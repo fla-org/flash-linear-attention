@@ -1284,3 +1284,23 @@ def test_prepare_wy_repr_bwd_no_g(B: int, T: int, H: int, HV: int, D: int):
     assert_close('dk', dk_zero_g, dk_no_g, 1e-4)
     assert_close('dv', dv_zero_g, dv_no_g, 1e-4)
     assert_close('db', db_zero_g, db_no_g, 1e-4)
+
+
+def test_fused_recurrent_default_beta_gva():
+    """`beta=None` must default to ones over the HV value heads; sizing it from
+    q ([B, T, H]) makes the kernel read out of bounds under GVA (HV > H)."""
+    torch.manual_seed(42)
+    B, T, H, HV, D = 2, 64, 2, 4, 64
+    q = torch.randn(B, T, H, D, dtype=torch.float32, device=device)
+    k = F.normalize(torch.randn(B, T, H, D, dtype=torch.float32, device=device), p=2, dim=-1)
+    v = torch.randn(B, T, HV, D, dtype=torch.float32, device=device)
+    g = F.logsigmoid(torch.randn(B, T, HV, dtype=torch.float32, device=device))
+
+    o_default, ht_default = fused_recurrent_gated_delta_rule(
+        q=q, k=k, v=v, g=g, beta=None, output_final_state=True,
+    )
+    o_ones, ht_ones = fused_recurrent_gated_delta_rule(
+        q=q, k=k, v=v, g=g, beta=torch.ones(B, T, HV, dtype=torch.float32, device=device), output_final_state=True,
+    )
+    assert torch.equal(o_default, o_ones)
+    assert torch.equal(ht_default, ht_ones)
