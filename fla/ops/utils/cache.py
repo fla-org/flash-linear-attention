@@ -20,6 +20,8 @@ import triton
 from packaging import version
 from triton.runtime.autotuner import Autotuner
 
+from fla.utils._batch_invariant import is_batch_invariant_mode_enabled
+
 TRITON_ABOVE_3_5_1 = version.parse(triton.__version__) >= version.parse("3.5.1")
 TRITON_ABOVE_3_4_0 = version.parse(triton.__version__) >= version.parse("3.4.0")
 
@@ -372,6 +374,12 @@ class CachedAutotuner(Autotuner):
         return key.autotune_key not in self.cache
 
     def run(self, *args, **kwargs):
+        if is_batch_invariant_mode_enabled():
+            # Batch-invariant mode: skip both the config cache and timing-based
+            # autotuning and always launch the first (deterministically ordered)
+            # config, so the kernel binary -- and with it the in-kernel reduction
+            # order -- cannot vary with shapes, timing noise, or cache state.
+            return self.fn.run(*args, **kwargs, **self.configs[0].all_kwargs())
         key = AutotuneKey.build(self.arg_names, self.keys, args, kwargs)
         if self.should_check_fla_cache(key):
             self.maybe_load_cached_config(key)

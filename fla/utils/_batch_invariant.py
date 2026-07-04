@@ -40,6 +40,16 @@ regular requests concurrently::
 Currently participating ops:
 
 - ``fla.ops.gated_delta_rule.fused_recurrent_gated_delta_rule``
+  (splits allowed at any token position)
+- ``fla.ops.gated_delta_rule.chunk_gated_delta_rule``
+  (splits allowed at chunk-size boundaries; the fp32 state handed from a
+  chunked prefill call to recurrent decode calls is lossless, so the
+  chunk-prefill + recurrent-decode serving pipeline is deterministic and
+  batch-invariant end to end)
+
+Under the mode, autotuned kernels launch a fixed, deterministically chosen
+config instead of a timing-based winner, so the compiled binary -- and with it
+the in-kernel reduction order -- cannot vary between runs or shapes.
 """
 
 import os

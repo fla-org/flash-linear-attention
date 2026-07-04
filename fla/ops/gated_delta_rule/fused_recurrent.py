@@ -255,7 +255,7 @@ def fused_recurrent_gated_delta_rule_fwd(
 
 
 @functools.lru_cache(maxsize=32)
-def _flat_cu_seqlens(batch_size: int, seq_len: int, device: torch.device) -> torch.Tensor:
+def flat_cu_seqlens(batch_size: int, seq_len: int, device: torch.device) -> torch.Tensor:
     """Cumulative sequence lengths of a fixed-length batch in flattened varlen form.
 
     Cached so that steady-state decode does not pay an allocation + kernel launch
@@ -512,7 +512,7 @@ def fused_recurrent_gated_delta_rule(
         initial_state = materialize_initial_state(k, v, initial_state, state_v_first, cu_seqlens)
         output_final_state = True
         if cu_seqlens is None:
-            cu_seqlens = _flat_cu_seqlens(q.shape[0], q.shape[1], q.device)
+            cu_seqlens = flat_cu_seqlens(q.shape[0], q.shape[1], q.device)
 
     o, final_state = FusedRecurrentFunction.apply(
         q,
