@@ -418,7 +418,14 @@ def test_chunk_prefill_recurrent_decode_pipeline():
 def test_chunk_vs_recurrent_tolerance():
     """chunk and recurrent share the exp2 decay convention and fp32 states but
     order their reductions differently, so cross-algorithm agreement is checked
-    at tolerance (bitwise equality is not expected)."""
+    at tolerance (bitwise equality is not expected).
+
+    TODO: the cross-algorithm gap (and the boundary drift it implies when a
+    token is recomputed under a different prefill/decode split) could be
+    removed entirely by serving prefill through fused_recurrent as well --
+    one bitwise numerical path at the cost of prefill speed (chunk is ~7x
+    faster at T=4096 on H100). Worth an end-to-end benchmark.
+    """
     B, T, H, HV, D = 2, 256, 2, 4, 64
     q, k, v, g, beta, A_log, dt_bias, h0 = make_inputs(
         B, T, H, HV, D, torch.bfloat16, gate_fusion=True, with_initial_state=True,
