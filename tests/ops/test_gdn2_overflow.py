@@ -13,6 +13,9 @@
 # normal path; kernel finite guards are a backstop for selected op-level
 # backward accumulators.
 #
+# `do_scale` below is a synthetic upstream-gradient scale used only to stress
+# backward numerics. It is not a training hyperparameter.
+#
 # Fixes:
 #   (a) A_log floor (fla/layers/gdn2.py): clamp(min=a_log_min) on A_log
 #       before exp(). With the default a_log_min=0.0, drifted negative
@@ -24,14 +27,14 @@
 #       from propagating on the guarded paths.
 #
 # Test structure:
-#   A. Layer-level (real training path) — validates fix (a):
+#   A. Layer-level finite regression — exercises fix (a):
 #      GatedDeltaNet2 with A_log=-200 (simulates drifted A_log), large do.
-#      The test checks that the floored layer path returns finite gradients for
-#      the chosen 128K-token stress case.
-#   B. Op-level stress (bypasses layer floor) — validates fix (c):
+#      This did not reproduce the pre-fix failure at the selected scale on A100;
+#      it guards that the floored public layer path remains finite.
+#   B. Op-level controlled overflow repro — exercises fix (c):
 #      chunk_gdn2 with use_gate_in_kernel=True, A_log=-200, extreme do.
-#      The test exercises the guard-covered backward path and checks that the
-#      returned gradients are finite for this stress case.
+#      On the pre-fix baseline, this stress case produced non-finite dq values
+#      in both fp32 and bf16. With the guards, the returned gradients are finite.
 #   C. Regression: A_log floor behaviour — A_log.grad == 0 below floor.
 
 import pytest
@@ -54,15 +57,16 @@ def _assert_all_finite(named_tensors):
 
 
 # =============================================================================
-# A. Layer-level overflow (validates fix (a) — A_log floor)
+# A. Layer-level finite regression (fix (a) — A_log floor)
 #
 # Simulates a drifted A_log=-200 in a long-sequence layer run. The test asserts
 # that the default floor keeps this public layer path finite for the selected
-# T=131072, do_scale=1e15 stress case.
+# T=131072, do_scale=1e15 stress case. This is regression coverage for the
+# layer mitigation, not the controlled pre-fix overflow reproduction.
 # =============================================================================
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_overflow_layer_fp32_128k():
-    """T=131072 (2048 chunks), fp32, A_log=-200, do_scale=1e15.
+    """T=131072 (2048 chunks), fp32, A_log=-200, synthetic do_scale=1e15.
 
     The floor clamps the layer's A_log contribution before exp(). This test
     checks that the selected long-sequence stress case returns finite
@@ -96,7 +100,7 @@ def test_overflow_layer_fp32_128k():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_overflow_layer_bf16_128k():
-    """T=131072 (2048 chunks), bf16, A_log=-200, do_scale=1e15.
+    """T=131072 (2048 chunks), bf16, A_log=-200, synthetic do_scale=1e15.
 
     Checks the same long-sequence layer stress case in bf16.
     """
@@ -127,19 +131,17 @@ def test_overflow_layer_bf16_128k():
 
 
 # =============================================================================
-# B. Op-level stress (validates fix (c) — kernel overflow guards)
+# B. Op-level controlled overflow repro (fix (c) — kernel overflow guards)
 #
 # Bypasses the layer's Python gate floor by using use_gate_in_kernel=True
-# with A_log=-200. Only the kernel guards can keep grads finite.
-#
-# This path bypasses the layer floor, so it is intentionally more extreme than
-# the layer tests. It verifies that the selected guarded backward accumulators
-# return finite gradients for this stress case.
+# with A_log=-200. This path is intentionally more extreme than the layer tests:
+# on the pre-fix baseline, this controlled stress produced
+# `dq has 128/16777216 non-finite values` in both fp32 and bf16 on A100.
 # =============================================================================
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_overflow_op_128k(dtype):
-    """chunk_gdn2 with use_gate_in_kernel=True, A_log=-200, T=131072, do_scale=1e37.
+    """chunk_gdn2 with use_gate_in_kernel=True, A_log=-200, T=131072, synthetic do_scale=1e37.
 
     This bypasses the layer floor and checks that the guarded backward path
     returns finite gradients for the selected op-level stress case.
