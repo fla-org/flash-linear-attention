@@ -33,6 +33,8 @@ def _get_stride(x: torch.Tensor) -> int:
     """
     if x.ndim < 2:
         return 0
+    if torch.compiler.is_compiling():
+        return x.shape[-1]
     return x.stride(-2)
 
 
@@ -69,6 +71,8 @@ def _is_inner_contiguous(x: torch.Tensor) -> bool:
 
 def _ensure_inner_contiguous(x: torch.Tensor) -> torch.Tensor:
     """Make the tensor inner-contiguous if it isn't already."""
+    if torch.compiler.is_compiling():
+        return x.contiguous()
     if _is_inner_contiguous(x):
         return x
     return x.contiguous()
