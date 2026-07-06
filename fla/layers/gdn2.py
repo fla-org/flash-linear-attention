@@ -99,6 +99,7 @@ class GatedDeltaNet2(nn.Module):
         conv_bias: bool = False,
         layer_idx: int | None = None,
         norm_eps: float = 1e-5,
+        a_log_min: float = 0.0,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -107,6 +108,7 @@ class GatedDeltaNet2(nn.Module):
         self.allow_neg_eigval = allow_neg_eigval
         self.hidden_size = hidden_size
         self.expand_v = expand_v
+        self.a_log_min = a_log_min
 
         self.use_short_conv = use_short_conv
         self.conv_size = conv_size
@@ -267,7 +269,7 @@ class GatedDeltaNet2(nn.Module):
         b = rearrange(b, "... (h d) -> ... h d", d=self.head_k_dim)
         w = rearrange(w, "... (h d) -> ... h d", d=self.head_v_dim)
         # Apply per-head A_log decay rate via broadcast on the (H, K) tail.
-        g = -self.A_log.float().exp().unsqueeze(-1) * g
+        g = -self.A_log.float().clamp(min=self.a_log_min).exp().unsqueeze(-1) * g
 
         # Grouped value attention: broadcast QK-side tensors across value-head groups.
         if self.num_v_heads > self.num_heads:

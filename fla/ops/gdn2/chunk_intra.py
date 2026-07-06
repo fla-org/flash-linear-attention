@@ -510,7 +510,9 @@ def chunk_gdn2_bwd_kernel_intra(
             b_dAqk = tl.load(p_dAqk, boundary_check=(0, 1))
             b_dAkk = tl.load(p_dAkk, boundary_check=(0, 1))
             b_dq2 += tl.dot(b_dAqk, b_kg)
+            b_dq2 = tl.where((b_dq2 != b_dq2) | (tl.abs(b_dq2) == float('inf')), 0.0, b_dq2)
             b_dk2 += tl.dot(b_dAkk, b_kg)
+            b_dk2 = tl.where((b_dk2 != b_dk2) | (tl.abs(b_dk2) == float('inf')), 0.0, b_dk2)
         b_gqn = exp2(b_g - b_gn)
         b_dq2 *= b_gqn
         b_dk2 *= b_gqn
@@ -606,6 +608,7 @@ def chunk_gdn2_bwd_kernel_intra(
             b_kbg = b_kbj * tl.where(m_j[:, None], b_gkn, 0)
             b_dkt += tl.dot(b_dAqk, b_qg)
             b_dkt += tl.dot(b_dAkk, b_kbg)
+        b_dkt = tl.where((b_dkt != b_dkt) | (tl.abs(b_dkt) == float('inf')), 0.0, b_dkt)
         b_dkt *= exp2(b_gn - b_g)
 
     o_dA = i_ti * H * BT + i_i * BC + o_i
@@ -641,6 +644,7 @@ def chunk_gdn2_bwd_kernel_intra(
 
         b_dkt += tl.dot(b_dAqk_diag_kk, b_q_exp) * exp_neg_b_g_diag_kk
         b_dkt += tl.dot(b_dAkk_diag_kk, b_kb_exp) * exp_neg_b_g_diag_kk
+        b_dkt = tl.where((b_dkt != b_dkt) | (tl.abs(b_dkt) == float('inf')), 0.0, b_dkt)
     else:
         for j in range(0, min(BC, T - i_t * BT - i_i * BC)):
             b_dAqk = tl.load(dAqk + o_dA + j * H * BT)

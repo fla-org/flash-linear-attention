@@ -98,8 +98,10 @@ def chunk_kda_bwd_kernel_dAv(
         b_do = tl.load(p_do, boundary_check=(0, 1))
         # [BT, BT]
         b_dA += tl.dot(b_do, b_v)
+        b_dA = tl.where((b_dA != b_dA) | (tl.abs(b_dA) == float('inf')), 0.0, b_dA)
         # [BT, BV]
         b_dv = tl.dot(b_A.to(b_do.dtype), b_do)
+        b_dv = tl.where((b_dv != b_dv) | (tl.abs(b_dv) == float('inf')), 0.0, b_dv)
         tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
 
     p_dA = tl.make_block_ptr(dA, (T, BT), (HV*BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))

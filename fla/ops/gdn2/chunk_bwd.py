@@ -177,8 +177,11 @@ def chunk_gdn2_bwd_kernel_wy_dqkg_fused(
 
             b_dgk += tl.sum(b_h * b_dh, axis=0)
             b_dq += tl.dot(b_do, b_h.to(b_do.dtype))
+            b_dq = tl.where((b_dq != b_dq) | (tl.abs(b_dq) == float('inf')), 0.0, b_dq)
             b_dk += tl.dot(b_v_new, b_dh.to(b_v_new.dtype))
+            b_dk = tl.where((b_dk != b_dk) | (tl.abs(b_dk) == float('inf')), 0.0, b_dk)
             b_dw_flow += tl.dot(b_dv.to(b_v_new.dtype), b_h.to(b_v_new.dtype))
+            b_dw_flow = tl.where((b_dw_flow != b_dw_flow) | (tl.abs(b_dw_flow) == float('inf')), 0.0, b_dw_flow)
             tl.debug_barrier()
 
             if i_k == 0:
@@ -191,8 +194,10 @@ def chunk_gdn2_bwd_kernel_wy_dqkg_fused(
                 b_wg = tl.load(p_wg, boundary_check=(0, 1))
                 # dA gets (w_gate * v) on the value side - the GDN-2 channel-wise twist.
                 b_dA += tl.dot(b_dv, tl.trans(b_v * b_wg))
+                b_dA = tl.where((b_dA != b_dA) | (tl.abs(b_dA) == float('inf')), 0.0, b_dA)
 
                 b_dvb = tl.dot(b_A, b_dv)
+                b_dvb = tl.where((b_dvb != b_dvb) | (tl.abs(b_dvb) == float('inf')), 0.0, b_dvb)
                 b_dv2 = b_dvb * b_wg
                 b_dw_gate = b_dvb * b_v
 
@@ -210,8 +215,10 @@ def chunk_gdn2_bwd_kernel_wy_dqkg_fused(
         b_dw_flow = -b_dw_flow.to(b_A.dtype)
         # dA gets (b * exp(gk) * k) on the key side - the GDN-2 channel-wise twist.
         b_dA += tl.dot(b_dw_flow, tl.trans((b_kg * b_b).to(b_A.dtype)))
+        b_dA = tl.where((b_dA != b_dA) | (tl.abs(b_dA) == float('inf')), 0.0, b_dA)
 
         b_dkgb = tl.dot(b_A, b_dw_flow)
+        b_dkgb = tl.where((b_dkgb != b_dkgb) | (tl.abs(b_dkgb) == float('inf')), 0.0, b_dkgb)
         p_db = tl.make_block_ptr(db, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         b_db_partial = b_dkgb * b_kg
         tl.store(p_db, b_db_partial.to(p_db.dtype.element_ty), boundary_check=(0, 1))
@@ -233,7 +240,9 @@ def chunk_gdn2_bwd_kernel_wy_dqkg_fused(
     m_A = (o_t[:, None] > o_t[None, :]) & (m_t[:, None] & m_t)
     b_dA = tl.where(m_A, b_dA, 0)
     b_dA = tl.dot(b_dA.to(b_A.dtype), b_A)
+    b_dA = tl.where((b_dA != b_dA) | (tl.abs(b_dA) == float('inf')), 0.0, b_dA)
     b_dA = tl.dot(b_A, b_dA.to(b_A.dtype))
+    b_dA = tl.where((b_dA != b_dA) | (tl.abs(b_dA) == float('inf')), 0.0, b_dA)
     b_dA = tl.where(m_A, -b_dA, 0)
     p_dA = tl.make_block_ptr(dA, (T, BT), (H * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
     tl.store(p_dA, b_dA.to(p_dA.dtype.element_ty), boundary_check=(0, 1))
