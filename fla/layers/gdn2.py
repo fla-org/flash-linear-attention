@@ -83,6 +83,10 @@ class GatedDeltaNet2(nn.Module):
             The index of the layer. Default: None.
         norm_eps (float, Optional):
             The epsilon value for the normalization layer. Default: 1e-5.
+        a_log_min (float, Optional):
+            The minimum `A_log` used by the layer gate activation before `exp`. Default: 0.0.
+            `A_log` is initialized from `log(uniform(1, 16))`, whose lower bound is 0.0.
+            The default therefore preserves the initialization support and only clips drifted negative values.
     """
 
     def __init__(
@@ -181,7 +185,8 @@ class GatedDeltaNet2(nn.Module):
         self.b_proj = nn.Linear(hidden_size, self.key_dim, bias=False)
         self.w_proj = nn.Linear(hidden_size, self.value_dim, bias=False)
 
-        # Per-QK-head decay rate (A_log) and per-channel softplus bias (dt_bias).
+        # a_log starts at log(uniform(1, 16)); the default floor of 0.0 preserves the initialization support.
+        # per-QK-head decay rate (A_log) and per-channel softplus bias (dt_bias).
         self.A_log = nn.Parameter(torch.log(torch.empty(self.num_heads, dtype=torch.float32).uniform_(1, 16)))
         self.A_log._no_weight_decay = True
         dt = torch.exp(
