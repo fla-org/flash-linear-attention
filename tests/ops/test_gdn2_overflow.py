@@ -7,34 +7,31 @@
 
 # Overflow reproduction and regression tests for GDN-2 backward.
 #
-# Root-cause summary: a drifted `A_log` can make per-chunk decay vanish,
-# letting the recurrent state grow across long sequences until backward
-# `tl.dot` accumulators overflow. The layer-level floor bounds the normal path;
-# kernel finite guards are a backstop for op-level paths that bypass the layer.
+# Root-cause summary: a very negative `A_log` can make the layer's decay nearly
+# vanish, allowing long-sequence recurrent state growth to amplify backward
+# dot-product inputs. The layer-level floor mitigates that failure mode in the
+# normal path; kernel finite guards are a backstop for selected op-level
+# backward accumulators.
 #
 # Fixes:
 #   (a) A_log floor (fla/layers/gdn2.py): clamp(min=a_log_min) on A_log
-#       before exp(). Guarantees exp(A_log) >= 1, so per-chunk decay is
-#       non-trivial and state growth is bounded over 2048 chunks. This
-#       breaks the chain at link #2 regardless of what triggers it.
+#       before exp(). With the default a_log_min=0.0, drifted negative
+#       values use exp(0) instead of a near-zero decay rate in the layer path.
 #   (c) Kernel overflow guards (chunk_bwd.py, chunk_delta_h.py,
-#       kda/chunk_bwd.py, gdn2/chunk_intra.py): zero inf/nan after each
-#       tl.dot in the backward kernels. Backstop only — masks residual
-#       overflow that the floor misses. Cannot prevent overflow inside
-#       tl.dot (the partial sum overflows before the guard sees the
-#       result), but zeros the corrupted gradient so it does not
-#       propagate further.
+#       kda/chunk_bwd.py, gdn2/chunk_intra.py): zero inf/nan in selected
+#       backward accumulators after overflow-prone tl.dot sites. These guards
+#       do not prevent overflow inside tl.dot; they only stop non-finite values
+#       from propagating on the guarded paths.
 #
 # Test structure:
 #   A. Layer-level (real training path) — validates fix (a):
 #      GatedDeltaNet2 with A_log=-200 (simulates drifted A_log), large do.
-#      The floor keeps exp(A_log) >= 1, bounding the state. Without the
-#      floor, the state grows and gradients overflow at do >= 1e37.
+#      The test checks that the floored layer path returns finite gradients for
+#      the chosen 128K-token stress case.
 #   B. Op-level stress (bypasses layer floor) — validates fix (c):
 #      chunk_gdn2 with use_gate_in_kernel=True, A_log=-200, extreme do.
-#      Only kernel guards can keep grads finite. Requires guards in ALL
-#      backward kernels (chunk_kda_bwd_dAv, chunk_delta_h, chunk_bwd,
-#      chunk_intra) because inf propagates through the pipeline.
+#      The test exercises the guard-covered backward path and checks that the
+#      returned gradients are finite for this stress case.
 #   C. Regression: A_log floor behaviour — A_log.grad == 0 below floor.
 
 import pytest
@@ -59,22 +56,17 @@ def _assert_all_finite(named_tensors):
 # =============================================================================
 # A. Layer-level overflow (validates fix (a) — A_log floor)
 #
-# Simulates the training scenario: A_log has drifted to -200 (exp ≈ 0,
-# zero decay), state would grow over 2048 chunks. The floor clamps
-# A_log to 0.0, so exp(A_log) >= 1, decay is non-trivial, state is bounded.
-#
-# Without the floor, the layer overflows at do_scale >= 1e37 (fp32 max
-# in the WY inverse VJP and state-backward dots). With the floor, it
-# stays finite up to do_scale = 1e35 — well beyond the 1.57M× loss
-# weight amplification (~1e6 × state magnitude) seen in real training.
+# Simulates a drifted A_log=-200 in a long-sequence layer run. The test asserts
+# that the default floor keeps this public layer path finite for the selected
+# T=131072, do_scale=1e15 stress case.
 # =============================================================================
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_overflow_layer_fp32_128k():
     """T=131072 (2048 chunks), fp32, A_log=-200, do_scale=1e15.
 
-    The floor clamps exp(A_log) >= 1, bounding state growth. Without the
-    floor, the unbounded state × 1e15 do overflows the fp32 accumulator
-    in the state-backward dots (dot(k, dh), dot(q, do)).
+    The floor clamps the layer's A_log contribution before exp(). This test
+    checks that the selected long-sequence stress case returns finite
+    gradients.
     """
     from fla.layers import GatedDeltaNet2
 
@@ -106,8 +98,7 @@ def test_overflow_layer_fp32_128k():
 def test_overflow_layer_bf16_128k():
     """T=131072 (2048 chunks), bf16, A_log=-200, do_scale=1e15.
 
-    bf16 shares fp32's exponent range, so the overflow threshold is the
-    same. The floor bounds the state regardless of dtype.
+    Checks the same long-sequence layer stress case in bf16.
     """
     from fla.layers import GatedDeltaNet2
 
@@ -141,20 +132,17 @@ def test_overflow_layer_bf16_128k():
 # Bypasses the layer's Python gate floor by using use_gate_in_kernel=True
 # with A_log=-200. Only the kernel guards can keep grads finite.
 #
-# The backward pipeline runs 4 kernels; inf from the first (chunk_kda_bwd_dAv)
-# propagates through the rest. Guards in all 4 are needed to zero the inf
-# before it propagates. This is an extreme stress test (do_scale=1e37);
-# in real training the floor (fix a) prevents reaching this magnitude.
+# This path bypasses the layer floor, so it is intentionally more extreme than
+# the layer tests. It verifies that the selected guarded backward accumulators
+# return finite gradients for this stress case.
 # =============================================================================
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_overflow_op_128k(dtype):
     """chunk_gdn2 with use_gate_in_kernel=True, A_log=-200, T=131072, do_scale=1e37.
 
-    Without kernel guards, dq has 128/16777216 non-finite values (inf
-    from dot(do, v) in chunk_kda_bwd_dAv propagates through the pipeline).
-    With guards in all backward kernels, gradients are zeroed instead
-    of inf — finite but information-lossy (backstop, not a cure).
+    This bypasses the layer floor and checks that the guarded backward path
+    returns finite gradients for the selected op-level stress case.
     """
     torch.manual_seed(42)
     B, T, H, K, V = 1, 131072, 2, 64, 64
