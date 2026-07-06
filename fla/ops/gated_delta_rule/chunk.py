@@ -21,12 +21,13 @@ from fla.ops.cp.chunk_delta_h import (
     expand_h0,
 )
 from fla.ops.gated_delta_rule.chunk_fwd import chunk_gated_delta_rule_fwd_intra
+from fla.ops.gated_delta_rule.fused_recurrent import flat_cu_seqlens, materialize_initial_state
 from fla.ops.gated_delta_rule.gate import gdn_gate_bwd, gdn_gate_chunk_cumsum
 from fla.ops.gated_delta_rule.wy_fast import prepare_wy_repr_bwd, recompute_w_u_fwd
 from fla.ops.utils import chunk_local_cumsum
 from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.index import prepare_chunk_indices
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard, is_batch_invariant_mode_enabled
 
 
 def chunk_gated_delta_rule_fwd(
@@ -562,6 +563,24 @@ def chunk_gated_delta_rule(
 
     if scale is None:
         scale = k.shape[-1] ** -0.5
+
+    final_state_requested = output_final_state
+    unflatten_batch = None
+    if is_batch_invariant_mode_enabled() and cp_context is None:
+        # Pin every call to a single compiled specialization of each chunk kernel,
+        # mirroring the fused recurrent path: fp32 initial state always present,
+        # final state always stored, and varlen addressing always used. Unlike the
+        # recurrent path, chunk kernels size intermediate buffers from the batch
+        # dimension, so fixed-length batches are flattened to true varlen form;
+        # for contiguous inputs these reshapes are views.
+        initial_state = materialize_initial_state(k, v, initial_state, state_v_first, cu_seqlens)
+        output_final_state = True
+        if cu_seqlens is None:
+            B, T = q.shape[0], q.shape[1]
+            cu_seqlens = flat_cu_seqlens(B, T, q.device)
+            q, k, v, g, beta = (x.reshape(1, B * T, *x.shape[2:]) for x in (q, k, v, g, beta))
+            unflatten_batch = (B, T)
+
     o, final_state = ChunkGatedDeltaRuleFunction.apply(
         q,
         k,
@@ -583,6 +602,10 @@ def chunk_gated_delta_rule(
         cp_context,
         chunk_size,
     )
+    if unflatten_batch is not None:
+        o = o.view(*unflatten_batch, *o.shape[2:])
+    if not final_state_requested:
+        final_state = None
     return o, final_state
 
 

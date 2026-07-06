@@ -7,6 +7,11 @@
 
 import sys
 
+from ._batch_invariant import (  # noqa: F401
+    batch_invariant_mode,
+    is_batch_invariant_mode_enabled,
+    set_batch_invariant_mode,
+)
 from ._compat import (  # noqa: F401
     SUPPORTS_AUTOTUNE_CACHE,
     TRITON_ABOVE_3_4_0,
