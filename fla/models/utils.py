@@ -46,6 +46,7 @@ class FLALayer(CacheLayerMixin):
         attn_state: tuple[torch.Tensor, ...] | None = None,
         conv_state: Any | None = None,
         ffn_state: Any | None = None,
+        A_state: torch.Tensor | None = None,
         offset: int = 1,
         cache_kwargs: dict[str, Any] | None = None,
         **_: Any,
@@ -63,6 +64,7 @@ class FLALayer(CacheLayerMixin):
                 "attn_state": None,
                 "conv_state": None,
                 "ffn_state": None,
+                "A_state": None,
             }
 
         if recurrent_state is not None:
@@ -108,10 +110,12 @@ class FLALayer(CacheLayerMixin):
             self.state["conv_state"] = conv_state
         if ffn_state is not None:
             self.state["ffn_state"] = ffn_state
+        if A_state is not None:
+            self.state["A_state"] = A_state
 
         if not hasattr(self, 'device'):
             self.device = 'cpu'
-        for state in (recurrent_state, attn_state, conv_state, ffn_state):
+        for state in (recurrent_state, attn_state, conv_state, ffn_state, A_state):
             if state is not None:
                 if isinstance(state, torch.Tensor):
                     self.device = state.device
@@ -155,7 +159,7 @@ class FLALayer(CacheLayerMixin):
 
         def to_cpu(x):
             return x.to("cpu", non_blocking=True) if isinstance(x, torch.Tensor) else x
-        for k in ("recurrent_state", "attn_state", "conv_state", "ffn_state"):
+        for k in ("recurrent_state", "attn_state", "conv_state", "ffn_state", "A_state"):
             v = self.state.get(k, None)
             if v is None:
                 continue
@@ -170,7 +174,7 @@ class FLALayer(CacheLayerMixin):
 
         def to_dev(x):
             return x.to(self.device, non_blocking=True) if isinstance(x, torch.Tensor) else x
-        for k in ("recurrent_state", "attn_state", "conv_state", "ffn_state"):
+        for k in ("recurrent_state", "attn_state", "conv_state", "ffn_state", "A_state"):
             v = self.state.get(k, None)
             if v is None:
                 continue
@@ -388,6 +392,7 @@ class FLACache(HFCacheBase):
         attn_state: tuple[torch.Tensor] | None = None,
         conv_state: tuple[torch.Tensor] | None = None,
         ffn_state: tuple[torch.Tensor] | None = None,
+        A_state: torch.Tensor | None = None,
         layer_idx: int = 0,
         offset: int | None = 1,
         cache_kwargs: dict[str, Any] | None = None,
@@ -404,6 +409,7 @@ class FLACache(HFCacheBase):
             attn_state=attn_state,
             conv_state=conv_state,
             ffn_state=ffn_state,
+            A_state=A_state,
             offset=offset if offset is not None else 1,
             cache_kwargs=cache_kwargs,
         )

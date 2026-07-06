@@ -1,0 +1,158 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
+# Copyright (c) 2023-2025
+# Asymmetric KKT kernel for preconditioned gated delta rule
+# Computes k @ k_precond^T (asymmetric) instead of k @ k^T (symmetric)
+
+import torch
+import triton
+import triton.language as tl
+
+from fla.ops.utils import prepare_chunk_indices
+from fla.ops.utils.op import exp, exp2
+from fla.utils import autotune_cache_kwargs
+
+
+@triton.heuristics({
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
+})
+@triton.autotune(
+    configs=[
+        triton.Config({'BK': BK}, num_warps=num_warps, num_stages=num_stages)
+        for BK in [32, 64]
+        for num_warps in [2, 4, 8]
+        for num_stages in [2, 3, 4]
+    ],
+    key=['H', 'K', 'BT', 'IS_VARLEN'],
+    **autotune_cache_kwargs,
+)
+@triton.jit(do_not_specialize=['T'])
+def chunk_precond_kkt_fwd_kernel(
+    k,              # [B, T, H, K] - original keys
+    k_precond,      # [B, T, H, K] - pre-computed preconditioned keys
+    g,              # [B, T, H] - gate (cumsum)
+    beta,           # [B, T, H] - beta scaling
+    A,              # [B, T, H, BT] - output asymmetric KKT matrix
+    cu_seqlens,
+    chunk_indices,
+    T,
+    H: tl.constexpr,
+    K: tl.constexpr,
+    BT: tl.constexpr,
+    BK: tl.constexpr,
+    USE_EXP2: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+):
+    """
+    Compute asymmetric KKT matrix using pre-computed k_precond.
+
+    A_ij = beta_i * k_i @ k_precond_j^T * exp(g_i - g_j)
+    """
+    i_t, i_bh = tl.program_id(0), tl.program_id(1)
+    i_b, i_h = i_bh // H, i_bh % H
+
+    if IS_VARLEN:
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        T = eos - bos
+    else:
+        i_n = i_b
+        bos, eos = i_b * T, i_b * T + T
+
+    o_t = i_t * BT + tl.arange(0, BT)
+    m_t = o_t < T
+
+    p_b = tl.make_block_ptr(beta + bos*H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
+    b_b = tl.load(p_b, boundary_check=(0,))
+
+    p_g = tl.make_block_ptr(g + bos*H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
+    b_g = tl.load(p_g, boundary_check=(0,))
+
+    b_A = tl.zeros([BT, BT], dtype=tl.float32)
+
+    for i_k in range(tl.cdiv(K, BK)):
+        p_k = tl.make_block_ptr(k + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+        b_k = tl.load(p_k, boundary_check=(0, 1))
+
+        p_kp = tl.make_block_ptr(k_precond + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+        b_kp = tl.load(p_kp, boundary_check=(0, 1))
+
+        b_A += tl.dot(b_k, tl.trans(b_kp))
+
+    # Attention gating and beta scaling
+    if USE_EXP2:
+        b_A *= exp2(b_g[:, None] - b_g[None, :])
+    else:
+        b_A *= exp(b_g[:, None] - b_g[None, :])
+    b_A *= b_b[:, None]
+
+    # Causal mask
+    m_A = (o_t[:, None] > o_t[None, :]) & (m_t[:, None] & m_t)
+    b_A = tl.where(m_A, b_A, 0)
+
+    p_A = tl.make_block_ptr(A + (bos*H + i_h) * BT, (T, BT), (BT*H, 1), (i_t * BT, 0), (BT, BT), (1, 0))
+    tl.store(p_A, b_A.to(p_A.dtype.element_ty), boundary_check=(0, 1))
+
+
+def chunk_precond_kkt_fwd(
+    k: torch.Tensor,
+    k_precond: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    chunk_size: int = 64,
+    output_dtype: torch.dtype = torch.float32,
+    cu_seqlens: torch.LongTensor | None = None,
+    use_exp2: bool = True,
+) -> torch.Tensor:
+    r"""
+    Compute beta * K * K_precond^T (asymmetric).
+
+    Args:
+        k (torch.Tensor):
+            The key tensor of shape `[B, T, H, K]`.
+        k_precond (torch.Tensor):
+            The preconditioned key tensor of shape `[B, T, H, K]`.
+        g (torch.Tensor):
+            The cumulative sum of the gate tensor of shape `[B, T, H]`.
+        beta (torch.Tensor):
+            The beta tensor of shape `[B, T, H]`.
+        cu_seqlens (torch.LongTensor):
+            The cumulative sequence lengths of the input tensor.
+            Default: None
+        chunk_size (int):
+            The chunk size. Default: 64.
+        output_dtype (torch.dtype):
+            The dtype of the output tensor. Default: `torch.float32`
+
+    Returns:
+        beta * K * K_precond^T of shape `[B, T, H, BT]` where `BT` is the chunk size.
+    """
+    B, T, H, K = k.shape
+    BT = chunk_size
+
+    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
+
+    A = torch.empty(B, T, H, BT, device=k.device, dtype=output_dtype)
+
+    chunk_precond_kkt_fwd_kernel[(NT, B * H)](
+        k=k,
+        k_precond=k_precond,
+        g=g,
+        beta=beta,
+        A=A,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        T=T,
+        H=H,
+        K=K,
+        BT=BT,
+        USE_EXP2=use_exp2,
+    )
+
+    return A
