@@ -66,7 +66,7 @@ _SMEM_BUDGET = 192 * 1024
 
 def _prune_fwd_smem(configs, named_args, **kwargs):
     args = {**named_args, **kwargs}
-    need = lambda c: 2 * c.kwargs['BT'] * args['BD'] * args['ES']  # noqa: E731
+    def need(c): return 2 * c.kwargs['BT'] * args['BD'] * args['ES']  # noqa: E731
     keep = [c for c in configs if need(c) <= _SMEM_BUDGET] or configs[:1]
     if args['L'] > 8:
         # the source loop is fully unrolled; cap the sweep so big-L compiles stay sane
@@ -77,7 +77,7 @@ def _prune_fwd_smem(configs, named_args, **kwargs):
 def _prune_bwd_smem(configs, named_args, **kwargs):
     # streaming fallback needs a 2-deep V ring plus the do tile
     args = {**named_args, **kwargs}
-    need = lambda c: 3 * c.kwargs['BT'] * args['BD'] * args['ES']  # noqa: E731
+    def need(c): return 3 * c.kwargs['BT'] * args['BD'] * args['ES']  # noqa: E731
     keep = [c for c in configs if need(c) <= _SMEM_BUDGET] or configs[:1]
     if args['L'] > 8:
         # both passes unroll L tile bodies; cap the sweep so big-L compiles stay sane
