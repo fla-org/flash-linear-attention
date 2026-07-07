@@ -129,7 +129,6 @@ from __future__ import annotations
 
 import argparse
 import importlib
-import inspect
 import json
 import logging
 import os
@@ -251,15 +250,21 @@ def benchmark_op(
     config = get_op(op_name)
     op_fn = _import_op(config)
 
-    # `--backend` is a generic selector: only ops whose function exposes a `backend`
-    # parameter (e.g. fused_attnres) receive it; others (naive, chunk_*) are left as-is.
+    # `--backend` selects an op backend by toggling its dispatch env var (see OpConfig.backend_env),
+    # matching how FLA backends are enabled at runtime. 'triton' (or unset) leaves the default path.
     call_kwargs = dict(config.extra_kwargs)
     op_label = op_name
-    if backend is not None and 'backend' in inspect.signature(op_fn).parameters:
-        call_kwargs['backend'] = backend
-        op_label = f"{op_name}[{backend}]"
-    elif backend is not None:
-        logger.info(f"Op '{op_name}' has no 'backend' parameter; ignoring --backend={backend}")
+    backend_env = config.backend_env or {}
+    if backend and backend != 'triton':
+        env = backend_env.get(backend)
+        if env is not None:
+            os.environ[env] = '1'
+            op_label = f"{op_name}[{backend}]"
+        else:
+            logger.info(f"Op '{op_name}' has no '{backend}' backend; running the default path")
+    elif backend == 'triton':
+        for env in backend_env.values():
+            os.environ[env] = '0'
 
     if config.skip_backward and 'fwdbwd' in modes:
         modes = [m for m in modes if m != 'fwdbwd']
@@ -584,8 +589,8 @@ def main():
     )
     parser.add_argument(
         '--backend', default=None,
-        help="Op backend to select, e.g. 'triton' or 'gluon'. Passed to ops whose "
-             "function exposes a 'backend' parameter (such as fused_attnres); ignored otherwise.",
+        help="Op backend to select, e.g. 'triton' or 'gluon'. Toggles the backend's dispatch env "
+             "var for ops that declare one (see OpConfig.backend_env); ignored otherwise.",
     )
     parser.add_argument(
         '--custom-shapes', default=None,

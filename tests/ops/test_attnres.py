@@ -50,7 +50,10 @@ def test_attnres(
     dtype: torch.dtype,
     checkpoint_level: int,
     backend: str,
+    monkeypatch,
 ):
+    # the gluon backend is opt-in and dispatched via its env var, not a call argument
+    monkeypatch.setenv('FLA_ATTNRES_GLUON', '1' if backend == 'gluon' else '0')
     torch.manual_seed(42)
     # disable TF32 in the PyTorch reference path so the fp32 sanity case
     # actually compares fp32 vs fp32 (otherwise einsum bwd uses cuBLAS TF32
@@ -79,7 +82,6 @@ def test_attnres(
         scale=scale,
         return_weights=True,
         checkpoint_level=checkpoint_level,
-        backend=backend,
     )
     do = torch.randn_like(tri)
     (tri * do).sum().backward()

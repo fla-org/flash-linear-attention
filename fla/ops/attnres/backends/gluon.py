@@ -736,23 +736,40 @@ def _run(
 class AttnResGluonBackend(BaseBackend):
     """Gluon-native AttnRes kernels (cp.async staging, static source indexing, grouped bwd partials).
 
-    Never auto-selected: the verifier accepts a ``fused_attnres`` call only when the caller
-    passes an explicit ``backend='gluon'``. Correctness parity with the Triton path is the
-    frozen ``tests/ops/test_attnres.py``.
+    Opt-in and auto-dispatched like the other FLA backends: enable with ``FLA_ATTNRES_GLUON=1``
+    (off by default), after which the verifier accepts any CUDA call that meets the kernel's
+    constraints (SM80+, ``D * itemsize >= 128`` bytes) and otherwise falls back to the Triton path.
+    Correctness parity with Triton is the frozen ``tests/ops/test_attnres.py``.
     """
 
     backend_type = "gluon"
     package_name = None  # gluon ships with triton
-    env_var = None
+    env_var = "FLA_ATTNRES_GLUON"
+    default_enable = False
     priority = 3
 
-    def fused_attnres_verifier(self, *args, **kwargs) -> tuple[bool, str | None]:
-        if kwargs.get('backend') != 'gluon':
-            return False, "gluon backend requires explicit backend='gluon'"
+    def fused_attnres_verifier(
+        self,
+        query: torch.Tensor,
+        residuals: Sequence[torch.Tensor],
+        rms_weight: torch.Tensor,
+        output_rms_weight: torch.Tensor | None = None,
+        rms_eps: float = 1e-6,
+        scale: float = 1.0,
+        return_weights: bool = False,
+        checkpoint_level: int = 1,
+        **kwargs,
+    ) -> tuple[bool, str | None]:
+        if not residuals or not residuals[0].is_cuda:
+            return False, "gluon AttnRes backend requires CUDA tensors"
+        v = residuals[0]
+        if torch.cuda.get_device_capability(v.device)[0] < 8:
+            return False, "gluon AttnRes backend requires NVIDIA SM80+ (cp.async)"
+        if v.shape[-1] * v.element_size() < 128:
+            return False, "gluon AttnRes backend requires D * itemsize >= 128 bytes"
         return True, None
 
     def fused_attnres(self, *args, **kwargs):
-        kwargs.pop('backend', None)
         return _run(*args, **kwargs)
 
 
