@@ -26,6 +26,7 @@ import triton
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
 from triton.experimental.gluon.language.nvidia.ampere import async_copy as cp
+from triton.experimental.gluon.language.nvidia.ampere import mbarrier as mb
 
 from fla.ops.backends import BaseBackend
 from fla.ops.utils.cache import fla_cache_autotune
@@ -259,12 +260,12 @@ def attnres_bwd_kernel_dv_gluon(
     D: gl.constexpr,
     eps: gl.constexpr,
     scale: gl.constexpr,
+    R: gl.constexpr,
+    ES: gl.constexpr,
     G: gl.constexpr,
     BT: gl.constexpr,
     BD: gl.constexpr,
     NW: gl.constexpr,
-    R: gl.constexpr,
-    ES: gl.constexpr,
     HAS_ONORM: gl.constexpr,
     SAVE_OPRE: gl.constexpr,
 ):
@@ -294,6 +295,13 @@ def attnres_bwd_kernel_dv_gluon(
 
     b_vs = gl.allocate_shared_memory(res[0].dtype.element_ty, [NB, BT, BD], smem_layout)
     b_dos = gl.allocate_shared_memory(do.dtype.element_ty, [BT, BD], smem_layout)
+    if RESIDENT:
+        # one mbarrier per v slot plus one for do, so loads for group t+1 can be issued per slot
+        # while group t is still being consumed (commit groups cannot express this)
+        b_bars = gl.allocate_shared_memory(gl.int64, [L + 1, 1], mb.MBarrierLayout())
+        for i in gl.static_range(L + 1):
+            mb.init(b_bars.index(i), count=NW * 32)
+        gl.thread_barrier()
 
     for t in range(KT):
         # [BT]; OOB rows are clamped to a valid token and their do rows zeroed below, so every
@@ -303,26 +311,31 @@ def attnres_bwd_kernel_dv_gluon(
         o_tc = gl.minimum(o_t, N - 1)
         o_v = o_tc[:, None] * D + o_d[None, :]
 
-        # do goes first so its wait count is independent of the V schedule
-        if NEEDS_DMASK:
-            cp.async_copy_global_to_shared(b_dos, do + o_v, mask=m_d[None, :])
-        else:
-            cp.async_copy_global_to_shared(b_dos, do + o_v)
-        cp.commit_group()
         if RESIDENT:
-            for i_l in gl.static_range(L):
+            if t == 0:
                 if NEEDS_DMASK:
-                    cp.async_copy_global_to_shared(
-                        b_vs.index(i_l),
-                        res[i_l] + o_v,
-                        mask=m_d[None, :],
-                        eviction_policy="evict_first",
-                    )
+                    cp.async_copy_global_to_shared(b_dos, do + o_v, mask=m_d[None, :])
                 else:
-                    cp.async_copy_global_to_shared(b_vs.index(i_l), res[i_l] + o_v, eviction_policy="evict_first")
-                cp.commit_group()
-            cp.wait_group(L)
+                    cp.async_copy_global_to_shared(b_dos, do + o_v)
+                cp.mbarrier_arrive(b_bars.index(L), increment_count=False)
+                for i_l in gl.static_range(L):
+                    if NEEDS_DMASK:
+                        cp.async_copy_global_to_shared(
+                            b_vs.index(i_l),
+                            res[i_l] + o_v,
+                            mask=m_d[None, :],
+                            eviction_policy="evict_first",
+                        )
+                    else:
+                        cp.async_copy_global_to_shared(b_vs.index(i_l), res[i_l] + o_v, eviction_policy="evict_first")
+                    cp.mbarrier_arrive(b_bars.index(i_l), increment_count=False)
+            mb.wait(b_bars.index(L), phase=t & 1)
         else:
+            if NEEDS_DMASK:
+                cp.async_copy_global_to_shared(b_dos, do + o_v, mask=m_d[None, :])
+            else:
+                cp.async_copy_global_to_shared(b_dos, do + o_v)
+            cp.commit_group()
             if NEEDS_DMASK:
                 cp.async_copy_global_to_shared(b_vs.index(0), res[0] + o_v, mask=m_d[None, :], eviction_policy="evict_first")
             else:
@@ -337,16 +350,25 @@ def attnres_bwd_kernel_dv_gluon(
         if NEEDS_DMASK:
             b_do = gl.where(m_d[None, :], b_do, 0.)
 
+        # [BT] next group's tokens; loads for t+1 are issued as this group's slots drain
+        o_t2 = gl.minimum(i_g + (t + 1) * BT + gl.arange(0, BT, layout=sl_t), N - 1)
+        if RESIDENT:
+            if t + 1 < KT:
+                gl.thread_barrier()
+                if NEEDS_DMASK:
+                    cp.async_copy_global_to_shared(b_dos, do + (o_t2[:, None] * D + o_d[None, :]), mask=m_d[None, :])
+                else:
+                    cp.async_copy_global_to_shared(b_dos, do + (o_t2[:, None] * D + o_d[None, :]))
+                cp.mbarrier_arrive(b_bars.index(L), increment_count=False)
+
         if SAVE_OPRE:
             b_opre = gl.load(o_pre + o_v, mask=m_d[None, :], other=0.).to(gl.float32)
-            if RESIDENT:
-                cp.wait_group(0)
         else:
             # level 1: recompute the mix sum_l p_l * v_l
             b_opre = gl.zeros([BT, BD], gl.float32, layout=blk)
             for i_l in gl.static_range(L):
                 if RESIDENT:
-                    cp.wait_group(L - 1 - i_l)
+                    mb.wait(b_bars.index(i_l), phase=t & 1)
                     b_v = b_vs.index(i_l).load(blk).to(gl.float32)
                 else:
                     if i_l + 1 < L:
@@ -397,7 +419,9 @@ def attnres_bwd_kernel_dv_gluon(
 
         for i_l in gl.static_range(L):
             if RESIDENT:
-                # tiles were already waited on above; second use comes straight from smem
+                if SAVE_OPRE:
+                    mb.wait(b_bars.index(i_l), phase=t & 1)
+                # otherwise the tile was already waited on above; reads come straight from smem
                 b_v = b_vs.index(i_l).load(blk).to(gl.float32)
             else:
                 if i_l + 1 < L:
@@ -429,11 +453,33 @@ def attnres_bwd_kernel_dv_gluon(
             b_dv, b_inc = _dv_tile(b_v, b_do, b_qw, b_rstd, b_logit, b_p, b_delta, scale, D, L)
             gl.store(dres[i_l] + o_v, b_dv.to(dres[0].dtype.element_ty), mask=m_t[:, None] & m_d[None, :])
             b_dqw += b_inc
-            if not RESIDENT:
+            if RESIDENT:
+                if t + 1 < KT:
+                    # slot i_l fully consumed by every warp; refill it for group t+1
+                    gl.thread_barrier()
+                    if NEEDS_DMASK:
+                        cp.async_copy_global_to_shared(
+                            b_vs.index(i_l),
+                            res[i_l] + (o_t2[:, None] * D + o_d[None, :]),
+                            mask=m_d[None, :],
+                            eviction_policy="evict_first",
+                        )
+                    else:
+                        cp.async_copy_global_to_shared(
+                            b_vs.index(i_l),
+                            res[i_l] + (o_t2[:, None] * D + o_d[None, :]),
+                            eviction_policy="evict_first",
+                        )
+                    cp.mbarrier_arrive(b_bars.index(i_l), increment_count=False)
+            else:
                 gl.thread_barrier()
-        # tiles of iteration t are fully consumed before iteration t+1 refills the buffers
-        gl.thread_barrier()
+        if not RESIDENT:
+            # tiles of iteration t are fully consumed before iteration t+1 refills the buffers
+            gl.thread_barrier()
 
+    if RESIDENT:
+        for i in gl.static_range(L + 1):
+            mb.invalidate(b_bars.index(i))
     i_p = gl.program_id(0).to(gl.int64)
     gl.store(dqw + i_p * D + o_d, b_dqw, mask=m_d)
     if HAS_ONORM:
@@ -737,7 +783,7 @@ class AttnResGluonBackend(BaseBackend):
     """
 
     backend_type = "gluon"
-    package_name = None  # gluon ships with triton
+    package_name = "triton.experimental.gluon"  # ships with Triton 3.5+; absent on older builds
     env_var = "FLA_ATTNRES_GLUON"
     default_enable = False
     priority = 3
