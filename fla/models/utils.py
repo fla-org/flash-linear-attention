@@ -146,6 +146,9 @@ class FLALayer(CacheLayerMixin):
     def get_max_cache_shape(self) -> int:
         return -1
 
+    def get_max_length(self) -> int:
+        return self.get_max_cache_shape()
+
     def get_mask_sizes(self, cache_position: torch.Tensor) -> tuple[int, int]:
         return 0, 0
 

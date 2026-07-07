@@ -43,6 +43,13 @@ def _raw_legacy_cache():
     return cache
 
 
+def test_fla_layer_reports_dynamic_max_length():
+    layer = FLALayer()
+
+    assert layer.get_max_cache_shape() == -1
+    assert layer.get_max_length() == -1
+
+
 # ===================================================================================
 # Test for FLACache per-layer get_seq_length behavior
 # ===================================================================================
