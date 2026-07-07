@@ -5,24 +5,16 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""Gluon backend for AttnRes (see ``fla/ops/attnres/fused.py`` for the Triton reference).
+"""Gluon backend for the fused AttnRes op (see ``fla/ops/attnres/fused.py`` for the Triton reference).
 
-Unlike the Triton kernels (one token per program, compiler-managed layouts/pipelining), this
-backend restructures the work around what Gluon makes explicit:
+Where the Triton kernel leaves layout, shared memory, and load/compute overlap to the compiler, this
+port makes them explicit: residual sources are indexed statically (``L`` is a constexpr, so no
+pointer-table gather), V tiles are staged through shared memory with ``cp.async``, and the backward
+keeps all ``L`` tiles resident when they fit and streams a 2-deep ring otherwise.
 
-- ``L`` is a constexpr and residual sources are indexed statically, so each iteration loads a
-  contiguous ``[BT, BD]`` block from a single tensor instead of gathering rows through a
-  pointer-select chain;
-- loads are staged through shared memory with ``cp.async`` double buffering (fwd) or full
-  ``L``-tile residency (bwd, so checkpoint_level=1 reads V from global exactly once);
-- layouts are vectorized to 16 bytes per lane and the two forward reductions (``v*v``, ``v*qw``)
-  share one cross-warp pass;
-- bwd accumulates ``dqw``/``dow`` partials in registers across ``GROUP`` tokens before spilling
-  one fp32 row per program, shrinking the partial-reduction traffic by ``GROUP`` x.
-
-Never auto-selected: the verifier accepts a ``fused_attnres`` call only when the caller passes an
-explicit ``backend='gluon'``. Correctness parity with the Triton path is the frozen
-``tests/ops/test_attnres.py`` (selected with ``backend='gluon'``).
+Opt-in and auto-dispatched like the other FLA backends: enable with ``FLA_ATTNRES_GLUON=1`` (off by
+default); the verifier then selects it for suitable CUDA calls and falls back to Triton elsewhere.
+Numerical parity with Triton is the frozen ``tests/ops/test_attnres.py``.
 """
 
 from __future__ import annotations
