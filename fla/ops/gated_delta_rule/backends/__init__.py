@@ -8,7 +8,7 @@
 """GDR backends."""
 
 from fla.ops.backends import BackendRegistry, dispatch
-from fla.ops.gated_delta_rule.backends.flashqla import FlashQLABackend
+from fla.ops.gated_delta_rule.backends.flash_qla import FlashQLABackend
 
 gdr_registry = BackendRegistry("gated_delta_rule")
 gdr_registry.register(FlashQLABackend())

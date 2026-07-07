@@ -48,7 +48,6 @@ class FlashQLABackend(BaseBackend):
         initial_state: torch.Tensor | None = None,
         output_final_state: bool = False,
         use_qk_l2norm_in_kernel: bool = False,
-        use_gate_in_kernel: bool = False,
         use_beta_sigmoid_in_kernel: bool = False,
         allow_neg_eigval: bool = False,
         state_v_first: bool = False,
@@ -67,12 +66,14 @@ class FlashQLABackend(BaseBackend):
             return False, f"FlashQLA requires K=128, got {q.shape[-1]}"
         if v.shape[-1] != 128:
             return False, f"FlashQLA requires V=128, got {v.shape[-1]}"
-        if use_gate_in_kernel:
+        if kwargs.get('use_gate_in_kernel'):
             return False, "FlashQLA does not support use_gate_in_kernel"
         if use_beta_sigmoid_in_kernel:
             return False, "FlashQLA does not support use_beta_sigmoid_in_kernel"
         if allow_neg_eigval:
             return False, "FlashQLA does not support allow_neg_eigval"
+        if 'transpose_state_layout' in kwargs:
+            return False, "FlashQLA does not support the deprecated transpose_state_layout"
         if cp_context is not None:
             return False, "FlashQLA does not support inter-card context parallel"
         return True, None
@@ -88,6 +89,8 @@ class FlashQLABackend(BaseBackend):
         initial_state: torch.Tensor | None = None,
         output_final_state: bool = False,
         use_qk_l2norm_in_kernel: bool = False,
+        use_beta_sigmoid_in_kernel: bool = False,
+        allow_neg_eigval: bool = False,
         state_v_first: bool = False,
         cu_seqlens: torch.LongTensor | None = None,
         cu_seqlens_cpu: torch.LongTensor | None = None,
