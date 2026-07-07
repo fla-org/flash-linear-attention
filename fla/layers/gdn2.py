@@ -189,7 +189,7 @@ class GatedDeltaNet2(nn.Module):
         self.b_proj = nn.Linear(hidden_size, self.key_dim, bias=False)
         self.w_proj = nn.Linear(hidden_size, self.value_dim, bias=False)
 
-        # per-QK-head decay rate (A_log) and per-channel softplus bias (dt_bias).
+        # Per-QK-head decay rate (A_log) and per-channel softplus bias (dt_bias).
         self.A_log = nn.Parameter(torch.log(torch.empty(self.num_heads, dtype=torch.float32).uniform_(1, 16)))
         self.A_log._no_weight_decay = True
         dt = torch.exp(
