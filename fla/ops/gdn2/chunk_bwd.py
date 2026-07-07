@@ -176,13 +176,9 @@ def chunk_gdn2_bwd_kernel_wy_dqkg_fused(
             b_dv = tl.load(p_dv, boundary_check=(0, 1))
 
             b_dgk += tl.sum(b_h * b_dh, axis=0)
-            b_dgk = tl.where((b_dgk != b_dgk) | (tl.abs(b_dgk) == float('inf')), 0.0, b_dgk)
             b_dq += tl.dot(b_do, b_h.to(b_do.dtype))
-            b_dq = tl.where((b_dq != b_dq) | (tl.abs(b_dq) == float('inf')), 0.0, b_dq)
             b_dk += tl.dot(b_v_new, b_dh.to(b_v_new.dtype))
-            b_dk = tl.where((b_dk != b_dk) | (tl.abs(b_dk) == float('inf')), 0.0, b_dk)
             b_dw_flow += tl.dot(b_dv.to(b_v_new.dtype), b_h.to(b_v_new.dtype))
-            b_dw_flow = tl.where((b_dw_flow != b_dw_flow) | (tl.abs(b_dw_flow) == float('inf')), 0.0, b_dw_flow)
             tl.debug_barrier()
 
             if i_k == 0:
@@ -195,52 +191,37 @@ def chunk_gdn2_bwd_kernel_wy_dqkg_fused(
                 b_wg = tl.load(p_wg, boundary_check=(0, 1))
                 # dA gets (w_gate * v) on the value side - the GDN-2 channel-wise twist.
                 b_dA += tl.dot(b_dv, tl.trans(b_v * b_wg))
-                b_dA = tl.where((b_dA != b_dA) | (tl.abs(b_dA) == float('inf')), 0.0, b_dA)
 
                 b_dvb = tl.dot(b_A, b_dv)
-                b_dvb = tl.where((b_dvb != b_dvb) | (tl.abs(b_dvb) == float('inf')), 0.0, b_dvb)
                 b_dv2 = b_dvb * b_wg
-                b_dv2 = tl.where((b_dv2 != b_dv2) | (tl.abs(b_dv2) == float('inf')), 0.0, b_dv2)
                 b_dw_gate = b_dvb * b_v
-                b_dw_gate = tl.where((b_dw_gate != b_dw_gate) | (tl.abs(b_dw_gate) == float('inf')), 0.0, b_dw_gate)
 
                 tl.store(p_dv2, b_dv2.to(p_dv2.dtype.element_ty), boundary_check=(0, 1))
                 tl.store(p_dw_gate, b_dw_gate.to(p_dw_gate.dtype.element_ty), boundary_check=(0, 1))
 
         b_gk_exp = exp2(b_g)
-        b_gk_exp = tl.where((b_gk_exp != b_gk_exp) | (tl.abs(b_gk_exp) == float('inf')), 0.0, b_gk_exp)
         b_gb = b_gk_exp * b_b
         b_dgk *= exp2(b_gn)
-        b_dgk = tl.where((b_dgk != b_dgk) | (tl.abs(b_dgk) == float('inf')), 0.0, b_dgk)
         b_dq = b_dq * b_gk_exp * scale
-        b_dq = tl.where((b_dq != b_dq) | (tl.abs(b_dq) == float('inf')), 0.0, b_dq)
         b_dk = b_dk * tl.where(m_t[:, None], exp2(b_gn[None, :] - b_g), 0)
-        b_dk = tl.where((b_dk != b_dk) | (tl.abs(b_dk) == float('inf')), 0.0, b_dk)
 
         b_kg = b_k * b_gk_exp
 
         b_dw_flow = -b_dw_flow.to(b_A.dtype)
         # dA gets (b * exp(gk) * k) on the key side - the GDN-2 channel-wise twist.
         b_dA += tl.dot(b_dw_flow, tl.trans((b_kg * b_b).to(b_A.dtype)))
-        b_dA = tl.where((b_dA != b_dA) | (tl.abs(b_dA) == float('inf')), 0.0, b_dA)
 
         b_dkgb = tl.dot(b_A, b_dw_flow)
-        b_dkgb = tl.where((b_dkgb != b_dkgb) | (tl.abs(b_dkgb) == float('inf')), 0.0, b_dkgb)
         p_db = tl.make_block_ptr(db, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         b_db_partial = b_dkgb * b_kg
-        b_db_partial = tl.where((b_db_partial != b_db_partial) | (tl.abs(b_db_partial) == float('inf')), 0.0, b_db_partial)
         tl.store(p_db, b_db_partial.to(p_db.dtype.element_ty), boundary_check=(0, 1))
 
         p_q = tl.make_block_ptr(q, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         b_q = tl.load(p_q, boundary_check=(0, 1))
         b_kdk = b_k * b_dk
-        b_kdk = tl.where((b_kdk != b_kdk) | (tl.abs(b_kdk) == float('inf')), 0.0, b_kdk)
         b_dgk += tl.sum(b_kdk, axis=0)
-        b_dgk = tl.where((b_dgk != b_dgk) | (tl.abs(b_dgk) == float('inf')), 0.0, b_dgk)
         b_dg = b_q * b_dq - b_kdk + m_last[:, None] * b_dgk + b_kg * b_dkgb * b_b
-        b_dg = tl.where((b_dg != b_dg) | (tl.abs(b_dg) == float('inf')), 0.0, b_dg)
         b_dk = b_dk + b_dkgb * b_gb
-        b_dk = tl.where((b_dk != b_dk) | (tl.abs(b_dk) == float('inf')), 0.0, b_dk)
 
         p_dq = tl.make_block_ptr(dq, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         p_dk = tl.make_block_ptr(dk, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
@@ -252,9 +233,7 @@ def chunk_gdn2_bwd_kernel_wy_dqkg_fused(
     m_A = (o_t[:, None] > o_t[None, :]) & (m_t[:, None] & m_t)
     b_dA = tl.where(m_A, b_dA, 0)
     b_dA = tl.dot(b_dA.to(b_A.dtype), b_A)
-    b_dA = tl.where((b_dA != b_dA) | (tl.abs(b_dA) == float('inf')), 0.0, b_dA)
     b_dA = tl.dot(b_A, b_dA.to(b_A.dtype))
-    b_dA = tl.where((b_dA != b_dA) | (tl.abs(b_dA) == float('inf')), 0.0, b_dA)
     b_dA = tl.where(m_A, -b_dA, 0)
     p_dA = tl.make_block_ptr(dA, (T, BT), (H * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
     tl.store(p_dA, b_dA.to(p_dA.dtype.element_ty), boundary_check=(0, 1))

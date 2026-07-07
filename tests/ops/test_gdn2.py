@@ -472,3 +472,79 @@ def test_layer(num_heads, num_v_heads, use_short_conv):
         if p.requires_grad:
             assert p.grad is not None, f"{name}.grad is None"
             assert torch.isfinite(p.grad).all(), f"{name}.grad has non-finite values"
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize(
+    ("num_v_heads", "use_short_conv"),
+    [
+        pytest.param(2, False, id="mha"),
+        pytest.param(4, False, id="gva"),
+        pytest.param(2, True, id="short_conv"),
+    ],
+)
+def test_layer_safe_gate(num_v_heads, use_short_conv):
+    """The opt-in bounded gate path must run through training layer paths."""
+    from fla.layers import GatedDeltaNet2
+
+    torch.manual_seed(0)
+    hidden_size, head_dim, num_heads, B, T = 128, 32, 2, 2, 128
+    layer = GatedDeltaNet2(
+        hidden_size=hidden_size,
+        head_dim=head_dim,
+        num_heads=num_heads,
+        num_v_heads=num_v_heads,
+        use_short_conv=use_short_conv,
+        safe_gate=True,
+        gate_lower_bound=-5.0,
+    ).to(device).to(torch.float32)
+    layer.train()
+    layer.A_log.data.fill_(5.0)
+    layer.dt_bias.data.fill_(8.0)
+
+    x = torch.randn(B, T, hidden_size, device=device, dtype=torch.float32, requires_grad=True)
+    o, _, _ = layer(x)
+    assert o.shape == (B, T, hidden_size)
+    assert torch.isfinite(o).all()
+
+    o.float().mean().backward()
+    assert x.grad is not None and torch.isfinite(x.grad).all()
+    for name, p in layer.named_parameters():
+        if p.requires_grad:
+            assert p.grad is not None, f"{name}.grad is None"
+            assert torch.isfinite(p.grad).all(), f"{name}.grad has non-finite values"
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize(
+    ("num_v_heads", "use_short_conv"),
+    [
+        pytest.param(2, False, id="mha"),
+        pytest.param(4, False, id="gva"),
+        pytest.param(2, True, id="short_conv"),
+    ],
+)
+def test_layer_safe_gate_fused_recurrent(num_v_heads, use_short_conv):
+    """Short eval sequences should use the bounded fused recurrent path."""
+    from fla.layers import GatedDeltaNet2
+
+    torch.manual_seed(0)
+    hidden_size, head_dim, num_heads, B, T = 128, 32, 2, 2, 16
+    layer = GatedDeltaNet2(
+        hidden_size=hidden_size,
+        head_dim=head_dim,
+        num_heads=num_heads,
+        num_v_heads=num_v_heads,
+        use_short_conv=use_short_conv,
+        safe_gate=True,
+        gate_lower_bound=-5.0,
+    ).to(device).to(torch.float32)
+    layer.eval()
+    layer.A_log.data.fill_(5.0)
+    layer.dt_bias.data.fill_(8.0)
+
+    x = torch.randn(B, T, hidden_size, device=device, dtype=torch.float32)
+    with torch.no_grad():
+        o, _, _ = layer(x)
+    assert o.shape == (B, T, hidden_size)
+    assert torch.isfinite(o).all()

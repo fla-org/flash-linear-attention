@@ -274,6 +274,13 @@ def fused_recurrent_gdn2_fwd(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if scale is None:
         scale = k.shape[-1] ** -0.5
+    if use_gate_in_kernel:
+        assert A_log is not None, "A_log must be provided when use_gate_in_kernel=True."
+    if lower_bound is not None:
+        if not use_gate_in_kernel:
+            raise ValueError("`lower_bound` requires `use_gate_in_kernel=True`.")
+        if not (-5 <= lower_bound < 0):
+            raise ValueError(f"`lower_bound` must be in the safe range [-5, 0), got {lower_bound}.")
 
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
@@ -436,6 +443,13 @@ def fused_recurrent_gdn2(
         f"w must have shape [B, T, HV, V] matching v; got {tuple(w.shape)} "
         f"vs v {tuple(v.shape)}."
     )
+    if use_gate_in_kernel:
+        assert A_log is not None, "A_log must be provided when use_gate_in_kernel=True."
+    if lower_bound is not None:
+        if not use_gate_in_kernel:
+            raise ValueError("`lower_bound` requires `use_gate_in_kernel=True`.")
+        if not (-5 <= lower_bound < 0):
+            raise ValueError(f"`lower_bound` must be in the safe range [-5, 0), got {lower_bound}.")
     if scale is None:
         scale = k.shape[-1] ** -0.5
 

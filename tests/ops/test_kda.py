@@ -1100,6 +1100,24 @@ def test_gate(
         assert_close("dbias", ref_dbias, tri_dbias, 1e-4)
 
 
+@pytest.mark.skipif(device == "cpu", reason="CUDA required")
+@pytest.mark.parametrize("gate_value", [32.0, -32.0])
+def test_lowerbound_gate_extreme_a_log_saturated_backward(gate_value):
+    """Saturated lower-bound gates should not produce 0 * inf gradients."""
+    T, H, D = 32, 1, 32
+    g = torch.full((T, H, D), gate_value, dtype=torch.float32, device=device, requires_grad=True)
+    A_log = torch.full((H,), 100.0, dtype=torch.float32, device=device, requires_grad=True)
+    dt_bias = torch.zeros(H * D, dtype=torch.float32, device=device, requires_grad=True)
+
+    y = fused_kda_gate(g, A_log, dt_bias, lower_bound=-5.0)
+    assert torch.isfinite(y).all()
+    y.float().sum().backward()
+
+    assert torch.isfinite(g.grad).all()
+    assert torch.isfinite(A_log.grad).all()
+    assert torch.isfinite(dt_bias.grad).all()
+
+
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 def test_chunk_return_intermediate_states(dtype):
     """Test that return_intermediate_states=True works in inference mode and returns h with correct shape."""

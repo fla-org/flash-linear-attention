@@ -319,6 +319,10 @@ def chunk_gdn2(
             raise ValueError("`lower_bound` must be specified when `safe_gate=True` and `use_gate_in_kernel=True`.")
         if not (-5 <= lower_bound < 0):
             raise ValueError(f"`lower_bound` must be in the safe range [-5, 0), got {lower_bound}.")
+    if lower_bound is not None and not use_gate_in_kernel:
+        raise ValueError("`lower_bound` requires `use_gate_in_kernel=True`.")
+    if lower_bound is not None and not (-5 <= lower_bound < 0):
+        raise ValueError(f"`lower_bound` must be in the safe range [-5, 0), got {lower_bound}.")
 
     assert q.shape == k.shape == g.shape, "q, k, g must have the same shape."
     assert k.shape[-1] <= 256, f"GDN-2 only supports key headdim <= 256, got {k.shape[-1]}."

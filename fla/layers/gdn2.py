@@ -83,10 +83,10 @@ class GatedDeltaNet2(nn.Module):
             The index of the layer. Default: None.
         norm_eps (float, Optional):
             The epsilon value for the normalization layer. Default: 1e-5.
-        a_log_min (float, Optional):
-            The minimum `A_log` used by the layer gate activation before `exp`. Default: 0.0.
-            `A_log` is initialized from `log(uniform(1, 16))`, whose lower bound is 0.0.
-            The default therefore preserves the initialization support and only clips drifted negative values.
+        safe_gate (bool, Optional):
+            Whether to use the bounded in-kernel gate activation. Default: `False`.
+        gate_lower_bound (float, Optional):
+            The lower bound for the bounded gate activation when `safe_gate=True`. Default: -5.0.
     """
 
     def __init__(
@@ -103,7 +103,8 @@ class GatedDeltaNet2(nn.Module):
         conv_bias: bool = False,
         layer_idx: int | None = None,
         norm_eps: float = 1e-5,
-        a_log_min: float = 0.0,
+        safe_gate: bool = False,
+        gate_lower_bound: float = -5.0,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -112,7 +113,10 @@ class GatedDeltaNet2(nn.Module):
         self.allow_neg_eigval = allow_neg_eigval
         self.hidden_size = hidden_size
         self.expand_v = expand_v
-        self.a_log_min = a_log_min
+        self.safe_gate = safe_gate
+        if not (-5 <= gate_lower_bound < 0):
+            raise ValueError(f"gate_lower_bound must be in the safe range [-5, 0), got {gate_lower_bound}.")
+        self.gate_lower_bound = gate_lower_bound
 
         self.use_short_conv = use_short_conv
         self.conv_size = conv_size
@@ -185,7 +189,6 @@ class GatedDeltaNet2(nn.Module):
         self.b_proj = nn.Linear(hidden_size, self.key_dim, bias=False)
         self.w_proj = nn.Linear(hidden_size, self.value_dim, bias=False)
 
-        # a_log starts at log(uniform(1, 16)); the default floor of 0.0 preserves the initialization support.
         # per-QK-head decay rate (A_log) and per-channel softplus bias (dt_bias).
         self.A_log = nn.Parameter(torch.log(torch.empty(self.num_heads, dtype=torch.float32).uniform_(1, 16)))
         self.A_log._no_weight_decay = True
@@ -263,7 +266,9 @@ class GatedDeltaNet2(nn.Module):
         # head axis, rather than `repeat_interleave(head_k_dim)` then `rearrange` —
         # which produces an intermediate flat `key_dim` tensor only to immediately
         # reshape it back.
-        g = F.softplus(self.f_proj(hidden_states).float() + self.dt_bias)
+        g = self.f_proj(hidden_states).float()
+        if not self.safe_gate:
+            g = F.softplus(g + self.dt_bias)
         # GDN-2 channel-wise gates, both squashed to [0, 1].
         b = self.b_proj(hidden_states).sigmoid()
         w = self.w_proj(hidden_states).sigmoid()
@@ -273,15 +278,25 @@ class GatedDeltaNet2(nn.Module):
         v = rearrange(v, "... (h d) -> ... h d", d=self.head_v_dim)
         b = rearrange(b, "... (h d) -> ... h d", d=self.head_k_dim)
         w = rearrange(w, "... (h d) -> ... h d", d=self.head_v_dim)
-        # Apply per-head A_log decay rate via broadcast on the (H, K) tail.
-        g = -self.A_log.float().clamp(min=self.a_log_min).exp().unsqueeze(-1) * g
+        A_log, dt_bias = None, None
+        if self.safe_gate:
+            A_log, dt_bias = self.A_log, self.dt_bias
+        else:
+            # apply per-head A_log decay rate via broadcast on the (H, K) tail.
+            g = -self.A_log.float().exp().unsqueeze(-1) * g
 
         # Grouped value attention: broadcast QK-side tensors across value-head groups.
         if self.num_v_heads > self.num_heads:
+            num_groups = self.num_v_heads // self.num_heads
             q, k, g, b = (
-                repeat(x, "... h d -> ... (h g) d", g=self.num_v_heads // self.num_heads)
+                repeat(x, "... h d -> ... (h g) d", g=num_groups)
                 for x in (q, k, g, b)
             )
+            if self.safe_gate:
+                A_log = repeat(A_log, "h -> (h g)", g=num_groups)
+                dt_bias = rearrange(dt_bias, "(h d) -> h d", d=self.head_k_dim)
+                dt_bias = repeat(dt_bias, "h d -> (h g) d", g=num_groups)
+                dt_bias = rearrange(dt_bias, "h d -> (h d)").contiguous()
 
         if self.allow_neg_eigval:
             b = b * 2.0
@@ -299,6 +314,11 @@ class GatedDeltaNet2(nn.Module):
                 output_final_state=use_cache,
                 use_qk_l2norm_in_kernel=True,
                 cu_seqlens=cu_seqlens,
+                use_gate_in_kernel=self.safe_gate,
+                safe_gate=self.safe_gate,
+                lower_bound=self.gate_lower_bound if self.safe_gate else None,
+                A_log=A_log,
+                dt_bias=dt_bias,
             )
         elif mode == "fused_recurrent":
             o, recurrent_state = fused_recurrent_gdn2(
@@ -312,6 +332,10 @@ class GatedDeltaNet2(nn.Module):
                 output_final_state=use_cache,
                 use_qk_l2norm_in_kernel=True,
                 cu_seqlens=cu_seqlens,
+                use_gate_in_kernel=self.safe_gate,
+                lower_bound=self.gate_lower_bound if self.safe_gate else None,
+                A_log=A_log,
+                dt_bias=dt_bias,
             )
         else:
             raise NotImplementedError(f"Unsupported mode `{mode}`.")

@@ -23,6 +23,19 @@ BT_LIST_AUTOTUNE = [32, 64, 128]
 NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if IS_AMD else [4, 8, 16, 32]
 
 
+@triton.jit
+def _lowerbound_gate_sigmoid_and_slope(b_A, b_g):
+    b_abs_g = tl.abs(b_g)
+    b_log_abs_inner = b_A + tl.log(b_abs_g)
+    b_saturated = b_log_abs_inner > 80.0
+    b_abs_inner = tl.exp(tl.minimum(b_log_abs_inner, 80.0))
+    b_inner = tl.where(b_g < 0.0, -b_abs_inner, b_abs_inner)
+    b_sig = tl.where(b_saturated, tl.where(b_g < 0.0, 0.0, 1.0), tl.sigmoid(b_inner))
+    b_log_dsig = -b_abs_inner - 2.0 * tl.log(1.0 + tl.exp(-b_abs_inner))
+    b_slope = tl.where(b_saturated, 0.0, tl.exp(b_A + b_log_dsig))
+    return b_sig, b_slope
+
+
 def naive_kda_gate(
     g: torch.Tensor,
     A_log: torch.Tensor,
@@ -116,7 +129,8 @@ def kda_gate_fwd_kernel(
     if not USE_LOWER_BOUND:
         b_yg = -exp(b_A) * softplus(b_g)
     else:
-        b_yg = lower_bound * tl.sigmoid(exp(b_A) * b_g)
+        b_sig, _ = _lowerbound_gate_sigmoid_and_slope(b_A, b_g)
+        b_yg = lower_bound * b_sig
     tl.store(p_yg, b_yg.to(p_yg.dtype.element_ty), boundary_check=(0, 1))
 
     if HAS_BETA:
@@ -184,14 +198,8 @@ def kda_gate_bwd_kernel(
         b_dg = b_A * (b_dyg * tl.sigmoid(b_g))
         b_dA = tl.sum(tl.sum(b_dyg * b_yg, 1), 0)
     else:
-        b_A = exp(b_A)
-        b_inner = b_A * b_g
-        b_sig = tl.sigmoid(b_inner)
-        b_dsig = b_sig * (1.0 - b_sig)
-        # Common term: dy * (LB * dsig)
-        b_d_inner_term = b_dyg * (lower_bound * b_dsig)
-        # dg = d_inner_term * A
-        b_dg = b_d_inner_term * b_A
+        _, b_slope = _lowerbound_gate_sigmoid_and_slope(b_A, b_g)
+        b_dg = b_dyg * (lower_bound * b_slope)
         b_dA = tl.sum(tl.sum(b_dg * b_g, 1), 0)
 
     tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), boundary_check=(0, 1))
