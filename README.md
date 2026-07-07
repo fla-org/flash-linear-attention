@@ -30,9 +30,10 @@
 
 ## News
 
-- [2026-06] 🔭 Add Parallax implementation to `fla` ([paper](https://arxiv.org/abs/2605.29157)) — parameterized local linear attention: softmax attention with a learned first-order correction from a secondary query-side stream.
-- [2026-06] 🧱 Add Wall attention implementation to `fla` ([blog](https://blog.tilderesearch.com/blog/wall-attn)) — full softmax attention with a learned per-channel multiplicative decay, a RoPE-free positional encoding from Tilde Research.
-- [2026-05] 🚪 Add Gated DeltaNet 2 (GDN-2) implementation to `fla` ([paper](https://arxiv.org/abs/2605.22791)) — decouples erase and write gates into independent channel-wise gates on top of KDA.
+- [2026-07] 🚀 Add [FlashQLA](https://github.com/QwenLM/FlashQLA) backend for [Gated DeltaNet](fla/ops/gated_delta_rule).
+- [2026-06] 🔭 Add Parallax implementation to `fla` ([paper](https://arxiv.org/abs/2605.29157)).
+- [2026-06] 🧱 Add Wall attention implementation to `fla` ([blog](https://blog.tilderesearch.com/blog/wall-attn)).
+- [2026-05] 🚪 Add Gated DeltaNet 2 (GDN-2) implementation to `fla` ([paper](https://arxiv.org/abs/2605.22791)).
 - [2026-05] 🦅 Add Raven implementation to `fla` ([repo](https://github.com/goombalab/raven)).
 - [2026-05] 🚀 Add [YOCO](https://arxiv.org/abs/2405.05254) (You Only Cache Once) implementation to `fla`.
 - [2026-05] ⚡ Add fused [AttnRes](fla/ops/attnres) support to `fla` ([paper](https://arxiv.org/abs/2603.15031)).
@@ -46,12 +47,12 @@
 - [2025-09] 🐻 Thrilled to announce that [GDN](fla/ops/gated_delta_rule) has been integrated into Qwen3-Next. Check out their [blog post](https://qwen.ai/blog?id=4074cca80393150c248e508aa62983f9cb7d27cd&from=research.latest-advancements-list) for more info!
 - [2025-08] 🌲 Add Log-Linear Attention implementation to `fla` ([paper](https://arxiv.org/abs/2506.04761)).
 - [2025-08] 🎓 Add MoM implementation to `fla` ([paper](https://arxiv.org/abs/2502.13685)).
-- [2025-07] 🐳 Add MLA implementation to `fla` ([paper](https://arxiv.org/abs/2405.04434)).
-- [2025-07] 🛣️ Add PaTH Attention implementation to `fla` ([paper](https://arxiv.org/abs/2505.16381)).
 
 <details>
 <summary>Older news</summary>
 
+- [2025-07] 🐳 Add MLA implementation to `fla` ([paper](https://arxiv.org/abs/2405.04434)).
+- [2025-07] 🛣️ Add PaTH Attention implementation to `fla` ([paper](https://arxiv.org/abs/2505.16381)).
 - [2025-06] 🎉 Add MesaNet implementation to `fla` ([paper](https://arxiv.org/abs/2506.05233)).
 - [2025-06] 🐍 Add Comba implementation to `fla` ([paper](https://arxiv.org/abs/2506.02475)).
 - [2025-05] 🎉 Add Rodimus&ast; implementation to `fla` ([paper](https://arxiv.org/abs/2410.06577)).
