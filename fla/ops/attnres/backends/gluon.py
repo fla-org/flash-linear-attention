@@ -36,7 +36,7 @@ from fla.utils import (
     input_guard,
 )
 
-# tokens per bwd program (= BT * KT); one fp32 dqw/dow partial row is written per GROUP tokens
+# tokens per bwd program (BT * KT); each program spills one fp32 dqw/dow partial row
 GROUP = 32
 
 # each config sets `num_warps=W` and constexpr `NW=W` together so the static layouts stay in sync
@@ -218,8 +218,7 @@ def attnres_fwd_kernel_gluon(
 
         gl.store(rstd + i_l * N + o_t, b_rstd.to(rstd.dtype.element_ty), mask=m_t)
         gl.store(logit + i_l * N + o_t, b_logit.to(logit.dtype.element_ty), mask=m_t)
-        # the double buffer is same-lane staging (each lane reads back its own cp.async bytes), but
-        # buffer reuse still needs the CTA in step before the next issue overwrites slot i_l % 2
+        # cp.async is same-lane staging, but the CTA must sync before the next issue reuses slot i_l % 2
         gl.thread_barrier()
 
     gl.store(lse + o_t, b_m + gl.log(b_acc), mask=m_t)
@@ -731,12 +730,10 @@ def _run(
 
 
 class AttnResGluonBackend(BaseBackend):
-    """Gluon-native AttnRes kernels (cp.async staging, static source indexing, grouped bwd partials).
+    """Dispatch entry for the Gluon AttnRes kernels (see the module docstring for the design).
 
-    Opt-in and auto-dispatched like the other FLA backends: enable with ``FLA_ATTNRES_GLUON=1``
-    (off by default), after which the verifier accepts any CUDA call that meets the kernel's
-    constraints (SM80+, ``D * itemsize >= 128`` bytes) and otherwise falls back to the Triton path.
-    Correctness parity with Triton is the frozen ``tests/ops/test_attnres.py``.
+    Off by default; enable with ``FLA_ATTNRES_GLUON=1``. The verifier then accepts any CUDA call
+    on SM80+ with ``D * itemsize >= 128`` bytes and otherwise defers to the Triton path.
     """
 
     backend_type = "gluon"
