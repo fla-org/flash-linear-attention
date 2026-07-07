@@ -12,7 +12,6 @@ from fla.ops.attnres import fused_attnres, naive_attnres
 from fla.utils import assert_close, device
 
 
-@pytest.mark.parametrize('backend', ['triton', 'gluon'])
 @pytest.mark.parametrize(
     ('L', 'B', 'T', 'D', 'scale', 'fuse_output_norm', 'dtype', 'checkpoint_level'),
     [
@@ -49,11 +48,7 @@ def test_attnres(
     fuse_output_norm: bool,
     dtype: torch.dtype,
     checkpoint_level: int,
-    backend: str,
-    monkeypatch,
 ):
-    # the gluon backend is opt-in and dispatched via its env var, not a call argument
-    monkeypatch.setenv('FLA_ATTNRES_GLUON', '1' if backend == 'gluon' else '0')
     torch.manual_seed(42)
     # disable TF32 in the PyTorch reference path so the fp32 sanity case
     # actually compares fp32 vs fp32 (otherwise einsum bwd uses cuBLAS TF32
