@@ -111,10 +111,15 @@ def _resident_tiles(L, BT, BD, ES):
 
 
 @gluon.jit
-def _dv_tile(b_v, b_do, b_qw, b_rstd, b_logit, b_p, b_delta, scale: gl.constexpr, D: gl.constexpr):
-    # softmax bwd with delta already known; returns the dv tile and this tile's dqw contribution
-    b_dp = gl.sum(b_v * b_do, axis=1)
-    b_ds = b_p * (b_dp - b_delta) * scale
+def _dv_tile(b_v, b_do, b_qw, b_rstd, b_logit, b_p, b_delta, scale: gl.constexpr, D: gl.constexpr, L: gl.constexpr):
+    # softmax bwd with delta already known; returns the dv tile and this tile's dqw contribution.
+    # for L == 1 the softmax is constant so dlogit vanishes identically; branching on the constexpr
+    # keeps ds exactly zero instead of relying on two reductions cancelling bitwise
+    if L == 1:
+        b_ds = gl.zeros_like(b_delta)
+    else:
+        b_dp = gl.sum(b_v * b_do, axis=1)
+        b_ds = b_p * (b_dp - b_delta) * scale
     # [BT, BD]
     b_k = b_v * b_rstd[:, None]
     b_dv = b_p[:, None] * b_do + (b_ds * b_rstd)[:, None] * (b_qw[None, :] - b_k * (b_logit / D)[:, None])
@@ -430,7 +435,7 @@ def attnres_bwd_kernel_dv_gluon(
             b_logit = gl.load(logit + i_l * N + o_tc).to(gl.float32)
             b_p = gl.exp(b_logit * scale - b_lse)
 
-            b_dv, b_inc = _dv_tile(b_v, b_do, b_qw, b_rstd, b_logit, b_p, b_delta, scale, D)
+            b_dv, b_inc = _dv_tile(b_v, b_do, b_qw, b_rstd, b_logit, b_p, b_delta, scale, D, L)
             gl.store(dres[i_l] + o_v, b_dv.to(dres[0].dtype.element_ty), mask=m_t[:, None] & m_d[None, :])
             b_dqw += b_inc
             if not RESIDENT:
