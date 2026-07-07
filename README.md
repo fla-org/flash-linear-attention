@@ -30,6 +30,7 @@
 
 ## News
 
+- [2026-07] 🧱 Add a [Gluon](https://triton-lang.org/main/getting-started/tutorials/gluon/) backend for [AttnRes](fla/ops/attnres).
 - [2026-07] 🚀 Add [FlashQLA](https://github.com/QwenLM/FlashQLA) backend for [Gated DeltaNet](fla/ops/gated_delta_rule).
 - [2026-06] 🔭 Add Parallax implementation to `fla` ([paper](https://arxiv.org/abs/2605.29157)).
 - [2026-06] 🧱 Add Wall attention implementation to `fla` ([blog](https://blog.tilderesearch.com/blog/wall-attn)).

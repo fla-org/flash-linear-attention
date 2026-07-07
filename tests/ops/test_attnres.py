@@ -12,6 +12,7 @@ from fla.ops.attnres import fused_attnres, naive_attnres
 from fla.utils import assert_close, device
 
 
+@pytest.mark.parametrize('backend', ['triton', 'gluon'])
 @pytest.mark.parametrize(
     ('L', 'B', 'T', 'D', 'scale', 'fuse_output_norm', 'dtype', 'checkpoint_level'),
     [
@@ -48,6 +49,7 @@ def test_attnres(
     fuse_output_norm: bool,
     dtype: torch.dtype,
     checkpoint_level: int,
+    backend: str,
 ):
     torch.manual_seed(42)
     # disable TF32 in the PyTorch reference path so the fp32 sanity case
@@ -77,6 +79,7 @@ def test_attnres(
         scale=scale,
         return_weights=True,
         checkpoint_level=checkpoint_level,
+        backend=backend,
     )
     do = torch.randn_like(tri)
     (tri * do).sum().backward()

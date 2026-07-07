@@ -13,6 +13,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.backends import dispatch
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.op import exp
 from fla.utils import (
@@ -500,6 +501,7 @@ class FusedAttnresFunction(torch.autograd.Function):
         return (dq, dw, dow, None, None, None, None, *dvs)
 
 
+@dispatch("attnres")
 def fused_attnres(
     query: torch.Tensor,
     residuals: Sequence[torch.Tensor],
@@ -509,6 +511,7 @@ def fused_attnres(
     scale: float = 1.0,
     return_weights: bool = False,
     checkpoint_level: int = 1,
+    backend: str = 'triton',
 ) -> torch.Tensor | tuple[torch.Tensor, ...]:
     r"""
     Apply AttnRes residual aggregation.
@@ -538,6 +541,8 @@ def fused_attnres(
             `0` keeps the mixed residual;
             `1` drops it and recomputes it from the sources in backward (less memory, one extra read).
             Default: `1`.
+        backend (str):
+            Kernel backend, either `'triton'` or `'gluon'`. Default: `'triton'`.
 
     Returns:
         o (torch.Tensor):
@@ -549,6 +554,8 @@ def fused_attnres(
         raise ValueError("residuals must contain at least one source")
     if checkpoint_level not in (0, 1):
         raise ValueError(f"checkpoint_level must be 0 or 1, got {checkpoint_level}")
+    if backend not in ('triton', 'gluon'):
+        raise ValueError(f"backend must be 'triton' or 'gluon', got {backend!r}")
 
     output_shape = residuals[0].shape
     D = output_shape[-1]
