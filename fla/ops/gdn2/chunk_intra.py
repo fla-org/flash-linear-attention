@@ -507,6 +507,7 @@ def chunk_gdn2_bwd_kernel_intra(
             b_kj = tl.load(p_k, boundary_check=(0, 1))
             b_gk = tl.load(p_gk, boundary_check=(0, 1))
             b_kg = b_kj * exp2(b_gn - b_gk)
+            b_kg = tl.where((b_kg != b_kg) | (tl.abs(b_kg) == float('inf')), 0.0, b_kg)
             b_dAqk = tl.load(p_dAqk, boundary_check=(0, 1))
             b_dAkk = tl.load(p_dAkk, boundary_check=(0, 1))
             b_dq2 += tl.dot(b_dAqk, b_kg)
@@ -514,6 +515,7 @@ def chunk_gdn2_bwd_kernel_intra(
             b_dk2 += tl.dot(b_dAkk, b_kg)
             b_dk2 = tl.where((b_dk2 != b_dk2) | (tl.abs(b_dk2) == float('inf')), 0.0, b_dk2)
         b_gqn = exp2(b_g - b_gn)
+        b_gqn = tl.where((b_gqn != b_gqn) | (tl.abs(b_gqn) == float('inf')), 0.0, b_gqn)
         b_dq2 *= b_gqn
         b_dk2 *= b_gqn
 
@@ -560,6 +562,7 @@ def chunk_gdn2_bwd_kernel_intra(
             b_gkj = tl.load(p_gkj, mask=m_k, other=0).to(tl.float32)
             m_i = o_i[:, None] >= j
             b_gqk = exp2(b_g - b_gkj[None, :])
+            b_gqk = tl.where((b_gqk != b_gqk) | (tl.abs(b_gqk) == float('inf')), 0.0, b_gqk)
             b_dq2 += tl.where(m_i, b_dAqk[:, None] * b_kj[None, :] * b_gqk, 0.)
             b_dk2 += tl.where(m_i, b_dAkk[:, None] * b_kj[None, :] * b_gqk, 0.)
 
@@ -569,13 +572,16 @@ def chunk_gdn2_bwd_kernel_intra(
     # db gets the elementwise b * k contribution from dk2 (before b is folded
     # back into dk2 itself); then dk2 is rescaled by the channel-wise gate.
     b_db_tile = b_dk2 * b_k
+    b_db_tile = tl.where((b_db_tile != b_db_tile) | (tl.abs(b_db_tile) == float('inf')), 0.0, b_db_tile)
     b_dk2 = b_dk2 * b_b
+    b_dk2 = tl.where((b_dk2 != b_dk2) | (tl.abs(b_dk2) == float('inf')), 0.0, b_dk2)
 
     p_dq = tl.make_block_ptr(dq, (T, K), (H * K, 1), (i_ti, i_k * BK), (BC, BK), (1, 0))
     p_dq2 = tl.make_block_ptr(dq2, (T, K), (H * K, 1), (i_ti, i_k * BK), (BC, BK), (1, 0))
     p_db = tl.make_block_ptr(db, (T, BK), (H * BK, 1), (i_ti, 0), (BC, BK), (1, 0))
 
     b_dg2 = b_q * b_dq2
+    b_dg2 = tl.where((b_dg2 != b_dg2) | (tl.abs(b_dg2) == float('inf')), 0.0, b_dg2)
     b_dq2 = b_dq2 + tl.load(p_dq, boundary_check=(0, 1))
     tl.store(p_dq2, b_dq2.to(p_dq2.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_db, b_db_tile.to(p_db.dtype.element_ty), boundary_check=(0, 1))
@@ -604,12 +610,14 @@ def chunk_gdn2_bwd_kernel_intra(
             o_j = i_t * BT + i_j * BC + o_i
             m_j = o_j < T
             b_gkn = exp2(b_gk - b_gn)
+            b_gkn = tl.where((b_gkn != b_gkn) | (tl.abs(b_gkn) == float('inf')), 0.0, b_gkn)
             b_qg = b_qj * tl.where(m_j[:, None], b_gkn, 0)
             b_kbg = b_kbj * tl.where(m_j[:, None], b_gkn, 0)
             b_dkt += tl.dot(b_dAqk, b_qg)
             b_dkt += tl.dot(b_dAkk, b_kbg)
         b_dkt = tl.where((b_dkt != b_dkt) | (tl.abs(b_dkt) == float('inf')), 0.0, b_dkt)
         b_dkt *= exp2(b_gn - b_g)
+        b_dkt = tl.where((b_dkt != b_dkt) | (tl.abs(b_dkt) == float('inf')), 0.0, b_dkt)
 
     o_dA = i_ti * H * BT + i_i * BC + o_i
     p_qj = q + i_ti * H * K + o_k
@@ -656,6 +664,7 @@ def chunk_gdn2_bwd_kernel_intra(
             b_gkj = tl.load(p_gkj, mask=m_k, other=0).to(tl.float32)
             m_i = o_i[:, None] <= j
             b_gkq = exp2(b_gkj[None, :] - b_g)
+            b_gkq = tl.where((b_gkq != b_gkq) | (tl.abs(b_gkq) == float('inf')), 0.0, b_gkq)
             b_dkt += tl.where(m_i, b_dAqk[:, None] * b_qj[None, :] * b_gkq, 0.)
             b_dkt += tl.where(m_i, b_dAkk[:, None] * b_kbj[None, :] * b_gkq, 0.)
 
@@ -670,6 +679,7 @@ def chunk_gdn2_bwd_kernel_intra(
     p_dg2 = tl.make_block_ptr(dg2, (T, K), (H * K, 1), (i_ti, i_k * BK), (BC, BK), (1, 0))
 
     b_dg2 += (b_dk2 - b_dkt) * b_k + tl.load(p_dg, boundary_check=(0, 1))
+    b_dg2 = tl.where((b_dg2 != b_dg2) | (tl.abs(b_dg2) == float('inf')), 0.0, b_dg2)
     b_dk2 += tl.load(p_dk, boundary_check=(0, 1))
     b_dk2 += b_dkt
 
