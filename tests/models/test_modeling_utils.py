@@ -6,7 +6,9 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import math
+from importlib.util import find_spec
 
+import pytest
 import torch
 import torch.nn as nn
 from transformers import AutoModelForCausalLM
@@ -34,6 +36,24 @@ GENERATION_UNSUPPORTED = [
 ]
 
 
+FLASH_ATTN_LAYER_MODULES = {
+    "fla.layers.attn",
+    "fla.layers.bitattn",
+    "fla.layers.deltaformer",
+    "fla.layers.mla",
+    "fla.layers.moba",
+    "fla.layers.nsa",
+    "fla.layers.rodimus",
+}
+
+
+def skip_if_missing_optional_model_dependencies(model):
+    if find_spec("flash_attn") is not None:
+        return
+    if any(module.__class__.__module__ in FLASH_ATTN_LAYER_MODULES for module in model.modules()):
+        pytest.skip("flash-attn is not installed")
+
+
 def create_model_and_config(config_class, L, H, D, dtype, **kwargs):
     """
     A helper function to create a model and its configuration.
@@ -45,7 +65,12 @@ def create_model_and_config(config_class, L, H, D, dtype, **kwargs):
         **kwargs,
     }
     config = config_class(**config_params)
-    model = AutoModelForCausalLM.from_config(config)
+    try:
+        model = AutoModelForCausalLM.from_config(config)
+    except ImportError as exc:
+        if find_spec("flash_attn") is None and "Flash Attention" in str(exc):
+            pytest.skip("flash-attn is not installed")
+        raise
     model.apply(init_weights_recursively)
     model.to(dtype).to(device)
     return model, config
