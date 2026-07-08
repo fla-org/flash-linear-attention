@@ -5,7 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""chunk_scaled_dot_kkt_fwd adapted for triton-ascend on Huawei NPU."""
+"""chunk_scaled_dot_kkt_fwd adapted for triton-ascend on Ascend NPU."""
 
 from __future__ import annotations
 

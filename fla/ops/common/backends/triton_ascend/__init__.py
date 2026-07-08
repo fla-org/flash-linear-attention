@@ -5,7 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""Triton-Ascend NPU backend for common chunk ops."""
+"""Triton-Ascend Ascend NPU backend for common chunk ops."""
 
 from __future__ import annotations
 

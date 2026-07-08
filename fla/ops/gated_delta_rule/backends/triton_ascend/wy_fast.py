@@ -5,7 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""WY-representation kernels adapted for triton-ascend on Huawei NPU."""
+"""WY-representation kernels adapted for triton-ascend on Ascend NPU."""
 
 from __future__ import annotations
 

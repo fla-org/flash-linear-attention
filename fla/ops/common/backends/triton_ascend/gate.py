@@ -5,7 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""Beta-sigmoid gate kernels adapted for triton-ascend on Huawei NPU."""
+"""Beta-sigmoid gate kernels adapted for triton-ascend on Ascend NPU."""
 
 import torch
 import triton

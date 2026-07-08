@@ -5,7 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""Triton-Ascend (Huawei NPU) backend for GDN gated_delta_rule ops."""
+"""Triton-Ascend Ascend NPU backend for GDN gated_delta_rule ops."""
 
 from __future__ import annotations
 
