@@ -1101,10 +1101,17 @@ def test_gate(
 
 
 @pytest.mark.skipif(device == "cpu", reason="CUDA required")
-@pytest.mark.parametrize("gate_value", [32.0, -32.0])
-def test_lowerbound_gate_extreme_a_log_saturated_backward(gate_value):
+@pytest.mark.parametrize(
+    ("T", "H", "D", "gate_value"),
+    [
+        pytest.param(32, 1, 32, 32.0, id="full-positive"),
+        pytest.param(32, 1, 32, -32.0, id="full-negative"),
+        pytest.param(4, 2, 8, 32.0, id="partial-positive"),
+        pytest.param(4, 2, 8, -32.0, id="partial-negative"),
+    ],
+)
+def test_lowerbound_gate_extreme_a_log_saturated_backward(T, H, D, gate_value):
     """Saturated lower-bound gates should not produce 0 * inf gradients."""
-    T, H, D = 32, 1, 32
     g = torch.full((T, H, D), gate_value, dtype=torch.float32, device=device, requires_grad=True)
     A_log = torch.full((H,), 100.0, dtype=torch.float32, device=device, requires_grad=True)
     dt_bias = torch.zeros(H * D, dtype=torch.float32, device=device, requires_grad=True)
