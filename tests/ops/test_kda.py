@@ -1109,7 +1109,7 @@ def test_lowerbound_gate_extreme_a_log_saturated_backward(gate_value):
     A_log = torch.full((H,), 100.0, dtype=torch.float32, device=device, requires_grad=True)
     dt_bias = torch.zeros(H * D, dtype=torch.float32, device=device, requires_grad=True)
 
-    y = fused_kda_gate(g, A_log, dt_bias, lower_bound=-5.0)
+    y = fused_kda_gate(g, A_log, dt_bias, lower_bound=-7.0)
     assert torch.isfinite(y).all()
     y.float().sum().backward()
 

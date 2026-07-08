@@ -25,6 +25,7 @@ from torch.nn import functional as F
 from fla.layers.utils import get_layer_cache, get_unpad_data, index_first_axis, pad_input, update_layer_cache
 from fla.modules import FusedRMSNormGated, ShortConvolution
 from fla.ops.gdn2 import chunk_gdn2, fused_recurrent_gdn2
+from fla.ops.kda.gate import SAFE_GATE_LOWER_BOUND_MIN, validate_safe_gate_lower_bound
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
@@ -86,7 +87,7 @@ class GatedDeltaNet2(nn.Module):
         safe_gate (bool, Optional):
             Whether to use the bounded in-kernel gate activation. Default: `False`.
         gate_lower_bound (float, Optional):
-            The lower bound for the bounded gate activation when `safe_gate=True`. Default: -5.0.
+            The lower bound for the bounded gate activation when `safe_gate=True`. Default: -7.0.
     """
 
     def __init__(
@@ -104,7 +105,7 @@ class GatedDeltaNet2(nn.Module):
         layer_idx: int | None = None,
         norm_eps: float = 1e-5,
         safe_gate: bool = False,
-        gate_lower_bound: float = -5.0,
+        gate_lower_bound: float = SAFE_GATE_LOWER_BOUND_MIN,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -114,8 +115,7 @@ class GatedDeltaNet2(nn.Module):
         self.hidden_size = hidden_size
         self.expand_v = expand_v
         self.safe_gate = safe_gate
-        if not (-5 <= gate_lower_bound < 0):
-            raise ValueError(f"gate_lower_bound must be in the safe range [-5, 0), got {gate_lower_bound}.")
+        validate_safe_gate_lower_bound(gate_lower_bound, name="gate_lower_bound")
         self.gate_lower_bound = gate_lower_bound
 
         self.use_short_conv = use_short_conv

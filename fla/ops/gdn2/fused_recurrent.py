@@ -40,6 +40,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.kda.gate import validate_safe_gate_lower_bound
 from fla.ops.utils.op import exp
 from fla.ops.utils.softplus import softplus
 from fla.utils import input_guard
@@ -279,8 +280,7 @@ def fused_recurrent_gdn2_fwd(
     if lower_bound is not None:
         if not use_gate_in_kernel:
             raise ValueError("`lower_bound` requires `use_gate_in_kernel=True`.")
-        if not (-5 <= lower_bound < 0):
-            raise ValueError(f"`lower_bound` must be in the safe range [-5, 0), got {lower_bound}.")
+        validate_safe_gate_lower_bound(lower_bound)
 
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
@@ -448,8 +448,7 @@ def fused_recurrent_gdn2(
     if lower_bound is not None:
         if not use_gate_in_kernel:
             raise ValueError("`lower_bound` requires `use_gate_in_kernel=True`.")
-        if not (-5 <= lower_bound < 0):
-            raise ValueError(f"`lower_bound` must be in the safe range [-5, 0), got {lower_bound}.")
+        validate_safe_gate_lower_bound(lower_bound)
     if scale is None:
         scale = k.shape[-1] ** -0.5
 

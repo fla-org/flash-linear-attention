@@ -496,7 +496,7 @@ def test_layer_safe_gate(num_v_heads, use_short_conv):
         num_v_heads=num_v_heads,
         use_short_conv=use_short_conv,
         safe_gate=True,
-        gate_lower_bound=-5.0,
+        gate_lower_bound=-7.0,
     ).to(device).to(torch.float32)
     layer.train()
     layer.A_log.data.fill_(5.0)
@@ -537,7 +537,7 @@ def test_layer_safe_gate_fused_recurrent(num_v_heads, use_short_conv):
         num_v_heads=num_v_heads,
         use_short_conv=use_short_conv,
         safe_gate=True,
-        gate_lower_bound=-5.0,
+        gate_lower_bound=-7.0,
     ).to(device).to(torch.float32)
     layer.eval()
     layer.A_log.data.fill_(5.0)

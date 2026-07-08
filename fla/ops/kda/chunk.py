@@ -17,6 +17,7 @@ from fla.ops.common.gate import fused_beta_sigmoid, fused_beta_sigmoid_bwd
 from fla.ops.cp import FLACPContext
 from fla.ops.kda.chunk_bwd import chunk_kda_bwd
 from fla.ops.kda.chunk_fwd import chunk_kda_fwd
+from fla.ops.kda.gate import validate_safe_gate_lower_bound
 from fla.ops.utils.index import prepare_chunk_indices
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
@@ -244,7 +245,7 @@ def chunk_kda(
             the kernel computes ``2 * sigmoid(beta)`` instead of ``sigmoid(beta)``.
             Default: ``False``.
         safe_gate (bool):
-            Whether to clamp the gate to ``[lower_bound, 0)`` and enable M=16 TensorCore
+            Whether to use the bounded gate activation and enable M=16 TensorCore
             acceleration for higher throughput. Requires ``lower_bound`` to be set.
             Default: ``False``.
         lower_bound (Optional[float]):
@@ -253,7 +254,7 @@ def chunk_kda(
             ``-exp(A_log) * softplus(g + dt_bias)`` to
             ``lower_bound * sigmoid(exp(A_log) * (g + dt_bias))``,
             which naturally clamps the output to ``[lower_bound, 0)``.
-            Recommended value: ``-5`` (i.e., per-step decay ``exp(-5) ≈ 0.0067``).
+            Recommended range: ``[-7, 0)``.
             Default: ``None``.
         disable_recompute (bool):
             Whether to disable gradient recomputation in the kernel. When ``True``, the kernel
@@ -394,8 +395,7 @@ def chunk_kda(
     if safe_gate and use_gate_in_kernel:
         if lower_bound is None:
             raise ValueError("`lower_bound` must be specified when `safe_gate=True` and `use_gate_in_kernel=True`.")
-        if not (-5 <= lower_bound < 0):
-            raise ValueError(f"`lower_bound` must be in the safe range [-5, 0), got {lower_bound}.")
+        validate_safe_gate_lower_bound(lower_bound)
 
     if allow_neg_eigval and not use_beta_sigmoid_in_kernel:
         raise ValueError("`allow_neg_eigval=True` requires `use_beta_sigmoid_in_kernel=True`.")

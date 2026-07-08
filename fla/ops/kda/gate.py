@@ -21,6 +21,14 @@ from fla.utils import IS_AMD, autocast_custom_bwd, autocast_custom_fwd, autotune
 BS_LIST = [32, 64] if check_shared_mem() else [16, 32]
 BT_LIST_AUTOTUNE = [32, 64, 128]
 NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if IS_AMD else [4, 8, 16, 32]
+SAFE_GATE_LOWER_BOUND_MIN = -7.0
+
+
+def validate_safe_gate_lower_bound(lower_bound: float, name: str = "lower_bound") -> None:
+    if not (SAFE_GATE_LOWER_BOUND_MIN <= lower_bound < 0):
+        raise ValueError(
+            f"`{name}` must be in the safe range [{SAFE_GATE_LOWER_BOUND_MIN:g}, 0), got {lower_bound}."
+        )
 
 
 @triton.jit
@@ -71,7 +79,7 @@ def naive_kda_lowerbound_gate(
     g: torch.Tensor,
     A_log: torch.Tensor,
     dt_bias: torch.Tensor | None = None,
-    lower_bound: float = -5.0,
+    lower_bound: float = SAFE_GATE_LOWER_BOUND_MIN,
     output_dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     H, _ = g.shape[-2:]

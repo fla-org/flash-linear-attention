@@ -32,6 +32,7 @@ import torch
 from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
 from fla.ops.gdn2.chunk_bwd import chunk_gdn2_bwd
 from fla.ops.gdn2.chunk_fwd import chunk_gdn2_fwd
+from fla.ops.kda.gate import validate_safe_gate_lower_bound
 from fla.ops.utils import prepare_chunk_indices
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
@@ -246,12 +247,12 @@ def chunk_gdn2(
         cu_seqlens: ``[N+1]`` packed-sequence offsets. Requires batch size 1.
         cu_seqlens_cpu: optional CPU mirror of ``cu_seqlens``, forwarded to the
             state-recurrence kernel.
-        safe_gate: use the safe-gate intra kernel variant (M=16 TensorCore
-            path; requires gate values in ``[-5, 0)`` if combined with
-            ``use_gate_in_kernel=True``).
+        safe_gate: use the safe-gate intra kernel variant (M=16 TensorCore path).
+            With ``use_gate_in_kernel=True``, the bounded activation produces
+            log-decay gate values in ``[lower_bound, 0)``.
         lower_bound: when ``safe_gate=True`` and ``use_gate_in_kernel=True``,
             use the bounded gate activation
-            ``lower_bound * sigmoid(exp(A_log) * g)``. Must lie in ``[-5, 0)``.
+            ``lower_bound * sigmoid(exp(A_log) * g)``. Must lie in ``[-7, 0)``.
         disable_recompute: retain forward intermediates for a faster backward
             at the cost of memory. Default: ``False``.
         return_intermediate_states: when ``True``, also returns the per-chunk
@@ -317,12 +318,11 @@ def chunk_gdn2(
     if safe_gate and use_gate_in_kernel:
         if lower_bound is None:
             raise ValueError("`lower_bound` must be specified when `safe_gate=True` and `use_gate_in_kernel=True`.")
-        if not (-5 <= lower_bound < 0):
-            raise ValueError(f"`lower_bound` must be in the safe range [-5, 0), got {lower_bound}.")
+        validate_safe_gate_lower_bound(lower_bound)
     if lower_bound is not None and not use_gate_in_kernel:
         raise ValueError("`lower_bound` requires `use_gate_in_kernel=True`.")
-    if lower_bound is not None and not (-5 <= lower_bound < 0):
-        raise ValueError(f"`lower_bound` must be in the safe range [-5, 0), got {lower_bound}.")
+    if lower_bound is not None:
+        validate_safe_gate_lower_bound(lower_bound)
 
     assert q.shape == k.shape == g.shape, "q, k, g must have the same shape."
     assert k.shape[-1] <= 256, f"GDN-2 only supports key headdim <= 256, got {k.shape[-1]}."
