@@ -5,15 +5,13 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""KDA backends."""
+"""AttnRes backends."""
 
+from fla.ops.attnres.backends.gluon import AttnResGluonBackend
 from fla.ops.backends import BackendRegistry, dispatch
-from fla.ops.kda.backends.flash_kda import FlashKDABackend
-from fla.ops.kda.backends.tilelang import KDATileLangBackend
 
-kda_registry = BackendRegistry("kda")
-kda_registry.register(FlashKDABackend())
-kda_registry.register(KDATileLangBackend())
+attnres_registry = BackendRegistry("attnres")
+attnres_registry.register(AttnResGluonBackend())
 
 
-__all__ = ['dispatch', 'kda_registry']
+__all__ = ['attnres_registry', 'dispatch']
