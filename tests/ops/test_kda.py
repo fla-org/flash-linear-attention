@@ -1179,12 +1179,12 @@ def test_chunk_return_intermediate_states(dtype):
 # ---------------------------------------------------------------------------
 
 _FLASH_KDA_AVAILABLE = importlib.util.find_spec("flash_kda") is not None
-_SKIP_FLASHKDA = pytest.mark.skipif(
+_SKIP_FLASH_KDA = pytest.mark.skipif(
     device == "cpu" or not _FLASH_KDA_AVAILABLE,
     reason="FlashKDA backend requires GPU and the flash_kda package",
 )
 
-_FLASHKDA_REQUIRED_KWARGS = dict(
+_FLASH_KDA_REQUIRED_KWARGS = dict(
     use_qk_l2norm_in_kernel=True,
     use_gate_in_kernel=True,
     use_beta_sigmoid_in_kernel=True,
@@ -1193,23 +1193,23 @@ _FLASHKDA_REQUIRED_KWARGS = dict(
     state_v_first=True,
 )
 
-_FLASHKDA_RTOL = 0.006
+_FLASH_KDA_RTOL = 0.006
 
 
-def _flashkda_make_gate_params(H, D):
+def _flash_kda_make_gate_params(H, D):
     A_log = torch.log(torch.empty(H, dtype=torch.float32, device=device).uniform_(1, 16))
     dt_bias = torch.randn(H * D, dtype=torch.float32, device=device)
     return A_log, dt_bias
 
 
-def _flashkda_run(monkeypatch, **kwargs):
+def _flash_kda_run(monkeypatch, **kwargs):
     monkeypatch.setenv("FLA_FLASH_KDA", "1")
     with torch.inference_mode():
-        return chunk_kda(**kwargs, **_FLASHKDA_REQUIRED_KWARGS)
+        return chunk_kda(**kwargs, **_FLASH_KDA_REQUIRED_KWARGS)
 
 
-def _flashkda_gold(q, k, v, g, beta_raw, A_log, dt_bias, scale, initial_state,
-                   lower_bound=-5.0, cu_seqlens=None):
+def _flash_kda_gold(q, k, v, g, beta_raw, A_log, dt_bias, scale, initial_state,
+                    lower_bound=-5.0, cu_seqlens=None):
     kwargs = {}
     if cu_seqlens is not None:
         kwargs["cu_seqlens"] = cu_seqlens
@@ -1232,7 +1232,7 @@ def _flashkda_gold(q, k, v, g, beta_raw, A_log, dt_bias, scale, initial_state,
     )
 
 
-@_SKIP_FLASHKDA
+@_SKIP_FLASH_KDA
 @pytest.mark.parametrize(
     ("B", "T", "H", "D"),
     [
@@ -1244,7 +1244,7 @@ def _flashkda_gold(q, k, v, g, beta_raw, A_log, dt_bias, scale, initial_state,
         ]
     ],
 )
-def test_flashkda_chunk(B, T, H, D, monkeypatch):
+def test_flash_kda_chunk(B, T, H, D, monkeypatch):
     torch.manual_seed(42)
     dtype = torch.bfloat16
     q = torch.rand(B, T, H, D, dtype=dtype, device=device)
@@ -1252,14 +1252,14 @@ def test_flashkda_chunk(B, T, H, D, monkeypatch):
     v = torch.rand(B, T, H, D, dtype=dtype, device=device)
     g = torch.randn(B, T, H, D, dtype=dtype, device=device)
     beta = torch.randn(B, T, H, dtype=dtype, device=device)
-    A_log, dt_bias = _flashkda_make_gate_params(H, D)
+    A_log, dt_bias = _flash_kda_make_gate_params(H, D)
     h0 = torch.randn(B, H, D, D, dtype=torch.float32, device=device)
     scale = D ** -0.5
 
-    ref_o, ref_ht = _flashkda_gold(
+    ref_o, ref_ht = _flash_kda_gold(
         q, k, v, g, beta, A_log, dt_bias, scale, h0.clone())
 
-    tri_o, tri_ht = _flashkda_run(
+    tri_o, tri_ht = _flash_kda_run(
         monkeypatch,
         q=q, k=k, v=v, g=g, beta=beta,
         A_log=A_log, dt_bias=dt_bias,
@@ -1267,11 +1267,11 @@ def test_flashkda_chunk(B, T, H, D, monkeypatch):
         initial_state=h0.clone(),
         output_final_state=True,
     )
-    assert_close("o", ref_o, tri_o, _FLASHKDA_RTOL)
-    assert_close("ht", ref_ht, tri_ht.to(ref_ht.dtype), _FLASHKDA_RTOL)
+    assert_close("o", ref_o, tri_o, _FLASH_KDA_RTOL)
+    assert_close("ht", ref_ht, tri_ht.to(ref_ht.dtype), _FLASH_KDA_RTOL)
 
 
-@_SKIP_FLASHKDA
+@_SKIP_FLASH_KDA
 @pytest.mark.parametrize(
     ("H", "D", "cu_seqlens"),
     [
@@ -1283,7 +1283,7 @@ def test_flashkda_chunk(B, T, H, D, monkeypatch):
         ]
     ],
 )
-def test_flashkda_chunk_varlen(H, D, cu_seqlens, monkeypatch):
+def test_flash_kda_chunk_varlen(H, D, cu_seqlens, monkeypatch):
     torch.manual_seed(42)
     dtype = torch.bfloat16
     cu_seqlens_t = torch.LongTensor(cu_seqlens).to(device)
@@ -1295,15 +1295,15 @@ def test_flashkda_chunk_varlen(H, D, cu_seqlens, monkeypatch):
     v = torch.randn(1, T, H, D, dtype=dtype, device=device)
     g = torch.randn(1, T, H, D, dtype=dtype, device=device)
     beta = torch.randn(1, T, H, dtype=dtype, device=device)
-    A_log, dt_bias = _flashkda_make_gate_params(H, D)
+    A_log, dt_bias = _flash_kda_make_gate_params(H, D)
     h0 = torch.randn(N, H, D, D, dtype=torch.float32, device=device)
     scale = D ** -0.5
 
-    ref_o, ref_ht = _flashkda_gold(
+    ref_o, ref_ht = _flash_kda_gold(
         q, k, v, g, beta, A_log, dt_bias, scale, h0.clone(),
         cu_seqlens=cu_seqlens_t,
     )
-    tri_o, tri_ht = _flashkda_run(
+    tri_o, tri_ht = _flash_kda_run(
         monkeypatch,
         q=q, k=k, v=v, g=g, beta=beta,
         A_log=A_log, dt_bias=dt_bias,
@@ -1312,5 +1312,5 @@ def test_flashkda_chunk_varlen(H, D, cu_seqlens, monkeypatch):
         output_final_state=True,
         cu_seqlens=cu_seqlens_t,
     )
-    assert_close("o", ref_o, tri_o, _FLASHKDA_RTOL)
-    assert_close("ht", ref_ht, tri_ht.to(ref_ht.dtype), _FLASHKDA_RTOL)
+    assert_close("o", ref_o, tri_o, _FLASH_KDA_RTOL)
+    assert_close("ht", ref_ht, tri_ht.to(ref_ht.dtype), _FLASH_KDA_RTOL)
