@@ -202,20 +202,20 @@ def kda_gate_bwd_kernel(
         p_b = tl.make_block_ptr(dt_bias, (H * D,), (1,), (i_h * D,), (BD,), (0,))
         b_g = b_g + tl.load(p_b, boundary_check=(0,)).to(tl.float32)
 
+    b_g_active = tl.where(b_mask, b_g, 0.0)
+    b_dyg = tl.where(b_mask, b_dyg, 0.0)
+
     # [BT, BD]
     if not USE_LOWER_BOUND:
         b_A = -exp(b_A)
-        b_yg = b_A * softplus(b_g)
-        b_dg = b_A * (b_dyg * tl.sigmoid(b_g))
-        b_dg = tl.where(b_mask, b_dg, 0.0)
-        b_yg = tl.where(b_mask, b_yg, 0.0)
+        b_yg = b_A * softplus(b_g_active)
+        b_dg = b_A * (b_dyg * tl.sigmoid(b_g_active))
         b_dA = tl.sum(tl.sum(b_dyg * b_yg, 1), 0)
     else:
-        b_g_active = tl.where(b_mask, b_g, 1.0)
-        _, b_slope = _lowerbound_gate_sigmoid_and_slope(b_A, b_g_active)
+        b_g_safe = tl.where(b_mask, b_g, 1.0)
+        _, b_slope = _lowerbound_gate_sigmoid_and_slope(b_A, b_g_safe)
         b_dg = b_dyg * (lower_bound * b_slope)
-        b_dg = tl.where(b_mask, b_dg, 0.0)
-        b_dA = tl.sum(tl.sum(b_dg * b_g_active, 1), 0)
+        b_dA = tl.sum(tl.sum(b_dg * b_g_safe, 1), 0)
 
     tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), boundary_check=(0, 1))
     tl.store(dA + i_t * H + i_h, b_dA)
