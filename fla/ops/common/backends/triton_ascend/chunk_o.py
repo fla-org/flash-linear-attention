@@ -161,6 +161,182 @@ def chunk_fwd_kernel_o_inter_npu(
 
 
 @triton.jit(do_not_specialize=['T'])
+def chunk_fwd_kernel_o_fused_hv1_npu(
+    q,
+    k,
+    v,
+    h,
+    g,
+    g_gamma,
+    o,
+    cu_seqlens,
+    chunk_indices,
+    scale,
+    T,
+    H: tl.constexpr,
+    HV: tl.constexpr,
+    K: tl.constexpr,
+    V: tl.constexpr,
+    BT: tl.constexpr,
+    BK: tl.constexpr,
+    BV: tl.constexpr,
+    USE_G: tl.constexpr,
+    USE_G_GAMMA: tl.constexpr,
+    STATE_V_FIRST: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+    V_OFFSET: tl.constexpr,
+    NT_OFFSET: tl.constexpr,
+    BH_OFFSET: tl.constexpr,
+):
+    """GPU-aligned fused inter+intra path for HV==1.
+
+    BC-split intra miscompiles tl.dot([BC,BC],[BC,BV]) on Ascend when HV==1.
+    Use full-BT tiles like the CUDA kernel instead.
+    """
+    i_v = tl.program_id(0) + V_OFFSET
+    i_t = tl.program_id(1) + NT_OFFSET
+    i_bh = tl.program_id(2) + BH_OFFSET
+    i_b, i_h = i_bh // HV, i_bh % HV
+
+    if IS_VARLEN:
+        i_tg = i_t
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        T = eos - bos
+        NT = tl.cdiv(T, BT)
+    else:
+        NT = tl.cdiv(T, BT)
+        i_tg = i_b * NT + i_t
+        bos, eos = i_b * T, i_b * T + T
+
+    q += (bos * H + i_h // (HV // H)) * K
+    k += (bos * H + i_h // (HV // H)) * K
+    v += (bos * HV + i_h) * V
+    o += (bos * HV + i_h) * V
+    h += (i_tg * HV + i_h).to(tl.int64) * K * V
+
+    b_o = tl.zeros([BT, BV], dtype=tl.float32)
+    b_A = tl.zeros([BT, BT], dtype=tl.float32)
+
+    for i_k in range(tl.cdiv(K, BK)):
+        p_q = tl.make_block_ptr(q, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+        p_k = tl.make_block_ptr(k, (K, T), (1, H * K), (i_k * BK, i_t * BT), (BK, BT), (0, 1))
+        if STATE_V_FIRST:
+            p_h = tl.make_block_ptr(h, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
+        else:
+            p_h = tl.make_block_ptr(h, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
+        b_q = tl.load(p_q, boundary_check=(0, 1))
+        b_k = tl.load(p_k, boundary_check=(0, 1))
+        b_h = tl.load(p_h, boundary_check=(0, 1))
+        if STATE_V_FIRST:
+            b_o += tl.dot(b_q, tl.trans(b_h), allow_tf32=False)
+        else:
+            b_o += tl.dot(b_q, b_h, allow_tf32=False)
+        b_A += tl.dot(b_q, b_k, allow_tf32=False)
+
+    if USE_G:
+        g += bos * HV + i_h
+        p_g = tl.make_block_ptr(g, (T,), (HV,), (i_t * BT,), (BT,), (0,))
+        b_g = tl.load(p_g, boundary_check=(0,))
+        b_o = b_o * exp2(b_g)[:, None]
+        b_A = b_A * exp2(b_g[:, None] - b_g[None, :])
+    if USE_G_GAMMA:
+        b_gamma = tl.load(g_gamma + i_h)
+        b_g = b_gamma * (tl.arange(0, BT) + 1)
+        b_o = b_o * exp2(b_g)[:, None]
+        b_A = b_A * exp2(b_g[:, None] - b_g[None, :])
+
+    o_t = i_t * BT + tl.arange(0, BT)
+    m_t = o_t < T
+    m_A = (o_t[:, None] >= o_t[None, :]) & (m_t[:, None] & m_t)
+    b_A = tl.where(m_A, b_A, 0)
+
+    p_v = tl.make_block_ptr(v, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+    p_o = tl.make_block_ptr(o, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+    b_v = tl.load(p_v, boundary_check=(0, 1))
+    b_o = b_o * scale + tl.dot(b_A.to(b_v.dtype), b_v, allow_tf32=False) * scale
+    tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
+
+
+@triton.jit(do_not_specialize=['T'])
+def chunk_fwd_kernel_o_intra_hv1_npu(
+    q,
+    k,
+    v,
+    g,
+    g_gamma,
+    o,
+    cu_seqlens,
+    chunk_indices,
+    scale,
+    T,
+    H: tl.constexpr,
+    HV: tl.constexpr,
+    K: tl.constexpr,
+    V: tl.constexpr,
+    BT: tl.constexpr,
+    BK: tl.constexpr,
+    BV: tl.constexpr,
+    USE_G: tl.constexpr,
+    USE_G_GAMMA: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+    ACCUMULATE_OUTPUT: tl.constexpr,
+    V_OFFSET: tl.constexpr,
+    NT_OFFSET: tl.constexpr,
+    BH_OFFSET: tl.constexpr,
+):
+    """Full-BT intra path for HV==1 (avoids BC-split tl.dot bug)."""
+    i_v = tl.program_id(0) + V_OFFSET
+    i_t = tl.program_id(1) + NT_OFFSET
+    i_bh = tl.program_id(2) + BH_OFFSET
+    i_b, i_h = i_bh // HV, i_bh % HV
+
+    if IS_VARLEN:
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        T = eos - bos
+    else:
+        bos, eos = i_b * T, i_b * T + T
+
+    q += (bos * H + i_h // (HV // H)) * K
+    k += (bos * H + i_h // (HV // H)) * K
+    v += (bos * HV + i_h) * V
+    o += (bos * HV + i_h) * V
+
+    b_A = tl.zeros([BT, BT], dtype=tl.float32)
+    for i_k in range(tl.cdiv(K, BK)):
+        p_q = tl.make_block_ptr(q, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+        p_k = tl.make_block_ptr(k, (K, T), (1, H * K), (i_k * BK, i_t * BT), (BK, BT), (0, 1))
+        b_q = tl.load(p_q, boundary_check=(0, 1))
+        b_k = tl.load(p_k, boundary_check=(0, 1))
+        b_A += tl.dot(b_q, b_k, allow_tf32=False)
+
+    if USE_G:
+        g += bos * HV + i_h
+        p_g = tl.make_block_ptr(g, (T,), (HV,), (i_t * BT,), (BT,), (0,))
+        b_g = tl.load(p_g, boundary_check=(0,))
+        b_A = b_A * exp2(b_g[:, None] - b_g[None, :])
+    if USE_G_GAMMA:
+        b_gamma = tl.load(g_gamma + i_h)
+        b_g = b_gamma * (tl.arange(0, BT) + 1)
+        b_A = b_A * exp2(b_g[:, None] - b_g[None, :])
+
+    o_t = i_t * BT + tl.arange(0, BT)
+    m_t = o_t < T
+    m_A = (o_t[:, None] >= o_t[None, :]) & (m_t[:, None] & m_t)
+    b_A = tl.where(m_A, b_A, 0)
+
+    p_v = tl.make_block_ptr(v, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+    p_o = tl.make_block_ptr(o, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+    b_v = tl.load(p_v, boundary_check=(0, 1))
+    b_o = tl.dot(b_A.to(b_v.dtype), b_v, allow_tf32=False) * scale
+    if ACCUMULATE_OUTPUT:
+        b_o_prev = tl.load(p_o, boundary_check=(0, 1)).to(tl.float32)
+        b_o = b_o + b_o_prev
+    tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
+
+
+@triton.jit(do_not_specialize=['T'])
 def chunk_fwd_kernel_o_intra_npu(
     q,
     k,
@@ -183,6 +359,7 @@ def chunk_fwd_kernel_o_intra_npu(
     USE_G: tl.constexpr,
     USE_G_GAMMA: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    ACCUMULATE_OUTPUT: tl.constexpr,
     V_OFFSET: tl.constexpr,
     NT_OFFSET: tl.constexpr,
     BH_OFFSET: tl.constexpr,
@@ -246,15 +423,15 @@ def chunk_fwd_kernel_o_intra_npu(
 
             p_v = tl.make_block_ptr(v, (T, V), (HV * V, 1), (i_tc_c, i_v * BV), (BC, BV), (1, 0))
             b_v = tl.load(p_v, boundary_check=(0, 1))
-            b_o += tl.dot(b_A, b_v.to(tl.float32), allow_tf32=False)
+            b_o += tl.dot(b_A.to(b_v.dtype), b_v, allow_tf32=False)
 
         p_o = tl.make_block_ptr(o, (T, V), (HV * V, 1), (i_tc_s, i_v * BV), (BC, BV), (1, 0))
-        b_o_prev = tl.load(p_o, boundary_check=(0, 1)).to(tl.float32)
-        b_o = (b_o * scale) + b_o_prev
+        if ACCUMULATE_OUTPUT:
+            b_o_prev = tl.load(p_o, boundary_check=(0, 1)).to(tl.float32)
+            b_o = (b_o * scale) + b_o_prev
+        else:
+            b_o = b_o * scale
         tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
-
-
-
 
 
 @input_guard
@@ -314,6 +491,36 @@ def chunk_fwd_o_npu(
         use_g = True
     base_kwargs['g'] = g_arg
     base_kwargs['USE_G'] = use_g
+    if HV == 1:
+        _launch_fwd_o_kernel(
+            chunk_fwd_kernel_o_inter_npu,
+            nv=nv,
+            nt=NT,
+            bh_total=B * HV,
+            kernel_kwargs={
+                **base_kwargs,
+                'q': q,
+                'h': h,
+                'o': o,
+                'STATE_V_FIRST': state_v_first,
+            },
+        )
+        intra_hv1_kwargs = {k: v for k, v in base_kwargs.items() if k != 'BC'}
+        _launch_fwd_o_kernel(
+            chunk_fwd_kernel_o_intra_hv1_npu,
+            nv=nv,
+            nt=NT,
+            bh_total=B * HV,
+            kernel_kwargs={
+                **intra_hv1_kwargs,
+                'q': q,
+                'k': k,
+                'v': v,
+                'o': o,
+                'ACCUMULATE_OUTPUT': True,
+            },
+        )
+        return o
     _launch_fwd_o_kernel(
         chunk_fwd_kernel_o_inter_npu,
         nv=nv,
@@ -338,6 +545,7 @@ def chunk_fwd_o_npu(
             'k': k,
             'v': v,
             'o': o,
+            'ACCUMULATE_OUTPUT': True,
         },
     )
     return o
@@ -386,6 +594,79 @@ def _launch_bwd_3d_kernel(
                 bh_len = min(max_bh, bh_total - bh_off)
                 kernel_kwargs['BH_OFFSET'] = bh_off
                 kernel[(1, nt_len, bh_len)](num_warps=_NUM_WARPS, **kernel_kwargs)
+
+
+@triton.jit(do_not_specialize=['T'])
+def chunk_bwd_kernel_dv_local_hv1_npu(
+    q,
+    k,
+    g,
+    g_gamma,
+    do,
+    dv,
+    cu_seqlens,
+    chunk_indices,
+    scale,
+    T,
+    H: tl.constexpr,
+    HV: tl.constexpr,
+    K: tl.constexpr,
+    V: tl.constexpr,
+    BT: tl.constexpr,
+    BK: tl.constexpr,
+    BV: tl.constexpr,
+    USE_G: tl.constexpr,
+    USE_G_GAMMA: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+    NT_OFFSET: tl.constexpr,
+    BH_OFFSET: tl.constexpr,
+):
+    """GPU-aligned bwd_dv_local for HV==1 (avoids BC-split tl.dot bug)."""
+    i_t = tl.program_id(0) + NT_OFFSET
+    i_bh = tl.program_id(1) + BH_OFFSET
+    i_b, i_h = i_bh // HV, i_bh % HV
+
+    if IS_VARLEN:
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        T = eos - bos
+    else:
+        bos, eos = i_b * T, i_b * T + T
+
+    q += (bos * H + i_h // (HV // H)) * K
+    k += (bos * H + i_h // (HV // H)) * K
+    do += (bos * HV + i_h) * V
+    dv += (bos * HV + i_h) * V
+
+    if USE_G:
+        g += bos * HV + i_h
+        p_g = tl.make_block_ptr(g, (T,), (HV,), (i_t * BT,), (BT,), (0,))
+        b_g = tl.load(p_g, boundary_check=(0,))
+    if USE_G_GAMMA:
+        b_gamma = tl.load(g_gamma + i_h)
+        b_g = b_gamma * (tl.arange(0, BT) + 1)
+
+    b_A = tl.zeros([BT, BT], dtype=tl.float32)
+    for i_k in range(tl.cdiv(K, BK)):
+        p_k = tl.make_block_ptr(k, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+        p_q = tl.make_block_ptr(q, (K, T), (1, H * K), (i_k * BK, i_t * BT), (BK, BT), (0, 1))
+        b_k = tl.load(p_k, boundary_check=(0, 1))
+        b_q = tl.load(p_q, boundary_check=(0, 1))
+        b_A += tl.dot(b_k, b_q, allow_tf32=False) * scale
+    if USE_G or USE_G_GAMMA:
+        b_A *= exp2(b_g[None, :] - b_g[:, None])
+
+    o_t = i_t * BT + tl.arange(0, BT)
+    m_t = o_t < T
+    m_A = (o_t[:, None] <= o_t[None, :]) & (m_t[:, None] & m_t)
+    b_A = tl.where(m_A, b_A, 0)
+
+    for i_v in range(tl.cdiv(V, BV)):
+        p_do = tl.make_block_ptr(do, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+        p_dv = tl.make_block_ptr(dv, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+        b_do = tl.load(p_do, boundary_check=(0, 1))
+        b_dv = tl.dot(b_A.to(b_do.dtype), b_do, allow_tf32=False)
+        tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
 
 
 @triton.jit(do_not_specialize=['T'])
@@ -479,7 +760,6 @@ def chunk_bwd_kernel_dv_local_npu(
             tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
 
 
-
 @triton.jit(do_not_specialize=['T'])
 def chunk_bwd_kernel_dqkwg_npu(
     q,
@@ -523,7 +803,6 @@ def chunk_bwd_kernel_dqkwg_npu(
     i_bh = tl.program_id(2) + BH_OFFSET
     i_b, i_h = i_bh // HV, i_bh % HV
 
-    all = B * T
     if IS_VARLEN:
         i_tg = i_t
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
@@ -571,9 +850,7 @@ def chunk_bwd_kernel_dqkwg_npu(
         b_h = tl.load(p_h, boundary_check=(0, 1))
         b_dh = tl.load(p_dh, boundary_check=(0, 1))
         if USE_DW:
-            p_do = tl.make_block_ptr(do, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
             p_dv = tl.make_block_ptr(dv, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-            b_do = tl.load(p_do, boundary_check=(0, 1))
             b_dv = tl.load(p_dv, boundary_check=(0, 1))
             b_dw += tl.dot(b_dv.to(b_h.dtype), b_h.to(b_h.dtype), allow_tf32=False)
 
@@ -659,9 +936,7 @@ def chunk_bwd_kernel_dqkwg_npu(
             b_dq_r += tl.dot(b_do_r, b_h.to(b_do_r.dtype), allow_tf32=False)
 
         p_q_r = tl.make_block_ptr(q, (T, K), (H * K, 1), (i_tc_r, i_k * BK), (BC, BK), (1, 0))
-        p_k_r = tl.make_block_ptr(k, (T, K), (H * K, 1), (i_tc_r, i_k * BK), (BC, BK), (1, 0))
         b_q_r = tl.load(p_q_r, boundary_check=(0, 1))
-        b_k_r = tl.load(p_k_r, boundary_check=(0, 1))
 
         if USE_G:
             p_gr = tl.make_block_ptr(g, (T,), (HV,), (i_tc_r,), (BC,), (0,))
@@ -856,35 +1131,38 @@ def chunk_bwd_dv_local_npu(
         use_g = True
 
     dv = torch.empty_like(do)
+    bwd_kernel = chunk_bwd_kernel_dv_local_hv1_npu if HV == 1 else chunk_bwd_kernel_dv_local_npu
+    kernel_kwargs = {
+        'q': q,
+        'k': k,
+        'g': g_arg,
+        'g_gamma': g_gamma,
+        'do': do,
+        'dv': dv,
+        'cu_seqlens': cu_seqlens,
+        'chunk_indices': chunk_indices,
+        'scale': scale,
+        'T': T,
+        'H': H,
+        'HV': HV,
+        'K': K,
+        'V': V,
+        'BT': BT,
+        'BK': BK,
+        'BV': BV,
+        'USE_G': use_g,
+        'USE_G_GAMMA': use_g_gamma,
+        'IS_VARLEN': cu_seqlens is not None,
+        'NT_OFFSET': 0,
+        'BH_OFFSET': 0,
+    }
+    if HV != 1:
+        kernel_kwargs['BC'] = _BC
     _launch_bwd_2d_kernel(
-        chunk_bwd_kernel_dv_local_npu,
+        bwd_kernel,
         nt=NT,
         bh_total=B * HV,
-        kernel_kwargs={
-            'q': q,
-            'k': k,
-            'g': g_arg,
-            'g_gamma': g_gamma,
-            'do': do,
-            'dv': dv,
-            'cu_seqlens': cu_seqlens,
-            'chunk_indices': chunk_indices,
-            'scale': scale,
-            'T': T,
-            'H': H,
-            'HV': HV,
-            'K': K,
-            'V': V,
-            'BT': BT,
-            'BC': _BC,
-            'BK': BK,
-            'BV': BV,
-            'USE_G': use_g,
-            'USE_G_GAMMA': use_g_gamma,
-            'IS_VARLEN': cu_seqlens is not None,
-            'NT_OFFSET': 0,
-            'BH_OFFSET': 0,
-        },
+        kernel_kwargs=kernel_kwargs,
     )
     return dv
 

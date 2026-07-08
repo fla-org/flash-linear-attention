@@ -57,3 +57,17 @@ class TritonAscendCommonBackend(BaseBackend):
     def chunk_gated_delta_rule_bwd_dhu(self, *args, **kwargs):
         from fla.ops.common.backends.triton_ascend.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu_npu
         return chunk_gated_delta_rule_bwd_dhu_npu(*args, **kwargs)
+
+    def fused_beta_sigmoid_fwd_verifier(self, *args, **kwargs):
+        return True, None
+
+    def fused_beta_sigmoid_fwd(self, x, scale=1.0):
+        from fla.ops.common.backends.triton_ascend.gate import fused_beta_sigmoid_fwd_npu
+        return fused_beta_sigmoid_fwd_npu(x, scale)
+
+    def fused_beta_sigmoid_bwd_verifier(self, *args, **kwargs):
+        return True, None
+
+    def fused_beta_sigmoid_bwd(self, x, dy, scale=1.0):
+        from fla.ops.common.backends.triton_ascend.gate import fused_beta_sigmoid_bwd_npu
+        return fused_beta_sigmoid_bwd_npu(x, dy, scale)

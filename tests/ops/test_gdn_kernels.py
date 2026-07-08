@@ -205,6 +205,7 @@ def chunk_kkt_solve_ref(
             (2, 128, 2, 4, 64, True, torch.bfloat16),
             (1, 256, 4, 4, 32, True, torch.float16),
             (2, 128, 2, 2, 64, False, torch.bfloat16),
+            (1, 64, 1, 1, 64, True, torch.float16),
         ]
     ],
 )
@@ -345,6 +346,7 @@ def chunk_fwd_o_ref(
     g: torch.Tensor | None,
     scale: float,
     chunk_size: int = 64,
+    state_v_first: bool = False,
 ) -> torch.Tensor:
     """Torch baseline for `chunk_fwd_kernel_o`.
 
@@ -375,10 +377,11 @@ def chunk_fwd_o_ref(
         q_c = q_hv[:, s:e].float()  # [B, BT, HV, K]
         k_c = k_hv[:, s:e].float()
         v_c = v[:, s:e].float()
-        h_c = h[:, it].float()      # [B, HV, K, V]
-
-        # inter-chunk: (q @ h) * exp2(g)
-        o_inter = torch.einsum('bthk,bhkv->bthv', q_c, h_c)
+        h_c = h[:, it].float()
+        if state_v_first:
+            o_inter = torch.einsum('bthk,bhvk->bthv', q_c, h_c)
+        else:
+            o_inter = torch.einsum('bthk,bhkv->bthv', q_c, h_c)
         if g is not None:
             g_c = g[:, s:e].float()
             o_inter = o_inter * torch.exp2(g_c)[:, :, :, None]
@@ -399,19 +402,30 @@ def chunk_fwd_o_ref(
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'HV', 'D', 'use_g', 'dtype'),
+    ('B', 'T', 'H', 'HV', 'D', 'use_g', 'state_v_first', 'dtype'),
     [
-        pytest.param(B, T, H, HV, D, use_g, dtype,
-                     id=f"B{B}-T{T}-H{H}-HV{HV}-D{D}-use_g{use_g}-{dtype}")
-        for (B, T, H, HV, D, use_g, dtype) in [
-            (2, 128, 2, 2, 64, True, torch.bfloat16),
-            (2, 128, 2, 4, 64, True, torch.bfloat16),
-            (1, 256, 4, 4, 32, True, torch.float16),
-            (2, 128, 2, 2, 64, False, torch.bfloat16),
+        pytest.param(B, T, H, HV, D, use_g, state_v_first, dtype,
+                     id=f"B{B}-T{T}-H{H}-HV{HV}-D{D}-use_g{use_g}-state_v_first{state_v_first}-{dtype}")
+        for (B, T, H, HV, D, use_g, state_v_first, dtype) in [
+            (2, 128, 2, 2, 64, True, False, torch.bfloat16),
+            (2, 128, 2, 4, 64, True, False, torch.bfloat16),
+            (1, 256, 4, 4, 32, True, False, torch.float16),
+            (2, 128, 2, 2, 64, False, False, torch.bfloat16),
+            (1, 64, 1, 1, 64, True, False, torch.float16),
+            (1, 64, 1, 1, 64, True, True, torch.float16),
         ]
     ],
 )
-def test_chunk_fwd_o(B: int, T: int, H: int, HV: int, D: int, use_g: bool, dtype: torch.dtype):
+def test_chunk_fwd_o(
+    B: int,
+    T: int,
+    H: int,
+    HV: int,
+    D: int,
+    use_g: bool,
+    state_v_first: bool,
+    dtype: torch.dtype,
+):
     torch.manual_seed(42)
     BT = 64
     NT = T // BT
@@ -420,11 +434,18 @@ def test_chunk_fwd_o(B: int, T: int, H: int, HV: int, D: int, use_g: bool, dtype
     k = torch.randn(B, T, H, D, dtype=dtype, device=device)
     v = torch.randn(B, T, HV, D, dtype=dtype, device=device)
     # chunk_fwd_kernel_o expects h to share q/k's dtype (tl.dot has no cast).
-    h = torch.randn(B, NT, HV, D, D, dtype=dtype, device=device)
+    h_kv = torch.randn(B, NT, HV, D, D, dtype=dtype, device=device)
     g = torch.randn(B, T, HV, dtype=torch.float32, device=device) * 0.1 if use_g else None
 
-    ref = chunk_fwd_o_ref(q, k, v, h, g, scale, BT)
-    tri = chunk_fwd_o(q=q, k=k, v=v, h=h, g=g, scale=scale, chunk_size=BT)
+    if state_v_first:
+        h_vk = h_kv.permute(0, 1, 2, 4, 3).contiguous()
+        ref = chunk_fwd_o_ref(q, k, v, h_kv, g, scale, BT, state_v_first=False)
+        tri = chunk_fwd_o(
+            q=q, k=k, v=v, h=h_vk, g=g, scale=scale, chunk_size=BT, state_v_first=True,
+        )
+    else:
+        ref = chunk_fwd_o_ref(q, k, v, h_kv, g, scale, BT)
+        tri = chunk_fwd_o(q=q, k=k, v=v, h=h_kv, g=g, scale=scale, chunk_size=BT)
 
     assert_close('o', ref, tri, 0.005)
 
@@ -436,11 +457,12 @@ def chunk_gated_delta_rule_fwd_h_ref(
     g: torch.Tensor | None,
     initial_state: torch.Tensor | None,
     chunk_size: int = 64,
+    state_v_first: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Torch baseline for `chunk_gated_delta_rule_fwd_kernel_h_blockdim64`.
 
-    Recurrence over chunks (state_v_first=False, USE_G, USE_GK=False). For each
-    chunk [s, e) with last gate g_last = g[e-1]:
+    Recurrence over chunks (USE_G, USE_GK=False). For each chunk [s, e) with
+    last gate g_last = g[e-1]:
         h[it]          = h_state                         (state at chunk start)
         v_new[t]       = (u[t] - w[t] @ h_state) * exp2(g_last - g[t])
         h_state        = h_state * exp2(g_last) + k^T @ v_new
@@ -458,10 +480,15 @@ def chunk_gated_delta_rule_fwd_h_ref(
     else:
         k_hv = k
 
-    h_all = torch.zeros(B, NT, HV, K, V, dtype=k.dtype, device=k.device)
+    if state_v_first:
+        h_all = torch.zeros(B, NT, HV, V, K, dtype=k.dtype, device=k.device)
+    else:
+        h_all = torch.zeros(B, NT, HV, K, V, dtype=k.dtype, device=k.device)
     v_new = torch.zeros(B, T, HV, V, dtype=u.dtype, device=u.device)
     if initial_state is not None:
         h_state = initial_state.float().clone()
+    elif state_v_first:
+        h_state = torch.zeros(B, HV, V, K, device=k.device)
     else:
         h_state = torch.zeros(B, HV, K, V, device=k.device)
 
@@ -472,7 +499,10 @@ def chunk_gated_delta_rule_fwd_h_ref(
         u_c = u[:, s:e].float()       # [B, BT, HV, V]
         k_c = k_hv[:, s:e].float()    # [B, BT, HV, K]
 
-        b_v = u_c - torch.einsum('bthk,bhkv->bthv', w_c, h_state)
+        if state_v_first:
+            b_v = u_c - torch.einsum('bthk,bhvk->bthv', w_c, h_state)
+        else:
+            b_v = u_c - torch.einsum('bthk,bhkv->bthv', w_c, h_state)
         # v_new is the *ungated* residual (stored before the gate is applied to b_v).
         v_new[:, s:e] = b_v.to(u.dtype)
         if g is not None:
@@ -480,20 +510,25 @@ def chunk_gated_delta_rule_fwd_h_ref(
             g_last = g_c[:, -1]       # [B, HV]
             b_v = b_v * torch.exp2(g_last[:, None, :, None] - g_c[:, :, :, None])
             h_state = h_state * torch.exp2(g_last)[:, :, None, None]
-        h_state = h_state + torch.einsum('bthk,bthv->bhkv', k_c, b_v)
+        if state_v_first:
+            h_state = h_state + torch.einsum('bthk,bthv->bhvk', k_c, b_v)
+        else:
+            h_state = h_state + torch.einsum('bthk,bthv->bhkv', k_c, b_v)
 
     return h_all, v_new, h_state
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'HV', 'D', 'use_h0', 'dtype'),
+    ('B', 'T', 'H', 'HV', 'D', 'use_h0', 'state_v_first', 'dtype'),
     [
-        pytest.param(B, T, H, HV, D, use_h0, dtype,
-                     id=f"B{B}-T{T}-H{H}-HV{HV}-D{D}-use_h0{use_h0}-{dtype}")
-        for (B, T, H, HV, D, use_h0, dtype) in [
-            (2, 128, 2, 2, 64, True, torch.bfloat16),
-            (2, 128, 2, 4, 64, False, torch.bfloat16),
-            (1, 256, 4, 4, 32, True, torch.float16),
+        pytest.param(B, T, H, HV, D, use_h0, state_v_first, dtype,
+                     id=f"B{B}-T{T}-H{H}-HV{HV}-D{D}-use_h0{use_h0}-state_v_first{state_v_first}-{dtype}")
+        for (B, T, H, HV, D, use_h0, state_v_first, dtype) in [
+            (2, 128, 2, 2, 64, True, False, torch.bfloat16),
+            (2, 128, 2, 4, 64, False, False, torch.bfloat16),
+            (1, 256, 4, 4, 32, True, False, torch.float16),
+            (1, 64, 1, 1, 64, True, False, torch.float16),
+            (1, 64, 1, 1, 64, True, True, torch.float16),
         ]
     ],
 )
@@ -504,6 +539,7 @@ def test_chunk_gated_delta_rule_fwd_h(
     HV: int,
     D: int,
     use_h0: bool,
+    state_v_first: bool,
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
@@ -512,15 +548,33 @@ def test_chunk_gated_delta_rule_fwd_h(
     w = torch.randn(B, T, HV, D, dtype=dtype, device=device)
     u = torch.randn(B, T, HV, D, dtype=dtype, device=device)
     g = _make_gate(B, T, HV)
-    h0 = torch.randn(B, HV, D, D, dtype=torch.float32, device=device) if use_h0 else None
+    h0_kv = torch.randn(B, HV, D, D, dtype=torch.float32, device=device) if use_h0 else None
 
-    h_ref, vn_ref, fs_ref = chunk_gated_delta_rule_fwd_h_ref(k, w, u, g, h0, BT)
+    if state_v_first:
+        assert use_h0 and h0_kv is not None
+        h0_vk = h0_kv.transpose(-1, -2).contiguous()
+        h_ref, vn_ref, fs_ref = chunk_gated_delta_rule_fwd_h_ref(
+            k, w, u, g, h0_kv, BT, state_v_first=False,
+        )
+        h_tri, vn_tri, fs_tri = chunk_gated_delta_rule_fwd_h(
+            k=k, w=w, u=u, g=g,
+            initial_state=h0_vk.clone(),
+            output_final_state=True,
+            chunk_size=BT,
+            state_v_first=True,
+        )
+        torch.testing.assert_close(vn_ref, vn_tri, atol=5e-3, rtol=5e-3)
+        assert_close('h', h_ref, h_tri.permute(0, 1, 2, 4, 3), 0.005)
+        assert_close('final_state', fs_ref, fs_tri.permute(0, 1, 3, 2), 0.005)
+        return
+
+    h_ref, vn_ref, fs_ref = chunk_gated_delta_rule_fwd_h_ref(k, w, u, g, h0_kv, BT)
     h_tri, vn_tri, fs_tri = chunk_gated_delta_rule_fwd_h(
         k=k,
         w=w,
         u=u,
         g=g,
-        initial_state=h0,
+        initial_state=h0_kv,
         output_final_state=True,
         chunk_size=BT,
     )
@@ -587,6 +641,7 @@ def chunk_bwd_dv_local_ref(
             (2, 128, 2, 4, 64, True, torch.bfloat16),
             (1, 256, 4, 4, 32, True, torch.float16),
             (2, 128, 2, 2, 64, False, torch.bfloat16),
+            (1, 64, 1, 1, 64, True, torch.float16),
         ]
     ],
 )
@@ -919,6 +974,7 @@ def prepare_wy_repr_bwd_ref(
             (2, 128, 2, 4, 64, True, torch.bfloat16),
             (1, 256, 4, 4, 32, True, torch.float16),
             (2, 128, 2, 2, 64, False, torch.bfloat16),
+            (1, 64, 1, 1, 64, True, torch.float16),
         ]
     ],
 )

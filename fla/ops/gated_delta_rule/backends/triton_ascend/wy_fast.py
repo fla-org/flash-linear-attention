@@ -374,17 +374,14 @@ def prepare_wy_repr_bwd_da_gate_npu(
     else:
         bos, eos = i_b * T, i_b * T + T
 
-    o_i = tl.arange(0, BC)
     n_sub = BT // BC
 
     for r in range(n_sub):
         i_tr = i_t * BT + r * BC
-        m_r = (i_tr + o_i) < T
         p_gr = tl.make_block_ptr(g + (bos * HV + i_h), (T,), (HV,), (i_tr,), (BC,), (0,))
         b_gr = tl.load(p_gr, boundary_check=(0,)).to(tl.float32)
         for c in range(n_sub):
             i_tc = i_t * BT + c * BC
-            m_c = (i_tc + o_i) < T
             p_dA = tl.make_block_ptr(
                 dA_out + (bos * HV + i_h) * BT, (BT, T), (1, HV * BT),
                 (r * BC, i_t * BT + c * BC), (BC, BC), (0, 1),
@@ -499,7 +496,6 @@ def prepare_wy_repr_bwd_finalize_dg_npu(
         i_tg = i_b * NT + i_t
         bos, eos = i_b * T, i_b * T + T
 
-    o_i = tl.arange(0, BC)
     n_sub = BT // BC
     col_off = (i_tg * HV + i_h) * BT
     p_col0 = tl.make_block_ptr(col_acc_scr + col_off, (BT,), (1,), (0,), (BT,), (0,))
@@ -621,7 +617,8 @@ def prepare_wy_repr_bwd_npu(
     dA_mid = torch.zeros_like(A, dtype=torch.float32)
     dA_out = torch.zeros_like(A, dtype=torch.float32)
     a2_scr = torch.zeros_like(A, dtype=torch.float32)
-    col_acc_scr = torch.zeros(B, triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices), HV, BT, dtype=torch.float32, device=k.device)
+    col_acc_scr = torch.zeros(B, triton.cdiv(T, BT) if cu_seqlens is None else len(
+        chunk_indices), HV, BT, dtype=torch.float32, device=k.device)
 
     base = dict(
         cu_seqlens=cu_seqlens,
