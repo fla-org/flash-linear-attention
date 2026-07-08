@@ -30,8 +30,8 @@ _RECOMPUTE_FWD_MEM_MULT = 6.0
 _PREPARE_BWD_MEM_MULT = 18.0
 _SAFETY_MARGIN = 0.75
 _FALLBACK_TILE = 8
-_MAX_TILE_FWD = 32
-_MAX_TILE_BWD = 16
+_MAX_TILE_FWD = 64
+_MAX_TILE_BWD = 32
 
 
 def _get_fwd_tiles(BT: int, K: int, V: int) -> tuple[int, int]:
@@ -61,7 +61,7 @@ def _get_bwd_tiles(BT: int, K: int, V: int) -> tuple[int, int]:
         safety_margin=_SAFETY_MARGIN,
         fallback=_FALLBACK_TILE,
         min_block=8,
-        max_block=min(8, triton.next_power_of_2(K)),
+        max_block=min(_MAX_TILE_BWD, triton.next_power_of_2(K)),
     )
     BV = compute_row_tile_block_size(
         BT, V, _PREPARE_BWD_MEM_MULT,
@@ -69,7 +69,7 @@ def _get_bwd_tiles(BT: int, K: int, V: int) -> tuple[int, int]:
         safety_margin=_SAFETY_MARGIN,
         fallback=_FALLBACK_TILE,
         min_block=8,
-        max_block=min(8, triton.next_power_of_2(V)),
+        max_block=min(_MAX_TILE_BWD, triton.next_power_of_2(V)),
     )
     return BK, BV
 

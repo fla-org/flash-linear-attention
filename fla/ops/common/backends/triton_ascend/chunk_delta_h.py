@@ -27,7 +27,7 @@ _NUM_WARPS = 4
 _FWD_H_MEM_MULT = 8.0
 _SAFETY_MARGIN = 0.80
 _FALLBACK_BV = 16
-_MAX_BV = 32
+_MAX_BV = 64
 
 
 def _get_bv(K: int, V: int) -> int:

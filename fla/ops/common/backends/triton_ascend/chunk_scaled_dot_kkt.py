@@ -28,7 +28,7 @@ _BC = 16
 _KKT_MEM_MULT = 4.0
 _SAFETY_MARGIN = 0.80
 _FALLBACK_BK = 8
-_MAX_BK = 32
+_MAX_BK = 64
 
 
 def _get_bk(K: int) -> int:
