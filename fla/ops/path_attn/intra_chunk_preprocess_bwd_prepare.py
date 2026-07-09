@@ -1,3 +1,10 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
 import torch
 import triton
 import triton.language as tl
@@ -7,7 +14,7 @@ from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 
 @triton.heuristics({
     "USE_GATE": lambda args: args['g_cumsum'] is not None,
-    "IS_VARLEN": lambda args: args['offsets'] is not None
+    "IS_VARLEN": lambda args: args['offsets'] is not None,
 })
 @triton.jit(do_not_specialize=['T'])
 def chunk_transform_qk_bwd_kernel_prepare(
@@ -42,7 +49,7 @@ def chunk_transform_qk_bwd_kernel_prepare(
     BT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     USE_GATE: tl.constexpr,
-    RETURN_H: tl.constexpr
+    RETURN_H: tl.constexpr,
 ):
     i_t, i_nh = tl.program_id(0), tl.program_id(1)
     i_n, i_hq = i_nh // HQ, i_nh % HQ
@@ -50,11 +57,11 @@ def chunk_transform_qk_bwd_kernel_prepare(
 
     if IS_VARLEN:
         i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
-        T = eos - bos
+        bos, eos = tl.load(offsets + i_n).to(tl.int64), tl.load(offsets + i_n + 1).to(tl.int64)
+        T = (eos - bos).to(tl.int32)
         boh = tl.load(chunk_offsets + i_n).to(tl.int32)
     else:
-        bos, eos = i_n * T, i_n * T + T
+        bos, eos = (i_n * T).to(tl.int64), (i_n * T + T).to(tl.int64)
         NT = tl.cdiv(T, BT)
         boh = i_n * NT
 
@@ -105,12 +112,13 @@ def chunk_transform_qk_bwd_kernel_prepare(
     tl.store(p_q_new, b_q.to(p_q_new.dtype.element_ty), boundary_check=(0, 1))
 
     if i_hq % G == 0:
-        b_Twb = tl.dot(b_T, b_w) # tf32
+        b_Twb = tl.dot(b_T, b_w)  # tf32
         p_h = tl.make_block_ptr(h, (T, K), (K * H, 1), (i_t * BT, 0), (BT, BK), (1, 0))
         tl.store(p_h, b_Twb.to(p_h.dtype.element_ty), boundary_check=(0, 1))
         b_T_wbk = tl.dot(b_T.to(b_wbk.dtype), b_wbk).to(b_kt.dtype)
         p_k_new = tl.make_block_ptr(k_new, (K, T), (1, K*H), (0, i_t * BT), (BK, BT), (0, 1))
-        tl.store(p_k_new, (b_kt - tl.dot(tl.trans(b_w.to(b_kt.dtype)), b_T_wbk)).to(p_k_new.dtype.element_ty), boundary_check=(0, 1))
+        tl.store(p_k_new, (b_kt - tl.dot(tl.trans(b_w.to(b_kt.dtype)), b_T_wbk)
+                           ).to(p_k_new.dtype.element_ty), boundary_check=(0, 1))
 
     if USE_GATE:
         p_g_cumsum = tl.make_block_ptr(g_cumsum, (T, ), (HQ, ), (i_t * BT, ), (BT, ), (0, ))
@@ -142,7 +150,8 @@ def chunk_transform_qk_bwd_kernel_prepare(
     tl.store(p_dA, b_dA.to(p_dA.dtype.element_ty), boundary_check=(0, 1))
 
 
-def intra_chunk_preprocess_bwd_prepare_fn(q, k, v, w, beta, g_cumsum, A, L, D, do, scale, return_h=True, cu_seqlens=None):
+def intra_chunk_preprocess_bwd_prepare_fn(q, k, v, w, beta, g_cumsum, A, L, D, do, scale, return_h=True, cu_seqlens=None,
+                                          chunk_indices: torch.LongTensor | None = None):
     BT = A.shape[-1]
     HQ = q.shape[-2]
     B, T, H, K = k.shape
@@ -152,7 +161,9 @@ def intra_chunk_preprocess_bwd_prepare_fn(q, k, v, w, beta, g_cumsum, A, L, D, d
     q_new = torch.empty_like(q)
     k_new = torch.empty_like(k)
 
-    indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
+    indices = chunk_indices
     chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(indices)
     grid = (NT, B*HQ)
@@ -191,6 +202,6 @@ def intra_chunk_preprocess_bwd_prepare_fn(q, k, v, w, beta, g_cumsum, A, L, D, d
         BK=triton.next_power_of_2(K),
         BV=triton.next_power_of_2(V),
         BT=BT,
-        RETURN_H=return_h
+        RETURN_H=return_h,
     )
     return q_new, k_new, h, dA_local, dv, dg_cumsum

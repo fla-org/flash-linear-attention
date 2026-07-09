@@ -1,4 +1,9 @@
-# -*- coding: utf-8 -*-
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 # scripts for converting pretrained hf model weights to fla style
 # calling the code to make conversions for RWKV/rwkv-6-world-7b would achieve the following results:
@@ -42,7 +47,7 @@ def sizeof_fmt(num, suffix='B'):
 def convert(
     rwkv6: str,
     config: str,
-    output: str
+    output: str,
 ):
     torch.manual_seed(1)
     AutoTokenizer.from_pretrained(rwkv6, trust_remote_code=True).save_pretrained(output)

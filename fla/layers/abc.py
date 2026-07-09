@@ -1,15 +1,20 @@
-# -*- coding: utf-8 -*-
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 from __future__ import annotations
 
 import warnings
-from typing import TYPE_CHECKING, Optional, Tuple
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
 from einops import rearrange
 
+from fla.layers.utils import get_layer_cache, update_layer_cache
 from fla.modules import FusedRMSNormGated, RMSNorm, RotaryEmbedding, ShortConvolution
 from fla.modules.activations import swiglu, swish
 from fla.ops.abc.chunk import chunk_abc
@@ -29,8 +34,8 @@ class ABCAttention(nn.Module):
         use_short_conv: bool = False,
         conv_size: int = 4,
         conv_bias: bool = False,
-        num_slots: Optional[int] = None,
-        elementwise_affine: Optional[bool] = True,
+        num_slots: int | None = None,
+        elementwise_affine: bool | None = True,
         norm_eps: float = 1e-5,
         gate_low_rank_dim: int = 16,
         gate_logit_normalizer: int = 16,
@@ -38,10 +43,10 @@ class ABCAttention(nn.Module):
         use_input_gate: bool = False,
         use_output_gate: bool = True,
         use_norm: bool = True,
-        clamp_min: Optional[float] = -32,
-        clamp_max: Optional[float] = 32,
-        layer_idx: Optional[int] = None,
-        **kwargs
+        clamp_min: float | None = -32,
+        clamp_max: float | None = 32,
+        layer_idx: int | None = None,
+        **kwargs,
     ) -> ABCAttention:
         super().__init__()
 
@@ -80,7 +85,7 @@ class ABCAttention(nn.Module):
             warnings.warn(
                 f"Instantiating {self.__class__.__name__} without passing `layer_idx` is not recommended and will "
                 "to errors during the forward call, if caching is used. Please make sure to provide a `layer_idx` "
-                "when creating this class."
+                "when creating this class.",
             )
 
         self.q_proj = nn.Linear(self.hidden_size, self.key_dim, bias=False)
@@ -98,19 +103,19 @@ class ABCAttention(nn.Module):
                 hidden_size=self.key_dim,
                 kernel_size=conv_size,
                 bias=conv_bias,
-                activation='silu'
+                activation='silu',
             )
             self.k_conv1d = ShortConvolution(
                 hidden_size=self.key_dim,
                 kernel_size=conv_size,
                 bias=conv_bias,
-                activation='silu'
+                activation='silu',
             )
             self.v_conv1d = ShortConvolution(
                 hidden_size=self.value_dim,
                 kernel_size=conv_size,
                 bias=conv_bias,
-                activation='silu'
+                activation='silu',
             )
 
         if self.use_norm:
@@ -118,13 +123,14 @@ class ABCAttention(nn.Module):
                 self.g_norm = FusedRMSNormGated(
                     hidden_size=self.head_v_dim,
                     elementwise_affine=elementwise_affine,
-                    eps=norm_eps
+                    eps=norm_eps,
                 )
             else:
                 self.g_norm = RMSNorm(
                     hidden_size=self.head_v_dim,
                     elementwise_affine=elementwise_affine,
-                    eps=norm_eps
+                    eps=norm_eps,
+                    dtype=torch.float32,
                 )
 
         if self.use_rope:
@@ -133,12 +139,12 @@ class ABCAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        past_key_values: Optional[Cache] = None,
-        use_cache: Optional[bool] = False,
-        output_attentions: Optional[bool] = False,
-        **kwargs
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Cache]]:
+        attention_mask: torch.Tensor | None = None,
+        past_key_values: Cache | None = None,
+        use_cache: bool | None = False,
+        output_attentions: bool | None = False,
+        **kwargs,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, Cache | None]:
         if attention_mask is not None:
             assert len(attention_mask.shape) == 2, (
                 "Expected attention_mask as a 0-1 matrix with shape [batch_size, seq_len] "
@@ -146,11 +152,9 @@ class ABCAttention(nn.Module):
                 "Arbitrary attention masks of shape [batch_size, seq_len, seq_len] are not allowed."
             )
 
-        last_state = None
-        if past_key_values is not None and len(past_key_values) > self.layer_idx:
-            last_state = past_key_values[self.layer_idx]
+        last_state = get_layer_cache(self, past_key_values)
 
-        cu_seqlens = kwargs.get('cu_seqlens', None)
+        cu_seqlens = kwargs.get('cu_seqlens')
         if cu_seqlens is not None:
             raise NotImplementedError("Training with cu_seqlens is not supported yet for ABCAttention")
         if self.use_short_conv:
@@ -163,21 +167,21 @@ class ABCAttention(nn.Module):
                 mask=conv_mask,
                 cache=conv_state_q,
                 output_final_state=use_cache,
-                cu_seqlens=cu_seqlens
+                cu_seqlens=cu_seqlens,
             )
             k, conv_state_k = self.k_conv1d(
                 x=self.k_proj(hidden_states),
                 mask=conv_mask,
                 cache=conv_state_k,
                 output_final_state=use_cache,
-                cu_seqlens=cu_seqlens
+                cu_seqlens=cu_seqlens,
             )
             v, conv_state_v = self.v_conv1d(
                 x=self.v_proj(hidden_states),
                 mask=conv_mask,
                 cache=conv_state_v,
                 output_final_state=use_cache,
-                cu_seqlens=cu_seqlens
+                cu_seqlens=cu_seqlens,
             )
         else:
             q = self.q_proj(hidden_states)
@@ -210,13 +214,13 @@ class ABCAttention(nn.Module):
             initial_state=recurrent_state,
             output_final_state=use_cache,
         )
-        if past_key_values is not None:
-            past_key_values.update(
-                recurrent_state=recurrent_state,
-                conv_state=(conv_state_q, conv_state_k, conv_state_v) if self.use_short_conv else None,
-                layer_idx=self.layer_idx,
-                offset=q.shape[1]
-            )
+        update_layer_cache(
+            self,
+            past_key_values,
+            recurrent_state=recurrent_state,
+            conv_state=(conv_state_q, conv_state_k, conv_state_v) if self.use_short_conv else None,
+            offset=q.shape[1],
+        )
 
         if self.use_norm and not self.use_output_gate:
             o = self.g_norm(o)

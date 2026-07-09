@@ -1,7 +1,11 @@
-# -*- coding: utf-8 -*-
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import os
-from typing import List
 
 import pytest
 import torch
@@ -9,7 +13,7 @@ import torch.nn.functional as F
 
 from fla.ops.common.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
 from fla.ops.utils.solve_tril import solve_tril
-from fla.utils import assert_close, device, device_platform
+from fla.utils import IS_NVIDIA_BLACKWELL, assert_close, device, device_platform
 
 
 @pytest.mark.parametrize(
@@ -23,11 +27,11 @@ from fla.utils import assert_close, device, device_platform
             (3, 1024, 6, 64),
             (4, 2048, 8, 64),
         ]
-    ]
+    ],
 )
 @pytest.mark.skipif(
     device_platform == 'intel',
-    reason='Intel Pytorch Failure'
+    reason='Intel Pytorch Failure',
 )
 def test_solve_tril(B, T, H, chunk_size):
     # do not randomly intiialize A otherwise the inverse is not stable
@@ -57,21 +61,21 @@ def test_solve_tril(B, T, H, chunk_size):
             (4, 64, 16, [0, 1, 100, 300, 1200, 2048]),
             (4, 128, 32, [0, 200, 512, 1200, 2048]),
         ]
-    ]
+    ],
 )
 @pytest.mark.skipif(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
-    reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set'
+    reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set',
 )
 @pytest.mark.skipif(
     device_platform == 'intel',
-    reason='Intel Pytorch Failure'
+    reason='Intel Pytorch Failure',
 )
 def test_solve_tril_varlen(
     H: int,
     D: int,
     chunk_size: int,
-    cu_seqlens: List[int],
+    cu_seqlens: list[int],
 ):
     T = cu_seqlens[-1]
     cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
@@ -86,8 +90,25 @@ def test_solve_tril_varlen(
             actual_size = min(chunk_size, cu_seqlens[i+1] - j)
             ref[:, j:j+actual_size, :, :actual_size] = torch.inverse(
                 A[:, j:j+actual_size, :, :actual_size].transpose(1, 2) +
-                torch.eye(actual_size, device=A.device, dtype=A.dtype)[None, None, ...]
+                torch.eye(actual_size, device=A.device, dtype=A.dtype)[None, None, ...],
             ).transpose(1, 2)
 
     tri = solve_tril(A, cu_seqlens=cu_seqlens)
     assert_close('solve_tril_varlen', ref, tri, 0.0001)
+
+
+@pytest.mark.skipif(not IS_NVIDIA_BLACKWELL, reason="large-offset repro requires a Blackwell/B200-class CUDA GPU")
+def test_solve_tril_large_batch_offsets():
+    torch.manual_seed(42)
+    B, T, H, BT = 256, 16384, 12, 64
+    A = torch.randn(B, T, H, BT, device=device, dtype=torch.bfloat16) * 0.01
+    offsets = torch.arange(T, device=device) % BT
+    cols = torch.arange(BT, device=device)
+    A.masked_fill_(offsets[None, :, None, None] <= cols[None, None, None, :], 0)
+
+    tri = solve_tril(A, output_dtype=torch.bfloat16)
+    ref = torch.cat(
+        [solve_tril(A[start:start + 128], output_dtype=torch.bfloat16) for start in range(0, B, 128)],
+        dim=0,
+    )
+    assert_close('solve_tril', ref, tri, 0.0)

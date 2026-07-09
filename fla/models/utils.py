@@ -1,9 +1,14 @@
-# -*- coding: utf-8 -*-
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 from __future__ import annotations
 
 import inspect
-from typing import Any, Dict, List, Optional, Union
+from typing import Any
 
 import torch
 import transformers
@@ -29,6 +34,7 @@ class FLALayer(CacheLayerMixin):
     def __init__(self):
         super().__init__()
         self.state = None
+        self._seen_tokens = 0
 
     def lazy_initialization(self, key_states: torch.Tensor):
         self.state = None
@@ -36,13 +42,14 @@ class FLALayer(CacheLayerMixin):
     def update(
         self,
         *,
-        recurrent_state: Optional[Union[torch.Tensor, tuple[torch.Tensor, ...]]] = None,
-        attn_state: Optional[tuple[torch.Tensor, ...]] = None,
-        conv_state: Optional[Any] = None,
-        ffn_state: Optional[Any] = None,
-        cache_kwargs: Optional[Dict[str, Any]] = None,
+        recurrent_state: torch.Tensor | tuple[torch.Tensor, ...] | None = None,
+        attn_state: tuple[torch.Tensor, ...] | None = None,
+        conv_state: Any | None = None,
+        ffn_state: Any | None = None,
+        offset: int = 1,
+        cache_kwargs: dict[str, Any] | None = None,
         **_: Any,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         if cache_kwargs is None:
             cache_kwargs = {}
         window_size = cache_kwargs.get("window_size")
@@ -61,26 +68,41 @@ class FLALayer(CacheLayerMixin):
         if recurrent_state is not None:
             self.state["recurrent_state"] = recurrent_state
 
-        if attn_state is not None:
-            input_size = attn_state[0].shape[1]
+        # Extract input_size from attn_state if available (before potential window truncation)
+        has_attn_state = attn_state and attn_state[0] is not None
+        input_size = attn_state[0].shape[1] if has_attn_state else 0
+
+        if has_attn_state:
             if self.state["attn_state"] is None:
                 if window_size is not None and input_size > window_size:
                     attn_state = tuple(x[:, -window_size:].contiguous() for x in attn_state)
                 self.state["attn_state"] = tuple(attn_state)
             else:
                 old = self.state["attn_state"]
-                if window_size is not None and old[0].shape[1] >= window_size:
+                if window_size is not None and input_size == 0:
+                    pass
+                # if the incoming chunk covers the whole window then we can replace the cache with its tail
+                # otherwise we roll the existing window and splice in the new tokens
+                elif window_size is not None and old[0].shape[1] >= window_size:
                     new_tuple = []
-                    for old_x, new_x in zip(old, attn_state):
-                        rolled = old_x.roll(-input_size, dims=1)
+                    for old_x, new_x in zip(old, attn_state, strict=False):
                         tail = new_x[:, -window_size:]
-                        rolled[:, -tail.shape[1]:] = tail
-                        new_tuple.append(rolled)
+                        if tail.shape[1] >= window_size:
+                            new_tuple.append(tail.contiguous())
+                        else:
+                            old_x = old_x[:, -window_size:].contiguous() if old_x.shape[1] > window_size else old_x
+                            rolled = old_x.roll(-input_size, dims=1)
+                            rolled[:, -tail.shape[1]:] = tail
+                            new_tuple.append(rolled)
                     self.state["attn_state"] = tuple(new_tuple)
                 else:
-                    self.state["attn_state"] = tuple(
-                        torch.cat([old_x, new_x], dim=1) for old_x, new_x in zip(old, attn_state)
-                    )
+                    new_tuple = []
+                    for old_x, new_x in zip(old, attn_state, strict=False):
+                        updated = torch.cat([old_x, new_x], dim=1)
+                        if window_size is not None and updated.shape[1] > window_size:
+                            updated = updated[:, -window_size:].contiguous()
+                        new_tuple.append(updated)
+                    self.state["attn_state"] = tuple(new_tuple)
 
         if conv_state is not None:
             self.state["conv_state"] = conv_state
@@ -91,17 +113,41 @@ class FLALayer(CacheLayerMixin):
             self.device = 'cpu'
         for state in (recurrent_state, attn_state, conv_state, ffn_state):
             if state is not None:
-                self.device = state.device if isinstance(state, torch.Tensor) else state[0].device
+                if isinstance(state, torch.Tensor):
+                    self.device = state.device
+                elif isinstance(state, (tuple, list)):
+                    first_tensor = next((item for item in state if isinstance(item, torch.Tensor)), None)
+                    if first_tensor is not None:
+                        self.device = first_tensor.device
+                elif hasattr(state, 'device'):
+                    self.device = state.device
+                else:
+                    # For custom state objects (e.g., LogLinearAttentionState),
+                    # try to find a tensor attribute to get the device.
+                    for attr in vars(state).values():
+                        if isinstance(attr, torch.Tensor):
+                            self.device = attr.device
+                            break
                 break
+
+        # Track seen tokens from attn_state if available, otherwise use offset
+        if has_attn_state:
+            # Use input_size captured before potential window truncation
+            self._seen_tokens += input_size
+        else:
+            # For layers without attn_state (e.g., rwkv7, gated_deltanet), use offset
+            self._seen_tokens += offset
 
         return self.state
 
     def get_seq_length(self, cache_position=None) -> int:
-        # we do not store seen_tokens here
-        return 0
+        return self._seen_tokens
+
+    def get_max_length(self) -> int:
+        return -1
 
     def get_max_cache_shape(self) -> int:
-        return -1
+        return self.get_max_length()
 
     def get_mask_sizes(self, cache_position: torch.Tensor) -> tuple[int, int]:
         return 0, 0
@@ -137,51 +183,53 @@ class FLALayer(CacheLayerMixin):
                 self.state[k] = to_dev(v)
 
     def reset(self):
-        pass
+        self.state = None
+        self._seen_tokens = 0
 
 
 class LegacyFLACache(HFCacheBase):
     """
     A cache used for storing hidden states produced by flash linear attention models.
 
-    It stores the states of each layer as the tensor of shape `[batch_size, key_dim, value_dim]`.
+    It stores the recurrent state of each layer; the exact state shape is layer-dependent
+    (e.g. `[batch_size, key_dim, value_dim]`, or `[batch_size, value_dim, key_dim]` for
+    layers using the V-first state layout).
     """
 
     is_compileable = True
 
     def __init__(
         self,
-        seen_tokens: int = 0
+        seen_tokens: int = 0,
     ) -> LegacyFLACache:
         super().__init__()
 
-        self.states: List[Dict[str, Any]] = []
+        self.states: list[dict[str, Any]] = []
 
         self._seen_tokens = seen_tokens  # Used in `generate` to keep tally of how many tokens the cache has seen
 
-    def __getitem__(self, layer_idx: int) -> Dict[str, Any]:
+    def __getitem__(self, layer_idx: int) -> dict[str, Any]:
         if layer_idx < len(self):
             return self.states[layer_idx]
         else:
             raise KeyError(f"Cache only has {len(self)} layers, attempted to access layer with index {layer_idx}")
 
     def __iter__(self):
-        for state in self.states:
-            yield state
+        yield from self.states
 
     def __len__(self):
         return len(self.states)
 
     def update(
         self,
-        recurrent_state: Optional[tuple[torch.Tensor]] = None,
-        attn_state: Optional[tuple[torch.Tensor]] = None,
-        conv_state: Optional[tuple[torch.Tensor]] = None,
-        ffn_state: Optional[tuple[torch.Tensor]] = None,
+        recurrent_state: tuple[torch.Tensor] | None = None,
+        attn_state: tuple[torch.Tensor] | None = None,
+        conv_state: tuple[torch.Tensor] | None = None,
+        ffn_state: tuple[torch.Tensor] | None = None,
         layer_idx: int = 0,
-        offset: Optional[int] = 1,
-        cache_kwargs: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        offset: int | None = 1,
+        cache_kwargs: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """
         Args:
             recurrent_state (`torch.Tensor`):
@@ -207,7 +255,7 @@ class LegacyFLACache(HFCacheBase):
             cache_kwargs = {}
         if attn_state is not None:
             input_size = attn_state[0].shape[1]
-            window_size = cache_kwargs.get('window_size', None)
+            window_size = cache_kwargs.get('window_size')
             if not isinstance(attn_state, (tuple, list)):
                 raise ValueError("`attn_state` must be a tuple of tensors for key/value states")
         if len(self.states) <= layer_idx:
@@ -221,7 +269,7 @@ class LegacyFLACache(HFCacheBase):
                 recurrent_state=recurrent_state,
                 attn_state=attn_state,
                 conv_state=conv_state,
-                ffn_state=ffn_state
+                ffn_state=ffn_state,
             )
             self.states.append(state)
         else:
@@ -232,20 +280,41 @@ class LegacyFLACache(HFCacheBase):
             if recurrent_state is not None:
                 state['recurrent_state'] = recurrent_state
             if attn_state is not None:
-                if window_size is not None and state['attn_state'][0].shape[1] == window_size:
-                    for i, (old_state, new_state) in enumerate(zip(state['attn_state'], attn_state)):
-                        # DO NOT allocate new memory if the cache is full
-                        # roll the key/value states to the left by `input_size`
-                        old_state = old_state.roll(-input_size, 1)
-                        # replace the last `input_size` tokens with the new key/value states
-                        old_state[:, -input_size:] = new_state
-                        state['attn_state'][i] = old_state
-                else:
-                    attn_state = [
-                        torch.cat([old_state, new_state], 1)
-                        for old_state, new_state in zip(state['attn_state'], attn_state)
+                if state['attn_state'] is None:
+                    state['attn_state'] = [
+                        new_state[:, -window_size:].contiguous()
+                        if window_size is not None and new_state.shape[1] > window_size
+                        else new_state
+                        for new_state in attn_state
                     ]
-                    state['attn_state'] = attn_state
+                elif window_size is not None and input_size == 0:
+                    pass
+                # mirror FLALayer's window semantics so legacy caches handle oversized decoding chunks
+                elif window_size is not None and state['attn_state'][0].shape[1] >= window_size:
+                    updated_attn_state = []
+                    for old_state, new_state in zip(state['attn_state'], attn_state, strict=False):
+                        tail = new_state[:, -window_size:]
+                        if tail.shape[1] >= window_size:
+                            updated_attn_state.append(tail.contiguous())
+                        else:
+                            # DO NOT allocate new memory if the cache is full
+                            # roll the key/value states to the left by `input_size`
+                            old_state = (
+                                old_state[:, -window_size:].contiguous() if old_state.shape[1] > window_size else old_state
+                            )
+                            old_state = old_state.roll(-input_size, 1)
+                            # replace the newest slots with the new key/value states
+                            old_state[:, -tail.shape[1]:] = tail
+                            updated_attn_state.append(old_state)
+                    state['attn_state'] = updated_attn_state
+                else:
+                    updated_attn_state = []
+                    for old_state, new_state in zip(state['attn_state'], attn_state, strict=False):
+                        updated = torch.cat([old_state, new_state], 1)
+                        if window_size is not None and updated.shape[1] > window_size:
+                            updated = updated[:, -window_size:].contiguous()
+                        updated_attn_state.append(updated)
+                    state['attn_state'] = updated_attn_state
             if conv_state is not None:
                 state['conv_state'] = conv_state
             if ffn_state is not None:
@@ -253,15 +322,19 @@ class LegacyFLACache(HFCacheBase):
 
         return state
 
-    def get_seq_length(self, layer_idx: Optional[int] = 0) -> int:
+    def get_seq_length(self, layer_idx: int | None = 0) -> int:
         """Returns the sequence length of the cached states. A layer index can be optionally passed."""
         if len(self.states) <= layer_idx:
             return 0
         return self._seen_tokens
 
-    def get_max_cache_shape(self) -> Optional[int]:
+    def get_max_cache_shape(self) -> int | None:
         """Returns the maximum sequence length of the cached states. Cache does not have a maximum length."""
         return None
+
+    def reset(self):
+        self.states.clear()
+        self._seen_tokens = 0
 
     def to_legacy_cache(self) -> tuple:
         return tuple(self.states)
@@ -270,8 +343,8 @@ class LegacyFLACache(HFCacheBase):
     @torch.compiler.disable
     def from_legacy_cache(
         cls,
-        past_key_values: Optional[tuple] = None,
-        seen_tokens: int = 0
+        past_key_values: tuple | None = None,
+        seen_tokens: int = 0,
     ) -> LegacyFLACache:
         """Converts a cache in the legacy cache format into an equivalent `Cache`."""
 
@@ -286,7 +359,9 @@ class FLACache(HFCacheBase):
     """
     A cache used for storing hidden states produced by flash linear attention models.
 
-    It stores the states of each layer as the tensor of shape `[batch_size, key_dim, value_dim]`.
+    It stores the recurrent state of each layer; the exact state shape is layer-dependent
+    (e.g. `[batch_size, key_dim, value_dim]`, or `[batch_size, value_dim, key_dim]` for
+    layers using the V-first state layout).
     """
 
     is_compileable = True
@@ -306,37 +381,37 @@ class FLACache(HFCacheBase):
             raise TypeError(
                 "FLA cache initialization failed: HFCacheBase.__init__ accepts neither "
                 "'layer_class_to_replicate' nor 'layer_classes'. This might be caused by an incompatible "
-                "transformers version. Please check your transformers>=4.36.0"
+                "transformers version. Please check your transformers>=4.36.0",
             )
         self._seen_tokens = int(seen_tokens)
 
     def update(
         self,
-        recurrent_state: Optional[tuple[torch.Tensor]] = None,
-        attn_state: Optional[tuple[torch.Tensor]] = None,
-        conv_state: Optional[tuple[torch.Tensor]] = None,
-        ffn_state: Optional[tuple[torch.Tensor]] = None,
+        recurrent_state: tuple[torch.Tensor] | None = None,
+        attn_state: tuple[torch.Tensor] | None = None,
+        conv_state: tuple[torch.Tensor] | None = None,
+        ffn_state: tuple[torch.Tensor] | None = None,
         layer_idx: int = 0,
-        offset: Optional[int] = 1,
-        cache_kwargs: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        offset: int | None = 1,
+        cache_kwargs: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         if not self.use_layer_class_to_replicate:
             self.append_new_layers(layer_idx)
         else:
             while len(self.layers) <= layer_idx:
                 self.layers.append(self.layer_class_to_replicate())
-        if layer_idx == 0:
-            self._seen_tokens += int(offset)
+        # Per-layer seen_tokens is now tracked in FLALayer.update()
 
         return self.layers[layer_idx].update(
             recurrent_state=recurrent_state,
             attn_state=attn_state,
             conv_state=conv_state,
             ffn_state=ffn_state,
+            offset=offset if offset is not None else 1,
             cache_kwargs=cache_kwargs,
         )
 
-    def __getitem__(self, layer_idx: int) -> Dict[str, Any]:
+    def __getitem__(self, layer_idx: int) -> dict[str, Any]:
         if layer_idx >= len(self.layers):
             raise KeyError(f"Cache only have {len(self.layers)} layers, however accessed {layer_idx} out of bounds")
         return self.layers[layer_idx].state
@@ -348,29 +423,38 @@ class FLACache(HFCacheBase):
     def __len__(self):
         return super().__len__()
 
-    def get_seq_length(self, layer_idx: Optional[int] = 0, cache_position=None) -> int:
+    def get_seq_length(self, layer_idx: int | None = 0, cache_position=None) -> int:
         if len(self.layers) <= (layer_idx or 0):
             return 0
-        return self._seen_tokens
+        return self.layers[layer_idx or 0].get_seq_length()
 
-    def get_max_cache_shape(self, layer_idx: int = 0) -> int:
+    def get_max_length(self, layer_idx: int = 0) -> int:
         return -1
 
+    def get_max_cache_shape(self, layer_idx: int = 0) -> int:
+        return self.get_max_length(layer_idx)
+
     def get_mask_sizes(self, cache_position: torch.Tensor, layer_idx: int) -> tuple[int, int]:
-        # Respect your global seen_tokens semantics
         # kv_length = past_seen + current_query_length
         query_len = int(cache_position.shape[0]) if cache_position is not None else 0
-        kv_length = int(self._seen_tokens) + query_len
+        kv_length = int(self.get_seq_length(layer_idx)) + query_len
         return kv_length, 0
 
-    def to_legacy_cache(self) -> tuple[Dict[str, Any], ...]:
+    def reset(self):
+        # keeps the layer objects allocated for the HF cache compatibility
+        # drops cache state
+        for layer in self.layers:
+            layer.reset()
+        self._seen_tokens = 0
+
+    def to_legacy_cache(self) -> tuple[dict[str, Any], ...]:
         return tuple(self[i] for i in range(len(self.layers)))
 
     @classmethod
     @torch.compiler.disable
     def from_legacy_cache(
         cls,
-        past_key_values: Optional[tuple[Dict[str, Any], ...]] = None,
+        past_key_values: tuple[dict[str, Any], ...] | None = None,
         seen_tokens: int = 0,
         **kwargs,
     ) -> FLACache:
@@ -378,8 +462,13 @@ class FLACache(HFCacheBase):
         if isinstance(past_key_values, (list, tuple)):
             for i, st in enumerate(past_key_values):
                 while len(cache.layers) <= i:
-                    cache.layers.append(cache.layer_class_to_replicate())
+                    if cache.use_layer_class_to_replicate:
+                        cache.layers.append(cache.layer_class_to_replicate())
+                    else:
+                        cache.append_new_layers(i)
                 cache.layers[i].state = dict(st)
+                # legacy cache tracks seen token globally but FLACache stores per layer
+                cache.layers[i]._seen_tokens = int(seen_tokens)
         return cache
 
 
@@ -396,13 +485,13 @@ class FLAGenerationMixin(GenerationMixin):
     def prepare_inputs_for_generation(
         self,
         input_ids: torch.LongTensor = None,
-        past_key_values: Optional[HFCacheBase] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        past_key_values: HFCacheBase | None = None,
+        attention_mask: torch.Tensor | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         use_cache: bool = True,
-        logits_to_keep: Optional[int] = None,
-        cache_position: Optional[torch.LongTensor] = None,
-        **kwargs
+        logits_to_keep: int | None = None,
+        cache_position: torch.LongTensor | None = None,
+        **kwargs,
     ):
         # Use pre-computed version comparison for performance
         if _IS_TRANSFORMERS_4_56_PLUS:
@@ -416,7 +505,7 @@ class FLAGenerationMixin(GenerationMixin):
                 # Use the new cache-dependent input preparation method if available
                 if hasattr(self, '_cache_dependant_input_preparation') and cache_position is not None:
                     inputs_embeds, input_ids = self._cache_dependant_input_preparation(
-                        input_ids, inputs_embeds, cache_position
+                        input_ids, inputs_embeds, cache_position,
                     )
                 elif cache_position is not None:
                     # Fallback: manually slice using cache_position

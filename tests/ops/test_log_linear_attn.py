@@ -1,5 +1,11 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
 import os
-from typing import List
 
 import numpy as np
 import pytest
@@ -31,7 +37,7 @@ def test_chunk(
     L = int(np.log2(T) + 1)
     x = torch.randn(B, T, H, D, dtype=dtype, device=device)
     dt = torch.nn.functional.softplus(
-        torch.randn(B, T, H, dtype=torch.float32, device=device) - 4
+        torch.randn(B, T, H, dtype=torch.float32, device=device) - 4,
     )
     a = -torch.exp(torch.rand(H, dtype=torch.float32, device=device))
     q = torch.randn(B, T, 1, D, dtype=dtype, device=device)
@@ -68,7 +74,7 @@ def test_chunk_bwd(
     L = int(np.log2(T) + 1)
     x = torch.randn(B, T, H, D, dtype=dtype, device=device)
     dt = torch.nn.functional.softplus(
-        torch.randn(B, T, H, dtype=torch.float32, device=device) - 4
+        torch.randn(B, T, H, dtype=torch.float32, device=device) - 4,
     )
     a = -torch.exp(torch.rand(H, dtype=torch.float32, device=device))
     q = torch.randn(B, T, 1, D, dtype=dtype, device=device)
@@ -111,7 +117,7 @@ def test_chunk_bwd(
 def test_chunk_varlen(
     H: int,
     D: int,
-    cu_seqlens: List[int],
+    cu_seqlens: list[int],
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
@@ -123,7 +129,7 @@ def test_chunk_varlen(
     L = int(np.ceil(np.log2(T)) + 1)
     x = torch.randn(1, T, H, D, dtype=dtype, device=device)
     dt = torch.nn.functional.softplus(
-        torch.randn(1, T, H, dtype=torch.float32, device=device) - 4
+        torch.randn(1, T, H, dtype=torch.float32, device=device) - 4,
     )
     a = -torch.exp(torch.rand(H, dtype=torch.float32, device=device))
     q = torch.randn(1, T, 1, D, dtype=dtype, device=device)

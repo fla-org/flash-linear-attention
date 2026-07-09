@@ -1,7 +1,9 @@
-# -*- coding: utf-8 -*-
-# Copyright (c) 2024, Songlin Yang, Yu Zhang
-
-from typing import Optional, Tuple
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 from einops import reduce
@@ -39,12 +41,12 @@ class ParallelPATHAttentionFunction(torch.autograd.Function):
             beta=beta,
             cu_seqlens=cu_seqlens,
             chunk_size=BS,
-            output_dtype=torch.float32
+            output_dtype=torch.float32,
         )
         A = solve_tril(
             A=A,
             cu_seqlens=cu_seqlens,
-            output_dtype=w.dtype  # force fp32?
+            output_dtype=w.dtype,  # force fp32?
         )
         q_new, k_new, w2, o, L, M = intra_chunk_preprocess_fwd_fn(
             q=q,
@@ -115,7 +117,7 @@ class ParallelPATHAttentionFunction(torch.autograd.Function):
             w2=h_fp16,
             S=S,
             BT=BS,
-            cu_seqlens=cu_seqlens
+            cu_seqlens=cu_seqlens,
         )
         q_new_large = transform_q_fwd_fn(q=q_new, w1=w_fp16, w2=h_fp16, cu_seqlens=cu_seqlens, BT=BT, BS=BS, S=S)
         w = w.to(q.dtype)
@@ -136,7 +138,7 @@ class ParallelPATHAttentionFunction(torch.autograd.Function):
             D=delta,
             S=S,
             BT=BT,
-            BS=BS
+            BS=BS,
         )
         dq, dhc_whole, dg_cumsum = parallel_path_bwd_dq_fn(
             q=q_new_large,
@@ -152,7 +154,7 @@ class ParallelPATHAttentionFunction(torch.autograd.Function):
             D=delta,
             S=S,
             BT=BT,
-            BS=BS
+            BS=BS,
         )
         dw1, dw2, dk = chunk_cumprod_householder_bwd_fn(
             w1=w,
@@ -163,7 +165,7 @@ class ParallelPATHAttentionFunction(torch.autograd.Function):
             dhc_whole=dhc_whole,
             cu_seqlens=cu_seqlens,
             S=S,
-            BT=BS
+            BT=BS,
         )
         dq, dk, dv, dw1, dw2, dg_cumsum = parallel_path_bwd_intra_chunk_fn(
             q=q_new,
@@ -184,7 +186,7 @@ class ParallelPATHAttentionFunction(torch.autograd.Function):
             dg_cumsum=dg_cumsum,
             cu_seqlens=cu_seqlens,
             S=S,
-            BT=BS
+            BT=BS,
         )
         dq, dk, dbeta, dw = intra_chunk_preprocess_bwd_fn(
             q=q,
@@ -202,7 +204,7 @@ class ParallelPATHAttentionFunction(torch.autograd.Function):
             D=delta,
             do=do,
             scale=ctx.scale,
-            cu_seqlens=cu_seqlens
+            cu_seqlens=cu_seqlens,
         )
         G = q.shape[-2] // k.shape[-2]
         if G > 1:
@@ -226,11 +228,11 @@ def parallel_path_attn(
     v: torch.Tensor,
     w: torch.Tensor,
     beta: torch.Tensor,
-    g: Optional[torch.Tensor] = None,
+    g: torch.Tensor | None = None,
     scale: float = None,
-    cu_seqlens: Optional[torch.Tensor] = None,
-    use_cache: bool = False
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    cu_seqlens: torch.Tensor | None = None,
+    use_cache: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
         q (torch.Tensor):
@@ -262,6 +264,11 @@ def parallel_path_attn(
     """
     if scale is None:
         scale = k.shape[-1]**-0.5
+    if cu_seqlens is not None and q.shape[0] != 1:
+        raise ValueError(
+            f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`. "
+            f"Please flatten variable-length inputs before processing.",
+        )
     assert w.dtype == beta.dtype == torch.float32, 'w, beta should be float32 to preserve precision.'
     if g is not None:
         assert g.dtype == torch.float32, 'g should be float32 to preserve precision.'
@@ -275,5 +282,6 @@ def parallel_path_attn(
     assert q.shape[-2] % k.shape[-2] == 0, 'the number of query heads should be divisible by the number of key heads'
     o, k_cache = ParallelPATHAttentionFunction.apply(q, k, v, w, beta, g, scale, cu_seqlens, use_cache)
     return o, k_cache
+
 
 parallel_path_attention = parallel_path_attn

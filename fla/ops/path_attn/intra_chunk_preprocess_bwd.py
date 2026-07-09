@@ -1,3 +1,10 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
 import torch
 import triton
 import triton.language as tl
@@ -18,7 +25,7 @@ def intra_chunk_preprocess_bwd_kernel(
     offsets, indices,
     HQ: tl.constexpr, G: tl.constexpr, H: tl.constexpr,
     K: tl.constexpr, BT: tl.constexpr, BK: tl.constexpr,
-    IS_VARLEN: tl.constexpr
+    IS_VARLEN: tl.constexpr,
 ):
     i_t, i_nh = tl.program_id(0), tl.program_id(1)
     i_n, i_hq = i_nh // HQ, i_nh % HQ
@@ -26,10 +33,10 @@ def intra_chunk_preprocess_bwd_kernel(
 
     if IS_VARLEN:
         i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
-        T = eos - bos
+        bos, eos = tl.load(offsets + i_n).to(tl.int64), tl.load(offsets + i_n + 1).to(tl.int64)
+        T = (eos - bos).to(tl.int32)
     else:
-        bos, eos = i_n * T, i_n * T + T
+        bos, eos = (i_n * T).to(tl.int64), (i_n * T + T).to(tl.int64)
 
     b_dk = tl.zeros([BT, BK], dtype=tl.float32)
     b_dw_beta = tl.zeros([BT, BK], dtype=tl.float32)
@@ -114,12 +121,15 @@ def intra_chunk_preprocess_bwd_kernel(
 def intra_chunk_preprocess_bwd_fn(q, k, w, w2, beta,
                                   dq, dk, dA_local,
                                   dw1, dw2,
-                                  A, L, D, do, scale, cu_seqlens=None):
+                                  A, L, D, do, scale, cu_seqlens=None,
+                                  chunk_indices: torch.LongTensor | None = None):
     BT = A.shape[-1]
     HQ = q.shape[-2]
     B, T, H, K = k.shape
     G = HQ//H
-    indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
+    indices = chunk_indices
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(indices)
     grid = (NT, B*HQ)
     # better precision because h would be of norm smaller than 1 anyways
@@ -136,6 +146,6 @@ def intra_chunk_preprocess_bwd_fn(q, k, w, w2, beta,
         offsets=cu_seqlens, indices=indices,
         HQ=HQ, G=G, H=H,
         K=K, BT=BT, BK=triton.next_power_of_2(K),
-        num_stages=3 if check_shared_mem('hopper') else 1
+        num_stages=3 if check_shared_mem('hopper') else 1,
     )
     return dq_new, dk_new, dbeta, dw

@@ -1,10 +1,14 @@
-# -*- coding: utf-8 -*-
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 # Code adapted from
 # https://github.com/linkedin/Liger-Kernel/blob/main/src/liger_kernel/ops/fused_linear_cross_entropy.py
 
 from functools import partial
-from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -15,9 +19,9 @@ from torch.distributed import DeviceMesh
 from torch.distributed.tensor import Replicate, Shard, distribute_module
 from torch.distributed.tensor.parallel import ParallelStyle
 
-from fla.ops.utils import logsumexp_fwd
-from fla.ops.utils.op import exp
-from fla.utils import input_guard, is_amd
+from fla.modules.backends import dispatch
+from fla.ops.utils.op import exp, log, tanh
+from fla.utils import IS_AMD, input_guard
 
 try:
     from torch.distributed.tensor import DTensor
@@ -29,7 +33,64 @@ except (ImportError, AttributeError):
 # However, setting limit as 65536 as in LayerNorm tutorial is faster because of less register spilling
 # The optimal maximum block size depends on your hardware, your kernel, and your dtype
 MAX_FUSED_SIZE = 65536 // 2
-STATIC_WARPS = 32 if not is_amd else 16
+STATIC_WARPS = 32 if not IS_AMD else 16
+
+
+@triton.heuristics({
+    'HAS_SCALE': lambda args: args['scale'] is not None,
+    'HAS_SOFTCAPPING': lambda args: args['softcapping'] is not None,
+})
+@triton.jit
+def logsumexp_fwd_kernel(
+    x,
+    z,
+    scale,
+    softcapping,
+    D: tl.constexpr,
+    B: tl.constexpr,
+    HAS_SCALE: tl.constexpr,
+    HAS_SOFTCAPPING: tl.constexpr,
+):
+    i_n, i_d = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
+    o_d = i_d * B + tl.arange(0, B)
+    m_d = o_d < D
+
+    b_x = tl.load(x + i_n * D + o_d, mask=m_d, other=-float('inf'))
+    if HAS_SCALE:
+        b_x = b_x * scale
+    if HAS_SOFTCAPPING:
+        b_x = softcapping * tanh(b_x / softcapping)
+    b_m = tl.max(b_x, 0)
+    b_z = log(tl.sum(exp(b_x - b_m), 0)) + b_m
+    tl.store(z + i_n * tl.cdiv(D, B) + i_d, b_z)
+
+
+@dispatch('modules')
+def logsumexp_fwd(
+    x,
+    scale: float | None = None,
+    softcapping: float | None = None,
+    dtype: torch.dtype | None = None,
+):
+    shape = x.shape
+    x = x.view(-1, shape[-1])
+    N, D = x.shape
+    B = min(triton.next_power_of_2(D), 64 * 1024)
+    ND = triton.cdiv(D, B)
+
+    z = x.new_empty(N, ND, dtype=torch.float)
+    logsumexp_fwd_kernel[(N, ND)](
+        x=x,
+        z=z,
+        scale=scale,
+        softcapping=softcapping,
+        D=D,
+        B=B,
+    )
+    z = z.logsumexp(-1).view(*shape[:-1])
+    if dtype is not None and dtype != torch.float:
+        z = z.to(dtype)
+    return z
 
 
 @triton.jit
@@ -42,9 +103,10 @@ def cross_entropy_kernel(
     ignore_index,
     label_smoothing: tl.constexpr,
     logit_scale: tl.constexpr,
+    logit_softcapping: tl.constexpr,
     reduction: tl.constexpr,
     V: tl.constexpr,
-    BV: tl.constexpr
+    BV: tl.constexpr,
 ):
     """
     This kernel computes both cross entropy loss and the gradient of the input.
@@ -95,8 +157,13 @@ def cross_entropy_kernel(
     # Refer to Algorithm 3 in the paper: https://arxiv.org/pdf/1805.02867
 
     # 3. [Online softmax] first pass: compute logsumexp
-    # we did this in anouter kernel
-    b_l = tl.load(logits + b_y) * logit_scale
+    # we did this in another kernel
+    b_l = tl.load(logits + b_y).to(tl.float32) * logit_scale
+    if logit_softcapping is not None:
+        b_t_y = tanh(b_l / logit_softcapping)
+        b_l = logit_softcapping * b_t_y
+        # Save the softcap derivative for the target position for use in step 6
+        b_softcap_deriv_y = 1.0 - b_t_y * b_t_y
     b_lse = tl.load(lse + i_n)
 
     # 4. Calculate the loss
@@ -122,18 +189,26 @@ def cross_entropy_kernel(
     #      = dx_i - (1 - label_smoothing) / N
     for iv in range(0, NV):
         o_v = iv * BV + tl.arange(0, BV)
-        b_logits = tl.load(logits + o_v, mask=o_v < V, other=float('-inf')) * logit_scale
+        b_logits = tl.load(logits + o_v, mask=o_v < V, other=float('-inf')).to(tl.float32) * logit_scale
+        if logit_softcapping is not None:
+            b_t = tanh(b_logits / logit_softcapping)
+            b_capped = logit_softcapping * b_t
+        else:
+            b_capped = b_logits
         if label_smoothing > 0:
             # scale X beforehand to avoid overflow
-            b_z += tl.sum(tl.where(o_v < V, -eps * b_logits, 0.0))
-        b_p = (exp(b_logits - b_lse) - eps) * logit_scale
+            b_z += tl.sum(tl.where(o_v < V, -eps * b_capped, 0.0))
+        b_p = (exp(b_capped - b_lse) - eps) * logit_scale
+        # d(softcap * tanh(x/softcap))/dx = 1 - tanh(x/softcap)^2
+        if logit_softcapping is not None:
+            b_p = b_p * (1.0 - b_t * b_t)
         if reduction == "mean":
             b_p = b_p / total
         tl.store(logits + o_v, b_p, mask=o_v < V)
 
         tl.debug_barrier()
 
-    # Orginal loss = H(q, p),  with label smoothing regularization = H(q', p) and (label_smoothing / V) = eps
+    # Original loss = H(q, p),  with label smoothing regularization = H(q', p) and (label_smoothing / V) = eps
     # H(q', p) = (1 - label_smoothing) * H(q, p) + label_smoothing * H(u, p)
     #          = (1 - label_smoothing) * H(q, p) + eps * sum(logsoftmax(x_i))
     # By using m (global max of xi) and d (sum of e^(xi-m)), we can simplify as:
@@ -149,12 +224,18 @@ def cross_entropy_kernel(
     # 6. Specially handle the i==y case where `dx_y = (softmax(x_y) - (1 - label_smoothing) / N`
     b_l = tl.load(logits + b_y)
 
+    # The correction term also needs the softcap chain rule factor
+    if logit_softcapping is not None:
+        b_sc_factor = b_softcap_deriv_y
+    else:
+        b_sc_factor = 1.0
+
     # Normalize the loss by the number of non-ignored elements if reduction is "mean"
     if reduction == 'mean':
         b_loss = b_loss / total
-        b_l += (label_smoothing - 1) / total * logit_scale
+        b_l += (label_smoothing - 1) / total * logit_scale * b_sc_factor
     else:
-        b_l += (label_smoothing - 1) * logit_scale
+        b_l += (label_smoothing - 1) * logit_scale * b_sc_factor
 
     tl.store(loss + i_n, b_loss)
     tl.store(logits + b_y, b_l)
@@ -165,7 +246,7 @@ def elementwise_mul_kernel(
     x,
     g,
     N: tl.constexpr,
-    B: tl.constexpr
+    B: tl.constexpr,
 ):
     """
     This function multiplies each element of the tensor pointed by x with the value pointed by g.
@@ -192,6 +273,7 @@ def elementwise_mul_kernel(
     tl.store(x + o_x, b_x * b_g, mask=o_x < N)
 
 
+@dispatch('modules')
 def fused_linear_cross_entropy_forward(
     x: torch.Tensor,
     target: torch.LongTensor,
@@ -200,10 +282,12 @@ def fused_linear_cross_entropy_forward(
     ignore_index: int = -100,
     label_smoothing: float = 0.0,
     logit_scale: float = 1.0,
+    logit_softcapping: float = None,
     num_chunks: int = 8,
     reduction: str = "mean",
     use_l2warp: bool = False,
-    l2_penalty_factor: float = 1e-4
+    l2_penalty_factor: float = 1e-4,
+    accumulate_grad_in_fp32: bool = True,
 ):
     device = x.device
     # inputs have shape: [N, H]
@@ -226,10 +310,15 @@ def fused_linear_cross_entropy_forward(
 
     # [N, H]
     dx = torch.zeros_like(x, device=device)
+    grad_dtype = torch.float32 if accumulate_grad_in_fp32 else weight.dtype
+    bias_grad_dtype = None
+    if bias is not None:
+        bias_grad_dtype = torch.float32 if accumulate_grad_in_fp32 else bias.dtype
+
     # [V, H]
-    dw = torch.zeros_like(weight, device=device, dtype=torch.float) if weight is not None else None
+    dw = torch.zeros_like(weight, device=device, dtype=grad_dtype) if weight is not None else None
     # [V]
-    db = torch.zeros_like(bias, device=device, dtype=torch.float) if bias is not None else None
+    db = torch.zeros_like(bias, device=device, dtype=bias_grad_dtype) if bias is not None else None
     # [N]
     loss = torch.zeros(N, device=device, dtype=torch.float)
 
@@ -242,10 +331,12 @@ def fused_linear_cross_entropy_forward(
         # when doing matmul, use the original precision
         # [C, V]
         c_logits = F.linear(c_x, weight, bias)
+        if weight is not None and c_x.dtype != grad_dtype:
+            c_x = c_x.to(dtype=grad_dtype)
         c_target = target[start:end]
         # [C]
         # keep lse in fp32 to maintain precision
-        c_lse = logsumexp_fwd(c_logits, scale=logit_scale, dtype=torch.float)
+        c_lse = logsumexp_fwd(c_logits, scale=logit_scale, softcapping=logit_softcapping, dtype=torch.float)
 
         # unreduced loss
         c_loss = loss[start:end]
@@ -262,17 +353,18 @@ def fused_linear_cross_entropy_forward(
             ignore_index=ignore_index,
             label_smoothing=label_smoothing,
             logit_scale=logit_scale,
+            logit_softcapping=logit_softcapping,
             reduction=reduction,
             V=V,
             BV=BV,
-            num_warps=STATIC_WARPS
+            num_warps=STATIC_WARPS,
         )
         if use_l2warp:
             # a. Calculate the L2 gradient w.r.t logits (g_logits_l2)
             g_logits_l2 = torch.zeros_like(c_logits)
 
-            # Normalize factor by B*T, which is the 'total' variable here
-            l2_factor = l2_penalty_factor / total if reduction == 'mean' else l2_penalty_factor
+            # Match L2Wrap: normalize by the full number of input tokens, not by non-ignored labels.
+            l2_factor = l2_penalty_factor / N
             penalty_grad = c_maxx * l2_factor
             g_logits_l2.scatter_(-1, c_ids, penalty_grad)
 
@@ -282,9 +374,14 @@ def fused_linear_cross_entropy_forward(
             # Total_dw = CE_dw + L2_dw
             # Total_db = CE_db + L2_db
             if weight is not None:
-                dw.add_(g_logits_l2.t() @ c_x)
+                torch.addmm(
+                    input=dw,
+                    mat1=g_logits_l2.t().to(dtype=grad_dtype),
+                    mat2=c_x,
+                    out=dw,
+                )
             if bias is not None:
-                db.add_(g_logits_l2.sum(0))
+                torch.add(input=db, other=g_logits_l2.sum(0, dtype=bias_grad_dtype), out=db)
             # The dx contribution must be added to the final dx calculation
             dx_l2_contribution = torch.mm(g_logits_l2, weight)
         else:
@@ -294,12 +391,16 @@ def fused_linear_cross_entropy_forward(
         # thus dx should be of shape: C x H
         dx[start:end] = torch.mm(c_logits, weight) + dx_l2_contribution
 
-        # keep dw in fp32 to maintain precision
         if weight is not None:
-            dw += c_logits.t() @ c_x
+            torch.addmm(
+                input=dw,
+                mat1=c_logits.t().to(dtype=grad_dtype),
+                mat2=c_x,
+                out=dw,
+            )
 
         if bias is not None:
-            torch.add(input=db, other=c_logits.sum(0), out=db)
+            torch.add(input=db, other=c_logits.sum(0, dtype=bias_grad_dtype), out=db)
 
     loss = loss.sum()
     if dw is not None:
@@ -309,11 +410,12 @@ def fused_linear_cross_entropy_forward(
     return loss, dx, dw, db
 
 
+@dispatch('modules')
 def fused_linear_cross_entropy_backward(
     do: torch.Tensor,
     dx: torch.Tensor,
     dw: torch.Tensor,
-    db: torch.Tensor
+    db: torch.Tensor,
 ):
     # If cross entropy is the last layer, do is 1.0. Skip the mul to save time
     if torch.ne(do, torch.tensor(1.0, device=do.device)):
@@ -366,10 +468,12 @@ class FusedLinearCrossEntropyFunction(torch.autograd.Function):
         ignore_index: int = -100,
         label_smoothing: float = 0.0,
         logit_scale: float = 1.0,
+        logit_softcapping: float = None,
         num_chunks: int = 8,
         reduction: str = "mean",
         use_l2warp: bool = False,
         l2_penalty_factor: float = 1e-4,
+        accumulate_grad_in_fp32: bool = True,
     ):
         """
         Fusing the last linear layer with cross-entropy loss
@@ -393,6 +497,9 @@ class FusedLinearCrossEntropyFunction(torch.autograd.Function):
             the amount of smoothing when computing the loss, where 0.0 means no smoothing.
         logit_scale: float = 1.0,
             A scaling factor applied to the logits. Default: 1.0
+        logit_softcapping: float = None,
+            If > 0, apply logit softcapping: logits = softcap * tanh(logits / softcap).
+            Default: 0.0
         num_chunks: int
             The number of chunks to split the input tensor into for processing.
             This can help optimize memory usage and computation speed.
@@ -406,6 +513,10 @@ class FusedLinearCrossEntropyFunction(torch.autograd.Function):
             Whether to use L2 regularization on the logits to prevent overconfidence.
             Default: False
         l2_penalty_factor: float = 1e-4,
+            The L2Warp penalty factor. Default: 1e-4
+        accumulate_grad_in_fp32: bool = True,
+            Whether to accumulate weight and bias gradients in fp32 before casting them
+            back to the parameter dtype. Default: True
         """
         loss, dx, dw, db = fused_linear_cross_entropy_forward(
             x,
@@ -415,10 +526,12 @@ class FusedLinearCrossEntropyFunction(torch.autograd.Function):
             ignore_index,
             label_smoothing,
             logit_scale,
+            logit_softcapping,
             num_chunks,
             reduction,
             use_l2warp,
-            l2_penalty_factor
+            l2_penalty_factor,
+            accumulate_grad_in_fp32,
         )
         # downcast to dtype and store for backward
         ctx.save_for_backward(
@@ -433,7 +546,7 @@ class FusedLinearCrossEntropyFunction(torch.autograd.Function):
     def backward(ctx, do):
         dx, dw, db = ctx.saved_tensors
         dx, dw, db = fused_linear_cross_entropy_backward(do, dx, dw, db)
-        return dx, None, dw, db, None, None, None, None, None, None, None
+        return dx, None, dw, db, None, None, None, None, None, None, None, None, None
 
 
 def fused_linear_cross_entropy_loss(
@@ -444,11 +557,13 @@ def fused_linear_cross_entropy_loss(
     ignore_index: int = -100,
     label_smoothing: float = 0.0,
     logit_scale: float = 1.0,
+    logit_softcapping: float = None,
     num_chunks: int = 8,
     reduction: str = "mean",
     use_l2warp: bool = False,
     l2_penalty_factor: float = 1e-4,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    accumulate_grad_in_fp32: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Args:
         x (torch.Tensor): [batch_size * seq_len, hidden_size]
@@ -463,6 +578,9 @@ def fused_linear_cross_entropy_loss(
         label_smoothing: float
         logit_scale: float
             A scaling factor applied to the logits. Default: 1.0
+        logit_softcapping: float
+            If > 0, apply logit softcapping: logits = softcap * tanh(logits / softcap).
+            Default: 0.0
         num_chunks: int
             The number of chunks to split the input tensor into for processing.
             This can help optimize memory usage and computation speed.
@@ -472,6 +590,15 @@ def fused_linear_cross_entropy_loss(
             'mean': the weighted mean of the output is taken,
             'sum': the output will be summed.
             Default: 'mean'.
+        use_l2warp:
+            Whether to add the L2Warp logit regularization gradient. The penalty is normalized by
+            the full number of input tokens, matching `fla.modules.l2warp.l2_warp`.
+            Default: `False`.
+        l2_penalty_factor:
+            The L2Warp penalty factor. Default: `1e-4`.
+        accumulate_grad_in_fp32:
+            Whether to accumulate weight and bias gradients in fp32 before casting them
+            back to the parameter dtype. Default: `True`.
     Returns:
         losses: [batch,], float
     """
@@ -483,10 +610,12 @@ def fused_linear_cross_entropy_loss(
         ignore_index,
         label_smoothing,
         logit_scale,
+        logit_softcapping,
         num_chunks,
         reduction,
         use_l2warp,
-        l2_penalty_factor
+        l2_penalty_factor,
+        accumulate_grad_in_fp32,
     )
 
 
@@ -497,10 +626,12 @@ class FusedLinearCrossEntropyLoss(nn.Module):
         ignore_index: int = -100,
         label_smoothing: float = 0.0,
         logit_scale: float = 1.0,
+        logit_softcapping: float = None,
         num_chunks: int = 8,
         reduction: str = "mean",
         use_l2warp: bool = False,
         l2_penalty_factor: float = 1e-4,
+        accumulate_grad_in_fp32: bool = True,
     ):
         """
         Args:
@@ -509,6 +640,9 @@ class FusedLinearCrossEntropyLoss(nn.Module):
             label_smoothing: float
             logit_scale: float
                 A scaling factor applied to the logits. Default: 1.0
+            logit_softcapping: float
+                If > 0, apply logit softcapping: logits = softcap * tanh(logits / softcap).
+                Default: 0.0
             num_chunks: int
                 The number of chunks to split the input tensor into for processing.
                 This can help optimize memory usage and computation speed.
@@ -518,6 +652,15 @@ class FusedLinearCrossEntropyLoss(nn.Module):
                 'mean': the weighted mean of the output is taken,
                 'sum': the output will be summed.
                 Default: 'mean'.
+            use_l2warp:
+                Whether to add the L2Warp logit regularization gradient. The penalty is normalized by
+                the full number of input tokens, matching `fla.modules.l2warp.l2_warp`.
+                Default: `False`.
+            l2_penalty_factor:
+                The L2Warp penalty factor. Default: `1e-4`.
+            accumulate_grad_in_fp32:
+                Whether to accumulate weight and bias gradients in fp32 before casting them
+                back to the parameter dtype. Default: `True`.
         """
         super().__init__()
 
@@ -526,10 +669,12 @@ class FusedLinearCrossEntropyLoss(nn.Module):
         self.ignore_index = ignore_index
         self.label_smoothing = label_smoothing
         self.logit_scale = logit_scale
+        self.logit_softcapping = logit_softcapping
         self.num_chunks = num_chunks
         self.reduction = reduction
         self.use_l2warp = use_l2warp
         self.l2_penalty_factor = l2_penalty_factor
+        self.accumulate_grad_in_fp32 = accumulate_grad_in_fp32
 
     @torch.compiler.disable
     def forward(
@@ -537,7 +682,7 @@ class FusedLinearCrossEntropyLoss(nn.Module):
         x: torch.Tensor,
         target: torch.LongTensor,
         weight: torch.Tensor,
-        bias: Optional[torch.Tensor] = None
+        bias: torch.Tensor | None = None,
     ):
         """
         Args:
@@ -559,10 +704,12 @@ class FusedLinearCrossEntropyLoss(nn.Module):
             ignore_index=self.ignore_index,
             label_smoothing=self.label_smoothing,
             logit_scale=self.logit_scale,
+            logit_softcapping=self.logit_softcapping,
             num_chunks=self.num_chunks,
             reduction=self.reduction,
             use_l2warp=self.use_l2warp,
-            l2_penalty_factor=self.l2_penalty_factor
+            l2_penalty_factor=self.l2_penalty_factor,
+            accumulate_grad_in_fp32=self.accumulate_grad_in_fp32,
         )
         return loss
 
@@ -616,5 +763,5 @@ class LinearLossParallel(ParallelStyle):
             device_mesh,
             partition_fn=None,
             input_fn=partial(self._prepare_input_fn, self.sequence_sharding),
-            output_fn=partial(self._prepare_output_fn, self.use_local_output)
+            output_fn=partial(self._prepare_output_fn, self.use_local_output),
         )
