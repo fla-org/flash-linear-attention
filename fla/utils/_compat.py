@@ -5,7 +5,9 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import functools
 import inspect
+from importlib.util import find_spec
 
 import triton
 from packaging import version as package_version
@@ -18,3 +20,8 @@ TRITON_ABOVE_3_7_1 = package_version.parse(triton.__version__) >= package_versio
 
 SUPPORTS_AUTOTUNE_CACHE = "cache_results" in inspect.signature(triton.autotune).parameters
 autotune_cache_kwargs = {"cache_results": FLA_CACHE_RESULTS} if SUPPORTS_AUTOTUNE_CACHE else {}
+
+
+@functools.cache
+def find_spec_cached(name):
+    return find_spec(name)

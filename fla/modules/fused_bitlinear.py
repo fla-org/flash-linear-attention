@@ -133,7 +133,7 @@ def layer_norm_fwd_kernel_quant(
     # Aply quantization to the output
     scale = 127.0 / tl.maximum(tl.max(tl.abs(y), 0), 1e-5)
     # Quantize and then de-quantize the tensor
-    y = tl.extra.cuda.libdevice.round(y * scale)
+    y = tl.extra.libdevice.round(y * scale)
     y = tl.maximum(tl.minimum(y, 127), -128) / scale
 
     # Write output
@@ -276,7 +276,7 @@ def layer_norm_bwd_kernel(
             # Aply quantization to the output
             scale = 127.0 / tl.maximum(tl.max(tl.abs(y), 0), 1e-5)
             # Quantize and then de-quantize the tensor
-            y = tl.extra.cuda.libdevice.round(y * scale)
+            y = tl.extra.libdevice.round(y * scale)
             y = tl.maximum(tl.minimum(y, 127), -128) / scale
 
             tl.store(Y + cols, y, mask=mask)

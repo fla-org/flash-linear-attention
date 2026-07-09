@@ -6,6 +6,7 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import importlib.util
+import math
 
 import pytest
 import torch
@@ -78,6 +79,9 @@ def test_modeling(
 
     model = Mamba3ForCausalLM(config).to(device=device, dtype=dtype)
     model.eval()
+
+    A = model.backbone.layers[0].mixer._compute_a(torch.tensor([-100.0, 0.0], device=device))
+    torch.testing.assert_close(A, torch.tensor([-config.A_floor, -math.log(2)], device=device))
 
     x = torch.randint(0, config.vocab_size, (B, T), device=device)
     y = model(x)

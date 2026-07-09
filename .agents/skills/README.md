@@ -23,3 +23,4 @@ Do not add a `README.md` inside individual skill directories; the canonical entr
 | `fla-dispatch-backends`    | `@dispatch` decorator and backend registry workflow                                                                                                               |
 | `fla-correctness-coverage` | Coverage matrix and test guidance for `fla/ops/**` kernels                                                                                                        |
 | `fla-mr-readiness`         | MR/PR preparation checklist, test plan, and PR body structure                                                                                                     |
+| `fla-triton-to-gluon`      | Incremental workflow for porting a Triton kernel to Gluon (layouts, cp.async/TMA, WGMMA/tcgen05, scheduling), with API mapping and pitfall checklist              |

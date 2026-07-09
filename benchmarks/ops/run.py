@@ -22,6 +22,9 @@ Usage::
     # All registered ops
     python -m benchmarks.ops.run --op all
 
+    # Select an op backend (ops with a `backend` param, e.g. AttnRes triton vs gluon)
+    python -m benchmarks.ops.run --op fused_attnres --backend gluon
+
     # Forward only
     python -m benchmarks.ops.run --op chunk_gla --modes fwd
 
@@ -233,6 +236,7 @@ def benchmark_op(
     op_name: str,
     shapes: dict[str, dict[str, int]],
     modes: list[str] | None = None,
+    backend: str | None = None,
 ) -> list[dict]:
     """Benchmark a single op across all *shapes* and *modes*.
 
@@ -245,6 +249,22 @@ def benchmark_op(
 
     config = get_op(op_name)
     op_fn = _import_op(config)
+
+    # `--backend` selects an op backend by toggling its dispatch env var (see OpConfig.backend_env),
+    # matching how FLA backends are enabled at runtime. 'triton' (or unset) leaves the default path.
+    call_kwargs = dict(config.extra_kwargs)
+    op_label = op_name
+    backend_env = config.backend_env or {}
+    if backend and backend != 'triton':
+        env = backend_env.get(backend)
+        if env is not None:
+            os.environ[env] = '1'
+            op_label = f"{op_name}[{backend}]"
+        else:
+            logger.info(f"Op '{op_name}' has no '{backend}' backend; running the default path")
+    elif backend == 'triton':
+        for env in backend_env.values():
+            os.environ[env] = '0'
 
     if config.skip_backward and 'fwdbwd' in modes:
         modes = [m for m in modes if m != 'fwdbwd']
@@ -285,12 +305,12 @@ def benchmark_op(
         extra_shape_kw = {k: v for k, v in shape_dict.items() if k not in ('B', 'T', 'H', 'D')}
         try:
             inputs = generate_inputs(config, B, T, H, D, dtype=dtype, device=device, **extra_shape_kw)
-            out = op_fn(**inputs, **config.extra_kwargs)
+            out = op_fn(**inputs, **call_kwargs)
             out_tensor = out[0] if config.output_is_tuple else out
             do = torch.randn_like(out_tensor)
 
             def _fwdbwd_fn(inputs=inputs, do=do):
-                result = op_fn(**inputs, **config.extra_kwargs)
+                result = op_fn(**inputs, **call_kwargs)
                 t = result[0] if config.output_is_tuple else result
                 t.backward(do)
 
@@ -314,17 +334,17 @@ def benchmark_op(
             logger.warning(f"Input generation failed for {op_name} @ {shape_name}: {e}")
             continue
 
-        out = op_fn(**inputs, **config.extra_kwargs)
+        out = op_fn(**inputs, **call_kwargs)
         out_tensor = out[0] if config.output_is_tuple else out
         do = torch.randn_like(out_tensor)
 
         for mode in modes:
             if mode == 'fwd':
                 def fn(inputs=inputs):
-                    return op_fn(**inputs, **config.extra_kwargs)
+                    return op_fn(**inputs, **call_kwargs)
             else:
                 def fn(inputs=inputs, do=do):
-                    result = op_fn(**inputs, **config.extra_kwargs)
+                    result = op_fn(**inputs, **call_kwargs)
                     t = result[0] if config.output_is_tuple else result
                     t.backward(do)
 
@@ -337,7 +357,7 @@ def benchmark_op(
                 continue
 
             results.append({
-                'op': op_name,
+                'op': op_label,
                 'mode': mode,
                 'B': B, 'T': T, 'H': H, 'D': D,
                 **extra_shape_kw,
@@ -500,7 +520,7 @@ def _find_project_root() -> str:
     return os.getcwd()
 
 
-def _bench_at_ref(ref, op_names, shape_configs, modes):
+def _bench_at_ref(ref, op_names, shape_configs, modes, backend=None):
     """Run benchmarks at a git ref using a temporary worktree.
 
     Returns (results_list, machine_info_dict) or (None, None) on failure.
@@ -534,6 +554,8 @@ def _bench_at_ref(ref, op_names, shape_configs, modes):
         cmd = [sys.executable, runner, '--op', *op_names,
                '--custom-shapes', json.dumps(shape_configs),
                '--modes', *modes, '--json', out_json]
+        if backend is not None:
+            cmd += ['--backend', backend]
         subprocess.run(cmd, cwd=worktree_dir)
 
         if os.path.exists(out_json):
@@ -564,6 +586,11 @@ def main():
     parser.add_argument(
         '--op', nargs='+', default=None,
         help='Op name(s) to benchmark, or "all"',
+    )
+    parser.add_argument(
+        '--backend', default=None,
+        help="Op backend to select, e.g. 'triton' or 'gluon'. Toggles the backend's dispatch env "
+             "var for ops that declare one (see OpConfig.backend_env); ignored otherwise.",
     )
     parser.add_argument(
         '--custom-shapes', default=None,
@@ -640,7 +667,7 @@ def main():
     all_results = []
     for op_name in op_names:
         try:
-            all_results.extend(benchmark_op(op_name, shape_configs, modes=args.modes))
+            all_results.extend(benchmark_op(op_name, shape_configs, modes=args.modes, backend=args.backend))
         except Exception as e:
             logger.error(f"Failed to benchmark {op_name}: {e}")
 
@@ -654,7 +681,7 @@ def main():
     baseline, baseline_info = None, None
     if base_ref:
         baseline, baseline_info = _bench_at_ref(
-            base_ref, op_names, shape_configs, args.modes)
+            base_ref, op_names, shape_configs, args.modes, backend=args.backend)
 
     # Sort by (mode, L, B, T, H, D, op) so the table groups by mode first
     # and (when present) by L so different residual-source counts cluster.

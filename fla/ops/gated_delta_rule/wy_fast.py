@@ -12,7 +12,13 @@ import triton.language as tl
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.op import exp2
-from fla.utils import autotune_cache_kwargs, check_shared_mem
+from fla.utils import IS_NVIDIA_BLACKWELL, autotune_cache_kwargs, check_shared_mem
+
+# Blackwell can select unstable Triton configs for prepare_wy_repr_bwd_kernel
+# during autotuning (see #913). Restrict it to the config that has been
+# validated on B200 until the wider config space is re-validated.
+PREPARE_WY_REPR_BWD_NUM_WARPS = [2] if IS_NVIDIA_BLACKWELL else [2, 4]
+PREPARE_WY_REPR_BWD_NUM_STAGES = [4] if IS_NVIDIA_BLACKWELL else [2, 3, 4]
 
 
 @triton.heuristics({
@@ -94,8 +100,8 @@ def recompute_w_u_fwd_kernel(
 @fla_cache_autotune(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [2, 4]
-        for num_stages in [2, 3, 4]
+        for num_warps in PREPARE_WY_REPR_BWD_NUM_WARPS
+        for num_stages in PREPARE_WY_REPR_BWD_NUM_STAGES
     ],
     key=['H', 'HV', 'K', 'V', 'BT', 'BK', 'BV', 'IS_VARLEN'],
     **autotune_cache_kwargs,

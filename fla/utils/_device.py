@@ -115,13 +115,23 @@ device_platform = get_available_device()
 device_name = map_triton_backend_to_torch_device()
 
 IS_AMD = (device_platform == 'hip')
+
 IS_ARM = platform.machine().lower() in ('aarch64', 'arm64')
+
 IS_INTEL = (device_platform == 'xpu')
 IS_INTEL_ALCHEMIST = (IS_INTEL and 'Intel(R) Arc(TM) A' in torch.xpu.get_device_name(0))
-IS_NVIDIA = (device_platform == 'cuda')
+
 IS_NPU = (device_platform == 'npu')
+
+IS_NVIDIA = (device_platform == 'cuda')
+IS_NVIDIA_HOPPER = (
+    IS_NVIDIA and (
+        'NVIDIA H' in torch.cuda.get_device_name(0)
+        or torch.cuda.get_device_capability()[0] == 9
+    )
+)
+IS_NVIDIA_SM100 = (IS_NVIDIA and torch.cuda.get_device_capability()[0] == 10)
 IS_NVIDIA_BLACKWELL = (IS_NVIDIA and torch.cuda.get_device_capability()[0] in (10, 12))
-IS_NVIDIA_HOPPER = (IS_NVIDIA and ('NVIDIA H' in torch.cuda.get_device_name(0) or torch.cuda.get_device_capability()[0] == 9))
 
 # Nvidia Ampere or newer, haven't check AMD and intel yet.
 IS_TF32_SUPPORTED = (IS_NVIDIA and torch.cuda.get_device_capability(0)[0] >= 8)
@@ -130,7 +140,10 @@ IS_TMA_SUPPORTED = (
     IS_NVIDIA
     and torch.cuda.get_device_capability(0)[0] >= 9
     and os.environ.get('FLA_USE_TMA', '0') == '1'
-    and (hasattr(triton.language, '_experimental_make_tensor_descriptor') or hasattr(triton.language, 'make_tensor_descriptor'))
+    and (
+        hasattr(triton.language, '_experimental_make_tensor_descriptor')
+        or hasattr(triton.language, 'make_tensor_descriptor')
+    )
 )
 
 if IS_NVIDIA and not IS_TF32_SUPPORTED:

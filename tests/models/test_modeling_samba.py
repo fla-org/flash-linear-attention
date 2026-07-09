@@ -9,8 +9,14 @@ import pytest
 import torch
 
 from fla.models import SambaConfig
+from fla.utils import find_spec_cached
 
 from .test_modeling_base import run_test_generation, run_test_model_forward_backward
+
+# Mark (not importorskip): a fully skipped module reports "no tests collected" and exits
+# with code 5, which CI per-file loops treat as a failure.
+pytestmark = pytest.mark.skipif(find_spec_cached(
+    "flash_attn") is None, reason="Samba attention layers require flash-attn (`pip install flash-attn --no-build-isolation`).")
 
 
 # ===================================================================================

@@ -13,19 +13,76 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.op import exp, log
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, input_guard
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
+from fla.utils.ascend_ub_manager import ASCEND_MAX_GRID_DIM, compute_activation_block_size
 
-# Ascend vector UB is small; keep warps and tile sizes conservative.
-NUM_WARPS_AUTOTUNE = [2, 4]
-BLOCK_SIZES_AUTOTUNE = [512, 1024, 2048]
-STATIC_WARPS = 2
-STATIC_BLOCK_SIZE = 1024
+# Ascend launch limits: grid dim and per-core vector width.
+_MAX_CORE_DIM = 65535
+
+
+def _activation_launch_config(
+    T: int,
+    is_backward: bool = False,
+    *,
+    memory_multiplier: float | None = None,
+) -> tuple[tuple[int], int]:
+    """Pick block size under Ascend launch and UB limits."""
+    B = compute_activation_block_size(
+        T,
+        is_backward,
+        max_grid=ASCEND_MAX_GRID_DIM,
+        max_core_dim=_MAX_CORE_DIM,
+        memory_multiplier=memory_multiplier,
+    )
+    return (triton.cdiv(T, B),), B
+
+
+@triton.jit
+def _flat_offset(
+    offs,
+    D: tl.constexpr,
+    stride,
+    IS_LINEAR: tl.constexpr,
+):
+    if IS_LINEAR:
+        return offs
+    row = offs // D
+    col = offs % D
+    return row * stride + col
 
 
 def _get_stride(x: torch.Tensor) -> int:
     if x.ndim < 2:
         return 0
     return x.stride(-2)
+
+
+def _is_linear_stride(stride: int, D: int) -> bool:
+    return stride == D
+
+
+_LINEAR_HEURISTICS_XY = {
+    'X_LINEAR': lambda args: _is_linear_stride(args['stride_x_row'], args['D']),
+    'Y_LINEAR': lambda args: _is_linear_stride(args['stride_y_row'], args['D']),
+}
+
+_LINEAR_HEURISTICS_XYZ = {
+    **_LINEAR_HEURISTICS_XY,
+    'Z_LINEAR': lambda args: _is_linear_stride(args['stride_z_row'], args['D']),
+}
+
+_LINEAR_HEURISTICS_BWD = {
+    'X_LINEAR': lambda args: _is_linear_stride(args['stride_x_row'], args['D']),
+    'DY_LINEAR': lambda args: _is_linear_stride(args['stride_dy_row'], args['D']),
+    'DX_LINEAR': lambda args: _is_linear_stride(args['stride_dx_row'], args['D']),
+}
+
+_LINEAR_HEURISTICS_FWDBWD = {
+    **_LINEAR_HEURISTICS_XYZ,
+    'G_LINEAR': lambda args: _is_linear_stride(args['stride_g_row'], args['D']),
+    'DX_LINEAR': lambda args: _is_linear_stride(args['stride_dx_row'], args['D']),
+    'DY_LINEAR': lambda args: _is_linear_stride(args['stride_dy_row'], args['D']),
+}
 
 
 def _is_inner_contiguous(x: torch.Tensor) -> bool:
@@ -62,15 +119,7 @@ def _alloc_output(x: torch.Tensor, contiguous: bool = False) -> torch.Tensor:
     return torch.empty_like(x)
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({'B': bs}, num_warps=num_warps)
-        for bs in BLOCK_SIZES_AUTOTUNE
-        for num_warps in NUM_WARPS_AUTOTUNE
-    ],
-    key=['D'],
-    **autotune_cache_kwargs,
-)
+@triton.heuristics(_LINEAR_HEURISTICS_XY)
 @triton.jit(do_not_specialize=['T'])
 def sigmoid_fwd_kernel(
     x, y,
@@ -79,28 +128,20 @@ def sigmoid_fwd_kernel(
     stride_x_row,
     stride_y_row,
     B: tl.constexpr,
+    X_LINEAR: tl.constexpr,
+    Y_LINEAR: tl.constexpr,
 ):
     pid = tl.program_id(0)
     offs = pid * B + tl.arange(0, B)
     mask = offs < T
-    row = offs // D
-    col = offs % D
-    x_off = row * stride_x_row + col
-    y_off = row * stride_y_row + col
+    x_off = _flat_offset(offs, D, stride_x_row, X_LINEAR)
+    y_off = _flat_offset(offs, D, stride_y_row, Y_LINEAR)
     x_val = tl.load(x + x_off, mask=mask, other=0.).to(tl.float32)
-    y_val = 1.0 / (1.0 + exp(-x_val))
+    y_val = tl.sigmoid(x_val)
     tl.store(y + y_off, y_val.to(y.dtype.element_ty), mask=mask)
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({'B': bs}, num_warps=num_warps)
-        for bs in BLOCK_SIZES_AUTOTUNE
-        for num_warps in NUM_WARPS_AUTOTUNE
-    ],
-    key=['D'],
-    **autotune_cache_kwargs,
-)
+@triton.heuristics(_LINEAR_HEURISTICS_BWD)
 @triton.jit(do_not_specialize=['T'])
 def sigmoid_bwd_kernel(
     x, dy, dx,
@@ -110,31 +151,24 @@ def sigmoid_bwd_kernel(
     stride_dy_row,
     stride_dx_row,
     B: tl.constexpr,
+    X_LINEAR: tl.constexpr,
+    DY_LINEAR: tl.constexpr,
+    DX_LINEAR: tl.constexpr,
 ):
     pid = tl.program_id(0)
     offs = pid * B + tl.arange(0, B)
     mask = offs < T
-    row = offs // D
-    col = offs % D
-    x_off = row * stride_x_row + col
-    dy_off = row * stride_dy_row + col
-    dx_off = row * stride_dx_row + col
+    x_off = _flat_offset(offs, D, stride_x_row, X_LINEAR)
+    dy_off = _flat_offset(offs, D, stride_dy_row, DY_LINEAR)
+    dx_off = _flat_offset(offs, D, stride_dx_row, DX_LINEAR)
     x_val = tl.load(x + x_off, mask=mask, other=0.).to(tl.float32)
     g_val = tl.load(dy + dy_off, mask=mask, other=0.).to(tl.float32)
-    s = 1.0 / (1.0 + exp(-x_val))
+    s = tl.sigmoid(x_val)
     dx_val = g_val * s * (1.0 - s)
     tl.store(dx + dx_off, dx_val.to(dx.dtype.element_ty), mask=mask)
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({'B': bs}, num_warps=num_warps)
-        for bs in BLOCK_SIZES_AUTOTUNE
-        for num_warps in NUM_WARPS_AUTOTUNE
-    ],
-    key=['D'],
-    **autotune_cache_kwargs,
-)
+@triton.heuristics(_LINEAR_HEURISTICS_XY)
 @triton.jit(do_not_specialize=['T'])
 def logsigmoid_fwd_kernel(
     x,
@@ -145,31 +179,23 @@ def logsigmoid_fwd_kernel(
     stride_x_row,
     stride_y_row,
     B: tl.constexpr,
+    X_LINEAR: tl.constexpr,
+    Y_LINEAR: tl.constexpr,
 ):
     i = tl.program_id(0)
-    o_i = i * B + tl.arange(0, B)
-    m_i = o_i < T
-    row = o_i // D
-    col = o_i % D
-    x_off = row * stride_x_row + col
-    y_off = row * stride_y_row + col
+    offs = i * B + tl.arange(0, B)
+    mask = offs < T
+    x_off = _flat_offset(offs, D, stride_x_row, X_LINEAR)
+    y_off = _flat_offset(offs, D, stride_y_row, Y_LINEAR)
 
-    b_x = tl.load(x + x_off, mask=m_i, other=0.).to(tl.float32)
+    b_x = tl.load(x + x_off, mask=mask, other=0.).to(tl.float32)
     b_m = tl.minimum(0., b_x)
     b_z = 1. + exp(-tl.abs(b_x))
     b_y = (b_m - log(b_z)) / temperature
-    tl.store(y + y_off, b_y.to(y.dtype.element_ty), mask=m_i)
+    tl.store(y + y_off, b_y.to(y.dtype.element_ty), mask=mask)
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({'B': bs}, num_warps=num_warps)
-        for bs in BLOCK_SIZES_AUTOTUNE
-        for num_warps in NUM_WARPS_AUTOTUNE
-    ],
-    key=['D'],
-    **autotune_cache_kwargs,
-)
+@triton.heuristics(_LINEAR_HEURISTICS_BWD)
 @triton.jit(do_not_specialize=['T'])
 def logsigmoid_bwd_kernel(
     x,
@@ -182,32 +208,25 @@ def logsigmoid_bwd_kernel(
     stride_dx_row,
     stride_dy_row,
     B: tl.constexpr,
+    X_LINEAR: tl.constexpr,
+    DX_LINEAR: tl.constexpr,
+    DY_LINEAR: tl.constexpr,
 ):
     i = tl.program_id(0)
-    o_i = i * B + tl.arange(0, B)
-    m_i = o_i < T
-    row = o_i // D
-    col = o_i % D
-    x_off = row * stride_x_row + col
-    dx_off = row * stride_dx_row + col
-    dy_off = row * stride_dy_row + col
+    offs = i * B + tl.arange(0, B)
+    mask = offs < T
+    x_off = _flat_offset(offs, D, stride_x_row, X_LINEAR)
+    dx_off = _flat_offset(offs, D, stride_dx_row, DX_LINEAR)
+    dy_off = _flat_offset(offs, D, stride_dy_row, DY_LINEAR)
 
-    b_x = tl.load(x + x_off, mask=m_i, other=0.).to(tl.float32)
-    b_dy = tl.load(dy + dy_off, mask=m_i, other=0.).to(tl.float32)
-    b_s = 1.0 / (1.0 + exp(-b_x))
+    b_x = tl.load(x + x_off, mask=mask, other=0.).to(tl.float32)
+    b_dy = tl.load(dy + dy_off, mask=mask, other=0.).to(tl.float32)
+    b_s = tl.sigmoid(b_x)
     b_dx = b_dy * ((1. - b_s) / temperature)
-    tl.store(dx + dx_off, b_dx.to(dx.dtype.element_ty), mask=m_i)
+    tl.store(dx + dx_off, b_dx.to(dx.dtype.element_ty), mask=mask)
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({'B': bs}, num_warps=num_warps)
-        for bs in BLOCK_SIZES_AUTOTUNE
-        for num_warps in NUM_WARPS_AUTOTUNE
-    ],
-    key=['D'],
-    **autotune_cache_kwargs,
-)
+@triton.heuristics(_LINEAR_HEURISTICS_XY)
 @triton.jit(do_not_specialize=['T'])
 def swish_fwd_kernel(
     x, y,
@@ -216,29 +235,21 @@ def swish_fwd_kernel(
     stride_x_row,
     stride_y_row,
     B: tl.constexpr,
+    X_LINEAR: tl.constexpr,
+    Y_LINEAR: tl.constexpr,
 ):
     pid = tl.program_id(0)
     offs = pid * B + tl.arange(0, B)
     mask = offs < T
-    row = offs // D
-    col = offs % D
-    x_off = row * stride_x_row + col
-    y_off = row * stride_y_row + col
+    x_off = _flat_offset(offs, D, stride_x_row, X_LINEAR)
+    y_off = _flat_offset(offs, D, stride_y_row, Y_LINEAR)
     x_val = tl.load(x + x_off, mask=mask, other=0.).to(tl.float32)
-    s = 1.0 / (1.0 + exp(-x_val))
+    s = tl.sigmoid(x_val)
     y_val = x_val * s
     tl.store(y + y_off, y_val.to(y.dtype.element_ty), mask=mask)
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({'B': bs}, num_warps=num_warps)
-        for bs in BLOCK_SIZES_AUTOTUNE
-        for num_warps in NUM_WARPS_AUTOTUNE
-    ],
-    key=['D'],
-    **autotune_cache_kwargs,
-)
+@triton.heuristics(_LINEAR_HEURISTICS_BWD)
 @triton.jit(do_not_specialize=['T'])
 def swish_bwd_kernel(
     x, dy, dx,
@@ -248,31 +259,24 @@ def swish_bwd_kernel(
     stride_dy_row,
     stride_dx_row,
     B: tl.constexpr,
+    X_LINEAR: tl.constexpr,
+    DY_LINEAR: tl.constexpr,
+    DX_LINEAR: tl.constexpr,
 ):
     pid = tl.program_id(0)
     offs = pid * B + tl.arange(0, B)
     mask = offs < T
-    row = offs // D
-    col = offs % D
-    x_off = row * stride_x_row + col
-    dy_off = row * stride_dy_row + col
-    dx_off = row * stride_dx_row + col
+    x_off = _flat_offset(offs, D, stride_x_row, X_LINEAR)
+    dy_off = _flat_offset(offs, D, stride_dy_row, DY_LINEAR)
+    dx_off = _flat_offset(offs, D, stride_dx_row, DX_LINEAR)
     x_val = tl.load(x + x_off, mask=mask, other=0.).to(tl.float32)
     g_val = tl.load(dy + dy_off, mask=mask, other=0.).to(tl.float32)
-    s = 1.0 / (1.0 + exp(-x_val))
+    s = tl.sigmoid(x_val)
     dx_val = g_val * s * (1.0 + x_val * (1.0 - s))
     tl.store(dx + dx_off, dx_val.to(dx.dtype.element_ty), mask=mask)
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({'B': bs}, num_warps=num_warps)
-        for bs in BLOCK_SIZES_AUTOTUNE
-        for num_warps in NUM_WARPS_AUTOTUNE
-    ],
-    key=['D'],
-    **autotune_cache_kwargs,
-)
+@triton.heuristics(_LINEAR_HEURISTICS_XYZ)
 @triton.jit(do_not_specialize=['T'])
 def swiglu_fwd_kernel(
     x, y, z,
@@ -282,34 +286,27 @@ def swiglu_fwd_kernel(
     stride_y_row,
     stride_z_row,
     B: tl.constexpr,
+    X_LINEAR: tl.constexpr,
+    Y_LINEAR: tl.constexpr,
+    Z_LINEAR: tl.constexpr,
 ):
     pid = tl.program_id(0)
     offs = pid * B + tl.arange(0, B)
     mask = offs < T
-    row = offs // D
-    col = offs % D
-    x_off = row * stride_x_row + col
-    y_off = row * stride_y_row + col
-    z_off = row * stride_z_row + col
+    x_off = _flat_offset(offs, D, stride_x_row, X_LINEAR)
+    y_off = _flat_offset(offs, D, stride_y_row, Y_LINEAR)
+    z_off = _flat_offset(offs, D, stride_z_row, Z_LINEAR)
     x_val = tl.load(x + x_off, mask=mask, other=0.).to(tl.float32)
     y_val = tl.load(y + y_off, mask=mask, other=0.).to(tl.float32)
-    s = 1.0 / (1.0 + exp(-x_val))
+    s = tl.sigmoid(x_val)
     z_val = x_val * s * y_val
     tl.store(z + z_off, z_val.to(z.dtype.element_ty), mask=mask)
 
 
 @triton.heuristics({
     'HAS_WEIGHT': lambda args: args['z'] is not None,
+    **_LINEAR_HEURISTICS_FWDBWD,
 })
-@triton.autotune(
-    configs=[
-        triton.Config({'B': bs}, num_warps=num_warps)
-        for bs in BLOCK_SIZES_AUTOTUNE
-        for num_warps in NUM_WARPS_AUTOTUNE
-    ],
-    key=['D'],
-    **autotune_cache_kwargs,
-)
 @triton.jit(do_not_specialize=['T'])
 def swiglu_fwdbwd_kernel(
     x, y, g, dx, dy, z,
@@ -323,22 +320,26 @@ def swiglu_fwdbwd_kernel(
     stride_z_row,
     B: tl.constexpr,
     HAS_WEIGHT: tl.constexpr,
+    X_LINEAR: tl.constexpr,
+    Y_LINEAR: tl.constexpr,
+    G_LINEAR: tl.constexpr,
+    DX_LINEAR: tl.constexpr,
+    DY_LINEAR: tl.constexpr,
+    Z_LINEAR: tl.constexpr,
 ):
     pid = tl.program_id(0)
     offs = pid * B + tl.arange(0, B)
     mask = offs < T
-    row = offs // D
-    col = offs % D
-    x_off = row * stride_x_row + col
-    y_off = row * stride_y_row + col
-    g_off = row * stride_g_row + col
-    dx_off = row * stride_dx_row + col
-    dy_off = row * stride_dy_row + col
+    x_off = _flat_offset(offs, D, stride_x_row, X_LINEAR)
+    y_off = _flat_offset(offs, D, stride_y_row, Y_LINEAR)
+    g_off = _flat_offset(offs, D, stride_g_row, G_LINEAR)
+    dx_off = _flat_offset(offs, D, stride_dx_row, DX_LINEAR)
+    dy_off = _flat_offset(offs, D, stride_dy_row, DY_LINEAR)
     x_val = tl.load(x + x_off, mask=mask, other=0.).to(tl.float32)
     y_val = tl.load(y + y_off, mask=mask, other=0.).to(tl.float32)
     g_val = tl.load(g + g_off, mask=mask, other=0.).to(tl.float32)
 
-    s = 1.0 / (1.0 + exp(-x_val))
+    s = tl.sigmoid(x_val)
     x_s = x_val * s
     dx_val = g_val * s * (1.0 + x_val * (1.0 - s)) * y_val
     dy_val = g_val * x_s
@@ -346,177 +347,9 @@ def swiglu_fwdbwd_kernel(
     tl.store(dx + dx_off, dx_val.to(dx.dtype.element_ty), mask=mask)
     tl.store(dy + dy_off, dy_val.to(dy.dtype.element_ty), mask=mask)
     if HAS_WEIGHT:
-        z_off = row * stride_z_row + col
+        z_off = _flat_offset(offs, D, stride_z_row, Z_LINEAR)
         z_val = x_s * y_val
         tl.store(z + z_off, z_val.to(z.dtype.element_ty), mask=mask)
-
-
-@triton.jit(do_not_specialize=['T'])
-def gelu_fwd_kernel(
-    x, y,
-    T,
-    D: tl.constexpr,
-    stride_x_row,
-    stride_y_row,
-    BLOCK_SIZE: tl.constexpr,
-):
-    pid = tl.program_id(0)
-    offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = offs < T
-    row = offs // D
-    col = offs % D
-    x_off = row * stride_x_row + col
-    y_off = row * stride_y_row + col
-    x_val = tl.load(x + x_off, mask=mask, other=0.).to(tl.float32)
-    t = 0.79788456 * x_val * (1.0 + 0.044715 * x_val * x_val)
-    s = 1.0 / (1.0 + exp(-2.0 * t))
-    tanh_out = 2.0 * s - 1.0
-    y_val = x_val * 0.5 * (1.0 + tanh_out)
-    tl.store(y + y_off, y_val.to(y.dtype.element_ty), mask=mask)
-
-
-@triton.jit(do_not_specialize=['T'])
-def gelu_bwd_kernel(
-    x, dy, dx,
-    T,
-    D: tl.constexpr,
-    stride_x_row,
-    stride_dy_row,
-    stride_dx_row,
-    BLOCK_SIZE: tl.constexpr,
-):
-    pid = tl.program_id(0)
-    offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = offs < T
-    row = offs // D
-    col = offs % D
-    x_off = row * stride_x_row + col
-    dy_off = row * stride_dy_row + col
-    dx_off = row * stride_dx_row + col
-    x_val = tl.load(x + x_off, mask=mask, other=0.).to(tl.float32)
-    g_val = tl.load(dy + dy_off, mask=mask, other=0.).to(tl.float32)
-    t = 0.79788456 * x_val * (1.0 + 0.044715 * x_val * x_val)
-    s = 1.0 / (1.0 + exp(-2.0 * t))
-    tanh_out = 2.0 * s - 1.0
-    ff = 0.5 * x_val * (
-        (1.0 - tanh_out * tanh_out) * (0.79788456 + 0.1070322243 * x_val * x_val)
-    ) + 0.5 * (1.0 + tanh_out)
-    dx_val = ff * g_val
-    tl.store(dx + dx_off, dx_val.to(dx.dtype.element_ty), mask=mask)
-
-
-@triton.jit(do_not_specialize=['T'])
-def sqrelu_fwd_kernel(
-    x, y,
-    T,
-    D: tl.constexpr,
-    stride_x_row,
-    stride_y_row,
-    BLOCK_SIZE: tl.constexpr,
-):
-    pid = tl.program_id(0)
-    offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = offs < T
-    row = offs // D
-    col = offs % D
-    x_off = row * stride_x_row + col
-    y_off = row * stride_y_row + col
-    x_val = tl.load(x + x_off, mask=mask, other=0.).to(tl.float32)
-    r = tl.maximum(x_val, 0.0)
-    y_val = r * r
-    tl.store(y + y_off, y_val.to(y.dtype.element_ty), mask=mask)
-
-
-@triton.jit(do_not_specialize=['T'])
-def sqrelu_bwd_kernel(
-    x, dy, dx,
-    T,
-    D: tl.constexpr,
-    stride_x_row,
-    stride_dy_row,
-    stride_dx_row,
-    BLOCK_SIZE: tl.constexpr,
-):
-    pid = tl.program_id(0)
-    offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = offs < T
-    row = offs // D
-    col = offs % D
-    x_off = row * stride_x_row + col
-    dy_off = row * stride_dy_row + col
-    dx_off = row * stride_dx_row + col
-    x_val = tl.load(x + x_off, mask=mask, other=0.).to(tl.float32)
-    g_val = tl.load(dy + dy_off, mask=mask, other=0.).to(tl.float32)
-    dx_val = 2.0 * g_val * tl.maximum(x_val, 0.0)
-    tl.store(dx + dx_off, dx_val.to(dx.dtype.element_ty), mask=mask)
-
-
-@torch.compiler.disable
-def gelu_fwd_npu(x: torch.Tensor) -> torch.Tensor:
-    x = _ensure_inner_contiguous(x)
-    T, D = x.numel(), x.shape[-1]
-    y = _alloc_output(x)
-    grid = (triton.cdiv(T, STATIC_BLOCK_SIZE),)
-    gelu_fwd_kernel[grid](
-        x, y, T=T, D=D,
-        stride_x_row=_get_stride(x),
-        stride_y_row=_get_stride(y),
-        BLOCK_SIZE=STATIC_BLOCK_SIZE,
-        num_warps=STATIC_WARPS,
-    )
-    return y
-
-
-@torch.compiler.disable
-def gelu_bwd_npu(g: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
-    x = _ensure_inner_contiguous(x)
-    g = _ensure_inner_contiguous(g)
-    T, D = x.numel(), x.shape[-1]
-    dx = _alloc_output(x)
-    grid = (triton.cdiv(T, STATIC_BLOCK_SIZE),)
-    gelu_bwd_kernel[grid](
-        x, g, dx, T=T, D=D,
-        stride_x_row=_get_stride(x),
-        stride_dy_row=_get_stride(g),
-        stride_dx_row=_get_stride(dx),
-        BLOCK_SIZE=STATIC_BLOCK_SIZE,
-        num_warps=STATIC_WARPS,
-    )
-    return dx
-
-
-@torch.compiler.disable
-def sqrelu_fwd_npu(x: torch.Tensor) -> torch.Tensor:
-    x = _ensure_inner_contiguous(x)
-    T, D = x.numel(), x.shape[-1]
-    y = _alloc_output(x)
-    grid = (triton.cdiv(T, STATIC_BLOCK_SIZE),)
-    sqrelu_fwd_kernel[grid](
-        x, y, T=T, D=D,
-        stride_x_row=_get_stride(x),
-        stride_y_row=_get_stride(y),
-        BLOCK_SIZE=STATIC_BLOCK_SIZE,
-        num_warps=STATIC_WARPS,
-    )
-    return y
-
-
-@torch.compiler.disable
-def sqrelu_bwd_npu(g: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
-    x = _ensure_inner_contiguous(x)
-    g = _ensure_inner_contiguous(g)
-    T, D = x.numel(), x.shape[-1]
-    dx = _alloc_output(x)
-    grid = (triton.cdiv(T, STATIC_BLOCK_SIZE),)
-    sqrelu_bwd_kernel[grid](
-        x, g, dx, T=T, D=D,
-        stride_x_row=_get_stride(x),
-        stride_dy_row=_get_stride(g),
-        stride_dx_row=_get_stride(dx),
-        BLOCK_SIZE=STATIC_BLOCK_SIZE,
-        num_warps=STATIC_WARPS,
-    )
-    return dx
 
 
 @torch.compiler.disable
@@ -524,10 +357,12 @@ def sigmoid_fwd_npu(x: torch.Tensor, output_contiguous: bool = False) -> torch.T
     x = _ensure_inner_contiguous(x)
     T, D = x.numel(), x.shape[-1]
     y = _alloc_output(x, output_contiguous)
-    sigmoid_fwd_kernel[lambda meta: (triton.cdiv(T, meta['B']),)](
+    grid, B = _activation_launch_config(T)
+    sigmoid_fwd_kernel[grid](
         x, y, T=T, D=D,
         stride_x_row=_get_stride(x),
         stride_y_row=_get_stride(y),
+        B=B,
     )
     return y
 
@@ -538,11 +373,13 @@ def sigmoid_bwd_npu(x: torch.Tensor, dy: torch.Tensor, output_contiguous: bool =
     dy = _ensure_inner_contiguous(dy)
     T, D = x.numel(), x.shape[-1]
     dx = _alloc_output(x, output_contiguous)
-    sigmoid_bwd_kernel[lambda meta: (triton.cdiv(T, meta['B']),)](
+    grid, B = _activation_launch_config(T, is_backward=True)
+    sigmoid_bwd_kernel[grid](
         x, dy, dx, T=T, D=D,
         stride_x_row=_get_stride(x),
         stride_dy_row=_get_stride(dy),
         stride_dx_row=_get_stride(dx),
+        B=B,
     )
     return dx
 
@@ -552,7 +389,8 @@ def logsigmoid_fwd_npu(x: torch.Tensor, temperature: float = 1., output_contiguo
     x = _ensure_inner_contiguous(x)
     T, D = x.numel(), x.shape[-1]
     y = _alloc_output(x, output_contiguous)
-    logsigmoid_fwd_kernel[lambda meta: (triton.cdiv(T, meta['B']),)](
+    grid, B = _activation_launch_config(T)
+    logsigmoid_fwd_kernel[grid](
         x=x,
         y=y,
         temperature=temperature,
@@ -560,6 +398,7 @@ def logsigmoid_fwd_npu(x: torch.Tensor, temperature: float = 1., output_contiguo
         D=D,
         stride_x_row=_get_stride(x),
         stride_y_row=_get_stride(y),
+        B=B,
     )
     return y
 
@@ -575,7 +414,8 @@ def logsigmoid_bwd_npu(
     dy = _ensure_inner_contiguous(dy)
     T, D = x.numel(), x.shape[-1]
     dx = _alloc_output(x, output_contiguous)
-    logsigmoid_bwd_kernel[lambda meta: (triton.cdiv(T, meta['B']),)](
+    grid, B = _activation_launch_config(T, is_backward=True)
+    logsigmoid_bwd_kernel[grid](
         x=x,
         dx=dx,
         dy=dy,
@@ -585,6 +425,7 @@ def logsigmoid_bwd_npu(
         stride_x_row=_get_stride(x),
         stride_dx_row=_get_stride(dx),
         stride_dy_row=_get_stride(dy),
+        B=B,
     )
     return dx
 
@@ -594,10 +435,12 @@ def swish_fwd_npu(x: torch.Tensor, output_contiguous: bool = False) -> torch.Ten
     x = _ensure_inner_contiguous(x)
     T, D = x.numel(), x.shape[-1]
     y = _alloc_output(x, output_contiguous)
-    swish_fwd_kernel[lambda meta: (triton.cdiv(T, meta['B']),)](
+    grid, B = _activation_launch_config(T)
+    swish_fwd_kernel[grid](
         x, y, T=T, D=D,
         stride_x_row=_get_stride(x),
         stride_y_row=_get_stride(y),
+        B=B,
     )
     return y
 
@@ -608,11 +451,13 @@ def swish_bwd_npu(x: torch.Tensor, dy: torch.Tensor, output_contiguous: bool = F
     dy = _ensure_inner_contiguous(dy)
     T, D = x.numel(), x.shape[-1]
     dx = _alloc_output(x, output_contiguous)
-    swish_bwd_kernel[lambda meta: (triton.cdiv(T, meta['B']),)](
+    grid, B = _activation_launch_config(T, is_backward=True)
+    swish_bwd_kernel[grid](
         x, dy, dx, T=T, D=D,
         stride_x_row=_get_stride(x),
         stride_dy_row=_get_stride(dy),
         stride_dx_row=_get_stride(dx),
+        B=B,
     )
     return dx
 
@@ -624,11 +469,13 @@ def swiglu_fwd_npu(x: torch.Tensor, y: torch.Tensor, output_contiguous: bool = F
     y = _ensure_inner_contiguous(y)
     T, D = x.numel(), x.shape[-1]
     z = _alloc_output(x, output_contiguous)
-    swiglu_fwd_kernel[lambda meta: (triton.cdiv(T, meta['B']),)](
+    grid, B = _activation_launch_config(T)
+    swiglu_fwd_kernel[grid](
         x, y, z, T=T, D=D,
         stride_x_row=_get_stride(x),
         stride_y_row=_get_stride(y),
         stride_z_row=_get_stride(z),
+        B=B,
     )
     return z
 
@@ -652,7 +499,8 @@ def swiglu_fwdbwd_npu(
         z = _alloc_output(x, output_contiguous)
     else:
         z = None
-    swiglu_fwdbwd_kernel[lambda meta: (triton.cdiv(T, meta['B']),)](
+    grid, B = _activation_launch_config(T, is_backward=True)
+    swiglu_fwdbwd_kernel[grid](
         x, y, g, dx, dy, z, T=T, D=D,
         stride_x_row=_get_stride(x),
         stride_y_row=_get_stride(y),
@@ -660,6 +508,7 @@ def swiglu_fwdbwd_npu(
         stride_dx_row=_get_stride(dx),
         stride_dy_row=_get_stride(dy),
         stride_z_row=_get_stride(z) if z is not None else 0,
+        B=B,
     )
     if use_weight:
         return dx, dy, z
@@ -696,15 +545,7 @@ def swiglu_linear_npu(x, y, weight, bias):
     return SwiGLULinearFunctionNPU.apply(x, y, weight, bias)
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({'B': bs}, num_warps=num_warps)
-        for bs in [512, 1024, 2048, 4096, 8192]
-        for num_warps in NUM_WARPS_AUTOTUNE
-    ],
-    key=['D'],
-    **autotune_cache_kwargs,
-)
+@triton.heuristics(_LINEAR_HEURISTICS_XYZ)
 @triton.jit(do_not_specialize=['T'])
 def powglu_fwd_kernel(
     x, y, z,
@@ -715,14 +556,18 @@ def powglu_fwd_kernel(
     T,
     D: tl.constexpr,
     B: tl.constexpr,
+    X_LINEAR: tl.constexpr,
+    Y_LINEAR: tl.constexpr,
+    Z_LINEAR: tl.constexpr,
 ):
-    i_n = tl.program_id(0).to(tl.int64)
+    i_n = tl.program_id(0)
     offs = i_n * B + tl.arange(0, B)
     mask = offs < T
-    row = offs // D
-    col = offs % D
-    b_x = tl.load(x + row * stride_x_row + col, mask=mask, other=0.).to(tl.float32)
-    b_y = tl.load(y + row * stride_y_row + col, mask=mask, other=0.).to(tl.float32)
+    x_off = _flat_offset(offs, D, stride_x_row, X_LINEAR)
+    y_off = _flat_offset(offs, D, stride_y_row, Y_LINEAR)
+    z_off = _flat_offset(offs, D, stride_z_row, Z_LINEAR)
+    b_x = tl.load(x + x_off, mask=mask, other=0.).to(tl.float32)
+    b_y = tl.load(y + y_off, mask=mask, other=0.).to(tl.float32)
     b_s = tl.sigmoid(b_x)
     b_pos = b_x > 0
     # feed only positive lanes to log/sqrt; masked lanes give x**p = 1 and are dropped by the where
@@ -732,21 +577,13 @@ def powglu_fwd_kernel(
     b_pow = exp(b_p * log(b_xp))
     b_g = tl.where(b_pos, b_pow * b_s, b_x * b_s)
     b_z = b_g * b_y
-    tl.store(z + row * stride_z_row + col, b_z.to(z.dtype.element_ty), mask=mask)
+    tl.store(z + z_off, b_z.to(z.dtype.element_ty), mask=mask)
 
 
 @triton.heuristics({
     'HAS_WEIGHT': lambda args: args['z'] is not None,
+    **_LINEAR_HEURISTICS_FWDBWD,
 })
-@triton.autotune(
-    configs=[
-        triton.Config({'B': bs}, num_warps=num_warps)
-        for bs in [512, 1024, 2048, 4096, 8192]
-        for num_warps in NUM_WARPS_AUTOTUNE
-    ],
-    key=['D'],
-    **autotune_cache_kwargs,
-)
 @triton.jit(do_not_specialize=['T'])
 def powglu_fwdbwd_kernel(
     x, y, g, dx, dy, z,
@@ -761,15 +598,24 @@ def powglu_fwdbwd_kernel(
     D: tl.constexpr,
     B: tl.constexpr,
     HAS_WEIGHT: tl.constexpr,
+    X_LINEAR: tl.constexpr,
+    Y_LINEAR: tl.constexpr,
+    G_LINEAR: tl.constexpr,
+    DX_LINEAR: tl.constexpr,
+    DY_LINEAR: tl.constexpr,
+    Z_LINEAR: tl.constexpr,
 ):
-    i_n = tl.program_id(0).to(tl.int64)
+    i_n = tl.program_id(0)
     offs = i_n * B + tl.arange(0, B)
     mask = offs < T
-    row = offs // D
-    col = offs % D
-    b_x = tl.load(x + row * stride_x_row + col, mask=mask, other=0.).to(tl.float32)
-    b_y = tl.load(y + row * stride_y_row + col, mask=mask, other=0.).to(tl.float32)
-    b_g = tl.load(g + row * stride_g_row + col, mask=mask, other=0.).to(tl.float32)
+    x_off = _flat_offset(offs, D, stride_x_row, X_LINEAR)
+    y_off = _flat_offset(offs, D, stride_y_row, Y_LINEAR)
+    g_off = _flat_offset(offs, D, stride_g_row, G_LINEAR)
+    dx_off = _flat_offset(offs, D, stride_dx_row, DX_LINEAR)
+    dy_off = _flat_offset(offs, D, stride_dy_row, DY_LINEAR)
+    b_x = tl.load(x + x_off, mask=mask, other=0.).to(tl.float32)
+    b_y = tl.load(y + y_off, mask=mask, other=0.).to(tl.float32)
+    b_g = tl.load(g + g_off, mask=mask, other=0.).to(tl.float32)
 
     b_s = tl.sigmoid(b_x)
     b_pos = b_x > 0
@@ -792,11 +638,17 @@ def powglu_fwdbwd_kernel(
     b_dx = b_g * b_y * b_dgate
     b_dy = b_g * b_gate
 
-    tl.store(dx + row * stride_dx_row + col, b_dx.to(dx.dtype.element_ty), mask=mask)
-    tl.store(dy + row * stride_dy_row + col, b_dy.to(dy.dtype.element_ty), mask=mask)
+    tl.store(dx + dx_off, b_dx.to(dx.dtype.element_ty), mask=mask)
+    tl.store(dy + dy_off, b_dy.to(dy.dtype.element_ty), mask=mask)
     if HAS_WEIGHT:
         b_z = b_gate * b_y
-        tl.store(z + row * stride_z_row + col, b_z.to(z.dtype.element_ty), mask=mask)
+        z_off = _flat_offset(offs, D, stride_z_row, Z_LINEAR)
+        tl.store(z + z_off, b_z.to(z.dtype.element_ty), mask=mask)
+
+
+# Peak fp32 temporaries: sigmoid, sqrt, log, exp, pow, gate, output.
+_POWGLU_FWD_MEM_MULT = 8.0
+_POWGLU_BWD_MEM_MULT = 10.0
 
 
 @torch.compiler.disable
@@ -806,7 +658,8 @@ def powglu_fwd_npu(x: torch.Tensor, y: torch.Tensor, power: float = 3.0, output_
     y = _ensure_inner_contiguous(y)
     T, D = x.numel(), x.shape[-1]
     z = _alloc_output(x, output_contiguous)
-    powglu_fwd_kernel[lambda meta: (triton.cdiv(T, meta['B']),)](
+    grid, B = _activation_launch_config(T, memory_multiplier=_POWGLU_FWD_MEM_MULT)
+    powglu_fwd_kernel[grid](
         x=x,
         y=y,
         z=z,
@@ -816,6 +669,7 @@ def powglu_fwd_npu(x: torch.Tensor, y: torch.Tensor, power: float = 3.0, output_
         m=power,
         T=T,
         D=D,
+        B=B,
     )
     return z
 
@@ -840,7 +694,8 @@ def powglu_fwdbwd_npu(
         z = _alloc_output(x, output_contiguous)
     else:
         z = None
-    powglu_fwdbwd_kernel[lambda meta: (triton.cdiv(T, meta['B']),)](
+    grid, B = _activation_launch_config(T, is_backward=True, memory_multiplier=_POWGLU_BWD_MEM_MULT)
+    powglu_fwdbwd_kernel[grid](
         x=x,
         y=y,
         g=g,
@@ -856,6 +711,7 @@ def powglu_fwdbwd_npu(
         m=power,
         T=T,
         D=D,
+        B=B,
     )
     if use_weight:
         return dx, dy, z

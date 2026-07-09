@@ -18,7 +18,9 @@ import os
 import torch
 
 from fla.ops.backends import BaseBackend
-from fla.utils import IS_NVIDIA_HOPPER, TRITON_ABOVE_3_4_0
+from fla.utils import IS_NVIDIA_HOPPER, TRITON_ABOVE_3_4_0, find_spec_cached
+
+_TILELANG_AVAILABLE = find_spec_cached("tilelang") is not None
 
 
 class TileLangBackend(BaseBackend):
@@ -29,11 +31,7 @@ class TileLangBackend(BaseBackend):
 
     @classmethod
     def is_available(cls) -> bool:
-        try:
-            import tilelang  # noqa: F401
-            return True
-        except ImportError:
-            return False
+        return _TILELANG_AVAILABLE
 
     @classmethod
     def is_enabled(cls) -> bool:
