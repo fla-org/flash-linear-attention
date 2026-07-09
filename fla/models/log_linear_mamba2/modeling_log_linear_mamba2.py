@@ -1,3 +1,10 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
 import math
 
 import torch
@@ -11,6 +18,7 @@ from fla.layers.log_linear_mamba2 import LogLinearMamba2
 from fla.models.log_linear_mamba2.configuration_log_linear_mamba2 import LogLinearMamba2Config
 from fla.models.utils import Cache, FLAGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, GatedMLP, RMSNorm
+from fla.ops.attnres import fused_attnres
 
 logger = logging.get_logger(__name__)
 
@@ -34,12 +42,13 @@ class LogLinearMamba2Block(nn.Module):
             conv_kernel=config.conv_kernel,
             use_conv_bias=config.use_conv_bias,
             hidden_act=config.hidden_act,
-            rms_norm=config.rms_norm,
+            rmsnorm=config.rmsnorm,
+            D_has_hdim=config.D_has_hdim,
+            norm_before_gate=config.norm_before_gate,
             chunk_size=config.chunk_size,
-            time_step_rank=config.time_step_rank,
-            time_step_limit=config.time_step_limit,
-            time_step_min=config.time_step_min,
-            time_step_max=config.time_step_max,
+            dt_limit=config.dt_limit,
+            dt_min=config.dt_min,
+            dt_max=config.dt_max,
             use_bias=config.use_bias,
             norm_eps=config.norm_eps,
             layer_idx=layer_idx,
@@ -52,6 +61,18 @@ class LogLinearMamba2Block(nn.Module):
             fuse_swiglu=True,
         )
 
+        self.use_attnres = config.attnres_block_size is not None
+        if self.use_attnres:
+            self.attn_res_proj = nn.Linear(in_features=config.hidden_size, out_features=1, bias=False)
+            self.attn_res_norm = nn.RMSNorm(normalized_shape=config.hidden_size, eps=config.norm_eps)
+            self.mlp_res_proj = nn.Linear(in_features=config.hidden_size, out_features=1, bias=False)
+            self.mlp_res_norm = nn.RMSNorm(normalized_shape=config.hidden_size, eps=config.norm_eps)
+            block_size = config.attnres_block_size
+            self.attnres_is_attn_boundary = (2 * layer_idx) % block_size == 0
+            self.attnres_is_mlp_boundary = (2 * layer_idx + 1) % block_size == 0
+            self.attn_res_proj._is_attnres_proj = True
+            self.mlp_res_proj._is_attnres_proj = True
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -59,10 +80,34 @@ class LogLinearMamba2Block(nn.Module):
         past_key_values: Cache | list[torch.FloatTensor] | None = None,
         use_cache: bool | None = False,
         output_attentions: bool | None = False,
+        attnres_states: list[torch.Tensor] | None = None,
         **kwargs,
     ):
-        residual = hidden_states
-        hidden_states = self.mixer_norm(hidden_states)
+        if self.use_attnres:
+            prefix_sum = hidden_states
+            if attnres_states is None:
+                # L=1 single-source: attnres is trivially identity (p=1, mix=v[0]);
+                # apply the prenorm directly, matching the L>1 kernel path which
+                # folds it via `output_rms_weight`. Mirrors Megatron-LM's bypass
+                # at the first layer (where `block_residual` is empty).
+                hidden_states = self.mixer_norm(prefix_sum)
+                attnres_states = [prefix_sum]
+                prefix_sum = None
+            else:
+                residuals = [*attnres_states, prefix_sum]
+                if self.attnres_is_attn_boundary:
+                    attnres_states = residuals
+                    prefix_sum = None
+                hidden_states = fused_attnres(
+                    query=self.attn_res_proj.weight,
+                    residuals=residuals,
+                    rms_weight=self.attn_res_norm.weight,
+                    output_rms_weight=self.mixer_norm.weight,
+                    rms_eps=self.attn_res_norm.eps,
+                )
+        else:
+            residual = hidden_states
+            hidden_states = self.mixer_norm(hidden_states)
         hidden_states, attentions, past_key_values = self.mixer(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
@@ -71,7 +116,21 @@ class LogLinearMamba2Block(nn.Module):
             output_attentions=output_attentions,
             **kwargs,
         )
-        if self.config.fuse_norm:
+
+        if self.use_attnres:
+            prefix_sum = hidden_states if prefix_sum is None else prefix_sum + hidden_states
+            residuals = [*attnres_states, prefix_sum]
+            if self.attnres_is_mlp_boundary:
+                attnres_states = residuals
+                prefix_sum = None
+            hidden_states = fused_attnres(
+                query=self.mlp_res_proj.weight,
+                residuals=residuals,
+                rms_weight=self.mlp_res_norm.weight,
+                output_rms_weight=self.mlp_norm.weight,
+                rms_eps=self.mlp_res_norm.eps,
+            )
+        elif self.config.fuse_norm:
             hidden_states, residual = self.mlp_norm(
                 hidden_states, residual=residual, prenorm=True,
             )
@@ -80,8 +139,12 @@ class LogLinearMamba2Block(nn.Module):
             residual = hidden_states
             hidden_states = self.mlp_norm(hidden_states)
         hidden_states = self.mlp(hidden_states)
-        hidden_states = residual + hidden_states
-        return hidden_states, attentions, past_key_values
+
+        if self.use_attnres:
+            hidden_states = hidden_states if prefix_sum is None else prefix_sum + hidden_states
+        else:
+            hidden_states = residual + hidden_states
+        return hidden_states, attentions, past_key_values, attnres_states
 
 
 class LogLinearMamba2PreTrainedModel(PreTrainedModel, FLAGenerationMixin):
@@ -104,47 +167,61 @@ class LogLinearMamba2PreTrainedModel(PreTrainedModel, FLAGenerationMixin):
         """Initialize the weights."""
         if isinstance(module, LogLinearMamba2):
             # --- A_log ---
-            A = torch.arange(1, module.num_heads + 1)
-            with torch.no_grad():
-                if not isinstance(module.A_log, torch.distributed.tensor.DTensor):
-                    module.A_log.copy_(torch.log(A))
-                else:
-                    logger.warning_once("`A_log` is a DTensor, skipping initialization")
+            if not getattr(module.A_log, '_is_hf_initialized', False):
+                A = torch.arange(1, module.num_heads + 1)
+                with torch.no_grad():
+                    if not isinstance(module.A_log, torch.distributed.tensor.DTensor):
+                        module.A_log.copy_(torch.log(A))
+                    else:
+                        logger.warning_once("`A_log` is a DTensor, skipping initialization")
             module.A_log._no_weight_decay = True
 
             # --- D ---
-            nn.init.ones_(module.D)
+            if not getattr(module.D, '_is_hf_initialized', False):
+                nn.init.ones_(module.D)
             module.D._no_weight_decay = True
 
+            # --- conv1d ---
+            if self.config.conv_init is not None:
+                nn.init.uniform_(module.conv1d.weight, -self.config.conv_init, self.config.conv_init)
+                module.conv1d.weight._no_reinit = True
+
             # --- L ---
-            nn.init.ones_(module.L)
+            if not getattr(module.L, '_is_hf_initialized', False):
+                nn.init.ones_(module.L)
             module.L._no_weight_decay = True
 
             # --- dt_bias ---
-            dt = torch.exp(
-                torch.rand(self.config.num_heads)
-                * (
-                    math.log(self.config.time_step_max)
-                    - math.log(self.config.time_step_min)
-                )
-                + math.log(self.config.time_step_min),
-            ).clamp(min=self.config.time_step_floor)
-
-            # Inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
-            inv_dt = dt + torch.log(-torch.expm1(-dt))
-            with torch.no_grad():
-                if not isinstance(module.dt_bias, torch.distributed.tensor.DTensor):
-                    module.dt_bias.copy_(inv_dt)
-                else:
-                    logger.warning_once(
-                        "`dt_bias` is a DTensor, skipping initialization",
+            if not getattr(module.dt_bias, '_is_hf_initialized', False):
+                dt = torch.exp(
+                    torch.rand(self.config.num_heads)
+                    * (
+                        math.log(self.config.dt_max)
+                        - math.log(self.config.dt_min)
                     )
+                    + math.log(self.config.dt_min),
+                ).clamp(min=self.config.dt_init_floor)
+
+                # Inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
+                inv_dt = dt + torch.log(-torch.expm1(-dt))
+                with torch.no_grad():
+                    if not isinstance(module.dt_bias, torch.distributed.tensor.DTensor):
+                        module.dt_bias.copy_(inv_dt)
+                    else:
+                        logger.warning_once(
+                            "`dt_bias` is a DTensor, skipping initialization",
+                        )
             module.dt_bias._no_reinit = True
 
         elif isinstance(module, (nn.Linear, nn.Conv1d)):
-            # Slightly different from the TF version which uses truncated_normal for initialization
-            # cf https://github.com/pytorch/pytorch/pull/5617
-            nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
+            if getattr(module, '_is_attnres_proj', False):
+                # attnres pseudo-query (per-layer projection): zero init keeps
+                # the initial softmax uniform (paper §5)
+                nn.init.zeros_(module.weight)
+            else:
+                # Slightly different from the TF version which uses truncated_normal for initialization
+                # cf https://github.com/pytorch/pytorch/pull/5617
+                nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
                 # guard against deprecated behavior
@@ -171,7 +248,7 @@ class LogLinearMamba2PreTrainedModel(PreTrainedModel, FLAGenerationMixin):
                 p = module.out_proj.weight
             elif hasattr(module, "down_proj"):
                 p = module.down_proj.weight
-            if p is not None:
+            if p is not None and not getattr(p, '_is_hf_initialized', False):
                 # Special Scaled Initialization --> There are 2 Layer Norms per Transformer Block
                 # Following Pytorch init, except scale by 1/sqrt(2 * n_layer)
                 # We need to reinit p since this code could be called multiple times
@@ -197,6 +274,13 @@ class LogLinearMamba2Model(LogLinearMamba2PreTrainedModel):
 
         self.gradient_checkpointing = False
         self.norm_f = RMSNorm(config.hidden_size, eps=config.norm_eps, dtype=torch.float32)
+
+        self.use_attnres = config.attnres_block_size is not None
+        if self.use_attnres:
+            self.res_proj = nn.Linear(in_features=config.hidden_size, out_features=1, bias=False)
+            self.res_norm = nn.RMSNorm(normalized_shape=config.hidden_size, eps=config.norm_eps)
+            self.res_proj._is_attnres_proj = True
+
         # Initialize weights and apply final processing
         self._register_load_state_dict_pre_hook(self.load_hook)
         self.post_init()
@@ -260,6 +344,8 @@ class LogLinearMamba2Model(LogLinearMamba2PreTrainedModel):
             past_key_values = Cache.from_legacy_cache(past_key_values)
 
         hidden_states = inputs_embeds
+        attnres_states: list[torch.Tensor] | None = None
+
         all_hidden_states = () if output_hidden_states else None
         all_attns = () if output_attentions else None
         for mixer_block in self.layers:
@@ -267,28 +353,40 @@ class LogLinearMamba2Model(LogLinearMamba2PreTrainedModel):
                 all_hidden_states = all_hidden_states + (hidden_states,)
 
             if self.gradient_checkpointing and self.training:
-                hidden_states, attentions, past_key_values = self._gradient_checkpointing_func(
+                hidden_states, attentions, past_key_values, attnres_states = self._gradient_checkpointing_func(
                     mixer_block.__call__,
                     hidden_states,
                     attention_mask,
                     past_key_values,
                     use_cache,
                     output_attentions,
+                    attnres_states,
                 )
             else:
-                hidden_states, attentions, past_key_values = mixer_block(
+                hidden_states, attentions, past_key_values, attnres_states = mixer_block(
                     hidden_states,
                     attention_mask=attention_mask,
                     past_key_values=past_key_values,
                     use_cache=use_cache,
                     output_attentions=output_attentions,
+                    attnres_states=attnres_states,
                     **kwargs,
                 )
 
             if output_attentions and attentions is not None:
                 all_attns = all_attns + (attentions,)
 
-        hidden_states = self.norm_f(hidden_states)
+        if self.use_attnres:
+            residuals = [*attnres_states, hidden_states]
+            hidden_states = fused_attnres(
+                query=self.res_proj.weight,
+                residuals=residuals,
+                rms_weight=self.res_norm.weight,
+                output_rms_weight=self.norm_f.weight,
+                rms_eps=self.res_norm.eps,
+            )
+        else:
+            hidden_states = self.norm_f(hidden_states)
 
         if output_hidden_states:
             all_hidden_states = all_hidden_states + (hidden_states,)

@@ -1,3 +1,10 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
 import pytest
 import torch
 
@@ -19,6 +26,7 @@ from fla.layers.mamba2 import Mamba2
 from fla.layers.mesa_net import MesaNet
 from fla.layers.mom import MomAttention
 from fla.layers.multiscale_retention import MultiScaleRetention
+from fla.layers.raven import Raven
 from fla.layers.rodimus import RodimusAttention
 from fla.layers.rwkv6 import RWKV6Attention
 from fla.layers.rwkv7 import RWKV7Attention
@@ -133,6 +141,11 @@ CACHE_REQUIRES_LAYER_IDX_CASES = [
         lambda: GatedSlotAttention(hidden_size=16, num_heads=4),
         torch.randn(1, 2, 16),
         id="gsa",
+    ),
+    pytest.param(
+        lambda: Raven(hidden_size=16, num_heads=4, num_slots=4, topk=2),
+        torch.randn(1, 2, 16),
+        id="raven",
     ),
     pytest.param(
         lambda: GatedLinearAttention(hidden_size=16, num_heads=4),

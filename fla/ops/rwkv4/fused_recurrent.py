@@ -1,4 +1,9 @@
-# Copyright (c) 2024, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 from typing import Any, cast
 
@@ -251,7 +256,7 @@ def fused_recurrent_rwkv4_backward_kernel(
     gk_ptr = gk_ptr + b_idx * gk_s_b
     gv_ptr = gv_ptr + b_idx * gv_s_b
 
-    # Pointers to gradients which were recieved by the function.
+    # Pointers to gradients which were received by the function.
     gwkv_ptr = gwkv_ptr + b_idx * gwkv_s_b
     galpha_out_ptr = gstate_out_ptr + b_idx * gstate_out_s_b
     gbeta_out_ptr = gstate_out_ptr + b_idx * gstate_out_s_b + gstate_out_s_abe

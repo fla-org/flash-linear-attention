@@ -1,4 +1,9 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import os
 
@@ -30,6 +35,8 @@ def cumsum_comba_local_fwd_reference(s, reverse=False, chunk_size=128):
     [
         pytest.param(*test, id='B{}-T{}-H{}-chunk_size{}-{}'.format(*test))
         for test in [
+            (32, 200, 4, 16, torch.float),
+            (32, 200, 4, 32, torch.float),
             (32, 200, 4, 64, torch.float),
             (32, 1000, 4, 64, torch.float),
             (32, 2048, 8, 128, torch.float),

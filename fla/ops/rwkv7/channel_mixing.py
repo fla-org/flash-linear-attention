@@ -1,4 +1,9 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import logging
 
@@ -7,7 +12,6 @@ import triton
 import triton.language as tl
 
 from fla.utils import (
-    USE_CUDA_GRAPH,
     autocast_custom_bwd,
     autocast_custom_fwd,
     autotune_cache_kwargs,
@@ -27,7 +31,6 @@ if not check_pytorch_version('2.4'):
         for block_size in [128, 256, 512, 1024, 2048, 4096, 8192]
     ],
     key=['hidden_dim'],
-    use_cuda_graph=USE_CUDA_GRAPH,
     **autotune_cache_kwargs,
 )
 @triton.jit
@@ -194,7 +197,6 @@ def relu_square_bwd_kernel(
         for block_size in [128, 256, 512, 1024, 2048, 4096, 8192]
     ],
     key=['hidden_dim'],
-    use_cuda_graph=USE_CUDA_GRAPH,
     **autotune_cache_kwargs,
 )
 @triton.jit

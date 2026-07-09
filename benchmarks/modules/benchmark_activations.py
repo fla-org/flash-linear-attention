@@ -1,9 +1,15 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 import triton
 
 from fla.modules.activations import fast_gelu_impl as gelu
-from fla.modules.activations import logsigmoid, sigmoid, sqrelu, swiglu, swish
+from fla.modules.activations import logsigmoid, powglu, sigmoid, sqrelu, swiglu, swish
 from fla.utils import device
 
 DTYPE = torch.bfloat16
@@ -36,6 +42,7 @@ def fwdbwd(fn, *args):
             'gelu_fwd', 'gelu_fwdbwd',
             'sqrelu_fwd', 'sqrelu_fwdbwd',
             'swiglu_fwd', 'swiglu_fwdbwd',
+            'powglu_fwd', 'powglu_fwdbwd',
         ],
         line_names=[
             'sigmoid_fwd', 'sigmoid_fwdbwd',
@@ -44,13 +51,15 @@ def fwdbwd(fn, *args):
             'gelu_fwd', 'gelu_fwdbwd',
             'sqrelu_fwd', 'sqrelu_fwdbwd',
             'swiglu_fwd', 'swiglu_fwdbwd',
+            'powglu_fwd', 'powglu_fwdbwd',
         ],
         styles=[('green', '-'), ('green', '--'),
                 ('blue', '-'), ('blue', '--'),
                 ('red', '-'), ('red', '--'),
                 ('cyan', '-'), ('cyan', '--'),
                 ('magenta', '-'), ('magenta', '--'),
-                ('yellow', '-'), ('yellow', '--')],
+                ('yellow', '-'), ('yellow', '--'),
+                ('black', '-'), ('black', '--')],
         ylabel="Time (ms)",
         plot_name="activation_performance",
         args={},
@@ -60,7 +69,7 @@ def benchmark(B, T, D, provider):
     requires_grad = True
     x = torch.randn(B, T, D, device=device, dtype=DTYPE, requires_grad=requires_grad)
 
-    if 'swiglu' in provider:
+    if 'swiglu' in provider or 'powglu' in provider:
         y = torch.randn_like(x)
         inputs = (x, y)
     elif 'bias_gelu' in provider:
@@ -81,13 +90,15 @@ def benchmark(B, T, D, provider):
         fn = sqrelu
     elif provider.startswith('swiglu'):
         fn = swiglu
+    elif provider.startswith('powglu'):
+        fn = powglu
     else:
         raise ValueError(provider)
 
     if provider.endswith('fwd'):
-        fn_to_call = lambda: fwd(fn, *inputs)  # noqa: E731
+        def fn_to_call(): return fwd(fn, *inputs)  # noqa: E731
     elif provider.endswith('fwdbwd'):
-        fn_to_call = lambda: fwdbwd(fn, *inputs)  # noqa: E731
+        def fn_to_call(): return fwdbwd(fn, *inputs)  # noqa: E731
     else:
         raise ValueError(provider)
 

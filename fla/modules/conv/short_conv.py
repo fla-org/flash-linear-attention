@@ -1,4 +1,9 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 """Short convolution implementation for efficient causal convolutions."""
 
@@ -121,7 +126,7 @@ class ShortConvolution(nn.Conv1d):
         cu_seqlens: torch.LongTensor | None = None,
         chunk_indices: torch.LongTensor | None = None,
         **kwargs,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """
         Args:
             x (`torch.Tensor`):
@@ -196,20 +201,23 @@ class ShortConvolution(nn.Conv1d):
     def step(
         self,
         x: torch.Tensor,
-        residual: torch.Tensor,
-        cache: torch.Tensor,
+        residual: torch.Tensor | None,
+        cache: torch.Tensor | None,
         output_final_state: bool = False,
         cu_seqlens: torch.LongTensor | None = None,
-    ):
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         from fla.modules.conv.triton.ops import causal_conv1d_update
 
         B, _, D, W = *x.shape, self.kernel_size[0]
         N = B if cu_seqlens is None else len(cu_seqlens) - 1
-        if output_final_state and cache is None:
+        # Always initialise cache when None so the Triton kernel never
+        # receives a None tensor. Return value still respects output_final_state
+        # to maintain consistency with the non-step path in forward().
+        if cache is None:
             cache = x.new_zeros(N, D, W)
         # NOTE: we follow the fast mode that updates the cache in-place
         if self.backend == 'triton':
-            return causal_conv1d_update(
+            y, cache = causal_conv1d_update(
                 x=x,
                 cache=cache,
                 residual=residual,
@@ -217,6 +225,7 @@ class ShortConvolution(nn.Conv1d):
                 bias=self.bias,
                 activation=self.activation,
             )
+            return y, (cache if output_final_state else None)
 
         shape = x.shape
         x = x.squeeze(0) if cu_seqlens is not None else x.squeeze(1)
@@ -234,7 +243,7 @@ class ShortConvolution(nn.Conv1d):
         y = y.view(shape)
         if residual is not None:
             y.add_(residual)
-        return y, cache
+        return y, (cache if output_final_state else None)
 
     @property
     def state_size(self) -> int:

@@ -1,3 +1,10 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
 from __future__ import annotations
 
 import math
@@ -232,16 +239,18 @@ class RWKV7PreTrainedModel(PreTrainedModel):
     ):
         if isinstance(module, nn.Embedding):
             # https://github.com/BlinkDL/RWKV-LM/blob/main/RWKV-v7/train_temp/src/model.py#L396C12-L399C58
-            scale = -1e-4
-            nn.init.uniform_(module.weight, a=scale, b=-scale)
+            if not getattr(module.weight, '_is_hf_initialized', False):
+                scale = -1e-4
+                nn.init.uniform_(module.weight, a=scale, b=-scale)
         elif isinstance(module, nn.Linear) and hasattr(self, 'lm_head') and module is self.lm_head:
             # https://github.com/BlinkDL/RWKV-LM/blob/main/RWKV-v7/train_temp/src/model.py#L403
-            if self.config.vocab_size > self.config.hidden_size:
-                scale = 0.5 * math.sqrt(self.config.vocab_size / self.config.hidden_size)
-            else:
-                scale = 0.5
-            original_dtype = module.weight.dtype
-            module.weight.data = nn.init.orthogonal_(module.weight.data.to(torch.float32), gain=scale).to(original_dtype)
+            if not getattr(module.weight, '_is_hf_initialized', False):
+                if self.config.vocab_size > self.config.hidden_size:
+                    scale = 0.5 * math.sqrt(self.config.vocab_size / self.config.hidden_size)
+                else:
+                    scale = 0.5
+                original_dtype = module.weight.dtype
+                module.weight.data = nn.init.orthogonal_(module.weight.data.to(torch.float32), gain=scale).to(original_dtype)
         # Init Attention parameters
         elif isinstance(module, (nn.Linear, nn.Conv1d)) and getattr(module, '_in_rwkv_module', False) is False:
             # Slightly different from the TF version which uses truncated_normal for initialization

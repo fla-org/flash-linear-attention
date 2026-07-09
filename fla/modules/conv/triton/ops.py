@@ -1,13 +1,19 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 import triton
 from einops import rearrange
 
+from fla.modules.backends import dispatch
 from fla.ops.utils import prepare_chunk_indices
 from fla.utils import input_guard
 
 from .kernels import (
-    STATIC_WARPS,
     causal_conv1d_bwd_kernel,
     causal_conv1d_fwd_kernel,
     causal_conv1d_states_fwd_kernel,
@@ -16,6 +22,17 @@ from .kernels import (
 )
 
 
+def _has_non_standard_layout(x: torch.Tensor) -> bool:
+    """QKV-style views (stride_t != D) break triton-ascend masked kernels."""
+    if x.dtype not in (torch.float16, torch.bfloat16):
+        return False
+    if x.dim() != 3:
+        return not x.is_contiguous()
+    _, stride_t, stride_d = x.stride()
+    return stride_d == 1 and stride_t != x.shape[-1]
+
+
+@dispatch('modules')
 @input_guard(no_guard_contiguous=["x"])
 def causal_conv1d_fwd(
     x: torch.Tensor,
@@ -29,6 +46,7 @@ def causal_conv1d_fwd(
     cu_seqlens_cpu: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
     BT: int = 64,
+    layout_fallback: bool = False,
 ) -> torch.Tensor:
     shape = x.shape
     if x.shape[-1] != weight.shape[0]:
@@ -78,6 +96,7 @@ def causal_conv1d_fwd(
     return y.view(shape), final_state
 
 
+@dispatch('modules')
 def compute_dh0_triton(
     dy: torch.Tensor,
     y: torch.Tensor | None,
@@ -122,6 +141,7 @@ def compute_dh0_triton(
     return dh0
 
 
+@dispatch('modules')
 def causal_conv1d_bwd(
     x: torch.Tensor,
     dy: torch.Tensor,
@@ -135,6 +155,7 @@ def causal_conv1d_bwd(
     cu_seqlens_cpu: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
     BT: int = 64,
+    layout_fallback: bool = False,
 ):
     shape = x.shape
     if x.shape[-1] != weight.shape[0]:
@@ -143,6 +164,7 @@ def causal_conv1d_bwd(
     W = weight.shape[1] if weight is not None else None
 
     stride_x_n, stride_x_t, stride_x_d = x.stride()
+    stride_dy_n, stride_dy_t, stride_dy_d = dy.stride()
 
     BW = triton.next_power_of_2(W)
     if cu_seqlens is not None and chunk_indices is None:
@@ -197,6 +219,9 @@ def causal_conv1d_bwd(
         stride_dx_n=stride_dx_n,
         stride_dx_t=stride_dx_t,
         stride_dx_d=stride_dx_d,
+        stride_dy_n=stride_dy_n,
+        stride_dy_t=stride_dy_t,
+        stride_dy_d=stride_dy_d,
         ACTIVATION=activation,
     )
     if weight is not None:
@@ -219,6 +244,7 @@ def causal_conv1d_bwd(
     return dx.view(shape), dw, db, dr, dh0
 
 
+@dispatch('modules')
 @input_guard(no_guard_contiguous=["x"])
 def causal_conv1d_update_states(
     x: torch.Tensor,
@@ -267,6 +293,7 @@ def causal_conv1d_update_states(
     return final_state
 
 
+@dispatch('modules')
 @input_guard(no_guard_contiguous=["x"])
 def causal_conv1d_update(
     x: torch.Tensor,
@@ -283,7 +310,6 @@ def causal_conv1d_update(
     D = x.shape[-1]
     N = x.numel() // D
     W = weight.shape[1] if weight is not None else None
-    BD = 8
     BW = triton.next_power_of_2(W)
 
     if x.dim() == 2:
@@ -328,10 +354,8 @@ def causal_conv1d_update(
         stride_y_d=stride_y_d,
         D=D,
         W=W,
-        BD=BD,
         BW=BW,
         ACTIVATION=activation,
-        num_warps=STATIC_WARPS,
     )
     return y.view(shape), cache
 
@@ -361,6 +385,7 @@ class CausalConv1dFunction(torch.autograd.Function):
         ctx.cu_seqlens = cu_seqlens
         ctx.cu_seqlens_cpu = cu_seqlens_cpu
         ctx.chunk_indices = chunk_indices
+        ctx.layout_fallback = _has_non_standard_layout(x)
         ctx.save_for_backward(x, weight, bias, residual, initial_state)
         y, final_state = causal_conv1d_fwd(
             x=x,
@@ -374,6 +399,7 @@ class CausalConv1dFunction(torch.autograd.Function):
             cu_seqlens_cpu=cu_seqlens_cpu,
             chunk_indices=chunk_indices,
             BT=BT,
+            layout_fallback=ctx.layout_fallback,
         )
         return y, final_state
 
@@ -393,5 +419,6 @@ class CausalConv1dFunction(torch.autograd.Function):
             cu_seqlens=ctx.cu_seqlens,
             cu_seqlens_cpu=ctx.cu_seqlens_cpu,
             chunk_indices=ctx.chunk_indices,
+            layout_fallback=ctx.layout_fallback,
         )
         return dx, dw, db, dr, dh0, None, None, None, None, None, None

@@ -1,5 +1,10 @@
-# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang
-
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+#
 # Copyright (c) 2023, Tri Dao
 # https://github.com/state-spaces/mamba/blob/fb7b5310fa865dbd62aa059b1e26f2b431363e2a/mamba_ssm/ops/triton/layernorm.py
 # Implement residual + layer_norm / rms_norm.
@@ -23,6 +28,7 @@ from torch.distributed import DeviceMesh
 from torch.distributed.tensor import Replicate, Shard, distribute_module
 from torch.distributed.tensor.parallel import ParallelStyle
 
+from fla.modules.backends import dispatch
 from fla.utils import autotune_cache_kwargs, get_multiprocessor_count, input_guard
 
 try:
@@ -533,6 +539,7 @@ def layer_norm_bwd_kernel1(
         tl.store(db + i_s * D + o_d, b_db, mask=mask)
 
 
+@dispatch('modules')
 def layer_norm_fwd(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -616,6 +623,7 @@ def layer_norm_fwd(
     return y, mean, rstd, res_out if res_out is not None else x
 
 
+@dispatch('modules')
 def layer_norm_bwd(
     dy: torch.Tensor,
     x: torch.Tensor,

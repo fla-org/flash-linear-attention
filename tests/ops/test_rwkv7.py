@@ -1,4 +1,9 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import os
 
@@ -6,7 +11,9 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from fla.ops.generalized_delta_rule.dplr import chunk_dplr_delta_rule
 from fla.ops.generalized_delta_rule.dplr.fused_recurrent import fused_recurrent_dplr_delta_rule
+from fla.ops.rwkv7 import chunk_rwkv7
 from fla.ops.rwkv7.channel_mixing import channel_mixing_rwkv7, channel_mixing_rwkv7_torch
 from fla.ops.rwkv7.fused_addcmul import fused_addcmul_rwkv7, torch_addcmul_rwkv7
 from fla.ops.rwkv7.fused_k_update import fused_k_rwkv7, k_update_ref
@@ -128,6 +135,43 @@ def test_fused_mul_recurrent_fwd(
         initial_state=h0.clone(),
         output_final_state=True,
     )
+    assert_close('o', ref, tri, 0.002)
+    assert_close('ht', ref_ht, tri_ht, 0.002)
+
+
+@pytest.mark.parametrize('chunk_size', [16, 32, 64])
+def test_chunk_wrapper_chunk_size(chunk_size: int):
+    B, T, H, D = 1, 64, 2, 64
+    r = torch.empty(B, T, H, D).uniform_(-8, -6).to(device)
+    k = torch.empty(B, T, H, D).uniform_(-8, -6).to(device)
+    v = torch.empty(B, T, H, D).uniform_(-8, -6).to(device)
+    w = torch.empty(B, T, H, D).uniform_(-8, -6).to(device)
+    kk = F.normalize(torch.empty(B, T, H, D).uniform_(-1, 1), dim=-1).to(device)
+    a = -kk
+    b = kk * torch.empty(B, T, H, D).uniform_(0, 0.1).to(device)
+
+    ref, ref_ht = chunk_dplr_delta_rule(
+        q=r.clone(),
+        k=k.clone(),
+        v=v.clone(),
+        a=a.clone(),
+        b=b.clone(),
+        gk=w.clone(),
+        scale=1.0,
+        output_final_state=True,
+        chunk_size=chunk_size,
+    )
+    tri, tri_ht = chunk_rwkv7(
+        r=r.clone(),
+        w=w.clone(),
+        k=k.clone(),
+        v=v.clone(),
+        a=a.clone(),
+        b=b.clone(),
+        output_final_state=True,
+        chunk_size=chunk_size,
+    )
+
     assert_close('o', ref, tri, 0.002)
     assert_close('ht', ref_ht, tri_ht, 0.002)
 
@@ -260,11 +304,13 @@ def test_fused_k_update(
     assert_close("dka", ref_dka, ka.grad, ratio=ratio)
 
 
-@pytest.mark.parametrize("B", [4])
-@pytest.mark.parametrize("T", [4096])
-@pytest.mark.parametrize("H", [64])
-@pytest.mark.parametrize("D", [64])
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize(
+    ("B", "T", "H", "D", "dtype"),
+    [
+        pytest.param(4, 4096, 64, 64, torch.bfloat16, id="default"),
+        pytest.param(1, 65537, 8, 64, torch.bfloat16, id="long_ctx"),
+    ],
+)
 def test_gate_output_correction(
     B: int,
     T: int,

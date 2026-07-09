@@ -1,8 +1,16 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
 import torch
 import triton
 import triton.language as tl
 from einops import rearrange
 
+from fla.ops.utils.cache import fla_cache_autotune
 from fla.utils import IS_AMD, autotune_cache_kwargs, input_guard
 
 NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if IS_AMD else [4, 8, 16, 32]
@@ -16,7 +24,7 @@ STATIC_WARPS = 32 if not IS_AMD else 16
     'USE_INITIAL_STATE': lambda args: args['initial_state'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
-@triton.autotune(
+@fla_cache_autotune(
     configs=[
         triton.Config({'BD': BD}, num_warps=num_warps)
         for BD in [16, 32, 64, 128]
@@ -133,7 +141,7 @@ def causal_conv1d_fwd_kernel(
     'USE_FINAL_STATE': lambda args: args['dht'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
-@triton.autotune(
+@fla_cache_autotune(
     configs=[
         triton.Config({'BD': BD}, num_warps=num_warps)
         for BD in [16, 32, 64, 128]
@@ -163,6 +171,9 @@ def causal_conv1d_bwd_kernel(
     stride_dx_n,  # dx batch stride
     stride_dx_t,  # dx time stride
     stride_dx_d,  # dx dim stride
+    stride_dy_n,  # dy batch stride
+    stride_dy_t,  # dy time stride
+    stride_dy_d,  # dy dim stride
     D: tl.constexpr,
     W: tl.constexpr,
     BT: tl.constexpr,
@@ -189,6 +200,11 @@ def causal_conv1d_bwd_kernel(
         bos, eos = (i_b * T).to(tl.int64), (i_b * T + T).to(tl.int64)
         p_x = x + tl.cast(i_b, tl.int64) * stride_x_n
 
+    if IS_VARLEN:
+        p_dy = dy + bos * stride_dy_t
+    else:
+        p_dy = dy + tl.cast(i_b, tl.int64) * stride_dy_n
+
     o_d = i_d * BD + tl.arange(0, BD)
     o_w = tl.arange(0, BW) + W - BW
     m_d = o_d < D
@@ -206,9 +222,10 @@ def causal_conv1d_bwd_kernel(
 
     if not USE_FINAL_STATE and not USE_INITIAL_STATE:
         for i_w in tl.static_range(0, W):
-            p_dy = tl.make_block_ptr(dy + bos * D, (T, D), (D, 1), (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
+            p_dy_blk = tl.make_block_ptr(p_dy, (T, D), (stride_dy_t, stride_dy_d),
+                                         (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
             # [BT, BD]
-            b_dy = tl.load(p_dy, boundary_check=(0, 1)).to(tl.float32)
+            b_dy = tl.load(p_dy_blk, boundary_check=(0, 1)).to(tl.float32)
             if ACTIVATION == 'swish' or ACTIVATION == 'silu':
                 p_y = tl.make_block_ptr(y + bos * D, (T, D), (D, 1), (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
                 b_y = tl.load(p_y, boundary_check=(0, 1)).to(tl.float32)
@@ -227,9 +244,10 @@ def causal_conv1d_bwd_kernel(
     elif i_t * BT >= W:
         # to make Triton compiler happy, we need to copy codes
         for i_w in tl.static_range(0, W):
-            p_dy = tl.make_block_ptr(dy + bos * D, (T, D), (D, 1), (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
+            p_dy_blk = tl.make_block_ptr(p_dy, (T, D), (stride_dy_t, stride_dy_d),
+                                         (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
             # [BT, BD]
-            b_dy = tl.load(p_dy, boundary_check=(0, 1)).to(tl.float32)
+            b_dy = tl.load(p_dy_blk, boundary_check=(0, 1)).to(tl.float32)
             if ACTIVATION == 'swish' or ACTIVATION == 'silu':
                 p_y = tl.make_block_ptr(y + bos * D, (T, D), (D, 1), (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
                 b_y = tl.load(p_y, boundary_check=(0, 1)).to(tl.float32)
@@ -249,8 +267,9 @@ def causal_conv1d_bwd_kernel(
         # which may use initial state
         o_t = i_t * BT + tl.arange(0, BT)
         for i_w in tl.static_range(0, W):
-            p_dy = tl.make_block_ptr(dy + bos * D, (T, D), (D, 1), (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
-            b_dy_shift = tl.load(p_dy, boundary_check=(0, 1)).to(tl.float32)
+            p_dy_blk = tl.make_block_ptr(p_dy, (T, D), (stride_dy_t, stride_dy_d),
+                                         (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
+            b_dy_shift = tl.load(p_dy_blk, boundary_check=(0, 1)).to(tl.float32)
             if ACTIVATION == 'swish' or ACTIVATION == 'silu':
                 p_y = tl.make_block_ptr(y + bos * D, (T, D), (D, 1), (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
                 b_y_shift = tl.load(p_y, boundary_check=(0, 1)).to(tl.float32)
@@ -263,7 +282,7 @@ def causal_conv1d_bwd_kernel(
                 if USE_INITIAL_STATE:
                     mask_head_rows = (o_t < i_w) & (o_t < T)
                     # dy_head = dy[t]
-                    b_dy_head = tl.load(dy + bos * D + o_t[:, None] * D + o_d, mask=(mask_head_rows[:, None] & m_d[None, :]),
+                    b_dy_head = tl.load(p_dy + o_t[:, None] * stride_dy_t + o_d * stride_dy_d, mask=(mask_head_rows[:, None] & m_d[None, :]),
                                         other=0.0).to(tl.float32)
                     if ACTIVATION == 'swish' or ACTIVATION == 'silu':
                         # use y[t] （not y[t+i_w]）
@@ -315,6 +334,16 @@ def causal_conv1d_bwd_kernel(
     'HAS_BIAS': lambda args: args['bias'] is not None,
     'HAS_RESIDUAL': lambda args: args['residual'] is not None,
 })
+@fla_cache_autotune(
+    configs=[
+        triton.Config({'BD': BD}, num_warps=num_warps)
+        for BD in [8, 16, 32, 64, 128, 256]
+        for num_warps in NUM_WARPS_AUTOTUNE
+    ],
+    key=['D', 'W'],
+    restore_value=['cache'],
+    **autotune_cache_kwargs,
+)
 @triton.jit
 def causal_conv1d_update_kernel(
     x,
@@ -426,8 +455,8 @@ def compute_dh0_kernel(
 
     # Get sequence boundaries
     if IS_VARLEN:
-        bos = tl.load(cu_seqlens + i_n).to(tl.int32)
-        eos = tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos = tl.load(cu_seqlens + i_n).to(tl.int64)
+        eos = tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         seq_len = eos - bos
         # For varlen, dy is [1, total_T, D], offset by bos
         dy_base = dy + bos * stride_dy_t
@@ -501,9 +530,9 @@ def causal_conv1d_states_fwd_kernel(
     m_d = o_d < D
 
     if IS_VARLEN:
-        bos = tl.load(cu_seqlens + i_n).to(tl.int32)
-        eos = tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-        seq_len = eos - bos
+        bos = tl.load(cu_seqlens + i_n).to(tl.int64)
+        eos = tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        seq_len = (eos - bos).to(tl.int32)
         p_x = x + bos * stride_x_t
     else:
         seq_len = T
@@ -604,7 +633,6 @@ def causal_conv1d_update(
     D = x.shape[-1]
     N = x.numel() // D
     W = weight.shape[1] if weight is not None else None
-    BD = 8
     BW = triton.next_power_of_2(W)
 
     if x.dim() == 2:
@@ -649,9 +677,7 @@ def causal_conv1d_update(
         stride_y_d=stride_y_d,
         D=D,
         W=W,
-        BD=BD,
         BW=BW,
         ACTIVATION=activation,
-        num_warps=STATIC_WARPS,
     )
     return y.view(shape), cache

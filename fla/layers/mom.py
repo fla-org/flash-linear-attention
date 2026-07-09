@@ -1,3 +1,9 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 from __future__ import annotations
 
@@ -579,6 +585,7 @@ class MomAttention(nn.Module):
                 initial_state=recurrent_state[0],
                 output_final_state=use_cache,
                 use_qk_l2norm_in_kernel=True,
+                state_v_first=True,
                 cu_seqlens=cu_seqlens,
             )
             recurrent_state[0] = self.handle_recurrent_state(
@@ -604,6 +611,7 @@ class MomAttention(nn.Module):
                 initial_state=memories,
                 output_final_state=use_cache,
                 use_qk_l2norm_in_kernel=True,
+                state_v_first=True,
                 cu_seqlens=cu_seqlens,
             )
             recurrent_state[0] = self.handle_recurrent_state(
@@ -713,8 +721,9 @@ class MomAttention(nn.Module):
                 beta=beta,
                 initial_state=recurrent_state[-1],
                 output_final_state=use_cache,
-                cu_seqlens=cu_seqlens,
                 use_qk_l2norm_in_kernel=True,
+                state_v_first=True,
+                cu_seqlens=cu_seqlens,
             )
         elif mode == 'fused_recurrent':
             o, recurrent_state[-1] = fused_recurrent_gated_delta_rule(
@@ -725,8 +734,9 @@ class MomAttention(nn.Module):
                 beta=beta,
                 initial_state=recurrent_state[-1],
                 output_final_state=use_cache,
-                cu_seqlens=cu_seqlens,
                 use_qk_l2norm_in_kernel=True,
+                state_v_first=True,
+                cu_seqlens=cu_seqlens,
             )
         else:
             raise NotImplementedError(f"Not supported mode `{mode}`.")

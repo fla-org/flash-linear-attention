@@ -1,4 +1,9 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import pytest
 import torch
@@ -127,3 +132,54 @@ def test_parallel_varlen(
     assert_close(" dk", ref_dk.squeeze(), tri_dk.squeeze(), 0.005)
     assert_close(" dv", ref_dv.squeeze(), tri_dv.squeeze(), 0.005)
     assert_close(" dg", ref_dg.squeeze(), tri_dg.squeeze(), 0.005)
+
+
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'HQ', 'D', 'W'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-HQ{}-D{}-W{}".format(*test))
+        for test in [
+            (1, 63, 1, 1, 64, 16),
+            (3, 111, 2, 2, 100, 32),
+            (3, 1024, 2, 8, 128, 64),
+        ]
+    ],
+)
+def test_parallel_swa(
+    B: int,
+    T: int,
+    H: int,
+    HQ: int,
+    D: int,
+    W: int,
+):
+    torch.manual_seed(42)
+    if not check_shared_mem('hopper') and D > 128:
+        pytest.skip("Skipping test because global shared memory is not available")
+
+    dtype = torch.float16
+    q = torch.randn((B, T, HQ, D), dtype=dtype, device=device).requires_grad_(True)
+    k = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_(True)
+    v = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_(True)
+    g = torch.randn((B, T, HQ), dtype=dtype, device=device).uniform_(-0.1, -0.01).requires_grad_(True)
+    do = torch.randn((B, T, HQ, D), dtype=dtype, device=device)
+
+    ref = naive_forgetting_attn(q, k, v, g, window_size=W)
+    ref.backward(do)
+    ref_dq, q.grad = q.grad.clone(), None
+    ref_dk, k.grad = k.grad.clone(), None
+    ref_dv, v.grad = v.grad.clone(), None
+    ref_dg, g.grad = g.grad.clone(), None
+
+    tri = parallel_forgetting_attn(q=q, k=k, v=v, g=g, window_size=W)
+    tri.backward(do)
+    tri_dq, q.grad = q.grad.clone(), None
+    tri_dk, k.grad = k.grad.clone(), None
+    tri_dv, v.grad = v.grad.clone(), None
+    tri_dg, g.grad = g.grad.clone(), None
+
+    assert_close(" o", ref, tri, 0.005)
+    assert_close("dq", ref_dq, tri_dq, 0.005)
+    assert_close("dk", ref_dk, tri_dk, 0.005)
+    assert_close("dv", ref_dv, tri_dv, 0.005)
+    assert_close("dg", ref_dg, tri_dg, 0.005)

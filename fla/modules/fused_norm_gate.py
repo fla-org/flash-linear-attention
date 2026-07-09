@@ -1,4 +1,9 @@
-# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 from __future__ import annotations
 
@@ -10,6 +15,7 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
+from fla.modules.backends import dispatch
 from fla.utils import autotune_cache_kwargs, get_multiprocessor_count, input_guard
 
 
@@ -435,6 +441,7 @@ def layer_norm_gated_bwd_kernel1(
         tl.store(db + i_s * D + o_d, b_db, mask=mask)
 
 
+@dispatch('modules')
 def layer_norm_gated_fwd(
     x: torch.Tensor,
     g: torch.Tensor,
@@ -519,6 +526,7 @@ def layer_norm_gated_fwd(
     return y, mean, rstd, residual_out if residual_out is not None else x
 
 
+@dispatch('modules')
 def layer_norm_gated_bwd(
     dy: torch.Tensor,
     x: torch.Tensor,

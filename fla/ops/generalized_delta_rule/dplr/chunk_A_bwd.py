@@ -1,12 +1,17 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
-from fla.ops.utils.op import exp, gather
-from fla.utils import IS_AMD, IS_GATHER_SUPPORTED, USE_CUDA_GRAPH, autotune_cache_kwargs, check_shared_mem
+from fla.ops.utils.op import exp2, gather
+from fla.utils import IS_AMD, IS_GATHER_SUPPORTED, autotune_cache_kwargs, check_shared_mem
 
 NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if IS_AMD else [2, 4, 8, 16, 32]
 
@@ -21,7 +26,6 @@ NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if IS_AMD else [2, 4, 8, 16, 32]
         for num_stages in [2, 3, 4]
     ],
     key=['BK', 'BT', 'K'],
-    use_cuda_graph=USE_CUDA_GRAPH,
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -171,8 +175,8 @@ def chunk_dplr_bwd_kernel_intra(
 
         m_e = o_i[:, None] > j
         m_i = o_i[:, None] >= j
-        tmp1 = exp(b_gi - b_gij)
-        tmp2 = exp(b_ge - b_gij)
+        tmp1 = exp2(b_gi - b_gij)
+        tmp2 = exp2(b_ge - b_gij)
         b_dq += tl.where(m_i, b_dAqk_j * b_kj * tmp1, 0.)
         b_dq += tl.where(m_i, b_dAqb_j * b_bj * tmp1, 0.)
         b_da += tl.where(m_e, b_dAab_j * b_bj * tmp2, 0.)
@@ -180,8 +184,8 @@ def chunk_dplr_bwd_kernel_intra(
 
         m_i = o_i[:, None] <= j
         m_e = o_i[:, None] < j
-        tmp1 = exp(b_gij - b_gi)
-        tmp2 = exp(b_gej - b_gi)
+        tmp1 = exp2(b_gij - b_gi)
+        tmp2 = exp2(b_gej - b_gi)
         b_dk += tl.where(m_i, b_dA_qk_j * b_qj * tmp1, 0.)
         b_dk += tl.where(m_e, b_dA_ak_j * b_aj * tmp2, 0.)
         b_db += tl.where(m_i, b_dA_qb_j * b_qj * tmp1, 0.)
@@ -201,9 +205,9 @@ def chunk_dplr_bwd_kernel_intra(
     p_gn = gi + (min(i_t * BT + BT, T) - 1)*stride_qk + o_k
     p_gn = tl.max_contiguous(tl.multiple_of(p_gn, BK), BK)
     b_gn = tl.load(p_gn, mask=m_k, other=0)
-    b_da += tl.load(p_dag, boundary_check=(0, 1)) * exp(b_ge)
-    b_dq += tl.load(p_dqg, boundary_check=(0, 1)) * exp(b_gi) * scale
-    tmp = exp(b_gn[None, :] - b_gi)
+    b_da += tl.load(p_dag, boundary_check=(0, 1)) * exp2(b_ge)
+    b_dq += tl.load(p_dqg, boundary_check=(0, 1)) * exp2(b_gi) * scale
+    tmp = exp2(b_gn[None, :] - b_gi)
     b_dk += tl.load(p_dkg, boundary_check=(0, 1)).to(tl.float32) * tmp
     b_db += tl.load(p_dbg, boundary_check=(0, 1)).to(tl.float32) * tmp
     tl.store(p_dq, (b_dq).to(p_dq.dtype.element_ty), boundary_check=(0, 1))
@@ -226,7 +230,6 @@ def chunk_dplr_bwd_kernel_intra(
         for num_stages in [2, 3, 4]
     ],
     key=['BK', 'BT'],
-    use_cuda_graph=USE_CUDA_GRAPH,
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -303,9 +306,9 @@ def chunk_dplr_bwd_kernel_intra_tensorcore(
 
     b_gi_shifted = b_gi_val - b_offset[None, :]
     b_ge_shifted = b_ge_val - b_offset[None, :]
-    exp_gi_shifted = tl.exp(b_gi_shifted)
-    inv_exp_gi_shifted = tl.exp(-b_gi_shifted)
-    exp_ge_shifted = tl.exp(b_ge_shifted)
+    exp_gi_shifted = exp2(b_gi_shifted)
+    inv_exp_gi_shifted = exp2(-b_gi_shifted)
+    exp_ge_shifted = exp2(b_ge_shifted)
 
     q_ops = (b_q * exp_gi_shifted).to(tl.float32)
     k_ops = (b_k * inv_exp_gi_shifted).to(tl.float32)
@@ -361,9 +364,9 @@ def chunk_dplr_bwd_kernel_intra_tensorcore(
     p_g_last = gi + offset_base_k + last_idx * H * K + tl.arange(0, BK) + i_k * BK
     b_g_last = tl.load(p_g_last, mask=m_k, other=0.0)
 
-    b_dq = b_dq_intra * exp_gi_shifted + b_dqg * tl.exp(b_gi_val) * scale
-    b_da = b_da_intra * exp_ge_shifted + b_dag * tl.exp(b_ge_val)
-    term_inter_stabilized = tl.exp(b_g_last[None, :] - b_gi_val)
+    b_dq = b_dq_intra * exp_gi_shifted + b_dqg * exp2(b_gi_val) * scale
+    b_da = b_da_intra * exp_ge_shifted + b_dag * exp2(b_ge_val)
+    term_inter_stabilized = exp2(b_g_last[None, :] - b_gi_val)
     b_dk = b_dk_intra * inv_exp_gi_shifted + b_dkg * term_inter_stabilized
     b_db = b_db_intra * inv_exp_gi_shifted + b_dbg * term_inter_stabilized
 
@@ -396,7 +399,6 @@ def chunk_dplr_bwd_kernel_intra_tensorcore(
         for BK in [32, 64]
     ],
     key=['BK', 'BT', 'K'],
-    use_cuda_graph=USE_CUDA_GRAPH,
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])

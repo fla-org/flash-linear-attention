@@ -1,3 +1,9 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 import triton
@@ -5,7 +11,7 @@ import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 from fla.ops.utils.op import exp
-from fla.utils import check_shared_mem, is_nvidia_hopper, use_cuda_graph
+from fla.utils import check_shared_mem, is_nvidia_hopper
 
 BKV_LIST = [64, 128] if check_shared_mem() else [32, 64]
 NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8, 16]
@@ -26,7 +32,6 @@ NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8, 16]
         for BK in [32, 64]
     ],
     key=['H', 'K', 'V', 'BT'],
-    use_cuda_graph=use_cuda_graph,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_oja_fwd_kernel_h_blockdim64(
@@ -253,7 +258,6 @@ def chunk_oja_fwd_h(
         for BK in [64, 32]
     ],
     key=['H', 'K', 'V', 'BT', 'BK', 'USE_GV'],
-    use_cuda_graph=use_cuda_graph,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_oja_bwd_kernel_dhu_blockdim64(
@@ -469,7 +473,7 @@ def chunk_oja_bwd_dhu(
     states_in_fp32: bool = False
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *q.shape, do.shape[-1]
-    BT = 64
+    BT = chunk_size
     assert K <= 256, "current kernel does not support head dimension being larger than 256."
 
     if chunk_indices is None and cu_seqlens is not None:

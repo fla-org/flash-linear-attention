@@ -1,3 +1,10 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
 """
 Test for Context Parallel (CP) KDA (Kimi Delta Attention)
 
@@ -106,7 +113,7 @@ def run_cp_kda_test_worker(
     use_gate_in_kernel: bool = False,
     safe_gate: bool = False,
     lower_bound: float | None = None,
-    transpose_state_layout: bool = False,
+    state_v_first: bool = False,
 ):
     """
     Worker function for CP KDA test.
@@ -333,7 +340,7 @@ def run_cp_kda_test_worker(
             lower_bound=lower_bound,
             A_log=A_log_global[:H].contiguous() if use_gate_in_kernel else None,
             dt_bias=dt_bias_global if use_gate_in_kernel else None,
-            transpose_state_layout=transpose_state_layout,
+            state_v_first=state_v_first,
         )
 
         # CP Backward
@@ -368,7 +375,7 @@ def run_cp_kda_test_worker(
         if rank == 0:
             print(f"\n[{test_name}] Verifying results...")
 
-            # Tolerance: ratio=2e-2 for all tensors.
+            # Tolerance: ratio=8e-3 for all tensors.
             # KDA CP has ~0.7-1.2% error from per-dim gating + L2 norm
             # amplifying bf16 state communication precision loss.
             # db (beta grad) involves cross-rank reduction → higher error
@@ -385,7 +392,7 @@ def run_cp_kda_test_worker(
             try:
                 for name, ref, cp in tensors_to_verify:
                     warn = (name == "db")
-                    assert_close(name, ref, cp, ratio=2e-2, warning=warn)
+                    assert_close(name, ref, cp, ratio=8e-3, warning=warn)
                 print(f"✅ [{test_name}] Test Passed!\n")
             except AssertionError as e:
                 print(f"❌ [{test_name}] Test Failed: {e}\n")
@@ -414,7 +421,7 @@ def run_cp_test_with_spawn(
     use_gate_in_kernel: bool = False,
     safe_gate: bool = False,
     lower_bound: float | None = None,
-    transpose_state_layout: bool = False,
+    state_v_first: bool = False,
 ):
     """
     Run CP test using torch.multiprocessing.spawn.
@@ -423,7 +430,7 @@ def run_cp_test_with_spawn(
     mp.start_processes(
         run_cp_kda_test_worker,
         args=(world_size, test_name, T, H, D, lengths, dtype, disable_recompute,
-              use_gate_in_kernel, safe_gate, lower_bound, transpose_state_layout),
+              use_gate_in_kernel, safe_gate, lower_bound, state_v_first),
         nprocs=world_size,
         join=True,
         start_method='spawn',
@@ -548,8 +555,8 @@ def test_cp2_disable_recompute():
 # Transpose State Layout Tests
 # ============================================================
 
-def test_cp2_transpose_state():
-    """CP2: transpose_state_layout=True with sequence cut."""
+def test_cp2_state_v_first():
+    """CP2: state_v_first=True with sequence cut."""
     if torch.cuda.device_count() < 2:
         pytest.skip("At least 2 GPUs required")
 
@@ -559,13 +566,13 @@ def test_cp2_transpose_state():
         T=10240, H=12, D=128,
         lengths=[3000, 4000, 3240],
         dtype=torch.bfloat16,
-        transpose_state_layout=True,
+        state_v_first=True,
         **GATE_KWARGS,
     )
 
 
-def test_cp4_transpose_state():
-    """CP4: transpose_state_layout=True with single long sequence."""
+def test_cp4_state_v_first():
+    """CP4: state_v_first=True with single long sequence."""
     if torch.cuda.device_count() < 4:
         pytest.skip("At least 4 GPUs required")
 
@@ -575,7 +582,7 @@ def test_cp4_transpose_state():
         T=10240, H=12, D=128,
         lengths=[10240],
         dtype=torch.bfloat16,
-        transpose_state_layout=True,
+        state_v_first=True,
         **GATE_KWARGS,
     )
 

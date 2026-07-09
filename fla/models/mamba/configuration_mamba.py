@@ -1,3 +1,10 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+#
 # Copyright 2024 The HuggingFace Inc. team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -61,18 +68,18 @@ class MambaConfig(PretrainedConfig):
         residual_in_fp32 (`bool`, *optional*):
             Whether or not residuals should be in `float32`.
             If set to `False` residuals will keep the same `dtype` as the rest of the model. Default: `True`.
-        time_step_rank (`Union[int,str]`, *optional*):
+        dt_rank (`Union[int,str]`, *optional*):
             Rank of the the discretization projection matrix.
             `"auto"` means that it will default to `math.ceil(self.hidden_size / 16)`. Default: `"auto"`.
-        time_step_scale (`float`, *optional*):
-            Scale used used to scale `dt_proj.bias`. Default: 1.0.
-        time_step_min (`float`, *optional*):
-            Minimum `time_step` used to bound `dt_proj.bias`. Default: 0.001.
-        time_step_max (`float`, *optional*):
-            Maximum `time_step` used to bound `dt_proj.bias`. Default: 0.1.
-        time_step_init_scheme (`float`, *optional*):
-            Init scheme used for `dt_proj.weight`. Should be one of `["random","uniform"]`. Default: `"random"`.
-        time_step_floor (`float`, *optional*):
+        dt_scale (`float`, *optional*):
+            Scale used to initialize `dt_proj.weight`. Default: 1.0.
+        dt_min (`float`, *optional*):
+            Minimum `dt` used to bound `dt_proj.bias`. Default: 0.001.
+        dt_max (`float`, *optional*):
+            Maximum `dt` used to bound `dt_proj.bias`. Default: 0.1.
+        dt_init_scheme (`str`, *optional*):
+            Init scheme used for `dt_proj.weight`. Should be one of `["random","constant"]`. Default: `"random"`.
+        dt_init_floor (`float`, *optional*):
             Minimum clamping value of the `dt_proj.bias` layer initialization. Default: 0.0001.
         window_size (`int`, *optional*):
             The window size used for sliding window attention. Default: 2048.
@@ -116,12 +123,12 @@ class MambaConfig(PretrainedConfig):
         hidden_act: str = "silu",
         initializer_range: float = 0.02,
         residual_in_fp32: bool = False,
-        time_step_rank: str = "auto",
-        time_step_scale: float = 1.0,
-        time_step_min: float = 0.001,
-        time_step_max: float = 0.1,
-        time_step_init_scheme: str = "random",
-        time_step_floor: float = 1e-4,
+        dt_rank: str | int = "auto",
+        dt_scale: float = 1.0,
+        dt_min: float = 0.001,
+        dt_max: float = 0.1,
+        dt_init_scheme: str = "random",
+        dt_init_floor: float = 1e-4,
         rescale_prenorm_residual: bool = False,
         use_cache: bool = True,
         fuse_norm: bool = True,
@@ -146,12 +153,12 @@ class MambaConfig(PretrainedConfig):
         self.use_conv_bias = use_conv_bias
         self.hidden_act = hidden_act
         self.initializer_range = initializer_range
-        self.time_step_rank = math.ceil(self.hidden_size / 16) if time_step_rank == "auto" else time_step_rank
-        self.time_step_scale = time_step_scale
-        self.time_step_min = time_step_min
-        self.time_step_max = time_step_max
-        self.time_step_init_scheme = time_step_init_scheme
-        self.time_step_floor = time_step_floor
+        self.dt_rank = math.ceil(self.hidden_size / 16) if dt_rank == "auto" else dt_rank
+        self.dt_scale = dt_scale
+        self.dt_min = dt_min
+        self.dt_max = dt_max
+        self.dt_init_scheme = dt_init_scheme
+        self.dt_init_floor = dt_init_floor
         self.rescale_prenorm_residual = rescale_prenorm_residual
         self.residual_in_fp32 = residual_in_fp32
         self.use_cache = use_cache

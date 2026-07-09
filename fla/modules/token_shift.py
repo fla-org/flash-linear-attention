@@ -1,13 +1,21 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
-from fla.utils import IS_AMD, autotune_cache_kwargs, get_multiprocessor_count, input_guard, tensor_cache
+from fla.utils import IS_AMD, IS_NPU, autotune_cache_kwargs, get_multiprocessor_count, input_guard, tensor_cache
 
 NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if IS_AMD else [2, 4, 8, 16, 32]
+# Ascend Triton rejects 2-D grids whose product exceeds 65535 unless
+# TRITON_ALL_BLOCKS_PARALLEL=1. Fall back to the long kernel instead.
+_NPU_MAX_TRITON_GRID = 65535
 
 
 def token_shift_ref(
@@ -164,11 +172,13 @@ def token_shift_fwd_kernel_long(
     BD: tl.constexpr,
     BT: tl.constexpr,
     NB: tl.constexpr,
+    ND: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
 ):
-    i_d, i_t, i_b = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_dt, i_b = tl.program_id(0), tl.program_id(1)
+    i_d, i_t = i_dt % ND, i_dt // ND
 
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), \
@@ -316,11 +326,13 @@ def token_shift_bwd_kernel_long(
     BD: tl.constexpr,
     BT: tl.constexpr,
     NB: tl.constexpr,
+    ND: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     HAS_DCACHE: tl.constexpr,
 ):
-    i_d, i_t_blk, i_b = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_dt, i_b = tl.program_id(0), tl.program_id(1)
+    i_d, i_t_blk = i_dt % ND, i_dt // ND
 
     if IS_VARLEN:
         i_n, i_t_blk = tl.load(chunk_indices + i_t_blk * 2).to(tl.int32), \
@@ -329,6 +341,7 @@ def token_shift_bwd_kernel_long(
         t_start = i_t_blk * BT
         t_end = tl.minimum(t_start + BT, eos - bos)
     else:
+        i_n = i_b
         bos, eos = i_b * T, (i_b + 1) * T
         t_start = i_t_blk * BT
         t_end = tl.minimum(t_start + BT, T)
@@ -373,13 +386,16 @@ def token_shift_fwd(
 ) -> torch.Tensor:
     B, T, D = x.shape
     y = torch.empty_like(x)
-    use_short_kernel = T <= 4096
 
     if cu_seqlens is not None:
         T = prepare_maxlens(cu_seqlens)
         N = len(cu_seqlens) - 1
     else:
         N = B
+
+    use_short_kernel = T <= 4096
+    if IS_NPU and use_short_kernel and N * T > _NPU_MAX_TRITON_GRID:
+        use_short_kernel = False
 
     if output_cache:
         cache_out = torch.empty((N, D), device=x.device, dtype=x.dtype)
@@ -413,9 +429,10 @@ def token_shift_fwd(
         NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
 
         BD = triton.next_power_of_2(D)
+        ND = triton.cdiv(D, BD)
         NB = triton.cdiv(B*T, 1024)
 
-        def grid(meta): return (triton.cdiv(D, meta['BD']), NT, N)
+        def grid(meta): return (ND * NT, 1 if cu_seqlens is not None else N)
         token_shift_fwd_kernel_long[grid](
             x,
             y,
@@ -428,6 +445,7 @@ def token_shift_fwd(
             BD=BD,
             BT=BT,
             NB=NB,
+            ND=ND,
             STORE_FINAL_STATE=output_cache,
         )
 
@@ -471,8 +489,9 @@ def token_shift_bwd(
         NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
         NB = triton.cdiv(N * dy.shape[1], 1024)
         BD = triton.next_power_of_2(D)
+        ND = triton.cdiv(D, BD)
 
-        def grid(meta): return (triton.cdiv(D, meta['BD']), NT, N)
+        def grid(meta): return (ND * NT, 1 if cu_seqlens is not None else N)
         token_shift_bwd_kernel_long[grid](
             dx,
             dy,
@@ -485,6 +504,7 @@ def token_shift_bwd(
             BD=BD,
             BT=BT,
             NB=NB,
+            ND=ND,
         )
     return dx, grad_cache_out
 
@@ -513,6 +533,7 @@ class TokenShift(torch.autograd.Function):
         return dx, None, grad_cache, None, None
 
 
+@torch.compiler.disable
 def token_shift(
     x: torch.Tensor,
     cu_seqlens: torch.LongTensor | None = None,

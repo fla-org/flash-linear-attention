@@ -1,4 +1,9 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 import triton
@@ -6,7 +11,7 @@ import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import gather
-from fla.utils import IS_GATHER_SUPPORTED, USE_CUDA_GRAPH, autotune_cache_kwargs
+from fla.utils import IS_GATHER_SUPPORTED, autotune_cache_kwargs
 
 
 @triton.heuristics({
@@ -18,7 +23,6 @@ from fla.utils import IS_GATHER_SUPPORTED, USE_CUDA_GRAPH, autotune_cache_kwargs
         for num_warps in [1, 2, 4, 8, 16]
     ],
     key=['BT'],
-    use_cuda_graph=USE_CUDA_GRAPH,
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -64,7 +68,6 @@ def prepare_wy_repr_fwd_kernel_chunk32(
         for num_stages in [2, 3, 4]
     ],
     key=['BC'],
-    use_cuda_graph=USE_CUDA_GRAPH,
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -144,7 +147,6 @@ def prepare_wy_repr_fwd_kernel_chunk64(
         for num_stages in [2, 3, 4]
     ],
     key=['H', 'K', 'V', 'BT', 'BK', 'BV', 'IS_VARLEN'],
-    use_cuda_graph=USE_CUDA_GRAPH,
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])

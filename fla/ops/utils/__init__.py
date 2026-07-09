@@ -1,3 +1,11 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
+from .csr import prepare_block_csr
 from .cumsum import (
     chunk_global_cumsum,
     chunk_global_cumsum_scalar,
@@ -39,6 +47,7 @@ __all__ = [
     "matmul",
     "mean_pooling",
     "pack_sequence",
+    "prepare_block_csr",
     "prepare_chunk_indices",
     "prepare_chunk_offsets",
     "prepare_cu_seqlens_from_lens",

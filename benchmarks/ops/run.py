@@ -1,4 +1,9 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 """
 Unified CLI benchmark runner for all registered ops.
@@ -8,11 +13,17 @@ Usage::
     # Benchmark one op (uses all default shape configs)
     python -m benchmarks.ops.run --op chunk_gla
 
+    # Ops touched by git diff (same rules as scripts/run_benchmark_compare.py)
+    python -m benchmarks.ops.run --from-diff --diff-base main --diff-head HEAD
+
     # Multiple ops
     python -m benchmarks.ops.run --op chunk_gla chunk_kda
 
     # All registered ops
     python -m benchmarks.ops.run --op all
+
+    # Select an op backend (ops with a `backend` param, e.g. AttnRes triton vs gluon)
+    python -m benchmarks.ops.run --op fused_attnres --backend gluon
 
     # Forward only
     python -m benchmarks.ops.run --op chunk_gla --modes fwd
@@ -104,10 +115,12 @@ Special cases:
 
 Benchmark methodology
 =====================
-1. **Warmup**: For each (op, shape), run fwd+bwd 5 times to trigger all
-   triton autotuning.  All shapes are warmed up before any timing begins.
-2. **Timing**: ``triton.testing.do_bench(fn, quantiles=[0.5, 0.2, 0.8])``
-   gives median, p20, p80 in milliseconds.
+1. **Warmup**: For each (op, shape), run fwd+bwd several times (default 5;
+   override with ``FLA_BENCH_OP_WARMUP_ITERS``) to trigger triton autotuning.
+   All shapes are warmed up before any timing begins.
+2. **Timing**: ``triton.testing.do_bench`` with quantiles ``[0.5, 0.2, 0.8]``,
+   ``warmup``/``rep`` in milliseconds (defaults 25 / 100; set
+   ``FLA_BENCH_WARMUP_MS`` / ``FLA_BENCH_REP_MS`` for noisier machines / CI).
 3. Input tensors (including gate transforms like logsigmoid) are prepared
    **before** timing — only the op call itself is measured.
 """
@@ -198,8 +211,22 @@ def _get_machine_info() -> dict:
     return info
 
 
-def _warmup_autotune(fn, n=5):
+def _warmup_iters() -> int:
+    """Extra per-shape forward+backward iterations before timing (not Triton do_bench warmup)."""
+    return max(1, int(os.environ.get('FLA_BENCH_OP_WARMUP_ITERS', '5')))
+
+
+def _do_bench_kw():
+    """Triton ``do_bench`` uses warmup/rep in *milliseconds* of timed execution (see Triton docs)."""
+    warmup_ms = int(os.environ.get('FLA_BENCH_WARMUP_MS', '25'))
+    rep_ms = int(os.environ.get('FLA_BENCH_REP_MS', '100'))
+    return {'warmup': max(1, warmup_ms), 'rep': max(1, rep_ms)}
+
+
+def _warmup_autotune(fn, n: int | None = None):
     """Run *fn* multiple times so triton autotuning is fully cached."""
+    if n is None:
+        n = _warmup_iters()
     for _ in range(n):
         fn()
     torch.cuda.synchronize()
@@ -209,6 +236,7 @@ def benchmark_op(
     op_name: str,
     shapes: dict[str, dict[str, int]],
     modes: list[str] | None = None,
+    backend: str | None = None,
 ) -> list[dict]:
     """Benchmark a single op across all *shapes* and *modes*.
 
@@ -222,8 +250,28 @@ def benchmark_op(
     config = get_op(op_name)
     op_fn = _import_op(config)
 
+    # `--backend` selects an op backend by toggling its dispatch env var (see OpConfig.backend_env),
+    # matching how FLA backends are enabled at runtime. 'triton' (or unset) leaves the default path.
+    call_kwargs = dict(config.extra_kwargs)
+    op_label = op_name
+    backend_env = config.backend_env or {}
+    if backend and backend != 'triton':
+        env = backend_env.get(backend)
+        if env is not None:
+            os.environ[env] = '1'
+            op_label = f"{op_name}[{backend}]"
+        else:
+            logger.info(f"Op '{op_name}' has no '{backend}' backend; running the default path")
+    elif backend == 'triton':
+        for env in backend_env.values():
+            os.environ[env] = '0'
+
     if config.skip_backward and 'fwdbwd' in modes:
         modes = [m for m in modes if m != 'fwdbwd']
+
+    # Per-op shape override (e.g., AttnRes uses an `L` axis not in B/T/H/D)
+    if config.default_shapes is not None:
+        shapes = config.default_shapes
 
     # Filter shapes by dim_constraints
     valid_shapes = {}
@@ -254,14 +302,15 @@ def benchmark_op(
     failed_shapes = set()
     for shape_name, shape_dict in valid_shapes.items():
         B, T, H, D = shape_dict['B'], shape_dict['T'], shape_dict['H'], shape_dict['D']
+        extra_shape_kw = {k: v for k, v in shape_dict.items() if k not in ('B', 'T', 'H', 'D')}
         try:
-            inputs = generate_inputs(config, B, T, H, D, dtype=dtype, device=device)
-            out = op_fn(**inputs, **config.extra_kwargs)
+            inputs = generate_inputs(config, B, T, H, D, dtype=dtype, device=device, **extra_shape_kw)
+            out = op_fn(**inputs, **call_kwargs)
             out_tensor = out[0] if config.output_is_tuple else out
             do = torch.randn_like(out_tensor)
 
             def _fwdbwd_fn(inputs=inputs, do=do):
-                result = op_fn(**inputs, **config.extra_kwargs)
+                result = op_fn(**inputs, **call_kwargs)
                 t = result[0] if config.output_is_tuple else result
                 t.backward(do)
 
@@ -278,36 +327,40 @@ def benchmark_op(
     results = []
     for shape_name, shape_dict in list(valid_shapes.items()):
         B, T, H, D = shape_dict['B'], shape_dict['T'], shape_dict['H'], shape_dict['D']
+        extra_shape_kw = {k: v for k, v in shape_dict.items() if k not in ('B', 'T', 'H', 'D')}
         try:
-            inputs = generate_inputs(config, B, T, H, D, dtype=dtype, device=device)
+            inputs = generate_inputs(config, B, T, H, D, dtype=dtype, device=device, **extra_shape_kw)
         except Exception as e:
             logger.warning(f"Input generation failed for {op_name} @ {shape_name}: {e}")
             continue
 
-        out = op_fn(**inputs, **config.extra_kwargs)
+        out = op_fn(**inputs, **call_kwargs)
         out_tensor = out[0] if config.output_is_tuple else out
         do = torch.randn_like(out_tensor)
 
         for mode in modes:
             if mode == 'fwd':
                 def fn(inputs=inputs):
-                    return op_fn(**inputs, **config.extra_kwargs)
+                    return op_fn(**inputs, **call_kwargs)
             else:
                 def fn(inputs=inputs, do=do):
-                    result = op_fn(**inputs, **config.extra_kwargs)
+                    result = op_fn(**inputs, **call_kwargs)
                     t = result[0] if config.output_is_tuple else result
                     t.backward(do)
 
             try:
-                ms = triton.testing.do_bench(fn, quantiles=[0.5, 0.2, 0.8])
+                ms = triton.testing.do_bench(
+                    fn, quantiles=[0.5, 0.2, 0.8], **_do_bench_kw()
+                )
             except Exception as e:
                 logger.warning(f"Bench failed for {op_name} {mode} @ {shape_name}: {e}")
                 continue
 
             results.append({
-                'op': op_name,
+                'op': op_label,
                 'mode': mode,
                 'B': B, 'T': T, 'H': H, 'D': D,
+                **extra_shape_kw,
                 'median_ms': ms[0],
                 'p20_ms': ms[1],
                 'p80_ms': ms[2],
@@ -316,8 +369,15 @@ def benchmark_op(
     return results
 
 
+_RESULT_RESERVED_KEYS = {'op', 'mode', 'B', 'T', 'H', 'D', 'median_ms', 'p20_ms', 'p80_ms'}
+
+
 def _make_result_key(r):
-    return (r['op'], r['mode'], r['B'], r['T'], r['H'], r['D'])
+    """Identify a result row. Include any extra shape dims (e.g., AttnRes `L`)
+    so per-op shape configs that share B/T/H/D but vary in extras don't collide.
+    """
+    extras = tuple(sorted((k, v) for k, v in r.items() if k not in _RESULT_RESERVED_KEYS))
+    return (r['op'], r['mode'], r['B'], r['T'], r['H'], r['D'], extras)
 
 
 def _truncate_branch(name: str, max_len: int = 8) -> str:
@@ -367,23 +427,29 @@ def print_results_table(results: list[dict], machine_info: dict | None = None,
 
     new_git = machine_info.get('git_label', 'new') if machine_info else 'new'
 
-    # mode_w = 2 (indent) + 7 (mode field) + 1 (space) = 10 chars before B column
+    # mode_w = 2 (indent) + 7 (mode field) + 1 (space) = 10 chars before first dim column
     mode_pad = ' ' * 10
+
+    # Show L column only when every row has an L axis (e.g., a pure
+    # AttnRes / mHC / layer-attn run). Mixed runs hide L for clarity.
+    has_l = bool(results) and all('L' in r for r in results)
+    l_col = f"{'L':>4s} " if has_l else ''
+    l_extra_w = 5 if has_l else 0
 
     if has_baseline:
         old_git = baseline_info.get('git_label', 'main') if baseline_info else 'main'
         old_hdr, new_hdr = _make_col_headers(old_git, new_git)
         col_w = max(len(old_hdr), len(new_hdr), 10)
-        inner_w = 4 + 1 + 6 + 1 + 4 + 1 + 4 + 2 + 28 + 2 + col_w + 1 + col_w + 1 + 8
-        inner_hdr = (f"{'B':>4s} {'T':>6s} {'H':>4s} {'D':>4s}  {'op':<28s}"
+        inner_w = l_extra_w + 4 + 1 + 6 + 1 + 4 + 1 + 4 + 2 + 28 + 2 + col_w + 1 + col_w + 1 + 8
+        inner_hdr = (f"{l_col}{'B':>4s} {'T':>6s} {'H':>4s} {'D':>4s}  {'op':<28s}"
                      f"  {old_hdr:>{col_w}s} {new_hdr:>{col_w}s} {'speedup':>8s}")
     else:
         new_hdr = _truncate_branch(new_git.split('[')[0]) if '[' in new_git else new_git
         suffix = '[' + new_git.split('[', 1)[1] + '(ms)' if '[' in new_git else '(ms)'
         new_hdr = new_hdr + suffix
         col_w = max(len(new_hdr), 10)
-        inner_w = 4 + 1 + 6 + 1 + 4 + 1 + 4 + 2 + 28 + 2 + col_w
-        inner_hdr = (f"{'B':>4s} {'T':>6s} {'H':>4s} {'D':>4s}  {'op':<28s}"
+        inner_w = l_extra_w + 4 + 1 + 6 + 1 + 4 + 1 + 4 + 2 + 28 + 2 + col_w
+        inner_hdr = (f"{l_col}{'B':>4s} {'T':>6s} {'H':>4s} {'D':>4s}  {'op':<28s}"
                      f"  {new_hdr:>{col_w}s}")
 
     width = 10 + inner_w
@@ -397,10 +463,18 @@ def print_results_table(results: list[dict], machine_info: dict | None = None,
         pytorch = machine_info.get('pytorch_version', 'N/A')
         print(f"  Machine: {gpu} | CUDA {cuda} | PyTorch {pytorch}")
 
+    def _l_cell(r, blank=False):
+        if not has_l:
+            return ''
+        if blank:
+            return f"{'':>4s} "
+        v = r.get('L')
+        return f"{v:>4d} " if v is not None else f"{'-':>4s} "
+
     prev_shape = None
     prev_mode = None
     for r in results:
-        cur_shape = (r['B'], r['T'], r['H'], r['D'])
+        cur_shape = (r.get('L'), r['B'], r['T'], r['H'], r['D'])
         cur_mode = r['mode']
 
         # Show mode label + column header when mode changes; just a dash line between shapes
@@ -411,11 +485,11 @@ def print_results_table(results: list[dict], machine_info: dict | None = None,
         elif cur_shape != prev_shape:
             print(dash_line)
 
-        # Show B/T/H/D on first row of each shape group
+        # Show shape columns on first row of each shape group
         if cur_mode != prev_mode or cur_shape != prev_shape:
-            shape_str = f"{r['B']:>4d} {r['T']:>6d} {r['H']:>4d} {r['D']:>4d}"
+            shape_str = f"{_l_cell(r)}{r['B']:>4d} {r['T']:>6d} {r['H']:>4d} {r['D']:>4d}"
         else:
-            shape_str = f"{'':>4s} {'':>6s} {'':>4s} {'':>4s}"
+            shape_str = f"{_l_cell(r, blank=True)}{'':>4s} {'':>6s} {'':>4s} {'':>4s}"
 
         prev_shape = cur_shape
         prev_mode = cur_mode
@@ -446,7 +520,7 @@ def _find_project_root() -> str:
     return os.getcwd()
 
 
-def _bench_at_ref(ref, op_names, shape_configs, modes):
+def _bench_at_ref(ref, op_names, shape_configs, modes, backend=None):
     """Run benchmarks at a git ref using a temporary worktree.
 
     Returns (results_list, machine_info_dict) or (None, None) on failure.
@@ -480,6 +554,8 @@ def _bench_at_ref(ref, op_names, shape_configs, modes):
         cmd = [sys.executable, runner, '--op', *op_names,
                '--custom-shapes', json.dumps(shape_configs),
                '--modes', *modes, '--json', out_json]
+        if backend is not None:
+            cmd += ['--backend', backend]
         subprocess.run(cmd, cwd=worktree_dir)
 
         if os.path.exists(out_json):
@@ -512,6 +588,11 @@ def main():
         help='Op name(s) to benchmark, or "all"',
     )
     parser.add_argument(
+        '--backend', default=None,
+        help="Op backend to select, e.g. 'triton' or 'gluon'. Toggles the backend's dispatch env "
+             "var for ops that declare one (see OpConfig.backend_env); ignored otherwise.",
+    )
+    parser.add_argument(
         '--custom-shapes', default=None,
         help='JSON string to override default shapes, '
              'e.g. \'{"my": {"B":1,"T":2048,"H":16,"D":128}}\'',
@@ -534,6 +615,18 @@ def main():
         '--list', action='store_true',
         help='List all registered ops and exit',
     )
+    parser.add_argument(
+        '--from-diff', action='store_true',
+        help='Select ops from git diff (use with --diff-base / --diff-head, not with --op)',
+    )
+    parser.add_argument(
+        '--diff-base', default='main',
+        help='Base ref for --from-diff (default: main)',
+    )
+    parser.add_argument(
+        '--diff-head', default='HEAD',
+        help='Head ref for --from-diff (default: HEAD)',
+    )
     args = parser.parse_args()
 
     if args.list:
@@ -544,10 +637,24 @@ def main():
             print(f"  {name:30s}  [{cfg.category}]  {cfg.import_path}")
         return
 
-    if args.op is None:
-        parser.error("--op is required (use --list to see available ops)")
+    if args.from_diff:
+        if args.op is not None:
+            parser.error('--from-diff cannot be used with --op')
+        project_root = _find_project_root()
+        scripts_dir = os.path.join(project_root, 'scripts')
+        if scripts_dir not in sys.path:
+            sys.path.insert(0, scripts_dir)
+        import run_benchmark_compare as _diff
+        changed = _diff.get_changed_files(args.diff_base, args.diff_head)
+        op_names = _diff.find_affected_op_names(changed)
+        if not op_names:
+            print('No affected ops for this diff.', file=sys.stderr)
+            return
+    elif args.op is None:
+        parser.error("--op is required unless --from-diff (use --list to see available ops)")
 
-    op_names = list_ops() if args.op == ['all'] else args.op
+    if not args.from_diff:
+        op_names = list_ops() if args.op == ['all'] else args.op
     shape_configs = json.loads(args.custom_shapes) if args.custom_shapes else SHAPE_CONFIGS
 
     machine_info = _get_machine_info()
@@ -560,7 +667,7 @@ def main():
     all_results = []
     for op_name in op_names:
         try:
-            all_results.extend(benchmark_op(op_name, shape_configs, modes=args.modes))
+            all_results.extend(benchmark_op(op_name, shape_configs, modes=args.modes, backend=args.backend))
         except Exception as e:
             logger.error(f"Failed to benchmark {op_name}: {e}")
 
@@ -574,11 +681,16 @@ def main():
     baseline, baseline_info = None, None
     if base_ref:
         baseline, baseline_info = _bench_at_ref(
-            base_ref, op_names, shape_configs, args.modes)
+            base_ref, op_names, shape_configs, args.modes, backend=args.backend)
 
-    # Sort by (mode, B, T, H, D, op) so the table groups by mode first
+    # Sort by (mode, L, B, T, H, D, op) so the table groups by mode first
+    # and (when present) by L so different residual-source counts cluster.
     mode_order = {'fwd': 0, 'fwdbwd': 1}
-    all_results.sort(key=lambda r: (mode_order.get(r['mode'], 9), r['B'], r['T'], r['H'], r['D'], r['op']))
+    all_results.sort(key=lambda r: (
+        mode_order.get(r['mode'], 9),
+        r.get('L', 0),
+        r['B'], r['T'], r['H'], r['D'], r['op'],
+    ))
 
     print_results_table(all_results, machine_info, baseline=baseline, baseline_info=baseline_info)
 

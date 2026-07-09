@@ -1,11 +1,16 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
-from fla.utils import IS_INTEL_ALCHEMIST, USE_CUDA_GRAPH, autotune_cache_kwargs, check_shared_mem
+from fla.utils import IS_INTEL_ALCHEMIST, autotune_cache_kwargs, check_shared_mem
 
 # https://github.com/intel/intel-xpu-backend-for-triton/issues/3449
 triton_config = {'grf_mode': 'large'} if IS_INTEL_ALCHEMIST else {}
@@ -21,7 +26,6 @@ triton_config = {'grf_mode': 'large'} if IS_INTEL_ALCHEMIST else {}
         for num_stages in [2, 3, 4]
     ],
     key=['BT', 'BK', 'BV'],
-    use_cuda_graph=USE_CUDA_GRAPH,
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])

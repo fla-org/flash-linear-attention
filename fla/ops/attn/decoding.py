@@ -1,5 +1,9 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
-
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 import triton
@@ -12,6 +16,7 @@ from fla.utils import autotune_cache_kwargs, check_shared_mem
 
 @triton.heuristics({
     'USE_G': lambda args: args['g_cumsum'] is not None,
+    'USE_SINK_BIAS': lambda args: args['sink_bias'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -19,7 +24,7 @@ from fla.utils import autotune_cache_kwargs, check_shared_mem
         for num_warps in [1, 2, 4] + ([] if check_shared_mem('hopper') else [8])
         for num_stages in [2, 3, 4, 5]
     ],
-    key=['H', 'G', 'K', 'V', 'BK', 'BV', 'USE_G'],
+    key=['H', 'G', 'K', 'V', 'BK', 'BV', 'USE_G', 'USE_SINK_BIAS'],
     **autotune_cache_kwargs,
 )
 @triton.jit
@@ -29,8 +34,8 @@ def naive_attn_decoding_kernel(
     v,
     o,
     g_cumsum,
+    sink_bias,
     scale,
-    gate_scale,
     cu_seqlens,
     T,
     B: tl.constexpr,
@@ -43,6 +48,7 @@ def naive_attn_decoding_kernel(
     BK: tl.constexpr,
     BV: tl.constexpr,
     USE_G: tl.constexpr,
+    USE_SINK_BIAS: tl.constexpr,
 ):
     i_v, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
@@ -57,7 +63,7 @@ def naive_attn_decoding_kernel(
     b_q = tl.load(p_q, boundary_check=(0,))
     b_q = (b_q * scale).to(b_q.dtype)
 
-    b_o = tl.zeros([BV ], dtype=tl.float32)
+    b_o = tl.zeros([BV], dtype=tl.float32)
 
     b_m = tl.full([1], float('-inf'), dtype=tl.float32)
     b_acc = tl.zeros([1], dtype=tl.float32)
@@ -67,6 +73,11 @@ def naive_attn_decoding_kernel(
         b_gq = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
     else:
         b_gq = None
+
+    if USE_SINK_BIAS:
+        b_sink_bias = tl.load(sink_bias + i_hq).to(tl.float32)
+    else:
+        b_sink_bias = None
 
     for i_s in range(0, T, BS):
         p_k = tl.make_block_ptr(k + (bos * H + i_h) * K, (T, K), (H*K, 1), (i_s, 0), (BS, BK), (1, 0))
@@ -84,7 +95,7 @@ def naive_attn_decoding_kernel(
         if USE_G:
             p_gk = tl.make_block_ptr(g_cumsum + bos * HQ + i_hq, (T,), (HQ,), (i_s,), (BS,), (0,))
             b_gk = tl.load(p_gk, boundary_check=(0,)).to(tl.float32)
-            b_s += (b_gq - b_gk) * gate_scale
+            b_s += b_gq - b_gk
         # [BT, BS]
         b_m, b_mp = tl.maximum(b_m, tl.max(b_s)), b_m
         b_r = exp(b_mp - b_m)
@@ -96,6 +107,11 @@ def naive_attn_decoding_kernel(
         # [BT, BV]
         b_o = b_o * b_r + tl.sum(b_p[:, None] * b_v, 0)
         b_mp = b_m
+
+    if USE_SINK_BIAS:
+        # keep the sink-bias merge finite when masking leaves a row with no valid key.
+        b_m = tl.where(b_m == float('-inf'), 0., b_m)
+        b_acc += exp(b_sink_bias - b_m)
     b_o = b_o / b_acc
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, ))
 
@@ -108,6 +124,8 @@ def attn_decoding_one_step(
     scale: float | None = None,
     cu_seqlens: torch.LongTensor = None,
     do_gate_scale: bool = False,
+    *,
+    sink_bias: torch.Tensor | None = None,
 ):
     r"""
     Args:
@@ -119,7 +137,7 @@ def attn_decoding_one_step(
         v (torch.Tensor):
             values of shape `[1, T, H, V]`.
         g (Optional[torch.Tensor]):
-            log decay factors of shape `[1, T, H]`. Default: `None`.
+            log decay factors of shape `[1, T, HQ]`. Default: `None`.
         scale (Optional[float]):
             Scale factor for attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
@@ -129,10 +147,14 @@ def attn_decoding_one_step(
         do_gate_scale (bool):
             Whether to apply gate scale. Default: `False`. If `True`, the attention scale will also be applied
             to the gating bias term in Forgetting Transformer or PaTH-FoX.
+        sink_bias (Optional[torch.Tensor]):
+            Per-query-head attention-sink bias logits of shape `[HQ]` — one
+            learnable scalar per query head, as introduced by GPT-OSS.
+            Augments the softmax denominator without contributing to the output.
 
     Returns:
         o (torch.Tensor):
-            Outputs of shape `[B, 1, HQ, V]`.
+            Outputs of shape `[1, B, HQ, V]`.
     """
     assert cu_seqlens is not None, "The cu_seqlens must be provided for varlen decoding"
     B, T, H, K, V = *k.shape, v.shape[-1]
@@ -141,6 +163,8 @@ def attn_decoding_one_step(
     G = HQ // H
     if scale is None:
         scale = K ** -0.5
+    if sink_bias is not None:
+        assert sink_bias.shape == (HQ,), "sink_bias must have shape [HQ]"
 
     BK = max(triton.next_power_of_2(K), 16)
     if check_shared_mem('hopper', q.device.index):
@@ -152,10 +176,14 @@ def attn_decoding_one_step(
     else:
         BS = min(32, max(16, triton.next_power_of_2(T)))
         BV = min(64, max(16, triton.next_power_of_2(V)))
-    g_cumsum = chunk_global_cumsum(g, cu_seqlens=cu_seqlens, output_dtype=torch.float32) if g is not None else None
+    g_cumsum = chunk_global_cumsum(
+        g,
+        cu_seqlens=cu_seqlens,
+        scale=scale if do_gate_scale else None,
+        output_dtype=torch.float32,
+    ) if g is not None else None
     NV = triton.cdiv(V, BV)
     o = torch.empty(*q.shape[:-1], V, dtype=v.dtype, device=q.device)
-    gate_scale = 1.0 if not do_gate_scale else scale
 
     grid = (NV, N * HQ)
     naive_attn_decoding_kernel[grid](
@@ -164,8 +192,8 @@ def attn_decoding_one_step(
         v=v,
         o=o,
         g_cumsum=g_cumsum,
+        sink_bias=sink_bias,
         scale=scale,
-        gate_scale=gate_scale,
         cu_seqlens=cu_seqlens,
         B=B,
         T=T,

@@ -1,10 +1,17 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 import torch.nn as nn
 import triton
 import triton.language as tl
 
+from fla.modules.backends import dispatch
+from fla.ops.utils.cache import fla_cache_autotune
 from fla.utils import IS_AMD, autotune_cache_kwargs, input_guard
 
 BT_LIST = [8, 16, 32, 64, 128]
@@ -68,7 +75,7 @@ def l2norm_bwd_kernel1(
     tl.store(dx + cols, b_dx, mask=mask)
 
 
-@triton.autotune(
+@fla_cache_autotune(
     configs=[triton.Config({"BT": BT}, num_warps=num_warps) for num_warps in [1, 2, 4, 8, 16] for BT in BT_LIST],
     key=["D", "NB"],
     **autotune_cache_kwargs,
@@ -98,7 +105,7 @@ def l2norm_fwd_kernel(
     tl.store(p_rstd, b_rstd.to(p_rstd.dtype.element_ty), boundary_check=(0,))
 
 
-@triton.autotune(
+@fla_cache_autotune(
     configs=[triton.Config({"BT": BT}, num_warps=num_warps) for num_warps in [1, 2, 4, 8, 16] for BT in BT_LIST],
     key=["D", "NB"],
     **autotune_cache_kwargs,
@@ -129,6 +136,7 @@ def l2norm_bwd_kernel(
     tl.store(p_dx, b_dx.to(p_dx.dtype.element_ty), boundary_check=(0, 1))
 
 
+@dispatch('modules')
 def l2norm_fwd(
     x: torch.Tensor,
     eps: float = 1e-6,
@@ -181,6 +189,7 @@ def l2norm_fwd(
     return y.view(x_shape_og), rstd.view(x_shape_og[:-1])
 
 
+@dispatch('modules')
 def l2norm_bwd(
     y: torch.Tensor,
     rstd: torch.Tensor,

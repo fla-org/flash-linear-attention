@@ -1,4 +1,9 @@
-
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import pytest
 import torch
@@ -91,7 +96,7 @@ def test_chunk(
 @pytest.mark.parametrize(
     ('H', 'D', 'num_householder', 'cu_seqlens', 'dtype'),
     [
-        (2, 64, 3, [0, 63 ], torch.float16),
+        (2, 64, 3, [0, 63], torch.float16),
         (2, 100, 2, [0, 63, 100, 500, 1000], torch.float16),
         (2, 128, 2, [0, 100, 300, 800, 1500, 2000], torch.float16),
         (2, 256, 3, [0, 100, 123, 300, 500, 800, 1000, 1500, 2048], torch.float16),

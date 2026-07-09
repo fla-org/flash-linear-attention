@@ -1,3 +1,9 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import os
 
@@ -87,6 +93,66 @@ def test_fused_recurrent(
     assert_close('dv', ref_dv, tri_dv, 0.005)
     assert_close('dg', ref_dg, tri_dg, 0.005, err_atol=2e-4)
     assert_close('dh0', ref_dh0, tri_dh0, 0.005)
+
+
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'D', 'dtype'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-{}".format(*test))
+        for test in [
+            (2, 256, 4, 64, torch.float),
+            (2, 1024, 4, 128, torch.float16),
+        ]
+    ],
+)
+def test_fused_recurrent_state_v_first(
+    B: int,
+    T: int,
+    H: int,
+    D: int,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(42)
+
+    q = torch.randn((B, T, H, D), dtype=dtype, device=device)
+    k = torch.randn((B, T, H, D), dtype=dtype, device=device)
+    v = torch.randn((B, T, H, D), dtype=dtype, device=device)
+    g = F.logsigmoid(torch.randn((B, T, H), dtype=dtype, device=device))
+    h0 = torch.randn(B, H, D, D, device=device)
+    do = torch.randn_like(v)
+    dht = torch.randn_like(h0)
+
+    def run(state_v_first: bool):
+        q_, k_, v_, g_ = (x.detach().clone().requires_grad_() for x in (q, k, v, g))
+        h0_in = h0.transpose(-1, -2).contiguous() if state_v_first else h0.clone()
+        dht_in = dht.transpose(-1, -2).contiguous() if state_v_first else dht
+        h0_in = h0_in.requires_grad_()
+        out, ht = fused_recurrent_simple_gla(
+            q=q_, k=k_, v=v_, g=g_,
+            initial_state=h0_in,
+            output_final_state=True,
+            state_v_first=state_v_first,
+        )
+        ((out * do).sum() + (ht * dht_in).sum()).backward()
+        return out, ht, q_.grad, k_.grad, v_.grad, g_.grad, h0_in.grad
+
+    ref_o, ref_ht, ref_dq, ref_dk, ref_dv, ref_dg, ref_dh0 = run(False)
+    tri_o, tri_ht, tri_dq, tri_dk, tri_dv, tri_dg, tri_dh0 = run(True)
+
+    assert_close('o', ref_o, tri_o, 0.005)
+    assert_close('ht', ref_ht, tri_ht.transpose(-1, -2), 0.005)
+    assert_close('dq', ref_dq, tri_dq, 0.005)
+    assert_close('dk', ref_dk, tri_dk, 0.005)
+    assert_close('dv', ref_dv, tri_dv, 0.005)
+    assert_close('dg', ref_dg, tri_dg, 0.005, err_atol=2e-4)
+    assert_close('dh0', ref_dh0, tri_dh0.transpose(-1, -2), 0.005)
+
+    # the legacy `transpose_state_layout` kwarg maps to `state_v_first` with a warning,
+    # and passing both names at once is rejected
+    with pytest.warns(DeprecationWarning):
+        fused_recurrent_simple_gla(q, k, v, g=g, transpose_state_layout=True)
+    with pytest.raises(ValueError):
+        fused_recurrent_simple_gla(q, k, v, g=g, state_v_first=True, transpose_state_layout=True)
 
 
 @pytest.mark.parametrize(
@@ -248,6 +314,131 @@ def test_chunk(
     assert_close('dv', ref_dv, tri_dv, 0.005)
     assert_close('dg', ref_dg, tri_dg, 0.005)
     assert_close('dh0', ref_dh0, tri_dh0, 0.005)
+
+
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'D', 'scale', 'gate_logit_normalizer', 'dtype', 'chunk_size'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-scale{}-gate{}-{}-chunk{}".format(*test))
+        for chunk_size in [16, 32, 64]
+        for test in [
+            (1, 64, 2, 64, 0.1, 1.0, torch.float16, chunk_size),
+        ]
+    ],
+)
+def test_chunk_with_chunk_size(
+    B: int,
+    T: int,
+    H: int,
+    D: int,
+    scale: float,
+    gate_logit_normalizer: float,
+    dtype: torch.dtype,
+    chunk_size: int,
+):
+    torch.manual_seed(42)
+    q = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    k = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    v = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    g = F.logsigmoid(torch.randn(B, T, H, dtype=torch.float32, device=device)) / gate_logit_normalizer
+    h0 = torch.randn(B, H, D, D, dtype=torch.float32, device=device)
+    do = torch.randn_like(v)
+    dht = torch.randn_like(h0)
+
+    def run_ref():
+        q_, k_, v_, g_, h0_ = (x.detach().clone().requires_grad_(True) for x in (q, k, v, g, h0))
+        o, ht = fused_recurrent_simple_gla(
+            q=q_,
+            k=k_,
+            v=v_,
+            g=g_,
+            scale=scale,
+            initial_state=h0_,
+            output_final_state=True,
+        )
+        ((o * do).sum() + (ht * dht).sum()).backward()
+        return o, ht, q_.grad, k_.grad, v_.grad, g_.grad, h0_.grad
+
+    def run_tri(chunk_size: int):
+        q_, k_, v_, g_, h0_ = (x.detach().clone().requires_grad_(True) for x in (q, k, v, g, h0))
+        o, ht = chunk_simple_gla(
+            q=q_,
+            k=k_,
+            v=v_,
+            g=g_,
+            scale=scale,
+            initial_state=h0_,
+            output_final_state=True,
+            chunk_size=chunk_size,
+        )
+        ((o * do).sum() + (ht * dht).sum()).backward()
+        return o, ht, q_.grad, k_.grad, v_.grad, g_.grad, h0_.grad
+
+    ref_o, ref_ht, ref_dq, ref_dk, ref_dv, ref_dg, ref_dh0 = run_ref()
+    tri_o, tri_ht, tri_dq, tri_dk, tri_dv, tri_dg, tri_dh0 = run_tri(chunk_size)
+
+    assert_close(f'o@{chunk_size}', ref_o, tri_o, 0.005)
+    assert_close(f'ht@{chunk_size}', ref_ht, tri_ht, 0.005)
+    assert_close(f'dq@{chunk_size}', ref_dq, tri_dq, 0.005)
+    assert_close(f'dk@{chunk_size}', ref_dk, tri_dk, 0.005)
+    assert_close(f'dv@{chunk_size}', ref_dv, tri_dv, 0.005)
+    assert_close(f'dg@{chunk_size}', ref_dg, tri_dg, 0.005)
+    assert_close(f'dh0@{chunk_size}', ref_dh0, tri_dh0, 0.005)
+
+
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'D', 'dtype'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-{}".format(*test))
+        for test in [
+            (2, 256, 4, 64, torch.float),
+            (2, 1024, 4, 128, torch.float16),
+        ]
+    ],
+)
+def test_chunk_state_v_first(
+    B: int,
+    T: int,
+    H: int,
+    D: int,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(42)
+    os.environ['TRITON_F32_DEFAULT'] = 'ieee'
+
+    q = torch.randn((B, T, H, D), dtype=dtype, device=device)
+    k = torch.randn((B, T, H, D), dtype=dtype, device=device)
+    v = torch.randn((B, T, H, D), dtype=dtype, device=device)
+    g = F.logsigmoid(torch.randn((B, T, H), dtype=dtype, device=device))
+    h0 = torch.rand(B, H, D, D, dtype=torch.float32, device=device)
+    do = torch.randn_like(v)
+    dht = torch.randn_like(h0)
+
+    def run(state_v_first: bool):
+        q_, k_, v_, g_ = (x.detach().clone().requires_grad_() for x in (q, k, v, g))
+        # the [V, K] state layout takes a transposed initial state / final-state gradient
+        h0_in = h0.transpose(-1, -2).contiguous() if state_v_first else h0.clone()
+        dht_in = dht.transpose(-1, -2).contiguous() if state_v_first else dht
+        h0_in = h0_in.requires_grad_()
+        out, ht = chunk_simple_gla(
+            q=q_, k=k_, v=v_, g=g_,
+            initial_state=h0_in,
+            output_final_state=True,
+            state_v_first=state_v_first,
+        )
+        ((out * do).sum() + (ht * dht_in).sum()).backward()
+        return out, ht, q_.grad, k_.grad, v_.grad, g_.grad, h0_in.grad
+
+    ref_o, ref_ht, ref_dq, ref_dk, ref_dv, ref_dg, ref_dh0 = run(False)
+    tri_o, tri_ht, tri_dq, tri_dk, tri_dv, tri_dg, tri_dh0 = run(True)
+
+    assert_close('o', ref_o, tri_o, 0.005)
+    assert_close('ht', ref_ht, tri_ht.transpose(-1, -2), 0.005)
+    assert_close('dq', ref_dq, tri_dq, 0.005)
+    assert_close('dk', ref_dk, tri_dk, 0.005)
+    assert_close('dv', ref_dv, tri_dv, 0.005)
+    assert_close('dg', ref_dg, tri_dg, 0.005, err_atol=2e-4)
+    assert_close('dh0', ref_dh0, tri_dh0.transpose(-1, -2), 0.005)
 
 
 @pytest.mark.parametrize(

@@ -1,3 +1,9 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import math
 
@@ -11,7 +17,7 @@ from fla.utils import device
 MODELING_UNSUPPORTED_VARLEN = [
     "ABCConfig", "ForgettingTransformerConfig", "LinearAttentionConfig", "LightNetConfig",
     "Mamba2Config", "MambaConfig", "MesaNetConfig", "SambaConfig",
-    "RodimusConfig",
+    "RodimusConfig", "WallTransformerConfig",
 ]
 
 # Models not yet ready for basic testing
@@ -22,8 +28,9 @@ HOPPER_EXCLUSIVE = []
 
 GENERATION_UNSUPPORTED = [
     "ABCConfig",
-    "NSAConfig",
     "DeltaFormerConfig",
+    "MoBAConfig",
+    "WallTransformerConfig",
 ]
 
 

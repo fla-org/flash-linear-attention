@@ -1,4 +1,9 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 import triton
@@ -6,10 +11,15 @@ import triton.language as tl
 
 from fla.ops.common.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
 from fla.ops.utils import prepare_chunk_indices
+from fla.ops.utils.op import safe_dot
 from fla.ops.utils.solve_tril import solve_tril
 from fla.utils import IS_NVIDIA_HOPPER, autotune_cache_kwargs, check_shared_mem
 
-NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8]
+# Triton miscompiles `prepare_wy_repr_bwd_kernel` with num_warps=4 on Hopper
+# (sm_90) for BT=64: it produces incorrect dk/dbeta (and can raise an illegal
+# memory access), while num_warps=2 is correct (see #984). Restrict the Hopper
+# autotune configs to num_warps=2 until the upstream compiler issue is resolved.
+NUM_WARPS = [2] if IS_NVIDIA_HOPPER else [2, 4, 8]
 
 
 @triton.heuristics({
@@ -168,7 +178,7 @@ def prepare_wy_repr_bwd_kernel(
 
         b_dk_beta = tl.dot(b_dA, b_k, allow_tf32=False)
         b_dbeta += tl.sum(b_dk_beta * b_k, 1)
-        b_dk += tl.dot(tl.trans(b_dA), b_k_beta, allow_tf32=False)
+        b_dk += safe_dot(tl.trans(b_dA), b_k_beta, allow_tf32=False)
         b_dk += b_dk_beta * b_beta[:, None]
         tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
 
@@ -182,12 +192,13 @@ def prepare_wy_repr_fwd(
     beta: torch.Tensor,
     cu_seqlens: torch.LongTensor | None,
     chunk_indices: torch.LongTensor | None = None,
+    chunk_size: int = 64,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     A = chunk_scaled_dot_kkt_fwd(
         k=k,
         beta=beta,
         cu_seqlens=cu_seqlens,
-        chunk_size=64,
+        chunk_size=chunk_size,
         output_dtype=torch.float32,
         chunk_indices=chunk_indices,
     )
@@ -217,7 +228,7 @@ def recompute_w_u_fwd(
     chunk_indices: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
-    BT = 64
+    BT = A.shape[-1]
     CONST_TILING = 64 if check_shared_mem() else 32
     BK = min(max(triton.next_power_of_2(K), 16), CONST_TILING)
     BV = min(max(triton.next_power_of_2(V), 16), CONST_TILING)

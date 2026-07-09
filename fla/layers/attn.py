@@ -1,4 +1,9 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 from __future__ import annotations
 
@@ -150,14 +155,17 @@ class Attention(nn.Module):
             o = pad_input(o, indices_q, batch_size, q_len)
         elif cu_seqlens is not None:
             o = flash_attn_varlen_func(
-                q.squeeze(0), k.squeeze(0), v.squeeze(0),
+                rearrange(q, 'b l ... -> (b l) ...').contiguous(),
+                rearrange(k, 'b l ... -> (b l) ...').contiguous(),
+                rearrange(v, 'b l ... -> (b l) ...').contiguous(),
                 cu_seqlens_q=cu_seqlens,
                 cu_seqlens_k=cu_seqlens,
                 max_seqlen_q=max_seqlen,
                 max_seqlen_k=max_seqlen,
                 causal=True,
                 window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0),
-            ).unsqueeze(0)
+            )
+            o = rearrange(o, '(b l) h d -> b l h d', b=batch_size, l=q_len)
         else:
             o = flash_attn_func(
                 q, k, v,
