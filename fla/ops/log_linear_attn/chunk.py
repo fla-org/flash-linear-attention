@@ -76,12 +76,12 @@ def chunkwise_fwd_kernel(
 
     if IS_VARLEN:
         bos, eos = (
-            tl.load(cu_seqlens + i_n).to(tl.int32),
-            tl.load(cu_seqlens + i_n + 1).to(tl.int32),
+            tl.load(cu_seqlens + i_n).to(tl.int64),
+            tl.load(cu_seqlens + i_n + 1).to(tl.int64),
         )
-        T = eos - bos
+        T = (eos - bos).to(tl.int32)
     else:
-        bos, eos = i_n * T, i_n * T + T
+        bos, eos = (i_n * T).to(tl.int64), (i_n * T + T).to(tl.int64)
 
     o_i = tl.arange(0, BT)
 
@@ -281,9 +281,8 @@ def chunkwise_fwd_kernel(
         b_k = tl.load(p_k, boundary_check=(0, 1))
 
         m_t = i_t * BT + o_i < T
-        b_s = (tl.dot(b_q, b_k) * tl.where((i_idx >= j_idx) & m_t[:, None] & m_t[None, :], tl.exp(b_g[:, None] - b_g[None, :]), 0)).to(
-            b_q.dtype,
-        ) * b_h
+        b_s = tl.where((i_idx >= j_idx) & m_t[:, None] & m_t[None, :], tl.exp(b_g[:, None] - b_g[None, :]), 0)
+        b_s = (tl.dot(b_q, b_k) * b_s).to(b_q.dtype) * b_h
 
         b_v = tl.load(p_v, boundary_check=(0, 1))
         b_o = tl.zeros((BT, V), dtype=tl.float32)
@@ -707,12 +706,12 @@ def copy_input_kernel(
 
     if IS_VARLEN:
         bos, eos = (
-            tl.load(cu_seqlens + i_n).to(tl.int32),
-            tl.load(cu_seqlens + i_n + 1).to(tl.int32),
+            tl.load(cu_seqlens + i_n).to(tl.int64),
+            tl.load(cu_seqlens + i_n + 1).to(tl.int64),
         )
-        T = eos - bos
+        T = (eos - bos).to(tl.int32)
     else:
-        bos, eos = i_n * T, i_n * T + T
+        bos, eos = (i_n * T).to(tl.int64), (i_n * T + T).to(tl.int64)
 
     offset = tl.load(offsets + i_n)
     input_offset = -1 * (offset % BT)
@@ -853,12 +852,12 @@ def copy_last_chunk_kernel(
 
     if IS_VARLEN:
         bos, eos = (
-            tl.load(cu_seqlens + i_n).to(tl.int32),
-            tl.load(cu_seqlens + i_n + 1).to(tl.int32),
+            tl.load(cu_seqlens + i_n).to(tl.int64),
+            tl.load(cu_seqlens + i_n + 1).to(tl.int64),
         )
-        T = eos - bos
+        T = (eos - bos).to(tl.int32)
     else:
-        bos, eos = i_n * T, i_n * T + T
+        bos, eos = (i_n * T).to(tl.int64), (i_n * T + T).to(tl.int64)
 
     seq_offset = (T // BT) * BT
 
@@ -955,12 +954,12 @@ def chunkwise_bwd_kernel_dhg(
 
     if IS_VARLEN:
         bos, eos = (
-            tl.load(cu_seqlens + i_n).to(tl.int32),
-            tl.load(cu_seqlens + i_n + 1).to(tl.int32),
+            tl.load(cu_seqlens + i_n).to(tl.int64),
+            tl.load(cu_seqlens + i_n + 1).to(tl.int64),
         )
-        T = eos - bos
+        T = (eos - bos).to(tl.int32)
     else:
-        bos, eos = i_n * T, i_n * T + T
+        bos, eos = (i_n * T).to(tl.int64), (i_n * T + T).to(tl.int64)
 
     b_dh = tl.zeros([BK, V], dtype=tl.float32)
 
@@ -1073,12 +1072,12 @@ def chunkwise_bwd_kernel_hdqgl(
 
     if IS_VARLEN:
         bos, eos = (
-            tl.load(cu_seqlens + i_n).to(tl.int32),
-            tl.load(cu_seqlens + i_n + 1).to(tl.int32),
+            tl.load(cu_seqlens + i_n).to(tl.int64),
+            tl.load(cu_seqlens + i_n + 1).to(tl.int64),
         )
-        T = eos - bos
+        T = (eos - bos).to(tl.int32)
     else:
-        bos, eos = i_n * T, i_n * T + T
+        bos, eos = (i_n * T).to(tl.int64), (i_n * T + T).to(tl.int64)
 
     b_h = tl.zeros([V, K], dtype=tl.float32)
 
@@ -1216,12 +1215,12 @@ def chunkwise_bwd_kernel_dkg(
 
     if IS_VARLEN:
         bos, eos = (
-            tl.load(cu_seqlens + i_n).to(tl.int32),
-            tl.load(cu_seqlens + i_n + 1).to(tl.int32),
+            tl.load(cu_seqlens + i_n).to(tl.int64),
+            tl.load(cu_seqlens + i_n + 1).to(tl.int64),
         )
-        T = eos - bos
+        T = (eos - bos).to(tl.int32)
     else:
-        bos, eos = i_n * T, i_n * T + T
+        bos, eos = (i_n * T).to(tl.int64), (i_n * T + T).to(tl.int64)
 
     o_i = tl.arange(0, BT)
     o_t = i_t * BT + o_i
@@ -1303,12 +1302,12 @@ def chunkwise_bwd_kernel_dv(
 
     if IS_VARLEN:
         bos, eos = (
-            tl.load(cu_seqlens + i_n).to(tl.int32),
-            tl.load(cu_seqlens + i_n + 1).to(tl.int32),
+            tl.load(cu_seqlens + i_n).to(tl.int64),
+            tl.load(cu_seqlens + i_n + 1).to(tl.int64),
         )
-        T = eos - bos
+        T = (eos - bos).to(tl.int32)
     else:
-        bos, eos = i_n * T, i_n * T + T
+        bos, eos = (i_n * T).to(tl.int64), (i_n * T + T).to(tl.int64)
 
     o_t = i_t * BT + tl.arange(0, BT)
     m_t = o_t < T
@@ -1379,12 +1378,12 @@ def chunkwise_bwd_kernel_diag(
 
     if IS_VARLEN:
         bos, eos = (
-            tl.load(cu_seqlens + i_n).to(tl.int32),
-            tl.load(cu_seqlens + i_n + 1).to(tl.int32),
+            tl.load(cu_seqlens + i_n).to(tl.int64),
+            tl.load(cu_seqlens + i_n + 1).to(tl.int64),
         )
-        T = eos - bos
+        T = (eos - bos).to(tl.int32)
     else:
-        bos, eos = i_n * T, i_n * T + T
+        bos, eos = (i_n * T).to(tl.int64), (i_n * T + T).to(tl.int64)
 
     o_i = tl.arange(0, BT)
     i_idx = o_i[:, None]  # BT x 1

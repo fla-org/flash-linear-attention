@@ -39,7 +39,6 @@ runtime. Variables are grouped by what they control:
 | Variable             | Default | Options    | Description                                                                                                  |
 | -------------------- | ------- | ---------- | ------------------------------------------------------------------------------------------------------------ |
 | `FLA_USE_TMA`        | `0`     | `0` / `1`  | Enable the Tensor Memory Accelerator (TMA) on Hopper / Blackwell GPUs. Requires Triton with TMA support.     |
-| `FLA_USE_CUDA_GRAPH` | `0`     | `0` / `1`  | Use CUDA graphs for selected kernels (NVIDIA only).                                                          |
 | `FLA_USE_COMPILE`    | `1`     | `1` / `0`, `true` / `false`, `yes` / `no` | Use `torch.compile` for the RWKV7 fused addcmul path. Auto-disabled on Python < 3.11. |
 
 ---

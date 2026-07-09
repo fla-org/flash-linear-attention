@@ -56,3 +56,24 @@ Keep provenance (specific iter numbers, exact ms, dates) in `OPT_LOG.md` and the
 not in the promoted PR diff or the shared SKILL docs.
 The PR carries only the final minimal change plus the perf evidence (`fla-nvidia-performance`)
 and PR structure (`fla-mr-readiness`).
+
+---
+
+## `dispatch.md` — one row per shape bucket (only if Phase 3 specializes)
+
+A shape-specialized / dispatched kernel is justified only by evidence that buckets need *different* code.
+Record that evidence so the added complexity is auditable — one row per bucket:
+
+```markdown
+# Dispatch — <op>
+
+| Bucket condition | Entry point chosen  | Baseline ms | Candidate ms | Speedup | Why this path                          |
+| ---------------- | ------------------- | ----------- | ------------ | ------- | -------------------------------------- |
+| T <= 512         | `chunk_fwd_small`   | 0.42        | 0.31         | 1.35x   | launch-bound; smaller BT cuts overhead |
+| T > 512, D <= 64 | `chunk_fwd_default` | 1.93        | 1.70         | 1.14x   | compute-bound; default tiling wins     |
+```
+
+Rules:
+- A bucket earns a row only if profiler/bench evidence shows it needs a *different* path —
+  don't split a bucket the single kernel already serves best.
+- Every bucket's speedup is vs. the same frozen `main` baseline on *that bucket's* shapes.

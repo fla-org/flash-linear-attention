@@ -4,15 +4,9 @@ Thank you for your interest in contributing to Flash Linear Attention! All pull 
 
 ## Table of Contents
 
-* [Table of Contents](#table-of-contents)
 * [Report Bugs](#report-bugs)
 * [Ask Questions](#ask-questions)
 * [Core Principles](#core-principles)
-* [Submit Pull Requests](#submit-pull-requests)
-  * [Commit Message Convention](#commit-message-convention)
-  * [PR Description](#pr-description)
-  * [CI Pipeline](#ci-pipeline)
-  * [Review Checklist](#review-checklist)
 * [Setup Development Environment](#setup-development-environment)
   * [Prerequisites](#prerequisites)
   * [Setup](#setup)
@@ -23,6 +17,7 @@ Thank you for your interest in contributing to Flash Linear Attention! All pull 
   * [Copyright Header](#copyright-header)
   * [Formatting and Linting](#formatting-and-linting)
   * [Docstrings and Comments](#docstrings-and-comments)
+  * [Prose and Markdown](#prose-and-markdown)
   * [Naming Conventions](#naming-conventions)
   * [Triton Kernels](#triton-kernels)
   * [PyTorch Operators](#pytorch-operators)
@@ -32,6 +27,12 @@ Thank you for your interest in contributing to Flash Linear Attention! All pull 
   * [Running Tests](#running-tests)
   * [Writing Tests](#writing-tests)
   * [NaN Memory Poisoning](#nan-memory-poisoning)
+* [Benchmarking](#benchmarking)
+* [Submit Pull Requests](#submit-pull-requests)
+  * [Commit Message Convention](#commit-message-convention)
+  * [PR Description](#pr-description)
+  * [CI Pipeline](#ci-pipeline)
+  * [Review Checklist](#review-checklist)
 * [Environment Variables](#environment-variables)
 * [License](#license)
 
@@ -50,80 +51,13 @@ Please ask questions in [issues](https://github.com/fla-org/flash-linear-attenti
 
 ## Core Principles
 
+Read these before changing any kernel — they are the bar every PR is held to.
+
 1. **Match the reference numerically.** Every optimized kernel must agree with its naive reference within `assert_close` tolerance. Pure refactors and other non-computational changes (rewrites, fused paths, autotune tweaks) must leave outputs **and gradients** unchanged — verify before vs. after, don't assume.
 2. **Find the root cause before patching.** Don't land band-aid fixes. If a change appears to help but you can't explain why, keep digging.
 3. **Reuse over duplication.** Check `fla/ops/common/` and existing operators before writing new kernels; unify shared code paths instead of copying per-operator variants.
 4. **Audit every callsite when touching shared code.** Renaming a symbol, changing a config field, or editing a common kernel/component means updating *all* of its uses in one pass — not one spot at a time. Changes in `fla/ops/` or `fla/modules/` ripple up to `fla/layers/` and `fla/models/`: check those consumers and decide explicitly whether the public interface needs to change. See [Triton Kernels](#triton-kernels) for the kernel-level checklist.
 5. **Protect battle-tested paths; keep diffs minimal.** Changes to converged kernels or public APIs can silently break user code or checkpoints. Change only what the fix or feature needs, plus light incidental cleanups — don't revert or rewrite working code just because it could be cleaner (note it as optional in review instead). Flag risky changes, and when in doubt, ask.
-
-## Submit Pull Requests
-
-> [!NOTE]
-> Please include tests with every pull request if applicable!
-
-- **Keep the scope focused**: one PR should do one thing. If you have multiple unrelated changes, please split them into separate PRs.
-- **Use Draft PRs**: feel free to open a draft early for design feedback or work-in-progress discussion.
-
-### Commit Message Convention
-
-Use a prefix tag in square brackets to categorize your change. Here are some common examples:
-
-| Tag          | Usage                      | Example                                           |
-| ------------ | -------------------------- | ------------------------------------------------- |
-| `[Fix]`      | Bug fixes                  | `[Fix] Guard checkpoint weight re-initialization` |
-| `[Misc]`     | Miscellaneous              | `[Misc] Upgrade minimum PyTorch requirement`      |
-| `[Docs]`     | Documentation              | `[Docs] Update CP README`                         |
-| `[CI]`       | CI/CD changes              | `[CI] Fix skip-test check failing on fork PRs`    |
-| `[Test]`     | Test additions or fixes    | `[Test] Add varlen backward gradient checks`      |
-| `[Perf]`     | Performance optimizations  | `[Perf] Fuse gate multiplication in delta rule`   |
-| `[Refactor]` | Code refactoring           | `[Refactor] Unify chunk kernel entry points`      |
-| `[Ops]`      | General operator changes   | `[Ops] Refactor common chunk reduction utilities` |
-| `[Model]`    | Model architecture changes | `[Model] Add RoPE scaling to GLA config`          |
-| `[Layer]`    | Layer-level changes        | `[Layer] Normalize initial state initialization`  |
-| `[Attn]`     | Attention-related changes  | `[Attn] Add sliding window attention support`     |
-| `[GDN]`      | Gated Delta Net            | `[GDN] Add fused gate kernel`                     |
-| `[KDA]`      | Kimi Delta Attention       | `[KDA] Fix illegal memory access in backward`     |
-| `[CP]`       | Context Parallel           | `[CP] Enable KCP for DPLR`                        |
-| `[Conv]`     | Convolution                | `[Conv] Fix int32 overflow in varlen conv kernel` |
-| `[CE]`       | Cross Entropy              | `[CE] Add logit softcapping support`              |
-
-If your change doesn't fit any of the above, `[Misc]`/`[chore]` is the safe default.
-
-### PR Description
-
-Include a clear description with:
-
-- **Summary**: What the PR does and why (bullet points preferred).
-- **Test plan**: How the change is tested.
-- **Breaking changes** (if any): List any API changes that are not backward compatible and describe the migration path.
-
-See [recent PRs](https://github.com/fla-org/flash-linear-attention/pulls?q=is%3Apr+is%3Amerged) for examples.
-
-### CI Pipeline
-
-When you submit a PR, the following checks run automatically:
-
-- **Linting** — Ruff + autopep8 via pre-commit
-- **License header check** — Ensures copyright headers are present
-- **GPU tests** — On NVIDIA H100/A100/4090 and Intel B580 (when available)
-- **Benchmarks** — Performance regression checks; results are posted automatically as a PR comment
-
-Add `[skip test]` to your commit message to skip GPU tests for documentation-only changes.
-
-For `[Perf]` changes, benchmark locally and include before/after numbers in the PR. The op runner compares against a git ref directly, e.g. `python -m benchmarks.ops.run --op chunk_gla --base main`.
-
-### Review Checklist
-
-Before submitting, please go through the following checklist:
-
-- Code follows the project's style conventions.
-- Copyright header is present on all new files.
-- Changes to `fla/ops/` or `fla/modules/` add or update the matching test in `tests/`.
-- Tests pass locally (`pytest tests/ops/test_<your_op>.py`).
-- New operators include a naive reference implementation.
-- Both forward and backward passes are tested.
-- Gradient correctness is verified against a reference implementation.
-- Pre-commit hooks pass (`pre-commit run --files <your_files>`).
 
 ## Setup Development Environment
 
@@ -247,6 +181,12 @@ Capitalize `Optional` (not `optional`), put the default as `Default: <value>` (n
 
 Keep inline comments restrained, especially in Triton kernels: shape annotations (e.g. `# [BL, BD]`) plus at most a one-line "why" for genuinely non-obvious tricks. Avoid multi-line derivations and narration that just restates the next line — math derivations belong in the operator's `README.md`, the PR description, or a single pointer, not inline.
 
+Put explanatory comments on their own line **above** the code they describe, not trailing it — write `# why` on the line above `x = f()`, not `x = f()  # why`. Start the comment text with a lowercase letter (`# guard against overflow`, not `# Guard against overflow`), and wrap a multi-line comment at clause boundaries like other prose. Reserve inline trailing comments for terse shape / type annotations like `# [BL, BD]`.
+
+### Prose and Markdown
+
+Don't hard-wrap prose at an arbitrary short column — this covers Markdown files, Python docstrings (including `Args:` / `Returns:` descriptions), and comment paragraphs. Either keep a paragraph on a single line, or break **only at sentence or clause boundaries** (after a `.`, `,`, `;`, or `—`), never mid-clause. In Python files the 127-character limit still applies, so wrap a docstring or comment at a clause boundary before it reaches the limit. Format Markdown tables with aligned columns so the `|` separators line up; table rows are exempt from the line limit.
+
 ### Naming Conventions
 
 | Entity          | Convention         | Example                                   |
@@ -303,6 +243,8 @@ Each model lives under `fla/models/<model_name>/` with:
 Register your model in `fla/models/__init__.py` for auto-discovery.
 
 ## Testing
+
+Every change to `fla/ops/` or `fla/modules/` must add or update the matching test under `tests/`, and a new operator must ship with a naive reference to compare against. Correctness is checked by **strict numerical comparison** against that reference — forward outputs *and* gradients — so a change that lacks a test, or only checks the forward pass, is not complete.
 
 ### Running Tests
 
@@ -373,9 +315,110 @@ Key guidelines:
 - **Skip unsupported platforms** with `@pytest.mark.skipif(device_platform == 'intel', ...)` when needed.
 - **Include test IDs** in parametrize for readable output.
 
+**Naming and structure.** Name the file `tests/ops/test_<op>.py`, and name each test after the implementation entry point it exercises — `test_chunk`, `test_fused_recurrent`, `test_parallel` — mirroring the functions in `fla/ops/<op>/`. Distinguish a genuinely different code path with a short suffix (`test_chunk_varlen`, `test_fused_recurrent_state_v_first`). Prefer adding a new shape, dtype, or flag as a `@parametrize` case on an existing test rather than writing a new function; only add a new function when the path or purpose is clearly different — varlen vs. dense, a specific feature flag, or a separate entry point. See `tests/ops/test_gla.py` and `tests/ops/test_gdn.py` for the pattern.
+
 ### NaN Memory Poisoning
 
 The test suite (`conftest.py`) automatically replaces `torch.empty` with NaN-filled tensors for `tests/ops/` and `tests/modules/`. This catches bugs where uninitialized memory is accidentally used. You don't need to do anything special — just be aware that your kernels must fully initialize all output tensors.
+
+## Benchmarking
+
+Any change that can affect performance — a new or rewritten kernel in `fla/ops/` or `fla/modules/`, an autotune or backend tweak — should come with before/after numbers in the PR, measured on the same hardware and workload. `[Perf]` PRs must include them.
+
+Benchmark only against a **green test gate**. A kernel that runs faster but fails its `tests/ops/test_<op>.py` (forward, backward, and NaN-poisoned init) is not an improvement, so confirm correctness first — see [Testing](#testing).
+
+**Op microbenchmark** — times forward and forward+backward across a shape sweep, and compares against a git ref (it builds a throwaway worktree, so your working tree is untouched):
+
+```bash
+python -m benchmarks.ops.run --op chunk_gla --base main   # one op vs. main
+python -m benchmarks.ops.run --list                       # registered ops
+```
+
+New ops are registered in `benchmarks/ops/registry.py`.
+
+**Correctness-gated driver** — runs the op's pytest as a frozen gate, then benchmarks, and refuses to report a speedup on a red gate. Use it as the per-iteration command when optimizing a kernel; the `fla-optimization-loop` agent skill drives the full loop:
+
+```bash
+python -m benchmarks.ops.verify --op chunk_gla --base main
+```
+
+**Model-level throughput and generation:**
+
+```bash
+python benchmarks/benchmark_training_throughput.py --name kda --batch_size 2 --seq_len 8192 [--varlen]
+python benchmarks/benchmark_generation.py --name kda
+```
+
+For profiling (Nsight Compute, hot-instruction analysis), see the `fla-nvidia-performance` agent skill. Report throughput (tokens/s or iters/s) and, when relevant, peak memory, and flag any shape or backend that regressed and why.
+
+## Submit Pull Requests
+
+Once your change is implemented, tested, and (if it touches performance) benchmarked, open a pull request against `main`.
+
+> [!NOTE]
+> Please include tests with every pull request if applicable!
+
+- **Keep the scope focused**: one PR should do one thing. If you have multiple unrelated changes, please split them into separate PRs.
+- **Use Draft PRs**: feel free to open a draft early for design feedback or work-in-progress discussion.
+
+### Commit Message Convention
+
+Use a prefix tag in square brackets to categorize your change. Here are some common examples:
+
+| Tag          | Usage                      | Example                                           |
+| ------------ | -------------------------- | ------------------------------------------------- |
+| `[Fix]`      | Bug fixes                  | `[Fix] Guard checkpoint weight re-initialization` |
+| `[Misc]`     | Miscellaneous              | `[Misc] Upgrade minimum PyTorch requirement`      |
+| `[Docs]`     | Documentation              | `[Docs] Update CP README`                         |
+| `[CI]`       | CI/CD changes              | `[CI] Fix skip-test check failing on fork PRs`    |
+| `[Test]`     | Test additions or fixes    | `[Test] Add varlen backward gradient checks`      |
+| `[Perf]`     | Performance optimizations  | `[Perf] Fuse gate multiplication in delta rule`   |
+| `[Refactor]` | Code refactoring           | `[Refactor] Unify chunk kernel entry points`      |
+| `[Ops]`      | General operator changes   | `[Ops] Refactor common chunk reduction utilities` |
+| `[Model]`    | Model architecture changes | `[Model] Add RoPE scaling to GLA config`          |
+| `[Layer]`    | Layer-level changes        | `[Layer] Normalize initial state initialization`  |
+| `[Attn]`     | Attention-related changes  | `[Attn] Add sliding window attention support`     |
+| `[GDN]`      | Gated Delta Net            | `[GDN] Add fused gate kernel`                     |
+| `[KDA]`      | Kimi Delta Attention       | `[KDA] Fix illegal memory access in backward`     |
+| `[CP]`       | Context Parallel           | `[CP] Enable KCP for DPLR`                        |
+| `[Conv]`     | Convolution                | `[Conv] Fix int32 overflow in varlen conv kernel` |
+| `[CE]`       | Cross Entropy              | `[CE] Add logit softcapping support`              |
+
+If your change doesn't fit any of the above, `[Misc]`/`[chore]` is the safe default.
+
+### PR Description
+
+Lead with what changed and why, at a high level — describe the behavior or capability, not a file-by-file walkthrough. Include:
+
+- **Summary**: the change and its motivation, stated up front. Keep it concise; reviewers read the diff for details.
+- **Test plan**: how you verified it (commands run, hardware used).
+- **Breaking changes** (if any): list any API changes that are not backward compatible, and describe the migration path.
+
+See [recent PRs](https://github.com/fla-org/flash-linear-attention/pulls?q=is%3Apr+is%3Amerged) for examples.
+
+### CI Pipeline
+
+When you submit a PR, the following checks run automatically:
+
+- **Linting** — Ruff + autopep8 via pre-commit
+- **License header check** — Ensures copyright headers are present
+- **GPU tests** — On NVIDIA H100/A100/4090 and Intel B580 (when available)
+- **Benchmarks** — Performance regression checks; results are posted automatically as a PR comment
+
+Add `[skip test]` to your commit message to skip GPU tests for documentation-only changes. For `[Perf]` changes, include before/after numbers in the PR — see [Benchmarking](#benchmarking).
+
+### Review Checklist
+
+Before submitting, please go through the following checklist:
+
+- Code follows the project's style conventions.
+- Copyright header is present on all new files.
+- Changes to `fla/ops/` or `fla/modules/` add or update the matching test in `tests/`.
+- Tests pass locally (`pytest tests/ops/test_<your_op>.py`).
+- New operators include a naive reference implementation.
+- Both forward and backward passes are tested.
+- Gradient correctness is verified against a reference implementation.
+- Pre-commit hooks pass (`pre-commit run --files <your_files>`).
 
 ## Environment Variables
 

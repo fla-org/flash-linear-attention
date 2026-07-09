@@ -220,6 +220,15 @@ def test_fused_recurrent_varlen(cu_seqlens, H, K, V):
 # =============================================================================
 # chunk — forward + numeric backward
 # =============================================================================
+@pytest.mark.parametrize('chunk_size', [16, 32])
+def test_chunk_invalid_chunk_size(chunk_size):
+    B, T, H, K, V = 1, 64, 2, 64, 64
+    q, k, v, g, b, w, _, _ = _rand_inputs(B, T, H, K, V, torch.float32)
+
+    with pytest.raises(ValueError, match=r"`chunk_size` must be 64 for GDN-2"):
+        chunk_gdn2(q=q, k=k, v=v, g=g, b=b, w=w, chunk_size=chunk_size)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize(
     ("B", "T", "H", "K", "V", "scale", "use_qk_l2norm_in_kernel", "use_gate_in_kernel", "safe_gate", "dtype"),

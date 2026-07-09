@@ -202,6 +202,10 @@ class Mamba3(nn.Module):
         )
         return z, x, B, C, dd_dt, dd_A, trap, angles
 
+    def _compute_a(self, dd_A: torch.Tensor) -> torch.Tensor:
+        A = -F.softplus(dd_A.to(torch.float32))
+        return A.clamp(max=-self.A_floor)
+
     def cuda_kernels_forward(
         self,
         hidden_states: torch.Tensor,
@@ -234,7 +238,7 @@ class Mamba3(nn.Module):
         C = rearrange(C, "b l (r g n) -> b l r g n", r=self.mimo_rank, g=self.n_groups)
         trap = rearrange(trap, "b l h -> b h l")
 
-        A = -F.softplus(dd_A.to(torch.float32)).clamp(max=-self.A_floor)
+        A = self._compute_a(dd_A)
         DT = F.softplus(dd_dt + self.dt_bias)
         ADT = A * DT
         DT = rearrange(DT, "b l n -> b n l")
@@ -311,7 +315,7 @@ class Mamba3(nn.Module):
         return out, new_state
 
     def _preprocess_step(self, dd_A, dd_dt, B, C, x, z, trap_proj, angle_proj):
-        A = -F.softplus(dd_A.to(torch.float32)).clamp(max=-self.A_floor)
+        A = self._compute_a(dd_A)
         DT = F.softplus(dd_dt + self.dt_bias)
         trap = torch.sigmoid(trap_proj)
 

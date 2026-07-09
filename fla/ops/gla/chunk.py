@@ -21,6 +21,21 @@ BK_LIST = [32, 64] if check_shared_mem() else [16, 32]
 BV_LIST = [64, 128] if check_shared_mem('ampere') else [16, 32]
 
 
+def _prune_gla_bwd_configs(configs, nargs, **kwargs):
+    # Keep a tile only if it leaves headroom below its dim, or is the smallest
+    # option (so small dims still autotune); this avoids a software-pipelined
+    # make_block_ptr prefetching past the tensor. K/V arrive as launch kwargs.
+    args = {**(nargs or {}), **kwargs}
+    K, V = args['K'], args['V']
+    min_bk = min(c.kwargs['BK'] for c in configs)
+    min_bv = min(c.kwargs['BV'] for c in configs)
+    return [
+        c for c in configs
+        if (c.kwargs['BK'] < K or c.kwargs['BK'] == min_bk)
+        and (c.kwargs['BV'] < V or c.kwargs['BV'] == min_bv)
+    ]
+
+
 @triton.heuristics({
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
@@ -585,7 +600,8 @@ def chunk_gla_bwd_kernel_dA(
         for num_warps in [2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
-    key=['BT', 'STATE_V_FIRST'],
+    key=['BT', 'STATE_V_FIRST', 'K', 'V'],
+    prune_configs_by={'early_config_prune': _prune_gla_bwd_configs},
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -668,7 +684,8 @@ def chunk_gla_bwd_kernel_dv(
         for num_warps in [2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
-    key=['BT', 'STATE_V_FIRST'],
+    key=['BT', 'STATE_V_FIRST', 'K', 'V'],
+    prune_configs_by={'early_config_prune': _prune_gla_bwd_configs},
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])

@@ -51,6 +51,7 @@ promote only on a full (no `-k`) green gate.
 | Making the op a thin wrapper that delegates the whole compute to a vendor lib (a plain `torch.matmul` / `F.scaled_dot_product_attention` standing in *as* the operator) just to win latency | Hand-written Triton / Gluon / TileLang / CuTe kernels; `torch` ops used as *glue* around a kernel you wrote |
 | Returning uninitialized / partially-written outputs that happen to pass | Fully initialized outputs (NaN poisoning will catch partial writes) |
 | Stream tricks / monkey-patching the bench to dodge timing | Genuine latency reduction measured by `verify.py` / `run.py` |
+| One-sided numeric relaxation the baseline doesn't get — flipping `allow_tf32` on, dropping the fp32 accumulator to bf16/tf32, a config that quietly changes the numeric path | Same accumulation precision and numeric flags on both sides; speed comes from the kernel, not from computing something less accurate |
 
 If you genuinely believe a test is **wrong**, that is a **separate PR** with its own justification —
 never bundled into a perf change. Stop and ask the user.
@@ -64,7 +65,7 @@ Put a short `docs/draft.md` in your scratch workspace (see §6) stating:
 - **Allowed languages** — Triton / Gluon / TileLang / CuTe (state any constraint).
 - **Validation command** — `python -m benchmarks.ops.verify --op <op>` (the frozen gate).
 - **Benchmark command** — `python -m benchmarks.ops.verify --op <op> --base main`.
-- **Promotion criteria** — full green gate AND a measured, repeatable win on the target shapes.
+- **Promotion criteria** — full green gate, a measured repeatable win, and a profiler reading that explains it (§7).
 - **Frozen scope** — the test file, `naive.py`, and the public op signature.
 
 Do not start editing kernels until the draft exists. (Borrowed from KDA: plan, then execute.)
@@ -82,6 +83,8 @@ Run these in order; repeat 2 and 3 with progressively higher targets.
 - **Phase 3 — shape specialization.** Only when profiling shows *different* bottlenecks across shape regimes
   (short vs. long `T`, small vs. large `D`), add dispatch / specialized paths.
   Justify the added complexity with the measured win; validate on the full shape set, not the one you tuned on.
+  Record each bucket (condition / entry point / per-bucket latency + speedup / reason) in `dispatch.md`
+  (template in `references/opt-log-template.md`) — a specialized path without that evidence is unjustified complexity.
 
 ## 3. Iteration protocol
 
@@ -104,6 +107,11 @@ timer-resolution limited — cite it in `OPT_LOG.md`);
 or you've documented ≥3 distinct directions tried with evidence.
 Don't stop silently because a tool (e.g. NCU) was unavailable — that's a re-assessment input.
 
+**No-go bar.** If stopping means concluding there's no win to promote — a no-go — that verdict has its own bar:
+a first candidate losing doesn't clear it. A no-go needs a recorded baseline number, at least one reasoned
+candidate attempt (not a blind guess), the gate status, the bench evidence, and a *named* active bound or
+blocker (name which roofline/launch/timer limit, with the number). Without those five it's an unfinished loop.
+
 ## 4. Reproducibility
 
 - **Seed** — the tests already pin `torch.manual_seed(42)`; don't undermine it.
@@ -118,8 +126,8 @@ Don't stop silently because a tool (e.g. NCU) was unavailable — that's a re-as
 
 Read `references/TRAPS.md` before trusting any number.
 It catalogs FLA-specific traps (NaN poisoning on partial writes, TF32 inflating fp32 reference diffs,
-`assert_close` relative tolerance, autotune-cache staleness across edits, `int64` address arithmetic,
-implausible speedups that signal a silently-skipped path).
+`assert_close` relative tolerance, one-sided numeric-flag relaxation, autotune-cache staleness across edits,
+`int64` address arithmetic, implausible speedups that signal a silently-skipped path).
 When you hit a new one, add it there with **Fact / Why / How to apply** so the next session doesn't re-learn it.
 (Borrowed from AKO4X's `TRAPS.md`.)
 
@@ -131,6 +139,7 @@ Keep your search artifacts in a git-ignored directory — `profile/<op>-opt/` is
 profile/<op>-opt/
   docs/draft.md       # the task contract (§1)
   OPT_LOG.md          # one row per iteration (template in references/)
+  dispatch.md         # one row per shape bucket — only if Phase 3 specializes (template in references/)
   TRAPS.md            # traps you hit this session (seed: references/TRAPS.md)
   trace/              # torch.profiler / NCU artifacts (kept out of git)
 ```
@@ -140,11 +149,16 @@ per `references/opt-log-template.md`, so a later session can see what was tried 
 
 ## 7. Promotion → MR
 
-A candidate is promotable only on a **full green gate** plus a measured, repeatable win on the target shapes. Then:
+A candidate is promotable only on a **full green gate** plus a measured, repeatable win on the target shapes,
+**and** a profiler/roofline reading that *explains* the win (or, for a no-go, the blocker) —
+a speedup you can't account for is a silent-skip suspect, not a result (see §5). Then:
 
 - Keep the diff minimal — change only what the win needs,
   plus light cleanups (CONTRIBUTING "Protect battle-tested paths; keep diffs minimal").
-- Collect perf evidence per `fla-nvidia-performance` (before/after, NCU summary, dense + varlen coverage).
+- Collect perf evidence per `fla-nvidia-performance` — before/after, NCU summary, dense + varlen coverage,
+  and a full final-claim stats block (median/mean/std/min/p10/p90 per shape, equal-weight geomean speedup,
+  exact commands, baseline commit + candidate SHA, GPU id/model with idle-clock evidence —
+  the last guards the clock-drift trap in §5).
 - Package the PR per `fla-mr-readiness`.
 
 The scratch workspace under `profile/<op>-opt/` stays local; it is not part of the PR.

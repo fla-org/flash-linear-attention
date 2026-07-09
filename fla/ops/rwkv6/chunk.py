@@ -15,7 +15,6 @@ from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.op import exp2
 from fla.utils import (
-    USE_CUDA_GRAPH,
     autocast_custom_bwd,
     autocast_custom_fwd,
     autotune_cache_kwargs,
@@ -39,7 +38,6 @@ BV_LIST = [32, 64] if check_shared_mem() else [16, 32]
         for num_stages in [2, 3, 4]
     ],
     key=['S', 'BT', 'HAS_SCALE'],
-    use_cuda_graph=USE_CUDA_GRAPH,
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -128,7 +126,6 @@ def chunk_rwkv6_fwd_cumsum(
         for num_stages in [2, 3, 4]
     ],
     key=['BC'],
-    use_cuda_graph=USE_CUDA_GRAPH,
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -204,7 +201,6 @@ def chunk_rwkv6_fwd_A_kernel_intra_sub_inter(
         for num_warps in [1, 2, 4, 8]
     ],
     key=['BK', 'BT'],
-    use_cuda_graph=USE_CUDA_GRAPH,
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -279,7 +275,6 @@ def chunk_rwkv6_fwd_A_kernel_intra_sub_intra(
         triton.Config({}, num_warps=8),
     ],
     key=['BC', 'BK'],
-    use_cuda_graph=USE_CUDA_GRAPH,
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -360,7 +355,6 @@ def chunk_rwkv6_fwd_A_kernel_intra_sub_intra_split(
         triton.Config({}, num_warps=8),
     ],
     key=['BC'],
-    use_cuda_graph=USE_CUDA_GRAPH,
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -413,7 +407,6 @@ def chunk_rwkv6_fwd_A_kernel_intra_sub_intra_merge(
         for num_stages in [2, 3, 4]
     ],
     key=['BT'],
-    use_cuda_graph=USE_CUDA_GRAPH,
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -494,7 +487,6 @@ def chunk_rwkv6_bwd_kernel_dh(
         for num_warps in [1, 2, 4, 8]
     ],
     key=['BK', 'NC', 'BT'],
-    use_cuda_graph=USE_CUDA_GRAPH,
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -635,7 +627,6 @@ def chunk_rwkv6_bwd_kernel_intra(
         for num_warps in [2, 4, 8]
     ],
     key=['BT'],
-    use_cuda_graph=USE_CUDA_GRAPH,
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -1186,12 +1177,10 @@ class ChunkRWKV6Function(torch.autograd.Function):
         output_final_state,
         cu_seqlens,
         cu_seqlens_cpu,
+        chunk_size: int | None = None,
     ):
-        T = q.shape[1]
-        if check_shared_mem():
-            chunk_size = min(32, max(32, triton.next_power_of_2(T)))
-        else:
-            chunk_size = min(64, max(32, triton.next_power_of_2(T)))
+        if chunk_size is None:
+            chunk_size = 64
 
         chunk_indices = prepare_chunk_indices(
             cu_seqlens, chunk_size, cu_seqlens_cpu=cu_seqlens_cpu) if cu_seqlens is not None else None
@@ -1238,7 +1227,7 @@ class ChunkRWKV6Function(torch.autograd.Function):
             chunk_size=chunk_size,
             chunk_indices=chunk_indices,
         )
-        return dq.to(q), dk.to(k), dv.to(v), dg.to(g), du.to(u), None, dh0, None, None, None
+        return dq.to(q), dk.to(k), dv.to(v), dg.to(g), du.to(u), None, dh0, None, None, None, None
 
 
 @torch.compiler.disable
@@ -1323,6 +1312,9 @@ def chunk_rwkv6(
         raise DeprecationWarning(
             "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
         )
+    chunk_size = kwargs.pop('chunk_size', None)
+    if chunk_size is not None and chunk_size != 2 ** (chunk_size.bit_length() - 1):
+        raise ValueError(f"`chunk_size` must be a power of 2, got {chunk_size}.")
     if cu_seqlens is not None:
         if r.shape[0] != 1:
             raise ValueError(
@@ -1347,5 +1339,6 @@ def chunk_rwkv6(
         output_final_state,
         cu_seqlens,
         cu_seqlens_cpu,
+        chunk_size,
     )
     return o, final_state

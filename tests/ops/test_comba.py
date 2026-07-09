@@ -35,6 +35,8 @@ def cumsum_comba_local_fwd_reference(s, reverse=False, chunk_size=128):
     [
         pytest.param(*test, id='B{}-T{}-H{}-chunk_size{}-{}'.format(*test))
         for test in [
+            (32, 200, 4, 16, torch.float),
+            (32, 200, 4, 32, torch.float),
             (32, 200, 4, 64, torch.float),
             (32, 1000, 4, 64, torch.float),
             (32, 2048, 8, 128, torch.float),

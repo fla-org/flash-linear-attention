@@ -58,6 +58,7 @@ def chunk_lightning_attn(
         raise DeprecationWarning(
             "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
         )
+    chunk_size = kwargs.pop('chunk_size', None)
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(
@@ -80,4 +81,5 @@ def chunk_lightning_attn(
         initial_state=initial_state,
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
+        chunk_size=chunk_size,
     )

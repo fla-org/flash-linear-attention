@@ -59,6 +59,13 @@ def shape_LBTD(B, T, H, D, L=None, **kw):
     return (L, B, T, D)
 
 
+def shape_q_hq(B, T, H, D, HQ=None, **kw):
+    """q with HQ query heads (GQA); k/v keep H heads. Used by NSA."""
+    if HQ is None:
+        raise ValueError("shape_q_hq requires the 'HQ' (query-head) shape config key")
+    return (B, T, HQ, D)
+
+
 # ---------------------------------------------------------------------------
 # Transform helpers
 # ---------------------------------------------------------------------------
@@ -144,6 +151,10 @@ class OpConfig:
             used as the frozen correctness gate by `benchmarks/ops/verify.py`.
             When None, the gate is derived from `import_path`'s last segment (e.g. `fla.ops.gla` -> `tests/ops/test_gla.py`).
             Set this only when the derived path is wrong. Default: None.
+        backend_env (dict[str, str], Optional):
+            Maps a `--backend <name>` value to the environment variable that enables that backend's
+            dispatch (e.g. `{'gluon': 'FLA_ATTNRES_GLUON'}`). The runner sets it before launching the
+            op; ops selected purely by a runtime verifier need no entry. Default: None.
     """
     name: str
     import_path: str
@@ -157,6 +168,7 @@ class OpConfig:
     dim_constraints: dict | None = None
     default_shapes: dict[str, dict[str, int]] | None = None
     test_file: str | None = None
+    backend_env: dict[str, str] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -259,7 +271,7 @@ def generate_inputs(
 # Op registrations
 # ===========================================================================
 
-# --- A: Simple qkv (no extra inputs) ---
+# --- Simple qkv (no extra inputs) ---
 
 _simple_qkv = {
     'q': TensorSpec(shape_BTHD),
@@ -281,7 +293,7 @@ register_op(OpConfig(
     category='simple_qkv',
 ))
 
-# --- B: +elem gate (g=[B,T,H,D] with logsigmoid_clamp) ---
+# --- +elem gate (g=[B,T,H,D] with logsigmoid_clamp) ---
 
 register_op(OpConfig(
     name='chunk_gla',
@@ -293,7 +305,7 @@ register_op(OpConfig(
     category='elem_gate',
 ))
 
-# --- C: +beta (beta=[B,T,H] with sigmoid) ---
+# --- +beta (beta=[B,T,H] with sigmoid) ---
 
 register_op(OpConfig(
     name='chunk_delta_rule',
@@ -306,7 +318,7 @@ register_op(OpConfig(
     test_file='tests/ops/test_delta.py',
 ))
 
-# --- D: +gate + beta ---
+# --- +gate + beta ---
 
 register_op(OpConfig(
     name='chunk_gdn',
@@ -334,7 +346,7 @@ register_op(OpConfig(
     category='gate_beta',
 ))
 
-# --- E: +head gate (g=[B,T,H] with logsigmoid) ---
+# --- +head gate (g=[B,T,H] with logsigmoid) ---
 
 register_op(OpConfig(
     name='chunk_simple_gla',
@@ -346,7 +358,7 @@ register_op(OpConfig(
     category='head_gate',
 ))
 
-# --- F: RWKV ---
+# --- RWKV ---
 
 
 def _rwkv7_post_init(inputs, B, T, H, D, **kw):
@@ -385,7 +397,7 @@ register_op(OpConfig(
     category='rwkv',
 ))
 
-# --- H: Comba ---
+# --- Comba ---
 
 register_op(OpConfig(
     name='chunk_comba',
@@ -400,7 +412,7 @@ register_op(OpConfig(
     category='comba',
 ))
 
-# --- I: HGRN (x, g only, no qkv) ---
+# --- HGRN (x, g only, no qkv) ---
 
 register_op(OpConfig(
     name='fused_recurrent_hgrn',
@@ -412,7 +424,7 @@ register_op(OpConfig(
     category='hgrn',
 ))
 
-# --- J: Generalized delta rule (DPLR) ---
+# --- Generalized delta rule (DPLR) ---
 
 register_op(OpConfig(
     name='chunk_dplr_delta_rule',
@@ -427,7 +439,7 @@ register_op(OpConfig(
     test_file='tests/ops/test_dplr_delta.py',
 ))
 
-# --- K: Lightning attention (needs layer_idx, num_layers) ---
+# --- Lightning attention (needs layer_idx, num_layers) ---
 
 register_op(OpConfig(
     name='chunk_lightning_attn',
@@ -437,7 +449,7 @@ register_op(OpConfig(
     category='lightning',
 ))
 
-# --- L: Attention baselines ---
+# --- Attention baselines ---
 
 register_op(OpConfig(
     name='parallel_attn',
@@ -458,7 +470,7 @@ register_op(OpConfig(
     category='flash_attn',
 ))
 
-# --- M: layer-axis residual aggregation (AttnRes, mHC, ...) ---
+# --- layer-axis residual aggregation (AttnRes, mHC, ...) ---
 # These ops attend / aggregate over an `L` axis of stacked residual sources.
 # Inputs and shape sweeps are shared so future ops (mHC etc.) can reuse them.
 
@@ -484,6 +496,7 @@ register_op(OpConfig(
     output_is_tuple=False,
     default_shapes=_layer_default_shapes,
     category='fused_attnres',
+    backend_env={'gluon': 'FLA_ATTNRES_GLUON'},
 ))
 
 register_op(OpConfig(
@@ -493,4 +506,49 @@ register_op(OpConfig(
     output_is_tuple=False,
     default_shapes=_layer_default_shapes,
     category='naive_attnres',
+))
+
+# --- NSA (native sparse attention) — GQA + structured block selection ---
+# q carries HQ query heads while k/v carry H kv heads (GQA; HQ/H a power of two
+# and >= 16). block_indices is a causal random selection that must be built
+# explicitly — the generic randn/randint input factory cannot produce a valid one.
+
+
+def _nsa_post_init(inputs, B, T, H, D, HQ=None, S=16, block_size=64, **kw):
+    # build block_indices [B, T, H, S]: for each query t, pick S of the causal
+    # blocks (block i is selectable iff i <= t // block_size), -1-padded when
+    # fewer than S exist, then sorted — mirroring tests/ops/test_nsa.py.
+    device = inputs['q'].device
+    NS = (T + block_size - 1) // block_size
+    valid = (torch.arange(NS, device=device)[None, None, None, :]
+             <= (torch.arange(T, device=device) // block_size)[None, :, None, None])
+    scores = torch.rand(B, T, H, NS, device=device).masked_fill(~valid, float('-inf'))
+    topv, topi = scores.topk(min(S, NS), dim=-1)
+    block_indices = topi.masked_fill(topv == float('-inf'), -1).sort(-1)[0].to(torch.long)
+    inputs['block_indices'] = block_indices.contiguous()
+    inputs['block_counts'] = S
+    inputs['block_size'] = block_size
+
+
+_nsa_shapes = {
+    'B1_T8K_H1_HQ32_D128_S16':  {'B': 1, 'T': 8192,  'H': 1, 'HQ': 32, 'D': 128, 'S': 16, 'block_size': 64},
+    'B1_T16K_H1_HQ64_D128_S16': {'B': 1, 'T': 16384, 'H': 1, 'HQ': 64, 'D': 128, 'S': 16, 'block_size': 64},
+    'B1_T32K_H1_HQ64_D256_S16': {'B': 1, 'T': 32768, 'H': 1, 'HQ': 64, 'D': 256, 'S': 16, 'block_size': 64},
+    'B1_T64K_H1_HQ128_D256_S16': {'B': 1, 'T': 65536, 'H': 1, 'HQ': 128, 'D': 256, 'S': 16, 'block_size': 64},
+    'B1_T128K_H1_HQ128_D256_S16': {'B': 1, 'T': 131072, 'H': 1, 'HQ': 128, 'D': 256, 'S': 16, 'block_size': 64},
+}
+
+register_op(OpConfig(
+    name='parallel_nsa',
+    import_path='fla.ops.nsa',
+    inputs={
+        'q': TensorSpec(shape_q_hq),
+        'k': TensorSpec(shape_BTHD),
+        'v': TensorSpec(shape_BTHD),
+    },
+    post_init=_nsa_post_init,
+    output_is_tuple=False,
+    default_shapes=_nsa_shapes,
+    category='nsa',
+    test_file='tests/ops/test_nsa.py',
 ))

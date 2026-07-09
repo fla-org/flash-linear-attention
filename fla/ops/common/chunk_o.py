@@ -13,7 +13,13 @@ from fla.ops.common.backends import dispatch
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.op import exp2
-from fla.utils import IS_NVIDIA_HOPPER, TRITON_ABOVE_3_4_0, autotune_cache_kwargs, check_shared_mem
+from fla.utils import (
+    IS_NVIDIA_HOPPER,
+    TRITON_ABOVE_3_4_0,
+    TRITON_ABOVE_3_7_1,
+    autotune_cache_kwargs,
+    check_shared_mem,
+)
 
 BKV_LIST = [64, 128] if check_shared_mem() else ([32, 64] if check_shared_mem('ada') else [32])
 NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8]
@@ -674,11 +680,11 @@ def chunk_bwd_dqkwg(
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    if g is not None and IS_NVIDIA_HOPPER and TRITON_ABOVE_3_4_0:
+    if g is not None and IS_NVIDIA_HOPPER and TRITON_ABOVE_3_4_0 and not TRITON_ABOVE_3_7_1:
         raise RuntimeError(
-            "Triton >= 3.4.0 on Hopper GPUs produces incorrect results for "
-            "gated chunk_bwd_dqkwg (see #640). Please install tilelang: "
-            "`pip install tilelang`"
+            "Triton >= 3.4.0 and < 3.7.1 on Hopper GPUs produces incorrect results for "
+            "gated chunk_bwd_dqkwg (see #640). Please upgrade Triton to >= 3.7.1 or "
+            "install tilelang: `pip install tilelang`"
         )
 
     B, T, H, K, V, HV = *k.shape, v.shape[-1], v.shape[2]

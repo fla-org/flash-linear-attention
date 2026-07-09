@@ -5,6 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import importlib.util
 import os
 
 import pytest
@@ -16,7 +17,23 @@ from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gat
 from fla.ops.gated_delta_rule.gate import fused_gdn_gate, naive_gdn_gate
 from fla.ops.gated_delta_rule.naive import naive_recurrent_gated_delta_rule
 from fla.ops.gated_delta_rule.wy_fast import prepare_wy_repr_bwd, recompute_w_u_fwd
-from fla.utils import IS_INTEL_ALCHEMIST, assert_close, device
+from fla.utils import IS_INTEL_ALCHEMIST, IS_NVIDIA_BLACKWELL, IS_NVIDIA_HOPPER, IS_NVIDIA_SM100, assert_close, device
+
+
+def _unwrap_autotuner(fn):
+    while not hasattr(fn, 'configs'):
+        fn = fn.fn
+    return fn
+
+
+def test_chunk_gated_delta_rule_fwd_h_blackwell_triton_guard():
+    if not IS_NVIDIA_BLACKWELL:
+        pytest.skip(reason='Blackwell guard is only active on Blackwell GPUs')
+
+    from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_fwd_kernel_h_blockdim64
+
+    tuner = _unwrap_autotuner(chunk_gated_delta_rule_fwd_kernel_h_blockdim64)
+    assert {config.num_warps for config in tuner.configs} == {2}
 
 
 @pytest.mark.parametrize(
@@ -113,6 +130,11 @@ def test_chunk(
     use_qk_l2norm_in_kernel: bool,
     dtype: torch.dtype,
 ):
+    if os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") != "1" and HV != H:
+        pytest.skip(
+            reason="GQA (HV != H) is not supported by the tilelang backend; "
+            "covered by the Triton baseline run."
+        )
     torch.manual_seed(42)
     if IS_INTEL_ALCHEMIST and D > 128:
         pytest.skip(reason='chunk_gated_delta_rule is not supported on alchemist for D>128')
@@ -170,6 +192,84 @@ def test_chunk(
 
 
 @pytest.mark.parametrize(
+    ('B', 'T', 'H', 'HV', 'D', 'scale', 'gate_logit_normalizer', 'dtype', 'chunk_size'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-HV{}-D{}-scale{}-gate{}-{}-chunk{}".format(*test))
+        for chunk_size in [16, 32, 64]
+        for test in [
+            (1, 64, 2, 4, 32, 0.1, 1.0, torch.float32, chunk_size),
+        ]
+    ],
+)
+def test_chunk_with_chunk_size(
+    B: int,
+    T: int,
+    H: int,
+    HV: int,
+    D: int,
+    scale: float,
+    gate_logit_normalizer: float,
+    dtype: torch.dtype,
+    chunk_size: int,
+):
+    torch.manual_seed(42)
+    assert HV % H == 0
+    G = HV // H
+
+    q = torch.rand(B, T, H, D, dtype=dtype, device=device)
+    k = torch.rand(B, T, H, D, dtype=dtype, device=device)
+    v = torch.rand(B, T, HV, D, dtype=dtype, device=device)
+    beta = torch.rand(B, T, HV, dtype=torch.float32, device=device).sigmoid()
+    g = F.logsigmoid(torch.rand(B, T, HV, dtype=torch.float32, device=device)) / gate_logit_normalizer
+    h0 = torch.zeros(B, HV, D, D, dtype=torch.float32, device=device)
+    do = torch.randn_like(v)
+    dht = torch.randn_like(h0)
+
+    def run_ref():
+        q_, k_, v_, beta_, g_, h0_ = (x.detach().clone().requires_grad_(True) for x in (q, k, v, beta, g, h0))
+        o, ht = naive_recurrent_gated_delta_rule(
+            q=F.normalize(repeat(q_, 'b t h d -> b t (h g) d', g=G), p=2, dim=-1),
+            k=F.normalize(repeat(k_, 'b t h d -> b t (h g) d', g=G), p=2, dim=-1),
+            v=v_,
+            beta=beta_,
+            g=g_,
+            scale=scale,
+            initial_state=h0_,
+            output_final_state=True,
+        )
+        ((o * do).sum() + (ht * dht).sum()).backward()
+        return o, ht, q_.grad, k_.grad, v_.grad, beta_.grad, g_.grad, h0_.grad
+
+    def run_tri(chunk_size: int):
+        q_, k_, v_, beta_, g_, h0_ = (x.detach().clone().requires_grad_(True) for x in (q, k, v, beta, g, h0))
+        o, ht = chunk_gated_delta_rule(
+            q=F.normalize(q_, p=2, dim=-1),
+            k=F.normalize(k_, p=2, dim=-1),
+            v=v_,
+            beta=beta_,
+            g=g_,
+            scale=scale,
+            initial_state=h0_,
+            output_final_state=True,
+            chunk_size=chunk_size,
+        )
+        ((o * do).sum() + (ht * dht).sum()).backward()
+        return o, ht, q_.grad, k_.grad, v_.grad, beta_.grad, g_.grad, h0_.grad
+
+    ref_o, ref_ht, ref_dq, ref_dk, ref_dv, ref_dbeta, ref_dg, ref_dh0 = run_ref()
+    tri_o, tri_ht, tri_dq, tri_dk, tri_dv, tri_dbeta, tri_dg, tri_dh0 = run_tri(chunk_size)
+
+    assert_close(f'o@{chunk_size}', ref_o, tri_o, 0.005)
+    assert_close(f'ht@{chunk_size}', ref_ht, tri_ht, 0.005)
+    assert_close(f'dq@{chunk_size}', ref_dq, tri_dq, 0.005)
+    assert_close(f'dk@{chunk_size}', ref_dk, tri_dk, 0.005)
+    assert_close(f'dv@{chunk_size}', ref_dv, tri_dv, 0.005)
+    assert_close(f'db@{chunk_size}', ref_dbeta, tri_dbeta, 0.01)
+    assert_close(f'dg@{chunk_size}', ref_dg, tri_dg, 0.01)
+    assert_close(f'dh0@{chunk_size}', ref_dh0, tri_dh0, 0.005)
+
+
+@pytest.mark.parametrize(
     ('B', 'T', 'H', 'HV', 'D', 'scale', 'use_qk_l2norm_in_kernel', 'allow_neg_eigval', 'dtype'),
     [
         pytest.param(
@@ -196,6 +296,11 @@ def test_chunk_beta_sigmoid_in_kernel(
     dtype: torch.dtype,
 ):
     """`use_beta_sigmoid_in_kernel=True` (raw beta logits) matches manual sigmoid + autograd."""
+    if os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") != "1" and HV != H:
+        pytest.skip(
+            reason="GQA (HV != H) is not supported by the tilelang backend; "
+            "covered by the Triton baseline run."
+        )
     torch.manual_seed(42)
     if IS_INTEL_ALCHEMIST and D > 128:
         pytest.skip(reason='chunk_gated_delta_rule is not supported on alchemist for D>128')
@@ -596,14 +701,16 @@ def test_fused_recurrent_gate_in_kernel_varlen(
 
 
 @pytest.mark.parametrize(
-    ('H', 'D', 'mask_p', 'cu_seqlens', 'dtype'),
+    ('H', 'HV', 'D', 'mask_p', 'cu_seqlens', 'dtype'),
     [
-        pytest.param(*test, id="H{}-D{}-mask_p{}-cu_seqlens{}-{}".format(*test))
+        pytest.param(*test, id="H{}-HV{}-D{}-mask_p{}-cu_seqlens{}-{}".format(*test))
         for test in [
-            (4, 60, 0, [0, 15], torch.float16),
-            (4, 64, 0, [0, 256, 500, 1000], torch.float16),
-            (4, 64, 0.5, [0, 256, 500, 1000], torch.float16),
-            (4, 100, 0, [0, 15, 100, 300, 1200, 2000], torch.float16),
+            (4, 4, 60, 0, [0, 15], torch.float16),
+            (4, 4, 64, 0, [0, 256, 500, 1000], torch.float16),
+            (4, 4, 64, 0.5, [0, 256, 500, 1000], torch.float16),
+            (4, 4, 100, 0, [0, 15, 100, 300, 1200, 2000], torch.float16),
+            (2, 4, 64, 0, [0, 256, 500, 1000], torch.float16),
+            (2, 8, 64, 0, [0, 256, 500, 1000], torch.float16),
         ]
     ],
 )
@@ -613,6 +720,7 @@ def test_fused_recurrent_gate_in_kernel_varlen(
 )
 def test_chunk_varlen(
     H: int,
+    HV: int,
     D: int,
     mask_p: float,
     cu_seqlens: list[int],
@@ -622,6 +730,8 @@ def test_chunk_varlen(
         pytest.skip(reason='chunk_gated_delta_rule is not supported on alchemist for D>128')
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
+    assert HV % H == 0
+    G = HV // H
     # randomly split the sequence into N segments
     cu_seqlens = torch.LongTensor(cu_seqlens).to(device)
     T = cu_seqlens[-1]
@@ -630,11 +740,11 @@ def test_chunk_varlen(
     # seq-first required for inputs with variable lengths
     q = torch.randn((1, T, H, D), dtype=dtype)
     k = F.normalize(torch.randn(1, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
-    v = torch.randn((1, T, H, D), dtype=dtype)
-    g = F.logsigmoid(torch.rand(1, T, H, dtype=dtype))
+    v = torch.randn((1, T, HV, D), dtype=dtype)
+    g = F.logsigmoid(torch.rand(1, T, HV, dtype=dtype))
     g = g * (torch.rand_like(g) > mask_p)
-    beta = torch.rand(1, T, H, dtype=torch.float).sigmoid()
-    h0 = torch.randn((N, H, D, D), dtype=dtype)
+    beta = torch.rand(1, T, HV, dtype=torch.float).sigmoid()
+    h0 = torch.randn((N, HV, D, D), dtype=dtype)
 
     q, k, v, beta, g, h0 = map(lambda x: x.to(device).requires_grad_(), (q, k, v, beta, g, h0))
     do = torch.randn_like(v)
@@ -658,8 +768,8 @@ def test_chunk_varlen(
     ref_ht = []
     for i in range(N):
         ref_i, ref_ht_i = naive_recurrent_gated_delta_rule(
-            q=q[:, cu_seqlens[i]:cu_seqlens[i+1]],
-            k=k[:, cu_seqlens[i]:cu_seqlens[i+1]],
+            q=repeat(q[:, cu_seqlens[i]:cu_seqlens[i+1]], 'b t h d -> b t (h g) d', g=G),
+            k=repeat(k[:, cu_seqlens[i]:cu_seqlens[i+1]], 'b t h d -> b t (h g) d', g=G),
             v=v[:, cu_seqlens[i]:cu_seqlens[i+1]],
             beta=beta[:, cu_seqlens[i]:cu_seqlens[i+1]],
             g=g[:, cu_seqlens[i]:cu_seqlens[i+1]],
@@ -889,6 +999,11 @@ def test_chunk_gate_in_kernel_gqa(
     dtype: torch.dtype,
 ):
     """Test use_gate_in_kernel=True with grouped value attention (HV > H)."""
+    if os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") != "1" and Hq != H:
+        pytest.skip(
+            reason="GQA (Hq != H) is not supported by the tilelang backend; "
+            "covered by the Triton baseline run."
+        )
     torch.manual_seed(42)
     if IS_INTEL_ALCHEMIST and D > 128:
         pytest.skip(reason='chunk_gated_delta_rule is not supported on alchemist for D>128')
@@ -1170,3 +1285,300 @@ def test_prepare_wy_repr_bwd_no_g(B: int, T: int, H: int, HV: int, D: int):
     assert_close('dk', dk_zero_g, dk_no_g, 1e-4)
     assert_close('dv', dv_zero_g, dv_no_g, 1e-4)
     assert_close('db', db_zero_g, db_no_g, 1e-4)
+
+
+# ---------------------------------------------------------------------------
+# FlashQLA backend tests
+# ---------------------------------------------------------------------------
+
+_FLASH_QLA_AVAILABLE = importlib.util.find_spec("flash_qla") is not None
+_SKIP_FLASH_QLA = pytest.mark.skipif(
+    device == "cpu" or not _FLASH_QLA_AVAILABLE or not (IS_NVIDIA_HOPPER or IS_NVIDIA_SM100),
+    reason="FlashQLA backend requires an SM90/SM100 GPU and the flash_qla package",
+)
+
+_FLASH_QLA_RTOL = 0.008
+
+
+def _flash_qla_run(monkeypatch, **kwargs):
+    from fla.ops.gated_delta_rule.backends.flash_qla import FlashQLABackend
+    monkeypatch.setenv("FLA_FLASH_QLA", "1")
+    dispatched = []
+    impl = FlashQLABackend.chunk_gated_delta_rule
+
+    def spy(self, *args, **kw):
+        dispatched.append(True)
+        return impl(self, *args, **kw)
+
+    monkeypatch.setattr(FlashQLABackend, "chunk_gated_delta_rule", spy)
+    out = chunk_gated_delta_rule(**kwargs)
+    assert dispatched, "FlashQLA backend was not dispatched; the test would only compare the Triton fallback"
+    return out
+
+
+def _flash_qla_gold(q, k, v, g, beta, scale, h0):
+    HV = v.shape[2]
+    H = q.shape[2]
+    G = HV // H
+    return naive_recurrent_gated_delta_rule(
+        q=F.normalize(repeat(q.clone(), 'b t h d -> b t (h g) d', g=G), p=2, dim=-1),
+        k=F.normalize(repeat(k.clone(), 'b t h d -> b t (h g) d', g=G), p=2, dim=-1),
+        v=v.clone(),
+        g=g.clone(),
+        beta=beta.clone(),
+        scale=scale,
+        initial_state=h0.clone(),
+        output_final_state=True,
+    )
+
+
+@_SKIP_FLASH_QLA
+@pytest.mark.parametrize(
+    ("B", "T", "H", "HV", "D", "dtype"),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-HV{}-D{}-{}".format(*test))
+        for test in [
+            (1, 1024, 4, 4, 128, torch.bfloat16),
+            (2, 2048, 8, 8, 128, torch.bfloat16),
+            (1, 4096, 16, 16, 128, torch.bfloat16),
+            (1, 1024, 4, 4, 128, torch.float16),
+            (2, 2048, 8, 8, 128, torch.float16),
+            # GVA: HV > H
+            (1, 1024, 2, 8, 128, torch.bfloat16),
+            (2, 2048, 4, 16, 128, torch.bfloat16),
+        ]
+    ],
+)
+def test_flash_qla_chunk(B, T, H, HV, D, dtype, monkeypatch):
+    torch.manual_seed(42)
+    q = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    k = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    v = torch.randn(B, T, HV, D, dtype=dtype, device=device)
+    g = F.logsigmoid(torch.randn(B, T, HV, dtype=torch.float32, device=device))
+    beta = torch.randn(B, T, HV, dtype=torch.float32, device=device).sigmoid()
+    h0 = torch.randn(B, HV, D, D, dtype=torch.float32, device=device)
+    scale = D ** -0.5
+    q, k, v, g, beta, h0 = (x.requires_grad_(True) for x in (q, k, v, g, beta, h0))
+
+    ref_o, ref_ht = _flash_qla_gold(q, k, v, g, beta, scale, h0.clone())
+    do = torch.randn_like(ref_o)
+    dht = torch.randn_like(ref_ht)
+    ((ref_o * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=True)
+    ref_dq, ref_dk, ref_dv, ref_dg, ref_dbeta, ref_dh0 = q.grad, k.grad, v.grad, g.grad, beta.grad, h0.grad
+    q.grad = k.grad = v.grad = g.grad = beta.grad = h0.grad = None
+
+    tri_o, tri_ht = _flash_qla_run(
+        monkeypatch,
+        q=q.clone(), k=k.clone(), v=v.clone(), g=g.clone(), beta=beta.clone(),
+        scale=scale,
+        initial_state=h0.clone(),
+        output_final_state=True,
+        use_qk_l2norm_in_kernel=True,
+    )
+    ((tri_o * do).sum() + (tri_ht * dht).sum()).backward(retain_graph=True)
+    tri_dq, tri_dk, tri_dv, tri_dg, tri_dbeta, tri_dh0 = q.grad, k.grad, v.grad, g.grad, beta.grad, h0.grad
+
+    assert_close("  o", ref_o, tri_o, _FLASH_QLA_RTOL)
+    assert_close(" ht", ref_ht, tri_ht.to(ref_ht.dtype), _FLASH_QLA_RTOL)
+    assert_close(" dq", ref_dq, tri_dq, _FLASH_QLA_RTOL)
+    assert_close(" dk", ref_dk, tri_dk, _FLASH_QLA_RTOL)
+    assert_close(" dv", ref_dv, tri_dv, _FLASH_QLA_RTOL)
+    assert_close(" dg", ref_dg, tri_dg, 0.035)
+    assert_close(" db", ref_dbeta, tri_dbeta, 0.008)
+    assert_close("dh0", ref_dh0, tri_dh0, _FLASH_QLA_RTOL)
+
+
+@_SKIP_FLASH_QLA
+@pytest.mark.parametrize(
+    ("H", "D", "cu_seqlens"),
+    [
+        pytest.param(H, D, cu, id=f"H{H}-D{D}-cu{cu}")
+        for (H, D, cu) in [
+            (4, 128, [0, 256, 500, 1000]),
+            (8, 128, [0, 100, 300, 1200, 2000]),
+            (16, 128, [0, 101, 303, 1205, 3007, 4096]),
+        ]
+    ],
+)
+def test_flash_qla_chunk_varlen(H, D, cu_seqlens, monkeypatch):
+    torch.manual_seed(42)
+    dtype = torch.bfloat16
+    cu_seqlens_t = torch.LongTensor(cu_seqlens).to(device)
+    T = cu_seqlens[-1]
+    N = len(cu_seqlens) - 1
+
+    q = torch.randn(1, T, H, D, dtype=dtype, device=device)
+    k = torch.randn(1, T, H, D, dtype=dtype, device=device)
+    v = torch.randn(1, T, H, D, dtype=dtype, device=device)
+    g = F.logsigmoid(torch.randn(1, T, H, dtype=torch.float32, device=device))
+    beta = torch.randn(1, T, H, dtype=torch.float32, device=device).sigmoid()
+    h0 = torch.randn(N, H, D, D, dtype=torch.float32, device=device)
+    scale = D ** -0.5
+    q, k, v, g, beta, h0 = (x.requires_grad_(True) for x in (q, k, v, g, beta, h0))
+    do = torch.randn(1, T, H, D, dtype=dtype, device=device)
+    dht = torch.randn(N, H, D, D, dtype=torch.float32, device=device)
+
+    tri_o, tri_ht = _flash_qla_run(
+        monkeypatch,
+        q=q.clone(), k=k.clone(), v=v.clone(), g=g.clone(), beta=beta.clone(),
+        scale=scale,
+        initial_state=h0.clone(),
+        output_final_state=True,
+        use_qk_l2norm_in_kernel=True,
+        cu_seqlens=cu_seqlens_t,
+    )
+    ((tri_o * do).sum() + (tri_ht * dht).sum()).backward(retain_graph=True)
+    tri_dq, tri_dk, tri_dv, tri_dg, tri_dbeta, tri_dh0 = q.grad, k.grad, v.grad, g.grad, beta.grad, h0.grad
+    q.grad = k.grad = v.grad = g.grad = beta.grad = h0.grad = None
+
+    ref_parts = []
+    ref_ht_parts = []
+    for i in range(N):
+        s, e = cu_seqlens[i], cu_seqlens[i + 1]
+        ref_i, ref_ht_i = naive_recurrent_gated_delta_rule(
+            q=F.normalize(q[:, s:e].clone(), p=2, dim=-1),
+            k=F.normalize(k[:, s:e].clone(), p=2, dim=-1),
+            v=v[:, s:e].clone(),
+            g=g[:, s:e].clone(),
+            beta=beta[:, s:e].clone(),
+            scale=scale,
+            initial_state=h0[i].clone(),
+            output_final_state=True,
+        )
+        ref_parts.append(ref_i)
+        ref_ht_parts.append(ref_ht_i)
+    ref_o = torch.cat(ref_parts, 1)
+    ref_ht = torch.cat(ref_ht_parts, 0)
+
+    ((ref_o * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=True)
+    ref_dq, ref_dk, ref_dv, ref_dg, ref_dbeta, ref_dh0 = q.grad, k.grad, v.grad, g.grad, beta.grad, h0.grad
+
+    assert_close("  o", ref_o, tri_o, _FLASH_QLA_RTOL)
+    assert_close(" ht", ref_ht, tri_ht.to(ref_ht.dtype), _FLASH_QLA_RTOL)
+    assert_close(" dq", ref_dq, tri_dq, _FLASH_QLA_RTOL)
+    assert_close(" dk", ref_dk, tri_dk, _FLASH_QLA_RTOL)
+    assert_close(" dv", ref_dv, tri_dv, _FLASH_QLA_RTOL)
+    assert_close(" dg", ref_dg, tri_dg, 0.035)
+    assert_close(" db", ref_dbeta, tri_dbeta, 0.008)
+    assert_close("dh0", ref_dh0, tri_dh0, _FLASH_QLA_RTOL)
+
+
+@_SKIP_FLASH_QLA
+@pytest.mark.parametrize(
+    ("B", "T", "H", "D"),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-D{}".format(*test))
+        for test in [
+            (1, 1024, 4, 128),
+            (2, 2048, 8, 128),
+        ]
+    ],
+)
+def test_flash_qla_chunk_state_v_first(B, T, H, D, monkeypatch):
+    torch.manual_seed(42)
+    dtype = torch.bfloat16
+    q = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    k = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    v = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    g = F.logsigmoid(torch.randn(B, T, H, dtype=torch.float32, device=device))
+    beta = torch.randn(B, T, H, dtype=torch.float32, device=device).sigmoid()
+    h0_kv = torch.randn(B, H, D, D, dtype=torch.float32, device=device)
+    h0_vk = h0_kv.transpose(-1, -2).contiguous()
+    scale = D ** -0.5
+    q, k, v, g, beta, h0_kv, h0_vk = (x.requires_grad_(True) for x in (q, k, v, g, beta, h0_kv, h0_vk))
+
+    tri_vk, tri_ht_vk = _flash_qla_run(
+        monkeypatch,
+        q=q.clone(), k=k.clone(), v=v.clone(), g=g.clone(), beta=beta.clone(),
+        scale=scale,
+        initial_state=h0_vk.clone(),
+        output_final_state=True,
+        use_qk_l2norm_in_kernel=True,
+        state_v_first=True,
+    )
+    do = torch.randn_like(v)
+    dht_vk = torch.randn(B, H, D, D, dtype=torch.float32, device=device)
+    dht_kv = dht_vk.transpose(-1, -2).contiguous()
+    ((tri_vk * do).sum() + (tri_ht_vk * dht_vk).sum()).backward(retain_graph=True)
+    tri_dq, tri_dk, tri_dv, tri_dg, tri_dbeta, tri_dh0 = q.grad, k.grad, v.grad, g.grad, beta.grad, h0_vk.grad
+    q.grad = k.grad = v.grad = g.grad = beta.grad = h0_vk.grad = None
+
+    ref_kv, ref_ht_kv = _flash_qla_run(
+        monkeypatch,
+        q=q.clone(), k=k.clone(), v=v.clone(), g=g.clone(), beta=beta.clone(),
+        scale=scale,
+        initial_state=h0_kv.clone(),
+        output_final_state=True,
+        use_qk_l2norm_in_kernel=True,
+        state_v_first=False,
+    )
+    ((ref_kv * do).sum() + (ref_ht_kv * dht_kv).sum()).backward(retain_graph=True)
+    ref_dq, ref_dk, ref_dv, ref_dg, ref_dbeta, ref_dh0 = q.grad, k.grad, v.grad, g.grad, beta.grad, h0_kv.grad
+
+    assert_close("  o", ref_kv, tri_vk, 0.0)
+    assert_close(" ht", ref_ht_kv, tri_ht_vk.transpose(-1, -2), 0.0)
+    assert_close(" dq", ref_dq, tri_dq, 0.0)
+    assert_close(" dk", ref_dk, tri_dk, 0.0)
+    assert_close(" dv", ref_dv, tri_dv, 0.0)
+    assert_close(" dg", ref_dg, tri_dg, 0.0)
+    assert_close(" db", ref_dbeta, tri_dbeta, 0.0)
+    assert_close("dh0", ref_dh0, tri_dh0.transpose(-1, -2), 0.0)
+
+
+# ---------------------------------------------------------------------------
+# FlashQLA verifier rejection tests
+# ---------------------------------------------------------------------------
+
+def test_flash_qla_verifier_rejects(monkeypatch):
+    from fla.ops.gated_delta_rule.backends import flash_qla
+    be = flash_qla.FlashQLABackend()
+
+    monkeypatch.setattr(flash_qla, "IS_NVIDIA_HOPPER", False)
+    monkeypatch.setattr(flash_qla, "IS_NVIDIA_SM100", False)
+    passed, reason = be.chunk_gated_delta_rule_verifier(
+        q=torch.empty(1, 64, 4, 128, dtype=torch.bfloat16),
+        k=torch.empty(1, 64, 4, 128, dtype=torch.bfloat16),
+        v=torch.empty(1, 64, 4, 128, dtype=torch.bfloat16),
+        g=torch.empty(1, 64, 4),
+        beta=torch.empty(1, 64, 4),
+    )
+    assert not passed and "SM90 or SM100" in reason
+
+    # exercise the remaining branches independently of the actual hardware
+    monkeypatch.setattr(flash_qla, "IS_NVIDIA_HOPPER", True)
+
+    dtype = torch.bfloat16
+    q128 = torch.empty(1, 64, 4, 128, dtype=dtype)
+    k128 = torch.empty(1, 64, 4, 128, dtype=dtype)
+    v128 = torch.empty(1, 64, 4, 128, dtype=dtype)
+    g = torch.empty(1, 64, 4)
+    beta = torch.empty(1, 64, 4)
+
+    q64 = torch.empty(1, 64, 4, 64, dtype=dtype)
+    v64 = torch.empty(1, 64, 4, 64, dtype=dtype)
+
+    ok_kwargs = dict(q=q128, k=k128, v=v128, g=g, beta=beta)
+
+    passed, reason = be.chunk_gated_delta_rule_verifier(q=q64, k=q64, v=v128, g=g, beta=beta)
+    assert not passed and "K=128" in reason
+
+    passed, reason = be.chunk_gated_delta_rule_verifier(q=q128, k=k128, v=v64, g=g, beta=beta)
+    assert not passed and "V=128" in reason
+
+    passed, reason = be.chunk_gated_delta_rule_verifier(**ok_kwargs, use_gate_in_kernel=True)
+    assert not passed and "use_gate_in_kernel" in reason
+
+    passed, reason = be.chunk_gated_delta_rule_verifier(**ok_kwargs, use_beta_sigmoid_in_kernel=True)
+    assert not passed and "use_beta_sigmoid_in_kernel" in reason
+
+    passed, reason = be.chunk_gated_delta_rule_verifier(**ok_kwargs, allow_neg_eigval=True)
+    assert not passed and "allow_neg_eigval" in reason
+
+    passed, reason = be.chunk_gated_delta_rule_verifier(**ok_kwargs, transpose_state_layout=True)
+    assert not passed and "transpose_state_layout" in reason
+
+    passed, reason = be.chunk_gated_delta_rule_verifier(**ok_kwargs, cp_context=object())
+    assert not passed and "context parallel" in reason
+
+    passed, reason = be.chunk_gated_delta_rule_verifier(**ok_kwargs)
+    assert passed and reason is None

@@ -9,8 +9,9 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.common.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
 from fla.ops.gated_delta_rule.wy_fast import recompute_w_u_fwd
-from fla.ops.utils import prepare_chunk_indices
+from fla.ops.utils import prepare_chunk_indices, solve_tril
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.op import exp2
 from fla.utils import IS_TF32_SUPPORTED, autotune_cache_kwargs
@@ -324,15 +325,11 @@ def chunk_gated_delta_rule_fwd_intra(
     chunk_indices: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     r"""
-    GDN intra-chunk forward: fused kkt + solve_tril + recompute_w_u.
+    GDN intra-chunk forward: fused or unfused kkt + solve_tril + recompute_w_u.
 
-    Equivalent to:
-        A = chunk_scaled_dot_kkt_fwd(k, g, beta, ...)       # kernel 1
-        A = solve_tril(A, ...)                                # kernel 2
-        w, u = recompute_w_u_fwd(k, v, beta, A, g, ...)      # kernel 3
-
-    Fuses kernels 1+2 into a single kernel, reducing from 3 to 2 kernel launches
-    and eliminating the HBM round-trip for the intermediate A matrix.
+    For ``chunk_size == 64``, this uses the fused kkt + solve_tril path. For
+    other supported chunk sizes, it computes the mathematically equivalent
+    representation with ``chunk_scaled_dot_kkt_fwd`` followed by ``solve_tril``.
 
     Args:
         k (torch.Tensor):
@@ -355,30 +352,51 @@ def chunk_gated_delta_rule_fwd_intra(
         u (torch.Tensor): shape `[B, T, HV, V]`
         A (torch.Tensor): shape `[B, T, HV, BT]`, the solved (I+A)^{-1} matrix
     """
+    if chunk_size not in (16, 32, 64):
+        raise ValueError(f"`chunk_size` must be 16, 32, or 64, got {chunk_size}.")
+
     B, T, H, K, HV = *k.shape, beta.shape[2]
     BT = chunk_size
-    BC = 16
 
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
-    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
-    # Step 1: fused kkt + solve_tril
-    A = torch.zeros(B, T, HV, BT, device=k.device, dtype=k.dtype)
-    chunk_gated_delta_rule_fwd_kkt_solve_kernel[(NT, B * HV)](
-        k=k,
-        g=g,
-        beta=beta,
-        A=A,
-        cu_seqlens=cu_seqlens,
-        chunk_indices=chunk_indices,
-        T=T,
-        H=H,
-        HV=HV,
-        K=K,
-        BT=BT,
-        BC=BC,
-    )
+    if BT == 64:
+        # Step 1: fused kkt + solve_tril
+        BC = 16
+        NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
+        A = torch.zeros(B, T, HV, BT, device=k.device, dtype=k.dtype)
+        chunk_gated_delta_rule_fwd_kkt_solve_kernel[(NT, B * HV)](
+            k=k,
+            g=g,
+            beta=beta,
+            A=A,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+            T=T,
+            H=H,
+            HV=HV,
+            K=K,
+            BT=BT,
+            BC=BC,
+        )
+    else:
+        # Step 1: mathematically equivalent unfused kkt + solve_tril for non-64 chunks
+        A = chunk_scaled_dot_kkt_fwd(
+            k=k,
+            g=g,
+            beta=beta,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+            chunk_size=BT,
+            output_dtype=torch.float32,
+        )
+        A = solve_tril(
+            A=A,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+            output_dtype=k.dtype,
+        )
 
     # Step 2: recompute_w_u
     w, u = recompute_w_u_fwd(

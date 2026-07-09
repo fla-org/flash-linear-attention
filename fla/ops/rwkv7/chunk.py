@@ -7,6 +7,7 @@
 
 import torch
 
+from fla.ops.cp import FLACPContext
 from fla.ops.generalized_delta_rule import chunk_dplr_delta_rule
 
 
@@ -24,6 +25,8 @@ def chunk_rwkv7(
     cu_seqlens_cpu: torch.LongTensor | None = None,
     safe_gate: bool = False,
     chunk_size: int | None = None,
+    disable_recompute: bool = False,
+    cp_context: FLACPContext | None = None,
     **kwargs,
 ):
     """
@@ -59,6 +62,12 @@ def chunk_rwkv7(
             The safe range is approximately `[-5, 0)`. Default: `False`.
         chunk_size (Optional[int]):
             Chunk size for the chunked computation. Default: `None`, which means 16.
+        disable_recompute (Optional[bool]):
+            Whether to disable gradient recomputation in the kernel. Default: `False`.
+        cp_context (Optional[FLACPContext]):
+            Context parallel context for distributed training across multiple devices.
+            When provided, `initial_state` and `output_final_state` are not supported,
+            and `cp_context.cu_seqlens` is used as the local `cu_seqlens`. Default: `None`.
     """
     if 'head_first' in kwargs:
         raise DeprecationWarning(
@@ -78,4 +87,6 @@ def chunk_rwkv7(
         cu_seqlens_cpu=cu_seqlens_cpu,
         safe_gate=safe_gate,
         chunk_size=chunk_size,
+        disable_recompute=disable_recompute,
+        cp_context=cp_context,
     )

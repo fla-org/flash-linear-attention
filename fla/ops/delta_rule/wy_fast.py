@@ -15,7 +15,11 @@ from fla.ops.utils.op import safe_dot
 from fla.ops.utils.solve_tril import solve_tril
 from fla.utils import IS_NVIDIA_HOPPER, autotune_cache_kwargs, check_shared_mem
 
-NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8]
+# Triton miscompiles `prepare_wy_repr_bwd_kernel` with num_warps=4 on Hopper
+# (sm_90) for BT=64: it produces incorrect dk/dbeta (and can raise an illegal
+# memory access), while num_warps=2 is correct (see #984). Restrict the Hopper
+# autotune configs to num_warps=2 until the upstream compiler issue is resolved.
+NUM_WARPS = [2] if IS_NVIDIA_HOPPER else [2, 4, 8]
 
 
 @triton.heuristics({
@@ -188,12 +192,13 @@ def prepare_wy_repr_fwd(
     beta: torch.Tensor,
     cu_seqlens: torch.LongTensor | None,
     chunk_indices: torch.LongTensor | None = None,
+    chunk_size: int = 64,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     A = chunk_scaled_dot_kkt_fwd(
         k=k,
         beta=beta,
         cu_seqlens=cu_seqlens,
-        chunk_size=64,
+        chunk_size=chunk_size,
         output_dtype=torch.float32,
         chunk_indices=chunk_indices,
     )
@@ -223,7 +228,7 @@ def recompute_w_u_fwd(
     chunk_indices: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
-    BT = 64
+    BT = A.shape[-1]
     CONST_TILING = 64 if check_shared_mem() else 32
     BK = min(max(triton.next_power_of_2(K), 16), CONST_TILING)
     BV = min(max(triton.next_power_of_2(V), 16), CONST_TILING)
