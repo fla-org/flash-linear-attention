@@ -1,9 +1,13 @@
-# -*- coding: utf-8 -*-
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 from __future__ import annotations
 
 import warnings
-from typing import Dict, Optional
 
 from transformers.configuration_utils import PretrainedConfig
 
@@ -15,23 +19,23 @@ class DeltaFormerConfig(PretrainedConfig):
     def __init__(
         self,
         hidden_size: int = 2048,
-        hidden_ratio: Optional[int] = 4,
-        intermediate_size: Optional[int] = None,
+        hidden_ratio: int | None = 4,
+        intermediate_size: int | None = None,
         num_hidden_layers: int = 24,
         num_heads: int = 8,
-        num_kv_heads: Optional[int] = None,
+        num_kv_heads: int | None = None,
         attn_mode: str = "chunk",
         hidden_act: str = "swish",
         max_position_embeddings: int = 2048,
-        elementwise_affine: Optional[bool] = True,
+        elementwise_affine: bool | None = True,
         norm_eps: float = 1e-6,
         qkv_bias: bool = False,
         qk_norm: bool = False,
         rope_theta: float = 10000.,
-        rope_max_position_embeddings: Optional[int] = None,
-        attn: Optional[Dict] = None,
+        rope_max_position_embeddings: int | None = None,
+        attn: dict | None = None,
         use_cache: bool = True,
-        pad_token_id: Optional[int] = None,
+        pad_token_id: int | None = None,
         bos_token_id: int = 1,
         eos_token_id: int = 2,
         tie_word_embeddings: bool = False,
@@ -44,7 +48,8 @@ class DeltaFormerConfig(PretrainedConfig):
         vocab_size: int = 32000,
         output_attentions: bool = False,
         output_hidden_states: bool = False,
-        **kwargs
+        attnres_block_size: int | None = None,
+        **kwargs,
     ):
         self.hidden_size = hidden_size
         self.hidden_ratio = hidden_ratio
@@ -74,20 +79,21 @@ class DeltaFormerConfig(PretrainedConfig):
 
         self.output_attentions = output_attentions
         self.output_hidden_states = output_hidden_states
+        self.attnres_block_size = attnres_block_size
 
         if fuse_cross_entropy and fuse_linear_cross_entropy:
             raise ValueError(
-                "`fuse_cross_entropy` and `fuse_linear_cross_entropy` cannot be True at the same time."
+                "`fuse_cross_entropy` and `fuse_linear_cross_entropy` cannot be True at the same time.",
             )
         if fuse_linear_cross_entropy:
             warnings.warn(
                 "`fuse_linear_cross_entropy` is enabled, which can improves memory efficiency "
                 "at the potential cost of reduced precision. "
-                "If you observe issues like loss divergence, consider disabling this setting."
+                "If you observe issues like loss divergence, consider disabling this setting.",
             )
 
         if attn is not None:
-            if not isinstance(attn, Dict):
+            if not isinstance(attn, dict):
                 raise ValueError("attn must be a dictionary")
             if 'layers' not in attn:
                 raise ValueError("Layer indices must be provided to initialize hybrid attention layers")
@@ -97,6 +103,13 @@ class DeltaFormerConfig(PretrainedConfig):
             attn['qkv_bias'] = attn.get('qkv_bias', False)
             attn['window_size'] = attn.get('window_size', None)
             attn['rope_theta'] = attn.get('rope_theta', 10000.)
+
+        if attnres_block_size is not None and attnres_block_size != 1:
+            if attnres_block_size < 2 or attnres_block_size % 2 != 0:
+                raise ValueError(
+                    "`attnres_block_size` must be `None`, `1` (full mode), or an even integer (one block "
+                    f"contains `attnres_block_size // 2` transformer layers); got {attnres_block_size}."
+                )
 
         super().__init__(
             pad_token_id=pad_token_id,

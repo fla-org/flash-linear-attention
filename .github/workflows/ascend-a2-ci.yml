@@ -1,0 +1,114 @@
+name: ascend-a2-ci
+
+# Pinned stack: CANN 9.0.0 + pyproject [npu] extra (torch/torch_npu/torchvision/triton-ascend)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "**/*.py"
+      - "pyproject.toml"
+      - ".github/workflows/*.yml"
+  pull_request:
+    branches:
+      - main
+    types: [opened, synchronize, reopened, edited]
+    paths:
+      - "**/*.py"
+      - "pyproject.toml"
+      - ".github/workflows/*.yml"
+
+jobs:
+  test-a2-npu-pytorch-2-7:
+    name: Test A2 NPU (PyTorch 2.7.1)
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'push' ||
+      (
+        github.event_name == 'pull_request' &&
+        (
+          contains(github.event.pull_request.title, 'npu') ||
+          contains(github.event.pull_request.title, 'NPU') ||
+          contains(github.event.pull_request.title, 'ascend') ||
+          contains(github.event.pull_request.title, 'Ascend') ||
+          contains(github.event.pull_request.title, 'ASCEND')
+        )
+      )
+    strategy:
+      fail-fast: false
+      matrix:
+        python:
+          - "3.11"
+        os:
+          - "linux-aarch64-a2-8"
+
+    runs-on: ${{ matrix.os }}
+
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-${{ matrix.os }}-${{ matrix.python }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+    container:
+      image: ascendai/cann:9.0.0-910b-ubuntu22.04-py3.11
+      options: >-
+        --shm-size 16g
+      env:
+        HF_ENDPOINT: https://hf-mirror.com
+
+    env:
+      FLA_CI_ENV: 1
+      ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3,4,5,6,7"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.0
+
+      - name: Check NPU and CANN info
+        run: |
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -m)"-linux/ascend_toolkit_install.info
+          npu-smi info
+
+      - name: Set up Python
+        uses: actions/setup-python@v6.2.0
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install -U pip setuptools wheel
+          # triton-ascend runtime/build deps; install before resolving [npu] extra
+          python -m pip install pybind11 cmake attrs sympy pyyaml scipy decorator einops
+          # [npu] extra pins torch / torch_npu / torchvision / triton-ascend; osinfra index
+          # hosts triton-ascend wheels (see INSTALL.md).
+          python -m pip install ".[npu,test]" \
+            --extra-index-url=https://triton-ascend.osinfra.cn/pypi/simple
+
+      - name: Verify environment
+        shell: bash
+        run: |
+          source /usr/local/Ascend/ascend-toolkit/set_env.sh
+          python - <<'PY'
+          import torch
+          import torch_npu
+
+          print("torch:", torch.__version__)
+          print("torch_npu:", torch_npu.__version__)
+          print("npu available:", torch.npu.is_available())
+
+          import triton
+          print("triton:", triton.__version__)
+
+          from fla.utils import IS_NPU, device_platform
+          print("device_platform:", device_platform)
+          assert IS_NPU, "Expected NPU backend (IS_NPU=True)"
+          PY
+
+      - name: Run module and utils op tests
+        shell: bash
+        env:
+          FLA_NPU_XDIST: "1"
+        run: |
+          source /usr/local/Ascend/ascend-toolkit/set_env.sh
+          pytest -s -v --exitfirst -n 8 --dist loadfile tests/modules tests/ops/utils

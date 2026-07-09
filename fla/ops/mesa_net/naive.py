@@ -1,5 +1,9 @@
-# -*- coding: utf-8 -*-
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 from einops import rearrange
@@ -59,7 +63,7 @@ def naive_mesa_net_exact(q, k, v, g, lamb, beta, h_kk_init=None, h_kv_init=None)
         h_kk_all[:, i] = h_kk
         h_kv_all[:, i] = h_kv
 
-    q_star_gold = torch.linalg.solve(h_kk_all + torch.diag_embed(lamb)[None, None, ...,], q)
+    q_star_gold = torch.linalg.solve(h_kk_all + torch.diag_embed(lamb)[None, None, ...], q)
     o_gold = (q_star_gold[..., :, None] * h_kv_all).sum(-2)
     return o_gold, h_kk, h_kv
 

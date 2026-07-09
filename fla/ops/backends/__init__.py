@@ -1,0 +1,223 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
+"""Generic backend dispatch system for FLA operations."""
+
+from __future__ import annotations
+
+import contextlib
+import logging
+import os
+import threading
+from collections.abc import Callable
+from functools import cache, wraps
+from typing import Any, ClassVar, TypeVar
+
+import torch
+
+from fla.utils import find_spec_cached
+
+logger = logging.getLogger(__name__)
+F = TypeVar('F', bound=Callable)
+
+
+_DISPATCH_DISABLED = os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") == "1"
+if _DISPATCH_DISABLED:
+    logger.info("[FLA Backend] FLA_DISABLE_BACKEND_DISPATCH=1 — all dispatch bypassed")
+
+
+class BaseBackend:
+    """Base class for operation-specific backends.
+
+    Attributes:
+        backend_type (str, Optional):
+            Identifier for the backend type, used to distinguish different backend implementations.
+            Default: `"base"`.
+        package_name (str, Optional):
+            Name of the external package required by the backend.
+            `None` indicates no external dependency. Default: `None`.
+        env_var (str, Optional):
+            Environment variable name that controls whether the backend is enabled.
+            `None` means always enabled. Default: `None`.
+        default_enable (bool, Optional):
+            Whether the backend is enabled by default when `env_var` is not set.
+            Set to `False` to require explicit user opt-in. Default: `True`.
+        priority (int, Optional):
+            Backend priority. Lower values indicate higher priority. Default: 5.
+    """
+
+    backend_type: ClassVar[str] = "base"
+    package_name: ClassVar[str | None] = None
+    env_var: ClassVar[str | None] = None
+    default_enable: ClassVar[bool] = True
+    # Lower number = higher priority, default is 5
+    priority: ClassVar[int] = 5
+
+    @classmethod
+    def is_available(cls) -> bool:
+        if cls.package_name is None:
+            return True
+        return find_spec_cached(cls.package_name) is not None
+
+    @classmethod
+    def is_enabled(cls) -> bool:
+        if cls.env_var is None:
+            return True
+        default_value = "1" if cls.default_enable else "0"
+        return os.environ.get(cls.env_var, default_value) != "0"
+
+    @classmethod
+    @cache
+    def can_use(cls) -> bool:
+        return cls.is_available() and cls.is_enabled()
+
+    def verify(self, func_name: str, *args, **kwargs) -> tuple[bool, str | None]:
+        """Check if backend can handle the function call."""
+        verifier_name = f"{func_name}_verifier"
+        verifier = getattr(self, verifier_name, None)
+        if verifier is None:
+            return True, None
+
+        try:
+            return verifier(*args, **kwargs)
+        except Exception as e:
+            return False, str(e)
+
+
+_OPERATION_BACKEND_MODULES: dict[str, str] = {
+    'modules': 'fla.modules.backends',
+}
+
+
+class BackendRegistry:
+    """Per-operation backend registry."""
+
+    _registries: ClassVar[dict[str, BackendRegistry]] = {}
+    _initialized: ClassVar[set[str]] = set()
+    _init_lock: ClassVar[threading.Lock] = threading.Lock()
+
+    def __init__(self, operation_name: str):
+        self.operation_name = operation_name
+        self._backends: dict[str, BaseBackend] = {}
+        self._active: BaseBackend | None = None
+        self._lock = threading.RLock()
+        self._logged: set[str] = set()
+        BackendRegistry._registries[operation_name] = self
+
+    def register(self, backend: BaseBackend) -> None:
+        """Register a backend."""
+        with self._lock:
+            self._backends[backend.backend_type] = backend
+            # Update active backend based on priority
+            self._update_active_backend()
+
+    def _get_sorted_backends(self) -> list[BaseBackend]:
+        """Get backends sorted by priority (lower number = higher priority).
+
+        Backends with the same priority are sorted by registration order.
+        """
+        return sorted(
+            self._backends.values(),
+            key=lambda b: (b.priority, list(self._backends.values()).index(b))
+        )
+
+    def _update_active_backend(self) -> None:
+        """Update active backend based on priority."""
+        for backend in self._get_sorted_backends():
+            if backend.can_use():
+                self._active = backend
+                return
+
+    def get_active(self) -> BaseBackend | None:
+        """Get active backend."""
+        return self._active
+
+    @classmethod
+    def ensure_initialized(cls, operation: str) -> None:
+        """Lazy-load backends on first use."""
+        if operation in cls._initialized:
+            return
+
+        with cls._init_lock:
+            if operation in cls._initialized:
+                return
+
+            # Import backend module to trigger registration
+            module_path = _OPERATION_BACKEND_MODULES.get(
+                operation,
+                f'fla.ops.{operation}.backends',
+            )
+            with contextlib.suppress(ImportError):
+                __import__(module_path, fromlist=[''])
+
+            cls._initialized.add(operation)
+
+
+def dispatch(operation: str):
+    """Dispatch decorator with verifier support.
+
+    Iterates through all registered backends and selects the first one
+    that passes the verifier for the given function call.
+    """
+    def decorator(func: F) -> F:
+        if _DISPATCH_DISABLED:
+            return func
+        func_name = func.__name__
+
+        @wraps(func)
+        def wrapper(*args, **kwargs) -> Any:
+            # Lazy initialization of backends
+            BackendRegistry.ensure_initialized(operation)
+
+            registry = BackendRegistry._registries.get(operation)
+            if registry is None:
+                return func(*args, **kwargs)
+
+            # Iterate through all registered backends sorted by priority
+            # to find one that can handle this call
+            backends_list = registry._get_sorted_backends()
+
+            for be in backends_list:
+                # Avoid be.can_use(): its @cache wrapper breaks torch.compile tracing.
+                if not (be.is_available() and be.is_enabled()):
+                    continue
+
+                can_use, reason = be.verify(func_name, *args, **kwargs)
+                if not can_use:
+                    fail_key = f"{operation}:{func_name}:{be.backend_type}:fail"
+                    if fail_key not in registry._logged:
+                        registry._logged.add(fail_key)
+                        logger.info(
+                            f"[FLA Backend] {operation}.{func_name} -> {be.backend_type} "
+                            f"rejected: {reason}"
+                        )
+                    continue
+
+                impl = getattr(be, func_name, None)
+                if impl is None:
+                    continue
+
+                result = impl(*args, **kwargs)
+
+                log_key = f"{operation}:{func_name}:{be.backend_type}"
+                if log_key not in registry._logged:
+                    registry._logged.add(log_key)
+                    logger.info(f"[FLA Backend] {operation}.{func_name} -> {be.backend_type}")
+
+                return result
+
+            # No backend can handle this call, use default implementation
+            return func(*args, **kwargs)
+
+        # Dispatch performs runtime backend selection; keep it out of torch.compile graphs.
+        wrapper = torch.compiler.disable(wrapper)
+
+        return wrapper
+    return decorator
+
+
+__all__ = ['BackendRegistry', 'BaseBackend', 'dispatch']

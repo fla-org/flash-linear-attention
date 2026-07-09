@@ -1,3 +1,10 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
 import torch
 import triton
 import triton.language as tl
@@ -44,11 +51,11 @@ def parallel_path_fwd_kernel(
 
     if IS_VARLEN:
         i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-        T = eos - bos
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = (eos - bos).to(tl.int32)
     else:
         i_n = i_b
-        bos, eos = i_n * T, i_n * T + T
+        bos, eos = (i_n * T).to(tl.int64), (i_n * T + T).to(tl.int64)
 
     p_q = tl.make_block_ptr(q + (bos * HQ + i_hq) * K, (T, K), (HQ*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
     b_q = tl.zeros([BT, BK], dtype=tl.float32)
@@ -92,7 +99,7 @@ def parallel_path_fwd_kernel(
             b_s = b_s + b_g_cumsum_q[:, None] - b_g_cumsum_k[None, :]
         b_s = tl.where(m_s[:, None], b_s * sm_scale, float("-inf"))
         b_m_new = tl.maximum(b_m, tl.max(b_s, 1))
-        alpha = tl.math.exp2((b_m - b_m_new))
+        alpha = tl.math.exp2(b_m - b_m_new)
         b_s = tl.math.exp2(b_s - b_m_new[:, None])
         b_o *= alpha[:, None]
         b_l = b_l * alpha + tl.sum(b_s, 1)
@@ -123,7 +130,7 @@ def parallel_path_fwd_kernel(
             b_s = b_s + b_g_cumsum_q[:, None] - b_g_cumsum_k[None, :]
         b_s = b_s * sm_scale
         b_m_new = tl.maximum(b_m, tl.max(b_s, 1))
-        alpha = tl.math.exp2((b_m - b_m_new))
+        alpha = tl.math.exp2(b_m - b_m_new)
         b_s = tl.math.exp2(b_s - b_m_new[:, None])
         b_o *= alpha[:, None]
         b_l = b_l * alpha + tl.sum(b_s, 1)
@@ -154,12 +161,15 @@ def parallel_path_fwd_fn(
     cu_seqlens,
     BT,
     BS,
+    chunk_indices: torch.LongTensor | None = None,
 ):
     B, T, HQ, K = q.shape
     V = v.shape[-1]
     H = k.shape[-2]
     G = HQ // H
-    indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
+    indices = chunk_indices
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(indices)
     grid = (NT, B * HQ)
     o_new = torch.empty_like(o, dtype=v.dtype)
@@ -190,6 +200,6 @@ def parallel_path_fwd_fn(
         H=H,
         BS=BS,
         BT=BT,
-        num_warps=8 if (BT == 128 and K == 128) else 4
+        num_warps=8 if (BT == 128 and K == 128) else 4,
     )
     return o_new, L_new

@@ -1,7 +1,11 @@
-# -*- coding: utf-8 -*-
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from typing import Optional, Tuple
+import warnings
 
 import torch
 
@@ -12,12 +16,35 @@ def fused_recurrent_retention(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    scale: Optional[float] = None,
-    initial_state: Optional[torch.Tensor] = None,
+    scale: float | None = None,
+    initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
     reverse: bool = False,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    state_v_first: bool = False,
+    cu_seqlens: torch.LongTensor | None = None,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if 'transpose_state_layout' in kwargs:
+        if state_v_first:
+            raise ValueError("Cannot pass both `state_v_first` and the deprecated `transpose_state_layout`.")
+        warnings.warn(
+            "`transpose_state_layout` is deprecated and renamed to `state_v_first`.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        state_v_first = kwargs.pop('transpose_state_layout')
+
+    if cu_seqlens is not None:
+        if q.shape[0] != 1:
+            raise ValueError(
+                f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`. "
+                f"Please flatten variable-length inputs before processing.",
+            )
+        if initial_state is not None and initial_state.shape[0] != len(cu_seqlens) - 1:
+            raise ValueError(
+                f"The number of initial states is expected to be equal to the number of input sequences, "
+                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}.",
+            )
     g_gamma = (1 - q.new_tensor(2., dtype=torch.float).pow(-5. - q.new_tensor(range(q.shape[2]), dtype=torch.float))).log()
     o, final_state = fused_recurrent_simple_gla(
         q=q,
@@ -29,5 +56,6 @@ def fused_recurrent_retention(
         output_final_state=output_final_state,
         reverse=reverse,
         cu_seqlens=cu_seqlens,
+        state_v_first=state_v_first,
     )
     return o, final_state

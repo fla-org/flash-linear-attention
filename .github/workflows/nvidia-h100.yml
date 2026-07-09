@@ -4,24 +4,168 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  checks: read
+
 on:
   pull_request:
     branches: [ '*' ]
     types: [opened, synchronize, reopened, closed]
+  pull_request_review:
+    types: [submitted]
   push:
     branches:
       - main
 
 jobs:
-  test-h100-pytorch-2-7:
-    name: Test H100 (PyTorch 2.7)
+  test-h100-pytorch-2-12:
+    name: Test H100 (PyTorch 2.12)
     # Test on all main commits and PRs, but skip on closed PRs
     # to avoid running tests on merged PRs.
-    if: github.event_name != 'pull_request' || github.event.action != 'closed'
+    if: github.event_name != 'pull_request_review' && (github.event_name != 'pull_request' || github.event.action != 'closed')
     uses: ./.github/workflows/reusable-ci-tests.yml
     with:
-      runner: 'nvidia-h100-pt2-7'
+      runner: 'nvidia-h100-1'
+      gpu_type: 'nvidia'
+      conda_env_name: 'pytorch_2_12'
+      skip_gpu_check: true
+
+  check_h100_pytorch_2_7:
+    name: Check H100 PyTorch 2.7 Eligibility
+    if: >
+      (github.event_name == 'pull_request' && github.event.action != 'closed') ||
+      (github.event_name == 'pull_request_review' && github.event.review.state == 'approved' && github.event.pull_request.state == 'open')
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    outputs:
+      allowed: ${{ steps.check.outputs.allowed }}
+    steps:
+      - name: Check eligibility and wait for PyTorch 2.12 H100 jobs
+        id: check
+        uses: actions/github-script@v9.0.0
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const ref = context.payload.pull_request.head.sha;
+            const eventName = context.eventName;
+            let username, association;
+            if (eventName === 'pull_request') {
+              const pr = context.payload.pull_request;
+              username = pr.user.login;
+              association = pr.author_association;
+            } else if (eventName === 'pull_request_review') {
+              username = context.payload.review.user.login;
+              association = context.payload.review.author_association;
+            } else {
+              core.setOutput('allowed', 'false');
+              return;
+            }
+            const timeoutMs = 85 * 60 * 1000;
+            const pollMs = 60 * 1000;
+            const deadline = Date.now() + timeoutMs;
+            const requiredChecks = [
+              'Test H100 (PyTorch 2.12) / test-ops',
+              'Test H100 (PyTorch 2.12) / test-models',
+            ];
+            const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+            let permission = 'none';
+            let allowed = association === 'OWNER';
+            if (!allowed) {
+              try {
+                const response = await github.rest.repos.getCollaboratorPermissionLevel({
+                  owner,
+                  repo,
+                  username,
+                });
+                permission = response.data.permission;
+                allowed = permission === 'admin';
+              } catch (error) {
+                core.info(`Could not read ${username}'s repo permission: ${error.message}`);
+              }
+            }
+            core.info(`${username}: association=${association}, permission=${permission}`);
+            if (!allowed) {
+              core.setOutput('allowed', 'false');
+              return;
+            }
+
+            while (true) {
+              const checkRuns = await github.paginate(github.rest.checks.listForRef, {
+                owner,
+                repo,
+                ref,
+                per_page: 100,
+              });
+
+              const latestByName = new Map();
+              for (const run of checkRuns) {
+                if (run.app?.slug !== 'github-actions') {
+                  continue;
+                }
+                const prev = latestByName.get(run.name);
+                const runTime = Date.parse(run.started_at || run.completed_at || run.created_at || 0);
+                const prevTime = prev ? Date.parse(prev.started_at || prev.completed_at || prev.created_at || 0) : 0;
+                if (!prev || runTime > prevTime) {
+                  latestByName.set(run.name, run);
+                }
+              }
+
+              let allPassed = true;
+              let shouldWait = false;
+              for (const name of requiredChecks) {
+                const run = latestByName.get(name);
+                if (!run) {
+                  core.info(`${name}: missing`);
+                  allPassed = false;
+                  shouldWait = true;
+                  continue;
+                }
+                core.info(`${name}: status=${run.status}, conclusion=${run.conclusion}`);
+                if (run.status !== 'completed') {
+                  allPassed = false;
+                  shouldWait = true;
+                  continue;
+                }
+                if (run.conclusion !== 'success') {
+                  core.setFailed(`Required check failed: ${name}`);
+                  return;
+                }
+              }
+
+              if (allPassed) {
+                core.setOutput('allowed', 'true');
+                return;
+              }
+
+              if (!shouldWait || Date.now() >= deadline) {
+                core.setFailed('Timed out waiting for PyTorch 2.12 H100 checks to pass');
+                return;
+              }
+
+              await sleep(pollMs);
+            }
+
+  test-h100-pytorch-2-7-ops:
+    name: Test H100 Ops (PyTorch 2.7)
+    needs: check_h100_pytorch_2_7
+    if: needs.check_h100_pytorch_2_7.outputs.allowed == 'true'
+    uses: ./.github/workflows/reusable-ci-tests.yml
+    with:
+      runner: 'nvidia-h100-1'
       gpu_type: 'nvidia'
       conda_env_name: 'pytorch_2_7'
-      pytorch_version: '2.7.0'
       skip_gpu_check: true
+      skip_models_tests: true
+
+  benchmark-h100:
+    name: Benchmark H100 (PyTorch 2.12)
+    needs: test-h100-pytorch-2-12
+    if: github.event_name == 'pull_request'
+    uses: ./.github/workflows/reusable-ci-benchmarks.yml
+    with:
+      runner: 'nvidia-h100-1'
+      conda_env_name: 'pytorch_2_12'
+      base_ref: origin/${{ github.event.pull_request.base.ref }}
