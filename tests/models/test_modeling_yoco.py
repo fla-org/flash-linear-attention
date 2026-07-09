@@ -12,6 +12,12 @@ from fla.models import YOCOConfig, YOCOForCausalLM
 
 from .test_modeling_base import run_test_generation, run_test_model_forward_backward
 
+try:
+    import flash_attn  # noqa: F401
+    HAS_FLASH_ATTN = True
+except ImportError:
+    HAS_FLASH_ATTN = False
+
 
 def _create_yoco_config_kwargs(
     L: int,
@@ -106,6 +112,8 @@ def test_modeling(
     attnres_block_size: int | None,
     dtype: torch.dtype,
 ):
+    if self_decoder_attn_type == 'swa' and not HAS_FLASH_ATTN:
+        pytest.skip(reason="YOCO swa attention requires flash-attn (`pip install flash-attn --no-build-isolation`).")
     torch.manual_seed(42)
     run_test_model_forward_backward(
         L,
@@ -150,6 +158,8 @@ def test_generation(
     dtype: torch.dtype,
     tol: float,
 ):
+    if self_decoder_attn_type == 'swa' and not HAS_FLASH_ATTN:
+        pytest.skip(reason="YOCO swa attention requires flash-attn (`pip install flash-attn --no-build-isolation`).")
     config = _create_yoco_config(
         L,
         H,
