@@ -11,10 +11,9 @@ from __future__ import annotations
 
 import torch
 
-from fla.ops.common.backends.triton_ascend.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd_npu
-from fla.ops.gated_delta_rule.backends.triton_ascend.wy_fast import recompute_w_u_fwd_npu
-from fla.ops.utils import prepare_chunk_indices
-from fla.ops.utils.backends.triton_ascend.solve_tril import solve_tril_npu
+from fla.ops.common.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
+from fla.ops.gated_delta_rule.wy_fast import recompute_w_u_fwd
+from fla.ops.utils import prepare_chunk_indices, solve_tril
 from fla.utils import input_guard
 
 
@@ -35,8 +34,8 @@ def chunk_gated_delta_rule_fwd_intra_npu(
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
 
-    # NPU always uses the unfused kkt + solve_tril path (avoids fused kernel UB pressure).
-    A = chunk_scaled_dot_kkt_fwd_npu(
+    # Unfused kkt + solve_tril path to stay within UB budget.
+    A = chunk_scaled_dot_kkt_fwd(
         k=k,
         g=g,
         beta=beta,
@@ -45,13 +44,13 @@ def chunk_gated_delta_rule_fwd_intra_npu(
         chunk_size=BT,
         output_dtype=torch.float32,
     )
-    A = solve_tril_npu(
+    A = solve_tril(
         A=A,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         output_dtype=k.dtype,
     )
-    w, u = recompute_w_u_fwd_npu(
+    w, u = recompute_w_u_fwd(
         k=k,
         v=v,
         beta=beta,

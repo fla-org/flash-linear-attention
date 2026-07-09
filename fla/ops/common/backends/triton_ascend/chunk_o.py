@@ -188,11 +188,7 @@ def chunk_fwd_kernel_o_fused_hv1_npu(
     NT_OFFSET: tl.constexpr,
     BH_OFFSET: tl.constexpr,
 ):
-    """GPU-aligned fused inter+intra path for HV==1.
-
-    BC-split intra miscompiles tl.dot([BC,BC],[BC,BV]) on Ascend when HV==1.
-    Use full-BT tiles like the CUDA kernel instead.
-    """
+    """Full-BT fused inter+intra path for HV==1."""
     i_v = tl.program_id(0) + V_OFFSET
     i_t = tl.program_id(1) + NT_OFFSET
     i_bh = tl.program_id(2) + BH_OFFSET
@@ -285,7 +281,7 @@ def chunk_fwd_kernel_o_intra_hv1_npu(
     NT_OFFSET: tl.constexpr,
     BH_OFFSET: tl.constexpr,
 ):
-    """Full-BT intra path for HV==1 (avoids BC-split tl.dot bug)."""
+    """Full-BT intra path for HV==1."""
     i_v = tl.program_id(0) + V_OFFSET
     i_t = tl.program_id(1) + NT_OFFSET
     i_bh = tl.program_id(2) + BH_OFFSET
@@ -485,7 +481,7 @@ def chunk_fwd_o_npu(
         'BH_OFFSET': 0,
     }
     nv = triton.cdiv(V, BV)
-    # NPU compiler miscompiles USE_G=False intra path; exp2(0)=1 gate is identity.
+    # Identity gate (exp2(0)=1) when g is disabled.
     if not use_g and not use_g_gamma:
         g_arg = torch.zeros(B, T, HV, dtype=torch.float32, device=q.device)
         use_g = True
@@ -621,7 +617,7 @@ def chunk_bwd_kernel_dv_local_hv1_npu(
     NT_OFFSET: tl.constexpr,
     BH_OFFSET: tl.constexpr,
 ):
-    """GPU-aligned bwd_dv_local for HV==1 (avoids BC-split tl.dot bug)."""
+    """Full-BT bwd_dv_local path for HV==1."""
     i_t = tl.program_id(0) + NT_OFFSET
     i_bh = tl.program_id(1) + BH_OFFSET
     i_b, i_h = i_bh // HV, i_bh % HV
@@ -1014,7 +1010,7 @@ def chunk_bwd_kernel_dg_npu(
     NT_OFFSET: tl.constexpr,
     BH_OFFSET: tl.constexpr,
 ):
-    """GPU-aligned dg kernel: b_dg_last + sum(dq*q) - sum(dk*k) from fp32 scratch."""
+    """dg kernel: b_dg_last + sum(dq*q) - sum(dk*k) from fp32 scratch."""
     i_k = tl.program_id(0) + K_OFFSET
     i_t = tl.program_id(1) + NT_OFFSET
     i_bh = tl.program_id(2) + BH_OFFSET

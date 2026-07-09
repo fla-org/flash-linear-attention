@@ -23,6 +23,13 @@ class TritonAscendCommonBackend(BaseBackend):
         from fla.utils import IS_NPU
         return IS_NPU
 
+    def chunk_scaled_dot_kkt_fwd_verifier(self, *args, **kwargs):
+        return True, None
+
+    def chunk_scaled_dot_kkt_fwd(self, *args, **kwargs):
+        from fla.ops.common.backends.triton_ascend.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd_npu
+        return chunk_scaled_dot_kkt_fwd_npu(*args, **kwargs)
+
     def chunk_gated_delta_rule_fwd_h_verifier(self, *args, **kwargs):
         return True, None
 
