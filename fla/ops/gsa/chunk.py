@@ -1,8 +1,9 @@
-# -*- coding: utf-8 -*-
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
-
-import warnings
-from typing import Optional, Tuple
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 import triton
@@ -12,14 +13,15 @@ from einops import reduce
 from fla.ops.common.chunk_h import chunk_bwd_dh, chunk_fwd_h
 from fla.ops.gla.chunk import chunk_gla_bwd, chunk_gla_fwd
 from fla.ops.utils import prepare_chunk_indices
+from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.cumsum import chunk_local_cumsum
-from fla.ops.utils.op import exp
+from fla.ops.utils.op import exp2
 from fla.ops.utils.softmax import softmax_bwd, softmax_fwd
-from fla.utils import input_guard
+from fla.utils import autotune_cache_kwargs, input_guard
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -29,7 +31,8 @@ from fla.utils import input_guard
         for num_warps in [2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
-    key=['BT']
+    key=['BT'],
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_gsa_fwd_k_kernel_inter(
@@ -93,7 +96,7 @@ def chunk_gsa_fwd_k_kernel_inter(
     p_A = tl.make_block_ptr(A + (bos * HQ + i_hq) * BT, (T, BT), (HQ*BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
     # [BT, BV]
     b_g = tl.load(p_g, boundary_check=(0, 1))
-    b_o = b_o * exp(b_g)
+    b_o = b_o * exp2(b_g)
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
 
     # [BT, BT]
@@ -103,7 +106,7 @@ def chunk_gsa_fwd_k_kernel_inter(
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.jit(do_not_specialize=['T'])
 def chunk_gsa_fwd_k_kernel_intra(
@@ -135,6 +138,7 @@ def chunk_gsa_fwd_k_kernel_intra(
     else:
         bos, eos = i_b * T, i_b * T + T
 
+    o_i = tl.arange(0, BC)
     o_v = i_v * BV + tl.arange(0, BV)
     m_v = o_v < V
 
@@ -154,15 +158,14 @@ def chunk_gsa_fwd_k_kernel_intra(
         # [BC, BV]
         b_v = tl.load(p_v, boundary_check=(0, 1))
         b_gv = tl.load(p_gv, boundary_check=(0, 1))
-        b_vg = (b_v * exp(b_gn[None, :] - b_gv)).to(b_v.dtype)
+        b_vg = (b_v * exp2(b_gn[None, :] - b_gv)).to(b_v.dtype)
         # [BC, BC]
         b_A = tl.load(p_A, boundary_check=(0, 1))
         b_o += tl.dot(b_A, b_vg)
     # [BC, BV]
     b_g = tl.load(p_g, boundary_check=(0, 1))
-    b_o *= exp(b_g - b_gn[None, :])
+    b_o *= exp2(b_g - b_gn[None, :])
 
-    o_i = tl.arange(0, BC)
     o_A = (bos + i_t * BT + i_i * BC + tl.arange(0, BC)) * HQ*BT + i_hq * BT + i_i * BC
     m_A = (i_t * BT + i_i * BC + tl.arange(0, BC)) < T
     for j in range(0, min(BC, T - i_t * BT - i_i * BC)):
@@ -174,7 +177,7 @@ def chunk_gsa_fwd_k_kernel_intra(
         b_v = tl.load(p_v, mask=m_v, other=0).to(tl.float32)
         b_gv = tl.load(p_gv, mask=m_v, other=0).to(tl.float32)
         # [BC, BV]
-        b_vg = b_v[None, :] * exp(b_g - b_gv[None, :])
+        b_vg = b_v[None, :] * exp2(b_g - b_gv[None, :])
         # avoid 0 * inf = inf
         b_o += tl.where(o_i[:, None] >= j, b_A[:, None] * b_vg, 0.)
     p_o = tl.make_block_ptr(o + (bos*HQ + i_hq) * V, (T, V), (HQ*V, 1), (i_t * BT + i_i * BC, i_v * BV), (BC, BV), (1, 0))
@@ -183,14 +186,15 @@ def chunk_gsa_fwd_k_kernel_intra(
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps)
         for num_warps in [2, 4, 8]
     ],
-    key=["BT"]
+    key=['BT'],
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_gsa_bwd_k_kernel_dA(
@@ -247,13 +251,13 @@ def chunk_gsa_bwd_k_kernel_dA(
         # [BC, BV]
         b_g = tl.load(p_g, boundary_check=(0, 1))
         b_do = tl.load(p_do, boundary_check=(0, 1))
-        b_do = (b_do * exp(b_g - b_gn[None, :]) * scale).to(b_do.dtype)
+        b_do = (b_do * exp2(b_g - b_gn[None, :])).to(b_do.dtype)
         # [BV, BC]
         b_v = tl.load(p_v, boundary_check=(0, 1))
         b_gv = tl.load(p_gv, boundary_check=(0, 1))
-        b_vg = (b_v * exp(b_gn[:, None] - b_gv)).to(b_v.dtype)
+        b_vg = (b_v * exp2(b_gn[:, None] - b_gv)).to(b_v.dtype)
         # [BC, BC]
-        b_dA = tl.dot(b_do, b_vg)
+        b_dA = tl.dot(b_do, b_vg) * scale
     elif i_i == i_j:
         p_g = tl.make_block_ptr(g + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t*BT + i_i*BC, i_v*BV), (BC, BV), (1, 0))
         p_do = tl.make_block_ptr(do + (bos*HQ + i_hq) * V, (T, V), (HQ*V, 1), (i_t*BT + i_i*BC, i_v*BV), (BC, BV), (1, 0))
@@ -272,7 +276,7 @@ def chunk_gsa_bwd_k_kernel_dA(
             b_v = tl.load(p_v, mask=m_v, other=0).to(tl.float32)
             b_gv = tl.load(p_gv, mask=m_v, other=0).to(tl.float32)
             # [BC,]
-            b_dAj = tl.sum(b_do * b_v[None, :] * exp(b_g - b_gv[None, :]), 1)
+            b_dAj = tl.sum(b_do * b_v[None, :] * exp2(b_g - b_gv[None, :]), 1)
             b_dA = tl.where((o_i == j)[None, :], b_dAj[:, None], b_dA)
 
             p_v += H*V
@@ -282,7 +286,7 @@ def chunk_gsa_bwd_k_kernel_dA(
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -290,7 +294,8 @@ def chunk_gsa_bwd_k_kernel_dA(
         for num_warps in [2, 4]
         for num_stages in [2, 3, 4]
     ],
-    key=['BT']
+    key=['BT'],
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_gsa_bwd_k_kernel_dqkvg(
@@ -375,20 +380,20 @@ def chunk_gsa_bwd_k_kernel_dqkvg(
         # [BT, BV]
         b_v = tl.load(p_v, boundary_check=(0, 1))
         b_g = tl.load(p_g, boundary_check=(0, 1))
-        b_gv = exp(b_gn[None, :] - b_g)
+        b_gv = exp2(b_gn[None, :] - b_g)
         # [BV, BK]
         b_h = tl.load(p_h, boundary_check=(0, 1))
         # [BT, BV]
         b_do = tl.load(p_do, boundary_check=(0, 1))
-        b_do = (b_do * exp(b_g) * scale).to(b_do.dtype)
+        b_do = (b_do * exp2(b_g)).to(b_do.dtype)
         # [BK, BV]
         b_dh = tl.load(p_dh, boundary_check=(0, 1))
         # [BV]
-        b_dg = tl.sum(tl.trans(b_h) * b_dh, 0) * exp(b_gn)
+        b_dg = tl.sum(tl.trans(b_h) * b_dh, 0) * exp2(b_gn)
 
         b_dh = b_dh.to(b_k.dtype)
         # [BT, BK]
-        b_dq += tl.dot(b_do, b_h.to(b_k.dtype))
+        b_dq += tl.dot(b_do, b_h.to(b_k.dtype)) * scale
         b_dk += tl.dot((b_v * b_gv).to(b_v.dtype), tl.trans(b_dh))
         # [BT, BV]
         b_dv = tl.dot(b_k, b_dh) * b_gv
@@ -416,7 +421,7 @@ def chunk_gsa_bwd_k_kernel_dqkvg(
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.jit(do_not_specialize=['T'])
 def chunk_gsa_bwd_k_kernel_intra_dvg(
@@ -451,6 +456,7 @@ def chunk_gsa_bwd_k_kernel_intra_dvg(
     else:
         bos, eos = i_b * T, i_b * T + T
 
+    o_i = tl.arange(0, BC)
     o_v = i_v * BV + tl.arange(0, BV)
     m_v = o_v < V
 
@@ -468,20 +474,19 @@ def chunk_gsa_bwd_k_kernel_intra_dvg(
         p_g = tl.make_block_ptr(g + (bos*H+i_h) * V, (T, V), (H*V, 1), (i_t * BT + i_j * BC, i_v * BV), (BC, BV), (1, 0))
         p_A = tl.make_block_ptr(A + (bos*HQ+i_hq) * BT, (BT, T), (1, HQ*BT), (i_i*BC, i_t*BT + i_j*BC), (BC, BC), (0, 1))
         p_do = tl.make_block_ptr(do + (bos*HQ+i_hq) * V, (T, V), (HQ*V, 1), (i_t*BT + i_j*BC, i_v*BV), (BC, BV), (1, 0))
+
+        m_j = (i_t * BT + i_j * BC + o_i) < T
         # [BC, BV]
         b_g = tl.load(p_g, boundary_check=(0, 1))
-        b_do = tl.load(p_do, boundary_check=(0, 1)) * exp(b_g - b_gn[None, :])
+        b_do = tl.load(p_do, boundary_check=(0, 1)) * tl.where(m_j[:, None], exp2(b_g - b_gn[None, :]), 0)
         # [BC, BC]
         b_A = tl.load(p_A, boundary_check=(0, 1))
         # [BC, BV]
         b_dv += tl.dot(b_A, b_do.to(b_A.dtype))
-    b_dv *= exp(b_gn[None, :] - b_gv)
-
-    o_i = tl.arange(0, BC)
-    o_c = i_i * BC + tl.arange(0, BC)
+    b_dv *= exp2(b_gn[None, :] - b_gv)
 
     p_g = g + (bos + i_t * BT + i_i * BC) * H*V + i_h * V + o_v
-    p_A = A + (bos + i_t*BT + i_i*BC) * HQ*BT + i_hq * BT + o_c
+    p_A = A + (bos + i_t*BT + i_i*BC) * HQ*BT + i_hq * BT + i_i * BC + o_i
     p_do = do + (bos + i_t*BT + i_i*BC) * HQ*V + i_hq * V + o_v
     for j in range(0, min(BC, T - i_t * BT - i_i * BC)):
         # [BC,]
@@ -491,7 +496,7 @@ def chunk_gsa_bwd_k_kernel_intra_dvg(
         b_do = tl.load(p_do, mask=m_v, other=0)
         # [BC, BV]
         m_i = o_i[:, None] <= j
-        b_dv += tl.where(m_i, exp(b_g[None, :] - b_gv) * b_A[:, None] * b_do[None, :], 0.)
+        b_dv += tl.where(m_i, exp2(b_g[None, :] - b_gv) * b_A[:, None] * b_do[None, :], 0.)
 
         p_g += H * V
         p_A += HQ * BT
@@ -517,11 +522,12 @@ def chunk_gsa_fwd_v(
     v: torch.Tensor,
     g: torch.Tensor,
     scale: float = 1.,
-    initial_state: Optional[torch.Tensor] = None,
+    initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    chunk_size: int = 64
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_size: int = 64,
+    chunk_indices: torch.LongTensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     _, A, h, ht, o = chunk_gla_fwd(
         q=q,
         k=k,
@@ -532,7 +538,8 @@ def chunk_gsa_fwd_v(
         initial_state=initial_state,
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
-        chunk_size=chunk_size
+        chunk_size=chunk_size,
+        chunk_indices=chunk_indices,
     )
     return A, h, ht, o
 
@@ -542,19 +549,24 @@ def chunk_gsa_fwd_k(
     k: torch.Tensor,
     v: torch.Tensor,
     g: torch.Tensor,
-    h0: Optional[torch.Tensor] = None,
+    h0: torch.Tensor | None = None,
     output_final_state: bool = False,
     scale: float = 1.,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    chunk_size: int = 64
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_size: int = 64,
+    chunk_indices: torch.LongTensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
-    BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
+    BT = chunk_size
     BC = min(16, BT)
     BV = min(64, triton.next_power_of_2(V))
     HQ = q.shape[2]
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None:
+        if cu_seqlens is not None:
+            chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
+        else:
+            chunk_indices = None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     NC = triton.cdiv(BT, BC)
     NG = HQ // H
@@ -569,7 +581,7 @@ def chunk_gsa_fwd_k(
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
         chunk_size=BT,
-        states_in_fp32=False
+        states_in_fp32=False,
     )
     o = v.new_empty(B, T, HQ, V)
     A = q.new_empty(B, T, HQ, BT)
@@ -611,7 +623,7 @@ def chunk_gsa_fwd_k(
         NC=NC,
         NG=NG,
         num_warps=4,
-        num_stages=2
+        num_stages=2,
     )
     return A, h, ht, o
 
@@ -628,8 +640,9 @@ def chunk_gsa_bwd_v(
     dht: torch.Tensor,
     dg: torch.Tensor,
     scale: float = 1.,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    chunk_size: int = 64
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_size: int = 64,
+    chunk_indices: torch.LongTensor | None = None,
 ):
     dq, dk, dv, dg, dh0 = chunk_gla_bwd(
         q=q,
@@ -644,7 +657,8 @@ def chunk_gsa_bwd_v(
         do=do,
         dht=dht,
         cu_seqlens=cu_seqlens,
-        chunk_size=chunk_size
+        chunk_size=chunk_size,
+        chunk_indices=chunk_indices,
     )
     return dq, dk, dv, dg, dh0
 
@@ -661,17 +675,22 @@ def chunk_gsa_bwd_k(
     dht: torch.Tensor,
     dg: torch.Tensor,
     scale: float = 1.,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    chunk_size: int = 64
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_size: int = 64,
+    chunk_indices: torch.LongTensor | None = None,
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
-    BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
+    BT = chunk_size
     BC = min(16, BT)
     BK = min(64, triton.next_power_of_2(K))
     BV = min(64, triton.next_power_of_2(V))
     HQ = q.shape[2]
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None:
+        if cu_seqlens is not None:
+            chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
+        else:
+            chunk_indices = None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     NC = triton.cdiv(BT, BC)
     NK = triton.cdiv(K, BK)
@@ -689,7 +708,7 @@ def chunk_gsa_bwd_k(
             output_final_state=False,
             cu_seqlens=cu_seqlens,
             chunk_size=BT,
-            states_in_fp32=False
+            states_in_fp32=False,
         )
     dh, dh0 = chunk_bwd_dh(
         q=q,
@@ -704,7 +723,7 @@ def chunk_gsa_bwd_k(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_size=BT,
-        states_in_fp32=True
+        states_in_fp32=True,
     )
     dA = q.new_empty(NV, B, T, HQ, BT)
     grid = (NV, NT * NC * NC, B * HQ)
@@ -789,9 +808,17 @@ def chunk_gsa_bwd_k(
         NC=NC,
         NG=NG,
         num_warps=4,
-        num_stages=2
+        num_stages=2,
     )
-    dg = dgv.add_(chunk_local_cumsum(dg, chunk_size=BT, reverse=True, cu_seqlens=cu_seqlens))
+    dg = dgv.add_(
+        chunk_local_cumsum(
+            dg,
+            chunk_size=BT,
+            reverse=True,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+        )
+    )
 
     return dq, dk, dv, dg, dh0
 
@@ -802,12 +829,13 @@ def chunk_gsa_fwd(
     v: torch.Tensor,
     s: torch.Tensor,
     g: torch.Tensor,
-    initial_state: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+    initial_state: tuple[torch.Tensor, torch.Tensor] | None = None,
     output_final_state: bool = False,
     scale: float = 1.,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    chunk_size: int = 64
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_size: int = 64,
+    chunk_indices: torch.LongTensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     hk0, hv0 = None, None
     if initial_state is not None:
         hk0, hv0 = initial_state
@@ -820,7 +848,8 @@ def chunk_gsa_fwd(
         output_final_state=output_final_state,
         scale=scale,
         cu_seqlens=cu_seqlens,
-        chunk_size=chunk_size
+        chunk_size=chunk_size,
+        chunk_indices=chunk_indices,
     )
 
     # p is kept in fp32 for safe softmax backward
@@ -836,7 +865,8 @@ def chunk_gsa_fwd(
         initial_state=hv0,
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
-        chunk_size=chunk_size
+        chunk_size=chunk_size,
+        chunk_indices=chunk_indices,
     )
     return Ak, hk, hkt, ok, p, Av, hv, hvt, ov
 
@@ -849,14 +879,15 @@ def chunk_gsa_bwd(
     g: torch.Tensor,
     ok: torch.Tensor,
     p: torch.Tensor,
-    A: Tuple[torch.Tensor, torch.Tensor],
-    h: Tuple[torch.Tensor, torch.Tensor],
-    initial_state: Optional[Tuple[torch.Tensor, torch.Tensor]],
+    A: tuple[torch.Tensor, torch.Tensor],
+    h: tuple[torch.Tensor, torch.Tensor],
+    initial_state: tuple[torch.Tensor, torch.Tensor] | None,
     scale: float,
     do: torch.Tensor,
-    dht: Tuple[torch.Tensor, torch.Tensor],
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    chunk_size: int = 64
+    dht: tuple[torch.Tensor, torch.Tensor],
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_size: int = 64,
+    chunk_indices: torch.LongTensor | None = None,
 ):
     hk0, hv0 = None, None
     if initial_state is not None:
@@ -880,7 +911,8 @@ def chunk_gsa_bwd(
         dg=None,
         scale=1.,
         cu_seqlens=cu_seqlens,
-        chunk_size=chunk_size
+        chunk_size=chunk_size,
+        chunk_indices=chunk_indices,
     )
 
     # softmax gradient, equivalent to:
@@ -900,7 +932,8 @@ def chunk_gsa_bwd(
         dg=dg,
         scale=scale,
         cu_seqlens=cu_seqlens,
-        chunk_size=chunk_size
+        chunk_size=chunk_size,
+        chunk_indices=chunk_indices,
     )
 
     ds = dsv.add_(dsk)
@@ -922,16 +955,35 @@ class ChunkGSAFunction(torch.autograd.Function):
         s: torch.Tensor,
         g: torch.Tensor,
         scale: float,
-        hk0: Optional[torch.Tensor],
-        hv0: Optional[torch.Tensor],
+        hk0: torch.Tensor | None,
+        hv0: torch.Tensor | None,
         output_final_state: bool,
         checkpoint_level: int,
-        cu_seqlens: Optional[torch.LongTensor],
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        T = q.shape[1]
-        chunk_size = min(64, max(16, triton.next_power_of_2(T)))
+        cu_seqlens: torch.LongTensor | None,
+        cu_seqlens_cpu: torch.LongTensor | None,
+        chunk_size: int | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if chunk_size is None:
+            chunk_size = 64
 
-        g_org, g = g, chunk_local_cumsum(g, chunk_size, cu_seqlens=cu_seqlens)
+        if cu_seqlens is not None:
+            chunk_indices = prepare_chunk_indices(
+                cu_seqlens,
+                chunk_size,
+                cu_seqlens_cpu=cu_seqlens_cpu,
+            )
+        else:
+            chunk_indices = None
+
+        # Pre-scale by RCP_LN2 so downstream kernels can use exp2 directly.
+        g_org = g
+        g = chunk_local_cumsum(
+            g,
+            chunk_size,
+            scale=RCP_LN2,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+        )
         Ak, hk, hkt, ok, p, Av, hv, hvt, ov = chunk_gsa_fwd(
             q=q,
             k=k,
@@ -942,7 +994,8 @@ class ChunkGSAFunction(torch.autograd.Function):
             output_final_state=output_final_state,
             scale=scale,
             cu_seqlens=cu_seqlens,
-            chunk_size=chunk_size
+            chunk_size=chunk_size,
+            chunk_indices=chunk_indices,
         )
 
         if checkpoint_level >= 1:
@@ -955,7 +1008,21 @@ class ChunkGSAFunction(torch.autograd.Function):
         else:
             hk0, hv0 = None, None
 
-        ctx.save_for_backward(q, k, v, s, g, ok, p, Av, hk0, hv0, hk, hv)
+        ctx.save_for_backward(
+            q,
+            k,
+            v,
+            s,
+            g,
+            ok,
+            p,
+            Av,
+            hk0,
+            hv0,
+            hk,
+            hv,
+            chunk_indices,
+        )
         ctx.checkpoint_level = checkpoint_level
         ctx.scale = scale
         ctx.cu_seqlens = cu_seqlens
@@ -965,13 +1032,33 @@ class ChunkGSAFunction(torch.autograd.Function):
     @staticmethod
     @input_guard
     def backward(ctx, dov, dhkt=None, dhvt=None):
-        q, k, v, s, g, ok, p, Av, hk0, hv0, hk, hv = ctx.saved_tensors
+        (
+            q,
+            k,
+            v,
+            s,
+            g,
+            ok,
+            p,
+            Av,
+            hk0,
+            hv0,
+            hk,
+            hv,
+            chunk_indices,
+        ) = ctx.saved_tensors
         scale = ctx.scale
         cu_seqlens = ctx.cu_seqlens
         chunk_size = ctx.chunk_size
 
         if ctx.checkpoint_level >= 1:
-            g = chunk_local_cumsum(g, chunk_size, cu_seqlens=cu_seqlens)
+            g = chunk_local_cumsum(
+                g,
+                chunk_size,
+                scale=RCP_LN2,
+                cu_seqlens=cu_seqlens,
+                chunk_indices=chunk_indices,
+            )
         dq, dk, dv, ds, dg, dhk0, dhv0 = chunk_gsa_bwd(
             q=q,
             k=k,
@@ -987,9 +1074,10 @@ class ChunkGSAFunction(torch.autograd.Function):
             do=dov,
             dht=(dhkt, dhvt),
             cu_seqlens=cu_seqlens,
-            chunk_size=chunk_size
+            chunk_size=chunk_size,
+            chunk_indices=chunk_indices,
         )
-        return dq, dk, dv, ds, dg, None, dhk0, dhv0, None, None, None, None
+        return dq, dk, dv, ds, dg, None, dhk0, dhv0, None, None, None, None, None
 
 
 @torch.compiler.disable
@@ -998,28 +1086,29 @@ def chunk_gsa(
     k: torch.Tensor,
     v: torch.Tensor,
     s: torch.Tensor,
-    g: Optional[torch.Tensor] = None,
-    scale: Optional[int] = None,
-    initial_state: Optional[Tuple[torch.Tensor]] = None,
-    output_final_state: Optional[bool] = False,
-    checkpoint_level: Optional[int] = 2,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    head_first: Optional[bool] = False
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    g: torch.Tensor | None = None,
+    scale: float | None = None,
+    initial_state: tuple[torch.Tensor] | None = None,
+    output_final_state: bool | None = False,
+    checkpoint_level: int | None = 2,
+    cu_seqlens: torch.LongTensor | None = None,
+    cu_seqlens_cpu: torch.LongTensor | None = None,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
         q (torch.Tensor):
-            queries of shape `[B, T, HQ, K]`..
+            queries of shape `[B, T, HQ, K]`.
         k (torch.Tensor):
             keys of shape `[B, T, H, K]`.
             GQA is performed if `H` is not equal to `HQ`.
         v (torch.Tensor):
             values of shape `[B, T, H, V]`.
         s (torch.Tensor):
-            slot representations of shape `[B, T, H, M]`..
-        g (torch.Tensor):
+            slot representations of shape `[B, T, H, M]`.
+        g (Optional[torch.Tensor]):
             Forget gates of shape `[B, T, H, M]` applied to keys.
-            If not provided, this function is equivalent to vanilla ABC.
+            If not provided, this function is equivalent to vanilla ABC. Default: `None`.
         scale (Optional[float]):
             Scale factor for attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
@@ -1031,17 +1120,16 @@ def chunk_gsa(
             Whether to output the final state tuple, having tensors of shape `[N, H, K, M]` and `[N, H, M, V]`.
             Default: `False`.
         checkpoint_level (Optional[int]):
-            Checkpointing level; higher values will save more memories and do more recomputations during backward.
-            Default: `2`:
+            Checkpointing level; higher values will save more memory and do more recomputations during backward.
+            Default: `2`.
             - Level `0`: no memory saved, no recomputation.
             - Level `1`: recompute the fp32 cumulative values during backward.
             - Level `2`: recompute the fp32 cumulative values and forward hidden states during backward.
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
-        head_first (Optional[bool]):
-            Whether the inputs are in the head-first format. Default: `False`.
-            This argument has been deprecated.
+        cu_seqlens_cpu (torch.LongTensor):
+            CPU copy of `cu_seqlens` to avoid unnecessary device synchronization. Default: `None`.
 
     Returns:
         o (torch.Tensor):
@@ -1082,28 +1170,23 @@ def chunk_gsa(
         >>> assert hk.allclose(hk_var)
         >>> assert hv.allclose(hv_var)
     """
-    if head_first:
+    if 'head_first' in kwargs:
         raise DeprecationWarning(
-            "head_first is deprecated and will be removed in a future version. "
-            "Please use head_first=False for now instead."
+            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
         )
-    if not head_first and q.shape[1] < q.shape[2]:
-        warnings.warn(
-            f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
-            "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
-            "when head_first=False was specified. "
-            "Please verify your input tensor format matches the expected shape [B, T, H, ...]."
-        )
+    chunk_size = kwargs.pop('chunk_size', None)
+    if chunk_size is not None and chunk_size != 2 ** (chunk_size.bit_length() - 1):
+        raise ValueError(f"`chunk_size` must be a power of 2, got {chunk_size}.")
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(
-                f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
-                f"Please flatten variable-length inputs before processing."
+                f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`. "
+                f"Please flatten variable-length inputs before processing.",
             )
         if initial_state is not None and initial_state[0].shape[0] != len(cu_seqlens) - 1:
             raise ValueError(
                 f"The number of initial states is expected to be equal to the number of input sequences, "
-                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state[0].shape[0]}."
+                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state[0].shape[0]}.",
             )
     assert checkpoint_level in [0, 1, 2]
     if g is None:
@@ -1128,6 +1211,8 @@ def chunk_gsa(
         hv0,
         output_final_state,
         checkpoint_level,
-        cu_seqlens
+        cu_seqlens,
+        cu_seqlens_cpu,
+        chunk_size,
     )
     return o, final_state

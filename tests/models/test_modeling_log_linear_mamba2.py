@@ -1,4 +1,9 @@
-# -*- coding: utf-8 -*-
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import os
 
@@ -13,15 +18,17 @@ from fla.utils import device
 # Test for Modeling (Forward/Backward Pass)
 # ===================================================================================
 @pytest.mark.parametrize(
-    ['L', 'B', 'T', 'H', 'D', 'dtype', 'conv_backend'],
+    ['L', 'B', 'T', 'H', 'D', 'attnres_block_size', 'dtype', 'conv_backend'],
     [
-        pytest.param(*test, id="L{}-B{}-T{}-H{}-D{}-{}-conv-{}".format(*test))
+        pytest.param(*test, id="L{}-B{}-T{}-H{}-D{}-bs{}-{}-conv-{}".format(*test))
         for test in [
-            (4, 4, 1024, 4, 64, torch.bfloat16, 'cuda'),
-            (4, 4, 1024, 4, 64, torch.bfloat16, 'triton'),
-            (4, 4, 1024, 4, 128, torch.bfloat16, 'cuda'),
+            (4, 4, 1024, 4, 64,  None, torch.bfloat16, 'cuda'),
+            (4, 4, 1024, 4, 64,  None, torch.bfloat16, 'triton'),
+            (4, 4, 1024, 4, 128, None, torch.bfloat16, 'cuda'),
+            (4, 4, 1024, 4, 64,  1,    torch.bfloat16, 'cuda'),
+            (4, 4, 1024, 4, 64,  4,    torch.bfloat16, 'cuda'),
         ]
-    ]
+    ],
 )
 def test_modeling(
     L: int,
@@ -29,6 +36,7 @@ def test_modeling(
     T: int,
     H: int,
     D: int,
+    attnres_block_size: int | None,
     dtype: torch.dtype,
     conv_backend: str,
 ):
@@ -50,6 +58,7 @@ def test_modeling(
         expand=expand,
         num_heads=H,
         head_dim=D,
+        attnres_block_size=attnres_block_size,
         vocab_size=1000,  # dummy vocab size
     )
 

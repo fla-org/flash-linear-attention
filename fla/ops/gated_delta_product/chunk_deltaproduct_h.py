@@ -1,17 +1,19 @@
-# -*- coding: utf-8 -*-
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
-
-from typing import Optional, Tuple
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
-from fla.ops.utils.op import exp
-from fla.utils import is_nvidia_hopper, use_cuda_graph
+from fla.ops.utils.op import exp2
+from fla.utils import IS_NVIDIA_HOPPER, autotune_cache_kwargs
 
-NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8, 16]
+NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8, 16]
 
 
 @triton.heuristics({
@@ -29,7 +31,7 @@ NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8, 16]
         for BV in [32, 64]
     ],
     key=['H', 'K', 'V', 'BT', 'USE_G'],
-    use_cuda_graph=use_cuda_graph,
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_gated_delta_product_fwd_kernel_h_blockdim64(
@@ -153,8 +155,8 @@ def chunk_gated_delta_product_fwd_kernel_h_blockdim64(
             b_g_last = tl.load(g + bos * H + last_idx * H + i_h)
             p_g = tl.make_block_ptr(g + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
             b_g = tl.load(p_g, boundary_check=(0,))
-            b_v_new = b_v_new * tl.where(m_t, exp(b_g_last - b_g), 0)[:, None]
-            b_g_last = exp(b_g_last)
+            b_v_new = b_v_new * tl.where(m_t, exp2(b_g_last - b_g), 0)[:, None]
+            b_g_last = exp2(b_g_last)
             b_h1 = b_h1 * b_g_last
             if K > 64:
                 b_h2 = b_h2 * b_g_last
@@ -207,7 +209,7 @@ def chunk_gated_delta_product_fwd_kernel_h_blockdim64(
         for BV in [64, 32]
     ],
     key=['H', 'K', 'V', 'BT', 'BV', 'USE_G'],
-    use_cuda_graph=use_cuda_graph,
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_gated_delta_product_bwd_kernel_dhu_blockdim64(
@@ -233,7 +235,7 @@ def chunk_gated_delta_product_bwd_kernel_dhu_blockdim64(
     USE_G: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     USE_FINAL_STATE_GRADIENT: tl.constexpr,
-    IS_VARLEN: tl.constexpr
+    IS_VARLEN: tl.constexpr,
 ):
     i_v, i_nh = tl.program_id(0), tl.program_id(1)
     i_n, i_h = i_nh // H, i_nh % H
@@ -301,10 +303,10 @@ def chunk_gated_delta_product_bwd_kernel_dhu_blockdim64(
         if USE_G:
             last_idx = min((i_t + 1) * BT, T) - 1
             bg_last = tl.load(g + (bos + last_idx) * H + i_h)
-            bg_last_exp = exp(bg_last)
+            bg_last_exp = exp2(bg_last)
             p_g = tl.make_block_ptr(g + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
             b_g = tl.load(p_g, boundary_check=(0,))
-            b_g_exp = exp(b_g)
+            b_g_exp = exp2(b_g)
         else:
             bg_last = None
             last_idx = None
@@ -340,7 +342,7 @@ def chunk_gated_delta_product_bwd_kernel_dhu_blockdim64(
 
         if USE_G:
             m_t = (i_t * BT + tl.arange(0, BT)) < T
-            b_dv *= tl.where(m_t, exp(bg_last - b_g), 0)[:, None]
+            b_dv *= tl.where(m_t, exp2(bg_last - b_g), 0)[:, None]
         b_dv += tl.load(p_dv, boundary_check=(0, 1))
 
         tl.store(p_dv2, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
@@ -403,19 +405,21 @@ def chunk_gated_delta_product_fwd_h(
     k: torch.Tensor,
     w: torch.Tensor,
     u: torch.Tensor,
-    g: Optional[torch.Tensor] = None,
-    initial_state: Optional[torch.Tensor] = None,
+    g: torch.Tensor | None = None,
+    initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
     chunk_size: int = 64,  # SY: remove this argument and force chunk size 64?
     save_new_value: bool = True,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens: torch.LongTensor | None = None,
     num_householder: int = 1,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    chunk_indices: torch.LongTensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, u.shape[-1]
     assert T % num_householder == 0, "T must be divisible by num_householder"
     T_true = T // num_householder
     BT = chunk_size
-    chunk_indices = prepare_chunk_indices(cu_seqlens // num_householder, chunk_size) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens // num_householder, chunk_size)
     # N: the actual number of sequences in the batch with either equal or variable lengths
     if cu_seqlens is None:
         N, NT, chunk_offsets = B, triton.cdiv(T_true, BT), None
@@ -444,7 +448,7 @@ def chunk_gated_delta_product_fwd_h(
         H=H,
         K=K,
         V=V,
-        BT=BT
+        BT=BT,
     )
     return h, v_new, final_state
 
@@ -455,20 +459,22 @@ def chunk_gated_delta_product_bwd_dhu(
     w: torch.Tensor,
     g: torch.Tensor,
     h0: torch.Tensor,
-    dht: Optional[torch.Tensor],
+    dht: torch.Tensor | None,
     do: torch.Tensor,
     dv: torch.Tensor,
     scale: float,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,  # SY: remove this argument and force chunk size 64?
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    chunk_indices: torch.LongTensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *q.shape, do.shape[-1]
 
     # N: the actual number of sequences in the batch with either equal or variable lengths
     BT = 64
     assert K <= 256, "current kernel does not support head dimension being larger than 256."
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
     if cu_seqlens is None:
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
     else:

@@ -1,6 +1,9 @@
-# -*- coding: utf-8 -*-
-
-from typing import Optional
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import pytest
 import torch
@@ -86,9 +89,9 @@ def recurrence_iplr_delta_rule_ref(
     v,
     a,
     b,
-    initial_state: Optional[torch.Tensor] = None,
+    initial_state: torch.Tensor | None = None,
     output_final_state: bool = True,
-    scale: Optional[float] = None
+    scale: float | None = None,
 ):
     orig_dtype = q.dtype
     if scale is None:
@@ -127,7 +130,7 @@ def recurrence_iplr_delta_rule_ref(
             (2, 1024, 8, 128, 0.1, torch.float),
             (4, 2048, 8, 64, 0.1, torch.float),
         ]
-    ]
+    ],
 )
 def test_fused_recurrent(
     B: int,
@@ -192,9 +195,9 @@ def test_fused_recurrent(
             (2, 1000, 3, 64, 0.1, torch.float16),
             (2, 1024, 4, 100, 1, torch.float16),
             (3, 1024, 4, 128, 0.1, torch.float16),
-            (4, 2048, 8, 64, 0.1, torch.float16)
+            (4, 2048, 8, 64, 0.1, torch.float16),
         ]
-    ]
+    ],
 )
 def test_chunk(
     B: int,
@@ -235,3 +238,56 @@ def test_chunk(
     )
     assert_close('o', ref, tri, 0.007)
     assert_close('ht', ref_ht, tri_ht, 0.008)
+
+
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'D', 'scale', 'dtype', 'chunk_size'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-scale{}-{}-chunk{}".format(*test))
+        for chunk_size in [16, 32, 64]
+        for test in [
+            (1, 64, 2, 32, 0.1, torch.float32, chunk_size),
+        ]
+    ],
+)
+def test_chunk_with_chunk_size(
+    B: int,
+    T: int,
+    H: int,
+    D: int,
+    scale: float,
+    dtype: torch.dtype,
+    chunk_size: int,
+):
+    torch.manual_seed(42)
+    q = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    k = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    v = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    a = F.normalize(torch.rand(B, T, H, D, dtype=dtype, device=device), p=2, dim=-1)
+    b = -a
+    h0 = torch.zeros(B, H, D, D, dtype=torch.float32, device=device)
+
+    ref, ref_ht = recurrence_iplr_delta_rule_ref(
+        q=q,
+        k=k,
+        v=v,
+        a=a,
+        b=b,
+        scale=scale,
+        initial_state=h0,
+        output_final_state=True,
+    )
+    tri, tri_ht = chunk_iplr_delta_rule(
+        q=q,
+        k=k,
+        v=v,
+        a=a,
+        b=b,
+        scale=scale,
+        initial_state=h0,
+        output_final_state=True,
+        chunk_size=chunk_size,
+    )
+
+    assert_close(f'o@{chunk_size}', ref, tri, 0.005)
+    assert_close(f'ht@{chunk_size}', ref_ht, tri_ht, 0.005)

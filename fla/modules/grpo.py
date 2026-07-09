@@ -1,4 +1,10 @@
-# -*- coding: utf-8 -*-
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
 # modified from https://github.com/mdy666/mdy_triton/blob/e0a856347bd988e05e0152332bba35f1d33c5b1f/others/grpo/grpo_loss.ipynb
 # XHS ID: blueeeee
 
@@ -54,10 +60,11 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.modules.backends import dispatch
 from fla.ops.utils.op import exp, log
-from fla.utils import input_guard, is_amd
+from fla.utils import IS_AMD, autotune_cache_kwargs, input_guard
 
-NUM_WARPS_AUTOTUNE = [4, 8, 16] if is_amd else [4, 8, 16, 32]
+NUM_WARPS_AUTOTUNE = [4, 8, 16] if IS_AMD else [4, 8, 16, 32]
 
 
 @triton.autotune(
@@ -67,7 +74,8 @@ NUM_WARPS_AUTOTUNE = [4, 8, 16] if is_amd else [4, 8, 16, 32]
         for NUM_WARPS in NUM_WARPS_AUTOTUNE
         for NUM_STAGES in [1, 2, 4]
     ],
-    key=['B', 'N']
+    key=['B', 'N'],
+    **autotune_cache_kwargs,
 )
 @triton.jit
 def grpo_fwd_kernel(
@@ -85,7 +93,7 @@ def grpo_fwd_kernel(
     N,
     L,
     start_idx,
-    BLOCK_SIZE: tl.constexpr
+    BLOCK_SIZE: tl.constexpr,
 ):
     row_idx = tl.program_id(0)
 
@@ -142,7 +150,8 @@ def grpo_fwd_kernel(
         for NUM_WARPS in [32]
         for NUM_STAGES in [4]
     ],
-    key=['B', 'N']
+    key=['B', 'N'],
+    **autotune_cache_kwargs,
 )
 @triton.jit
 def grpo_bwd_kernel(
@@ -159,7 +168,7 @@ def grpo_bwd_kernel(
     N,
     L,
     start_idx,
-    BLOCK_SIZE: tl.constexpr
+    BLOCK_SIZE: tl.constexpr,
 ):
 
     row_idx = tl.program_id(0)  # B*L
@@ -287,6 +296,7 @@ class GrpoLoss(torch.autograd.Function):
         return dlogits.view(*ctx.input_shape), None, None, None, None, None, None, None
 
 
+@dispatch('modules')
 def fused_grpo_loss(logits, ref_logp, input_ids, advantages,
                     beta=0.1, completion_mask=None, save_kl=False, inplace=False) -> torch.Tensor:
     '''
@@ -326,7 +336,7 @@ def fused_grpo_loss(logits, ref_logp, input_ids, advantages,
 def grpo_loss_torch(logits, ref_logp, input_ids, advantages, beta=0.1, completion_mask=None, save_kl=False):
     def get_log_probs(logits, input_ids):
         per_token_logps = []
-        for logits_row, input_ids_row in zip(logits, input_ids[:, -logits.size(1):]):
+        for logits_row, input_ids_row in zip(logits, input_ids[:, -logits.size(1):], strict=False):
             log_probs = logits_row.log_softmax(dim=-1)
             token_log_prob = torch.gather(log_probs, dim=1, index=input_ids_row.unsqueeze(1)).squeeze(1)
             per_token_logps.append(token_log_prob)
@@ -355,7 +365,7 @@ def grpo_loss_with_old_logps(
     logits_to_keep: int,
     rewards: torch.Tensor,
     beta: float = 0.2,
-    epsilon: float = 0.2
+    epsilon: float = 0.2,
 ):
     """
     Compute the GRPO (Group Relative Policy Optimization) loss.

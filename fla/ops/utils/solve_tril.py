@@ -1,8 +1,11 @@
-# -*- coding: utf-8 -*-
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import os
-from typing import Optional
 
 import torch
 import triton
@@ -10,24 +13,25 @@ import triton.language as tl
 
 from fla.ops.utils.index import prepare_chunk_indices
 from fla.ops.utils.op import make_tensor_descriptor
-from fla.utils import input_guard, is_amd, is_tma_supported
+from fla.utils import IS_TMA_SUPPORTED, autotune_cache_kwargs, input_guard
 
 FLA_TRIL_PRECISION = os.environ.get('FLA_TRIL_PRECISION', 'ieee')
-ALLOWED_TRIL_PRECISIONS = ['ieee', 'tf32'] if is_amd else ['ieee', 'tf32', 'tf32x3']
-assert FLA_TRIL_PRECISION in ALLOWED_TRIL_PRECISIONS, \
-    f'FLA_TRIL_PRECISION must be one of {ALLOWED_TRIL_PRECISIONS}, but got {FLA_TRIL_PRECISION}'
+assert FLA_TRIL_PRECISION in ['ieee', 'tf32', 'tf32x3'], \
+    f"FLA_TRIL_PRECISION must be one of 'ieee', 'tf32', or 'tf32x3', but got {FLA_TRIL_PRECISION}"
+DOT_PRECISION_AUTOTUNE_LIST = ["ieee"] if not IS_TMA_SUPPORTED else list({"ieee", FLA_TRIL_PRECISION})
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
-        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        triton.Config({'DOT_PRECISION': 'ieee'}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [1, 2, 4, 8]
         for num_stages in [2, 3, 4, 5]
     ],
     key=['BT'],
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def solve_tril_16x16_kernel(
@@ -40,9 +44,9 @@ def solve_tril_16x16_kernel(
     BT: tl.constexpr,
     USE_TMA: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    DOT_PRECISION: tl.constexpr
+    DOT_PRECISION: tl.constexpr,
 ):
-    i_t, i_bh = tl.program_id(0), tl.program_id(1)
+    i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
@@ -62,15 +66,18 @@ def solve_tril_16x16_kernel(
         p_A = tl.make_block_ptr(A, (T, BT), (H*BT, 1), (i_t * 16, offset), (16, 16), (1, 0))
         # [16, 16]
         b_A = tl.load(p_A, boundary_check=(0, 1)).to(tl.float32)
+        b_A = tl.where(m_A, b_A, 0)
     else:
         desc = make_tensor_descriptor(A, [T, BT], [H*BT, 1], [16, 16])
         desc_o = make_tensor_descriptor(Ai, [T, 16], [H*16, 1], [16, 16])
         b_A = desc.load([i_t * 16, offset]).to(tl.float32)
-    b_A = -tl.where(m_A, b_A, 0)
+        b_A = tl.where(m_A, b_A, 0)
+    b_A = -b_A
 
     for i in range(2, min(16, T - i_t * 16)):
         # [16]
         b_a = -tl.load(A + (i_t * 16 + i) * H*BT + o_i + offset)
+        b_a = tl.where(o_i < i, b_a, 0.)
         b_a = b_a + tl.sum(b_a[:, None] * b_A, 0)
         b_A = tl.where((o_i == i)[:, None], b_a, b_A)
     b_A += m_I
@@ -82,15 +89,17 @@ def solve_tril_16x16_kernel(
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
-        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        triton.Config({'DOT_PRECISION': DOT_PRECISION}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [1, 2, 4, 8]
         for num_stages in [2, 3, 4, 5]
+        for DOT_PRECISION in DOT_PRECISION_AUTOTUNE_LIST
     ],
     key=['H', 'BT', 'IS_VARLEN'],
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def merge_16x16_to_32x32_inverse_kernel(
@@ -103,9 +112,9 @@ def merge_16x16_to_32x32_inverse_kernel(
     BT: tl.constexpr,
     USE_TMA: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    DOT_PRECISION: tl.constexpr
+    DOT_PRECISION: tl.constexpr,
 ):
-    i_t, i_bh = tl.program_id(0), tl.program_id(1)
+    i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
@@ -169,15 +178,17 @@ def merge_16x16_to_32x32_inverse_kernel(
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
-        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        triton.Config({'DOT_PRECISION': DOT_PRECISION}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [2, 4, 8]
         for num_stages in [2, 3, 4, 5]
+        for DOT_PRECISION in DOT_PRECISION_AUTOTUNE_LIST
     ],
     key=['H', 'BT', 'IS_VARLEN'],
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def merge_16x16_to_64x64_inverse_kernel(
@@ -190,9 +201,9 @@ def merge_16x16_to_64x64_inverse_kernel(
     BT: tl.constexpr,
     USE_TMA: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    DOT_PRECISION: tl.constexpr
+    DOT_PRECISION: tl.constexpr,
 ):
-    i_t, i_bh = tl.program_id(0), tl.program_id(1)
+    i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
@@ -232,18 +243,22 @@ def merge_16x16_to_64x64_inverse_kernel(
 
     for i in range(2, min(16, T - i_t * BT)):
         b_a_11 = -tl.load(A + (i_t * BT + i) * H*BT + o_i)
+        b_a_11 = tl.where(o_i < i, b_a_11, 0.)
         b_a_11 += tl.sum(b_a_11[:, None] * b_Ai_11, 0)
         b_Ai_11 = tl.where((o_i == i)[:, None], b_a_11, b_Ai_11)
     for i in range(16 + 2, min(32, T - i_t * BT)):
         b_a_22 = -tl.load(A + (i_t * BT + i) * H*BT + o_i + 16)
+        b_a_22 = tl.where(o_i < i - 16, b_a_22, 0.)
         b_a_22 += tl.sum(b_a_22[:, None] * b_Ai_22, 0)
         b_Ai_22 = tl.where((o_i == i - 16)[:, None], b_a_22, b_Ai_22)
     for i in range(32 + 2, min(48, T - i_t * BT)):
         b_a_33 = -tl.load(A + (i_t * BT + i) * H*BT + o_i + 32)
+        b_a_33 = tl.where(o_i < i - 32, b_a_33, 0.)
         b_a_33 += tl.sum(b_a_33[:, None] * b_Ai_33, 0)
         b_Ai_33 = tl.where((o_i == i - 32)[:, None], b_a_33, b_Ai_33)
     for i in range(48 + 2, min(64, T - i_t * BT)):
         b_a_44 = -tl.load(A + (i_t * BT + i) * H*BT + o_i + 48)
+        b_a_44 = tl.where(o_i < i - 48, b_a_44, 0.)
         b_a_44 += tl.sum(b_a_44[:, None] * b_Ai_44, 0)
         b_Ai_44 = tl.where((o_i == i - 48)[:, None], b_a_44, b_Ai_44)
     b_Ai_11 += m_I
@@ -280,20 +295,20 @@ def merge_16x16_to_64x64_inverse_kernel(
         b_Ai_33,
         tl.dot(b_A_31, b_Ai_11, input_precision=DOT_PRECISION) +
         tl.dot(b_A_32, b_Ai_21, input_precision=DOT_PRECISION),
-        input_precision=DOT_PRECISION
+        input_precision=DOT_PRECISION,
     )
     b_Ai_42 = -tl.dot(
         b_Ai_44,
         tl.dot(b_A_42, b_Ai_22, input_precision=DOT_PRECISION) +
         tl.dot(b_A_43, b_Ai_32, input_precision=DOT_PRECISION),
-        input_precision=DOT_PRECISION
+        input_precision=DOT_PRECISION,
     )
     b_Ai_41 = -tl.dot(
         b_Ai_44,
         tl.dot(b_A_41, b_Ai_11, input_precision=DOT_PRECISION) +
         tl.dot(b_A_42, b_Ai_21, input_precision=DOT_PRECISION) +
         tl.dot(b_A_43, b_Ai_31, input_precision=DOT_PRECISION),
-        input_precision=DOT_PRECISION
+        input_precision=DOT_PRECISION,
     )
 
     if not USE_TMA:
@@ -333,8 +348,9 @@ def merge_16x16_to_64x64_inverse_kernel(
 @input_guard
 def solve_tril(
     A: torch.Tensor,
-    cu_seqlens: Optional[torch.Tensor] = None,
-    output_dtype: torch.dtype = torch.float
+    cu_seqlens: torch.Tensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
+    output_dtype: torch.dtype = torch.float,
 ) -> torch.Tensor:
     """
     Compute the inverse of the matrix I + A
@@ -356,7 +372,8 @@ def solve_tril(
     output_dtype = A.dtype if output_dtype is None else output_dtype
 
     B, T, H, BT = A.shape
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
 
     Ai = torch.zeros_like(A, dtype=output_dtype)
@@ -375,7 +392,6 @@ def solve_tril(
         T=T,
         H=H,
         BT=BT,
-        USE_TMA=is_tma_supported,
-        DOT_PRECISION=FLA_TRIL_PRECISION,
+        USE_TMA=IS_TMA_SUPPORTED,
     )
     return Ai

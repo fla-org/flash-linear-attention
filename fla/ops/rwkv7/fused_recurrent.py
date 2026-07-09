@@ -1,8 +1,9 @@
-# -*- coding: utf-8 -*-
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
-
-import warnings
-from typing import Optional, Tuple
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 import triton
@@ -10,13 +11,13 @@ import triton.language as tl
 
 from fla.ops.generalized_delta_rule import fused_recurrent_dplr_delta_rule
 from fla.ops.utils.op import exp
-from fla.utils import input_guard, use_cuda_graph
+from fla.utils import autotune_cache_kwargs, input_guard
 
 
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -26,7 +27,7 @@ from fla.utils import input_guard, use_cuda_graph
         for num_stages in [2, 3, 4]
     ],
     key=['BK'],
-    use_cuda_graph=use_cuda_graph,
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def fused_recurrent_rwkv7_fwd_kernel(
@@ -135,11 +136,11 @@ def fused_recurrent_rwkv7_fwd(
     v: torch.Tensor,
     kk: torch.Tensor,
     a: torch.Tensor,
-    scale: Optional[float] = 1.0,
-    initial_state: Optional[torch.Tensor] = None,
+    scale: float | None = 1.0,
+    initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
     reverse: bool = False,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens: torch.LongTensor | None = None,
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
@@ -173,7 +174,7 @@ def fused_recurrent_rwkv7_fwd(
         V=V,
         BK=BK,
         REVERSE=reverse,
-        IS_DECODE=IS_DECODE
+        IS_DECODE=IS_DECODE,
     )
     return o, ht
 
@@ -185,11 +186,11 @@ def fused_recurrent_rwkv7(
     v: torch.Tensor,
     a: torch.Tensor,
     b: torch.Tensor,
-    scale: Optional[float] = None,
-    initial_state: torch.Tensor = None,
+    scale: float | None = None,
+    initial_state: torch.Tensor | None = None,
     output_final_state: bool = True,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    head_first: bool = False,
+    cu_seqlens: torch.LongTensor | None = None,
+    **kwargs,
 ):
     """
     Args:
@@ -205,31 +206,21 @@ def fused_recurrent_rwkv7(
             a of shape `[B, T, H, K]`.
         b (torch.Tensor):
             b of shape `[B, T, H, K]`.
-        scale (float):
-            scale of the attention.
+        scale (Optional[float]):
+            Scale factor for the attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
-        initial_state (torch.Tensor):
-            initial state of shape `[B, H, K, V]` if cu_seqlens is None else `[N, H, K, V]` where N = len(cu_seqlens) - 1.
-        output_final_state (bool):
-            whether to output the final state.
+        initial_state (Optional[torch.Tensor]):
+            Initial state of shape `[B, H, K, V]` if `cu_seqlens` is `None`,
+            else `[N, H, K, V]` where `N = len(cu_seqlens) - 1`. Default: `None`.
+        output_final_state (Optional[bool]):
+            Whether to output the final state. Default: `True`.
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
-        head_first (Optional[bool]):
-            Whether the inputs are in the head-first format. Default: `False`.
-            This argument has been deprecated.
     """
-    if head_first:
+    if 'head_first' in kwargs:
         raise DeprecationWarning(
-            "head_first is deprecated and will be removed in a future version. "
-            "Please use head_first=False for now instead."
-        )
-    elif r.shape[1] < r.shape[2]:
-        warnings.warn(
-            f"Input tensor shape suggests potential format mismatch: seq_len ({r.shape[1]}) < num_heads ({r.shape[2]}). "
-            "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
-            "when head_first=False was specified. "
-            "Please verify your input tensor format matches the expected shape [B, T, H, ...]."
+            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
         )
     return fused_recurrent_dplr_delta_rule(
         q=r,
@@ -252,13 +243,13 @@ def fused_mul_recurrent_rwkv7(
     v: torch.Tensor,
     kk: torch.Tensor,
     a: torch.Tensor,
-    scale: Optional[float] = 1.0,
-    initial_state: Optional[torch.Tensor] = None,
+    scale: float = 1.0,
+    initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
     reverse: bool = False,
-    cu_seqlens: Optional[torch.Tensor] = None,
-    head_first: bool = False,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    cu_seqlens: torch.Tensor | None = None,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     This function computes the recurrence S_t = S_t @ (I + a_t b_t^T) + v_t k_t^T in a recurrent manner.
 
@@ -266,18 +257,17 @@ def fused_mul_recurrent_rwkv7(
         r (torch.Tensor):
             queries of shape `[B, T, H, K]`.
         w (torch.Tensor):
-            keys of shape `[B, T, H, K]`.
+            log decay of shape `[B, T, H, K]`.
         k (torch.Tensor):
-            values of shape `[B, T, H, V]`.
+            keys of shape `[B, T, H, K]`.
         v (torch.Tensor):
-            a of shape `[B, T, H, K]`.
+            values of shape `[B, T, H, V]`.
         kk (torch.Tensor):
-            b of shape `[B, T, H, K]`.
+            kk of shape `[B, T, H, K]`.
         a (torch.Tensor):
-            gk of shape `[B, T, H, K]`. decay term in log space!
-        scale (Optional[float]):
-            Scale factor for the RetNet attention scores.
-            If not provided, it will default to `1 / sqrt(K)`. Default: 1.
+            a of shape `[B, T, H, K]`.
+        scale (float):
+            Scale factor for the attention scores. Default: `1.0`.
         initial_state (Optional[torch.Tensor]):
             Initial state of shape `[N, H, K, V]` for `N` input sequences.
             For equal-length input sequences, `N` equals the batch size `B`.
@@ -287,34 +277,23 @@ def fused_mul_recurrent_rwkv7(
         reverse (Optional[bool]):
             If `True`, process the state passing in reverse order. Default: `False`.
         cu_seqlens (Optional[torch.Tensor]):
-            Cumulative sequence lengths of shape `[N + 1]` used for variable-length training,
+            Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
-        head_first (Optional[bool]):
-            Whether the inputs are in the head-first format. Default: `False`.
-            This argument has been deprecated.
     """
-    if head_first:
+    if 'head_first' in kwargs:
         raise DeprecationWarning(
-            "head_first is deprecated and will be removed in a future version. "
-            "Please use head_first=False for now instead."
-        )
-    elif r.shape[1] < r.shape[2]:
-        warnings.warn(
-            f"Input tensor shape suggests potential format mismatch: seq_len ({r.shape[1]}) < num_heads ({r.shape[2]}). "
-            "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
-            "when head_first=False was specified. "
-            "Please verify your input tensor format matches the expected shape [B, T, H, ...]."
+            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
         )
     if cu_seqlens is not None:
         if r.shape[0] != 1:
             raise ValueError(
-                f"The batch size is expected to be 1 rather than {r.shape[0]} when using `cu_seqlens`."
-                f"Please flatten variable-length inputs before processing."
+                f"The batch size is expected to be 1 rather than {r.shape[0]} when using `cu_seqlens`. "
+                f"Please flatten variable-length inputs before processing.",
             )
         if initial_state is not None and initial_state.shape[0] != len(cu_seqlens) - 1:
             raise ValueError(
                 f"The number of initial states is expected to be equal to the number of input sequences, "
-                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}."
+                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}.",
             )
     if scale is None:
         scale = r.shape[-1] ** -0.5

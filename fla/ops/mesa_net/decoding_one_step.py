@@ -1,5 +1,9 @@
-# -*- coding: utf-8 -*-
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 import triton
@@ -77,7 +81,7 @@ def mesa_net_decoding_one_step_kernel(
     b_x = b_q / (b_h_kk_diag + b_lamb + 1e-5)
     b_Hx = tl.sum(b_h_kk * b_x[:, None], axis=0)
     b_r = b_q - b_Hx - b_lamb * b_x
-    b_p = tl.zeros([BK,], dtype=tl.float32)
+    b_p = tl.zeros([BK], dtype=tl.float32)
     b_p += b_r
     delta_old = tl.sum(b_r * b_r)
 
@@ -106,7 +110,7 @@ def mesa_net_decoding_one_step(
     beta: torch.Tensor,
     prev_h_kk: torch.Tensor,
     prev_h_kv: torch.Tensor,
-    max_CG_iteration: int = 30
+    max_CG_iteration: int = 30,
 ):
     """
     Triton implementation of Mesa Net CG one step
@@ -170,6 +174,6 @@ def mesa_net_decoding_one_step(
         BK=BK,
         BV=BV,
         MAX_CG_STEP=max_CG_iteration,
-        num_warps=4 if BK <= 64 else 8
+        num_warps=4 if BK <= 64 else 8,
     )
     return o, curr_h_kk, curr_h_kv

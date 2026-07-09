@@ -1,7 +1,9 @@
-# -*- coding: utf-8 -*-
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
-
-from typing import Optional, Tuple, Union
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 import torch.nn as nn
@@ -9,10 +11,11 @@ import triton
 import triton.language as tl
 from einops import rearrange, repeat
 
+from fla.modules.backends import dispatch
 from fla.ops.utils import prepare_chunk_indices
-from fla.utils import get_multiprocessor_count, input_guard, is_amd
+from fla.utils import IS_AMD, autotune_cache_kwargs, get_multiprocessor_count, input_guard
 
-NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if is_amd else [2, 4, 8, 16, 32]
+NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if IS_AMD else [2, 4, 8, 16, 32]
 
 
 def rotate_half(x, interleaved=False):
@@ -39,6 +42,7 @@ def rotary_embedding_ref(x, cos, sin, interleaved=False):
         for num_stages in [2, 3, 4]
     ],
     key=['B', 'H', 'D', 'INTERLEAVED'],
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def rotary_embedding_kernel(
@@ -60,7 +64,7 @@ def rotary_embedding_kernel(
     IS_SEQLEN_OFFSETS_TENSOR: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     INTERLEAVED: tl.constexpr,
-    CONJUGATE: tl.constexpr
+    CONJUGATE: tl.constexpr,
 ):
     i_t, i_b, i_h = tl.program_id(0), tl.program_id(1), tl.program_id(2)
 
@@ -134,15 +138,17 @@ def rotary_embedding_kernel(
         tl.store(p_y, b_y, mask=mask)
 
 
+@dispatch('modules')
 def rotary_embedding_fwdbwd(
     x: torch.Tensor,
     cos: torch.Tensor,
     sin: torch.Tensor,
-    seqlen_offsets: Union[int, torch.Tensor] = 0,
-    cu_seqlens: Optional[torch.Tensor] = None,
+    seqlen_offsets: int | torch.Tensor = 0,
+    cu_seqlens: torch.Tensor | None = None,
     interleaved: bool = False,
     inplace: bool = False,
-    conjugate: bool = False
+    conjugate: bool = False,
+    chunk_indices: torch.LongTensor | None = None,
 ) -> torch.Tensor:
     """
     Args:
@@ -174,13 +180,15 @@ def rotary_embedding_fwdbwd(
     else:
         assert seqlen_offsets + T <= TR
 
-    y = torch.empty_like(x) if not inplace else x
+    # zeros_like: rows the kernel skips (negative o_cs under left-padding) must be defined, not uninitialized.
+    y = torch.zeros_like(x) if not inplace else x
     if R2 < D and not inplace:
         y[..., R2:].copy_(x[..., R2:])
 
     BD = triton.next_power_of_2(R2)
     BT = min(128, triton.next_power_of_2(triton.cdiv(T, get_multiprocessor_count(x.device.index))))
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if is_varlen else None
+    if chunk_indices is None and is_varlen:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = len(chunk_indices) if is_varlen else triton.cdiv(T, BT)
 
     grid = (NT, B, H)
@@ -203,7 +211,7 @@ def rotary_embedding_fwdbwd(
         IS_SEQLEN_OFFSETS_TENSOR=isinstance(seqlen_offsets, torch.Tensor),
         IS_VARLEN=is_varlen,
         INTERLEAVED=interleaved,
-        CONJUGATE=conjugate
+        CONJUGATE=conjugate,
     )
     return y
 
@@ -219,8 +227,9 @@ class RotaryEmbeddingFunction(torch.autograd.Function):
         sin,
         interleaved=False,
         inplace=False,
-        seqlen_offsets: Union[int, torch.Tensor] = 0,
-        cu_seqlens: Optional[torch.Tensor] = None,
+        seqlen_offsets: int | torch.Tensor = 0,
+        cu_seqlens: torch.Tensor | None = None,
+        chunk_indices: torch.LongTensor | None = None,
     ):
         y = rotary_embedding_fwdbwd(
             x,
@@ -230,6 +239,7 @@ class RotaryEmbeddingFunction(torch.autograd.Function):
             cu_seqlens=cu_seqlens,
             interleaved=interleaved,
             inplace=inplace,
+            chunk_indices=chunk_indices,
         )
         if isinstance(seqlen_offsets, int):
             # Can't save int with save_for_backward
@@ -240,6 +250,7 @@ class RotaryEmbeddingFunction(torch.autograd.Function):
             ctx.seqlen_offsets = None
         ctx.interleaved = interleaved
         ctx.inplace = inplace
+        ctx.chunk_indices = chunk_indices
         return y if not inplace else x
 
     @staticmethod
@@ -263,6 +274,7 @@ class RotaryEmbeddingFunction(torch.autograd.Function):
             interleaved=ctx.interleaved,
             inplace=ctx.inplace,
             conjugate=True,
+            chunk_indices=ctx.chunk_indices,
         )
         return dx, None, None, None, None, None, None, None
 
@@ -273,8 +285,9 @@ def rotary_embedding(
     sin,
     interleaved=False,
     inplace=False,
-    seqlen_offsets: Union[int, torch.Tensor] = 0,
-    cu_seqlens: Optional[torch.Tensor] = None
+    seqlen_offsets: int | torch.Tensor = 0,
+    cu_seqlens: torch.Tensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
 ):
     """
     Args:
@@ -299,7 +312,8 @@ def rotary_embedding(
         interleaved,
         inplace,
         seqlen_offsets,
-        cu_seqlens
+        cu_seqlens,
+        chunk_indices,
     )
 
 
@@ -325,10 +339,10 @@ class RotaryEmbedding(nn.Module):
         self,
         dim: int,
         base: float = 10000.0,
-        scale_base: Optional[float] = None,
+        scale_base: float | None = None,
         interleaved: bool = False,
         pos_idx_in_fp32: bool = True,
-        device: Optional[torch.device] = None,
+        device: torch.device | None = None,
     ):
         """
         interleaved:
@@ -443,10 +457,11 @@ class RotaryEmbedding(nn.Module):
         self,
         q: torch.Tensor,
         k: torch.Tensor,
-        seqlen_offset: Union[int, torch.Tensor] = 0,
-        cu_seqlens: Optional[torch.Tensor] = None,
-        max_seqlen: Optional[int] = None,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        seqlen_offset: int | torch.Tensor = 0,
+        cu_seqlens: torch.Tensor | None = None,
+        max_seqlen: int | None = None,
+        chunk_indices: torch.LongTensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """
         q: [B, T, H, D]
         k: [B, T, H, D]
@@ -469,6 +484,7 @@ class RotaryEmbedding(nn.Module):
                 interleaved=self.interleaved,
                 seqlen_offsets=seqlen_offset,
                 cu_seqlens=cu_seqlens,
+                chunk_indices=chunk_indices,
             )
             k = rotary_embedding(
                 k,
@@ -477,6 +493,7 @@ class RotaryEmbedding(nn.Module):
                 interleaved=self.interleaved,
                 seqlen_offsets=seqlen_offset,
                 cu_seqlens=cu_seqlens,
+                chunk_indices=chunk_indices,
             )
 
         else:
@@ -487,6 +504,7 @@ class RotaryEmbedding(nn.Module):
                 interleaved=self.interleaved,
                 seqlen_offsets=seqlen_offset,
                 cu_seqlens=cu_seqlens,
+                chunk_indices=chunk_indices,
             )
             k = rotary_embedding(
                 k,
@@ -495,6 +513,7 @@ class RotaryEmbedding(nn.Module):
                 interleaved=self.interleaved,
                 seqlen_offsets=seqlen_offset,
                 cu_seqlens=cu_seqlens,
+                chunk_indices=chunk_indices,
             )
 
         return q, k

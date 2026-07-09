@@ -1,7 +1,11 @@
-# -*- coding: utf-8 -*-
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import os
-from typing import List
 
 import pytest
 import torch
@@ -13,18 +17,19 @@ from fla.utils import assert_close, check_shared_mem, device
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'D', 'scale', 'dtype'),
+    ('B', 'T', 'H', 'D', 'scale', 'chunk_size', 'dtype'),
     [
-        pytest.param(*test, id="B{}-T{}-H{}-D{}-scale{}-{}".format(*test))
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-scale{}-chunk_size{}-{}".format(*test))
         for test in [
-            (1, 63, 1, 64, 1, torch.float16),
-            (2, 100, 4, 60, 0.1, torch.float16),
-            (2, 1024, 3, 128, 0.1, torch.float16),
-            (2, 1024, 4, 128, 1, torch.float16),
-            (3, 2000, 4, 128, 0.1, torch.float16),
-            (4, 2048, 8, 64, 0.1, torch.float16),
+            (1, 63, 1, 64, 1, 16, torch.float16),
+            (2, 96, 4, 60, 0.1, 32, torch.float16),
+            (2, 128, 4, 60, 0.1, 64, torch.float16),
+            (2, 1024, 3, 128, 0.1, 16, torch.float16),
+            (2, 1024, 4, 128, 1, 16, torch.float16),
+            (3, 2000, 4, 128, 0.1, 16, torch.float16),
+            (4, 2048, 8, 64, 0.1, 16, torch.float16),
         ]
-    ]
+    ],
 )
 def test_chunk(
     B: int,
@@ -32,6 +37,7 @@ def test_chunk(
     H: int,
     D: int,
     scale: float,
+    chunk_size: int,
     dtype: torch.dtype,
 ):
     if D > 64 and check_shared_mem('hopper') is False:
@@ -64,6 +70,7 @@ def test_chunk(
         output_final_state=True,
         initial_state=h0.clone(),
         initial_state_bias=hb0.clone(),
+        chunk_size=chunk_size,
     )
     ((tri * do).sum() + (tri_ht * dht).sum() + (tri_hbt * dhbt).sum()).backward(retain_graph=True)
     tri_dq, tri_dk, tri_dv, tri_dw, tri_db, tri_deta, \
@@ -78,6 +85,7 @@ def test_chunk(
         b.clone(),
         eta.clone(),
         scale=scale,
+        mini_batch_size=chunk_size,
         output_final_state=True,
         initial_state=h0.clone(),
         initial_state_bias=hb0.clone(),
@@ -101,18 +109,19 @@ def test_chunk(
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'D', 'scale', 'dtype'),
+    ('B', 'T', 'H', 'D', 'scale', 'chunk_size', 'dtype'),
     [
-        pytest.param(*test, id="B{}-T{}-H{}-D{}-scale{}-{}".format(*test))
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-scale{}-chunk_size{}-{}".format(*test))
         for test in [
-            (1, 63, 1, 64, 1, torch.float16),
-            (2, 100, 4, 60, 0.1, torch.float16),
-            (2, 1024, 3, 128, 0.1, torch.float16),
-            (2, 1024, 4, 128, 1, torch.float16),
-            (3, 2000, 4, 128, 0.1, torch.float16),
-            (4, 2048, 8, 64, 0.1, torch.float16),
+            (1, 63, 1, 64, 1, 16, torch.float16),
+            (2, 96, 4, 60, 0.1, 32, torch.float16),
+            (2, 128, 4, 60, 0.1, 64, torch.float16),
+            (2, 1024, 3, 128, 0.1, 16, torch.float16),
+            (2, 1024, 4, 128, 1, 16, torch.float16),
+            (3, 2000, 4, 128, 0.1, 16, torch.float16),
+            (4, 2048, 8, 64, 0.1, 16, torch.float16),
         ]
-    ]
+    ],
 )
 def test_fused_chunk(
     B: int,
@@ -120,6 +129,7 @@ def test_fused_chunk(
     H: int,
     D: int,
     scale: float,
+    chunk_size: int,
     dtype: torch.dtype,
 ):
     if D > 64 and check_shared_mem('hopper') is False:
@@ -152,6 +162,7 @@ def test_fused_chunk(
         output_final_state=True,
         initial_state=h0.clone(),
         initial_state_bias=hb0.clone(),
+        chunk_size=chunk_size,
     )
     ((tri * do).sum() + (tri_ht * dht).sum() + (tri_hbt * dhbt).sum()).backward(retain_graph=True)
     tri_dq, tri_dk, tri_dv, tri_dw, tri_db, tri_deta, \
@@ -166,6 +177,7 @@ def test_fused_chunk(
         b.clone(),
         eta.clone(),
         scale=scale,
+        mini_batch_size=chunk_size,
         output_final_state=True,
         initial_state=h0.clone(),
         initial_state_bias=hb0.clone(),
@@ -189,25 +201,25 @@ def test_fused_chunk(
 
 
 @pytest.mark.parametrize(
-    ('H', 'D', 'cu_seqlens', 'dtype'),
+    ('H', 'D', 'chunk_size', 'cu_seqlens', 'dtype'),
     [
-        pytest.param(*test, id="H{}-D{}-cu_seqlens{}-{}".format(*test))
+        pytest.param(*test, id="H{}-D{}-chunk_size{}-cu_seqlens{}-{}".format(*test))
         for test in [
-            (2, 64, [0, 15], torch.float16),
-            (3, 60, [0, 111, 500], torch.float16),
-            (3, 64, [0, 256, 500, 900, 1000], torch.float16),
-            (4, 100, [0, 15, 100, 300, 1200, 1599, 1800, 2000], torch.float16),
+            (2, 64, 16, [0, 15], torch.float16),
+            (3, 60, 32, [0, 32, 96, 160], torch.float16),
+            (3, 64, 64, [0, 64, 128, 192], torch.float16),
         ]
-    ]
+    ],
 )
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
-    reason="Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set"
+    reason="Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set",
 )
 def test_chunk_varlen(
     H: int,
     D: int,
-    cu_seqlens: List[int],
+    chunk_size: int,
+    cu_seqlens: list[int],
     dtype: torch.dtype,
 ):
     if D > 64 and check_shared_mem('hopper') is False:
@@ -241,6 +253,7 @@ def test_chunk_varlen(
         initial_state=h0.clone(),
         initial_state_bias=hb0.clone(),
         cu_seqlens=cu_seqlens,
+        chunk_size=chunk_size,
     )
 
     ref = []
@@ -256,6 +269,7 @@ def test_chunk_varlen(
             eta=eta[:, cu_seqlens[i]:cu_seqlens[i+1]],
             initial_state=h0[i],
             initial_state_bias=hb0[i],
+            mini_batch_size=chunk_size,
             output_final_state=True,
         )
         ref.append(ref_i)

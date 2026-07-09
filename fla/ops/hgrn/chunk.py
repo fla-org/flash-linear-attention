@@ -1,5 +1,9 @@
-# -*- coding: utf-8 -*-
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 # this function implements the chunkwise form of HGRN, inspired by
 # [Volodymyr Kyrylov in his blog post](https://proger.github.io/posts/scan/chunk.html)
@@ -18,14 +22,13 @@
 # 6   8192.0  0.647872   3.755040   1.740496      11.117184
 # 7  16384.0  1.272064   7.520576   3.446608      22.362528
 
-from typing import Tuple
 
 import torch
 import triton
 import triton.language as tl
 
 from fla.ops.utils.op import exp
-from fla.utils import input_guard
+from fla.utils import autotune_cache_kwargs, input_guard
 
 
 @triton.autotune(
@@ -43,7 +46,8 @@ from fla.utils import input_guard
         triton.Config({'BD': 128}, num_warps=4),
         triton.Config({'BD': 128}, num_warps=8),
     ],
-    key=['D']
+    key=['D'],
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_hgrn_fwd_kernel_h(
@@ -56,7 +60,7 @@ def chunk_hgrn_fwd_kernel_h(
     D: tl.constexpr,
     BT: tl.constexpr,
     BD: tl.constexpr,
-    USE_INITIAL_STATE: tl.constexpr
+    USE_INITIAL_STATE: tl.constexpr,
 ):
     i_d, i_t, i_b = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     o_d = i_d * BD + tl.arange(0, BD)
@@ -97,7 +101,7 @@ def chunk_hgrn_fwd_kernel_o(
     T,
     D: tl.constexpr,
     BT: tl.constexpr,
-    BD: tl.constexpr
+    BD: tl.constexpr,
 ):
     i_d, i_b = tl.program_id(0), tl.program_id(1)
     o_d = i_d * BD + tl.arange(0, BD)
@@ -122,7 +126,8 @@ def chunk_hgrn_fwd_kernel_o(
         for BD in [32, 64, 128]
         for num_warps in [1, 2, 4, 8]
     ],
-    key=['D']
+    key=['D'],
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_hgrn_bwd_kernel_h(
@@ -133,7 +138,7 @@ def chunk_hgrn_bwd_kernel_h(
     T,
     D: tl.constexpr,
     BT: tl.constexpr,
-    BD: tl.constexpr
+    BD: tl.constexpr,
 ):
     i_d, i_t, i_b = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     o_d = i_d * BD + tl.arange(0, BD)
@@ -183,7 +188,7 @@ def chunk_hgrn_bwd_kernel_o(
     T,
     D: tl.constexpr,
     BT: tl.constexpr,
-    BD: tl.constexpr
+    BD: tl.constexpr,
 ):
     i_d, i_b = tl.program_id(0), tl.program_id(1)
     o_d = i_d * BD + tl.arange(0, BD)
@@ -226,14 +231,14 @@ class ChunkHGRNFunction(torch.autograd.Function):
         chunk_hgrn_fwd_kernel_h[grid](
             x, g, gc, o, initial_state,
             T=T, D=D, BT=BT,
-            USE_INITIAL_STATE=initial_state is not None
+            USE_INITIAL_STATE=initial_state is not None,
         )
         def grid(meta): return (triton.cdiv(D, meta['BD']), B)
         chunk_hgrn_fwd_kernel_o[grid](
             gc, o,
             o.stride(-3), o.stride(-2), o.stride(-1),
             T=T, D=D, BT=BT, BD=BD,
-            num_warps=num_warps
+            num_warps=num_warps,
         )
         final_state = None
         if output_final_state:
@@ -255,7 +260,7 @@ class ChunkHGRNFunction(torch.autograd.Function):
         def grid(meta): return (triton.cdiv(D, meta['BD']), triton.cdiv(T, meta['BT']), B)
         chunk_hgrn_bwd_kernel_h[grid](
             g, gc, dx, do,
-            T=T, D=D, BT=BT
+            T=T, D=D, BT=BT,
         )
 
         dg = torch.empty_like(g, dtype=torch.float)
@@ -264,7 +269,7 @@ class ChunkHGRNFunction(torch.autograd.Function):
             g, gc, o, dx, dg,
             o.stride(-3), o.stride(-2), o.stride(-1),
             T=T, D=D, BT=BT, BD=BD,
-            num_warps=num_warps
+            num_warps=num_warps,
         )
         if initial_state is not None:
             dg[:, 0] = (initial_state * dx[:, 0] * g[:, 0].float().exp()).to(dg.dtype)
@@ -277,6 +282,6 @@ def chunk_hgrn(
     x: torch.Tensor,
     g: torch.Tensor,
     initial_state: torch.Tensor = None,
-    output_final_state: bool = False
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    output_final_state: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
     return ChunkHGRNFunction.apply(x, g, initial_state, output_final_state)

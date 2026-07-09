@@ -1,0 +1,168 @@
+name: oj
+
+# OJ-style kernel debugging on self-hosted runners.
+#
+# Drop throwaway tests in `tests/oj/` and a `tests/oj/env.yml` selecting the
+# target runner, then dispatch this workflow on the branch:
+#
+#     gh workflow run oj.yml --ref <branch>
+#
+# It reads `tests/oj/env.yml` and runs ONLY `tests/oj/` on the chosen backend.
+# `tests/oj/` must be deleted before merging (enforced by check-no-oj.yml).
+#
+# env.yml:
+#   runner: npu-a2        # npu-a2 | h100 | b580
+#   pytest_args: "-s -v"  # optional, forwarded to pytest
+
+on:
+  workflow_dispatch:
+
+jobs:
+  read-config:
+    name: Read tests/oj/env.yml
+    runs-on: ubuntu-latest
+    outputs:
+      has_oj: ${{ steps.cfg.outputs.has_oj }}
+      runner: ${{ steps.cfg.outputs.runner }}
+      pytest_args: ${{ steps.cfg.outputs.pytest_args }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.0
+
+      - name: Parse env.yml
+        id: cfg
+        shell: bash
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import os, sys, subprocess
+          try:
+              import yaml
+          except ImportError:
+              subprocess.run([sys.executable, "-m", "pip", "install", "-q", "pyyaml"], check=False)
+              import yaml
+          path = os.path.join("tests", "oj", "env.yml")
+          if not os.path.exists(path):
+              print("has_oj=false")
+              print("runner=")
+              print("pytest_args=-s -v")
+              sys.exit(0)
+          with open(path) as f:
+              cfg = yaml.safe_load(f) or {}
+          runner = str(cfg.get("runner", "")).strip()
+          pytest_args = str(cfg.get("pytest_args", "-s -v")).strip() or "-s -v"
+          print("has_oj=true")
+          print(f"runner={runner}")
+          print(f"pytest_args={pytest_args}")
+          PY
+
+  oj-npu:
+    name: OJ on Ascend A2 NPU
+    needs: read-config
+    if: needs.read-config.outputs.has_oj == 'true' && needs.read-config.outputs.runner == 'npu-a2'
+    runs-on: linux-aarch64-a2-1
+    timeout-minutes: 60
+    container:
+      image: ascendai/cann:9.0.0-910b-ubuntu22.04-py3.11
+      options: >-
+        --shm-size 16g
+      env:
+        HF_ENDPOINT: https://hf-mirror.com
+    env:
+      FLA_CI_ENV: 1
+      ASCEND_RT_VISIBLE_DEVICES: "0"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.0
+
+      - name: Set up Python
+        uses: actions/setup-python@v6.2.0
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install -U pip setuptools wheel
+          python -m pip install pybind11 cmake attrs sympy pyyaml scipy decorator einops
+          python -m pip install ".[npu,test]" \
+            --extra-index-url=https://triton-ascend.osinfra.cn/pypi/simple
+
+      - name: Run OJ tests
+        shell: bash
+        run: |
+          source /usr/local/Ascend/ascend-toolkit/set_env.sh
+          pytest ${{ needs.read-config.outputs.pytest_args }} tests/oj
+
+  oj-h100:
+    name: OJ on NVIDIA H100
+    needs: read-config
+    if: needs.read-config.outputs.has_oj == 'true' && needs.read-config.outputs.runner == 'h100'
+    runs-on: nvidia-h100-1
+    timeout-minutes: 60
+    env:
+      FLA_CI_ENV: 1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.0
+
+      - name: Setup CI environment
+        id: setup
+        uses: ./.github/actions/setup-ci-env
+        with:
+          runner_name: ${{ runner.name }}
+          conda_env_name: pytorch_2_7
+          pytorch_version: ""
+          gpu_type: nvidia
+          pytorch_cuda_version: cu128
+          install_tilelang: "true"
+          skip_gpu_check: "false"
+
+      - name: Run OJ tests
+        shell: bash
+        if: steps.setup.outputs.skip_tests != 'true'
+        run: |
+          $CONDA_BIN_PATH/pytest ${{ needs.read-config.outputs.pytest_args }} tests/oj
+
+  oj-b580:
+    name: OJ on Intel B580
+    needs: read-config
+    if: needs.read-config.outputs.has_oj == 'true' && needs.read-config.outputs.runner == 'b580'
+    runs-on: intel-b580
+    timeout-minutes: 60
+    env:
+      FLA_CI_ENV: 1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.0
+
+      - name: Setup CI environment
+        id: setup
+        uses: ./.github/actions/setup-ci-env
+        with:
+          runner_name: ${{ runner.name }}
+          conda_env_name: pytorch_2_7
+          pytorch_version: ""
+          gpu_type: intel
+          pytorch_cuda_version: ""
+          install_tilelang: "false"
+          skip_gpu_check: "false"
+
+      - name: Run OJ tests
+        shell: bash
+        if: steps.setup.outputs.skip_tests != 'true'
+        run: |
+          $CONDA_BIN_PATH/pytest ${{ needs.read-config.outputs.pytest_args }} tests/oj
+
+  unknown-runner:
+    name: Unknown runner guard
+    needs: read-config
+    if: |
+      needs.read-config.outputs.has_oj == 'true' &&
+      needs.read-config.outputs.runner != 'npu-a2' &&
+      needs.read-config.outputs.runner != 'h100' &&
+      needs.read-config.outputs.runner != 'b580'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail on unsupported runner
+        run: |
+          echo "::error::tests/oj/env.yml runner='${{ needs.read-config.outputs.runner }}' is not supported. Use one of: npu-a2, h100, b580."
+          exit 1

@@ -1,16 +1,19 @@
-# -*- coding: utf-8 -*-
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 # Code adapted from https://github.com/mayank31398/cute-kernels
 
-from typing import Optional
 
 import torch
 import triton
 import triton.language as tl
 
 from fla.ops.utils.index import prepare_lens
-from fla.utils import input_guard
+from fla.utils import autotune_cache_kwargs, input_guard
 
 
 @triton.autotune(
@@ -18,7 +21,8 @@ from fla.utils import input_guard
         triton.Config({}, num_warps=num_warps)
         for num_warps in [4, 8, 16, 32]
     ],
-    key=['D', 'PADDING_SIDE', 'PACK']
+    key=['D', 'PADDING_SIDE', 'PACK'],
+    **autotune_cache_kwargs,
 )
 @triton.jit
 def packunpack_sequence_kernel(
@@ -152,7 +156,7 @@ class UnpackSequenceFunction(torch.autograd.Function):
         x: torch.Tensor,
         cu_seqlens: torch.Tensor,
         padding_side: str,
-        desired_shape: Optional[torch.Size] = None,
+        desired_shape: torch.Size | None = None,
     ) -> torch.Tensor:
         assert padding_side in ['left', 'right']
         assert x.ndim >= 2
@@ -185,7 +189,7 @@ class UnpackSequenceFunction(torch.autograd.Function):
 def pack_sequence(
     x: torch.Tensor,
     cu_seqlens: torch.Tensor,
-    padding_side: str = 'left'
+    padding_side: str = 'left',
 ) -> torch.Tensor:
     return PackSequenceFunction.apply(
         x,
@@ -198,7 +202,7 @@ def unpack_sequence(
     x: torch.Tensor,
     cu_seqlens: torch.Tensor,
     padding_side: str = 'left',
-    desired_shape: Optional[torch.Size] = None,
+    desired_shape: torch.Size | None = None,
 ) -> torch.Tensor:
     return UnpackSequenceFunction.apply(
         x,

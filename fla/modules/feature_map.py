@@ -1,9 +1,14 @@
-# -*- coding: utf-8 -*-
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 from __future__ import annotations
 
+import functools
 import math
-from typing import Optional
 
 import torch
 import torch.nn.functional as F
@@ -14,24 +19,31 @@ from fla.modules.layernorm import layer_norm
 from fla.utils import checkpoint
 
 
-@checkpoint
-def flatten_diag_outer_product(x, y):
-    z = torch.einsum("...i,...j->...ij", x, y)
-    N = z.size(-1)
-    indicies = torch.triu_indices(N, N)
-    return z[..., indicies[0], indicies[1]]
+@functools.cache
+def _triu_indices(n: int, offset: int, device: torch.device) -> torch.Tensor:
+    # cache the upper-triangular gather indices per (size, offset, device) to avoid rebuilding
+    # them and copying host -> device on every forward
+    return torch.triu_indices(n, n, offset, device=device)
 
 
 @checkpoint
-def flatten_diag_outer_product_off1(x, y):
+def flatten_diag_outer_product(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     z = torch.einsum("...i,...j->...ij", x, y)
     N = z.size(-1)
-    indicies = torch.triu_indices(N, N, 1)
-    indices2 = torch.arange(0, N)
-    return z[..., indicies[0], indicies[1]], z[..., indices2, indices2]
+    indices = _triu_indices(N, 0, z.device)
+    return z[..., indices[0], indices[1]]
 
 
-def is_power_of_2(n):
+@checkpoint
+def flatten_diag_outer_product_off1(x: torch.Tensor, y: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    z = torch.einsum("...i,...j->...ij", x, y)
+    N = z.size(-1)
+    indices = _triu_indices(N, 1, z.device)
+    diag = torch.arange(N, device=z.device)
+    return z[..., indices[0], indices[1]], z[..., diag, diag]
+
+
+def is_power_of_2(n: int) -> bool:
     return (n & (n - 1) == 0) and n != 0
 
 
@@ -44,8 +56,8 @@ class HedgehogFeatureMap(nn.Module):
 
     def __init__(
         self,
-        head_dim: int
-    ) -> HedgehogFeatureMap:
+        head_dim: int,
+    ) -> None:
         super().__init__()
         # Trainable map
         self.layer = nn.Linear(head_dim, head_dim)
@@ -53,14 +65,13 @@ class HedgehogFeatureMap(nn.Module):
 
     def init_weights_(self):
         """Initialize trainable map as identity"""
-        with torch.no_grad():
-            identity = torch.eye(*self.layer.weight.shape[-2:], dtype=torch.float)
-            self.layer.weight.copy_(identity.to(self.layer.weight))
+        nn.init.eye_(self.layer.weight)
         nn.init.zeros_(self.layer.bias)
 
-    def forward(self, x: torch.Tensor):
-        x = self.layer(x)  # shape b, h, l, d
-        return torch.cat([2*x, -2*x], dim=-1).softmax(-1)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.layer(x)  # b, h, l, d
+        y = 2 * x
+        return torch.cat([y, -y], dim=-1).softmax(-1)
 
 
 class T2RFeatureMap(nn.Module):
@@ -73,9 +84,9 @@ class T2RFeatureMap(nn.Module):
     def __init__(
         self,
         head_dim: int,
-        dot_dim: int = None,
-        bias: Optional[bool] = False
-    ) -> T2RFeatureMap:
+        dot_dim: int | None = None,
+        bias: bool | None = False,
+    ) -> None:
         super().__init__()
         # Trainable map
         if dot_dim is None:
@@ -90,7 +101,7 @@ class T2RFeatureMap(nn.Module):
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(head_dim={self.head_dim}, dot_dim={self.dot_dim}, bias={self.bias})"
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.layer(x).relu()
 
 
@@ -104,13 +115,14 @@ class DPFPFeatureMap(nn.Module):
     def __init__(
         self,
         head_dim: int,
-        nu: int = 4
-    ) -> DPFPFeatureMap:
+        nu: int = 4,
+    ) -> None:
         super().__init__()
         self.nu = nu
 
-    def forward(self, x: torch.Tensor):
-        x = torch.cat([x.relu(), -x.relu()], dim=-1)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        relu = x.relu()
+        x = torch.cat([relu, -relu], dim=-1)
         x_rolled = torch.cat([x.roll(shifts=j, dims=-1) for j in range(1, self.nu+1)], dim=-1)
         x_repeat = torch.cat([x] * self.nu, dim=-1)
         return x_repeat * x_rolled
@@ -119,14 +131,14 @@ class DPFPFeatureMap(nn.Module):
 class HadamardFeatureMap(nn.Module):
     def __init__(
         self,
-        head_dim: int
-    ) -> HadamardFeatureMap:
+        head_dim: int,
+    ) -> None:
         super().__init__()
         # Trainable map
         self.layer1 = nn.Linear(head_dim, head_dim)
         self.layer2 = nn.Linear(head_dim, head_dim)
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.layer1(x) * self.layer2(x)
 
 
@@ -134,15 +146,15 @@ class LearnableOuterProductFeatureMap(nn.Module):
     def __init__(
         self,
         head_dim: int,
-        feature_dim: int
-    ) -> LearnableOuterProductFeatureMap:
+        feature_dim: int,
+    ) -> None:
         super().__init__()
         # Trainable map
         self.layer1 = nn.Linear(head_dim, feature_dim, bias=False)
         self.layer2 = nn.Linear(head_dim, feature_dim, bias=False)
         self.normalizer = feature_dim ** -0.5
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return flatten_diag_outer_product(self.layer1(x), self.layer2(x))
 
 
@@ -151,15 +163,18 @@ class LearnablePolySketchNonNegativeFeatureMap(nn.Module):
     def __init__(
         self,
         head_dim: int,
-        sketch_size: Optional[int] = None,
-        degree: Optional[int] = 2
-    ) -> LearnablePolySketchNonNegativeFeatureMap:
+        sketch_size: int | None = None,
+        degree: int | None = 2,
+    ) -> None:
         super().__init__()
 
         assert is_power_of_2(degree) and degree >= 2, f"The degree {degree} must be a power of 2"
 
+        if sketch_size is None:
+            sketch_size = head_dim
+
         self.head_dim = head_dim
-        self.sketch_size = sketch_size if sketch_size is not None else head_dim
+        self.sketch_size = sketch_size
         self.degree = degree
 
         self.gamma = nn.Parameter(torch.ones(head_dim))
@@ -168,14 +183,14 @@ class LearnablePolySketchNonNegativeFeatureMap(nn.Module):
         # currently we simply use linear layers without any non-linear activations
         self.sketches1 = nn.ModuleList([
             nn.Linear(head_dim, sketch_size, bias=False),
-            *[nn.Linear(sketch_size, sketch_size, bias=False) for _ in range(int(math.log2(self.degree)) - 2)]
+            *[nn.Linear(sketch_size, sketch_size, bias=False) for _ in range(int(math.log2(self.degree)) - 2)],
         ])
         self.sketches2 = nn.ModuleList([
             nn.Linear(head_dim, sketch_size, bias=False),
-            *[nn.Linear(sketch_size, sketch_size, bias=False) for _ in range(int(math.log2(self.degree)) - 2)]
+            *[nn.Linear(sketch_size, sketch_size, bias=False) for _ in range(int(math.log2(self.degree)) - 2)],
         ])
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Section 2.1
         x = layer_norm(x, self.gamma, self.beta)
         # first map the input to sketch size with learnable parameters
@@ -190,15 +205,15 @@ class LearnablePolySketchNonNegativeFeatureMap(nn.Module):
 class TaylorFeatureMap(nn.Module):
     def __init__(
         self,
-        head_dim: int
-    ) -> TaylorFeatureMap:
+        head_dim: int,
+    ) -> None:
         super().__init__()
         self.head_dim = head_dim
         self.r2 = math.sqrt(2)
         self.rd = math.sqrt(self.head_dim)
         self.rrd = math.sqrt(self.rd)
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         x2_1, x2_2 = flatten_diag_outer_product_off1(x, x)
         return torch.cat([torch.ones_like(x[..., 0:1]), x / self.rrd, x2_2 / (self.rd * self.r2), x2_1 / self.rd], dim=-1)
 
@@ -208,10 +223,10 @@ class RebasedFeatureMap(nn.Module):
     def __init__(
         self,
         head_dim: int,
-        use_gamma: Optional[bool] = True,
-        use_beta: Optional[bool] = True,
-        normalize: Optional[bool] = True
-    ) -> RebasedFeatureMap:
+        use_gamma: bool | None = True,
+        use_beta: bool | None = True,
+        normalize: bool | None = True,
+    ) -> None:
         super().__init__()
 
         self.head_dim = head_dim
@@ -226,7 +241,7 @@ class RebasedFeatureMap(nn.Module):
         if use_beta:
             self.beta = nn.Parameter(torch.zeros(head_dim))
 
-    def forward(self, x: torch.Tensor, flatten: Optional[bool] = True):
+    def forward(self, x: torch.Tensor, flatten: bool | None = True) -> torch.Tensor:
         if self.use_beta and self.use_gamma and self.normalize:
             x = layer_norm(x, self.gamma, self.beta)
         elif self.normalize:
@@ -237,7 +252,7 @@ class RebasedFeatureMap(nn.Module):
             x = x.mul(self.gamma)
         else:
             raise RuntimeError(f"Not supported combination of `use_gamma`, `use_beta` and `normalize`, "
-                               f"which is currentlt set as (`{self.use_gamma}`, `{self.use_beta}`, `{self.normalize}`)")
+                               f"which is currently set as (`{self.use_gamma}`, `{self.use_beta}`, `{self.normalize}`)")
         if not flatten:
             return x
         x2_1, x2_2 = flatten_diag_outer_product_off1(x, x)
@@ -249,10 +264,10 @@ class ReLUFeatureMap(nn.Module):
 
     def __init__(
         self,
-    ) -> ReLUFeatureMap:
+    ) -> None:
         super().__init__()
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return F.relu(x)
 
 
@@ -260,10 +275,10 @@ class SquaredReLUFeatureMap(nn.Module):
 
     def __init__(
         self,
-    ) -> SquaredReLUFeatureMap:
+    ) -> None:
         super().__init__()
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return sqrelu(x)
 
 
@@ -271,10 +286,10 @@ class GELUFeatureMap(nn.Module):
 
     def __init__(
         self,
-    ) -> GELUFeatureMap:
+    ) -> None:
         super().__init__()
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return fast_gelu_impl(x)
 
 
@@ -282,10 +297,10 @@ class SwishFeatureMap(nn.Module):
 
     def __init__(
         self,
-    ) -> SwishFeatureMap:
+    ) -> None:
         super().__init__()
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return swish(x)
 
 
@@ -293,8 +308,8 @@ class SigmoidFeatureMap(nn.Module):
 
     def __init__(
         self,
-    ) -> SigmoidFeatureMap:
+    ) -> None:
         super().__init__()
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return sigmoid(x)

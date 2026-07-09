@@ -1,16 +1,20 @@
-# -*- coding: utf-8 -*-
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import logging
 import os
 import sys
-from typing import Optional
 
 import torch
 import triton
 import triton.language as tl
 from packaging.version import Version
 
-from fla.utils import check_pytorch_version, input_guard, is_amd, use_cuda_graph
+from fla.utils import IS_AMD, IS_ARM, autotune_cache_kwargs, check_pytorch_version, input_guard
 
 logger = logging.getLogger(__name__)
 
@@ -23,16 +27,17 @@ def identity_decorator(fn):
 
 
 current_python_version = Version(f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")
-min_torch_compile_version = Version("3.11")
+min_torch_compile_version = Version("3.11" if IS_ARM else "3.10")
 fla_use_compile = os.getenv('FLA_USE_COMPILE', '1').lower() in ('1', 'true', 'yes')
 
 if current_python_version >= min_torch_compile_version and fla_use_compile:
     torch_compile = torch.compile(fullgraph=True)
 else:
-    logger.warning('torch.compile is not available in Python 3.10, using identity decorator instead')
+    if fla_use_compile:
+        logger.warning(f'torch.compile requires Python >= {min_torch_compile_version}, using identity decorator instead')
     torch_compile = identity_decorator
 
-NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if is_amd else [2, 4, 8, 16, 32]
+NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if IS_AMD else [2, 4, 8, 16, 32]
 
 
 @triton.autotune(
@@ -43,7 +48,7 @@ NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if is_amd else [2, 4, 8, 16, 32]
         for BT in [2, 4, 8]
     ],
     key=['BD'],
-    use_cuda_graph=use_cuda_graph,
+    **autotune_cache_kwargs,
 )
 @triton.jit
 def fused_addcmul_fwd_kernel(
@@ -102,7 +107,7 @@ def fused_addcmul_fwd_kernel(
         for BT in [2, 4, 8]
     ],
     key=['BD'],
-    use_cuda_graph=use_cuda_graph,
+    **autotune_cache_kwargs,
 )
 @triton.jit
 def addcmul_bwd_kernel1(
@@ -272,7 +277,7 @@ def fused_addcmul_rwkv7(
     xk: torch.Tensor,
     xv: torch.Tensor,
     xa: torch.Tensor,
-    xg: Optional[torch.Tensor] = None
+    xg: torch.Tensor | None = None,
 ):
     if hidden_states.shape[1] == 1:
         # Special case for decode
@@ -290,4 +295,5 @@ def torch_addcmul_rwkv7(hidden_states, delta, xr, xw, xk, xv, xa, xg=None):
         oxg = torch.addcmul(hidden_states, delta, xg)
         return oxr, oxw, oxk, oxv, oxa, oxg
     else:
+        return oxr, oxw, oxk, oxv, oxa, None
         return oxr, oxw, oxk, oxv, oxa, None

@@ -1,4 +1,9 @@
-# -*- coding: utf-8 -*-
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import math
 
@@ -12,7 +17,7 @@ from fla.utils import device
 MODELING_UNSUPPORTED_VARLEN = [
     "ABCConfig", "ForgettingTransformerConfig", "LinearAttentionConfig", "LightNetConfig",
     "Mamba2Config", "MambaConfig", "MesaNetConfig", "SambaConfig",
-    "RodimusConfig",
+    "RodimusConfig", "WallTransformerConfig",
 ]
 
 # Models not yet ready for basic testing
@@ -22,8 +27,10 @@ NOT_READY_FOR_TESTING = ['RodimusConfig']
 HOPPER_EXCLUSIVE = []
 
 GENERATION_UNSUPPORTED = [
-    "ABCConfig", "LinearAttentionConfig", "LightNetConfig",
-    "Mamba2Config", "MambaConfig", "NSAConfig", "SambaConfig", "RWKV6Config", "RWKV7Config",
+    "ABCConfig",
+    "DeltaFormerConfig",
+    "MoBAConfig",
+    "WallTransformerConfig",
 ]
 
 
@@ -35,7 +42,7 @@ def create_model_and_config(config_class, L, H, D, dtype, **kwargs):
         'hidden_size': H * D,
         'num_hidden_layers': L,
         **({'num_heads': H} if config_class.__name__ != 'NSAConfig' else {}),
-        **kwargs
+        **kwargs,
     }
     config = config_class(**config_params)
     model = AutoModelForCausalLM.from_config(config)

@@ -1,6 +1,9 @@
-# -*- coding: utf-8 -*-
-
-from typing import List
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import pytest
 import torch
@@ -22,11 +25,11 @@ from fla.utils import assert_close, device, device_platform
             (3, 2000, 4, 128, 0.1, False, torch.float16),
             (4, 2048, 8, 64, 0.1, False, torch.float16),
         ]
-    ]
+    ],
 )
 @pytest.mark.skipif(
     device_platform == 'intel',
-    reason='Intel Triton Failure'
+    reason='Intel Triton Failure',
 )
 def test_chunk(
     B: int,
@@ -84,6 +87,79 @@ def test_chunk(
 
 
 @pytest.mark.parametrize(
+    ('B', 'T', 'H', 'D', 'scale', 'dtype', 'chunk_size'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-scale{}-{}-chunk{}".format(*test))
+        for chunk_size in [16, 32, 64]
+        for test in [
+            (1, 64, 2, 32, 0.1, torch.bfloat16, chunk_size),
+        ]
+    ],
+)
+@pytest.mark.skipif(
+    device_platform == 'intel',
+    reason='Intel Triton Failure',
+)
+def test_chunk_with_chunk_size(
+    B: int,
+    T: int,
+    H: int,
+    D: int,
+    scale: float,
+    dtype: torch.dtype,
+    chunk_size: int,
+):
+    torch.manual_seed(42)
+    q = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    k = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    v = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    beta = torch.randn(B, T, H, dtype=dtype, device=device).sigmoid()
+    h0 = torch.randn(B, H, D, D, dtype=torch.float32, device=device)
+    do = torch.randn_like(v)
+    dht = torch.randn_like(h0)
+
+    def run_ref():
+        q_, k_, v_, beta_, h0_ = (x.detach().clone().requires_grad_(True) for x in (q, k, v, beta, h0))
+        o, ht = fused_recurrent_delta_rule(
+            q=F.normalize(q_, p=2, dim=-1),
+            k=F.normalize(k_, p=2, dim=-1),
+            v=v_,
+            beta=beta_,
+            scale=scale,
+            output_final_state=True,
+            initial_state=h0_,
+        )
+        ((o * do).sum() + (ht * dht).sum()).backward()
+        return o, ht, q_.grad, k_.grad, v_.grad, beta_.grad, h0_.grad
+
+    def run_tri(chunk_size: int):
+        q_, k_, v_, beta_, h0_ = (x.detach().clone().requires_grad_(True) for x in (q, k, v, beta, h0))
+        o, ht = chunk_delta_rule(
+            q=F.normalize(q_, p=2, dim=-1),
+            k=F.normalize(k_, p=2, dim=-1),
+            v=v_,
+            beta=beta_,
+            scale=scale,
+            output_final_state=True,
+            initial_state=h0_,
+            chunk_size=chunk_size,
+        )
+        ((o * do).sum() + (ht * dht).sum()).backward()
+        return o, ht, q_.grad, k_.grad, v_.grad, beta_.grad, h0_.grad
+
+    ref_o, ref_ht, ref_dq, ref_dk, ref_dv, ref_dbeta, ref_dh0 = run_ref()
+    tri_o, tri_ht, tri_dq, tri_dk, tri_dv, tri_dbeta, tri_dh0 = run_tri(chunk_size)
+
+    assert_close(f'o@{chunk_size}', ref_o, tri_o, 0.006)
+    assert_close(f'ht@{chunk_size}', ref_ht, tri_ht, 0.006)
+    assert_close(f'dq@{chunk_size}', ref_dq, tri_dq, 0.008)
+    assert_close(f'dk@{chunk_size}', ref_dk, tri_dk, 0.008)
+    assert_close(f'dv@{chunk_size}', ref_dv, tri_dv, 0.008)
+    assert_close(f'db@{chunk_size}', ref_dbeta, tri_dbeta, 0.008)
+    assert_close(f'dh0@{chunk_size}', ref_dh0, tri_dh0, 0.008)
+
+
+@pytest.mark.parametrize(
     ('H', 'D', 'cu_seqlens', 'dtype'),
     [
         pytest.param(*test, id="H{}-D{}-cu_seqlens{}-{}".format(*test))
@@ -93,16 +169,16 @@ def test_chunk(
             (3, 64, [0, 256, 500, 900, 1000], torch.float16),
             (4, 100, [0, 15, 100, 300, 1200, 1599, 1800, 2000], torch.float16),
         ]
-    ]
+    ],
 )
 @pytest.mark.skipif(
     device_platform == 'intel',
-    reason='Intel Triton Failure'
+    reason='Intel Triton Failure',
 )
 def test_chunk_varlen(
     H: int,
     D: int,
-    cu_seqlens: List[int],
+    cu_seqlens: list[int],
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
