@@ -473,7 +473,7 @@ def chunk_oja_bwd_dhu(
     states_in_fp32: bool = False
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *q.shape, do.shape[-1]
-    BT = 64
+    BT = chunk_size
     assert K <= 256, "current kernel does not support head dimension being larger than 256."
 
     if chunk_indices is None and cu_seqlens is not None:

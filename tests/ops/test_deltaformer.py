@@ -10,7 +10,16 @@ import torch
 
 from fla.ops.deltaformer import deltaformer_attn
 from fla.ops.deltaformer.naive import naive_deltaformer_attn
-from fla.utils import IS_INTEL_ALCHEMIST, assert_close, device
+from fla.utils import IS_INTEL_ALCHEMIST, assert_close, device, find_spec_cached
+
+pytestmark = [
+    # Module-level importorskip would exit pytest with code 5 (no tests collected), which
+    # breaks CI's per-file `pytest "$f" || exit 1` loop; mark tests as skipped instead.
+    pytest.mark.skipif(
+        find_spec_cached("flash_attn") is None,
+        reason="deltaformer_attn requires flash-attn (`pip install flash-attn --no-build-isolation`).",
+    ),
+]
 
 
 @pytest.mark.parametrize(

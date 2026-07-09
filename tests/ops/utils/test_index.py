@@ -83,6 +83,11 @@ HELPERS = [
 ]
 HELPER_IDS = [h[0] for h in HELPERS]
 
+skip_npu_compile = pytest.mark.skipif(
+    fu.IS_NPU,
+    reason='torch.compile graph-count contract is not supported on NPU yet',
+)
+
 
 def make_cu_seqlens(seqlens):
     seqlens = torch.tensor(seqlens, device=device, dtype=torch.int32)
@@ -134,7 +139,7 @@ def test_cu_seqlens_cpu_matches_device(name, impl, ref):
 
 @pytest.mark.parametrize("batch_size", [1, 4])
 @pytest.mark.parametrize("max_seq_len", [100, 500])
-@pytest.mark.parametrize("chunk_size", [16, 64, 128])
+@pytest.mark.parametrize("chunk_size", [16, 32, 64, 128])
 def test_chunk_offsets_correctness(batch_size, max_seq_len, chunk_size):
     torch.manual_seed(42)
     cu_seqlens = make_cu_seqlens(torch.randint(1, max_seq_len, (batch_size,)).tolist())
@@ -169,6 +174,7 @@ def test_edge_cases():
         torch.testing.assert_close(ref.long(), opt.long())
 
 
+@skip_npu_compile
 @pytest.mark.parametrize("name,impl,ref", HELPERS, ids=HELPER_IDS)
 def test_no_recompile_across_multi_segment_shapes(name, impl, ref):
     shapes = [[5, 7, 8], [10, 20, 15, 35, 20], [7, 7], [3, 5, 8, 8, 16], [1, 1, 1, 1, 1, 1, 1]]
@@ -176,6 +182,7 @@ def test_no_recompile_across_multi_segment_shapes(name, impl, ref):
     assert n == 1, f"{name}: expected 1 graph across {len(shapes)} multi-segment shapes, got {n} -- Dynamo recompiled."
 
 
+@skip_npu_compile
 @pytest.mark.parametrize("name,impl,ref", HELPERS, ids=HELPER_IDS)
 def test_no_recompile_across_single_segment_shapes(name, impl, ref):
     shapes = [[16], [64], [100], [7], [999]]
@@ -183,6 +190,7 @@ def test_no_recompile_across_single_segment_shapes(name, impl, ref):
     assert n == 1, f"{name}: expected 1 graph across {len(shapes)} single-segment shapes, got {n}."
 
 
+@skip_npu_compile
 @pytest.mark.parametrize("name,impl,ref", HELPERS, ids=HELPER_IDS)
 def test_single_vs_multi_segment_specializes_once(name, impl, ref):
     # A size-1 `counts` hits PyTorch's 0/1 dynamic-shape specialization, so single-

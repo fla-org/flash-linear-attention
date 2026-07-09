@@ -151,6 +151,10 @@ class OpConfig:
             used as the frozen correctness gate by `benchmarks/ops/verify.py`.
             When None, the gate is derived from `import_path`'s last segment (e.g. `fla.ops.gla` -> `tests/ops/test_gla.py`).
             Set this only when the derived path is wrong. Default: None.
+        backend_env (dict[str, str], Optional):
+            Maps a `--backend <name>` value to the environment variable that enables that backend's
+            dispatch (e.g. `{'gluon': 'FLA_ATTNRES_GLUON'}`). The runner sets it before launching the
+            op; ops selected purely by a runtime verifier need no entry. Default: None.
     """
     name: str
     import_path: str
@@ -164,6 +168,7 @@ class OpConfig:
     dim_constraints: dict | None = None
     default_shapes: dict[str, dict[str, int]] | None = None
     test_file: str | None = None
+    backend_env: dict[str, str] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -491,6 +496,7 @@ register_op(OpConfig(
     output_is_tuple=False,
     default_shapes=_layer_default_shapes,
     category='fused_attnres',
+    backend_env={'gluon': 'FLA_ATTNRES_GLUON'},
 ))
 
 register_op(OpConfig(

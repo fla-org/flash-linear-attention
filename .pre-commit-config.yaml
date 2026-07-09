@@ -22,3 +22,4 @@ repos:
   hooks:
   - id: autopep8
     args: [--in-place]
+    exclude: ^tests/conftest\.py$

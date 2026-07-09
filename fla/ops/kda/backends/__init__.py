@@ -8,7 +8,7 @@
 """KDA backends."""
 
 from fla.ops.backends import BackendRegistry, dispatch
-from fla.ops.kda.backends.flashkda import FlashKDABackend
+from fla.ops.kda.backends.flash_kda import FlashKDABackend
 from fla.ops.kda.backends.tilelang import KDATileLangBackend
 
 kda_registry = BackendRegistry("kda")

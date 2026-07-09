@@ -24,7 +24,7 @@ def chunk_cumprod_householder_bwd_kernel(
     BT: tl.constexpr,  # previous small chunk size
     K: tl.constexpr,
     BK: tl.constexpr,
-    T: tl.constexpr,
+    T,
     S: tl.constexpr,
     G: tl.constexpr,
     H: tl.constexpr,

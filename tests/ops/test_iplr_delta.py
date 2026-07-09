@@ -238,3 +238,56 @@ def test_chunk(
     )
     assert_close('o', ref, tri, 0.007)
     assert_close('ht', ref_ht, tri_ht, 0.008)
+
+
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'D', 'scale', 'dtype', 'chunk_size'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-scale{}-{}-chunk{}".format(*test))
+        for chunk_size in [16, 32, 64]
+        for test in [
+            (1, 64, 2, 32, 0.1, torch.float32, chunk_size),
+        ]
+    ],
+)
+def test_chunk_with_chunk_size(
+    B: int,
+    T: int,
+    H: int,
+    D: int,
+    scale: float,
+    dtype: torch.dtype,
+    chunk_size: int,
+):
+    torch.manual_seed(42)
+    q = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    k = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    v = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    a = F.normalize(torch.rand(B, T, H, D, dtype=dtype, device=device), p=2, dim=-1)
+    b = -a
+    h0 = torch.zeros(B, H, D, D, dtype=torch.float32, device=device)
+
+    ref, ref_ht = recurrence_iplr_delta_rule_ref(
+        q=q,
+        k=k,
+        v=v,
+        a=a,
+        b=b,
+        scale=scale,
+        initial_state=h0,
+        output_final_state=True,
+    )
+    tri, tri_ht = chunk_iplr_delta_rule(
+        q=q,
+        k=k,
+        v=v,
+        a=a,
+        b=b,
+        scale=scale,
+        initial_state=h0,
+        output_final_state=True,
+        chunk_size=chunk_size,
+    )
+
+    assert_close(f'o@{chunk_size}', ref, tri, 0.005)
+    assert_close(f'ht@{chunk_size}', ref_ht, tri_ht, 0.005)

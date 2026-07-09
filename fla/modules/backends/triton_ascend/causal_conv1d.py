@@ -16,6 +16,15 @@ from fla.ops.utils import prepare_chunk_indices
 from fla.utils import input_guard
 
 STATIC_WARPS = 2
+# Ascend Triton rejects grids whose product exceeds 65535 (see fla/modules/token_shift.py).
+_NPU_MAX_TRITON_GRID = 65535
+_ELEM_BLOCK = 2048
+
+
+def _elementwise_launch_iters(numel: int):
+    n_blocks = triton.cdiv(numel, _ELEM_BLOCK)
+    for block_off in range(0, n_blocks, _NPU_MAX_TRITON_GRID):
+        yield min(_NPU_MAX_TRITON_GRID, n_blocks - block_off), block_off * _ELEM_BLOCK
 
 
 def _npu_chunk_size(T: int, BT: int) -> int:
@@ -31,9 +40,18 @@ def _npu_chunk_size(T: int, BT: int) -> int:
 
 
 def _clamp_bd_for_grid(B: int, NT: int, D: int, BD: int) -> int:
-    while triton.cdiv(D, BD) * NT * B >= 65536 and BD < 64:
+    while triton.cdiv(D, BD) * NT * B > _NPU_MAX_TRITON_GRID and BD < 64:
         BD *= 2
     return BD
+
+
+def _npu_max_axis_chunks(grid_dim0: int, batch: int = 1) -> int:
+    denom = grid_dim0 * batch
+    if denom > _NPU_MAX_TRITON_GRID:
+        raise RuntimeError(
+            f'Ascend Triton grid dim0*batch={denom} exceeds {_NPU_MAX_TRITON_GRID}',
+        )
+    return max(1, _NPU_MAX_TRITON_GRID // max(denom, 1))
 
 
 def _npu_tile_config(
@@ -45,8 +63,13 @@ def _npu_tile_config(
 ) -> tuple[int, int, int]:
     BT = _npu_chunk_size(T, BT)
     BD = 16
-    if D >= 1024:
-        BD = 4
+    if D >= 8192:
+        BD = 8
+        BT = min(BT, 8)
+    elif D >= 1024:
+        # BD=4 overflows Ascend UB on large-D forward; cap BT to limit NT.
+        BD = 8
+        BT = min(BT, 32)
     elif D >= 512:
         BD = 8
     if dtype == torch.float16 and initial_state is not None:
@@ -69,10 +92,10 @@ def _npu_bwd_tile_config(
         BD = min(BD, 8)
         BT = min(BT, 32)
     if D >= 2048:
-        BD = 4
+        BD = 8
         BT = min(BT, 8)
     elif D >= 1024:
-        BD = 4
+        BD = 8
         BT = min(BT, 16)
     elif D >= 512:
         BD = 8
@@ -115,6 +138,7 @@ def causal_conv1d_fwd_kernel(
     HAS_BIAS: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    CHUNK_OFFSET: tl.constexpr,
 ):
     i_d, i_t, i_b = tl.program_id(0), tl.program_id(1), tl.program_id(2)
 
@@ -126,6 +150,7 @@ def causal_conv1d_fwd_kernel(
         p_y = y + bos * stride_y_t
     else:
         i_n = i_b
+        i_t = i_t + CHUNK_OFFSET
         bos = (i_b * T).to(tl.int64)
         p_x = x + tl.cast(i_b, tl.int64) * stride_x_n
         p_y = y + tl.cast(i_b, tl.int64) * stride_y_n
@@ -178,10 +203,11 @@ def _silu_kernel(
     x_ptr,
     y_ptr,
     n_elements,
+    ELEM_OFFSET: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     pid = tl.program_id(0)
-    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    offs = pid * BLOCK + tl.arange(0, BLOCK) + ELEM_OFFSET
     mask = offs < n_elements
     x = tl.load(x_ptr + offs, mask=mask, other=0.).to(tl.float32)
     y = x * tl.sigmoid(x)
@@ -194,10 +220,11 @@ def _add_kernel(
     b_ptr,
     out_ptr,
     n_elements,
+    ELEM_OFFSET: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     pid = tl.program_id(0)
-    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    offs = pid * BLOCK + tl.arange(0, BLOCK) + ELEM_OFFSET
     mask = offs < n_elements
     a = tl.load(a_ptr + offs, mask=mask, other=0.).to(tl.float32)
     b = tl.load(b_ptr + offs, mask=mask, other=0.).to(tl.float32)
@@ -205,20 +232,31 @@ def _add_kernel(
 
 
 def _launch_silu(y: torch.Tensor) -> torch.Tensor:
+    y = y.contiguous()
     out = torch.zeros_like(y)
     n = y.numel()
-    block = 1024
-    grid = (triton.cdiv(n, block),)
-    _silu_kernel[grid](y, out, n, BLOCK=block, num_warps=STATIC_WARPS)
+    for grid, elem_off in _elementwise_launch_iters(n):
+        _silu_kernel[(grid,)](
+            y, out, n,
+            ELEM_OFFSET=elem_off,
+            BLOCK=_ELEM_BLOCK,
+            num_warps=STATIC_WARPS,
+        )
     return out
 
 
 def _launch_add(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    a = a.contiguous()
+    b = b.contiguous()
     out = torch.zeros_like(a)
     n = a.numel()
-    block = 1024
-    grid = (triton.cdiv(n, block),)
-    _add_kernel[grid](a, b, out, n, BLOCK=block, num_warps=STATIC_WARPS)
+    for grid, elem_off in _elementwise_launch_iters(n):
+        _add_kernel[(grid,)](
+            a, b, out, n,
+            ELEM_OFFSET=elem_off,
+            BLOCK=_ELEM_BLOCK,
+            num_warps=STATIC_WARPS,
+        )
     return out
 
 
@@ -239,10 +277,11 @@ def _silu_bwd_kernel(
     B,
     T,
     D,
+    ELEM_OFFSET: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     pid = tl.program_id(0)
-    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    offs = pid * BLOCK + tl.arange(0, BLOCK) + ELEM_OFFSET
     n_elements = B * T * D
     mask = offs < n_elements
     rem = offs % D
@@ -263,20 +302,21 @@ def _silu_bwd_kernel(
 def _launch_silu_bwd(y_pre: torch.Tensor, dy: torch.Tensor) -> torch.Tensor:
     out = torch.zeros_like(dy, memory_format=torch.contiguous_format)
     B, T, D = dy.shape
-    block = 1024
-    grid = (triton.cdiv(B * T * D, block),)
+    n = B * T * D
     sy_n, sy_t, sy_d = y_pre.stride()
     sdy_n, sdy_t, sdy_d = dy.stride()
     so_n, so_t, so_d = out.stride()
-    _silu_bwd_kernel[grid](
-        y_pre, dy, out,
-        sy_n, sy_t, sy_d,
-        sdy_n, sdy_t, sdy_d,
-        so_n, so_t, so_d,
-        B, T, D,
-        BLOCK=block,
-        num_warps=STATIC_WARPS,
-    )
+    for grid, elem_off in _elementwise_launch_iters(n):
+        _silu_bwd_kernel[(grid,)](
+            y_pre, dy, out,
+            sy_n, sy_t, sy_d,
+            sdy_n, sdy_t, sdy_d,
+            so_n, so_t, so_d,
+            B, T, D,
+            ELEM_OFFSET=elem_off,
+            BLOCK=_ELEM_BLOCK,
+            num_warps=STATIC_WARPS,
+        )
     return out
 
 
@@ -425,6 +465,8 @@ def causal_conv1d_bwd_kernel(
     USE_INITIAL_STATE: tl.constexpr,
     USE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    CHUNK_OFFSET: tl.constexpr,
+    NT: tl.constexpr,
 ):
     i_d, i_t, i_b = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     if IS_VARLEN:
@@ -436,7 +478,8 @@ def causal_conv1d_bwd_kernel(
         p_dy = dy + bos * stride_dy_t
         p_dx = dx + bos * stride_dx_t
     else:
-        i_tg = i_b * tl.num_programs(1) + i_t
+        i_t = i_t + CHUNK_OFFSET
+        i_tg = i_b * NT + i_t
         i_n = i_b
         p_x = x + tl.cast(i_b, tl.int64) * stride_x_n
         p_dy = dy + tl.cast(i_b, tl.int64) * stride_dy_n
@@ -543,8 +586,9 @@ def compute_dh0_kernel(
     BD: tl.constexpr,
     USE_ACTIVATION: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    CHUNK_OFFSET: tl.constexpr,
 ):
-    i_d, i_n = tl.program_id(0), tl.program_id(1)
+    i_d, i_n = tl.program_id(0), tl.program_id(1) + CHUNK_OFFSET
 
     if IS_VARLEN:
         bos = tl.load(cu_seqlens + i_n).to(tl.int64)
@@ -604,8 +648,9 @@ def causal_conv1d_states_fwd_kernel(
     BW: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    CHUNK_OFFSET: tl.constexpr,
 ):
-    i_d, i_n = tl.program_id(0), tl.program_id(1)
+    i_d, i_n = tl.program_id(0), tl.program_id(1) + CHUNK_OFFSET
 
     o_d = i_d * BD + tl.arange(0, BD)
     m_d = o_d < D
@@ -665,8 +710,9 @@ def causal_conv1d_update_kernel(
     BD: tl.constexpr,
     HAS_WEIGHT: tl.constexpr,
     HAS_BIAS: tl.constexpr,
+    CHUNK_OFFSET: tl.constexpr,
 ):
-    i_d, i_n = tl.program_id(0), tl.program_id(1)
+    i_d, i_n = tl.program_id(0), tl.program_id(1) + CHUNK_OFFSET
 
     o_d = i_d * BD + tl.arange(0, BD)
     m_d = o_d < D
@@ -738,15 +784,14 @@ def _launch_fwd_core(
     y = torch.zeros_like(x, memory_format=torch.contiguous_format)
     stride_y_n, stride_y_t, stride_y_d = y.stride()
 
-    grid = (triton.cdiv(D, BD), NT, B)
-    causal_conv1d_fwd_kernel[grid](
+    max_nt = _npu_max_axis_chunks(triton.cdiv(D, BD), B)
+    kernel_kwargs = dict(
         x=x,
         y=y,
         weight=weight,
         bias=bias,
         cu_seqlens=cu_seqlens,
         initial_state=initial_state,
-        chunk_indices=chunk_indices,
         B=B,
         T=T,
         D=D,
@@ -762,6 +807,16 @@ def _launch_fwd_core(
         stride_y_d=stride_y_d,
         num_warps=num_warps,
     )
+    for nt_off in range(0, NT, max_nt):
+        nt_len = min(max_nt, NT - nt_off)
+        grid = (triton.cdiv(D, BD), nt_len, B)
+        if cu_seqlens is not None:
+            kernel_kwargs['chunk_indices'] = chunk_indices[nt_off:nt_off + nt_len]
+            kernel_kwargs['CHUNK_OFFSET'] = 0
+        else:
+            kernel_kwargs['chunk_indices'] = chunk_indices
+            kernel_kwargs['CHUNK_OFFSET'] = nt_off
+        causal_conv1d_fwd_kernel[grid](**kernel_kwargs)
     return y
 
 
@@ -892,18 +947,15 @@ def causal_conv1d_bwd_npu(
         stride_dy_n, stride_dy_t, stride_dy_d = dy_conv.stride()
         dw = weight.new_empty(B * NT, *weight.shape, dtype=torch.float) if weight is not None else None
         db = bias.new_empty(B * NT, *bias.shape, dtype=torch.float) if bias is not None else None
-        grid = (triton.cdiv(D, BD), NT, B)
-        causal_conv1d_bwd_kernel[grid](
+        max_nt = _npu_max_axis_chunks(triton.cdiv(D, BD), B)
+        kernel_kwargs = dict(
             x=x,
             weight=weight,
             initial_state=initial_state,
             dht=dht,
             dy=dy_conv,
             dx=dx,
-            dw=dw,
-            db=db,
             cu_seqlens=cu_seqlens,
-            chunk_indices=chunk_indices,
             B=B,
             T=T,
             D=D,
@@ -921,7 +973,22 @@ def causal_conv1d_bwd_npu(
             stride_dy_t=stride_dy_t,
             stride_dy_d=stride_dy_d,
             num_warps=num_warps,
+            NT=NT,
         )
+        for nt_off in range(0, NT, max_nt):
+            nt_len = min(max_nt, NT - nt_off)
+            grid = (triton.cdiv(D, BD), nt_len, B)
+            if cu_seqlens is not None:
+                kernel_kwargs['chunk_indices'] = chunk_indices[nt_off:nt_off + nt_len]
+                kernel_kwargs['CHUNK_OFFSET'] = 0
+                kernel_kwargs['dw'] = dw[nt_off:nt_off + nt_len] if weight is not None else None
+                kernel_kwargs['db'] = db[nt_off:nt_off + nt_len] if bias is not None else None
+            else:
+                kernel_kwargs['chunk_indices'] = chunk_indices
+                kernel_kwargs['CHUNK_OFFSET'] = nt_off
+                kernel_kwargs['dw'] = dw
+                kernel_kwargs['db'] = db
+            causal_conv1d_bwd_kernel[grid](**kernel_kwargs)
     if weight is not None:
         dw = dw.sum(0).to(weight)
     if bias is not None:
@@ -955,7 +1022,6 @@ def compute_dh0_npu(
 
     BD = 8 if dy.dtype == torch.float16 and activation in ('swish', 'silu') else 16
     dh0 = torch.zeros_like(initial_state)
-    grid = (triton.cdiv(D, BD), N)
 
     stride_dy_n = dy.stride(0)
     stride_dy_t = dy.stride(1)
@@ -966,10 +1032,10 @@ def compute_dh0_npu(
         stride_y_t = y.stride(1)
         stride_y_d = y.stride(2) if y.dim() == 3 else y.stride(-1)
 
-    y_to_pass = y if activation in ('swish', 'silu') else None
-    compute_dh0_kernel[grid](
+    max_n = _npu_max_axis_chunks(triton.cdiv(D, BD))
+    kernel_kwargs = dict(
         dy=dy,
-        y=y_to_pass,
+        y=y if activation in ('swish', 'silu') else None,
         weight=weight,
         dh0=dh0,
         cu_seqlens=cu_seqlens,
@@ -985,6 +1051,10 @@ def compute_dh0_npu(
         BD=BD,
         num_warps=STATIC_WARPS,
     )
+    for n_off in range(0, N, max_n):
+        n_len = min(max_n, N - n_off)
+        kernel_kwargs['CHUNK_OFFSET'] = n_off
+        compute_dh0_kernel[(triton.cdiv(D, BD), n_len)](**kernel_kwargs)
     return dh0
 
 
@@ -1017,9 +1087,9 @@ def causal_conv1d_update_states_npu(
     final_state = torch.empty(N, D, W, dtype=x.dtype, device=x.device)
     BD = min(triton.next_power_of_2(D), 16)
     BW = triton.next_power_of_2(W)
-    grid = (triton.cdiv(D, BD), N)
-
-    causal_conv1d_states_fwd_kernel[grid](
+    grid_dim0 = triton.cdiv(D, BD)
+    max_n = _npu_max_axis_chunks(grid_dim0)
+    kernel_kwargs = dict(
         x=x,
         initial_state=initial_state,
         final_state=final_state,
@@ -1034,6 +1104,10 @@ def causal_conv1d_update_states_npu(
         BD=BD,
         num_warps=STATIC_WARPS,
     )
+    for n_off in range(0, N, max_n):
+        n_len = min(max_n, N - n_off)
+        kernel_kwargs['CHUNK_OFFSET'] = n_off
+        causal_conv1d_states_fwd_kernel[(grid_dim0, n_len)](**kernel_kwargs)
     return final_state
 
 
@@ -1076,8 +1150,9 @@ def causal_conv1d_update_npu(
     elif y.dim() == 3:
         stride_y_n, stride_y_d = y.stride(0), y.stride(2)
 
-    grid = (triton.cdiv(D, BD), N)
-    causal_conv1d_update_kernel[grid](
+    grid_dim0 = triton.cdiv(D, BD)
+    max_n = _npu_max_axis_chunks(grid_dim0)
+    kernel_kwargs = dict(
         x=x,
         cache=cache,
         y=y,
@@ -1092,5 +1167,9 @@ def causal_conv1d_update_npu(
         BD=BD,
         num_warps=STATIC_WARPS,
     )
+    for n_off in range(0, N, max_n):
+        n_len = min(max_n, N - n_off)
+        kernel_kwargs['CHUNK_OFFSET'] = n_off
+        causal_conv1d_update_kernel[(grid_dim0, n_len)](**kernel_kwargs)
     y = _postprocess_update(y, residual, activation)
     return y.view(shape), cache

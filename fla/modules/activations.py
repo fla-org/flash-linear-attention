@@ -33,6 +33,8 @@ def _get_stride(x: torch.Tensor) -> int:
     """
     if x.ndim < 2:
         return 0
+    if torch.compiler.is_compiling():
+        return x.shape[-1]
     return x.stride(-2)
 
 
@@ -69,6 +71,8 @@ def _is_inner_contiguous(x: torch.Tensor) -> bool:
 
 def _ensure_inner_contiguous(x: torch.Tensor) -> torch.Tensor:
     """Make the tensor inner-contiguous if it isn't already."""
+    if torch.compiler.is_compiling():
+        return x.contiguous()
     if _is_inner_contiguous(x):
         return x
     return x.contiguous()
@@ -145,7 +149,6 @@ def sigmoid_bwd_kernel(
 
 
 @dispatch('modules')
-@torch.compiler.disable
 def sigmoid_fwd(x: torch.Tensor, output_contiguous: bool = False) -> torch.Tensor:
     x = _ensure_inner_contiguous(x)
     T, D = x.numel(), x.shape[-1]
@@ -162,7 +165,6 @@ def sigmoid_fwd(x: torch.Tensor, output_contiguous: bool = False) -> torch.Tenso
 
 
 @dispatch('modules')
-@torch.compiler.disable
 def sigmoid_bwd(x: torch.Tensor, dy: torch.Tensor, output_contiguous: bool = False) -> torch.Tensor:
     x = _ensure_inner_contiguous(x)
     dy = _ensure_inner_contiguous(dy)
@@ -265,7 +267,6 @@ def logsigmoid_bwd_kernel(
 
 
 @dispatch('modules')
-@torch.compiler.disable
 def logsigmoid_fwd(x: torch.Tensor, temperature: float = 1., output_contiguous: bool = False) -> torch.Tensor:
     x = _ensure_inner_contiguous(x)
     T, D = x.numel(), x.shape[-1]
@@ -283,7 +284,6 @@ def logsigmoid_fwd(x: torch.Tensor, temperature: float = 1., output_contiguous: 
 
 
 @dispatch('modules')
-@torch.compiler.disable
 def logsigmoid_bwd(
     x: torch.Tensor,
     dy: torch.Tensor,
@@ -388,7 +388,6 @@ def swish_bwd_kernel(
 
 
 @dispatch('modules')
-@torch.compiler.disable
 def swish_fwd(x: torch.Tensor, output_contiguous: bool = False) -> torch.Tensor:
     x = _ensure_inner_contiguous(x)
     T, D = x.numel(), x.shape[-1]
@@ -405,7 +404,6 @@ def swish_fwd(x: torch.Tensor, output_contiguous: bool = False) -> torch.Tensor:
 
 
 @dispatch('modules')
-@torch.compiler.disable
 def swish_bwd(x: torch.Tensor, dy: torch.Tensor, output_contiguous: bool = False) -> torch.Tensor:
     x = _ensure_inner_contiguous(x)
     dy = _ensure_inner_contiguous(dy)
@@ -636,7 +634,6 @@ def swiglu_fwdbwd_kernel(
 
 
 @dispatch('modules')
-@torch.compiler.disable
 def swiglu_fwd(x: torch.Tensor, y: torch.Tensor, output_contiguous: bool = False) -> torch.Tensor:
     assert x.shape == y.shape, f"swiglu_fwd: shape mismatch x={x.shape} y={y.shape}"
     x = _ensure_inner_contiguous(x)
@@ -657,7 +654,6 @@ def swiglu_fwd(x: torch.Tensor, y: torch.Tensor, output_contiguous: bool = False
 
 
 @dispatch('modules')
-@torch.compiler.disable
 def swiglu_fwdbwd(
     x: torch.Tensor,
     y: torch.Tensor,
@@ -1058,7 +1054,7 @@ def powglu_fwdbwd_kernel(
         tl.store(z + row * stride_z_row + col, b_z.to(z.dtype.element_ty), mask=mask)
 
 
-@torch.compiler.disable
+@dispatch('modules')
 def powglu_fwd(x: torch.Tensor, y: torch.Tensor, power: float = 3.0, output_contiguous: bool = False) -> torch.Tensor:
     assert x.shape == y.shape, f"powglu_fwd: shape mismatch x={x.shape} y={y.shape}"
     x = _ensure_inner_contiguous(x)
@@ -1079,7 +1075,7 @@ def powglu_fwd(x: torch.Tensor, y: torch.Tensor, power: float = 3.0, output_cont
     return z
 
 
-@torch.compiler.disable
+@dispatch('modules')
 def powglu_fwdbwd(
     x: torch.Tensor,
     y: torch.Tensor,
@@ -1186,6 +1182,7 @@ def powglu(x: torch.Tensor, y: torch.Tensor, power: float = 3.0) -> torch.Tensor
     return PowGLUFunction.apply(x, y, power)
 
 
+@dispatch('modules')
 def powglu_linear(
     x: torch.Tensor,
     y: torch.Tensor,
