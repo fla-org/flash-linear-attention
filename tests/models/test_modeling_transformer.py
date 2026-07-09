@@ -12,6 +12,11 @@ from fla.models import TransformerConfig
 
 from .test_modeling_base import run_test_generation, run_test_model_forward_backward
 
+pytest.importorskip(
+    "flash_attn",
+    reason="Attention requires flash-attn to be installed (`pip install flash-attn --no-build-isolation`).",
+)
+
 
 # ===================================================================================
 # Test for Modeling (Forward/Backward Pass)

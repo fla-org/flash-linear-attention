@@ -452,6 +452,11 @@ def test_parallel_decode(
         window_size: int,
         dtype: torch.dtype,
 ):
+    if window_size > 0:
+        pytest.importorskip(
+            "flash_attn",
+            reason="NSA sliding-window attention requires flash-attn (`pip install flash-attn --no-build-isolation`).",
+        )
     torch.manual_seed(42)
 
     q = (torch.rand((B, T, HQ, D), dtype=dtype, device=device) * 3 - 2).requires_grad_(True)
@@ -841,6 +846,11 @@ def test_parallel_varlen_decode(
         q_lens,
         dtype: torch.dtype,
 ):
+    if window_size > 0:
+        pytest.importorskip(
+            "flash_attn",
+            reason="NSA sliding-window attention requires flash-attn (`pip install flash-attn --no-build-isolation`).",
+        )
     torch.manual_seed(42)
 
     T = cu_seqlens[-1]
