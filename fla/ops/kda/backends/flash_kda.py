@@ -32,7 +32,7 @@ class FlashKDABackend(BaseBackend):
     raw tensors and set all three ``*_in_kernel`` flags.
     """
 
-    backend_type = "flashkda"
+    backend_type = "flash_kda"
     package_name = "flash_kda"
     env_var = "FLA_FLASH_KDA"
     default_enable = True

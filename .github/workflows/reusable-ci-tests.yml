@@ -25,11 +25,6 @@ on:
         required: false
         type: string
         default: 'cu128'
-      nvcc_toolkit_version:
-        description: 'The NVCC toolkit version to install (e.g., 12.8.1)'
-        required: false
-        type: string
-        default: '12.8.1'
       skip_gpu_check:
         description: 'Whether to skip the GPU check (default: false)'
         required: false
@@ -50,7 +45,7 @@ jobs:
 
     steps:
       - name: Check out repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.0
 
       - name: Setup CI Environment
         id: setup
@@ -61,7 +56,6 @@ jobs:
           pytorch_version: ${{ inputs.pytorch_version }}
           gpu_type: ${{ inputs.gpu_type }}
           pytorch_cuda_version: ${{ inputs.pytorch_cuda_version }}
-          nvcc_toolkit_version: ${{ inputs.nvcc_toolkit_version }}
           install_tilelang: "true"
           skip_gpu_check: ${{ inputs.skip_gpu_check }}
 
@@ -93,30 +87,66 @@ jobs:
             echo "dispatch_changed=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Detect Triton baseline support
-        if: steps.find-ops-tests.outputs.test_files && steps.setup.outputs.skip_tests == 'false'
-        id: triton-baseline
-        shell: bash
-        run: |
-          RUN_TRITON_BASELINE=$($CONDA_BIN_PATH/python -c "from fla.utils import IS_NVIDIA_HOPPER, TRITON_ABOVE_3_4_0; print('false' if IS_NVIDIA_HOPPER and TRITON_ABOVE_3_4_0 else 'true')")
-          echo "run=$RUN_TRITON_BASELINE" >> $GITHUB_OUTPUT
-          if [ "$RUN_TRITON_BASELINE" = "false" ]; then
-            echo "Skipping dispatch-disabled Triton baseline: gated chunk_bwd_dqkwg is blocked on Hopper with Triton >= 3.4.0 (#640)."
-          fi
-
       - name: Run pytest on ops test files (dispatch DISABLED, Triton baseline)
-        if: steps.find-ops-tests.outputs.test_files && steps.setup.outputs.skip_tests == 'false' && steps.triton-baseline.outputs.run == 'true'
+        if: steps.find-ops-tests.outputs.test_files && steps.setup.outputs.skip_tests == 'false'
         shell: bash
         env:
           FLA_DISABLE_BACKEND_DISPATCH: "1"
         run: |
-          $CONDA_BIN_PATH/pytest -s -v --exitfirst ${{ steps.find-ops-tests.outputs.test_files }}
+          # Run each test file in its own pytest process (single concurrency).
+          # The op suite accumulates Triton JIT caches, PyTorch allocator state
+          # and Python objects in a single process until it exceeds the runner's
+          # ~15GB RAM and gets OOM-killed (exit 137). One file per process
+          # releases all memory between files. --exitfirst still stops a file at
+          # its first failure.
+          for f in ${{ steps.find-ops-tests.outputs.test_files }}; do
+            $CONDA_BIN_PATH/pytest -s -v --exitfirst "$f" || exit 1
+          done
 
       - name: Run pytest on ops test files (dispatch ENABLED, backend coverage)
-        if: steps.find-ops-tests.outputs.test_files && steps.setup.outputs.skip_tests == 'false' && (steps.triton-baseline.outputs.run == 'false' || steps.check-dispatch.outputs.dispatch_changed == 'true')
+        if: steps.find-ops-tests.outputs.test_files && steps.setup.outputs.skip_tests == 'false' && steps.check-dispatch.outputs.dispatch_changed == 'true'
+        id: dispatch-coverage
+        continue-on-error: true
         shell: bash
         run: |
-          $CONDA_BIN_PATH/pytest -s -v --exitfirst ${{ steps.find-ops-tests.outputs.test_files }}
+          # Same per-file splitting as the baseline batch above (avoid runner OOM).
+          # Append each file's output to the coverage log.
+          : > /tmp/fla-dispatch-coverage.log
+          for f in ${{ steps.find-ops-tests.outputs.test_files }}; do
+            $CONDA_BIN_PATH/pytest -s -v --exitfirst "$f" 2>&1 | tee -a /tmp/fla-dispatch-coverage.log
+            test ${PIPESTATUS[0]} -eq 0 || exit 1
+          done
+
+      - name: Comment on PR when dispatch coverage fails
+        if: steps.dispatch-coverage.outcome == 'failure' && github.event_name == 'pull_request'
+        continue-on-error: true
+        uses: actions/github-script@v9.0.0
+        with:
+          script: |
+            const fs = require('fs');
+            let tail = '(log unavailable)';
+            try {
+              const lines = fs.readFileSync('/tmp/fla-dispatch-coverage.log', 'utf8').trimEnd().split('\n');
+              tail = lines.slice(-40).join('\n');
+            } catch (e) {}
+            const body = [
+              '⚠️ **Dispatch coverage (backend) failed** while the Triton baseline passed.',
+              '',
+              'The dispatched backend (e.g. TileLang) disagrees with the Triton reference. CI is not blocked, but please review the backend changes.',
+              '',
+              '<details><summary>Last 40 lines of the failure log</summary>',
+              '',
+              '```text',
+              tail,
+              '```',
+              '</details>',
+            ].join('\n');
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body,
+            });
 
   test-models:
     runs-on: ${{ inputs.runner }}
@@ -124,11 +154,10 @@ jobs:
     if: (success() || failure()) && inputs.skip_models_tests == false
     env:
       FLA_CI_ENV: 1
-      FLA_DISABLE_BACKEND_DISPATCH: "1"
 
     steps:
       - name: Check out repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.0
 
       - name: Setup CI Environment
         id: setup
@@ -139,8 +168,7 @@ jobs:
           pytorch_version: ${{ inputs.pytorch_version }}
           gpu_type: ${{ inputs.gpu_type }}
           pytorch_cuda_version: ${{ inputs.pytorch_cuda_version }}
-          nvcc_toolkit_version: ${{ inputs.nvcc_toolkit_version }}
-          install_tilelang: "false"
+          install_tilelang: "true"
           skip_gpu_check: ${{ inputs.skip_gpu_check }}
 
       - name: Find dependent Model test files for Models

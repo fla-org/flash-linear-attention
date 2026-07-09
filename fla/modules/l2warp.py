@@ -16,13 +16,20 @@ class L2Wrap(torch.autograd.Function):
     This version is memory-optimized by not storing the full logits tensor.
     """
     @staticmethod
-    def forward(ctx, loss, logits, l2_penalty_factor=1e-4):
+    def forward(
+        ctx,
+        loss: torch.Tensor,
+        logits: torch.Tensor,
+        l2_penalty_factor: float = 1e-4,
+    ) -> torch.Tensor:
         """
-        Forward pass for L2 penalty.
         Args:
-            loss (torch.Tensor): The loss tensor.
-            logits (torch.Tensor): Shape[B, T, V] The logits tensor.
-            l2_penalty_factor (float): The factor for L2 penalty.
+            loss (torch.Tensor):
+                The already-reduced (scalar) loss to wrap.
+            logits (torch.Tensor):
+                The logits of shape `[B, T, V]`.
+            l2_penalty_factor (float, Optional):
+                The strength of the L2 penalty on the max logit. Default: 1e-4.
         """
         maxx, ids = torch.max(logits, dim=-1, keepdim=True)
         ctx.logits_shape = logits.shape
@@ -32,11 +39,12 @@ class L2Wrap(torch.autograd.Function):
         return loss
 
     @staticmethod
-    def backward(ctx, grad_output):
+    def backward(ctx, grad_output: torch.Tensor):
         maxx, ids = ctx.saved_tensors
-        glogits = torch.zeros(ctx.logits_shape, device=grad_output.device,
-                              dtype=grad_output.dtype)
-        glogits.scatter_(-1, ids, maxx)
+        glogits = torch.zeros(ctx.logits_shape, device=grad_output.device, dtype=grad_output.dtype)
+        # an autograd.Function must scale its input gradients by the upstream gradient; fold the
+        # scalar grad_output into the sparse maxx to avoid a second full-size logits allocation
+        glogits.scatter_(-1, ids, maxx * grad_output)
         return grad_output, glogits, None
 
 

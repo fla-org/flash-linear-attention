@@ -180,7 +180,8 @@ def rotary_embedding_fwdbwd(
     else:
         assert seqlen_offsets + T <= TR
 
-    y = torch.empty_like(x) if not inplace else x
+    # zeros_like: rows the kernel skips (negative o_cs under left-padding) must be defined, not uninitialized.
+    y = torch.zeros_like(x) if not inplace else x
     if R2 < D and not inplace:
         y[..., R2:].copy_(x[..., R2:])
 

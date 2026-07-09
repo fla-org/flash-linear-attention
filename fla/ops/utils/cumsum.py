@@ -9,6 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.backends import dispatch
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.index import prepare_chunk_indices
 from fla.utils import autotune_cache_kwargs, check_shared_mem, input_guard
@@ -393,6 +394,7 @@ def chunk_global_cumsum_vector(
 
 
 @input_guard
+@dispatch('utils')
 def chunk_global_cumsum(
     s: torch.Tensor,
     reverse: bool = False,
@@ -430,6 +432,7 @@ def chunk_global_cumsum(
 
 
 @input_guard
+@dispatch('utils')
 def chunk_local_cumsum(
     g: torch.Tensor,
     chunk_size: int,

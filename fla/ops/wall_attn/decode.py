@@ -66,9 +66,9 @@ def parallel_wall_attn_decode_kernel(
     i_h = i_hq // G
     RCP_LN2: tl.constexpr = 1.4426950216
 
-    bos_q = i_b * T_q
-    bos_kv = i_b * T_kv
-    bos_nc = i_b * NC
+    bos_q = (i_b * T_q).to(tl.int64)
+    bos_kv = (i_b * T_kv).to(tl.int64)
+    bos_nc = (i_b * NC).to(tl.int64)
 
     p_q = tl.make_block_ptr(
         q + (bos_q * HQ + i_hq) * K, (T_q, K), (HQ * K, 1),

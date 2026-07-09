@@ -24,6 +24,7 @@ Keep review/PR comments concise and natural — skip heavy `**1.** **2.**` scaff
 
 This repo provides task-specific workflow skills under `.agents/skills/*/SKILL.md`:
 
+- **`fla-optimization-loop`** — disciplined, reproducible kernel optimization loop with a frozen pytest correctness gate (`benchmarks/ops/verify.py`)
 - **`fla-nvidia-performance`** — NVIDIA GPU kernel / Triton / Gluon / TileLang / CUDA backend performance work
 - **`fla-kda`** — KDA-specific gate, intra/inter, backend, and test workflow
 - **`fla-dispatch-backends`** — `@dispatch` decorator and backend registry workflow

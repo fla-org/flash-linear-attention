@@ -56,14 +56,14 @@ def parallel_nsa_compression_fwd_kernel(
 
     if IS_VARLEN:
         i_n, i_t = tl.load(token_indices_q + i_t * 2).to(tl.int32), tl.load(token_indices_q + i_t * 2 + 1).to(tl.int32)
-        bos_q, eos_q = tl.load(cu_seqlens_q + i_n).to(tl.int32), tl.load(cu_seqlens_q + i_n + 1).to(tl.int32)
-        bos_k, eos_k = tl.load(cu_seqlens_k + i_n).to(tl.int32), tl.load(cu_seqlens_k + i_n + 1).to(tl.int32)
-        TQ = eos_q - bos_q
-        TK = eos_k - bos_k
+        bos_q, eos_q = tl.load(cu_seqlens_q + i_n).to(tl.int64), tl.load(cu_seqlens_q + i_n + 1).to(tl.int64)
+        bos_k, eos_k = tl.load(cu_seqlens_k + i_n).to(tl.int64), tl.load(cu_seqlens_k + i_n + 1).to(tl.int64)
+        TQ = (eos_q - bos_q).to(tl.int32)
+        TK = (eos_k - bos_k).to(tl.int32)
         TC = tl.cdiv(TK, BS)
         boc = tl.load(chunk_offsets + i_n).to(tl.int32)
     else:
-        bos_q, eos_q = i_b * TQ, i_b * TQ + TQ
+        bos_q, eos_q = (i_b * TQ).to(tl.int64), (i_b * TQ + TQ).to(tl.int64)
         TC = tl.cdiv(TK, BS)
         boc = i_b * TC
 
@@ -162,11 +162,11 @@ def parallel_nsa_compression_bwd_kernel_dq(
     all = B * T
     if IS_VARLEN:
         i_n, i_t = tl.load(token_indices + i_t * 2).to(tl.int32), tl.load(token_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-        T = eos - bos
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = (eos - bos).to(tl.int32)
         boc = tl.load(chunk_offsets + i_n).to(tl.int32)
     else:
-        bos, eos = i_b * T, i_b * T + T
+        bos, eos = (i_b * T).to(tl.int64), (i_b * T + T).to(tl.int64)
         boc = i_b * tl.cdiv(T, BS)
 
     q += (bos + i_t) * HQ*K
@@ -269,13 +269,13 @@ def parallel_nsa_compression_bwd_kernel_dkv(
 
     if IS_VARLEN:
         i_n, i_c = tl.load(chunk_indices + i_c * 2).to(tl.int32), tl.load(chunk_indices + i_c * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-        T = eos - bos
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = (eos - bos).to(tl.int32)
         # the number of compression representations in total
         TC = tl.cdiv(T, BS)
         boc = tl.load(chunk_offsets + i_n).to(tl.int32)
     else:
-        bos, eos = i_b * T, i_b * T + T
+        bos, eos = (i_b * T).to(tl.int64), (i_b * T + T).to(tl.int64)
         boc = i_b * tl.cdiv(T, BS)
 
     p_k = tl.make_block_ptr(k + (boc * H + i_h) * K, (TC, K), (H*K, 1), (i_c * BC, 0), (BC, BK), (1, 0))
@@ -521,7 +521,7 @@ class ParallelNSACompressionFunction(torch.autograd.Function):
         ctx.token_indices = token_indices_q
         ctx.block_size = block_size
         ctx.scale = scale
-        # q/k cu_seqlens differ only in cached inference (Tq != Tk), where backward is not supported
+        # q/k cu_seqlens differ only in cached inference (TQ != TK), where backward is not supported
         ctx.tq_ne_tk = isinstance(cu_seqlens, tuple)
         return o.to(q.dtype), lse
 
