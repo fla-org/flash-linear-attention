@@ -49,6 +49,7 @@ class RetNetConfig(PretrainedConfig):
         fuse_linear_cross_entropy: bool = False,
         use_l2warp: bool = False,
         vocab_size: int = 32000,
+        attnres_block_size: int | None = None,
         **kwargs,
     ) -> RetNetConfig:
         self.attn_mode = attn_mode
@@ -79,6 +80,7 @@ class RetNetConfig(PretrainedConfig):
         self.fuse_linear_cross_entropy = fuse_linear_cross_entropy
         self.use_l2warp = use_l2warp
         self.vocab_size = vocab_size
+        self.attnres_block_size = attnres_block_size
 
         if fuse_cross_entropy and fuse_linear_cross_entropy:
             raise ValueError(
@@ -102,6 +104,13 @@ class RetNetConfig(PretrainedConfig):
             attn['qkv_bias'] = attn.get('qkv_bias', False)
             attn['window_size'] = attn.get('window_size', None)
             attn['rope_theta'] = attn.get('rope_theta', 10000.)
+
+        if attnres_block_size is not None and attnres_block_size != 1:
+            if attnres_block_size < 2 or attnres_block_size % 2 != 0:
+                raise ValueError(
+                    "`attnres_block_size` must be `None`, `1` (full mode), or an even integer (one block "
+                    f"contains `attnres_block_size // 2` transformer layers); got {attnres_block_size}."
+                )
 
         super().__init__(
             pad_token_id=pad_token_id,

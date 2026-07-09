@@ -15,6 +15,7 @@ from .deltaformer import DeltaFormerAttention
 from .forgetting_attn import ForgettingAttention
 from .gated_deltanet import GatedDeltaNet
 from .gated_deltaproduct import GatedDeltaProduct
+from .gdn2 import GatedDeltaNet2
 from .gla import GatedLinearAttention
 from .gsa import GatedSlotAttention
 from .hgrn import HGRNAttention
@@ -25,17 +26,22 @@ from .linear_attn import LinearAttention
 from .log_linear_mamba2 import LogLinearMamba2
 from .mamba import Mamba
 from .mamba2 import Mamba2
+from .mamba3 import Mamba3
 from .mesa_net import MesaNet
 from .mla import MultiheadLatentAttention
 from .moba import MoBA
 from .mom import MomAttention
 from .multiscale_retention import MultiScaleRetention
 from .nsa import NativeSparseAttention
+from .parallax import Parallax
 from .path_attn import PaTHAttention
+from .raven import Raven
 from .rebased import ReBasedLinearAttention
 from .rodimus import RodimusAttention, SlidingWindowSharedKeyAttention
 from .rwkv6 import RWKV6Attention
 from .rwkv7 import RWKV7Attention
+from .wall_attn import WallAttention
+from .yoco import YOCOCrossAttention, YOCOGatedRetention, YOCOSharedKVBuilder
 
 __all__ = [
     'ABCAttention',
@@ -47,6 +53,7 @@ __all__ = [
     'DeltaNet',
     'ForgettingAttention',
     'GatedDeltaNet',
+    'GatedDeltaNet2',
     'GatedDeltaProduct',
     'GatedLinearAttention',
     'GatedSlotAttention',
@@ -58,6 +65,7 @@ __all__ = [
     'LogLinearMamba2',
     'Mamba',
     'Mamba2',
+    'Mamba3',
     'MesaNet',
     'MoBA',
     'MomAttention',
@@ -65,9 +73,15 @@ __all__ = [
     'MultiheadLatentAttention',
     'NativeSparseAttention',
     'PaTHAttention',
+    'Parallax',
     'RWKV6Attention',
     'RWKV7Attention',
+    'Raven',
     'ReBasedLinearAttention',
     'RodimusAttention',
     'SlidingWindowSharedKeyAttention',
+    'WallAttention',
+    'YOCOCrossAttention',
+    'YOCOGatedRetention',
+    'YOCOSharedKVBuilder',
 ]

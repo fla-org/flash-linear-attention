@@ -10,8 +10,10 @@ import warnings
 import torch
 
 from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
+from fla.ops.backends import dispatch
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_gated_delta_rule_fwd_h
 from fla.ops.common.chunk_o import chunk_bwd_dqkwg, chunk_bwd_dv_local, chunk_fwd_o
+from fla.ops.common.gate import fused_beta_sigmoid, fused_beta_sigmoid_bwd
 from fla.ops.cp import FLACPContext
 from fla.ops.cp.chunk_delta_h import (
     chunk_gated_delta_rule_bwd_dhu_pre_process,
@@ -37,22 +39,22 @@ def chunk_gated_delta_rule_fwd(
     scale: float,
     initial_state: torch.Tensor,
     output_final_state: bool,
+    state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     cp_context: FLACPContext | None = None,
     chunk_indices: torch.LongTensor | None = None,
-    use_exp2: bool = True,
-    transpose_state_layout: bool = False,
     use_gate_in_kernel: bool = False,
     A_log: torch.Tensor | None = None,
     dt_bias: torch.Tensor | None = None,
+    chunk_size: int = 64,
 ):
     g_input = g if use_gate_in_kernel else None
     if use_gate_in_kernel:
         g = gdn_gate_chunk_cumsum(
             g=g,
             A_log=A_log,
-            chunk_size=64,
-            scale=RCP_LN2 if use_exp2 else None,
+            chunk_size=chunk_size,
+            scale=RCP_LN2,
             dt_bias=dt_bias,
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
@@ -60,8 +62,8 @@ def chunk_gated_delta_rule_fwd(
     else:
         g = chunk_local_cumsum(
             g,
-            chunk_size=64,
-            scale=RCP_LN2 if use_exp2 else None,
+            chunk_size=chunk_size,
+            scale=RCP_LN2,
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
         )
@@ -74,7 +76,7 @@ def chunk_gated_delta_rule_fwd(
         beta=beta,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
-        use_exp2=use_exp2,
+        chunk_size=chunk_size,
     )
 
     if cp_context is not None:
@@ -86,8 +88,8 @@ def chunk_gated_delta_rule_fwd(
             cu_seqlens=cu_seqlens,
             initial_state=initial_state,
             context=cp_context,
-            use_exp2=use_exp2,
-            transpose_state_layout=transpose_state_layout,
+            state_v_first=state_v_first,
+            chunk_size=chunk_size,
         )
 
     h, v_new, final_state = chunk_gated_delta_rule_fwd_h(
@@ -99,8 +101,8 @@ def chunk_gated_delta_rule_fwd(
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
-        use_exp2=use_exp2,
-        transpose_state_layout=transpose_state_layout,
+        state_v_first=state_v_first,
+        chunk_size=chunk_size,
     )
 
     if cp_context is not None:
@@ -115,8 +117,8 @@ def chunk_gated_delta_rule_fwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
-        use_exp2=use_exp2,
-        transpose_state_layout=transpose_state_layout,
+        state_v_first=state_v_first,
+        chunk_size=chunk_size,
     )
     return g, o, A, final_state, initial_state, g_input
 
@@ -132,15 +134,15 @@ def chunk_gated_delta_rule_bwd(
     initial_state: torch.Tensor,
     do: torch.Tensor,
     dht: torch.Tensor,
+    state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     cp_context: FLACPContext | None = None,
     chunk_indices: torch.LongTensor | None = None,
-    use_exp2: bool = True,
-    transpose_state_layout: bool = False,
     use_gate_in_kernel: bool = False,
     g_input: torch.Tensor | None = None,
     A_log: torch.Tensor | None = None,
     dt_bias: torch.Tensor | None = None,
+    chunk_size: int = 64,
 ):
     w, u = recompute_w_u_fwd(
         k=k,
@@ -150,7 +152,6 @@ def chunk_gated_delta_rule_bwd(
         g=g,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
-        use_exp2=use_exp2,
     )
 
     if cp_context is not None:
@@ -165,8 +166,8 @@ def chunk_gated_delta_rule_bwd(
         output_final_state=False,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
-        use_exp2=use_exp2,
-        transpose_state_layout=transpose_state_layout,
+        state_v_first=state_v_first,
+        chunk_size=chunk_size,
     )
     dv = chunk_bwd_dv_local(
         q=q,
@@ -176,7 +177,7 @@ def chunk_gated_delta_rule_bwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
-        use_exp2=use_exp2,
+        chunk_size=chunk_size,
     )
 
     if cp_context is not None:
@@ -194,8 +195,8 @@ def chunk_gated_delta_rule_bwd(
             dht=dht,
             initial_state=initial_state,
             context=cp_context,
-            use_exp2=use_exp2,
-            transpose_state_layout=transpose_state_layout,
+            state_v_first=state_v_first,
+            chunk_size=chunk_size,
         )
 
     dh, dh0, dv = chunk_gated_delta_rule_bwd_dhu(
@@ -210,8 +211,8 @@ def chunk_gated_delta_rule_bwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
-        use_exp2=use_exp2,
-        transpose_state_layout=transpose_state_layout,
+        state_v_first=state_v_first,
+        chunk_size=chunk_size,
     )
     dq, dk, dw, dg = chunk_bwd_dqkwg(
         q=q,
@@ -226,8 +227,8 @@ def chunk_gated_delta_rule_bwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
-        use_exp2=use_exp2,
-        transpose_state_layout=transpose_state_layout,
+        state_v_first=state_v_first,
+        chunk_size=chunk_size,
     )
     dk2, dv, db, dg2 = prepare_wy_repr_bwd(
         k=k,
@@ -239,11 +240,10 @@ def chunk_gated_delta_rule_bwd(
         du=dv,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
-        use_exp2=use_exp2,
     )
     dk.add_(dk2)
     dg.add_(dg2)
-    dg = chunk_local_cumsum(dg, chunk_size=64, reverse=True, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
+    dg = chunk_local_cumsum(dg, chunk_size=chunk_size, reverse=True, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
     dA_log, ddt_bias = None, None
     if use_gate_in_kernel:
         dg, dA_log, ddt_bias = gdn_gate_bwd(g=g_input, A_log=A_log, dt_bias=dt_bias, dyg=dg)
@@ -265,22 +265,30 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         scale: float,
         initial_state: torch.Tensor,
         output_final_state: bool,
+        state_v_first: bool = False,
         cu_seqlens: torch.LongTensor | None = None,
         cu_seqlens_cpu: torch.LongTensor | None = None,
         use_qk_l2norm_in_kernel: bool = False,
-        cp_context: FLACPContext | None = None,
-        transpose_state_layout: bool = False,
         use_gate_in_kernel: bool = False,
         A_log: torch.Tensor | None = None,
         dt_bias: torch.Tensor | None = None,
+        use_beta_sigmoid_in_kernel: bool = False,
+        allow_neg_eigval: bool = False,
+        cp_context: FLACPContext | None = None,
+        chunk_size: int = 64,
     ):
         q_rstd, k_rstd = None, None
         if use_qk_l2norm_in_kernel:
             q, q_rstd = l2norm_fwd(q)
             k, k_rstd = l2norm_fwd(k)
 
-        chunk_indices = prepare_chunk_indices(
-            cu_seqlens, 64, cu_seqlens_cpu=cu_seqlens_cpu) if cu_seqlens is not None else None
+        beta_raw = beta
+        if use_beta_sigmoid_in_kernel:
+            beta = fused_beta_sigmoid(beta_raw, scale=2.0 if allow_neg_eigval else 1.0)
+
+        chunk_indices = None
+        if cu_seqlens is not None:
+            chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size, cu_seqlens_cpu=cu_seqlens_cpu)
         g, o, A, final_state, initial_state, g_input = chunk_gated_delta_rule_fwd(
             q=q,
             k=k,
@@ -293,20 +301,36 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             cu_seqlens=cu_seqlens,
             cp_context=cp_context,
             chunk_indices=chunk_indices,
-            transpose_state_layout=transpose_state_layout,
+            state_v_first=state_v_first,
             use_gate_in_kernel=use_gate_in_kernel,
             A_log=A_log,
             dt_bias=dt_bias,
+            chunk_size=chunk_size,
         )
         ctx.save_for_backward(
-            q, q_rstd, k, k_rstd, v, g, beta, A,
-            initial_state, cu_seqlens, chunk_indices,
-            g_input, A_log, dt_bias,
+            q,
+            q_rstd,
+            k,
+            k_rstd,
+            v,
+            g,
+            beta_raw,
+            beta,
+            A,
+            initial_state,
+            cu_seqlens,
+            chunk_indices,
+            g_input,
+            A_log,
+            dt_bias,
         )
         ctx.scale = scale
+        ctx.chunk_size = chunk_size
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
+        ctx.use_beta_sigmoid_in_kernel = use_beta_sigmoid_in_kernel
+        ctx.allow_neg_eigval = allow_neg_eigval
         ctx.cp_context = cp_context
-        ctx.transpose_state_layout = transpose_state_layout
+        ctx.state_v_first = state_v_first
         ctx.use_gate_in_kernel = use_gate_in_kernel
         return o.to(q.dtype), final_state
 
@@ -318,9 +342,23 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         do: torch.Tensor,
         dht: torch.Tensor,
     ):
-        (q, q_rstd, k, k_rstd, v, g, beta, A,
-         initial_state, cu_seqlens, chunk_indices,
-         g_input, A_log, dt_bias) = ctx.saved_tensors
+        (
+            q,
+            q_rstd,
+            k,
+            k_rstd,
+            v,
+            g,
+            beta_raw,
+            beta,
+            A,
+            initial_state,
+            cu_seqlens,
+            chunk_indices,
+            g_input,
+            A_log,
+            dt_bias,
+        ) = ctx.saved_tensors
         dq, dk, dv, db, dg, dh0, dA_log, ddt_bias = chunk_gated_delta_rule_bwd(
             q=q,
             k=k,
@@ -335,22 +373,26 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             cu_seqlens=cu_seqlens,
             cp_context=ctx.cp_context,
             chunk_indices=chunk_indices,
-            transpose_state_layout=ctx.transpose_state_layout,
+            state_v_first=ctx.state_v_first,
             use_gate_in_kernel=ctx.use_gate_in_kernel,
             g_input=g_input,
             A_log=A_log,
             dt_bias=dt_bias,
+            chunk_size=ctx.chunk_size,
         )
         if ctx.use_qk_l2norm_in_kernel:
             dq = l2norm_bwd(q, q_rstd, dq)
             dk = l2norm_bwd(k, k_rstd, dk)
+        if ctx.use_beta_sigmoid_in_kernel:
+            db = fused_beta_sigmoid_bwd(beta_raw, db, scale=2.0 if ctx.allow_neg_eigval else 1.0)
         return (
-            dq.to(q), dk.to(k), dv.to(v), dg.to(g), db.to(beta),
-            None, dh0, None, None, None, None, None, None,
-            None, dA_log, ddt_bias,
+            dq.to(q), dk.to(k), dv.to(v), dg.to(g), db.to(beta_raw),
+            None, dh0, None, None, None, None, None, None, dA_log, ddt_bias,
+            None, None, None, None,
         )
 
 
+@dispatch('gated_delta_rule')
 @torch.compiler.disable
 def chunk_gated_delta_rule(
     q: torch.Tensor,
@@ -358,14 +400,16 @@ def chunk_gated_delta_rule(
     v: torch.Tensor,
     g: torch.Tensor,
     beta: torch.Tensor,
-    scale: float = None,
-    initial_state: torch.Tensor = None,
+    scale: float | None = None,
+    initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
+    use_beta_sigmoid_in_kernel: bool = False,
+    allow_neg_eigval: bool = False,
+    state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     cu_seqlens_cpu: torch.LongTensor | None = None,
     cp_context: FLACPContext | None = None,
-    transpose_state_layout: bool = False,
     **kwargs,
 ):
     r"""
@@ -395,16 +439,6 @@ def chunk_gated_delta_rule(
             Whether to output the final state of shape `[N, HV, K, V]`. Default: `False`.
         use_qk_l2norm_in_kernel (bool):
             Whether to apply L2norm to the q/k tensor internally. Default: `False`.
-        cu_seqlens (torch.LongTensor):
-            Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
-            consistent with the FlashAttention API.
-        cp_context (Optional[FLACPContext]):
-            Context parallel context for distributed training across multiple devices.
-            When provided, `initial_state` and `output_final_state` are not supported,
-            and `cu_seqlens` will be overridden by the context. Default: `None`.
-        transpose_state_layout (Optional[bool]):
-            Whether to use the transposed state layout for the hidden state.
-            Default: `False`.
         use_gate_in_kernel (bool):
             Whether to compute the log-space GDN decay internally.
             When `True`, the passed `g` is the raw input, and `A_log` must be provided.
@@ -415,6 +449,24 @@ def chunk_gated_delta_rule(
         dt_bias (Optional[torch.Tensor]):
             Bias added to `g` before activation, of shape `[HV]`.
             Only used when `use_gate_in_kernel=True`.
+        use_beta_sigmoid_in_kernel (bool):
+            Whether to apply `torch.sigmoid(beta)` before launching the chunk kernel.
+            - If `True`, the passed `beta` acts as the raw beta logits.
+            - If `False`, `beta` is expected to already be in post-sigmoid space.
+            Default: `False`.
+        allow_neg_eigval (bool):
+            Whether to allow negative eigenvalues by scaling `beta` to `[0, 2)`.
+            Only takes effect together with `use_beta_sigmoid_in_kernel=True`, in which case
+            the kernel computes `2 * sigmoid(beta)` instead of `sigmoid(beta)`. Default: `False`.
+        state_v_first (Optional[bool]):
+            Store the recurrent state in V-first ``[V, K]`` layout instead of the default ``[K, V]``. Default: ``False``.
+        cu_seqlens (torch.LongTensor):
+            Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
+            consistent with the FlashAttention API.
+        cp_context (Optional[FLACPContext]):
+            Context parallel context for distributed training across multiple devices.
+            When provided, `initial_state` and `output_final_state` are not supported,
+            and `cu_seqlens` will be overridden by the context. Default: `None`.
 
     Returns:
         o (torch.Tensor):
@@ -451,6 +503,16 @@ def chunk_gated_delta_rule(
             cu_seqlens=cu_seqlens
         )
     """
+    if 'transpose_state_layout' in kwargs:
+        if state_v_first:
+            raise ValueError("Cannot pass both `state_v_first` and the deprecated `transpose_state_layout`.")
+        warnings.warn(
+            "`transpose_state_layout` is deprecated and renamed to `state_v_first`.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        state_v_first = kwargs.pop('transpose_state_layout')
+
     # Validate head dimensions
     if q.shape[2] != k.shape[2]:
         raise ValueError(
@@ -465,10 +527,13 @@ def chunk_gated_delta_rule(
         )
 
     if 'head_first' in kwargs:
-        warnings.warn(
-            "head_first is deprecated and will be removed in a future version. "
-            "Please use head_first=False for now instead.",
+        raise DeprecationWarning(
+            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
         )
+
+    chunk_size = kwargs.pop('chunk_size', 64)
+    if chunk_size not in (16, 32, 64):
+        raise ValueError(f"`chunk_size` must be 16, 32, or 64 for Gated Delta Rule, got {chunk_size}.")
 
     if cp_context is not None:
         assert initial_state is None, "Initial state is not supported for CP"
@@ -494,6 +559,8 @@ def chunk_gated_delta_rule(
     dt_bias = kwargs.get('dt_bias')
     if use_gate_in_kernel:
         assert A_log is not None, "A_log must be provided when use_gate_in_kernel=True."
+    if allow_neg_eigval and not use_beta_sigmoid_in_kernel:
+        raise ValueError("`allow_neg_eigval=True` requires `use_beta_sigmoid_in_kernel=True`.")
 
     if scale is None:
         scale = k.shape[-1] ** -0.5
@@ -506,14 +573,17 @@ def chunk_gated_delta_rule(
         scale,
         initial_state,
         output_final_state,
+        state_v_first,
         cu_seqlens,
         cu_seqlens_cpu,
         use_qk_l2norm_in_kernel,
-        cp_context,
-        transpose_state_layout,
         use_gate_in_kernel,
         A_log,
         dt_bias,
+        use_beta_sigmoid_in_kernel,
+        allow_neg_eigval,
+        cp_context,
+        chunk_size,
     )
     return o, final_state
 

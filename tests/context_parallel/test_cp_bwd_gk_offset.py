@@ -31,6 +31,7 @@ With the bug:  all heads read head 0's gk (=0 in both A and B) → dh identical
 With the fix:  heads 1+ read their own gk → dh very different between A and B
 """
 
+import logging
 import os
 import tempfile
 
@@ -41,7 +42,7 @@ import triton
 from fla.ops.cp.chunk_delta_h import pre_process_bwd_kernel_merged
 from fla.utils import device
 
-os.environ["FLA_ALWAYS_CHECK_CACHE"] = "1"
+logging.basicConfig(level=logging.INFO, format='%(message)s')
 
 
 class TestBwdGkOffset:
@@ -108,18 +109,48 @@ class TestBwdGkOffset:
         # Run A: all gk = 0
         dhm_a = torch.zeros(H, K, V + K, dtype=torch.float32, device=device)
         pre_process_bwd_kernel_merged[grid](
-            q=q, k=k, w=w, g=None, gk=gk_zero, do=do, dhm=dhm_a, dv=dv,
-            cu_seqlens=cu_seqlens, scale=1.0, T=T, H=H, HV=H, K=K, V=V,
-            BT=BT, BK1=BK, USE_EXP2=True, BLOCK_SIZE=BLOCK_SIZE,
+            q=q,
+            k=k,
+            w=w,
+            g=None,
+            gk=gk_zero,
+            do=do,
+            dhm=dhm_a,
+            dv=dv,
+            cu_seqlens=cu_seqlens,
+            scale=1.0,
+            T=T,
+            H=H,
+            HV=H,
+            K=K,
+            V=V,
+            BT=BT,
+            BK1=BK,
+            BLOCK_SIZE=BLOCK_SIZE,
             USE_BG=False,
         )
 
         # Run B: head 0 = 0, heads 1+ = -10
         dhm_b = torch.zeros(H, K, V + K, dtype=torch.float32, device=device)
         pre_process_bwd_kernel_merged[grid](
-            q=q, k=k, w=w, g=None, gk=gk_diff, do=do, dhm=dhm_b, dv=dv,
-            cu_seqlens=cu_seqlens, scale=1.0, T=T, H=H, HV=H, K=K, V=V,
-            BT=BT, BK1=BK, USE_EXP2=True, BLOCK_SIZE=BLOCK_SIZE,
+            q=q,
+            k=k,
+            w=w,
+            g=None,
+            gk=gk_diff,
+            do=do,
+            dhm=dhm_b,
+            dv=dv,
+            cu_seqlens=cu_seqlens,
+            scale=1.0,
+            T=T,
+            H=H,
+            HV=H,
+            K=K,
+            V=V,
+            BT=BT,
+            BK1=BK,
+            BLOCK_SIZE=BLOCK_SIZE,
             USE_BG=False,
         )
 

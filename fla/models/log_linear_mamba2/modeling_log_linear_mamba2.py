@@ -18,6 +18,7 @@ from fla.layers.log_linear_mamba2 import LogLinearMamba2
 from fla.models.log_linear_mamba2.configuration_log_linear_mamba2 import LogLinearMamba2Config
 from fla.models.utils import Cache, FLAGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, GatedMLP, RMSNorm
+from fla.ops.attnres import fused_attnres
 
 logger = logging.get_logger(__name__)
 
@@ -60,6 +61,18 @@ class LogLinearMamba2Block(nn.Module):
             fuse_swiglu=True,
         )
 
+        self.use_attnres = config.attnres_block_size is not None
+        if self.use_attnres:
+            self.attn_res_proj = nn.Linear(in_features=config.hidden_size, out_features=1, bias=False)
+            self.attn_res_norm = nn.RMSNorm(normalized_shape=config.hidden_size, eps=config.norm_eps)
+            self.mlp_res_proj = nn.Linear(in_features=config.hidden_size, out_features=1, bias=False)
+            self.mlp_res_norm = nn.RMSNorm(normalized_shape=config.hidden_size, eps=config.norm_eps)
+            block_size = config.attnres_block_size
+            self.attnres_is_attn_boundary = (2 * layer_idx) % block_size == 0
+            self.attnres_is_mlp_boundary = (2 * layer_idx + 1) % block_size == 0
+            self.attn_res_proj._is_attnres_proj = True
+            self.mlp_res_proj._is_attnres_proj = True
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -67,10 +80,34 @@ class LogLinearMamba2Block(nn.Module):
         past_key_values: Cache | list[torch.FloatTensor] | None = None,
         use_cache: bool | None = False,
         output_attentions: bool | None = False,
+        attnres_states: list[torch.Tensor] | None = None,
         **kwargs,
     ):
-        residual = hidden_states
-        hidden_states = self.mixer_norm(hidden_states)
+        if self.use_attnres:
+            prefix_sum = hidden_states
+            if attnres_states is None:
+                # L=1 single-source: attnres is trivially identity (p=1, mix=v[0]);
+                # apply the prenorm directly, matching the L>1 kernel path which
+                # folds it via `output_rms_weight`. Mirrors Megatron-LM's bypass
+                # at the first layer (where `block_residual` is empty).
+                hidden_states = self.mixer_norm(prefix_sum)
+                attnres_states = [prefix_sum]
+                prefix_sum = None
+            else:
+                residuals = [*attnres_states, prefix_sum]
+                if self.attnres_is_attn_boundary:
+                    attnres_states = residuals
+                    prefix_sum = None
+                hidden_states = fused_attnres(
+                    query=self.attn_res_proj.weight,
+                    residuals=residuals,
+                    rms_weight=self.attn_res_norm.weight,
+                    output_rms_weight=self.mixer_norm.weight,
+                    rms_eps=self.attn_res_norm.eps,
+                )
+        else:
+            residual = hidden_states
+            hidden_states = self.mixer_norm(hidden_states)
         hidden_states, attentions, past_key_values = self.mixer(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
@@ -79,7 +116,21 @@ class LogLinearMamba2Block(nn.Module):
             output_attentions=output_attentions,
             **kwargs,
         )
-        if self.config.fuse_norm:
+
+        if self.use_attnres:
+            prefix_sum = hidden_states if prefix_sum is None else prefix_sum + hidden_states
+            residuals = [*attnres_states, prefix_sum]
+            if self.attnres_is_mlp_boundary:
+                attnres_states = residuals
+                prefix_sum = None
+            hidden_states = fused_attnres(
+                query=self.mlp_res_proj.weight,
+                residuals=residuals,
+                rms_weight=self.mlp_res_norm.weight,
+                output_rms_weight=self.mlp_norm.weight,
+                rms_eps=self.mlp_res_norm.eps,
+            )
+        elif self.config.fuse_norm:
             hidden_states, residual = self.mlp_norm(
                 hidden_states, residual=residual, prenorm=True,
             )
@@ -88,8 +139,12 @@ class LogLinearMamba2Block(nn.Module):
             residual = hidden_states
             hidden_states = self.mlp_norm(hidden_states)
         hidden_states = self.mlp(hidden_states)
-        hidden_states = residual + hidden_states
-        return hidden_states, attentions, past_key_values
+
+        if self.use_attnres:
+            hidden_states = hidden_states if prefix_sum is None else prefix_sum + hidden_states
+        else:
+            hidden_states = residual + hidden_states
+        return hidden_states, attentions, past_key_values, attnres_states
 
 
 class LogLinearMamba2PreTrainedModel(PreTrainedModel, FLAGenerationMixin):
@@ -159,9 +214,14 @@ class LogLinearMamba2PreTrainedModel(PreTrainedModel, FLAGenerationMixin):
             module.dt_bias._no_reinit = True
 
         elif isinstance(module, (nn.Linear, nn.Conv1d)):
-            # Slightly different from the TF version which uses truncated_normal for initialization
-            # cf https://github.com/pytorch/pytorch/pull/5617
-            nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
+            if getattr(module, '_is_attnres_proj', False):
+                # attnres pseudo-query (per-layer projection): zero init keeps
+                # the initial softmax uniform (paper §5)
+                nn.init.zeros_(module.weight)
+            else:
+                # Slightly different from the TF version which uses truncated_normal for initialization
+                # cf https://github.com/pytorch/pytorch/pull/5617
+                nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
                 # guard against deprecated behavior
@@ -214,6 +274,13 @@ class LogLinearMamba2Model(LogLinearMamba2PreTrainedModel):
 
         self.gradient_checkpointing = False
         self.norm_f = RMSNorm(config.hidden_size, eps=config.norm_eps, dtype=torch.float32)
+
+        self.use_attnres = config.attnres_block_size is not None
+        if self.use_attnres:
+            self.res_proj = nn.Linear(in_features=config.hidden_size, out_features=1, bias=False)
+            self.res_norm = nn.RMSNorm(normalized_shape=config.hidden_size, eps=config.norm_eps)
+            self.res_proj._is_attnres_proj = True
+
         # Initialize weights and apply final processing
         self._register_load_state_dict_pre_hook(self.load_hook)
         self.post_init()
@@ -277,6 +344,8 @@ class LogLinearMamba2Model(LogLinearMamba2PreTrainedModel):
             past_key_values = Cache.from_legacy_cache(past_key_values)
 
         hidden_states = inputs_embeds
+        attnres_states: list[torch.Tensor] | None = None
+
         all_hidden_states = () if output_hidden_states else None
         all_attns = () if output_attentions else None
         for mixer_block in self.layers:
@@ -284,28 +353,40 @@ class LogLinearMamba2Model(LogLinearMamba2PreTrainedModel):
                 all_hidden_states = all_hidden_states + (hidden_states,)
 
             if self.gradient_checkpointing and self.training:
-                hidden_states, attentions, past_key_values = self._gradient_checkpointing_func(
+                hidden_states, attentions, past_key_values, attnres_states = self._gradient_checkpointing_func(
                     mixer_block.__call__,
                     hidden_states,
                     attention_mask,
                     past_key_values,
                     use_cache,
                     output_attentions,
+                    attnres_states,
                 )
             else:
-                hidden_states, attentions, past_key_values = mixer_block(
+                hidden_states, attentions, past_key_values, attnres_states = mixer_block(
                     hidden_states,
                     attention_mask=attention_mask,
                     past_key_values=past_key_values,
                     use_cache=use_cache,
                     output_attentions=output_attentions,
+                    attnres_states=attnres_states,
                     **kwargs,
                 )
 
             if output_attentions and attentions is not None:
                 all_attns = all_attns + (attentions,)
 
-        hidden_states = self.norm_f(hidden_states)
+        if self.use_attnres:
+            residuals = [*attnres_states, hidden_states]
+            hidden_states = fused_attnres(
+                query=self.res_proj.weight,
+                residuals=residuals,
+                rms_weight=self.res_norm.weight,
+                output_rms_weight=self.norm_f.weight,
+                rms_eps=self.res_norm.eps,
+            )
+        else:
+            hidden_states = self.norm_f(hidden_states)
 
         if output_hidden_states:
             all_hidden_states = all_hidden_states + (hidden_states,)

@@ -81,6 +81,7 @@ def run_cp_dplr_test_worker(
     lengths: list[int],
     dtype,
     safe_gate: bool = False,
+    op=chunk_dplr_delta_rule,
 ):
     """
     Worker function for CP DPLR test.
@@ -242,7 +243,7 @@ def run_cp_dplr_test_worker(
         dist.barrier()
 
         # CP Forward
-        o_local, _ = chunk_dplr_delta_rule(
+        o_local, _ = op(
             q=q_local,
             k=k_local,
             v=v_local,
@@ -336,6 +337,7 @@ def run_cp_test_with_spawn(
     lengths: list[int],
     dtype=torch.bfloat16,
     safe_gate: bool = False,
+    op=chunk_dplr_delta_rule,
 ):
     """
     Run CP test using torch.multiprocessing.spawn.
@@ -343,7 +345,7 @@ def run_cp_test_with_spawn(
     """
     mp.start_processes(
         run_cp_dplr_test_worker,
-        args=(world_size, test_name, T, H, D, lengths, dtype, safe_gate),
+        args=(world_size, test_name, T, H, D, lengths, dtype, safe_gate, op),
         nprocs=world_size,
         join=True,
         start_method='spawn',

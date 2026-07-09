@@ -195,6 +195,7 @@ class RodimusAttention(nn.Module):
                 gk=rt_gate_log,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
+                state_v_first=True,
                 cu_seqlens=cu_seqlens,
                 head_first=False,
             )
@@ -217,6 +218,7 @@ class RodimusAttention(nn.Module):
                 g=rt_gate_log,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
+                state_v_first=True,
                 cu_seqlens=cu_seqlens,
                 head_first=False,
             )

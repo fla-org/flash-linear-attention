@@ -1,5 +1,4 @@
 self-hosted-runner:
   labels:
-    - nvidia-h100-pt2-7
     - nvidia-h100-1
-    - nvidia-h100-2
+    - linux-aarch64-a2-8

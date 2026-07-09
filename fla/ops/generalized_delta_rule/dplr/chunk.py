@@ -26,6 +26,7 @@ from fla.ops.generalized_delta_rule.dplr.wy_fast_bwd import chunk_dplr_bwd_wy
 from fla.ops.generalized_delta_rule.dplr.wy_fast_fwd import prepare_wy_repr_fwd
 from fla.ops.rwkv6.chunk import chunk_rwkv6_fwd_cumsum
 from fla.ops.utils import prepare_chunk_indices
+from fla.ops.utils.constant import RCP_LN2
 from fla.utils import TRITON_ABOVE_3_4_0, autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
@@ -46,7 +47,13 @@ def chunk_dplr_fwd(
     disable_recompute: bool = False,
     cp_context: FLACPContext | None = None,
 ):
-    gi, ge = chunk_rwkv6_fwd_cumsum(gk, chunk_size, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
+    gi, ge = chunk_rwkv6_fwd_cumsum(
+        gk,
+        chunk_size,
+        scale=RCP_LN2,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+    )
 
     A_ab, A_qk, A_ak, A_qb, qg, kg, ag, bg = chunk_dplr_fwd_intra(
         q=q,
@@ -162,8 +169,9 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
                 stacklevel=2,
             )
             chunk_size = 16
-        chunk_indices = prepare_chunk_indices(
-            cu_seqlens, chunk_size, cu_seqlens_cpu=cu_seqlens_cpu) if cu_seqlens is not None else None
+        chunk_indices = None
+        if cu_seqlens is not None:
+            chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size, cu_seqlens_cpu=cu_seqlens_cpu)
 
         # chunk_dplr_fwd returns the possibly CP-merged + compressed initial_state;
         # for CP this is the [1, HV, K, V] state we must save for backward so the
@@ -188,8 +196,28 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
 
         if disable_recompute:
             gi, ge, A_qk, A_qb, A_ak, qg, kg, ag, bg, w, h, v_new, A_ab_inv = cache
-            ctx.save_for_backward(q, k, v, a, b, gk, initial_state, gi, ge, A_qk,
-                                  A_qb, A_ak, qg, kg, ag, bg, w, h, v_new, A_ab_inv)
+            ctx.save_for_backward(
+                q,
+                k,
+                v,
+                a,
+                b,
+                gk,
+                initial_state,
+                gi,
+                ge,
+                A_qk,
+                A_qb,
+                A_ak,
+                qg,
+                kg,
+                ag,
+                bg,
+                w,
+                h,
+                v_new,
+                A_ab_inv,
+            )
         else:
             ctx.save_for_backward(q, k, v, a, b, gk, initial_state)
         ctx.cu_seqlens = cu_seqlens
@@ -211,8 +239,26 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
     ):
         if ctx.disable_recompute:
             (
-                q, k, v, a, b, gk, initial_state,
-                gi, ge, A_qk, A_qb, A_ak, qg, kg, ag, bg, w, h, v_new, A_ab_inv,
+                q,
+                k,
+                v,
+                a,
+                b,
+                gk,
+                initial_state,
+                gi,
+                ge,
+                A_qk,
+                A_qb,
+                A_ak,
+                qg,
+                kg,
+                ag,
+                bg,
+                w,
+                h,
+                v_new,
+                A_ab_inv,
             ) = ctx.saved_tensors
         else:
             q, k, v, a, b, gk, initial_state = ctx.saved_tensors
@@ -230,7 +276,13 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
 
         if not ctx.disable_recompute:
             # ******* start recomputing everything, otherwise i believe the gpu memory will be exhausted *******
-            gi, ge = chunk_rwkv6_fwd_cumsum(gk, chunk_size, cu_seqlens=cu_seqlens, chunk_indices=ctx.chunk_indices)
+            gi, ge = chunk_rwkv6_fwd_cumsum(
+                gk,
+                chunk_size,
+                scale=RCP_LN2,
+                cu_seqlens=cu_seqlens,
+                chunk_indices=ctx.chunk_indices,
+            )
 
             A_ab, A_qk, A_ak, A_qb, qg, kg, ag, bg = chunk_dplr_fwd_intra(
                 q=q,
@@ -297,6 +349,7 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
                 dht=dht,
                 initial_state=initial_state,
                 context=cp_context,
+                chunk_size=chunk_size,
             )
 
         dh, dh0, dv_new = chunk_dplr_bwd_dhu(
@@ -379,7 +432,10 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
             chunk_indices=ctx.chunk_indices,
         )
 
-        return dq.to(q), dk.to(k), dv.to(v), da.to(a), db.to(b), dgk.to(gk), None, dh0, None, None, None, None, None, None, None
+        return (
+            dq.to(q), dk.to(k), dv.to(v), da.to(a), db.to(b), dgk.to(gk),
+            None, dh0, None, None, None, None, None, None, None,
+        )
 
 
 @torch.compiler.disable
@@ -395,11 +451,11 @@ def chunk_dplr_delta_rule(
     output_final_state: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     cu_seqlens_cpu: torch.LongTensor | None = None,
-    head_first: bool = False,
     safe_gate: bool = False,
     chunk_size: int | None = None,
     disable_recompute: bool = False,
     cp_context: FLACPContext | None = None,
+    **kwargs,
 ):
     r"""
     Args:
@@ -414,9 +470,9 @@ def chunk_dplr_delta_rule(
         b (torch.Tensor):
             betas of shape `[B, T, H, K]`.
         gk (torch.Tensor):
-            gk of shape `[B, T, H, K]`. decay term in log space!
+            gk of shape `[B, T, H, K]`. Decay term in log space.
         scale (Optional[float]):
-            Scale factor for the RetNet attention scores.
+            Scale factor for the attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         initial_state (Optional[torch.Tensor]):
             Initial state of shape `[N, H, K, V]` for `N` input sequences.
@@ -428,17 +484,15 @@ def chunk_dplr_delta_rule(
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
         cu_seqlens_cpu (torch.LongTensor):
-            Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
-            consistent with the FlashAttention API.
-        safe_gate (bool):
+            CPU copy of `cu_seqlens` to avoid unnecessary device synchronization. Default: `None`.
+        safe_gate (Optional[bool]):
             Whether the kernel can assume the input gate values `g` are in a safe range.
             When `True`, the kernel can use M=16 TensorCore acceleration.
-            The safe range is approximately [-5, 0). Default: `False`.
+            The safe range is approximately `[-5, 0)`. Default: `False`.
         chunk_size (Optional[int]):
             Chunk size for the chunked computation. Default: `None`, which means 16.
-        head_first (Optional[bool]):
-            Whether the inputs are in the head-first format. Default: `False`.
-            This argument has been deprecated.
+        disable_recompute (Optional[bool]):
+            Whether to disable gradient recomputation in the kernel. Default: `False`.
         cp_context (Optional[FLACPContext]):
             Context parallel context for distributed training across multiple devices.
             When provided, `initial_state` and `output_final_state` are not supported.
@@ -450,24 +504,16 @@ def chunk_dplr_delta_rule(
         final_state (torch.Tensor):
             Final state of shape `[N, H, K, V]` if `output_final_state=True` else `None`.
     """
-    if head_first:
-        raise DeprecationWarning(
-            "head_first is deprecated and will be removed in a future version. "
-            "Please use head_first=False for now instead.",
-        )
-    if not head_first and q.shape[1] < q.shape[2]:
-        warnings.warn(
-            f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
-            "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
-            "when head_first=False was specified. "
-            "Please verify your input tensor format matches the expected shape [B, T, H, ...].",
-        )
     if q.dtype == torch.float32:
         warnings.warn(
             """ChunkDeltaRuleFunction does not support float32 on some platforms. Please use bfloat16/float16.
             If you want to use float32, please solve the issue by yourself.""",
             category=RuntimeWarning,
             stacklevel=2,
+        )
+    if 'head_first' in kwargs:
+        raise DeprecationWarning(
+            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
         )
     if cp_context is not None:
         assert initial_state is None, "Initial state is not supported for CP"

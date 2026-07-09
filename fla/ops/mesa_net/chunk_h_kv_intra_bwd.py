@@ -11,7 +11,7 @@ import triton.language as tl
 
 from fla.ops.mesa_net.chunk_h_kv_intra_bwd_separate import chunk_mesa_net_h_kv_bwd_intra_separate_fn
 from fla.ops.utils import prepare_chunk_indices
-from fla.ops.utils.op import exp
+from fla.ops.utils.op import exp2
 from fla.utils import IS_NVIDIA_HOPPER, autotune_cache_kwargs, check_shared_mem
 
 NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8]
@@ -113,9 +113,9 @@ def chunk_mesa_net_h_kv_bwd_intra_kernel(
 
     # calculation
     b_dg_last += tl.sum(b_h * b_dh)
-    b_dg_last *= exp(b_g_last)
+    b_dg_last *= exp2(b_g_last)
 
-    b_m = tl.where((o_t[:, None] >= o_t[None, :]) & (m_t[:, None] & m_t[None, :]), exp(b_g[:, None] - b_g[None, :]), 0)
+    b_m = tl.where((o_t[:, None] >= o_t[None, :]) & (m_t[:, None] & m_t[None, :]), exp2(b_g[:, None] - b_g[None, :]), 0)
     b_k = (b_k * b_beta[:, None]).to(b_k.dtype)
     b_s = tl.dot(b_q, tl.trans(b_k)) * b_m
 
@@ -126,8 +126,8 @@ def chunk_mesa_net_h_kv_bwd_intra_kernel(
     b_dg += tl.sum(b_dm, axis=1)
     b_dg -= tl.sum(b_dm, axis=0)
 
-    b_g_exp_q = exp(b_g)
-    b_g_exp_k = tl.where(m_t, exp(-b_g + b_g_last), 0)
+    b_g_exp_q = exp2(b_g)
+    b_g_exp_k = tl.where(m_t, exp2(-b_g + b_g_last), 0)
     b_ds = b_ds * b_m
     b_dq += tl.dot(b_do, b_h.to(b_do.dtype)) * b_g_exp_q[:, None]
     b_dk += tl.dot(b_v, b_dh.to(b_v.dtype)) * b_g_exp_k[:, None]

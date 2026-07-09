@@ -17,7 +17,7 @@ from fla.utils import device
 MODELING_UNSUPPORTED_VARLEN = [
     "ABCConfig", "ForgettingTransformerConfig", "LinearAttentionConfig", "LightNetConfig",
     "Mamba2Config", "MambaConfig", "MesaNetConfig", "SambaConfig",
-    "RodimusConfig",
+    "RodimusConfig", "WallTransformerConfig",
 ]
 
 # Models not yet ready for basic testing
@@ -28,9 +28,9 @@ HOPPER_EXCLUSIVE = []
 
 GENERATION_UNSUPPORTED = [
     "ABCConfig",
-    "NSAConfig",
     "DeltaFormerConfig",
     "MoBAConfig",
+    "WallTransformerConfig",
 ]
 
 

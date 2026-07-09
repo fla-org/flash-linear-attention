@@ -5,15 +5,14 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-import warnings
-
 import torch
 import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
+from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.cumsum import chunk_global_cumsum, chunk_local_cumsum
-from fla.ops.utils.op import exp
+from fla.ops.utils.op import exp2
 from fla.utils import (
     IS_INTEL_ALCHEMIST,
     IS_NVIDIA_HOPPER,
@@ -125,7 +124,7 @@ def parallel_simple_gla_fwd_kernel(
         b_s = tl.dot(b_q, b_k)
         if USE_G:
             b_gk = tl.load(g + o_k * H, mask=m_k, other=0)
-            b_s *= exp(b_gq[:, None] - b_gk[None, :])
+            b_s *= exp2(b_gq[:, None] - b_gk[None, :])
         b_s = tl.where(m_s, b_s, 0)
         # [BT, BV]
         if i_s >= 0:
@@ -151,7 +150,7 @@ def parallel_simple_gla_fwd_kernel(
             b_gn = tl.load(g + (min(i_s + BS, T) - 1) * H)
             b_gp = tl.load(g + (i_s-1) * H) if i_s % BT > 0 else 0.
             # No concrete meaning. Just to avoid some layout bugs.
-            b_s *= exp(b_gq[:, None] + (b_gn - b_g)[None, :])
+            b_s *= exp2(b_gq[:, None] + (b_gn - b_g)[None, :])
             b_gq += b_gn - b_gp
         b_s = tl.where(m_s, b_s, 0)
         if OUTPUT_ATTENTIONS:
@@ -211,9 +210,9 @@ def parallel_simple_gla_bwd_kernel_dq(
             b_g = tl.load(g + o_k * H, mask=m_k, other=0)
             b_gn = tl.load(g + (min(i_s + BS, T) - 1) * H)
             b_gp = tl.load(g + (i_s - 1) * H) if i_s % BT > 0 else 0.
-            b_ds *= tl.where(m_k, exp(b_gn - b_g), 0)[None, :]
+            b_ds *= tl.where(m_k, exp2(b_gn - b_g), 0)[None, :]
             if i_s > 0:
-                b_dq *= exp(b_gn - b_gp)
+                b_dq *= exp2(b_gn - b_gp)
         # [BT, BS] @ [BS, BK] = [BT, BK]
         b_dq += tl.dot(b_ds.to(b_v.dtype), b_k)
 
@@ -221,8 +220,7 @@ def parallel_simple_gla_bwd_kernel_dq(
         # [BT,]
         b_gq = tl.load(g + o_q * H, mask=m_q, other=float('-inf'))
         # [BT, BK]
-        b_dq *= exp(b_gq)[:, None]
-
+        b_dq *= exp2(b_gq)[:, None]
     # Q block and K block have overlap. masks required
     for i_s in range(i_t * BT, min((i_t + 1) * BT, T), BS):
         p_k = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_s, i_k * BK), (BS, BK), (1, 0))
@@ -238,7 +236,7 @@ def parallel_simple_gla_bwd_kernel_dq(
         b_ds = tl.dot(b_do, b_v)
         if USE_G:
             b_gk = tl.load(g + o_k * H, mask=m_k, other=0)
-            b_ds *= exp(b_gq[:, None] - b_gk[None, :])
+            b_ds *= exp2(b_gq[:, None] - b_gk[None, :])
         m_s = (o_q[:, None] >= o_k[None, :]) & (m_q[:, None] & m_k[None, :])
         b_ds = tl.where(m_s, b_ds, 0)
         # [BT, BK]
@@ -311,10 +309,10 @@ def parallel_simple_gla_bwd_kernel_dkv(
             b_gp = tl.load(g + (min(i_s + BS, T) - 1) * H)
             b_gn = tl.load(g + (i_s - 1) * H) if i_s % BT > 0 else 0.
             if i_s >= 0:
-                b_gpn = exp(b_gp - b_gn)
+                b_gpn = exp2(b_gp - b_gn)
                 b_dk *= b_gpn
                 b_dv *= b_gpn
-                b_gqn = exp(b_gq - b_gn)
+                b_gqn = exp2(b_gq - b_gn)
                 b_ds *= b_gqn[None, :]
                 b_s *= b_gqn[None, :]
         # [BT, BK]
@@ -325,7 +323,7 @@ def parallel_simple_gla_bwd_kernel_dkv(
     if USE_G:
         b_gn = tl.load(g + (min(i_t * BT + BT, T) - 1) * H)
         if i_t >= 0:
-            b_gpn = exp(b_gn - b_gk)[:, None]
+            b_gpn = exp2(b_gn - b_gk)[:, None]
             b_dk *= b_gpn
             b_dv *= b_gpn
 
@@ -345,7 +343,7 @@ def parallel_simple_gla_bwd_kernel_dkv(
         if USE_G:
             b_gq = tl.load(g + o_q * H, mask=m_q, other=float('-inf'))
             if i_s >= 0:
-                b_gkq = exp(-b_gk[:, None] + b_gq[None, :])
+                b_gkq = exp2(-b_gk[:, None] + b_gq[None, :])
                 b_ds *= b_gkq
                 b_s *= b_gkq
         m_s = o_k[:, None] <= o_q[None, :]
@@ -514,7 +512,13 @@ def parallel_simple_gla_fwd(
 
     # local cumulative decay in log space
     if g is not None:
-        g = chunk_local_cumsum(g, chunk_size, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
+        g = chunk_local_cumsum(
+            g,
+            chunk_size,
+            scale=RCP_LN2,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+        )
     grid = (NK * NV, NT, B * H)
     o = torch.empty(NK, *v.shape, dtype=v.dtype if NK == 1 else torch.float, device=q.device)
     attn = q.new_zeros(NK, B, H, T, T) if output_attentions else None
@@ -672,7 +676,7 @@ def parallel_simple_gla(
     output_attentions: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     cu_seqlens_cpu: torch.LongTensor | None = None,
-    head_first: bool = False,
+    **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
@@ -682,43 +686,34 @@ def parallel_simple_gla(
             keys of shape `[B, T, H, K]`.
         v (torch.Tensor):
             values of shape `[B, T, H, V]`.
-        g (torch.Tensor):
+        g (Optional[torch.Tensor]):
             Forget gates of shape `[B, T, H]`.
-            Compared to GLA, the gating is head-wise instead of elementwise.
+            Compared to GLA, the gating is head-wise instead of elementwise. Default: `None`.
         scale (Optional[float]):
             Scale factor for attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         output_attentions (bool):
-            Whether to output the materialized attention scores of shape [B, H, T, T]. Default: `False`.
+            Whether to output the materialized attention scores of shape `[B, H, T, T]`. Default: `False`.
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
-        head_first (Optional[bool]):
-            Whether the inputs are in the head-first format. Default: `False`.
-            This argument has been deprecated.
+        cu_seqlens_cpu (torch.LongTensor):
+            CPU copy of `cu_seqlens` to avoid unnecessary device synchronization. Default: `None`.
 
     Returns:
         o (torch.Tensor):
             Outputs of shape `[B, T, H, V]`.
         attn (torch.Tensor):
-            Attention scores of shape `[B, H, T, T]` if `output_attentions=True` else `None`
+            Attention scores of shape `[B, H, T, T]` if `output_attentions=True` else `None`.
     """
-    if head_first:
+    if 'head_first' in kwargs:
         raise DeprecationWarning(
-            "head_first is deprecated and will be removed in a future version. "
-            "Please use head_first=False for now instead.",
-        )
-    if not head_first and q.shape[1] < q.shape[2]:
-        warnings.warn(
-            f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
-            "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
-            "when head_first=False was specified. "
-            "Please verify your input tensor format matches the expected shape [B, T, H, ...].",
+            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
         )
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(
-                f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
+                f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`. "
                 f"Please flatten variable-length inputs before processing.",
             )
     if output_attentions:

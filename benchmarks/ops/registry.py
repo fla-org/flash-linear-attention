@@ -48,6 +48,24 @@ def shape_HD(B, T, H, D, **kw):
     return (H, D)
 
 
+def shape_D(B, T, H, D, **kw):
+    return (D,)
+
+
+def shape_LBTD(B, T, H, D, L=None, **kw):
+    """AttnRes-style residuals stack: [L, B, T, D] where L is the number of residual sources."""
+    if L is None:
+        raise ValueError("shape_LBTD requires the 'L' shape config key")
+    return (L, B, T, D)
+
+
+def shape_q_hq(B, T, H, D, HQ=None, **kw):
+    """q with HQ query heads (GQA); k/v keep H heads. Used by NSA."""
+    if HQ is None:
+        raise ValueError("shape_q_hq requires the 'HQ' (query-head) shape config key")
+    return (B, T, HQ, D)
+
+
 # ---------------------------------------------------------------------------
 # Transform helpers
 # ---------------------------------------------------------------------------
@@ -102,16 +120,41 @@ class OpConfig:
     """Registry entry describing how to benchmark a single op.
 
     Args:
-        name:           display/registry name, e.g. 'chunk_gla'
-        import_path:    Python module path, e.g. 'fla.ops.gla'
-        inputs:         param_name -> TensorSpec mapping
-        func_name:      actual function attribute name if different from *name*
-        extra_kwargs:   constant keyword args passed to the op
-        output_is_tuple: True if output[0] is the tensor to .backward()
-        skip_backward:  True to skip fwdbwd mode
-        post_init:      callable(inputs_dict, B, T, H, D, **kw) for custom mutation
-        category:       grouping label
-        dim_constraints: e.g. {'D': [64, 128]} — skip shapes that don't match
+        name (str):
+            Display and registry name, such as `chunk_gla`.
+        import_path (str):
+            Python module path, such as `fla.ops.gla`.
+        inputs (dict[str, TensorSpec]):
+            Mapping from function argument names to tensor specs.
+        func_name (str, Optional):
+            Function attribute name to import when it differs from `name`.
+            Default: None.
+        extra_kwargs (dict[str, Any], Optional):
+            Constant keyword arguments passed to the op. Default: `{}`.
+        output_is_tuple (bool):
+            Whether the op returns a tuple whose first item is the tensor used for `.backward()`. Default: `True`.
+        skip_backward (bool):
+            Whether to skip forward-backward benchmark mode. Default: `False`.
+        post_init (Callable, Optional):
+            Callback invoked as `post_init(inputs, B=B, T=T, H=H, D=D, **kw)` for custom input mutation. Default: None.
+        category (str):
+            Grouping label used in reports. Default: `''`.
+        dim_constraints (dict, Optional):
+            Shape constraints, such as `{'D': [64, 128]}`. Shapes that do not match are skipped. Default: None.
+        default_shapes (dict[str, dict[str, int]], Optional):
+            Per-op shape configs used instead of the global `SHAPE_CONFIGS`.
+            This is useful when the op's shape semantics differ from `B/T/H/D`,
+            for example when AttnRes uses an extra `L` residual-source axis.
+            Default: None.
+        test_file (str, Optional):
+            Path (relative to repo root) to the op's pytest file,
+            used as the frozen correctness gate by `benchmarks/ops/verify.py`.
+            When None, the gate is derived from `import_path`'s last segment (e.g. `fla.ops.gla` -> `tests/ops/test_gla.py`).
+            Set this only when the derived path is wrong. Default: None.
+        backend_env (dict[str, str], Optional):
+            Maps a `--backend <name>` value to the environment variable that enables that backend's
+            dispatch (e.g. `{'gluon': 'FLA_ATTNRES_GLUON'}`). The runner sets it before launching the
+            op; ops selected purely by a runtime verifier need no entry. Default: None.
     """
     name: str
     import_path: str
@@ -123,6 +166,9 @@ class OpConfig:
     post_init: Callable | None = None
     category: str = ''
     dim_constraints: dict | None = None
+    default_shapes: dict[str, dict[str, int]] | None = None
+    test_file: str | None = None
+    backend_env: dict[str, str] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -225,7 +271,7 @@ def generate_inputs(
 # Op registrations
 # ===========================================================================
 
-# --- A: Simple qkv (no extra inputs) ---
+# --- Simple qkv (no extra inputs) ---
 
 _simple_qkv = {
     'q': TensorSpec(shape_BTHD),
@@ -247,7 +293,7 @@ register_op(OpConfig(
     category='simple_qkv',
 ))
 
-# --- B: +elem gate (g=[B,T,H,D] with logsigmoid_clamp) ---
+# --- +elem gate (g=[B,T,H,D] with logsigmoid_clamp) ---
 
 register_op(OpConfig(
     name='chunk_gla',
@@ -259,7 +305,7 @@ register_op(OpConfig(
     category='elem_gate',
 ))
 
-# --- C: +beta (beta=[B,T,H] with sigmoid) ---
+# --- +beta (beta=[B,T,H] with sigmoid) ---
 
 register_op(OpConfig(
     name='chunk_delta_rule',
@@ -269,9 +315,10 @@ register_op(OpConfig(
         'beta': TensorSpec(shape_BTH, transform=sigmoid_transform),
     },
     category='beta',
+    test_file='tests/ops/test_delta.py',
 ))
 
-# --- D: +gate + beta ---
+# --- +gate + beta ---
 
 register_op(OpConfig(
     name='chunk_gdn',
@@ -284,6 +331,7 @@ register_op(OpConfig(
     func_name='chunk_gated_delta_rule',
     extra_kwargs={'use_qk_l2norm_in_kernel': True},
     category='gate_beta',
+    test_file='tests/ops/test_gdn.py',
 ))
 
 register_op(OpConfig(
@@ -298,7 +346,7 @@ register_op(OpConfig(
     category='gate_beta',
 ))
 
-# --- E: +head gate (g=[B,T,H] with logsigmoid) ---
+# --- +head gate (g=[B,T,H] with logsigmoid) ---
 
 register_op(OpConfig(
     name='chunk_simple_gla',
@@ -310,7 +358,7 @@ register_op(OpConfig(
     category='head_gate',
 ))
 
-# --- F: RWKV ---
+# --- RWKV ---
 
 
 def _rwkv7_post_init(inputs, B, T, H, D, **kw):
@@ -349,7 +397,7 @@ register_op(OpConfig(
     category='rwkv',
 ))
 
-# --- H: Comba ---
+# --- Comba ---
 
 register_op(OpConfig(
     name='chunk_comba',
@@ -364,7 +412,7 @@ register_op(OpConfig(
     category='comba',
 ))
 
-# --- I: HGRN (x, g only, no qkv) ---
+# --- HGRN (x, g only, no qkv) ---
 
 register_op(OpConfig(
     name='fused_recurrent_hgrn',
@@ -376,7 +424,7 @@ register_op(OpConfig(
     category='hgrn',
 ))
 
-# --- J: Generalized delta rule (DPLR) ---
+# --- Generalized delta rule (DPLR) ---
 
 register_op(OpConfig(
     name='chunk_dplr_delta_rule',
@@ -388,9 +436,10 @@ register_op(OpConfig(
         'gk': TensorSpec(shape_BTHD, transform=logsigmoid),
     },
     category='gen_delta',
+    test_file='tests/ops/test_dplr_delta.py',
 ))
 
-# --- K: Lightning attention (needs layer_idx, num_layers) ---
+# --- Lightning attention (needs layer_idx, num_layers) ---
 
 register_op(OpConfig(
     name='chunk_lightning_attn',
@@ -400,7 +449,7 @@ register_op(OpConfig(
     category='lightning',
 ))
 
-# --- L: Attention baselines ---
+# --- Attention baselines ---
 
 register_op(OpConfig(
     name='parallel_attn',
@@ -419,4 +468,87 @@ register_op(OpConfig(
     extra_kwargs={'causal': True},
     output_is_tuple=False,
     category='flash_attn',
+))
+
+# --- layer-axis residual aggregation (AttnRes, mHC, ...) ---
+# These ops attend / aggregate over an `L` axis of stacked residual sources.
+# Inputs and shape sweeps are shared so future ops (mHC etc.) can reuse them.
+
+_layer_default_shapes = {
+    'L8_B1_T8K_D2K':   {'L': 8,  'B': 1, 'T': 8192,  'H': 1, 'D': 2048},
+    'L8_B1_T32K_D2K':  {'L': 8,  'B': 1, 'T': 32768, 'H': 1, 'D': 2048},
+    'L10_B1_T8K_D4K':  {'L': 10, 'B': 1, 'T': 8192,  'H': 1, 'D': 4096},
+    'L10_B1_T32K_D4K': {'L': 10, 'B': 1, 'T': 32768, 'H': 1, 'D': 4096},
+    'L32_B1_T8K_D2K':  {'L': 64, 'B': 1, 'T': 8192,  'H': 1, 'D': 8192},
+}
+
+
+_attnres_inputs = {
+    'query': TensorSpec(shape_D),
+    'residuals': TensorSpec(shape_LBTD),
+    'rms_weight': TensorSpec(shape_D),
+}
+
+register_op(OpConfig(
+    name='fused_attnres',
+    import_path='fla.ops.attnres',
+    inputs=_attnres_inputs,
+    output_is_tuple=False,
+    default_shapes=_layer_default_shapes,
+    category='fused_attnres',
+    backend_env={'gluon': 'FLA_ATTNRES_GLUON'},
+))
+
+register_op(OpConfig(
+    name='naive_attnres',
+    import_path='fla.ops.attnres',
+    inputs=_attnres_inputs,
+    output_is_tuple=False,
+    default_shapes=_layer_default_shapes,
+    category='naive_attnres',
+))
+
+# --- NSA (native sparse attention) — GQA + structured block selection ---
+# q carries HQ query heads while k/v carry H kv heads (GQA; HQ/H a power of two
+# and >= 16). block_indices is a causal random selection that must be built
+# explicitly — the generic randn/randint input factory cannot produce a valid one.
+
+
+def _nsa_post_init(inputs, B, T, H, D, HQ=None, S=16, block_size=64, **kw):
+    # build block_indices [B, T, H, S]: for each query t, pick S of the causal
+    # blocks (block i is selectable iff i <= t // block_size), -1-padded when
+    # fewer than S exist, then sorted — mirroring tests/ops/test_nsa.py.
+    device = inputs['q'].device
+    NS = (T + block_size - 1) // block_size
+    valid = (torch.arange(NS, device=device)[None, None, None, :]
+             <= (torch.arange(T, device=device) // block_size)[None, :, None, None])
+    scores = torch.rand(B, T, H, NS, device=device).masked_fill(~valid, float('-inf'))
+    topv, topi = scores.topk(min(S, NS), dim=-1)
+    block_indices = topi.masked_fill(topv == float('-inf'), -1).sort(-1)[0].to(torch.long)
+    inputs['block_indices'] = block_indices.contiguous()
+    inputs['block_counts'] = S
+    inputs['block_size'] = block_size
+
+
+_nsa_shapes = {
+    'B1_T8K_H1_HQ32_D128_S16':  {'B': 1, 'T': 8192,  'H': 1, 'HQ': 32, 'D': 128, 'S': 16, 'block_size': 64},
+    'B1_T16K_H1_HQ64_D128_S16': {'B': 1, 'T': 16384, 'H': 1, 'HQ': 64, 'D': 128, 'S': 16, 'block_size': 64},
+    'B1_T32K_H1_HQ64_D256_S16': {'B': 1, 'T': 32768, 'H': 1, 'HQ': 64, 'D': 256, 'S': 16, 'block_size': 64},
+    'B1_T64K_H1_HQ128_D256_S16': {'B': 1, 'T': 65536, 'H': 1, 'HQ': 128, 'D': 256, 'S': 16, 'block_size': 64},
+    'B1_T128K_H1_HQ128_D256_S16': {'B': 1, 'T': 131072, 'H': 1, 'HQ': 128, 'D': 256, 'S': 16, 'block_size': 64},
+}
+
+register_op(OpConfig(
+    name='parallel_nsa',
+    import_path='fla.ops.nsa',
+    inputs={
+        'q': TensorSpec(shape_q_hq),
+        'k': TensorSpec(shape_BTHD),
+        'v': TensorSpec(shape_BTHD),
+    },
+    post_init=_nsa_post_init,
+    output_is_tuple=False,
+    default_shapes=_nsa_shapes,
+    category='nsa',
+    test_file='tests/ops/test_nsa.py',
 ))

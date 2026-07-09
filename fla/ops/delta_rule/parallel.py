@@ -5,8 +5,6 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-import warnings
-
 import torch
 import triton
 import triton.language as tl
@@ -309,9 +307,9 @@ def parallel_delta_rule(
     k: torch.Tensor,
     v: torch.Tensor,
     beta: torch.Tensor,
-    scale: float = None,
+    scale: float | None = None,
     output_attentions: bool = False,
-    head_first: bool = False,
+    **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
@@ -327,10 +325,7 @@ def parallel_delta_rule(
             Scale factor for attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         output_attentions (bool):
-            Whether to output the materialized attention scores of shape [B, H, T, T]. Default: `False`.
-        head_first (Optional[bool]):
-            Whether the inputs are in the head-first format. Default: `False`.
-            This argument has been deprecated.
+            Whether to output the materialized attention scores of shape `[B, H, T, T]`. Default: `False`.
 
     Returns:
         o (torch.Tensor):
@@ -338,17 +333,9 @@ def parallel_delta_rule(
         attn (torch.Tensor):
             Attention scores of shape `[B, H, T, T]` if `output_attentions=True` else `None`.
     """
-    if head_first:
+    if 'head_first' in kwargs:
         raise DeprecationWarning(
-            "head_first is deprecated and will be removed in a future version. "
-            "Please use head_first=False for now instead.",
-        )
-    if not head_first and q.shape[1] < q.shape[2]:
-        warnings.warn(
-            f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
-            "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
-            "when head_first=False was specified. "
-            "Please verify your input tensor format matches the expected shape [B, T, H, ...].",
+            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
         )
     o, attn = ParallelDeltaRuleFunction.apply(q, k, v, beta, scale, output_attentions)
     return o, attn

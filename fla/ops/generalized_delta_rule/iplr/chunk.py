@@ -5,8 +5,6 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-import warnings
-
 import torch
 import triton
 import triton.language as tl
@@ -14,7 +12,6 @@ import triton.language as tl
 from fla.ops.generalized_delta_rule.iplr.wy_fast import prepare_wy_repr_fwd
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 from fla.utils import (
-    USE_CUDA_GRAPH,
     autocast_custom_bwd,
     autocast_custom_fwd,
     autotune_cache_kwargs,
@@ -36,7 +33,6 @@ BKV_LIST = [64, 128] if check_shared_mem() else [32, 64]
         for num_warps in [2, 4] + ([] if check_shared_mem('hopper') else [8])
     ],
     key=['BT', 'BK', 'BV'],
-    use_cuda_graph=USE_CUDA_GRAPH,
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -121,7 +117,6 @@ def chunk_generalized_iplr_delta_rule_fwd_kernel_h(
         for num_warps in [2, 4, 8]
     ],
     key=['BT'],
-    use_cuda_graph=USE_CUDA_GRAPH,
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -395,8 +390,10 @@ class ChunkGeneralizedIPLRDeltaRuleFunction(torch.autograd.Function):
         output_final_state: bool,
         cu_seqlens: torch.LongTensor | None = None,
         cu_seqlens_cpu: torch.LongTensor | None = None,
+        chunk_size: int | None = None,
     ):
-        chunk_size = min(64, max(triton.next_power_of_2(q.shape[1]), 16))
+        if chunk_size is None:
+            chunk_size = 64
         chunk_indices = prepare_chunk_indices(
             cu_seqlens, chunk_size, cu_seqlens_cpu=cu_seqlens_cpu) if cu_seqlens is not None else None
         o, final_state = chunk_generalized_iplr_delta_rule_fwd(
@@ -435,12 +432,12 @@ def chunk_iplr_delta_rule(
     v: torch.Tensor,
     a: torch.Tensor,
     b: torch.Tensor,
-    scale: float = None,
-    initial_state: torch.Tensor = None,
+    scale: float | None = None,
+    initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     cu_seqlens_cpu: torch.LongTensor | None = None,
-    head_first: bool = False,
+    **kwargs,
 ):
     r"""
     Args:
@@ -455,7 +452,7 @@ def chunk_iplr_delta_rule(
         b (torch.Tensor):
             betas of shape `[B, T, H, K]`.
         scale (Optional[float]):
-            Scale factor for the RetNet attention scores.
+            Scale factor for the attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         initial_state (Optional[torch.Tensor]):
             Initial state of shape `[N, H, K, V]` for `N` input sequences.
@@ -467,10 +464,7 @@ def chunk_iplr_delta_rule(
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
         cu_seqlens_cpu (torch.LongTensor):
-            CPU version of cumulative sequence lengths of shape `[N+1]`.
-        head_first (Optional[bool]):
-            Whether the inputs are in the head-first format. Default: `False`.
-            This argument has been deprecated.
+            CPU copy of `cu_seqlens` to avoid unnecessary device synchronization. Default: `None`.
 
     Returns:
         o (torch.Tensor):
@@ -478,22 +472,17 @@ def chunk_iplr_delta_rule(
         final_state (torch.Tensor):
             Final state of shape `[N, H, K, V]` if `output_final_state=True` else `None`.
     """
-    if head_first:
+    if 'head_first' in kwargs:
         raise DeprecationWarning(
-            "head_first is deprecated and will be removed in a future version. "
-            "Please use head_first=False for now instead.",
+            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
         )
-    if not head_first and q.shape[1] < q.shape[2]:
-        warnings.warn(
-            f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
-            "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
-            "when head_first=False was specified. "
-            "Please verify your input tensor format matches the expected shape [B, T, H, ...].",
-        )
+    chunk_size = kwargs.pop('chunk_size', None)
+    if chunk_size is not None and chunk_size != 2 ** (chunk_size.bit_length() - 1):
+        raise ValueError(f"`chunk_size` must be a power of 2, got {chunk_size}.")
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(
-                f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
+                f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`. "
                 f"Please flatten variable-length inputs before processing.",
             )
         if initial_state is not None and initial_state.shape[0] != len(cu_seqlens) - 1:
@@ -513,5 +502,6 @@ def chunk_iplr_delta_rule(
         output_final_state,
         cu_seqlens,
         cu_seqlens_cpu,
+        chunk_size,
     )
     return o, final_state

@@ -17,13 +17,15 @@ from .test_modeling_base import run_test_generation, run_test_model_forward_back
 # Test for Modeling (Forward/Backward Pass)
 # ===================================================================================
 @pytest.mark.parametrize(
-    ['L', 'B', 'T', 'H', 'D', 'use_l2warp', 'dtype'],
+    ['L', 'B', 'T', 'H', 'D', 'use_l2warp', 'attnres_block_size', 'dtype'],
     [
-        pytest.param(*test, id="L{}-B{}-T{}-H{}-D{}-use_l2warp{}-{}".format(*test))
+        pytest.param(*test, id="L{}-B{}-T{}-H{}-D{}-l2{}-bs{}-{}".format(*test))
         for test in [
-            (4, 4, 1024, 4, 64, True, torch.bfloat16),
-            (4, 4, 1024, 4, 64, False, torch.bfloat16),
-            (4, 4, 1024, 4, 128, False, torch.bfloat16),
+            (4, 4, 1024, 4, 64,  True,  None, torch.bfloat16),
+            (4, 4, 1024, 4, 64,  False, None, torch.bfloat16),
+            (4, 4, 1024, 4, 128, False, None, torch.bfloat16),
+            (4, 4, 1024, 4, 64,  False, 1,    torch.bfloat16),
+            (4, 4, 1024, 4, 64,  False, 4,    torch.bfloat16),
         ]
     ],
 )
@@ -34,9 +36,20 @@ def test_modeling(
     H: int,
     D: int,
     use_l2warp: bool,
+    attnres_block_size: int | None,
     dtype: torch.dtype,
 ):
-    run_test_model_forward_backward(L, B, T, H, D, MesaNetConfig, use_l2warp=use_l2warp, dtype=dtype)
+    run_test_model_forward_backward(
+        L,
+        B,
+        T,
+        H,
+        D,
+        MesaNetConfig,
+        use_l2warp=use_l2warp,
+        attnres_block_size=attnres_block_size,
+        dtype=dtype,
+    )
 
 
 # ===================================================================================

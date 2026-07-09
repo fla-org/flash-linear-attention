@@ -26,6 +26,7 @@ from fla.layers.mamba2 import Mamba2
 from fla.layers.mesa_net import MesaNet
 from fla.layers.mom import MomAttention
 from fla.layers.multiscale_retention import MultiScaleRetention
+from fla.layers.raven import Raven
 from fla.layers.rodimus import RodimusAttention
 from fla.layers.rwkv6 import RWKV6Attention
 from fla.layers.rwkv7 import RWKV7Attention
@@ -140,6 +141,11 @@ CACHE_REQUIRES_LAYER_IDX_CASES = [
         lambda: GatedSlotAttention(hidden_size=16, num_heads=4),
         torch.randn(1, 2, 16),
         id="gsa",
+    ),
+    pytest.param(
+        lambda: Raven(hidden_size=16, num_heads=4, num_slots=4, topk=2),
+        torch.randn(1, 2, 16),
+        id="raven",
     ),
     pytest.param(
         lambda: GatedLinearAttention(hidden_size=16, num_heads=4),

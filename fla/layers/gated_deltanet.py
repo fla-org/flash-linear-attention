@@ -18,6 +18,7 @@ from torch.nn import functional as F
 
 from fla.layers.utils import get_layer_cache, get_unpad_data, index_first_axis, pad_input, update_layer_cache
 from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
+from fla.modules.convolution import causal_conv1d
 from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
 
 if TYPE_CHECKING:
@@ -198,6 +199,23 @@ class GatedDeltaNet(nn.Module):
             self.o_norm = RMSNorm(self.head_v_dim, eps=norm_eps, dtype=torch.float32)
         self.o_proj = nn.Linear(self.value_dim, hidden_size, bias=False)
 
+    def _use_fused_qkv_conv(
+        self,
+        last_state: dict | None,
+        use_cache: bool | None,
+        cu_seqlens: torch.Tensor | None,
+    ) -> bool:
+        # The dense no-cache q/k/v short convolutions can collapse into a single
+        # causal_conv1d only when there is no cache/varlen state and the three convs
+        # share the same backend, activation, and kernel size.
+        if not (self.use_short_conv and last_state is None and not use_cache and cu_seqlens is None):
+            return False
+        return (
+            self.q_conv1d.backend == self.k_conv1d.backend == self.v_conv1d.backend and
+            self.q_conv1d.activation == self.k_conv1d.activation == self.v_conv1d.activation and
+            self.q_conv1d.kernel_size == self.k_conv1d.kernel_size == self.v_conv1d.kernel_size
+        )
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -227,8 +245,37 @@ class GatedDeltaNet(nn.Module):
             indices, cu_seqlens, _ = get_unpad_data(attention_mask[:, -q_len:])
             hidden_states = index_first_axis(rearrange(hidden_states, "b s ... -> (b s) ..."), indices).unsqueeze(0)
 
-        if self.use_short_conv:
-            conv_state_q, conv_state_k, conv_state_v = None, None, None
+        conv_state_q, conv_state_k, conv_state_v = None, None, None
+        if self._use_fused_qkv_conv(last_state, use_cache, cu_seqlens):
+            qkv = torch.cat(
+                [
+                    self.q_proj(hidden_states),
+                    self.k_proj(hidden_states),
+                    self.v_proj(hidden_states),
+                ],
+                dim=-1,
+            )
+            qkv_weight = torch.cat(
+                [
+                    self.q_conv1d.weight.squeeze(1),
+                    self.k_conv1d.weight.squeeze(1),
+                    self.v_conv1d.weight.squeeze(1),
+                ],
+                dim=0,
+            )
+            if self.conv_bias:
+                qkv_bias = torch.cat([self.q_conv1d.bias, self.k_conv1d.bias, self.v_conv1d.bias], dim=0)
+            else:
+                qkv_bias = None
+            qkv, _ = causal_conv1d(
+                x=qkv,
+                weight=qkv_weight,
+                bias=qkv_bias,
+                activation=self.q_conv1d.activation,
+                backend=self.q_conv1d.backend,
+            )
+            q, k, v = torch.split(qkv, [self.key_dim, self.key_dim, self.value_dim], dim=-1)
+        elif self.use_short_conv:
             if last_state is not None:
                 conv_state_q, conv_state_k, conv_state_v = last_state['conv_state']
             q, conv_state_q = self.q_conv1d(
@@ -257,9 +304,7 @@ class GatedDeltaNet(nn.Module):
         q, k = map(lambda x: rearrange(x, '... (h d) -> ... h d', d=self.head_k_dim), (q, k))
         v = rearrange(v, '... (h d) -> ... h d', d=self.head_v_dim)
 
-        beta = self.b_proj(hidden_states).sigmoid()
-        if self.allow_neg_eigval:
-            beta = beta * 2.
+        beta = self.b_proj(hidden_states)
 
         recurrent_state = last_state['recurrent_state'] if last_state is not None else None
         if mode == 'chunk':
@@ -269,13 +314,16 @@ class GatedDeltaNet(nn.Module):
                 v=v,
                 g=self.a_proj(hidden_states),
                 beta=beta,
-                initial_state=recurrent_state,
-                output_final_state=use_cache,
-                cu_seqlens=cu_seqlens,
-                use_qk_l2norm_in_kernel=True,
-                use_gate_in_kernel=True,
                 A_log=self.A_log,
                 dt_bias=self.dt_bias,
+                initial_state=recurrent_state,
+                output_final_state=use_cache,
+                use_qk_l2norm_in_kernel=True,
+                use_gate_in_kernel=True,
+                use_beta_sigmoid_in_kernel=True,
+                allow_neg_eigval=self.allow_neg_eigval,
+                state_v_first=True,
+                cu_seqlens=cu_seqlens,
             )
         elif mode == 'fused_recurrent':
             o, recurrent_state = fused_recurrent_gated_delta_rule(
@@ -284,13 +332,16 @@ class GatedDeltaNet(nn.Module):
                 v=v,
                 g=self.a_proj(hidden_states),
                 beta=beta,
-                initial_state=recurrent_state,
-                output_final_state=use_cache,
-                cu_seqlens=cu_seqlens,
-                use_qk_l2norm_in_kernel=True,
-                use_gate_in_kernel=True,
                 A_log=self.A_log,
                 dt_bias=self.dt_bias,
+                initial_state=recurrent_state,
+                output_final_state=use_cache,
+                use_qk_l2norm_in_kernel=True,
+                use_gate_in_kernel=True,
+                use_beta_sigmoid_in_kernel=True,
+                allow_neg_eigval=self.allow_neg_eigval,
+                state_v_first=True,
+                cu_seqlens=cu_seqlens,
             )
         else:
             raise NotImplementedError(f"Not supported mode `{mode}`.")

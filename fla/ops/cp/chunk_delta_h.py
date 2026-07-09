@@ -15,8 +15,8 @@ import triton
 import triton.language as tl
 
 from fla.ops.cp.comm import all_gather_into_tensor
-from fla.ops.utils.op import exp, exp2
-from fla.utils import USE_CUDA_GRAPH, autotune_cache_kwargs, check_shared_mem
+from fla.ops.utils.op import exp2
+from fla.utils import autotune_cache_kwargs, check_shared_mem
 
 if TYPE_CHECKING:
     from fla.ops.cp.context import FLACPContext
@@ -34,8 +34,7 @@ if TYPE_CHECKING:
         for num_warps in [2, 4]
         for num_stages in [2, 3, 4]
     ],
-    key=['H', 'HV', 'K', 'V', 'BT', 'USE_EXP2'],
-    use_cuda_graph=USE_CUDA_GRAPH,
+    key=['H', 'HV', 'K', 'V', 'BT'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -60,7 +59,6 @@ def pre_process_fwd_kernel_merged(
     USE_G: tl.constexpr,
     USE_GK: tl.constexpr,
     USE_BG: tl.constexpr,
-    USE_EXP2: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     MULTI_SEQS: tl.constexpr,
 ):
@@ -92,6 +90,10 @@ def pre_process_fwd_kernel_merged(
         bg += ((bos * H + i_h // (HV // H)) * K).to(tl.int64)
     else:
         w += ((bos * HV + i_h) * K).to(tl.int64)
+    if USE_G:
+        g += (bos * HV + i_h).to(tl.int64)
+    if USE_GK:
+        gk += ((bos * HV + i_h) * K).to(tl.int64)
     stride_k = H * K
     stride_w = H * K if USE_BG else HV * K
 
@@ -148,15 +150,11 @@ def pre_process_fwd_kernel_merged(
             # Apply g decay
             if USE_G:
                 m_t = (i_t * BT + tl.arange(0, BT)) < T
-                b_g_last = tl.load(g + bos * HV + last_idx * HV + i_h).to(tl.float32)
-                p_g = tl.make_block_ptr(g + bos * HV + i_h, (T,), (HV,), (i_t * BT,), (BT,), (0,))
+                b_g_last = tl.load(g + last_idx * HV).to(tl.float32)
+                p_g = tl.make_block_ptr(g, (T,), (HV,), (i_t * BT,), (BT,), (0,))
                 b_g = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
-                if USE_EXP2:
-                    b_v = b_v * tl.where(m_t, exp2(b_g_last - b_g), 0)[:, None]
-                    b_g_last = exp2(b_g_last)
-                else:
-                    b_v = b_v * tl.where(m_t, exp(b_g_last - b_g), 0)[:, None]
-                    b_g_last = exp(b_g_last)
+                b_v = b_v * tl.where(m_t, exp2(b_g_last - b_g), 0)[:, None]
+                b_g_last = exp2(b_g_last)
                 b_h1 *= b_g_last
                 if K > 64:
                     b_h2 *= b_g_last
@@ -168,36 +166,21 @@ def pre_process_fwd_kernel_merged(
             # Apply gk decay
             if USE_GK:
                 o_k1 = tl.arange(0, 64)
-                b_gk_last1 = tl.load(gk + (bos + last_idx) * HV * K + i_h * K + o_k1, mask=(o_k1 < K), other=0.).to(tl.float32)
-                if USE_EXP2:
-                    b_h1 *= exp2(b_gk_last1)[:, None]
-                else:
-                    b_h1 *= exp(b_gk_last1)[:, None]
+                p_gk_last = gk + last_idx * HV * K
+                b_gk_last1 = tl.load(p_gk_last + o_k1, mask=(o_k1 < K), other=0.).to(tl.float32)
+                b_h1 *= exp2(b_gk_last1)[:, None]
                 if K > 64:
                     o_k2 = 64 + o_k1
-                    b_gk_last2 = tl.load(gk + (bos + last_idx) * HV * K + i_h * K +
-                                         o_k2, mask=(o_k2 < K), other=0.).to(tl.float32)
-                    if USE_EXP2:
-                        b_h2 *= exp2(b_gk_last2)[:, None]
-                    else:
-                        b_h2 *= exp(b_gk_last2)[:, None]
+                    b_gk_last2 = tl.load(p_gk_last + o_k2, mask=(o_k2 < K), other=0.).to(tl.float32)
+                    b_h2 *= exp2(b_gk_last2)[:, None]
                 if K > 128:
                     o_k3 = 128 + o_k1
-                    b_gk_last3 = tl.load(gk + (bos + last_idx) * HV * K + i_h * K +
-                                         o_k3, mask=(o_k3 < K), other=0.).to(tl.float32)
-                    if USE_EXP2:
-                        b_h3 *= exp2(b_gk_last3)[:, None]
-                    else:
-                        b_h3 *= exp(b_gk_last3)[:, None]
+                    b_gk_last3 = tl.load(p_gk_last + o_k3, mask=(o_k3 < K), other=0.).to(tl.float32)
+                    b_h3 *= exp2(b_gk_last3)[:, None]
                 if K > 192:
                     o_k4 = 192 + o_k1
-                    b_gk_last4 = tl.load(gk + (bos + last_idx) * HV * K + i_h * K +
-                                         o_k4, mask=(o_k4 < K), other=0.).to(tl.float32)
-                    if USE_EXP2:
-                        b_h4 *= exp2(b_gk_last4)[:, None]
-                    else:
-                        b_h4 *= exp(b_gk_last4)[:, None]
-
+                    b_gk_last4 = tl.load(p_gk_last + o_k4, mask=(o_k4 < K), other=0.).to(tl.float32)
+                    b_h4 *= exp2(b_gk_last4)[:, None]
             b_v = b_v.to(k.dtype.element_ty)
 
             # Update h
@@ -288,22 +271,15 @@ def pre_process_fwd_kernel_merged(
 
             if USE_G:
                 m_t = (i_t * BT + tl.arange(0, BT)) < T
-                b_g_last = tl.load(g + bos * HV + last_idx * HV + i_h).to(tl.float32)
-                p_g = tl.make_block_ptr(g + bos * HV + i_h, (T,), (HV,), (i_t * BT,), (BT,), (0,))
+                b_g_last = tl.load(g + last_idx * HV).to(tl.float32)
+                p_g = tl.make_block_ptr(g, (T,), (HV,), (i_t * BT,), (BT,), (0,))
                 b_g = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
-                if USE_EXP2:
-                    b_k = b_k * tl.where(m_t, exp2(b_g_last - b_g), 0)[:, None]
-                    b_g_last = exp2(b_g_last)
-                else:
-                    b_k = b_k * tl.where(m_t, exp(b_g_last - b_g), 0)[:, None]
-                    b_g_last = exp(b_g_last)
+                b_k = b_k * tl.where(m_t, exp2(b_g_last - b_g), 0)[:, None]
+                b_g_last = exp2(b_g_last)
                 b_diag = tl.where(row[:, None] == row[None, :], b_g_last, 0.0)
             elif USE_GK:
-                b_gk_last = tl.load(gk + (bos + last_idx) * HV * K + i_h * K + row, mask=(row < K), other=0.).to(tl.float32)
-                if USE_EXP2:
-                    b_gk_last = exp2(b_gk_last)
-                else:
-                    b_gk_last = exp(b_gk_last)
+                b_gk_last = tl.load(gk + last_idx * HV * K + row, mask=(row < K), other=0.).to(tl.float32)
+                b_gk_last = exp2(b_gk_last)
                 b_diag = tl.where(row[:, None] == row[None, :], b_gk_last[:, None], 0.0)
             else:
                 b_diag = tl.where(row[:, None] == row[None, :], 1.0, 0.0)
@@ -336,8 +312,7 @@ def pre_process_fwd_kernel_merged(
         for num_stages in [2, 3, 4]
         for BV in [32, 64]
     ],
-    key=['HV', 'K', 'V', 'BT', 'USE_EXP2'],
-    use_cuda_graph=USE_CUDA_GRAPH,
+    key=['HV', 'K', 'V', 'BT'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['pre_or_post_num_ranks', 'rank', 'NUM_SEQ_ENTRIES'])
@@ -359,7 +334,7 @@ def merge_fwd_bwd_kernel(
     INTRACARD_MODE: tl.constexpr,          # True: intracard mode, False: CP mode
     NUM_SEQ_ENTRIES,         # num_split_seqs for intracard
     HAS_H0: tl.constexpr,                  # Heuristic: whether h0 is provided
-    TRANSPOSE_STATE: tl.constexpr = False,  # When True, h0/h use [V, K] layout; ag_hm always [K, V+K]
+    STATE_V_FIRST: tl.constexpr = False,  # When True, h0/h use [V, K] layout; ag_hm always [K, V+K]
 ):
     """
     Unified merge kernel for both CP and Intra-card modes.
@@ -372,7 +347,7 @@ def merge_fwd_bwd_kernel(
         Grid: (V/BV, NUM_SEQ_ENTRIES, HV)
         Merges across subseqs within card for intra-card context parallel.
 
-    When TRANSPOSE_STATE=True, h0 and output h use [V, K] layout.
+    When STATE_V_FIRST=True, h0 and output h use [V, K] layout.
     ag_hm always uses [K, V+K] layout (from pre_scan).
     The recurrence h' = M @ h + he becomes h_T' = h_T @ M^T + he^T.
     """
@@ -396,7 +371,7 @@ def merge_fwd_bwd_kernel(
         # Initialize from h0 if provided
         if HAS_H0:
             orig_seq_id = tl.load(h0_seq_ids + i_seq).to(tl.int32)
-            if TRANSPOSE_STATE:
+            if STATE_V_FIRST:
                 p_h0 = tl.make_block_ptr(
                     h0 + (orig_seq_id * HV + i_h) * V * K,
                     (V, K), (K, 1), (i_v * BV, 0), (BV, BK), (1, 0)
@@ -409,7 +384,7 @@ def merge_fwd_bwd_kernel(
                 )
                 b_h = tl.load(p_h0, boundary_check=(0, 1)).to(tl.float32)
         else:
-            if TRANSPOSE_STATE:
+            if STATE_V_FIRST:
                 b_h = tl.zeros([BV, BK], dtype=tl.float32)
             else:
                 b_h = tl.zeros([BK, BV], dtype=tl.float32)
@@ -428,7 +403,7 @@ def merge_fwd_bwd_kernel(
                 ag_hm + base + V, (K, K), (V + K, 1), (0, 0), (BK, BK), (1, 0)
             )
             b_m = tl.load(p_m, boundary_check=(0, 1)).to(tl.float32)
-            if TRANSPOSE_STATE:
+            if STATE_V_FIRST:
                 # h_T' = h_T @ M^T + he^T
                 b_h = tl.dot(b_h.to(tl.float32), tl.trans(b_m)) + tl.trans(b_he)
             else:
@@ -438,7 +413,7 @@ def merge_fwd_bwd_kernel(
             if idx < num_subseqs - 1:
                 init_idx = init_base + idx
                 stride_init = HV * K * V
-                if TRANSPOSE_STATE:
+                if STATE_V_FIRST:
                     p_out = tl.make_block_ptr(
                         h + init_idx * stride_init + i_h * V * K,
                         (V, K), (K, 1), (i_v * BV, 0), (BV, BK), (1, 0)
@@ -456,7 +431,7 @@ def merge_fwd_bwd_kernel(
         h += i_h * K * V
         ag_hm += i_h * K * (K + V)
         stride = HV * K * (K + V)
-        if TRANSPOSE_STATE:
+        if STATE_V_FIRST:
             b_h = tl.zeros([BV, BK], dtype=tl.float32)
         else:
             b_h = tl.zeros([BK, BV], dtype=tl.float32)
@@ -469,11 +444,11 @@ def merge_fwd_bwd_kernel(
             b_ag_h = tl.load(p_ag_h, boundary_check=(0, 1))
             p_ag_m = tl.make_block_ptr(ag_hm + cur_rank * stride + V, (K, K), (K + V, 1), (0, 0), (BK, BK), (1, 0))
             b_ag_m = tl.load(p_ag_m, boundary_check=(0, 1))
-            if TRANSPOSE_STATE:
+            if STATE_V_FIRST:
                 b_h = tl.dot(b_h.to(tl.float32), tl.trans(b_ag_m).to(tl.float32)) + tl.trans(b_ag_h).to(tl.float32)
             else:
                 b_h = tl.dot(b_ag_m.to(tl.float32), b_h.to(tl.float32)) + b_ag_h.to(tl.float32)
-        if TRANSPOSE_STATE:
+        if STATE_V_FIRST:
             p_h = tl.make_block_ptr(h, (V, K), (K, 1), (i_v * BV, 0), (BV, BK), (1, 0))
         else:
             p_h = tl.make_block_ptr(h, (K, V), (V, 1), (0, i_v * BV), (BK, BV), (1, 0))
@@ -491,8 +466,7 @@ def merge_fwd_bwd_kernel(
         for num_warps in [2, 4]
         for num_stages in ([4, 3, 2] if check_shared_mem('ampere') else [1])
     ],
-    key=['H', 'HV', 'K', 'V', 'BT', 'USE_EXP2'],
-    use_cuda_graph=USE_CUDA_GRAPH,
+    key=['H', 'HV', 'K', 'V', 'BT'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -518,7 +492,6 @@ def pre_process_bwd_kernel_merged(
     USE_G: tl.constexpr,
     USE_GK: tl.constexpr,
     USE_BG: tl.constexpr,
-    USE_EXP2: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
     """
@@ -550,6 +523,10 @@ def pre_process_bwd_kernel_merged(
         w += ((bos * H + i_h // (HV // H)) * K).to(tl.int64)
     else:
         w += ((bos * HV + i_h) * K).to(tl.int64)
+    if USE_G:
+        g += (bos * HV + i_h).to(tl.int64)
+    if USE_GK:
+        gk += ((bos * HV + i_h) * K).to(tl.int64)
     dhm += i_h * K * (V + K)
     stride_qk = H * K
     stride_w = H * K if USE_BG else HV * K
@@ -575,13 +552,11 @@ def pre_process_bwd_kernel_merged(
             last_idx = min((i_t + 1) * BT, T) - 1
 
             if USE_G:
-                # Note: pre_process_bwd_kernel_stage1 always uses exp for USE_G,
-                # regardless of USE_EXP2. This is for consistency with the original design.
-                bg_last = tl.load(g + (bos + last_idx) * HV + i_h).to(tl.float32)
-                bg_last_exp = exp(bg_last)
-                p_g = tl.make_block_ptr(g + bos * HV + i_h, (T,), (HV,), (i_t * BT,), (BT,), (0,))
+                bg_last = tl.load(g + last_idx * HV).to(tl.float32)
+                p_g = tl.make_block_ptr(g, (T,), (HV,), (i_t * BT,), (BT,), (0,))
                 b_g = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
-                b_g_exp = exp(b_g)
+                bg_last_exp = exp2(bg_last)
+                b_g_exp = exp2(b_g)
 
             p_dv = tl.make_block_ptr(dv, (T, V), (stride_v, 1), (i_t * BT, i_v * BLOCK_SIZE), (BT, BLOCK_SIZE), (1, 0))
             p_do = tl.make_block_ptr(do, (T, V), (stride_v, 1), (i_t * BT, i_v * BLOCK_SIZE), (BT, BLOCK_SIZE), (1, 0))
@@ -592,12 +567,8 @@ def pre_process_bwd_kernel_merged(
             b_k = tl.load(p_k, boundary_check=(0, 1))
             if USE_GK:
                 o_k1 = tl.arange(0, 64)
-                if USE_EXP2:
-                    b_gk_last1 = tl.load(gk + (bos + last_idx) * HV * K + i_h * K +
-                                         o_k1, mask=(o_k1 < K), other=0.).to(tl.float32)
-                else:
-                    b_gk_last1 = tl.load(gk + (bos + last_idx) * HV * K + i_h * K +
-                                         o_k1, mask=(o_k1 < K), other=0.).to(tl.float32)
+                p_gk_last = gk + last_idx * HV * K
+                b_gk_last1 = tl.load(p_gk_last + o_k1, mask=(o_k1 < K), other=0.).to(tl.float32)
             b_dv = tl.dot(b_k, b_dh1.to(b_k.dtype))
 
             if K > 64:
@@ -605,12 +576,7 @@ def pre_process_bwd_kernel_merged(
                 b_k = tl.load(p_k, boundary_check=(0, 1))
                 if USE_GK:
                     o_k2 = 64 + o_k1
-                    if USE_EXP2:
-                        b_gk_last2 = tl.load(gk + (bos + last_idx) * HV * K + i_h * K +
-                                             o_k2, mask=(o_k2 < K), other=0.).to(tl.float32)
-                    else:
-                        b_gk_last2 = tl.load(gk + (bos + last_idx) * HV * K + i_h * K +
-                                             o_k2, mask=(o_k2 < K), other=0.).to(tl.float32)
+                    b_gk_last2 = tl.load(p_gk_last + o_k2, mask=(o_k2 < K), other=0.).to(tl.float32)
                 b_dv += tl.dot(b_k, b_dh2.to(b_k.dtype))
 
             if K > 128:
@@ -618,12 +584,7 @@ def pre_process_bwd_kernel_merged(
                 b_k = tl.load(p_k, boundary_check=(0, 1))
                 if USE_GK:
                     o_k3 = 128 + o_k1
-                    if USE_EXP2:
-                        b_gk_last3 = tl.load(gk + (bos + last_idx) * HV * K + i_h * K +
-                                             o_k3, mask=(o_k3 < K), other=0.).to(tl.float32)
-                    else:
-                        b_gk_last3 = tl.load(gk + (bos + last_idx) * HV * K + i_h * K +
-                                             o_k3, mask=(o_k3 < K), other=0.).to(tl.float32)
+                    b_gk_last3 = tl.load(p_gk_last + o_k3, mask=(o_k3 < K), other=0.).to(tl.float32)
                 b_dv += tl.dot(b_k, b_dh3.to(b_k.dtype))
 
             if K > 192:
@@ -631,18 +592,12 @@ def pre_process_bwd_kernel_merged(
                 b_k = tl.load(p_k, boundary_check=(0, 1))
                 if USE_GK:
                     o_k4 = 192 + o_k1
-                    if USE_EXP2:
-                        b_gk_last4 = tl.load(gk + (bos + last_idx) * HV * K + i_h * K +
-                                             o_k4, mask=(o_k4 < K), other=0.).to(tl.float32)
-                    else:
-                        b_gk_last4 = tl.load(gk + (bos + last_idx) * HV * K + i_h * K +
-                                             o_k4, mask=(o_k4 < K), other=0.).to(tl.float32)
+                    b_gk_last4 = tl.load(p_gk_last + o_k4, mask=(o_k4 < K), other=0.).to(tl.float32)
                 b_dv += tl.dot(b_k, b_dh4.to(b_k.dtype))
 
             if USE_G:
                 m_t = (i_t * BT + tl.arange(0, BT)) < T
-                # Note: pre_process_bwd_kernel_stage1 always uses exp for USE_G
-                b_dv *= tl.where(m_t, exp(bg_last - b_g), 0)[:, None]
+                b_dv *= tl.where(m_t, exp2(bg_last - b_g), 0)[:, None]
             b_dv += tl.load(p_dv, boundary_check=(0, 1))
 
             # Update dh
@@ -654,10 +609,7 @@ def pre_process_bwd_kernel_merged(
                 b_dh1 *= bg_last_exp
                 b_q = b_q * b_g_exp[None, :]
             if USE_GK:
-                if USE_EXP2:
-                    b_dh1 *= exp2(b_gk_last1[:, None])
-                else:
-                    b_dh1 *= exp(b_gk_last1[:, None])
+                b_dh1 *= exp2(b_gk_last1[:, None])
             if USE_BG:
                 # DPLR mode: dh += q^T @ do + w^T @ dv2 (no scale)
                 b_dh1 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) + tl.dot(b_w, b_dv.to(b_w.dtype))
@@ -673,10 +625,7 @@ def pre_process_bwd_kernel_merged(
                     b_dh2 *= bg_last_exp
                     b_q = b_q * b_g_exp[None, :]
                 if USE_GK:
-                    if USE_EXP2:
-                        b_dh2 *= exp2(b_gk_last2[:, None])
-                    else:
-                        b_dh2 *= exp(b_gk_last2[:, None])
+                    b_dh2 *= exp2(b_gk_last2[:, None])
                 if USE_BG:
                     b_dh2 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) + tl.dot(b_w, b_dv.to(b_w.dtype))
                 else:
@@ -691,10 +640,7 @@ def pre_process_bwd_kernel_merged(
                     b_dh3 *= bg_last_exp
                     b_q = b_q * b_g_exp[None, :]
                 if USE_GK:
-                    if USE_EXP2:
-                        b_dh3 *= exp2(b_gk_last3[:, None])
-                    else:
-                        b_dh3 *= exp(b_gk_last3[:, None])
+                    b_dh3 *= exp2(b_gk_last3[:, None])
                 if USE_BG:
                     b_dh3 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) + tl.dot(b_w, b_dv.to(b_w.dtype))
                 else:
@@ -709,10 +655,7 @@ def pre_process_bwd_kernel_merged(
                     b_dh4 *= bg_last_exp
                     b_q = b_q * b_g_exp[None, :]
                 if USE_GK:
-                    if USE_EXP2:
-                        b_dh4 *= exp2(b_gk_last4[:, None])
-                    else:
-                        b_dh4 *= exp(b_gk_last4[:, None])
+                    b_dh4 *= exp2(b_gk_last4[:, None])
                 if USE_BG:
                     b_dh4 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) + tl.dot(b_w, b_dv.to(b_w.dtype))
                 else:
@@ -758,22 +701,15 @@ def pre_process_bwd_kernel_merged(
 
             if USE_G:
                 m_t = (i_t * BT + tl.arange(0, BT)) < T
-                b_g_last = tl.load(g + bos * HV + last_idx * HV + i_h).to(tl.float32)
-                p_g = tl.make_block_ptr(g + bos * HV + i_h, (T,), (HV,), (i_t * BT,), (BT,), (0,))
+                b_g_last = tl.load(g + last_idx * HV).to(tl.float32)
+                p_g = tl.make_block_ptr(g, (T,), (HV,), (i_t * BT,), (BT,), (0,))
                 b_g = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
-                if USE_EXP2:
-                    b_k = b_k * tl.where(m_t, exp2(b_g_last - b_g), 0)[:, None]
-                    b_g_last = exp2(b_g_last)
-                else:
-                    b_k = b_k * tl.where(m_t, exp(b_g_last - b_g), 0)[:, None]
-                    b_g_last = exp(b_g_last)
+                b_k = b_k * tl.where(m_t, exp2(b_g_last - b_g), 0)[:, None]
+                b_g_last = exp2(b_g_last)
                 b_diag = tl.where(row[:, None] == row[None, :], b_g_last, 0.0)
             elif USE_GK:
-                b_gk_last = tl.load(gk + (bos + last_idx) * HV * K + i_h * K + row, mask=(row < K), other=0.).to(tl.float32)
-                if USE_EXP2:
-                    b_gk_last = exp2(b_gk_last)
-                else:
-                    b_gk_last = exp(b_gk_last)
+                b_gk_last = tl.load(gk + last_idx * HV * K + row, mask=(row < K), other=0.).to(tl.float32)
+                b_gk_last = exp2(b_gk_last)
                 b_diag = tl.where(row[:, None] == row[None, :], b_gk_last[:, None], 0.0)
             else:
                 b_diag = tl.where(row[:, None] == row[None, :], 1.0, 0.0)
@@ -803,11 +739,10 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
     bg: torch.Tensor | None = None,
     v: torch.Tensor | None = None,
     chunk_size: int = 64,  # SY: remove this argument and force chunk size 64?
+    state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
-    use_exp2: bool = False,
     initial_state: torch.Tensor | None = None,
     context: FLACPContext = None,
-    transpose_state_layout: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if context is None or context.group is None:
         return initial_state
@@ -826,7 +761,7 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
     assert K <= 256, "current kernel does not support head dimension larger than 256."
 
     hm = k.new_zeros(HV, K, (V + K), dtype=torch.float32)
-    if transpose_state_layout:
+    if state_v_first:
         initial_state = k.new_zeros(N, HV, V, K, dtype=torch.float32)
     else:
         initial_state = k.new_zeros(N, HV, K, V, dtype=torch.float32)
@@ -852,7 +787,6 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
             V=V,
             BT=BT,
             BK1=BK,
-            USE_EXP2=use_exp2,
             BLOCK_SIZE=BLOCK_SIZE,
             MULTI_SEQS=False,
         )
@@ -875,7 +809,7 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
             FORWARD=True,
             INTRACARD_MODE=False,
             NUM_SEQ_ENTRIES=0,
-            TRANSPOSE_STATE=transpose_state_layout,
+            STATE_V_FIRST=state_v_first,
         )
     return initial_state
 
@@ -890,12 +824,12 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
     gk: torch.Tensor | None = None,
     bg: torch.Tensor | None = None,
     scale: float | None = None,
+    state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
-    use_exp2: bool = False,
     dht: torch.Tensor | None = None,
     initial_state: torch.Tensor | None = None,
     context: FLACPContext | None = None,
-    transpose_state_layout: bool = False,
+    chunk_size: int = 64,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if context is None or context.group is None:
         return dht, initial_state
@@ -904,7 +838,7 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
 
     B, T, H, K, V, HV = *q.shape, do.shape[-1], do.shape[2]
     # N: the actual number of sequences in the batch with either equal or variable lengths
-    BT = 64
+    BT = chunk_size
     assert K <= 256, "current kernel does not support head dimension being larger than 256."
     BK = triton.next_power_of_2(K)
 
@@ -914,7 +848,7 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
         N = len(cu_seqlens) - 1
 
     dhm = q.new_zeros(HV, K, V + K, dtype=torch.float32)
-    if transpose_state_layout:
+    if state_v_first:
         dht = q.new_zeros(N, HV, V, K, dtype=torch.float32)
     else:
         dht = q.new_zeros(N, HV, K, V, dtype=torch.float32)
@@ -940,7 +874,6 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
             V=V,
             BT=BT,
             BK1=BK,
-            USE_EXP2=use_exp2,
             BLOCK_SIZE=BLOCK_SIZE,
             USE_BG=bg is not None,
         )
@@ -965,7 +898,7 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
             FORWARD=False,
             INTRACARD_MODE=False,
             NUM_SEQ_ENTRIES=0,
-            TRANSPOSE_STATE=transpose_state_layout,
+            STATE_V_FIRST=state_v_first,
         )
 
     # initial_state is None in the CP mode

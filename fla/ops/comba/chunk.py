@@ -47,7 +47,6 @@ def chunk_comba_fwd(
         cu_seqlens=cu_seqlens,
         output_dtype=torch.float32,
         chunk_indices=chunk_indices,
-        use_exp2=True,
     )
     A = solve_tril(
         A=A,
@@ -63,7 +62,6 @@ def chunk_comba_fwd(
         g_cumsum=g0,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
-        use_exp2=True,
     )
     h, v_new, final_state = chunk_gated_delta_rule_fwd_h(
         k=k,
@@ -74,7 +72,6 @@ def chunk_comba_fwd(
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
-        use_exp2=True,
     )
     o = chunk_fwd_o(
         q=q,
@@ -85,7 +82,6 @@ def chunk_comba_fwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
-        use_exp2=True,
     )
     return g0, g, o, A, final_state
 
@@ -114,7 +110,6 @@ def chunk_comba_bwd(
         g_cumsum=g0,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
-        use_exp2=True,
     )
     h, v_new, _ = chunk_gated_delta_rule_fwd_h(
         k=k,
@@ -125,7 +120,6 @@ def chunk_comba_bwd(
         output_final_state=False,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
-        use_exp2=True,
     )
     dv = chunk_bwd_dv_local(
         q=q,
@@ -135,7 +129,6 @@ def chunk_comba_bwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
-        use_exp2=True,
     )
     dh, dh0, dv = chunk_gated_delta_rule_bwd_dhu(
         q=q,
@@ -149,7 +142,6 @@ def chunk_comba_bwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
-        use_exp2=True,
     )
     dq, dk, dw, dg = chunk_bwd_dqkwg(
         q=q,
@@ -164,7 +156,6 @@ def chunk_comba_bwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
-        use_exp2=True,
     )
     dk2, dv, dp, db, dg0, dg2 = prepare_wy_repr_bwd(
         k=k,
@@ -178,7 +169,6 @@ def chunk_comba_bwd(
         du=dv,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
-        use_exp2=True,
     )
     dk.add_(dk2)
     dg.add_(dg2)
@@ -216,8 +206,9 @@ class ChunkCombaFunction(torch.autograd.Function):
         else:
             q_rstd, k_rstd, p_rstd = None, None, None
 
-        chunk_indices = prepare_chunk_indices(
-            cu_seqlens, 64, cu_seqlens_cpu=cu_seqlens_cpu) if cu_seqlens is not None else None
+        chunk_indices = None
+        if cu_seqlens is not None:
+            chunk_indices = prepare_chunk_indices(cu_seqlens, 64, cu_seqlens_cpu=cu_seqlens_cpu)
 
         g0, g, o, A, final_state = chunk_comba_fwd(
             q=q,
@@ -232,8 +223,22 @@ class ChunkCombaFunction(torch.autograd.Function):
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
         )
-        ctx.save_for_backward(q, q_rstd, k, k_rstd, p, p_rstd, v, g0, g, beta, A, initial_state, cu_seqlens,
-                              chunk_indices)
+        ctx.save_for_backward(
+            q,
+            q_rstd,
+            k,
+            k_rstd,
+            p,
+            p_rstd,
+            v,
+            g0,
+            g,
+            beta,
+            A,
+            initial_state,
+            cu_seqlens,
+            chunk_indices,
+        )
         ctx.scale = scale
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
         return o.to(q.dtype), final_state
@@ -246,9 +251,22 @@ class ChunkCombaFunction(torch.autograd.Function):
         do: torch.Tensor,
         dht: torch.Tensor,
     ):
-        q, q_rstd, k, k_rstd, p, p_rstd, v, g0, g, beta, A, initial_state, cu_seqlens, chunk_indices = (
-            ctx.saved_tensors
-        )
+        (
+            q,
+            q_rstd,
+            k,
+            k_rstd,
+            p,
+            p_rstd,
+            v,
+            g0,
+            g,
+            beta,
+            A,
+            initial_state,
+            cu_seqlens,
+            chunk_indices,
+        ) = ctx.saved_tensors
         dq, dk, dv, dp, db, dg, dh0 = chunk_comba_bwd(
             q=q,
             k=k,

@@ -19,43 +19,63 @@ from fla.utils import check_shared_mem
     tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
 })
 def _build_kernel(
-    B, H, K, V, BT, BK, BV, NK,
-    hD1, hD2,
+    B,
+    H,
+    HV,
+    K,
+    V,
+    BT,
+    BK,
+    BV,
+    NK,
+    hD1,
+    hD2,
     dtype_str,
-    USE_G, USE_DW, USE_EXP2, TRANSPOSE_STATE, IS_VARLEN=False,
+    USE_G,
+    USE_DW,
+    STATE_V_FIRST,
+    IS_VARLEN=False,
     num_warps=4,
 ):
     dtype_map = {'float16': T.float16, 'bfloat16': T.bfloat16, 'float32': T.float32}
     _dtype = dtype_map[dtype_str]
     NV = tilelang.cdiv(V, BV)
     threads = num_warps * 32
-    tile_hD1, tile_hD2 = (BV, BK) if TRANSPOSE_STATE else (BK, BV)
+    tile_hD1, tile_hD2 = (BV, BK) if STATE_V_FIRST else (BK, BV)
 
     # Rebind to underscore-prefixed locals so the kernel body (a closure below)
     # stays identical to the previous nested layout. tilelang caches _build_kernel
     # by the outer (B, H, K, V, BT, BK, BV, NK, hD1, hD2, dtype_str, ...) tuple.
-    _B, _H, _K, _V = B, H, K, V
+    _B, _H, _HV, _K, _V = B, H, HV, K, V
+    _G = HV // H
     _BT, _BK, _BV, _NK = BT, BK, BV, NK
     _NV = NV
     _hD1, _hD2, _thD1, _thD2 = hD1, hD2, tile_hD1, tile_hD2
     _threads = threads
-    _USE_G, _USE_DW, _USE_EXP2 = USE_G, USE_DW, USE_EXP2
-    _TS, _VAR = TRANSPOSE_STATE, IS_VARLEN
+    _USE_G, _USE_DW = USE_G, USE_DW
+    _TS, _VAR = STATE_V_FIRST, IS_VARLEN
 
     # T, NT, total_h are dynamic (vary with sequence length, no recompilation).
     # B, H are compile-time (stable across batches, enables fast integer division).
     T_d, NT_d, total_h_d, Ncu_d = T.dynamic("T, NT, total_h, Ncu")
 
     # 4D tensor shapes using dynamic T + compile-time B, H, K, V.
+    # q/k carry H qk-heads; dq/dk/dw and v/do/g/dg carry HV value-heads
+    # (HV >= H for GVA). dq/dk/dw are written at value-head granularity and
+    # reduced to qk-heads by the caller when HV > H.
     qk_s = (_B, T_d, _H, _K)
-    v_s = (_B, T_d, _H, _V)
+    dqk_s = (_B, T_d, _HV, _K)
+    v_s = (_B, T_d, _HV, _V)
     h_s = (total_h_d, _hD1, _hD2)
-    g_s = (_B, T_d, _H)
-    dg_s = (_NK, _B, T_d, _H)
+    g_s = (_B, T_d, _HV)
+    dg_s = (_NK, _B, T_d, _HV)
 
     @T.macro
     def kernel_body(q, k, v, g, h, do, dh, dq, dk, dw, dv, dg, scale,
                     i_b, i_h, i_k, t_s, T_seq, i_t_local, h_idx, k_off):
+        # Map the value-head program id to the qk-head it belongs to. For GVA
+        # (HV > H) multiple value-heads share the same q/k head.
+        i_hqk = i_h // _G
         # -- accumulators --
         b_dq = T.alloc_fragment((_BT, _BK), T.float32)
         b_dk = T.alloc_fragment((_BT, _BK), T.float32)
@@ -138,10 +158,11 @@ def _build_kernel(
         # dg_last is now in s_dg_last_acc[0] (shared memory, visible to all threads)
 
         # ========== load q, k ==========
+        # q/k are indexed by the shared qk-head, not the value-head.
         s_q = T.alloc_shared((_BT, _BK), _dtype)
         s_k = T.alloc_shared((_BT, _BK), _dtype)
-        T.copy(q[i_b, t_s:t_s + _BT, i_h, k_off:k_off + _BK], s_q)
-        T.copy(k[i_b, t_s:t_s + _BT, i_h, k_off:k_off + _BK], s_k)
+        T.copy(q[i_b, t_s:t_s + _BT, i_hqk, k_off:k_off + _BK], s_q)
+        T.copy(k[i_b, t_s:t_s + _BT, i_hqk, k_off:k_off + _BK], s_k)
 
         # ========== USE_G path ==========
         if _USE_G:
@@ -154,89 +175,39 @@ def _build_kernel(
             last_pos = T.max(0, T.min(_BT, T_seq - i_t_local * _BT) - 1)
             g_last = s_g[last_pos]
             b_dg_last = T.alloc_var(T.float32)
-            b_dg_last = s_dg_last_acc[0] * (T.exp2(g_last) if _USE_EXP2 else T.exp(g_last))
+            b_dg_last = s_dg_last_acc[0] * T.exp2(g_last)
 
-            # b_dq *= exp(g) * scale  (inline, no extra fragment)
+            # b_dq *= exp2(g) * scale  (inline, no extra fragment)
             for _i, _j in T.Parallel(_BT, _BK):
-                b_dq[_i, _j] = b_dq[_i, _j] * (T.exp2(s_g[_i]) if _USE_EXP2 else T.exp(s_g[_i])) * scale
+                b_dq[_i, _j] = b_dq[_i, _j] * T.exp2(s_g[_i]) * scale
 
             # Gate b_dk with m_t mask: zero out OOB positions
             for _i, _j in T.Parallel(_BT, _BK):
                 m_t = (i_t_local * _BT + _i) < T_seq
                 b_dk[_i, _j] = T.if_then_else(
                     m_t,
-                    b_dk[_i, _j] * (T.exp2(-s_g[_i] + g_last) if _USE_EXP2 else T.exp(-s_g[_i] + g_last)),
+                    b_dk[_i, _j] * T.exp2(-s_g[_i] + g_last),
                     0.0)
 
-            # dq*q and dk*k reductions: compute products directly in fragments
-            # via fragment×shared (safe per pattern 174). Avoids the shared
-            # round-trip through s_A1/s_A2.
-            f_prod1 = T.alloc_fragment((_BT, _BK), T.float32)
+            # dk*k reduction (before ds gemms): compute product directly in
+            # fragments via fragment×shared. b_dg_last uses the gated-only b_dk.
             f_prod2 = T.alloc_fragment((_BT, _BK), T.float32)
             for _i, _j in T.Parallel(_BT, _BK):
-                f_prod1[_i, _j] = b_dq[_i, _j] * s_q[_i, _j]
                 f_prod2[_i, _j] = b_dk[_i, _j] * s_k[_i, _j]
-            f_dg1 = T.alloc_fragment((_BT,), T.float32)
             f_dg2 = T.alloc_fragment((_BT,), T.float32)
-            T.reduce_sum(f_prod1, f_dg1, dim=1)
             T.reduce_sum(f_prod2, f_dg2, dim=1)
-            f_dg_diff = T.alloc_fragment((_BT,), T.float32)
-            for _i in T.Parallel(_BT):
-                f_dg_diff[_i] = f_dg1[_i] - f_dg2[_i]
-            s_dg = T.alloc_shared((_BT,), T.float32)
-            T.copy(f_dg_diff, s_dg)
             # b_dg_last += sum(dk*k) via fragment reduce (f_dg2 → scalar)
             f_dkk_scalar = T.alloc_fragment((1,), T.float32)
             T.reduce_sum(f_dg2, f_dkk_scalar, dim=0)
             b_dg_last = b_dg_last + f_dkk_scalar[0]
 
-            # b_ds = where(causal, b_ds * exp(g_i - g_j), 0) * scale
+            # b_ds = where(causal, b_ds * exp2(g_i - g_j), 0) * scale
             for _i, _j in T.Parallel(_BT, _BT):
                 causal = (_i >= _j) & ((i_t_local * _BT + _i) < T_seq) & ((i_t_local * _BT + _j) < T_seq)
                 b_ds[_i, _j] = T.if_then_else(
                     causal,
-                    b_ds[_i, _j] * (T.exp2(s_g[_i] - s_g[_j]) if _USE_EXP2 else T.exp(s_g[_i] - s_g[_j])) * scale,
+                    b_ds[_i, _j] * T.exp2(s_g[_i] - s_g[_j]) * scale,
                     0.0)
-
-            # ds2 = ds * (q @ k^T);  dg += row_sum(ds2) - col_sum(ds2)
-            b_qk = T.alloc_fragment((_BT, _BT), T.float32)
-            T.clear(b_qk)
-            T.gemm(s_q, s_k, b_qk, transpose_B=True)
-            # Write both to shared, multiply to get ds2
-            s_ds_f32 = T.alloc_shared((_BT, _BT), T.float32)
-            s_qk_f32 = T.alloc_shared((_BT, _BT), T.float32)
-            T.copy(b_ds, s_ds_f32)
-            T.copy(b_qk, s_qk_f32)
-            T.sync_threads()
-            for _i, _j in T.Parallel(_BT, _BT):
-                s_ds_f32[_i, _j] = s_ds_f32[_i, _j] * s_qk_f32[_i, _j]
-            T.sync_threads()
-            # row_sum(ds2) via T.reduce_sum
-            f_ds2 = T.alloc_fragment((_BT, _BT), T.float32)
-            T.copy(s_ds_f32, f_ds2)
-            f_row_sum = T.alloc_fragment((_BT,), T.float32)
-            T.reduce_sum(f_ds2, f_row_sum, dim=1)
-            s_row = T.alloc_shared((_BT,), T.float32)
-            T.copy(f_row_sum, s_row)
-            T.sync_threads()
-            for _i in T.Parallel(_BT):
-                s_dg[_i] = s_dg[_i] + s_row[_i]
-            T.sync_threads()
-            # col_sum(ds2): transpose in shared, then T.reduce_sum
-            # Reuse s_qk_f32 for the transposed ds2
-            for _i, _j in T.Parallel(_BT, _BT):
-                s_qk_f32[_i, _j] = s_ds_f32[_j, _i]
-            T.sync_threads()
-            f_ds2t = T.alloc_fragment((_BT, _BT), T.float32)
-            T.copy(s_qk_f32, f_ds2t)
-            f_col_sum = T.alloc_fragment((_BT,), T.float32)
-            T.reduce_sum(f_ds2t, f_col_sum, dim=1)
-            s_col = T.alloc_shared((_BT,), T.float32)
-            T.copy(f_col_sum, s_col)
-            T.sync_threads()
-            for _i in T.Parallel(_BT):
-                s_dg[_i] = s_dg[_i] - s_col[_i]
-            T.sync_threads()
 
             # cast ds for final gemms
             s_ds = T.alloc_shared((_BT, _BT), _dtype)
@@ -247,6 +218,20 @@ def _build_kernel(
 
             T.gemm(s_ds, s_k, b_dq)               # dq += ds @ k
             T.gemm(s_ds, s_q, b_dk, transpose_A=True)  # dk += ds^T @ q
+
+            # b_dg = sum(b_dq * q) - sum(b_dk * k)  using the fully-updated b_dq/b_dk
+            f_prod1 = T.alloc_fragment((_BT, _BK), T.float32)
+            for _i, _j in T.Parallel(_BT, _BK):
+                f_prod1[_i, _j] = b_dq[_i, _j] * s_q[_i, _j]
+                f_prod2[_i, _j] = b_dk[_i, _j] * s_k[_i, _j]
+            f_dg1 = T.alloc_fragment((_BT,), T.float32)
+            T.reduce_sum(f_prod1, f_dg1, dim=1)
+            T.reduce_sum(f_prod2, f_dg2, dim=1)
+            f_dg_diff = T.alloc_fragment((_BT,), T.float32)
+            for _i in T.Parallel(_BT):
+                f_dg_diff[_i] = f_dg1[_i] - f_dg2[_i]
+            s_dg = T.alloc_shared((_BT,), T.float32)
+            T.copy(f_dg_diff, s_dg)
 
             # store dq, dk via shared (fragment has MMA layout, can't index directly)
             f_out = T.alloc_fragment((_BT, _BK), _dtype)
@@ -278,19 +263,19 @@ def _build_kernel(
             q: T.Tensor(qk_s, _dtype), k: T.Tensor(qk_s, _dtype),
             v: T.Tensor(v_s, _dtype), g: T.Tensor(g_s, T.float32),
             h: T.Tensor(h_s, _dtype), do: T.Tensor(v_s, _dtype),
-            dh: T.Tensor(h_s, _dtype), dq: T.Tensor(qk_s, _dtype),
-            dk: T.Tensor(qk_s, _dtype), dw: T.Tensor(qk_s, _dtype),
+            dh: T.Tensor(h_s, _dtype), dq: T.Tensor(dqk_s, _dtype),
+            dk: T.Tensor(dqk_s, _dtype), dw: T.Tensor(dqk_s, _dtype),
             dv: T.Tensor(v_s, _dtype), dg: T.Tensor(dg_s, T.float32),
             cu_seqlens: T.Tensor((Ncu_d,), T.int32),
             chunk_indices: T.Tensor((NT_d, 2), T.int32),
             scale: T.float32,
         ):
-            with T.Kernel(_NK, NT_d, _H, threads=_threads) as (i_k, i_t, i_h):
+            with T.Kernel(_NK, NT_d, _HV, threads=_threads) as (i_k, i_t, i_h):
                 i_n = chunk_indices[i_t, 0]
                 i_t_local = chunk_indices[i_t, 1]
                 bos = cu_seqlens[i_n]
                 T_seq = cu_seqlens[i_n + 1] - bos
-                h_idx = i_t * _H + i_h
+                h_idx = i_t * _HV + i_h
                 t_s = bos + i_t_local * _BT
                 kernel_body(q, k, v, g, h, do, dh, dq, dk, dw, dv, dg,
                             scale, 0, i_h, i_k, t_s, T_seq, i_t_local,
@@ -301,16 +286,16 @@ def _build_kernel(
             q: T.Tensor(qk_s, _dtype), k: T.Tensor(qk_s, _dtype),
             v: T.Tensor(v_s, _dtype), g: T.Tensor(g_s, T.float32),
             h: T.Tensor(h_s, _dtype), do: T.Tensor(v_s, _dtype),
-            dh: T.Tensor(h_s, _dtype), dq: T.Tensor(qk_s, _dtype),
-            dk: T.Tensor(qk_s, _dtype), dw: T.Tensor(qk_s, _dtype),
+            dh: T.Tensor(h_s, _dtype), dq: T.Tensor(dqk_s, _dtype),
+            dk: T.Tensor(dqk_s, _dtype), dw: T.Tensor(dqk_s, _dtype),
             dv: T.Tensor(v_s, _dtype), dg: T.Tensor(dg_s, T.float32),
             scale: T.float32,
         ):
-            with T.Kernel(_NK, T.ceildiv(T_d, _BT), _B * _H, threads=_threads) as (i_k, i_t, i_bh):
-                i_b = i_bh // _H
-                i_h = i_bh % _H
+            with T.Kernel(_NK, T.ceildiv(T_d, _BT), _B * _HV, threads=_threads) as (i_k, i_t, i_bh):
+                i_b = i_bh // _HV
+                i_h = i_bh % _HV
                 NT_local = T.ceildiv(T_d, _BT)
-                h_idx = (i_b * NT_local + i_t) * _H + i_h
+                h_idx = (i_b * NT_local + i_t) * _HV + i_h
                 t_s = i_t * _BT
                 kernel_body(q, k, v, g, h, do, dh, dq, dk, dw, dv, dg,
                             scale, i_b, i_h, i_k, t_s, T_d, i_t,
@@ -320,12 +305,24 @@ def _build_kernel(
 
 
 def chunk_bwd_dqkwg_tilelang(
-    q, k, v, do, h, dh,
-    w=None, g=None, g_gamma=None, dv=None,
-    scale=None, cu_seqlens=None, chunk_size=64,
-    chunk_indices=None, use_exp2=False, transpose_state_layout=False,
+    q,
+    k,
+    v,
+    do,
+    h,
+    dh,
+    w=None,
+    g=None,
+    g_gamma=None,
+    dv=None,
+    scale=None,
+    state_v_first=False,
+    cu_seqlens=None,
+    chunk_size=64,
+    chunk_indices=None,
 ):
-    B, T, H, K, V = *k.shape, v.shape[-1]
+    B, T, H, K = k.shape
+    HV, V = v.shape[2], v.shape[-1]
     BT = chunk_size
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
@@ -341,29 +338,47 @@ def chunk_bwd_dqkwg_tilelang(
     USE_G = g is not None
     USE_DW = w is not None
 
-    # Outputs — kernel writes directly
-    dq = torch.empty_like(q)
-    dk = torch.empty_like(k)
+    # Outputs — kernel writes dq/dk at value-head (HV) granularity; reduce to
+    # qk-head (H) below when GVA is active. dg stays at HV (per value-head).
+    dq = torch.empty(B, T, HV, K, dtype=q.dtype, device=q.device)
+    dk = torch.empty(B, T, HV, K, dtype=k.dtype, device=k.device)
     dw_out = torch.empty_like(w) if USE_DW else None
-    dg = torch.zeros(NK, B, T, H, dtype=torch.float32, device=q.device) if USE_G else None
+    dg = torch.zeros(NK, B, T, HV, dtype=torch.float32, device=q.device) if USE_G else None
 
     h_flat = h.reshape(-1, h.shape[-2], h.shape[-1])
     dh_flat = dh.reshape(-1, dh.shape[-2], dh.shape[-1])
     hD1, hD2 = h_flat.shape[-2], h_flat.shape[-1]
     dtype_str = {torch.float16: 'float16', torch.bfloat16: 'bfloat16', torch.float32: 'float32'}[q.dtype]
 
-    # Cache key: B, H, tile sizes, flags. T is dynamic (no recompilation for different seq lengths).
+    # Cache key: B, H, HV, tile sizes, flags. T is dynamic (no recompilation for different seq lengths).
+    # Small head dims (< 64) cannot be warp-partitioned across 4 warps by TileLang's
+    # GEMM (tile too small); drop to 2 warps so the kernel still compiles.
+    num_warps = 4 if min(K, V) >= 64 else 2
     kernel = _build_kernel(
-        B, H, K, V, BT, BK, BV, NK,
-        hD1, hD2, dtype_str,
-        USE_G, USE_DW, use_exp2, transpose_state_layout, IS_VARLEN,
+        B,
+        H,
+        HV,
+        K,
+        V,
+        BT,
+        BK,
+        BV,
+        NK,
+        hD1,
+        hD2,
+        dtype_str,
+        USE_G,
+        USE_DW,
+        state_v_first,
+        IS_VARLEN,
+        num_warps=num_warps,
     )
 
     # Unused optional params still need shape-matching tensors for TileLang
-    g_kern = g if USE_G else q.new_empty(B, T, H)
-    dw_kern = dw_out if USE_DW else q.new_empty(B, T, H, K)
-    dv_kern = dv if USE_DW else q.new_empty(B, T, H, V)
-    dg_kern = dg if USE_G else q.new_empty(NK, B, T, H, dtype=torch.float32)
+    g_kern = g if USE_G else q.new_empty(B, T, HV)
+    dw_kern = dw_out if USE_DW else q.new_empty(B, T, HV, K)
+    dv_kern = dv if USE_DW else q.new_empty(B, T, HV, V)
+    dg_kern = dg if USE_G else q.new_empty(NK, B, T, HV, dtype=torch.float32)
 
     if IS_VARLEN:
         kernel(q, k, v, g_kern, h_flat, do, dh_flat, dq, dk, dw_kern, dv_kern, dg_kern,
@@ -373,4 +388,8 @@ def chunk_bwd_dqkwg_tilelang(
 
     if dg is not None:
         dg = dg.sum(0)
+    if H != HV:
+        G = HV // H
+        dq = dq.view(B, T, H, G, K).sum(3)
+        dk = dk.view(B, T, H, G, K).sum(3)
     return dq, dk, dw_out, dg

@@ -100,6 +100,7 @@ def test_fused_cross_entropy_softcap(
 @pytest.mark.parametrize("V", [32000, 100000])
 @pytest.mark.parametrize("scale", [1., 0.5])
 @pytest.mark.parametrize("reduction", ['mean'])
+@pytest.mark.parametrize("accumulate_grad_in_fp32", [False, True])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.skipif(
     device_platform == 'intel',
@@ -112,6 +113,7 @@ def test_fused_linear_cross_entropy(
     V: int,
     scale: float,
     reduction: str,
+    accumulate_grad_in_fp32: bool,
     dtype: torch.dtype
 ):
     torch.manual_seed(42)
@@ -132,7 +134,11 @@ def test_fused_linear_cross_entropy(
     ref_dw, weight.grad = weight.grad.clone(), None
     ref_db, bias.grad = bias.grad.clone(), None
 
-    tri = FusedLinearCrossEntropyLoss(logit_scale=scale, reduction=reduction)(x, target, weight, bias)
+    tri = FusedLinearCrossEntropyLoss(
+        logit_scale=scale,
+        reduction=reduction,
+        accumulate_grad_in_fp32=accumulate_grad_in_fp32,
+    )(x, target, weight, bias)
     tri.backward(do)
     tri_dx, x.grad = x.grad.clone(), None
     tri_dw, weight.grad = weight.grad.clone(), None

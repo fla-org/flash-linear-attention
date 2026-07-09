@@ -256,7 +256,7 @@ def fused_recurrent_rwkv4_backward_kernel(
     gk_ptr = gk_ptr + b_idx * gk_s_b
     gv_ptr = gv_ptr + b_idx * gv_s_b
 
-    # Pointers to gradients which were recieved by the function.
+    # Pointers to gradients which were received by the function.
     gwkv_ptr = gwkv_ptr + b_idx * gwkv_s_b
     galpha_out_ptr = gstate_out_ptr + b_idx * gstate_out_s_b
     gbeta_out_ptr = gstate_out_ptr + b_idx * gstate_out_s_b + gstate_out_s_abe

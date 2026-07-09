@@ -64,6 +64,41 @@ def test_parallel(
     assert_close("dv", ref_dv, tri_dv, 0.005)
 
 
+def test_parallel_bwd_full_value_reduction(monkeypatch):
+    """Regression test: the backward must not split the value dim (NV == 1).
+
+    On low-shared-memory GPUs (e.g. consumer RTX cards) the backward used to cap BV <= 64,
+    so any head dim > 64 split V across programs and produced silently wrong dq/dk. We force
+    that low-smem branch here so the bug is caught on any GPU, not just consumer cards.
+    """
+    # Force the low-shared-memory branch regardless of the actual device.
+    monkeypatch.setattr("fla.ops.attn.parallel.check_shared_mem", lambda *args, **kwargs: False)
+
+    torch.manual_seed(42)
+    monkeypatch.setenv('TRITON_F32_DEFAULT', 'ieee')
+    # D=128 (> 64) is what triggered the bug: BV was capped at 64, splitting V into NV=2 blocks.
+    B, T, H, HQ, D, scale = 2, 256, 2, 2, 128, 0.1
+    q = torch.randn((B, T, HQ, D), dtype=torch.float16, device=device).requires_grad_(True)
+    k = torch.randn((B, T, H, D), dtype=torch.float16, device=device).requires_grad_(True)
+    v = torch.randn((B, T, H, D), dtype=torch.float16, device=device).requires_grad_(True)
+    do = torch.randn((B, T, HQ, D), dtype=torch.float16, device=device)
+
+    ref, _ = naive_parallel_attn(q=q.float(), k=k.float(), v=v.float(), scale=scale)
+    ref = ref.to(q.dtype)
+    ref.backward(do)
+    ref_dq, q.grad = q.grad.clone(), None
+    ref_dk, k.grad = k.grad.clone(), None
+    ref_dv, v.grad = v.grad.clone(), None
+
+    tri = parallel_attn(q=q, k=k, v=v, scale=scale)
+    tri.backward(do)
+
+    assert_close(" o", ref, tri, 0.005)
+    assert_close("dq", ref_dq, q.grad, 0.005)
+    assert_close("dk", ref_dk, k.grad, 0.005)
+    assert_close("dv", ref_dv, v.grad, 0.005)
+
+
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'HQ', 'D', 'scale'),
     [

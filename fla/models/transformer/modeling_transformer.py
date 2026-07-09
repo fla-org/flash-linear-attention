@@ -24,6 +24,7 @@ from fla.models.utils import Cache, FLAGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
 from fla.modules import GatedMLP as TransformerMLP
 from fla.modules.l2warp import l2_warp
+from fla.ops.attnres import fused_attnres
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
@@ -67,6 +68,25 @@ class TransformerBlock(GradientCheckpointingLayer):
             fuse_swiglu=config.fuse_swiglu,
         )
 
+        self.use_attnres = config.attnres_block_size is not None
+        if self.use_attnres:
+            self.attn_res_proj = nn.Linear(in_features=config.hidden_size, out_features=1, bias=False)
+            self.attn_res_norm = nn.RMSNorm(normalized_shape=config.hidden_size, eps=config.norm_eps)
+            self.mlp_res_proj = nn.Linear(in_features=config.hidden_size, out_features=1, bias=False)
+            self.mlp_res_norm = nn.RMSNorm(normalized_shape=config.hidden_size, eps=config.norm_eps)
+            # a sub-layer "starts a new block" if its global index
+            # (`2*layer_idx` for attn, `2*layer_idx+1` for mlp) is a multiple
+            # of `attnres_block_size`. when `True`, the incoming `prefix_sum`
+            # represents the previous block's complete sum (or the token
+            # embedding for the very first sub-layer) and gets cat'd into
+            # `attnres_states` before this sub-layer's attnres call.
+            block_size = config.attnres_block_size
+            self.attnres_is_attn_boundary = (2 * layer_idx) % block_size == 0
+            self.attnres_is_mlp_boundary = (2 * layer_idx + 1) % block_size == 0
+            # tag so `_init_weights` keeps the zero init (paper §5)
+            self.attn_res_proj._is_attnres_proj = True
+            self.mlp_res_proj._is_attnres_proj = True
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -74,11 +94,38 @@ class TransformerBlock(GradientCheckpointingLayer):
         past_key_values: tuple[torch.Tensor] | None = None,
         output_attentions: bool | None = False,
         use_cache: bool | None = False,
+        attnres_states: list[torch.Tensor] | None = None,
         **kwargs: Unpack[Any],
     ) -> tuple[torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None]:
 
-        residual = hidden_states
-        hidden_states = self.attn_norm(hidden_states)
+        if self.use_attnres:
+            # incoming `hidden_states` is the running `prefix_sum`
+            # (= previous layer's `output = prefix_sum + mlp_out`)
+            prefix_sum = hidden_states
+            if attnres_states is None:
+                # L=1 single-source: attnres is trivially identity (p=1, mix=v[0]);
+                # apply the prenorm directly, matching the L>1 kernel path which
+                # folds it via `output_rms_weight`. Mirrors Megatron-LM's bypass
+                # at the first layer (where `block_residual` is empty).
+                hidden_states = self.attn_norm(prefix_sum)
+                attnres_states = [prefix_sum]
+                prefix_sum = None
+            else:
+                residuals = [*attnres_states, prefix_sum]
+                if self.attnres_is_attn_boundary:
+                    # prev block's sum becomes a new residual entry
+                    attnres_states = residuals
+                    prefix_sum = None
+                hidden_states = fused_attnres(
+                    query=self.attn_res_proj.weight,
+                    residuals=residuals,
+                    rms_weight=self.attn_res_norm.weight,
+                    output_rms_weight=self.attn_norm.weight,
+                    rms_eps=self.attn_res_norm.eps,
+                )
+        else:
+            residual = hidden_states
+            hidden_states = self.attn_norm(hidden_states)
         hidden_states, attentions, past_key_values = self.attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
@@ -87,22 +134,37 @@ class TransformerBlock(GradientCheckpointingLayer):
             output_attentions=output_attentions,
             **kwargs,
         )
-        if self.config.fuse_norm:
+
+        if self.use_attnres:
+            # accumulate attn output into the running `prefix_sum`
+            prefix_sum = hidden_states if prefix_sum is None else prefix_sum + hidden_states
+            residuals = [*attnres_states, prefix_sum]
+            if self.attnres_is_mlp_boundary:
+                attnres_states = residuals
+                prefix_sum = None
+            hidden_states = fused_attnres(
+                query=self.mlp_res_proj.weight,
+                residuals=residuals,
+                rms_weight=self.mlp_res_norm.weight,
+                output_rms_weight=self.mlp_norm.weight,
+                rms_eps=self.mlp_res_norm.eps,
+            )
+        elif self.config.fuse_norm:
             hidden_states, residual = self.mlp_norm(hidden_states, residual, True)
         else:
             hidden_states = residual + hidden_states
             residual = hidden_states
             hidden_states = self.mlp_norm(hidden_states)
         hidden_states = self.mlp(hidden_states, **kwargs)
-        hidden_states = residual + hidden_states
 
-        outputs = (hidden_states,)
+        if self.use_attnres:
+            # returned `hidden_states` carries the running `prefix_sum` to
+            # the next layer (single-tensor pp transmission, no separate carry)
+            hidden_states = hidden_states if prefix_sum is None else prefix_sum + hidden_states
+        else:
+            hidden_states = residual + hidden_states
 
-        if output_attentions:
-            outputs += (attentions,)
-
-        if use_cache:
-            outputs += (past_key_values,)
+        outputs = (hidden_states, attentions, past_key_values, attnres_states)
 
         return outputs
 
@@ -125,9 +187,14 @@ class TransformerPreTrainedModel(PreTrainedModel):
         num_residuals_per_layer: int = 2,
     ):
         if isinstance(module, (nn.Linear, nn.Conv1d)):
-            # Slightly different from the TF version which uses truncated_normal for initialization
-            # cf https://github.com/pytorch/pytorch/pull/5617
-            nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
+            if getattr(module, '_is_attnres_proj', False):
+                # attnres pseudo-query (per-layer projection): zero init keeps
+                # the initial softmax uniform (paper §5)
+                nn.init.zeros_(module.weight)
+            else:
+                # Slightly different from the TF version which uses truncated_normal for initialization
+                # cf https://github.com/pytorch/pytorch/pull/5617
+                nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
@@ -159,10 +226,7 @@ class TransformerPreTrainedModel(PreTrainedModel):
 
 class TransformerModel(TransformerPreTrainedModel):
 
-    def __init__(
-        self,
-        config: TransformerConfig,
-    ) -> TransformerModel:
+    def __init__(self, config: TransformerConfig):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
@@ -170,6 +234,13 @@ class TransformerModel(TransformerPreTrainedModel):
         self.embeddings = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
         self.layers = nn.ModuleList([TransformerBlock(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
         self.norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
+
+        self.use_attnres = config.attnres_block_size is not None
+        if self.use_attnres:
+            # top-level attnres aggregation params; `self.norm` still applies afterward
+            self.res_proj = nn.Linear(in_features=config.hidden_size, out_features=1, bias=False)
+            self.res_norm = nn.RMSNorm(normalized_shape=config.hidden_size, eps=config.norm_eps)
+            self.res_proj._is_attnres_proj = True
 
         self.gradient_checkpointing = False
 
@@ -192,7 +263,7 @@ class TransformerModel(TransformerPreTrainedModel):
         output_hidden_states: bool | None = None,
         return_dict: bool | None = None,
         **kwargs: Unpack[Any],
-    ) -> tuple | CausalLMOutputWithPast:
+    ) -> tuple | BaseModelOutputWithPast:
         if output_attentions:
             warnings.warn(
                 "`TransformerModel` does not support output attention weights now, so `output_attentions` is set to `False`.",
@@ -206,7 +277,7 @@ class TransformerModel(TransformerPreTrainedModel):
         # retrieve input_ids and inputs_embeds
         if input_ids is not None and inputs_embeds is not None:
             raise ValueError("You cannot specify both input_ids and inputs_embeds at the same time")
-        elif input_ids is None and inputs_embeds is None:
+        if input_ids is None and inputs_embeds is None:
             raise ValueError("You have to specify either input_ids or inputs_embeds")
 
         if use_cache and not isinstance(past_key_values, Cache):
@@ -218,43 +289,55 @@ class TransformerModel(TransformerPreTrainedModel):
         # embed positions
         hidden_states = inputs_embeds
 
+        # list of completed block summaries (kept as separate tensors so
+        # `fused_attnres` can ingest them via its pointer-table API
+        # without an upstream `torch.cat`); the running `prefix_sum`
+        # rides on `hidden_states` itself.
+        attnres_states: list[torch.Tensor] | None = None
+
         all_hidden_states = () if output_hidden_states else None
         all_attns = () if output_attentions else None
-        next_cache = None
-
         for layer in self.layers:
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
-            layer_outputs = layer(
+            hidden_states, attentions, past_key_values, attnres_states = layer(
                 hidden_states,
                 attention_mask=attention_mask,
                 past_key_values=past_key_values,
                 output_attentions=output_attentions,
                 use_cache=use_cache,
+                attnres_states=attnres_states,
                 **kwargs,
             )
 
-            hidden_states = layer_outputs[0]
-
-            if use_cache:
-                next_cache = layer_outputs[2 if output_attentions else 1]
-
             if output_attentions:
-                all_attns += (layer_outputs[1],)
+                all_attns += (attentions,)
 
-        hidden_states = self.norm(hidden_states)
+        if self.use_attnres:
+            # top-level attnres aggregation; `self.norm` is folded into the
+            # kernel via `output_rms_weight` so we don't double-norm.
+            residuals = [*attnres_states, hidden_states]
+            hidden_states = fused_attnres(
+                query=self.res_proj.weight,
+                residuals=residuals,
+                rms_weight=self.res_norm.weight,
+                output_rms_weight=self.norm.weight,
+                rms_eps=self.res_norm.eps,
+            )
+        else:
+            hidden_states = self.norm(hidden_states)
 
         # add hidden states from the last decoder layer
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
 
         if not return_dict:
-            return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_attns] if v is not None)
+            return tuple(v for v in [hidden_states, past_key_values, all_hidden_states, all_attns] if v is not None)
 
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
-            past_key_values=next_cache,
+            past_key_values=past_key_values,
             hidden_states=all_hidden_states,
             attentions=all_attns,
         )
@@ -327,9 +410,9 @@ class TransformerForCausalLM(TransformerPreTrainedModel, FLAGenerationMixin):
 
         hidden_states = outputs[0]
 
-        logits = None if self.config.fuse_linear_cross_entropy else self.lm_head(hidden_states[:, -logits_to_keep:])
-
-        loss = None
+        loss, logits = None, None
+        if not self.config.fuse_linear_cross_entropy or labels is None:
+            logits = self.lm_head(hidden_states if logits_to_keep is None else hidden_states[:, -logits_to_keep:])
         if labels is not None:
             if getattr(self, 'criterion', None) is None:
                 if self.config.fuse_linear_cross_entropy:

@@ -41,6 +41,7 @@ class PaTHAttentionConfig(PretrainedConfig):
         use_forget_gate: bool = False,
         use_w_shortconv: bool = True,
         use_low_rank_w: bool = True,
+        attnres_block_size: int | None = None,
         **kwargs,
     ):
         self.hidden_size = hidden_size
@@ -77,6 +78,14 @@ class PaTHAttentionConfig(PretrainedConfig):
         self.use_forget_gate = use_forget_gate
         self.use_w_shortconv = use_w_shortconv
         self.use_low_rank_w = use_low_rank_w
+        self.attnres_block_size = attnres_block_size
+
+        if attnres_block_size is not None and attnres_block_size != 1:
+            if attnres_block_size < 2 or attnres_block_size % 2 != 0:
+                raise ValueError(
+                    "`attnres_block_size` must be `None`, `1` (full mode), or an even integer (one block "
+                    f"contains `attnres_block_size // 2` transformer layers); got {attnres_block_size}."
+                )
 
         super().__init__(
             pad_token_id=pad_token_id,

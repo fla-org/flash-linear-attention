@@ -13,7 +13,7 @@ import torch.nn.functional as F
 
 from fla.ops.common.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
 from fla.ops.utils.solve_tril import solve_tril
-from fla.utils import assert_close, device, device_platform
+from fla.utils import IS_NVIDIA_BLACKWELL, assert_close, device, device_platform
 
 
 @pytest.mark.parametrize(
@@ -95,3 +95,20 @@ def test_solve_tril_varlen(
 
     tri = solve_tril(A, cu_seqlens=cu_seqlens)
     assert_close('solve_tril_varlen', ref, tri, 0.0001)
+
+
+@pytest.mark.skipif(not IS_NVIDIA_BLACKWELL, reason="large-offset repro requires a Blackwell/B200-class CUDA GPU")
+def test_solve_tril_large_batch_offsets():
+    torch.manual_seed(42)
+    B, T, H, BT = 256, 16384, 12, 64
+    A = torch.randn(B, T, H, BT, device=device, dtype=torch.bfloat16) * 0.01
+    offsets = torch.arange(T, device=device) % BT
+    cols = torch.arange(BT, device=device)
+    A.masked_fill_(offsets[None, :, None, None] <= cols[None, None, None, :], 0)
+
+    tri = solve_tril(A, output_dtype=torch.bfloat16)
+    ref = torch.cat(
+        [solve_tril(A[start:start + 128], output_dtype=torch.bfloat16) for start in range(0, B, 128)],
+        dim=0,
+    )
+    assert_close('solve_tril', ref, tri, 0.0)

@@ -110,17 +110,35 @@ def prepare_split_cu_seqlens(
     )
 
 
+def _segmented_arange(counts: torch.LongTensor) -> tuple[torch.LongTensor, torch.LongTensor]:
+    """Expand per-segment counts into flat per-slot index tensors.
+
+    Given segment sizes ``counts = [c0, c1, ...]``, return two 1-D tensors of
+    length ``counts.sum()`` that together label every slot with its segment and
+    its position within that segment.
+
+    Example -- ``counts = [2, 3]`` (segment 0 spans 2 slots, segment 1 spans 3)::
+
+        seg_id    = [0, 0, 1, 1, 1]   # which segment each slot belongs to
+        intra_idx = [0, 1, 0, 1, 2]   # running index within that segment
+
+    With CUDA ``counts``, ``repeat_interleave`` reads ``counts.sum()`` on the
+    host (one device sync). Pass host-side counts to avoid it.
+    """
+    seg_id = torch.repeat_interleave(
+        torch.arange(counts.numel(), device=counts.device, dtype=counts.dtype),
+        counts,
+    )
+    seg_start = F.pad(counts.cumsum(0), (1, 0))[:-1]
+    intra_idx = torch.arange(seg_id.shape[0], device=counts.device, dtype=counts.dtype) - seg_start[seg_id]
+    return seg_id, intra_idx
+
+
 @tensor_cache
 def prepare_position_ids(cu_seqlens: torch.LongTensor, cu_seqlens_cpu: torch.LongTensor | None = None) -> torch.LongTensor:
-    if cu_seqlens_cpu is not None:
-        return torch.cat([
-            torch.arange(n, dtype=cu_seqlens.dtype, device=cu_seqlens.device)
-            for n in prepare_lens(cu_seqlens_cpu).unbind()
-        ])
-    return torch.cat([
-        torch.arange(n, dtype=cu_seqlens.dtype, device=cu_seqlens.device)
-        for n in prepare_lens(cu_seqlens).unbind()
-    ])
+    src = cu_seqlens_cpu if cu_seqlens_cpu is not None else cu_seqlens
+    _, position_ids = _segmented_arange(prepare_lens(src))
+    return position_ids.to(cu_seqlens)
 
 
 @tensor_cache
@@ -140,12 +158,10 @@ def prepare_chunk_indices(
     chunk_size: int,
     cu_seqlens_cpu: torch.LongTensor | None = None,
 ) -> torch.LongTensor:
-    if cu_seqlens_cpu is not None:
-        indices = torch.cat([torch.arange(n, device=cu_seqlens.device)
-                            for n in triton.cdiv(prepare_lens(cu_seqlens_cpu), chunk_size).tolist()])
-        return torch.stack([indices.eq(0).cumsum(0) - 1, indices], 1).to(cu_seqlens)
-    indices = torch.cat([torch.arange(n) for n in triton.cdiv(prepare_lens(cu_seqlens), chunk_size).tolist()])
-    return torch.stack([indices.eq(0).cumsum(0) - 1, indices], 1).to(cu_seqlens)
+    src = cu_seqlens_cpu if cu_seqlens_cpu is not None else cu_seqlens
+    chunk_counts = (prepare_lens(src) + (chunk_size - 1)).div(chunk_size, rounding_mode='floor')
+    seg_id, intra_chunk_idx = _segmented_arange(chunk_counts)
+    return torch.stack([seg_id, intra_chunk_idx], 1).to(cu_seqlens)
 
 
 @tensor_cache

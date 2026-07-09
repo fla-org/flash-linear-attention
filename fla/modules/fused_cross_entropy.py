@@ -12,6 +12,7 @@ import torch.nn as nn
 import triton
 import triton.language as tl
 
+from fla.modules.backends import dispatch
 from fla.ops.utils.op import exp, log, tanh
 from fla.utils import input_guard
 
@@ -322,6 +323,7 @@ class CrossEntropyLossFunction(torch.autograd.Function):
         return dlogits, None, None, None, None, None, None, None, None, None
 
 
+@dispatch('modules')
 def cross_entropy_loss(
     logits: torch.Tensor,
     target: torch.Tensor,
@@ -423,7 +425,9 @@ class FusedCrossEntropyLoss(nn.Module):
             losses: (batch,) if reduction is 'none', else (1,), dtype float
             z_loss: (batch,) if reduction is 'none', else (1,), dtype float (if self.return_z_loss)
         """
-        assert input.is_cuda and target.is_cuda, "Only support CUDA tensors"
+        assert input.device.type in ('cuda', 'npu') and target.device.type in ('cuda', 'npu'), (
+            "Only support CUDA/NPU tensors"
+        )
         loss, z_loss = cross_entropy_loss(
             input,
             target,

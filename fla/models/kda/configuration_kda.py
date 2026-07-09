@@ -43,6 +43,7 @@ class KDAConfig(PretrainedConfig):
         fuse_cross_entropy: bool = True,
         use_l2warp: bool = False,
         vocab_size: int = 32000,
+        attnres_block_size: int | None = None,
         **kwargs,
     ):
         self.attn_mode = attn_mode
@@ -72,6 +73,8 @@ class KDAConfig(PretrainedConfig):
         self.allow_neg_eigval = allow_neg_eigval
         self.safe_gate = safe_gate
         self.lower_bound = lower_bound
+        self.attnres_block_size = attnres_block_size
+
         if safe_gate and lower_bound is None:
             raise ValueError("`lower_bound` must be specified when `safe_gate=True` (recommended: -5).")
 
@@ -86,6 +89,13 @@ class KDAConfig(PretrainedConfig):
             attn['qkv_bias'] = attn.get('qkv_bias', False)
             attn['window_size'] = attn.get('window_size', None)
             attn['rope_theta'] = attn.get('rope_theta', 10000.)
+
+        if attnres_block_size is not None and attnres_block_size != 1:
+            if attnres_block_size < 2 or attnres_block_size % 2 != 0:
+                raise ValueError(
+                    "`attnres_block_size` must be `None`, `1` (full mode), or an even integer (one block "
+                    f"contains `attnres_block_size // 2` transformer layers); got {attnres_block_size}."
+                )
 
         super().__init__(
             pad_token_id=pad_token_id,

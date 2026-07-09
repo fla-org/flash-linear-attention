@@ -175,6 +175,7 @@ class HGRN2Attention(nn.Module):
                 gk=g,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
+                state_v_first=True,
                 cu_seqlens=cu_seqlens,
             )
         elif mode == 'fused_chunk':
@@ -194,6 +195,7 @@ class HGRN2Attention(nn.Module):
                 g=g,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
+                state_v_first=True,
                 cu_seqlens=cu_seqlens,
             )
         else:

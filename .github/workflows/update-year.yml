@@ -18,10 +18,10 @@ jobs:
       pull-requests: write
     steps:
       - name: Check out repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.0
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6.2.0
         with:
           python-version: '3.12'
 
@@ -44,7 +44,7 @@ jobs:
           START_YEAR: 2023
 
       - name: Create pull request
-        uses: peter-evans/create-pull-request@v7
+        uses: peter-evans/create-pull-request@v8.1.1
         with:
           commit-message: "chore: bump copyright year to ${{ steps.year.outputs.value }}"
           title: "chore: bump copyright year to ${{ steps.year.outputs.value }}"

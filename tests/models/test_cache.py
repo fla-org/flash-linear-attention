@@ -12,6 +12,37 @@ from fla.models.utils import FLACache, FLALayer, LegacyFLACache
 from fla.utils import device
 
 
+# encode token positions into tensor values so window tail assertions are exact
+def _make_attn_state(start: int, length: int, *, batch_size: int = 1, num_heads: int = 2, head_dim: int = 3):
+    token_ids = torch.arange(start, start + length, dtype=torch.float32, device=device).view(1, length, 1, 1)
+    key_states = token_ids.expand(batch_size, length, num_heads, head_dim).contiguous()
+    value_states = (token_ids + 1000).expand(batch_size, length, num_heads, head_dim).contiguous()
+    return key_states, value_states
+
+
+def _assert_attn_state_tokens(attn_state, expected_tokens: torch.Tensor):
+    expected = expected_tokens.to(device=device, dtype=torch.float32).view(1, -1, 1, 1)
+    expected_key = expected.expand_as(attn_state[0])
+    expected_value = (expected + 1000).expand_as(attn_state[1])
+
+    torch.testing.assert_close(attn_state[0], expected_key)
+    torch.testing.assert_close(attn_state[1], expected_value)
+
+
+def _new_cache(cache_cls):
+    try:
+        return cache_cls()
+    except (TypeError, ValueError) as exc:
+        pytest.skip(f"{cache_cls.__name__} is not compatible with this transformers version: {exc}")
+
+
+def _raw_legacy_cache():
+    cache = object.__new__(LegacyFLACache)
+    cache.states = []
+    cache._seen_tokens = 0
+    return cache
+
+
 # ===================================================================================
 # Test for FLACache per-layer get_seq_length behavior
 # ===================================================================================
@@ -164,6 +195,121 @@ def test_cache_window_size_does_not_undercount():
     # Sequence length should be the full seq_len, not window_size
     assert cache.get_seq_length(0) == seq_len, \
         f"Expected seq_length={seq_len}, got {cache.get_seq_length(0)} (window_size={window_size})"
+
+
+@pytest.mark.parametrize("cache_cls", [FLACache, LegacyFLACache])
+@pytest.mark.parametrize(
+    ["first_len", "second_len", "window_size"],
+    [
+        pytest.param(4, 6, 4, id="full-window-oversized-update"),
+        pytest.param(2, 4, 4, id="partial-window-overflow"),
+    ],
+)
+def test_cache_window_overflow_keeps_tail(cache_cls, first_len: int, second_len: int, window_size: int):
+    cache = _new_cache(cache_cls)
+
+    first_state = _make_attn_state(0, first_len)
+    second_state = _make_attn_state(first_len, second_len)
+
+    cache.update(
+        attn_state=first_state,
+        layer_idx=0,
+        offset=first_len,
+        cache_kwargs={"window_size": window_size},
+    )
+    cache.update(
+        attn_state=second_state,
+        layer_idx=0,
+        offset=second_len,
+        cache_kwargs={"window_size": window_size},
+    )
+
+    expected_tokens = torch.arange(first_len + second_len - window_size, first_len + second_len)
+    state = cache[0]
+    assert state["attn_state"][0].shape[1] == window_size
+    _assert_attn_state_tokens(state["attn_state"], expected_tokens)
+    assert cache.get_seq_length(0) == first_len + second_len
+
+
+def test_legacy_cache_window_overflow_without_hf_init():
+    cache = _raw_legacy_cache()
+    window_size = 4
+    first_len = 2
+    second_len = 4
+
+    cache.update(
+        attn_state=_make_attn_state(0, first_len),
+        layer_idx=0,
+        offset=first_len,
+        cache_kwargs={"window_size": window_size},
+    )
+    cache.update(
+        attn_state=_make_attn_state(first_len, second_len),
+        layer_idx=0,
+        offset=second_len,
+        cache_kwargs={"window_size": window_size},
+    )
+
+    _assert_attn_state_tokens(
+        cache[0]["attn_state"], torch.arange(first_len + second_len - window_size, first_len + second_len)
+    )
+    assert cache.get_seq_length(0) == first_len + second_len
+
+
+def test_fla_layer_reset():
+    layer = FLALayer()
+    layer.update(attn_state=_make_attn_state(0, 5))
+
+    assert layer.state is not None
+    assert layer.get_seq_length() == 5
+
+    layer.reset()
+
+    assert layer.state is None
+    assert layer.get_seq_length() == 0
+
+    layer.update(attn_state=_make_attn_state(20, 2))
+
+    assert layer.get_seq_length() == 2
+    _assert_attn_state_tokens(layer.state["attn_state"], torch.arange(20, 22))
+
+
+@pytest.mark.parametrize("cache_cls", [FLACache, LegacyFLACache])
+def test_cache_reset(cache_cls):
+    cache = _new_cache(cache_cls)
+    for layer_idx in range(2):
+        cache.update(
+            attn_state=_make_attn_state(layer_idx * 10, 3),
+            layer_idx=layer_idx,
+            offset=3,
+        )
+
+    assert cache.get_seq_length(0) == 3
+
+    cache.reset()
+
+    assert cache.get_seq_length(0) == 0
+    if isinstance(cache, FLACache):
+        assert len(cache) == 2
+        assert cache[0] is None
+        assert cache[1] is None
+    else:
+        assert len(cache) == 0
+
+
+def test_cache_from_legacy_preserves_seen_tokens():
+    seen_tokens = 17
+    legacy_state = {
+        "recurrent_state": None,
+        "attn_state": _make_attn_state(10, 4),
+        "conv_state": None,
+        "ffn_state": None,
+    }
+
+    cache = FLACache.from_legacy_cache([legacy_state], seen_tokens=seen_tokens)
+
+    assert cache.get_seq_length(0) == seen_tokens
+    _assert_attn_state_tokens(cache[0]["attn_state"], torch.arange(10, 14))
 
 
 # ===================================================================================

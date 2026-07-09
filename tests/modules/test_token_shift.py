@@ -7,6 +7,7 @@
 
 import pytest
 import torch
+import torch.nn.functional as F
 
 from fla.modules.token_shift import token_shift, token_shift_ref
 from fla.utils import assert_close, device
@@ -137,3 +138,43 @@ def test_all_with_and_without_varlen(B, T, H, cu_seqlens, split_at):
     dtype = torch.float
     assert cu_seqlens is None, "This test is for cu_seqlens=None case"
     _check_passing_vs_whole(B, T, H, cu_seqlens, dtype, split_at)
+
+
+def _packed_cu_seqlens(total_tokens: int, doc_len: int) -> torch.Tensor:
+    n_docs = (total_tokens + doc_len - 1) // doc_len
+    lens = torch.full((n_docs,), doc_len, device=device, dtype=torch.long)
+    lens[-1] -= n_docs * doc_len - total_tokens
+    return F.pad(lens.cumsum(0), (1, 0))
+
+
+def test_token_shift_varlen_uses_max_doc_len_for_short_kernel():
+    total_tokens, hidden_size = 262_144, 8
+    torch.manual_seed(42)
+
+    cu_seqlens = _packed_cu_seqlens(total_tokens, doc_len=752)
+    x = torch.randn(1, total_tokens, hidden_size, device=device, dtype=torch.bfloat16)
+
+    ref = token_shift_ref(x, cu_seqlens)
+    tri = token_shift(x, cu_seqlens)
+
+    assert_close(" x", ref, tri, 1e-3)
+
+
+def test_token_shift_varlen_long_kernel_matches_reference():
+    cu_seqlens = torch.tensor([0, 4097, 8200, 12304], dtype=torch.long, device=device)
+    torch.manual_seed(42)
+
+    x = torch.randn(1, cu_seqlens[-1].item(), 32, device=device, dtype=torch.float, requires_grad=True)
+    dy = torch.randn_like(x)
+
+    ref = token_shift_ref(x, cu_seqlens)
+    tri = token_shift(x, cu_seqlens)
+
+    ref.backward(dy)
+    ref_dx, x.grad = x.grad.clone(), None
+
+    tri.backward(dy)
+    tri_dx, x.grad = x.grad.clone(), None
+
+    assert_close(" x", ref, tri, 1e-3)
+    assert_close("dx", ref_dx, tri_dx, 1e-3)
