@@ -53,7 +53,5 @@ class TritonAscendOpsBackend(BaseBackend):
         cu_seqlens=None,
         chunk_indices=None,
     ):
-        import math
         from fla.ops.gated_delta_rule.backends.triton_ascend.wy_fast import recompute_w_u_fwd_npu
-        g_cumsum = g * math.log(2.0) if g is not None else None
-        return recompute_w_u_fwd_npu(k, v, beta, g_cumsum, A, cu_seqlens)
+        return recompute_w_u_fwd_npu(k, v, beta, A, g, cu_seqlens, chunk_indices)
