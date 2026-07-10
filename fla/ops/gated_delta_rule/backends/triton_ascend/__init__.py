@@ -28,8 +28,8 @@ class TritonAscendOpsBackend(BaseBackend):
         k,
         v,
         beta,
-        g,
         A,
+        g=None,
         cu_seqlens=None,
         chunk_indices=None,
     ) -> tuple[bool, str | None]:
@@ -48,8 +48,8 @@ class TritonAscendOpsBackend(BaseBackend):
         k,
         v,
         beta,
-        g,
         A,
+        g=None,
         cu_seqlens=None,
         chunk_indices=None,
     ):
