@@ -37,6 +37,19 @@ try:
 except ImportError:
     from fla.models.modeling_layers import GradientCheckpointingLayer
 
+# Adaptive CAT cycles power-of-two chunk sizes, each with a different FlexAttention
+# sequence length / block mask. Raise Dynamo limits so those shapes stay compiled
+# instead of falling back to dense math attention after the default recompile cap.
+_CAT_DYNAMO_CACHE_LIMIT = 64
+torch._dynamo.config.cache_size_limit = max(
+    getattr(torch._dynamo.config, 'cache_size_limit', 0),
+    _CAT_DYNAMO_CACHE_LIMIT,
+)
+if hasattr(torch._dynamo.config, 'recompile_limit'):
+    torch._dynamo.config.recompile_limit = max(
+        getattr(torch._dynamo.config, 'recompile_limit', 0),
+        _CAT_DYNAMO_CACHE_LIMIT,
+    )
 
 create_block_mask = torch.compile(create_block_mask)
 _flex_attention_compiled = torch.compile(flex_attention, dynamic=False, mode="default")
