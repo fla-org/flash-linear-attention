@@ -94,7 +94,12 @@ def fused_chunk_based_fwd_kernel(
         b_o += tl.dot(b_s.to(b_q.dtype), b_v, allow_tf32=False)
         # [TB, BV]
         tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
-        tl.store(p_z, b_z.to(p_z.dtype.element_ty), mask=(i * BT + tl.arange(0, BT)) < T)
+        # only one V-split program writes z: its address does not depend on
+        # i_v, so all i_v programs would store the same values to the same
+        # locations concurrently (an unsynchronized same-value WAW). The bwd
+        # kernel below already guards its i_v-redundant work with i_v == 0.
+        if i_v == 0:
+            tl.store(p_z, b_z.to(p_z.dtype.element_ty), mask=(i * BT + tl.arange(0, BT)) < T)
 
         # update hidden state
         # [BK, BV]
