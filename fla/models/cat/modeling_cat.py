@@ -73,7 +73,7 @@ def _ceil_div(x: int, y: int) -> int:
 
 def get_cat_mask_mod(block_size: int):
     """
-    Create the official interleaved CAT attention mask.
+    Create the interleaved CAT attention mask.
 
     The decoder sequence is `[fx, sep, tokens...]` per chunk, followed by a final
     `[fx, sep]` pair. Queries attend causally within their local block and to prior
