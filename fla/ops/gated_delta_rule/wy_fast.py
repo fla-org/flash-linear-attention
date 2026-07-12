@@ -9,6 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.backends import dispatch
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.op import exp2
@@ -230,6 +231,7 @@ def prepare_wy_repr_bwd_kernel(
         tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), boundary_check=(0,))
 
 
+@dispatch('gated_delta_rule')
 def recompute_w_u_fwd(
     k: torch.Tensor,
     v: torch.Tensor,
@@ -272,6 +274,7 @@ def recompute_w_u_fwd(
     return w, u
 
 
+@dispatch('gated_delta_rule')
 def prepare_wy_repr_bwd(
     k: torch.Tensor,
     v: torch.Tensor,

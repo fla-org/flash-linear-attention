@@ -9,6 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.backends import dispatch
 from fla.ops.common.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
 from fla.ops.gated_delta_rule.wy_fast import recompute_w_u_fwd
 from fla.ops.utils import prepare_chunk_indices, solve_tril
@@ -315,6 +316,7 @@ def chunk_gated_delta_rule_fwd_kkt_solve_kernel(
     tl.store(p_A33, b_Ai33.to(A.dtype.element_ty), boundary_check=(0, 1))
 
 
+@dispatch('gated_delta_rule')
 def chunk_gated_delta_rule_fwd_intra(
     k: torch.Tensor,
     v: torch.Tensor,

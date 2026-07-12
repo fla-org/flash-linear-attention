@@ -10,6 +10,7 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
+from fla.ops.backends import dispatch
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.index import prepare_chunk_indices
 from fla.ops.utils.op import exp
@@ -154,6 +155,7 @@ def gdn_gate_bwd_kernel(
 
 
 @input_guard
+@dispatch('gated_delta_rule')
 def gdn_gate_chunk_cumsum(
     g: torch.Tensor,
     A_log: torch.Tensor,
@@ -187,6 +189,7 @@ def gdn_gate_chunk_cumsum(
     return o
 
 
+@dispatch('gated_delta_rule')
 def gdn_gate_bwd(
     g: torch.Tensor,
     A_log: torch.Tensor,
@@ -257,6 +260,7 @@ def gdn_gate_fwd_kernel(
     tl.store(p_yg, b_yg.to(p_yg.dtype.element_ty), boundary_check=(0,))
 
 
+@dispatch('gated_delta_rule')
 def gdn_gate_fwd(
     g: torch.Tensor,
     A_log: torch.Tensor,

@@ -164,8 +164,10 @@ def l2norm_bwd_npu(
     y = y.view(-1, dy.shape[-1])
     dy = dy.view(-1, dy.shape[-1])
     assert dy.shape == y.shape
+    rstd = rstd.reshape(-1)
     dx = torch.empty_like(y)
     T, D = y.shape[0], y.shape[-1]
+    assert rstd.numel() == T
 
     BD = _get_l2norm_bd(D, is_forward=False)
     if D > BD:

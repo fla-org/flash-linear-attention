@@ -5,14 +5,25 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-# Shared gate helpers reused across delta-rule family ops (KDA, GDN, ...).
+"""Beta-sigmoid gate kernels adapted for triton-ascend on Ascend NPU."""
 
 import torch
 import triton
 import triton.language as tl
 
-from fla.ops.backends import dispatch
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
+from fla.utils.ascend_ub_manager import ASCEND_MAX_GRID_DIM, compute_activation_block_size
+
+
+def _beta_sigmoid_launch_config(
+    n_elements: int,
+    is_backward: bool = False,
+) -> tuple[tuple[int], int]:
+    block = compute_activation_block_size(
+        n_elements,
+        is_backward,
+        max_grid=ASCEND_MAX_GRID_DIM,
+    )
+    return (triton.cdiv(n_elements, block),), block
 
 
 @triton.jit
@@ -50,61 +61,39 @@ def fused_beta_sigmoid_bwd_kernel(
     tl.store(dx + offs, b_dx.to(dx.dtype.element_ty), mask=mask)
 
 
-_BETA_SIGMOID_BLOCK_SIZE = 2048
-_BETA_SIGMOID_NUM_WARPS = 8
-
-
-@dispatch('common')
-def fused_beta_sigmoid_fwd(x: torch.Tensor, scale: float = 1.0) -> torch.Tensor:
+@torch.compiler.disable
+def fused_beta_sigmoid_fwd_npu(x: torch.Tensor, scale: float = 1.0) -> torch.Tensor:
+    x = x.contiguous()
     y = torch.empty_like(x, dtype=torch.float32)
     n_elements = x.numel()
-    grid = (triton.cdiv(n_elements, _BETA_SIGMOID_BLOCK_SIZE),)
+    grid, block = _beta_sigmoid_launch_config(n_elements, is_backward=False)
     fused_beta_sigmoid_fwd_kernel[grid](
         x,
         y,
         scale,
         n_elements,
-        BLOCK_SIZE=_BETA_SIGMOID_BLOCK_SIZE,
-        num_warps=_BETA_SIGMOID_NUM_WARPS,
+        BLOCK_SIZE=block,
     )
     return y
 
 
-@dispatch('common')
-def fused_beta_sigmoid_bwd(x: torch.Tensor, dy: torch.Tensor, scale: float = 1.0) -> torch.Tensor:
+@torch.compiler.disable
+def fused_beta_sigmoid_bwd_npu(
+    x: torch.Tensor,
+    dy: torch.Tensor,
+    scale: float = 1.0,
+) -> torch.Tensor:
+    x = x.contiguous()
+    dy = dy.contiguous()
     dx = torch.empty_like(x)
     n_elements = x.numel()
-    grid = (triton.cdiv(n_elements, _BETA_SIGMOID_BLOCK_SIZE),)
+    grid, block = _beta_sigmoid_launch_config(n_elements, is_backward=True)
     fused_beta_sigmoid_bwd_kernel[grid](
         x,
         dy,
         dx,
         scale,
         n_elements,
-        BLOCK_SIZE=_BETA_SIGMOID_BLOCK_SIZE,
-        num_warps=_BETA_SIGMOID_NUM_WARPS,
+        BLOCK_SIZE=block,
     )
     return dx
-
-
-class BetaSigmoidFunction(torch.autograd.Function):
-    @staticmethod
-    @input_guard
-    @autocast_custom_fwd
-    def forward(ctx, x: torch.Tensor, scale: float = 1.0) -> torch.Tensor:
-        y = fused_beta_sigmoid_fwd(x, scale)
-        ctx.save_for_backward(x)
-        ctx.scale = scale
-        return y
-
-    @staticmethod
-    @input_guard
-    @autocast_custom_bwd
-    def backward(ctx, dy: torch.Tensor):
-        (x,) = ctx.saved_tensors
-        dx = fused_beta_sigmoid_bwd(x, dy, ctx.scale)
-        return dx.type_as(x), None
-
-
-def fused_beta_sigmoid(x: torch.Tensor, scale: float = 1.0) -> torch.Tensor:
-    return BetaSigmoidFunction.apply(x, scale)

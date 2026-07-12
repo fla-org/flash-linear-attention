@@ -17,7 +17,15 @@ from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gat
 from fla.ops.gated_delta_rule.gate import fused_gdn_gate, naive_gdn_gate
 from fla.ops.gated_delta_rule.naive import naive_recurrent_gated_delta_rule
 from fla.ops.gated_delta_rule.wy_fast import prepare_wy_repr_bwd, recompute_w_u_fwd
-from fla.utils import IS_INTEL_ALCHEMIST, IS_NVIDIA_BLACKWELL, IS_NVIDIA_HOPPER, IS_NVIDIA_SM100, assert_close, device
+from fla.utils import (
+    IS_INTEL_ALCHEMIST,
+    IS_NPU,
+    IS_NVIDIA_BLACKWELL,
+    IS_NVIDIA_HOPPER,
+    IS_NVIDIA_SM100,
+    assert_close,
+    device,
+)
 
 
 def _unwrap_autotuner(fn):
@@ -130,7 +138,7 @@ def test_chunk(
     use_qk_l2norm_in_kernel: bool,
     dtype: torch.dtype,
 ):
-    if os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") != "1" and HV != H:
+    if os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") != "1" and HV != H and not IS_NPU:
         pytest.skip(
             reason="GQA (HV != H) is not supported by the tilelang backend; "
             "covered by the Triton baseline run."
@@ -296,7 +304,7 @@ def test_chunk_beta_sigmoid_in_kernel(
     dtype: torch.dtype,
 ):
     """`use_beta_sigmoid_in_kernel=True` (raw beta logits) matches manual sigmoid + autograd."""
-    if os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") != "1" and HV != H:
+    if os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") != "1" and HV != H and not IS_NPU:
         pytest.skip(
             reason="GQA (HV != H) is not supported by the tilelang backend; "
             "covered by the Triton baseline run."
@@ -999,7 +1007,7 @@ def test_chunk_gate_in_kernel_gqa(
     dtype: torch.dtype,
 ):
     """Test use_gate_in_kernel=True with grouped value attention (HV > H)."""
-    if os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") != "1" and Hq != H:
+    if os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") != "1" and Hq != H and not IS_NPU:
         pytest.skip(
             reason="GQA (Hq != H) is not supported by the tilelang backend; "
             "covered by the Triton baseline run."

@@ -508,6 +508,7 @@ def chunk_bwd_kernel_dv_local(
         tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
 
 
+@dispatch('common')
 def chunk_fwd_o(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -610,6 +611,7 @@ def chunk_bwd_dv(
     return dv
 
 
+@dispatch('common')
 def chunk_bwd_dv_local(
     q: torch.Tensor,
     k: torch.Tensor,
