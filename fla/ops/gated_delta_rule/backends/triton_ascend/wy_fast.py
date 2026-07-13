@@ -12,6 +12,7 @@ from __future__ import annotations
 import torch
 import triton
 import triton.language as tl
+import triton.runtime.driver as driver
 
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp2
@@ -22,36 +23,18 @@ from fla.utils.ascend_ub_manager import (
     max_grid_axis_chunks,
 )
 
+
+def get_npu_properties():
+    device = torch.npu.current_device()
+    return driver.active.utils.get_device_properties(device)
+
+
 _NUM_WARPS = 2
-_NUM_WARPS_FWD = 4
-# recompute_w_u_fwd: b_A[BT,BT], b_vb[BT,BV], b_kb[BT,BK]
-_RECOMPUTE_FWD_MEM_MULT = 6.0
 # prepare_wy_repr_bwd: multiple [BT,BT] fp32 tiles + [BT,BK/BV] tiles
 _PREPARE_BWD_MEM_MULT = 18.0
 _SAFETY_MARGIN = 0.75
 _FALLBACK_TILE = 8
-_MAX_TILE_FWD = 64
 _MAX_TILE_BWD = 32
-
-
-def _get_fwd_tiles(BT: int, K: int, V: int) -> tuple[int, int]:
-    BK = compute_row_tile_block_size(
-        BT, K, _RECOMPUTE_FWD_MEM_MULT,
-        tiling_row=False,
-        safety_margin=_SAFETY_MARGIN,
-        fallback=_FALLBACK_TILE,
-        min_block=8,
-        max_block=min(_MAX_TILE_FWD, triton.next_power_of_2(K)),
-    )
-    BV = compute_row_tile_block_size(
-        BT, V, _RECOMPUTE_FWD_MEM_MULT,
-        tiling_row=False,
-        safety_margin=_SAFETY_MARGIN,
-        fallback=_FALLBACK_TILE,
-        min_block=8,
-        max_block=min(_MAX_TILE_FWD, triton.next_power_of_2(V)),
-    )
-    return BK, BV
 
 
 def _get_bwd_tiles(BT: int, K: int, V: int) -> tuple[int, int]:
@@ -92,7 +75,11 @@ def _launch_wy_kernel(kernel, *, NT: int, bh_total: int, kernel_kwargs: dict) ->
             kernel[(nt_len, bh_len)](**kernel_kwargs)
 
 
-@triton.jit(do_not_specialize=['T'])
+@triton.heuristics({
+    "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
+    "USE_G": lambda args: args["g"] is not None,
+})
+@triton.jit(do_not_specialize=["T", "B", "task_num", "num_core"])
 def recompute_w_u_fwd_kernel_npu(
     k,
     v,
@@ -104,6 +91,9 @@ def recompute_w_u_fwd_kernel_npu(
     cu_seqlens,
     chunk_indices,
     T,
+    B,
+    task_num,
+    num_core,
     H: tl.constexpr,
     HV: tl.constexpr,
     K: tl.constexpr,
@@ -111,50 +101,78 @@ def recompute_w_u_fwd_kernel_npu(
     BT: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    USE_G: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    NT_OFFSET: tl.constexpr,
-    BH_OFFSET: tl.constexpr,
+    USE_G: tl.constexpr,
 ):
-    i_t = tl.program_id(0) + NT_OFFSET
-    i_bh = tl.program_id(1) + BH_OFFSET
-    i_b, i_h = i_bh // HV, i_bh % HV
-    if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-        T = eos - bos
-    else:
-        bos, eos = i_b * T, i_b * T + T
+    T_max = T
+    core_id = tl.program_id(0)
 
-    p_b = tl.make_block_ptr(beta + bos * HV + i_h, (T,), (HV,), (i_t * BT,), (BT,), (0,))
-    b_b = tl.load(p_b, boundary_check=(0,))
+    for task_id in tl.range(core_id, task_num, num_core):
+        i_t_o = task_id // (B * HV)
+        i_bh = task_id % (B * HV)
+        i_b, i_h = i_bh // HV, i_bh % HV
+        if IS_VARLEN:
+            i_n, i_t = tl.load(chunk_indices + i_t_o * 2).to(tl.int32), tl.load(
+                chunk_indices + i_t_o * 2 + 1
+            ).to(tl.int32)
+            bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(
+                cu_seqlens + i_n + 1
+            ).to(tl.int32)
+            T = eos - bos
+            bos_bh = bos
+        else:
+            i_t = i_t_o
+            bos, eos = i_b * T, i_b * T + T
+            bos_bh = i_b * HV * T_max
 
-    p_A = tl.make_block_ptr(A + (bos * HV + i_h) * BT, (T, BT), (HV * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
-    b_A = tl.load(p_A, boundary_check=(0, 1))
+        offs_t = tl.arange(0, BT)
+        global_offs_t = i_t * BT + offs_t
+        mask_t = global_offs_t < T
 
-    for i_v in range(tl.cdiv(V, BV)):
-        p_v = tl.make_block_ptr(v + (bos * HV + i_h) * V, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-        p_u = tl.make_block_ptr(u + (bos * HV + i_h) * V, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-        b_v = tl.load(p_v, boundary_check=(0, 1))
-        b_vb = (b_v * b_b[:, None]).to(b_v.dtype)
-        b_u = tl.dot(b_A, b_vb, allow_tf32=False)
-        tl.store(p_u, b_u.to(p_u.dtype.element_ty), boundary_check=(0, 1))
+        offs_t_2d = global_offs_t[:, None]
+        offs_bt = tl.arange(0, BT)[None, :]
+        ptr_A = A + (bos * HV + i_h) * BT + offs_t_2d * (HV * BT) + offs_bt * 1
+        mask_A = mask_t[:, None]
+        b_A = tl.load(ptr_A, mask=mask_A, other=0.0).to(tl.float32)
 
-    if USE_G:
-        p_g = tl.make_block_ptr(g + (bos * HV + i_h), (T,), (HV,), (i_t * BT,), (BT,), (0,))
-        b_g = exp2(tl.load(p_g, boundary_check=(0,)))
+        ptr_beta = beta + bos_bh + i_h * T_max + global_offs_t
+        b_beta = tl.load(ptr_beta, mask=mask_t, other=0.0).to(tl.float32)
 
-    for i_k in range(tl.cdiv(K, BK)):
-        p_k = tl.make_block_ptr(
-            k + (bos * H + i_h // (HV // H)) * K, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0),
-        )
-        p_w = tl.make_block_ptr(w + (bos * HV + i_h) * K, (T, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-        b_k = tl.load(p_k, boundary_check=(0, 1))
-        b_kb = b_k * b_b[:, None]
+        for i_v in range(tl.cdiv(V, BV)):
+            offs_v = i_v * BV + tl.arange(0, BV)[None, :]
+            mask_v = (mask_t[:, None]) & (offs_v < V)
+
+            ptr_v = v + (bos * HV + i_h) * V + offs_t_2d * (HV * V) + offs_v * 1
+            b_v = tl.load(ptr_v, mask=mask_v, other=0.0).to(tl.float32)
+
+            b_vb = b_v * b_beta[:, None]
+            b_u = tl.dot(b_A, b_vb, allow_tf32=False)
+
+            ptr_u = u + (bos * HV + i_h) * V + offs_t_2d * (HV * V) + offs_v * 1
+            tl.store(ptr_u, b_u.to(ptr_u.dtype.element_ty), mask=mask_v)
+
         if USE_G:
-            b_kb *= b_g[:, None]
-        b_w = tl.dot(b_A, b_kb.to(b_k.dtype))
-        tl.store(p_w, b_w.to(p_w.dtype.element_ty), boundary_check=(0, 1))
+            ptr_g = g + bos_bh + i_h * T_max + global_offs_t
+            b_g = exp2(tl.load(ptr_g, mask=mask_t, other=0.0)).to(tl.float32)
+
+        for i_k in range(tl.cdiv(K, BK)):
+            offs_k = i_k * BK + tl.arange(0, BK)[None, :]
+            mask_k = (mask_t[:, None]) & (offs_k < K)
+            ptr_k = (
+                k
+                + (bos * H + i_h // (HV // H)) * K
+                + offs_t_2d * (H * K)
+                + offs_k * 1
+            )
+            b_k = tl.load(ptr_k, mask=mask_k, other=0.0).to(tl.float32)
+
+            b_kb = b_k * b_beta[:, None]
+            if USE_G:
+                b_kb = b_kb * b_g[:, None]
+            b_w = tl.dot(b_A, b_kb)
+
+            ptr_w = w + (bos * HV + i_h) * K + offs_t_2d * (HV * K) + offs_k * 1
+            tl.store(ptr_w, b_w.to(ptr_w.dtype.element_ty), mask=mask_k)
 
 
 @triton.jit(do_not_specialize=['T'])
@@ -544,45 +562,48 @@ def recompute_w_u_fwd_npu(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    B, T, H, K, V, HV = *k.shape, v.shape[-1], v.shape[2]
+    B, T, H, K, V = *k.shape, v.shape[-1]
+    HV = v.shape[2]
     BT = A.shape[-1]
-    BK, BV = _get_fwd_tiles(BT, K, V)
-    use_g = g is not None
-    is_varlen = cu_seqlens is not None
-    g_arg = g if use_g else beta
 
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
-    w = k.new_empty(B, T, HV, K)
+    BK = 64
+    BV = 64
+
     u = torch.empty_like(v)
-    _launch_wy_kernel(
-        recompute_w_u_fwd_kernel_npu,
-        NT=NT,
-        bh_total=B * HV,
-        kernel_kwargs=dict(
-            k=k,
-            v=v,
-            beta=beta,
-            w=w,
-            u=u,
-            A=A,
-            g=g_arg,
-            cu_seqlens=cu_seqlens,
-            chunk_indices=chunk_indices,
-            T=T,
-            H=H,
-            HV=HV,
-            K=K,
-            V=V,
-            BT=BT,
-            BK=BK,
-            BV=BV,
-            USE_G=use_g,
-            IS_VARLEN=is_varlen,
-            num_warps=_NUM_WARPS_FWD,
-        ),
+    w = k.new_empty(B, T, HV, K)
+    beta = beta.transpose(1, 2).contiguous()
+    if g is not None:
+        g = g.transpose(1, 2).contiguous()
+
+    num_core = get_npu_properties()["num_aicore"]
+    task_num = NT * B * HV
+    recompute_w_u_fwd_kernel_npu[(num_core,)](
+        k=k,
+        v=v,
+        beta=beta,
+        w=w,
+        u=u,
+        A=A,
+        g=g,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        T=T,
+        B=B,
+        task_num=task_num,
+        num_core=num_core,
+        H=H,
+        HV=HV,
+        K=K,
+        V=V,
+        BT=BT,
+        BK=BK,
+        BV=BV,
+        num_warps=4,
+        num_stages=3,
     )
     return w, u
 

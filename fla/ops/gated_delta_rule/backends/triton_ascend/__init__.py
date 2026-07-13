@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+import torch
+
 from fla.ops.backends import BaseBackend
 
 
@@ -46,12 +48,38 @@ class TritonAscendGDNBackend(BaseBackend):
         from fla.ops.gated_delta_rule.backends.triton_ascend.gate import gdn_gate_bwd_npu
         return gdn_gate_bwd_npu(*args, **kwargs)
 
-    def recompute_w_u_fwd_verifier(self, *args, **kwargs):
-        return True, None
+    def recompute_w_u_fwd_verifier(
+        self,
+        k,
+        v,
+        beta,
+        A,
+        g=None,
+        cu_seqlens=None,
+        chunk_indices=None,
+    ) -> tuple[bool, str | None]:
+        from fla.utils import IS_NPU
+        if not IS_NPU:
+            return False, "not running on NPU"
+        if k.device.type != "npu":
+            return False, "input device is not NPU"
+        if all(t.dtype in (torch.float32, torch.float16, torch.bfloat16)
+               for t in (k, v, beta, A)):
+            return True, None
+        return False, "unsupported dtype for NPU recompute_w_u_fwd"
 
-    def recompute_w_u_fwd(self, *args, **kwargs):
+    def recompute_w_u_fwd(
+        self,
+        k,
+        v,
+        beta,
+        A,
+        g=None,
+        cu_seqlens=None,
+        chunk_indices=None,
+    ):
         from fla.ops.gated_delta_rule.backends.triton_ascend.wy_fast import recompute_w_u_fwd_npu
-        return recompute_w_u_fwd_npu(*args, **kwargs)
+        return recompute_w_u_fwd_npu(k, v, beta, A, g, cu_seqlens, chunk_indices)
 
     def prepare_wy_repr_bwd_verifier(self, *args, **kwargs):
         return True, None
