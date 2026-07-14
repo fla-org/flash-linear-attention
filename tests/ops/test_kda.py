@@ -16,7 +16,7 @@ from fla.ops.kda.fused_recurrent import fused_recurrent_kda_fwd
 from fla.ops.kda.gate import fused_kda_gate, naive_kda_gate, naive_kda_lowerbound_gate
 from fla.ops.kda.naive import naive_chunk_kda, naive_recurrent_kda
 from fla.ops.utils.cache import FLA_CACHE_MODE
-from fla.utils import IS_INTEL_ALCHEMIST, assert_close, device
+from fla.utils import IS_INTEL_ALCHEMIST, IS_NPU, IS_NVIDIA, assert_close, device
 
 
 @pytest.mark.parametrize(
@@ -383,6 +383,10 @@ def test_fused_recurrent_gate_in_kernel(
         ]
     ],
 )
+@pytest.mark.skipif(
+    not (IS_NVIDIA or IS_NPU),
+    reason='test_fused_recurrent_vllm_decode requires CUDA or NPU',
+)
 def test_fused_recurrent_vllm_decode(
     B: int,
     H: int,
@@ -396,7 +400,7 @@ def test_fused_recurrent_vllm_decode(
 ):
     """Test vLLM-style decoding with continuous batching and paged state storage."""
     torch.manual_seed(42)
-    device = torch.device("cuda")
+    device = torch.device("npu" if IS_NPU else "cuda")
 
     # Setup cache pool and inputs
     max_cache_slots = B * 3
