@@ -13,25 +13,53 @@ hardware-specific regressions (see #640). Can also be forced via FLA_TILELANG=1.
 
 from __future__ import annotations
 
+import logging
 import os
+import shutil
+from functools import cache
+from pathlib import Path
 
 import torch
+from torch.utils import cpp_extension
 
 from fla.ops.backends import BaseBackend
 from fla.utils import IS_NVIDIA_HOPPER, TRITON_ABOVE_3_4_0, find_spec_cached
 
+logger = logging.getLogger(__name__)
+
 _TILELANG_AVAILABLE = find_spec_cached("tilelang") is not None
 
 
-class TileLangBackend(BaseBackend):
+@cache
+def _has_usable_nvcc() -> bool:
+    if shutil.which("nvcc") is not None:
+        return True
 
+    cuda_home = cpp_extension.CUDA_HOME
+    if cuda_home is not None and (Path(cuda_home) / "bin" / "nvcc").exists():
+        return True
+
+    try:
+        if find_spec_cached("nvidia.cuda_nvcc") is not None:
+            return True
+    except ModuleNotFoundError:
+        pass
+
+    logger.info(
+        "[FLA Backend] TileLang is installed but no usable nvcc compiler was found; falling back to Triton. "
+        "Install a CUDA toolkit or nvidia-cuda-nvcc, or set FLA_TILELANG=0 to disable TileLang explicitly."
+    )
+    return False
+
+
+class TileLangBackend(BaseBackend):
     backend_type = "tilelang"
     package_name = "tilelang"
     env_var = "FLA_TILELANG"
 
     @classmethod
     def is_available(cls) -> bool:
-        return _TILELANG_AVAILABLE
+        return _TILELANG_AVAILABLE and _has_usable_nvcc()
 
     @classmethod
     def is_enabled(cls) -> bool:
