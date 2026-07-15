@@ -58,13 +58,17 @@ import sys
 
 import torch
 
+from fla.utils import device_name
+
 # Import sibling modules. Works both as a package (python -m benchmarks.ops.verify)
 # and standalone, matching run.py's import strategy.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from registry import SHAPE_CONFIGS, get_op, list_ops  # noqa: E402
 from run import (  # noqa: E402
     _bench_at_ref,
+    _device_synchronize,
     _find_project_root,
+    _format_machine_line,
     _get_machine_info,
     benchmark_op,
     print_results_table,
@@ -128,7 +132,7 @@ def profile_op(op_name: str, modes: list[str]) -> None:
     shape = next(iter(shapes.values()))
     B, T, H, D = shape['B'], shape['T'], shape['H'], shape['D']
     extra = {k: v for k, v in shape.items() if k not in ('B', 'T', 'H', 'D')}
-    inputs = generate_inputs(config, B, T, H, D, dtype=torch.bfloat16, device='cuda', **extra)
+    inputs = generate_inputs(config, B, T, H, D, dtype=torch.bfloat16, device=device_name, **extra)
 
     do_bwd = 'fwdbwd' in modes and not config.skip_backward
     out = op_fn(**inputs, **config.extra_kwargs)
@@ -143,19 +147,24 @@ def profile_op(op_name: str, modes: list[str]) -> None:
 
     for _ in range(3):  # warm autotune before profiling
         step()
-    torch.cuda.synchronize()
+    _device_synchronize(device_name)
 
     out_dir = os.path.join(_find_project_root(), 'profile', f'{op_name}-opt')
     os.makedirs(out_dir, exist_ok=True)
-    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=True) as prof:
+    activities = [ProfilerActivity.CPU]
+    sort_by = 'self_cpu_time_total'
+    if device_name == 'cuda':
+        activities.append(ProfilerActivity.CUDA)
+        sort_by = 'self_cuda_time_total'
+    with profile(activities=activities, record_shapes=True) as prof:
         step()
-        torch.cuda.synchronize()
+        _device_synchronize(device_name)
 
     trace = os.path.join(out_dir, f'{op_name}_trace.json')
     prof.export_chrome_trace(trace)
-    print(f"\n  Top CUDA ops for {op_name} @ {B}x{T}x{H}x{D} "
+    print(f"\n  Top ops for {op_name} @ {B}x{T}x{H}x{D} "
           f"({'fwd+bwd' if do_bwd else 'fwd'}):")
-    print(prof.key_averages().table(sort_by='self_cuda_time_total', row_limit=10))
+    print(prof.key_averages().table(sort_by=sort_by, row_limit=10))
     print(f"  Chrome trace: {trace}")
 
 
@@ -236,9 +245,7 @@ def main():
 
     # 2. Performance measurement (reuses run.py). Baseline compare via git worktree.
     machine_info = _get_machine_info()
-    print(f"\n  Machine: {machine_info.get('gpu_name', 'N/A')} | "
-          f"CUDA {machine_info.get('cuda_version', 'N/A')} | "
-          f"PyTorch {machine_info.get('pytorch_version', 'N/A')} | "
+    print(f"\n  {_format_machine_line(machine_info)} | "
           f"Triton {machine_info.get('triton_version', 'N/A')} | "
           f"{machine_info.get('git_label', 'unknown')}")
 

@@ -141,6 +141,8 @@ import tempfile
 
 import torch
 
+from fla.utils import device_name
+
 # Import registry — works both as a package (python -m benchmarks.ops.run)
 # and standalone (python /tmp/fla_bench_xxx/run.py) for cross-commit use.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -153,6 +155,27 @@ from registry import (  # noqa: E402
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _device_synchronize(device: str | None = None) -> None:
+    """Synchronize the active accelerator before/after timed runs."""
+    dev = device or device_name
+    dev_mod = getattr(torch, dev, None)
+    if dev_mod is not None and hasattr(dev_mod, 'synchronize'):
+        dev_mod.synchronize()
+
+
+def _format_machine_line(info: dict) -> str:
+    gpu = info.get('gpu_name', 'N/A')
+    pytorch = info.get('pytorch_version', 'N/A')
+    platform = info.get('device_platform', 'N/A')
+    if platform == 'cuda':
+        backend = f"CUDA {info.get('cuda_version', 'N/A')}"
+    elif platform == 'npu':
+        backend = f"NPU: CANN {info.get('cann_version', 'N/A')}"
+    else:
+        backend = platform.upper() if platform != 'N/A' else 'N/A'
+    return f"Machine: {gpu} | {backend} | PyTorch {pytorch}"
 
 
 def _import_op(config: OpConfig):
@@ -185,11 +208,14 @@ def _get_git_label() -> str:
 
 
 def _get_machine_info() -> dict:
+    from fla.utils import device_platform
+
     info = {
         'hostname': socket.gethostname(),
         'platform': platform.platform(),
         'pytorch_version': torch.__version__,
         'cuda_version': torch.version.cuda or 'N/A',
+        'device_platform': device_platform,
         'git_label': _get_git_label(),
     }
     try:
@@ -198,7 +224,13 @@ def _get_machine_info() -> dict:
     except Exception:
         info['triton_version'] = 'N/A'
 
-    if torch.cuda.is_available():
+    if device_platform == 'npu' and hasattr(torch, 'npu') and torch.npu.is_available():
+        props = torch.npu.get_device_properties(0)
+        info['gpu_name'] = torch.npu.get_device_name(0)
+        info['gpu_count'] = torch.npu.device_count()
+        info['gpu_memory_gb'] = round(props.total_memory / (1024**3), 1)
+        info['cann_version'] = getattr(torch.version, 'cann', None) or 'N/A'
+    elif torch.cuda.is_available():
         info['gpu_name'] = torch.cuda.get_device_name(0)
         info['gpu_count'] = torch.cuda.device_count()
         info['gpu_memory_gb'] = round(
@@ -223,13 +255,13 @@ def _do_bench_kw():
     return {'warmup': max(1, warmup_ms), 'rep': max(1, rep_ms)}
 
 
-def _warmup_autotune(fn, n: int | None = None):
+def _warmup_autotune(fn, n: int | None = None, device: str | None = None):
     """Run *fn* multiple times so triton autotuning is fully cached."""
     if n is None:
         n = _warmup_iters()
     for _ in range(n):
         fn()
-    torch.cuda.synchronize()
+    _device_synchronize(device)
 
 
 def benchmark_op(
@@ -294,7 +326,6 @@ def benchmark_op(
         logger.warning(f"No compatible shapes for {op_name}, skipping.")
         return []
 
-    device = 'cuda'
     dtype = torch.bfloat16
 
     # Phase 1: warmup ALL shapes before timing ANY
@@ -304,7 +335,7 @@ def benchmark_op(
         B, T, H, D = shape_dict['B'], shape_dict['T'], shape_dict['H'], shape_dict['D']
         extra_shape_kw = {k: v for k, v in shape_dict.items() if k not in ('B', 'T', 'H', 'D')}
         try:
-            inputs = generate_inputs(config, B, T, H, D, dtype=dtype, device=device, **extra_shape_kw)
+            inputs = generate_inputs(config, B, T, H, D, dtype=dtype, device=device_name, **extra_shape_kw)
             out = op_fn(**inputs, **call_kwargs)
             out_tensor = out[0] if config.output_is_tuple else out
             do = torch.randn_like(out_tensor)
@@ -314,7 +345,7 @@ def benchmark_op(
                 t = result[0] if config.output_is_tuple else result
                 t.backward(do)
 
-            _warmup_autotune(_fwdbwd_fn)
+            _warmup_autotune(_fwdbwd_fn, device=device_name)
         except Exception as e:
             logger.warning(f"Warmup failed for {op_name} @ {shape_name}: {e}")
             failed_shapes.add(shape_name)
@@ -329,7 +360,7 @@ def benchmark_op(
         B, T, H, D = shape_dict['B'], shape_dict['T'], shape_dict['H'], shape_dict['D']
         extra_shape_kw = {k: v for k, v in shape_dict.items() if k not in ('B', 'T', 'H', 'D')}
         try:
-            inputs = generate_inputs(config, B, T, H, D, dtype=dtype, device=device, **extra_shape_kw)
+            inputs = generate_inputs(config, B, T, H, D, dtype=dtype, device=device_name, **extra_shape_kw)
         except Exception as e:
             logger.warning(f"Input generation failed for {op_name} @ {shape_name}: {e}")
             continue
@@ -458,10 +489,7 @@ def print_results_table(results: list[dict], machine_info: dict | None = None,
 
     print(f"\n{sep}")
     if machine_info:
-        gpu = machine_info.get('gpu_name', 'N/A')
-        cuda = machine_info.get('cuda_version', 'N/A')
-        pytorch = machine_info.get('pytorch_version', 'N/A')
-        print(f"  Machine: {gpu} | CUDA {cuda} | PyTorch {pytorch}")
+        print(f"  {_format_machine_line(machine_info)}")
 
     def _l_cell(r, blank=False):
         if not has_l:
@@ -658,9 +686,7 @@ def main():
     shape_configs = json.loads(args.custom_shapes) if args.custom_shapes else SHAPE_CONFIGS
 
     machine_info = _get_machine_info()
-    print(f"Machine: {machine_info.get('gpu_name', 'N/A')} | "
-          f"CUDA {machine_info.get('cuda_version', 'N/A')} | "
-          f"PyTorch {machine_info.get('pytorch_version', 'N/A')}")
+    print(_format_machine_line(machine_info))
     print(f"Shapes: {len(shape_configs)} configs")
     print(f"Ops: {op_names}")
 
