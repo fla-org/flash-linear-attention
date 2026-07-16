@@ -403,6 +403,28 @@ def test_attn_decoding_sink_matches_reference():
     assert_close("o_decode_ref_vs_tri", ref, tri, 0.01)
 
 
+def test_attn_decoding_value_split_matches_reference():
+    torch.manual_seed(456)
+    os.environ["TRITON_F32_DEFAULT"] = "ieee"
+
+    B, T, H, HQ, K, V = 2, 64, 2, 4, 64, 320
+    dtype = torch.float16
+    q = torch.randn((1, B, HQ, K), dtype=dtype, device=device)
+    k = torch.randn((1, T * B, H, K), dtype=dtype, device=device)
+    v = torch.randn((1, T * B, H, V), dtype=dtype, device=device)
+    cu_seqlens = torch.tensor([i * T for i in range(B + 1)], dtype=torch.int32, device=device)
+
+    ref = naive_attn_decoding(
+        q=q.float(),
+        k=k.float(),
+        v=v.float(),
+        cu_seqlens=cu_seqlens,
+    ).to(dtype)
+    tri = attn_decoding_one_step(q=q, k=k, v=v, cu_seqlens=cu_seqlens)
+
+    assert_close("o_decode_value_split_ref_vs_tri", ref, tri, 0.01)
+
+
 def test_attn_decoding_sink_empty_row_matches_reference():
     torch.manual_seed(457)
     os.environ["TRITON_F32_DEFAULT"] = "ieee"
