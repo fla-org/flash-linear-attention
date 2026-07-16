@@ -21,7 +21,7 @@ from transformers.utils.deprecation import deprecate_kwarg
 from fla.layers.abc import ABCAttention
 from fla.layers.attn import Attention
 from fla.models.abc.configuration_abc import ABCConfig
-from fla.models.utils import Cache, FLAGenerationMixin
+from fla.models.utils import Cache, FLAUnsupportedCacheGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
 from fla.modules import GatedMLP as ABCMLP
 from fla.modules.l2warp import l2_warp
@@ -339,7 +339,7 @@ class ABCModel(ABCPreTrainedModel):
         )
 
 
-class ABCForCausalLM(ABCPreTrainedModel, FLAGenerationMixin):
+class ABCForCausalLM(ABCPreTrainedModel, FLAUnsupportedCacheGenerationMixin):
 
     _tied_weights_keys = ["lm_head.weight"]
 
@@ -370,21 +370,6 @@ class ABCForCausalLM(ABCPreTrainedModel, FLAGenerationMixin):
 
     def get_decoder(self):
         return self.model
-
-    def generate(self, *args, **kwargs):
-        try:
-            return super().generate(*args, **kwargs)
-        except AttributeError as exception:
-            if 'past_key_values' in str(exception):
-                raise AttributeError(
-                    f"You tried to call `generate` with a decoding strategy that manipulates `past_key_values`, "
-                    f"which is not supported for {self.__class__.__name__}. "
-                    f"Try another generation strategy instead. "
-                    f"For the available generation strategies, check this doc: "
-                    f"https://huggingface.co/docs/transformers/en/generation_strategies#decoding-strategies",
-                )
-            else:
-                raise exception
 
     @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
     def forward(
