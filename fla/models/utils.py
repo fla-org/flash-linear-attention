@@ -552,6 +552,24 @@ class FLAGenerationMixin(GenerationMixin):
         return model_inputs
 
 
+class FLAUnsupportedCacheGenerationMixin(FLAGenerationMixin):
+    """Generation mixin for models whose caches do not support every decoding strategy."""
+
+    def generate(self, *args, **kwargs):
+        try:
+            return super().generate(*args, **kwargs)
+        except AttributeError as exception:
+            if "past_key_values" in str(exception):
+                raise AttributeError(
+                    f"You tried to call `generate` with a decoding strategy that manipulates `past_key_values`, "
+                    f"which is not supported for {self.__class__.__name__}. "
+                    f"Try another generation strategy instead. "
+                    f"For the available generation strategies, check this doc: "
+                    f"https://huggingface.co/docs/transformers/en/generation_strategies#decoding-strategies",
+                )
+            raise exception
+
+
 if version.parse(_TF_VERSION) > version.parse(_NEED_NEW):
     class Cache(FLACache):
         def __init__(self, seen_tokens: int = 0, **kwargs: Any) -> None:
