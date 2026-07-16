@@ -15,6 +15,7 @@ from fla.ops.attn.parallel import parallel_attn_bwd_preprocess
 from fla.ops.nsa.compression import parallel_nsa_compression
 from fla.ops.nsa.utils import _bitonic_merge
 from fla.ops.utils import prepare_block_csr, prepare_chunk_indices, prepare_chunk_offsets, prepare_lens, prepare_token_indices
+from fla.ops.utils.head import get_gqa_group_size
 from fla.ops.utils.op import exp, log
 from fla.ops.utils.pooling import mean_pooling
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, check_shared_mem, contiguous
@@ -540,7 +541,7 @@ def parallel_nsa_topk(
     else:
         cu_seqlens_q = cu_seqlens_k = token_indices_q = None
 
-    G = HQ // H
+    G = get_gqa_group_size(HQ, H)
     # the number of selected blocks for each token
     S = block_counts if isinstance(block_counts, int) else block_counts.max().item()
     S = triton.next_power_of_2(S)
@@ -592,7 +593,7 @@ def parallel_nsa_fwd(
 ):
     B, TK, H, K, V, S = *k.shape, v.shape[-1], block_indices.shape[-1]
     _, TQ, HQ, _ = q.shape
-    G = HQ // H
+    G = get_gqa_group_size(HQ, H)
     BS = block_size
     if check_shared_mem('hopper', q.device.index):
         BK = min(256, triton.next_power_of_2(K))
@@ -652,7 +653,7 @@ def parallel_nsa_bwd(
 ):
     B, T, H, K, V, S = *k.shape, v.shape[-1], block_indices.shape[-1]
     HQ = q.shape[2]
-    G = HQ // H
+    G = get_gqa_group_size(HQ, H)
     BS = block_size
     BK = max(triton.next_power_of_2(K), 16)
     BV = min(128, max(triton.next_power_of_2(v.shape[-1]), 16))
@@ -875,8 +876,9 @@ def parallel_nsa(
             f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`. "
             f"Please flatten variable-length inputs before processing.",
         )
-    G = q.shape[2] // k.shape[2]
-    assert G >= 16 and (G & (G - 1)) == 0, "Group size (HQ/H) must be a power of 2 and >= 16 in NSA"
+    G = get_gqa_group_size(q.shape[2], k.shape[2])
+    if G < 16 or (G & (G - 1)) != 0:
+        raise ValueError("Group size (HQ/H) must be a power of 2 and >= 16 in NSA")
 
     if cu_seqlens is not None:
         if isinstance(cu_seqlens, tuple):

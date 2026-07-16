@@ -11,6 +11,7 @@ import triton.language as tl
 from einops import reduce
 
 from fla.ops.utils import prepare_chunk_indices
+from fla.ops.utils.head import get_gqa_group_size
 from fla.ops.utils.op import exp2
 from fla.utils import IS_NVIDIA_BLACKWELL, autocast_custom_bwd, autocast_custom_fwd, check_shared_mem, contiguous
 
@@ -650,7 +651,7 @@ def parallel_parallax_fwd(q, r, k, v, scale, cu_seqlens=None, chunk_indices=None
     """
     B, T, HQ, K = q.shape
     H = k.shape[2]
-    G = HQ // H
+    G = get_gqa_group_size(HQ, H)
     BK = triton.next_power_of_2(K)
     BT = _block_size(K, q.device.index)
     o = torch.empty_like(q)
@@ -675,7 +676,7 @@ def parallel_parallax_bwd(q, r, k, v, o, barv, d1, bart, m, grad_o, scale, cu_se
     """Parallax backward (Triton). Returns grads matching `q, r, k, v`."""
     B, T, HQ, K = q.shape
     H = k.shape[2]
-    G = HQ // H
+    G = get_gqa_group_size(HQ, H)
     BK = triton.next_power_of_2(K)
     BT = _block_size(K, q.device.index)
 
@@ -796,6 +797,7 @@ def parallel_parallax(
         raise TypeError(f"parallel_parallax requires bf16 or fp16 inputs, got q.dtype={q.dtype}")
     if scale is None:
         scale = k.shape[-1] ** -0.5
+    get_gqa_group_size(q.shape[2], k.shape[2])
     if cu_seqlens is not None and q.shape[0] != 1:
         raise ValueError(
             f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`. "

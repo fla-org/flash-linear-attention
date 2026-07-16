@@ -17,6 +17,17 @@ from fla.ops.attn.parallel import parallel_attn
 from fla.utils import assert_close, device
 
 
+@pytest.mark.parametrize("op", [naive_attn_decoding, attn_decoding_one_step], ids=["naive", "triton"])
+def test_attn_decoding_rejects_invalid_gqa_head_counts(op):
+    q = torch.empty(1, 1, 3, 16, dtype=torch.float16)
+    k = torch.empty(1, 2, 2, 16, dtype=torch.float16)
+    v = torch.empty(1, 2, 2, 16, dtype=torch.float16)
+    cu_seqlens = torch.tensor([0, 2], dtype=torch.int32)
+
+    with pytest.raises(ValueError, match="must be divisible"):
+        op(q=q, k=k, v=v, cu_seqlens=cu_seqlens)
+
+
 def _repeat_kv_for_gpt_oss(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     if n_rep == 1:
         return hidden_states

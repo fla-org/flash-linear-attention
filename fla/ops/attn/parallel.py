@@ -14,6 +14,7 @@ from fla.ops.backends import dispatch
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.cumsum import chunk_global_cumsum
+from fla.ops.utils.head import get_gqa_group_size
 from fla.ops.utils.op import exp2, log2
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, check_shared_mem, contiguous
 
@@ -519,7 +520,7 @@ def parallel_attn_fwd(
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
     HQ = q.shape[2]
-    G = HQ // H
+    G = get_gqa_group_size(HQ, H)
     BT = 128
     if check_shared_mem('hopper', q.device.index):
         BS = min(64, max(16, triton.next_power_of_2(T)))
@@ -609,7 +610,7 @@ def parallel_attn_bwd(
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
     HQ = q.shape[2]
-    G = HQ // H
+    G = get_gqa_group_size(HQ, H)
     # dq/dk are reduced over the full value dim in one program (no cross-program accumulation),
     # so BV must span all of V (NV == 1). Don't cap it here -- the forward can, the backward can't.
     if check_shared_mem('hopper'):
@@ -825,6 +826,7 @@ def parallel_attn(
         )
     if scale is None:
         scale = k.shape[-1] ** -0.5
+    get_gqa_group_size(q.shape[2], k.shape[2])
     if cu_seqlens is not None and q.shape[0] != 1:
         raise ValueError(
             f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`. "

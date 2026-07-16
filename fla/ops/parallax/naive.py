@@ -7,6 +7,8 @@
 
 import torch
 
+from fla.ops.utils.head import get_gqa_group_size
+
 
 def naive_parallax(
     q: torch.Tensor,
@@ -56,7 +58,7 @@ def naive_parallax(
     """
     B, T, HQ, D = q.shape
     H = k.shape[2]
-    G = HQ // H
+    G = get_gqa_group_size(HQ, H)
 
     if scale is None:
         scale = D ** -0.5

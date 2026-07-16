@@ -11,6 +11,7 @@ import torch
 from einops import repeat
 
 from fla.ops.utils import prepare_chunk_offsets
+from fla.ops.utils.head import get_gqa_group_size
 from fla.ops.utils.pooling import mean_pooling
 
 try:
@@ -68,7 +69,7 @@ def naive_nsa_selection(
         scale = k.shape[-1] ** -0.5
 
     dtype = q.dtype
-    G = q.shape[2] // k.shape[2]
+    G = get_gqa_group_size(q.shape[2], k.shape[2])
     BS = block_size
     k, v, block_indices = (repeat(x, 'b t h d -> b t (h g) d', g=G) for x in (k, v, block_indices))
     q, k, v = map(lambda x: x.float(), (q, k, v))
@@ -225,7 +226,7 @@ def naive_nsa_topk(
     """
     B, TQ, HQ, _ = q.shape
     H = k_cmp.shape[2]
-    G = HQ // H
+    G = get_gqa_group_size(HQ, H)
     k_cmp = repeat(k_cmp, 'b t h d -> b t (h g) d', g=G)
 
     device = q.device
@@ -364,8 +365,9 @@ def naive_nsa(
         scale = k.shape[-1] ** -0.5
     if cu_seqlens is not None:
         assert q.shape[0] == 1, "batch size must be 1 when cu_seqlens are provided"
-    G = q.shape[2] // k.shape[2]
-    assert G >= 16 and (G & (G - 1)) == 0, "Group size (HQ/H) must be a power of 2 and >= 16 in NSA"
+    G = get_gqa_group_size(q.shape[2], k.shape[2])
+    if G < 16 or (G & (G - 1)) != 0:
+        raise ValueError("Group size (HQ/H) must be a power of 2 and >= 16 in NSA")
 
     if cu_seqlens is not None:
         if isinstance(cu_seqlens, tuple):

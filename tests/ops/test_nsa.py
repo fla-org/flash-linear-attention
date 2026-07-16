@@ -23,6 +23,17 @@ from fla.ops.utils.pooling import mean_pooling  # noqa: E402
 from fla.utils import assert_close, device  # noqa: E402
 
 
+@pytest.mark.parametrize("op", [naive_nsa, parallel_nsa], ids=["naive", "parallel"])
+def test_parallel_nsa_rejects_invalid_gqa_head_counts(op):
+    q = torch.empty(1, 1, 33, 16, dtype=torch.float16)
+    k = torch.empty(1, 1, 2, 16, dtype=torch.float16)
+    v = torch.empty(1, 1, 2, 16, dtype=torch.float16)
+    block_indices = torch.zeros(1, 1, 2, 1, dtype=torch.long)
+
+    with pytest.raises(ValueError, match="must be divisible"):
+        op(q=q, k=k, v=v, block_indices=block_indices, block_counts=1)
+
+
 def build_block_indices(B, T, H, S, block_size, seq_indices=None):
     block_indices = torch.full((B, T, H, S), -1, dtype=torch.long, device=device)
     for b in range(B):
