@@ -12,6 +12,7 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
+from fla.ops.backends import dispatch
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.index import prepare_chunk_indices
 from fla.ops.utils.op import exp
@@ -207,6 +208,7 @@ def kda_gate_bwd_kernel(
         tl.store(p_db, b_db.to(p_db.dtype.element_ty), boundary_check=(0,))
 
 
+@dispatch('kda')
 def kda_gate_fwd(
     g: torch.Tensor,
     A_log: torch.Tensor,
@@ -238,6 +240,7 @@ def kda_gate_fwd(
     return yg
 
 
+@dispatch('kda')
 def kda_gate_bwd(
     g: torch.Tensor,
     A_log: torch.Tensor,
@@ -317,6 +320,7 @@ class KDAGateFunction(torch.autograd.Function):
         return dg, dA, dbias, None, None
 
 
+@dispatch('kda')
 @torch.compiler.disable
 def fused_kda_gate(
     g: torch.Tensor,
@@ -419,6 +423,7 @@ def kda_gate_chunk_cumsum_vector_kernel(
 
 
 @input_guard
+@dispatch('kda')
 def kda_gate_chunk_cumsum(
     g: torch.Tensor,
     A_log: torch.Tensor,

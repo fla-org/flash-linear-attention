@@ -9,6 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.backends import dispatch
 from fla.ops.kda.chunk_intra_token_parallel import chunk_kda_fwd_intra_token_parallel
 from fla.ops.kda.wy_fast import recompute_w_u_fwd
 from fla.ops.utils import prepare_chunk_indices
@@ -761,6 +762,7 @@ def chunk_kda_fwd_kernel_intra_sub_chunk(
     tl.store(p_Akk, b_Ai.to(Akk.dtype.element_ty), boundary_check=(0, 1))
 
 
+@dispatch('kda')
 def chunk_kda_fwd_intra(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -863,6 +865,7 @@ def chunk_kda_fwd_intra(
     return w, u, qg, kg, Aqk, Akk
 
 
+@dispatch('kda')
 def chunk_kda_bwd_intra(
     q: torch.Tensor,
     k: torch.Tensor,

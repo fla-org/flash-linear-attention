@@ -9,6 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.backends import dispatch
 from fla.ops.common.chunk_h import chunk_bwd_dh, chunk_fwd_h
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.cache import fla_cache_autotune
@@ -897,6 +898,7 @@ def chunk_gla_fwd_intra_gk(
     return A
 
 
+@dispatch('gla')
 def chunk_gla_fwd_o_gk(
     q: torch.Tensor,
     v: torch.Tensor,
