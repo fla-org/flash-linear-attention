@@ -14,6 +14,7 @@ from ._compat import (  # noqa: F401
     TRITON_ABOVE_3_7_1,
     autotune_cache_kwargs,
     find_spec_cached,
+    has_usable_nvcc,
 )
 from ._config import (  # noqa: F401
     FLA_CACHE_RESULTS,

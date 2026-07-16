@@ -5,67 +5,112 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import importlib.metadata
 import logging
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-import fla.ops.common.backends.tilelang as tilelang_backend
+import fla.ops.common.backends.tilelang as common_tilelang_backend
+import fla.ops.kda.backends.tilelang as kda_tilelang_backend
+from fla.utils import _compat
+
+_REAL_PATH_EXISTS = Path.exists
 
 
 @pytest.fixture(autouse=True)
 def clear_nvcc_probe_cache():
-    tilelang_backend._has_usable_nvcc.cache_clear()
+    _compat.has_usable_nvcc.cache_clear()
     yield
-    tilelang_backend._has_usable_nvcc.cache_clear()
+    _compat.has_usable_nvcc.cache_clear()
 
 
-def _configure_tilelang_without_nvcc(monkeypatch):
-    monkeypatch.setattr(tilelang_backend, "_TILELANG_AVAILABLE", True)
-    monkeypatch.setattr(tilelang_backend.shutil, "which", lambda name: None)
-    monkeypatch.setattr(tilelang_backend.cpp_extension, "CUDA_HOME", None)
-    monkeypatch.setattr(tilelang_backend, "find_spec_cached", lambda name: None)
+def _configure_no_nvcc(monkeypatch):
+    """Hide every nvcc source probed by has_usable_nvcc (CI runners have a real toolkit)."""
+    monkeypatch.delenv("CUDA_HOME", raising=False)
+    monkeypatch.delenv("CUDA_PATH", raising=False)
+    monkeypatch.setattr(_compat.shutil, "which", lambda name: None)
+
+    def no_such_dist(name):
+        raise importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(importlib.metadata, "files", no_such_dist)
+
+    def fake_exists(self):
+        if str(self).startswith("/usr/local/cuda"):
+            return False
+        return _REAL_PATH_EXISTS(self)
+
+    monkeypatch.setattr(_compat.Path, "exists", fake_exists)
 
 
-def test_tilelang_available_with_path_nvcc(monkeypatch):
-    _configure_tilelang_without_nvcc(monkeypatch)
-    monkeypatch.setattr(tilelang_backend.shutil, "which", lambda name: "/usr/local/cuda/bin/nvcc")
-
-    assert tilelang_backend.TileLangBackend.is_available() is True
-
-
-def test_tilelang_available_with_cuda_home_nvcc(monkeypatch, tmp_path):
-    _configure_tilelang_without_nvcc(monkeypatch)
+def test_nvcc_from_cuda_home_env(monkeypatch, tmp_path):
+    _configure_no_nvcc(monkeypatch)
     nvcc = tmp_path / "cuda" / "bin" / "nvcc"
     nvcc.parent.mkdir(parents=True)
     nvcc.touch()
-    monkeypatch.setattr(tilelang_backend.cpp_extension, "CUDA_HOME", str(nvcc.parents[1]))
+    monkeypatch.setenv("CUDA_HOME", str(tmp_path / "cuda"))
 
-    assert tilelang_backend.TileLangBackend.is_available() is True
+    assert _compat.has_usable_nvcc() is True
 
 
-def test_tilelang_available_with_pip_nvcc(monkeypatch):
-    _configure_tilelang_without_nvcc(monkeypatch)
+def test_nvcc_from_path(monkeypatch):
+    _configure_no_nvcc(monkeypatch)
+    monkeypatch.setattr(_compat.shutil, "which", lambda name: "/usr/local/cuda/bin/nvcc")
+
+    assert _compat.has_usable_nvcc() is True
+
+
+def test_nvcc_from_pip_wheel(monkeypatch):
+    _configure_no_nvcc(monkeypatch)
     monkeypatch.setattr(
-        tilelang_backend,
-        "find_spec_cached",
-        lambda name: object() if name == "nvidia.cuda_nvcc" else None,
+        importlib.metadata,
+        "files",
+        lambda dist: [SimpleNamespace(name="ptxas"), SimpleNamespace(name="nvcc")],
     )
 
-    assert tilelang_backend.TileLangBackend.is_available() is True
+    assert _compat.has_usable_nvcc() is True
 
 
-def test_tilelang_unavailable_without_nvcc(monkeypatch, caplog):
-    _configure_tilelang_without_nvcc(monkeypatch)
+def test_nvcc_pip_wheel_without_nvcc_binary(monkeypatch):
+    # nvidia-cuda-nvcc-cu12 ships only ptxas; it must not count as a usable compiler
+    _configure_no_nvcc(monkeypatch)
+    monkeypatch.setattr(importlib.metadata, "files", lambda dist: [SimpleNamespace(name="ptxas")])
 
-    def find_missing_spec(name):
-        raise ModuleNotFoundError(name)
+    assert _compat.has_usable_nvcc() is False
 
-    monkeypatch.setattr(tilelang_backend, "find_spec_cached", find_missing_spec)
 
-    with caplog.at_level(logging.INFO, logger=tilelang_backend.__name__):
-        assert tilelang_backend.TileLangBackend.is_available() is False
-        assert tilelang_backend.TileLangBackend.is_available() is False
+def test_no_nvcc_logs_fallback_once(monkeypatch, caplog):
+    _configure_no_nvcc(monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger=_compat.__name__):
+        assert _compat.has_usable_nvcc() is False
+        assert _compat.has_usable_nvcc() is False
 
     fallback_messages = [record.message for record in caplog.records if "falling back to Triton" in record.message]
     assert len(fallback_messages) == 1
     assert "FLA_TILELANG=0" in fallback_messages[0]
+
+
+def _backend_cls(backend_module):
+    if backend_module is common_tilelang_backend:
+        return backend_module.TileLangBackend
+    return backend_module.KDATileLangBackend
+
+
+@pytest.mark.parametrize("backend_module", [common_tilelang_backend, kda_tilelang_backend])
+def test_tilelang_backend_gated_by_nvcc_probe(monkeypatch, backend_module):
+    monkeypatch.setattr(backend_module, "_TILELANG_AVAILABLE", True)
+    monkeypatch.setattr(backend_module, "has_usable_nvcc", lambda: False)
+    assert _backend_cls(backend_module).is_available() is False
+
+    monkeypatch.setattr(backend_module, "has_usable_nvcc", lambda: True)
+    assert _backend_cls(backend_module).is_available() is True
+
+
+@pytest.mark.parametrize("backend_module", [common_tilelang_backend, kda_tilelang_backend])
+def test_tilelang_backend_unavailable_without_tilelang(monkeypatch, backend_module):
+    monkeypatch.setattr(backend_module, "_TILELANG_AVAILABLE", False)
+    monkeypatch.setattr(backend_module, "has_usable_nvcc", lambda: True)
+    assert _backend_cls(backend_module).is_available() is False
