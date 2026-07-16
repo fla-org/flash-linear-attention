@@ -53,7 +53,26 @@ def benchmark(T, D, provider):
         torch.arange(16, T)[torch.randperm(T - 16)[:N-1]],
         torch.tensor([T], dtype=torch.long),
     ], 0).to(device).sort()[0]
-    if provider.startswith('causal_conv1d_fwd'):
+    if provider.startswith('causal_conv1d_fwdbwd'):
+        results = triton.testing.do_bench(
+            lambda: causal_conv1d(x, weight, bias, activation='swish', cu_seqlens=cu_seqlens)[0].backward(x),
+            quantiles=quantiles,
+        )
+    elif provider.startswith('causal_conv1d_cuda_fwdbwd'):
+        results = triton.testing.do_bench(
+            lambda: rearrange(
+                causal_conv1d_fn(
+                    x=rearrange(x, 'b t d -> b d t'),
+                    weight=weight,
+                    bias=bias,
+                    activation='swish',
+                    seq_idx=prepare_sequence_ids(cu_seqlens).to(torch.int32).unsqueeze(0),
+                ),
+                'b d t -> b t d',
+            ).backward(x),
+            quantiles=quantiles,
+        )
+    elif provider.startswith('causal_conv1d_fwd'):
         results = triton.testing.do_bench(
             lambda: causal_conv1d(x, weight, bias, activation='swish', cu_seqlens=cu_seqlens),
             quantiles=quantiles,
@@ -70,25 +89,6 @@ def benchmark(T, D, provider):
                 ),
                 'b d t -> b t d',
             ),
-            quantiles=quantiles,
-        )
-    elif provider.startswith('causal_conv1d_fwdbwd'):
-        results = triton.testing.do_bench(
-            lambda: causal_conv1d(x, weight, bias, activation='swish', cu_seqlens=cu_seqlens).backward(x),
-            quantiles=quantiles,
-        )
-    elif provider.startswith('causal_conv1d_cuda_fwdbwd'):
-        results = triton.testing.do_bench(
-            lambda: rearrange(
-                causal_conv1d_fn(
-                    x=rearrange(x, 'b t d -> b d t'),
-                    weight=weight,
-                    bias=bias,
-                    activation='swish',
-                    seq_idx=prepare_sequence_ids(cu_seqlens).to(torch.int32).unsqueeze(0),
-                ),
-                'b d t -> b t d',
-            ).backward(x),
             quantiles=quantiles,
         )
     return results
