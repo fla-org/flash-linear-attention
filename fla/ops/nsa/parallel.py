@@ -656,7 +656,10 @@ def parallel_nsa_bwd(
     G = HQ // H
     BS = block_size
     BK = max(triton.next_power_of_2(K), 16)
-    BV = min(128, max(triton.next_power_of_2(v.shape[-1]), 16))
+    # dq/dk accumulate softmax deltas reduced over the full value dim (delta from
+    # parallel_attn_bwd_preprocess spans all of V), so BV must span all of V (NV == 1)
+    # to avoid cross-program over-subtraction — same contract as fla/ops/attn/parallel bwd.
+    BV = max(triton.next_power_of_2(v.shape[-1]), 16)
     NV = triton.cdiv(V, BV)
 
     delta = parallel_attn_bwd_preprocess(o, do)
