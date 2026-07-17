@@ -14,13 +14,78 @@ import torch
 from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.cumsum import chunk_global_cumsum
 from fla.ops.wall_attn import build_wall_kv_cache, naive_wall_attn, parallel_wall_attn, parallel_wall_attn_decode
+from fla.ops.wall_attn.decode import parallel_wall_attn_decode_kernel
+from fla.ops.wall_attn.parallel import (
+    parallel_wall_attn_bwd_kernel_dkv,
+    parallel_wall_attn_bwd_kernel_dq,
+    parallel_wall_attn_fwd_kernel,
+)
 from fla.utils import assert_close, device
 
-# Wall's log-space `R` factoring and the gate-gradient reverse-cumsum are sensitive
-# to TF32 matmuls (catastrophic cancellation for small gates), so force IEEE fp32
-# dots for these correctness checks -- matching the convention in `test_attn.py`.
-# Read by Triton at kernel-launch time, so setting it after imports is sufficient.
-os.environ['TRITON_F32_DEFAULT'] = 'ieee'
+# Keep IEEE as the default until the structural subset passes unchanged with tf32x3.
+_STRUCTURAL_F32_PRECISION_ENV = 'FLA_TEST_WALL_STRUCTURAL_F32_PRECISION'
+_STRUCTURAL_F32_PRECISION = os.environ.get(_STRUCTURAL_F32_PRECISION_ENV, 'ieee')
+_VALID_F32_PRECISIONS = {'ieee', 'tf32x3'}
+if _STRUCTURAL_F32_PRECISION not in _VALID_F32_PRECISIONS:
+    raise ValueError(
+        f'{_STRUCTURAL_F32_PRECISION_ENV} must be one of {sorted(_VALID_F32_PRECISIONS)}, '
+        f'but got {_STRUCTURAL_F32_PRECISION!r}',
+    )
+
+_WALL_KERNELS = (
+    parallel_wall_attn_fwd_kernel,
+    parallel_wall_attn_bwd_kernel_dq,
+    parallel_wall_attn_bwd_kernel_dkv,
+    parallel_wall_attn_decode_kernel,
+)
+
+
+def _clear_wall_kernel_caches():
+    """Drop precision-blind process-local caches before changing FP32 dot mode."""
+    for kernel in _WALL_KERNELS:
+        node = kernel
+        while node is not None:
+            cache = getattr(node, 'cache', None)
+            if cache is not None:
+                cache.clear()
+            device_caches = getattr(node, 'device_caches', None)
+            if device_caches is not None:
+                device_caches.clear()
+            node = getattr(node, 'fn', None)
+
+
+def _set_wall_f32_precision(precision: str):
+    if os.environ.get('TRITON_F32_DEFAULT') != precision:
+        _clear_wall_kernel_caches()
+        os.environ['TRITON_F32_DEFAULT'] = precision
+
+
+@pytest.fixture(scope='module', autouse=True)
+def restore_wall_f32_precision():
+    """Keep Wall's test-only precision changes from leaking into other modules."""
+    original = os.environ.get('TRITON_F32_DEFAULT')
+    _clear_wall_kernel_caches()
+    try:
+        yield
+    finally:
+        _clear_wall_kernel_caches()
+        if original is None:
+            os.environ.pop('TRITON_F32_DEFAULT', None)
+        else:
+            os.environ['TRITON_F32_DEFAULT'] = original
+
+
+@pytest.fixture
+def wall_ieee_f32_dots():
+    """Use IEEE FP32 dots for eager-reference and gradient-oracle tests."""
+    _set_wall_f32_precision('ieee')
+
+
+@pytest.fixture
+def wall_structural_f32_dots():
+    """Use the precision selected for structural and self-consistency tests."""
+    _set_wall_f32_precision(_STRUCTURAL_F32_PRECISION)
+
 
 # Wall scores with a per-block log-space reference `R` for the `exp2(P_i - P_j)`
 # rescaling, where `P = cumsum(g)`. The factoring assumes `P` is monotonically
@@ -46,18 +111,21 @@ def log_decay(*shape, scale=0.05, dtype=torch.float32):
         for test in [
             (1, 48, 2, 4, 32, 16),
             (2, 31, 1, 1, 24, 8),
-            (1, 31, 1, 2, 32, 128),
         ]
     ],
 )
 @pytest.mark.parametrize('window_size', [None, 8])
-def test_parallel_matches_reference(B: int, T: int, H: int, HQ: int, K: int, V: int, window_size, monkeypatch):
+def test_parallel_matches_reference(
+    B: int,
+    T: int,
+    H: int,
+    HQ: int,
+    K: int,
+    V: int,
+    window_size,
+    wall_ieee_f32_dots,
+):
     assert HQ % H == 0
-    if V == 128:
-        # force BV=64 so the forward launches with NV=2: exercises the value-split
-        # path (incl. single-writer LSE stores) without the BV=256 giant tiles whose
-        # IEEE fp32-dot compilation stalls ptxas for minutes per autotune config.
-        monkeypatch.setattr("fla.ops.wall_attn.parallel.check_shared_mem", lambda *args, **kwargs: False)
     torch.manual_seed(0)
     dtype = torch.float32
     q = torch.randn(B, T, HQ, K, device=device, dtype=dtype)
@@ -71,7 +139,25 @@ def test_parallel_matches_reference(B: int, T: int, H: int, HQ: int, K: int, V: 
     assert_close(" o", ref, tri, RTOL_FWD)
 
 
-def test_parallel_gqa_matches_reference():
+@pytest.mark.parametrize('window_size', [None, 8])
+def test_parallel_value_split_matches_reference(window_size, monkeypatch, wall_structural_f32_dots):
+    """Force two value tiles while retaining the existing eager-reference check."""
+    monkeypatch.setattr("fla.ops.wall_attn.parallel.check_shared_mem", lambda *args, **kwargs: False)
+    torch.manual_seed(0)
+    dtype = torch.float32
+    B, T, H, HQ, K, V = 1, 31, 1, 2, 32, 128
+    q = torch.randn(B, T, HQ, K, device=device, dtype=dtype)
+    k = torch.randn(B, T, H, K, device=device, dtype=dtype)
+    v = torch.randn(B, T, H, V, device=device, dtype=dtype)
+    g = log_decay(B, T, HQ, K, dtype=dtype)
+    scale = K**-0.5
+
+    ref = naive_wall_attn(q, k, v, g, scale=scale, window_size=window_size)
+    tri = parallel_wall_attn(q, k, v, g, scale=scale, window_size=window_size)
+    assert_close(" o", ref, tri, RTOL_FWD)
+
+
+def test_parallel_gqa_matches_reference(wall_ieee_f32_dots):
     dtype = torch.float32
     B, T, H, HQ, K, V = 1, 40, 2, 8, 32, 24
     assert HQ // H == 4
@@ -87,7 +173,7 @@ def test_parallel_gqa_matches_reference():
     assert_close(" o", ref, tri, RTOL_FWD)
 
 
-def test_parallel_varlen_matches_reference():
+def test_parallel_varlen_matches_reference(wall_ieee_f32_dots):
     dtype = torch.float32
     T1, T2 = 17, 23
     T = T1 + T2
@@ -105,7 +191,7 @@ def test_parallel_varlen_matches_reference():
     assert_close(" o", ref, tri, RTOL_FWD)
 
 
-def test_parallel_sink_bias_matches_reference():
+def test_parallel_sink_bias_matches_reference(wall_ieee_f32_dots):
     dtype = torch.float32
     B, T, H, HQ, K, V = 1, 29, 1, 2, 20, 10
     torch.manual_seed(3)
@@ -121,7 +207,7 @@ def test_parallel_sink_bias_matches_reference():
     assert_close(" o", ref, tri, RTOL_FWD)
 
 
-def test_parallel_aggressive_gates_long_seq():
+def test_parallel_aggressive_gates_long_seq(wall_ieee_f32_dots):
     """Strong per-timestep decay; exact reference stays in fp32, kernel uses per-block R."""
     dtype = torch.float32
     B, T, H, HQ, K, V = 1, 512, 1, 1, 32, 32
@@ -147,7 +233,16 @@ def test_parallel_aggressive_gates_long_seq():
         ]
     ],
 )
-def test_backward_matches_eager_reference(B: int, T: int, H: int, HQ: int, K: int, V: int, monkeypatch):
+def test_backward_matches_eager_reference(
+    B: int,
+    T: int,
+    H: int,
+    HQ: int,
+    K: int,
+    V: int,
+    monkeypatch,
+    wall_ieee_f32_dots,
+):
     if V == 128:
         # force BV=64 in the forward so backward consumes LSE from a split-value launch
         monkeypatch.setattr("fla.ops.wall_attn.parallel.check_shared_mem", lambda *args, **kwargs: False)
@@ -182,7 +277,7 @@ def test_backward_matches_eager_reference(B: int, T: int, H: int, HQ: int, K: in
     # `dg` is validated separately in `test_g_gradient_matches_finite_differences`.
 
 
-def test_dg_nonzero_after_backward():
+def test_dg_nonzero_after_backward(wall_structural_f32_dots):
     torch.manual_seed(3)
     B, T, H, HQ, K, V = 1, 16, 1, 1, 8, 8
     q = torch.randn(B, T, HQ, K, device=device, requires_grad=True)
@@ -194,7 +289,7 @@ def test_dg_nonzero_after_backward():
     assert g.grad is not None and torch.isfinite(g.grad).all()
 
 
-def test_g_gradient_matches_finite_differences():
+def test_g_gradient_matches_finite_differences(wall_ieee_f32_dots):
     """dL/dg for the Triton Wall path vs central finite differences.
 
     The loss is accumulated in fp64; the step is sized for fp32 softmax logits.
@@ -244,7 +339,7 @@ def test_g_gradient_matches_finite_differences():
         ]
     ],
 )
-def test_scalar_gate_matches_reference(B: int, T: int, H: int, HQ: int, K: int, V: int):
+def test_scalar_gate_matches_reference(B: int, T: int, H: int, HQ: int, K: int, V: int, wall_ieee_f32_dots):
     """Wall + FoX-style additive scalar gate: Triton vs reference."""
     dtype = torch.float32
     torch.manual_seed(42)
@@ -260,7 +355,7 @@ def test_scalar_gate_matches_reference(B: int, T: int, H: int, HQ: int, K: int, 
     assert_close(" o", ref, tri, RTOL_FWD)
 
 
-def test_scalar_gate_gradient_finite_differences():
+def test_scalar_gate_gradient_finite_differences(wall_ieee_f32_dots):
     """dL/dg_scalar for Wall + scalar gate via central differences."""
     torch.manual_seed(13)
     dtype = torch.float32
@@ -337,7 +432,17 @@ def _decode_at(t, q, k, v, P, scale, C, *, g_scalar_cumsum=None):
         ]
     ],
 )
-def test_decode_matches_training_forward(dtype, B: int, T: int, H: int, HQ: int, K: int, V: int, C: int):
+def test_decode_matches_training_forward(
+    dtype,
+    B: int,
+    T: int,
+    H: int,
+    HQ: int,
+    K: int,
+    V: int,
+    C: int,
+    wall_structural_f32_dots,
+):
     """Decode at position t reproduces the training forward output at that row."""
     torch.manual_seed(0)
     scale = K**-0.5
@@ -354,7 +459,7 @@ def test_decode_matches_training_forward(dtype, B: int, T: int, H: int, HQ: int,
         assert_close("o_dec", o_ref[:, t: t + 1], o_dec, RTOL_DECODE)
 
 
-def test_decode_matches_training_forward_long():
+def test_decode_matches_training_forward_long(wall_structural_f32_dots):
     """Long-context stability: per-block reference must keep exp2 finite."""
     dtype = torch.bfloat16
     torch.manual_seed(1)
@@ -374,7 +479,7 @@ def test_decode_matches_training_forward_long():
     assert_close("o_dec_long", o_ref[:, t: t + 1], o_dec, RTOL_DECODE)
 
 
-def test_decode_with_scalar_gate():
+def test_decode_with_scalar_gate(wall_structural_f32_dots):
     """Wall + FoX-style scalar gate: decode matches training forward."""
     torch.manual_seed(2)
     dtype = torch.float32
@@ -396,7 +501,7 @@ def test_decode_with_scalar_gate():
 
 
 @pytest.mark.parametrize('dtype', [torch.float32, torch.bfloat16])
-def test_decode_streaming_matches_full_forward(dtype):
+def test_decode_streaming_matches_full_forward(dtype, wall_structural_f32_dots):
     """End-to-end serving pattern: prefill the cache, then decode token-by-token,
     appending each new (k_tilde, v) to a pre-allocated buffer, and compare each
     step against the batched training forward at that position.
@@ -455,7 +560,7 @@ def test_decode_streaming_matches_full_forward(dtype):
         assert_close("o_stream", o_ref[:, t: t + 1], o_t, RTOL_DECODE)
 
 
-def test_decode_cache_layout_shapes():
+def test_decode_cache_layout_shapes(wall_structural_f32_dots):
     """Pre-rescaled cache has documented shapes; r_cache size == ceil(T/C)."""
     torch.manual_seed(3)
     B, T, H, HQ, K = 2, 200, 2, 8, 32
