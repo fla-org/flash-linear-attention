@@ -166,6 +166,5 @@ def chunk_scaled_dot_kkt_fwd_npu(
         HV=HV,
         K=K,
         BT=BT,
-        multibuffer=True,
     )
     return A
