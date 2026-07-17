@@ -46,13 +46,18 @@ def log_decay(*shape, scale=0.05, dtype=torch.float32):
         for test in [
             (1, 48, 2, 4, 32, 16),
             (2, 31, 1, 1, 24, 8),
-            (1, 31, 1, 2, 32, 320),
+            (1, 31, 1, 2, 32, 128),
         ]
     ],
 )
 @pytest.mark.parametrize('window_size', [None, 8])
-def test_parallel_matches_reference(B: int, T: int, H: int, HQ: int, K: int, V: int, window_size):
+def test_parallel_matches_reference(B: int, T: int, H: int, HQ: int, K: int, V: int, window_size, monkeypatch):
     assert HQ % H == 0
+    if V == 128:
+        # force BV=64 so the forward launches with NV=2: exercises the value-split
+        # path (incl. single-writer LSE stores) without the BV=256 giant tiles whose
+        # IEEE fp32-dot compilation stalls ptxas for minutes per autotune config.
+        monkeypatch.setattr("fla.ops.wall_attn.parallel.check_shared_mem", lambda *args, **kwargs: False)
     torch.manual_seed(0)
     dtype = torch.float32
     q = torch.randn(B, T, HQ, K, device=device, dtype=dtype)
