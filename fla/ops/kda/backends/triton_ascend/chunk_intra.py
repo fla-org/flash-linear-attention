@@ -120,6 +120,58 @@ def _launch_inter_kernel(
 
 
 @triton.jit(do_not_specialize=['T'])
+def chunk_kda_fwd_kernel_diag_solve_npu(
+    Akkd,
+    cu_seqlens,
+    chunk_indices,
+    T,
+    HV: tl.constexpr,
+    BT: tl.constexpr,
+    BC: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+    NT_OFFSET: tl.constexpr,
+    NC_OFFSET: tl.constexpr,
+    BH_OFFSET: tl.constexpr,
+):
+    """Per-subchunk lower-triangular forward substitution into Akkd.
+
+    Kept out of inter_solve: the scalar BC loops fused with inter matmul exceed
+    Ascend's AICore task timeout on large (NT, BH) grids.
+    """
+    i_t = tl.program_id(0) + NT_OFFSET
+    i_i = tl.program_id(1) + NC_OFFSET
+    i_bh = tl.program_id(2) + BH_OFFSET
+    i_b, i_hv = i_bh // HV, i_bh % HV
+
+    if IS_VARLEN:
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        T = eos - bos
+    else:
+        bos, eos = i_b * T, i_b * T + T
+
+    i_ti = i_t * BT + i_i * BC
+    if i_ti >= T:
+        return
+
+    Akkd = Akkd + (bos * HV + i_hv) * BC
+    o_i = tl.arange(0, BC)
+    m_A = o_i[:, None] > o_i[None, :]
+    m_I = o_i[:, None] == o_i[None, :]
+
+    p_Akk = tl.make_block_ptr(Akkd, (T, BC), (HV * BC, 1), (i_ti, 0), (BC, BC), (1, 0))
+    b_Akk = tl.load(p_Akk, boundary_check=(0, 1)).to(tl.float32)
+    b_Ai = -tl.where(m_A, b_Akk, 0)
+    for i in range(2, min(BC, T - i_ti)):
+        b_a = -tl.load(Akkd + (i_ti + i) * HV * BC + o_i)
+        b_a = tl.where(o_i < i, b_a, 0.)
+        b_a += tl.sum(b_a[:, None] * b_Ai, 0)
+        b_Ai = tl.where((o_i == i)[:, None], b_a, b_Ai)
+    b_Ai += m_I
+    tl.store(p_Akk, b_Ai.to(Akkd.dtype.element_ty), boundary_check=(0, 1))
+
+
+@triton.jit(do_not_specialize=['T'])
 def chunk_kda_fwd_kernel_intra_sub_chunk_npu(
     q,
     k,
@@ -557,6 +609,27 @@ def chunk_kda_fwd_intra_npu(
             sub_chunk_size=BC,
         )
 
+    # Invert diagonal Akkd blocks first; inter then skips the scalar solve path.
+    _launch_sub_chunk_kernel(
+        chunk_kda_fwd_kernel_diag_solve_npu,
+        nt=NT,
+        nc=NC,
+        bh_total=B * HV,
+        kernel_kwargs=dict(
+            Akkd=Akkd,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+            T=T,
+            HV=HV,
+            BT=BT,
+            BC=BC,
+            IS_VARLEN=is_varlen,
+            NT_OFFSET=0,
+            NC_OFFSET=0,
+            BH_OFFSET=0,
+        ),
+    )
+
     inter_bk = _get_inter_bk(K)
     _launch_inter_kernel(
         chunk_kda_fwd_kernel_inter_solve_fused_npu,
@@ -582,7 +655,7 @@ def chunk_kda_fwd_intra_npu(
             NC=NC,
             BK=inter_bk,
             IS_VARLEN=is_varlen,
-            USE_SAFE_GATE=False,
+            USE_SAFE_GATE=True,
             NT_OFFSET=0,
             BH_OFFSET=0,
         ),
