@@ -14,7 +14,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.op import exp2, log2
-from fla.utils import check_shared_mem
+from fla.utils import autotune_cache_kwargs, check_shared_mem
 
 WALL_DECODE_AUTOTUNE_CONFIGS = [
     triton.Config({'BT': BT}, num_warps=nw, num_stages=ns)
@@ -26,13 +26,14 @@ WALL_DECODE_AUTOTUNE_CONFIGS = [
 
 @triton.autotune(
     configs=WALL_DECODE_AUTOTUNE_CONFIGS,
-    key=['T_kv', 'K', 'V', 'HQ', 'H', 'C'],
+    key=['KV_CHUNKS_BUCKET', 'K', 'V', 'HQ', 'H', 'C'],
+    **autotune_cache_kwargs,
 )
 @triton.heuristics({
     'USE_SINK_BIAS': lambda args: args['sink_bias'] is not None,
     'USE_SCALAR_G': lambda args: args['g_scalar_cumsum'] is not None,
 })
-@triton.jit
+@triton.jit(do_not_specialize=['T_kv', 'NC', 'KV_CHUNKS_BUCKET'])
 def parallel_wall_attn_decode_kernel(
     q,                # [B, T_q, HQ, K]
     k_tilde,          # [B, T_kv, HQ, K]  pre-rescaled keys (per-Q-head)
@@ -47,6 +48,7 @@ def parallel_wall_attn_decode_kernel(
     T_q,
     T_kv,
     NC,
+    KV_CHUNKS_BUCKET,
     B: tl.constexpr,
     H: tl.constexpr,
     HQ: tl.constexpr,
@@ -189,6 +191,8 @@ def parallel_wall_attn_decode(
     _, T_kv, H, V = v.shape
     NC = r_cache.shape[1]
     G = HQ // H
+    # the bucket selects an autotune config; exact T_kv remains the runtime loop bound
+    KV_CHUNKS_BUCKET = triton.next_power_of_2(max(1, triton.cdiv(T_kv, C)))
 
     if k_tilde.shape != (B, T_kv, HQ, K):
         raise ValueError(f"k_tilde shape {k_tilde.shape} != expected {(B, T_kv, HQ, K)}")
@@ -238,6 +242,7 @@ def parallel_wall_attn_decode(
         T_q=T_q,
         T_kv=T_kv,
         NC=NC,
+        KV_CHUNKS_BUCKET=KV_CHUNKS_BUCKET,
         B=B,
         H=H,
         HQ=HQ,

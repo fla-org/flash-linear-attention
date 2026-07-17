@@ -22,7 +22,7 @@ from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.cumsum import chunk_global_cumsum
 from fla.ops.utils.op import exp2, log2
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, check_shared_mem, contiguous
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, check_shared_mem, contiguous
 
 _DEBUG_ASSERTS = os.environ.get("WALL_ATTN_DEBUG", "0") == "1"
 
@@ -62,8 +62,9 @@ def _prune_wall_fwd_configs(configs, nargs, **kwargs):
 
 @triton.autotune(
     configs=WALL_FWD_AUTOTUNE_CONFIGS,
-    key=['T', 'K', 'V', 'HQ', 'H'],
+    key=['T_BUCKET', 'K', 'V', 'HQ', 'H'],
     prune_configs_by={'early_config_prune': _prune_wall_fwd_configs},
+    **autotune_cache_kwargs,
 )
 @triton.heuristics({
     'USE_SINK_BIAS': lambda args: args['sink_bias'] is not None,
@@ -71,7 +72,7 @@ def _prune_wall_fwd_configs(configs, nargs, **kwargs):
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
     'USE_SCALAR_G': lambda args: args['g_scalar_cumsum'] is not None,
 })
-@triton.jit
+@triton.jit(do_not_specialize=['T', 'T_BUCKET'])
 def parallel_wall_attn_fwd_kernel(
     q,
     k,
@@ -85,6 +86,7 @@ def parallel_wall_attn_fwd_kernel(
     cu_seqlens,
     chunk_indices,
     T,
+    T_BUCKET,
     W: tl.constexpr,
     B: tl.constexpr,
     H: tl.constexpr,
@@ -231,14 +233,15 @@ def parallel_wall_attn_fwd_kernel(
 
 @triton.autotune(
     configs=WALL_BWD_AUTOTUNE_CONFIGS,
-    key=['T', 'K', 'V', 'HQ', 'H'],
+    key=['T_BUCKET', 'K', 'V', 'HQ', 'H'],
+    **autotune_cache_kwargs,
 )
 @triton.heuristics({
     'USE_WINDOW': lambda args: args['W'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
     'USE_SCALAR_G': lambda args: args['g_scalar_cumsum'] is not None,
 })
-@triton.jit(do_not_specialize=['T'])
+@triton.jit(do_not_specialize=['T', 'T_BUCKET'])
 def parallel_wall_attn_bwd_kernel_dq(
     q,
     k,
@@ -255,6 +258,7 @@ def parallel_wall_attn_bwd_kernel_dq(
     cu_seqlens,
     chunk_indices,
     T,
+    T_BUCKET,
     W: tl.constexpr,
     B: tl.constexpr,
     H: tl.constexpr,
@@ -404,14 +408,15 @@ def parallel_wall_attn_bwd_kernel_dq(
 
 @triton.autotune(
     configs=WALL_BWD_AUTOTUNE_CONFIGS,
-    key=['T', 'K', 'V', 'HQ', 'H'],
+    key=['T_BUCKET', 'K', 'V', 'HQ', 'H'],
+    **autotune_cache_kwargs,
 )
 @triton.heuristics({
     'USE_WINDOW': lambda args: args['W'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
     'USE_SCALAR_G': lambda args: args['g_scalar_cumsum'] is not None,
 })
-@triton.jit(do_not_specialize=['T'])
+@triton.jit(do_not_specialize=['T', 'T_BUCKET'])
 def parallel_wall_attn_bwd_kernel_dkv(
     q,
     k,
@@ -429,6 +434,7 @@ def parallel_wall_attn_bwd_kernel_dkv(
     chunk_indices,
     scale,
     T,
+    T_BUCKET,
     W: tl.constexpr,
     B: tl.constexpr,
     H: tl.constexpr,
@@ -642,13 +648,15 @@ def parallel_wall_attn_fwd(
             q=q, k=k, v=v, o=o,
             g_cumsum=g_cumsum, g_scalar_cumsum=g_scalar_cumsum, sink_bias=sink_bias,
             lse=lse, scale=scale, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices,
-            B=B, T=T, W=window_size, H=H, HQ=HQ, G=G, K=K, V=V,
+            B=B, T=T, T_BUCKET=1, W=window_size, H=H, HQ=HQ, G=G, K=K, V=V,
             BT=BT, BS=BS, BK=BK, BV=BV, num_warps=num_warps, num_stages=num_stages,
         )
         return o, lse
 
     o = torch.empty(B, T, HQ, V, dtype=v.dtype, device=q.device)
     lse = torch.empty(B, T, HQ, dtype=torch.float, device=q.device)
+    # the bucket selects an autotune config; exact T remains the runtime loop bound
+    T_BUCKET = triton.next_power_of_2(T)
 
     def grid(meta):
         return (NV, triton.cdiv(T, meta['BT']), B * HQ)
@@ -666,6 +674,7 @@ def parallel_wall_attn_fwd(
         chunk_indices=chunk_indices,
         B=B,
         T=T,
+        T_BUCKET=T_BUCKET,
         W=window_size,
         H=H,
         HQ=HQ,
@@ -711,6 +720,8 @@ def parallel_wall_attn_bwd(
     # Varlen: pin BT=128 and bypass the autotuner (BT sweep would invalidate the
     # precomputed chunk map). `extra` injects the fixed launch config via `.fn`.
     is_varlen = cu_seqlens is not None
+    # varlen bypasses autotuning; dense lengths share configs within power-of-two buckets
+    T_BUCKET = 1 if is_varlen else triton.next_power_of_2(T)
     extra = {}
     if is_varlen:
         BT = 128
@@ -763,6 +774,7 @@ def parallel_wall_attn_bwd(
         chunk_indices=chunk_indices,
         scale=scale,
         T=T,
+        T_BUCKET=T_BUCKET,
         W=window_size,
         B=B,
         H=H,
@@ -791,6 +803,7 @@ def parallel_wall_attn_bwd(
         chunk_indices=chunk_indices,
         scale=scale,
         T=T,
+        T_BUCKET=T_BUCKET,
         W=window_size,
         B=B,
         H=H,
