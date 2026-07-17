@@ -226,7 +226,7 @@ class TritonAscendBackend(BaseBackend):
         eps=1e-6,
     ):
         from fla.modules.backends.triton_ascend.l2norm import l2norm_bwd_npu
-        return l2norm_bwd_npu(y, rstd, dy, eps)
+        return l2norm_bwd_npu(y, rstd, dy)
 
     def layer_norm_gated_fwd(
         self,
