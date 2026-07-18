@@ -198,10 +198,11 @@ def test_backward_value_split_matches_single_tile(monkeypatch):
     sink_bias0 = torch.randn(HQ, device=device, dtype=dtype) * 0.1
     do = torch.randn(B, T, HQ, V, device=device, dtype=dtype)
 
-    def run(single_tile: bool):
+    def run(single_tile_backward: bool):
+        force_single_tile = True
         monkeypatch.setattr(
             "fla.ops.wall_attn.parallel.check_shared_mem",
-            lambda arch, *args, **kwargs: single_tile and arch == 'hopper',
+            lambda arch, *args, **kwargs: force_single_tile and arch == 'hopper',
         )
         inputs = [x.clone().requires_grad_(True) for x in (q0, k0, v0, g0, g_scalar0, sink_bias0)]
         q, k, v, g, g_scalar, sink_bias = inputs
@@ -216,14 +217,16 @@ def test_backward_value_split_matches_single_tile(monkeypatch):
             window_size=window_size,
             cu_seqlens=cu_seqlens,
         )
+        force_single_tile = single_tile_backward
         grads = torch.autograd.grad((o * do).sum(), inputs)
         return o, grads
 
-    # The split run uses BV=64, so V=96 launches NV=2 with a 32-wide tail.
-    # If either slice subtracts the full-V delta, summing its score gradients
+    # keep forward single-tile so this backward regression does not depend on split-LSE ownership.
+    # the split backward uses BV=64, so V=96 launches NV=2 with a 32-wide tail.
+    # if either slice subtracts the full-V delta, summing its score gradients
     # subtracts delta twice and disagrees with the single-tile result below.
-    o_split, grads_split = run(single_tile=False)
-    o_single, grads_single = run(single_tile=True)
+    o_split, grads_split = run(single_tile_backward=False)
+    o_single, grads_single = run(single_tile_backward=True)
 
     assert_close("       o", o_single, o_split, RTOL_FWD)
     for name, single, split in zip(
