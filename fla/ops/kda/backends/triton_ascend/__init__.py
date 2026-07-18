@@ -11,6 +11,29 @@ from __future__ import annotations
 
 from fla.ops.backends import BaseBackend
 
+_SUPPORTED_INTRA_CHUNK_SIZES = (32, 64)
+_SUB_CHUNK = 16
+
+
+def _chunk_size_from(args, kwargs, default: int = 64) -> int:
+    if 'chunk_size' in kwargs and kwargs['chunk_size'] is not None:
+        return int(kwargs['chunk_size'])
+    return default
+
+
+def _verify_intra_chunk_size(args, kwargs):
+    chunk_size = _chunk_size_from(args, kwargs)
+    if chunk_size not in _SUPPORTED_INTRA_CHUNK_SIZES:
+        return False, f'KDA Ascend intra only supports chunk_size in {_SUPPORTED_INTRA_CHUNK_SIZES}, got {chunk_size}'
+    return True, None
+
+
+def _verify_subchunk_aligned(args, kwargs):
+    chunk_size = _chunk_size_from(args, kwargs)
+    if chunk_size % _SUB_CHUNK != 0:
+        return False, f'KDA Ascend bwd requires chunk_size % {_SUB_CHUNK} == 0, got {chunk_size}'
+    return True, None
+
 
 class TritonAscendKDABackend(BaseBackend):
     """Ascend NPU backend for KDA chunk intra and WY-representation kernels."""
@@ -26,7 +49,7 @@ class TritonAscendKDABackend(BaseBackend):
         return IS_NPU
 
     def chunk_kda_fwd_intra_verifier(self, *args, **kwargs):
-        return True, None
+        return _verify_intra_chunk_size(args, kwargs)
 
     def chunk_kda_fwd_intra(self, *args, **kwargs):
         from fla.ops.kda.backends.triton_ascend.chunk_intra import chunk_kda_fwd_intra_npu
@@ -40,14 +63,14 @@ class TritonAscendKDABackend(BaseBackend):
         return recompute_w_u_fwd_kda_npu(*args, **kwargs)
 
     def chunk_kda_bwd_intra_verifier(self, *args, **kwargs):
-        return True, None
+        return _verify_intra_chunk_size(args, kwargs)
 
     def chunk_kda_bwd_intra(self, *args, **kwargs):
         from fla.ops.kda.backends.triton_ascend.chunk_intra import chunk_kda_bwd_intra_npu
         return chunk_kda_bwd_intra_npu(*args, **kwargs)
 
     def chunk_kda_bwd_wy_dqkg_fused_verifier(self, *args, **kwargs):
-        return True, None
+        return _verify_subchunk_aligned(args, kwargs)
 
     def chunk_kda_bwd_wy_dqkg_fused(self, *args, **kwargs):
         from fla.ops.kda.backends.triton_ascend.chunk_bwd import chunk_kda_bwd_wy_dqkg_fused_npu

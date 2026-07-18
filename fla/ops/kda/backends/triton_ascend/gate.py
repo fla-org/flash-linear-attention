@@ -400,6 +400,7 @@ def kda_gate_fwd_npu(
     return yg
 
 
+@input_guard
 def kda_gate_bwd_npu(
     g: torch.Tensor,
     A_log: torch.Tensor,

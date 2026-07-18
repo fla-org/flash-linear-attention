@@ -382,13 +382,13 @@ def chunk_kda_bwd_kernel_wy_k_part_npu(
     if IS_VARLEN:
         i_tg = i_t.to(tl.int64)
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-        T = eos - bos
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = (eos - bos).to(tl.int32)
         NT = tl.cdiv(T, BT)
     else:
         NT = tl.cdiv(T, BT)
         i_tg = (i_b * NT + i_t).to(tl.int64)
-        bos, eos = i_b * T, i_b * T + T
+        bos, eos = (i_b * T).to(tl.int64), (i_b * T + T).to(tl.int64)
 
     q += (bos * H + i_h) * K
     k += (bos * H + i_h) * K
@@ -539,11 +539,11 @@ def chunk_kda_bwd_kernel_wy_dw_part_npu(
     if IS_VARLEN:
         i_tg = i_t.to(tl.int64)
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-        T = eos - bos
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = (eos - bos).to(tl.int32)
     else:
         i_tg = (i_b * tl.cdiv(T, BT) + i_t).to(tl.int64)
-        bos, eos = i_b * T, i_b * T + T
+        bos, eos = (i_b * T).to(tl.int64), (i_b * T + T).to(tl.int64)
 
     k += (bos * H + i_h) * K
     g += (bos * HV + i_hv) * K
@@ -737,6 +737,8 @@ def chunk_kda_bwd_wy_dqkg_fused_npu(
 ):
     B, T, H, K, HV, V = *k.shape, v.shape[2], v.shape[-1]
     BT = chunk_size
+    if BT % _BC != 0:
+        raise ValueError(f'KDA Ascend bwd requires chunk_size % {_BC} == 0, got {BT}')
 
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)

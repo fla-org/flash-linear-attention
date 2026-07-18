@@ -34,7 +34,7 @@ _INTER_MEM_MULT = 14.0
 _SAFETY_MARGIN = 0.80
 _FALLBACK_BK = 16
 _MAX_INTER_BK = 64
-# Cap programs/launch for diag_solve / inter on Ascend (~4.3s AICore timeout).
+# limit programs per launch to stay within Ascend AICore task time.
 _KDA_LAUNCH_BLOCK_BUDGET = 4096
 
 
@@ -151,8 +151,8 @@ def chunk_kda_fwd_kernel_diag_solve_npu(
 ):
     """Per-subchunk lower-triangular forward substitution into Akkd.
 
-    Kept out of inter_solve: the scalar BC loops fused with inter matmul exceed
-    Ascend's AICore task timeout on large (NT, BH) grids.
+    Run before inter_solve so the fused inter kernel only merges off-diagonal
+    blocks, keeping scalar BC loops off the large (NT, BH) grid.
     """
     i_t = tl.program_id(0) + NT_OFFSET
     i_i = tl.program_id(1) + NC_OFFSET
@@ -296,10 +296,10 @@ def chunk_kda_fwd_kernel_inter_solve_fused_npu(
     NC: tl.constexpr,
     BK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    USE_SAFE_GATE: tl.constexpr,
     NT_OFFSET,
     BH_OFFSET,
 ):
+    # Diagonal Akkd blocks are inverted by diag_solve before this kernel.
     i_t = tl.program_id(0) + NT_OFFSET
     i_bh = tl.program_id(1) + BH_OFFSET
     i_b, i_hv = i_bh // HV, i_bh % HV
@@ -356,13 +356,15 @@ def chunk_kda_fwd_kernel_inter_solve_fused_npu(
         b_k0 = tl.load(p_k0, boundary_check=(0, 1)).to(tl.float32)
         b_g0 = tl.load(p_g0, boundary_check=(0, 1)).to(tl.float32)
 
+        # Ascend cannot compile dynamic `if i_tc* < T` around dots (scf.if shape mismatch);
+        # block_ptr uses boundary_check, and bare g loads mask out-of-range rows.
         p_q1 = tl.make_block_ptr(q, (T, K), (H * K, 1), (i_tc1, i_k * BK), (BC, BK), (1, 0))
         p_k1 = tl.make_block_ptr(k, (T, K), (H * K, 1), (i_tc1, i_k * BK), (BC, BK), (1, 0))
         p_g1 = tl.make_block_ptr(g, (T, K), (HV * K, 1), (i_tc1, i_k * BK), (BC, BK), (1, 0))
         b_q1 = tl.load(p_q1, boundary_check=(0, 1)).to(tl.float32)
         b_k1 = tl.load(p_k1, boundary_check=(0, 1)).to(tl.float32)
         b_g1 = tl.load(p_g1, boundary_check=(0, 1)).to(tl.float32)
-        b_gn1 = tl.load(g + i_tc1 * HV * K + o_k, mask=m_k, other=0).to(tl.float32)
+        b_gn1 = tl.load(g + i_tc1 * HV * K + o_k, mask=m_k & (i_tc1 < T), other=0).to(tl.float32)
         b_gqn = tl.where(m_tc1[:, None], exp2(b_g1 - b_gn1[None, :]), 0)
         b_kgt = tl.trans(b_k0 * exp2(b_gn1[None, :] - b_g0))
         b_Aqk10 += tl.dot(b_q1 * b_gqn, b_kgt, allow_tf32=False)
@@ -375,7 +377,7 @@ def chunk_kda_fwd_kernel_inter_solve_fused_npu(
             b_q2 = tl.load(p_q2, boundary_check=(0, 1)).to(tl.float32)
             b_k2 = tl.load(p_k2, boundary_check=(0, 1)).to(tl.float32)
             b_g2 = tl.load(p_g2, boundary_check=(0, 1)).to(tl.float32)
-            b_gn2 = tl.load(g + i_tc2 * HV * K + o_k, mask=m_k, other=0).to(tl.float32)
+            b_gn2 = tl.load(g + i_tc2 * HV * K + o_k, mask=m_k & (i_tc2 < T), other=0).to(tl.float32)
             b_gqn2 = tl.where(m_tc2[:, None], exp2(b_g2 - b_gn2[None, :]), 0)
             b_qg2 = b_q2 * b_gqn2
             b_kg2 = b_k2 * b_gqn2
@@ -393,7 +395,7 @@ def chunk_kda_fwd_kernel_inter_solve_fused_npu(
                 b_q3 = tl.load(p_q3, boundary_check=(0, 1)).to(tl.float32)
                 b_k3 = tl.load(p_k3, boundary_check=(0, 1)).to(tl.float32)
                 b_g3 = tl.load(p_g3, boundary_check=(0, 1)).to(tl.float32)
-                b_gn3 = tl.load(g + i_tc3 * HV * K + o_k, mask=m_k, other=0).to(tl.float32)
+                b_gn3 = tl.load(g + i_tc3 * HV * K + o_k, mask=m_k & (i_tc3 < T), other=0).to(tl.float32)
                 b_gqn3 = tl.where(m_tc3[:, None], exp2(b_g3 - b_gn3[None, :]), 0)
                 b_qg3 = b_q3 * b_gqn3
                 b_kg3 = b_k3 * b_gqn3
@@ -447,47 +449,6 @@ def chunk_kda_fwd_kernel_inter_solve_fused_npu(
     if NC >= 4:
         p_Akk33 = tl.make_block_ptr(Akkd, (T, BC), (HV * BC, 1), (i_tc3, 0), (BC, BC), (1, 0))
         b_Ai33 = tl.load(p_Akk33, boundary_check=(0, 1)).to(tl.float32)
-
-    if not USE_SAFE_GATE:
-        m_A = o_i[:, None] > o_i[None, :]
-        m_I = o_i[:, None] == o_i[None, :]
-
-        b_Ai00 = -tl.where(m_A, b_Ai00, 0)
-        b_Ai11 = -tl.where(m_A, b_Ai11, 0)
-        if NC >= 3:
-            b_Ai22 = -tl.where(m_A, b_Ai22, 0)
-        if NC >= 4:
-            b_Ai33 = -tl.where(m_A, b_Ai33, 0)
-
-        for i in range(2, min(BC, T - i_tc0)):
-            b_a00 = -tl.load(Akkd + (i_tc0 + i) * HV * BC + o_i)
-            b_a00 = tl.where(o_i < i, b_a00, 0.)
-            b_a00 += tl.sum(b_a00[:, None] * b_Ai00, 0)
-            b_Ai00 = tl.where((o_i == i)[:, None], b_a00, b_Ai00)
-        for i in range(BC + 2, min(2 * BC, T - i_tc0)):
-            b_a11 = -tl.load(Akkd + (i_tc0 + i) * HV * BC + o_i)
-            b_a11 = tl.where(o_i < i - BC, b_a11, 0.)
-            b_a11 += tl.sum(b_a11[:, None] * b_Ai11, 0)
-            b_Ai11 = tl.where((o_i == i - BC)[:, None], b_a11, b_Ai11)
-        if NC >= 3:
-            for i in range(2 * BC + 2, min(3 * BC, T - i_tc0)):
-                b_a22 = -tl.load(Akkd + (i_tc0 + i) * HV * BC + o_i)
-                b_a22 = tl.where(o_i < i - 2 * BC, b_a22, 0.)
-                b_a22 += tl.sum(b_a22[:, None] * b_Ai22, 0)
-                b_Ai22 = tl.where((o_i == i - 2 * BC)[:, None], b_a22, b_Ai22)
-        if NC >= 4:
-            for i in range(3 * BC + 2, min(4 * BC, T - i_tc0)):
-                b_a33 = -tl.load(Akkd + (i_tc0 + i) * HV * BC + o_i)
-                b_a33 = tl.where(o_i < i - 3 * BC, b_a33, 0.)
-                b_a33 += tl.sum(b_a33[:, None] * b_Ai33, 0)
-                b_Ai33 = tl.where((o_i == i - 3 * BC)[:, None], b_a33, b_Ai33)
-
-        b_Ai00 += m_I
-        b_Ai11 += m_I
-        if NC >= 3:
-            b_Ai22 += m_I
-        if NC >= 4:
-            b_Ai33 += m_I
 
     b_Ai10 = -tl.dot(
         tl.dot(b_Ai11, b_Akk10, allow_tf32=False),
@@ -625,7 +586,7 @@ def chunk_kda_fwd_intra_npu(
             sub_chunk_size=BC,
         )
 
-    # Invert diagonal Akkd blocks first; inter then skips the scalar solve path.
+    # Invert diagonal Akkd blocks first; inter then only merges off-diagonals.
     _launch_sub_chunk_kernel(
         chunk_kda_fwd_kernel_diag_solve_npu,
         nt=NT,
@@ -671,7 +632,6 @@ def chunk_kda_fwd_intra_npu(
             NC=NC,
             BK=inter_bk,
             IS_VARLEN=is_varlen,
-            USE_SAFE_GATE=True,
             NT_OFFSET=0,
             BH_OFFSET=0,
         ),
@@ -690,11 +650,11 @@ def chunk_kda_fwd_intra_npu(
 
 
 _NUM_WARPS_BWD = 2
-# Vectorized diagonal path keeps BC×BK tiles live; keep BK small for Ascend UB
-# and AICore task timeout under large (NK×NC, NT, BH) grids.
+# Vectorized diagonal path keeps BC×BK tiles live; keep BK small for Ascend UB.
 _BWD_INTRA_MEM_MULT = 18.0
 _FALLBACK_BK = 16
 _MAX_BK = 16
+# limit programs per launch to stay within Ascend AICore task time.
 _KDA_BWD_INTRA_LAUNCH_BLOCK_BUDGET = 4096
 
 
@@ -719,8 +679,7 @@ def _launch_bwd_intra_kernel(
     bh_total: int,
     kernel_kwargs: dict,
 ) -> None:
-    # Cap programs/launch. NT<64 previously launched nearly ASCEND_MAX_GRID_DIM
-    # (e.g. blockDim=57344 on B8_T2048_H32_D256) and aicore-timeouts (507014).
+    # limit programs per launch to stay within Ascend AICore task time.
     budget = _KDA_BWD_INTRA_LAUNCH_BLOCK_BUDGET
     chunk_indices = kernel_kwargs.get('chunk_indices')
     cu_seqlens = kernel_kwargs.get('cu_seqlens')
@@ -907,8 +866,7 @@ def chunk_kda_bwd_kernel_intra_npu(
     tl.store(p_dq2, b_dq2.to(p_dq2.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_db, b_db.to(p_db.dtype.element_ty), boundary_check=(0,))
 
-    # Barrier kept for correctness; launch budget below keeps blockDim small enough
-    # that this no longer aicore-timeouts on Ascend benchmark shapes.
+    # synchronize before the second half of the kernel that reuses the same tiles.
     tl.debug_barrier()
     b_dkt = tl.zeros([BC, BK], dtype=tl.float32)
 
