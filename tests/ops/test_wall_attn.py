@@ -20,9 +20,9 @@ from fla.ops.wall_attn.parallel import (
     parallel_wall_attn_bwd_kernel_dq,
     parallel_wall_attn_fwd_kernel,
 )
-from fla.utils import assert_close, device
+from fla.utils import IS_TF32_SUPPORTED, assert_close, device
 
-# Keep IEEE as the default until the structural subset passes unchanged with tf32x3.
+# keep IEEE as the default until the structural subset passes unchanged with tf32x3.
 _STRUCTURAL_F32_PRECISION_ENV = 'FLA_TEST_WALL_STRUCTURAL_F32_PRECISION'
 _STRUCTURAL_F32_PRECISION = os.environ.get(_STRUCTURAL_F32_PRECISION_ENV, 'ieee')
 _VALID_F32_PRECISIONS = {'ieee', 'tf32x3'}
@@ -84,6 +84,8 @@ def wall_ieee_f32_dots():
 @pytest.fixture
 def wall_structural_f32_dots():
     """Use the precision selected for structural and self-consistency tests."""
+    if _STRUCTURAL_F32_PRECISION == 'tf32x3' and not IS_TF32_SUPPORTED:
+        pytest.skip('Wall structural tf32x3 tests require NVIDIA Ampere or newer')
     _set_wall_f32_precision(_STRUCTURAL_F32_PRECISION)
 
 
@@ -140,7 +142,7 @@ def test_parallel_matches_reference(
 
 
 @pytest.mark.parametrize('window_size', [None, 8])
-def test_parallel_value_split_matches_reference(window_size, monkeypatch, wall_structural_f32_dots):
+def test_parallel_value_split_matches_reference(window_size, monkeypatch, wall_ieee_f32_dots):
     """Force two value tiles while retaining the existing eager-reference check."""
     monkeypatch.setattr("fla.ops.wall_attn.parallel.check_shared_mem", lambda *args, **kwargs: False)
     torch.manual_seed(0)
@@ -277,7 +279,7 @@ def test_backward_matches_eager_reference(
     # `dg` is validated separately in `test_g_gradient_matches_finite_differences`.
 
 
-def test_dg_nonzero_after_backward(wall_structural_f32_dots):
+def test_dg_nonzero_after_backward(wall_ieee_f32_dots):
     torch.manual_seed(3)
     B, T, H, HQ, K, V = 1, 16, 1, 1, 8, 8
     q = torch.randn(B, T, HQ, K, device=device, requires_grad=True)
