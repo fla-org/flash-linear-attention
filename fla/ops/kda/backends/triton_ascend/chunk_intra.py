@@ -34,6 +34,8 @@ _INTER_MEM_MULT = 14.0
 _SAFETY_MARGIN = 0.80
 _FALLBACK_BK = 16
 _MAX_INTER_BK = 64
+# Cap programs/launch for diag_solve / inter on Ascend (~4.3s AICore timeout).
+_KDA_LAUNCH_BLOCK_BUDGET = 4096
 
 
 def _get_sub_chunk_bk(K: int) -> int:
@@ -74,21 +76,30 @@ def _launch_sub_chunk_kernel(
     bh_total: int,
     kernel_kwargs: dict,
 ) -> None:
-    max_nt = max_grid_axis_chunks(nt, nc * bh_total, max_grid=ASCEND_MAX_GRID_DIM)
+    budget = _KDA_LAUNCH_BLOCK_BUDGET
     chunk_indices = kernel_kwargs.get('chunk_indices')
     cu_seqlens = kernel_kwargs.get('cu_seqlens')
-    for nt_off in range(0, nt, max_nt):
-        nt_len = min(max_nt, nt - nt_off)
+    nt_step = nt if nt * nc * bh_total <= budget else max(1, budget // max(nc * bh_total, 1))
+    for nt_off in range(0, nt, nt_step):
+        nt_len = min(nt_step, nt - nt_off)
         if cu_seqlens is not None and chunk_indices is not None:
             kernel_kwargs['chunk_indices'] = chunk_indices[nt_off:nt_off + nt_len]
             kernel_kwargs['NT_OFFSET'] = 0
         else:
             kernel_kwargs['NT_OFFSET'] = nt_off
-        max_nc = max_grid_axis_chunks(nc, nt_len * bh_total, max_grid=ASCEND_MAX_GRID_DIM)
+        nc_budget = max(1, budget // max(nt_len * bh_total, 1))
+        max_nc = min(
+            nc_budget,
+            max_grid_axis_chunks(nc, nt_len * bh_total, max_grid=ASCEND_MAX_GRID_DIM),
+        )
         for nc_off in range(0, nc, max_nc):
             nc_len = min(max_nc, nc - nc_off)
             kernel_kwargs['NC_OFFSET'] = nc_off
-            max_bh = max_grid_axis_chunks(bh_total, nt_len * nc_len, max_grid=ASCEND_MAX_GRID_DIM)
+            bh_budget = max(1, budget // max(nt_len * nc_len, 1))
+            max_bh = min(
+                bh_budget,
+                max_grid_axis_chunks(bh_total, nt_len * nc_len, max_grid=ASCEND_MAX_GRID_DIM),
+            )
             for bh_off in range(0, bh_total, max_bh):
                 bh_len = min(max_bh, bh_total - bh_off)
                 kernel_kwargs['BH_OFFSET'] = bh_off
@@ -102,24 +113,29 @@ def _launch_inter_kernel(
     bh_total: int,
     kernel_kwargs: dict,
 ) -> None:
-    max_nt = max_grid_axis_chunks(nt, bh_total, max_grid=ASCEND_MAX_GRID_DIM)
+    budget = _KDA_LAUNCH_BLOCK_BUDGET
     chunk_indices = kernel_kwargs.get('chunk_indices')
     cu_seqlens = kernel_kwargs.get('cu_seqlens')
-    for nt_off in range(0, nt, max_nt):
-        nt_len = min(max_nt, nt - nt_off)
+    nt_step = nt if nt * bh_total <= budget else max(1, min(nt, budget // max(bh_total, 1)))
+    for nt_off in range(0, nt, nt_step):
+        nt_len = min(nt_step, nt - nt_off)
         if cu_seqlens is not None and chunk_indices is not None:
             kernel_kwargs['chunk_indices'] = chunk_indices[nt_off:nt_off + nt_len]
             kernel_kwargs['NT_OFFSET'] = 0
         else:
             kernel_kwargs['NT_OFFSET'] = nt_off
-        max_bh = max_grid_axis_chunks(bh_total, nt_len, max_grid=ASCEND_MAX_GRID_DIM)
+        bh_budget = max(1, budget // max(nt_len, 1))
+        max_bh = min(
+            bh_budget,
+            max_grid_axis_chunks(bh_total, nt_len, max_grid=ASCEND_MAX_GRID_DIM),
+        )
         for bh_off in range(0, bh_total, max_bh):
             bh_len = min(max_bh, bh_total - bh_off)
             kernel_kwargs['BH_OFFSET'] = bh_off
             kernel[(nt_len, bh_len)](num_warps=_NUM_WARPS_INTER, **kernel_kwargs)
 
 
-@triton.jit(do_not_specialize=['T'])
+@triton.jit(do_not_specialize=['T', 'NT_OFFSET', 'NC_OFFSET', 'BH_OFFSET'])
 def chunk_kda_fwd_kernel_diag_solve_npu(
     Akkd,
     cu_seqlens,
@@ -129,9 +145,9 @@ def chunk_kda_fwd_kernel_diag_solve_npu(
     BT: tl.constexpr,
     BC: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    NT_OFFSET: tl.constexpr,
-    NC_OFFSET: tl.constexpr,
-    BH_OFFSET: tl.constexpr,
+    NT_OFFSET,
+    NC_OFFSET,
+    BH_OFFSET,
 ):
     """Per-subchunk lower-triangular forward substitution into Akkd.
 
@@ -171,7 +187,7 @@ def chunk_kda_fwd_kernel_diag_solve_npu(
     tl.store(p_Akk, b_Ai.to(Akkd.dtype.element_ty), boundary_check=(0, 1))
 
 
-@triton.jit(do_not_specialize=['T'])
+@triton.jit(do_not_specialize=['T', 'NT_OFFSET', 'NC_OFFSET', 'BH_OFFSET'])
 def chunk_kda_fwd_kernel_intra_sub_chunk_npu(
     q,
     k,
@@ -190,9 +206,9 @@ def chunk_kda_fwd_kernel_intra_sub_chunk_npu(
     BC: tl.constexpr,
     BK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    NT_OFFSET: tl.constexpr,
-    NC_OFFSET: tl.constexpr,
-    BH_OFFSET: tl.constexpr,
+    NT_OFFSET,
+    NC_OFFSET,
+    BH_OFFSET,
 ):
     i_t = tl.program_id(0) + NT_OFFSET
     i_i = tl.program_id(1) + NC_OFFSET
@@ -259,7 +275,7 @@ def chunk_kda_fwd_kernel_intra_sub_chunk_npu(
     tl.store(p_Akk, b_Akk.to(Akk.dtype.element_ty), boundary_check=(0, 1))
 
 
-@triton.jit(do_not_specialize=['T'])
+@triton.jit(do_not_specialize=['T', 'NT_OFFSET', 'BH_OFFSET'])
 def chunk_kda_fwd_kernel_inter_solve_fused_npu(
     q,
     k,
@@ -281,8 +297,8 @@ def chunk_kda_fwd_kernel_inter_solve_fused_npu(
     BK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     USE_SAFE_GATE: tl.constexpr,
-    NT_OFFSET: tl.constexpr,
-    BH_OFFSET: tl.constexpr,
+    NT_OFFSET,
+    BH_OFFSET,
 ):
     i_t = tl.program_id(0) + NT_OFFSET
     i_bh = tl.program_id(1) + BH_OFFSET
@@ -674,11 +690,12 @@ def chunk_kda_fwd_intra_npu(
 
 
 _NUM_WARPS_BWD = 2
-_BWD_INTRA_MEM_MULT = 10.0
+# Vectorized diagonal path keeps BC×BK tiles live; keep BK small for Ascend UB
+# and AICore task timeout under large (NK×NC, NT, BH) grids.
+_BWD_INTRA_MEM_MULT = 18.0
 _FALLBACK_BK = 16
-_MAX_BK = 32
-# debug_barrier + large (NT x BH) grid triggers aicore timeout on Ascend; serialize NT.
-_INTRA_NT_SERIAL_THRESHOLD = 64
+_MAX_BK = 16
+_KDA_BWD_INTRA_LAUNCH_BLOCK_BUDGET = 4096
 
 
 def _get_bwd_intra_bk(K: int) -> int:
@@ -694,13 +711,6 @@ def _get_bwd_intra_bk(K: int) -> int:
     )
 
 
-def _get_nt_launch_step(nt: int) -> int:
-    if nt < _INTRA_NT_SERIAL_THRESHOLD:
-        return nt
-    # NT>=64: avoid single huge grid (507014) and avoid NT=1 serial (too many launches).
-    return min(8, nt)
-
-
 def _launch_bwd_intra_kernel(
     kernel,
     *,
@@ -709,28 +719,39 @@ def _launch_bwd_intra_kernel(
     bh_total: int,
     kernel_kwargs: dict,
 ) -> None:
+    # Cap programs/launch. NT<64 previously launched nearly ASCEND_MAX_GRID_DIM
+    # (e.g. blockDim=57344 on B8_T2048_H32_D256) and aicore-timeouts (507014).
+    budget = _KDA_BWD_INTRA_LAUNCH_BLOCK_BUDGET
     chunk_indices = kernel_kwargs.get('chunk_indices')
     cu_seqlens = kernel_kwargs.get('cu_seqlens')
-    nt_step = _get_nt_launch_step(nt)
-    for nt_off in range(0, nt, nt_step):
-        nt_len = min(nt_step, nt - nt_off)
-        if cu_seqlens is not None and chunk_indices is not None:
-            kernel_kwargs['chunk_indices'] = chunk_indices[nt_off:nt_off + nt_len]
-            kernel_kwargs['NT_OFFSET'] = 0
-        else:
-            kernel_kwargs['NT_OFFSET'] = nt_off
-        max_nknc = max_grid_axis_chunks(nk_nc, nt_len * bh_total, max_grid=ASCEND_MAX_GRID_DIM)
-        for nknc_off in range(0, nk_nc, max_nknc):
-            nknc_len = min(max_nknc, nk_nc - nknc_off)
-            kernel_kwargs['NKNC_OFFSET'] = nknc_off
-            max_bh = max_grid_axis_chunks(bh_total, nknc_len * nt_len, max_grid=ASCEND_MAX_GRID_DIM)
+    nk_step = nk_nc if nk_nc * nt * bh_total <= budget else max(1, budget // max(nt * bh_total, 1))
+    for nknc_off in range(0, nk_nc, nk_step):
+        nknc_len = min(nk_step, nk_nc - nknc_off)
+        kernel_kwargs['NKNC_OFFSET'] = nknc_off
+        nt_budget = max(1, budget // max(nknc_len * bh_total, 1))
+        max_nt = min(
+            nt_budget,
+            max_grid_axis_chunks(nt, nknc_len * bh_total, max_grid=ASCEND_MAX_GRID_DIM),
+        )
+        for nt_off in range(0, nt, max_nt):
+            nt_len = min(max_nt, nt - nt_off)
+            if cu_seqlens is not None and chunk_indices is not None:
+                kernel_kwargs['chunk_indices'] = chunk_indices[nt_off:nt_off + nt_len]
+                kernel_kwargs['NT_OFFSET'] = 0
+            else:
+                kernel_kwargs['NT_OFFSET'] = nt_off
+            bh_budget = max(1, budget // max(nknc_len * nt_len, 1))
+            max_bh = min(
+                bh_budget,
+                max_grid_axis_chunks(bh_total, nknc_len * nt_len, max_grid=ASCEND_MAX_GRID_DIM),
+            )
             for bh_off in range(0, bh_total, max_bh):
                 bh_len = min(max_bh, bh_total - bh_off)
                 kernel_kwargs['BH_OFFSET'] = bh_off
                 kernel[(nknc_len, nt_len, bh_len)](num_warps=_NUM_WARPS_BWD, **kernel_kwargs)
 
 
-@triton.jit(do_not_specialize=['B', 'T'])
+@triton.jit(do_not_specialize=['B', 'T', 'NKNC_OFFSET', 'NT_OFFSET', 'BH_OFFSET'])
 def chunk_kda_bwd_kernel_intra_npu(
     q,
     k,
@@ -758,9 +779,9 @@ def chunk_kda_bwd_kernel_intra_npu(
     NC: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     SAFE_GATE: tl.constexpr,
-    NKNC_OFFSET: tl.constexpr,
-    NT_OFFSET: tl.constexpr,
-    BH_OFFSET: tl.constexpr,
+    NKNC_OFFSET,
+    NT_OFFSET,
+    BH_OFFSET,
 ):
     i_kc = tl.program_id(0) + NKNC_OFFSET
     i_t = tl.program_id(1) + NT_OFFSET
@@ -838,6 +859,7 @@ def chunk_kda_bwd_kernel_intra_npu(
     b_k = tl.load(p_k, boundary_check=(0, 1))
 
     if SAFE_GATE:
+        # Midpoint-offset vectorized path (bounded under lower_bound=-5).
         p_gn = g + (i_ti + min(BC // 2, T - i_ti - 1)) * HV * K + o_k
         b_gn = tl.load(p_gn, mask=m_k, other=0).to(tl.float32)[None, :]
 
@@ -859,6 +881,7 @@ def chunk_kda_bwd_kernel_intra_npu(
         b_dq2 += tl.dot(b_dAqk_diag_qk, b_k_exp_diag_qk, allow_tf32=False) * exp_b_g_diag_qk
         b_dk2 += tl.dot(b_dAkk_diag_qk, b_k_exp_diag_qk, allow_tf32=False) * exp_b_g_diag_qk
     else:
+        # Pairwise scalar path required for unbounded non-safe gates (avoids Inf/NaN).
         for j in range(0, min(BC, T - i_t * BT - i_i * BC)):
             b_dAqk = tl.load(dAqk + o_dA + j, mask=m_dA, other=0)
             b_dAkk = tl.load(dAkk + o_dA + j, mask=m_dA, other=0)
@@ -884,6 +907,8 @@ def chunk_kda_bwd_kernel_intra_npu(
     tl.store(p_dq2, b_dq2.to(p_dq2.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_db, b_db.to(p_db.dtype.element_ty), boundary_check=(0,))
 
+    # Barrier kept for correctness; launch budget below keeps blockDim small enough
+    # that this no longer aicore-timeouts on Ascend benchmark shapes.
     tl.debug_barrier()
     b_dkt = tl.zeros([BC, BK], dtype=tl.float32)
 
