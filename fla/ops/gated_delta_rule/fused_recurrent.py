@@ -197,6 +197,7 @@ def fused_recurrent_gated_delta_rule_fwd(
     allow_neg_eigval: bool = False,
     state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
+    final_state: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
@@ -206,7 +207,22 @@ def fused_recurrent_gated_delta_rule_fwd(
     NV = triton.cdiv(V, BV)
 
     o = torch.empty_like(v)
-    if output_final_state:
+    if final_state is not None:
+        expected_shape = (N, HV, V, K) if state_v_first else (N, HV, K, V)
+        if final_state.shape != expected_shape:
+            raise ValueError(
+                f"`final_state` must have shape {expected_shape}, got {tuple(final_state.shape)}.",
+            )
+        if final_state.dtype != torch.float32:
+            raise ValueError(f"`final_state` must have dtype torch.float32, got {final_state.dtype}.")
+        if final_state.device != q.device:
+            raise ValueError(f"`final_state` must be on {q.device}, got {final_state.device}.")
+        if not final_state.is_contiguous():
+            raise ValueError("`final_state` must be contiguous.")
+        if final_state.requires_grad:
+            raise ValueError("`final_state` must not require gradients because it is written in-place.")
+        output_final_state = True
+    elif output_final_state:
         if state_v_first:
             final_state = q.new_empty(N, HV, V, K, dtype=torch.float32)
         else:
@@ -251,7 +267,7 @@ def fused_recurrent_gated_delta_rule_fwd(
 class FusedRecurrentFunction(torch.autograd.Function):
 
     @staticmethod
-    @input_guard
+    @input_guard(no_guard_contiguous={'final_state'})
     def forward(
         ctx,
         q: torch.Tensor,
@@ -271,7 +287,9 @@ class FusedRecurrentFunction(torch.autograd.Function):
         allow_neg_eigval: bool = False,
         state_v_first: bool = False,
         cu_seqlens: torch.LongTensor | None = None,
+        final_state: torch.Tensor | None = None,
     ):
+        has_final_state_buffer = final_state is not None
         o, final_state = fused_recurrent_gated_delta_rule_fwd(
             q=q,
             k=k,
@@ -290,7 +308,10 @@ class FusedRecurrentFunction(torch.autograd.Function):
             allow_neg_eigval=allow_neg_eigval,
             state_v_first=state_v_first,
             cu_seqlens=cu_seqlens,
+            final_state=final_state,
         )
+        if has_final_state_buffer:
+            ctx.mark_dirty(final_state)
 
         return o, final_state
 
@@ -323,6 +344,7 @@ def fused_recurrent_gated_delta_rule(
     allow_neg_eigval: bool = False,
     state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
+    final_state: torch.Tensor | None = None,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
@@ -379,6 +401,11 @@ def fused_recurrent_gated_delta_rule(
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
+        final_state (Optional[torch.Tensor]):
+            Preallocated output buffer for the final state. The buffer must be contiguous,
+            have shape `[N, HV, K, V]` or `[N, HV, V, K]` when `state_v_first=True`,
+            and have `torch.float32` dtype. If provided, it is written in-place and returned.
+            Default: `None`.
 
     Returns:
         o (torch.Tensor):
@@ -469,6 +496,7 @@ def fused_recurrent_gated_delta_rule(
         allow_neg_eigval,
         state_v_first,
         cu_seqlens,
+        final_state,
     )
     return o, final_state
 

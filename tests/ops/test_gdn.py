@@ -516,6 +516,199 @@ def test_fused_recurrent_state_v_first(
         fused_recurrent_gated_delta_rule(q=q, k=k, v=v, g=g, beta=beta, state_v_first=True, transpose_state_layout=True)
 
 
+@pytest.mark.parametrize('state_v_first', [False, True])
+def test_fused_recurrent_final_state_buffer(state_v_first: bool):
+    torch.manual_seed(42)
+    B, T, H, HV, D = 2, 17, 2, 4, 32
+    dtype = torch.float16
+    q = torch.randn(B, T, H, D, dtype=torch.float32, device=device)
+    k = torch.randn(B, T, H, D, dtype=torch.float32, device=device)
+    v = torch.randn(B, T, HV, D, dtype=dtype, device=device)
+    beta = torch.rand(B, T, HV, dtype=dtype, device=device).sigmoid()
+    g = F.logsigmoid(torch.randn(B, T, HV, dtype=torch.float32, device=device))
+    h0 = torch.randn(B, HV, D, D, dtype=torch.float32, device=device)
+    h0 = h0.transpose(-1, -2).contiguous() if state_v_first else h0
+
+    ref_o, ref_ht = fused_recurrent_gated_delta_rule(
+        q=q,
+        k=k,
+        v=v,
+        beta=beta,
+        g=g,
+        initial_state=h0.clone(),
+        output_final_state=True,
+        state_v_first=state_v_first,
+        use_qk_l2norm_in_kernel=True,
+    )
+    buffer = torch.full_like(ref_ht, float('nan'))
+    buf_o, buf_ht = fused_recurrent_gated_delta_rule(
+        q=q,
+        k=k,
+        v=v,
+        beta=beta,
+        g=g,
+        initial_state=h0.clone(),
+        output_final_state=True,
+        state_v_first=state_v_first,
+        use_qk_l2norm_in_kernel=True,
+        final_state=buffer,
+    )
+
+    assert buf_ht.data_ptr() == buffer.data_ptr()
+    assert not torch.isnan(buffer).any()
+    assert_close('o', ref_o, buf_o, 0.002)
+    assert_close('ht', ref_ht, buf_ht, 0.002)
+
+
+def test_fused_recurrent_final_state_buffer_reuse():
+    torch.manual_seed(42)
+    B, T, H, HV, D = 1, 5, 1, 1, 16
+    q = torch.randn(B, T, H, D, dtype=torch.float32, device=device)
+    k = torch.randn(B, T, H, D, dtype=torch.float32, device=device)
+    v = torch.randn(B, T, HV, D, dtype=torch.float16, device=device)
+    beta = torch.rand(B, T, HV, dtype=torch.float16, device=device).sigmoid()
+    g = F.logsigmoid(torch.randn(B, T, HV, dtype=torch.float32, device=device))
+    state = torch.randn(B, HV, D, D, dtype=torch.float32, device=device)
+    buffer = torch.full_like(state, float('nan'))
+    buffer_ptr = buffer.data_ptr()
+
+    for _ in range(3):
+        ref_o, ref_ht = fused_recurrent_gated_delta_rule(
+            q=q,
+            k=k,
+            v=v,
+            beta=beta,
+            g=g,
+            initial_state=state.clone(),
+            output_final_state=True,
+            use_qk_l2norm_in_kernel=True,
+        )
+        buf_o, buf_ht = fused_recurrent_gated_delta_rule(
+            q=q,
+            k=k,
+            v=v,
+            beta=beta,
+            g=g,
+            initial_state=state.clone(),
+            use_qk_l2norm_in_kernel=True,
+            final_state=buffer,
+        )
+
+        assert buf_ht.data_ptr() == buffer_ptr
+        assert not torch.isnan(buffer).any()
+        assert_close('o', ref_o, buf_o, 0.002)
+        assert_close('ht', ref_ht, buf_ht, 0.002)
+        state.copy_(buffer)
+
+
+def test_fused_recurrent_final_state_buffer_aliases_initial_state():
+    torch.manual_seed(42)
+    B, T, H, HV, D = 1, 7, 1, 1, 16
+    q = torch.randn(B, T, H, D, dtype=torch.float32, device=device)
+    k = torch.randn(B, T, H, D, dtype=torch.float32, device=device)
+    v = torch.randn(B, T, HV, D, dtype=torch.float16, device=device)
+    beta = torch.rand(B, T, HV, dtype=torch.float16, device=device).sigmoid()
+    g = F.logsigmoid(torch.randn(B, T, HV, dtype=torch.float32, device=device))
+    state = torch.randn(B, HV, D, D, dtype=torch.float32, device=device)
+
+    ref_o, ref_ht = fused_recurrent_gated_delta_rule(
+        q=q,
+        k=k,
+        v=v,
+        beta=beta,
+        g=g,
+        initial_state=state.clone(),
+        output_final_state=True,
+        use_qk_l2norm_in_kernel=True,
+    )
+    buf_o, buf_ht = fused_recurrent_gated_delta_rule(
+        q=q,
+        k=k,
+        v=v,
+        beta=beta,
+        g=g,
+        initial_state=state,
+        use_qk_l2norm_in_kernel=True,
+        final_state=state,
+    )
+
+    assert buf_ht.data_ptr() == state.data_ptr()
+    assert_close('o', ref_o, buf_o, 0.002)
+    assert_close('ht', ref_ht, buf_ht, 0.002)
+
+
+def test_fused_recurrent_final_state_buffer_varlen():
+    torch.manual_seed(42)
+    H, HV, D = 2, 4, 32
+    cu_seqlens = torch.tensor([0, 3, 11], dtype=torch.long, device=device)
+    T = cu_seqlens[-1].item()
+    N = len(cu_seqlens) - 1
+    q = torch.randn(1, T, H, D, dtype=torch.float32, device=device)
+    k = torch.randn(1, T, H, D, dtype=torch.float32, device=device)
+    v = torch.randn(1, T, HV, D, dtype=torch.float16, device=device)
+    beta = torch.rand(1, T, HV, dtype=torch.float16, device=device).sigmoid()
+    g = F.logsigmoid(torch.randn(1, T, HV, dtype=torch.float32, device=device))
+    h0 = torch.randn(N, HV, D, D, dtype=torch.float32, device=device)
+
+    ref_o, ref_ht = fused_recurrent_gated_delta_rule(
+        q=q,
+        k=k,
+        v=v,
+        beta=beta,
+        g=g,
+        initial_state=h0.clone(),
+        output_final_state=True,
+        cu_seqlens=cu_seqlens,
+        use_qk_l2norm_in_kernel=True,
+    )
+    buffer = torch.full_like(ref_ht, float('nan'))
+    buf_o, buf_ht = fused_recurrent_gated_delta_rule(
+        q=q,
+        k=k,
+        v=v,
+        beta=beta,
+        g=g,
+        initial_state=h0.clone(),
+        output_final_state=True,
+        cu_seqlens=cu_seqlens,
+        use_qk_l2norm_in_kernel=True,
+        final_state=buffer,
+    )
+
+    assert buf_ht.data_ptr() == buffer.data_ptr()
+    assert not torch.isnan(buffer).any()
+    assert_close('o', ref_o, buf_o, 0.002)
+    assert_close('ht', ref_ht, buf_ht, 0.002)
+
+
+@pytest.mark.parametrize('bad_buffer', ['shape', 'dtype', 'noncontiguous'])
+def test_fused_recurrent_final_state_buffer_validation(bad_buffer: str):
+    B, T, H, HV, D = 1, 4, 1, 1, 16
+    q = torch.randn(B, T, H, D, dtype=torch.float32, device=device)
+    k = torch.randn(B, T, H, D, dtype=torch.float32, device=device)
+    v = torch.randn(B, T, HV, D, dtype=torch.float16, device=device)
+    beta = torch.rand(B, T, HV, dtype=torch.float16, device=device).sigmoid()
+    g = F.logsigmoid(torch.randn(B, T, HV, dtype=torch.float32, device=device))
+
+    buffer = torch.empty(B, HV, D, D, dtype=torch.float32, device=device)
+    if bad_buffer == 'shape':
+        buffer = torch.empty(B, HV, D + 1, D, dtype=torch.float32, device=device)
+    elif bad_buffer == 'dtype':
+        buffer = torch.empty(B, HV, D, D, dtype=torch.float16, device=device)
+    elif bad_buffer == 'noncontiguous':
+        buffer = torch.empty(B, HV, D, D, dtype=torch.float32, device=device).transpose(-1, -2)
+
+    with pytest.raises(ValueError, match='final_state'):
+        fused_recurrent_gated_delta_rule(
+            q=q,
+            k=k,
+            v=v,
+            beta=beta,
+            g=g,
+            final_state=buffer,
+        )
+
+
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'HV', 'D', 'scale', 'has_dt_bias', 'dtype'),
     [
