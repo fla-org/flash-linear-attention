@@ -46,12 +46,18 @@ def log_decay(*shape, scale=0.05, dtype=torch.float32):
         for test in [
             (1, 48, 2, 4, 32, 16),
             (2, 31, 1, 1, 24, 8),
+            (1, 31, 1, 2, 32, 128),
         ]
     ],
 )
 @pytest.mark.parametrize('window_size', [None, 8])
-def test_parallel_matches_reference(B: int, T: int, H: int, HQ: int, K: int, V: int, window_size):
+def test_parallel_matches_reference(B: int, T: int, H: int, HQ: int, K: int, V: int, window_size, monkeypatch):
     assert HQ % H == 0
+    if V == 128:
+        # force BV=64 so the forward launches with NV=2: exercises the value-split
+        # path (incl. single-writer LSE stores) without the BV=256 giant tiles whose
+        # IEEE fp32-dot compilation stalls ptxas for minutes per autotune config.
+        monkeypatch.setattr("fla.ops.wall_attn.parallel.check_shared_mem", lambda *args, **kwargs: False)
     torch.manual_seed(0)
     dtype = torch.float32
     q = torch.randn(B, T, HQ, K, device=device, dtype=dtype)
@@ -141,7 +147,10 @@ def test_parallel_aggressive_gates_long_seq():
         ]
     ],
 )
-def test_backward_matches_eager_reference(B: int, T: int, H: int, HQ: int, K: int, V: int):
+def test_backward_matches_eager_reference(B: int, T: int, H: int, HQ: int, K: int, V: int, monkeypatch):
+    if V == 128:
+        # force BV=64 in the forward so backward consumes LSE from a split-value launch
+        monkeypatch.setattr("fla.ops.wall_attn.parallel.check_shared_mem", lambda *args, **kwargs: False)
     dtype = torch.float32
     torch.manual_seed(11)
     q0 = torch.randn(B, T, HQ, K, device=device, dtype=dtype)
@@ -324,6 +333,7 @@ def _decode_at(t, q, k, v, P, scale, C, *, g_scalar_cumsum=None):
             (1, 256, 4, 4, 64, 64, 64),   # MHA
             (1, 256, 2, 8, 64, 64, 64),   # GQA, G=4
             (2, 128, 1, 2, 32, 32, 32),   # small
+            (1, 128, 1, 2, 32, 320, 32),  # split value dimension
         ]
     ],
 )

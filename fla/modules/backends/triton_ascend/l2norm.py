@@ -11,112 +11,152 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.utils.ascend_ub_manager import ASCEND_MAX_GRID_DIM, compute_ub_block_size, iter_axis_launch_chunks
+from fla.utils.ascend_ub_manager import (
+    ASCEND_MAX_GRID_DIM,
+    compute_row_tile_block_size,
+    compute_ub_block_size,
+    iter_axis_launch_chunks,
+)
 
-# Peak live fp32 vectors in row-wise kernel1 (same order as layer_norm).
-_FWD_MEM_MULT = 6.0
-_BWD_MEM_MULT = 8.0
+# Peak live fp32 tiles relative to [BT, BD].
+# Forward keeps ~b_x/b_y; backward keeps b_y/b_dy/b_dx plus reduction temps.
+# Multipliers are calibrated so small-D shapes can use large BT without UB overflow
+# under Ascend multi-buffering (bwd BT=128 @ BD=128 overflows; BT=64 is safe).
+_FWD_MEM_MULT = 2.0
+_BWD_MEM_MULT = 4.0
 _UB_SAFETY_MARGIN = 0.85
 # Legacy byte cap when UB capacity cannot be detected (65536 // fp32).
 _FALLBACK_MAX_BD = 65536 // 4
+# Cap row tile to keep compile variants small and match the CUDA BT list.
+_MAX_BT = 128
 
 
-def _get_l2norm_bd(D: int, is_forward: bool) -> int:
-    """Return power-of-2 block size for feature dim D under UB constraints."""
+def _get_l2norm_tiles(D: int, is_forward: bool) -> tuple[int, int]:
+    """Return (BD, BT) under UB constraints. BT may be 1 for large D."""
     memory_multiplier = _FWD_MEM_MULT if is_forward else _BWD_MEM_MULT
-    return compute_ub_block_size(
+    BD = compute_ub_block_size(
         D,
         memory_multiplier,
         safety_margin=_UB_SAFETY_MARGIN,
         fallback=_FALLBACK_MAX_BD,
         desired=triton.next_power_of_2(D),
     )
+    if D > BD:
+        raise RuntimeError(
+            f"L2Norm feature dim {D} exceeds UB-safe block size {BD}. "
+            "Column-tiled kernels are not yet implemented for this size."
+        )
+    # Large synthetic row dim so BT is limited by UB, not by a host-side T guess.
+    BT = compute_row_tile_block_size(
+        1 << 20,
+        BD,
+        memory_multiplier,
+        tiling_row=True,
+        safety_margin=_UB_SAFETY_MARGIN,
+        fallback=16,
+        min_block=1,
+        max_block=_MAX_BT,
+    )
+    return BD, BT
 
 
-@triton.jit
-def l2norm_fwd_kernel1(
+@triton.jit(do_not_specialize=['T'])
+def l2norm_fwd_kernel(
     x,
     y,
     rstd,
     eps,
-    D,
+    T,
+    T_OFFSET,
+    D: tl.constexpr,
     BD: tl.constexpr,
+    BT: tl.constexpr,
 ):
-    i_t = tl.program_id(0)
-    x += i_t * D
-    y += i_t * D
+    i_t = tl.program_id(0) + T_OFFSET
+    rows = i_t * BT + tl.arange(0, BT)
     cols = tl.arange(0, BD)
-    mask = cols < D
+    mask = (rows[:, None] < T) & (cols[None, :] < D)
 
-    b_x = tl.load(x + cols, mask=mask, other=0.0).to(tl.float32)
-    b_rstd = 1 / tl.sqrt(tl.sum(b_x * b_x) + eps)
-    b_y = b_x * b_rstd
-    tl.store(y + cols, b_y, mask=mask)
-    tl.store(rstd + i_t, b_rstd)
+    b_x = tl.load(x + rows[:, None] * D + cols[None, :], mask=mask, other=0.0).to(tl.float32)
+    b_rstd = 1 / tl.sqrt(tl.sum(b_x * b_x, 1) + eps)
+    b_y = b_x * b_rstd[:, None]
+
+    tl.store(y + rows[:, None] * D + cols[None, :], b_y.to(y.dtype.element_ty), mask=mask)
+    tl.store(rstd + rows, b_rstd.to(rstd.dtype.element_ty), mask=rows < T)
 
 
-@triton.jit
-def l2norm_bwd_kernel1(
+@triton.jit(do_not_specialize=['T'])
+def l2norm_bwd_kernel(
     y,
     rstd,
     dy,
     dx,
-    eps,
-    D,
+    T,
+    T_OFFSET,
+    D: tl.constexpr,
     BD: tl.constexpr,
+    BT: tl.constexpr,
 ):
-    i_t = tl.program_id(0)
-    y += i_t * D
-    dx += i_t * D
-    dy += i_t * D
-
+    i_t = tl.program_id(0) + T_OFFSET
+    rows = i_t * BT + tl.arange(0, BT)
     cols = tl.arange(0, BD)
-    mask = cols < D
-    b_y = tl.load(y + cols, mask=mask, other=0.0).to(tl.float32)
-    b_rstd = tl.load(rstd + i_t).to(tl.float32)
-    b_dy = tl.load(dy + cols, mask=mask, other=0.0).to(tl.float32)
-    b_dx = b_dy * b_rstd - tl.sum(b_dy * b_y) * b_y * b_rstd
-    tl.store(dx + cols, b_dx, mask=mask)
+    mask = (rows[:, None] < T) & (cols[None, :] < D)
+
+    b_y = tl.load(y + rows[:, None] * D + cols[None, :], mask=mask, other=0.0).to(tl.float32)
+    b_rstd = tl.load(rstd + rows, mask=rows < T, other=0.0).to(tl.float32)
+    b_dy = tl.load(dy + rows[:, None] * D + cols[None, :], mask=mask, other=0.0).to(tl.float32)
+    b_dx = b_dy * b_rstd[:, None] - tl.sum(b_dy * b_y, 1)[:, None] * b_y * b_rstd[:, None]
+    tl.store(dx + rows[:, None] * D + cols[None, :], b_dx.to(dx.dtype.element_ty), mask=mask)
 
 
-def _launch_l2norm_fwd_kernel1(
+def _launch_l2norm_fwd_kernel(
     x: torch.Tensor,
     y: torch.Tensor,
     rstd: torch.Tensor,
     eps: float,
+    T: int,
     D: int,
     BD: int,
+    BT: int,
 ):
-    chunk_T = x.shape[0]
-    l2norm_fwd_kernel1[(chunk_T,)](
-        x=x,
-        y=y,
-        rstd=rstd,
-        eps=eps,
-        D=D,
-        BD=BD,
-    )
+    NT = triton.cdiv(T, BT)
+    for nt_off, nt_len in iter_axis_launch_chunks(NT, 1, max_grid=ASCEND_MAX_GRID_DIM):
+        l2norm_fwd_kernel[(nt_len,)](
+            x=x,
+            y=y,
+            rstd=rstd,
+            eps=eps,
+            T=T,
+            T_OFFSET=nt_off,
+            D=D,
+            BD=BD,
+            BT=BT,
+        )
 
 
-def _launch_l2norm_bwd_kernel1(
+def _launch_l2norm_bwd_kernel(
     y: torch.Tensor,
     rstd: torch.Tensor,
     dy: torch.Tensor,
     dx: torch.Tensor,
-    eps: float,
+    T: int,
     D: int,
     BD: int,
+    BT: int,
 ):
-    chunk_T = y.shape[0]
-    l2norm_bwd_kernel1[(chunk_T,)](
-        y=y,
-        rstd=rstd,
-        dy=dy,
-        dx=dx,
-        eps=eps,
-        D=D,
-        BD=BD,
-    )
+    NT = triton.cdiv(T, BT)
+    for nt_off, nt_len in iter_axis_launch_chunks(NT, 1, max_grid=ASCEND_MAX_GRID_DIM):
+        l2norm_bwd_kernel[(nt_len,)](
+            y=y,
+            rstd=rstd,
+            dy=dy,
+            dx=dx,
+            T=T,
+            T_OFFSET=nt_off,
+            D=D,
+            BD=BD,
+            BT=BT,
+        )
 
 
 def l2norm_fwd_npu(
@@ -133,24 +173,9 @@ def l2norm_fwd_npu(
     assert y.stride(-1) == 1
     T, D = x.shape[0], x.shape[-1]
 
-    BD = _get_l2norm_bd(D, is_forward=True)
-    if D > BD:
-        raise RuntimeError(
-            f"L2Norm feature dim {D} exceeds UB-safe block size {BD}. "
-            "Column-tiled kernels are not yet implemented for this size."
-        )
-
+    BD, BT = _get_l2norm_tiles(D, is_forward=True)
     rstd = torch.empty((T,), dtype=torch.float32, device=x.device)
-    for row_start, row_len in iter_axis_launch_chunks(T, 1, max_grid=ASCEND_MAX_GRID_DIM):
-        row_end = row_start + row_len
-        _launch_l2norm_fwd_kernel1(
-            x[row_start:row_end],
-            y[row_start:row_end],
-            rstd[row_start:row_end],
-            eps,
-            D,
-            BD,
-        )
+    _launch_l2norm_fwd_kernel(x, y, rstd, eps, T, D, BD, BT)
     return y.view(x_shape_og), rstd.view(x_shape_og[:-1])
 
 
@@ -158,7 +183,6 @@ def l2norm_bwd_npu(
     y: torch.Tensor,
     rstd: torch.Tensor,
     dy: torch.Tensor,
-    eps: float = 1e-6,
 ):
     y_shape_og = y.shape
     y = y.view(-1, dy.shape[-1])
@@ -169,22 +193,6 @@ def l2norm_bwd_npu(
     T, D = y.shape[0], y.shape[-1]
     assert rstd.numel() == T
 
-    BD = _get_l2norm_bd(D, is_forward=False)
-    if D > BD:
-        raise RuntimeError(
-            f"L2Norm feature dim {D} exceeds UB-safe block size {BD}. "
-            "Column-tiled kernels are not yet implemented for this size."
-        )
-
-    for row_start, row_len in iter_axis_launch_chunks(T, 1, max_grid=ASCEND_MAX_GRID_DIM):
-        row_end = row_start + row_len
-        _launch_l2norm_bwd_kernel1(
-            y[row_start:row_end],
-            rstd[row_start:row_end],
-            dy[row_start:row_end],
-            dx[row_start:row_end],
-            eps,
-            D,
-            BD,
-        )
+    BD, BT = _get_l2norm_tiles(D, is_forward=False)
+    _launch_l2norm_bwd_kernel(y, rstd, dy, dx, T, D, BD, BT)
     return dx.view(y_shape_og)

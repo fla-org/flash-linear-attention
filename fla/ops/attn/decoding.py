@@ -58,7 +58,7 @@ def naive_attn_decoding_kernel(
     T = eos - bos
 
     p_q = tl.make_block_ptr(q + i_bh * K, (K,), (1, ), (0, ), (BK,), (0,))
-    p_o = tl.make_block_ptr(o + i_bh * V, (V,), (1, ), (0, ), (BV,), (0,))
+    p_o = tl.make_block_ptr(o + i_bh * V, (V,), (1, ), (i_v * BV, ), (BV,), (0,))
 
     b_q = tl.load(p_q, boundary_check=(0,))
     b_q = (b_q * scale).to(b_q.dtype)

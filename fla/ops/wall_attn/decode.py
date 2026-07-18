@@ -153,7 +153,8 @@ def parallel_wall_attn_decode_kernel(
     b_o = b_o / b_acc[:, None]
     b_m += log2(b_acc)
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_lse, b_m.to(p_lse.dtype.element_ty), boundary_check=(0,))
+    if i_v == 0:
+        tl.store(p_lse, b_m.to(p_lse.dtype.element_ty), boundary_check=(0,))
 
 
 def parallel_wall_attn_decode(

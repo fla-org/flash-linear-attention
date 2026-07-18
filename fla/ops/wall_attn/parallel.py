@@ -47,9 +47,23 @@ WALL_BWD_AUTOTUNE_CONFIGS = [
 ]
 
 
+def _prune_wall_fwd_configs(configs, nargs, **kwargs):
+    # The per-program fp32 accumulator tile is BT x BV. At the Hopper BV cap of
+    # 256, BT=128 configs hold a 128x256 fp32 accumulator (128 KiB), spill
+    # registers massively, can never win the benchmark, and each take minutes to
+    # compile under IEEE fp32 dots (TRITON_F32_DEFAULT=ieee in the test suite),
+    # which reads as a multi-minute stall per autotune key. Drop configs that
+    # exceed the tile budget; BV <= 128 keeps the full sweep. BV never exceeds
+    # the fwd cap (256), so BT=64 always survives and the pruned set is non-empty.
+    nargs = {**(nargs or {}), **kwargs}  # keyword launches leave nargs empty
+    BV = nargs.get('BV') or 128
+    return [c for c in configs if c.kwargs['BT'] * BV <= 16384]
+
+
 @triton.autotune(
     configs=WALL_FWD_AUTOTUNE_CONFIGS,
     key=['T', 'K', 'V', 'HQ', 'H'],
+    prune_configs_by={'early_config_prune': _prune_wall_fwd_configs},
 )
 @triton.heuristics({
     'USE_SINK_BIAS': lambda args: args['sink_bias'] is not None,
@@ -211,7 +225,8 @@ def parallel_wall_attn_fwd_kernel(
     b_o = b_o / b_acc[:, None]
     b_m += log2(b_acc)
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_lse, b_m.to(p_lse.dtype.element_ty), boundary_check=(0,))
+    if i_v == 0:
+        tl.store(p_lse, b_m.to(p_lse.dtype.element_ty), boundary_check=(0,))
 
 
 @triton.autotune(

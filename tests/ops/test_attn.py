@@ -69,7 +69,8 @@ def test_parallel_bwd_full_value_reduction(monkeypatch):
 
     On low-shared-memory GPUs (e.g. consumer RTX cards) the backward used to cap BV <= 64,
     so any head dim > 64 split V across programs and produced silently wrong dq/dk. We force
-    that low-smem branch here so the bug is caught on any GPU, not just consumer cards.
+    that low-smem branch here so the bug is caught on any GPU, not just consumer cards. The
+    same setup forces a split forward and validates its LSE through backward.
     """
     # Force the low-shared-memory branch regardless of the actual device.
     monkeypatch.setattr("fla.ops.attn.parallel.check_shared_mem", lambda *args, **kwargs: False)
