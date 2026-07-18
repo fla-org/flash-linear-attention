@@ -9,6 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.backends import dispatch
 from fla.ops.common.chunk_h import chunk_fwd_h
 from fla.ops.gla.chunk import chunk_gla_bwd_dA, chunk_gla_bwd_dv, chunk_gla_fwd_o_gk
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
@@ -740,6 +741,7 @@ def chunk_rwkv6_bwd_kernel_inter(
     tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), boundary_check=(0, 1))
 
 
+@dispatch('rwkv6')
 def chunk_rwkv6_fwd_intra(
     q: torch.Tensor,
     k: torch.Tensor,

@@ -11,9 +11,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 import fla.ops.common.backends.tilelang as common_tilelang_backend
 import fla.ops.kda.backends.tilelang as kda_tilelang_backend
+import fla.ops.rwkv6.backends.tilelang as rwkv6_tilelang_backend
 from fla.utils import _compat
 
 _REAL_PATH_EXISTS = Path.exists
@@ -96,10 +98,12 @@ def test_no_nvcc_logs_fallback_once(monkeypatch, caplog):
 def _backend_cls(backend_module):
     if backend_module is common_tilelang_backend:
         return backend_module.TileLangBackend
+    if backend_module is rwkv6_tilelang_backend:
+        return backend_module.RWKV6TileLangBackend
     return backend_module.KDATileLangBackend
 
 
-@pytest.mark.parametrize("backend_module", [common_tilelang_backend, kda_tilelang_backend])
+@pytest.mark.parametrize("backend_module", [common_tilelang_backend, kda_tilelang_backend, rwkv6_tilelang_backend])
 def test_tilelang_backend_gated_by_nvcc_probe(monkeypatch, backend_module):
     monkeypatch.setattr(backend_module, "_TILELANG_AVAILABLE", True)
     monkeypatch.setattr(backend_module, "has_usable_nvcc", lambda: False)
@@ -109,8 +113,56 @@ def test_tilelang_backend_gated_by_nvcc_probe(monkeypatch, backend_module):
     assert _backend_cls(backend_module).is_available() is True
 
 
-@pytest.mark.parametrize("backend_module", [common_tilelang_backend, kda_tilelang_backend])
+@pytest.mark.parametrize("backend_module", [common_tilelang_backend, kda_tilelang_backend, rwkv6_tilelang_backend])
 def test_tilelang_backend_unavailable_without_tilelang(monkeypatch, backend_module):
     monkeypatch.setattr(backend_module, "_TILELANG_AVAILABLE", False)
     monkeypatch.setattr(backend_module, "has_usable_nvcc", lambda: True)
     assert _backend_cls(backend_module).is_available() is False
+
+
+def test_rwkv6_tilelang_backend_requires_opt_in(monkeypatch):
+    monkeypatch.delenv("FLA_TILELANG", raising=False)
+    assert rwkv6_tilelang_backend.RWKV6TileLangBackend.is_enabled() is False
+
+    monkeypatch.setenv("FLA_TILELANG", "1")
+    assert rwkv6_tilelang_backend.RWKV6TileLangBackend.is_enabled() is True
+
+
+def test_rwkv6_tilelang_backend_verifier_accepts_supported_shape():
+    q = SimpleNamespace(dtype=torch.bfloat16, is_cuda=True, shape=(1, 64, 2, 64), ndim=4)
+    k = SimpleNamespace(dtype=torch.bfloat16, shape=q.shape)
+    gi = SimpleNamespace(dtype=torch.float32, shape=q.shape)
+    ge = SimpleNamespace(dtype=torch.float32, shape=q.shape)
+    u = SimpleNamespace(dtype=torch.bfloat16, shape=(2, 64))
+
+    accepted, reason = rwkv6_tilelang_backend.RWKV6TileLangBackend().chunk_rwkv6_fwd_intra_verifier(
+        q=q,
+        k=k,
+        gi=gi,
+        ge=ge,
+        u=u,
+        scale=1.0,
+    )
+
+    assert accepted is True
+    assert reason is None
+
+
+def test_rwkv6_tilelang_backend_verifier_rejects_unsupported_dimension():
+    q = SimpleNamespace(dtype=torch.bfloat16, is_cuda=True, shape=(1, 64, 2, 128), ndim=4)
+    k = SimpleNamespace(dtype=torch.bfloat16, shape=q.shape)
+    gi = SimpleNamespace(dtype=torch.float32, shape=q.shape)
+    ge = SimpleNamespace(dtype=torch.float32, shape=q.shape)
+    u = SimpleNamespace(dtype=torch.bfloat16, shape=(2, 128))
+
+    accepted, reason = rwkv6_tilelang_backend.RWKV6TileLangBackend().chunk_rwkv6_fwd_intra_verifier(
+        q=q,
+        k=k,
+        gi=gi,
+        ge=ge,
+        u=u,
+        scale=1.0,
+    )
+
+    assert accepted is False
+    assert reason == "TileLang RWKV6 intra backend currently supports the D=64 benchmark bucket only, got K=128"
