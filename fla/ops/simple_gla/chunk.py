@@ -7,11 +7,220 @@
 
 import torch
 
+from fla.ops.common.backends.tilelang import TileLangBackend
 from fla.ops.common.chunk_h import chunk_bwd_dh, chunk_fwd_h
 from fla.ops.common.chunk_o import chunk_bwd_dqkwg, chunk_bwd_dv, chunk_fwd_o
 from fla.ops.utils import chunk_local_cumsum, prepare_chunk_indices
 from fla.ops.utils.constant import RCP_LN2
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, check_shared_mem, input_guard
+
+
+def _can_use_shadow_state_dqkwg(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor | None,
+    g_gamma: torch.Tensor | None,
+    initial_state: torch.Tensor | None,
+    do: torch.Tensor,
+    dht: torch.Tensor | None,
+    state_v_first: bool,
+    cu_seqlens: torch.LongTensor | None,
+    chunk_size: int,
+    chunk_indices: torch.LongTensor | None,
+) -> bool:
+    _, _, H, K = k.shape
+    HQ = q.shape[2]
+    HV, V = v.shape[2], v.shape[-1]
+    return (
+        TileLangBackend.is_available()
+        and TileLangBackend.is_enabled()
+        and g is not None
+        and g_gamma is None
+        and initial_state is None
+        and dht is None
+        and cu_seqlens is None
+        and chunk_indices is None
+        and not state_v_first
+        and chunk_size == 64
+        and q.dtype in (torch.float16, torch.bfloat16)
+        and k.dtype == q.dtype
+        and v.dtype == q.dtype
+        and do.dtype == q.dtype
+        and HQ == H
+        and H == HV
+        and K == V
+        and K >= 128
+        and V >= 128
+        and K % 64 == 0
+        and V % 64 == 0
+    )
+
+
+def _can_use_direct_mixed_state_dqkwg(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor | None,
+    g_gamma: torch.Tensor | None,
+    initial_state: torch.Tensor | None,
+    do: torch.Tensor,
+    dht: torch.Tensor | None,
+    state_v_first: bool,
+    cu_seqlens: torch.LongTensor | None,
+    chunk_size: int,
+    chunk_indices: torch.LongTensor | None,
+) -> bool:
+    return _can_use_shadow_state_dqkwg(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        g_gamma=g_gamma,
+        initial_state=initial_state,
+        do=do,
+        dht=dht,
+        state_v_first=state_v_first,
+        cu_seqlens=cu_seqlens,
+        chunk_size=chunk_size,
+        chunk_indices=chunk_indices,
+    )
+
+
+def _can_use_v_first_direct_state_dqkwg(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor | None,
+    g_gamma: torch.Tensor | None,
+    initial_state: torch.Tensor | None,
+    do: torch.Tensor,
+    dht: torch.Tensor | None,
+    state_v_first: bool,
+    cu_seqlens: torch.LongTensor | None,
+    chunk_size: int,
+    chunk_indices: torch.LongTensor | None,
+) -> bool:
+    K = k.shape[-1]
+    V = v.shape[-1]
+    return (
+        _can_use_shadow_state_dqkwg(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            g_gamma=g_gamma,
+            initial_state=initial_state,
+            do=do,
+            dht=dht,
+            state_v_first=state_v_first,
+            cu_seqlens=cu_seqlens,
+            chunk_size=chunk_size,
+            chunk_indices=chunk_indices,
+        )
+        and K in (128, 256)
+        and V in (128, 256)
+    )
+
+
+def _can_use_v_first_d256_matured_dqkwg(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor | None,
+    g_gamma: torch.Tensor | None,
+    initial_state: torch.Tensor | None,
+    do: torch.Tensor,
+    dht: torch.Tensor | None,
+    state_v_first: bool,
+    cu_seqlens: torch.LongTensor | None,
+    chunk_size: int,
+    chunk_indices: torch.LongTensor | None,
+) -> bool:
+    K = k.shape[-1]
+    V = v.shape[-1]
+    if not q.is_cuda:
+        return False
+    device_index = q.device.index if q.device.index is not None else torch.cuda.current_device()
+    return (
+        check_shared_mem('hopper', device_index)
+        and _can_use_shadow_state_dqkwg(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            g_gamma=g_gamma,
+            initial_state=initial_state,
+            do=do,
+            dht=dht,
+            state_v_first=state_v_first,
+            cu_seqlens=cu_seqlens,
+            chunk_size=chunk_size,
+            chunk_indices=chunk_indices,
+        )
+        and K == 256
+        and V == 256
+    )
+
+
+def _can_use_dh_shadow_state_dqkwg(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor | None,
+    g_gamma: torch.Tensor | None,
+    initial_state: torch.Tensor | None,
+    do: torch.Tensor,
+    dht: torch.Tensor | None,
+    state_v_first: bool,
+    cu_seqlens: torch.LongTensor | None,
+    chunk_size: int,
+    chunk_indices: torch.LongTensor | None,
+) -> bool:
+    return _can_use_shadow_state_dqkwg(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        g_gamma=g_gamma,
+        initial_state=initial_state,
+        do=do,
+        dht=dht,
+        state_v_first=state_v_first,
+        cu_seqlens=cu_seqlens,
+        chunk_size=chunk_size,
+        chunk_indices=chunk_indices,
+    )
+
+
+def _can_use_dh_shadow_terminal_dot_dqkwg(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor | None,
+    g_gamma: torch.Tensor | None,
+    initial_state: torch.Tensor | None,
+    do: torch.Tensor,
+    dht: torch.Tensor | None,
+    state_v_first: bool,
+    cu_seqlens: torch.LongTensor | None,
+    chunk_size: int,
+    chunk_indices: torch.LongTensor | None,
+) -> bool:
+    return _can_use_shadow_state_dqkwg(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        g_gamma=g_gamma,
+        initial_state=initial_state,
+        do=do,
+        dht=dht,
+        state_v_first=state_v_first,
+        cu_seqlens=cu_seqlens,
+        chunk_size=chunk_size,
+        chunk_indices=chunk_indices,
+    )
 
 
 def chunk_simple_gla_fwd(
@@ -74,7 +283,103 @@ def chunk_simple_gla_bwd(
     chunk_indices: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     # (SY 09/22) states_in_fp32 seems not affecting the error of dg but for safety, set to True
-    h, _ = chunk_fwd_h(
+    use_v_first_d256_matured = _can_use_v_first_d256_matured_dqkwg(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        g_gamma=g_gamma,
+        initial_state=initial_state,
+        do=do,
+        dht=dht,
+        state_v_first=state_v_first,
+        cu_seqlens=cu_seqlens,
+        chunk_size=chunk_size,
+        chunk_indices=chunk_indices,
+    )
+    use_v_first_direct_state = _can_use_v_first_direct_state_dqkwg(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        g_gamma=g_gamma,
+        initial_state=initial_state,
+        do=do,
+        dht=dht,
+        state_v_first=state_v_first,
+        cu_seqlens=cu_seqlens,
+        chunk_size=chunk_size,
+        chunk_indices=chunk_indices,
+    ) and not use_v_first_d256_matured
+    use_dh_shadow_terminal_dot = _can_use_dh_shadow_terminal_dot_dqkwg(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        g_gamma=g_gamma,
+        initial_state=initial_state,
+        do=do,
+        dht=dht,
+        state_v_first=state_v_first,
+        cu_seqlens=cu_seqlens,
+        chunk_size=chunk_size,
+        chunk_indices=chunk_indices,
+    ) and not use_v_first_d256_matured and not use_v_first_direct_state
+    use_dh_shadow_state = _can_use_dh_shadow_state_dqkwg(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        g_gamma=g_gamma,
+        initial_state=initial_state,
+        do=do,
+        dht=dht,
+        state_v_first=state_v_first,
+        cu_seqlens=cu_seqlens,
+        chunk_size=chunk_size,
+        chunk_indices=chunk_indices,
+    ) and not use_v_first_d256_matured and not use_v_first_direct_state and not use_dh_shadow_terminal_dot
+    use_direct_mixed_state = _can_use_direct_mixed_state_dqkwg(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        g_gamma=g_gamma,
+        initial_state=initial_state,
+        do=do,
+        dht=dht,
+        state_v_first=state_v_first,
+        cu_seqlens=cu_seqlens,
+        chunk_size=chunk_size,
+        chunk_indices=chunk_indices,
+    ) and (
+        not use_v_first_d256_matured
+        and not use_v_first_direct_state
+        and not use_dh_shadow_terminal_dot
+        and not use_dh_shadow_state
+    )
+    use_shadow_state = _can_use_shadow_state_dqkwg(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        g_gamma=g_gamma,
+        initial_state=initial_state,
+        do=do,
+        dht=dht,
+        state_v_first=state_v_first,
+        cu_seqlens=cu_seqlens,
+        chunk_size=chunk_size,
+        chunk_indices=chunk_indices,
+    ) and (
+        not use_v_first_d256_matured
+        and not use_v_first_direct_state
+        and not use_dh_shadow_terminal_dot
+        and not use_dh_shadow_state
+        and not use_direct_mixed_state
+    )
+    internal_state_v_first = state_v_first or use_v_first_d256_matured or use_v_first_direct_state
+    h_result = chunk_fwd_h(
         k=k,
         v=v,
         g=g,
@@ -86,9 +391,15 @@ def chunk_simple_gla_bwd(
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         states_in_fp32=True,
-        state_v_first=state_v_first,
+        state_v_first=internal_state_v_first,
+        output_mma_state=use_shadow_state,
     )
-    dh, dh0 = chunk_bwd_dh(
+    if use_shadow_state:
+        h, _, h_mma = h_result
+    else:
+        h, _ = h_result
+
+    dh_result = chunk_bwd_dh(
         q=q,
         k=k,
         v=v,
@@ -103,36 +414,153 @@ def chunk_simple_gla_bwd(
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         states_in_fp32=True,
-        state_v_first=state_v_first,
+        state_v_first=internal_state_v_first,
+        output_mma_state=use_shadow_state or use_dh_shadow_state or use_dh_shadow_terminal_dot,
+        h_for_hdh=h if (use_shadow_state or use_dh_shadow_state) else None,
     )
-    dq, dk, _, dg = chunk_bwd_dqkwg(
-        q=q,
-        k=k,
-        v=v,
-        g=g,
-        g_gamma=g_gamma,
-        h=h,
-        do=do,
-        dh=dh,
-        scale=scale,
-        cu_seqlens=cu_seqlens,
-        chunk_size=chunk_size,
-        chunk_indices=chunk_indices,
-        state_v_first=state_v_first,
-    )
-    dv = chunk_bwd_dv(
-        q=q,
-        k=k,
-        g=g,
-        g_gamma=g_gamma,
-        do=do,
-        dh=dh,
-        scale=scale,
-        cu_seqlens=cu_seqlens,
-        chunk_size=chunk_size,
-        chunk_indices=chunk_indices,
-        state_v_first=state_v_first,
-    )
+    if use_shadow_state or use_dh_shadow_state:
+        dh, dh0, dh_mma, hdh_last = dh_result
+    elif use_dh_shadow_terminal_dot:
+        dh, dh0, dh_mma = dh_result
+    else:
+        dh, dh0 = dh_result
+
+    if use_v_first_d256_matured:
+        from fla.ops.common.backends.tilelang.chunk_bwd import (
+            chunk_bwd_dqkwg_tilelang_k_inner_v_first_d256,
+        )
+        dq, dk, _, dg = chunk_bwd_dqkwg_tilelang_k_inner_v_first_d256(
+            q=q,
+            k=k,
+            v=v,
+            do=do,
+            h=h,
+            dh=dh,
+            g=g,
+            scale=scale,
+            chunk_size=chunk_size,
+        )
+    elif use_v_first_direct_state:
+        from fla.ops.common.backends.tilelang.chunk_bwd import (
+            chunk_bwd_dqkwg_tilelang_k_inner_v_first,
+        )
+        dq, dk, _, dg = chunk_bwd_dqkwg_tilelang_k_inner_v_first(
+            q=q,
+            k=k,
+            v=v,
+            do=do,
+            h=h,
+            dh=dh,
+            g=g,
+            scale=scale,
+            chunk_size=chunk_size,
+        )
+    elif use_dh_shadow_terminal_dot:
+        from fla.ops.common.backends.tilelang.chunk_bwd import (
+            chunk_bwd_dqkwg_tilelang_k_inner_dh_shadow_terminal_dot,
+        )
+        dq, dk, _, dg = chunk_bwd_dqkwg_tilelang_k_inner_dh_shadow_terminal_dot(
+            q=q,
+            k=k,
+            v=v,
+            do=do,
+            h=h,
+            dh=dh,
+            dh_mma=dh_mma,
+            g=g,
+            scale=scale,
+            chunk_size=chunk_size,
+        )
+    elif use_dh_shadow_state:
+        from fla.ops.common.backends.tilelang.chunk_bwd import (
+            chunk_bwd_dqkwg_tilelang_k_inner_dh_shadow,
+        )
+        dq, dk, _, dg = chunk_bwd_dqkwg_tilelang_k_inner_dh_shadow(
+            q=q,
+            k=k,
+            v=v,
+            do=do,
+            h=h,
+            dh_mma=dh_mma,
+            hdh_last=hdh_last,
+            g=g,
+            scale=scale,
+            chunk_size=chunk_size,
+        )
+    elif use_shadow_state:
+        from fla.ops.common.backends.tilelang.chunk_bwd import (
+            chunk_bwd_dqkwg_tilelang_k_inner_shadow_state,
+        )
+        dq, dk, _, dg = chunk_bwd_dqkwg_tilelang_k_inner_shadow_state(
+            q=q,
+            k=k,
+            v=v,
+            do=do,
+            h_mma=h_mma,
+            dh_mma=dh_mma,
+            hdh_last=hdh_last,
+            g=g,
+            scale=scale,
+            chunk_size=chunk_size,
+        )
+    elif use_direct_mixed_state:
+        from fla.ops.common.backends.tilelang.chunk_bwd import (
+            chunk_bwd_dqkwg_tilelang_k_inner,
+        )
+        dq, dk, _, dg = chunk_bwd_dqkwg_tilelang_k_inner(
+            q=q,
+            k=k,
+            v=v,
+            do=do,
+            h=h,
+            dh=dh,
+            g=g,
+            scale=scale,
+            chunk_size=chunk_size,
+        )
+    else:
+        dq, dk, _, dg = chunk_bwd_dqkwg(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            g_gamma=g_gamma,
+            h=h,
+            do=do,
+            dh=dh,
+            scale=scale,
+            cu_seqlens=cu_seqlens,
+            chunk_size=chunk_size,
+            chunk_indices=chunk_indices,
+            state_v_first=state_v_first,
+        )
+    if use_v_first_d256_matured:
+        from fla.ops.common.backends.tilelang.chunk_bwd import (
+            chunk_bwd_dv_tilelang_v_first_d256,
+        )
+        dv = chunk_bwd_dv_tilelang_v_first_d256(
+            q=q,
+            k=k,
+            g=g,
+            do=do,
+            dh=dh,
+            scale=scale,
+            chunk_size=chunk_size,
+        )
+    else:
+        dv = chunk_bwd_dv(
+            q=q,
+            k=k,
+            g=g,
+            g_gamma=g_gamma,
+            do=do,
+            dh=dh,
+            scale=scale,
+            cu_seqlens=cu_seqlens,
+            chunk_size=chunk_size,
+            chunk_indices=chunk_indices,
+            state_v_first=internal_state_v_first,
+        )
     return dq, dk, dv, dg, dh0
 
 
