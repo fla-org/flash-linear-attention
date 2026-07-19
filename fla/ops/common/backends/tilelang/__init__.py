@@ -65,15 +65,25 @@ class TileLangBackend(BaseBackend):
             return False, "TileLang backend only supports gated case (g != None)"
         if g_gamma is not None:
             return False, "TileLang backend does not support g_gamma"
+        if q.dtype not in (torch.float16, torch.bfloat16):
+            return False, f"TileLang backend only supports fp16/bf16 model tensors, got {q.dtype}"
+        if chunk_size != 64:
+            return False, f"TileLang backend requires chunk_size == 64, got {chunk_size}"
+        if state_v_first:
+            return False, "TileLang backend does not support state_v_first"
         if v.shape[2] % k.shape[2] != 0:
             return False, (
                 f"TileLang backend requires num_v_heads (HV={v.shape[2]}) to be divisible by "
                 f"num_qk_heads (H={k.shape[2]}); HV % H must be 0 for GVA"
             )
-        if h.dtype != q.dtype:
+        if h.dtype != dh.dtype:
             return False, (
-                f"TileLang backend requires h.dtype == q.dtype (got h={h.dtype}, q={q.dtype}); "
-                "e.g. simple_gla's bwd keeps h/dh in fp32 for h·dh reduction precision"
+                f"TileLang backend requires h.dtype == dh.dtype (got h={h.dtype}, dh={dh.dtype})"
+            )
+        if h.dtype not in (q.dtype, torch.float32):
+            return False, (
+                f"TileLang backend requires h/dh dtype to be q.dtype or fp32 "
+                f"(got h={h.dtype}, q={q.dtype})"
             )
         return True, None
 
