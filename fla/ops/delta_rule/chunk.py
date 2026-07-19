@@ -5,14 +5,101 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import os
+
 import torch
 
 from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_gated_delta_rule_fwd_h
+from fla.ops.common.backends.tilelang import TileLangBackend
 from fla.ops.common.chunk_o import chunk_bwd_dqkwg, chunk_bwd_dv_local, chunk_fwd_o
+from fla.ops.delta_rule.backends.tilelang import chunk_delta_rule_wy_dqkw_fused_tilelang
+from fla.ops.delta_rule.backends.triton import chunk_delta_rule_wy_dqkw_fused_triton
 from fla.ops.delta_rule.wy_fast import prepare_wy_repr_bwd, prepare_wy_repr_fwd, recompute_w_u_fwd
 from fla.ops.utils.index import prepare_chunk_indices
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
+
+
+def _can_use_fused_wy_dqkw(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    beta: torch.Tensor,
+    A: torch.Tensor,
+    h: torch.Tensor,
+    dh: torch.Tensor,
+    do: torch.Tensor,
+    dv: torch.Tensor,
+    initial_state: torch.Tensor | None,
+    dht: torch.Tensor | None,
+    cu_seqlens: torch.LongTensor | None,
+    chunk_indices: torch.LongTensor | None,
+    chunk_size: int,
+) -> bool:
+    return (
+        os.environ.get("FLA_DELTA_RULE_FUSED_WY", "1") != "0"
+        and os.environ.get("FLA_TILELANG") == "1"
+        and q.is_cuda
+        and cu_seqlens is None
+        and chunk_indices is None
+        and initial_state is None
+        and dht is None
+        and chunk_size == 64
+        and q.dtype in (torch.float16, torch.bfloat16)
+        and q.dtype == k.dtype == v.dtype == beta.dtype == do.dtype == dv.dtype
+        and h.dtype == dh.dtype == q.dtype
+        and q.shape == k.shape
+        and v.shape == do.shape == dv.shape
+        and q.shape[2] == v.shape[2]
+        and q.shape[-1] == v.shape[-1]
+        and q.shape[-1] == 256
+        and q.shape[1] % 64 == 0
+        and A.shape[-1] == 64
+    )
+
+
+def _can_use_tilelang_wy_dqkw_fused(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    beta: torch.Tensor,
+    A: torch.Tensor,
+    h: torch.Tensor,
+    dh: torch.Tensor,
+    do: torch.Tensor,
+    dv: torch.Tensor,
+    initial_state: torch.Tensor | None,
+    dht: torch.Tensor | None,
+    cu_seqlens: torch.LongTensor | None,
+    chunk_indices: torch.LongTensor | None,
+    chunk_size: int,
+) -> bool:
+    if not (
+        os.environ.get("FLA_DELTA_RULE_FUSED_WY", "1") != "0"
+        and os.environ.get("FLA_DELTA_RULE_TILELANG_WY", "1") != "0"
+        and TileLangBackend.is_available()
+        and TileLangBackend.is_enabled()
+        and q.is_cuda
+        and cu_seqlens is None
+        and chunk_indices is None
+        and initial_state is None
+        and dht is None
+        and chunk_size == 64
+        and q.dtype in (torch.float16, torch.bfloat16)
+        and q.dtype == k.dtype == v.dtype == beta.dtype == do.dtype == dv.dtype
+        and h.dtype == dh.dtype == q.dtype
+        and q.shape == k.shape
+        and v.shape == do.shape == dv.shape
+        and q.shape[2] == v.shape[2]
+        and q.shape[-1] == v.shape[-1]
+        and q.shape[1] % 64 == 0
+        and A.shape[-1] == 64
+    ):
+        return False
+    head_dim = q.shape[-1]
+    if head_dim == 128:
+        return True
+    return head_dim == 256 and os.environ.get("FLA_DELTA_RULE_TILELANG_WY_D256", "0") == "1"
 
 
 def chunk_delta_rule_fwd(
@@ -119,6 +206,68 @@ def chunk_delta_rule_bwd(
         chunk_indices=chunk_indices,
         chunk_size=chunk_size,
     )
+    if _can_use_tilelang_wy_dqkw_fused(
+        q=q,
+        k=k,
+        v=v,
+        beta=beta,
+        A=A,
+        h=h,
+        dh=dh,
+        do=do,
+        dv=dv,
+        initial_state=initial_state,
+        dht=dht,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        chunk_size=chunk_size,
+    ):
+        dq, dk, dv, db = chunk_delta_rule_wy_dqkw_fused_tilelang(
+            q=q,
+            k=k,
+            v=v,
+            v_new=v_new,
+            beta=beta,
+            A=A,
+            h=h,
+            do=do,
+            dh=dh,
+            dv=dv,
+            scale=scale,
+            chunk_size=chunk_size,
+        )
+        return dq, dk, dv, db, dh0
+    if _can_use_fused_wy_dqkw(
+        q=q,
+        k=k,
+        v=v,
+        beta=beta,
+        A=A,
+        h=h,
+        dh=dh,
+        do=do,
+        dv=dv,
+        initial_state=initial_state,
+        dht=dht,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        chunk_size=chunk_size,
+    ):
+        dq, dk, dv, db = chunk_delta_rule_wy_dqkw_fused_triton(
+            q=q,
+            k=k,
+            v=v,
+            v_new=v_new,
+            beta=beta,
+            A=A,
+            h=h,
+            do=do,
+            dh=dh,
+            dv=dv,
+            scale=scale,
+            chunk_size=chunk_size,
+        )
+        return dq, dk, dv, db, dh0
     dq, dk, dw, _ = chunk_bwd_dqkwg(
         q=q,
         k=k,
