@@ -16,13 +16,12 @@ import triton
 import triton.language as tl
 from einops import reduce
 
-from fla.ops.attn.parallel import parallel_attn_bwd_preprocess
 from fla.ops.backends import dispatch
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.cumsum import chunk_global_cumsum
 from fla.ops.utils.op import exp2, log2
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, check_shared_mem, contiguous
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, check_shared_mem, contiguous
 
 _DEBUG_ASSERTS = os.environ.get("WALL_ATTN_DEBUG", "0") == "1"
 
@@ -47,9 +46,45 @@ WALL_BWD_AUTOTUNE_CONFIGS = [
 ]
 
 
+def _prune_wall_fwd_configs(configs, nargs, **kwargs):
+    # The per-program fp32 accumulator tile is BT x BV. At the Hopper BV cap of
+    # 256, BT=128 configs hold a 128x256 fp32 accumulator (128 KiB), spill
+    # registers massively, can never win the benchmark, and each take minutes to
+    # compile under IEEE fp32 dots (TRITON_F32_DEFAULT=ieee in the test suite),
+    # which reads as a multi-minute stall per autotune key. Drop configs that
+    # exceed the tile budget; BV <= 128 keeps the full sweep. BV never exceeds
+    # the fwd cap (256), so BT=64 always survives and the pruned set is non-empty.
+    nargs = {**(nargs or {}), **kwargs}  # keyword launches leave nargs empty
+    BV = nargs.get('BV') or 128
+    return [c for c in configs if c.kwargs['BT'] * BV <= 16384]
+
+
+@triton.jit(do_not_specialize=['N'])
+def parallel_wall_attn_bwd_kernel_preprocess(
+    o,
+    do,
+    delta,
+    N,
+    V: tl.constexpr,
+    BV: tl.constexpr,
+):
+    i_nv = tl.program_id(0).to(tl.int64)
+    i_v, i_n = i_nv // N, i_nv % N
+    o_v = i_v * BV + tl.arange(0, BV)
+    m_v = o_v < V
+
+    b_o = tl.load(o + i_n * V + o_v, mask=m_v, other=0.).to(tl.float32)
+    b_do = tl.load(do + i_n * V + o_v, mask=m_v, other=0.).to(tl.float32)
+    b_delta = tl.sum(b_o * b_do)
+
+    tl.store(delta + i_v * N + i_n, b_delta)
+
+
 @triton.autotune(
     configs=WALL_FWD_AUTOTUNE_CONFIGS,
-    key=['T', 'K', 'V', 'HQ', 'H'],
+    key=['T_BUCKET', 'K', 'V', 'HQ', 'H'],
+    prune_configs_by={'early_config_prune': _prune_wall_fwd_configs},
+    **autotune_cache_kwargs,
 )
 @triton.heuristics({
     'USE_SINK_BIAS': lambda args: args['sink_bias'] is not None,
@@ -57,7 +92,7 @@ WALL_BWD_AUTOTUNE_CONFIGS = [
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
     'USE_SCALAR_G': lambda args: args['g_scalar_cumsum'] is not None,
 })
-@triton.jit
+@triton.jit(do_not_specialize=['T', 'T_BUCKET'])
 def parallel_wall_attn_fwd_kernel(
     q,
     k,
@@ -71,6 +106,7 @@ def parallel_wall_attn_fwd_kernel(
     cu_seqlens,
     chunk_indices,
     T,
+    T_BUCKET,
     W: tl.constexpr,
     B: tl.constexpr,
     H: tl.constexpr,
@@ -211,19 +247,21 @@ def parallel_wall_attn_fwd_kernel(
     b_o = b_o / b_acc[:, None]
     b_m += log2(b_acc)
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_lse, b_m.to(p_lse.dtype.element_ty), boundary_check=(0,))
+    if i_v == 0:
+        tl.store(p_lse, b_m.to(p_lse.dtype.element_ty), boundary_check=(0,))
 
 
 @triton.autotune(
     configs=WALL_BWD_AUTOTUNE_CONFIGS,
-    key=['T', 'K', 'V', 'HQ', 'H'],
+    key=['T_BUCKET', 'K', 'V', 'HQ', 'H'],
+    **autotune_cache_kwargs,
 )
 @triton.heuristics({
     'USE_WINDOW': lambda args: args['W'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
     'USE_SCALAR_G': lambda args: args['g_scalar_cumsum'] is not None,
 })
-@triton.jit(do_not_specialize=['T'])
+@triton.jit(do_not_specialize=['T', 'T_BUCKET'])
 def parallel_wall_attn_bwd_kernel_dq(
     q,
     k,
@@ -240,6 +278,7 @@ def parallel_wall_attn_bwd_kernel_dq(
     cu_seqlens,
     chunk_indices,
     T,
+    T_BUCKET,
     W: tl.constexpr,
     B: tl.constexpr,
     H: tl.constexpr,
@@ -258,6 +297,13 @@ def parallel_wall_attn_bwd_kernel_dq(
     i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
     i_h = i_hq // G
+
+    i_v64 = i_v.to(tl.int64)
+    delta += i_v64 * B * T * HQ
+    dq += i_v64 * B * T * HQ * K
+    dg_cumsum += i_v64 * B * T * HQ * K
+    if USE_SCALAR_G:
+        dg_scalar_cumsum += i_v64 * B * T * HQ
 
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
@@ -284,7 +330,7 @@ def parallel_wall_attn_bwd_kernel_dq(
     # Off-diagonal q_til (bf16 tensor cores, exp2 <= 1).
     b_q_til = (b_q.to(tl.float32) * exp2(b_pq - b_R)).to(b_q.dtype)
 
-    b_do = tl.load(p_do, boundary_check=(0, 1))
+    b_do = tl.load(p_do, boundary_check=(0, 1), padding_option="zero")
     b_lse = tl.load(p_lse, boundary_check=(0,))
     b_delta = tl.load(p_delta, boundary_check=(0,))
 
@@ -308,7 +354,7 @@ def parallel_wall_attn_bwd_kernel_dq(
         m_k = o_k < T
         b_k = tl.load(p_k, boundary_check=(0, 1))
         b_pk = tl.load(p_pk, boundary_check=(0, 1)).to(tl.float32)
-        b_v = tl.load(p_v, boundary_check=(0, 1))
+        b_v = tl.load(p_v, boundary_check=(0, 1), padding_option="zero")
         b_k_til = (b_k.to(tl.float32) * exp2(b_R_t - b_pk)).to(b_k.dtype)
         b_s = tl.dot(b_q_til, b_k_til) * scale * RCP_LN2
 
@@ -342,7 +388,7 @@ def parallel_wall_attn_bwd_kernel_dq(
         m_k = o_k < T
         b_k = tl.load(p_k, boundary_check=(0, 1))
         b_pk = tl.load(p_pk, boundary_check=(0, 1)).to(tl.float32)
-        b_v = tl.load(p_v, boundary_check=(0, 1))
+        b_v = tl.load(p_v, boundary_check=(0, 1), padding_option="zero")
 
         # Local-ref k_til: exp2 arg bounded by BS positions <= 110 (fp32-safe with BK dot).
         b_exp_k = b_R_local_t - b_pk
@@ -389,14 +435,15 @@ def parallel_wall_attn_bwd_kernel_dq(
 
 @triton.autotune(
     configs=WALL_BWD_AUTOTUNE_CONFIGS,
-    key=['T', 'K', 'V', 'HQ', 'H'],
+    key=['T_BUCKET', 'K', 'V', 'HQ', 'H'],
+    **autotune_cache_kwargs,
 )
 @triton.heuristics({
     'USE_WINDOW': lambda args: args['W'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
     'USE_SCALAR_G': lambda args: args['g_scalar_cumsum'] is not None,
 })
-@triton.jit(do_not_specialize=['T'])
+@triton.jit(do_not_specialize=['T', 'T_BUCKET'])
 def parallel_wall_attn_bwd_kernel_dkv(
     q,
     k,
@@ -414,6 +461,7 @@ def parallel_wall_attn_bwd_kernel_dkv(
     chunk_indices,
     scale,
     T,
+    T_BUCKET,
     W: tl.constexpr,
     B: tl.constexpr,
     H: tl.constexpr,
@@ -433,6 +481,13 @@ def parallel_wall_attn_bwd_kernel_dkv(
     i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
     i_h = i_hq // G
+
+    i_v64 = i_v.to(tl.int64)
+    delta += i_v64 * B * T * HQ
+    dk += i_v64 * B * T * HQ * K
+    dg_cumsum += i_v64 * B * T * HQ * K
+    if USE_SCALAR_G:
+        dg_scalar_cumsum += i_v64 * B * T * HQ
 
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
@@ -454,7 +509,7 @@ def parallel_wall_attn_bwd_kernel_dkv(
     b_k = tl.load(p_k, boundary_check=(0, 1))
     b_pk = tl.load(p_pk, boundary_check=(0, 1)).to(tl.float32)
     b_dk = tl.zeros([BT, BK], dtype=tl.float32)
-    b_v = tl.load(p_v, boundary_check=(0, 1))
+    b_v = tl.load(p_v, boundary_check=(0, 1), padding_option="zero")
     b_dv = tl.zeros([BT, BV], dtype=tl.float32)
 
     o_k = i_t * BT + tl.arange(0, BT)
@@ -495,7 +550,7 @@ def parallel_wall_attn_bwd_kernel_dkv(
             # Precise path: fp32 tensor cores.
             b_q_til = b_q.to(tl.float32) * exp2(b_pq - b_Rq_bc_q)
             b_k_til = b_k.to(tl.float32) * b_exp_k_val
-        b_do = tl.load(p_do, boundary_check=(0, 1))
+        b_do = tl.load(p_do, boundary_check=(0, 1), padding_option="zero")
         b_lse = tl.load(p_lse, boundary_check=(0,))
         b_delta = tl.load(p_delta, boundary_check=(0,))
         b_s = tl.dot(b_k_til, tl.trans(b_q_til)) * scale * RCP_LN2
@@ -541,7 +596,7 @@ def parallel_wall_attn_bwd_kernel_dkv(
         b_exp_k_off = b_Rq_bc_k - b_pk
         b_exp_k_off_val = exp2(b_exp_k_off)  # CSE: reused for k_til and final dk scaling
         b_k_til = (b_k.to(tl.float32) * b_exp_k_off_val).to(b_k.dtype)
-        b_do = tl.load(p_do, boundary_check=(0, 1))
+        b_do = tl.load(p_do, boundary_check=(0, 1), padding_option="zero")
         b_lse = tl.load(p_lse, boundary_check=(0,))
         b_delta = tl.load(p_delta, boundary_check=(0,))
         b_s = tl.dot(b_k_til, tl.trans(b_q_til)) * scale * RCP_LN2
@@ -627,13 +682,15 @@ def parallel_wall_attn_fwd(
             q=q, k=k, v=v, o=o,
             g_cumsum=g_cumsum, g_scalar_cumsum=g_scalar_cumsum, sink_bias=sink_bias,
             lse=lse, scale=scale, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices,
-            B=B, T=T, W=window_size, H=H, HQ=HQ, G=G, K=K, V=V,
+            B=B, T=T, T_BUCKET=1, W=window_size, H=H, HQ=HQ, G=G, K=K, V=V,
             BT=BT, BS=BS, BK=BK, BV=BV, num_warps=num_warps, num_stages=num_stages,
         )
         return o, lse
 
     o = torch.empty(B, T, HQ, V, dtype=v.dtype, device=q.device)
     lse = torch.empty(B, T, HQ, dtype=torch.float, device=q.device)
+    # the bucket selects an autotune config; exact T remains the runtime loop bound
+    T_BUCKET = triton.next_power_of_2(T)
 
     def grid(meta):
         return (NV, triton.cdiv(T, meta['BT']), B * HQ)
@@ -651,6 +708,7 @@ def parallel_wall_attn_fwd(
         chunk_indices=chunk_indices,
         B=B,
         T=T,
+        T_BUCKET=T_BUCKET,
         W=window_size,
         H=H,
         HQ=HQ,
@@ -661,6 +719,26 @@ def parallel_wall_attn_fwd(
         BV=BV,
     )
     return o, lse
+
+
+def parallel_wall_attn_bwd_preprocess(
+    o: torch.Tensor,
+    do: torch.Tensor,
+    BV: int,
+) -> torch.Tensor:
+    V = o.shape[-1]
+    NV = triton.cdiv(V, BV)
+    N = o.numel() // V
+    delta = torch.empty(NV, *o.shape[:-1], dtype=torch.float, device=o.device)
+    parallel_wall_attn_bwd_kernel_preprocess[(NV * N,)](
+        o=o,
+        do=do,
+        delta=delta,
+        N=N,
+        V=V,
+        BV=BV,
+    )
+    return delta
 
 
 @dispatch('attn')
@@ -686,22 +764,25 @@ def parallel_wall_attn_bwd(
     B, T, H, K, V = *k.shape, v.shape[-1]
     HQ = q.shape[2]
     G = HQ // H
-    # dq/dk are reduced over the full value dim in one program (no cross-program accumulation),
-    # so BV must span all of V (NV == 1). Don't cap it here -- the forward can, the backward can't.
     BK = max(triton.next_power_of_2(K), 16)
-    BV = max(triton.next_power_of_2(V), 16)
+    if check_shared_mem('hopper', q.device.index) or check_shared_mem('ampere', q.device.index):
+        BV = min(128, max(triton.next_power_of_2(V), 16))
+    else:
+        BV = min(64, max(triton.next_power_of_2(V), 16))
 
     NV = triton.cdiv(V, BV)
 
     # Varlen: pin BT=128 and bypass the autotuner (BT sweep would invalidate the
     # precomputed chunk map). `extra` injects the fixed launch config via `.fn`.
     is_varlen = cu_seqlens is not None
+    # varlen bypasses autotuning; dense lengths share configs within power-of-two buckets
+    T_BUCKET = 1 if is_varlen else triton.next_power_of_2(T)
     extra = {}
     if is_varlen:
         BT = 128
-        if check_shared_mem('hopper'):
+        if check_shared_mem('hopper', q.device.index):
             BS, num_warps = min(64, max(16, triton.next_power_of_2(T))), 8
-        elif check_shared_mem('ampere'):
+        elif check_shared_mem('ampere', q.device.index):
             BS, num_warps = min(32, max(16, triton.next_power_of_2(T))), 4
         else:
             BS, num_warps = min(32, max(16, triton.next_power_of_2(T))), 2
@@ -714,23 +795,19 @@ def parallel_wall_attn_bwd(
         def grid(meta):
             return (NV, triton.cdiv(T, meta['BT']), B * HQ)
 
-    delta = parallel_attn_bwd_preprocess(o, do)
+    delta = parallel_wall_attn_bwd_preprocess(o, do, BV)
 
-    dq = torch.empty(B, T, HQ, K, dtype=k.dtype if H == HQ else torch.float, device=q.device)
-    dk = torch.empty(B, T, HQ, K, dtype=k.dtype if H == HQ else torch.float, device=q.device)
-    dv = torch.empty(B, T, HQ, V, dtype=v.dtype if H == HQ else torch.float, device=q.device)
+    partial_dtype = k.dtype if NV == 1 and H == HQ else torch.float
+    dq = torch.empty(NV, B, T, HQ, K, dtype=partial_dtype, device=q.device)
     dq_kernel = parallel_wall_attn_bwd_kernel_dq.fn if is_varlen else parallel_wall_attn_bwd_kernel_dq
     dkv_kernel = parallel_wall_attn_bwd_kernel_dkv.fn if is_varlen else parallel_wall_attn_bwd_kernel_dkv
 
-    dg_cumsum = torch.empty(B, T, HQ, K, dtype=torch.float, device=q.device)
-    dg_cumsum_k = torch.empty_like(dg_cumsum)
+    dg_cumsum = torch.empty(NV, B, T, HQ, K, dtype=torch.float, device=q.device)
 
     if g_scalar_cumsum is not None:
-        dg_scalar_cumsum = torch.empty(B, T, HQ, dtype=torch.float, device=q.device)
-        dg_scalar_cumsum_k = torch.empty_like(dg_scalar_cumsum)
+        dg_scalar_cumsum = torch.empty(NV, B, T, HQ, dtype=torch.float, device=q.device)
     else:
         dg_scalar_cumsum = None
-        dg_scalar_cumsum_k = None
 
     dq_kernel[grid](
         q=q,
@@ -748,6 +825,7 @@ def parallel_wall_attn_bwd(
         chunk_indices=chunk_indices,
         scale=scale,
         T=T,
+        T_BUCKET=T_BUCKET,
         W=window_size,
         B=B,
         H=H,
@@ -759,6 +837,26 @@ def parallel_wall_attn_bwd(
         BV=BV,
         **extra,
     )
+    # reduce query-side partials before allocating key-side partials to bound peak temporary memory
+    if NV > 1:
+        dq = dq.sum(0)
+        dg_cumsum = dg_cumsum.sum(0)
+        if g_scalar_cumsum is not None:
+            dg_scalar_cumsum = dg_scalar_cumsum.sum(0)
+    else:
+        dq = dq[0]
+        dg_cumsum = dg_cumsum[0]
+        if g_scalar_cumsum is not None:
+            dg_scalar_cumsum = dg_scalar_cumsum[0]
+
+    dk = torch.empty(NV, B, T, HQ, K, dtype=partial_dtype, device=q.device)
+    dv = torch.empty(B, T, HQ, V, dtype=v.dtype if H == HQ else torch.float, device=q.device)
+    dg_cumsum_k = torch.empty(NV, B, T, HQ, K, dtype=torch.float, device=q.device)
+    if g_scalar_cumsum is not None:
+        dg_scalar_cumsum_k = torch.empty(NV, B, T, HQ, dtype=torch.float, device=q.device)
+    else:
+        dg_scalar_cumsum_k = None
+
     dkv_kernel[grid](
         q=q,
         k=k,
@@ -776,6 +874,7 @@ def parallel_wall_attn_bwd(
         chunk_indices=chunk_indices,
         scale=scale,
         T=T,
+        T_BUCKET=T_BUCKET,
         W=window_size,
         B=B,
         H=H,
@@ -788,6 +887,17 @@ def parallel_wall_attn_bwd(
         DIAG_BF16=_DKV_DIAG_BF16,
         **extra,
     )
+    if NV > 1:
+        dk = dk.sum(0)
+        dg_cumsum_k = dg_cumsum_k.sum(0)
+        if g_scalar_cumsum is not None:
+            dg_scalar_cumsum_k = dg_scalar_cumsum_k.sum(0)
+    else:
+        dk = dk[0]
+        dg_cumsum_k = dg_cumsum_k[0]
+        if g_scalar_cumsum is not None:
+            dg_scalar_cumsum_k = dg_scalar_cumsum_k[0]
+
     dk = reduce(dk, 'b t (h g) k -> b t h k', g=G, reduction='sum')
     dv = reduce(dv, 'b t (h g) v -> b t h v', g=G, reduction='sum')
     dg_cumsum.add_(dg_cumsum_k)
@@ -798,7 +908,8 @@ def parallel_wall_attn_bwd(
     dsink_bias = None
     if sink_bias is not None:
         p_sink_bias = torch.exp2(sink_bias[None, None, :] - lse)
-        dsink_bias = -(p_sink_bias * delta).sum((0, 1))
+        delta_total = delta.sum(0) if NV > 1 else delta[0]
+        dsink_bias = -(p_sink_bias * delta_total).sum((0, 1))
 
     return dq, dk, dv, dg_cumsum, dsink_bias, dg_scalar_cumsum
 
