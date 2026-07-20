@@ -112,3 +112,13 @@ jobs:
             tests/ops/test_gdn_kernels.py \
             tests/ops/test_gdn.py \
             tests/ops/test_kda.py
+
+      - name: Benchmark chunk_gdn and chunk_kda
+        shell: bash
+        env:
+          FLA_BENCH_WARMUP_MS: "25"
+          FLA_BENCH_REP_MS: "100"
+          FLA_BENCH_OP_WARMUP_ITERS: "3"
+        run: |
+          source /usr/local/Ascend/ascend-toolkit/set_env.sh
+          python -m benchmarks.ops.run --op chunk_gdn chunk_kda --base ''
