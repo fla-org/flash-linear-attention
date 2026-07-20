@@ -97,7 +97,7 @@ def _build_rwkv6_fwd_intra_kernel(
                             ku_diag_shared[i, k_i] = (
                                 T.cast(k[i_b, q_s + i, i_h, k_idx], accum_dtype) *
                                 T.cast(u[i_h, k_idx], accum_dtype)
-                        )
+                            )
                         T.gemm(q_diag_frag, ku_diag_shared, diag_acc, transpose_B=True)
 
                 if i_i == i_j:
