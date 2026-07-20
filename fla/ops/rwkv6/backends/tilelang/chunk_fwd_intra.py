@@ -68,6 +68,7 @@ def _build_rwkv6_fwd_intra_kernel(
             acc = T.alloc_fragment((_BC, _BC), accum_dtype)
             diag_acc = T.alloc_fragment((_BC, _BC), accum_dtype)
             diag_shared = T.alloc_shared((_BC, _BC), accum_dtype)
+            gn_frag = T.alloc_fragment((_K,), accum_dtype)
             T.clear(acc)
             T.clear(diag_acc)
 
@@ -75,18 +76,25 @@ def _build_rwkv6_fwd_intra_kernel(
                 for i, j in T.Parallel(_BC, _BC):
                     A[i_b, q_s + i, i_h, i_j * _BC + j] = 0.0
             else:
+                # Block-local reference for the decay exponents. gi/ge are sequence-global
+                # cumulative log2 decays, so raw exp2(ge) / exp2(-gi) overflow or underflow
+                # fp32 on long sequences. Any finite center cancels in the product and keeps
+                # both factors bounded by the intra-chunk decay range.
+                gn_pos = T.if_then_else(t_s + i_i * _BC > 0, t_s + i_i * _BC - 1, 0)
+                for k_i in T.Parallel(_K):
+                    gn_frag[k_i] = gi[i_b, gn_pos, i_h, k_i]
                 for k_blk in T.Pipelined(T.ceildiv(_K, _BK), num_stages=2):
                     for i, k_i in T.Parallel(_BC, _BK):
                         k_idx = k_blk * _BK + k_i
                         q_frag[i, k_i] = (
                             T.cast(q[i_b, q_s + i, i_h, k_idx], accum_dtype) *
-                            T.exp2(ge[i_b, q_s + i, i_h, k_idx]) * scale
+                            T.exp2(ge[i_b, q_s + i, i_h, k_idx] - gn_frag[k_idx]) * scale
                         )
                     for j, k_i in T.Parallel(_BC, _BK):
                         k_idx = k_blk * _BK + k_i
                         k_shared[j, k_i] = (
                             T.cast(k[i_b, k_s + j, i_h, k_idx], accum_dtype) *
-                            T.exp2(-gi[i_b, k_s + j, i_h, k_idx])
+                            T.exp2(gn_frag[k_idx] - gi[i_b, k_s + j, i_h, k_idx])
                         )
                     T.gemm(q_frag, k_shared, acc, transpose_B=True)
 
