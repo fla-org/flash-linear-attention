@@ -36,7 +36,7 @@ def _verify_subchunk_aligned(args, kwargs):
 
 
 class TritonAscendKDABackend(BaseBackend):
-    """Ascend NPU backend for KDA chunk intra and WY-representation kernels."""
+    """Ascend NPU backend for KDA gate, intra, WY, and backward kernels."""
 
     backend_type = "triton_ascend"
     package_name = None
@@ -54,6 +54,15 @@ class TritonAscendKDABackend(BaseBackend):
     def chunk_kda_fwd_intra(self, *args, **kwargs):
         from fla.ops.kda.backends.triton_ascend.chunk_intra import chunk_kda_fwd_intra_npu
         return chunk_kda_fwd_intra_npu(*args, **kwargs)
+
+    def chunk_kda_fwd_intra_token_parallel_verifier(self, *args, **kwargs):
+        return _verify_intra_chunk_size(args, kwargs)
+
+    def chunk_kda_fwd_intra_token_parallel(self, *args, **kwargs):
+        from fla.ops.kda.backends.triton_ascend.chunk_intra_token_parallel import (
+            chunk_kda_fwd_intra_token_parallel_npu,
+        )
+        return chunk_kda_fwd_intra_token_parallel_npu(*args, **kwargs)
 
     def recompute_w_u_fwd_verifier(self, *args, **kwargs):
         return True, None

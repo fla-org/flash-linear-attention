@@ -11,6 +11,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.backends import dispatch
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.op import exp2
 from fla.utils import autotune_cache_kwargs
@@ -122,6 +123,7 @@ def chunk_kda_fwd_kernel_intra_token_parallel(
         tl.store(Akk + i_t * HV * BC + o_hv * BC + j - i_ts, b_Akk.to(Akk.dtype.element_ty), mask=m_hv)
 
 
+@dispatch('kda')
 def chunk_kda_fwd_intra_token_parallel(
     q: torch.Tensor,
     k: torch.Tensor,
