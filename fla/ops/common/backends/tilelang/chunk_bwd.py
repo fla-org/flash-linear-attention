@@ -15,7 +15,6 @@ import triton
 from fla.ops.utils import prepare_chunk_indices
 from fla.utils import check_shared_mem
 
-
 _CUDA126_FP8_E8M0_STUB = Path(__file__).with_name("cuda126_fp8_e8m0_stub.cuh")
 _TILELANG_COMPILE_FLAGS = ["-include", str(_CUDA126_FP8_E8M0_STUB)]
 

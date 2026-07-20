@@ -18,8 +18,6 @@ from pathlib import Path
 import tilelang
 import tilelang.language as T
 import torch
-import triton
-
 
 _COMMON_TILELANG_DIR = Path(__file__).parents[3] / "common" / "backends" / "tilelang"
 _CUDA126_FP8_E8M0_STUB = _COMMON_TILELANG_DIR / "cuda126_fp8_e8m0_stub.cuh"

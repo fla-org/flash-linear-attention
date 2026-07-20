@@ -2,6 +2,8 @@
 #
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 from pathlib import Path
 
@@ -9,7 +11,6 @@ import tilelang
 import tilelang.language as T
 import torch
 import triton
-
 
 _CUDA126_FP8_E8M0_STUB = (
     Path(__file__).parents[3]
