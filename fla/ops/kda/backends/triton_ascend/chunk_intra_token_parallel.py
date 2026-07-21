@@ -5,32 +5,49 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-# Token-parallel implementation of KDA intra chunk kernel
+"""KDA chunk intra token-parallel kernels for triton-ascend on Ascend NPU."""
+
+from __future__ import annotations
 
 import torch
 import triton
 import triton.language as tl
 
-from fla.ops.backends import dispatch
-from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.op import exp2
-from fla.utils import autotune_cache_kwargs
+from fla.utils import input_guard
+from fla.utils.ascend_ub_manager import (
+    ASCEND_MAX_GRID_DIM,
+    max_grid_axis_chunks,
+)
+
+_BH = 4
+_NUM_WARPS = 2
+
+
+def _launch_token_parallel_kernel(
+    kernel,
+    *,
+    tg_total: int,
+    hv_total: int,
+    kernel_kwargs: dict,
+) -> None:
+    hg_total = triton.cdiv(hv_total, _BH)
+    max_tg = max_grid_axis_chunks(tg_total, hg_total, max_grid=ASCEND_MAX_GRID_DIM)
+    for tg_off in range(0, tg_total, max_tg):
+        tg_len = min(max_tg, tg_total - tg_off)
+        kernel_kwargs['TG_OFFSET'] = tg_off
+        max_hg = max_grid_axis_chunks(hg_total, tg_len, max_grid=ASCEND_MAX_GRID_DIM)
+        for hg_off in range(0, hg_total, max_hg):
+            hg_len = min(max_hg, hg_total - hg_off)
+            kernel_kwargs['HG_OFFSET'] = hg_off
+            kernel[(tg_len, hg_len)](num_warps=_NUM_WARPS, **kernel_kwargs)
 
 
 @triton.heuristics({
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
-@fla_cache_autotune(
-    configs=[
-        triton.Config({'BH': BH}, num_warps=num_warps)
-        for BH in [1, 2, 4, 8]
-        for num_warps in [1, 2, 4, 8]
-    ],
-    key=["K", "H", "HV"],
-    **autotune_cache_kwargs,
-)
 @triton.jit(do_not_specialize=['T', 'N'])
-def chunk_kda_fwd_kernel_intra_token_parallel(
+def chunk_kda_fwd_kernel_intra_token_parallel_npu(
     q,
     k,
     g,
@@ -48,16 +65,16 @@ def chunk_kda_fwd_kernel_intra_token_parallel(
     BC: tl.constexpr,
     BH: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    TG_OFFSET: tl.constexpr,
+    HG_OFFSET: tl.constexpr,
 ):
-    i_tg, i_hg = tl.program_id(0), tl.program_id(1)
+    i_tg = tl.program_id(0) + TG_OFFSET
+    i_hg = tl.program_id(1) + HG_OFFSET
 
     if IS_VARLEN:
         i_n = 0
         left, right = 0, N
 
-        # Unrolled binary search (max B=2^32)
-        # We can limit iterations based on expected max batch size if needed
-        # 20 iterations covers B=1M, usually enough
         for _ in range(20):
             if left < right:
                 mid = (left + right) // 2
@@ -84,11 +101,11 @@ def chunk_kda_fwd_kernel_intra_token_parallel(
 
     G: tl.constexpr = HV // H
 
-    q += bos * H*K
-    k += bos * H*K
-    g += bos * HV*K
-    Aqk += bos * HV*BT
-    Akk += bos * HV*BC
+    q += bos * H * K
+    k += bos * H * K
+    g += bos * HV * K
+    Aqk += bos * HV * BT
+    Akk += bos * HV * BC
     beta += bos * HV
 
     BK: tl.constexpr = triton.next_power_of_2(K)
@@ -99,12 +116,10 @@ def chunk_kda_fwd_kernel_intra_token_parallel(
     m_k = o_k < K
     m_hk = m_hv[:, None] & m_k[None, :]
 
-    # q/k: [B, T, H, K], manual load via mapped qk head index
     p_qk = o_h[:, None] * K + o_k[None, :]
     b_q = tl.load(q + i_t * H * K + p_qk, mask=m_hk, other=0).to(tl.float32)
     b_k = tl.load(k + i_t * H * K + p_qk, mask=m_hk, other=0).to(tl.float32)
 
-    # g: [B, T, HV, K], beta: [B, T, HV]
     p_g = tl.make_block_ptr(g + i_t * HV * K, (HV, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0))
     p_beta = tl.make_block_ptr(beta + i_t * HV, (HV,), (1,), (i_hg * BH,), (BH,), (0,))
     b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
@@ -123,8 +138,8 @@ def chunk_kda_fwd_kernel_intra_token_parallel(
         tl.store(Akk + i_t * HV * BC + o_hv * BC + j - i_ts, b_Akk.to(Akk.dtype.element_ty), mask=m_hv)
 
 
-@dispatch('kda')
-def chunk_kda_fwd_intra_token_parallel(
+@input_guard
+def chunk_kda_fwd_intra_token_parallel_npu(
     q: torch.Tensor,
     k: torch.Tensor,
     gk: torch.Tensor,
@@ -135,46 +150,41 @@ def chunk_kda_fwd_intra_token_parallel(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     sub_chunk_size: int = 16,
-) -> None:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    Token-parallel implementation: each token gets its own thread block.
-    Supports both fixed-length and variable-length sequences.
-    Reduces wasted computation on padding.
+    Token-parallel NPU implementation: each token gets its own thread block.
+    Supports both fixed-length and variable-length sequences (GVA: HV >= H).
 
     Writes directly to Aqk and Akk tensors (in-place).
-
-    Args:
-        q: [B, T, H, K]
-        k: [B, T, H, K]
-        gk: [B, T, HV, K] cumsum of gates (HV >= H for GVA)
-        beta: [B, T, HV]
-        Aqk: [B, T, HV, BT] output tensor to write to
-        Akk: [B, T, HV, BC] output tensor for diagonal blocks (fp32)
-        scale: attention scale
-        chunk_size: BT (default 64)
-        sub_chunk_size: BC (default 16)
     """
     B, T, H, K, HV = *q.shape, gk.shape[2]
     N = len(cu_seqlens) - 1 if cu_seqlens is not None else B
     BT = chunk_size
     BC = sub_chunk_size
 
-    def grid(meta): return (B * T, triton.cdiv(HV, meta['BH']))
-    chunk_kda_fwd_kernel_intra_token_parallel[grid](
-        q=q,
-        k=k,
-        g=gk,
-        beta=beta,
-        Aqk=Aqk,
-        Akk=Akk,
-        scale=scale,
-        cu_seqlens=cu_seqlens,
-        N=N,
-        T=T,
-        H=H,
-        HV=HV,
-        K=K,
-        BT=BT,
-        BC=BC,
+    _launch_token_parallel_kernel(
+        chunk_kda_fwd_kernel_intra_token_parallel_npu,
+        tg_total=B * T,
+        hv_total=HV,
+        kernel_kwargs=dict(
+            q=q,
+            k=k,
+            g=gk,
+            beta=beta,
+            Aqk=Aqk,
+            Akk=Akk,
+            scale=scale,
+            cu_seqlens=cu_seqlens,
+            N=N,
+            T=T,
+            H=H,
+            HV=HV,
+            K=K,
+            BT=BT,
+            BC=BC,
+            BH=_BH,
+            TG_OFFSET=0,
+            HG_OFFSET=0,
+        ),
     )
     return Aqk, Akk
