@@ -13,10 +13,8 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.kda.backends.triton_ascend.chunk_intra_token_parallel import (
-    chunk_kda_fwd_intra_token_parallel_npu,
-)
 from fla.ops.kda.backends.triton_ascend.wy_fast import recompute_w_u_fwd_kda_npu as _recompute_w_u_fwd_npu
+from fla.ops.kda.chunk_intra_token_parallel import chunk_kda_fwd_intra_token_parallel
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp2
 from fla.utils import input_guard
@@ -573,7 +571,7 @@ def chunk_kda_fwd_intra_npu(
             ),
         )
     else:
-        Aqk, Akkd = chunk_kda_fwd_intra_token_parallel_npu(
+        Aqk, Akkd = chunk_kda_fwd_intra_token_parallel(
             q=q,
             k=k,
             gk=gk,
