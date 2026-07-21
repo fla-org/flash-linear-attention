@@ -131,11 +131,18 @@ class GatedDeltaNet2(nn.Module):
         # maps each value head to its qk head via `i_h = i_hv // (HV // H)`. num_v_heads <
         # num_heads would divide by zero there.
         if self.num_v_heads < self.num_heads:
-            raise ValueError(f"num_v_heads={self.num_v_heads} must be >= num_heads={self.num_heads}.")
+            raise ValueError(
+                f"num_v_heads={self.num_v_heads} must be >= num_heads={self.num_heads}."
+            )
         if self.num_v_heads % self.num_heads != 0:
-            raise ValueError(f"num_v_heads={self.num_v_heads} must be divisible by num_heads={self.num_heads}.")
+            raise ValueError(
+                f"num_v_heads={self.num_v_heads} must be divisible by num_heads={self.num_heads}."
+            )
         if not math.isclose(head_dim * expand_v, self.head_v_dim, rel_tol=1e-5):
-            raise ValueError(f"expand_v={expand_v} does not produce an integer value when multiplied by head_dim={head_dim}.")
+            raise ValueError(
+                f"expand_v={expand_v} does not produce an integer value when multiplied by "
+                f"head_dim={head_dim}."
+            )
         assert mode in ("chunk", "fused_recurrent"), f"Unsupported mode `{mode}`."
 
         # q/k/v projections.
@@ -200,7 +207,9 @@ class GatedDeltaNet2(nn.Module):
         **kwargs: Unpack[dict],
     ) -> tuple[torch.Tensor, torch.Tensor | None, Cache | None]:
         if attention_mask is not None:
-            assert len(attention_mask.shape) == 2, "Expected attention_mask as a [batch_size, seq_len] 0/1 padding mask."
+            assert len(attention_mask.shape) == 2, (
+                "Expected attention_mask as a [batch_size, seq_len] 0/1 padding mask."
+            )
 
         batch_size, q_len, _ = hidden_states.shape
         # Short inference sequences use the lower-latency recurrent kernel.
@@ -262,7 +271,10 @@ class GatedDeltaNet2(nn.Module):
 
         # Grouped value attention: broadcast QK-side tensors across value-head groups.
         if self.num_v_heads > self.num_heads:
-            q, k, g, b = (repeat(x, "... h d -> ... (h g) d", g=self.num_v_heads // self.num_heads) for x in (q, k, g, b))
+            q, k, g, b = (
+                repeat(x, "... h d -> ... (h g) d", g=self.num_v_heads // self.num_heads)
+                for x in (q, k, g, b)
+            )
 
         if self.allow_neg_eigval:
             b = b * 2.0

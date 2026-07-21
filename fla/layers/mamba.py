@@ -19,7 +19,7 @@ from fla.layers.utils import get_layer_cache, update_layer_cache
 from fla.modules.activations import ACT2FN
 
 with warnings.catch_warnings():
-    warnings.simplefilter("ignore")
+    warnings.simplefilter('ignore')
     try:
         from mamba_ssm.ops.selective_scan_interface import mamba_inner_fn, selective_scan_fn
         from mamba_ssm.ops.triton.selective_state_update import selective_state_update
@@ -30,13 +30,11 @@ with warnings.catch_warnings():
         from causal_conv1d import causal_conv1d_fn, causal_conv1d_update
     except ImportError:
         causal_conv1d_update, causal_conv1d_fn = None, None
-    is_fast_path_available = all(
-        (
-            selective_state_update,
-            selective_scan_fn,
-            mamba_inner_fn,
-        )
-    )
+    is_fast_path_available = all((
+        selective_state_update,
+        selective_scan_fn,
+        mamba_inner_fn,
+    ))
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
@@ -112,9 +110,10 @@ class Mamba(nn.Module):
             raise NotImplementedError
 
         # Initialize dt bias so that F.softplus(dt_bias) is between dt_min and dt_max
-        dt = torch.exp(torch.rand(self.intermediate_size) * (math.log(dt_max) - math.log(dt_min)) + math.log(dt_min)).clamp(
-            min=dt_init_floor
-        )
+        dt = torch.exp(
+            torch.rand(self.intermediate_size) * (math.log(dt_max) - math.log(dt_min))
+            + math.log(dt_min)
+        ).clamp(min=dt_init_floor)
         # Inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
         inv_dt = dt + torch.log(-torch.expm1(-dt))
         with torch.no_grad():
@@ -142,20 +141,18 @@ class Mamba(nn.Module):
                 " https://github.com/Dao-AILab/causal-conv1d",
             )
         import os
-
-        backend = os.environ.get("FLA_CONV_BACKEND", backend)
-        assert backend in ["cuda", "triton"], f"Unsupported backend: {backend}"
-        if backend == "cuda" and causal_conv1d_fn is None:
+        backend = os.environ.get('FLA_CONV_BACKEND', backend)
+        assert backend in ['cuda', 'triton'], f"Unsupported backend: {backend}"
+        if backend == 'cuda' and causal_conv1d_fn is None:
             logger.warning_once(
                 "The CUDA backend is not available because `causal_conv1d` is None. "
                 "Falling back to the Triton backend. "
                 "To install follow https://github.com/Dao-AILab/causal-conv1d",
             )
-            backend = "triton"
-        if backend == "triton":
+            backend = 'triton'
+        if backend == 'triton':
             from fla.modules.convolution import causal_conv1d as causal_conv1d_triton
             from fla.modules.convolution import causal_conv1d_update as causal_conv1d_update_triton
-
             self.causal_conv1d_fn = causal_conv1d_triton
             self.causal_conv1d_update = causal_conv1d_update_triton
         else:
@@ -172,7 +169,7 @@ class Mamba(nn.Module):
     def _build_conv_state(self, hidden_states: torch.Tensor) -> torch.Tensor:
         seq_len = hidden_states.shape[-1]
         if seq_len >= self.conv_kernel_size:
-            return hidden_states[..., -self.conv_kernel_size :].contiguous()
+            return hidden_states[..., -self.conv_kernel_size:].contiguous()
         return nn.functional.pad(hidden_states, (self.conv_kernel_size - seq_len, 0)).contiguous()
 
     def cuda_kernels_forward(
@@ -217,10 +214,10 @@ class Mamba(nn.Module):
         conv_inputs = hidden_states
         conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0), self.conv1d.weight.size(2))
         if last_state is not None:
-            conv_state = last_state["conv_state"]
-            ssm_state = last_state["recurrent_state"]
+            conv_state = last_state['conv_state']
+            ssm_state = last_state['recurrent_state']
 
-            if self.backend == "triton":
+            if self.backend == 'triton':
                 hidden_states, conv_state = self.causal_conv1d_update(
                     x=self._to_causal_conv_layout(conv_inputs),
                     cache=conv_state,
@@ -241,7 +238,7 @@ class Mamba(nn.Module):
         else:
             conv_state = None
             ssm_state = None
-            if self.backend == "triton":
+            if self.backend == 'triton':
                 hidden_states, conv_state = self.causal_conv1d_fn(
                     x=self._to_causal_conv_layout(conv_inputs),
                     weight=conv_weights,
@@ -254,10 +251,7 @@ class Mamba(nn.Module):
                 if use_cache:
                     conv_state = self._build_conv_state(conv_inputs)
                 hidden_states = self.causal_conv1d_fn(
-                    conv_inputs,
-                    conv_weights,
-                    self.conv1d.bias,
-                    activation=self.activation,
+                    conv_inputs, conv_weights, self.conv1d.bias, activation=self.activation,
                 )
 
         if attention_mask is not None and last_state is None:
@@ -269,9 +263,7 @@ class Mamba(nn.Module):
         # 3.a. input varying initialization of time_step, B and C
         ssm_parameters = self.x_proj(hidden_states.transpose(1, 2))
         time_step, B, C = torch.split(
-            ssm_parameters,
-            [self.dt_rank, self.ssm_state_size, self.ssm_state_size],
-            dim=-1,
+            ssm_parameters, [self.dt_rank, self.ssm_state_size, self.ssm_state_size], dim=-1,
         )
         discrete_time_step = self.dt_proj.weight @ time_step.transpose(1, 2)
 
@@ -333,8 +325,8 @@ class Mamba(nn.Module):
 
         # 2. Convolution sequence transformation
         if last_state is not None:
-            conv_state = last_state["conv_state"]
-            ssm_state = last_state["recurrent_state"].clone().to(hidden_states.device)
+            conv_state = last_state['conv_state']
+            ssm_state = last_state['recurrent_state'].clone().to(hidden_states.device)
 
             # decode path: single token
             conv_state = conv_state.roll(shifts=-1, dims=-1)
@@ -347,8 +339,7 @@ class Mamba(nn.Module):
         elif use_cache:
             ssm_state = torch.zeros(
                 (batch_size, self.intermediate_size, self.ssm_state_size),
-                device=hidden_states.device,
-                dtype=dtype,
+                device=hidden_states.device, dtype=dtype,
             )
             conv_state = self._build_conv_state(hidden_states)
             # [batch, intermediate_size, seq_len]
@@ -356,8 +347,7 @@ class Mamba(nn.Module):
         else:
             ssm_state = torch.zeros(
                 (batch_size, self.intermediate_size, self.ssm_state_size),
-                device=hidden_states.device,
-                dtype=dtype,
+                device=hidden_states.device, dtype=dtype,
             )
             conv_state = None
             # [batch, intermediate_size, seq_len]
@@ -372,9 +362,7 @@ class Mamba(nn.Module):
         # 3.a. Selection:  [batch, seq_len, self.dt_rank + self.ssm_state_size * 2]
         ssm_parameters = self.x_proj(hidden_states.transpose(1, 2))
         time_step, B, C = torch.split(
-            ssm_parameters,
-            [self.dt_rank, self.ssm_state_size, self.ssm_state_size],
-            dim=-1,
+            ssm_parameters, [self.dt_rank, self.ssm_state_size, self.ssm_state_size], dim=-1,
         )
         # [batch, seq_len, intermediate_size]
         discrete_time_step = self.dt_proj(time_step)
@@ -401,13 +389,12 @@ class Mamba(nn.Module):
         # [batch, seq_len, intermediade_size]
         scan_output = torch.stack(scan_outputs, dim=-1)
         scan_output = scan_output + (hidden_states * self.D[None, :, None])
-        scan_output = scan_output * self.act(gate)
+        scan_output = (scan_output * self.act(gate))
 
         # 4. Final linear projection
         # [batch, seq_len, hidden_size]
         contextualized_states = self.out_proj(scan_output.transpose(1, 2))
         return contextualized_states, conv_state, ssm_state
-
     # fmt: on
 
     def forward(
@@ -426,7 +413,9 @@ class Mamba(nn.Module):
                 hidden_states, last_state, use_cache, attention_mask, **kwargs
             )
         else:
-            output, conv_state, ssm_state = self.slow_forward(hidden_states, last_state, use_cache, attention_mask, **kwargs)
+            output, conv_state, ssm_state = self.slow_forward(
+                hidden_states, last_state, use_cache, attention_mask, **kwargs
+            )
 
         if use_cache and past_key_values is not None:
             update_layer_cache(

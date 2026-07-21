@@ -9,10 +9,10 @@ import warnings
 
 from transformers.configuration_utils import PretrainedConfig
 
-from fla.models.hybrid import HybridAttentionConfig, normalize_hybrid_attention_config
+from fla.models.hybrid import HybridAttentionConfig, _HybridAttentionConfigMixin
 
 
-class GLAConfig(PretrainedConfig):
+class GLAConfig(_HybridAttentionConfigMixin, PretrainedConfig):
 
     model_type = 'gla'
     keys_to_ignore_at_inference = ['past_key_values']
@@ -75,7 +75,7 @@ class GLAConfig(PretrainedConfig):
         self.norm_eps = norm_eps
         self.use_gk = use_gk
         self.use_gv = use_gv
-        self.attn = normalize_hybrid_attention_config(attn, num_hidden_layers=num_hidden_layers)
+        self.attn = attn
         self.use_cache = use_cache
         self.initializer_range = initializer_range
 

@@ -9,10 +9,10 @@ import warnings
 
 from transformers.configuration_utils import PretrainedConfig
 
-from fla.models.hybrid import HybridAttentionConfig, normalize_hybrid_attention_config
+from fla.models.hybrid import HybridAttentionConfig, _HybridAttentionConfigMixin
 
 
-class HGRNConfig(PretrainedConfig):
+class HGRNConfig(_HybridAttentionConfigMixin, PretrainedConfig):
 
     model_type = 'hgrn'
     keys_to_ignore_at_inference = ['past_key_values']
@@ -59,7 +59,7 @@ class HGRNConfig(PretrainedConfig):
         self.hidden_ratio = hidden_ratio
         self.intermediate_size = intermediate_size
         self.elementwise_affine = elementwise_affine
-        self.attn = normalize_hybrid_attention_config(attn, num_hidden_layers=num_hidden_layers)
+        self.attn = attn
         self.norm_eps = norm_eps
         self.hidden_act = hidden_act
         self.use_cache = use_cache

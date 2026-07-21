@@ -43,7 +43,7 @@ from fla.models.gated_deltanet.modeling_gated_deltanet import GatedDeltaNetBlock
 from fla.models.gla.modeling_gla import GLABlock, GLAForCausalLM
 from fla.models.hybrid import get_hybrid_attention_spec, normalize_hybrid_attention_config
 from fla.models.samba.modeling_samba import SambaBlock
-from fla.utils import assert_close, device, device_platform
+from fla.utils import assert_close, device, device_platform, device_torch_lib
 
 CONFIG_CLASSES = (
     ABCConfig,
@@ -209,7 +209,10 @@ def test_normalize_invalid_window_size(value):
         normalize_hybrid_attention_config({'layers': [0], 'num_heads': 2, 'window_size': value}, num_hidden_layers=1)
 
 
-@pytest.mark.parametrize('value', [0, -1., True, None, '10000', float('nan'), float('inf')])
+@pytest.mark.parametrize(
+    'value',
+    [0, -1., True, None, '10000', float('nan'), float('inf'), pytest.param(10**1000, id='overflowing-integer')],
+)
 def test_normalize_invalid_rope_theta(value):
     with pytest.raises(ValueError, match=rf"rope_theta.*{value!r}"):
         normalize_hybrid_attention_config({'layers': [0], 'num_heads': 2, 'rope_theta': value}, num_hidden_layers=1)
@@ -301,6 +304,68 @@ def test_config_normalization_and_round_trip(config_class, outer_type, tmp_path)
     assert reloaded.attn == config.attn
 
 
+@pytest.mark.parametrize('config_class', CONFIG_CLASSES, ids=lambda config_class: config_class.model_type)
+@pytest.mark.parametrize('outer_type', ['dictionary', 'list'])
+def test_config_assignment_normalizes(config_class, outer_type):
+    source_spec = {'layers': [1], 'num_heads': 2, 'extension': 'preserved'}
+    source = source_spec if outer_type == 'dictionary' else [source_spec]
+    original = deepcopy(source)
+    config = config_class(num_hidden_layers=3, attn=None)
+
+    config.attn = source
+
+    spec = config.attn if outer_type == 'dictionary' else config.attn[0]
+    assert source == original
+    assert spec['num_kv_heads'] == 2
+    assert spec['qkv_bias'] is False
+    assert spec['window_size'] is None
+    assert spec['rope_theta'] == 10000.
+    assert spec['extension'] == 'preserved'
+
+
+@pytest.mark.parametrize('config_class', CONFIG_CLASSES, ids=lambda config_class: config_class.model_type)
+@pytest.mark.parametrize('outer_type', ['dictionary', 'list'])
+def test_config_from_dict_override_normalizes(config_class, outer_type):
+    source_spec = {'layers': [1], 'num_heads': 2}
+    source = source_spec if outer_type == 'dictionary' else [source_spec]
+
+    config = config_class.from_dict(
+        {'num_hidden_layers': 3, 'attn': None},
+        attn=source,
+    )
+
+    spec = config.attn if outer_type == 'dictionary' else config.attn[0]
+    assert spec['num_kv_heads'] == 2
+    assert spec['qkv_bias'] is False
+    assert spec['window_size'] is None
+    assert spec['rope_theta'] == 10000.
+
+
+def test_config_from_pretrained_override_normalizes(tmp_path):
+    GLAConfig(num_hidden_layers=3, attn=None).save_pretrained(tmp_path)
+
+    config = GLAConfig.from_pretrained(
+        tmp_path,
+        attn=[{'layers': [1], 'num_heads': 2}],
+    )
+
+    assert config.attn == [{
+        'layers': [1],
+        'num_heads': 2,
+        'num_kv_heads': 2,
+        'qkv_bias': False,
+        'window_size': None,
+        'rope_theta': 10000.,
+    }]
+
+
+def test_config_assignment_rejects_invalid_plan():
+    config = GLAConfig(num_hidden_layers=2, attn=None)
+
+    with pytest.raises(ValueError, match=r"layers.*2"):
+        config.attn = {'layers': [2], 'num_heads': 2}
+
+
 def test_samba_canonical_default_adapts_to_model_depth():
     shallow = SambaConfig(num_hidden_layers=2)
     deep = SambaConfig(num_hidden_layers=20)
@@ -337,13 +402,11 @@ def test_samba_from_dict_explicit_canonical_out_of_range_plan_is_rejected(outer_
 
 
 def test_rodimus_qk_norm_defaults_each_specification():
-    config = RodimusConfig(
-        num_hidden_layers=2,
-        attn=[
-            {'layers': [0], 'num_heads': 2},
-            {'layers': [1], 'num_heads': 2, 'qk_norm': True},
-        ],
-    )
+    config = RodimusConfig(num_hidden_layers=2, attn=None)
+    config.attn = [
+        {'layers': [0], 'num_heads': 2},
+        {'layers': [1], 'num_heads': 2, 'qk_norm': True},
+    ]
 
     assert config.attn[0]['qk_norm'] is False
     assert config.attn[1]['qk_norm'] is True
@@ -501,6 +564,14 @@ def _tiny_gla_config(attn):
     )
 
 
+def _has_bf16_flash_attention():
+    return (
+        attn_module.flash_attn_func is not None
+        and device_platform in ('cuda', 'hip')
+        and device_torch_lib.is_bf16_supported()
+    )
+
+
 def test_dictionary_and_one_item_list_architecture_equivalence(allow_attention_construction, tmp_path):
     spec = {
         'layers': [1],
@@ -538,9 +609,7 @@ def test_dictionary_and_one_item_list_architecture_equivalence(allow_attention_c
 
 
 @pytest.mark.skipif(
-    attn_module.flash_attn_func is None
-    or device_platform not in ('cuda', 'hip')
-    or not torch.cuda.is_bf16_supported(),
+    not _has_bf16_flash_attention(),
     reason="numerical hybrid equivalence requires FlashAttention and BF16 on a CUDA or ROCm device",
 )
 def test_dictionary_and_one_item_list_numerical_equivalence():

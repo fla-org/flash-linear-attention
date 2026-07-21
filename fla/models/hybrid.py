@@ -101,13 +101,17 @@ def _normalize_spec(
     normalized['window_size'] = window_size
 
     rope_theta = normalized.get('rope_theta', 10000.)
-    if (
-        isinstance(rope_theta, bool)
-        or not isinstance(rope_theta, (int, float))
-        or not math.isfinite(rope_theta)
-        or rope_theta <= 0
-    ):
-        raise ValueError(f"{context} field 'rope_theta' must be positive; got {rope_theta!r}")
+    try:
+        valid_rope_theta = (
+            not isinstance(rope_theta, bool)
+            and isinstance(rope_theta, (int, float))
+            and math.isfinite(rope_theta)
+            and rope_theta > 0
+        )
+    except OverflowError:
+        valid_rope_theta = False
+    if not valid_rope_theta:
+        raise ValueError(f"{context} field 'rope_theta' must be positive and finite; got {rope_theta!r}")
     normalized['rope_theta'] = rope_theta
 
     return normalized
@@ -155,6 +159,21 @@ def normalize_hybrid_attention_config(
     if is_single_spec:
         return normalized_specs[0]
     return normalized_specs
+
+
+class _HybridAttentionConfigMixin:
+    """Apply hybrid-attention validation to constructor and later assignments."""
+
+    @property
+    def attn(self) -> HybridAttentionConfig:
+        return self.__dict__.get('attn')
+
+    @attn.setter
+    def attn(self, value: HybridAttentionConfig) -> None:
+        self.__dict__['attn'] = self._normalize_hybrid_attention_config(value)
+
+    def _normalize_hybrid_attention_config(self, attn: HybridAttentionConfig) -> HybridAttentionConfig:
+        return normalize_hybrid_attention_config(attn, num_hidden_layers=self.num_hidden_layers)
 
 
 def get_hybrid_attention_spec(

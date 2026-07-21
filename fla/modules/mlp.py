@@ -28,12 +28,13 @@ if TYPE_CHECKING:
 
 
 class GatedMLP(nn.Module):
+
     def __init__(
         self,
         hidden_size: int,
         hidden_ratio: int | None = None,
         intermediate_size: int | None = None,
-        hidden_act: str = "swish",
+        hidden_act: str = 'swish',
         fuse_swiglu: bool = True,
         powglu_power: float = 3.0,
     ) -> GatedMLP:
@@ -53,13 +54,13 @@ class GatedMLP(nn.Module):
         self.fuse_swiglu = fuse_swiglu
         self.powglu_power = powglu_power
 
-        if hidden_act not in ("swish", "powlu"):
-            raise ValueError(f"Unsupported hidden_act: {hidden_act}")
+        if hidden_act not in ('swish', 'powlu'):
+            raise ValueError(f'Unsupported hidden_act: {hidden_act}')
 
         self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
         self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
-        if self.fuse_swiglu and hidden_act == "swish":
+        if self.fuse_swiglu and hidden_act == 'swish':
             self.swiglu_linear = SwiGLULinear()
 
     def forward(
@@ -68,7 +69,7 @@ class GatedMLP(nn.Module):
         **kwargs: Unpack[Any],
     ) -> torch.Tensor:
         gate, y = self.gate_proj(x), self.up_proj(x)
-        if self.hidden_act == "powlu":
+        if self.hidden_act == 'powlu':
             if self.fuse_swiglu:
                 return powglu_linear(gate, y, self.down_proj.weight, self.down_proj.bias, self.powglu_power)
             return self.down_proj(powglu(gate, y, self.powglu_power))
@@ -78,6 +79,7 @@ class GatedMLP(nn.Module):
 
 
 class SwiGLULinear(nn.Module):
+
     def forward(self, x, y, weight, bias):
         return swiglu_linear(x, y, weight, bias)
 
@@ -98,11 +100,7 @@ class SwiGLULinearParallel(ParallelStyle):
 
     @staticmethod
     def _prepare_input_fn(
-        input_layouts,
-        desired_input_layouts,
-        mod,
-        inputs,
-        device_mesh,
+        input_layouts, desired_input_layouts, mod, inputs, device_mesh,
     ):
         x, y, weight, bias = inputs
         if not isinstance(x, DTensor):

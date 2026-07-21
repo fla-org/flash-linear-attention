@@ -10,7 +10,7 @@ import warnings
 
 from transformers.configuration_utils import PretrainedConfig
 
-from fla.models.hybrid import HybridAttentionConfig, normalize_hybrid_attention_config
+from fla.models.hybrid import HybridAttentionConfig, _HybridAttentionConfigMixin
 
 _DEFAULT_ATTN = {
     'layers': (1, 3, 5, 7, 9, 11, 13, 15, 17),
@@ -38,7 +38,7 @@ def _adapt_default_attn(num_hidden_layers: int) -> dict:
     }
 
 
-class SambaConfig(PretrainedConfig):
+class SambaConfig(_HybridAttentionConfigMixin, PretrainedConfig):
 
     model_type = "samba"
 
@@ -51,7 +51,7 @@ class SambaConfig(PretrainedConfig):
             and _is_legacy_default_attn(config_dict.get('attn'))
         )
         if is_legacy_serialized_default:
-            # Before hybrid-plan validation, shallow Samba JSON retained the
+            # before hybrid-plan validation, shallow Samba JSON retained the
             # full depth-18 default. Adapt only that serialized legacy shape.
             num_hidden_layers = config_dict.get('num_hidden_layers', 18)
             config_dict['attn'] = _adapt_default_attn(num_hidden_layers)
@@ -117,7 +117,7 @@ class SambaConfig(PretrainedConfig):
         self.max_position_embeddings = max_position_embeddings
         if attn is _DEFAULT_ATTN:
             attn = _adapt_default_attn(num_hidden_layers)
-        self.attn = normalize_hybrid_attention_config(attn, num_hidden_layers=num_hidden_layers)
+        self.attn = attn
         self.hidden_ratio = hidden_ratio
         self.rescale_prenorm_residual = rescale_prenorm_residual
         self.residual_in_fp32 = residual_in_fp32

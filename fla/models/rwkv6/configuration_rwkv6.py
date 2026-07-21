@@ -9,10 +9,10 @@ import warnings
 
 from transformers.configuration_utils import PretrainedConfig
 
-from fla.models.hybrid import HybridAttentionConfig, normalize_hybrid_attention_config
+from fla.models.hybrid import HybridAttentionConfig, _HybridAttentionConfigMixin
 
 
-class RWKV6Config(PretrainedConfig):
+class RWKV6Config(_HybridAttentionConfigMixin, PretrainedConfig):
 
     model_type = 'rwkv6'
     keys_to_ignore_at_inference = ['past_key_values']
@@ -63,7 +63,7 @@ class RWKV6Config(PretrainedConfig):
         self.max_position_embeddings = max_position_embeddings
         self.norm_bias = norm_bias
         self.norm_eps = norm_eps
-        self.attn = normalize_hybrid_attention_config(attn, num_hidden_layers=num_hidden_layers)
+        self.attn = attn
         self.use_cache = use_cache
         self.initializer_range = initializer_range
         self.fuse_norm = fuse_norm

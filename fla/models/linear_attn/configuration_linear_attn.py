@@ -9,10 +9,10 @@ import warnings
 
 from transformers.configuration_utils import PretrainedConfig
 
-from fla.models.hybrid import HybridAttentionConfig, normalize_hybrid_attention_config
+from fla.models.hybrid import HybridAttentionConfig, _HybridAttentionConfigMixin
 
 
-class LinearAttentionConfig(PretrainedConfig):
+class LinearAttentionConfig(_HybridAttentionConfigMixin, PretrainedConfig):
 
     model_type = 'linear_attn'
     keys_to_ignore_at_inference = ['past_key_values']
@@ -71,7 +71,7 @@ class LinearAttentionConfig(PretrainedConfig):
         self.max_position_embeddings = max_position_embeddings
         self.elementwise_affine = elementwise_affine
         self.norm_eps = norm_eps
-        self.attn = normalize_hybrid_attention_config(attn, num_hidden_layers=num_hidden_layers)
+        self.attn = attn
         self.use_cache = use_cache
         self.initializer_range = initializer_range
 

@@ -9,10 +9,10 @@ import warnings
 
 from transformers.configuration_utils import PretrainedConfig
 
-from fla.models.hybrid import HybridAttentionConfig, normalize_hybrid_attention_config
+from fla.models.hybrid import HybridAttentionConfig, _HybridAttentionConfigMixin
 
 
-class MesaNetConfig(PretrainedConfig):
+class MesaNetConfig(_HybridAttentionConfigMixin, PretrainedConfig):
     model_type = 'mesa_net'
     keys_to_ignore_at_inference = ['past_key_values']
 
@@ -64,7 +64,7 @@ class MesaNetConfig(PretrainedConfig):
         self.hidden_act = hidden_act
         self.num_hidden_layers = num_hidden_layers
         self.norm_eps = norm_eps
-        self.attn = normalize_hybrid_attention_config(attn, num_hidden_layers=num_hidden_layers)
+        self.attn = attn
         self.use_cache = use_cache
         self.initializer_range = initializer_range
         self.lambda_lower_bound = lambda_lower_bound

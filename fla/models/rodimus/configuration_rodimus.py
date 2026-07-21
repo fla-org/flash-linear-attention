@@ -9,13 +9,21 @@ import warnings
 
 from transformers.configuration_utils import PretrainedConfig
 
-from fla.models.hybrid import HybridAttentionConfig, normalize_hybrid_attention_config
+from fla.models.hybrid import HybridAttentionConfig, _HybridAttentionConfigMixin
 
 
-class RodimusConfig(PretrainedConfig):
+class RodimusConfig(_HybridAttentionConfigMixin, PretrainedConfig):
 
     model_type = 'rodimus'
     keys_to_ignore_at_inference = ['past_key_values']
+
+    def _normalize_hybrid_attention_config(self, attn: HybridAttentionConfig) -> HybridAttentionConfig:
+        attn = super()._normalize_hybrid_attention_config(attn)
+        specs = [attn] if isinstance(attn, dict) else attn
+        if specs is not None:
+            for attn_spec in specs:
+                attn_spec.setdefault('qk_norm', False)
+        return attn
 
     def __init__(
         self,
@@ -69,12 +77,7 @@ class RodimusConfig(PretrainedConfig):
         self.norm_eps = norm_eps
         self.k_norm_eps = k_norm_eps
 
-        self.attn = normalize_hybrid_attention_config(attn, num_hidden_layers=num_hidden_layers)
-        if isinstance(self.attn, dict):
-            self.attn.setdefault('qk_norm', False)
-        elif self.attn is not None:
-            for attn_spec in self.attn:
-                attn_spec.setdefault('qk_norm', False)
+        self.attn = attn
         self.ska_attn = ska_attn
         self.use_cache = use_cache
         self.initializer_range = initializer_range
