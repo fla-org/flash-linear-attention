@@ -9,6 +9,8 @@ import warnings
 
 from transformers.configuration_utils import PretrainedConfig
 
+from fla.models.hybrid import HybridAttentionConfig, normalize_hybrid_attention_config
+
 
 class RodimusConfig(PretrainedConfig):
 
@@ -33,7 +35,7 @@ class RodimusConfig(PretrainedConfig):
         max_position_embeddings: int = 2048,
         norm_eps: float = 1e-5,
         k_norm_eps: float | None = None,
-        attn: dict | None = None,
+        attn: HybridAttentionConfig = None,
         ska_attn: dict | None = None,
         use_cache: bool = True,
         pad_token_id: int | None = None,
@@ -67,7 +69,12 @@ class RodimusConfig(PretrainedConfig):
         self.norm_eps = norm_eps
         self.k_norm_eps = k_norm_eps
 
-        self.attn = attn
+        self.attn = normalize_hybrid_attention_config(attn, num_hidden_layers=num_hidden_layers)
+        if isinstance(self.attn, dict):
+            self.attn.setdefault('qk_norm', False)
+        elif self.attn is not None:
+            for attn_spec in self.attn:
+                attn_spec.setdefault('qk_norm', False)
         self.ska_attn = ska_attn
         self.use_cache = use_cache
         self.initializer_range = initializer_range
@@ -89,19 +96,6 @@ class RodimusConfig(PretrainedConfig):
                 "at the potential cost of reduced precision. "
                 "If you observe issues like loss divergence, consider disabling this setting.",
             )
-
-        if attn is not None:
-            if not isinstance(attn, dict):
-                raise ValueError("attn must be a dictionary")
-            if 'layers' not in attn:
-                raise ValueError("Layer indices must be provided to initialize hybrid attention layers")
-            if 'num_heads' not in attn:
-                raise ValueError("Number of heads must be provided to initialize hybrid attention layers")
-            attn['num_kv_heads'] = attn.get('num_kv_heads', attn['num_heads'])
-            attn['qkv_bias'] = attn.get('qkv_bias', False)
-            attn['qk_norm'] = attn.get('qk_norm', False)
-            attn['window_size'] = attn.get('window_size', None)
-            attn['rope_theta'] = attn.get('rope_theta', 10000.)
 
         if ska_attn is not None:
             if not isinstance(ska_attn, dict):

@@ -21,6 +21,7 @@ from transformers.utils.deprecation import deprecate_kwarg
 from fla.layers.attn import Attention
 from fla.layers.gsa import GatedSlotAttention
 from fla.models.gsa.configuration_gsa import GSAConfig
+from fla.models.hybrid import get_hybrid_attention_spec
 from fla.models.utils import Cache, FLAUnsupportedCacheGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
 from fla.modules import GatedMLP as GSAMLP
@@ -48,14 +49,15 @@ class GSABlock(GradientCheckpointingLayer):
         self.layer_idx = layer_idx
 
         self.attn_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
-        if config.attn is not None and layer_idx in config.attn['layers']:
+        attn_spec = get_hybrid_attention_spec(config.attn, layer_idx=layer_idx)
+        if attn_spec is not None:
             self.attn = Attention(
                 hidden_size=config.hidden_size,
-                num_heads=config.attn['num_heads'],
-                num_kv_heads=config.attn['num_kv_heads'],
-                qkv_bias=config.attn['qkv_bias'],
-                window_size=config.attn['window_size'],
-                rope_theta=config.attn['rope_theta'],
+                num_heads=attn_spec['num_heads'],
+                num_kv_heads=attn_spec['num_kv_heads'],
+                qkv_bias=attn_spec['qkv_bias'],
+                window_size=attn_spec['window_size'],
+                rope_theta=attn_spec['rope_theta'],
                 max_position_embeddings=config.max_position_embeddings,
                 layer_idx=layer_idx,
             )

@@ -7,6 +7,8 @@
 
 from transformers.configuration_utils import PretrainedConfig
 
+from fla.models.hybrid import HybridAttentionConfig, normalize_hybrid_attention_config
+
 
 class KDAConfig(PretrainedConfig):
     model_type = 'kda'
@@ -31,7 +33,7 @@ class KDAConfig(PretrainedConfig):
         hidden_act: str = "swish",
         num_hidden_layers: int = 24,
         norm_eps: float = 1e-6,
-        attn: dict | None = None,
+        attn: HybridAttentionConfig = None,
         use_cache: bool = True,
         pad_token_id: int | None = None,
         bos_token_id: int = 1,
@@ -61,7 +63,7 @@ class KDAConfig(PretrainedConfig):
         self.hidden_act = hidden_act
         self.num_hidden_layers = num_hidden_layers
         self.norm_eps = norm_eps
-        self.attn = attn
+        self.attn = normalize_hybrid_attention_config(attn, num_hidden_layers=num_hidden_layers)
         self.use_cache = use_cache
         self.initializer_range = initializer_range
 
@@ -77,18 +79,6 @@ class KDAConfig(PretrainedConfig):
 
         if safe_gate and lower_bound is None:
             raise ValueError("`lower_bound` must be specified when `safe_gate=True` (recommended: -5).")
-
-        if attn is not None:
-            if not isinstance(attn, dict):
-                raise ValueError("attn must be a dictionary")
-            if 'layers' not in attn:
-                raise ValueError("Layer indices must be provided to initialize hybrid attention layers")
-            if 'num_heads' not in attn:
-                raise ValueError("Number of heads must be provided to initialize hybrid attention layers")
-            attn['num_kv_heads'] = attn.get('num_kv_heads', attn['num_heads'])
-            attn['qkv_bias'] = attn.get('qkv_bias', False)
-            attn['window_size'] = attn.get('window_size', None)
-            attn['rope_theta'] = attn.get('rope_theta', 10000.)
 
         if attnres_block_size is not None and attnres_block_size != 1:
             if attnres_block_size < 2 or attnres_block_size % 2 != 0:
