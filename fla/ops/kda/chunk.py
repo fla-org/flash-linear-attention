@@ -11,7 +11,7 @@ import warnings
 
 import torch
 
-from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
+from fla.modules.l2norm import l2norm_bwd_pair, l2norm_fwd_pair
 from fla.ops.backends import dispatch
 from fla.ops.common.gate import fused_beta_sigmoid, fused_beta_sigmoid_bwd
 from fla.ops.cp import FLACPContext
@@ -54,8 +54,7 @@ class ChunkKDAFunction(torch.autograd.Function):
         # Apply l2norm
         q_rstd, k_rstd = None, None
         if use_qk_l2norm_in_kernel:
-            q, q_rstd = l2norm_fwd(q)
-            k, k_rstd = l2norm_fwd(k)
+            q, q_rstd, k, k_rstd = l2norm_fwd_pair(q, k)
 
         beta_raw = beta
         if use_beta_sigmoid_in_kernel:
@@ -164,8 +163,7 @@ class ChunkKDAFunction(torch.autograd.Function):
             h=h,
         )
         if ctx.use_qk_l2norm_in_kernel:
-            dq = l2norm_bwd(q, q_rstd, dq)
-            dk = l2norm_bwd(k, k_rstd, dk)
+            dq, dk = l2norm_bwd_pair(q, q_rstd, dq, k, k_rstd, dk)
         if ctx.use_beta_sigmoid_in_kernel:
             db = fused_beta_sigmoid_bwd(beta_raw, db, scale=2.0 if ctx.allow_neg_eigval else 1.0)
 

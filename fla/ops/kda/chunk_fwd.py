@@ -42,6 +42,8 @@ def chunk_kda_fwd(
 ):
     # Apply gate activation
     g_org = None
+    fuse_g_cumsum = False
+    g_input_for_intra = g
     if use_gate_in_kernel:
         g_org = g
         g = kda_gate_chunk_cumsum(
@@ -54,28 +56,37 @@ def chunk_kda_fwd(
             chunk_indices=chunk_indices,
             lower_bound=lower_bound,
         )
+        g_input_for_intra = g
     else:
-        g = chunk_local_cumsum(
-            g=g,
-            scale=RCP_LN2,
-            chunk_size=chunk_size,
-            cu_seqlens=cu_seqlens,
-            chunk_indices=chunk_indices
-        )
+        fuse_g_cumsum = safe_gate and cu_seqlens is None and chunk_indices is None
+        if fuse_g_cumsum:
+            g = torch.empty_like(g, dtype=torch.float)
+        else:
+            g = chunk_local_cumsum(
+                g=g,
+                scale=RCP_LN2,
+                chunk_size=chunk_size,
+                cu_seqlens=cu_seqlens,
+                chunk_indices=chunk_indices
+            )
+            g_input_for_intra = g
 
     # qg = None if disable_recompute is False
     w, u, qg, kg, Aqk, Akk = chunk_kda_fwd_intra(
         q=q,
         k=k,
         v=v,
-        gk=g,
+        gk=g_input_for_intra,
+        g_cumsum=g if fuse_g_cumsum else None,
         beta=beta,
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
         safe_gate=safe_gate,
-        disable_recompute=disable_recompute
+        disable_recompute=disable_recompute,
+        fuse_g_cumsum=fuse_g_cumsum,
+        g_cumsum_scale=RCP_LN2,
     )
 
     if cp_context is not None:

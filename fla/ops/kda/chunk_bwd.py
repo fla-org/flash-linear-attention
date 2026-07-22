@@ -20,7 +20,7 @@ from fla.ops.utils import chunk_local_cumsum, prepare_chunk_indices
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.op import exp2
-from fla.utils import IS_NVIDIA_HOPPER, autotune_cache_kwargs, check_shared_mem
+from fla.utils import IS_NVIDIA_BLACKWELL, IS_NVIDIA_HOPPER, autotune_cache_kwargs, check_shared_mem
 
 BK_LIST = [32, 64] if check_shared_mem() else [16, 32]
 BV_LIST = [64, 128] if check_shared_mem('ampere') else [16, 32]
@@ -117,7 +117,7 @@ def chunk_kda_bwd_kernel_dAv(
         for BV in BV_LIST
         for num_warps in NUM_WARPS
         for num_stages in [2, 3, 4]
-        if not (IS_NVIDIA_HOPPER and BK == 32 and num_warps == 4)
+        if not ((IS_NVIDIA_HOPPER or IS_NVIDIA_BLACKWELL) and BK == 32 and num_warps != 2)
     ],
     key=['BT', 'HV', 'STATE_V_FIRST'],
     **autotune_cache_kwargs,

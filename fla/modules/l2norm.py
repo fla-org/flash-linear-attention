@@ -106,6 +106,91 @@ def l2norm_fwd_kernel(
 
 
 @fla_cache_autotune(
+    configs=[triton.Config({"BT": BT}, num_warps=num_warps) for num_warps in [1, 2, 4] for BT in [16, 32, 64]],
+    key=["D", "NB"],
+    **autotune_cache_kwargs,
+)
+@triton.jit(do_not_specialize=["T"])
+def l2norm_fwd_pair_kernel(
+    x0,
+    x1,
+    y0,
+    y1,
+    rstd0,
+    rstd1,
+    eps,
+    T,
+    D: tl.constexpr,
+    BD: tl.constexpr,
+    NB: tl.constexpr,
+    BT: tl.constexpr,
+):
+    i_t = tl.program_id(0).to(tl.int64)
+    rows = i_t * BT + tl.arange(0, BT).to(tl.int64)
+    cols = tl.arange(0, BD).to(tl.int64)
+    row_mask = rows < T
+    col_mask = cols < D
+    mask = row_mask[:, None] & col_mask[None, :]
+    offsets = rows[:, None] * D + cols[None, :]
+
+    b_x0 = tl.load(x0 + offsets, mask=mask, other=0.0).to(tl.float32)
+    b_x1 = tl.load(x1 + offsets, mask=mask, other=0.0).to(tl.float32)
+    b_rstd0 = 1 / tl.sqrt(tl.sum(b_x0 * b_x0, 1) + eps)
+    b_rstd1 = 1 / tl.sqrt(tl.sum(b_x1 * b_x1, 1) + eps)
+    b_y0 = b_x0 * b_rstd0[:, None]
+    b_y1 = b_x1 * b_rstd1[:, None]
+
+    tl.store(y0 + offsets, b_y0.to(y0.dtype.element_ty), mask=mask)
+    tl.store(y1 + offsets, b_y1.to(y1.dtype.element_ty), mask=mask)
+    tl.store(rstd0 + rows, b_rstd0, mask=row_mask)
+    tl.store(rstd1 + rows, b_rstd1, mask=row_mask)
+
+
+@fla_cache_autotune(
+    configs=[triton.Config({"BT": BT}, num_warps=num_warps) for num_warps in [1, 2, 4] for BT in [16, 32, 64]],
+    key=["D", "NB"],
+    **autotune_cache_kwargs,
+)
+@triton.jit(do_not_specialize=["T"])
+def l2norm_bwd_pair_kernel(
+    y0,
+    rstd0,
+    dy0,
+    dx0,
+    y1,
+    rstd1,
+    dy1,
+    dx1,
+    eps,
+    T,
+    D: tl.constexpr,
+    BD: tl.constexpr,
+    NB: tl.constexpr,
+    BT: tl.constexpr,
+):
+    i_t = tl.program_id(0).to(tl.int64)
+    rows = i_t * BT + tl.arange(0, BT).to(tl.int64)
+    cols = tl.arange(0, BD).to(tl.int64)
+    row_mask = rows < T
+    col_mask = cols < D
+    mask = row_mask[:, None] & col_mask[None, :]
+    offsets = rows[:, None] * D + cols[None, :]
+
+    b_y0 = tl.load(y0 + offsets, mask=mask, other=0.0).to(tl.float32)
+    b_dy0 = tl.load(dy0 + offsets, mask=mask, other=0.0).to(tl.float32)
+    b_rstd0 = tl.load(rstd0 + rows, mask=row_mask, other=0.0).to(tl.float32)
+    b_dx0 = b_dy0 * b_rstd0[:, None] - tl.sum(b_dy0 * b_y0, 1)[:, None] * b_y0 * b_rstd0[:, None]
+
+    b_y1 = tl.load(y1 + offsets, mask=mask, other=0.0).to(tl.float32)
+    b_dy1 = tl.load(dy1 + offsets, mask=mask, other=0.0).to(tl.float32)
+    b_rstd1 = tl.load(rstd1 + rows, mask=row_mask, other=0.0).to(tl.float32)
+    b_dx1 = b_dy1 * b_rstd1[:, None] - tl.sum(b_dy1 * b_y1, 1)[:, None] * b_y1 * b_rstd1[:, None]
+
+    tl.store(dx0 + offsets, b_dx0.to(dx0.dtype.element_ty), mask=mask)
+    tl.store(dx1 + offsets, b_dx1.to(dx1.dtype.element_ty), mask=mask)
+
+
+@fla_cache_autotune(
     configs=[triton.Config({"BT": BT}, num_warps=num_warps) for num_warps in [1, 2, 4, 8, 16] for BT in BT_LIST],
     key=["D", "NB"],
     **autotune_cache_kwargs,
@@ -190,6 +275,66 @@ def l2norm_fwd(
 
 
 @dispatch('modules')
+def l2norm_fwd_pair(
+    x0: torch.Tensor,
+    x1: torch.Tensor,
+    eps: float = 1e-6,
+    output_dtype: torch.dtype | None = None,
+):
+    x_shape_og = x0.shape
+    if x1.shape != x_shape_og:
+        raise ValueError(f"paired l2norm inputs must have matching shapes, got {x0.shape} and {x1.shape}.")
+    if x1.device != x0.device:
+        raise ValueError(f"paired l2norm inputs must be on the same device, got {x0.device} and {x1.device}.")
+
+    x0 = x0.view(-1, x0.shape[-1])
+    x1 = x1.view(-1, x1.shape[-1])
+    if output_dtype is None:
+        y0 = torch.empty_like(x0)
+        y1 = torch.empty_like(x1)
+    else:
+        y0 = torch.empty_like(x0, dtype=output_dtype)
+        y1 = torch.empty_like(x1, dtype=output_dtype)
+    assert y0.stride(-1) == 1
+    assert y1.stride(-1) == 1
+    T, D = x0.shape[0], x0.shape[-1]
+    MAX_FUSED_SIZE = 65536 // x0.element_size()
+    BD = min(MAX_FUSED_SIZE, triton.next_power_of_2(D))
+    if D > BD:
+        y0, rstd0 = l2norm_fwd(x0, eps=eps, output_dtype=output_dtype)
+        y1, rstd1 = l2norm_fwd(x1, eps=eps, output_dtype=output_dtype)
+        return y0.view(x_shape_og), rstd0.view(x_shape_og[:-1]), y1.view(x_shape_og), rstd1.view(x_shape_og[:-1])
+
+    if D > 512:
+        y0, rstd0 = l2norm_fwd(x0, eps=eps, output_dtype=output_dtype)
+        y1, rstd1 = l2norm_fwd(x1, eps=eps, output_dtype=output_dtype)
+        return y0.view(x_shape_og), rstd0.view(x_shape_og[:-1]), y1.view(x_shape_og), rstd1.view(x_shape_og[:-1])
+
+    rstd0 = torch.empty((T,), dtype=torch.float32, device=x0.device)
+    rstd1 = torch.empty((T,), dtype=torch.float32, device=x1.device)
+    # match the single-input kernel's coarse T bucket to avoid unnecessary retunes.
+    NB = triton.cdiv(T, 2048 * 32)
+
+    def grid(meta):
+        return (triton.cdiv(T, meta["BT"]),)
+
+    l2norm_fwd_pair_kernel[grid](
+        x0=x0,
+        x1=x1,
+        y0=y0,
+        y1=y1,
+        rstd0=rstd0,
+        rstd1=rstd1,
+        eps=eps,
+        T=T,
+        D=D,
+        BD=BD,
+        NB=NB,
+    )
+    return y0.view(x_shape_og), rstd0.view(x_shape_og[:-1]), y1.view(x_shape_og), rstd1.view(x_shape_og[:-1])
+
+
+@dispatch('modules')
 def l2norm_bwd(
     y: torch.Tensor,
     rstd: torch.Tensor,
@@ -241,6 +386,70 @@ def l2norm_bwd(
         )
 
     return dx.view(y_shape_og)
+
+
+@dispatch('modules')
+def l2norm_bwd_pair(
+    y0: torch.Tensor,
+    rstd0: torch.Tensor,
+    dy0: torch.Tensor,
+    y1: torch.Tensor,
+    rstd1: torch.Tensor,
+    dy1: torch.Tensor,
+    eps: float = 1e-6,
+):
+    y_shape_og = y0.shape
+    if y1.shape != y_shape_og or dy0.shape != y_shape_og or dy1.shape != y_shape_og:
+        raise ValueError("paired l2norm backward inputs must have matching activation and gradient shapes.")
+    if rstd0.shape != y_shape_og[:-1] or rstd1.shape != y_shape_og[:-1]:
+        raise ValueError("paired l2norm backward rstd tensors must match the activation shape without the last dimension.")
+    if y1.device != y0.device or dy0.device != y0.device or dy1.device != y0.device:
+        raise ValueError("paired l2norm backward inputs must be on the same device.")
+    if rstd0.device != y0.device or rstd1.device != y0.device:
+        raise ValueError("paired l2norm backward rstd tensors must be on the same device as the inputs.")
+
+    y0 = y0.view(-1, dy0.shape[-1])
+    y1 = y1.view(-1, dy1.shape[-1])
+    dy0 = dy0.view(-1, dy0.shape[-1])
+    dy1 = dy1.view(-1, dy1.shape[-1])
+    rstd0 = rstd0.view(-1)
+    rstd1 = rstd1.view(-1)
+    dx0 = torch.empty_like(y0)
+    dx1 = torch.empty_like(y1)
+    T, D = y0.shape[0], y0.shape[-1]
+    MAX_FUSED_SIZE = 65536 // y0.element_size()
+    BD = min(MAX_FUSED_SIZE, triton.next_power_of_2(D))
+    if D > BD:
+        dx0 = l2norm_bwd(y0, rstd0, dy0, eps=eps)
+        dx1 = l2norm_bwd(y1, rstd1, dy1, eps=eps)
+        return dx0.view(y_shape_og), dx1.view(y_shape_og)
+
+    if D > 512:
+        dx0 = l2norm_bwd(y0, rstd0, dy0, eps=eps)
+        dx1 = l2norm_bwd(y1, rstd1, dy1, eps=eps)
+        return dx0.view(y_shape_og), dx1.view(y_shape_og)
+
+    NB = triton.cdiv(T, 2048 * 32)
+
+    def grid(meta):
+        return (triton.cdiv(T, meta["BT"]),)
+
+    l2norm_bwd_pair_kernel[grid](
+        y0=y0,
+        rstd0=rstd0,
+        dy0=dy0,
+        dx0=dx0,
+        y1=y1,
+        rstd1=rstd1,
+        dy1=dy1,
+        dx1=dx1,
+        eps=eps,
+        T=T,
+        D=D,
+        BD=BD,
+        NB=NB,
+    )
+    return dx0.view(y_shape_og), dx1.view(y_shape_og)
 
 
 class L2NormFunction(torch.autograd.Function):
