@@ -20,7 +20,7 @@ from fla.ops.utils import chunk_local_cumsum, prepare_chunk_indices
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.op import exp2
-from fla.utils import IS_NVIDIA_HOPPER, autotune_cache_kwargs, check_shared_mem
+from fla.utils import IS_NVIDIA_BLACKWELL, IS_NVIDIA_HOPPER, autotune_cache_kwargs, check_shared_mem
 
 BK_LIST = [32, 64] if check_shared_mem() else [16, 32]
 BV_LIST = [64, 128] if check_shared_mem('ampere') else [16, 32]
@@ -117,7 +117,13 @@ def chunk_kda_bwd_kernel_dAv(
         for BV in BV_LIST
         for num_warps in NUM_WARPS
         for num_stages in [2, 3, 4]
+        # Hopper exclusion unchanged from upstream (do not touch the Hopper autotune space here).
         if not (IS_NVIDIA_HOPPER and BK == 32 and num_warps == 4)
+        # Blackwell (sm_100)-only workaround: BK==32 with num_warps!=2 currently triggers an
+        # illegal memory access in chunk_kda_bwd_kernel_dAv. This prunes those configs to keep
+        # autotuning safe on Blackwell; it is NOT a root-cause fix for the OOB and does not
+        # affect Hopper or other archs.
+        if not (IS_NVIDIA_BLACKWELL and BK == 32 and num_warps != 2)
     ],
     key=['BT', 'HV', 'STATE_V_FIRST'],
     **autotune_cache_kwargs,
