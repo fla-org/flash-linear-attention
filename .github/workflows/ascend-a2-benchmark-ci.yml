@@ -63,6 +63,8 @@ jobs:
     env:
       FLA_CI_ENV: 1
       ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3"
+      # Triton perf_report always calls plt.savefig when save_path is set.
+      MPLBACKEND: Agg
 
     steps:
       - name: Checkout
@@ -78,6 +80,8 @@ jobs:
           python -m pip install -U pip setuptools wheel
           # triton-ascend runtime/build deps; install before resolving [npu] extra
           python -m pip install pybind11 cmake attrs sympy pyyaml scipy decorator einops
+          # benchmark_conv plotting (Triton perf_report + benchmarks.visualize).
+          python -m pip install matplotlib pandas
           # [npu] extra pins torch / torch_npu / torchvision / triton-ascend; osinfra index
           # hosts triton-ascend wheels (see INSTALL.md).
           python -m pip install ".[npu,test]" \
@@ -101,6 +105,18 @@ jobs:
           from fla.utils import IS_NPU, device_platform
           print("device_platform:", device_platform)
           assert IS_NPU, "Expected NPU backend (IS_NPU=True)"
+
+          import matplotlib
+          import pandas as pd
+          print("matplotlib:", matplotlib.__version__, "| backend:", matplotlib.get_backend())
+          print("pandas:", pd.__version__)
+
+          import io
+          import matplotlib.pyplot as plt
+          fig, _ax = plt.subplots()
+          fig.savefig(io.BytesIO(), format='png')
+          plt.close(fig)
+          print("matplotlib savefig smoke test: ok")
           PY
 
       - name: Benchmark chunk_gdn, chunk_kda, and conv1d
