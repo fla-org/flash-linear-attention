@@ -659,3 +659,32 @@ def test_dictionary_and_one_item_list_numerical_equivalence():
     assert dictionary_grads.keys() == list_grads.keys()
     for name in dictionary_grads:
         assert_close(f'gradient {name}', dictionary_grads[name], list_grads[name], 1e-5)
+
+
+@pytest.mark.skipif(
+    not _has_bf16_flash_attention(),
+    reason="heterogeneous plan smoke requires FlashAttention and BF16 on a CUDA or ROCm device",
+)
+def test_heterogeneous_plan_numerical_smoke():
+    """A plan with two different specs must run end to end on GPU.
+
+    Covers the actual heterogeneous case (SWA + native mixer + full attention
+    in one model) that the dictionary/list equivalence tests cannot reach.
+    """
+    attn = [
+        {'layers': [0], 'num_heads': 4, 'num_kv_heads': 2, 'window_size': 4},
+        {'layers': [2], 'num_heads': 4, 'num_kv_heads': 4, 'qkv_bias': True, 'window_size': None},
+    ]
+    torch.manual_seed(42)
+    model = GLAForCausalLM(_tiny_gla_config(attn)).to(torch.bfloat16).to(device)
+    model.train()
+
+    input_ids = torch.randint(0, 64, (2, 16), device=device)
+    logits = model(input_ids, use_cache=False).logits
+    assert logits.shape == (2, 16, 64)
+    assert torch.isfinite(logits).all()
+
+    logits.float().square().mean().backward()
+    for name, parameter in model.named_parameters():
+        if parameter.grad is not None:
+            assert torch.isfinite(parameter.grad).all(), f'non-finite gradient: {name}'

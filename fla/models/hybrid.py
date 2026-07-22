@@ -162,7 +162,12 @@ def normalize_hybrid_attention_config(
 
 
 class _HybridAttentionConfigMixin:
-    """Apply hybrid-attention validation to constructor and later assignments."""
+    """Apply hybrid-attention validation to constructor and later assignments.
+
+    Validation depends on ``self.num_hidden_layers`` for layer range checks,
+    so subclasses must assign ``num_hidden_layers`` before ``self.attn`` in
+    their ``__init__``.
+    """
 
     @property
     def attn(self) -> HybridAttentionConfig:
