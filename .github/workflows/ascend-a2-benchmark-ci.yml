@@ -1,6 +1,7 @@
-name: ascend-a2-ci
+name: ascend-a2-benchmark-ci
 
 # Pinned stack: CANN 9.0.0 + pyproject [npu] extra (torch/torch_npu/torchvision/triton-ascend)
+# Runs NPU performance benchmarks for triton-ascend backends and causal conv.
 
 on:
   workflow_dispatch:
@@ -21,8 +22,8 @@ on:
       - ".github/workflows/*.yml"
 
 jobs:
-  test-a2-npu-pytorch-2-7:
-    name: Test A2 NPU (PyTorch 2.7.1)
+  benchmark-a2-npu-pytorch-2-7:
+    name: Benchmark A2 NPU (PyTorch 2.7.1)
     if: |
       github.event_name == 'workflow_dispatch' ||
       github.event_name == 'push' ||
@@ -42,9 +43,11 @@ jobs:
         python:
           - "3.11"
         os:
-          - "linux-aarch64-a2-8"
+          - "linux-aarch64-a2-4"
 
     runs-on: ${{ matrix.os }}
+
+    timeout-minutes: 360
 
     concurrency:
       group: ${{ github.workflow }}-${{ github.ref }}-${{ matrix.os }}-${{ matrix.python }}
@@ -59,7 +62,7 @@ jobs:
 
     env:
       FLA_CI_ENV: 1
-      ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3,4,5,6,7"
+      ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3"
 
     steps:
       - name: Checkout
@@ -100,15 +103,49 @@ jobs:
           assert IS_NPU, "Expected NPU backend (IS_NPU=True)"
           PY
 
-      - name: Run fla/modules and fla/ops/utils, gdn, kda tests
+      - name: Benchmark chunk_gdn, chunk_kda, and conv1d
         shell: bash
         env:
-          FLA_NPU_XDIST: "1"
+          FLA_BENCH_WARMUP_MS: "25"
+          FLA_BENCH_REP_MS: "100"
+          FLA_BENCH_OP_WARMUP_ITERS: "3"
         run: |
           source /usr/local/Ascend/ascend-toolkit/set_env.sh
-          pytest -s -v --exitfirst -n 8 --dist load \
-            tests/modules \
-            tests/ops/utils \
-            tests/ops/test_gdn_kernels.py \
-            tests/ops/test_gdn.py \
-            tests/ops/test_kda.py
+          set -uo pipefail
+
+          ASCEND_RT_VISIBLE_DEVICES=0 python -m benchmarks.ops.run \
+            --op chunk_gdn --base '' --json benchmark_chunk_gdn.json \
+            > chunk_gdn.log 2>&1 &
+          pid_gdn=$!
+          ASCEND_RT_VISIBLE_DEVICES=1 python -m benchmarks.ops.run \
+            --op chunk_kda --base '' --json benchmark_chunk_kda.json \
+            > chunk_kda.log 2>&1 &
+          pid_kda=$!
+          ASCEND_RT_VISIBLE_DEVICES=2 python benchmarks/modules/benchmark_conv.py \
+            > conv1d.log 2>&1 &
+          pid_conv1d=$!
+
+          status=0
+          wait "$pid_gdn" || status=1
+          wait "$pid_kda" || status=1
+          wait "$pid_conv1d" || status=1
+
+          echo "========== chunk_gdn =========="
+          cat chunk_gdn.log
+          echo "========== chunk_kda =========="
+          cat chunk_kda.log
+          echo "========== conv1d =========="
+          cat conv1d.log
+          exit "$status"
+
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: ascend-a2-benchmark-results
+          path: |
+            benchmark_chunk_gdn.json
+            benchmark_chunk_kda.json
+            conv_benchmark/
+          if-no-files-found: ignore
+          retention-days: 10
