@@ -311,33 +311,32 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64_npu(
                         else:
                             b_h4 *= exp2(b_gk_last4)[:, None]
 
-                b_v = b_v.to(k.dtype.element_ty)
 
                 # load k (K-segmented), update b_h += dot(b_k_seg, b_v)
                 k_base = k + bos * H * K + (i_h // (HV // H)) * K
                 p_k1 = tl.make_block_ptr(k_base, (K, T), (1, stride_k), (0, i_t * BT), (64, BT), (0, 1))
-                b_k = tl.load(p_k1, boundary_check=(0, 1))
+                b_k = tl.load(p_k1, boundary_check=(0, 1)).to(tl.float32)
                 if STATE_V_FIRST:
                     b_h1 += tl.trans(tl.dot(b_k, b_v))
                 else:
                     b_h1 += tl.dot(b_k, b_v)
                 if K > 64:
                     p_k2 = tl.make_block_ptr(k_base, (K, T), (1, stride_k), (64, i_t * BT), (64, BT), (0, 1))
-                    b_k = tl.load(p_k2, boundary_check=(0, 1))
+                    b_k = tl.load(p_k2, boundary_check=(0, 1)).to(tl.float32)
                     if STATE_V_FIRST:
                         b_h2 += tl.trans(tl.dot(b_k, b_v))
                     else:
                         b_h2 += tl.dot(b_k, b_v)
                 if K > 128:
                     p_k3 = tl.make_block_ptr(k_base, (K, T), (1, stride_k), (128, i_t * BT), (64, BT), (0, 1))
-                    b_k = tl.load(p_k3, boundary_check=(0, 1))
+                    b_k = tl.load(p_k3, boundary_check=(0, 1)).to(tl.float32)
                     if STATE_V_FIRST:
                         b_h3 += tl.trans(tl.dot(b_k, b_v))
                     else:
                         b_h3 += tl.dot(b_k, b_v)
                 if K > 192:
                     p_k4 = tl.make_block_ptr(k_base, (K, T), (1, stride_k), (192, i_t * BT), (64, BT), (0, 1))
-                    b_k = tl.load(p_k4, boundary_check=(0, 1))
+                    b_k = tl.load(p_k4, boundary_check=(0, 1)).to(tl.float32)
                     if STATE_V_FIRST:
                         b_h4 += tl.trans(tl.dot(b_k, b_v))
                     else:
