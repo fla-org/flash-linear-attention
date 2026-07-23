@@ -218,28 +218,28 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64_npu(
                 # load w (K-segmented), accumulate b_v = sum_k dot(b_w_k, b_h_k)
                 w_base = w + bos * HV * K + i_h * K
                 p_w1 = tl.make_block_ptr(w_base, (T, K), (stride_w, 1), (i_t * BT, 0), (BT, 64), (1, 0))
-                b_w = tl.load(p_w1, boundary_check=(0, 1))
+                b_w = tl.load(p_w1, boundary_check=(0, 1)).to(tl.float32)
                 if STATE_V_FIRST:
                     b_v = tl.dot(b_w, tl.trans(b_h1).to(b_w.dtype))
                 else:
                     b_v = tl.dot(b_w, b_h1.to(b_w.dtype))
                 if K > 64:
                     p_w2 = tl.make_block_ptr(w_base, (T, K), (stride_w, 1), (i_t * BT, 64), (BT, 64), (1, 0))
-                    b_w = tl.load(p_w2, boundary_check=(0, 1))
+                    b_w = tl.load(p_w2, boundary_check=(0, 1)).to(tl.float32)
                     if STATE_V_FIRST:
                         b_v += tl.dot(b_w, tl.trans(b_h2).to(b_w.dtype))
                     else:
                         b_v += tl.dot(b_w, b_h2.to(b_w.dtype))
                 if K > 128:
                     p_w3 = tl.make_block_ptr(w_base, (T, K), (stride_w, 1), (i_t * BT, 128), (BT, 64), (1, 0))
-                    b_w = tl.load(p_w3, boundary_check=(0, 1))
+                    b_w = tl.load(p_w3, boundary_check=(0, 1)).to(tl.float32)
                     if STATE_V_FIRST:
                         b_v += tl.dot(b_w, tl.trans(b_h3).to(b_w.dtype))
                     else:
                         b_v += tl.dot(b_w, b_h3.to(b_w.dtype))
                 if K > 192:
                     p_w4 = tl.make_block_ptr(w_base, (T, K), (stride_w, 1), (i_t * BT, 192), (BT, 64), (1, 0))
-                    b_w = tl.load(p_w4, boundary_check=(0, 1))
+                    b_w = tl.load(p_w4, boundary_check=(0, 1)).to(tl.float32)
                     if STATE_V_FIRST:
                         b_v += tl.dot(b_w, tl.trans(b_h4).to(b_w.dtype))
                     else:
