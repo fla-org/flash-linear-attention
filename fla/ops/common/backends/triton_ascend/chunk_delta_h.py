@@ -262,7 +262,8 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64_npu(
                     m_t = (i_t * BT + tl.arange(0, BT)) < T
 
                 # load v and compute v_new = v - b_v
-                p_v = tl.make_block_ptr(v + bos * HV * V + i_h * V, (T, V), (stride_v, 1), (i_t * BT, v_start), (BT, BV), (1, 0))
+                p_v = tl.make_block_ptr(v + bos * HV * V + i_h * V, (T, V), (stride_v, 1),
+                                        (i_t * BT, v_start), (BT, BV), (1, 0))
                 b_v = tl.load(p_v, boundary_check=(0, 1)).to(tl.float32) - b_v
 
                 if SAVE_NEW_VALUE:
