@@ -48,6 +48,7 @@ def causal_conv1d_fwd_kernel(
     stride_x_n,
     stride_x_t,
     stride_x_d,
+    stride_y_n,
     D: tl.constexpr,
     W: tl.constexpr,
     BT: tl.constexpr,
@@ -67,7 +68,7 @@ def causal_conv1d_fwd_kernel(
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
-        p_x = x + bos * stride_x_t
+        p_x = x + tl.cast(i_b, tl.int64) * stride_x_n + bos * stride_x_t
     else:
         i_n = i_b
         bos, eos = (i_b * T).to(tl.int64), (i_b * T + T).to(tl.int64)
@@ -130,7 +131,7 @@ def causal_conv1d_fwd_kernel(
         b_residual = tl.load(p_residual, boundary_check=(0, 1))
         b_y += b_residual
 
-    p_y = tl.make_block_ptr(y + bos * D, (T, D), (D, 1), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
+    p_y = tl.make_block_ptr(y + tl.cast(i_b, tl.int64) * stride_y_n + bos * D, (T, D), (D, 1), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
     tl.store(p_y, tl.cast(b_y, dtype=p_y.dtype.element_ty, fp_downcast_rounding='rtne'), boundary_check=(0, 1))
 
 
@@ -174,6 +175,7 @@ def causal_conv1d_bwd_kernel(
     stride_dy_n,  # dy batch stride
     stride_dy_t,  # dy time stride
     stride_dy_d,  # dy dim stride
+    stride_y_n,   # y batch stride (only used when ACTIVATION is set)
     D: tl.constexpr,
     W: tl.constexpr,
     BT: tl.constexpr,
@@ -227,7 +229,7 @@ def causal_conv1d_bwd_kernel(
             # [BT, BD]
             b_dy = tl.load(p_dy_blk, boundary_check=(0, 1)).to(tl.float32)
             if ACTIVATION == 'swish' or ACTIVATION == 'silu':
-                p_y = tl.make_block_ptr(y + bos * D, (T, D), (D, 1), (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
+                p_y = tl.make_block_ptr(y + tl.cast(i_b, tl.int64) * stride_y_n + bos * D, (T, D), (D, 1), (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
                 b_y = tl.load(p_y, boundary_check=(0, 1)).to(tl.float32)
                 b_ys = tl.sigmoid(b_y)
                 b_dy = b_dy * b_ys * (1 + b_y * (1 - b_ys))
@@ -249,7 +251,7 @@ def causal_conv1d_bwd_kernel(
             # [BT, BD]
             b_dy = tl.load(p_dy_blk, boundary_check=(0, 1)).to(tl.float32)
             if ACTIVATION == 'swish' or ACTIVATION == 'silu':
-                p_y = tl.make_block_ptr(y + bos * D, (T, D), (D, 1), (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
+                p_y = tl.make_block_ptr(y + tl.cast(i_b, tl.int64) * stride_y_n + bos * D, (T, D), (D, 1), (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
                 b_y = tl.load(p_y, boundary_check=(0, 1)).to(tl.float32)
                 b_ys = tl.sigmoid(b_y)
                 b_dy = b_dy * b_ys * (1 + b_y * (1 - b_ys))
@@ -271,7 +273,7 @@ def causal_conv1d_bwd_kernel(
                                          (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
             b_dy_shift = tl.load(p_dy_blk, boundary_check=(0, 1)).to(tl.float32)
             if ACTIVATION == 'swish' or ACTIVATION == 'silu':
-                p_y = tl.make_block_ptr(y + bos * D, (T, D), (D, 1), (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
+                p_y = tl.make_block_ptr(y + tl.cast(i_b, tl.int64) * stride_y_n + bos * D, (T, D), (D, 1), (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
                 b_y_shift = tl.load(p_y, boundary_check=(0, 1)).to(tl.float32)
                 b_ys = tl.sigmoid(b_y_shift)
                 b_dy_shift = b_dy_shift * b_ys * (1 + b_y_shift * (1 - b_ys))
@@ -286,7 +288,7 @@ def causal_conv1d_bwd_kernel(
                                         other=0.0).to(tl.float32)
                     if ACTIVATION == 'swish' or ACTIVATION == 'silu':
                         # use y[t] （not y[t+i_w]）
-                        b_y_head = tl.load(y + bos * D + o_t[:, None] * D + o_d,
+                        b_y_head = tl.load(y + tl.cast(i_b, tl.int64) * stride_y_n + bos * D + o_t[:, None] * D + o_d,
                                            mask=(mask_head_rows[:, None] & m_d[None, :]), other=0.0).to(tl.float32)
                         b_ys_head = tl.sigmoid(b_y_head)
                         b_dy_head = b_dy_head * b_ys_head * (1 + b_y_head * (1 - b_ys_head))
@@ -320,7 +322,7 @@ def causal_conv1d_bwd_kernel(
             b_dx += b_dht
 
     if IS_VARLEN:
-        p_dx = dx + bos * stride_dx_t
+        p_dx = dx + tl.cast(i_b, tl.int64) * stride_dx_n + bos * stride_dx_t
     else:
         p_dx = dx + tl.cast(i_b, tl.int64) * stride_dx_n
 
