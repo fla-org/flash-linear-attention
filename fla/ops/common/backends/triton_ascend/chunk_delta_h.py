@@ -312,7 +312,6 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64_npu(
                         else:
                             b_h4 *= exp2(b_gk_last4)[:, None]
 
-
                 # load k (K-segmented), update b_h += dot(b_k_seg, b_v)
                 k_base = k + bos * H * K + (i_h // (HV // H)) * K
                 p_k1 = tl.make_block_ptr(k_base, (K, T), (1, stride_k), (0, i_t * BT), (64, BT), (0, 1))
