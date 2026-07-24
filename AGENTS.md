@@ -30,6 +30,13 @@ The style rules for comments and docstrings live in `CONTRIBUTING.md` ("Docstrin
 - **Fix the words, not the style.** Correcting stale content is not a license to reformat the surrounding docstring or comment style.
 - Before opening a PR, re-read your own diff once with fresh eyes: check every comment it adds against the anti-pattern list, and every comment it invalidates against the rule above.
 
+## Pre-PR self-check
+
+Before opening a PR, verify both of these and be ready to show the answer:
+
+- **Minimal diff**: every changed line serves the PR's stated purpose. Drop drive-by reformats, unrelated cleanups, and speculative generality before pushing, not after a reviewer asks (see CONTRIBUTING "Core Principles" 5).
+- **Blast radius**: for every shared symbol you touched, all callsites still hold (Core Principle 4 — audit them in one pass, don't assume). For any behavior or numerics change, the PR description must state who is affected — which shapes, dtypes, backends, checkpoints, or downstream users — or state explicitly why no one is. "Tests pass" is not an impact analysis.
+
 ## Review comments
 
 Keep review/PR comments concise and natural — skip heavy `**1.** **2.**` scaffolding, write like a person.
