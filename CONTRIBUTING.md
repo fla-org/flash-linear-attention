@@ -183,6 +183,17 @@ Keep inline comments restrained, especially in Triton kernels: shape annotations
 
 Put explanatory comments on their own line **above** the code they describe, not trailing it — write `# why` on the line above `x = f()`, not `x = f()  # why`. Start the comment text with a lowercase letter (`# guard against overflow`, not `# Guard against overflow`), and wrap a multi-line comment at clause boundaries like other prose. Reserve inline trailing comments for terse shape / type annotations like `# [BL, BD]`.
 
+Comments and docstrings must not go stale: when a change makes one factually wrong — a renamed symbol, a changed default, a removed code path — update or delete it in the same commit. An outdated comment is worse than none. If you can't tell whether a comment is still true, keep it and say so in the PR description; don't delete a "why" comment you merely can't verify. Fixing stale content means fixing the words, not reformatting the surrounding comment or docstring style.
+
+Beyond narration that restates the next line, these comment patterns are banned:
+
+- **Banner blocks** (`##### ... #####`): section boundaries should be visible from the code structure; use a blank line.
+- **Commented-out code**: delete it — git has the history. Exception: commented-out *configurations* deliberately kept as documented alternatives (e.g. known-good autotune configs for a future dtype) may stay if a one-line comment says why they are kept.
+- **Personal asides** (`# XY: remove this?`): a name in a comment is not an owner. Convert it to a TODO with an anchor, or delete it.
+- **Anchorless TODOs**: a TODO must name when it can be acted on — a link to a tracking issue (this repo or upstream), a version bound (`TODO: drop once we require triton>=3.5`), or an externally checkable event. This applies to TODOs in docstrings too; see `fla/ops/utils/op.py::safe_dot` for the pattern.
+
+Never treated as excess comments: the license header required by `scripts/check_header.py`, a one-line attribution with a URL for adapted code, shape/dtype annotations, and `NOTE:` / `WARNING:` prefixes on a genuine "why" comment.
+
 ### Prose and Markdown
 
 Don't hard-wrap prose at an arbitrary short column — this covers Markdown files, Python docstrings (including `Args:` / `Returns:` descriptions), and comment paragraphs. Either keep a paragraph on a single line, or break **only at sentence or clause boundaries** (after a `.`, `,`, `;`, or `—`), never mid-clause. In Python files the 127-character limit still applies, so wrap a docstring or comment at a clause boundary before it reaches the limit. Format Markdown tables with aligned columns so the `|` separators line up; table rows are exempt from the line limit.
