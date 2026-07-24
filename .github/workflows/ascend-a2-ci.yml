@@ -100,7 +100,7 @@ jobs:
           assert IS_NPU, "Expected NPU backend (IS_NPU=True)"
           PY
 
-      - name: Run fla/modules and fla/ops/utils, gdn, kda tests
+      - name: Run fla/modules and fla/ops/utils, gdn, kda, attnres tests
         shell: bash
         env:
           FLA_NPU_XDIST: "1"
@@ -111,4 +111,5 @@ jobs:
             tests/ops/utils \
             tests/ops/test_gdn_kernels.py \
             tests/ops/test_gdn.py \
-            tests/ops/test_kda.py
+            tests/ops/test_kda.py \
+            tests/ops/test_attnres.py

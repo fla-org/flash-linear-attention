@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from fla.ops.attnres import fused_attnres, naive_attnres
-from fla.utils import assert_close, device
+from fla.utils import IS_NPU, assert_close, device
 
 
 @pytest.mark.parametrize(
@@ -110,3 +110,64 @@ def test_attnres(
     assert_close('dv', torch.stack([r.grad for r in residuals_ref]), torch.stack(tri_dvs), 0.005)
     if fuse_output_norm:
         assert_close('dow', output_rms_weight_ref.grad, tri_dow, 0.005)
+
+
+_TRITON_ASCEND_ATTNRES_OPS = ('fused_attnres',)
+
+
+def _spy_on_triton_ascend_attnres_backend():
+    """Patch every op of the Triton-Ascend AttnRes backend to record dispatched calls."""
+    from fla.ops.backends import BackendRegistry
+
+    BackendRegistry.ensure_initialized('attnres')
+    backend = BackendRegistry._registries['attnres']._backends.get('triton_ascend')
+    assert backend is not None, 'Triton-Ascend AttnRes backend is not registered'
+
+    calls = []
+    for name in _TRITON_ASCEND_ATTNRES_OPS:
+        original = getattr(backend, name)
+
+        def make_spy(name, original):
+            def spy(*args, **kwargs):
+                calls.append(name)
+                return original(*args, **kwargs)
+            return spy
+
+        setattr(backend, name, make_spy(name, original))
+    return backend, calls
+
+
+@pytest.mark.skipif(not IS_NPU, reason='Triton-Ascend AttnRes backend routing is only exercised on NPU')
+def test_triton_ascend_backend_routing():
+    """fused_attnres must actually dispatch to the Triton-Ascend backend on NPU.
+
+    Numerical parity tests alone cannot catch silently-failing verifiers: if
+    every verifier rejected, the call would fall back to the default CUDA Triton
+    path and parity tests would still pass, leaving the NPU kernels dead.
+    """
+    backend, calls = _spy_on_triton_ascend_attnres_backend()
+    try:
+        L, B, T, D = 3, 1, 64, 128
+        dtype = torch.float16
+        residuals = [
+            torch.randn(B, T, D, dtype=dtype, device=device).requires_grad_(True)
+            for _ in range(L)
+        ]
+        query = torch.randn(D, dtype=dtype, device=device).requires_grad_(True)
+        rms_weight = torch.randn(D, dtype=dtype, device=device).requires_grad_(True)
+
+        calls.clear()
+        o = fused_attnres(
+            query=query,
+            residuals=residuals,
+            rms_weight=rms_weight,
+            scale=D ** -0.5,
+            checkpoint_level=1,
+        )
+        (o * torch.randn_like(o)).sum().backward()
+        assert calls == ['fused_attnres'], (
+            f'fused_attnres not routed to the Triton-Ascend backend (dispatched: {calls})'
+        )
+    finally:
+        for name in _TRITON_ASCEND_ATTNRES_OPS:
+            delattr(backend, name)
