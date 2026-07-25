@@ -29,6 +29,7 @@ Guidance for AI coding agents (Claude Code, Codex, etc.) working in this repo.
 The style rules for comments and docstrings live in `CONTRIBUTING.md` ("Docstrings and Comments"), including the banned anti-patterns. What follows is agent-specific behavior:
 
 - **You own the comments your change invalidates.** When a change makes a comment or docstring in the code you touched factually wrong, fix it or delete it in the same commit — "the code you touched" means the same function, kernel, or class, not a repo-wide sweep for stale mentions. If you can't tell whether a comment is still true, keep it and flag it in the PR description; never delete a "why" comment just because you can't verify it.
+- **Comments are not your scratchpad.** State design conclusions, not the journey: "not X, it does not compile" is a welcome why comment; "tried X first, then switched to Y" is chain-of-thought noise. This covers docstrings too.
 - **Fix the words, not the style.** Correcting stale content is not a license to reformat the surrounding docstring or comment style.
 - Before opening a PR, re-read your own diff once with fresh eyes: check every comment it adds against the anti-pattern list, and every comment it invalidates against the rule above.
 

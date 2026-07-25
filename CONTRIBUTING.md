@@ -167,6 +167,8 @@ Key rules:
 
 ### Docstrings and Comments
 
+Comments and docstrings are hints for other readers, not a chain of thought. Give the reader what the code cannot say for itself, in as few words as possible — correct, simple, and with no narration of your reasoning.
+
 Use a two-line hanging format for `Args:` / `Returns:` entries: a `name (type, Optional):` header line, then the description and `Default:` on the next indented line(s).
 
 ```python
