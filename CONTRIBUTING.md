@@ -211,10 +211,14 @@ Don't hard-wrap prose at an arbitrary short column — this covers Markdown file
 
 - Kernel functions use `@triton.jit` with `do_not_specialize=['T']` for the sequence-length argument.
 - Use `tl.constexpr` for compile-time constants (block sizes, flags like `USE_INITIAL_STATE`).
-- Do not introduce new `tl.make_block_ptr` use; Triton marks it deprecated. Prefer
-  `TensorDescriptor` / `tl.make_tensor_descriptor` when descriptor semantics are
-  needed, or explicit `tl.load` / `tl.store` pointer arithmetic following an
-  existing validated kernel pattern.
+- Write block accesses as explicit offset vectors (`offset + tl.arange`) with
+  plain `tl.load` / `tl.store` plus matching `mask=` / `other=`. Do not use
+  `tl.make_block_ptr` / `tl.advance`: they are removed from Triton and no longer
+  compile. Do not reach for `tl.make_tensor_descriptor` either — descriptors
+  require stride-1 innermost dims and 16-byte alignment, so they cannot express
+  the transposed blocks used in backward kernels, and they buy nothing elsewhere.
+  Mask exactly the dimensions that can overrun the tensor's logical shape — no
+  more, no less.
 - Treat program IDs and grid-derived indices as potentially narrow integers.
   Cast them to `tl.int64` before multiplying by sizes, strides, or sequence
   offsets. This is especially important for non-first grid dimensions on NVIDIA
