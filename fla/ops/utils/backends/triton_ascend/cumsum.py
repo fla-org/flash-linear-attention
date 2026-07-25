@@ -32,7 +32,25 @@ _CUMSUM_SAFETY_MARGIN = 0.85
 _FALLBACK_BT_GLOBAL = 32
 _FALLBACK_BS_LOCAL = 32
 _FALLBACK_BS_GLOBAL = 16
+_FALLBACK_BT_LOCAL = 32
 _MAX_BT_GLOBAL = 256
+
+
+def _get_local_scalar_bt(H: int, chunk_size: int, T: int | None = None) -> int:
+    """UB-safe BLOCK_T for local scalar cumsum on NPU."""
+    max_t = T if T is not None else (2**18)
+    BT = compute_row_tile_block_size(
+        max_t,
+        H,
+        _CUMSUM_SCALAR_MEM_MULT,
+        tiling_row=True,
+        safety_margin=_CUMSUM_SAFETY_MARGIN,
+        dtype_size=4,
+        fallback=_FALLBACK_BT_LOCAL,
+        min_block=chunk_size,
+    )
+    BT = (BT // chunk_size) * chunk_size
+    return max(BT, chunk_size)
 
 
 def get_npu_properties():
@@ -207,7 +225,7 @@ def chunk_local_cumsum_scalar_kernel_npu(
             b_o = tl.trans(b_o, (1, 0, 2))
             b_o = tl.reshape(b_o, (BLOCK_T, H))
 
-        tl.store(ptr_o, b_o.to(s.dtype.element_ty), boundary_check=(0,))
+        tl.store(ptr_o, b_o.to(ptr_o.dtype.element_ty), boundary_check=(0,))
     return
 
 
@@ -379,7 +397,7 @@ def chunk_local_cumsum_scalar_npu(
     else:
         B, T, H = g.shape
     assert chunk_size == 2**(chunk_size.bit_length()-1), "chunk_size must be a power of 2"
-    OPTIM_BLOCK_SIZE = triton.next_power_of_2((2**18) // (H * chunk_size))
+    OPTIM_BLOCK_SIZE = _get_local_scalar_bt(H, chunk_size, T=T)
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size=OPTIM_BLOCK_SIZE)
     num_blocks = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, OPTIM_BLOCK_SIZE)
