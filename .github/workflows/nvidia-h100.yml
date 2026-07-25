@@ -21,11 +21,52 @@ on:
       - main
 
 jobs:
+  # Detect PRs that only touch NPU-only code (triton-ascend backend files,
+  # Ascend workflow definitions) so the H100 jobs below can skip them.
+  # Shared files — including backend __init__.py files, which GPU imports
+  # unconditionally — always get the full GPU pipeline. Push events and
+  # titles containing '[nv]' force the full pipeline.
+  changes:
+    name: Detect NPU-only changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      npu_only: ${{ steps.detect.outputs.npu_only }}
+    steps:
+      - name: Detect NPU-only diff
+        id: detect
+        uses: actions/github-script@v9.0.0
+        with:
+          script: |
+            if (context.eventName !== 'pull_request' && context.eventName !== 'pull_request_review') {
+              core.setOutput('npu_only', 'false');
+              return;
+            }
+            const pr = context.payload.pull_request;
+            if (pr.title.includes('[nv]')) {
+              core.info('title contains [nv]: forcing H100 CI');
+              core.setOutput('npu_only', 'false');
+              return;
+            }
+            const { owner, repo } = context.repo;
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner, repo, pull_number: pr.number, per_page: 100,
+            });
+            // Safe set: triton-ascend backend files (except __init__.py, which
+            // GPU imports unconditionally) and Ascend workflow definitions.
+            const safePattern = /^fla\/(.+\/)?backends\/triton_ascend\/(?!.*__init__\.py$)|^\.github\/workflows\/ascend-/;
+            const unsafe = files.filter(f => !safePattern.test(f.filename)).map(f => f.filename);
+            if (unsafe.length > 0) {
+              core.info('GPU-affecting files changed: ' + unsafe.join(', '));
+            }
+            core.setOutput('npu_only', files.length > 0 && unsafe.length === 0 ? 'true' : 'false');
+
   test-h100-pytorch-2-12:
     name: Test H100 (PyTorch 2.12)
     # Test on all main commits and PRs, but skip on closed PRs
-    # to avoid running tests on merged PRs.
-    if: github.event_name != 'pull_request_review' && (github.event_name != 'pull_request' || github.event.action != 'closed')
+    # to avoid running tests on merged PRs, and skip NPU-only PRs.
+    needs: changes
+    if: needs.changes.outputs.npu_only != 'true' && github.event_name != 'pull_request_review' && (github.event_name != 'pull_request' || github.event.action != 'closed')
     uses: ./.github/workflows/reusable-ci-tests.yml
     with:
       runner: 'nvidia-h100-1'
@@ -35,9 +76,11 @@ jobs:
 
   check_h100_pytorch_2_7:
     name: Check H100 PyTorch 2.7 Eligibility
+    needs: changes
     if: >
-      (github.event_name == 'pull_request' && github.event.action != 'closed') ||
-      (github.event_name == 'pull_request_review' && github.event.review.state == 'approved' && github.event.pull_request.state == 'open')
+      needs.changes.outputs.npu_only != 'true' &&
+      ((github.event_name == 'pull_request' && github.event.action != 'closed') ||
+      (github.event_name == 'pull_request_review' && github.event.review.state == 'approved' && github.event.pull_request.state == 'open'))
     runs-on: ubuntu-latest
     timeout-minutes: 90
     outputs:

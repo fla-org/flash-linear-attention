@@ -244,8 +244,8 @@ def layer_norm_gated_bwd_kernel(
 
     # the caller guarantees NS = min(SM, T), so every program has at least one token.
     # the last program's range may slightly exceed T (since BS = ceil(T/NS));
-    # make_block_ptr uses the true tensor shape (T, D), so boundary_check
-    # handles the partial tail tile by zero-padding loads and skipping stores.
+    # accesses are bounded by the true tensor shape (T, D), so the partial
+    # tail tile is handled by zero-padding loads and skipping stores.
     # the m_t mask below further ensures dw/db only accumulate valid rows (< T).
     for i_t in range(i_s * BS, i_s * BS + BS, BT):
         o_t = (i_t + tl.arange(0, BT)).to(tl.int64)
@@ -570,7 +570,7 @@ def layer_norm_gated_bwd(
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
     # cap program count to T so no program is completely idle.
     # without this, high-SM GPUs (e.g. B200, 160 SMs) with small T would
-    # launch idle programs whose make_block_ptr offsets exceed the tensor shape.
+    # launch idle programs whose tile offsets exceed the tensor shape.
     NS = min(get_multiprocessor_count(x.device.index), T)
     BS = math.ceil(T / NS)
 

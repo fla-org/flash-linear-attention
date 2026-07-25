@@ -24,7 +24,7 @@ BV_LIST = [64, 128] if check_shared_mem('ampere') else [16, 32]
 def _prune_gla_bwd_configs(configs, nargs, **kwargs):
     # Keep a tile only if it leaves headroom below its dim, or is the smallest
     # option (so small dims still autotune); this avoids a software-pipelined
-    # make_block_ptr prefetching past the tensor. K/V arrive as launch kwargs.
+    # block load prefetching past the tensor. K/V arrive as launch kwargs.
     args = {**(nargs or {}), **kwargs}
     K, V = args['K'], args['V']
     min_bk = min(c.kwargs['BK'] for c in configs)
