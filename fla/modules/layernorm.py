@@ -381,7 +381,7 @@ def layer_norm_bwd_kernel(
         b_b = tl.load(b + i_g * D + o_d, mask=m_d, other=0.0).to(tl.float32)
         b_db = tl.zeros((BT, BD), dtype=tl.float32)
 
-    # Tg: number of tokens per group, used as the logical shape for make_block_ptr.
+    # Tg: number of tokens per group, used as the logical row count for tile indexing.
     # for mean/rstd with shape (T,) and stride (G,), the strided view has Tg elements per group.
     # the caller guarantees NS capped so every program has work.
     # the last program's range may slightly exceed Tg (since BS = cdiv(T, NS));
@@ -664,7 +664,7 @@ def layer_norm_bwd(
     # each program handles one group only.
     # cap per-group program count to T // G so no program is completely idle.
     # without this, high-SM GPUs (e.g. B200, 160 SMs) with small T would
-    # launch idle programs whose make_block_ptr offsets exceed the tensor shape.
+    # launch idle programs whose tile offsets exceed the tensor shape.
     NS = min(triton.cdiv(get_multiprocessor_count(x.device.index), G), T // G) * G
     BS = triton.cdiv(T, NS)
     GS = NS // G
