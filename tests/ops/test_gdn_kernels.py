@@ -1111,14 +1111,15 @@ def chunk_gated_delta_rule_bwd_dhu_ref(
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'HV', 'D', 'use_h0', 'dtype'),
+    ('B', 'T', 'H', 'HV', 'D', 'use_h0', 'use_g', 'dtype'),
     [
-        pytest.param(B, T, H, HV, D, use_h0, dtype,
-                     id=f"B{B}-T{T}-H{H}-HV{HV}-D{D}-use_h0{use_h0}-{dtype}")
-        for (B, T, H, HV, D, use_h0, dtype) in [
-            (2, 128, 2, 2, 64, True, torch.bfloat16),
-            (2, 128, 2, 4, 64, False, torch.bfloat16),
-            (1, 256, 4, 4, 32, True, torch.float16),
+        pytest.param(B, T, H, HV, D, use_h0, use_g, dtype,
+                     id=f"B{B}-T{T}-H{H}-HV{HV}-D{D}-use_h0{use_h0}-use_g{use_g}-{dtype}")
+        for (B, T, H, HV, D, use_h0, use_g, dtype) in [
+            (2, 128, 2, 2, 64, True, True, torch.bfloat16),
+            (2, 128, 2, 4, 64, False, True, torch.bfloat16),
+            (1, 256, 4, 4, 32, True, True, torch.float16),
+            (2, 128, 2, 2, 64, True, False, torch.bfloat16),
         ]
     ],
 )
@@ -1129,6 +1130,7 @@ def test_chunk_gated_delta_rule_bwd_dhu(
     HV: int,
     D: int,
     use_h0: bool,
+    use_g: bool,
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
@@ -1139,7 +1141,7 @@ def test_chunk_gated_delta_rule_bwd_dhu(
     w = torch.randn(B, T, HV, D, dtype=dtype, device=device)
     u = torch.randn(B, T, HV, D, dtype=dtype, device=device)
     do = torch.randn(B, T, HV, D, dtype=dtype, device=device)
-    g = _make_gate(B, T, HV)
+    g = _make_gate(B, T, HV) if use_g else None
     h0 = torch.randn(B, HV, D, D, dtype=torch.float32, device=device) if use_h0 else None
     dht = torch.randn(B, HV, D, D, dtype=torch.float32, device=device)
 
