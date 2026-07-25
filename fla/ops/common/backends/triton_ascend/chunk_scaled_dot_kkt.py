@@ -16,7 +16,29 @@ import triton.runtime.driver as driver
 
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp2
-from fla.utils import autotune_cache_kwargs, input_guard
+from fla.utils import input_guard
+from fla.utils.ascend_ub_manager import compute_row_tile_block_size
+
+# Peak live fp32 tiles: b_A[BT,BT], b_k[BT,BK], plus tl.dot intermediate buffer
+_CHUNK_SCALED_DOT_KKT_MEM_MULT = 5.0
+_SAFETY_MARGIN = 0.85
+_FALLBACK_BK = 16
+_MAX_BK_FWD = 128
+
+
+def _get_fwd_bk(BT: int, K: int) -> int:
+    """UB-safe BK tile size for chunk_scaled_dot_kkt_fwd on NPU."""
+    return compute_row_tile_block_size(
+        BT,
+        K,
+        _CHUNK_SCALED_DOT_KKT_MEM_MULT,
+        tiling_row=False,
+        safety_margin=_SAFETY_MARGIN,
+        dtype_size=4,
+        fallback=_FALLBACK_BK,
+        min_block=16,
+        max_block=min(_MAX_BK_FWD, triton.next_power_of_2(K)),
+    )
 
 
 def get_npu_properties():
@@ -29,16 +51,6 @@ def get_npu_properties():
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
         "USE_G": lambda args: args["g"] is not None,
     }
-)
-@triton.autotune(
-    configs=[
-        triton.Config({'BK': BK}, num_warps=num_warps, num_stages=num_stages)
-        for BK in [32, 64, 128]
-        for num_warps in [2, 4, 8]
-        for num_stages in [2, 3, 4]
-    ],
-    key=['H', 'HV', 'K', 'BT', 'IS_VARLEN'],
-    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=["T", "B", "bh_step", "task_num", "num_core"])
 def chunk_scaled_dot_kkt_fwd_kernel_npu(
@@ -61,8 +73,9 @@ def chunk_scaled_dot_kkt_fwd_kernel_npu(
     IS_VARLEN: tl.constexpr,
     USE_G: tl.constexpr,
 ):
-    bt_stride = B * T
+    bt_stride = B.to(tl.int64) * T.to(tl.int64)
     core_id = tl.program_id(0)
+    T64 = T.to(tl.int64)
 
     for task_id in tl.range(core_id, task_num, num_core):
         i_t_i = task_id // bh_step
@@ -73,10 +86,12 @@ def chunk_scaled_dot_kkt_fwd_kernel_npu(
                 tl.load(chunk_indices + i_t_i * 2).to(tl.int32),
                 tl.load(chunk_indices + i_t_i * 2 + 1).to(tl.int32),
             )
-            bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+            bos = tl.load(cu_seqlens + i_n).to(tl.int64)
+            eos = tl.load(cu_seqlens + i_n + 1).to(tl.int64)
             T = eos - bos
         else:
-            bos, eos = i_b * T, i_b * T + T
+            bos = i_b.to(tl.int64) * T64
+            eos = bos + T64
             i_t = i_t_i
         o_t = tl.arange(0, BT)
         o_t_fp32 = o_t.to(tl.float32)
@@ -144,12 +159,13 @@ def chunk_scaled_dot_kkt_fwd_npu(
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     A = torch.zeros(B, T, HV, BT, device=k.device, dtype=output_dtype)
+    BK = _get_fwd_bk(BT, K)
 
     num_core = get_npu_properties()["num_aicore"]
     bh_step = B * HV
     task_num = NT * bh_step
     g_arg = torch.permute(g, (2, 0, 1)).contiguous() if g is not None else g
-    beta_arg = torch.permute(beta, (2, 0, 1)).contiguous() if beta is not None else beta
+    beta_arg = torch.permute(beta, (2, 0, 1)).contiguous()
     chunk_scaled_dot_kkt_fwd_kernel_npu[(num_core,)](
         k=k,
         g=g_arg,
@@ -166,5 +182,6 @@ def chunk_scaled_dot_kkt_fwd_npu(
         HV=HV,
         K=K,
         BT=BT,
+        BK=BK,
     )
     return A
