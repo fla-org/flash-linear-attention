@@ -15,7 +15,7 @@ Guidance for AI coding agents (Claude Code, Codex, etc.) working in this repo.
 - **Check for duplicates first**: search open issues/PRs before starting so you don't redo in-flight work — `gh pr list --repo fla-org/flash-linear-attention --state open --search "<keywords>"`.
 - **No busywork PRs**: don't open a one-off PR for a single typo or isolated style tweak; bundle trivial cleanups into substantive work.
 - **No tool attribution**: no `Co-Authored-By` trailers, "Generated with ..." lines, or AI-tool names in commit messages, PR titles/bodies, or review comments.
-- **No block pointers in Triton code**: write block accesses as explicit offset vectors with masked `tl.load` / `tl.store`; `tl.make_block_ptr` / `tl.advance` no longer compile. TMA descriptors are fine as a justified hot-path optimization, not a default (see CONTRIBUTING "Triton Kernels").
+- Grep your diff for `tl.make_block_ptr` / `tl.advance` before opening a PR — banned from mainline Triton code (see CONTRIBUTING "Triton Kernels").
 - `gh pr edit` fails on this repo (classic-Projects GraphQL error). Edit a PR title/body via the REST API instead: `gh api -X PATCH repos/fla-org/flash-linear-attention/pulls/<N> -f title='...' -F body=@file`.
 
 ## Scope and direction

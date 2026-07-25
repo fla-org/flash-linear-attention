@@ -212,14 +212,17 @@ Don't hard-wrap prose at an arbitrary short column — this covers Markdown file
 - Kernel functions use `@triton.jit` with `do_not_specialize=['T']` for the sequence-length argument.
 - Use `tl.constexpr` for compile-time constants (block sizes, flags like `USE_INITIAL_STATE`).
 - Write block accesses as explicit offset vectors (`offset + tl.arange`) with
-  plain `tl.load` / `tl.store` plus matching `mask=` / `other=`. Do not use
-  `tl.make_block_ptr` / `tl.advance`: they are removed from Triton and no longer
-  compile. `tl.make_tensor_descriptor` (TMA) is a deliberate optimization for
-  hot-path tiles on Hopper and newer, not a default substitute for block access —
-  use it where it measurably pays off and its constraints hold (16-byte
-  alignment, stride-1 innermost dim, no transposed blocks), e.g. behind a
-  `USE_TMA` flag as in `fla/ops/utils/solve_tril.py`. Mask exactly the
-  dimensions that can overrun the tensor's logical shape — no more, no less.
+  plain `tl.load` / `tl.store`. Masked loads must cover every dimension that
+  can overrun at any call site, with `other=` where masked lanes matter; assert
+  any divisibility you rely on. Do not use `tl.make_block_ptr` / `tl.advance`:
+  deprecated upstream and removed in triton main. (`backends/triton_ascend/` is
+  exempt — triton-ascend still requires block pointers.)
+- `tl.make_tensor_descriptor` (TMA) is an opt-in optimization for hot-path
+  tiles on Hopper and newer, not a default substitute for block access. It
+  requires 16-byte-aligned bases and stride multiples, a stride-1 innermost
+  dim, no transposed blocks, and a registered allocator for device-side
+  descriptors. Use it when a per-kernel benchmark in the PR shows it pays off,
+  e.g. behind a flag as in `fla/ops/utils/solve_tril.py`.
 - Treat program IDs and grid-derived indices as potentially narrow integers.
   Cast them to `tl.int64` before multiplying by sizes, strides, or sequence
   offsets. This is especially important for non-first grid dimensions on NVIDIA
