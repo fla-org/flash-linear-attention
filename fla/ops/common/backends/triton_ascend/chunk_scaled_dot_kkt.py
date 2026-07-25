@@ -86,9 +86,9 @@ def chunk_scaled_dot_kkt_fwd_kernel_npu(
                 tl.load(chunk_indices + i_t_i * 2).to(tl.int32),
                 tl.load(chunk_indices + i_t_i * 2 + 1).to(tl.int32),
             )
-            bos = tl.load(cu_seqlens + i_n).to(tl.int64)
-            eos = tl.load(cu_seqlens + i_n + 1).to(tl.int64)
-            T = eos - bos
+            bos = tl.load(cu_seqlens + i_n)
+            eos = tl.load(cu_seqlens + i_n + 1)
+            T = eos.to(tl.int32) - bos.to(tl.int32)
         else:
             bos = i_b.to(tl.int64) * T64
             eos = bos + T64
