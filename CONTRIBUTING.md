@@ -214,11 +214,12 @@ Don't hard-wrap prose at an arbitrary short column — this covers Markdown file
 - Write block accesses as explicit offset vectors (`offset + tl.arange`) with
   plain `tl.load` / `tl.store` plus matching `mask=` / `other=`. Do not use
   `tl.make_block_ptr` / `tl.advance`: they are removed from Triton and no longer
-  compile. Do not reach for `tl.make_tensor_descriptor` either — descriptors
-  require stride-1 innermost dims and 16-byte alignment, so they cannot express
-  the transposed blocks used in backward kernels, and they buy nothing elsewhere.
-  Mask exactly the dimensions that can overrun the tensor's logical shape — no
-  more, no less.
+  compile. `tl.make_tensor_descriptor` (TMA) is a deliberate optimization for
+  hot-path tiles on Hopper and newer, not a default substitute for block access —
+  use it where it measurably pays off and its constraints hold (16-byte
+  alignment, stride-1 innermost dim, no transposed blocks), e.g. behind a
+  `USE_TMA` flag as in `fla/ops/utils/solve_tril.py`. Mask exactly the
+  dimensions that can overrun the tensor's logical shape — no more, no less.
 - Treat program IDs and grid-derived indices as potentially narrow integers.
   Cast them to `tl.int64` before multiplying by sizes, strides, or sequence
   offsets. This is especially important for non-first grid dimensions on NVIDIA
