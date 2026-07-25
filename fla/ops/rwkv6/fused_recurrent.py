@@ -329,24 +329,31 @@ def fused_recurrent_rwkv6_bwd_kernel_dw(
 
     o_i = tl.arange(0, BT)
     m_i = tl.where(o_i[:, None] >= o_i[None, :], 1., 0.) if not REVERSE else tl.where(o_i[:, None] <= o_i[None, :], 1., 0.)
+    o_k = i_k * BK + tl.arange(0, BK)
+    m_k = o_k < K
 
     b_z = tl.zeros([BK], dtype=tl.float32)
 
     i_t = 0 if not REVERSE else NT - 1
     for _ in range(NT):
-        p_q = tl.make_block_ptr(q + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT + 1, i_k * BK), (BT, BK), (1, 0))
-        p_k = tl.make_block_ptr(k + (bos*H + i_h) * K, (T-1, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-        p_dq = tl.make_block_ptr(dq + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT + 1, i_k * BK), (BT, BK), (1, 0))
-        p_dk = tl.make_block_ptr(dk + (bos*H + i_h) * K, (T-1, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-        p_dw = tl.make_block_ptr(dw + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+        o_q = i_t.to(tl.int64) * BT + 1 + o_i
+        o_kt = i_t.to(tl.int64) * BT + o_i
+        m_q = (o_q[:, None] < T) & m_k[None, :]
+        m_kt = (o_kt[:, None] < T - 1) & m_k[None, :]
+        m_wt = (o_kt[:, None] < T) & m_k[None, :]
+        p_q = q + (bos*H + i_h) * K + o_q[:, None] * (H*K) + o_k[None, :]
+        p_k = k + (bos*H + i_h) * K + o_kt[:, None] * (H*K) + o_k[None, :]
+        p_dq = dq + (bos*H + i_h) * K + o_q[:, None] * (H*K) + o_k[None, :]
+        p_dk = dk + (bos*H + i_h) * K + o_kt[:, None] * (H*K) + o_k[None, :]
+        p_dw = dw + (bos*H + i_h) * K + o_kt[:, None] * (H*K) + o_k[None, :]
         # [BT, BK]
-        b_q = tl.load(p_q, boundary_check=(0, 1)).to(tl.float32)
-        b_dq = tl.load(p_dq, boundary_check=(0, 1)).to(tl.float32)
-        b_k = tl.load(p_k, boundary_check=(0, 1)).to(tl.float32)
-        b_dk = tl.load(p_dk, boundary_check=(0, 1)).to(tl.float32)
+        b_q = tl.load(p_q, mask=m_q, other=0.0).to(tl.float32)
+        b_dq = tl.load(p_dq, mask=m_q, other=0.0).to(tl.float32)
+        b_k = tl.load(p_k, mask=m_kt, other=0.0).to(tl.float32)
+        b_dk = tl.load(p_dk, mask=m_kt, other=0.0).to(tl.float32)
         b_dw = (b_q * b_dq * scale) - b_k * b_dk
         b_c = b_z[None, :] + tl.dot(m_i, b_dw, allow_tf32=False)
-        tl.store(p_dw, b_c.to(p_dw.dtype.element_ty), boundary_check=(0, 1))
+        tl.store(p_dw, b_c.to(p_dw.dtype.element_ty), mask=m_wt)
         if i_t >= 0:
             b_z += tl.sum(b_dw, 0)
 

@@ -63,11 +63,11 @@ def parallel_nsa_kernel_topk(
     BK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_bh = tl.program_id(0), tl.program_id(1)
+    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
 
     if IS_VARLEN:
-        i_n, i_t = tl.load(token_indices_q + i_t * 2).to(tl.int32), tl.load(token_indices_q + i_t * 2 + 1).to(tl.int32)
+        i_n, i_t = tl.load(token_indices_q + i_t * 2).to(tl.int32), tl.load(token_indices_q + i_t * 2 + 1).to(tl.int64)
         bos_q, eos_q = tl.load(cu_seqlens_q + i_n).to(tl.int64), tl.load(cu_seqlens_q + i_n + 1).to(tl.int64)
         bos_k, eos_k = tl.load(cu_seqlens_k + i_n).to(tl.int64), tl.load(cu_seqlens_k + i_n + 1).to(tl.int64)
         TQ = (eos_q - bos_q).to(tl.int32)
@@ -79,12 +79,15 @@ def parallel_nsa_kernel_topk(
         TC = tl.cdiv(TK, BS)
         boc = i_b * TC
     # boc is the start of the current sequence at [B, TC] dimensions
-    p_q = tl.make_block_ptr(q + (bos_q + i_t) * HQ * K, (HQ, K), (K, 1), (i_h * G, 0), (G, BK), (1, 0))
+    o_g = i_h * G + tl.arange(0, G)
+    o_d = tl.arange(0, BK)
+    m_q = (o_g[:, None] < HQ) & (o_d[None, :] < K)
+    p_q = q + (bos_q + i_t) * HQ * K + o_g[:, None] * K + o_d[None, :]
     Q_OFFSET = TK - TQ
 
     # the Q block is kept in the shared memory throughout the whole kernel
     # [G, BK]
-    b_q = tl.load(p_q, boundary_check=(0, 1))
+    b_q = tl.load(p_q, mask=m_q, other=0.0)
     b_q = (b_q * scale).to(b_q.dtype)
 
     # number of complete compression blocks visible to the query (q tokens are the last TQ of the sequence)
@@ -102,9 +105,9 @@ def parallel_nsa_kernel_topk(
         for i_c in range(0, NC, BC):
             o_c = i_c + tl.arange(0, BC)
 
-            p_k = tl.make_block_ptr(k + (boc * H + i_h) * K, (K, TC), (1, H*K), (0, i_c), (BK, BC), (0, 1))
+            p_k = k + (boc * H + i_h) * K + o_d[:, None] + o_c[None, :] * (H*K)
             # [BK, BC]
-            b_k = tl.load(p_k, boundary_check=(0, 1))
+            b_k = tl.load(p_k, mask=(o_d[:, None] < K) & (o_c[None, :] < TC), other=0.0)
 
             # [G, BC]
             b_s = tl.dot(b_q, b_k)
@@ -135,9 +138,9 @@ def parallel_nsa_kernel_topk(
     IC = (i_t + Q_OFFSET) // BS  # Idx of the current query block
     for i_c in range(0, IC + 1, BC):  # +1, because the current block might be also included
         o_c = i_c + tl.arange(0, BC)
-        p_k = tl.make_block_ptr(k + (boc * H + i_h) * K, (K, TC), (1, H*K), (0, i_c), (BK, BC), (0, 1))
+        p_k = k + (boc * H + i_h) * K + o_d[:, None] + o_c[None, :] * (H*K)
         # [BK, BC]
-        b_k = tl.load(p_k, boundary_check=(0, 1))
+        b_k = tl.load(p_k, mask=(o_d[:, None] < K) & (o_c[None, :] < TC), other=0.0)
         # [G, BC]
         b_s = tl.dot(b_q, b_k)
         b_s = tl.where(o_c < IC, b_s, float('-inf'))
@@ -163,7 +166,7 @@ def parallel_nsa_kernel_topk(
     m_top = tl.arange(0, BC // S) == 0
     b_top = tl.sum(m_top[:, None] * tl.reshape(o_i, [BC // S, S]), 0)
 
-    p_b = tl.make_block_ptr(block_indices + (bos_q + i_t) * H*S, (H*S,), (1,), (i_h * S,), (S,), (0,))
+    p_b = block_indices + (bos_q + i_t) * H*S + i_h * S + tl.arange(0, S)
     tl.store(p_b, b_top.to(p_b.dtype.element_ty))
 
 
@@ -207,13 +210,13 @@ def parallel_nsa_fwd_kernel(
     IS_VARLEN: tl.constexpr,
     USE_BLOCK_COUNTS: tl.constexpr,
 ):
-    i_t, i_v, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_t, i_v, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
     # k/v: [B, TK, H, *], q: [B, TQ, HQ, K], block_indices: [B, TQ, H, S], lse: [B, TQ, HQ]; G = HQ // H
 
     if IS_VARLEN:
         # token_indices_q maps a flattened query to its (sequence index, in-sequence position)
-        i_n, i_t = tl.load(token_indices_q + i_t * 2).to(tl.int32), tl.load(token_indices_q + i_t * 2 + 1).to(tl.int32)
+        i_n, i_t = tl.load(token_indices_q + i_t * 2).to(tl.int32), tl.load(token_indices_q + i_t * 2 + 1).to(tl.int64)
         bos_q, eos_q = tl.load(cu_seqlens_q + i_n).to(tl.int64), tl.load(cu_seqlens_q + i_n + 1).to(tl.int64)
         bos_k, eos_k = tl.load(cu_seqlens_k + i_n).to(tl.int64), tl.load(cu_seqlens_k + i_n + 1).to(tl.int64)
         TQ = (eos_q - bos_q).to(tl.int32)
@@ -235,13 +238,18 @@ def parallel_nsa_fwd_kernel(
     else:
         NS = S
 
-    p_q = tl.make_block_ptr(q + (bos_q + i_t) * HQ * K, (HQ, K), (K, 1), (i_h * G, 0), (G, BK), (1, 0))
+    o_g = i_h * G + tl.arange(0, G)
+    o_d = tl.arange(0, BK)
+    m_q = (o_g[:, None] < HQ) & (o_d[None, :] < K)
+    p_q = q + (bos_q + i_t) * HQ * K + o_g[:, None] * K + o_d[None, :]
     # the Q block is kept in shared memory throughout the kernel
     # [G, BK]
-    b_q = tl.load(p_q, boundary_check=(0, 1))
+    b_q = tl.load(p_q, mask=m_q, other=0.0)
     b_q = (b_q * scale).to(b_q.dtype)
 
-    p_o = tl.make_block_ptr(o + (bos_q + i_t) * HQ * V, (HQ, V), (V, 1), (i_h * G, i_v * BV), (G, BV), (1, 0))
+    o_v = i_v * BV + tl.arange(0, BV)
+    m_o = (o_g[:, None] < HQ) & (o_v[None, :] < V)
+    p_o = o + (bos_q + i_t) * HQ * V + o_g[:, None] * V + o_v[None, :]
     p_lse = lse + (bos_q + i_t) * HQ + i_h * G + tl.arange(0, G)
 
     # [G, BV]
@@ -250,14 +258,16 @@ def parallel_nsa_fwd_kernel(
     b_m = tl.full([G], float('-inf'), dtype=tl.float32)
     b_acc = tl.zeros([G], dtype=tl.float32)
     for i in range(NS):
-        i_s = tl.load(block_indices + i).to(tl.int32) * BS  # start token index of the i-th selected KV block
+        i_s = tl.load(block_indices + i).to(tl.int64) * BS  # start token index of the i-th selected KV block
         if i_s <= Q_OFFSET + i_t and i_s >= 0:
-            p_k = tl.make_block_ptr(k, (K, TK), (1, H*K), (0, i_s), (BK, BS), (0, 1))
-            p_v = tl.make_block_ptr(v, (TK, V), (H*V, 1), (i_s, i_v * BV), (BS, BV), (1, 0))
+            o_s = i_s + tl.arange(0, BS)
+            m_s = o_s < TK
+            p_k = k + o_d[:, None] + o_s[None, :] * (H*K)
+            p_v = v + o_s[:, None] * (H*V) + o_v[None, :]
             # [BK, BS]
-            b_k = tl.load(p_k, boundary_check=(0, 1))
+            b_k = tl.load(p_k, mask=(o_d[:, None] < K) & m_s[None, :], other=0.0)
             # [BS, BV]
-            b_v = tl.load(p_v, boundary_check=(0, 1))
+            b_v = tl.load(p_v, mask=m_s[:, None] & (o_v[None, :] < V), other=0.0)
             # [G, BS]
             b_s = tl.dot(b_q, b_k)
             # causal mask against the absolute query position Q_OFFSET + i_t
@@ -275,7 +285,7 @@ def parallel_nsa_fwd_kernel(
 
     b_o = b_o / b_acc[:, None]
     b_m += log(b_acc)
-    tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=m_o)
     if i_v == 0:
         tl.store(p_lse, b_m.to(p_lse.dtype.element_ty))
 
@@ -321,12 +331,12 @@ def parallel_nsa_bwd_kernel_dq(
     IS_VARLEN: tl.constexpr,
     USE_BLOCK_COUNTS: tl.constexpr,
 ):
-    i_t, i_v, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_t, i_v, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
 
     all = B * T
     if IS_VARLEN:
-        i_n, i_t = tl.load(token_indices + i_t * 2).to(tl.int32), tl.load(token_indices + i_t * 2 + 1).to(tl.int32)
+        i_n, i_t = tl.load(token_indices + i_t * 2).to(tl.int32), tl.load(token_indices + i_t * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
     else:
@@ -347,19 +357,24 @@ def parallel_nsa_bwd_kernel_dq(
     k += (bos * H + i_h) * K
     v += (bos * H + i_h) * V
 
-    p_q = tl.make_block_ptr(q, (HQ, K), (K, 1), (i_h * G, 0), (G, BK), (1, 0))
-    p_dq = tl.make_block_ptr(dq, (HQ, K), (K, 1), (i_h * G, 0), (G, BK), (1, 0))
+    o_g = i_h * G + tl.arange(0, G)
+    o_d = tl.arange(0, BK)
+    m_q = (o_g[:, None] < HQ) & (o_d[None, :] < K)
+    p_q = q + o_g[:, None] * K + o_d[None, :]
+    p_dq = dq + o_g[:, None] * K + o_d[None, :]
 
     # [G, BK]
-    b_q = tl.load(p_q, boundary_check=(0, 1))
+    b_q = tl.load(p_q, mask=m_q, other=0.0)
     b_q = (b_q * scale).to(b_q.dtype)
 
-    p_do = tl.make_block_ptr(do, (HQ, V), (V, 1), (i_h * G, i_v * BV), (G, BV), (1, 0))
+    o_v = i_v * BV + tl.arange(0, BV)
+    m_o = (o_g[:, None] < HQ) & (o_v[None, :] < V)
+    p_do = do + o_g[:, None] * V + o_v[None, :]
     p_lse = lse + i_h * G + tl.arange(0, G)
     p_delta = delta + i_h * G + tl.arange(0, G)
 
     # [G, BV]
-    b_do = tl.load(p_do, boundary_check=(0, 1))
+    b_do = tl.load(p_do, mask=m_o, other=0.0)
     # [G]
     b_lse = tl.load(p_lse)
     b_delta = tl.load(p_delta)
@@ -367,14 +382,16 @@ def parallel_nsa_bwd_kernel_dq(
     # [G, BK]
     b_dq = tl.zeros([G, BK], dtype=tl.float32)
     for i in range(NS):
-        i_s = tl.load(block_indices + i).to(tl.int32) * BS
+        i_s = tl.load(block_indices + i).to(tl.int64) * BS
         if i_s <= i_t and i_s >= 0:
-            p_k = tl.make_block_ptr(k, (K, T), (1, H*K), (0, i_s), (BK, BS), (0, 1))
-            p_v = tl.make_block_ptr(v, (V, T), (1, H*V), (i_v * BV, i_s), (BV, BS), (0, 1))
+            o_s = i_s + tl.arange(0, BS)
+            m_s = o_s < T
+            p_k = k + o_d[:, None] + o_s[None, :] * (H*K)
+            p_v = v + o_v[:, None] + o_s[None, :] * (H*V)
             # [BK, BS]
-            b_k = tl.load(p_k, boundary_check=(0, 1))
+            b_k = tl.load(p_k, mask=(o_d[:, None] < K) & m_s[None, :], other=0.0)
             # [BV, BS]
-            b_v = tl.load(p_v, boundary_check=(0, 1))
+            b_v = tl.load(p_v, mask=(o_v[:, None] < V) & m_s[None, :], other=0.0)
 
             # [G, BS]
             b_s = tl.dot(b_q, b_k)
@@ -388,7 +405,7 @@ def parallel_nsa_bwd_kernel_dq(
             b_dq += tl.dot(b_ds.to(b_k.dtype), tl.trans(b_k))
     b_dq *= scale
 
-    tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), mask=m_q)
 
 
 def _prune_dkv_bq(configs, nargs, **kwargs):
