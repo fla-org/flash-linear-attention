@@ -167,6 +167,8 @@ Key rules:
 
 ### Docstrings and Comments
 
+Comments and docstrings are hints for other readers, not a chain of thought. Give the reader what the code cannot say for itself, in as few words as possible — correct, simple, and with no narration of your reasoning.
+
 Use a two-line hanging format for `Args:` / `Returns:` entries: a `name (type, Optional):` header line, then the description and `Default:` on the next indented line(s).
 
 ```python
@@ -182,6 +184,17 @@ Capitalize `Optional` (not `optional`), put the default as `Default: <value>` (n
 Keep inline comments restrained, especially in Triton kernels: shape annotations (e.g. `# [BL, BD]`) plus at most a one-line "why" for genuinely non-obvious tricks. Avoid multi-line derivations and narration that just restates the next line — math derivations belong in the operator's `README.md`, the PR description, or a single pointer, not inline.
 
 Put explanatory comments on their own line **above** the code they describe, not trailing it — write `# why` on the line above `x = f()`, not `x = f()  # why`. Start the comment text with a lowercase letter (`# guard against overflow`, not `# Guard against overflow`), and wrap a multi-line comment at clause boundaries like other prose. Reserve inline trailing comments for terse shape / type annotations like `# [BL, BD]`.
+
+Comments and docstrings must not go stale: when a change makes one factually wrong — a renamed symbol, a changed default, a removed code path — update or delete it in the same commit. An outdated comment is worse than none. If you can't tell whether a comment is still true, keep it and say so in the PR description; don't delete a "why" comment you merely can't verify. Fixing stale content means fixing the words, not reformatting the surrounding comment or docstring style.
+
+Beyond narration that restates the next line, these comment patterns are banned:
+
+- **Banner blocks** (`##### ... #####`): section boundaries should be visible from the code structure; use a blank line.
+- **Commented-out code**: delete it — git has the history. Exception: commented-out *configurations* deliberately kept as documented alternatives (e.g. known-good autotune configs for a future dtype) may stay if a one-line comment says why they are kept.
+- **Personal asides** (`# XY: remove this?`): a name in a comment is not an owner. Convert it to a TODO with an anchor, or delete it.
+- **Anchorless TODOs**: a TODO must name when it can be acted on — a link to a tracking issue (this repo or upstream), a version bound (`TODO: drop once we require triton>=3.5`), or an externally checkable event. This applies to TODOs in docstrings too; see `fla/ops/utils/op.py::safe_dot` for the pattern.
+
+Never treated as excess comments: the license header required by `scripts/check_header.py`, a one-line attribution with a URL for adapted code, shape/dtype annotations, and `NOTE:` / `WARNING:` prefixes on a genuine "why" comment.
 
 ### Prose and Markdown
 
@@ -200,10 +213,18 @@ Don't hard-wrap prose at an arbitrary short column — this covers Markdown file
 
 - Kernel functions use `@triton.jit` with `do_not_specialize=['T']` for the sequence-length argument.
 - Use `tl.constexpr` for compile-time constants (block sizes, flags like `USE_INITIAL_STATE`).
-- Do not introduce new `tl.make_block_ptr` use; Triton marks it deprecated. Prefer
-  `TensorDescriptor` / `tl.make_tensor_descriptor` when descriptor semantics are
-  needed, or explicit `tl.load` / `tl.store` pointer arithmetic following an
-  existing validated kernel pattern.
+- Write block accesses as explicit offset vectors (`offset + tl.arange`) with
+  plain `tl.load` / `tl.store`. Masked loads must cover every dimension that
+  can overrun at any call site, with `other=` where masked lanes matter; assert
+  any divisibility you rely on. Do not use `tl.make_block_ptr` / `tl.advance`:
+  deprecated upstream and removed in triton main. (`backends/triton_ascend/` is
+  exempt — triton-ascend still requires block pointers.)
+- `tl.make_tensor_descriptor` (TMA) is an opt-in optimization for hot-path
+  tiles on Hopper and newer, not a default substitute for block access. It
+  requires 16-byte-aligned bases and stride multiples, a stride-1 innermost
+  dim, no transposed blocks, and a registered allocator for device-side
+  descriptors. Use it when a per-kernel benchmark in the PR shows it pays off,
+  e.g. behind a flag as in `fla/ops/utils/solve_tril.py`.
 - Treat program IDs and grid-derived indices as potentially narrow integers.
   Cast them to `tl.int64` before multiplying by sizes, strides, or sequence
   offsets. This is especially important for non-first grid dimensions on NVIDIA
