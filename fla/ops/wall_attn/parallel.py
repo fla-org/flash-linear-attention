@@ -123,12 +123,12 @@ def parallel_wall_attn_fwd_kernel(
     IS_VARLEN: tl.constexpr,
     USE_SCALAR_G: tl.constexpr,
 ):
-    i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
     i_h = i_hq // G
 
     if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
     else:
@@ -136,16 +136,22 @@ def parallel_wall_attn_fwd_kernel(
         bos, eos = (i_b * T).to(tl.int64), (i_b * T + T).to(tl.int64)
     RCP_LN2: tl.constexpr = 1.4426950216
 
-    p_q = tl.make_block_ptr(q + (bos * HQ + i_hq) * K, (T, K), (HQ*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
-    p_o = tl.make_block_ptr(o + (bos * HQ + i_hq) * V, (T, V), (HQ*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-    p_lse = tl.make_block_ptr(lse + bos * HQ + i_hq, (T,), (HQ,), (i_t * BT,), (BT,), (0,))
+    o_q = i_t * BT + tl.arange(0, BT)
+    o_d = tl.arange(0, BK)
+    o_v = i_v * BV + tl.arange(0, BV)
+    m_q = o_q < T
+    m_qk = m_q[:, None] & (o_d[None, :] < K)
+    p_q = q + (bos * HQ + i_hq) * K + o_q[:, None] * (HQ*K) + o_d[None, :]
+    p_o = o + (bos * HQ + i_hq) * V + o_q[:, None] * (HQ*V) + o_v[None, :]
+    p_lse = lse + bos * HQ + i_hq + o_q * HQ
 
-    p_pq = tl.make_block_ptr(g_cumsum + (bos * HQ + i_hq) * K, (T, K), (HQ*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
-    p_R = tl.make_block_ptr(g_cumsum + (bos * HQ + i_hq) * K, (T, K), (HQ*K, 1), (i_t * BT, 0), (1, BK), (1, 0))
+    p_pq = g_cumsum + (bos * HQ + i_hq) * K + o_q[:, None] * (HQ*K) + o_d[None, :]
+    o_r = i_t * BT + tl.arange(0, 1)
+    p_R = g_cumsum + (bos * HQ + i_hq) * K + o_r[:, None] * (HQ*K) + o_d[None, :]
 
-    b_q = tl.load(p_q, boundary_check=(0, 1))
-    b_pq = tl.load(p_pq, boundary_check=(0, 1)).to(tl.float32)
-    b_R = tl.load(p_R, boundary_check=(0, 1)).to(tl.float32)
+    b_q = tl.load(p_q, mask=m_qk, other=0.0)
+    b_pq = tl.load(p_pq, mask=m_qk, other=0.0).to(tl.float32)
+    b_R = tl.load(p_R, mask=(o_r[:, None] < T) & (o_d[None, :] < K), other=0.0).to(tl.float32)
     # b_R is at i_t*BT; the same value is used in both off-diag and diag loops,
     # since |b_pq - b_R| within a BT-chunk is bounded by BT*|g_max|*RCP_LN2.
     # Off-diagonal: P_q - R <= 0 and R - P_k <= 0 -> exp2 <= 1 -> bf16 safe.
@@ -156,32 +162,31 @@ def parallel_wall_attn_fwd_kernel(
     b_acc = tl.zeros([BT], dtype=tl.float32)
 
     if USE_SCALAR_G:
-        p_cq = tl.make_block_ptr(g_scalar_cumsum + bos * HQ + i_hq, (T,), (HQ,), (i_t * BT,), (BT,), (0,))
-        b_cq = tl.load(p_cq, boundary_check=(0,)).to(tl.float32)
+        p_cq = g_scalar_cumsum + bos * HQ + i_hq + o_q * HQ
+        b_cq = tl.load(p_cq, mask=m_q, other=0.0).to(tl.float32)
 
     if USE_SINK_BIAS:
         b_sink_bias = tl.load(sink_bias + i_hq).to(tl.float32)
     else:
         b_sink_bias = None
 
-    o_q = i_t * BT + tl.arange(0, BT)
     i_start = tl.maximum((i_t * BT - W + 1) // BS * BS, 0) if USE_WINDOW else 0
 
     b_R_t = tl.trans(b_R)
 
     for i_s in range(i_start, i_t * BT, BS):
-        p_k = tl.make_block_ptr(k + (bos * H + i_h) * K, (K, T), (1, H*K), (0, i_s), (BK, BS), (0, 1))
-        p_v = tl.make_block_ptr(v + (bos * H + i_h) * V, (T, V), (H*V, 1), (i_s, i_v * BV), (BS, BV), (1, 0))
-        p_pk = tl.make_block_ptr(g_cumsum + (bos * HQ + i_hq) * K, (K, T), (1, HQ*K), (0, i_s), (BK, BS), (0, 1))
+        o_k = i_s + tl.arange(0, BS)
+        m_k = o_k < T
+        p_k = k + (bos * H + i_h) * K + o_d[:, None] + o_k[None, :] * (H*K)
+        p_v = v + (bos * H + i_h) * V + o_k[:, None] * (H*V) + o_v[None, :]
+        p_pk = g_cumsum + (bos * HQ + i_hq) * K + o_d[:, None] + o_k[None, :] * (HQ*K)
 
-        b_k = tl.load(p_k, boundary_check=(0, 1))
-        b_v = tl.load(p_v, boundary_check=(0, 1))
-        b_pk = tl.load(p_pk, boundary_check=(0, 1)).to(tl.float32)
+        b_k = tl.load(p_k, mask=(o_d[:, None] < K) & m_k[None, :], other=0.0)
+        b_v = tl.load(p_v, mask=m_k[:, None] & (o_v[None, :] < V), other=0.0)
+        b_pk = tl.load(p_pk, mask=(o_d[:, None] < K) & m_k[None, :], other=0.0).to(tl.float32)
         b_k_til = (b_k.to(tl.float32) * exp2(b_R_t - b_pk)).to(b_k.dtype)
         b_s = tl.dot(b_q_til, b_k_til) * scale * RCP_LN2
 
-        o_k = i_s + tl.arange(0, BS)
-        m_k = o_k < T
         if USE_SCALAR_G:
             b_ck = tl.load(g_scalar_cumsum + (bos + o_k) * HQ + i_hq, mask=m_k, other=0).to(tl.float32)
             b_s += b_cq[:, None] - b_ck[None, :]
@@ -197,21 +202,22 @@ def parallel_wall_attn_fwd_kernel(
         b_mp = b_m
 
     for i_s in range(i_t * BT, min((i_t + 1) * BT, T), BS):
-        p_k = tl.make_block_ptr(k + (bos * H + i_h) * K, (K, T), (1, H*K), (0, i_s), (BK, BS), (0, 1))
-        p_v = tl.make_block_ptr(v + (bos * H + i_h) * V, (T, V), (H*V, 1), (i_s, i_v * BV), (BS, BV), (1, 0))
-        p_pk = tl.make_block_ptr(g_cumsum + (bos * HQ + i_hq) * K, (K, T), (1, HQ*K), (0, i_s), (BK, BS), (0, 1))
+        o_k = i_s + tl.arange(0, BS)
+        m_k = o_k < T
+        p_k = k + (bos * H + i_h) * K + o_d[:, None] + o_k[None, :] * (H*K)
+        p_v = v + (bos * H + i_h) * V + o_k[:, None] * (H*V) + o_v[None, :]
+        p_pk = g_cumsum + (bos * HQ + i_hq) * K + o_d[:, None] + o_k[None, :] * (HQ*K)
 
         # Per-sub-block local reference to prevent exp2 overflow.
-        p_R_local = tl.make_block_ptr(g_cumsum + (bos * HQ + i_hq) * K, (T, K), (HQ*K, 1), (i_s, 0), (1, BK), (1, 0))
-        b_R_local = tl.load(p_R_local, boundary_check=(0, 1)).to(tl.float32)
+        o_r = i_s + tl.arange(0, 1)
+        p_R_local = g_cumsum + (bos * HQ + i_hq) * K + o_r[:, None] * (HQ*K) + o_d[None, :]
+        b_R_local = tl.load(p_R_local, mask=(o_r[:, None] < T) & (o_d[None, :] < K), other=0.0).to(tl.float32)
         b_R_local_bc = tl.broadcast_to(b_R_local, (BT, BK))
         b_R_local_t = tl.trans(b_R_local)
 
-        o_k = i_s + tl.arange(0, BS)
-        m_k = o_k < T
-        b_k = tl.load(p_k, boundary_check=(0, 1))
-        b_v = tl.load(p_v, boundary_check=(0, 1))
-        b_pk = tl.load(p_pk, boundary_check=(0, 1)).to(tl.float32)
+        b_k = tl.load(p_k, mask=(o_d[:, None] < K) & m_k[None, :], other=0.0)
+        b_v = tl.load(p_v, mask=m_k[:, None] & (o_v[None, :] < V), other=0.0)
+        b_pk = tl.load(p_pk, mask=(o_d[:, None] < K) & m_k[None, :], other=0.0).to(tl.float32)
 
         # k_til in local frame: exp2 bounded by BS positions <= 110 (fp32-safe with BK dot).
         b_exp_k = b_R_local_t - b_pk
@@ -246,9 +252,9 @@ def parallel_wall_attn_fwd_kernel(
 
     b_o = b_o / b_acc[:, None]
     b_m += log2(b_acc)
-    tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=m_q[:, None] & (o_v[None, :] < V))
     if i_v == 0:
-        tl.store(p_lse, b_m.to(p_lse.dtype.element_ty), boundary_check=(0,))
+        tl.store(p_lse, b_m.to(p_lse.dtype.element_ty), mask=m_q)
 
 
 @triton.autotune(
@@ -294,7 +300,7 @@ def parallel_wall_attn_bwd_kernel_dq(
     IS_VARLEN: tl.constexpr,
     USE_SCALAR_G: tl.constexpr,
 ):
-    i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
     i_h = i_hq // G
 
@@ -306,7 +312,7 @@ def parallel_wall_attn_bwd_kernel_dq(
         dg_scalar_cumsum += i_v64 * B * T * HQ
 
     if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
     else:
@@ -315,46 +321,52 @@ def parallel_wall_attn_bwd_kernel_dq(
     RCP_LN2: tl.constexpr = 1.4426950216
     LN2: tl.constexpr = 0.6931471805599453
 
-    p_q = tl.make_block_ptr(q + (bos * HQ + i_hq) * K, (T, K), (HQ*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
-    p_pq = tl.make_block_ptr(g_cumsum + (bos * HQ + i_hq) * K, (T, K), (HQ*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
-    p_R = tl.make_block_ptr(g_cumsum + (bos * HQ + i_hq) * K, (T, K), (HQ*K, 1), (i_t * BT, 0), (1, BK), (1, 0))
-    p_dq = tl.make_block_ptr(dq + (bos * HQ + i_hq) * K, (T, K), (HQ*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
-    p_dg = tl.make_block_ptr(dg_cumsum + (bos * HQ + i_hq) * K, (T, K), (HQ*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
-    p_do = tl.make_block_ptr(do + (bos * HQ + i_hq) * V, (T, V), (HQ*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-    p_lse = tl.make_block_ptr(lse + bos * HQ + i_hq, (T,), (HQ,), (i_t * BT,), (BT,), (0,))
-    p_delta = tl.make_block_ptr(delta + bos * HQ + i_hq, (T,), (HQ,), (i_t * BT,), (BT,), (0,))
+    o_q = i_t * BT + tl.arange(0, BT)
+    o_d = tl.arange(0, BK)
+    o_v = i_v * BV + tl.arange(0, BV)
+    m_q = o_q < T
+    m_qk = m_q[:, None] & (o_d[None, :] < K)
+    m_o = m_q[:, None] & (o_v[None, :] < V)
+    p_q = q + (bos * HQ + i_hq) * K + o_q[:, None] * (HQ*K) + o_d[None, :]
+    p_pq = g_cumsum + (bos * HQ + i_hq) * K + o_q[:, None] * (HQ*K) + o_d[None, :]
+    o_r = i_t * BT + tl.arange(0, 1)
+    p_R = g_cumsum + (bos * HQ + i_hq) * K + o_r[:, None] * (HQ*K) + o_d[None, :]
+    p_dq = dq + (bos * HQ + i_hq) * K + o_q[:, None] * (HQ*K) + o_d[None, :]
+    p_dg = dg_cumsum + (bos * HQ + i_hq) * K + o_q[:, None] * (HQ*K) + o_d[None, :]
+    p_do = do + (bos * HQ + i_hq) * V + o_q[:, None] * (HQ*V) + o_v[None, :]
+    p_lse = lse + bos * HQ + i_hq + o_q * HQ
+    p_delta = delta + bos * HQ + i_hq + o_q * HQ
 
-    b_q = tl.load(p_q, boundary_check=(0, 1))
-    b_pq = tl.load(p_pq, boundary_check=(0, 1)).to(tl.float32)
-    b_R = tl.load(p_R, boundary_check=(0, 1)).to(tl.float32)
+    b_q = tl.load(p_q, mask=m_qk, other=0.0)
+    b_pq = tl.load(p_pq, mask=m_qk, other=0.0).to(tl.float32)
+    b_R = tl.load(p_R, mask=(o_r[:, None] < T) & (o_d[None, :] < K), other=0.0).to(tl.float32)
     # Off-diagonal q_til (bf16 tensor cores, exp2 <= 1).
     b_q_til = (b_q.to(tl.float32) * exp2(b_pq - b_R)).to(b_q.dtype)
 
-    b_do = tl.load(p_do, boundary_check=(0, 1), padding_option="zero")
-    b_lse = tl.load(p_lse, boundary_check=(0,))
-    b_delta = tl.load(p_delta, boundary_check=(0,))
+    b_do = tl.load(p_do, mask=m_o, other=0.0)
+    b_lse = tl.load(p_lse, mask=m_q, other=0.0)
+    b_delta = tl.load(p_delta, mask=m_q, other=0.0)
 
     b_dq_til = tl.zeros([BT, BK], dtype=tl.float32)
 
     if USE_SCALAR_G:
-        p_cq = tl.make_block_ptr(g_scalar_cumsum + bos * HQ + i_hq, (T,), (HQ,), (i_t * BT,), (BT,), (0,))
-        b_cq = tl.load(p_cq, boundary_check=(0,)).to(tl.float32)
+        p_cq = g_scalar_cumsum + bos * HQ + i_hq + o_q * HQ
+        b_cq = tl.load(p_cq, mask=m_q, other=0.0).to(tl.float32)
         b_dc = tl.zeros([BT], dtype=tl.float32)
 
-    o_q = i_t * BT + tl.arange(0, BT)
     i_start = tl.maximum((i_t * BT - W + 1) // BS * BS, 0) if USE_WINDOW else 0
     b_R_t = tl.trans(b_R)
 
     for i_s in range(i_start, i_t * BT, BS):
-        p_k = tl.make_block_ptr(k + (bos * H + i_h) * K, (K, T), (1, H*K), (0, i_s), (BK, BS), (0, 1))
-        p_v = tl.make_block_ptr(v + (bos * H + i_h) * V, (V, T), (1, H*V), (i_v * BV, i_s), (BV, BS), (0, 1))
-        p_pk = tl.make_block_ptr(g_cumsum + (bos * HQ + i_hq) * K, (K, T), (1, HQ*K), (0, i_s), (BK, BS), (0, 1))
-
         o_k = i_s + tl.arange(0, BS)
         m_k = o_k < T
-        b_k = tl.load(p_k, boundary_check=(0, 1))
-        b_pk = tl.load(p_pk, boundary_check=(0, 1)).to(tl.float32)
-        b_v = tl.load(p_v, boundary_check=(0, 1), padding_option="zero")
+        p_k = k + (bos * H + i_h) * K + o_d[:, None] + o_k[None, :] * (H*K)
+        p_v = v + (bos * H + i_h) * V + o_v[:, None] + o_k[None, :] * (H*V)
+        p_pk = g_cumsum + (bos * HQ + i_hq) * K + o_d[:, None] + o_k[None, :] * (HQ*K)
+
+        b_k = tl.load(p_k, mask=(o_d[:, None] < K) & m_k[None, :], other=0.0)
+        b_pk = tl.load(p_pk, mask=(o_d[:, None] < K) & m_k[None, :], other=0.0).to(tl.float32)
+        b_v = tl.load(p_v, mask=(o_v[:, None] < V) & m_k[None, :], other=0.0)
         b_k_til = (b_k.to(tl.float32) * exp2(b_R_t - b_pk)).to(b_k.dtype)
         b_s = tl.dot(b_q_til, b_k_til) * scale * RCP_LN2
 
@@ -375,20 +387,21 @@ def parallel_wall_attn_bwd_kernel_dq(
     b_dq_diag = tl.zeros([BT, BK], dtype=tl.float32)
 
     for i_s in range(i_t * BT, min((i_t + 1) * BT, T), BS):
-        p_k = tl.make_block_ptr(k + (bos * H + i_h) * K, (K, T), (1, H*K), (0, i_s), (BK, BS), (0, 1))
-        p_v = tl.make_block_ptr(v + (bos * H + i_h) * V, (V, T), (1, H*V), (i_v * BV, i_s), (BV, BS), (0, 1))
-        p_pk = tl.make_block_ptr(g_cumsum + (bos * HQ + i_hq) * K, (K, T), (1, HQ*K), (0, i_s), (BK, BS), (0, 1))
+        o_k = i_s + tl.arange(0, BS)
+        m_k = o_k < T
+        p_k = k + (bos * H + i_h) * K + o_d[:, None] + o_k[None, :] * (H*K)
+        p_v = v + (bos * H + i_h) * V + o_v[:, None] + o_k[None, :] * (H*V)
+        p_pk = g_cumsum + (bos * HQ + i_hq) * K + o_d[:, None] + o_k[None, :] * (HQ*K)
 
-        p_R_local = tl.make_block_ptr(g_cumsum + (bos * HQ + i_hq) * K, (T, K), (HQ*K, 1), (i_s, 0), (1, BK), (1, 0))
-        b_R_local = tl.load(p_R_local, boundary_check=(0, 1)).to(tl.float32)
+        o_r = i_s + tl.arange(0, 1)
+        p_R_local = g_cumsum + (bos * HQ + i_hq) * K + o_r[:, None] * (HQ*K) + o_d[None, :]
+        b_R_local = tl.load(p_R_local, mask=(o_r[:, None] < T) & (o_d[None, :] < K), other=0.0).to(tl.float32)
         b_R_local_bc = tl.broadcast_to(b_R_local, (BT, BK))
         b_R_local_t = tl.trans(b_R_local)
 
-        o_k = i_s + tl.arange(0, BS)
-        m_k = o_k < T
-        b_k = tl.load(p_k, boundary_check=(0, 1))
-        b_pk = tl.load(p_pk, boundary_check=(0, 1)).to(tl.float32)
-        b_v = tl.load(p_v, boundary_check=(0, 1), padding_option="zero")
+        b_k = tl.load(p_k, mask=(o_d[:, None] < K) & m_k[None, :], other=0.0)
+        b_pk = tl.load(p_pk, mask=(o_d[:, None] < K) & m_k[None, :], other=0.0).to(tl.float32)
+        b_v = tl.load(p_v, mask=(o_v[:, None] < V) & m_k[None, :], other=0.0)
 
         # Local-ref k_til: exp2 arg bounded by BS positions <= 110 (fp32-safe with BK dot).
         b_exp_k = b_R_local_t - b_pk
@@ -426,11 +439,11 @@ def parallel_wall_attn_bwd_kernel_dq(
 
     # Structural: b_dg derived from b_dq (saves [BT,BK] fp32 accumulator).
     b_dg = LN2 * b_q.to(tl.float32) * b_dq
-    tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), mask=m_qk)
+    tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), mask=m_qk)
     if USE_SCALAR_G:
-        p_dc = tl.make_block_ptr(dg_scalar_cumsum + bos * HQ + i_hq, (T,), (HQ,), (i_t * BT,), (BT,), (0,))
-        tl.store(p_dc, b_dc.to(p_dc.dtype.element_ty), boundary_check=(0,))
+        p_dc = dg_scalar_cumsum + bos * HQ + i_hq + o_q * HQ
+        tl.store(p_dc, b_dc.to(p_dc.dtype.element_ty), mask=m_q)
 
 
 @triton.autotune(
@@ -478,7 +491,7 @@ def parallel_wall_attn_bwd_kernel_dkv(
     USE_SCALAR_G: tl.constexpr,
     DIAG_BF16: tl.constexpr,
 ):
-    i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
     i_h = i_hq // G
 
@@ -490,7 +503,7 @@ def parallel_wall_attn_bwd_kernel_dkv(
         dg_scalar_cumsum += i_v64 * B * T * HQ
 
     if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
     else:
@@ -499,41 +512,46 @@ def parallel_wall_attn_bwd_kernel_dkv(
     RCP_LN2: tl.constexpr = 1.4426950216
     LN2: tl.constexpr = 0.6931471805599453
 
-    p_k = tl.make_block_ptr(k + (bos * H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
-    p_pk = tl.make_block_ptr(g_cumsum + (bos * HQ + i_hq) * K, (T, K), (HQ*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
-    p_v = tl.make_block_ptr(v + (bos * H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-    p_dk = tl.make_block_ptr(dk + (bos * HQ + i_hq) * K, (T, K), (HQ*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
-    p_dv = tl.make_block_ptr(dv + (bos * HQ + i_hq) * V, (T, V), (HQ*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-    p_dg = tl.make_block_ptr(dg_cumsum + (bos * HQ + i_hq) * K, (T, K), (HQ*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
+    o_k = i_t * BT + tl.arange(0, BT)
+    o_d = tl.arange(0, BK)
+    o_v = i_v * BV + tl.arange(0, BV)
+    m_k = o_k < T
+    m_kk = m_k[:, None] & (o_d[None, :] < K)
+    m_kv = m_k[:, None] & (o_v[None, :] < V)
+    p_k = k + (bos * H + i_h) * K + o_k[:, None] * (H*K) + o_d[None, :]
+    p_pk = g_cumsum + (bos * HQ + i_hq) * K + o_k[:, None] * (HQ*K) + o_d[None, :]
+    p_v = v + (bos * H + i_h) * V + o_k[:, None] * (H*V) + o_v[None, :]
+    p_dk = dk + (bos * HQ + i_hq) * K + o_k[:, None] * (HQ*K) + o_d[None, :]
+    p_dv = dv + (bos * HQ + i_hq) * V + o_k[:, None] * (HQ*V) + o_v[None, :]
+    p_dg = dg_cumsum + (bos * HQ + i_hq) * K + o_k[:, None] * (HQ*K) + o_d[None, :]
 
-    b_k = tl.load(p_k, boundary_check=(0, 1))
-    b_pk = tl.load(p_pk, boundary_check=(0, 1)).to(tl.float32)
+    b_k = tl.load(p_k, mask=m_kk, other=0.0)
+    b_pk = tl.load(p_pk, mask=m_kk, other=0.0).to(tl.float32)
     b_dk = tl.zeros([BT, BK], dtype=tl.float32)
-    b_v = tl.load(p_v, boundary_check=(0, 1), padding_option="zero")
+    b_v = tl.load(p_v, mask=m_kv, other=0.0)
     b_dv = tl.zeros([BT, BV], dtype=tl.float32)
 
-    o_k = i_t * BT + tl.arange(0, BT)
-
     if USE_SCALAR_G:
-        p_ck = tl.make_block_ptr(g_scalar_cumsum + bos * HQ + i_hq, (T,), (HQ,), (i_t * BT,), (BT,), (0,))
-        b_ck = tl.load(p_ck, boundary_check=(0,)).to(tl.float32)
+        p_ck = g_scalar_cumsum + bos * HQ + i_hq + o_k * HQ
+        b_ck = tl.load(p_ck, mask=m_k, other=0.0).to(tl.float32)
         b_dc = tl.zeros([BT], dtype=tl.float32)
 
     for i_s in range(i_t * BT, min((i_t + 1) * BT, T), BS):
-        p_Rq = tl.make_block_ptr(g_cumsum + (bos * HQ + i_hq) * K, (T, K), (HQ*K, 1), (i_s, 0), (1, BK), (1, 0))
-        p_q = tl.make_block_ptr(q + (bos * HQ + i_hq) * K, (T, K), (HQ*K, 1), (i_s, 0), (BS, BK), (1, 0))
-        p_pq = tl.make_block_ptr(g_cumsum + (bos * HQ + i_hq) * K, (T, K), (HQ*K, 1), (i_s, 0), (BS, BK), (1, 0))
-        p_do = tl.make_block_ptr(do + (bos * HQ + i_hq) * V, (T, V), (HQ*V, 1), (i_s, i_v * BV), (BS, BV), (1, 0))
-        p_lse = tl.make_block_ptr(lse + bos * HQ + i_hq, (T,), (HQ,), (i_s,), (BS,), (0,))
-        p_delta = tl.make_block_ptr(delta + bos * HQ + i_hq, (T,), (HQ,), (i_s,), (BS,), (0,))
-
         o_q = i_s + tl.arange(0, BS)
         m_q = o_q < T
-        b_Rq = tl.load(p_Rq, boundary_check=(0, 1)).to(tl.float32)
+        o_r = i_s + tl.arange(0, 1)
+        p_Rq = g_cumsum + (bos * HQ + i_hq) * K + o_r[:, None] * (HQ*K) + o_d[None, :]
+        p_q = q + (bos * HQ + i_hq) * K + o_q[:, None] * (HQ*K) + o_d[None, :]
+        p_pq = g_cumsum + (bos * HQ + i_hq) * K + o_q[:, None] * (HQ*K) + o_d[None, :]
+        p_do = do + (bos * HQ + i_hq) * V + o_q[:, None] * (HQ*V) + o_v[None, :]
+        p_lse = lse + bos * HQ + i_hq + o_q * HQ
+        p_delta = delta + bos * HQ + i_hq + o_q * HQ
+
+        b_Rq = tl.load(p_Rq, mask=(o_r[:, None] < T) & (o_d[None, :] < K), other=0.0).to(tl.float32)
         b_Rq_bc_k = tl.broadcast_to(b_Rq, (BT, BK))
         b_Rq_bc_q = tl.broadcast_to(b_Rq, (BS, BK))
-        b_q = tl.load(p_q, boundary_check=(0, 1))
-        b_pq = tl.load(p_pq, boundary_check=(0, 1)).to(tl.float32)
+        b_q = tl.load(p_q, mask=m_q[:, None] & (o_d[None, :] < K), other=0.0)
+        b_pq = tl.load(p_pq, mask=m_q[:, None] & (o_d[None, :] < K), other=0.0).to(tl.float32)
         b_exp_k = b_Rq_bc_k - b_pk
         # Non-causal keys (key_pos > last query in sub-block) can have
         # exp_k >> 110, overflowing the gradient headroom.  The causal mask
@@ -550,9 +568,9 @@ def parallel_wall_attn_bwd_kernel_dkv(
             # Precise path: fp32 tensor cores.
             b_q_til = b_q.to(tl.float32) * exp2(b_pq - b_Rq_bc_q)
             b_k_til = b_k.to(tl.float32) * b_exp_k_val
-        b_do = tl.load(p_do, boundary_check=(0, 1), padding_option="zero")
-        b_lse = tl.load(p_lse, boundary_check=(0,))
-        b_delta = tl.load(p_delta, boundary_check=(0,))
+        b_do = tl.load(p_do, mask=m_q[:, None] & (o_v[None, :] < V), other=0.0)
+        b_lse = tl.load(p_lse, mask=m_q, other=0.0)
+        b_delta = tl.load(p_delta, mask=m_q, other=0.0)
         b_s = tl.dot(b_k_til, tl.trans(b_q_til)) * scale * RCP_LN2
         if USE_SCALAR_G:
             b_cq = tl.load(g_scalar_cumsum + (bos + o_q) * HQ + i_hq, mask=m_q, other=0).to(tl.float32)
@@ -578,27 +596,28 @@ def parallel_wall_attn_bwd_kernel_dkv(
     i_end = min(tl.cdiv(T, BS) * BS, (i_t + 1) * BT + W - 1) if USE_WINDOW else tl.cdiv(T, BS) * BS
 
     for i_s in range((i_t + 1) * BT, i_end, BS):
-        p_Rq = tl.make_block_ptr(g_cumsum + (bos * HQ + i_hq) * K, (T, K), (HQ*K, 1), (i_s, 0), (1, BK), (1, 0))
-        p_q = tl.make_block_ptr(q + (bos * HQ + i_hq) * K, (T, K), (HQ*K, 1), (i_s, 0), (BS, BK), (1, 0))
-        p_pq = tl.make_block_ptr(g_cumsum + (bos * HQ + i_hq) * K, (T, K), (HQ*K, 1), (i_s, 0), (BS, BK), (1, 0))
-        p_do = tl.make_block_ptr(do + (bos * HQ + i_hq) * V, (T, V), (HQ*V, 1), (i_s, i_v * BV), (BS, BV), (1, 0))
-        p_lse = tl.make_block_ptr(lse + bos * HQ + i_hq, (T,), (HQ,), (i_s,), (BS,), (0,))
-        p_delta = tl.make_block_ptr(delta + bos * HQ + i_hq, (T,), (HQ,), (i_s,), (BS,), (0,))
-
         o_q = i_s + tl.arange(0, BS)
         m_q = o_q < T
-        b_Rq = tl.load(p_Rq, boundary_check=(0, 1)).to(tl.float32)
+        o_r = i_s + tl.arange(0, 1)
+        p_Rq = g_cumsum + (bos * HQ + i_hq) * K + o_r[:, None] * (HQ*K) + o_d[None, :]
+        p_q = q + (bos * HQ + i_hq) * K + o_q[:, None] * (HQ*K) + o_d[None, :]
+        p_pq = g_cumsum + (bos * HQ + i_hq) * K + o_q[:, None] * (HQ*K) + o_d[None, :]
+        p_do = do + (bos * HQ + i_hq) * V + o_q[:, None] * (HQ*V) + o_v[None, :]
+        p_lse = lse + bos * HQ + i_hq + o_q * HQ
+        p_delta = delta + bos * HQ + i_hq + o_q * HQ
+
+        b_Rq = tl.load(p_Rq, mask=(o_r[:, None] < T) & (o_d[None, :] < K), other=0.0).to(tl.float32)
         b_Rq_bc_k = tl.broadcast_to(b_Rq, (BT, BK))
         b_Rq_bc_q = tl.broadcast_to(b_Rq, (BS, BK))
-        b_q = tl.load(p_q, boundary_check=(0, 1))
-        b_pq = tl.load(p_pq, boundary_check=(0, 1)).to(tl.float32)
+        b_q = tl.load(p_q, mask=m_q[:, None] & (o_d[None, :] < K), other=0.0)
+        b_pq = tl.load(p_pq, mask=m_q[:, None] & (o_d[None, :] < K), other=0.0).to(tl.float32)
         b_q_til = (b_q.to(tl.float32) * exp2(b_pq - b_Rq_bc_q)).to(b_q.dtype)
         b_exp_k_off = b_Rq_bc_k - b_pk
         b_exp_k_off_val = exp2(b_exp_k_off)  # CSE: reused for k_til and final dk scaling
         b_k_til = (b_k.to(tl.float32) * b_exp_k_off_val).to(b_k.dtype)
-        b_do = tl.load(p_do, boundary_check=(0, 1), padding_option="zero")
-        b_lse = tl.load(p_lse, boundary_check=(0,))
-        b_delta = tl.load(p_delta, boundary_check=(0,))
+        b_do = tl.load(p_do, mask=m_q[:, None] & (o_v[None, :] < V), other=0.0)
+        b_lse = tl.load(p_lse, mask=m_q, other=0.0)
+        b_delta = tl.load(p_delta, mask=m_q, other=0.0)
         b_s = tl.dot(b_k_til, tl.trans(b_q_til)) * scale * RCP_LN2
         if USE_SCALAR_G:
             b_cq = tl.load(g_scalar_cumsum + (bos + o_q) * HQ + i_hq, mask=m_q, other=0).to(tl.float32)
@@ -617,12 +636,12 @@ def parallel_wall_attn_bwd_kernel_dkv(
 
     # Structural: b_dg derived from b_dk (saves [BT,BK] fp32 accumulator).
     b_dg = -LN2 * b_k.to(tl.float32) * b_dk
-    tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), mask=m_kk)
+    tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), mask=m_kv)
+    tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), mask=m_kk)
     if USE_SCALAR_G:
-        p_dc = tl.make_block_ptr(dg_scalar_cumsum + bos * HQ + i_hq, (T,), (HQ,), (i_t * BT,), (BT,), (0,))
-        tl.store(p_dc, b_dc.to(p_dc.dtype.element_ty), boundary_check=(0,))
+        p_dc = dg_scalar_cumsum + bos * HQ + i_hq + o_k * HQ
+        tl.store(p_dc, b_dc.to(p_dc.dtype.element_ty), mask=m_k)
 
 
 @dispatch('attn')

@@ -57,7 +57,7 @@ def chunk_gdn2_fwd_kernel_intra_token_parallel(
     BH: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_tg, i_hg = tl.program_id(0), tl.program_id(1)
+    i_tg, i_hg = tl.program_id(0).to(tl.int64), tl.program_id(1)
 
     if IS_VARLEN:
         i_n = 0
@@ -98,24 +98,24 @@ def chunk_gdn2_fwd_kernel_intra_token_parallel(
     m_h = (i_hg * BH + o_h) < H
     m_k = o_k < K
 
-    p_q = tl.make_block_ptr(q + i_t * H * K, (H, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0))
-    p_k = tl.make_block_ptr(k + i_t * H * K, (H, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0))
-    p_g = tl.make_block_ptr(g + i_t * H * K, (H, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0))
-    p_b = tl.make_block_ptr(b + i_t * H * K, (H, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0))
+    p_q = q + i_t * H * K + (i_hg * BH + o_h)[:, None] * K + o_k[None, :]
+    p_k = k + i_t * H * K + (i_hg * BH + o_h)[:, None] * K + o_k[None, :]
+    p_g = g + i_t * H * K + (i_hg * BH + o_h)[:, None] * K + o_k[None, :]
+    p_b = b + i_t * H * K + (i_hg * BH + o_h)[:, None] * K + o_k[None, :]
 
-    b_q = tl.load(p_q, boundary_check=(0, 1)).to(tl.float32)
-    b_k = tl.load(p_k, boundary_check=(0, 1)).to(tl.float32)
-    b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
-    b_b = tl.load(p_b, boundary_check=(0, 1)).to(tl.float32)
+    b_q = tl.load(p_q, mask=m_h[:, None] & m_k[None, :], other=0.0).to(tl.float32)
+    b_k = tl.load(p_k, mask=m_h[:, None] & m_k[None, :], other=0.0).to(tl.float32)
+    b_g = tl.load(p_g, mask=m_h[:, None] & m_k[None, :], other=0.0).to(tl.float32)
+    b_b = tl.load(p_b, mask=m_h[:, None] & m_k[None, :], other=0.0).to(tl.float32)
 
     # Fold channel-wise erase gate into the key tile.
     b_k = b_k * b_b
 
     for j in range(i_ts, min(i_t + 1, min(T, i_ts + BC))):
-        p_kj = tl.make_block_ptr(k + j * H * K, (H, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0))
-        p_gj = tl.make_block_ptr(g + j * H * K, (H, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0))
-        b_kj = tl.load(p_kj, boundary_check=(0, 1)).to(tl.float32)
-        b_gj = tl.load(p_gj, boundary_check=(0, 1)).to(tl.float32)
+        p_kj = k + j * H * K + (i_hg * BH + o_h)[:, None] * K + o_k[None, :]
+        p_gj = g + j * H * K + (i_hg * BH + o_h)[:, None] * K + o_k[None, :]
+        b_kj = tl.load(p_kj, mask=m_h[:, None] & m_k[None, :], other=0.0).to(tl.float32)
+        b_gj = tl.load(p_gj, mask=m_h[:, None] & m_k[None, :], other=0.0).to(tl.float32)
 
         b_kgj = b_kj * exp2(b_g - b_gj)
         b_kgj = tl.where(m_k[None, :], b_kgj, 0.0)

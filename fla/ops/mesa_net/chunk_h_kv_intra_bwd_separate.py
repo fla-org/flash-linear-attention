@@ -53,11 +53,11 @@ def chunk_mesa_net_h_kv_bwd_intra_kernel_dkv(
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_bh = tl.program_id(0), tl.program_id(1)
+    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_tg = i_t
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
         NT = tl.cdiv(T, BT)
@@ -88,23 +88,28 @@ def chunk_mesa_net_h_kv_bwd_intra_kernel_dkv(
     b_dg_last = tl.zeros([1], dtype=tl.float32)
     b_dg = tl.zeros([BT], dtype=tl.float32)
 
-    p_v = tl.make_block_ptr(v, (T, V), (H*V, 1), (i_t * BT, 0), (BT, BV), (1, 0))
-    p_k = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
-    p_beta = tl.make_block_ptr(beta, (T, ), (H, ), (i_t * BT,), (BT,), (0,))
-    p_do = tl.make_block_ptr(do, (T, V), (H*V, 1), (i_t * BT, 0), (BT, BV), (1, 0))
-    p_h = tl.make_block_ptr(h_kv, (V, K), (1, V), (0, 0), (BV, BK), (0, 1))
-    p_dh = tl.make_block_ptr(dh_kv, (V, K), (1, V), (0, 0), (BV, BK), (0, 1))
-    p_q = tl.make_block_ptr(q_star, (T, K), (H*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
-    p_g = tl.make_block_ptr(g, (T,), (H,), (i_t * BT,), (BT,), (0,))
+    o_k = tl.arange(0, BK)
+    o_v = tl.arange(0, BV)
+    m_tk = m_t[:, None] & (o_k[None, :] < K)
+    m_tv = m_t[:, None] & (o_v[None, :] < V)
+    m_h = (o_v[:, None] < V) & (o_k[None, :] < K)
+    p_v = v + o_t[:, None] * (H*V) + o_v[None, :]
+    p_k = k + o_t[:, None] * (H*K) + o_k[None, :]
+    p_beta = beta + o_t * H
+    p_do = do + o_t[:, None] * (H*V) + o_v[None, :]
+    p_h = h_kv + o_v[:, None] + o_k[None, :] * V
+    p_dh = dh_kv + o_v[:, None] + o_k[None, :] * V
+    p_q = q_star + o_t[:, None] * (H*K) + o_k[None, :]
+    p_g = g + o_t * H
 
-    b_q = tl.load(p_q, boundary_check=(0, 1))
-    b_v = tl.load(p_v, boundary_check=(0, 1))
-    b_k = tl.load(p_k, boundary_check=(0, 1))
-    b_beta = tl.load(p_beta, boundary_check=(0, ))
-    b_g = tl.load(p_g, boundary_check=(0,))
-    b_do = tl.load(p_do, boundary_check=(0, 1))
-    b_h = tl.load(p_h, boundary_check=(0, 1))
-    b_dh = tl.load(p_dh, boundary_check=(0, 1))
+    b_q = tl.load(p_q, mask=m_tk, other=0.0)
+    b_v = tl.load(p_v, mask=m_tv, other=0.0)
+    b_k = tl.load(p_k, mask=m_tk, other=0.0)
+    b_beta = tl.load(p_beta, mask=m_t, other=0.0)
+    b_g = tl.load(p_g, mask=m_t, other=0.0)
+    b_do = tl.load(p_do, mask=m_tv, other=0.0)
+    b_h = tl.load(p_h, mask=m_h, other=0.0)
+    b_dh = tl.load(p_dh, mask=m_h, other=0.0)
     b_g_last = tl.load(g + (min(i_t * BT + BT, T) - 1) * H)
 
     # calculation
@@ -127,12 +132,12 @@ def chunk_mesa_net_h_kv_bwd_intra_kernel_dkv(
     b_dv += tl.dot(b_k, tl.trans(b_dh).to(b_k.dtype)) * b_g_exp_k[:, None] + tl.dot(tl.trans(b_s.to(b_do.dtype)), b_do)
     b_dk += tl.dot(tl.trans(b_ds.to(b_q.dtype)), b_q)
     b_dg = tl.where(o_t < min(i_t * BT + BT, T) - 1, b_dg, b_dg + b_dg_last)
-    p_dk = tl.make_block_ptr(dk_beta, (T, K), (H*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
-    p_dv = tl.make_block_ptr(dv, (T, V), (H*V, 1), (i_t * BT, 0), (BT, BV), (1, 0))
-    p_dg = tl.make_block_ptr(dg, (T,), (H,), (i_t * BT,), (BT,), (0,))
-    tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), boundary_check=(0,))
+    p_dk = dk_beta + o_t[:, None] * (H*K) + o_k[None, :]
+    p_dv = dv + o_t[:, None] * (H*V) + o_v[None, :]
+    p_dg = dg + o_t * H
+    tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), mask=m_tk)
+    tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), mask=m_tv)
+    tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), mask=m_t)
 
 
 @triton.heuristics({
@@ -171,11 +176,11 @@ def chunk_mesa_net_h_kv_bwd_intra_kernel_dq(
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_bh = tl.program_id(0), tl.program_id(1)
+    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_tg = i_t
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
         NT = tl.cdiv(T, BT)
@@ -201,24 +206,29 @@ def chunk_mesa_net_h_kv_bwd_intra_kernel_dq(
 
     b_dq = tl.zeros([BT, BK], dtype=tl.float32)
 
-    p_v = tl.make_block_ptr(v, (T, V), (H*V, 1), (i_t * BT, 0), (BT, BV), (1, 0))
-    p_k = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
-    p_beta = tl.make_block_ptr(beta, (T, ), (H, ), (i_t * BT,), (BT,), (0,))
-    p_do = tl.make_block_ptr(do, (T, V), (H*V, 1), (i_t * BT, 0), (BT, BV), (1, 0))
-    p_h = tl.make_block_ptr(h_kv, (V, K), (1, V), (0, 0), (BV, BK), (0, 1))
-    p_q = tl.make_block_ptr(q_star, (T, K), (H*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
-    p_g = tl.make_block_ptr(g, (T,), (H,), (i_t * BT,), (BT,), (0,))
-    p_dg_prev = tl.make_block_ptr(dg_prev, (T,), (H,), (i_t * BT,), (BT,), (0,))
-    p_dg = tl.make_block_ptr(dg, (T,), (H,), (i_t * BT,), (BT,), (0,))
-    p_dq = tl.make_block_ptr(dq, (T, K), (H*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
+    o_k = tl.arange(0, BK)
+    o_v = tl.arange(0, BV)
+    m_tk = m_t[:, None] & (o_k[None, :] < K)
+    m_tv = m_t[:, None] & (o_v[None, :] < V)
+    m_h = (o_v[:, None] < V) & (o_k[None, :] < K)
+    p_v = v + o_t[:, None] * (H*V) + o_v[None, :]
+    p_k = k + o_t[:, None] * (H*K) + o_k[None, :]
+    p_beta = beta + o_t * H
+    p_do = do + o_t[:, None] * (H*V) + o_v[None, :]
+    p_h = h_kv + o_v[:, None] + o_k[None, :] * V
+    p_q = q_star + o_t[:, None] * (H*K) + o_k[None, :]
+    p_g = g + o_t * H
+    p_dg_prev = dg_prev + o_t * H
+    p_dg = dg + o_t * H
+    p_dq = dq + o_t[:, None] * (H*K) + o_k[None, :]
 
-    b_q = tl.load(p_q, boundary_check=(0, 1))
-    b_v = tl.load(p_v, boundary_check=(0, 1))
-    b_k = tl.load(p_k, boundary_check=(0, 1))
-    b_beta = tl.load(p_beta, boundary_check=(0, ))
-    b_g = tl.load(p_g, boundary_check=(0,))
-    b_do = tl.load(p_do, boundary_check=(0, 1))
-    b_h = tl.load(p_h, boundary_check=(0, 1))
+    b_q = tl.load(p_q, mask=m_tk, other=0.0)
+    b_v = tl.load(p_v, mask=m_tv, other=0.0)
+    b_k = tl.load(p_k, mask=m_tk, other=0.0)
+    b_beta = tl.load(p_beta, mask=m_t, other=0.0)
+    b_g = tl.load(p_g, mask=m_t, other=0.0)
+    b_do = tl.load(p_do, mask=m_tv, other=0.0)
+    b_h = tl.load(p_h, mask=m_h, other=0.0)
 
     b_m = tl.where((o_t[:, None] >= o_t[None, :]) & (m_t[:, None] & m_t[None, :]), exp2(b_g[:, None] - b_g[None, :]), 0)
     b_k = (b_k * b_beta[:, None]).to(b_k.dtype)
@@ -226,11 +236,11 @@ def chunk_mesa_net_h_kv_bwd_intra_kernel_dq(
     b_ds = tl.dot(b_do, tl.trans(b_v)) * b_m
     b_g_exp_q = exp2(b_g)
     b_dq = tl.dot(b_do, b_h.to(b_do.dtype)) * b_g_exp_q[:, None]
-    b_dg = tl.sum(b_dq * b_q, axis=1) + tl.load(p_dg_prev, boundary_check=(0,))
+    b_dg = tl.sum(b_dq * b_q, axis=1) + tl.load(p_dg_prev, mask=m_t, other=0.0)
     b_dq += tl.dot(b_ds.to(b_k.dtype), b_k)
 
-    tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), boundary_check=(0,))
+    tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), mask=m_tk)
+    tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), mask=m_t)
 
 
 def chunk_mesa_net_h_kv_bwd_intra_separate_fn(

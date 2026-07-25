@@ -28,12 +28,12 @@ def parallel_path_bwd_intra_chunk_kernel(
     BT: tl.constexpr, S: tl.constexpr,
     IS_VARLEN: tl.constexpr, USE_GATE: tl.constexpr,
 ):
-    i_t, i_bh = tl.program_id(0), tl.program_id(1)
+    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
     i_h = i_hq // G
 
     if IS_VARLEN:
-        i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
+        i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int64)
         bos, eos = tl.load(offsets + i_n).to(tl.int64), tl.load(offsets + i_n + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
     else:
@@ -63,24 +63,29 @@ def parallel_path_bwd_intra_chunk_kernel(
     # constants
     sm_scale = scale * 1.44269504
 
-    p_do = tl.make_block_ptr(do, (T, V), (HQ*V, 1), (i_t * BT, 0), (BT, BV), (1, 0))
+    o_t = i_t * BT + tl.arange(0, BT)
+    o_d = tl.arange(0, BK)
+    o_v = tl.arange(0, BV)
+    m_t = o_t < T
+    m_k = m_t[:, None] & (o_d[None, :] < K)
+    p_do = do + o_t[:, None] * (HQ*V) + o_v[None, :]
     # [BT, BV]
-    b_do = tl.load(p_do, boundary_check=(0, 1))
+    b_do = tl.load(p_do, mask=m_t[:, None] & (o_v[None, :] < V), other=0.0)
 
-    p_delta = tl.make_block_ptr(D, (T, ), (HQ, ), (i_t * BT, ), (BT, ), (0, ))
-    b_delta = tl.load(p_delta, boundary_check=(0, ))
-    p_l = tl.make_block_ptr(L, (T, ), (HQ, ), (i_t * BT, ), (BT, ), (0, ))
-    b_l = tl.load(p_l, boundary_check=(0, ))
+    p_delta = D + o_t * HQ
+    b_delta = tl.load(p_delta, mask=m_t, other=0.0)
+    p_l = L + o_t * HQ
+    b_l = tl.load(p_l, mask=m_t, other=0.0)
 
     b_dq = tl.zeros([BT, BK], dtype=tl.float32)
-    p_dq = tl.make_block_ptr(dq, (T, K), (HQ*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
-    b_dq += tl.load(p_dq, boundary_check=(0, 1))
-    p_q = tl.make_block_ptr(q, (T, K), (HQ*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
-    b_q = tl.load(p_q, boundary_check=(0, 1))
+    p_dq = dq + o_t[:, None] * (HQ*K) + o_d[None, :]
+    b_dq += tl.load(p_dq, mask=m_k, other=0.0)
+    p_q = q + o_t[:, None] * (HQ*K) + o_d[None, :]
+    b_q = tl.load(p_q, mask=m_k, other=0.0)
 
     if USE_GATE:
-        p_gq_cumsum = tl.make_block_ptr(g_cumsum, (T, ), (HQ, ), (i_t * BT, ), (BT, ), (0, ))
-        b_gq_cumsum = tl.load(p_gq_cumsum, boundary_check=(0, ))
+        p_gq_cumsum = g_cumsum + o_t * HQ
+        b_gq_cumsum = tl.load(p_gq_cumsum, mask=m_t, other=0.0)
         b_dgq = tl.zeros([BT], dtype=tl.float32)
     else:
         b_dgq = None
@@ -88,23 +93,27 @@ def parallel_path_bwd_intra_chunk_kernel(
     curr_start = (tl.floor(i_t * BT / S).to(tl.int32) * S).to(tl.int32)
 
     for offset in range(curr_start, i_t * BT, BT):
-        mask = offset + tl.arange(0, BT) < T
-        p_k = tl.make_block_ptr(k, (T, K), (H*K, 1), (offset, 0), (BT, BK), (1, 0))
-        b_k = tl.load(p_k, boundary_check=(0, 1))
+        o_k = (offset + tl.arange(0, BT)).to(tl.int64)
+        mask = o_k < T
+        m_kk = mask[:, None] & (o_d[None, :] < K)
+        p_k = k + o_k[:, None] * (H*K) + o_d[None, :]
+        b_k = tl.load(p_k, mask=m_kk, other=0.0)
         b_q_tmp = tl.zeros([BT, BK], dtype=tl.float32)
         b_q_tmp += b_q
         for i_t_small in range(i_t * BT - BT, offset, -BT):
-            p_w1 = tl.make_block_ptr(w1, (T, K), (H*K, 1), (i_t_small, 0), (BT, BK), (1, 0))
-            b_w1 = tl.load(p_w1, boundary_check=(0, 1))
-            p_w2 = tl.make_block_ptr(w2, (T, K), (H*K, 1), (i_t_small, 0), (BT, BK), (1, 0))
-            b_w2 = tl.load(p_w2, boundary_check=(0, 1))
+            o_w = i_t_small + tl.arange(0, BT)
+            m_w = (o_w[:, None] < T) & (o_d[None, :] < K)
+            p_w1 = w1 + o_w[:, None] * (H*K) + o_d[None, :]
+            b_w1 = tl.load(p_w1, mask=m_w, other=0.0)
+            p_w2 = w2 + o_w[:, None] * (H*K) + o_d[None, :]
+            b_w2 = tl.load(p_w2, mask=m_w, other=0.0)
             b_A_tmp = tl.dot(b_q_tmp.to(b_w1.dtype), tl.trans(b_w1))
             b_q_tmp -= tl.dot(b_A_tmp.to(b_w1.dtype), b_w2)
         b_q2 = b_q_tmp.to(b_k.dtype)
         b_A = tl.dot(b_q2, tl.trans(b_k))
         if USE_GATE:
-            p_gk_cumsum = tl.make_block_ptr(g_cumsum, (T, ), (HQ, ), (offset, ), (BT, ), (0, ))
-            b_gk_cumsum = tl.load(p_gk_cumsum, boundary_check=(0, ))
+            p_gk_cumsum = g_cumsum + o_k * HQ
+            b_gk_cumsum = tl.load(p_gk_cumsum, mask=mask, other=0.0)
             b_A = b_A + b_gq_cumsum[:, None] - b_gk_cumsum[None, :]
             b_A = tl.where((i_t * BT + tl.arange(0, BT) < T)[:, None], b_A, float("-inf"))  # avoid nan
         b_A_softmax = tl.math.exp2(b_A * sm_scale - b_l[:, None])
@@ -115,8 +124,8 @@ def parallel_path_bwd_intra_chunk_kernel(
             mask=mask[:, None],
             sem='relaxed',
         )
-        p_v = tl.make_block_ptr(v, (T, V), (V*H, 1), (offset, 0), (BT, BV), (1, 0))
-        b_v = tl.load(p_v, boundary_check=(0, 1))
+        p_v = v + o_k[:, None] * (V*H) + o_v[None, :]
+        b_v = tl.load(p_v, mask=mask[:, None] & (o_v[None, :] < V), other=0.0)
         b_dp = tl.dot(b_do, tl.trans(b_v))
         b_dA = ((b_dp - b_delta[:, None]) * b_A_softmax * scale)
         if USE_GATE:
@@ -127,10 +136,10 @@ def parallel_path_bwd_intra_chunk_kernel(
         b_dk = tl.dot(tl.trans(b_dA), b_q2)
         tl.atomic_add(dk + (offset + tl.arange(0, BT))[:, None] * HQ*K + tl.arange(0,
                       BK)[None, :], b_dk, mask=mask[:, None], sem='relaxed')
-        p_w1 = tl.make_block_ptr(w1, (T, K), (H*K, 1), (offset, 0), (BT, BK), (1, 0))
-        b_w1 = tl.load(p_w1, boundary_check=(0, 1))
-        p_w2 = tl.make_block_ptr(w2, (T, K), (H*K, 1), (offset, 0), (BT, BK), (1, 0))
-        b_w2 = tl.load(p_w2, boundary_check=(0, 1))
+        p_w1 = w1 + o_k[:, None] * (H*K) + o_d[None, :]
+        b_w1 = tl.load(p_w1, mask=m_kk, other=0.0)
+        p_w2 = w2 + o_k[:, None] * (H*K) + o_d[None, :]
+        b_w2 = tl.load(p_w2, mask=m_kk, other=0.0)
         b_dA2 = tl.dot(b_dq.to(b_w2.dtype), tl.trans(b_w2)).to(b_v.dtype)
         b_A2 = tl.dot(b_q2.to(b_w1.dtype), tl.trans(b_w1)).to(b_v.dtype)
         b_dw2 = -tl.dot(tl.trans(b_A2), b_dq.to(b_v.dtype))
@@ -142,8 +151,8 @@ def parallel_path_bwd_intra_chunk_kernel(
         b_dq -= tl.dot(b_dA2, b_w1.to(b_v.dtype))
         b_dq += tl.dot(b_dA.to(b_k.dtype), b_k)
 
-    p_dq_new = tl.make_block_ptr(dq_new, (T, K), (HQ*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
-    tl.store(p_dq_new, b_dq.to(dq_new.dtype.element_ty), boundary_check=(0, 1))
+    p_dq_new = dq_new + o_t[:, None] * (HQ*K) + o_d[None, :]
+    tl.store(p_dq_new, b_dq.to(dq_new.dtype.element_ty), mask=m_k)
     mask = i_t * BT + tl.arange(0, BT) < T
     if USE_GATE:
         tl.atomic_add(dg_cumsum + (i_t * BT + tl.arange(0, BT)) * HQ, b_dgq, mask=mask, sem='relaxed')
