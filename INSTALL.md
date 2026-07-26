@@ -24,7 +24,7 @@ from the matching PyTorch wheel index (rocm / xpu).
 
 CUDA can use a single command since `triton` lives on PyPI:
 ```sh
-pip install flash-linear-attention[cuda]
+pip install 'flash-linear-attention[cuda]'
 ```
 
 For ROCm / XPU / CPU, do it in two steps so `torch` (and the matching `triton`
@@ -36,15 +36,15 @@ there is no priority across configured indices). This mirrors the
 ```sh
 # ROCm
 pip install --index-url https://download.pytorch.org/whl/rocm7.2 torch
-pip install flash-linear-attention[rocm]
+pip install 'flash-linear-attention[rocm]'
 
 # XPU
 pip install --index-url https://download.pytorch.org/whl/xpu torch
-pip install flash-linear-attention[xpu]
+pip install 'flash-linear-attention[xpu]'
 
 # CPU
 pip install --index-url https://download.pytorch.org/whl/cpu torch
-pip install flash-linear-attention[cpu]
+pip install 'flash-linear-attention[cpu]'
 ```
 
 For nightly torch, swap `whl/<backend>` for `whl/nightly/<backend>` and add `--pre`.
@@ -61,7 +61,7 @@ dance is no longer needed.
 # 2. install torch / torch_npu / triton-ascend, then fla with the npu extra
 pip install torch==2.7.1 torch_npu==2.7.1 torchvision==0.22.1
 pip install triton-ascend==3.2.1 --extra-index-url=https://triton-ascend.osinfra.cn/pypi/simple
-pip install flash-linear-attention[npu]
+pip install 'flash-linear-attention[npu]'
 ```
 
 The `[npu]` extra pins `torch==2.7.1`, `torch_npu==2.7.1`, `torchvision==0.22.1`,

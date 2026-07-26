@@ -124,11 +124,11 @@
 
 ```sh
 # CUDA
-pip install flash-linear-attention[cuda]
+pip install 'flash-linear-attention[cuda]'
 
 # ROCm
 pip install --index-url https://download.pytorch.org/whl/rocm7.2 torch
-pip install flash-linear-attention[rocm]
+pip install 'flash-linear-attention[rocm]'
 ```
 
 See [INSTALL.md](INSTALL.md) for the full backend table, XPU / NPU (Ascend) / CPU flows, source installs, and the `--no-deps` path for `torch` pre-release / `triton-nightly`.
