@@ -896,7 +896,10 @@ def parallel_nsa(
             f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`. "
             f"Please flatten variable-length inputs before processing.",
         )
-    G = q.shape[2] // k.shape[2]
+    HQ, H = q.shape[2], k.shape[2]
+    if HQ % H != 0:
+        raise ValueError(f"num_query_heads ({HQ}) must be divisible by num_kv_heads ({H})")
+    G = HQ // H
     assert G >= 16 and (G & (G - 1)) == 0, "Group size (HQ/H) must be a power of 2 and >= 16 in NSA"
 
     if cu_seqlens is not None:

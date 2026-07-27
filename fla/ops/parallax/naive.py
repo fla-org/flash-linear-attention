@@ -56,6 +56,8 @@ def naive_parallax(
     """
     B, T, HQ, D = q.shape
     H = k.shape[2]
+    if HQ % H != 0:
+        raise ValueError(f"num_query_heads ({HQ}) must be divisible by num_kv_heads ({H})")
     G = HQ // H
 
     if scale is None:
