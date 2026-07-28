@@ -1164,6 +1164,8 @@ def chunk_dplr_delta_rule_tilelang(
         raise DeprecationWarning(
             "head_first has been removed; inputs must use [B, T, H, ...]"
         )
+    if kwargs:
+        raise TypeError(f"unexpected DPLR kwargs: {', '.join(sorted(kwargs))}")
     chunk_size = 16 if chunk_size is None else int(chunk_size)
     scale_f = float(q.shape[-1] ** -0.5 if scale is None else scale)
     h0 = (

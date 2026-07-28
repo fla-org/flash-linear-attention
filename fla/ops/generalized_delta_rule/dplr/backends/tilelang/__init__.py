@@ -14,7 +14,7 @@ import functools
 import torch
 
 from fla.ops.backends import BaseBackend
-from fla.utils import IS_NVIDIA_HOPPER, find_spec_cached, has_usable_nvcc
+from fla.utils import find_spec_cached, has_usable_nvcc
 
 _TILELANG_AVAILABLE = find_spec_cached("tilelang") is not None
 
@@ -22,6 +22,12 @@ _TILELANG_AVAILABLE = find_spec_cached("tilelang") is not None
 @functools.cache
 def _sm_count(device_index: int) -> int:
     return torch.cuda.get_device_properties(device_index).multi_processor_count
+
+
+@functools.cache
+def _smem_optin_bytes(device_index: int) -> int:
+    props = torch.cuda.get_device_properties(device_index)
+    return int(getattr(props, "shared_memory_per_block_optin", props.shared_memory_per_block))
 
 
 class DPLRTileLangBackend(BaseBackend):
@@ -71,10 +77,18 @@ class DPLRTileLangBackend(BaseBackend):
         if k.shape[-1] not in (64, 128):
             return False, f"TileLang backend supports head dim 64 or 128 (got {k.shape[-1]}); fall back to Triton"
         chunk_size = 16 if chunk_size is None else chunk_size
-        if chunk_size == 64 and not IS_NVIDIA_HOPPER:
-            return False, "TileLang backend supports chunk_size 64 on Hopper (sm90) only; fall back to Triton"
+        if chunk_size == 64:
+            # the intra backward at BT=64 needs 131200B (K=64) or 148480B
+            # (K=128) of shared memory per block; smaller caps cannot run it
+            smem_need = 131200 if k.shape[-1] <= 64 else 148480
+            if _smem_optin_bytes(q.device.index or 0) < smem_need:
+                return False, (
+                    f"TileLang backend supports chunk_size 64 only on devices with "
+                    f">= {smem_need}B shared memory per block "
+                    f"(got {_smem_optin_bytes(q.device.index or 0)}B); fall back to Triton"
+                )
         if chunk_size not in (16, 32, 64):
-            return False, f"TileLang backend supports chunk_size 16/32 (or 64 on sm90), got {chunk_size}; fall back to Triton"
+            return False, f"TileLang backend supports chunk_size 16/32/64, got {chunk_size}; fall back to Triton"
         if not q.is_cuda:
             return False, "TileLang backend is CUDA-only; fall back to Triton"
         # The fused h+o state pass parallelizes only over (V/BV, N, H) blocks
