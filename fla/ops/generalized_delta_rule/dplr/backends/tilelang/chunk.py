@@ -13,6 +13,11 @@ import torch
 from torch import Tensor
 from torch.utils._python_dispatch import TorchDispatchMode
 
+from fla.ops.cp.chunk_delta_h import (
+    chunk_gated_delta_rule_bwd_dhu_pre_process,
+    chunk_gated_delta_rule_fwd_h_pre_process,
+)
+from fla.ops.generalized_delta_rule.dplr.chunk_o_bwd import chunk_dplr_bwd_dAu
 from fla.ops.utils.constant import RCP_LN2
 
 from .chunk_A_bwd import (
@@ -41,6 +46,10 @@ _DPLR_CHECKPOINT_PHASE: ContextVar[str] = ContextVar(
     "rwkv7_dplr_checkpoint_phase",
     default=_CHECKPOINT_PHASE_NORMAL,
 )
+
+# Active FLACPContext for the duration of a CP call. Custom ops cannot take
+# the context object, so it is threaded through a ContextVar instead.
+_DPLR_CP_CONTEXT: ContextVar = ContextVar("fla_dplr_cp_context", default=None)
 
 
 class _DPLRCheckpointPhaseMode(TorchDispatchMode):
@@ -190,6 +199,22 @@ def _chunk_dplr_delta_rule_bwd_core(
         chunk_layout=layout,
     )
     del A_ab
+    cp_context = _DPLR_CP_CONTEXT.get()
+    if cp_context is not None:
+        # CP: rebuild the corrected initial state (boundary exchange across
+        # ranks) before recomputing the chunk states
+        initial_state = chunk_gated_delta_rule_fwd_h_pre_process(
+            k=kg,
+            w=w,
+            u=u,
+            gk=gi,
+            bg=bg,
+            v=v,
+            cu_seqlens=cu,
+            initial_state=None,
+            context=cp_context,
+            chunk_size=chunk_size,
+        )
     if saved_h is not None and saved_v_new is not None:
         h = saved_h
         v_new = saved_v_new
@@ -229,6 +254,34 @@ def _chunk_dplr_delta_rule_bwd_core(
         device=q.device,
     )
     dv_full_workspace = torch.empty_like(v_new)
+    if cp_context is not None:
+        # CP: compute the local dh boundary contribution and fold the
+        # following ranks' dh into this rank's terminal dh
+        dv_new_intra, _, _ = chunk_dplr_bwd_dAu(
+            v=v,
+            v_new=v_new,
+            do=do,
+            A_qb=A_qb,
+            scale=scale,
+            cu_seqlens=cu,
+            chunk_size=chunk_size,
+            chunk_indices=layout.chunk_indices if is_varlen else None,
+        )
+        dht_arg, _ = chunk_gated_delta_rule_bwd_dhu_pre_process(
+            q=qg,
+            k=kg,
+            w=w,
+            do=do,
+            dv=dv_new_intra,
+            gk=gi,
+            bg=bg,
+            scale=1.0,
+            cu_seqlens=cu,
+            dht=None,
+            initial_state=None,
+            context=cp_context,
+            chunk_size=chunk_size,
+        )
     dqg, dkg, dw, dbg, dgk_last, dv2, dv_full, dh0 = (
         chunk_dplr_bwd_stream_dhu_o_into(
             qg=qg,
@@ -314,7 +367,7 @@ def _chunk_dplr_delta_rule_bwd_core(
         dgk_dtype=gk.dtype,
     )
 
-    dh0_out = dh0 if has_initial_state and dh0 is not None else h0.new_empty((0,))
+    dh0_out = dh0 if (cp_context is None and has_initial_state and dh0 is not None) else h0.new_empty((0,))
     return dq, dk, dv_out, da, db, dgk, dh0_out
 
 
@@ -555,6 +608,22 @@ def _chunk_dplr_delta_rule_fwd_op(
         chunk_size=chunk_size,
         chunk_layout=layout,
     )
+    cp_context = _DPLR_CP_CONTEXT.get()
+    if cp_context is not None:
+        # CP: exchange the compact local boundary state (h = M @ h_in + c)
+        # across ranks and fold it into the corrected initial state
+        initial_state = chunk_gated_delta_rule_fwd_h_pre_process(
+            k=kg,
+            w=w,
+            u=u,
+            gk=gi,
+            bg=bg,
+            v=v,
+            cu_seqlens=cu,
+            initial_state=None,
+            context=cp_context,
+            chunk_size=chunk_size,
+        )
     o, final_state = chunk_dplr_fwd_ho(
         qg=qg,
         kg=kg,
@@ -682,6 +751,22 @@ def _chunk_dplr_delta_rule_fwd_ctx_core(
         chunk_size=chunk_size,
         chunk_layout=layout,
     )
+    cp_context = _DPLR_CP_CONTEXT.get()
+    if cp_context is not None:
+        # CP: exchange the compact local boundary state (h = M @ h_in + c)
+        # across ranks and fold it into the corrected initial state
+        initial_state = chunk_gated_delta_rule_fwd_h_pre_process(
+            k=kg,
+            w=w,
+            u=u,
+            gk=gi,
+            bg=bg,
+            v=v,
+            cu_seqlens=cu,
+            initial_state=None,
+            context=cp_context,
+            chunk_size=chunk_size,
+        )
     if not store_context:
         o, final_state, h_ctx, v_new_ctx = chunk_dplr_fwd_ho_context_elided(
             qg=qg,
@@ -923,6 +1008,7 @@ def _chunk_dplr_setup_context(ctx, inputs, output):
     ctx.has_initial_state = bool(has_initial_state)
     ctx.is_varlen = bool(is_varlen)
     ctx.chunk_size = int(chunk_size)
+    ctx.cp_context = _DPLR_CP_CONTEXT.get()
 
 
 def _chunk_dplr_backward(
@@ -945,24 +1031,28 @@ def _chunk_dplr_backward(
         chunk_offsets,
     ) = ctx.saved_tensors
     dht_arg = dht if dht is not None else q.new_empty((0,), dtype=torch.float32)
-    dq, dk, dv, da, db, dgk, dh0 = _chunk_dplr_delta_rule_bwd_op(
-        do,
-        dht_arg,
-        q,
-        k,
-        v,
-        a,
-        b,
-        gk,
-        h0,
-        cu_seqlens,
-        chunk_indices,
-        chunk_offsets,
-        ctx.scale,
-        ctx.has_initial_state,
-        ctx.is_varlen,
-        ctx.chunk_size,
-    )
+    token = _DPLR_CP_CONTEXT.set(getattr(ctx, "cp_context", None))
+    try:
+        dq, dk, dv, da, db, dgk, dh0 = _chunk_dplr_delta_rule_bwd_op(
+            do,
+            dht_arg,
+            q,
+            k,
+            v,
+            a,
+            b,
+            gk,
+            h0,
+            cu_seqlens,
+            chunk_indices,
+            chunk_offsets,
+            ctx.scale,
+            ctx.has_initial_state,
+            ctx.is_varlen,
+            ctx.chunk_size,
+        )
+    finally:
+        _DPLR_CP_CONTEXT.reset(token)
     return (
         dq,
         dk,
@@ -1024,6 +1114,7 @@ def _chunk_dplr_ctx_setup_context(ctx, inputs, output):
     ctx.has_initial_state = bool(has_initial_state)
     ctx.is_varlen = bool(is_varlen)
     ctx.chunk_size = int(chunk_size)
+    ctx.cp_context = _DPLR_CP_CONTEXT.get()
 
 
 def _chunk_dplr_ctx_backward_from_saved(
@@ -1047,26 +1138,30 @@ def _chunk_dplr_ctx_backward_from_saved(
         v_new_ctx,
     ) = saved_tensors
     dht_arg = dht if dht is not None else q.new_empty((0,), dtype=torch.float32)
-    dq, dk, dv, da, db, dgk, dh0 = _chunk_dplr_delta_rule_bwd_ctx_op(
-        do,
-        dht_arg,
-        q,
-        k,
-        v,
-        a,
-        b,
-        gk,
-        h0,
-        cu_seqlens,
-        chunk_indices,
-        chunk_offsets,
-        h_ctx,
-        v_new_ctx,
-        ctx.scale,
-        ctx.has_initial_state,
-        ctx.is_varlen,
-        ctx.chunk_size,
-    )
+    token = _DPLR_CP_CONTEXT.set(getattr(ctx, "cp_context", None))
+    try:
+        dq, dk, dv, da, db, dgk, dh0 = _chunk_dplr_delta_rule_bwd_ctx_op(
+            do,
+            dht_arg,
+            q,
+            k,
+            v,
+            a,
+            b,
+            gk,
+            h0,
+            cu_seqlens,
+            chunk_indices,
+            chunk_offsets,
+            h_ctx,
+            v_new_ctx,
+            ctx.scale,
+            ctx.has_initial_state,
+            ctx.is_varlen,
+            ctx.chunk_size,
+        )
+    finally:
+        _DPLR_CP_CONTEXT.reset(token)
     return (
         dq,
         dk,
@@ -1159,6 +1254,7 @@ def chunk_dplr_delta_rule_tilelang(
     safe_gate: bool = False,
     chunk_size: int | None = None,
     disable_recompute: bool = False,
+    cp_context=None,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     del cu_seqlens_cpu, safe_gate
@@ -1168,13 +1264,22 @@ def chunk_dplr_delta_rule_tilelang(
         )
     if kwargs:
         raise TypeError(f"unexpected DPLR kwargs: {', '.join(sorted(kwargs))}")
+    if cp_context is not None:
+        assert initial_state is None, "Initial state is not supported for CP"
+        assert output_final_state is False, "Output final state is not supported for CP"
+        assert cp_context.cu_seqlens is not None, "cu_seqlens is required for CP"
+        cu_seqlens = cp_context.cu_seqlens
     chunk_size = 16 if chunk_size is None else int(chunk_size)
     scale_f = float(q.shape[-1] ** -0.5 if scale is None else scale)
-    h0 = (
-        initial_state
-        if initial_state is not None
-        else q.new_empty((0,), dtype=torch.float32)
-    )
+    n_seqs = len(cu_seqlens) - 1 if cu_seqlens is not None else q.shape[0]
+    if initial_state is not None:
+        h0 = initial_state
+    elif cp_context is not None:
+        # the corrected initial state is produced inside the op by the CP
+        # boundary exchange; this buffer only carries its shape/ABI
+        h0 = q.new_empty((n_seqs, q.shape[2], q.shape[3], v.shape[3]), dtype=torch.float32)
+    else:
+        h0 = q.new_empty((0,), dtype=torch.float32)
     cu = (
         _prepare_cuda_cu_seqlens(cu_seqlens, q.device)
         if cu_seqlens is not None
@@ -1192,24 +1297,28 @@ def chunk_dplr_delta_rule_tilelang(
         h0,
         cu,
         scale_f,
-        initial_state is not None,
+        initial_state is not None or cp_context is not None,
         output_final_state,
         cu_seqlens is not None,
         chunk_size,
     )
-    if disable_recompute:
-        if not is_compiling and checkpoint_phase == _CHECKPOINT_PHASE_FORWARD or (
-            not is_compiling
-            and checkpoint_phase == _CHECKPOINT_PHASE_NORMAL
-            and not torch.is_grad_enabled()
-        ):
-            o, final_state, _, _, _, _ = (
-                _chunk_dplr_delta_rule_fwd_ctx_elided_op(*op_args)
-            )
+    token = _DPLR_CP_CONTEXT.set(cp_context)
+    try:
+        if disable_recompute:
+            if not is_compiling and checkpoint_phase == _CHECKPOINT_PHASE_FORWARD or (
+                not is_compiling
+                and checkpoint_phase == _CHECKPOINT_PHASE_NORMAL
+                and not torch.is_grad_enabled()
+            ):
+                o, final_state, _, _, _, _ = (
+                    _chunk_dplr_delta_rule_fwd_ctx_elided_op(*op_args)
+                )
+            else:
+                o, final_state, _, _, _, _ = _chunk_dplr_delta_rule_fwd_ctx_op(
+                    *op_args
+                )
         else:
-            o, final_state, _, _, _, _ = _chunk_dplr_delta_rule_fwd_ctx_op(
-                *op_args
-            )
-    else:
-        o, final_state, _, _ = _chunk_dplr_delta_rule_fwd_op(*op_args)
+            o, final_state, _, _ = _chunk_dplr_delta_rule_fwd_op(*op_args)
+    finally:
+        _DPLR_CP_CONTEXT.reset(token)
     return o, final_state if output_final_state else None

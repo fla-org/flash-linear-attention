@@ -59,8 +59,6 @@ class DPLRTileLangBackend(BaseBackend):
         cp_context=None,
         **kwargs,
     ) -> tuple[bool, str | None]:
-        if cp_context is not None:
-            return False, "TileLang backend does not support context parallelism (cp_context); fall back to Triton"
         if q.dtype not in (torch.float16, torch.bfloat16):
             return False, f"TileLang backend does not support dtype {q.dtype}; fall back to Triton"
         if not all(t.dtype == q.dtype for t in (k, v, a, b)):
@@ -140,4 +138,5 @@ class DPLRTileLangBackend(BaseBackend):
             safe_gate=safe_gate,
             chunk_size=chunk_size,
             disable_recompute=disable_recompute,
+            cp_context=cp_context,
         )

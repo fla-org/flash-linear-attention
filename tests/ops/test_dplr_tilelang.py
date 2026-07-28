@@ -45,7 +45,7 @@ def _verifier_inputs(
 @pytest.mark.parametrize(('K', 'dtype', 'chunk_size'), [(64, torch.bfloat16, 32), (128, torch.bfloat16, 16), (64, torch.float16, 16)])
 def test_chunk_verifier_accepts(K: int, dtype: torch.dtype, chunk_size: int):
     ok, reason = DPLRTileLangBackend().chunk_dplr_delta_rule_verifier(
-        *_verifier_inputs(K=K, dtype=dtype), chunk_size=chunk_size,
+        *_verifier_inputs(K=K, dtype=dtype), chunk_size=chunk_size, cp_context=SimpleNamespace(),
     )
     assert ok and reason is None
 
@@ -67,7 +67,6 @@ def test_chunk_verifier_accepts_chunk64_on_large_smem_device(monkeypatch):
 @pytest.mark.parametrize(
     ('case', 'reason'),
     [
-        ('cp', 'context parallelism'),
         ('fp32', 'does not support dtype'),
         ('dtype_mismatch', 'dtypes to match'),
         ('kv_mismatch', 'K == V'),
@@ -79,10 +78,7 @@ def test_chunk_verifier_accepts_chunk64_on_large_smem_device(monkeypatch):
 )
 def test_chunk_verifier_rejects(monkeypatch, case: str, reason: str):
     kwargs = {}
-    if case == 'cp':
-        args = _verifier_inputs()
-        kwargs['cp_context'] = SimpleNamespace()
-    elif case == 'fp32':
+    if case == 'fp32':
         args = _verifier_inputs(dtype=torch.float32)
     elif case == 'dtype_mismatch':
         args = list(_verifier_inputs())
