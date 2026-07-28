@@ -26,11 +26,18 @@ requires_tilelang_route = pytest.mark.skipif(
 )
 
 
-def _verifier_inputs(K: int = 64, V: int | None = None, dtype: torch.dtype = torch.bfloat16, gk_dtype: torch.dtype | None = None):
+def _verifier_inputs(
+    K: int = 64,
+    V: int | None = None,
+    dtype: torch.dtype = torch.bfloat16,
+    gk_dtype: torch.dtype | None = None,
+    B: int = 4,
+    H: int = 32,
+):
     V = K if V is None else V
 
     def make(d, dt=dtype):
-        return torch.empty(1, 16, 2, d, dtype=dt)
+        return torch.empty(B, 16, H, d, dtype=dt, device=device)
 
     return make(K), make(K), make(V), make(K), make(K), make(K, gk_dtype or dtype)
 
@@ -59,6 +66,7 @@ def test_chunk_verifier_accepts_chunk64_on_hopper(monkeypatch):
         ('head_dim', 'head dim'),
         ('chunk64', 'Hopper'),
         ('chunk48', 'chunk_size'),
+        ('small_grid', 'small grids'),
     ],
 )
 def test_chunk_verifier_rejects(monkeypatch, case: str, reason: str):
@@ -78,6 +86,8 @@ def test_chunk_verifier_rejects(monkeypatch, case: str, reason: str):
         monkeypatch.setattr(dplr_tilelang_backend, 'IS_NVIDIA_HOPPER', False)
         args = _verifier_inputs()
         kwargs['chunk_size'] = 64
+    elif case == 'small_grid':
+        args = _verifier_inputs(B=1, H=1)
     else:
         args = _verifier_inputs()
         kwargs['chunk_size'] = 48
@@ -124,14 +134,14 @@ def _assert_route_parity(monkeypatch, run, names):
             ),
         )
         for test in [
-            (2, 512, 3, 64, True, torch.bfloat16, 32, False),
-            (2, 512, 3, 64, True, torch.bfloat16, 32, True),
-            (2, 512, 3, 128, False, torch.bfloat16, 32, False),
-            (2, 512, 3, 64, True, torch.bfloat16, 16, False),
-            (2, 512, 3, 128, False, torch.bfloat16, 16, False),
-            (2, 512, 3, 64, True, torch.float16, 32, False),
-            (1, 63, 1, 64, True, torch.float16, 16, False),
-            (2, 512, 3, 64, True, torch.bfloat16, 64, False),
+            (8, 512, 32, 64, True, torch.bfloat16, 32, False),
+            (8, 512, 32, 64, True, torch.bfloat16, 32, True),
+            (8, 512, 32, 128, False, torch.bfloat16, 32, False),
+            (8, 512, 32, 64, True, torch.bfloat16, 16, False),
+            (8, 512, 32, 128, False, torch.bfloat16, 16, False),
+            (8, 512, 32, 64, True, torch.float16, 32, False),
+            (8, 63, 32, 64, True, torch.float16, 16, False),
+            (8, 512, 32, 64, True, torch.bfloat16, 64, False),
         ]
     ],
 )
@@ -183,10 +193,10 @@ def test_chunk_tilelang_route_parity(
     [
         pytest.param(*test, id="H{}-D{}-safe_gate{}-cu_seqlens{}-{}-chunk_size{}".format(*test))
         for test in [
-            (3, 64, True, [0, 256, 500, 1000], torch.bfloat16, 32),
-            (3, 128, False, [0, 256, 500, 1000], torch.bfloat16, 32),
-            (3, 64, True, [0, 256, 500, 1000], torch.bfloat16, 16),
-            (3, 64, True, [0, 256, 500, 1000], torch.float16, 32),
+            (32, 64, True, [0, 256, 500, 760, 1000], torch.bfloat16, 32),
+            (32, 128, False, [0, 256, 500, 760, 1000], torch.bfloat16, 32),
+            (32, 64, True, [0, 256, 500, 760, 1000], torch.bfloat16, 16),
+            (32, 64, True, [0, 256, 500, 760, 1000], torch.float16, 32),
         ]
     ],
 )
