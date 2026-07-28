@@ -93,7 +93,6 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64_npu(
     cu_seqlens,
     chunk_offsets,
     T,
-    T_total,
     task_num,
     num_core,
     H: tl.constexpr,
@@ -111,10 +110,10 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64_npu(
     IS_VARLEN: tl.constexpr,
 ):
     core_id = tl.program_id(0)
+    T_max = T
     for task_id in tl.range(core_id, task_num, num_core):
         i_nh = task_id
         i_n, i_h = i_nh // HV, i_nh % HV
-        T_max = T_total
         if IS_VARLEN:
             bos, eos = (
                 tl.load(cu_seqlens + i_n).to(tl.int32),
@@ -427,7 +426,6 @@ def chunk_gated_delta_rule_fwd_h_npu(
         cu_seqlens=cu_seqlens,
         chunk_offsets=chunk_offsets,
         T=T,
-        T_total=T,
         task_num=task_num,
         num_core=num_core,
         H=H,
