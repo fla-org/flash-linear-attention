@@ -42,7 +42,7 @@ def _verifier_inputs(
     return make(K), make(K), make(V), make(K), make(K), make(K, gk_dtype or dtype)
 
 
-@pytest.mark.parametrize(('K', 'dtype', 'chunk_size'), [(64, torch.bfloat16, 32), (128, torch.bfloat16, 16), (64, torch.float16, 16)])
+@pytest.mark.parametrize(('K', 'dtype', 'chunk_size'), [(64, torch.bfloat16, 32), (128, torch.bfloat16, 32), (64, torch.float16, 16)])
 def test_chunk_verifier_accepts(K: int, dtype: torch.dtype, chunk_size: int):
     ok, reason = DPLRTileLangBackend().chunk_dplr_delta_rule_verifier(
         *_verifier_inputs(K=K, dtype=dtype), chunk_size=chunk_size, cp_context=SimpleNamespace(),
@@ -72,6 +72,7 @@ def test_chunk_verifier_accepts_chunk64_on_large_smem_device(monkeypatch):
         ('kv_mismatch', 'K == V'),
         ('head_dim', 'head dim'),
         ('chunk64', 'shared memory per block'),
+        ('chunk16_k128', 'slower than Triton'),
         ('chunk48', 'chunk_size'),
         ('small_grid', 'small grids'),
     ],
@@ -92,6 +93,9 @@ def test_chunk_verifier_rejects(monkeypatch, case: str, reason: str):
         monkeypatch.setattr(dplr_tilelang_backend, '_smem_optin_bytes', lambda idx: 101376)
         args = _verifier_inputs()
         kwargs['chunk_size'] = 64
+    elif case == 'chunk16_k128':
+        args = _verifier_inputs(K=128)
+        kwargs['chunk_size'] = 16
     elif case == 'small_grid':
         args = _verifier_inputs(B=1, H=1)
     else:
@@ -144,7 +148,6 @@ def _assert_route_parity(monkeypatch, run, names):
             (8, 512, 32, 64, True, torch.bfloat16, 32, True),
             (8, 512, 32, 128, False, torch.bfloat16, 32, False),
             (8, 512, 32, 64, True, torch.bfloat16, 16, False),
-            (8, 512, 32, 128, False, torch.bfloat16, 16, False),
             (8, 512, 32, 64, True, torch.float16, 32, False),
             (8, 63, 32, 64, True, torch.float16, 16, False),
             (8, 512, 32, 64, True, torch.bfloat16, 64, False),

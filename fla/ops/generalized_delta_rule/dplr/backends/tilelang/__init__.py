@@ -77,6 +77,10 @@ class DPLRTileLangBackend(BaseBackend):
         if k.shape[-1] not in (64, 128):
             return False, f"TileLang backend supports head dim 64 or 128 (got {k.shape[-1]}); fall back to Triton"
         chunk_size = 16 if chunk_size is None else chunk_size
+        if chunk_size == 16 and k.shape[-1] == 128:
+            # measured ~0.5x vs Triton (the non-vectorized A-stage and the
+            # 2-warp h+o path at BT=16 do not pay off at K=128)
+            return False, "TileLang backend is slower than Triton at chunk_size 16 with head dim 128; fall back to Triton"
         if chunk_size == 64:
             # the intra backward at BT=64 needs 131200B (K=64) or 148480B
             # (K=128) of shared memory per block; smaller caps cannot run it
