@@ -9,12 +9,19 @@
 
 from __future__ import annotations
 
+import functools
+
 import torch
 
 from fla.ops.backends import BaseBackend
 from fla.utils import IS_NVIDIA_HOPPER, find_spec_cached, has_usable_nvcc
 
 _TILELANG_AVAILABLE = find_spec_cached("tilelang") is not None
+
+
+@functools.cache
+def _sm_count(device_index: int) -> int:
+    return torch.cuda.get_device_properties(device_index).multi_processor_count
 
 
 class DPLRTileLangBackend(BaseBackend):
@@ -68,6 +75,21 @@ class DPLRTileLangBackend(BaseBackend):
             return False, "TileLang backend supports chunk_size 64 on Hopper (sm90) only; fall back to Triton"
         if chunk_size not in (16, 32, 64):
             return False, f"TileLang backend supports chunk_size 16/32 (or 64 on sm90), got {chunk_size}; fall back to Triton"
+        if not q.is_cuda:
+            return False, "TileLang backend is CUDA-only; fall back to Triton"
+        # The fused h+o state pass parallelizes only over (V/BV, N, H) blocks
+        # and walks chunks serially, so it loses to the split Triton kernels
+        # when the grid underfills the GPU. Measured crossover on PRO 6000 /
+        # H100 class parts is around half the SM count.
+        bv = 64 if v.shape[-1] <= 64 else 32
+        n_seqs = len(cu_seqlens) - 1 if cu_seqlens is not None else q.shape[0]
+        grid = n_seqs * q.shape[2] * ((v.shape[-1] + bv - 1) // bv)
+        sm = _sm_count(q.device.index or 0)
+        if grid < sm // 2:
+            return False, (
+                f"TileLang backend is slower than Triton on small grids (N*H*(V/BV)={grid} "
+                f"< {sm // 2} SMs/2); fall back to Triton"
+            )
         return True, None
 
     def chunk_dplr_delta_rule(
