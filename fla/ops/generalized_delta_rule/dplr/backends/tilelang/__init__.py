@@ -1,0 +1,105 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
+"""TileLang backend for DPLR operations."""
+
+from __future__ import annotations
+
+import torch
+
+from fla.ops.backends import BaseBackend
+from fla.utils import IS_NVIDIA_HOPPER, find_spec_cached, has_usable_nvcc
+
+_TILELANG_AVAILABLE = find_spec_cached("tilelang") is not None
+
+
+class DPLRTileLangBackend(BaseBackend):
+
+    backend_type = "tilelang"
+    package_name = "tilelang"
+    env_var = "FLA_TILELANG"
+
+    @classmethod
+    def is_available(cls) -> bool:
+        return _TILELANG_AVAILABLE and has_usable_nvcc()
+
+    def chunk_dplr_delta_rule_verifier(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        gk: torch.Tensor,
+        scale: float | None = None,
+        initial_state: torch.Tensor | None = None,
+        output_final_state: bool = False,
+        cu_seqlens: torch.LongTensor | None = None,
+        cu_seqlens_cpu: torch.LongTensor | None = None,
+        safe_gate: bool = False,
+        chunk_size: int | None = None,
+        disable_recompute: bool = False,
+        cp_context=None,
+        **kwargs,
+    ) -> tuple[bool, str | None]:
+        if cp_context is not None:
+            return False, "TileLang backend does not support context parallelism (cp_context); fall back to Triton"
+        if q.dtype not in (torch.float16, torch.bfloat16):
+            return False, f"TileLang backend does not support dtype {q.dtype}; fall back to Triton"
+        if not all(t.dtype == q.dtype for t in (k, v, a, b, gk)):
+            return False, (
+                "TileLang backend requires k/v/a/b/gk dtypes to match q.dtype "
+                f"(got q={q.dtype}, k={k.dtype}, v={v.dtype}, a={a.dtype}, b={b.dtype}, gk={gk.dtype}); "
+                "fall back to Triton"
+            )
+        if k.shape[-1] != v.shape[-1]:
+            return False, (
+                f"TileLang backend requires K == V (got K={k.shape[-1]}, V={v.shape[-1]}); "
+                "fall back to Triton"
+            )
+        if k.shape[-1] not in (64, 128):
+            return False, f"TileLang backend supports head dim 64 or 128 (got {k.shape[-1]}); fall back to Triton"
+        chunk_size = 16 if chunk_size is None else chunk_size
+        if chunk_size == 64 and not IS_NVIDIA_HOPPER:
+            return False, "TileLang backend supports chunk_size 64 on Hopper (sm90) only; fall back to Triton"
+        if chunk_size not in (16, 32, 64):
+            return False, f"TileLang backend supports chunk_size 16/32 (or 64 on sm90), got {chunk_size}; fall back to Triton"
+        return True, None
+
+    def chunk_dplr_delta_rule(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        gk: torch.Tensor,
+        scale: float | None = None,
+        initial_state: torch.Tensor | None = None,
+        output_final_state: bool = False,
+        cu_seqlens: torch.LongTensor | None = None,
+        cu_seqlens_cpu: torch.LongTensor | None = None,
+        safe_gate: bool = False,
+        chunk_size: int | None = None,
+        disable_recompute: bool = False,
+        cp_context=None,
+        **kwargs,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        from fla.ops.generalized_delta_rule.dplr.backends.tilelang.chunk import (
+            chunk_dplr_delta_rule_tilelang,
+        )
+        return chunk_dplr_delta_rule_tilelang(
+            q=q, k=k, v=v, a=a, b=b, gk=gk,
+            scale=scale,
+            initial_state=initial_state,
+            output_final_state=output_final_state,
+            cu_seqlens=cu_seqlens,
+            cu_seqlens_cpu=cu_seqlens_cpu,
+            safe_gate=safe_gate,
+            chunk_size=chunk_size,
+            disable_recompute=disable_recompute,
+        )
