@@ -309,6 +309,7 @@ def _chunk_dplr_fwd_intra_from_gk_tensorcore_kernel(
     cumsum_scale_value: float,
     threads: int = 128,
     USE_SWIZZLE: bool = False,
+    gk_dtype: str | None = None,
 ):
     """Rectangular eval A-stage that computes chunk-local gi inside the CTA."""
     acc_dtype = "float32"
@@ -316,6 +317,8 @@ def _chunk_dplr_fwd_intra_from_gk_tensorcore_kernel(
     # ~115 log2 at BT=32); keep the q-side GEMM operands in fp32 there, as
     # FLA's Triton kernel does for both dtypes.
     qside_dtype = acc_dtype if in_dtype == "float16" else in_dtype
+    # raw gk may stay in its own dtype (e.g. fp32); all gate math is fp32
+    gk_dtype = gk_dtype or in_dtype
     n_tokens, n_seq_plus_one, n_chunks = T.dynamic(
         "n_tokens, n_seq_plus_one, n_chunks"
     )
@@ -326,7 +329,7 @@ def _chunk_dplr_fwd_intra_from_gk_tensorcore_kernel(
         k: T.Tensor((n_tokens, H, K), in_dtype),
         a: T.Tensor((n_tokens, H, K), in_dtype),
         b: T.Tensor((n_tokens, H, K), in_dtype),
-        gk: T.Tensor((n_tokens, H, K), in_dtype),
+        gk: T.Tensor((n_tokens, H, K), gk_dtype),
         cu_seqlens: T.Tensor((n_seq_plus_one,), "int32"),
         chunk_indices: T.Tensor((n_chunks, 2), "int32"),
         qg: T.Tensor((n_tokens, H, K), in_dtype),
@@ -502,6 +505,7 @@ def chunk_dplr_fwd_intra_from_gk(
     kernel = _chunk_dplr_fwd_intra_from_gk_tensorcore_kernel(
         H, K, BT, in_dtype, float(scale), float(RCP_LN2),
         threads=threads,
+        gk_dtype=str(gk.dtype).split(".")[-1],
     )
     qg_f, kg_f, ag_f, bg_f, Aqk_f, Aqb_f, Aab_f, Aak_f, gi_f = kernel(
         q_f, k_f, a_f, b_f, gk_f, layout.cu_seqlens, layout.chunk_indices,

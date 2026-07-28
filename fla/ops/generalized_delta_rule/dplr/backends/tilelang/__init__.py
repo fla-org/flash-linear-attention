@@ -63,12 +63,14 @@ class DPLRTileLangBackend(BaseBackend):
             return False, "TileLang backend does not support context parallelism (cp_context); fall back to Triton"
         if q.dtype not in (torch.float16, torch.bfloat16):
             return False, f"TileLang backend does not support dtype {q.dtype}; fall back to Triton"
-        if not all(t.dtype == q.dtype for t in (k, v, a, b, gk)):
+        if not all(t.dtype == q.dtype for t in (k, v, a, b)):
             return False, (
-                "TileLang backend requires k/v/a/b/gk dtypes to match q.dtype "
-                f"(got q={q.dtype}, k={k.dtype}, v={v.dtype}, a={a.dtype}, b={b.dtype}, gk={gk.dtype}); "
+                "TileLang backend requires k/v/a/b dtypes to match q.dtype "
+                f"(got q={q.dtype}, k={k.dtype}, v={v.dtype}, a={a.dtype}, b={b.dtype}); "
                 "fall back to Triton"
             )
+        if gk.dtype not in (torch.float16, torch.bfloat16, torch.float32):
+            return False, f"TileLang backend does not support gk dtype {gk.dtype}; fall back to Triton"
         if k.shape[-1] != v.shape[-1]:
             return False, (
                 f"TileLang backend requires K == V (got K={k.shape[-1]}, V={v.shape[-1]}); "

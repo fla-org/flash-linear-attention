@@ -50,6 +50,14 @@ def test_chunk_verifier_accepts(K: int, dtype: torch.dtype, chunk_size: int):
     assert ok and reason is None
 
 
+def test_chunk_verifier_accepts_fp32_gk():
+    # gk may stay fp32 while activations are fp16/bf16 (FLA's own test convention)
+    ok, reason = DPLRTileLangBackend().chunk_dplr_delta_rule_verifier(
+        *_verifier_inputs(gk_dtype=torch.float32), chunk_size=32,
+    )
+    assert ok and reason is None
+
+
 def test_chunk_verifier_accepts_chunk64_on_large_smem_device(monkeypatch):
     monkeypatch.setattr(dplr_tilelang_backend, '_smem_optin_bytes', lambda idx: 232448)
     ok, reason = DPLRTileLangBackend().chunk_dplr_delta_rule_verifier(*_verifier_inputs(), chunk_size=64)
@@ -77,7 +85,9 @@ def test_chunk_verifier_rejects(monkeypatch, case: str, reason: str):
     elif case == 'fp32':
         args = _verifier_inputs(dtype=torch.float32)
     elif case == 'dtype_mismatch':
-        args = _verifier_inputs(gk_dtype=torch.float32)
+        args = list(_verifier_inputs())
+        args[1] = torch.empty_like(args[1], dtype=torch.float32)
+        args = tuple(args)
     elif case == 'kv_mismatch':
         args = _verifier_inputs(K=64, V=128)
     elif case == 'head_dim':
@@ -180,6 +190,39 @@ def test_chunk_tilelang_route_parity(
             safe_gate=safe_gate,
             chunk_size=chunk_size,
             disable_recompute=disable_recompute,
+        )
+        ((o * do).sum() + (st * dht).sum()).backward()
+        return o, st, q_.grad, k_.grad, v_.grad, a_.grad, b_.grad, gk_.grad, h0_.grad
+
+    _assert_route_parity(monkeypatch, run, ('o', 'ht', 'dq', 'dk', 'dv', 'da', 'db', 'dgk', 'dh0'))
+
+
+@requires_tilelang_route
+def test_chunk_tilelang_route_parity_fp32_gk(monkeypatch):
+    torch.manual_seed(42)
+    B, T, H, D = 8, 512, 32, 64
+    dtype = torch.bfloat16
+    q = torch.randn(B, T, H, D, dtype=dtype)
+    k = torch.randn(B, T, H, D, dtype=dtype)
+    v = torch.randn(B, T, H, D, dtype=dtype)
+    a = F.normalize(torch.rand(B, T, H, D, dtype=dtype), p=2, dim=-1)
+    b = -a
+    # FLA's own tests keep gk in fp32 with bf16 activations
+    gk = F.logsigmoid(torch.randn(B, T, H, D, dtype=torch.float)).clamp(-5, 0)
+    h0 = torch.randn(B, H, D, D, dtype=torch.float)
+    q, k, v, a, b, gk, h0 = (x.to(device) for x in (q, k, v, a, b, gk, h0))
+    do = torch.randn_like(v)
+    dht = torch.randn_like(h0)
+
+    def run():
+        q_, k_, v_, a_, b_, gk_, h0_ = (x.detach().clone().requires_grad_(True) for x in (q, k, v, a, b, gk, h0))
+        o, st = chunk_dplr_delta_rule(
+            q=q_, k=k_, v=v_, a=a_, b=b_, gk=gk_,
+            scale=1.0,
+            initial_state=h0_,
+            output_final_state=True,
+            safe_gate=True,
+            chunk_size=32,
         )
         ((o * do).sum() + (st * dht).sum()).backward()
         return o, st, q_.grad, k_.grad, v_.grad, a_.grad, b_.grad, gk_.grad, h0_.grad

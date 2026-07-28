@@ -62,9 +62,11 @@ def _chunk_dplr_bwd_kernel_intra(
     USE_SWIZZLE: bool = False,
     DERIVE_GE: bool = False,
     cumsum_scale_value: float = RCP_LN2,
+    gk_dtype: str | None = None,
 ):
     acc_dtype = "float32"
-    ge_in_dtype = in_dtype if DERIVE_GE else acc_dtype
+    # DERIVE_GE loads raw gk, which may stay in its own dtype (e.g. fp32)
+    ge_in_dtype = (gk_dtype or in_dtype) if DERIVE_GE else acc_dtype
     n_tokens, n_seq_plus_one, n_chunks = T.dynamic(
         "n_tokens, n_seq_plus_one, n_chunks"
     )
@@ -432,6 +434,7 @@ def chunk_dplr_bwd_dqk_intra_fused_qside_into(
         FUSE_QSIDE_DA=True, V=V, BV=bv,
         USE_SWIZZLE=False,
         DERIVE_GE=derive_ge,
+        gk_dtype=str(gk.dtype).split(".")[-1] if derive_ge else None,
         **config,
     )
     kernel(
