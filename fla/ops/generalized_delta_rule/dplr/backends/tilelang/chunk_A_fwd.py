@@ -370,6 +370,16 @@ def _chunk_dplr_fwd_intra_from_gk_tensorcore_kernel(
             scale_v = T.Cast(acc_dtype, scale_value)
             cumsum_scale = T.Cast(acc_dtype, cumsum_scale_value)
 
+            # hoist the gk tile into shared once; the scan and the gating
+            # loop then read it from shared instead of global twice
+            gk_shared = T.alloc_shared((BT, K), gk_dtype)
+            for r, c in T.Parallel(BT, K):
+                t = bos + r
+                if t < eos:
+                    gk_shared[r, c] = gk[t, i_h, c]
+                else:
+                    gk_shared[r, c] = T.Cast(gk_dtype, 0.0)
+
             for c in T.Parallel(K):
                 prefix_acc[c] = T.Cast(acc_dtype, 0.0)
 
@@ -377,11 +387,16 @@ def _chunk_dplr_fwd_intra_from_gk_tensorcore_kernel(
                 t = bos + r
                 for c in T.Parallel(K):
                     if t < eos:
-                        prefix_acc[c] += T.Cast(acc_dtype, gk[t, i_h, c])
+                        prefix_acc[c] += T.Cast(acc_dtype, gk_shared[r, c])
                         gi_mat[r, c] = prefix_acc[c] * cumsum_scale
-                        gi_out[t, i_h, c] = gi_mat[r, c]
                     else:
                         gi_mat[r, c] = T.Cast(acc_dtype, 0.0)
+
+            # one batched coalesced store of gi instead of one per serial step
+            for r, c in T.Parallel(BT, K):
+                t = bos + r
+                if t < eos:
+                    gi_out[t, i_h, c] = gi_mat[r, c]
 
             for c in T.Parallel(K):
                 if bos < eos:
@@ -403,7 +418,7 @@ def _chunk_dplr_fwd_intra_from_gk_tensorcore_kernel(
                     kv = T.Cast(acc_dtype, k[t, i_h, c])
                     av = T.Cast(acc_dtype, a[t, i_h, c])
                     bv = T.Cast(acc_dtype, b[t, i_h, c])
-                    gkv = T.Cast(acc_dtype, gk[t, i_h, c])
+                    gkv = T.Cast(acc_dtype, gk_shared[r, c])
                     giv = gi_mat[r, c]
                     gev = giv - gkv * cumsum_scale
                     q_scaled = qv * scale_v
