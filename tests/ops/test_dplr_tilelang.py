@@ -15,7 +15,7 @@ import torch.nn.functional as F
 import fla.ops.generalized_delta_rule.dplr.backends.tilelang as dplr_tilelang_backend
 from fla.ops.generalized_delta_rule.dplr import chunk_dplr_delta_rule
 from fla.ops.generalized_delta_rule.dplr.backends.tilelang import DPLRTileLangBackend
-from fla.utils import IS_NVIDIA_HOPPER, assert_close, device
+from fla.utils import assert_close, device
 
 _TILELANG_USABLE = DPLRTileLangBackend.is_available()
 _DISPATCH_DISABLED = os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") == "1"
@@ -50,8 +50,8 @@ def test_chunk_verifier_accepts(K: int, dtype: torch.dtype, chunk_size: int):
     assert ok and reason is None
 
 
-def test_chunk_verifier_accepts_chunk64_on_hopper(monkeypatch):
-    monkeypatch.setattr(dplr_tilelang_backend, 'IS_NVIDIA_HOPPER', True)
+def test_chunk_verifier_accepts_chunk64_on_large_smem_device(monkeypatch):
+    monkeypatch.setattr(dplr_tilelang_backend, '_smem_optin_bytes', lambda idx: 232448)
     ok, reason = DPLRTileLangBackend().chunk_dplr_delta_rule_verifier(*_verifier_inputs(), chunk_size=64)
     assert ok and reason is None
 
@@ -64,7 +64,7 @@ def test_chunk_verifier_accepts_chunk64_on_hopper(monkeypatch):
         ('dtype_mismatch', 'dtypes to match'),
         ('kv_mismatch', 'K == V'),
         ('head_dim', 'head dim'),
-        ('chunk64', 'Hopper'),
+        ('chunk64', 'shared memory per block'),
         ('chunk48', 'chunk_size'),
         ('small_grid', 'small grids'),
     ],
@@ -83,7 +83,7 @@ def test_chunk_verifier_rejects(monkeypatch, case: str, reason: str):
     elif case == 'head_dim':
         args = _verifier_inputs(K=100, V=100)
     elif case == 'chunk64':
-        monkeypatch.setattr(dplr_tilelang_backend, 'IS_NVIDIA_HOPPER', False)
+        monkeypatch.setattr(dplr_tilelang_backend, '_smem_optin_bytes', lambda idx: 101376)
         args = _verifier_inputs()
         kwargs['chunk_size'] = 64
     elif case == 'small_grid':
@@ -129,8 +129,8 @@ def _assert_route_parity(monkeypatch, run, names):
             *test,
             id="B{}-T{}-H{}-D{}-safe_gate{}-{}-chunk_size{}-disable_recompute{}".format(*test),
             marks=pytest.mark.skipif(
-                test[6] == 64 and not IS_NVIDIA_HOPPER,
-                reason='chunk_size 64 route requires sm90',
+                test[6] == 64 and dplr_tilelang_backend._smem_optin_bytes(0) < 131200,
+                reason='chunk_size 64 route requires >= 131200B shared memory per block',
             ),
         )
         for test in [
