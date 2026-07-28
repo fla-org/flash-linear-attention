@@ -14,6 +14,7 @@ import pytest
 import torch
 
 import fla.ops.common.backends.tilelang as common_tilelang_backend
+import fla.ops.generalized_delta_rule.dplr.backends.tilelang as dplr_tilelang_backend
 import fla.ops.kda.backends.tilelang as kda_tilelang_backend
 import fla.ops.rwkv6.backends.tilelang as rwkv6_tilelang_backend
 from fla.utils import _compat
@@ -100,10 +101,12 @@ def _backend_cls(backend_module):
         return backend_module.TileLangBackend
     if backend_module is rwkv6_tilelang_backend:
         return backend_module.RWKV6TileLangBackend
-    return backend_module.KDATileLangBackend
+    if backend_module is kda_tilelang_backend:
+        return backend_module.KDATileLangBackend
+    return backend_module.DPLRTileLangBackend
 
 
-@pytest.mark.parametrize("backend_module", [common_tilelang_backend, kda_tilelang_backend, rwkv6_tilelang_backend])
+@pytest.mark.parametrize("backend_module", [common_tilelang_backend, kda_tilelang_backend, rwkv6_tilelang_backend, dplr_tilelang_backend])
 def test_tilelang_backend_gated_by_nvcc_probe(monkeypatch, backend_module):
     monkeypatch.setattr(backend_module, "_TILELANG_AVAILABLE", True)
     monkeypatch.setattr(backend_module, "has_usable_nvcc", lambda: False)
@@ -113,7 +116,7 @@ def test_tilelang_backend_gated_by_nvcc_probe(monkeypatch, backend_module):
     assert _backend_cls(backend_module).is_available() is True
 
 
-@pytest.mark.parametrize("backend_module", [common_tilelang_backend, kda_tilelang_backend, rwkv6_tilelang_backend])
+@pytest.mark.parametrize("backend_module", [common_tilelang_backend, kda_tilelang_backend, rwkv6_tilelang_backend, dplr_tilelang_backend])
 def test_tilelang_backend_unavailable_without_tilelang(monkeypatch, backend_module):
     monkeypatch.setattr(backend_module, "_TILELANG_AVAILABLE", False)
     monkeypatch.setattr(backend_module, "has_usable_nvcc", lambda: True)
