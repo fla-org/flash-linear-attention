@@ -63,39 +63,44 @@ def chunk_cumprod_householder_bwd_kernel(
 
     stride_h = H * K * K
     NT_small = tl.cdiv(min(S, T-i_s*S), BT)
-    p_dhc_whole = tl.make_block_ptr(dhc_whole, (K, K), (K, 1), (0, 0), (BK, BK), (1, 0))
+    o_d = tl.arange(0, BK)
+    m_d = o_d < K
+    p_dhc_whole = dhc_whole + o_d[:, None] * K + o_d[None, :]
     b_dhc = tl.zeros([BK, BK], dtype=tl.float32)
-    b_dhc += tl.load(p_dhc_whole, boundary_check=(0, 1))
+    b_dhc += tl.load(p_dhc_whole, mask=m_d[:, None] & m_d[None, :], other=0.0)
 
     # calculate dh
     for i_t_small in range(0, NT_small):
-        p_k = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_s*S + i_t_small*BT, 0), (BT, BK), (1, 0))
-        p_dk = tl.make_block_ptr(dk, (T, K), (HQ*K, 1), (i_s*S + i_t_small*BT, 0), (BT, BK), (1, 0))
-        p_dk_new = tl.make_block_ptr(dk_new, (T, K), (HQ*K, 1), (i_s*S + i_t_small*BT, 0), (BT, BK), (1, 0))
-        p_hc = tl.make_block_ptr(hc_suffix + i_t_small * stride_h, (K, K), (K, 1), (0, 0), (BK, BK), (1, 0))
+        o_k = (i_s*S + i_t_small*BT).to(tl.int64) + tl.arange(0, BT)
+        m_k = o_k < T
+        m_kk = m_k[:, None] & m_d[None, :]
+        p_k = k + o_k[:, None] * (H*K) + o_d[None, :]
+        p_dk = dk + o_k[:, None] * (HQ*K) + o_d[None, :]
+        p_dk_new = dk_new + o_k[:, None] * (HQ*K) + o_d[None, :]
+        p_hc = hc_suffix + i_t_small * stride_h + o_d[:, None] * K + o_d[None, :]
 
-        b_k = tl.load(p_k, boundary_check=(0, 1))
-        b_dk = tl.load(p_dk, boundary_check=(0, 1))
+        b_k = tl.load(p_k, mask=m_kk, other=0.0)
+        b_dk = tl.load(p_dk, mask=m_kk, other=0.0)
 
-        p_w1 = tl.make_block_ptr(w1, (T, K), (H*K, 1), (i_s*S + i_t_small*BT, 0), (BT, BK), (1, 0))
-        p_w2 = tl.make_block_ptr(w2, (T, K), (H*K, 1), (i_s*S + i_t_small*BT, 0), (BT, BK), (1, 0))
+        p_w1 = w1 + o_k[:, None] * (H*K) + o_d[None, :]
+        p_w2 = w2 + o_k[:, None] * (H*K) + o_d[None, :]
 
-        b_w1 = tl.load(p_w1, boundary_check=(0, 1))
-        b_w2 = tl.load(p_w2, boundary_check=(0, 1))
-        b_hc = tl.load(p_hc, boundary_check=(0, 1))
+        b_w1 = tl.load(p_w1, mask=m_kk, other=0.0)
+        b_w2 = tl.load(p_w2, mask=m_kk, other=0.0)
+        b_hc = tl.load(p_hc, mask=m_d[:, None] & m_d[None, :], other=0.0)
 
         b_dk_new = b_dk - tl.dot(b_dk.to(b_hc.dtype), b_hc)
-        tl.store(p_dk_new, b_dk_new.to(dk_new.dtype.element_ty), boundary_check=(0, 1))
+        tl.store(p_dk_new, b_dk_new.to(dk_new.dtype.element_ty), mask=m_kk)
 
         b_dh = b_dhc - tl.dot(tl.trans(b_hc), b_dhc.to(b_hc.dtype))
         b_dw2 = tl.dot(b_w1, b_dh.to(b_w1.dtype))
         b_dw1 = tl.dot(b_w2, tl.trans(b_dh.to(b_w2.dtype)))
 
-        p_dw1 = tl.make_block_ptr(dw1, (T, K), (HQ*K, 1), (i_s*S + i_t_small*BT, 0), (BT, BK), (1, 0))
-        p_dw2 = tl.make_block_ptr(dw2, (T, K), (HQ*K, 1), (i_s*S + i_t_small*BT, 0), (BT, BK), (1, 0))
+        p_dw1 = dw1 + o_k[:, None] * (HQ*K) + o_d[None, :]
+        p_dw2 = dw2 + o_k[:, None] * (HQ*K) + o_d[None, :]
 
-        tl.store(p_dw1, b_dw1.to(dw1.dtype.element_ty), boundary_check=(0, 1))
-        tl.store(p_dw2, b_dw2.to(dw2.dtype.element_ty), boundary_check=(0, 1))
+        tl.store(p_dw1, b_dw1.to(dw1.dtype.element_ty), mask=m_kk)
+        tl.store(p_dw2, b_dw2.to(dw2.dtype.element_ty), mask=m_kk)
 
         b_dhc = b_dhc - tl.dot(tl.dot(b_dhc.to(b_w2.dtype), tl.trans(b_w2)).to(b_w1.dtype), b_w1)
         b_dhc -= tl.dot(tl.trans(b_dk).to(b_k.dtype), b_k)

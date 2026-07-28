@@ -16,7 +16,7 @@ from fla.ops.kda.fused_recurrent import fused_recurrent_kda_fwd
 from fla.ops.kda.gate import fused_kda_gate, naive_kda_gate, naive_kda_lowerbound_gate
 from fla.ops.kda.naive import naive_chunk_kda, naive_recurrent_kda
 from fla.ops.utils.cache import FLA_CACHE_MODE
-from fla.utils import IS_INTEL_ALCHEMIST, assert_close, device
+from fla.utils import IS_INTEL_ALCHEMIST, IS_NPU, IS_NVIDIA, assert_close, device
 
 
 @pytest.mark.parametrize(
@@ -383,6 +383,10 @@ def test_fused_recurrent_gate_in_kernel(
         ]
     ],
 )
+@pytest.mark.skipif(
+    not (IS_NVIDIA or IS_NPU),
+    reason='test_fused_recurrent_vllm_decode requires CUDA or NPU',
+)
 def test_fused_recurrent_vllm_decode(
     B: int,
     H: int,
@@ -396,7 +400,7 @@ def test_fused_recurrent_vllm_decode(
 ):
     """Test vLLM-style decoding with continuous batching and paged state storage."""
     torch.manual_seed(42)
-    device = torch.device("cuda")
+    device = torch.device("npu" if IS_NPU else "cuda")
 
     # Setup cache pool and inputs
     max_cache_slots = B * 3
@@ -538,6 +542,11 @@ def test_fused_recurrent_vllm_decode(
             (2, 1024, 2, 8, 64, 0.1, 1, 0, False, True, torch.float16, False, False, 64),
             (2, 1024, 4, 8, 128, 0.1, 1, 0, True, True, torch.float16, False, False, 64),
             (2, 160, 2, 4, 64, 0.1, 1, 0, False, True, torch.float16, True, True, 32),
+
+            (2, 1024, 2, 4, 64, 0.1, 1, 0, True, True, torch.bfloat16, True, False, 64),
+            (2, 1024, 2, 4, 64, 0.1, 1, 0, False, True, torch.bfloat16, False, False, 64),
+            (2, 160, 2, 4, 64, 0.1, 1, 0, False, True, torch.bfloat16, True, True, 32),
+            (2, 1024, 2, 8, 128, 0.1, 1, 0, True, True, torch.bfloat16, False, False, 64),
         ]
     ],
 )
@@ -1314,3 +1323,126 @@ def test_flash_kda_chunk_varlen(H, D, cu_seqlens, monkeypatch):
     )
     assert_close("o", ref_o, tri_o, _FLASH_KDA_RTOL)
     assert_close("ht", ref_ht, tri_ht.to(ref_ht.dtype), _FLASH_KDA_RTOL)
+
+
+_TRITON_ASCEND_KDA_OPS = (
+    'kda_gate_fwd',
+    'kda_gate_bwd',
+    'kda_gate_chunk_cumsum',
+    'fused_kda_gate',
+    'recompute_w_u_fwd',
+    'chunk_kda_fwd_intra',
+    'chunk_kda_fwd_intra_token_parallel',
+    'chunk_kda_bwd_intra',
+    'chunk_kda_bwd_dAv',
+    'chunk_kda_bwd_wy_dqkg_fused',
+)
+
+
+def _spy_on_triton_ascend_kda_backend():
+    """Patch every op of the Triton-Ascend KDA backend to record dispatched calls."""
+    from fla.ops.backends import BackendRegistry
+
+    BackendRegistry.ensure_initialized('kda')
+    backend = BackendRegistry._registries['kda']._backends.get('triton_ascend')
+    assert backend is not None, 'Triton-Ascend KDA backend is not registered'
+
+    calls = []
+    for name in _TRITON_ASCEND_KDA_OPS:
+        original = getattr(backend, name)
+
+        def make_spy(name, original):
+            def spy(*args, **kwargs):
+                calls.append(name)
+                return original(*args, **kwargs)
+            return spy
+
+        setattr(backend, name, make_spy(name, original))
+    return backend, calls
+
+
+def _run_chunk_kda(safe_gate: bool, chunk_size: int = 64, use_gate_in_kernel: bool = True):
+    B, T, H, HV, D = 2, 128, 2, 2, 64
+    dtype = torch.float
+    q = torch.rand(B, T, H, D, dtype=dtype, device=device)
+    k = torch.rand(B, T, H, D, dtype=dtype, device=device)
+    v = torch.rand(B, T, HV, D, dtype=dtype, device=device)
+    g = torch.randn(B, T, HV, D, dtype=dtype, device=device)
+    beta = torch.randn(B, T, HV, dtype=dtype, device=device).sigmoid()
+    h0 = torch.randn(B, HV, D, D, dtype=torch.float32, device=device)
+    tensors = [q, k, v, g, beta, h0]
+    if use_gate_in_kernel:
+        A_log = torch.randn(HV, dtype=torch.float, device=device)
+        dt_bias = torch.randn(HV * D, dtype=torch.float, device=device)
+        tensors += [A_log, dt_bias]
+    else:
+        A_log = dt_bias = None
+    for x in tensors:
+        x.requires_grad_(True)
+
+    o, ht = chunk_kda(
+        q=q, k=k, v=v, g=g, beta=beta,
+        A_log=A_log, dt_bias=dt_bias,
+        scale=1.,
+        initial_state=h0,
+        output_final_state=True,
+        use_qk_l2norm_in_kernel=True,
+        use_gate_in_kernel=use_gate_in_kernel,
+        safe_gate=safe_gate,
+        lower_bound=-5.0 if safe_gate else None,
+        disable_recompute=False,
+        chunk_size=chunk_size,
+    )
+    ((o * torch.randn_like(o)).sum() + (ht * torch.randn_like(ht)).sum()).backward()
+
+
+@pytest.mark.skipif(not IS_NPU, reason='Triton-Ascend KDA backend routing is only exercised on NPU')
+def test_triton_ascend_backend_routing():
+    """chunk_kda must actually dispatch to the Triton-Ascend backend on NPU.
+
+    Numerical parity tests alone cannot catch silently-failing verifiers: if
+    every verifier rejected, all ops would fall back to the default Triton
+    kernels and parity tests would still pass, leaving the NPU kernels dead.
+    """
+    backend, calls = _spy_on_triton_ascend_kda_backend()
+    try:
+        # safe_gate=True: forward and backward must hit the NPU kernels
+        calls.clear()
+        _run_chunk_kda(safe_gate=True)
+        expected = {
+            'kda_gate_chunk_cumsum',
+            'chunk_kda_fwd_intra',
+            'recompute_w_u_fwd',
+            'chunk_kda_bwd_dAv',
+            'chunk_kda_bwd_wy_dqkg_fused',
+            'chunk_kda_bwd_intra',
+            'kda_gate_bwd',
+        }
+        missing = expected - set(calls)
+        assert not missing, f'ops not routed to the Triton-Ascend backend: {missing} (dispatched: {calls})'
+
+        # safe_gate=False: the intra kernel delegates to the token-parallel variant
+        calls.clear()
+        _run_chunk_kda(safe_gate=False)
+        assert 'chunk_kda_fwd_intra_token_parallel' in calls, (
+            'chunk_kda_fwd_intra_token_parallel not routed to the Triton-Ascend backend '
+            f'(dispatched: {calls})'
+        )
+
+        # chunk_size=16 is rejected by the verifiers and must fall back to the
+        # default implementation (which raises), never touching the NPU kernels
+        calls.clear()
+        with pytest.raises(ValueError, match=r"`chunk_size` must be either 32 or 64"):
+            _run_chunk_kda(safe_gate=False, chunk_size=16, use_gate_in_kernel=False)
+        rejected = {
+            'chunk_kda_fwd_intra',
+            'chunk_kda_fwd_intra_token_parallel',
+            'chunk_kda_bwd_intra',
+            'chunk_kda_bwd_wy_dqkg_fused',
+        }
+        assert rejected.isdisjoint(calls), (
+            f'verifier-rejected ops were still routed to the Triton-Ascend backend: {rejected & set(calls)}'
+        )
+    finally:
+        for name in _TRITON_ASCEND_KDA_OPS:
+            delattr(backend, name)

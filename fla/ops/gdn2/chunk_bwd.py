@@ -97,12 +97,12 @@ def chunk_gdn2_bwd_kernel_wy_dqkg_fused(
     STATE_V_FIRST: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_bh = tl.program_id(0), tl.program_id(1)
+    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
 
     if IS_VARLEN:
-        i_tg = i_t.to(tl.int64)
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        i_tg = i_t
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
         NT = tl.cdiv(T, BT)
@@ -112,8 +112,11 @@ def chunk_gdn2_bwd_kernel_wy_dqkg_fused(
         bos, eos = (i_b * T).to(tl.int64), (i_b * T + T).to(tl.int64)
 
     o_t = i_t * BT + tl.arange(0, BT)
+    o_A = tl.arange(0, BT)
     m_t = o_t < T
     m_last = (o_t == min(T, i_t * BT + BT) - 1)
+    m_AT = (o_A[:, None] < BT) & m_t[None, :]
+    m_dA = m_t[:, None] & (o_A[None, :] < BT)
 
     q += (bos * H + i_h) * K
     k += (bos * H + i_h) * K
@@ -135,8 +138,8 @@ def chunk_gdn2_bwd_kernel_wy_dqkg_fused(
     dw += (bos * H + i_h) * V
     dA += (bos * H + i_h) * BT
 
-    p_A = tl.make_block_ptr(A, (BT, T), (1, H * BT), (0, i_t * BT), (BT, BT), (0, 1))
-    b_A = tl.load(p_A, boundary_check=(0, 1))
+    p_A = A + o_A[:, None] + o_t[None, :] * (H * BT)
+    b_A = tl.load(p_A, mask=m_AT, other=0.0)
 
     b_dA = tl.zeros([BT, BT], dtype=tl.float32)
 
@@ -144,12 +147,13 @@ def chunk_gdn2_bwd_kernel_wy_dqkg_fused(
         o_k = i_k * BK + tl.arange(0, BK)
         m_k = o_k < K
 
-        p_k = tl.make_block_ptr(k, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-        p_g = tl.make_block_ptr(g, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-        p_b = tl.make_block_ptr(b, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-        b_k = tl.load(p_k, boundary_check=(0, 1))
-        b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
-        b_b = tl.load(p_b, boundary_check=(0, 1))
+        m_kk = m_t[:, None] & m_k[None, :]
+        p_k = k + o_t[:, None] * (H * K) + o_k[None, :]
+        p_g = g + o_t[:, None] * (H * K) + o_k[None, :]
+        p_b = b + o_t[:, None] * (H * K) + o_k[None, :]
+        b_k = tl.load(p_k, mask=m_kk, other=0.0)
+        b_g = tl.load(p_g, mask=m_kk, other=0.0).to(tl.float32)
+        b_b = tl.load(p_b, mask=m_kk, other=0.0)
 
         p_gn = g + (min(T, i_t * BT + BT) - 1).to(tl.int64) * H * K + o_k
         b_gn = tl.load(p_gn, mask=m_k, other=0).to(tl.float32)
@@ -160,20 +164,23 @@ def chunk_gdn2_bwd_kernel_wy_dqkg_fused(
         b_dgk = tl.zeros([BK], dtype=tl.float32)
 
         for i_v in range(tl.cdiv(V, BV)):
-            p_v_new = tl.make_block_ptr(v_new, (T, V), (H * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-            p_do = tl.make_block_ptr(do, (T, V), (H * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+            o_v = i_v * BV + tl.arange(0, BV)
+            m_vv = m_t[:, None] & (o_v[None, :] < V)
+            m_hv = (o_v[:, None] < V) & m_k[None, :]
+            p_v_new = v_new + o_t[:, None] * (H * V) + o_v[None, :]
+            p_do = do + o_t[:, None] * (H * V) + o_v[None, :]
             if STATE_V_FIRST:
-                p_h = tl.make_block_ptr(h, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
-                p_dh = tl.make_block_ptr(dh, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
+                p_h = h + o_v[:, None] * K + o_k[None, :]
+                p_dh = dh + o_v[:, None] * K + o_k[None, :]
             else:
-                p_h = tl.make_block_ptr(h, (V, K), (1, V), (i_v * BV, i_k * BK), (BV, BK), (0, 1))
-                p_dh = tl.make_block_ptr(dh, (V, K), (1, V), (i_v * BV, i_k * BK), (BV, BK), (0, 1))
-            p_dv = tl.make_block_ptr(dv, (T, V), (H * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-            b_v_new = tl.load(p_v_new, boundary_check=(0, 1))
-            b_do = tl.load(p_do, boundary_check=(0, 1))
-            b_h = tl.load(p_h, boundary_check=(0, 1))
-            b_dh = tl.load(p_dh, boundary_check=(0, 1))
-            b_dv = tl.load(p_dv, boundary_check=(0, 1))
+                p_h = h + o_v[:, None] + o_k[None, :] * V
+                p_dh = dh + o_v[:, None] + o_k[None, :] * V
+            p_dv = dv + o_t[:, None] * (H * V) + o_v[None, :]
+            b_v_new = tl.load(p_v_new, mask=m_vv, other=0.0)
+            b_do = tl.load(p_do, mask=m_vv, other=0.0)
+            b_h = tl.load(p_h, mask=m_hv, other=0.0)
+            b_dh = tl.load(p_dh, mask=m_hv, other=0.0)
+            b_dv = tl.load(p_dv, mask=m_vv, other=0.0)
 
             b_dgk += tl.sum(b_h * b_dh, axis=0)
             b_dq += tl.dot(b_do, b_h.to(b_do.dtype))
@@ -182,13 +189,13 @@ def chunk_gdn2_bwd_kernel_wy_dqkg_fused(
             tl.debug_barrier()
 
             if i_k == 0:
-                p_v = tl.make_block_ptr(v, (T, V), (H * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-                p_dv2 = tl.make_block_ptr(dv2, (T, V), (H * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-                p_wg = tl.make_block_ptr(w_gate, (T, V), (H * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-                p_dw_gate = tl.make_block_ptr(dw, (T, V), (H * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+                p_v = v + o_t[:, None] * (H * V) + o_v[None, :]
+                p_dv2 = dv2 + o_t[:, None] * (H * V) + o_v[None, :]
+                p_wg = w_gate + o_t[:, None] * (H * V) + o_v[None, :]
+                p_dw_gate = dw + o_t[:, None] * (H * V) + o_v[None, :]
 
-                b_v = tl.load(p_v, boundary_check=(0, 1))
-                b_wg = tl.load(p_wg, boundary_check=(0, 1))
+                b_v = tl.load(p_v, mask=m_vv, other=0.0)
+                b_wg = tl.load(p_wg, mask=m_vv, other=0.0)
                 # dA gets (w_gate * v) on the value side - the GDN-2 channel-wise twist.
                 b_dA += tl.dot(b_dv, tl.trans(b_v * b_wg))
 
@@ -196,8 +203,8 @@ def chunk_gdn2_bwd_kernel_wy_dqkg_fused(
                 b_dv2 = b_dvb * b_wg
                 b_dw_gate = b_dvb * b_v
 
-                tl.store(p_dv2, b_dv2.to(p_dv2.dtype.element_ty), boundary_check=(0, 1))
-                tl.store(p_dw_gate, b_dw_gate.to(p_dw_gate.dtype.element_ty), boundary_check=(0, 1))
+                tl.store(p_dv2, b_dv2.to(p_dv2.dtype.element_ty), mask=m_vv)
+                tl.store(p_dw_gate, b_dw_gate.to(p_dw_gate.dtype.element_ty), mask=m_vv)
 
         b_gk_exp = exp2(b_g)
         b_gb = b_gk_exp * b_b
@@ -212,31 +219,31 @@ def chunk_gdn2_bwd_kernel_wy_dqkg_fused(
         b_dA += tl.dot(b_dw_flow, tl.trans((b_kg * b_b).to(b_A.dtype)))
 
         b_dkgb = tl.dot(b_A, b_dw_flow)
-        p_db = tl.make_block_ptr(db, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+        p_db = db + o_t[:, None] * (H * K) + o_k[None, :]
         b_db_partial = b_dkgb * b_kg
-        tl.store(p_db, b_db_partial.to(p_db.dtype.element_ty), boundary_check=(0, 1))
+        tl.store(p_db, b_db_partial.to(p_db.dtype.element_ty), mask=m_kk)
 
-        p_q = tl.make_block_ptr(q, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-        b_q = tl.load(p_q, boundary_check=(0, 1))
+        p_q = q + o_t[:, None] * (H * K) + o_k[None, :]
+        b_q = tl.load(p_q, mask=m_kk, other=0.0)
         b_kdk = b_k * b_dk
         b_dgk += tl.sum(b_kdk, axis=0)
         b_dg = b_q * b_dq - b_kdk + m_last[:, None] * b_dgk + b_kg * b_dkgb * b_b
         b_dk = b_dk + b_dkgb * b_gb
 
-        p_dq = tl.make_block_ptr(dq, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-        p_dk = tl.make_block_ptr(dk, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-        p_dg = tl.make_block_ptr(dg, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-        tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), boundary_check=(0, 1))
-        tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
-        tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), boundary_check=(0, 1))
+        p_dq = dq + o_t[:, None] * (H * K) + o_k[None, :]
+        p_dk = dk + o_t[:, None] * (H * K) + o_k[None, :]
+        p_dg = dg + o_t[:, None] * (H * K) + o_k[None, :]
+        tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), mask=m_kk)
+        tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), mask=m_kk)
+        tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), mask=m_kk)
 
     m_A = (o_t[:, None] > o_t[None, :]) & (m_t[:, None] & m_t)
     b_dA = tl.where(m_A, b_dA, 0)
     b_dA = tl.dot(b_dA.to(b_A.dtype), b_A)
     b_dA = tl.dot(b_A, b_dA.to(b_A.dtype))
     b_dA = tl.where(m_A, -b_dA, 0)
-    p_dA = tl.make_block_ptr(dA, (T, BT), (H * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
-    tl.store(p_dA, b_dA.to(p_dA.dtype.element_ty), boundary_check=(0, 1))
+    p_dA = dA + o_t[:, None] * (H * BT) + o_A[None, :]
+    tl.store(p_dA, b_dA.to(p_dA.dtype.element_ty), mask=m_dA)
 
 
 def chunk_gdn2_bwd_wy_dqkg_fused(

@@ -106,6 +106,56 @@ def recompute_w_u_fwd_ref(
     return w, u
 
 
+def recompute_w_u_fwd_varlen_ref(
+    k: torch.Tensor,
+    v: torch.Tensor,
+    beta: torch.Tensor,
+    A: torch.Tensor,
+    g: torch.Tensor | None,
+    cu_seqlens: torch.LongTensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Per-sequence torch baseline for varlen `recompute_w_u_fwd`."""
+    assert k.shape[0] == 1
+    w = k.new_empty(k.shape[0], k.shape[1], v.shape[2], k.shape[-1])
+    u = torch.empty_like(v)
+    for i in range(len(cu_seqlens) - 1):
+        s, e = cu_seqlens[i].item(), cu_seqlens[i + 1].item()
+        g_seq = g[:, s:e] if g is not None else None
+        w_seq, u_seq = recompute_w_u_fwd_ref(k[:, s:e], v[:, s:e], beta[:, s:e], A[:, s:e], g_seq)
+        w[:, s:e] = w_seq
+        u[:, s:e] = u_seq
+    return w, u
+
+
+def prepare_wy_repr_bwd_varlen_ref(
+    k: torch.Tensor,
+    v: torch.Tensor,
+    beta: torch.Tensor,
+    A: torch.Tensor,
+    dw: torch.Tensor,
+    du: torch.Tensor,
+    g: torch.Tensor | None,
+    cu_seqlens: torch.LongTensor,
+    chunk_size: int = 64,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Per-sequence torch baseline for varlen `prepare_wy_repr_bwd`."""
+    assert k.shape[0] == 1
+    dk = k.new_zeros(k.shape)
+    dv = torch.zeros_like(v)
+    db = torch.zeros_like(beta)
+    for i in range(len(cu_seqlens) - 1):
+        s, e = cu_seqlens[i].item(), cu_seqlens[i + 1].item()
+        g_seq = g[:, s:e] if g is not None else None
+        dk_seq, dv_seq, db_seq = prepare_wy_repr_bwd_ref(
+            k[:, s:e], v[:, s:e], beta[:, s:e], A[:, s:e],
+            dw[:, s:e], du[:, s:e], g_seq, chunk_size,
+        )
+        dk[:, s:e] = dk_seq
+        dv[:, s:e] = dv_seq
+        db[:, s:e] = db_seq
+    return dk, dv, db
+
+
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'HV', 'D', 'use_g', 'dtype'),
     [
@@ -709,17 +759,20 @@ def chunk_bwd_dqkwg_ref(
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'HV', 'D', 'dtype'),
+    ('B', 'T', 'H', 'HV', 'D', 'use_g', 'use_w', 'dtype'),
     [
-        pytest.param(B, T, H, HV, D, dtype, id=f"B{B}-T{T}-H{H}-HV{HV}-D{D}-{dtype}")
-        for (B, T, H, HV, D, dtype) in [
-            (2, 128, 2, 2, 64, torch.bfloat16),
-            (2, 128, 2, 4, 64, torch.bfloat16),
-            (1, 256, 4, 4, 32, torch.float16),
+        pytest.param(B, T, H, HV, D, use_g, use_w, dtype,
+                     id=f"B{B}-T{T}-H{H}-HV{HV}-D{D}-use_g{use_g}-use_w{use_w}-{dtype}")
+        for (B, T, H, HV, D, use_g, use_w, dtype) in [
+            (2, 128, 2, 2, 64, True, True, torch.bfloat16),
+            (2, 128, 2, 4, 64, True, True, torch.bfloat16),
+            (1, 256, 4, 4, 32, True, True, torch.float16),
+            (2, 128, 2, 2, 64, False, True, torch.bfloat16),
+            (2, 128, 2, 2, 64, False, False, torch.bfloat16),
         ]
     ],
 )
-def test_chunk_bwd_dqkwg(B: int, T: int, H: int, HV: int, D: int, dtype: torch.dtype):
+def test_chunk_bwd_dqkwg(B: int, T: int, H: int, HV: int, D: int, use_g: bool, use_w: bool, dtype: torch.dtype):
     torch.manual_seed(42)
     BT = 64
     NT = T // BT
@@ -730,9 +783,9 @@ def test_chunk_bwd_dqkwg(B: int, T: int, H: int, HV: int, D: int, dtype: torch.d
     do = torch.randn(B, T, HV, D, dtype=dtype, device=device)
     h = torch.randn(B, NT, HV, D, D, dtype=dtype, device=device)
     dh = torch.randn(B, NT, HV, D, D, dtype=dtype, device=device)
-    w = torch.randn(B, T, HV, D, dtype=dtype, device=device)
-    dv = torch.randn(B, T, HV, D, dtype=dtype, device=device)
-    g = torch.randn(B, T, HV, dtype=torch.float32, device=device) * 0.1
+    w = torch.randn(B, T, HV, D, dtype=dtype, device=device) if use_w else None
+    dv = torch.randn(B, T, HV, D, dtype=dtype, device=device) if use_w else None
+    g = torch.randn(B, T, HV, dtype=torch.float32, device=device) * 0.1 if use_g else None
 
     dq_ref, dk_ref, dw_ref, dg_ref = chunk_bwd_dqkwg_ref(q, k, v_new, do, h, dh, w, dv, g, scale, BT)
     dq_tri, dk_tri, dw_tri, dg_tri = chunk_bwd_dqkwg(
@@ -741,8 +794,14 @@ def test_chunk_bwd_dqkwg(B: int, T: int, H: int, HV: int, D: int, dtype: torch.d
 
     assert_close('dq', dq_ref, dq_tri, 0.006)
     assert_close('dk', dk_ref, dk_tri, 0.006)
-    assert_close('dw', dw_ref, dw_tri, 0.006)
-    assert_close('dg', dg_ref, dg_tri, 0.006)
+    if use_w:
+        assert_close('dw', dw_ref, dw_tri, 0.006)
+    else:
+        assert dw_ref is None and dw_tri is None
+    if use_g:
+        assert_close('dg', dg_ref, dg_tri, 0.006)
+    else:
+        assert dg_ref is None and dg_tri is None
 
 
 def gdn_fwd_torch(
@@ -919,6 +978,8 @@ def prepare_wy_repr_bwd_ref(
             (2, 128, 2, 4, 64, True, torch.bfloat16),
             (1, 256, 4, 4, 32, True, torch.float16),
             (2, 128, 2, 2, 64, False, torch.bfloat16),
+            (2, 128, 2, 4, 64, False, torch.bfloat16),
+            (1, 128, 1, 1, 64, False, torch.bfloat16),
         ]
     ],
 )
@@ -940,11 +1001,97 @@ def test_prepare_wy_repr_bwd(B: int, T: int, H: int, HV: int, D: int, use_g: boo
     du = torch.randn(B, T, HV, D, dtype=dtype, device=device)
 
     dk_ref, dv_ref, db_ref = prepare_wy_repr_bwd_ref(k, v, beta, A, dw, du, g, BT)
-    dk_tri, dv_tri, db_tri, _ = prepare_wy_repr_bwd(k=k, v=v, beta=beta, A=A, dw=dw, du=du, g=g)
+    dk_tri, dv_tri, db_tri, dg_tri = prepare_wy_repr_bwd(k=k, v=v, beta=beta, A=A, dw=dw, du=du, g=g)
 
     assert_close('dk', dk_ref, dk_tri, 0.006)
     assert_close('dv', dv_ref, dv_tri, 0.006)
     assert_close('db', db_ref, db_tri, 0.006)
+    if use_g:
+        assert dg_tri is not None
+    else:
+        assert dg_tri is None
+
+
+@pytest.mark.parametrize(
+    ('H', 'HV', 'D', 'cu_seqlens', 'use_g', 'dtype'),
+    [
+        pytest.param(H, HV, D, cu_seqlens, use_g, dtype,
+                     id=f"H{H}-HV{HV}-D{D}-cu{cu_seqlens}-use_g{use_g}-{dtype}")
+        for (H, HV, D, cu_seqlens, use_g, dtype) in [
+            (2, 2, 64, [0, 64, 128], False, torch.bfloat16),
+            (2, 4, 64, [0, 128, 256], False, torch.bfloat16),
+            (1, 1, 64, [0, 64, 128], False, torch.bfloat16),
+            (2, 2, 64, [0, 64, 128], True, torch.bfloat16),
+        ]
+    ],
+)
+def test_recompute_w_u_fwd_varlen(
+    H: int,
+    HV: int,
+    D: int,
+    cu_seqlens: list[int],
+    use_g: bool,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(42)
+    BT = 64
+    cu_seqlens = torch.LongTensor(cu_seqlens).to(device)
+    T = cu_seqlens[-1].item()
+    k = torch.randn(1, T, H, D, dtype=dtype, device=device)
+    v = torch.randn(1, T, HV, D, dtype=dtype, device=device)
+    beta = torch.rand(1, T, HV, dtype=dtype, device=device).sigmoid()
+    g = torch.randn(1, T, HV, dtype=torch.float32, device=device) * 0.1 if use_g else None
+    A = _make_wy_inverse(1, T, HV, BT, dtype)
+
+    w_ref, u_ref = recompute_w_u_fwd_varlen_ref(k, v, beta, A, g, cu_seqlens)
+    w_tri, u_tri = recompute_w_u_fwd(k, v, beta, A, g, cu_seqlens=cu_seqlens)
+
+    assert_close('u', u_ref, u_tri, 0.005)
+    assert_close('w', w_ref, w_tri, 0.005)
+
+
+@pytest.mark.parametrize(
+    ('H', 'HV', 'D', 'cu_seqlens', 'dtype'),
+    [
+        pytest.param(H, HV, D, cu_seqlens, dtype,
+                     id=f"H{H}-HV{HV}-D{D}-cu{cu_seqlens}-{dtype}")
+        for (H, HV, D, cu_seqlens, dtype) in [
+            (2, 2, 64, [0, 64, 128], torch.bfloat16),
+            (2, 4, 64, [0, 128, 256], torch.bfloat16),
+            (1, 1, 64, [0, 64, 128], torch.bfloat16),
+        ]
+    ],
+)
+def test_prepare_wy_repr_bwd_varlen(
+    H: int,
+    HV: int,
+    D: int,
+    cu_seqlens: list[int],
+    dtype: torch.dtype,
+):
+    torch.manual_seed(42)
+    BT = 64
+    cu_seqlens = torch.LongTensor(cu_seqlens).to(device)
+    T = cu_seqlens[-1].item()
+    k = torch.randn(1, T, H, D, dtype=dtype, device=device)
+    k = F.normalize(k, p=2, dim=-1)
+    v = torch.randn(1, T, HV, D, dtype=dtype, device=device)
+    beta = torch.rand(1, T, HV, dtype=dtype, device=device).sigmoid()
+    A = chunk_kkt_solve_ref(k, None, beta, BT)
+    dw = torch.randn(1, T, HV, D, dtype=dtype, device=device)
+    du = torch.randn(1, T, HV, D, dtype=dtype, device=device)
+
+    dk_ref, dv_ref, db_ref = prepare_wy_repr_bwd_varlen_ref(
+        k, v, beta, A, dw, du, None, cu_seqlens, BT,
+    )
+    dk_tri, dv_tri, db_tri, dg_tri = prepare_wy_repr_bwd(
+        k=k, v=v, beta=beta, A=A, dw=dw, du=du, g=None, cu_seqlens=cu_seqlens,
+    )
+
+    assert_close('dk', dk_ref, dk_tri, 0.006)
+    assert_close('dv', dv_ref, dv_tri, 0.006)
+    assert_close('db', db_ref, db_tri, 0.006)
+    assert dg_tri is None
 
 
 @pytest.mark.parametrize(
@@ -1102,14 +1249,15 @@ def chunk_gated_delta_rule_bwd_dhu_ref(
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'HV', 'D', 'use_h0', 'dtype'),
+    ('B', 'T', 'H', 'HV', 'D', 'use_h0', 'use_g', 'dtype'),
     [
-        pytest.param(B, T, H, HV, D, use_h0, dtype,
-                     id=f"B{B}-T{T}-H{H}-HV{HV}-D{D}-use_h0{use_h0}-{dtype}")
-        for (B, T, H, HV, D, use_h0, dtype) in [
-            (2, 128, 2, 2, 64, True, torch.bfloat16),
-            (2, 128, 2, 4, 64, False, torch.bfloat16),
-            (1, 256, 4, 4, 32, True, torch.float16),
+        pytest.param(B, T, H, HV, D, use_h0, use_g, dtype,
+                     id=f"B{B}-T{T}-H{H}-HV{HV}-D{D}-use_h0{use_h0}-use_g{use_g}-{dtype}")
+        for (B, T, H, HV, D, use_h0, use_g, dtype) in [
+            (2, 128, 2, 2, 64, True, True, torch.bfloat16),
+            (2, 128, 2, 4, 64, False, True, torch.bfloat16),
+            (1, 256, 4, 4, 32, True, True, torch.float16),
+            (2, 128, 2, 2, 64, True, False, torch.bfloat16),
         ]
     ],
 )
@@ -1120,6 +1268,7 @@ def test_chunk_gated_delta_rule_bwd_dhu(
     HV: int,
     D: int,
     use_h0: bool,
+    use_g: bool,
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
@@ -1130,7 +1279,7 @@ def test_chunk_gated_delta_rule_bwd_dhu(
     w = torch.randn(B, T, HV, D, dtype=dtype, device=device)
     u = torch.randn(B, T, HV, D, dtype=dtype, device=device)
     do = torch.randn(B, T, HV, D, dtype=dtype, device=device)
-    g = _make_gate(B, T, HV)
+    g = _make_gate(B, T, HV) if use_g else None
     h0 = torch.randn(B, HV, D, D, dtype=torch.float32, device=device) if use_h0 else None
     dht = torch.randn(B, HV, D, D, dtype=torch.float32, device=device)
 

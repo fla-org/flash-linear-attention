@@ -45,57 +45,64 @@ def parallel_path_fwd_kernel(
     USE_GATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_bh = tl.program_id(0), tl.program_id(1)
+    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
     i_h = i_hq // G
 
     if IS_VARLEN:
-        i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
+        i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
     else:
         i_n = i_b
         bos, eos = (i_n * T).to(tl.int64), (i_n * T + T).to(tl.int64)
 
-    p_q = tl.make_block_ptr(q + (bos * HQ + i_hq) * K, (T, K), (HQ*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
+    o_q = i_t * BT + tl.arange(0, BT)
+    o_d = tl.arange(0, BK)
+    o_v = tl.arange(0, BV)
+    m_q = o_q < T
+    m_o = m_q[:, None] & (o_v[None, :] < V)
+    p_q = q + (bos * HQ + i_hq) * K + o_q[:, None] * (HQ*K) + o_d[None, :]
     b_q = tl.zeros([BT, BK], dtype=tl.float32)
-    b_q += tl.load(p_q, boundary_check=(0, 1))
+    b_q += tl.load(p_q, mask=m_q[:, None] & (o_d[None, :] < K), other=0.0)
     sm_scale = scale * 1.44269504
     b_o = tl.zeros([BT, BV], dtype=tl.float32)
-    p_o = tl.make_block_ptr(o + (bos * HQ + i_hq) * V, (T, V), (HQ*V, 1), (i_t * BT, 0), (BT, BV), (1, 0))
-    b_o += tl.load(p_o, boundary_check=(0, 1))
+    p_o = o + (bos * HQ + i_hq) * V + o_q[:, None] * (HQ*V) + o_v[None, :]
+    b_o += tl.load(p_o, mask=m_o, other=0.0)
 
-    p_L = tl.make_block_ptr(L + bos * HQ + i_hq, (T, ), (HQ, ), (i_t * BT, ), (BT, ), (0,))
-    p_M = tl.make_block_ptr(M + bos * HQ + i_hq, (T, ), (HQ, ), (i_t * BT, ), (BT, ), (0,))
-    b_l = tl.load(p_L, boundary_check=(0,))
-    b_m = tl.load(p_M, boundary_check=(0,))
+    p_L = L + bos * HQ + i_hq + o_q * HQ
+    p_M = M + bos * HQ + i_hq + o_q * HQ
+    b_l = tl.load(p_L, mask=m_q, other=0.0)
+    b_m = tl.load(p_M, mask=m_q, other=0.0)
 
     if USE_GATE:
-        p_g_cumsum_q = tl.make_block_ptr(g_cumsum + bos * HQ + i_hq, (T, ), (HQ, ), (i_t * BT, ), (BT, ), (0,))
-        b_g_cumsum_q = tl.load(p_g_cumsum_q, boundary_check=(0,))
+        p_g_cumsum_q = g_cumsum + bos * HQ + i_hq + o_q * HQ
+        b_g_cumsum_q = tl.load(p_g_cumsum_q, mask=m_q, other=0.0)
     else:
         b_g_cumsum_q = None
 
     for offset in range((i_t + 1) * BT - 2 * BS, i_t*BT-BS, -BS):
-        p_k = tl.make_block_ptr(k + (bos * H + i_h) * K, (K, T), (1, K*H), (0, offset), (BK, BS), (0, 1))  # GQA when H!=HQ
-        p_v = tl.make_block_ptr(v + (bos * H + i_h) * V, (T, V), (V*H, 1), (offset, 0), (BS, BV), (1, 0))  # GQA when H!=HQ
-        p_w1 = tl.make_block_ptr(w1 + (bos * H + i_h) * K, (K, T), (1, K*H), (0, offset), (BK, BS), (0, 1))
-        p_w2 = tl.make_block_ptr(w2 + (bos * H + i_h) * K, (T, K), (K*H, 1), (offset, 0), (BS, BK), (1, 0))
+        o_k = offset + tl.arange(0, BS)
+        m_k = o_k < T
+        p_k = k + (bos * H + i_h) * K + o_d[:, None] + o_k[None, :] * (K*H)  # GQA when H!=HQ
+        p_v = v + (bos * H + i_h) * V + o_k[:, None] * (V*H) + o_v[None, :]  # GQA when H!=HQ
+        p_w1 = w1 + (bos * H + i_h) * K + o_d[:, None] + o_k[None, :] * (K*H)
+        p_w2 = w2 + (bos * H + i_h) * K + o_k[:, None] * (K*H) + o_d[None, :]
         # [BK, BS]
 
-        b_k = tl.load(p_k, boundary_check=(0, 1))
+        b_k = tl.load(p_k, mask=(o_d[:, None] < K) & m_k[None, :], other=0.0)
         # [BS, BV]
-        b_v = tl.load(p_v, boundary_check=(0, 1))
+        b_v = tl.load(p_v, mask=m_k[:, None] & (o_v[None, :] < V), other=0.0)
         # [BK, BK]
-        b_w1 = tl.load(p_w1, boundary_check=(0, 1))
-        b_w2 = tl.load(p_w2, boundary_check=(0, 1))
+        b_w1 = tl.load(p_w1, mask=(o_d[:, None] < K) & m_k[None, :], other=0.0)
+        b_w2 = tl.load(p_w2, mask=m_k[:, None] & (o_d[None, :] < K), other=0.0)
         # [BT, BS]
         m_s = i_t * BT + tl.arange(0, BT) >= (offset + BS)
         b_s = tl.dot(b_q.to(b_k.dtype), b_k)
 
         if USE_GATE:
-            p_g_cumsum_k = tl.make_block_ptr(g_cumsum + (bos * HQ + i_hq), (T, ), (HQ, ), (offset, ), (BS, ), (0,))
-            b_g_cumsum_k = tl.load(p_g_cumsum_k, boundary_check=(0,))
+            p_g_cumsum_k = g_cumsum + (bos * HQ + i_hq) + o_k * HQ
+            b_g_cumsum_k = tl.load(p_g_cumsum_k, mask=m_k, other=0.0)
             b_s = b_s + b_g_cumsum_q[:, None] - b_g_cumsum_k[None, :]
         b_s = tl.where(m_s[:, None], b_s * sm_scale, float("-inf"))
         b_m_new = tl.maximum(b_m, tl.max(b_s, 1))
@@ -112,21 +119,23 @@ def parallel_path_fwd_kernel(
     tl.debug_barrier()
 
     for offset in range(i_t * BT - BS, -BS, -BS):
-        p_k = tl.make_block_ptr(k + (bos * H + i_h) * K, (K, T), (1, K*H), (0, offset), (BK, BS), (0, 1))  # GQA when H!=HQ
-        p_v = tl.make_block_ptr(v + (bos * H + i_h) * V, (T, V), (V*H, 1), (offset, 0), (BS, BV), (1, 0))  # GQA when H!=HQ
-        p_w1 = tl.make_block_ptr(w1 + (bos * H + i_h) * K, (K, T), (1, K*H), (0, offset), (BK, BS), (0, 1))
-        p_w2 = tl.make_block_ptr(w2 + (bos * H + i_h) * K, (T, K), (K*H, 1), (offset, 0), (BS, BK), (1, 0))
+        o_k = offset + tl.arange(0, BS)
+        m_k = o_k < T
+        p_k = k + (bos * H + i_h) * K + o_d[:, None] + o_k[None, :] * (K*H)  # GQA when H!=HQ
+        p_v = v + (bos * H + i_h) * V + o_k[:, None] * (V*H) + o_v[None, :]  # GQA when H!=HQ
+        p_w1 = w1 + (bos * H + i_h) * K + o_d[:, None] + o_k[None, :] * (K*H)
+        p_w2 = w2 + (bos * H + i_h) * K + o_k[:, None] * (K*H) + o_d[None, :]
         # [BK, BS]
-        b_k = tl.load(p_k, boundary_check=(0, 1))
+        b_k = tl.load(p_k, mask=(o_d[:, None] < K) & m_k[None, :], other=0.0)
         # [BS, BV]
-        b_v = tl.load(p_v, boundary_check=(0, 1))
-        b_w1 = tl.load(p_w1, boundary_check=(0, 1))
-        b_w2 = tl.load(p_w2, boundary_check=(0, 1))
+        b_v = tl.load(p_v, mask=m_k[:, None] & (o_v[None, :] < V), other=0.0)
+        b_w1 = tl.load(p_w1, mask=(o_d[:, None] < K) & m_k[None, :], other=0.0)
+        b_w2 = tl.load(p_w2, mask=m_k[:, None] & (o_d[None, :] < K), other=0.0)
         # [BT, BS]
         b_s = tl.dot(b_q.to(b_k.dtype), b_k)
         if USE_GATE:
-            p_g_cumsum_k = tl.make_block_ptr(g_cumsum + (bos * HQ + i_hq), (T, ), (HQ, ), (offset, ), (BS, ), (0,))
-            b_g_cumsum_k = tl.load(p_g_cumsum_k, boundary_check=(0,))
+            p_g_cumsum_k = g_cumsum + (bos * HQ + i_hq) + o_k * HQ
+            b_g_cumsum_k = tl.load(p_g_cumsum_k, mask=m_k, other=0.0)
             b_s = b_s + b_g_cumsum_q[:, None] - b_g_cumsum_k[None, :]
         b_s = b_s * sm_scale
         b_m_new = tl.maximum(b_m, tl.max(b_s, 1))
@@ -140,11 +149,11 @@ def parallel_path_fwd_kernel(
         b_q -= tl.dot(b_s2.to(b_w2.dtype), b_w2)
 
     b_o = b_o / b_l[:, None]
-    p_o_new = tl.make_block_ptr(o_new + (bos * HQ + i_hq) * V, (T, V), (HQ*V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
-    tl.store(p_o_new, b_o.to(p_o_new.dtype.element_ty), boundary_check=(0, 1))
+    p_o_new = o_new + (bos * HQ + i_hq) * V + o_q[:, None] * (HQ*V) + o_v[None, :]
+    tl.store(p_o_new, b_o.to(p_o_new.dtype.element_ty), mask=m_o)
     b_l = tl.math.log2(b_l) + b_m
-    p_L_new = tl.make_block_ptr(L_new + (bos * HQ + i_hq), (T, ), (HQ, ), (i_t * BT, ), (BT, ), (0,))
-    tl.store(p_L_new, b_l.to(p_L_new.dtype.element_ty), boundary_check=(0,))
+    p_L_new = L_new + (bos * HQ + i_hq) + o_q * HQ
+    tl.store(p_L_new, b_l.to(p_L_new.dtype.element_ty), mask=m_q)
 
 
 def parallel_path_fwd_fn(

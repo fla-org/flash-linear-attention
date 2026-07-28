@@ -182,6 +182,61 @@ def test_backward_matches_eager_reference(B: int, T: int, H: int, HQ: int, K: in
     # `dg` is validated separately in `test_g_gradient_matches_finite_differences`.
 
 
+def test_backward_value_split_matches_single_tile(monkeypatch):
+    torch.manual_seed(42)
+    dtype = torch.float32
+    B, T, H, HQ, K, V = 1, 17, 1, 2, 16, 96
+    scale = K**-0.5
+    window_size = 8
+    cu_seqlens = torch.tensor([0, 7, T], dtype=torch.long, device=device)
+
+    q0 = torch.randn(B, T, HQ, K, device=device, dtype=dtype)
+    k0 = torch.randn(B, T, H, K, device=device, dtype=dtype)
+    v0 = torch.randn(B, T, H, V, device=device, dtype=dtype)
+    g0 = log_decay(B, T, HQ, K, dtype=dtype)
+    g_scalar0 = log_decay(B, T, HQ, dtype=dtype)
+    sink_bias0 = torch.randn(HQ, device=device, dtype=dtype) * 0.1
+    do = torch.randn(B, T, HQ, V, device=device, dtype=dtype)
+
+    def run(single_tile_backward: bool):
+        force_single_tile = True
+        monkeypatch.setattr(
+            "fla.ops.wall_attn.parallel.check_shared_mem",
+            lambda arch, *args, **kwargs: force_single_tile and arch == 'hopper',
+        )
+        inputs = [x.clone().requires_grad_(True) for x in (q0, k0, v0, g0, g_scalar0, sink_bias0)]
+        q, k, v, g, g_scalar, sink_bias = inputs
+        o = parallel_wall_attn(
+            q,
+            k,
+            v,
+            g,
+            g_scalar=g_scalar,
+            sink_bias=sink_bias,
+            scale=scale,
+            window_size=window_size,
+            cu_seqlens=cu_seqlens,
+        )
+        force_single_tile = single_tile_backward
+        grads = torch.autograd.grad((o * do).sum(), inputs)
+        return o, grads
+
+    # keep forward single-tile so this backward regression does not depend on split-LSE ownership.
+    # the split backward uses BV=64, so V=96 launches NV=2 with a 32-wide tail.
+    # if either slice subtracts the full-V delta, summing its score gradients
+    # subtracts delta twice and disagrees with the single-tile result below.
+    o_split, grads_split = run(single_tile_backward=False)
+    o_single, grads_single = run(single_tile_backward=True)
+
+    assert_close("       o", o_single, o_split, RTOL_FWD)
+    for name, single, split in zip(
+        ("dq", "dk", "dv", "dg", "dg_scalar", "dsink_bias"),
+        grads_single,
+        grads_split,
+    ):
+        assert_close(name, single, split, RTOL_GRAD)
+
+
 def test_dg_nonzero_after_backward():
     torch.manual_seed(3)
     B, T, H, HQ, K, V = 1, 16, 1, 1, 8, 8

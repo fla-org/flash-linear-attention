@@ -305,6 +305,7 @@ All of the pretrained models currently available can be found in [`fla-hub`](htt
 
 `fla` provides a flexible method to incorporate standard attention layers into existing linear attention models.
 This is easily achieved by specifying the `attn` argument in the model configuration.
+The original dictionary form applies one shared attention specification to every listed layer.
 
 For example, to create a 2-layer Samba model with one Mamba layer followed by one local attention layer, using a sliding window size of 2048:
 
@@ -420,6 +421,35 @@ SambaForCausalLM(
 ```
 
 </details>
+
+To use different attention settings at different depths, pass a list of specifications. For example, this six-layer Samba model uses local attention at layers 1 and 3, full attention at layer 5, and the native Mamba mixer at layers 0, 2, and 4:
+
+```py
+>>> config = SambaConfig(
+...   num_hidden_layers=6,
+...   attn=[
+...     {
+...       'layers': [1, 3],
+...       'num_heads': 18,
+...       'num_kv_heads': 18,
+...       'qkv_bias': False,
+...       'rope_theta': 10000.,
+...       'window_size': 2048,
+...     },
+...     {
+...       'layers': [5],
+...       'num_heads': 18,
+...       'num_kv_heads': 18,
+...       'qkv_bias': False,
+...       'rope_theta': 10000.,
+...       'window_size': None,
+...     },
+...   ],
+... )
+>>> model = AutoModelForCausalLM.from_config(config)
+```
+
+Each specification is normalized independently. Layers omitted from the plan retain the model's native linear-attention, recurrent, or state-space mixer.
 
 During inference, you **DO NOT** need to revise anything for generation!
 The model will produce output as-is, without any need for additional configurations or modifications.
