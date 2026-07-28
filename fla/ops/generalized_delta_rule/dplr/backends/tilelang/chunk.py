@@ -282,6 +282,8 @@ def _chunk_dplr_delta_rule_bwd_core(
     del h
     del dv2
 
+    # dgk is returned in gk's dtype; recycle the w buffer only when they agree
+    dgk_out = w if w.dtype == gk.dtype else torch.empty_like(gk)
     dq, dk, da, db, dgk = chunk_dplr_bwd_dqk_intra_fused_qside_into(
         q=q,
         k=k,
@@ -304,7 +306,7 @@ def _chunk_dplr_delta_rule_bwd_core(
         dk_out=kg,
         da_out=ag,
         db_out=bg,
-        dgk_out=w,
+        dgk_out=dgk_out,
         cu_seqlens=cu,
         chunk_size=chunk_size,
         scale=scale,
