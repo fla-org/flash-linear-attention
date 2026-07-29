@@ -99,12 +99,25 @@ def build_varlen_chunk_layout(
     return layout
 
 
+# Rect layouts are pure functions of (B, T, BT, device): every stage builds the
+# same one within a call, so memoize it like the varlen layout above.
+_RECT_LAYOUT_CACHE: dict = {}
+
+
 def build_rect_chunk_layout(B: int, T_: int, BT: int, device: torch.device) -> ChunkLayout:
     """Build canonical chunk layout for a rectangular batch."""
+    key = (B, T_, BT, device)
+    layout = _RECT_LAYOUT_CACHE.get(key)
+    if layout is not None:
+        return layout
     n_chunks_per_seq = (T_ + BT - 1) // BT
     cu = torch.arange(B + 1, device=device, dtype=torch.int32) * T_
     seq = torch.arange(B, device=device, dtype=torch.int32).repeat_interleave(n_chunks_per_seq)
     local = torch.arange(n_chunks_per_seq, device=device, dtype=torch.int32).repeat(B)
     chunk_indices = torch.stack([seq, local], dim=1).contiguous()
     chunk_offsets = (torch.arange(B + 1, device=device, dtype=torch.int32) * n_chunks_per_seq).contiguous()
-    return ChunkLayout(cu, chunk_indices, chunk_offsets)
+    layout = ChunkLayout(cu, chunk_indices, chunk_offsets)
+    if len(_RECT_LAYOUT_CACHE) >= 8:
+        _RECT_LAYOUT_CACHE.clear()
+    _RECT_LAYOUT_CACHE[key] = layout
+    return layout
