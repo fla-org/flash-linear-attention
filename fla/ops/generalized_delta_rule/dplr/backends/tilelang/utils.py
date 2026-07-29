@@ -5,6 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+from collections import deque
 from dataclasses import dataclass
 
 import torch
@@ -53,17 +54,27 @@ def _as_cuda_cu_seqlens(cu_seqlens: torch.Tensor) -> torch.Tensor:
     return cu_seqlens.to(dtype=torch.int32).contiguous()
 
 
+# Bounded identity-keyed cache (same contract as fla.utils.tensor_cache):
+# repeated calls with the same cu_seqlens object skip the layout build. The
+# cached tensors are kept alive by the cache itself, so ids cannot recycle.
+_VARLEN_LAYOUT_CACHE: deque = deque(maxlen=4)
+
+
 def build_varlen_chunk_layout(
     cu_seqlens: torch.Tensor,
     chunk_size: int,
     total_tokens: int,
 ) -> ChunkLayout:
     """Build fixed-shape varlen chunk indices/offsets on CUDA."""
+    for cu_cached, cs_cached, tt_cached, layout in _VARLEN_LAYOUT_CACHE:
+        if cu_cached is cu_seqlens and cs_cached == chunk_size and tt_cached == total_tokens:
+            return layout
+
     cu = _as_cuda_cu_seqlens(cu_seqlens)
     n_seqs = cu.shape[0] - 1
     nt_alloc = varlen_chunk_count_upper(total_tokens, n_seqs, chunk_size)
 
-    lengths = torch.diff(cu)
+    lengths = cu[1:] - cu[:-1]
     chunks_per_seq = torch.div(lengths + chunk_size - 1, chunk_size, rounding_mode="floor")
     chunk_offsets = torch.cat(
         [
@@ -83,7 +94,9 @@ def build_varlen_chunk_layout(
     local_chunk = torch.where(valid, local_chunk, torch.zeros_like(local_chunk))
 
     chunk_indices = torch.stack([seq, local_chunk], dim=1).contiguous()
-    return ChunkLayout(cu, chunk_indices, chunk_offsets)
+    layout = ChunkLayout(cu, chunk_indices, chunk_offsets)
+    _VARLEN_LAYOUT_CACHE.append((cu_seqlens, chunk_size, total_tokens, layout))
+    return layout
 
 
 def build_rect_chunk_layout(B: int, T_: int, BT: int, device: torch.device) -> ChunkLayout:
