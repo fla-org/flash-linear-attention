@@ -256,24 +256,28 @@ def run_cp_dplr_test_worker(
 
             DPLRTileLangBackend.chunk_dplr_delta_rule = _spy
 
-        # CP Forward
-        o_local, _ = op(
-            q=q_local,
-            k=k_local,
-            v=v_local,
-            a=a_local,
-            b=b_local,
-            gk=gk_local,
-            cp_context=context,
-            safe_gate=True,
-            chunk_size=op_chunk_size,
-        )
+        try:
+            # CP Forward
+            o_local, _ = op(
+                q=q_local,
+                k=k_local,
+                v=v_local,
+                a=a_local,
+                b=b_local,
+                gk=gk_local,
+                cp_context=context,
+                safe_gate=True,
+                chunk_size=op_chunk_size,
+            )
 
-        # CP Backward
-        o_local.backward(do_local)
+            # CP Backward
+            o_local.backward(do_local)
 
-        if assert_tilelang:
-            assert route_spy, "TileLang backend route was not taken"
+            if assert_tilelang:
+                assert route_spy, "TileLang backend route was not taken"
+        finally:
+            if assert_tilelang:
+                DPLRTileLangBackend.chunk_dplr_delta_rule = _orig
 
         # Step 4: Result Aggregation and Verification
         o_gathered = [torch.zeros_like(o_local) for _ in range(world_size)]

@@ -103,7 +103,9 @@ def _backend_cls(backend_module):
         return backend_module.RWKV6TileLangBackend
     if backend_module is kda_tilelang_backend:
         return backend_module.KDATileLangBackend
-    return backend_module.DPLRTileLangBackend
+    if backend_module is dplr_tilelang_backend:
+        return backend_module.DPLRTileLangBackend
+    raise ValueError(f"unrecognized TileLang backend module: {backend_module}")
 
 
 @pytest.mark.parametrize("backend_module", [common_tilelang_backend, kda_tilelang_backend, rwkv6_tilelang_backend, dplr_tilelang_backend])
