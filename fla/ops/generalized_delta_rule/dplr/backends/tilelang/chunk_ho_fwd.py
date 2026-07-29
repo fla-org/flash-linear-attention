@@ -95,7 +95,6 @@ def _ho_fragment_merge_flags(
 
 
 @tilelang.jit(
-    out_idx=[12],
     pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
         tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: False,
@@ -604,10 +603,11 @@ def chunk_dplr_fwd_ho(
         **merge_flags,
         **config,
     )
+    o_f = torch.empty((token_rows, H, V), dtype=v.dtype, device=v.device)
     ht = torch.empty((n_ht, H, K, V), dtype=torch.float32, device=kg.device)
-    o_f = kernel(
+    kernel(
         qg_f, kg_f, v_f, w_f, u_f, bg_f, gk_f, A_qk_f, A_qb_f,
-        h0, layout.cu_seqlens, layout.chunk_offsets, ht,
+        h0, layout.cu_seqlens, layout.chunk_offsets, o_f, ht,
     )
     final_state = ht if output_final_state else None
     return o_f.view(B, T_, H, V), final_state

@@ -195,7 +195,6 @@ def _chunk_dplr_fwd_intra_tensorcore_kernel_impl(
 
 
 @tilelang.jit(
-    out_idx=[8, 9, 10, 11, 12, 13, 14, 15],
     pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
         tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: False,
@@ -211,7 +210,6 @@ def _chunk_dplr_fwd_intra_tensorcore_kernel_vec(
 
 
 @tilelang.jit(
-    out_idx=[8, 9, 10, 11, 12, 13, 14, 15],
     pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
         tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: False,
@@ -280,8 +278,17 @@ def chunk_dplr_fwd_intra(
         H, K, BT, in_dtype, float(scale), threads=threads,
     )
 
-    qg_f, kg_f, ag_f, bg_f, Aqk_f, Aqb_f, Aab_f, Aak_f = kernel(
+    qg_f = torch.empty((N_tokens, H, K), dtype=q.dtype, device=q.device)
+    kg_f = torch.empty((N_tokens, H, K), dtype=q.dtype, device=q.device)
+    ag_f = torch.empty((N_tokens, H, K), dtype=q.dtype, device=q.device)
+    bg_f = torch.empty((N_tokens, H, K), dtype=q.dtype, device=q.device)
+    Aqk_f = torch.empty((N_tokens, H, BT), dtype=q.dtype, device=q.device)
+    Aqb_f = torch.empty((N_tokens, H, BT), dtype=q.dtype, device=q.device)
+    Aab_f = torch.empty((N_tokens, H, BT), dtype=torch.float16, device=q.device)
+    Aak_f = torch.empty((N_tokens, H, BT), dtype=torch.float16, device=q.device)
+    kernel(
         q_f, k_f, a_f, b_f, gi_f, ge_f, layout.cu_seqlens, layout.chunk_indices,
+        qg_f, kg_f, ag_f, bg_f, Aqk_f, Aqb_f, Aab_f, Aak_f,
     )
 
     qg = qg_f.view(B, T_, H, K)
@@ -297,7 +304,6 @@ def chunk_dplr_fwd_intra(
 
 
 @tilelang.jit(
-    out_idx=[7, 8, 9, 10, 11, 12, 13, 14, 15],
     pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
         tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: False,
@@ -522,8 +528,18 @@ def chunk_dplr_fwd_intra_from_gk(
         threads=threads,
         gk_dtype=str(gk.dtype).split(".")[-1],
     )
-    qg_f, kg_f, ag_f, bg_f, Aqk_f, Aqb_f, Aab_f, Aak_f, gi_f = kernel(
+    qg_f = torch.empty((n_tokens, H, K), dtype=q.dtype, device=q.device)
+    kg_f = torch.empty((n_tokens, H, K), dtype=q.dtype, device=q.device)
+    ag_f = torch.empty((n_tokens, H, K), dtype=q.dtype, device=q.device)
+    bg_f = torch.empty((n_tokens, H, K), dtype=q.dtype, device=q.device)
+    Aqk_f = torch.empty((n_tokens, H, BT), dtype=q.dtype, device=q.device)
+    Aqb_f = torch.empty((n_tokens, H, BT), dtype=q.dtype, device=q.device)
+    Aab_f = torch.empty((n_tokens, H, BT), dtype=torch.float16, device=q.device)
+    Aak_f = torch.empty((n_tokens, H, BT), dtype=torch.float16, device=q.device)
+    gi_f = torch.empty((n_tokens, H, K), dtype=torch.float32, device=q.device)
+    kernel(
         q_f, k_f, a_f, b_f, gk_f, layout.cu_seqlens, layout.chunk_indices,
+        qg_f, kg_f, ag_f, bg_f, Aqk_f, Aqb_f, Aab_f, Aak_f, gi_f,
     )
 
     qg = qg_f.view(B, T_, H, K)
