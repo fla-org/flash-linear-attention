@@ -59,6 +59,13 @@ class DPLRTileLangBackend(BaseBackend):
         cp_context=None,
         **kwargs,
     ) -> tuple[bool, str | None]:
+        if cp_context is not None:
+            if initial_state is not None:
+                return False, "TileLang backend does not support initial_state with CP; fall back to Triton"
+            if output_final_state:
+                return False, "TileLang backend does not support output_final_state with CP; fall back to Triton"
+            if getattr(cp_context, "cu_seqlens", None) is None:
+                return False, "TileLang backend requires cu_seqlens for CP; fall back to Triton"
         if q.dtype not in (torch.float16, torch.bfloat16):
             return False, f"TileLang backend does not support dtype {q.dtype}; fall back to Triton"
         if not all(t.dtype == q.dtype for t in (k, v, a, b)):
@@ -100,7 +107,12 @@ class DPLRTileLangBackend(BaseBackend):
         # when the grid underfills the GPU. Measured crossover on PRO 6000 /
         # H100 class parts is around half the SM count.
         bv = 64 if v.shape[-1] <= 64 else 32
-        n_seqs = len(cu_seqlens) - 1 if cu_seqlens is not None else q.shape[0]
+        if cp_context is not None:
+            n_seqs = len(cp_context.cu_seqlens) - 1
+        elif cu_seqlens is not None:
+            n_seqs = len(cu_seqlens) - 1
+        else:
+            n_seqs = q.shape[0]
         grid = n_seqs * q.shape[2] * ((v.shape[-1] + bv - 1) // bv)
         sm = _sm_count(q.device.index or 0)
         if grid < sm // 2:

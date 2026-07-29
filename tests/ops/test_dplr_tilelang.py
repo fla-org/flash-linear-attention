@@ -45,7 +45,18 @@ def _verifier_inputs(
 @pytest.mark.parametrize(('K', 'dtype', 'chunk_size'), [(64, torch.bfloat16, 32), (128, torch.bfloat16, 32), (64, torch.float16, 16)])
 def test_chunk_verifier_accepts(K: int, dtype: torch.dtype, chunk_size: int):
     ok, reason = DPLRTileLangBackend().chunk_dplr_delta_rule_verifier(
-        *_verifier_inputs(K=K, dtype=dtype), chunk_size=chunk_size, cp_context=SimpleNamespace(),
+        *_verifier_inputs(K=K, dtype=dtype), chunk_size=chunk_size,
+    )
+    assert ok and reason is None
+
+
+def test_chunk_verifier_accepts_cp():
+    # CP requires a real context: cu_seqlens set, no initial_state, no final state
+    cp_context = SimpleNamespace(
+        cu_seqlens=torch.tensor([0, 16, 32, 48, 64], dtype=torch.int32, device=device),
+    )
+    ok, reason = DPLRTileLangBackend().chunk_dplr_delta_rule_verifier(
+        *_verifier_inputs(), chunk_size=32, cp_context=cp_context,
     )
     assert ok and reason is None
 
@@ -75,6 +86,9 @@ def test_chunk_verifier_accepts_chunk64_on_large_smem_device(monkeypatch):
         ('chunk16_k128', 'slower than Triton'),
         ('chunk48', 'chunk_size'),
         ('small_grid', 'small grids'),
+        ('cp_initial_state', 'initial_state with CP'),
+        ('cp_final_state', 'output_final_state with CP'),
+        ('cp_no_cu_seqlens', 'cu_seqlens for CP'),
     ],
 )
 def test_chunk_verifier_rejects(monkeypatch, case: str, reason: str):
@@ -98,6 +112,21 @@ def test_chunk_verifier_rejects(monkeypatch, case: str, reason: str):
         kwargs['chunk_size'] = 16
     elif case == 'small_grid':
         args = _verifier_inputs(B=1, H=1)
+    elif case == 'cp_initial_state':
+        args = _verifier_inputs()
+        kwargs['initial_state'] = torch.empty(4, 32, 64, 64, device=device)
+        kwargs['cp_context'] = SimpleNamespace(
+            cu_seqlens=torch.tensor([0, 16, 32, 48, 64], dtype=torch.int32, device=device),
+        )
+    elif case == 'cp_final_state':
+        args = _verifier_inputs()
+        kwargs['output_final_state'] = True
+        kwargs['cp_context'] = SimpleNamespace(
+            cu_seqlens=torch.tensor([0, 16, 32, 48, 64], dtype=torch.int32, device=device),
+        )
+    elif case == 'cp_no_cu_seqlens':
+        args = _verifier_inputs()
+        kwargs['cp_context'] = SimpleNamespace()
     else:
         args = _verifier_inputs()
         kwargs['chunk_size'] = 48
