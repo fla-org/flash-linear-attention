@@ -38,7 +38,6 @@ def _wu_fwd_threads(BT: int) -> int:
 
 
 @tilelang.jit(
-    out_idx=[3],
     pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
                   tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: False,
                   },
@@ -113,7 +112,6 @@ def _prepare_wy_repr_fwd_kernel(H, BT, in_dtype, threads: int = 32):
 
 
 @tilelang.jit(
-    out_idx=[3],
     pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
                   tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: False,
                   },
@@ -223,7 +221,6 @@ def _prepare_wy_repr_fwd_kernel64(H, in_dtype, threads: int = 32):
 
 
 @tilelang.jit(
-    out_idx=[6, 7],
     pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
                   tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: False,
                   },
@@ -350,7 +347,8 @@ def prepare_wy_repr_fwd(
         inv_kernel = _prepare_wy_repr_fwd_kernel(
             H, BT, in_dtype, threads=inv_threads,
         )
-    A_ab_inv_f = inv_kernel(A_ab_f, layout.cu_seqlens, layout.chunk_indices)
+    A_ab_inv_f = torch.empty((N_tokens, H, BT), dtype=torch.float32, device=ag.device)
+    inv_kernel(A_ab_f, layout.cu_seqlens, layout.chunk_indices, A_ab_inv_f)
 
     ag_f = ag.reshape(N_tokens, H, K).contiguous()
     v_f = v.reshape(N_tokens, H, V).contiguous()
@@ -359,7 +357,9 @@ def prepare_wy_repr_fwd(
         H, K, V, BT, in_dtype,
         threads=_wu_fwd_threads(BT),
     )
-    w_f, u_f = wu_kernel(ag_f, v_f, A_ab_inv_f, A_ak_f, layout.cu_seqlens, layout.chunk_indices)
+    w_f = torch.empty((N_tokens, H, K), dtype=ag.dtype, device=ag.device)
+    u_f = torch.empty((N_tokens, H, V), dtype=v.dtype, device=v.device)
+    wu_kernel(ag_f, v_f, A_ab_inv_f, A_ak_f, layout.cu_seqlens, layout.chunk_indices, w_f, u_f)
 
     w = w_f.view(B, T_, H, K)
     u = u_f.view(B, T_, H, V)

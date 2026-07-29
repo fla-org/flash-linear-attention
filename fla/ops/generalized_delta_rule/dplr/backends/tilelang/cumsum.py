@@ -38,7 +38,6 @@ from .utils import ChunkLayout, build_varlen_chunk_layout
 
 
 @tilelang.jit(
-    out_idx=[1, 2],
     pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
         tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: False,
@@ -176,7 +175,9 @@ def chunk_local_cumsum(
 
     in_dtype = str(g.dtype).split(".")[-1]
     kernel = _chunk_local_cumsum_kernel_tl(H, K, BT, BS, in_dtype, scale_f)
-    gi_flat, ge_flat = kernel(g_flat, layout.cu_seqlens, layout.chunk_indices)
+    gi_flat = torch.empty((N_tokens, H, K), dtype=torch.float32, device=g.device)
+    ge_flat = torch.empty((N_tokens, H, K), dtype=torch.float32, device=g.device)
+    kernel(g_flat, gi_flat, ge_flat, layout.cu_seqlens, layout.chunk_indices)
     return gi_flat.view(B, T_, H, K), ge_flat.view(B, T_, H, K)
 
 

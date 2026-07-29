@@ -46,7 +46,6 @@ def _chunk_h_fwd_configs(
 
 
 @tilelang.jit(
-    out_idx=[10, 11],
     pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
                   tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: False,
                   },
@@ -283,10 +282,12 @@ def chunk_dplr_fwd_h(
         **config,
     )
 
+    h_flat = torch.empty((chunk_rows, H, K, V), dtype=kg.dtype, device=kg.device)
+    v_new_flat = torch.empty((token_rows, H, V), dtype=v.dtype, device=v.device)
     ht = torch.empty((n_ht, H, K, V), dtype=torch.float32, device=kg.device)
-    h_flat, v_new_flat = kernel(
+    kernel(
         kg_f, v_f, w_f, bg_f, u_f, gk_f, h0, layout.cu_seqlens,
-        layout.chunk_offsets, layout.chunk_indices, ht,
+        layout.chunk_offsets, layout.chunk_indices, h_flat, v_new_flat, ht,
     )
 
     h_out = h_flat.view(B if not is_varlen else 1, chunk_rows // (1 if is_varlen else B), H, K, V) \
