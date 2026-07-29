@@ -198,7 +198,7 @@ def _chunk_dplr_fwd_intra_tensorcore_kernel_impl(
     out_idx=[8, 9, 10, 11, 12, 13, 14, 15],
     pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-        tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: True,
+        tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: False,
     },
 )
 def _chunk_dplr_fwd_intra_tensorcore_kernel_vec(
@@ -214,7 +214,7 @@ def _chunk_dplr_fwd_intra_tensorcore_kernel_vec(
     out_idx=[8, 9, 10, 11, 12, 13, 14, 15],
     pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-        tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: True,
+        tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: False,
         tilelang.PassConfigKey.TIR_DISABLE_VECTORIZE: True,
     },
 )
@@ -300,7 +300,7 @@ def chunk_dplr_fwd_intra(
     out_idx=[7, 8, 9, 10, 11, 12, 13, 14, 15],
     pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-        tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: True,
+        tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: False,
     },
 )
 def _chunk_dplr_fwd_intra_from_gk_tensorcore_kernel(
