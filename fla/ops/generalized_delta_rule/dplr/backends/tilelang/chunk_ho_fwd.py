@@ -108,6 +108,7 @@ def _chunk_dplr_fwd_ho_kernel(
     STORE_FINAL_STATE: bool,
     BV: int = 64,
     threads: int = 128,
+    num_stages: int = 0,
     DIRECT_KG_FRAGMENT: bool = False,
     DIRECT_BG_FRAGMENT: bool = False,
 ):
@@ -173,33 +174,58 @@ def _chunk_dplr_fwd_ho_kernel(
                 for k_idx, vv in T.Parallel(K, BV):
                     b_h[k_idx, vv] = 0.0
 
-            for i_t in T.serial(n_chunks):
+            for i_t in T.Pipelined(n_chunks, num_stages=num_stages):
                 chunk_bos = bos + i_t * BT
                 T.copy(b_h, b_h_shared)
                 T.clear(b_hc)
 
+                full_tile = chunk_bos + BT <= eos
+                if full_tile:
+                    # bulk vectorized copies for interior chunks
+                    T.copy(kg[chunk_bos: chunk_bos + BT, i_h, 0:K], kg_shared)
+                    T.copy(w[chunk_bos: chunk_bos + BT, i_h, 0:K], w_shared)
+                    T.copy(qg[chunk_bos: chunk_bos + BT, i_h, 0:K], qg_shared)
+                    T.copy(v[chunk_bos: chunk_bos + BT, i_h, i_v * BV: i_v * BV + BV], v_shared)
+                    T.copy(u[chunk_bos: chunk_bos + BT, i_h, i_v * BV: i_v * BV + BV], u_shared)
+                    T.copy(A_qk[chunk_bos: chunk_bos + BT, i_h, 0:BT], A_qk_shared)
+                    T.copy(A_qb[chunk_bos: chunk_bos + BT, i_h, 0:BT], A_qb_shared)
+                else:
+                    for c, k_idx in T.Parallel(BT, K):
+                        t = chunk_bos + c
+                        if t < eos:
+                            kg_shared[c, k_idx] = kg[t, i_h, k_idx]
+                            w_shared[c, k_idx] = w[t, i_h, k_idx]
+                            qg_shared[c, k_idx] = qg[t, i_h, k_idx]
+                        else:
+                            kg_shared[c, k_idx] = T.Cast(in_dtype, 0.0)
+                            w_shared[c, k_idx] = T.Cast(in_dtype, 0.0)
+                            qg_shared[c, k_idx] = T.Cast(in_dtype, 0.0)
+
+                    for c, vv in T.Parallel(BT, BV):
+                        t = chunk_bos + c
+                        g_v = i_v * BV + vv
+                        if (t < eos) and (g_v < V):
+                            v_shared[c, vv] = v[t, i_h, g_v]
+                            u_shared[c, vv] = u[t, i_h, g_v]
+                        else:
+                            v_shared[c, vv] = T.Cast(in_dtype, 0.0)
+                            u_shared[c, vv] = T.Cast(in_dtype, 0.0)
+
+                    for r, c in T.Parallel(BT, BT):
+                        t = chunk_bos + r
+                        if (t < eos) and (r >= c):
+                            A_qk_shared[r, c] = A_qk[t, i_h, c]
+                            A_qb_shared[r, c] = A_qb[t, i_h, c]
+                        else:
+                            A_qk_shared[r, c] = T.Cast(in_dtype, 0.0)
+                            A_qb_shared[r, c] = T.Cast(in_dtype, 0.0)
+
                 for c, k_idx in T.Parallel(BT, K):
                     t = chunk_bos + c
                     if t < eos:
-                        kg_shared[c, k_idx] = kg[t, i_h, k_idx]
                         bg_shared[c, k_idx] = T.Cast(acc_dtype, bg[t, i_h, k_idx])
-                        w_shared[c, k_idx] = w[t, i_h, k_idx]
-                        qg_shared[c, k_idx] = qg[t, i_h, k_idx]
                     else:
-                        kg_shared[c, k_idx] = T.Cast(in_dtype, 0.0)
                         bg_shared[c, k_idx] = 0.0
-                        w_shared[c, k_idx] = T.Cast(in_dtype, 0.0)
-                        qg_shared[c, k_idx] = T.Cast(in_dtype, 0.0)
-
-                for c, vv in T.Parallel(BT, BV):
-                    t = chunk_bos + c
-                    g_v = i_v * BV + vv
-                    if (t < eos) and (g_v < V):
-                        v_shared[c, vv] = v[t, i_h, g_v]
-                        u_shared[c, vv] = u[t, i_h, g_v]
-                    else:
-                        v_shared[c, vv] = T.Cast(in_dtype, 0.0)
-                        u_shared[c, vv] = T.Cast(in_dtype, 0.0)
 
                 T.gemm(w_shared, b_h_shared, v2_frag, clear_accum=True)
                 for c, vv in T.Parallel(BT, BV):
@@ -257,15 +283,6 @@ def _chunk_dplr_fwd_ho_kernel(
                         )
 
                 T.gemm(qg_shared, b_h_shared, o_frag, clear_accum=True)
-
-                for r, c in T.Parallel(BT, BT):
-                    t = chunk_bos + r
-                    if (t < eos) and (r >= c):
-                        A_qk_shared[r, c] = A_qk[t, i_h, c]
-                        A_qb_shared[r, c] = A_qb[t, i_h, c]
-                    else:
-                        A_qk_shared[r, c] = T.Cast(in_dtype, 0.0)
-                        A_qb_shared[r, c] = T.Cast(in_dtype, 0.0)
 
                 T.gemm(A_qk_shared, v_shared, o_frag)
                 T.gemm(A_qb_shared, v2_shared, o_frag)
@@ -389,28 +406,53 @@ def _chunk_dplr_fwd_ho_ctx_kernel(
                             )
                 T.clear(b_hc)
 
+                full_tile = chunk_bos + BT <= eos
+                if full_tile:
+                    # bulk vectorized copies for interior chunks
+                    T.copy(kg[chunk_bos: chunk_bos + BT, i_h, 0:K], kg_shared)
+                    T.copy(w[chunk_bos: chunk_bos + BT, i_h, 0:K], w_shared)
+                    T.copy(qg[chunk_bos: chunk_bos + BT, i_h, 0:K], qg_shared)
+                    T.copy(v[chunk_bos: chunk_bos + BT, i_h, i_v * BV: i_v * BV + BV], v_shared)
+                    T.copy(u[chunk_bos: chunk_bos + BT, i_h, i_v * BV: i_v * BV + BV], u_shared)
+                    T.copy(A_qk[chunk_bos: chunk_bos + BT, i_h, 0:BT], A_qk_shared)
+                    T.copy(A_qb[chunk_bos: chunk_bos + BT, i_h, 0:BT], A_qb_shared)
+                else:
+                    for c, k_idx in T.Parallel(BT, K):
+                        t = chunk_bos + c
+                        if t < eos:
+                            kg_shared[c, k_idx] = kg[t, i_h, k_idx]
+                            w_shared[c, k_idx] = w[t, i_h, k_idx]
+                            qg_shared[c, k_idx] = qg[t, i_h, k_idx]
+                        else:
+                            kg_shared[c, k_idx] = T.Cast(in_dtype, 0.0)
+                            w_shared[c, k_idx] = T.Cast(in_dtype, 0.0)
+                            qg_shared[c, k_idx] = T.Cast(in_dtype, 0.0)
+
+                    for c, vv in T.Parallel(BT, BV):
+                        t = chunk_bos + c
+                        g_v = i_v * BV + vv
+                        if (t < eos) and (g_v < V):
+                            v_shared[c, vv] = v[t, i_h, g_v]
+                            u_shared[c, vv] = u[t, i_h, g_v]
+                        else:
+                            v_shared[c, vv] = T.Cast(in_dtype, 0.0)
+                            u_shared[c, vv] = T.Cast(in_dtype, 0.0)
+
+                    for r, c in T.Parallel(BT, BT):
+                        t = chunk_bos + r
+                        if (t < eos) and (r >= c):
+                            A_qk_shared[r, c] = A_qk[t, i_h, c]
+                            A_qb_shared[r, c] = A_qb[t, i_h, c]
+                        else:
+                            A_qk_shared[r, c] = T.Cast(in_dtype, 0.0)
+                            A_qb_shared[r, c] = T.Cast(in_dtype, 0.0)
+
                 for c, k_idx in T.Parallel(BT, K):
                     t = chunk_bos + c
                     if t < eos:
-                        kg_shared[c, k_idx] = kg[t, i_h, k_idx]
                         bg_shared[c, k_idx] = T.Cast(acc_dtype, bg[t, i_h, k_idx])
-                        w_shared[c, k_idx] = w[t, i_h, k_idx]
-                        qg_shared[c, k_idx] = qg[t, i_h, k_idx]
                     else:
-                        kg_shared[c, k_idx] = T.Cast(in_dtype, 0.0)
                         bg_shared[c, k_idx] = 0.0
-                        w_shared[c, k_idx] = T.Cast(in_dtype, 0.0)
-                        qg_shared[c, k_idx] = T.Cast(in_dtype, 0.0)
-
-                for c, vv in T.Parallel(BT, BV):
-                    t = chunk_bos + c
-                    g_v = i_v * BV + vv
-                    if (t < eos) and (g_v < V):
-                        v_shared[c, vv] = v[t, i_h, g_v]
-                        u_shared[c, vv] = u[t, i_h, g_v]
-                    else:
-                        v_shared[c, vv] = T.Cast(in_dtype, 0.0)
-                        u_shared[c, vv] = T.Cast(in_dtype, 0.0)
 
                 T.gemm(w_shared, b_h_shared, v2_frag, clear_accum=True)
                 for c, vv in T.Parallel(BT, BV):
@@ -470,15 +512,6 @@ def _chunk_dplr_fwd_ho_ctx_kernel(
                         )
 
                 T.gemm(qg_shared, b_h_shared, o_frag, clear_accum=True)
-
-                for r, c in T.Parallel(BT, BT):
-                    t = chunk_bos + r
-                    if (t < eos) and (r >= c):
-                        A_qk_shared[r, c] = A_qk[t, i_h, c]
-                        A_qb_shared[r, c] = A_qb[t, i_h, c]
-                    else:
-                        A_qk_shared[r, c] = T.Cast(in_dtype, 0.0)
-                        A_qb_shared[r, c] = T.Cast(in_dtype, 0.0)
 
                 T.gemm(A_qk_shared, v_shared, o_frag)
                 T.gemm(A_qb_shared, v2_shared, o_frag)
