@@ -94,3 +94,62 @@ class TritonAscendGDNBackend(BaseBackend):
     def chunk_gated_delta_rule_fwd_intra(self, *args, **kwargs):
         from fla.ops.gated_delta_rule.backends.triton_ascend.chunk_fwd import chunk_gated_delta_rule_fwd_intra_npu
         return chunk_gated_delta_rule_fwd_intra_npu(*args, **kwargs)
+
+    def fused_recurrent_gated_delta_rule_fwd_verifier(
+        self,
+        q,
+        k,
+        v,
+        g=None,
+        gk=None,
+        gv=None,
+        beta=None,
+        A_log=None,
+        dt_bias=None,
+        scale=None,
+        initial_state=None,
+        output_final_state=False,
+        use_qk_l2norm_in_kernel=False,
+        use_beta_sigmoid_in_kernel=False,
+        allow_neg_eigval=False,
+        state_v_first=False,
+        cu_seqlens=None,
+    ) -> tuple[bool, str | None]:
+        from fla.utils import IS_NPU
+        if not IS_NPU:
+            return False, "not running on NPU"
+        if q.device.type != "npu":
+            return False, "input device is not NPU"
+        return True, None
+
+    def fused_recurrent_gated_delta_rule_fwd(
+        self,
+        q,
+        k,
+        v,
+        g=None,
+        gk=None,
+        gv=None,
+        beta=None,
+        A_log=None,
+        dt_bias=None,
+        scale=None,
+        initial_state=None,
+        output_final_state=False,
+        use_qk_l2norm_in_kernel=False,
+        use_beta_sigmoid_in_kernel=False,
+        allow_neg_eigval=False,
+        state_v_first=False,
+        cu_seqlens=None,
+    ):
+        from fla.ops.gated_delta_rule.backends.triton_ascend.fused_recurrent import fused_recurrent_gated_delta_rule_fwd_npu
+        return fused_recurrent_gated_delta_rule_fwd_npu(
+            q, k, v, beta, scale, initial_state,
+            g=g, gk=gk, gv=gv, A_log=A_log, dt_bias=dt_bias,
+            output_final_state=output_final_state,
+            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+            use_beta_sigmoid_in_kernel=use_beta_sigmoid_in_kernel,
+            allow_neg_eigval=allow_neg_eigval,
+            state_v_first=state_v_first,
+            cu_seqlens=cu_seqlens,
+        )
