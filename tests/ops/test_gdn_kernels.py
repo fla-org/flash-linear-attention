@@ -580,6 +580,53 @@ def test_chunk_gated_delta_rule_fwd_h(
     assert_close('final_state', fs_ref, fs_tri, 0.005)
 
 
+def _uniform_cu_seqlens(n_docs: int, doc_len: int) -> torch.Tensor:
+    return torch.arange(n_docs + 1, dtype=torch.long, device=device) * doc_len
+
+
+def test_chunk_gated_delta_rule_fwd_h_varlen_many_documents():
+    """A packed batch with N*HV > 65535 must launch and stay per-document exact.
+
+    Sequences are independent, so running the same batch as two halves must reproduce
+    the single launch; only the grid geometry differs between the two.
+    """
+    torch.manual_seed(42)
+    BT, H, HV, D, dtype = 64, 32, 32, 32, torch.bfloat16
+    n_docs, doc_len = 2050, 16
+    T, split = n_docs * doc_len, n_docs // 2
+
+    cu_seqlens = _uniform_cu_seqlens(n_docs, doc_len)
+    k = torch.randn(1, T, H, D, dtype=dtype, device=device)
+    w = torch.randn(1, T, HV, D, dtype=dtype, device=device)
+    u = torch.randn(1, T, HV, D, dtype=dtype, device=device)
+    g = torch.randn(1, T, HV, dtype=torch.float32, device=device) * 0.1
+    h0 = torch.randn(n_docs, HV, D, D, dtype=torch.float32, device=device)
+
+    h_tri, vn_tri, fs_tri = chunk_gated_delta_rule_fwd_h(
+        k=k, w=w, u=u, g=g, initial_state=h0, output_final_state=True,
+        cu_seqlens=cu_seqlens, chunk_size=BT,
+    )
+
+    halves = [(0, split), (split, n_docs)]
+    parts = [
+        chunk_gated_delta_rule_fwd_h(
+            k=k[:, lo * doc_len:hi * doc_len],
+            w=w[:, lo * doc_len:hi * doc_len],
+            u=u[:, lo * doc_len:hi * doc_len],
+            g=g[:, lo * doc_len:hi * doc_len],
+            initial_state=h0[lo:hi],
+            output_final_state=True,
+            cu_seqlens=_uniform_cu_seqlens(hi - lo, doc_len),
+            chunk_size=BT,
+        )
+        for lo, hi in halves
+    ]
+
+    assert_close('h', torch.cat([p[0] for p in parts], dim=1), h_tri, 0.005)
+    assert_close('v_new', torch.cat([p[1] for p in parts], dim=1), vn_tri, 0.005)
+    assert_close('final_state', torch.cat([p[2] for p in parts], dim=0), fs_tri, 0.005)
+
+
 def chunk_bwd_dv_local_ref(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -1296,3 +1343,49 @@ def test_chunk_gated_delta_rule_bwd_dhu(
     assert_close('dv2', dv2_ref.to(dtype), dv2_tri, 0.006)
     if use_h0:
         assert_close('dh0', dh0_ref, dh0_tri, 0.006)
+
+
+def test_chunk_gated_delta_rule_bwd_dhu_varlen_many_documents():
+    """The backward counterpart of `test_chunk_gated_delta_rule_fwd_h_varlen_many_documents`."""
+    torch.manual_seed(42)
+    BT, H, HV, D, dtype = 64, 32, 32, 32, torch.bfloat16
+    n_docs, doc_len = 2050, 16
+    T, split = n_docs * doc_len, n_docs // 2
+    scale = D ** -0.5
+
+    cu_seqlens = _uniform_cu_seqlens(n_docs, doc_len)
+    q = torch.randn(1, T, H, D, dtype=dtype, device=device)
+    k = torch.randn(1, T, H, D, dtype=dtype, device=device)
+    w = torch.randn(1, T, HV, D, dtype=dtype, device=device)
+    do = torch.randn(1, T, HV, D, dtype=dtype, device=device)
+    dv = torch.randn(1, T, HV, D, dtype=dtype, device=device)
+    g = torch.randn(1, T, HV, dtype=torch.float32, device=device) * 0.1
+    h0 = torch.randn(n_docs, HV, D, D, dtype=torch.float32, device=device)
+    dht = torch.randn(n_docs, HV, D, D, dtype=torch.float32, device=device)
+
+    dh_tri, dh0_tri, dv2_tri = chunk_gated_delta_rule_bwd_dhu(
+        q=q, k=k, w=w, g=g, h0=h0, dht=dht, do=do, dv=dv, scale=scale,
+        cu_seqlens=cu_seqlens, chunk_size=BT,
+    )
+
+    halves = [(0, split), (split, n_docs)]
+    parts = [
+        chunk_gated_delta_rule_bwd_dhu(
+            q=q[:, lo * doc_len:hi * doc_len],
+            k=k[:, lo * doc_len:hi * doc_len],
+            w=w[:, lo * doc_len:hi * doc_len],
+            g=g[:, lo * doc_len:hi * doc_len],
+            h0=h0[lo:hi],
+            dht=dht[lo:hi],
+            do=do[:, lo * doc_len:hi * doc_len],
+            dv=dv[:, lo * doc_len:hi * doc_len],
+            scale=scale,
+            cu_seqlens=_uniform_cu_seqlens(hi - lo, doc_len),
+            chunk_size=BT,
+        )
+        for lo, hi in halves
+    ]
+
+    assert_close('dh', torch.cat([p[0] for p in parts], dim=1), dh_tri, 0.006)
+    assert_close('dh0', torch.cat([p[1] for p in parts], dim=0), dh0_tri, 0.006)
+    assert_close('dv2', torch.cat([p[2] for p in parts], dim=1), dv2_tri, 0.006)
