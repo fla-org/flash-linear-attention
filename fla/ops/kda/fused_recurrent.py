@@ -242,6 +242,7 @@ def fused_recurrent_kda_fwd(
     initial_state: torch.Tensor | None = None,
     scale: float | None = None,
     output_final_state: bool = False,
+    store_dtype: torch.dtype = torch.float32,
     inplace_final_state: bool = True,
     state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
@@ -273,9 +274,9 @@ def fused_recurrent_kda_fwd(
         final_state = initial_state
     elif output_final_state:
         if state_v_first:
-            final_state = q.new_empty(N, HV, V, K, dtype=torch.float32)
+            final_state = q.new_empty(N, HV, V, K, dtype=store_dtype)
         else:
-            final_state = q.new_empty(N, HV, K, V, dtype=torch.float32)
+            final_state = q.new_empty(N, HV, K, V, dtype=store_dtype)
     else:
         final_state = None
 
@@ -344,6 +345,7 @@ def fused_recurrent_kda(
     scale: float | None = None,
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
+    store_dtype: torch.dtype | None = None,
     use_qk_l2norm_in_kernel: bool = False,
     use_gate_in_kernel: bool = False,
     use_beta_sigmoid_in_kernel: bool = False,
@@ -380,6 +382,11 @@ def fused_recurrent_kda(
             Default: `None`.
         output_final_state (Optional[bool]):
             Whether to output the final state of shape `[N, HV, K, V]`. Default: `False`.
+        store_dtype (Optional[torch.dtype]):
+            The dtype to store the final state in. If None, defaults to float32.
+            Use `torch.float16` to halve the state memory (2x more checkpoints).
+            Use `torch.float8_e4m3fn` for 4x reduction (requires PyTorch >= 2.1).
+            Only applies when `output_final_state=True`.
         use_qk_l2norm_in_kernel (Optional[bool]):
             Whether to use L2 normalization in the kernel. Default: `False`.
         use_gate_in_kernel (Optional[bool]):
@@ -463,6 +470,35 @@ def fused_recurrent_kda(
         scale = k.shape[-1] ** -0.5
     if allow_neg_eigval and not use_beta_sigmoid_in_kernel:
         raise ValueError("`allow_neg_eigval=True` requires `use_beta_sigmoid_in_kernel=True`.")
+    if store_dtype is None:
+        store_dtype = torch.float32
+    if store_dtype == torch.float8_e4m3fn:
+        # FP8: compute in FP32 first, then quantize externally with per-tensor scaling.
+        # PyTorch's .to(float8_e4m3fn) handles the scaling automatically.
+        o, final_state = fused_recurrent_kda_fwd(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            A_log=A_log,
+            dt_bias=dt_bias,
+            scale=scale,
+            initial_state=initial_state,
+            inplace_final_state=False,
+            output_final_state=output_final_state,
+            store_dtype=torch.float32,
+            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+            use_gate_in_kernel=use_gate_in_kernel,
+            use_beta_sigmoid_in_kernel=use_beta_sigmoid_in_kernel,
+            allow_neg_eigval=allow_neg_eigval,
+            lower_bound=lower_bound,
+            cu_seqlens=cu_seqlens,
+            state_v_first=state_v_first,
+        )
+        if final_state is not None:
+            final_state = final_state.to(torch.float8_e4m3fn)
+        return o, final_state
 
     o, final_state = fused_recurrent_kda_fwd(
         q=q,
@@ -476,6 +512,7 @@ def fused_recurrent_kda(
         initial_state=initial_state,
         inplace_final_state=False,
         output_final_state=output_final_state,
+        store_dtype=store_dtype,
         use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
         use_gate_in_kernel=use_gate_in_kernel,
         use_beta_sigmoid_in_kernel=use_beta_sigmoid_in_kernel,

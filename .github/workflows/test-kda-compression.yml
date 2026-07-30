@@ -1,0 +1,43 @@
+name: test-kda-compression
+
+on:
+  push:
+    branches:
+      - feat/kda-state-compression
+  pull_request:
+    branches:
+      - main
+      - feat/kda-state-compression
+
+jobs:
+  test-compression-h100:
+    name: Test KDA compression (H100, PyTorch 2.12)
+    runs-on: nvidia-h100-1
+    env:
+      FLA_CI_ENV: 1
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v7.0.0
+
+      - name: Setup CI Environment
+        id: setup
+        uses: ./.github/actions/setup-ci-env
+        with:
+          runner_name: ${{ runner.name }}
+          conda_env_name: pytorch_2_12
+          gpu_type: nvidia
+          install_tilelang: "true"
+          skip_gpu_check: true
+
+      - name: Run KDA compression tests
+        if: steps.setup.outputs.skip_tests == 'false'
+        shell: bash
+        run: |
+          $CONDA_BIN_PATH/pytest tests/ops/test_kda_compression.py -v --exitfirst --durations=10
+
+      - name: Run KDA baseline regression
+        if: steps.setup.outputs.skip_tests == 'false'
+        shell: bash
+        run: |
+          $CONDA_BIN_PATH/pytest tests/ops/test_kda.py -v --exitfirst -k "not test_kda_n8192" --durations=5
