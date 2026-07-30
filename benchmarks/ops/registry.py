@@ -346,6 +346,32 @@ register_op(OpConfig(
     category='gate_beta',
 ))
 
+register_op(OpConfig(
+    name='chunk_kda_inference',
+    import_path='fla.ops.kda',
+    inputs={
+        'q': TensorSpec(shape_BTHD, requires_grad=False),
+        'k': TensorSpec(shape_BTHD, requires_grad=False),
+        'v': TensorSpec(shape_BTHD, requires_grad=False),
+        'g': TensorSpec(shape_BTHD, requires_grad=False),
+        'beta': TensorSpec(shape_BTH, requires_grad=False),
+        'A_log': TensorSpec(shape_H, requires_grad=False, dtype='float32'),
+        'dt_bias': TensorSpec(shape_HD, requires_grad=False, dtype='float32'),
+    },
+    func_name='chunk_kda',
+    extra_kwargs={
+        'use_qk_l2norm_in_kernel': True,
+        'use_gate_in_kernel': True,
+        'use_beta_sigmoid_in_kernel': True,
+        'safe_gate': True,
+        'lower_bound': -5.0,
+        'state_v_first': True,
+    },
+    skip_backward=True,
+    category='gate_beta',
+    dim_constraints={'D': [128]},
+))
+
 # --- +head gate (g=[B,T,H] with logsigmoid) ---
 
 register_op(OpConfig(

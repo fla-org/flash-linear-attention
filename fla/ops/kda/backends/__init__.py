@@ -10,12 +10,14 @@
 from fla.ops.backends import BackendRegistry, dispatch
 from fla.ops.kda.backends.flash_kda import FlashKDABackend
 from fla.ops.kda.backends.tilelang import KDATileLangBackend
+from fla.ops.kda.backends.tle import KDATLEBackend
 from fla.ops.kda.backends.triton_ascend import TritonAscendKDABackend
 
 kda_registry = BackendRegistry("kda")
 kda_registry.register(TritonAscendKDABackend())
 kda_registry.register(FlashKDABackend())
 kda_registry.register(KDATileLangBackend())
+kda_registry.register(KDATLEBackend())
 
 
 __all__ = ['dispatch', 'kda_registry']
