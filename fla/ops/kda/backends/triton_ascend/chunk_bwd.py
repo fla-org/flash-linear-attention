@@ -86,10 +86,10 @@ def chunk_kda_bwd_kernel_dAv_npu(
     i_b, i_hv = i_bh // HV, i_bh % HV
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-        T = eos - bos
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = (eos - bos).to(tl.int32)
     else:
-        bos, eos = i_b * T, i_b * T + T
+        bos, eos = (i_b * T).to(tl.int64), (i_b * T + T).to(tl.int64)
 
     v += (bos * HV + i_hv) * V
     do += (bos * HV + i_hv) * V
@@ -281,10 +281,10 @@ def chunk_kda_bwd_kernel_wy_v_part_npu(
 
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-        T = eos - bos
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = (eos - bos).to(tl.int32)
     else:
-        bos, eos = i_b * T, i_b * T + T
+        bos, eos = (i_b * T).to(tl.int64), (i_b * T + T).to(tl.int64)
 
     v += (bos * HV + i_hv) * V
     beta += bos * HV + i_hv
@@ -681,7 +681,7 @@ def chunk_kda_bwd_kernel_wy_dA_mid_npu(
     NT_OFFSET: tl.constexpr,
     BH_OFFSET: tl.constexpr,
 ):
-    """T = dA_acc @ A after mask*beta has been applied to dA_acc."""
+    """dA_mid = dA_acc @ A after mask*beta has been applied to dA_acc."""
     i_t = tl.program_id(0) + NT_OFFSET
     i_bh = tl.program_id(1) + BH_OFFSET
     i_b, i_hv = i_bh // HV, i_bh % HV
@@ -722,6 +722,7 @@ def chunk_kda_bwd_kernel_wy_dA_finalize_npu(
     NT_OFFSET: tl.constexpr,
     BH_OFFSET: tl.constexpr,
 ):
+    """dA = mask(-A @ dA_mid); copy db_acc into db."""
     i_t = tl.program_id(0) + NT_OFFSET
     i_bh = tl.program_id(1) + BH_OFFSET
     i_b, i_hv = i_bh // HV, i_bh % HV
@@ -909,7 +910,7 @@ def chunk_kda_bwd_wy_dqkg_fused_npu(
         kernel_kwargs=dict(
             A=A,
             dA_acc=dA_acc,
-            dA_mid=dA_acc,
+            dA_mid=dA_acc,  # in-place alias; avoids a [B,T,HV,BT] fp32 workspace
             **common_launch,
         ),
     )
@@ -920,7 +921,7 @@ def chunk_kda_bwd_wy_dqkg_fused_npu(
         bh_total=B * HV,
         kernel_kwargs=dict(
             A=A,
-            dA_mid=dA_acc,
+            dA_mid=dA_acc,  # in-place alias; avoids a [B,T,HV,BT] fp32 workspace
             db_acc=db_acc,
             dA=dA,
             db=db,
