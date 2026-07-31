@@ -29,9 +29,12 @@ from fla.utils.ascend_ub_manager import (
 # Bwd stores dg early before the dx path. Calibrated on Ascend910 (192 KiB UB,
 # 0.85 margin): fwd BT=8 @ D=1024 (mult=3); bwd BT=4 @ D=1024 (mult=8).
 # Do not lower bwd mult below ~6 without re-validating (BT=8 bwd overflows).
+# Recompute-output (norm+linear bwd) keeps b_y live for tl.store(y);
+# bwd BT=2 @ D=1024 (mult=11). Do not lower without re-validating.
 _BD_MEM_MULT = 6.0
 _FWD_MEM_MULT = 3.0
 _BWD_MEM_MULT = 8.0
+_BWD_RECOMPUTE_MEM_MULT = 11.0
 _UB_SAFETY_MARGIN = 0.85
 # Legacy byte cap when UB capacity cannot be detected (65536 // fp32).
 _FALLBACK_MAX_BD = 65536 // 4
@@ -40,6 +43,7 @@ _MAX_BT = 128
 _LARGE_BD = 2048
 _LARGE_BD_FWD_MEM_MULT = 4.0
 _LARGE_BD_BWD_MEM_MULT = 12.0
+_LARGE_BD_BWD_RECOMPUTE_MEM_MULT = 16.5
 
 # ACTIVATION constexpr: 0 = swish/silu, 1 = sigmoid
 _ACTIVATION_SWISH = 0
@@ -66,13 +70,23 @@ def _fwd_memory_multiplier(BD: int) -> float:
     return _tile_memory_multiplier(_FWD_MEM_MULT, _LARGE_BD_FWD_MEM_MULT, BD)
 
 
-def _bwd_memory_multiplier(is_rms_norm: bool, BD: int) -> float:
+def _bwd_memory_multiplier(
+    is_rms_norm: bool,
+    BD: int,
+    *,
+    recompute_output: bool = False,
+) -> float:
     """Return bwd tile multiplier; larger BD needs a higher mult (smaller BT).
 
     ``is_rms_norm`` is accepted for callers/host UB scripts; LN and RMS currently
-    share the same calibrated budget.
+    share the same calibrated budget. ``recompute_output`` needs extra headroom
+    because the kernel keeps pre-gate ``b_y`` live for the ``y`` store.
     """
     del is_rms_norm  # reserved if LN/RMS budgets diverge
+    if recompute_output:
+        return _tile_memory_multiplier(
+            _BWD_RECOMPUTE_MEM_MULT, _LARGE_BD_BWD_RECOMPUTE_MEM_MULT, BD,
+        )
     return _tile_memory_multiplier(_BWD_MEM_MULT, _LARGE_BD_BWD_MEM_MULT, BD)
 
 
@@ -81,6 +95,7 @@ def _get_layer_norm_gated_tiles(
     is_forward: bool,
     *,
     is_rms_norm: bool = False,
+    recompute_output: bool = False,
 ) -> tuple[int, int]:
     """Return (BD, BT) for row-tiled kernels under UB constraints."""
     # BD: fit feature dim with BT=1 using a single-row budget.
@@ -99,7 +114,9 @@ def _get_layer_norm_gated_tiles(
     if is_forward:
         memory_multiplier = _fwd_memory_multiplier(BD)
     else:
-        memory_multiplier = _bwd_memory_multiplier(is_rms_norm, BD)
+        memory_multiplier = _bwd_memory_multiplier(
+            is_rms_norm, BD, recompute_output=recompute_output,
+        )
     # Large synthetic row dim so BT is limited by UB, not by a host-side T guess.
     BT = compute_row_tile_block_size(
         1 << 20,
@@ -121,9 +138,13 @@ def _launch_config(
     *,
     is_forward: bool,
     is_rms_norm: bool = False,
+    recompute_output: bool = False,
 ) -> tuple[int, int, int]:
     """Return (BD, BT, NS) for a grid-stride launch over T rows."""
-    BD, BT = _get_layer_norm_gated_tiles(D, is_forward=is_forward, is_rms_norm=is_rms_norm)
+    BD, BT = _get_layer_norm_gated_tiles(
+        D, is_forward=is_forward, is_rms_norm=is_rms_norm,
+        recompute_output=recompute_output,
+    )
     NT = triton.cdiv(T, BT)
     NS = max(1, min(get_multiprocessor_count(device_index), NT, ASCEND_MAX_GRID_DIM))
     return BD, BT, NS
@@ -405,6 +426,7 @@ def layer_norm_gated_bwd_npu(
 
     BD, BT, NS = _launch_config(
         T, D, x.device.index, is_forward=False, is_rms_norm=is_rms_norm,
+        recompute_output=recompute_output,
     )
 
     dw = torch.empty((NS, D), dtype=torch.float, device=weight.device) if weight is not None else None
