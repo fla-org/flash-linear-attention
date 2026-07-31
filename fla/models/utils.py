@@ -349,7 +349,7 @@ class LegacyFLACache(HFCacheBase):
         """Converts a cache in the legacy cache format into an equivalent `Cache`."""
 
         cache = cls(seen_tokens)
-        if isinstance(past_key_values, list):
+        if isinstance(past_key_values, (list, tuple)):
             for layer_idx in range(len(past_key_values)):
                 cache.states.append(past_key_values[layer_idx])
         return cache
