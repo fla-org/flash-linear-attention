@@ -22,19 +22,22 @@ import tilelang
 import tilelang.language as T
 import torch
 
+from .schedules import device_cc
 from .utils import ChunkLayout, build_rect_chunk_layout, build_varlen_chunk_layout
 
 _WY_INV_CONFIGS = [
     {"threads": 32},
 ]
 
-_WU_FWD_CONFIGS = [
-    {"threads": 128},
-]
 
-
-def _wu_fwd_threads(BT: int) -> int:
-    return 32 if BT <= 16 else _WU_FWD_CONFIGS[0]["threads"]
+def _wu_fwd_config(BT: int, device: torch.device) -> dict[str, int]:
+    # 256 threads + bulk copies only pay on cc90 at BT=64 (see
+    # chunk_A_bwd._a_bwd_config); occupancy-bound elsewhere.
+    if BT <= 16:
+        return {"threads": 32, "bulk_copy": False}
+    if device_cc(device) == 90 and BT >= 64:
+        return {"threads": 256, "bulk_copy": True}
+    return {"threads": 128, "bulk_copy": False}
 
 
 @tilelang.jit(
@@ -225,7 +228,7 @@ def _prepare_wy_repr_fwd_kernel64(H, in_dtype, threads: int = 32):
                   tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: False,
                   },
 )
-def _wu_fwd_kernel(H, K, V, BT, in_dtype, threads: int = 32):
+def _wu_fwd_kernel(H, K, V, BT, in_dtype, threads: int = 32, bulk_copy: bool = False):
     acc_dtype = "float32"
     n_tokens, n_seq_plus_one, n_chunks = T.dynamic(
         "n_tokens, n_seq_plus_one, n_chunks"
@@ -268,47 +271,75 @@ def _wu_fwd_kernel(H, K, V, BT, in_dtype, threads: int = 32):
             w_frag = T.alloc_fragment((BT, K), acc_dtype)
             u_frag = T.alloc_fragment((BT, V), acc_dtype)
 
-            # Load A_ab_inv (inclusive lower-tri after diagonal-add) and A_ak
-            for r, c in T.Parallel(BT, BT):
-                t = bos + r
-                if (t < eos) and (r >= c):
-                    A_inv_acc_shared[r, c] = A_ab_inv[t, i_h, c]
-                    A_inv_shared[r, c] = T.Cast(in_dtype, A_ab_inv[t, i_h, c])
-                else:
-                    A_inv_acc_shared[r, c] = 0.0
-                    A_inv_shared[r, c] = T.Cast(in_dtype, 0.0)
-                if (t < eos) and (r > c):
-                    A_ak_acc_shared[r, c] = A_ak[t, i_h, c]
-                else:
-                    A_ak_acc_shared[r, c] = 0.0
+            # Load A_ab_inv (inclusive lower-tri after diagonal-add) and A_ak.
+            # Interior chunks bulk-copy and mask in shared; boundary chunks
+            # keep the scalar predicated path (same gating as chunk_A_bwd).
+            full_tile = (is_valid_chunk and (bos + BT <= eos)) if bulk_copy else False
+            if full_tile:
+                T.copy(A_ab_inv[bos: bos + BT, i_h, 0:BT], A_inv_acc_shared)
+                T.copy(A_ab_inv[bos: bos + BT, i_h, 0:BT], A_inv_shared)
+                T.copy(A_ak[bos: bos + BT, i_h, 0:BT], A_ak_acc_shared)
+                for r, c in T.Parallel(BT, BT):
+                    if r < c:
+                        A_inv_acc_shared[r, c] = 0.0
+                        A_inv_shared[r, c] = T.Cast(in_dtype, 0.0)
+                    if r <= c:
+                        A_ak_acc_shared[r, c] = 0.0
+            else:
+                for r, c in T.Parallel(BT, BT):
+                    t = bos + r
+                    if (t < eos) and (r >= c):
+                        A_inv_acc_shared[r, c] = A_ab_inv[t, i_h, c]
+                        A_inv_shared[r, c] = T.Cast(in_dtype, A_ab_inv[t, i_h, c])
+                    else:
+                        A_inv_acc_shared[r, c] = 0.0
+                        A_inv_shared[r, c] = T.Cast(in_dtype, 0.0)
+                    if (t < eos) and (r > c):
+                        A_ak_acc_shared[r, c] = A_ak[t, i_h, c]
+                    else:
+                        A_ak_acc_shared[r, c] = 0.0
 
             T.gemm(A_inv_acc_shared, A_ak_acc_shared, Aak_processed_frag, clear_accum=True)
             for r, c in T.Parallel(BT, BT):
                 Aak_processed_shared[r, c] = T.Cast(in_dtype, Aak_processed_frag[r, c])
 
-            for r, c in T.Parallel(BT, K):
-                t = bos + r
-                if t < eos:
-                    ag_shared[r, c] = ag[t, i_h, c]
-                else:
-                    ag_shared[r, c] = T.Cast(in_dtype, 0.0)
+            if full_tile:
+                T.copy(ag[bos: bos + BT, i_h, 0:K], ag_shared)
+            else:
+                for r, c in T.Parallel(BT, K):
+                    t = bos + r
+                    if t < eos:
+                        ag_shared[r, c] = ag[t, i_h, c]
+                    else:
+                        ag_shared[r, c] = T.Cast(in_dtype, 0.0)
             T.gemm(A_inv_shared, ag_shared, w_frag, clear_accum=True)
-            for r, c in T.Parallel(BT, K):
-                t = bos + r
-                if t < eos:
-                    w[t, i_h, c] = T.Cast(in_dtype, w_frag[r, c])
+            if full_tile:
+                for r, c in T.Parallel(BT, K):
+                    w[bos + r, i_h, c] = T.Cast(in_dtype, w_frag[r, c])
+            else:
+                for r, c in T.Parallel(BT, K):
+                    t = bos + r
+                    if t < eos:
+                        w[t, i_h, c] = T.Cast(in_dtype, w_frag[r, c])
 
-            for r, c in T.Parallel(BT, V):
-                t = bos + r
-                if t < eos:
-                    v_shared[r, c] = v[t, i_h, c]
-                else:
-                    v_shared[r, c] = T.Cast(in_dtype, 0.0)
+            if full_tile:
+                T.copy(v[bos: bos + BT, i_h, 0:V], v_shared)
+            else:
+                for r, c in T.Parallel(BT, V):
+                    t = bos + r
+                    if t < eos:
+                        v_shared[r, c] = v[t, i_h, c]
+                    else:
+                        v_shared[r, c] = T.Cast(in_dtype, 0.0)
             T.gemm(Aak_processed_shared, v_shared, u_frag, clear_accum=True)
-            for r, c in T.Parallel(BT, V):
-                t = bos + r
-                if t < eos:
-                    u[t, i_h, c] = T.Cast(in_dtype, u_frag[r, c])
+            if full_tile:
+                for r, c in T.Parallel(BT, V):
+                    u[bos + r, i_h, c] = T.Cast(in_dtype, u_frag[r, c])
+            else:
+                for r, c in T.Parallel(BT, V):
+                    t = bos + r
+                    if t < eos:
+                        u[t, i_h, c] = T.Cast(in_dtype, u_frag[r, c])
 
     return wu_fwd_tl
 
@@ -355,7 +386,7 @@ def prepare_wy_repr_fwd(
 
     wu_kernel = _wu_fwd_kernel(
         H, K, V, BT, in_dtype,
-        threads=_wu_fwd_threads(BT),
+        **_wu_fwd_config(BT, ag.device),
     )
     w_f = torch.empty((N_tokens, H, K), dtype=ag.dtype, device=ag.device)
     u_f = torch.empty((N_tokens, H, V), dtype=v.dtype, device=v.device)

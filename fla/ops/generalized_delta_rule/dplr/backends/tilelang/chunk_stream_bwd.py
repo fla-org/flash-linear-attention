@@ -18,11 +18,15 @@ import tilelang
 import tilelang.language as T
 import torch
 
+from .schedules import (
+    stream_bwd_schedule_or_none,
+    stream_default_threads,
+    stream_high_smem_bytes,
+    stream_low_bwd_config,
+    stream_low_smem_bytes,
+    stream_mid_smem_bytes,
+)
 from .utils import ChunkLayout, build_rect_chunk_layout, build_varlen_chunk_layout
-
-
-def _stream_default_threads(BT: int) -> int:
-    return 128 if BT >= 32 else 64
 
 
 def _stream_bwd_config(
@@ -38,52 +42,8 @@ def _stream_bwd_config(
     if cc >= 90 and BT >= 32:
         threads = 256
     else:
-        threads = 128 if BT >= 32 else 64
+        threads = stream_default_threads(BT)
     return {"threads": threads}
-
-
-def _stream_low_default_qside_bv(BT: int) -> int:
-    return 32 if BT >= 64 else 16
-
-
-def _stream_low_bwd_config(BT: int, V: int, *, qside_bv: int | None = None):
-    config = {"threads": _stream_default_threads(BT)}
-    if qside_bv is None:
-        qside_bv = _stream_low_default_qside_bv(BT)
-    if qside_bv > V:
-        raise ValueError(f"DPLR low-SMEM qside_bv={qside_bv} exceeds V={V}")
-    config["qside_bv"] = qside_bv
-    return config
-
-
-def _dtype_nbytes(dtype: str) -> int:
-    if dtype in {"float32", "float"}:
-        return 4
-    if dtype in {"bfloat16", "float16", "half"}:
-        return 2
-    raise ValueError(f"unsupported DPLR stream backward dtype {dtype!r}")
-
-
-def _stream_high_smem_bytes(K: int, V: int, BT: int, in_dtype: str) -> int:
-    elem = _dtype_nbytes(in_dtype)
-    return elem * (2 * K * V + 8 * BT * K + 5 * BT * V + 2 * BT * BT) + 4 * K
-
-
-def _stream_low_smem_bytes(K: int, V: int, BT: int, in_dtype: str) -> int:
-    qside_bv = _stream_low_default_qside_bv(BT)
-    return _stream_reuse_smem_bytes(K, V, BT, in_dtype, qside_bv)
-
-
-def _stream_reuse_smem_bytes(K: int, V: int, BT: int, in_dtype: str, qside_bv: int) -> int:
-    elem = _dtype_nbytes(in_dtype)
-    return elem * (
-        K * V
-        + 4 * BT * K
-        + 3 * BT * V
-        + BT * BT
-        + BT * qside_bv
-        + K * qside_bv
-    )
 
 
 def _device_shared_memory_cap(device: torch.device) -> tuple[int, int, str]:
@@ -101,40 +61,19 @@ def _select_stream_bwd_schedule(
     in_dtype: str,
     device: torch.device,
 ) -> tuple[str, dict[str, int]]:
-    high_smem = _stream_high_smem_bytes(K, V, BT, in_dtype)
-    low_config = _stream_low_bwd_config(BT, V)
-    low_smem = _stream_reuse_smem_bytes(K, V, BT, in_dtype, low_config["qside_bv"])
     smem_cap, cc, name = _device_shared_memory_cap(device)
-    low_dtype_supported = in_dtype in {"bfloat16", "float16", "half"}
-
-    def _check(selected: str, required: int) -> str:
-        if required > smem_cap:
-            raise RuntimeError(
-                f"DPLR stream backward schedule {selected} needs {required}B shared memory "
-                f"for K={K}, V={V}, BT={BT}, dtype={in_dtype}, but device {name} "
-                f"allows {smem_cap}B"
-            )
-        return selected
-
-    # PRO6000 cc120's 99KB cap does not fit the head_dim128 high-SMEM schedule;
-    # route it directly to the low-SMEM compatibility schedule instead of
-    # probing the over-cap high-SMEM kernel.
-    if cc == 120 and K == V == 128:
-        if not low_dtype_supported:
-            raise RuntimeError(
-                "DPLR stream backward low-smem schedule is only enabled for "
-                f"bf16/fp16 training dtypes; got {in_dtype!r}"
-            )
-        return _check("low_v2", low_smem), low_config
-
-    if high_smem <= smem_cap:
+    selected = stream_bwd_schedule_or_none(K=K, V=V, BT=BT, in_dtype=in_dtype, smem_cap=smem_cap, cc=cc)
+    if selected == "high":
         return "high", _stream_bwd_config(BT, K=K, V=V, in_dtype=in_dtype, cc=cc)
-    if low_dtype_supported and low_smem <= smem_cap:
-        return "low_v2", low_config
+    if selected == "mid":
+        return "mid", _stream_bwd_config(BT, K=K, V=V, in_dtype=in_dtype, cc=cc)
+    if selected == "low_v2":
+        return "low_v2", stream_low_bwd_config(BT, V)
     raise RuntimeError(
         f"No launchable DPLR stream backward schedule for K={K}, V={V}, BT={BT}, "
-        f"dtype={in_dtype} on {name} cc{cc}: high={high_smem}B, "
-        f"low={low_smem}B, device cap={smem_cap}B"
+        f"dtype={in_dtype} on {name} cc{cc}: high={stream_high_smem_bytes(K, V, BT, in_dtype)}B, "
+        f"mid={stream_mid_smem_bytes(K, V, BT, in_dtype)}B, "
+        f"low={stream_low_smem_bytes(K, V, BT, in_dtype)}B, device cap={smem_cap}B"
     )
 
 
@@ -151,6 +90,7 @@ def _chunk_dplr_bwd_stream_dhu_o_kernel(
     USE_FINAL_STATE_GRADIENT: bool,
     USE_INITIAL_STATE: bool,
     threads: int = 128,
+    alias_kv: bool = False,
 ):
     acc_dtype = "float32"
     n_tokens, n_seq_plus_one, n_chunks, n_dht, n_dh0 = T.dynamic(
@@ -191,8 +131,16 @@ def _chunk_dplr_bwd_stream_dhu_o_kernel(
 
             b_dh = T.alloc_fragment((K, V), acc_dtype)
             b_dh_tmp = T.alloc_fragment((K, V), acc_dtype)
-            b_dh_shared = T.alloc_shared((K, V), in_dtype)
-            h_shared = T.alloc_shared((K, V), in_dtype)
+            if alias_kv:
+                # One (K, V) tile holds dh first (dv2/dk/db/dv_full GEMMs),
+                # then h (dgk_h/dq/dw GEMMs); one (BT, K) tile stages the four
+                # output rows sequentially.  Fits the 227KB cc90 cap at
+                # K=V=128, BT=64 where the high schedule needs 291KB.
+                kv_shared = T.alloc_shared((K, V), in_dtype)
+                out_shared = T.alloc_shared((BT, K), in_dtype)
+            else:
+                b_dh_shared = T.alloc_shared((K, V), in_dtype)
+                h_shared = T.alloc_shared((K, V), in_dtype)
 
             qg_shared = T.alloc_shared((BT, K), in_dtype)
             bg_shared = T.alloc_shared((BT, K), in_dtype)
@@ -214,10 +162,11 @@ def _chunk_dplr_bwd_stream_dhu_o_kernel(
             dk_frag = T.alloc_fragment((BT, K), acc_dtype)
             dw_frag = T.alloc_fragment((BT, K), acc_dtype)
             db_frag = T.alloc_fragment((BT, K), acc_dtype)
-            dq_shared = T.alloc_shared((BT, K), in_dtype)
-            dw_shared = T.alloc_shared((BT, K), in_dtype)
-            dk_shared = T.alloc_shared((BT, K), in_dtype)
-            db_shared = T.alloc_shared((BT, K), in_dtype)
+            if not alias_kv:
+                dq_shared = T.alloc_shared((BT, K), in_dtype)
+                dw_shared = T.alloc_shared((BT, K), in_dtype)
+                dk_shared = T.alloc_shared((BT, K), in_dtype)
+                db_shared = T.alloc_shared((BT, K), in_dtype)
             dgk_last_frag = T.alloc_fragment((K,), acc_dtype)
             gk_last_shared = T.alloc_shared((K,), acc_dtype)
 
@@ -289,12 +238,15 @@ def _chunk_dplr_bwd_stream_dhu_o_kernel(
                             A_qb_shared[r, c] = T.Cast(in_dtype, 0.0)
                             A_qk_shared[r, c] = T.Cast(in_dtype, 0.0)
 
-                T.copy(h[chunk_row, i_h, 0:K, 0:V], h_shared)
-                T.copy(b_dh, b_dh_shared)
+                if alias_kv:
+                    T.copy(b_dh, kv_shared)
+                else:
+                    T.copy(h[chunk_row, i_h, 0:K, 0:V], h_shared)
+                    T.copy(b_dh, b_dh_shared)
 
                 # dv2 = A_qb^T @ do + bg @ dh
                 T.gemm(A_qb_shared, do_shared, dv_intra_frag, transpose_A=True, clear_accum=True)
-                T.gemm(bg_shared, b_dh_shared, dv2_frag, clear_accum=True)
+                T.gemm(bg_shared, kv_shared if alias_kv else b_dh_shared, dv2_frag, clear_accum=True)
                 for r, vv in T.Parallel(BT, V):
                     t = t_off + r
                     dv2_frag[r, vv] = dv2_frag[r, vv] + dv_intra_frag[r, vv]
@@ -302,57 +254,121 @@ def _chunk_dplr_bwd_stream_dhu_o_kernel(
                         dv2[t, i_h, vv] = T.Cast(in_dtype, dv2_frag[r, vv])
                 T.copy(dv2_frag, dv2_shared)
 
-                # q/o-side consumer of current dh.
-                for k_idx, vv in T.Parallel(K, V):
-                    dgk_last_frag[k_idx] = (
-                        dgk_last_frag[k_idx]
-                        + T.Cast(acc_dtype, h_shared[k_idx, vv])
-                        * T.Cast(acc_dtype, b_dh_shared[k_idx, vv])
-                    )
-                T.gemm(do_shared, h_shared, dq_frag, transpose_B=True)
-                T.gemm(v_shared, b_dh_shared, dk_frag, transpose_B=True)
-                T.gemm(v_new_shared, b_dh_shared, db_frag, transpose_B=True)
-                T.gemm(dv2_shared, h_shared, dw_frag, transpose_B=True)
-
-                T.gemm(kg_shared, b_dh_shared, dv_full_frag, clear_accum=True)
-                T.gemm(A_qk_shared, do_shared, dv_full_frag, transpose_A=True)
-                T.copy(dv_full_frag, dv_full_shared)
-                for r, vv in T.Parallel(BT, V):
-                    t = t_off + r
-                    if t < eos:
-                        dv_full[t, i_h, vv] = T.Cast(in_dtype, dv_full_shared[r, vv])
-
-                T.copy(dk_frag, dk_shared)
-                T.copy(db_frag, db_shared)
-                T.copy(dq_frag, dq_shared)
-                T.copy(dw_frag, dw_shared)
-                for r, c in T.Parallel(BT, K):
-                    t = t_off + r
-                    if t < eos:
-                        dq_out[t, i_h, c] = dq_shared[r, c]
-                        dk_out[t, i_h, c] = dk_shared[r, c]
-                        dw_out[t, i_h, c] = dw_shared[r, c]
-                        db_out[t, i_h, c] = db_shared[r, c]
-
-                last_idx = T.min(t_off + BT - 1, eos - 1)
-                for c in T.Parallel(K):
-                    gk_last_shared[c] = gk[last_idx, i_h, c]
-                    dgk_last_frag[c] = dgk_last_frag[c] * T.exp2(gk_last_shared[c])
-                # Split the serial over-BT reduction across 4 lane groups so
+                # Split the serial over-BT dgk reduction across 4 lane groups so
                 # every thread participates (was 64/256 lanes, 21.5% of the
                 # kernel in the TIRx profile).
                 dgk_part = T.alloc_fragment((4, K), acc_dtype)
                 dgk_part_shared = T.alloc_shared((4, K), acc_dtype)
                 for gg, c in T.Parallel(4, K):
                     dgk_part[gg, c] = T.float32(0.0)
-                for r_local in T.serial(BT // 4):
-                    for gg, c in T.Parallel(4, K):
-                        r = gg * (BT // 4) + r_local
-                        dgk_part[gg, c] = (
-                            dgk_part[gg, c]
-                            + T.Cast(acc_dtype, kg_shared[r, c]) * T.Cast(acc_dtype, dk_shared[r, c])
-                            + T.Cast(acc_dtype, bg_shared[r, c]) * T.Cast(acc_dtype, db_shared[r, c])
+
+                if alias_kv:
+                    # dh-side reductions/GEMMs while kv_shared holds dh.  The
+                    # dgk_h term reads h straight from global memory; fragment
+                    # reads in a cross-layout reduction miscompile (wrong
+                    # thread map), so dh must come from the shared tile.
+                    for k_idx, vv in T.Parallel(K, V):
+                        dgk_last_frag[k_idx] = (
+                            dgk_last_frag[k_idx]
+                            + T.Cast(acc_dtype, h[chunk_row, i_h, k_idx, vv])
+                            * T.Cast(acc_dtype, kv_shared[k_idx, vv])
                         )
+                    T.gemm(v_shared, kv_shared, dk_frag, transpose_B=True)
+                    T.gemm(v_new_shared, kv_shared, db_frag, transpose_B=True)
+                    T.gemm(kg_shared, kv_shared, dv_full_frag, clear_accum=True)
+                    T.gemm(A_qk_shared, do_shared, dv_full_frag, transpose_A=True)
+                    T.copy(dv_full_frag, dv_full_shared)
+                    for r, vv in T.Parallel(BT, V):
+                        t = t_off + r
+                        if t < eos:
+                            dv_full[t, i_h, vv] = T.Cast(in_dtype, dv_full_shared[r, vv])
+
+                    # Stage each output row through the single (BT, K) tile,
+                    # folding the dgk reduction into the dk/db passes.
+                    T.copy(dk_frag, out_shared)
+                    for r, c in T.Parallel(BT, K):
+                        t = t_off + r
+                        if t < eos:
+                            dk_out[t, i_h, c] = out_shared[r, c]
+                    for r_local in T.serial(BT // 4):
+                        for gg, c in T.Parallel(4, K):
+                            r = gg * (BT // 4) + r_local
+                            dgk_part[gg, c] = (
+                                dgk_part[gg, c]
+                                + T.Cast(acc_dtype, kg_shared[r, c]) * T.Cast(acc_dtype, out_shared[r, c])
+                            )
+                    T.copy(db_frag, out_shared)
+                    for r, c in T.Parallel(BT, K):
+                        t = t_off + r
+                        if t < eos:
+                            db_out[t, i_h, c] = out_shared[r, c]
+                    for r_local in T.serial(BT // 4):
+                        for gg, c in T.Parallel(4, K):
+                            r = gg * (BT // 4) + r_local
+                            dgk_part[gg, c] = (
+                                dgk_part[gg, c]
+                                + T.Cast(acc_dtype, bg_shared[r, c]) * T.Cast(acc_dtype, out_shared[r, c])
+                            )
+
+                    # h-side GEMMs after overwriting the state tile with h.
+                    T.copy(h[chunk_row, i_h, 0:K, 0:V], kv_shared)
+                    T.gemm(do_shared, kv_shared, dq_frag, transpose_B=True)
+                    T.gemm(dv2_shared, kv_shared, dw_frag, transpose_B=True)
+                    T.copy(dq_frag, out_shared)
+                    for r, c in T.Parallel(BT, K):
+                        t = t_off + r
+                        if t < eos:
+                            dq_out[t, i_h, c] = out_shared[r, c]
+                    T.copy(dw_frag, out_shared)
+                    for r, c in T.Parallel(BT, K):
+                        t = t_off + r
+                        if t < eos:
+                            dw_out[t, i_h, c] = out_shared[r, c]
+                else:
+                    # q/o-side consumer of current dh.
+                    for k_idx, vv in T.Parallel(K, V):
+                        dgk_last_frag[k_idx] = (
+                            dgk_last_frag[k_idx]
+                            + T.Cast(acc_dtype, h_shared[k_idx, vv])
+                            * T.Cast(acc_dtype, b_dh_shared[k_idx, vv])
+                        )
+                    T.gemm(do_shared, h_shared, dq_frag, transpose_B=True)
+                    T.gemm(v_shared, b_dh_shared, dk_frag, transpose_B=True)
+                    T.gemm(v_new_shared, b_dh_shared, db_frag, transpose_B=True)
+                    T.gemm(dv2_shared, h_shared, dw_frag, transpose_B=True)
+
+                    T.gemm(kg_shared, b_dh_shared, dv_full_frag, clear_accum=True)
+                    T.gemm(A_qk_shared, do_shared, dv_full_frag, transpose_A=True)
+                    T.copy(dv_full_frag, dv_full_shared)
+                    for r, vv in T.Parallel(BT, V):
+                        t = t_off + r
+                        if t < eos:
+                            dv_full[t, i_h, vv] = T.Cast(in_dtype, dv_full_shared[r, vv])
+
+                    T.copy(dk_frag, dk_shared)
+                    T.copy(db_frag, db_shared)
+                    T.copy(dq_frag, dq_shared)
+                    T.copy(dw_frag, dw_shared)
+                    for r, c in T.Parallel(BT, K):
+                        t = t_off + r
+                        if t < eos:
+                            dq_out[t, i_h, c] = dq_shared[r, c]
+                            dk_out[t, i_h, c] = dk_shared[r, c]
+                            dw_out[t, i_h, c] = dw_shared[r, c]
+                            db_out[t, i_h, c] = db_shared[r, c]
+                    for r_local in T.serial(BT // 4):
+                        for gg, c in T.Parallel(4, K):
+                            r = gg * (BT // 4) + r_local
+                            dgk_part[gg, c] = (
+                                dgk_part[gg, c]
+                                + T.Cast(acc_dtype, kg_shared[r, c]) * T.Cast(acc_dtype, dk_shared[r, c])
+                                + T.Cast(acc_dtype, bg_shared[r, c]) * T.Cast(acc_dtype, db_shared[r, c])
+                            )
+
+                last_idx = T.min(t_off + BT - 1, eos - 1)
+                for c in T.Parallel(K):
+                    gk_last_shared[c] = gk[last_idx, i_h, c]
+                    dgk_last_frag[c] = dgk_last_frag[c] * T.exp2(gk_last_shared[c])
                 for gg, c in T.Parallel(4, K):
                     dgk_part_shared[gg, c] = dgk_part[gg, c]
                 T.sync_threads()
@@ -676,6 +692,8 @@ def chunk_dplr_bwd_stream_dhu_o_into(
     V = do.shape[-1]
     BT = int(chunk_size)
     is_varlen = cu_seqlens is not None
+    for out in (dq_out, dk_out, dw_out, db_out, dgk_last_out, dv2_out, dv_full_out, dh0_out):
+        assert out.is_contiguous(), "chunk_dplr_bwd_stream_dhu_o_into requires contiguous outputs"
     if V != K:
         raise NotImplementedError("stream_bwd_v1 currently targets K == V training shapes.")
     if is_varlen:
@@ -728,16 +746,19 @@ def chunk_dplr_bwd_stream_dhu_o_into(
         in_dtype=in_dtype,
         device=qg.device,
     )
-    kernel_factory = (
-        _chunk_dplr_bwd_stream_dhu_o_low_smem_kernel
-        if schedule == "low_v2"
-        else _chunk_dplr_bwd_stream_dhu_o_kernel
-    )
-    kernel = kernel_factory(
-        H, K, V, BT,
-        in_dtype, state_dtype, float(scale), use_dht, use_dh0,
-        **config,
-    )
+    if schedule == "low_v2":
+        kernel = _chunk_dplr_bwd_stream_dhu_o_low_smem_kernel(
+            H, K, V, BT,
+            in_dtype, state_dtype, float(scale), use_dht, use_dh0,
+            **config,
+        )
+    else:
+        kernel = _chunk_dplr_bwd_stream_dhu_o_kernel(
+            H, K, V, BT,
+            in_dtype, state_dtype, float(scale), use_dht, use_dh0,
+            alias_kv=(schedule == "mid"),
+            **config,
+        )
     kernel(
         qg_f, bg_f, w_f, kg_f, v_f, v_new_f, gk_f, do_f, h_f,
         A_qb_f, A_qk_f, dht_f, layout.cu_seqlens, layout.chunk_offsets,
