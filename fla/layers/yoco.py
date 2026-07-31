@@ -156,7 +156,7 @@ class YOCOGatedRetention(nn.Module):
 
         cu_seqlens = kwargs.get('cu_seqlens')
         indices = None
-        if attention_mask is not None:
+        if cu_seqlens is None and attention_mask is not None:
             indices, cu_seqlens, _ = get_unpad_data(attention_mask[:, -q_len:])
             hidden_states = index_first_axis(rearrange(hidden_states, 'b s ... -> (b s) ...'), indices).unsqueeze(0)
 
@@ -217,7 +217,7 @@ class YOCOGatedRetention(nn.Module):
             o = swiglu(g, o)
 
         o = self.o_proj(o)
-        if attention_mask is not None:
+        if indices is not None:
             o = pad_input(o.squeeze(0), indices, batch_size, q_len)
         attentions = None
         return o, attentions, past_key_values
