@@ -58,6 +58,8 @@ from ._device import (  # noqa: F401
     device_torch_lib,
     get_all_max_shared_mem,
     get_available_device,
+    get_device_capability,
+    get_device_smem_optin,
     get_multiprocessor_count,
     map_triton_backend_to_torch_device,
 )

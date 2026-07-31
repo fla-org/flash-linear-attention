@@ -9,25 +9,26 @@
 
 from __future__ import annotations
 
-import functools
+import logging
 
 import torch
 
 from fla.ops.backends import BaseBackend
-from fla.utils import find_spec_cached, has_usable_nvcc
+from fla.utils import (
+    find_spec_cached,
+    get_device_capability,
+    get_device_smem_optin,
+    get_multiprocessor_count,
+    has_usable_nvcc,
+)
+
+from .schedules import chunk64_schedule_or_none
+
+logger = logging.getLogger(__name__)
 
 _TILELANG_AVAILABLE = find_spec_cached("tilelang") is not None
 
-
-@functools.cache
-def _sm_count(device_index: int) -> int:
-    return torch.cuda.get_device_properties(device_index).multi_processor_count
-
-
-@functools.cache
-def _smem_optin_bytes(device_index: int) -> int:
-    props = torch.cuda.get_device_properties(device_index)
-    return int(getattr(props, "shared_memory_per_block_optin", props.shared_memory_per_block))
+_FALLBACK_LOGGED: set[str] = set()
 
 
 class DPLRTileLangBackend(BaseBackend):
@@ -84,24 +85,46 @@ class DPLRTileLangBackend(BaseBackend):
         if k.shape[-1] not in (64, 128):
             return False, f"TileLang backend supports head dim 64 or 128 (got {k.shape[-1]}); fall back to Triton"
         chunk_size = 16 if chunk_size is None else chunk_size
+        if chunk_size not in (16, 32, 64):
+            return False, f"TileLang backend supports chunk_size 16/32/64, got {chunk_size}; fall back to Triton"
+        if not safe_gate:
+            # The A-stage centers gates mid-chunk for its tensor-core operands
+            # (exp2(gi - gi[mid])), whose per-row exponents reach
+            # (chunk_size/2) * max|gk| * log2(e) and must stay below the fp32
+            # exponent range (~127 log2). Only safe_gate=True callers assert a
+            # gate bound at all: the documented [-5, 0) range keeps BT<=32 at
+            # <=115 log2, and BT=64 is licensed by callers with
+            # architecturally clamped gates such as RWKV7 (w in (-0.61, 0)).
+            # Unbounded gates must stay on Triton, whose sub_intra is correct
+            # for arbitrary gates.
+            return False, (
+                "TileLang backend requires safe_gate=True (its mid-chunk-centered "
+                "tensor-core scheme overflows fp32 for unbounded gates); fall back to Triton"
+            )
+        if not q.is_cuda:
+            return False, "TileLang backend is CUDA-only; fall back to Triton"
         if chunk_size == 16 and k.shape[-1] == 128:
             # measured ~0.5x vs Triton (the non-vectorized A-stage and the
             # 2-warp h+o path at BT=16 do not pay off at K=128)
             return False, "TileLang backend is slower than Triton at chunk_size 16 with head dim 128; fall back to Triton"
         if chunk_size == 64:
-            # the intra backward at BT=64 needs 131200B (K=64) or 148480B
-            # (K=128) of shared memory per block; smaller caps cannot run it
-            smem_need = 131200 if k.shape[-1] <= 64 else 148480
-            if _smem_optin_bytes(q.device.index or 0) < smem_need:
+            # reject configs no BT=64 kernel schedule can launch on this
+            # device (e.g. the K=128 stream backward needs 167936B on A100's
+            # 166912B cap, and the fused A-backward needs 131200B on cc120's
+            # 101376B cap); the arithmetic is shared with the launcher so
+            # acceptance implies schedulability
+            dev = q.device.index or 0
+            cc_major, cc_minor = get_device_capability(dev)
+            smem_cap = get_device_smem_optin(dev)
+            K = k.shape[-1]
+            in_dtype = "float16" if q.dtype == torch.float16 else "bfloat16"
+            if chunk64_schedule_or_none(K=K, V=K, in_dtype=in_dtype, smem_cap=smem_cap,
+                                        cc=cc_major * 10 + cc_minor) is None:
                 return False, (
-                    f"TileLang backend supports chunk_size 64 only on devices with "
-                    f">= {smem_need}B shared memory per block "
-                    f"(got {_smem_optin_bytes(q.device.index or 0)}B); fall back to Triton"
+                    f"TileLang backend has no launchable backward schedule for "
+                    f"chunk_size 64 with head dim {K} on a device with {smem_cap}B "
+                    "shared memory per block; fall back to Triton"
                 )
-        if chunk_size not in (16, 32, 64):
-            return False, f"TileLang backend supports chunk_size 16/32/64, got {chunk_size}; fall back to Triton"
-        if not q.is_cuda:
-            return False, "TileLang backend is CUDA-only; fall back to Triton"
         # The fused h+o state pass parallelizes only over (V/BV, N, H) blocks
         # and walks chunks serially, so it loses to the split Triton kernels
         # when the grid underfills the GPU. Measured crossover on PRO 6000 /
@@ -114,7 +137,7 @@ class DPLRTileLangBackend(BaseBackend):
         else:
             n_seqs = q.shape[0]
         grid = n_seqs * q.shape[2] * ((v.shape[-1] + bv - 1) // bv)
-        sm = _sm_count(q.device.index or 0)
+        sm = get_multiprocessor_count(q.device.index or 0)
         if grid < sm // 2:
             return False, (
                 f"TileLang backend is slower than Triton on small grids (N*H*(V/BV)={grid} "
@@ -144,15 +167,44 @@ class DPLRTileLangBackend(BaseBackend):
         from fla.ops.generalized_delta_rule.dplr.backends.tilelang.chunk import (
             chunk_dplr_delta_rule_tilelang,
         )
-        return chunk_dplr_delta_rule_tilelang(
-            q=q, k=k, v=v, a=a, b=b, gk=gk,
-            scale=scale,
-            initial_state=initial_state,
-            output_final_state=output_final_state,
-            cu_seqlens=cu_seqlens,
-            cu_seqlens_cpu=cu_seqlens_cpu,
-            safe_gate=safe_gate,
-            chunk_size=chunk_size,
-            disable_recompute=disable_recompute,
-            cp_context=cp_context,
-        )
+        try:
+            return chunk_dplr_delta_rule_tilelang(
+                q=q, k=k, v=v, a=a, b=b, gk=gk,
+                scale=scale,
+                initial_state=initial_state,
+                output_final_state=output_final_state,
+                cu_seqlens=cu_seqlens,
+                cu_seqlens_cpu=cu_seqlens_cpu,
+                safe_gate=safe_gate,
+                chunk_size=chunk_size,
+                disable_recompute=disable_recompute,
+                cp_context=cp_context,
+            )
+        except Exception as exc:
+            # The verifier gates on the schedule arithmetic, but JIT/launch
+            # failures can still escape; honor the dispatch contract and fall
+            # back to the default Triton implementation. Only the forward call
+            # is guarded: once it succeeds, autograd is committed to the
+            # TileLang backward.
+            key = f"{type(exc).__name__}: {exc}"
+            if key not in _FALLBACK_LOGGED:
+                _FALLBACK_LOGGED.add(key)
+                logger.warning(
+                    f"[FLA Backend] TileLang DPLR forward failed ({key}); falling back to Triton"
+                )
+            from fla.ops.generalized_delta_rule.dplr import chunk as dplr_chunk
+            fn = dplr_chunk.chunk_dplr_delta_rule
+            while hasattr(fn, "__wrapped__"):
+                fn = fn.__wrapped__
+            return fn(
+                q=q, k=k, v=v, a=a, b=b, gk=gk,
+                scale=scale,
+                initial_state=initial_state,
+                output_final_state=output_final_state,
+                cu_seqlens=cu_seqlens,
+                cu_seqlens_cpu=cu_seqlens_cpu,
+                safe_gate=safe_gate,
+                chunk_size=chunk_size,
+                disable_recompute=disable_recompute,
+                cp_context=cp_context,
+            )

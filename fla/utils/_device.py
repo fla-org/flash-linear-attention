@@ -93,6 +93,18 @@ def get_multiprocessor_count(tensor_idx: int = 0) -> int:
 
 
 @cache
+def get_device_capability(device_index: int = 0) -> tuple[int, int]:
+    major, minor = torch.cuda.get_device_capability(device_index)
+    return int(major), int(minor)
+
+
+@cache
+def get_device_smem_optin(device_index: int = 0) -> int:
+    props = torch.cuda.get_device_properties(device_index)
+    return int(getattr(props, 'shared_memory_per_block_optin', props.shared_memory_per_block))
+
+
+@cache
 def get_available_device() -> str:
     try:
         return triton.runtime.driver.active.get_current_target().backend

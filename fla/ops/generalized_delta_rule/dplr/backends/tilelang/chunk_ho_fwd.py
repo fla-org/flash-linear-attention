@@ -18,6 +18,8 @@ import tilelang
 import tilelang.language as T
 import torch
 
+from fla.utils import get_device_capability, get_device_smem_optin
+
 from .utils import ChunkLayout, build_rect_chunk_layout, build_varlen_chunk_layout
 
 _HO_FWD_CONFIGS = [
@@ -42,12 +44,14 @@ def _ho_fwd_configs(
     H, K, V, BT,
     in_dtype, state_dtype, USE_INITIAL_STATE, STORE_FINAL_STATE,
     BV: int = 64, threads: int = 128,
+    device_index: int | None = None,
 ):
     if not torch.cuda.is_available():
         return [{"BV": 16, "threads": 64}]
-    major = torch.cuda.get_device_capability()[0]
-    props = torch.cuda.get_device_properties(torch.cuda.current_device())
-    smem_limit = getattr(props, "shared_memory_per_block_optin", props.shared_memory_per_block)
+    if device_index is None:
+        device_index = torch.cuda.current_device()
+    major = get_device_capability(device_index)[0]
+    smem_limit = get_device_smem_optin(device_index)
 
     def pick(candidates: list[int]) -> int:
         for candidate in candidates:
@@ -75,8 +79,11 @@ def _ho_fragment_merge_flags(
     in_dtype: str,
     store_context: bool,
     config: dict[str, int],
+    device_index: int | None = None,
 ) -> dict[str, bool]:
-    capability = torch.cuda.get_device_capability()
+    if device_index is None:
+        device_index = torch.cuda.current_device()
+    capability = get_device_capability(device_index)
     common_shape = K == 128 and V == 128 and BT == 32 and in_dtype == "bfloat16"
     if (
         common_shape
@@ -593,9 +600,11 @@ def chunk_dplr_fwd_ho(
     config = _ho_fwd_configs(
         H, K, V, chunk_size,
         in_dtype, state_dtype, use_h0, output_final_state,
+        device_index=kg.device.index,
     )[0]
     merge_flags = _ho_fragment_merge_flags(
-        K, V, chunk_size, in_dtype, False, config
+        K, V, chunk_size, in_dtype, False, config,
+        device_index=kg.device.index,
     )
     kernel = _chunk_dplr_fwd_ho_kernel(
         H, K, V, chunk_size,
@@ -666,9 +675,11 @@ def _chunk_dplr_fwd_ho_context_schedule(
     config = _ho_fwd_configs(
         H, K, V, chunk_size,
         in_dtype, state_dtype, use_h0, output_final_state,
+        device_index=kg.device.index,
     )[0]
     merge_flags = _ho_fragment_merge_flags(
-        K, V, chunk_size, in_dtype, store_context, config
+        K, V, chunk_size, in_dtype, store_context, config,
+        device_index=kg.device.index,
     )
     h_ctx_rows = chunk_rows
     kernel = _chunk_dplr_fwd_ho_ctx_kernel(

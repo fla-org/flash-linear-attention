@@ -25,6 +25,8 @@ import tilelang
 import tilelang.language as T
 import torch
 
+from fla.utils import get_device_capability
+
 from .utils import ChunkLayout, build_rect_chunk_layout, build_varlen_chunk_layout
 
 _H_FWD_CONFIGS = [
@@ -36,8 +38,11 @@ def _chunk_h_fwd_configs(
     H, K, V, BT, BC,
     in_dtype, state_dtype, USE_INITIAL_STATE, STORE_FINAL_STATE,
     BV: int = 32, threads: int = 128, num_stages: int = 0,
+    device_index: int | None = None,
 ):
-    cap_major = torch.cuda.get_device_capability()[0] if torch.cuda.is_available() else 0
+    if device_index is None:
+        device_index = torch.cuda.current_device() if torch.cuda.is_available() else None
+    cap_major = get_device_capability(device_index)[0] if device_index is not None else 0
     if cap_major == 9 and K <= 128:
         return [{"BV": 64 if V >= 64 else 32 if V >= 32 else 16, "threads": 256, "num_stages": 1}]
     elif cap_major == 8:
@@ -241,7 +246,7 @@ def chunk_dplr_fwd_h(
     # BT=64 chunk in one H recurrence sub-block. Splitting into two BC=32
     # halves changes the fp32 accumulation order and was enough to create rare
     # one-ULP bf16 output spikes at long varlen sequence lengths.
-    cap_major = torch.cuda.get_device_capability(kg.device.index)[0]
+    cap_major = get_device_capability(kg.device.index)[0]
     if cap_major == 9:
         BC = min(BT, 64 if K <= 128 else 32)
     elif cap_major == 8:
@@ -275,6 +280,7 @@ def chunk_dplr_fwd_h(
     config = _chunk_h_fwd_configs(
         H, K, V, BT, BC,
         in_dtype, state_dtype, use_h0, store_ht,
+        device_index=kg.device.index,
     )[0]
     kernel = _chunk_dplr_fwd_h_kernel(
         H, K, V, BT, BC,

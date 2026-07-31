@@ -44,6 +44,7 @@ import torch.nn.functional as F
 
 from fla.ops.cp import build_cp_context
 from fla.ops.generalized_delta_rule.dplr import chunk_dplr_delta_rule
+from fla.ops.generalized_delta_rule.dplr.backends import DPLRTileLangBackend
 from fla.ops.generalized_delta_rule.dplr.naive import dplr_recurrence
 from fla.utils import assert_close
 
@@ -468,7 +469,10 @@ def test_cp2_tilelang_route():
     """CP2 through the TileLang DPLR backend (FLA_TILELANG=1), with route assertion."""
     if torch.cuda.device_count() < 2:
         pytest.skip("At least 2 GPUs required")
+    if not DPLRTileLangBackend.is_available():
+        pytest.skip("TileLang backend not available")
 
+    prev = os.environ.get('FLA_TILELANG')
     os.environ['FLA_TILELANG'] = '1'
     try:
         run_cp_test_with_spawn(
@@ -481,7 +485,10 @@ def test_cp2_tilelang_route():
             assert_tilelang=True,
         )
     finally:
-        del os.environ['FLA_TILELANG']
+        if prev is None:
+            del os.environ['FLA_TILELANG']
+        else:
+            os.environ['FLA_TILELANG'] = prev
 
 
 # ============================================================

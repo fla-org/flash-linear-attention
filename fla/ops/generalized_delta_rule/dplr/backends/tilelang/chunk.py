@@ -1273,7 +1273,9 @@ def chunk_dplr_delta_rule_tilelang(
     scale_f = float(q.shape[-1] ** -0.5 if scale is None else scale)
     n_seqs = len(cu_seqlens) - 1 if cu_seqlens is not None else q.shape[0]
     if initial_state is not None:
-        h0 = initial_state
+        # the kernels read h0 with dense strides; the Triton path gets this
+        # normalization from input_guard, which this backend bypasses
+        h0 = initial_state.contiguous()
     elif cp_context is not None:
         # the corrected initial state is produced inside the op by the CP
         # boundary exchange; this buffer only carries its shape/ABI
@@ -1302,23 +1304,30 @@ def chunk_dplr_delta_rule_tilelang(
         cu_seqlens is not None,
         chunk_size,
     )
-    token = _DPLR_CP_CONTEXT.set(cp_context)
-    try:
+
+    def call_fwd_op():
         if disable_recompute:
-            if not is_compiling and checkpoint_phase == _CHECKPOINT_PHASE_FORWARD or (
-                not is_compiling
-                and checkpoint_phase == _CHECKPOINT_PHASE_NORMAL
-                and not torch.is_grad_enabled()
-            ):
-                o, final_state, _, _, _, _ = (
-                    _chunk_dplr_delta_rule_fwd_ctx_elided_op(*op_args)
+            elide_ctx = (
+                checkpoint_phase == _CHECKPOINT_PHASE_FORWARD
+                or (
+                    checkpoint_phase == _CHECKPOINT_PHASE_NORMAL
+                    and not torch.is_grad_enabled()
                 )
-            else:
-                o, final_state, _, _, _, _ = _chunk_dplr_delta_rule_fwd_ctx_op(
-                    *op_args
-                )
-        else:
-            o, final_state, _, _ = _chunk_dplr_delta_rule_fwd_op(*op_args)
-    finally:
-        _DPLR_CP_CONTEXT.reset(token)
+            )
+            if not is_compiling and elide_ctx:
+                return _chunk_dplr_delta_rule_fwd_ctx_elided_op(*op_args)[:2]
+            return _chunk_dplr_delta_rule_fwd_ctx_op(*op_args)[:2]
+        return _chunk_dplr_delta_rule_fwd_op(*op_args)[:2]
+
+    if cp_context is None:
+        # keep the plain path free of ContextVar ops, which Dynamo cannot
+        # trace (torch.compile fullgraph support); the ContextVar is only a
+        # side channel for CP
+        o, final_state = call_fwd_op()
+    else:
+        token = _DPLR_CP_CONTEXT.set(cp_context)
+        try:
+            o, final_state = call_fwd_op()
+        finally:
+            _DPLR_CP_CONTEXT.reset(token)
     return o, final_state if output_final_state else None
