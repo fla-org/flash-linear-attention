@@ -263,8 +263,6 @@ def layer_norm_gated_bwd_kernel(
         b_y = b_xhat * b_w[None, :] if HAS_WEIGHT else b_xhat
         if HAS_BIAS:
             b_y = b_y + b_b[None, :]
-        if RECOMPUTE_OUTPUT:
-            tl.store(y + row_off, b_y.to(y.dtype.element_ty), mask=mask)
 
         b_g = tl.load(g + row_off, mask=mask, other=0.0).to(tl.float32)
         b_dy = tl.load(dy + row_off, mask=mask, other=0.0).to(tl.float32)
@@ -272,15 +270,20 @@ def layer_norm_gated_bwd_kernel(
         if ACTIVATION == 0:
             # silu'(g) = sigmoid(g) * (1 + g * (1 - sigmoid(g)))
             b_dsilu = b_sigmoid_g * (1 + b_g * (1 - b_sigmoid_g))
+            b_gate = b_g * b_sigmoid_g
             tl.store(dg + row_off, (b_dy * b_y * b_dsilu).to(dg.dtype.element_ty), mask=mask)
-            b_dy = b_dy * b_g * b_sigmoid_g
         else:
+            b_gate = b_sigmoid_g
             tl.store(
                 dg + row_off,
                 (b_dy * b_y * b_sigmoid_g * (1 - b_sigmoid_g)).to(dg.dtype.element_ty),
                 mask=mask,
             )
-            b_dy = b_dy * b_sigmoid_g
+        # dg needs the pre-gate b_y, but the recomputed output must match what the
+        # forward stored, i.e. the gated value the caller fed to its linear layer.
+        if RECOMPUTE_OUTPUT:
+            tl.store(y + row_off, (b_y * b_gate).to(y.dtype.element_ty), mask=mask)
+        b_dy = b_dy * b_gate
 
         if HAS_WEIGHT:
             b_dw += tl.sum(tl.where(mask, b_dy * b_xhat, 0.0), axis=0)
