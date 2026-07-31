@@ -16,6 +16,7 @@ import fla.ops.generalized_delta_rule.dplr.backends.tilelang as dplr_tilelang_ba
 from fla.ops.generalized_delta_rule.dplr import chunk_dplr_delta_rule
 from fla.ops.generalized_delta_rule.dplr.backends.tilelang import DPLRTileLangBackend
 from fla.ops.generalized_delta_rule.dplr.backends.tilelang.schedules import chunk64_schedule_or_none
+from fla.ops.generalized_delta_rule.dplr.naive import dplr_recurrence
 from fla.utils import assert_close, device, get_device_capability, get_device_smem_optin
 
 _TILELANG_USABLE = DPLRTileLangBackend.is_available()
@@ -114,6 +115,7 @@ def test_chunk_verifier_accepts_chunk64_on_large_smem_device(monkeypatch, K: int
         ('chunk16_k128', 'slower than Triton'),
         ('chunk48', 'chunk_size'),
         ('small_grid', 'small grids'),
+        ('low_v2_small_grid', 'low-smem stream backward'),
         ('cp_initial_state', 'initial_state with CP'),
         ('cp_final_state', 'output_final_state with CP'),
         ('cp_no_cu_seqlens', 'cu_seqlens for CP'),
@@ -159,6 +161,13 @@ def test_chunk_verifier_rejects(monkeypatch, case: str, reason: str):
         kwargs['chunk_size'] = 16
     elif case == 'small_grid':
         args = _verifier_inputs(B=1, H=1)
+    elif case == 'low_v2_small_grid':
+        # cc120-class 99KB cap forces the low_v2 stream schedule at K=128;
+        # N*H=64 below half the (pinned) SM count must fall back
+        monkeypatch.setattr(dplr_tilelang_backend, 'get_device_smem_optin', lambda idx: 101376)
+        monkeypatch.setattr(dplr_tilelang_backend, 'get_device_capability', lambda idx: (12, 0))
+        monkeypatch.setattr(dplr_tilelang_backend, 'get_multiprocessor_count', lambda idx: 188)
+        args = _verifier_inputs(B=2, H=32, K=128)
     elif case == 'cp_initial_state':
         args = _verifier_inputs()
         kwargs['initial_state'] = torch.empty(4, 32, 64, 64, device=device)
@@ -449,6 +458,158 @@ def test_chunk_varlen_tilelang_route_parity(
 
     names = ['o', 'dq', 'dk', 'dv', 'da', 'db', 'dgk'] + (['ht', 'dh0'] if use_state else [])
     _assert_route_parity(monkeypatch, run, names)
+
+
+def _naive_recurrence(q, k, v, a, b, gk, h0):
+    # per-token fp32 PyTorch baseline (no chunk math); dplr_recurrence works
+    # on [B, H, T, D] and applies the K**-0.5 scale internally
+    o, st = dplr_recurrence(
+        q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2),
+        a.transpose(1, 2), b.transpose(1, 2), gk.transpose(1, 2),
+        initial_state=h0, output_final_state=True,
+    )
+    return o.transpose(1, 2), st
+
+
+def _assert_naive_parity(monkeypatch, inputs, do, dht, names, call):
+    q, k, v, a, b, gk, h0 = inputs
+
+    def run(fn):
+        q_, k_, v_, a_, b_, gk_ = (x.detach().clone().requires_grad_(True) for x in (q, k, v, a, b, gk))
+        h0_ = h0.detach().clone().requires_grad_(True)
+        o, st = call(fn, q_, k_, v_, a_, b_, gk_, h0_)
+        ((o * do).sum() + (st * dht).sum()).backward()
+        return o, st, q_.grad, k_.grad, v_.grad, a_.grad, b_.grad, gk_.grad, h0_.grad
+
+    calls = _spy_on_tilelang_route(monkeypatch)
+    monkeypatch.setenv('FLA_TILELANG', '1')
+    tri = run('op')
+    assert calls, 'TileLang backend route was not taken'
+    ref = run('naive')
+    # same ratios test_dplr_delta uses for the Triton path vs the fp32 ref
+    for name, r, t in zip(names, ref, tri):
+        assert_close(name, r, t, 0.007 if name == 'o' else 0.008)
+
+
+_NAIVE_PARITY_NAMES = ('o', 'ht', 'dq', 'dk', 'dv', 'da', 'db', 'dgk', 'dh0')
+
+
+@requires_tilelang_route
+@pytest.mark.parametrize(
+    ('T', 'D', 'dtype', 'chunk_size', 'gate_style'),
+    [
+        pytest.param(
+            *test,
+            id="T{}-D{}-{}-chunk_size{}-{}".format(*test),
+            marks=pytest.mark.skipif(
+                test[3] == 64 and not _cs64_launchable(test[1]),
+                reason='chunk_size 64 has no launchable backward schedule on this device',
+            ),
+        )
+        for test in [
+            (256, 64, torch.bfloat16, 32, 'standard'),
+            (256, 64, torch.bfloat16, 16, 'standard'),
+            (256, 128, torch.bfloat16, 32, 'standard'),
+            (256, 64, torch.float16, 32, 'standard'),
+            (256, 64, torch.bfloat16, 64, 'standard'),
+            (256, 64, torch.bfloat16, 32, 'saturated_lb'),
+            (256, 128, torch.bfloat16, 64, 'rwkv7'),
+        ]
+    ],
+)
+def test_chunk_tilelang_naive_ref_parity(
+    monkeypatch,
+    T: int,
+    D: int,
+    dtype: torch.dtype,
+    chunk_size: int,
+    gate_style: str,
+):
+    torch.manual_seed(42)
+    B, H = 8, 32
+    q = torch.randn(B, T, H, D, dtype=dtype)
+    k = torch.randn(B, T, H, D, dtype=dtype)
+    v = torch.randn(B, T, H, D, dtype=dtype)
+    a = F.normalize(torch.rand(B, T, H, D, dtype=dtype), p=2, dim=-1)
+    b = -a
+    if gate_style == 'saturated_lb':
+        gk = (F.logsigmoid(torch.randn(B, T, H, D, dtype=torch.float)) / 0.6).clamp(-5, 0).to(dtype)
+    elif gate_style == 'rwkv7':
+        gk = (-0.61 * torch.sigmoid(5 * torch.randn(B, T, H, D, dtype=torch.float))).to(dtype)
+    else:
+        gk = F.logsigmoid(torch.randn(B, T, H, D, dtype=torch.float)).to(dtype).clamp(-5, 0)
+    h0 = torch.randn(B, H, D, D, dtype=torch.float)
+    q, k, v, a, b, gk, h0 = (x.to(device) for x in (q, k, v, a, b, gk, h0))
+    do = torch.randn_like(v)
+    dht = torch.randn_like(h0)
+
+    def call(fn, q_, k_, v_, a_, b_, gk_, h0_):
+        if fn == 'naive':
+            return _naive_recurrence(q_, k_, v_, a_, b_, gk_, h0_)
+        return chunk_dplr_delta_rule(
+            q=q_, k=k_, v=v_, a=a_, b=b_, gk=gk_,
+            initial_state=h0_, output_final_state=True,
+            safe_gate=True, chunk_size=chunk_size,
+        )
+
+    _assert_naive_parity(monkeypatch, (q, k, v, a, b, gk, h0), do, dht, _NAIVE_PARITY_NAMES, call)
+
+
+@requires_tilelang_route
+@pytest.mark.parametrize(
+    ('D', 'cu_seqlens', 'dtype', 'chunk_size'),
+    [
+        pytest.param(*test, id="D{}-cu_seqlens{}-{}-chunk_size{}".format(*test))
+        for test in [
+            (64, [0, 130, 260, 390, 512], torch.bfloat16, 32),
+            (128, [0, 130, 260, 390, 512], torch.bfloat16, 32),
+        ]
+    ],
+)
+def test_chunk_varlen_tilelang_naive_ref_parity(
+    monkeypatch,
+    D: int,
+    cu_seqlens: list[int],
+    dtype: torch.dtype,
+    chunk_size: int,
+):
+    torch.manual_seed(42)
+    N = len(cu_seqlens) - 1
+    T = cu_seqlens[-1]
+    H = 32
+    cu = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+
+    q = torch.randn(1, T, H, D, dtype=dtype)
+    k = torch.randn(1, T, H, D, dtype=dtype)
+    v = torch.randn(1, T, H, D, dtype=dtype)
+    a = F.normalize(torch.rand(1, T, H, D, dtype=dtype), p=2, dim=-1)
+    b = -a
+    gk = F.logsigmoid(torch.randn(1, T, H, D, dtype=torch.float)).to(dtype).clamp(-5, 0)
+    h0 = torch.randn(N, H, D, D, dtype=torch.float)
+    q, k, v, a, b, gk, h0 = (x.to(device) for x in (q, k, v, a, b, gk, h0))
+    do = torch.randn_like(v)
+    dht = torch.randn_like(h0)
+
+    def call(fn, q_, k_, v_, a_, b_, gk_, h0_):
+        if fn == 'naive':
+            # the baseline has no varlen form; run each sequence and repack
+            outs, sts = [], []
+            for i in range(N):
+                s, e = cu_seqlens[i], cu_seqlens[i + 1]
+                o_i, st_i = _naive_recurrence(
+                    q_[:, s:e], k_[:, s:e], v_[:, s:e],
+                    a_[:, s:e], b_[:, s:e], gk_[:, s:e], h0_[i: i + 1],
+                )
+                outs.append(o_i)
+                sts.append(st_i)
+            return torch.cat(outs, 1), torch.cat(sts, 0)
+        return chunk_dplr_delta_rule(
+            q=q_, k=k_, v=v_, a=a_, b=b_, gk=gk_,
+            initial_state=h0_, output_final_state=True,
+            cu_seqlens=cu, safe_gate=True, chunk_size=chunk_size,
+        )
+
+    _assert_naive_parity(monkeypatch, (q, k, v, a, b, gk, h0), do, dht, _NAIVE_PARITY_NAMES, call)
 
 
 @requires_tilelang_route
