@@ -226,7 +226,7 @@ def chunk_dplr_fwd_A_kernel_intra_tensorcore(
     # Load the offset vector from Global Memory
     # p_offset points to gi[i_t*BT + mid_idx, :]
     m_k = tl.arange(0, BK) < K
-    p_offset = gi + offset_base + (i_t * BT + mid_idx) * K + tl.arange(0, BK)
+    p_offset = gi + offset_base + (i_t * BT + mid_idx) * H * K + tl.arange(0, BK)
     b_offset = tl.load(p_offset, mask=m_k, other=0.0).to(tl.float32)
 
     # Apply offset to gate values

@@ -290,7 +290,7 @@ def chunk_dplr_bwd_kernel_intra_tensorcore(
     valid_len = min(T_len - i_t * BT, BT)
     mid_idx = valid_len // 2
     m_k = tl.arange(0, BK) + i_k * BK < K
-    p_offset = gi + offset_base_k + (i_t * BT + mid_idx) * K + tl.arange(0, BK) + i_k * BK
+    p_offset = gi + offset_base_k + (i_t * BT + mid_idx) * H * K + tl.arange(0, BK) + i_k * BK
     b_offset = tl.load(p_offset, mask=m_k, other=0.0).to(tl.float32)
 
     # Q, K, A, B, Gates: [BT, BK]
