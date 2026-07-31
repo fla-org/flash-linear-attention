@@ -39,7 +39,10 @@ def stream_low_default_qside_bv(BT: int) -> int:
 
 
 def stream_low_bwd_config(BT: int, V: int, *, qside_bv: int | None = None):
-    config = {"threads": stream_default_threads(BT)}
+    # At K=V=128 the persistent (K, V) fp32 dh fragment alone is 128 regs per
+    # thread at 128 threads, so the serial chunk loop spills to local memory
+    # every iteration; 256 threads halves that to a spill-free 64.
+    config = {"threads": 256 if V >= 128 else stream_default_threads(BT)}
     if qside_bv is None:
         qside_bv = stream_low_default_qside_bv(BT)
     if qside_bv > V:

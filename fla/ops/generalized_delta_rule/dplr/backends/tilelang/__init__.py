@@ -22,7 +22,7 @@ from fla.utils import (
     has_usable_nvcc,
 )
 
-from .schedules import chunk64_schedule_or_none
+from .schedules import chunk64_schedule_or_none, stream_bwd_schedule_or_none
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +103,12 @@ class DPLRTileLangBackend(BaseBackend):
             )
         if not q.is_cuda:
             return False, "TileLang backend is CUDA-only; fall back to Triton"
-        if chunk_size == 16 and k.shape[-1] == 128:
+        dev = q.device.index or 0
+        cc_major, cc_minor = get_device_capability(dev)
+        smem_cap = get_device_smem_optin(dev)
+        K = k.shape[-1]
+        in_dtype = "float16" if q.dtype == torch.float16 else "bfloat16"
+        if chunk_size == 16 and K == 128:
             # measured ~0.5x vs Triton (the non-vectorized A-stage and the
             # 2-warp h+o path at BT=16 do not pay off at K=128)
             return False, "TileLang backend is slower than Triton at chunk_size 16 with head dim 128; fall back to Triton"
@@ -113,11 +118,6 @@ class DPLRTileLangBackend(BaseBackend):
             # 166912B cap, and the fused A-backward needs 131200B on cc120's
             # 101376B cap); the arithmetic is shared with the launcher so
             # acceptance implies schedulability
-            dev = q.device.index or 0
-            cc_major, cc_minor = get_device_capability(dev)
-            smem_cap = get_device_smem_optin(dev)
-            K = k.shape[-1]
-            in_dtype = "float16" if q.dtype == torch.float16 else "bfloat16"
             if chunk64_schedule_or_none(K=K, V=K, in_dtype=in_dtype, smem_cap=smem_cap,
                                         cc=cc_major * 10 + cc_minor) is None:
                 return False, (
@@ -137,11 +137,31 @@ class DPLRTileLangBackend(BaseBackend):
         else:
             n_seqs = q.shape[0]
         grid = n_seqs * q.shape[2] * ((v.shape[-1] + bv - 1) // bv)
-        sm = get_multiprocessor_count(q.device.index or 0)
+        sm = get_multiprocessor_count(dev)
         if grid < sm // 2:
             return False, (
                 f"TileLang backend is slower than Triton on small grids (N*H*(V/BV)={grid} "
                 f"< {sm // 2} SMs/2); fall back to Triton"
+            )
+        stream_schedule = stream_bwd_schedule_or_none(
+            K=K, V=K, BT=chunk_size, in_dtype=in_dtype,
+            smem_cap=smem_cap, cc=cc_major * 10 + cc_minor,
+        )
+        if stream_schedule is None:
+            return False, (
+                f"TileLang backend has no launchable backward schedule for "
+                f"chunk_size {chunk_size} with head dim {K} on a device with {smem_cap}B "
+                "shared memory per block; fall back to Triton"
+            )
+        if stream_schedule == "low_v2" and n_seqs * q.shape[2] < sm // 2:
+            # the low-smem stream backward is one serial chunk scan per
+            # (seq, head) block with no V split, and its 97KB footprint leaves
+            # no room to prefetch; below half the SMs it cannot hide the
+            # serial chain and measurably loses to the split Triton kernels
+            return False, (
+                f"TileLang backend is slower than Triton when the low-smem stream backward "
+                f"underfills the device (N*H={n_seqs * q.shape[2]} < {sm // 2} SMs/2); "
+                "fall back to Triton"
             )
         return True, None
 
