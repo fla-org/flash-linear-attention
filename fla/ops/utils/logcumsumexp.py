@@ -29,7 +29,7 @@ def logcumsumexp_fwd_kernel(
     S: tl.constexpr,
     BT: tl.constexpr,
 ):
-    i_bh = tl.program_id(0)
+    i_bh = tl.program_id(0).to(tl.int64)
     o_i = tl.arange(0, BT)
     m_s = tl.where(o_i[:, None] >= o_i[None, :], 1., 0.)
 

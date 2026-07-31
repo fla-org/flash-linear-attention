@@ -29,7 +29,7 @@ def fused_chunk_based_fwd_kernel(
     BK: tl.constexpr,
     BV: tl.constexpr,
 ):
-    i_v, i_k, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_v, i_k, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
 
     o_i = tl.arange(0, BT)
 
@@ -139,7 +139,7 @@ def fused_chunk_based_bwd_kernel(
     BK: tl.constexpr,
     BV: tl.constexpr,
 ):
-    i_v, i_k, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_v, i_k, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
 
     o_i = tl.arange(0, BT)
     m_s = o_i[:, None] >= o_i[None, :]

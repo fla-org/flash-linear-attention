@@ -34,7 +34,7 @@ def fused_recurrent_gsa_inference_kernel(
     BV: tl.constexpr,
     NG: tl.constexpr,
 ):
-    i_bh = tl.program_id(0)
+    i_bh = tl.program_id(0).to(tl.int64)
     i_bg = i_bh // NG
 
     b_s = tl.load(s + i_bg * M + tl.arange(0, M)).to(tl.float32)

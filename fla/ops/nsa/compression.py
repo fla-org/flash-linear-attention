@@ -51,7 +51,7 @@ def parallel_nsa_compression_fwd_kernel(
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_v, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1), tl.program_id(2)
+    i_t, i_v, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1), tl.program_id(2).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
 
     if IS_VARLEN:
@@ -61,7 +61,7 @@ def parallel_nsa_compression_fwd_kernel(
         TQ = (eos_q - bos_q).to(tl.int32)
         TK = (eos_k - bos_k).to(tl.int32)
         TC = tl.cdiv(TK, BS)
-        boc = tl.load(chunk_offsets + i_n).to(tl.int32)
+        boc = tl.load(chunk_offsets + i_n).to(tl.int64)
     else:
         bos_q, eos_q = (i_b * TQ).to(tl.int64), (i_b * TQ + TQ).to(tl.int64)
         TC = tl.cdiv(TK, BS)
@@ -161,15 +161,15 @@ def parallel_nsa_compression_bwd_kernel_dq(
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_v, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1), tl.program_id(2)
+    i_t, i_v, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1), tl.program_id(2).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
 
-    all = B * T
+    all = B * T.to(tl.int64)
     if IS_VARLEN:
         i_n, i_t = tl.load(token_indices + i_t * 2).to(tl.int32), tl.load(token_indices + i_t * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
-        boc = tl.load(chunk_offsets + i_n).to(tl.int32)
+        boc = tl.load(chunk_offsets + i_n).to(tl.int64)
     else:
         bos, eos = (i_b * T).to(tl.int64), (i_b * T + T).to(tl.int64)
         boc = i_b * tl.cdiv(T, BS)
@@ -272,10 +272,10 @@ def parallel_nsa_compression_bwd_kernel_dkv(
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_c, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2)
+    i_v, i_c, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
 
-    all = B * TC
+    all = B * TC.to(tl.int64)
 
     if IS_VARLEN:
         i_n, i_c = tl.load(chunk_indices + i_c * 2).to(tl.int32), tl.load(chunk_indices + i_c * 2 + 1).to(tl.int64)
@@ -283,7 +283,7 @@ def parallel_nsa_compression_bwd_kernel_dkv(
         T = (eos - bos).to(tl.int32)
         # the number of compression representations in total
         TC = tl.cdiv(T, BS)
-        boc = tl.load(chunk_offsets + i_n).to(tl.int32)
+        boc = tl.load(chunk_offsets + i_n).to(tl.int64)
     else:
         bos, eos = (i_b * T).to(tl.int64), (i_b * T + T).to(tl.int64)
         boc = i_b * tl.cdiv(T, BS)

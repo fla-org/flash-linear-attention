@@ -30,7 +30,7 @@ def softmax_fwd_kernel(
     D: tl.constexpr,
     B: tl.constexpr,
 ):
-    i_n = tl.program_id(0)
+    i_n = tl.program_id(0).to(tl.int64)
     o_d = tl.arange(0, B)
     m_d = o_d < D
 
@@ -58,7 +58,7 @@ def softmax_bwd_kernel(
     D: tl.constexpr,
     B: tl.constexpr,
 ):
-    i_n = tl.program_id(0)
+    i_n = tl.program_id(0).to(tl.int64)
     o_d = tl.arange(0, B)
     m_d = o_d < D
 
