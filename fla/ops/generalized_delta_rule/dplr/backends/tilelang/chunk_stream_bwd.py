@@ -450,7 +450,6 @@ def _chunk_dplr_bwd_stream_dhu_o_low_smem_kernel(
             n_chunks = chunk_offsets[i_n + 1] - boh
 
             b_dh = T.alloc_fragment((K, V), acc_dtype)
-            b_dh_tmp = T.alloc_fragment((K, V), acc_dtype)
             state_shared = T.alloc_shared((K, V), in_dtype)
 
             qg_shared = T.alloc_shared((BT, K), in_dtype)
@@ -494,7 +493,6 @@ def _chunk_dplr_bwd_stream_dhu_o_low_smem_kernel(
                 T.clear(dk_frag)
                 T.clear(dw_frag)
                 T.clear(db_frag)
-                T.clear(b_dh_tmp)
                 for gg, c in T.Parallel(4, K):
                     dgk_part[gg, c] = T.float32(0.0)
                 for k_idx in T.Parallel(K):
@@ -710,11 +708,13 @@ def _chunk_dplr_bwd_stream_dhu_o_low_smem_kernel(
                         dw_out[t, i_h, c] = T.Cast(in_dtype, dw_frag[r, c])
                         db_out[t, i_h, c] = T.Cast(in_dtype, db_frag[r, c])
 
-                # Update dh for the previous chunk.
-                T.gemm(qg_shared, do_shared, b_dh_tmp, transpose_A=True)
-                T.gemm(w_shared, dv2_shared, b_dh_tmp, transpose_A=True)
+                # Update dh for the previous chunk: scale the carried state
+                # in place so both GEMMs accumulate straight into it (mirrors
+                # the Triton dhu kernel; one less (K, V) fp32 fragment).
                 for k_idx, vv in T.Parallel(K, V):
-                    b_dh[k_idx, vv] = T.exp2(gk_last_frag[k_idx]) * b_dh[k_idx, vv] + b_dh_tmp[k_idx, vv]
+                    b_dh[k_idx, vv] = b_dh[k_idx, vv] * T.exp2(gk_last_frag[k_idx])
+                T.gemm(qg_shared, do_shared, b_dh, transpose_A=True)
+                T.gemm(w_shared, dv2_shared, b_dh, transpose_A=True)
 
             if USE_INITIAL_STATE:
                 for k_idx, vv in T.Parallel(K, V):
