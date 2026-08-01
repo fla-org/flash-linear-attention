@@ -410,6 +410,9 @@ def _chunk_dplr_bwd_stream_dhu_o_low_smem_kernel(
     qside_bv: int = 16,
 ):
     acc_dtype = "float32"
+    # Exact qside tiling lets the h slices bulk-load; ragged Vs keep the
+    # scalar predicated staging.
+    qside_exact = V % qside_bv == 0
     n_tokens, n_seq_plus_one, n_chunks, n_dht, n_dh0 = T.dynamic(
         "n_tokens, n_seq_plus_one, n_chunks, n_dht, n_dh0"
     )
@@ -496,32 +499,44 @@ def _chunk_dplr_bwd_stream_dhu_o_low_smem_kernel(
                     dgk_h_frag[k_idx] = T.float32(0.0)
                     gk_last_frag[k_idx] = T.float32(0.0)
 
-                for r, c in T.Parallel(BT, K):
-                    t = t_off + r
-                    if t < eos:
-                        qg_shared[r, c] = qg[t, i_h, c]
-                        bg_shared[r, c] = bg[t, i_h, c]
-                        w_shared[r, c] = w[t, i_h, c]
-                        kg_shared[r, c] = kg[t, i_h, c]
-                    else:
-                        qg_shared[r, c] = T.Cast(in_dtype, 0.0)
-                        bg_shared[r, c] = T.Cast(in_dtype, 0.0)
-                        w_shared[r, c] = T.Cast(in_dtype, 0.0)
-                        kg_shared[r, c] = T.Cast(in_dtype, 0.0)
+                full_tile = t_off + BT <= eos
+                if full_tile:
+                    # Bulk vectorized copies for interior chunks (TIRx showed
+                    # the scalar predicated loads cap at ~1.5TB/s).
+                    T.copy(qg[t_off: t_off + BT, i_h, 0:K], qg_shared)
+                    T.copy(bg[t_off: t_off + BT, i_h, 0:K], bg_shared)
+                    T.copy(w[t_off: t_off + BT, i_h, 0:K], w_shared)
+                    T.copy(kg[t_off: t_off + BT, i_h, 0:K], kg_shared)
+                    T.copy(do[t_off: t_off + BT, i_h, 0:V], do_shared)
+                    # Stored A matrices are already causally masked.
+                    T.copy(A_qb[t_off: t_off + BT, i_h, 0:BT], A_shared)
+                else:
+                    for r, c in T.Parallel(BT, K):
+                        t = t_off + r
+                        if t < eos:
+                            qg_shared[r, c] = qg[t, i_h, c]
+                            bg_shared[r, c] = bg[t, i_h, c]
+                            w_shared[r, c] = w[t, i_h, c]
+                            kg_shared[r, c] = kg[t, i_h, c]
+                        else:
+                            qg_shared[r, c] = T.Cast(in_dtype, 0.0)
+                            bg_shared[r, c] = T.Cast(in_dtype, 0.0)
+                            w_shared[r, c] = T.Cast(in_dtype, 0.0)
+                            kg_shared[r, c] = T.Cast(in_dtype, 0.0)
 
-                for r, c in T.Parallel(BT, V):
-                    t = t_off + r
-                    if t < eos:
-                        do_shared[r, c] = do[t, i_h, c]
-                    else:
-                        do_shared[r, c] = T.Cast(in_dtype, 0.0)
+                    for r, c in T.Parallel(BT, V):
+                        t = t_off + r
+                        if t < eos:
+                            do_shared[r, c] = do[t, i_h, c]
+                        else:
+                            do_shared[r, c] = T.Cast(in_dtype, 0.0)
 
-                for r, c in T.Parallel(BT, BT):
-                    t = t_off + r
-                    if (t < eos) and (r >= c):
-                        A_shared[r, c] = A_qb[t, i_h, c]
-                    else:
-                        A_shared[r, c] = T.Cast(in_dtype, 0.0)
+                    for r, c in T.Parallel(BT, BT):
+                        t = t_off + r
+                        if (t < eos) and (r >= c):
+                            A_shared[r, c] = A_qb[t, i_h, c]
+                        else:
+                            A_shared[r, c] = T.Cast(in_dtype, 0.0)
 
                 # state_shared first holds the current reverse state dH.
                 T.copy(b_dh, state_shared)
@@ -537,12 +552,15 @@ def _chunk_dplr_bwd_stream_dhu_o_low_smem_kernel(
                 T.copy(dv2_frag, dv2_shared)
 
                 # Reuse A_shared for A_qk; write dv_full directly from registers.
-                for r, c in T.Parallel(BT, BT):
-                    t = t_off + r
-                    if (t < eos) and (r >= c):
-                        A_shared[r, c] = A_qk[t, i_h, c]
-                    else:
-                        A_shared[r, c] = T.Cast(in_dtype, 0.0)
+                if full_tile:
+                    T.copy(A_qk[t_off: t_off + BT, i_h, 0:BT], A_shared)
+                else:
+                    for r, c in T.Parallel(BT, BT):
+                        t = t_off + r
+                        if (t < eos) and (r >= c):
+                            A_shared[r, c] = A_qk[t, i_h, c]
+                        else:
+                            A_shared[r, c] = T.Cast(in_dtype, 0.0)
                 T.gemm(kg_shared, state_shared, dv_full_frag, clear_accum=True)
                 T.gemm(A_shared, do_shared, dv_full_frag, transpose_A=True)
                 for r, vv in T.Parallel(BT, V):
@@ -559,19 +577,41 @@ def _chunk_dplr_bwd_stream_dhu_o_low_smem_kernel(
 
                 # q/o-side consumers.  Tile over V to match the saved path's
                 # accumulation order and avoid long-bf16 spike drift in dq/dk.
+                # v_new and v are staged like do so the slices below never
+                # touch global memory; boundary rows stay zero-padded.
+                if full_tile:
+                    T.copy(v_new[t_off: t_off + BT, i_h, 0:V], v_like_shared)
+                else:
+                    for r, c in T.Parallel(BT, V):
+                        t = t_off + r
+                        if t < eos:
+                            v_like_shared[r, c] = v_new[t, i_h, c]
+                        else:
+                            v_like_shared[r, c] = T.Cast(in_dtype, 0.0)
                 for i_v in T.serial(T.ceildiv(V, qside_bv)):
-                    # h tile: dgk_h, dq, and dw consume this tile.
-                    for k_idx, vv in T.Parallel(K, qside_bv):
-                        g_v = i_v * qside_bv + vv
-                        if g_v < V:
-                            qside_state_shared[k_idx, vv] = h[chunk_row, i_h, k_idx, g_v]
+                    # h tile: dgk_h, dq, and dw consume this tile.  h rows are
+                    # defined for every chunk, so exact slices bulk-load.
+                    if qside_exact:
+                        T.copy(h[chunk_row, i_h, 0:K, i_v * qside_bv: (i_v + 1) * qside_bv],
+                               qside_state_shared)
+                        for k_idx, vv in T.Parallel(K, qside_bv):
                             dgk_h_frag[k_idx] = (
                                 dgk_h_frag[k_idx]
                                 + T.Cast(acc_dtype, qside_state_shared[k_idx, vv])
-                                * T.Cast(acc_dtype, state_shared[k_idx, g_v])
+                                * T.Cast(acc_dtype, state_shared[k_idx, i_v * qside_bv + vv])
                             )
-                        else:
-                            qside_state_shared[k_idx, vv] = T.Cast(in_dtype, 0.0)
+                    else:
+                        for k_idx, vv in T.Parallel(K, qside_bv):
+                            g_v = i_v * qside_bv + vv
+                            if g_v < V:
+                                qside_state_shared[k_idx, vv] = h[chunk_row, i_h, k_idx, g_v]
+                                dgk_h_frag[k_idx] = (
+                                    dgk_h_frag[k_idx]
+                                    + T.Cast(acc_dtype, qside_state_shared[k_idx, vv])
+                                    * T.Cast(acc_dtype, state_shared[k_idx, g_v])
+                                )
+                            else:
+                                qside_state_shared[k_idx, vv] = T.Cast(in_dtype, 0.0)
                     for r, vv in T.Parallel(BT, qside_bv):
                         t = t_off + r
                         g_v = i_v * qside_bv + vv
@@ -588,9 +628,10 @@ def _chunk_dplr_bwd_stream_dhu_o_low_smem_kernel(
                             qside_value_shared[r, vv] = T.Cast(in_dtype, 0.0)
                     T.gemm(qside_value_shared, qside_state_shared, dw_frag, transpose_B=True)
 
-                    # dh tile: dk and db consume this tile.  Reloading it into
-                    # the same K x BV scratch avoids the K x V shared-memory
-                    # conflict that broke the previous low-smem schedule.
+                    # dh tile: db consumes it with the staged v_new, dk with v
+                    # (staged below).  Reloading dh into the same K x BV
+                    # scratch avoids the K x V shared-memory conflict that
+                    # broke the previous low-smem schedule.
                     for k_idx, vv in T.Parallel(K, qside_bv):
                         g_v = i_v * qside_bv + vv
                         if g_v < V:
@@ -598,18 +639,33 @@ def _chunk_dplr_bwd_stream_dhu_o_low_smem_kernel(
                         else:
                             qside_state_shared[k_idx, vv] = T.Cast(in_dtype, 0.0)
                     for r, vv in T.Parallel(BT, qside_bv):
-                        t = t_off + r
                         g_v = i_v * qside_bv + vv
-                        if (t < eos) and (g_v < V):
-                            qside_value_shared[r, vv] = v_new[t, i_h, g_v]
+                        if g_v < V:
+                            qside_value_shared[r, vv] = v_like_shared[r, g_v]
                         else:
                             qside_value_shared[r, vv] = T.Cast(in_dtype, 0.0)
                     T.gemm(qside_value_shared, qside_state_shared, db_frag, transpose_B=True)
-                    for r, vv in T.Parallel(BT, qside_bv):
+
+                if full_tile:
+                    T.copy(v[t_off: t_off + BT, i_h, 0:V], v_like_shared)
+                else:
+                    for r, c in T.Parallel(BT, V):
                         t = t_off + r
+                        if t < eos:
+                            v_like_shared[r, c] = v[t, i_h, c]
+                        else:
+                            v_like_shared[r, c] = T.Cast(in_dtype, 0.0)
+                for i_v in T.serial(T.ceildiv(V, qside_bv)):
+                    for k_idx, vv in T.Parallel(K, qside_bv):
                         g_v = i_v * qside_bv + vv
-                        if (t < eos) and (g_v < V):
-                            qside_value_shared[r, vv] = v[t, i_h, g_v]
+                        if g_v < V:
+                            qside_state_shared[k_idx, vv] = state_shared[k_idx, g_v]
+                        else:
+                            qside_state_shared[k_idx, vv] = T.Cast(in_dtype, 0.0)
+                    for r, vv in T.Parallel(BT, qside_bv):
+                        g_v = i_v * qside_bv + vv
+                        if g_v < V:
+                            qside_value_shared[r, vv] = v_like_shared[r, g_v]
                         else:
                             qside_value_shared[r, vv] = T.Cast(in_dtype, 0.0)
                     T.gemm(qside_value_shared, qside_state_shared, dk_frag, transpose_B=True)
