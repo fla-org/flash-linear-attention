@@ -473,7 +473,8 @@ def _chunk_dplr_bwd_stream_dhu_o_low_smem_kernel(
             dk_frag = T.alloc_fragment((BT, K), acc_dtype)
             dw_frag = T.alloc_fragment((BT, K), acc_dtype)
             db_frag = T.alloc_fragment((BT, K), acc_dtype)
-            dgk_last_frag = T.alloc_fragment((K,), acc_dtype)
+            dgk_part = T.alloc_fragment((4, K), acc_dtype)
+            dgk_part_shared = T.alloc_shared((4, K), acc_dtype)
             dgk_h_frag = T.alloc_fragment((K,), acc_dtype)
             gk_last_frag = T.alloc_fragment((K,), acc_dtype)
 
@@ -493,8 +494,9 @@ def _chunk_dplr_bwd_stream_dhu_o_low_smem_kernel(
                 T.clear(dk_frag)
                 T.clear(dw_frag)
                 T.clear(db_frag)
-                T.clear(dgk_last_frag)
                 T.clear(b_dh_tmp)
+                for gg, c in T.Parallel(4, K):
+                    dgk_part[gg, c] = T.float32(0.0)
                 for k_idx in T.Parallel(K):
                     dgk_h_frag[k_idx] = T.float32(0.0)
                     gk_last_frag[k_idx] = T.float32(0.0)
@@ -571,9 +573,6 @@ def _chunk_dplr_bwd_stream_dhu_o_low_smem_kernel(
                 last_idx = T.min(t_off + BT - 1, eos - 1)
                 for c in T.Parallel(K):
                     gk_last_frag[c] = gk[last_idx, i_h, c]
-
-                for c in T.Parallel(K):
-                    dgk_last_frag[c] = T.float32(0.0)
 
                 # q/o-side consumers.  Tile over V to match the saved path's
                 # accumulation order and avoid long-bf16 spike drift in dq/dk.
@@ -671,28 +670,36 @@ def _chunk_dplr_bwd_stream_dhu_o_low_smem_kernel(
                     T.gemm(qside_value_shared, qside_state_shared, dk_frag, transpose_B=True)
 
                 # Reuse v_like_shared as a single K-shaped scratch for the
-                # dgk_last terms.  This keeps the low-smem schedule under the
-                # PRO6000 cap while avoiding unsupported fragment reduction
-                # layouts.
+                # dgk_last terms, with the over-BT reduction split across 4
+                # lane groups so every thread participates (21.5% of the
+                # kernel in the high schedule's TIRx profile when serial).
                 T.copy(dk_frag, v_like_shared)
-                for r in T.serial(BT):
-                    for c in T.Parallel(K):
-                        dgk_last_frag[c] = (
-                            dgk_last_frag[c]
+                for r_local in T.serial(BT // 4):
+                    for gg, c in T.Parallel(4, K):
+                        r = gg * (BT // 4) + r_local
+                        dgk_part[gg, c] = (
+                            dgk_part[gg, c]
                             + T.Cast(acc_dtype, kg_shared[r, c]) * T.Cast(acc_dtype, v_like_shared[r, c])
                         )
                 T.copy(db_frag, v_like_shared)
-                for r in T.serial(BT):
-                    for c in T.Parallel(K):
-                        dgk_last_frag[c] = (
-                            dgk_last_frag[c]
+                for r_local in T.serial(BT // 4):
+                    for gg, c in T.Parallel(4, K):
+                        r = gg * (BT // 4) + r_local
+                        dgk_part[gg, c] = (
+                            dgk_part[gg, c]
                             + T.Cast(acc_dtype, bg_shared[r, c]) * T.Cast(acc_dtype, v_like_shared[r, c])
                         )
 
+                for gg, c in T.Parallel(4, K):
+                    dgk_part_shared[gg, c] = dgk_part[gg, c]
+                T.sync_threads()
                 for c in T.Parallel(K):
                     dgk_last[chunk_row, i_h, c] = (
                         dgk_h_frag[c] * T.exp2(gk_last_frag[c])
-                        + dgk_last_frag[c]
+                        + dgk_part_shared[0, c]
+                        + dgk_part_shared[1, c]
+                        + dgk_part_shared[2, c]
+                        + dgk_part_shared[3, c]
                     )
 
                 for r, c in T.Parallel(BT, K):

@@ -74,13 +74,17 @@ def stream_mid_smem_bytes(K: int, V: int, BT: int, in_dtype: str) -> int:
 
 def stream_reuse_smem_bytes(K: int, V: int, BT: int, in_dtype: str, qside_bv: int) -> int:
     elem = dtype_nbytes(in_dtype)
-    return elem * (
-        K * V
-        + 4 * BT * K
-        + 3 * BT * V
-        + BT * BT
-        + BT * qside_bv
-        + K * qside_bv
+    # The trailing fp32 term is the (4, K) dgk_part lane-split staging buffer.
+    return (
+        elem * (
+            K * V
+            + 4 * BT * K
+            + 3 * BT * V
+            + BT * BT
+            + BT * qside_bv
+            + K * qside_bv
+        )
+        + 16 * K
     )
 
 
