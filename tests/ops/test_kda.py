@@ -1330,6 +1330,7 @@ _TRITON_ASCEND_KDA_OPS = (
     'kda_gate_bwd',
     'kda_gate_chunk_cumsum',
     'fused_kda_gate',
+    'fused_recurrent_kda_fwd',
     'recompute_w_u_fwd',
     'chunk_kda_fwd_intra',
     'chunk_kda_fwd_intra_token_parallel',
@@ -1396,9 +1397,32 @@ def _run_chunk_kda(safe_gate: bool, chunk_size: int = 64, use_gate_in_kernel: bo
     ((o * torch.randn_like(o)).sum() + (ht * torch.randn_like(ht)).sum()).backward()
 
 
+def _run_fused_recurrent_kda_fwd():
+    B, T, H, D = 2, 64, 2, 64
+    dtype = torch.float
+    q = torch.rand(B, T, H, D, dtype=dtype, device=device)
+    k = torch.rand(B, T, H, D, dtype=dtype, device=device)
+    v = torch.rand(B, T, H, D, dtype=dtype, device=device)
+    g = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    beta = torch.randn(B, T, H, dtype=dtype, device=device).sigmoid()
+    h0 = torch.randn(B, H, D, D, dtype=torch.float32, device=device)
+    fused_recurrent_kda_fwd(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        beta=beta,
+        initial_state=h0,
+        scale=1.0,
+        output_final_state=False,
+        inplace_final_state=True,
+        use_qk_l2norm_in_kernel=True,
+    )
+
+
 @pytest.mark.skipif(not IS_NPU, reason='Triton-Ascend KDA backend routing is only exercised on NPU')
 def test_triton_ascend_backend_routing():
-    """chunk_kda must actually dispatch to the Triton-Ascend backend on NPU.
+    """KDA ops must actually dispatch to the Triton-Ascend backend on NPU.
 
     Numerical parity tests alone cannot catch silently-failing verifiers: if
     every verifier rejected, all ops would fall back to the default Triton
@@ -1442,6 +1466,13 @@ def test_triton_ascend_backend_routing():
         }
         assert rejected.isdisjoint(calls), (
             f'verifier-rejected ops were still routed to the Triton-Ascend backend: {rejected & set(calls)}'
+        )
+
+        calls.clear()
+        _run_fused_recurrent_kda_fwd()
+        assert 'fused_recurrent_kda_fwd' in calls, (
+            'fused_recurrent_kda_fwd not routed to the Triton-Ascend backend '
+            f'(dispatched: {calls})'
         )
     finally:
         for name in _TRITON_ASCEND_KDA_OPS:
