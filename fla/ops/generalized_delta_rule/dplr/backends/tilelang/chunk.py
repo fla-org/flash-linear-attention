@@ -257,6 +257,7 @@ def _chunk_dplr_delta_rule_bwd_core(
     if cp_context is not None:
         # CP: compute the local dh boundary contribution and fold the
         # following ranks' dh into this rank's terminal dh
+        assert dht_arg is None, "When enable CP, the provided dht must be None."
         dv_new_intra, _, _ = chunk_dplr_bwd_dAu(
             v=v,
             v_new=v_new,
