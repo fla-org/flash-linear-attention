@@ -377,8 +377,11 @@ def _chunk_dplr_fwd_intra_from_gk_tensorcore_kernel(
             scale_v = T.Cast(acc_dtype, scale_value)
             cumsum_scale = T.Cast(acc_dtype, cumsum_scale_value)
 
-            # hoist the gk tile into shared once; the scan and the gating
-            # loop then read it from shared instead of global twice
+            # hoist the gk tile into shared for the serial scan; the gating
+            # loop below re-reads gk from global (L2-resident by then), which
+            # ends this tile's lifetime at the scan and lets the allocator
+            # overlap it with the fp32 operand tiles — needed to fit a 99KB
+            # smem cap at BT=64 with fp32 gates
             gk_shared = T.alloc_shared((BT, K), gk_dtype)
             for r, c in T.Parallel(BT, K):
                 t = bos + r
@@ -425,7 +428,7 @@ def _chunk_dplr_fwd_intra_from_gk_tensorcore_kernel(
                     kv = T.Cast(acc_dtype, k[t, i_h, c])
                     av = T.Cast(acc_dtype, a[t, i_h, c])
                     bv = T.Cast(acc_dtype, b[t, i_h, c])
-                    gkv = T.Cast(acc_dtype, gk_shared[r, c])
+                    gkv = T.Cast(acc_dtype, gk[t, i_h, c])
                     giv = gi_mat[r, c]
                     gev = giv - gkv * cumsum_scale
                     q_scaled = qv * scale_v
