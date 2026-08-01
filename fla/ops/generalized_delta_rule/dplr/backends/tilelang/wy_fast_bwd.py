@@ -32,11 +32,12 @@ from .utils import ChunkLayout, build_rect_chunk_layout, build_varlen_chunk_layo
 
 
 def _wy_bwd_config(BT: int, device: torch.device) -> dict[str, int]:
-    # 256 threads + bulk copies only pay on cc90 at BT=64 (see
-    # chunk_A_bwd._a_bwd_config); occupancy-bound elsewhere.
+    # 256 threads + bulk copies pay at BT=64 on cc90 and cc120 alike
+    # (kernel-level 1.5x over the scalar path on both); they measure
+    # flat at BT=32 on cc120, so the gate stays BT>=64.
     if BT <= 16:
         return {"threads": 32, "bulk_copy": False}
-    if device_cc(device) == 90 and BT >= 64:
+    if device_cc(device) in (90, 120) and BT >= 64:
         return {"threads": 256, "bulk_copy": True}
     return {"threads": 128, "bulk_copy": False}
 
