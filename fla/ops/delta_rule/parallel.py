@@ -42,7 +42,7 @@ def chunk_transform_qk_fwd_kernel(
     BT: tl.constexpr,
     OUTPUT_ATTENTIONS: tl.constexpr,
 ):
-    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1)
+    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
 
     o_t = i_t * BT + tl.arange(0, BT)
     o_k = tl.arange(0, BK)
@@ -145,7 +145,7 @@ def save_intra_chunk_attn(
     T,
     BT: tl.constexpr,
 ):
-    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1)
+    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     o_t = i_t * BT + tl.arange(0, BT)
     o_l = tl.arange(0, BT)
     m_t = o_t < T
@@ -179,7 +179,7 @@ def parallel_delta_rule_fwd_kernel(
     BV: tl.constexpr,
     OUTPUT_ATTENTIONS: tl.constexpr,
 ):
-    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1)
+    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     o_t = i_t * BT + tl.arange(0, BT)
     o_k = tl.arange(0, BK)
     o_v = tl.arange(0, BV)

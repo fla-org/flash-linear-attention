@@ -72,7 +72,7 @@ def chunkwise_fwd_kernel(
     b_llut = tl.load(p_llut, mask=(o_i[:, None] < BT) & (o_i[None, :] < BT), other=0.0)
     # parallel over sequences and heads
     i_k = tl.program_id(0)
-    i_nh = tl.program_id(1)
+    i_nh = tl.program_id(1).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
 
     if IS_VARLEN:
@@ -442,7 +442,7 @@ def copy_input_kernel(
     IS_VARLEN: tl.constexpr,
 ):
     # parallel over sequences and heads
-    i_nh = tl.program_id(0)
+    i_nh = tl.program_id(0).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
 
     if IS_VARLEN:
@@ -539,7 +539,7 @@ def copy_last_chunk_kernel(
     IS_VARLEN: tl.constexpr,
 ):
     # parallel over sequences and heads
-    i_nh = tl.program_id(0)
+    i_nh = tl.program_id(0).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
 
     if IS_VARLEN:
@@ -617,7 +617,7 @@ def chunkwise_bwd_kernel_dhg(
 ):
     # parallel over batches and heads
     i_k = tl.program_id(0)
-    i_nh = tl.program_id(1)
+    i_nh = tl.program_id(1).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
 
     if IS_VARLEN:
@@ -711,7 +711,7 @@ def chunkwise_bwd_kernel_hdqgl(
     IS_VARLEN: tl.constexpr,
 ):
     # parallel over batches and heads
-    i_nh = tl.program_id(0)
+    i_nh = tl.program_id(0).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
 
     if IS_VARLEN:
@@ -814,7 +814,7 @@ def chunkwise_bwd_kernel_dkg(
     NT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1)
+    i_t, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
 
     if IS_VARLEN:
@@ -890,7 +890,7 @@ def chunkwise_bwd_kernel_dv(
     NT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1)
+    i_t, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
 
     if IS_VARLEN:
@@ -963,7 +963,7 @@ def chunkwise_bwd_kernel_diag(
     o_i = tl.arange(0, BT)
     p_llut = llut + o_i[:, None] * BT + o_i[None, :]
     b_llut = tl.load(p_llut, mask=(o_i[:, None] < BT) & (o_i[None, :] < BT), other=0.0)
-    i_t, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1)
+    i_t, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
 
     if IS_VARLEN:

@@ -142,7 +142,7 @@ def layer_norm_gated_fwd_kernel1(
     HAS_WEIGHT: tl.constexpr,
     HAS_BIAS: tl.constexpr,
 ):
-    i_t = tl.program_id(0)
+    i_t = tl.program_id(0).to(tl.int64)
     x += i_t * D
     y += i_t * D
     g += i_t * D
@@ -364,7 +364,7 @@ def layer_norm_gated_bwd_kernel1(
     HAS_BIAS: tl.constexpr,
     RECOMPUTE_OUTPUT: tl.constexpr,
 ):
-    i_s = tl.program_id(0)
+    i_s = tl.program_id(0).to(tl.int64)
     o_d = tl.arange(0, BD)
     mask = o_d < D
     x += i_s * BS * D

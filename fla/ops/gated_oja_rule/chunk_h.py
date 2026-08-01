@@ -58,13 +58,13 @@ def chunk_oja_fwd_kernel_h_blockdim64(
     IS_VARLEN: tl.constexpr,
 ):
     # (triton.cdiv(K, meta['BK']), N*H)
-    i_k, i_nh = tl.program_id(0), tl.program_id(1)
+    i_k, i_nh = tl.program_id(0), tl.program_id(1).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
         NT = tl.cdiv(T, BT)
-        boh = tl.load(chunk_offsets + i_n).to(tl.int32)
+        boh = tl.load(chunk_offsets + i_n).to(tl.int64)
     else:
         bos, eos = i_n * T, i_n * T + T
         NT = tl.cdiv(T, BT)
@@ -116,16 +116,16 @@ def chunk_oja_fwd_kernel_h_blockdim64(
         m_t = o_t < T
         m_tk = m_t[:, None] & (o_k[None, :] < K)
         m_kv1 = (o_k[:, None] < K) & (o_v1[None, :] < V)
-        p_h1 = h + i_t * stride_h + o_k[:, None] * V + o_v1[None, :]
+        p_h1 = h + i_t.to(tl.int64) * stride_h + o_k[:, None] * V + o_v1[None, :]
         tl.store(p_h1, b_h1.to(p_h1.dtype.element_ty), mask=m_kv1)
         if V > 64:
-            p_h2 = h + i_t * stride_h + o_k[:, None] * V + (64 + o_v1)[None, :]
+            p_h2 = h + i_t.to(tl.int64) * stride_h + o_k[:, None] * V + (64 + o_v1)[None, :]
             tl.store(p_h2, b_h2.to(p_h2.dtype.element_ty), mask=(o_k[:, None] < K) & ((64 + o_v1)[None, :] < V))
         if V > 128:
-            p_h3 = h + i_t * stride_h + o_k[:, None] * V + (128 + o_v1)[None, :]
+            p_h3 = h + i_t.to(tl.int64) * stride_h + o_k[:, None] * V + (128 + o_v1)[None, :]
             tl.store(p_h3, b_h3.to(p_h3.dtype.element_ty), mask=(o_k[:, None] < K) & ((128 + o_v1)[None, :] < V))
         if V > 192:
-            p_h4 = h + i_t * stride_h + o_k[:, None] * V + (192 + o_v1)[None, :]
+            p_h4 = h + i_t.to(tl.int64) * stride_h + o_k[:, None] * V + (192 + o_v1)[None, :]
             tl.store(p_h4, b_h4.to(p_h4.dtype.element_ty), mask=(o_k[:, None] < K) & ((192 + o_v1)[None, :] < V))
 
         p_w = w + o_t[:, None] * stride_v + o_v1[None, :]
@@ -290,13 +290,13 @@ def chunk_oja_bwd_kernel_dhu_blockdim64(
     USE_FINAL_STATE_GRADIENT: tl.constexpr,
     IS_VARLEN: tl.constexpr
 ):
-    i_k, i_nh = tl.program_id(0), tl.program_id(1)
+    i_k, i_nh = tl.program_id(0), tl.program_id(1).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
         NT = tl.cdiv(T, BT)
-        boh = tl.load(chunk_offsets + i_n).to(tl.int32)
+        boh = tl.load(chunk_offsets + i_n).to(tl.int64)
     else:
         bos, eos = i_n * T, i_n * T + T
         NT = tl.cdiv(T, BT)
@@ -352,16 +352,16 @@ def chunk_oja_bwd_kernel_dhu_blockdim64(
         m_tk = m_t[:, None] & (o_k[None, :] < K)
         m_kv1 = (o_k[:, None] < K) & (o_v1[None, :] < V)
         m_tv1 = m_t[:, None] & (o_v1[None, :] < V)
-        p_dh1 = dh + i_t*stride_h + o_k[:, None] * V + o_v1[None, :]
+        p_dh1 = dh + i_t.to(tl.int64)*stride_h + o_k[:, None] * V + o_v1[None, :]
         tl.store(p_dh1, b_dh1.to(p_dh1.dtype.element_ty), mask=m_kv1)
         if V > 64:
-            p_dh2 = dh + i_t*stride_h + o_k[:, None] * V + (64 + o_v1)[None, :]
+            p_dh2 = dh + i_t.to(tl.int64)*stride_h + o_k[:, None] * V + (64 + o_v1)[None, :]
             tl.store(p_dh2, b_dh2.to(p_dh2.dtype.element_ty), mask=(o_k[:, None] < K) & ((64 + o_v1)[None, :] < V))
         if V > 128:
-            p_dh3 = dh + i_t*stride_h + o_k[:, None] * V + (128 + o_v1)[None, :]
+            p_dh3 = dh + i_t.to(tl.int64)*stride_h + o_k[:, None] * V + (128 + o_v1)[None, :]
             tl.store(p_dh3, b_dh3.to(p_dh3.dtype.element_ty), mask=(o_k[:, None] < K) & ((128 + o_v1)[None, :] < V))
         if V > 192:
-            p_dh4 = dh + i_t*stride_h + o_k[:, None] * V + (192 + o_v1)[None, :]
+            p_dh4 = dh + i_t.to(tl.int64)*stride_h + o_k[:, None] * V + (192 + o_v1)[None, :]
             tl.store(p_dh4, b_dh4.to(p_dh4.dtype.element_ty), mask=(o_k[:, None] < K) & ((192 + o_v1)[None, :] < V))
 
         last_idx = min((i_t + 1) * BT, T) - 1
@@ -407,7 +407,7 @@ def chunk_oja_bwd_kernel_dhu_blockdim64(
             p_gv = gv + o_t[:, None] * stride_v + o_v1[None, :]  # [BT, BV]
             b_gv = tl.load(p_gv, mask=m_tv1, other=0.0)
             if USE_GV:
-                b_gv_last1 = tl.load(gv + last_idx * H*V + o_v1, mask=(o_v1 < V), other=0.)
+                b_gv_last1 = tl.load(gv + last_idx.to(tl.int64) * H*V + o_v1, mask=(o_v1 < V), other=0.)
                 b_dh1 *= exp(b_gv_last1[None, :])
                 b_do *= exp(b_gv)
             b_dh1 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) * scale - \
@@ -422,7 +422,7 @@ def chunk_oja_bwd_kernel_dhu_blockdim64(
             b_gv = tl.load(p_gv, mask=m_t[:, None] & ((64 + o_v1)[None, :] < V), other=0.0)
             if USE_GV:
                 o_v2 = 64 + o_v1
-                b_gv_last2 = tl.load(gv + last_idx * H*V + o_v2, mask=(o_v2 < V), other=0.)
+                b_gv_last2 = tl.load(gv + last_idx.to(tl.int64) * H*V + o_v2, mask=(o_v2 < V), other=0.)
                 b_dh2 *= exp(b_gv_last2[None, :])
                 b_do *= exp(b_gv)
             b_dh2 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) * scale - tl.dot(tl.trans(b_dk).to(b_w.dtype), b_w)
@@ -436,7 +436,7 @@ def chunk_oja_bwd_kernel_dhu_blockdim64(
             b_gv = tl.load(p_gv, mask=m_t[:, None] & ((128 + o_v1)[None, :] < V), other=0.0)
             if USE_GV:
                 o_v3 = 128 + o_v1
-                b_gv_last3 = tl.load(gv + last_idx * H*V + o_v3, mask=(o_v3 < V), other=0.)
+                b_gv_last3 = tl.load(gv + last_idx.to(tl.int64) * H*V + o_v3, mask=(o_v3 < V), other=0.)
                 b_dh3 *= exp(b_gv_last3[None, :])
                 b_do *= exp(b_gv)
             b_dh3 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) * scale - tl.dot(tl.trans(b_dk).to(b_w.dtype), b_w)
@@ -450,7 +450,7 @@ def chunk_oja_bwd_kernel_dhu_blockdim64(
             b_gv = tl.load(p_gv, mask=m_t[:, None] & ((192 + o_v1)[None, :] < V), other=0.0)
             if USE_GV:
                 o_v4 = 192 + o_v1
-                b_gv_last4 = tl.load(gv + last_idx * H*V + o_v4, mask=(o_v4 < V), other=0.)
+                b_gv_last4 = tl.load(gv + last_idx.to(tl.int64) * H*V + o_v4, mask=(o_v4 < V), other=0.)
                 b_dh4 *= exp(b_gv_last4[None, :])
                 b_do *= exp(b_gv)
             b_dh4 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) * scale - tl.dot(tl.trans(b_dk).to(b_w.dtype), b_w)
@@ -565,13 +565,13 @@ def chunk_gsa_bwd_k_kernel_dqkvg(
     NG: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2)
+    i_k, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
     i_h = i_hq // NG
     if IS_VARLEN:
         i_tg = i_t
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         all = T
         T = eos - bos
         NT = tl.cdiv(T, BT)
@@ -579,7 +579,7 @@ def chunk_gsa_bwd_k_kernel_dqkvg(
         NT = tl.cdiv(T, BT)
         i_tg = i_b * NT + i_t
         bos, eos = i_b * T, i_b * T + T
-        all = B * T
+        all = B * T.to(tl.int64)
 
     o_i = tl.arange(0, BT)
     o_t = min(i_t * BT + BT, T)
@@ -704,13 +704,13 @@ def chunk_oja_bwd_kernel_dvwg_h(
     HAVE_GK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2)
+    i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
 
     if IS_VARLEN:
         i_tg = i_t
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
         NT = tl.cdiv(T, BT)
     else:

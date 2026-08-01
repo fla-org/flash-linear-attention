@@ -58,10 +58,10 @@ def fused_chunk_ttt_linear_fwd_kernel(
     STORE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_nh = tl.program_id(0)
+    i_nh = tl.program_id(0).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
         NT = tl.cdiv(T, BT)
     else:
@@ -189,7 +189,7 @@ def fused_chunk_ttt_linear_bwd_kernel_h(
     USE_INITIAL_STATE: tl.constexpr,
     USE_INITIAL_STATE_B: tl.constexpr,
 ):
-    i_nh = tl.program_id(0)
+    i_nh = tl.program_id(0).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
     bos, _ = i_n * T, i_n * T + T
     NT = tl.cdiv(T, BT)
@@ -325,7 +325,7 @@ def fused_chunk_ttt_linear_bwd_kernel_dh(
     USE_FINAL_STATE_GRADIENT: tl.constexpr,
     USE_FINAL_STATE_GRADIENT_B: tl.constexpr,
 ):
-    i_nh = tl.program_id(0)
+    i_nh = tl.program_id(0).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
     bos, _ = i_n * T, i_n * T + T
     NT = tl.cdiv(T, BT)

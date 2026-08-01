@@ -74,7 +74,7 @@ def fused_recurrent_kda_fwd_kernel(
     STATE_V_FIRST: tl.constexpr,
     num_stages: tl.constexpr,
 ):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     NV = tl.cdiv(V, BV)
     NK = tl.cdiv(K, BK)
     i_k = pid % NK

@@ -42,7 +42,7 @@ def fused_recurrent_hgrn_fwd_kernel(
     STORE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_d, i_n = tl.program_id(0), tl.program_id(1)
+    i_d, i_n = tl.program_id(0), tl.program_id(1).to(tl.int64)
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
@@ -107,7 +107,7 @@ def fused_recurrent_hgrn_bwd_kernel(
     USE_FINAL_STATE_GRADIENT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_d, i_n = tl.program_id(0), tl.program_id(1)
+    i_d, i_n = tl.program_id(0), tl.program_id(1).to(tl.int64)
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos

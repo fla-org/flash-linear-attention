@@ -64,7 +64,7 @@ def pre_process_fwd_kernel_merged(
 ):
     i_col, i_h = tl.program_id(0), tl.program_id(1)
     if MULTI_SEQS:
-        i_n = tl.program_id(2)
+        i_n = tl.program_id(2).to(tl.int64)
         # Offset hm for this subseq: hm[i_n, h, k, v+k]
         hm += i_n * HV * K * (K + V) + i_h * K * (K + V)
     else:

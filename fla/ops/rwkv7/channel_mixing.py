@@ -44,7 +44,7 @@ def rwkv_seq_mix_kernel(
     hidden_dim: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
-    block_start = tl.program_id(0) * BLOCK_SIZE
+    block_start = tl.program_id(0).to(tl.int64) * BLOCK_SIZE
     block_idx = block_start + tl.arange(0, BLOCK_SIZE)[:]
 
     total_seq_dim = token_length * hidden_dim
@@ -85,7 +85,7 @@ def rwkv_channel_mixing_pow_and_relu(
     BLOCK_SIZE: tl.constexpr,
 ):
     """Fused ReLU and Power operation: x = ReLU(x)^2"""
-    xoffset = tl.program_id(0) * BLOCK_SIZE
+    xoffset = tl.program_id(0).to(tl.int64) * BLOCK_SIZE
     xindex = xoffset + tl.arange(0, BLOCK_SIZE)
     x0 = xindex
     x = tl.load(in_ptr + (x0), None)
@@ -177,7 +177,7 @@ def relu_square_bwd_kernel(
     """ReLU(x)^2 backward kernel
     grad_input = grad_output * 2 * x if x > 0 else 0
     """
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     block_start = pid * BLOCK_SIZE
     offsets = block_start + tl.arange(0, BLOCK_SIZE)
 
@@ -210,7 +210,7 @@ def rwkv_mix_bwd_kenel(
     hidden_dim: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
 
     batch_idx = offsets // (token_length * hidden_dim)
@@ -218,7 +218,7 @@ def rwkv_mix_bwd_kenel(
     seq_idx = seq_feat // hidden_dim
     feat_idx = seq_feat % hidden_dim
 
-    is_valid = offsets < (batch_size * token_length * hidden_dim)
+    is_valid = offsets < (batch_size.to(tl.int64) * token_length * hidden_dim)
 
     dk1 = tl.load(dk1_ptr0 + offsets, mask=is_valid)
     xk = tl.load(xk_ptr + feat_idx, mask=is_valid)

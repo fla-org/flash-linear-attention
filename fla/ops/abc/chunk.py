@@ -34,7 +34,7 @@ def chunk_abc_fwd_kernel_h(
     USE_INITIAL_STATE: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
 ):
-    i_v, i_k, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_v, i_k, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
 
     o_k = i_k * BK + tl.arange(0, BK)
     o_v = i_v * BV + tl.arange(0, BV)
@@ -100,7 +100,7 @@ def chunk_abc_fwd_kernel_intra_K(
     BV: tl.constexpr,
     NC: tl.constexpr,
 ):
-    i_v, i_c, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2)
+    i_v, i_c, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_t, i_i = i_c // NC, i_c % NC
 
     o_r = i_t * BT + i_i * BC + tl.arange(0, BC)
@@ -163,7 +163,7 @@ def chunk_abc_fwd_kernel_K(
     BV: tl.constexpr,
     NT: tl.constexpr,
 ):
-    i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2)
+    i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_p = tl.maximum(i_t * BT - 1, 0)
 
     o_i = tl.arange(0, BT)
@@ -229,7 +229,7 @@ def chunk_abc_fwd_kernel_intra_V(
     BK: tl.constexpr,
     NC: tl.constexpr,
 ):
-    i_k, i_c, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2)
+    i_k, i_c, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_t, i_i, i_j = i_c // (NC * NC), (i_c % (NC * NC)) // NC, (i_c % (NC * NC)) % NC
     n_bh = tl.num_programs(2)
 
@@ -295,7 +295,7 @@ def chunk_abc_fwd_kernel_V(
     BV: tl.constexpr,
     NT: tl.constexpr,
 ):
-    i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2)
+    i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_p = tl.maximum(i_t * BT - 1, 0)
 
     o_t = i_t * BT + tl.arange(0, BT)
@@ -356,7 +356,7 @@ def chunk_abc_bwd_kernel_dh(
     NT: tl.constexpr,
     NORMK: tl.constexpr,
 ):
-    i_k, i_v, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_k, i_v, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
 
     o_k = i_k * BK + tl.arange(0, BK)
     o_v = i_v * BV + tl.arange(0, BV)
@@ -430,7 +430,7 @@ def chunk_abc_bwd_kernel_V(
     BV: tl.constexpr,
     NT: tl.constexpr,
 ):
-    i_k, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2)
+    i_k, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_p = tl.maximum(i_t * BT - 1, 0)
     n_bh = tl.num_programs(2)
 
@@ -529,7 +529,7 @@ def chunk_abc_bwd_kernel_intra_V(
     BK: tl.constexpr,
     NC: tl.constexpr,
 ):
-    i_k, i_c, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2)
+    i_k, i_c, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_t, i_i = i_c // NC, i_c % NC
 
     o_r = i_t * BT + i_i * BC + tl.arange(0, BC)
@@ -636,7 +636,7 @@ def chunk_abc_bwd_kernel_intra_K(
     BV: tl.constexpr,
     NC: tl.constexpr,
 ):
-    i_v, i_c, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2)
+    i_v, i_c, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_t, i_i, i_j = i_c // (NC * NC), (i_c % (NC * NC)) // NC, (i_c % (NC * NC)) % NC
     n_bh = tl.num_programs(2)
 
@@ -708,7 +708,7 @@ def chunk_abc_bwd_kernel_K(
     BV: tl.constexpr,
     NT: tl.constexpr,
 ):
-    i_k, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2)
+    i_k, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_p = tl.maximum(i_t * BT - 1, 0)
     n_bh = tl.num_programs(2)
 
@@ -801,7 +801,7 @@ def chunk_abc_bwd_kernel_intra_KV(
     BV: tl.constexpr,
     NC: tl.constexpr,
 ):
-    i_v, i_c, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2)
+    i_v, i_c, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_t, i_i = i_c // NC, i_c % NC
 
     o_r = i_t * BT + i_i * BC + tl.arange(0, BC)
@@ -863,7 +863,7 @@ def chunk_abc_bwd_kernel_rcum_inter(
     BS: tl.constexpr,
     NT: tl.constexpr,
 ):
-    i_m, i_bh = tl.program_id(0), tl.program_id(1)
+    i_m, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64)
 
     o_s = i_m * BS + tl.arange(0, BS)
     b_sp = tl.zeros([BS], dtype=tl.float32)
@@ -904,7 +904,7 @@ def chunk_abc_bwd_kernel_rcum_intra(
     BS: tl.constexpr,
     NC: tl.constexpr,
 ):
-    i_s, i_c, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2)
+    i_s, i_c, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_t, i_i = i_c // NC, i_c % NC
 
     o_i = tl.arange(0, BC)

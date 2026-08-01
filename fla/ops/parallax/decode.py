@@ -42,7 +42,7 @@ def parallax_decode_kernel(
     sliding window and to ``[cache_start, Skv)`` when set. One program owns a
     ``BT``-row query block; see ``naive_parallax`` for the output formula.
     """
-    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1)
+    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
     i_h = i_hq // G                               # kv head shared by this q head (GQA)
     RCP_LN2: tl.constexpr = 1.4426950216
@@ -219,7 +219,7 @@ def parallax_decode_one_step_kernel(
     ``parallax_decode_kernel`` incurs at ``Sq == 1``. One program per
     (batch, head); see ``naive_parallax`` for the output formula.
     """
-    i_bh = tl.program_id(0)
+    i_bh = tl.program_id(0).to(tl.int64)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
     i_h = i_hq // G                               # kv head shared by this q head (GQA)
     RCP_LN2: tl.constexpr = 1.4426950216
