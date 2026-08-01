@@ -30,6 +30,7 @@ import tilelang.language as T
 import torch
 
 from fla.ops.utils.constant import RCP_LN2
+from fla.utils import get_device_capability
 
 from .utils import ChunkLayout, build_rect_chunk_layout, build_varlen_chunk_layout
 
@@ -272,7 +273,7 @@ def chunk_dplr_fwd_intra(
     gi_f = gi.reshape(N_tokens, H, K).contiguous()
     ge_f = ge.reshape(N_tokens, H, K).contiguous()
 
-    major = torch.cuda.get_device_capability(q.device.index)[0] if q.is_cuda else 0
+    major = get_device_capability(q.device.index)[0] if q.is_cuda else 0
     threads = _select_a_fwd_threads(major, K, BT)
     kernel = _chunk_dplr_fwd_intra_tensorcore_kernel(
         H, K, BT, in_dtype, float(scale), threads=threads,
@@ -521,7 +522,7 @@ def chunk_dplr_fwd_intra_from_gk(
     b_f = b.reshape(n_tokens, H, K).contiguous()
     gk_f = gk.reshape(n_tokens, H, K).contiguous()
 
-    major = torch.cuda.get_device_capability(q.device.index)[0] if q.is_cuda else 0
+    major = get_device_capability(q.device.index)[0] if q.is_cuda else 0
     threads = _select_a_fwd_threads(major, K, BT)
     kernel = _chunk_dplr_fwd_intra_from_gk_tensorcore_kernel(
         H, K, BT, in_dtype, float(scale), float(RCP_LN2),

@@ -16,10 +16,12 @@ from __future__ import annotations
 
 import torch
 
+from fla.utils import get_device_capability
+
 
 def device_cc(device: torch.device) -> int:
-    props = torch.cuda.get_device_properties(device)
-    return int(props.major) * 10 + int(props.minor)
+    major, minor = get_device_capability(device.index or 0)
+    return major * 10 + minor
 
 
 # Compiler-reported dynamic shared memory of the fused A-backward kernel

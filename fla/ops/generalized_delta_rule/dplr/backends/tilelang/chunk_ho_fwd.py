@@ -44,12 +44,10 @@ def _ho_fwd_configs(
     H, K, V, BT,
     in_dtype, state_dtype, USE_INITIAL_STATE, STORE_FINAL_STATE,
     BV: int = 64, threads: int = 128,
-    device_index: int | None = None,
+    device_index: int = 0,
 ):
     if not torch.cuda.is_available():
         return [{"BV": 16, "threads": 64}]
-    if device_index is None:
-        device_index = torch.cuda.current_device()
     major = get_device_capability(device_index)[0]
     smem_limit = get_device_smem_optin(device_index)
 
@@ -79,10 +77,8 @@ def _ho_fragment_merge_flags(
     in_dtype: str,
     store_context: bool,
     config: dict[str, int],
-    device_index: int | None = None,
+    device_index: int = 0,
 ) -> dict[str, bool]:
-    if device_index is None:
-        device_index = torch.cuda.current_device()
     capability = get_device_capability(device_index)
     common_shape = K == 128 and V == 128 and BT == 32 and in_dtype == "bfloat16"
     if (

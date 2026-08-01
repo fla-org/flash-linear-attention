@@ -18,6 +18,8 @@ import tilelang
 import tilelang.language as T
 import torch
 
+from fla.utils import get_device_capability, get_device_smem_optin
+
 from .schedules import (
     stream_bwd_schedule_or_none,
     stream_default_threads,
@@ -46,13 +48,6 @@ def _stream_bwd_config(
     return {"threads": threads}
 
 
-def _device_shared_memory_cap(device: torch.device) -> tuple[int, int, str]:
-    props = torch.cuda.get_device_properties(device)
-    cap = int(getattr(props, "shared_memory_per_block_optin", props.shared_memory_per_block))
-    cc = int(props.major) * 10 + int(props.minor)
-    return cap, cc, str(props.name)
-
-
 def _select_stream_bwd_schedule(
     *,
     K: int,
@@ -61,7 +56,10 @@ def _select_stream_bwd_schedule(
     in_dtype: str,
     device: torch.device,
 ) -> tuple[str, dict[str, int]]:
-    smem_cap, cc, name = _device_shared_memory_cap(device)
+    index = device.index or 0
+    smem_cap = get_device_smem_optin(index)
+    major, minor = get_device_capability(index)
+    cc = major * 10 + minor
     selected = stream_bwd_schedule_or_none(K=K, V=V, BT=BT, in_dtype=in_dtype, smem_cap=smem_cap, cc=cc)
     if selected == "high":
         return "high", _stream_bwd_config(BT, K=K, V=V, in_dtype=in_dtype, cc=cc)
@@ -69,6 +67,7 @@ def _select_stream_bwd_schedule(
         return "mid", _stream_bwd_config(BT, K=K, V=V, in_dtype=in_dtype, cc=cc)
     if selected == "low_v2":
         return "low_v2", stream_low_bwd_config(BT, V)
+    name = torch.cuda.get_device_properties(index).name
     raise RuntimeError(
         f"No launchable DPLR stream backward schedule for K={K}, V={V}, BT={BT}, "
         f"dtype={in_dtype} on {name} cc{cc}: high={stream_high_smem_bytes(K, V, BT, in_dtype)}B, "
