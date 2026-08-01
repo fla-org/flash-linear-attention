@@ -101,6 +101,19 @@ def test_chunk_verifier_accepts_chunk64_on_large_smem_device(monkeypatch, K: int
 
 
 @requires_cuda
+def test_chunk_verifier_accepts_chunk64_k64_on_99kb_device(monkeypatch):
+    # cc120's 101376B optin fits every K=64 BT=64 stage: the fused A-backward
+    # at 98432B, the A-forward from_gk at 98304B, and the stream backward via
+    # low_v2 (82944B)
+    monkeypatch.setattr(dplr_tilelang_backend, 'get_device_smem_optin', lambda idx: 101376)
+    monkeypatch.setattr(dplr_tilelang_backend, 'get_device_capability', lambda idx: (12, 0))
+    ok, reason = DPLRTileLangBackend().chunk_dplr_delta_rule_verifier(
+        *_verifier_inputs(K=64), safe_gate=True, chunk_size=64,
+    )
+    assert ok and reason is None
+
+
+@requires_cuda
 @pytest.mark.parametrize(
     ('case', 'reason'),
     [
@@ -111,7 +124,6 @@ def test_chunk_verifier_accepts_chunk64_on_large_smem_device(monkeypatch, K: int
         ('safe_gate', 'requires safe_gate=True'),
         ('chunk64_a100_k128', 'no launchable backward schedule'),
         ('chunk64_small_smem_k128', 'no launchable backward schedule'),
-        ('chunk64_small_smem_k64', 'no launchable backward schedule'),
         ('chunk16_k128', 'slower than Triton'),
         ('chunk48', 'chunk_size'),
         ('small_grid', 'small grids'),
@@ -143,18 +155,12 @@ def test_chunk_verifier_rejects(monkeypatch, case: str, reason: str):
         args = _verifier_inputs(K=128)
         kwargs['chunk_size'] = 64
     elif case == 'chunk64_small_smem_k128':
-        # the fused A-backward stage needs 131200B off cc90, and every stream
-        # schedule (mid=215552B, low=167936B) also exceeds the 99KB cap
+        # every K=128 stream schedule (mid=215552B, low=167936B) exceeds the
+        # 99KB cap; the fused A-backward (98432B off cc90) is not the binding
+        # stage here
         monkeypatch.setattr(dplr_tilelang_backend, 'get_device_smem_optin', lambda idx: 101376)
         monkeypatch.setattr(dplr_tilelang_backend, 'get_device_capability', lambda idx: (12, 0))
         args = _verifier_inputs(K=128)
-        kwargs['chunk_size'] = 64
-    elif case == 'chunk64_small_smem_k64':
-        # the K=64 stream backward fits cc120's 99KB cap via low_v2 (81920B),
-        # but the fused A-backward stage needs 131200B there
-        monkeypatch.setattr(dplr_tilelang_backend, 'get_device_smem_optin', lambda idx: 101376)
-        monkeypatch.setattr(dplr_tilelang_backend, 'get_device_capability', lambda idx: (12, 0))
-        args = _verifier_inputs(K=64)
         kwargs['chunk_size'] = 64
     elif case == 'chunk16_k128':
         args = _verifier_inputs(K=128)

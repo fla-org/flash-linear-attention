@@ -115,9 +115,9 @@ class DPLRTileLangBackend(BaseBackend):
         if chunk_size == 64:
             # reject configs no BT=64 kernel schedule can launch on this
             # device (e.g. the K=128 stream backward needs 167936B on A100's
-            # 166912B cap, and the fused A-backward needs 131200B on cc120's
-            # 101376B cap); the arithmetic is shared with the launcher so
-            # acceptance implies schedulability
+            # 166912B cap or cc120's 101376B cap, where K=64 fits via low_v2);
+            # the arithmetic is shared with the launcher so acceptance
+            # implies schedulability
             if chunk64_schedule_or_none(K=K, V=K, in_dtype=in_dtype, smem_cap=smem_cap,
                                         cc=cc_major * 10 + cc_minor) is None:
                 return False, (

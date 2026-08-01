@@ -28,8 +28,10 @@ def device_cc(device: torch.device) -> int:
 # (chunk_dplr_bwd_intra_tl, FUSE_QSIDE_DA=True) at BT=64 with the BK=32
 # config used off cc90. All of its shared tiles are (BT, BK), (BT, BT) or
 # (BT, BV) with BV=64, so the footprint is independent of K and identical
-# for bf16/fp16 (accumulator tiles are fp32 either way).
-A_BWD_FUSED_BT64_SMEM_BYTES = 131200
+# for bf16/fp16 (accumulator tiles are fp32 either way). The two aliased
+# dA staging pairs keep it under cc120's 101376B optin; the A-forward
+# from_gk stage sits 128B below it, so this stays the binding footprint.
+A_BWD_FUSED_BT64_SMEM_BYTES = 98432
 
 
 def stream_default_threads(BT: int) -> int:
@@ -133,9 +135,11 @@ def chunk64_schedule_or_none(
     """Stream-backward schedule for BT=64, or None if any stage overflows.
 
     Acceptance must imply launchability of every BT=64 kernel: on cc90 the
-    fused A-backward stage runs its BK=64 config and fits the 228KB cap, but
-    elsewhere it runs BK=32 and still needs A_BWD_FUSED_BT64_SMEM_BYTES,
-    which smaller caps (e.g. cc120's 101376B) do not have.
+    fused A-backward stage runs its BK=64 config and fits the 228KB cap, and
+    elsewhere it runs BK=32 at A_BWD_FUSED_BT64_SMEM_BYTES, which a 99KB
+    optin (e.g. cc120) just fits — there the A-forward from_gk stage is the
+    next-tightest at 98304B. At K=V=128 the stream backward still exceeds
+    every sub-228KB cap, so this returns None regardless of the A stages.
     """
     if cc != 90 and smem_cap < A_BWD_FUSED_BT64_SMEM_BYTES:
         return None
