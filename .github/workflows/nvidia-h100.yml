@@ -53,8 +53,9 @@ jobs:
               owner, repo, pull_number: pr.number, per_page: 100,
             });
             // Safe set: triton-ascend backend files (except __init__.py, which
-            // GPU imports unconditionally) and Ascend workflow definitions.
-            const safePattern = /^fla\/(.+\/)?backends\/triton_ascend\/(?!.*__init__\.py$)|^\.github\/workflows\/ascend-/;
+            // GPU imports unconditionally), Ascend workflow definitions, and
+            // fla-ascend-performance agent skill (NPU profiling/optimization docs).
+            const safePattern = /^fla\/(.+\/)?backends\/triton_ascend\/(?!.*__init__\.py$)|^\.github\/workflows\/ascend-|^\.agents\/skills\/fla-ascend-performance\//;
             const unsafe = files.filter(f => !safePattern.test(f.filename)).map(f => f.filename);
             if (unsafe.length > 0) {
               core.info('GPU-affecting files changed: ' + unsafe.join(', '));

@@ -119,3 +119,11 @@ class TritonAscendKDABackend(BaseBackend):
     def fused_kda_gate(self, *args, **kwargs):
         from fla.ops.kda.backends.triton_ascend.gate import fused_kda_gate_npu
         return fused_kda_gate_npu(*args, **kwargs)
+
+    def fused_recurrent_kda_fwd_verifier(self, *args, **kwargs):
+        return True, None
+
+    def fused_recurrent_kda_fwd(self, *args, **kwargs):
+        from fla.ops.kda.backends.triton_ascend.fused_recurrent import fused_recurrent_kda_fwd_npu
+
+        return fused_recurrent_kda_fwd_npu(*args, **kwargs)
