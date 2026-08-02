@@ -1676,6 +1676,13 @@ def test_flash_qla_verifier_sm120_rejects_float16(monkeypatch):
     assert passed and reason is None
 
 
+@pytest.mark.skipif(not IS_NVIDIA_SM120, reason="only meaningful where the SM120 flag is set")
+def test_flash_qla_sm120_flag_is_exact_capability():
+    """FlashQLA matches the '12.0' target string exactly and raises ValueError at import on 12.1
+    (GB10), so widening this flag to major == 12 would turn a Triton fallback into a hard error."""
+    assert torch.cuda.get_device_capability() == (12, 0)
+
+
 @_SKIP_FLASH_QLA_FWD
 @pytest.mark.parametrize(
     ("B", "T", "H", "HV", "D", "dtype"),
