@@ -111,7 +111,7 @@ def _raw_chunk_gated_delta_rule_fwd_h(
     v_new = torch.empty_like(u) if save_new_value else None
 
     def grid(meta):
-        return (triton.cdiv(V, meta['BV']), N * HV)
+        return (triton.cdiv(V, meta['BV']) * N * HV, )
 
     chunk_gated_delta_rule_fwd_kernel_h_blockdim64[grid](
         k=k,
@@ -148,7 +148,7 @@ def compute_subseq_len(
     Splitting always reduces the critical path and helps, as long as the
     sequence is long enough to amortize the pre_scan + merge overhead.
 
-    The fwd_h kernel grid is (num_v_blocks, N*HV) where num_v_blocks ≈ 2.
+    The fwd_h kernel grid is num_v_blocks*N*HV where num_v_blocks ≈ 2.
     Each sub-sequence contributes 2*HV blocks. We target enough splits so
     that even a single long sequence can saturate all SMs.
 

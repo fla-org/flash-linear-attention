@@ -131,6 +131,7 @@ IS_NVIDIA_HOPPER = (
     )
 )
 IS_NVIDIA_SM100 = (IS_NVIDIA and torch.cuda.get_device_capability()[0] == 10)
+IS_NVIDIA_SM120 = (IS_NVIDIA and torch.cuda.get_device_capability()[0] == 12)
 IS_NVIDIA_BLACKWELL = (IS_NVIDIA and torch.cuda.get_device_capability()[0] in (10, 12))
 
 # Nvidia Ampere or newer, haven't check AMD and intel yet.
