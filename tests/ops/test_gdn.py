@@ -1653,6 +1653,29 @@ def test_flash_qla_verifier_sm120_rejects_backward(monkeypatch):
     assert passed and reason is None
 
 
+def test_flash_qla_verifier_sm120_rejects_float16(monkeypatch):
+    """FlashQLA's blackwell_sm120 forward kernel fails to compile for float16."""
+    from fla.ops.gated_delta_rule.backends import flash_qla
+    be = flash_qla.FlashQLABackend()
+
+    fp16 = {
+        k: (v.half() if v.dtype == torch.bfloat16 else v)
+        for k, v in _sm120_verifier_kwargs(requires_grad=False).items()
+    }
+
+    monkeypatch.setattr(flash_qla, "IS_NVIDIA_HOPPER", False)
+    monkeypatch.setattr(flash_qla, "IS_NVIDIA_SM100", False)
+    monkeypatch.setattr(flash_qla, "IS_NVIDIA_SM120", True)
+    passed, reason = be.chunk_gated_delta_rule_verifier(**fp16)
+    assert not passed and "float16" in reason
+
+    # float16 still dispatches on SM90/SM100
+    monkeypatch.setattr(flash_qla, "IS_NVIDIA_SM120", False)
+    monkeypatch.setattr(flash_qla, "IS_NVIDIA_HOPPER", True)
+    passed, reason = be.chunk_gated_delta_rule_verifier(**fp16)
+    assert passed and reason is None
+
+
 @_SKIP_FLASH_QLA_FWD
 @pytest.mark.parametrize(
     ("B", "T", "H", "HV", "D", "dtype"),
@@ -1669,6 +1692,8 @@ def test_flash_qla_verifier_sm120_rejects_backward(monkeypatch):
 )
 def test_flash_qla_chunk_forward_only(B, T, H, HV, D, dtype, monkeypatch):
     """Inference-shaped forward parity — the only path FlashQLA supports on SM120."""
+    if IS_NVIDIA_SM120 and dtype == torch.float16:
+        pytest.skip(reason="FlashQLA's SM120 forward kernel does not compile for float16")
     torch.manual_seed(42)
     q = torch.randn(B, T, H, D, dtype=dtype, device=device)
     k = torch.randn(B, T, H, D, dtype=dtype, device=device)

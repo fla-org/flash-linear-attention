@@ -36,8 +36,8 @@ class FlashQLABackend(BaseBackend):
     https://github.com/QwenLM/FlashQLA
 
     SM90/SM100/SM103 run both directions. SM120 (consumer/workstation Blackwell) ships a
-    forward kernel only, so it is dispatched exclusively for grad-free calls (inference,
-    frozen weights) and falls back to Triton whenever a backward pass could be requested.
+    bfloat16 forward kernel only, so it is dispatched exclusively for grad-free bf16 calls
+    (inference, frozen weights) and falls back to Triton otherwise.
 
     Disable with ``FLA_FLASH_QLA=0``.
     """
@@ -75,6 +75,10 @@ class FlashQLABackend(BaseBackend):
             return False, f"FlashQLA requires dtype float16 or bfloat16, got {q.dtype}"
         if not (q.dtype == k.dtype == v.dtype):
             return False, f"FlashQLA requires q, k, v to have the same dtype, got {q.dtype}, {k.dtype}, {v.dtype}"
+        # NOTE: the masked tail-store in FlashQLA's blackwell_sm120 forward kernel emits
+        # tl::pack_float16x4 on cutlass::half_t, which fails to compile under nvcc.
+        if IS_NVIDIA_SM120 and q.dtype == torch.float16:
+            return False, "FlashQLA's SM120 forward kernel does not compile for float16"
         if q.shape[-1] != 128:
             return False, f"FlashQLA requires K=128, got {q.shape[-1]}"
         if v.shape[-1] != 128:
