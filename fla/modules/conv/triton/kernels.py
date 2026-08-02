@@ -536,7 +536,7 @@ def causal_conv1d_states_fwd_kernel(
         seq_len = T
         p_x = x + tl.cast(i_n, tl.int64) * stride_x_n
 
-    o_x = seq_len.to(tl.int64) - BW + tl.arange(0, BW)
+    o_x = tl.cast(seq_len, tl.int64) - BW + tl.arange(0, BW)
     p_x = p_x + o_x[:, None] * stride_x_t + o_d[None, :] * stride_x_d
 
     # b_x Shape: [BW, BD]

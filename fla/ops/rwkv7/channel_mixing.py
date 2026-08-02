@@ -218,7 +218,7 @@ def rwkv_mix_bwd_kenel(
     seq_idx = seq_feat // hidden_dim
     feat_idx = seq_feat % hidden_dim
 
-    is_valid = offsets < (batch_size.to(tl.int64) * token_length * hidden_dim)
+    is_valid = offsets < (tl.cast(batch_size, tl.int64) * token_length * hidden_dim)
 
     dk1 = tl.load(dk1_ptr0 + offsets, mask=is_valid)
     xk = tl.load(xk_ptr + feat_idx, mask=is_valid)

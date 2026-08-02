@@ -462,7 +462,7 @@ def chunk_oja_bwd_kernel_dqk(
         NT = tl.cdiv(T, BT)
         i_tg = i_b * NT + i_t
         bos, eos = i_b * T, i_b * T + T
-        all = B.to(tl.int64) * T
+        all = tl.cast(B * T, tl.int64)
 
     o_i = tl.arange(0, BT)
     m_s = o_i[:, None] >= o_i[None, :]
