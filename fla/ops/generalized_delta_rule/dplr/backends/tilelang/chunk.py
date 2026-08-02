@@ -144,6 +144,7 @@ def _chunk_dplr_delta_rule_bwd_core(
     chunk_size: int,
     saved_h: Tensor | None = None,
     saved_v_new: Tensor | None = None,
+    saved_wy: tuple[Tensor, ...] | None = None,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
     if saved_h is not None and saved_h.numel() == 0:
         saved_h = None
@@ -155,8 +156,28 @@ def _chunk_dplr_delta_rule_bwd_core(
     initial_state = h0 if has_initial_state else None
     dht_arg = dht if dht.numel() > 0 else None
 
-    use_from_gk_bwd = q.shape[-1] == 64
-    if use_from_gk_bwd:
+    cp_context = _DPLR_CP_CONTEXT.get()
+    bwd_derives_ge = q.shape[-1] == 64
+    # Under disable_recompute the backward consumes the wy-side
+    # intermediates the forward saved, skipping the from_gk/intra A-stage,
+    # prepare_wy_repr, and wu entirely. This also makes the backward use
+    # the forward's own cumsum gi at K=64 instead of re-deriving it inside
+    # from_gk (rounding-level difference only). The CP branch keeps the
+    # recompute path: its boundary pre-process consumes u's values, which
+    # the save set deliberately omits.
+    if saved_wy is not None and cp_context is None:
+        qg, kg, ag, bg, w, A_ab_inv, A_ak, A_qk, A_qb = saved_wy
+        gi, ge = chunk_local_cumsum(
+            gk,
+            chunk_size,
+            scale=RCP_LN2,
+            cu_seqlens=cu,
+            chunk_layout=layout,
+        )
+        if bwd_derives_ge:
+            ge = None
+        u = torch.empty_like(v)
+    elif bwd_derives_ge:
         A_ab, A_qk, A_ak, A_qb, qg, kg, ag, bg, gi = chunk_dplr_fwd_intra_from_gk(
             q=q,
             k=k,
@@ -169,6 +190,16 @@ def _chunk_dplr_delta_rule_bwd_core(
             chunk_layout=layout,
         )
         ge = None
+        w, u, A_ab_inv = prepare_wy_repr_fwd(
+            ag=ag,
+            v=v,
+            A_ak=A_ak,
+            A_ab=A_ab,
+            cu_seqlens=cu,
+            chunk_size=chunk_size,
+            chunk_layout=layout,
+        )
+        del A_ab
     else:
         gi, ge = chunk_local_cumsum(
             gk,
@@ -189,17 +220,16 @@ def _chunk_dplr_delta_rule_bwd_core(
             cu_seqlens=cu,
             chunk_layout=layout,
         )
-    w, u, A_ab_inv = prepare_wy_repr_fwd(
-        ag=ag,
-        v=v,
-        A_ak=A_ak,
-        A_ab=A_ab,
-        cu_seqlens=cu,
-        chunk_size=chunk_size,
-        chunk_layout=layout,
-    )
-    del A_ab
-    cp_context = _DPLR_CP_CONTEXT.get()
+        w, u, A_ab_inv = prepare_wy_repr_fwd(
+            ag=ag,
+            v=v,
+            A_ak=A_ak,
+            A_ab=A_ab,
+            cu_seqlens=cu,
+            chunk_size=chunk_size,
+            chunk_layout=layout,
+        )
+        del A_ab
     if cp_context is not None:
         # CP: rebuild the corrected initial state (boundary exchange across
         # ranks) before recomputing the chunk states
@@ -283,6 +313,16 @@ def _chunk_dplr_delta_rule_bwd_core(
             context=cp_context,
             chunk_size=chunk_size,
         )
+    # The recompute path recycles the forward intermediates as gradient
+    # buffers; the saved path leaves them read-only (they alias ctx-saved
+    # tensors and the custom-op contract forbids mutating inputs), so the
+    # gradients land in fresh buffers instead.
+    recycle = saved_wy is None or cp_context is not None
+    dq_buf = qg if recycle else torch.empty_like(qg)
+    dk_buf = kg if recycle else torch.empty_like(kg)
+    dw_buf = w if recycle else torch.empty_like(w)
+    db_buf = bg if recycle else torch.empty_like(bg)
+    dag_buf = ag if recycle else torch.empty_like(ag)
     dqg, dkg, dw, dbg, dgk_last, dv2, dv_full, dh0 = (
         chunk_dplr_bwd_stream_dhu_o_into(
             qg=qg,
@@ -298,10 +338,10 @@ def _chunk_dplr_delta_rule_bwd_core(
             do=do,
             A_qb_for_dv=A_qb,
             A_qk=A_qk,
-            dq_out=qg,
-            dk_out=kg,
-            dw_out=w,
-            db_out=bg,
+            dq_out=dq_buf,
+            dk_out=dk_buf,
+            dw_out=dw_buf,
+            db_out=db_buf,
             dgk_last_out=dgk_last,
             dv2_out=u,
             dv_full_out=dv_full_workspace,
@@ -328,7 +368,7 @@ def _chunk_dplr_delta_rule_bwd_core(
         dA_ab_out=dA_ab_workspace,
         dA_ak_out=dA_ak_workspace,
         dv_out=dv_full,
-        dag_out=ag,
+        dag_out=dag_buf,
         cu_seqlens=cu,
         chunk_size=chunk_size,
         chunk_layout=layout,
@@ -336,8 +376,8 @@ def _chunk_dplr_delta_rule_bwd_core(
     del h
     del dv2
 
-    # dgk is returned in gk's dtype; recycle the w buffer only when they agree
-    dgk_out = w if w.dtype == gk.dtype else torch.empty_like(gk)
+    # dgk is returned in gk's dtype; recycle the dw buffer only when they agree
+    dgk_out = dw if (recycle and dw.dtype == gk.dtype) else torch.empty_like(gk)
     dq, dk, da, db, dgk = chunk_dplr_bwd_dqk_intra_fused_qside_into(
         q=q,
         k=k,
@@ -345,7 +385,7 @@ def _chunk_dplr_delta_rule_bwd_core(
         b=b,
         gi=gi,
         ge=ge,
-        gk=gk if use_from_gk_bwd else None,
+        gk=gk if bwd_derives_ge else None,
         do=do,
         v=v,
         v_new=v_new,
@@ -356,10 +396,10 @@ def _chunk_dplr_delta_rule_bwd_core(
         dag=dag,
         dbg=dbg,
         dgk_last=dgk_last,
-        dq_out=qg,
-        dk_out=kg,
-        da_out=ag,
-        db_out=bg,
+        dq_out=dqg,
+        dk_out=dkg,
+        da_out=dag,
+        db_out=dbg,
         dgk_out=dgk_out,
         cu_seqlens=cu,
         chunk_size=chunk_size,
@@ -464,6 +504,15 @@ def _chunk_dplr_delta_rule_bwd_ctx_op(
     chunk_offsets: Tensor,
     h_ctx: Tensor,
     v_new_ctx: Tensor,
+    qg_ctx: Tensor,
+    kg_ctx: Tensor,
+    ag_ctx: Tensor,
+    bg_ctx: Tensor,
+    w_ctx: Tensor,
+    A_ab_inv_ctx: Tensor,
+    A_ak_ctx: Tensor,
+    A_qk_ctx: Tensor,
+    A_qb_ctx: Tensor,
     scale: float,
     has_initial_state: bool,
     is_varlen: bool,
@@ -488,6 +537,10 @@ def _chunk_dplr_delta_rule_bwd_ctx_op(
         chunk_size,
         saved_h=h_ctx,
         saved_v_new=v_new_ctx,
+        saved_wy=(
+            qg_ctx, kg_ctx, ag_ctx, bg_ctx,
+            w_ctx, A_ab_inv_ctx, A_ak_ctx, A_qk_ctx, A_qb_ctx,
+        ),
     )
 
 
@@ -507,12 +560,22 @@ def _chunk_dplr_delta_rule_bwd_ctx_fake(
     chunk_offsets,
     h_ctx,
     v_new_ctx,
+    qg_ctx,
+    kg_ctx,
+    ag_ctx,
+    bg_ctx,
+    w_ctx,
+    A_ab_inv_ctx,
+    A_ak_ctx,
+    A_qk_ctx,
+    A_qb_ctx,
     scale: float,
     has_initial_state: bool,
     is_varlen: bool,
     chunk_size: int,
 ):
-    del h_ctx, v_new_ctx
+    del h_ctx, v_new_ctx, qg_ctx, kg_ctx, ag_ctx, bg_ctx, w_ctx
+    del A_ab_inv_ctx, A_ak_ctx, A_qk_ctx, A_qb_ctx
     return _chunk_dplr_delta_rule_bwd_fake(
         do,
         dht,
@@ -711,7 +774,7 @@ def _chunk_dplr_delta_rule_fwd_ctx_core(
     is_varlen: bool,
     chunk_size: int,
     store_context: bool,
-) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+) -> tuple[Tensor, ...]:
     cu = cu_seqlens if is_varlen else None
     layout = (
         build_varlen_chunk_layout(
@@ -743,7 +806,7 @@ def _chunk_dplr_delta_rule_fwd_ctx_core(
         cu_seqlens=cu,
         chunk_layout=layout,
     )
-    w, u, _ = prepare_wy_repr_fwd(
+    w, u, A_ab_inv = prepare_wy_repr_fwd(
         ag=ag,
         v=v,
         A_ak=A_ak,
@@ -810,7 +873,13 @@ def _chunk_dplr_delta_rule_fwd_ctx_core(
     else:
         chunk_indices = layout.chunk_indices
         chunk_offsets = layout.chunk_offsets
-    return o, final_state, chunk_indices, chunk_offsets, h_ctx, v_new_ctx
+    # The wy-side intermediates ride along as outputs so the disable_recompute
+    # backward can consume them from ctx instead of recomputing (they are
+    # forward intermediates anyway; returning them costs no extra traffic).
+    return (
+        o, final_state, chunk_indices, chunk_offsets, h_ctx, v_new_ctx,
+        qg, kg, ag, bg, w, A_ab_inv, A_ak, A_qk, A_qb,
+    )
 
 
 @torch.library.custom_op(
@@ -831,7 +900,10 @@ def _chunk_dplr_delta_rule_fwd_ctx_op(
     output_final_state: bool,
     is_varlen: bool,
     chunk_size: int,
-) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+) -> tuple[
+    Tensor, Tensor, Tensor, Tensor, Tensor, Tensor,
+    Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor,
+]:
     return _chunk_dplr_delta_rule_fwd_ctx_core(
         q,
         k,
@@ -895,6 +967,16 @@ def _chunk_dplr_delta_rule_fwd_ctx_fake(
         q.new_empty(offsets_shape, dtype=torch.int32),
         q.new_empty((n_chunks, heads, key_dim, value_dim)),
         v.new_empty(v.shape),
+        # wy-side save set for the disable_recompute backward
+        q.new_empty(q.shape),
+        q.new_empty(q.shape),
+        q.new_empty(q.shape),
+        q.new_empty(q.shape),
+        q.new_empty(q.shape),
+        q.new_empty((batch, tokens, heads, chunk_size), dtype=torch.float32),
+        q.new_empty((batch, tokens, heads, chunk_size), dtype=torch.float16),
+        q.new_empty((batch, tokens, heads, chunk_size)),
+        q.new_empty((batch, tokens, heads, chunk_size)),
     )
 
 
@@ -916,7 +998,10 @@ def _chunk_dplr_delta_rule_fwd_ctx_elided_op(
     output_final_state: bool,
     is_varlen: bool,
     chunk_size: int,
-) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+) -> tuple[
+    Tensor, Tensor, Tensor, Tensor, Tensor, Tensor,
+    Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor,
+]:
     return _chunk_dplr_delta_rule_fwd_ctx_core(
         q,
         k,
@@ -970,6 +1055,7 @@ def _chunk_dplr_delta_rule_fwd_ctx_elided_fake(
         *outputs[:4],
         q.new_empty((1,)).expand(outputs[4].shape),
         v.new_empty((1,)).expand(outputs[5].shape),
+        *outputs[6:],
     )
 
 
@@ -1093,10 +1179,11 @@ def _chunk_dplr_ctx_setup_context(ctx, inputs, output):
         is_varlen,
         chunk_size,
     ) = inputs
-    _, final_state, chunk_indices, chunk_offsets, h_ctx, v_new_ctx = output
+    _, final_state, chunk_indices, chunk_offsets, h_ctx, v_new_ctx = output[:6]
+    wy_ctx = output[6:]
     if not output_final_state:
         ctx.mark_non_differentiable(final_state)
-    ctx.mark_non_differentiable(chunk_indices, chunk_offsets)
+    ctx.mark_non_differentiable(chunk_indices, chunk_offsets, *wy_ctx)
     ctx.save_for_backward(
         q,
         k,
@@ -1110,6 +1197,7 @@ def _chunk_dplr_ctx_setup_context(ctx, inputs, output):
         chunk_offsets,
         h_ctx,
         v_new_ctx,
+        *wy_ctx,
     )
     ctx.scale = float(scale)
     ctx.has_initial_state = bool(has_initial_state)
@@ -1137,6 +1225,7 @@ def _chunk_dplr_ctx_backward_from_saved(
         chunk_offsets,
         h_ctx,
         v_new_ctx,
+        *wy_ctx
     ) = saved_tensors
     dht_arg = dht if dht is not None else q.new_empty((0,), dtype=torch.float32)
     token = _DPLR_CP_CONTEXT.set(getattr(ctx, "cp_context", None))
@@ -1156,6 +1245,7 @@ def _chunk_dplr_ctx_backward_from_saved(
             chunk_offsets,
             h_ctx,
             v_new_ctx,
+            *wy_ctx,
             ctx.scale,
             ctx.has_initial_state,
             ctx.is_varlen,
@@ -1188,6 +1278,7 @@ def _chunk_dplr_ctx_backward(
     _dchunk_offsets,
     _dh_ctx,
     _dv_new_ctx,
+    *_dwy_ctx,
 ):
     return _chunk_dplr_ctx_backward_from_saved(
         ctx,
@@ -1210,9 +1301,10 @@ def _chunk_dplr_ctx_elided_backward(
     _dchunk_offsets,
     _dh_ctx,
     _dv_new_ctx,
+    *_dwy_ctx,
 ):
     saved_tensors = ctx.saved_tensors
-    h_ctx, v_new_ctx = saved_tensors[-2:]
+    h_ctx, v_new_ctx = saved_tensors[10:12]
     if not (
         _checkpoint_context_is_materialized(h_ctx)
         and _checkpoint_context_is_materialized(v_new_ctx)
