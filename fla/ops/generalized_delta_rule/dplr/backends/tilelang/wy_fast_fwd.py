@@ -25,10 +25,6 @@ import torch
 from .schedules import device_cc
 from .utils import ChunkLayout, build_rect_chunk_layout, build_varlen_chunk_layout
 
-_WY_INV_CONFIGS = [
-    {"threads": 32},
-]
-
 
 def _wu_fwd_config(BT: int, device: torch.device) -> dict[str, int]:
     # 256 threads + bulk copies pay at BT=64 on cc90 and cc120 alike
@@ -76,22 +72,30 @@ def _prepare_wy_repr_fwd_kernel(H, BT, in_dtype, threads: int = 32):
             v_new = T.alloc_fragment((BT,), acc_dtype)
             T.clear(v_new)
 
-            # Load A_ab, mask to strict lower triangular.
-            for r, c in T.Parallel(BT, BT):
-                t = bos + r
-                if (r > c) and (t < eos):
-                    M[r, c] = A_ab[t, i_h, c]
-                else:
-                    M[r, c] = 0.0
+            # Load A_ab, mask to strict lower triangular. Interior chunks
+            # bulk-copy and mask in shared; boundary chunks stay scalar.
+            if is_valid_chunk and (bos + BT <= eos):
+                T.copy(A_ab[bos: bos + BT, i_h, 0:BT], M)
+                for r, c in T.Parallel(BT, BT):
+                    if r <= c:
+                        M[r, c] = 0.0
+            else:
+                for r, c in T.Parallel(BT, BT):
+                    t = bos + r
+                    if (r > c) and (t < eos):
+                        M[r, c] = A_ab[t, i_h, c]
+                    else:
+                        M[r, c] = 0.0
 
             # Iterative inversion: for i in 1..BT-1. The j-reduction runs
-            # serially so each c-lane accumulator stays private to one thread.
+            # serially so each c-lane accumulator stays private to one thread;
+            # the trip count stops at row_i since v[j>=row_i] is zero.
             for i in T.serial(BT - 1):
                 row_i = i + 1
                 for c in T.Parallel(BT):
                     v[c] = M[row_i, c]
 
-                for j in T.serial(BT):
+                for j in T.serial(1, row_i):
                     for c in T.Parallel(BT):
                         if c < j:
                             v_new[c] = v_new[c] + v[j] * M[j, c]
@@ -370,15 +374,10 @@ def prepare_wy_repr_fwd(
     A_ab_f = A_ab.reshape(N_tokens, H, BT).contiguous()
     A_ak_f = A_ak.reshape(N_tokens, H, BT).contiguous()
 
-    inv_threads = _WY_INV_CONFIGS[0]["threads"]
     if BT == 64:
-        inv_kernel = _prepare_wy_repr_fwd_kernel64(
-            H, in_dtype, threads=inv_threads,
-        )
+        inv_kernel = _prepare_wy_repr_fwd_kernel64(H, in_dtype, threads=32)
     else:
-        inv_kernel = _prepare_wy_repr_fwd_kernel(
-            H, BT, in_dtype, threads=inv_threads,
-        )
+        inv_kernel = _prepare_wy_repr_fwd_kernel(H, BT, in_dtype, threads=32)
     A_ab_inv_f = torch.empty((N_tokens, H, BT), dtype=torch.float32, device=ag.device)
     inv_kernel(A_ab_f, layout.cu_seqlens, layout.chunk_indices, A_ab_inv_f)
 
