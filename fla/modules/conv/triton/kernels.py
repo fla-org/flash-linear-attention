@@ -372,7 +372,9 @@ def causal_conv1d_update_kernel(
     HAS_BIAS: tl.constexpr,
     HAS_RESIDUAL: tl.constexpr,
 ):
-    i_d, i_n = tl.program_id(0), tl.program_id(1)
+    pid = tl.program_id(0)
+    ND = tl.cdiv(D, BD)
+    i_d, i_n = pid % ND, (pid // ND).to(tl.int64)
 
     o_d = i_d * BD + tl.arange(0, BD)
     o_w = tl.arange(0, BW)
@@ -441,9 +443,11 @@ def compute_dh0_kernel(
     Compute dh0 (gradient w.r.t. initial_state) in a separate kernel.
     This avoids Triton compiler bugs on some architectures (e.g., GB200).
 
-    Grid: (cdiv(D, BD), N)
+    Grid: (cdiv(D, BD) * N,)
     """
-    i_d, i_n = tl.program_id(0), tl.program_id(1)
+    pid = tl.program_id(0)
+    ND = tl.cdiv(D, BD)
+    i_d, i_n = pid % ND, (pid // ND).to(tl.int64)
 
     # Get sequence boundaries
     if IS_VARLEN:
@@ -515,7 +519,9 @@ def causal_conv1d_states_fwd_kernel(
     USE_INITIAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_d, i_n = tl.program_id(0), tl.program_id(1)
+    pid = tl.program_id(0)
+    ND = tl.cdiv(D, BD)
+    i_d, i_n = pid % ND, (pid // ND).to(tl.int64)
 
     # o_d Shape: [BD]
     o_d = i_d * BD + tl.arange(0, BD)
@@ -591,7 +597,7 @@ def causal_conv1d_update_states(
     BD = min(triton.next_power_of_2(D), 256)
     BW = triton.next_power_of_2(W)
 
-    grid = (triton.cdiv(D, BD), N)
+    grid = (triton.cdiv(D, BD) * N,)
 
     causal_conv1d_states_fwd_kernel[grid](
         x=x,
@@ -655,7 +661,7 @@ def causal_conv1d_update(
     elif y.dim() == 3:
         stride_y_n, stride_y_d = y.stride(0), y.stride(2)
 
-    def grid(meta): return (triton.cdiv(D, meta['BD']), N)
+    def grid(meta): return (triton.cdiv(D, meta['BD']) * N,)
 
     causal_conv1d_update_kernel[grid](
         x=x,

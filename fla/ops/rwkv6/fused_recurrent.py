@@ -50,7 +50,9 @@ def fused_recurrent_rwkv6_fwd_kernel(
     STORE_FINAL_STATE: tl.constexpr,  # whether to store final state
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_k, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    pid = tl.program_id(0)
+    NK, NV = tl.cdiv(K, BK), tl.cdiv(V, BV)
+    i_v, i_k, i_nh = (pid % NV).to(tl.int64), ((pid // NV) % NK).to(tl.int64), (pid // (NV * NK)).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
@@ -136,7 +138,9 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
     USE_INITIAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_k, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    pid = tl.program_id(0)
+    NK, NV = tl.cdiv(K, BK), tl.cdiv(V, BV)
+    i_v, i_k, i_nh = (pid % NV).to(tl.int64), ((pid // NV) % NK).to(tl.int64), (pid // (NV * NK)).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
@@ -228,7 +232,9 @@ def fused_recurrent_rwkv6_bwd_kernel_dkv(
     USE_INITIAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_k, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    pid = tl.program_id(0)
+    NK, NV = tl.cdiv(K, BK), tl.cdiv(V, BV)
+    i_v, i_k, i_nh = (pid % NV).to(tl.int64), ((pid // NV) % NK).to(tl.int64), (pid // (NV * NK)).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
@@ -318,7 +324,9 @@ def fused_recurrent_rwkv6_bwd_kernel_dw(
     REVERSE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_nh = tl.program_id(0), tl.program_id(1).to(tl.int64)
+    pid = tl.program_id(0)
+    NK = tl.cdiv(K, BK)
+    i_k, i_nh = pid % NK, (pid // NK).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
@@ -381,7 +389,7 @@ def fused_recurrent_rwkv6_fwd(
     ht = q.new_empty(N, H, K, V, dtype=torch.float) if output_final_state else None
     o = q.new_empty(NK, *v.shape, dtype=torch.float)
 
-    grid = (NV, NK, N * H)
+    grid = (NV * NK * N * H,)
     fused_recurrent_rwkv6_fwd_kernel[grid](
         q,
         k,
@@ -427,7 +435,7 @@ def fused_recurrent_rwkv6_bwd(
     dq = q.new_empty(NV, *q.shape, dtype=torch.float)
     dq1 = torch.empty_like(dq)
 
-    grid = (NV, NK, N * H)
+    grid = (NV * NK * N * H,)
     fused_recurrent_rwkv6_bwd_kernel_dq[grid](
         k,
         v,
@@ -459,7 +467,7 @@ def fused_recurrent_rwkv6_bwd(
     dv = q.new_empty(NK, *v.shape, dtype=torch.float)
 
     dh0 = torch.empty_like(initial_state) if initial_state is not None else None
-    grid = (NV, NK, N * H)
+    grid = (NV * NK * N * H,)
     fused_recurrent_rwkv6_bwd_kernel_dkv[grid](
         q,
         k,
@@ -487,7 +495,7 @@ def fused_recurrent_rwkv6_bwd(
     dv = dv.sum(0)
 
     dw = torch.empty_like(w)
-    def grid(meta): return (triton.cdiv(meta['K'], meta['BK']), N * H)
+    def grid(meta): return (triton.cdiv(meta['K'], meta['BK']) * N * H,)
     fused_recurrent_rwkv6_bwd_kernel_dw[grid](
         q,
         k,

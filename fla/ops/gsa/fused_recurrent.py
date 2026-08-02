@@ -166,7 +166,7 @@ def fused_recurrent_gsa_fwd(
 
     ok = q.new_empty(NK, *s.shape, dtype=torch.float)
     gk, gv = None, g
-    grid = (NM, NK, N * H)
+    grid = (NM * NK * N * H,)
     fused_recurrent_fwd_kernel[grid](
         q=q,
         k=k,
@@ -198,7 +198,7 @@ def fused_recurrent_gsa_fwd(
     qv = ok.softmax(-1, dtype=torch.float)
     ov = q.new_empty(NM, *v.shape, dtype=torch.float)
     gk, gv = g, None
-    grid = (NV, NM, N * H)
+    grid = (NV * NM * N * H,)
     fused_recurrent_fwd_kernel[grid](
         q=qv,
         k=s,
@@ -258,7 +258,7 @@ def fused_recurrent_gsa_bwd(
     dgv = q.new_empty(NV, B, T, H, M, dtype=torch.float)
     dhv0 = torch.empty_like(hv0)if hv0 is not None else None
 
-    grid = (NV, NM, N * H)
+    grid = (NV * NM * N * H,)
     fused_recurrent_bwd_kernel[grid](
         q=qv,
         k=s,
@@ -305,7 +305,7 @@ def fused_recurrent_gsa_bwd(
     dgk = q.new_empty(NK, B, T, H, M, dtype=torch.float)
     dhk0 = torch.empty_like(hk0)if hk0 is not None else None
 
-    grid = (NM, NK, N * H)
+    grid = (NM * NK * N * H,)
     fused_recurrent_bwd_kernel[grid](
         q=q,
         k=k,
