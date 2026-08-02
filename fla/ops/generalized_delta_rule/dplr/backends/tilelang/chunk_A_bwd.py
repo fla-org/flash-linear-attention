@@ -38,12 +38,14 @@ from .utils import ChunkLayout, build_rect_chunk_layout, build_varlen_chunk_layo
 def _a_bwd_config(K: int, BT: int, in_dtype: str, device: torch.device) -> dict[str, int]:
     # BK=64 with 256 threads on cc90 (fits 228KB smem, 1 CTA/SM there so the
     # extra warps hide unpipelined load latency); BK=32 elsewhere (cc120's
-    # 99KB cap).  Bulk vectorized copies only pay at BT=64 (measured flat to
-    # -4% at BT<=32, where occupancy already hides latency).
+    # 99KB cap).  256 threads also pay at BT=64 on cc120 (bwd_intra -14%,
+    # but +16% at BT=32 where occupancy already hides latency).  Bulk
+    # vectorized copies only pay at BT=64 on cc90 (measured flat to -4% at
+    # BT<=32; at BT=64 on cc120 the bulk staging exceeds the 99KB smem cap).
     cc = device_cc(device)
     return {
         "BK": 64 if cc == 90 else 32,
-        "threads": 256 if cc == 90 else 128,
+        "threads": 256 if (cc == 90 or BT >= 64) else 128,
         "num_stages": 1,
         "bulk_copy": cc == 90 and BT >= 64,
     }
