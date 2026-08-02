@@ -16,10 +16,17 @@ from typing import TYPE_CHECKING
 import torch
 
 from fla.ops.backends import BaseBackend
-from fla.utils import IS_NVIDIA_HOPPER, IS_NVIDIA_SM100
+from fla.utils import IS_NVIDIA_HOPPER, IS_NVIDIA_SM100, IS_NVIDIA_SM120
 
 if TYPE_CHECKING:
     from fla.ops.cp import FLACPContext
+
+
+def _needs_backward(*tensors: torch.Tensor | None) -> bool:
+    """Whether autograd would later require a backward pass over these inputs."""
+    if not torch.is_grad_enabled():
+        return False
+    return any(isinstance(t, torch.Tensor) and t.requires_grad for t in tensors)
 
 
 class FlashQLABackend(BaseBackend):
@@ -27,6 +34,10 @@ class FlashQLABackend(BaseBackend):
 
     Fused TileLang forward and backward with intra-card CP (replaces the multi-kernel Triton path).
     https://github.com/QwenLM/FlashQLA
+
+    SM90/SM100/SM103 run both directions. SM120 (consumer/workstation Blackwell) ships a
+    forward kernel only, so it is dispatched exclusively for grad-free calls (inference,
+    frozen weights) and falls back to Triton whenever a backward pass could be requested.
 
     Disable with ``FLA_FLASH_QLA=0``.
     """
@@ -56,8 +67,10 @@ class FlashQLABackend(BaseBackend):
         cp_context: FLACPContext | None = None,
         **kwargs,
     ) -> tuple[bool, str | None]:
-        if not (IS_NVIDIA_HOPPER or IS_NVIDIA_SM100):
-            return False, "FlashQLA requires NVIDIA SM90 or SM100"
+        if not (IS_NVIDIA_HOPPER or IS_NVIDIA_SM100 or IS_NVIDIA_SM120):
+            return False, "FlashQLA requires NVIDIA SM90, SM100/SM103 or SM120"
+        if IS_NVIDIA_SM120 and _needs_backward(q, k, v, g, beta, initial_state):
+            return False, "FlashQLA on SM120 implements the forward pass only, but an input requires grad"
         if q.dtype != torch.float16 and q.dtype != torch.bfloat16:
             return False, f"FlashQLA requires dtype float16 or bfloat16, got {q.dtype}"
         if not (q.dtype == k.dtype == v.dtype):
