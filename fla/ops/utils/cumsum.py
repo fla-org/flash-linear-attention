@@ -64,10 +64,10 @@ def chunk_local_cumsum_scalar_kernel(
         p_o = o + bos*H + i_h + o_t * H
     # [BT]
     b_s = tl.load(p_s, mask=m_t, other=0.0).to(tl.float32)
-    b_o = tl.cumsum(b_s, axis=0)
     if REVERSE:
-        b_z = tl.sum(b_s, axis=0)
-        b_o = -b_o + b_z[None] + b_s
+        b_o = tl.cumsum(b_s, axis=0, reverse=True)
+    else:
+        b_o = tl.cumsum(b_s, axis=0)
     if HAS_SCALE:
         b_o *= scale
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=m_t)
@@ -183,10 +183,11 @@ def chunk_global_cumsum_scalar_kernel(
             p_s = s + bos*H + i_h + o_t * H
             p_o = o + bos*H + i_h + o_t * H
         b_s = tl.load(p_s, mask=m_t, other=0.0).to(tl.float32)
-        b_o = tl.cumsum(b_s, axis=0)
-        b_ss = tl.sum(b_s, 0)
         if REVERSE:
-            b_o = -b_o + b_ss + b_s
+            b_o = tl.cumsum(b_s, axis=0, reverse=True)
+        else:
+            b_o = tl.cumsum(b_s, axis=0)
+        b_ss = tl.sum(b_s, 0)
         b_o += b_z
         if i_c >= 0:
             b_z += b_ss
