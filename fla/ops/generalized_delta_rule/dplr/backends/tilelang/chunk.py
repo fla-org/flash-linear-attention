@@ -787,25 +787,41 @@ def _chunk_dplr_delta_rule_fwd_ctx_core(
     )
     initial_state = h0 if has_initial_state else None
 
-    gi, ge = chunk_local_cumsum(
-        gk,
-        chunk_size,
-        scale=RCP_LN2,
-        cu_seqlens=cu,
-        chunk_layout=layout,
-    )
-    A_ab, A_qk, A_ak, A_qb, qg, kg, ag, bg = chunk_dplr_fwd_intra(
-        q=q,
-        k=k,
-        a=a,
-        b=b,
-        gi=gi,
-        ge=ge,
-        scale=scale,
-        chunk_size=chunk_size,
-        cu_seqlens=cu,
-        chunk_layout=layout,
-    )
+    # Same A-stage split as the plain forward: from_gk (in-CTA cumsum) at
+    # head_dim 64 avoids the standalone cumsum and the intra variant's
+    # torch-side gate preparation entirely.
+    if q.shape[-1] == 64:
+        A_ab, A_qk, A_ak, A_qb, qg, kg, ag, bg, gi = chunk_dplr_fwd_intra_from_gk(
+            q=q,
+            k=k,
+            a=a,
+            b=b,
+            gk=gk,
+            scale=scale,
+            chunk_size=chunk_size,
+            cu_seqlens=cu,
+            chunk_layout=layout,
+        )
+    else:
+        gi, ge = chunk_local_cumsum(
+            gk,
+            chunk_size,
+            scale=RCP_LN2,
+            cu_seqlens=cu,
+            chunk_layout=layout,
+        )
+        A_ab, A_qk, A_ak, A_qb, qg, kg, ag, bg = chunk_dplr_fwd_intra(
+            q=q,
+            k=k,
+            a=a,
+            b=b,
+            gi=gi,
+            ge=ge,
+            scale=scale,
+            chunk_size=chunk_size,
+            cu_seqlens=cu,
+            chunk_layout=layout,
+        )
     w, u, A_ab_inv = prepare_wy_repr_fwd(
         ag=ag,
         v=v,
