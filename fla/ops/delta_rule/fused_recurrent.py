@@ -42,15 +42,15 @@ def fused_recurrent_delta_rule_fwd_kernel(
     IS_BETA_HEADWISE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_k, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_v, i_k, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
-        all = T
+        all = T.to(tl.int64)
         T = eos - bos
     else:
         bos, eos = i_n * T, i_n * T + T
-        all = B * T
+        all = B * T.to(tl.int64)
 
     p_q = q + (bos * H + i_h) * K + i_k * BK + tl.arange(0, BK)
     p_k = k + (bos * H + i_h) * K + i_k * BK + tl.arange(0, BK)
@@ -134,25 +134,25 @@ def fused_recurrent_delta_rule_bwd_kernel(
     USE_FINAL_STATE_GRADIENT: tl.constexpr,  # whether to use dht
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_k, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_v, i_k, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
-        all = T
+        all = T.to(tl.int64)
         T = eos - bos
     else:
         bos, eos = i_n * T, i_n * T + T
-        all = B * T
+        all = B * T.to(tl.int64)
 
     mask_k = i_k * BK + tl.arange(0, BK) < K
     mask_v = i_v * BV + tl.arange(0, BV) < V
 
-    p_q = q + (bos * H + i_h) * K + i_k * BK + tl.arange(0, BK) + (T - 1) * H*K
-    p_k = k + (bos * H + i_h) * K + i_k * BK + tl.arange(0, BK) + (T - 1) * H*K
-    p_v = v + (bos * H + i_h) * V + i_v * BV + tl.arange(0, BV) + (T - 1) * H*V
-    p_do = do + (bos * H + i_h) * V + i_v * BV + tl.arange(0, BV) + (T - 1) * H*V
-    p_dk = dk + ((i_v * all + bos) * H + i_h) * K + i_k * BK + tl.arange(0, BK) + (T - 1) * H*K
-    p_dv = dv + ((i_k * all + bos) * H + i_h) * V + i_v * BV + tl.arange(0, BV) + (T - 1) * H*V
+    p_q = q + (bos * H + i_h) * K + i_k * BK + tl.arange(0, BK) + (T - 1).to(tl.int64) * H*K
+    p_k = k + (bos * H + i_h) * K + i_k * BK + tl.arange(0, BK) + (T - 1).to(tl.int64) * H*K
+    p_v = v + (bos * H + i_h) * V + i_v * BV + tl.arange(0, BV) + (T - 1).to(tl.int64) * H*V
+    p_do = do + (bos * H + i_h) * V + i_v * BV + tl.arange(0, BV) + (T - 1).to(tl.int64) * H*V
+    p_dk = dk + ((i_v * all + bos) * H + i_h) * K + i_k * BK + tl.arange(0, BK) + (T - 1).to(tl.int64) * H*K
+    p_dv = dv + ((i_k * all + bos) * H + i_h) * V + i_v * BV + tl.arange(0, BV) + (T - 1).to(tl.int64) * H*V
     if IS_BETA_HEADWISE:
         p_beta = beta + (bos + T - 1) * H*V + i_h * V + i_v * BV + tl.arange(0, BV)
         p_dbeta = db + ((i_v * NK + i_k) * all + bos + T - 1) * H*V + i_h * V + tl.arange(0, BV)

@@ -61,11 +61,11 @@ def chunk_fwd_kernel_h_split(
     # i_h: head index
     # i_n: sequence index
     # i_s: local split index inside a sequence
-    i_k, i_v, i_sh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_k, i_v, i_sh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
     i_ss, i_h = i_sh // H, i_sh % H
     if IS_VARLEN:
         i_n, i_s = tl.load(split_indices + i_ss * 2).to(tl.int32), tl.load(split_indices + i_ss * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
         NS = tl.cdiv(T, S)
     else:
@@ -178,13 +178,13 @@ def chunk_fwd_kernel_h_reduction(
     STORE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
         NS = tl.cdiv(T, S)
-        boh = tl.load(split_offsets + i_n).to(tl.int32)
+        boh = tl.load(split_offsets + i_n).to(tl.int64)
     else:
         bos, eos = i_n * T, i_n * T + T
         NS = tl.cdiv(T, S)
@@ -279,11 +279,11 @@ def chunk_bwd_kernel_dh_split(
     # i_h: head index
     # i_n: sequence index
     # i_s: local split index inside a sequence
-    i_k, i_v, i_sh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_k, i_v, i_sh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
     i_ss, i_hq = i_sh // HQ, i_sh % HQ
     if IS_VARLEN:
         i_n, i_s = tl.load(split_indices + i_ss * 2).to(tl.int32), tl.load(split_indices + i_ss * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
         NS = tl.cdiv(T, S)
     else:
@@ -394,14 +394,14 @@ def chunk_bwd_kernel_dh_reduction(
     STORE_INITIAL_STATE_GRADIENT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
     i_n, i_hq = i_nh // HQ, i_nh % HQ
     i_h = i_hq // NG
     if IS_VARLEN:
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
         NS = tl.cdiv(T, S)
-        boh = tl.load(split_offsets + i_n).to(tl.int32)
+        boh = tl.load(split_offsets + i_n).to(tl.int64)
     else:
         bos, eos = i_n * T, i_n * T + T
         NS = tl.cdiv(T, S)

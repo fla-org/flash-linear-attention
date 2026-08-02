@@ -47,11 +47,11 @@ def solve_tril_16x16_kernel(
     IS_VARLEN: tl.constexpr,
     DOT_PRECISION: tl.constexpr,
 ):
-    i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64)
+    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
@@ -117,11 +117,11 @@ def merge_16x16_to_32x32_inverse_kernel(
     IS_VARLEN: tl.constexpr,
     DOT_PRECISION: tl.constexpr,
 ):
-    i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64)
+    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
@@ -207,11 +207,11 @@ def merge_16x16_to_64x64_inverse_kernel(
     IS_VARLEN: tl.constexpr,
     DOT_PRECISION: tl.constexpr,
 ):
-    i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64)
+    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T

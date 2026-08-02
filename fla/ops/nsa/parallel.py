@@ -63,7 +63,7 @@ def parallel_nsa_kernel_topk(
     BK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1)
+    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
 
     if IS_VARLEN:
@@ -73,7 +73,7 @@ def parallel_nsa_kernel_topk(
         TQ = (eos_q - bos_q).to(tl.int32)
         TK = (eos_k - bos_k).to(tl.int32)
         TC = tl.cdiv(TK, BS)
-        boc = tl.load(chunk_offsets + i_n).to(tl.int32)
+        boc = tl.load(chunk_offsets + i_n).to(tl.int64)
     else:
         bos_q, eos_q = (i_b * TQ).to(tl.int64), (i_b * TQ + TQ).to(tl.int64)
         TC = tl.cdiv(TK, BS)
@@ -210,7 +210,7 @@ def parallel_nsa_fwd_kernel(
     IS_VARLEN: tl.constexpr,
     USE_BLOCK_COUNTS: tl.constexpr,
 ):
-    i_t, i_v, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1), tl.program_id(2)
+    i_t, i_v, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1), tl.program_id(2).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     # k/v: [B, TK, H, *], q: [B, TQ, HQ, K], block_indices: [B, TQ, H, S], lse: [B, TQ, HQ]; G = HQ // H
 
@@ -331,10 +331,10 @@ def parallel_nsa_bwd_kernel_dq(
     IS_VARLEN: tl.constexpr,
     USE_BLOCK_COUNTS: tl.constexpr,
 ):
-    i_t, i_v, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1), tl.program_id(2)
+    i_t, i_v, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1), tl.program_id(2).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
 
-    all = B * T
+    all = B * T.to(tl.int64)
     if IS_VARLEN:
         i_n, i_t = tl.load(token_indices + i_t * 2).to(tl.int32), tl.load(token_indices + i_t * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
@@ -459,8 +459,8 @@ def parallel_nsa_bwd_kernel_dkv(
     BQ: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_blk = tl.program_id(0), tl.program_id(1)
-    all = B * T
+    i_v, i_blk = tl.program_id(0), tl.program_id(1).to(tl.int64)
+    all = B * T.to(tl.int64)
     if IS_VARLEN:
         i_c, i_h = i_blk // H, i_blk % H
         i_n = tl.load(chunk_indices + i_c * 2).to(tl.int32)

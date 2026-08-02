@@ -10,7 +10,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from fla.modules import FusedLayerNormGated, FusedRMSNormGated
+from fla.modules import (
+    FusedLayerNormGated,
+    FusedLayerNormSwishGateLinear,
+    FusedRMSNormGated,
+    FusedRMSNormSwishGateLinear,
+)
 from fla.utils import IS_NVIDIA_BLACKWELL, assert_close, device
 
 
@@ -96,6 +101,53 @@ def test_rmsnorm_gated(B: int, H: int, T: int, D: int, activation: str):
     assert_close('dx', ref_dx, tri_dx, 1e-3)
     assert_close('dg', ref_dg, tri_dg, 1e-3)
     assert_close('dw', ref_dw, tri_dw, 1e-3)
+
+
+@pytest.mark.parametrize(
+    ('B', 'T', 'D', 'O', 'is_rms_norm', 'linear_bias'),
+    [
+        # D <= 512 and D > 512 select the two different backward kernels
+        pytest.param(*test, id=f"B{test[0]}_T{test[1]}_D{test[2]}_O{test[3]}_rms{test[4]}_bias{test[5]}")
+        for test in [
+            (2, 64,  64,   32,  False, False),
+            (2, 64,  64,   32,  True,  True),
+            (2, 500, 1024, 256, False, True),
+            (2, 500, 1024, 256, True,  False),
+        ]
+    ],
+)
+def test_norm_swish_gate_linear(B: int, T: int, D: int, O: int, is_rms_norm: bool, linear_bias: bool):
+    torch.manual_seed(42)
+    eps = 1e-5
+    x = torch.randn(B, T, D).to(device)
+    g = torch.randn(B, T, D).to(device)
+    nw = torch.randn(D).to(device)
+    lw = (torch.randn(O, D) / D ** 0.5).to(device)
+    lb = torch.randn(O).to(device) if linear_bias else None
+    do = torch.randn(B, T, O).to(device)
+
+    def leaves():
+        return [t.clone().requires_grad_(True) if t is not None else None for t in (x, g, lw, lb)]
+
+    tri_x, tri_g, tri_lw, tri_lb = leaves()
+    tri = (FusedRMSNormSwishGateLinear if is_rms_norm else FusedLayerNormSwishGateLinear)(D, eps=eps).to(device)
+    tri.weight.data.copy_(nw)
+    tri(tri_x, tri_g, tri_lw, tri_lb).backward(do)
+
+    ref_x, ref_g, ref_lw, ref_lb = leaves()
+    ref_nw = nw.clone().requires_grad_(True)
+    if is_rms_norm:
+        ref_norm = ref_x * torch.rsqrt(ref_x.pow(2).mean(-1, keepdim=True) + eps) * ref_nw
+    else:
+        ref_norm = F.layer_norm(ref_x, (D,), ref_nw, None, eps)
+    F.linear(ref_norm * F.silu(ref_g), ref_lw, ref_lb).backward(do)
+
+    assert_close('            dx', ref_x.grad, tri_x.grad, 1e-3)
+    assert_close('            dg', ref_g.grad, tri_g.grad, 1e-3)
+    assert_close('  dnorm_weight', ref_nw.grad, tri.weight.grad, 1e-3)
+    assert_close('dlinear_weight', ref_lw.grad, tri_lw.grad, 1e-3)
+    if linear_bias:
+        assert_close('  dlinear_bias', ref_lb.grad, tri_lb.grad, 1e-3)
 
 
 @pytest.mark.skipif(not IS_NVIDIA_BLACKWELL, reason="large-offset repro requires a Blackwell/B200-class CUDA GPU")

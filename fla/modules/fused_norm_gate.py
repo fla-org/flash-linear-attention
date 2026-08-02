@@ -142,7 +142,7 @@ def layer_norm_gated_fwd_kernel1(
     HAS_WEIGHT: tl.constexpr,
     HAS_BIAS: tl.constexpr,
 ):
-    i_t = tl.program_id(0)
+    i_t = tl.program_id(0).to(tl.int64)
     x += i_t * D
     y += i_t * D
     g += i_t * D
@@ -273,17 +273,20 @@ def layer_norm_gated_bwd_kernel(
         b_y = b_xhat * b_w[None, :] if HAS_WEIGHT else b_xhat
         if HAS_BIAS:
             b_y = b_y + b_b[None, :]
-        if RECOMPUTE_OUTPUT:
-            p_y = y + o_t[:, None] * D + o_d[None, :]
-            tl.store(p_y, b_y.to(p_y.dtype.element_ty), mask=m_x)
 
         b_sigmoid_g = tl.sigmoid(b_g)
         if ACTIVATION == "swish" or ACTIVATION == "silu":
+            b_gate = b_g * b_sigmoid_g
             b_dg = b_dy * b_y * (b_sigmoid_g + b_g * b_sigmoid_g * (1 - b_sigmoid_g))
-            b_dy = b_dy * b_g * b_sigmoid_g
         elif ACTIVATION == "sigmoid":
+            b_gate = b_sigmoid_g
             b_dg = b_dy * b_y * b_sigmoid_g * (1 - b_sigmoid_g)
-            b_dy = b_dy * b_sigmoid_g
+        # b_dg needs the pre-gate b_y, but the recomputed output must match what the
+        # forward stored, i.e. the gated value the caller fed to its linear layer.
+        if RECOMPUTE_OUTPUT:
+            p_y = y + o_t[:, None] * D + o_d[None, :]
+            tl.store(p_y, (b_y * b_gate).to(p_y.dtype.element_ty), mask=m_x)
+        b_dy = b_dy * b_gate
         b_wdy = b_dy
 
         if HAS_WEIGHT or HAS_BIAS:
@@ -361,7 +364,7 @@ def layer_norm_gated_bwd_kernel1(
     HAS_BIAS: tl.constexpr,
     RECOMPUTE_OUTPUT: tl.constexpr,
 ):
-    i_s = tl.program_id(0)
+    i_s = tl.program_id(0).to(tl.int64)
     o_d = tl.arange(0, BD)
     mask = o_d < D
     x += i_s * BS * D
@@ -398,16 +401,19 @@ def layer_norm_gated_bwd_kernel1(
         b_y = b_xhat * b_w if HAS_WEIGHT else b_xhat
         if HAS_BIAS:
             b_y = b_y + b_b
-        if RECOMPUTE_OUTPUT:
-            tl.store(y + o_d, b_y, mask=mask)
 
         b_sigmoid_g = tl.sigmoid(b_g)
         if ACTIVATION == "swish" or ACTIVATION == "silu":
+            b_gate = b_g * b_sigmoid_g
             b_dg = b_dy * b_y * (b_sigmoid_g + b_g * b_sigmoid_g * (1 - b_sigmoid_g))
-            b_dy = b_dy * b_g * b_sigmoid_g
         elif ACTIVATION == "sigmoid":
+            b_gate = b_sigmoid_g
             b_dg = b_dy * b_y * b_sigmoid_g * (1 - b_sigmoid_g)
-            b_dy = b_dy * b_sigmoid_g
+        # b_dg needs the pre-gate b_y, but the recomputed output must match what the
+        # forward stored, i.e. the gated value the caller fed to its linear layer.
+        if RECOMPUTE_OUTPUT:
+            tl.store(y + o_d, b_y * b_gate, mask=mask)
+        b_dy = b_dy * b_gate
         b_wdy = b_dy
         if HAS_WEIGHT:
             b_wdy = b_dy * b_w

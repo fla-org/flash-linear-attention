@@ -68,12 +68,12 @@ def fused_chunk_fwd_kernel(
     STORE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_k, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_v, i_k, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
 
     all = B * T
     if IS_VARLEN:
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
         bos, eos = i_n * T, i_n * T + T
@@ -213,12 +213,12 @@ def fused_chunk_bwd_kernel(
     USE_INITIAL_STATE: tl.constexpr,
     USE_FINAL_STATE: tl.constexpr,
 ):
-    i_v, i_k, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_v, i_k, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
 
     all = B * T
     if IS_VARLEN:
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
         bos, eos = i_n * T, i_n * T + T

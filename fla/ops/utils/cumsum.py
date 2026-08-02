@@ -45,11 +45,11 @@ def chunk_local_cumsum_scalar_kernel(
     IS_VARLEN: tl.constexpr,
     HEAD_FIRST: tl.constexpr,
 ):
-    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1)
+    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
@@ -104,11 +104,11 @@ def chunk_local_cumsum_vector_kernel(
     IS_VARLEN: tl.constexpr,
     HEAD_FIRST: tl.constexpr,
 ):
-    i_s, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2)
+    i_s, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
@@ -162,10 +162,10 @@ def chunk_global_cumsum_scalar_kernel(
     IS_VARLEN: tl.constexpr,
     HEAD_FIRST: tl.constexpr,
 ):
-    i_nh = tl.program_id(0)
+    i_nh = tl.program_id(0).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
     else:
         bos, eos = i_n * T, i_n * T + T
     T = eos - bos
@@ -226,10 +226,10 @@ def chunk_global_cumsum_vector_kernel(
     IS_VARLEN: tl.constexpr,
     HEAD_FIRST: tl.constexpr,
 ):
-    i_s, i_nh = tl.program_id(0), tl.program_id(1)
+    i_s, i_nh = tl.program_id(0), tl.program_id(1).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
     else:
         bos, eos = i_n * T, i_n * T + T
     T = eos - bos

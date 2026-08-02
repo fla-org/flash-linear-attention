@@ -67,12 +67,12 @@ def chunk_gated_delta_rule_fwd_kkt_solve_kernel(
     4. Block merge to get full (I+A)^{-1}
     5. Write result to A (output)
     """
-    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1)
+    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // HV, i_bh % HV
 
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T

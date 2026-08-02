@@ -35,8 +35,8 @@ def packunpack_sequence_kernel(
     PADDING_SIDE: tl.constexpr,
     PACK: tl.constexpr,
 ):
-    i_d, i_s, i_b = tl.program_id(0), tl.program_id(1), tl.program_id(2)
-    bos, eos = tl.load(cu_seqlens + i_b), tl.load(cu_seqlens + i_b + 1)
+    i_d, i_s, i_b = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    bos, eos = tl.load(cu_seqlens + i_b).to(tl.int64), tl.load(cu_seqlens + i_b + 1).to(tl.int64)
 
     T = eos - bos
     if PADDING_SIDE == 'left':

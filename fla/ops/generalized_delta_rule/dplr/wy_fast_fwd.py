@@ -37,11 +37,11 @@ def prepare_wy_repr_fwd_kernel_chunk32(
     BC: tl.constexpr,  # placeholder, do not delete
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1)
+    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
@@ -87,11 +87,11 @@ def prepare_wy_repr_fwd_kernel_chunk64(
     IS_VARLEN: tl.constexpr,
     GATHER_SUPPORTED: tl.constexpr = IS_GATHER_SUPPORTED,
 ):
-    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1)
+    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
@@ -181,11 +181,11 @@ def wu_fwd_kernel(
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1)
+    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T

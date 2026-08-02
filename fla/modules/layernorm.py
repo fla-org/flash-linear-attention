@@ -287,7 +287,7 @@ def layer_norm_fwd_kernel1(
     HAS_WEIGHT: tl.constexpr,
     HAS_BIAS: tl.constexpr,
 ):
-    i_t = tl.program_id(0)
+    i_t = tl.program_id(0).to(tl.int64)
     i_g = i_t % G
 
     x += i_t * D
@@ -487,7 +487,7 @@ def layer_norm_bwd_kernel1(
     HAS_BIAS: tl.constexpr,
     RECOMPUTE_OUTPUT: tl.constexpr,
 ):
-    i_s = tl.program_id(0)
+    i_s = tl.program_id(0).to(tl.int64)
     i_g, i_sg = i_s // GS, i_s % GS
 
     o_d = tl.arange(0, BD)

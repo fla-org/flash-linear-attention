@@ -57,11 +57,11 @@ def chunk_rwkv6_fwd_cumsum_kernel(
     HAS_SCALE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_s, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2)
+    i_s, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
@@ -151,12 +151,12 @@ def chunk_rwkv6_fwd_A_kernel_intra_sub_inter(
     NC: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_c, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1), tl.program_id(2)
+    i_t, i_c, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1), tl.program_id(2).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     i_i, i_j = i_c // NC, i_c % NC
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
@@ -232,12 +232,12 @@ def chunk_rwkv6_fwd_A_kernel_intra_sub_intra(
     BK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_i, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1), tl.program_id(2)
+    i_t, i_i, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1), tl.program_id(2).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     i_j = i_i
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
@@ -310,13 +310,13 @@ def chunk_rwkv6_fwd_A_kernel_intra_sub_intra_split(
     NC: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_tc, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2)
+    i_k, i_tc, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     i_t, i_i = i_tc // NC, i_tc % NC
     i_j = i_i
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         all = T
         T = eos - bos
     else:
@@ -385,11 +385,11 @@ def chunk_rwkv6_fwd_A_kernel_intra_sub_intra_merge(
     NK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_c, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1), tl.program_id(2)
+    i_t, i_c, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1), tl.program_id(2).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         all = T
         T = eos - bos
     else:
@@ -452,14 +452,14 @@ def chunk_rwkv6_bwd_kernel_dh(
     USE_FINAL_STATE_GRADIENT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
     i_n, i_hq = i_nh // HQ, i_nh % HQ
     i_h = i_hq // NG
     if IS_VARLEN:
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
         NT = tl.cdiv(T, BT)
-        boh = tl.load(chunk_offsets + i_n).to(tl.int32)
+        boh = tl.load(chunk_offsets + i_n).to(tl.int64)
     else:
         bos, eos = i_n * T, i_n * T + T
         NT = tl.cdiv(T, BT)
@@ -534,12 +534,12 @@ def chunk_rwkv6_bwd_kernel_intra(
     NC: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_c, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2)
+    i_k, i_c, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     i_t, i_i = i_c // NC, i_c % NC
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
     else:
         bos, eos = i_b * T, i_b * T + T
     T = eos - bos
@@ -690,13 +690,13 @@ def chunk_rwkv6_bwd_kernel_inter(
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2)
+    i_k, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
 
     if IS_VARLEN:
         i_tg = i_t
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
         NT = tl.cdiv(T, BT)
     else:

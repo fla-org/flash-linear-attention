@@ -62,7 +62,7 @@ def chunk_hgrn_fwd_kernel_h(
     BD: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
 ):
-    i_d, i_t, i_b = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_d, i_t, i_b = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
     o_d = i_d * BD + tl.arange(0, BD)
     mask = o_d < D
 
@@ -103,7 +103,7 @@ def chunk_hgrn_fwd_kernel_o(
     BT: tl.constexpr,
     BD: tl.constexpr,
 ):
-    i_d, i_b = tl.program_id(0), tl.program_id(1)
+    i_d, i_b = tl.program_id(0), tl.program_id(1).to(tl.int64)
     o_d = i_d * BD + tl.arange(0, BD)
     mask = o_d < D
 
@@ -142,7 +142,7 @@ def chunk_hgrn_bwd_kernel_h(
     BT: tl.constexpr,
     BD: tl.constexpr,
 ):
-    i_d, i_t, i_b = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_d, i_t, i_b = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
     o_d = i_d * BD + tl.arange(0, BD)
     mask = o_d < D
     BC = min(BT, T - i_t * BT)
@@ -192,7 +192,7 @@ def chunk_hgrn_bwd_kernel_o(
     BT: tl.constexpr,
     BD: tl.constexpr,
 ):
-    i_d, i_b = tl.program_id(0), tl.program_id(1)
+    i_d, i_b = tl.program_id(0), tl.program_id(1).to(tl.int64)
     o_d = i_d * BD + tl.arange(0, BD)
     mask = o_d < D
 

@@ -8,8 +8,111 @@
 import pytest
 import torch
 
-from fla.modules.grpo import fused_grpo_loss, grpo_loss_torch
+from fla.modules.grpo import fused_grpo_loss, grpo_loss_torch, grpo_loss_with_old_logps
 from fla.utils import IS_NVIDIA_HOPPER, assert_close, device, device_torch_lib
+
+
+def grpo_loss_with_old_logps_torch(
+    logps: torch.Tensor,
+    ref_logps: torch.Tensor,
+    old_logps: torch.Tensor,
+    pad_mask: torch.Tensor,
+    logits_to_keep: int,
+    rewards: torch.Tensor,
+    beta: float,
+    epsilon: float,
+) -> torch.Tensor:
+    batch_size = logps.shape[0]
+    rewards_shaped = rewards.view(-1, batch_size)
+    advantages = (rewards_shaped - rewards_shaped.mean(dim=1, keepdim=True)) / (
+        rewards_shaped.std(dim=1, keepdim=True) + 1e-8
+    )
+    advantages = advantages.view(-1, 1)
+
+    log_ratio = logps - old_logps
+    importance_weights = torch.exp(log_ratio)
+    importance_weights_clipped = torch.clamp(importance_weights, 1 - epsilon, 1 + epsilon)
+    per_token_kl = torch.exp(ref_logps - logps) - (ref_logps - logps) - 1
+    completion_mask = (torch.arange(logits_to_keep, device=logps.device)[None, :] >= 0) & pad_mask
+    per_token_objective = torch.min(
+        advantages * importance_weights,
+        advantages * importance_weights_clipped,
+    ) - beta * per_token_kl
+    return -(per_token_objective * completion_mask).sum() / completion_mask.sum()
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("case", ["unclipped", "clipped", "kl", "masked"])
+def test_grpo_loss_with_old_logps(dtype: torch.dtype, case: str):
+    device_torch_lib.manual_seed(42)
+    batch_size, num_tokens = 4, 5
+    logps = (torch.randn(batch_size, num_tokens, device=device, dtype=dtype) * 0.1).requires_grad_(True)
+    ref_logps = logps.detach().clone()
+    old_logps = logps.detach().clone()
+    pad_mask = torch.ones(batch_size, num_tokens, device=device, dtype=torch.bool)
+    rewards = torch.tensor([1.5, -0.5, 2.0, -1.0], device=device)
+    beta = 0.0
+    epsilon = 0.2
+
+    if case == "clipped":
+        old_logps = old_logps + torch.tensor(
+            [[-0.5], [0.5], [-0.5], [0.5]],
+            device=device,
+            dtype=dtype,
+        )
+    elif case == "kl":
+        ref_logps = ref_logps + 0.3
+        beta = 0.2
+    elif case == "masked":
+        pad_mask[0, 1:] = False
+        pad_mask[2, 3:] = False
+
+    reference_logps = logps.detach().clone().requires_grad_(True)
+    expected = grpo_loss_with_old_logps_torch(
+        logps=reference_logps,
+        ref_logps=ref_logps,
+        old_logps=old_logps,
+        pad_mask=pad_mask,
+        logits_to_keep=num_tokens,
+        rewards=rewards,
+        beta=beta,
+        epsilon=epsilon,
+    )
+    actual = grpo_loss_with_old_logps(
+        logps=logps,
+        ref_logps=ref_logps,
+        old_logps=old_logps,
+        pad_mask=pad_mask,
+        logits_to_keep=num_tokens,
+        rewards=rewards,
+        beta=beta,
+        epsilon=epsilon,
+    )
+    expected.backward()
+    actual.backward()
+
+    atol = 1e-5 if dtype == torch.float32 else 2e-2
+    torch.testing.assert_close(actual, expected, atol=atol, rtol=0)
+    torch.testing.assert_close(logps.grad, reference_logps.grad, atol=atol, rtol=0)
+
+
+def test_grpo_loss_with_old_logps_gradient_direction():
+    logps = torch.zeros(2, 1, device=device, dtype=torch.float32, requires_grad=True)
+    rewards = torch.tensor([1.0, -1.0], device=device)
+    loss = grpo_loss_with_old_logps(
+        logps=logps,
+        ref_logps=torch.zeros_like(logps),
+        old_logps=torch.zeros_like(logps),
+        pad_mask=torch.ones_like(logps, dtype=torch.bool),
+        logits_to_keep=1,
+        rewards=rewards,
+        beta=0.0,
+        epsilon=0.2,
+    )
+    loss.backward()
+
+    assert logps.grad[0, 0] < 0
+    assert logps.grad[1, 0] > 0
 
 
 @pytest.mark.parametrize("B", [2])

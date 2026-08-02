@@ -50,11 +50,11 @@ def naive_attn_decoding_kernel(
     USE_G: tl.constexpr,
     USE_SINK_BIAS: tl.constexpr,
 ):
-    i_v, i_bh = tl.program_id(0), tl.program_id(1)
+    i_v, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
     i_h = i_hq // G
 
-    bos, eos = tl.load(cu_seqlens + i_b).to(tl.int32), tl.load(cu_seqlens + i_b + 1).to(tl.int32)
+    bos, eos = tl.load(cu_seqlens + i_b).to(tl.int64), tl.load(cu_seqlens + i_b + 1).to(tl.int64)
     T = eos - bos
 
     o_d = tl.arange(0, BK)

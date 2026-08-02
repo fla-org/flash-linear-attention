@@ -67,12 +67,12 @@ def chunk_gla_fwd_A_kernel_intra_sub_inter(
     NC: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_c, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1), tl.program_id(2)
+    i_t, i_c, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1), tl.program_id(2).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     i_i, i_j = i_c // NC, i_c % NC
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
@@ -147,12 +147,12 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra(
     BK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_i, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1), tl.program_id(2)
+    i_t, i_i, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1), tl.program_id(2).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     i_j = i_i
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
@@ -224,13 +224,13 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra_split(
     NC: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_tc, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_k, i_tc, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     i_t, i_i = (i_tc // NC).to(tl.int64), i_tc % NC
     i_j = i_i
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         all = T
         T = eos - bos
     else:
@@ -300,11 +300,11 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra_merge(
     NK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_c, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1), tl.program_id(2)
+    i_t, i_c, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1), tl.program_id(2).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         all = T
         T = eos - bos
     else:
@@ -463,12 +463,12 @@ def chunk_gla_bwd_kernel_intra(
     NC: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_kc, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2)
+    i_kc, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     i_k, i_i = i_kc // NC, i_kc % NC
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
     else:
         bos, eos = i_b * T, i_b * T + T
     T = eos - bos
@@ -603,11 +603,11 @@ def chunk_gla_bwd_kernel_dA(
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1)
+    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
     else:
         bos, eos = i_b * T, i_b * T + T
     T = eos - bos
@@ -670,12 +670,12 @@ def chunk_gla_bwd_kernel_dv(
     IS_VARLEN: tl.constexpr,
     STATE_V_FIRST: tl.constexpr,
 ):
-    i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2)
+    i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_tg = i_t
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
         NT = tl.cdiv(T, BT)
     else:
@@ -770,12 +770,12 @@ def chunk_gla_bwd_kernel_inter(
     IS_VARLEN: tl.constexpr,
     STATE_V_FIRST: tl.constexpr,
 ):
-    i_k, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2)
+    i_k, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_tg = i_t
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
         NT = tl.cdiv(T, BT)
     else:

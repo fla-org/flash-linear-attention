@@ -32,7 +32,7 @@ def l2norm_fwd_kernel1(
     D,
     BD: tl.constexpr,
 ):
-    i_t = tl.program_id(0)
+    i_t = tl.program_id(0).to(tl.int64)
     x += i_t * D
     y += i_t * D
     # Compute mean and variance
@@ -61,7 +61,7 @@ def l2norm_bwd_kernel1(
     D,
     BD: tl.constexpr,
 ):
-    i_t = tl.program_id(0)
+    i_t = tl.program_id(0).to(tl.int64)
     y += i_t * D
     dx += i_t * D
     dy += i_t * D

@@ -56,11 +56,11 @@ def chunk_dplr_fwd_A_kernel_intra_sub_intra(
     IS_VARLEN: tl.constexpr,
     GATHER_SUPPORTED: tl.constexpr,
 ):
-    i_t, i_b, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1), tl.program_id(2)
+    i_t, i_b, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2)
 
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
@@ -184,11 +184,11 @@ def chunk_dplr_fwd_A_kernel_intra_tensorcore(
     IS_VARLEN: tl.constexpr,
     GATHER_SUPPORTED: tl.constexpr,
 ):
-    i_t, i_b, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1), tl.program_id(2)
+    i_t, i_b, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2)
 
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T_len = eos - bos
     else:
         bos = i_b * T
@@ -226,7 +226,7 @@ def chunk_dplr_fwd_A_kernel_intra_tensorcore(
     # Load the offset vector from Global Memory
     # p_offset points to gi[i_t*BT + mid_idx, :]
     m_k = tl.arange(0, BK) < K
-    p_offset = gi + offset_base + (i_t * BT + mid_idx) * K + tl.arange(0, BK)
+    p_offset = gi + offset_base + (i_t * BT + mid_idx) * H * K + tl.arange(0, BK)
     b_offset = tl.load(p_offset, mask=m_k, other=0.0).to(tl.float32)
 
     # Apply offset to gate values

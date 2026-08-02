@@ -58,13 +58,13 @@ def chunk_gated_delta_product_fwd_kernel_h_blockdim64(
     SAVE_NEW_VALUE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_nh = tl.program_id(0), tl.program_id(1)
+    i_v, i_nh = tl.program_id(0), tl.program_id(1).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
         NT = tl.cdiv(T, BT)
-        boh = tl.load(chunk_offsets + i_n).to(tl.int32)
+        boh = tl.load(chunk_offsets + i_n).to(tl.int64)
     else:
         bos, eos = i_n * T, i_n * T + T
         NT = tl.cdiv(T, BT)
@@ -121,8 +121,9 @@ def chunk_gated_delta_product_fwd_kernel_h_blockdim64(
 
     # main recurrence
     for i_t in range(NT):
+        i_t_int64 = i_t.to(tl.int64)
         if i_t % num_householder == 0:
-            i_t_true = i_t // num_householder
+            i_t_true = i_t_int64 // num_householder
             p_h1 = h + i_t_true * stride_h + o_k1[:, None] * V + o_v[None, :]
             tl.store(p_h1, b_h1.to(p_h1.dtype.element_ty), mask=m_h1)
             if K > 64:
@@ -135,7 +136,7 @@ def chunk_gated_delta_product_fwd_kernel_h_blockdim64(
                 p_h4 = h + i_t_true * stride_h + o_k4[:, None] * V + o_v[None, :]
                 tl.store(p_h4, b_h4.to(p_h4.dtype.element_ty), mask=m_h4)
 
-        o_t = i_t * BT + tl.arange(0, BT)
+        o_t = i_t_int64 * BT + tl.arange(0, BT)
         m_t = o_t < T
         m_vv = m_t[:, None] & m_v[None, :]
         p_v = v + o_t[:, None] * stride_v + o_v[None, :]
@@ -250,13 +251,13 @@ def chunk_gated_delta_product_bwd_kernel_dhu_blockdim64(
     USE_FINAL_STATE_GRADIENT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_nh = tl.program_id(0), tl.program_id(1)
+    i_v, i_nh = tl.program_id(0), tl.program_id(1).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
         NT = tl.cdiv(T, BT)
-        boh = tl.load(chunk_offsets + i_n).to(tl.int32)
+        boh = tl.load(chunk_offsets + i_n).to(tl.int64)
     else:
         bos, eos = i_n * T, i_n * T + T
         NT = tl.cdiv(T, BT)
@@ -312,19 +313,20 @@ def chunk_gated_delta_product_bwd_kernel_dhu_blockdim64(
             b_dh4 += tl.load(p_dht4, mask=m_h4, other=0.0)
 
     for i_t in range(NT - 1, -1, -1):
-        o_t = i_t * BT + tl.arange(0, BT)
+        i_t_int64 = i_t.to(tl.int64)
+        o_t = i_t_int64 * BT + tl.arange(0, BT)
         m_t = o_t < T
         m_vv = m_t[:, None] & m_v[None, :]
-        p_dh1 = dh + i_t*stride_h + o_k1[:, None] * V + o_v[None, :]
+        p_dh1 = dh + i_t_int64*stride_h + o_k1[:, None] * V + o_v[None, :]
         tl.store(p_dh1, b_dh1.to(p_dh1.dtype.element_ty), mask=m_h1)
         if K > 64:
-            p_dh2 = dh + i_t*stride_h + o_k2[:, None] * V + o_v[None, :]
+            p_dh2 = dh + i_t_int64*stride_h + o_k2[:, None] * V + o_v[None, :]
             tl.store(p_dh2, b_dh2.to(p_dh2.dtype.element_ty), mask=m_h2)
         if K > 128:
-            p_dh3 = dh + i_t*stride_h + o_k3[:, None] * V + o_v[None, :]
+            p_dh3 = dh + i_t_int64*stride_h + o_k3[:, None] * V + o_v[None, :]
             tl.store(p_dh3, b_dh3.to(p_dh3.dtype.element_ty), mask=m_h3)
         if K > 192:
-            p_dh4 = dh + i_t*stride_h + o_k4[:, None] * V + o_v[None, :]
+            p_dh4 = dh + i_t_int64*stride_h + o_k4[:, None] * V + o_v[None, :]
             tl.store(p_dh4, b_dh4.to(p_dh4.dtype.element_ty), mask=m_h4)
 
         if USE_G:
