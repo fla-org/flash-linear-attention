@@ -25,7 +25,7 @@ git submodule update --init --recursive
 
 ## Preparing the dataset
 
-Unlike the [legacy codebase](legacy/training), which required extensive pre-processing,
+Unlike the [legacy codebase](../legacy/training), which required extensive pre-processing,
 `flame` streamlines dataset handling with smart on-the-fly processing.
 
 For most datasets:
