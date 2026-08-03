@@ -42,7 +42,9 @@ def parallax_decode_kernel(
     sliding window and to ``[cache_start, Skv)`` when set. One program owns a
     ``BT``-row query block; see ``naive_parallax`` for the output formula.
     """
-    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
+    pid = tl.program_id(0)
+    NT = tl.cdiv(Sq, BT)
+    i_t, i_bh = (pid % NT).to(tl.int64), (pid // NT).to(tl.int64)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
     i_h = i_hq // G                               # kv head shared by this q head (GQA)
     RCP_LN2: tl.constexpr = 1.4426950216
@@ -176,7 +178,7 @@ def parallax_decode(
     BK = triton.next_power_of_2(K)
     BT = _block_size(K, q.device.index)
     o = torch.empty_like(q)
-    grid = (triton.cdiv(Sq, BT), B * HQ)
+    grid = (triton.cdiv(Sq, BT) * B * HQ,)
     parallax_decode_kernel[grid](
         q, r, k, v, o, float(scale), cache_start, Sq, Skv,
         HQ=HQ, H=H, G=G, K=K, BK=BK,

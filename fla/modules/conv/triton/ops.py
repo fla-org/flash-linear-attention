@@ -117,7 +117,7 @@ def compute_dh0_triton(
     dh0 = torch.zeros_like(initial_state)
 
     BD = 32
-    grid = (triton.cdiv(D, BD), N)
+    grid = (triton.cdiv(D, BD) * N,)
 
     y_to_pass = y if activation in ('swish', 'silu') else None
     # dy is [B, T, D], stride_n = T*D, stride_t = D
@@ -274,7 +274,7 @@ def causal_conv1d_update_states(
     BD = min(triton.next_power_of_2(D), 256)
     BW = triton.next_power_of_2(W)
 
-    grid = (triton.cdiv(D, BD), N)
+    grid = (triton.cdiv(D, BD) * N,)
 
     causal_conv1d_states_fwd_kernel[grid](
         x=x,
@@ -339,7 +339,7 @@ def causal_conv1d_update(
     elif y.dim() == 3:
         stride_y_n, stride_y_d = y.stride(0), y.stride(2)
 
-    def grid(meta): return (triton.cdiv(D, meta['BD']), N)
+    def grid(meta): return (triton.cdiv(D, meta['BD']) * N,)
 
     causal_conv1d_update_kernel[grid](
         x=x,

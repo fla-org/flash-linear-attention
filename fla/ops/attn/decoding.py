@@ -50,7 +50,9 @@ def naive_attn_decoding_kernel(
     USE_G: tl.constexpr,
     USE_SINK_BIAS: tl.constexpr,
 ):
-    i_v, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64)
+    pid = tl.program_id(0)
+    NV = tl.cdiv(V, BV)
+    i_v, i_bh = pid % NV, (pid // NV).to(tl.int64)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
     i_h = i_hq // G
 
@@ -188,7 +190,7 @@ def attn_decoding_one_step(
     NV = triton.cdiv(V, BV)
     o = torch.empty(*q.shape[:-1], V, dtype=v.dtype, device=q.device)
 
-    grid = (NV, N * HQ)
+    grid = (NV * N * HQ,)
     naive_attn_decoding_kernel[grid](
         q=q,
         k=k,
