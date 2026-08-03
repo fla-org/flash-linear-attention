@@ -28,11 +28,7 @@ from .chunk_A_fwd import (
     chunk_dplr_fwd_intra_from_gk,
 )
 from .chunk_h_fwd import chunk_dplr_fwd_h
-from .chunk_ho_fwd import (
-    chunk_dplr_fwd_ho,
-    chunk_dplr_fwd_ho_context_elided,
-    chunk_dplr_fwd_ho_with_context,
-)
+from .chunk_ho_fwd import chunk_dplr_fwd_ho, chunk_dplr_fwd_ho_ctx
 from .chunk_stream_bwd import chunk_dplr_bwd_stream_dhu_o_into
 from .cumsum import chunk_local_cumsum
 from .utils import ChunkLayout, build_varlen_chunk_layout
@@ -348,7 +344,6 @@ def _chunk_dplr_delta_rule_bwd_core(
             dh0_out=dh0_workspace,
             cu_seqlens=cu,
             chunk_size=chunk_size,
-            scale=scale,
             chunk_layout=layout,
         )
     )
@@ -847,40 +842,23 @@ def _chunk_dplr_delta_rule_fwd_ctx_core(
             context=cp_context,
             chunk_size=chunk_size,
         )
-    if not store_context:
-        o, final_state, h_ctx, v_new_ctx = chunk_dplr_fwd_ho_context_elided(
-            qg=qg,
-            kg=kg,
-            v=v,
-            w=w,
-            u=u,
-            bg=bg,
-            gk=gi,
-            A_qk=A_qk,
-            A_qb=A_qb,
-            initial_state=initial_state,
-            output_final_state=output_final_state,
-            cu_seqlens=cu,
-            chunk_size=chunk_size,
-            chunk_layout=layout,
-        )
-    else:
-        o, final_state, h_ctx, v_new_ctx = chunk_dplr_fwd_ho_with_context(
-            qg=qg,
-            kg=kg,
-            v=v,
-            w=w,
-            u=u,
-            bg=bg,
-            gk=gi,
-            A_qk=A_qk,
-            A_qb=A_qb,
-            initial_state=initial_state,
-            output_final_state=output_final_state,
-            cu_seqlens=cu,
-            chunk_size=chunk_size,
-            chunk_layout=layout,
-        )
+    o, final_state, h_ctx, v_new_ctx = chunk_dplr_fwd_ho_ctx(
+        qg=qg,
+        kg=kg,
+        v=v,
+        w=w,
+        u=u,
+        bg=bg,
+        gk=gi,
+        A_qk=A_qk,
+        A_qb=A_qb,
+        initial_state=initial_state,
+        output_final_state=output_final_state,
+        cu_seqlens=cu,
+        chunk_size=chunk_size,
+        chunk_layout=layout,
+        store_context=store_context,
+    )
 
     if final_state is None:
         final_state = q.new_empty((0,), dtype=torch.float32)

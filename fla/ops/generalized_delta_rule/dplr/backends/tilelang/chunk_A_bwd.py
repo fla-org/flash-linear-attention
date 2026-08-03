@@ -46,7 +46,6 @@ def _a_bwd_config(K: int, BT: int, in_dtype: str, device: torch.device) -> dict[
     return {
         "BK": 64 if cc == 90 else 32,
         "threads": 256 if (cc == 90 or BT >= 64) else 128,
-        "num_stages": 1,
         "bulk_copy": cc == 90 and BT >= 64,
     }
 
@@ -64,8 +63,6 @@ def _chunk_dplr_bwd_kernel_intra(
     BV: int = 32,
     BK: int = 32,
     threads: int = 128,
-    num_stages: int = 0,
-    USE_SWIZZLE: bool = False,
     DERIVE_GE: bool = False,
     bulk_copy: bool = False,
     cumsum_scale_value: float = RCP_LN2,
@@ -111,7 +108,6 @@ def _chunk_dplr_bwd_kernel_intra(
         dgk_output: T.Tensor((n_tokens, H, K), out_dtype),
     ):
         with T.Kernel(T.ceildiv(K, BK), n_chunks, H, threads=threads) as (i_k, i_c, i_h):
-            T.use_swizzle(10, enable=USE_SWIZZLE)
             i_n = chunk_indices[i_c, 0]
             i_t = chunk_indices[i_c, 1]
             safe_i_n = T.max(i_n, 0)
@@ -520,7 +516,6 @@ def chunk_dplr_bwd_dqk_intra_fused_qside_into(
     kernel = _chunk_dplr_bwd_kernel_intra(
         H, K, BT, in_dtype, dgk_out_dtype, float(scale),
         FUSE_QSIDE_DA=True, V=V, BV=bv,
-        USE_SWIZZLE=False,
         DERIVE_GE=derive_ge,
         gk_dtype=str(gk.dtype).split(".")[-1] if derive_ge else None,
         **config,

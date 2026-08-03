@@ -29,23 +29,14 @@ from fla.utils import get_device_capability
 
 from .utils import ChunkLayout, build_rect_chunk_layout, build_varlen_chunk_layout
 
-_H_FWD_CONFIGS = [
-    {"BV": 64, "threads": 256, "num_stages": 1},
-]
 
-
-def _chunk_h_fwd_configs(
-    H, K, V, BT, BC,
-    in_dtype, state_dtype, USE_INITIAL_STATE, STORE_FINAL_STATE,
-    BV: int = 32, threads: int = 128, num_stages: int = 0,
-    device_index: int = 0,
-):
+def _chunk_h_fwd_config(K: int, V: int, device_index: int) -> dict[str, int]:
     cap_major = get_device_capability(device_index)[0]
     if cap_major == 9 and K <= 128:
-        return [{"BV": 64 if V >= 64 else 32 if V >= 32 else 16, "threads": 256, "num_stages": 1}]
+        return {"BV": 64 if V >= 64 else 32 if V >= 32 else 16, "threads": 256}
     elif cap_major == 8:
-        return [{"BV": 32 if V >= 32 else 16, "threads": 128, "num_stages": 1}]
-    return [{"BV": 16, "threads": 64, "num_stages": 0}]
+        return {"BV": 32 if V >= 32 else 16, "threads": 128}
+    return {"BV": 16, "threads": 64}
 
 
 @tilelang.jit(
@@ -60,7 +51,6 @@ def _chunk_dplr_fwd_h_kernel(
     STORE_FINAL_STATE: bool,
     BV: int = 32,
     threads: int = 128,
-    num_stages: int = 0,
 ):
     acc_dtype = "float32"
     n_tokens, n_seq_plus_one, n_chunks, n_h0, n_ht = T.dynamic(
@@ -224,7 +214,6 @@ def chunk_dplr_fwd_h(
     cu_seqlens: torch.Tensor | None = None,
     chunk_size: int = 16,
     chunk_layout: ChunkLayout | None = None,
-    allocate_state_cache: bool | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     B, T_, H, K = kg.shape
     V = v.shape[-1]
@@ -256,13 +245,10 @@ def chunk_dplr_fwd_h(
     state_dtype = "float32"
     use_h0 = initial_state is not None
     store_ht = output_final_state
-    allocate_state_cache = bool(allocate_state_cache) if allocate_state_cache is not None else False
-    n_ht = active_nseq if (store_ht or allocate_state_cache) else 1
+    n_ht = active_nseq if store_ht else 1
 
     if use_h0:
         h0 = initial_state
-    elif allocate_state_cache:
-        h0 = torch.zeros((active_nseq, H, K, V), dtype=torch.float32, device=kg.device)
     else:
         h0 = torch.empty((1, H, K, V), dtype=torch.float32, device=kg.device)
     if h0.dtype != torch.float32:
@@ -275,15 +261,10 @@ def chunk_dplr_fwd_h(
     u_f = u.reshape(token_rows, H, V).contiguous()
     gk_f = gk.reshape(token_rows, H, K).contiguous()
 
-    config = _chunk_h_fwd_configs(
-        H, K, V, BT, BC,
-        in_dtype, state_dtype, use_h0, store_ht,
-        device_index=kg.device.index,
-    )[0]
     kernel = _chunk_dplr_fwd_h_kernel(
         H, K, V, BT, BC,
         in_dtype, state_dtype, use_h0, store_ht,
-        **config,
+        **_chunk_h_fwd_config(K, V, kg.device.index),
     )
 
     h_flat = torch.empty((chunk_rows, H, K, V), dtype=kg.dtype, device=kg.device)
@@ -294,12 +275,12 @@ def chunk_dplr_fwd_h(
         layout.chunk_offsets, layout.chunk_indices, h_flat, v_new_flat, ht,
     )
 
-    h_out = h_flat.view(B if not is_varlen else 1, chunk_rows // (1 if is_varlen else B), H, K, V) \
-        if not is_varlen else h_flat.view(1, chunk_rows, H, K, V)
-    if not is_varlen:
-        # FLA returns (B, NT, H, K, V). chunk_rows = B * chunks_per_seq.
-        chunks_per_seq = chunk_rows // B
-        h_out = h_flat.view(B, chunks_per_seq, H, K, V)
+    # FLA returns (B, NT, H, K, V); varlen packs all sequences' chunks flat.
+    h_out = (
+        h_flat.view(1, chunk_rows, H, K, V)
+        if is_varlen
+        else h_flat.view(B, chunk_rows // B, H, K, V)
+    )
     v_new = v_new_flat.view(B, T_, H, V)
     final_state = ht if store_ht else None
     return h_out, v_new, final_state

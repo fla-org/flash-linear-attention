@@ -5,13 +5,11 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""Streaming DPLR backward diagnostic kernels.
+"""Streaming DPLR backward.
 
-V1 fuses the reverse `dhu` scan with the q/o-side backward consumer so the
+The reverse `dhu` scan is fused with the q/o-side backward consumer so the
 per-chunk `dh` state stays inside one sequence/head program instead of being
-materialized as a global `(n_chunks, H, K, V)` tensor.  It deliberately keeps
-the existing global `dv_full` workspace so correctness is isolated to the
-`dh` lifetime change.
+materialized as a global `(n_chunks, H, K, V)` tensor.
 """
 
 import tilelang
@@ -31,14 +29,7 @@ from .schedules import (
 from .utils import ChunkLayout, build_rect_chunk_layout, build_varlen_chunk_layout
 
 
-def _stream_bwd_config(
-    BT: int,
-    *,
-    K: int,
-    V: int,
-    in_dtype: str,
-    cc: int,
-):
+def _stream_bwd_config(BT: int, cc: int) -> dict[str, int]:
     # Micro-autotune on H800 (cc90) shows the high-SMEM schedule is faster with
     # 256 threads for all BT>=32 training shapes, not just K=V=128.
     if cc >= 90 and BT >= 32:
@@ -60,11 +51,11 @@ def _select_stream_bwd_schedule(
     smem_cap = get_device_smem_optin(index)
     major, minor = get_device_capability(index)
     cc = major * 10 + minor
-    selected = stream_bwd_schedule_or_none(K=K, V=V, BT=BT, in_dtype=in_dtype, smem_cap=smem_cap, cc=cc)
+    selected = stream_bwd_schedule_or_none(K=K, V=V, BT=BT, in_dtype=in_dtype, smem_cap=smem_cap)
     if selected == "high":
-        return "high", _stream_bwd_config(BT, K=K, V=V, in_dtype=in_dtype, cc=cc)
+        return "high", _stream_bwd_config(BT, cc)
     if selected == "mid":
-        return "mid", _stream_bwd_config(BT, K=K, V=V, in_dtype=in_dtype, cc=cc)
+        return "mid", _stream_bwd_config(BT, cc)
     if selected == "low_v2":
         return "low_v2", stream_low_bwd_config(BT, V)
     name = torch.cuda.get_device_properties(index).name
@@ -85,7 +76,6 @@ def _select_stream_bwd_schedule(
 def _chunk_dplr_bwd_stream_dhu_o_kernel(
     H, K, V, BT,
     in_dtype, state_dtype,
-    scale_value: float,
     USE_FINAL_STATE_GRADIENT: bool,
     USE_INITIAL_STATE: bool,
     threads: int = 128,
@@ -402,7 +392,6 @@ def _chunk_dplr_bwd_stream_dhu_o_kernel(
 def _chunk_dplr_bwd_stream_dhu_o_low_smem_kernel(
     H, K, V, BT,
     in_dtype, state_dtype,
-    scale_value: float,
     USE_FINAL_STATE_GRADIENT: bool,
     USE_INITIAL_STATE: bool,
     threads: int = 128,
@@ -746,9 +735,7 @@ def chunk_dplr_bwd_stream_dhu_o_into(
     dh0_out: torch.Tensor,
     cu_seqlens: torch.Tensor | None = None,
     chunk_size: int = 16,
-    scale: float = 1.0,
     chunk_layout: ChunkLayout | None = None,
-    allocate_state_cache: bool | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     B, T_, H, K = qg.shape
     V = do.shape[-1]
@@ -757,7 +744,7 @@ def chunk_dplr_bwd_stream_dhu_o_into(
     for out in (dq_out, dk_out, dw_out, db_out, dgk_last_out, dv2_out, dv_full_out, dh0_out):
         assert out.is_contiguous(), "chunk_dplr_bwd_stream_dhu_o_into requires contiguous outputs"
     if V != K:
-        raise NotImplementedError("stream_bwd_v1 currently targets K == V training shapes.")
+        raise NotImplementedError("The fused DPLR stream backward requires K == V.")
     if is_varlen:
         assert B == 1
         layout = chunk_layout if chunk_layout is not None else build_varlen_chunk_layout(cu_seqlens, BT, T_)
@@ -770,8 +757,7 @@ def chunk_dplr_bwd_stream_dhu_o_into(
     state_dtype = "float32"
     use_dht = dht is not None
     use_dh0 = h0 is not None
-    allocate_state_cache = bool(allocate_state_cache) if allocate_state_cache is not None else False
-    n_dh0 = n_seqs if (use_dh0 or allocate_state_cache) else 1
+    n_dh0 = n_seqs if use_dh0 else 1
 
     qg_f = qg.reshape(n_tokens, H, K).contiguous()
     bg_f = bg.reshape(n_tokens, H, K).contiguous()
@@ -787,8 +773,6 @@ def chunk_dplr_bwd_stream_dhu_o_into(
 
     if use_dht:
         dht_f = dht.reshape(n_seqs, H, K, V).contiguous().to(torch.float32)
-    elif allocate_state_cache:
-        dht_f = torch.zeros((n_seqs, H, K, V), dtype=torch.float32, device=qg.device)
     else:
         dht_f = torch.empty((1, H, K, V), dtype=torch.float32, device=qg.device)
 
@@ -811,13 +795,13 @@ def chunk_dplr_bwd_stream_dhu_o_into(
     if schedule == "low_v2":
         kernel = _chunk_dplr_bwd_stream_dhu_o_low_smem_kernel(
             H, K, V, BT,
-            in_dtype, state_dtype, float(scale), use_dht, use_dh0,
+            in_dtype, state_dtype, use_dht, use_dh0,
             **config,
         )
     else:
         kernel = _chunk_dplr_bwd_stream_dhu_o_kernel(
             H, K, V, BT,
-            in_dtype, state_dtype, float(scale), use_dht, use_dh0,
+            in_dtype, state_dtype, use_dht, use_dh0,
             alias_kv=(schedule == "mid"),
             **config,
         )

@@ -145,7 +145,7 @@ class DPLRTileLangBackend(BaseBackend):
             )
         stream_schedule = stream_bwd_schedule_or_none(
             K=K, V=K, BT=chunk_size, in_dtype=in_dtype,
-            smem_cap=smem_cap, cc=cc_major * 10 + cc_minor,
+            smem_cap=smem_cap,
         )
         if stream_schedule is None:
             return False, (

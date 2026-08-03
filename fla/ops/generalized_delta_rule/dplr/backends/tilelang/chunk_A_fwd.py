@@ -35,7 +35,7 @@ from fla.utils import get_device_capability
 from .utils import ChunkLayout, build_rect_chunk_layout, build_varlen_chunk_layout
 
 
-def _select_a_fwd_threads(major: int, K: int, BT: int) -> int:
+def _select_a_fwd_threads(major: int, BT: int) -> int:
     if BT < 32:
         return 32
     if major >= 9 and BT >= 64:
@@ -47,7 +47,6 @@ def _chunk_dplr_fwd_intra_tensorcore_kernel_impl(
     H, K, BT, in_dtype,
     scale_value: float,
     threads: int = 128,
-    USE_SWIZZLE: bool = False,
 ):
     acc_dtype = "float32"
     # fp16 cannot hold the centered exp2 operands (|centered_gi| can reach
@@ -78,7 +77,6 @@ def _chunk_dplr_fwd_intra_tensorcore_kernel_impl(
         Aak: T.Tensor((n_tokens, H, BT), "float16"),
     ):
         with T.Kernel(n_chunks, H, threads=threads) as (i_c, i_h):
-            T.use_swizzle(10, enable=USE_SWIZZLE)
             i_n = chunk_indices[i_c, 0]
             i_t = chunk_indices[i_c, 1]
             safe_i_n = T.max(i_n, 0)
@@ -205,9 +203,8 @@ def _chunk_dplr_fwd_intra_tensorcore_kernel_vec(
     H, K, BT, in_dtype,
     scale_value: float,
     threads: int = 128,
-    USE_SWIZZLE: bool = False,
 ):
-    return _chunk_dplr_fwd_intra_tensorcore_kernel_impl(H, K, BT, in_dtype, scale_value, threads, USE_SWIZZLE)
+    return _chunk_dplr_fwd_intra_tensorcore_kernel_impl(H, K, BT, in_dtype, scale_value, threads)
 
 
 @tilelang.jit(
@@ -221,22 +218,20 @@ def _chunk_dplr_fwd_intra_tensorcore_kernel_novec(
     H, K, BT, in_dtype,
     scale_value: float,
     threads: int = 128,
-    USE_SWIZZLE: bool = False,
 ):
-    return _chunk_dplr_fwd_intra_tensorcore_kernel_impl(H, K, BT, in_dtype, scale_value, threads, USE_SWIZZLE)
+    return _chunk_dplr_fwd_intra_tensorcore_kernel_impl(H, K, BT, in_dtype, scale_value, threads)
 
 
 def _chunk_dplr_fwd_intra_tensorcore_kernel(
     H, K, BT, in_dtype,
     scale_value: float,
     threads: int = 128,
-    USE_SWIZZLE: bool = False,
 ):
     # tilelang 0.1.12's vectorize planner breaks the ThreadSync pass for this
     # kernel at BT <= 16 (K=128); compile that shape without vectorization.
     if BT <= 16:
-        return _chunk_dplr_fwd_intra_tensorcore_kernel_novec(H, K, BT, in_dtype, scale_value, threads, USE_SWIZZLE)
-    return _chunk_dplr_fwd_intra_tensorcore_kernel_vec(H, K, BT, in_dtype, scale_value, threads, USE_SWIZZLE)
+        return _chunk_dplr_fwd_intra_tensorcore_kernel_novec(H, K, BT, in_dtype, scale_value, threads)
+    return _chunk_dplr_fwd_intra_tensorcore_kernel_vec(H, K, BT, in_dtype, scale_value, threads)
 
 
 def chunk_dplr_fwd_intra(
@@ -274,7 +269,7 @@ def chunk_dplr_fwd_intra(
     ge_f = ge.reshape(N_tokens, H, K).contiguous()
 
     major = get_device_capability(q.device.index)[0] if q.is_cuda else 0
-    threads = _select_a_fwd_threads(major, K, BT)
+    threads = _select_a_fwd_threads(major, BT)
     kernel = _chunk_dplr_fwd_intra_tensorcore_kernel(
         H, K, BT, in_dtype, float(scale), threads=threads,
     )
@@ -315,10 +310,9 @@ def _chunk_dplr_fwd_intra_from_gk_tensorcore_kernel(
     scale_value: float,
     cumsum_scale_value: float,
     threads: int = 128,
-    USE_SWIZZLE: bool = False,
     gk_dtype: str | None = None,
 ):
-    """Rectangular eval A-stage that computes chunk-local gi inside the CTA."""
+    """K=64 A-stage with the chunk-local gi cumsum computed inside the CTA."""
     acc_dtype = "float32"
     # fp16 cannot hold the centered exp2 operands (|centered_gi| can reach
     # ~115 log2 at BT=32); keep the q-side GEMM operands in fp32 there, as
@@ -350,7 +344,6 @@ def _chunk_dplr_fwd_intra_from_gk_tensorcore_kernel(
         gi_out: T.Tensor((n_tokens, H, K), acc_dtype),
     ):
         with T.Kernel(n_chunks, H, threads=threads) as (i_c, i_h):
-            T.use_swizzle(10, enable=USE_SWIZZLE)
             i_n = chunk_indices[i_c, 0]
             i_t = chunk_indices[i_c, 1]
             safe_i_n = T.max(i_n, 0)
@@ -526,7 +519,7 @@ def chunk_dplr_fwd_intra_from_gk(
     gk_f = gk.reshape(n_tokens, H, K).contiguous()
 
     major = get_device_capability(q.device.index)[0] if q.is_cuda else 0
-    threads = _select_a_fwd_threads(major, K, BT)
+    threads = _select_a_fwd_threads(major, BT)
     kernel = _chunk_dplr_fwd_intra_from_gk_tensorcore_kernel(
         H, K, BT, in_dtype, float(scale), float(RCP_LN2),
         threads=threads,

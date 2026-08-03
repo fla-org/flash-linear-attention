@@ -42,17 +42,14 @@ def stream_low_default_qside_bv(BT: int) -> int:
     return 32 if BT >= 64 else 16
 
 
-def stream_low_bwd_config(BT: int, V: int, *, qside_bv: int | None = None):
+def stream_low_bwd_config(BT: int, V: int) -> dict[str, int]:
     # At K=V=128 the persistent (K, V) fp32 dh fragment alone is 128 regs per
     # thread at 128 threads, so the serial chunk loop spills to local memory
     # every iteration; 256 threads halves that to a spill-free 64.
-    config = {"threads": 256 if V >= 128 else stream_default_threads(BT)}
-    if qside_bv is None:
-        qside_bv = stream_low_default_qside_bv(BT)
-    if qside_bv > V:
-        raise ValueError(f"DPLR low-SMEM qside_bv={qside_bv} exceeds V={V}")
-    config["qside_bv"] = qside_bv
-    return config
+    return {
+        "threads": 256 if V >= 128 else stream_default_threads(BT),
+        "qside_bv": stream_low_default_qside_bv(BT),
+    }
 
 
 def dtype_nbytes(dtype: str) -> int:
@@ -103,7 +100,6 @@ def stream_bwd_schedule_or_none(
     BT: int,
     in_dtype: str,
     smem_cap: int,
-    cc: int,
 ) -> str | None:
     """Return the stream-backward schedule that fits `smem_cap`, or None.
 
@@ -144,5 +140,5 @@ def chunk64_schedule_or_none(
     if cc != 90 and smem_cap < A_BWD_FUSED_BT64_SMEM_BYTES:
         return None
     return stream_bwd_schedule_or_none(
-        K=K, V=V, BT=64, in_dtype=in_dtype, smem_cap=smem_cap, cc=cc,
+        K=K, V=V, BT=64, in_dtype=in_dtype, smem_cap=smem_cap,
     )

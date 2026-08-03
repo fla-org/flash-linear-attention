@@ -22,10 +22,6 @@ from fla.utils import get_device_capability, get_device_smem_optin
 
 from .utils import ChunkLayout, build_rect_chunk_layout, build_varlen_chunk_layout
 
-_HO_FWD_CONFIGS = [
-    {"BV": 64, "threads": 256},
-]
-
 
 def _dtype_bytes(dtype: str) -> int:
     return 4 if dtype in {"float32", "float"} else 2
@@ -40,14 +36,9 @@ def _ho_smem_bytes(BT: int, K: int, BV: int, in_dtype: str) -> int:
     )
 
 
-def _ho_fwd_configs(
-    H, K, V, BT,
-    in_dtype, state_dtype, USE_INITIAL_STATE, STORE_FINAL_STATE,
-    BV: int = 64, threads: int = 128,
-    device_index: int = 0,
-):
+def _ho_fwd_config(K: int, V: int, BT: int, in_dtype: str, device_index: int) -> dict[str, int]:
     if not torch.cuda.is_available():
-        return [{"BV": 16, "threads": 64}]
+        return {"BV": 16, "threads": 64}
     major = get_device_capability(device_index)[0]
     smem_limit = get_device_smem_optin(device_index)
 
@@ -60,14 +51,12 @@ def _ho_fwd_configs(
     if BT <= 16:
         # 16-row GEMMs only partition across <= 2 warps (m_warp x n_warp must
         # equal num_warps with >= 16 rows and >= 8 cols per warp).
-        config = {"BV": pick([64, 32, 16]), "threads": 64}
+        return {"BV": pick([64, 32, 16]), "threads": 64}
     elif major >= 9 and K <= 128:
-        config = {"BV": pick([64, 32, 16]), "threads": 256}
+        return {"BV": pick([64, 32, 16]), "threads": 256}
     elif major == 8:
-        config = {"BV": pick([32, 16]), "threads": 128}
-    else:
-        config = {"BV": 16, "threads": 64}
-    return [config]
+        return {"BV": pick([32, 16]), "threads": 128}
+    return {"BV": 16, "threads": 64}
 
 
 def _ho_fragment_merge_flags(
@@ -110,7 +99,6 @@ def _chunk_dplr_fwd_ho_kernel(
     STORE_FINAL_STATE: bool,
     BV: int = 64,
     threads: int = 128,
-    num_stages: int = 0,
     DIRECT_KG_FRAGMENT: bool = False,
     DIRECT_BG_FRAGMENT: bool = False,
 ):
@@ -176,7 +164,7 @@ def _chunk_dplr_fwd_ho_kernel(
                 for k_idx, vv in T.Parallel(K, BV):
                     b_h[k_idx, vv] = 0.0
 
-            for i_t in T.Pipelined(n_chunks, num_stages=num_stages):
+            for i_t in T.serial(n_chunks):
                 chunk_bos = bos + i_t * BT
                 T.copy(b_h, b_h_shared)
                 T.clear(b_hc)
@@ -556,7 +544,6 @@ def chunk_dplr_fwd_ho(
     cu_seqlens: torch.Tensor | None = None,
     chunk_size: int = 64,
     chunk_layout: ChunkLayout | None = None,
-    allocate_state_cache: bool | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     B, T_, H, K = kg.shape
     V = v.shape[-1]
@@ -572,12 +559,9 @@ def chunk_dplr_fwd_ho(
     in_dtype = str(kg.dtype).split(".")[-1]
     state_dtype = "float32"
     use_h0 = initial_state is not None
-    allocate_state_cache = bool(allocate_state_cache) if allocate_state_cache is not None else False
-    n_ht = active_nseq if (output_final_state or allocate_state_cache) else 1
+    n_ht = active_nseq if output_final_state else 1
     if use_h0:
         h0 = initial_state
-    elif allocate_state_cache:
-        h0 = torch.zeros((active_nseq, H, K, V), dtype=torch.float32, device=kg.device)
     else:
         h0 = torch.empty((1, H, K, V), dtype=torch.float32, device=kg.device)
     if h0.dtype != torch.float32:
@@ -593,11 +577,7 @@ def chunk_dplr_fwd_ho(
     A_qk_f = A_qk.reshape(token_rows, H, chunk_size).contiguous()
     A_qb_f = A_qb.reshape(token_rows, H, chunk_size).contiguous()
 
-    config = _ho_fwd_configs(
-        H, K, V, chunk_size,
-        in_dtype, state_dtype, use_h0, output_final_state,
-        device_index=kg.device.index,
-    )[0]
+    config = _ho_fwd_config(K, V, chunk_size, in_dtype, kg.device.index)
     merge_flags = _ho_fragment_merge_flags(
         K, V, chunk_size, in_dtype, False, config,
         device_index=kg.device.index,
@@ -618,7 +598,7 @@ def chunk_dplr_fwd_ho(
     return o_f.view(B, T_, H, V), final_state
 
 
-def _chunk_dplr_fwd_ho_context_schedule(
+def chunk_dplr_fwd_ho_ctx(
     qg: torch.Tensor,
     kg: torch.Tensor,
     v: torch.Tensor,
@@ -668,11 +648,7 @@ def _chunk_dplr_fwd_ho_context_schedule(
     A_qk_f = A_qk.reshape(token_rows, H, chunk_size).contiguous()
     A_qb_f = A_qb.reshape(token_rows, H, chunk_size).contiguous()
 
-    config = _ho_fwd_configs(
-        H, K, V, chunk_size,
-        in_dtype, state_dtype, use_h0, output_final_state,
-        device_index=kg.device.index,
-    )[0]
+    config = _ho_fwd_config(K, V, chunk_size, in_dtype, kg.device.index)
     merge_flags = _ho_fragment_merge_flags(
         K, V, chunk_size, in_dtype, store_context, config,
         device_index=kg.device.index,
@@ -704,73 +680,3 @@ def _chunk_dplr_fwd_ho_context_schedule(
     )
     final_state = ht if output_final_state else None
     return o_f.view(B, T_, H, V), final_state, h_ctx, v_new_ctx.view(B, T_, H, V)
-
-
-def chunk_dplr_fwd_ho_with_context(
-    qg: torch.Tensor,
-    kg: torch.Tensor,
-    v: torch.Tensor,
-    w: torch.Tensor,
-    u: torch.Tensor,
-    bg: torch.Tensor,
-    gk: torch.Tensor,
-    A_qk: torch.Tensor,
-    A_qb: torch.Tensor,
-    initial_state: torch.Tensor | None = None,
-    output_final_state: bool = False,
-    cu_seqlens: torch.Tensor | None = None,
-    chunk_size: int = 64,
-    chunk_layout: ChunkLayout | None = None,
-) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor]:
-    return _chunk_dplr_fwd_ho_context_schedule(
-        qg=qg,
-        kg=kg,
-        v=v,
-        w=w,
-        u=u,
-        bg=bg,
-        gk=gk,
-        A_qk=A_qk,
-        A_qb=A_qb,
-        initial_state=initial_state,
-        output_final_state=output_final_state,
-        cu_seqlens=cu_seqlens,
-        chunk_size=chunk_size,
-        chunk_layout=chunk_layout,
-        store_context=True,
-    )
-
-
-def chunk_dplr_fwd_ho_context_elided(
-    qg: torch.Tensor,
-    kg: torch.Tensor,
-    v: torch.Tensor,
-    w: torch.Tensor,
-    u: torch.Tensor,
-    bg: torch.Tensor,
-    gk: torch.Tensor,
-    A_qk: torch.Tensor,
-    A_qb: torch.Tensor,
-    initial_state: torch.Tensor | None = None,
-    output_final_state: bool = False,
-    cu_seqlens: torch.Tensor | None = None,
-    chunk_size: int = 64,
-    chunk_layout: ChunkLayout | None = None,
-) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor]:
-    return _chunk_dplr_fwd_ho_context_schedule(
-        qg=qg,
-        kg=kg,
-        v=v,
-        w=w,
-        u=u,
-        bg=bg,
-        gk=gk,
-        A_qk=A_qk,
-        A_qb=A_qb,
-        initial_state=initial_state,
-        output_final_state=output_final_state,
-        cu_seqlens=cu_seqlens,
-        chunk_size=chunk_size,
-        chunk_layout=chunk_layout,
-        store_context=False,
-    )
