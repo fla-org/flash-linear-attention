@@ -85,7 +85,7 @@ def chunk_generalized_iplr_delta_rule_fwd_kernel_h(
         p_h = h + ((boh + i_t) * H + i_h) * K*V + o_k[:, None] * V + o_v[None, :]
         tl.store(p_h, b_h.to(p_h.dtype.element_ty), mask=m_h)
         b_hc = tl.zeros([BK, BV], dtype=tl.float32)
-        # Since all DK values must fit in SRAM, subchunking alleviates the SRAM memory burden.
+        # since all DK values must fit in SRAM, subchunking alleviates the SRAM memory burden.
         for i_c in range(tl.cdiv(min(BT, T - i_t * BT), BC)):
             o_c = i_t * BT + i_c * BC + tl.arange(0, BC)
             m_c = o_c < T
