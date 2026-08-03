@@ -330,6 +330,47 @@ def test_chunk_tilelang_route_parity_fp32_gk(monkeypatch):
 
 
 @requires_tilelang_route
+@pytest.mark.parametrize('chunk_size', [16, 32, 64])
+def test_chunk_tilelang_unsafe_gate_stays_on_triton(monkeypatch, chunk_size: int):
+    # safe_gate=False asserts no gate bound, so dispatch must reject the
+    # TileLang route and still return the Triton (sub_intra) results. The
+    # gates here reach magnitudes that would overflow the mid-chunk-centered
+    # tensor-core scheme both backends share.
+    torch.manual_seed(42)
+    B, T, H, D = 8, 512, 32, 64
+    dtype = torch.bfloat16
+    q = torch.randn(B, T, H, D, dtype=dtype)
+    k = torch.randn(B, T, H, D, dtype=dtype)
+    v = torch.randn(B, T, H, D, dtype=dtype)
+    a = F.normalize(torch.rand(B, T, H, D, dtype=dtype), p=2, dim=-1)
+    b = -a
+    gk = (20 * F.logsigmoid(torch.randn(B, T, H, D, dtype=torch.float))).to(dtype)
+    q, k, v, a, b, gk = (x.to(device) for x in (q, k, v, a, b, gk))
+    do = torch.randn_like(v)
+
+    def run():
+        q_, k_, v_, a_, b_, gk_ = (x.detach().clone().requires_grad_(True) for x in (q, k, v, a, b, gk))
+        o, _ = chunk_dplr_delta_rule(
+            q=q_, k=k_, v=v_, a=a_, b=b_, gk=gk_,
+            scale=1.0,
+            safe_gate=False,
+            chunk_size=chunk_size,
+        )
+        (o * do).sum().backward()
+        return o, q_.grad, k_.grad, v_.grad, a_.grad, b_.grad, gk_.grad
+
+    monkeypatch.setenv('FLA_TILELANG', '0')
+    ref = run()
+    calls = _spy_on_tilelang_route(monkeypatch)
+    monkeypatch.setenv('FLA_TILELANG', '1')
+    tri = run()
+    assert not calls, 'TileLang route must stay rejected for safe_gate=False'
+    assert torch.isfinite(tri[0]).all()
+    for name, r, t in zip(('o', 'dq', 'dk', 'dv', 'da', 'db', 'dgk'), ref, tri):
+        assert_close(name, r, t, 0.01)
+
+
+@requires_tilelang_route
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'D', 'dtype', 'chunk_size', 'gate_style'),
     [
