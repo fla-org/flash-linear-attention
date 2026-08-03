@@ -117,7 +117,7 @@ class ForgettingAttention(nn.Module):
         k = rearrange(k, '... (h d) -> ... h d', d=self.head_dim)
         v = rearrange(v, '... (h d) -> ... h d', d=self.head_dim)
 
-        if attention_mask is not None:
+        if cu_seqlens is None and attention_mask is not None:
             q, (k, v, f), indices_q, cu_seqlens, max_seq_lens = unpad_input(q, (k, v, f), attention_mask, q_len, keepdim=True)
             _, cu_seqlens_k = cu_seqlens
             cu_seqlens = cu_seqlens_k
@@ -129,7 +129,7 @@ class ForgettingAttention(nn.Module):
                 o = parallel_forgetting_attn(q, k, v, f, cu_seqlens=cu_seqlens)
         else:
             o = parallel_forgetting_attn(q, k, v, f, cu_seqlens=cu_seqlens)
-        if attention_mask is not None:
+        if cu_seqlens is None and attention_mask is not None:
             o = pad_input(o.squeeze(0), indices_q, batch_size, q_len)
         o = rearrange(o, '... h d -> ... (h d)')
         if self.use_output_gate:

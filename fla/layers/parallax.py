@@ -167,7 +167,7 @@ class Parallax(nn.Module):
             # single-token step -> optimized vector decode; chunked prefill -> tile kernel
             decode_fn = parallax_decode_one_step if q_len == 1 else parallax_decode
             o = decode_fn(q, r, k, v, window_size=self.window_size, cache_start=cache_start)
-        elif attention_mask is not None:
+        elif cu_seqlens is None and attention_mask is not None:
             # Unpad to a single packed sequence (batch folded into the seq axis).
             q, (r, k, v), indices_q, cu_seqlens, _ = unpad_input(
                 q, (r, k, v), attention_mask, q_len, keepdim=True,

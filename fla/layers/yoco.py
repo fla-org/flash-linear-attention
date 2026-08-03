@@ -15,7 +15,14 @@ import torch.nn.functional as F
 from einops import rearrange
 from transformers.utils import logging
 
-from fla.layers.utils import get_layer_cache, get_unpad_data, index_first_axis, pad_input, unpad_input, update_layer_cache
+from fla.layers.utils import (
+    get_layer_cache,
+    pad_input,
+    repad_hidden_states,
+    unpad_hidden_states,
+    unpad_input,
+    update_layer_cache,
+)
 from fla.modules import FusedRMSNormGated, RMSNorm, RotaryEmbedding
 from fla.modules.activations import swiglu
 from fla.modules.rotary import rotary_embedding
@@ -155,10 +162,7 @@ class YOCOGatedRetention(nn.Module):
         last_state = get_layer_cache(self, past_key_values)
 
         cu_seqlens = kwargs.get('cu_seqlens')
-        indices = None
-        if cu_seqlens is None and attention_mask is not None:
-            indices, cu_seqlens, _ = get_unpad_data(attention_mask[:, -q_len:])
-            hidden_states = index_first_axis(rearrange(hidden_states, 'b s ... -> (b s) ...'), indices).unsqueeze(0)
+        hidden_states, indices, cu_seqlens = unpad_hidden_states(hidden_states, cu_seqlens, attention_mask, q_len)
 
         q = rearrange(self.q_proj(hidden_states), '... (h d) -> ... h d', d=self.head_dim)
         k = rearrange(self.k_proj(hidden_states), '... (h d) -> ... h d', d=self.head_dim)
@@ -217,8 +221,7 @@ class YOCOGatedRetention(nn.Module):
             o = swiglu(g, o)
 
         o = self.o_proj(o)
-        if indices is not None:
-            o = pad_input(o.squeeze(0), indices, batch_size, q_len)
+        o = repad_hidden_states(o, indices, batch_size, q_len)
         attentions = None
         return o, attentions, past_key_values
 
