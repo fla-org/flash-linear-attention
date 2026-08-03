@@ -16,7 +16,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 
-from fla.layers.utils import get_layer_cache, get_unpad_data, index_first_axis, pad_input, update_layer_cache
+from fla.layers.utils import get_layer_cache, repad_hidden_states, unpad_hidden_states, update_layer_cache
 from fla.modules import RMSNorm, ShortConvolution
 from fla.modules.activations import swish
 from fla.modules.layernorm import rms_norm_linear
@@ -124,9 +124,7 @@ class HGRN2Attention(nn.Module):
         last_state = get_layer_cache(self, past_key_values)
 
         cu_seqlens = kwargs.get('cu_seqlens')
-        if cu_seqlens is None and attention_mask is not None:
-            indices, cu_seqlens, _ = get_unpad_data(attention_mask[:, -q_len:])
-            hidden_states = index_first_axis(rearrange(hidden_states, "b s ... -> (b s) ..."), indices).unsqueeze(0)
+        hidden_states, indices, cu_seqlens = unpad_hidden_states(hidden_states, cu_seqlens, attention_mask, q_len)
 
         if self.use_short_conv:
             conv_state_q, conv_state_f, conv_state_i = None, None, None
@@ -211,7 +209,6 @@ class HGRN2Attention(nn.Module):
 
         o = rearrange(o, '... h d -> ... (h d)')
         o = rms_norm_linear(o, self.g_norm.weight, self.g_norm.bias, self.o_proj.weight, self.o_proj.bias)
-        if attention_mask is not None:
-            o = pad_input(o.squeeze(0), indices, batch_size, q_len)
+        o = repad_hidden_states(o, indices, batch_size, q_len)
 
         return o, None, past_key_values

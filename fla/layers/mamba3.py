@@ -19,9 +19,8 @@ from transformers.utils import logging
 
 from fla.layers.utils import (
     get_layer_cache,
-    get_unpad_data,
-    index_first_axis,
-    pad_input,
+    repad_hidden_states,
+    unpad_hidden_states,
     update_layer_cache,
 )
 from fla.modules.layernorm_gated import RMSNormGated
@@ -424,11 +423,8 @@ class Mamba3(nn.Module):
         # Prefill with padding mask: pack [B, T, D] -> [1, sum(lens), D] so the
         # upstream varlen kernels (which require batch=1) can consume it.
         indices_q = None
-        if last_state is None and cu_seqlens is None and attention_mask is not None and q_len > 1:
-            indices_q, cu_seqlens, _ = get_unpad_data(attention_mask[:, -q_len:])
-            hidden_states = index_first_axis(
-                rearrange(hidden_states, "b s ... -> (b s) ..."), indices_q,
-            ).unsqueeze(0)
+        if last_state is None and q_len > 1:
+            hidden_states, indices_q, cu_seqlens = unpad_hidden_states(hidden_states, cu_seqlens, attention_mask, q_len)
 
         output, new_state = self.cuda_kernels_forward(
             hidden_states,
@@ -440,8 +436,7 @@ class Mamba3(nn.Module):
         if new_state is not None:
             update_layer_cache(self, past_key_values, recurrent_state=new_state, offset=q_len)
 
-        if indices_q is not None:
-            output = pad_input(output.squeeze(0), indices_q, batch_size, q_len)
+        output = repad_hidden_states(output, indices_q, batch_size, q_len)
 
         return output, None, past_key_values
 
