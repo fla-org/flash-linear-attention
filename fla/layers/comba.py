@@ -28,11 +28,11 @@ if TYPE_CHECKING:
 
 class Comba(nn.Module):
     """
-    The layer implementaion for [Comba: Improving Bilinear RNNs with Closed-loop Control](https://arxiv.org/abs/2506.02475).
+    The layer implementation for [Comba: Improving Bilinear RNNs with Closed-loop Control](https://arxiv.org/abs/2506.02475).
 
     Similar to Mamba2 and Gated-DeltaNet, each layer contains around 6*hidden_size*hidden_size parameters.
 
-    Parameter alloation when use_output_gate=True:
+    Parameter allocation when `use_output_gate=True`:
         - 0.75 * hidden_size * hidden_size for the q_proj and k_proj each
         - 1.5 * hidden_size * hidden_size for the v_proj, g_proj and o_proj each
         - Others are ignorably small.

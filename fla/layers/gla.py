@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 
 class GatedLinearAttention(nn.Module):
     r"""
-    The layer implementaion for [Gated Linear Attention Transformers with Hardware-Efficient Training](https://arxiv.org/abs/2312.06635).  # noqa
+    The layer implementation for [Gated Linear Attention Transformers with Hardware-Efficient Training](https://arxiv.org/abs/2312.06635).  # noqa
 
     Args:
         mode (str, Optional):

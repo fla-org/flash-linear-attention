@@ -862,7 +862,7 @@ def parallel_nsa(
         g_slc (torch.Tensor):
             Gate score for selected attention of shape `[B, TQ, HQ]`.
         g_swa (torch.Tensor):
-            Gate score for sliding attentionof shape `[B, TQ, HQ]`.
+            Gate score for sliding attention of shape `[B, TQ, HQ]`.
         block_indices (torch.LongTensor):
             Block indices of shape `[B, TQ, H, S]`.
             `S` is the number of selected blocks for each query token, which is set to 16 in the paper.
