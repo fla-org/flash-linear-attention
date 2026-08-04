@@ -56,8 +56,8 @@ def _select_stream_bwd_schedule(
         return "high", _stream_bwd_config(BT, cc)
     if selected == "mid":
         return "mid", _stream_bwd_config(BT, cc)
-    if selected == "low_v2":
-        return "low_v2", stream_low_bwd_config(BT, V)
+    if selected == "low":
+        return "low", stream_low_bwd_config(BT, V)
     name = torch.cuda.get_device_properties(index).name
     raise RuntimeError(
         f"No launchable DPLR stream backward schedule for K={K}, V={V}, BT={BT}, "
@@ -73,7 +73,7 @@ def _select_stream_bwd_schedule(
         tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: False,
     },
 )
-def _chunk_dplr_bwd_stream_dhu_o_kernel(
+def _chunk_dplr_bwd_stream_kernel(
     H, K, V, BT,
     in_dtype, state_dtype,
     USE_FINAL_STATE_GRADIENT: bool,
@@ -88,7 +88,7 @@ def _chunk_dplr_bwd_stream_dhu_o_kernel(
     n_seqs = n_seq_plus_one - 1
 
     @T.prim_func
-    def chunk_dplr_bwd_stream_dhu_o_tl(
+    def chunk_dplr_bwd_stream_tl(
         qg: T.Tensor((n_tokens, H, K), in_dtype),
         bg: T.Tensor((n_tokens, H, K), in_dtype),
         w: T.Tensor((n_tokens, H, K), in_dtype),
@@ -380,7 +380,7 @@ def _chunk_dplr_bwd_stream_dhu_o_kernel(
                 for k_idx, vv in T.Parallel(K, V):
                     dh0[i_n, i_h, k_idx, vv] = T.Cast(state_dtype, b_dh[k_idx, vv])
 
-    return chunk_dplr_bwd_stream_dhu_o_tl
+    return chunk_dplr_bwd_stream_tl
 
 
 @tilelang.jit(
@@ -389,7 +389,7 @@ def _chunk_dplr_bwd_stream_dhu_o_kernel(
         tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: False,
     },
 )
-def _chunk_dplr_bwd_stream_dhu_o_low_smem_kernel(
+def _chunk_dplr_bwd_stream_low_smem_kernel(
     H, K, V, BT,
     in_dtype, state_dtype,
     USE_FINAL_STATE_GRADIENT: bool,
@@ -407,7 +407,7 @@ def _chunk_dplr_bwd_stream_dhu_o_low_smem_kernel(
     n_seqs = n_seq_plus_one - 1
 
     @T.prim_func
-    def chunk_dplr_bwd_stream_dhu_o_low_smem_tl(
+    def chunk_dplr_bwd_stream_low_smem_tl(
         qg: T.Tensor((n_tokens, H, K), in_dtype),
         bg: T.Tensor((n_tokens, H, K), in_dtype),
         w: T.Tensor((n_tokens, H, K), in_dtype),
@@ -708,10 +708,10 @@ def _chunk_dplr_bwd_stream_dhu_o_low_smem_kernel(
                 for k_idx, vv in T.Parallel(K, V):
                     dh0[i_n, i_h, k_idx, vv] = T.Cast(state_dtype, b_dh[k_idx, vv])
 
-    return chunk_dplr_bwd_stream_dhu_o_low_smem_tl
+    return chunk_dplr_bwd_stream_low_smem_tl
 
 
-def chunk_dplr_bwd_stream_dhu_o_into(
+def chunk_dplr_bwd_stream_into(
     qg: torch.Tensor,
     bg: torch.Tensor,
     w: torch.Tensor,
@@ -742,7 +742,7 @@ def chunk_dplr_bwd_stream_dhu_o_into(
     BT = int(chunk_size)
     is_varlen = cu_seqlens is not None
     for out in (dq_out, dk_out, dw_out, db_out, dgk_last_out, dv2_out, dv_full_out, dh0_out):
-        assert out.is_contiguous(), "chunk_dplr_bwd_stream_dhu_o_into requires contiguous outputs"
+        assert out.is_contiguous(), "chunk_dplr_bwd_stream_into requires contiguous outputs"
     if V != K:
         raise NotImplementedError("The fused DPLR stream backward requires K == V.")
     if is_varlen:
@@ -792,14 +792,14 @@ def chunk_dplr_bwd_stream_dhu_o_into(
         in_dtype=in_dtype,
         device=qg.device,
     )
-    if schedule == "low_v2":
-        kernel = _chunk_dplr_bwd_stream_dhu_o_low_smem_kernel(
+    if schedule == "low":
+        kernel = _chunk_dplr_bwd_stream_low_smem_kernel(
             H, K, V, BT,
             in_dtype, state_dtype, use_dht, use_dh0,
             **config,
         )
     else:
-        kernel = _chunk_dplr_bwd_stream_dhu_o_kernel(
+        kernel = _chunk_dplr_bwd_stream_kernel(
             H, K, V, BT,
             in_dtype, state_dtype, use_dht, use_dh0,
             alias_kv=(schedule == "mid"),

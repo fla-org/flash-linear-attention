@@ -103,8 +103,8 @@ def test_chunk_verifier_accepts_chunk64_on_large_smem_device(monkeypatch, K: int
 @requires_cuda
 def test_chunk_verifier_accepts_chunk64_k64_on_99kb_device(monkeypatch):
     # cc120's 101376B optin fits every K=64 BT=64 stage: the fused A-backward
-    # at 98432B, the A-forward from_gk at 98304B, and the stream backward via
-    # low_v2 (82944B)
+    # at 98432B, the A-forward from_gk at 98304B, and the stream backward's
+    # low schedule (82944B)
     monkeypatch.setattr(dplr_tilelang_backend, 'get_device_smem_optin', lambda idx: 101376)
     monkeypatch.setattr(dplr_tilelang_backend, 'get_device_capability', lambda idx: (12, 0))
     ok, reason = DPLRTileLangBackend().chunk_dplr_delta_rule_verifier(
@@ -151,7 +151,7 @@ def test_chunk_verifier_accepts_lower_bound_chunk64(monkeypatch):
         ('chunk16_k128', 'slower than Triton'),
         ('chunk48', 'chunk_size'),
         ('small_grid', 'small grids'),
-        ('low_v2_small_grid', 'low-smem stream backward'),
+        ('low_small_grid', 'low-smem stream backward'),
         ('cp_initial_state', 'initial_state with CP'),
         ('cp_final_state', 'output_final_state with CP'),
         ('cp_no_cu_seqlens', 'cu_seqlens for CP'),
@@ -202,8 +202,8 @@ def test_chunk_verifier_rejects(monkeypatch, case: str, reason: str):
         kwargs['chunk_size'] = 16
     elif case == 'small_grid':
         args = _verifier_inputs(B=1, H=1)
-    elif case == 'low_v2_small_grid':
-        # cc120-class 99KB cap forces the low_v2 stream schedule at K=128;
+    elif case == 'low_small_grid':
+        # cc120-class 99KB cap forces the low stream schedule at K=128;
         # N*H=64 below half the (pinned) SM count must fall back
         monkeypatch.setattr(dplr_tilelang_backend, 'get_device_smem_optin', lambda idx: 101376)
         monkeypatch.setattr(dplr_tilelang_backend, 'get_device_capability', lambda idx: (12, 0))

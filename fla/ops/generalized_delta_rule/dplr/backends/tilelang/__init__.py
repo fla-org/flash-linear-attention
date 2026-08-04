@@ -120,7 +120,8 @@ class DPLRTileLangBackend(BaseBackend):
         if chunk_size == 64:
             # reject configs no BT=64 kernel schedule can launch on this
             # device (e.g. the K=128 stream backward needs 167936B on A100's
-            # 166912B cap or cc120's 101376B cap, where K=64 fits via low_v2);
+            # 166912B cap or cc120's 101376B cap, where K=64 fits via the
+            # low schedule);
             # the arithmetic is shared with the launcher so acceptance
             # implies schedulability
             if chunk64_schedule_or_none(K=K, V=K, in_dtype=in_dtype, smem_cap=smem_cap,
@@ -158,7 +159,7 @@ class DPLRTileLangBackend(BaseBackend):
                 f"chunk_size {chunk_size} with head dim {K} on a device with {smem_cap}B "
                 "shared memory per block; fall back to Triton"
             )
-        if stream_schedule == "low_v2" and n_seqs * q.shape[2] < sm // 2:
+        if stream_schedule == "low" and n_seqs * q.shape[2] < sm // 2:
             # the low-smem stream backward is one serial chunk scan per
             # (seq, head) block with no V split, and its 97KB footprint leaves
             # no room to prefetch; below half the SMs it cannot hide the

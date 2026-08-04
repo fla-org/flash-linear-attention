@@ -29,7 +29,7 @@ from .chunk_A_fwd import (
 )
 from .chunk_h_fwd import chunk_dplr_fwd_h
 from .chunk_ho_fwd import chunk_dplr_fwd_ho, chunk_dplr_fwd_ho_ctx
-from .chunk_stream_bwd import chunk_dplr_bwd_stream_dhu_o_into
+from .chunk_stream_bwd import chunk_dplr_bwd_stream_into
 from .cumsum import chunk_local_cumsum
 from .utils import ChunkLayout, build_varlen_chunk_layout
 from .wy_fast_bwd import chunk_dplr_bwd_wy_into
@@ -320,7 +320,7 @@ def _chunk_dplr_delta_rule_bwd_core(
     db_buf = bg if recycle else torch.empty_like(bg)
     dag_buf = ag if recycle else torch.empty_like(ag)
     dqg, dkg, dw, dbg, dgk_last, dv2, dv_full, dh0 = (
-        chunk_dplr_bwd_stream_dhu_o_into(
+        chunk_dplr_bwd_stream_into(
             qg=qg,
             bg=bg,
             w=w,

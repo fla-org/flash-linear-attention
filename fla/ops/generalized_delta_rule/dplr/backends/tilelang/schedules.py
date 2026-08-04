@@ -116,7 +116,7 @@ def stream_bwd_schedule_or_none(
     if mid_smem <= smem_cap:
         return "mid"
     if low_dtype_supported and low_smem <= smem_cap:
-        return "low_v2"
+        return "low"
     return None
 
 

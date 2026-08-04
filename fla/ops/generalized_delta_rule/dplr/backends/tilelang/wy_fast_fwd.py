@@ -124,7 +124,7 @@ def _prepare_wy_repr_fwd_kernel(H, BT, in_dtype, threads: int = 32):
                   tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: False,
                   },
 )
-def _prepare_wy_repr_fwd_kernel64(H, in_dtype, threads: int = 32):
+def _prepare_wy_repr_fwd_kernel_bt64(H, in_dtype, threads: int = 32):
     acc_dtype = "float32"
     BT = 64
     BC = 32
@@ -133,7 +133,7 @@ def _prepare_wy_repr_fwd_kernel64(H, in_dtype, threads: int = 32):
     )
 
     @T.prim_func
-    def prepare_wy_repr_fwd64_tl(
+    def prepare_wy_repr_fwd_bt64_tl(
         A_ab: T.Tensor((n_tokens, H, BT), "float16"),
         cu_seqlens: T.Tensor((n_seq_plus_one,), "int32"),
         chunk_indices: T.Tensor((n_chunks, 2), "int32"),
@@ -225,7 +225,7 @@ def _prepare_wy_repr_fwd_kernel64(H, in_dtype, threads: int = 32):
                     A_ab_inv[t2, i_h, c] = A3_out[r, c]
                     A_ab_inv[t2, i_h, BC + c] = A2[r, c]
 
-    return prepare_wy_repr_fwd64_tl
+    return prepare_wy_repr_fwd_bt64_tl
 
 
 @tilelang.jit(
@@ -375,7 +375,7 @@ def prepare_wy_repr_fwd(
     A_ak_f = A_ak.reshape(N_tokens, H, BT).contiguous()
 
     if BT == 64:
-        inv_kernel = _prepare_wy_repr_fwd_kernel64(H, in_dtype, threads=32)
+        inv_kernel = _prepare_wy_repr_fwd_kernel_bt64(H, in_dtype, threads=32)
     else:
         inv_kernel = _prepare_wy_repr_fwd_kernel(H, BT, in_dtype, threads=32)
     A_ab_inv_f = torch.empty((N_tokens, H, BT), dtype=torch.float32, device=ag.device)
