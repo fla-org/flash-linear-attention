@@ -47,12 +47,13 @@ jobs:
             // definitions, the files that define the NPU CI stack itself:
             //   pyproject.toml    - pins the [npu] extra (torch_npu / triton-ascend)
             //   fla/utils/        - IS_NPU / device_platform detection, ascend_ub_manager
+            //   fla/modules/      - pure-torch modules run on NPU in the A2 test suite
             //   tests/conftest.py - FLA_NPU_XDIST xdist worker -> device mapping
             // and the benchmark harness invoked by this workflow (benchmarks/).
             // Unlike the H100 'npu_only' detection, __init__.py is NOT excluded
             // here: a change to it affects the NPU backend too, so it should
             // trigger this CI.
-            const npuPattern = /^fla\/(.+\/)?backends\/triton_ascend\/|^\.github\/workflows\/ascend-|^pyproject\.toml$|^fla\/utils\/|^tests\/conftest\.py$|^benchmarks\//;
+            const npuPattern = /^fla\/(.+\/)?backends\/triton_ascend\/|^\.github\/workflows\/ascend-|^pyproject\.toml$|^fla\/utils\/|^fla\/modules\/|^tests\/conftest\.py$|^benchmarks\//;
             const related = files.filter(f => npuPattern.test(f.filename)).map(f => f.filename);
             if (related.length > 0) {
               core.info('NPU-related files changed: ' + related.join(', '));
