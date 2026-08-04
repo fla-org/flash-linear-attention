@@ -381,6 +381,8 @@ Once your change is implemented, tested, and (if it touches performance) benchma
 
 - **Keep the scope focused**: one PR should do one thing. If you have multiple unrelated changes, please split them into separate PRs.
 - **Use Draft PRs**: feel free to open a draft early for design feedback or work-in-progress discussion.
+- **Read `AGENTS.md` and `.agents/skills/fla-mr-readiness` first**: they cover the PR checklist, test-plan requirements, and benchmark evidence standards expected of every pull request.
+- **No busywork PRs**: don't open standalone PRs for typos or isolated style tweaks; fold them into a related substantive change instead.
 
 ### Commit Message Convention
 
