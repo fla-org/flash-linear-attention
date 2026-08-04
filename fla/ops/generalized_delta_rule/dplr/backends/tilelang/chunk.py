@@ -1339,12 +1339,13 @@ def chunk_dplr_delta_rule_tilelang(
     cu_seqlens: torch.Tensor | None = None,
     cu_seqlens_cpu: torch.Tensor | None = None,
     safe_gate: bool = False,
+    lower_bound: float | None = None,
     chunk_size: int | None = None,
     disable_recompute: bool = False,
     cp_context=None,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
-    del cu_seqlens_cpu, safe_gate
+    del cu_seqlens_cpu, safe_gate, lower_bound
     if "head_first" in kwargs:
         raise DeprecationWarning(
             "head_first has been removed; inputs must use [B, T, H, ...]"

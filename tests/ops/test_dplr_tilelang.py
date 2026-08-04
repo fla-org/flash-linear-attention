@@ -114,6 +114,28 @@ def test_chunk_verifier_accepts_chunk64_k64_on_99kb_device(monkeypatch):
 
 
 @requires_cuda
+def test_chunk_verifier_accepts_lower_bound():
+    # a caller-asserted gate bound licenses the route without safe_gate=True:
+    # |-1| keeps the cs32 half-range at 23 log2
+    ok, reason = DPLRTileLangBackend().chunk_dplr_delta_rule_verifier(
+        *_verifier_inputs(), safe_gate=False, lower_bound=-1, chunk_size=32,
+    )
+    assert ok and reason is None
+
+
+@requires_cuda
+def test_chunk_verifier_accepts_lower_bound_chunk64(monkeypatch):
+    # RWKV7's w is architecturally clamped to (-0.61, 0), which keeps the cs64
+    # half-range at 28 log2
+    monkeypatch.setattr(dplr_tilelang_backend, 'get_device_smem_optin', lambda idx: 101376)
+    monkeypatch.setattr(dplr_tilelang_backend, 'get_device_capability', lambda idx: (12, 0))
+    ok, reason = DPLRTileLangBackend().chunk_dplr_delta_rule_verifier(
+        *_verifier_inputs(K=64), safe_gate=False, lower_bound=-0.61, chunk_size=64,
+    )
+    assert ok and reason is None
+
+
+@requires_cuda
 @pytest.mark.parametrize(
     ('case', 'reason'),
     [
@@ -122,6 +144,8 @@ def test_chunk_verifier_accepts_chunk64_k64_on_99kb_device(monkeypatch):
         ('kv_mismatch', 'K == V'),
         ('head_dim', 'head dim'),
         ('safe_gate', 'requires safe_gate=True'),
+        ('lower_bound_unfit', 'requires safe_gate=True'),
+        ('lower_bound_positive', 'lower_bound < 0'),
         ('chunk64_a100_k128', 'no launchable backward schedule'),
         ('chunk64_small_smem_k128', 'no launchable backward schedule'),
         ('chunk16_k128', 'slower than Triton'),
@@ -148,6 +172,17 @@ def test_chunk_verifier_rejects(monkeypatch, case: str, reason: str):
     elif case == 'safe_gate':
         args = _verifier_inputs()
         kwargs['safe_gate'] = False
+    elif case == 'lower_bound_unfit':
+        # |-5| pushes the cs64 half-range to 231 log2, past the fp32 limit
+        args = _verifier_inputs()
+        kwargs['safe_gate'] = False
+        kwargs['lower_bound'] = -5
+        kwargs['chunk_size'] = 64
+    elif case == 'lower_bound_positive':
+        # a non-negative bound is invalid (gk is a log-decay < 0) even with
+        # safe_gate=True, so both routes surface the same ValueError
+        args = _verifier_inputs()
+        kwargs['lower_bound'] = 0.5
     elif case == 'chunk64_a100_k128':
         # high=297472B, mid=215552B and low=167936B all exceed A100's 166912B optin
         monkeypatch.setattr(dplr_tilelang_backend, 'get_device_smem_optin', lambda idx: 166912)
@@ -196,6 +231,12 @@ def test_chunk_verifier_rejects(monkeypatch, case: str, reason: str):
         kwargs['chunk_size'] = 32
     ok, why = DPLRTileLangBackend().chunk_dplr_delta_rule_verifier(*args, **kwargs)
     assert not ok and reason in why
+
+
+@requires_cuda
+def test_chunk_lower_bound_must_be_negative():
+    with pytest.raises(ValueError, match='lower_bound'):
+        chunk_dplr_delta_rule(*_verifier_inputs(), safe_gate=False, lower_bound=0.5)
 
 
 def _spy_on_tilelang_route(monkeypatch):
@@ -368,6 +409,39 @@ def test_chunk_tilelang_unsafe_gate_stays_on_triton(monkeypatch, chunk_size: int
     assert torch.isfinite(tri[0]).all()
     for name, r, t in zip(('o', 'dq', 'dk', 'dv', 'da', 'db', 'dgk'), ref, tri):
         assert_close(name, r, t, 0.01)
+
+
+@requires_tilelang_route
+@pytest.mark.parametrize('chunk_size', [16, 32])
+def test_chunk_tilelang_lower_bound_takes_tilelang_route(monkeypatch, chunk_size: int):
+    # safe_gate=False with a fitting lower_bound must take the TileLang route;
+    # the Triton reference canonicalizes to the same centered tensor-core
+    # scheme, so both sides compute identical math here
+    torch.manual_seed(42)
+    B, T, H, D = 8, 512, 32, 64
+    dtype = torch.bfloat16
+    q = torch.randn(B, T, H, D, dtype=dtype)
+    k = torch.randn(B, T, H, D, dtype=dtype)
+    v = torch.randn(B, T, H, D, dtype=dtype)
+    a = F.normalize(torch.rand(B, T, H, D, dtype=dtype), p=2, dim=-1)
+    b = -a
+    gk = F.logsigmoid(torch.randn(B, T, H, D, dtype=torch.float)).to(dtype).clamp(-1, 0)
+    q, k, v, a, b, gk = (x.to(device) for x in (q, k, v, a, b, gk))
+    do = torch.randn_like(v)
+
+    def run():
+        q_, k_, v_, a_, b_, gk_ = (x.detach().clone().requires_grad_(True) for x in (q, k, v, a, b, gk))
+        o, _ = chunk_dplr_delta_rule(
+            q=q_, k=k_, v=v_, a=a_, b=b_, gk=gk_,
+            scale=1.0,
+            safe_gate=False,
+            lower_bound=-1,
+            chunk_size=chunk_size,
+        )
+        (o * do).sum().backward()
+        return o, q_.grad, k_.grad, v_.grad, a_.grad, b_.grad, gk_.grad
+
+    _assert_route_parity(monkeypatch, run, ('o', 'dq', 'dk', 'dv', 'da', 'db', 'dgk'))
 
 
 @requires_tilelang_route

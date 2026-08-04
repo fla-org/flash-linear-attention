@@ -55,11 +55,15 @@ class DPLRTileLangBackend(BaseBackend):
         cu_seqlens: torch.LongTensor | None = None,
         cu_seqlens_cpu: torch.LongTensor | None = None,
         safe_gate: bool = False,
+        lower_bound: float | None = None,
         chunk_size: int | None = None,
         disable_recompute: bool = False,
         cp_context=None,
         **kwargs,
     ) -> tuple[bool, str | None]:
+        if lower_bound is not None and lower_bound >= 0:
+            # rejected so the default implementation surfaces the ValueError
+            return False, "TileLang backend requires `lower_bound < 0`; fall back to Triton"
         if cp_context is not None:
             if initial_state is not None:
                 return False, "TileLang backend does not support initial_state with CP; fall back to Triton"
@@ -91,16 +95,17 @@ class DPLRTileLangBackend(BaseBackend):
             # The A-stage centers gates mid-chunk for its tensor-core operands
             # (exp2(gi - gi[mid])), whose per-row exponents reach
             # (chunk_size/2) * max|gk| * log2(e) and must stay below the fp32
-            # exponent range (~127 log2). Only safe_gate=True callers assert a
-            # gate bound at all: the documented [-5, 0) range keeps BT<=32 at
-            # <=115 log2, and BT=64 is licensed by callers with
-            # architecturally clamped gates such as RWKV7 (w in (-0.61, 0)).
-            # Unbounded gates must stay on Triton, whose sub_intra is correct
-            # for arbitrary gates.
-            return False, (
-                "TileLang backend requires safe_gate=True (its mid-chunk-centered "
-                "tensor-core scheme overflows fp32 for unbounded gates); fall back to Triton"
-            )
+            # exponent range (~127 log2). safe_gate=True callers assert a gate
+            # bound themselves; a lower_bound that fits the chunk size asserts
+            # the same bound explicitly. Unbounded gates must stay on Triton,
+            # whose sub_intra is correct for arbitrary gates.
+            from fla.ops.generalized_delta_rule.dplr.chunk import gate_bound_is_safe
+            if lower_bound is None or not gate_bound_is_safe(lower_bound, chunk_size):
+                return False, (
+                    "TileLang backend requires safe_gate=True or a lower_bound that "
+                    "fits the chunk size (its mid-chunk-centered tensor-core scheme "
+                    "overflows fp32 for unbounded gates); fall back to Triton"
+                )
         if not q.is_cuda:
             return False, "TileLang backend is CUDA-only; fall back to Triton"
         dev = q.device.index or 0
@@ -179,6 +184,7 @@ class DPLRTileLangBackend(BaseBackend):
         cu_seqlens: torch.LongTensor | None = None,
         cu_seqlens_cpu: torch.LongTensor | None = None,
         safe_gate: bool = False,
+        lower_bound: float | None = None,
         chunk_size: int | None = None,
         disable_recompute: bool = False,
         cp_context=None,
@@ -196,6 +202,7 @@ class DPLRTileLangBackend(BaseBackend):
                 cu_seqlens=cu_seqlens,
                 cu_seqlens_cpu=cu_seqlens_cpu,
                 safe_gate=safe_gate,
+                lower_bound=lower_bound,
                 chunk_size=chunk_size,
                 disable_recompute=disable_recompute,
                 cp_context=cp_context,
@@ -224,6 +231,7 @@ class DPLRTileLangBackend(BaseBackend):
                 cu_seqlens=cu_seqlens,
                 cu_seqlens_cpu=cu_seqlens_cpu,
                 safe_gate=safe_gate,
+                lower_bound=lower_bound,
                 chunk_size=chunk_size,
                 disable_recompute=disable_recompute,
                 cp_context=cp_context,
