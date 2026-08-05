@@ -22,14 +22,54 @@ on:
       - ".github/workflows/*.yml"
 
 jobs:
+  changes:
+    name: Detect NPU-related changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      npu_related: ${{ steps.detect.outputs.npu_related }}
+    steps:
+      - name: Detect NPU-related diff
+        id: detect
+        uses: actions/github-script@v9.0.0
+        with:
+          script: |
+            if (context.eventName !== 'pull_request') {
+              core.setOutput('npu_related', 'false');
+              return;
+            }
+            const pr = context.payload.pull_request;
+            const { owner, repo } = context.repo;
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner, repo, pull_number: pr.number, per_page: 100,
+            });
+            // NPU-related set: triton-ascend backend files, Ascend workflow
+            // definitions, the files that define the NPU CI stack itself:
+            //   pyproject.toml    - pins the [npu] extra (torch_npu / triton-ascend)
+            //   fla/utils/        - IS_NPU / device_platform detection, ascend_ub_manager
+            //   fla/modules/      - pure-torch modules run on NPU in the A2 test suite
+            //   tests/conftest.py - FLA_NPU_XDIST xdist worker -> device mapping
+            // and the benchmark harness invoked by this workflow (benchmarks/).
+            // Unlike the H100 'npu_only' detection, __init__.py is NOT excluded
+            // here: a change to it affects the NPU backend too, so it should
+            // trigger this CI.
+            const npuPattern = /^fla\/(.+\/)?backends\/triton_ascend\/|^\.github\/workflows\/ascend-|^pyproject\.toml$|^fla\/utils\/|^fla\/modules\/|^tests\/conftest\.py$|^benchmarks\//;
+            const related = files.filter(f => npuPattern.test(f.filename)).map(f => f.filename);
+            if (related.length > 0) {
+              core.info('NPU-related files changed: ' + related.join(', '));
+            }
+            core.setOutput('npu_related', related.length > 0 ? 'true' : 'false');
+
   benchmark-a2-npu-pytorch-2-7:
     name: Benchmark A2 NPU (PyTorch 2.7.1)
+    needs: changes
     if: |
       github.event_name == 'workflow_dispatch' ||
       github.event_name == 'push' ||
       (
         github.event_name == 'pull_request' &&
         (
+          needs.changes.outputs.npu_related == 'true' ||
           contains(github.event.pull_request.title, 'npu') ||
           contains(github.event.pull_request.title, 'NPU') ||
           contains(github.event.pull_request.title, 'ascend') ||
@@ -47,7 +87,7 @@ jobs:
 
     runs-on: ${{ matrix.os }}
 
-    timeout-minutes: 360
+    timeout-minutes: 150
 
     concurrency:
       group: ${{ github.workflow }}-${{ github.ref }}-${{ matrix.os }}-${{ matrix.python }}
