@@ -17,6 +17,7 @@ from einops import rearrange, repeat
 from fla.layers.utils import get_layer_cache, repad_hidden_states, unpad_hidden_states, update_layer_cache
 from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
 from fla.modules.activations import ACT2FN
+from fla.modules.convolution import can_fuse_qkv_short_conv, fused_qkv_short_conv
 from fla.ops.gla import chunk_gla, fused_chunk_gla, fused_recurrent_gla
 
 if TYPE_CHECKING:
@@ -198,8 +199,23 @@ class GatedLinearAttention(nn.Module):
         cu_seqlens = kwargs.get('cu_seqlens')
         hidden_states, indices, cu_seqlens = unpad_hidden_states(hidden_states, cu_seqlens, attention_mask, q_len)
 
-        if self.use_short_conv:
-            conv_state_q, conv_state_k, conv_state_v = None, None, None
+        conv_state_q, conv_state_k, conv_state_v = None, None, None
+        if (
+            self.use_short_conv
+            and last_state is None
+            and not use_cache
+            and cu_seqlens is None
+            and can_fuse_qkv_short_conv(self.q_conv1d, self.k_conv1d, self.v_conv1d)
+        ):
+            q, k, v = fused_qkv_short_conv(
+                self.q_proj(hidden_states),
+                self.k_proj(hidden_states),
+                self.v_proj(hidden_states),
+                self.q_conv1d,
+                self.k_conv1d,
+                self.v_conv1d,
+            )
+        elif self.use_short_conv:
             if last_state is not None:
                 conv_state_q, conv_state_k, conv_state_v = last_state['conv_state']
             q, conv_state_q = self.q_conv1d(
