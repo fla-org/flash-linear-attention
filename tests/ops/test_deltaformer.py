@@ -23,14 +23,18 @@ pytestmark = [
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'D', 'dtype'),
+    ('B', 'T', 'H', 'D', 'C', 'dtype'),
     [
-        pytest.param(*test, id="B{}-T{}-H{}-D{}-{}".format(*test))
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-C{}-{}".format(*test))
         for test in [
-            (2, 128, 2, 64, torch.float16),
-            (1, 256, 4, 64, torch.float16),
-            (2, 512, 4, 64, torch.float16),
-            (4, 1024, 4, 128, torch.float16),
+            (2, 128, 2, 64, 512, torch.float16),
+            (1, 256, 4, 64, 512, torch.float16),
+            (2, 512, 4, 64, 512, torch.float16),
+            (4, 1024, 4, 128, 512, torch.float16),
+            # chunk sizes the autotuned BLOCK_T values (64, 32) do not divide, so a key
+            # tile straddles the chunk boundary
+            (2, 200, 2, 64, 48, torch.float16),
+            (1, 400, 2, 64, 96, torch.float16),
         ]
     ],
 )
@@ -43,6 +47,7 @@ def test_deltaformer_attn(
     T: int,
     H: int,
     D: int,
+    C: int,
     dtype: torch.dtype,
 ):
     """
@@ -64,7 +69,7 @@ def test_deltaformer_attn(
     ref_dv, v.grad = v.grad.clone(), None
     ref_dbeta, beta.grad = beta.grad.clone(), None
 
-    tri = deltaformer_attn(q, k, v, beta)
+    tri = deltaformer_attn(q, k, v, beta, C=C)
     tri.backward(do)
     tri_dq, q.grad = q.grad.clone(), None
     tri_dk, k.grad = k.grad.clone(), None

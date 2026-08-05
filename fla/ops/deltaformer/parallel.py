@@ -172,7 +172,8 @@ def parallel_deltaformer_fwd_kernel(
         k = tl.load(k_blk_ptr, mask=m_kv[None, :], other=0.0)
         qk = tl.dot(q, k) * qk_scale
 
-        if kv_i >= T - C:
+        # tiles straddling the T - C boundary need the mask too; prefix columns evaluate to false
+        if kv_i + BLOCK_T > T - C:
             mask = (T - C - kv_i + rowid_block[:, None] - colid_block[None, :] < 1)
             qk = tl.where(mask, -1e6, qk)
 
@@ -188,7 +189,9 @@ def parallel_deltaformer_fwd_kernel(
 
         if kv_i < T - C:
             u_blk_ptr = u_ptr + pid_h * D + o_kv[:, None] * (H * D) + o_d[None, :]
-            u = tl.load(u_blk_ptr, mask=m_kv[:, None], other=0.0)
+            # rows at and past T - C are this launch's own output, not yet written
+            m_u = o_kv < T - C
+            u = tl.load(u_blk_ptr, mask=m_u[:, None], other=0.0)
             acc = tl.dot(p.to(u_ptr.dtype.element_ty), u, acc)
 
     lse = rowmax + tl.math.log2(rowsum)
