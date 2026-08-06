@@ -44,6 +44,7 @@ def chunk_kda_fwd_kernel_intra_token_parallel(
     H: tl.constexpr,
     HV: tl.constexpr,
     K: tl.constexpr,
+    BK: tl.constexpr,
     BT: tl.constexpr,
     BC: tl.constexpr,
     BH: tl.constexpr,
@@ -91,7 +92,6 @@ def chunk_kda_fwd_kernel_intra_token_parallel(
     Akk += bos * HV*BC
     beta += bos * HV
 
-    BK: tl.constexpr = triton.next_power_of_2(K)
     o_hv = i_hg * BH + tl.arange(0, BH)
     o_h = o_hv // G
     o_k = tl.arange(0, BK)
@@ -158,6 +158,7 @@ def chunk_kda_fwd_intra_token_parallel(
     N = len(cu_seqlens) - 1 if cu_seqlens is not None else B
     BT = chunk_size
     BC = sub_chunk_size
+    BK = triton.next_power_of_2(K)
 
     def grid(meta): return (B * T, triton.cdiv(HV, meta['BH']))
     chunk_kda_fwd_kernel_intra_token_parallel[grid](
@@ -174,6 +175,7 @@ def chunk_kda_fwd_intra_token_parallel(
         H=H,
         HV=HV,
         K=K,
+        BK=BK,
         BT=BT,
         BC=BC,
     )
