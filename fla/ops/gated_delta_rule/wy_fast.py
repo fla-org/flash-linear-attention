@@ -208,6 +208,9 @@ def prepare_wy_repr_bwd_kernel(
     b_A = tl.zeros([BT, BT], dtype=tl.float32)
     b_dA = tl.where(m_A, -b_dA, 0).to(k.dtype.element_ty)
 
+    # keep this barrier: triton-ascend can misorder b_dA before the dk load-modify-store without it
+    tl.debug_barrier()
+
     for i_k in range(tl.cdiv(K, BK)):
         p_k = tl.make_block_ptr(k + (bos*H + i_h // (HV // H)) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         p_dk = tl.make_block_ptr(dk + (bos*HV + i_h) * K, (T, K), (HV*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
