@@ -21,3 +21,10 @@ File: `fla/ops/common/backends/triton_ascend/chunk_o.py`
 - Fwd: fuse inter+intra, 1D core-grid, host `g.transpose(1,2).contiguous()`.
 - Bwd `G_T_CONTIG`: `chunk_bwd_dv_local_npu`, `chunk_bwd_dqkwg_npu`, `chunk_bwd_kernel_dg_npu` — stride-1 `g_ptr` (`i_b*HV*T+i_h*T` / varlen `bos+i_h*T`), `T_seq` before varlen.
 - dv_local kernel ~6.5→0.18ms, dqkwg ~10.8→0.91ms (B2 T2048 HV8). Fix `BV`, autotune `BK`. Details: [g-contiguous-loading.md](g-contiguous-loading.md).
+
+## `chunk_bwd.py` — varlen `cu_seqlens` int32 overflow
+
+File: `fla/ops/kda/backends/triton_ascend/chunk_bwd.py`
+
+- `chunk_kda_bwd_kernel_dAv_npu` and `chunk_kda_bwd_kernel_wy_v_part_npu` loaded `bos`/`eos` via `.to(tl.int32)` then `(bos * HV + i_hv) * V` — int32 wrap on packed varlen offsets (e.g. HV=32, V=4096 safe `bos` ≈ 16K). Later kernels in the same file already used `tl.int64`.
+- Fix: load `bos`/`eos` as int64; `T = (eos - bos).to(tl.int32)`; non-varlen else-branch `(i_b * T).to(tl.int64)`.

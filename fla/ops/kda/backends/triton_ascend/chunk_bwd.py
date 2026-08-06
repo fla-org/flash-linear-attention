@@ -13,7 +13,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.utils import prepare_chunk_indices
+from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 from fla.ops.utils.op import exp2
 from fla.utils import input_guard
 from fla.utils.ascend_ub_manager import (
@@ -42,15 +42,9 @@ def _get_dAv_bv(BT: int, V: int) -> int:
 
 def _launch_dAv_2d_kernel(kernel, *, nt: int, bh_total: int, kernel_kwargs: dict) -> None:
     max_nt = max_grid_axis_chunks(nt, bh_total, max_grid=ASCEND_MAX_GRID_DIM)
-    chunk_indices = kernel_kwargs.get('chunk_indices')
-    cu_seqlens = kernel_kwargs.get('cu_seqlens')
     for nt_off in range(0, nt, max_nt):
         nt_len = min(max_nt, nt - nt_off)
-        if cu_seqlens is not None and chunk_indices is not None:
-            kernel_kwargs['chunk_indices'] = chunk_indices[nt_off:nt_off + nt_len]
-            kernel_kwargs['NT_OFFSET'] = 0
-        else:
-            kernel_kwargs['NT_OFFSET'] = nt_off
+        kernel_kwargs['NT_OFFSET'] = nt_off
         max_bh = max_grid_axis_chunks(bh_total, nt_len, max_grid=ASCEND_MAX_GRID_DIM)
         for bh_off in range(0, bh_total, max_bh):
             bh_len = min(max_bh, bh_total - bh_off)
@@ -86,10 +80,10 @@ def chunk_kda_bwd_kernel_dAv_npu(
     i_b, i_hv = i_bh // HV, i_bh % HV
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-        T = eos - bos
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = (eos - bos).to(tl.int32)
     else:
-        bos, eos = i_b * T, i_b * T + T
+        bos, eos = (i_b * T).to(tl.int64), (i_b * T + T).to(tl.int64)
 
     v += (bos * HV + i_hv) * V
     do += (bos * HV + i_hv) * V
@@ -208,15 +202,9 @@ def _get_bv(V: int) -> int:
 
 def _launch_2d_kernel(kernel, *, nt: int, bh_total: int, kernel_kwargs: dict, num_warps: int = _NUM_WARPS) -> None:
     max_nt = max_grid_axis_chunks(nt, bh_total, max_grid=ASCEND_MAX_GRID_DIM)
-    chunk_indices = kernel_kwargs.get('chunk_indices')
-    cu_seqlens = kernel_kwargs.get('cu_seqlens')
     for nt_off in range(0, nt, max_nt):
         nt_len = min(max_nt, nt - nt_off)
-        if cu_seqlens is not None and chunk_indices is not None:
-            kernel_kwargs['chunk_indices'] = chunk_indices[nt_off:nt_off + nt_len]
-            kernel_kwargs['NT_OFFSET'] = 0
-        else:
-            kernel_kwargs['NT_OFFSET'] = nt_off
+        kernel_kwargs['NT_OFFSET'] = nt_off
         max_bh = max_grid_axis_chunks(bh_total, nt_len, max_grid=ASCEND_MAX_GRID_DIM)
         for bh_off in range(0, bh_total, max_bh):
             bh_len = min(max_bh, bh_total - bh_off)
@@ -234,19 +222,13 @@ def _launch_3d_kernel(
     num_warps: int = _NUM_WARPS,
 ) -> None:
     max_nk = max_grid_axis_chunks(nk, nt * bh_total, max_grid=ASCEND_MAX_GRID_DIM)
-    chunk_indices = kernel_kwargs.get('chunk_indices')
-    cu_seqlens = kernel_kwargs.get('cu_seqlens')
     for nk_off in range(0, nk, max_nk):
         nk_len = min(max_nk, nk - nk_off)
         kernel_kwargs['K_OFFSET'] = nk_off
         max_nt = max_grid_axis_chunks(nt, nk_len * bh_total, max_grid=ASCEND_MAX_GRID_DIM)
         for nt_off in range(0, nt, max_nt):
             nt_len = min(max_nt, nt - nt_off)
-            if cu_seqlens is not None and chunk_indices is not None:
-                kernel_kwargs['chunk_indices'] = chunk_indices[nt_off:nt_off + nt_len]
-                kernel_kwargs['NT_OFFSET'] = 0
-            else:
-                kernel_kwargs['NT_OFFSET'] = nt_off
+            kernel_kwargs['NT_OFFSET'] = nt_off
             max_bh = max_grid_axis_chunks(bh_total, nk_len * nt_len, max_grid=ASCEND_MAX_GRID_DIM)
             for bh_off in range(0, bh_total, max_bh):
                 bh_len = min(max_bh, bh_total - bh_off)
@@ -281,10 +263,10 @@ def chunk_kda_bwd_kernel_wy_v_part_npu(
 
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-        T = eos - bos
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = (eos - bos).to(tl.int32)
     else:
-        bos, eos = i_b * T, i_b * T + T
+        bos, eos = (i_b * T).to(tl.int64), (i_b * T + T).to(tl.int64)
 
     v += (bos * HV + i_hv) * V
     beta += bos * HV + i_hv
@@ -353,6 +335,7 @@ def chunk_kda_bwd_kernel_wy_k_part_npu(
     dg,
     cu_seqlens,
     chunk_indices,
+    chunk_offsets,
     scale,
     T,
     H: tl.constexpr,
@@ -376,10 +359,10 @@ def chunk_kda_bwd_kernel_wy_k_part_npu(
     i_h = i_hv // (HV // H)
 
     if IS_VARLEN:
-        i_tg = i_t.to(tl.int64)
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
+        i_tg = tl.load(chunk_offsets + i_n).to(tl.int64) + i_t.to(tl.int64)
     else:
         i_tg = (i_b * tl.cdiv(T, BT) + i_t).to(tl.int64)
         bos, eos = (i_b * T).to(tl.int64), (i_b * T + T).to(tl.int64)
@@ -506,6 +489,7 @@ def chunk_kda_bwd_kernel_wy_dw_part_npu(
     dk,
     cu_seqlens,
     chunk_indices,
+    chunk_offsets,
     T,
     H: tl.constexpr,
     HV: tl.constexpr,
@@ -528,10 +512,10 @@ def chunk_kda_bwd_kernel_wy_dw_part_npu(
     i_h = i_hv // (HV // H)
 
     if IS_VARLEN:
-        i_tg = i_t.to(tl.int64)
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
+        i_tg = tl.load(chunk_offsets + i_n).to(tl.int64) + i_t.to(tl.int64)
     else:
         i_tg = (i_b * tl.cdiv(T, BT) + i_t).to(tl.int64)
         bos, eos = (i_b * T).to(tl.int64), (i_b * T + T).to(tl.int64)
@@ -681,7 +665,7 @@ def chunk_kda_bwd_kernel_wy_dA_mid_npu(
     NT_OFFSET: tl.constexpr,
     BH_OFFSET: tl.constexpr,
 ):
-    """T = dA_acc @ A after mask*beta has been applied to dA_acc."""
+    """dA_mid = dA_acc @ A after mask*beta has been applied to dA_acc."""
     i_t = tl.program_id(0) + NT_OFFSET
     i_bh = tl.program_id(1) + BH_OFFSET
     i_b, i_hv = i_bh // HV, i_bh % HV
@@ -722,6 +706,7 @@ def chunk_kda_bwd_kernel_wy_dA_finalize_npu(
     NT_OFFSET: tl.constexpr,
     BH_OFFSET: tl.constexpr,
 ):
+    """dA = mask(-A @ dA_mid); copy db_acc into db."""
     i_t = tl.program_id(0) + NT_OFFSET
     i_bh = tl.program_id(1) + BH_OFFSET
     i_b, i_hv = i_bh // HV, i_bh % HV
@@ -801,6 +786,7 @@ def chunk_kda_bwd_wy_dqkg_fused_npu(
     BV = _get_bv(V)
     NK = triton.cdiv(K, BK)
     is_varlen = cu_seqlens is not None
+    chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT) if is_varlen else g.new_zeros(1, dtype=torch.int32)
 
     common_launch = dict(
         cu_seqlens=cu_seqlens,
@@ -813,6 +799,7 @@ def chunk_kda_bwd_wy_dqkg_fused_npu(
         BH_OFFSET=0,
     )
     common = dict(BC=_BC, **common_launch)
+    h_launch = dict(chunk_offsets=chunk_offsets, **common)
 
     _launch_2d_kernel(
         chunk_kda_bwd_kernel_wy_v_part_npu,
@@ -856,7 +843,7 @@ def chunk_kda_bwd_wy_dqkg_fused_npu(
             BV=BV,
             STATE_V_FIRST=state_v_first,
             K_OFFSET=0,
-            **common,
+            **h_launch,
         ),
     )
 
@@ -878,7 +865,7 @@ def chunk_kda_bwd_wy_dqkg_fused_npu(
         BK=BK,
         BV=BV,
         STATE_V_FIRST=state_v_first,
-        **common,
+        **h_launch,
     )
     for k_off in range(NK):
         dw_kwargs['K_OFFSET'] = k_off
@@ -909,7 +896,7 @@ def chunk_kda_bwd_wy_dqkg_fused_npu(
         kernel_kwargs=dict(
             A=A,
             dA_acc=dA_acc,
-            dA_mid=dA_acc,
+            dA_mid=dA_acc,  # in-place alias; avoids a [B,T,HV,BT] fp32 workspace
             **common_launch,
         ),
     )
@@ -920,7 +907,7 @@ def chunk_kda_bwd_wy_dqkg_fused_npu(
         bh_total=B * HV,
         kernel_kwargs=dict(
             A=A,
-            dA_mid=dA_acc,
+            dA_mid=dA_acc,  # in-place alias; avoids a [B,T,HV,BT] fp32 workspace
             db_acc=db_acc,
             dA=dA,
             db=db,
