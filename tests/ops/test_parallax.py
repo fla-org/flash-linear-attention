@@ -34,6 +34,21 @@ def _ref_varlen(q, r, k, v, cu_seqlens, window_size=None):
 TOL = {torch.float16: 0.005, torch.bfloat16: 0.02}
 
 
+@pytest.mark.parametrize(
+    "op",
+    [naive_parallax, parallel_parallax, parallax_decode, parallax_decode_one_step],
+    ids=["naive", "parallel", "decode", "decode_one_step"],
+)
+def test_rejects_invalid_gqa_head_counts(op):
+    q = torch.empty(1, 1, 3, 16, dtype=torch.float16)
+    r = torch.empty_like(q)
+    k = torch.empty(1, 1, 2, 16, dtype=torch.float16)
+    v = torch.empty_like(k)
+
+    with pytest.raises(ValueError, match="must be divisible"):
+        op(q=q, r=r, k=k, v=v)
+
+
 @pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'HQ', 'D', 'scale'),
