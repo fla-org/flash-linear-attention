@@ -28,3 +28,12 @@ File: `fla/ops/kda/backends/triton_ascend/chunk_bwd.py`
 
 - `chunk_kda_bwd_kernel_dAv_npu` and `chunk_kda_bwd_kernel_wy_v_part_npu` loaded `bos`/`eos` via `.to(tl.int32)` then `(bos * HV + i_hv) * V` — int32 wrap on packed varlen offsets (e.g. HV=32, V=4096 safe `bos` ≈ 16K). Later kernels in the same file already used `tl.int64`.
 - Fix: load `bos`/`eos` as int64; `T = (eos - bos).to(tl.int32)`; non-varlen else-branch `(i_b * T).to(tl.int64)`.
+
+## `wy_fast.py` — Ascend `tl.dot` left-operand clobber
+
+Files: `fla/ops/gated_delta_rule/backends/triton_ascend/wy_fast.py`, `fla/ops/kda/backends/triton_ascend/wy_fast.py`
+
+- **Behavior**: Ascend `tl.dot(lhs, rhs, ...)` can overwrite `lhs` in UB. CUDA Triton leaves `lhs` intact.
+- **Fwd `recompute_w_u_fwd_kernel_npu`**: load `b_A` once; `u` loop runs `b_u = tl.dot(b_A, b_vb, ...)` over V tiles — each dot clobbers `b_A`; `w` loop still needs pristine `A` for `b_w = tl.dot(b_A, b_kb, ...)`. **Fix**: after the `u` loop, before the `w` loop, reload from GM: `b_A = tl.load(ptr_A, mask=mask_A, other=0.0).to(tl.float32)`.
+- **Bwd `prepare_wy_repr_bwd_kv_npu`**: `k` loop uses `tl.dot(b_A, b_dw, ...)` (clobbers `b_A`); `v` loop reuses `b_A` — reload before the `v` loop the same way.
+- **Symptom / cost**: numeric mismatch vs Torch on Ascend only; no compile error. One extra GM load per stage is cheaper than keeping a duplicate tile live for the whole kernel.

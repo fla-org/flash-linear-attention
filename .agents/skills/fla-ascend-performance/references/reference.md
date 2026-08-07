@@ -53,6 +53,7 @@ After changing `mem_mult`/tiles, always re-check compile + numeric correctness.
 - **Varlen wrong only on long seqs**: after slicing `chunk_indices`, check for a second global `NT_OFFSET`; on core-grid paths, verify `chunk_offsets` → `(i_n, i_t)` against `cu_seqlens`.
 - **Wrong results only in multi-task core-grid loops**: rebind local base pointers each `task_id`; avoid in-place `ptr +=` across iterations.
 - **Occasional bf16 NaN**: mask before exp, fp32 accum, exp/exp2 scale, solve precision.
+- **`tl.dot` left operand clobbered (Ascend only)**: `tl.dot(lhs, rhs, ...)` may mutate `lhs` in UB. Reload `lhs` from GM before any second dot that needs the original tile (e.g. `wy_fast.py` fwd u loop then w loop on `b_A`; bwd k loop then v loop). CUDA does not show this; symptom is numeric mismatch vs Torch with no compile failure.
 - **Correct but slower**: launch count (split inter/intra + host grid chunks), tiny tiles, full-size fp32 scratch, extra layout converts, unsynced fake baselines.
 - **Local pass, full gate NaN**: tail writeback, boundary masks, invalid exp regions, scratch init before read.
 - **Compile-variant explosion**: do not specialize on T; move feature flags to heuristics/constexpr.

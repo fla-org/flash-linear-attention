@@ -201,8 +201,10 @@ def chunk_fwd_kernel_o_npu(
                 b_o += tl.dot(b_q, tl.trans(b_h))
             else:
                 b_o += tl.dot(b_q, b_h)
+            # Ascend tl.dot clobbers lhs; keep a pristine copy for the A dot.
+            b_q_c = b_q + 0.0
             # [BT, BK] @ [BK, BT] -> [BT, BT]
-            b_A += tl.dot(b_q, b_k)
+            b_A += tl.dot(b_q_c, b_k)
 
         if USE_G:
             # g is transposed to [B, HV, T] in wrapper for contiguous T-load.
@@ -413,12 +415,14 @@ def chunk_bwd_kernel_dv_local_hv1_npu(
     m_t = o_t < T
     m_A = (o_t[:, None] <= o_t[None, :]) & (m_t[:, None] & m_t)
     b_A = tl.where(m_A, b_A, 0)
+    b_A_pristine = b_A + 0.0
 
     for i_v in range(tl.cdiv(V, BV)):
         p_do = tl.make_block_ptr(do, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
         p_dv = tl.make_block_ptr(dv, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
         b_do = tl.load(p_do, boundary_check=(0, 1))
-        b_dv = tl.dot(b_A.to(b_do.dtype), b_do, allow_tf32=False)
+        b_A_i = b_A_pristine + 0.0
+        b_dv = tl.dot(b_A_i.to(b_do.dtype), b_do, allow_tf32=False)
         tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
 
 
@@ -745,11 +749,12 @@ def chunk_bwd_kernel_dqkwg_npu(
             p_k_c = tl.make_block_ptr(k, (T, K), (H * K, 1), (i_tc_c, i_k * BK), (BC, BK), (1, 0))
             b_k_c = tl.load(p_k_c, boundary_check=(0, 1))
             b_ds = tl.where(m_blk, b_ds, 0).to(b_k_c.dtype)
+            b_ds_c = b_ds + 0.0
             b_dq_r += tl.dot(b_ds, b_k_c, allow_tf32=False)
 
             p_dk_acc = tl.make_block_ptr(dk_f32, (T, K), (HV * K, 1), (i_tc_c, i_k * BK), (BC, BK), (1, 0))
             b_dk_acc = tl.load(p_dk_acc, boundary_check=(0, 1))
-            b_ds_dk = tl.dot(tl.trans(b_ds), b_q_r, allow_tf32=False)
+            b_ds_dk = tl.dot(tl.trans(b_ds_c), b_q_r, allow_tf32=False)
             if not USE_G and not USE_G_GAMMA:
                 b_ds_dk = b_ds_dk * scale
             b_dk_acc += b_ds_dk
