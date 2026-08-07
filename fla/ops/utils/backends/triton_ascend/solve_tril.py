@@ -136,6 +136,7 @@ def merge_16x16_to_32x32_inverse_kernel_npu(
 
     p_A_21 = tl.make_block_ptr(A, (T, BT), (H * BT, 1), (i_t * BT + 16, 0), (16, 16), (1, 0))
     b_A_21 = tl.load(p_A_21, boundary_check=(0, 1)).to(tl.float32)
+    b_Ai_22_c = b_Ai_22 + 0.0
     b_Ai_21 = -tl.dot(
         tl.dot(b_Ai_22, b_A_21, input_precision='ieee'),
         b_Ai_11,
@@ -146,7 +147,7 @@ def merge_16x16_to_32x32_inverse_kernel_npu(
     p_Ai_21 = tl.make_block_ptr(Ai, (T, BT), (H * BT, 1), (i_t * BT + 16, 0), (16, 16), (1, 0))
     p_Ai_22 = tl.make_block_ptr(Ai, (T, BT), (H * BT, 1), (i_t * BT + 16, 16), (16, 16), (1, 0))
     tl.store(p_Ai_11, b_Ai_11.to(p_Ai_11.dtype.element_ty, fp_downcast_rounding='rtne'), boundary_check=(0, 1))
-    tl.store(p_Ai_22, b_Ai_22.to(p_Ai_22.dtype.element_ty, fp_downcast_rounding='rtne'), boundary_check=(0, 1))
+    tl.store(p_Ai_22, b_Ai_22_c.to(p_Ai_22.dtype.element_ty, fp_downcast_rounding='rtne'), boundary_check=(0, 1))
     tl.store(p_Ai_21, b_Ai_21.to(p_Ai_21.dtype.element_ty, fp_downcast_rounding='rtne'), boundary_check=(0, 1))
 
 
@@ -231,6 +232,15 @@ def merge_16x16_to_64x64_inverse_kernel_npu(
     b_A_42 = tl.load(p_A_42, boundary_check=(0, 1)).to(tl.float32)
     b_A_43 = tl.load(p_A_43, boundary_check=(0, 1)).to(tl.float32)
 
+    b_Ai_22_c = b_Ai_22 + 0.0
+    b_Ai_33_c = b_Ai_33 + 0.0
+    b_Ai_33_c2 = b_Ai_33 + 0.0
+    b_Ai_44_c = b_Ai_44 + 0.0
+    b_Ai_44_c2 = b_Ai_44 + 0.0
+    b_Ai_44_store = b_Ai_44 + 0.0
+    b_A_42_c = b_A_42 + 0.0
+    b_A_43_c = b_A_43 + 0.0
+
     b_Ai_21 = -tl.dot(
         tl.dot(b_Ai_22, b_A_21, input_precision='ieee'),
         b_Ai_11,
@@ -238,31 +248,31 @@ def merge_16x16_to_64x64_inverse_kernel_npu(
     )
     b_Ai_32 = -tl.dot(
         tl.dot(b_Ai_33, b_A_32, input_precision='ieee'),
-        b_Ai_22,
+        b_Ai_22_c,
         input_precision='ieee',
     )
     b_Ai_43 = -tl.dot(
         tl.dot(b_Ai_44, b_A_43, input_precision='ieee'),
-        b_Ai_33,
+        b_Ai_33_c,
         input_precision='ieee',
     )
     b_Ai_31 = -tl.dot(
-        b_Ai_33,
+        b_Ai_33_c2,
         tl.dot(b_A_31, b_Ai_11, input_precision='ieee')
         + tl.dot(b_A_32, b_Ai_21, input_precision='ieee'),
         input_precision='ieee',
     )
     b_Ai_42 = -tl.dot(
-        b_Ai_44,
-        tl.dot(b_A_42, b_Ai_22, input_precision='ieee')
+        b_Ai_44_c,
+        tl.dot(b_A_42, b_Ai_22_c, input_precision='ieee')
         + tl.dot(b_A_43, b_Ai_32, input_precision='ieee'),
         input_precision='ieee',
     )
     b_Ai_41 = -tl.dot(
-        b_Ai_44,
+        b_Ai_44_c2,
         tl.dot(b_A_41, b_Ai_11, input_precision='ieee')
-        + tl.dot(b_A_42, b_Ai_21, input_precision='ieee')
-        + tl.dot(b_A_43, b_Ai_31, input_precision='ieee'),
+        + tl.dot(b_A_42_c, b_Ai_21, input_precision='ieee')
+        + tl.dot(b_A_43_c, b_Ai_31, input_precision='ieee'),
         input_precision='ieee',
     )
 
@@ -277,9 +287,9 @@ def merge_16x16_to_64x64_inverse_kernel_npu(
     p_Ai_42 = tl.make_block_ptr(Ai, (T, BT), (H * BT, 1), (i_t * BT + 48, 16), (16, 16), (1, 0))
     p_Ai_43 = tl.make_block_ptr(Ai, (T, BT), (H * BT, 1), (i_t * BT + 48, 32), (16, 16), (1, 0))
     tl.store(p_Ai_11, b_Ai_11.to(p_Ai_11.dtype.element_ty, fp_downcast_rounding='rtne'), boundary_check=(0, 1))
-    tl.store(p_Ai_22, b_Ai_22.to(p_Ai_22.dtype.element_ty, fp_downcast_rounding='rtne'), boundary_check=(0, 1))
-    tl.store(p_Ai_33, b_Ai_33.to(p_Ai_33.dtype.element_ty, fp_downcast_rounding='rtne'), boundary_check=(0, 1))
-    tl.store(p_Ai_44, b_Ai_44.to(p_Ai_44.dtype.element_ty, fp_downcast_rounding='rtne'), boundary_check=(0, 1))
+    tl.store(p_Ai_22, b_Ai_22_c.to(p_Ai_22.dtype.element_ty, fp_downcast_rounding='rtne'), boundary_check=(0, 1))
+    tl.store(p_Ai_33, b_Ai_33_c.to(p_Ai_33.dtype.element_ty, fp_downcast_rounding='rtne'), boundary_check=(0, 1))
+    tl.store(p_Ai_44, b_Ai_44_store.to(p_Ai_44.dtype.element_ty, fp_downcast_rounding='rtne'), boundary_check=(0, 1))
     tl.store(p_Ai_21, b_Ai_21.to(p_Ai_21.dtype.element_ty, fp_downcast_rounding='rtne'), boundary_check=(0, 1))
     tl.store(p_Ai_31, b_Ai_31.to(p_Ai_31.dtype.element_ty, fp_downcast_rounding='rtne'), boundary_check=(0, 1))
     tl.store(p_Ai_32, b_Ai_32.to(p_Ai_32.dtype.element_ty, fp_downcast_rounding='rtne'), boundary_check=(0, 1))
