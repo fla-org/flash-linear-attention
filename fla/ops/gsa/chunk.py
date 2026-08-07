@@ -1217,6 +1217,8 @@ def chunk_gsa(
     chunk_size = kwargs.pop('chunk_size', None)
     if chunk_size is not None and chunk_size != 2 ** (chunk_size.bit_length() - 1):
         raise ValueError(f"`chunk_size` must be a power of 2, got {chunk_size}.")
+    if q.shape[2] % k.shape[2] != 0:
+        raise ValueError(f"num_query_heads ({q.shape[2]}) must be divisible by num_kv_heads ({k.shape[2]})")
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(

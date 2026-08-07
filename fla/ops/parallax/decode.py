@@ -167,6 +167,8 @@ def parallax_decode(
     """
     B, Sq, HQ, K = q.shape
     Skv, H = k.shape[1], k.shape[2]
+    if HQ % H != 0:
+        raise ValueError(f"num_query_heads ({HQ}) must be divisible by num_kv_heads ({H})")
     G = HQ // H
     if scale is None:
         scale = K ** -0.5
@@ -322,6 +324,8 @@ def parallax_decode_one_step(
     if Sq != 1:
         raise ValueError(f"parallax_decode_one_step expects a single query (Sq=1), got Sq={Sq}")
     Skv, H = k.shape[1], k.shape[2]
+    if HQ % H != 0:
+        raise ValueError(f"num_query_heads ({HQ}) must be divisible by num_kv_heads ({H})")
     G = HQ // H
     if scale is None:
         scale = K ** -0.5

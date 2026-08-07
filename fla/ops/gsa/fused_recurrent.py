@@ -508,6 +508,8 @@ def fused_recurrent_gsa(
         >>> assert hk.allclose(hk_var)
         >>> assert hv.allclose(hv_var)
     """
+    if q.shape[2] % k.shape[2] != 0:
+        raise ValueError(f"num_query_heads ({q.shape[2]}) must be divisible by num_kv_heads ({k.shape[2]})")
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(

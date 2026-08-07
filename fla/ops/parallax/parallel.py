@@ -809,6 +809,10 @@ def parallel_parallax(
             f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`. "
             f"Please flatten variable-length inputs before processing.",
         )
+    if q.shape[2] % k.shape[2] != 0:
+        raise ValueError(
+            f"num_query_heads ({q.shape[2]}) must be divisible by num_kv_heads ({k.shape[2]})"
+        )
     # The kernel keeps cols [i - W + 1, i] (W keys total, diagonal included),
     # matching FLA's `window_size=W` semantics exactly (no off-by-one).
     window_size_left = -1 if window_size is None else window_size

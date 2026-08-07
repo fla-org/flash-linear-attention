@@ -45,6 +45,7 @@ def naive_parallel_attn(
     """
     B, T, HQ, D = q.shape
     H = k.shape[2]
+    assert HQ % H == 0, f"num_query_heads ({HQ}) must be divisible by num_kv_heads ({H})"
     G = HQ // H
 
     if scale is None:
@@ -126,6 +127,7 @@ def naive_attn_decoding(
     HQ, D = q.shape[-2], q.shape[-1]
     V = v.shape[-1]
     H = k.shape[2]
+    assert HQ % H == 0, f"num_query_heads ({HQ}) must be divisible by num_kv_heads ({H})"
     G = HQ // H
     if scale is None:
         scale = D ** -0.5

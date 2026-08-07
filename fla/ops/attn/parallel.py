@@ -837,6 +837,10 @@ def parallel_attn(
             f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`. "
             f"Please flatten variable-length inputs before processing.",
         )
+    if q.shape[2] % k.shape[2] != 0:
+        raise ValueError(
+            f"num_query_heads ({q.shape[2]}) must be divisible by num_kv_heads ({k.shape[2]})"
+        )
     if sink_bias is not None:
         assert sink_bias.shape == (q.shape[2],), "sink_bias must have shape [HQ]"
 

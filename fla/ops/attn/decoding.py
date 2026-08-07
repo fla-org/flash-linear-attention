@@ -165,6 +165,7 @@ def attn_decoding_one_step(
     B, T, H, K, V = *k.shape, v.shape[-1]
     N = len(cu_seqlens) - 1
     HQ = q.shape[2]
+    assert HQ % H == 0, f"num_query_heads ({HQ}) must be divisible by num_kv_heads ({H})"
     G = HQ // H
     if scale is None:
         scale = K ** -0.5
