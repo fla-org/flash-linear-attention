@@ -86,10 +86,6 @@ def test_channel_mixing_gradients(B, T, n_embd, dim_ffn, dtype, inplace, xprevdi
     assert_close(" dV_", V_.grad, V_2.grad, ratio=5e-3)
 
 
-@pytest.mark.skipif(
-    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
-    reason="Skipping test because TEST_CHUNK_VARLEN is enabled",
-)
 def test_channel_mixing_no_out_of_bounds_writes():
     torch.manual_seed(42)
     # element counts that no block size in [128, 8192] divides, so every launch has a partial tail block
