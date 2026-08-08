@@ -187,7 +187,6 @@ def recompute_w_u_fwd_kda_kernel_npu(
         b_b = tl.load(p_b, boundary_check=(0,))
 
         p_A = tl.make_block_ptr(A_ptr, (T, BT), (HV * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
-        b_A = tl.load(p_A, boundary_check=(0, 1))
 
         last_idx = min(i_t * BT + BT, T) - 1
 
@@ -196,6 +195,8 @@ def recompute_w_u_fwd_kda_kernel_npu(
             p_u = tl.make_block_ptr(u_ptr, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
             b_v = tl.load(p_v, boundary_check=(0, 1))
             b_vb = (b_v * b_b[:, None]).to(b_v.dtype)
+            # Ascend tl.dot may clobber the left operand; reload A each V tile.
+            b_A = tl.load(p_A, boundary_check=(0, 1))
             b_u = tl.dot(b_A, b_vb, allow_tf32=False)
             tl.store(p_u, b_u.to(p_u.dtype.element_ty), boundary_check=(0, 1))
 
@@ -226,6 +227,8 @@ def recompute_w_u_fwd_kda_kernel_npu(
                 p_kg = tl.make_block_ptr(kg_ptr, (T, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
                 tl.store(p_kg, b_kg.to(p_kg.dtype.element_ty), boundary_check=(0, 1))
 
+            # Ascend tl.dot may clobber the left operand; reload A each K tile.
+            b_A = tl.load(p_A, boundary_check=(0, 1))
             b_w = tl.dot(b_A, b_kb.to(b_k.dtype), allow_tf32=False)
             p_w = tl.make_block_ptr(w_ptr, (T, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
             tl.store(p_w, b_w.to(p_w.dtype.element_ty), boundary_check=(0, 1))

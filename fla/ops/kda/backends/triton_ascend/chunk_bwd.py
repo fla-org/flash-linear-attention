@@ -91,12 +91,10 @@ def chunk_kda_bwd_kernel_dAv_npu(
     dA += (bos * HV + i_hv) * BT
 
     p_A = tl.make_block_ptr(A + (bos * HV + i_hv) * BT, (BT, T), (1, HV * BT), (0, i_t * BT), (BT, BT), (0, 1))
-    b_A = tl.load(p_A, boundary_check=(0, 1))
 
     o_t = i_t * BT + tl.arange(0, BT)
     m_t = o_t < T
     m_A = (o_t[:, None] <= o_t[None, :]) & (m_t[:, None] & m_t)
-    b_A = tl.where(m_A, b_A, 0).to(do.dtype.element_ty)
 
     b_dA = tl.zeros([BT, BT], dtype=tl.float32)
     for i_v in range(tl.cdiv(V, BV)):
@@ -106,7 +104,9 @@ def chunk_kda_bwd_kernel_dAv_npu(
         b_v = tl.load(p_v, boundary_check=(0, 1))
         b_do = tl.load(p_do, boundary_check=(0, 1))
         b_dA += tl.dot(b_do, b_v, allow_tf32=False)
-        b_dv = tl.dot(b_A.to(b_do.dtype), b_do, allow_tf32=False)
+        b_A_i = tl.load(p_A, boundary_check=(0, 1))
+        b_A_i = tl.where(m_A, b_A_i, 0).to(b_do.dtype)
+        b_dv = tl.dot(b_A_i, b_do, allow_tf32=False)
         tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
 
     p_dA = tl.make_block_ptr(dA, (T, BT), (HV * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))

@@ -383,8 +383,10 @@ def chunk_kda_fwd_kernel_inter_solve_fused_npu(
             b_Aqk20 += tl.dot(b_qg2, b_kgt, allow_tf32=False)
             b_Akk20 += tl.dot(b_kg2, b_kgt, allow_tf32=False)
             b_kgt = tl.trans(b_k1 * exp2(b_gn2[None, :] - b_g1))
-            b_Aqk21 += tl.dot(b_qg2, b_kgt, allow_tf32=False)
-            b_Akk21 += tl.dot(b_kg2, b_kgt, allow_tf32=False)
+            b_qg2_c = b_qg2 + 0.0
+            b_kg2_c = b_kg2 + 0.0
+            b_Aqk21 += tl.dot(b_qg2_c, b_kgt, allow_tf32=False)
+            b_Akk21 += tl.dot(b_kg2_c, b_kgt, allow_tf32=False)
 
             if NC >= 4:
                 p_q3 = tl.make_block_ptr(q, (T, K), (H * K, 1), (i_tc3, i_k * BK), (BC, BK), (1, 0))
@@ -401,11 +403,15 @@ def chunk_kda_fwd_kernel_inter_solve_fused_npu(
                 b_Aqk30 += tl.dot(b_qg3, b_kgt, allow_tf32=False)
                 b_Akk30 += tl.dot(b_kg3, b_kgt, allow_tf32=False)
                 b_kgt = tl.trans(b_k1 * exp2(b_gn3[None, :] - b_g1))
-                b_Aqk31 += tl.dot(b_qg3, b_kgt, allow_tf32=False)
-                b_Akk31 += tl.dot(b_kg3, b_kgt, allow_tf32=False)
+                b_qg3_c1 = b_qg3 + 0.0
+                b_kg3_c1 = b_kg3 + 0.0
+                b_Aqk31 += tl.dot(b_qg3_c1, b_kgt, allow_tf32=False)
+                b_Akk31 += tl.dot(b_kg3_c1, b_kgt, allow_tf32=False)
                 b_kgt = tl.trans(b_k2 * exp2(b_gn3[None, :] - b_g2))
-                b_Aqk32 += tl.dot(b_qg3, b_kgt, allow_tf32=False)
-                b_Akk32 += tl.dot(b_kg3, b_kgt, allow_tf32=False)
+                b_qg3_c2 = b_qg3 + 0.0
+                b_kg3_c2 = b_kg3 + 0.0
+                b_Aqk32 += tl.dot(b_qg3_c2, b_kgt, allow_tf32=False)
+                b_Akk32 += tl.dot(b_kg3_c2, b_kgt, allow_tf32=False)
 
     p_Aqk10 = tl.make_block_ptr(Aqk, (T, BT), (HV * BT, 1), (i_tc1, 0), (BC, BC), (1, 0))
     tl.store(p_Aqk10, (b_Aqk10 * scale).to(Aqk.dtype.element_ty), boundary_check=(0, 1))
@@ -448,6 +454,12 @@ def chunk_kda_fwd_kernel_inter_solve_fused_npu(
         p_Akk33 = tl.make_block_ptr(Akkd, (T, BC), (HV * BC, 1), (i_tc3, 0), (BC, BC), (1, 0))
         b_Ai33 = tl.load(p_Akk33, boundary_check=(0, 1)).to(tl.float32)
 
+    b_Ai11_c = b_Ai11 + 0.0
+    if NC >= 3:
+        b_Ai22_c = b_Ai22 + 0.0
+    if NC >= 4:
+        b_Ai33_c = b_Ai33 + 0.0
+
     b_Ai10 = -tl.dot(
         tl.dot(b_Ai11, b_Akk10, allow_tf32=False),
         b_Ai00,
@@ -457,11 +469,11 @@ def chunk_kda_fwd_kernel_inter_solve_fused_npu(
     if NC >= 3:
         b_Ai21 = -tl.dot(
             tl.dot(b_Ai22, b_Akk21, allow_tf32=False),
-            b_Ai11,
+            b_Ai11_c,
             allow_tf32=False,
         )
         b_Ai20 = -tl.dot(
-            b_Ai22,
+            b_Ai22_c,
             tl.dot(b_Akk20, b_Ai00, allow_tf32=False) +
             tl.dot(b_Akk21, b_Ai10, allow_tf32=False),
             allow_tf32=False,
@@ -469,17 +481,18 @@ def chunk_kda_fwd_kernel_inter_solve_fused_npu(
     if NC >= 4:
         b_Ai32 = -tl.dot(
             tl.dot(b_Ai33, b_Akk32, allow_tf32=False),
-            b_Ai22,
+            b_Ai22_c,
             allow_tf32=False,
         )
         b_Ai31 = -tl.dot(
-            b_Ai33,
-            tl.dot(b_Akk31, b_Ai11, allow_tf32=False) +
+            b_Ai33_c,
+            tl.dot(b_Akk31, b_Ai11_c, allow_tf32=False) +
             tl.dot(b_Akk32, b_Ai21, allow_tf32=False),
             allow_tf32=False,
         )
+        b_Ai33_c2 = b_Ai33_c + 0.0
         b_Ai30 = -tl.dot(
-            b_Ai33,
+            b_Ai33_c2,
             tl.dot(b_Akk30, b_Ai00, allow_tf32=False) +
             tl.dot(b_Akk31, b_Ai10, allow_tf32=False) +
             tl.dot(b_Akk32, b_Ai20, allow_tf32=False),
@@ -492,14 +505,14 @@ def chunk_kda_fwd_kernel_inter_solve_fused_npu(
 
     tl.store(p_Akk00, b_Ai00.to(Akk.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_Akk10, b_Ai10.to(Akk.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_Akk11, b_Ai11.to(Akk.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_Akk11, b_Ai11_c.to(Akk.dtype.element_ty), boundary_check=(0, 1))
     if NC >= 3:
         p_Akk20 = tl.make_block_ptr(Akk, (T, BT), (HV * BT, 1), (i_tc2, 0), (BC, BC), (1, 0))
         p_Akk21 = tl.make_block_ptr(Akk, (T, BT), (HV * BT, 1), (i_tc2, BC), (BC, BC), (1, 0))
         p_Akk22 = tl.make_block_ptr(Akk, (T, BT), (HV * BT, 1), (i_tc2, 2 * BC), (BC, BC), (1, 0))
         tl.store(p_Akk20, b_Ai20.to(Akk.dtype.element_ty), boundary_check=(0, 1))
         tl.store(p_Akk21, b_Ai21.to(Akk.dtype.element_ty), boundary_check=(0, 1))
-        tl.store(p_Akk22, b_Ai22.to(Akk.dtype.element_ty), boundary_check=(0, 1))
+        tl.store(p_Akk22, b_Ai22_c.to(Akk.dtype.element_ty), boundary_check=(0, 1))
     if NC >= 4:
         p_Akk30 = tl.make_block_ptr(Akk, (T, BT), (HV * BT, 1), (i_tc3, 0), (BC, BC), (1, 0))
         p_Akk31 = tl.make_block_ptr(Akk, (T, BT), (HV * BT, 1), (i_tc3, BC), (BC, BC), (1, 0))
@@ -508,7 +521,7 @@ def chunk_kda_fwd_kernel_inter_solve_fused_npu(
         tl.store(p_Akk30, b_Ai30.to(Akk.dtype.element_ty), boundary_check=(0, 1))
         tl.store(p_Akk31, b_Ai31.to(Akk.dtype.element_ty), boundary_check=(0, 1))
         tl.store(p_Akk32, b_Ai32.to(Akk.dtype.element_ty), boundary_check=(0, 1))
-        tl.store(p_Akk33, b_Ai33.to(Akk.dtype.element_ty), boundary_check=(0, 1))
+        tl.store(p_Akk33, b_Ai33_c.to(Akk.dtype.element_ty), boundary_check=(0, 1))
 
 
 @input_guard
