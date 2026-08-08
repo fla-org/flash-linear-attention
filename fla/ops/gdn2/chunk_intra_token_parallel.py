@@ -52,6 +52,7 @@ def chunk_gdn2_fwd_kernel_intra_token_parallel(
     T,
     H: tl.constexpr,
     K: tl.constexpr,
+    BK: tl.constexpr,
     BT: tl.constexpr,
     BC: tl.constexpr,
     BH: tl.constexpr,
@@ -92,7 +93,6 @@ def chunk_gdn2_fwd_kernel_intra_token_parallel(
     Aqk += bos * H * BT
     Akk += bos * H * BC
 
-    BK: tl.constexpr = triton.next_power_of_2(K)
     o_h = tl.arange(0, BH)
     o_k = tl.arange(0, BK)
     m_h = (i_hg * BH + o_h) < H
@@ -149,6 +149,7 @@ def chunk_gdn2_fwd_intra_token_parallel(
     N = len(cu_seqlens) - 1 if cu_seqlens is not None else B
     BT = chunk_size
     BC = sub_chunk_size
+    BK = triton.next_power_of_2(K)
 
     def grid(meta):
         return (B * T, triton.cdiv(H, meta['BH']))
@@ -166,6 +167,7 @@ def chunk_gdn2_fwd_intra_token_parallel(
         T=T,
         H=H,
         K=K,
+        BK=BK,
         BT=BT,
         BC=BC,
     )
