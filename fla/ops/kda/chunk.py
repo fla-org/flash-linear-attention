@@ -173,8 +173,8 @@ class ChunkKDAFunction(torch.autograd.Function):
                 None, None, None, None, None, None, None, None, None, None, None, None, None, None)
 
 
-@dispatch('kda')
 @torch.compiler.disable
+@dispatch('kda')
 def chunk_kda(
     q: torch.Tensor,
     k: torch.Tensor,
