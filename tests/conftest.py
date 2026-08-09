@@ -73,7 +73,9 @@ def _guarded_empty(*args, **kwargs):
     if not (dtype.is_floating_point or dtype.is_complex):
         return _ORIGINAL_EMPTY(*args, **kwargs)
 
-    if is_compiling() or not _is_called_from_fla():
+    # fill_ raises on leaf tensors that require grad; such allocations (e.g. inductor's
+    # pattern-matcher example inputs) are never kernel scratch buffers, so leave them unpoisoned
+    if is_compiling() or kwargs.get('requires_grad', False) or not _is_called_from_fla():
         return _ORIGINAL_EMPTY(*args, **kwargs)
 
     result = _ORIGINAL_EMPTY(*args, **kwargs)
@@ -88,7 +90,7 @@ def _guarded_empty(*args, **kwargs):
 
 def _guarded_empty_like(input, **kwargs):
     """Create a tensor filled with NaN instead of uninitialized values."""
-    if is_compiling() or not _is_called_from_fla():
+    if is_compiling() or kwargs.get('requires_grad', False) or not _is_called_from_fla():
         return _ORIGINAL_EMPTY_LIKE(input, **kwargs)
 
     if kwargs.get('dtype') is None:
@@ -110,7 +112,7 @@ def _guarded_empty_like(input, **kwargs):
 
 def _guarded_new_empty(self, *args, **kwargs):
     """Create a tensor filled with NaN instead of uninitialized values."""
-    if is_compiling() or not _is_called_from_fla():
+    if is_compiling() or kwargs.get('requires_grad', False) or not _is_called_from_fla():
         return _ORIGINAL_NEW_EMPTY(self, *args, **kwargs)
 
     if kwargs.get('dtype') is None:
