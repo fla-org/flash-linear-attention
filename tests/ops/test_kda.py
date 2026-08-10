@@ -10,6 +10,7 @@ import importlib.util
 import pytest
 import torch
 import torch.nn.functional as F
+import triton
 
 from fla.ops.kda import chunk_kda, fused_recurrent_kda
 from fla.ops.kda.fused_recurrent import fused_recurrent_kda_fwd
@@ -160,6 +161,28 @@ def test_fused_recurrent(
     )
     assert_close("o", ref, tri, 0.005)
     assert_close("ht", ref_ht, tri_ht, 0.005)
+
+
+@pytest.mark.parametrize("D", [60, 100])
+def test_fused_recurrent_non_power_of_two_d(D: int):
+    # the kernel loads `g` over a [next_power_of_2(D)] block; the lanes beyond D must not
+    # be read, or the values living right after `g` leak into the recurrence
+    B, T, H = 1, 4, 2
+    torch.manual_seed(42)
+    q = torch.rand(B, T, H, D, dtype=torch.float, device=device)
+    k = torch.rand(B, T, H, D, dtype=torch.float, device=device)
+    v = torch.rand(B, T, H, D, dtype=torch.float, device=device)
+    beta = torch.randn(B, T, H, dtype=torch.float, device=device).sigmoid()
+    g = F.logsigmoid(torch.randn(B, T, H, D, dtype=torch.float, device=device))
+
+    # place `g` at the front of a larger buffer whose tail would overflow `exp` if read
+    buf = torch.full((g.numel() + triton.next_power_of_2(D),), 1e30, dtype=torch.float, device=device)
+    g_padded = buf[:g.numel()].view_as(g)
+    g_padded.copy_(g)
+
+    ref, _ = fused_recurrent_kda(q=q, k=k, v=v, g=g, beta=beta)
+    tri, _ = fused_recurrent_kda(q=q, k=k, v=v, g=g_padded, beta=beta)
+    assert_close("o", ref, tri, 0.005)
 
 
 @pytest.mark.parametrize(
