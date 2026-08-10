@@ -247,3 +247,44 @@ def test_local_cumsum_varlen(
     ], 1)
     tri = chunk_local_cumsum(s, chunk_size=C, cu_seqlens=cu_seqlens)
     assert_close('local_cumsum', ref, tri, 1e-3)
+
+
+@pytest.mark.parametrize(
+    ('H', 'C', 'D', 'cu_seqlens', 'dtype'),
+    [
+        pytest.param(*test, id="H{}-C{}-D{}-cu_seqlens{}-{}".format(*test))
+        for test in [
+            (1, 16, 60, [0, 100, 300], torch.float),
+            (2, 16, 60, [0, 100, 300], torch.float),
+            (3, 64, 100, [0, 256, 500, 1000], torch.float),
+            (4, 64, 256, [0, 15, 100, 300, 1200, 2000], torch.float),
+        ]
+    ],
+)
+@pytest.mark.skipif(
+    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
+    reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set',
+)
+def test_cumsum_varlen_head_first(
+    H: int,
+    C: int,
+    D: int,
+    cu_seqlens: list[int],
+    dtype: torch.dtype,
+):
+    # head-major input must give the same result as the default layout on its transpose
+    torch.manual_seed(42)
+    T = cu_seqlens[-1]
+    cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+
+    for shape in ((1, H, T), (1, H, T, D)):
+        s = torch.randn(*shape, dtype=dtype).to(device)
+        st = s.transpose(1, 2).contiguous()
+
+        ref = chunk_local_cumsum(st, chunk_size=C, cu_seqlens=cu_seqlens).transpose(1, 2)
+        tri = chunk_local_cumsum(s, chunk_size=C, cu_seqlens=cu_seqlens, head_first=True)
+        assert_close('local_cumsum', ref, tri, 1e-3)
+
+        ref = chunk_global_cumsum(st, cu_seqlens=cu_seqlens).transpose(1, 2)
+        tri = chunk_global_cumsum(s, cu_seqlens=cu_seqlens, head_first=True)
+        assert_close('global_cumsum', ref, tri, 1e-3)

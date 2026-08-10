@@ -50,15 +50,18 @@ def chunk_local_cumsum_scalar_kernel(
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        # heads of the packed sequence stride by the total length, not by the segment length
+        boh = i_h * T + bos
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
+        boh = bos * H + i_h * T
 
     o_t = i_t * BT + tl.arange(0, BT)
     m_t = o_t < T
     if HEAD_FIRST:
-        p_s = s + bos*H + i_h*T + o_t
-        p_o = o + bos*H + i_h*T + o_t
+        p_s = s + boh + o_t
+        p_o = o + boh + o_t
     else:
         p_s = s + bos*H + i_h + o_t * H
         p_o = o + bos*H + i_h + o_t * H
@@ -109,16 +112,19 @@ def chunk_local_cumsum_vector_kernel(
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        # heads of the packed sequence stride by the total length, not by the segment length
+        boh = i_h * T + bos
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
+        boh = bos * H + i_h * T
 
     o_t = i_t * BT + tl.arange(0, BT)
     o_s = i_s * BS + tl.arange(0, BS)
     m_s = (o_t[:, None] < T) & (o_s[None, :] < S)
     if HEAD_FIRST:
-        p_s = s + (bos * H + i_h*T)*S + o_t[:, None] * S + o_s[None, :]
-        p_o = o + (bos * H + i_h*T)*S + o_t[:, None] * S + o_s[None, :]
+        p_s = s + boh*S + o_t[:, None] * S + o_s[None, :]
+        p_o = o + boh*S + o_t[:, None] * S + o_s[None, :]
     else:
         p_s = s + (bos * H + i_h) * S + o_t[:, None] * (H*S) + o_s[None, :]
         p_o = o + (bos * H + i_h) * S + o_t[:, None] * (H*S) + o_s[None, :]
@@ -166,8 +172,11 @@ def chunk_global_cumsum_scalar_kernel(
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        # heads of the packed sequence stride by the total length, not by the segment length
+        boh = i_h * T + bos
     else:
         bos, eos = i_n * T, i_n * T + T
+        boh = bos * H + i_h * T
     T = eos - bos
 
     b_z = tl.zeros([], dtype=tl.float32)
@@ -177,8 +186,8 @@ def chunk_global_cumsum_scalar_kernel(
         o_t = i_t * BT + tl.arange(0, BT)
         m_t = o_t < T
         if HEAD_FIRST:
-            p_s = s + bos*H + i_h*T + o_t
-            p_o = o + bos*H + i_h*T + o_t
+            p_s = s + boh + o_t
+            p_o = o + boh + o_t
         else:
             p_s = s + bos*H + i_h + o_t * H
             p_o = o + bos*H + i_h + o_t * H
@@ -230,8 +239,11 @@ def chunk_global_cumsum_vector_kernel(
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        # heads of the packed sequence stride by the total length, not by the segment length
+        boh = i_h * T + bos
     else:
         bos, eos = i_n * T, i_n * T + T
+        boh = bos * H + i_h * T
     T = eos - bos
 
     b_z = tl.zeros([BS], dtype=tl.float32)
@@ -242,8 +254,8 @@ def chunk_global_cumsum_vector_kernel(
         o_s = i_s * BS + tl.arange(0, BS)
         m_s = (o_t[:, None] < T) & (o_s[None, :] < S)
         if HEAD_FIRST:
-            p_s = s + (bos * H + i_h*T)*S + o_t[:, None] * S + o_s[None, :]
-            p_o = o + (bos * H + i_h*T)*S + o_t[:, None] * S + o_s[None, :]
+            p_s = s + boh*S + o_t[:, None] * S + o_s[None, :]
+            p_o = o + boh*S + o_t[:, None] * S + o_s[None, :]
         else:
             p_s = s + (bos * H + i_h) * S + o_t[:, None] * (H*S) + o_s[None, :]
             p_o = o + (bos * H + i_h) * S + o_t[:, None] * (H*S) + o_s[None, :]
