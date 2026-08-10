@@ -1467,6 +1467,58 @@ def test_conv_varlen_non_contiguous_qkv(
 
 
 @pytest.mark.parametrize(
+    ('B', 'T', 'T1', 'D', 'W', 'activation', 'dtype'),
+    [
+        pytest.param(*test, id="B{0}_T{1}_T1{2}_D{3}_W{4}_activation{5}_{6}".format(*test))
+        for test in [
+            (1, 64, 1, 128, 4, "silu", torch.float32),
+            (1, 64, 2, 128, 4, "silu", torch.float32),
+            (1, 64, 3, 128, 4, "silu", torch.float32),
+            (1, 64, 8, 128, 4, "silu", torch.float32),
+            (2, 64, 1, 128, 4, None, torch.float32),
+            (2, 64, 2, 128, 4, None, torch.float32),
+            (1, 32, 1, 64, 3, "silu", torch.float32),
+        ]
+    ],
+)
+def test_conv_chunked_prefill_backward(B, T, T1, D, W, activation, dtype):
+    """Splitting a sequence into two chunks must not change its gradients.
+
+    The first chunk's final_state feeds the second chunk as its initial_state, so the
+    backward has to route the state gradient back to the tokens that produced it. That
+    routing is wrong for chunks shorter than W - 1 tokens.
+    """
+    torch.manual_seed(42)
+
+    x = torch.randn(B, T, D, device=device, dtype=dtype)
+    weight = torch.randn(D, W, device=device, dtype=dtype)
+    bias = torch.randn(D, device=device, dtype=dtype)
+    h0 = torch.randn(B, D, W, device=device, dtype=dtype)
+    dy = torch.randn(B, T, D, device=device, dtype=dtype)
+
+    def leaves():
+        return (x.clone().requires_grad_(True), weight.clone().requires_grad_(True),
+                bias.clone().requires_grad_(True), h0.clone().requires_grad_(True))
+
+    x_ref, w_ref, b_ref, h_ref = leaves()
+    y_ref, _ = causal_conv1d(x_ref, w_ref, b_ref, initial_state=h_ref, activation=activation)
+    y_ref.backward(dy)
+
+    x_tri, w_tri, b_tri, h_tri = leaves()
+    y1, state = causal_conv1d(x_tri[:, :T1], w_tri, b_tri, initial_state=h_tri,
+                              output_final_state=True, activation=activation)
+    y2, _ = causal_conv1d(x_tri[:, T1:], w_tri, b_tri, initial_state=state, activation=activation)
+    y_tri = torch.cat([y1, y2], dim=1)
+    y_tri.backward(dy)
+
+    assert_close("  y", y_ref, y_tri, 1e-3)
+    assert_close(" dx", x_ref.grad, x_tri.grad, 1e-3)
+    assert_close(" dw", w_ref.grad, w_tri.grad, 1e-3)
+    assert_close(" db", b_ref.grad, b_tri.grad, 1e-3)
+    assert_close("dh0", h_ref.grad, h_tri.grad, 1e-3)
+
+
+@pytest.mark.parametrize(
     ('B', 'T', 'D', 'W', 'activation', 'dtype'),
     [
         pytest.param(*test, id="B{0}_T{1}_D{2}_W{3}_activation{4}_{5}".format(*test))
