@@ -388,6 +388,7 @@ In CP mode, only the first sequence in the local batch can be a continuation fro
 - [`tests/context_parallel/test_cp_conv.py`](../../../tests/context_parallel/test_cp_conv.py)
 - [`tests/context_parallel/test_cp_gdp.py`](../../../tests/context_parallel/test_cp_gdp.py)
 - [`tests/context_parallel/test_cp_kda.py`](../../../tests/context_parallel/test_cp_kda.py)
+- [`tests/context_parallel/test_cp_gdn2.py`](../../../tests/context_parallel/test_cp_gdn2.py)
 
 ## Discussion
 
@@ -399,7 +400,7 @@ The only model-specific components are:
 
 As long as these two operations are well-defined, the same CP infrastructure (`build_cp_context`, all-gather, and merge) applies without changing the high-level data flow.
 
-At the time of writing, CP has been implemented and verified for **GDN**, **GDP**, **KDA**, and **DPLR** (a.k.a. RWKV-7). GDP support currently requires `g`. If you would like to see support for another linear-attention variant, please feel free to open an issue.
+At the time of writing, CP has been implemented and verified for **GDN**, **GDP**, **GDN2**, **KDA**, and **DPLR** (a.k.a. RWKV-7). GDP support currently requires `g`. If you would like to see support for another linear-attention variant, please feel free to open an issue.
 
 ## Acknowledgments
 
