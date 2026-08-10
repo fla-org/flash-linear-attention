@@ -120,9 +120,8 @@ def compute_dh0_triton(
     grid = (triton.cdiv(D, BD) * N,)
 
     y_to_pass = y if activation in ('swish', 'silu') else None
-    # dy is [B, T, D], stride_n = T*D, stride_t = D
-    stride_dy_n = dy.stride(0)
-    stride_dy_t = dy.stride(1)
+    # dy is [B, T, D] but may be a strided view; `y` is always contiguous
+    stride_dy_n, stride_dy_t, stride_dy_d = dy.stride()
 
     compute_dh0_kernel[grid](
         dy=dy,
@@ -132,6 +131,7 @@ def compute_dh0_triton(
         cu_seqlens=cu_seqlens,
         stride_dy_n=stride_dy_n,
         stride_dy_t=stride_dy_t,
+        stride_dy_d=stride_dy_d,
         T=T,
         D=D,
         W=W,

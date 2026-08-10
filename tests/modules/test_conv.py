@@ -1488,19 +1488,22 @@ def test_conv_non_contiguous_dy(B, T, D, W, activation, dtype):
 
     weight = torch.randn(D, W, device=device, dtype=dtype).requires_grad_(True)
     weight_ref = weight.detach().clone().requires_grad_(True)
+    h0 = torch.randn(B, D, W, device=device, dtype=dtype)
+    h0_ref = h0.clone().requires_grad_(True)
 
     # --- Reference: contiguous path ---
     x_ref = torch.randn(B, T, D, device=device, dtype=dtype, requires_grad=True)
-    y_ref, _ = causal_conv1d(x_ref, weight_ref, activation=activation)
+    y_ref, _ = causal_conv1d(x_ref, weight_ref, initial_state=h0_ref, activation=activation)
     dy = torch.randn_like(y_ref)
     y_ref.backward(dy)
 
     # --- Test: non-contiguous dy via cat/split pattern ---
     x_test = x_ref.detach().clone().requires_grad_(True)
     weight_test = weight.detach().clone().requires_grad_(True)
+    h0_test = h0.clone().requires_grad_(True)
 
     # Forward through conv
-    y_test, _ = causal_conv1d(x_test, weight_test, activation=activation)
+    y_test, _ = causal_conv1d(x_test, weight_test, initial_state=h0_test, activation=activation)
 
     # Simulate non-contiguous dy: cat into [B, T, 3D] then split back
     dummy = torch.zeros_like(dy)
@@ -1514,3 +1517,21 @@ def test_conv_non_contiguous_dy(B, T, D, W, activation, dtype):
 
     assert_close(" dx", x_ref.grad, x_test.grad, 1e-3)
     assert_close(" dw", weight_ref.grad, weight_test.grad, 1e-3)
+    assert_close("dh0", h0_ref.grad, h0_test.grad, 1e-3)
+
+    # a gradient autograd expanded, e.g. from `y.sum()`, has stride 0 in every dimension
+    x_sum = x_ref.detach().clone().requires_grad_(True)
+    weight_sum = weight.detach().clone().requires_grad_(True)
+    h0_sum = h0.clone().requires_grad_(True)
+    y_sum, _ = causal_conv1d(x_sum, weight_sum, initial_state=h0_sum, activation=activation)
+    y_sum.sum().backward()
+
+    x_ones = x_ref.detach().clone().requires_grad_(True)
+    weight_ones = weight.detach().clone().requires_grad_(True)
+    h0_ones = h0.clone().requires_grad_(True)
+    y_ones, _ = causal_conv1d(x_ones, weight_ones, initial_state=h0_ones, activation=activation)
+    y_ones.backward(torch.ones_like(y_ones))
+
+    assert_close(" dx", x_ones.grad, x_sum.grad, 1e-3)
+    assert_close(" dw", weight_ones.grad, weight_sum.grad, 1e-3)
+    assert_close("dh0", h0_ones.grad, h0_sum.grad, 1e-3)

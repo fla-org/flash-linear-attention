@@ -432,6 +432,7 @@ def compute_dh0_kernel(
     cu_seqlens,
     stride_dy_n,
     stride_dy_t,
+    stride_dy_d,
     T,
     D: tl.constexpr,
     W: tl.constexpr,
@@ -474,15 +475,16 @@ def compute_dh0_kernel(
                 w_idx = i_w - 1 - t
 
                 # Load dy[t, :] relative to dy_base
-                p_dy = dy_base + t * stride_dy_t + o_d
+                p_dy = dy_base + t * stride_dy_t + o_d * stride_dy_d
                 m_t = (t < seq_len) & m_d
                 b_dy = tl.load(p_dy, mask=m_t, other=0).to(tl.float32)
 
                 if USE_ACTIVATION:
+                    # `y` is recomputed contiguous [*, T, D]; only `dy` may carry other strides
                     if IS_VARLEN:
-                        p_y = y + bos * stride_dy_t + t * stride_dy_t + o_d
+                        p_y = y + bos * D + t * D + o_d
                     else:
-                        p_y = y + tl.cast(i_n, tl.int64) * stride_dy_n + t * stride_dy_t + o_d
+                        p_y = y + tl.cast(i_n, tl.int64) * T * D + t * D + o_d
                     b_y = tl.load(p_y, mask=m_t, other=0).to(tl.float32)
                     b_ys = tl.sigmoid(b_y)
                     b_dy = b_dy * b_ys * (1 + b_y * (1 - b_ys))
