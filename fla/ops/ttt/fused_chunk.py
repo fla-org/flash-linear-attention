@@ -58,10 +58,10 @@ def fused_chunk_ttt_linear_fwd_kernel(
     STORE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_nh = tl.program_id(0)
+    i_nh = tl.program_id(0).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
         NT = tl.cdiv(T, BT)
     else:
@@ -78,24 +78,32 @@ def fused_chunk_ttt_linear_fwd_kernel(
     b_h = tl.zeros([BK, BV], dtype=tl.float32)
     # [BV]
     b_hb = tl.zeros([BV], dtype=tl.float32)
+    o_k = tl.arange(0, BK)
+    o_v = tl.arange(0, BV)
+    m_h = (o_k[:, None] < K) & (o_v[None, :] < V)
     if USE_INITIAL_STATE:
-        p_h0 = tl.make_block_ptr(h0 + i_nh * K * V, (K, V), (V, 1), (0, 0), (BK, BV), (1, 0))
-        b_h = tl.load(p_h0, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
+        p_h0 = h0 + i_nh * K * V + o_k[:, None] * V + o_v[None, :]
+        b_h = tl.load(p_h0, mask=m_h, other=0.0).to(tl.float32)
     if USE_INITIAL_STATE_B:
-        p_hb0 = tl.make_block_ptr(hb0 + i_nh * V, (V,), (1,), (0,), (BV,), (0,))
-        b_hb = tl.load(p_hb0, boundary_check=(0,), padding_option="zero").to(tl.float32)
+        p_hb0 = hb0 + i_nh * V + o_v
+        b_hb = tl.load(p_hb0, mask=o_v < V, other=0.0).to(tl.float32)
 
     for i_t in range(NT):
-        p_q = tl.make_block_ptr(q+(bos*H+i_h)*K, (T, K), (H*K, 1), (i_t*BT, 0), (BT, BK), (1, 0))
-        p_k = tl.make_block_ptr(k+(bos*H+i_h)*K, (K, T), (1, H*K), (0, i_t*BT), (BK, BT), (0, 1))
-        p_v = tl.make_block_ptr(v+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
-        p_o = tl.make_block_ptr(o+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
-        p_e = tl.make_block_ptr(eta+(bos*H+i_h), (T,), (H,), (i_t*BT,), (BT,), (0,))
+        o_t = i_t * BT + tl.arange(0, BT)
+        m_t = o_t < T
+        m_q = m_t[:, None] & (o_k[None, :] < K)
+        m_k = (o_k[:, None] < K) & m_t[None, :]
+        m_v = m_t[:, None] & (o_v[None, :] < V)
+        p_q = q+(bos*H+i_h)*K + o_t[:, None] * (H*K) + o_k[None, :]
+        p_k = k+(bos*H+i_h)*K + o_k[:, None] + o_t[None, :] * (H*K)
+        p_v = v+(bos*H+i_h)*V + o_t[:, None] * (H*V) + o_v[None, :]
+        p_o = o+(bos*H+i_h)*V + o_t[:, None] * (H*V) + o_v[None, :]
+        p_e = eta+(bos*H+i_h) + o_t * H
         p_e_last = eta+bos*H+i_h + (T-1)*H if i_t == NT-1 else eta+bos*H+i_h + (i_t*BT+BT-1)*H
         # [BK, BT]
-        b_k = tl.load(p_k, boundary_check=(0, 1), padding_option="zero")
+        b_k = tl.load(p_k, mask=m_k, other=0.0)
         # [BT, BV]
-        b_v = tl.load(p_v, boundary_check=(0, 1), padding_option="zero")
+        b_v = tl.load(p_v, mask=m_v, other=0.0)
 
         # [BT, BV]
         b_kh = tl.dot(tl.trans(b_k), b_h.to(b_k.dtype), allow_tf32=False).to(tl.float32) + b_hb[None, :]
@@ -113,9 +121,9 @@ def fused_chunk_ttt_linear_fwd_kernel(
                        * tl.sum(b_v * b_kh_hat.to(b_k.dtype), axis=1, keep_dims=True)) / V
 
         # [BT, BK]
-        b_q = tl.load(p_q, boundary_check=(0, 1), padding_option="zero")
+        b_q = tl.load(p_q, mask=m_q, other=0.0)
         # [BT]
-        b_e = tl.load(p_e, boundary_check=(0,), padding_option="zero")
+        b_e = tl.load(p_e, mask=m_t, other=0.0)
         b_q = (b_q * scale).to(b_k.dtype)
 
         # [BT, BT]
@@ -131,13 +139,13 @@ def fused_chunk_ttt_linear_fwd_kernel(
         b_hb = b_hb - tl.sum(b_e_last * b_v2.to(b_k.dtype), axis=0)
         b_h = tl.where((v_i < V)[None, :], b_h, 0.)
         b_hb = tl.where((v_i < V), b_hb, 0.)
-        tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
+        tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=m_v)
 
     if STORE_FINAL_STATE:
-        p_ht = tl.make_block_ptr(ht + i_nh * K*V, (K, V), (V, 1), (0, 0), (BK, BV), (1, 0))
-        p_hbt = tl.make_block_ptr(hbt + i_nh * V, (V,), (1,), (0,), (BV,), (0,))
-        tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), boundary_check=(0, 1))
-        tl.store(p_hbt, b_hb.to(p_hbt.dtype.element_ty), boundary_check=(0,))
+        p_ht = ht + i_nh * K*V + o_k[:, None] * V + o_v[None, :]
+        p_hbt = hbt + i_nh * V + o_v
+        tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=m_h)
+        tl.store(p_hbt, b_hb.to(p_hbt.dtype.element_ty), mask=o_v < V)
 
 
 @triton.heuristics({
@@ -181,7 +189,7 @@ def fused_chunk_ttt_linear_bwd_kernel_h(
     USE_INITIAL_STATE: tl.constexpr,
     USE_INITIAL_STATE_B: tl.constexpr,
 ):
-    i_nh = tl.program_id(0)
+    i_nh = tl.program_id(0).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
     bos, _ = i_n * T, i_n * T + T
     NT = tl.cdiv(T, BT)
@@ -197,30 +205,38 @@ def fused_chunk_ttt_linear_bwd_kernel_h(
     b_h = tl.zeros([BK, BV], dtype=tl.float32)
     # [BV]
     b_hb = tl.zeros([BV], dtype=tl.float32)
+    o_k = tl.arange(0, BK)
+    o_v = tl.arange(0, BV)
+    m_h = (o_k[:, None] < K) & (o_v[None, :] < V)
     if USE_INITIAL_STATE:
-        p_h0 = tl.make_block_ptr(h0 + i_nh * K * V, (K, V), (V, 1), (0, 0), (BK, BV), (1, 0))
-        b_h = tl.load(p_h0, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
+        p_h0 = h0 + i_nh * K * V + o_k[:, None] * V + o_v[None, :]
+        b_h = tl.load(p_h0, mask=m_h, other=0.0).to(tl.float32)
     if USE_INITIAL_STATE_B:
-        p_hb0 = tl.make_block_ptr(hb0 + i_nh * V, (V,), (1,), (0,), (BV,), (0,))
-        b_hb = tl.load(p_hb0, boundary_check=(0,), padding_option="zero").to(tl.float32)
+        p_hb0 = hb0 + i_nh * V + o_v
+        b_hb = tl.load(p_hb0, mask=o_v < V, other=0.0).to(tl.float32)
 
     for i_t in range(NT):
-        p_h = tl.make_block_ptr(h+((boh+i_t)*H+i_h)*K*V, (K, V), (V, 1), (0, 0), (BK, BV), (1, 0))
-        p_k = tl.make_block_ptr(k+(bos*H+i_h)*K, (K, T), (1, H*K), (0, i_t*BT), (BK, BT), (0, 1))
-        p_v = tl.make_block_ptr(v+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
-        p_v2 = tl.make_block_ptr(v2+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
-        p_x = tl.make_block_ptr(x+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
-        p_y = tl.make_block_ptr(y+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
-        p_r = tl.make_block_ptr(r+bos*H+i_h, (T, 1), (H, 1), (i_t*BT, 0), (BT, 1), (1, 0))
-        p_e = tl.make_block_ptr(eta+(bos*H+i_h), (T,), (H,), (i_t*BT,), (BT,), (0,))
-        p_dq = tl.make_block_ptr(dq+(bos*H+i_h)*K, (T, K), (H*K, 1), (i_t*BT, 0), (BT, BK), (1, 0))
-        p_do = tl.make_block_ptr(do+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
+        o_t = i_t * BT + tl.arange(0, BT)
+        m_t = o_t < T
+        m_q = m_t[:, None] & (o_k[None, :] < K)
+        m_k = (o_k[:, None] < K) & m_t[None, :]
+        m_v = m_t[:, None] & (o_v[None, :] < V)
+        p_h = h+((boh+i_t)*H+i_h)*K*V + o_k[:, None] * V + o_v[None, :]
+        p_k = k+(bos*H+i_h)*K + o_k[:, None] + o_t[None, :] * (H*K)
+        p_v = v+(bos*H+i_h)*V + o_t[:, None] * (H*V) + o_v[None, :]
+        p_v2 = v2+(bos*H+i_h)*V + o_t[:, None] * (H*V) + o_v[None, :]
+        p_x = x+(bos*H+i_h)*V + o_t[:, None] * (H*V) + o_v[None, :]
+        p_y = y+(bos*H+i_h)*V + o_t[:, None] * (H*V) + o_v[None, :]
+        p_r = r+bos*H+i_h + o_t[:, None] * H
+        p_e = eta+(bos*H+i_h) + o_t * H
+        p_dq = dq+(bos*H+i_h)*K + o_t[:, None] * (H*K) + o_k[None, :]
+        p_do = do+(bos*H+i_h)*V + o_t[:, None] * (H*V) + o_v[None, :]
         p_e_last = eta+bos*H+i_h + (T-1)*H if i_t == NT-1 else eta+bos*H+i_h + (i_t*BT+BT-1)*H
-        tl.store(p_h, b_h.to(p_h.dtype.element_ty), boundary_check=(0, 1))
+        tl.store(p_h, b_h.to(p_h.dtype.element_ty), mask=m_h)
         # [BK, BT]
-        b_k = tl.load(p_k, boundary_check=(0, 1), padding_option="zero")
+        b_k = tl.load(p_k, mask=m_k, other=0.0)
         # [BT, BV]
-        b_v = tl.load(p_v, boundary_check=(0, 1), padding_option="zero")
+        b_v = tl.load(p_v, mask=m_v, other=0.0)
 
         b_kh = tl.dot(tl.trans(b_k), b_h.to(b_k.dtype), allow_tf32=False).to(tl.float32) + b_hb[None, :]
         b_kh = tl.where((v_i < V)[None, :], b_kh, 0.)
@@ -235,13 +251,13 @@ def fused_chunk_ttt_linear_bwd_kernel_h(
         b_v = tl.where((v_i < V)[None, :], b_v * b_w[None, :].to(b_k.dtype), 0.)
         b_v2 = rstd * (V * b_v - tl.sum(b_v, axis=1, keep_dims=True) - b_kh_hat.to(b_k.dtype)
                        * tl.sum(b_v * b_kh_hat.to(b_k.dtype), axis=1, keep_dims=True)) / V
-        tl.store(p_x, b_kh_hat.to(p_x.dtype.element_ty), boundary_check=(0, 1))
-        tl.store(p_y, b_v.to(p_y.dtype.element_ty), boundary_check=(0, 1))
-        tl.store(p_r, rstd.to(p_r.dtype.element_ty), boundary_check=(0, 1))
-        tl.store(p_v2, b_v2.to(p_v2.dtype.element_ty), boundary_check=(0, 1))
+        tl.store(p_x, b_kh_hat.to(p_x.dtype.element_ty), mask=m_v)
+        tl.store(p_y, b_v.to(p_y.dtype.element_ty), mask=m_v)
+        tl.store(p_r, rstd.to(p_r.dtype.element_ty), mask=m_t[:, None])
+        tl.store(p_v2, b_v2.to(p_v2.dtype.element_ty), mask=m_v)
 
-        b_e = tl.load(p_e, boundary_check=(0,), padding_option="zero")
-        b_do = tl.load(p_do, boundary_check=(0, 1), padding_option="zero")
+        b_e = tl.load(p_e, mask=m_t, other=0.0)
+        b_do = tl.load(p_do, mask=m_v, other=0.0)
 
         b_v2 = tl.where((v_i < V)[None, :], b_v2, 0.)
         b_ds = tl.dot(b_do, tl.trans(b_v2).to(b_do.dtype))
@@ -256,7 +272,7 @@ def fused_chunk_ttt_linear_bwd_kernel_h(
         b_hb = b_hb - tl.sum(b_e_last * b_v2.to(b_k.dtype), axis=0)
         b_h = tl.where((v_i < V)[None, :], b_h, 0.)
         b_hb = tl.where((v_i < V), b_hb, 0.)
-        tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), boundary_check=(0, 1))
+        tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), mask=m_q)
 
 
 @triton.heuristics({
@@ -309,7 +325,7 @@ def fused_chunk_ttt_linear_bwd_kernel_dh(
     USE_FINAL_STATE_GRADIENT: tl.constexpr,
     USE_FINAL_STATE_GRADIENT_B: tl.constexpr,
 ):
-    i_nh = tl.program_id(0)
+    i_nh = tl.program_id(0).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
     bos, _ = i_n * T, i_n * T + T
     NT = tl.cdiv(T, BT)
@@ -319,12 +335,15 @@ def fused_chunk_ttt_linear_bwd_kernel_dh(
     b_dh = tl.zeros([BK, BV], dtype=tl.float32)
     # [BV]
     b_dhb = tl.zeros([BV], dtype=tl.float32)
+    o_k = tl.arange(0, BK)
+    o_v = tl.arange(0, BV)
+    m_h = (o_k[:, None] < K) & (o_v[None, :] < V)
     if USE_FINAL_STATE_GRADIENT:
-        p_dht = tl.make_block_ptr(dht + i_nh * K*V, (K, V), (V, 1), (0, 0), (BK, BV), (1, 0))
-        b_dh += tl.load(p_dht, boundary_check=(0, 1), padding_option="zero")
+        p_dht = dht + i_nh * K*V + o_k[:, None] * V + o_v[None, :]
+        b_dh += tl.load(p_dht, mask=m_h, other=0.0)
     if USE_FINAL_STATE_GRADIENT_B:
-        p_dhbt = tl.make_block_ptr(dhbt + i_nh * V, (V,), (1,), (0,), (BV,), (0,))
-        b_dhb += tl.load(p_dhbt, boundary_check=(0,), padding_option="zero")
+        p_dhbt = dhbt + i_nh * V + o_v
+        b_dhb += tl.load(p_dhbt, mask=o_v < V, other=0.0)
 
     # [BV]
     o_i = tl.arange(0, BT)
@@ -335,28 +354,34 @@ def fused_chunk_ttt_linear_bwd_kernel_dh(
     b_b = tl.load(b + i_h * V + v_i, mask=v_i < V, other=0.)
     b_dw = tl.zeros([BV], dtype=b_w.dtype)
     b_db = tl.zeros([BV], dtype=b_b.dtype)
-    p_dw = tl.make_block_ptr(dw + i_nh * V, (V,), (1,), (0,), (BV,), (0,))
-    p_db = tl.make_block_ptr(db + i_nh * V, (V,), (1,), (0,), (BV,), (0,))
+    p_dw = dw + i_nh * V + o_v
+    p_db = db + i_nh * V + o_v
 
     for i_t in range(NT - 1, -1, -1):
-        p_h = tl.make_block_ptr(h+((boh+i_t)*H+i_h)*K*V, (V, K), (1, V), (0, 0), (BV, BK), (0, 1))
-        p_q = tl.make_block_ptr(q+(bos*H+i_h)*K, (K, T), (1, H*K), (0, i_t*BT), (BK, BT), (0, 1))
-        p_k = tl.make_block_ptr(k+(bos*H+i_h)*K, (T, K), (H*K, 1), (i_t*BT, 0), (BT, BK), (1, 0))
-        p_v = tl.make_block_ptr(v+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
-        p_v2 = tl.make_block_ptr(v2+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
-        p_x = tl.make_block_ptr(x+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
-        p_y = tl.make_block_ptr(y+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
-        p_r = tl.make_block_ptr(r+bos*H+i_h, (T, 1), (H, 1), (i_t*BT, 0), (BT, 1), (1, 0))
-        p_e = tl.make_block_ptr(eta+(bos*H+i_h), (T,), (H,), (i_t*BT,), (BT,), (0,))
-        p_dv = tl.make_block_ptr(dv+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
-        p_dk = tl.make_block_ptr(dk+(bos*H+i_h)*K, (T, K), (H*K, 1), (i_t*BT, 0), (BT, BK), (1, 0))
-        p_do = tl.make_block_ptr(do+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
-        p_de = tl.make_block_ptr(de+(bos*H+i_h), (T,), (H,), (i_t*BT,), (BT,), (0,))
+        o_t = i_t * BT + tl.arange(0, BT)
+        m_t = o_t < T
+        m_q = (o_k[:, None] < K) & m_t[None, :]
+        m_k = m_t[:, None] & (o_k[None, :] < K)
+        m_v = m_t[:, None] & (o_v[None, :] < V)
+        m_hv = (o_v[:, None] < V) & (o_k[None, :] < K)
+        p_h = h+((boh+i_t)*H+i_h)*K*V + o_v[:, None] + o_k[None, :] * V
+        p_q = q+(bos*H+i_h)*K + o_k[:, None] + o_t[None, :] * (H*K)
+        p_k = k+(bos*H+i_h)*K + o_t[:, None] * (H*K) + o_k[None, :]
+        p_v = v+(bos*H+i_h)*V + o_t[:, None] * (H*V) + o_v[None, :]
+        p_v2 = v2+(bos*H+i_h)*V + o_t[:, None] * (H*V) + o_v[None, :]
+        p_x = x+(bos*H+i_h)*V + o_t[:, None] * (H*V) + o_v[None, :]
+        p_y = y+(bos*H+i_h)*V + o_t[:, None] * (H*V) + o_v[None, :]
+        p_r = r+bos*H+i_h + o_t[:, None] * H
+        p_e = eta+(bos*H+i_h) + o_t * H
+        p_dv = dv+(bos*H+i_h)*V + o_t[:, None] * (H*V) + o_v[None, :]
+        p_dk = dk+(bos*H+i_h)*K + o_t[:, None] * (H*K) + o_k[None, :]
+        p_do = do+(bos*H+i_h)*V + o_t[:, None] * (H*V) + o_v[None, :]
+        p_de = de+(bos*H+i_h) + o_t * H
         p_e_last = eta+bos*H+i_h + (T-1)*H if i_t == NT-1 else eta+bos*H+i_h + (i_t*BT+BT-1)*H
-        b_q = tl.load(p_q, boundary_check=(0, 1), padding_option="zero")
-        b_k = tl.load(p_k, boundary_check=(0, 1), padding_option="zero")
-        b_e = tl.load(p_e, boundary_check=(0,), padding_option="zero")
-        b_do = tl.load(p_do, boundary_check=(0, 1), padding_option="zero")
+        b_q = tl.load(p_q, mask=m_q, other=0.0)
+        b_k = tl.load(p_k, mask=m_k, other=0.0)
+        b_e = tl.load(p_e, mask=m_t, other=0.0)
+        b_do = tl.load(p_do, mask=m_v, other=0.0)
         b_e_last = tl.load(p_e_last)
         b_A = tl.dot(b_k, b_q)
         b_A = - tl.where(m_A_t, b_A * scale * b_e[None, :], 0).to(do.dtype.element_ty)
@@ -365,17 +390,17 @@ def fused_chunk_ttt_linear_bwd_kernel_dh(
         b_dv_new -= tl.dot(b_e_last * b_k, b_dh.to(b_k.dtype))
         b_dv_new -= b_e_last * b_dhb.to(b_k.dtype)[None, :]
 
-        b_v2 = tl.load(p_v2, boundary_check=(0, 1), padding_option="zero").to(b_k.dtype)
-        b_x = tl.load(p_x, boundary_check=(0, 1), padding_option="zero").to(b_k.dtype)
-        b_y = tl.load(p_y, boundary_check=(0, 1), padding_option="zero").to(b_k.dtype)
-        b_rstd = tl.load(p_r, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
+        b_v2 = tl.load(p_v2, mask=m_v, other=0.0).to(b_k.dtype)
+        b_x = tl.load(p_x, mask=m_v, other=0.0).to(b_k.dtype)
+        b_y = tl.load(p_y, mask=m_v, other=0.0).to(b_k.dtype)
+        b_rstd = tl.load(p_r, mask=m_t[:, None], other=0.0).to(tl.float32)
         b_dy = b_rstd * (b_dv_new * V - tl.sum(b_dv_new, axis=1, keep_dims=True) -
                          b_x * tl.sum(b_dv_new * b_x, axis=1, keep_dims=True)) / V
         b_dx = -b_rstd * (b_dv_new * tl.sum(b_x * b_y, axis=1, keep_dims=True) +
                           b_y * tl.sum(b_dv_new * b_x, axis=1, keep_dims=True)) / V
         b_drstd = tl.sum(b_dv_new.to(b_rstd.dtype) * b_v2.to(b_rstd.dtype) / b_rstd, axis=1, keep_dims=True)
 
-        b_v = tl.load(p_v, boundary_check=(0, 1), padding_option="zero")
+        b_v = tl.load(p_v, mask=m_v, other=0.0)
         b_w = b_w.to(b_k.dtype)
         b_b = b_b.to(b_k.dtype)
         b_dv = -b_w * b_dy.to(b_k.dtype)
@@ -385,7 +410,7 @@ def fused_chunk_ttt_linear_bwd_kernel_dh(
         b_db += tl.sum(b_w * b_dy.to(b_k.dtype), axis=0).to(b_db.dtype)
         b_dx = b_dx.to(b_k.dtype) + b_w * b_w * b_dy.to(b_k.dtype)
 
-        b_h = tl.load(p_h, boundary_check=(0, 1), padding_option="zero")
+        b_h = tl.load(p_h, mask=m_hv, other=0.0)
         b_q = (b_q * scale).to(b_q.dtype)
         b_dkh = b_rstd * (V * b_dx - tl.sum(b_dx, axis=1, keep_dims=True) -
                           b_x * tl.sum(b_x * b_dx, axis=1, keep_dims=True)) / V
@@ -409,18 +434,18 @@ def fused_chunk_ttt_linear_bwd_kernel_dh(
         b_dh = tl.where((v_i < V)[None, :], b_dh, 0.)
         b_dhb = tl.where((v_i < V), b_dhb, 0.)
 
-        tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
-        tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
-        tl.store(p_de, b_de.to(p_de.dtype.element_ty), boundary_check=(0,))
-    tl.store(p_dw, b_dw.to(p_dw.dtype.element_ty), boundary_check=(0,))
-    tl.store(p_db, b_db.to(p_db.dtype.element_ty), boundary_check=(0,))
+        tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), mask=m_k)
+        tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), mask=m_v)
+        tl.store(p_de, b_de.to(p_de.dtype.element_ty), mask=m_t)
+    tl.store(p_dw, b_dw.to(p_dw.dtype.element_ty), mask=o_v < V)
+    tl.store(p_db, b_db.to(p_db.dtype.element_ty), mask=o_v < V)
 
     if USE_INITIAL_STATE:
-        p_dh0 = tl.make_block_ptr(dh0+i_nh*K*V, (K, V), (V, 1), (0, 0), (BK, BV), (1, 0))
-        tl.store(p_dh0, b_dh.to(p_dh0.dtype.element_ty), boundary_check=(0, 1))
+        p_dh0 = dh0+i_nh*K*V + o_k[:, None] * V + o_v[None, :]
+        tl.store(p_dh0, b_dh.to(p_dh0.dtype.element_ty), mask=m_h)
     if USE_INITIAL_STATE_B:
-        p_dhb0 = tl.make_block_ptr(dhb0+i_nh*V, (V,), (1,), (0,), (BV,), (0,))
-        tl.store(p_dhb0, b_dhb.to(p_dhb0.dtype.element_ty), boundary_check=(0,))
+        p_dhb0 = dhb0+i_nh*V + o_v
+        tl.store(p_dhb0, b_dhb.to(p_dhb0.dtype.element_ty), mask=o_v < V)
 
 
 def fused_chunk_ttt_linear_bwd_h(

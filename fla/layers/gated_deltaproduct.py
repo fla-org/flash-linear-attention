@@ -16,7 +16,7 @@ import torch.nn as nn
 from einops import rearrange, repeat
 from torch.nn import functional as F
 
-from fla.layers.utils import get_layer_cache, get_unpad_data, index_first_axis, pad_input, update_layer_cache
+from fla.layers.utils import get_layer_cache, repad_hidden_states, unpad_hidden_states, update_layer_cache
 from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
 from fla.ops.gated_delta_product import chunk_gated_delta_product
 from fla.ops.gated_delta_rule import fused_recurrent_gated_delta_rule
@@ -186,9 +186,7 @@ class GatedDeltaProduct(nn.Module):
         last_state = get_layer_cache(self, past_key_values)
 
         cu_seqlens = kwargs.get('cu_seqlens')
-        if cu_seqlens is None and attention_mask is not None:
-            indices, cu_seqlens, _ = get_unpad_data(attention_mask[:, -q_len:])
-            hidden_states = index_first_axis(rearrange(hidden_states, "b s ... -> (b s) ..."), indices).unsqueeze(0)
+        hidden_states, indices, cu_seqlens = unpad_hidden_states(hidden_states, cu_seqlens, attention_mask, q_len)
 
         if self.use_short_conv:
             conv_state_q, conv_state_k, conv_state_v = None, None, None
@@ -286,7 +284,6 @@ class GatedDeltaProduct(nn.Module):
             o = self.o_norm(o)
         o = rearrange(o, 'b t h d -> b t (h d)')
         o = self.o_proj(o)
-        if attention_mask is not None:
-            o = pad_input(o.squeeze(0), indices, batch_size, q_len)
+        o = repad_hidden_states(o, indices, batch_size, q_len)
 
         return o, None, past_key_values

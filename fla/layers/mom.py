@@ -23,7 +23,16 @@ if TYPE_CHECKING:
 
     from fla.models.utils import Cache
 
-from fla.layers.utils import get_layer_cache, get_unpad_data, index_first_axis, pad_input, unpad_input, update_layer_cache
+from fla.layers.utils import (
+    get_layer_cache,
+    get_unpad_data,
+    index_first_axis,
+    pad_input,
+    repad_hidden_states,
+    unpad_hidden_states,
+    unpad_input,
+    update_layer_cache,
+)
 
 
 def _upad_input(
@@ -678,11 +687,9 @@ class MomAttention(nn.Module):
         if self.training:
             assert mode == 'chunk', "Only chunk mode is supported in training."
 
-        cu_seqlens = None
-        if attention_mask is not None:
-            batch_size, q_len = hidden_states.shape[0], hidden_states.shape[1]
-            indices, cu_seqlens, _ = get_unpad_data(attention_mask[:, -q_len:])
-            hidden_states = index_first_axis(rearrange(hidden_states, "b s ... -> (b s) ..."), indices).unsqueeze(0)
+        cu_seqlens = kwargs.get('cu_seqlens')
+        batch_size, q_len = hidden_states.shape[0], hidden_states.shape[1]
+        hidden_states, indices, cu_seqlens = unpad_hidden_states(hidden_states, cu_seqlens, attention_mask, q_len)
 
         if self.use_short_conv:
             q, conv_state_q[1] = self.q_conv1d(
@@ -741,8 +748,7 @@ class MomAttention(nn.Module):
         else:
             raise NotImplementedError(f"Not supported mode `{mode}`.")
 
-        if attention_mask is not None:
-            o = pad_input(o.squeeze(0), indices, batch_size, q_len)
+        o = repad_hidden_states(o, indices, batch_size, q_len)
         return o
 
     def cu2pad(self, x, cu_seqlens):

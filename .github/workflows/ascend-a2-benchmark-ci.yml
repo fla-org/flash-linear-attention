@@ -1,0 +1,215 @@
+name: ascend-a2-benchmark-ci
+
+# Pinned stack: CANN 9.0.0 + pyproject [npu] extra (torch/torch_npu/torchvision/triton-ascend)
+# Runs NPU performance benchmarks for triton-ascend backends and causal conv.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "**/*.py"
+      - "pyproject.toml"
+      - ".github/workflows/*.yml"
+  pull_request:
+    branches:
+      - main
+    types: [opened, synchronize, reopened, edited]
+    paths:
+      - "**/*.py"
+      - "pyproject.toml"
+      - ".github/workflows/*.yml"
+
+jobs:
+  changes:
+    name: Detect NPU-related changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      npu_related: ${{ steps.detect.outputs.npu_related }}
+    steps:
+      - name: Detect NPU-related diff
+        id: detect
+        uses: actions/github-script@v9.0.0
+        with:
+          script: |
+            if (context.eventName !== 'pull_request') {
+              core.setOutput('npu_related', 'false');
+              return;
+            }
+            const pr = context.payload.pull_request;
+            const { owner, repo } = context.repo;
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner, repo, pull_number: pr.number, per_page: 100,
+            });
+            // NPU-related set: triton-ascend backend files, Ascend workflow
+            // definitions, the files that define the NPU CI stack itself:
+            //   pyproject.toml    - pins the [npu] extra (torch_npu / triton-ascend)
+            //   fla/utils/        - IS_NPU / device_platform detection, ascend_ub_manager
+            //   fla/modules/      - pure-torch modules run on NPU in the A2 test suite
+            //   tests/conftest.py - FLA_NPU_XDIST xdist worker -> device mapping
+            // and the benchmark harness invoked by this workflow (benchmarks/).
+            // Unlike the H100 'npu_only' detection, __init__.py is NOT excluded
+            // here: a change to it affects the NPU backend too, so it should
+            // trigger this CI.
+            const npuPattern = /^fla\/(.+\/)?backends\/triton_ascend\/|^\.github\/workflows\/ascend-|^pyproject\.toml$|^fla\/utils\/|^fla\/modules\/|^tests\/conftest\.py$|^benchmarks\//;
+            const related = files.filter(f => npuPattern.test(f.filename)).map(f => f.filename);
+            if (related.length > 0) {
+              core.info('NPU-related files changed: ' + related.join(', '));
+            }
+            core.setOutput('npu_related', related.length > 0 ? 'true' : 'false');
+
+  benchmark-a2-npu-pytorch-2-7:
+    name: Benchmark A2 NPU (PyTorch 2.7.1)
+    needs: changes
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'push' ||
+      (
+        github.event_name == 'pull_request' &&
+        (
+          needs.changes.outputs.npu_related == 'true' ||
+          contains(github.event.pull_request.title, 'npu') ||
+          contains(github.event.pull_request.title, 'NPU') ||
+          contains(github.event.pull_request.title, 'ascend') ||
+          contains(github.event.pull_request.title, 'Ascend') ||
+          contains(github.event.pull_request.title, 'ASCEND')
+        )
+      )
+    strategy:
+      fail-fast: false
+      matrix:
+        python:
+          - "3.11"
+        os:
+          - "linux-aarch64-a2-4"
+
+    runs-on: ${{ matrix.os }}
+
+    timeout-minutes: 150
+
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-${{ matrix.os }}-${{ matrix.python }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+    container:
+      image: ascendai/cann:9.0.0-910b-ubuntu22.04-py3.11
+      options: >-
+        --shm-size 16g
+      env:
+        HF_ENDPOINT: https://hf-mirror.com
+
+    env:
+      FLA_CI_ENV: 1
+      ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3"
+      # Triton perf_report always calls plt.savefig when save_path is set.
+      MPLBACKEND: Agg
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.0
+
+      - name: Check NPU and CANN info
+        run: |
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -m)"-linux/ascend_toolkit_install.info
+          npu-smi info
+
+      - name: Install dependencies
+        run: |
+          python -m pip install -U pip setuptools wheel
+          # triton-ascend runtime/build deps; install before resolving [npu] extra
+          python -m pip install pybind11 cmake attrs sympy pyyaml scipy decorator einops
+          # benchmark_conv plotting (Triton perf_report + benchmarks.visualize).
+          python -m pip install matplotlib pandas
+          # [npu] extra pins torch / torch_npu / torchvision / triton-ascend; osinfra index
+          # hosts triton-ascend wheels (see INSTALL.md).
+          python -m pip install ".[npu,test]" \
+            --extra-index-url=https://triton-ascend.osinfra.cn/pypi/simple
+
+      - name: Verify environment
+        shell: bash
+        run: |
+          source /usr/local/Ascend/ascend-toolkit/set_env.sh
+          python - <<'PY'
+          import torch
+          import torch_npu
+
+          print("torch:", torch.__version__)
+          print("torch_npu:", torch_npu.__version__)
+          print("npu available:", torch.npu.is_available())
+
+          import triton
+          print("triton:", triton.__version__)
+
+          from fla.utils import IS_NPU, device_platform
+          print("device_platform:", device_platform)
+          assert IS_NPU, "Expected NPU backend (IS_NPU=True)"
+
+          import matplotlib
+          import pandas as pd
+          print("matplotlib:", matplotlib.__version__, "| backend:", matplotlib.get_backend())
+          print("pandas:", pd.__version__)
+
+          import io
+          import matplotlib.pyplot as plt
+          fig, _ax = plt.subplots()
+          fig.savefig(io.BytesIO(), format='png')
+          plt.close(fig)
+          print("matplotlib savefig smoke test: ok")
+          PY
+
+      - name: Benchmark chunk_gdn, chunk_kda, fused_attnres, and conv1d
+        shell: bash
+        env:
+          FLA_BENCH_WARMUP_MS: "25"
+          FLA_BENCH_REP_MS: "100"
+          FLA_BENCH_OP_WARMUP_ITERS: "3"
+        run: |
+          source /usr/local/Ascend/ascend-toolkit/set_env.sh
+          set -uo pipefail
+
+          ASCEND_RT_VISIBLE_DEVICES=0 python -m benchmarks.ops.run \
+            --op chunk_gdn --base '' --json benchmark_chunk_gdn.json \
+            > chunk_gdn.log 2>&1 &
+          pid_gdn=$!
+          ASCEND_RT_VISIBLE_DEVICES=1 python -m benchmarks.ops.run \
+            --op chunk_kda --base '' --json benchmark_chunk_kda.json \
+            > chunk_kda.log 2>&1 &
+          pid_kda=$!
+          ASCEND_RT_VISIBLE_DEVICES=2 python -m benchmarks.ops.run \
+            --op fused_attnres --base '' --json benchmark_fused_attnres.json \
+            > fused_attnres.log 2>&1 &
+          pid_attnres=$!
+          ASCEND_RT_VISIBLE_DEVICES=3 python benchmarks/modules/benchmark_conv.py \
+            > conv1d.log 2>&1 &
+          pid_conv1d=$!
+
+          status=0
+          wait "$pid_gdn" || status=1
+          wait "$pid_kda" || status=1
+          wait "$pid_attnres" || status=1
+          wait "$pid_conv1d" || status=1
+
+          echo "========== chunk_gdn =========="
+          cat chunk_gdn.log
+          echo "========== chunk_kda =========="
+          cat chunk_kda.log
+          echo "========== fused_attnres =========="
+          cat fused_attnres.log
+          echo "========== conv1d =========="
+          cat conv1d.log
+          exit "$status"
+
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: ascend-a2-benchmark-results
+          path: |
+            benchmark_chunk_gdn.json
+            benchmark_chunk_kda.json
+            benchmark_fused_attnres.json
+            conv_benchmark/
+          if-no-files-found: ignore
+          retention-days: 10

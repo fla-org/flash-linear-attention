@@ -60,50 +60,58 @@ def chunk_generalized_iplr_delta_rule_fwd_kernel_h(
     STORE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
         NT = tl.cdiv(T, BT)
-        boh = tl.load(chunk_offsets + i_n).to(tl.int32)
+        boh = tl.load(chunk_offsets + i_n).to(tl.int64)
     else:
         bos, eos = i_n * T, i_n * T + T
         NT = tl.cdiv(T, BT)
         boh = i_n * NT
 
+    o_k = i_k * BK + tl.arange(0, BK)
+    o_v = i_v * BV + tl.arange(0, BV)
+    m_h = (o_k[:, None] < K) & (o_v[None, :] < V)
     # [BK, BV]
     b_h = tl.zeros([BK, BV], dtype=tl.float32)
     if USE_INITIAL_STATE:
-        p_h0 = tl.make_block_ptr(h0 + i_nh * K*V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
-        b_h = tl.load(p_h0, boundary_check=(0, 1)).to(tl.float32)
+        p_h0 = h0 + i_nh * K*V + o_k[:, None] * V + o_v[None, :]
+        b_h = tl.load(p_h0, mask=m_h, other=0.0).to(tl.float32)
 
     for i_t in range(NT):
-        p_h = tl.make_block_ptr(h + ((boh + i_t) * H + i_h) * K*V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
-        tl.store(p_h, b_h.to(p_h.dtype.element_ty), boundary_check=(0, 1))
+        p_h = h + ((boh + i_t) * H + i_h) * K*V + o_k[:, None] * V + o_v[None, :]
+        tl.store(p_h, b_h.to(p_h.dtype.element_ty), mask=m_h)
         b_hc = tl.zeros([BK, BV], dtype=tl.float32)
         # since we need to make all DK in the SRAM. we face serve SRAM memory burden. By subchunking we allievate such burden
         for i_c in range(tl.cdiv(min(BT, T - i_t * BT), BC)):
-            p_k = tl.make_block_ptr(k+(bos*H+i_h)*K, (K, T), (1, H*K), (i_k * BK, i_t * BT + i_c * BC), (BK, BC), (0, 1))
-            p_b = tl.make_block_ptr(b+(bos*H+i_h)*K, (K, T), (1, H*K), (i_k * BK, i_t * BT + i_c * BC), (BK, BC), (0, 1))
-            p_d = tl.make_block_ptr(d+(bos*H+i_h)*K, (T, K), (H*K, 1), (i_t * BT + i_c * BC, i_k * BK), (BC, BK), (1, 0))
-            p_v = tl.make_block_ptr(v+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t * BT + i_c * BC, i_v * BV), (BC, BV), (1, 0))
-            p_u = tl.make_block_ptr(u+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t * BT + i_c * BC, i_v * BV), (BC, BV), (1, 0))
-            p_v_new = tl.make_block_ptr(v_new+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t*BT+i_c*BC, i_v * BV), (BC, BV), (1, 0))
+            o_c = i_t * BT + i_c * BC + tl.arange(0, BC)
+            m_c = o_c < T
+            m_kc = (o_k[:, None] < K) & m_c[None, :]
+            m_dc = m_c[:, None] & (o_k[None, :] < K)
+            m_vc = m_c[:, None] & (o_v[None, :] < V)
+            p_k = k+(bos*H+i_h)*K + o_k[:, None] + o_c[None, :] * (H*K)
+            p_b = b+(bos*H+i_h)*K + o_k[:, None] + o_c[None, :] * (H*K)
+            p_d = d+(bos*H+i_h)*K + o_c[:, None] * (H*K) + o_k[None, :]
+            p_v = v+(bos*H+i_h)*V + o_c[:, None] * (H*V) + o_v[None, :]
+            p_u = u+(bos*H+i_h)*V + o_c[:, None] * (H*V) + o_v[None, :]
+            p_v_new = v_new+(bos*H+i_h)*V + o_c[:, None] * (H*V) + o_v[None, :]
             # [BK, BC]
-            b_k = tl.load(p_k, boundary_check=(0, 1))
-            b_v = tl.load(p_v, boundary_check=(0, 1))
-            b_d = tl.load(p_d, boundary_check=(0, 1))
-            b_b = tl.load(p_b, boundary_check=(0, 1))
-            b_v2 = tl.dot(b_d, b_h.to(b_d.dtype)) + tl.load(p_u, boundary_check=(0, 1))
+            b_k = tl.load(p_k, mask=m_kc, other=0.0)
+            b_v = tl.load(p_v, mask=m_vc, other=0.0)
+            b_d = tl.load(p_d, mask=m_dc, other=0.0)
+            b_b = tl.load(p_b, mask=m_kc, other=0.0)
+            b_v2 = tl.dot(b_d, b_h.to(b_d.dtype)) + tl.load(p_u, mask=m_vc, other=0.0)
             b_hc += tl.dot(b_k, b_v)
             b_hc += tl.dot(b_b, b_v2.to(b_k.dtype))
-            tl.store(p_v_new, b_v2.to(p_v_new.dtype.element_ty), boundary_check=(0, 1))
+            tl.store(p_v_new, b_v2.to(p_v_new.dtype.element_ty), mask=m_vc)
         b_h += b_hc
 
     if STORE_FINAL_STATE:
-        p_ht = tl.make_block_ptr(ht + i_nh * K*V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
-        tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), boundary_check=(0, 1))
+        p_ht = ht + i_nh * K*V + o_k[:, None] * V + o_v[None, :]
+        tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=m_h)
 
 
 @triton.heuristics({
@@ -140,13 +148,13 @@ def chunk_generalized_iplr_delta_rule_fwd_kernel_o(
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
 
     if IS_VARLEN:
         i_tg = i_t
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
         NT = tl.cdiv(T, BT)
     else:
@@ -169,18 +177,25 @@ def chunk_generalized_iplr_delta_rule_fwd_kernel_o(
     b_Aqk = tl.zeros([BT, BT], dtype=tl.float32)
     b_Aqb = tl.zeros([BT, BT], dtype=tl.float32)
 
+    o_t = i_t * BT + tl.arange(0, BT)
+    o_v = i_v * BV + tl.arange(0, BV)
+    m_t = o_t < T
     for i_k in range(tl.cdiv(K, BK)):
-        p_q = tl.make_block_ptr(q, (T, K), (stride_qk, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-        p_k = tl.make_block_ptr(k, (K, T), (1, stride_qk), (i_k * BK, i_t * BT), (BK, BT), (0, 1))
-        p_h = tl.make_block_ptr(h, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
-        p_b = tl.make_block_ptr(b, (K, T), (1, stride_qk), (i_k * BK, i_t * BT), (BK, BT), (0, 1))
+        o_k = i_k * BK + tl.arange(0, BK)
+        m_q = m_t[:, None] & (o_k[None, :] < K)
+        m_k = (o_k[:, None] < K) & m_t[None, :]
+        m_h = (o_k[:, None] < K) & (o_v[None, :] < V)
+        p_q = q + o_t[:, None] * stride_qk + o_k[None, :]
+        p_k = k + o_k[:, None] + o_t[None, :] * stride_qk
+        p_h = h + o_k[:, None] * V + o_v[None, :]
+        p_b = b + o_k[:, None] + o_t[None, :] * stride_qk
         # [BT, BK]
-        b_q = tl.load(p_q, boundary_check=(0, 1))
+        b_q = tl.load(p_q, mask=m_q, other=0.0)
         # [BK, BT]
-        b_k = tl.load(p_k, boundary_check=(0, 1))
-        b_b = tl.load(p_b, boundary_check=(0, 1))
+        b_k = tl.load(p_k, mask=m_k, other=0.0)
+        b_b = tl.load(p_b, mask=m_k, other=0.0)
         # [BK, BV]
-        b_h = tl.load(p_h, boundary_check=(0, 1))
+        b_h = tl.load(p_h, mask=m_h, other=0.0)
         # [BT, BK] @ [BK, BV] -> [BT, BV]
         b_o += tl.dot(b_q, b_h)
         # [BT, BK] @ [BK, BT] -> [BT, BT]
@@ -193,13 +208,14 @@ def chunk_generalized_iplr_delta_rule_fwd_kernel_o(
     b_Aqk = tl.where(m_A, b_Aqk, 0)
     b_Aqb = tl.where(m_A, b_Aqb, 0)
 
-    p_v = tl.make_block_ptr(v, (T, V), (stride_vo, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-    p_u = tl.make_block_ptr(u, (T, V), (stride_vo, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-    p_o = tl.make_block_ptr(o, (T, V), (stride_vo, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-    b_v = tl.load(p_v, boundary_check=(0, 1))
-    b_u = tl.load(p_u, boundary_check=(0, 1))
+    m_v = m_t[:, None] & (o_v[None, :] < V)
+    p_v = v + o_t[:, None] * stride_vo + o_v[None, :]
+    p_u = u + o_t[:, None] * stride_vo + o_v[None, :]
+    p_o = o + o_t[:, None] * stride_vo + o_v[None, :]
+    b_v = tl.load(p_v, mask=m_v, other=0.0)
+    b_u = tl.load(p_u, mask=m_v, other=0.0)
     b_o = (b_o + tl.dot(b_Aqk.to(b_v.dtype), b_v) + tl.dot(b_Aqb.to(b_u.dtype), b_u)) * scale
-    tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=m_v)
 
 
 def chunk_generalized_iplr_delta_rule_fwd_o(

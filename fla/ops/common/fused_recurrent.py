@@ -57,7 +57,9 @@ def fused_recurrent_fwd_kernel(
     IS_VARLEN: tl.constexpr,
     STATE_V_FIRST: tl.constexpr = False,
 ):
-    i_v, i_k, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    pid = tl.program_id(0)
+    NV, NK = tl.cdiv(V, BV), tl.cdiv(K, BK)
+    i_v, i_k, i_nh = (pid % NV).to(tl.int64), ((pid // NV) % NK).to(tl.int64), (pid // (NV * NK)).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
 
     all = B * T
@@ -199,7 +201,9 @@ def fused_recurrent_bwd_kernel(
     IS_VARLEN: tl.constexpr,
     STATE_V_FIRST: tl.constexpr = False,
 ):
-    i_v, i_k, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    pid = tl.program_id(0)
+    NV, NK = tl.cdiv(V, BV), tl.cdiv(K, BK)
+    i_v, i_k, i_nh = (pid % NV).to(tl.int64), ((pid // NV) % NK).to(tl.int64), (pid // (NV * NK)).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
 
     all = B * T
@@ -432,7 +436,7 @@ def fused_recurrent_fwd(
         ht = None
     o = q.new_empty(NK, *v.shape, dtype=torch.float32)
 
-    grid = (NV, NK, N * H)
+    grid = (NV * NK * N * H,)
     fused_recurrent_fwd_kernel[grid](
         q=q,
         k=k,
@@ -501,7 +505,7 @@ def fused_recurrent_bwd(
     if gv is not None:
         dgv = gv.new_empty(NK, *gv.shape, dtype=torch.float32)
 
-    grid = (NV, NK, N * H)
+    grid = (NV * NK * N * H,)
     fused_recurrent_bwd_kernel[grid](
         q=q,
         k=k,

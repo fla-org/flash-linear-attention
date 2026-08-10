@@ -37,17 +37,21 @@ def prepare_wy_repr_fwd_kernel_chunk32(
     BC: tl.constexpr,  # placeholder, do not delete
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_bh = tl.program_id(0), tl.program_id(1)
+    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
-    p_Aab = tl.make_block_ptr(A_ab + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
-    p_Aab_inv = tl.make_block_ptr(A_ab_inv + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
-    b_A_ab = tl.load(p_Aab, boundary_check=(0, 1))
+    o_t = i_t * BT + tl.arange(0, BT)
+    o_A = tl.arange(0, BT)
+    m_t = o_t < T
+    m_A = m_t[:, None] & (o_A[None, :] < BT)
+    p_Aab = A_ab + (bos*H + i_h) * BT + o_t[:, None] * (H*BT) + o_A[None, :]
+    p_Aab_inv = A_ab_inv + (bos*H + i_h) * BT + o_t[:, None] * (H*BT) + o_A[None, :]
+    b_A_ab = tl.load(p_Aab, mask=m_A, other=0.0)
     b_A_ab = tl.where(tl.arange(0, BT)[:, None] > tl.arange(0, BT)[None, :], b_A_ab, 0)
     for i in range(1, BT):
         mask = tl.arange(0, BT) == i
@@ -55,7 +59,7 @@ def prepare_wy_repr_fwd_kernel_chunk32(
         b_a = b_a + tl.sum(b_a[:, None] * b_A_ab, 0) * (tl.arange(0, BT) < i)
         b_A_ab = tl.where(mask[:, None], b_a, b_A_ab)
     b_A_ab += tl.arange(0, BT)[:, None] == tl.arange(0, BT)[None, :]
-    tl.store(p_Aab_inv, b_A_ab.to(p_Aab_inv.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_Aab_inv, b_A_ab.to(p_Aab_inv.dtype.element_ty), mask=m_A)
 
 
 @triton.heuristics({
@@ -83,26 +87,31 @@ def prepare_wy_repr_fwd_kernel_chunk64(
     IS_VARLEN: tl.constexpr,
     GATHER_SUPPORTED: tl.constexpr = IS_GATHER_SUPPORTED,
 ):
-    i_t, i_bh = tl.program_id(0), tl.program_id(1)
+    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
 
-    p_A1 = tl.make_block_ptr(A_ab + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT, 0), (BC, BC), (1, 0))
-    p_A2 = tl.make_block_ptr(A_ab + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT + BC, BC), (BC, BC), (1, 0))
-    p_A3 = tl.make_block_ptr(A_ab + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT + BC, 0), (BC, BC), (1, 0))
-    p_A_inv1 = tl.make_block_ptr(A_ab_inv + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT, 0), (BC, BC), (1, 0))
-    p_A_inv2 = tl.make_block_ptr(A_ab_inv + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT + BC, BC), (BC, BC), (1, 0))
-    p_A_inv3 = tl.make_block_ptr(A_ab_inv + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT + BC, 0), (BC, BC), (1, 0))
-    p_A_inv4 = tl.make_block_ptr(A_ab_inv + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT, BC), (BC, BC), (1, 0))
+    o_c = tl.arange(0, BC)
+    o_t1 = i_t * BT + o_c
+    o_t2 = i_t * BT + BC + o_c
+    m_t1 = o_t1 < T
+    m_t2 = o_t2 < T
+    p_A1 = A_ab + (bos*H + i_h) * BT + o_t1[:, None] * (H*BT) + o_c[None, :]
+    p_A2 = A_ab + (bos*H + i_h) * BT + o_t2[:, None] * (H*BT) + (BC + o_c)[None, :]
+    p_A3 = A_ab + (bos*H + i_h) * BT + o_t2[:, None] * (H*BT) + o_c[None, :]
+    p_A_inv1 = A_ab_inv + (bos*H + i_h) * BT + o_t1[:, None] * (H*BT) + o_c[None, :]
+    p_A_inv2 = A_ab_inv + (bos*H + i_h) * BT + o_t2[:, None] * (H*BT) + (BC + o_c)[None, :]
+    p_A_inv3 = A_ab_inv + (bos*H + i_h) * BT + o_t2[:, None] * (H*BT) + o_c[None, :]
+    p_A_inv4 = A_ab_inv + (bos*H + i_h) * BT + o_t1[:, None] * (H*BT) + (BC + o_c)[None, :]
 
-    b_A = tl.load(p_A1, boundary_check=(0, 1))
-    b_A2 = tl.load(p_A2, boundary_check=(0, 1))
-    b_A3 = tl.load(p_A3, boundary_check=(0, 1))
+    b_A = tl.load(p_A1, mask=m_t1[:, None] & (o_c[None, :] < BT), other=0.0)
+    b_A2 = tl.load(p_A2, mask=m_t2[:, None] & ((BC + o_c)[None, :] < BT), other=0.0)
+    b_A3 = tl.load(p_A3, mask=m_t2[:, None] & (o_c[None, :] < BT), other=0.0)
     b_A = tl.where(tl.arange(0, BC)[:, None] > tl.arange(0, BC)[None, :], b_A, 0)
     b_A2 = tl.where(tl.arange(0, BC)[:, None] > tl.arange(0, BC)[None, :], b_A2, 0)
 
@@ -130,11 +139,15 @@ def prepare_wy_repr_fwd_kernel_chunk64(
     b_A2 += tl.arange(0, BC)[:, None] == tl.arange(0, BC)[None, :]
     b_A3 = tl.dot(tl.dot(b_A2, b_A3), b_A)
     # tl.debug_barrier()
-    tl.store(p_A_inv1, b_A.to(p_A_inv1.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
-    tl.store(p_A_inv2, b_A2.to(p_A_inv2.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
-    tl.store(p_A_inv3, b_A3.to(p_A_inv3.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
+    tl.store(p_A_inv1, b_A.to(p_A_inv1.dtype.element_ty, fp_downcast_rounding="rtne"),
+             mask=m_t1[:, None] & (o_c[None, :] < BT))
+    tl.store(p_A_inv2, b_A2.to(p_A_inv2.dtype.element_ty, fp_downcast_rounding="rtne"),
+             mask=m_t2[:, None] & ((BC + o_c)[None, :] < BT))
+    tl.store(p_A_inv3, b_A3.to(p_A_inv3.dtype.element_ty, fp_downcast_rounding="rtne"),
+             mask=m_t2[:, None] & (o_c[None, :] < BT))
     # causal mask
-    tl.store(p_A_inv4, tl.zeros([BC, BC], dtype=tl.float32).to(p_A_inv4.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_A_inv4, tl.zeros([BC, BC], dtype=tl.float32).to(
+        p_A_inv4.dtype.element_ty), mask=m_t1[:, None] & ((BC + o_c)[None, :] < BT))
 
 
 @triton.heuristics({
@@ -168,21 +181,24 @@ def wu_fwd_kernel(
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_bh = tl.program_id(0), tl.program_id(1)
+    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
     o_s = tl.arange(0, BT)
 
-    p_A_ab_inv = tl.make_block_ptr(A_ab_inv + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
-    p_A_ak = tl.make_block_ptr(A_ak + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
+    o_t = i_t * BT + o_s
+    m_t = o_t < T
+    m_A = m_t[:, None] & (o_s[None, :] < BT)
+    p_A_ab_inv = A_ab_inv + (bos*H + i_h) * BT + o_t[:, None] * (H*BT) + o_s[None, :]
+    p_A_ak = A_ak + (bos*H + i_h) * BT + o_t[:, None] * (H*BT) + o_s[None, :]
 
-    b_Aab_inv = tl.load(p_A_ab_inv, boundary_check=(0, 1))
-    b_Aak = tl.load(p_A_ak, boundary_check=(0, 1))
+    b_Aab_inv = tl.load(p_A_ab_inv, mask=m_A, other=0.0)
+    b_Aak = tl.load(p_A_ak, mask=m_A, other=0.0)
     b_Aab_inv = tl.where(o_s[:, None] >= o_s[None, :], b_Aab_inv, 0)
     b_Aak = tl.where(o_s[:, None] > o_s[None, :], b_Aak, 0)
     # let's use tf32 here
@@ -192,18 +208,22 @@ def wu_fwd_kernel(
     b_Aab_inv = b_Aab_inv.to(ag.dtype.element_ty, fp_downcast_rounding="rtne")
 
     for i_k in range(tl.cdiv(K, BK)):
-        p_ag = tl.make_block_ptr(ag + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-        p_w = tl.make_block_ptr(w + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-        b_ag = tl.load(p_ag, boundary_check=(0, 1))
+        o_k = i_k * BK + tl.arange(0, BK)
+        m_k = m_t[:, None] & (o_k[None, :] < K)
+        p_ag = ag + (bos*H + i_h) * K + o_t[:, None] * (H*K) + o_k[None, :]
+        p_w = w + (bos*H + i_h) * K + o_t[:, None] * (H*K) + o_k[None, :]
+        b_ag = tl.load(p_ag, mask=m_k, other=0.0)
         b_w = tl.dot(b_Aab_inv, b_ag)  # both bf16 or fp16
-        tl.store(p_w, b_w.to(p_w.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
+        tl.store(p_w, b_w.to(p_w.dtype.element_ty, fp_downcast_rounding="rtne"), mask=m_k)
 
     for i_v in range(tl.cdiv(V, BV)):
-        p_v = tl.make_block_ptr(v + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-        p_u = tl.make_block_ptr(u + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-        b_v = tl.load(p_v, boundary_check=(0, 1))
+        o_v = i_v * BV + tl.arange(0, BV)
+        m_v = m_t[:, None] & (o_v[None, :] < V)
+        p_v = v + (bos*H + i_h) * V + o_t[:, None] * (H*V) + o_v[None, :]
+        p_u = u + (bos*H + i_h) * V + o_t[:, None] * (H*V) + o_v[None, :]
+        b_v = tl.load(p_v, mask=m_v, other=0.0)
         b_u = tl.dot(b_Aak, b_v)  # both bf16 or fp16
-        tl.store(p_u, b_u.to(p_u.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
+        tl.store(p_u, b_u.to(p_u.dtype.element_ty, fp_downcast_rounding="rtne"), mask=m_v)
 
 
 def wu_fwd(

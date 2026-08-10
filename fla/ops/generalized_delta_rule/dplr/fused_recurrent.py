@@ -53,7 +53,9 @@ def fused_recurrent_dplr_delta_rule_fwd_kernel(
     STORE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
+    pid = tl.program_id(0)
+    NV = tl.cdiv(V, BV)
+    i_v, i_nh = (pid % NV).to(tl.int64), (pid // NV).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
 
     if IS_VARLEN:
@@ -128,7 +130,7 @@ def fused_recurrent_dplr_delta_rule_fwd(
     ht = q.new_empty(N, H, K, V, dtype=torch.float32) if output_final_state else None
     o = torch.empty_like(v)
 
-    def grid(meta): return (triton.cdiv(V, meta['BV']), N * H)
+    def grid(meta): return (triton.cdiv(V, meta['BV']) * N * H,)
     fused_recurrent_dplr_delta_rule_fwd_kernel[grid](
         q=q,
         k=k,

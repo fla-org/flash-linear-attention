@@ -65,13 +65,13 @@ def chunk_fwd_kernel_h(
     IS_VARLEN: tl.constexpr,
     STATE_V_FIRST: tl.constexpr,
 ):
-    i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
         NT, NS = tl.cdiv(T, BT), tl.cdiv(T, BS)
-        boh = tl.load(split_offsets + i_n).to(tl.int32)
+        boh = tl.load(split_offsets + i_n).to(tl.int64)
     else:
         bos, eos = i_n * T, i_n * T + T
         NT, NS = tl.cdiv(T, BT), tl.cdiv(T, BS)
@@ -85,41 +85,47 @@ def chunk_fwd_kernel_h(
 
     # [BK, BV] accumulator; STATE_V_FIRST only flips the stored state's HBM layout to [V, K], applied at the load/store below.
     b_h = tl.zeros([BK, BV], dtype=tl.float32)
+    o_k = i_k * BK + tl.arange(0, BK)
+    o_v = i_v * BV + tl.arange(0, BV)
     if USE_INITIAL_STATE:
         if STATE_V_FIRST:
-            p_h0 = tl.make_block_ptr(h0 + i_nh * K*V, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
-            b_h = tl.trans(tl.load(p_h0, boundary_check=(0, 1))).to(tl.float32)
+            p_h0 = h0 + i_nh * K*V + o_v[:, None] * K + o_k[None, :]
+            b_h = tl.trans(tl.load(p_h0, mask=(o_v[:, None] < V) & (o_k[None, :] < K), other=0.0)).to(tl.float32)
         else:
-            p_h0 = tl.make_block_ptr(h0 + i_nh * K*V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
-            b_h = tl.load(p_h0, boundary_check=(0, 1)).to(tl.float32)
+            p_h0 = h0 + i_nh * K*V + o_k[:, None] * V + o_v[None, :]
+            b_h = tl.load(p_h0, mask=(o_k[:, None] < K) & (o_v[None, :] < V), other=0.0).to(tl.float32)
 
     for i_t in range(NT):
         i_s = i_t // NTS
-        p_k = tl.make_block_ptr(k + (bos*H + i_h) * K, (K, T), (1, H*K), (i_k * BK, i_t * BT), (BK, BT), (0, 1))
-        p_v = tl.make_block_ptr(v + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+        o_t = i_t * BT + tl.arange(0, BT)
+        m_t = o_t < T
+        p_k = k + (bos*H + i_h) * K + o_k[:, None] + o_t[None, :] * (H*K)
+        p_v = v + (bos*H + i_h) * V + o_t[:, None] * (H*V) + o_v[None, :]
 
         o_h = ((boh + i_s) * H + i_h).to(tl.int64) * K*V
         if STATE_V_FIRST:
-            p_h = tl.make_block_ptr(h + o_h, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
+            p_h = h + o_h + o_v[:, None] * K + o_k[None, :]
+            m_h = (o_v[:, None] < V) & (o_k[None, :] < K)
             if STORE_MMA_STATE:
-                p_h_mma = tl.make_block_ptr(h_mma + o_h, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
+                p_h_mma = h_mma + o_h + o_v[:, None] * K + o_k[None, :]
         else:
-            p_h = tl.make_block_ptr(h + o_h, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
+            p_h = h + o_h + o_k[:, None] * V + o_v[None, :]
+            m_h = (o_k[:, None] < K) & (o_v[None, :] < V)
             if STORE_MMA_STATE:
-                p_h_mma = tl.make_block_ptr(h_mma + o_h, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
+                p_h_mma = h_mma + o_h + o_k[:, None] * V + o_v[None, :]
 
         if i_t % NTS == 0:
-            tl.store(p_h, (tl.trans(b_h) if STATE_V_FIRST else b_h).to(p_h.dtype.element_ty), boundary_check=(0, 1))
+            tl.store(p_h, (tl.trans(b_h) if STATE_V_FIRST else b_h).to(p_h.dtype.element_ty), mask=m_h)
             if STORE_MMA_STATE:
                 tl.store(
                     p_h_mma,
                     (tl.trans(b_h) if STATE_V_FIRST else b_h).to(p_h_mma.dtype.element_ty),
-                    boundary_check=(0, 1),
+                    mask=m_h,
                 )
         # [BK, BT]
-        b_k = tl.load(p_k, boundary_check=(0, 1))
+        b_k = tl.load(p_k, mask=(o_k[:, None] < K) & m_t[None, :], other=0.0)
         # [BT, BV]
-        b_v = tl.load(p_v, boundary_check=(0, 1))
+        b_v = tl.load(p_v, mask=m_t[:, None] & (o_v < V)[None, :], other=0.0)
         last_idx = min((i_t + 1) * BT, T) - 1
 
         # scalar decay
@@ -137,21 +143,21 @@ def chunk_fwd_kernel_h(
 
         # vector decay, h = Diag(gk) @ h
         if USE_GK:
-            p_gk = tl.make_block_ptr(gk + (bos*H + i_h) * K, (K, T), (1, H*K), (i_k * BK, i_t * BT), (BK, BT), (0, 1))
+            p_gk = gk + (bos*H + i_h) * K + o_k[:, None] + o_t[None, :] * (H*K)
             p_gk_last = gk + (bos + last_idx) * H*K + i_h * K + i_k * BK + tl.arange(0, BK)
 
             b_gk_last = tl.load(p_gk_last, mask=(i_k * BK + tl.arange(0, BK) < K), other=0.)
-            b_gk = tl.load(p_gk, boundary_check=(0, 1))
+            b_gk = tl.load(p_gk, mask=(o_k[:, None] < K) & m_t[None, :], other=0.0)
             b_h *= exp2(b_gk_last)[:, None]
             b_k = (b_k * exp2(b_gk_last[:, None] - b_gk)).to(b_k.dtype)
 
         # vector decay, h = h @ Diag(gv)
         if USE_GV:
-            p_gv = tl.make_block_ptr(gv + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+            p_gv = gv + (bos*H + i_h) * V + o_t[:, None] * (H*V) + o_v[None, :]
             p_gv_last = gv + (bos + last_idx) * H*V + i_h * V + i_v * BV + tl.arange(0, BV)
 
             b_gv_last = tl.load(p_gv_last, mask=(i_v * BV + tl.arange(0, BV) < V), other=0.)
-            b_gv = tl.load(p_gv, boundary_check=(0, 1))
+            b_gv = tl.load(p_gv, mask=m_t[:, None] & (o_v < V)[None, :], other=0.0)
             b_h *= exp2(b_gv_last)[None, :]
             b_v = (b_v * exp2(b_gv_last[None, :] - b_gv)).to(b_v.dtype)
 
@@ -159,11 +165,11 @@ def chunk_fwd_kernel_h(
 
     if STORE_FINAL_STATE:
         if STATE_V_FIRST:
-            p_ht = tl.make_block_ptr(ht + i_nh * K*V, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
-            tl.store(p_ht, tl.trans(b_h).to(p_ht.dtype.element_ty), boundary_check=(0, 1))
+            p_ht = ht + i_nh * K*V + o_v[:, None] * K + o_k[None, :]
+            tl.store(p_ht, tl.trans(b_h).to(p_ht.dtype.element_ty), mask=(o_v[:, None] < V) & (o_k[None, :] < K))
         else:
-            p_ht = tl.make_block_ptr(ht + i_nh * K*V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
-            tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), boundary_check=(0, 1))
+            p_ht = ht + i_nh * K*V + o_k[:, None] * V + o_v[None, :]
+            tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=(o_k[:, None] < K) & (o_v[None, :] < V))
 
 
 @triton.heuristics({
@@ -222,15 +228,15 @@ def chunk_bwd_kernel_dh(
     IS_VARLEN: tl.constexpr,
     STATE_V_FIRST: tl.constexpr,
 ):
-    i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
     i_n, i_hq = i_nh // HQ, i_nh % HQ
     i_h = i_hq // NG
     if IS_VARLEN:
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
         NT = tl.cdiv(T, BT)
         NS = tl.cdiv(T, BS)
-        boh = tl.load(split_offsets + i_n).to(tl.int32)
+        boh = tl.load(split_offsets + i_n).to(tl.int64)
     else:
         bos, eos = i_n * T, i_n * T + T
         NT = tl.cdiv(T, BT)
@@ -243,44 +249,44 @@ def chunk_bwd_kernel_dh(
 
     # [BK, BV] accumulator; STATE_V_FIRST only flips the stored state's HBM layout to [V, K], applied at the load/store below.
     b_dh = tl.zeros([BK, BV], dtype=tl.float32)
+    o_k = i_k * BK + tl.arange(0, BK)
+    o_v = i_v * BV + tl.arange(0, BV)
     if USE_FINAL_STATE_GRADIENT:
         if STATE_V_FIRST:
-            p_dht = tl.make_block_ptr(dht + i_nh * K*V, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
-            b_dh += tl.trans(tl.load(p_dht, boundary_check=(0, 1))).to(tl.float32)
+            p_dht = dht + i_nh * K*V + o_v[:, None] * K + o_k[None, :]
+            b_dh += tl.trans(tl.load(p_dht, mask=(o_v[:, None] < V) & (o_k[None, :] < K), other=0.0)).to(tl.float32)
         else:
-            p_dht = tl.make_block_ptr(dht + i_nh * K*V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
-            b_dh += tl.load(p_dht, boundary_check=(0, 1)).to(tl.float32)
+            p_dht = dht + i_nh * K*V + o_k[:, None] * V + o_v[None, :]
+            b_dh += tl.load(p_dht, mask=(o_k[:, None] < K) & (o_v[None, :] < V), other=0.0).to(tl.float32)
 
     for i_t in range(NT - 1, -1, -1):
         i_s = i_t // (BS // BT)
         o_dh = ((boh + i_s) * H + i_h).to(tl.int64) * K*V
         if STATE_V_FIRST:
-            p_dh = tl.make_block_ptr(dh + o_dh, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
+            p_dh = dh + o_dh + o_v[:, None] * K + o_k[None, :]
+            m_dh = (o_v[:, None] < V) & (o_k[None, :] < K)
             if STORE_MMA_STATE:
-                p_dh_mma = tl.make_block_ptr(dh_mma + o_dh, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
+                p_dh_mma = dh_mma + o_dh + o_v[:, None] * K + o_k[None, :]
             if FUSE_HDH_LAST:
-                p_h_for_hdh = tl.make_block_ptr(
-                    h_for_hdh + o_dh, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0)
-                )
+                p_h_for_hdh = h_for_hdh + o_dh + o_v[:, None] * K + o_k[None, :]
         else:
-            p_dh = tl.make_block_ptr(dh + o_dh, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
+            p_dh = dh + o_dh + o_k[:, None] * V + o_v[None, :]
+            m_dh = (o_k[:, None] < K) & (o_v[None, :] < V)
             if STORE_MMA_STATE:
-                p_dh_mma = tl.make_block_ptr(dh_mma + o_dh, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
+                p_dh_mma = dh_mma + o_dh + o_k[:, None] * V + o_v[None, :]
             if FUSE_HDH_LAST:
-                p_h_for_hdh = tl.make_block_ptr(
-                    h_for_hdh + o_dh, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0)
-                )
+                p_h_for_hdh = h_for_hdh + o_dh + o_k[:, None] * V + o_v[None, :]
 
         if i_t % (BS // BT) == 0:
-            tl.store(p_dh, (tl.trans(b_dh) if STATE_V_FIRST else b_dh).to(p_dh.dtype.element_ty), boundary_check=(0, 1))
+            tl.store(p_dh, (tl.trans(b_dh) if STATE_V_FIRST else b_dh).to(p_dh.dtype.element_ty), mask=m_dh)
             if STORE_MMA_STATE:
                 tl.store(
                     p_dh_mma,
                     (tl.trans(b_dh) if STATE_V_FIRST else b_dh).to(p_dh_mma.dtype.element_ty),
-                    boundary_check=(0, 1),
+                    mask=m_dh,
                 )
             if FUSE_HDH_LAST:
-                b_h_for_hdh = tl.load(p_h_for_hdh, boundary_check=(0, 1)).to(tl.float32)
+                b_h_for_hdh = tl.load(p_h_for_hdh, mask=m_dh, other=0.0).to(tl.float32)
                 if STATE_V_FIRST:
                     b_h_for_hdh = tl.trans(b_h_for_hdh)
                 tl.atomic_add(
@@ -289,13 +295,15 @@ def chunk_bwd_kernel_dh(
                     sem='relaxed',
                 )
         last_idx = min(i_t * BT + BT, T) - 1
+        o_t = i_t * BT + tl.arange(0, BT)
+        m_t = o_t < T
         # [BK, BT]
-        p_q = tl.make_block_ptr(q + (bos*HQ + i_hq) * K, (K, T), (1, HQ*K), (i_k * BK, i_t * BT), (BK, BT), (0, 1))
-        p_do = tl.make_block_ptr(do + (bos*HQ + i_hq) * V, (T, V), (HQ*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-        b_q = tl.load(p_q, boundary_check=(0, 1))
+        p_q = q + (bos*HQ + i_hq) * K + o_k[:, None] + o_t[None, :] * (HQ*K)
+        p_do = do + (bos*HQ + i_hq) * V + o_t[:, None] * (HQ*V) + o_v[None, :]
+        b_q = tl.load(p_q, mask=(o_k[:, None] < K) & m_t[None, :], other=0.0)
         b_q = (b_q * scale).to(b_q.dtype)
         # [BT, BV]
-        b_do = tl.load(p_do, boundary_check=(0, 1))
+        b_do = tl.load(p_do, mask=m_t[:, None] & (o_v < V)[None, :], other=0.0)
 
         if USE_G:
             p_g = g + (bos + i_t * BT + tl.arange(0, BT)) * H + i_h
@@ -310,19 +318,19 @@ def chunk_bwd_kernel_dh(
             b_dh *= exp2(b_g_last)
 
         if USE_GK:
-            p_gk = tl.make_block_ptr(gk + (bos*H + i_h) * K, (K, T), (1, H*K), (i_k * BK, i_t * BT), (BK, BT), (0, 1))
+            p_gk = gk + (bos*H + i_h) * K + o_k[:, None] + o_t[None, :] * (H*K)
             p_gk_last = gk + (bos + last_idx) * H*K + i_h * K + i_k * BK + tl.arange(0, BK)
 
-            b_gk = tl.load(p_gk, boundary_check=(0, 1))
+            b_gk = tl.load(p_gk, mask=(o_k[:, None] < K) & m_t[None, :], other=0.0)
             b_gk_last = tl.load(p_gk_last, mask=(i_k * BK + tl.arange(0, BK) < K), other=0.)
             b_q = (b_q * exp2(b_gk)).to(b_q.dtype)
             b_dh *= exp2(b_gk_last)[:, None]
 
         if USE_GV:
-            p_gv = tl.make_block_ptr(gv + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+            p_gv = gv + (bos*H + i_h) * V + o_t[:, None] * (H*V) + o_v[None, :]
             p_gv_last = gv + (bos + last_idx) * H*V + i_h * V + i_v * BV + tl.arange(0, BV)
 
-            b_gv = tl.load(p_gv, boundary_check=(0, 1))
+            b_gv = tl.load(p_gv, mask=m_t[:, None] & (o_v < V)[None, :], other=0.0)
             b_gv_last = tl.load(p_gv_last, mask=(i_v * BV + tl.arange(0, BV) < V), other=0.)
             b_do = (b_do * exp2(b_gv))
             b_dh *= exp2(b_gv_last)[None, :]
@@ -331,11 +339,11 @@ def chunk_bwd_kernel_dh(
 
     if STORE_INITIAL_STATE_GRADIENT:
         if STATE_V_FIRST:
-            p_dh0 = tl.make_block_ptr(dh0 + i_nh * K*V, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
-            tl.store(p_dh0, tl.trans(b_dh).to(p_dh0.dtype.element_ty), boundary_check=(0, 1))
+            p_dh0 = dh0 + i_nh * K*V + o_v[:, None] * K + o_k[None, :]
+            tl.store(p_dh0, tl.trans(b_dh).to(p_dh0.dtype.element_ty), mask=(o_v[:, None] < V) & (o_k[None, :] < K))
         else:
-            p_dh0 = tl.make_block_ptr(dh0 + i_nh * K*V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
-            tl.store(p_dh0, b_dh.to(p_dh0.dtype.element_ty), boundary_check=(0, 1))
+            p_dh0 = dh0 + i_nh * K*V + o_k[:, None] * V + o_v[None, :]
+            tl.store(p_dh0, b_dh.to(p_dh0.dtype.element_ty), mask=(o_k[:, None] < K) & (o_v[None, :] < V))
 
 
 @triton.jit

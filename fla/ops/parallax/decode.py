@@ -42,7 +42,9 @@ def parallax_decode_kernel(
     sliding window and to ``[cache_start, Skv)`` when set. One program owns a
     ``BT``-row query block; see ``naive_parallax`` for the output formula.
     """
-    i_t, i_bh = tl.program_id(0), tl.program_id(1)
+    pid = tl.program_id(0)
+    NT = tl.cdiv(Sq, BT)
+    i_t, i_bh = (pid % NT).to(tl.int64), (pid // NT).to(tl.int64)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
     i_h = i_hq // G                               # kv head shared by this q head (GQA)
     RCP_LN2: tl.constexpr = 1.4426950216
@@ -69,14 +71,15 @@ def parallax_decode_kernel(
         leftmost = kv_lo
     KV_START_BLOCK = leftmost // BS
 
-    p_q = tl.make_block_ptr(q + (i_b * Sq * HQ + i_hq) * K, (Sq, K), (HQ * K, 1), (q_off, 0), (BT, BK), (1, 0))
-    p_r = tl.make_block_ptr(r + (i_b * Sq * HQ + i_hq) * K, (Sq, K), (HQ * K, 1), (q_off, 0), (BT, BK), (1, 0))
-    p_k = tl.make_block_ptr(k + (i_b * Skv * H + i_h) * K, (Skv, K), (H * K, 1), (KV_START_BLOCK * BS, 0), (BS, BK), (1, 0))
-    p_v = tl.make_block_ptr(v + (i_b * Skv * H + i_h) * K, (Skv, K), (H * K, 1), (KV_START_BLOCK * BS, 0), (BS, BK), (1, 0))
-    p_o = tl.make_block_ptr(o + (i_b * Sq * HQ + i_hq) * K, (Sq, K), (HQ * K, 1), (q_off, 0), (BT, BK), (1, 0))
+    o_k = tl.arange(0, BK)
+    m_k = o_k < K
+    m_qk = row_mask & m_k[None, :]
+    p_q = q + (i_b * Sq * HQ + i_hq) * K + rows[:, None] * (HQ * K) + o_k[None, :]
+    p_r = r + (i_b * Sq * HQ + i_hq) * K + rows[:, None] * (HQ * K) + o_k[None, :]
+    p_o = o + (i_b * Sq * HQ + i_hq) * K + rows[:, None] * (HQ * K) + o_k[None, :]
 
-    b_q = tl.load(p_q, boundary_check=(0, 1), padding_option="zero")
-    b_r = tl.load(p_r, boundary_check=(0, 1), padding_option="zero")
+    b_q = tl.load(p_q, mask=m_qk, other=0.0)
+    b_r = tl.load(p_r, mask=m_qk, other=0.0)
     m_acc = tl.zeros((BT, 1), dtype=tl.float32) - float("inf")
     d1_acc = tl.zeros((BT, 1), dtype=tl.float32)
     d2_acc = tl.zeros((BT, 1), dtype=tl.float32)
@@ -86,8 +89,12 @@ def parallax_decode_kernel(
 
     for col_block_id in range(KV_START_BLOCK, KV_END_BLOCK):
         col = (col_block_id * BS + tl.arange(0, BS))[None, :]   # [1, BS] key positions
-        b_k = tl.load(p_k, boundary_check=(0, 1), padding_option="zero")   # [BS, BK]
-        b_v = tl.load(p_v, boundary_check=(0, 1), padding_option="zero")   # [BS, BK]
+        o_kv = col_block_id.to(tl.int64) * BS + tl.arange(0, BS)
+        m_kv = (o_kv[:, None] < Skv) & m_k[None, :]
+        p_k = k + (i_b * Skv * H + i_h) * K + o_kv[:, None] * (H * K) + o_k[None, :]
+        p_v = v + (i_b * Skv * H + i_h) * K + o_kv[:, None] * (H * K) + o_k[None, :]
+        b_k = tl.load(p_k, mask=m_kv, other=0.0)   # [BS, BK]
+        b_v = tl.load(p_v, mask=m_kv, other=0.0)   # [BS, BK]
         # [BT, BS]: causal, in-cache, past left-padding; optionally inside the window.
         mask = (abs_q >= col) & row_mask & (col < Skv) & (col >= kv_lo)
         if WINDOW_SIZE_LEFT >= 0:
@@ -108,8 +115,6 @@ def parallax_decode_kernel(
         barv_acc = tl.dot(w.to(b_v.dtype), b_v, out_dtype=tl.float32, acc=barv_acc)
         Rv_acc = tl.dot(wr.to(b_v.dtype), b_v, out_dtype=tl.float32, acc=Rv_acc)
         m_acc = m_new
-        p_k = tl.advance(p_k, (BS, 0))
-        p_v = tl.advance(p_v, (BS, 0))
 
     # Rows that see no valid key (e.g. left-padded query positions) have d1 == 0;
     # emit a finite zero instead of inf/NaN so padding can't poison valid rows.
@@ -118,7 +123,7 @@ def parallax_decode_kernel(
     b_bart = d2_acc * inv_d1                                   # d2 / d1
     b_o = b_barv + b_bart * b_barv - Rv_acc * inv_d1           # O1/d1 * (1 + d2/d1) - O2/d1
 
-    tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=m_qk)
 
 
 def parallax_decode(
@@ -173,7 +178,7 @@ def parallax_decode(
     BK = triton.next_power_of_2(K)
     BT = _block_size(K, q.device.index)
     o = torch.empty_like(q)
-    grid = (triton.cdiv(Sq, BT), B * HQ)
+    grid = (triton.cdiv(Sq, BT) * B * HQ,)
     parallax_decode_kernel[grid](
         q, r, k, v, o, float(scale), cache_start, Sq, Skv,
         HQ=HQ, H=H, G=G, K=K, BK=BK,
@@ -216,7 +221,7 @@ def parallax_decode_one_step_kernel(
     ``parallax_decode_kernel`` incurs at ``Sq == 1``. One program per
     (batch, head); see ``naive_parallax`` for the output formula.
     """
-    i_bh = tl.program_id(0)
+    i_bh = tl.program_id(0).to(tl.int64)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
     i_h = i_hq // G                               # kv head shared by this q head (GQA)
     RCP_LN2: tl.constexpr = 1.4426950216
@@ -229,11 +234,13 @@ def parallax_decode_one_step_kernel(
         kv_lo = tl.maximum(kv_lo, Skv - WINDOW_SIZE_LEFT)
     kv_lo = tl.maximum(kv_lo, 0)
 
-    p_q = tl.make_block_ptr(q + i_bh * K, (K,), (1,), (0,), (BK,), (0,))
-    p_r = tl.make_block_ptr(r + i_bh * K, (K,), (1,), (0,), (BK,), (0,))
-    p_o = tl.make_block_ptr(o + i_bh * K, (K,), (1,), (0,), (BK,), (0,))
-    b_q = tl.load(p_q, boundary_check=(0,), padding_option="zero").to(tl.float32)   # [BK] query vector
-    b_r = tl.load(p_r, boundary_check=(0,), padding_option="zero").to(tl.float32)   # [BK] secondary query
+    o_k = tl.arange(0, BK)
+    m_k = o_k < K
+    p_q = q + i_bh * K + o_k
+    p_r = r + i_bh * K + o_k
+    p_o = o + i_bh * K + o_k
+    b_q = tl.load(p_q, mask=m_k, other=0.0).to(tl.float32)   # [BK] query vector
+    b_r = tl.load(p_r, mask=m_k, other=0.0).to(tl.float32)   # [BK] secondary query
     scale_log2 = scale * RCP_LN2
 
     # Running online-softmax state for the single query: pivot m, denominators
@@ -245,13 +252,15 @@ def parallax_decode_one_step_kernel(
     o2 = tl.zeros((BK,), dtype=tl.float32)
 
     start_block = kv_lo // BS
-    p_k = tl.make_block_ptr(k + (i_b * Skv * H + i_h) * K, (Skv, K), (H * K, 1), (start_block * BS, 0), (BS, BK), (1, 0))
-    p_v = tl.make_block_ptr(v + (i_b * Skv * H + i_h) * K, (Skv, K), (H * K, 1), (start_block * BS, 0), (BS, BK), (1, 0))
     for i_s in range(start_block * BS, tl.cdiv(Skv, BS) * BS, BS):
         col = i_s + tl.arange(0, BS)
+        o_kv = i_s.to(tl.int64) + tl.arange(0, BS)
+        m_kv = (o_kv[:, None] < Skv) & m_k[None, :]
+        p_k = k + (i_b * Skv * H + i_h) * K + o_kv[:, None] * (H * K) + o_k[None, :]
+        p_v = v + (i_b * Skv * H + i_h) * K + o_kv[:, None] * (H * K) + o_k[None, :]
         mask = (col >= kv_lo) & (col < Skv)                          # [BS] valid keys
-        b_k = tl.load(p_k, boundary_check=(0, 1), padding_option="zero")   # [BS, BK]
-        b_v = tl.load(p_v, boundary_check=(0, 1), padding_option="zero")   # [BS, BK]
+        b_k = tl.load(p_k, mask=m_kv, other=0.0)   # [BS, BK]
+        b_v = tl.load(p_v, mask=m_kv, other=0.0)   # [BS, BK]
         s1 = tl.sum(b_q[None, :] * b_k, axis=1) * scale_log2          # [BS] = scale * (q . k), base-2
         s2 = tl.sum(b_r[None, :] * b_k, axis=1)                        # [BS] = r . k (unscaled)
         s1 = tl.where(mask, s1, -float("inf"))
@@ -265,12 +274,10 @@ def parallax_decode_one_step_kernel(
         o1 = o1 * alpha + tl.sum(p1[:, None] * b_v, axis=0)           # [BK]
         o2 = o2 * alpha + tl.sum(p2[:, None] * b_v, axis=0)
         m = m_new
-        p_k = tl.advance(p_k, (BS, 0))
-        p_v = tl.advance(p_v, (BS, 0))
 
     inv_d1 = tl.where(d1 > 0.0, 1.0 / d1, 0.0)                        # 0 when no valid key (avoid NaN)
     out = o1 * inv_d1 * (1.0 + d2 * inv_d1) - o2 * inv_d1             # [BK] O1/d1*(1 + d2/d1) - O2/d1
-    tl.store(p_o, out.to(p_o.dtype.element_ty), boundary_check=(0,))
+    tl.store(p_o, out.to(p_o.dtype.element_ty), mask=m_k)
 
 
 def parallax_decode_one_step(

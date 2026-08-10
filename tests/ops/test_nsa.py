@@ -43,6 +43,21 @@ def build_partial_varlen(x, cu_seqlens, q_lens):
     return partial_x
 
 
+def test_parallel_value_split_matches_single_tile():
+    torch.manual_seed(42)
+    B, T, H, HQ, K, V, S, block_size = 1, 63, 1, 16, 64, 320, 16, 32
+    q = torch.randn(B, T, HQ, K, dtype=torch.float16, device=device)
+    k = torch.randn(B, T, H, K, dtype=torch.float16, device=device)
+    v = torch.randn(B, T, H, V, dtype=torch.float16, device=device)
+    block_indices = build_block_indices(B, T, H, S, block_size)
+
+    o_split, lse_split = parallel_nsa_fwd(q, k, v, block_indices, S, block_size, K**-0.5)
+    o_single, lse_single = parallel_nsa_fwd(q, k, v[..., :128], block_indices, S, block_size, K**-0.5)
+
+    assert_close("  o", o_single, o_split[..., :128], 0.005)
+    assert_close("lse", lse_single, lse_split, 0.005)
+
+
 # Tests on individual ops are skipped as tests on the whole NSA function are added;
 # see `test_parallel_decode` and `test_parallel_decode_varlen`.
 @pytest.mark.parametrize(

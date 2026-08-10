@@ -44,15 +44,15 @@ def chunk_cumprod_householder_fwd_kernel(
         T = (eos - bos).to(tl.int32)
         NS = tl.cdiv(T, S)
 
-        boh = tl.load(chunk_offsets + i_n).to(tl.int32)
-        boh_large = tl.load(split_offsets + i_n).to(tl.int32)
+        boh = tl.load(chunk_offsets + i_n).to(tl.int64)
+        boh_large = tl.load(split_offsets + i_n).to(tl.int64)
     else:
         NS = tl.cdiv(T, S)
         i_n, i_s = i_ss // NS, i_ss % NS
         bos, eos = (i_n * T).to(tl.int64), (i_n * T + T).to(tl.int64)
 
-        boh = i_n * tl.cdiv(T, BT)
-        boh_large = i_n * tl.cdiv(T, S)
+        boh = (i_n * tl.cdiv(T, BT)).to(tl.int64)
+        boh_large = (i_n * tl.cdiv(T, S)).to(tl.int64)
 
     NT_small = tl.cdiv(min(S, T-i_s*S), BT)
     stride_h = H*K*K
@@ -66,24 +66,28 @@ def chunk_cumprod_householder_fwd_kernel(
     w1 += (bos * H + i_h) * K
     w2 += (bos * H + i_h) * K
 
+    o_d = tl.arange(0, BK)
+    m_d = o_d < K
     b_h = tl.zeros([BK, BK], dtype=tl.float32)
     for i_t_small in range(NT_small-1, -1, -1):
-        p_hc_suffix = tl.make_block_ptr(hc_suffix + i_t_small * stride_h, (K, K), (K, 1), (0, 0), (BK, BK), (1, 0))
-        tl.store(p_hc_suffix, b_h.to(hc_suffix.dtype.element_ty), boundary_check=(0, 1))
-        p_k = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_s * S + i_t_small * BT, 0), (BT, BK), (1, 0))
-        b_k = tl.load(p_k, boundary_check=(0, 1))
+        o_k = (i_s * S + i_t_small * BT).to(tl.int64) + tl.arange(0, BT)
+        m_k = o_k < T
+        p_hc_suffix = hc_suffix + i_t_small * stride_h + o_d[:, None] * K + o_d[None, :]
+        tl.store(p_hc_suffix, b_h.to(hc_suffix.dtype.element_ty), mask=m_d[:, None] & m_d[None, :])
+        p_k = k + o_k[:, None] * (H*K) + o_d[None, :]
+        b_k = tl.load(p_k, mask=m_k[:, None] & m_d[None, :], other=0.0)
         b_k = (b_k - tl.dot(b_k, tl.trans(b_h.to(b_k.dtype))))
-        p_w1 = tl.make_block_ptr(w1, (K, T), (1, H*K), (0, i_s * S + i_t_small * BT), (BK, BT), (0, 1))
-        p_w2 = tl.make_block_ptr(w2, (T, K), (H*K, 1), (i_s * S + i_t_small * BT, 0), (BT, BK), (1, 0))
-        b_w1 = tl.load(p_w1, boundary_check=(0, 1))
-        b_w2 = tl.load(p_w2, boundary_check=(0, 1))
+        p_w1 = w1 + o_d[:, None] + o_k[None, :] * (H*K)
+        p_w2 = w2 + o_k[:, None] * (H*K) + o_d[None, :]
+        b_w1 = tl.load(p_w1, mask=m_d[:, None] & m_k[None, :], other=0.0)
+        b_w2 = tl.load(p_w2, mask=m_k[:, None] & m_d[None, :], other=0.0)
         b_v_new = (b_w1 - tl.dot(b_h.to(b_w1.dtype), b_w1)).to(b_w2.dtype)
         b_h += tl.dot(b_v_new, b_w2)
-        p_k_new = tl.make_block_ptr(k_new, (T, K), (H*K, 1), (i_s * S + i_t_small * BT, 0), (BT, BK), (1, 0))
-        tl.store(p_k_new, b_k.to(k_new.dtype.element_ty), boundary_check=(0, 1))
+        p_k_new = k_new + o_k[:, None] * (H*K) + o_d[None, :]
+        tl.store(p_k_new, b_k.to(k_new.dtype.element_ty), mask=m_k[:, None] & m_d[None, :])
 
-    p_hc_whole = tl.make_block_ptr(hc_whole, (K, K), (K, 1), (0, 0), (BK, BK), (1, 0))
-    tl.store(p_hc_whole, b_h.to(hc_whole.dtype.element_ty), boundary_check=(0, 1))
+    p_hc_whole = hc_whole + o_d[:, None] * K + o_d[None, :]
+    tl.store(p_hc_whole, b_h.to(hc_whole.dtype.element_ty), mask=m_d[:, None] & m_d[None, :])
 
 
 def chunk_cumprod_householder_fwd_fn(

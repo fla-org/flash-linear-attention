@@ -16,6 +16,7 @@ across more than one iteration, in any FLA backend language (Triton, Gluon, Tile
 This skill is the **search discipline** that ties the other skills together; it does not replace them:
 
 - **`fla-nvidia-performance`** — how to profile (NCU), hardware baselines, MR-ready perf evidence.
+- **`fla-ascend-performance`** — how to profile (torch_npu), diagnose Cube/Vector/MTE/UB bottlenecks, and optimize Triton-Ascend kernels.
 - **`fla-correctness-coverage`** — how to design the test coverage matrix for an op.
 - **`fla-mr-readiness`** — how to package the promoted change into a PR.
 
@@ -77,7 +78,7 @@ Run these in order; repeat 2 and 3 with progressively higher targets.
 - **Phase 1 — correct baseline.** Confirm the current kernel passes the full gate, and record baseline numbers:
   `python -m benchmarks.ops.verify --op <op> --base main`.
   For a brand-new kernel, get the gate green first; performance is secondary here.
-- **Phase 2 — profile-guided optimization.** Use `fla-nvidia-performance` for NCU evidence.
+- **Phase 2 — profile-guided optimization.** Use `fla-nvidia-performance` for NCU evidence on NVIDIA backends, or `fla-ascend-performance` for Ascend NPU / Triton-Ascend backends.
   Enumerate candidate directions, rank them by expected benefit vs. implementation risk,
   and explore each for at most a few iterations. Keep, revise, or reject each with evidence — don't optimize blindly.
 - **Phase 3 — shape specialization.** Only when profiling shows *different* bottlenecks across shape regimes
@@ -155,7 +156,7 @@ a speedup you can't account for is a silent-skip suspect, not a result (see §5)
 
 - Keep the diff minimal — change only what the win needs,
   plus light cleanups (CONTRIBUTING "Protect battle-tested paths; keep diffs minimal").
-- Collect perf evidence per `fla-nvidia-performance` — before/after, NCU summary, dense + varlen coverage,
+- Collect perf evidence per backend skill — `fla-nvidia-performance` (before/after, NCU summary, dense + varlen coverage) or `fla-ascend-performance` (before/after, pipe/UB metrics, round summary template) —
   and a full final-claim stats block (median/mean/std/min/p10/p90 per shape, equal-weight geomean speedup,
   exact commands, baseline commit + candidate SHA, GPU id/model with idle-clock evidence —
   the last guards the clock-drift trap in §5).

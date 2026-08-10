@@ -66,11 +66,11 @@ def rotary_embedding_kernel(
     INTERLEAVED: tl.constexpr,
     CONJUGATE: tl.constexpr,
 ):
-    i_t, i_b, i_h = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_t, i_b, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2)
 
     if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n), tl.load(cu_seqlens + i_n + 1)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
         x = x + bos * H*D + i_h * D
         y = y + bos * H*D + i_h * D

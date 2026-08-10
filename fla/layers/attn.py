@@ -137,7 +137,7 @@ class Attention(nn.Module):
                 v = rearrange(v, '... (h d) -> ... h d', d=self.head_dim)
 
         # Contains at least one padding token in the sequence
-        if attention_mask is not None:
+        if cu_seqlens is None and attention_mask is not None:
             if q.shape[1] == 1 and self.window_size is not None:
                 attention_mask = attention_mask[:, -self.window_size:]
             q, (k, v), indices_q, cu_seqlens, max_seq_lens = unpad_input(q, (k, v), attention_mask, q_len)

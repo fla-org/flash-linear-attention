@@ -9,7 +9,25 @@
 
 from __future__ import annotations
 
+import torch
+
 from fla.ops.backends import BaseBackend
+from fla.utils import IS_NPU
+
+# NPU inductor mis-compiles grpo_loss_with_old_logps; keep eager fn from fla.modules.grpo.
+if IS_NPU and not getattr(torch.compile, "_fla_npu_skip_grpo_old_logps_compile", False):
+    _orig_torch_compile = torch.compile
+
+    def _torch_compile(fn=None, /, **kwargs):
+        def _dec(f):
+            if f.__name__ == "grpo_loss_with_old_logps":
+                return f
+            return _orig_torch_compile(f, **kwargs)
+
+        return _dec(fn) if fn is not None else _dec
+
+    _torch_compile._fla_npu_skip_grpo_old_logps_compile = True
+    torch.compile = _torch_compile
 
 
 class TritonAscendBackend(BaseBackend):
@@ -226,7 +244,7 @@ class TritonAscendBackend(BaseBackend):
         eps=1e-6,
     ):
         from fla.modules.backends.triton_ascend.l2norm import l2norm_bwd_npu
-        return l2norm_bwd_npu(y, rstd, dy, eps)
+        return l2norm_bwd_npu(y, rstd, dy)
 
     def layer_norm_gated_fwd(
         self,

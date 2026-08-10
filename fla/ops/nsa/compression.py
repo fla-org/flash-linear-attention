@@ -51,33 +51,38 @@ def parallel_nsa_compression_fwd_kernel(
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_v, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_t, i_v, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1), tl.program_id(2).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
 
     if IS_VARLEN:
-        i_n, i_t = tl.load(token_indices_q + i_t * 2).to(tl.int32), tl.load(token_indices_q + i_t * 2 + 1).to(tl.int32)
+        i_n, i_t = tl.load(token_indices_q + i_t * 2).to(tl.int32), tl.load(token_indices_q + i_t * 2 + 1).to(tl.int64)
         bos_q, eos_q = tl.load(cu_seqlens_q + i_n).to(tl.int64), tl.load(cu_seqlens_q + i_n + 1).to(tl.int64)
         bos_k, eos_k = tl.load(cu_seqlens_k + i_n).to(tl.int64), tl.load(cu_seqlens_k + i_n + 1).to(tl.int64)
         TQ = (eos_q - bos_q).to(tl.int32)
         TK = (eos_k - bos_k).to(tl.int32)
         TC = tl.cdiv(TK, BS)
-        boc = tl.load(chunk_offsets + i_n).to(tl.int32)
+        boc = tl.load(chunk_offsets + i_n).to(tl.int64)
     else:
         bos_q, eos_q = (i_b * TQ).to(tl.int64), (i_b * TQ + TQ).to(tl.int64)
         TC = tl.cdiv(TK, BS)
         boc = i_b * TC
 
-    p_q = tl.make_block_ptr(q + (bos_q + i_t) * HQ*K, (HQ, K), (K, 1), (i_h * G, 0), (G, BK), (1, 0))
+    o_g = i_h * G + tl.arange(0, G)
+    o_d = tl.arange(0, BK)
+    m_q = (o_g[:, None] < HQ) & (o_d[None, :] < K)
+    p_q = q + (bos_q + i_t) * HQ*K + o_g[:, None] * K + o_d[None, :]
     Q_OFFSET = TK - TQ
     # the Q block is kept in the shared memory throughout the whole kernel
     # [G, BK]
-    b_q = tl.load(p_q, boundary_check=(0, 1))
+    b_q = tl.load(p_q, mask=m_q, other=0.0)
     b_q = (b_q * scale).to(b_q.dtype)
 
     # number of complete compression blocks visible to the query (q tokens are the last TQ of the sequence)
     NC = (i_t + Q_OFFSET + 1) // BS
 
-    p_o = tl.make_block_ptr(o + (bos_q + i_t) * HQ*V, (HQ, V), (V, 1), (i_h * G, i_v * BV), (G, BV), (1, 0))
+    o_v = i_v * BV + tl.arange(0, BV)
+    m_o = (o_g[:, None] < HQ) & (o_v[None, :] < V)
+    p_o = o + (bos_q + i_t) * HQ*V + o_g[:, None] * V + o_v[None, :]
     # [G, BV]
     b_o = tl.zeros([G, BV], dtype=tl.float32)
     # max scores for the current block
@@ -88,12 +93,12 @@ def parallel_nsa_compression_fwd_kernel(
     for i_c in range(0, NC, BC):
         o_c = i_c + tl.arange(0, BC)
 
-        p_k = tl.make_block_ptr(k + (boc * H + i_h) * K, (K, TC), (1, H*K), (0, i_c), (BK, BC), (0, 1))
-        p_v = tl.make_block_ptr(v + (boc * H + i_h) * V, (TC, V), (H*V, 1), (i_c, i_v * BV), (BC, BV), (1, 0))
+        p_k = k + (boc * H + i_h) * K + o_d[:, None] + o_c[None, :] * (H*K)
+        p_v = v + (boc * H + i_h) * V + o_c[:, None] * (H*V) + o_v[None, :]
         # [BK, BC]
-        b_k = tl.load(p_k, boundary_check=(0, 1))
+        b_k = tl.load(p_k, mask=(o_d[:, None] < K) & (o_c[None, :] < TC), other=0.0)
         # [BC, BV]
-        b_v = tl.load(p_v, boundary_check=(0, 1))
+        b_v = tl.load(p_v, mask=(o_c[:, None] < TC) & (o_v[None, :] < V), other=0.0)
         # [G, BC]
         b_s = tl.dot(b_q, b_k)
         # causal mask: only the NC complete blocks are visible
@@ -114,7 +119,7 @@ def parallel_nsa_compression_fwd_kernel(
         b_o = b_o / b_acc[:, None]
         b_lse = b_m + log(b_acc)
 
-    tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=m_o)
     if i_v == 0:
         tl.store(lse + (bos_q + i_t) * HQ + i_h * G + tl.arange(0, G), b_lse.to(lse.dtype.element_ty))
 
@@ -156,15 +161,15 @@ def parallel_nsa_compression_bwd_kernel_dq(
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_v, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_t, i_v, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1), tl.program_id(2).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
 
-    all = B * T
+    all = B * T.to(tl.int64)
     if IS_VARLEN:
-        i_n, i_t = tl.load(token_indices + i_t * 2).to(tl.int32), tl.load(token_indices + i_t * 2 + 1).to(tl.int32)
+        i_n, i_t = tl.load(token_indices + i_t * 2).to(tl.int32), tl.load(token_indices + i_t * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
-        boc = tl.load(chunk_offsets + i_n).to(tl.int32)
+        boc = tl.load(chunk_offsets + i_n).to(tl.int64)
     else:
         bos, eos = (i_b * T).to(tl.int64), (i_b * T + T).to(tl.int64)
         boc = i_b * tl.cdiv(T, BS)
@@ -175,14 +180,19 @@ def parallel_nsa_compression_bwd_kernel_dq(
     delta += (bos + i_t) * HQ
     dq += (i_v * all + bos + i_t) * HQ*K
 
-    p_q = tl.make_block_ptr(q, (HQ, K), (K, 1), (i_h * G, 0), (G, BK), (1, 0))
-    p_dq = tl.make_block_ptr(dq, (HQ, K), (K, 1), (i_h * G, 0), (G, BK), (1, 0))
+    o_g = i_h * G + tl.arange(0, G)
+    o_d = tl.arange(0, BK)
+    m_q = (o_g[:, None] < HQ) & (o_d[None, :] < K)
+    p_q = q + o_g[:, None] * K + o_d[None, :]
+    p_dq = dq + o_g[:, None] * K + o_d[None, :]
 
     # [G, BK]
-    b_q = tl.load(p_q, boundary_check=(0, 1))
+    b_q = tl.load(p_q, mask=m_q, other=0.0)
     b_q = (b_q * scale).to(b_q.dtype)
 
-    p_do = tl.make_block_ptr(do, (HQ, V), (V, 1), (i_h * G, i_v * BV), (G, BV), (1, 0))
+    o_v = i_v * BV + tl.arange(0, BV)
+    m_o = (o_g[:, None] < HQ) & (o_v[None, :] < V)
+    p_do = do + o_g[:, None] * V + o_v[None, :]
     p_lse = lse + i_h * G + tl.arange(0, G)
     p_delta = delta + i_h * G + tl.arange(0, G)
 
@@ -193,7 +203,7 @@ def parallel_nsa_compression_bwd_kernel_dq(
     NC = (i_t + 1) // BS
 
     # [G, BV]
-    b_do = tl.load(p_do, boundary_check=(0, 1))
+    b_do = tl.load(p_do, mask=m_o, other=0.0)
     # [G]
     b_lse = tl.load(p_lse)
     b_delta = tl.load(p_delta)
@@ -202,12 +212,12 @@ def parallel_nsa_compression_bwd_kernel_dq(
     b_dq = tl.zeros([G, BK], dtype=tl.float32)
     for i_c in range(0, NC, BC):
         o_c = i_c + tl.arange(0, BC)
-        p_k = tl.make_block_ptr(k + (boc * H + i_h) * K, (K, TC), (1, H*K), (0, i_c), (BK, BC), (0, 1))
-        p_v = tl.make_block_ptr(v + (boc * H + i_h) * V, (V, TC), (1, H*V), (i_v * BV, i_c), (BV, BC), (0, 1))
+        p_k = k + (boc * H + i_h) * K + o_d[:, None] + o_c[None, :] * (H*K)
+        p_v = v + (boc * H + i_h) * V + o_v[:, None] + o_c[None, :] * (H*V)
         # [BK, BC]
-        b_k = tl.load(p_k, boundary_check=(0, 1))
+        b_k = tl.load(p_k, mask=(o_d[:, None] < K) & (o_c[None, :] < TC), other=0.0)
         # [BV, BC]
-        b_v = tl.load(p_v, boundary_check=(0, 1))
+        b_v = tl.load(p_v, mask=(o_v[:, None] < V) & (o_c[None, :] < TC), other=0.0)
 
         # [G, BC]
         b_s = tl.dot(b_q, b_k)
@@ -220,7 +230,7 @@ def parallel_nsa_compression_bwd_kernel_dq(
         # [G, BC] @ [BC, BK] -> [G, BK]
         b_dq += tl.dot(b_ds.to(b_k.dtype), tl.trans(b_k))
     b_dq *= scale
-    tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), mask=m_q)
 
 
 @triton.heuristics({
@@ -262,47 +272,51 @@ def parallel_nsa_compression_bwd_kernel_dkv(
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_c, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_v, i_c, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
 
-    all = B * TC
+    all = B * TC.to(tl.int64)
 
     if IS_VARLEN:
-        i_n, i_c = tl.load(chunk_indices + i_c * 2).to(tl.int32), tl.load(chunk_indices + i_c * 2 + 1).to(tl.int32)
+        i_n, i_c = tl.load(chunk_indices + i_c * 2).to(tl.int32), tl.load(chunk_indices + i_c * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
         # the number of compression representations in total
         TC = tl.cdiv(T, BS)
-        boc = tl.load(chunk_offsets + i_n).to(tl.int32)
+        boc = tl.load(chunk_offsets + i_n).to(tl.int64)
     else:
         bos, eos = (i_b * T).to(tl.int64), (i_b * T + T).to(tl.int64)
         boc = i_b * tl.cdiv(T, BS)
 
-    p_k = tl.make_block_ptr(k + (boc * H + i_h) * K, (TC, K), (H*K, 1), (i_c * BC, 0), (BC, BK), (1, 0))
-    p_v = tl.make_block_ptr(v + (boc * H + i_h) * V, (TC, V), (H*V, 1), (i_c * BC, i_v * BV), (BC, BV), (1, 0))
-    p_dk = tl.make_block_ptr(dk + (i_v * all*H + boc * H + i_h) * K, (TC, K), (H*K, 1), (i_c * BC, 0), (BC, BK), (1, 0))
-    p_dv = tl.make_block_ptr(dv + (boc * H + i_h) * V, (TC, V), (H*V, 1), (i_c * BC, i_v * BV), (BC, BV), (1, 0))
+    o_c = i_c * BC + tl.arange(0, BC)
+    o_d = tl.arange(0, BK)
+    o_v = i_v * BV + tl.arange(0, BV)
+    m_k = (o_c[:, None] < TC) & (o_d[None, :] < K)
+    m_v = (o_c[:, None] < TC) & (o_v[None, :] < V)
+    p_k = k + (boc * H + i_h) * K + o_c[:, None] * (H*K) + o_d[None, :]
+    p_v = v + (boc * H + i_h) * V + o_c[:, None] * (H*V) + o_v[None, :]
+    p_dk = dk + (i_v * all*H + boc * H + i_h) * K + o_c[:, None] * (H*K) + o_d[None, :]
+    p_dv = dv + (boc * H + i_h) * V + o_c[:, None] * (H*V) + o_v[None, :]
 
     # [BC, BK]
-    b_k = tl.load(p_k, boundary_check=(0, 1))
+    b_k = tl.load(p_k, mask=m_k, other=0.0)
     b_dk = tl.zeros([BC, BK], dtype=tl.float32)
     # [BC, BV]
-    b_v = tl.load(p_v, boundary_check=(0, 1))
+    b_v = tl.load(p_v, mask=m_v, other=0.0)
     b_dv = tl.zeros([BC, BV], dtype=tl.float32)
 
     for i in range(i_c * BC * BS, T):
-        o_c = i_c * BC + tl.arange(0, BC)
-
-        p_q = tl.make_block_ptr(q + (bos + i) * HQ*K, (HQ, K), (K, 1), (i_h * G, 0), (G, BK), (1, 0))
+        o_g = i_h * G + tl.arange(0, G)
+        p_q = q + (bos + i) * HQ*K + o_g[:, None] * K + o_d[None, :]
         # [G, BK]
-        b_q = tl.load(p_q, boundary_check=(0, 1))
+        b_q = tl.load(p_q, mask=(o_g[:, None] < HQ) & (o_d[None, :] < K), other=0.0)
         b_q = (b_q * scale).to(b_q.dtype)
 
-        p_do = tl.make_block_ptr(do + (bos + i) * HQ*V, (HQ, V), (V, 1), (i_h * G, i_v * BV), (G, BV), (1, 0))
+        p_do = do + (bos + i) * HQ*V + o_g[:, None] * V + o_v[None, :]
         p_lse = lse + (bos + i) * HQ + i_h * G + tl.arange(0, G)
         p_delta = delta + (bos + i) * HQ + i_h * G + tl.arange(0, G)
         # [G, BV]
-        b_do = tl.load(p_do, boundary_check=(0, 1))
+        b_do = tl.load(p_do, mask=(o_g[:, None] < HQ) & (o_v[None, :] < V), other=0.0)
         # [G]
         b_lse = tl.load(p_lse)
         b_delta = tl.load(p_delta)
@@ -319,8 +333,8 @@ def parallel_nsa_compression_bwd_kernel_dkv(
         # [BC, G] @ [G, BK] -> [BC, BK]
         b_dk += tl.dot(b_ds.to(b_q.dtype), b_q)
 
-    tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), mask=m_k)
+    tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), mask=m_v)
 
 
 def parallel_nsa_compression_fwd(

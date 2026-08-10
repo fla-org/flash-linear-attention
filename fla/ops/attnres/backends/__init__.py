@@ -7,11 +7,21 @@
 
 """AttnRes backends."""
 
-from fla.ops.attnres.backends.gluon import AttnResGluonBackend
+from fla.ops.attnres.backends.triton_ascend import TritonAscendAttnResBackend
 from fla.ops.backends import BackendRegistry, dispatch
 
 attnres_registry = BackendRegistry("attnres")
-attnres_registry.register(AttnResGluonBackend())
+
+attnres_registry.register(TritonAscendAttnResBackend())
+
+# gluon.py imports triton.experimental at module load; without this guard, import fails
+# on NPU and attnres backends never register (including triton_ascend above).
+try:
+    from fla.ops.attnres.backends.gluon import AttnResGluonBackend
+
+    attnres_registry.register(AttnResGluonBackend())
+except ImportError:
+    pass
 
 
 __all__ = ['attnres_registry', 'dispatch']
