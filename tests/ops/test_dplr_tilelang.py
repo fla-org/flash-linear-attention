@@ -95,22 +95,22 @@ def test_chunk_verifier_accepts_chunk64_on_large_smem_device(monkeypatch, K: int
     monkeypatch.setattr(dplr_tilelang_backend, 'get_device_smem_optin', lambda idx: 232448)
     monkeypatch.setattr(dplr_tilelang_backend, 'get_device_capability', lambda idx: (9, 0))
     ok, reason = DPLRTileLangBackend().chunk_dplr_delta_rule_verifier(
-        *_verifier_inputs(K=K), safe_gate=True, chunk_size=64,
+        *_verifier_inputs(K=K), safe_gate=True, lower_bound=-0.61, chunk_size=64,
     )
     assert ok and reason is None
 
 
 @requires_cuda
-def test_chunk_verifier_accepts_chunk64_k64_on_99kb_device(monkeypatch):
-    # cc120's 101376B optin fits every K=64 BT=64 stage: the fused A-backward
-    # at 98432B, the A-forward from_gk at 98304B, and the stream backward's
-    # low schedule (82944B)
+def test_chunk_verifier_rejects_safe_gate_chunk64(monkeypatch):
+    # safe_gate's documented [-5, 0) range overflows the centered scheme at
+    # chunk_size 64 (half-range 231 log2), so the route is rejected even where
+    # every K=64 BT=64 stage fits (cc120's 101376B optin)
     monkeypatch.setattr(dplr_tilelang_backend, 'get_device_smem_optin', lambda idx: 101376)
     monkeypatch.setattr(dplr_tilelang_backend, 'get_device_capability', lambda idx: (12, 0))
     ok, reason = DPLRTileLangBackend().chunk_dplr_delta_rule_verifier(
         *_verifier_inputs(K=64), safe_gate=True, chunk_size=64,
     )
-    assert ok and reason is None
+    assert not ok and 'requires safe_gate or a lower_bound' in reason
 
 
 @requires_cuda
@@ -143,8 +143,8 @@ def test_chunk_verifier_accepts_lower_bound_chunk64(monkeypatch):
         ('dtype_mismatch', 'dtypes to match'),
         ('kv_mismatch', 'K == V'),
         ('head_dim', 'head dim'),
-        ('safe_gate', 'requires safe_gate=True'),
-        ('lower_bound_unfit', 'requires safe_gate=True'),
+        ('safe_gate', 'requires safe_gate or a lower_bound'),
+        ('lower_bound_unfit', 'requires safe_gate or a lower_bound'),
         ('lower_bound_positive', 'lower_bound < 0'),
         ('chunk64_a100_k128', 'no launchable backward schedule'),
         ('chunk64_small_smem_k128', 'no launchable backward schedule'),
@@ -188,6 +188,7 @@ def test_chunk_verifier_rejects(monkeypatch, case: str, reason: str):
         monkeypatch.setattr(dplr_tilelang_backend, 'get_device_smem_optin', lambda idx: 166912)
         monkeypatch.setattr(dplr_tilelang_backend, 'get_device_capability', lambda idx: (8, 0))
         args = _verifier_inputs(K=128)
+        kwargs['lower_bound'] = -0.61
         kwargs['chunk_size'] = 64
     elif case == 'chunk64_small_smem_k128':
         # every K=128 stream schedule (mid=215552B, low=167936B) exceeds the
@@ -196,6 +197,7 @@ def test_chunk_verifier_rejects(monkeypatch, case: str, reason: str):
         monkeypatch.setattr(dplr_tilelang_backend, 'get_device_smem_optin', lambda idx: 101376)
         monkeypatch.setattr(dplr_tilelang_backend, 'get_device_capability', lambda idx: (12, 0))
         args = _verifier_inputs(K=128)
+        kwargs['lower_bound'] = -0.61
         kwargs['chunk_size'] = 64
     elif case == 'chunk16_k128':
         args = _verifier_inputs(K=128)
@@ -306,7 +308,12 @@ def test_chunk_tilelang_route_parity(
     v = torch.randn(B, T, H, D, dtype=dtype)
     a = F.normalize(torch.rand(B, T, H, D, dtype=dtype), p=2, dim=-1)
     b = -a
-    gk = F.logsigmoid(torch.randn(B, T, H, D, dtype=torch.float)).to(dtype).clamp(-5, 0)
+    if chunk_size == 64:
+        # safe_gate's [-5, 0) bound does not fit chunk_size 64; RWKV7's
+        # architectural clamp on w does
+        gk = (-0.61 * torch.sigmoid(5 * torch.randn(B, T, H, D, dtype=torch.float))).to(dtype)
+    else:
+        gk = F.logsigmoid(torch.randn(B, T, H, D, dtype=torch.float)).to(dtype).clamp(-5, 0)
     h0 = torch.randn(B, H, D, D, dtype=torch.float)
     q, k, v, a, b, gk, h0 = (x.to(device) for x in (q, k, v, a, b, gk, h0))
     do = torch.randn_like(v)
@@ -321,6 +328,7 @@ def test_chunk_tilelang_route_parity(
             initial_state=h0_,
             output_final_state=use_state,
             safe_gate=True,
+            lower_bound=-0.61 if chunk_size == 64 else None,
             chunk_size=chunk_size,
             disable_recompute=disable_recompute,
         )
@@ -510,12 +518,113 @@ def test_chunk_tilelang_route_parity_gate_stress(
             initial_state=h0_,
             output_final_state=True,
             safe_gate=True,
+            lower_bound=-0.61 if chunk_size == 64 else None,
             chunk_size=chunk_size,
         )
         ((o * do).sum() + (st * dht).sum()).backward()
         return o, st, q_.grad, k_.grad, v_.grad, a_.grad, b_.grad, gk_.grad, h0_.grad
 
     _assert_route_parity(monkeypatch, run, ('o', 'ht', 'dq', 'dk', 'dv', 'da', 'db', 'dgk', 'dh0'))
+
+
+@requires_tilelang_route
+def test_chunk_tilelang_safe_gate_chunk64_stays_on_triton(monkeypatch):
+    # safe_gate's documented [-5, 0) range overflows the centered scheme at
+    # chunk_size 64, so dispatch must reject the route regardless of the
+    # (here mild) gates actually supplied
+    torch.manual_seed(42)
+    B, T, H, D = 8, 512, 32, 64
+    dtype = torch.bfloat16
+    q = torch.randn(B, T, H, D, dtype=dtype)
+    k = torch.randn(B, T, H, D, dtype=dtype)
+    v = torch.randn(B, T, H, D, dtype=dtype)
+    a = F.normalize(torch.rand(B, T, H, D, dtype=dtype), p=2, dim=-1)
+    b = -a
+    gk = F.logsigmoid(torch.randn(B, T, H, D, dtype=torch.float)).to(dtype).clamp(-5, 0)
+    q, k, v, a, b, gk = (x.to(device) for x in (q, k, v, a, b, gk))
+    do = torch.randn_like(v)
+
+    def run():
+        q_, k_, v_, a_, b_, gk_ = (x.detach().clone().requires_grad_(True) for x in (q, k, v, a, b, gk))
+        o, _ = chunk_dplr_delta_rule(
+            q=q_, k=k_, v=v_, a=a_, b=b_, gk=gk_,
+            scale=1.0,
+            safe_gate=True,
+            chunk_size=64,
+        )
+        (o * do).sum().backward()
+        return o, q_.grad, k_.grad, v_.grad, a_.grad, b_.grad, gk_.grad
+
+    monkeypatch.setenv('FLA_TILELANG', '0')
+    ref = run()
+    calls = _spy_on_tilelang_route(monkeypatch)
+    monkeypatch.setenv('FLA_TILELANG', '1')
+    tri = run()
+    assert not calls, 'TileLang route must stay rejected for safe_gate=True with chunk_size=64'
+    for name, r, t in zip(('o', 'dq', 'dk', 'dv', 'da', 'db', 'dgk'), ref, tri):
+        assert_close(name, r, t, 0.01)
+
+
+@requires_tilelang_route
+@pytest.mark.parametrize(
+    ('chunk_size', 'pin'),
+    [
+        pytest.param(
+            chunk_size,
+            pin,
+            id=f'chunk_size{chunk_size}-pin{pin}',
+            marks=pytest.mark.skipif(
+                chunk_size == 64 and not _cs64_launchable(64),
+                reason='chunk_size 64 has no launchable backward schedule on this device',
+            ),
+        )
+        for chunk_size, pin in [(16, -5.0), (32, -5.0), (64, -2.0), (64, -0.61)]
+    ],
+)
+def test_chunk_tilelang_sustained_gate_pin_stress(monkeypatch, chunk_size: int, pin: float):
+    # every gate pinned at the bound for the whole sequence: the licensed
+    # half-range must stay finite and track the fp32 recurrence. dgk is
+    # ill-conditioned in this regime for any chunked scheme (RMS err vs the
+    # baseline: TileLang 0.12-0.17 at the -5 pin, the Triton reference
+    # 0.34-0.48), so parity is asserted against the baseline with a relaxed
+    # dgk tolerance; all other outputs match the usual naive-parity bars
+    torch.manual_seed(42)
+    B, T, H, D = 8, 512, 16, 64
+    dtype = torch.bfloat16
+    q = torch.randn(B, T, H, D, dtype=dtype)
+    k = torch.randn(B, T, H, D, dtype=dtype)
+    v = torch.randn(B, T, H, D, dtype=dtype)
+    a = F.normalize(torch.rand(B, T, H, D, dtype=dtype), p=2, dim=-1)
+    b = -a
+    gk = torch.full((B, T, H, D), pin, dtype=dtype)
+    h0 = torch.randn(B, H, D, D, dtype=torch.float)
+    q, k, v, a, b, gk, h0 = (x.to(device) for x in (q, k, v, a, b, gk, h0))
+    do = torch.randn_like(v)
+    dht = torch.randn_like(h0)
+
+    def run(fn):
+        q_, k_, v_, a_, b_, gk_, h0_ = (x.detach().clone().requires_grad_(True) for x in (q, k, v, a, b, gk, h0))
+        if fn == 'naive':
+            o, st = _naive_recurrence(q_, k_, v_, a_, b_, gk_, h0_)
+        else:
+            o, st = chunk_dplr_delta_rule(
+                q=q_, k=k_, v=v_, a=a_, b=b_, gk=gk_,
+                initial_state=h0_, output_final_state=True,
+                safe_gate=True, lower_bound=pin if chunk_size == 64 else None,
+                chunk_size=chunk_size,
+            )
+        ((o * do).sum() + (st * dht).sum()).backward()
+        return o, st, q_.grad, k_.grad, v_.grad, a_.grad, b_.grad, gk_.grad, h0_.grad
+
+    calls = _spy_on_tilelang_route(monkeypatch)
+    monkeypatch.setenv('FLA_TILELANG', '1')
+    tri = run('op')
+    assert calls, 'TileLang backend route was not taken'
+    for x in tri:
+        assert torch.isfinite(x).all()
+    ref = run('naive')
+    for name, r, t in zip(_NAIVE_PARITY_NAMES, ref, tri):
+        assert_close(name, r, t, 0.007 if name == 'o' else (0.25 if name == 'dgk' else 0.008))
 
 
 @requires_tilelang_route
@@ -670,7 +779,8 @@ def test_chunk_tilelang_naive_ref_parity(
         return chunk_dplr_delta_rule(
             q=q_, k=k_, v=v_, a=a_, b=b_, gk=gk_,
             initial_state=h0_, output_final_state=True,
-            safe_gate=True, chunk_size=chunk_size,
+            safe_gate=True, lower_bound=-0.61 if chunk_size == 64 else None,
+            chunk_size=chunk_size,
         )
 
     _assert_naive_parity(monkeypatch, (q, k, v, a, b, gk, h0), do, dht, _NAIVE_PARITY_NAMES, call)

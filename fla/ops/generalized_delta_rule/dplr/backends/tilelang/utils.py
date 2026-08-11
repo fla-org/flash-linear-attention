@@ -54,9 +54,10 @@ def _as_cuda_cu_seqlens(cu_seqlens: torch.Tensor) -> torch.Tensor:
     return cu_seqlens.to(dtype=torch.int32).contiguous()
 
 
-# Bounded identity-keyed cache (same contract as fla.utils.tensor_cache):
-# repeated calls with the same cu_seqlens object skip the layout build. The
-# cached tensors are kept alive by the cache itself, so ids cannot recycle.
+# Bounded cache keyed on cu_seqlens identity + int values. fla.utils.tensor_cache
+# is not reusable here: it identity-keys every arg, which only works for small
+# interned ints like chunk_size — total_tokens is a fresh object per call.
+# Cached tensors are kept alive by the cache itself, so ids cannot recycle.
 _VARLEN_LAYOUT_CACHE: deque = deque(maxlen=4)
 
 

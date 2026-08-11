@@ -91,21 +91,16 @@ class DPLRTileLangBackend(BaseBackend):
         chunk_size = 16 if chunk_size is None else chunk_size
         if chunk_size not in (16, 32, 64):
             return False, f"TileLang backend supports chunk_size 16/32/64, got {chunk_size}; fall back to Triton"
-        if not safe_gate:
-            # The A-stage centers gates mid-chunk for its tensor-core operands
-            # (exp2(gi - gi[mid])), whose per-row exponents reach
-            # (chunk_size/2) * max|gk| * log2(e) and must stay below the fp32
-            # exponent range (~127 log2). safe_gate=True callers assert a gate
-            # bound themselves; a lower_bound that fits the chunk size asserts
-            # the same bound explicitly. Unbounded gates must stay on Triton,
-            # whose sub_intra is correct for arbitrary gates.
-            from fla.ops.generalized_delta_rule.dplr.chunk import gate_bound_is_safe
-            if lower_bound is None or not gate_bound_is_safe(lower_bound, chunk_size):
-                return False, (
-                    "TileLang backend requires safe_gate=True or a lower_bound that "
-                    "fits the chunk size (its mid-chunk-centered tensor-core scheme "
-                    "overflows fp32 for unbounded gates); fall back to Triton"
-                )
+        from fla.ops.generalized_delta_rule.dplr.chunk import gate_bound_is_safe
+        bound = lower_bound if lower_bound is not None else (-5.0 if safe_gate else None)
+        if bound is None or not gate_bound_is_safe(bound, chunk_size):
+            return False, (
+                "TileLang backend requires safe_gate or a lower_bound that fits "
+                f"chunk_size {chunk_size}: its mid-chunk-centered tensor-core scheme "
+                "keeps exp2 operands in fp32 range only while "
+                "(chunk_size/2)*bound*log2(e) <= 120 (the documented safe_gate "
+                "range [-5, 0) fits chunk_size 16/32 but not 64); fall back to Triton"
+            )
         if not q.is_cuda:
             return False, "TileLang backend is CUDA-only; fall back to Triton"
         dev = q.device.index or 0
