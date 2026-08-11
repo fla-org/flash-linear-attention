@@ -14,16 +14,15 @@ Produces two outputs:
 where each chunk of size BT cumsums independently. `scale = RCP_LN2` lets
 downstream kernels use `T.exp2` directly.
 
-Strategy:
-- **Rectangular batches** (cu_seqlens is None): vectorized PyTorch fp32 cumsum.
-  This is ~2.3x faster than TileLang T.cumsum for rectangular inputs
-  (0.24 ms vs 0.55 ms for B=1,T=8192,H=32,K=64,BT=64).
-- **Varlen batches** (cu_seqlens is not None): TileLang T.cumsum kernel,
-  which handles irregular chunk boundaries without Python loops.
+Rectangular batches use a segmented fp32 scan kernel: each (chunk, head,
+channel-block) CTA splits the chunk's BT timesteps across SEG lane groups that
+scan their segment serially in registers, then applies a per-channel exclusive
+prefix of the segment sums before writing gi/ge in one pass (ge is the shifted
+gi). This replaces the earlier vectorized PyTorch chain (fp32 cast + pad +
+cumsum + scale + shifted zeros), which cost ~2.5 ms of elementwise/scan glue
+kernels per call at h4096 (vs ~1.3 ms here).
 
-The earlier T.cumsum-only approach (commit e99c20a) was based on a flawed
-microbenchmark that claimed parity (0.37 ms vs 0.39 ms). End-to-end profiling
-revealed T.cumsum is actually significantly slower for rectangular batches.
+Varlen batches keep the irregular-boundary kernel keyed by chunk_indices.
 """
 
 import tilelang
@@ -31,6 +30,81 @@ import tilelang.language as T
 import torch
 
 from .utils import ChunkLayout, build_varlen_chunk_layout
+
+# ---------------------------------------------------------------------------
+# TileLang segmented scan kernel for rectangular batches.
+# ---------------------------------------------------------------------------
+
+
+@tilelang.jit(
+    pass_configs={
+        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
+        tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: False,
+    },
+)
+def _chunk_local_cumsum_rect_kernel_tl(
+    H, K, BT, BS, SEG, in_dtype, scale_value: float, OUTPUT_GE: bool
+):
+    acc_dtype = "float32"
+    B, Tt = T.dynamic("B, Tt")
+    SL = BT // SEG  # segment length
+
+    @T.prim_func
+    def chunk_local_cumsum_rect_tl(
+        g: T.Tensor((B, Tt, H, K), in_dtype),
+        gi: T.Tensor((B, Tt, H, K), acc_dtype),
+        ge: T.Tensor((B, Tt, H, K), acc_dtype),
+    ):
+        tpc = T.ceildiv(Tt, BT)
+        with T.Kernel(T.ceildiv(K, BS), B * tpc, H, threads=BS * SEG) as (i_sb, i_c, i_h):
+            i_n = i_c // tpc
+            bos = (i_c % tpc) * BT
+
+            scan_sh = T.alloc_shared((BT, BS), acc_dtype)
+            seg_sum = T.alloc_shared((BS, SEG), acc_dtype)
+            acc = T.alloc_fragment((BS, SEG), acc_dtype)
+            off_frag = T.alloc_fragment((BS, SEG), acc_dtype)
+            T.clear(acc)
+            T.clear(off_frag)
+
+            # Per-lane serial scan over its segment, values staged in shared.
+            for step in T.serial(SL):
+                for c, s in T.Parallel(BS, SEG):
+                    t_local = s * SL + step
+                    k_idx = i_sb * BS + c
+                    if (bos + t_local < Tt) and (k_idx < K):
+                        acc[c, s] = acc[c, s] + T.Cast(acc_dtype, g[i_n, bos + t_local, i_h, k_idx])
+                        scan_sh[t_local, c] = acc[c, s]
+
+            # Exclusive prefix over segment sums per channel.
+            for c, s in T.Parallel(BS, SEG):
+                seg_sum[c, s] = acc[c, s]
+            for s2 in T.serial(1, SEG):
+                for c, s in T.Parallel(BS, SEG):
+                    if s >= s2:
+                        off_frag[c, s] += seg_sum[c, s2 - 1]
+
+            # Emit gi/ge with the segment offset; ge is the shifted gi.
+            for step in T.serial(SL):
+                for c, s in T.Parallel(BS, SEG):
+                    t_local = s * SL + step
+                    k_idx = i_sb * BS + c
+                    if (bos + t_local < Tt) and (k_idx < K):
+                        gi[i_n, bos + t_local, i_h, k_idx] = (scan_sh[t_local, c] + off_frag[c, s]) * scale_value
+                        if OUTPUT_GE:
+                            ge[i_n, bos + t_local, i_h, k_idx] = (
+                                off_frag[c, s]
+                                + T.if_then_else(step > 0, scan_sh[T.max(t_local - 1, 0), c], T.Cast(acc_dtype, 0.0))
+                            ) * scale_value
+
+    return chunk_local_cumsum_rect_tl
+
+
+def _rect_cumsum_seg(chunk_size: int) -> int:
+    # Measured on sm_120 (h4096, fp32 gates): BT=64 favors 2 lane groups
+    # (1.27 ms vs 1.52/1.83 at 4/8), BT=32 favors 8 (1.34 vs 1.43/1.45 at 2/4).
+    return {64: 2, 32: 8}.get(chunk_size, 4)
+
 
 # ---------------------------------------------------------------------------
 # TileLang chunk-local scan kernel — kept for varlen batches.
@@ -44,7 +118,7 @@ from .utils import ChunkLayout, build_varlen_chunk_layout
     },
 )
 def _chunk_local_cumsum_kernel_tl(
-    H, K, BT, BS, in_dtype, scale_value: float
+    H, K, BT, BS, in_dtype, scale_value: float, OUTPUT_GE: bool
 ):
     acc_dtype = "float32"
     n_tokens, n_seq_plus_one, n_chunks = T.dynamic(
@@ -86,61 +160,12 @@ def _chunk_local_cumsum_kernel_tl(
                 for s_local in T.Parallel(BS):
                     s = i_sb * BS + s_local
                     if (t < eos) and (s < K):
-                        ge[t, i_h, s] = acc[s_local] * s_scalar
+                        if OUTPUT_GE:
+                            ge[t, i_h, s] = acc[s_local] * s_scalar
                         acc[s_local] += T.Cast(acc_dtype, g[t, i_h, s])
                         gi[t, i_h, s] = acc[s_local] * s_scalar
 
     return chunk_local_cumsum_tl
-
-
-def _chunk_local_cumsum_pytorch(
-    g: torch.Tensor,
-    chunk_size: int,
-    scale: float | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Vectorized PyTorch fp32 cumsum for rectangular batches.
-
-    Steps:
-    1. Cast to fp32 (critical for precision — bf16 cumsum causes 43% error).
-    2. Pad time dim to multiple of chunk_size.
-    3. Reshape to (B, n_chunks, BT, H, K).
-    4. Cumsum along chunk time axis (dim=2).
-    5. Derive exclusive by shifting inclusive result.
-    6. Scale, reshape back, trim padding.
-    """
-    B, T_, H, K = g.shape
-    BT = chunk_size
-    scale_f = float(scale) if scale is not None else 1.0
-
-    # Cast to fp32 before cumsum for numerical stability.
-    g_fp32 = g.to(torch.float32)
-
-    # Pad to multiple of BT.
-    pad_len = (BT - T_ % BT) % BT
-    if pad_len > 0:
-        g_pad = torch.cat(
-            [g_fp32, torch.zeros(B, pad_len, H, K, dtype=torch.float32, device=g.device)],
-            dim=1,
-        )
-    else:
-        g_pad = g_fp32
-
-    # Reshape: (B, n_chunks, BT, H, K)
-    n_chunks = g_pad.shape[1] // BT
-    g_chunks = g_pad.view(B, n_chunks, BT, H, K)
-
-    # Inclusive cumsum along time axis within each chunk.
-    gi_chunks = g_chunks.cumsum(dim=2) * scale_f
-
-    # Exclusive: shift inclusive down by 1, pad 0 at top of each chunk.
-    ge_chunks = torch.zeros_like(gi_chunks)
-    ge_chunks[:, :, 1:, :, :] = gi_chunks[:, :, :-1, :, :]
-
-    # Flatten back and trim padding.
-    gi = gi_chunks.view(B, -1, H, K)[:, :T_]
-    ge = ge_chunks.view(B, -1, H, K)[:, :T_]
-
-    return gi, ge
 
 
 def chunk_local_cumsum(
@@ -149,15 +174,29 @@ def chunk_local_cumsum(
     scale: float | None = None,
     cu_seqlens: torch.Tensor | None = None,
     chunk_layout: ChunkLayout | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Chunk-local inclusive (gi) and exclusive (ge) cumsum over the time axis."""
+    output_ge: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Chunk-local inclusive (gi) and exclusive (ge) cumsum over the time axis.
+
+    With ``output_ge=False`` the kernels never touch the ge buffer, which is
+    then aliased to gi to skip the unused fp32 allocation, and None is
+    returned in its place.
+    """
     is_varlen = cu_seqlens is not None
+    scale_f = float(scale) if scale is not None else 1.0
+    in_dtype = str(g.dtype).split(".")[-1]
 
     if not is_varlen:
-        # Fast path: vectorized PyTorch for rectangular batches.
-        return _chunk_local_cumsum_pytorch(g, chunk_size, scale=scale)
+        B, T_, H, K = g.shape
+        kernel = _chunk_local_cumsum_rect_kernel_tl(
+            H, K, chunk_size, 64, _rect_cumsum_seg(chunk_size), in_dtype, scale_f, output_ge
+        )
+        gi = torch.empty((B, T_, H, K), dtype=torch.float32, device=g.device)
+        ge = torch.empty((B, T_, H, K), dtype=torch.float32, device=g.device) if output_ge else gi
+        kernel(g.contiguous(), gi, ge)
+        return gi, ge if output_ge else None
 
-    # Varlen path: TileLang T.cumsum kernel handles irregular chunk boundaries.
+    # Varlen path: the chunk_indices-keyed kernel handles irregular boundaries.
     B, T_, H, K = g.shape
     assert B == 1, "Varlen expects B==1"
     BT = chunk_size
@@ -165,7 +204,6 @@ def chunk_local_cumsum(
     N_tokens = B * T_
     layout = chunk_layout if chunk_layout is not None else build_varlen_chunk_layout(cu_seqlens, BT, N_tokens)
     g_flat = g.reshape(N_tokens, H, K).contiguous()
-    scale_f = float(scale) if scale is not None else 1.0
 
     BS = K if K <= 64 else 64
     while BS > 16 and K % BS != 0:
@@ -173,12 +211,11 @@ def chunk_local_cumsum(
     if K < BS:
         BS = K
 
-    in_dtype = str(g.dtype).split(".")[-1]
-    kernel = _chunk_local_cumsum_kernel_tl(H, K, BT, BS, in_dtype, scale_f)
+    kernel = _chunk_local_cumsum_kernel_tl(H, K, BT, BS, in_dtype, scale_f, output_ge)
     gi_flat = torch.empty((N_tokens, H, K), dtype=torch.float32, device=g.device)
-    ge_flat = torch.empty((N_tokens, H, K), dtype=torch.float32, device=g.device)
+    ge_flat = torch.empty((N_tokens, H, K), dtype=torch.float32, device=g.device) if output_ge else gi_flat
     kernel(g_flat, gi_flat, ge_flat, layout.cu_seqlens, layout.chunk_indices)
-    return gi_flat.view(B, T_, H, K), ge_flat.view(B, T_, H, K)
+    return gi_flat.view(B, T_, H, K), ge_flat.view(B, T_, H, K) if output_ge else None
 
 
 __all__ = ["chunk_local_cumsum"]

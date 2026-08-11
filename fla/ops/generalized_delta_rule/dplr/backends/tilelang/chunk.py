@@ -169,9 +169,8 @@ def _chunk_dplr_delta_rule_bwd_core(
             scale=RCP_LN2,
             cu_seqlens=cu,
             chunk_layout=layout,
+            output_ge=not bwd_derives_ge,
         )
-        if bwd_derives_ge:
-            ge = None
         u = torch.empty_like(v)
     elif bwd_derives_ge:
         A_ab, A_qk, A_ak, A_qb, qg, kg, ag, bg, gi = chunk_dplr_fwd_intra_from_gk(
