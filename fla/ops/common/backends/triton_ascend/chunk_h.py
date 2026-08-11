@@ -9,6 +9,8 @@
 
 Ascend requires host-specialized ``NT`` + ``tl.static_range(NT)``. Dynamic
 ``for i_t in range(tl.cdiv(T, BT))`` under-iterates when ``T`` is unspecialized.
+The kernels below only handle equal-length inputs; varlen inputs are split per
+sequence on the host (see ``chunk_fwd_h_npu``/``chunk_bwd_dh_npu``).
 """
 
 from __future__ import annotations
@@ -20,71 +22,44 @@ import triton.language as tl
 from fla.ops.utils import prepare_chunk_offsets
 from fla.ops.utils.op import exp2
 from fla.utils import input_guard
-from fla.utils.ascend_ub_manager import ASCEND_MAX_GRID_DIM, max_grid_axis_chunks
+from fla.utils.ascend_ub_manager import launch_grid_chunked
 
-_LAUNCH_BLOCK_BUDGET = 4096
-# Fixed tiles: matches validated probe; avoids UB/autotune variance on Ascend.
+# Fixed tiles: avoids autotune picking UB-overflowing configs on Ascend.
 _BK = 64
 _BV = 64
 
 
-def _max_nt(T: int, BT: int, cu_seqlens: torch.Tensor | None) -> int:
-    if cu_seqlens is None:
-        return triton.cdiv(T, BT)
-    lengths = cu_seqlens[1:] - cu_seqlens[:-1]
-    return int(triton.cdiv(int(lengths.max().item()), BT))
+def _chunk_h_tile_size(K: int, V: int) -> tuple[int, int]:
+    """Pick BK/BV for chunk_h on Ascend.
 
-
-def _launch_kv_nh(kernel, *, nk: int, nv: int, nh: int, kernel_kwargs: dict) -> None:
-    budget = _LAUNCH_BLOCK_BUDGET
-    nk_step = nk if nk * nv * nh <= budget else max(1, budget // max(nv * nh, 1))
-    for k_off in range(0, nk, nk_step):
-        k_len = min(nk_step, nk - k_off)
-        kernel_kwargs['K_OFFSET'] = k_off
-        nv_budget = max(1, budget // max(k_len * nh, 1))
-        nv_step = min(nv_budget, max_grid_axis_chunks(nv, k_len * nh, max_grid=ASCEND_MAX_GRID_DIM))
-        for v_off in range(0, nv, nv_step):
-            v_len = min(nv_step, nv - v_off)
-            kernel_kwargs['V_OFFSET'] = v_off
-            nh_budget = max(1, budget // max(k_len * v_len, 1))
-            nh_step = min(nh_budget, max_grid_axis_chunks(nh, k_len * v_len, max_grid=ASCEND_MAX_GRID_DIM))
-            for nh_off in range(0, nh, nh_step):
-                nh_len = min(nh_step, nh - nh_off)
-                kernel_kwargs['NH_OFFSET'] = nh_off
-                kernel[(k_len, v_len, nh_len)](**kernel_kwargs)
-    if hasattr(torch, 'npu') and torch.npu.is_available():
-        torch.npu.synchronize()
+    BK=BV=64 overflows UB when K,V>=256 and USE_GK loads extra fp32 tiles
+    (b_k/b_gk/b_h/b_v), which surfaces as MTE DDR OOB for large B*H.
+    """
+    if K > 128 or V > 128:
+        return 32, 32
+    return _BK, _BV
 
 
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.jit(do_not_specialize=['T', 'K_OFFSET', 'V_OFFSET', 'NH_OFFSET'])
 def chunk_fwd_kernel_h_npu(
-    k, v, h, g, g_gamma, gk, gv, h0, ht,
-    cu_seqlens, split_offsets, T,
+    k, v, h, g, g_gamma, gk, gv, h0, ht, T,
     H: tl.constexpr, K: tl.constexpr, V: tl.constexpr,
     BT: tl.constexpr, BS: tl.constexpr, BK: tl.constexpr, BV: tl.constexpr, NT: tl.constexpr,
     USE_G: tl.constexpr, USE_G_GAMMA: tl.constexpr, USE_GK: tl.constexpr, USE_GV: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr, STORE_FINAL_STATE: tl.constexpr,
-    IS_VARLEN: tl.constexpr, STATE_V_FIRST: tl.constexpr,
+    STATE_V_FIRST: tl.constexpr,
     K_OFFSET, V_OFFSET, NH_OFFSET,
 ):
     i_k = tl.program_id(0) + K_OFFSET
     i_v = tl.program_id(1) + V_OFFSET
     i_nh = tl.program_id(2).to(tl.int64) + NH_OFFSET
     i_n, i_h = i_nh // H, i_nh % H
-    if IS_VARLEN:
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
-        T = eos - bos
-        NT_SEQ = tl.cdiv(T, BT)
-        boh = tl.load(split_offsets + i_n).to(tl.int64)
-    else:
-        bos, eos = i_n * T, i_n * T + T
-        NT_SEQ = NT
-        boh = i_n * tl.cdiv(T, BS)
+    bos = (i_n * T).to(tl.int64)
+    boh = (i_n * tl.cdiv(T, BS)).to(tl.int64)
     NTS = BS // BT
 
     if USE_G_GAMMA:
@@ -95,29 +70,29 @@ def chunk_fwd_kernel_h_npu(
     o_k = i_k * BK + tl.arange(0, BK)
     o_v = i_v * BV + tl.arange(0, BV)
     if USE_INITIAL_STATE:
+        h0_base = (i_nh * K * V).to(tl.int64)
         if STATE_V_FIRST:
-            p_h0 = h0 + i_nh * K * V + o_v[:, None] * K + o_k[None, :]
+            p_h0 = h0 + h0_base + o_v[:, None].to(tl.int64) * K + o_k[None, :]
             b_h = tl.trans(tl.load(p_h0, mask=(o_v[:, None] < V) & (o_k[None, :] < K), other=0.0)).to(tl.float32)
         else:
-            p_h0 = h0 + i_nh * K * V + o_k[:, None] * V + o_v[None, :]
+            p_h0 = h0 + h0_base + o_k[:, None].to(tl.int64) * V + o_v[None, :]
             b_h = tl.load(p_h0, mask=(o_k[:, None] < K) & (o_v[None, :] < V), other=0.0).to(tl.float32)
 
     for i_t in tl.static_range(NT):
-        # Always execute body; inactive (varlen pad) iterations contribute zeros via masks.
-        active = i_t < NT_SEQ
         i_s = i_t // NTS
-        o_t = i_t * BT + tl.arange(0, BT)
-        m_t = (o_t < T) & active
-        p_k = k + (bos * H + i_h) * K + o_k[:, None] + o_t[None, :] * (H * K)
-        p_v = v + (bos * H + i_h) * V + o_t[:, None] * (H * V) + o_v[None, :]
+        o_t = (i_t * BT + tl.arange(0, BT)).to(tl.int64)
+        m_t = o_t < T
+        kv_base = (bos * H + i_h).to(tl.int64) * K
+        p_k = k + kv_base + o_k[:, None] + o_t[None, :] * (H * K)
+        p_v = v + (bos * H + i_h).to(tl.int64) * V + o_t[:, None] * (H * V) + o_v[None, :]
 
-        o_h = ((boh + i_s) * H + i_h).to(tl.int64) * K * V
+        o_h = ((boh + i_s.to(tl.int64)) * H + i_h).to(tl.int64) * K * V
         if STATE_V_FIRST:
-            p_h = h + o_h + o_v[:, None] * K + o_k[None, :]
-            m_h = (o_v[:, None] < V) & (o_k[None, :] < K) & active
+            p_h = h + o_h + o_v[:, None].to(tl.int64) * K + o_k[None, :]
+            m_h = (o_v[:, None] < V) & (o_k[None, :] < K)
         else:
-            p_h = h + o_h + o_k[:, None] * V + o_v[None, :]
-            m_h = (o_k[:, None] < K) & (o_v[None, :] < V) & active
+            p_h = h + o_h + o_k[:, None].to(tl.int64) * V + o_v[None, :]
+            m_h = (o_k[:, None] < K) & (o_v[None, :] < V)
 
         if i_t % NTS == 0:
             tl.store(p_h, (tl.trans(b_h) if STATE_V_FIRST else b_h).to(p_h.dtype.element_ty), mask=m_h)
@@ -126,61 +101,60 @@ def chunk_fwd_kernel_h_npu(
         b_k = tl.load(p_k, mask=(o_k[:, None] < K) & m_t[None, :], other=0.0).to(tl.float32)
         b_v = tl.load(p_v, mask=m_t[:, None] & (o_v < V)[None, :], other=0.0).to(tl.float32)
         last_idx = min((i_t + 1) * BT, T) - 1
-        last_idx = max(last_idx, 0)
 
         if USE_G:
-            b_g_last = tl.load(g + bos * H + last_idx * H + i_h).to(tl.float32)
-            p_g = g + bos * H + (i_t * BT + tl.arange(0, BT)) * H + i_h
-            b_g = tl.load(p_g, mask=(i_t * BT + tl.arange(0, BT) < T) & active, other=0.).to(tl.float32)
-            b_h *= tl.where(active, exp2(b_g_last), 1.0)
+            b_g_last = tl.load(g + bos * H + last_idx.to(tl.int64) * H + i_h).to(tl.float32)
+            p_g = g + bos * H + o_t * H + i_h
+            b_g = tl.load(p_g, mask=m_t, other=0.).to(tl.float32)
+            b_h *= exp2(b_g_last)
             b_v = b_v * exp2(b_g_last - b_g)[:, None]
 
         if USE_G_GAMMA:
-            b_g_last = b_gamma * min(BT, max(T - i_t * BT, 0))
-            b_h *= tl.where(active, exp2(b_g_last), 1.0)
+            b_g_last = b_gamma * min(BT, T - i_t * BT)
+            b_h *= exp2(b_g_last)
             b_v = b_v * exp2(b_g_last - b_g)[:, None]
 
         if USE_GK:
-            p_gk = gk + (bos * H + i_h) * K + o_k[:, None] + o_t[None, :] * (H * K)
-            p_gk_last = gk + (bos + last_idx) * H * K + i_h * K + i_k * BK + tl.arange(0, BK)
+            p_gk = gk + kv_base + o_k[:, None] + o_t[None, :] * (H * K)
+            p_gk_last = gk + (bos + last_idx.to(tl.int64)) * (H * K) + i_h * K + i_k * BK + tl.arange(0, BK)
             b_gk_last = tl.load(p_gk_last, mask=(i_k * BK + tl.arange(0, BK) < K), other=0.).to(tl.float32)
             b_gk = tl.load(p_gk, mask=(o_k[:, None] < K) & m_t[None, :], other=0.0).to(tl.float32)
-            b_h *= tl.where(active, exp2(b_gk_last), 1.0)[:, None]
+            b_h *= exp2(b_gk_last)[:, None]
             b_k = b_k * exp2(b_gk_last[:, None] - b_gk)
 
         if USE_GV:
-            p_gv = gv + (bos * H + i_h) * V + o_t[:, None] * (H * V) + o_v[None, :]
-            p_gv_last = gv + (bos + last_idx) * H * V + i_h * V + i_v * BV + tl.arange(0, BV)
+            p_gv = gv + (bos * H + i_h).to(tl.int64) * V + o_t[:, None] * (H * V) + o_v[None, :]
+            p_gv_last = gv + (bos + last_idx.to(tl.int64)) * (H * V) + i_h * V + i_v * BV + tl.arange(0, BV)
             b_gv_last = tl.load(p_gv_last, mask=(i_v * BV + tl.arange(0, BV) < V), other=0.).to(tl.float32)
             b_gv = tl.load(p_gv, mask=m_t[:, None] & (o_v < V)[None, :], other=0.0).to(tl.float32)
-            b_h *= tl.where(active, exp2(b_gv_last), 1.0)[None, :]
+            b_h *= exp2(b_gv_last)[None, :]
             b_v = b_v * exp2(b_gv_last[None, :] - b_gv)
 
         b_h += tl.dot(b_k, b_v)
 
     if STORE_FINAL_STATE:
+        ht_base = (i_nh * K * V).to(tl.int64)
         if STATE_V_FIRST:
-            p_ht = ht + i_nh * K * V + o_v[:, None] * K + o_k[None, :]
+            p_ht = ht + ht_base + o_v[:, None].to(tl.int64) * K + o_k[None, :]
             tl.store(p_ht, tl.trans(b_h).to(p_ht.dtype.element_ty), mask=(o_v[:, None] < V) & (o_k[None, :] < K))
         else:
-            p_ht = ht + i_nh * K * V + o_k[:, None] * V + o_v[None, :]
+            p_ht = ht + ht_base + o_k[:, None].to(tl.int64) * V + o_v[None, :]
             tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=(o_k[:, None] < K) & (o_v[None, :] < V))
 
 
 @triton.heuristics({
     'STORE_INITIAL_STATE_GRADIENT': lambda args: args['dh0'] is not None,
     'USE_FINAL_STATE_GRADIENT': lambda args: args['dht'] is not None,
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.jit(do_not_specialize=['T', 'K_OFFSET', 'V_OFFSET', 'NH_OFFSET'])
 def chunk_bwd_kernel_dh_npu(
     q, g, g_gamma, gk, gv, do, dh, dht, dh0,
-    cu_seqlens, split_offsets, scale, T,
+    scale, T,
     HQ: tl.constexpr, H: tl.constexpr, K: tl.constexpr, V: tl.constexpr,
     BT: tl.constexpr, BS: tl.constexpr, BK: tl.constexpr, BV: tl.constexpr, NT: tl.constexpr, NG: tl.constexpr,
     USE_G: tl.constexpr, USE_G_GAMMA: tl.constexpr, USE_GK: tl.constexpr, USE_GV: tl.constexpr,
     STORE_INITIAL_STATE_GRADIENT: tl.constexpr, USE_FINAL_STATE_GRADIENT: tl.constexpr,
-    IS_VARLEN: tl.constexpr, STATE_V_FIRST: tl.constexpr,
+    STATE_V_FIRST: tl.constexpr,
     K_OFFSET, V_OFFSET, NH_OFFSET,
 ):
     i_k = tl.program_id(0) + K_OFFSET
@@ -188,15 +162,8 @@ def chunk_bwd_kernel_dh_npu(
     i_nh = tl.program_id(2).to(tl.int64) + NH_OFFSET
     i_n, i_hq = i_nh // HQ, i_nh % HQ
     i_h = i_hq // NG
-    if IS_VARLEN:
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
-        T = eos - bos
-        NT_SEQ = tl.cdiv(T, BT)
-        boh = tl.load(split_offsets + i_n).to(tl.int64)
-    else:
-        bos, eos = i_n * T, i_n * T + T
-        NT_SEQ = NT
-        boh = i_n * tl.cdiv(T, BS)
+    bos = (i_n * T).to(tl.int64)
+    boh = (i_n * tl.cdiv(T, BS)).to(tl.int64)
 
     if USE_G_GAMMA:
         b_gamma = tl.load(g_gamma + i_h)
@@ -206,73 +173,75 @@ def chunk_bwd_kernel_dh_npu(
     o_k = i_k * BK + tl.arange(0, BK)
     o_v = i_v * BV + tl.arange(0, BV)
     if USE_FINAL_STATE_GRADIENT:
+        dht_base = (i_nh * K * V).to(tl.int64)
         if STATE_V_FIRST:
-            p_dht = dht + i_nh * K * V + o_v[:, None] * K + o_k[None, :]
+            p_dht = dht + dht_base + o_v[:, None].to(tl.int64) * K + o_k[None, :]
             b_dh += tl.trans(tl.load(p_dht, mask=(o_v[:, None] < V) & (o_k[None, :] < K), other=0.0)).to(tl.float32)
         else:
-            p_dht = dht + i_nh * K * V + o_k[:, None] * V + o_v[None, :]
+            p_dht = dht + dht_base + o_k[:, None].to(tl.int64) * V + o_v[None, :]
             b_dh += tl.load(p_dht, mask=(o_k[:, None] < K) & (o_v[None, :] < V), other=0.0).to(tl.float32)
 
     for step in tl.static_range(NT):
         i_t = NT - 1 - step
-        active = i_t < NT_SEQ
         i_s = i_t // (BS // BT)
-        o_dh = ((boh + i_s) * H + i_h).to(tl.int64) * K * V
+        o_dh = ((boh + i_s.to(tl.int64)) * H + i_h).to(tl.int64) * K * V
         if STATE_V_FIRST:
-            p_dh = dh + o_dh + o_v[:, None] * K + o_k[None, :]
-            m_dh = (o_v[:, None] < V) & (o_k[None, :] < K) & active
+            p_dh = dh + o_dh + o_v[:, None].to(tl.int64) * K + o_k[None, :]
+            m_dh = (o_v[:, None] < V) & (o_k[None, :] < K)
         else:
-            p_dh = dh + o_dh + o_k[:, None] * V + o_v[None, :]
-            m_dh = (o_k[:, None] < K) & (o_v[None, :] < V) & active
+            p_dh = dh + o_dh + o_k[:, None].to(tl.int64) * V + o_v[None, :]
+            m_dh = (o_k[:, None] < K) & (o_v[None, :] < V)
 
         if i_t % (BS // BT) == 0:
             tl.store(p_dh, (tl.trans(b_dh) if STATE_V_FIRST else b_dh).to(p_dh.dtype.element_ty), mask=m_dh)
 
         last_idx = min(i_t * BT + BT, T) - 1
-        last_idx = max(last_idx, 0)
-        o_t = i_t * BT + tl.arange(0, BT)
-        m_t = (o_t < T) & active
-        p_q = q + (bos * HQ + i_hq) * K + o_k[:, None] + o_t[None, :] * (HQ * K)
-        p_do = do + (bos * HQ + i_hq) * V + o_t[:, None] * (HQ * V) + o_v[None, :]
+        o_t = (i_t * BT + tl.arange(0, BT)).to(tl.int64)
+        m_t = o_t < T
+        qv_base = (bos * HQ + i_hq).to(tl.int64)
+        p_q = q + qv_base * K + o_k[:, None] + o_t[None, :] * (HQ * K)
+        p_do = do + qv_base * V + o_t[:, None] * (HQ * V) + o_v[None, :]
         b_q = tl.load(p_q, mask=(o_k[:, None] < K) & m_t[None, :], other=0.0).to(tl.float32) * scale
         b_do = tl.load(p_do, mask=m_t[:, None] & (o_v < V)[None, :], other=0.0).to(tl.float32)
 
         if USE_G:
-            p_g = g + (bos + i_t * BT + tl.arange(0, BT)) * H + i_h
-            b_g_last = tl.load(g + (bos + last_idx) * H + i_h).to(tl.float32)
-            b_g = tl.load(p_g, mask=(i_t * BT + tl.arange(0, BT) < T) & active, other=0.).to(tl.float32)
+            p_g = g + bos * H + o_t * H + i_h
+            b_g_last = tl.load(g + bos * H + last_idx.to(tl.int64) * H + i_h).to(tl.float32)
+            b_g = tl.load(p_g, mask=m_t, other=0.).to(tl.float32)
             b_q = b_q * exp2(b_g)[None, :]
-            b_dh *= tl.where(active, exp2(b_g_last), 1.0)
+            b_dh *= exp2(b_g_last)
 
         if USE_G_GAMMA:
-            b_g_last = b_gamma * min(BT, max(T - i_t * BT, 0))
+            b_g_last = b_gamma * min(BT, T - i_t * BT)
             b_q = b_q * exp2(b_g)[None, :]
-            b_dh *= tl.where(active, exp2(b_g_last), 1.0)
+            b_dh *= exp2(b_g_last)
 
         if USE_GK:
-            p_gk = gk + (bos * H + i_h) * K + o_k[:, None] + o_t[None, :] * (H * K)
-            p_gk_last = gk + (bos + last_idx) * H * K + i_h * K + i_k * BK + tl.arange(0, BK)
+            kv_base = (bos * H + i_h).to(tl.int64) * K
+            p_gk = gk + kv_base + o_k[:, None] + o_t[None, :] * (H * K)
+            p_gk_last = gk + (bos + last_idx.to(tl.int64)) * (H * K) + i_h * K + i_k * BK + tl.arange(0, BK)
             b_gk = tl.load(p_gk, mask=(o_k[:, None] < K) & m_t[None, :], other=0.0).to(tl.float32)
             b_gk_last = tl.load(p_gk_last, mask=(i_k * BK + tl.arange(0, BK) < K), other=0.).to(tl.float32)
             b_q = b_q * exp2(b_gk)
-            b_dh *= tl.where(active, exp2(b_gk_last), 1.0)[:, None]
+            b_dh *= exp2(b_gk_last)[:, None]
 
         if USE_GV:
-            p_gv = gv + (bos * H + i_h) * V + o_t[:, None] * (H * V) + o_v[None, :]
-            p_gv_last = gv + (bos + last_idx) * H * V + i_h * V + i_v * BV + tl.arange(0, BV)
+            p_gv = gv + (bos * H + i_h).to(tl.int64) * V + o_t[:, None] * (H * V) + o_v[None, :]
+            p_gv_last = gv + (bos + last_idx.to(tl.int64)) * (H * V) + i_h * V + i_v * BV + tl.arange(0, BV)
             b_gv = tl.load(p_gv, mask=m_t[:, None] & (o_v < V)[None, :], other=0.0).to(tl.float32)
             b_gv_last = tl.load(p_gv_last, mask=(i_v * BV + tl.arange(0, BV) < V), other=0.).to(tl.float32)
             b_do = b_do * exp2(b_gv)
-            b_dh *= tl.where(active, exp2(b_gv_last), 1.0)[None, :]
+            b_dh *= exp2(b_gv_last)[None, :]
 
         b_dh += tl.dot(b_q, b_do)
 
     if STORE_INITIAL_STATE_GRADIENT:
+        dh0_base = (i_nh * K * V).to(tl.int64)
         if STATE_V_FIRST:
-            p_dh0 = dh0 + i_nh * K * V + o_v[:, None] * K + o_k[None, :]
+            p_dh0 = dh0 + dh0_base + o_v[:, None].to(tl.int64) * K + o_k[None, :]
             tl.store(p_dh0, tl.trans(b_dh).to(p_dh0.dtype.element_ty), mask=(o_v[:, None] < V) & (o_k[None, :] < K))
         else:
-            p_dh0 = dh0 + i_nh * K * V + o_k[:, None] * V + o_v[None, :]
+            p_dh0 = dh0 + dh0_base + o_k[:, None].to(tl.int64) * V + o_v[None, :]
             tl.store(p_dh0, b_dh.to(p_dh0.dtype.element_ty), mask=(o_k[:, None] < K) & (o_v[None, :] < V))
 
 
@@ -300,18 +269,16 @@ def chunk_fwd_h_npu(
     BT = chunk_size
     BS = BT if split_size is None else split_size
     assert BS % BT == 0, f"The `split_size` (got {BS}) must be a multiple of `chunk_size` {BT}"
-    assert K <= 256 and V <= 256, "NPU chunk_h currently supports K,V <= 256"
 
-    # Ascend fused IS_VARLEN path can leave partial NaNs in `ht` while `h` stays
-    # correct. Route each packed sequence through the validated equal-length path.
+    # packed varlen: run the equal-length kernel per sequence for complete state stores
     if cu_seqlens is not None:
         assert B == 1, "NPU varlen chunk_h expects packed batch B=1"
         split_offsets = prepare_chunk_offsets(cu_seqlens, BS)
         N = len(cu_seqlens) - 1
         NS = int(split_offsets[-1].item())
         state_shape = (V, K) if state_v_first else (K, V)
-        # zeros: tests/conftest poisons empty*() with NaN; partial stores must not leak.
-        h = k.new_zeros(B, NS, H, *state_shape, dtype=torch.float)
+        # zero-init: kernels may only partially store each tile
+        h = k.new_zeros(B, NS, H, *state_shape, dtype=torch.float if states_in_fp32 else k.dtype)
         ht = k.new_zeros(N, H, *state_shape, dtype=torch.float) if output_final_state else None
         for i_n in range(N):
             bos = int(cu_seqlens[i_n].item())
@@ -340,21 +307,20 @@ def chunk_fwd_h_npu(
                 ht[i_n].copy_(ht_i[0])
         return h, ht
 
-    N, NS, split_offsets = B, triton.cdiv(T, BS), None
-    NT = _max_nt(T, BT, None)
+    N, NS = B, triton.cdiv(T, BS)
+    NT = triton.cdiv(T, BT)
     state_shape = (V, K) if state_v_first else (K, V)
-    # zeros: tests/conftest poisons empty*() with NaN; partial stores must not leak.
-    h = k.new_zeros(B, NS, H, *state_shape, dtype=torch.float)
+    # zero-init: kernels may only partially store each tile
+    h = k.new_zeros(B, NS, H, *state_shape, dtype=torch.float if states_in_fp32 else k.dtype)
     ht = k.new_zeros(N, H, *state_shape, dtype=torch.float) if output_final_state else None
 
-    BK, BV = _BK, _BV
-    nk, nv, nh = triton.cdiv(K, BK), triton.cdiv(V, BV), N * H
-    _launch_kv_nh(
+    BK, BV = _chunk_h_tile_size(K, V)
+    launch_grid_chunked(
         chunk_fwd_kernel_h_npu,
-        nk=nk, nv=nv, nh=nh,
+        (triton.cdiv(K, BK), triton.cdiv(V, BV), N * H),
+        offset_keys=('K_OFFSET', 'V_OFFSET', 'NH_OFFSET'),
         kernel_kwargs=dict(
-            k=k, v=v, h=h, g=g, g_gamma=g_gamma, gk=gk, gv=gv, h0=h0, ht=ht,
-            cu_seqlens=None, split_offsets=None, T=T,
+            k=k, v=v, h=h, g=g, g_gamma=g_gamma, gk=gk, gv=gv, h0=h0, ht=ht, T=T,
             H=H, K=K, V=V, BT=BT, BS=BS, BK=BK, BV=BV, NT=NT,
             USE_G=g is not None, USE_G_GAMMA=g_gamma is not None,
             USE_GK=gk is not None, USE_GV=gv is not None,
@@ -389,15 +355,15 @@ def chunk_bwd_dh_npu(
     BT = chunk_size
     BS = BT if split_size is None else split_size
     assert BS % BT == 0, f"The `split_size` (got {BS}) must be a multiple of `chunk_size` {BT}"
-    assert K <= 256 and V <= 256, "NPU chunk_h currently supports K,V <= 256"
 
+    # packed varlen: run the equal-length kernel per sequence for complete state stores
     if cu_seqlens is not None:
         assert B == 1, "NPU varlen chunk_bwd_dh expects packed batch B=1"
         split_offsets = prepare_chunk_offsets(cu_seqlens, BS)
         N = len(cu_seqlens) - 1
         NS = int(split_offsets[-1].item())
         state_shape = (V, K) if state_v_first else (K, V)
-        dh = k.new_zeros(B, NS, HQ, *state_shape, dtype=torch.float)
+        dh = k.new_zeros(B, NS, HQ, *state_shape, dtype=torch.float if states_in_fp32 else k.dtype)
         dh0 = torch.zeros_like(h0, dtype=torch.float) if h0 is not None else None
         for i_n in range(N):
             bos = int(cu_seqlens[i_n].item())
@@ -429,22 +395,22 @@ def chunk_bwd_dh_npu(
                 dh0[i_n].copy_(dh0_i[0])
         return dh, dh0
 
-    N, NS, split_offsets = B, triton.cdiv(T, BS), None
+    N, NS = B, triton.cdiv(T, BS)
     NG = HQ // H
-    NT = _max_nt(T, BT, None)
+    NT = triton.cdiv(T, BT)
 
     state_shape = (V, K) if state_v_first else (K, V)
-    dh = k.new_zeros(B, NS, HQ, *state_shape, dtype=torch.float)
+    dh = k.new_zeros(B, NS, HQ, *state_shape, dtype=torch.float if states_in_fp32 else k.dtype)
     dh0 = torch.zeros_like(h0, dtype=torch.float) if h0 is not None else None
 
-    BK, BV = _BK, _BV
-    nk, nv, nh = triton.cdiv(K, BK), triton.cdiv(V, BV), N * HQ
-    _launch_kv_nh(
+    BK, BV = _chunk_h_tile_size(K, V)
+    launch_grid_chunked(
         chunk_bwd_kernel_dh_npu,
-        nk=nk, nv=nv, nh=nh,
+        (triton.cdiv(K, BK), triton.cdiv(V, BV), N * HQ),
+        offset_keys=('K_OFFSET', 'V_OFFSET', 'NH_OFFSET'),
         kernel_kwargs=dict(
             q=q, g=g, g_gamma=g_gamma, gk=gk, gv=gv, do=do, dh=dh, dht=dht, dh0=dh0,
-            cu_seqlens=None, split_offsets=None, scale=scale, T=T,
+            scale=scale, T=T,
             HQ=HQ, H=H, K=K, V=V, BT=BT, BS=BS, BK=BK, BV=BV, NT=NT, NG=NG,
             USE_G=g is not None, USE_G_GAMMA=g_gamma is not None,
             USE_GK=gk is not None, USE_GV=gv is not None,

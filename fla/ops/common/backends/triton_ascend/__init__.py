@@ -39,8 +39,8 @@ class TritonAscendCommonBackend(BaseBackend):
 
     def chunk_fwd_h_verifier(self, k, v, *args, **kwargs):
         K, V = k.shape[-1], v.shape[-1]
-        if K > 256 or V > 256:
-            return False, f'NPU chunk_fwd_h supports K,V<=256, got K={K}, V={V}'
+        if K > 512 or V > 512:
+            return False, f'NPU chunk_fwd_h supports K,V<=512, got K={K}, V={V}'
         return True, None
 
     def chunk_fwd_h(self, *args, **kwargs):
@@ -49,8 +49,8 @@ class TritonAscendCommonBackend(BaseBackend):
 
     def chunk_bwd_dh_verifier(self, q, k, v, *args, **kwargs):
         K, V = k.shape[-1], v.shape[-1]
-        if K > 256 or V > 256:
-            return False, f'NPU chunk_bwd_dh supports K,V<=256, got K={K}, V={V}'
+        if K > 512 or V > 512:
+            return False, f'NPU chunk_bwd_dh supports K,V<=512, got K={K}, V={V}'
         return True, None
 
     def chunk_bwd_dh(self, *args, **kwargs):

@@ -12,66 +12,28 @@ from __future__ import annotations
 import torch
 import triton
 import triton.language as tl
-import triton.runtime.driver as driver
 
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp2
 from fla.utils import input_guard
 from fla.utils.ascend_ub_manager import (
-    ASCEND_MAX_GRID_DIM,
     compute_row_tile_block_size,
-    max_grid_axis_chunks,
+    get_npu_properties,
+    launch_grid_chunked,
 )
 
 _BC = 16
-_LAUNCH_BLOCK_BUDGET = 4096
 _SAFETY_MARGIN = 0.80
-_FALLBACK_BK = 16
 _FALLBACK = 16
 _MAX_TILE = 64
-
-
-def _npu_sync() -> None:
-    if hasattr(torch, 'npu') and torch.npu.is_available():
-        torch.npu.synchronize()
 
 
 def _get_bk(K: int) -> int:
     return compute_row_tile_block_size(
         _BC, K, 6.0, tiling_row=False, safety_margin=_SAFETY_MARGIN,
-        fallback=_FALLBACK_BK, min_block=16,
+        fallback=_FALLBACK, min_block=16,
         max_block=min(64, max(16, triton.next_power_of_2(K))),
     )
-
-
-def get_npu_properties():
-    device = torch.npu.current_device()
-    return driver.active.utils.get_device_properties(device)
-
-
-def _launch_3d_nt_nc_bh(kernel, *, nt: int, nc: int, bh: int, kernel_kwargs: dict) -> None:
-    budget = _LAUNCH_BLOCK_BUDGET
-    chunk_indices = kernel_kwargs.get('chunk_indices')
-    cu_seqlens = kernel_kwargs.get('cu_seqlens')
-    nt_step = nt if nt * nc * bh <= budget else max(1, budget // max(nc * bh, 1))
-    for nt_off in range(0, nt, nt_step):
-        nt_len = min(nt_step, nt - nt_off)
-        if cu_seqlens is not None and chunk_indices is not None:
-            kernel_kwargs['chunk_indices'] = chunk_indices[nt_off:nt_off + nt_len]
-            kernel_kwargs['NT_OFFSET'] = 0
-        else:
-            kernel_kwargs['NT_OFFSET'] = nt_off
-        nc_budget = max(1, budget // max(nt_len * bh, 1))
-        nc_step = min(nc_budget, max_grid_axis_chunks(nc, nt_len * bh, max_grid=ASCEND_MAX_GRID_DIM))
-        for nc_off in range(0, nc, nc_step):
-            nc_len = min(nc_step, nc - nc_off)
-            kernel_kwargs['NC_OFFSET'] = nc_off
-            bh_budget = max(1, budget // max(nt_len * nc_len, 1))
-            bh_step = min(bh_budget, max_grid_axis_chunks(bh, nt_len * nc_len, max_grid=ASCEND_MAX_GRID_DIM))
-            for bh_off in range(0, bh, bh_step):
-                bh_len = min(bh_step, bh - bh_off)
-                kernel_kwargs['BH_OFFSET'] = bh_off
-                kernel[(nt_len, nc_len, bh_len)](**kernel_kwargs)
 
 
 @triton.heuristics({'IS_VARLEN': lambda args: args['cu_seqlens'] is not None})
@@ -168,7 +130,7 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra_npu(
     b_q = tl.load(q_ptr + o_c[:, None] * (H * K) + o_k[None, :], mask=m_qk, other=0.0).to(tl.float32)
     b_g = tl.load(g_ptr + o_c[:, None] * (H * K) + o_k[None, :], mask=m_qk, other=0.0).to(tl.float32)
 
-    # Diagonal lower-tri via masked static loop (no continue).
+    # intra diagonal: fixed tl.static_range(BC) with a per-j active mask
     max_j = min(BC, T - i_t * BT - i_i * BC)
     for j in tl.static_range(BC):
         active = j < max_j
@@ -184,13 +146,114 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra_npu(
         tl.store(A_ptr + o_A + j, b_Aj, mask=m_A & active)
 
     tl.debug_barrier()
-    # Zero strict upper triangle of the BC×BC diagonal block (keep causal i>=j).
+    # zero entries above the causal diagonal in the BC×BC block
     b_zero = tl.zeros([BC, BC], dtype=tl.float32)
     tl.store(
         A_ptr + o_A[:, None] + o_i,
         b_zero,
         mask=m_A[:, None] & (o_i[:, None] < o_i),
     )
+
+
+@triton.heuristics({'IS_VARLEN': lambda args: args['cu_seqlens'] is not None})
+@triton.jit(do_not_specialize=['T', 'NK_OFFSET', 'NTNC_OFFSET', 'BH_OFFSET'])
+def chunk_gla_fwd_A_kernel_intra_sub_intra_split_npu(
+    q, k, g, A, cu_seqlens, chunk_indices, scale, T,
+    B: tl.constexpr, H: tl.constexpr, K: tl.constexpr,
+    BT: tl.constexpr, BC: tl.constexpr, BK: tl.constexpr, NC: tl.constexpr,
+    IS_VARLEN: tl.constexpr, NK_OFFSET, NTNC_OFFSET, BH_OFFSET,
+):
+    i_k = tl.program_id(0) + NK_OFFSET
+    i_tc = tl.program_id(1) + NTNC_OFFSET
+    i_bh = tl.program_id(2).to(tl.int64) + BH_OFFSET
+    i_b, i_h = i_bh // H, i_bh % H
+    i_t, i_i = (i_tc // NC).to(tl.int64), i_tc % NC
+    i_j = i_i
+    if IS_VARLEN:
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        all = T
+        T = eos - bos
+    else:
+        bos, eos = i_b * T, i_b * T + T
+        all = B * T
+
+    if i_t * BT + i_i * BC >= T:
+        return
+
+    o_i = tl.arange(0, BC)
+    o_k = i_k * BK + tl.arange(0, BK)
+    o_A = (i_t * BT + i_i * BC + tl.arange(0, BC)) * H * BC
+    m_k = o_k < K
+    m_A = (i_t * BT + i_i * BC + tl.arange(0, BC)) < T
+
+    q_ptr = q + (bos * H + i_h) * K
+    k_ptr = k + (bos * H + i_h) * K
+    g_ptr = g + (bos * H + i_h) * K
+    A_ptr = A + ((i_k * all + bos) * H + i_h) * BC
+
+    o_c = i_t * BT + i_i * BC + tl.arange(0, BC)
+    m_qk = m_A[:, None] & m_k[None, :]
+    b_q = tl.load(q_ptr + o_c[:, None] * (H * K) + o_k[None, :], mask=m_qk, other=0.0).to(tl.float32)
+    b_g = tl.load(g_ptr + o_c[:, None] * (H * K) + o_k[None, :], mask=m_qk, other=0.0).to(tl.float32)
+
+    max_j = min(BC, T - i_t * BT - i_i * BC)
+    for j in tl.static_range(BC):
+        active = j < max_j
+        b_k = tl.load(
+            k_ptr + (i_t * BT + i_j * BC + j) * H * K + o_k,
+            mask=m_k & active, other=0,
+        ).to(tl.float32)
+        b_gk = tl.load(
+            g_ptr + (i_t * BT + i_j * BC + j) * H * K + o_k,
+            mask=m_k & active, other=0,
+        ).to(tl.float32)
+        b_Aj = tl.sum(b_q * b_k[None, :] * exp2(b_g - b_gk[None, :]), 1) * scale
+        tl.store(A_ptr + o_A + j, b_Aj, mask=m_A & active)
+
+    tl.debug_barrier()
+    b_zero = tl.zeros([BC, BC], dtype=tl.float32)
+    tl.store(
+        A_ptr + o_A[:, None] + o_i,
+        b_zero,
+        mask=m_A[:, None] & (o_i[:, None] < o_i),
+    )
+
+
+@triton.heuristics({'IS_VARLEN': lambda args: args['cu_seqlens'] is not None})
+@triton.jit(do_not_specialize=['T', 'NT_OFFSET', 'NC_OFFSET', 'BH_OFFSET'])
+def chunk_gla_fwd_A_kernel_intra_sub_intra_merge_npu(
+    A, A2, cu_seqlens, chunk_indices, T,
+    B: tl.constexpr, H: tl.constexpr, BT: tl.constexpr, BC: tl.constexpr, NK: tl.constexpr,
+    IS_VARLEN: tl.constexpr, NT_OFFSET, NC_OFFSET, BH_OFFSET,
+):
+    i_t = tl.program_id(0).to(tl.int64) + NT_OFFSET
+    i_c = tl.program_id(1) + NC_OFFSET
+    i_bh = tl.program_id(2).to(tl.int64) + BH_OFFSET
+    i_b, i_h = i_bh // H, i_bh % H
+    if IS_VARLEN:
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        all = T
+        T = eos - bos
+    else:
+        bos, eos = i_b * T, i_b * T + T
+        all = B * T
+
+    if i_t * BT + i_c * BC >= T:
+        return
+
+    b_A = tl.zeros([BC, BC], dtype=tl.float32)
+    o_c = i_t * BT + i_c * BC + tl.arange(0, BC)
+    o_i = tl.arange(0, BC)
+    m_c = o_c < T
+    m_A = m_c[:, None] & (o_i[None, :] < BC)
+    m_A2 = m_c[:, None] & ((i_c * BC + o_i)[None, :] < BT)
+    for i_k in range(0, NK):
+        p_A = A + (i_k * all + bos) * H * BC + i_h * BC + o_c[:, None] * (H * BC) + o_i[None, :]
+        b_A += tl.load(p_A, mask=m_A, other=0.0).to(tl.float32)
+    p_A2 = A2 + (bos * H + i_h) * BT + o_c[:, None] * (H * BT) + (i_c * BC + o_i)[None, :]
+    tl.store(p_A2, b_A.to(A2.dtype.element_ty), mask=m_A2)
 
 
 @input_guard
@@ -205,41 +268,62 @@ def chunk_gla_fwd_intra_gk_npu(
 ):
     B, T, H, K = k.shape
     BT = chunk_size
-    assert K <= 256, "NPU GLA intra currently supports K <= 256"
 
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     BC = min(_BC, BT)
     NC = triton.cdiv(BT, BC)
-    # Inter tiles K; diag mirrors CUDA K<=256 path: load full [BC, K] at once.
     BK_inter = _get_bk(K)
-    BK_diag = max(triton.next_power_of_2(K), 16)
 
-    # Partial writes (lower-tri + diag); zeros avoid dirty upper-tri NaNs.
     A = q.new_zeros(B, T, H, BT, dtype=torch.float)
     base = dict(
         q=q, k=k, g=g, A=A, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices,
         scale=scale, T=T, H=H, K=K, BT=BT, BC=BC,
         NT_OFFSET=0, NC_OFFSET=0, BH_OFFSET=0,
     )
-    _launch_3d_nt_nc_bh(
+    launch_grid_chunked(
         chunk_gla_fwd_A_kernel_intra_sub_inter_npu,
-        nt=NT, nc=NC * NC, bh=B * H,
+        (NT, NC * NC, B * H),
+        offset_keys=('NT_OFFSET', 'NC_OFFSET', 'BH_OFFSET'),
         kernel_kwargs={**base, 'BK': BK_inter, 'NC': NC},
     )
-    _launch_3d_nt_nc_bh(
-        chunk_gla_fwd_A_kernel_intra_sub_intra_npu,
-        nt=NT, nc=NC, bh=B * H,
-        kernel_kwargs={**base, 'BK': BK_diag},
-    )
-    if hasattr(torch, 'npu') and torch.npu.is_available():
-        torch.npu.synchronize()
+    if K <= 256:
+        BK_diag = max(triton.next_power_of_2(K), 16)
+        launch_grid_chunked(
+            chunk_gla_fwd_A_kernel_intra_sub_intra_npu,
+            (NT, NC, B * H),
+            offset_keys=('NT_OFFSET', 'NC_OFFSET', 'BH_OFFSET'),
+            kernel_kwargs={**base, 'BK': BK_diag},
+        )
+    else:
+        BK = min(128, triton.next_power_of_2(K))
+        NK = triton.cdiv(K, BK)
+        A_intra = q.new_zeros(NK, B, T, H, BC, dtype=torch.float)
+        split_base = dict(
+            q=q, k=k, g=g, A=A_intra, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices,
+            scale=scale, T=T, B=B, H=H, K=K, BT=BT, BC=BC, BK=BK, NC=NC,
+            NK_OFFSET=0, NTNC_OFFSET=0, BH_OFFSET=0,
+        )
+        launch_grid_chunked(
+            chunk_gla_fwd_A_kernel_intra_sub_intra_split_npu,
+            (NK, NT * NC, B * H),
+            offset_keys=('NK_OFFSET', 'NTNC_OFFSET', 'BH_OFFSET'),
+            quanta=(1, NC, 1),
+            kernel_kwargs=split_base,
+        )
+        merge_base = dict(
+            A=A_intra, A2=A, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices,
+            T=T, B=B, H=H, BT=BT, BC=BC, NK=NK,
+            NT_OFFSET=0, NC_OFFSET=0, BH_OFFSET=0,
+        )
+        launch_grid_chunked(
+            chunk_gla_fwd_A_kernel_intra_sub_intra_merge_npu,
+            (NT, NC, B * H),
+            offset_keys=('NT_OFFSET', 'NC_OFFSET', 'BH_OFFSET'),
+            kernel_kwargs=merge_base,
+        )
     return A
-
-# ---------------------------------------------------------------------------
-# Forward: o  (1D core-grid + host-pick BK; pattern from common/chunk_o.py)
-# ---------------------------------------------------------------------------
 
 
 _FWD_O_BV = 128
@@ -247,14 +331,14 @@ _FWD_O_MEM_MULT = 6.0
 
 
 def _get_fwd_o_bk(K: int) -> int:
-    """Host-pick K tile for fwd-o; avoids Ascend parallel autotune flake in pytest."""
+    """Host-pick K tile for fwd-o from UB budget."""
     return compute_row_tile_block_size(
         64,
         K,
         _FWD_O_MEM_MULT,
         tiling_row=False,
         safety_margin=_SAFETY_MARGIN,
-        fallback=_FALLBACK_BK,
+        fallback=_FALLBACK,
         min_block=32,
         max_block=min(128, triton.next_power_of_2(K)),
     )
@@ -345,7 +429,6 @@ def chunk_gla_fwd_o_gk_npu(
 ):
     B, T, H, K, HV, V = *q.shape, v.shape[2], v.shape[-1]
     BT = chunk_size
-    assert K <= 256 and V <= 256, "NPU GLA o currently supports K,V <= 256"
 
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
@@ -385,10 +468,6 @@ def chunk_gla_fwd_o_gk_npu(
     )
     return o
 
-# ---------------------------------------------------------------------------
-# Backward
-# ---------------------------------------------------------------------------
-
 
 def _bwd_pick_bk(K: int) -> int:
     return compute_row_tile_block_size(
@@ -405,44 +484,6 @@ def _bwd_pick_bv(V: int) -> int:
         max_block=min(_MAX_TILE, max(16, triton.next_power_of_2(V))),
     )
 
-
-def _launch_2d(kernel, *, nt: int, bh: int, kernel_kwargs: dict) -> None:
-    budget = _LAUNCH_BLOCK_BUDGET
-    nt_step = nt if nt * bh <= budget else max(1, budget // max(bh, 1))
-    for nt_off in range(0, nt, nt_step):
-        nt_len = min(nt_step, nt - nt_off)
-        kernel_kwargs['NT_OFFSET'] = nt_off
-        bh_budget = max(1, budget // max(nt_len, 1))
-        bh_step = min(bh_budget, max_grid_axis_chunks(bh, nt_len, max_grid=ASCEND_MAX_GRID_DIM))
-        for bh_off in range(0, bh, bh_step):
-            bh_len = min(bh_step, bh - bh_off)
-            kernel_kwargs['BH_OFFSET'] = bh_off
-            kernel[(nt_len, bh_len)](**kernel_kwargs)
-
-
-def _launch_3d_na_nt_bh(kernel, *, na: int, nt: int, bh: int, kernel_kwargs: dict) -> None:
-    """3D launch over (axis0, nt, bh). Does not slice chunk_indices (need global i_tg)."""
-    budget = _LAUNCH_BLOCK_BUDGET
-    na_step = na if na * nt * bh <= budget else max(1, budget // max(nt * bh, 1))
-    for a_off in range(0, na, na_step):
-        a_len = min(na_step, na - a_off)
-        kernel_kwargs['A_OFFSET'] = a_off
-        nt_budget = max(1, budget // max(a_len * bh, 1))
-        nt_step = min(nt_budget, max_grid_axis_chunks(nt, a_len * bh, max_grid=ASCEND_MAX_GRID_DIM))
-        for nt_off in range(0, nt, nt_step):
-            nt_len = min(nt_step, nt - nt_off)
-            kernel_kwargs['NT_OFFSET'] = nt_off
-            bh_budget = max(1, budget // max(a_len * nt_len, 1))
-            bh_step = min(bh_budget, max_grid_axis_chunks(bh, a_len * nt_len, max_grid=ASCEND_MAX_GRID_DIM))
-            for bh_off in range(0, bh, bh_step):
-                bh_len = min(bh_step, bh - bh_off)
-                kernel_kwargs['BH_OFFSET'] = bh_off
-                kernel[(a_len, nt_len, bh_len)](**kernel_kwargs)
-
-
-# ---------------------------------------------------------------------------
-# dA
-# ---------------------------------------------------------------------------
 
 @triton.heuristics({'IS_VARLEN': lambda args: args['cu_seqlens'] is not None})
 @triton.jit(do_not_specialize=['T', 'NT_OFFSET', 'BH_OFFSET'])
@@ -506,22 +547,18 @@ def chunk_gla_bwd_dA_npu(
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     BV = _bwd_pick_bv(V)
     dA = v.new_zeros(B, T, H, BT, dtype=torch.float)
-    _launch_2d(
+    launch_grid_chunked(
         chunk_gla_bwd_kernel_dA_npu,
-        nt=NT, bh=B * H,
+        (NT, B * H),
+        offset_keys=('NT_OFFSET', 'BH_OFFSET'),
         kernel_kwargs=dict(
             v=v, do=do, dA=dA, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices,
             scale=scale, T=T, H=H, V=V, BT=BT, BV=BV,
             NT_OFFSET=0, BH_OFFSET=0,
         ),
     )
-    _npu_sync()
     return dA
 
-
-# ---------------------------------------------------------------------------
-# dv
-# ---------------------------------------------------------------------------
 
 @triton.heuristics({'IS_VARLEN': lambda args: args['cu_seqlens'] is not None})
 @triton.jit(do_not_specialize=['T', 'A_OFFSET', 'NT_OFFSET', 'BH_OFFSET'])
@@ -623,9 +660,10 @@ def chunk_gla_bwd_dv_npu(
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     BK, BV = _bwd_pick_bk(K), _bwd_pick_bv(V)
     dv = torch.zeros_like(do)
-    _launch_3d_na_nt_bh(
+    launch_grid_chunked(
         chunk_gla_bwd_kernel_dv_npu,
-        na=triton.cdiv(V, BV), nt=NT, bh=B * H,
+        (triton.cdiv(V, BV), NT, B * H),
+        offset_keys=('A_OFFSET', 'NT_OFFSET', 'BH_OFFSET'),
         kernel_kwargs=dict(
             k=k, g=g, A=A, do=do, dh=dh, dv=dv,
             cu_seqlens=cu_seqlens, chunk_indices=chunk_indices, T=T,
@@ -633,13 +671,8 @@ def chunk_gla_bwd_dv_npu(
             A_OFFSET=0, NT_OFFSET=0, BH_OFFSET=0,
         ),
     )
-    _npu_sync()
     return dv
 
-
-# ---------------------------------------------------------------------------
-# dqk_intra
-# ---------------------------------------------------------------------------
 
 @triton.heuristics({'IS_VARLEN': lambda args: args['cu_seqlens'] is not None})
 @triton.jit(do_not_specialize=['T', 'A_OFFSET', 'NT_OFFSET', 'BH_OFFSET'])
@@ -648,8 +681,6 @@ def chunk_gla_bwd_kernel_intra_npu(
     H: tl.constexpr, K: tl.constexpr, BT: tl.constexpr, BC: tl.constexpr, BK: tl.constexpr, NC: tl.constexpr,
     IS_VARLEN: tl.constexpr, A_OFFSET, NT_OFFSET, BH_OFFSET,
 ):
-    # Mirror CUDA/KDA structure: `if i_i > 0` + `range(0, i_i)` (proven on Ascend).
-    # Do NOT use static_range(NC)+mask gates for inter-subchunk — that path produced NaNs.
     i_kc = tl.program_id(0) + A_OFFSET
     i_t = tl.program_id(1).to(tl.int64) + NT_OFFSET
     i_bh = tl.program_id(2).to(tl.int64) + BH_OFFSET
@@ -702,16 +733,20 @@ def chunk_gla_bwd_kernel_intra_npu(
     o_i = tl.arange(0, BC)
     m_dA = (i_t * BT + i_i * BC + tl.arange(0, BC)) < T
     o_dA = bos * H * BT + (i_t * BT + i_i * BC + tl.arange(0, BC)) * H * BT + i_h * BT + i_i * BC
-    p_kj = k + (bos + i_t * BT + i_i * BC) * H * K + i_h * K + o_k
-    p_gkj = g + (bos + i_t * BT + i_i * BC) * H * K + i_h * K + o_k
-    for j in range(0, min(BC, T - i_t * BT - i_i * BC)):
-        b_dAj = tl.load(dA + o_dA + j, mask=m_dA, other=0).to(tl.float32)
-        b_kj = tl.load(p_kj, mask=m_k, other=0).to(tl.float32)
-        b_gkj = tl.load(p_gkj, mask=m_k, other=0).to(tl.float32)
+    max_j = min(BC, T - i_t * BT - i_i * BC)
+    for j in tl.static_range(BC):
+        active = j < max_j
+        b_dAj = tl.load(dA + o_dA + j, mask=m_dA & active, other=0).to(tl.float32)
+        b_kj = tl.load(
+            k + (bos + i_t * BT + i_i * BC + j) * H * K + i_h * K + o_k,
+            mask=m_k & active, other=0,
+        ).to(tl.float32)
+        b_gkj = tl.load(
+            g + (bos + i_t * BT + i_i * BC + j) * H * K + i_h * K + o_k,
+            mask=m_k & active, other=0,
+        ).to(tl.float32)
         m_i = o_i[:, None] >= j
-        b_dq += tl.where(m_i, b_dAj[:, None] * b_kj[None, :] * exp2(b_g - b_gkj[None, :]), 0.)
-        p_kj += H * K
-        p_gkj += H * K
+        b_dq += tl.where(m_i & active, b_dAj[:, None] * b_kj[None, :] * exp2(b_g - b_gkj[None, :]), 0.)
 
     tl.store(
         dq + (bos * H + i_h) * K + o_c[:, None] * (H * K) + o_k[None, :],
@@ -747,16 +782,19 @@ def chunk_gla_bwd_kernel_intra_npu(
         b_dk *= exp2(b_gn2[None, :] - b_g)
 
     o_dA2 = bos * H * BT + (i_t * BT + i_i * BC) * H * BT + i_h * BT + i_i * BC + tl.arange(0, BC)
-    p_qj = q + (bos + i_t * BT + i_i * BC) * H * K + i_h * K + o_k
-    p_gqj = g + (bos + i_t * BT + i_i * BC) * H * K + i_h * K + o_k
-    for j in range(0, min(BC, T - i_t * BT - i_i * BC)):
-        b_dAj = tl.load(dA + o_dA2 + j * H * BT).to(tl.float32)
-        b_qj = tl.load(p_qj, mask=m_k, other=0).to(tl.float32)
-        b_gqj = tl.load(p_gqj, mask=m_k, other=0).to(tl.float32)
+    for j in tl.static_range(BC):
+        active = j < max_j
+        b_dAj = tl.load(dA + o_dA2 + j * H * BT, mask=active, other=0).to(tl.float32)
+        b_qj = tl.load(
+            q + (bos + i_t * BT + i_i * BC + j) * H * K + i_h * K + o_k,
+            mask=m_k & active, other=0,
+        ).to(tl.float32)
+        b_gqj = tl.load(
+            g + (bos + i_t * BT + i_i * BC + j) * H * K + i_h * K + o_k,
+            mask=m_k & active, other=0,
+        ).to(tl.float32)
         m_i = o_i[:, None] <= j
-        b_dk += tl.where(m_i, b_dAj[:, None] * b_qj[None, :] * exp2(b_gqj[None, :] - b_g), 0.)
-        p_qj += H * K
-        p_gqj += H * K
+        b_dk += tl.where(m_i & active, b_dAj[:, None] * b_qj[None, :] * exp2(b_gqj[None, :] - b_g), 0.)
 
     tl.store(
         dk + (bos * H + i_h) * K + o_c[:, None] * (H * K) + o_k[None, :],
@@ -777,7 +815,7 @@ def chunk_gla_bwd_dqk_intra_npu(
     B, T, H, K = q.shape
     BT = chunk_size
     BC = min(_BC, BT)
-    BK = min(64, triton.next_power_of_2(K))
+    BK = _bwd_pick_bk(K)
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
@@ -785,9 +823,10 @@ def chunk_gla_bwd_dqk_intra_npu(
     NK = triton.cdiv(K, BK)
     dq = torch.zeros_like(q, dtype=torch.float)
     dk = torch.zeros_like(k, dtype=torch.float)
-    _launch_3d_na_nt_bh(
+    launch_grid_chunked(
         chunk_gla_bwd_kernel_intra_npu,
-        na=NK * NC, nt=NT, bh=B * H,
+        (NK * NC, NT, B * H),
+        offset_keys=('A_OFFSET', 'NT_OFFSET', 'BH_OFFSET'),
         kernel_kwargs=dict(
             q=q, k=k, g=g, dA=dA, dq=dq, dk=dk,
             cu_seqlens=cu_seqlens, chunk_indices=chunk_indices, T=T,
@@ -795,13 +834,8 @@ def chunk_gla_bwd_dqk_intra_npu(
             A_OFFSET=0, NT_OFFSET=0, BH_OFFSET=0,
         ),
     )
-    _npu_sync()
     return dq, dk
 
-
-# ---------------------------------------------------------------------------
-# dqkg (inter)
-# ---------------------------------------------------------------------------
 
 @triton.heuristics({'IS_VARLEN': lambda args: args['cu_seqlens'] is not None})
 @triton.jit(do_not_specialize=['T', 'A_OFFSET', 'NT_OFFSET', 'BH_OFFSET'])
@@ -915,9 +949,10 @@ def chunk_gla_bwd_dqkg_npu(
     dg = torch.zeros_like(g)
     dq2 = torch.zeros_like(dq)
     dk2 = torch.zeros_like(dk)
-    _launch_3d_na_nt_bh(
+    launch_grid_chunked(
         chunk_gla_bwd_kernel_inter_npu,
-        na=triton.cdiv(K, BK), nt=NT, bh=B * H,
+        (triton.cdiv(K, BK), NT, B * H),
+        offset_keys=('A_OFFSET', 'NT_OFFSET', 'BH_OFFSET'),
         kernel_kwargs=dict(
             q=q, k=k, v=v, g=g, h=h, do=do, dh=dh, dq=dq, dk=dk,
             dq2=dq2, dk2=dk2, dg=dg,
@@ -926,5 +961,4 @@ def chunk_gla_bwd_dqkg_npu(
             A_OFFSET=0, NT_OFFSET=0, BH_OFFSET=0,
         ),
     )
-    _npu_sync()
     return dq2, dk2, dg

@@ -11,15 +11,15 @@ from __future__ import annotations
 
 from fla.ops.backends import BaseBackend
 
-# Flip per-op after numerical smoke passes. Unready ops fall back to CUDA kernels.
-_READY = {
-    'chunk_gla_fwd_intra_gk': True,
-    'chunk_gla_fwd_o_gk': True,
-    'chunk_gla_bwd_dA': True,
-    'chunk_gla_bwd_dv': True,
-    'chunk_gla_bwd_dqk_intra': True,
-    'chunk_gla_bwd_dqkg': True,
-}
+_MAX_KV = 512
+
+
+def _verify_kv(K: int, V: int | None = None) -> tuple[bool, str | None]:
+    if K > _MAX_KV:
+        return False, f'NPU GLA supports K<={_MAX_KV}, got K={K}'
+    if V is not None and V > _MAX_KV:
+        return False, f'NPU GLA supports V<={_MAX_KV}, got V={V}'
+    return True, None
 
 
 class TritonAscendGLABackend(BaseBackend):
@@ -33,48 +33,43 @@ class TritonAscendGLABackend(BaseBackend):
         from fla.utils import IS_NPU
         return IS_NPU
 
-    def _gate(self, name: str):
-        if not _READY.get(name, False):
-            return False, f'{name} NPU path not ready'
-        return True, None
-
-    def chunk_gla_fwd_intra_gk_verifier(self, *args, **kwargs):
-        return self._gate('chunk_gla_fwd_intra_gk')
+    def chunk_gla_fwd_intra_gk_verifier(self, q, k, *args, **kwargs):
+        return _verify_kv(k.shape[-1])
 
     def chunk_gla_fwd_intra_gk(self, *args, **kwargs):
         from fla.ops.gla.backends.triton_ascend.chunk import chunk_gla_fwd_intra_gk_npu
         return chunk_gla_fwd_intra_gk_npu(*args, **kwargs)
 
-    def chunk_gla_fwd_o_gk_verifier(self, *args, **kwargs):
-        return self._gate('chunk_gla_fwd_o_gk')
+    def chunk_gla_fwd_o_gk_verifier(self, q, v, *args, **kwargs):
+        return _verify_kv(q.shape[-1], v.shape[-1])
 
     def chunk_gla_fwd_o_gk(self, *args, **kwargs):
         from fla.ops.gla.backends.triton_ascend.chunk import chunk_gla_fwd_o_gk_npu
         return chunk_gla_fwd_o_gk_npu(*args, **kwargs)
 
-    def chunk_gla_bwd_dA_verifier(self, *args, **kwargs):
-        return self._gate('chunk_gla_bwd_dA')
+    def chunk_gla_bwd_dA_verifier(self, v, do, *args, **kwargs):
+        return _verify_kv(v.shape[-1])
 
     def chunk_gla_bwd_dA(self, *args, **kwargs):
         from fla.ops.gla.backends.triton_ascend.chunk import chunk_gla_bwd_dA_npu
         return chunk_gla_bwd_dA_npu(*args, **kwargs)
 
-    def chunk_gla_bwd_dv_verifier(self, *args, **kwargs):
-        return self._gate('chunk_gla_bwd_dv')
+    def chunk_gla_bwd_dv_verifier(self, k, g, A, do, dh, *args, **kwargs):
+        return _verify_kv(k.shape[-1], do.shape[-1])
 
     def chunk_gla_bwd_dv(self, *args, **kwargs):
         from fla.ops.gla.backends.triton_ascend.chunk import chunk_gla_bwd_dv_npu
         return chunk_gla_bwd_dv_npu(*args, **kwargs)
 
-    def chunk_gla_bwd_dqk_intra_verifier(self, *args, **kwargs):
-        return self._gate('chunk_gla_bwd_dqk_intra')
+    def chunk_gla_bwd_dqk_intra_verifier(self, q, k, *args, **kwargs):
+        return _verify_kv(k.shape[-1])
 
     def chunk_gla_bwd_dqk_intra(self, *args, **kwargs):
         from fla.ops.gla.backends.triton_ascend.chunk import chunk_gla_bwd_dqk_intra_npu
         return chunk_gla_bwd_dqk_intra_npu(*args, **kwargs)
 
-    def chunk_gla_bwd_dqkg_verifier(self, *args, **kwargs):
-        return self._gate('chunk_gla_bwd_dqkg')
+    def chunk_gla_bwd_dqkg_verifier(self, q, k, v, *args, **kwargs):
+        return _verify_kv(k.shape[-1], v.shape[-1])
 
     def chunk_gla_bwd_dqkg(self, *args, **kwargs):
         from fla.ops.gla.backends.triton_ascend.chunk import chunk_gla_bwd_dqkg_npu

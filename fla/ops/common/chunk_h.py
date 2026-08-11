@@ -9,7 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.common.backends import dispatch
+from fla.ops.backends import dispatch
 from fla.ops.utils import prepare_chunk_offsets
 from fla.ops.utils.op import exp2
 from fla.utils import autotune_cache_kwargs, check_shared_mem
