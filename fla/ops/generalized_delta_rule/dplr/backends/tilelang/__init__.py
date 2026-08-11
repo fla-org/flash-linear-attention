@@ -55,10 +55,10 @@ class DPLRTileLangBackend(BaseBackend):
         cu_seqlens: torch.LongTensor | None = None,
         cu_seqlens_cpu: torch.LongTensor | None = None,
         safe_gate: bool = False,
-        lower_bound: float | None = None,
         chunk_size: int | None = None,
         disable_recompute: bool = False,
         cp_context=None,
+        lower_bound: float | None = None,
         **kwargs,
     ) -> tuple[bool, str | None]:
         if lower_bound is not None and lower_bound >= 0:
@@ -180,10 +180,10 @@ class DPLRTileLangBackend(BaseBackend):
         cu_seqlens: torch.LongTensor | None = None,
         cu_seqlens_cpu: torch.LongTensor | None = None,
         safe_gate: bool = False,
-        lower_bound: float | None = None,
         chunk_size: int | None = None,
         disable_recompute: bool = False,
         cp_context=None,
+        lower_bound: float | None = None,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         from fla.ops.generalized_delta_rule.dplr.backends.tilelang.chunk import (

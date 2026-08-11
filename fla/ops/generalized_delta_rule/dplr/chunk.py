@@ -470,10 +470,10 @@ def chunk_dplr_delta_rule(
     cu_seqlens: torch.LongTensor | None = None,
     cu_seqlens_cpu: torch.LongTensor | None = None,
     safe_gate: bool = False,
-    lower_bound: float | None = None,
     chunk_size: int | None = None,
     disable_recompute: bool = False,
     cp_context: FLACPContext | None = None,
+    lower_bound: float | None = None,
     **kwargs,
 ):
     r"""
@@ -508,10 +508,6 @@ def chunk_dplr_delta_rule(
             Whether the kernel can assume the input gate values `g` are in a safe range.
             When `True`, the kernel can use M=16 TensorCore acceleration.
             The safe range is approximately `[-5, 0)`. Default: `False`.
-        lower_bound (Optional[float]):
-            When set, asserts `lower_bound <= gk < 0` (the caller is responsible for
-            the guarantee). Licenses the same tensor-core scheme as `safe_gate=True`
-            when the bound fits the chunk size. Default: `None`.
         chunk_size (Optional[int]):
             Chunk size for the chunked computation. Default: `None`, which means 16.
         disable_recompute (Optional[bool]):
@@ -520,6 +516,10 @@ def chunk_dplr_delta_rule(
             Context parallel context for distributed training across multiple devices.
             When provided, `initial_state` and `output_final_state` are not supported.
             Default: `None`.
+        lower_bound (Optional[float]):
+            When set, asserts `lower_bound <= gk < 0` (the caller is responsible for
+            the guarantee). Licenses the same tensor-core scheme as `safe_gate=True`
+            when the bound fits the chunk size. Default: `None`.
 
     Returns:
         o (torch.Tensor):
