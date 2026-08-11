@@ -1072,6 +1072,9 @@ def _chunk_dplr_setup_context(ctx, inputs, output):
     if not output_final_state:
         ctx.mark_non_differentiable(final_state)
     ctx.mark_non_differentiable(chunk_indices, chunk_offsets)
+    # the backward consumes grads of o/final_state only and already handles
+    # them being None, so skip the engine's zero materialization of the rest
+    ctx.set_materialize_grads(False)
     ctx.save_for_backward(
         q,
         k,
@@ -1177,6 +1180,10 @@ def _chunk_dplr_ctx_setup_context(ctx, inputs, output):
     if not output_final_state:
         ctx.mark_non_differentiable(final_state)
     ctx.mark_non_differentiable(chunk_indices, chunk_offsets, *wy_ctx)
+    # 13 of the 15 outputs are pure save-for-backward intermediates whose
+    # grads the backward discards; materializing them as zeros would cost
+    # ~3GB of dead fills per step at h4096
+    ctx.set_materialize_grads(False)
     ctx.save_for_backward(
         q,
         k,
