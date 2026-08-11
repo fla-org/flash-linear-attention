@@ -33,10 +33,13 @@ requires_tilelang_route = pytest.mark.skipif(
 )
 
 
-def _cs64_launchable(K: int) -> bool:
+def _cs64_routed(K: int) -> bool:
     if not _CUDA_AVAILABLE:
         return False
     cc_major, cc_minor = get_device_capability(0)
+    if cc_major < 12:
+        # schedulable but measurably slower than Triton on pre-cc12 devices
+        return False
     return chunk64_schedule_or_none(
         K=K, V=K, in_dtype='bfloat16',
         smem_cap=get_device_smem_optin(0), cc=cc_major * 10 + cc_minor,
@@ -91,13 +94,16 @@ def test_chunk_verifier_accepts_fp32_gk():
 
 @requires_cuda
 @pytest.mark.parametrize('K', [64, 128])
-def test_chunk_verifier_accepts_chunk64_on_large_smem_device(monkeypatch, K: int):
+def test_chunk_verifier_rejects_chunk64_on_cc90(monkeypatch, K: int):
+    # every BT=64 schedule launches on sm_90's 232448B optin, but cs64 measured
+    # 0.68-1.05x vs Triton on H800 (rect and varlen, both head dims), so the
+    # route is accepted only on cc12x
     monkeypatch.setattr(dplr_tilelang_backend, 'get_device_smem_optin', lambda idx: 232448)
     monkeypatch.setattr(dplr_tilelang_backend, 'get_device_capability', lambda idx: (9, 0))
     ok, reason = DPLRTileLangBackend().chunk_dplr_delta_rule_verifier(
         *_verifier_inputs(K=K), safe_gate=True, lower_bound=-0.61, chunk_size=64,
     )
-    assert ok and reason is None
+    assert not ok and 'slower than Triton at chunk_size 64' in reason
 
 
 @requires_cuda
@@ -273,8 +279,8 @@ def _assert_route_parity(monkeypatch, run, names):
             *test,
             id="B{}-T{}-H{}-D{}-{}-chunk_size{}-disable_recompute{}-use_state{}".format(*test),
             marks=pytest.mark.skipif(
-                test[5] == 64 and not _cs64_launchable(test[3]),
-                reason='chunk_size 64 has no launchable backward schedule on this device',
+                test[5] == 64 and not _cs64_routed(test[3]),
+                reason='chunk_size 64 is not routed on this device',
             ),
         )
         for test in [
@@ -460,8 +466,8 @@ def test_chunk_tilelang_lower_bound_takes_tilelang_route(monkeypatch, chunk_size
             *test,
             id="B{}-T{}-H{}-D{}-{}-chunk_size{}-{}".format(*test),
             marks=pytest.mark.skipif(
-                test[5] == 64 and not _cs64_launchable(test[3]),
-                reason='chunk_size 64 has no launchable backward schedule on this device',
+                test[5] == 64 and not _cs64_routed(test[3]),
+                reason='chunk_size 64 is not routed on this device',
             ),
         )
         for test in [
@@ -574,8 +580,8 @@ def test_chunk_tilelang_safe_gate_chunk64_stays_on_triton(monkeypatch):
             pin,
             id=f'chunk_size{chunk_size}-pin{pin}',
             marks=pytest.mark.skipif(
-                chunk_size == 64 and not _cs64_launchable(64),
-                reason='chunk_size 64 has no launchable backward schedule on this device',
+                chunk_size == 64 and not _cs64_routed(64),
+                reason='chunk_size 64 is not routed on this device',
             ),
         )
         for chunk_size, pin in [(16, -5.0), (32, -5.0), (64, -2.0), (64, -0.61)]
@@ -732,8 +738,8 @@ _NAIVE_PARITY_NAMES = ('o', 'ht', 'dq', 'dk', 'dv', 'da', 'db', 'dgk', 'dh0')
             *test,
             id="T{}-D{}-{}-chunk_size{}-{}".format(*test),
             marks=pytest.mark.skipif(
-                test[3] == 64 and not _cs64_launchable(test[1]),
-                reason='chunk_size 64 has no launchable backward schedule on this device',
+                test[3] == 64 and not _cs64_routed(test[1]),
+                reason='chunk_size 64 is not routed on this device',
             ),
         )
         for test in [

@@ -126,6 +126,15 @@ class DPLRTileLangBackend(BaseBackend):
                     f"chunk_size 64 with head dim {K} on a device with {smem_cap}B "
                     "shared memory per block; fall back to Triton"
                 )
+            if cc_major < 12:
+                # measured 0.68-1.05x vs Triton on sm_90 (H800, rect and
+                # varlen, both head dims): the BT=64 wy/wu UT-transform
+                # stages are latency-bound there, and the fused h+o pass
+                # does not amortize at twice the chunk serial length
+                return False, (
+                    "TileLang backend is slower than Triton at chunk_size 64 "
+                    f"on compute capability {cc_major}.{cc_minor}; fall back to Triton"
+                )
         # The fused h+o state pass parallelizes only over (V/BV, N, H) blocks
         # and walks chunks serially, so it loses to the split Triton kernels
         # when the grid underfills the GPU. Measured crossover on PRO 6000 /
