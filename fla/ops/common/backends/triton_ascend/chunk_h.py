@@ -22,7 +22,6 @@ from fla.ops.utils.op import exp2
 from fla.utils import input_guard
 from fla.utils.ascend_ub_manager import ASCEND_MAX_GRID_DIM, max_grid_axis_chunks
 
-_NUM_WARPS = 4
 _LAUNCH_BLOCK_BUDGET = 4096
 # Fixed tiles: matches validated probe; avoids UB/autotune variance on Ascend.
 _BK = 64
@@ -52,7 +51,7 @@ def _launch_kv_nh(kernel, *, nk: int, nv: int, nh: int, kernel_kwargs: dict) -> 
             for nh_off in range(0, nh, nh_step):
                 nh_len = min(nh_step, nh - nh_off)
                 kernel_kwargs['NH_OFFSET'] = nh_off
-                kernel[(k_len, v_len, nh_len)](num_warps=_NUM_WARPS, **kernel_kwargs)
+                kernel[(k_len, v_len, nh_len)](**kernel_kwargs)
     if hasattr(torch, 'npu') and torch.npu.is_available():
         torch.npu.synchronize()
 

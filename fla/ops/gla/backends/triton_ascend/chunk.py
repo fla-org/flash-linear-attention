@@ -12,6 +12,7 @@ from __future__ import annotations
 import torch
 import triton
 import triton.language as tl
+import triton.runtime.driver as driver
 
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp2
@@ -23,14 +24,10 @@ from fla.utils.ascend_ub_manager import (
 )
 
 _BC = 16
-_NUM_WARPS = 2
-_NUM_WARPS_FWD_O = 4
-_NUM_WARPS_INTER = 4
 _LAUNCH_BLOCK_BUDGET = 4096
 _SAFETY_MARGIN = 0.80
 _FALLBACK_BK = 16
 _FALLBACK = 16
-_MAX_BKV = 64
 _MAX_TILE = 64
 
 
@@ -47,7 +44,12 @@ def _get_bk(K: int) -> int:
     )
 
 
-def _launch_3d_nt_nc_bh(kernel, *, nt: int, nc: int, bh: int, kernel_kwargs: dict, num_warps: int = _NUM_WARPS) -> None:
+def get_npu_properties():
+    device = torch.npu.current_device()
+    return driver.active.utils.get_device_properties(device)
+
+
+def _launch_3d_nt_nc_bh(kernel, *, nt: int, nc: int, bh: int, kernel_kwargs: dict) -> None:
     budget = _LAUNCH_BLOCK_BUDGET
     chunk_indices = kernel_kwargs.get('chunk_indices')
     cu_seqlens = kernel_kwargs.get('cu_seqlens')
@@ -69,7 +71,7 @@ def _launch_3d_nt_nc_bh(kernel, *, nt: int, nc: int, bh: int, kernel_kwargs: dic
             for bh_off in range(0, bh, bh_step):
                 bh_len = min(bh_step, bh - bh_off)
                 kernel_kwargs['BH_OFFSET'] = bh_off
-                kernel[(nt_len, nc_len, bh_len)](num_warps=num_warps, **kernel_kwargs)
+                kernel[(nt_len, nc_len, bh_len)](**kernel_kwargs)
 
 
 @triton.heuristics({'IS_VARLEN': lambda args: args['cu_seqlens'] is not None})
@@ -236,117 +238,96 @@ def chunk_gla_fwd_intra_gk_npu(
     return A
 
 # ---------------------------------------------------------------------------
-# Forward: o
+# Forward: o  (1D core-grid + host-pick BK; pattern from common/chunk_o.py)
 # ---------------------------------------------------------------------------
 
-def _fwd_o_pick_bk(K: int) -> int:
+
+_FWD_O_BV = 128
+_FWD_O_MEM_MULT = 6.0
+
+
+def _get_fwd_o_bk(K: int) -> int:
+    """Host-pick K tile for fwd-o; avoids Ascend parallel autotune flake in pytest."""
     return compute_row_tile_block_size(
-        64, K, 6.0, tiling_row=False, safety_margin=_SAFETY_MARGIN,
-        fallback=_FALLBACK, min_block=16,
-        max_block=min(_MAX_BKV, max(16, triton.next_power_of_2(K))),
+        64,
+        K,
+        _FWD_O_MEM_MULT,
+        tiling_row=False,
+        safety_margin=_SAFETY_MARGIN,
+        fallback=_FALLBACK_BK,
+        min_block=32,
+        max_block=min(128, triton.next_power_of_2(K)),
     )
-
-
-def _fwd_o_pick_bv(V: int) -> int:
-    return compute_row_tile_block_size(
-        64, V, 6.0, tiling_row=False, safety_margin=_SAFETY_MARGIN,
-        fallback=_FALLBACK, min_block=16,
-        max_block=min(_MAX_BKV, max(16, triton.next_power_of_2(V))),
-    )
-
-
-def _launch_v_nt_bh(kernel, *, nv: int, nt: int, bh: int, kernel_kwargs: dict) -> None:
-    # Keep full chunk_indices: varlen h is indexed by global chunk id (i_tg).
-    budget = _LAUNCH_BLOCK_BUDGET
-    nv_step = nv if nv * nt * bh <= budget else max(1, budget // max(nt * bh, 1))
-    for v_off in range(0, nv, nv_step):
-        v_len = min(nv_step, nv - v_off)
-        kernel_kwargs['V_OFFSET'] = v_off
-        nt_budget = max(1, budget // max(v_len * bh, 1))
-        nt_step = min(nt_budget, max_grid_axis_chunks(nt, v_len * bh, max_grid=ASCEND_MAX_GRID_DIM))
-        for nt_off in range(0, nt, nt_step):
-            nt_len = min(nt_step, nt - nt_off)
-            kernel_kwargs['NT_OFFSET'] = nt_off
-            bh_budget = max(1, budget // max(v_len * nt_len, 1))
-            bh_step = min(bh_budget, max_grid_axis_chunks(bh, v_len * nt_len, max_grid=ASCEND_MAX_GRID_DIM))
-            for bh_off in range(0, bh, bh_step):
-                bh_len = min(bh_step, bh - bh_off)
-                kernel_kwargs['BH_OFFSET'] = bh_off
-                kernel[(v_len, nt_len, bh_len)](num_warps=_NUM_WARPS_FWD_O, **kernel_kwargs)
 
 
 @triton.heuristics({'IS_VARLEN': lambda args: args['cu_seqlens'] is not None})
-@triton.jit(do_not_specialize=['T', 'V_OFFSET', 'NT_OFFSET', 'BH_OFFSET'])
+@triton.jit(do_not_specialize=['T', 'total_chunks', 'task_num', 'num_core'])
 def chunk_gla_fwd_kernel_o_npu(
     q, v, g, h, o, A, cu_seqlens, chunk_indices, scale, T,
     H: tl.constexpr, HV: tl.constexpr, K: tl.constexpr, V: tl.constexpr,
     BT: tl.constexpr, BK: tl.constexpr, BV: tl.constexpr,
+    total_chunks, task_num, num_core,
     STATE_V_FIRST: tl.constexpr, IS_VARLEN: tl.constexpr,
-    V_OFFSET, NT_OFFSET, BH_OFFSET,
 ):
-    i_v = tl.program_id(0) + V_OFFSET
-    i_t = tl.program_id(1).to(tl.int64) + NT_OFFSET
-    i_bh = tl.program_id(2) + BH_OFFSET
-    i_b, i_hv = i_bh // HV, i_bh % HV
-    i_h = i_hv // (HV // H)
-    if IS_VARLEN:
-        i_tg = i_t.to(tl.int64)
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
-        T = eos - bos
-        NT = tl.cdiv(T, BT)
-    else:
-        NT = tl.cdiv(T, BT)
-        i_tg = (i_b * NT + i_t).to(tl.int64)
-        bos, eos = (i_b * T).to(tl.int64), (i_b * T + T).to(tl.int64)
+    core_id = tl.program_id(0)
+    h_t_step = HV * total_chunks
+    for task_id in tl.range(core_id, task_num, num_core):
+        i_v = task_id // h_t_step
+        remainder = task_id % h_t_step
+        i_hv = remainder // total_chunks
+        global_t = remainder % total_chunks
+        i_h = i_hv // (HV // H)
+        T_cur = T
 
-    if i_t * BT >= T:
-        return
-
-    m_s = tl.arange(0, BT)[:, None] >= tl.arange(0, BT)[None, :]
-
-    q_base = q + (bos * H + i_h) * K
-    g_base = g + (bos * HV + i_hv) * K
-    v_base = v + (bos * HV + i_hv) * V
-    o_base = o + (bos * HV + i_hv) * V
-    h_base = h + (i_tg * HV + i_hv).to(tl.int64) * K * V
-    A_base = A + (bos * HV + i_hv) * BT
-
-    b_o = tl.zeros([BT, BV], dtype=tl.float32)
-    o_t = i_t * BT + tl.arange(0, BT)
-    o_v = i_v * BV + tl.arange(0, BV)
-    o_i = tl.arange(0, BT)
-    m_t = o_t < T
-    m_v = o_v < V
-    m_tv = m_t[:, None] & m_v[None, :]
-    m_A = m_t[:, None] & (o_i[None, :] < BT)
-
-    for i_k in range(tl.cdiv(K, BK)):
-        o_k = i_k * BK + tl.arange(0, BK)
-        m_k = o_k < K
-        m_qk = m_t[:, None] & m_k[None, :]
-        b_q = tl.load(q_base + o_t[:, None] * (H * K) + o_k[None, :], mask=m_qk, other=0.0).to(tl.float32)
-        b_g = tl.load(g_base + o_t[:, None] * (HV * K) + o_k[None, :], mask=m_qk, other=0.0).to(tl.float32)
-        b_qg = b_q * exp2(b_g)
-        if STATE_V_FIRST:
-            b_h = tl.load(
-                h_base + o_v[:, None] * K + o_k[None, :],
-                mask=m_v[:, None] & m_k[None, :], other=0.0,
-            ).to(tl.float32)
-            b_o += tl.dot(b_qg, tl.trans(b_h), allow_tf32=False)
+        if IS_VARLEN:
+            i_n = tl.load(chunk_indices + global_t * 2).to(tl.int32)
+            i_t = tl.load(chunk_indices + global_t * 2 + 1).to(tl.int32)
+            bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+            T_cur = (eos - bos).to(tl.int32)
+            i_tg = global_t.to(tl.int64)
         else:
-            b_h = tl.load(
-                h_base + o_k[:, None] * V + o_v[None, :],
-                mask=m_k[:, None] & m_v[None, :], other=0.0,
-            ).to(tl.float32)
-            b_o += tl.dot(b_qg, b_h, allow_tf32=False)
+            NT = tl.cdiv(T, BT)
+            i_b = global_t // NT
+            i_t = (global_t % NT).to(tl.int32)
+            bos = (i_b * T).to(tl.int64)
+            i_tg = global_t.to(tl.int64)
 
-    b_o *= scale
-    b_v = tl.load(v_base + o_t[:, None] * (HV * V) + o_v[None, :], mask=m_tv, other=0.0).to(tl.float32)
-    b_A = tl.load(A_base + o_t[:, None] * (HV * BT) + o_i[None, :], mask=m_A, other=0.0).to(tl.float32)
-    b_A = tl.where(m_s, b_A, 0.0)
-    b_o += tl.dot(b_A, b_v, allow_tf32=False)
-    tl.store(o_base + o_t[:, None] * (HV * V) + o_v[None, :], b_o.to(o.dtype.element_ty), mask=m_tv)
+        q_ptr = q + (bos * H + i_h) * K
+        g_ptr = g + (bos * HV + i_hv) * K
+        v_ptr = v + (bos * HV + i_hv) * V
+        o_ptr = o + (bos * HV + i_hv) * V
+        h_base = h + (i_tg * HV + i_hv).to(tl.int64) * K * V
+        a_ptr = A + (bos * HV + i_hv) * BT
+
+        b_o = tl.zeros([BT, BV], dtype=tl.float32)
+        for i_k in range(tl.cdiv(K, BK)):
+            p_q = tl.make_block_ptr(q_ptr, (T_cur, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+            p_g = tl.make_block_ptr(g_ptr, (T_cur, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+            if STATE_V_FIRST:
+                p_h = tl.make_block_ptr(h_base, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
+            else:
+                p_h = tl.make_block_ptr(h_base, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
+            b_q = tl.load(p_q, boundary_check=(0, 1))
+            b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
+            b_qg = (b_q * exp2(b_g)).to(b_q.dtype)
+            b_h = tl.load(p_h, boundary_check=(0, 1))
+            if STATE_V_FIRST:
+                b_o += tl.dot(b_qg, tl.trans(b_h).to(b_qg.dtype))
+            else:
+                b_o += tl.dot(b_qg, b_h.to(b_qg.dtype))
+
+        b_o *= scale
+        o_t = i_t * BT + tl.arange(0, BT)
+        m_t = o_t < T_cur
+        p_a = tl.make_block_ptr(a_ptr, (T_cur, BT), (HV * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
+        p_v = tl.make_block_ptr(v_ptr, (T_cur, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+        p_o = tl.make_block_ptr(o_ptr, (T_cur, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+        b_A = tl.load(p_a, boundary_check=(0, 1))
+        m_s = tl.arange(0, BT)[:, None] >= tl.arange(0, BT)[None, :]
+        b_A = tl.where(m_s & (m_t[:, None] & m_t[None, :]), b_A, 0.0)
+        b_v = tl.load(p_v, boundary_check=(0, 1))
+        b_o += tl.dot(b_A.to(b_v.dtype), b_v)
+        tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
 
 
 @input_guard
@@ -368,29 +349,46 @@ def chunk_gla_fwd_o_gk_npu(
 
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
-    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
+    if cu_seqlens is None:
+        total_chunks = B * triton.cdiv(T, BT)
+    else:
+        total_chunks = len(chunk_indices)
 
     o = torch.zeros_like(v)
-    BK, BV = _fwd_o_pick_bk(K), _fwd_o_pick_bv(V)
-    nv, bh = triton.cdiv(V, BV), B * HV
-    _launch_v_nt_bh(
-        chunk_gla_fwd_kernel_o_npu,
-        nv=nv, nt=NT, bh=bh,
-        kernel_kwargs=dict(
-            q=q, v=v, g=g, h=h, o=o, A=A,
-            cu_seqlens=cu_seqlens, chunk_indices=chunk_indices, scale=scale, T=T,
-            H=H, HV=HV, K=K, V=V, BT=BT, BK=BK, BV=BV,
-            STATE_V_FIRST=state_v_first,
-            V_OFFSET=0, NT_OFFSET=0, BH_OFFSET=0,
-        ),
+    BV = min(_FWD_O_BV, triton.next_power_of_2(V))
+    BK = _get_fwd_o_bk(K)
+    NV = triton.cdiv(V, BV)
+    num_core = get_npu_properties()['num_aicore']
+    task_num = NV * HV * total_chunks
+    chunk_gla_fwd_kernel_o_npu[(num_core,)](
+        q=q,
+        v=v,
+        g=g,
+        h=h,
+        o=o,
+        A=A,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        scale=scale,
+        T=T,
+        H=H,
+        HV=HV,
+        K=K,
+        V=V,
+        BT=BT,
+        BK=BK,
+        BV=BV,
+        total_chunks=total_chunks,
+        task_num=task_num,
+        num_core=num_core,
+        STATE_V_FIRST=state_v_first,
     )
-    if hasattr(torch, 'npu') and torch.npu.is_available():
-        torch.npu.synchronize()
     return o
 
 # ---------------------------------------------------------------------------
 # Backward
 # ---------------------------------------------------------------------------
+
 
 def _bwd_pick_bk(K: int) -> int:
     return compute_row_tile_block_size(
@@ -408,7 +406,7 @@ def _bwd_pick_bv(V: int) -> int:
     )
 
 
-def _launch_2d(kernel, *, nt: int, bh: int, kernel_kwargs: dict, num_warps: int = _NUM_WARPS) -> None:
+def _launch_2d(kernel, *, nt: int, bh: int, kernel_kwargs: dict) -> None:
     budget = _LAUNCH_BLOCK_BUDGET
     nt_step = nt if nt * bh <= budget else max(1, budget // max(bh, 1))
     for nt_off in range(0, nt, nt_step):
@@ -419,10 +417,10 @@ def _launch_2d(kernel, *, nt: int, bh: int, kernel_kwargs: dict, num_warps: int 
         for bh_off in range(0, bh, bh_step):
             bh_len = min(bh_step, bh - bh_off)
             kernel_kwargs['BH_OFFSET'] = bh_off
-            kernel[(nt_len, bh_len)](num_warps=num_warps, **kernel_kwargs)
+            kernel[(nt_len, bh_len)](**kernel_kwargs)
 
 
-def _launch_3d_na_nt_bh(kernel, *, na: int, nt: int, bh: int, kernel_kwargs: dict, num_warps: int = _NUM_WARPS) -> None:
+def _launch_3d_na_nt_bh(kernel, *, na: int, nt: int, bh: int, kernel_kwargs: dict) -> None:
     """3D launch over (axis0, nt, bh). Does not slice chunk_indices (need global i_tg)."""
     budget = _LAUNCH_BLOCK_BUDGET
     na_step = na if na * nt * bh <= budget else max(1, budget // max(nt * bh, 1))
@@ -439,7 +437,7 @@ def _launch_3d_na_nt_bh(kernel, *, na: int, nt: int, bh: int, kernel_kwargs: dic
             for bh_off in range(0, bh, bh_step):
                 bh_len = min(bh_step, bh - bh_off)
                 kernel_kwargs['BH_OFFSET'] = bh_off
-                kernel[(a_len, nt_len, bh_len)](num_warps=num_warps, **kernel_kwargs)
+                kernel[(a_len, nt_len, bh_len)](**kernel_kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -634,7 +632,6 @@ def chunk_gla_bwd_dv_npu(
             H=H, K=K, V=V, BT=BT, BK=BK, BV=BV, STATE_V_FIRST=state_v_first,
             A_OFFSET=0, NT_OFFSET=0, BH_OFFSET=0,
         ),
-        num_warps=_NUM_WARPS_INTER,
     )
     _npu_sync()
     return dv
@@ -928,7 +925,6 @@ def chunk_gla_bwd_dqkg_npu(
             H=H, K=K, V=V, BT=BT, BK=BK, BV=BV, STATE_V_FIRST=state_v_first,
             A_OFFSET=0, NT_OFFSET=0, BH_OFFSET=0,
         ),
-        num_warps=_NUM_WARPS_INTER,
     )
     _npu_sync()
     return dq2, dk2, dg
