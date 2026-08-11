@@ -209,6 +209,9 @@ class DPLRTileLangBackend(BaseBackend):
             # back to the default Triton implementation. Only the forward call
             # is guarded: once it succeeds, autograd is committed to the
             # TileLang backward.
+            if cp_context is not None:
+                # a rank-local fallback would diverge the CP collectives
+                raise
             key = f"{type(exc).__name__}: {exc}"
             if key not in _FALLBACK_LOGGED:
                 _FALLBACK_LOGGED.add(key)
