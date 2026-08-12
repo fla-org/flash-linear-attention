@@ -268,6 +268,31 @@ def read_config_file(config_file: Path) -> dict[str, Any] | None:
     return load_config_file(config_file)
 
 
+@cache
+def load_kernel_config_file(config_file: Path) -> "tuple[dict[str, Any] | None, KernelConfigFile | None]":
+    """Read, parse and validate a kernel config file, memoized by path.
+
+    Returns a ``(raw config dict, validated KernelConfigFile)`` pair, with both set
+    to ``None`` when the file is missing or malformed.
+
+    The existence check and the validation are memoized along with the file contents,
+    so in the steady state a kernel launch performs no filesystem access at all.
+    Without this, every launch whose autotune key misses the in-memory cache would
+    stat the config file (and re-validate its JSON) again, which showed up as
+    thousands of small file operations per second in large multi-rank trainings
+    (see issue #1072).
+
+    ALWAYS mode should bypass the memoization via ``load_kernel_config_file.__wrapped__``
+    so that config file edits are picked up on the next kernel call.
+    """
+    if not config_file.exists():
+        return None, None
+    config_data = read_config_file(config_file)
+    if config_data is None:
+        return None, None
+    return config_data, KernelConfigFile.from_dict(config_file, config_data)
+
+
 def load_cached_config(kernel_name: str, autotune_key: AutotuneKey | None = None) -> dict[str, Any] | None:
     """
     Load cached best config for a kernel from FLA configs directory.
@@ -296,13 +321,10 @@ def load_cached_config(kernel_name: str, autotune_key: AutotuneKey | None = None
     config_dir = get_fla_config_dir()
     config_file = config_dir / f"{kernel_name}.json"
 
-    if not config_file.exists():
-        return None
-
-    config_data = read_config_file(config_file)
-    if config_data is None:
-        return None
-    config = KernelConfigFile.from_dict(config_file, config_data)
+    if FLA_CACHE_MODE is FlaCacheMode.ALWAYS:
+        config_data, config = load_kernel_config_file.__wrapped__(config_file)
+    else:
+        config_data, config = load_kernel_config_file(config_file)
     if config is None:
         return None
 
