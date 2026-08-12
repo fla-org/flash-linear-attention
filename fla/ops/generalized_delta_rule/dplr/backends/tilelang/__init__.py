@@ -98,7 +98,7 @@ class DPLRTileLangBackend(BaseBackend):
                 "TileLang backend requires safe_gate or a lower_bound that fits "
                 f"chunk_size {chunk_size}: its mid-chunk-centered tensor-core scheme "
                 "keeps exp2 operands in fp32 range only while "
-                "(chunk_size/2)*bound*log2(e) <= 120 (the documented safe_gate "
+                "(chunk_size/2+1)*bound*log2(e) <= 124 (the documented safe_gate "
                 "range [-5, 0) fits chunk_size 16/32 but not 64); fall back to Triton"
             )
         if not q.is_cuda:

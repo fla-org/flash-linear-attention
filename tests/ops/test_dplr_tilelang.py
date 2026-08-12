@@ -16,6 +16,7 @@ import fla.ops.generalized_delta_rule.dplr.backends.tilelang as dplr_tilelang_ba
 from fla.ops.generalized_delta_rule.dplr import chunk_dplr_delta_rule
 from fla.ops.generalized_delta_rule.dplr.backends.tilelang import DPLRTileLangBackend
 from fla.ops.generalized_delta_rule.dplr.backends.tilelang.schedules import chunk64_schedule_or_none
+from fla.ops.generalized_delta_rule.dplr.chunk import gate_bound_is_safe
 from fla.ops.generalized_delta_rule.dplr.naive import dplr_recurrence
 from fla.utils import assert_close, device, get_device_capability, get_device_smem_optin
 
@@ -139,6 +140,19 @@ def test_chunk_verifier_accepts_lower_bound_chunk64(monkeypatch):
         *_verifier_inputs(K=64), safe_gate=False, lower_bound=-0.61, chunk_size=64,
     )
     assert ok and reason is None
+
+
+def test_gate_bound_is_safe_exact_span():
+    # the a-side operand spans chunk_size/2 + 1 rows: the exclusive cumsum
+    # ge[0] = 0 is centered against the inclusive gi[mid]. The helper must
+    # reject bounds whose true exponent overflows fp32 even where the
+    # chunk_size/2 estimate still passed (9*10.39*log2(e) = 135 log2)
+    assert not gate_bound_is_safe(-10.39, 16)
+    # the documented safe_gate range [-5, 0) stays licensed at cs16/cs32
+    # (65 / 123 log2) and rejected at cs64 (238 log2)
+    assert gate_bound_is_safe(-5, 16)
+    assert gate_bound_is_safe(-5, 32)
+    assert not gate_bound_is_safe(-5, 64)
 
 
 @requires_cuda

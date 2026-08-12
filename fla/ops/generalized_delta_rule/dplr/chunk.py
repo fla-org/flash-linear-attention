@@ -34,12 +34,15 @@ from fla.utils import TRITON_ABOVE_3_4_0, autocast_custom_bwd, autocast_custom_f
 def gate_bound_is_safe(lower_bound: float, chunk_size: int) -> bool:
     """Whether `gk >= lower_bound` keeps the centered tensor-core A-stage in fp32 range.
 
-    The A-stages factorize exp2(gi[i] - gi[j]) around the mid-chunk row, so
-    per-row exponents reach (chunk_size/2) * |lower_bound| * log2(e); 120
-    keeps a margin below the fp32 exponent limit (~127 log2). A non-negative
-    bound is invalid (gk is a log-decay < 0) and never licenses the scheme.
+    The A-stages factorize exp2(gi[i] - gi[j]) around the mid-chunk row. The
+    largest positive exponent is on the a-side: the exclusive cumsum ge is
+    centered against the inclusive gi[mid], so it spans chunk_size/2 + 1 rows
+    and per-row exponents reach (chunk_size/2 + 1) * |lower_bound| * log2(e).
+    124 is the fp32 exponent limit (~128 log2) minus 4 log2 of headroom for
+    the activation multiply. A non-negative bound is invalid (gk is a
+    log-decay < 0) and never licenses the scheme.
     """
-    return lower_bound < 0 and abs(lower_bound) * (chunk_size // 2) * RCP_LN2 <= 120
+    return lower_bound < 0 and abs(lower_bound) * (chunk_size // 2 + 1) * RCP_LN2 <= 124
 
 
 def chunk_dplr_fwd(
