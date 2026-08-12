@@ -544,8 +544,9 @@ def test_chunk_tilelang_route_parity_gate_stress(
         # KDA's convention (tests/ops/test_kda.py): amplify the logits so the
         # clamp pins a fraction of gates at the documented -5 bound. Sustained
         # pinning of most gates is excluded on purpose: at cs32 the Triton
-        # reference itself overflows fp32 there (TileLang stays finite), so
-        # parity is undefined
+        # reference's dgk diverges from the true recurrence far beyond parity
+        # tolerance there (measured err ratio ~0.5 vs TileLang's ~0.17 on
+        # sm_120), so parity is undefined
         gk = (F.logsigmoid(torch.randn(B, T, H, D, dtype=torch.float)) / 0.6).clamp(-5, 0).to(dtype)
     else:
         # sigmoid saturates to 0/1, pinning gk at the ends of (-0.61, 0)
@@ -629,10 +630,11 @@ def test_chunk_tilelang_safe_gate_chunk64_stays_on_triton(monkeypatch):
 def test_chunk_tilelang_sustained_gate_pin_stress(monkeypatch, chunk_size: int, pin: float):
     # every gate pinned at the bound for the whole sequence: the licensed
     # half-range must stay finite and track the fp32 recurrence. dgk is
-    # ill-conditioned in this regime for any chunked scheme (RMS err vs the
-    # baseline: TileLang 0.12-0.17 at the -5 pin, the Triton reference
-    # 0.34-0.48), so parity is asserted against the baseline with a relaxed
-    # dgk tolerance; all other outputs match the usual naive-parity bars
+    # ill-conditioned in this regime for any chunked scheme (RMS err ratio vs
+    # the baseline at the cs32 -5 pin, measured on sm_120: TileLang ~0.17,
+    # the Triton reference ~0.5), so parity is asserted against the baseline
+    # with a relaxed dgk tolerance; all other outputs match the usual
+    # naive-parity bars
     torch.manual_seed(42)
     B, T, H, D = 8, 512, 16, 64
     dtype = torch.bfloat16
