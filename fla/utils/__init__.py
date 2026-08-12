@@ -30,6 +30,7 @@ from ._decorators import (  # noqa: F401
     input_guard,
     require_version,
     tensor_cache,
+    warn_unconsumed_kwargs,
 )
 from ._device import (  # noqa: F401
     IS_AMD,

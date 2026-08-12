@@ -16,7 +16,7 @@ import triton.language as tl
 from fla.ops.backends import dispatch
 from fla.ops.utils.op import exp
 from fla.ops.utils.softplus import softplus
-from fla.utils import input_guard
+from fla.utils import input_guard, warn_unconsumed_kwargs
 
 
 @triton.heuristics(
@@ -448,6 +448,8 @@ def fused_recurrent_kda(
             stacklevel=2,
         )
         state_v_first = kwargs.pop('transpose_state_layout')
+
+    warn_unconsumed_kwargs('fused_recurrent_kda', kwargs)
 
     if cu_seqlens is not None:
         if q.shape[0] != 1:

@@ -329,6 +329,42 @@ def deprecate_kwarg(
     return wrapper
 
 
+def warn_unconsumed_kwargs(
+    func_name: str,
+    kwargs: dict[str, Any],
+    consumed: tuple[str, ...] = (),
+) -> None:
+    """
+    Warn about keyword arguments that a public entry point accepted but will not use.
+
+    Public ops keep a trailing ``**kwargs`` so that backend-specific arguments can flow
+    through the dispatch layer. The downside is that a misspelled argument, or a flag
+    only known to a newer release, is silently dropped instead of raising, which can
+    silently change numerics (see fla-org/flash-linear-attention#1119).
+
+    Call this after all known keys have been popped from ``kwargs``. Keys listed in
+    ``consumed`` are treated as used even if still present.
+
+    Args:
+        func_name (`str`):
+            Name of the calling entry point, used in the warning message.
+        kwargs (`dict[str, Any]`):
+            The remaining ``**kwargs`` of the entry point.
+        consumed (`tuple[str, ...]`, *optional*):
+            Keys that are read from ``kwargs`` without being popped.
+    """
+    unconsumed = sorted(k for k in kwargs if k not in consumed)
+    if unconsumed:
+        warnings.warn(
+            f"`{func_name}` received unexpected keyword arguments {unconsumed}, which will be ignored. "
+            f"This usually means an argument name is misspelled, or that the argument requires a newer "
+            f"version of flash-linear-attention than the one installed. "
+            f"If the argument controls kernel semantics, ignoring it may silently change the results.",
+            UserWarning,
+            stacklevel=3,
+        )
+
+
 def checkpoint(fn):
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
