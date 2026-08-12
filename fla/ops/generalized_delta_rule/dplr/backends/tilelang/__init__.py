@@ -112,6 +112,16 @@ class DPLRTileLangBackend(BaseBackend):
             # measured ~0.5x vs Triton (the non-vectorized A-stage and the
             # 2-warp h+o path at BT=16 do not pay off at K=128)
             return False, "TileLang backend is slower than Triton at chunk_size 16 with head dim 128; fall back to Triton"
+        if chunk_size == 16 and (cu_seqlens is not None or cp_context is not None) and cc_major < 12:
+            # measured 0.83-1.02x vs Triton on sm_90 (H800, D64, all varlen
+            # sizes): the BT=16 serial state pass does not amortize ragged
+            # chunks there. Rect cs16 and cc12x varlen cs16 win and stay
+            # accepted.
+            return False, (
+                "TileLang backend is slower than Triton at chunk_size 16 on "
+                f"variable-length inputs on compute capability {cc_major}.{cc_minor}; "
+                "fall back to Triton"
+            )
         if chunk_size == 64:
             # reject configs no BT=64 kernel schedule can launch on this
             # device (e.g. the K=128 stream backward needs 167936B on A100's

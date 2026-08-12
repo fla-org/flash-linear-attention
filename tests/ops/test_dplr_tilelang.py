@@ -47,6 +47,14 @@ def _cs64_routed(K: int) -> bool:
     ) is not None
 
 
+def _varlen_cs16_routed() -> bool:
+    if not _CUDA_AVAILABLE:
+        return False
+    cc_major, _ = get_device_capability(0)
+    # schedulable but not measurably faster on pre-cc12 devices
+    return cc_major >= 12
+
+
 def _verifier_inputs(
     K: int = 64,
     V: int | None = None,
@@ -118,6 +126,23 @@ def test_chunk_verifier_rejects_safe_gate_chunk64(monkeypatch):
         *_verifier_inputs(K=64), safe_gate=True, chunk_size=64,
     )
     assert not ok and 'requires safe_gate or a lower_bound' in reason
+
+
+@requires_cuda
+@pytest.mark.parametrize(('cc', 'accepted'), [((9, 0), False), ((12, 0), True)])
+def test_chunk_verifier_varlen_cs16_gate(monkeypatch, cc, accepted):
+    # varlen cs16 measured 0.83-1.02x vs Triton on sm_90 (no win at any size),
+    # while cc12x keeps it (1.08-1.23x at h2560/h4096) — rejected below cc12
+    monkeypatch.setattr(dplr_tilelang_backend, 'get_device_smem_optin', lambda idx: 232448)
+    monkeypatch.setattr(dplr_tilelang_backend, 'get_device_capability', lambda idx: cc)
+    cu = torch.tensor([0, 256, 500, 760, 1000], dtype=torch.int32, device=device)
+    ok, reason = DPLRTileLangBackend().chunk_dplr_delta_rule_verifier(
+        *_verifier_inputs(K=64), safe_gate=True, chunk_size=16, cu_seqlens=cu,
+    )
+    if accepted:
+        assert ok and reason is None
+    else:
+        assert not ok and 'chunk_size 16 on variable-length inputs' in reason
 
 
 @requires_cuda
@@ -651,7 +676,14 @@ def test_chunk_tilelang_sustained_gate_pin_stress(monkeypatch, chunk_size: int, 
 @pytest.mark.parametrize(
     ('H', 'D', 'cu_seqlens', 'dtype', 'chunk_size', 'use_state'),
     [
-        pytest.param(*test, id="H{}-D{}-cu_seqlens{}-{}-chunk_size{}-use_state{}".format(*test))
+        pytest.param(
+            *test,
+            id="H{}-D{}-cu_seqlens{}-{}-chunk_size{}-use_state{}".format(*test),
+            marks=pytest.mark.skipif(
+                test[4] == 16 and not _varlen_cs16_routed(),
+                reason='varlen chunk_size 16 is not routed on this device',
+            ),
+        )
         for test in [
             (32, 64, [0, 256, 500, 760, 1000], torch.bfloat16, 32, True),
             (32, 128, [0, 256, 500, 760, 1000], torch.bfloat16, 32, True),
