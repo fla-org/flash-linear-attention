@@ -28,7 +28,7 @@ from fla.layers.utils import (
 )
 from fla.modules import RMSNorm, RotaryEmbedding, ShortConvolution
 from fla.modules.layernorm_gated import RMSNormGated
-from fla.ops.gla import chunk_gla, fused_chunk_gla, fused_recurrent_gla
+from fla.ops.gla import chunk_gla, fused_recurrent_gla
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
@@ -97,7 +97,7 @@ class RodimusAttention(nn.Module):
         self.residual_in_fp32 = residual_in_fp32
         self.layer_idx = layer_idx
 
-        assert mode in ['chunk', 'fused_recurrent', 'fused_chunk'], f"Not supported mode `{mode}`."
+        assert mode in ['chunk', 'fused_recurrent'], f"Not supported mode `{mode}`."
 
         self.gate_proj = nn.Linear(self.hidden_size, self.d_inner, bias=False)
         self.up_proj = nn.Linear(self.hidden_size, self.d_inner, bias=False)
@@ -195,17 +195,6 @@ class RodimusAttention(nn.Module):
                 output_final_state=use_cache,
                 state_v_first=True,
                 cu_seqlens=cu_seqlens,
-                head_first=False,
-            )
-        elif mode == 'fused_chunk':
-            o, recurrent_state = fused_chunk_gla(
-                q=q,
-                k=k,
-                v=v,
-                g=rt_gate_log,
-                initial_state=recurrent_state,
-                output_final_state=use_cache,
-                head_first=False,
             )
         elif mode == 'chunk':
             q, k, rt_gate_log = map(lambda x: x.to(v.dtype), (q, k, rt_gate_log))
@@ -218,7 +207,6 @@ class RodimusAttention(nn.Module):
                 output_final_state=use_cache,
                 state_v_first=True,
                 cu_seqlens=cu_seqlens,
-                head_first=False,
             )
         else:
             raise NotImplementedError(f"Not supported mode `{mode}`.")
