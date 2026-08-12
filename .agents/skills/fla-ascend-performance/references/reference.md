@@ -53,6 +53,7 @@ After changing `mem_mult`/tiles, always re-check compile + numeric correctness.
 - **Varlen wrong only on long seqs**: after slicing `chunk_indices`, check for a second global `NT_OFFSET`; on core-grid paths, verify `chunk_offsets` → `(i_n, i_t)` against `cu_seqlens`.
 - **Wrong results only in multi-task core-grid loops**: rebind local base pointers each `task_id`; avoid in-place `ptr +=` across iterations.
 - **Occasional bf16 NaN**: mask before exp, fp32 accum, exp/exp2 scale, solve precision.
+- **`tl.dot` left operand clobbered (Ascend only)**: `tl.dot(lhs, rhs, …)` may mutate `lhs` in UB (CUDA does not). Any later read of that tile — second lhs, rhs, store, or arithmetic — can see corrupted data. Two fixes: **GM reload** between stages (e.g. `wy_fast` u→w on `b_A`) or **`tile + 0.0` before the first lhs dot** when multiple disposable copies are needed in tight sequence. Post-dot `+ 0.0` is invalid. Full per-kernel catalog: [cases.md § tl.dot lhs clobber](cases.md#tldot-lhs-clobber--repo-wide-case-catalog). Symptom: numeric mismatch vs Torch, no compile error. Tests: `test_gdn_kernels.py`, `test_solve_tril.py`.
 - **Correct but slower**: launch count (split inter/intra + host grid chunks), tiny tiles, full-size fp32 scratch, extra layout converts, unsynced fake baselines.
 - **Local pass, full gate NaN**: tail writeback, boundary masks, invalid exp regions, scratch init before read.
 - **Compile-variant explosion**: do not specialize on T; move feature flags to heuristics/constexpr.
@@ -77,7 +78,11 @@ Paths relative to the `flash-linear-attention` repo root. Detailed case notes: [
 - `fla/ops/common/backends/triton_ascend/chunk_scaled_dot_kkt.py` — peak tile, BC, UB-safe BK
 - `fla/ops/common/backends/triton_ascend/chunk_delta_h.py` — fwd recurrence, V tiling, bwd `dhu` (see [cases.md](cases.md))
 - `fla/ops/common/backends/triton_ascend/chunk_o.py` — fwd fuse + bwd G_T_CONTIG (see [cases.md](cases.md))
-- `fla/ops/gated_delta_rule/backends/triton_ascend/wy_fast.py` — different fwd/bwd `mem_mult`; multi-stage bwd
+- `fla/ops/gated_delta_rule/backends/triton_ascend/wy_fast.py` — multi-stage bwd; **`tl.dot` lhs clobber** (GM reload + copy) — [cases.md](cases.md)
+- `fla/ops/kda/backends/triton_ascend/wy_fast.py` — KDA variant of wy_fast; same clobber patterns
+- `fla/ops/kda/backends/triton_ascend/chunk_intra.py` — inter solve fused; multi-copy block merge — [cases.md](cases.md)
+- `fla/ops/kda/backends/triton_ascend/chunk_bwd.py` — KDA bwd (`dAv`, wy dw/dqkg); `b_do_c` pattern — [cases.md](cases.md)
+- `fla/ops/utils/backends/triton_ascend/solve_tril.py` — blocked triangular solve; 32×32/64×64 merge clobber guards — [cases.md](cases.md)
 - `fla/ops/utils/backends/triton_ascend/cumsum.py` — scalar/vector split and leftover UB budget
 
 ### Split / numerics / varlen

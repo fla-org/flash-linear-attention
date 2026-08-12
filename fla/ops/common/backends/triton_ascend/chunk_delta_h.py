@@ -722,6 +722,7 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64_npu(
                 b_dv *= tl.where(m_t, b_g_ratio, 0)[:, None]
         b_dv += tl.load(p_dv, boundary_check=(0, 1))
         tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
+        b_dv_pristine = b_dv + 0.0
 
         # Decay dh once; fold gate*scale into do so K-slabs skip per-slab gating.
         if USE_G:
@@ -735,6 +736,9 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64_npu(
             b_do = b_do * (b_g_exp * scale)[:, None]
         else:
             b_do = b_do * scale
+        b_do_c = b_do + 0.0
+        b_do_c2 = b_do + 0.0
+        b_do_c3 = b_do + 0.0
 
         p_w = tl.make_block_ptr(w, (K, T_cur), (1, HV * K), (0, i_t * BT), (BK, BT), (0, 1))
         p_q = tl.make_block_ptr(q, (K, T_cur), (1, H * K), (0, i_t * BT), (BK, BT), (0, 1))
@@ -747,7 +751,8 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64_npu(
                 b_dh1 *= exp2(b_gk_last1[:, None])
         if STATE_V_FIRST:
             b_dh1 += tl.dot(tl.trans(b_do.to(b_q.dtype)), tl.trans(b_q), allow_tf32=False)
-            b_dh1 -= tl.dot(tl.trans(b_dv.to(b_w.dtype)), tl.trans(b_w), allow_tf32=False)
+            b_dv_i = b_dv_pristine + 0.0
+            b_dh1 -= tl.dot(tl.trans(b_dv_i.to(b_w.dtype)), tl.trans(b_w), allow_tf32=False)
         else:
             b_dh1 += (
                 tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype), allow_tf32=False)
@@ -765,11 +770,12 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64_npu(
                 else:
                     b_dh2 *= exp2(b_gk_last2[:, None])
             if STATE_V_FIRST:
-                b_dh2 += tl.dot(tl.trans(b_do.to(b_q.dtype)), tl.trans(b_q), allow_tf32=False)
-                b_dh2 -= tl.dot(tl.trans(b_dv.to(b_w.dtype)), tl.trans(b_w), allow_tf32=False)
+                b_dh2 += tl.dot(tl.trans(b_do_c.to(b_q.dtype)), tl.trans(b_q), allow_tf32=False)
+                b_dv_i = b_dv_pristine + 0.0
+                b_dh2 -= tl.dot(tl.trans(b_dv_i.to(b_w.dtype)), tl.trans(b_w), allow_tf32=False)
             else:
                 b_dh2 += (
-                    tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype), allow_tf32=False)
+                    tl.dot(b_q.to(b_q.dtype), b_do_c.to(b_q.dtype), allow_tf32=False)
                     - tl.dot(b_w, b_dv.to(b_w.dtype), allow_tf32=False)
                 )
 
@@ -784,11 +790,12 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64_npu(
                 else:
                     b_dh3 *= exp2(b_gk_last3[:, None])
             if STATE_V_FIRST:
-                b_dh3 += tl.dot(tl.trans(b_do.to(b_q.dtype)), tl.trans(b_q), allow_tf32=False)
-                b_dh3 -= tl.dot(tl.trans(b_dv.to(b_w.dtype)), tl.trans(b_w), allow_tf32=False)
+                b_dh3 += tl.dot(tl.trans(b_do_c2.to(b_q.dtype)), tl.trans(b_q), allow_tf32=False)
+                b_dv_i = b_dv_pristine + 0.0
+                b_dh3 -= tl.dot(tl.trans(b_dv_i.to(b_w.dtype)), tl.trans(b_w), allow_tf32=False)
             else:
                 b_dh3 += (
-                    tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype), allow_tf32=False)
+                    tl.dot(b_q.to(b_q.dtype), b_do_c2.to(b_q.dtype), allow_tf32=False)
                     - tl.dot(b_w, b_dv.to(b_w.dtype), allow_tf32=False)
                 )
 
@@ -803,11 +810,12 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64_npu(
                 else:
                     b_dh4 *= exp2(b_gk_last4[:, None])
             if STATE_V_FIRST:
-                b_dh4 += tl.dot(tl.trans(b_do.to(b_q.dtype)), tl.trans(b_q), allow_tf32=False)
-                b_dh4 -= tl.dot(tl.trans(b_dv.to(b_w.dtype)), tl.trans(b_w), allow_tf32=False)
+                b_dh4 += tl.dot(tl.trans(b_do_c3.to(b_q.dtype)), tl.trans(b_q), allow_tf32=False)
+                b_dv_i = b_dv_pristine + 0.0
+                b_dh4 -= tl.dot(tl.trans(b_dv_i.to(b_w.dtype)), tl.trans(b_w), allow_tf32=False)
             else:
                 b_dh4 += (
-                    tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype), allow_tf32=False)
+                    tl.dot(b_q.to(b_q.dtype), b_do_c3.to(b_q.dtype), allow_tf32=False)
                     - tl.dot(b_w, b_dv.to(b_w.dtype), allow_tf32=False)
                 )
 

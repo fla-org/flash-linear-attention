@@ -4,9 +4,10 @@ description: >
   Guidelines for Ascend NPU kernel / Triton-Ascend backend performance work in the FLA repo.
   Covers profiling with torch_npu, PipeUtilization/MemoryUB CSV analysis, Cube/Vector/MTE/UB
   bottleneck diagnosis, and kernel optimization (UB tiling, grid splits, fusion/split, varlen,
-  G_T_CONTIG gate loading, correctness gates). NPU kernels must not use num_warps/num_stages.
+  G_T_CONTIG gate loading, correctness gates, tl.dot left-operand clobber). NPU kernels must not use num_warps/num_stages.
+  Per-kernel tl.dot clobber catalog: references/cases.md.
   Use when working on NPU profiling, kernel_details/op_statistic, aic_metrics,
-  fla triton_ascend backends, g transpose stride-1, UB overflow, grid limits, or Ascend performance.
+  fla triton_ascend backends, g transpose stride-1, UB overflow, grid limits, tl.dot reuse, or Ascend performance.
 ---
 
 # FLA Ascend NPU: Profiling → Bottlenecks → Optimization
@@ -138,6 +139,9 @@ Change only levers that match the bottleneck; one hypothesis per round. Before t
 - **int64 before multiply on runtime indices**: with `do_not_specialize` on `T`, values like `NT = cdiv(T, BT)` are runtime int32. `(NT - 1) * DH_CS` or `i_t * HV * K * V` can wrap past 2³¹ before `.to(tl.int64)` (e.g. K=V=128, HV=64 overflows at T>131K). Cast the index first: `(NT - 1).to(tl.int64) * DH_CS`, not `((NT - 1) * DH_CS).to(tl.int64)`.
 - **Varlen `cu_seqlens` → int64 for pointer math**: host `cu_seqlens` is `torch.long` (int64). Loading with `.to(tl.int32)` then computing `(bos * HV + i_hv) * V` overflows int32 well before `bos` hits 2³¹ (e.g. HV=32, V=4096 → safe `bos` ≈ 16K tokens). Pattern: `bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64); T = (eos - bos).to(tl.int32)`. Non-varlen else-branch: `(i_b * T).to(tl.int64)`. Alternative (when `T_cur` only needs int32): load `bos`/`eos` as int32 but cast before multiply — `(bos * HV + i_h).to(tl.int64) * K`. Never rely on post-multiply `.to(tl.int64)`.
 - Reductions / recurrence / grads use fp32 accum, cast on store; sensitive solves: `input_precision='ieee'` / `allow_tf32=False`; mask before exp on gated paths; keep a consistent `exp`/`exp2` base.
+- **Ascend `tl.dot` clobbers the left operand**: on NPU, `tl.dot(lhs, rhs, …)` may overwrite `lhs` in UB (CUDA Triton does not). Any later read of that tile (second lhs, rhs, store) sees corrupted data unless you reload from GM or copy with `tile + 0.0` **before** the first lhs dot. Full per-kernel catalog: [cases.md § tl.dot lhs clobber](references/cases.md#tldot-lhs-clobber--repo-wide-case-catalog). Symptom: silent numeric drift vs Torch oracle with no compile error.
+- **Audit checklist for new/changed kernels**: (1) `rg 'tl\.dot\(' fla/ops/**/triton_ascend/**` — only 8 op files use `tl.dot`; (2) for each lhs tile, flag lhs→lhs, lhs→rhs/store, or post-dot copy; (3) prefer GM reload for one reuse between stages, `+ 0.0` for tight multi-dot sequences; (4) re-run `tests/ops/test_gdn_kernels.py` + op-specific kernel tests.
+- **Upstream**: lhs clobber is a Triton-Ascend backend limitation (UB capacity / in-place matmul), not intentional API. Durable fix belongs in the compiler (preserve lhs or emit a diagnostic on post-dot read). Track via the Triton-Ascend / Ascend backend issue tracker.
 - For separable gate differences, compute `exp2(gs)[:, None] / exp2(gc)[None, :]` instead of `exp2(gs[:, None] - gc[None, :])` to replace a matrix of exponentials with two vectors. Verify numerics on the target compiler; multiplying by `exp2(-gc)` can produce materially different Ascend results.
 
 ### Fusion, compile, varlen
@@ -163,7 +167,7 @@ Each round, in order:
 5. Synchronized benchmark (latency/throughput, fwd and fwd+bwd); re-profile with the same `aic_metrics` and confirm Duration/pipe/UB move as expected.
 6. Metrics unchanged → reclassify bottleneck or switch metrics; do not pile unrelated changes.
 
-Prefer: `tests/ops/test_gdn_kernels.py`, `tests/utils/test_ascend_ub_manager.py`, `python -m benchmarks.ops.verify --op <op> --base <ref>` (`--gate-k` is a quick signal only).
+Prefer: `tests/ops/test_gdn_kernels.py`, `tests/ops/test_solve_tril.py`, `tests/utils/test_ascend_ub_manager.py`, `python -m benchmarks.ops.verify --op <op> --base <ref>` (`--gate-k` is a quick signal only).
 
 ### Round summary template
 
@@ -187,6 +191,7 @@ Generalizable fixes discovered during optimization belong in this skill (`SKILL.
 - [ ] Grid ≤ 65535 **or** 1D core-grid (`num_aicore`); host-split offsets not double-counted with varlen; task-loop pointers rebound each iteration
 - [ ] Block pointers contiguous innermost; **gate `g` uses G_T_CONTIG** when `[B,T,HV]` (see [g-contiguous-loading.md](references/g-contiguous-loading.md)); tail `boundary_check`
 - [ ] fp32 accum consistent with output/exp base; fusion worth the complexity (no gratuitous `ACCUMULATE_OUTPUT` writeback when UB allows)
+- [ ] Reused `tl.dot` left-hand tiles: GM reload or `tile + 0.0` **before** first lhs dot (post-dot copy invalid); see [cases.md § tl.dot catalog](references/cases.md#tldot-lhs-clobber--repo-wide-case-catalog)
 - [ ] fwd/bwd/varlen/layout branches covered; no unwritten regions under NaN poisoning
 - [ ] Runtime chunk indices (`NT`, `i_t`, …) cast to `tl.int64` **before** stride multiply when `T` is `do_not_specialize`
 - [ ] Varlen `bos`/`eos` from `cu_seqlens` loaded as `tl.int64` (or `.to(tl.int64)` before `(bos * HV + …) * stride`); `T_cur = (eos - bos).to(tl.int32)` only

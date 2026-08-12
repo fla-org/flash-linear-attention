@@ -91,12 +91,10 @@ def chunk_kda_bwd_kernel_dAv_npu(
     dA += (bos * HV + i_hv) * BT
 
     p_A = tl.make_block_ptr(A + (bos * HV + i_hv) * BT, (BT, T), (1, HV * BT), (0, i_t * BT), (BT, BT), (0, 1))
-    b_A = tl.load(p_A, boundary_check=(0, 1))
 
     o_t = i_t * BT + tl.arange(0, BT)
     m_t = o_t < T
     m_A = (o_t[:, None] <= o_t[None, :]) & (m_t[:, None] & m_t)
-    b_A = tl.where(m_A, b_A, 0).to(do.dtype.element_ty)
 
     b_dA = tl.zeros([BT, BT], dtype=tl.float32)
     for i_v in range(tl.cdiv(V, BV)):
@@ -105,8 +103,11 @@ def chunk_kda_bwd_kernel_dAv_npu(
         p_dv = tl.make_block_ptr(dv, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
         b_v = tl.load(p_v, boundary_check=(0, 1))
         b_do = tl.load(p_do, boundary_check=(0, 1))
+        b_do_c = b_do + 0.0
         b_dA += tl.dot(b_do, b_v, allow_tf32=False)
-        b_dv = tl.dot(b_A.to(b_do.dtype), b_do, allow_tf32=False)
+        b_A_i = tl.load(p_A, boundary_check=(0, 1))
+        b_A_i = tl.where(m_A, b_A_i, 0).to(b_do.dtype)
+        b_dv = tl.dot(b_A_i, b_do_c, allow_tf32=False)
         tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
 
     p_dA = tl.make_block_ptr(dA, (T, BT), (HV * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
@@ -566,6 +567,7 @@ def chunk_kda_bwd_kernel_wy_dw_part_npu(
         b_gb = b_gk_exp * b_beta_r[:, None]
 
         b_dkgb_r = tl.zeros([BC, BK], dtype=tl.float32)
+        b_dw_r_p = b_dw_r + 0.0
         for s_c in range(n_sub):
             i_tc_c = i_t * BT + s_c * BC
             p_dw_c = tl.make_block_ptr(dw, (T, K), (HV * K, 1), (i_tc_c, i_k * BK), (BC, BK), (1, 0))
@@ -583,7 +585,8 @@ def chunk_kda_bwd_kernel_wy_dw_part_npu(
 
             p_dA_acc = tl.make_block_ptr(dA_acc, (T, BT), (HV * BT, 1), (i_tc_r, s_c * BC), (BC, BC), (1, 0))
             b_dA_rc = tl.load(p_dA_acc, boundary_check=(0, 1)).to(tl.float32)
-            b_dA_rc += tl.dot(b_dw_r.to(tl.float32), tl.trans(b_kg_c.to(tl.float32)), allow_tf32=False)
+            b_dw_r_c = b_dw_r_p + 0.0
+            b_dA_rc += tl.dot(b_dw_r_c.to(tl.float32), tl.trans(b_kg_c.to(tl.float32)), allow_tf32=False)
             tl.store(p_dA_acc, b_dA_rc.to(p_dA_acc.dtype.element_ty), boundary_check=(0, 1))
 
         p_db_acc = tl.make_block_ptr(db_acc, (T,), (HV,), (i_tc_r,), (BC,), (0,))
