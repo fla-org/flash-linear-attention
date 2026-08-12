@@ -789,7 +789,7 @@ def chunk_kda_bwd_wy_dqkg_fused_npu(
     BV = _get_bv(V)
     NK = triton.cdiv(K, BK)
     is_varlen = cu_seqlens is not None
-    chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT) if is_varlen else g.new_zeros(1, dtype=torch.int32)
+    chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT) if is_varlen else g.new_zeros(1, dtype=torch.int64)
 
     common_launch = dict(
         cu_seqlens=cu_seqlens,
