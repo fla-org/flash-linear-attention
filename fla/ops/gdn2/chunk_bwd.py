@@ -60,7 +60,7 @@ NUM_WARPS_WY = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8]
         for num_stages in [2, 3, 4]
         if not (IS_NVIDIA_HOPPER and BK == 32 and num_warps == 4)
     ],
-    key=['BT', 'STATE_V_FIRST'],
+    key=['BT', 'K', 'V', 'STATE_V_FIRST'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
