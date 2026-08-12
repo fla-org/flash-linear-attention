@@ -24,7 +24,7 @@ from fla.ops.gated_delta_rule.gate import gdn_gate_bwd, gdn_gate_chunk_cumsum, g
 from fla.ops.gated_delta_rule.naive import naive_recurrent_gated_delta_rule
 from fla.ops.gated_delta_rule.wy_fast import prepare_wy_repr_bwd, recompute_w_u_fwd
 from fla.ops.utils.constant import RCP_LN2
-from fla.utils import IS_NPU, assert_close, device
+from fla.utils import assert_close, device
 
 
 def _make_wy_inverse(B: int, T: int, HV: int, BT: int, dtype: torch.dtype) -> torch.Tensor:
@@ -1345,13 +1345,6 @@ def test_chunk_gated_delta_rule_bwd_dhu(
         assert_close('dh0', dh0_ref, dh0_tri, 0.006)
 
 
-@pytest.mark.skipif(
-    IS_NPU,
-    reason=(
-        "Ascend triton_ascend chunk_gated_delta_rule_bwd_dhu AICore-times out on the "
-        "2050-document varlen stress from #1077; skip until the NPU backend fix is ready."
-    ),
-)
 def test_chunk_gated_delta_rule_bwd_dhu_varlen_many_documents():
     """The backward counterpart of `test_chunk_gated_delta_rule_fwd_h_varlen_many_documents`."""
     torch.manual_seed(42)
