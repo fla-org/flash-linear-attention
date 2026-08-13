@@ -192,7 +192,7 @@ def causal_conv1d_fwd_kernel(
                 i_n, i_t = tl.load(chunk_indices + i_t_global * 2).to(tl.int32), tl.load(chunk_indices +
                                                                                          i_t_global * 2 + 1).to(tl.int32)
                 bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
-                T_local = eos - bos
+                T_local = (eos - bos).to(tl.int32)
                 p_x = x + bos * stride_x_t
             else:
                 i_n = i_n_base
@@ -490,7 +490,7 @@ def causal_conv1d_bwd_dx_kernel(
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
-        T = eos - bos
+        T = (eos - bos).to(tl.int32)
         p_dy = dy + bos * stride_dy_t
         p_dx = dx + bos * stride_dx_t
     else:
@@ -652,7 +652,7 @@ def causal_conv1d_bwd_dwdb_kernel(
         i_tg = i_t
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
-        T = eos - bos
+        T = (eos - bos).to(tl.int32)
         p_x = x + bos * stride_x_t
         p_dy = dy + bos * stride_dy_t
     else:
@@ -1031,7 +1031,7 @@ def causal_conv1d_fwd_kernel_scalar(
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
-        T = eos - bos
+        T = (eos - bos).to(tl.int32)
         p_x = x + bos * stride_x_t
         p_y = y + bos * stride_y_t
     else:

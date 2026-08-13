@@ -160,10 +160,10 @@ def recompute_w_u_fwd_kernel_npu(
             i_n, i_t = tl.load(chunk_indices + i_t_o * 2).to(tl.int32), tl.load(
                 chunk_indices + i_t_o * 2 + 1
             ).to(tl.int32)
-            bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(
+            bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(
                 cu_seqlens + i_n + 1
-            ).to(tl.int32)
-            T = eos - bos
+            ).to(tl.int64)
+            T = (eos - bos).to(tl.int32)
             bos_bh = bos
         else:
             i_t = i_t_o
@@ -248,10 +248,10 @@ def prepare_wy_repr_bwd_kv_npu(
             i_n, i_t = tl.load(chunk_indices + i_t_o * 2).to(tl.int32), tl.load(
                 chunk_indices + i_t_o * 2 + 1
             ).to(tl.int32)
-            bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(
+            bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(
                 cu_seqlens + i_n + 1
-            ).to(tl.int32)
-            T = eos - bos
+            ).to(tl.int64)
+            T = (eos - bos).to(tl.int32)
         else:
             i_t = i_t_o
             bos, eos = i_b * T_seq, i_b * T_seq + T_seq
@@ -365,10 +365,10 @@ def prepare_wy_repr_bwd_da_mask_dot1_npu(
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(
             chunk_indices + i_t * 2 + 1
         ).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(
             cu_seqlens + i_n + 1
-        ).to(tl.int32)
-        T = eos - bos
+        ).to(tl.int64)
+        T = (eos - bos).to(tl.int32)
     else:
         bos, eos = i_b * T, i_b * T + T
 
@@ -404,8 +404,8 @@ def prepare_wy_repr_bwd_da_dot2_npu(
     i_b, i_h = i_bh // HV, i_bh % HV
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-        T = eos - bos
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = (eos - bos).to(tl.int32)
     else:
         bos, eos = i_b * T, i_b * T + T
 
@@ -441,10 +441,10 @@ def prepare_wy_repr_bwd_da_gate_npu(
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(
             chunk_indices + i_t * 2 + 1
         ).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(
             cu_seqlens + i_n + 1
-        ).to(tl.int32)
-        T = eos - bos
+        ).to(tl.int64)
+        T = (eos - bos).to(tl.int32)
     else:
         bos, eos = i_b * T, i_b * T + T
 
@@ -495,10 +495,10 @@ def prepare_wy_repr_bwd_finalize_k_npu(
             i_n, i_t = tl.load(chunk_indices + i_t_o * 2).to(tl.int32), tl.load(
                 chunk_indices + i_t_o * 2 + 1
             ).to(tl.int32)
-            bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(
+            bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(
                 cu_seqlens + i_n + 1
-            ).to(tl.int32)
-            T = eos - bos
+            ).to(tl.int64)
+            T = (eos - bos).to(tl.int32)
         else:
             i_t = i_t_o
             bos, eos = i_b * T_seq, i_b * T_seq + T_seq
@@ -557,8 +557,8 @@ def prepare_wy_repr_bwd_finalize_a2_npu(
     T_seq = T
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-        T = eos - bos
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = (eos - bos).to(tl.int32)
     else:
         bos, eos = i_b * T, i_b * T + T
 
@@ -595,8 +595,8 @@ def prepare_wy_repr_bwd_finalize_dg_npu(
     if IS_VARLEN:
         i_tg = i_t
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-        T = eos - bos
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = (eos - bos).to(tl.int32)
     else:
         NT = tl.cdiv(T, BT)
         i_tg = i_b * NT + i_t
