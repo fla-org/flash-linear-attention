@@ -24,7 +24,7 @@ from fla.ops.gated_delta_rule.gate import gdn_gate_bwd, gdn_gate_chunk_cumsum, g
 from fla.ops.gated_delta_rule.naive import naive_recurrent_gated_delta_rule
 from fla.ops.gated_delta_rule.wy_fast import prepare_wy_repr_bwd, recompute_w_u_fwd
 from fla.ops.utils.constant import RCP_LN2
-from fla.utils import IS_NPU, assert_close, device
+from fla.utils import assert_close, device
 
 
 def _make_wy_inverse(B: int, T: int, HV: int, BT: int, dtype: torch.dtype) -> torch.Tensor:
@@ -1221,6 +1221,8 @@ def chunk_gated_delta_rule_bwd_dhu_ref(
     dv_local: torch.Tensor,
     scale: float,
     chunk_size: int = 64,
+    gk: torch.Tensor | None = None,
+    state_v_first: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
     """Torch baseline for `chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64`.
 
@@ -1228,20 +1230,22 @@ def chunk_gated_delta_rule_bwd_dhu_ref(
     reverse recurrence that autodiff on the forward states cannot reproduce
     directly (the reverse-pass gradient flows through a running accumulator, not
     through the stored forward states). We therefore evaluate that same reverse
-    recurrence in plain torch (state_v_first=False, USE_GK=False):
+    recurrence in plain torch:
 
         b_dh = dht
         for it = NT-1 ... 0:
             dh[it]  = b_dh
             b_dv    = (k[it] @ b_dh) * exp2(g_last[it] - g[it]) + dv_local[it]
             dv2[it] = b_dv
-            b_dh    = b_dh * exp2(g_last[it])
+            b_dh    = b_dh * exp2(g_last[it]) [* exp2(gk_last[it])]
                       + (q_gated[it]^T @ do[it]) * scale
                       - w[it]^T @ b_dv
         dh0   = b_dh
 
-    Returns (dh, dh0, dv2) matching the kernel. `u` is unused (the kernel consumes
-    `dv_local` instead) and kept only for a uniform call signature.
+    With `state_v_first=True`, `b_dh`/`dh`/`dht`/`dh0` are `[..., V, K]` and the
+    contractions are transposed accordingly. `gk` is the per-key vector gate
+    `[B, T, HV, K]`. `u` is unused (the kernel consumes `dv_local`) and kept only
+    for a uniform call signature.
     """
     del u  # unused: the kernel differentiates w.r.t. dv_local, not u
     B, T, H, K = k.shape
@@ -1261,13 +1265,21 @@ def chunk_gated_delta_rule_bwd_dhu_ref(
     do_f = do.float()
     dv_f = dv_local.float()
     g_f = g.float() if g is not None else None
+    gk_f = gk.float() if gk is not None else None
 
-    dh = torch.zeros(B, NT, HV, K, V, dtype=torch.float32, device=k.device)
+    if state_v_first:
+        dh = torch.zeros(B, NT, HV, V, K, dtype=torch.float32, device=k.device)
+        dh_shape = (B, HV, V, K)
+        kdh_eq, qdo_eq, wdv_eq = 'bthk,bhvk->bthv', 'bthk,bthv->bhvk', 'bthk,bthv->bhvk'
+    else:
+        dh = torch.zeros(B, NT, HV, K, V, dtype=torch.float32, device=k.device)
+        dh_shape = (B, HV, K, V)
+        kdh_eq, qdo_eq, wdv_eq = 'bthk,bhkv->bthv', 'bthk,bthv->bhkv', 'bthk,bthv->bhkv'
     dv2 = torch.zeros(B, T, HV, V, dtype=torch.float32, device=k.device)
     if dht is not None:
         b_dh = dht.float().clone()
     else:
-        b_dh = torch.zeros(B, HV, K, V, dtype=torch.float32, device=k.device)
+        b_dh = torch.zeros(*dh_shape, dtype=torch.float32, device=k.device)
 
     for it in range(NT - 1, -1, -1):
         s, e = it * BT, (it + 1) * BT
@@ -1277,7 +1289,7 @@ def chunk_gated_delta_rule_bwd_dhu_ref(
         w_c = w_f[:, s:e]             # [B, BT, HV, K]
         do_c = do_f[:, s:e]           # [B, BT, HV, V]
         dv_c = dv_f[:, s:e]           # [B, BT, HV, V]
-        kdh = torch.einsum('bthk,bhkv->bthv', k_c, b_dh)   # [B, BT, HV, V]
+        kdh = torch.einsum(kdh_eq, k_c, b_dh)   # [B, BT, HV, V]
         if g_f is not None:
             g_c = g_f[:, s:e]         # [B, BT, HV]
             g_last = g_c[:, -1]       # [B, HV]
@@ -1288,8 +1300,14 @@ def chunk_gated_delta_rule_bwd_dhu_ref(
             b_dv = kdh + dv_c
             q_gated = q_c
         dv2[:, s:e] = b_dv
-        b_dh = b_dh + torch.einsum('bthk,bthv->bhkv', q_gated, do_c) * scale
-        b_dh = b_dh - torch.einsum('bthk,bthv->bhkv', w_c, b_dv)
+        if gk_f is not None:
+            gk_last = torch.exp2(gk_f[:, e - 1])  # [B, HV, K]
+            if state_v_first:
+                b_dh = b_dh * gk_last[:, :, None, :]
+            else:
+                b_dh = b_dh * gk_last[:, :, :, None]
+        b_dh = b_dh + torch.einsum(qdo_eq, q_gated, do_c) * scale
+        b_dh = b_dh - torch.einsum(wdv_eq, w_c, b_dv)
 
     dh0 = b_dh if h0 is not None else None
     return dh, dh0, dv2
@@ -1345,13 +1363,36 @@ def test_chunk_gated_delta_rule_bwd_dhu(
         assert_close('dh0', dh0_ref, dh0_tri, 0.006)
 
 
-@pytest.mark.skipif(
-    IS_NPU,
-    reason=(
-        "Ascend triton_ascend chunk_gated_delta_rule_bwd_dhu AICore-times out on the "
-        "2050-document varlen stress from #1077; skip until the NPU backend fix is ready."
-    ),
-)
+def test_chunk_gated_delta_rule_bwd_dhu_k256_state_v_first_gk():
+    """K=V=256 + state_v_first + USE_GK so K-slabs 3/4 actually run."""
+    torch.manual_seed(42)
+    B, T, H, HV, D, BT = 1, 128, 1, 1, 256, 64
+    dtype = torch.bfloat16
+    scale = D ** -0.5
+    q = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    k = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    w = torch.randn(B, T, HV, D, dtype=dtype, device=device)
+    u = torch.randn(B, T, HV, D, dtype=dtype, device=device)
+    do = torch.randn(B, T, HV, D, dtype=dtype, device=device)
+    gk = torch.randn(B, T, HV, D, dtype=torch.float32, device=device) * 0.1
+    h0 = torch.randn(B, HV, D, D, dtype=torch.float32, device=device)
+    dht = torch.randn(B, HV, D, D, dtype=torch.float32, device=device)
+
+    dv_local = torch.randn(B, T, HV, D, dtype=dtype, device=device)
+    dh_ref, dh0_ref, dv2_ref = chunk_gated_delta_rule_bwd_dhu_ref(
+        q, k, w, u, None, h0, do, dht, dv_local, scale, BT,
+        gk=gk, state_v_first=True,
+    )
+    dh_tri, dh0_tri, dv2_tri = chunk_gated_delta_rule_bwd_dhu(
+        q=q, k=k, w=w, g=None, gk=gk, h0=h0, dht=dht, do=do, dv=dv_local,
+        scale=scale, chunk_size=BT, state_v_first=True,
+    )
+
+    assert_close('dh', dh_ref.to(dtype), dh_tri, 0.006)
+    assert_close('dv2', dv2_ref.to(dtype), dv2_tri, 0.006)
+    assert_close('dh0', dh0_ref, dh0_tri, 0.006)
+
+
 def test_chunk_gated_delta_rule_bwd_dhu_varlen_many_documents():
     """The backward counterpart of `test_chunk_gated_delta_rule_fwd_h_varlen_many_documents`."""
     torch.manual_seed(42)
