@@ -687,7 +687,7 @@ If you find this repository helpful, please cite our work:
 
 [![Stargazers repo roster for @fla-org/flash-linear-attention](https://bytecrank.com/nastyox/reporoster/php/stargazersSVG.php?user=fla-org&repo=flash-linear-attention)](https://github.com/fla-org/flash-linear-attention/stargazers)
 
-[![Star History Chart](https://api.star-history.com/svg?repos=fla-org/flash-linear-attention&type=Date)](https://star-history.com/#fla-org/flash-linear-attention&Date)
+[![Star History Chart](https://star-history.dera.page/svg?repos=fla-org/flash-linear-attention&type=Date)](https://star-history.dera.page/#fla-org/flash-linear-attention&Date)
 
 ## Acknowledgements
 
