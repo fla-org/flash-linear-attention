@@ -39,6 +39,7 @@ def chunk_kda_fwd(
     disable_recompute: bool = False,
     return_intermediate_states: bool = False,
     cp_context: FLACPContext | None = None,
+    use_tilelang_helpers: bool = False,
 ):
     # Apply gate activation
     g_org = None
@@ -63,8 +64,13 @@ def chunk_kda_fwd(
             chunk_indices=chunk_indices
         )
 
+    fwd_intra = chunk_kda_fwd_intra
+    if use_tilelang_helpers:
+        from fla.ops.kda.backends.tilelang.chunk_fwd_intra import chunk_kda_fwd_intra_tilelang
+        fwd_intra = chunk_kda_fwd_intra_tilelang
+
     # qg = None if disable_recompute is False
-    w, u, qg, kg, Aqk, Akk = chunk_kda_fwd_intra(
+    w, u, qg, kg, Aqk, Akk = fwd_intra(
         q=q,
         k=k,
         v=v,
