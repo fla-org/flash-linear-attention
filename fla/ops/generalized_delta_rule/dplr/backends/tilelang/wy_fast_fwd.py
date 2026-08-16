@@ -26,13 +26,19 @@ from .schedules import device_cc
 from .utils import ChunkLayout, build_rect_chunk_layout, build_varlen_chunk_layout
 
 
-def _wu_fwd_config(BT: int, device: torch.device) -> dict[str, int]:
-    # 256 threads + bulk copies pay at BT=64 on cc90 and cc120 alike
-    # (kernel-level 1.7-2.1x over the scalar path on both); they measure
-    # flat at BT=32 on cc120, so the gate stays BT>=64.
+def _wu_fwd_config(BT: int, K: int, device: torch.device) -> dict[str, int]:
+    # Bulk copies + wide threads pay at BT=64 on cc90 and cc120 alike
+    # (kernel-level 1.7-2.1x over the scalar path on both); cc90 also wins
+    # at BT=32 with 128 threads, while cc120 measures flat there, so the
+    # cc120 gate stays BT>=64. At BT=32/K>=128 on cc90, 256 threads spread
+    # the wide ag/v tiles and N=128 GEMMs further (-21% kernel time); at
+    # K=64 they over-subscribe the narrow tiles (+3%).
     if BT <= 16:
         return {"threads": 32, "bulk_copy": False}
-    if device_cc(device) in (90, 120) and BT >= 64:
+    cc = device_cc(device)
+    if cc == 90:
+        return {"threads": 256 if BT >= 64 or K >= 128 else 128, "bulk_copy": True}
+    if cc == 120 and BT >= 64:
         return {"threads": 256, "bulk_copy": True}
     return {"threads": 128, "bulk_copy": False}
 
@@ -158,11 +164,18 @@ def _prepare_wy_repr_fwd_kernel_bt64(H, in_dtype, threads: int = 32):
             tmp_shared = T.alloc_shared((BC, BC), acc_dtype)
             A3_out = T.alloc_fragment((BC, BC), acc_dtype)
             v = T.alloc_shared((BC,), acc_dtype)
+            v2 = T.alloc_shared((BC,), acc_dtype)
             v_new = T.alloc_fragment((BC,), acc_dtype)
+            v_new2 = T.alloc_fragment((BC,), acc_dtype)
             T.clear(v_new)
+            T.clear(v_new2)
 
             # FLA's chunk64 path inverts the two 32x32 diagonal blocks
             # independently, then forms the bottom-left block with two GEMMs.
+            # The two inversions share one loop so the independent FMA chains
+            # interleave (same per-matrix accumulation order); only j < row_i
+            # can contribute since v[j>=row_i] is exactly zero above the
+            # strict lower triangle.
             for r, c in T.Parallel(BC, BC):
                 t1 = bos + r
                 t2 = bos + BC + r
@@ -183,28 +196,18 @@ def _prepare_wy_repr_fwd_kernel_bt64(H, in_dtype, threads: int = 32):
                 row_i = i + 1
                 for c in T.Parallel(BC):
                     v[c] = A1[row_i, c]
-                for j in T.serial(BC):
+                    v2[c] = A2[row_i, c]
+                for j in T.serial(1, row_i):
                     for c in T.Parallel(BC):
                         if c < j:
                             v_new[c] = v_new[c] + v[j] * A1[j, c]
+                            v_new2[c] = v_new2[c] + v2[j] * A2[j, c]
                 for c in T.Parallel(BC):
                     if c < row_i:
                         A1[row_i, c] = v[c] + v_new[c]
+                        A2[row_i, c] = v2[c] + v_new2[c]
                     v_new[c] = 0.0
-
-            T.clear(v_new)
-            for i in T.serial(BC - 1):
-                row_i = i + 1
-                for c in T.Parallel(BC):
-                    v[c] = A2[row_i, c]
-                for j in T.serial(BC):
-                    for c in T.Parallel(BC):
-                        if c < j:
-                            v_new[c] = v_new[c] + v[j] * A2[j, c]
-                for c in T.Parallel(BC):
-                    if c < row_i:
-                        A2[row_i, c] = v[c] + v_new[c]
-                    v_new[c] = 0.0
+                    v_new2[c] = 0.0
 
             for r, c in T.Parallel(BC, BC):
                 if r == c:
@@ -282,23 +285,23 @@ def _wu_fwd_kernel(H, K, V, BT, in_dtype, threads: int = 32, bulk_copy: bool = F
             full_tile = (is_valid_chunk and (bos + BT <= eos)) if bulk_copy else False
             if full_tile:
                 T.copy(A_ab_inv[bos: bos + BT, i_h, 0:BT], A_inv_acc_shared)
-                T.copy(A_ab_inv[bos: bos + BT, i_h, 0:BT], A_inv_shared)
                 T.copy(A_ak[bos: bos + BT, i_h, 0:BT], A_ak_acc_shared)
+                # The bf16 view is the same tile after masking, so derive it
+                # from the fp32 copy in shared instead of reading global twice.
                 for r, c in T.Parallel(BT, BT):
                     if r < c:
                         A_inv_acc_shared[r, c] = 0.0
-                        A_inv_shared[r, c] = T.Cast(in_dtype, 0.0)
                     if r <= c:
                         A_ak_acc_shared[r, c] = 0.0
+                    A_inv_shared[r, c] = T.Cast(in_dtype, A_inv_acc_shared[r, c])
             else:
                 for r, c in T.Parallel(BT, BT):
                     t = bos + r
                     if (t < eos) and (r >= c):
                         A_inv_acc_shared[r, c] = A_ab_inv[t, i_h, c]
-                        A_inv_shared[r, c] = T.Cast(in_dtype, A_ab_inv[t, i_h, c])
                     else:
                         A_inv_acc_shared[r, c] = 0.0
-                        A_inv_shared[r, c] = T.Cast(in_dtype, 0.0)
+                    A_inv_shared[r, c] = T.Cast(in_dtype, A_inv_acc_shared[r, c])
                     if (t < eos) and (r > c):
                         A_ak_acc_shared[r, c] = A_ak[t, i_h, c]
                     else:
@@ -386,7 +389,7 @@ def prepare_wy_repr_fwd(
 
     wu_kernel = _wu_fwd_kernel(
         H, K, V, BT, in_dtype,
-        **_wu_fwd_config(BT, ag.device),
+        **_wu_fwd_config(BT, K, ag.device),
     )
     w_f = torch.empty((N_tokens, H, K), dtype=ag.dtype, device=ag.device)
     u_f = torch.empty((N_tokens, H, V), dtype=v.dtype, device=v.device)

@@ -60,17 +60,34 @@ def dtype_nbytes(dtype: str) -> int:
     raise ValueError(f"unsupported DPLR stream backward dtype {dtype!r}")
 
 
-def stream_high_smem_bytes(K: int, V: int, BT: int, in_dtype: str) -> int:
+def stream_pipeline_extra_smem_bytes(K: int, V: int, BT: int, in_dtype: str) -> int:
+    """Extra smem of the double-buffered chunk loop: a second version of
+    every global->shared operand tile (4x (BT, K), 3x (BT, V), 2x (BT, BT)).
+    The fp32 gk_last row stays single-buffered (scalar per-chunk loads)."""
+    elem = dtype_nbytes(in_dtype)
+    return elem * (4 * BT * K + 3 * BT * V + 2 * BT * BT)
+
+
+def stream_high_smem_bytes(K: int, V: int, BT: int, in_dtype: str, num_stages: int = 1) -> int:
     elem = dtype_nbytes(in_dtype)
     # fp32 tiles: gk_last (K,) plus the (4, K) dgk_part staging buffer.
-    return elem * (2 * K * V + 8 * BT * K + 5 * BT * V + 2 * BT * BT) + 20 * K
+    base = elem * (2 * K * V + 8 * BT * K + 5 * BT * V + 2 * BT * BT) + 20 * K
+    if num_stages < 2:
+        return base
+    # Double-buffered: a second version of the nine operand tiles plus the
+    # (K, V) h tile.
+    return base + stream_pipeline_extra_smem_bytes(K, V, BT, in_dtype) + elem * K * V
 
 
-def stream_mid_smem_bytes(K: int, V: int, BT: int, in_dtype: str) -> int:
+def stream_mid_smem_bytes(K: int, V: int, BT: int, in_dtype: str, num_stages: int = 1) -> int:
     """High schedule with the two (K, V) state tiles aliased into one and the
-    four (BT, K) output staging tiles merged into one sequential buffer."""
+    four (BT, K) output staging tiles merged into one sequential buffer.  The
+    alias_kv path keeps the h tile single-buffered when pipelined."""
     elem = dtype_nbytes(in_dtype)
-    return stream_high_smem_bytes(K, V, BT, in_dtype) - elem * (K * V + 3 * BT * K)
+    base = stream_high_smem_bytes(K, V, BT, in_dtype, 1) - elem * (K * V + 3 * BT * K)
+    if num_stages < 2:
+        return base
+    return base + stream_pipeline_extra_smem_bytes(K, V, BT, in_dtype)
 
 
 def stream_reuse_smem_bytes(K: int, V: int, BT: int, in_dtype: str, qside_bv: int) -> int:
@@ -118,6 +135,30 @@ def stream_bwd_schedule_or_none(
     if low_dtype_supported and low_smem <= smem_cap:
         return "low"
     return None
+
+
+def stream_bwd_num_stages(
+    schedule: str,
+    *,
+    K: int,
+    V: int,
+    BT: int,
+    in_dtype: str,
+    smem_cap: int,
+) -> int:
+    """Software-pipeline depth for the high/mid chunk loop.
+
+    Double-buffering the operand tiles pays off wherever the versioned
+    footprint still fits the optin cap; the low schedule stays serial.
+    Returns 0 (a plain serial loop) or 2.
+    """
+    if schedule == "high":
+        smem = stream_high_smem_bytes(K, V, BT, in_dtype, num_stages=2)
+    elif schedule == "mid":
+        smem = stream_mid_smem_bytes(K, V, BT, in_dtype, num_stages=2)
+    else:
+        return 0
+    return 2 if smem <= smem_cap else 0
 
 
 def chunk64_schedule_or_none(

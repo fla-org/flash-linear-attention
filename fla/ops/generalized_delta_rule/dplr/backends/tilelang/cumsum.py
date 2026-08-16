@@ -14,13 +14,16 @@ Produces two outputs:
 where each chunk of size BT cumsums independently. `scale = RCP_LN2` lets
 downstream kernels use `T.exp2` directly.
 
-Rectangular batches use a segmented fp32 scan kernel: each (chunk, head,
-channel-block) CTA splits the chunk's BT timesteps across SEG lane groups that
-scan their segment serially in registers, then applies a per-channel exclusive
-prefix of the segment sums before writing gi/ge in one pass (ge is the shifted
-gi). This replaces the earlier vectorized PyTorch chain (fp32 cast + pad +
-cumsum + scale + shifted zeros), which cost ~2.5 ms of elementwise/scan glue
-kernels per call at h4096 (vs ~1.3 ms here).
+Rectangular batches compute the prefix as a matmul against constant
+(strict-)lower-triangular ones matrices (FLA's chunk_rwkv6_fwd_cumsum
+formulation): the gate tile is loaded once, two tensor-core GEMMs produce
+the inclusive and exclusive prefixes, and results are scaled and stored.
+Same global traffic as a scan with no serial phases; the GEMMs accumulate
+in fp32 from tf32-rounded inputs, matching the Triton reference's numerics.
+This replaces the earlier vectorized PyTorch chain (fp32 cast + pad +
+cumsum + scale + shifted zeros), which cost ~2.5 ms of elementwise/scan
+glue kernels per call at h4096, and a segmented serial-scan kernel that
+measured 2.2x behind Triton on sm_90.
 
 Varlen batches keep the irregular-boundary kernel keyed by chunk_indices.
 """
@@ -43,11 +46,10 @@ from .utils import ChunkLayout, build_varlen_chunk_layout
     },
 )
 def _chunk_local_cumsum_rect_kernel_tl(
-    H, K, BT, BS, SEG, in_dtype, scale_value: float, OUTPUT_GE: bool
+    H, K, BT, BS, in_dtype, scale_value: float, OUTPUT_GE: bool, threads: int = 128
 ):
     acc_dtype = "float32"
     B, Tt = T.dynamic("B, Tt")
-    SL = BT // SEG  # segment length
 
     @T.prim_func
     def chunk_local_cumsum_rect_tl(
@@ -56,54 +58,50 @@ def _chunk_local_cumsum_rect_kernel_tl(
         ge: T.Tensor((B, Tt, H, K), acc_dtype),
     ):
         tpc = T.ceildiv(Tt, BT)
-        with T.Kernel(T.ceildiv(K, BS), B * tpc, H, threads=BS * SEG) as (i_sb, i_c, i_h):
+        with T.Kernel(T.ceildiv(K, BS), B * tpc, H, threads=threads) as (i_sb, i_c, i_h):
             i_n = i_c // tpc
             bos = (i_c % tpc) * BT
 
-            scan_sh = T.alloc_shared((BT, BS), acc_dtype)
-            seg_sum = T.alloc_shared((BS, SEG), acc_dtype)
-            acc = T.alloc_fragment((BS, SEG), acc_dtype)
-            off_frag = T.alloc_fragment((BS, SEG), acc_dtype)
-            T.clear(acc)
-            T.clear(off_frag)
+            g_shared = T.alloc_shared((BT, BS), acc_dtype)
+            mask_i = T.alloc_shared((BT, BT), acc_dtype)
+            if OUTPUT_GE:
+                mask_e = T.alloc_shared((BT, BT), acc_dtype)
+            gi_frag = T.alloc_fragment((BT, BS), acc_dtype)
+            if OUTPUT_GE:
+                ge_frag = T.alloc_fragment((BT, BS), acc_dtype)
 
-            # Per-lane serial scan over its segment, values staged in shared.
-            for step in T.serial(SL):
-                for c, s in T.Parallel(BS, SEG):
-                    t_local = s * SL + step
+            # Interior chunks bulk-copy; the last chunk of a batch element
+            # (T % BT != 0) takes the predicated scalar path.
+            if bos + BT <= Tt:
+                T.copy(g[i_n, bos: bos + BT, i_h, i_sb * BS: i_sb * BS + BS], g_shared)
+            else:
+                for r, c in T.Parallel(BT, BS):
+                    t = bos + r
                     k_idx = i_sb * BS + c
-                    if (bos + t_local < Tt) and (k_idx < K):
-                        acc[c, s] = acc[c, s] + T.Cast(acc_dtype, g[i_n, bos + t_local, i_h, k_idx])
-                        scan_sh[t_local, c] = acc[c, s]
+                    if (t < Tt) and (k_idx < K):
+                        g_shared[r, c] = T.Cast(acc_dtype, g[i_n, t, i_h, k_idx])
+                    else:
+                        g_shared[r, c] = T.Cast(acc_dtype, 0.0)
 
-            # Exclusive prefix over segment sums per channel.
-            for c, s in T.Parallel(BS, SEG):
-                seg_sum[c, s] = acc[c, s]
-            for s2 in T.serial(1, SEG):
-                for c, s in T.Parallel(BS, SEG):
-                    if s >= s2:
-                        off_frag[c, s] += seg_sum[c, s2 - 1]
+            # Mask entries are exact 0/1 values.
+            for r, c in T.Parallel(BT, BT):
+                mask_i[r, c] = T.if_then_else(r >= c, T.Cast(acc_dtype, 1.0), T.Cast(acc_dtype, 0.0))
+                if OUTPUT_GE:
+                    mask_e[r, c] = T.if_then_else(r > c, T.Cast(acc_dtype, 1.0), T.Cast(acc_dtype, 0.0))
 
-            # Emit gi/ge with the segment offset; ge is the shifted gi.
-            for step in T.serial(SL):
-                for c, s in T.Parallel(BS, SEG):
-                    t_local = s * SL + step
-                    k_idx = i_sb * BS + c
-                    if (bos + t_local < Tt) and (k_idx < K):
-                        gi[i_n, bos + t_local, i_h, k_idx] = (scan_sh[t_local, c] + off_frag[c, s]) * scale_value
-                        if OUTPUT_GE:
-                            ge[i_n, bos + t_local, i_h, k_idx] = (
-                                off_frag[c, s]
-                                + T.if_then_else(step > 0, scan_sh[T.max(t_local - 1, 0), c], T.Cast(acc_dtype, 0.0))
-                            ) * scale_value
+            T.gemm(mask_i, g_shared, gi_frag, clear_accum=True)
+            if OUTPUT_GE:
+                T.gemm(mask_e, g_shared, ge_frag, clear_accum=True)
+
+            for r, c in T.Parallel(BT, BS):
+                t = bos + r
+                k_idx = i_sb * BS + c
+                if (t < Tt) and (k_idx < K):
+                    gi[i_n, t, i_h, k_idx] = gi_frag[r, c] * scale_value
+                    if OUTPUT_GE:
+                        ge[i_n, t, i_h, k_idx] = ge_frag[r, c] * scale_value
 
     return chunk_local_cumsum_rect_tl
-
-
-def _rect_cumsum_seg(chunk_size: int) -> int:
-    # Measured on sm_120 (h4096, fp32 gates): BT=64 favors 2 lane groups
-    # (1.27 ms vs 1.52/1.83 at 4/8), BT=32 favors 8 (1.34 vs 1.43/1.45 at 2/4).
-    return {64: 2, 32: 8}.get(chunk_size, 4)
 
 
 # ---------------------------------------------------------------------------
@@ -189,7 +187,7 @@ def chunk_local_cumsum(
     if not is_varlen:
         B, T_, H, K = g.shape
         kernel = _chunk_local_cumsum_rect_kernel_tl(
-            H, K, chunk_size, 64, _rect_cumsum_seg(chunk_size), in_dtype, scale_f, output_ge
+            H, K, chunk_size, 64, in_dtype, scale_f, output_ge
         )
         gi = torch.empty((B, T_, H, K), dtype=torch.float32, device=g.device)
         ge = torch.empty((B, T_, H, K), dtype=torch.float32, device=g.device) if output_ge else gi
