@@ -41,6 +41,10 @@ Usage::
     python -m benchmarks.ops.run --op chunk_gla \\
         --custom-shapes '{"test": {"B": 2, "T": 4096, "H": 32, "D": 128}}'
 
+    # Layer-shaped q/k/v and gate distributions with a reproducible seed
+    python -m benchmarks.ops.run --op chunk_gla chunk_gdn chunk_kda \\
+        --input-profile realistic --seed 42
+
     # List all registered ops
     python -m benchmarks.ops.run --list
 
@@ -123,6 +127,8 @@ Benchmark methodology
    ``FLA_BENCH_WARMUP_MS`` / ``FLA_BENCH_REP_MS`` for noisier machines / CI).
 3. Input tensors (including gate transforms like logsigmoid) are prepared
    **before** timing — only the op call itself is measured.
+4. ``--input-profile realistic`` follows the transforms and parameter ranges used by FLA layers.
+   ``--seed`` is reapplied per op/shape so input samples are stable across runs and baseline refs.
 """
 
 from __future__ import annotations
@@ -269,6 +275,8 @@ def benchmark_op(
     shapes: dict[str, dict[str, int]],
     modes: list[str] | None = None,
     backend: str | None = None,
+    input_profile: str = 'synthetic',
+    seed: int = 42,
 ) -> list[dict]:
     """Benchmark a single op across all *shapes* and *modes*.
 
@@ -297,6 +305,8 @@ def benchmark_op(
     elif backend == 'triton':
         for env in backend_env.values():
             os.environ[env] = '0'
+    if input_profile != 'synthetic':
+        op_label = f"{op_label}[{input_profile}]"
 
     if config.skip_backward and 'fwdbwd' in modes:
         modes = [m for m in modes if m != 'fwdbwd']
@@ -331,11 +341,22 @@ def benchmark_op(
     # Phase 1: warmup ALL shapes before timing ANY
     print(f"\n  [{op_name}] Warming up {len(valid_shapes)} shape(s)...")
     failed_shapes = set()
-    for shape_name, shape_dict in valid_shapes.items():
+    for shape_index, (shape_name, shape_dict) in enumerate(valid_shapes.items()):
         B, T, H, D = shape_dict['B'], shape_dict['T'], shape_dict['H'], shape_dict['D']
         extra_shape_kw = {k: v for k, v in shape_dict.items() if k not in ('B', 'T', 'H', 'D')}
         try:
-            inputs = generate_inputs(config, B, T, H, D, dtype=dtype, device=device_name, **extra_shape_kw)
+            torch.manual_seed(seed + shape_index)
+            inputs = generate_inputs(
+                config,
+                B,
+                T,
+                H,
+                D,
+                dtype=dtype,
+                device=device_name,
+                input_profile=input_profile,
+                **extra_shape_kw,
+            )
             out = op_fn(**inputs, **call_kwargs)
             out_tensor = out[0] if config.output_is_tuple else out
             do = torch.randn_like(out_tensor)
@@ -356,11 +377,22 @@ def benchmark_op(
 
     # Phase 2: timing
     results = []
-    for shape_name, shape_dict in list(valid_shapes.items()):
+    for shape_index, (shape_name, shape_dict) in enumerate(valid_shapes.items()):
         B, T, H, D = shape_dict['B'], shape_dict['T'], shape_dict['H'], shape_dict['D']
         extra_shape_kw = {k: v for k, v in shape_dict.items() if k not in ('B', 'T', 'H', 'D')}
         try:
-            inputs = generate_inputs(config, B, T, H, D, dtype=dtype, device=device_name, **extra_shape_kw)
+            torch.manual_seed(seed + shape_index)
+            inputs = generate_inputs(
+                config,
+                B,
+                T,
+                H,
+                D,
+                dtype=dtype,
+                device=device_name,
+                input_profile=input_profile,
+                **extra_shape_kw,
+            )
         except Exception as e:
             logger.warning(f"Input generation failed for {op_name} @ {shape_name}: {e}")
             continue
@@ -548,7 +580,7 @@ def _find_project_root() -> str:
     return os.getcwd()
 
 
-def _bench_at_ref(ref, op_names, shape_configs, modes, backend=None):
+def _bench_at_ref(ref, op_names, shape_configs, modes, backend=None, input_profile='synthetic', seed=42):
     """Run benchmarks at a git ref using a temporary worktree.
 
     Returns (results_list, machine_info_dict) or (None, None) on failure.
@@ -581,7 +613,8 @@ def _bench_at_ref(ref, op_names, shape_configs, modes, backend=None):
         out_json = os.path.join(tmpdir, 'results.json')
         cmd = [sys.executable, runner, '--op', *op_names,
                '--custom-shapes', json.dumps(shape_configs),
-               '--modes', *modes, '--json', out_json]
+               '--modes', *modes, '--input-profile', input_profile,
+               '--seed', str(seed), '--json', out_json]
         if backend is not None:
             cmd += ['--backend', backend]
         subprocess.run(cmd, cwd=worktree_dir)
@@ -629,6 +662,14 @@ def main():
         '--modes', nargs='+', default=['fwd', 'fwdbwd'],
         choices=['fwd', 'fwdbwd'],
         help='Benchmark modes (default: fwd fwdbwd)',
+    )
+    parser.add_argument(
+        '--input-profile', choices=['synthetic', 'realistic'], default='synthetic',
+        help='Input distribution profile (default: synthetic)',
+    )
+    parser.add_argument(
+        '--seed', type=int, default=42,
+        help='Input seed reapplied for each op/shape (default: 42)',
     )
     parser.add_argument(
         '--json', dest='json_file', default=None,
@@ -689,11 +730,21 @@ def main():
     print(_format_machine_line(machine_info))
     print(f"Shapes: {len(shape_configs)} configs")
     print(f"Ops: {op_names}")
+    print(f"Input profile: {args.input_profile} (seed={args.seed})")
 
     all_results = []
     for op_name in op_names:
         try:
-            all_results.extend(benchmark_op(op_name, shape_configs, modes=args.modes, backend=args.backend))
+            all_results.extend(
+                benchmark_op(
+                    op_name,
+                    shape_configs,
+                    modes=args.modes,
+                    backend=args.backend,
+                    input_profile=args.input_profile,
+                    seed=args.seed,
+                )
+            )
         except Exception as e:
             logger.error(f"Failed to benchmark {op_name}: {e}")
 
@@ -707,7 +758,14 @@ def main():
     baseline, baseline_info = None, None
     if base_ref:
         baseline, baseline_info = _bench_at_ref(
-            base_ref, op_names, shape_configs, args.modes, backend=args.backend)
+            base_ref,
+            op_names,
+            shape_configs,
+            args.modes,
+            backend=args.backend,
+            input_profile=args.input_profile,
+            seed=args.seed,
+        )
 
     # Sort by (mode, L, B, T, H, D, op) so the table groups by mode first
     # and (when present) by L so different residual-source counts cluster.
