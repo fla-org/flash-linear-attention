@@ -104,6 +104,7 @@ def compute_dh0_triton(
     initial_state: torch.Tensor,
     activation: str | None,
     cu_seqlens: torch.Tensor | None,
+    dht: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
     Compute dh0 (gradient w.r.t. initial_state) using a separate Triton kernel.
@@ -129,6 +130,7 @@ def compute_dh0_triton(
         y=y_to_pass,
         weight=weight,
         dh0=dh0,
+        dht=dht,
         cu_seqlens=cu_seqlens,
         stride_dy_n=stride_dy_n,
         stride_dy_t=stride_dy_t,
@@ -239,6 +241,7 @@ def causal_conv1d_bwd(
             initial_state=initial_state,
             activation=activation,
             cu_seqlens=cu_seqlens,
+            dht=dht,
         )
 
     return dx.view(shape), dw, db, dr, dh0
