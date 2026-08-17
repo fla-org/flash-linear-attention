@@ -137,6 +137,13 @@ def test_fused_recurrent(
     h0 = torch.randn(B, HV, D, D, dtype=torch.float32)
     q, k, v, g, beta, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, g, beta, h0))
 
+    g_tri = g.clone()
+    if triton.next_power_of_2(D) != D:
+        # the kernel loads g in next_power_of_2(D) blocks;
+        # poison the memory right after g so any read past D shows up as NaN instead of a silent no-op
+        buf = torch.full((g.numel() + triton.next_power_of_2(D),), 1e30, dtype=torch.float, device=device)
+        g_tri = buf[:g.numel()].view_as(g).copy_(g)
+
     ref, ref_ht = naive_recurrent_kda(
         q=F.normalize(q.clone(), p=2, dim=-1),
         k=F.normalize(k.clone(), p=2, dim=-1),
@@ -152,7 +159,7 @@ def test_fused_recurrent(
         q=F.normalize(q.clone(), p=2, dim=-1) if not use_qk_l2norm_in_kernel else q.clone(),
         k=F.normalize(k.clone(), p=2, dim=-1) if not use_qk_l2norm_in_kernel else k.clone(),
         v=v.clone(),
-        g=g.clone(),
+        g=g_tri,
         beta=beta.clone(),
         scale=scale,
         initial_state=h0.clone(),
@@ -161,28 +168,6 @@ def test_fused_recurrent(
     )
     assert_close("o", ref, tri, 0.005)
     assert_close("ht", ref_ht, tri_ht, 0.005)
-
-
-@pytest.mark.parametrize("D", [60, 100])
-def test_fused_recurrent_non_power_of_two_d(D: int):
-    # the kernel loads `g` over a [next_power_of_2(D)] block; the lanes beyond D must not
-    # be read, or the values living right after `g` leak into the recurrence
-    B, T, H = 1, 4, 2
-    torch.manual_seed(42)
-    q = torch.rand(B, T, H, D, dtype=torch.float, device=device)
-    k = torch.rand(B, T, H, D, dtype=torch.float, device=device)
-    v = torch.rand(B, T, H, D, dtype=torch.float, device=device)
-    beta = torch.randn(B, T, H, dtype=torch.float, device=device).sigmoid()
-    g = F.logsigmoid(torch.randn(B, T, H, D, dtype=torch.float, device=device))
-
-    # place `g` at the front of a larger buffer whose tail would overflow `exp` if read
-    buf = torch.full((g.numel() + triton.next_power_of_2(D),), 1e30, dtype=torch.float, device=device)
-    g_padded = buf[:g.numel()].view_as(g)
-    g_padded.copy_(g)
-
-    ref, _ = fused_recurrent_kda(q=q, k=k, v=v, g=g, beta=beta)
-    tri, _ = fused_recurrent_kda(q=q, k=k, v=v, g=g_padded, beta=beta)
-    assert_close("o", ref, tri, 0.005)
 
 
 @pytest.mark.parametrize(
