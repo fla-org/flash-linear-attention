@@ -18,20 +18,19 @@ import os
 import torch
 
 from fla.ops.backends import BaseBackend
-from fla.utils import IS_NVIDIA_HOPPER, TRITON_ABOVE_3_4_0, find_spec_cached
+from fla.utils import IS_NVIDIA_HOPPER, TRITON_ABOVE_3_4_0, find_spec_cached, has_usable_nvcc
 
 _TILELANG_AVAILABLE = find_spec_cached("tilelang") is not None
 
 
 class TileLangBackend(BaseBackend):
-
     backend_type = "tilelang"
     package_name = "tilelang"
     env_var = "FLA_TILELANG"
 
     @classmethod
     def is_available(cls) -> bool:
-        return _TILELANG_AVAILABLE
+        return _TILELANG_AVAILABLE and has_usable_nvcc()
 
     @classmethod
     def is_enabled(cls) -> bool:

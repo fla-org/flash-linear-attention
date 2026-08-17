@@ -187,7 +187,7 @@ class WallAttention(nn.Module):
                     o = self._decode_rebuild(q, k, v, g, gs)
                 else:
                     o = parallel_wall_attn(q, k, v, g, g_scalar=gs, window_size=self.window_size)
-        elif attention_mask is not None:
+        elif cu_seqlens is None and attention_mask is not None:
             states = (k, v, g, gs) if self.use_scalar_gate else (k, v, g)
             q, states, indices_q, cu_seqlens, max_seq_lens = unpad_input(q, states, attention_mask, q_len, keepdim=True)
             if self.use_scalar_gate:

@@ -10,6 +10,7 @@ import warnings
 import torch
 
 from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
+from fla.ops.backends import dispatch
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_gated_delta_rule_fwd_h
 from fla.ops.common.chunk_o import chunk_bwd_dqkwg, chunk_bwd_dv_local, chunk_fwd_o
 from fla.ops.common.gate import fused_beta_sigmoid, fused_beta_sigmoid_bwd
@@ -267,6 +268,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         state_v_first: bool = False,
         cu_seqlens: torch.LongTensor | None = None,
         cu_seqlens_cpu: torch.LongTensor | None = None,
+        chunk_indices: torch.LongTensor | None = None,
         use_qk_l2norm_in_kernel: bool = False,
         use_gate_in_kernel: bool = False,
         A_log: torch.Tensor | None = None,
@@ -285,8 +287,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         if use_beta_sigmoid_in_kernel:
             beta = fused_beta_sigmoid(beta_raw, scale=2.0 if allow_neg_eigval else 1.0)
 
-        chunk_indices = None
-        if cu_seqlens is not None:
+        if chunk_indices is None and cu_seqlens is not None:
             chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size, cu_seqlens_cpu=cu_seqlens_cpu)
         g, o, A, final_state, initial_state, g_input = chunk_gated_delta_rule_fwd(
             q=q,
@@ -386,11 +387,12 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             db = fused_beta_sigmoid_bwd(beta_raw, db, scale=2.0 if ctx.allow_neg_eigval else 1.0)
         return (
             dq.to(q), dk.to(k), dv.to(v), dg.to(g), db.to(beta_raw),
-            None, dh0, None, None, None, None, None, None, dA_log, ddt_bias,
+            None, dh0, None, None, None, None, None, None, None, dA_log, ddt_bias,
             None, None, None, None,
         )
 
 
+@dispatch('gated_delta_rule')
 @torch.compiler.disable
 def chunk_gated_delta_rule(
     q: torch.Tensor,
@@ -407,6 +409,7 @@ def chunk_gated_delta_rule(
     state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     cu_seqlens_cpu: torch.LongTensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
     cp_context: FLACPContext | None = None,
     **kwargs,
 ):
@@ -461,6 +464,9 @@ def chunk_gated_delta_rule(
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
+        chunk_indices (Optional[torch.LongTensor]):
+            Pre-computed chunk indices for variable-length inputs.
+            If provided, they are used directly instead of being computed from `cu_seqlens`. Default: `None`.
         cp_context (Optional[FLACPContext]):
             Context parallel context for distributed training across multiple devices.
             When provided, `initial_state` and `output_final_state` are not supported,
@@ -574,6 +580,7 @@ def chunk_gated_delta_rule(
         state_v_first,
         cu_seqlens,
         cu_seqlens_cpu,
+        chunk_indices,
         use_qk_l2norm_in_kernel,
         use_gate_in_kernel,
         A_log,

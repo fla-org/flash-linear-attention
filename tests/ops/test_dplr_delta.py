@@ -13,6 +13,10 @@ import torch.nn.functional as F
 from einops import rearrange
 
 from fla.ops.generalized_delta_rule.dplr import chunk_dplr_delta_rule, fused_recurrent_dplr_delta_rule
+from fla.ops.generalized_delta_rule.dplr.chunk_A_bwd import chunk_dplr_bwd_dqk_intra
+from fla.ops.generalized_delta_rule.dplr.chunk_A_fwd import chunk_dplr_fwd_intra
+from fla.ops.rwkv6.chunk import chunk_rwkv6_fwd_cumsum
+from fla.ops.utils.constant import RCP_LN2
 from fla.utils import assert_close, device, device_platform
 
 
@@ -365,6 +369,96 @@ def test_chunk(
     if gate_logit_normalizer >= 1 and ref_dg.norm() > 0.01:  # otherwise it is meaningless
         assert_close('dg', ref_dg, tri_dg, 0.008)
     assert_close('dh0', ref_dh0, tri_dh0, 0.008)
+
+
+@pytest.mark.skipif(
+    device_platform == 'intel',
+    reason='Intel Triton Failure',
+)
+def test_chunk_safe_gate_multihead_gradients():
+    B, T, H, D = 1, 16, 3, 16
+    dtype = torch.float16
+    h = torch.arange(H, dtype=torch.float32).view(1, 1, H, 1)
+
+    q = (1 + 0.1 * h).expand(B, T, H, D).to(dtype)
+    k = (1 + 0.2 * h).expand(B, T, H, D).to(dtype)
+    v = (1 + 0.3 * h).expand(B, T, H, D).to(dtype)
+    a = F.normalize((0.5 + 0.1 * h).expand(B, T, H, D).to(dtype), p=2, dim=-1)
+    b = -a
+    gk = torch.full((B, T, H, D), -0.1, dtype=torch.float32)
+    gk[:, :, 1, :] = -0.2
+    gk[:, :, 2, :] = -0.3
+    gk[:, :8, 0, :] = -5
+    q, k, v, a, b, gk = (x.to(device) for x in (q, k, v, a, b, gk))
+
+    gi, ge = chunk_rwkv6_fwd_cumsum(gk, 16, scale=RCP_LN2)
+    Aab, Aqk, Aak, Aqb, qg, kg, ag, bg = chunk_dplr_fwd_intra(
+        q=q,
+        k=k,
+        a=a,
+        b=b,
+        gi=gi,
+        ge=ge,
+        scale=1.0,
+        chunk_size=16,
+        safe_gate=True,
+    )
+    decay = torch.exp(gk[0, 8, :, 0])
+    expected_Aqk = D * q[0, 8, :, 0].float() * k[0, 7, :, 0].float() * decay
+    torch.testing.assert_close(Aqk[0, 8, :, 7].float(), expected_Aqk, rtol=2e-3, atol=2e-3)
+
+    dAqk = torch.zeros_like(Aqk)
+    dAqk[0, 8, :, 7] = 1
+    dAqb = torch.zeros_like(Aqb)
+    dAak = torch.zeros_like(Aak)
+    dAab = torch.zeros_like(Aab)
+    dqg = torch.zeros_like(qg)
+    dkg = torch.zeros_like(kg)
+    dag = torch.zeros_like(ag)
+    dbg = torch.zeros_like(bg)
+    dq, dk, da, db, dgk = chunk_dplr_bwd_dqk_intra(
+        q=q,
+        k=k,
+        a=a,
+        b=b,
+        gi=gi,
+        ge=ge,
+        dAqk=dAqk,
+        dAqb=dAqb,
+        dAak=dAak,
+        dAab=dAab,
+        dqg=dqg,
+        dkg=dkg,
+        dag=dag,
+        dbg=dbg,
+        dgk_last=torch.zeros_like(gi),
+        scale=1.0,
+        chunk_size=16,
+        safe_gate=True,
+    )
+    expected_dq = k[0, 7, :, 0].float() * decay
+    torch.testing.assert_close(dq[0, 8, :, 0].float(), expected_dq, rtol=1e-2, atol=1e-2)
+
+    tensors = [x.detach().clone().requires_grad_(True) for x in (q, k, v, a, b, gk)]
+    q2, k2, v2, a2, b2, gk2 = tensors
+    h0 = torch.zeros(B, H, D, D, dtype=torch.float32, device=device, requires_grad=True)
+    o, ht = chunk_dplr_delta_rule(
+        q2,
+        k2,
+        v2,
+        a2,
+        b2,
+        gk2,
+        scale=1.0,
+        initial_state=h0,
+        output_final_state=True,
+        safe_gate=True,
+        chunk_size=16,
+    )
+    (o.square().mean() + ht.square().mean()).backward()
+    assert torch.isfinite(o).all() and torch.isfinite(ht).all()
+    assert all(x.grad is not None and torch.isfinite(x.grad).all() for x in (*tensors, h0))
+    assert h0.grad.abs().max() > 0
 
 
 @pytest.mark.parametrize(

@@ -10,10 +10,52 @@ import warnings
 
 from transformers.configuration_utils import PretrainedConfig
 
+from fla.models.hybrid import HybridAttentionConfig, _HybridAttentionConfigMixin
 
-class SambaConfig(PretrainedConfig):
+_DEFAULT_ATTN = {
+    'layers': (1, 3, 5, 7, 9, 11, 13, 15, 17),
+    'num_heads': 18,
+    'num_kv_heads': 18,
+    'qkv_bias': False,
+    'window_size': 2048,
+    'rope_theta': 10000.,
+}
+
+
+def _is_legacy_default_attn(attn: HybridAttentionConfig) -> bool:
+    if not isinstance(attn, dict) or attn.keys() != _DEFAULT_ATTN.keys():
+        return False
+    layers = attn['layers']
+    if not isinstance(layers, (list, tuple)) or tuple(layers) != _DEFAULT_ATTN['layers']:
+        return False
+    return all(attn[key] == value for key, value in _DEFAULT_ATTN.items() if key != 'layers')
+
+
+def _adapt_default_attn(num_hidden_layers: int) -> dict:
+    return {
+        **_DEFAULT_ATTN,
+        'layers': [layer_idx for layer_idx in _DEFAULT_ATTN['layers'] if layer_idx < num_hidden_layers],
+    }
+
+
+class SambaConfig(_HybridAttentionConfigMixin, PretrainedConfig):
 
     model_type = "samba"
+
+    @classmethod
+    def from_dict(cls, config_dict: dict, **kwargs):
+        config_dict = config_dict.copy()
+        is_legacy_serialized_default = (
+            config_dict.get('model_type') == cls.model_type
+            and 'transformers_version' in config_dict
+            and _is_legacy_default_attn(config_dict.get('attn'))
+        )
+        if is_legacy_serialized_default:
+            # before hybrid-plan validation, shallow Samba JSON retained the
+            # full depth-18 default. Adapt only that serialized legacy shape.
+            num_hidden_layers = config_dict.get('num_hidden_layers', 18)
+            config_dict['attn'] = _adapt_default_attn(num_hidden_layers)
+        return super().from_dict(config_dict, **kwargs)
 
     def __init__(
         self,
@@ -38,14 +80,7 @@ class SambaConfig(PretrainedConfig):
         time_step_init_scheme: str = "random",
         time_step_floor: float = 1e-4,
         max_position_embeddings: int = 2048,
-        attn: dict | None = {
-            'layers': (1, 3, 5, 7, 9, 11, 13, 15, 17),
-            'num_heads': 18,
-            'num_kv_heads': 18,
-            'qkv_bias': False,
-            'window_size': 2048,
-            'rope_theta': 10000.,
-        },
+        attn: HybridAttentionConfig = _DEFAULT_ATTN,
         hidden_ratio: int | None = 4,
         rescale_prenorm_residual: bool = False,
         use_cache: bool = True,
@@ -80,6 +115,8 @@ class SambaConfig(PretrainedConfig):
         self.time_step_init_scheme = time_step_init_scheme
         self.time_step_floor = time_step_floor
         self.max_position_embeddings = max_position_embeddings
+        if attn is _DEFAULT_ATTN:
+            attn = _adapt_default_attn(num_hidden_layers)
         self.attn = attn
         self.hidden_ratio = hidden_ratio
         self.rescale_prenorm_residual = rescale_prenorm_residual

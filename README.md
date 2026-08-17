@@ -30,10 +30,12 @@
 
 ## News
 
-- [2026-06] 🔭 Add Parallax implementation to `fla` ([paper](https://arxiv.org/abs/2605.29157)) — parameterized local linear attention: softmax attention with a learned first-order correction from a secondary query-side stream.
+- [2026-07] 🧱 Add a [Gluon](https://triton-lang.org/main/getting-started/tutorials/gluon/) backend for [AttnRes](fla/ops/attnres).
+- [2026-07] 🚀 Add [FlashQLA](https://github.com/QwenLM/FlashQLA) backend for [Gated DeltaNet](fla/ops/gated_delta_rule).
+- [2026-06] 🔭 Add Parallax implementation to `fla` ([paper](https://arxiv.org/abs/2605.29157)).
 - [2026-06] 🧮 Add Preconditioned Gated DeltaNet (PGDN) and Preconditioned KDA (PKDA) to `fla` ([paper](https://arxiv.org/abs/2604.21100)) — curvature-aware preconditioning of the linear recurrence via an ATK preconditioner.
-- [2026-06] 🧱 Add Wall attention implementation to `fla` ([blog](https://blog.tilderesearch.com/blog/wall-attn)) — full softmax attention with a learned per-channel multiplicative decay, a RoPE-free positional encoding from Tilde Research.
-- [2026-05] 🚪 Add Gated DeltaNet 2 (GDN-2) implementation to `fla` ([paper](https://arxiv.org/abs/2605.22791)) — decouples erase and write gates into independent channel-wise gates on top of KDA.
+- [2026-06] 🧱 Add Wall attention implementation to `fla` ([blog](https://blog.tilderesearch.com/blog/wall-attn)).
+- [2026-05] 🚪 Add Gated DeltaNet 2 (GDN-2) implementation to `fla` ([paper](https://arxiv.org/abs/2605.22791)).
 - [2026-05] 🦅 Add Raven implementation to `fla` ([repo](https://github.com/goombalab/raven)).
 - [2026-05] 🚀 Add [YOCO](https://arxiv.org/abs/2405.05254) (You Only Cache Once) implementation to `fla`.
 - [2026-05] ⚡ Add fused [AttnRes](fla/ops/attnres) support to `fla` ([paper](https://arxiv.org/abs/2603.15031)).
@@ -47,12 +49,12 @@
 - [2025-09] 🐻 Thrilled to announce that [GDN](fla/ops/gated_delta_rule) has been integrated into Qwen3-Next. Check out their [blog post](https://qwen.ai/blog?id=4074cca80393150c248e508aa62983f9cb7d27cd&from=research.latest-advancements-list) for more info!
 - [2025-08] 🌲 Add Log-Linear Attention implementation to `fla` ([paper](https://arxiv.org/abs/2506.04761)).
 - [2025-08] 🎓 Add MoM implementation to `fla` ([paper](https://arxiv.org/abs/2502.13685)).
-- [2025-07] 🐳 Add MLA implementation to `fla` ([paper](https://arxiv.org/abs/2405.04434)).
-- [2025-07] 🛣️ Add PaTH Attention implementation to `fla` ([paper](https://arxiv.org/abs/2505.16381)).
 
 <details>
 <summary>Older news</summary>
 
+- [2025-07] 🐳 Add MLA implementation to `fla` ([paper](https://arxiv.org/abs/2405.04434)).
+- [2025-07] 🛣️ Add PaTH Attention implementation to `fla` ([paper](https://arxiv.org/abs/2505.16381)).
 - [2025-06] 🎉 Add MesaNet implementation to `fla` ([paper](https://arxiv.org/abs/2506.05233)).
 - [2025-06] 🐍 Add Comba implementation to `fla` ([paper](https://arxiv.org/abs/2506.02475)).
 - [2025-05] 🎉 Add Rodimus&ast; implementation to `fla` ([paper](https://arxiv.org/abs/2410.06577)).
@@ -306,6 +308,7 @@ All of the pretrained models currently available can be found in [`fla-hub`](htt
 
 `fla` provides a flexible method to incorporate standard attention layers into existing linear attention models.
 This is easily achieved by specifying the `attn` argument in the model configuration.
+The original dictionary form applies one shared attention specification to every listed layer.
 
 For example, to create a 2-layer Samba model with one Mamba layer followed by one local attention layer, using a sliding window size of 2048:
 
@@ -421,6 +424,35 @@ SambaForCausalLM(
 ```
 
 </details>
+
+To use different attention settings at different depths, pass a list of specifications. For example, this six-layer Samba model uses local attention at layers 1 and 3, full attention at layer 5, and the native Mamba mixer at layers 0, 2, and 4:
+
+```py
+>>> config = SambaConfig(
+...   num_hidden_layers=6,
+...   attn=[
+...     {
+...       'layers': [1, 3],
+...       'num_heads': 18,
+...       'num_kv_heads': 18,
+...       'qkv_bias': False,
+...       'rope_theta': 10000.,
+...       'window_size': 2048,
+...     },
+...     {
+...       'layers': [5],
+...       'num_heads': 18,
+...       'num_kv_heads': 18,
+...       'qkv_bias': False,
+...       'rope_theta': 10000.,
+...       'window_size': None,
+...     },
+...   ],
+... )
+>>> model = AutoModelForCausalLM.from_config(config)
+```
+
+Each specification is normalized independently. Layers omitted from the plan retain the model's native linear-attention, recurrent, or state-space mixer.
 
 During inference, you **DO NOT** need to revise anything for generation!
 The model will produce output as-is, without any need for additional configurations or modifications.

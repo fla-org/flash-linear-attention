@@ -10,6 +10,7 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
+from fla.ops.backends import dispatch
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.index import prepare_chunk_indices
 from fla.ops.utils.op import exp
@@ -75,20 +76,22 @@ def gdn_gate_chunk_cumsum_scalar_kernel(
     HAS_SCALE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_bh = tl.program_id(0), tl.program_id(1)
+    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
 
     if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
 
-    p_g = tl.make_block_ptr(g + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
-    p_o = tl.make_block_ptr(o + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
+    o_t = i_t * BT + tl.arange(0, BT)
+    m_t = o_t < T
+    p_g = g + bos * H + i_h + o_t * H
+    p_o = o + bos * H + i_h + o_t * H
 
-    b_g = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
+    b_g = tl.load(p_g, mask=m_t, other=0.0).to(tl.float32)
     if HAS_BIAS:
         b_g = b_g + tl.load(dt_bias + i_h).to(tl.float32)
     b_A = tl.load(A_log + i_h).to(tl.float32)
@@ -100,7 +103,7 @@ def gdn_gate_chunk_cumsum_scalar_kernel(
         b_o = -b_o + b_z[None] + b_gate
     if HAS_SCALE:
         b_o *= scale
-    tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0,))
+    tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=m_t)
 
 
 @triton.heuristics({
@@ -127,16 +130,18 @@ def gdn_gate_bwd_kernel(
     BT: tl.constexpr,
     HAS_BIAS: tl.constexpr,
 ):
-    i_t, i_h = tl.program_id(0), tl.program_id(1)
+    i_t, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1)
 
     b_A = tl.load(A_log + i_h).to(tl.float32)
 
-    p_g = tl.make_block_ptr(g + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
-    p_dg = tl.make_block_ptr(dg + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
-    p_dyg = tl.make_block_ptr(dyg + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
+    o_t = i_t * BT + tl.arange(0, BT)
+    m_t = o_t < T
+    p_g = g + i_h + o_t * H
+    p_dg = dg + i_h + o_t * H
+    p_dyg = dyg + i_h + o_t * H
 
-    b_g = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
-    b_dyg = tl.load(p_dyg, boundary_check=(0,)).to(tl.float32)
+    b_g = tl.load(p_g, mask=m_t, other=0.0).to(tl.float32)
+    b_dyg = tl.load(p_dyg, mask=m_t, other=0.0).to(tl.float32)
 
     if HAS_BIAS:
         b_g = b_g + tl.load(dt_bias + i_h).to(tl.float32)
@@ -149,11 +154,12 @@ def gdn_gate_bwd_kernel(
     b_dg = b_neg_expA * (b_dyg * tl.sigmoid(b_g))
     b_dA = tl.sum(b_dyg * b_yg, 0)
 
-    tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), boundary_check=(0,))
+    tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), mask=m_t)
     tl.store(dA + i_t * H + i_h, b_dA)
 
 
 @input_guard
+@dispatch('gated_delta_rule')
 def gdn_gate_chunk_cumsum(
     g: torch.Tensor,
     A_log: torch.Tensor,
@@ -187,6 +193,7 @@ def gdn_gate_chunk_cumsum(
     return o
 
 
+@dispatch('gated_delta_rule')
 def gdn_gate_bwd(
     g: torch.Tensor,
     A_log: torch.Tensor,
@@ -244,19 +251,22 @@ def gdn_gate_fwd_kernel(
     BT: tl.constexpr,
     HAS_BIAS: tl.constexpr,
 ):
-    i_t, i_h = tl.program_id(0), tl.program_id(1)
+    i_t, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1)
 
     b_A = tl.load(A_log + i_h).to(tl.float32)
 
-    p_g = tl.make_block_ptr(g + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
-    p_yg = tl.make_block_ptr(yg + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
-    b_g = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
+    o_t = i_t * BT + tl.arange(0, BT)
+    m_t = o_t < T
+    p_g = g + i_h + o_t * H
+    p_yg = yg + i_h + o_t * H
+    b_g = tl.load(p_g, mask=m_t, other=0.0).to(tl.float32)
     if HAS_BIAS:
         b_g = b_g + tl.load(dt_bias + i_h).to(tl.float32)
     b_yg = -exp(b_A) * softplus(b_g)
-    tl.store(p_yg, b_yg.to(p_yg.dtype.element_ty), boundary_check=(0,))
+    tl.store(p_yg, b_yg.to(p_yg.dtype.element_ty), mask=m_t)
 
 
+@dispatch('gated_delta_rule')
 def gdn_gate_fwd(
     g: torch.Tensor,
     A_log: torch.Tensor,

@@ -147,8 +147,11 @@ class FLALayer(CacheLayerMixin):
     def get_seq_length(self, cache_position=None) -> int:
         return self._seen_tokens
 
-    def get_max_cache_shape(self) -> int:
+    def get_max_length(self) -> int:
         return -1
+
+    def get_max_cache_shape(self) -> int:
+        return self.get_max_length()
 
     def get_mask_sizes(self, cache_position: torch.Tensor) -> tuple[int, int]:
         return 0, 0
@@ -350,7 +353,7 @@ class LegacyFLACache(HFCacheBase):
         """Converts a cache in the legacy cache format into an equivalent `Cache`."""
 
         cache = cls(seen_tokens)
-        if isinstance(past_key_values, list):
+        if isinstance(past_key_values, (list, tuple)):
             for layer_idx in range(len(past_key_values)):
                 cache.states.append(past_key_values[layer_idx])
         return cache
@@ -431,8 +434,11 @@ class FLACache(HFCacheBase):
             return 0
         return self.layers[layer_idx or 0].get_seq_length()
 
-    def get_max_cache_shape(self, layer_idx: int = 0) -> int:
+    def get_max_length(self, layer_idx: int = 0) -> int:
         return -1
+
+    def get_max_cache_shape(self, layer_idx: int = 0) -> int:
+        return self.get_max_length(layer_idx)
 
     def get_mask_sizes(self, cache_position: torch.Tensor, layer_idx: int) -> tuple[int, int]:
         # kv_length = past_seen + current_query_length
@@ -550,6 +556,24 @@ class FLAGenerationMixin(GenerationMixin):
             'attention_mask': attention_mask,
         })
         return model_inputs
+
+
+class FLAUnsupportedCacheGenerationMixin(FLAGenerationMixin):
+    """Generation mixin for models whose caches do not support every decoding strategy."""
+
+    def generate(self, *args, **kwargs):
+        try:
+            return super().generate(*args, **kwargs)
+        except AttributeError as exception:
+            if "past_key_values" in str(exception):
+                raise AttributeError(
+                    f"You tried to call `generate` with a decoding strategy that manipulates `past_key_values`, "
+                    f"which is not supported for {self.__class__.__name__}. "
+                    f"Try another generation strategy instead. "
+                    f"For the available generation strategies, check this doc: "
+                    f"https://huggingface.co/docs/transformers/en/generation_strategies#decoding-strategies",
+                )
+            raise exception
 
 
 if version.parse(_TF_VERSION) > version.parse(_NEED_NEW):

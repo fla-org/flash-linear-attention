@@ -151,6 +151,10 @@ class OpConfig:
             used as the frozen correctness gate by `benchmarks/ops/verify.py`.
             When None, the gate is derived from `import_path`'s last segment (e.g. `fla.ops.gla` -> `tests/ops/test_gla.py`).
             Set this only when the derived path is wrong. Default: None.
+        backend_env (dict[str, str], Optional):
+            Maps a `--backend <name>` value to the environment variable that enables that backend's
+            dispatch (e.g. `{'gluon': 'FLA_ATTNRES_GLUON'}`). The runner sets it before launching the
+            op; ops selected purely by a runtime verifier need no entry. Default: None.
     """
     name: str
     import_path: str
@@ -164,6 +168,7 @@ class OpConfig:
     dim_constraints: dict | None = None
     default_shapes: dict[str, dict[str, int]] | None = None
     test_file: str | None = None
+    backend_env: dict[str, str] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -484,19 +489,32 @@ _attnres_inputs = {
     'rms_weight': TensorSpec(shape_D),
 }
 
+
+def _attnres_post_init(inputs, B, T, H, D, L=None, **kw):
+    # fused_attnres expects a sequence of [B, T, D] tensors, not the stacked [L, B, T, D] buffer.
+    res = inputs['residuals']
+    if isinstance(res, torch.Tensor) and res.ndim == 4:
+        inputs['residuals'] = [
+            res[i].detach().clone().requires_grad_(True) for i in range(res.shape[0])
+        ]
+
+
 register_op(OpConfig(
     name='fused_attnres',
     import_path='fla.ops.attnres',
     inputs=_attnres_inputs,
+    post_init=_attnres_post_init,
     output_is_tuple=False,
     default_shapes=_layer_default_shapes,
     category='fused_attnres',
+    backend_env={'gluon': 'FLA_ATTNRES_GLUON'},
 ))
 
 register_op(OpConfig(
     name='naive_attnres',
     import_path='fla.ops.attnres',
     inputs=_attnres_inputs,
+    post_init=_attnres_post_init,
     output_is_tuple=False,
     default_shapes=_layer_default_shapes,
     category='naive_attnres',

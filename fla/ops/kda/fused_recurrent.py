@@ -13,6 +13,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.backends import dispatch
 from fla.ops.utils.op import exp
 from fla.ops.utils.softplus import softplus
 from fla.utils import input_guard
@@ -74,7 +75,7 @@ def fused_recurrent_kda_fwd_kernel(
     STATE_V_FIRST: tl.constexpr,
     num_stages: tl.constexpr,
 ):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     NV = tl.cdiv(V, BV)
     NK = tl.cdiv(K, BK)
     i_k = pid % NK
@@ -230,7 +231,7 @@ def fused_recurrent_kda_fwd_kernel(
             tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
 
 
-@torch.compiler.disable
+@dispatch("kda")
 def fused_recurrent_kda_fwd(
     q: torch.Tensor,
     k: torch.Tensor,

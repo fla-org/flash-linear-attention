@@ -19,9 +19,8 @@ from transformers.utils import logging
 
 from fla.layers.utils import (
     get_layer_cache,
-    get_unpad_data,
-    index_first_axis,
-    pad_input,
+    repad_hidden_states,
+    unpad_hidden_states,
     update_layer_cache,
 )
 from fla.modules.layernorm_gated import RMSNormGated
@@ -202,6 +201,10 @@ class Mamba3(nn.Module):
         )
         return z, x, B, C, dd_dt, dd_A, trap, angles
 
+    def _compute_a(self, dd_A: torch.Tensor) -> torch.Tensor:
+        A = -F.softplus(dd_A.to(torch.float32))
+        return A.clamp(max=-self.A_floor)
+
     def cuda_kernels_forward(
         self,
         hidden_states: torch.Tensor,
@@ -234,7 +237,7 @@ class Mamba3(nn.Module):
         C = rearrange(C, "b l (r g n) -> b l r g n", r=self.mimo_rank, g=self.n_groups)
         trap = rearrange(trap, "b l h -> b h l")
 
-        A = -F.softplus(dd_A.to(torch.float32)).clamp(max=-self.A_floor)
+        A = self._compute_a(dd_A)
         DT = F.softplus(dd_dt + self.dt_bias)
         ADT = A * DT
         DT = rearrange(DT, "b l n -> b n l")
@@ -311,7 +314,7 @@ class Mamba3(nn.Module):
         return out, new_state
 
     def _preprocess_step(self, dd_A, dd_dt, B, C, x, z, trap_proj, angle_proj):
-        A = -F.softplus(dd_A.to(torch.float32)).clamp(max=-self.A_floor)
+        A = self._compute_a(dd_A)
         DT = F.softplus(dd_dt + self.dt_bias)
         trap = torch.sigmoid(trap_proj)
 
@@ -420,11 +423,8 @@ class Mamba3(nn.Module):
         # Prefill with padding mask: pack [B, T, D] -> [1, sum(lens), D] so the
         # upstream varlen kernels (which require batch=1) can consume it.
         indices_q = None
-        if last_state is None and cu_seqlens is None and attention_mask is not None and q_len > 1:
-            indices_q, cu_seqlens, _ = get_unpad_data(attention_mask[:, -q_len:])
-            hidden_states = index_first_axis(
-                rearrange(hidden_states, "b s ... -> (b s) ..."), indices_q,
-            ).unsqueeze(0)
+        if last_state is None and q_len > 1:
+            hidden_states, indices_q, cu_seqlens = unpad_hidden_states(hidden_states, cu_seqlens, attention_mask, q_len)
 
         output, new_state = self.cuda_kernels_forward(
             hidden_states,
@@ -436,8 +436,7 @@ class Mamba3(nn.Module):
         if new_state is not None:
             update_layer_cache(self, past_key_values, recurrent_state=new_state, offset=q_len)
 
-        if indices_q is not None:
-            output = pad_input(output.squeeze(0), indices_q, batch_size, q_len)
+        output = repad_hidden_states(output, indices_q, batch_size, q_len)
 
         return output, None, past_key_values
 

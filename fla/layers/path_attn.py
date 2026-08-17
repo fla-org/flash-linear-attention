@@ -111,11 +111,8 @@ class PaTHAttention(nn.Module):
         beta = self.bt_proj(hidden_states).float().sigmoid() * 2  # allowing negative eigenvalues
         g = F.logsigmoid(self.g_proj(hidden_states).float()) if self.use_forget_gate else None
         cu_seqlens = kwargs.get('cu_seqlens')
-        assert not (cu_seqlens is not None and attention_mask is not None), (
-            "cu_seqlens should not be provided when attention_mask is not None"
-        )
         # Training
-        if attention_mask is None:
+        if cu_seqlens is not None or attention_mask is None:
             assert use_cache is False, "use_cache should be False in training"
             if self.use_w_shortconv:
                 w, _ = self.w_conv1d(w, cache=None, output_final_state=False, cu_seqlens=cu_seqlens)

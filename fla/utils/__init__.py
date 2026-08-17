@@ -14,6 +14,7 @@ from ._compat import (  # noqa: F401
     TRITON_ABOVE_3_7_1,
     autotune_cache_kwargs,
     find_spec_cached,
+    has_usable_nvcc,
 )
 from ._config import (  # noqa: F401
     FLA_CACHE_RESULTS,
@@ -40,6 +41,8 @@ from ._device import (  # noqa: F401
     IS_NVIDIA,
     IS_NVIDIA_BLACKWELL,
     IS_NVIDIA_HOPPER,
+    IS_NVIDIA_SM100,
+    IS_NVIDIA_SM120,
     IS_TF32_SUPPORTED,
     IS_TMA_SUPPORTED,
     Backend,
@@ -72,6 +75,8 @@ def _register_aliases():
         'IS_NPU',
         'IS_NVIDIA_BLACKWELL',
         'IS_NVIDIA_HOPPER',
+        'IS_NVIDIA_SM100',
+        'IS_NVIDIA_SM120',
         'IS_TF32_SUPPORTED',
         'IS_GATHER_SUPPORTED',
         'IS_TMA_SUPPORTED',

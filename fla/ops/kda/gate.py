@@ -12,6 +12,7 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
+from fla.ops.backends import dispatch
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.index import prepare_chunk_indices
 from fla.ops.utils.op import exp
@@ -102,28 +103,32 @@ def kda_gate_fwd_kernel(
     HAS_BETA: tl.constexpr,
     USE_LOWER_BOUND: tl.constexpr,
 ):
-    i_t, i_h = tl.program_id(0), tl.program_id(1)
+    i_t, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1)
 
     b_A = tl.load(A_log + i_h).to(tl.float32)
 
-    p_g = tl.make_block_ptr(g + i_h * D, (T, D), (H * D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
-    p_yg = tl.make_block_ptr(yg + i_h * D, (T, D), (H * D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
+    o_t = i_t * BT + tl.arange(0, BT)
+    o_d = tl.arange(0, BD)
+    m_t = o_t < T
+    m_g = m_t[:, None] & (o_d[None, :] < D)
+    p_g = g + i_h * D + o_t[:, None] * (H * D) + o_d[None, :]
+    p_yg = yg + i_h * D + o_t[:, None] * (H * D) + o_d[None, :]
     # [BT, BD]
-    b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
+    b_g = tl.load(p_g, mask=m_g, other=0.0).to(tl.float32)
     if HAS_BIAS:
-        p_b = tl.make_block_ptr(dt_bias, (H * D,), (1,), (i_h * D,), (BD,), (0,))
-        b_g = b_g + tl.load(p_b, boundary_check=(0,)).to(tl.float32)
+        o_b = i_h * D + tl.arange(0, BD)
+        b_g = b_g + tl.load(dt_bias + o_b, mask=o_b < H * D, other=0.0).to(tl.float32)
     if not USE_LOWER_BOUND:
         b_yg = -exp(b_A) * softplus(b_g)
     else:
         b_yg = lower_bound * tl.sigmoid(exp(b_A) * b_g)
-    tl.store(p_yg, b_yg.to(p_yg.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_yg, b_yg.to(p_yg.dtype.element_ty), mask=m_g)
 
     if HAS_BETA:
-        p_b = tl.make_block_ptr(beta + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
-        p_yb = tl.make_block_ptr(yb + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
-        b_yb = tl.sigmoid(tl.load(p_b, boundary_check=(0,)).to(tl.float32))
-        tl.store(p_yb, b_yb.to(p_yb.dtype.element_ty), boundary_check=(0,))
+        p_b = beta + i_h + o_t * H
+        p_yb = yb + i_h + o_t * H
+        b_yb = tl.sigmoid(tl.load(p_b, mask=m_t, other=0.0).to(tl.float32))
+        tl.store(p_yb, b_yb.to(p_yb.dtype.element_ty), mask=m_t)
 
 
 @triton.heuristics({
@@ -161,21 +166,25 @@ def kda_gate_bwd_kernel(
     HAS_BETA: tl.constexpr,
     USE_LOWER_BOUND: tl.constexpr,
 ):
-    i_t, i_h = tl.program_id(0), tl.program_id(1)
+    i_t, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1)
 
     b_A = tl.load(A_log + i_h).to(tl.float32)
 
-    p_g = tl.make_block_ptr(g + i_h * D, (T, D), (H * D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
-    p_dg = tl.make_block_ptr(dg + i_h * D, (T, D), (H * D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
-    p_dyg = tl.make_block_ptr(dyg + i_h * D, (T, D), (H * D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
+    o_t = i_t * BT + tl.arange(0, BT)
+    o_d = tl.arange(0, BD)
+    m_t = o_t < T
+    m_g = m_t[:, None] & (o_d[None, :] < D)
+    p_g = g + i_h * D + o_t[:, None] * (H * D) + o_d[None, :]
+    p_dg = dg + i_h * D + o_t[:, None] * (H * D) + o_d[None, :]
+    p_dyg = dyg + i_h * D + o_t[:, None] * (H * D) + o_d[None, :]
 
     # [BT, BD]
-    b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
-    b_dyg = tl.load(p_dyg, boundary_check=(0, 1)).to(tl.float32)
+    b_g = tl.load(p_g, mask=m_g, other=0.0).to(tl.float32)
+    b_dyg = tl.load(p_dyg, mask=m_g, other=0.0).to(tl.float32)
 
     if HAS_BIAS:
-        p_b = tl.make_block_ptr(dt_bias, (H * D,), (1,), (i_h * D,), (BD,), (0,))
-        b_g = b_g + tl.load(p_b, boundary_check=(0,)).to(tl.float32)
+        o_b = i_h * D + tl.arange(0, BD)
+        b_g = b_g + tl.load(dt_bias + o_b, mask=o_b < H * D, other=0.0).to(tl.float32)
 
     # [BT, BD]
     if not USE_LOWER_BOUND:
@@ -194,19 +203,20 @@ def kda_gate_bwd_kernel(
         b_dg = b_d_inner_term * b_A
         b_dA = tl.sum(tl.sum(b_dg * b_g, 1), 0)
 
-    tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), mask=m_g)
     tl.store(dA + i_t * H + i_h, b_dA)
 
     if HAS_BETA:
-        p_b = tl.make_block_ptr(beta + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
-        p_db = tl.make_block_ptr(dbeta + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
-        p_dyb = tl.make_block_ptr(dyb + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
+        p_b = beta + i_h + o_t * H
+        p_db = dbeta + i_h + o_t * H
+        p_dyb = dyb + i_h + o_t * H
 
-        b_b = tl.load(p_b, boundary_check=(0,)).to(tl.float32)
-        b_db = tl.load(p_dyb, boundary_check=(0,)).to(tl.float32) * b_b * (1.0 - b_b)
-        tl.store(p_db, b_db.to(p_db.dtype.element_ty), boundary_check=(0,))
+        b_b = tl.load(p_b, mask=m_t, other=0.0).to(tl.float32)
+        b_db = tl.load(p_dyb, mask=m_t, other=0.0).to(tl.float32) * b_b * (1.0 - b_b)
+        tl.store(p_db, b_db.to(p_db.dtype.element_ty), mask=m_t)
 
 
+@dispatch('kda')
 def kda_gate_fwd(
     g: torch.Tensor,
     A_log: torch.Tensor,
@@ -238,6 +248,7 @@ def kda_gate_fwd(
     return yg
 
 
+@dispatch('kda')
 def kda_gate_bwd(
     g: torch.Tensor,
     A_log: torch.Tensor,
@@ -317,6 +328,7 @@ class KDAGateFunction(torch.autograd.Function):
         return dg, dA, dbias, None, None
 
 
+@dispatch('kda')
 @torch.compiler.disable
 def fused_kda_gate(
     g: torch.Tensor,
@@ -380,24 +392,26 @@ def kda_gate_chunk_cumsum_vector_kernel(
     IS_VARLEN: tl.constexpr,
     USE_LOWER_BOUND: tl.constexpr,
 ):
-    i_s, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_s, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
 
-    p_s = tl.make_block_ptr(s + (bos * H + i_h) * S, (T, S), (H*S, 1), (i_t * BT, i_s * BS), (BT, BS), (1, 0))
-    p_o = tl.make_block_ptr(o + (bos * H + i_h) * S, (T, S), (H*S, 1), (i_t * BT, i_s * BS), (BT, BS), (1, 0))
+    o_t = i_t * BT + tl.arange(0, BT)
+    o_s = i_s * BS + tl.arange(0, BS)
+    m_s = (o_t[:, None] < T) & (o_s[None, :] < S)
+    p_s = s + (bos * H + i_h) * S + o_t[:, None] * (H*S) + o_s[None, :]
+    p_o = o + (bos * H + i_h) * S + o_t[:, None] * (H*S) + o_s[None, :]
     # [BT, BS]
-    b_s = tl.load(p_s, boundary_check=(0, 1)).to(tl.float32)
+    b_s = tl.load(p_s, mask=m_s, other=0.0).to(tl.float32)
 
     # Apply dt_bias if exists
     if HAS_BIAS:
-        p_b = tl.make_block_ptr(dt_bias + i_h * S, (S,), (1,), (i_s * BS,), (BS,), (0,))
-        b_bias = tl.load(p_b, boundary_check=(0,)).to(tl.float32)
+        b_bias = tl.load(dt_bias + i_h * S + o_s, mask=o_s < S, other=0.0).to(tl.float32)
         b_s = b_s + b_bias[None, :]
 
     b_A = tl.load(A_log + i_h).to(tl.float32)
@@ -415,10 +429,11 @@ def kda_gate_chunk_cumsum_vector_kernel(
 
     if HAS_SCALE:
         b_o *= scale
-    tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=m_s)
 
 
 @input_guard
+@dispatch('kda')
 def kda_gate_chunk_cumsum(
     g: torch.Tensor,
     A_log: torch.Tensor,

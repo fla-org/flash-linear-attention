@@ -16,7 +16,7 @@ from fla.ops.kda.fused_recurrent import fused_recurrent_kda_fwd
 from fla.ops.kda.gate import fused_kda_gate, naive_kda_gate, naive_kda_lowerbound_gate
 from fla.ops.kda.naive import naive_chunk_kda, naive_recurrent_kda
 from fla.ops.utils.cache import FLA_CACHE_MODE
-from fla.utils import IS_INTEL_ALCHEMIST, assert_close, device
+from fla.utils import IS_INTEL_ALCHEMIST, IS_NPU, IS_NVIDIA, assert_close, device
 
 
 @pytest.mark.parametrize(
@@ -383,6 +383,10 @@ def test_fused_recurrent_gate_in_kernel(
         ]
     ],
 )
+@pytest.mark.skipif(
+    not (IS_NVIDIA or IS_NPU),
+    reason='test_fused_recurrent_vllm_decode requires CUDA or NPU',
+)
 def test_fused_recurrent_vllm_decode(
     B: int,
     H: int,
@@ -396,7 +400,7 @@ def test_fused_recurrent_vllm_decode(
 ):
     """Test vLLM-style decoding with continuous batching and paged state storage."""
     torch.manual_seed(42)
-    device = torch.device("cuda")
+    device = torch.device("npu" if IS_NPU else "cuda")
 
     # Setup cache pool and inputs
     max_cache_slots = B * 3
@@ -538,6 +542,11 @@ def test_fused_recurrent_vllm_decode(
             (2, 1024, 2, 8, 64, 0.1, 1, 0, False, True, torch.float16, False, False, 64),
             (2, 1024, 4, 8, 128, 0.1, 1, 0, True, True, torch.float16, False, False, 64),
             (2, 160, 2, 4, 64, 0.1, 1, 0, False, True, torch.float16, True, True, 32),
+
+            (2, 1024, 2, 4, 64, 0.1, 1, 0, True, True, torch.bfloat16, True, False, 64),
+            (2, 1024, 2, 4, 64, 0.1, 1, 0, False, True, torch.bfloat16, False, False, 64),
+            (2, 160, 2, 4, 64, 0.1, 1, 0, False, True, torch.bfloat16, True, True, 32),
+            (2, 1024, 2, 8, 128, 0.1, 1, 0, True, True, torch.bfloat16, False, False, 64),
         ]
     ],
 )
@@ -1179,12 +1188,12 @@ def test_chunk_return_intermediate_states(dtype):
 # ---------------------------------------------------------------------------
 
 _FLASH_KDA_AVAILABLE = importlib.util.find_spec("flash_kda") is not None
-_SKIP_FLASHKDA = pytest.mark.skipif(
+_SKIP_FLASH_KDA = pytest.mark.skipif(
     device == "cpu" or not _FLASH_KDA_AVAILABLE,
     reason="FlashKDA backend requires GPU and the flash_kda package",
 )
 
-_FLASHKDA_REQUIRED_KWARGS = dict(
+_FLASH_KDA_REQUIRED_KWARGS = dict(
     use_qk_l2norm_in_kernel=True,
     use_gate_in_kernel=True,
     use_beta_sigmoid_in_kernel=True,
@@ -1193,23 +1202,23 @@ _FLASHKDA_REQUIRED_KWARGS = dict(
     state_v_first=True,
 )
 
-_FLASHKDA_RTOL = 0.006
+_FLASH_KDA_RTOL = 0.006
 
 
-def _flashkda_make_gate_params(H, D):
+def _flash_kda_make_gate_params(H, D):
     A_log = torch.log(torch.empty(H, dtype=torch.float32, device=device).uniform_(1, 16))
     dt_bias = torch.randn(H * D, dtype=torch.float32, device=device)
     return A_log, dt_bias
 
 
-def _flashkda_run(monkeypatch, **kwargs):
+def _flash_kda_run(monkeypatch, **kwargs):
     monkeypatch.setenv("FLA_FLASH_KDA", "1")
     with torch.inference_mode():
-        return chunk_kda(**kwargs, **_FLASHKDA_REQUIRED_KWARGS)
+        return chunk_kda(**kwargs, **_FLASH_KDA_REQUIRED_KWARGS)
 
 
-def _flashkda_gold(q, k, v, g, beta_raw, A_log, dt_bias, scale, initial_state,
-                   lower_bound=-5.0, cu_seqlens=None):
+def _flash_kda_gold(q, k, v, g, beta_raw, A_log, dt_bias, scale, initial_state,
+                    lower_bound=-5.0, cu_seqlens=None):
     kwargs = {}
     if cu_seqlens is not None:
         kwargs["cu_seqlens"] = cu_seqlens
@@ -1232,7 +1241,7 @@ def _flashkda_gold(q, k, v, g, beta_raw, A_log, dt_bias, scale, initial_state,
     )
 
 
-@_SKIP_FLASHKDA
+@_SKIP_FLASH_KDA
 @pytest.mark.parametrize(
     ("B", "T", "H", "D"),
     [
@@ -1244,7 +1253,7 @@ def _flashkda_gold(q, k, v, g, beta_raw, A_log, dt_bias, scale, initial_state,
         ]
     ],
 )
-def test_flashkda_chunk(B, T, H, D, monkeypatch):
+def test_flash_kda_chunk(B, T, H, D, monkeypatch):
     torch.manual_seed(42)
     dtype = torch.bfloat16
     q = torch.rand(B, T, H, D, dtype=dtype, device=device)
@@ -1252,14 +1261,14 @@ def test_flashkda_chunk(B, T, H, D, monkeypatch):
     v = torch.rand(B, T, H, D, dtype=dtype, device=device)
     g = torch.randn(B, T, H, D, dtype=dtype, device=device)
     beta = torch.randn(B, T, H, dtype=dtype, device=device)
-    A_log, dt_bias = _flashkda_make_gate_params(H, D)
+    A_log, dt_bias = _flash_kda_make_gate_params(H, D)
     h0 = torch.randn(B, H, D, D, dtype=torch.float32, device=device)
     scale = D ** -0.5
 
-    ref_o, ref_ht = _flashkda_gold(
+    ref_o, ref_ht = _flash_kda_gold(
         q, k, v, g, beta, A_log, dt_bias, scale, h0.clone())
 
-    tri_o, tri_ht = _flashkda_run(
+    tri_o, tri_ht = _flash_kda_run(
         monkeypatch,
         q=q, k=k, v=v, g=g, beta=beta,
         A_log=A_log, dt_bias=dt_bias,
@@ -1267,11 +1276,11 @@ def test_flashkda_chunk(B, T, H, D, monkeypatch):
         initial_state=h0.clone(),
         output_final_state=True,
     )
-    assert_close("o", ref_o, tri_o, _FLASHKDA_RTOL)
-    assert_close("ht", ref_ht, tri_ht.to(ref_ht.dtype), _FLASHKDA_RTOL)
+    assert_close("o", ref_o, tri_o, _FLASH_KDA_RTOL)
+    assert_close("ht", ref_ht, tri_ht.to(ref_ht.dtype), _FLASH_KDA_RTOL)
 
 
-@_SKIP_FLASHKDA
+@_SKIP_FLASH_KDA
 @pytest.mark.parametrize(
     ("H", "D", "cu_seqlens"),
     [
@@ -1283,7 +1292,7 @@ def test_flashkda_chunk(B, T, H, D, monkeypatch):
         ]
     ],
 )
-def test_flashkda_chunk_varlen(H, D, cu_seqlens, monkeypatch):
+def test_flash_kda_chunk_varlen(H, D, cu_seqlens, monkeypatch):
     torch.manual_seed(42)
     dtype = torch.bfloat16
     cu_seqlens_t = torch.LongTensor(cu_seqlens).to(device)
@@ -1295,15 +1304,15 @@ def test_flashkda_chunk_varlen(H, D, cu_seqlens, monkeypatch):
     v = torch.randn(1, T, H, D, dtype=dtype, device=device)
     g = torch.randn(1, T, H, D, dtype=dtype, device=device)
     beta = torch.randn(1, T, H, dtype=dtype, device=device)
-    A_log, dt_bias = _flashkda_make_gate_params(H, D)
+    A_log, dt_bias = _flash_kda_make_gate_params(H, D)
     h0 = torch.randn(N, H, D, D, dtype=torch.float32, device=device)
     scale = D ** -0.5
 
-    ref_o, ref_ht = _flashkda_gold(
+    ref_o, ref_ht = _flash_kda_gold(
         q, k, v, g, beta, A_log, dt_bias, scale, h0.clone(),
         cu_seqlens=cu_seqlens_t,
     )
-    tri_o, tri_ht = _flashkda_run(
+    tri_o, tri_ht = _flash_kda_run(
         monkeypatch,
         q=q, k=k, v=v, g=g, beta=beta,
         A_log=A_log, dt_bias=dt_bias,
@@ -1312,5 +1321,159 @@ def test_flashkda_chunk_varlen(H, D, cu_seqlens, monkeypatch):
         output_final_state=True,
         cu_seqlens=cu_seqlens_t,
     )
-    assert_close("o", ref_o, tri_o, _FLASHKDA_RTOL)
-    assert_close("ht", ref_ht, tri_ht.to(ref_ht.dtype), _FLASHKDA_RTOL)
+    assert_close("o", ref_o, tri_o, _FLASH_KDA_RTOL)
+    assert_close("ht", ref_ht, tri_ht.to(ref_ht.dtype), _FLASH_KDA_RTOL)
+
+
+_TRITON_ASCEND_KDA_OPS = (
+    'kda_gate_fwd',
+    'kda_gate_bwd',
+    'kda_gate_chunk_cumsum',
+    'fused_kda_gate',
+    'fused_recurrent_kda_fwd',
+    'recompute_w_u_fwd',
+    'chunk_kda_fwd_intra',
+    'chunk_kda_fwd_intra_token_parallel',
+    'chunk_kda_bwd_intra',
+    'chunk_kda_bwd_dAv',
+    'chunk_kda_bwd_wy_dqkg_fused',
+)
+
+
+def _spy_on_triton_ascend_kda_backend():
+    """Patch every op of the Triton-Ascend KDA backend to record dispatched calls."""
+    from fla.ops.backends import BackendRegistry
+
+    BackendRegistry.ensure_initialized('kda')
+    backend = BackendRegistry._registries['kda']._backends.get('triton_ascend')
+    assert backend is not None, 'Triton-Ascend KDA backend is not registered'
+
+    calls = []
+    for name in _TRITON_ASCEND_KDA_OPS:
+        original = getattr(backend, name)
+
+        def make_spy(name, original):
+            def spy(*args, **kwargs):
+                calls.append(name)
+                return original(*args, **kwargs)
+            return spy
+
+        setattr(backend, name, make_spy(name, original))
+    return backend, calls
+
+
+def _run_chunk_kda(safe_gate: bool, chunk_size: int = 64, use_gate_in_kernel: bool = True):
+    B, T, H, HV, D = 2, 128, 2, 2, 64
+    dtype = torch.float
+    q = torch.rand(B, T, H, D, dtype=dtype, device=device)
+    k = torch.rand(B, T, H, D, dtype=dtype, device=device)
+    v = torch.rand(B, T, HV, D, dtype=dtype, device=device)
+    g = torch.randn(B, T, HV, D, dtype=dtype, device=device)
+    beta = torch.randn(B, T, HV, dtype=dtype, device=device).sigmoid()
+    h0 = torch.randn(B, HV, D, D, dtype=torch.float32, device=device)
+    tensors = [q, k, v, g, beta, h0]
+    if use_gate_in_kernel:
+        A_log = torch.randn(HV, dtype=torch.float, device=device)
+        dt_bias = torch.randn(HV * D, dtype=torch.float, device=device)
+        tensors += [A_log, dt_bias]
+    else:
+        A_log = dt_bias = None
+    for x in tensors:
+        x.requires_grad_(True)
+
+    o, ht = chunk_kda(
+        q=q, k=k, v=v, g=g, beta=beta,
+        A_log=A_log, dt_bias=dt_bias,
+        scale=1.,
+        initial_state=h0,
+        output_final_state=True,
+        use_qk_l2norm_in_kernel=True,
+        use_gate_in_kernel=use_gate_in_kernel,
+        safe_gate=safe_gate,
+        lower_bound=-5.0 if safe_gate else None,
+        disable_recompute=False,
+        chunk_size=chunk_size,
+    )
+    ((o * torch.randn_like(o)).sum() + (ht * torch.randn_like(ht)).sum()).backward()
+
+
+def _run_fused_recurrent_kda_fwd():
+    B, T, H, D = 2, 64, 2, 64
+    dtype = torch.float
+    q = torch.rand(B, T, H, D, dtype=dtype, device=device)
+    k = torch.rand(B, T, H, D, dtype=dtype, device=device)
+    v = torch.rand(B, T, H, D, dtype=dtype, device=device)
+    g = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    beta = torch.randn(B, T, H, dtype=dtype, device=device).sigmoid()
+    h0 = torch.randn(B, H, D, D, dtype=torch.float32, device=device)
+    fused_recurrent_kda_fwd(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        beta=beta,
+        initial_state=h0,
+        scale=1.0,
+        output_final_state=False,
+        inplace_final_state=True,
+        use_qk_l2norm_in_kernel=True,
+    )
+
+
+@pytest.mark.skipif(not IS_NPU, reason='Triton-Ascend KDA backend routing is only exercised on NPU')
+def test_triton_ascend_backend_routing():
+    """KDA ops must actually dispatch to the Triton-Ascend backend on NPU.
+
+    Numerical parity tests alone cannot catch silently-failing verifiers: if
+    every verifier rejected, all ops would fall back to the default Triton
+    kernels and parity tests would still pass, leaving the NPU kernels dead.
+    """
+    backend, calls = _spy_on_triton_ascend_kda_backend()
+    try:
+        # safe_gate=True: forward and backward must hit the NPU kernels
+        calls.clear()
+        _run_chunk_kda(safe_gate=True)
+        expected = {
+            'kda_gate_chunk_cumsum',
+            'chunk_kda_fwd_intra',
+            'recompute_w_u_fwd',
+            'chunk_kda_bwd_dAv',
+            'chunk_kda_bwd_wy_dqkg_fused',
+            'chunk_kda_bwd_intra',
+            'kda_gate_bwd',
+        }
+        missing = expected - set(calls)
+        assert not missing, f'ops not routed to the Triton-Ascend backend: {missing} (dispatched: {calls})'
+
+        # safe_gate=False: the intra kernel delegates to the token-parallel variant
+        calls.clear()
+        _run_chunk_kda(safe_gate=False)
+        assert 'chunk_kda_fwd_intra_token_parallel' in calls, (
+            'chunk_kda_fwd_intra_token_parallel not routed to the Triton-Ascend backend '
+            f'(dispatched: {calls})'
+        )
+
+        # chunk_size=16 is rejected by the verifiers and must fall back to the
+        # default implementation (which raises), never touching the NPU kernels
+        calls.clear()
+        with pytest.raises(ValueError, match=r"`chunk_size` must be either 32 or 64"):
+            _run_chunk_kda(safe_gate=False, chunk_size=16, use_gate_in_kernel=False)
+        rejected = {
+            'chunk_kda_fwd_intra',
+            'chunk_kda_fwd_intra_token_parallel',
+            'chunk_kda_bwd_intra',
+            'chunk_kda_bwd_wy_dqkg_fused',
+        }
+        assert rejected.isdisjoint(calls), (
+            f'verifier-rejected ops were still routed to the Triton-Ascend backend: {rejected & set(calls)}'
+        )
+
+        calls.clear()
+        _run_fused_recurrent_kda_fwd()
+        assert 'fused_recurrent_kda_fwd' in calls, (
+            'fused_recurrent_kda_fwd not routed to the Triton-Ascend backend '
+            f'(dispatched: {calls})'
+        )
+    finally:
+        for name in _TRITON_ASCEND_KDA_OPS:
+            delattr(backend, name)

@@ -93,7 +93,7 @@ def layer_norm_fwd_kernel_quant(
     HAS_BIAS: tl.constexpr,
 ):
     # Map the program id to the row of X and Y it should compute.
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)
     X += row * stride_x_row
     Y += row * stride_y_row
     if HAS_RESIDUAL:
@@ -133,7 +133,7 @@ def layer_norm_fwd_kernel_quant(
     # Aply quantization to the output
     scale = 127.0 / tl.maximum(tl.max(tl.abs(y), 0), 1e-5)
     # Quantize and then de-quantize the tensor
-    y = tl.extra.cuda.libdevice.round(y * scale)
+    y = tl.extra.libdevice.round(y * scale)
     y = tl.maximum(tl.minimum(y, 127), -128) / scale
 
     # Write output
@@ -237,7 +237,7 @@ def layer_norm_bwd_kernel(
     RECOMPUTE_OUTPUT: tl.constexpr,
 ):
     # Map the program id to the elements of X, DX, and DY it should compute.
-    row_block_id = tl.program_id(0)
+    row_block_id = tl.program_id(0).to(tl.int64)
     row_start = row_block_id * rows_per_program
     cols = tl.arange(0, BLOCK_N)
     mask = cols < N
@@ -276,7 +276,7 @@ def layer_norm_bwd_kernel(
             # Aply quantization to the output
             scale = 127.0 / tl.maximum(tl.max(tl.abs(y), 0), 1e-5)
             # Quantize and then de-quantize the tensor
-            y = tl.extra.cuda.libdevice.round(y * scale)
+            y = tl.extra.libdevice.round(y * scale)
             y = tl.maximum(tl.minimum(y, 127), -128) / scale
 
             tl.store(Y + cols, y, mask=mask)

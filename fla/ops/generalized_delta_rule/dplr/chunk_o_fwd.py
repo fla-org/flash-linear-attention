@@ -51,13 +51,13 @@ def chunk_dplr_fwd_kernel_o(
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
 
     if IS_VARLEN:
         i_tg = i_t
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
         NT = tl.cdiv(T, BT)
     else:
@@ -65,29 +65,38 @@ def chunk_dplr_fwd_kernel_o(
         i_tg = i_b * NT + i_t
         bos, eos = i_b * T, i_b * T + T
 
+    o_t = i_t * BT + tl.arange(0, BT)
+    o_v = i_v * BV + tl.arange(0, BV)
+    m_t = o_t < T
     b_o = tl.zeros([BT, BV], dtype=tl.float32)
     for i_k in range(tl.cdiv(K, BK)):
-        p_qg = tl.make_block_ptr(qg + (bos * H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-        p_h = tl.make_block_ptr(h + (i_tg * H + i_h) * K*V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
-        b_qg = tl.load(p_qg, boundary_check=(0, 1))
-        b_h = tl.load(p_h, boundary_check=(0, 1))
+        o_k = i_k * BK + tl.arange(0, BK)
+        m_qg = m_t[:, None] & (o_k[None, :] < K)
+        m_h = (o_k[:, None] < K) & (o_v[None, :] < V)
+        p_qg = qg + (bos * H + i_h) * K + o_t[:, None] * (H*K) + o_k[None, :]
+        p_h = h + (i_tg * H + i_h) * K*V + o_k[:, None] * V + o_v[None, :]
+        b_qg = tl.load(p_qg, mask=m_qg, other=0.0)
+        b_h = tl.load(p_h, mask=m_h, other=0.0)
         b_o += tl.dot(b_qg, b_h)
 
-    p_Aqk = tl.make_block_ptr(A_qk + (bos * H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
-    p_Aqb = tl.make_block_ptr(A_qb + (bos * H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
-    p_v = tl.make_block_ptr(v + (bos * H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-    p_v_new = tl.make_block_ptr(v_new + (bos * H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-    p_o = tl.make_block_ptr(o + (bos * H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+    o_A = tl.arange(0, BT)
+    m_A = m_t[:, None] & (o_A[None, :] < BT)
+    m_v = m_t[:, None] & (o_v[None, :] < V)
+    p_Aqk = A_qk + (bos * H + i_h) * BT + o_t[:, None] * (H*BT) + o_A[None, :]
+    p_Aqb = A_qb + (bos * H + i_h) * BT + o_t[:, None] * (H*BT) + o_A[None, :]
+    p_v = v + (bos * H + i_h) * V + o_t[:, None] * (H*V) + o_v[None, :]
+    p_v_new = v_new + (bos * H + i_h) * V + o_t[:, None] * (H*V) + o_v[None, :]
+    p_o = o + (bos * H + i_h) * V + o_t[:, None] * (H*V) + o_v[None, :]
 
     m_s = tl.arange(0, BT)[:, None] >= tl.arange(0, BT)[None, :]
-    b_Aqk = tl.load(p_Aqk, boundary_check=(0, 1))
-    b_Aqb = tl.load(p_Aqb, boundary_check=(0, 1))
+    b_Aqk = tl.load(p_Aqk, mask=m_A, other=0.0)
+    b_Aqb = tl.load(p_Aqb, mask=m_A, other=0.0)
     b_Aqk = tl.where(m_s, b_Aqk, 0)
     b_Aqb = tl.where(m_s, b_Aqb, 0)
-    b_v = tl.load(p_v, boundary_check=(0, 1))
-    b_v_new = tl.load(p_v_new, boundary_check=(0, 1))
+    b_v = tl.load(p_v, mask=m_v, other=0.0)
+    b_v_new = tl.load(p_v_new, mask=m_v, other=0.0)
     b_o = b_o + tl.dot(b_Aqk.to(b_v.dtype), b_v) + tl.dot(b_Aqb.to(b_v_new.dtype), b_v_new)
-    tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=m_v)
 
 
 def chunk_dplr_fwd_o(

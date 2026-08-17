@@ -25,11 +25,11 @@ def parallel_path_fwd_kernel_prepare_k_cache(
     BT: tl.constexpr, BK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_bh = tl.program_id(0), tl.program_id(1)
+    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
 
     if IS_VARLEN:
-        i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
+        i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int64)
         bos, eos = tl.load(offsets + i_n).to(tl.int64), tl.load(offsets + i_n + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
     else:
@@ -41,19 +41,24 @@ def parallel_path_fwd_kernel_prepare_k_cache(
     w1 += (bos * H + i_h) * K
     w2 += (bos * H + i_h) * K
     # constants
-    p_k = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
+    o_k = i_t * BT + tl.arange(0, BT)
+    o_d = tl.arange(0, BK)
+    m_k = (o_k[:, None] < T) & (o_d[None, :] < K)
+    p_k = k + o_k[:, None] * (H*K) + o_d[None, :]
     b_k = tl.zeros([BT, BK], dtype=tl.float32)
-    b_k += tl.load(p_k, boundary_check=(0, 1))
+    b_k += tl.load(p_k, mask=m_k, other=0.0)
     for k_block_idx in range(i_t + 1, tl.cdiv(T, BT)):
-        p_w1 = tl.make_block_ptr(w1, (T, K), (H*K, 1), (k_block_idx * BT, 0), (BT, BK), (1, 0))
-        p_w2 = tl.make_block_ptr(w2, (T, K), (H*K, 1), (k_block_idx * BT, 0), (BT, BK), (1, 0))
-        b_w1 = tl.load(p_w1, boundary_check=(0, 1))
-        b_w2 = tl.load(p_w2, boundary_check=(0, 1))
+        o_w = k_block_idx * BT + tl.arange(0, BT)
+        m_w = (o_w[:, None] < T) & (o_d[None, :] < K)
+        p_w1 = w1 + o_w[:, None] * (H*K) + o_d[None, :]
+        p_w2 = w2 + o_w[:, None] * (H*K) + o_d[None, :]
+        b_w1 = tl.load(p_w1, mask=m_w, other=0.0)
+        b_w2 = tl.load(p_w2, mask=m_w, other=0.0)
         b_A = tl.dot(b_k.to(b_w2.dtype), tl.trans(b_w2))
         b_k = b_k - tl.dot(b_A.to(b_w1.dtype), b_w1)
 
-    p_k_new = tl.make_block_ptr(k_new, (T, K), (H*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
-    tl.store(p_k_new, b_k.to(p_k_new.dtype.element_ty), boundary_check=(0, 1))
+    p_k_new = k_new + o_k[:, None] * (H*K) + o_d[None, :]
+    tl.store(p_k_new, b_k.to(p_k_new.dtype.element_ty), mask=m_k)
 
 
 def prepare_k_cache_fn(k, w1, w2, cu_seqlens, BS, use_cache=False, chunk_indices: torch.LongTensor | None = None):

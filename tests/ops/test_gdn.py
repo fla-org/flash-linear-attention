@@ -5,6 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import importlib.util
 import os
 
 import pytest
@@ -16,7 +17,16 @@ from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gat
 from fla.ops.gated_delta_rule.gate import fused_gdn_gate, naive_gdn_gate
 from fla.ops.gated_delta_rule.naive import naive_recurrent_gated_delta_rule
 from fla.ops.gated_delta_rule.wy_fast import prepare_wy_repr_bwd, recompute_w_u_fwd
-from fla.utils import IS_INTEL_ALCHEMIST, IS_NVIDIA_BLACKWELL, assert_close, device
+from fla.utils import (
+    IS_INTEL_ALCHEMIST,
+    IS_NPU,
+    IS_NVIDIA_BLACKWELL,
+    IS_NVIDIA_HOPPER,
+    IS_NVIDIA_SM100,
+    IS_NVIDIA_SM120,
+    assert_close,
+    device,
+)
 
 
 def _unwrap_autotuner(fn):
@@ -129,7 +139,7 @@ def test_chunk(
     use_qk_l2norm_in_kernel: bool,
     dtype: torch.dtype,
 ):
-    if os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") != "1" and HV != H:
+    if os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") != "1" and HV != H and not IS_NPU:
         pytest.skip(
             reason="GQA (HV != H) is not supported by the tilelang backend; "
             "covered by the Triton baseline run."
@@ -295,7 +305,7 @@ def test_chunk_beta_sigmoid_in_kernel(
     dtype: torch.dtype,
 ):
     """`use_beta_sigmoid_in_kernel=True` (raw beta logits) matches manual sigmoid + autograd."""
-    if os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") != "1" and HV != H:
+    if os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") != "1" and HV != H and not IS_NPU:
         pytest.skip(
             reason="GQA (HV != H) is not supported by the tilelang backend; "
             "covered by the Triton baseline run."
@@ -998,7 +1008,7 @@ def test_chunk_gate_in_kernel_gqa(
     dtype: torch.dtype,
 ):
     """Test use_gate_in_kernel=True with grouped value attention (HV > H)."""
-    if os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") != "1" and Hq != H:
+    if os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") != "1" and Hq != H and not IS_NPU:
         pytest.skip(
             reason="GQA (Hq != H) is not supported by the tilelang backend; "
             "covered by the Triton baseline run."
@@ -1284,3 +1294,435 @@ def test_prepare_wy_repr_bwd_no_g(B: int, T: int, H: int, HV: int, D: int):
     assert_close('dk', dk_zero_g, dk_no_g, 1e-4)
     assert_close('dv', dv_zero_g, dv_no_g, 1e-4)
     assert_close('db', db_zero_g, db_no_g, 1e-4)
+
+
+# ---------------------------------------------------------------------------
+# FlashQLA backend tests
+# ---------------------------------------------------------------------------
+
+_FLASH_QLA_AVAILABLE = importlib.util.find_spec("flash_qla") is not None
+# Backward is implemented on SM90/SM100/SM103 only, so the fwd+bwd parity tests stay gated on those.
+_SKIP_FLASH_QLA = pytest.mark.skipif(
+    device == "cpu" or not _FLASH_QLA_AVAILABLE or not (IS_NVIDIA_HOPPER or IS_NVIDIA_SM100),
+    reason="FlashQLA backward requires an SM90/SM100 GPU and the flash_qla package",
+)
+# SM120 ships a forward kernel only; forward-parity tests additionally run there.
+_SKIP_FLASH_QLA_FWD = pytest.mark.skipif(
+    device == "cpu" or not _FLASH_QLA_AVAILABLE or not (IS_NVIDIA_HOPPER or IS_NVIDIA_SM100 or IS_NVIDIA_SM120),
+    reason="FlashQLA backend requires an SM90/SM100/SM120 GPU and the flash_qla package",
+)
+
+_FLASH_QLA_RTOL = 0.008
+
+
+def _flash_qla_run(monkeypatch, **kwargs):
+    from fla.ops.gated_delta_rule.backends.flash_qla import FlashQLABackend
+    monkeypatch.setenv("FLA_FLASH_QLA", "1")
+    dispatched = []
+    impl = FlashQLABackend.chunk_gated_delta_rule
+
+    def spy(self, *args, **kw):
+        dispatched.append(True)
+        return impl(self, *args, **kw)
+
+    monkeypatch.setattr(FlashQLABackend, "chunk_gated_delta_rule", spy)
+    out = chunk_gated_delta_rule(**kwargs)
+    assert dispatched, "FlashQLA backend was not dispatched; the test would only compare the Triton fallback"
+    return out
+
+
+def _flash_qla_gold(q, k, v, g, beta, scale, h0):
+    HV = v.shape[2]
+    H = q.shape[2]
+    G = HV // H
+    return naive_recurrent_gated_delta_rule(
+        q=F.normalize(repeat(q.clone(), 'b t h d -> b t (h g) d', g=G), p=2, dim=-1),
+        k=F.normalize(repeat(k.clone(), 'b t h d -> b t (h g) d', g=G), p=2, dim=-1),
+        v=v.clone(),
+        g=g.clone(),
+        beta=beta.clone(),
+        scale=scale,
+        initial_state=h0.clone(),
+        output_final_state=True,
+    )
+
+
+@_SKIP_FLASH_QLA
+@pytest.mark.parametrize(
+    ("B", "T", "H", "HV", "D", "dtype"),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-HV{}-D{}-{}".format(*test))
+        for test in [
+            (1, 1024, 4, 4, 128, torch.bfloat16),
+            (2, 2048, 8, 8, 128, torch.bfloat16),
+            (1, 4096, 16, 16, 128, torch.bfloat16),
+            (1, 1024, 4, 4, 128, torch.float16),
+            (2, 2048, 8, 8, 128, torch.float16),
+            # GVA: HV > H
+            (1, 1024, 2, 8, 128, torch.bfloat16),
+            (2, 2048, 4, 16, 128, torch.bfloat16),
+        ]
+    ],
+)
+def test_flash_qla_chunk(B, T, H, HV, D, dtype, monkeypatch):
+    torch.manual_seed(42)
+    q = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    k = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    v = torch.randn(B, T, HV, D, dtype=dtype, device=device)
+    g = F.logsigmoid(torch.randn(B, T, HV, dtype=torch.float32, device=device))
+    beta = torch.randn(B, T, HV, dtype=torch.float32, device=device).sigmoid()
+    h0 = torch.randn(B, HV, D, D, dtype=torch.float32, device=device)
+    scale = D ** -0.5
+    q, k, v, g, beta, h0 = (x.requires_grad_(True) for x in (q, k, v, g, beta, h0))
+
+    ref_o, ref_ht = _flash_qla_gold(q, k, v, g, beta, scale, h0.clone())
+    do = torch.randn_like(ref_o)
+    dht = torch.randn_like(ref_ht)
+    ((ref_o * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=True)
+    ref_dq, ref_dk, ref_dv, ref_dg, ref_dbeta, ref_dh0 = q.grad, k.grad, v.grad, g.grad, beta.grad, h0.grad
+    q.grad = k.grad = v.grad = g.grad = beta.grad = h0.grad = None
+
+    tri_o, tri_ht = _flash_qla_run(
+        monkeypatch,
+        q=q.clone(), k=k.clone(), v=v.clone(), g=g.clone(), beta=beta.clone(),
+        scale=scale,
+        initial_state=h0.clone(),
+        output_final_state=True,
+        use_qk_l2norm_in_kernel=True,
+    )
+    ((tri_o * do).sum() + (tri_ht * dht).sum()).backward(retain_graph=True)
+    tri_dq, tri_dk, tri_dv, tri_dg, tri_dbeta, tri_dh0 = q.grad, k.grad, v.grad, g.grad, beta.grad, h0.grad
+
+    assert_close("  o", ref_o, tri_o, _FLASH_QLA_RTOL)
+    assert_close(" ht", ref_ht, tri_ht.to(ref_ht.dtype), _FLASH_QLA_RTOL)
+    assert_close(" dq", ref_dq, tri_dq, _FLASH_QLA_RTOL)
+    assert_close(" dk", ref_dk, tri_dk, _FLASH_QLA_RTOL)
+    assert_close(" dv", ref_dv, tri_dv, _FLASH_QLA_RTOL)
+    assert_close(" dg", ref_dg, tri_dg, 0.035)
+    assert_close(" db", ref_dbeta, tri_dbeta, 0.008)
+    assert_close("dh0", ref_dh0, tri_dh0, _FLASH_QLA_RTOL)
+
+
+@_SKIP_FLASH_QLA
+@pytest.mark.parametrize(
+    ("H", "D", "cu_seqlens"),
+    [
+        pytest.param(H, D, cu, id=f"H{H}-D{D}-cu{cu}")
+        for (H, D, cu) in [
+            (4, 128, [0, 256, 500, 1000]),
+            (8, 128, [0, 100, 300, 1200, 2000]),
+            (16, 128, [0, 101, 303, 1205, 3007, 4096]),
+        ]
+    ],
+)
+def test_flash_qla_chunk_varlen(H, D, cu_seqlens, monkeypatch):
+    torch.manual_seed(42)
+    dtype = torch.bfloat16
+    cu_seqlens_t = torch.LongTensor(cu_seqlens).to(device)
+    T = cu_seqlens[-1]
+    N = len(cu_seqlens) - 1
+
+    q = torch.randn(1, T, H, D, dtype=dtype, device=device)
+    k = torch.randn(1, T, H, D, dtype=dtype, device=device)
+    v = torch.randn(1, T, H, D, dtype=dtype, device=device)
+    g = F.logsigmoid(torch.randn(1, T, H, dtype=torch.float32, device=device))
+    beta = torch.randn(1, T, H, dtype=torch.float32, device=device).sigmoid()
+    h0 = torch.randn(N, H, D, D, dtype=torch.float32, device=device)
+    scale = D ** -0.5
+    q, k, v, g, beta, h0 = (x.requires_grad_(True) for x in (q, k, v, g, beta, h0))
+    do = torch.randn(1, T, H, D, dtype=dtype, device=device)
+    dht = torch.randn(N, H, D, D, dtype=torch.float32, device=device)
+
+    tri_o, tri_ht = _flash_qla_run(
+        monkeypatch,
+        q=q.clone(), k=k.clone(), v=v.clone(), g=g.clone(), beta=beta.clone(),
+        scale=scale,
+        initial_state=h0.clone(),
+        output_final_state=True,
+        use_qk_l2norm_in_kernel=True,
+        cu_seqlens=cu_seqlens_t,
+    )
+    ((tri_o * do).sum() + (tri_ht * dht).sum()).backward(retain_graph=True)
+    tri_dq, tri_dk, tri_dv, tri_dg, tri_dbeta, tri_dh0 = q.grad, k.grad, v.grad, g.grad, beta.grad, h0.grad
+    q.grad = k.grad = v.grad = g.grad = beta.grad = h0.grad = None
+
+    ref_parts = []
+    ref_ht_parts = []
+    for i in range(N):
+        s, e = cu_seqlens[i], cu_seqlens[i + 1]
+        ref_i, ref_ht_i = naive_recurrent_gated_delta_rule(
+            q=F.normalize(q[:, s:e].clone(), p=2, dim=-1),
+            k=F.normalize(k[:, s:e].clone(), p=2, dim=-1),
+            v=v[:, s:e].clone(),
+            g=g[:, s:e].clone(),
+            beta=beta[:, s:e].clone(),
+            scale=scale,
+            initial_state=h0[i].clone(),
+            output_final_state=True,
+        )
+        ref_parts.append(ref_i)
+        ref_ht_parts.append(ref_ht_i)
+    ref_o = torch.cat(ref_parts, 1)
+    ref_ht = torch.cat(ref_ht_parts, 0)
+
+    ((ref_o * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=True)
+    ref_dq, ref_dk, ref_dv, ref_dg, ref_dbeta, ref_dh0 = q.grad, k.grad, v.grad, g.grad, beta.grad, h0.grad
+
+    assert_close("  o", ref_o, tri_o, _FLASH_QLA_RTOL)
+    assert_close(" ht", ref_ht, tri_ht.to(ref_ht.dtype), _FLASH_QLA_RTOL)
+    assert_close(" dq", ref_dq, tri_dq, _FLASH_QLA_RTOL)
+    assert_close(" dk", ref_dk, tri_dk, _FLASH_QLA_RTOL)
+    assert_close(" dv", ref_dv, tri_dv, _FLASH_QLA_RTOL)
+    assert_close(" dg", ref_dg, tri_dg, 0.035)
+    assert_close(" db", ref_dbeta, tri_dbeta, 0.008)
+    assert_close("dh0", ref_dh0, tri_dh0, _FLASH_QLA_RTOL)
+
+
+@_SKIP_FLASH_QLA
+@pytest.mark.parametrize(
+    ("B", "T", "H", "D"),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-D{}".format(*test))
+        for test in [
+            (1, 1024, 4, 128),
+            (2, 2048, 8, 128),
+        ]
+    ],
+)
+def test_flash_qla_chunk_state_v_first(B, T, H, D, monkeypatch):
+    torch.manual_seed(42)
+    dtype = torch.bfloat16
+    q = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    k = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    v = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    g = F.logsigmoid(torch.randn(B, T, H, dtype=torch.float32, device=device))
+    beta = torch.randn(B, T, H, dtype=torch.float32, device=device).sigmoid()
+    h0_kv = torch.randn(B, H, D, D, dtype=torch.float32, device=device)
+    h0_vk = h0_kv.transpose(-1, -2).contiguous()
+    scale = D ** -0.5
+    q, k, v, g, beta, h0_kv, h0_vk = (x.requires_grad_(True) for x in (q, k, v, g, beta, h0_kv, h0_vk))
+
+    tri_vk, tri_ht_vk = _flash_qla_run(
+        monkeypatch,
+        q=q.clone(), k=k.clone(), v=v.clone(), g=g.clone(), beta=beta.clone(),
+        scale=scale,
+        initial_state=h0_vk.clone(),
+        output_final_state=True,
+        use_qk_l2norm_in_kernel=True,
+        state_v_first=True,
+    )
+    do = torch.randn_like(v)
+    dht_vk = torch.randn(B, H, D, D, dtype=torch.float32, device=device)
+    dht_kv = dht_vk.transpose(-1, -2).contiguous()
+    ((tri_vk * do).sum() + (tri_ht_vk * dht_vk).sum()).backward(retain_graph=True)
+    tri_dq, tri_dk, tri_dv, tri_dg, tri_dbeta, tri_dh0 = q.grad, k.grad, v.grad, g.grad, beta.grad, h0_vk.grad
+    q.grad = k.grad = v.grad = g.grad = beta.grad = h0_vk.grad = None
+
+    ref_kv, ref_ht_kv = _flash_qla_run(
+        monkeypatch,
+        q=q.clone(), k=k.clone(), v=v.clone(), g=g.clone(), beta=beta.clone(),
+        scale=scale,
+        initial_state=h0_kv.clone(),
+        output_final_state=True,
+        use_qk_l2norm_in_kernel=True,
+        state_v_first=False,
+    )
+    ((ref_kv * do).sum() + (ref_ht_kv * dht_kv).sum()).backward(retain_graph=True)
+    ref_dq, ref_dk, ref_dv, ref_dg, ref_dbeta, ref_dh0 = q.grad, k.grad, v.grad, g.grad, beta.grad, h0_kv.grad
+
+    assert_close("  o", ref_kv, tri_vk, 0.0)
+    assert_close(" ht", ref_ht_kv, tri_ht_vk.transpose(-1, -2), 0.0)
+    assert_close(" dq", ref_dq, tri_dq, 0.0)
+    assert_close(" dk", ref_dk, tri_dk, 0.0)
+    assert_close(" dv", ref_dv, tri_dv, 0.0)
+    assert_close(" dg", ref_dg, tri_dg, 0.0)
+    assert_close(" db", ref_dbeta, tri_dbeta, 0.0)
+    assert_close("dh0", ref_dh0, tri_dh0.transpose(-1, -2), 0.0)
+
+
+# ---------------------------------------------------------------------------
+# FlashQLA verifier rejection tests
+# ---------------------------------------------------------------------------
+
+def test_flash_qla_verifier_rejects(monkeypatch):
+    from fla.ops.gated_delta_rule.backends import flash_qla
+    be = flash_qla.FlashQLABackend()
+
+    monkeypatch.setattr(flash_qla, "IS_NVIDIA_HOPPER", False)
+    monkeypatch.setattr(flash_qla, "IS_NVIDIA_SM100", False)
+    monkeypatch.setattr(flash_qla, "IS_NVIDIA_SM120", False)
+    passed, reason = be.chunk_gated_delta_rule_verifier(
+        q=torch.empty(1, 64, 4, 128, dtype=torch.bfloat16),
+        k=torch.empty(1, 64, 4, 128, dtype=torch.bfloat16),
+        v=torch.empty(1, 64, 4, 128, dtype=torch.bfloat16),
+        g=torch.empty(1, 64, 4),
+        beta=torch.empty(1, 64, 4),
+    )
+    assert not passed and "SM90, SM100/SM103 or SM120" in reason
+
+    # exercise the remaining branches independently of the actual hardware
+    monkeypatch.setattr(flash_qla, "IS_NVIDIA_HOPPER", True)
+
+    dtype = torch.bfloat16
+    q128 = torch.empty(1, 64, 4, 128, dtype=dtype)
+    k128 = torch.empty(1, 64, 4, 128, dtype=dtype)
+    v128 = torch.empty(1, 64, 4, 128, dtype=dtype)
+    g = torch.empty(1, 64, 4)
+    beta = torch.empty(1, 64, 4)
+
+    q64 = torch.empty(1, 64, 4, 64, dtype=dtype)
+    v64 = torch.empty(1, 64, 4, 64, dtype=dtype)
+
+    ok_kwargs = dict(q=q128, k=k128, v=v128, g=g, beta=beta)
+
+    passed, reason = be.chunk_gated_delta_rule_verifier(q=q64, k=q64, v=v128, g=g, beta=beta)
+    assert not passed and "K=128" in reason
+
+    passed, reason = be.chunk_gated_delta_rule_verifier(q=q128, k=k128, v=v64, g=g, beta=beta)
+    assert not passed and "V=128" in reason
+
+    passed, reason = be.chunk_gated_delta_rule_verifier(**ok_kwargs, use_gate_in_kernel=True)
+    assert not passed and "use_gate_in_kernel" in reason
+
+    passed, reason = be.chunk_gated_delta_rule_verifier(**ok_kwargs, use_beta_sigmoid_in_kernel=True)
+    assert not passed and "use_beta_sigmoid_in_kernel" in reason
+
+    passed, reason = be.chunk_gated_delta_rule_verifier(**ok_kwargs, allow_neg_eigval=True)
+    assert not passed and "allow_neg_eigval" in reason
+
+    passed, reason = be.chunk_gated_delta_rule_verifier(**ok_kwargs, transpose_state_layout=True)
+    assert not passed and "transpose_state_layout" in reason
+
+    passed, reason = be.chunk_gated_delta_rule_verifier(**ok_kwargs, cp_context=object())
+    assert not passed and "context parallel" in reason
+
+    passed, reason = be.chunk_gated_delta_rule_verifier(**ok_kwargs)
+    assert passed and reason is None
+
+
+def _sm120_verifier_kwargs(requires_grad: bool):
+    dtype = torch.bfloat16
+    q, k, v = (torch.empty(1, 64, 4, 128, dtype=dtype).requires_grad_(requires_grad) for _ in range(3))
+    g = torch.empty(1, 64, 4).requires_grad_(requires_grad)
+    beta = torch.empty(1, 64, 4).requires_grad_(requires_grad)
+    return dict(q=q, k=k, v=v, g=g, beta=beta)
+
+
+def test_flash_qla_verifier_sm120_accepts_forward(monkeypatch):
+    """SM120 has a forward kernel: grad-free calls must dispatch to FlashQLA."""
+    from fla.ops.gated_delta_rule.backends import flash_qla
+    be = flash_qla.FlashQLABackend()
+
+    monkeypatch.setattr(flash_qla, "IS_NVIDIA_HOPPER", False)
+    monkeypatch.setattr(flash_qla, "IS_NVIDIA_SM100", False)
+    monkeypatch.setattr(flash_qla, "IS_NVIDIA_SM120", True)
+
+    passed, reason = be.chunk_gated_delta_rule_verifier(**_sm120_verifier_kwargs(requires_grad=False))
+    assert passed and reason is None
+
+    # frozen model under no_grad: inputs may still carry requires_grad
+    grad_kwargs = _sm120_verifier_kwargs(requires_grad=True)
+    with torch.no_grad():
+        passed, reason = be.chunk_gated_delta_rule_verifier(**grad_kwargs)
+    assert passed and reason is None
+
+    # an initial state that requires grad is enough to force the Triton path
+    passed, reason = be.chunk_gated_delta_rule_verifier(
+        **_sm120_verifier_kwargs(requires_grad=False),
+        initial_state=torch.empty(1, 4, 128, 128).requires_grad_(True),
+    )
+    assert not passed and "forward pass only" in reason
+
+
+def test_flash_qla_verifier_sm120_rejects_backward(monkeypatch):
+    """SM120 has no backward kernel: trainable calls must fall back to Triton."""
+    from fla.ops.gated_delta_rule.backends import flash_qla
+    be = flash_qla.FlashQLABackend()
+
+    monkeypatch.setattr(flash_qla, "IS_NVIDIA_HOPPER", False)
+    monkeypatch.setattr(flash_qla, "IS_NVIDIA_SM100", False)
+    monkeypatch.setattr(flash_qla, "IS_NVIDIA_SM120", True)
+
+    passed, reason = be.chunk_gated_delta_rule_verifier(**_sm120_verifier_kwargs(requires_grad=True))
+    assert not passed and "forward pass only" in reason
+
+    # SM90/SM100 keep dispatching trainable calls
+    monkeypatch.setattr(flash_qla, "IS_NVIDIA_SM120", False)
+    monkeypatch.setattr(flash_qla, "IS_NVIDIA_HOPPER", True)
+    passed, reason = be.chunk_gated_delta_rule_verifier(**_sm120_verifier_kwargs(requires_grad=True))
+    assert passed and reason is None
+
+
+def test_flash_qla_verifier_sm120_rejects_float16(monkeypatch):
+    """FlashQLA's blackwell_sm120 forward kernel fails to compile for float16."""
+    from fla.ops.gated_delta_rule.backends import flash_qla
+    be = flash_qla.FlashQLABackend()
+
+    fp16 = {
+        k: (v.half() if v.dtype == torch.bfloat16 else v)
+        for k, v in _sm120_verifier_kwargs(requires_grad=False).items()
+    }
+
+    monkeypatch.setattr(flash_qla, "IS_NVIDIA_HOPPER", False)
+    monkeypatch.setattr(flash_qla, "IS_NVIDIA_SM100", False)
+    monkeypatch.setattr(flash_qla, "IS_NVIDIA_SM120", True)
+    passed, reason = be.chunk_gated_delta_rule_verifier(**fp16)
+    assert not passed and "float16" in reason
+
+    # float16 still dispatches on SM90/SM100
+    monkeypatch.setattr(flash_qla, "IS_NVIDIA_SM120", False)
+    monkeypatch.setattr(flash_qla, "IS_NVIDIA_HOPPER", True)
+    passed, reason = be.chunk_gated_delta_rule_verifier(**fp16)
+    assert passed and reason is None
+
+
+@pytest.mark.skipif(not IS_NVIDIA_SM120, reason="only meaningful where the SM120 flag is set")
+def test_flash_qla_sm120_flag_is_exact_capability():
+    """FlashQLA matches the '12.0' target string exactly and raises ValueError at import on 12.1
+    (GB10), so widening this flag to major == 12 would turn a Triton fallback into a hard error."""
+    assert torch.cuda.get_device_capability() == (12, 0)
+
+
+@_SKIP_FLASH_QLA_FWD
+@pytest.mark.parametrize(
+    ("B", "T", "H", "HV", "D", "dtype"),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-HV{}-D{}-{}".format(*test))
+        for test in [
+            (1, 1024, 4, 4, 128, torch.bfloat16),
+            (2, 2048, 8, 8, 128, torch.bfloat16),
+            (1, 1024, 4, 4, 128, torch.float16),
+            # GVA: HV > H
+            (1, 1024, 2, 8, 128, torch.bfloat16),
+        ]
+    ],
+)
+def test_flash_qla_chunk_forward_only(B, T, H, HV, D, dtype, monkeypatch):
+    """Inference-shaped forward parity — the only path FlashQLA supports on SM120."""
+    if IS_NVIDIA_SM120 and dtype == torch.float16:
+        pytest.skip(reason="FlashQLA's SM120 forward kernel does not compile for float16")
+    torch.manual_seed(42)
+    q = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    k = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    v = torch.randn(B, T, HV, D, dtype=dtype, device=device)
+    g = F.logsigmoid(torch.randn(B, T, HV, dtype=torch.float32, device=device))
+    beta = torch.randn(B, T, HV, dtype=torch.float32, device=device).sigmoid()
+    h0 = torch.randn(B, HV, D, D, dtype=torch.float32, device=device)
+    scale = D ** -0.5
+
+    with torch.no_grad():
+        ref_o, ref_ht = _flash_qla_gold(q, k, v, g, beta, scale, h0)
+        tri_o, tri_ht = _flash_qla_run(
+            monkeypatch,
+            q=q.clone(), k=k.clone(), v=v.clone(), g=g.clone(), beta=beta.clone(),
+            scale=scale,
+            initial_state=h0.clone(),
+            output_final_state=True,
+            use_qk_l2norm_in_kernel=True,
+        )
+
+    assert tri_o.shape == (B, T, HV, D)
+    assert tri_ht.shape == h0.shape
+    assert torch.isfinite(tri_o).all() and torch.isfinite(tri_ht).all()
+    assert_close("  o", ref_o, tri_o, _FLASH_QLA_RTOL)
+    assert_close(" ht", ref_ht, tri_ht.to(ref_ht.dtype), _FLASH_QLA_RTOL)

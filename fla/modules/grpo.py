@@ -416,6 +416,6 @@ def grpo_loss_with_old_logps(
                    importance_weights_clipped) - beta * per_token_kl) * completion_mask
 
     # Calculate the final loss by summing the token losses and normalizing by the number of valid tokens
-    loss = -token_loss.sum() / completion_mask.sum()
+    loss = token_loss.sum() / completion_mask.sum()
 
     return loss
