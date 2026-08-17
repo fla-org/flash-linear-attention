@@ -116,6 +116,13 @@ def causal_conv1d_update_ref_torch(x, conv_state, weight, bias=None, activation=
     return (out if activation is None else F.silu(out)).to(dtype=dtype_in)
 
 
+def test_short_conv_state_size():
+    conv = ShortConvolution(hidden_size=8, kernel_size=4)
+
+    assert conv.state_size == 32
+    assert isinstance(conv.state_size, int)
+
+
 @pytest.mark.parametrize(
     ('B', 'T', 'D', 'W', 'activation', 'has_bias', 'has_residual', 'dtype', 'backend'),
     [
