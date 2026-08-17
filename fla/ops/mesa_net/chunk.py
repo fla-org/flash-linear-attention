@@ -140,7 +140,7 @@ def chunk_fwd_mesa_net_bwd(
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         max_CG_iteration=max_CG_iteration,
-        output_dtype=torch.float16,
+        output_dtype=torch.bfloat16,
         chunk_indices=chunk_indices,
     )
     dh_kk, dh0_kk = chunk_bwd_dh(
@@ -213,12 +213,12 @@ class ChunkMesaNetFunction(torch.autograd.Function):
             chunk_indices = None
 
         if use_qk_l2norm_in_kernel:
-            q, q_rstd = l2norm_fwd(q, output_dtype=torch.float16)
-            k, k_rstd = l2norm_fwd(k, output_dtype=torch.float16)
+            q, q_rstd = l2norm_fwd(q, output_dtype=torch.bfloat16)
+            k, k_rstd = l2norm_fwd(k, output_dtype=torch.bfloat16)
         else:
             q_rstd, k_rstd = None, None
-            q = q.to(torch.float16)
-            k = k.to(torch.float16)
+            q = q.to(torch.bfloat16)
+            k = k.to(torch.bfloat16)
 
         g_cumsum, q_star, o, (h_kk_final, h_kv_final) = chunk_fwd_mesa_net_fwd(
             q=q,
