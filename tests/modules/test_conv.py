@@ -883,6 +883,9 @@ def test_fast_conv_varlen(
             (2, 128, 2048, 3, True, True, "swish", torch.float32),
             (2, 128, 4096, 4, True, True, "swish", torch.float32),
             (2, 128, 8192, 4, True, True, "swish", torch.float32),
+            (1, 1, 128, 4, True, True, "swish", torch.float32),
+            (2, 2, 128, 4, True, True, "swish", torch.float32),
+            (1, 1, 64, 3, True, True, "swish", torch.float32),
         ]
     ],
 )
