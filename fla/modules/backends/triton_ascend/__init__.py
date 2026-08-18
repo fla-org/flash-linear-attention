@@ -459,6 +459,7 @@ class TritonAscendBackend(BaseBackend):
         initial_state,
         activation,
         cu_seqlens,
+        dht=None,
     ):
         from fla.modules.backends.triton_ascend.causal_conv1d import compute_dh0_npu
         return compute_dh0_npu(
@@ -468,6 +469,7 @@ class TritonAscendBackend(BaseBackend):
             initial_state,
             activation,
             cu_seqlens,
+            dht,
         )
 
     def causal_conv1d_update_states(
