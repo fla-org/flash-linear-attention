@@ -318,9 +318,11 @@ def causal_conv1d_bwd_kernel(
         if i_t * BT + BT >= T-W:
             start_tok = max(0, T - (W - 1))
             offset = i_t * BT + tl.arange(0, BT)
-            tok_idx = offset - start_tok
             mask = (offset >= start_tok) & (offset < T)
-            w_idx = 1 + tok_idx
+            # state slot w is token T - W + w, so token t takes dht[:, t + W - T].
+            # start_tok is clamped, which only matters for the mask (offset >= 0 anyway),
+            # so the slot index has to come from the unclamped expression.
+            w_idx = offset + (W - T)
             dht_off = i_n * D * W + o_d[None, :] * W + w_idx[:, None]
             b_dht = tl.load(dht + dht_off, mask=mask[:, None] & m_d[None, :], other=0.).to(tl.float32)
             b_dx += b_dht
@@ -421,6 +423,7 @@ def causal_conv1d_update_kernel(
 
 @triton.heuristics({
     'USE_ACTIVATION': lambda args: args['y'] is not None,
+    'USE_FINAL_STATE': lambda args: args['dht'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.jit
@@ -429,14 +432,17 @@ def compute_dh0_kernel(
     y,
     weight,
     dh0,
+    dht,
     cu_seqlens,
     stride_dy_n,
     stride_dy_t,
+    stride_dy_d,
     T,
     D: tl.constexpr,
     W: tl.constexpr,
     BD: tl.constexpr,
     USE_ACTIVATION: tl.constexpr,
+    USE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
     """
@@ -468,21 +474,29 @@ def compute_dh0_kernel(
     for i_w in tl.static_range(1, W):
         b_dh0 = tl.zeros([BD], dtype=tl.float32)
 
+        if USE_FINAL_STATE:
+            # a sequence shorter than the state leaves initial_state[:, i_w] still sitting in
+            # final_state[:, i_w - seq_len], so that slot's gradient passes straight through
+            if i_w >= seq_len:
+                p_dht = dht + i_n * D * W + o_d * W + (i_w - seq_len)
+                b_dh0 += tl.load(p_dht, mask=m_d, other=0).to(tl.float32)
+
         # Accumulate contributions from t = 0 to min(i_w, seq_len) - 1
         for t in tl.static_range(0, W - 1):
             if t < i_w:
                 w_idx = i_w - 1 - t
 
                 # Load dy[t, :] relative to dy_base
-                p_dy = dy_base + t * stride_dy_t + o_d
+                p_dy = dy_base + t * stride_dy_t + o_d * stride_dy_d
                 m_t = (t < seq_len) & m_d
                 b_dy = tl.load(p_dy, mask=m_t, other=0).to(tl.float32)
 
                 if USE_ACTIVATION:
+                    # `y` is recomputed contiguous [*, T, D]; only `dy` may carry other strides
                     if IS_VARLEN:
-                        p_y = y + bos * stride_dy_t + t * stride_dy_t + o_d
+                        p_y = y + bos * D + t * D + o_d
                     else:
-                        p_y = y + tl.cast(i_n, tl.int64) * stride_dy_n + t * stride_dy_t + o_d
+                        p_y = y + tl.cast(i_n, tl.int64) * T * D + t * D + o_d
                     b_y = tl.load(p_y, mask=m_t, other=0).to(tl.float32)
                     b_ys = tl.sigmoid(b_y)
                     b_dy = b_dy * b_ys * (1 + b_y * (1 - b_ys))

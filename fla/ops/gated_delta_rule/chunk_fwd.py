@@ -15,7 +15,7 @@ from fla.ops.gated_delta_rule.wy_fast import recompute_w_u_fwd
 from fla.ops.utils import prepare_chunk_indices, solve_tril
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.op import exp2
-from fla.utils import IS_TF32_SUPPORTED, autotune_cache_kwargs
+from fla.utils import IS_INTEL, IS_TF32_SUPPORTED, autotune_cache_kwargs
 
 if IS_TF32_SUPPORTED:
     SOLVE_TRIL_DOT_PRECISION = tl.constexpr('tf32')
@@ -375,7 +375,10 @@ def chunk_gated_delta_rule_fwd_intra(
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
 
-    if BT == 64:
+    # The fused kernel keeps ten [BC, BC] fp32 accumulators live across the K loop.
+    # That fits NVIDIA's register file but spills on Intel GPUs, where the unfused
+    # two-kernel path measures 2.3-3.0x faster despite the extra HBM round-trip.
+    if BT == 64 and not IS_INTEL:
         # Step 1: fused kkt + solve_tril
         BC = 16
         NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
@@ -395,7 +398,7 @@ def chunk_gated_delta_rule_fwd_intra(
             BC=BC,
         )
     else:
-        # Step 1: mathematically equivalent unfused kkt + solve_tril for non-64 chunks
+        # Step 1: mathematically equivalent unfused kkt + solve_tril
         A = chunk_scaled_dot_kkt_fwd(
             k=k,
             g=g,

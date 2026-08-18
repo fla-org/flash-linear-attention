@@ -2,6 +2,51 @@
 
 Experience notes from past kernel work. Read the current code before applying — numbers are not immutable hardware constants. Paths are relative to the `flash-linear-attention` repo root.
 
+## `causal_conv1d.py` — 1D core-grid + constexpr DMA split
+
+File: `fla/modules/backends/triton_ascend/causal_conv1d.py`
+
+Packed training path (contiguous `[B,T,D]`, no `initial_state` / `dht`, `D` divisible by a `BD>=16` tile) uses 1D core-grid kernels. Odd `D` (e.g. 200), strided layout, and cache-state paths stay on the legacy multi-axis kernels.
+
+### Fast-path shape
+
+- Public weight is `[D, W]`; host `transpose(0, 1).contiguous()` → `[W, D]` so `block_ptr` is stride-1 along D.
+- Grid: `get_multiprocessor_count` → `num_vectorcore` (Vector-bound, Cube=0). A2: 48 vector vs 24 Cube.
+- Fwd: preferred `BD=256` (exact divisor of D), `BT<=32`. Fuse bias / silu / residual. If activation is silu/swish, also store pre-silu `y_linear` (extra MTE3, skips a second full fwd in bwd). Stash on the pre-rearrange `x` as `_fla_causal_conv_y_linear`.
+- Bwd: `BT<=64` bf16/fp16, `BT<=32` fp32 (fp32 live tiles ~200KB > 192KB UB). `BD` 64 if `cdiv(D,64)*NUM_CHKS > NUM_CORES/2` else 32. No-state path: one `BT+W-1` `dy` load + `extract_slice` per tap; `insert_slice` into `b_dw`.
+- `tl.extract_slice` / `insert_slice`: shim from `triton.language.extra.cann.extension` when `tl` lacks them. Intra-loop `x` loads — preloading every tap overflows UB.
+- Constexpr vs runtime on optional ptrs: nest `if not USE_INITIAL_STATE: … elif i_t*BT >= W: … else: …`. OR-ing still compiles `initial_state + …` when the pointer is None.
+- Tail DMA: packed-row end `bos + i_t*BT + BT` (bwd halo: `+ W-1`) must not exceed `B*T`, else MTE `DDR address out of range`. Masked load/store on that chunk.
+- Address math: `t0 = tl.cast(i_t, tl.int64) * BT` and `bos = tl.cast(i_b, tl.int64) * T` for flattened `offset * D` (int32 wrap at T>2³¹/D; D=4096 → T>524K). Use `tl.cast`, not `.to` — specialized `B`/`T` are constexpr (`B.to(tl.int64)` fails compile). `make_block_ptr` offsets stay int32 (`i_t * BT`); do not pass `t0`. Tail check: `tl.cast(B, tl.int64) * T`.
+
+### Constexpr `TAIL_MODE` split (the perf win)
+
+Bwd used a **runtime** `is_tail_chunk` to pick `make_block_ptr` vs masked DMA. Triton-Ascend keeps **both** paths live in UB → peak UB ≈ sum of both; Vector stuck at `aiv_vec_ratio≈0.76` even though MemoryUB R/W ~32/22 GB/s was not saturated. Larger tiles (`BT=128` / `BD=128`) fail compile (`req ~390KB > 192KB`).
+
+Packed `NT>1`: two launches so each compile DCE's the unused path.
+
+| Launch | `TAIL_MODE` | Coverage | DMA |
+|--------|-------------|----------|-----|
+| bulk | `0` | `i_t = 0..NT-2` (`num_chks=B*(NT-1)`, `nt_stride=NT-1`, `i_t_offset=0`) | `block_ptr` only |
+| tail | `1` | last T-chunk (`num_chks=B`, `nt_stride=1`, `i_t_offset=NT-1`) | masked only |
+| varlen / `NT==1` | `2` | all tasks | runtime predicate |
+
+`NT_STRIDE` / `I_T_OFFSET` decode `i_chk` → `(i_b, i_t)` without a runtime tail flag in the bulk kernel.
+
+### Measured (Ascend 910, 48 vector / 24 Cube, bf16 silu bias, no residual/state)
+
+Synced median fwdbwd, vs core-grid **before** the split:
+
+| Shape | before | after |
+|-------|--------|-------|
+| B1 T8192 D4096 W4 | 1.536 ms | **1.371 ms** |
+| B1 T2048 D4096 W4 | 0.689 ms | 0.590 ms |
+| B1 T2048 D1024 W4 | 0.540 ms | 0.457 ms |
+
+Pipe (T8192 D4096): bwd 916µs (65%, vec=0.756, mte2=0.216) → bulk **759µs vec=0.948** + tail 23µs. Fwd ~350µs unchanged (vec≈0.64, still per-tap masked `x` loads). Host transpose + `dw`/`db` ReduceSum ~10%. Gate: `tests/modules/test_conv.py -k "not cuda"`.
+
+Open: fwd window+`extract_slice` (same pattern as no-state bwd); host ReduceSum of per-chunk `dw`/`db`.
+
 ## `chunk_delta_h.py` — bwd `dhu`
 
 File: `fla/ops/common/backends/triton_ascend/chunk_delta_h.py`
@@ -29,7 +74,7 @@ File: `fla/ops/common/backends/triton_ascend/chunk_o.py`
 File: `fla/ops/kda/backends/triton_ascend/chunk_bwd.py`
 
 - `chunk_kda_bwd_kernel_dAv_npu` and `chunk_kda_bwd_kernel_wy_v_part_npu` loaded `bos`/`eos` via `.to(tl.int32)` then `(bos * HV + i_hv) * V` — int32 wrap on packed varlen offsets (e.g. HV=32, V=4096 safe `bos` ≈ 16K). Later kernels in the same file already used `tl.int64`.
-- Fix: load `bos`/`eos` as int64; `T = (eos - bos).to(tl.int32)`; non-varlen else-branch `(i_b * T).to(tl.int64)`.
+- Fix: load `bos`/`eos` as int64; `T = (eos - bos).to(tl.int32)`; non-varlen else-branch `tl.cast(i_b, tl.int64) * T` (CUDA often writes `(i_b * T).to(tl.int64)`, which still wraps if `i_b * T` exceeds 2³¹; `.to` also fails if `i_b` is constexpr).
 
 ## `wy_fast.py` — Ascend `tl.dot` left-operand clobber
 
