@@ -1248,7 +1248,9 @@ def _launch_bwd_dwdb_core(
     if BD is None:
         pow2_t = triton.next_power_of_2(T)
         floor_t = pow2_t if pow2_t == T else pow2_t // 2
-        BT = min(64, floor_t)
+        # BT=1 (T=1) miscompiles the initial_state dw contribution on Ascend
+        # (masked [1, BD] reduce / store); pad to at least 8 and mask o_t >= T.
+        BT = min(64, max(8, floor_t))
         BD = min(16, max(8, triton.next_power_of_2(D)))
     if cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT, cu_seqlens_cpu=cu_seqlens_cpu)
@@ -1305,6 +1307,7 @@ def _launch_bwd_dwdb_core(
 
 @triton.heuristics({
     'USE_ACTIVATION': lambda args: args['y'] is not None,
+    'USE_FINAL_STATE': lambda args: args['dht'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.jit
@@ -1313,6 +1316,7 @@ def compute_dh0_kernel(
     y,
     weight,
     dh0,
+    dht,
     cu_seqlens,
     stride_dy_n,
     stride_dy_t,
@@ -1325,6 +1329,7 @@ def compute_dh0_kernel(
     W: tl.constexpr,
     BD: tl.constexpr,
     USE_ACTIVATION: tl.constexpr,
+    USE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     CHUNK_OFFSET: tl.constexpr,
 ):
@@ -1344,6 +1349,13 @@ def compute_dh0_kernel(
 
     for i_w in tl.static_range(1, W):
         b_dh0 = tl.zeros([BD], dtype=tl.float32)
+
+        if USE_FINAL_STATE:
+            # a sequence shorter than the state leaves initial_state[:, i_w] still sitting in
+            # final_state[:, i_w - seq_len], so that slot's gradient passes straight through
+            if i_w >= seq_len:
+                p_dht = dht + i_n * D * W + o_d * W + (i_w - seq_len)
+                b_dh0 += tl.load(p_dht, mask=m_d, other=0).to(tl.float32)
 
         for t in tl.static_range(0, W - 1):
             if t < i_w:
@@ -2091,6 +2103,7 @@ def causal_conv1d_bwd_npu(
             initial_state=initial_state,
             activation=activation,
             cu_seqlens=cu_seqlens,
+            dht=dht,
         )
 
     return dx.view(shape), dw, db, dr, dh0
@@ -2103,6 +2116,7 @@ def compute_dh0_npu(
     initial_state: torch.Tensor,
     activation: str | None,
     cu_seqlens: torch.Tensor | None,
+    dht: torch.Tensor | None = None,
 ) -> torch.Tensor:
     D, W = weight.shape
     N = initial_state.shape[0]
@@ -2126,6 +2140,7 @@ def compute_dh0_npu(
         y=y if activation in ('swish', 'silu') else None,
         weight=weight,
         dh0=dh0,
+        dht=dht,
         cu_seqlens=cu_seqlens,
         stride_dy_n=stride_dy_n,
         stride_dy_t=stride_dy_t,
