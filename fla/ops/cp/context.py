@@ -80,6 +80,14 @@ def get_cp_cu_seqlens(
     # Get total tokens and current rank's responsible range
     # Assume cu_seqlens is [0, s1, s1+s2, ..., total]
     total_tokens = cu_seqlens_cpu[-1].item()
+    if total_tokens < world_size:
+        raise ValueError(
+            f"`total_tokens` ({total_tokens}) must be at least `world_size` ({world_size}) for context parallelism."
+        )
+    if total_tokens % world_size != 0:
+        raise ValueError(
+            f"`total_tokens` ({total_tokens}) must be divisible by `world_size` ({world_size}) for context parallelism."
+        )
     part_len = total_tokens // world_size
     rank_start = part_len * rank
     rank_end = rank_start + part_len
