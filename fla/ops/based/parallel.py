@@ -423,16 +423,18 @@ def parallel_based(
     v: torch.Tensor,
     scale: float | None = None,
     use_norm: bool = True,
-    head_first: bool = False,
+    **kwargs,
 ):
+    if 'head_first' in kwargs:
+        raise DeprecationWarning(
+            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
+        )
     assert q.shape[-1] <= 128, "only support feature dim up to 128"
     if scale is None:
         scale = q.shape[-1] ** -0.5
-    if not head_first:
-        q, k, v = map(lambda x: x.transpose(1, 2), (q, k, v))
+    q, k, v = map(lambda x: x.transpose(1, 2), (q, k, v))
     o, z = triton_parallel_based(q, k, v, scale)
     if use_norm:
         o = o / (z[..., None] + 1e-6)
-    if not head_first:
-        o = o.transpose(1, 2)
+    o = o.transpose(1, 2)
     return o.to(q.dtype)
