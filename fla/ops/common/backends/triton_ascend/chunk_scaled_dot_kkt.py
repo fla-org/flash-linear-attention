@@ -91,7 +91,6 @@ def chunk_scaled_dot_kkt_fwd_kernel_npu(
             T = eos - bos
         else:
             bos = i_b.to(tl.int64) * T
-            eos = bos + T
             i_t = i_t_i.to(tl.int64)
         o_t = i_t * BT + tl.arange(0, BT)
         m_t = o_t < T
