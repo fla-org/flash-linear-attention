@@ -472,3 +472,43 @@ def test_layer(num_heads, num_v_heads, use_short_conv):
         if p.requires_grad:
             assert p.grad is not None, f"{name}.grad is None"
             assert torch.isfinite(p.grad).all(), f"{name}.grad has non-finite values"
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_chunk_bwd_autotune_key_covers_head_dims():
+    """The fused WY/dqkg backward must autotune each (K, V) geometry separately.
+
+    The kernel autotunes over BK/BV tile configs, whose relative performance
+    depends on the head dimensions K and V. Backwards through two different
+    (K, V) geometries at the same chunk size must therefore leave two distinct
+    autotuner cache entries; if K/V are missing from the autotune key, the
+    second geometry cache-hits on the first geometry's winner and runs a
+    config that was never measured for its shape.
+    """
+    import fla.ops.gdn2.chunk_bwd as chunk_bwd_mod
+
+    # The module symbol is Heuristics(Autotuner(JITFunction)); walk .fn down to
+    # the Autotuner, which owns the config cache.
+    tuner = chunk_bwd_mod.chunk_gdn2_bwd_kernel_wy_dqkg_fused
+    for _ in range(3):
+        if hasattr(tuner, 'cache'):
+            break
+        tuner = tuner.fn
+    assert hasattr(tuner, 'cache'), "could not locate the Autotuner on the fused kernel"
+
+    saved = dict(tuner.cache)
+    tuner.cache.clear()
+    try:
+        for K, V in [(32, 64), (64, 128)]:
+            q, k, v, g, b, w, _, _ = _rand_inputs(1, 256, 2, K, V, torch.bfloat16)
+            for t in (q, k, v, g, b, w):
+                t.requires_grad_(True)
+            o, _ = chunk_gdn2(q=q, k=k, v=v, g=g, b=b, w=w, use_qk_l2norm_in_kernel=True)
+            o.sum().backward()
+        assert len(tuner.cache) == 2, (
+            f"expected one autotune cache entry per (K, V) geometry, got {len(tuner.cache)}; "
+            f"the autotune key must include K and V"
+        )
+    finally:
+        tuner.cache.clear()
+        tuner.cache.update(saved)
