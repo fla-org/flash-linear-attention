@@ -79,14 +79,15 @@ def check_pytorch_version(version_s: str = '2.4') -> bool:
 
 
 @cache
-def get_multiprocessor_count(tensor_idx: int = 0) -> int:
+def get_multiprocessor_count(tensor_idx: int = 0, *, use_aicore: bool = False) -> int:
     try:
         return triton.runtime.driver.active.utils.get_device_properties(tensor_idx)['multiprocessor_count']
     except Exception:
         # Maybe we use a NPU device.
         try:
             if triton.runtime.driver.active.get_current_target().backend == 'npu':
-                return triton.runtime.driver.active.utils.get_device_properties(tensor_idx)['num_vectorcore']
+                props = triton.runtime.driver.active.utils.get_device_properties(tensor_idx)
+                return props['num_aicore'] if use_aicore else props['num_vectorcore']
         except Exception:
             logger.debug('Failed to get NPU multiprocessor count, falling back to 1.', exc_info=True)
         return 1
