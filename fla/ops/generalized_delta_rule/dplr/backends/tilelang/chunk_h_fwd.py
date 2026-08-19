@@ -27,7 +27,7 @@ import torch
 
 from fla.utils import get_device_capability
 
-from .utils import ChunkLayout, build_rect_chunk_layout, build_varlen_chunk_layout
+from .layout import ChunkLayout, build_rect_chunk_layout, build_varlen_chunk_layout
 
 
 def _chunk_h_fwd_config(K: int, V: int, device_index: int) -> dict[str, int]:

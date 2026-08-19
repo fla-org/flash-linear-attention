@@ -31,8 +31,8 @@ from .chunk_h_fwd import chunk_dplr_fwd_h
 from .chunk_ho_fwd import chunk_dplr_fwd_ho, chunk_dplr_fwd_ho_ctx
 from .chunk_stream_bwd import chunk_dplr_bwd_stream_into
 from .cumsum import chunk_local_cumsum
-from .utils import ChunkLayout, build_varlen_chunk_layout
-from .wy_fast_bwd import chunk_dplr_bwd_wy_into
+from .layout import ChunkLayout, build_varlen_chunk_layout
+from .wy_fast_bwd import chunk_dplr_bwd_wy_repr_into
 from .wy_fast_fwd import prepare_wy_repr_fwd
 
 _CHECKPOINT_PHASE_NORMAL = "normal"
@@ -351,7 +351,7 @@ def _chunk_dplr_delta_rule_bwd_core(
 
     dA_ab_workspace = torch.empty(A_ak.shape, dtype=q.dtype, device=A_ak.device)
     dA_ak_workspace = torch.empty(A_ak.shape, dtype=q.dtype, device=A_ak.device)
-    dA_ab, dA_ak, dv_out, dag = chunk_dplr_bwd_wy_into(
+    dA_ab, dA_ak, dv_out, dag = chunk_dplr_bwd_wy_repr_into(
         A_ab_inv=A_ab_inv,
         A_ak=A_ak,
         v=v,

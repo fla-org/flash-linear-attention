@@ -32,7 +32,7 @@ import tilelang
 import tilelang.language as T
 import torch
 
-from .utils import ChunkLayout, build_varlen_chunk_layout
+from .layout import ChunkLayout, build_varlen_chunk_layout
 
 # ---------------------------------------------------------------------------
 # TileLang segmented scan kernel for rectangular batches.

@@ -8,10 +8,15 @@
 """Default fused DPLR H/O forward.
 
 Computes the chunk start state, per-token ``v_new``, and final output in one
-forward TileLang stage.  The public DPLR recompute forward returns only
-``(o, final_state)``, so this kernel avoids the global forward write/read of
-``h`` and ``v_new``.  Backward recompute still uses the split H/O kernels
-because its gradients consume those intermediates.
+forward TileLang stage.  One kernel serves both entries:
+
+- ``chunk_dplr_fwd_ho`` (recompute forward) returns only ``(o, final_state)``,
+  so it avoids the global forward write/read of ``h`` and ``v_new``;
+- ``chunk_dplr_fwd_ho_ctx`` (disable_recompute forward) additionally stores
+  per-chunk ``h`` and per-token ``v_new`` for the backward to consume.
+
+Backward recompute still uses the split H/O kernels because its gradients
+consume those intermediates.
 """
 
 import tilelang
@@ -20,15 +25,12 @@ import torch
 
 from fla.utils import get_device_capability, get_device_smem_optin
 
-from .utils import ChunkLayout, build_rect_chunk_layout, build_varlen_chunk_layout
-
-
-def _dtype_bytes(dtype: str) -> int:
-    return 4 if dtype in {"float32", "float"} else 2
+from .layout import ChunkLayout, build_rect_chunk_layout, build_varlen_chunk_layout
+from .schedules import dtype_nbytes
 
 
 def _ho_smem_bytes(BT: int, K: int, BV: int, in_dtype: str, num_stages: int = 1) -> int:
-    elem = _dtype_bytes(in_dtype)
+    elem = dtype_nbytes(in_dtype)
     # Keep this in sync with the shared buffers in _chunk_dplr_fwd_ho_kernel.
     base = (
         elem * (K * BV + BT * K + BT * K + BT * BV + BT * BV + BT * K + BT * BT + BT * BT)
@@ -111,6 +113,8 @@ def _chunk_dplr_fwd_ho_kernel(
     in_dtype, state_dtype,
     USE_INITIAL_STATE: bool,
     STORE_FINAL_STATE: bool,
+    STORE_H_CTX: bool = False,
+    STORE_V_NEW_CTX: bool = False,
     BV: int = 64,
     threads: int = 128,
     DIRECT_KG_FRAGMENT: bool = False,
@@ -124,287 +128,6 @@ def _chunk_dplr_fwd_ho_kernel(
     # prefetch target is ragged it is staged with predicated scalar loads
     # instead (cp.async cannot mask rows by `eos`).  The fp32 bg tile needs a
     # cast on load, so it always takes the scalar path.
-    PIPELINED = num_stages >= 2
-    n_bufs = 2 if PIPELINED else 1
-    n_tokens, n_seq_plus_one, n_h0, n_ht = T.dynamic(
-        "n_tokens, n_seq_plus_one, n_h0, n_ht"
-    )
-    n_seqs = n_seq_plus_one - 1
-
-    @T.macro
-    def load_ho_chunk(
-        chunk_bos, buf, eos, i_h, i_v,
-        qg, kg, v, w, u, A_qk, A_qb,
-        kg_shared, w_shared, qg_shared, v_shared, u_shared, A_qk_shared, A_qb_shared,
-    ):
-        full_tile = chunk_bos + BT <= eos
-        if full_tile:
-            # Bulk vectorized copies for full chunks.
-            T.copy(kg[chunk_bos: chunk_bos + BT, i_h, 0:K], kg_shared[buf, :, :])
-            T.copy(w[chunk_bos: chunk_bos + BT, i_h, 0:K], w_shared[buf, :, :])
-            T.copy(qg[chunk_bos: chunk_bos + BT, i_h, 0:K], qg_shared[buf, :, :])
-            T.copy(v[chunk_bos: chunk_bos + BT, i_h, i_v * BV: i_v * BV + BV], v_shared[buf, :, :])
-            T.copy(u[chunk_bos: chunk_bos + BT, i_h, i_v * BV: i_v * BV + BV], u_shared[buf, :, :])
-            T.copy(A_qk[chunk_bos: chunk_bos + BT, i_h, 0:BT], A_qk_shared[buf, :, :])
-            T.copy(A_qb[chunk_bos: chunk_bos + BT, i_h, 0:BT], A_qb_shared[buf, :, :])
-        else:
-            for c, k_idx in T.Parallel(BT, K):
-                t = chunk_bos + c
-                if t < eos:
-                    kg_shared[buf, c, k_idx] = kg[t, i_h, k_idx]
-                    w_shared[buf, c, k_idx] = w[t, i_h, k_idx]
-                    qg_shared[buf, c, k_idx] = qg[t, i_h, k_idx]
-                else:
-                    kg_shared[buf, c, k_idx] = T.Cast(in_dtype, 0.0)
-                    w_shared[buf, c, k_idx] = T.Cast(in_dtype, 0.0)
-                    qg_shared[buf, c, k_idx] = T.Cast(in_dtype, 0.0)
-
-            for c, vv in T.Parallel(BT, BV):
-                t = chunk_bos + c
-                g_v = i_v * BV + vv
-                if (t < eos) and (g_v < V):
-                    v_shared[buf, c, vv] = v[t, i_h, g_v]
-                    u_shared[buf, c, vv] = u[t, i_h, g_v]
-                else:
-                    v_shared[buf, c, vv] = T.Cast(in_dtype, 0.0)
-                    u_shared[buf, c, vv] = T.Cast(in_dtype, 0.0)
-
-            for r, c in T.Parallel(BT, BT):
-                t = chunk_bos + r
-                if (t < eos) and (r >= c):
-                    A_qk_shared[buf, r, c] = A_qk[t, i_h, c]
-                    A_qb_shared[buf, r, c] = A_qb[t, i_h, c]
-                else:
-                    A_qk_shared[buf, r, c] = T.Cast(in_dtype, 0.0)
-                    A_qb_shared[buf, r, c] = T.Cast(in_dtype, 0.0)
-
-    @T.macro
-    def prefetch_ho_chunk(
-        chunk_bos, buf, i_h, i_v,
-        qg, kg, v, w, u, A_qk, A_qb,
-        kg_shared, w_shared, qg_shared, v_shared, u_shared, A_qk_shared, A_qb_shared,
-    ):
-        # Full tiles only: 7 operand tiles, one commit group per async_copy.
-        T.async_copy(kg[chunk_bos: chunk_bos + BT, i_h, 0:K], kg_shared[buf, :, :])
-        T.async_copy(w[chunk_bos: chunk_bos + BT, i_h, 0:K], w_shared[buf, :, :])
-        T.async_copy(qg[chunk_bos: chunk_bos + BT, i_h, 0:K], qg_shared[buf, :, :])
-        T.async_copy(v[chunk_bos: chunk_bos + BT, i_h, i_v * BV: i_v * BV + BV], v_shared[buf, :, :])
-        T.async_copy(u[chunk_bos: chunk_bos + BT, i_h, i_v * BV: i_v * BV + BV], u_shared[buf, :, :])
-        # Stored A matrices are already causally masked.
-        T.async_copy(A_qk[chunk_bos: chunk_bos + BT, i_h, 0:BT], A_qk_shared[buf, :, :])
-        T.async_copy(A_qb[chunk_bos: chunk_bos + BT, i_h, 0:BT], A_qb_shared[buf, :, :])
-        # Leave the 7 just issued groups pending, wait for the 7 issued for
-        # the current buffer at the previous iteration.
-        T.ptx_wait_group(7)
-
-    @T.prim_func
-    def chunk_dplr_fwd_ho_tl(
-        qg: T.Tensor((n_tokens, H, K), in_dtype),
-        kg: T.Tensor((n_tokens, H, K), in_dtype),
-        v: T.Tensor((n_tokens, H, V), in_dtype),
-        w: T.Tensor((n_tokens, H, K), in_dtype),
-        u: T.Tensor((n_tokens, H, V), in_dtype),
-        bg: T.Tensor((n_tokens, H, K), in_dtype),
-        gk: T.Tensor((n_tokens, H, K), acc_dtype),
-        A_qk: T.Tensor((n_tokens, H, BT), in_dtype),
-        A_qb: T.Tensor((n_tokens, H, BT), in_dtype),
-        h0: T.Tensor((n_h0, H, K, V), acc_dtype),
-        cu_seqlens: T.Tensor((n_seq_plus_one,), "int32"),
-        chunk_offsets: T.Tensor((n_seq_plus_one,), "int32"),
-        o: T.Tensor((n_tokens, H, V), in_dtype),
-        ht: T.Tensor((n_ht, H, K, V), state_dtype),
-    ):
-        with T.Kernel(T.ceildiv(V, BV), n_seqs, H, threads=threads) as (i_v, i_n, i_h):
-            bos = cu_seqlens[i_n]
-            eos = cu_seqlens[i_n + 1]
-            n_chunks = chunk_offsets[i_n + 1] - chunk_offsets[i_n]
-
-            b_h = T.alloc_fragment((K, BV), acc_dtype)
-            b_h_shared = T.alloc_shared((K, BV), in_dtype)
-            b_hc = T.alloc_fragment((K, BV), acc_dtype)
-            b_hc_kg = T.alloc_fragment((K, BV), acc_dtype)
-            b_hc_bg = T.alloc_fragment((K, BV), acc_dtype)
-            if not DIRECT_KG_FRAGMENT:
-                b_hc_kg_shared = T.alloc_shared((K, BV), acc_dtype)
-            if not DIRECT_BG_FRAGMENT:
-                b_hc_bg_shared = T.alloc_shared((K, BV), acc_dtype)
-            v2_frag = T.alloc_fragment((BT, BV), acc_dtype)
-            v2_acc_shared = T.alloc_shared((BT, BV), acc_dtype)
-            v2_shared = T.alloc_shared((BT, BV), in_dtype)
-            kg_shared = T.alloc_shared((n_bufs, BT, K), in_dtype)
-            bg_shared = T.alloc_shared((BT, K), acc_dtype)
-            w_shared = T.alloc_shared((n_bufs, BT, K), in_dtype)
-            v_shared = T.alloc_shared((n_bufs, BT, BV), in_dtype)
-            u_shared = T.alloc_shared((n_bufs, BT, BV), in_dtype)
-            qg_shared = T.alloc_shared((n_bufs, BT, K), in_dtype)
-            A_qk_shared = T.alloc_shared((n_bufs, BT, BT), in_dtype)
-            A_qb_shared = T.alloc_shared((n_bufs, BT, BT), in_dtype)
-            o_frag = T.alloc_fragment((BT, BV), acc_dtype)
-            gk_last_shared = T.alloc_shared((K,), acc_dtype)
-
-            if USE_INITIAL_STATE:
-                for k_idx, vv in T.Parallel(K, BV):
-                    g_v = i_v * BV + vv
-                    if g_v < V:
-                        b_h[k_idx, vv] = h0[i_n, i_h, k_idx, g_v]
-                    else:
-                        b_h[k_idx, vv] = 0.0
-            else:
-                for k_idx, vv in T.Parallel(K, BV):
-                    b_h[k_idx, vv] = 0.0
-
-            if PIPELINED:
-                load_ho_chunk(bos, 0, eos, i_h, i_v, qg, kg, v, w, u, A_qk, A_qb,
-                              kg_shared, w_shared, qg_shared, v_shared, u_shared,
-                              A_qk_shared, A_qb_shared)
-
-            for i_t in T.serial(n_chunks):
-                chunk_bos = bos + i_t * BT
-                cur = i_t % 2 if PIPELINED else 0
-                T.copy(b_h, b_h_shared)
-                T.clear(b_hc)
-
-                if PIPELINED:
-                    # The current buffer must be fully consumed before the
-                    # cp.async below overwrites the idle one.
-                    T.sync_threads()
-                    if i_t + 1 < n_chunks:
-                        nxt = (i_t + 1) % 2
-                        nxt_bos = chunk_bos + BT
-                        if nxt_bos + BT <= eos:
-                            prefetch_ho_chunk(nxt_bos, nxt, i_h, i_v, qg, kg, v, w, u, A_qk, A_qb,
-                                              kg_shared, w_shared, qg_shared, v_shared, u_shared,
-                                              A_qk_shared, A_qb_shared)
-                        else:
-                            load_ho_chunk(nxt_bos, nxt, eos, i_h, i_v, qg, kg, v, w, u, A_qk, A_qb,
-                                          kg_shared, w_shared, qg_shared, v_shared, u_shared,
-                                          A_qk_shared, A_qb_shared)
-                            T.ptx_wait_group(0)
-                    else:
-                        T.ptx_wait_group(0)
-                else:
-                    load_ho_chunk(chunk_bos, 0, eos, i_h, i_v, qg, kg, v, w, u, A_qk, A_qb,
-                                  kg_shared, w_shared, qg_shared, v_shared, u_shared,
-                                  A_qk_shared, A_qb_shared)
-
-                for c, k_idx in T.Parallel(BT, K):
-                    t = chunk_bos + c
-                    if t < eos:
-                        bg_shared[c, k_idx] = T.Cast(acc_dtype, bg[t, i_h, k_idx])
-                    else:
-                        bg_shared[c, k_idx] = 0.0
-
-                T.gemm(w_shared[cur, :, :], b_h_shared, v2_frag, clear_accum=True)
-                for c, vv in T.Parallel(BT, BV):
-                    t = chunk_bos + c
-                    g_v = i_v * BV + vv
-                    v2 = T.ieee_add(v2_frag[c, vv], T.Cast(acc_dtype, u_shared[cur, c, vv]))
-                    if (t < eos) and (g_v < V):
-                        v2_acc_shared[c, vv] = v2
-                        v2_shared[c, vv] = T.Cast(in_dtype, v2)
-                    else:
-                        v2_acc_shared[c, vv] = T.Cast(acc_dtype, 0.0)
-                        v2_shared[c, vv] = T.Cast(in_dtype, 0.0)
-
-                T.gemm(
-                    kg_shared[cur, :, :],
-                    v_shared[cur, :, :],
-                    b_hc_kg,
-                    transpose_A=True,
-                    clear_accum=True,
-                )
-                if not DIRECT_KG_FRAGMENT:
-                    T.copy(b_hc_kg, b_hc_kg_shared)
-                T.gemm(
-                    bg_shared,
-                    v2_acc_shared,
-                    b_hc_bg,
-                    transpose_A=True,
-                    clear_accum=True,
-                )
-                if not DIRECT_BG_FRAGMENT:
-                    T.copy(b_hc_bg, b_hc_bg_shared)
-                if DIRECT_KG_FRAGMENT and DIRECT_BG_FRAGMENT:
-                    for k_idx, vv in T.Parallel(K, BV):
-                        b_hc[k_idx, vv] = T.ieee_add(
-                            b_hc_kg[k_idx, vv],
-                            b_hc_bg[k_idx, vv],
-                        )
-                elif DIRECT_KG_FRAGMENT:
-                    for k_idx, vv in T.Parallel(K, BV):
-                        b_hc[k_idx, vv] = T.ieee_add(
-                            b_hc_kg[k_idx, vv],
-                            b_hc_bg_shared[k_idx, vv],
-                        )
-                elif DIRECT_BG_FRAGMENT:
-                    for k_idx, vv in T.Parallel(K, BV):
-                        b_hc[k_idx, vv] = T.ieee_add(
-                            b_hc_kg_shared[k_idx, vv],
-                            b_hc_bg[k_idx, vv],
-                        )
-                else:
-                    for k_idx, vv in T.Parallel(K, BV):
-                        b_hc[k_idx, vv] = T.ieee_add(
-                            b_hc_kg_shared[k_idx, vv],
-                            b_hc_bg_shared[k_idx, vv],
-                        )
-
-                T.gemm(qg_shared[cur, :, :], b_h_shared, o_frag, clear_accum=True)
-
-                T.gemm(A_qk_shared[cur, :, :], v_shared[cur, :, :], o_frag)
-                T.gemm(A_qb_shared[cur, :, :], v2_shared, o_frag)
-
-                # Stage o through v2_shared (dead after its GEMM): accumulator
-                # fragments are thread-strided, so a direct store lowers to
-                # 2-byte writes; staging enables vectorized ones.
-                T.copy(o_frag, v2_shared)
-                if (chunk_bos + BT <= eos) and (i_v * BV + BV <= V):
-                    T.copy(v2_shared, o[chunk_bos: chunk_bos + BT, i_h, i_v * BV: i_v * BV + BV])
-                else:
-                    for c, vv in T.Parallel(BT, BV):
-                        t = chunk_bos + c
-                        g_v = i_v * BV + vv
-                        if (t < eos) and (g_v < V):
-                            o[t, i_h, g_v] = v2_shared[c, vv]
-
-                last_idx = T.min(chunk_bos + BT - 1, eos - 1)
-                for k_idx in T.Parallel(K):
-                    gk_last_shared[k_idx] = gk[last_idx, i_h, k_idx]
-                for k_idx, vv in T.Parallel(K, BV):
-                    b_h[k_idx, vv] = T.ieee_mul(T.exp2(gk_last_shared[k_idx]), b_h[k_idx, vv])
-                for k_idx, vv in T.Parallel(K, BV):
-                    b_h[k_idx, vv] = T.ieee_add(b_h[k_idx, vv], b_hc[k_idx, vv])
-
-            if STORE_FINAL_STATE:
-                for k_idx, vv in T.Parallel(K, BV):
-                    g_v = i_v * BV + vv
-                    if g_v < V:
-                        ht[i_n, i_h, k_idx, g_v] = T.Cast(state_dtype, b_h[k_idx, vv])
-
-    return chunk_dplr_fwd_ho_tl
-
-
-@tilelang.jit(
-    pass_configs={
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-        tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: False,
-    },
-)
-def _chunk_dplr_fwd_ho_ctx_kernel(
-    H, K, V, BT,
-    in_dtype, state_dtype,
-    USE_INITIAL_STATE: bool,
-    STORE_FINAL_STATE: bool,
-    BV: int = 64,
-    threads: int = 128,
-    STORE_H_CTX: bool = True,
-    STORE_V_NEW_CTX: bool = True,
-    DIRECT_KG_FRAGMENT: bool = False,
-    DIRECT_BG_FRAGMENT: bool = False,
-    num_stages: int = 0,
-):
-    acc_dtype = "float32"
-    # See _chunk_dplr_fwd_ho_kernel for the pipelining scheme.
     PIPELINED = num_stages >= 2
     n_bufs = 2 if PIPELINED else 1
     n_tokens, n_seq_plus_one, n_h0, n_ht, n_h_ctx, n_v_ctx = T.dynamic(
@@ -479,7 +202,7 @@ def _chunk_dplr_fwd_ho_ctx_kernel(
         T.ptx_wait_group(7)
 
     @T.prim_func
-    def chunk_dplr_fwd_ho_ctx_tl(
+    def chunk_dplr_fwd_ho_tl(
         qg: T.Tensor((n_tokens, H, K), in_dtype),
         kg: T.Tensor((n_tokens, H, K), in_dtype),
         v: T.Tensor((n_tokens, H, V), in_dtype),
@@ -675,7 +398,44 @@ def _chunk_dplr_fwd_ho_ctx_kernel(
                     if g_v < V:
                         ht[i_n, i_h, k_idx, g_v] = T.Cast(state_dtype, b_h[k_idx, vv])
 
-    return chunk_dplr_fwd_ho_ctx_tl
+    return chunk_dplr_fwd_ho_tl
+
+
+def _prepare_ho_inputs(
+    qg, kg, v, w, u, bg, gk, A_qk, A_qb,
+    initial_state, cu_seqlens, chunk_size, chunk_layout,
+):
+    B, T_, H, K = kg.shape
+    V = v.shape[-1]
+
+    is_varlen = cu_seqlens is not None
+    if is_varlen:
+        assert B == 1
+        layout = chunk_layout if chunk_layout is not None else build_varlen_chunk_layout(cu_seqlens, chunk_size, T_)
+    else:
+        layout = build_rect_chunk_layout(B, T_, chunk_size, kg.device)
+    token_rows = B * T_
+    in_dtype = str(kg.dtype).split(".")[-1]
+    use_h0 = initial_state is not None
+    if use_h0:
+        h0 = initial_state
+    else:
+        h0 = torch.empty((1, H, K, V), dtype=torch.float32, device=kg.device)
+    if h0.dtype != torch.float32:
+        h0 = h0.to(torch.float32)
+
+    flats = (
+        qg.reshape(token_rows, H, K).contiguous(),
+        kg.reshape(token_rows, H, K).contiguous(),
+        v.reshape(token_rows, H, V).contiguous(),
+        w.reshape(token_rows, H, K).contiguous(),
+        u.reshape(token_rows, H, V).contiguous(),
+        bg.reshape(token_rows, H, K).contiguous(),
+        gk.reshape(token_rows, H, K).contiguous(),
+        A_qk.reshape(token_rows, H, chunk_size).contiguous(),
+        A_qb.reshape(token_rows, H, chunk_size).contiguous(),
+    )
+    return layout, h0, in_dtype, flats
 
 
 def chunk_dplr_fwd_ho(
@@ -696,35 +456,11 @@ def chunk_dplr_fwd_ho(
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     B, T_, H, K = kg.shape
     V = v.shape[-1]
-
-    is_varlen = cu_seqlens is not None
-    if is_varlen:
-        assert B == 1
-        layout = chunk_layout if chunk_layout is not None else build_varlen_chunk_layout(cu_seqlens, chunk_size, T_)
-    else:
-        layout = build_rect_chunk_layout(B, T_, chunk_size, kg.device)
-    active_nseq = layout.cu_seqlens.shape[0] - 1
-    token_rows = B * T_
-    in_dtype = str(kg.dtype).split(".")[-1]
-    state_dtype = "float32"
-    use_h0 = initial_state is not None
-    n_ht = active_nseq if output_final_state else 1
-    if use_h0:
-        h0 = initial_state
-    else:
-        h0 = torch.empty((1, H, K, V), dtype=torch.float32, device=kg.device)
-    if h0.dtype != torch.float32:
-        h0 = h0.to(torch.float32)
-
-    qg_f = qg.reshape(token_rows, H, K).contiguous()
-    kg_f = kg.reshape(token_rows, H, K).contiguous()
-    v_f = v.reshape(token_rows, H, V).contiguous()
-    w_f = w.reshape(token_rows, H, K).contiguous()
-    u_f = u.reshape(token_rows, H, V).contiguous()
-    bg_f = bg.reshape(token_rows, H, K).contiguous()
-    gk_f = gk.reshape(token_rows, H, K).contiguous()
-    A_qk_f = A_qk.reshape(token_rows, H, chunk_size).contiguous()
-    A_qb_f = A_qb.reshape(token_rows, H, chunk_size).contiguous()
+    layout, h0, in_dtype, flats = _prepare_ho_inputs(
+        qg, kg, v, w, u, bg, gk, A_qk, A_qb,
+        initial_state, cu_seqlens, chunk_size, chunk_layout,
+    )
+    qg_f, kg_f, v_f, w_f, u_f, bg_f, gk_f, A_qk_f, A_qb_f = flats
 
     config = _ho_fwd_config(K, V, chunk_size, in_dtype, kg.device.index)
     merge_flags = _ho_fragment_merge_flags(
@@ -734,15 +470,20 @@ def chunk_dplr_fwd_ho(
     config["num_stages"] = _ho_fwd_num_stages(chunk_size, K, config["BV"], in_dtype, kg.device.index)
     kernel = _chunk_dplr_fwd_ho_kernel(
         H, K, V, chunk_size,
-        in_dtype, state_dtype, use_h0, output_final_state,
+        in_dtype, "float32", initial_state is not None, output_final_state,
         **merge_flags,
         **config,
     )
-    o_f = torch.empty((token_rows, H, V), dtype=v.dtype, device=v.device)
-    ht = torch.empty((n_ht, H, K, V), dtype=torch.float32, device=kg.device)
+    o_f = torch.empty((B * T_, H, V), dtype=v.dtype, device=v.device)
+    ht = torch.empty((layout.cu_seqlens.shape[0] - 1 if output_final_state else 1, H, K, V),
+                     dtype=torch.float32, device=kg.device)
+    # ctx outputs are never stored here; 1-row dummies only carry the ABI
+    h_ctx_dummy = torch.empty((1, H, K, V), dtype=kg.dtype, device=kg.device)
+    v_new_ctx_dummy = torch.empty((1, H, V), dtype=v.dtype, device=v.device)
     kernel(
         qg_f, kg_f, v_f, w_f, u_f, bg_f, gk_f, A_qk_f, A_qb_f,
         h0, layout.cu_seqlens, layout.chunk_offsets, o_f, ht,
+        h_ctx_dummy, v_new_ctx_dummy,
     )
     final_state = ht if output_final_state else None
     return o_f.view(B, T_, H, V), final_state
@@ -767,36 +508,13 @@ def chunk_dplr_fwd_ho_ctx(
 ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor]:
     B, T_, H, K = kg.shape
     V = v.shape[-1]
-
-    is_varlen = cu_seqlens is not None
-    if is_varlen:
-        assert B == 1
-        layout = chunk_layout if chunk_layout is not None else build_varlen_chunk_layout(cu_seqlens, chunk_size, T_)
-    else:
-        layout = build_rect_chunk_layout(B, T_, chunk_size, kg.device)
-    active_nseq = layout.cu_seqlens.shape[0] - 1
+    layout, h0, in_dtype, flats = _prepare_ho_inputs(
+        qg, kg, v, w, u, bg, gk, A_qk, A_qb,
+        initial_state, cu_seqlens, chunk_size, chunk_layout,
+    )
+    qg_f, kg_f, v_f, w_f, u_f, bg_f, gk_f, A_qk_f, A_qb_f = flats
     chunk_rows = layout.chunk_indices.shape[0]
     token_rows = B * T_
-    in_dtype = str(kg.dtype).split(".")[-1]
-    state_dtype = "float32"
-    use_h0 = initial_state is not None
-    n_ht = active_nseq if output_final_state else 1
-    if use_h0:
-        h0 = initial_state
-    else:
-        h0 = torch.empty((1, H, K, V), dtype=torch.float32, device=kg.device)
-    if h0.dtype != torch.float32:
-        h0 = h0.to(torch.float32)
-
-    qg_f = qg.reshape(token_rows, H, K).contiguous()
-    kg_f = kg.reshape(token_rows, H, K).contiguous()
-    v_f = v.reshape(token_rows, H, V).contiguous()
-    w_f = w.reshape(token_rows, H, K).contiguous()
-    u_f = u.reshape(token_rows, H, V).contiguous()
-    bg_f = bg.reshape(token_rows, H, K).contiguous()
-    gk_f = gk.reshape(token_rows, H, K).contiguous()
-    A_qk_f = A_qk.reshape(token_rows, H, chunk_size).contiguous()
-    A_qb_f = A_qb.reshape(token_rows, H, chunk_size).contiguous()
 
     config = _ho_fwd_config(K, V, chunk_size, in_dtype, kg.device.index)
     merge_flags = _ho_fragment_merge_flags(
@@ -804,26 +522,26 @@ def chunk_dplr_fwd_ho_ctx(
         device_index=kg.device.index,
     )
     config["num_stages"] = _ho_fwd_num_stages(chunk_size, K, config["BV"], in_dtype, kg.device.index)
-    h_ctx_rows = chunk_rows
-    kernel = _chunk_dplr_fwd_ho_ctx_kernel(
+    kernel = _chunk_dplr_fwd_ho_kernel(
         H, K, V, chunk_size,
-        in_dtype, state_dtype, use_h0, output_final_state,
+        in_dtype, "float32", initial_state is not None, output_final_state,
         STORE_H_CTX=store_context,
         STORE_V_NEW_CTX=store_context,
         **merge_flags,
         **config,
     )
     o_f = torch.empty((token_rows, H, V), dtype=v.dtype, device=v.device)
-    ht = torch.empty((n_ht, H, K, V), dtype=torch.float32, device=kg.device)
+    ht = torch.empty((layout.cu_seqlens.shape[0] - 1 if output_final_state else 1, H, K, V),
+                     dtype=torch.float32, device=kg.device)
     if store_context:
-        h_ctx = torch.empty((h_ctx_rows, H, K, V), dtype=kg.dtype, device=kg.device)
+        h_ctx = torch.empty((chunk_rows, H, K, V), dtype=kg.dtype, device=kg.device)
         v_new_ctx = torch.empty((token_rows, H, V), dtype=v.dtype, device=v.device)
         h_ctx_arg = h_ctx
         v_new_ctx_arg = v_new_ctx
     else:
         h_ctx_arg = torch.empty((1, H, K, V), dtype=kg.dtype, device=kg.device)
         v_new_ctx_arg = torch.empty((1, H, V), dtype=v.dtype, device=v.device)
-        h_ctx = kg.new_empty((1,)).expand(h_ctx_rows, H, K, V)
+        h_ctx = kg.new_empty((1,)).expand(chunk_rows, H, K, V)
         v_new_ctx = v.new_empty((1,)).expand(token_rows, H, V)
     kernel(
         qg_f, kg_f, v_f, w_f, u_f, bg_f, gk_f, A_qk_f, A_qb_f,

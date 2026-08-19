@@ -27,8 +27,8 @@ import tilelang
 import tilelang.language as T
 import torch
 
+from .layout import ChunkLayout, build_rect_chunk_layout, build_varlen_chunk_layout
 from .schedules import device_cc
-from .utils import ChunkLayout, build_rect_chunk_layout, build_varlen_chunk_layout
 
 
 def _wy_bwd_config(BT: int, device: torch.device) -> dict[str, int]:
@@ -262,7 +262,7 @@ def _wy_fast_bwd_kernel(
     return wy_fast_bwd_tl
 
 
-def chunk_dplr_bwd_wy_into(
+def chunk_dplr_bwd_wy_repr_into(
     A_ab_inv: torch.Tensor,
     A_ak: torch.Tensor,
     v: torch.Tensor,
@@ -281,7 +281,7 @@ def chunk_dplr_bwd_wy_into(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Mutable-output variant used by recompute backward workspace reuse."""
     for out in (dA_ab_out, dA_ak_out, dv_out, dag_out):
-        assert out.is_contiguous(), "chunk_dplr_bwd_wy_into requires contiguous outputs"
+        assert out.is_contiguous(), "chunk_dplr_bwd_wy_repr_into requires contiguous outputs"
     B, T_, H, K = dw.shape
     V = du.shape[-1]
     BT = chunk_size

@@ -31,8 +31,8 @@ import torch
 
 from fla.ops.utils.constant import RCP_LN2
 
+from .layout import ChunkLayout, build_rect_chunk_layout, build_varlen_chunk_layout
 from .schedules import device_cc
-from .utils import ChunkLayout, build_rect_chunk_layout, build_varlen_chunk_layout
 
 
 def _a_bwd_config(K: int, BT: int, in_dtype: str, device: torch.device) -> dict[str, int]:

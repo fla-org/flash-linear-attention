@@ -32,7 +32,7 @@ import torch
 from fla.ops.utils.constant import RCP_LN2
 from fla.utils import get_device_capability
 
-from .utils import ChunkLayout, build_rect_chunk_layout, build_varlen_chunk_layout
+from .layout import ChunkLayout, build_rect_chunk_layout, build_varlen_chunk_layout
 
 
 def _select_a_fwd_threads(major: int, BT: int) -> int:
@@ -227,8 +227,9 @@ def _chunk_dplr_fwd_intra_tensorcore_kernel(
     scale_value: float,
     threads: int = 128,
 ):
-    # tilelang 0.1.12's vectorize planner breaks the ThreadSync pass for this
-    # kernel at BT <= 16 (K=128); compile that shape without vectorization.
+    # At BT <= 16 the vectorized plan leaves the intra GEMMs without a valid
+    # warp partition (M=16 tiles need each warp to own >= 16 rows); compile
+    # that shape without vectorization.
     if BT <= 16:
         return _chunk_dplr_fwd_intra_tensorcore_kernel_novec(H, K, BT, in_dtype, scale_value, threads)
     return _chunk_dplr_fwd_intra_tensorcore_kernel_vec(H, K, BT, in_dtype, scale_value, threads)

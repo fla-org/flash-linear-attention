@@ -22,8 +22,8 @@ import tilelang
 import tilelang.language as T
 import torch
 
+from .layout import ChunkLayout, build_rect_chunk_layout, build_varlen_chunk_layout
 from .schedules import device_cc
-from .utils import ChunkLayout, build_rect_chunk_layout, build_varlen_chunk_layout
 
 
 def _wu_fwd_config(BT: int, K: int, device: torch.device) -> dict[str, int]:

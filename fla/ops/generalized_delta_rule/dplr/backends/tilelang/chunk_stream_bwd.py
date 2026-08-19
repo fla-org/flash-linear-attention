@@ -18,6 +18,7 @@ import torch
 
 from fla.utils import get_device_capability, get_device_smem_optin
 
+from .layout import ChunkLayout, build_rect_chunk_layout, build_varlen_chunk_layout
 from .schedules import (
     stream_bwd_num_stages,
     stream_bwd_schedule_or_none,
@@ -27,7 +28,6 @@ from .schedules import (
     stream_low_smem_bytes,
     stream_mid_smem_bytes,
 )
-from .utils import ChunkLayout, build_rect_chunk_layout, build_varlen_chunk_layout
 
 
 def _stream_bwd_config(BT: int, cc: int) -> dict[str, int]:
