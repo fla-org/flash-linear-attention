@@ -14,6 +14,7 @@ from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.op import exp2
 from fla.utils import (
+    IS_INTEL,
     IS_NVIDIA_BLACKWELL,
     IS_NVIDIA_HOPPER,
     autotune_cache_kwargs,
@@ -25,7 +26,14 @@ NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8, 16]
 # TODO: Triton mainline fixes a Blackwell tl.dot recurrence race.
 # Keep this kernel on num_warps=2 for Blackwell until Triton 3.8 is released
 # and we re-validate the wider config space.
-GATED_DELTA_RULE_FWD_H_NUM_WARPS = [2] if IS_NVIDIA_BLACKWELL else [2, 4]
+# Intel needs more warps than NVIDIA here: 8 warps is ~1.5x faster than the best
+# config reachable under the [2, 4] cap.
+if IS_NVIDIA_BLACKWELL:
+    GATED_DELTA_RULE_FWD_H_NUM_WARPS = [2]
+elif IS_INTEL:
+    GATED_DELTA_RULE_FWD_H_NUM_WARPS = [2, 4, 8, 16]
+else:
+    GATED_DELTA_RULE_FWD_H_NUM_WARPS = [2, 4]
 
 
 @triton.heuristics({
