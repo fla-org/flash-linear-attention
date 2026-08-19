@@ -67,20 +67,19 @@ def chunk_precond_kkt_fwd_kernel(
     o_t = i_t * BT + tl.arange(0, BT)
     m_t = o_t < T
 
-    p_b = tl.make_block_ptr(beta + bos*H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
-    b_b = tl.load(p_b, boundary_check=(0,))
-
-    p_g = tl.make_block_ptr(g + bos*H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
-    b_g = tl.load(p_g, boundary_check=(0,))
+    b_b = tl.load(beta + bos*H + i_h + o_t*H, mask=m_t, other=0.0)
+    b_g = tl.load(g + bos*H + i_h + o_t*H, mask=m_t, other=0.0)
 
     b_A = tl.zeros([BT, BT], dtype=tl.float32)
 
     for i_k in range(tl.cdiv(K, BK)):
-        p_k = tl.make_block_ptr(k + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-        b_k = tl.load(p_k, boundary_check=(0, 1))
+        o_k = i_k * BK + tl.arange(0, BK)
+        m_tk = m_t[:, None] & (o_k[None, :] < K)
+        p_k = k + (bos*H + i_h) * K + o_t[:, None] * (H*K) + o_k[None, :]
+        b_k = tl.load(p_k, mask=m_tk, other=0.0)
 
-        p_kp = tl.make_block_ptr(k_precond + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-        b_kp = tl.load(p_kp, boundary_check=(0, 1))
+        p_kp = k_precond + (bos*H + i_h) * K + o_t[:, None] * (H*K) + o_k[None, :]
+        b_kp = tl.load(p_kp, mask=m_tk, other=0.0)
 
         b_A += tl.dot(b_k, tl.trans(b_kp))
 
@@ -95,8 +94,9 @@ def chunk_precond_kkt_fwd_kernel(
     m_A = (o_t[:, None] > o_t[None, :]) & (m_t[:, None] & m_t)
     b_A = tl.where(m_A, b_A, 0)
 
-    p_A = tl.make_block_ptr(A + (bos*H + i_h) * BT, (T, BT), (BT*H, 1), (i_t * BT, 0), (BT, BT), (1, 0))
-    tl.store(p_A, b_A.to(p_A.dtype.element_ty), boundary_check=(0, 1))
+    o_A = tl.arange(0, BT)
+    p_A = A + (bos*H + i_h) * BT + o_t[:, None] * (BT*H) + o_A[None, :]
+    tl.store(p_A, b_A.to(A.dtype.element_ty), mask=m_t[:, None] & (o_A[None, :] < BT))
 
 
 def chunk_precond_kkt_fwd(
