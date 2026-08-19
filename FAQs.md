@@ -1,7 +1,7 @@
 # Triton FAQs and Common Issues
 
 * [MMA Assertion](#1-mma-assertion-error-on-h100)
-* [AsstibuteError](#2-attributeerror-nonetype-object-has-no-attribute-start)
+* [AttributeError](#2-attributeerror-nonetype-object-has-no-attribute-start)
 * [LinearLayout](#3-h100-linearlayout-assertion-error)
 * [Triton on Arm](#4-triton-support-for-arm-aarch64-architecture)
 
@@ -34,7 +34,7 @@ pip install -U --pre torch --index-url https://download.pytorch.org/whl/nightly/
 pip uninstall triton pytorch-triton -y
 pip install -U triton-nightly --index-url https://pypi.fla-org.com/simple
 
-# Instal flash-linear-attention
+# Install flash-linear-attention
 pip install einops ninja datasets transformers numpy
 pip uninstall flash-linear-attention && pip install -U --no-use-pep517 git+https://github.com/fla-org/flash-linear-attention --no-deps
 
