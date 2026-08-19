@@ -354,12 +354,13 @@ def chunk_gla_fwd_kernel_o_npu(
     STATE_V_FIRST: tl.constexpr, IS_VARLEN: tl.constexpr,
 ):
     core_id = tl.program_id(0)
-    h_t_step = HV * total_chunks
+    total_chunks_i64 = total_chunks.to(tl.int64)
+    h_t_step = total_chunks_i64 * HV
     for task_id in tl.range(core_id, task_num, num_core):
-        i_v = task_id // h_t_step
+        i_v = (task_id // h_t_step).to(tl.int32)
         remainder = task_id % h_t_step
-        i_hv = remainder // total_chunks
-        global_t = remainder % total_chunks
+        i_hv = (remainder // total_chunks_i64).to(tl.int32)
+        global_t = (remainder % total_chunks_i64).to(tl.int32)
         i_h = i_hv // (HV // H)
         T_cur = T
 
@@ -373,7 +374,7 @@ def chunk_gla_fwd_kernel_o_npu(
             NT = tl.cdiv(T, BT)
             i_b = global_t // NT
             i_t = (global_t % NT).to(tl.int32)
-            bos = (i_b * T).to(tl.int64)
+            bos = tl.cast(i_b, tl.int64) * T
             i_tg = global_t.to(tl.int64)
 
         q_ptr = q + (bos * H + i_h) * K

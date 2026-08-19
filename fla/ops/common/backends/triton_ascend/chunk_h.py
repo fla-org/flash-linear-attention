@@ -286,6 +286,8 @@ def chunk_fwd_h_npu(
             boh = int(split_offsets[i_n].item())
             n_i = int(split_offsets[i_n + 1].item()) - boh
             if eos <= bos or n_i <= 0:
+                if ht is not None and h0 is not None:
+                    ht[i_n].copy_(h0[i_n])
                 continue
             h_i, ht_i = chunk_fwd_h_npu(
                 k=_slice_seq(k, bos, eos),
@@ -371,6 +373,8 @@ def chunk_bwd_dh_npu(
             boh = int(split_offsets[i_n].item())
             n_i = int(split_offsets[i_n + 1].item()) - boh
             if eos <= bos or n_i <= 0:
+                if dh0 is not None and dht is not None:
+                    dh0[i_n].copy_(dht[i_n])
                 continue
             dh_i, dh0_i = chunk_bwd_dh_npu(
                 q=_slice_seq(q, bos, eos),
