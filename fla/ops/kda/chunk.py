@@ -18,7 +18,7 @@ from fla.ops.cp import FLACPContext
 from fla.ops.kda.chunk_bwd import chunk_kda_bwd
 from fla.ops.kda.chunk_fwd import chunk_kda_fwd
 from fla.ops.utils.index import prepare_chunk_indices
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard, warn_unconsumed_kwargs
 
 
 class ChunkKDAFunction(torch.autograd.Function):
@@ -390,6 +390,8 @@ def chunk_kda(
     chunk_size = kwargs.pop("chunk_size", 64)
     if chunk_size not in (32, 64):
         raise ValueError(f"`chunk_size` must be either 32 or 64 for KDA, got {chunk_size}.")
+
+    warn_unconsumed_kwargs('chunk_kda', kwargs, consumed=('A_log', 'dt_bias'))
 
     if safe_gate and use_gate_in_kernel:
         if lower_bound is None:

@@ -6,6 +6,7 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import importlib.util
+import warnings
 
 import pytest
 import torch
@@ -95,6 +96,28 @@ def test_chunk_invalid_chunk_size():
 
     with pytest.raises(ValueError, match=r"`chunk_size` must be either 32 or 64"):
         chunk_kda(q, k, v, g, beta, chunk_size=16)
+
+
+def test_unconsumed_kwargs_warning():
+    B, T, H, D = 1, 64, 1, 64
+    q = torch.randn(B, T, H, D, dtype=torch.float, device=device)
+    k = torch.randn(B, T, H, D, dtype=torch.float, device=device)
+    v = torch.randn(B, T, H, D, dtype=torch.float, device=device)
+    g = F.logsigmoid(torch.randn(B, T, H, D, dtype=torch.float, device=device))
+    beta = torch.randn(B, T, H, dtype=torch.float, device=device).sigmoid()
+
+    # arguments unknown to the installed version are reported instead of being silently dropped
+    with pytest.warns(UserWarning, match=r"unexpected keyword arguments \['use_beta_sigmoid'\]"):
+        chunk_kda(q, k, v, g, beta, use_beta_sigmoid=True)
+    with pytest.warns(UserWarning, match=r"unexpected keyword arguments \['use_beta_sigmoid'\]"):
+        fused_recurrent_kda(q, k, v, g, beta, use_beta_sigmoid=True)
+
+    # calls without stray keyword arguments stay silent
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        chunk_kda(q, k, v, g, beta)
+        fused_recurrent_kda(q, k, v, g, beta)
+    assert not any("unexpected keyword arguments" in str(w.message) for w in caught)
 
 
 @pytest.mark.parametrize(
