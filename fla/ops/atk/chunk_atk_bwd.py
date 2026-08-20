@@ -61,17 +61,17 @@ def _atk_backward_chunk_out(
     """
     i_t = tl.program_id(0)
     h = tl.program_id(1)
-    chunk_id = tl.program_id(2)
+    chunk_id = tl.program_id(2).to(tl.int64)
 
     if IS_VARLEN:
         i_n = tl.load(chunk_indices + i_t * 2).to(tl.int32)
-        chunk_id = tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        chunk_id = tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
         bos = tl.load(cu_seqlens + i_n).to(tl.int32)
         eos = tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
-        b = i_n
+        b = i_n.to(tl.int64)
     else:
-        b = tl.program_id(0)
+        b = tl.program_id(0).to(tl.int64)
         i_n = b
         bos = 0
         eos = T
@@ -242,7 +242,7 @@ def _atk_backward_pass_chunks(
     Sequential backward pass across chunks.
     Not K-tiled due to cross-D reduction in gsa_val computation.
     """
-    i_nh = tl.program_id(0)
+    i_nh = tl.program_id(0).to(tl.int64)
 
     if IS_VARLEN:
         i_n = i_nh // H
@@ -250,7 +250,7 @@ def _atk_backward_pass_chunks(
         bos = tl.load(cu_seqlens + i_n).to(tl.int32)
         eos = tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
-        b = i_n
+        b = i_n.to(tl.int64)
     else:
         b = i_nh // H
         h = i_nh % H
@@ -333,17 +333,17 @@ def _atk_backward_chunk_summary(
 ):
     i_t = tl.program_id(0)
     h = tl.program_id(1)
-    chunk_id = tl.program_id(2)
+    chunk_id = tl.program_id(2).to(tl.int64)
 
     if IS_VARLEN:
         i_n = tl.load(chunk_indices + i_t * 2).to(tl.int32)
-        chunk_id = tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        chunk_id = tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
         bos = tl.load(cu_seqlens + i_n).to(tl.int32)
         eos = tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
-        b = i_n
+        b = i_n.to(tl.int64)
     else:
-        b = tl.program_id(0)
+        b = tl.program_id(0).to(tl.int64)
         i_n = b
         bos = 0
         eos = T
@@ -439,6 +439,7 @@ def chunk_atk_bwd(
     x: float = 1.5,
     eps: float = 1e-6,
     log_atk_scale: torch.Tensor = None,
+    dat: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
     r"""
     ATK backward pass. Takes precomputed forward intermediates from ``recompute_atk_fwd``.
@@ -457,6 +458,7 @@ def chunk_atk_bwd(
         x: Squash range parameter.
         eps: Epsilon for numerical stability.
         log_atk_scale: Per-head log-space center ``[H]``.
+        dat: Incoming gradient w.r.t. the final ATK state ``[N, H, K]`` or ``None``.
 
     Returns:
         dk_atk: Gradient contribution to k ``[B, T, H, K]``.
@@ -493,6 +495,18 @@ def chunk_atk_bwd(
     gg = torch.zeros_like(g_raw, dtype=torch.float32)
     gbeta = torch.zeros_like(beta, dtype=torch.float32)
     gac_prev = torch.zeros_like(ac, dtype=torch.float32)
+    if dat is not None:
+        # The final ATK state `at` equals `ac[:, last_chunk]`, so its incoming
+        # gradient enters the reverse scan as the carry at the final chunk;
+        # `gac_prev[:, last_chunk]` is never written by the local-backward kernel.
+        if cu_seqlens is None:
+            gac_prev[:, NT - 1] += dat
+        else:
+            seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
+            last_chunk = torch.clamp((seqlens + CHUNK_LEN - 1) // CHUNK_LEN - 1, min=0)
+            valid = seqlens > 0
+            idx = torch.arange(N, device=k.device)
+            gac_prev[idx[valid], last_chunk[valid]] += dat[valid]
     dh0 = torch.zeros(N, H, K, device=k.device, dtype=torch.float32) if initial_A_state is not None else None
     ga = torch.empty_like(a, dtype=torch.float32)
     gsa = torch.empty_like(sa, dtype=torch.float32)

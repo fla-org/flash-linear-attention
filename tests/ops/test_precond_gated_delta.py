@@ -12,7 +12,6 @@ import os
 import pytest
 import torch
 import torch.nn.functional as F
-from einops import repeat
 
 from fla.ops.precond_gated_delta_rule import (
     chunk_precond_gated_delta_rule,
@@ -53,24 +52,26 @@ def test_fused_recurrent(
     q = torch.randn(B, T, H, D, dtype=torch.float32)
     k = torch.randn(B, T, H, D, dtype=torch.float32)
     v = torch.randn(B, T, HV, D, dtype=dtype)
-    beta_atk = torch.rand(B, T, HV, dtype=dtype).sigmoid()
+    # ATK preconditions the keys: all ATK-side tensors carry H (key) heads
+    beta_atk = torch.rand(B, T, H, dtype=dtype).sigmoid()
     beta = torch.rand(B, T, HV, dtype=dtype).sigmoid()
-    g_atk = F.logsigmoid(torch.rand(B, T, HV, dtype=torch.float32)) / gate_logit_normalizer
+    g_atk = F.logsigmoid(torch.rand(B, T, H, dtype=torch.float32)) / gate_logit_normalizer
     g = F.logsigmoid(torch.rand(B, T, HV, dtype=torch.float32)) / gate_logit_normalizer
     h0 = torch.randn(B, HV, D, D, dtype=torch.float32)
-    A0 = torch.zeros(B, HV, D, dtype=torch.float32)
+    A0 = torch.zeros(B, H, D, dtype=torch.float32)
 
-    log_atk_scale = torch.rand(HV, dtype=torch.float32) - 1.0
+    log_atk_scale = torch.rand(H, dtype=torch.float32) - 1.0
 
     q, k, v, beta_atk, beta, g_atk, g, h0, A0, log_atk_scale = map(
         lambda t: t.to(device).requires_grad_(False),
         (q, k, v, beta_atk, beta, g_atk, g, h0, A0, log_atk_scale)
     )
 
-    # Reference implementation: manually L2 normalize + repeat q/k to HV heads
+    # Reference implementation: manually L2 normalize; the naive reference
+    # applies the GVA repeat internally when HV > H
     ref, ref_ht, _ = naive_recurrent_precond_gated_delta_rule(
-        q=F.normalize(repeat(q.clone(), 'b t h d -> b t (h g) d', g=HV // H), p=2, dim=-1).to(dtype),
-        k=F.normalize(repeat(k.clone(), 'b t h d -> b t (h g) d', g=HV // H), p=2, dim=-1).to(dtype),
+        q=F.normalize(q.clone(), p=2, dim=-1).to(dtype),
+        k=F.normalize(k.clone(), p=2, dim=-1).to(dtype),
         v=v.clone(),
         g_atk=g_atk.clone(),
         g=g.clone(),
@@ -594,3 +595,208 @@ def test_fused_recurrent_transpose_state(
 
     assert_close('o', ref, tri, 1e-4)
     assert_close('ht', ref_ht, tri_ht.transpose(-1, -2), 1e-4)
+
+
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'HV', 'D', 'dtype'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-HV{}-D{}-{}".format(*test))
+        for test in [
+            (2, 500, 2, 4, 64, torch.float16),
+            (2, 1024, 2, 8, 128, torch.float16),
+            (3, 1000, 4, 8, 100, torch.float16),
+        ]
+    ],
+)
+def test_chunk_gva(
+    B: int,
+    T: int,
+    H: int,
+    HV: int,
+    D: int,
+    dtype: torch.dtype,
+):
+    """GVA (HV > H): chunk kernel against the naive reference, forward and backward."""
+    torch.manual_seed(42)
+    os.environ['TRITON_F32_DEFAULT'] = 'ieee'
+    x = 1.5
+    scale = D ** -0.5
+
+    q = torch.rand(B, T, H, D, dtype=dtype)
+    k = torch.rand(B, T, H, D, dtype=dtype)
+    v = torch.rand(B, T, HV, D, dtype=dtype)
+    # ATK preconditions the keys: all ATK-side tensors carry H (key) heads
+    beta_atk = torch.rand(B, T, H, dtype=torch.float).sigmoid()
+    beta = torch.rand(B, T, HV, dtype=torch.float).sigmoid()
+    g_atk = F.logsigmoid(torch.rand(B, T, H, dtype=torch.float32))
+    g = F.logsigmoid(torch.rand(B, T, HV, dtype=torch.float32))
+    h0 = torch.zeros(B, HV, D, D, dtype=torch.float32)
+    log_atk_scale = torch.rand(H, dtype=torch.float32) - 1.0
+
+    q, k, v, beta_atk, beta, g_atk, g, h0, log_atk_scale = map(
+        lambda t: t.to(device).requires_grad_(True),
+        (q, k, v, beta_atk, beta, g_atk, g, h0, log_atk_scale)
+    )
+
+    tri, tri_ht, _ = chunk_precond_gated_delta_rule(
+        q=F.normalize(q.clone(), p=2, dim=-1),
+        k=F.normalize(k.clone(), p=2, dim=-1),
+        v=v.clone(),
+        g_atk=g_atk.clone(),
+        g=g.clone(),
+        beta_atk=beta_atk.clone(),
+        beta=beta.clone(),
+        scale=scale,
+        initial_state=h0.clone(),
+        output_final_state=True,
+        use_qk_l2norm_in_kernel=False,
+        x=x,
+        log_atk_scale=log_atk_scale.clone(),
+    )
+
+    do = torch.randn_like(v)
+    dht = torch.randn_like(h0)
+    ((tri * do).sum() + (tri_ht * dht).sum()).backward(retain_graph=True)
+
+    tri_dq, tri_dk, tri_dv = q.grad, k.grad, v.grad
+    tri_dbeta_atk, tri_dbeta = beta_atk.grad, beta.grad
+    tri_dg_atk, tri_dg = g_atk.grad, g.grad
+    tri_dh0 = h0.grad
+    tri_d_log_atk_scale = log_atk_scale.grad
+
+    q.grad = k.grad = v.grad = beta_atk.grad = beta.grad = None
+    g_atk.grad = g.grad = h0.grad = None
+    log_atk_scale.grad = None
+
+    # the naive reference applies the GVA repeat internally when HV > H
+    ref, ref_ht, _ = naive_recurrent_precond_gated_delta_rule(
+        q=F.normalize(q.clone(), p=2, dim=-1),
+        k=F.normalize(k.clone(), p=2, dim=-1),
+        v=v.clone(),
+        g_atk=g_atk.clone(),
+        g=g.clone(),
+        beta_atk=beta_atk.clone(),
+        beta=beta.clone(),
+        scale=scale,
+        x=x,
+        log_atk_scale=log_atk_scale.clone(),
+        initial_state=h0.clone(),
+        output_final_state=True,
+    )
+
+    ((ref * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=True)
+
+    assert_close('o', ref, tri, 0.005)
+    assert_close('ht', ref_ht, tri_ht, 0.005)
+    assert_close('dq', q.grad, tri_dq, 0.008)
+    assert_close('dk', k.grad, tri_dk, 0.008)
+    assert_close('dv', v.grad, tri_dv, 0.008)
+    assert_close('dbeta_atk', beta_atk.grad, tri_dbeta_atk, 0.02)
+    assert_close('dg_atk', g_atk.grad, tri_dg_atk, 0.02)
+    assert_close('dbeta', beta.grad, tri_dbeta, 0.02)
+    assert_close('dg', g.grad, tri_dg, 0.02)
+    assert_close('dh0', h0.grad, tri_dh0, 0.008)
+    assert_close('d_log_atk_scale', log_atk_scale.grad, tri_d_log_atk_scale, 0.02)
+
+
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'D', 'dtype'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-{}".format(*test))
+        for test in [
+            (2, 500, 3, 64, torch.float16),
+            (2, 1024, 4, 128, torch.float16),
+        ]
+    ],
+)
+def test_chunk_A_state(
+    B: int,
+    T: int,
+    H: int,
+    D: int,
+    dtype: torch.dtype,
+):
+    """End-to-end A-state: nonzero initial_A_state, the returned `at` is asserted,
+    and the gradient flowing in through `at` (dat) is checked against the naive
+    reference together with `dh0_atk`."""
+    torch.manual_seed(42)
+    os.environ['TRITON_F32_DEFAULT'] = 'ieee'
+    x = 1.5
+    scale = D ** -0.5
+
+    q = torch.rand(B, T, H, D, dtype=dtype)
+    k = torch.rand(B, T, H, D, dtype=dtype)
+    v = torch.rand(B, T, H, D, dtype=dtype)
+    beta_atk = torch.rand(B, T, H, dtype=torch.float).sigmoid()
+    beta = torch.rand(B, T, H, dtype=torch.float).sigmoid()
+    g_atk = F.logsigmoid(torch.rand(B, T, H, dtype=torch.float32))
+    g = F.logsigmoid(torch.rand(B, T, H, dtype=torch.float32))
+    h0 = torch.zeros(B, H, D, D, dtype=torch.float32)
+    A0 = torch.rand(B, H, D, dtype=torch.float32)
+    log_atk_scale = torch.rand(H, dtype=torch.float32) - 1.0
+
+    q, k, v, beta_atk, beta, g_atk, g, h0, A0, log_atk_scale = map(
+        lambda t: t.to(device).requires_grad_(True),
+        (q, k, v, beta_atk, beta, g_atk, g, h0, A0, log_atk_scale)
+    )
+
+    tri, tri_ht, tri_at = chunk_precond_gated_delta_rule(
+        q=F.normalize(q.clone(), p=2, dim=-1),
+        k=F.normalize(k.clone(), p=2, dim=-1),
+        v=v.clone(),
+        g_atk=g_atk.clone(),
+        g=g.clone(),
+        beta_atk=beta_atk.clone(),
+        beta=beta.clone(),
+        scale=scale,
+        initial_state=h0.clone(),
+        initial_A_state=A0.clone(),
+        output_final_state=True,
+        use_qk_l2norm_in_kernel=False,
+        x=x,
+        log_atk_scale=log_atk_scale.clone(),
+    )
+
+    do = torch.randn_like(v)
+    dht = torch.randn_like(h0)
+    dat = torch.randn(B, H, D, dtype=torch.float32, device=device)
+    ((tri * do).sum() + (tri_ht * dht).sum() + (tri_at.float() * dat).sum()).backward(retain_graph=True)
+
+    tri_dq, tri_dk, tri_dv = q.grad, k.grad, v.grad
+    tri_dbeta_atk, tri_dg_atk = beta_atk.grad, g_atk.grad
+    tri_dh0, tri_dA0 = h0.grad, A0.grad
+    tri_d_log_atk_scale = log_atk_scale.grad
+
+    q.grad = k.grad = v.grad = beta_atk.grad = beta.grad = None
+    g_atk.grad = g.grad = h0.grad = A0.grad = None
+    log_atk_scale.grad = None
+
+    ref, ref_ht, ref_at = naive_recurrent_precond_gated_delta_rule(
+        q=F.normalize(q.clone(), p=2, dim=-1),
+        k=F.normalize(k.clone(), p=2, dim=-1),
+        v=v.clone(),
+        g_atk=g_atk.clone(),
+        g=g.clone(),
+        beta_atk=beta_atk.clone(),
+        beta=beta.clone(),
+        scale=scale,
+        x=x,
+        log_atk_scale=log_atk_scale.clone(),
+        initial_state=h0.clone(),
+        initial_A_state=A0.clone(),
+        output_final_state=True,
+    )
+
+    ((ref * do).sum() + (ref_ht * dht).sum() + (ref_at.float() * dat).sum()).backward(retain_graph=True)
+
+    assert_close('o', ref, tri, 0.005)
+    assert_close('ht', ref_ht, tri_ht, 0.005)
+    assert_close('at', ref_at, tri_at, 0.005)
+    assert_close('dq', q.grad, tri_dq, 0.008)
+    assert_close('dk', k.grad, tri_dk, 0.008)
+    assert_close('dv', v.grad, tri_dv, 0.008)
+    assert_close('dbeta_atk', beta_atk.grad, tri_dbeta_atk, 0.02)
+    assert_close('dg_atk', g_atk.grad, tri_dg_atk, 0.02)
+    assert_close('dh0', h0.grad, tri_dh0, 0.008)
+    assert_close('dh0_atk', A0.grad, tri_dA0, 0.02)
+    assert_close('d_log_atk_scale', log_atk_scale.grad, tri_d_log_atk_scale, 0.02)

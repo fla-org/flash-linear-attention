@@ -71,12 +71,12 @@ def chunk_precond_kda_fwd_kernel_inter_solve_fused(
     5. Computes merged Akk_inv
     6. Writes Akk_inv to Akk
     """
-    i_t, i_bh = tl.program_id(0), tl.program_id(1)
+    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
 
     if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
@@ -405,12 +405,12 @@ def chunk_precond_kda_fwd_kernel_intra_sub_chunk(
     Computes diagonal Aqk and Akk blocks using block-level dot products.
     Key difference from symmetric KDA: column side uses k_precond.
     """
-    i_t, i_i, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_t, i_i, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1), tl.program_id(2).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
 
     if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
@@ -677,7 +677,7 @@ def chunk_precond_kda_bwd_kernel_intra(
         Aqk[t, s] = q[t] @ k_precond[s]^T * exp(g[t] - g[s]) * beta[s]  (for t >= s)
         Akk[t, s] = k[t] @ k_precond[s]^T * exp(g[t] - g[s]) * beta[s]  (for t > s)
     """
-    i_kc, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_kc, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     i_k = i_kc // NC
     i_i = i_kc % NC
@@ -685,8 +685,8 @@ def chunk_precond_kda_bwd_kernel_intra(
     all_BT = B * T
 
     if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
@@ -821,7 +821,9 @@ def chunk_precond_kda_bwd_kernel_intra(
     tl.debug_barrier()
     b_dkt = tl.zeros([BC, BK], dtype=tl.float32)  # Final dk_precond (with beta from rows)
 
-    NC_actual = min(NC, tl.cdiv(T - i_t * BT, BC))
+    # cast back to int32: `i_t` is int64 for pointer arithmetic, but the loop
+    # counter below must match the type of its int32 initial value `i_i + 1`
+    NC_actual = min(NC, tl.cdiv(T - i_t * BT, BC)).to(tl.int32)
     if i_i < NC_actual - 1:
         p_gn_t = g + (min(i_ti + BC, T) - 1) * H*K + o_k
         b_gn_t = tl.load(p_gn_t, mask=m_k, other=0).to(tl.float32)

@@ -83,7 +83,7 @@ def fused_recurrent_precond_kda_fwd_kernel(
     TRANSPOSE_STATE: tl.constexpr,
     num_stages: tl.constexpr,
 ):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     NV = tl.cdiv(V, BV)
     NK = tl.cdiv(K, BK)
     i_k = pid % NK
@@ -188,7 +188,7 @@ def fused_recurrent_precond_kda_fwd_kernel(
             b_q = b_q / tl.sqrt(tl.sum(b_q * b_q) + 1e-6)
             b_k = b_k / tl.sqrt(tl.sum(b_k * b_k) + 1e-6)
         b_q = b_q * scale
-        b_g = tl.load(p_g, eviction_policy='evict_last').to(tl.float32)
+        b_g = tl.load(p_g, mask=mask_k, other=0, eviction_policy='evict_last').to(tl.float32)
 
         if USE_GATE_IN_KERNEL:
             b_A = tl.load(A_log + i_hv).to(tl.float32)

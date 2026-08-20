@@ -64,7 +64,7 @@ def fused_recurrent_precond_gated_delta_rule_fwd_kernel(
     TRANSPOSE_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_nh = tl.program_id(0), tl.program_id(1)
+    i_v, i_nh = tl.program_id(0), tl.program_id(1).to(tl.int64)
     i_n, i_hv = i_nh // HV, i_nh % HV
     i_h = i_hv // (HV // H)
 
@@ -90,11 +90,12 @@ def fused_recurrent_precond_gated_delta_rule_fwd_kernel(
     else:
         p_beta = beta + (bos * HV + i_hv) * V + o_v
 
-    # ATK pointers (per-HV-head: g_atk, beta_atk, log_atk_scale are shape-HV like v/beta/g)
-    p_g_atk = g_atk + bos * HV + i_hv
-    p_beta_atk = beta_atk + bos * HV + i_hv
+    # ATK pointers (per key head: ATK preconditions k, so g_atk, beta_atk and
+    # log_atk_scale carry H heads; under GVA every value head in a group shares them)
+    p_g_atk = g_atk + bos * H + i_h
+    p_beta_atk = beta_atk + bos * H + i_h
 
-    scale_val = tl.load(log_atk_scale + i_hv).to(tl.float32)
+    scale_val = tl.load(log_atk_scale + i_h).to(tl.float32)
     logx = tl.log(tl.cast(x, tl.float32))
 
     p_o = o + (bos * HV + i_hv) * V + o_v
@@ -117,10 +118,10 @@ def fused_recurrent_precond_gated_delta_rule_fwd_kernel(
             p_h0 = h0 + i_nh * K*V + o_k[:, None] * V + o_v[None, :]
         b_h += tl.load(p_h0, mask=mask_h, other=0).to(tl.float32)
 
-    # ATK state
+    # ATK state (per key head: [N, H, K])
     b_a = tl.zeros([BK], dtype=tl.float32)
     if USE_INITIAL_ATK:
-        p_a0 = a0 + i_nh * K + o_k
+        p_a0 = a0 + (i_n * H + i_h) * K + o_k
         b_a += tl.load(p_a0, mask=mask_k, other=0).to(tl.float32)
 
     for _ in tl.range(0, T):
@@ -156,7 +157,7 @@ def fused_recurrent_precond_gated_delta_rule_fwd_kernel(
                 b_h *= exp(b_g)
 
         if USE_GK:
-            b_gk = tl.load(p_gk).to(tl.float32)
+            b_gk = tl.load(p_gk, mask=mask_k, other=0).to(tl.float32)
             if USE_EXP2:
                 if TRANSPOSE_STATE:
                     b_h *= exp2(b_gk[None, :])
@@ -169,7 +170,7 @@ def fused_recurrent_precond_gated_delta_rule_fwd_kernel(
                     b_h *= exp(b_gk[:, None])
 
         if USE_GV:
-            b_gv = tl.load(p_gv).to(tl.float32)
+            b_gv = tl.load(p_gv, mask=mask_v, other=0).to(tl.float32)
             if USE_EXP2:
                 if TRANSPOSE_STATE:
                     b_h *= exp2(b_gv[:, None])
@@ -203,8 +204,8 @@ def fused_recurrent_precond_gated_delta_rule_fwd_kernel(
             p_gv += HV*V
         p_beta += HV * (1 if IS_BETA_HEADWISE else V)
         p_o += HV*V
-        p_g_atk += HV
-        p_beta_atk += HV
+        p_g_atk += H
+        p_beta_atk += H
 
     if STORE_FINAL_STATE:
         if TRANSPOSE_STATE:
@@ -214,8 +215,10 @@ def fused_recurrent_precond_gated_delta_rule_fwd_kernel(
         tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
 
     if STORE_FINAL_ATK:
-        if i_v == 0:
-            p_at = at + i_nh * K + o_k
+        # The ATK state is shared by all value heads in a GVA group; only the
+        # first program of each (i_v, group) stores it to avoid duplicate writes.
+        if (i_v == 0) and (i_hv % (HV // H) == 0):
+            p_at = at + (i_n * H + i_h) * K + o_k
             tl.store(p_at, b_a.to(p_at.dtype.element_ty), mask=mask_k)
 
 
@@ -249,7 +252,7 @@ def fused_recurrent_precond_gated_delta_rule_fwd(
     NV = triton.cdiv(V, BV)
 
     if log_atk_scale is None:
-        log_atk_scale = torch.full((HV,), -0.2, device=k.device, dtype=torch.float32)
+        log_atk_scale = torch.full((H,), -0.2, device=k.device, dtype=torch.float32)
 
     o = torch.empty_like(v)
     if output_final_state:
@@ -257,7 +260,7 @@ def fused_recurrent_precond_gated_delta_rule_fwd(
             final_state = q.new_empty(N, HV, V, K, dtype=torch.float32)
         else:
             final_state = q.new_empty(N, HV, K, V, dtype=torch.float32)
-        final_A_state = q.new_empty(N, HV, K, dtype=torch.float32)
+        final_A_state = q.new_empty(N, H, K, dtype=torch.float32)
     else:
         final_state = None
         final_A_state = None
@@ -413,7 +416,8 @@ def fused_recurrent_precond_gated_delta_rule(
             For equal-length input sequences, `N` equals the batch size `B`.
             Default: `None`.
         initial_A_state (Optional[torch.Tensor]):
-            Initial ATK diagonal state of shape `[N, HV, K]`. Default: `None`.
+            Initial ATK diagonal state of shape `[N, H, K]`; the ATK preconditioner
+            acts on the keys, so its state carries `H` (key) heads. Default: `None`.
         output_final_state (Optional[bool]):
             Whether to output the final state of shape `[N, HV, K, V]`. Default: `False`.
         use_qk_l2norm_in_kernel (Optional[bool]):
@@ -438,7 +442,7 @@ def fused_recurrent_precond_gated_delta_rule(
         final_state (torch.Tensor):
             Final state of shape `[N, HV, K, V]` if `output_final_state=True` else `None`.
         final_A_state (torch.Tensor):
-            Final ATK diagonal state of shape `[N, HV, K]` if `output_final_state=True` else `None`.
+            Final ATK diagonal state of shape `[N, H, K]` if `output_final_state=True` else `None`.
 
     Examples::
         >>> import torch

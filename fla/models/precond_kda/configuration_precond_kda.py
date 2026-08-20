@@ -47,6 +47,9 @@ class PrecondKDAConfig(PretrainedConfig):
         squash_x: float = 1.5,
         squash_eps: float = 1e-6,
         log_atk_scale_init: float = -0.2,
+        # Lower bound of the uniform A_log/A_log_atk init distribution.
+        # The paper's experiments use 0; baseline KDA uses 1.
+        a_log_init_lower: float = 0,
         **kwargs,
     ):
         self.attn_mode = attn_mode
@@ -81,6 +84,7 @@ class PrecondKDAConfig(PretrainedConfig):
         self.squash_x = squash_x
         self.squash_eps = squash_eps
         self.log_atk_scale_init = log_atk_scale_init
+        self.a_log_init_lower = a_log_init_lower
 
         if safe_gate and lower_bound is None:
             raise ValueError("`lower_bound` must be specified when `safe_gate=True` (recommended: -5).")

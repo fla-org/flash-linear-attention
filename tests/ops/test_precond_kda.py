@@ -821,3 +821,107 @@ def test_gate(
     assert_close("dA", ref_dA, tri_dA, 1e-4)
     if HAS_BIAS:
         assert_close("dbias", ref_dbias, tri_dbias, 1e-4)
+
+
+@pytest.mark.parametrize(
+    ("B", "T", "H", "K", "V", "dtype"),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-K{}-V{}-{}".format(*test))
+        for test in [
+            (2, 500, 3, 64, 64, torch.float16),
+            (2, 1024, 4, 128, 128, torch.float16),
+        ]
+    ],
+)
+def test_chunk_A_state(
+    B: int,
+    T: int,
+    H: int,
+    K: int,
+    V: int,
+    dtype: torch.dtype,
+):
+    """End-to-end A-state: nonzero initial_A_state, the returned `at` is asserted,
+    and the gradient flowing in through `at` (dat) is checked against the naive
+    reference together with `dh0_atk`."""
+    torch.manual_seed(42)
+    scale = K ** -0.5
+    x = 1.5
+
+    q = torch.rand(B, T, H, K, dtype=dtype)
+    k = torch.rand(B, T, H, K, dtype=dtype)
+    v = torch.rand(B, T, H, V, dtype=dtype)
+    gk = F.logsigmoid(torch.randn(B, T, H, K, dtype=torch.float))
+    g_atk = F.logsigmoid(torch.randn(B, T, H, dtype=torch.float))
+    beta_atk = torch.randn(B, T, H, dtype=torch.float).sigmoid()
+    beta = torch.randn(B, T, H, dtype=torch.float).sigmoid()
+    log_atk_scale = torch.full((H,), -0.2, dtype=torch.float32)
+    h0 = torch.randn(B, H, K, V, dtype=torch.float32)
+    A0 = torch.rand(B, H, K, dtype=torch.float32)
+
+    q, k, v, gk, g_atk, beta_atk, beta, h0, A0, log_atk_scale = map(
+        lambda t: t.to(device).requires_grad_(True),
+        (q, k, v, gk, g_atk, beta_atk, beta, h0, A0, log_atk_scale)
+    )
+
+    tri, tri_ht, tri_at = chunk_precond_kda(
+        q=q.clone(),
+        k=k.clone(),
+        v=v.clone(),
+        g=gk.clone(),
+        g_atk=g_atk.clone(),
+        beta_atk=beta_atk.clone(),
+        beta=beta.clone(),
+        scale=scale,
+        initial_state=h0.clone(),
+        initial_A_state=A0.clone(),
+        output_final_state=True,
+        x=x,
+        log_atk_scale=log_atk_scale.clone(),
+    )
+
+    do = torch.randn_like(v)
+    dht = torch.randn_like(h0)
+    dat = torch.randn(B, H, K, dtype=torch.float32, device=device)
+    ((tri * do).sum() + (tri_ht * dht).sum() + (tri_at.float() * dat).sum()).backward(retain_graph=True)
+
+    tri_dq, tri_dk, tri_dv = q.grad, k.grad, v.grad
+    tri_dg, tri_dg_atk = gk.grad, g_atk.grad
+    tri_dbeta_atk = beta_atk.grad
+    tri_dh0, tri_dA0 = h0.grad, A0.grad
+    tri_dlog_atk_scale = log_atk_scale.grad
+
+    q.grad = k.grad = v.grad = gk.grad = None
+    g_atk.grad = beta_atk.grad = beta.grad = None
+    h0.grad = A0.grad = log_atk_scale.grad = None
+
+    ref, ref_ht, ref_at = naive_recurrent_precond_kda(
+        q=F.normalize(q.clone(), p=2, dim=-1),
+        k=F.normalize(k.clone(), p=2, dim=-1),
+        v=v.clone(),
+        g=gk.clone(),
+        g_atk=g_atk.clone(),
+        beta_atk=beta_atk.clone(),
+        beta=beta.clone(),
+        scale=scale,
+        initial_state=h0.clone(),
+        initial_A_state=A0.clone(),
+        output_final_state=True,
+        x=x,
+        log_atk_scale=log_atk_scale.clone(),
+    )
+
+    ((ref * do).sum() + (ref_ht * dht).sum() + (ref_at.float() * dat).sum()).backward(retain_graph=True)
+
+    assert_close("o", ref, tri, 0.005)
+    assert_close("ht", ref_ht, tri_ht, 0.005)
+    assert_close("at", ref_at, tri_at, 0.005)
+    assert_close("dq", q.grad, tri_dq, 0.008)
+    assert_close("dk", k.grad, tri_dk, 0.008)
+    assert_close("dv", v.grad, tri_dv, 0.008)
+    assert_close("dg", gk.grad, tri_dg, 0.02)
+    assert_close("dg_atk", g_atk.grad, tri_dg_atk, 0.02)
+    assert_close("dbeta_atk", beta_atk.grad, tri_dbeta_atk, 0.02)
+    assert_close("dh0", h0.grad, tri_dh0, 0.008)
+    assert_close("dh0_atk", A0.grad, tri_dA0, 0.02)
+    assert_close("d_log_atk_scale", log_atk_scale.grad, tri_dlog_atk_scale, 0.02)

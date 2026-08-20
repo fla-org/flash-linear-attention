@@ -166,13 +166,15 @@ class PrecondGatedDeltaNet(nn.Module):
         self.a_proj = nn.Linear(hidden_size, self.num_v_heads, bias=False)
         self.b_proj = nn.Linear(hidden_size, self.num_v_heads, bias=False)
 
-        # Separate gate and beta projections for ATK preconditioner recurrence
-        self.a_atk_proj = nn.Linear(hidden_size, self.num_v_heads, bias=False)
-        self.b_atk_proj = nn.Linear(hidden_size, self.num_v_heads, bias=False)
+        # Separate gate and beta projections for ATK preconditioner recurrence.
+        # NOTE: ATK preconditions the keys, which carry `num_heads` (not `num_v_heads`)
+        # heads, so all ATK-side parameters are sized by `num_heads`.
+        self.a_atk_proj = nn.Linear(hidden_size, self.num_heads, bias=False)
+        self.b_atk_proj = nn.Linear(hidden_size, self.num_heads, bias=False)
 
         # Learnable per-head log-space center for preconditioner
         self.log_atk_scale = nn.Parameter(
-            torch.full((self.num_v_heads,), self.log_atk_scale_init, dtype=torch.float32)
+            torch.full((self.num_heads,), self.log_atk_scale_init, dtype=torch.float32)
         )
         self.log_atk_scale._no_weight_decay = True
 
@@ -196,13 +198,13 @@ class PrecondGatedDeltaNet(nn.Module):
         # name.endswith("bias") in param_grouping.py
         self.dt_bias._no_weight_decay = True
 
-        # Gate parameters for preconditioner recurrence
-        A_atk = torch.empty(self.num_v_heads, dtype=torch.float32).uniform_(1, 16)
+        # Gate parameters for preconditioner recurrence (per key head)
+        A_atk = torch.empty(self.num_heads, dtype=torch.float32).uniform_(1, 16)
         self.A_log_atk = nn.Parameter(torch.log(A_atk))
         self.A_log_atk._no_weight_decay = True
 
         dt_atk = torch.exp(
-            torch.rand(self.num_v_heads) * (math.log(dt_max) - math.log(dt_min))
+            torch.rand(self.num_heads) * (math.log(dt_max) - math.log(dt_min))
             + math.log(dt_min),
         )
         dt_atk = torch.clamp(dt_atk, min=dt_init_floor)

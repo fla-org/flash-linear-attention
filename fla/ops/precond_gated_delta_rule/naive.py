@@ -31,21 +31,34 @@ def naive_recurrent_precond_gated_delta_rule(
     Args:
         q: [B, T, H, K]
         k: [B, T, H, K]
-        v: [B, T, H, V]
+        v: [B, T, HV, V]
         g_atk: [B, T, H]
-        g: [B, T, H]
+        g: [B, T, HV]
         beta_atk: [B, T, H]
-        beta: [B, T, H]
+        beta: [B, T, HV]
         scale: float, optional
-        initial_state: [B, H, K, V], optional
+        initial_state: [B, HV, K, V], optional
         initial_A_state: [B, H, K], optional
         output_final_state: bool
 
+    GVA is applied if `HV > H` (with `HV` divisible by `H`): each group of
+    `HV // H` value heads shares one key head and its ATK preconditioner state.
+
     Returns:
-        o: [B, T, H, V]
-        final_state: [B, H, K, V] if output_final_state else None
+        o: [B, T, HV, V]
+        final_state: [B, HV, K, V] if output_final_state else None
         final_A_state: [B, H, K] if output_final_state else None
     """
+    num_heads, num_v_heads = k.shape[2], v.shape[2]
+    n_rep = num_v_heads // num_heads
+    if n_rep > 1:
+        # GVA: value heads in a group share the key head and ATK state
+        q, k, g_atk, beta_atk = (t.repeat_interleave(n_rep, dim=2) for t in (q, k, g_atk, beta_atk))
+        if initial_A_state is not None:
+            initial_A_state = initial_A_state.repeat_interleave(n_rep, dim=1)
+        if log_atk_scale is not None and not isinstance(log_atk_scale, (int, float)):
+            log_atk_scale = log_atk_scale.repeat_interleave(n_rep, dim=0)
+
     q, k, v, g_atk, g, beta_atk, beta = map(
         lambda t: t.transpose(1, 2).contiguous().to(torch.float32),
         [q, k, v, g_atk, g, beta_atk, beta]
@@ -103,5 +116,9 @@ def naive_recurrent_precond_gated_delta_rule(
     if not output_final_state:
         S = None
         A = None
+    elif n_rep > 1:
+        # all value heads in a group carry the identical shared ATK state;
+        # return one copy per key head
+        A = A[:, ::n_rep]
     o = o.transpose(1, 2).contiguous()
     return o, S, A

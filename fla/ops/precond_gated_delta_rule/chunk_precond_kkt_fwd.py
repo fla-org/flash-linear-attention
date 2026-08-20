@@ -35,13 +35,14 @@ from fla.utils import autotune_cache_kwargs
 def chunk_precond_kkt_fwd_kernel(
     k,              # [B, T, H, K] - original keys
     k_precond,      # [B, T, H, K] - pre-computed preconditioned keys
-    g,              # [B, T, H] - gate (cumsum)
-    beta,           # [B, T, H] - beta scaling
-    A,              # [B, T, H, BT] - output asymmetric KKT matrix
+    g,              # [B, T, HV] - gate (cumsum)
+    beta,           # [B, T, HV] - beta scaling
+    A,              # [B, T, HV, BT] - output asymmetric KKT matrix
     cu_seqlens,
     chunk_indices,
     T,
     H: tl.constexpr,
+    HV: tl.constexpr,
     K: tl.constexpr,
     BT: tl.constexpr,
     BK: tl.constexpr,
@@ -52,13 +53,17 @@ def chunk_precond_kkt_fwd_kernel(
     Compute asymmetric KKT matrix using pre-computed k_precond.
 
     A_ij = beta_i * k_i @ k_precond_j^T * exp(g_i - g_j)
+
+    GVA (`HV > H`) is supported: `k`/`k_precond` carry `H` heads while `g`/`beta`/`A`
+    carry `HV` heads; each value head reads its shared key head via `i_hv // (HV // H)`.
     """
-    i_t, i_bh = tl.program_id(0), tl.program_id(1)
-    i_b, i_h = i_bh // H, i_bh % H
+    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
+    i_b, i_hv = i_bh // HV, i_bh % HV
+    i_h = i_hv // (HV // H)
 
     if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
         i_n = i_b
@@ -67,8 +72,8 @@ def chunk_precond_kkt_fwd_kernel(
     o_t = i_t * BT + tl.arange(0, BT)
     m_t = o_t < T
 
-    b_b = tl.load(beta + bos*H + i_h + o_t*H, mask=m_t, other=0.0)
-    b_g = tl.load(g + bos*H + i_h + o_t*H, mask=m_t, other=0.0)
+    b_b = tl.load(beta + bos*HV + i_hv + o_t*HV, mask=m_t, other=0.0)
+    b_g = tl.load(g + bos*HV + i_hv + o_t*HV, mask=m_t, other=0.0)
 
     b_A = tl.zeros([BT, BT], dtype=tl.float32)
 
@@ -95,7 +100,7 @@ def chunk_precond_kkt_fwd_kernel(
     b_A = tl.where(m_A, b_A, 0)
 
     o_A = tl.arange(0, BT)
-    p_A = A + (bos*H + i_h) * BT + o_t[:, None] * (BT*H) + o_A[None, :]
+    p_A = A + (bos*HV + i_hv) * BT + o_t[:, None] * (BT*HV) + o_A[None, :]
     tl.store(p_A, b_A.to(A.dtype.element_ty), mask=m_t[:, None] & (o_A[None, :] < BT))
 
 
@@ -118,9 +123,10 @@ def chunk_precond_kkt_fwd(
         k_precond (torch.Tensor):
             The preconditioned key tensor of shape `[B, T, H, K]`.
         g (torch.Tensor):
-            The cumulative sum of the gate tensor of shape `[B, T, H]`.
+            The cumulative sum of the gate tensor of shape `[B, T, HV]`.
+            GVA is applied if `HV > H`, where `HV` must be divisible by `H`.
         beta (torch.Tensor):
-            The beta tensor of shape `[B, T, H]`.
+            The beta tensor of shape `[B, T, HV]`.
         cu_seqlens (torch.LongTensor):
             The cumulative sequence lengths of the input tensor.
             Default: None
@@ -130,17 +136,19 @@ def chunk_precond_kkt_fwd(
             The dtype of the output tensor. Default: `torch.float32`
 
     Returns:
-        beta * K * K_precond^T of shape `[B, T, H, BT]` where `BT` is the chunk size.
+        beta * K * K_precond^T of shape `[B, T, HV, BT]` where `BT` is the chunk size.
     """
     B, T, H, K = k.shape
+    HV = beta.shape[-1]
+    assert HV % H == 0, f"HV ({HV}) must be divisible by H ({H})"
     BT = chunk_size
 
     chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
-    A = torch.empty(B, T, H, BT, device=k.device, dtype=output_dtype)
+    A = torch.empty(B, T, HV, BT, device=k.device, dtype=output_dtype)
 
-    chunk_precond_kkt_fwd_kernel[(NT, B * H)](
+    chunk_precond_kkt_fwd_kernel[(NT, B * HV)](
         k=k,
         k_precond=k_precond,
         g=g,
@@ -150,6 +158,7 @@ def chunk_precond_kkt_fwd(
         chunk_indices=chunk_indices,
         T=T,
         H=H,
+        HV=HV,
         K=K,
         BT=BT,
         USE_EXP2=use_exp2,

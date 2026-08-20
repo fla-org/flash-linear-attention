@@ -162,6 +162,7 @@ def chunk_precond_kda_bwd(
     kg: torch.Tensor | None = None,
     v_new: torch.Tensor | None = None,
     h: torch.Tensor | None = None,
+    dat: torch.Tensor | None = None,
 ):
     """
     Backward pass for preconditioned KDA with symmetric fast squash preconditioning.
@@ -314,6 +315,7 @@ def chunk_precond_kda_bwd(
         x=x,
         eps=eps,
         log_atk_scale=log_atk_scale,
+        dat=dat,
     )
 
     # Combine dk gradients
@@ -502,6 +504,7 @@ class ChunkPrecondKDAFunction(torch.autograd.Function):
             kg=kg,
             v_new=v_new,
             h=h,
+            dat=dat,
         )
 
         if ctx.use_qk_l2norm_in_kernel:
@@ -656,9 +659,8 @@ def chunk_precond_kda(
             Must be used within `torch.inference_mode()` and will return a 4-tuple instead of 3-tuple.
             This is not intended for training as it bypasses autograd. Default: `False`.
         cp_context (Optional[FLACPContext]):
-            Context parallel context for distributed training across multiple devices.
-            When provided, `initial_state` and `output_final_state` are not supported,
-            and `cu_seqlens` will be overridden by the context. Default: `None`.
+            Context parallelism is not yet supported for the preconditioned path;
+            passing a context raises `NotImplementedError`. Default: `None`.
         transpose_state_layout (Optional[bool]):
             Whether to use the transposed state layout for the hidden state.
             Default: `False`.
@@ -728,13 +730,11 @@ def chunk_precond_kda(
     """
 
     if cp_context is not None:
-        assert initial_state is None, "Initial state is not supported for CP"
-        assert output_final_state is False, "Output final state is not supported for CP"
-        assert cp_context.cu_seqlens is not None, "cu_seqlens is required for CP"
-        # Override cu_seqlens and cu_seqlens_cpu with the ones from the context
-        cu_seqlens = cp_context.cu_seqlens
-        if cp_context.cu_seqlens_cpu is not None:
-            cu_seqlens_cpu = cp_context.cu_seqlens_cpu
+        raise NotImplementedError(
+            "Context parallelism is not yet supported for chunk_precond_kda: "
+            "the preconditioned path lacks the CP state compression/expansion plumbing. "
+            "Please run without `cp_context`."
+        )
 
     if cu_seqlens is not None:
         if q.shape[0] != 1:

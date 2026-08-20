@@ -148,6 +148,7 @@ def chunk_precond_gated_delta_rule_bwd(
     eps: float = 1e-6,
     log_atk_scale: torch.Tensor = None,
     transpose_state_layout: bool = False,
+    dat: torch.Tensor | None = None,
 ):
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, 64)
@@ -257,6 +258,7 @@ def chunk_precond_gated_delta_rule_bwd(
         x=x,
         eps=eps,
         log_atk_scale=log_atk_scale,
+        dat=dat,
     )
 
     dk_read = dk_read_wy
@@ -389,6 +391,7 @@ class ChunkPrecondGatedDeltaRuleFunction(torch.autograd.Function):
             eps=ctx.eps,
             log_atk_scale=log_atk_scale,
             transpose_state_layout=ctx.transpose_state_layout,
+            dat=dat,
         )
 
         dk_read.add_(dk_write)
@@ -467,9 +470,8 @@ def chunk_precond_gated_delta_rule(
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
         cp_context (Optional[FLACPContext]):
-            Context parallel context for distributed training across multiple devices.
-            When provided, `initial_state` and `output_final_state` are not supported,
-            and `cu_seqlens` will be overridden by the context. Default: `None`.
+            Context parallelism is not yet supported for the preconditioned path;
+            passing a context raises `NotImplementedError`. Default: `None`.
         transpose_state_layout (Optional[bool]):
             Whether to use the transposed state layout for the hidden state.
             Default: `False`.
@@ -539,12 +541,11 @@ def chunk_precond_gated_delta_rule(
         )
 
     if cp_context is not None:
-        assert initial_state is None, "Initial state is not supported for CP"
-        assert output_final_state is False, "Output final state is not supported for CP"
-        assert cp_context.cu_seqlens is not None, "cu_seqlens is required for CP"
-        cu_seqlens = cp_context.cu_seqlens
-        if cp_context.cu_seqlens_cpu is not None:
-            cu_seqlens_cpu = cp_context.cu_seqlens_cpu
+        raise NotImplementedError(
+            "Context parallelism is not yet supported for chunk_precond_gated_delta_rule: "
+            "the preconditioned path lacks the CP state compression/expansion plumbing. "
+            "Please run without `cp_context`."
+        )
 
     if cu_seqlens is not None:
         if q.shape[0] != 1:

@@ -54,17 +54,17 @@ def _forward_chunk_summary(
 ):
     i_t = tl.program_id(0)
     h = tl.program_id(1)
-    chunk_id = tl.program_id(2)
+    chunk_id = tl.program_id(2).to(tl.int64)
 
     if IS_VARLEN:
         i_n = tl.load(chunk_indices + i_t * 2).to(tl.int32)
-        chunk_id = tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        chunk_id = tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
         bos = tl.load(cu_seqlens + i_n).to(tl.int32)
         eos = tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
-        b = i_n
+        b = i_n.to(tl.int64)
     else:
-        b = tl.program_id(0)
+        b = tl.program_id(0).to(tl.int64)
         bos = 0
         eos = T
 
@@ -136,7 +136,7 @@ def _forward_pass_chunks(
     USE_INITIAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_nh = tl.program_id(0)
+    i_nh = tl.program_id(0).to(tl.int64)
 
     if IS_VARLEN:
         i_n = i_nh // H
@@ -144,7 +144,7 @@ def _forward_pass_chunks(
         bos = tl.load(cu_seqlens + i_n).to(tl.int32)
         eos = tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
-        b = i_n
+        b = i_n.to(tl.int64)
     else:
         b = i_nh // H
         h = i_nh % H
@@ -216,17 +216,17 @@ def _forward_chunk_out(
 ):
     i_t = tl.program_id(0)
     h = tl.program_id(1)
-    chunk_id = tl.program_id(2)
+    chunk_id = tl.program_id(2).to(tl.int64)
 
     if IS_VARLEN:
         i_n = tl.load(chunk_indices + i_t * 2).to(tl.int32)
-        chunk_id = tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        chunk_id = tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
         bos = tl.load(cu_seqlens + i_n).to(tl.int32)
         eos = tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
-        b = i_n
+        b = i_n.to(tl.int64)
     else:
-        b = tl.program_id(0)
+        b = tl.program_id(0).to(tl.int64)
         bos = 0
         eos = T
 

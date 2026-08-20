@@ -233,6 +233,7 @@ class LegacyFLACache(HFCacheBase):
         layer_idx: int = 0,
         offset: int | None = 1,
         cache_kwargs: dict[str, Any] | None = None,
+        A_state: torch.Tensor | None = None,
     ) -> dict[str, Any]:
         """
         Args:
@@ -250,6 +251,8 @@ class LegacyFLACache(HFCacheBase):
                 The number of new tokens being processed.
             cache_kwargs (`Dict[str, Any]`):
                 Additional arguments for the cache subclass.
+            A_state (`torch.Tensor`, optional):
+                The new auxiliary preconditioner state to cache. Default: `None`.
 
         Return:
             Dictionary of the updated state.
@@ -274,6 +277,7 @@ class LegacyFLACache(HFCacheBase):
                 attn_state=attn_state,
                 conv_state=conv_state,
                 ffn_state=ffn_state,
+                A_state=A_state,
             )
             self.states.append(state)
         else:
@@ -323,6 +327,8 @@ class LegacyFLACache(HFCacheBase):
                 state['conv_state'] = conv_state
             if ffn_state is not None:
                 state['ffn_state'] = ffn_state
+            if A_state is not None:
+                state['A_state'] = A_state
 
         return state
 
