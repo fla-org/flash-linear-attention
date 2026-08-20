@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 
 class SimpleGatedLinearAttention(nn.Module):
     r"""
-    The layer implementaion for [Gated Linear Attention Transformers with Hardware-Efficient Training](https://arxiv.org/abs/2312.06635).  # noqa
+    The layer implementation for [Gated Linear Attention Transformers with Hardware-Efficient Training](https://arxiv.org/abs/2312.06635).  # noqa
     This layer calls the simplified GLA kernel in which the gating is head-wise instead of elementwise.
 
     Args:

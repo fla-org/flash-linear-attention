@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+import torch
+
 from fla.ops.backends import BaseBackend
 
 
@@ -23,8 +25,25 @@ class TritonAscendCommonBackend(BaseBackend):
         from fla.utils import IS_NPU
         return IS_NPU
 
-    def chunk_scaled_dot_kkt_fwd_verifier(self, *args, **kwargs):
-        return True, None
+    def chunk_scaled_dot_kkt_fwd_verifier(
+        self,
+        k,
+        g=None,
+        beta=None,
+        cu_seqlens=None,
+        chunk_size=64,
+        output_dtype=torch.float32,
+        chunk_indices=None,
+    ) -> tuple[bool, str | None]:
+        from fla.utils import IS_NPU
+        if not IS_NPU:
+            return False, "not running on NPU"
+        if k.device.type != "npu":
+            return False, "input device is not NPU"
+        tensors = (k, beta) if g is None else (k, g, beta)
+        if all(t.dtype in (torch.float32, torch.float16, torch.bfloat16) for t in tensors):
+            return True, None
+        return False, "unsupported dtype for NPU chunk_scaled_dot_kkt_fwd"
 
     def chunk_scaled_dot_kkt_fwd(self, *args, **kwargs):
         from fla.ops.common.backends.triton_ascend.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd_npu
