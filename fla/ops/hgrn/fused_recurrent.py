@@ -16,6 +16,11 @@ _HGRN_HIERARCHICAL_BT = 128
 _HGRN_HIERARCHICAL_MIN_T = 1024
 
 
+def _use_hierarchical_hgrn(T: int, N: int, is_varlen: bool) -> bool:
+    packed_scratch_is_bounded = not is_varlen or N * triton.cdiv(T, _HGRN_HIERARCHICAL_BT) <= T
+    return IS_NVIDIA_SM103 and T >= _HGRN_HIERARCHICAL_MIN_T and packed_scratch_is_bounded
+
+
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
@@ -640,7 +645,7 @@ def fused_recurrent_hgrn_fwd(
     B, T, D = x.shape
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
 
-    if IS_NVIDIA_SM103 and T >= _HGRN_HIERARCHICAL_MIN_T:
+    if _use_hierarchical_hgrn(T=T, N=N, is_varlen=cu_seqlens is not None):
         return _fused_recurrent_hgrn_fwd_hierarchical(
             x=x,
             g=g,
@@ -677,7 +682,7 @@ def fused_recurrent_hgrn_bwd(
     B, T, D = do.shape
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
 
-    if IS_NVIDIA_SM103 and T >= _HGRN_HIERARCHICAL_MIN_T:
+    if _use_hierarchical_hgrn(T=T, N=N, is_varlen=cu_seqlens is not None):
         return _fused_recurrent_hgrn_bwd_hierarchical(
             g=g,
             o=o,
