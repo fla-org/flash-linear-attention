@@ -10,7 +10,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
-from fla.ops.utils.op import exp, exp2
+from fla.ops.utils.op import exp2
 from fla.utils import IS_NVIDIA_BLACKWELL, autotune_cache_kwargs, check_shared_mem
 
 if IS_NVIDIA_BLACKWELL:
@@ -89,7 +89,6 @@ def prepare_precond_wy_repr_bwd_kernel(
     BK: tl.constexpr,
     BV: tl.constexpr,
     USE_G: tl.constexpr,
-    USE_EXP2: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
     """
@@ -128,10 +127,7 @@ def prepare_precond_wy_repr_bwd_kernel(
 
     if USE_G:
         b_g = tl.load(g + (bos*HV + i_hv) + o_t*HV, mask=m_t, other=0.0)
-        if USE_EXP2:
-            b_g_exp = exp2(b_g)
-        else:
-            b_g_exp = tl.exp(b_g)
+        b_g_exp = exp2(b_g)
         b_dg = tl.zeros([BT], dtype=tl.float32)
 
     # First pass: accumulate dA from dw using original k (for w = A^-1 @ (k * beta * g))
@@ -188,10 +184,7 @@ def prepare_precond_wy_repr_bwd_kernel(
     b_dA = safe_dot(b_A, b_dA.to(b_A.dtype))
 
     if USE_G:
-        if USE_EXP2:
-            b_dA *= exp2(b_g[:, None] - b_g[None, :])
-        else:
-            b_dA *= exp(b_g[:, None] - b_g[None, :])
+        b_dA *= exp2(b_g[:, None] - b_g[None, :])
 
     b_dA = tl.where(m_A, -b_dA, 0)
 
@@ -262,7 +255,6 @@ def prepare_precond_wy_repr_bwd(
     du: torch.Tensor,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
-    use_exp2: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Asymmetric WY backward for preconditioned gated delta rule.
@@ -333,7 +325,6 @@ def prepare_precond_wy_repr_bwd(
         BT=BT,
         BK=BK,
         BV=BV,
-        USE_EXP2=use_exp2,
     )
 
     if H != HV:

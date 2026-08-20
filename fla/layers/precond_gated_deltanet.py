@@ -179,7 +179,8 @@ class PrecondGatedDeltaNet(nn.Module):
         self.log_atk_scale._no_weight_decay = True
 
         # Gate parameters for preconditioned Gated DeltaNet main recurrence
-        A = torch.empty(self.num_v_heads, dtype=torch.float32).uniform_(1, 16)
+        # (uniform(0, 16) matches the baseline GatedDeltaNet layer init)
+        A = torch.empty(self.num_v_heads, dtype=torch.float32).uniform_(0, 16)
         self.A_log = nn.Parameter(torch.log(A))
         self.A_log._no_weight_decay = True
         # hard coded (taken from Gated DeltaNet layer)
@@ -199,7 +200,7 @@ class PrecondGatedDeltaNet(nn.Module):
         self.dt_bias._no_weight_decay = True
 
         # Gate parameters for preconditioner recurrence (per key head)
-        A_atk = torch.empty(self.num_heads, dtype=torch.float32).uniform_(1, 16)
+        A_atk = torch.empty(self.num_heads, dtype=torch.float32).uniform_(0, 16)
         self.A_log_atk = nn.Parameter(torch.log(A_atk))
         self.A_log_atk._no_weight_decay = True
 

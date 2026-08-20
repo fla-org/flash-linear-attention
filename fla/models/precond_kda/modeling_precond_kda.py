@@ -135,7 +135,7 @@ class PrecondKDAPreTrainedModel(PreTrainedModel):
         num_residuals_per_layer: int = 2,
     ):
         if isinstance(module, PrecondKDA) and next(module.parameters()).device.type != "meta":
-            a_log_lower = getattr(self.config, "a_log_init_lower", 0)
+            a_log_lower = getattr(self.config, "a_log_init_lower", 1)
             with torch.no_grad():
                 # Initialize ATK gate parameters
                 if not getattr(module.A_log_atk, "_is_hf_initialized", False):

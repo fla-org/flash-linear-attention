@@ -165,7 +165,7 @@ class PrecondKDA(nn.Module):
         self.b_atk_proj = nn.Linear(hidden_size, self.num_v_heads, bias=False)
         self.b_proj = nn.Linear(hidden_size, self.num_heads, bias=False)
 
-        A_atk = torch.empty(self.num_v_heads, dtype=torch.float32).uniform_(0, 16)
+        A_atk = torch.empty(self.num_v_heads, dtype=torch.float32).uniform_(1, 16)
         self.A_log_atk = nn.Parameter(torch.log(A_atk))
         self.A_log_atk._no_weight_decay = True
 

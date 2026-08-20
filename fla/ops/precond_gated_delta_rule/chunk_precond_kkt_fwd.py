@@ -14,7 +14,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
-from fla.ops.utils.op import exp, exp2
+from fla.ops.utils.op import exp2
 from fla.utils import autotune_cache_kwargs
 
 
@@ -46,7 +46,6 @@ def chunk_precond_kkt_fwd_kernel(
     K: tl.constexpr,
     BT: tl.constexpr,
     BK: tl.constexpr,
-    USE_EXP2: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
     """
@@ -88,11 +87,8 @@ def chunk_precond_kkt_fwd_kernel(
 
         b_A += tl.dot(b_k, tl.trans(b_kp))
 
-    # Attention gating and beta scaling
-    if USE_EXP2:
-        b_A *= exp2(b_g[:, None] - b_g[None, :])
-    else:
-        b_A *= exp(b_g[:, None] - b_g[None, :])
+    # Attention gating and beta scaling (gates are pre-scaled by RCP_LN2 upstream)
+    b_A *= exp2(b_g[:, None] - b_g[None, :])
     b_A *= b_b[:, None]
 
     # Causal mask
@@ -112,7 +108,6 @@ def chunk_precond_kkt_fwd(
     chunk_size: int = 64,
     output_dtype: torch.dtype = torch.float32,
     cu_seqlens: torch.LongTensor | None = None,
-    use_exp2: bool = True,
 ) -> torch.Tensor:
     r"""
     Compute beta * K * K_precond^T (asymmetric).
@@ -161,7 +156,6 @@ def chunk_precond_kkt_fwd(
         HV=HV,
         K=K,
         BT=BT,
-        USE_EXP2=use_exp2,
     )
 
     return A

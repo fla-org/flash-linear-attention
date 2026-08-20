@@ -9,7 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.utils.op import exp, exp2
+from fla.ops.utils.op import exp
 from fla.utils import input_guard
 
 
@@ -60,7 +60,6 @@ def fused_recurrent_precond_gated_delta_rule_fwd_kernel(
     STORE_FINAL_STATE: tl.constexpr,
     USE_INITIAL_ATK: tl.constexpr,
     STORE_FINAL_ATK: tl.constexpr,
-    USE_EXP2: tl.constexpr,
     TRANSPOSE_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
@@ -151,36 +150,21 @@ def fused_recurrent_precond_gated_delta_rule_fwd_kernel(
 
         if USE_G:
             b_g = tl.load(p_g).to(tl.float32)
-            if USE_EXP2:
-                b_h *= exp2(b_g)
-            else:
-                b_h *= exp(b_g)
+            b_h *= exp(b_g)
 
         if USE_GK:
             b_gk = tl.load(p_gk, mask=mask_k, other=0).to(tl.float32)
-            if USE_EXP2:
-                if TRANSPOSE_STATE:
-                    b_h *= exp2(b_gk[None, :])
-                else:
-                    b_h *= exp2(b_gk[:, None])
+            if TRANSPOSE_STATE:
+                b_h *= exp(b_gk[None, :])
             else:
-                if TRANSPOSE_STATE:
-                    b_h *= exp(b_gk[None, :])
-                else:
-                    b_h *= exp(b_gk[:, None])
+                b_h *= exp(b_gk[:, None])
 
         if USE_GV:
             b_gv = tl.load(p_gv, mask=mask_v, other=0).to(tl.float32)
-            if USE_EXP2:
-                if TRANSPOSE_STATE:
-                    b_h *= exp2(b_gv[:, None])
-                else:
-                    b_h *= exp2(b_gv[None, :])
+            if TRANSPOSE_STATE:
+                b_h *= exp(b_gv[:, None])
             else:
-                if TRANSPOSE_STATE:
-                    b_h *= exp(b_gv[:, None])
-                else:
-                    b_h *= exp(b_gv[None, :])
+                b_h *= exp(b_gv[None, :])
 
         # Delta rule update using k_precond for the write side
         if TRANSPOSE_STATE:
@@ -238,7 +222,6 @@ def fused_recurrent_precond_gated_delta_rule_fwd(
     output_final_state: bool = False,
     use_qk_l2norm_in_kernel: bool = True,
     cu_seqlens: torch.LongTensor | None = None,
-    use_exp2: bool = False,
     transpose_state_layout: bool = False,
     x: float = 1.5,
     eps: float = 1e-6,
@@ -295,7 +278,6 @@ def fused_recurrent_precond_gated_delta_rule_fwd(
         BV=BV,
         IS_BETA_HEADWISE=beta.ndim != v.ndim,
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
-        USE_EXP2=use_exp2,
         TRANSPOSE_STATE=transpose_state_layout,
         num_warps=1,
         num_stages=3,
@@ -324,8 +306,7 @@ class FusedRecurrentPrecondGatedDeltaRuleFunction(torch.autograd.Function):
         output_final_state: bool = False,
         use_qk_l2norm_in_kernel: bool = False,
         cu_seqlens: torch.LongTensor | None = None,
-        use_exp2: bool = False,
-        transpose_state_layout: bool = False,
+            transpose_state_layout: bool = False,
         x: float = 1.5,
         eps: float = 1e-6,
         log_atk_scale: torch.Tensor = None,
@@ -346,7 +327,6 @@ class FusedRecurrentPrecondGatedDeltaRuleFunction(torch.autograd.Function):
             output_final_state=output_final_state,
             use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
             cu_seqlens=cu_seqlens,
-            use_exp2=use_exp2,
             transpose_state_layout=transpose_state_layout,
             x=x,
             eps=eps,
@@ -381,7 +361,6 @@ def fused_recurrent_precond_gated_delta_rule(
     output_final_state: bool = False,
     use_qk_l2norm_in_kernel: bool = True,
     cu_seqlens: torch.LongTensor | None = None,
-    use_exp2: bool = False,
     transpose_state_layout: bool = False,
     x: float = 1.5,
     eps: float = 1e-6,
@@ -425,8 +404,6 @@ def fused_recurrent_precond_gated_delta_rule(
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
-        use_exp2 (bool):
-            Whether to use exp2 instead of exp for gate application. Default: `False`.
         transpose_state_layout (bool):
             Whether to use transposed state layout `[V, K]` instead of `[K, V]`. Default: `False`.
         x (float):
@@ -510,7 +487,6 @@ def fused_recurrent_precond_gated_delta_rule(
         output_final_state,
         use_qk_l2norm_in_kernel,
         cu_seqlens,
-        use_exp2,
         transpose_state_layout,
         x,
         eps,

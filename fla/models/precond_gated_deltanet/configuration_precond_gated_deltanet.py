@@ -50,7 +50,7 @@ class PrecondGatedDeltaNetConfig(PretrainedConfig):
         squash_eps: float = 1e-6,
         log_atk_scale_init: float = -0.2,
         # Lower bound of the uniform A_log/A_log_atk init distribution.
-        # The paper's experiments use 0; baseline (Gated)DeltaNet uses 1.
+        # Defaults to 0, matching baseline GatedDeltaNet (and the paper's experiments).
         a_log_init_lower: float = 0,
         **kwargs,
     ):

@@ -40,7 +40,6 @@ def chunk_precond_gated_delta_rule_fwd(
     cu_seqlens: torch.LongTensor | None = None,
     cp_context: FLACPContext | None = None,
     chunk_indices: torch.LongTensor | None = None,
-    use_exp2: bool = True,
     x: float = 1.5,
     eps: float = 1e-6,
     log_atk_scale: torch.Tensor = None,
@@ -65,7 +64,7 @@ def chunk_precond_gated_delta_rule_fwd(
     g = chunk_local_cumsum(
         g,
         chunk_size=64,
-        scale=RCP_LN2 if use_exp2 else None,
+        scale=RCP_LN2,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
     )
@@ -79,7 +78,6 @@ def chunk_precond_gated_delta_rule_fwd(
         chunk_size=64,
         output_dtype=torch.float32,
         cu_seqlens=cu_seqlens,
-        use_exp2=use_exp2,
     )
     A = solve_tril(
         A=A,
@@ -143,7 +141,6 @@ def chunk_precond_gated_delta_rule_bwd(
     cu_seqlens: torch.LongTensor | None = None,
     cp_context: FLACPContext | None = None,
     chunk_indices: torch.LongTensor | None = None,
-    use_exp2: bool = True,
     x: float = 1.5,
     eps: float = 1e-6,
     log_atk_scale: torch.Tensor = None,
@@ -238,7 +235,6 @@ def chunk_precond_gated_delta_rule_bwd(
         du=dv,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
-        use_exp2=use_exp2,
     )
 
     dbeta = dbeta_wy
@@ -330,7 +326,6 @@ class ChunkPrecondGatedDeltaRuleFunction(torch.autograd.Function):
             cu_seqlens=cu_seqlens,
             cp_context=cp_context,
             chunk_indices=chunk_indices,
-            use_exp2=True,
             x=x,
             eps=eps,
             log_atk_scale=log_atk_scale,
@@ -386,7 +381,6 @@ class ChunkPrecondGatedDeltaRuleFunction(torch.autograd.Function):
             cu_seqlens=cu_seqlens,
             cp_context=ctx.cp_context,
             chunk_indices=chunk_indices,
-            use_exp2=True,
             x=ctx.x,
             eps=ctx.eps,
             log_atk_scale=log_atk_scale,

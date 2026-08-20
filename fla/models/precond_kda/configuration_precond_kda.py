@@ -48,8 +48,8 @@ class PrecondKDAConfig(PretrainedConfig):
         squash_eps: float = 1e-6,
         log_atk_scale_init: float = -0.2,
         # Lower bound of the uniform A_log/A_log_atk init distribution.
-        # The paper's experiments use 0; baseline KDA uses 1.
-        a_log_init_lower: float = 0,
+        # Defaults to 1, matching baseline KDA; the paper's experiments used 0.
+        a_log_init_lower: float = 1,
         **kwargs,
     ):
         self.attn_mode = attn_mode
