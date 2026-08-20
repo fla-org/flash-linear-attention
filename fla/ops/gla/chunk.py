@@ -9,6 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.common.backends.tilelang import TileLangBackend
 from fla.ops.common.chunk_h import chunk_bwd_dh, chunk_fwd_h
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.cache import fla_cache_autotune
@@ -19,6 +20,52 @@ from fla.utils import autotune_cache_kwargs, check_shared_mem, input_guard
 
 BK_LIST = [32, 64] if check_shared_mem() else [16, 32]
 BV_LIST = [64, 128] if check_shared_mem('ampere') else [16, 32]
+
+
+def _can_use_tilelang_fused_bwd_k_tile(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g_cumsum: torch.Tensor | None,
+    h: torch.Tensor,
+    dh: torch.Tensor,
+    do: torch.Tensor,
+    initial_state: torch.Tensor | None,
+    dht: torch.Tensor | None,
+    state_v_first: bool,
+    cu_seqlens: torch.LongTensor | None,
+    chunk_size: int,
+    chunk_indices: torch.LongTensor | None,
+) -> bool:
+    B, T, H, K = k.shape
+    HV, V = v.shape[2], v.shape[-1]
+    return (
+        TileLangBackend.is_available()
+        and TileLangBackend.is_enabled()
+        and q.is_cuda
+        and cu_seqlens is None
+        and chunk_indices is None
+        and initial_state is None
+        and dht is None
+        and not state_v_first
+        and chunk_size == 64
+        and T % chunk_size == 0
+        and q.dtype in (torch.float16, torch.bfloat16)
+        and k.dtype == q.dtype
+        and v.dtype == q.dtype
+        and do.dtype == q.dtype
+        and g_cumsum is not None
+        and g_cumsum.dtype == torch.float32
+        and h.dtype == torch.float32
+        and dh.dtype == torch.float32
+        and H == HV
+        and K == V
+        and K >= 128
+        and V >= 128
+        and K % 64 == 0
+        and V % 64 == 0
+        and B > 0
+    )
 
 
 def _prune_gla_bwd_configs(configs, nargs, **kwargs):
@@ -1310,31 +1357,62 @@ def chunk_gla_bwd(
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
     )
-    dq, dk = chunk_gla_bwd_dqk_intra(
-        q=q,
-        k=k,
-        g=g_cumsum,
-        dA=dA,
-        cu_seqlens=cu_seqlens,
-        chunk_size=chunk_size,
-        chunk_indices=chunk_indices,
-    )
-    dq, dk, dg = chunk_gla_bwd_dqkg(
+    if _can_use_tilelang_fused_bwd_k_tile(
         q=q,
         k=k,
         v=v,
+        g_cumsum=g_cumsum,
         h=h,
-        g=g_cumsum,
-        do=do,
         dh=dh,
-        dq=dq,
-        dk=dk,
-        scale=scale,
+        do=do,
+        initial_state=initial_state,
+        dht=dht,
+        state_v_first=state_v_first,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
-        state_v_first=state_v_first,
-    )
+    ):
+        from fla.ops.gla.backends.tilelang.chunk_bwd import (
+            chunk_gla_bwd_dqkg_fused_tilelang,
+        )
+        dq, dk, dg = chunk_gla_bwd_dqkg_fused_tilelang(
+            q=q,
+            k=k,
+            v=v,
+            h=h,
+            g=g_cumsum,
+            do=do,
+            dh=dh,
+            dA=dA,
+            scale=scale,
+            chunk_size=chunk_size,
+        )
+    else:
+        dq, dk = chunk_gla_bwd_dqk_intra(
+            q=q,
+            k=k,
+            g=g_cumsum,
+            dA=dA,
+            cu_seqlens=cu_seqlens,
+            chunk_size=chunk_size,
+            chunk_indices=chunk_indices,
+        )
+        dq, dk, dg = chunk_gla_bwd_dqkg(
+            q=q,
+            k=k,
+            v=v,
+            h=h,
+            g=g_cumsum,
+            do=do,
+            dh=dh,
+            dq=dq,
+            dk=dk,
+            scale=scale,
+            cu_seqlens=cu_seqlens,
+            chunk_size=chunk_size,
+            chunk_indices=chunk_indices,
+            state_v_first=state_v_first,
+        )
     return dq, dk, dv, dg, dh0
 
 

@@ -5,6 +5,8 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import os
+
 import torch
 import triton
 import triton.language as tl
@@ -224,7 +226,9 @@ def prepare_wy_repr_bwd_kernel(
     b_A = tl.zeros([BT, BT], dtype=tl.float32)
     b_dA = tl.where(m_A, -b_dA, 0).to(k.dtype.element_ty)
 
+    # keep this barrier: triton-ascend can misorder b_dA before the dk load-modify-store without it
     tl.debug_barrier()
+
     for i_k in range(tl.cdiv(K, BK)):
         o_k = i_k * BK + tl.arange(0, BK)
         m_k = m_t[:, None] & (o_k[None, :] < K)
@@ -311,13 +315,33 @@ def prepare_wy_repr_bwd(
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
+
+    if k.dtype is torch.float32 and os.environ.get('TRITON_F32_DEFAULT') == 'ieee':
+        return _prepare_wy_repr_bwd_split(
+            k=k,
+            v=v,
+            beta=beta,
+            A=A,
+            dw=dw,
+            du=du,
+            g=g,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+            NT=NT,
+        )
+
     CONST_TILING = 64 if check_shared_mem() else 32
     BK = min(max(triton.next_power_of_2(K), 16), CONST_TILING)
     BV = min(max(triton.next_power_of_2(V), 16), CONST_TILING)
 
+    return_dg = g is not None
+    if g is None:
+        # exp2(0) is the no-g path; reuse the g-specialized compiler artifact.
+        g = torch.zeros_like(beta)
+
     dk = k.new_empty(B, T, HV, K)
     dv = torch.empty_like(v)
-    dg = torch.empty_like(g) if g is not None else None
+    dg = torch.empty_like(g)
     db = torch.empty_like(beta)
     prepare_wy_repr_bwd_kernel[(NT, B * HV)](
         k=k,
@@ -342,6 +366,112 @@ def prepare_wy_repr_bwd(
         BK=BK,
         BV=BV,
     )
+    if H != HV:
+        dk = dk.view(B, T, H, HV // H, K).sum(3)
+    if not return_dg:
+        dg = None
+    return dk, dv, db, dg
+
+
+def _prepare_wy_repr_bwd_split(
+    k: torch.Tensor,
+    v: torch.Tensor,
+    beta: torch.Tensor,
+    A: torch.Tensor,
+    dw: torch.Tensor,
+    du: torch.Tensor,
+    g: torch.Tensor | None,
+    cu_seqlens: torch.LongTensor | None,
+    chunk_indices: torch.LongTensor | None,
+    NT: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    from fla.ops.gated_delta_rule.backends.triton_ascend import wy_fast as wy_split
+
+    B, T, H, K, V, HV = *k.shape, v.shape[-1], v.shape[2]
+    BT = A.shape[-1]
+    BK = min(max(triton.next_power_of_2(K), 16), 32)
+    BV = min(max(triton.next_power_of_2(V), 16), 32)
+    use_g = g is not None
+    is_varlen = cu_seqlens is not None
+
+    dk = k.new_empty(B, T, HV, K)
+    dv = torch.empty_like(v)
+    dg = torch.empty_like(g) if use_g else None
+    db = torch.empty_like(beta)
+    dA_scr = torch.empty_like(A, dtype=torch.float32)
+    dA_mid = torch.empty_like(A, dtype=torch.float32)
+    dA_out = torch.empty_like(A, dtype=torch.float32)
+    a2_scr = torch.empty_like(A, dtype=torch.float32)
+    col_acc_scr = torch.empty(
+        B,
+        triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices),
+        HV,
+        BT,
+        dtype=torch.float32,
+        device=k.device,
+    )
+    g_arg = g if use_g else beta
+    dg_arg = dg if use_g else beta
+    grid = (NT, B * HV)
+    base = dict(
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        T=T,
+        BT=BT,
+        IS_VARLEN=is_varlen,
+        NT_OFFSET=0,
+        BH_OFFSET=0,
+        num_warps=2,
+    )
+
+    wy_split.prepare_wy_repr_bwd_k_npu[grid](
+        k=k, beta=beta, g=g_arg, A=A, dw=dw,
+        dk=dk, dA_scr=dA_scr, db=db, dg=dg_arg,
+        H=H, HV=HV, K=K, BK=BK, USE_G=use_g,
+        **base,
+    )
+    wy_split.prepare_wy_repr_bwd_v_npu[grid](
+        v=v, beta=beta, A=A, du=du, dv=dv, dA_scr=dA_scr, db=db,
+        HV=HV, V=V, BV=BV,
+        **base,
+    )
+    wy_split.prepare_wy_repr_bwd_da_mask_npu[grid](
+        dA_scr=dA_scr,
+        HV=HV,
+        **base,
+    )
+    wy_split.prepare_wy_repr_bwd_da_dot1_npu[grid](
+        A=A, dA_scr=dA_scr, dA_mid=dA_mid,
+        HV=HV,
+        **base,
+    )
+    wy_split.prepare_wy_repr_bwd_da_dot2_npu[grid](
+        A=A, dA_mid=dA_mid, dA_out=dA_out,
+        HV=HV,
+        **base,
+    )
+    if use_g:
+        wy_split.prepare_wy_repr_bwd_da_gate_npu[grid](
+            g=g_arg, dA_out=dA_out,
+            HV=HV, BC=16,
+            **base,
+        )
+    wy_split.prepare_wy_repr_bwd_finalize_k_npu[grid](
+        k=k, beta=beta, dA_out=dA_out, dk=dk, db=db,
+        H=H, HV=HV, K=K, BK=BK,
+        **base,
+    )
+    if use_g:
+        wy_split.prepare_wy_repr_bwd_finalize_a2_npu[grid](
+            k=k, beta=beta, a2_scr=a2_scr,
+            H=H, HV=HV, K=K, BK=BK,
+            **base,
+        )
+        wy_split.prepare_wy_repr_bwd_finalize_dg_npu[grid](
+            dA_out=dA_out, a2_scr=a2_scr, dg=dg_arg, col_acc_scr=col_acc_scr,
+            HV=HV, BC=16,
+            **base,
+        )
     if H != HV:
         dk = dk.view(B, T, H, HV // H, K).sum(3)
     return dk, dv, db, dg

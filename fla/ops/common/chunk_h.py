@@ -19,6 +19,7 @@ BKV_LIST = [32, 64] if check_shared_mem() else [16, 32]
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
+    'STORE_MMA_STATE': lambda args: args['h_mma'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
@@ -37,6 +38,7 @@ def chunk_fwd_kernel_h(
     k,
     v,
     h,
+    h_mma,
     g,
     g_gamma,
     gk,
@@ -59,6 +61,7 @@ def chunk_fwd_kernel_h(
     USE_GV: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
+    STORE_MMA_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     STATE_V_FIRST: tl.constexpr,
 ):
@@ -103,12 +106,22 @@ def chunk_fwd_kernel_h(
         if STATE_V_FIRST:
             p_h = h + o_h + o_v[:, None] * K + o_k[None, :]
             m_h = (o_v[:, None] < V) & (o_k[None, :] < K)
+            if STORE_MMA_STATE:
+                p_h_mma = h_mma + o_h + o_v[:, None] * K + o_k[None, :]
         else:
             p_h = h + o_h + o_k[:, None] * V + o_v[None, :]
             m_h = (o_k[:, None] < K) & (o_v[None, :] < V)
+            if STORE_MMA_STATE:
+                p_h_mma = h_mma + o_h + o_k[:, None] * V + o_v[None, :]
 
         if i_t % NTS == 0:
             tl.store(p_h, (tl.trans(b_h) if STATE_V_FIRST else b_h).to(p_h.dtype.element_ty), mask=m_h)
+            if STORE_MMA_STATE:
+                tl.store(
+                    p_h_mma,
+                    (tl.trans(b_h) if STATE_V_FIRST else b_h).to(p_h_mma.dtype.element_ty),
+                    mask=m_h,
+                )
         # [BK, BT]
         b_k = tl.load(p_k, mask=(o_k[:, None] < K) & m_t[None, :], other=0.0)
         # [BT, BV]
@@ -162,6 +175,8 @@ def chunk_fwd_kernel_h(
 @triton.heuristics({
     'STORE_INITIAL_STATE_GRADIENT': lambda args: args['dh0'] is not None,
     'USE_FINAL_STATE_GRADIENT': lambda args: args['dht'] is not None,
+    'STORE_MMA_STATE': lambda args: args['dh_mma'] is not None,
+    'FUSE_HDH_LAST': lambda args: args['h_for_hdh'] is not None and args['hdh_last'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
@@ -184,6 +199,9 @@ def chunk_bwd_kernel_dh(
     gv,
     do,
     dh,
+    dh_mma,
+    h_for_hdh,
+    hdh_last,
     dht,
     dh0,
     cu_seqlens,
@@ -205,6 +223,8 @@ def chunk_bwd_kernel_dh(
     USE_GV: tl.constexpr,
     STORE_INITIAL_STATE_GRADIENT: tl.constexpr,
     USE_FINAL_STATE_GRADIENT: tl.constexpr,
+    STORE_MMA_STATE: tl.constexpr,
+    FUSE_HDH_LAST: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     STATE_V_FIRST: tl.constexpr,
 ):
@@ -245,12 +265,35 @@ def chunk_bwd_kernel_dh(
         if STATE_V_FIRST:
             p_dh = dh + o_dh + o_v[:, None] * K + o_k[None, :]
             m_dh = (o_v[:, None] < V) & (o_k[None, :] < K)
+            if STORE_MMA_STATE:
+                p_dh_mma = dh_mma + o_dh + o_v[:, None] * K + o_k[None, :]
+            if FUSE_HDH_LAST:
+                p_h_for_hdh = h_for_hdh + o_dh + o_v[:, None] * K + o_k[None, :]
         else:
             p_dh = dh + o_dh + o_k[:, None] * V + o_v[None, :]
             m_dh = (o_k[:, None] < K) & (o_v[None, :] < V)
+            if STORE_MMA_STATE:
+                p_dh_mma = dh_mma + o_dh + o_k[:, None] * V + o_v[None, :]
+            if FUSE_HDH_LAST:
+                p_h_for_hdh = h_for_hdh + o_dh + o_k[:, None] * V + o_v[None, :]
 
         if i_t % (BS // BT) == 0:
             tl.store(p_dh, (tl.trans(b_dh) if STATE_V_FIRST else b_dh).to(p_dh.dtype.element_ty), mask=m_dh)
+            if STORE_MMA_STATE:
+                tl.store(
+                    p_dh_mma,
+                    (tl.trans(b_dh) if STATE_V_FIRST else b_dh).to(p_dh_mma.dtype.element_ty),
+                    mask=m_dh,
+                )
+            if FUSE_HDH_LAST:
+                b_h_for_hdh = tl.load(p_h_for_hdh, mask=m_dh, other=0.0).to(tl.float32)
+                if STATE_V_FIRST:
+                    b_h_for_hdh = tl.trans(b_h_for_hdh)
+                tl.atomic_add(
+                    hdh_last + (boh + i_s) * H + i_h,
+                    tl.sum(b_h_for_hdh * b_dh),
+                    sem='relaxed',
+                )
         last_idx = min(i_t * BT + BT, T) - 1
         o_t = i_t * BT + tl.arange(0, BT)
         m_t = o_t < T
@@ -303,6 +346,45 @@ def chunk_bwd_kernel_dh(
             tl.store(p_dh0, b_dh.to(p_dh0.dtype.element_ty), mask=(o_k[:, None] < K) & (o_v[None, :] < V))
 
 
+@triton.jit
+def _chunk_hdh_last_kernel(
+    h,
+    dh,
+    hdh_last,
+    D: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    i_h = tl.program_id(0)
+    offs = tl.arange(0, BLOCK)
+    acc = tl.zeros((BLOCK,), dtype=tl.float32)
+
+    for base in range(0, D, BLOCK):
+        idx = base + offs
+        mask = idx < D
+        b_h = tl.load(h + i_h * D + idx, mask=mask, other=0.).to(tl.float32)
+        b_dh = tl.load(dh + i_h * D + idx, mask=mask, other=0.).to(tl.float32)
+        acc += b_h * b_dh
+
+    tl.store(hdh_last + i_h, tl.sum(acc, axis=0))
+
+
+def chunk_hdh_last(h: torch.Tensor, dh: torch.Tensor) -> torch.Tensor:
+    h_flat = h.reshape(-1, h.shape[-2] * h.shape[-1])
+    dh_flat = dh.reshape(-1, dh.shape[-2] * dh.shape[-1])
+    D = h_flat.shape[1]
+    block = min(triton.next_power_of_2(D), 1024)
+    hdh_last = torch.empty(h_flat.shape[0], dtype=torch.float32, device=h.device)
+    _chunk_hdh_last_kernel[(h_flat.shape[0],)](
+        h_flat,
+        dh_flat,
+        hdh_last,
+        D,
+        BLOCK=block,
+        num_warps=8 if block >= 1024 else 4,
+    )
+    return hdh_last
+
+
 def chunk_fwd_h(
     k: torch.Tensor,
     v: torch.Tensor,
@@ -317,7 +399,8 @@ def chunk_fwd_h(
     chunk_size: int = 64,
     split_size: int | None = None,
     states_in_fp32: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    output_mma_state: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = chunk_size
     BS = BT if split_size is None else split_size
@@ -332,12 +415,14 @@ def chunk_fwd_h(
     # `state_v_first` stores the states in V-first `[V, K]` layout instead of `[K, V]`
     state_shape = (V, K) if state_v_first else (K, V)
     h = k.new_empty(B, NS, H, *state_shape, dtype=k.dtype if not states_in_fp32 else torch.float)
+    h_mma = k.new_empty(B, NS, H, *state_shape, dtype=k.dtype) if output_mma_state else None
     ht = k.new_empty(N, H, *state_shape, dtype=torch.float) if output_final_state else None
     def grid(meta): return (triton.cdiv(K, meta['BK']), triton.cdiv(V, meta['BV']), N * H)
     chunk_fwd_kernel_h[grid](
         k=k,
         v=v,
         h=h,
+        h_mma=h_mma,
         g=g,
         g_gamma=g_gamma,
         gk=gk,
@@ -358,6 +443,8 @@ def chunk_fwd_h(
         USE_GV=gv is not None,
         STATE_V_FIRST=state_v_first,
     )
+    if output_mma_state:
+        return h, ht, h_mma
     return h, ht
 
 
@@ -378,7 +465,9 @@ def chunk_bwd_dh(
     chunk_size: int = 64,
     split_size: int | None = None,
     states_in_fp32: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    output_mma_state: bool = False,
+    h_for_hdh: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     HQ = q.shape[2]
     BT = chunk_size
@@ -396,6 +485,8 @@ def chunk_bwd_dh(
     # `state_v_first` stores the states in V-first `[V, K]` layout instead of `[K, V]`
     state_shape = (V, K) if state_v_first else (K, V)
     dh = k.new_empty(B, NS, HQ, *state_shape, dtype=k.dtype if not states_in_fp32 else torch.float)
+    dh_mma = k.new_empty(B, NS, HQ, *state_shape, dtype=q.dtype) if output_mma_state else None
+    hdh_last = q.new_zeros(B, NS, H, dtype=torch.float32) if h_for_hdh is not None else None
     dh0 = torch.empty_like(h0, dtype=torch.float) if h0 is not None else None
 
     def grid(meta): return (triton.cdiv(K, meta['BK']), triton.cdiv(V, meta['BV']), N * H)
@@ -407,6 +498,9 @@ def chunk_bwd_dh(
         gv=gv,
         do=do,
         dh=dh,
+        dh_mma=dh_mma,
+        h_for_hdh=h_for_hdh,
+        hdh_last=hdh_last,
         dht=dht,
         dh0=dh0,
         cu_seqlens=cu_seqlens,
@@ -426,4 +520,8 @@ def chunk_bwd_dh(
         USE_GV=gv is not None,
         STATE_V_FIRST=state_v_first,
     )
+    if output_mma_state:
+        if hdh_last is not None:
+            return dh, dh0, dh_mma, hdh_last
+        return dh, dh0, dh_mma
     return dh, dh0
