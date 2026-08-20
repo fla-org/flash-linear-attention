@@ -281,6 +281,8 @@ def benchmark_op(
 
     config = get_op(op_name)
     op_fn = _import_op(config)
+    if config.skip_backward:
+        op_fn = torch.inference_mode()(op_fn)
 
     # `--backend` selects an op backend by toggling its dispatch env var (see OpConfig.backend_env),
     # matching how FLA backends are enabled at runtime. 'triton' (or unset) leaves the default path.
@@ -338,12 +340,13 @@ def benchmark_op(
             inputs = generate_inputs(config, B, T, H, D, dtype=dtype, device=device_name, **extra_shape_kw)
             out = op_fn(**inputs, **call_kwargs)
             out_tensor = out[0] if config.output_is_tuple else out
-            do = torch.randn_like(out_tensor)
+            do = None if config.skip_backward else torch.randn_like(out_tensor)
 
             def _fwdbwd_fn(inputs=inputs, do=do):
                 result = op_fn(**inputs, **call_kwargs)
-                t = result[0] if config.output_is_tuple else result
-                t.backward(do)
+                if do is not None:
+                    t = result[0] if config.output_is_tuple else result
+                    t.backward(do)
 
             _warmup_autotune(_fwdbwd_fn, device=device_name)
         except Exception as e:

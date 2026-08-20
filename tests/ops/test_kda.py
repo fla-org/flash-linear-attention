@@ -13,6 +13,7 @@ import torch.nn.functional as F
 import triton
 
 from fla.ops.kda import chunk_kda, fused_recurrent_kda
+from fla.ops.kda.backends.tle import KDATLEBackend
 from fla.ops.kda.fused_recurrent import fused_recurrent_kda_fwd
 from fla.ops.kda.gate import fused_kda_gate, naive_kda_gate, naive_kda_lowerbound_gate
 from fla.ops.kda.naive import naive_chunk_kda, naive_recurrent_kda
@@ -1220,6 +1221,7 @@ def _flash_kda_make_gate_params(H, D):
 
 
 def _flash_kda_run(monkeypatch, **kwargs):
+    monkeypatch.setenv("FLA_TLE_KDA", "0")
     monkeypatch.setenv("FLA_FLASH_KDA", "1")
     with torch.inference_mode():
         return chunk_kda(**kwargs, **_FLASH_KDA_REQUIRED_KWARGS)
@@ -1485,3 +1487,223 @@ def test_triton_ascend_backend_routing():
     finally:
         for name in _TRITON_ASCEND_KDA_OPS:
             delattr(backend, name)
+
+
+# TLE backend (inference-only)
+
+_SKIP_TLE_KDA = pytest.mark.skipif(
+    not KDATLEBackend.is_available(),
+    reason="TLE KDA backend requires an NVIDIA Hopper GPU and Triton TLE",
+)
+
+
+def _tle_kda_make_gate_params(H, D):
+    A_log = torch.log(torch.empty(H, dtype=torch.float32, device=device).uniform_(1, 16))
+    dt_bias = torch.randn(H, D, dtype=torch.float32, device=device)
+    return A_log, dt_bias
+
+
+def _tle_kda_run(monkeypatch, **kwargs):
+    monkeypatch.setenv("FLA_TLE_KDA", "1")
+    monkeypatch.setenv("FLA_FLASH_KDA", "0")
+    monkeypatch.setenv("FLA_TILELANG", "0")
+    dispatched = []
+    impl = KDATLEBackend.chunk_kda
+
+    def spy(self, *args, **kw):
+        dispatched.append(True)
+        return impl(self, *args, **kw)
+
+    monkeypatch.setattr(KDATLEBackend, "chunk_kda", spy)
+    required_kwargs = dict(_FLASH_KDA_REQUIRED_KWARGS)
+    if "transpose_state_layout" in kwargs:
+        required_kwargs.pop("state_v_first")
+    with torch.inference_mode():
+        out = chunk_kda(**kwargs, **required_kwargs)
+    assert dispatched, "TLE KDA backend was not dispatched; the test would only compare the Triton fallback"
+    return out
+
+
+@_SKIP_TLE_KDA
+@pytest.mark.parametrize(
+    ("B", "T", "H", "D"),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-D{}".format(*test))
+        for test in [
+            (1, 257, 4, 128),
+            (2, 1024, 8, 128),
+        ]
+    ],
+)
+def test_tle_kda_chunk(B, T, H, D, monkeypatch):
+    torch.manual_seed(42)
+    dtype = torch.bfloat16
+    q = torch.rand(B, T, H, D, dtype=dtype, device=device)
+    k = torch.rand(B, T, H, D, dtype=dtype, device=device)
+    v = torch.rand(B, T, H, D, dtype=dtype, device=device)
+    g = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    beta = torch.randn(B, T, H, dtype=dtype, device=device)
+    A_log, dt_bias = _tle_kda_make_gate_params(H, D)
+    h0 = torch.randn(B, H, D, D, dtype=torch.float32, device=device)
+    scale = D ** -0.5
+
+    ref_o, ref_ht = _flash_kda_gold(
+        q, k, v, g, beta, A_log, dt_bias, scale, h0.clone())
+    tri_o, tri_ht = _tle_kda_run(
+        monkeypatch,
+        q=q, k=k, v=v, g=g, beta=beta,
+        A_log=A_log, dt_bias=dt_bias,
+        scale=scale,
+        initial_state=h0.clone(),
+        output_final_state=True,
+    )
+    assert_close("o", ref_o, tri_o, _FLASH_KDA_RTOL)
+    assert_close("ht", ref_ht, tri_ht.to(ref_ht.dtype), _FLASH_KDA_RTOL)
+
+
+@_SKIP_TLE_KDA
+@pytest.mark.parametrize("bias_kind", ["none", "flat"])
+def test_tle_kda_input_contract(bias_kind, monkeypatch):
+    torch.manual_seed(42)
+    B, T, H, D = 1, 65, 2, 128
+
+    def make_noncontiguous(*shape, dtype):
+        return torch.randn(*shape, 2, dtype=dtype, device=device)[..., 0]
+
+    q = make_noncontiguous(B, T, H, D, dtype=torch.bfloat16)
+    k = make_noncontiguous(B, T, H, D, dtype=torch.bfloat16)
+    v = make_noncontiguous(B, T, H, D, dtype=torch.bfloat16)
+    g = make_noncontiguous(B, T, H, D, dtype=torch.bfloat16)
+    beta = make_noncontiguous(B, T, H, dtype=torch.bfloat16)
+    A_log = torch.log(make_noncontiguous(H, dtype=torch.float32).abs() + 1)
+    dt_bias = None if bias_kind == "none" else make_noncontiguous(H * D, dtype=torch.float32)
+    h0 = make_noncontiguous(B, H, D, D, dtype=torch.float32)
+    ref_bias = torch.zeros(H * D, dtype=torch.float32, device=device) if dt_bias is None else dt_bias
+
+    ref_o, ref_ht = _flash_kda_gold(
+        q, k, v, g, beta, A_log, ref_bias, D ** -0.5, h0.clone())
+    tri_o, tri_ht = _tle_kda_run(
+        monkeypatch,
+        q=q, k=k, v=v, g=g, beta=beta,
+        A_log=A_log, dt_bias=dt_bias,
+        scale=D ** -0.5,
+        initial_state=h0.clone(),
+        output_final_state=True,
+    )
+    assert_close("o", ref_o, tri_o, _FLASH_KDA_RTOL)
+    assert_close("ht", ref_ht, tri_ht.to(ref_ht.dtype), _FLASH_KDA_RTOL)
+
+
+@_SKIP_TLE_KDA
+def test_tle_kda_transpose_state_layout(monkeypatch):
+    torch.manual_seed(42)
+    B, T, H, D = 1, 65, 2, 128
+    q = torch.randn(B, T, H, D, dtype=torch.bfloat16, device=device)
+    k = torch.randn_like(q)
+    v = torch.randn_like(q)
+    g = torch.randn_like(q)
+    beta = torch.randn(B, T, H, dtype=torch.bfloat16, device=device)
+    A_log, dt_bias = _tle_kda_make_gate_params(H, D)
+    h0 = torch.randn(B, H, D, D, dtype=torch.float32, device=device)
+
+    with pytest.warns(DeprecationWarning, match="transpose_state_layout"):
+        out, ht = _tle_kda_run(
+            monkeypatch,
+            q=q, k=k, v=v, g=g, beta=beta,
+            A_log=A_log, dt_bias=dt_bias,
+            initial_state=h0,
+            output_final_state=True,
+            transpose_state_layout=True,
+        )
+    assert out.shape == v.shape
+    assert ht.shape == h0.shape
+
+
+@_SKIP_TLE_KDA
+@pytest.mark.parametrize(
+    ("H", "D", "cu_seqlens"),
+    [
+        pytest.param(H, D, cu, id=f"H{H}-D{D}-cu{cu}")
+        for (H, D, cu) in [
+            (4, 128, [0, 17, 129, 257]),
+            (8, 128, [0, 101, 303, 1205]),
+        ]
+    ],
+)
+def test_tle_kda_chunk_varlen(H, D, cu_seqlens, monkeypatch):
+    torch.manual_seed(42)
+    dtype = torch.bfloat16
+    cu_seqlens_t = torch.LongTensor(cu_seqlens).to(device)
+    T = cu_seqlens[-1]
+    N = len(cu_seqlens) - 1
+
+    q = torch.randn(1, T, H, D, dtype=dtype, device=device)
+    k = torch.randn(1, T, H, D, dtype=dtype, device=device)
+    v = torch.randn(1, T, H, D, dtype=dtype, device=device)
+    g = torch.randn(1, T, H, D, dtype=dtype, device=device)
+    beta = torch.randn(1, T, H, dtype=dtype, device=device)
+    A_log, dt_bias = _tle_kda_make_gate_params(H, D)
+    h0 = torch.randn(N, H, D, D, dtype=torch.float32, device=device)
+    scale = D ** -0.5
+
+    ref_o, ref_ht = _flash_kda_gold(
+        q, k, v, g, beta, A_log, dt_bias, scale, h0.clone(),
+        cu_seqlens=cu_seqlens_t,
+    )
+    tri_o, tri_ht = _tle_kda_run(
+        monkeypatch,
+        q=q, k=k, v=v, g=g, beta=beta,
+        A_log=A_log, dt_bias=dt_bias,
+        scale=scale,
+        initial_state=h0.clone(),
+        output_final_state=True,
+        cu_seqlens=cu_seqlens_t,
+    )
+    assert_close("o", ref_o, tri_o, _FLASH_KDA_RTOL)
+    assert_close("ht", ref_ht, tri_ht.to(ref_ht.dtype), _FLASH_KDA_RTOL)
+
+
+@_SKIP_TLE_KDA
+def test_tle_kda_fallback(monkeypatch):
+    torch.manual_seed(42)
+    B, T, H, D = 1, 65, 2, 64
+    dtype = torch.bfloat16
+    q = torch.rand(B, T, H, D, dtype=dtype, device=device)
+    k = torch.rand(B, T, H, D, dtype=dtype, device=device)
+    v = torch.rand(B, T, H, D, dtype=dtype, device=device)
+    g = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    beta = torch.randn(B, T, H, dtype=dtype, device=device)
+    A_log, dt_bias = _tle_kda_make_gate_params(H, D)
+    h0 = torch.randn(B, H, D, D, dtype=torch.float32, device=device)
+    kwargs = {
+        "q": q,
+        "k": k,
+        "v": v,
+        "g": g,
+        "beta": beta,
+        "A_log": A_log,
+        "dt_bias": dt_bias,
+        "initial_state": h0,
+        "output_final_state": True,
+        **_FLASH_KDA_REQUIRED_KWARGS,
+    }
+
+    monkeypatch.setenv("FLA_TLE_KDA", "1")
+    monkeypatch.setenv("FLA_FLASH_KDA", "0")
+    monkeypatch.setenv("FLA_TILELANG", "0")
+    dispatched = []
+    impl = KDATLEBackend.chunk_kda
+
+    def spy(self, *args, **kw):
+        dispatched.append(True)
+        return impl(self, *args, **kw)
+
+    monkeypatch.setattr(KDATLEBackend, "chunk_kda", spy)
+    with torch.inference_mode():
+        out, ht = chunk_kda(**kwargs)
+        monkeypatch.setenv("FLA_TLE_KDA", "0")
+        ref_out, ref_ht = chunk_kda(**kwargs)
+
+    assert not dispatched, "TLE KDA must reject unsupported head dimensions"
+    assert_close("o", ref_out, out, _FLASH_KDA_RTOL)
+    assert_close("ht", ref_ht, ht, _FLASH_KDA_RTOL)
