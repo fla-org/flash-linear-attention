@@ -355,7 +355,7 @@ class LogLinearMamba2(nn.Module):
             projection_size,
             bias=use_bias,
         )
-        # selective projection used to make dt, B and C input dependant
+        # selective projection used to make dt, B and C input-dependent
 
         # time step projection (discretization)
         # instantiate once and copy inv_dt in init_weights of PretrainedModel

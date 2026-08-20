@@ -271,15 +271,15 @@ def reconstruct(
 
     assert (indices >= 0).all(), "Indices should be non-negative"
 
-    resortd_x = torch.zeros((b * s * k, d), device=gathered_x.device, dtype=gathered_x.dtype).scatter_add_(
+    resorted_x = torch.zeros((b * s * k, d), device=gathered_x.device, dtype=gathered_x.dtype).scatter_add_(
         0,
         indices.reshape(-1).unsqueeze(-1).expand(-1, d),
         gathered_x,
     )
-    assert (indices < resortd_x.size(0)).all(), "Indices should be less than resortd_x size"
+    assert (indices < resorted_x.size(0)).all(), "Indices should be less than resorted_x size"
 
     inverse_indices = sorted_indices.argsort()
-    rearranged_x_flat = resortd_x[inverse_indices]
+    rearranged_x_flat = resorted_x[inverse_indices]
     restored_x = rearranged_x_flat.reshape((b, s * k, d))
     restored_x = restored_x.reshape(b, s, k, d) * routing_weights.reshape(b, s, k).unsqueeze(-1)
     restored_x = restored_x.sum(dim=2)
@@ -288,7 +288,7 @@ def reconstruct(
 
 class MomAttention(nn.Module):
     """
-    The layer implementaion for [MoM: Linear Sequence Modeling with Mixture-of-Memories](https://arxiv.org/abs/2502.13685).
+    The layer implementation for [MoM: Linear Sequence Modeling with Mixture-of-Memories](https://arxiv.org/abs/2502.13685).
     """
 
     def __init__(
@@ -338,7 +338,7 @@ class MomAttention(nn.Module):
         self.layer_idx = layer_idx
         self.silu = nn.SiLU()
 
-        assert mode in ['chunk', 'fused_recurrent'], f"Not suppoerted mode `{mode}`."
+        assert mode in ['chunk', 'fused_recurrent'], f"Not supported mode `{mode}`."
 
         self.q_proj = nn.Linear(hidden_size, self.key_dim, bias=False)
         self.gate = nn.Linear(self.hidden_size, self.num_memories, bias=False)

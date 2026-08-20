@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 
 class MultiScaleRetention(nn.Module):
     r"""
-    The layer implementaion for [Retentive Network: A Successor to Transformer for Large Language Models](https://arxiv.org/pdf/2307.08621.pdf).  # noqa
+    The layer implementation for [Retentive Network: A Successor to Transformer for Large Language Models](https://arxiv.org/pdf/2307.08621.pdf).  # noqa
 
     Args:
         mode (str, Optional):
@@ -230,7 +230,7 @@ class MultiScaleRetention(nn.Module):
             max_seqlen = q.shape[1] + seqlen_offset
 
             if attention_mask is not None and seqlen_offset > 0:
-                # to deliminate the offsets of padding tokens
+                # to eliminate the offsets of padding tokens
                 seqlen_offset = prepare_lens_from_mask(attention_mask) - q_len
                 max_seqlen = q.shape[1] + seqlen_offset.max().item()
 
