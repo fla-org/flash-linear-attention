@@ -131,6 +131,7 @@ IS_NVIDIA_HOPPER = (
     )
 )
 IS_NVIDIA_SM100 = (IS_NVIDIA and torch.cuda.get_device_capability()[0] == 10)
+IS_NVIDIA_SM103 = (IS_NVIDIA and torch.cuda.get_device_capability() == (10, 3))
 # NOTE: exactly 12.0 — 12.1 (GB10) is a different target that FlashQLA rejects at import time.
 IS_NVIDIA_SM120 = (IS_NVIDIA and torch.cuda.get_device_capability() == (12, 0))
 IS_NVIDIA_BLACKWELL = (IS_NVIDIA and torch.cuda.get_device_capability()[0] in (10, 12))
