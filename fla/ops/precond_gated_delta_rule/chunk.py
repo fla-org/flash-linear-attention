@@ -5,8 +5,6 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-import warnings
-
 import torch
 
 from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
@@ -529,9 +527,8 @@ def chunk_precond_gated_delta_rule(
         )
 
     if 'head_first' in kwargs:
-        warnings.warn(
-            "head_first is deprecated and will be removed in a future version. "
-            "Please use head_first=False for now instead.",
+        raise DeprecationWarning(
+            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
         )
 
     if cp_context is not None:
