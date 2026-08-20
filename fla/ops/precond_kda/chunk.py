@@ -372,9 +372,8 @@ class ChunkPrecondKDAFunction(torch.autograd.Function):
             k, k_rstd = l2norm_fwd(k)
 
         # Compute gate + cumsum
-        g_org = None
+        g_org = g
         if use_gate_in_kernel:
-            g_org = g
             g = kda_gate_chunk_cumsum(
                 g=g_org,
                 A_log=A_log,
@@ -525,9 +524,6 @@ class ChunkPrecondKDAFunction(torch.autograd.Function):
             if dt_bias is not None:
                 ddt_bias = ddt_bias.to(dt_bias)
 
-        # For return, use g_org if use_gate_in_kernel, else g
-        g_for_dtype = g_org if ctx.use_gate_in_kernel else g
-
         # Format d_log_atk_scale for return
         if log_atk_scale is not None and d_log_atk_scale is not None:
             d_log_atk_scale = d_log_atk_scale.to(log_atk_scale)
@@ -538,7 +534,7 @@ class ChunkPrecondKDAFunction(torch.autograd.Function):
             dq.to(q),
             dk.to(k),
             dv.to(v),
-            dg.to(g_for_dtype),
+            dg.to(g_org),
             dg_atk.to(g_atk),
             dbeta_atk.to(beta_atk),
             dbeta.to(beta),
