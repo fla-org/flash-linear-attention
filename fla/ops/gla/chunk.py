@@ -9,6 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.backends import dispatch
 from fla.ops.common.chunk_h import chunk_bwd_dh, chunk_fwd_h
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.cache import fla_cache_autotune
@@ -863,6 +864,7 @@ def chunk_gla_bwd_kernel_inter(
     tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), mask=m_tk)
 
 
+@dispatch('gla')
 def chunk_gla_fwd_intra_gk(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -959,6 +961,7 @@ def chunk_gla_fwd_intra_gk(
     return A
 
 
+@dispatch('gla')
 def chunk_gla_fwd_o_gk(
     q: torch.Tensor,
     v: torch.Tensor,
@@ -1002,6 +1005,7 @@ def chunk_gla_fwd_o_gk(
     return o
 
 
+@dispatch('gla')
 def chunk_gla_bwd_dA(
     v: torch.Tensor,
     do: torch.Tensor,
@@ -1036,6 +1040,7 @@ def chunk_gla_bwd_dA(
     return dA
 
 
+@dispatch('gla')
 def chunk_gla_bwd_dv(
     k: torch.Tensor,
     g: torch.Tensor,
@@ -1075,6 +1080,7 @@ def chunk_gla_bwd_dv(
     return dv
 
 
+@dispatch('gla')
 def chunk_gla_bwd_dqk_intra(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -1118,6 +1124,7 @@ def chunk_gla_bwd_dqk_intra(
     return dq, dk
 
 
+@dispatch('gla')
 def chunk_gla_bwd_dqkg(
     q: torch.Tensor,
     k: torch.Tensor,

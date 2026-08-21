@@ -252,6 +252,9 @@ def test_fused_recurrent_varlen(
             (2, 1024, 8, 128, 1, torch.float16),
             (2, 1024, 8, 128, 10, torch.float16),
             (4, 2048, 8, 64, 1, torch.float16),
+            (1, 128, 4, 256, 1, torch.float16),
+            (1, 64, 2, 320, 1, torch.float16),
+            (1, 128, 4, 512, 1, torch.bfloat16),
         ]
     ],
 )
@@ -382,6 +385,7 @@ def test_chunk_state_v_first(
         pytest.param(*test, id="H{}-D{}-cu_seqlens{}-{}".format(*test))
         for test in [
             (4, 64, [0, 15], torch.float16),
+            (4, 64, [0, 0, 16], torch.float16),
             (4, 64, [0, 256, 500, 1000], torch.float16),
             (4, 100, [0, 15, 100, 300, 1200, 2000], torch.float16),
         ]
