@@ -10,6 +10,7 @@ from __future__ import annotations
 import torch
 import triton
 import triton.language as tl
+
 from fla.ops.utils.index import prepare_chunk_indices
 from fla.utils import get_multiprocessor_count, input_guard
 from fla.utils.ascend_ub_manager import (
