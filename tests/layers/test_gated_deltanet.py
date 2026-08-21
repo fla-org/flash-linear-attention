@@ -60,7 +60,7 @@ def test_gated_deltanet_fused_qkv_conv_matches_fallback(B: int, T: int, D: int, 
         # input, so the three q/k/v convs run as separate calls.
         x_sep = x.detach().clone().requires_grad_(True)
         conv_calls['n'] = 0
-        with mock.patch.object(GatedDeltaNet, '_use_fused_qkv_conv', return_value=False):
+        with mock.patch('fla.layers.gated_deltanet.can_fuse_qkv_short_conv', return_value=False):
             y_sep = layer(x_sep)[0]
         sep_calls = conv_calls['n']
         (y_sep * do).sum().backward()
