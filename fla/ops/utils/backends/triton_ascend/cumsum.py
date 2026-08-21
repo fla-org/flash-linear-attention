@@ -10,10 +10,8 @@ from __future__ import annotations
 import torch
 import triton
 import triton.language as tl
-import triton.runtime.driver as driver
-
 from fla.ops.utils.index import prepare_chunk_indices
-from fla.utils import input_guard
+from fla.utils import get_multiprocessor_count, input_guard
 from fla.utils.ascend_ub_manager import (
     ASCEND_MAX_GRID_DIM,
     compute_grid_limited_tile_size,
@@ -33,11 +31,6 @@ _FALLBACK_BT_GLOBAL = 32
 _FALLBACK_BS_LOCAL = 32
 _FALLBACK_BS_GLOBAL = 16
 _MAX_BT_GLOBAL = 256
-
-
-def get_npu_properties():
-    device = torch.npu.current_device()
-    return driver.active.utils.get_device_properties(device)
 
 
 def _get_global_scalar_bt(T: int) -> int:
@@ -156,56 +149,41 @@ def chunk_local_cumsum_scalar_kernel_npu(
     task_num,
     num_core,
     H: tl.constexpr,
-    BLOCK_T: tl.constexpr,
+    BT: tl.constexpr,
     REVERSE: tl.constexpr,
     HAS_SCALE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    HEAD_FIRST: tl.constexpr,
-    CHUNK_SIZE: tl.constexpr = 64,
 ):
     core_id = tl.program_id(0)
-    for task_id in tl.range(core_id, task_num, num_core):
-        i_block = task_id // B
-        i_b = task_id % B
-        N_CHUNKS: tl.constexpr = BLOCK_T // CHUNK_SIZE
+    for tid in tl.range(core_id, task_num, num_core):
+        task_id = tid.to(tl.int64)
+        i_t = task_id // (B * H)
+        i_bh = task_id % (B * H)
+        i_b, i_h = i_bh // H, i_bh % H
 
         if IS_VARLEN:
-            i_s, i_block = (
-                tl.load(chunk_indices + i_block * 2).to(tl.int32),
-                tl.load(chunk_indices + i_block * 2 + 1).to(tl.int32),
+            i_n, i_t = (
+                tl.load(chunk_indices + i_t * 2).to(tl.int64),
+                tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64),
             )
             bos, eos = (
-                tl.load(cu_seqlens + i_s).to(tl.int32),
-                tl.load(cu_seqlens + i_s + 1).to(tl.int32),
+                tl.load(cu_seqlens + i_n).to(tl.int64),
+                tl.load(cu_seqlens + i_n + 1).to(tl.int64),
             )
             T = eos - bos
         else:
             bos, eos = i_b * T, i_b * T + T
 
-        if HEAD_FIRST:
-            ptr_s = tl.make_block_ptr(s + bos * H, (H, T), (T, 1), (0, i_block * BLOCK_T), (H, BLOCK_T), (1, 0))
-            ptr_o = tl.make_block_ptr(o + bos * H, (H, T), (T, 1), (0, i_block * BLOCK_T), (H, BLOCK_T), (1, 0))
-            b_s = tl.load(ptr_s, boundary_check=(1,)).to(tl.float32)
-            b_s = tl.reshape(b_s, (H, N_CHUNKS, CHUNK_SIZE))
-            b_s = tl.trans(b_s, (2, 0, 1))
-            b_o = tl.cumsum(b_s, axis=0, reverse=REVERSE)
-            if HAS_SCALE:
-                b_o *= scale
-            b_o = tl.trans(b_o, (1, 2, 0))
-            b_o = tl.reshape(b_o, (H, BLOCK_T))
-        else:
-            ptr_s = tl.make_block_ptr(s + bos * H, (T, H), (H, 1), (i_block * BLOCK_T, 0), (BLOCK_T, H), (1, 0))
-            ptr_o = tl.make_block_ptr(o + bos * H, (T, H), (H, 1), (i_block * BLOCK_T, 0), (BLOCK_T, H), (1, 0))
-            b_s = tl.load(ptr_s, boundary_check=(0,)).to(tl.float32)
-            b_s = tl.reshape(b_s, (N_CHUNKS, CHUNK_SIZE, H))
-            b_s = tl.trans(b_s, (1, 0, 2))
-            b_o = tl.cumsum(b_s, axis=0, reverse=REVERSE)
-            if HAS_SCALE:
-                b_o *= scale
-            b_o = tl.trans(b_o, (1, 0, 2))
-            b_o = tl.reshape(b_o, (BLOCK_T, H))
-
-        tl.store(ptr_o, b_o.to(ptr_o.dtype.element_ty), boundary_check=(1,) if HEAD_FIRST else (0,))
+        o_t = i_t * BT + tl.arange(0, BT)
+        m_t = o_t < T
+        p_s = s + bos * H + i_h + o_t * H
+        p_o = o + bos * H + i_h + o_t * H
+        # [BT]
+        b_s = tl.load(p_s, mask=m_t, other=0.0).to(tl.float32)
+        b_o = tl.cumsum(b_s, axis=0, reverse=REVERSE)
+        if HAS_SCALE:
+            b_o *= scale
+        tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=m_t)
     return
 
 
@@ -356,9 +334,12 @@ def chunk_local_cumsum_scalar_npu(
     cu_seqlens: torch.Tensor | None = None,
     output_dtype: torch.dtype | None = torch.float,
     chunk_indices: torch.LongTensor | None = None,
-    head_first: bool = False,
     **kwargs,
 ) -> torch.Tensor:
+    if 'head_first' in kwargs:
+        raise DeprecationWarning(
+            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
+        )
     B, T, H = g.shape
     assert chunk_size == 2**(chunk_size.bit_length()-1), "chunk_size must be a power of 2"
     if chunk_indices is None and cu_seqlens is not None:
@@ -366,8 +347,8 @@ def chunk_local_cumsum_scalar_npu(
     num_blocks = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, chunk_size)
     g_org, g = g, torch.empty_like(g, dtype=output_dtype or g.dtype)
 
-    num_core = get_npu_properties()['num_vectorcore']
-    task_num = num_blocks * B
+    num_core = get_multiprocessor_count()
+    task_num = num_blocks * B * H
     grid = (num_core,)
     chunk_local_cumsum_scalar_kernel_npu[grid](
         s=g_org,
@@ -380,9 +361,7 @@ def chunk_local_cumsum_scalar_npu(
         task_num=task_num,
         num_core=num_core,
         H=H,
-        BLOCK_T=chunk_size,
-        CHUNK_SIZE=chunk_size,
-        HEAD_FIRST=head_first,
+        BT=chunk_size,
         REVERSE=reverse,
     )
     return g
