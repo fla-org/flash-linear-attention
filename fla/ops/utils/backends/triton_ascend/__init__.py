@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+import torch
+
 from fla.ops.backends import BaseBackend
 
 
@@ -23,7 +25,16 @@ class TritonAscendUtilsBackend(BaseBackend):
         from fla.utils import IS_NPU
         return IS_NPU
 
-    def solve_tril_verifier(self, *args, **kwargs):
+    def solve_tril_verifier(self, A: torch.Tensor, *args, **kwargs) -> tuple[bool, str | None]:
+        from fla.utils import IS_NPU
+        if not IS_NPU:
+            return False, "not running on NPU"
+        if A.device.type != 'npu':
+            return False, f"input device is not NPU, got {A.device.type}"
+        if A.dtype not in (torch.float16, torch.bfloat16, torch.float32):
+            return False, f"unsupported dtype for NPU solve_tril: {A.dtype}"
+        if A.shape[-1] not in (16, 32, 64):
+            return False, f"solve_tril requires BT in (16, 32, 64), got {A.shape[-1]}"
         return True, None
 
     def solve_tril(self, *args, **kwargs):
