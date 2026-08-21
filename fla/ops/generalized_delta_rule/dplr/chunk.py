@@ -9,6 +9,7 @@ import warnings
 
 import torch
 
+from fla.ops.backends import dispatch
 from fla.ops.cp import FLACPContext
 from fla.ops.cp.chunk_delta_h import (
     chunk_gated_delta_rule_bwd_dhu_pre_process,
@@ -28,6 +29,20 @@ from fla.ops.rwkv6.chunk import chunk_rwkv6_fwd_cumsum
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.constant import RCP_LN2
 from fla.utils import TRITON_ABOVE_3_4_0, autocast_custom_bwd, autocast_custom_fwd, input_guard
+
+
+def gate_bound_is_safe(lower_bound: float, chunk_size: int) -> bool:
+    """Whether `gk >= lower_bound` keeps the centered tensor-core A-stage in fp32 range.
+
+    The A-stages factorize exp2(gi[i] - gi[j]) around the mid-chunk row. The
+    largest positive exponent is on the a-side: the exclusive cumsum ge is
+    centered against the inclusive gi[mid], so it spans chunk_size/2 + 1 rows
+    and per-row exponents reach (chunk_size/2 + 1) * |lower_bound| * log2(e).
+    124 is the fp32 exponent limit (~128 log2) minus 4 log2 of headroom for
+    the activation multiply. A non-negative bound is invalid (gk is a
+    log-decay < 0) and never licenses the scheme.
+    """
+    return lower_bound < 0 and abs(lower_bound) * (chunk_size // 2 + 1) * RCP_LN2 <= 124
 
 
 def chunk_dplr_fwd(
@@ -149,6 +164,7 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
         cu_seqlens: torch.LongTensor | None = None,
         cu_seqlens_cpu: torch.LongTensor | None = None,
         safe_gate: bool = False,
+        lower_bound: float | None = None,
         chunk_size: int | None = None,
         disable_recompute: bool = False,
         cp_context: FLACPContext | None = None,
@@ -169,6 +185,10 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
                 stacklevel=2,
             )
             chunk_size = 16
+        if not safe_gate and lower_bound is not None and gate_bound_is_safe(lower_bound, chunk_size):
+            # the caller-asserted gate bound licenses the same centered
+            # tensor-core scheme as safe_gate=True
+            safe_gate = True
         chunk_indices = None
         if cu_seqlens is not None:
             chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size, cu_seqlens_cpu=cu_seqlens_cpu)
@@ -434,10 +454,11 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
 
         return (
             dq.to(q), dk.to(k), dv.to(v), da.to(a), db.to(b), dgk.to(gk),
-            None, dh0, None, None, None, None, None, None, None,
+            None, dh0, None, None, None, None, None, None, None, None,
         )
 
 
+@dispatch('generalized_delta_rule.dplr')
 @torch.compiler.disable
 def chunk_dplr_delta_rule(
     q: torch.Tensor,
@@ -455,6 +476,7 @@ def chunk_dplr_delta_rule(
     chunk_size: int | None = None,
     disable_recompute: bool = False,
     cp_context: FLACPContext | None = None,
+    lower_bound: float | None = None,
     **kwargs,
 ):
     r"""
@@ -497,6 +519,10 @@ def chunk_dplr_delta_rule(
             Context parallel context for distributed training across multiple devices.
             When provided, `initial_state` and `output_final_state` are not supported.
             Default: `None`.
+        lower_bound (Optional[float]):
+            When set, asserts `lower_bound <= gk < 0` (the caller is responsible for
+            the guarantee). Licenses the same tensor-core scheme as `safe_gate=True`
+            when the bound fits the chunk size. Default: `None`.
 
     Returns:
         o (torch.Tensor):
@@ -515,6 +541,8 @@ def chunk_dplr_delta_rule(
         raise DeprecationWarning(
             "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
         )
+    if lower_bound is not None and lower_bound >= 0:
+        raise ValueError(f"`lower_bound` must be negative (gk is a log-decay < 0), got {lower_bound}.")
     if cp_context is not None:
         assert initial_state is None, "Initial state is not supported for CP"
         assert output_final_state is False, "Output final state is not supported for CP"
@@ -547,6 +575,7 @@ def chunk_dplr_delta_rule(
         cu_seqlens,
         cu_seqlens_cpu,
         safe_gate,
+        lower_bound,
         chunk_size,
         disable_recompute,
         cp_context,

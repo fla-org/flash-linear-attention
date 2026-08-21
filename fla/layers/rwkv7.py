@@ -317,6 +317,7 @@ class RWKV7Attention(nn.Module):
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
                 safe_gate=True,
+                lower_bound=-0.6065306597126334,
                 chunk_size=64,
             )
         else:
