@@ -115,7 +115,7 @@ def chunk_mesa_net_fwd_kernel_h(
         b_g = tl.load(p_g, mask=(i_t * BT + tl.arange(0, BT) < T), other=0.)
         b_k_decay = ((b_k * exp2(b_g_last - b_g)[:, None]) * b_beta[:, None]).to(b_k2.dtype)
         b_h += safe_dot(tl.trans(b_k_decay), b_k2)
-        b_h_kv += safe_dot(tl.trans(b_k_decay), b_v.to(b_k2.dtype))
+        b_h_kv += safe_dot(tl.trans(b_k_decay).to(b_v.dtype), b_v)
 
     if STORE_FINAL_STATE:
         p_ht = h_final + i_nh * K*V + o_k[:, None] * V + o_v[None, :]
