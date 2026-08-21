@@ -1333,6 +1333,141 @@ def test_flash_kda_chunk_varlen(H, D, cu_seqlens, monkeypatch):
     assert_close("ht", ref_ht, tri_ht.to(ref_ht.dtype), _FLASH_KDA_RTOL)
 
 
+_FLASH_KDA_TRAIN_AVAILABLE = importlib.util.find_spec("flash_kda_train_C") is not None
+_SKIP_FLASH_KDA_TRAIN = pytest.mark.skipif(
+    device == "cpu" or not _FLASH_KDA_TRAIN_AVAILABLE,
+    reason="FlashKDA training backend requires GPU and the flash_kda package built with training support",
+)
+
+
+def _flash_kda_train_fwd_bwd(monkeypatch, use_cuda_backend, q, k, v, g, beta, A_log, dt_bias, h0,
+                             scale, use_gate_in_kernel, safe_gate, lower_bound, do, dht,
+                             cu_seqlens=None):
+    if use_cuda_backend:
+        monkeypatch.setenv("FLA_FLASH_KDA_TRAIN", "1")
+    else:
+        monkeypatch.delenv("FLA_FLASH_KDA_TRAIN", raising=False)
+    leaves = (q, k, v, g, beta, h0) + ((A_log, dt_bias) if use_gate_in_kernel else ())
+    for x in leaves:
+        x.grad = None
+    kwargs = {}
+    if cu_seqlens is not None:
+        kwargs["cu_seqlens"] = cu_seqlens
+    o, ht = chunk_kda(
+        q=q, k=k, v=v, g=g, beta=beta,
+        A_log=A_log, dt_bias=dt_bias,
+        scale=scale,
+        initial_state=h0,
+        output_final_state=True,
+        use_qk_l2norm_in_kernel=True,
+        use_gate_in_kernel=use_gate_in_kernel,
+        safe_gate=safe_gate,
+        lower_bound=lower_bound,
+        **kwargs,
+    )
+    ((o * do).sum() + (ht * dht).sum()).backward()
+    grads = [x.grad.clone() for x in leaves]
+    return o, ht, grads
+
+
+@pytest.mark.parametrize(
+    ("B", "T", "H", "D", "use_gate_in_kernel", "safe_gate"),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-gate{}-safe{}".format(*test))
+        for test in [
+            (2, 512, 4, 128, False, False),
+            (2, 1000, 4, 128, False, True),
+            (1, 1024, 4, 128, True, True),
+        ]
+    ],
+)
+@_SKIP_FLASH_KDA_TRAIN
+def test_flash_kda_train_chunk(B, T, H, D, use_gate_in_kernel, safe_gate, monkeypatch):
+    torch.manual_seed(42)
+    dtype = torch.bfloat16
+    lower_bound = -5.0 if safe_gate else None
+    q = torch.rand(B, T, H, D, dtype=dtype, device=device).requires_grad_(True)
+    k = torch.rand(B, T, H, D, dtype=dtype, device=device).requires_grad_(True)
+    v = torch.rand(B, T, H, D, dtype=dtype, device=device).requires_grad_(True)
+    g = torch.randn(B, T, H, D, dtype=torch.float32, device=device)
+    if not use_gate_in_kernel:
+        # non-positive log-decay, as in test_chunk; raw randn gates overflow exp2(cumsum)
+        g = F.logsigmoid(g)
+        if safe_gate:
+            g = g.clamp(-5, 0)
+    g = g.to(dtype).requires_grad_(True)
+    beta = torch.randn(B, T, H, dtype=dtype, device=device).sigmoid().requires_grad_(True)
+    h0 = torch.randn(B, H, D, D, dtype=torch.float32, device=device).requires_grad_(True)
+    if use_gate_in_kernel:
+        A_log, dt_bias = _flash_kda_make_gate_params(H, D)
+        A_log, dt_bias = A_log.requires_grad_(True), dt_bias.requires_grad_(True)
+    else:
+        A_log = dt_bias = None
+    scale = D ** -0.5
+
+    args = (q, k, v, g, beta, A_log, dt_bias, h0, scale, use_gate_in_kernel, safe_gate, lower_bound)
+    do = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    dht = torch.randn(B, H, D, D, dtype=torch.float32, device=device)
+    ref_o, ref_ht, ref_grads = _flash_kda_train_fwd_bwd(monkeypatch, False, *args, do, dht)
+    cuda_o, cuda_ht, cuda_grads = _flash_kda_train_fwd_bwd(monkeypatch, True, *args, do, dht)
+
+    # the CUDA kernels replicate the Triton math but differ in bf16 storage order
+    # of Aqk (~4e-3), which propagates into o/ht; dA/dbias are full-T reductions
+    # with cancellation so their relative error is amplified
+    assert_close("o", ref_o, cuda_o, 0.008)
+    assert_close("ht", ref_ht, cuda_ht, 0.008)
+    names = ["dq", "dk", "dv", "dg", "db", "dh0"] + (["dA", "dbias"] if use_gate_in_kernel else [])
+    ratios = [0.008, 0.008, 0.008, 0.02, 0.02, 0.008] + ([0.02, 0.02] if use_gate_in_kernel else [])
+    for name, ref_d, cuda_d, ratio in zip(names, ref_grads, cuda_grads, ratios):
+        assert_close(name, ref_d, cuda_d, ratio)
+
+
+@pytest.mark.parametrize(
+    ("H", "D", "cu_seqlens"),
+    [
+        pytest.param(H, D, cu, id=f"H{H}-D{D}-cu{cu}")
+        for (H, D, cu) in [
+            (4, 128, [0, 256, 500, 1000]),
+            (8, 128, [0, 100, 300, 1200, 2000]),
+        ]
+    ],
+)
+@_SKIP_FLASH_KDA_TRAIN
+def test_flash_kda_train_chunk_varlen(H, D, cu_seqlens, monkeypatch):
+    torch.manual_seed(42)
+    dtype = torch.bfloat16
+    cu_seqlens_t = torch.LongTensor(cu_seqlens).to(device)
+    T = cu_seqlens[-1]
+    N = len(cu_seqlens) - 1
+
+    q = torch.rand(1, T, H, D, dtype=dtype, device=device).requires_grad_(True)
+    k = torch.rand(1, T, H, D, dtype=dtype, device=device).requires_grad_(True)
+    v = torch.rand(1, T, H, D, dtype=dtype, device=device).requires_grad_(True)
+    g = torch.randn(1, T, H, D, dtype=dtype, device=device).clamp(-5, 0).requires_grad_(True)
+    beta = torch.randn(1, T, H, dtype=dtype, device=device).sigmoid().requires_grad_(True)
+    h0 = torch.randn(N, H, D, D, dtype=torch.float32, device=device).requires_grad_(True)
+    A_log, dt_bias = _flash_kda_make_gate_params(H, D)
+    A_log, dt_bias = A_log.requires_grad_(True), dt_bias.requires_grad_(True)
+    scale = D ** -0.5
+
+    args = (q, k, v, g, beta, A_log, dt_bias, h0, scale, True, True, -5.0)
+    do = torch.randn(1, T, H, D, dtype=dtype, device=device)
+    dht = torch.randn(N, H, D, D, dtype=torch.float32, device=device)
+    ref_o, ref_ht, ref_grads = _flash_kda_train_fwd_bwd(
+        monkeypatch, False, *args, do, dht, cu_seqlens=cu_seqlens_t)
+    cuda_o, cuda_ht, cuda_grads = _flash_kda_train_fwd_bwd(
+        monkeypatch, True, *args, do, dht, cu_seqlens=cu_seqlens_t)
+
+    assert_close("o", ref_o, cuda_o, 0.008)
+    assert_close("ht", ref_ht, cuda_ht, 0.008)
+    for name, ref_d, cuda_d, ratio in zip(
+        ["dq", "dk", "dv", "dg", "db", "dh0", "dA", "dbias"],
+        ref_grads, cuda_grads,
+        [0.008, 0.008, 0.008, 0.02, 0.02, 0.008, 0.02, 0.02],
+    ):
+        assert_close(name, ref_d, cuda_d, ratio)
+
+
 _TRITON_ASCEND_KDA_OPS = (
     'kda_gate_fwd',
     'kda_gate_bwd',

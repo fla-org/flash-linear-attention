@@ -343,6 +343,7 @@ register_op(OpConfig(
         'beta': TensorSpec(shape_BTH, transform=sigmoid_transform),
     },
     extra_kwargs={'use_qk_l2norm_in_kernel': True, 'safe_gate': True, 'lower_bound': -5},
+    backend_env={'flash_kda_train': 'FLA_FLASH_KDA_TRAIN'},
     category='gate_beta',
 ))
 
