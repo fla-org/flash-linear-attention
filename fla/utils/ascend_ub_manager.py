@@ -592,6 +592,7 @@ def launch_grid_chunked(
     kernel_kwargs: dict,
     quanta: tuple[int, ...] | None = None,
     budget: int = ASCEND_LAUNCH_BLOCK_BUDGET,
+    compile_kwargs: dict | None = None,
 ) -> None:
     """Launch a triton kernel over `grid` in host-side chunks.
 
@@ -603,9 +604,11 @@ def launch_grid_chunked(
     blocks, for grids packing several logical indices into one axis
     (e.g. ``nt * nc``). Keeping the product within `budget`
     (<= `ASCEND_MAX_GRID_DIM`) also keeps every axis within the per-axis limit.
+    `compile_kwargs` is forwarded unchanged to each ``kernel[grid](...)`` launch.
     """
     dims = len(grid)
     quanta = quanta or (1,) * dims
+    extra = compile_kwargs or {}
     lens = [0] * dims
 
     def _recurse(ax: int, prod_so_far: int) -> None:
@@ -620,7 +623,7 @@ def launch_grid_chunked(
             lens[ax] = min(len_q * quantum, grid[ax] - offset)
             kernel_kwargs[offset_keys[ax]] = offset
             if ax == dims - 1:
-                kernel[tuple(lens)](**kernel_kwargs)
+                kernel[tuple(lens)](**kernel_kwargs, **extra)
             else:
                 _recurse(ax + 1, prod_so_far * len_q * quantum)
 
