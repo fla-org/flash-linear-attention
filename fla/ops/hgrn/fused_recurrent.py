@@ -172,7 +172,7 @@ def fused_recurrent_hgrn_bwd_kernel(
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.jit(do_not_specialize=['T'])
-def fused_recurrent_hgrn_fwd_summary_kernel(
+def fused_recurrent_hgrn_fwd_kernel_summary(
     x,
     g,
     scale,
@@ -229,7 +229,7 @@ def fused_recurrent_hgrn_fwd_summary_kernel(
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.jit(do_not_specialize=['T'])
-def fused_recurrent_hgrn_fwd_scan_kernel(
+def fused_recurrent_hgrn_fwd_kernel_scan(
     scale,
     state,
     h0,
@@ -278,7 +278,7 @@ def fused_recurrent_hgrn_fwd_scan_kernel(
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.jit(do_not_specialize=['T'])
-def fused_recurrent_hgrn_fwd_replay_kernel(
+def fused_recurrent_hgrn_fwd_kernel_replay(
     x,
     g,
     state,
@@ -330,7 +330,7 @@ def fused_recurrent_hgrn_fwd_replay_kernel(
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.jit(do_not_specialize=['T'])
-def fused_recurrent_hgrn_bwd_summary_kernel(
+def fused_recurrent_hgrn_bwd_kernel_summary(
     g,
     do,
     scale,
@@ -387,7 +387,7 @@ def fused_recurrent_hgrn_bwd_summary_kernel(
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.jit(do_not_specialize=['T'])
-def fused_recurrent_hgrn_bwd_scan_kernel(
+def fused_recurrent_hgrn_bwd_kernel_scan(
     scale,
     state,
     h0,
@@ -439,7 +439,7 @@ def fused_recurrent_hgrn_bwd_scan_kernel(
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.jit(do_not_specialize=['T'])
-def fused_recurrent_hgrn_bwd_replay_kernel(
+def fused_recurrent_hgrn_bwd_kernel_replay(
     g,
     o,
     h0,
@@ -526,7 +526,7 @@ def _fused_recurrent_hgrn_fwd_hierarchical(
     grid_blocks = (triton.cdiv(D, BD) * NB * N,)
     grid_sequences = (triton.cdiv(D, BD) * N,)
 
-    fused_recurrent_hgrn_fwd_summary_kernel[grid_blocks](
+    fused_recurrent_hgrn_fwd_kernel_summary[grid_blocks](
         x=x,
         g=g,
         scale=scale,
@@ -539,7 +539,7 @@ def _fused_recurrent_hgrn_fwd_hierarchical(
         BD=BD,
         num_warps=4,
     )
-    fused_recurrent_hgrn_fwd_scan_kernel[grid_sequences](
+    fused_recurrent_hgrn_fwd_kernel_scan[grid_sequences](
         scale=scale,
         state=state,
         h0=initial_state,
@@ -552,7 +552,7 @@ def _fused_recurrent_hgrn_fwd_hierarchical(
         BD=BD,
         num_warps=4,
     )
-    fused_recurrent_hgrn_fwd_replay_kernel[grid_blocks](
+    fused_recurrent_hgrn_fwd_kernel_replay[grid_blocks](
         x=x,
         g=g,
         state=state,
@@ -589,7 +589,7 @@ def _fused_recurrent_hgrn_bwd_hierarchical(
     grid_blocks = (triton.cdiv(D, BD) * NB * N,)
     grid_sequences = (triton.cdiv(D, BD) * N,)
 
-    fused_recurrent_hgrn_bwd_summary_kernel[grid_blocks](
+    fused_recurrent_hgrn_bwd_kernel_summary[grid_blocks](
         g=g,
         do=do,
         scale=scale,
@@ -602,7 +602,7 @@ def _fused_recurrent_hgrn_bwd_hierarchical(
         BD=BD,
         num_warps=4,
     )
-    fused_recurrent_hgrn_bwd_scan_kernel[grid_sequences](
+    fused_recurrent_hgrn_bwd_kernel_scan[grid_sequences](
         scale=scale,
         state=state,
         h0=initial_state,
@@ -616,7 +616,7 @@ def _fused_recurrent_hgrn_bwd_hierarchical(
         BD=BD,
         num_warps=4,
     )
-    fused_recurrent_hgrn_bwd_replay_kernel[grid_blocks](
+    fused_recurrent_hgrn_bwd_kernel_replay[grid_blocks](
         g=g,
         o=o,
         h0=initial_state,
