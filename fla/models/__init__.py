@@ -7,6 +7,7 @@
 
 from fla.models.abc import ABCConfig, ABCForCausalLM, ABCModel
 from fla.models.bitnet import BitNetConfig, BitNetForCausalLM, BitNetModel
+from fla.models.cat import CATConfig, CATForCausalLM, CATModel
 from fla.models.comba import CombaConfig, CombaForCausalLM, CombaModel
 from fla.models.delta_net import DeltaNetConfig, DeltaNetForCausalLM, DeltaNetModel
 from fla.models.deltaformer import DeltaFormerConfig, DeltaFormerForCausalLM, DeltaFormerModel
@@ -62,6 +63,9 @@ __all__ = [
     'BitNetConfig',
     'BitNetForCausalLM',
     'BitNetModel',
+    'CATConfig',
+    'CATForCausalLM',
+    'CATModel',
     'CombaConfig',
     'CombaForCausalLM',
     'CombaModel',
