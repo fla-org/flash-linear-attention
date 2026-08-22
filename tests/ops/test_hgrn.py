@@ -12,8 +12,21 @@ import torch
 import torch.nn.functional as F
 
 from fla.ops.hgrn import chunk_hgrn, fused_recurrent_hgrn
+from fla.ops.hgrn.fused_recurrent import _use_hierarchical_hgrn
 from fla.ops.hgrn.naive import naive_recurrent_hgrn
-from fla.utils import assert_close, device
+from fla.utils import IS_NVIDIA_SM103, assert_close, device
+
+
+@pytest.mark.skipif(not IS_NVIDIA_SM103, reason='hierarchical HGRN is supported only on SM103')
+@pytest.mark.parametrize(
+    ('N', 'is_varlen', 'expected'),
+    [
+        pytest.param(1, False, True, id='dense-eligible'),
+        pytest.param(129, True, False, id='packed-over-scratch-budget'),
+    ],
+)
+def test_fused_recurrent_hierarchical_dispatch(N: int, is_varlen: bool, expected: bool):
+    assert _use_hierarchical_hgrn(T=1024, N=N, is_varlen=is_varlen) is expected
 
 
 @pytest.mark.parametrize(

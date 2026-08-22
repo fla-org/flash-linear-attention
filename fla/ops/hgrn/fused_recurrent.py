@@ -10,7 +10,15 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.op import exp
-from fla.utils import autotune_cache_kwargs, input_guard
+from fla.utils import IS_NVIDIA_SM103, autotune_cache_kwargs, input_guard
+
+_HGRN_HIERARCHICAL_BT = 128
+_HGRN_HIERARCHICAL_MIN_T = 1024
+
+
+def _use_hierarchical_hgrn(T: int, N: int, is_varlen: bool) -> bool:
+    packed_scratch_is_bounded = not is_varlen or N * triton.cdiv(T, _HGRN_HIERARCHICAL_BT) <= T
+    return IS_NVIDIA_SM103 and T >= _HGRN_HIERARCHICAL_MIN_T and packed_scratch_is_bounded
 
 
 @triton.heuristics({
@@ -160,6 +168,473 @@ def fused_recurrent_hgrn_bwd_kernel(
         tl.store(p_dh0, b_dh.to(p_dh0.dtype.element_ty), mask=mask)
 
 
+@triton.heuristics({
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
+})
+@triton.jit(do_not_specialize=['T'])
+def fused_recurrent_hgrn_fwd_kernel_summary(
+    x,
+    g,
+    scale,
+    state,
+    cu_seqlens,
+    T,
+    D: tl.constexpr,
+    NB: tl.constexpr,
+    BT: tl.constexpr,
+    BD: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    ND = tl.cdiv(D, BD)
+    i_d = (pid % ND).to(tl.int64)
+    i_b = ((pid // ND) % NB).to(tl.int64)
+    i_n = (pid // (ND * NB)).to(tl.int64)
+    if IS_VARLEN:
+        bos = tl.load(cu_seqlens + i_n).to(tl.int64)
+        eos = tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = eos - bos
+    else:
+        bos = i_n * T
+
+    block_start = i_b * BT
+    if block_start >= T:
+        return
+
+    o_d = i_d * BD + tl.arange(0, BD)
+    mask_d = o_d < D
+    p_x = x + (bos + block_start) * D + o_d
+    p_g = g + (bos + block_start) * D + o_d
+
+    b_scale = tl.full([BD], 1.0, dtype=tl.float32)
+    b_state = tl.zeros([BD], dtype=tl.float32)
+    for i in tl.range(0, BT, loop_unroll_factor=1):
+        mask_t = block_start + i < T
+        b_x = tl.load(p_x, mask=mask_d & mask_t, other=0).to(tl.float32)
+        b_g = tl.load(p_g, mask=mask_d & mask_t, other=0).to(tl.float32)
+        b_decay = exp(b_g)
+        b_scale *= b_decay
+        b_state = b_decay * b_state + b_x
+        p_x += D
+        p_g += D
+
+    o_block = (i_n * NB + i_b) * D + o_d
+    tl.store(scale + o_block, b_scale, mask=mask_d)
+    tl.store(state + o_block, b_state, mask=mask_d)
+
+
+@triton.heuristics({
+    'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
+    'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
+})
+@triton.jit(do_not_specialize=['T'])
+def fused_recurrent_hgrn_fwd_kernel_scan(
+    scale,
+    state,
+    h0,
+    ht,
+    cu_seqlens,
+    T,
+    D: tl.constexpr,
+    NB: tl.constexpr,
+    BT: tl.constexpr,
+    BD: tl.constexpr,
+    USE_INITIAL_STATE: tl.constexpr,
+    STORE_FINAL_STATE: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    ND = tl.cdiv(D, BD)
+    i_d = (pid % ND).to(tl.int64)
+    i_n = (pid // ND).to(tl.int64)
+    if IS_VARLEN:
+        bos = tl.load(cu_seqlens + i_n).to(tl.int64)
+        eos = tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = eos - bos
+
+    o_d = i_d * BD + tl.arange(0, BD)
+    mask_d = o_d < D
+    b_h = tl.zeros([BD], dtype=tl.float32)
+    if USE_INITIAL_STATE:
+        b_h += tl.load(h0 + i_n * D + o_d, mask=mask_d, other=0).to(tl.float32)
+
+    p_scale = scale + i_n * NB * D + o_d
+    p_state = state + i_n * NB * D + o_d
+    for _ in tl.range(0, tl.cdiv(T, BT), loop_unroll_factor=1):
+        b_scale = tl.load(p_scale, mask=mask_d, other=1).to(tl.float32)
+        b_state = tl.load(p_state, mask=mask_d, other=0).to(tl.float32)
+        tl.store(p_state, b_h, mask=mask_d)
+        b_h = b_scale * b_h + b_state
+        p_scale += D
+        p_state += D
+
+    if STORE_FINAL_STATE:
+        p_ht = ht + i_n * D + o_d
+        tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_d)
+
+
+@triton.heuristics({
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
+})
+@triton.jit(do_not_specialize=['T'])
+def fused_recurrent_hgrn_fwd_kernel_replay(
+    x,
+    g,
+    state,
+    o,
+    cu_seqlens,
+    T,
+    D: tl.constexpr,
+    NB: tl.constexpr,
+    BT: tl.constexpr,
+    BD: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    ND = tl.cdiv(D, BD)
+    i_d = (pid % ND).to(tl.int64)
+    i_b = ((pid // ND) % NB).to(tl.int64)
+    i_n = (pid // (ND * NB)).to(tl.int64)
+    if IS_VARLEN:
+        bos = tl.load(cu_seqlens + i_n).to(tl.int64)
+        eos = tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = eos - bos
+    else:
+        bos = i_n * T
+
+    block_start = i_b * BT
+    if block_start >= T:
+        return
+
+    o_d = i_d * BD + tl.arange(0, BD)
+    mask_d = o_d < D
+    o_block = (i_n * NB + i_b) * D + o_d
+    b_h = tl.load(state + o_block, mask=mask_d, other=0).to(tl.float32)
+    p_x = x + (bos + block_start) * D + o_d
+    p_g = g + (bos + block_start) * D + o_d
+    p_o = o + (bos + block_start) * D + o_d
+
+    for i in tl.range(0, BT, loop_unroll_factor=1):
+        mask_t = block_start + i < T
+        b_x = tl.load(p_x, mask=mask_d & mask_t, other=0).to(tl.float32)
+        b_g = tl.load(p_g, mask=mask_d & mask_t, other=0).to(tl.float32)
+        b_h = exp(b_g) * b_h + b_x
+        tl.store(p_o, b_h.to(p_o.dtype.element_ty), mask=mask_d & mask_t)
+        p_x += D
+        p_g += D
+        p_o += D
+
+
+@triton.heuristics({
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
+})
+@triton.jit(do_not_specialize=['T'])
+def fused_recurrent_hgrn_bwd_kernel_summary(
+    g,
+    do,
+    scale,
+    state,
+    cu_seqlens,
+    T,
+    D: tl.constexpr,
+    NB: tl.constexpr,
+    BT: tl.constexpr,
+    BD: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    ND = tl.cdiv(D, BD)
+    i_d = (pid % ND).to(tl.int64)
+    i_b = ((pid // ND) % NB).to(tl.int64)
+    i_n = (pid // (ND * NB)).to(tl.int64)
+    if IS_VARLEN:
+        bos = tl.load(cu_seqlens + i_n).to(tl.int64)
+        eos = tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = eos - bos
+    else:
+        bos = i_n * T
+
+    block_start = i_b * BT
+    if block_start >= T:
+        return
+
+    o_d = i_d * BD + tl.arange(0, BD)
+    mask_d = o_d < D
+    p_g = g + (bos + block_start + BT - 1) * D + o_d
+    p_do = do + (bos + block_start + BT - 1) * D + o_d
+
+    b_scale = tl.full([BD], 1.0, dtype=tl.float32)
+    b_state = tl.zeros([BD], dtype=tl.float32)
+    for i in tl.range(BT - 1, -1, -1, loop_unroll_factor=1):
+        mask_t = block_start + i < T
+        b_g = tl.load(p_g, mask=mask_d & mask_t, other=0).to(tl.float32)
+        b_do = tl.load(p_do, mask=mask_d & mask_t, other=0).to(tl.float32)
+        b_decay = exp(b_g)
+        b_scale = b_decay * b_scale
+        b_state = b_decay * (b_state + b_do)
+        p_g -= D
+        p_do -= D
+
+    o_block = (i_n * NB + i_b) * D + o_d
+    tl.store(scale + o_block, b_scale, mask=mask_d)
+    tl.store(state + o_block, b_state, mask=mask_d)
+
+
+@triton.heuristics({
+    'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
+    'USE_FINAL_STATE_GRADIENT': lambda args: args['dht'] is not None,
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
+})
+@triton.jit(do_not_specialize=['T'])
+def fused_recurrent_hgrn_bwd_kernel_scan(
+    scale,
+    state,
+    h0,
+    dht,
+    dh0,
+    cu_seqlens,
+    T,
+    D: tl.constexpr,
+    NB: tl.constexpr,
+    BT: tl.constexpr,
+    BD: tl.constexpr,
+    USE_INITIAL_STATE: tl.constexpr,
+    USE_FINAL_STATE_GRADIENT: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    ND = tl.cdiv(D, BD)
+    i_d = (pid % ND).to(tl.int64)
+    i_n = (pid // ND).to(tl.int64)
+    if IS_VARLEN:
+        bos = tl.load(cu_seqlens + i_n).to(tl.int64)
+        eos = tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = eos - bos
+
+    o_d = i_d * BD + tl.arange(0, BD)
+    mask_d = o_d < D
+    b_dh = tl.zeros([BD], dtype=tl.float32)
+    if USE_FINAL_STATE_GRADIENT:
+        b_dh += tl.load(dht + i_n * D + o_d, mask=mask_d, other=0).to(tl.float32)
+
+    NT = tl.cdiv(T, BT)
+    p_scale = scale + (i_n * NB + NT - 1) * D + o_d
+    p_state = state + (i_n * NB + NT - 1) * D + o_d
+    for _ in tl.range(NT - 1, -1, -1, loop_unroll_factor=1):
+        b_scale = tl.load(p_scale, mask=mask_d, other=1).to(tl.float32)
+        b_state = tl.load(p_state, mask=mask_d, other=0).to(tl.float32)
+        tl.store(p_state, b_dh, mask=mask_d)
+        b_dh = b_scale * b_dh + b_state
+        p_scale -= D
+        p_state -= D
+
+    if USE_INITIAL_STATE:
+        p_dh0 = dh0 + i_n * D + o_d
+        tl.store(p_dh0, b_dh.to(p_dh0.dtype.element_ty), mask=mask_d)
+
+
+@triton.heuristics({
+    'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
+})
+@triton.jit(do_not_specialize=['T'])
+def fused_recurrent_hgrn_bwd_kernel_replay(
+    g,
+    o,
+    h0,
+    dx,
+    dg,
+    do,
+    state,
+    cu_seqlens,
+    T,
+    D: tl.constexpr,
+    NB: tl.constexpr,
+    BT: tl.constexpr,
+    BD: tl.constexpr,
+    USE_INITIAL_STATE: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    ND = tl.cdiv(D, BD)
+    i_d = (pid % ND).to(tl.int64)
+    i_b = ((pid // ND) % NB).to(tl.int64)
+    i_n = (pid // (ND * NB)).to(tl.int64)
+    if IS_VARLEN:
+        bos = tl.load(cu_seqlens + i_n).to(tl.int64)
+        eos = tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = eos - bos
+    else:
+        bos = i_n * T
+
+    block_start = i_b * BT
+    if block_start >= T:
+        return
+
+    o_d = i_d * BD + tl.arange(0, BD)
+    mask_d = o_d < D
+    o_block = (i_n * NB + i_b) * D + o_d
+    b_dh = tl.load(state + o_block, mask=mask_d, other=0).to(tl.float32)
+    p_g = g + (bos + block_start + BT - 1) * D + o_d
+    p_o = o + (bos + block_start + BT - 2) * D + o_d
+    p_dx = dx + (bos + block_start + BT - 1) * D + o_d
+    p_dg = dg + (bos + block_start + BT - 1) * D + o_d
+    p_do = do + (bos + block_start + BT - 1) * D + o_d
+
+    for i in tl.range(BT - 1, -1, -1, loop_unroll_factor=1):
+        i_t = block_start + i
+        mask_t = i_t < T
+        b_g = tl.load(p_g, mask=mask_d & mask_t, other=0).to(tl.float32)
+        b_do = tl.load(p_do, mask=mask_d & mask_t, other=0).to(tl.float32)
+        if i_t > 0:
+            b_o = tl.load(p_o, mask=mask_d & mask_t, other=0).to(tl.float32)
+        elif USE_INITIAL_STATE:
+            b_o = tl.load(h0 + i_n * D + o_d, mask=mask_d, other=0).to(tl.float32)
+        else:
+            b_o = tl.zeros([BD], dtype=tl.float32)
+
+        b_dh += b_do
+        b_dx = b_dh
+        b_dh *= exp(b_g)
+        b_dg = b_dh * b_o
+        tl.store(p_dx, b_dx.to(p_dx.dtype.element_ty), mask=mask_d & mask_t)
+        tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), mask=mask_d & mask_t)
+        p_g -= D
+        p_o -= D
+        p_dx -= D
+        p_dg -= D
+        p_do -= D
+
+
+def _fused_recurrent_hgrn_fwd_hierarchical(
+    x: torch.Tensor,
+    g: torch.Tensor,
+    initial_state: torch.Tensor,
+    output_final_state: bool,
+    cu_seqlens: torch.LongTensor | None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    B, T, D = x.shape
+    N = B if cu_seqlens is None else len(cu_seqlens) - 1
+    BT, BD = _HGRN_HIERARCHICAL_BT, 128
+    NB = triton.cdiv(T, BT)
+
+    o = torch.empty_like(x)
+    final_state = x.new_empty(N, D) if output_final_state else None
+    scale = torch.empty((N, NB, D), dtype=torch.float, device=x.device)
+    state = torch.empty_like(scale)
+    grid_blocks = (triton.cdiv(D, BD) * NB * N,)
+    grid_sequences = (triton.cdiv(D, BD) * N,)
+
+    fused_recurrent_hgrn_fwd_kernel_summary[grid_blocks](
+        x=x,
+        g=g,
+        scale=scale,
+        state=state,
+        cu_seqlens=cu_seqlens,
+        T=T,
+        D=D,
+        NB=NB,
+        BT=BT,
+        BD=BD,
+        num_warps=4,
+    )
+    fused_recurrent_hgrn_fwd_kernel_scan[grid_sequences](
+        scale=scale,
+        state=state,
+        h0=initial_state,
+        ht=final_state,
+        cu_seqlens=cu_seqlens,
+        T=T,
+        D=D,
+        NB=NB,
+        BT=BT,
+        BD=BD,
+        num_warps=4,
+    )
+    fused_recurrent_hgrn_fwd_kernel_replay[grid_blocks](
+        x=x,
+        g=g,
+        state=state,
+        o=o,
+        cu_seqlens=cu_seqlens,
+        T=T,
+        D=D,
+        NB=NB,
+        BT=BT,
+        BD=BD,
+        num_warps=4,
+    )
+    return o, final_state
+
+
+def _fused_recurrent_hgrn_bwd_hierarchical(
+    g: torch.Tensor,
+    o: torch.Tensor,
+    do: torch.Tensor,
+    dht: torch.Tensor,
+    initial_state: torch.Tensor,
+    cu_seqlens: torch.LongTensor | None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    B, T, D = do.shape
+    N = B if cu_seqlens is None else len(cu_seqlens) - 1
+    BT, BD = _HGRN_HIERARCHICAL_BT, 128
+    NB = triton.cdiv(T, BT)
+
+    dx = torch.empty_like(o, dtype=torch.float)
+    dg = torch.empty_like(g, dtype=torch.float)
+    dh0 = torch.empty_like(initial_state, dtype=torch.float) if initial_state is not None else None
+    scale = torch.empty((N, NB, D), dtype=torch.float, device=o.device)
+    state = torch.empty_like(scale)
+    grid_blocks = (triton.cdiv(D, BD) * NB * N,)
+    grid_sequences = (triton.cdiv(D, BD) * N,)
+
+    fused_recurrent_hgrn_bwd_kernel_summary[grid_blocks](
+        g=g,
+        do=do,
+        scale=scale,
+        state=state,
+        cu_seqlens=cu_seqlens,
+        T=T,
+        D=D,
+        NB=NB,
+        BT=BT,
+        BD=BD,
+        num_warps=4,
+    )
+    fused_recurrent_hgrn_bwd_kernel_scan[grid_sequences](
+        scale=scale,
+        state=state,
+        h0=initial_state,
+        dht=dht,
+        dh0=dh0,
+        cu_seqlens=cu_seqlens,
+        T=T,
+        D=D,
+        NB=NB,
+        BT=BT,
+        BD=BD,
+        num_warps=4,
+    )
+    fused_recurrent_hgrn_bwd_kernel_replay[grid_blocks](
+        g=g,
+        o=o,
+        h0=initial_state,
+        dx=dx,
+        dg=dg,
+        do=do,
+        state=state,
+        cu_seqlens=cu_seqlens,
+        T=T,
+        D=D,
+        NB=NB,
+        BT=BT,
+        BD=BD,
+        num_warps=4,
+    )
+    return dx, dg, dh0
+
+
 def fused_recurrent_hgrn_fwd(
     x: torch.Tensor,
     g: torch.Tensor,
@@ -169,6 +644,15 @@ def fused_recurrent_hgrn_fwd(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, D = x.shape
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
+
+    if _use_hierarchical_hgrn(T=T, N=N, is_varlen=cu_seqlens is not None):
+        return _fused_recurrent_hgrn_fwd_hierarchical(
+            x=x,
+            g=g,
+            initial_state=initial_state,
+            output_final_state=output_final_state,
+            cu_seqlens=cu_seqlens,
+        )
 
     o = torch.empty_like(x)
     final_state = x.new_empty(N, D) if output_final_state else None
@@ -197,6 +681,16 @@ def fused_recurrent_hgrn_bwd(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, D = do.shape
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
+
+    if _use_hierarchical_hgrn(T=T, N=N, is_varlen=cu_seqlens is not None):
+        return _fused_recurrent_hgrn_bwd_hierarchical(
+            g=g,
+            o=o,
+            do=do,
+            dht=dht,
+            initial_state=initial_state,
+            cu_seqlens=cu_seqlens,
+        )
 
     dx = torch.empty_like(o, dtype=torch.float)
     dg = torch.empty_like(g, dtype=torch.float)
