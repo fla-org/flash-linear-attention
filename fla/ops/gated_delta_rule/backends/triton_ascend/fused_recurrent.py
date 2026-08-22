@@ -216,6 +216,7 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
         tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
 
 
+@input_guard
 def fused_recurrent_gated_delta_rule_fwd_npu(
     q: torch.Tensor,
     k: torch.Tensor,
