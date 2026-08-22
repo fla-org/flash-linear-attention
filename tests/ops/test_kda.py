@@ -13,6 +13,8 @@ import torch.nn.functional as F
 import triton
 
 from fla.ops.kda import chunk_kda, fused_recurrent_kda
+from fla.ops.kda.backends.tilelang import KDATileLangBackend
+from fla.ops.kda.chunk_bwd import chunk_kda_bwd_wy_dqkg_fused
 from fla.ops.kda.fused_recurrent import fused_recurrent_kda_fwd
 from fla.ops.kda.gate import fused_kda_gate, naive_kda_gate, naive_kda_lowerbound_gate
 from fla.ops.kda.naive import naive_chunk_kda, naive_recurrent_kda
@@ -1208,6 +1210,547 @@ def test_chunk_return_intermediate_states(dtype):
         assert h_varlen.shape[0] == 1, f"Varlen h batch dim should be 1, got: {h_varlen.shape[0]}"
         assert h_varlen.shape[2:] == (H, D, D), f"Varlen h dims mismatch: {h_varlen.shape[2:]}"
         assert h_varlen.dtype == dtype, f"Varlen h dtype should be {dtype}, got: {h_varlen.dtype}"
+
+
+_SKIP_TILELANG_KDA = pytest.mark.skipif(
+    not (IS_NVIDIA and KDATileLangBackend.is_available()),
+    reason="KDA TileLang backend requires NVIDIA GPU, TileLang, and a usable nvcc",
+)
+
+
+@_SKIP_TILELANG_KDA
+@pytest.mark.parametrize(
+    ("case", "expected_reason"),
+    [
+        pytest.param("gk-cpu", "requires gk to be a CUDA tensor", id="gk-cpu"),
+        pytest.param("gk-dtype", "requires gk dtype torch.float32", id="gk-dtype"),
+        pytest.param("q-layout", "requires q to be contiguous", id="q-layout"),
+        pytest.param("chunk-size", "supports chunk_size 32 or 64", id="chunk-size"),
+        pytest.param("k-size", "supports K=64 or 128", id="k-size"),
+        pytest.param("safe-gate", "safe_gate=False only", id="safe-gate"),
+        pytest.param("disable-recompute", "disable_recompute=False only", id="disable-recompute"),
+        pytest.param("non-divisible-gva", "requires HV=3 to be divisible by H=2", id="non-divisible-gva"),
+    ],
+)
+def test_tilelang_kda_fwd_intra_direct_wrapper_rejects_unsupported(case, expected_reason):
+    from fla.ops.kda.backends.tilelang.chunk_fwd_intra import chunk_kda_fwd_intra_tilelang
+
+    B, T, H, HV, D, BT = 1, 64, 2, 4, 64, 64
+    dtype = torch.bfloat16
+    q = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    k = torch.randn_like(q)
+    v = torch.randn(B, T, HV, D, dtype=dtype, device=device)
+    gk = torch.cumsum(-torch.rand(B, T, HV, D, dtype=torch.float32, device=device) * 0.02, dim=1)
+    beta = torch.rand(B, T, HV, dtype=dtype, device=device)
+    call_chunk_size = BT
+    safe_gate = False
+    disable_recompute = False
+
+    if case == "gk-cpu":
+        gk = gk.cpu()
+    elif case == "gk-dtype":
+        gk = gk.to(torch.float16)
+    elif case == "q-layout":
+        q = torch.empty(B, T, H, D * 2, dtype=dtype, device=device)[..., ::2]
+    elif case == "chunk-size":
+        call_chunk_size = 16
+    elif case == "k-size":
+        D = 96
+        q = torch.randn(B, T, H, D, dtype=dtype, device=device)
+        k = torch.randn_like(q)
+        v = torch.randn(B, T, HV, D, dtype=dtype, device=device)
+        gk = torch.cumsum(-torch.rand(B, T, HV, D, dtype=torch.float32, device=device) * 0.02, dim=1)
+    elif case == "safe-gate":
+        safe_gate = True
+    elif case == "disable-recompute":
+        disable_recompute = True
+    elif case == "non-divisible-gva":
+        HV = 3
+        v = torch.randn(B, T, HV, D, dtype=dtype, device=device)
+        gk = torch.cumsum(-torch.rand(B, T, HV, D, dtype=torch.float32, device=device) * 0.02, dim=1)
+        beta = torch.rand(B, T, HV, dtype=dtype, device=device)
+
+    with pytest.raises(ValueError, match=expected_reason):
+        chunk_kda_fwd_intra_tilelang(
+            q=q,
+            k=k,
+            v=v,
+            gk=gk,
+            beta=beta,
+            scale=D ** -0.5,
+            chunk_size=call_chunk_size,
+            safe_gate=safe_gate,
+            disable_recompute=disable_recompute,
+        )
+
+
+@_SKIP_TILELANG_KDA
+@pytest.mark.parametrize(
+    ("case", "expected_reason"),
+    [
+        pytest.param("A-missing", "requires A", id="A-missing"),
+        pytest.param("do-cpu", "requires do to be a CUDA tensor", id="do-cpu"),
+        pytest.param("A-dtype", "requires A dtype torch.float32", id="A-dtype"),
+        pytest.param("do-layout", "requires do to be contiguous", id="do-layout"),
+        pytest.param("chunk-size", "supports chunk_size 32 or 64", id="chunk-size"),
+        pytest.param("A-shape", "requires A shape", id="A-shape"),
+        pytest.param("non-divisible-gva", "requires HV=3 to be divisible by H=2", id="non-divisible-gva"),
+    ],
+)
+def test_tilelang_kda_bwd_dav_direct_wrapper_rejects_unsupported(case, expected_reason):
+    from fla.ops.kda.backends.tilelang.chunk_bwd_dav import chunk_kda_bwd_dAv_tilelang
+
+    B, T, H, HV, D, BT = 1, 64, 2, 4, 64, 64
+    dtype = torch.bfloat16
+    q = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    k = torch.randn_like(q)
+    v = torch.randn(B, T, HV, D, dtype=dtype, device=device)
+    do = torch.randn_like(v)
+    A = torch.randn(B, T, HV, BT, dtype=dtype, device=device) * 0.01
+    call_chunk_size = BT
+
+    if case == "A-missing":
+        A = None
+    elif case == "do-cpu":
+        do = do.cpu()
+    elif case == "A-dtype":
+        A = A.float()
+    elif case == "do-layout":
+        do = torch.empty(B, T, HV, D * 2, dtype=dtype, device=device)[..., ::2]
+    elif case == "chunk-size":
+        call_chunk_size = 16
+    elif case == "A-shape":
+        A = A[..., :32].contiguous()
+    elif case == "non-divisible-gva":
+        HV = 3
+        v = torch.randn(B, T, HV, D, dtype=dtype, device=device)
+        do = torch.randn_like(v)
+        A = torch.randn(B, T, HV, BT, dtype=dtype, device=device) * 0.01
+
+    with pytest.raises(ValueError, match=expected_reason):
+        chunk_kda_bwd_dAv_tilelang(
+            q=q,
+            k=k,
+            v=v,
+            do=do,
+            A=A,
+            scale=D ** -0.5,
+            chunk_size=call_chunk_size,
+        )
+
+
+@_SKIP_TILELANG_KDA
+@pytest.mark.parametrize(
+    ("case", "expected_reason"),
+    [
+        pytest.param("g-cpu", "requires g to be a CUDA tensor", id="g-cpu"),
+        pytest.param("beta-cpu", "requires beta to be a CUDA tensor", id="beta-cpu"),
+        pytest.param("g-dtype", "requires g dtype torch.float32", id="g-dtype"),
+        pytest.param("beta-dtype", "does not support beta dtype torch.int32", id="beta-dtype"),
+        pytest.param("g-layout", "requires g to be contiguous", id="g-layout"),
+        pytest.param("beta-layout", "requires beta to be contiguous", id="beta-layout"),
+        pytest.param("chunk-size", "supports chunk_size 32 or 64", id="chunk-size"),
+        pytest.param("A-shape", "requires A shape", id="A-shape"),
+        pytest.param("g-shape", "requires g shape", id="g-shape"),
+    ],
+)
+def test_tilelang_kda_bwd_wy_dqkg_direct_wrapper_rejects_unsupported(case, expected_reason):
+    from fla.ops.kda.backends.tilelang.chunk_bwd_dqkg import chunk_kda_bwd_wy_dqkg_fused_tilelang
+
+    B, T, H, HV, D, BT = 1, 64, 2, 4, 64, 64
+    dtype = torch.bfloat16
+    q = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    k = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    v = torch.randn(B, T, HV, D, dtype=dtype, device=device)
+    v_new = torch.randn_like(v)
+    g = -torch.rand(B, T, HV, D, dtype=torch.float32, device=device)
+    beta = torch.rand(B, T, HV, dtype=torch.float32, device=device)
+    A = torch.randn(B, T, HV, BT, dtype=dtype, device=device) * 0.01
+    h = torch.randn(B, 1, HV, D, D, dtype=dtype, device=device)
+    do = torch.randn_like(v)
+    dh = torch.randn_like(h)
+    dv = torch.randn_like(v)
+    call_chunk_size = BT
+
+    if case == "g-cpu":
+        g = g.cpu()
+    elif case == "beta-cpu":
+        beta = beta.cpu()
+    elif case == "g-dtype":
+        g = g.to(torch.float16)
+    elif case == "beta-dtype":
+        beta = torch.ones(B, T, HV, dtype=torch.int32, device=device)
+    elif case == "g-layout":
+        g = torch.empty(B, T, HV, D * 2, dtype=torch.float32, device=device)[..., ::2]
+    elif case == "beta-layout":
+        beta = torch.empty(B, T, HV * 2, dtype=torch.float32, device=device)[..., ::2]
+    elif case == "chunk-size":
+        call_chunk_size = 16
+    elif case == "A-shape":
+        A = A[..., :32].contiguous()
+    elif case == "g-shape":
+        g = g[:, :, :H].contiguous()
+
+    with pytest.raises(ValueError, match=expected_reason):
+        chunk_kda_bwd_wy_dqkg_fused_tilelang(
+            q=q,
+            k=k,
+            v=v,
+            v_new=v_new,
+            g=g,
+            beta=beta,
+            A=A,
+            h=h,
+            do=do,
+            dh=dh,
+            dv=dv,
+            scale=D ** -0.5,
+            chunk_size=call_chunk_size,
+        )
+
+
+@_SKIP_TILELANG_KDA
+@pytest.mark.parametrize(
+    ("H", "HV", "chunk_size", "D", "dtype"),
+    [
+        pytest.param(4, 4, 64, 64, torch.bfloat16, id="mha-BT64-D64-bf16"),
+        pytest.param(2, 4, 64, 64, torch.bfloat16, id="gva-BT64-D64-bf16"),
+        pytest.param(4, 4, 32, 128, torch.bfloat16, id="mha-BT32-D128-bf16"),
+        pytest.param(2, 4, 32, 128, torch.bfloat16, id="gva-BT32-D128-bf16"),
+    ],
+)
+def test_tilelang_kda_bwd_wy_dqkg_supported_dense_matrix_routing(monkeypatch, H, HV, chunk_size, D, dtype):
+    torch.manual_seed(42)
+
+    from fla.ops.backends import BackendRegistry
+
+    BackendRegistry.ensure_initialized('kda')
+    backend = BackendRegistry._registries['kda']._backends.get('tilelang')
+    assert backend is not None, 'TileLang KDA backend is not registered'
+
+    B, T, BT = 1, 64, chunk_size
+    q = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    k = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    v = torch.randn(B, T, HV, D, dtype=dtype, device=device)
+    v_new = torch.randn_like(v)
+    g = -torch.rand(B, T, HV, D, dtype=torch.float32, device=device)
+    beta = torch.rand(B, T, HV, dtype=dtype, device=device)
+    A = torch.randn(B, T, HV, BT, dtype=dtype, device=device) * 0.01
+    h = torch.randn(B, T // BT, HV, D, D, dtype=dtype, device=device)
+    do = torch.randn_like(v)
+    dh = torch.randn_like(h)
+    dv = torch.randn_like(v)
+
+    def run_with_tilelang(enabled: bool):
+        monkeypatch.setenv("FLA_TILELANG", "1" if enabled else "0")
+        return chunk_kda_bwd_wy_dqkg_fused(
+            q=q,
+            k=k,
+            v=v,
+            v_new=v_new,
+            g=g,
+            beta=beta,
+            A=A,
+            h=h,
+            do=do,
+            dh=dh,
+            dv=dv,
+            scale=D ** -0.5,
+            chunk_size=BT,
+        )
+
+    ref = run_with_tilelang(False)
+
+    calls = []
+    original = backend.chunk_kda_bwd_wy_dqkg_fused
+
+    def spy(*args, **kwargs):
+        calls.append('chunk_kda_bwd_wy_dqkg_fused')
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(backend, 'chunk_kda_bwd_wy_dqkg_fused', spy)
+    tri = run_with_tilelang(True)
+
+    assert calls == ['chunk_kda_bwd_wy_dqkg_fused']
+    for name, ref_t, tri_t, rtol in zip(
+        ("dq", "dk", "dv", "db", "dg", "dA"),
+        ref,
+        tri,
+        (0.008, 0.008, 0.008, 0.02, 0.02, 0.02),
+    ):
+        assert_close(name, ref_t, tri_t, rtol)
+
+
+@_SKIP_TILELANG_KDA
+def test_tilelang_kda_bwd_wy_dqkg_state_v_first_routing(monkeypatch):
+    torch.manual_seed(42)
+
+    from fla.ops.backends import BackendRegistry
+
+    BackendRegistry.ensure_initialized('kda')
+    backend = BackendRegistry._registries['kda']._backends.get('tilelang')
+    assert backend is not None, 'TileLang KDA backend is not registered'
+
+    B, T, H, HV, K, V, BT = 1, 64, 2, 4, 128, 128, 64
+    dtype = torch.bfloat16
+    q = torch.randn(B, T, H, K, dtype=dtype, device=device)
+    k = torch.randn(B, T, H, K, dtype=dtype, device=device)
+    v = torch.randn(B, T, HV, V, dtype=dtype, device=device)
+    v_new = torch.randn_like(v)
+    g = -torch.rand(B, T, HV, K, dtype=torch.float32, device=device)
+    beta = torch.rand(B, T, HV, dtype=dtype, device=device)
+    A = torch.randn(B, T, HV, BT, dtype=dtype, device=device) * 0.01
+    h = torch.randn(B, 1, HV, V, K, dtype=dtype, device=device)
+    do = torch.randn_like(v)
+    dh = torch.randn_like(h)
+    dv = torch.randn_like(v)
+
+    def run_with_tilelang(enabled: bool):
+        monkeypatch.setenv("FLA_TILELANG", "1" if enabled else "0")
+        return chunk_kda_bwd_wy_dqkg_fused(
+            q=q,
+            k=k,
+            v=v,
+            v_new=v_new,
+            g=g,
+            beta=beta,
+            A=A,
+            h=h,
+            do=do,
+            dh=dh,
+            dv=dv,
+            scale=K ** -0.5,
+            state_v_first=True,
+            chunk_size=BT,
+        )
+
+    ref = run_with_tilelang(False)
+
+    calls = []
+    original = backend.chunk_kda_bwd_wy_dqkg_fused
+
+    def spy(*args, **kwargs):
+        calls.append('chunk_kda_bwd_wy_dqkg_fused')
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(backend, 'chunk_kda_bwd_wy_dqkg_fused', spy)
+    tri = run_with_tilelang(True)
+
+    assert calls == ['chunk_kda_bwd_wy_dqkg_fused']
+    for name, ref_t, tri_t, rtol in zip(
+        ("dq", "dk", "dv", "db", "dg", "dA"),
+        ref,
+        tri,
+        (0.008, 0.008, 0.008, 0.02, 0.02, 0.02),
+    ):
+        assert_close(name, ref_t, tri_t, rtol)
+
+
+@_SKIP_TILELANG_KDA
+@pytest.mark.parametrize(
+    ("H", "HV"),
+    [
+        pytest.param(4, 4, id="mha"),
+        pytest.param(2, 4, id="gva"),
+    ],
+)
+def test_tilelang_kda_public_autograd_routes_dense_bf16(monkeypatch, H, HV):
+    torch.manual_seed(42)
+
+    from fla.ops.backends import BackendRegistry
+    from fla.ops.kda.backends.tilelang import chunk_bwd_dav as tilelang_dav
+    from fla.ops.kda.backends.tilelang import chunk_bwd_dqkg as tilelang_dqkg
+    from fla.ops.kda.backends.tilelang import chunk_bwd_intra as tilelang_intra
+    from fla.ops.kda.backends.tilelang import chunk_fwd_intra as tilelang_fwd
+
+    BackendRegistry.ensure_initialized('kda')
+    backend = BackendRegistry._registries['kda']._backends.get('tilelang')
+    assert backend is not None, 'TileLang KDA backend is not registered'
+
+    B, T, D, BT = 1, 64, 128, 32
+    dtype = torch.bfloat16
+    q = torch.rand(B, T, H, D, dtype=dtype, device=device)
+    k = torch.rand(B, T, H, D, dtype=dtype, device=device)
+    v = torch.rand(B, T, HV, D, dtype=dtype, device=device)
+    g = F.logsigmoid(torch.randn(B, T, HV, D, dtype=torch.float32, device=device))
+    beta = torch.randn(B, T, HV, dtype=dtype, device=device).sigmoid()
+    h0 = torch.randn(B, HV, D, D, dtype=torch.float32, device=device) * 0.01
+    do = torch.randn_like(v)
+    dht = torch.randn_like(h0)
+
+    def run_with_tilelang(enabled: bool):
+        monkeypatch.setenv("FLA_TILELANG", "1" if enabled else "0")
+        q_i, k_i, v_i, g_i, beta_i, h0_i = (
+            x.detach().clone().requires_grad_(True) for x in (q, k, v, g, beta, h0)
+        )
+        o, ht = chunk_kda(
+            q=F.normalize(q_i, p=2, dim=-1),
+            k=F.normalize(k_i, p=2, dim=-1),
+            v=v_i,
+            g=g_i,
+            beta=beta_i,
+            scale=D ** -0.5,
+            initial_state=h0_i,
+            output_final_state=True,
+            use_qk_l2norm_in_kernel=False,
+            state_v_first=False,
+            chunk_size=BT,
+        )
+        ((o * do).sum() + (ht * dht).sum()).backward()
+        return o, ht, (q_i.grad, k_i.grad, v_i.grad, g_i.grad, beta_i.grad, h0_i.grad)
+
+    ref = run_with_tilelang(False)
+
+    calls = []
+    original_public = backend.chunk_kda
+    original_fwd = tilelang_fwd.chunk_kda_fwd_intra_tilelang
+    original_dav = tilelang_dav.chunk_kda_bwd_dAv_tilelang
+    original_dqkg = tilelang_dqkg.chunk_kda_bwd_wy_dqkg_fused_tilelang
+    original_intra = tilelang_intra.chunk_kda_bwd_intra_tilelang
+
+    def public_spy(*args, **kwargs):
+        calls.append('chunk_kda')
+        return original_public(*args, **kwargs)
+
+    def fwd_spy(*args, **kwargs):
+        calls.append('chunk_kda_fwd_intra')
+        return original_fwd(*args, **kwargs)
+
+    def dav_spy(*args, **kwargs):
+        calls.append('chunk_kda_bwd_dAv')
+        return original_dav(*args, **kwargs)
+
+    def dqkg_spy(*args, **kwargs):
+        calls.append('chunk_kda_bwd_wy_dqkg_fused')
+        return original_dqkg(*args, **kwargs)
+
+    def intra_spy(*args, **kwargs):
+        calls.append('chunk_kda_bwd_intra')
+        return original_intra(*args, **kwargs)
+
+    monkeypatch.setattr(backend, 'chunk_kda', public_spy)
+    monkeypatch.setattr(tilelang_fwd, 'chunk_kda_fwd_intra_tilelang', fwd_spy)
+    monkeypatch.setattr(tilelang_dav, 'chunk_kda_bwd_dAv_tilelang', dav_spy)
+    monkeypatch.setattr(tilelang_dqkg, 'chunk_kda_bwd_wy_dqkg_fused_tilelang', dqkg_spy)
+    monkeypatch.setattr(tilelang_intra, 'chunk_kda_bwd_intra_tilelang', intra_spy)
+    tri = run_with_tilelang(True)
+
+    assert calls == [
+        'chunk_kda',
+        'chunk_kda_fwd_intra',
+        'chunk_kda_bwd_dAv',
+        'chunk_kda_bwd_wy_dqkg_fused',
+        'chunk_kda_bwd_intra',
+    ]
+    for name, ref_t, tri_t, rtol in zip(
+        ("o", "ht", "dq", "dk", "dv", "dg", "db", "dh0"),
+        (ref[0], ref[1], *ref[2]),
+        (tri[0], tri[1], *tri[2]),
+        (0.005, 0.005, 0.008, 0.008, 0.008, 0.02, 0.02, 0.008),
+    ):
+        assert_close(name, ref_t, tri_t, rtol)
+
+
+@_SKIP_TILELANG_KDA
+@pytest.mark.parametrize(
+    ("H", "HV", "state_v_first"),
+    [
+        pytest.param(2, 2, False, id="mha"),
+        pytest.param(2, 4, False, id="gva"),
+        pytest.param(2, 4, True, id="gva-state-v-first"),
+    ],
+)
+def test_tilelang_kda_full_backward_falls_back_for_autograd(monkeypatch, H, HV, state_v_first):
+    torch.manual_seed(42)
+
+    from fla.ops.backends import BackendRegistry
+    from fla.ops.kda.backends.tilelang import chunk_bwd_dav as tilelang_dav
+    from fla.ops.kda.backends.tilelang import chunk_bwd_dqkg as tilelang_dqkg
+    from fla.ops.kda.backends.tilelang import chunk_bwd_intra as tilelang_intra
+    from fla.ops.kda.backends.tilelang import chunk_fwd_intra as tilelang_fwd
+
+    BackendRegistry.ensure_initialized('kda')
+    backend = BackendRegistry._registries['kda']._backends.get('tilelang')
+    assert backend is not None, 'TileLang KDA backend is not registered'
+
+    B, T, D, BT = 1, 64, 64, 64
+    dtype = torch.bfloat16
+    q = torch.rand(B, T, H, D, dtype=dtype, device=device)
+    k = torch.rand(B, T, H, D, dtype=dtype, device=device)
+    v = torch.rand(B, T, HV, D, dtype=dtype, device=device)
+    g = F.logsigmoid(torch.randn(B, T, HV, D, dtype=torch.float32, device=device))
+    beta = torch.randn(B, T, HV, dtype=dtype, device=device).sigmoid()
+    h0 = torch.randn(B, HV, D, D, dtype=torch.float32, device=device)
+    if state_v_first:
+        h0 = h0.transpose(-1, -2).contiguous()
+    do = torch.randn_like(v)
+    dht = torch.randn_like(h0)
+
+    def run_with_tilelang(enabled: bool):
+        monkeypatch.setenv("FLA_TILELANG", "1" if enabled else "0")
+        q_i, k_i, v_i, g_i, beta_i, h0_i = (
+            x.detach().clone().requires_grad_(True) for x in (q, k, v, g, beta, h0)
+        )
+        o, ht = chunk_kda(
+            q=F.normalize(q_i, p=2, dim=-1),
+            k=F.normalize(k_i, p=2, dim=-1),
+            v=v_i,
+            g=g_i,
+            beta=beta_i,
+            scale=D ** -0.5,
+            initial_state=h0_i,
+            output_final_state=True,
+            use_qk_l2norm_in_kernel=False,
+            state_v_first=state_v_first,
+            chunk_size=BT,
+        )
+        ((o * do).sum() + (ht * dht).sum()).backward()
+        return o, ht, (q_i.grad, k_i.grad, v_i.grad, g_i.grad, beta_i.grad, h0_i.grad)
+
+    ref = run_with_tilelang(False)
+
+    calls = []
+    original_public = backend.chunk_kda
+    original_fwd = tilelang_fwd.chunk_kda_fwd_intra_tilelang
+    original_dav = tilelang_dav.chunk_kda_bwd_dAv_tilelang
+    original_wy = tilelang_dqkg.chunk_kda_bwd_wy_dqkg_fused_tilelang
+    original_intra = tilelang_intra.chunk_kda_bwd_intra_tilelang
+
+    def public_spy(*args, **kwargs):
+        calls.append('chunk_kda')
+        return original_public(*args, **kwargs)
+
+    def fwd_spy(*args, **kwargs):
+        calls.append('chunk_kda_fwd_intra')
+        return original_fwd(*args, **kwargs)
+
+    def dav_spy(*args, **kwargs):
+        calls.append('chunk_kda_bwd_dAv')
+        return original_dav(*args, **kwargs)
+
+    def wy_spy(*args, **kwargs):
+        calls.append('chunk_kda_bwd_wy_dqkg_fused')
+        return original_wy(*args, **kwargs)
+
+    def intra_spy(*args, **kwargs):
+        calls.append('chunk_kda_bwd_intra')
+        return original_intra(*args, **kwargs)
+
+    monkeypatch.setattr(backend, 'chunk_kda', public_spy)
+    monkeypatch.setattr(tilelang_fwd, 'chunk_kda_fwd_intra_tilelang', fwd_spy)
+    monkeypatch.setattr(tilelang_dav, 'chunk_kda_bwd_dAv_tilelang', dav_spy)
+    monkeypatch.setattr(tilelang_dqkg, 'chunk_kda_bwd_wy_dqkg_fused_tilelang', wy_spy)
+    monkeypatch.setattr(tilelang_intra, 'chunk_kda_bwd_intra_tilelang', intra_spy)
+    tri = run_with_tilelang(True)
+
+    assert calls == []
+    for name, ref_t, tri_t, rtol in zip(
+        ("o", "ht", "dq", "dk", "dv", "dg", "db", "dh0"),
+        (ref[0], ref[1], *ref[2]),
+        (tri[0], tri[1], *tri[2]),
+        (0.001, 0.001, 0.03, 0.03, 0.03, 0.03, 0.03, 0.03),
+    ):
+        assert_close(name, ref_t, tri_t, rtol)
 
 
 # ---------------------------------------------------------------------------

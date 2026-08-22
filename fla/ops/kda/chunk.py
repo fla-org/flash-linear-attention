@@ -50,6 +50,7 @@ class ChunkKDAFunction(torch.autograd.Function):
         disable_recompute: bool = False,
         return_intermediate_states: bool = False,
         cp_context: FLACPContext | None = None,
+        use_tilelang_helpers: bool = False,
     ):
         # Apply l2norm
         q_rstd, k_rstd = None, None
@@ -93,6 +94,7 @@ class ChunkKDAFunction(torch.autograd.Function):
             return_intermediate_states=return_intermediate_states,
             cp_context=cp_context,
             state_v_first=state_v_first,
+            use_tilelang_helpers=use_tilelang_helpers,
         )
 
         if return_intermediate_states:
@@ -116,6 +118,7 @@ class ChunkKDAFunction(torch.autograd.Function):
         ctx.disable_recompute = disable_recompute
         ctx.cp_context = cp_context
         ctx.state_v_first = state_v_first
+        ctx.use_tilelang_helpers = use_tilelang_helpers
         return o.type_as(q), final_state
 
     @staticmethod
@@ -162,6 +165,7 @@ class ChunkKDAFunction(torch.autograd.Function):
             kg=kg,
             v_new=v_new,
             h=h,
+            use_tilelang_helpers=ctx.use_tilelang_helpers,
         )
         if ctx.use_qk_l2norm_in_kernel:
             dq = l2norm_bwd(q, q_rstd, dq)
@@ -170,11 +174,10 @@ class ChunkKDAFunction(torch.autograd.Function):
             db = fused_beta_sigmoid_bwd(beta_raw, db, scale=2.0 if ctx.allow_neg_eigval else 1.0)
 
         return (dq.to(q), dk.to(k), dv.to(v), dg.to(g_input), db.to(beta_raw), dA, dbias, None, dh0,
-                None, None, None, None, None, None, None, None, None, None, None, None, None, None)
+                None, None, None, None, None, None, None, None, None, None, None, None, None, None, None)
 
 
 @dispatch('kda')
-@torch.compiler.disable
 def chunk_kda(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -351,6 +354,8 @@ def chunk_kda(
             cu_seqlens=cu_seqlens
         )
     """
+    use_tilelang_helpers = kwargs.pop("_tilelang_helpers", False)
+
     if 'transpose_state_layout' in kwargs:
         if state_v_first:
             raise ValueError("Cannot pass both `state_v_first` and the deprecated `transpose_state_layout`.")
@@ -440,4 +445,5 @@ def chunk_kda(
         disable_recompute,
         return_intermediate_states,
         cp_context,
+        use_tilelang_helpers,
     )
