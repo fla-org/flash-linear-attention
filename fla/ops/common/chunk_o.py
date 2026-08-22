@@ -14,6 +14,7 @@ from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.op import exp2
 from fla.utils import (
+    IS_INTEL,
     IS_NVIDIA_HOPPER,
     TRITON_ABOVE_3_4_0,
     TRITON_ABOVE_3_7_1,
@@ -24,6 +25,22 @@ from fla.utils import (
 BKV_LIST = [64, 128] if check_shared_mem() else ([32, 64] if check_shared_mem('ada') else [32])
 NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8]
 
+# Upstream pairs each tile size with a single warp count, which is tuned for NVIDIA.
+# On Intel that pairing is off by a factor of two: BK=BV=64 is fastest at 8 warps but is
+# only offered at 4, so the autotuner falls back to the 32x32 config and leaves ~2.2x on
+# the table. Widen the space there instead of changing the defaults for other vendors.
+_O_CONFIGS = [
+    triton.Config({'BK': 128, 'BV': 128}, num_warps=8, num_stages=3),
+    triton.Config({'BK': 64, 'BV': 64}, num_warps=4, num_stages=3),
+    triton.Config({'BK': 32, 'BV': 32}, num_warps=2, num_stages=3),
+]
+if IS_INTEL:
+    _O_CONFIGS += [
+        triton.Config({'BK': BK, 'BV': BV}, num_warps=w, num_stages=2)
+        for BK, BV in [(128, 64), (64, 64), (64, 32), (32, 64), (32, 32)]
+        for w in (4, 8)
+    ]
+
 
 @triton.heuristics({
     'USE_G': lambda args: args['g'] is not None,
@@ -31,11 +48,7 @@ NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8]
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @fla_cache_autotune(
-    configs=[
-        triton.Config({'BK': 128, 'BV': 128}, num_warps=8, num_stages=3),
-        triton.Config({'BK': 64, 'BV': 64}, num_warps=4, num_stages=3),
-        triton.Config({'BK': 32, 'BV': 32}, num_warps=2, num_stages=3),
-    ],
+    configs=_O_CONFIGS,
     key=['H', 'HV', 'K', 'V', 'BT', 'STATE_V_FIRST'],
     **autotune_cache_kwargs,
 )

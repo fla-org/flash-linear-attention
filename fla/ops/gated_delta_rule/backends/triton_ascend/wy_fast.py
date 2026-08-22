@@ -160,10 +160,10 @@ def recompute_w_u_fwd_kernel_npu(
             i_n, i_t = tl.load(chunk_indices + i_t_o * 2).to(tl.int32), tl.load(
                 chunk_indices + i_t_o * 2 + 1
             ).to(tl.int32)
-            bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(
+            bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(
                 cu_seqlens + i_n + 1
-            ).to(tl.int32)
-            T = eos - bos
+            ).to(tl.int64)
+            T = (eos - bos).to(tl.int32)
             bos_bh = bos
         else:
             i_t = i_t_o
@@ -178,7 +178,6 @@ def recompute_w_u_fwd_kernel_npu(
         offs_bt = tl.arange(0, BT)[None, :]
         ptr_A = A + (bos * HV + i_h) * BT + offs_t_2d * (HV * BT) + offs_bt * 1
         mask_A = mask_t[:, None]
-        b_A = tl.load(ptr_A, mask=mask_A, other=0.0).to(tl.float32)
 
         ptr_beta = beta + bos_bh + i_h * T_max + global_offs_t
         b_beta = tl.load(ptr_beta, mask=mask_t, other=0.0).to(tl.float32)
@@ -191,6 +190,8 @@ def recompute_w_u_fwd_kernel_npu(
             b_v = tl.load(ptr_v, mask=mask_v, other=0.0).to(tl.float32)
 
             b_vb = b_v * b_beta[:, None]
+            # Ascend tl.dot may clobber the left operand; reload A each V tile.
+            b_A = tl.load(ptr_A, mask=mask_A, other=0.0).to(tl.float32)
             b_u = tl.dot(b_A, b_vb, allow_tf32=False)
 
             ptr_u = u + (bos * HV + i_h) * V + offs_t_2d * (HV * V) + offs_v * 1
@@ -214,6 +215,8 @@ def recompute_w_u_fwd_kernel_npu(
             b_kb = b_k * b_beta[:, None]
             if USE_G:
                 b_kb = b_kb * b_g[:, None]
+            # Ascend tl.dot may clobber the left operand; reload A each K tile.
+            b_A = tl.load(ptr_A, mask=mask_A, other=0.0).to(tl.float32)
             b_w = tl.dot(b_A, b_kb, allow_tf32=False)
 
             ptr_w = w + (bos * HV + i_h) * K + offs_t_2d * (HV * K) + offs_k * 1
@@ -245,10 +248,10 @@ def prepare_wy_repr_bwd_kv_npu(
             i_n, i_t = tl.load(chunk_indices + i_t_o * 2).to(tl.int32), tl.load(
                 chunk_indices + i_t_o * 2 + 1
             ).to(tl.int32)
-            bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(
+            bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(
                 cu_seqlens + i_n + 1
-            ).to(tl.int32)
-            T = eos - bos
+            ).to(tl.int64)
+            T = (eos - bos).to(tl.int32)
         else:
             i_t = i_t_o
             bos, eos = i_b * T_seq, i_b * T_seq + T_seq
@@ -272,7 +275,6 @@ def prepare_wy_repr_bwd_kv_npu(
 
         b_b = tl.load(p_b, boundary_check=(0,)).to(tl.float32)
         b_db = tl.zeros([BT], dtype=tl.float32)
-        b_A = tl.load(p_A, boundary_check=(0, 1)).to(tl.float32)
         b_dA = tl.zeros([BT, BT], dtype=tl.float32)
 
         if USE_G:
@@ -301,8 +303,11 @@ def prepare_wy_repr_bwd_kv_npu(
             else:
                 b_kbg = b_k * b_b[:, None]
             b_dw = tl.load(p_dw, boundary_check=(0, 1)).to(tl.float32)
+            b_dw_c = b_dw + 0.0
             b_dA += tl.dot(b_dw, tl.trans(b_kbg), allow_tf32=False)
-            b_dkbg = tl.dot(b_A, b_dw, allow_tf32=False)
+            # Ascend tl.dot may clobber the left operand; reload A each K tile.
+            b_A = tl.load(p_A, boundary_check=(0, 1)).to(tl.float32)
+            b_dkbg = tl.dot(b_A, b_dw_c, allow_tf32=False)
             if USE_G:
                 b_dk = b_dkbg * (b_g_exp * b_b)[:, None]
                 b_db += tl.sum(b_dkbg * b_k * b_g_exp[:, None], 1)
@@ -324,9 +329,12 @@ def prepare_wy_repr_bwd_kv_npu(
             )
             b_v = tl.load(p_v, boundary_check=(0, 1)).to(tl.float32)
             b_du = tl.load(p_du, boundary_check=(0, 1)).to(tl.float32)
+            b_du_c = b_du + 0.0
             b_vb = b_v * b_b[:, None]
             b_dA += tl.dot(b_du, tl.trans(b_vb), allow_tf32=False)
-            b_dvb = tl.dot(b_A, b_du, allow_tf32=False)
+            # Ascend tl.dot may clobber the left operand; reload A each V tile.
+            b_A = tl.load(p_A, boundary_check=(0, 1)).to(tl.float32)
+            b_dvb = tl.dot(b_A, b_du_c, allow_tf32=False)
             b_dv = b_dvb * b_b[:, None]
             b_db += tl.sum(b_dvb * b_v, 1)
             tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
@@ -357,10 +365,10 @@ def prepare_wy_repr_bwd_da_mask_dot1_npu(
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(
             chunk_indices + i_t * 2 + 1
         ).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(
             cu_seqlens + i_n + 1
-        ).to(tl.int32)
-        T = eos - bos
+        ).to(tl.int64)
+        T = (eos - bos).to(tl.int32)
     else:
         bos, eos = i_b * T, i_b * T + T
 
@@ -396,8 +404,8 @@ def prepare_wy_repr_bwd_da_dot2_npu(
     i_b, i_h = i_bh // HV, i_bh % HV
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-        T = eos - bos
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = (eos - bos).to(tl.int32)
     else:
         bos, eos = i_b * T, i_b * T + T
 
@@ -433,10 +441,10 @@ def prepare_wy_repr_bwd_da_gate_npu(
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(
             chunk_indices + i_t * 2 + 1
         ).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(
             cu_seqlens + i_n + 1
-        ).to(tl.int32)
-        T = eos - bos
+        ).to(tl.int64)
+        T = (eos - bos).to(tl.int32)
     else:
         bos, eos = i_b * T, i_b * T + T
 
@@ -487,10 +495,10 @@ def prepare_wy_repr_bwd_finalize_k_npu(
             i_n, i_t = tl.load(chunk_indices + i_t_o * 2).to(tl.int32), tl.load(
                 chunk_indices + i_t_o * 2 + 1
             ).to(tl.int32)
-            bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(
+            bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(
                 cu_seqlens + i_n + 1
-            ).to(tl.int32)
-            T = eos - bos
+            ).to(tl.int64)
+            T = (eos - bos).to(tl.int32)
         else:
             i_t = i_t_o
             bos, eos = i_b * T_seq, i_b * T_seq + T_seq
@@ -512,6 +520,7 @@ def prepare_wy_repr_bwd_finalize_k_npu(
         b_b = tl.load(p_b, boundary_check=(0,)).to(tl.float32)
         b_db = tl.load(p_db, boundary_check=(0,)).to(tl.float32)
         b_dA = tl.load(p_dA, boundary_check=(0, 1)).to(tl.float32)
+        b_dA_c = b_dA + 0.0
 
         for i_k in range(tl.cdiv(K, BK)):
             p_k = tl.make_block_ptr(
@@ -522,9 +531,11 @@ def prepare_wy_repr_bwd_finalize_k_npu(
             )
             b_k = tl.load(p_k, boundary_check=(0, 1)).to(tl.float32)
             b_kb = b_k * b_b[:, None]
-            b_dkb = tl.dot(b_dA, b_k, allow_tf32=False)
+            # Ascend tl.dot clobbers lhs; keep a pristine copy for the rhs dot.
+            b_dA_lhs = b_dA + 0.0
+            b_dkb = tl.dot(b_dA_lhs, b_k, allow_tf32=False)
             b_db += tl.sum(b_dkb * b_k, 1)
-            b_dk = b_dkb * b_b[:, None] + tl.trans(tl.dot(tl.trans(b_kb), b_dA, allow_tf32=False))
+            b_dk = b_dkb * b_b[:, None] + tl.trans(tl.dot(tl.trans(b_kb), b_dA_c, allow_tf32=False))
             b_dk += tl.load(p_dk, boundary_check=(0, 1)).to(tl.float32)
             tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
 
@@ -546,8 +557,8 @@ def prepare_wy_repr_bwd_finalize_a2_npu(
     T_seq = T
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-        T = eos - bos
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = (eos - bos).to(tl.int32)
     else:
         bos, eos = i_b * T, i_b * T + T
 
@@ -584,8 +595,8 @@ def prepare_wy_repr_bwd_finalize_dg_npu(
     if IS_VARLEN:
         i_tg = i_t
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-        T = eos - bos
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = (eos - bos).to(tl.int32)
     else:
         NT = tl.cdiv(T, BT)
         i_tg = i_b * NT + i_t

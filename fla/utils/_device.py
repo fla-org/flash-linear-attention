@@ -79,17 +79,30 @@ def check_pytorch_version(version_s: str = '2.4') -> bool:
 
 
 @cache
-def get_multiprocessor_count(tensor_idx: int = 0) -> int:
+def get_multiprocessor_count(tensor_idx: int = 0, *, use_aicore: bool = False) -> int:
     try:
         return triton.runtime.driver.active.utils.get_device_properties(tensor_idx)['multiprocessor_count']
     except Exception:
         # Maybe we use a NPU device.
         try:
             if triton.runtime.driver.active.get_current_target().backend == 'npu':
-                return triton.runtime.driver.active.utils.get_device_properties(tensor_idx)['num_vectorcore']
+                props = triton.runtime.driver.active.utils.get_device_properties(tensor_idx)
+                return props['num_aicore'] if use_aicore else props['num_vectorcore']
         except Exception:
             logger.debug('Failed to get NPU multiprocessor count, falling back to 1.', exc_info=True)
         return 1
+
+
+@cache
+def get_device_capability(device_index: int = 0) -> tuple[int, int]:
+    major, minor = torch.cuda.get_device_capability(device_index)
+    return int(major), int(minor)
+
+
+@cache
+def get_device_smem_optin(device_index: int = 0) -> int:
+    props = torch.cuda.get_device_properties(device_index)
+    return int(getattr(props, 'shared_memory_per_block_optin', props.shared_memory_per_block))
 
 
 @cache

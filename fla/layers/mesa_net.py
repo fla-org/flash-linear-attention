@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 
 class MesaNet(nn.Module):
     """
-    The layer implementaion for [MesaNet: Sequence Modeling by Locally Optimal Test-Time Training].  # noqa
+    The layer implementation for [MesaNet: Sequence Modeling by Locally Optimal Test-Time Training].  # noqa
 
     Args:
         hidden_size (int, Optional):

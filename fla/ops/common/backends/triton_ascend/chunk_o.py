@@ -162,8 +162,8 @@ def chunk_fwd_kernel_o_npu(
             for n in tl.range(0, N, 1):
                 i_n = tl.where(tl.load(chunk_offsets + n + 1) <= global_t, n + 1, i_n)
             i_t = global_t - tl.load(chunk_offsets + i_n).to(tl.int32)
-            bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-            T_cur = eos - bos
+            bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+            T_cur = (eos - bos).to(tl.int32)
             i_tg = global_t
         else:
             NT = tl.cdiv(T, BT)
@@ -196,13 +196,15 @@ def chunk_fwd_kernel_o_npu(
             # [BK, BV]
             b_h = tl.load(p_h, boundary_check=(0, 1))
 
+            # Ascend tl.dot clobbers lhs; copy before the first dot on b_q.
+            b_q_c = b_q + 0.0
             # [BT, BK] @ [BK, BV] -> [BT, BV]
             if STATE_V_FIRST:
                 b_o += tl.dot(b_q, tl.trans(b_h))
             else:
                 b_o += tl.dot(b_q, b_h)
             # [BT, BK] @ [BK, BT] -> [BT, BT]
-            b_A += tl.dot(b_q, b_k)
+            b_A += tl.dot(b_q_c, b_k)
 
         if USE_G:
             # g is transposed to [B, HV, T] in wrapper for contiguous T-load.
@@ -381,8 +383,8 @@ def chunk_bwd_kernel_dv_local_hv1_npu(
 
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-        T = eos - bos
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = (eos - bos).to(tl.int32)
     else:
         bos, eos = i_b * T, i_b * T + T
 
@@ -413,12 +415,14 @@ def chunk_bwd_kernel_dv_local_hv1_npu(
     m_t = o_t < T
     m_A = (o_t[:, None] <= o_t[None, :]) & (m_t[:, None] & m_t)
     b_A = tl.where(m_A, b_A, 0)
+    b_A_pristine = b_A + 0.0
 
     for i_v in range(tl.cdiv(V, BV)):
         p_do = tl.make_block_ptr(do, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
         p_dv = tl.make_block_ptr(dv, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
         b_do = tl.load(p_do, boundary_check=(0, 1))
-        b_dv = tl.dot(b_A.to(b_do.dtype), b_do, allow_tf32=False)
+        b_A_i = b_A_pristine + 0.0
+        b_dv = tl.dot(b_A_i.to(b_do.dtype), b_do, allow_tf32=False)
         tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
 
 
@@ -456,8 +460,8 @@ def chunk_bwd_kernel_dv_local_npu(
 
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-        T = eos - bos
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = (eos - bos).to(tl.int32)
     else:
         bos, eos = i_b * T, i_b * T + T
 
@@ -507,8 +511,9 @@ def chunk_bwd_kernel_dv_local_npu(
                 p_q1 = tl.make_block_ptr(q, (K, T), (1, H * K), (i_k * BK, i_tc1), (BK, BC), (0, 1))
                 b_q0 = tl.load(p_q0, boundary_check=(0, 1))
                 b_q1 = tl.load(p_q1, boundary_check=(0, 1))
+                b_k0_c = b_k0 + 0.0
                 b_A00 += tl.dot(b_k0, b_q0, allow_tf32=False) * scale
-                b_A01 += tl.dot(b_k0, b_q1, allow_tf32=False) * scale
+                b_A01 += tl.dot(b_k0_c, b_q1, allow_tf32=False) * scale
                 b_A11 += tl.dot(b_k1, b_q1, allow_tf32=False) * scale
 
             if USE_G or USE_G_GAMMA:
@@ -627,8 +632,8 @@ def chunk_bwd_kernel_dqkwg_npu(
     if IS_VARLEN:
         i_tg = i_t
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-        T = eos - bos
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = (eos - bos).to(tl.int32)
         NT = tl.cdiv(T, BT)
     else:
         NT = tl.cdiv(T, BT)
@@ -745,11 +750,12 @@ def chunk_bwd_kernel_dqkwg_npu(
             p_k_c = tl.make_block_ptr(k, (T, K), (H * K, 1), (i_tc_c, i_k * BK), (BC, BK), (1, 0))
             b_k_c = tl.load(p_k_c, boundary_check=(0, 1))
             b_ds = tl.where(m_blk, b_ds, 0).to(b_k_c.dtype)
+            b_ds_c = b_ds + 0.0
             b_dq_r += tl.dot(b_ds, b_k_c, allow_tf32=False)
 
             p_dk_acc = tl.make_block_ptr(dk_f32, (T, K), (HV * K, 1), (i_tc_c, i_k * BK), (BC, BK), (1, 0))
             b_dk_acc = tl.load(p_dk_acc, boundary_check=(0, 1))
-            b_ds_dk = tl.dot(tl.trans(b_ds), b_q_r, allow_tf32=False)
+            b_ds_dk = tl.dot(tl.trans(b_ds_c), b_q_r, allow_tf32=False)
             if not USE_G and not USE_G_GAMMA:
                 b_ds_dk = b_ds_dk * scale
             b_dk_acc += b_ds_dk
@@ -834,8 +840,8 @@ def chunk_bwd_kernel_dg_npu(
     if IS_VARLEN:
         i_tg = i_t
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-        T = eos - bos
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = (eos - bos).to(tl.int32)
         NT = tl.cdiv(T, BT)
     else:
         NT = tl.cdiv(T, BT)

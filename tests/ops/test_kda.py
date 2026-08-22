@@ -10,6 +10,7 @@ import importlib.util
 import pytest
 import torch
 import torch.nn.functional as F
+import triton
 
 from fla.ops.kda import chunk_kda, fused_recurrent_kda
 from fla.ops.kda.fused_recurrent import fused_recurrent_kda_fwd
@@ -136,6 +137,13 @@ def test_fused_recurrent(
     h0 = torch.randn(B, HV, D, D, dtype=torch.float32)
     q, k, v, g, beta, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, g, beta, h0))
 
+    g_tri = g.clone()
+    if triton.next_power_of_2(D) != D:
+        # the kernel loads g in next_power_of_2(D) blocks;
+        # poison the memory right after g so any read past D shows up as NaN instead of a silent no-op
+        buf = torch.full((g.numel() + triton.next_power_of_2(D),), 1e30, dtype=torch.float, device=device)
+        g_tri = buf[:g.numel()].view_as(g).copy_(g)
+
     ref, ref_ht = naive_recurrent_kda(
         q=F.normalize(q.clone(), p=2, dim=-1),
         k=F.normalize(k.clone(), p=2, dim=-1),
@@ -151,7 +159,7 @@ def test_fused_recurrent(
         q=F.normalize(q.clone(), p=2, dim=-1) if not use_qk_l2norm_in_kernel else q.clone(),
         k=F.normalize(k.clone(), p=2, dim=-1) if not use_qk_l2norm_in_kernel else k.clone(),
         v=v.clone(),
-        g=g.clone(),
+        g=g_tri,
         beta=beta.clone(),
         scale=scale,
         initial_state=h0.clone(),

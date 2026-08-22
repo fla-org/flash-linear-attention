@@ -205,10 +205,12 @@ def mean_pooling(
     x: torch.Tensor,
     chunk_size: int,
     cu_seqlens: torch.LongTensor | None = None,
-    head_first: bool = False,
+    **kwargs,
 ) -> torch.Tensor:
-    if head_first:
-        x = x.transpose(1, 2)
+    if 'head_first' in kwargs:
+        raise DeprecationWarning(
+            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
+        )
     if cu_seqlens is not None:
         if x.shape[0] != 1:
             raise ValueError(
@@ -216,6 +218,4 @@ def mean_pooling(
                 f"Please flatten variable-length inputs before processing.",
             )
     o = MeanPoolingFunction.apply(x, chunk_size, cu_seqlens)
-    if head_first:
-        o = o.transpose(1, 2)
     return o

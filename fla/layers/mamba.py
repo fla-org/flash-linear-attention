@@ -95,7 +95,7 @@ class Mamba(nn.Module):
 
         # projection of the input hidden states
         self.in_proj = nn.Linear(self.hidden_size, self.intermediate_size * 2, bias=use_bias)
-        # selective projection used to make dt, B and C input dependant
+        # selective projection used to make dt, B and C input-dependent
         self.x_proj = nn.Linear(self.intermediate_size, self.dt_rank + self.ssm_state_size * 2, bias=False)
         # time step projection (discretization)
         self.dt_proj = nn.Linear(self.dt_rank, self.intermediate_size, bias=True)
@@ -381,12 +381,12 @@ class Mamba(nn.Module):
         # 3.c perform the recurrence y ← SSM(A, B, C)(x)
         scan_outputs = []
         for i in range(hidden_states.shape[-1]):
-            # [batch, intermediade_size, ssm_state]
+            # [batch, intermediate_size, ssm_state]
             ssm_state = discrete_A[:, :, i, :] * ssm_state + deltaB_u[:, :, i, :]
-            # [batch, intermediade_size, 1]
+            # [batch, intermediate_size, 1]
             scan_output = torch.matmul(ssm_state.to(dtype), C[:, i, :].unsqueeze(-1))
             scan_outputs.append(scan_output[:, :, 0])
-        # [batch, seq_len, intermediade_size]
+        # [batch, seq_len, intermediate_size]
         scan_output = torch.stack(scan_outputs, dim=-1)
         scan_output = scan_output + (hidden_states * self.D[None, :, None])
         scan_output = (scan_output * self.act(gate))

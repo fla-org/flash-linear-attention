@@ -117,7 +117,7 @@ def fused_recurrent_kda_fwd_kernel_npu(
             tl.load(cu_seqlens + i_n).to(tl.int64),
             tl.load(cu_seqlens + i_n + 1).to(tl.int64),
         )
-        T_cur = eos - bos
+        T_cur = (eos - bos).to(tl.int32)
     else:
         bos = (i_n * T).to(tl.int64)
         T_cur = T
