@@ -70,6 +70,7 @@ def run_test_model_forward_backward(
 # ===================================================================================
 # BASE TEST FOR GENERATION (K/V CACHE)
 # ===================================================================================
+@torch.no_grad()
 def run_test_generation(
     L: int,
     B: int,
