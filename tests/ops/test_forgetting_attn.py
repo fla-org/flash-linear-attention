@@ -183,3 +183,13 @@ def test_parallel_swa(
     assert_close("dk", ref_dk, tri_dk, 0.005)
     assert_close("dv", ref_dv, tri_dv, 0.005)
     assert_close("dg", ref_dg, tri_dg, 0.005)
+
+
+def test_naive_forgetting_attn_rejects_invalid_gqa_head_counts():
+    q = torch.empty(1, 1, 3, 16)
+    k = torch.empty(1, 1, 2, 16)
+    v = torch.empty_like(k)
+    g = torch.empty(1, 1, 3)
+
+    with pytest.raises(ValueError, match="must be divisible"):
+        naive_forgetting_attn(q=q, k=k, v=v, g=g)

@@ -11,6 +11,8 @@ import torch
 import torch.nn.functional as F
 from einops import repeat
 
+from fla.ops.utils.head import get_gqa_group_size
+
 
 def naive_dsa_indexer(
     q_idx: torch.Tensor,
@@ -155,7 +157,7 @@ def naive_dsa(
         assert q.shape[0] == 1, "batch size must be 1 when cu_seqlens are provided"
 
     dtype = q.dtype
-    G = q.shape[2] // k.shape[2]
+    G = get_gqa_group_size(q.shape[2], k.shape[2])
     q, k, v = (x.float() for x in (q, k, v))
     k, v = (repeat(x, 'b t h d -> b t (h g) d', g=G) for x in (k, v))
 

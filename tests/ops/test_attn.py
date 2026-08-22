@@ -15,6 +15,16 @@ from fla.ops.attn.parallel import parallel_attn
 from fla.utils import assert_close, check_shared_mem, device
 
 
+@pytest.mark.parametrize("op", [naive_parallel_attn, parallel_attn], ids=["naive", "parallel"])
+def test_parallel_rejects_invalid_gqa_head_counts(op):
+    q = torch.empty(1, 1, 3, 16, dtype=torch.float16)
+    k = torch.empty(1, 1, 2, 16, dtype=torch.float16)
+    v = torch.empty(1, 1, 2, 16, dtype=torch.float16)
+
+    with pytest.raises(ValueError, match="must be divisible"):
+        op(q=q, k=k, v=v)
+
+
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'HQ', 'D', 'scale'),
     [
