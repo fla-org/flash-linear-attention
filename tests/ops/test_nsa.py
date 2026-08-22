@@ -949,7 +949,7 @@ def test_parallel_compressive_bq_fixture(
     block_size: int,
     dtype: torch.dtype,
 ):
-    torch.manual_seed(20260822)
+    torch.manual_seed(42)
     cu_seqlens = (
         torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
         if cu_seqlens is not None
