@@ -296,7 +296,7 @@ def fused_recurrent_gated_delta_rule_fwd_npu(
     else:
         final_state = None
 
-    stride_init_state_token = initial_state.stride(0)
+    stride_init_state_token = initial_state.stride(0) if initial_state is not None else 1
     stride_final_state_token = final_state.stride(0) if final_state is not None else 1
 
     stride_indices_seq, stride_indices_tok = 1, 1
