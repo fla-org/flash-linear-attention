@@ -168,7 +168,7 @@ def chunkwise_fwd_kernel(
     NT = tl.cdiv(T, BT)
     output_offset = -1 * (offset % BT)
     for i_t in range(NT):
-        b_h_ptrs = level_scales + ((bos + i_t * BT + i_idx) * H + i_h) * L + b_llut
+        b_h_ptrs = level_scales + ((bos + tl.minimum(i_t * BT + i_idx, T - 1)) * H + i_h) * L + b_llut
         b_h = tl.load(b_h_ptrs, mask=i_idx >= j_idx)
 
         o_t = (i_t * BT).to(tl.int64) + o_i
@@ -857,7 +857,9 @@ def chunkwise_bwd_kernel_dkg(
     b_dg -= tl.sum(b_k * b_dk, axis=1)
     b_dg_last += tl.sum(b_dk * b_k)
 
-    b_dg = tl.where(o_i < BT - 1, b_dg, b_dg + b_dg_last)
+    # deposit the chunk-scalar gradient on the last LIVE row, the one `last_idx` selected the
+    # gate from; on a partial last chunk row BT - 1 is dead and the masked store drops it
+    b_dg = tl.where(o_t < last_idx, b_dg, b_dg + b_dg_last)
 
     tl.store(p_dg, b_dg, mask=m_t)
     tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), mask=m_tk)
@@ -986,7 +988,7 @@ def chunkwise_bwd_kernel_diag(
     i_idx = o_i[:, None]  # BT x 1
     j_idx = o_i[None, :]  # 1 x BT
 
-    b_h_ptrs = l + ((bos + i_t * BT + i_idx) * H + i_h) * L + b_llut
+    b_h_ptrs = l + ((bos + tl.minimum(i_t * BT + i_idx, T - 1)) * H + i_h) * L + b_llut
     b_h = tl.load(b_h_ptrs, mask=i_idx >= j_idx)
 
     p_g = g + bos * H + i_h + o_t * H

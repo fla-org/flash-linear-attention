@@ -33,6 +33,7 @@
 - [2026-07] 🧱 Add a [Gluon](https://triton-lang.org/main/getting-started/tutorials/gluon/) backend for [AttnRes](fla/ops/attnres).
 - [2026-07] 🚀 Add [FlashQLA](https://github.com/QwenLM/FlashQLA) backend for [Gated DeltaNet](fla/ops/gated_delta_rule).
 - [2026-06] 🔭 Add Parallax implementation to `fla` ([paper](https://arxiv.org/abs/2605.29157)).
+- [2026-06] 🧮 Add Preconditioned Gated DeltaNet (PGDN) and Preconditioned KDA (PKDA) to `fla` ([paper](https://arxiv.org/abs/2604.21100)) — curvature-aware preconditioning of the linear recurrence via an ATK preconditioner.
 - [2026-06] 🧱 Add Wall attention implementation to `fla` ([blog](https://blog.tilderesearch.com/blog/wall-attn)).
 - [2026-05] 🚪 Add Gated DeltaNet 2 (GDN-2) implementation to `fla` ([paper](https://arxiv.org/abs/2605.22791)).
 - [2026-05] 🦅 Add Raven implementation to `fla` ([repo](https://github.com/goombalab/raven)).
@@ -115,6 +116,8 @@
 | 2026  |   Gated DeltaNet 2   | [Gated DeltaNet-2: Decoupling Erase and Write in Linear Attention](https://arxiv.org/abs/2605.22791)                                          | [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/ops/gdn2)                       |
 | 2026  |         Wall         | [Wall Attention: Length Generalization With Diagonal Gates](https://blog.tilderesearch.com/blog/wall-attn)                                    | [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/ops/wall_attn)                  |
 | 2026  |       Parallax       | [Parallax: Parameterized Local Linear Attention for Language Modeling](https://arxiv.org/abs/2605.29157)                                      | [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/ops/parallax)                   |
+| 2026  | Preconditioned Gated DeltaNet | [Preconditioned DeltaNet: Curvature-aware Sequence Modeling for Linear Recurrences](https://arxiv.org/abs/2604.21100)                | [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/ops/precond_gated_delta_rule)   |
+| 2026  | Preconditioned KDA   | [Preconditioned DeltaNet: Curvature-aware Sequence Modeling for Linear Recurrences](https://arxiv.org/abs/2604.21100)                         | [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/ops/precond_kda)                |
 
 ## Installation
 

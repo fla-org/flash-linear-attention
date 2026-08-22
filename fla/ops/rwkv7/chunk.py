@@ -27,6 +27,7 @@ def chunk_rwkv7(
     chunk_size: int | None = None,
     disable_recompute: bool = False,
     cp_context: FLACPContext | None = None,
+    lower_bound: float | None = None,
     **kwargs,
 ):
     """
@@ -68,6 +69,10 @@ def chunk_rwkv7(
             Context parallel context for distributed training across multiple devices.
             When provided, `initial_state` and `output_final_state` are not supported,
             and `cp_context.cu_seqlens` is used as the local `cu_seqlens`. Default: `None`.
+        lower_bound (Optional[float]):
+            When set, asserts `lower_bound <= w < 0` (the caller is responsible for
+            the guarantee). Licenses the same tensor-core scheme as `safe_gate=True`
+            when the bound fits the chunk size. Default: `None`.
     """
     if 'head_first' in kwargs:
         raise DeprecationWarning(
@@ -89,4 +94,5 @@ def chunk_rwkv7(
         chunk_size=chunk_size,
         disable_recompute=disable_recompute,
         cp_context=cp_context,
+        lower_bound=lower_bound,
     )

@@ -9,6 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.backends import dispatch
 from fla.ops.utils import prepare_chunk_offsets
 from fla.ops.utils.op import exp2
 from fla.utils import autotune_cache_kwargs, check_shared_mem
@@ -303,6 +304,7 @@ def chunk_bwd_kernel_dh(
             tl.store(p_dh0, b_dh.to(p_dh0.dtype.element_ty), mask=(o_k[:, None] < K) & (o_v[None, :] < V))
 
 
+@dispatch('common')
 def chunk_fwd_h(
     k: torch.Tensor,
     v: torch.Tensor,
@@ -361,6 +363,7 @@ def chunk_fwd_h(
     return h, ht
 
 
+@dispatch('common')
 def chunk_bwd_dh(
     q: torch.Tensor,
     k: torch.Tensor,
