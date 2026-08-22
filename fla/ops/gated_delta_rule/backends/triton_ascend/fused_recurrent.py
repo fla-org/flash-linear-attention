@@ -2,6 +2,8 @@
 #
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 import triton
@@ -11,7 +13,6 @@ from fla.ops.utils.op import exp
 from fla.ops.utils.softplus import softplus
 from fla.utils import input_guard
 from fla.utils.ascend_ub_manager import compute_row_tile_block_size
-
 
 # b_h [BK,BV] dominates UB usage. BK = next_power_of_2(K) is fixed (NK=1).
 # Additional buffers: b_q [BK], b_k [BK], b_v [BV], b_o [BV].
