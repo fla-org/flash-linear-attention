@@ -149,8 +149,11 @@ def chunk_mesa_fwd_h(
         split_offsets = prepare_chunk_offsets(cu_seqlens, BS)
         N, NS = len(cu_seqlens) - 1, split_offsets[-1].item()
 
+    # h_kk is read by the conjugate-gradient solver every iteration, so it is stored in fp16
+    # for higher mantissa precision. h_kv can grow unboundedly and needs a wide exponent range,
+    # so it is stored in bf16.
     h = k.new_empty(B, NS, H, K, V, dtype=k.dtype if not states_in_fp32 else torch.float)
-    h_kv = k.new_empty(B, NS, H, K, V, dtype=k.dtype if not states_in_fp32 else torch.float)
+    h_kv = k.new_empty(B, NS, H, K, V, dtype=torch.bfloat16 if not states_in_fp32 else torch.float)
     h_final = k.new_empty(N, H, K, V, dtype=torch.float) if output_final_state else None
     h_kv_final = k.new_empty(N, H, K, V, dtype=torch.float)
 
