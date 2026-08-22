@@ -328,8 +328,8 @@ class KDAGateFunction(torch.autograd.Function):
         return dg, dA, dbias, None, None
 
 
-@dispatch('kda')
 @torch.compiler.disable
+@dispatch('kda')
 def fused_kda_gate(
     g: torch.Tensor,
     A_log: torch.Tensor,
