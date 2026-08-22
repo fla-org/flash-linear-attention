@@ -304,8 +304,8 @@ def parallel_nsa_compression_bwd_kernel_dkv(
     IS_VARLEN: tl.constexpr,
 ):
     i_v, i_c, i_bh = (tl.program_id(0).to(tl.int64),
-                       tl.program_id(1).to(tl.int64),
-                       tl.program_id(2).to(tl.int64))
+                      tl.program_id(1).to(tl.int64),
+                      tl.program_id(2).to(tl.int64))
     i_b, i_h = i_bh // H, i_bh % H
 
     T, TC = T.to(tl.int64), TC.to(tl.int64)
