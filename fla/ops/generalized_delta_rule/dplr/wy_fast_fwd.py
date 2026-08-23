@@ -62,6 +62,126 @@ def prepare_wy_repr_fwd_kernel_chunk32(
     tl.store(p_Aab_inv, b_A_ab.to(p_Aab_inv.dtype.element_ty), mask=m_A)
 
 
+@triton.jit
+def _inv_diag16(b_L):
+    # (I - L)^-1 = (I + L)(I + L^2)(I + L^4)(I + L^8), exact for strictly
+    # lower-triangular 16x16 L (L^16 = 0). fp16 operands with fp32 accumulate:
+    # strictly-lower gated entries and their Neumann products are bounded.
+    o_i = tl.arange(0, 16)
+    b_I = (o_i[:, None] == o_i[None, :]).to(tl.float16)
+    b_L2 = tl.dot(b_L, b_L).to(tl.float16)
+    b_L4 = tl.dot(b_L2, b_L2).to(tl.float16)
+    b_L8 = tl.dot(b_L4, b_L4).to(tl.float16)
+    b_T = tl.dot(b_I + b_L, b_I + b_L2)
+    b_T = tl.dot(b_T.to(tl.float16), b_I + b_L4)
+    b_T = tl.dot(b_T.to(tl.float16), b_I + b_L8)
+    return b_T
+
+
+@triton.heuristics({
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
+})
+@triton.autotune(
+    configs=[
+        triton.Config({}, num_warps=num_warps)
+        for num_warps in [1, 2, 4]
+    ],
+    key=['BT'],
+    **autotune_cache_kwargs,
+)
+@triton.jit(do_not_specialize=['T'])
+def prepare_wy_repr_fwd_kernel_safe(
+    A_ab,
+    A_ab_inv,
+    cu_seqlens,
+    chunk_indices,
+    T,
+    H: tl.constexpr,
+    BT: tl.constexpr,
+    BC: tl.constexpr,  # placeholder, do not delete
+    IS_VARLEN: tl.constexpr,
+):
+    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
+    i_b, i_h = i_bh // H, i_bh % H
+    if IS_VARLEN:
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = eos - bos
+    else:
+        bos = i_b * T
+
+    NB: tl.constexpr = 16
+    NS: tl.constexpr = BT // NB
+    o_i = tl.arange(0, NB)
+    # hierarchical (I - L)^-1 over 16x16 blocks: exact nilpotent base inverses
+    # combined level by level with M21 = M22 L21 M11
+    o_c1 = NB + o_i
+    m_lo = o_i[:, None] > o_i[None, :]
+    b_zero = tl.zeros([NB, NB], dtype=tl.float32)
+
+    r_0 = i_t * BT + o_i
+    m_r0 = r_0 < T
+    o_A0 = A_ab + (bos * H + i_h) * BT + r_0[:, None] * (H * BT)
+    o_I0 = A_ab_inv + (bos * H + i_h) * BT + r_0[:, None] * (H * BT)
+    b_L00 = tl.where(m_lo, tl.load(o_A0 + o_i[None, :], mask=m_r0[:, None], other=0.0), 0.0).to(tl.float16)
+    b_T00 = _inv_diag16(b_L00)
+    tl.store(o_I0 + o_i[None, :], b_T00, mask=m_r0[:, None])
+    if NS >= 2:
+        r_1 = i_t * BT + NB + o_i
+        m_r1 = r_1 < T
+        o_A1 = A_ab + (bos * H + i_h) * BT + r_1[:, None] * (H * BT)
+        o_I1 = A_ab_inv + (bos * H + i_h) * BT + r_1[:, None] * (H * BT)
+        b_L11 = tl.where(m_lo, tl.load(o_A1 + o_c1[None, :], mask=m_r1[:, None], other=0.0), 0.0).to(tl.float16)
+        b_L10 = tl.load(o_A1 + o_i[None, :], mask=m_r1[:, None], other=0.0).to(tl.float16)
+        b_T11 = _inv_diag16(b_L11)
+        b_T10 = tl.dot(b_T11.to(tl.float16), tl.dot(b_L10, b_T00.to(tl.float16)).to(tl.float16))
+        tl.store(o_I1 + o_i[None, :], b_T10, mask=m_r1[:, None])
+        tl.store(o_I1 + o_c1[None, :], b_T11, mask=m_r1[:, None])
+        tl.store(o_I0 + o_c1[None, :], b_zero, mask=m_r0[:, None])
+        if NS == 4:
+            o_c2 = 2 * NB + o_i
+            o_c3 = 3 * NB + o_i
+            r_2 = i_t * BT + 2 * NB + o_i
+            r_3 = i_t * BT + 3 * NB + o_i
+            m_r2 = r_2 < T
+            m_r3 = r_3 < T
+            o_A2 = A_ab + (bos * H + i_h) * BT + r_2[:, None] * (H * BT)
+            o_A3 = A_ab + (bos * H + i_h) * BT + r_3[:, None] * (H * BT)
+            o_I2 = A_ab_inv + (bos * H + i_h) * BT + r_2[:, None] * (H * BT)
+            o_I3 = A_ab_inv + (bos * H + i_h) * BT + r_3[:, None] * (H * BT)
+            b_L22 = tl.where(m_lo, tl.load(o_A2 + o_c2[None, :], mask=m_r2[:, None], other=0.0), 0.0).to(tl.float16)
+            b_L33 = tl.where(m_lo, tl.load(o_A3 + o_c3[None, :], mask=m_r3[:, None], other=0.0), 0.0).to(tl.float16)
+            b_L20 = tl.load(o_A2 + o_i[None, :], mask=m_r2[:, None], other=0.0).to(tl.float16)
+            b_L21 = tl.load(o_A2 + o_c1[None, :], mask=m_r2[:, None], other=0.0).to(tl.float16)
+            b_L30 = tl.load(o_A3 + o_i[None, :], mask=m_r3[:, None], other=0.0).to(tl.float16)
+            b_L31 = tl.load(o_A3 + o_c1[None, :], mask=m_r3[:, None], other=0.0).to(tl.float16)
+            b_L32 = tl.load(o_A3 + o_c2[None, :], mask=m_r3[:, None], other=0.0).to(tl.float16)
+
+            b_T22 = _inv_diag16(b_L22)
+            b_T33 = _inv_diag16(b_L33)
+            b_T32 = tl.dot(b_T33.to(tl.float16), tl.dot(b_L32, b_T22.to(tl.float16)).to(tl.float16))
+            b_P1 = tl.dot(b_L20, b_T00.to(tl.float16)) + tl.dot(b_L21, b_T10.to(tl.float16))
+            b_P2 = tl.dot(b_L30, b_T00.to(tl.float16)) + tl.dot(b_L31, b_T10.to(tl.float16))
+            b_T20 = tl.dot(b_T22.to(tl.float16), b_P1.to(tl.float16))
+            b_T21 = tl.dot(b_T22.to(tl.float16), tl.dot(b_L21, b_T11.to(tl.float16)).to(tl.float16))
+            b_T30 = tl.dot(b_T32.to(tl.float16), b_P1.to(tl.float16)) + tl.dot(b_T33.to(tl.float16), b_P2.to(tl.float16))
+            b_T31 = tl.dot(b_T32.to(tl.float16), tl.dot(b_L21, b_T11.to(tl.float16)).to(tl.float16)) \
+                + tl.dot(b_T33.to(tl.float16), tl.dot(b_L31, b_T11.to(tl.float16)).to(tl.float16))
+
+            tl.store(o_I0 + o_c2[None, :], b_zero, mask=m_r0[:, None])
+            tl.store(o_I0 + o_c3[None, :], b_zero, mask=m_r0[:, None])
+            tl.store(o_I1 + o_c2[None, :], b_zero, mask=m_r1[:, None])
+            tl.store(o_I1 + o_c3[None, :], b_zero, mask=m_r1[:, None])
+            tl.store(o_I2 + o_i[None, :], b_T20, mask=m_r2[:, None])
+            tl.store(o_I2 + o_c1[None, :], b_T21, mask=m_r2[:, None])
+            tl.store(o_I2 + o_c2[None, :], b_T22, mask=m_r2[:, None])
+            tl.store(o_I2 + o_c3[None, :], b_zero, mask=m_r2[:, None])
+            tl.store(o_I3 + o_i[None, :], b_T30, mask=m_r3[:, None])
+            tl.store(o_I3 + o_c1[None, :], b_T31, mask=m_r3[:, None])
+            tl.store(o_I3 + o_c2[None, :], b_T32, mask=m_r3[:, None])
+            tl.store(o_I3 + o_c3[None, :], b_T33, mask=m_r3[:, None])
+
+
 @triton.heuristics({
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
@@ -274,6 +394,7 @@ def prepare_wy_repr_fwd(
     cu_seqlens: torch.LongTensor | None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
+    safe_gate: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     B, T, H, _ = ag.shape
     BT = chunk_size
@@ -282,7 +403,12 @@ def prepare_wy_repr_fwd(
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     BC = min(BT, 32)
-    fwd_fn = prepare_wy_repr_fwd_kernel_chunk64 if BT == 64 else prepare_wy_repr_fwd_kernel_chunk32
+    if safe_gate:
+        # the tensor-core inversion relies on bounded-gate decay to keep the
+        # Neumann products small; unbounded gates fall back to the serial one
+        fwd_fn = prepare_wy_repr_fwd_kernel_safe
+    else:
+        fwd_fn = prepare_wy_repr_fwd_kernel_chunk64 if BT == 64 else prepare_wy_repr_fwd_kernel_chunk32
     A_ab_inv = torch.empty_like(A_ab)
     fwd_fn[(NT, B * H)](
         A_ab=A_ab,
