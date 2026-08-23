@@ -64,9 +64,6 @@ def prepare_wy_repr_fwd_kernel_chunk32(
 
 @triton.jit
 def _inv_diag16(b_L):
-    # (I - L)^-1 = (I + L)(I + L^2)(I + L^4)(I + L^8), exact for strictly
-    # lower-triangular 16x16 L (L^16 = 0). fp16 operands with fp32 accumulate:
-    # strictly-lower gated entries and their Neumann products are bounded.
     o_i = tl.arange(0, 16)
     b_I = (o_i[:, None] == o_i[None, :]).to(tl.float16)
     b_L2 = tl.dot(b_L, b_L).to(tl.float16)
@@ -113,8 +110,6 @@ def prepare_wy_repr_fwd_kernel_safe(
     NB: tl.constexpr = 16
     NS: tl.constexpr = BT // NB
     o_i = tl.arange(0, NB)
-    # hierarchical (I - L)^-1 over 16x16 blocks: exact nilpotent base inverses
-    # combined level by level with M21 = M22 L21 M11
     o_c1 = NB + o_i
     m_lo = o_i[:, None] > o_i[None, :]
     b_zero = tl.zeros([NB, NB], dtype=tl.float32)
@@ -404,8 +399,8 @@ def prepare_wy_repr_fwd(
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     BC = min(BT, 32)
     if safe_gate:
-        # the tensor-core inversion relies on bounded-gate decay to keep the
-        # Neumann products small; unbounded gates fall back to the serial one
+        if BT not in (16, 32, 64):
+            raise ValueError(f"the safe-gate inversion supports chunk_size 16/32/64, got {BT}")
         fwd_fn = prepare_wy_repr_fwd_kernel_safe
     else:
         fwd_fn = prepare_wy_repr_fwd_kernel_chunk64 if BT == 64 else prepare_wy_repr_fwd_kernel_chunk32

@@ -1351,7 +1351,7 @@ def chunk_dplr_delta_rule_tilelang(
     cp_context=None,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
-    del cu_seqlens_cpu, safe_gate, lower_bound
+    del cu_seqlens_cpu, safe_gate
     if "head_first" in kwargs:
         raise DeprecationWarning(
             "head_first has been removed; inputs must use [B, T, H, ...]"
@@ -1363,7 +1363,9 @@ def chunk_dplr_delta_rule_tilelang(
         assert output_final_state is False, "Output final state is not supported for CP"
         assert cp_context.cu_seqlens is not None, "cu_seqlens is required for CP"
         cu_seqlens = cp_context.cu_seqlens
-    chunk_size = 16 if chunk_size is None else int(chunk_size)
+    if chunk_size is None:
+        from fla.ops.generalized_delta_rule.dplr.chunk import gate_bound_is_safe
+        chunk_size = 64 if lower_bound is not None and gate_bound_is_safe(lower_bound, 64) else 16
     scale_f = float(q.shape[-1] ** -0.5 if scale is None else scale)
     n_seqs = len(cu_seqlens) - 1 if cu_seqlens is not None else q.shape[0]
     if initial_state is not None:

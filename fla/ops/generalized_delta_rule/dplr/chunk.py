@@ -170,8 +170,6 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
         disable_recompute: bool = False,
         cp_context: FLACPContext | None = None,
     ):
-        # chunk_size=16 is the numerically conservative default; a caller-asserted
-        # lower_bound tight enough for 64-row gate factorization defaults to 64.
         if chunk_size is None:
             if TRITON_ABOVE_3_4_0 and lower_bound is not None and gate_bound_is_safe(lower_bound, 64):
                 chunk_size = 64
@@ -514,7 +512,9 @@ def chunk_dplr_delta_rule(
             When `True`, the kernel can use M=16 TensorCore acceleration.
             The safe range is approximately `[-5, 0)`. Default: `False`.
         chunk_size (Optional[int]):
-            Chunk size for the chunked computation. Default: `None`, which means 16.
+            Chunk size for the chunked computation. Default: `None`, which means 64
+            when `lower_bound` is given and `gate_bound_is_safe(lower_bound, 64)`
+            holds, and 16 otherwise.
         disable_recompute (Optional[bool]):
             Whether to disable gradient recomputation in the kernel. Default: `False`.
         cp_context (Optional[FLACPContext]):
