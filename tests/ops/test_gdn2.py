@@ -36,7 +36,7 @@ import torch.nn.functional as F
 
 from fla.ops.gdn2 import chunk_gdn2, fused_recurrent_gdn2, naive_recurrent_gdn2
 from fla.ops.kda.gate import naive_kda_gate, naive_kda_lowerbound_gate
-from fla.utils import assert_close, device
+from fla.utils import IS_NVIDIA, assert_close, device
 
 
 def _activate_g(g, A_log, dt_bias, safe_gate, lower_bound):
@@ -114,6 +114,28 @@ def test_fused_recurrent(B, T, H, K, V, scale, use_qk_l2norm_in_kernel, dtype):
         v=v, g=g, b=b, w=w, scale=scale,
         use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel, output_final_state=True,
     )
+    assert_close("o", ref, tri, 0.005)
+    assert_close("ht", ref_ht, tri_ht, 0.005)
+
+
+@pytest.mark.skipif(not IS_NVIDIA, reason="NVIDIA GPU required")
+def test_fused_recurrent_gva():
+    torch.manual_seed(42)
+    B, T, H, HV, K, V = 1, 64, 2, 4, 32, 64
+    q = torch.randn(B, T, H, K, device=device)
+    k = torch.randn_like(q)
+    v = torch.randn(B, T, HV, V, device=device)
+    g = torch.empty(B, T, HV, K, device=device).uniform_(-5.0, -0.1)
+    b = torch.rand(B, T, HV, K, device=device)
+    w = torch.rand(B, T, HV, V, device=device)
+
+    q = F.normalize(q, p=2, dim=-1)
+    k = F.normalize(k, p=2, dim=-1)
+    q_ref = q.repeat_interleave(HV // H, dim=2)
+    k_ref = k.repeat_interleave(HV // H, dim=2)
+    ref, ref_ht = naive_recurrent_gdn2(q_ref, k_ref, v, g, b, w, output_final_state=True)
+    tri, tri_ht = fused_recurrent_gdn2(q, k, v, g, b, w, output_final_state=True)
+
     assert_close("o", ref, tri, 0.005)
     assert_close("ht", ref_ht, tri_ht, 0.005)
 
