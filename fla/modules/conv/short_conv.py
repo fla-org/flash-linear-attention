@@ -247,4 +247,4 @@ class ShortConvolution(nn.Conv1d):
 
     @property
     def state_size(self) -> int:
-        return self.hidden_size * self.kernel_size
+        return self.hidden_size * self.kernel_size[0]
