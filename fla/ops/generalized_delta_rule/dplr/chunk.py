@@ -94,6 +94,7 @@ def chunk_dplr_fwd(
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
+        safe_gate=safe_gate,
     )
 
     if cp_context is not None:
@@ -169,14 +170,12 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
         disable_recompute: bool = False,
         cp_context: FLACPContext | None = None,
     ):
-        # Due to gate numerical stability consideration, we only support chunk_size=16 when safe_gate=True
-        # And in practice, chunk_size=16 is sufficient for no safe gate situations.
-        # It's different from the other chunk implementations.
         if chunk_size is None:
-            chunk_size = 16
-        elif TRITON_ABOVE_3_4_0:
-            chunk_size = chunk_size
-        else:
+            if TRITON_ABOVE_3_4_0 and lower_bound is not None and gate_bound_is_safe(lower_bound, 64):
+                chunk_size = 64
+            else:
+                chunk_size = 16
+        elif not TRITON_ABOVE_3_4_0:
             # Avoid Triton Compiler error
             warnings.warn(
                 "Set chunk_size to 16, to avoid triton compiler erorr. "
@@ -325,6 +324,7 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
                 cu_seqlens=cu_seqlens,
                 chunk_size=chunk_size,
                 chunk_indices=ctx.chunk_indices,
+                safe_gate=ctx.safe_gate,
             )
             del A_ab
             h, v_new, _ = chunk_dplr_fwd_h(
@@ -512,7 +512,9 @@ def chunk_dplr_delta_rule(
             When `True`, the kernel can use M=16 TensorCore acceleration.
             The safe range is approximately `[-5, 0)`. Default: `False`.
         chunk_size (Optional[int]):
-            Chunk size for the chunked computation. Default: `None`, which means 16.
+            Chunk size for the chunked computation. Default: `None`, which means 64
+            when `lower_bound` is given and `gate_bound_is_safe(lower_bound, 64)`
+            holds, and 16 otherwise.
         disable_recompute (Optional[bool]):
             Whether to disable gradient recomputation in the kernel. Default: `False`.
         cp_context (Optional[FLACPContext]):
