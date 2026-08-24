@@ -300,18 +300,20 @@ def test_fused_recurrent_state_v_first(
 
 
 @pytest.mark.parametrize(
-    ("B", "T", "H", "HV", "D", "scale", "has_dt_bias", "safe_gate", "dtype"),
+    ("B", "T", "H", "HV", "D", "scale", "has_a_log", "has_dt_bias", "safe_gate", "dtype"),
     [
         pytest.param(
             *test,
-            id="B{}-T{}-H{}-HV{}-D{}-scale{}-has_dt_bias{}-safe_gate{}-{}".format(*test),
+            id="B{}-T{}-H{}-HV{}-D{}-scale{}-has_a_log{}-has_dt_bias{}-safe_gate{}-{}".format(*test),
         )
         for test in [
-            (1, 64, 1, 1, 64, 1, False, False, torch.float),
-            (2, 256, 2, 2, 64, 1, True, False, torch.float),
-            (2, 512, 2, 4, 64, 0.1, True, True, torch.float16),
-            (3, 1000, 2, 8, 128, 1, False, False, torch.float16),
-            (4, 1024, 4, 4, 128, 0.1, True, True, torch.float16),
+            (1, 64, 1, 1, 64, 1, True, False, False, torch.float),
+            (2, 256, 2, 2, 64, 1, True, True, False, torch.float),
+            (2, 512, 2, 4, 64, 0.1, True, True, True, torch.float16),
+            (3, 1000, 2, 8, 128, 1, True, False, False, torch.float16),
+            (4, 1024, 4, 4, 128, 0.1, True, True, True, torch.float16),
+            (1, 64, 1, 1, 64, 1, False, False, True, torch.float),
+            (2, 256, 2, 4, 64, 1, False, True, True, torch.float),
         ]
     ],
 )
@@ -322,6 +324,7 @@ def test_fused_recurrent_gate_in_kernel(
     HV: int,
     D: int,
     scale: float,
+    has_a_log: bool,
     has_dt_bias: bool,
     safe_gate: bool,
     dtype: torch.dtype,
@@ -336,7 +339,7 @@ def test_fused_recurrent_gate_in_kernel(
     v = torch.rand(B, T, HV, D, dtype=dtype, device=device)
     beta = torch.rand(B, T, HV, dtype=dtype, device=device).sigmoid()
     g_raw = torch.randn(B, T, HV, D, dtype=torch.float32, device=device)
-    A_log = torch.log(torch.empty(HV, dtype=torch.float32, device=device).uniform_(1, 16))
+    A_log = torch.log(torch.empty(HV, dtype=torch.float32, device=device).uniform_(1, 16)) if has_a_log else None
     dt_bias = torch.randn(HV * D, dtype=torch.float32, device=device) if has_dt_bias else None
     h0 = torch.randn(B, HV, D, D, dtype=torch.float32, device=device)
 
@@ -361,7 +364,7 @@ def test_fused_recurrent_gate_in_kernel(
         v=v.clone(),
         g=g_raw.clone(),
         beta=beta.clone(),
-        A_log=A_log.clone(),
+        A_log=A_log.clone() if A_log is not None else None,
         dt_bias=dt_bias.clone() if dt_bias is not None else None,
         scale=scale,
         initial_state=h0.clone(),
@@ -1049,20 +1052,24 @@ def test_chunk_varlen_prefill(
 
 
 @pytest.mark.parametrize(
-    ("B", "T", "H", "D", "HAS_BIAS", "LOWER_BOUND"),
+    ("B", "T", "H", "D", "HAS_A_LOG", "HAS_BIAS", "LOWER_BOUND"),
     [
-        pytest.param(*test, id="B{}-T{}-H{}-D{}-bias{}-lowerbound{}".format(*test))
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-a_log{}-bias{}-lowerbound{}".format(*test))
         for test in [
-            (1, 2, 2, 12, False, -5.0),
-            (1, 32, 2, 16, False, -5.0),
-            (2, 64, 4, 32, False, -5.0),
-            (4, 128, 8, 64, False, -5.0),
-            (4, 128, 8, 128, False, None),
-            (1, 2, 2, 12, True, None),
-            (1, 32, 2, 16, True, None),
-            (2, 64, 4, 32, True, None),
-            (4, 128, 8, 64, True, None),
-            (4, 128, 8, 128, True, None),
+            (1, 2, 2, 12, True, False, -5.0),
+            (1, 32, 2, 16, True, False, -5.0),
+            (2, 64, 4, 32, True, False, -5.0),
+            (4, 128, 8, 64, True, False, -5.0),
+            (4, 128, 8, 128, True, False, None),
+            (1, 2, 2, 12, True, True, None),
+            (1, 32, 2, 16, True, True, None),
+            (2, 64, 4, 32, True, True, None),
+            (4, 128, 8, 64, True, True, None),
+            (4, 128, 8, 128, True, True, None),
+            (1, 2, 2, 12, False, False, -5.0),
+            (2, 64, 4, 32, False, False, -5.0),
+            (4, 128, 8, 64, False, True, -5.0),
+            (4, 128, 8, 128, False, True, -5.0),
         ]
     ],
 )
@@ -1071,48 +1078,60 @@ def test_gate(
     T: int,
     H: int,
     D: int,
+    HAS_A_LOG: bool,
     HAS_BIAS: bool,
     LOWER_BOUND: float | None,
 ):
     torch.manual_seed(42)
     g = torch.randn(B, T, H, D, dtype=torch.float32) * 10
-    A_log = torch.log(torch.randn(1, 1, H, 1, dtype=torch.float32).uniform_(1, 16))
+    A_log = torch.log(torch.randn(1, 1, H, 1, dtype=torch.float32).uniform_(1, 16)) if HAS_A_LOG else None
     dt_bias = torch.randn(H * D, dtype=torch.float32) if HAS_BIAS else None
-    g, A_log = map(lambda x: x.to(device).requires_grad_(True), (g, A_log))
+    g = g.to(device).requires_grad_(True)
+    if A_log is not None:
+        A_log = A_log.to(device).requires_grad_(True)
     if dt_bias is not None:
         dt_bias = dt_bias.to(device).requires_grad_(True)
     do = torch.randn_like(g).view(B, T, H, D)
 
     if LOWER_BOUND is not None:
         ref = naive_kda_lowerbound_gate(
-            g.clone(), A_log.clone(), dt_bias.clone() if dt_bias is not None else None, LOWER_BOUND
+            g=g.clone(),
+            A_log=A_log.clone() if A_log is not None else None,
+            dt_bias=dt_bias.clone() if dt_bias is not None else None,
+            lower_bound=LOWER_BOUND,
         )
     else:
         ref = naive_kda_gate(
-            g.clone(), A_log.clone(), dt_bias.clone() if dt_bias is not None else None,
+            g=g.clone(),
+            A_log=A_log.clone(),
+            dt_bias=dt_bias.clone() if dt_bias is not None else None,
         )
     tri = fused_kda_gate(
-        g.clone(), A_log.clone(), dt_bias.clone() if dt_bias is not None else None,
-        lower_bound=LOWER_BOUND
+        g=g.clone(),
+        A_log=A_log.clone() if A_log is not None else None,
+        dt_bias=dt_bias.clone() if dt_bias is not None else None,
+        lower_bound=LOWER_BOUND,
     )
     (ref * do).sum().backward(retain_graph=True)
 
-    ref_dg, ref_dA = g.grad, A_log.grad
+    ref_dg = g.grad
+    ref_dA = A_log.grad if A_log is not None else None
     ref_dbias = dt_bias.grad if dt_bias is not None else None
-    g.grad = A_log.grad = None
+    g.grad = None
+    if A_log is not None:
+        A_log.grad = None
     if dt_bias is not None:
         dt_bias.grad = None
 
     ((tri * do).sum()).backward(retain_graph=True)
-    tri_dg, tri_dA = g.grad, A_log.grad
+    tri_dg = g.grad
+    tri_dA = A_log.grad if A_log is not None else None
     tri_dbias = dt_bias.grad if dt_bias is not None else None
-    g.grad = A_log.grad = None
-    if dt_bias is not None:
-        dt_bias.grad = None
 
     assert_close("o", ref, tri, 1e-4)
     assert_close("dg", ref_dg, tri_dg, 1e-4)
-    assert_close("dA", ref_dA, tri_dA, 1e-4)
+    if HAS_A_LOG:
+        assert_close("dA", ref_dA, tri_dA, 1e-4)
     if HAS_BIAS:
         assert_close("dbias", ref_dbias, tri_dbias, 1e-4)
 

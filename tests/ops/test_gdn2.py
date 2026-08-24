@@ -42,9 +42,17 @@ from fla.utils import assert_close, device
 def _activate_g(g, A_log, dt_bias, safe_gate, lower_bound):
     """Reference gate activation matching the kernel's use_gate_in_kernel path."""
     if safe_gate:
-        return naive_kda_lowerbound_gate(g.float(), A_log.float(), dt_bias.float() if dt_bias is not None else None,
-                                         lower_bound=lower_bound)
-    return naive_kda_gate(g.float(), A_log.float(), dt_bias.float() if dt_bias is not None else None)
+        return naive_kda_lowerbound_gate(
+            g=g.float(),
+            A_log=A_log.float() if A_log is not None else None,
+            dt_bias=dt_bias.float() if dt_bias is not None else None,
+            lower_bound=lower_bound,
+        )
+    return naive_kda_gate(
+        g=g.float(),
+        A_log=A_log.float(),
+        dt_bias=dt_bias.float() if dt_bias is not None else None,
+    )
 
 
 def _rand_inputs(B, T, H, K, V, dtype, *, gate_in_kernel=False, b_scale=1.0, seed=42):
@@ -112,20 +120,24 @@ def test_fused_recurrent(B, T, H, K, V, scale, use_qk_l2norm_in_kernel, dtype):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize(
-    ("B", "T", "H", "K", "V", "has_dt_bias", "safe_gate"),
+    ("B", "T", "H", "K", "V", "has_a_log", "has_dt_bias", "safe_gate"),
     [
-        pytest.param(*p, id="B{}-T{}-H{}-K{}-V{}-dt_bias{}-safe_gate{}".format(*p))
+        pytest.param(*p, id="B{}-T{}-H{}-K{}-V{}-a_log{}-dt_bias{}-safe_gate{}".format(*p))
         for p in [
-            (2, 100, 2, 64, 64, True, False),
-            (2, 100, 2, 64, 64, False, False),
-            (1, 128, 2, 64, 64, True, True),
+            (2, 100, 2, 64, 64, True, True, False),
+            (2, 100, 2, 64, 64, True, False, False),
+            (1, 128, 2, 64, 64, True, True, True),
+            (2, 100, 2, 64, 64, False, False, True),
+            (1, 128, 2, 64, 64, False, True, True),
         ]
     ],
 )
-def test_fused_recurrent_gate_in_kernel(B, T, H, K, V, has_dt_bias, safe_gate):
+def test_fused_recurrent_gate_in_kernel(B, T, H, K, V, has_a_log, has_dt_bias, safe_gate):
     """use_gate_in_kernel=True must match the manually-activated gate path."""
     dtype = torch.float32
     q, k, v, g, b, w, A_log, dt_bias = _rand_inputs(B, T, H, K, V, dtype, gate_in_kernel=True)
+    if not has_a_log:
+        A_log = None
     if not has_dt_bias:
         dt_bias = None
     lower_bound = -5.0 if safe_gate else None
