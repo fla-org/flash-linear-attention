@@ -156,6 +156,7 @@ def chunk_local_cumsum_scalar_kernel_npu(
     IS_VARLEN: tl.constexpr,
 ):
     core_id = tl.program_id(0)
+    T = T.to(tl.int64)
     for tid in tl.range(core_id, task_num, num_core):
         task_id = tid.to(tl.int64)
         i_t = task_id // (B * H)
