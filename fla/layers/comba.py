@@ -275,7 +275,10 @@ class Comba(nn.Module):
         v = rearrange(v, '... (h d) -> ... h d', d=self.head_v_dim)
 
         if self.num_v_heads > self.num_heads:
-            q, k = map(lambda x: repeat(x, '... h d -> ... (h g) d', g=self.num_v_heads // self.num_heads), (q, k))
+            q, k, p = map(
+                lambda x: repeat(x, '... h d -> ... (h g) d', g=self.num_v_heads // self.num_heads),
+                (q, k, p),
+            )
 
         beta = self.b_proj(hidden_states).sigmoid()
         g = -self.A_log.float().exp() * F.softplus(self.a_proj(hidden_states).float() + self.dt_bias)
