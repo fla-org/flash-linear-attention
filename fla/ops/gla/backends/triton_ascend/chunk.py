@@ -15,7 +15,7 @@ import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp2
-from fla.utils import input_guard
+from fla.utils import ascend_compile_kwargs, input_guard
 from fla.utils.ascend_ub_manager import (
     compute_row_tile_block_size,
     get_npu_properties,
@@ -26,6 +26,9 @@ _BC = 16
 _SAFETY_MARGIN = 0.80
 _FALLBACK = 16
 _MAX_TILE = 64
+
+# disable auto-multi-buffer on inter and K>256 intra-A split/merge launches
+_GLA_COMPILE_KWARGS = ascend_compile_kwargs()
 
 
 def _get_bk(K: int) -> int:
@@ -311,6 +314,7 @@ def chunk_gla_fwd_intra_gk_npu(
             offset_keys=('NK_OFFSET', 'NTNC_OFFSET', 'BH_OFFSET'),
             quanta=(1, NC, 1),
             kernel_kwargs=split_base,
+            compile_kwargs=_GLA_COMPILE_KWARGS,
         )
         merge_base = dict(
             A=A_intra, A2=A, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices,
@@ -322,6 +326,7 @@ def chunk_gla_fwd_intra_gk_npu(
             (NT, NC, B * H),
             offset_keys=('NT_OFFSET', 'NC_OFFSET', 'BH_OFFSET'),
             kernel_kwargs=merge_base,
+            compile_kwargs=_GLA_COMPILE_KWARGS,
         )
     return A
 
@@ -961,5 +966,6 @@ def chunk_gla_bwd_dqkg_npu(
             H=H, K=K, V=V, BT=BT, BK=BK, BV=BV, STATE_V_FIRST=state_v_first,
             A_OFFSET=0, NT_OFFSET=0, BH_OFFSET=0,
         ),
+        compile_kwargs=_GLA_COMPILE_KWARGS,
     )
     return dq2, dk2, dg

@@ -18,7 +18,7 @@ from fla.ops.kda.backends.triton_ascend.wy_fast import recompute_w_u_fwd_kda_npu
 from fla.ops.kda.chunk_intra_token_parallel import chunk_kda_fwd_intra_token_parallel
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp2
-from fla.utils import input_guard
+from fla.utils import ascend_compile_kwargs, input_guard
 from fla.utils.ascend_ub_manager import (
     ASCEND_MAX_GRID_DIM,
     compute_row_tile_block_size,
@@ -35,6 +35,10 @@ _FALLBACK_BK = 16
 _MAX_INTER_BK = 64
 # limit programs per launch to stay within Ascend AICore task time.
 _KDA_LAUNCH_BLOCK_BUDGET = 4096
+
+
+# disable auto-multi-buffer and AutoBlockify on the fused inter launch
+_INTER_COMPILE_KWARGS = ascend_compile_kwargs(blacklist_auto_blockify=True)
 
 
 def _get_sub_chunk_bk(K: int) -> int:
@@ -131,7 +135,11 @@ def _launch_inter_kernel(
         for bh_off in range(0, bh_total, max_bh):
             bh_len = min(max_bh, bh_total - bh_off)
             kernel_kwargs['BH_OFFSET'] = bh_off
-            kernel[(nt_len, bh_len)](num_warps=_NUM_WARPS_INTER, **kernel_kwargs)
+            kernel[(nt_len, bh_len)](
+                num_warps=_NUM_WARPS_INTER,
+                **kernel_kwargs,
+                **_INTER_COMPILE_KWARGS,
+            )
 
 
 @triton.jit(do_not_specialize=['T', 'NT_OFFSET', 'NC_OFFSET', 'BH_OFFSET'])

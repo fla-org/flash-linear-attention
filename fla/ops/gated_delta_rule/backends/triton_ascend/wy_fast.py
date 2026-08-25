@@ -16,7 +16,7 @@ import triton.runtime.driver as driver
 
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp2
-from fla.utils import input_guard
+from fla.utils import ascend_compile_kwargs, input_guard
 from fla.utils.ascend_ub_manager import (
     ASCEND_MAX_GRID_DIM,
     compute_row_tile_block_size,
@@ -117,7 +117,8 @@ def _launch_wy_kernel(kernel, *, NT: int, bh_total: int, kernel_kwargs: dict) ->
 
 def _launch_wy_core_grid(kernel, *, task_num: int, kernel_kwargs: dict) -> None:
     num_core = get_npu_properties()["num_aicore"]
-    kernel[(num_core,)](task_num=task_num, num_core=num_core, **kernel_kwargs)
+    # disable auto-multi-buffer on this core-grid launch
+    kernel[(num_core,)](task_num=task_num, num_core=num_core, **ascend_compile_kwargs(), **kernel_kwargs)
 
 
 @triton.heuristics({
@@ -672,29 +673,30 @@ def recompute_w_u_fwd_npu(
     if g is not None:
         g = g.transpose(1, 2).contiguous()
 
-    num_core = get_npu_properties()["num_aicore"]
-    task_num = NT * B * HV
-    recompute_w_u_fwd_kernel_npu[(num_core,)](
-        k=k,
-        v=v,
-        beta=beta,
-        w=w,
-        u=u,
-        A=A,
-        g=g,
-        cu_seqlens=cu_seqlens,
-        chunk_indices=chunk_indices,
-        T=T,
-        B=B,
-        task_num=task_num,
-        num_core=num_core,
-        H=H,
-        HV=HV,
-        K=K,
-        V=V,
-        BT=BT,
-        BK=BK,
-        BV=BV,
+    # disable auto-multi-buffer on this core-grid launch
+    _launch_wy_core_grid(
+        recompute_w_u_fwd_kernel_npu,
+        task_num=NT * B * HV,
+        kernel_kwargs=dict(
+            k=k,
+            v=v,
+            beta=beta,
+            w=w,
+            u=u,
+            A=A,
+            g=g,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+            T=T,
+            B=B,
+            H=H,
+            HV=HV,
+            K=K,
+            V=V,
+            BT=BT,
+            BK=BK,
+            BV=BV,
+        ),
     )
     return w, u
 
