@@ -20,13 +20,13 @@
 
 - [ ] I have read [CONTRIBUTING.md](../CONTRIBUTING.md) and follow its conventions (code style, docstrings, commit prefixes).
 - [ ] I have read [AGENTS.md](../AGENTS.md) and, where my change matches its scope, the relevant skill under [.agents/skills](../.agents/skills).
-- [ ] This is not a minor/cosmetic-only PR (typo, formatting, style-only tweaks).
-- [ ] Dependent tests pass locally or in CI; new behavior is covered by tests where applicable.
-- [ ] Kernel changes include same-hardware before/after benchmark numbers (dense + varlen where applicable).
+- [ ] Dependent tests pass locally or in CI, and new behavior is covered by tests where applicable (tick as N/A for changes with no testable code, e.g. docs-only).
+- [ ] Kernel changes include same-hardware before/after benchmark numbers, dense + varlen where applicable (tick as N/A when no kernel code changed).
+- [ ] This PR is minor/cosmetic-only (typo, formatting, style-only tweaks) — tick only if it is, and justify below.
 
-### If you cannot tick the "not minor" box above
+### If you ticked the "minor" box above
 
 Standalone minor PRs are normally not accepted (see [No busywork PRs](../CONTRIBUTING.md#submit-pull-requests)).
-If you believe yours is an exception, justify here why it is worth a maintainer's review time — PRs without a justification may be closed without review:
+Justify here why yours is worth a maintainer's review time — minor PRs without a justification may be closed without review:
 
 <!-- justification, or delete this section if not applicable -->
