@@ -394,14 +394,16 @@ def chunk_gla_fwd_kernel_o_npu(
                 p_h = tl.make_block_ptr(h_base, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
             b_q = tl.load(p_q, boundary_check=(0, 1))
             b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
-            b_qg = (b_q * exp2(b_g)).to(b_q.dtype)
+            # scale folded into the dot operand; multiplying the accumulator
+            # between the two dots breaks L0C-to-L0C dataflow and forces a
+            # fixpipe round-trip through UB (measured 22% slower on 910B3).
+            b_qg = (b_q * exp2(b_g) * scale).to(b_q.dtype)
             b_h = tl.load(p_h, boundary_check=(0, 1))
             if STATE_V_FIRST:
                 b_o += tl.dot(b_qg, tl.trans(b_h).to(b_qg.dtype))
             else:
                 b_o += tl.dot(b_qg, b_h.to(b_qg.dtype))
 
-        b_o *= scale
         o_t = i_t * BT + tl.arange(0, BT)
         m_t = o_t < T_cur
         p_a = tl.make_block_ptr(a_ptr, (T_cur, BT), (HV * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
