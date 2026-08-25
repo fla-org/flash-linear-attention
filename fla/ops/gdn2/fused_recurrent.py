@@ -444,9 +444,9 @@ def fused_recurrent_gdn2(
                 f"The number of initial states is expected to be equal to the number of input sequences, "
                 f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}."
             )
-    assert b.shape == (*q.shape[:3], k.shape[-1]), (
+    assert b.shape == (*v.shape[:3], k.shape[-1]), (
         f"b must have shape [B, T, HV, K]; got {tuple(b.shape)} "
-        f"vs expected {(*q.shape[:3], k.shape[-1])}."
+        f"vs expected {(*v.shape[:3], k.shape[-1])}."
     )
     assert w.shape == v.shape, (
         f"w must have shape [B, T, HV, V] matching v; got {tuple(w.shape)} "
