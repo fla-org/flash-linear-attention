@@ -180,6 +180,10 @@ def rotary_embedding_fwdbwd(
     if isinstance(seqlen_offsets, torch.Tensor):
         assert seqlen_offsets.shape == (N,)
         assert seqlen_offsets.dtype in [torch.int32, torch.int64]
+        sequence_lengths = T if not is_varlen else cu_seqlens[1:] - cu_seqlens[:-1]
+        required_seqlen = (sequence_lengths + seqlen_offsets).max().item()
+        if required_seqlen > TR:
+            raise ValueError(f"Rotary cache is too short, required {required_seqlen} positions but got {TR}")
     else:
         assert seqlen_offsets + T <= TR
 
