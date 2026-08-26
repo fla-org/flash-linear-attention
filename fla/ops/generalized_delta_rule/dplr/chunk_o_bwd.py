@@ -242,7 +242,7 @@ def chunk_dplr_bwd_o_kernel(
         for BK in BK_LIST
         for BV in BK_LIST
     ],
-    key=['BT'],
+    key=['BT', 'K', 'V'],
     **autotune_cache_kwargs,
 )
 @triton.jit
