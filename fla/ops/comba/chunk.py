@@ -312,22 +312,23 @@ def chunk_comba(
         k (torch.Tensor):
             keys of shape `[B, T, H, K]`.
         v (torch.Tensor):
-            values of shape `[B, T, H, V]`.
+            values of shape `[B, T, HV, V]`.
+            GVA (Grouped Value Attention) is applied if `HV > H`, where `HV` must be divisible by `H`.
         p (torch.Tensor):
             auxiliary keys of shape `[B, T, H, K]`.
         g (torch.Tensor):
-            (forget) gating tensor (in log space!) of shape `[B, T, H]`.
+            (forget) gating tensor (in log space!) of shape `[B, T, HV]`.
         beta (torch.Tensor):
-            betas of shape `[B, T, H]`.
+            betas of shape `[B, T, HV]`.
         scale (Optional[int]):
             Scale factor for the RetNet attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         initial_state (Optional[torch.Tensor]):
-            Initial state of shape `[N, H, K, V]` for `N` input sequences.
+            Initial state of shape `[N, HV, K, V]` for `N` input sequences.
             For equal-length input sequences, `N` equals the batch size `B`.
             Default: `None`.
         output_final_state (Optional[bool]):
-            Whether to output the final state of shape `[N, H, K, V]`. Default: `False`.
+            Whether to output the final state of shape `[N, HV, K, V]`. Default: `False`.
         use_qk_l2norm_in_kernel (bool):
             Whether to apply L2norm to the q/k tensor internally. Default: `False`.
         cu_seqlens (torch.LongTensor):
@@ -336,9 +337,9 @@ def chunk_comba(
 
     Returns:
         o (torch.Tensor):
-            Outputs of shape `[B, T, H, V]`.
+            Outputs of shape `[B, T, HV, V]`.
         final_state (torch.Tensor):
-            Final state of shape `[N, H, K, V]` if `output_final_state=True` else `None`.
+            Final state of shape `[N, HV, K, V]` if `output_final_state=True` else `None`.
 
     Examples::
         >>> import torch
@@ -373,6 +374,17 @@ def chunk_comba(
     """
     if p is None:
         p = k
+    if q.shape[2] != k.shape[2] or q.shape[2] != p.shape[2]:
+        raise ValueError(
+            f"q, k and p must have the same number of heads, "
+            f"but got q.shape[2]={q.shape[2]}, k.shape[2]={k.shape[2]} and p.shape[2]={p.shape[2]}"
+        )
+    H, HV = q.shape[2], v.shape[2]
+    if HV % H != 0:
+        raise ValueError(
+            f"For GVA, num_v_heads (HV={HV}) must be evenly divisible by "
+            f"num_heads (H={H}), but got HV % H = {HV % H}"
+        )
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(

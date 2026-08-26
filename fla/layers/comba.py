@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
-from einops import rearrange, repeat
+from einops import rearrange
 from torch.nn import functional as F
 
 from fla.layers.utils import get_layer_cache, repad_hidden_states, unpad_hidden_states, update_layer_cache
@@ -273,12 +273,6 @@ class Comba(nn.Module):
             q = q - self.D[None, None, :, None] * p
 
         v = rearrange(v, '... (h d) -> ... h d', d=self.head_v_dim)
-
-        if self.num_v_heads > self.num_heads:
-            q, k, p = map(
-                lambda x: repeat(x, '... h d -> ... (h g) d', g=self.num_v_heads // self.num_heads),
-                (q, k, p),
-            )
 
         beta = self.b_proj(hidden_states).sigmoid()
         g = -self.A_log.float().exp() * F.softplus(self.a_proj(hidden_states).float() + self.dt_bias)
