@@ -107,6 +107,7 @@ def fused_chunk_fwd_kernel(
         b_h = tl.load(p_h, mask=(o_k[:, None] < K) & (o_v[None, :] < V), other=0.0).to(tl.float32)
 
     for i_t in range(0, NT):
+        i_t = i_t.to(tl.int64)
         o_t = i_t * BT + tl.arange(0, BT)
         m_t = o_t < T
         o_k = i_k * BK + tl.arange(0, BK)
@@ -253,6 +254,7 @@ def fused_chunk_bwd_kernel(
         b_h = tl.load(p_h, mask=(o_v[:, None] < V) & (o_k[None, :] < K), other=0.0).to(tl.float32)
 
     for i_t in range(0, NT):
+        i_t = i_t.to(tl.int64)
         o_t = i_t * BT + tl.arange(0, BT)
         m_t = o_t < T
         o_k = i_k * BK + tl.arange(0, BK)
@@ -338,6 +340,7 @@ def fused_chunk_bwd_kernel(
     tl.debug_barrier()
 
     for i_t in range(NT - 1, -1, -1):
+        i_t = i_t.to(tl.int64)
         o_t = i_t * BT + tl.arange(0, BT)
         m_t = o_t < T
         o_k = i_k * BK + tl.arange(0, BK)

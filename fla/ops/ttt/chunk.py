@@ -89,6 +89,7 @@ def chunk_ttt_linear_fwd_kernel_h(
     b_b = tl.load(b + i_h * V + offs, mask=offs < V, other=0.)
 
     for i_t in range(NT):
+        i_t = i_t.to(tl.int64)
         o_t = i_t * BT + tl.arange(0, BT)
         m_v = (o_t[:, None] < T) & (o_v[None, :] < V)
         m_k = (o_k[:, None] < K) & (o_t[None, :] < T)
@@ -301,6 +302,7 @@ def chunk_ttt_linear_bwd_kernel_h(
     b_b = tl.load(b + i_h * V + offs, mask=offs < V, other=0.)
 
     for i_t in range(NT):
+        i_t = i_t.to(tl.int64)
         o_t = i_t * BT + tl.arange(0, BT)
         m_v = (o_t[:, None] < T) & (o_v[None, :] < V)
         m_k = (o_k[:, None] < K) & (o_t[None, :] < T)
@@ -509,6 +511,7 @@ def chunk_ttt_linear_bwd_kernel_norm(
     p_db = db + i_nh * V + o_v
 
     for i_t in range(NT - 1, -1, -1):
+        i_t = i_t.to(tl.int64)
         o_t = i_t * BT + tl.arange(0, BT)
         m_t = o_t < T
         m_k = m_t[:, None] & (o_k[None, :] < K)
