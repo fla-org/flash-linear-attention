@@ -94,6 +94,7 @@ def chunk_fwd_kernel_h(
             b_h = tl.load(p_h0, mask=(o_k[:, None] < K) & (o_v[None, :] < V), other=0.0).to(tl.float32)
 
     for i_t in range(NT):
+        i_t = i_t.to(tl.int64)
         i_s = i_t // NTS
         o_t = i_t * BT + tl.arange(0, BT)
         m_t = o_t < T
@@ -241,6 +242,7 @@ def chunk_bwd_kernel_dh(
             b_dh += tl.load(p_dht, mask=(o_k[:, None] < K) & (o_v[None, :] < V), other=0.0).to(tl.float32)
 
     for i_t in range(NT - 1, -1, -1):
+        i_t = i_t.to(tl.int64)
         i_s = i_t // (BS // BT)
         o_dh = ((boh + i_s) * H + i_h).to(tl.int64) * K*V
         if STATE_V_FIRST:

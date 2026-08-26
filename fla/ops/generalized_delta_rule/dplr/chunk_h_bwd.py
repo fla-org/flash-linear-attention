@@ -83,7 +83,7 @@ def chunk_dplr_bwd_kernel_dhu(
         tl.store(p_dh, b_dh.to(p_dh.dtype.element_ty), mask=m_h)
         b_dh_tmp = tl.zeros([BK, BV], dtype=tl.float32)
         for i_c in range(tl.cdiv(BT, BC) - 1, -1, -1):
-            o_c = i_t * BT + i_c * BC + tl.arange(0, BC)
+            o_c = i_t.to(tl.int64) * BT + i_c * BC + tl.arange(0, BC)
             m_c = o_c < T
             m_kc = (o_k[:, None] < K) & m_c[None, :]
             m_bgc = m_c[:, None] & (o_k[None, :] < K)

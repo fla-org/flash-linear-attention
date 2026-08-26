@@ -87,6 +87,7 @@ def chunk_fwd_kernel_h_split(
         p_hr = hr + i_sh * K*V + o_k[:, None] * V + o_v[None, :]
         tl.store(p_hr, b_h.to(p_hr.dtype.element_ty), mask=m_kv)
     for i_t in range(tl.cdiv(i_s * S, BT), tl.cdiv(min(i_s * S + S, T), BT)):
+        i_t = i_t.to(tl.int64)
         o_t = i_t * BT + tl.arange(0, BT)
         m_t = o_t < T
         p_k = k + (bos*H + i_h) * K + o_k[:, None] + o_t[None, :] * (H*K)
@@ -306,6 +307,7 @@ def chunk_bwd_kernel_dh_split(
         tl.store(p_dhr, b_dh.to(p_dhr.dtype.element_ty), mask=m_kv)
 
     for i_t in range(tl.cdiv(min(i_s * S + S, T), BT) - 1, tl.cdiv(i_s * S, BT) - 1, -1):
+        i_t = i_t.to(tl.int64)
         o_t = i_t * BT + tl.arange(0, BT)
         m_t = o_t < T
         p_q = q + (bos*HQ + i_hq) * K + o_k[:, None] + o_t[None, :] * (HQ*K)
