@@ -339,7 +339,7 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra_merge(
         for num_warps in [2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
-    key=['BT', 'HV', 'STATE_V_FIRST'],
+    key=['BT', 'HV', 'STATE_V_FIRST', 'K', 'V'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])

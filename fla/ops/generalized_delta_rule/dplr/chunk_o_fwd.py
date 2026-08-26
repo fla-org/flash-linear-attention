@@ -28,7 +28,7 @@ BK_LIST = [32, 64, 128] if check_shared_mem() else [16, 32]
         for num_warps in NUM_WARPS_AUTOTUNE
         for num_stages in [2, 3, 4]
     ],
-    key=['BT'],
+    key=['BT', 'K', 'V'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
