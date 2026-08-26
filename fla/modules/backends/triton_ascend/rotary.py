@@ -145,7 +145,10 @@ def rotary_embedding_fwdbwd_npu(
     R2 = R * 2
 
     assert D <= 256, "Only support D <= 256"
-    assert TR >= T, f"TR must be >= T, got {TR} and {T}"
+    if R2 > D:
+        raise ValueError(f"Rotary dimension must not exceed head dimension, got rotary_dim={R2} and head_dim={D}")
+    if not is_varlen:
+        assert TR >= T, f"TR must be >= T, got {TR} and {T}"
 
     assert cos.dtype == sin.dtype, f"cos and sin must have the same dtype, got {cos.dtype} and {sin.dtype}"
     assert x.dtype == cos.dtype, f"Input and cos/sin must have the same dtype, got {x.dtype} and {cos.dtype}"

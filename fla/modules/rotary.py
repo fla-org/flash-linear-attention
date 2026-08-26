@@ -169,7 +169,10 @@ def rotary_embedding_fwdbwd(
     R2 = R * 2
 
     assert D <= 256, "Only support D <= 256"
-    assert TR >= T, f"TR must be >= T, got {TR} and {T}"
+    if R2 > D:
+        raise ValueError(f"Rotary dimension must not exceed head dimension, got rotary_dim={R2} and head_dim={D}")
+    if not is_varlen:
+        assert TR >= T, f"TR must be >= T, got {TR} and {T}"
 
     assert cos.dtype == sin.dtype, f"cos and sin must have the same dtype, got {cos.dtype} and {sin.dtype}"
     assert x.dtype == cos.dtype, f"Input and cos/sin must have the same dtype, got {x.dtype} and {cos.dtype}"
@@ -359,6 +362,9 @@ class RotaryEmbedding(nn.Module):
         """
         super().__init__()
 
+        if dim % 2 != 0:
+            raise ValueError(f"Rotary dimension must be even, got {dim}")
+
         self.dim = dim
         self.base = float(base)
         self.scale_base = scale_base
@@ -453,6 +459,25 @@ class RotaryEmbedding(nn.Module):
                 self._cos_k_cached = (torch.cos(freqs) / scale).to(dtype)
                 self._sin_k_cached = (torch.sin(freqs) / scale).to(dtype)
 
+    def _update_cos_sin_cache_for_seqlen_offset(
+        self,
+        x: torch.Tensor,
+        seqlen_offset: int | torch.Tensor,
+        cu_seqlens: torch.Tensor | None,
+        max_seqlen: int | None,
+    ) -> None:
+        if max_seqlen is not None:
+            required_seqlen = max_seqlen
+        elif isinstance(seqlen_offset, int):
+            required_seqlen = x.shape[1] + seqlen_offset
+        else:
+            if cu_seqlens is None:
+                required_seqlen = max(x.shape[1], x.shape[1] + seqlen_offset.max().item())
+            else:
+                sequence_lengths = cu_seqlens[1:] - cu_seqlens[:-1]
+                required_seqlen = (sequence_lengths + seqlen_offset).max().item()
+        self._update_cos_sin_cache(max(int(required_seqlen), 0), device=x.device, dtype=x.dtype)
+
     def forward(
         self,
         q: torch.Tensor,
@@ -470,12 +495,11 @@ class RotaryEmbedding(nn.Module):
             Each sequence in x is shifted by this amount.
             Most commonly used in inference when we have KV cache.
         cu_seqlens: [N + 1] or None
-        max_seqlen: int
+        max_seqlen:
+            Optional cache length. When omitted, it is inferred from seqlen_offset;
+            passing it explicitly avoids a device-to-host sync for tensor offsets.
         """
-        if max_seqlen is not None:
-            self._update_cos_sin_cache(max_seqlen, device=q.device, dtype=q.dtype)
-        elif isinstance(seqlen_offset, int):
-            self._update_cos_sin_cache(q.shape[1] + seqlen_offset, device=q.device, dtype=q.dtype)
+        self._update_cos_sin_cache_for_seqlen_offset(q, seqlen_offset, cu_seqlens, max_seqlen)
         if self.scale is None:
             q = rotary_embedding(
                 q,
