@@ -332,24 +332,16 @@ def chunk_gla_fwd_intra_gk_npu(
 
 
 _FWD_O_BV = 128
-_FWD_O_MEM_MULT = 6.0
 
 
-def _get_fwd_o_bk(K: int) -> int:
-    """Host-pick K tile for fwd-o from UB budget."""
-    return compute_row_tile_block_size(
-        64,
-        K,
-        _FWD_O_MEM_MULT,
-        tiling_row=False,
-        safety_margin=_SAFETY_MARGIN,
-        fallback=_FALLBACK,
-        min_block=32,
-        max_block=min(128, triton.next_power_of_2(K)),
-    )
-
-
-@triton.heuristics({'IS_VARLEN': lambda args: args['cu_seqlens'] is not None})
+@triton.autotune(
+    configs=[
+        triton.Config({'BK': 128}),
+        triton.Config({'BK': 64}),
+        triton.Config({'BK': 32}),
+    ],
+    key=['H', 'HV', 'K', 'V', 'IS_VARLEN', 'STATE_V_FIRST'],
+)
 @triton.jit(do_not_specialize=['T', 'total_chunks', 'task_num', 'num_core'])
 def chunk_gla_fwd_kernel_o_npu(
     q, v, g, h, o, A, cu_seqlens, chunk_indices, scale, T,
@@ -399,14 +391,15 @@ def chunk_gla_fwd_kernel_o_npu(
                 p_h = tl.make_block_ptr(h_base, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
             b_q = tl.load(p_q, boundary_check=(0, 1))
             b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
-            b_qg = (b_q * exp2(b_g)).to(b_q.dtype)
+            # fold scale into the operand: an elementwise op on the accumulator
+            # between the two dots forces a fixpipe round-trip through UB
+            b_qg = (b_q * exp2(b_g) * scale).to(b_q.dtype)
             b_h = tl.load(p_h, boundary_check=(0, 1))
             if STATE_V_FIRST:
                 b_o += tl.dot(b_qg, tl.trans(b_h).to(b_qg.dtype))
             else:
                 b_o += tl.dot(b_qg, b_h.to(b_qg.dtype))
 
-        b_o *= scale
         o_t = i_t * BT + tl.arange(0, BT)
         m_t = o_t < T_cur
         p_a = tl.make_block_ptr(a_ptr, (T_cur, BT), (HV * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
@@ -445,7 +438,6 @@ def chunk_gla_fwd_o_gk_npu(
 
     o = torch.zeros_like(v)
     BV = min(_FWD_O_BV, triton.next_power_of_2(V))
-    BK = _get_fwd_o_bk(K)
     NV = triton.cdiv(V, BV)
     num_core = get_npu_properties()['num_aicore']
     task_num = NV * HV * total_chunks
@@ -465,12 +457,12 @@ def chunk_gla_fwd_o_gk_npu(
         K=K,
         V=V,
         BT=BT,
-        BK=BK,
         BV=BV,
         total_chunks=total_chunks,
         task_num=task_num,
         num_core=num_core,
         STATE_V_FIRST=state_v_first,
+        IS_VARLEN=cu_seqlens is not None,
     )
     return o
 
