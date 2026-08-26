@@ -10,6 +10,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.parallax.parallel import _block_size
+from fla.ops.utils.head import get_gqa_group_size
 from fla.ops.utils.op import exp2
 
 
@@ -167,7 +168,7 @@ def parallax_decode(
     """
     B, Sq, HQ, K = q.shape
     Skv, H = k.shape[1], k.shape[2]
-    G = HQ // H
+    G = get_gqa_group_size(HQ, H)
     if scale is None:
         scale = K ** -0.5
     window_size_left = -1 if window_size is None else window_size
@@ -322,7 +323,7 @@ def parallax_decode_one_step(
     if Sq != 1:
         raise ValueError(f"parallax_decode_one_step expects a single query (Sq=1), got Sq={Sq}")
     Skv, H = k.shape[1], k.shape[2]
-    G = HQ // H
+    G = get_gqa_group_size(HQ, H)
     if scale is None:
         scale = K ** -0.5
     window_size_left = -1 if window_size is None else window_size

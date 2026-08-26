@@ -8,6 +8,8 @@
 import torch
 import torch.nn.functional as F
 
+from fla.ops.utils.head import get_gqa_group_size
+
 
 def naive_parallel_attn(
     q: torch.Tensor,
@@ -45,7 +47,7 @@ def naive_parallel_attn(
     """
     B, T, HQ, D = q.shape
     H = k.shape[2]
-    G = HQ // H
+    G = get_gqa_group_size(HQ, H)
 
     if scale is None:
         scale = D ** -0.5
@@ -126,7 +128,7 @@ def naive_attn_decoding(
     HQ, D = q.shape[-2], q.shape[-1]
     V = v.shape[-1]
     H = k.shape[2]
-    G = HQ // H
+    G = get_gqa_group_size(HQ, H)
     if scale is None:
         scale = D ** -0.5
     if sink_bias is not None:
