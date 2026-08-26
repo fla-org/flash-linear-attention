@@ -138,7 +138,8 @@ def chunk_gsa_fwd_k_kernel_intra(
     NG: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_c, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    NV = tl.cdiv(V, BV)
+    i_v, i_c, i_bh = tl.program_id(0) % NV, (tl.program_id(0) // NV).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
     i_h = i_hq // NG
     i_t, i_i = (i_c // NC).to(tl.int64), i_c % NC
@@ -235,7 +236,8 @@ def chunk_gsa_bwd_k_kernel_dA(
     NG: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_c, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    NV = tl.cdiv(V, BV)
+    i_v, i_c, i_bh = tl.program_id(0) % NV, (tl.program_id(0) // NV).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
     i_h = i_hq // NG
     i_t, i_i, i_j = (i_c // (NC * NC)).to(tl.int64), (i_c % (NC * NC)) // NC, (i_c % (NC * NC)) % NC
@@ -479,7 +481,8 @@ def chunk_gsa_bwd_k_kernel_intra_dvg(
     NG: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_c, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    NV = tl.cdiv(V, BV)
+    i_v, i_c, i_bh = tl.program_id(0) % NV, (tl.program_id(0) // NV).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
     i_h = i_hq // NG
     i_t, i_i = (i_c // NC).to(tl.int64), i_c % NC
@@ -645,7 +648,7 @@ def chunk_gsa_fwd_k(
         NG=NG,
     )
 
-    def grid(meta): return (triton.cdiv(V, meta['BV']), NT * NC, B * HQ)
+    def grid(meta): return (triton.cdiv(V, meta['BV']) * NT * NC, B * HQ)
     chunk_gsa_fwd_k_kernel_intra[grid](
         v,
         g,
@@ -766,7 +769,7 @@ def chunk_gsa_bwd_k(
         states_in_fp32=True,
     )
     dA = q.new_empty(NV, B, T, HQ, BT)
-    grid = (NV, NT * NC * NC, B * HQ)
+    grid = (NV * NT * NC * NC, B * HQ)
     chunk_gsa_bwd_k_kernel_dA[grid](
         v,
         g,
@@ -827,7 +830,7 @@ def chunk_gsa_bwd_k(
     dv = dv.sum(0, dtype=dv.dtype)
     dgv = dgv.sum(0, dtype=dgv.dtype)
 
-    def grid(meta): return (triton.cdiv(V, meta['BV']), NT * NC, B * HQ)
+    def grid(meta): return (triton.cdiv(V, meta['BV']) * NT * NC, B * HQ)
     chunk_gsa_bwd_k_kernel_intra_dvg[grid](
         v,
         g,

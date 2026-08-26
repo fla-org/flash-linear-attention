@@ -133,7 +133,8 @@ def chunk_oja_fwd_intra(
     NG: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_c, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    NV = tl.cdiv(V, BV)
+    i_v, i_c, i_bh = tl.program_id(0) % NV, (tl.program_id(0) // NV).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
     i_h = i_hq // NG
     i_t, i_i = i_c // NC, i_c % NC
@@ -242,7 +243,7 @@ def chunk_oja_fwd_o(
         NG=NG,
     )
 
-    def grid(meta): return (triton.cdiv(V, meta['BV']), NT * NC, B * HQ)
+    def grid(meta): return (triton.cdiv(V, meta['BV']) * NT * NC, B * HQ)
     chunk_oja_fwd_intra[grid](
         v,
         gv,
@@ -294,7 +295,8 @@ def chunk_oja_bwd_kernel_dA(
     NC: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_c, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    NV = tl.cdiv(V, BV)
+    i_v, i_c, i_bh = tl.program_id(0) % NV, (tl.program_id(0) // NV).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     i_t, i_i, i_j = i_c // (NC * NC), (i_c % (NC * NC)) // NC, (i_c % (NC * NC)) % NC
     if IS_VARLEN:
@@ -391,7 +393,7 @@ def chunk_oja_bwd_dA(
 
     dA = v.new_empty(NV, B, T, H, BT)
     # 计算dA
-    grid = (NV, NT * NC * NC, B * H)
+    grid = (NV * NT * NC * NC, B * H)
     chunk_oja_bwd_kernel_dA[grid](
         v,
         gv,
@@ -593,7 +595,8 @@ def chunk_oja_bwd_kernel_dv_o(
     NC: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_c, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    NV = tl.cdiv(V, BV)
+    i_v, i_c, i_bh = tl.program_id(0) % NV, (tl.program_id(0) // NV).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     i_t, i_i = i_c // NC, i_c % NC
     if IS_VARLEN:
@@ -694,7 +697,7 @@ def chunk_oja_bwd_dv_o(
     dv2 = torch.empty_like(v, dtype=torch.float)
     dgv = torch.empty_like(gv)
     # 计算dA
-    def grid(meta): return (triton.cdiv(V, meta['BV']), NT * NC, B * H)
+    def grid(meta): return (triton.cdiv(V, meta['BV']) * NT * NC, B * H)
     chunk_oja_bwd_kernel_dv_o[grid](
         v=v,
         g=gv,
