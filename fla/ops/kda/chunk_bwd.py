@@ -127,7 +127,7 @@ def chunk_kda_bwd_kernel_dAv(
         if not (IS_NVIDIA_HOPPER and BK == 32 and num_warps == 4)
         if not (IS_NVIDIA_SM100 and BK == 32 and num_warps != 2)
     ],
-    key=['BT', 'HV', 'STATE_V_FIRST'],
+    key=['BT', 'HV', 'STATE_V_FIRST', 'K', 'V'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])

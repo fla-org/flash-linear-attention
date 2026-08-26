@@ -174,7 +174,7 @@ def chunk_precond_kda_bwd_dAv(
         for num_stages in [2, 3, 4]
         if not (IS_NVIDIA_HOPPER and BK == 32 and num_warps == 4)
     ],
-    key=['BT', 'TRANSPOSE_STATE'],
+    key=['BT', 'TRANSPOSE_STATE', 'K', 'V'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
