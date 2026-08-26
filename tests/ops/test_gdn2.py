@@ -22,7 +22,7 @@ import torch.nn.functional as F
 
 from fla.ops.gdn2 import chunk_gdn2, fused_recurrent_gdn2, naive_recurrent_gdn2
 from fla.ops.kda.gate import naive_kda_gate, naive_kda_lowerbound_gate
-from fla.utils import IS_NVIDIA, assert_close, device
+from fla.utils import assert_close, device
 
 
 def _activate_g(g, A_log, dt_bias, safe_gate, lower_bound):
@@ -78,12 +78,19 @@ def _rand_inputs(B, T, H, HV, K, V, dtype, *, gate_in_kernel=False, b_scale=1.0,
             (1, 130, 2, 2, 64, 128, 1.0, True, torch.float16),    # fp16, V != K
             (2, 128, 2, 4, 64, 64, 1.0, False, torch.float32),    # GVA: HV > H
             (2, 100, 2, 4, 64, 128, 1.0, True, torch.float16),    # GVA + l2norm + fp16, V != K
+            (1, 4, 1, 1, 48, 16, 1.0, False, torch.float32),      # non-power-of-2 K
         ]
     ],
 )
 def test_fused_recurrent(B, T, H, HV, K, V, scale, use_qk_l2norm_in_kernel, dtype):
     assert HV % H == 0
     q, k, v, g, b, w, _, _ = _rand_inputs(B, T, H, HV, K, V, dtype)
+    if K & (K - 1):
+        # poison the allocation past g so an unmasked out-of-bounds gate load fails loudly
+        numel = B * T * HV * K
+        storage = torch.full((numel + 64,), float("nan"), device=device)
+        g = storage[:numel].view(B, T, HV, K)
+        g.uniform_(-2.0, -0.1)
 
     # The reference gets normalized q/k expanded to HV heads; the kernel maps
     # value heads to qk heads itself (and normalizes when the flag is on).
@@ -110,24 +117,6 @@ def test_fused_recurrent(B, T, H, HV, K, V, scale, use_qk_l2norm_in_kernel, dtyp
         output_final_state=True,
         use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
     )
-    assert_close("o", ref, tri, 0.005)
-    assert_close("ht", ref_ht, tri_ht, 0.005)
-
-
-@pytest.mark.skipif(not IS_NVIDIA, reason="NVIDIA GPU required")
-def test_fused_recurrent_non_power_of_two_key_dim():
-    torch.manual_seed(42)
-    B, T, H, K, V = 1, 4, 1, 48, 16
-    q, k, v, _, b, w, _, _ = _rand_inputs(B, T, H, K, V, torch.float32)
-
-    numel = B * T * H * K
-    g_storage = torch.full((numel + 64,), float("nan"), device=device)
-    g = g_storage[:numel].view(B, T, H, K)
-    g.uniform_(-2.0, -0.1)
-
-    ref, ref_ht = naive_recurrent_gdn2(q, k, v, g, b, w, output_final_state=True)
-    tri, tri_ht = fused_recurrent_gdn2(q, k, v, g, b, w, output_final_state=True)
-
     assert_close("o", ref, tri, 0.005)
     assert_close("ht", ref_ht, tri_ht, 0.005)
 
