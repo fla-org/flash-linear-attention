@@ -78,12 +78,19 @@ def _rand_inputs(B, T, H, HV, K, V, dtype, *, gate_in_kernel=False, b_scale=1.0,
             (1, 130, 2, 2, 64, 128, 1.0, True, torch.float16),    # fp16, V != K
             (2, 128, 2, 4, 64, 64, 1.0, False, torch.float32),    # GVA: HV > H
             (2, 100, 2, 4, 64, 128, 1.0, True, torch.float16),    # GVA + l2norm + fp16, V != K
+            (1, 4, 1, 1, 48, 16, 1.0, False, torch.float32),      # non-power-of-2 K
         ]
     ],
 )
 def test_fused_recurrent(B, T, H, HV, K, V, scale, use_qk_l2norm_in_kernel, dtype):
     assert HV % H == 0
     q, k, v, g, b, w, _, _ = _rand_inputs(B, T, H, HV, K, V, dtype)
+    if K & (K - 1):
+        # poison the allocation past g so an unmasked out-of-bounds gate load fails loudly
+        numel = B * T * HV * K
+        storage = torch.full((numel + 64,), float("nan"), device=device)
+        g = storage[:numel].view(B, T, HV, K)
+        g.uniform_(-2.0, -0.1)
 
     # The reference gets normalized q/k expanded to HV heads; the kernel maps
     # value heads to qk heads itself (and normalizes when the flag is on).
