@@ -53,6 +53,7 @@ This repo provides task-specific workflow skills under `.agents/skills/*/SKILL.m
 - **`fla-kda`** — KDA-specific gate, intra/inter, backend, and test workflow
 - **`fla-dispatch-backends`** — `@dispatch` decorator and backend registry workflow
 - **`fla-correctness-coverage`** — Kernel correctness testing and coverage for `fla/ops/**`
+- **`fla-design-coverage`** — Contract-first design: contract cells, numerical budgets, dispatch semantics, layered coverage, and production benchmarks
 - **`fla-mr-readiness`** — Preparing MR/PR, test plans, and contribution compliance
 
 Load the relevant skill when your task matches its scope — in particular, load
