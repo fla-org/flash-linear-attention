@@ -60,7 +60,7 @@ def test_chunk(
 def test_chunk_initial_state(varlen: bool):
     torch.manual_seed(42)
     H, K, V, L = 1, 64, 32, 15
-    prefix_lengths = [70, 75, 128, 133] if varlen else [70, 70]
+    prefix_lengths = [64, 70, 75, 128] if varlen else [64, 64]
     sequences = [
         (
             torch.randn(1, length + 1, 1, K, dtype=torch.float32, device=device),
