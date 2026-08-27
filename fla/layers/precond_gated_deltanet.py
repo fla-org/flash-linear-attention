@@ -266,7 +266,9 @@ class PrecondGatedDeltaNet(nn.Module):
 
         # change to inference mode.
         mode = self.mode
-        if q_len <= 64 and not self.training:
+        if torch.is_grad_enabled() and mode != 'naive':
+            mode = 'chunk'
+        elif q_len <= 64 and not self.training:
             mode = 'fused_recurrent'
         if self.training:
             assert mode in ['chunk', 'naive'], "Only chunk/naive modes are supported in training."
