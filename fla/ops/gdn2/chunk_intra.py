@@ -712,7 +712,8 @@ def chunk_gdn2_fwd_intra(
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
-    Aqk = torch.empty(B, T, H, BT, device=k.device, dtype=k.dtype)
+    # Aqk must be zero-initialized - kernel only writes lower triangular.
+    Aqk = torch.zeros(B, T, H, BT, device=k.device, dtype=k.dtype)
     # Akk must be zero-initialized - kernel only writes lower triangular.
     Akk = torch.zeros(B, T, H, BT, device=k.device, dtype=k.dtype)
     Akkd = torch.empty(B, T, H, BC, device=k.device, dtype=torch.float32)
