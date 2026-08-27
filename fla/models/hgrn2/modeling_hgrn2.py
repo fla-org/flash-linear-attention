@@ -415,7 +415,11 @@ class HGRN2ForCausalLM(HGRN2PreTrainedModel, FLAUnsupportedCacheGenerationMixin)
 
         loss, logits = None, None
         if not self.config.fuse_linear_cross_entropy or labels is None:
-            logits = self.lm_head(hidden_states if logits_to_keep is None else hidden_states[:, -logits_to_keep:])
+            logits = self.lm_head(
+                hidden_states
+                if labels is not None or logits_to_keep is None
+                else hidden_states[:, -logits_to_keep:]
+            )
         if labels is not None:
             if getattr(self, 'criterion', None) is None:
                 if self.config.fuse_linear_cross_entropy:
