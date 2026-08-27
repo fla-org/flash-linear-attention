@@ -5,6 +5,8 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+from itertools import product
+
 import pytest
 import torch
 
@@ -39,19 +41,42 @@ def test_rotary(B: int, T: int, H: int, G: int, D: int, dtype: torch.dtype):
     assert_close("dk", ref_dk, tri_dk, ratio=1e-5)
 
 
-@pytest.mark.parametrize("B", [2])
-@pytest.mark.parametrize("T", [2048, 4096])
-@pytest.mark.parametrize("H", [4])
-@pytest.mark.parametrize("G", [1, 4])
-@pytest.mark.parametrize("D", [128, 256])
-@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-def test_rotary_with_offsets(B: int, T: int, H: int, G: int, D: int, dtype: torch.dtype):
+@pytest.mark.parametrize(
+    ("B", "T", "H", "G", "D", "dtype", "max_seqlen_delta"),
+    [
+        (*case, 0)
+        for case in product([2], [2048, 4096], [4], [1, 4], [128, 256], [torch.float32, torch.bfloat16])
+    ] + [
+        (2, 8, 1, 1, 8, torch.float32, -1),
+        (2, 8, 1, 1, 8, torch.float32, None),
+    ],
+)
+def test_rotary_with_offsets(
+    B: int,
+    T: int,
+    H: int,
+    G: int,
+    D: int,
+    dtype: torch.dtype,
+    max_seqlen_delta: int | None,
+):
     torch.manual_seed(42)
-    q = torch.randn(B, T, H, D).to(device).to(dtype=dtype).requires_grad_()
-    k = torch.randn(B, T, H//G, D).to(device).to(dtype=dtype).requires_grad_()
-    seqlen_offset = torch.randint(0, T//2, (B,)).to(device)
-    max_seqlen = T + seqlen_offset.max().item()
-    rotary = RotaryEmbedding(D).to(device)
+    test_device = "cpu" if max_seqlen_delta != 0 else device
+    q = torch.randn(B, T, H, D).to(test_device).to(dtype=dtype).requires_grad_()
+    k = torch.randn(B, T, H//G, D).to(test_device).to(dtype=dtype).requires_grad_()
+    seqlen_offset = torch.randint(0, T//2, (B,)).to(test_device)
+    rotary = RotaryEmbedding(D).to(test_device)
+
+    if max_seqlen_delta is None:
+        with pytest.raises(AssertionError, match="Tensor offsets require an initialized cache"):
+            rotary(q, k, seqlen_offset=seqlen_offset)
+        return
+
+    max_seqlen = T + seqlen_offset.max().item() + max_seqlen_delta
+    if max_seqlen_delta < 0:
+        with pytest.raises(RuntimeError, match="Rotary cache is too short"):
+            rotary(q, k, seqlen_offset=seqlen_offset, max_seqlen=max_seqlen)
+        return
 
     tri_q, tri_k = rotary(q, k, seqlen_offset=seqlen_offset, max_seqlen=max_seqlen)
     tri_dq = torch.autograd.grad(tri_q.sum(), q, retain_graph=True)[0]
@@ -155,19 +180,34 @@ def test_rotary_left_padding(B: int, T: int, H: int, D: int, dtype: torch.dtype)
         assert_close(f" k[{i}]", ref_k, tri_k[i:i+1, pad:], ratio=1e-5)
 
 
-@pytest.mark.parametrize("B", [2])
-@pytest.mark.parametrize("T", [256, 2048])
-@pytest.mark.parametrize("H", [4])
-@pytest.mark.parametrize("D", [128, 256])
-@pytest.mark.parametrize("rotary_dim", [64])
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
+@pytest.mark.parametrize(
+    ("B", "T", "H", "D", "rotary_dim", "dtype"),
+    [
+        (B, T, H, D, 64, dtype)
+        for B, T, H, D, dtype in product([2], [256, 2048], [4], [128, 256], [torch.float32, torch.float16])
+    ] + [
+        (2, 8, 1, 128, 63, torch.float32),
+        (2, 8, 1, 32, 64, torch.float32),
+    ],
+)
 def test_rotary_partial(B: int, T: int, H: int, D: int, rotary_dim: int, dtype: torch.dtype):
     # Partial rotary (rotary_dim < head_dim): only [:rotary_dim] is rotated and the
     # non-rotated tail [rotary_dim:] is carried over from the input. Previously untested.
+    if rotary_dim % 2:
+        with pytest.raises(AssertionError, match="Rotary dimension must be even"):
+            RotaryEmbedding(rotary_dim)
+        return
+
     torch.manual_seed(42)
-    q = torch.randn(B, T, H, D).to(device).to(dtype=dtype)
-    k = torch.randn(B, T, H, D).to(device).to(dtype=dtype)
-    rotary = RotaryEmbedding(rotary_dim).to(device)
+    test_device = "cpu" if rotary_dim > D else device
+    q = torch.randn(B, T, H, D).to(test_device).to(dtype=dtype)
+    k = torch.randn(B, T, H, D).to(test_device).to(dtype=dtype)
+    rotary = RotaryEmbedding(rotary_dim).to(test_device)
+
+    if rotary_dim > D:
+        with pytest.raises(AssertionError, match="Rotary dimension must not exceed head dimension"):
+            rotary(q, k)
+        return
 
     tri_q, tri_k = rotary(q, k)
 

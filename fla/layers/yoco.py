@@ -74,7 +74,12 @@ class YOCORotaryEmbedding(RotaryEmbedding):
         cu_seqlens: torch.Tensor | None = None,
         max_seqlen: int | None = None,
     ) -> torch.Tensor:
-        self._update_cos_sin_cache_for_seqlen_offset(states, seqlen_offset, cu_seqlens, max_seqlen)
+        if max_seqlen is not None:
+            self._update_cos_sin_cache(max_seqlen, device=states.device, dtype=states.dtype)
+        elif isinstance(seqlen_offset, int):
+            self._update_cos_sin_cache(states.shape[1] + seqlen_offset, device=states.device, dtype=states.dtype)
+        else:
+            assert self._cos_cached is not None, "Tensor offsets require an initialized cache; pass max_seqlen on the first call"
         return rotary_embedding(
             states,
             self._cos_cached,

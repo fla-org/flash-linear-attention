@@ -169,8 +169,7 @@ def rotary_embedding_fwdbwd(
     R2 = R * 2
 
     assert D <= 256, "Only support D <= 256"
-    if R2 > D:
-        raise ValueError(f"Rotary dimension must not exceed head dimension, got rotary_dim={R2} and head_dim={D}")
+    assert R2 <= D, f"Rotary dimension must not exceed head dimension, got rotary_dim={R2} and head_dim={D}"
     if not is_varlen:
         assert TR >= T, f"TR must be >= T, got {TR} and {T}"
 
@@ -181,9 +180,10 @@ def rotary_embedding_fwdbwd(
         assert seqlen_offsets.shape == (N,)
         assert seqlen_offsets.dtype in [torch.int32, torch.int64]
         sequence_lengths = T if not is_varlen else cu_seqlens[1:] - cu_seqlens[:-1]
-        required_seqlen = (sequence_lengths + seqlen_offsets).max().item()
-        if required_seqlen > TR:
-            raise ValueError(f"Rotary cache is too short, required {required_seqlen} positions but got {TR}")
+        torch._assert_async(
+            torch.all(sequence_lengths + seqlen_offsets <= TR),
+            f"Rotary cache is too short for tensor offsets, got {TR} positions",
+        )
     else:
         assert seqlen_offsets + T <= TR
 
@@ -366,8 +366,7 @@ class RotaryEmbedding(nn.Module):
         """
         super().__init__()
 
-        if dim % 2 != 0:
-            raise ValueError(f"Rotary dimension must be even, got {dim}")
+        assert dim % 2 == 0, f"Rotary dimension must be even, got {dim}"
 
         self.dim = dim
         self.base = float(base)
@@ -463,25 +462,6 @@ class RotaryEmbedding(nn.Module):
                 self._cos_k_cached = (torch.cos(freqs) / scale).to(dtype)
                 self._sin_k_cached = (torch.sin(freqs) / scale).to(dtype)
 
-    def _update_cos_sin_cache_for_seqlen_offset(
-        self,
-        x: torch.Tensor,
-        seqlen_offset: int | torch.Tensor,
-        cu_seqlens: torch.Tensor | None,
-        max_seqlen: int | None,
-    ) -> None:
-        if max_seqlen is not None:
-            required_seqlen = max_seqlen
-        elif isinstance(seqlen_offset, int):
-            required_seqlen = x.shape[1] + seqlen_offset
-        else:
-            if cu_seqlens is None:
-                required_seqlen = max(x.shape[1], x.shape[1] + seqlen_offset.max().item())
-            else:
-                sequence_lengths = cu_seqlens[1:] - cu_seqlens[:-1]
-                required_seqlen = (sequence_lengths + seqlen_offset).max().item()
-        self._update_cos_sin_cache(max(int(required_seqlen), 0), device=x.device, dtype=x.dtype)
-
     def forward(
         self,
         q: torch.Tensor,
@@ -500,10 +480,15 @@ class RotaryEmbedding(nn.Module):
             Most commonly used in inference when we have KV cache.
         cu_seqlens: [N + 1] or None
         max_seqlen:
-            Optional cache length. When omitted, it is inferred from seqlen_offset;
-            passing it explicitly avoids a device-to-host sync for tensor offsets.
+            Cache length used to initialize the rotary tables. Tensor offsets require this on the first call so cache sizing does not
+            synchronize the device.
         """
-        self._update_cos_sin_cache_for_seqlen_offset(q, seqlen_offset, cu_seqlens, max_seqlen)
+        if max_seqlen is not None:
+            self._update_cos_sin_cache(max_seqlen, device=q.device, dtype=q.dtype)
+        elif isinstance(seqlen_offset, int):
+            self._update_cos_sin_cache(q.shape[1] + seqlen_offset, device=q.device, dtype=q.dtype)
+        else:
+            assert self._cos_cached is not None, "Tensor offsets require an initialized cache; pass max_seqlen on the first call"
         if self.scale is None:
             q = rotary_embedding(
                 q,
