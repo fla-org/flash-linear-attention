@@ -23,7 +23,6 @@ from fla.utils.ascend_ub_manager import (
     max_grid_axis_chunks,
 )
 
-_NUM_WARPS = 4
 # Peak live fp32 tiles: input + output (+ bias path).
 _GATE_FWD_MEM_MULT = 3.0
 _GATE_BWD_MEM_MULT = 5.0
@@ -140,7 +139,6 @@ def _launch_gate_fwd(
         D=K,
         BT=BT,
         BD=BD,
-        num_warps=_NUM_WARPS,
     )
     max_nt = max_grid_axis_chunks(NT, H, max_grid=ASCEND_MAX_GRID_DIM)
     for nt_off in range(0, NT, max_nt):
@@ -244,7 +242,6 @@ def _launch_gate_bwd(
         D=K,
         BT=BT,
         BD=BD,
-        num_warps=_NUM_WARPS,
     )
     max_nt = max_grid_axis_chunks(NT, H, max_grid=ASCEND_MAX_GRID_DIM)
     for nt_off in range(0, NT, max_nt):
@@ -363,7 +360,6 @@ def _launch_gate_chunk_cumsum(
         BT=BT,
         BS=BS,
         REVERSE=reverse,
-        num_warps=_NUM_WARPS,
     )
     max_nt = max_grid_axis_chunks(NT, ns * bh_total, max_grid=ASCEND_MAX_GRID_DIM)
     for nt_off in range(0, NT, max_nt):

@@ -13,6 +13,7 @@ import triton.language as tl
 
 from fla.ops.utils.index import prepare_chunk_indices
 from fla.utils import input_guard
+from fla.utils.ascend_stream import defer_npu_tensor_release
 from fla.utils.ascend_ub_manager import (
     ASCEND_MAX_GRID_DIM,
     compute_grid_limited_tile_size,
@@ -22,7 +23,6 @@ from fla.utils.ascend_ub_manager import (
     max_grid_axis_chunks,
 )
 
-_NUM_WARPS = 4
 # Peak live fp32 tiles: b_s, b_o (and b_z / partial sums for vector/global).
 _CUMSUM_SCALAR_MEM_MULT = 3.0
 # b_s, b_c, b_z, plus tl.cumsum multi-buffer on [BT, BS] tiles.
@@ -111,7 +111,6 @@ def _launch_local_cumsum_scalar(
         H=H,
         BT=BT,
         REVERSE=reverse,
-        num_warps=_NUM_WARPS,
     )
     max_nt = max_grid_axis_chunks(NT, bh_total, max_grid=ASCEND_MAX_GRID_DIM)
     for nt_off in range(0, NT, max_nt):
@@ -159,7 +158,6 @@ def _launch_local_cumsum_vector(
         BT=BT,
         BS=BS,
         REVERSE=reverse,
-        num_warps=_NUM_WARPS,
     )
     max_nt = max_grid_axis_chunks(NT, ns * bh_total, max_grid=ASCEND_MAX_GRID_DIM)
     for nt_off in range(0, NT, max_nt):
@@ -394,6 +392,7 @@ def chunk_local_cumsum_scalar_npu(
         NT=NT,
         reverse=reverse,
     )
+    defer_npu_tensor_release(g_org, cu_seqlens, chunk_indices)
     return g
 
 
@@ -441,6 +440,7 @@ def chunk_local_cumsum_vector_npu(
         NT=NT,
         reverse=reverse,
     )
+    defer_npu_tensor_release(g_org, cu_seqlens, chunk_indices)
     return g
 
 
@@ -473,11 +473,11 @@ def chunk_global_cumsum_scalar_npu(
         H=H,
         BT=BT,
         REVERSE=reverse,
-        num_warps=_NUM_WARPS,
     )
     for bh_off, bh_len in iter_axis_launch_chunks(bh_total, 1, max_grid=ASCEND_MAX_GRID_DIM):
         kernel_kwargs['BH_OFFSET'] = bh_off
         chunk_global_cumsum_scalar_kernel_npu[(bh_len,)](**kernel_kwargs)
+    defer_npu_tensor_release(s, cu_seqlens)
     return z
 
 
@@ -519,13 +519,13 @@ def chunk_global_cumsum_vector_npu(
         BT=BT,
         BS=BS,
         REVERSE=reverse,
-        num_warps=_NUM_WARPS,
     )
     max_bh = max_grid_axis_chunks(bh_total, ns, max_grid=ASCEND_MAX_GRID_DIM)
     for bh_off in range(0, bh_total, max_bh):
         bh_len = min(max_bh, bh_total - bh_off)
         kernel_kwargs['BH_OFFSET'] = bh_off
         chunk_global_cumsum_vector_kernel_npu[(ns, bh_len)](**kernel_kwargs)
+    defer_npu_tensor_release(s, cu_seqlens)
     return z
 
 

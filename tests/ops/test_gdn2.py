@@ -7,11 +7,13 @@
 
 # Correctness tests for the GDN-2 (Gated DeltaNet 2) ops.
 #
-# The ground truth is the pure-PyTorch ``naive_recurrent_gdn2`` reference: a
-# direct transcription of
+# Native-size correctness uses the pure-PyTorch ``naive_recurrent_gdn2``
+# reference: a direct transcription of
 #     S_t = (I - k_t (b_t * k_t)^T) Diag(exp(g_t)) S_{t-1} + k_t (w_t * v_t)^T
 # with no chunking, no WY trick, no fused gates. Any kernel that disagrees with
-# it is wrong.
+# it is wrong. With ``FLA_GDN2_LONG_SEQUENCE=1``, every case runs at T=32768;
+# whole-vs-streaming and packed-vs-per-sequence equivalence replace the Python
+# recurrence so the reference itself does not build a 32768-step autograd graph.
 #
 # The suite exercises the full feature surface of both public kernels:
 #   * forward + numeric backward (dq, dk, dv, db, dw, dg, dh0, dA_log, dt_bias)
@@ -30,13 +32,192 @@
 # GDN-2 reuses KDA's gate activation verbatim, so the gate-in-kernel reference
 # uses ``naive_kda_gate`` / ``naive_kda_lowerbound_gate``.
 
+import os
+
 import pytest
 import torch
 import torch.nn.functional as F
 
 from fla.ops.gdn2 import chunk_gdn2, fused_recurrent_gdn2, naive_recurrent_gdn2
 from fla.ops.kda.gate import naive_kda_gate, naive_kda_lowerbound_gate
-from fla.utils import assert_close, device
+from fla.utils import IS_AMD, IS_NPU, IS_NVIDIA, assert_close, device
+
+_requires_accelerator = pytest.mark.skipif(
+    not (IS_NVIDIA or IS_AMD or IS_NPU),
+    reason="CUDA/ROCm or Ascend NPU required",
+)
+
+_LONG_SEQUENCE = os.environ.get("FLA_GDN2_LONG_SEQUENCE") == "1"
+_LONG_T = 32768
+_LONG_SEGMENT_T = 4096
+_LONG_LOSS_SCALE = 1.0 / 256
+_LONG_DENSE_TOLERANCES = {
+    "o": 0.005,
+    "ht": 0.005,
+    "dq": 0.01,
+    "dk": 0.01,
+    "dv": 0.01,
+    "dg": 0.02,
+    "db": 0.02,
+    "dw": 0.02,
+    "dh0": 0.01,
+    "dA_log": 0.02,
+    "dt_bias": 0.02,
+}
+_LONG_VARLEN_TOLERANCES = {
+    **_LONG_DENSE_TOLERANCES,
+    "o": 0.006,
+    "ht": 0.006,
+    "dq": 0.012,
+    "dk": 0.012,
+    "dv": 0.012,
+    "dh0": 0.012,
+}
+
+
+def _test_length(native_length):
+    return _LONG_T if _LONG_SEQUENCE else native_length
+
+
+def _test_cu_seqlens(native_cu_seqlens):
+    if not _LONG_SEQUENCE:
+        return native_cu_seqlens
+
+    total = native_cu_seqlens[-1]
+    scaled = [0]
+    for i, boundary in enumerate(native_cu_seqlens[1:-1], 1):
+        value = round(boundary * _LONG_T / total)
+        if value % 64 == 0:
+            value += i
+        scaled.append(value)
+    return [*scaled, _LONG_T]
+
+
+def _segmented_fused_recurrent(q, k, v, g, b, w, initial_state=None, **kwargs):
+    outputs = []
+    state = initial_state
+    for start in range(0, q.shape[1], _LONG_SEGMENT_T):
+        end = min(start + _LONG_SEGMENT_T, q.shape[1])
+        output, state = fused_recurrent_gdn2(
+            q=q[:, start:end],
+            k=k[:, start:end],
+            v=v[:, start:end],
+            g=g[:, start:end],
+            b=b[:, start:end],
+            w=w[:, start:end],
+            initial_state=state,
+            output_final_state=True,
+            **kwargs,
+        )
+        outputs.append(output)
+    return torch.cat(outputs, dim=1), state
+
+
+def _run_long_chunk(
+    base,
+    do,
+    dht,
+    *,
+    segmented=False,
+    cu_seqlens=None,
+    separate_varlen=False,
+    normalize_qk=False,
+    scale=None,
+    use_qk_l2norm_in_kernel=False,
+    use_gate_in_kernel=False,
+    safe_gate=False,
+    lower_bound=None,
+):
+    tensors = {name: tensor.detach().clone().requires_grad_(True) for name, tensor in base.items() if tensor is not None}
+    q = F.normalize(tensors["q"].float(), p=2, dim=-1).to(tensors["q"].dtype) if normalize_qk else tensors["q"]
+    k = F.normalize(tensors["k"].float(), p=2, dim=-1).to(tensors["k"].dtype) if normalize_qk else tensors["k"]
+
+    def call(start, end, state, packed_cu_seqlens=None):
+        return chunk_gdn2(
+            q=q[:, start:end],
+            k=k[:, start:end],
+            v=tensors["v"][:, start:end],
+            g=tensors["g"][:, start:end],
+            b=tensors["b"][:, start:end],
+            w=tensors["w"][:, start:end],
+            A_log=tensors.get("A_log"),
+            dt_bias=tensors.get("dt_bias"),
+            scale=scale,
+            initial_state=state,
+            output_final_state=True,
+            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+            use_gate_in_kernel=use_gate_in_kernel,
+            safe_gate=safe_gate,
+            lower_bound=lower_bound,
+            cu_seqlens=packed_cu_seqlens,
+            cu_seqlens_cpu=packed_cu_seqlens.cpu() if packed_cu_seqlens is not None else None,
+        )
+
+    if separate_varlen:
+        outputs, states = [], []
+        cu_seqlens_cpu = cu_seqlens.cpu()
+        for i in range(len(cu_seqlens_cpu) - 1):
+            start, end = cu_seqlens_cpu[i].item(), cu_seqlens_cpu[i + 1].item()
+            output, state = call(start, end, tensors["h0"][i : i + 1])
+            outputs.append(output)
+            states.append(state)
+        output, state = torch.cat(outputs, dim=1), torch.cat(states, dim=0)
+    elif segmented:
+        outputs, state = [], tensors["h0"]
+        for start in range(0, q.shape[1], _LONG_SEGMENT_T):
+            end = min(start + _LONG_SEGMENT_T, q.shape[1])
+            output_i, state = call(start, end, state)
+            outputs.append(output_i)
+        output = torch.cat(outputs, dim=1)
+    else:
+        output, state = call(0, q.shape[1], tensors["h0"], cu_seqlens)
+
+    loss = ((output.float() * do.float()).sum() + (state.float() * dht.float()).sum()) * _LONG_LOSS_SCALE
+    loss.backward()
+
+    result = {"o": output.detach(), "ht": state.detach()}
+    for name, tensor in tensors.items():
+        assert tensor.grad is not None, f"{name}.grad is None"
+        grad_name = "dt_bias" if name == "dt_bias" else f"d{name}"
+        result[grad_name] = tensor.grad.detach()
+    return result
+
+
+def _assert_long_results(expected, actual, tolerances, warning_names=()):
+    assert expected.keys() == actual.keys()
+    for name in expected:
+        assert_close(
+            name,
+            expected[name],
+            actual[name],
+            tolerances[name],
+            warning=name in warning_names,
+        )
+
+
+def _assert_long_chunk_equivalent(
+    base,
+    do,
+    dht,
+    *,
+    segmented=False,
+    separate_varlen=False,
+    tolerances=None,
+    warning_names=(),
+    **kwargs,
+):
+    if tolerances is None:
+        tolerances = _LONG_DENSE_TOLERANCES
+    reference = _run_long_chunk(
+        base,
+        do,
+        dht,
+        segmented=segmented,
+        separate_varlen=separate_varlen,
+        **kwargs,
+    )
+    whole = _run_long_chunk(base, do, dht, **kwargs)
+    _assert_long_results(reference, whole, tolerances, warning_names)
 
 
 def _activate_g(g, A_log, dt_bias, safe_gate, lower_bound):
@@ -82,16 +263,16 @@ def _rand_inputs(B, T, H, K, V, dtype, *, gate_in_kernel=False, b_scale=1.0, see
 # =============================================================================
 # fused_recurrent
 # =============================================================================
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@_requires_accelerator
 @pytest.mark.parametrize(
     ("B", "T", "H", "K", "V", "scale", "use_qk_l2norm_in_kernel", "dtype"),
     [
         pytest.param(*p, id="B{}-T{}-H{}-K{}-V{}-scale{}-l2norm{}-{}".format(*p))
         for p in [
-            (1, 64, 2, 32, 32, 1.0, False, torch.float32),
-            (2, 128, 2, 64, 64, 0.5, False, torch.float32),
-            (2, 100, 3, 64, 64, 1.0, True, torch.float32),     # non-chunk-multiple T, l2norm
-            (1, 130, 2, 64, 128, 1.0, True, torch.float16),    # fp16, V != K
+            (1, _test_length(64), 2, 32, 32, 1.0, False, torch.float32),
+            (2, _test_length(128), 2, 64, 64, 0.5, False, torch.float32),
+            (2, _test_length(100), 3, 64, 64, 1.0, True, torch.float32),
+            (1, _test_length(130), 2, 64, 128, 1.0, True, torch.float16),
         ]
     ],
 )
@@ -103,32 +284,56 @@ def test_fused_recurrent(B, T, H, K, V, scale, use_qk_l2norm_in_kernel, dtype):
     # (flag on) or is handed the same pre-normalized tensors (flag off).
     qn = F.normalize(q.float(), p=2, dim=-1).to(dtype)
     kn = F.normalize(k.float(), p=2, dim=-1).to(dtype)
-    ref, ref_ht = naive_recurrent_gdn2(
-        q=qn, k=kn, v=v, g=g, b=b, w=w, scale=scale, output_final_state=True,
-    )
+    if _LONG_SEQUENCE:
+        ref, ref_ht = _segmented_fused_recurrent(
+            q=q if use_qk_l2norm_in_kernel else qn,
+            k=k if use_qk_l2norm_in_kernel else kn,
+            v=v,
+            g=g,
+            b=b,
+            w=w,
+            scale=scale,
+            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+        )
+    else:
+        ref, ref_ht = naive_recurrent_gdn2(
+            q=qn,
+            k=kn,
+            v=v,
+            g=g,
+            b=b,
+            w=w,
+            scale=scale,
+            output_final_state=True,
+        )
     tri, tri_ht = fused_recurrent_gdn2(
         # Flag on: hand the kernel raw q/k and let it normalize. Flag off: hand
         # it the same pre-normalized tensors the reference saw.
         q=q if use_qk_l2norm_in_kernel else qn,
         k=k if use_qk_l2norm_in_kernel else kn,
-        v=v, g=g, b=b, w=w, scale=scale,
-        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel, output_final_state=True,
+        v=v,
+        g=g,
+        b=b,
+        w=w,
+        scale=scale,
+        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+        output_final_state=True,
     )
     assert_close("o", ref, tri, 0.005)
     assert_close("ht", ref_ht, tri_ht, 0.005)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@_requires_accelerator
 @pytest.mark.parametrize(
     ("B", "T", "H", "K", "V", "has_a_log", "has_dt_bias", "safe_gate"),
     [
         pytest.param(*p, id="B{}-T{}-H{}-K{}-V{}-a_log{}-dt_bias{}-safe_gate{}".format(*p))
         for p in [
-            (2, 100, 2, 64, 64, True, True, False),
-            (2, 100, 2, 64, 64, True, False, False),
-            (1, 128, 2, 64, 64, True, True, True),
-            (2, 100, 2, 64, 64, False, False, True),
-            (1, 128, 2, 64, 64, False, True, True),
+            (2, _test_length(100), 2, 64, 64, True, True, False),
+            (2, _test_length(100), 2, 64, 64, True, False, False),
+            (1, _test_length(128), 2, 64, 64, True, True, True),
+            (2, _test_length(100), 2, 64, 64, False, False, True),
+            (1, _test_length(128), 2, 64, 64, False, True, True),
         ]
     ],
 )
@@ -142,26 +347,54 @@ def test_fused_recurrent_gate_in_kernel(B, T, H, K, V, has_a_log, has_dt_bias, s
         dt_bias = None
     lower_bound = -5.0 if safe_gate else None
 
-    g_ref = _activate_g(g, A_log, dt_bias, safe_gate, lower_bound).to(dtype)
-    ref, ref_ht = naive_recurrent_gdn2(
-        q=F.normalize(q.float(), p=2, dim=-1).to(dtype),
-        k=F.normalize(k.float(), p=2, dim=-1).to(dtype),
-        v=v, g=g_ref, b=b, w=w, output_final_state=True,
-    )
+    if _LONG_SEQUENCE:
+        ref, ref_ht = _segmented_fused_recurrent(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            b=b,
+            w=w,
+            A_log=A_log,
+            dt_bias=dt_bias,
+            use_qk_l2norm_in_kernel=True,
+            use_gate_in_kernel=True,
+            lower_bound=lower_bound,
+        )
+    else:
+        g_ref = _activate_g(g, A_log, dt_bias, safe_gate, lower_bound).to(dtype)
+        ref, ref_ht = naive_recurrent_gdn2(
+            q=F.normalize(q.float(), p=2, dim=-1).to(dtype),
+            k=F.normalize(k.float(), p=2, dim=-1).to(dtype),
+            v=v,
+            g=g_ref,
+            b=b,
+            w=w,
+            output_final_state=True,
+        )
     tri, tri_ht = fused_recurrent_gdn2(
-        q=q, k=k, v=v, g=g, b=b, w=w, A_log=A_log, dt_bias=dt_bias,
-        use_qk_l2norm_in_kernel=True, use_gate_in_kernel=True, lower_bound=lower_bound,
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        b=b,
+        w=w,
+        A_log=A_log,
+        dt_bias=dt_bias,
+        use_qk_l2norm_in_kernel=True,
+        use_gate_in_kernel=True,
+        lower_bound=lower_bound,
         output_final_state=True,
     )
     assert_close("o", ref, tri, 0.005)
     assert_close("ht", ref_ht, tri_ht, 0.005)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@_requires_accelerator
 def test_fused_recurrent_state_v_first():
     """state_v_first stores the state transposed to [V, K]; output must match."""
     dtype = torch.float32
-    B, T, H, K, V = 2, 64, 2, 64, 64
+    B, T, H, K, V = 2, _test_length(64), 2, 64, 64
     q, k, v, g, b, w, _, _ = _rand_inputs(B, T, H, K, V, dtype)
 
     o0, ht0 = fused_recurrent_gdn2(q=q, k=k, v=v, g=g, b=b, w=w, state_v_first=False, output_final_state=True)
@@ -170,34 +403,58 @@ def test_fused_recurrent_state_v_first():
     assert_close("ht", ht0, ht1.transpose(-1, -2), 0.005)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@_requires_accelerator
 def test_fused_recurrent_with_initial_state():
     dtype = torch.float32
-    B, T, H, K, V = 2, 64, 2, 64, 64
+    B, T, H, K, V = 2, _test_length(64), 2, 64, 64
     q, k, v, g, b, w, _, _ = _rand_inputs(B, T, H, K, V, dtype)
     h0 = torch.randn(B, H, K, V, device=device, dtype=torch.float32)
 
-    ref, ref_ht = naive_recurrent_gdn2(
-        q=F.normalize(q.float(), p=2, dim=-1).to(dtype),
-        k=F.normalize(k.float(), p=2, dim=-1).to(dtype),
-        v=v, g=g, b=b, w=w, initial_state=h0, output_final_state=True,
-    )
+    if _LONG_SEQUENCE:
+        ref, ref_ht = _segmented_fused_recurrent(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            b=b,
+            w=w,
+            initial_state=h0,
+            use_qk_l2norm_in_kernel=True,
+        )
+    else:
+        ref, ref_ht = naive_recurrent_gdn2(
+            q=F.normalize(q.float(), p=2, dim=-1).to(dtype),
+            k=F.normalize(k.float(), p=2, dim=-1).to(dtype),
+            v=v,
+            g=g,
+            b=b,
+            w=w,
+            initial_state=h0,
+            output_final_state=True,
+        )
     tri, tri_ht = fused_recurrent_gdn2(
-        q=q, k=k, v=v, g=g, b=b, w=w, initial_state=h0,
-        use_qk_l2norm_in_kernel=True, output_final_state=True,
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        b=b,
+        w=w,
+        initial_state=h0,
+        use_qk_l2norm_in_kernel=True,
+        output_final_state=True,
     )
     assert_close("o", ref, tri, 0.005)
     assert_close("ht", ref_ht, tri_ht, 0.005)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@_requires_accelerator
 @pytest.mark.parametrize(
     ("cu_seqlens", "H", "K", "V"),
     [
         pytest.param(*p, id="cu_seqlens{}-H{}-K{}-V{}".format(*p))
         for p in [
-            ([0, 64, 128], 2, 64, 64),
-            ([0, 15, 100, 256], 2, 64, 64),       # ragged, non-chunk-multiple
+            (_test_cu_seqlens([0, 64, 128]), 2, 64, 64),
+            (_test_cu_seqlens([0, 15, 100, 256]), 2, 64, 64),
         ]
     ],
 )
@@ -210,19 +467,44 @@ def test_fused_recurrent_varlen(cu_seqlens, H, K, V):
     h0 = torch.randn(N, H, K, V, device=device, dtype=torch.float32)
 
     tri, tri_ht = fused_recurrent_gdn2(
-        q=q, k=k, v=v, g=g, b=b, w=w, initial_state=h0,
-        use_qk_l2norm_in_kernel=True, output_final_state=True, cu_seqlens=cu,
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        b=b,
+        w=w,
+        initial_state=h0,
+        use_qk_l2norm_in_kernel=True,
+        output_final_state=True,
+        cu_seqlens=cu,
     )
 
     refs, ref_hts = [], []
     for i in range(N):
         s, e = cu[i].item(), cu[i + 1].item()
-        o_i, ht_i = naive_recurrent_gdn2(
-            q=F.normalize(q[:, s:e].float(), p=2, dim=-1).to(dtype),
-            k=F.normalize(k[:, s:e].float(), p=2, dim=-1).to(dtype),
-            v=v[:, s:e], g=g[:, s:e], b=b[:, s:e], w=w[:, s:e],
-            initial_state=h0[i:i + 1], output_final_state=True,
-        )
+        if _LONG_SEQUENCE:
+            o_i, ht_i = fused_recurrent_gdn2(
+                q=q[:, s:e],
+                k=k[:, s:e],
+                v=v[:, s:e],
+                g=g[:, s:e],
+                b=b[:, s:e],
+                w=w[:, s:e],
+                initial_state=h0[i : i + 1],
+                use_qk_l2norm_in_kernel=True,
+                output_final_state=True,
+            )
+        else:
+            o_i, ht_i = naive_recurrent_gdn2(
+                q=F.normalize(q[:, s:e].float(), p=2, dim=-1).to(dtype),
+                k=F.normalize(k[:, s:e].float(), p=2, dim=-1).to(dtype),
+                v=v[:, s:e],
+                g=g[:, s:e],
+                b=b[:, s:e],
+                w=w[:, s:e],
+                initial_state=h0[i : i + 1],
+                output_final_state=True,
+            )
         refs.append(o_i)
         ref_hts.append(ht_i)
     assert_close("o", torch.cat(refs, 1), tri, 0.005)
@@ -232,35 +514,59 @@ def test_fused_recurrent_varlen(cu_seqlens, H, K, V):
 # =============================================================================
 # chunk — forward + numeric backward
 # =============================================================================
-@pytest.mark.parametrize('chunk_size', [16, 32])
+@pytest.mark.parametrize("chunk_size", [16, 32])
 def test_chunk_invalid_chunk_size(chunk_size):
-    B, T, H, K, V = 1, 64, 2, 64, 64
+    B, T, H, K, V = 1, _test_length(64), 2, 64, 64
     q, k, v, g, b, w, _, _ = _rand_inputs(B, T, H, K, V, torch.float32)
 
     with pytest.raises(ValueError, match=r"`chunk_size` must be 64 for GDN-2"):
         chunk_gdn2(q=q, k=k, v=v, g=g, b=b, w=w, chunk_size=chunk_size)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@_requires_accelerator
 @pytest.mark.parametrize(
     ("B", "T", "H", "K", "V", "scale", "use_qk_l2norm_in_kernel", "use_gate_in_kernel", "safe_gate", "dtype"),
     [
         pytest.param(*p, id="B{}-T{}-H{}-K{}-V{}-scale{}-l2norm{}-gate{}-safe{}-{}".format(*p))
         for p in [
-            (1, 64, 2, 32, 32, 1.0, False, False, False, torch.float32),
-            (2, 256, 2, 64, 64, 0.5, True, False, False, torch.float32),
-            (2, 100, 3, 64, 64, 1.0, True, False, False, torch.float16),   # non-multiple T, fp16
-            (2, 256, 2, 64, 64, 1.0, True, True, False, torch.float32),    # gate-in-kernel
-            (1, 128, 2, 64, 64, 1.0, True, True, True, torch.float32),     # gate-in-kernel + safe_gate
+            (1, _test_length(64), 2, 32, 32, 1.0, False, False, False, torch.float32),
+            (2, _test_length(256), 2, 64, 64, 0.5, True, False, False, torch.float32),
+            (2, _test_length(100), 3, 64, 64, 1.0, True, False, False, torch.float16),
+            (2, _test_length(256), 2, 64, 64, 1.0, True, True, False, torch.float32),
+            (1, _test_length(128), 2, 64, 64, 1.0, True, True, True, torch.float32),
         ]
     ],
 )
 def test_chunk(B, T, H, K, V, scale, use_qk_l2norm_in_kernel, use_gate_in_kernel, safe_gate, dtype):
     """Full forward + gradient comparison of the chunkwise kernel vs autograd
-    through the naive recurrent reference."""
+    through the naive recurrent reference, or vs streaming at 32K."""
     q, k, v, g, b, w, A_log, dt_bias = _rand_inputs(B, T, H, K, V, dtype, gate_in_kernel=use_gate_in_kernel)
     lower_bound = -5.0 if safe_gate else None
     h0 = torch.randn(B, H, K, V, dtype=torch.float32, device=device)
+
+    if _LONG_SEQUENCE:
+        base = {"q": q, "k": k, "v": v, "g": g, "b": b, "w": w, "h0": h0}
+        if use_gate_in_kernel:
+            base.update(A_log=A_log, dt_bias=dt_bias)
+        do = torch.randn_like(v)
+        dht = torch.randn_like(h0)
+        kwargs = dict(
+            scale=scale,
+            normalize_qk=not use_qk_l2norm_in_kernel,
+            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+            use_gate_in_kernel=use_gate_in_kernel,
+            safe_gate=safe_gate,
+            lower_bound=lower_bound,
+        )
+        _assert_long_chunk_equivalent(
+            base,
+            do,
+            dht,
+            segmented=True,
+            warning_names=("dA_log",),
+            **kwargs,
+        )
+        return
 
     leaves = [q, k, v, g, b, w, h0]
     if use_gate_in_kernel:
@@ -280,11 +586,18 @@ def test_chunk(B, T, H, K, V, scale, use_qk_l2norm_in_kernel, use_gate_in_kernel
     qn = F.normalize(q.float(), p=2, dim=-1).to(dtype)
     kn = F.normalize(k.float(), p=2, dim=-1).to(dtype)
     ref, ref_ht = naive_recurrent_gdn2(
-        q=qn, k=kn, v=v, g=g_ref, b=b, w=w, scale=scale, initial_state=h0, output_final_state=True,
+        q=qn,
+        k=kn,
+        v=v,
+        g=g_ref,
+        b=b,
+        w=w,
+        scale=scale,
+        initial_state=h0,
+        output_final_state=True,
     )
     ((ref * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=True)
-    ref_grads = {n: t.grad.clone() for n, t in
-                 zip(("q", "k", "v", "g", "b", "w", "h0"), (q, k, v, g, b, w, h0))}
+    ref_grads = {n: t.grad.clone() for n, t in zip(("q", "k", "v", "g", "b", "w", "h0"), (q, k, v, g, b, w, h0))}
     if use_gate_in_kernel:
         ref_grads["A_log"], ref_grads["dt_bias"] = A_log.grad.clone(), dt_bias.grad.clone()
     for t in leaves:
@@ -294,16 +607,22 @@ def test_chunk(B, T, H, K, V, scale, use_qk_l2norm_in_kernel, use_gate_in_kernel
     tri, tri_ht = chunk_gdn2(
         q=q if use_qk_l2norm_in_kernel else qn,
         k=k if use_qk_l2norm_in_kernel else kn,
-        v=v, g=g, b=b, w=w, scale=scale,
+        v=v,
+        g=g,
+        b=b,
+        w=w,
+        scale=scale,
         A_log=A_log if use_gate_in_kernel else None,
         dt_bias=dt_bias if use_gate_in_kernel else None,
-        initial_state=h0, output_final_state=True,
+        initial_state=h0,
+        output_final_state=True,
         use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
-        use_gate_in_kernel=use_gate_in_kernel, safe_gate=safe_gate, lower_bound=lower_bound,
+        use_gate_in_kernel=use_gate_in_kernel,
+        safe_gate=safe_gate,
+        lower_bound=lower_bound,
     )
     ((tri * do).sum() + (tri_ht * dht).sum()).backward(retain_graph=True)
-    tri_grads = {n: t.grad.clone() for n, t in
-                 zip(("q", "k", "v", "g", "b", "w", "h0"), (q, k, v, g, b, w, h0))}
+    tri_grads = {n: t.grad.clone() for n, t in zip(("q", "k", "v", "g", "b", "w", "h0"), (q, k, v, g, b, w, h0))}
     if use_gate_in_kernel:
         tri_grads["A_log"], tri_grads["dt_bias"] = A_log.grad.clone(), dt_bias.grad.clone()
 
@@ -321,7 +640,140 @@ def test_chunk(B, T, H, K, V, scale, use_qk_l2norm_in_kernel, use_gate_in_kernel
         assert_close("dt_bias", ref_grads["dt_bias"], tri_grads["dt_bias"], 0.02)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.skipif(not IS_NPU, reason="Ascend NPU required")
+def test_chunk_npu_forward_backward():
+    """Ascend chunk path must agree with the recurrent reference on the NPU baseline."""
+    B, T, H, K, V = 1, _test_length(64), 1, 32, 32
+    q, k, v, g, b, w, _, _ = _rand_inputs(B, T, H, K, V, torch.float16)
+    q = F.normalize(q.float(), p=2, dim=-1).to(torch.float16).detach().requires_grad_()
+    k = F.normalize(k.float(), p=2, dim=-1).to(torch.float16).detach().requires_grad_()
+    h0 = torch.randn(B, H, K, V, dtype=torch.float32, device=device)
+    leaves = (q, k, v, g, b, w, h0)
+    for tensor in leaves:
+        tensor.requires_grad_(True)
+    do = torch.randn_like(v)
+    dht = torch.randn_like(h0)
+
+    if _LONG_SEQUENCE:
+        base = {"q": q, "k": k, "v": v, "g": g, "b": b, "w": w, "h0": h0}
+        _assert_long_chunk_equivalent(base, do, dht, segmented=True)
+        return
+
+    ref, ref_ht = naive_recurrent_gdn2(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        b=b,
+        w=w,
+        initial_state=h0,
+        output_final_state=True,
+    )
+    ((ref * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=True)
+    ref_grads = [tensor.grad.detach().clone() for tensor in leaves]
+    for tensor in leaves:
+        tensor.grad = None
+
+    actual, actual_ht = chunk_gdn2(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        b=b,
+        w=w,
+        initial_state=h0,
+        output_final_state=True,
+    )
+    ((actual * do).sum() + (actual_ht * dht).sum()).backward()
+    actual_grads = [tensor.grad for tensor in leaves]
+
+    assert_close("o", ref, actual, 0.005)
+    assert_close("ht", ref_ht, actual_ht, 0.005)
+    for name, expected, observed, tol in zip(
+        ("dq", "dk", "dv", "dg", "db", "dw", "dh0"),
+        ref_grads,
+        actual_grads,
+        (0.01, 0.01, 0.01, 0.02, 0.02, 0.02, 0.01),
+    ):
+        assert_close(name, expected, observed, tol)
+
+
+@pytest.mark.skipif(not IS_NPU, reason="Ascend NPU required")
+def test_chunk_npu_varlen_forward_backward():
+    """Ascend grouped intra path must preserve ragged sequence boundaries."""
+    cu = torch.tensor(_test_cu_seqlens([0, 7, 31, 65]), dtype=torch.long, device=device)
+    cu_cpu = cu.cpu()
+    T, N, H, K, V = cu_cpu[-1].item(), len(cu) - 1, 2, 64, 48
+    q, k, v, g, b, w, _, _ = _rand_inputs(1, T, H, K, V, torch.float16)
+    q = F.normalize(q.float(), p=2, dim=-1).to(torch.float16).detach().requires_grad_()
+    k = F.normalize(k.float(), p=2, dim=-1).to(torch.float16).detach().requires_grad_()
+    h0 = torch.randn(N, H, K, V, dtype=torch.float32, device=device)
+    leaves = (q, k, v, g, b, w, h0)
+    for tensor in leaves:
+        tensor.requires_grad_(True)
+    do = torch.randn_like(v)
+    dht = torch.randn_like(h0)
+
+    if _LONG_SEQUENCE:
+        base = {"q": q, "k": k, "v": v, "g": g, "b": b, "w": w, "h0": h0}
+        _assert_long_chunk_equivalent(
+            base,
+            do,
+            dht,
+            cu_seqlens=cu,
+            separate_varlen=True,
+            tolerances=_LONG_VARLEN_TOLERANCES,
+        )
+        return
+
+    refs, ref_states = [], []
+    for i in range(N):
+        start, end = cu_cpu[i].item(), cu_cpu[i + 1].item()
+        ref, ref_state = naive_recurrent_gdn2(
+            q=q[:, start:end],
+            k=k[:, start:end],
+            v=v[:, start:end],
+            g=g[:, start:end],
+            b=b[:, start:end],
+            w=w[:, start:end],
+            initial_state=h0[i : i + 1],
+            output_final_state=True,
+        )
+        refs.append(ref)
+        ref_states.append(ref_state)
+    expected = torch.cat(refs, dim=1)
+    expected_state = torch.cat(ref_states, dim=0)
+    ((expected * do).sum() + (expected_state * dht).sum()).backward(retain_graph=True)
+    expected_grads = [tensor.grad.detach().clone() for tensor in leaves]
+    for tensor in leaves:
+        tensor.grad = None
+
+    actual, actual_state = chunk_gdn2(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        b=b,
+        w=w,
+        initial_state=h0,
+        output_final_state=True,
+        cu_seqlens=cu,
+        cu_seqlens_cpu=cu_cpu,
+    )
+    ((actual * do).sum() + (actual_state * dht).sum()).backward()
+
+    assert_close("o", expected, actual, 0.006)
+    assert_close("ht", expected_state, actual_state, 0.006)
+    for name, expected_grad, actual_grad, tol in zip(
+        ("dq", "dk", "dv", "dg", "db", "dw", "dh0"),
+        expected_grads,
+        (tensor.grad for tensor in leaves),
+        (0.012, 0.012, 0.012, 0.02, 0.02, 0.02, 0.012),
+    ):
+        assert_close(name, expected_grad, actual_grad, tol)
+
+
+@_requires_accelerator
 def test_chunk_state_v_first():
     """state_v_first must give the same output and a transposed final state.
 
@@ -330,28 +782,48 @@ def test_chunk_state_v_first():
     transposed back for comparison.
     """
     dtype = torch.float32
-    B, T, H, K, V = 2, 128, 2, 64, 64
+    B, T, H, K, V = 2, _test_length(128), 2, 64, 64
     q, k, v, g, b, w, _, _ = _rand_inputs(B, T, H, K, V, dtype)
     h0_kv = torch.randn(B, H, K, V, dtype=torch.float32, device=device)
     h0_vk = h0_kv.transpose(-1, -2).contiguous()
 
-    o0, ht0 = chunk_gdn2(q=q, k=k, v=v, g=g, b=b, w=w, initial_state=h0_kv,
-                         use_qk_l2norm_in_kernel=True, output_final_state=True, state_v_first=False)
-    o1, ht1 = chunk_gdn2(q=q, k=k, v=v, g=g, b=b, w=w, initial_state=h0_vk,
-                         use_qk_l2norm_in_kernel=True, output_final_state=True, state_v_first=True)
+    o0, ht0 = chunk_gdn2(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        b=b,
+        w=w,
+        initial_state=h0_kv,
+        use_qk_l2norm_in_kernel=True,
+        output_final_state=True,
+        state_v_first=False,
+    )
+    o1, ht1 = chunk_gdn2(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        b=b,
+        w=w,
+        initial_state=h0_vk,
+        use_qk_l2norm_in_kernel=True,
+        output_final_state=True,
+        state_v_first=True,
+    )
     assert_close("o", o0, o1, 0.005)
     assert_close("ht", ht0, ht1.transpose(-1, -2), 0.005)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@_requires_accelerator
 @pytest.mark.parametrize(
     ("cu_seqlens", "H", "K", "V", "use_gate_in_kernel", "dtype"),
     [
         pytest.param(*p, id="cu_seqlens{}-H{}-K{}-V{}-gate{}-{}".format(*p))
         for p in [
-            ([0, 64, 128], 2, 64, 64, False, torch.float32),
-            ([0, 15, 100, 256], 2, 64, 64, False, torch.float16),     # ragged, non-multiple, fp16
-            ([0, 100, 300, 512], 2, 64, 64, True, torch.float16),     # gate-in-kernel + varlen
+            (_test_cu_seqlens([0, 64, 128]), 2, 64, 64, False, torch.float32),
+            (_test_cu_seqlens([0, 15, 100, 256]), 2, 64, 64, False, torch.float16),
+            (_test_cu_seqlens([0, 100, 300, 512]), 2, 64, 64, True, torch.float16),
         ]
     ],
 )
@@ -369,13 +841,40 @@ def test_chunk_varlen(cu_seqlens, H, K, V, use_gate_in_kernel, dtype):
     do = torch.randn_like(v)
     dht = torch.randn_like(h0)
 
+    if _LONG_SEQUENCE:
+        base = {"q": q, "k": k, "v": v, "g": g, "b": b, "w": w, "h0": h0}
+        if use_gate_in_kernel:
+            base.update(A_log=A_log, dt_bias=dt_bias)
+        kwargs = dict(
+            cu_seqlens=cu,
+            use_qk_l2norm_in_kernel=True,
+            use_gate_in_kernel=use_gate_in_kernel,
+        )
+        _assert_long_chunk_equivalent(
+            base,
+            do,
+            dht,
+            separate_varlen=True,
+            tolerances=_LONG_VARLEN_TOLERANCES,
+            **kwargs,
+        )
+        return
+
     tri, tri_ht = chunk_gdn2(
-        q=q, k=k, v=v, g=g, b=b, w=w,
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        b=b,
+        w=w,
         A_log=A_log if use_gate_in_kernel else None,
         dt_bias=dt_bias if use_gate_in_kernel else None,
-        initial_state=h0, output_final_state=True,
-        use_qk_l2norm_in_kernel=True, use_gate_in_kernel=use_gate_in_kernel,
-        cu_seqlens=cu, cu_seqlens_cpu=cu_cpu,
+        initial_state=h0,
+        output_final_state=True,
+        use_qk_l2norm_in_kernel=True,
+        use_gate_in_kernel=use_gate_in_kernel,
+        cu_seqlens=cu,
+        cu_seqlens_cpu=cu_cpu,
     )
     ((tri * do).sum() + (tri_ht * dht).sum()).backward(retain_graph=True)
     tri_grads = {n: t.grad.clone() for n, t in zip(("q", "k", "v", "g", "b", "w", "h0"), (q, k, v, g, b, w, h0))}
@@ -385,12 +884,16 @@ def test_chunk_varlen(cu_seqlens, H, K, V, use_gate_in_kernel, dtype):
     refs, ref_hts = [], []
     for i in range(N):
         s, e = cu[i].item(), cu[i + 1].item()
-        g_ref = (_activate_g(g[:, s:e], A_log, dt_bias, False, None) if use_gate_in_kernel else g[:, s:e])
+        g_ref = _activate_g(g[:, s:e], A_log, dt_bias, False, None) if use_gate_in_kernel else g[:, s:e]
         o_i, ht_i = naive_recurrent_gdn2(
             q=F.normalize(q[:, s:e].float(), p=2, dim=-1).to(dtype),
             k=F.normalize(k[:, s:e].float(), p=2, dim=-1).to(dtype),
-            v=v[:, s:e], g=g_ref, b=b[:, s:e], w=w[:, s:e],
-            initial_state=h0[i:i + 1], output_final_state=True,
+            v=v[:, s:e],
+            g=g_ref,
+            b=b[:, s:e],
+            w=w[:, s:e],
+            initial_state=h0[i : i + 1],
+            output_final_state=True,
         )
         refs.append(o_i)
         ref_hts.append(ht_i)
@@ -409,11 +912,11 @@ def test_chunk_varlen(cu_seqlens, H, K, V, use_gate_in_kernel, dtype):
     assert_close("dh0", ref_grads["h0"], tri_grads["h0"], 0.012)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@_requires_accelerator
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
 def test_chunk_matches_fused_recurrent(dtype):
     """The two production kernels must agree with each other (and the naive)."""
-    B, T, H, K, V = 2, 256, 2, 64, 64
+    B, T, H, K, V = 2, _test_length(256), 2, 64, 64
     q, k, v, g, b, w, _, _ = _rand_inputs(B, T, H, K, V, dtype)
     common = dict(use_qk_l2norm_in_kernel=True, output_final_state=True)
 
@@ -423,20 +926,19 @@ def test_chunk_matches_fused_recurrent(dtype):
     assert_close("ht", ht_rec, ht_chunk, 0.006)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@_requires_accelerator
 @torch.inference_mode()
 def test_chunk_return_intermediate_states():
     """return_intermediate_states yields per-chunk pre-states h; the output must
     still match the normal path."""
     dtype = torch.float32
-    B, T, H, K, V = 2, 192, 2, 64, 64
+    B, T, H, K, V = 2, _test_length(192), 2, 64, 64
     q, k, v, g, b, w, _, _ = _rand_inputs(B, T, H, K, V, dtype)
 
-    o_ref, ht_ref = chunk_gdn2(q=q, k=k, v=v, g=g, b=b, w=w,
-                               use_qk_l2norm_in_kernel=True, output_final_state=True)
-    o, ht, h = chunk_gdn2(q=q, k=k, v=v, g=g, b=b, w=w,
-                          use_qk_l2norm_in_kernel=True, output_final_state=True,
-                          return_intermediate_states=True)
+    o_ref, ht_ref = chunk_gdn2(q=q, k=k, v=v, g=g, b=b, w=w, use_qk_l2norm_in_kernel=True, output_final_state=True)
+    o, ht, h = chunk_gdn2(
+        q=q, k=k, v=v, g=g, b=b, w=w, use_qk_l2norm_in_kernel=True, output_final_state=True, return_intermediate_states=True
+    )
     NT = (T + 63) // 64
     assert h.shape == (B, NT, H, K, V), f"unexpected intermediate-state shape {tuple(h.shape)}"
     assert_close("o", o_ref, o, 0.005)
@@ -446,15 +948,15 @@ def test_chunk_return_intermediate_states():
 # =============================================================================
 # layer — GatedDeltaNet2 (GVA + short conv) end to end
 # =============================================================================
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@_requires_accelerator
 @pytest.mark.parametrize(
     ("num_heads", "num_v_heads", "use_short_conv"),
     [
         pytest.param(*p, id="H{}-HV{}-conv{}".format(*p))
         for p in [
             (2, 2, False),
-            (2, 4, False),    # GVA: num_v_heads > num_heads
-            (2, 2, True),     # short conv path
+            (2, 4, False),  # GVA: num_v_heads > num_heads
+            (2, 2, True),  # short conv path
         ]
     ],
 )
@@ -465,12 +967,18 @@ def test_layer(num_heads, num_v_heads, use_short_conv):
     from fla.layers import GatedDeltaNet2
 
     torch.manual_seed(0)
-    hidden_size, head_dim, B, T = 128, 32, 2, 128
-    layer = GatedDeltaNet2(
-        hidden_size=hidden_size, head_dim=head_dim,
-        num_heads=num_heads, num_v_heads=num_v_heads,
-        use_short_conv=use_short_conv,
-    ).to(device).to(torch.float32)
+    hidden_size, head_dim, B, T = 128, 32, 2, _test_length(128)
+    layer = (
+        GatedDeltaNet2(
+            hidden_size=hidden_size,
+            head_dim=head_dim,
+            num_heads=num_heads,
+            num_v_heads=num_v_heads,
+            use_short_conv=use_short_conv,
+        )
+        .to(device)
+        .to(torch.float32)
+    )
     layer.train()
 
     x = torch.randn(B, T, hidden_size, device=device, dtype=torch.float32, requires_grad=True)
