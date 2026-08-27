@@ -83,6 +83,10 @@ class GatedDeltaNet(nn.Module):
             The index of the layer. Default: None.
         norm_eps (float, Optional):
             The epsilon value for the normalization layer. Default: 1e-5.
+        output_gate_activation (str, Optional):
+            Activation applied by the output gate when `use_gate=True`.
+            Supported values are `swish`, `silu`, and `sigmoid`.
+            `swish` and `silu` are equivalent aliases. Default: `swish`.
     """
 
     def __init__(
@@ -100,6 +104,7 @@ class GatedDeltaNet(nn.Module):
         conv_bias: bool = False,
         layer_idx: int = None,
         norm_eps: float = 1e-5,
+        output_gate_activation: str = 'swish',
         **kwargs,
     ) -> GatedDeltaNet:
         super().__init__()
@@ -141,6 +146,10 @@ class GatedDeltaNet(nn.Module):
                 f"Resulting head_v_dim would be {head_dim * expand_v}, which is invalid for FusedRMSNormGated.",
             )
         assert mode in ['chunk', 'fused_recurrent'], f"Not supported mode `{mode}`."
+        if output_gate_activation not in ('swish', 'silu', 'sigmoid'):
+            raise ValueError(
+                f"output_gate_activation must be one of 'swish', 'silu', 'sigmoid', got {output_gate_activation!r}")
+        self.output_gate_activation = output_gate_activation
 
         self.q_proj = nn.Linear(hidden_size, self.key_dim, bias=False)
         self.k_proj = nn.Linear(hidden_size, self.key_dim, bias=False)
@@ -194,7 +203,7 @@ class GatedDeltaNet(nn.Module):
             )
         if use_gate:
             self.g_proj = nn.Linear(hidden_size, self.value_dim, bias=False)
-            self.o_norm = FusedRMSNormGated(self.head_v_dim, eps=norm_eps)
+            self.o_norm = FusedRMSNormGated(self.head_v_dim, eps=norm_eps, activation=self.output_gate_activation)
         else:
             self.o_norm = RMSNorm(self.head_v_dim, eps=norm_eps, dtype=torch.float32)
         self.o_proj = nn.Linear(self.value_dim, hidden_size, bias=False)
