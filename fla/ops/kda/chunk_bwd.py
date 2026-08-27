@@ -456,7 +456,6 @@ def chunk_kda_bwd(
     dt_bias: torch.Tensor | None = None,
     disable_recompute: bool = False,
     cp_context: FLACPContext | None = None,
-    use_tf32x3_affine_chain_in_cp: bool = False,
     **kwargs,
 ):
     H, HV = q.shape[2], v.shape[2]
@@ -538,7 +537,6 @@ def chunk_kda_bwd(
             context=cp_context,
             chunk_size=chunk_size,
             state_v_first=state_v_first,
-            use_tf32x3_affine_chain=use_tf32x3_affine_chain_in_cp,
         )
 
     dh, dh0, dv = chunk_gated_delta_rule_bwd_dhu(

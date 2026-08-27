@@ -50,7 +50,6 @@ class ChunkKDAFunction(torch.autograd.Function):
         disable_recompute: bool = False,
         return_intermediate_states: bool = False,
         cp_context: FLACPContext | None = None,
-        use_tf32x3_affine_chain_in_cp: bool = False,
     ):
         # Apply l2norm
         q_rstd, k_rstd = None, None
@@ -94,7 +93,6 @@ class ChunkKDAFunction(torch.autograd.Function):
             return_intermediate_states=return_intermediate_states,
             cp_context=cp_context,
             state_v_first=state_v_first,
-            use_tf32x3_affine_chain_in_cp=use_tf32x3_affine_chain_in_cp,
         )
 
         if return_intermediate_states:
@@ -118,7 +116,6 @@ class ChunkKDAFunction(torch.autograd.Function):
         ctx.disable_recompute = disable_recompute
         ctx.cp_context = cp_context
         ctx.state_v_first = state_v_first
-        ctx.use_tf32x3_affine_chain_in_cp = use_tf32x3_affine_chain_in_cp
         return o.type_as(q), final_state
 
     @staticmethod
@@ -165,7 +162,6 @@ class ChunkKDAFunction(torch.autograd.Function):
             kg=kg,
             v_new=v_new,
             h=h,
-            use_tf32x3_affine_chain_in_cp=ctx.use_tf32x3_affine_chain_in_cp,
         )
         if ctx.use_qk_l2norm_in_kernel:
             dq = l2norm_bwd(q, q_rstd, dq)
@@ -174,7 +170,7 @@ class ChunkKDAFunction(torch.autograd.Function):
             db = fused_beta_sigmoid_bwd(beta_raw, db, scale=2.0 if ctx.allow_neg_eigval else 1.0)
 
         return (dq.to(q), dk.to(k), dv.to(v), dg.to(g_input), db.to(beta_raw), dA, dbias, None, dh0,
-                None, None, None, None, None, None, None, None, None, None, None, None, None, None, None)
+                None, None, None, None, None, None, None, None, None, None, None, None, None, None)
 
 
 @dispatch('kda')
@@ -200,7 +196,6 @@ def chunk_kda(
     cu_seqlens: torch.LongTensor | None = None,
     cu_seqlens_cpu: torch.LongTensor | None = None,
     cp_context: FLACPContext = None,
-    use_tf32x3_affine_chain_in_cp: bool = False,
     **kwargs,
 ):
     r"""
@@ -282,11 +277,6 @@ def chunk_kda(
             Context parallel context for distributed training across multiple devices.
             When provided, ``initial_state`` and ``output_final_state`` are not supported,
             and ``cu_seqlens`` will be overridden by the context. Default: ``None``.
-        use_tf32x3_affine_chain_in_cp (bool):
-            Used only when ``cp_context`` is not ``None``.
-            If True, the h and grad_h propagation along subsequences and merging of transition matrix m along chunks
-            in each subsequence is done in dot with input_precision ``tf32x3`` to improve precision, else ``tf32``.
-            Default: ``False``.
 
     Returns:
         - Normal mode (return_intermediate_states=False): A tuple (o, final_state)
@@ -450,5 +440,4 @@ def chunk_kda(
         disable_recompute,
         return_intermediate_states,
         cp_context,
-        use_tf32x3_affine_chain_in_cp,
     )

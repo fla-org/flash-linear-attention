@@ -39,7 +39,6 @@ def chunk_kda_fwd(
     disable_recompute: bool = False,
     return_intermediate_states: bool = False,
     cp_context: FLACPContext | None = None,
-    use_tf32x3_affine_chain_in_cp: bool = False,
 ):
     # Apply gate activation
     g_org = None
@@ -90,7 +89,6 @@ def chunk_kda_fwd(
             context=cp_context,
             chunk_size=chunk_size,
             state_v_first=state_v_first,
-            use_tf32x3_affine_chain=use_tf32x3_affine_chain_in_cp,
         )
 
     h, v_new, final_state = chunk_gated_delta_rule_fwd_h(

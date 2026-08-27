@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import warnings
 from typing import TYPE_CHECKING
 
 import torch
@@ -16,7 +17,7 @@ import triton.language as tl
 
 from fla.ops.cp.comm import all_gather_into_tensor
 from fla.ops.utils.op import exp2
-from fla.utils import autotune_cache_kwargs, check_shared_mem
+from fla.utils import IS_TF32_SUPPORTED, autotune_cache_kwargs, check_shared_mem
 
 if TYPE_CHECKING:
     from fla.ops.cp.context import FLACPContext
@@ -61,7 +62,7 @@ def pre_process_fwd_kernel_merged(
     USE_BG: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     MULTI_SEQS: tl.constexpr,
-    AFFINE_CHAIN_PRECISION: tl.constexpr = "tf32",
+    AFFINE_CHAIN_PRECISION: tl.constexpr = None,
 ):
     i_col, i_h = tl.program_id(0), tl.program_id(1)
     if MULTI_SEQS:
@@ -268,7 +269,6 @@ def pre_process_fwd_kernel_merged(
         # Initialize as identity matrix: M_0 = I
         b_m = tl.where(row[:, None] == col[None, :], 1.0, 0.0)
 
-        # option to improve the input_precision in dm propagation
         for i_t in range(NT):
             o_t = i_t * BT + tl.arange(0, BT)
             m_t = o_t < T
@@ -350,7 +350,7 @@ def merge_fwd_bwd_kernel(
     NUM_SEQ_ENTRIES,         # num_split_seqs for intracard
     HAS_H0: tl.constexpr,                  # Heuristic: whether h0 is provided
     STATE_V_FIRST: tl.constexpr = False,  # When True, h0/h use [V, K] layout; ag_hm always [K, V+K]
-    AFFINE_CHAIN_PRECISION: tl.constexpr = "tf32",  # input_precision for M@h in the state update (h' = M @ h + he)
+    AFFINE_CHAIN_PRECISION: tl.constexpr = None,  # input_precision for M@h in the state update (h' = M @ h + he)
 ):
     """
     Unified merge kernel for both CP and Intra-card modes.
@@ -504,7 +504,7 @@ def pre_process_bwd_kernel_merged(
     USE_GK: tl.constexpr,
     USE_BG: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    AFFINE_CHAIN_PRECISION: tl.constexpr = "tf32",
+    AFFINE_CHAIN_PRECISION: tl.constexpr = None,
 ):
     """
     Merged backward kernel that computes both dh (K x V) and dm (K x K) in a single kernel.
@@ -764,11 +764,16 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
     cu_seqlens: torch.LongTensor | None = None,
     initial_state: torch.Tensor | None = None,
     context: FLACPContext = None,
-    use_tf32x3_affine_chain: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if context is None or context.group is None:
         return initial_state
     assert initial_state is None, "When enable CP, the provided initial_state must be None."
+    use_tf32x3_affine_chain = context.use_tf32x3_affine_chain
+    if use_tf32x3_affine_chain and not IS_TF32_SUPPORTED:
+        warnings.warn(
+            "tf32x3 affine chain requires an NVIDIA GPU with compute capability >= 8.0; falling back to ieee precision",
+            stacklevel=2,
+        )
     rank = dist.get_rank(group=context.group)
 
     B, T, H, K, V, HV = *k.shape, u.shape[-1], u.shape[2]
@@ -811,7 +816,10 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
             BK1=BK,
             BLOCK_SIZE=BLOCK_SIZE,
             MULTI_SEQS=False,
-            AFFINE_CHAIN_PRECISION="tf32x3" if use_tf32x3_affine_chain else "tf32",
+            AFFINE_CHAIN_PRECISION=(
+                "tf32x3" if use_tf32x3_affine_chain and IS_TF32_SUPPORTED
+                else ("ieee" if not IS_TF32_SUPPORTED else None)
+            ),
         )
     ag_hm, _ = all_gather_into_tensor(hm, group=context.group)
     if not context.is_first_rank:
@@ -833,7 +841,10 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
             INTRACARD_MODE=False,
             NUM_SEQ_ENTRIES=0,
             STATE_V_FIRST=state_v_first,
-            AFFINE_CHAIN_PRECISION="tf32x3" if use_tf32x3_affine_chain else "tf32",
+            AFFINE_CHAIN_PRECISION=(
+                "tf32x3" if use_tf32x3_affine_chain and IS_TF32_SUPPORTED
+                else ("ieee" if not IS_TF32_SUPPORTED else None)
+            ),
         )
     return initial_state
 
@@ -854,11 +865,16 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
     initial_state: torch.Tensor | None = None,
     context: FLACPContext | None = None,
     chunk_size: int = 64,
-    use_tf32x3_affine_chain: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if context is None or context.group is None:
         return dht, initial_state
     assert dht is None, "When enable CP, the provided dht must be None."
+    use_tf32x3_affine_chain = context.use_tf32x3_affine_chain
+    if use_tf32x3_affine_chain and not IS_TF32_SUPPORTED:
+        warnings.warn(
+            "tf32x3 affine chain requires an NVIDIA GPU with compute capability >= 8.0; falling back to ieee precision",
+            stacklevel=2,
+        )
     rank = dist.get_rank(context.group)
 
     B, T, H, K, V, HV = *q.shape, do.shape[-1], do.shape[2]
@@ -901,7 +917,10 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
             BK1=BK,
             BLOCK_SIZE=BLOCK_SIZE,
             USE_BG=bg is not None,
-            AFFINE_CHAIN_PRECISION="tf32x3" if use_tf32x3_affine_chain else "tf32",
+            AFFINE_CHAIN_PRECISION=(
+                "tf32x3" if use_tf32x3_affine_chain and IS_TF32_SUPPORTED
+                else ("ieee" if not IS_TF32_SUPPORTED else None)
+            ),
         )
 
     ag_dhm, _ = all_gather_into_tensor(dhm, group=context.group)
@@ -925,7 +944,10 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
             INTRACARD_MODE=False,
             NUM_SEQ_ENTRIES=0,
             STATE_V_FIRST=state_v_first,
-            AFFINE_CHAIN_PRECISION="tf32x3" if use_tf32x3_affine_chain else "tf32",
+            AFFINE_CHAIN_PRECISION=(
+                "tf32x3" if use_tf32x3_affine_chain and IS_TF32_SUPPORTED
+                else ("ieee" if not IS_TF32_SUPPORTED else None)
+            ),
         )
 
     # initial_state is None in the CP mode
