@@ -191,7 +191,6 @@ class MoBA(nn.Module):
         q, k = self.rotary(q, k, seqlen_offset=seqlen_offset, max_seqlen=max_seqlen, cu_seqlens=cu_seqlens)
 
         if past_key_values is not None:
-            assert cu_seqlens is None, "cu_seqlens should not be provided when past_key_values is not None"
             cache_has_content = past_key_values.get_seq_length(self.layer_idx) > 0
             assert cu_seqlens is None or not cache_has_content, \
                 "cu_seqlens should not be provided when past_key_values has content"
