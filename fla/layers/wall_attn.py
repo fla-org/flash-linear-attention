@@ -163,6 +163,7 @@ class WallAttention(nn.Module):
 
         if past_key_values is not None:
             assert cu_seqlens is None, "cu_seqlens should not be provided when past_key_values is not None"
+            assert attention_mask is None, "attention_mask should not be provided when past_key_values is not None"
             if self.window_size is None:
                 # Non-windowed: cache the *pre-rescaled* decode state and extend it one
                 # column per step, so prep is O(q_len) instead of rebuilding k_tilde/P
@@ -171,6 +172,7 @@ class WallAttention(nn.Module):
             else:
                 # Windowed: a rolling raw (k, v, g) cache; chunk anchors must track the
                 # window, so rebuild the rescale each step from the cached suffix.
+                cache_has_content = past_key_values.get_seq_length(self.layer_idx) > 0
                 cached = (k, v, g, gs) if self.use_scalar_gate else (k, v, g)
                 state = past_key_values.update(
                     attn_state=cached,
@@ -178,10 +180,11 @@ class WallAttention(nn.Module):
                     offset=q_len,
                     cache_kwargs=dict(window_size=self.window_size),
                 )['attn_state']
-                if self.use_scalar_gate:
-                    k, v, g, gs = state
-                else:
-                    k, v, g = state
+                if cache_has_content:
+                    if self.use_scalar_gate:
+                        k, v, g, gs = state
+                    else:
+                        k, v, g = state
                 kv_len = k.shape[1]
                 if q_len < kv_len:
                     o = self._decode_rebuild(q, k, v, g, gs)
