@@ -110,6 +110,8 @@ class NativeSparseAttention(nn.Module):
 
         if past_key_values is not None:
             cache_has_content = past_key_values.get_seq_length(self.layer_idx) > 0
+            assert cu_seqlens is None or not cache_has_content, \
+                "cu_seqlens should not be provided when past_key_values has content"
             k_cached, v_cached = past_key_values.update(
                 attn_state=(k.flatten(-2, -1), v.flatten(-2, -1)),
                 layer_idx=self.layer_idx,
