@@ -29,12 +29,12 @@ def test_empty_sliding_window_cache_prefill(dtype: torch.dtype):
 
     with torch.no_grad():
         expected, _, _ = layer(hidden_states=hidden_states)
-        expected_next, _, _ = layer(hidden_states=torch.cat([hidden_states, next_hidden_states], dim=1))
+        expected_next, _, _ = layer(hidden_states=torch.cat([hidden_states, next_hidden_states], dim=1)[:, -W:])
         cache = Cache()
         actual, _, returned_cache = layer(hidden_states=hidden_states, past_key_values=cache, use_cache=True)
         actual_next, _, _ = layer(
             hidden_states=next_hidden_states,
-            attention_mask=torch.ones(B, 1, dtype=torch.long, device=device),
+            attention_mask=torch.ones(B, W, dtype=torch.long, device=device),
             past_key_values=cache,
             use_cache=True,
         )
