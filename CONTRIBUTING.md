@@ -126,14 +126,16 @@ fla/
 │       └── README.md            # (optional) Mathematical derivations
 ├── models/          # Full language model definitions (config + modeling)
 ├── modules/         # Utility modules (norms, feature maps, rotary, etc.)
-└── utils.py         # Global utilities and decorators
+└── utils/           # Global utilities and decorators
 
 tests/
-├── conftest.py      # Pytest config with NaN memory poisoning
-├── ops/             # Operator tests
-├── layers/          # Layer tests
-├── models/          # Model tests
-└── modules/         # Module tests
+├── context_parallel/   # Context-parallel tests
+├── layers/             # Layer tests
+├── models/             # Model tests
+├── modules/            # Module tests
+├── ops/                # Operator tests
+├── utils/              # Tests for fla.utils
+└── conftest.py         # Pytest config with NaN memory poisoning
 ```
 
 ## Code Style
@@ -163,11 +165,15 @@ Key rules:
 - **Import sorting**: `isort`-compatible via Ruff (`fla` as first-party)
 - **Type hints**: Use modern syntax (`X | None` instead of `Optional[X]`, `list[str]` instead of `List[str]`)
 - Use `TYPE_CHECKING` for imports only needed at type-check time
-- **Multi-line calls**: don't wrap a call that fits within the line limit. When a call does overflow, use a hanging indent with **one keyword argument per line**, not several per line.
+- **Line width**: use the full 127 characters before reaching for a line break — a statement that fits on one line stays on one line.
+- **Calls**: prefer keyword arguments over positional ones. A call that fits within the limit stays on one line; a call that overflows breaks with a hanging indent, **one keyword argument per line** — never several.
+- **Parameter order**: keep related parameters adjacent, and pass keyword arguments at call sites in the same order they appear in the signature.
 
 ### Docstrings and Comments
 
 Comments and docstrings are hints for other readers, not a chain of thought. Give the reader what the code cannot say for itself, in as few words as possible — correct, simple, and with no narration of your reasoning.
+
+Write docstrings at a high level: say what the function or test does and the contract it guarantees, and let the code speak for its own mechanics. A docstring that only restates the body is better left unwritten.
 
 Use a two-line hanging format for `Args:` / `Returns:` entries: a `name (type, Optional):` header line, then the description and `Default:` on the next indented line(s).
 
@@ -234,7 +240,7 @@ Don't hard-wrap prose at an arbitrary short column — this covers Markdown file
   `int32` overflow behavior.
 - Gate autotune configs with `autotune_cache_kwargs` for cache support.
 - Kernel naming: `<op>_fwd_kernel_<suffix>` / `<op>_bwd_kernel_<suffix>`.
-- When renaming a symbol or adding/moving a parameter, sweep **every** site in one pass: the tensor, its `b_*` value, the `p_*` block pointer, comments, and — across the forward/backward kernels, host wrappers, and autograd `Function` — every signature, launch, return tuple, and `save_for_backward`/`saved_tensors` list. Keyword-argument order at each call site must match the parameter order in the signature.
+- When renaming a symbol or adding/moving a parameter, sweep **every** site in one pass: the tensor, its `b_*` value, the `p_*` block pointer, comments, and — across the forward/backward kernels, host wrappers, and autograd `Function` — every signature, launch, return tuple, and `save_for_backward`/`saved_tensors` list.
 
 ### PyTorch Operators
 
@@ -295,7 +301,7 @@ from fla.utils import assert_close, device, device_platform
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'D', 'dtype'),
     [
-        pytest.param(*test, id="B{}-T{}-H{}-D{}".format(*test))
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-{}".format(*test))
         for test in [
             (1, 63, 1, 64, torch.float16),
             (2, 1000, 4, 128, torch.float16),
@@ -330,7 +336,6 @@ Key guidelines:
 
 - **Always use `torch.manual_seed(42)`** for reproducibility.
 - **Use `assert_close`** from `fla.utils` for numerical comparison with relative tolerance.
-- **Test both forward and backward** passes by computing gradients.
 - **Use `device` from `fla.utils`** for device-agnostic tests.
 - **Parametrize** with diverse shapes including non-power-of-2 sequence lengths (e.g., 63, 100, 2000).
 - **Skip unsupported platforms** with `@pytest.mark.skipif(device_platform == 'intel', ...)` when needed.

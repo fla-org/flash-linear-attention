@@ -62,7 +62,7 @@ jobs:
     runs-on: linux-aarch64-a2-1
     timeout-minutes: 60
     container:
-      image: ascendai/cann:9.0.0-910b-ubuntu22.04-py3.11
+      image: ascendai/cann:9.1.0-910b-ubuntu22.04-py3.12
       options: >-
         --shm-size 16g
       env:
@@ -77,7 +77,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6.2.0
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
       - name: Install dependencies
         run: |

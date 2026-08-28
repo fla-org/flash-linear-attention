@@ -104,6 +104,26 @@ def test_fused_recurrent(
     assert_close('o', ref, tri, 0.002)
     assert_close('ht', ref_ht, tri_ht, 0.002)
 
+    if D & (D - 1):
+        numel = B * T * HV * D
+        for name in ('gk', 'gv'):
+            storage = torch.full((numel + 64,), float("nan"), device=device)
+            gg = storage[:numel].view(B, T, HV, D)
+            gg.copy_(g.detach()[..., None].expand(B, T, HV, D))
+            tri2, tri2_ht = fused_recurrent_gated_delta_rule(
+                q=q.clone(),
+                k=k.clone(),
+                v=v.clone(),
+                beta=beta.clone(),
+                **{name: gg},
+                scale=scale,
+                initial_state=h0.clone(),
+                use_qk_l2norm_in_kernel=True,
+                output_final_state=True,
+            )
+            assert_close(name, ref, tri2, 0.002)
+            assert_close(f'{name}_ht', ref_ht, tri2_ht, 0.002)
+
 
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'HV', 'D', 'scale', 'gate_logit_normalizer', 'mask_p', 'use_qk_l2norm_in_kernel', 'dtype'),

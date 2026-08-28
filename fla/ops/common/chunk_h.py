@@ -9,6 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.backends import dispatch
 from fla.ops.utils import prepare_chunk_offsets
 from fla.ops.utils.op import exp2
 from fla.utils import autotune_cache_kwargs, check_shared_mem
@@ -29,7 +30,7 @@ BKV_LIST = [32, 64] if check_shared_mem() else [16, 32]
         for num_warps in [1, 2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
-    key=['BT', 'USE_G', 'USE_GK', 'USE_GV', 'STATE_V_FIRST'],
+    key=['BT', 'USE_G', 'USE_GK', 'USE_GV', 'STATE_V_FIRST', 'K', 'V'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -93,6 +94,7 @@ def chunk_fwd_kernel_h(
             b_h = tl.load(p_h0, mask=(o_k[:, None] < K) & (o_v[None, :] < V), other=0.0).to(tl.float32)
 
     for i_t in range(NT):
+        i_t = i_t.to(tl.int64)
         i_s = i_t // NTS
         o_t = i_t * BT + tl.arange(0, BT)
         m_t = o_t < T
@@ -172,7 +174,7 @@ def chunk_fwd_kernel_h(
         for num_warps in [1, 2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
-    key=['BT', 'USE_G', 'USE_GK', 'USE_GV', 'STATE_V_FIRST'],
+    key=['BT', 'USE_G', 'USE_GK', 'USE_GV', 'STATE_V_FIRST', 'K', 'V'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -240,6 +242,7 @@ def chunk_bwd_kernel_dh(
             b_dh += tl.load(p_dht, mask=(o_k[:, None] < K) & (o_v[None, :] < V), other=0.0).to(tl.float32)
 
     for i_t in range(NT - 1, -1, -1):
+        i_t = i_t.to(tl.int64)
         i_s = i_t // (BS // BT)
         o_dh = ((boh + i_s) * H + i_h).to(tl.int64) * K*V
         if STATE_V_FIRST:
@@ -303,6 +306,7 @@ def chunk_bwd_kernel_dh(
             tl.store(p_dh0, b_dh.to(p_dh0.dtype.element_ty), mask=(o_k[:, None] < K) & (o_v[None, :] < V))
 
 
+@dispatch('common')
 def chunk_fwd_h(
     k: torch.Tensor,
     v: torch.Tensor,
@@ -361,6 +365,7 @@ def chunk_fwd_h(
     return h, ht
 
 
+@dispatch('common')
 def chunk_bwd_dh(
     q: torch.Tensor,
     k: torch.Tensor,

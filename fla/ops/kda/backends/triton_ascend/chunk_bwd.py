@@ -16,7 +16,7 @@ from triton.runtime import driver
 
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 from fla.ops.utils.op import exp2
-from fla.utils import input_guard
+from fla.utils import ascend_compile_kwargs, input_guard
 from fla.utils.ascend_ub_manager import (
     ASCEND_MAX_GRID_DIM,
     compute_row_tile_block_size,
@@ -764,6 +764,7 @@ def chunk_kda_bwd_wy_dqkg_fused_npu(
     bh_total = B * HV
     num_core = get_npu_properties()['num_vectorcore']
     task_num = NT * bh_total
+    # disable auto-multi-buffer on this V-slab launch
     chunk_kda_bwd_kernel_wy_v_part_npu[(num_core,)](
         v=v_arg,
         beta=beta_arg,
@@ -784,6 +785,7 @@ def chunk_kda_bwd_wy_dqkg_fused_npu(
         BV=BV,
         IS_VARLEN=is_varlen,
         G_T_CONTIG=g_t_contig,
+        **ascend_compile_kwargs(),
     )
 
     k_part_kwargs = dict(

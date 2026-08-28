@@ -52,7 +52,8 @@ from fla.utils import input_guard
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
         "IS_CONTINUOUS_BATCHING": lambda args: args["ssm_state_indices"] is not None,
         "IS_SPEC_DECODING": lambda args: args["num_accepted_tokens"] is not None,
-        "HAS_DT_BIAS": lambda args: args["dt_bias"] is not None,
+        "HAS_A": lambda args: args["A_log"] is not None,
+        "HAS_BIAS": lambda args: args["dt_bias"] is not None,
         "USE_LOWER_BOUND": lambda args: args["lower_bound"] is not None,
     }
 )
@@ -93,7 +94,8 @@ def fused_recurrent_gdn2_fwd_kernel(
     IS_CONTINUOUS_BATCHING: tl.constexpr,
     IS_SPEC_DECODING: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
-    HAS_DT_BIAS: tl.constexpr,
+    HAS_A: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
     USE_GATE_IN_KERNEL: tl.constexpr,
     USE_LOWER_BOUND: tl.constexpr,
     STATE_V_FIRST: tl.constexpr,
@@ -174,17 +176,17 @@ def fused_recurrent_gdn2_fwd_kernel(
             b_q = b_q / tl.sqrt(tl.sum(b_q * b_q) + 1e-6)
             b_k = b_k / tl.sqrt(tl.sum(b_k * b_k) + 1e-6)
         b_q = b_q * scale
-        b_g = tl.load(p_g, eviction_policy='evict_last').to(tl.float32)
+        b_g = tl.load(p_g, mask=mask_k, other=0, eviction_policy='evict_last').to(tl.float32)
 
         if USE_GATE_IN_KERNEL:
-            b_A = tl.load(A_log + i_hv).to(tl.float32)
+            b_A = tl.load(A_log + i_hv).to(tl.float32) if HAS_A else 1.0
 
-            if HAS_DT_BIAS:
+            if HAS_BIAS:
                 b_bias = tl.load(dt_bias + i_hv * K + o_k, mask=mask_k, other=0).to(tl.float32)
                 b_g = b_g + b_bias
 
             if USE_LOWER_BOUND:
-                b_gk = lower_bound * tl.sigmoid(exp(b_A) * b_g)
+                b_gk = lower_bound * tl.sigmoid((exp(b_A) if HAS_A else b_A) * b_g)
             else:
                 b_gk = -exp(b_A) * softplus(b_g)
         else:
@@ -377,35 +379,49 @@ def fused_recurrent_gdn2(
     Setting ``b = w = beta`` (scalar) recovers KDA exactly.
 
     Args:
-        q (torch.Tensor): queries of shape ``[B, T, H, K]``.
-        k (torch.Tensor): keys of shape ``[B, T, H, K]``.
-        v (torch.Tensor): values of shape ``[B, T, HV, V]`` (GVA if HV > H).
-        g (torch.Tensor): channel-wise log-decay of shape ``[B, T, HV, K]``.
-            When ``use_gate_in_kernel=True``, this is the raw pre-activation and
-            the kernel computes ``-exp(A_log) * softplus(g + dt_bias)`` (or the
-            bounded variant if ``lower_bound`` is set).
-        b (torch.Tensor): channel-wise erase gate of shape ``[B, T, HV, K]``.
-        w (torch.Tensor): channel-wise write gate of shape ``[B, T, HV, V]``.
-        A_log (Optional[torch.Tensor]): decay parameter of shape ``[HV]``.
-            Required when ``use_gate_in_kernel=True``.
-        dt_bias (Optional[torch.Tensor]): per-channel bias of shape ``[HV * K]``,
-            only used when ``use_gate_in_kernel=True``.
-        scale (Optional[float]): attention scale, defaults to ``1/sqrt(K)``.
-        initial_state (Optional[torch.Tensor]): ``[N, HV, K, V]`` in float32
-            (or ``[N, HV, V, K]`` if ``state_v_first=True``).
-        output_final_state (bool): whether to output the final state.
-        use_qk_l2norm_in_kernel (bool): L2-normalize q and k inside the kernel.
-        use_gate_in_kernel (bool): compute the gate activation from raw ``g``.
-        lower_bound (Optional[float]): when ``use_gate_in_kernel=True`` and set,
-            use ``lower_bound * sigmoid(exp(A_log) * g)`` instead of the softplus
-            activation.
-        state_v_first (bool): store state as ``[V, K]`` instead of the default
-            ``[K, V]``.
-        cu_seqlens (Optional[torch.LongTensor]): ``[N+1]`` packed-sequence offsets.
+        q (torch.Tensor):
+            queries of shape ``[B, T, H, K]``.
+        k (torch.Tensor):
+            keys of shape ``[B, T, H, K]``.
+        v (torch.Tensor):
+            values of shape ``[B, T, HV, V]`` (GVA if HV > H).
+        g (torch.Tensor):
+            channel-wise log-decay of shape ``[B, T, HV, K]``.
+            When ``use_gate_in_kernel=True``, this is the raw pre-activation,
+            and the kernel computes ``-exp(A_log) * softplus(g + dt_bias)`` (or the bounded variant if ``lower_bound`` is set).
+        b (torch.Tensor):
+            channel-wise erase gate of shape ``[B, T, HV, K]``.
+        w (torch.Tensor):
+            channel-wise write gate of shape ``[B, T, HV, V]``.
+        A_log (Optional[torch.Tensor]):
+            decay parameter of shape ``[HV]``.
+            When ``use_gate_in_kernel=True`` together with ``lower_bound``,
+            may be ``None`` to use ``lower_bound * sigmoid(g + dt_bias)``.
+        dt_bias (Optional[torch.Tensor]):
+            per-channel bias of shape ``[HV * K]``, only used when ``use_gate_in_kernel=True``.
+        scale (Optional[float]):
+            attention scale. Default: ``1/sqrt(K)``.
+        initial_state (Optional[torch.Tensor]):
+            ``[N, HV, K, V]`` in float32 (or ``[N, HV, V, K]`` if ``state_v_first=True``).
+        output_final_state (Optional[bool]):
+            whether to output the final state. Default: `False`.
+        use_qk_l2norm_in_kernel (Optional[bool]):
+            L2-normalize q and k inside the kernel. Default: `False`.
+        use_gate_in_kernel (Optional[bool]):
+            compute the gate activation from raw ``g``. Default: `False`.
+        lower_bound (Optional[float]):
+            when ``use_gate_in_kernel=True`` and set,
+            use ``lower_bound * sigmoid(exp(A_log) * g)`` instead of the softplus activation.
+        state_v_first (Optional[bool]):
+            store state as ``[V, K]`` instead of the default ``[K, V]``. Default: `False`.
+        cu_seqlens (Optional[torch.LongTensor]):
+            ``[N+1]`` packed-sequence offsets.
 
     Returns:
-        o (torch.Tensor): outputs of shape ``[B, T, HV, V]``.
-        final_state (Optional[torch.Tensor]): ``[N, HV, K, V]`` if requested.
+        o (torch.Tensor):
+            outputs of shape ``[B, T, HV, V]``.
+        final_state (Optional[torch.Tensor]):
+            ``[N, HV, K, V]`` if requested.
     """
     if 'transpose_state_layout' in kwargs:
         if state_v_first:
@@ -428,9 +444,9 @@ def fused_recurrent_gdn2(
                 f"The number of initial states is expected to be equal to the number of input sequences, "
                 f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}."
             )
-    assert b.shape == (*q.shape[:3], k.shape[-1]), (
+    assert b.shape == (*v.shape[:3], k.shape[-1]), (
         f"b must have shape [B, T, HV, K]; got {tuple(b.shape)} "
-        f"vs expected {(*q.shape[:3], k.shape[-1])}."
+        f"vs expected {(*v.shape[:3], k.shape[-1])}."
     )
     assert w.shape == v.shape, (
         f"w must have shape [B, T, HV, V] matching v; got {tuple(w.shape)} "

@@ -185,7 +185,12 @@ class MultiScaleRetention(nn.Module):
             )
 
         batch_size, q_len, _ = hidden_states.shape
-        mode = 'fused_recurrent' if q_len <= 64 else self.mode
+        if torch.is_grad_enabled():
+            mode = 'chunk'
+        elif q_len <= 64:
+            mode = 'fused_recurrent'
+        else:
+            mode = self.mode
 
         last_state = get_layer_cache(self, past_key_values)
 

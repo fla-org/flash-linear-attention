@@ -99,7 +99,12 @@ class HGRNAttention(nn.Module):
             )
 
         # launching the triton kernel for just one token will actually be slower
-        mode = 'fused_recurrent' if not self.training and hidden_states.shape[1] <= 64 else self.mode
+        if torch.is_grad_enabled() and kwargs.get('cu_seqlens') is None:
+            mode = 'chunk'
+        elif not self.training and hidden_states.shape[1] <= 64:
+            mode = 'fused_recurrent'
+        else:
+            mode = self.mode
 
         last_state = get_layer_cache(self, past_key_values)
 

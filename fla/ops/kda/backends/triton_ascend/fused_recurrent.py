@@ -52,7 +52,8 @@ def _get_bv(K: int, V: int) -> int:
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
         "IS_CONTINUOUS_BATCHING": lambda args: args["ssm_state_indices"] is not None,
         "IS_SPEC_DECODING": lambda args: args["num_accepted_tokens"] is not None,
-        "HAS_DT_BIAS": lambda args: args["dt_bias"] is not None,
+        "HAS_A": lambda args: args["A_log"] is not None,
+        "HAS_BIAS": lambda args: args["dt_bias"] is not None,
         "USE_LOWER_BOUND": lambda args: args["lower_bound"] is not None,
     }
 )
@@ -92,7 +93,8 @@ def fused_recurrent_kda_fwd_kernel_npu(
     IS_CONTINUOUS_BATCHING: tl.constexpr,
     IS_SPEC_DECODING: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
-    HAS_DT_BIAS: tl.constexpr,
+    HAS_A: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
     USE_GATE_IN_KERNEL: tl.constexpr,
     USE_LOWER_BOUND: tl.constexpr,
     APPLY_BETA_SIGMOID: tl.constexpr,
@@ -151,8 +153,8 @@ def fused_recurrent_kda_fwd_kernel_npu(
             b_h = tl.zeros([BK, BV], dtype=tl.float32)
 
         if USE_GATE_IN_KERNEL:
-            b_A = tl.load(A_log + i_hv).to(tl.float32)
-            if HAS_DT_BIAS:
+            b_A = tl.load(A_log + i_hv).to(tl.float32) if HAS_A else 1.0
+            if HAS_BIAS:
                 b_bias = tl.load(dt_bias + i_hv * K + o_k, mask=mask_k, other=0).to(tl.float32)
             else:
                 b_bias = tl.zeros([BK], dtype=tl.float32)
@@ -196,7 +198,7 @@ def fused_recurrent_kda_fwd_kernel_npu(
             if USE_GATE_IN_KERNEL:
                 b_g = b_g + b_bias
                 if USE_LOWER_BOUND:
-                    b_gk = lower_bound * tl.sigmoid(exp(b_A) * b_g)
+                    b_gk = lower_bound * tl.sigmoid((exp(b_A) if HAS_A else b_A) * b_g)
                 else:
                     b_gk = -exp(b_A) * softplus(b_g)
             else:

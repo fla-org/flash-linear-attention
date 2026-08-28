@@ -277,6 +277,7 @@ def test_fused_recurrent(
                 (2, 1000, 3, 60, 0, 1, True, -5, 1, torch.float16, 16, False),
                 (2, 1024, 3, 64, 0.5, 1, True, -5, 1, torch.float16, 16, False),
                 (2, 1024, 4, 100, 0, 0.1, True, -5, 1, torch.float16, 16, False),
+                (2, 1024, 3, 64, 0, 1, True, -5, 1, torch.float16, 32, False),
                 (2, 1024, 4, 100, 0, 0.1, True, -0.61, 1, torch.float16, 64, False),
                 (2, 1024, 4, 128, 0.5, 1, False, -5, 0.1, torch.float16, 16, False),
                 (2, 1024, 4, 128, 0, 10, False, -5, 0.1, torch.float16, 16, False),
@@ -310,16 +311,21 @@ def test_chunk(
     q = torch.randn(B, T, H, D, dtype=dtype)
     k = torch.randn(B, T, H, D, dtype=dtype)
     v = torch.randn(B, T, H, D, dtype=dtype)
-    a = torch.rand(B, T, H, D, dtype=dtype)
-    gk = torch.randn(B, T, H, D, dtype=torch.float)
-
-    a = F.normalize(a, p=2, dim=-1)
-    b = -a
-    gk = F.logsigmoid(gk)
-    gk = gk / gate_logit_normalizer
-    gk = gk * (torch.rand_like(gk) > mask_p)
     if safe_gate:
-        gk = gk.clamp(lowerbound, 0)
+        u = F.normalize(torch.randn(B, T, H, D, dtype=dtype), dim=-1)
+        a = -u
+        b = u * torch.sigmoid(0.5 * torch.randn(B, T, H, D, dtype=dtype) - 0.19)
+        gk = (-0.6065306597126334 if chunk_size == 64 else -5.0) \
+            * torch.sigmoid(2 * torch.randn(B, T, H, D, dtype=torch.float) - 1.5)
+        gk = gk * (torch.rand_like(gk) > mask_p)
+    else:
+        a = torch.rand(B, T, H, D, dtype=dtype)
+        gk = torch.randn(B, T, H, D, dtype=torch.float)
+        a = F.normalize(a, p=2, dim=-1)
+        b = -a
+        gk = F.logsigmoid(gk)
+        gk = gk / gate_logit_normalizer
+        gk = gk * (torch.rand_like(gk) > mask_p)
 
     h0 = torch.randn(B, H, D, D, dtype=torch.float)
     q, k, v, a, b, gk, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, a, b, gk, h0))
@@ -461,6 +467,39 @@ def test_chunk_safe_gate_multihead_gradients():
     assert h0.grad.abs().max() > 0
 
 
+@pytest.mark.skipif(
+    device_platform == 'intel',
+    reason='Intel Triton Failure',
+)
+@pytest.mark.parametrize(
+    ('lower_bound', 'chunk_size'),
+    [(-0.6065306597126334, 64), (-5.0, 16)],
+)
+def test_chunk_default_chunk_size(lower_bound, chunk_size):
+    B, T, H, D = 1, 500, 2, 64
+    dtype = torch.float16
+    torch.manual_seed(42)
+    q = torch.randn(B, T, H, D, dtype=dtype)
+    k = torch.randn(B, T, H, D, dtype=dtype)
+    v = torch.randn(B, T, H, D, dtype=dtype)
+    u = F.normalize(torch.randn(B, T, H, D, dtype=dtype), dim=-1)
+    a = -u
+    b = u * torch.sigmoid(0.5 * torch.randn(B, T, H, D, dtype=dtype) - 0.19)
+    gk = lower_bound * torch.sigmoid(2 * torch.randn(B, T, H, D, dtype=torch.float) - 1.5)
+    q, k, v, a, b, gk = map(lambda x: x.to(device).requires_grad_(False), (q, k, v, a, b, gk))
+
+    out_default, ht_default = chunk_dplr_delta_rule(
+        q=q, k=k, v=v, a=a, b=b, gk=gk, scale=1.0,
+        output_final_state=True, lower_bound=lower_bound,
+    )
+    out_explicit, ht_explicit = chunk_dplr_delta_rule(
+        q=q, k=k, v=v, a=a, b=b, gk=gk, scale=1.0,
+        output_final_state=True, lower_bound=lower_bound, chunk_size=chunk_size,
+    )
+    assert_close('o', out_explicit, out_default, 0.002)
+    assert_close('ht', ht_explicit, ht_default, 0.002)
+
+
 @pytest.mark.parametrize(
     ('H', 'D', 'mask_p', 'gate_logit_normalizer', 'safe_gate', 'cu_seqlens', 'chunk_size', 'dtype'),
     [
@@ -469,6 +508,8 @@ def test_chunk_safe_gate_multihead_gradients():
             (4, 64, 0, 1, True, [0, 15], 16, torch.float16),
             (4, 64, 0, 1, True, [0, 256, 500, 1000], 16, torch.float16),
             (4, 64, 0.5, 1, True, [0, 256, 500, 1000], 16, torch.float16),
+            (4, 64, 0, 1, True, [0, 256, 500, 1000], 32, torch.float16),
+            (4, 64, 0.5, 1, True, [0, 256, 500, 1000], 64, torch.float16),
             (4, 64, 0, 1, False, [0, 15], 32, torch.float16),
             (4, 64, 0, 1, False, [0, 64, 128, 192], 64, torch.float16),
             (4, 100, 0, 0.1, False, [0, 15, 100, 300, 1111, 1599, 2000], 64, torch.float16),
@@ -501,15 +542,21 @@ def test_chunk_varlen(
     q = torch.randn(1, T, H, D, dtype=dtype)
     k = torch.randn(1, T, H, D, dtype=dtype)
     v = torch.randn(1, T, H, D, dtype=dtype)
-    a = torch.rand(1, T, H, D, dtype=dtype)
-    gk = torch.randn(1, T, H, D, dtype=torch.float)
-    a = F.normalize(a, p=2, dim=-1)
-    b = -a
-    gk = F.logsigmoid(gk)
-    gk = gk / gate_logit_normalizer
-    gk = gk * (torch.rand_like(gk) > mask_p)
     if safe_gate:
-        gk = gk.clamp(-5, 0)
+        u = F.normalize(torch.randn(1, T, H, D, dtype=dtype), dim=-1)
+        a = -u
+        b = u * torch.sigmoid(0.5 * torch.randn(1, T, H, D, dtype=dtype) - 0.19)
+        gk = (-0.6065306597126334 if chunk_size == 64 else -5.0) \
+            * torch.sigmoid(2 * torch.randn(1, T, H, D, dtype=torch.float) - 1.5)
+        gk = gk * (torch.rand_like(gk) > mask_p)
+    else:
+        a = torch.rand(1, T, H, D, dtype=dtype)
+        gk = torch.randn(1, T, H, D, dtype=torch.float)
+        a = F.normalize(a, p=2, dim=-1)
+        b = -a
+        gk = F.logsigmoid(gk)
+        gk = gk / gate_logit_normalizer
+        gk = gk * (torch.rand_like(gk) > mask_p)
     h0 = torch.randn(N, H, D, D, dtype=torch.float)
     q, k, v, a, b, gk, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, a, b, gk, h0))
 

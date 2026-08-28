@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import warnings
 from typing import TYPE_CHECKING
 
 import torch
@@ -16,7 +17,7 @@ import triton.language as tl
 
 from fla.ops.cp.comm import all_gather_into_tensor
 from fla.ops.utils.op import exp2
-from fla.utils import autotune_cache_kwargs, check_shared_mem
+from fla.utils import IS_TF32_SUPPORTED, autotune_cache_kwargs, check_shared_mem
 
 if TYPE_CHECKING:
     from fla.ops.cp.context import FLACPContext
@@ -61,6 +62,7 @@ def pre_process_fwd_kernel_merged(
     USE_BG: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     MULTI_SEQS: tl.constexpr,
+    AFFINE_CHAIN_PRECISION: tl.constexpr = None,
 ):
     i_col, i_h = tl.program_id(0), tl.program_id(1)
     if MULTI_SEQS:
@@ -307,7 +309,7 @@ def pre_process_fwd_kernel_merged(
                 # GDN/KDA mode: M = (diag - k^T @ w) @ M
                 b_kw = tl.dot(tl.trans(b_k.to(b_w.dtype)), b_w)
                 b_m_i = b_diag - b_kw
-            b_m = tl.dot(b_m_i.to(tl.float32), b_m.to(tl.float32))
+            b_m = tl.dot(b_m_i.to(tl.float32), b_m.to(tl.float32), input_precision=AFFINE_CHAIN_PRECISION)
 
         # Store m result
         stride_hm_kv = K + V
@@ -348,6 +350,7 @@ def merge_fwd_bwd_kernel(
     NUM_SEQ_ENTRIES,         # num_split_seqs for intracard
     HAS_H0: tl.constexpr,                  # Heuristic: whether h0 is provided
     STATE_V_FIRST: tl.constexpr = False,  # When True, h0/h use [V, K] layout; ag_hm always [K, V+K]
+    AFFINE_CHAIN_PRECISION: tl.constexpr = None,  # input_precision for M@h in the state update (h' = M @ h + he)
 ):
     """
     Unified merge kernel for both CP and Intra-card modes.
@@ -412,9 +415,10 @@ def merge_fwd_bwd_kernel(
             b_m = tl.load(p_m, mask=m_k[:, None] & m_k[None, :], other=0.0).to(tl.float32)
             if STATE_V_FIRST:
                 # h_T' = h_T @ M^T + he^T
-                b_h = tl.dot(b_h.to(tl.float32), tl.trans(b_m)) + tl.trans(b_he)
+                b_h = tl.dot(b_h.to(tl.float32), tl.trans(b_m), input_precision=AFFINE_CHAIN_PRECISION) + tl.trans(b_he)
             else:
-                b_h = tl.dot(b_m.to(tl.float32), b_h.to(tl.float32)) + b_he.to(tl.float32)
+                b_h = tl.dot(b_m.to(tl.float32), b_h.to(tl.float32),
+                             input_precision=AFFINE_CHAIN_PRECISION) + b_he.to(tl.float32)
 
             # Store for non-first subseqs
             if idx < num_subseqs - 1:
@@ -448,9 +452,11 @@ def merge_fwd_bwd_kernel(
             p_ag_m = ag_hm + cur_rank * stride + V + o_k[:, None] * (K + V) + o_k[None, :]
             b_ag_m = tl.load(p_ag_m, mask=m_k[:, None] & m_k[None, :], other=0.0)
             if STATE_V_FIRST:
-                b_h = tl.dot(b_h.to(tl.float32), tl.trans(b_ag_m).to(tl.float32)) + tl.trans(b_ag_h).to(tl.float32)
+                b_h = tl.dot(b_h.to(tl.float32), tl.trans(b_ag_m).to(tl.float32),
+                             input_precision=AFFINE_CHAIN_PRECISION) + tl.trans(b_ag_h).to(tl.float32)
             else:
-                b_h = tl.dot(b_ag_m.to(tl.float32), b_h.to(tl.float32)) + b_ag_h.to(tl.float32)
+                b_h = tl.dot(b_ag_m.to(tl.float32), b_h.to(tl.float32),
+                             input_precision=AFFINE_CHAIN_PRECISION) + b_ag_h.to(tl.float32)
         if STATE_V_FIRST:
             p_h = h + o_v[:, None] * K + o_k[None, :]
             m_h = m_v[:, None] & m_k[None, :]
@@ -498,6 +504,7 @@ def pre_process_bwd_kernel_merged(
     USE_GK: tl.constexpr,
     USE_BG: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    AFFINE_CHAIN_PRECISION: tl.constexpr = None,
 ):
     """
     Merged backward kernel that computes both dh (K x V) and dm (K x K) in a single kernel.
@@ -737,7 +744,7 @@ def pre_process_bwd_kernel_merged(
                 # GDN/KDA mode: dM = (diag - w^T @ k) @ dM
                 b_m_i = b_diag - b_kw
             # Keep m chain in fp32 to avoid precision loss from repeated bf16 casting
-            b_m = tl.dot(b_m_i.to(tl.float32), b_m.to(tl.float32))
+            b_m = tl.dot(b_m_i.to(tl.float32), b_m.to(tl.float32), input_precision=AFFINE_CHAIN_PRECISION)
 
         # Store dm result
         p_m = dhm + V + row[:, None] * (V + K) + col[None, :]
@@ -761,6 +768,12 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
     if context is None or context.group is None:
         return initial_state
     assert initial_state is None, "When enable CP, the provided initial_state must be None."
+    use_tf32x3_affine_chain = context.use_tf32x3_affine_chain
+    if use_tf32x3_affine_chain and not IS_TF32_SUPPORTED:
+        warnings.warn(
+            "tf32x3 affine chain requires an NVIDIA GPU with compute capability >= 8.0; falling back to ieee precision",
+            stacklevel=2,
+        )
     rank = dist.get_rank(group=context.group)
 
     B, T, H, K, V, HV = *k.shape, u.shape[-1], u.shape[2]
@@ -803,6 +816,10 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
             BK1=BK,
             BLOCK_SIZE=BLOCK_SIZE,
             MULTI_SEQS=False,
+            AFFINE_CHAIN_PRECISION=(
+                "tf32x3" if use_tf32x3_affine_chain and IS_TF32_SUPPORTED
+                else ("ieee" if not IS_TF32_SUPPORTED else None)
+            ),
         )
     ag_hm, _ = all_gather_into_tensor(hm, group=context.group)
     if not context.is_first_rank:
@@ -824,6 +841,10 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
             INTRACARD_MODE=False,
             NUM_SEQ_ENTRIES=0,
             STATE_V_FIRST=state_v_first,
+            AFFINE_CHAIN_PRECISION=(
+                "tf32x3" if use_tf32x3_affine_chain and IS_TF32_SUPPORTED
+                else ("ieee" if not IS_TF32_SUPPORTED else None)
+            ),
         )
     return initial_state
 
@@ -848,6 +869,12 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
     if context is None or context.group is None:
         return dht, initial_state
     assert dht is None, "When enable CP, the provided dht must be None."
+    use_tf32x3_affine_chain = context.use_tf32x3_affine_chain
+    if use_tf32x3_affine_chain and not IS_TF32_SUPPORTED:
+        warnings.warn(
+            "tf32x3 affine chain requires an NVIDIA GPU with compute capability >= 8.0; falling back to ieee precision",
+            stacklevel=2,
+        )
     rank = dist.get_rank(context.group)
 
     B, T, H, K, V, HV = *q.shape, do.shape[-1], do.shape[2]
@@ -890,6 +917,10 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
             BK1=BK,
             BLOCK_SIZE=BLOCK_SIZE,
             USE_BG=bg is not None,
+            AFFINE_CHAIN_PRECISION=(
+                "tf32x3" if use_tf32x3_affine_chain and IS_TF32_SUPPORTED
+                else ("ieee" if not IS_TF32_SUPPORTED else None)
+            ),
         )
 
     ag_dhm, _ = all_gather_into_tensor(dhm, group=context.group)
@@ -913,6 +944,10 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
             INTRACARD_MODE=False,
             NUM_SEQ_ENTRIES=0,
             STATE_V_FIRST=state_v_first,
+            AFFINE_CHAIN_PRECISION=(
+                "tf32x3" if use_tf32x3_affine_chain and IS_TF32_SUPPORTED
+                else ("ieee" if not IS_TF32_SUPPORTED else None)
+            ),
         )
 
     # initial_state is None in the CP mode

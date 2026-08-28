@@ -25,7 +25,7 @@ from fla.utils import autotune_cache_kwargs, check_shared_mem
         for num_warps in [2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
-    key=['H', 'K', 'BT', 'IS_VARLEN', 'USE_G'],
+    key=['H', 'HV', 'K', 'BT', 'IS_VARLEN', 'USE_G'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -40,6 +40,7 @@ def chunk_scaled_dot_comba_pkt_fwd_kernel(
     chunk_indices,
     T,
     H: tl.constexpr,
+    HV: tl.constexpr,
     K: tl.constexpr,
     BT: tl.constexpr,
     BK: tl.constexpr,
@@ -47,7 +48,7 @@ def chunk_scaled_dot_comba_pkt_fwd_kernel(
     USE_G: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
-    i_b, i_h = i_bh // H, i_bh % H
+    i_b, i_h = i_bh // HV, i_bh % HV
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
@@ -57,23 +58,23 @@ def chunk_scaled_dot_comba_pkt_fwd_kernel(
     o_t = i_t * BT + tl.arange(0, BT)
     m_t = o_t < T
 
-    p_beta = beta + bos*H + i_h + o_t * H
+    p_beta = beta + bos*HV + i_h + o_t * HV
     b_beta = tl.load(p_beta, mask=m_t, other=0.0)
 
     b_A = tl.zeros([BT, BT], dtype=tl.float32)
     for i_k in range(tl.cdiv(K, BK)):
         o_k = i_k * BK + tl.arange(0, BK)
         m_k = m_t[:, None] & (o_k[None, :] < K)
-        p_k = k + (bos*H + i_h) * K + o_t[:, None] * (H*K) + o_k[None, :]
-        p_p = p + (bos*H + i_h) * K + o_t[:, None] * (H*K) + o_k[None, :]
+        p_k = k + (bos*H + i_h // (HV // H)) * K + o_t[:, None] * (H*K) + o_k[None, :]
+        p_p = p + (bos*H + i_h // (HV // H)) * K + o_t[:, None] * (H*K) + o_k[None, :]
         b_k = tl.load(p_k, mask=m_k, other=0.0)
         b_p = tl.load(p_p, mask=m_k, other=0.0)
         b_pb = b_p * b_beta[:, None]
         b_A += tl.dot(b_pb.to(b_k.dtype), tl.trans(b_k))
 
     if USE_G:
-        p_g0 = g0 + bos*H + i_h + o_t * H
-        p_g = g + bos*H + i_h + o_t * H
+        p_g0 = g0 + bos*HV + i_h + o_t * HV
+        p_g = g + bos*HV + i_h + o_t * HV
         b_g0 = tl.load(p_g0, mask=m_t, other=0.0)
         b_g = tl.load(p_g, mask=m_t, other=0.0)
         b_A = b_A * exp2(b_g0[:, None] - b_g[None, :])
@@ -81,7 +82,7 @@ def chunk_scaled_dot_comba_pkt_fwd_kernel(
     m_A = (o_t[:, None] > o_t[None, :]) & (m_t[:, None] & m_t)
     b_A = tl.where(m_A, b_A, 0)
     o_A = tl.arange(0, BT)
-    p_A = A + (bos*H + i_h) * BT + o_t[:, None] * (BT*H) + o_A[None, :]
+    p_A = A + (bos*HV + i_h) * BT + o_t[:, None] * (BT*HV) + o_A[None, :]
     tl.store(p_A, b_A.to(p_A.dtype.element_ty), mask=m_t[:, None] & (o_A[None, :] < BT))
 
 
@@ -105,12 +106,12 @@ def chunk_scaled_dot_comba_pkt_fwd(
         p (torch.Tensor):
             The auxiliary key tensor of shape `[B, T, H, K]`.
         beta (torch.Tensor):
-            The beta tensor of shape `[B, T, H]`.
+            The beta tensor of shape `[B, T, HV]`.
         g0 (torch.Tensor):
-            The cumulative sum minus the original one of the gate tensor of shape `[B, T, H]`.
+            The cumulative sum minus the original one of the gate tensor of shape `[B, T, HV]`.
             Default: None
         g (torch.Tensor):
-            The cumulative sum of the gate tensor of shape `[B, T, H]`.
+            The cumulative sum of the gate tensor of shape `[B, T, HV]`.
             Default: None
         cu_seqlens (torch.LongTensor):
             The cumulative sequence lengths of the input tensor.
@@ -121,15 +122,15 @@ def chunk_scaled_dot_comba_pkt_fwd(
             The dtype of the output tensor. Default: `torch.float32`
 
     Returns:
-        beta * K * K^T of shape `[B, T, H, BT]` where `BT` is the chunk size.
+        beta * K * K^T of shape `[B, T, HV, BT]` where `BT` is the chunk size.
     """
-    B, T, H, K = k.shape
+    B, T, H, K, HV = *k.shape, beta.shape[2]
     BT = chunk_size
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
-    A = torch.empty(B, T, H, BT, device=k.device, dtype=output_dtype)
-    chunk_scaled_dot_comba_pkt_fwd_kernel[(NT, B * H)](
+    A = torch.empty(B, T, HV, BT, device=k.device, dtype=output_dtype)
+    chunk_scaled_dot_comba_pkt_fwd_kernel[(NT, B * HV)](
         k=k,
         p=p,
         beta=beta,
@@ -140,6 +141,7 @@ def chunk_scaled_dot_comba_pkt_fwd(
         chunk_indices=chunk_indices,
         T=T,
         H=H,
+        HV=HV,
         K=K,
         BT=BT,
     )
@@ -155,7 +157,7 @@ def chunk_scaled_dot_comba_pkt_fwd(
         for num_warps in [2, 4]
         for num_stages in [2, 3, 4]
     ],
-    key=['H', 'K', 'V', 'BT', 'BK', 'BV', 'IS_VARLEN'],
+    key=['H', 'HV', 'K', 'V', 'BT', 'BK', 'BV', 'IS_VARLEN'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -179,6 +181,7 @@ def prepare_wy_repr_bwd_kernel(
     chunk_indices,
     T,
     H: tl.constexpr,
+    HV: tl.constexpr,
     K: tl.constexpr,
     V: tl.constexpr,
     BT: tl.constexpr,
@@ -187,7 +190,7 @@ def prepare_wy_repr_bwd_kernel(
     IS_VARLEN: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
-    i_b, i_h = i_bh // H, i_bh % H
+    i_b, i_h = i_bh // HV, i_bh % HV
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
@@ -199,10 +202,10 @@ def prepare_wy_repr_bwd_kernel(
     o_A = tl.arange(0, BT)
     m_t = o_t < T
     m_AT = (o_A[:, None] < BT) & m_t[None, :]
-    p_beta = beta + (bos*H + i_h) + o_t * H
-    p_g0 = g0 + (bos*H + i_h) + o_t * H
-    p_g = g + (bos*H + i_h) + o_t * H
-    p_A = A + (bos*H + i_h) * BT + o_A[:, None] + o_t[None, :] * (H*BT)
+    p_beta = beta + (bos*HV + i_h) + o_t * HV
+    p_g0 = g0 + (bos*HV + i_h) + o_t * HV
+    p_g = g + (bos*HV + i_h) + o_t * HV
+    p_A = A + (bos*HV + i_h) * BT + o_A[:, None] + o_t[None, :] * (HV*BT)
 
     b_A = tl.load(p_A, mask=m_AT, other=0.0)
     b_beta = tl.load(p_beta, mask=m_t, other=0.0)
@@ -217,9 +220,9 @@ def prepare_wy_repr_bwd_kernel(
     for i_k in range(tl.cdiv(K, BK)):
         o_k = i_k * BK + tl.arange(0, BK)
         m_k = m_t[:, None] & (o_k[None, :] < K)
-        p_p = p + (bos*H + i_h) * K + o_t[:, None] * (H*K) + o_k[None, :]
-        p_dp = dp + (bos*H + i_h) * K + o_t[:, None] * (H*K) + o_k[None, :]
-        p_dw = dw + (bos*H + i_h) * K + o_t[:, None] * (H*K) + o_k[None, :]
+        p_p = p + (bos*H + i_h // (HV // H)) * K + o_t[:, None] * (H*K) + o_k[None, :]
+        p_dp = dp + (bos*HV + i_h) * K + o_t[:, None] * (HV*K) + o_k[None, :]
+        p_dw = dw + (bos*HV + i_h) * K + o_t[:, None] * (HV*K) + o_k[None, :]
         b_p = tl.load(p_p, mask=m_k, other=0.0)
         b_p_beta_g0 = (b_p * b_beta[:, None] * b_g0_exp[:, None]).to(b_p.dtype)
         b_dw = tl.load(p_dw, mask=m_k, other=0.0)
@@ -233,9 +236,9 @@ def prepare_wy_repr_bwd_kernel(
     for i_v in range(tl.cdiv(V, BV)):
         o_v = i_v * BV + tl.arange(0, BV)
         m_v = m_t[:, None] & (o_v[None, :] < V)
-        p_v = v + (bos*H + i_h) * V + o_t[:, None] * (H*V) + o_v[None, :]
-        p_dv = dv + (bos*H + i_h) * V + o_t[:, None] * (H*V) + o_v[None, :]
-        p_du = du + (bos*H + i_h) * V + o_t[:, None] * (H*V) + o_v[None, :]
+        p_v = v + (bos*HV + i_h) * V + o_t[:, None] * (HV*V) + o_v[None, :]
+        p_dv = dv + (bos*HV + i_h) * V + o_t[:, None] * (HV*V) + o_v[None, :]
+        p_du = du + (bos*HV + i_h) * V + o_t[:, None] * (HV*V) + o_v[None, :]
         b_v = tl.load(p_v, mask=m_v, other=0.0)
         b_v_beta = (b_v * b_beta[:, None]).to(b_v.dtype)
         b_du = tl.load(p_du, mask=m_v, other=0.0)
@@ -256,10 +259,10 @@ def prepare_wy_repr_bwd_kernel(
     for i_k in range(tl.cdiv(K, BK)):
         o_k = i_k * BK + tl.arange(0, BK)
         m_k = m_t[:, None] & (o_k[None, :] < K)
-        p_k = k + (bos*H + i_h) * K + o_t[:, None] * (H*K) + o_k[None, :]
-        p_p = p + (bos*H + i_h) * K + o_t[:, None] * (H*K) + o_k[None, :]
-        p_dk = dk + (bos*H + i_h) * K + o_t[:, None] * (H*K) + o_k[None, :]
-        p_dp = dp + (bos*H + i_h) * K + o_t[:, None] * (H*K) + o_k[None, :]
+        p_k = k + (bos*H + i_h // (HV // H)) * K + o_t[:, None] * (H*K) + o_k[None, :]
+        p_p = p + (bos*H + i_h // (HV // H)) * K + o_t[:, None] * (H*K) + o_k[None, :]
+        p_dk = dk + (bos*HV + i_h) * K + o_t[:, None] * (HV*K) + o_k[None, :]
+        p_dp = dp + (bos*HV + i_h) * K + o_t[:, None] * (HV*K) + o_k[None, :]
         b_k = tl.load(p_k, mask=m_k, other=0.0)
         b_p = tl.load(p_p, mask=m_k, other=0.0)
         b_dp = tl.load(p_dp, mask=m_k, other=0.0)
@@ -275,9 +278,9 @@ def prepare_wy_repr_bwd_kernel(
     b_dA_A = b_dA * b_A
     b_dg0 += tl.sum(b_dA_A, axis=1)
     b_dg = - tl.sum(b_dA_A, axis=0)
-    p_dg = dg + (bos*H + i_h) + o_t * H
-    p_dg0 = dg0 + (bos*H + i_h) + o_t * H
-    p_dbeta = dbeta + (bos*H + i_h) + o_t * H
+    p_dg = dg + (bos*HV + i_h) + o_t * HV
+    p_dg0 = dg0 + (bos*HV + i_h) + o_t * HV
+    p_dbeta = dbeta + (bos*HV + i_h) + o_t * HV
     tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), mask=m_t)
     tl.store(p_dg0, b_dg0.to(p_dg0.dtype.element_ty), mask=m_t)
     tl.store(p_dbeta, b_dbeta.to(p_dbeta.dtype.element_ty), mask=m_t)
@@ -292,7 +295,7 @@ def prepare_wy_repr_bwd_kernel(
         for num_warps in [2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
-    key=['H', 'K', 'V', 'BT', 'BK', 'BV', 'IS_VARLEN'],
+    key=['H', 'HV', 'K', 'V', 'BT', 'BK', 'BV', 'IS_VARLEN'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -308,6 +311,7 @@ def recompute_w_u_fwd_kernel(
     chunk_indices,
     T,
     H: tl.constexpr,
+    HV: tl.constexpr,
     K: tl.constexpr,
     V: tl.constexpr,
     BT: tl.constexpr,
@@ -316,7 +320,7 @@ def recompute_w_u_fwd_kernel(
     IS_VARLEN: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
-    i_b, i_h = i_bh // H, i_bh % H
+    i_b, i_h = i_bh // HV, i_bh % HV
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
@@ -327,9 +331,9 @@ def recompute_w_u_fwd_kernel(
     o_A = tl.arange(0, BT)
     m_t = o_t < T
     m_A = m_t[:, None] & (o_A[None, :] < BT)
-    p_beta = beta + bos*H + i_h + o_t * H
-    p_g = g + (bos*H + i_h) + o_t * H
-    p_A = A + (bos*H + i_h) * BT + o_t[:, None] * (H*BT) + o_A[None, :]
+    p_beta = beta + bos*HV + i_h + o_t * HV
+    p_g = g + (bos*HV + i_h) + o_t * HV
+    p_A = A + (bos*HV + i_h) * BT + o_t[:, None] * (HV*BT) + o_A[None, :]
     b_beta = tl.load(p_beta, mask=m_t, other=0.0)
     b_A = tl.load(p_A, mask=m_A, other=0.0)
     b_g = exp2(tl.load(p_g, mask=m_t, other=0.0))
@@ -337,8 +341,8 @@ def recompute_w_u_fwd_kernel(
     for i_v in range(tl.cdiv(V, BV)):
         o_v = i_v * BV + tl.arange(0, BV)
         m_v = m_t[:, None] & (o_v[None, :] < V)
-        p_v = v + (bos*H + i_h) * V + o_t[:, None] * (H*V) + o_v[None, :]
-        p_u = u + (bos*H + i_h) * V + o_t[:, None] * (H*V) + o_v[None, :]
+        p_v = v + (bos*HV + i_h) * V + o_t[:, None] * (HV*V) + o_v[None, :]
+        p_u = u + (bos*HV + i_h) * V + o_t[:, None] * (HV*V) + o_v[None, :]
         b_v = tl.load(p_v, mask=m_v, other=0.0)
         b_vb = (b_v * b_beta[:, None]).to(b_v.dtype)
         b_u = tl.dot(b_A, b_vb, allow_tf32=False)
@@ -347,8 +351,8 @@ def recompute_w_u_fwd_kernel(
     for i_k in range(tl.cdiv(K, BK)):
         o_k = i_k * BK + tl.arange(0, BK)
         m_k = m_t[:, None] & (o_k[None, :] < K)
-        p_k = k + (bos*H + i_h) * K + o_t[:, None] * (H*K) + o_k[None, :]
-        p_w = w + (bos*H + i_h) * K + o_t[:, None] * (H*K) + o_k[None, :]
+        p_k = k + (bos*H + i_h // (HV // H)) * K + o_t[:, None] * (H*K) + o_k[None, :]
+        p_w = w + (bos*HV + i_h) * K + o_t[:, None] * (HV*K) + o_k[None, :]
         b_k = tl.load(p_k, mask=m_k, other=0.0)
         b_kb = (b_k * b_beta[:, None] * b_g[:, None]).to(b_k.dtype)
         b_w = tl.dot(b_A, b_kb)
@@ -364,7 +368,7 @@ def recompute_w_u_fwd(
     cu_seqlens: torch.LongTensor | None,
     chunk_indices: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    B, T, H, K, V = *k.shape, v.shape[-1]
+    B, T, H, K, V, HV = *k.shape, v.shape[-1], v.shape[2]
     BT = A.shape[-1]
 
     if chunk_indices is None and cu_seqlens is not None:
@@ -374,8 +378,8 @@ def recompute_w_u_fwd(
     BV = 64
 
     u = torch.empty_like(v)
-    w = torch.empty_like(k)
-    recompute_w_u_fwd_kernel[(NT, B*H)](
+    w = k.new_empty(B, T, HV, K)
+    recompute_w_u_fwd_kernel[(NT, B*HV)](
         k=k,
         v=v,
         beta=beta,
@@ -387,6 +391,7 @@ def recompute_w_u_fwd(
         chunk_indices=chunk_indices,
         T=T,
         H=H,
+        HV=HV,
         K=K,
         V=V,
         BT=BT,
@@ -409,7 +414,7 @@ def prepare_wy_repr_bwd(
     cu_seqlens: torch.LongTensor | None,
     chunk_indices: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    B, T, H, K, V = *k.shape, v.shape[-1]
+    B, T, H, K, V, HV = *k.shape, v.shape[-1], v.shape[2]
     BT = A.shape[-1]
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
@@ -418,13 +423,13 @@ def prepare_wy_repr_bwd(
     BK = min(max(triton.next_power_of_2(K), 16), CONST_TILING)
     BV = min(max(triton.next_power_of_2(V), 16), CONST_TILING)
 
-    dk = torch.empty_like(k)
+    dk = k.new_empty(B, T, HV, K)
     dv = torch.empty_like(v)
-    dp = torch.empty_like(p)
+    dp = p.new_empty(B, T, HV, K)
     dbeta = torch.empty_like(beta)
     dg0 = torch.empty_like(g0)
     dg = torch.empty_like(g)
-    prepare_wy_repr_bwd_kernel[(NT, B * H)](
+    prepare_wy_repr_bwd_kernel[(NT, B * HV)](
         k=k,
         v=v,
         p=p,
@@ -444,10 +449,14 @@ def prepare_wy_repr_bwd(
         chunk_indices=chunk_indices,
         T=T,
         H=H,
+        HV=HV,
         K=K,
         V=V,
         BT=BT,
         BK=BK,
         BV=BV,
     )
+    if H != HV:
+        dk = dk.view(B, T, H, HV // H, K).sum(3)
+        dp = dp.view(B, T, H, HV // H, K).sum(3)
     return dk, dv, dp, dbeta, dg0, dg

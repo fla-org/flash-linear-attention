@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
-from einops import rearrange, repeat
+from einops import rearrange
 from torch.nn import functional as F
 
 from fla.layers.utils import get_layer_cache, repad_hidden_states, unpad_hidden_states, update_layer_cache
@@ -226,8 +226,12 @@ class Comba(nn.Module):
             )
 
         batch_size, q_len, _ = hidden_states.shape
-        # change to inference mode.
-        mode = 'fused_recurrent' if (q_len <= 64 and not self.training) else self.mode
+        if torch.is_grad_enabled():
+            mode = 'chunk'
+        elif q_len <= 64 and not self.training:
+            mode = 'fused_recurrent'
+        else:
+            mode = self.mode
         if self.training:
             assert mode == 'chunk', "Only chunk mode is supported in training."
         last_state = get_layer_cache(self, past_key_values)
@@ -273,9 +277,6 @@ class Comba(nn.Module):
             q = q - self.D[None, None, :, None] * p
 
         v = rearrange(v, '... (h d) -> ... h d', d=self.head_v_dim)
-
-        if self.num_v_heads > self.num_heads:
-            q, k = map(lambda x: repeat(x, '... h d -> ... (h g) d', g=self.num_v_heads // self.num_heads), (q, k))
 
         beta = self.b_proj(hidden_states).sigmoid()
         g = -self.A_log.float().exp() * F.softplus(self.a_proj(hidden_states).float() + self.dt_bias)

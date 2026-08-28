@@ -46,6 +46,7 @@ class FLALayer(CacheLayerMixin):
         attn_state: tuple[torch.Tensor, ...] | None = None,
         conv_state: Any | None = None,
         ffn_state: Any | None = None,
+        A_state: torch.Tensor | None = None,
         offset: int = 1,
         cache_kwargs: dict[str, Any] | None = None,
         **_: Any,
@@ -63,6 +64,7 @@ class FLALayer(CacheLayerMixin):
                 "attn_state": None,
                 "conv_state": None,
                 "ffn_state": None,
+                "A_state": None,
             }
 
         if recurrent_state is not None:
@@ -108,10 +110,12 @@ class FLALayer(CacheLayerMixin):
             self.state["conv_state"] = conv_state
         if ffn_state is not None:
             self.state["ffn_state"] = ffn_state
+        if A_state is not None:
+            self.state["A_state"] = A_state
 
         if not hasattr(self, 'device'):
             self.device = 'cpu'
-        for state in (recurrent_state, attn_state, conv_state, ffn_state):
+        for state in (recurrent_state, attn_state, conv_state, ffn_state, A_state):
             if state is not None:
                 if isinstance(state, torch.Tensor):
                     self.device = state.device
@@ -158,7 +162,7 @@ class FLALayer(CacheLayerMixin):
 
         def to_cpu(x):
             return x.to("cpu", non_blocking=True) if isinstance(x, torch.Tensor) else x
-        for k in ("recurrent_state", "attn_state", "conv_state", "ffn_state"):
+        for k in ("recurrent_state", "attn_state", "conv_state", "ffn_state", "A_state"):
             v = self.state.get(k, None)
             if v is None:
                 continue
@@ -173,7 +177,7 @@ class FLALayer(CacheLayerMixin):
 
         def to_dev(x):
             return x.to(self.device, non_blocking=True) if isinstance(x, torch.Tensor) else x
-        for k in ("recurrent_state", "attn_state", "conv_state", "ffn_state"):
+        for k in ("recurrent_state", "attn_state", "conv_state", "ffn_state", "A_state"):
             v = self.state.get(k, None)
             if v is None:
                 continue
@@ -229,6 +233,7 @@ class LegacyFLACache(HFCacheBase):
         layer_idx: int = 0,
         offset: int | None = 1,
         cache_kwargs: dict[str, Any] | None = None,
+        A_state: torch.Tensor | None = None,
     ) -> dict[str, Any]:
         """
         Args:
@@ -246,6 +251,8 @@ class LegacyFLACache(HFCacheBase):
                 The number of new tokens being processed.
             cache_kwargs (`Dict[str, Any]`):
                 Additional arguments for the cache subclass.
+            A_state (`torch.Tensor`, optional):
+                The new auxiliary preconditioner state to cache. Default: `None`.
 
         Return:
             Dictionary of the updated state.
@@ -270,6 +277,7 @@ class LegacyFLACache(HFCacheBase):
                 attn_state=attn_state,
                 conv_state=conv_state,
                 ffn_state=ffn_state,
+                A_state=A_state,
             )
             self.states.append(state)
         else:
@@ -319,6 +327,8 @@ class LegacyFLACache(HFCacheBase):
                 state['conv_state'] = conv_state
             if ffn_state is not None:
                 state['ffn_state'] = ffn_state
+            if A_state is not None:
+                state['A_state'] = A_state
 
         return state
 
@@ -391,6 +401,7 @@ class FLACache(HFCacheBase):
         attn_state: tuple[torch.Tensor] | None = None,
         conv_state: tuple[torch.Tensor] | None = None,
         ffn_state: tuple[torch.Tensor] | None = None,
+        A_state: torch.Tensor | None = None,
         layer_idx: int = 0,
         offset: int | None = 1,
         cache_kwargs: dict[str, Any] | None = None,
@@ -407,6 +418,7 @@ class FLACache(HFCacheBase):
             attn_state=attn_state,
             conv_state=conv_state,
             ffn_state=ffn_state,
+            A_state=A_state,
             offset=offset if offset is not None else 1,
             cache_kwargs=cache_kwargs,
         )
@@ -511,7 +523,7 @@ class FLAGenerationMixin(GenerationMixin):
                     # Fallback: manually slice using cache_position
                     if input_ids is not None and input_ids.shape[1] != cache_position.shape[0]:
                         input_ids = input_ids[:, cache_position]
-                elif hasattr(past_key_values, '__len__') and len(past_key_values) > 0:
+                elif (past_key_values.get_seq_length() if hasattr(past_key_values, 'get_seq_length') else len(past_key_values)) > 0:
                     # Ultimate fallback to old behavior
                     input_ids = input_ids[:, -1:]
 
@@ -529,7 +541,7 @@ class FLAGenerationMixin(GenerationMixin):
             # For older transformers versions, use the original logic
             model_inputs = {}
             # only last token for `inputs_ids` if the `past_key_values` is not empty.
-            if past_key_values is not None and hasattr(past_key_values, '__len__') and len(past_key_values) > 0:
+            if past_key_values is not None and (past_key_values.get_seq_length() if hasattr(past_key_values, 'get_seq_length') else len(past_key_values)) > 0:
                 input_ids = input_ids[:, -1:]
             # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
             if inputs_embeds is not None and hasattr(past_key_values, '__len__') and len(past_key_values) == 0:

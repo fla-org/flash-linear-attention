@@ -302,7 +302,7 @@ class RWKV7Attention(nn.Module):
         r, w, k, a = map(lambda x: rearrange(x, 'b t (h d) -> b t h d', d=self.head_dim), (r, w, k, a))
         v = rearrange(v, 'b t (h d) -> b t h d', d=self.head_v_dim)
 
-        if self.training or seq_len >= 64:
+        if self.training or seq_len >= 64 or torch.is_grad_enabled():
             # if training, use chunk mode no matter how short the sequence is
             # launching the triton kernel for just one token will actually be slower
             o, recurrent_state = chunk_rwkv7(
@@ -317,6 +317,7 @@ class RWKV7Attention(nn.Module):
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
                 safe_gate=True,
+                lower_bound=-0.6065306597126334,
                 chunk_size=64,
             )
         else:

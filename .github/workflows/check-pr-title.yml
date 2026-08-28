@@ -45,10 +45,10 @@ jobs:
           require_checked "Dependent tests pass" "dependent tests"
           require_checked "Kernel changes include" "benchmark numbers (kernel changes)"
 
-          if ! grep -qiE "^[[:space:]]*- \[x\][[:space:]].*This is not a minor/cosmetic-only PR" <<<"$PR_BODY"; then
-            just=$(sed -n '/### If you cannot tick/,$p' <<<"$PR_BODY" | sed 's/<!--[^>]*-->//g' | tail -n +2 | tr -d '[:space:]')
+          if grep -qiE "^[[:space:]]*- \[x\][[:space:]].*This PR is minor/cosmetic-only" <<<"$PR_BODY"; then
+            just=$(sed -n '/### If you ticked/,$p' <<<"$PR_BODY" | sed 's/<!--[^>]*-->//g' | tail -n +2 | tr -d '[:space:]')
             if [ ${#just} -lt 20 ]; then
-              fail "Minor PR without justification: tick the 'not minor' box, or use the justification section to explain why this minor change is worth a maintainer's review time."
+              fail "You ticked the 'minor/cosmetic-only' box: add a justification under the '### If you ticked' heading explaining why this minor change is worth a maintainer's review time, or untick the box if the PR is not minor."
             fi
           fi
 
