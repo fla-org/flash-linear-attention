@@ -41,7 +41,7 @@ except ImportError:
         ),
         pytest.param(
             NativeSparseAttention,
-            dict(hidden_size=128, num_heads=2, num_kv_heads=1, head_dim=64, block_size=32, block_counts=2,
+            dict(hidden_size=128, num_heads=16, num_kv_heads=1, head_dim=64, block_size=32, block_counts=2,
                  window_size=16, layer_idx=0),
             False,
             id="nsa",
