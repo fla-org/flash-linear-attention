@@ -8,6 +8,7 @@
 import pytest
 import torch
 
+from fla.layers.attn import Attention
 from fla.layers.bitattn import BitAttention
 from fla.layers.mla import MultiheadLatentAttention
 from fla.layers.moba import MoBA
@@ -50,6 +51,12 @@ except ImportError:
             dict(hidden_size=128, num_heads=2, num_kv_heads=2, layer_idx=0),
             True,
             id="bitattn",
+        ),
+        pytest.param(
+            Attention,
+            dict(hidden_size=128, num_heads=2, layer_idx=0),
+            True,
+            id="attn",
         ),
     ],
 )
