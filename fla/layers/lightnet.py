@@ -173,8 +173,8 @@ class LightNetAttention(nn.Module):
         last_z = last_state['ffn_state'] if last_state is not None and last_state.get('ffn_state') is not None else None
         if last_z is not None:
             # Decode path: continue logcumsumexp from cached state
-            z = torch.logaddexp(last_z, k.float())
-            k, g = torch.exp(k - z).to(k.dtype), (last_z - z).to(k.dtype)
+            z = torch.logaddexp(last_z, k.float().logcumsumexp(1))
+            k, g = torch.exp(k - z).to(k.dtype), (torch.cat((last_z, z[:, :-1]), 1) - z).to(k.dtype)
         else:
             # Prefill path: mask padding positions to -inf so they don't affect logcumsumexp
             if cu_seqlens is not None:
