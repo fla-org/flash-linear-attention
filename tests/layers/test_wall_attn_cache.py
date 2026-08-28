@@ -43,7 +43,7 @@ def test_empty_sliding_window_cache_prefill(dtype: torch.dtype):
 
 
 @pytest.mark.parametrize("window_size", [None, 16], ids=["full", "windowed"])
-def test_cache_with_attention_mask_rejected(window_size: int | None):
+def test_cache_with_attention_mask_guard(window_size: int | None):
     B, T, H, D = 2, 16, 2, 64
     torch.manual_seed(42)
     layer = WallAttention(
@@ -54,12 +54,22 @@ def test_cache_with_attention_mask_rejected(window_size: int | None):
     ).to(device=device, dtype=torch.float16).eval()
     hidden_states = torch.randn(B, T, H * D, device=device, dtype=torch.float16)
     attention_mask = torch.ones(B, T, dtype=torch.bool, device=device)
-    attention_mask[:, :8] = False
+    attention_mask[:, -8:] = False
 
-    with pytest.raises(AssertionError, match="attention_mask"):
-        layer(
+    with torch.no_grad():
+        expected, _, _ = layer(hidden_states=hidden_states)
+        cache = Cache()
+        actual, _, _ = layer(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
-            past_key_values=Cache(),
+            past_key_values=cache,
             use_cache=True,
         )
+        assert_close("prefill", expected[:, :-8], actual[:, :-8], 0.005)
+        with pytest.raises(AssertionError, match="attention_mask"):
+            layer(
+                hidden_states=hidden_states,
+                attention_mask=attention_mask,
+                past_key_values=cache,
+                use_cache=True,
+            )
