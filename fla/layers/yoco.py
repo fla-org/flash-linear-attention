@@ -179,7 +179,7 @@ class YOCOGatedRetention(nn.Module):
 
             if attention_mask is not None and seqlen_offset > 0:
                 seqlen_offset = prepare_lens_from_mask(attention_mask) - q_len
-                max_seqlen = q.shape[1] + seqlen_offset.max().item()
+                max_seqlen = attention_mask.shape[-1]
 
         if self.max_position_embeddings is not None:
             max_seqlen = max(max_seqlen, self.max_position_embeddings)
@@ -296,7 +296,7 @@ class YOCOSharedKVBuilder(nn.Module):
         if attention_mask is not None and (past_key_values is None or use_cache):
             # Left-padded prefills should use the same effective RoPE positions as the unpadded sequence.
             seqlen_offset = seqlen_offset + prepare_lens_from_mask(attention_mask) - attention_mask.shape[-1]
-            max_seqlen = k.shape[1] + seqlen_offset.max().item()
+            max_seqlen = attention_mask.shape[-1]
 
         if self.max_position_embeddings is not None:
             max_seqlen = max(max_seqlen, self.max_position_embeddings)
@@ -392,7 +392,7 @@ class YOCOCrossAttention(nn.Module):
 
         if attention_mask is not None:
             seqlen_offset = seqlen_offset + prepare_lens_from_mask(attention_mask) - attention_mask.shape[-1]
-            max_seqlen = max(max_seqlen, q.shape[1] + max(seqlen_offset))
+            max_seqlen = max(max_seqlen, attention_mask.shape[-1])
         if self.max_position_embeddings is not None:
             max_seqlen = max(max_seqlen, self.max_position_embeddings)
 
