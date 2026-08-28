@@ -167,6 +167,7 @@ def parallax_decode(
     """
     B, Sq, HQ, K = q.shape
     Skv, H = k.shape[1], k.shape[2]
+    assert Skv >= Sq, f"Cached KV length must cover query length, got Skv={Skv} and Sq={Sq}"
     G = HQ // H
     if scale is None:
         scale = K ** -0.5

@@ -514,7 +514,11 @@ class MomForCausalLM(MomPreTrainedModel, FLAUnsupportedCacheGenerationMixin):
 
         hidden_states = outputs[0]
         fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training
-        logits = None if fuse_linear_and_cross_entropy else self.lm_head(hidden_states[:, -num_logits_to_keep:])
+        logits = None if fuse_linear_and_cross_entropy else self.lm_head(
+            hidden_states
+            if labels is not None or num_logits_to_keep is None
+            else hidden_states[:, -num_logits_to_keep:]
+        )
 
         loss = None
         aux_loss = None

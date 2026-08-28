@@ -505,7 +505,11 @@ class RWKV7ForCausalLM(RWKV7PreTrainedModel, FLAUnsupportedCacheGenerationMixin)
         loss, logits = None, None
         has_labels = (labels is not None) or (shift_labels is not None)
         if not (self.config.fuse_linear_cross_entropy and has_labels):
-            logits = self.lm_head(hidden_states if logits_to_keep is None else hidden_states[:, -logits_to_keep:])
+            logits = self.lm_head(
+                hidden_states
+                if has_labels or logits_to_keep is None
+                else hidden_states[:, -logits_to_keep:]
+            )
         if has_labels:
             if getattr(self, 'criterion', None) is None:
                 if self.config.fuse_linear_cross_entropy:

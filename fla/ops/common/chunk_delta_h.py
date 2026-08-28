@@ -486,42 +486,42 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
             b_dh4 += tl.load(p_dht4, mask=m_dht4, other=0.0)
 
     for i_t in range(NT - 1, -1, -1):
-        i_t = i_t.to(tl.int64)
-        o_t = i_t * BT + tl.arange(0, BT)
+        i_t_int64 = i_t.to(tl.int64)
+        o_t = i_t_int64 * BT + tl.arange(0, BT)
         m_t = o_t < T
         if STATE_V_FIRST:
-            p_dh1 = dh + i_t*HV*K*V + o_v[:, None] * K + o_k1[None, :]
+            p_dh1 = dh + i_t_int64*HV*K*V + o_v[:, None] * K + o_k1[None, :]
             m_dh1 = m_v[:, None] & m_k1[None, :]
         else:
-            p_dh1 = dh + i_t*HV*K*V + o_k1[:, None] * V + o_v[None, :]
+            p_dh1 = dh + i_t_int64*HV*K*V + o_k1[:, None] * V + o_v[None, :]
             m_dh1 = m_k1[:, None] & m_v[None, :]
         tl.store(p_dh1, b_dh1.to(p_dh1.dtype.element_ty), mask=m_dh1)
         if K > 64:
             if STATE_V_FIRST:
-                p_dh2 = dh + i_t*HV*K*V + o_v[:, None] * K + o_k2[None, :]
+                p_dh2 = dh + i_t_int64*HV*K*V + o_v[:, None] * K + o_k2[None, :]
                 m_dh2 = m_v[:, None] & m_k2[None, :]
             else:
-                p_dh2 = dh + i_t*HV*K*V + o_k2[:, None] * V + o_v[None, :]
+                p_dh2 = dh + i_t_int64*HV*K*V + o_k2[:, None] * V + o_v[None, :]
                 m_dh2 = m_k2[:, None] & m_v[None, :]
             tl.store(p_dh2, b_dh2.to(p_dh2.dtype.element_ty), mask=m_dh2)
         if K > 128:
             if STATE_V_FIRST:
-                p_dh3 = dh + i_t*HV*K*V + o_v[:, None] * K + o_k3[None, :]
+                p_dh3 = dh + i_t_int64*HV*K*V + o_v[:, None] * K + o_k3[None, :]
                 m_dh3 = m_v[:, None] & m_k3[None, :]
             else:
-                p_dh3 = dh + i_t*HV*K*V + o_k3[:, None] * V + o_v[None, :]
+                p_dh3 = dh + i_t_int64*HV*K*V + o_k3[:, None] * V + o_v[None, :]
                 m_dh3 = m_k3[:, None] & m_v[None, :]
             tl.store(p_dh3, b_dh3.to(p_dh3.dtype.element_ty), mask=m_dh3)
         if K > 192:
             if STATE_V_FIRST:
-                p_dh4 = dh + i_t*HV*K*V + o_v[:, None] * K + o_k4[None, :]
+                p_dh4 = dh + i_t_int64*HV*K*V + o_v[:, None] * K + o_k4[None, :]
                 m_dh4 = m_v[:, None] & m_k4[None, :]
             else:
-                p_dh4 = dh + i_t*HV*K*V + o_k4[:, None] * V + o_v[None, :]
+                p_dh4 = dh + i_t_int64*HV*K*V + o_k4[:, None] * V + o_v[None, :]
                 m_dh4 = m_k4[:, None] & m_v[None, :]
             tl.store(p_dh4, b_dh4.to(p_dh4.dtype.element_ty), mask=m_dh4)
 
-        last_idx = min((i_t + 1) * BT, T) - 1
+        last_idx = min((i_t_int64 + 1) * BT, T) - 1
         if USE_G:
             bg_last = tl.load(g + (bos + last_idx) * HV + i_h).to(tl.float32)
             p_g = g + bos * HV + i_h + o_t * HV

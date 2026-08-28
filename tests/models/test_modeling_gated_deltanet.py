@@ -8,7 +8,8 @@
 import pytest
 import torch
 
-from fla.models import GatedDeltaNetConfig
+from fla.models import GatedDeltaNetConfig, GatedDeltaNetForCausalLM
+from fla.utils import assert_close, device
 
 from .test_modeling_base import (
     run_test_generate_matches_forward,
@@ -96,3 +97,28 @@ def test_generate_prefill(
     dtype: torch.dtype,
 ):
     run_test_generate_matches_forward(L, B, T, H, D, GatedDeltaNetConfig, dtype)
+
+
+@torch.no_grad()
+def test_logits_to_keep_with_labels():
+    B, T, H, D, V = 2, 8, 2, 8, 32
+    config = GatedDeltaNetConfig(
+        hidden_size=H * D,
+        num_hidden_layers=1,
+        num_heads=H,
+        head_dim=D,
+        expand_v=1,
+        vocab_size=V,
+        fuse_cross_entropy=False,
+    )
+    model = GatedDeltaNetForCausalLM(config).eval().to(device)
+    input_ids = torch.randint(V, (B, T), device=device)
+
+    expected = model(input_ids, labels=input_ids)
+    actual = model(input_ids, labels=input_ids, logits_to_keep=1)
+    inference = model(input_ids, logits_to_keep=1)
+
+    assert actual.logits.shape == expected.logits.shape == (B, T, V)
+    assert inference.logits.shape == (B, 1, V)
+    assert torch.isfinite(actual.loss)
+    assert_close('loss', expected.loss, actual.loss, 1e-6)
