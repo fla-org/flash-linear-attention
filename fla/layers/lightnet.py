@@ -238,7 +238,7 @@ class LightNetAttention(nn.Module):
         return o, None, past_key_values
 
     def state_size(self, **kwargs) -> int:
-        state_size = self.key_dim * self.head_i_dim
+        state_size = self.key_dim * self.head_i_dim + self.key_dim
         for module in self.children():
             if isinstance(module, ShortConvolution):
                 state_size += module.state_size

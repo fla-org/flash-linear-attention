@@ -232,5 +232,9 @@ class ABCAttention(nn.Module):
 
         return o, None, past_key_values
 
-    def state_size(self, seq_len: int = 2048):
-        return 2 * self.num_slots * self.hidden_size
+    def state_size(self, seq_len: int = 2048) -> int:
+        state_size = self.num_slots * (self.key_dim + self.value_dim)
+        for module in self.children():
+            if isinstance(module, ShortConvolution):
+                state_size += module.state_size
+        return state_size
