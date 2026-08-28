@@ -279,6 +279,7 @@ def _decode_ref(q, r, k, v, scale, window_size=None):
             (2, 1, 300, 2, 2, 100, 64),      # windowed decode, non-pow2 D
             (2, 64, 64, 2, 2, 64, None),     # full prefill == training causal
             (3, 200, 200, 2, 8, 64, 32),     # windowed prefill (GQA)
+            (2, 64, 32, 2, 2, 64, 16),       # cached KV shorter than query
         ]
     ],
 )
@@ -292,6 +293,11 @@ def test_decode(B: int, Sq: int, Skv: int, H: int, HQ: int, D: int, W, dtype: to
     r = torch.randn((B, Sq, HQ, D), dtype=dtype, device=device)
     k = torch.randn((B, Skv, H, D), dtype=dtype, device=device)
     v = torch.randn((B, Skv, H, D), dtype=dtype, device=device)
+
+    if Skv < Sq:
+        with pytest.raises(AssertionError, match="Cached KV length must cover query length"):
+            parallax_decode(q, r, k, v, window_size=W)
+        return
 
     ref = _decode_ref(q, r, k, v, scale=D ** -0.5, window_size=W)
     tri = parallax_decode(q, r, k, v, window_size=W)
