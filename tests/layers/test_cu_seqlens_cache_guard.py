@@ -36,7 +36,7 @@ except ImportError:
         pytest.param(
             MoBA,
             dict(hidden_size=128, num_heads=2, num_kv_heads=2, moba_chunk_size=32, moba_topk=2, layer_idx=0),
-            False,
+            True,
             id="moba",
         ),
         pytest.param(
