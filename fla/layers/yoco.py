@@ -183,7 +183,7 @@ class YOCOGatedRetention(nn.Module):
             max_seqlen = q.shape[1] + seqlen_offset
 
             if attention_mask is not None and seqlen_offset > 0:
-                seqlen_offset = prepare_lens_from_mask(attention_mask) - q_len
+                seqlen_offset = seqlen_offset + prepare_lens_from_mask(attention_mask) - attention_mask.shape[-1]
                 max_seqlen = attention_mask.shape[-1]
 
         if self.max_position_embeddings is not None:
@@ -297,6 +297,8 @@ class YOCOSharedKVBuilder(nn.Module):
         if use_cache and past_key_values is not None:
             seqlen_offset = past_key_values.get_seq_length(self.layer_idx)
             max_seqlen = k.shape[1] + seqlen_offset
+            if seqlen_offset > 0:
+                assert q_len == 1, "only support q_len == 1 for decoding"
 
         if attention_mask is not None and (past_key_values is None or use_cache):
             # Left-padded prefills should use the same effective RoPE positions as the unpadded sequence.
@@ -419,7 +421,6 @@ class YOCOCrossAttention(nn.Module):
             _, cu_seqlens = cu_seqlens
             max_seqlen_q, max_seqlen_k = max_seq_lens
             if max_seqlen_q != max_seqlen_k:
-                assert max_seqlen_q == 1, "only support q_len == 1 for decoding"
                 o = attn_decoding_one_step(q, shared_k, shared_v, cu_seqlens=cu_seqlens)
             else:
                 o = parallel_attn(q, shared_k, shared_v, window_size=self.window_size, cu_seqlens=cu_seqlens)

@@ -24,7 +24,7 @@ def test_decode_rotary_offset_with_attention_mask(dtype: torch.dtype):
     ).to(device=device, dtype=dtype).eval()
     hidden_states = torch.randn(B, T, H * D, device=device, dtype=dtype)
     next_hidden_states = torch.randn(B, 2, H * D, device=device, dtype=dtype)
-    # HF generate always passes an attention_mask covering the new tokens at decode steps.
+    # Manual decode/serving callers may pass an attention_mask covering only the new tokens.
     decode_mask = torch.ones(B, 1, dtype=torch.long, device=device)
     tol = 0.005 if dtype == torch.float16 else 0.02
 
