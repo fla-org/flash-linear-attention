@@ -106,6 +106,8 @@ class ForgettingAttention(nn.Module):
         if past_key_values is not None:
             assert cu_seqlens is None, "cu_seqlens should not be provided when past_key_values is not None"
             cache_has_content = past_key_values.get_seq_length(self.layer_idx) > 0
+            if cache_has_content:
+                assert q_len == 1, "only support q_len == 1 for decoding"
             state = past_key_values.update(
                 attn_state=(k, v, f),
                 layer_idx=self.layer_idx,
@@ -126,7 +128,6 @@ class ForgettingAttention(nn.Module):
             cu_seqlens = cu_seqlens_k
             max_seqlen_q, max_seqlen_k = max_seq_lens
             if max_seqlen_q != max_seqlen_k:
-                assert max_seqlen_q == 1, "only support q_len == 1 for decoding"
                 o = attn_decoding_one_step(q, k, v, f, cu_seqlens=cu_seqlens)
             else:
                 o = parallel_forgetting_attn(q, k, v, f, cu_seqlens=cu_seqlens)
