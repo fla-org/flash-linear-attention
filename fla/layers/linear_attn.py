@@ -133,7 +133,12 @@ class LinearAttention(nn.Module):
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None, Cache | None]:
         # Match other recurrent layers: use the recurrent kernel for decode/small chunks.
-        mode = 'fused_recurrent' if hidden_states.shape[1] <= 64 else self.mode
+        if torch.is_grad_enabled():
+            mode = 'chunk'
+        elif hidden_states.shape[1] <= 64:
+            mode = 'fused_recurrent'
+        else:
+            mode = self.mode
         last_state = get_layer_cache(self, past_key_values)
 
         q = self.q_proj(hidden_states)

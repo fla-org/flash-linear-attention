@@ -452,7 +452,12 @@ class MomAttention(nn.Module):
         if origin_cu_seqlens is not None:
             hidden_states, attention_mask = self.cu2pad(hidden_states, origin_cu_seqlens)
 
-        mode = 'fused_recurrent' if (hidden_states.shape[1] <= 64 and not self.training) else self.mode
+        if torch.is_grad_enabled():
+            mode = 'chunk'
+        elif hidden_states.shape[1] <= 64 and not self.training:
+            mode = 'fused_recurrent'
+        else:
+            mode = self.mode
         if self.training:
             assert mode == 'chunk', "Only chunk mode is supported in training."
 
@@ -683,7 +688,12 @@ class MomAttention(nn.Module):
                 "Arbitrary attention masks of shape [batch_size, seq_len, seq_len] are not allowed."
             )
 
-        mode = 'fused_recurrent' if hidden_states.shape[1] <= 64 else self.mode
+        if torch.is_grad_enabled():
+            mode = 'chunk'
+        elif hidden_states.shape[1] <= 64:
+            mode = 'fused_recurrent'
+        else:
+            mode = self.mode
         if self.training:
             assert mode == 'chunk', "Only chunk mode is supported in training."
 

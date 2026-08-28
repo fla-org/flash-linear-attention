@@ -94,9 +94,9 @@ def chunk_fwd_kernel_h(
             b_h = tl.load(p_h0, mask=(o_k[:, None] < K) & (o_v[None, :] < V), other=0.0).to(tl.float32)
 
     for i_t in range(NT):
-        i_t = i_t.to(tl.int64)
-        i_s = i_t // NTS
-        o_t = i_t * BT + tl.arange(0, BT)
+        i_t_int64 = i_t.to(tl.int64)
+        i_s = i_t_int64 // NTS
+        o_t = i_t_int64 * BT + tl.arange(0, BT)
         m_t = o_t < T
         p_k = k + (bos*H + i_h) * K + o_k[:, None] + o_t[None, :] * (H*K)
         p_v = v + (bos*H + i_h) * V + o_t[:, None] * (H*V) + o_v[None, :]
@@ -109,24 +109,24 @@ def chunk_fwd_kernel_h(
             p_h = h + o_h + o_k[:, None] * V + o_v[None, :]
             m_h = (o_k[:, None] < K) & (o_v[None, :] < V)
 
-        if i_t % NTS == 0:
+        if i_t_int64 % NTS == 0:
             tl.store(p_h, (tl.trans(b_h) if STATE_V_FIRST else b_h).to(p_h.dtype.element_ty), mask=m_h)
         # [BK, BT]
         b_k = tl.load(p_k, mask=(o_k[:, None] < K) & m_t[None, :], other=0.0)
         # [BT, BV]
         b_v = tl.load(p_v, mask=m_t[:, None] & (o_v < V)[None, :], other=0.0)
-        last_idx = min((i_t + 1) * BT, T) - 1
+        last_idx = min((i_t_int64 + 1) * BT, T) - 1
 
         # scalar decay
         if USE_G:
             b_g_last = tl.load(g + bos * H + last_idx * H + i_h)
-            p_g = g + bos*H + (i_t * BT + tl.arange(0, BT)) * H + i_h
-            b_g = tl.load(p_g, mask=(i_t * BT + tl.arange(0, BT) < T), other=0.)
+            p_g = g + bos*H + (i_t_int64 * BT + tl.arange(0, BT)) * H + i_h
+            b_g = tl.load(p_g, mask=(i_t_int64 * BT + tl.arange(0, BT) < T), other=0.)
             b_h *= exp2(b_g_last)
             b_v = (b_v * exp2(b_g_last - b_g)[:, None]).to(b_v.dtype)
 
         if USE_G_GAMMA:
-            b_g_last = b_gamma * min(BT, T - i_t * BT)
+            b_g_last = b_gamma * min(BT, T - i_t_int64 * BT)
             b_h *= exp2(b_g_last)
             b_v = (b_v * exp2(b_g_last - b_g)[:, None]).to(b_v.dtype)
 
@@ -242,8 +242,8 @@ def chunk_bwd_kernel_dh(
             b_dh += tl.load(p_dht, mask=(o_k[:, None] < K) & (o_v[None, :] < V), other=0.0).to(tl.float32)
 
     for i_t in range(NT - 1, -1, -1):
-        i_t = i_t.to(tl.int64)
-        i_s = i_t // (BS // BT)
+        i_t_int64 = i_t.to(tl.int64)
+        i_s = i_t_int64 // (BS // BT)
         o_dh = ((boh + i_s) * H + i_h).to(tl.int64) * K*V
         if STATE_V_FIRST:
             p_dh = dh + o_dh + o_v[:, None] * K + o_k[None, :]
@@ -252,10 +252,10 @@ def chunk_bwd_kernel_dh(
             p_dh = dh + o_dh + o_k[:, None] * V + o_v[None, :]
             m_dh = (o_k[:, None] < K) & (o_v[None, :] < V)
 
-        if i_t % (BS // BT) == 0:
+        if i_t_int64 % (BS // BT) == 0:
             tl.store(p_dh, (tl.trans(b_dh) if STATE_V_FIRST else b_dh).to(p_dh.dtype.element_ty), mask=m_dh)
-        last_idx = min(i_t * BT + BT, T) - 1
-        o_t = i_t * BT + tl.arange(0, BT)
+        last_idx = min(i_t_int64 * BT + BT, T) - 1
+        o_t = i_t_int64 * BT + tl.arange(0, BT)
         m_t = o_t < T
         # [BK, BT]
         p_q = q + (bos*HQ + i_hq) * K + o_k[:, None] + o_t[None, :] * (HQ*K)
@@ -266,14 +266,14 @@ def chunk_bwd_kernel_dh(
         b_do = tl.load(p_do, mask=m_t[:, None] & (o_v < V)[None, :], other=0.0)
 
         if USE_G:
-            p_g = g + (bos + i_t * BT + tl.arange(0, BT)) * H + i_h
+            p_g = g + (bos + i_t_int64 * BT + tl.arange(0, BT)) * H + i_h
             b_g_last = tl.load(g + (bos + last_idx) * H + i_h)
-            b_g = tl.load(p_g, mask=(i_t * BT + tl.arange(0, BT) < T), other=0.)
+            b_g = tl.load(p_g, mask=(i_t_int64 * BT + tl.arange(0, BT) < T), other=0.)
             b_q = (b_q * exp2(b_g)[None, :]).to(b_q.dtype)
             b_dh *= exp2(b_g_last)
 
         if USE_G_GAMMA:
-            b_g_last = b_gamma * min(BT, T - i_t * BT)
+            b_g_last = b_gamma * min(BT, T - i_t_int64 * BT)
             b_q = (b_q * exp2(b_g)[None, :]).to(b_q.dtype)
             b_dh *= exp2(b_g_last)
 

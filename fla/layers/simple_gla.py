@@ -177,7 +177,12 @@ class SimpleGatedLinearAttention(nn.Module):
             )
 
         # launching the triton kernel for just one token will actually be slower
-        mode = 'fused_recurrent' if hidden_states.shape[1] <= 64 else self.mode
+        if torch.is_grad_enabled():
+            mode = 'chunk'
+        elif hidden_states.shape[1] <= 64:
+            mode = 'fused_recurrent'
+        else:
+            mode = self.mode
 
         last_state = get_layer_cache(self, past_key_values)
 
