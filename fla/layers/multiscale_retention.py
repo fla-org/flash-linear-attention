@@ -236,7 +236,7 @@ class MultiScaleRetention(nn.Module):
 
             if attention_mask is not None and seqlen_offset > 0:
                 # to eliminate the offsets of padding tokens
-                seqlen_offset = prepare_lens_from_mask(attention_mask) - q_len
+                seqlen_offset = seqlen_offset + prepare_lens_from_mask(attention_mask) - attention_mask.shape[-1]
                 max_seqlen = q.shape[1] + seqlen_offset.max().item()
 
         q, k = self.rotary(q, k, seqlen_offset=seqlen_offset, max_seqlen=max_seqlen, cu_seqlens=cu_seqlens)
