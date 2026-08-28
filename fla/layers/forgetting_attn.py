@@ -105,13 +105,15 @@ class ForgettingAttention(nn.Module):
         cu_seqlens = kwargs.get('cu_seqlens')
         if past_key_values is not None:
             assert cu_seqlens is None, "cu_seqlens should not be provided when past_key_values is not None"
+            cache_has_content = past_key_values.get_seq_length(self.layer_idx) > 0
             state = past_key_values.update(
                 attn_state=(k, v, f),
                 layer_idx=self.layer_idx,
                 offset=q_len,
                 cache_kwargs=dict(window_size=self.window_size),
             )
-            k, v, f = state['attn_state']
+            if cache_has_content:
+                k, v, f = state['attn_state']
 
         q = rearrange(q, '... (h d) -> ... h d', d=self.head_dim)
         k = rearrange(k, '... (h d) -> ... h d', d=self.head_dim)
@@ -129,6 +131,7 @@ class ForgettingAttention(nn.Module):
             else:
                 o = parallel_forgetting_attn(q, k, v, f, cu_seqlens=cu_seqlens)
         else:
+            assert q.shape[1] == k.shape[1], "only support q_len == kv_len when attention_mask is None"
             o = parallel_forgetting_attn(q, k, v, f, cu_seqlens=cu_seqlens)
         if indices_q is not None:
             o = pad_input(o.squeeze(0), indices_q, batch_size, q_len)
