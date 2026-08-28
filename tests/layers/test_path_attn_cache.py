@@ -44,9 +44,13 @@ def test_decode_rejects_multi_token_query(dtype: torch.dtype):
                 past_key_values=cache,
                 use_cache=True,
             )
+        assert cache.get_seq_length(0) == T
+        assert torch.equal(cache[0]['attn_state'][0], cached_k)
+        assert torch.equal(cache[0]['attn_state'][1], cached_v)
+        assert torch.equal(cache[0]['conv_state'], cached_conv)
         actual_next, _, _ = layer(
             hidden_states=next_hidden_states,
-            attention_mask=torch.ones(B, 1, dtype=torch.long, device=device),
+            attention_mask=torch.ones(B, T + 1, dtype=torch.long, device=device),
             past_key_values=cache,
             use_cache=True,
         )
@@ -54,7 +58,3 @@ def test_decode_rejects_multi_token_query(dtype: torch.dtype):
     assert_close("prefill", expected, actual, tol)
     assert_close("decode", expected_next[:, -1:], actual_next, tol)
     assert returned_cache is cache
-    assert cache.get_seq_length(0) == T
-    assert torch.equal(cache[0]['attn_state'][0], cached_k)
-    assert torch.equal(cache[0]['attn_state'][1], cached_v)
-    assert torch.equal(cache[0]['conv_state'], cached_conv)
