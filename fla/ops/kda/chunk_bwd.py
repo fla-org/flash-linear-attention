@@ -456,6 +456,7 @@ def chunk_kda_bwd(
     dt_bias: torch.Tensor | None = None,
     disable_recompute: bool = False,
     cp_context: FLACPContext | None = None,
+    use_tilelang_helpers: bool = False,
     **kwargs,
 ):
     H, HV = q.shape[2], v.shape[2]
@@ -506,9 +507,20 @@ def chunk_kda_bwd(
             # Only the first sequence's state is non-zero as it's the only one that could be cross-rank.
             initial_state = expand_h0(initial_state, context=cp_context)
 
+    bwd_dav = chunk_kda_bwd_dAv
+    bwd_dqkg = chunk_kda_bwd_wy_dqkg_fused
+    bwd_intra = chunk_kda_bwd_intra
+    if use_tilelang_helpers:
+        from fla.ops.kda.backends.tilelang.chunk_bwd_dav import chunk_kda_bwd_dAv_tilelang
+        from fla.ops.kda.backends.tilelang.chunk_bwd_dqkg import chunk_kda_bwd_wy_dqkg_fused_tilelang
+        from fla.ops.kda.backends.tilelang.chunk_bwd_intra import chunk_kda_bwd_intra_tilelang
+        bwd_dav = chunk_kda_bwd_dAv_tilelang
+        bwd_dqkg = chunk_kda_bwd_wy_dqkg_fused_tilelang
+        bwd_intra = chunk_kda_bwd_intra_tilelang
+
     # dAqk = do @ v.T
     # dv = A @ do
-    dAqk, dv = chunk_kda_bwd_dAv(
+    dAqk, dv = bwd_dav(
         q=q,
         k=k,
         v=v_new,
@@ -555,7 +567,7 @@ def chunk_kda_bwd(
         state_v_first=state_v_first,
     )
 
-    dq, dk, dv, db, dg, dAkk = chunk_kda_bwd_wy_dqkg_fused(
+    dq, dk, dv, db, dg, dAkk = bwd_dqkg(
         q=q,
         k=k,
         v=v,
@@ -574,7 +586,7 @@ def chunk_kda_bwd(
         state_v_first=state_v_first,
     )
 
-    dq, dk, db, dg = chunk_kda_bwd_intra(
+    dq, dk, db, dg = bwd_intra(
         q=q,
         k=k,
         g=g,
