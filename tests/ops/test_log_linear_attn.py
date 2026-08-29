@@ -55,6 +55,48 @@ def test_chunk(
     assert_close("o", ref, out, 0.004)
 
 
+@pytest.mark.parametrize("varlen", [False, True], ids=["dense", "varlen"])
+@pytest.mark.skipif(device_platform == "intel", reason="Intel Triton Failure")
+def test_chunk_initial_state(varlen: bool):
+    torch.manual_seed(42)
+    H, K, V, L = 1, 64, 32, 15
+    prefix_lengths = [64, 70, 75, 128] if varlen else [64, 64]
+    sequences = [
+        (
+            torch.randn(1, length + 1, 1, K, dtype=torch.float32, device=device),
+            torch.randn(1, length + 1, 1, K, dtype=torch.float32, device=device),
+            torch.randn(1, length + 1, H, V, dtype=torch.float32, device=device),
+            -torch.rand(1, length + 1, H, dtype=torch.float32, device=device),
+            torch.rand(1, length + 1, H, L, dtype=torch.float32, device=device),
+        )
+        for length in prefix_lengths
+    ]
+    cat_dim = 1 if varlen else 0
+    prefix = tuple(torch.cat([x[index][:, :length] for x, length in zip(sequences, prefix_lengths)], cat_dim)
+                   for index in range(len(sequences[0])))
+    new_tokens = tuple(torch.cat([x[index][:, length:] for x, length in zip(sequences, prefix_lengths)], cat_dim)
+                       for index in range(len(sequences[0])))
+    prefix_cu_seqlens = (
+        torch.tensor([0, *prefix_lengths], dtype=torch.long, device=device).cumsum(0) if varlen else None
+    )
+    decode_cu_seqlens = torch.arange(len(sequences) + 1, dtype=torch.long, device=device) if varlen else None
+
+    _, state = chunk_log_linear_attn(
+        *prefix,
+        output_final_state=True,
+        cu_seqlens=prefix_cu_seqlens,
+    )
+    suffix, _ = chunk_log_linear_attn(
+        *new_tokens,
+        initial_state=state,
+        cu_seqlens=decode_cu_seqlens,
+    )
+
+    expected = [chunk_log_linear_attn(*sequence)[0][:, -1:] for sequence in sequences]
+
+    assert_close("suffix", torch.cat(expected, dim=cat_dim), suffix, 0.004)
+
+
 @pytest.mark.parametrize(
     ("B", "T", "H", "D", "dtype"),
     [
