@@ -56,7 +56,7 @@ class ABCAttention(nn.Module):
         self.expand_v = expand_v
         self.num_heads = num_heads
         key_dim, value_dim = hidden_size * expand_k, hidden_size * expand_v
-        self.key_dim, self.value_dim = int(key_dim), int(value_dim)
+        self.key_dim, self.value_dim = round(key_dim), round(value_dim)
         assert math.isclose(key_dim, self.key_dim), f"`hidden_size * expand_k` must be an integer, got {key_dim}."
         assert math.isclose(value_dim, self.value_dim), f"`hidden_size * expand_v` must be an integer, got {value_dim}."
         assert self.key_dim % num_heads == 0, f"key dim must be divisible by num_heads of {num_heads}"
