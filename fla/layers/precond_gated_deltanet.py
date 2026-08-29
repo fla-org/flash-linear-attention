@@ -16,7 +16,13 @@ import torch.nn as nn
 from einops import rearrange
 from torch.nn import functional as F
 
-from fla.layers.utils import get_layer_cache, get_unpad_data, index_first_axis, pad_input, update_layer_cache
+from fla.layers.utils import (
+    get_layer_cache,
+    get_unpad_indices_and_cu,
+    index_first_axis,
+    pad_input,
+    update_layer_cache,
+)
 from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
 from fla.ops.precond_gated_delta_rule import (
     chunk_precond_gated_delta_rule,
@@ -277,7 +283,8 @@ class PrecondGatedDeltaNet(nn.Module):
 
         cu_seqlens = kwargs.get('cu_seqlens')
         if attention_mask is not None:
-            indices, cu_seqlens, _ = get_unpad_data(attention_mask[:, -q_len:])
+            mask = attention_mask if attention_mask.shape[-1] == q_len else attention_mask[:, -q_len:]
+            indices, cu_seqlens = get_unpad_indices_and_cu(mask)
             hidden_states = index_first_axis(rearrange(hidden_states, "b s ... -> (b s) ..."), indices).unsqueeze(0)
 
         if self.use_short_conv:
