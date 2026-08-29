@@ -10,13 +10,14 @@ import importlib.util
 import pytest
 import torch
 import torch.nn.functional as F
+import triton
 
 from fla.ops.kda import chunk_kda, fused_recurrent_kda
 from fla.ops.kda.fused_recurrent import fused_recurrent_kda_fwd
 from fla.ops.kda.gate import fused_kda_gate, naive_kda_gate, naive_kda_lowerbound_gate
 from fla.ops.kda.naive import naive_chunk_kda, naive_recurrent_kda
 from fla.ops.utils.cache import FLA_CACHE_MODE
-from fla.utils import IS_INTEL_ALCHEMIST, assert_close, device
+from fla.utils import IS_INTEL_ALCHEMIST, IS_NPU, IS_NVIDIA, assert_close, device
 
 
 @pytest.mark.parametrize(
@@ -136,6 +137,13 @@ def test_fused_recurrent(
     h0 = torch.randn(B, HV, D, D, dtype=torch.float32)
     q, k, v, g, beta, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, g, beta, h0))
 
+    g_tri = g.clone()
+    if triton.next_power_of_2(D) != D:
+        # the kernel loads g in next_power_of_2(D) blocks;
+        # poison the memory right after g so any read past D shows up as NaN instead of a silent no-op
+        buf = torch.full((g.numel() + triton.next_power_of_2(D),), 1e30, dtype=torch.float, device=device)
+        g_tri = buf[:g.numel()].view_as(g).copy_(g)
+
     ref, ref_ht = naive_recurrent_kda(
         q=F.normalize(q.clone(), p=2, dim=-1),
         k=F.normalize(k.clone(), p=2, dim=-1),
@@ -151,7 +159,7 @@ def test_fused_recurrent(
         q=F.normalize(q.clone(), p=2, dim=-1) if not use_qk_l2norm_in_kernel else q.clone(),
         k=F.normalize(k.clone(), p=2, dim=-1) if not use_qk_l2norm_in_kernel else k.clone(),
         v=v.clone(),
-        g=g.clone(),
+        g=g_tri,
         beta=beta.clone(),
         scale=scale,
         initial_state=h0.clone(),
@@ -292,18 +300,20 @@ def test_fused_recurrent_state_v_first(
 
 
 @pytest.mark.parametrize(
-    ("B", "T", "H", "HV", "D", "scale", "has_dt_bias", "safe_gate", "dtype"),
+    ("B", "T", "H", "HV", "D", "scale", "has_a_log", "has_dt_bias", "safe_gate", "dtype"),
     [
         pytest.param(
             *test,
-            id="B{}-T{}-H{}-HV{}-D{}-scale{}-has_dt_bias{}-safe_gate{}-{}".format(*test),
+            id="B{}-T{}-H{}-HV{}-D{}-scale{}-has_a_log{}-has_dt_bias{}-safe_gate{}-{}".format(*test),
         )
         for test in [
-            (1, 64, 1, 1, 64, 1, False, False, torch.float),
-            (2, 256, 2, 2, 64, 1, True, False, torch.float),
-            (2, 512, 2, 4, 64, 0.1, True, True, torch.float16),
-            (3, 1000, 2, 8, 128, 1, False, False, torch.float16),
-            (4, 1024, 4, 4, 128, 0.1, True, True, torch.float16),
+            (1, 64, 1, 1, 64, 1, True, False, False, torch.float),
+            (2, 256, 2, 2, 64, 1, True, True, False, torch.float),
+            (2, 512, 2, 4, 64, 0.1, True, True, True, torch.float16),
+            (3, 1000, 2, 8, 128, 1, True, False, False, torch.float16),
+            (4, 1024, 4, 4, 128, 0.1, True, True, True, torch.float16),
+            (1, 64, 1, 1, 64, 1, False, False, True, torch.float),
+            (2, 256, 2, 4, 64, 1, False, True, True, torch.float),
         ]
     ],
 )
@@ -314,6 +324,7 @@ def test_fused_recurrent_gate_in_kernel(
     HV: int,
     D: int,
     scale: float,
+    has_a_log: bool,
     has_dt_bias: bool,
     safe_gate: bool,
     dtype: torch.dtype,
@@ -328,7 +339,7 @@ def test_fused_recurrent_gate_in_kernel(
     v = torch.rand(B, T, HV, D, dtype=dtype, device=device)
     beta = torch.rand(B, T, HV, dtype=dtype, device=device).sigmoid()
     g_raw = torch.randn(B, T, HV, D, dtype=torch.float32, device=device)
-    A_log = torch.log(torch.empty(HV, dtype=torch.float32, device=device).uniform_(1, 16))
+    A_log = torch.log(torch.empty(HV, dtype=torch.float32, device=device).uniform_(1, 16)) if has_a_log else None
     dt_bias = torch.randn(HV * D, dtype=torch.float32, device=device) if has_dt_bias else None
     h0 = torch.randn(B, HV, D, D, dtype=torch.float32, device=device)
 
@@ -353,7 +364,7 @@ def test_fused_recurrent_gate_in_kernel(
         v=v.clone(),
         g=g_raw.clone(),
         beta=beta.clone(),
-        A_log=A_log.clone(),
+        A_log=A_log.clone() if A_log is not None else None,
         dt_bias=dt_bias.clone() if dt_bias is not None else None,
         scale=scale,
         initial_state=h0.clone(),
@@ -383,6 +394,10 @@ def test_fused_recurrent_gate_in_kernel(
         ]
     ],
 )
+@pytest.mark.skipif(
+    not (IS_NVIDIA or IS_NPU),
+    reason='test_fused_recurrent_vllm_decode requires CUDA or NPU',
+)
 def test_fused_recurrent_vllm_decode(
     B: int,
     H: int,
@@ -396,7 +411,7 @@ def test_fused_recurrent_vllm_decode(
 ):
     """Test vLLM-style decoding with continuous batching and paged state storage."""
     torch.manual_seed(42)
-    device = torch.device("cuda")
+    device = torch.device("npu" if IS_NPU else "cuda")
 
     # Setup cache pool and inputs
     max_cache_slots = B * 3
@@ -538,6 +553,11 @@ def test_fused_recurrent_vllm_decode(
             (2, 1024, 2, 8, 64, 0.1, 1, 0, False, True, torch.float16, False, False, 64),
             (2, 1024, 4, 8, 128, 0.1, 1, 0, True, True, torch.float16, False, False, 64),
             (2, 160, 2, 4, 64, 0.1, 1, 0, False, True, torch.float16, True, True, 32),
+
+            (2, 1024, 2, 4, 64, 0.1, 1, 0, True, True, torch.bfloat16, True, False, 64),
+            (2, 1024, 2, 4, 64, 0.1, 1, 0, False, True, torch.bfloat16, False, False, 64),
+            (2, 160, 2, 4, 64, 0.1, 1, 0, False, True, torch.bfloat16, True, True, 32),
+            (2, 1024, 2, 8, 128, 0.1, 1, 0, True, True, torch.bfloat16, False, False, 64),
         ]
     ],
 )
@@ -1032,20 +1052,24 @@ def test_chunk_varlen_prefill(
 
 
 @pytest.mark.parametrize(
-    ("B", "T", "H", "D", "HAS_BIAS", "LOWER_BOUND"),
+    ("B", "T", "H", "D", "HAS_A_LOG", "HAS_BIAS", "LOWER_BOUND"),
     [
-        pytest.param(*test, id="B{}-T{}-H{}-D{}-bias{}-lowerbound{}".format(*test))
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-a_log{}-bias{}-lowerbound{}".format(*test))
         for test in [
-            (1, 2, 2, 12, False, -5.0),
-            (1, 32, 2, 16, False, -5.0),
-            (2, 64, 4, 32, False, -5.0),
-            (4, 128, 8, 64, False, -5.0),
-            (4, 128, 8, 128, False, None),
-            (1, 2, 2, 12, True, None),
-            (1, 32, 2, 16, True, None),
-            (2, 64, 4, 32, True, None),
-            (4, 128, 8, 64, True, None),
-            (4, 128, 8, 128, True, None),
+            (1, 2, 2, 12, True, False, -5.0),
+            (1, 32, 2, 16, True, False, -5.0),
+            (2, 64, 4, 32, True, False, -5.0),
+            (4, 128, 8, 64, True, False, -5.0),
+            (4, 128, 8, 128, True, False, None),
+            (1, 2, 2, 12, True, True, None),
+            (1, 32, 2, 16, True, True, None),
+            (2, 64, 4, 32, True, True, None),
+            (4, 128, 8, 64, True, True, None),
+            (4, 128, 8, 128, True, True, None),
+            (1, 2, 2, 12, False, False, -5.0),
+            (2, 64, 4, 32, False, False, -5.0),
+            (4, 128, 8, 64, False, True, -5.0),
+            (4, 128, 8, 128, False, True, -5.0),
         ]
     ],
 )
@@ -1054,48 +1078,60 @@ def test_gate(
     T: int,
     H: int,
     D: int,
+    HAS_A_LOG: bool,
     HAS_BIAS: bool,
     LOWER_BOUND: float | None,
 ):
     torch.manual_seed(42)
     g = torch.randn(B, T, H, D, dtype=torch.float32) * 10
-    A_log = torch.log(torch.randn(1, 1, H, 1, dtype=torch.float32).uniform_(1, 16))
+    A_log = torch.log(torch.randn(1, 1, H, 1, dtype=torch.float32).uniform_(1, 16)) if HAS_A_LOG else None
     dt_bias = torch.randn(H * D, dtype=torch.float32) if HAS_BIAS else None
-    g, A_log = map(lambda x: x.to(device).requires_grad_(True), (g, A_log))
+    g = g.to(device).requires_grad_(True)
+    if A_log is not None:
+        A_log = A_log.to(device).requires_grad_(True)
     if dt_bias is not None:
         dt_bias = dt_bias.to(device).requires_grad_(True)
     do = torch.randn_like(g).view(B, T, H, D)
 
     if LOWER_BOUND is not None:
         ref = naive_kda_lowerbound_gate(
-            g.clone(), A_log.clone(), dt_bias.clone() if dt_bias is not None else None, LOWER_BOUND
+            g=g.clone(),
+            A_log=A_log.clone() if A_log is not None else None,
+            dt_bias=dt_bias.clone() if dt_bias is not None else None,
+            lower_bound=LOWER_BOUND,
         )
     else:
         ref = naive_kda_gate(
-            g.clone(), A_log.clone(), dt_bias.clone() if dt_bias is not None else None,
+            g=g.clone(),
+            A_log=A_log.clone(),
+            dt_bias=dt_bias.clone() if dt_bias is not None else None,
         )
     tri = fused_kda_gate(
-        g.clone(), A_log.clone(), dt_bias.clone() if dt_bias is not None else None,
-        lower_bound=LOWER_BOUND
+        g=g.clone(),
+        A_log=A_log.clone() if A_log is not None else None,
+        dt_bias=dt_bias.clone() if dt_bias is not None else None,
+        lower_bound=LOWER_BOUND,
     )
     (ref * do).sum().backward(retain_graph=True)
 
-    ref_dg, ref_dA = g.grad, A_log.grad
+    ref_dg = g.grad
+    ref_dA = A_log.grad if A_log is not None else None
     ref_dbias = dt_bias.grad if dt_bias is not None else None
-    g.grad = A_log.grad = None
+    g.grad = None
+    if A_log is not None:
+        A_log.grad = None
     if dt_bias is not None:
         dt_bias.grad = None
 
     ((tri * do).sum()).backward(retain_graph=True)
-    tri_dg, tri_dA = g.grad, A_log.grad
+    tri_dg = g.grad
+    tri_dA = A_log.grad if A_log is not None else None
     tri_dbias = dt_bias.grad if dt_bias is not None else None
-    g.grad = A_log.grad = None
-    if dt_bias is not None:
-        dt_bias.grad = None
 
     assert_close("o", ref, tri, 1e-4)
     assert_close("dg", ref_dg, tri_dg, 1e-4)
-    assert_close("dA", ref_dA, tri_dA, 1e-4)
+    if HAS_A_LOG:
+        assert_close("dA", ref_dA, tri_dA, 1e-4)
     if HAS_BIAS:
         assert_close("dbias", ref_dbias, tri_dbias, 1e-4)
 
@@ -1314,3 +1350,157 @@ def test_flash_kda_chunk_varlen(H, D, cu_seqlens, monkeypatch):
     )
     assert_close("o", ref_o, tri_o, _FLASH_KDA_RTOL)
     assert_close("ht", ref_ht, tri_ht.to(ref_ht.dtype), _FLASH_KDA_RTOL)
+
+
+_TRITON_ASCEND_KDA_OPS = (
+    'kda_gate_fwd',
+    'kda_gate_bwd',
+    'kda_gate_chunk_cumsum',
+    'fused_kda_gate',
+    'fused_recurrent_kda_fwd',
+    'recompute_w_u_fwd',
+    'chunk_kda_fwd_intra',
+    'chunk_kda_fwd_intra_token_parallel',
+    'chunk_kda_bwd_intra',
+    'chunk_kda_bwd_dAv',
+    'chunk_kda_bwd_wy_dqkg_fused',
+)
+
+
+def _spy_on_triton_ascend_kda_backend():
+    """Patch every op of the Triton-Ascend KDA backend to record dispatched calls."""
+    from fla.ops.backends import BackendRegistry
+
+    BackendRegistry.ensure_initialized('kda')
+    backend = BackendRegistry._registries['kda']._backends.get('triton_ascend')
+    assert backend is not None, 'Triton-Ascend KDA backend is not registered'
+
+    calls = []
+    for name in _TRITON_ASCEND_KDA_OPS:
+        original = getattr(backend, name)
+
+        def make_spy(name, original):
+            def spy(*args, **kwargs):
+                calls.append(name)
+                return original(*args, **kwargs)
+            return spy
+
+        setattr(backend, name, make_spy(name, original))
+    return backend, calls
+
+
+def _run_chunk_kda(safe_gate: bool, chunk_size: int = 64, use_gate_in_kernel: bool = True):
+    B, T, H, HV, D = 2, 128, 2, 2, 64
+    dtype = torch.float
+    q = torch.rand(B, T, H, D, dtype=dtype, device=device)
+    k = torch.rand(B, T, H, D, dtype=dtype, device=device)
+    v = torch.rand(B, T, HV, D, dtype=dtype, device=device)
+    g = torch.randn(B, T, HV, D, dtype=dtype, device=device)
+    beta = torch.randn(B, T, HV, dtype=dtype, device=device).sigmoid()
+    h0 = torch.randn(B, HV, D, D, dtype=torch.float32, device=device)
+    tensors = [q, k, v, g, beta, h0]
+    if use_gate_in_kernel:
+        A_log = torch.randn(HV, dtype=torch.float, device=device)
+        dt_bias = torch.randn(HV * D, dtype=torch.float, device=device)
+        tensors += [A_log, dt_bias]
+    else:
+        A_log = dt_bias = None
+    for x in tensors:
+        x.requires_grad_(True)
+
+    o, ht = chunk_kda(
+        q=q, k=k, v=v, g=g, beta=beta,
+        A_log=A_log, dt_bias=dt_bias,
+        scale=1.,
+        initial_state=h0,
+        output_final_state=True,
+        use_qk_l2norm_in_kernel=True,
+        use_gate_in_kernel=use_gate_in_kernel,
+        safe_gate=safe_gate,
+        lower_bound=-5.0 if safe_gate else None,
+        disable_recompute=False,
+        chunk_size=chunk_size,
+    )
+    ((o * torch.randn_like(o)).sum() + (ht * torch.randn_like(ht)).sum()).backward()
+
+
+def _run_fused_recurrent_kda_fwd():
+    B, T, H, D = 2, 64, 2, 64
+    dtype = torch.float
+    q = torch.rand(B, T, H, D, dtype=dtype, device=device)
+    k = torch.rand(B, T, H, D, dtype=dtype, device=device)
+    v = torch.rand(B, T, H, D, dtype=dtype, device=device)
+    g = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    beta = torch.randn(B, T, H, dtype=dtype, device=device).sigmoid()
+    h0 = torch.randn(B, H, D, D, dtype=torch.float32, device=device)
+    fused_recurrent_kda_fwd(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        beta=beta,
+        initial_state=h0,
+        scale=1.0,
+        output_final_state=False,
+        inplace_final_state=True,
+        use_qk_l2norm_in_kernel=True,
+    )
+
+
+@pytest.mark.skipif(not IS_NPU, reason='Triton-Ascend KDA backend routing is only exercised on NPU')
+def test_triton_ascend_backend_routing():
+    """KDA ops must actually dispatch to the Triton-Ascend backend on NPU.
+
+    Numerical parity tests alone cannot catch silently-failing verifiers: if
+    every verifier rejected, all ops would fall back to the default Triton
+    kernels and parity tests would still pass, leaving the NPU kernels dead.
+    """
+    backend, calls = _spy_on_triton_ascend_kda_backend()
+    try:
+        # safe_gate=True: forward and backward must hit the NPU kernels
+        calls.clear()
+        _run_chunk_kda(safe_gate=True)
+        expected = {
+            'kda_gate_chunk_cumsum',
+            'chunk_kda_fwd_intra',
+            'recompute_w_u_fwd',
+            'chunk_kda_bwd_dAv',
+            'chunk_kda_bwd_wy_dqkg_fused',
+            'chunk_kda_bwd_intra',
+            'kda_gate_bwd',
+        }
+        missing = expected - set(calls)
+        assert not missing, f'ops not routed to the Triton-Ascend backend: {missing} (dispatched: {calls})'
+
+        # safe_gate=False: the intra kernel delegates to the token-parallel variant
+        calls.clear()
+        _run_chunk_kda(safe_gate=False)
+        assert 'chunk_kda_fwd_intra_token_parallel' in calls, (
+            'chunk_kda_fwd_intra_token_parallel not routed to the Triton-Ascend backend '
+            f'(dispatched: {calls})'
+        )
+
+        # chunk_size=16 is rejected by the verifiers and must fall back to the
+        # default implementation (which raises), never touching the NPU kernels
+        calls.clear()
+        with pytest.raises(ValueError, match=r"`chunk_size` must be either 32 or 64"):
+            _run_chunk_kda(safe_gate=False, chunk_size=16, use_gate_in_kernel=False)
+        rejected = {
+            'chunk_kda_fwd_intra',
+            'chunk_kda_fwd_intra_token_parallel',
+            'chunk_kda_bwd_intra',
+            'chunk_kda_bwd_wy_dqkg_fused',
+        }
+        assert rejected.isdisjoint(calls), (
+            f'verifier-rejected ops were still routed to the Triton-Ascend backend: {rejected & set(calls)}'
+        )
+
+        calls.clear()
+        _run_fused_recurrent_kda_fwd()
+        assert 'fused_recurrent_kda_fwd' in calls, (
+            'fused_recurrent_kda_fwd not routed to the Triton-Ascend backend '
+            f'(dispatched: {calls})'
+        )
+    finally:
+        for name in _TRITON_ASCEND_KDA_OPS:
+            delattr(backend, name)

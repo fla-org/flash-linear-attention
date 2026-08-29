@@ -231,7 +231,7 @@ def test_rmsnorm_linear(N: int, D: int):
 # when T (total tokens) is small relative to the SM count,
 # some Triton programs in layer_norm_bwd_kernel have no work
 # (i_sg * BS >= T // G). Without an early-exit guard, these
-# idle programs access invalid memory via make_block_ptr,
+# idle programs access invalid memory via out-of-bounds tile loads,
 # causing "CUDA error: illegal memory access."
 #
 # The bug triggers when:

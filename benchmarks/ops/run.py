@@ -28,11 +28,16 @@ Usage::
     # Forward only
     python -m benchmarks.ops.run --op chunk_gla --modes fwd
 
-    # Compare against main (auto git worktree, no stash needed)
+    # Compare against main (auto git worktree, no stash needed).
+    # HEAD and the baseline each run in an isolated subprocess so the parent
+    # never holds NPU/CUDA tensors across refs.
     python -m benchmarks.ops.run --op chunk_gla --base main
 
     # Compare against any branch/tag/commit
     python -m benchmarks.ops.run --op chunk_gla --base HEAD~3
+
+    # Current ref only (no baseline subprocess)
+    python -m benchmarks.ops.run --op chunk_gla --no-base
 
     # Save results to JSON
     python -m benchmarks.ops.run --op chunk_gla --json results.json
@@ -123,6 +128,9 @@ Benchmark methodology
    ``FLA_BENCH_WARMUP_MS`` / ``FLA_BENCH_REP_MS`` for noisier machines / CI).
 3. Input tensors (including gate transforms like logsigmoid) are prepared
    **before** timing — only the op call itself is measured.
+4. **Isolation**: HEAD and ``--base`` each run in a subprocess. The parent
+   never holds accelerator tensors, so a large HEAD shape cannot starve the
+   baseline process of HBM (and vice versa).
 """
 
 from __future__ import annotations
@@ -143,6 +151,8 @@ import torch
 
 # Import registry — works both as a package (python -m benchmarks.ops.run)
 # and standalone (python /tmp/fla_bench_xxx/run.py) for cross-commit use.
+# ``device_name`` is imported inside ``benchmark_op`` so the parent compare
+# process never initializes the accelerator.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from registry import (  # noqa: E402
     SHAPE_CONFIGS,
@@ -153,6 +163,29 @@ from registry import (  # noqa: E402
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _device_synchronize(device: str | None = None) -> None:
+    """Synchronize the active accelerator before/after timed runs."""
+    if device is None:
+        from fla.utils import device_name as device
+    dev = device
+    dev_mod = getattr(torch, dev, None)
+    if dev_mod is not None and hasattr(dev_mod, 'synchronize'):
+        dev_mod.synchronize()
+
+
+def _format_machine_line(info: dict) -> str:
+    gpu = info.get('gpu_name', 'N/A')
+    pytorch = info.get('pytorch_version', 'N/A')
+    platform = info.get('device_platform', 'N/A')
+    if platform == 'cuda':
+        backend = f"CUDA {info.get('cuda_version', 'N/A')}"
+    elif platform == 'npu':
+        backend = f"NPU: CANN {info.get('cann_version', 'N/A')}"
+    else:
+        backend = platform.upper() if platform != 'N/A' else 'N/A'
+    return f"Machine: {gpu} | {backend} | PyTorch {pytorch}"
 
 
 def _import_op(config: OpConfig):
@@ -185,11 +218,14 @@ def _get_git_label() -> str:
 
 
 def _get_machine_info() -> dict:
+    from fla.utils import device_platform
+
     info = {
         'hostname': socket.gethostname(),
         'platform': platform.platform(),
         'pytorch_version': torch.__version__,
         'cuda_version': torch.version.cuda or 'N/A',
+        'device_platform': device_platform,
         'git_label': _get_git_label(),
     }
     try:
@@ -198,7 +234,13 @@ def _get_machine_info() -> dict:
     except Exception:
         info['triton_version'] = 'N/A'
 
-    if torch.cuda.is_available():
+    if device_platform == 'npu' and hasattr(torch, 'npu') and torch.npu.is_available():
+        props = torch.npu.get_device_properties(0)
+        info['gpu_name'] = torch.npu.get_device_name(0)
+        info['gpu_count'] = torch.npu.device_count()
+        info['gpu_memory_gb'] = round(props.total_memory / (1024**3), 1)
+        info['cann_version'] = getattr(torch.version, 'cann', None) or 'N/A'
+    elif torch.cuda.is_available():
         info['gpu_name'] = torch.cuda.get_device_name(0)
         info['gpu_count'] = torch.cuda.device_count()
         info['gpu_memory_gb'] = round(
@@ -223,13 +265,13 @@ def _do_bench_kw():
     return {'warmup': max(1, warmup_ms), 'rep': max(1, rep_ms)}
 
 
-def _warmup_autotune(fn, n: int | None = None):
+def _warmup_autotune(fn, n: int | None = None, device: str | None = None):
     """Run *fn* multiple times so triton autotuning is fully cached."""
     if n is None:
         n = _warmup_iters()
     for _ in range(n):
         fn()
-    torch.cuda.synchronize()
+    _device_synchronize(device)
 
 
 def benchmark_op(
@@ -243,6 +285,8 @@ def benchmark_op(
     Returns a list of result dicts (one per shape x mode).
     """
     import triton
+
+    from fla.utils import device_name
 
     if modes is None:
         modes = ['fwd', 'fwdbwd']
@@ -294,7 +338,6 @@ def benchmark_op(
         logger.warning(f"No compatible shapes for {op_name}, skipping.")
         return []
 
-    device = 'cuda'
     dtype = torch.bfloat16
 
     # Phase 1: warmup ALL shapes before timing ANY
@@ -304,7 +347,7 @@ def benchmark_op(
         B, T, H, D = shape_dict['B'], shape_dict['T'], shape_dict['H'], shape_dict['D']
         extra_shape_kw = {k: v for k, v in shape_dict.items() if k not in ('B', 'T', 'H', 'D')}
         try:
-            inputs = generate_inputs(config, B, T, H, D, dtype=dtype, device=device, **extra_shape_kw)
+            inputs = generate_inputs(config, B, T, H, D, dtype=dtype, device=device_name, **extra_shape_kw)
             out = op_fn(**inputs, **call_kwargs)
             out_tensor = out[0] if config.output_is_tuple else out
             do = torch.randn_like(out_tensor)
@@ -314,7 +357,7 @@ def benchmark_op(
                 t = result[0] if config.output_is_tuple else result
                 t.backward(do)
 
-            _warmup_autotune(_fwdbwd_fn)
+            _warmup_autotune(_fwdbwd_fn, device=device_name)
         except Exception as e:
             logger.warning(f"Warmup failed for {op_name} @ {shape_name}: {e}")
             failed_shapes.add(shape_name)
@@ -329,7 +372,7 @@ def benchmark_op(
         B, T, H, D = shape_dict['B'], shape_dict['T'], shape_dict['H'], shape_dict['D']
         extra_shape_kw = {k: v for k, v in shape_dict.items() if k not in ('B', 'T', 'H', 'D')}
         try:
-            inputs = generate_inputs(config, B, T, H, D, dtype=dtype, device=device, **extra_shape_kw)
+            inputs = generate_inputs(config, B, T, H, D, dtype=dtype, device=device_name, **extra_shape_kw)
         except Exception as e:
             logger.warning(f"Input generation failed for {op_name} @ {shape_name}: {e}")
             continue
@@ -458,10 +501,7 @@ def print_results_table(results: list[dict], machine_info: dict | None = None,
 
     print(f"\n{sep}")
     if machine_info:
-        gpu = machine_info.get('gpu_name', 'N/A')
-        cuda = machine_info.get('cuda_version', 'N/A')
-        pytorch = machine_info.get('pytorch_version', 'N/A')
-        print(f"  Machine: {gpu} | CUDA {cuda} | PyTorch {pytorch}")
+        print(f"  {_format_machine_line(machine_info)}")
 
     def _l_cell(r, blank=False):
         if not has_l:
@@ -520,6 +560,56 @@ def _find_project_root() -> str:
     return os.getcwd()
 
 
+_WORKER_ENV = 'FLA_BENCH_WORKER'
+
+
+def _isolated_bench_cmd(runner, op_names, shape_configs, modes, backend, out_json):
+    """Worker argv. ``--no-base`` plus ``FLA_BENCH_WORKER`` block nested compares."""
+    cmd = [sys.executable, runner, '--op', *op_names,
+           '--custom-shapes', json.dumps(shape_configs),
+           '--modes', *modes, '--json', out_json, '--no-base']
+    if backend is not None:
+        cmd += ['--backend', backend]
+    return cmd
+
+
+def _run_isolated_bench(cwd, cmd):
+    env = os.environ.copy()
+    env[_WORKER_ENV] = '1'
+    subprocess.run(cmd, cwd=cwd, env=env)
+
+
+def _read_bench_json(out_json):
+    if os.path.exists(out_json):
+        with open(out_json) as f:
+            data = json.load(f)
+        return data.get('results', []), data.get('machine_info')
+    return None, None
+
+
+def _bench_current(op_names, shape_configs, modes, backend=None):
+    """Run the current working tree in a subprocess, then exit to free HBM.
+
+    Returns (results_list, machine_info_dict) or (None, None) on failure.
+    """
+    project_root = _find_project_root()
+    tmpdir = tempfile.mkdtemp(prefix='fla_bench_HEAD_')
+    try:
+        print("\n  Benchmarking at HEAD (isolated subprocess)...")
+        runner = os.path.abspath(__file__)
+        out_json = os.path.join(tmpdir, 'results.json')
+        _run_isolated_bench(
+            project_root,
+            _isolated_bench_cmd(runner, op_names, shape_configs, modes, backend, out_json),
+        )
+        return _read_bench_json(out_json)
+    except Exception as e:
+        logger.warning(f"Failed to benchmark at HEAD: {e}")
+        return None, None
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 def _bench_at_ref(ref, op_names, shape_configs, modes, backend=None):
     """Run benchmarks at a git ref using a temporary worktree.
 
@@ -551,18 +641,11 @@ def _bench_at_ref(ref, op_names, shape_configs, modes, backend=None):
 
         runner = os.path.join(runner_dir, 'run.py')
         out_json = os.path.join(tmpdir, 'results.json')
-        cmd = [sys.executable, runner, '--op', *op_names,
-               '--custom-shapes', json.dumps(shape_configs),
-               '--modes', *modes, '--json', out_json]
-        if backend is not None:
-            cmd += ['--backend', backend]
-        subprocess.run(cmd, cwd=worktree_dir)
-
-        if os.path.exists(out_json):
-            with open(out_json) as f:
-                data = json.load(f)
-            return data.get('results', []), data.get('machine_info')
-        return None, None
+        _run_isolated_bench(
+            worktree_dir,
+            _isolated_bench_cmd(runner, op_names, shape_configs, modes, backend, out_json),
+        )
+        return _read_bench_json(out_json)
     except Exception as e:
         logger.warning(f"Failed to benchmark at '{ref}': {e}")
         return None, None
@@ -609,7 +692,13 @@ def main():
     parser.add_argument(
         '--base', default=None,
         help='Git ref for the baseline (old) column, e.g. "main" or "HEAD~3". '
-             'Auto-detected as "main" when on a feature branch.',
+             'Auto-detected as "main" when on a feature branch. '
+             'HEAD and the baseline each run in an isolated subprocess.',
+    )
+    parser.add_argument(
+        '--no-base', action='store_true',
+        help='Skip baseline comparison. Nested worker processes pass this '
+             'so they never spawn another compare.',
     )
     parser.add_argument(
         '--list', action='store_true',
@@ -657,31 +746,42 @@ def main():
         op_names = list_ops() if args.op == ['all'] else args.op
     shape_configs = json.loads(args.custom_shapes) if args.custom_shapes else SHAPE_CONFIGS
 
-    machine_info = _get_machine_info()
-    print(f"Machine: {machine_info.get('gpu_name', 'N/A')} | "
-          f"CUDA {machine_info.get('cuda_version', 'N/A')} | "
-          f"PyTorch {machine_info.get('pytorch_version', 'N/A')}")
+    is_worker = os.environ.get(_WORKER_ENV) == '1'
+    print(f"Git: {_get_git_label()}")
     print(f"Shapes: {len(shape_configs)} configs")
     print(f"Ops: {op_names}")
 
-    all_results = []
-    for op_name in op_names:
-        try:
-            all_results.extend(benchmark_op(op_name, shape_configs, modes=args.modes, backend=args.backend))
-        except Exception as e:
-            logger.error(f"Failed to benchmark {op_name}: {e}")
+    if is_worker:
+        machine_info = _get_machine_info()
+        print(_format_machine_line(machine_info))
+        all_results = []
+        for op_name in op_names:
+            try:
+                all_results.extend(
+                    benchmark_op(op_name, shape_configs, modes=args.modes, backend=args.backend),
+                )
+            except Exception as e:
+                logger.error(f"Failed to benchmark {op_name}: {e}")
+        baseline, baseline_info = None, None
+    else:
+        all_results, machine_info = _bench_current(
+            op_names, shape_configs, args.modes, backend=args.backend,
+        )
+        all_results = all_results or []
+        machine_info = machine_info or {'git_label': _get_git_label()}
 
-    # Determine baseline ref: explicit --base, or auto-detect main if on a feature branch.
-    git_label = machine_info.get('git_label', 'unknown')
-    current_branch = git_label.split('[')[0] if '[' in git_label else git_label
-    base_ref = args.base
-    if base_ref is None and current_branch not in ('main', 'master', 'unknown'):
-        base_ref = 'main'
+        git_label = machine_info.get('git_label', 'unknown')
+        current_branch = git_label.split('[')[0] if '[' in git_label else git_label
+        base_ref = None if args.no_base else args.base
+        if base_ref is None and not args.no_base and current_branch not in ('main', 'master', 'unknown'):
+            base_ref = 'main'
+        if base_ref == '':
+            base_ref = None
 
-    baseline, baseline_info = None, None
-    if base_ref:
-        baseline, baseline_info = _bench_at_ref(
-            base_ref, op_names, shape_configs, args.modes, backend=args.backend)
+        baseline, baseline_info = None, None
+        if base_ref:
+            baseline, baseline_info = _bench_at_ref(
+                base_ref, op_names, shape_configs, args.modes, backend=args.backend)
 
     # Sort by (mode, L, B, T, H, D, op) so the table groups by mode first
     # and (when present) by L so different residual-source counts cluster.
@@ -692,7 +792,10 @@ def main():
         r['B'], r['T'], r['H'], r['D'], r['op'],
     ))
 
-    print_results_table(all_results, machine_info, baseline=baseline, baseline_info=baseline_info)
+    # Workers print a per-ref table. The orchestrator prints the comparison
+    # (or nothing extra when --no-base, because the worker already printed).
+    if is_worker or baseline:
+        print_results_table(all_results, machine_info, baseline=baseline, baseline_info=baseline_info)
 
     if args.json_file:
         output = {'machine_info': machine_info, 'results': all_results}

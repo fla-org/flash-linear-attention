@@ -34,29 +34,38 @@ def parallel_rebased_fwd_kernel(
     BV: tl.constexpr,
 ):
     # i_c: chunk index. used for sequence parallelism
-    i_kv, i_c, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_kv, i_c, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     NV = tl.cdiv(V, BV)
     i_k = i_kv // (NV)
     i_v = i_kv % (NV)
 
-    p_q = tl.make_block_ptr(q + i_bh * T*K, (T, K), (K, 1), (i_c*BTL, i_k*BK), (BTL, BK), (1, 0))
-    p_k = tl.make_block_ptr(k + i_bh * T*K, (K, T), (1, K), (i_k*BK, 0), (BK, BTS), (0, 1))
-    p_v = tl.make_block_ptr(v + i_bh * T*V, (T, V), (V, 1), (0, i_v*BV), (BTS, BV), (1, 0))
+    o_t = i_c * BTL + tl.arange(0, BTL)
+    o_kk = i_k * BK + tl.arange(0, BK)
+    o_vv = i_v * BV + tl.arange(0, BV)
+    m_t = o_t < T
+    m_q = m_t[:, None] & (o_kk[None, :] < K)
+    m_o = m_t[:, None] & (o_vv[None, :] < V)
+    p_q = q + i_bh * T*K + o_t[:, None] * K + o_kk[None, :]
 
     # [BQ, BD] block Q, in the shared memory throughout the whole kernel
-    b_q = tl.load(p_q, boundary_check=(0, 1))
+    b_q = tl.load(p_q, mask=m_q, other=0.0)
     b_q = (b_q * scale).to(b_q.dtype)
     b_o = tl.zeros([BTL, BV], dtype=tl.float32)
     b_z = tl.zeros([BTL], dtype=tl.float32)
 
     # Q block and K block have no overlap
     # no need for mask, thereby saving flops
-    for _ in range(0, i_c*BTL, BTS):
+    for i_s in range(0, i_c*BTL, BTS):
+        o_s = i_s + tl.arange(0, BTS)
+        m_k = (o_kk[:, None] < K) & (o_s[None, :] < T)
+        m_v = (o_s[:, None] < T) & (o_vv[None, :] < V)
+        p_k = k + i_bh * T*K + o_kk[:, None] + o_s[None, :] * K
+        p_v = v + i_bh * T*V + o_s[:, None] * V + o_vv[None, :]
         # [BK, BTS]
-        b_k = tl.load(p_k, boundary_check=(0, 1))
+        b_k = tl.load(p_k, mask=m_k, other=0.0)
 
         # [BTS, BV]
-        b_v = tl.load(p_v, boundary_check=(0, 1))
+        b_v = tl.load(p_v, mask=m_v, other=0.0)
         # [BTL, BTS]
         b_s = tl.dot(b_q, (b_k), allow_tf32=False)
         b_s = b_s * b_s
@@ -64,8 +73,6 @@ def parallel_rebased_fwd_kernel(
 
         # [BQ, BD]
         b_o = b_o + tl.dot(b_s.to(b_v.dtype), b_v, allow_tf32=False)
-        p_k = tl.advance(p_k, (0, BTS))
-        p_v = tl.advance(p_v, (BTS, 0))
 
     # # rescale interchunk output
     tl.debug_barrier()
@@ -74,14 +81,17 @@ def parallel_rebased_fwd_kernel(
     # tl.debug_barrier()
 
     o_k = tl.arange(0, BTS)
-    p_k = tl.make_block_ptr(k + i_bh * T*K, (K, T), (1, K), (i_k*BK, i_c*BTL), (BK, BTS), (0, 1))
-    p_v = tl.make_block_ptr(v + i_bh * T*V, (T, V), (V, 1), (i_c*BTL, i_v*BV), (BTS, BV), (1, 0))
     # Q block and K block have overlap. masks required
-    for _ in range(i_c*BTL, (i_c + 1) * BTL, BTS):
+    for i_s in range(i_c*BTL, (i_c + 1) * BTL, BTS):
+        o_s = i_s + tl.arange(0, BTS)
+        m_k = (o_kk[:, None] < K) & (o_s[None, :] < T)
+        m_v = (o_s[:, None] < T) & (o_vv[None, :] < V)
+        p_k = k + i_bh * T*K + o_kk[:, None] + o_s[None, :] * K
+        p_v = v + i_bh * T*V + o_s[:, None] * V + o_vv[None, :]
         # [BK, BTS]
-        b_k = tl.load(p_k, boundary_check=(0, 1))
+        b_k = tl.load(p_k, mask=m_k, other=0.0)
         # [BTS, BV]
-        b_v = tl.load(p_v, boundary_check=(0, 1))
+        b_v = tl.load(p_v, mask=m_v, other=0.0)
         # [BTL, BTS]
         m_s = o_q[:, None] >= o_k[None, :]
         b_s = tl.dot(b_q, b_k, allow_tf32=False)
@@ -90,13 +100,11 @@ def parallel_rebased_fwd_kernel(
         b_z += tl.sum(b_s, axis=1)
         # [BTL, BV]
         b_o += tl.dot(b_s.to(b_q.dtype), b_v, allow_tf32=False)
-        p_k = tl.advance(p_k, (0, BTS))
-        p_v = tl.advance(p_v, (BTS, 0))
         o_k += BTS
 
-    p_o = tl.make_block_ptr(o + (i_bh + B * H * i_k) * T*V, (T, V), (V, 1), (i_c*BTL, i_v*BV), (BTL, BV), (1, 0))
+    p_o = o + (i_bh + B * H * i_k) * T*V + o_t[:, None] * V + o_vv[None, :]
     p_z = z + (i_bh + B * H * i_k) * T + i_c*BTL + tl.arange(0, BTL)
-    tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=m_o)
     tl.store(p_z, b_z.to(p_z.dtype.element_ty), mask=((i_c*BTL + tl.arange(0, BTL)) < T))
 
 
@@ -124,22 +132,31 @@ def _parallel_rebased_bwd_dq(
     BK: tl.constexpr,
     BV: tl.constexpr,
 ):
-    p_do = tl.make_block_ptr(do + i_bh * T*V, (T, V), (V, 1), (i_c*BTL, i_v*BV), (BTL, BV), (1, 0))
-    p_q = tl.make_block_ptr(q + (i_bh) * T*K, (T, K), (K, 1), (i_c*BTL, i_k*BK), (BTL, BK), (1, 0))
-    b_q = tl.load(p_q, boundary_check=(0, 1))
-    b_do = tl.load(p_do, boundary_check=(0, 1)).to(b_q.dtype)
+    o_t = i_c * BTL + tl.arange(0, BTL)
+    o_kk = i_k * BK + tl.arange(0, BK)
+    o_vv = i_v * BV + tl.arange(0, BV)
+    m_t = o_t < T
+    m_q = m_t[:, None] & (o_kk[None, :] < K)
+    m_o = m_t[:, None] & (o_vv[None, :] < V)
+    p_do = do + i_bh * T*V + o_t[:, None] * V + o_vv[None, :]
+    p_q = q + (i_bh) * T*K + o_t[:, None] * K + o_kk[None, :]
+    b_q = tl.load(p_q, mask=m_q, other=0.0)
+    b_do = tl.load(p_do, mask=m_o, other=0.0).to(b_q.dtype)
     b_q = (b_q * scale).to(b_q.dtype)
     b_dq = tl.zeros([BTL, BK], dtype=tl.float32)
-    p_k = tl.make_block_ptr(k + i_bh * T*K, (T, K), (K, 1), (0, i_k*BK), (BTS, BK), (1, 0))
-    p_v = tl.make_block_ptr(v + i_bh * T*V, (V, T), (1, V), (i_v*BV, 0), (BV, BTS), (0, 1))
     p_dz = dz + i_bh * T + i_c*BTL + tl.arange(0, BTL)
     b_dz = tl.load(p_dz, mask=(i_c*BTL + tl.arange(0, BTL)) < T)
 
-    for _ in range(0, i_c*BTL, BTS):
+    for i_s in range(0, i_c*BTL, BTS):
+        o_s = i_s + tl.arange(0, BTS)
+        m_k = (o_s[:, None] < T) & (o_kk[None, :] < K)
+        m_v = (o_vv[:, None] < V) & (o_s[None, :] < T)
+        p_k = k + i_bh * T*K + o_s[:, None] * K + o_kk[None, :]
+        p_v = v + i_bh * T*V + o_vv[:, None] + o_s[None, :] * V
         # [BTS, BK]
-        b_k = tl.load(p_k, boundary_check=(0, 1))
+        b_k = tl.load(p_k, mask=m_k, other=0.0)
         # [BV, BTS]
-        b_v = tl.load(p_v, boundary_check=(0, 1))
+        b_v = tl.load(p_v, mask=m_v, other=0.0)
         # [BTL, BTS]
         b_ds = tl.dot(b_do, b_v, allow_tf32=False)
         if i_v == 0:
@@ -149,20 +166,21 @@ def _parallel_rebased_bwd_dq(
         b_s = tl.dot(b_q, tl.trans(b_k), allow_tf32=False)
         # [BQ, BD]
         b_dq += tl.dot((2 * b_ds * b_s).to(b_v.dtype), b_k, allow_tf32=False)
-        p_k = tl.advance(p_k, (BTS, 0))
-        p_v = tl.advance(p_v, (0, BTS))
 
     b_dq *= scale
     o_q = tl.arange(0, BTL)
     o_k = tl.arange(0, BTS)
-    p_k = tl.make_block_ptr(k + i_bh * T*K, (T, K), (K, 1), (i_c*BTL, i_k*BK), (BTS, BK), (1, 0))
-    p_v = tl.make_block_ptr(v + i_bh * T*V, (V, T), (1, V), (i_v*BV, i_c*BTL), (BV, BTS), (0, 1))
     # Q block and K block have overlap. masks required
-    for _ in range(i_c*BTL, (i_c + 1) * BTL, BTS):
+    for i_s in range(i_c*BTL, (i_c + 1) * BTL, BTS):
+        o_s = i_s + tl.arange(0, BTS)
+        m_k = (o_s[:, None] < T) & (o_kk[None, :] < K)
+        m_v = (o_vv[:, None] < V) & (o_s[None, :] < T)
+        p_k = k + i_bh * T*K + o_s[:, None] * K + o_kk[None, :]
+        p_v = v + i_bh * T*V + o_vv[:, None] + o_s[None, :] * V
         # [BTS, BK]
-        b_k = tl.load(p_k, boundary_check=(0, 1))
+        b_k = tl.load(p_k, mask=m_k, other=0.0)
         # [BV, BTS]
-        b_v = tl.load(p_v, boundary_check=(0, 1))
+        b_v = tl.load(p_v, mask=m_v, other=0.0)
         # [BTL, BTS]
         m_s = o_q[:, None] >= o_k[None, :]
         b_ds = tl.dot(b_do, b_v, allow_tf32=False)
@@ -176,11 +194,9 @@ def _parallel_rebased_bwd_dq(
         # [BTL, BK]
         b_dq += tl.dot((2 * b_ds * b_s).to(b_k.dtype),
                        b_k, allow_tf32=False)
-        p_k = tl.advance(p_k, (BTS, 0))
-        p_v = tl.advance(p_v, (0, BTS))
         o_k += BTS
-    p_dq = tl.make_block_ptr(dq + (i_bh + B * H * i_v) * T*K, (T, K), (K, 1), (i_c*BTL, i_k*BK), (BTL, BK), (1, 0))
-    tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), boundary_check=(0, 1))
+    p_dq = dq + (i_bh + B * H * i_v) * T*K + o_t[:, None] * K + o_kk[None, :]
+    tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), mask=m_q)
     return
 
 
@@ -210,20 +226,29 @@ def _parallel_rebased_bwd_dkv(
     BV: tl.constexpr,
 ):
     # compute dk dv
-    p_k = tl.make_block_ptr(k + i_bh * T*K, (T, K), (K, 1), (i_c*BTL, i_k*BK), (BTL, BK), (1, 0))
-    p_v = tl.make_block_ptr(v + i_bh * T*V, (T, V), (V, 1), (i_c*BTL, i_v*BV), (BTL, BV), (1, 0))
-    b_k, b_v = tl.load(p_k, boundary_check=(0, 1)), tl.load(p_v, boundary_check=(0, 1))
+    o_t = i_c * BTL + tl.arange(0, BTL)
+    o_kk = i_k * BK + tl.arange(0, BK)
+    o_vv = i_v * BV + tl.arange(0, BV)
+    m_t = o_t < T
+    m_k = m_t[:, None] & (o_kk[None, :] < K)
+    m_v = m_t[:, None] & (o_vv[None, :] < V)
+    p_k = k + i_bh * T*K + o_t[:, None] * K + o_kk[None, :]
+    p_v = v + i_bh * T*V + o_t[:, None] * V + o_vv[None, :]
+    b_k, b_v = tl.load(p_k, mask=m_k, other=0.0), tl.load(p_v, mask=m_v, other=0.0)
     b_dk, b_dv = tl.zeros([BTL, BK], dtype=tl.float32), tl.zeros(
         [BTL, BV], dtype=tl.float32)
 
     for i in range((tl.cdiv(T, BTS) * BTS)-BTS, (i_c + 1) * BTL - BTS, -BTS):
-        p_q = tl.make_block_ptr(q + i_bh * T*K, (K, T), (1, K), (i_k*BK, i), (BK, BTS), (0, 1))
-        p_do = tl.make_block_ptr(do + i_bh * T*V, (V, T), (1, V), (i_v*BV, i), (BV, BTS), (0, 1))
+        o_s = i + tl.arange(0, BTS)
+        m_q = (o_kk[:, None] < K) & (o_s[None, :] < T)
+        m_o = (o_vv[:, None] < V) & (o_s[None, :] < T)
+        p_q = q + i_bh * T*K + o_kk[:, None] + o_s[None, :] * K
+        p_do = do + i_bh * T*V + o_vv[:, None] + o_s[None, :] * V
         p_dz = dz + i_bh * T + i + tl.arange(0, BTS)
         # [BK, BTS]
-        b_q = tl.load(p_q, boundary_check=(0, 1))
+        b_q = tl.load(p_q, mask=m_q, other=0.0)
         # [BV, BTS]
-        b_do = tl.load(p_do, boundary_check=(0, 1)).to(b_q.dtype)
+        b_do = tl.load(p_do, mask=m_o, other=0.0).to(b_q.dtype)
         b_dz = tl.load(p_dz, mask=(i + tl.arange(0, BTS)) < T)
         # [BTL, BTS]
         b_s = tl.dot(b_k.to(b_q.dtype), b_q, allow_tf32=False) * scale
@@ -239,11 +264,14 @@ def _parallel_rebased_bwd_dkv(
     tl.debug_barrier()
     o_q, o_k = tl.arange(0, BTS), tl.arange(0, BTL)
     for i in range(i_c*BTL, (i_c+1)*BTL, BTS):
-        p_q = tl.make_block_ptr(q + i_bh * T*K, (K, T), (1, K), (i_k*BK, i), (BK, BTS), (0, 1))
-        p_do = tl.make_block_ptr(do + i_bh * T*V, (V, T), (1, V), (i_v*BV, i), (BV, BTS), (0, 1))
+        o_s = i + tl.arange(0, BTS)
+        m_q = (o_kk[:, None] < K) & (o_s[None, :] < T)
+        m_o = (o_vv[:, None] < V) & (o_s[None, :] < T)
+        p_q = q + i_bh * T*K + o_kk[:, None] + o_s[None, :] * K
+        p_do = do + i_bh * T*V + o_vv[:, None] + o_s[None, :] * V
         p_dz = dz + i_bh * T + i + tl.arange(0, BTS)
-        b_q = tl.load(p_q, boundary_check=(0, 1))  # [BD, BQ]
-        b_do = tl.load(p_do, boundary_check=(0, 1)).to(b_q.dtype)
+        b_q = tl.load(p_q, mask=m_q, other=0.0)  # [BD, BQ]
+        b_do = tl.load(p_do, mask=m_o, other=0.0).to(b_q.dtype)
         b_dz = tl.load(p_dz, mask=(i + tl.arange(0, BTS)) < T)
         # [BK, BQ]
         m_s = o_k[:, None] <= o_q[None, :]
@@ -263,10 +291,10 @@ def _parallel_rebased_bwd_dkv(
         b_dk += tl.dot((2 * b_ds * b_s).to(b_q.dtype), tl.trans(b_q), allow_tf32=False)
         o_q += BTS
 
-    p_dk = tl.make_block_ptr(dk + (i_bh + B * H * i_v) * T*K, (T, K), (K, 1), (i_c*BTL, i_k*BK), (BTL, BK), (1, 0))
-    p_dv = tl.make_block_ptr(dv + (i_bh + B * H * i_k) * T*V, (T, V), (V, 1), (i_c*BTL, i_v*BV), (BTL, BV), (1, 0))
-    tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
+    p_dk = dk + (i_bh + B * H * i_v) * T*K + o_t[:, None] * K + o_kk[None, :]
+    p_dv = dv + (i_bh + B * H * i_k) * T*V + o_t[:, None] * V + o_vv[None, :]
+    tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), mask=m_k)
+    tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), mask=m_v)
     return
 
 
@@ -291,7 +319,7 @@ def parallel_rebased_bwd_kernel(
     BK: tl.constexpr,
     BV: tl.constexpr,
 ):
-    i_kv, i_c, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_kv, i_c, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     NV = tl.cdiv(V, BV)
     i_k = i_kv // (NV)
     i_v = i_kv % (NV)
@@ -448,20 +476,22 @@ def parallel_rebased(
     use_scale: bool = True,
     use_normalize: bool = True,
     return_both: bool = False,
-    head_first: bool = False,
+    **kwargs,
 ):
+    if 'head_first' in kwargs:
+        raise DeprecationWarning(
+            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
+        )
     assert q.shape[-1] <= 128, "only support feature dim up to 128"
     if use_scale:
         scale = q.shape[-1] ** -0.5
     else:
         scale = 1
-    if not head_first:
-        q, k, v = map(lambda x: x.transpose(1, 2), (q, k, v))
+    q, k, v = map(lambda x: x.transpose(1, 2), (q, k, v))
     o, z = ParallelBasedFunction.apply(q, k, v, scale)
     if return_both:
         return o, z
     if use_normalize:
         o = o / (z[..., None] + eps)
-    if not head_first:
-        o = o.transpose(1, 2)
+    o = o.transpose(1, 2)
     return o.to(q.dtype)

@@ -173,8 +173,8 @@ class ChunkKDAFunction(torch.autograd.Function):
                 None, None, None, None, None, None, None, None, None, None, None, None, None, None)
 
 
-@dispatch('kda')
 @torch.compiler.disable
+@dispatch('kda')
 def chunk_kda(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -231,6 +231,8 @@ def chunk_kda(
               The passed ``g`` acts as the raw input for ``-exp(A_log) * softplus(g + dt_bias.view(HV, K))``.
               Note that as part of the input arguments,
               ``A_log`` (shape ``[HV]``) and the optional ``dt_bias`` (shape ``[HV * K]``) should be provided.
+              When ``lower_bound`` is set, ``A_log`` may be ``None``,
+              in which case the gate is ``lower_bound * sigmoid(g + dt_bias)``.
             - If ``False``, ``g`` is expected to be the pre-computed decay value.
             Default: ``False``.
         use_beta_sigmoid_in_kernel (bool):
@@ -384,8 +386,9 @@ def chunk_kda(
 
     A_log, dt_bias = None, None
     if use_gate_in_kernel:
-        assert "A_log" in kwargs, "A_log must be provided when use_gate_in_kernel=True."
-        A_log, dt_bias = kwargs["A_log"], kwargs.get("dt_bias")
+        A_log, dt_bias = kwargs.get("A_log"), kwargs.get("dt_bias")
+        if A_log is None and lower_bound is None:
+            raise ValueError("`A_log` must be provided when `use_gate_in_kernel=True` and `lower_bound` is not set.")
 
     chunk_size = kwargs.pop("chunk_size", 64)
     if chunk_size not in (32, 64):

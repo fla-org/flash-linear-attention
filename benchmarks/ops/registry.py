@@ -346,6 +346,39 @@ register_op(OpConfig(
     category='gate_beta',
 ))
 
+register_op(OpConfig(
+    name='chunk_precond_gdn',
+    import_path='fla.ops.precond_gated_delta_rule',
+    inputs={
+        **_simple_qkv,
+        'g': TensorSpec(shape_BTH, transform=logsigmoid),
+        'beta': TensorSpec(shape_BTH, transform=sigmoid_transform),
+        'g_atk': TensorSpec(shape_BTH, transform=logsigmoid),
+        'beta_atk': TensorSpec(shape_BTH, transform=sigmoid_transform),
+        'log_atk_scale': TensorSpec(shape_H, dtype='float32'),
+    },
+    func_name='chunk_precond_gated_delta_rule',
+    extra_kwargs={'use_qk_l2norm_in_kernel': True, 'x': 1.5},
+    category='gate_beta',
+    test_file='tests/ops/test_precond_gated_delta.py',
+))
+
+register_op(OpConfig(
+    name='chunk_precond_kda',
+    import_path='fla.ops.precond_kda',
+    inputs={
+        **_simple_qkv,
+        'g': TensorSpec(shape_BTHD, transform=logsigmoid),
+        'beta': TensorSpec(shape_BTH, transform=sigmoid_transform),
+        'g_atk': TensorSpec(shape_BTH, transform=logsigmoid),
+        'beta_atk': TensorSpec(shape_BTH, transform=sigmoid_transform),
+        'log_atk_scale': TensorSpec(shape_H, dtype='float32'),
+    },
+    extra_kwargs={'x': 1.5},
+    category='gate_beta',
+    test_file='tests/ops/test_precond_kda.py',
+))
+
 # --- +head gate (g=[B,T,H] with logsigmoid) ---
 
 register_op(OpConfig(
@@ -489,10 +522,21 @@ _attnres_inputs = {
     'rms_weight': TensorSpec(shape_D),
 }
 
+
+def _attnres_post_init(inputs, B, T, H, D, L=None, **kw):
+    # fused_attnres expects a sequence of [B, T, D] tensors, not the stacked [L, B, T, D] buffer.
+    res = inputs['residuals']
+    if isinstance(res, torch.Tensor) and res.ndim == 4:
+        inputs['residuals'] = [
+            res[i].detach().clone().requires_grad_(True) for i in range(res.shape[0])
+        ]
+
+
 register_op(OpConfig(
     name='fused_attnres',
     import_path='fla.ops.attnres',
     inputs=_attnres_inputs,
+    post_init=_attnres_post_init,
     output_is_tuple=False,
     default_shapes=_layer_default_shapes,
     category='fused_attnres',
@@ -503,6 +547,7 @@ register_op(OpConfig(
     name='naive_attnres',
     import_path='fla.ops.attnres',
     inputs=_attnres_inputs,
+    post_init=_attnres_post_init,
     output_is_tuple=False,
     default_shapes=_layer_default_shapes,
     category='naive_attnres',

@@ -50,20 +50,22 @@ def parallel_path_bwd_dq_kernel(
     IS_VARLEN: tl.constexpr,
     USE_GATE: tl.constexpr,
 ):
-    i_t, i_nh = tl.program_id(0), tl.program_id(1)
+    i_t, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1)
     i_n, i_hq = i_nh // HQ, i_nh % HQ
     i_h = i_hq // G
 
     if IS_VARLEN:
-        i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
-        boh_large = tl.load(split_offsets + i_n).to(tl.int32)
+        i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int64)
+        boh_large = tl.load(split_offsets + i_n).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
     else:
         bos, eos = (i_n * T).to(tl.int64), (i_n * T + T).to(tl.int64)
-        boh_large = i_n * tl.cdiv(T, S)
+        boh_large = (i_n * tl.cdiv(T, S)).to(tl.int64)
     o_t = i_t * BT + tl.arange(0, BT)
     m_t = o_t < T
+    o_d = tl.arange(0, BK)
+    o_v = tl.arange(0, BV)
 
     k += (bos * H + i_h) * K  # GQA when H!=HQ
     v += (bos * H + i_h) * V  # GQA when H!=HQ
@@ -83,17 +85,17 @@ def parallel_path_bwd_dq_kernel(
     sm_scale = scale * 1.44269504
 
     # load query
-    p_do = tl.make_block_ptr(do, (T, V), (HQ*V, 1), (i_t * BT, 0), (BT, BV), (1, 0))
-    b_do = tl.load(p_do, boundary_check=(0, 1))
+    p_do = do + o_t[:, None] * (HQ*V) + o_v[None, :]
+    b_do = tl.load(p_do, mask=m_t[:, None] & (o_v[None, :] < V), other=0.0)
 
-    p_l = tl.make_block_ptr(L, (T,), (HQ,), (i_t * BT,), (BT,), (0,))
-    p_d = tl.make_block_ptr(D, (T,), (HQ,), (i_t * BT,), (BT,), (0,))
-    b_l = tl.load(p_l, boundary_check=(0,))
-    b_delta = tl.load(p_d, boundary_check=(0,))
+    p_l = L + o_t * HQ
+    p_d = D + o_t * HQ
+    b_l = tl.load(p_l, mask=m_t, other=0.0)
+    b_delta = tl.load(p_d, mask=m_t, other=0.0)
 
     if USE_GATE:
-        p_g_cumsum_q = tl.make_block_ptr(g_cumsum, (T,), (HQ,), (i_t * BT,), (BT,), (0,))
-        b_g_cumsum_q = tl.load(p_g_cumsum_q, boundary_check=(0,)).to(tl.float32)
+        p_g_cumsum_q = g_cumsum + o_t * HQ
+        b_g_cumsum_q = tl.load(p_g_cumsum_q, mask=m_t, other=0.0).to(tl.float32)
         b_dg_cumsum_q = tl.zeros([BT], dtype=tl.float32)
     else:
         b_g_cumsum_q = None
@@ -104,37 +106,39 @@ def parallel_path_bwd_dq_kernel(
 
     for offset_outer in range(0, curr_end, S):
         idx_j = offset_outer // S
-        p_q = tl.make_block_ptr(q + ((bos.to(tl.int64) * NUM_BLOCKS + idx_j + 1) * HQ + i_hq) * K, (T, K),
-                                (HQ*K*NUM_BLOCKS, 1), (i_t * BT, 0), (BT, BK), (1, 0))
-        b_q = tl.load(p_q, boundary_check=(0, 1))
+        p_q = q + ((bos.to(tl.int64) * NUM_BLOCKS + idx_j + 1) * HQ + i_hq) * \
+            K + o_t[:, None] * (HQ*K*NUM_BLOCKS) + o_d[None, :]
+        b_q = tl.load(p_q, mask=m_t[:, None] & (o_d[None, :] < K), other=0.0)
 
         b_dh = -tl.dot(tl.trans(b_q), b_dq.to(b_q.dtype))
         tl.atomic_add(dhc_whole + idx_j * stride_hq + tl.arange(0, K)
                       [:, None] * K + tl.arange(0, K)[None, :], b_dh, sem='relaxed')
-        p_h = tl.make_block_ptr(hc_whole + idx_j * stride_h, (K, K), (K, 1), (0, 0), (BK, BK), (1, 0))
-        b_h = tl.load(p_h, boundary_check=(0, 1))
+        p_h = hc_whole + idx_j * stride_h + o_d[:, None] * K + o_d[None, :]
+        b_h = tl.load(p_h, mask=(o_d[:, None] < K) & (o_d[None, :] < K), other=0.0)
         b_dq = b_dq - tl.dot(b_dq.to(b_h.dtype), tl.trans(b_h))
 
         for offset in range(offset_outer, min(offset_outer+S, i_t*BT), BS):
-            p_k = tl.make_block_ptr(k, (T, K), (H * K, 1), (offset, 0), (BS, BK), (1, 0))
-            b_k = tl.load(p_k, boundary_check=(0, 1))
+            o_k = (offset + tl.arange(0, BS)).to(tl.int64)
+            m_k = o_k < T
+            p_k = k + o_k[:, None] * (H * K) + o_d[None, :]
+            b_k = tl.load(p_k, mask=m_k[:, None] & (o_d[None, :] < K), other=0.0)
             b_A = tl.dot(b_q, tl.trans(b_k).to(b_q.dtype))
             if USE_GATE:
-                p_g_cumsum_k = tl.make_block_ptr(g_cumsum, (T,), (HQ,), (offset,), (BS,), (0,))
-                b_g_cumsum_k = tl.load(p_g_cumsum_k, boundary_check=(0,)).to(tl.float32)
+                p_g_cumsum_k = g_cumsum + o_k * HQ
+                b_g_cumsum_k = tl.load(p_g_cumsum_k, mask=m_k, other=0.0).to(tl.float32)
                 b_A = b_A + b_g_cumsum_q[:, None] - b_g_cumsum_k[None, :]
             b_A = exp2(b_A * sm_scale - b_l[:, None])
             b_A = tl.where(m_t[:, None], b_A, 0)
-            p_v = tl.make_block_ptr(v, (T, V), (H*V, 1), (offset, 0), (BS, BV), (1, 0))
-            b_v = tl.load(p_v, boundary_check=(0, 1))
+            p_v = v + o_k[:, None] * (H*V) + o_v[None, :]
+            b_v = tl.load(p_v, mask=m_k[:, None] & (o_v[None, :] < V), other=0.0)
             b_dp = tl.dot(b_do, tl.trans(b_v).to(b_do.dtype))
             b_dA = (b_dp - b_delta[:, None]) * b_A * scale
             b_dq += tl.dot(b_dA.to(b_k.dtype), b_k)
             if USE_GATE:
                 b_dg_cumsum_q += tl.sum(b_dA, axis=1)
 
-    p_dq = tl.make_block_ptr(dq, (T, K), (K * HQ, 1), (i_t * BT, 0), (BT, BK), (1, 0))
-    tl.store(p_dq, b_dq.to(dq.dtype.element_ty), boundary_check=(0, 1))
+    p_dq = dq + o_t[:, None] * (K * HQ) + o_d[None, :]
+    tl.store(p_dq, b_dq.to(dq.dtype.element_ty), mask=m_t[:, None] & (o_d[None, :] < K))
     if USE_GATE:
         tl.atomic_add(dg_cumsum + o_t * HQ, b_dg_cumsum_q, mask=m_t, sem='relaxed')
 

@@ -29,7 +29,7 @@ def fused_chunk_based_fwd_kernel(
     BK: tl.constexpr,
     BV: tl.constexpr,
 ):
-    i_v, i_k, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_v, i_k, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
 
     o_i = tl.arange(0, BT)
 
@@ -44,10 +44,8 @@ def fused_chunk_based_fwd_kernel(
     b_h_2o = tl.zeros([BK*BK, BV], dtype=tl.float32)
 
     # make block pointers
-    p_q = tl.make_block_ptr(q + i_bh * T*K, (T, K), (K, 1), (0, i_k * BK), (BT, BK), (1, 0))
-    p_k = tl.make_block_ptr(k + i_bh * T*K, (K, T), (1, K), (i_k * BK, 0), (BK, BT), (0, 1))
-    p_v = tl.make_block_ptr(v + i_bh * T*V, (T, V), (V, 1), (0, i_v * BV), (BT, BV), (1, 0))
-    p_o = tl.make_block_ptr(o + (i_bh + i_k*B*H) * T*V, (T, V), (V, 1), (0, i_v * BV), (BT, BV), (1, 0))
+    o_kk = i_k * BK + tl.arange(0, BK)
+    o_vv = i_v * BV + tl.arange(0, BV)
 
     p_z = z + (i_bh + i_k * B * H) * T + tl.arange(0, BT)
     k_2o = tl.zeros([1, BK * BK], dtype=tl.float32)
@@ -55,15 +53,24 @@ def fused_chunk_based_fwd_kernel(
     k_0o = 0
 
     for i in range(0, tl.cdiv(T, BT)):
+        o_t = (i * BT).to(tl.int64) + tl.arange(0, BT)
+        m_t = o_t < T
+        m_q = m_t[:, None] & (o_kk[None, :] < K)
+        m_k = (o_kk[:, None] < K) & m_t[None, :]
+        m_v = m_t[:, None] & (o_vv[None, :] < V)
+        p_q = q + i_bh * T*K + o_t[:, None] * K + o_kk[None, :]
+        p_k = k + i_bh * T*K + o_kk[:, None] + o_t[None, :] * K
+        p_v = v + i_bh * T*V + o_t[:, None] * V + o_vv[None, :]
+        p_o = o + (i_bh + i_k*B*H) * T*V + o_t[:, None] * V + o_vv[None, :]
         # [BK, BT]
-        b_k = tl.load(p_k, boundary_check=(0, 1))
+        b_k = tl.load(p_k, mask=m_k, other=0.0)
         # [BK*BK, BT]
         b_k_2o = b_k[:, None, :] * b_k[None, :, :]
         b_k_2o = tl.reshape(b_k_2o, [BK * BK, BT]).to(b_k.dtype)
         # [BT, BV]
-        b_v = tl.load(p_v, boundary_check=(0, 1))
+        b_v = tl.load(p_v, mask=m_v, other=0.0)
         # [BT, BK]
-        b_q = (tl.load(p_q, boundary_check=(0, 1)) * scale).to(b_k.dtype)
+        b_q = (tl.load(p_q, mask=m_q, other=0.0) * scale).to(b_k.dtype)
         b_o = tl.zeros([BT, BV], dtype=tl.float32)
         b_z = tl.zeros([BT], dtype=tl.float32)
 
@@ -93,8 +100,13 @@ def fused_chunk_based_fwd_kernel(
         b_z += tl.sum(b_s, axis=1)
         b_o += tl.dot(b_s.to(b_q.dtype), b_v, allow_tf32=False)
         # [TB, BV]
-        tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
-        tl.store(p_z, b_z.to(p_z.dtype.element_ty), mask=(i * BT + tl.arange(0, BT)) < T)
+        tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=m_v)
+        # only one V-split program writes z: its address does not depend on
+        # i_v, so all i_v programs would store the same values to the same
+        # locations concurrently (an unsynchronized same-value WAW). The bwd
+        # kernel below already guards its i_v-redundant work with i_v == 0.
+        if i_v == 0:
+            tl.store(p_z, b_z.to(p_z.dtype.element_ty), mask=(i * BT + tl.arange(0, BT)) < T)
 
         # update hidden state
         # [BK, BV]
@@ -102,10 +114,6 @@ def fused_chunk_based_fwd_kernel(
         b_h_1o = b_h_1o + tl.dot(b_k, b_v, allow_tf32=False)
         b_h_0o = b_h_0o + tl.sum(b_v, axis=0)
 
-        p_q = tl.advance(p_q, (BT, 0))
-        p_k = tl.advance(p_k, (0, BT))
-        p_v = tl.advance(p_v, (BT, 0))
-        p_o = tl.advance(p_o, (BT, 0))
         p_z += BT
 
 
@@ -131,7 +139,7 @@ def fused_chunk_based_bwd_kernel(
     BK: tl.constexpr,
     BV: tl.constexpr,
 ):
-    i_v, i_k, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_v, i_k, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
 
     o_i = tl.arange(0, BT)
     m_s = o_i[:, None] >= o_i[None, :]
@@ -146,24 +154,31 @@ def fused_chunk_based_bwd_kernel(
     k_1o = tl.zeros([1, BK], dtype=tl.float32)
     k_2o = tl.zeros([1, BK * BK], dtype=tl.float32)
 
+    o_kk = i_k * BK + tl.arange(0, BK)
+    o_vv = i_v * BV + tl.arange(0, BV)
     for i in range(0, tl.cdiv(T, BT)):
-        p_q = tl.make_block_ptr(q + i_bh * T*K, (T, K), (K, 1), (i * BT, i_k * BK), (BT, BK), (1, 0))
-        p_k = tl.make_block_ptr(k + i_bh * T*K, (T, K), (K, 1), (i * BT, i_k * BK), (BT, BK), (1, 0))
-        p_v = tl.make_block_ptr(v + i_bh * T*V, (V, T), (1, V), (i_v * BV, i * BT), (BV, BT), (0, 1))
-        p_do = tl.make_block_ptr(do + i_bh * T*V, (T, V), (V, 1), (i * BT, i_v * BV), (BT, BV), (1, 0))
-        p_dq = tl.make_block_ptr(dq + (i_bh + i_v*B*H) * T*K, (T, K), (K, 1), (i*BT, i_k*BK), (BT, BK), (1, 0))
+        o_t = (i * BT).to(tl.int64) + tl.arange(0, BT)
+        m_t = o_t < T
+        m_q = m_t[:, None] & (o_kk[None, :] < K)
+        m_v = m_t[:, None] & (o_vv[None, :] < V)
+        m_kv = (o_vv[:, None] < V) & m_t[None, :]
+        p_q = q + i_bh * T*K + o_t[:, None] * K + o_kk[None, :]
+        p_k = k + i_bh * T*K + o_t[:, None] * K + o_kk[None, :]
+        p_v = v + i_bh * T*V + o_vv[:, None] + o_t[None, :] * V
+        p_do = do + i_bh * T*V + o_t[:, None] * V + o_vv[None, :]
+        p_dq = dq + (i_bh + i_v*B*H) * T*K + o_t[:, None] * K + o_kk[None, :]
         p_dz = dz + (i_bh) * T + tl.arange(0, BT) + i * BT
         b_dq = tl.zeros([BT, BK], dtype=tl.float32)
 
         # load tensors
         # [BT, BK]
-        b_q = tl.load(p_q, boundary_check=(0, 1))
+        b_q = tl.load(p_q, mask=m_q, other=0.0)
         b_q = (b_q * scale).to(b_q.dtype)
-        b_k = tl.load(p_k, boundary_check=(0, 1))
-        b_do = tl.load(p_do, boundary_check=(0, 1)).to(b_q.dtype)
+        b_k = tl.load(p_k, mask=m_q, other=0.0)
+        b_do = tl.load(p_do, mask=m_v, other=0.0).to(b_q.dtype)
         b_dz = tl.load(p_dz, mask=(tl.arange(0, BT) + i * BT) < T)
         # [BV, BT]
-        b_v = tl.load(p_v, boundary_check=(0, 1))
+        b_v = tl.load(p_v, mask=m_kv, other=0.0)
 
         # inter-chunk
         b_dq += tl.dot(b_do, (b_h_1o).to(b_do.dtype), allow_tf32=False)
@@ -188,7 +203,7 @@ def fused_chunk_based_bwd_kernel(
         b_dq += tl.dot((b_ds * (1 + b_s)).to(b_q.dtype), b_k, allow_tf32=False)
 
         # store
-        tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), boundary_check=(0, 1))
+        tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), mask=m_q)
 
         # update hidden state
         # [BT, BK*BK]
@@ -219,21 +234,26 @@ def fused_chunk_based_bwd_kernel(
     dq_2o = tl.zeros([BK * BK, 1], dtype=tl.float32)
 
     for i in range(tl.cdiv(T, BT) * BT - BT, -BT, -BT):
-        p_q = tl.make_block_ptr(q + i_bh * T*K, (K, T), (1, K), (i_k * BK, i), (BK, BT), (0, 1))
-        p_k = tl.make_block_ptr(k + i_bh * T*K, (T, K), (K, 1), (i, i_k * BK), (BT, BK), (1, 0))
-        p_v = tl.make_block_ptr(v + i_bh * T*V, (T, V), (V, 1), (i, i_v * BV), (BT, BV), (1, 0))
-        p_do = tl.make_block_ptr(do + i_bh * T*V, (T, V), (V, 1), (i, i_v * BV), (BT, BV), (1, 0))
-        p_dk = tl.make_block_ptr(dk + (i_bh+i_v*B*H) * T*K, (T, K), (K, 1), (i, i_k*BK), (BT, BK), (1, 0))
-        p_dv = tl.make_block_ptr(dv + (i_bh+i_k*B*H) * T*V, (T, V), (V, 1), (i, i_v*BV), (BT, BV), (1, 0))
+        o_t = i.to(tl.int64) + tl.arange(0, BT)
+        m_t = o_t < T
+        m_q = (o_kk[:, None] < K) & m_t[None, :]
+        m_k = m_t[:, None] & (o_kk[None, :] < K)
+        m_v = m_t[:, None] & (o_vv[None, :] < V)
+        p_q = q + i_bh * T*K + o_kk[:, None] + o_t[None, :] * K
+        p_k = k + i_bh * T*K + o_t[:, None] * K + o_kk[None, :]
+        p_v = v + i_bh * T*V + o_t[:, None] * V + o_vv[None, :]
+        p_do = do + i_bh * T*V + o_t[:, None] * V + o_vv[None, :]
+        p_dk = dk + (i_bh+i_v*B*H) * T*K + o_t[:, None] * K + o_kk[None, :]
+        p_dv = dv + (i_bh+i_k*B*H) * T*V + o_t[:, None] * V + o_vv[None, :]
         p_dz = dz + (i_bh) * T + tl.arange(0, BT) + i
 
         b_dk = tl.zeros([BT, BK], dtype=tl.float32)
         b_dv = tl.zeros([BT, BV], dtype=tl.float32)
 
-        b_q = tl.load(p_q, boundary_check=(0, 1))
-        b_k = tl.load(p_k, boundary_check=(0, 1))
-        b_v = tl.load(p_v, boundary_check=(0, 1))
-        b_do = tl.load(p_do, boundary_check=(0, 1)).to(b_q.dtype)
+        b_q = tl.load(p_q, mask=m_q, other=0.0)
+        b_k = tl.load(p_k, mask=m_k, other=0.0)
+        b_v = tl.load(p_v, mask=m_v, other=0.0)
+        b_do = tl.load(p_do, mask=m_v, other=0.0).to(b_q.dtype)
         b_dz = tl.load(p_dz, mask=(tl.arange(0, BT)+i) < T)
         b_q = (b_q * scale).to(b_k.dtype)
 
@@ -284,8 +304,8 @@ def fused_chunk_based_bwd_kernel(
             dq_1o += (tl.sum(b_dz[None, :] * b_q, axis=1))[None, :]
             dq_2o += (tl.sum(b_dz[None, :] * b_q_2o, axis=1) * 0.5)[:, None]
 
-        tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
-        tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
+        tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), mask=m_k)
+        tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), mask=m_v)
 
 
 class FusedChunkBasedFunction(torch.autograd.Function):
@@ -360,16 +380,18 @@ def fused_chunk_based(
     v: torch.Tensor,
     scale: float | None = None,
     use_norm: bool = True,
-    head_first: bool = False,
+    **kwargs,
 ):
+    if 'head_first' in kwargs:
+        raise DeprecationWarning(
+            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
+        )
     assert q.shape[-1] <= 16, 'only support feature dimension up to 16.'
     if scale is None:
         scale = q.shape[-1] ** -0.5
-    if not head_first:
-        q, k, v = map(lambda x: x.transpose(1, 2), (q, k, v))
+    q, k, v = map(lambda x: x.transpose(1, 2), (q, k, v))
     o, z = FusedChunkBasedFunction.apply(q, k, v, scale)
     if use_norm:
         o = o / (z[..., None] + 1e-6)
-    if not head_first:
-        o = o.transpose(1, 2)
+    o = o.transpose(1, 2)
     return o.to(q.dtype)

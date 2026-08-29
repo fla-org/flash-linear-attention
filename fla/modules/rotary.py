@@ -66,11 +66,11 @@ def rotary_embedding_kernel(
     INTERLEAVED: tl.constexpr,
     CONJUGATE: tl.constexpr,
 ):
-    i_t, i_b, i_h = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_t, i_b, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2)
 
     if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n), tl.load(cu_seqlens + i_n + 1)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
         x = x + bos * H*D + i_h * D
         y = y + bos * H*D + i_h * D
@@ -169,7 +169,9 @@ def rotary_embedding_fwdbwd(
     R2 = R * 2
 
     assert D <= 256, "Only support D <= 256"
-    assert TR >= T, f"TR must be >= T, got {TR} and {T}"
+    assert R2 <= D, f"Rotary dimension must not exceed head dimension, got rotary_dim={R2} and head_dim={D}"
+    if not is_varlen:
+        assert TR >= T, f"TR must be >= T, got {TR} and {T}"
 
     assert cos.dtype == sin.dtype, f"cos and sin must have the same dtype, got {cos.dtype} and {sin.dtype}"
     assert x.dtype == cos.dtype, f"Input and cos/sin must have the same dtype, got {x.dtype} and {cos.dtype}"
@@ -177,6 +179,11 @@ def rotary_embedding_fwdbwd(
     if isinstance(seqlen_offsets, torch.Tensor):
         assert seqlen_offsets.shape == (N,)
         assert seqlen_offsets.dtype in [torch.int32, torch.int64]
+        sequence_lengths = T if not is_varlen else cu_seqlens[1:] - cu_seqlens[:-1]
+        torch._assert_async(
+            torch.all(sequence_lengths + seqlen_offsets <= TR),
+            f"Rotary cache is too short for tensor offsets, got {TR} positions",
+        )
     else:
         assert seqlen_offsets + T <= TR
 
@@ -359,6 +366,8 @@ class RotaryEmbedding(nn.Module):
         """
         super().__init__()
 
+        assert dim % 2 == 0, f"Rotary dimension must be even, got {dim}"
+
         self.dim = dim
         self.base = float(base)
         self.scale_base = scale_base
@@ -470,12 +479,16 @@ class RotaryEmbedding(nn.Module):
             Each sequence in x is shifted by this amount.
             Most commonly used in inference when we have KV cache.
         cu_seqlens: [N + 1] or None
-        max_seqlen: int
+        max_seqlen:
+            Cache length used to initialize the rotary tables. Tensor offsets require this on the first call so cache sizing does not
+            synchronize the device.
         """
         if max_seqlen is not None:
             self._update_cos_sin_cache(max_seqlen, device=q.device, dtype=q.dtype)
         elif isinstance(seqlen_offset, int):
             self._update_cos_sin_cache(q.shape[1] + seqlen_offset, device=q.device, dtype=q.dtype)
+        else:
+            assert self._cos_cached is not None, "Tensor offsets require an initialized cache; pass max_seqlen on the first call"
         if self.scale is None:
             q = rotary_embedding(
                 q,

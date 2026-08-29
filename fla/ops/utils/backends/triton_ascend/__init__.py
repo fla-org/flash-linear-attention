@@ -23,6 +23,13 @@ class TritonAscendUtilsBackend(BaseBackend):
         from fla.utils import IS_NPU
         return IS_NPU
 
+    def solve_tril_verifier(self, *args, **kwargs):
+        return True, None
+
+    def solve_tril(self, *args, **kwargs):
+        from fla.ops.utils.backends.triton_ascend.solve_tril import solve_tril_npu
+        return solve_tril_npu(*args, **kwargs)
+
     def chunk_global_cumsum_verifier(self, *args, **kwargs):
         return True, None
 

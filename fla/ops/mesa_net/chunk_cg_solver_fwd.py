@@ -55,13 +55,13 @@ def chunk_fwd_mesa_cg_dim64_kernel(
     BK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_bh = tl.program_id(0), tl.program_id(1)
+    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
 
     if IS_VARLEN:
         i_tg = i_t
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
         NT = tl.cdiv(T, BT)
     else:
@@ -85,21 +85,25 @@ def chunk_fwd_mesa_cg_dim64_kernel(
     v += (bos * H + i_h) * K
     h_kv += (i_tg * H + i_h).to(tl.int64) * K * K
 
-    p_q = tl.make_block_ptr(q, (T, K), (H*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
-    p_k = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
-    p_h = tl.make_block_ptr(h, (K, K), (K, 1), (0, 0), (BK, BK), (1, 0))
+    o_k = tl.arange(0, BK)
+    m_k = o_k < K
+    m_tk = m_t[:, None] & m_k[None, :]
+    m_kk = m_k[:, None] & m_k[None, :]
+    p_q = q + o_t[:, None] * (H*K) + o_k[None, :]
+    p_k = k + o_t[:, None] * (H*K) + o_k[None, :]
+    p_h = h + o_k[:, None] * K + o_k[None, :]
 
-    b_h = tl.load(p_h, boundary_check=(0, 1))
-    b_k = tl.load(p_k, boundary_check=(0, 1))
-    b_q = tl.load(p_q, boundary_check=(0, 1)).to(tl.float32)
+    b_h = tl.load(p_h, mask=m_kk, other=0.0)
+    b_k = tl.load(p_k, mask=m_tk, other=0.0)
+    b_q = tl.load(p_q, mask=m_tk, other=0.0).to(tl.float32)
 
-    p_g = tl.make_block_ptr(g, (T,), (H,), (i_t * BT,), (BT,), (0,))
-    b_g = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
-    p_beta = tl.make_block_ptr(beta, (T,), (H,), (i_t * BT,), (BT,), (0,))
-    b_beta = tl.load(p_beta, boundary_check=(0,)).to(tl.float32)
-    p_lamb = tl.make_block_ptr(lamb, (K,), (1,), (0,), (BK,), (0,))
+    p_g = g + o_t * H
+    b_g = tl.load(p_g, mask=m_t, other=0.0).to(tl.float32)
+    p_beta = beta + o_t * H
+    b_beta = tl.load(p_beta, mask=m_t, other=0.0).to(tl.float32)
+    p_lamb = lamb + o_k
 
-    b_lamb = tl.load(p_lamb, boundary_check=(0,)).to(tl.float32)
+    b_lamb = tl.load(p_lamb, mask=m_k, other=0.0).to(tl.float32)
 
     b_m = exp2(b_g[:, None] - b_g[None, :]) * b_beta[None, :]
     b_m = tl.where((o_t[:, None] >= o_t[None, :]) & (m_t[:, None] & m_t[None, :]), b_m, 0)
@@ -122,16 +126,16 @@ def chunk_fwd_mesa_cg_dim64_kernel(
         b_p = b_r + (b_delta_new / (b_delta_old + 1e-5))[:, None] * b_p
         b_delta_old = b_delta_new
 
-    p_q_final = tl.make_block_ptr(q_final, (T, K), (H*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
-    tl.store(p_q_final, b_x.to(p_q_final.dtype.element_ty), boundary_check=(0, 1))
+    p_q_final = q_final + o_t[:, None] * (H*K) + o_k[None, :]
+    tl.store(p_q_final, b_x.to(p_q_final.dtype.element_ty), mask=m_tk)
 
-    p_h_kv = tl.make_block_ptr(h_kv, (K, K), (K, 1), (0, 0), (BK, BK), (1, 0))
-    b_h_kv = tl.load(p_h_kv, boundary_check=(0, 1))
-    p_v = tl.make_block_ptr(v, (T, K), (H*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
-    b_v = tl.load(p_v, boundary_check=(0, 1))
+    p_h_kv = h_kv + o_k[:, None] * K + o_k[None, :]
+    b_h_kv = tl.load(p_h_kv, mask=m_kk, other=0.0)
+    p_v = v + o_t[:, None] * (H*K) + o_k[None, :]
+    b_v = tl.load(p_v, mask=m_tk, other=0.0)
     b_o = chunk_update_once(b_x, b_k, b_v, b_m, b_g_exp_q, b_h_kv, None)
-    p_o = tl.make_block_ptr(o, (T, K), (H*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
-    tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
+    p_o = o + o_t[:, None] * (H*K) + o_k[None, :]
+    tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=m_tk)
 
 
 def chunk_mesa_cg_fwd(

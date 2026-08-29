@@ -56,46 +56,54 @@ def chunk_dplr_bwd_kernel_dhu(
     USE_INITIAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
         NT = tl.cdiv(T, BT)
-        boh = tl.load(chunk_offsets + i_n).to(tl.int32)
+        boh = tl.load(chunk_offsets + i_n).to(tl.int64)
     else:
         bos, eos = i_n * T, i_n * T + T
         NT = tl.cdiv(T, BT)
         boh = i_n * NT
 
+    o_k = i_k * BK + tl.arange(0, BK)
+    o_v = i_v * BV + tl.arange(0, BV)
+    m_h = (o_k[:, None] < K) & (o_v[None, :] < V)
     # [BK, BV]
     b_dh = tl.zeros([BK, BV], dtype=tl.float32)
     if USE_FINAL_STATE_GRADIENT:
-        p_dht = tl.make_block_ptr(dht + i_nh * K*V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
-        b_dh += tl.load(p_dht, boundary_check=(0, 1))
+        p_dht = dht + i_nh * K*V + o_k[:, None] * V + o_v[None, :]
+        b_dh += tl.load(p_dht, mask=m_h, other=0.0)
 
     mask_k = tl.arange(0, BK) < K
     for i_t in range(NT - 1, -1, -1):
-        p_dh = tl.make_block_ptr(dh + ((boh+i_t) * H + i_h) * K*V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
-        tl.store(p_dh, b_dh.to(p_dh.dtype.element_ty), boundary_check=(0, 1))
+        p_dh = dh + ((boh+i_t) * H + i_h) * K*V + o_k[:, None] * V + o_v[None, :]
+        tl.store(p_dh, b_dh.to(p_dh.dtype.element_ty), mask=m_h)
         b_dh_tmp = tl.zeros([BK, BV], dtype=tl.float32)
         for i_c in range(tl.cdiv(BT, BC) - 1, -1, -1):
-            p_qg = tl.make_block_ptr(qg+(bos*H+i_h)*K, (K, T), (1, H*K), (i_k * BK, i_t * BT + i_c * BC), (BK, BC), (0, 1))
-            p_bg = tl.make_block_ptr(bg+(bos*H+i_h)*K, (T, K), (H*K, 1), (i_t * BT + i_c * BC, i_k * BK), (BC, BK), (1, 0))
-            p_w = tl.make_block_ptr(w+(bos*H+i_h)*K, (K, T), (1, H*K), (i_k * BK, i_t * BT + i_c * BC), (BK, BC), (0, 1))
-            p_dv = tl.make_block_ptr(dv+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t*BT + i_c * BC, i_v * BV), (BC, BV), (1, 0))
-            p_do = tl.make_block_ptr(do+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t*BT + i_c * BC, i_v * BV), (BC, BV), (1, 0))
-            p_dv2 = tl.make_block_ptr(dv2+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t*BT + i_c * BC, i_v * BV), (BC, BV), (1, 0))
+            o_c = i_t.to(tl.int64) * BT + i_c * BC + tl.arange(0, BC)
+            m_c = o_c < T
+            m_kc = (o_k[:, None] < K) & m_c[None, :]
+            m_bgc = m_c[:, None] & (o_k[None, :] < K)
+            m_vc = m_c[:, None] & (o_v[None, :] < V)
+            p_qg = qg+(bos*H+i_h)*K + o_k[:, None] + o_c[None, :] * (H*K)
+            p_bg = bg+(bos*H+i_h)*K + o_c[:, None] * (H*K) + o_k[None, :]
+            p_w = w+(bos*H+i_h)*K + o_k[:, None] + o_c[None, :] * (H*K)
+            p_dv = dv+(bos*H+i_h)*V + o_c[:, None] * (H*V) + o_v[None, :]
+            p_do = do+(bos*H+i_h)*V + o_c[:, None] * (H*V) + o_v[None, :]
+            p_dv2 = dv2+(bos*H+i_h)*V + o_c[:, None] * (H*V) + o_v[None, :]
             # [BK, BT]
-            b_qg = tl.load(p_qg, boundary_check=(0, 1))
+            b_qg = tl.load(p_qg, mask=m_kc, other=0.0)
             # [BT, BK]
-            b_bg = tl.load(p_bg, boundary_check=(0, 1))
-            b_w = tl.load(p_w, boundary_check=(0, 1))
+            b_bg = tl.load(p_bg, mask=m_bgc, other=0.0)
+            b_w = tl.load(p_w, mask=m_kc, other=0.0)
             # [BT, V]
-            b_do = tl.load(p_do, boundary_check=(0, 1))
-            b_dv = tl.load(p_dv, boundary_check=(0, 1))
+            b_do = tl.load(p_do, mask=m_vc, other=0.0)
+            b_dv = tl.load(p_dv, mask=m_vc, other=0.0)
             b_dv2 = b_dv + tl.dot(b_bg, b_dh.to(b_bg.dtype))
-            tl.store(p_dv2, b_dv2.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
+            tl.store(p_dv2, b_dv2.to(p_dv.dtype.element_ty), mask=m_vc)
             # [BK, BV]
             b_dh_tmp += tl.dot(b_qg, b_do.to(b_qg.dtype))
             b_dh_tmp += tl.dot(b_w, b_dv2.to(b_qg.dtype))
@@ -105,8 +113,8 @@ def chunk_dplr_bwd_kernel_dhu(
         b_dh += b_dh_tmp
 
     if USE_INITIAL_STATE:
-        p_dh0 = tl.make_block_ptr(dh0 + i_nh * K*V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
-        tl.store(p_dh0, b_dh.to(p_dh0.dtype.element_ty), boundary_check=(0, 1))
+        p_dh0 = dh0 + i_nh * K*V + o_k[:, None] * V + o_v[None, :]
+        tl.store(p_dh0, b_dh.to(p_dh0.dtype.element_ty), mask=m_h)
 
 
 def chunk_dplr_bwd_dhu(

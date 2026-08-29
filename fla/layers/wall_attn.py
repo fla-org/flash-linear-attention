@@ -163,6 +163,9 @@ class WallAttention(nn.Module):
 
         if past_key_values is not None:
             assert cu_seqlens is None, "cu_seqlens should not be provided when past_key_values is not None"
+            cache_has_content = past_key_values.get_seq_length(self.layer_idx) > 0
+            assert attention_mask is None or not cache_has_content, \
+                "attention_mask should not be provided when past_key_values has content"
             if self.window_size is None:
                 # Non-windowed: cache the *pre-rescaled* decode state and extend it one
                 # column per step, so prep is O(q_len) instead of rebuilding k_tilde/P
@@ -178,16 +181,17 @@ class WallAttention(nn.Module):
                     offset=q_len,
                     cache_kwargs=dict(window_size=self.window_size),
                 )['attn_state']
-                if self.use_scalar_gate:
-                    k, v, g, gs = state
-                else:
-                    k, v, g = state
+                if cache_has_content:
+                    if self.use_scalar_gate:
+                        k, v, g, gs = state
+                    else:
+                        k, v, g = state
                 kv_len = k.shape[1]
                 if q_len < kv_len:
                     o = self._decode_rebuild(q, k, v, g, gs)
                 else:
                     o = parallel_wall_attn(q, k, v, g, g_scalar=gs, window_size=self.window_size)
-        elif attention_mask is not None:
+        elif cu_seqlens is None and attention_mask is not None:
             states = (k, v, g, gs) if self.use_scalar_gate else (k, v, g)
             q, states, indices_q, cu_seqlens, max_seq_lens = unpad_input(q, states, attention_mask, q_len, keepdim=True)
             if self.use_scalar_gate:

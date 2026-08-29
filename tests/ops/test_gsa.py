@@ -523,3 +523,68 @@ def test_inference(
         tri[:, i] = o.squeeze(1)
         assert_close(f'o{i}', ref[:, i], tri[:, i], 0.005)
         h0 = ht
+
+
+@pytest.mark.parametrize(
+    ('has_initial_state', 'output_final_state'),
+    [
+        (False, False),
+        (False, True),
+        (True, False),
+        (True, True),
+    ],
+)
+@pytest.mark.skipif(
+    device_platform == 'intel',
+    reason='Intel Triton Failure',
+)
+def test_inference_state_contract(has_initial_state: bool, output_final_state: bool):
+    torch.manual_seed(42)
+    B, T, H, D, M = 2, 1, 2, 16, 8
+    q = torch.randn(B, T, H, D, device=device)
+    k = torch.randn_like(q)
+    v = torch.randn_like(q)
+    s = torch.randn(B, T, H, M, device=device)
+    g = F.logsigmoid(torch.randn_like(s))
+    initial_state = None
+    initial_state_before = None
+    if has_initial_state:
+        initial_state = (
+            torch.randn(B, H, D, M, device=device),
+            torch.randn(B, H, M, D, device=device),
+        )
+        initial_state_before = tuple(state.clone() for state in initial_state)
+
+    ref, ref_state = naive_recurrent_gsa(
+        q=q,
+        k=k,
+        v=v,
+        s=s,
+        g=g,
+        initial_state=initial_state,
+        output_final_state=output_final_state,
+    )
+    with torch.no_grad():
+        tri, tri_state = fused_recurrent_gsa(
+            q=q,
+            k=k,
+            v=v,
+            s=s,
+            g=g,
+            initial_state=initial_state,
+            output_final_state=output_final_state,
+        )
+
+    assert_close('o', ref, tri, 0.005)
+    if output_final_state:
+        assert_close('hkt', ref_state[0], tri_state[0], 0.005)
+        assert_close('hvt', ref_state[1], tri_state[1], 0.005)
+    else:
+        assert tri_state == [None, None]
+
+    if has_initial_state:
+        torch.testing.assert_close(initial_state[0], initial_state_before[0], rtol=0, atol=0)
+        torch.testing.assert_close(initial_state[1], initial_state_before[1], rtol=0, atol=0)
+        if output_final_state:
+            assert tri_state[0].data_ptr() != initial_state[0].data_ptr()
+            assert tri_state[1].data_ptr() != initial_state[1].data_ptr()

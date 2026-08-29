@@ -303,15 +303,15 @@ def fused_grpo_loss(logits, ref_logp, input_ids, advantages,
     compute grpo loss, save memory(no addition usage) and fast speed(6X for A800)
 
     Args:
-        logtits: Tensor, [B, L+1, vocab_size], the origin output of model, it's not logits[:, :-1]
-        ref_logp: Tensor, [B, L], the origin output of model, it's not ref_logits[:, :-1]
+        logits: Tensor, [B, L+1, vocab_size], the original output of model, it's not logits[:, :-1]
+        ref_logp: Tensor, [B, L], the original output of model, it's not ref_logits[:, :-1]
         input_ids: Tensor, [B, K+L], it's prompt_completion_id, it contains the prompt ids and output ids
         advantages: Tensor, [B], the advantages of each prompt
         beta: float, the weight of kl loss
         completion_mask: Tensor, loss mask
         save_kl: bool, if true will save kl
 
-    Retutn:
+    Returns:
         loss: Tensor, [B, L], the loss of grpo, it contains the advantage part and kl part
 
     NOTE: logits(ref_logits) is computed by these steps
@@ -416,6 +416,6 @@ def grpo_loss_with_old_logps(
                    importance_weights_clipped) - beta * per_token_kl) * completion_mask
 
     # Calculate the final loss by summing the token losses and normalizing by the number of valid tokens
-    loss = -token_loss.sum() / completion_mask.sum()
+    loss = token_loss.sum() / completion_mask.sum()
 
     return loss

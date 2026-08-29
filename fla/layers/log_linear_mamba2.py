@@ -150,6 +150,7 @@ def hmamba_split_conv1d_scan_combined(
     norm_before_gate: bool = True,
     conv1d_fn=None,
     conv_backend: str = "cuda",
+    attention_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
     Argument:
@@ -167,6 +168,7 @@ def hmamba_split_conv1d_scan_combined(
         outproj_bias: (out_dim,)
         headdim: if D is 1D, headdim must be passed in
         norm_before_gate: if True, we do RMSNorm(x) * F.silu(z). If False, we do RMSNorm(x * F.silu(z))
+        attention_mask: padding mask with shape (batch, seqlen)
     Return:
         out: (batch, seqlen, dim)
     """
@@ -219,17 +221,28 @@ def hmamba_split_conv1d_scan_combined(
     zxBCdtl_splits = [dim, dim + 2 * ngroups * dstate, nheads, nheads * dlambda]
     xBC_splits = [dim, ngroups * dstate, ngroups * dstate]
     z, xBC, dt, dl = torch.split(zxbcdtdl, zxBCdtl_splits, dim=-1)
+    xBC = apply_mask_to_padding_states(xBC, attention_mask)
     _conv_fn = conv1d_fn if conv1d_fn is not None else causal_conv1d_fn
-    _conv_out = _conv_fn(
-        rearrange(xBC, "b s d -> b d s"),
-        conv1d_weight,
-        bias=conv1d_bias,
-        activation=activation,
-        seq_idx=seq_idx,
-    )
     if conv_backend == 'triton':
-        _conv_out = _conv_out[0]
-    xBC = rearrange(_conv_out, "b d s -> b s d")
+        xBC, _ = _conv_fn(
+            x=xBC,
+            weight=conv1d_weight,
+            bias=conv1d_bias,
+            activation=activation,
+            seq_idx=seq_idx,
+        )
+    else:
+        xBC = rearrange(
+            _conv_fn(
+                x=rearrange(xBC, "b s d -> b d s"),
+                weight=conv1d_weight,
+                bias=conv1d_bias,
+                activation=activation,
+                seq_idx=seq_idx,
+            ),
+            "b d s -> b s d",
+        )
+    xBC = apply_mask_to_padding_states(xBC, attention_mask)
     x, B, C = torch.split(xBC, xBC_splits, dim=-1)
     x = rearrange(x, "b l (h p) -> b l h p", h=nheads, p=headdim)
     B = rearrange(B, "b l (g n) -> b l g n", g=ngroups, n=dstate)
@@ -355,7 +368,7 @@ class LogLinearMamba2(nn.Module):
             projection_size,
             bias=use_bias,
         )
-        # selective projection used to make dt, B and C input dependant
+        # selective projection used to make dt, B and C input-dependent
 
         # time step projection (discretization)
         # instantiate once and copy inv_dt in init_weights of PretrainedModel
@@ -486,13 +499,23 @@ class LogLinearMamba2(nn.Module):
 
             # 2. Convolution sequence transformation
             conv_state = last_state['conv_state']
-            xBC = self.causal_conv1d_update(
-                xBC,
-                conv_state,
-                rearrange(self.conv1d.weight, "d 1 w -> d w"),
-                self.conv1d.bias,
-                self.activation,
-            )
+            conv_weight = rearrange(self.conv1d.weight, "d 1 w -> d w")
+            if self.backend == 'triton':
+                xBC, conv_state = self.causal_conv1d_update(
+                    x=xBC,
+                    cache=conv_state,
+                    weight=conv_weight,
+                    bias=self.conv1d.bias,
+                    activation=self.activation,
+                )
+            else:
+                xBC = self.causal_conv1d_update(
+                    xBC,
+                    conv_state,
+                    conv_weight,
+                    self.conv1d.bias,
+                    self.activation,
+                )
 
             x, B, C = torch.split(
                 xBC,
@@ -542,6 +565,7 @@ class LogLinearMamba2(nn.Module):
                 C=C,
                 dl=dl_reshaped,
                 L=self.L,
+                chunk_size=self.chunk_size,
                 D=self._get_D(),
                 z=None,
                 dt_bias=self.dt_bias,
@@ -602,6 +626,7 @@ class LogLinearMamba2(nn.Module):
                     ngroups=self.n_groups,
                     norm_before_gate=self.norm_before_gate,
                     return_final_states=False,
+                    attention_mask=attention_mask,
                     **dt_limit_kwargs,
                 )
                 return out, None, None
@@ -629,16 +654,20 @@ class LogLinearMamba2(nn.Module):
                         (self.conv_kernel_size - xBC_t.shape[-1], 0),
                     )
 
-                _conv1d_output = self.causal_conv1d_fn(
-                    x=xBC.transpose(1, 2),
-                    weight=rearrange(self.conv1d.weight, "d 1 w -> d w"),
-                    bias=self.conv1d.bias,
-                    activation=self.activation,
-                )
                 if self.backend == 'cuda':
-                    xBC = _conv1d_output.transpose(1, 2)
+                    xBC = self.causal_conv1d_fn(
+                        x=masked_xBC.transpose(1, 2),
+                        weight=rearrange(self.conv1d.weight, "d 1 w -> d w"),
+                        bias=self.conv1d.bias,
+                        activation=self.activation,
+                    ).transpose(1, 2)
                 elif self.backend == 'triton':
-                    xBC = _conv1d_output[0].transpose(1, 2).contiguous()
+                    xBC, _ = self.causal_conv1d_fn(
+                        x=masked_xBC,
+                        weight=rearrange(self.conv1d.weight, "d 1 w -> d w"),
+                        bias=self.conv1d.bias,
+                        activation=self.activation,
+                    )
                 else:
                     raise ValueError(f"Unsupported backend: {self.backend}")
 

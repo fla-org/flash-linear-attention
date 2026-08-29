@@ -103,7 +103,7 @@ class BitAttention(nn.Module):
             max_seqlen = q.shape[1] + seqlen_offset
 
             if attention_mask is not None:
-                # to deliminate the offsets of padding tokens
+                # to eliminate the offsets of padding tokens
                 seqlen_offset = seqlen_offset + prepare_lens_from_mask(attention_mask) - attention_mask.shape[-1]
                 max_seqlen = q.shape[1] + max(seqlen_offset)
 
@@ -113,6 +113,8 @@ class BitAttention(nn.Module):
 
         if past_key_values is not None:
             cache_has_content = past_key_values.get_seq_length(self.layer_idx) > 0
+            assert cu_seqlens is None or not cache_has_content, \
+                "cu_seqlens should not be provided when past_key_values has content"
             k_cached, v_cached = past_key_values.update(
                 attn_state=(k.flatten(-2, -1), v.flatten(-2, -1)),
                 layer_idx=self.layer_idx,
@@ -128,7 +130,7 @@ class BitAttention(nn.Module):
             raise ImportError("Please install Flash Attention via `pip install flash-attn --no-build-isolation` first")
 
         # Contains at least one padding token in the sequence
-        if attention_mask is not None:
+        if cu_seqlens is None and attention_mask is not None:
             q, (k, v), indices_q, cu_seqlens, max_seq_lens = unpad_input(q, (k, v), attention_mask, q_len)
             cu_seqlens_q, cu_seqlens_k = cu_seqlens
             max_seqlen_q, max_seqlen_k = max_seq_lens

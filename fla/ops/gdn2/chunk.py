@@ -224,46 +224,54 @@ def chunk_gdn2(
     Setting ``b = w = beta`` (scalar) recovers KDA.
 
     Args:
-        q: queries of shape ``[B, T, H, K]``.
-        k: keys of shape ``[B, T, H, K]``.
-        v: values of shape ``[B, T, H, V]``.
-        g: (forget) log-decay of shape ``[B, T, H, K]``. With
-            ``use_gate_in_kernel=True`` this is the raw pre-activation and the
-            kernel computes ``-exp(A_log) * softplus(g + dt_bias)`` (or the
-            bounded variant if ``lower_bound`` is set).
-        b: channel-wise ERASE gate of shape ``[B, T, H, K]``. Replaces KDA's
-            scalar beta. Typical range: ``[0, 2]``.
-        w: channel-wise WRITE gate of shape ``[B, T, H, V]``. New for GDN-2.
-            Typical range: ``[0, 1]``.
-        scale: attention scale. Defaults to ``1 / sqrt(K)``.
-        initial_state: optional ``[N, H, K, V]`` initial state in float32 (or
-            ``[N, H, V, K]`` if ``state_v_first=True``).
-        output_final_state: whether to output the final recurrent state.
-        use_qk_l2norm_in_kernel: L2-normalize q and k inside the kernel.
-        use_gate_in_kernel: compute the gate activation inside the kernel from
-            raw ``g`` and (required) ``A_log`` (plus optional ``dt_bias``,
-            ``lower_bound``).
-        cu_seqlens: ``[N+1]`` packed-sequence offsets. Requires batch size 1.
-        cu_seqlens_cpu: optional CPU mirror of ``cu_seqlens``, forwarded to the
-            state-recurrence kernel.
-        safe_gate: use the safe-gate intra kernel variant (M=16 TensorCore
-            path; requires gate values in ``[-5, 0)`` if combined with
-            ``use_gate_in_kernel=True``).
-        lower_bound: when ``safe_gate=True`` and ``use_gate_in_kernel=True``,
-            use the bounded gate activation
-            ``lower_bound * sigmoid(exp(A_log) * g)``. Must lie in ``[-5, 0)``.
-        disable_recompute: retain forward intermediates for a faster backward
-            at the cost of memory. Default: ``False``.
-        return_intermediate_states: when ``True``, also returns the per-chunk
-            pre-states ``h`` (shape ``[B, NT, H, K, V]``). Must be used inside
-            ``torch.inference_mode()``.
-        state_v_first: store the recurrent state in ``[V, K]`` layout instead
-            of the default ``[K, V]``.
+        q (torch.Tensor):
+            queries of shape ``[B, T, H, K]``.
+        k (torch.Tensor):
+            keys of shape ``[B, T, H, K]``.
+        v (torch.Tensor):
+            values of shape ``[B, T, H, V]``.
+        g (torch.Tensor):
+            (forget) log-decay of shape ``[B, T, H, K]``.
+            With ``use_gate_in_kernel=True`` this is the raw pre-activation,
+            and the kernel computes ``-exp(A_log) * softplus(g + dt_bias)`` (or the bounded variant if ``lower_bound`` is set).
+        b (torch.Tensor):
+            channel-wise ERASE gate of shape ``[B, T, H, K]``. Replaces KDA's scalar beta. Typical range: ``[0, 2]``.
+        w (torch.Tensor):
+            channel-wise WRITE gate of shape ``[B, T, H, V]``. New for GDN-2. Typical range: ``[0, 1]``.
+        scale (Optional[float]):
+            attention scale. Default: ``1 / sqrt(K)``.
+        initial_state (Optional[torch.Tensor]):
+            initial state in float32, of shape ``[N, H, K, V]`` (or ``[N, H, V, K]`` if ``state_v_first=True``).
+        output_final_state (Optional[bool]):
+            whether to output the final recurrent state. Default: `False`.
+        use_qk_l2norm_in_kernel (Optional[bool]):
+            L2-normalize q and k inside the kernel. Default: `False`.
+        use_gate_in_kernel (Optional[bool]):
+            compute the gate activation inside the kernel from raw ``g`` and ``A_log``
+            (plus optional ``dt_bias``, ``lower_bound``).
+            When ``lower_bound`` is set, ``A_log`` may be ``None``,
+            in which case the gate is ``lower_bound * sigmoid(g + dt_bias)``. Default: `False`.
+        cu_seqlens (Optional[torch.LongTensor]):
+            ``[N+1]`` packed-sequence offsets. Requires batch size 1.
+        cu_seqlens_cpu (Optional[torch.LongTensor]):
+            CPU mirror of ``cu_seqlens``, forwarded to the state-recurrence kernel.
+        safe_gate (Optional[bool]):
+            use the safe-gate intra kernel variant (M=16 TensorCore path;
+            requires gate values in ``[-5, 0)`` if combined with ``use_gate_in_kernel=True``). Default: `False`.
+        lower_bound (Optional[float]):
+            when ``safe_gate=True`` and ``use_gate_in_kernel=True``,
+            use the bounded gate activation ``lower_bound * sigmoid(exp(A_log) * g)``. Must lie in ``[-5, 0)``.
+        disable_recompute (Optional[bool]):
+            retain forward intermediates for a faster backward at the cost of memory. Default: `False`.
+        return_intermediate_states (Optional[bool]):
+            when ``True``, also returns the per-chunk pre-states ``h`` (shape ``[B, NT, H, K, V]``).
+            Must be used inside ``torch.inference_mode()``. Default: `False`.
+        state_v_first (Optional[bool]):
+            store the recurrent state in ``[V, K]`` layout instead of the default ``[K, V]``. Default: `False`.
 
     Returns:
         - Normal mode: ``(o, final_state)``.
-        - Intermediate mode (``return_intermediate_states=True``):
-          ``(o, final_state, h)``.
+        - Intermediate mode (``return_intermediate_states=True``): ``(o, final_state, h)``.
 
     Examples::
 
@@ -305,8 +313,9 @@ def chunk_gdn2(
 
     A_log, dt_bias = None, None
     if use_gate_in_kernel:
-        assert "A_log" in kwargs, "A_log must be provided when use_gate_in_kernel=True."
-        A_log, dt_bias = kwargs["A_log"], kwargs.get("dt_bias")
+        A_log, dt_bias = kwargs.get("A_log"), kwargs.get("dt_bias")
+        if A_log is None and lower_bound is None:
+            raise ValueError("`A_log` must be provided when `use_gate_in_kernel=True` and `lower_bound` is not set.")
 
     chunk_size = kwargs.pop("chunk_size", 64)
     if chunk_size != 64:

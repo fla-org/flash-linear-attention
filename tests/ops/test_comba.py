@@ -10,6 +10,7 @@ import os
 import pytest
 import torch
 import torch.nn.functional as F
+from einops import repeat
 
 from fla.ops.comba import chunk_comba, fused_recurrent_comba
 from fla.ops.comba.naive import naive_chunk_comba
@@ -58,18 +59,20 @@ def test_cumsum_local_scalar_fwd(
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'D', 'scale', 'gate_logit_normalizer', 'dtype'),
+    ('B', 'T', 'H', 'HV', 'D', 'scale', 'gate_logit_normalizer', 'dtype'),
     [
-        pytest.param(*test, id="B{}-T{}-H{}-D{}-scale{}-gate_logit_normalizer{}-{}".format(*test))
+        pytest.param(*test, id="B{}-T{}-H{}-HV{}-D{}-scale{}-gate_logit_normalizer{}-{}".format(*test))
         for test in [
-            (1, 63, 1, 64, 1, 1, torch.float),
-            (2, 1024, 4, 60, 1, 1, torch.float),
-            (2, 1024, 8, 128, 1, 0.1, torch.float),
-            (2, 1024, 8, 128, 0.1, 1, torch.float),
-            (2, 1024, 8, 128, 1, 10, torch.float),
-            (4, 2048, 8, 64, 0.1, 1, torch.float),
-            (2, 1024, 8, 128, 1, 0.1, torch.float16),
-            (2, 1024, 8, 128, 1, 10, torch.float16),
+            (1, 63, 1, 1, 64, 1, 1, torch.float),
+            (2, 1024, 4, 4, 60, 1, 1, torch.float),
+            (2, 1024, 8, 8, 128, 1, 0.1, torch.float),
+            (2, 1024, 8, 8, 128, 0.1, 1, torch.float),
+            (2, 1024, 8, 8, 128, 1, 10, torch.float),
+            (4, 2048, 8, 8, 64, 0.1, 1, torch.float),
+            (2, 1024, 8, 8, 128, 1, 0.1, torch.float16),
+            (2, 1024, 8, 8, 128, 1, 10, torch.float16),
+            (2, 1024, 2, 8, 128, 1, 0.1, torch.float),
+            (2, 1024, 4, 8, 128, 1, 10, torch.float16),
         ]
     ],
 )
@@ -77,6 +80,7 @@ def test_fused_recurrent(
     B: int,
     T: int,
     H: int,
+    HV: int,
     D: int,
     scale: float,
     gate_logit_normalizer: float,
@@ -85,18 +89,18 @@ def test_fused_recurrent(
     torch.manual_seed(42)
     q = F.normalize(torch.randn(B, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
     k = F.normalize(torch.randn(B, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
-    v = torch.randn(B, T, H, D, dtype=dtype)
+    v = torch.randn(B, T, HV, D, dtype=dtype)
     p = F.normalize(torch.randn(B, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
-    beta = torch.rand(B, T, H, dtype=dtype).sigmoid()
-    g = F.logsigmoid(torch.rand(B, T, H, dtype=torch.float32))
+    beta = torch.rand(B, T, HV, dtype=dtype).sigmoid()
+    g = F.logsigmoid(torch.rand(B, T, HV, dtype=torch.float32))
     g = g / gate_logit_normalizer
-    h0 = torch.randn(B, H, D, D, dtype=torch.float32)
+    h0 = torch.randn(B, HV, D, D, dtype=torch.float32)
     q, k, v, p, beta, g, h0 = map(lambda x: x.to(device).requires_grad_(), (q, k, v, p, beta, g, h0))
     ref, ref_ht = naive_chunk_comba(
-        q=q.clone(),
-        k=k.clone(),
+        q=repeat(q.clone(), 'b t h d -> b t (h g) d', g=HV // H),
+        k=repeat(k.clone(), 'b t h d -> b t (h g) d', g=HV // H),
         v=v.clone(),
-        p=p.clone(),
+        p=repeat(p.clone(), 'b t h d -> b t (h g) d', g=HV // H),
         beta=beta.clone(),
         g=g.clone(),
         scale=scale,
@@ -119,21 +123,24 @@ def test_fused_recurrent(
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'D', 'scale', 'gate_logit_normalizer', 'mask_p', 'use_qk_l2norm_in_kernel', 'dtype'),
+    ('B', 'T', 'H', 'HV', 'D', 'scale', 'gate_logit_normalizer', 'mask_p', 'use_qk_l2norm_in_kernel', 'dtype'),
     [
         pytest.param(
             *test,
-            id="B{}-T{}-H{}-D{}-scale{}-gate_logit_normalizer{}-mask_p{}-use_qk_l2norm_in_kernel{}-{}".format(*test),
+            id="B{}-T{}-H{}-HV{}-D{}-scale{}-gate_logit_normalizer{}-mask_p{}-use_qk_l2norm_in_kernel{}-{}".format(*test),
         )
         for test in [
-            (1, 63, 1, 64, 1, 1, 0, False, torch.float16),
-            (2, 1000, 3, 60, 1, 1, 0, False, torch.float16),
-            (2, 1024, 3, 64, 0.1, 1, 0.5, False, torch.float16),
-            (2, 1024, 4, 100, 1, 0.1, 0, False, torch.float16),
-            (2, 1024, 4, 128, 0.1, 1, 0, True, torch.float16),
-            (2, 1024, 4, 128, 0.1, 1, 0.5, False, torch.float16),
-            (2, 1024, 4, 128, 0.1, 10, 0, False, torch.float16),
-            (4, 2048, 8, 64, 0.1, 1, 0, True, torch.float16),
+            (1, 63, 1, 1, 64, 1, 1, 0, False, torch.float16),
+            (2, 1000, 3, 3, 60, 1, 1, 0, False, torch.float16),
+            (2, 1024, 3, 3, 64, 0.1, 1, 0.5, False, torch.float16),
+            (2, 1024, 4, 4, 100, 1, 0.1, 0, False, torch.float16),
+            (2, 1024, 4, 4, 128, 0.1, 1, 0, True, torch.float16),
+            (2, 1024, 4, 4, 128, 0.1, 1, 0.5, False, torch.float16),
+            (2, 1024, 4, 4, 128, 0.1, 10, 0, False, torch.float16),
+            (4, 2048, 8, 8, 64, 0.1, 1, 0, True, torch.float16),
+            (2, 1000, 2, 8, 64, 1, 1, 0, False, torch.float16),
+            (2, 1024, 2, 8, 128, 0.1, 1, 0.5, False, torch.float16),
+            (2, 1024, 4, 8, 128, 0.1, 1, 0, True, torch.float16),
         ]
     ],
 )
@@ -141,6 +148,7 @@ def test_chunk(
     B: int,
     T: int,
     H: int,
+    HV: int,
     D: int,
     scale: float,
     gate_logit_normalizer: float,
@@ -150,16 +158,18 @@ def test_chunk(
 ):
     if IS_INTEL_ALCHEMIST and D > 128:
         pytest.skip(reason='chunk_gated_delta_rule is not supported on alchemist for D>128')
+    assert HV % H == 0
+    G = HV // H
 
     q = torch.randn(B, T, H, D, dtype=dtype)
     k = torch.randn(B, T, H, D, dtype=dtype)
     p = torch.randn(B, T, H, D, dtype=dtype)
-    v = torch.randn(B, T, H, D, dtype=dtype)
-    beta = torch.rand(B, T, H, dtype=dtype).sigmoid()
-    g = F.logsigmoid(torch.rand(B, T, H, dtype=torch.float32))
+    v = torch.randn(B, T, HV, D, dtype=dtype)
+    beta = torch.rand(B, T, HV, dtype=dtype).sigmoid()
+    g = F.logsigmoid(torch.rand(B, T, HV, dtype=torch.float32))
     g = g / gate_logit_normalizer
     g = g * (torch.rand_like(g) > mask_p)
-    h0 = torch.zeros(B, H, D, D, dtype=torch.float32)
+    h0 = torch.zeros(B, HV, D, D, dtype=torch.float32)
     q, k, v, p, beta, g, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, p, beta, g, h0))
 
     tri, tri_ht = chunk_comba(
@@ -181,9 +191,9 @@ def test_chunk(
     q.grad = k.grad = v.grad = p.grad = beta.grad = g.grad = h0.grad = None
 
     ref, ref_ht = naive_chunk_comba(
-        q=F.normalize(q.clone(), p=2, dim=-1),
-        k=F.normalize(k.clone(), p=2, dim=-1),
-        p=F.normalize(p.clone(), p=2, dim=-1),
+        q=F.normalize(repeat(q.clone(), 'b t h d -> b t (h g) d', g=G), p=2, dim=-1),
+        k=F.normalize(repeat(k.clone(), 'b t h d -> b t (h g) d', g=G), p=2, dim=-1),
+        p=F.normalize(repeat(p.clone(), 'b t h d -> b t (h g) d', g=G), p=2, dim=-1),
         v=v.clone(),
         g=g.clone(),
         beta=beta.clone(),
@@ -207,14 +217,15 @@ def test_chunk(
 
 
 @pytest.mark.parametrize(
-    ('H', 'D', 'mask_p', 'cu_seqlens', 'dtype'),
+    ('H', 'HV', 'D', 'mask_p', 'cu_seqlens', 'dtype'),
     [
-        pytest.param(*test, id="H{}-D{}-mask_p{}-cu_seqlens{}-{}".format(*test))
+        pytest.param(*test, id="H{}-HV{}-D{}-mask_p{}-cu_seqlens{}-{}".format(*test))
         for test in [
-            (4, 64, 0, [0, 15], torch.float16),
-            (4, 64, 0, [0, 256, 500, 1000], torch.float16),
-            (4, 64, 0.5, [0, 256, 500, 1000], torch.float16),
-            (4, 100, 0, [0, 15, 100, 300, 1200, 2000], torch.float16),
+            (4, 4, 64, 0, [0, 15], torch.float16),
+            (4, 4, 64, 0, [0, 256, 500, 1000], torch.float16),
+            (4, 4, 64, 0.5, [0, 256, 500, 1000], torch.float16),
+            (4, 4, 100, 0, [0, 15, 100, 300, 1200, 2000], torch.float16),
+            (2, 8, 64, 0, [0, 256, 500, 1000], torch.float16),
         ]
     ],
 )
@@ -224,6 +235,7 @@ def test_chunk(
 )
 def test_chunk_varlen(
     H: int,
+    HV: int,
     D: int,
     mask_p: float,
     cu_seqlens: list[int],
@@ -240,12 +252,12 @@ def test_chunk_varlen(
 
     q = torch.randn((1, T, H, D), dtype=dtype)
     k = F.normalize(torch.randn(1, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
-    v = torch.randn((1, T, H, D), dtype=dtype)
+    v = torch.randn((1, T, HV, D), dtype=dtype)
     p = F.normalize(torch.randn(1, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
-    g = F.logsigmoid(torch.rand(1, T, H, dtype=dtype))
+    g = F.logsigmoid(torch.rand(1, T, HV, dtype=dtype))
     g = g * (torch.rand_like(g) > mask_p)
-    beta = torch.rand(1, T, H, dtype=dtype).sigmoid()
-    h0 = torch.randn((N, H, D, D), dtype=dtype)
+    beta = torch.rand(1, T, HV, dtype=dtype).sigmoid()
+    h0 = torch.randn((N, HV, D, D), dtype=dtype)
 
     q, k, v, p, beta, g, h0 = map(lambda x: x.to(device).requires_grad_(), (q, k, v, p, beta, g, h0))
     do = torch.randn_like(v)
@@ -270,10 +282,10 @@ def test_chunk_varlen(
     ref_ht = []
     for i in range(N):
         ref_i, ref_ht_i = naive_chunk_comba(
-            q=q[:, cu_seqlens[i]:cu_seqlens[i+1]],
-            k=k[:, cu_seqlens[i]:cu_seqlens[i+1]],
+            q=repeat(q[:, cu_seqlens[i]:cu_seqlens[i+1]], 'b t h d -> b t (h g) d', g=HV // H),
+            k=repeat(k[:, cu_seqlens[i]:cu_seqlens[i+1]], 'b t h d -> b t (h g) d', g=HV // H),
             v=v[:, cu_seqlens[i]:cu_seqlens[i+1]],
-            p=p[:, cu_seqlens[i]:cu_seqlens[i+1]],
+            p=repeat(p[:, cu_seqlens[i]:cu_seqlens[i+1]], 'b t h d -> b t (h g) d', g=HV // H),
             beta=beta[:, cu_seqlens[i]:cu_seqlens[i+1]],
             g=g[:, cu_seqlens[i]:cu_seqlens[i+1]],
             initial_state=h0[i],
