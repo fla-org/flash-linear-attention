@@ -30,7 +30,7 @@ def elu_p1(x):
 
 
 def sum_norm(x):
-    return (x / x.sum(-1, keepdim=True)).to(x)
+    return F.normalize(x, p=1, dim=-1, eps=1e-6).to(x)
 
 
 class DeltaNet(nn.Module):
