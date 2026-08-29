@@ -417,7 +417,7 @@ class ForgettingTransformerForCausalLM(ForgettingTransformerPreTrainedModel, FLA
 
         hidden_states = outputs[0]
 
-        logits = None if self.config.fuse_linear_cross_entropy else self.lm_head(
+        logits = None if self.config.fuse_linear_cross_entropy and labels is not None else self.lm_head(
             hidden_states
             if labels is not None or logits_to_keep is None
             else hidden_states[:, -logits_to_keep:]

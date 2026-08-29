@@ -129,6 +129,8 @@ class RWKV6Attention(nn.Module):
             )
 
         batch_size, seq_len, hidden_size = hidden_states.shape
+        if seq_len == 0:
+            return hidden_states, None, past_key_values
         # launching the triton kernel for just one token will actually be slower
         mode = 'fused_recurrent' if hidden_states.shape[1] <= 64 else self.mode
 

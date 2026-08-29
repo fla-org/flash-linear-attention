@@ -8,9 +8,29 @@
 import torch
 
 
-def naive_recurrent_gated_delta_product(q, k, v, g, beta, scale, cu_seqlens,
+def naive_recurrent_gated_delta_product(q, k, v, g, beta, scale, cu_seqlens=None,
                                         initial_state=None, output_final_state=False,
                                         num_householder=1):
+    if cu_seqlens is not None:
+        outputs, final_states = [], []
+        offsets = cu_seqlens.tolist()
+        for i, (bos, eos) in enumerate(zip(offsets[:-1], offsets[1:], strict=False)):
+            o_i, h_i = naive_recurrent_gated_delta_product(
+                q=q[:, bos:eos],
+                k=k[:, bos*num_householder:eos*num_householder],
+                v=v[:, bos*num_householder:eos*num_householder],
+                g=None if g is None else g[:, bos:eos],
+                beta=beta[:, bos*num_householder:eos*num_householder],
+                scale=scale,
+                initial_state=None if initial_state is None else initial_state[i:i + 1],
+                output_final_state=output_final_state,
+                num_householder=num_householder,
+            )
+            outputs.append(o_i)
+            final_states.append(h_i)
+
+        return torch.cat(outputs, dim=1), torch.cat(final_states)
+
     q_original_dtype = q.dtype
     B, T, H, K = q.shape
     V = v.shape[-1]
