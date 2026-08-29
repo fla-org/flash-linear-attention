@@ -241,7 +241,7 @@ class WallAttention(nn.Module):
 
         if prior is None:
             # Prefill: lean on the tested builder for the full pass.
-            k_tilde_new, _ = build_wall_kv_cache(k, p_new, C)
+            k_tilde_new, _ = build_wall_kv_cache(k, p_new, C, out_dtype=torch.float32)
         else:
             prior_len = prior[2].shape[1]
             k_tilde_new = self._rescale_new_keys(k, p_new, prior[2], prior_len, C, G)
@@ -294,14 +294,14 @@ class WallAttention(nn.Module):
         r_new = p_new.index_select(1, idx_new).float()
         r = torch.where(in_prior[None, :, None, None], r_prior, r_new)  # [B, q_len, HQ, K]
         k_q = k.repeat_interleave(G, dim=2).float()
-        return (k_q * torch.exp2(r - p_new)).to(k.dtype)
+        return k_q * torch.exp2(r - p_new)
 
     def _decode_rebuild(self, q, k, v, g, gs):
         """Windowed decode: rebuild the rescale from the cached raw suffix each step."""
         scale = self.head_dim ** -0.5
         # P carries the base-2 conversion (RCP_LN2), matching the training forward.
         p = chunk_global_cumsum(g, scale=RCP_LN2)
-        k_tilde, r_cache = build_wall_kv_cache(k, p, WALL_DECODE_CHUNK)
+        k_tilde, r_cache = build_wall_kv_cache(k, p, WALL_DECODE_CHUNK, out_dtype=torch.float32)
         p_curr = p[:, -q.shape[1]:].contiguous()
         gs_cumsum = chunk_global_cumsum(gs, scale=RCP_LN2) if gs is not None else None
         o, _ = parallel_wall_attn_decode(
