@@ -666,8 +666,7 @@ class MomAttention(nn.Module):
         o = self.o_proj(o)
 
         if origin_cu_seqlens is not None:
-            mask = attention_mask if attention_mask.shape[-1] == seq_len else attention_mask[:, -seq_len:]
-            indices, _ = get_unpad_indices_and_cu(mask)
+            indices, _ = get_unpad_indices_and_cu(attention_mask, seq_len)
             o = index_first_axis(rearrange(o, "b s ... -> (b s) ..."), indices).unsqueeze(0)
 
         return o, None, past_key_values, router_logits.view(-1, self.num_memories)

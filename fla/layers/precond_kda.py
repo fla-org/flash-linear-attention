@@ -259,8 +259,7 @@ class PrecondKDA(nn.Module):
 
         cu_seqlens = kwargs.get("cu_seqlens")
         if attention_mask is not None:
-            mask = attention_mask if attention_mask.shape[-1] == q_len else attention_mask[:, -q_len:]
-            indices, cu_seqlens = get_unpad_indices_and_cu(mask)
+            indices, cu_seqlens = get_unpad_indices_and_cu(attention_mask, q_len)
             hidden_states = index_first_axis(rearrange(hidden_states, "b s ... -> (b s) ..."), indices).unsqueeze(0)
 
         if self.use_short_conv:

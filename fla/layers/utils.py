@@ -80,14 +80,32 @@ index_put_first_axis = IndexPutFirstAxis.apply
 
 
 @tensor_cache
-def get_unpad_indices_and_cu(
+def _get_unpad_indices_and_cu(
     attention_mask: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return unpadding indices and cumulative sequence lengths."""
     lens = prepare_lens_from_mask(attention_mask)
     indices = torch.nonzero(attention_mask.flatten(), as_tuple=False).flatten()
     cu_seqlens = prepare_cu_seqlens_from_lens(lens)
     return indices, cu_seqlens
+
+
+@tensor_cache
+def _get_last_token_unpad_indices_and_cu(
+    attention_mask: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return _get_unpad_indices_and_cu(attention_mask[:, -1:])
+
+
+def get_unpad_indices_and_cu(
+    attention_mask: torch.Tensor,
+    q_len: int | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return unpadding indices and cumulative sequence lengths."""
+    if q_len is None or attention_mask.shape[-1] == q_len:
+        return _get_unpad_indices_and_cu(attention_mask)
+    if q_len == 1:
+        return _get_last_token_unpad_indices_and_cu(attention_mask)
+    return _get_unpad_indices_and_cu(attention_mask[:, -q_len:])
 
 
 @tensor_cache
@@ -150,8 +168,7 @@ def unpad_hidden_states(
             or the explicit value passed in when unpadding is skipped.
     """
     if cu_seqlens is None and attention_mask is not None:
-        mask = attention_mask if attention_mask.shape[-1] == q_len else attention_mask[:, -q_len:]
-        indices, cu_seqlens = get_unpad_indices_and_cu(mask)
+        indices, cu_seqlens = get_unpad_indices_and_cu(attention_mask, q_len)
         hidden_states = index_first_axis(rearrange(hidden_states, "b s ... -> (b s) ..."), indices).unsqueeze(0)
         return hidden_states, indices, cu_seqlens
     return hidden_states, None, cu_seqlens
