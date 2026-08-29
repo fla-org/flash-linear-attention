@@ -24,6 +24,7 @@ def naive_recurrent_precond_gated_delta_rule(
     x: float = 1.5,
     eps: float = 1e-6,
     log_atk_scale: torch.Tensor | float = None,
+    cu_seqlens: torch.LongTensor | None = None,
 ):
     """
     Reference PyTorch implementation of recurrent preconditioned gated delta rule.
@@ -40,6 +41,7 @@ def naive_recurrent_precond_gated_delta_rule(
         initial_state: [B, HV, K, V], optional
         initial_A_state: [B, H, K], optional
         output_final_state: bool
+        cu_seqlens: [N+1], optional cumulative sequence lengths for packed inputs
 
     GVA is applied if `HV > H` (with `HV` divisible by `H`): each group of
     `HV // H` value heads shares one key head and its ATK preconditioner state.
@@ -49,6 +51,36 @@ def naive_recurrent_precond_gated_delta_rule(
         final_state: [B, HV, K, V] if output_final_state else None
         final_A_state: [B, H, K] if output_final_state else None
     """
+    if cu_seqlens is not None:
+        outputs, final_states, final_A_states = [], [], []
+        offsets = cu_seqlens.tolist()
+        for i, (bos, eos) in enumerate(zip(offsets[:-1], offsets[1:], strict=False)):
+            o_i, final_state_i, final_A_state_i = naive_recurrent_precond_gated_delta_rule(
+                q=q[:, bos:eos],
+                k=k[:, bos:eos],
+                v=v[:, bos:eos],
+                g_atk=g_atk[:, bos:eos],
+                g=g[:, bos:eos],
+                beta_atk=beta_atk[:, bos:eos],
+                beta=beta[:, bos:eos],
+                scale=scale,
+                initial_state=None if initial_state is None else initial_state[i:i + 1],
+                initial_A_state=None if initial_A_state is None else initial_A_state[i:i + 1],
+                output_final_state=output_final_state,
+                x=x,
+                eps=eps,
+                log_atk_scale=log_atk_scale,
+            )
+            outputs.append(o_i)
+            if output_final_state:
+                final_states.append(final_state_i)
+                final_A_states.append(final_A_state_i)
+
+        o = torch.cat(outputs, dim=1)
+        if not output_final_state:
+            return o, None, None
+        return o, torch.cat(final_states), torch.cat(final_A_states)
+
     num_heads, num_v_heads = k.shape[2], v.shape[2]
     n_rep = num_v_heads // num_heads
     if n_rep > 1:

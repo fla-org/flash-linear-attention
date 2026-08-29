@@ -372,6 +372,7 @@ class PrecondGatedDeltaNet(nn.Module):
                 x=self.squash_x,
                 eps=self.squash_eps,
                 log_atk_scale=log_atk_scale,
+                cu_seqlens=cu_seqlens,
             )
         else:
             raise NotImplementedError(f"Not supported mode `{mode}`.")
