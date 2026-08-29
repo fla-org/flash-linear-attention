@@ -114,6 +114,12 @@ class Mamba3(nn.Module):
             raise ValueError(
                 f"`n_groups` ({self.n_groups}) must be a positive divisor of `num_heads` ({self.num_heads})."
             )
+        if not self.is_mimo:
+            self.register_buffer(
+                "_siso_proj",
+                torch.ones(1, self.num_heads, self.head_dim, **factory_kwargs),
+                persistent=False,
+            )
 
         if self.is_mimo and mamba3_mimo_combined is None:
             logger.warning_once(
@@ -346,10 +352,9 @@ class Mamba3(nn.Module):
             zpj = rearrange(self.mimo_z, "h r p -> r h p", p=self.head_dim).contiguous()
             outpj = rearrange(self.mimo_o, "h r p -> r h p", p=self.head_dim).contiguous()
             return xpj, zpj, outpj
-        # SISO: pass identity-style ones tensors so the kernel signature stays uniform.
-        shape = (self.mimo_rank, self.num_heads, self.head_dim)
-        xpj = torch.ones(shape, device=self.in_proj.weight.device, dtype=x_dtype)
-        zpj = torch.ones(shape, device=self.in_proj.weight.device, dtype=z_dtype)
+        # SISO reuses an identity-style ones tensor so the kernel signature stays uniform.
+        xpj = self._siso_proj.to(dtype=x_dtype)
+        zpj = xpj if z_dtype == x_dtype else self._siso_proj.to(dtype=z_dtype)
         return xpj, zpj, xpj
 
     def step(
