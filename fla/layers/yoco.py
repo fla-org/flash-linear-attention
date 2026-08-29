@@ -78,6 +78,8 @@ class YOCORotaryEmbedding(RotaryEmbedding):
             self._update_cos_sin_cache(max_seqlen, device=states.device, dtype=states.dtype)
         elif isinstance(seqlen_offset, int):
             self._update_cos_sin_cache(states.shape[1] + seqlen_offset, device=states.device, dtype=states.dtype)
+        else:
+            assert self._cos_cached is not None, "Tensor offsets require an initialized cache; pass max_seqlen on the first call"
         return rotary_embedding(
             states,
             self._cos_cached,
@@ -182,7 +184,7 @@ class YOCOGatedRetention(nn.Module):
 
             if attention_mask is not None and seqlen_offset > 0:
                 seqlen_offset = prepare_lens_from_mask(attention_mask) - q_len
-                max_seqlen = q.shape[1] + seqlen_offset.max().item()
+                max_seqlen = attention_mask.shape[-1]
 
         if self.max_position_embeddings is not None:
             max_seqlen = max(max_seqlen, self.max_position_embeddings)
@@ -299,7 +301,7 @@ class YOCOSharedKVBuilder(nn.Module):
         if attention_mask is not None and (past_key_values is None or use_cache):
             # Left-padded prefills should use the same effective RoPE positions as the unpadded sequence.
             seqlen_offset = seqlen_offset + prepare_lens_from_mask(attention_mask) - attention_mask.shape[-1]
-            max_seqlen = k.shape[1] + seqlen_offset.max().item()
+            max_seqlen = attention_mask.shape[-1]
 
         if self.max_position_embeddings is not None:
             max_seqlen = max(max_seqlen, self.max_position_embeddings)
@@ -395,7 +397,7 @@ class YOCOCrossAttention(nn.Module):
 
         if attention_mask is not None:
             seqlen_offset = seqlen_offset + prepare_lens_from_mask(attention_mask) - attention_mask.shape[-1]
-            max_seqlen = max(max_seqlen, q.shape[1] + max(seqlen_offset))
+            max_seqlen = max(max_seqlen, attention_mask.shape[-1])
         if self.max_position_embeddings is not None:
             max_seqlen = max(max_seqlen, self.max_position_embeddings)
 
