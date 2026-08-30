@@ -110,6 +110,10 @@ class Mamba3(nn.Module):
                 f"`expand * hidden_size` ({self.intermediate_size}) must be divisible by `head_dim` ({head_dim})."
             )
         self.num_heads = self.intermediate_size // head_dim
+        if self.n_groups < 1 or self.num_heads % self.n_groups != 0:
+            raise ValueError(
+                f"`n_groups` ({self.n_groups}) must be a positive divisor of `num_heads` ({self.num_heads})."
+            )
 
         if self.is_mimo and mamba3_mimo_combined is None:
             logger.warning_once(
@@ -320,8 +324,15 @@ class Mamba3(nn.Module):
 
         B = rearrange(B, "b (r g s) -> b r g s", g=self.n_groups, r=self.mimo_rank)
         C = rearrange(C, "b (r g s) -> b r g s", g=self.n_groups, r=self.mimo_rank)
-        B = self.B_norm(B).expand(-1, -1, self.num_heads, -1)
-        C = self.C_norm(C).expand(-1, -1, self.num_heads, -1)
+        B = self.B_norm(B)
+        C = self.C_norm(C)
+        if self.n_groups not in (1, self.num_heads):
+            repeats = self.num_heads // self.n_groups
+            B = B.repeat_interleave(repeats, dim=2)
+            C = C.repeat_interleave(repeats, dim=2)
+        else:
+            B = B.expand(-1, -1, self.num_heads, -1)
+            C = C.expand(-1, -1, self.num_heads, -1)
 
         x = rearrange(x, "b (h p) -> b h p", p=self.head_dim)
         z = rearrange(z, "b (h p) -> b h p", p=self.head_dim)
