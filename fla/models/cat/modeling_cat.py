@@ -41,20 +41,37 @@ except ImportError:
 # sequence length / block mask. Raise Dynamo limits so those shapes stay compiled
 # instead of falling back to dense math attention after the default recompile cap.
 _CAT_DYNAMO_CACHE_LIMIT = 64
-torch._dynamo.config.cache_size_limit = max(
-    getattr(torch._dynamo.config, 'cache_size_limit', 0),
-    _CAT_DYNAMO_CACHE_LIMIT,
-)
-if hasattr(torch._dynamo.config, 'recompile_limit'):
-    torch._dynamo.config.recompile_limit = max(
-        getattr(torch._dynamo.config, 'recompile_limit', 0),
-        _CAT_DYNAMO_CACHE_LIMIT,
-    )
-
-create_block_mask = torch.compile(create_block_mask)
+_create_block_mask_compiled = torch.compile(create_block_mask)
 _flex_attention_compiled = torch.compile(flex_attention, dynamic=False, mode="default")
 
 logger = logging.get_logger(__name__)
+
+
+def _cat_dynamo_config_patch():
+    config = {
+        'cache_size_limit': max(
+            getattr(torch._dynamo.config, 'cache_size_limit', 0),
+            _CAT_DYNAMO_CACHE_LIMIT,
+        ),
+    }
+    if hasattr(torch._dynamo.config, 'recompile_limit'):
+        config['recompile_limit'] = max(
+            getattr(torch._dynamo.config, 'recompile_limit', 0),
+            _CAT_DYNAMO_CACHE_LIMIT,
+        )
+    return torch._dynamo.config.patch(config)
+
+
+@torch.compiler.disable(recursive=False)
+def create_block_mask_compiled(
+    mask_mod,
+    B: int | None,
+    H: int | None,
+    Q_LEN: int,
+    KV_LEN: int,
+) -> BlockMask:
+    with _cat_dynamo_config_patch():
+        return _create_block_mask_compiled(mask_mod, B=B, H=H, Q_LEN=Q_LEN, KV_LEN=KV_LEN)
 
 
 @torch.compiler.disable(recursive=False)
@@ -64,7 +81,8 @@ def flex_attention_compiled(
     v: torch.Tensor,
     block_mask: BlockMask | None = None,
 ) -> torch.Tensor:
-    return _flex_attention_compiled(q, k, v, block_mask=block_mask)
+    with _cat_dynamo_config_patch():
+        return _flex_attention_compiled(q, k, v, block_mask=block_mask)
 
 
 def _ceil_div(x: int, y: int) -> int:
@@ -204,7 +222,7 @@ class CATCompressor(nn.Module):
         total_len = num_chunks * block_len
         hidden_states = rearrange(hidden_states, 'b k l d -> b (k l) d')
 
-        block_mask = create_block_mask(
+        block_mask = create_block_mask_compiled(
             get_block_diagonal_mask_mod(block_len),
             B=None,
             H=None,
@@ -488,6 +506,27 @@ class CATModel(CATPreTrainedModel):
         positions = self._build_cat_positions(num_chunks, chunk_size, device)
         return self.rotary._cos_cached[positions], self.rotary._sin_cached[positions]
 
+    def _rearrange_hidden_states(
+        self,
+        hidden_states: torch.Tensor,
+        num_chunks: int,
+        chunk_size: int,
+        original_seq_len: int,
+    ) -> torch.Tensor:
+        block_len = 2 + chunk_size
+        last_pred = hidden_states[:, -1:, :]
+        hidden_states_chunks = rearrange(
+            hidden_states[:, :-2, :],
+            'b (k l) d -> b k l d',
+            k=num_chunks,
+            l=block_len,
+        )
+        first_chunk_preds = hidden_states_chunks[:, 0, 2:-1, :]
+        middle_chunk_preds = hidden_states_chunks[:, 1:, 1:-1, :]
+        middle_chunk_preds = rearrange(middle_chunk_preds, 'b k l d -> b (k l) d')
+        hidden_states = torch.cat([first_chunk_preds, middle_chunk_preds, last_pred], dim=1)
+        return hidden_states[:, :original_seq_len, :]
+
     def forward(
         self,
         input_ids: torch.LongTensor | None = None,
@@ -561,7 +600,7 @@ class CATModel(CATPreTrainedModel):
 
         cos, sin = self._build_cat_rope_cache(num_chunks, chunk_size, device, hidden_states.dtype)
         block_len = 2 + chunk_size
-        block_mask = create_block_mask(
+        block_mask = create_block_mask_compiled(
             get_cat_mask_mod(block_len),
             B=None,
             H=None,
@@ -569,24 +608,30 @@ class CATModel(CATPreTrainedModel):
             KV_LEN=hidden_states.shape[1],
         )
 
+        all_hidden_states = () if output_hidden_states else None
         for layer in self.layers:
+            if output_hidden_states:
+                all_hidden_states += (hidden_states,)
             hidden_states = layer(hidden_states, cos=cos, sin=sin, block_mask=block_mask, **kwargs)
         hidden_states = self.norm(hidden_states)
 
-        last_pred = hidden_states[:, -1:, :]
-        hidden_states_chunks = rearrange(
-            hidden_states[:, :-2, :],
-            'b (k l) d -> b k l d',
-            k=num_chunks,
-            l=block_len,
+        if output_hidden_states:
+            all_hidden_states += (hidden_states,)
+            all_hidden_states = tuple(
+                self._rearrange_hidden_states(
+                    state,
+                    num_chunks=num_chunks,
+                    chunk_size=chunk_size,
+                    original_seq_len=original_seq_len,
+                )
+                for state in all_hidden_states
+            )
+        hidden_states = self._rearrange_hidden_states(
+            hidden_states,
+            num_chunks=num_chunks,
+            chunk_size=chunk_size,
+            original_seq_len=original_seq_len,
         )
-        first_chunk_preds = hidden_states_chunks[:, 0, 2:-1, :]
-        middle_chunk_preds = hidden_states_chunks[:, 1:, 1:-1, :]
-        middle_chunk_preds = rearrange(middle_chunk_preds, 'b k l d -> b (k l) d')
-        hidden_states = torch.cat([first_chunk_preds, middle_chunk_preds, last_pred], dim=1)
-        hidden_states = hidden_states[:, :original_seq_len, :]
-
-        all_hidden_states = (hidden_states,) if output_hidden_states else None
 
         if not return_dict:
             return tuple(v for v in [hidden_states, None, all_hidden_states, None] if v is not None)
@@ -602,7 +647,12 @@ class CATModel(CATPreTrainedModel):
 class CATForCausalLM(CATPreTrainedModel, FLAGenerationMixin):
     """CAT model with a language modeling head."""
 
-    _tied_weights_keys = {"lm_head.weight": "model.embeddings.weight"}
+    # transformers 5 requires target-to-source mappings, while 4.x uses a list of tied keys
+    _tied_weights_keys = (
+        {"lm_head.weight": "model.embeddings.weight"}
+        if hasattr(PreTrainedModel, 'get_expanded_tied_weights_keys')
+        else ["lm_head.weight"]
+    )
 
     def __init__(self, config: CATConfig):
         super().__init__(config)

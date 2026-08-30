@@ -13,6 +13,7 @@ import torch
 from transformers import AutoConfig, AutoModelForCausalLM
 
 from fla.models.cat import CATConfig, CATForCausalLM
+from fla.models.cat import modeling_cat
 from fla.utils import device
 
 
@@ -24,8 +25,14 @@ def create_cat_model(
     max_position_embeddings: int = 64,
     pad_to_multiple_of: int = 32,
     dtype: torch.dtype = torch.bfloat16,
+    use_default_fused: bool = False,
 ) -> tuple[CATForCausalLM, CATConfig]:
     hidden_size = num_heads * head_dim
+    fuse_kwargs = {} if use_default_fused else {
+        'fuse_norm': False,
+        'fuse_swiglu': False,
+        'fuse_cross_entropy': False,
+    }
     config = CATConfig(
         hidden_size=hidden_size,
         num_hidden_layers=num_hidden_layers,
@@ -39,10 +46,8 @@ def create_cat_model(
         pad_to_multiple_of=pad_to_multiple_of,
         vocab_size=128,
         eos_token_id=None,
-        fuse_norm=False,
-        fuse_swiglu=False,
-        fuse_cross_entropy=False,
         use_cache=False,
+        **fuse_kwargs,
     )
     model = CATForCausalLM(config)
     model.to(dtype).to(device)
@@ -53,10 +58,14 @@ def test_cat_forward_backward():
     model, config = create_cat_model()
     input_ids = torch.randint(0, config.vocab_size, (2, 40), device=device)
 
+    with torch.no_grad():
+        output_without_hidden_states = model(input_ids, output_hidden_states=False)
     output = model(input_ids, output_hidden_states=True)
 
+    assert output_without_hidden_states.hidden_states is None
     assert output.logits.shape == (2, 40, config.vocab_size)
-    assert output.hidden_states[-1].shape == (2, 40, config.hidden_size)
+    assert len(output.hidden_states) == config.num_hidden_layers + 1
+    assert all(state.shape == (2, 40, config.hidden_size) for state in output.hidden_states)
 
     output.logits.float().sum().backward()
     for name, param in model.named_parameters():
@@ -74,6 +83,37 @@ def test_cat_with_labels():
     assert output.loss is not None
     assert output.loss.ndim == 0
     output.loss.backward()
+
+
+def test_cat_default_fused_forward_backward():
+    model, config = create_cat_model(use_default_fused=True)
+    input_ids = torch.randint(0, config.vocab_size, (2, 31), device=device)
+
+    assert config.fuse_norm
+    assert config.fuse_swiglu
+    assert config.fuse_cross_entropy
+
+    output = model(input_ids, labels=input_ids)
+
+    assert output.loss is not None
+    assert output.logits.shape == (2, 31, config.vocab_size)
+    output.loss.backward()
+
+
+def test_cat_dynamo_config_is_scoped():
+    config = {'cache_size_limit': 1}
+    if hasattr(torch._dynamo.config, 'recompile_limit'):
+        config['recompile_limit'] = 1
+
+    with torch._dynamo.config.patch(config):
+        with modeling_cat._cat_dynamo_config_patch():
+            assert torch._dynamo.config.cache_size_limit == modeling_cat._CAT_DYNAMO_CACHE_LIMIT
+            if hasattr(torch._dynamo.config, 'recompile_limit'):
+                assert torch._dynamo.config.recompile_limit == modeling_cat._CAT_DYNAMO_CACHE_LIMIT
+
+        assert torch._dynamo.config.cache_size_limit == 1
+        if hasattr(torch._dynamo.config, 'recompile_limit'):
+            assert torch._dynamo.config.recompile_limit == 1
 
 
 @pytest.mark.parametrize('chunk_size', [4, 8])
@@ -122,6 +162,26 @@ def test_cat_bucket_padding_and_trim():
         output = model(input_ids)
 
     assert output.logits.shape == (1, 17, config.vocab_size)
+
+
+def test_cat_padding_invariance():
+    torch.manual_seed(42)
+    model, config = create_cat_model(max_position_embeddings=64, pad_to_multiple_of=8)
+    model.eval()
+    input_ids = torch.randint(0, config.vocab_size, (1, 17), device=device)
+
+    with torch.no_grad():
+        output_small_bucket = model(input_ids, output_hidden_states=True)
+        config.pad_to_multiple_of = 32
+        output_large_bucket = model(input_ids, output_hidden_states=True)
+
+    torch.testing.assert_close(output_small_bucket.logits, output_large_bucket.logits, rtol=1e-2, atol=1e-2)
+    for small_bucket_state, large_bucket_state in zip(
+        output_small_bucket.hidden_states,
+        output_large_bucket.hidden_states,
+        strict=True,
+    ):
+        torch.testing.assert_close(small_bucket_state, large_bucket_state, rtol=1e-2, atol=1e-2)
 
 
 def test_cat_accepts_all_ones_attention_mask():
@@ -198,6 +258,10 @@ def test_cat_save_load_transformers_5_tied_weight_metadata(tmp_path):
     model, config = create_cat_model(dtype=torch.float32)
     input_ids = torch.randint(0, config.vocab_size, (1, 16), device=device)
 
+    if hasattr(model, 'get_expanded_tied_weights_keys'):
+        assert model._tied_weights_keys == {"lm_head.weight": "model.embeddings.weight"}
+    else:
+        assert model._tied_weights_keys == ["lm_head.weight"]
     model.save_pretrained(tmp_path)
     reloaded = CATForCausalLM.from_pretrained(tmp_path).to(device)
     reloaded.eval()
