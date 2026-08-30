@@ -246,7 +246,8 @@ class Raven(nn.Module):
         seqlen_offset, max_seqlen = 0, q_len
         if past_key_values is not None:
             seqlen_offset = past_key_values.get_seq_length(self.layer_idx)
-            max_seqlen = q_len + _max_offset(seqlen_offset)
+            if self.use_rope:
+                max_seqlen = q_len + _max_offset(seqlen_offset)
 
         cu_seqlens = kwargs.get('cu_seqlens')
         hidden_states, indices, cu_seqlens = unpad_hidden_states(hidden_states, cu_seqlens, attention_mask, q_len)
@@ -254,7 +255,7 @@ class Raven(nn.Module):
         # top of cached tokens. During prefill the unpadded tokens are already packed
         # contiguously per `cu_seqlens`, so positions start at 0; adding `lens - mask_len`
         # there would push them negative.
-        if indices is not None and _max_offset(seqlen_offset) > 0:
+        if self.use_rope and indices is not None and _max_offset(seqlen_offset) > 0:
             seqlen_offset = seqlen_offset + prepare_lens_from_mask(attention_mask) - attention_mask.shape[-1]
             max_seqlen = q_len + _max_offset(seqlen_offset)
 
