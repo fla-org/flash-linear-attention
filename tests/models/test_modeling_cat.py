@@ -12,8 +12,7 @@ import pytest
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM
 
-from fla.models.cat import CATConfig, CATForCausalLM
-from fla.models.cat import modeling_cat
+from fla.models.cat import CATConfig, CATForCausalLM, modeling_cat
 from fla.utils import device
 
 
