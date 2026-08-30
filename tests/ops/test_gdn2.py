@@ -158,7 +158,7 @@ def _run_long_chunk(
         cu_seqlens_cpu = cu_seqlens.cpu()
         for i in range(len(cu_seqlens_cpu) - 1):
             start, end = cu_seqlens_cpu[i].item(), cu_seqlens_cpu[i + 1].item()
-            output, state = call(start, end, tensors["h0"][i : i + 1])
+            output, state = call(start, end, tensors["h0"][i: i + 1])
             outputs.append(output)
             states.append(state)
         output, state = torch.cat(outputs, dim=1), torch.cat(states, dim=0)
@@ -490,7 +490,7 @@ def test_fused_recurrent_varlen(cu_seqlens, H, K, V):
                 g=g[:, s:e],
                 b=b[:, s:e],
                 w=w[:, s:e],
-                initial_state=h0[i : i + 1],
+                initial_state=h0[i: i + 1],
                 use_qk_l2norm_in_kernel=True,
                 output_final_state=True,
             )
@@ -502,7 +502,7 @@ def test_fused_recurrent_varlen(cu_seqlens, H, K, V):
                 g=g[:, s:e],
                 b=b[:, s:e],
                 w=w[:, s:e],
-                initial_state=h0[i : i + 1],
+                initial_state=h0[i: i + 1],
                 output_final_state=True,
             )
         refs.append(o_i)
@@ -641,7 +641,7 @@ def test_chunk(B, T, H, K, V, scale, use_qk_l2norm_in_kernel, use_gate_in_kernel
 
 
 @pytest.mark.skipif(not IS_NPU, reason="Ascend NPU required")
-def test_chunk_npu_forward_backward():
+def test_chunk_npu_forward_backward(monkeypatch):
     """Ascend chunk path must agree with the recurrent reference on the NPU baseline."""
     B, T, H, K, V = 1, _test_length(64), 1, 32, 32
     q, k, v, g, b, w, _, _ = _rand_inputs(B, T, H, K, V, torch.float16)
@@ -654,9 +654,33 @@ def test_chunk_npu_forward_backward():
     do = torch.randn_like(v)
     dht = torch.randn_like(h0)
 
+    from fla.ops.gdn2.backends import gdn2_registry
+
+    backend = gdn2_registry.get_active()
+    assert backend is not None and backend.backend_type == "triton_ascend"
+    accepted, reason = backend.chunk_gdn2_fwd_intra_verifier(q, k, v, g, b, w, 1.0)
+    assert accepted and reason is None
+    accepted, reason = backend.chunk_gdn2_fwd_intra_verifier(q, k, v, g, b, w, 1.0, chunk_size=32)
+    assert not accepted and reason == "GDN-2 Ascend intra requires chunk_size=64, got 32"
+    routed = {"fwd": 0, "bwd": 0}
+    original_fwd = backend.chunk_gdn2_fwd_intra
+    original_bwd = backend.chunk_gdn2_bwd_wy_dqkg_fused
+
+    def routed_fwd(*args, **kwargs):
+        routed["fwd"] += 1
+        return original_fwd(*args, **kwargs)
+
+    def routed_bwd(*args, **kwargs):
+        routed["bwd"] += 1
+        return original_bwd(*args, **kwargs)
+
+    monkeypatch.setattr(backend, "chunk_gdn2_fwd_intra", routed_fwd)
+    monkeypatch.setattr(backend, "chunk_gdn2_bwd_wy_dqkg_fused", routed_bwd)
+
     if _LONG_SEQUENCE:
         base = {"q": q, "k": k, "v": v, "g": g, "b": b, "w": w, "h0": h0}
         _assert_long_chunk_equivalent(base, do, dht, segmented=True)
+        assert routed["fwd"] > 0 and routed["bwd"] > 0
         return
 
     ref, ref_ht = naive_recurrent_gdn2(
@@ -696,6 +720,7 @@ def test_chunk_npu_forward_backward():
         (0.01, 0.01, 0.01, 0.02, 0.02, 0.02, 0.01),
     ):
         assert_close(name, expected, observed, tol)
+    assert routed["fwd"] > 0 and routed["bwd"] > 0
 
 
 @pytest.mark.skipif(not IS_NPU, reason="Ascend NPU required")
@@ -736,7 +761,7 @@ def test_chunk_npu_varlen_forward_backward():
             g=g[:, start:end],
             b=b[:, start:end],
             w=w[:, start:end],
-            initial_state=h0[i : i + 1],
+            initial_state=h0[i: i + 1],
             output_final_state=True,
         )
         refs.append(ref)
@@ -892,7 +917,7 @@ def test_chunk_varlen(cu_seqlens, H, K, V, use_gate_in_kernel, dtype):
             g=g_ref,
             b=b[:, s:e],
             w=w[:, s:e],
-            initial_state=h0[i : i + 1],
+            initial_state=h0[i: i + 1],
             output_final_state=True,
         )
         refs.append(o_i)

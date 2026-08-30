@@ -13,7 +13,6 @@ import triton.language as tl
 
 from fla.ops.utils.index import prepare_chunk_indices
 from fla.utils import input_guard
-from fla.utils.ascend_stream import defer_npu_tensor_release
 from fla.utils.ascend_ub_manager import (
     ASCEND_MAX_GRID_DIM,
     compute_grid_limited_tile_size,
@@ -392,7 +391,6 @@ def chunk_local_cumsum_scalar_npu(
         NT=NT,
         reverse=reverse,
     )
-    defer_npu_tensor_release(g_org, cu_seqlens, chunk_indices)
     return g
 
 
@@ -440,7 +438,6 @@ def chunk_local_cumsum_vector_npu(
         NT=NT,
         reverse=reverse,
     )
-    defer_npu_tensor_release(g_org, cu_seqlens, chunk_indices)
     return g
 
 
@@ -477,7 +474,6 @@ def chunk_global_cumsum_scalar_npu(
     for bh_off, bh_len in iter_axis_launch_chunks(bh_total, 1, max_grid=ASCEND_MAX_GRID_DIM):
         kernel_kwargs['BH_OFFSET'] = bh_off
         chunk_global_cumsum_scalar_kernel_npu[(bh_len,)](**kernel_kwargs)
-    defer_npu_tensor_release(s, cu_seqlens)
     return z
 
 
@@ -525,7 +521,6 @@ def chunk_global_cumsum_vector_npu(
         bh_len = min(max_bh, bh_total - bh_off)
         kernel_kwargs['BH_OFFSET'] = bh_off
         chunk_global_cumsum_vector_kernel_npu[(ns, bh_len)](**kernel_kwargs)
-    defer_npu_tensor_release(s, cu_seqlens)
     return z
 
 

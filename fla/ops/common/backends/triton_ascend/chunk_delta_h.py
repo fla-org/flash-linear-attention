@@ -17,7 +17,6 @@ import triton.runtime.driver as driver
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 from fla.ops.utils.op import exp2
 from fla.utils import input_guard
-from fla.utils.ascend_stream import defer_npu_tensor_release
 from fla.utils.ascend_ub_manager import (
     compute_row_tile_block_size,
     get_ub_manager,
@@ -765,20 +764,6 @@ def chunk_gated_delta_rule_fwd_h_npu(
             },
             **_FWD_H_COMPILE,
         )
-    defer_npu_tensor_release(
-        k,
-        w,
-        u,
-        g,
-        g_ratio,
-        g_last_exp,
-        gk,
-        gk_last_exp,
-        initial_state,
-        cu_seqlens,
-        chunk_indices,
-        chunk_offsets,
-    )
     return h, v_new, final_state
 
 
@@ -1257,23 +1242,5 @@ def chunk_gated_delta_rule_bwd_dhu_npu(
             "STATE_V_FIRST": state_v_first,
             "IS_VARLEN": cu_seqlens is not None,
         },
-    )
-    defer_npu_tensor_release(
-        q,
-        k,
-        w,
-        do,
-        dv,
-        g,
-        gk,
-        h0,
-        dht,
-        cu_seqlens,
-        chunk_indices,
-        g_log,
-        g_exp,
-        g_ratio,
-        g_last_exp,
-        chunk_offsets,
     )
     return dh, dh0, dv2
