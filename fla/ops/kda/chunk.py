@@ -17,7 +17,7 @@ from fla.ops.common.gate import fused_beta_sigmoid, fused_beta_sigmoid_bwd
 from fla.ops.cp import FLACPContext
 from fla.ops.kda.chunk_bwd import chunk_kda_bwd
 from fla.ops.kda.chunk_fwd import chunk_kda_fwd
-from fla.ops.utils.index import prepare_chunk_indices
+from fla.ops.utils.index import prepare_chunk_indices, prepare_chunk_indices_static
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
@@ -50,6 +50,8 @@ class ChunkKDAFunction(torch.autograd.Function):
         disable_recompute: bool = False,
         return_intermediate_states: bool = False,
         cp_context: FLACPContext | None = None,
+        use_graph: bool = False,
+        max_num_seqs: int | None = None,
     ):
         # Apply l2norm
         q_rstd, k_rstd = None, None
@@ -61,13 +63,22 @@ class ChunkKDAFunction(torch.autograd.Function):
         if use_beta_sigmoid_in_kernel:
             beta = fused_beta_sigmoid(beta_raw, scale=2.0 if allow_neg_eigval else 1.0)
 
-        chunk_indices = None
+        chunk_indices, chunk_offsets = None, None
         if cu_seqlens is not None:
-            chunk_indices = prepare_chunk_indices(
-                cu_seqlens,
-                chunk_size,
-                cu_seqlens_cpu=cu_seqlens_cpu,
-            )
+            if use_graph:
+                if max_num_seqs is None:
+                    max_num_seqs = cu_seqlens.shape[0] - 1
+                assert cu_seqlens.shape[0] - 1 <= max_num_seqs, (
+                    f"cu_seqlens has {cu_seqlens.shape[0] - 1} sequences but max_num_seqs is {max_num_seqs}"
+                )
+                nt_max = (q.shape[1] + chunk_size - 1) // chunk_size + max_num_seqs - 1
+                chunk_indices, chunk_offsets = prepare_chunk_indices_static(cu_seqlens, chunk_size, nt_max)
+            else:
+                chunk_indices = prepare_chunk_indices(
+                    cu_seqlens,
+                    chunk_size,
+                    cu_seqlens_cpu=cu_seqlens_cpu,
+                )
 
         g_input = g
 
@@ -93,6 +104,8 @@ class ChunkKDAFunction(torch.autograd.Function):
             return_intermediate_states=return_intermediate_states,
             cp_context=cp_context,
             state_v_first=state_v_first,
+            use_graph=use_graph,
+            chunk_offsets=chunk_offsets,
         )
 
         if return_intermediate_states:
@@ -103,8 +116,9 @@ class ChunkKDAFunction(torch.autograd.Function):
         ctx.save_for_backward(
             q, q_rstd, k, k_rstd, v, g_cumsum, g_input, beta_raw, beta, A_log, dt_bias, Aqk, Akk,
             w, u, qg, kg, v_new, h,
-            initial_state, cu_seqlens, chunk_indices
+            initial_state, cu_seqlens, chunk_indices, chunk_offsets
         )
+        ctx.use_graph = use_graph
         ctx.chunk_size = chunk_size
         ctx.safe_gate = safe_gate
         ctx.scale = scale
@@ -128,7 +142,7 @@ class ChunkKDAFunction(torch.autograd.Function):
     ):
         (q, q_rstd, k, k_rstd, v, g_cumsum, g_input, beta_raw, beta, A_log, dt_bias, Aqk, Akk,
          w, u, qg, kg, v_new, h,
-         initial_state, cu_seqlens, chunk_indices) = (
+         initial_state, cu_seqlens, chunk_indices, chunk_offsets) = (
             ctx.saved_tensors
         )
 
@@ -162,6 +176,8 @@ class ChunkKDAFunction(torch.autograd.Function):
             kg=kg,
             v_new=v_new,
             h=h,
+            use_graph=ctx.use_graph,
+            chunk_offsets=chunk_offsets,
         )
         if ctx.use_qk_l2norm_in_kernel:
             dq = l2norm_bwd(q, q_rstd, dq)
@@ -170,7 +186,8 @@ class ChunkKDAFunction(torch.autograd.Function):
             db = fused_beta_sigmoid_bwd(beta_raw, db, scale=2.0 if ctx.allow_neg_eigval else 1.0)
 
         return (dq.to(q), dk.to(k), dv.to(v), dg.to(g_input), db.to(beta_raw), dA, dbias, None, dh0,
-                None, None, None, None, None, None, None, None, None, None, None, None, None, None)
+                None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+                None, None)
 
 
 @torch.compiler.disable
@@ -196,6 +213,8 @@ def chunk_kda(
     cu_seqlens: torch.LongTensor | None = None,
     cu_seqlens_cpu: torch.LongTensor | None = None,
     cp_context: FLACPContext = None,
+    use_graph: bool = False,
+    max_num_seqs: int | None = None,
     **kwargs,
 ):
     r"""
@@ -277,6 +296,16 @@ def chunk_kda(
             Context parallel context for distributed training across multiple devices.
             When provided, ``initial_state`` and ``output_final_state`` are not supported,
             and ``cu_seqlens`` will be overridden by the context. Default: ``None``.
+        use_graph (bool):
+            Whether to build the varlen chunk list on-device at a fixed shape so the
+            forward/backward can be recorded by a platform graph (CUDA graph, NPU graph)
+            and replayed after only the contents of ``cu_seqlens`` change. Requires
+            ``cu_seqlens`` padded with zero-length tail sequences up to ``max_num_seqs + 1``
+            entries; kernels return immediately on sentinel rows (segment id < 0).
+            ``cp_context`` and ``disable_recompute=True`` are not supported. Default: ``False``.
+        max_num_seqs (Optional[int]):
+            Static upper bound of the sequence count used together with ``use_graph``.
+            Defaults to ``cu_seqlens.shape[0] - 1``. Default: ``None``.
 
     Returns:
         - Normal mode (return_intermediate_states=False): A tuple (o, final_state)
@@ -440,4 +469,6 @@ def chunk_kda(
         disable_recompute,
         return_intermediate_states,
         cp_context,
+        use_graph,
+        max_num_seqs,
     )

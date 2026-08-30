@@ -43,11 +43,16 @@ def chunk_local_cumsum_scalar_kernel(
     REVERSE: tl.constexpr,
     HAS_SCALE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
 ):
     i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        i_n = tl.load(chunk_indices + i_t * 2).to(tl.int32)
+        if USE_GRAPH:
+            if i_n < 0:
+                return
+        i_t = tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
@@ -97,11 +102,16 @@ def chunk_local_cumsum_vector_kernel(
     REVERSE: tl.constexpr,
     HAS_SCALE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
 ):
     i_s, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        i_n = tl.load(chunk_indices + i_t * 2).to(tl.int32)
+        if USE_GRAPH:
+            if i_n < 0:
+                return
+        i_t = tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
@@ -248,6 +258,7 @@ def chunk_local_cumsum_scalar(
     cu_seqlens: torch.Tensor | None = None,
     output_dtype: torch.dtype | None = torch.float,
     chunk_indices: torch.LongTensor | None = None,
+    use_graph: bool = False,
     **kwargs,
 ) -> torch.Tensor:
     if 'head_first' in kwargs:
@@ -273,6 +284,7 @@ def chunk_local_cumsum_scalar(
         H=H,
         BT=BT,
         REVERSE=reverse,
+        USE_GRAPH=use_graph,
     )
     return g
 
@@ -285,6 +297,7 @@ def chunk_local_cumsum_vector(
     cu_seqlens: torch.Tensor | None = None,
     output_dtype: torch.dtype | None = torch.float,
     chunk_indices: torch.LongTensor | None = None,
+    use_graph: bool = False,
     **kwargs,
 ) -> torch.Tensor:
     if 'head_first' in kwargs:
@@ -315,6 +328,7 @@ def chunk_local_cumsum_vector(
         S=S,
         BT=BT,
         REVERSE=reverse,
+        USE_GRAPH=use_graph,
     )
     return g
 
@@ -433,6 +447,7 @@ def chunk_local_cumsum(
     cu_seqlens: torch.Tensor | None = None,
     output_dtype: torch.dtype | None = torch.float,
     chunk_indices: torch.LongTensor | None = None,
+    use_graph: bool = False,
     **kwargs,
 ) -> torch.Tensor:
     if 'head_first' in kwargs:
@@ -450,6 +465,7 @@ def chunk_local_cumsum(
             cu_seqlens=cu_seqlens,
             output_dtype=output_dtype,
             chunk_indices=chunk_indices,
+            use_graph=use_graph,
         )
     elif len(g.shape) == 4:
         return chunk_local_cumsum_vector(
@@ -460,6 +476,7 @@ def chunk_local_cumsum(
             cu_seqlens=cu_seqlens,
             output_dtype=output_dtype,
             chunk_indices=chunk_indices,
+            use_graph=use_graph,
         )
     else:
         raise ValueError(
