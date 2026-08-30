@@ -164,6 +164,32 @@ def test_cat_bucket_padding_and_trim():
     assert output.logits.shape == (1, 17, config.vocab_size)
 
 
+@pytest.mark.parametrize('original_seq_len', [10, 12])
+def test_cat_rearrange_hidden_states_matches_loop(original_seq_len: int):
+    model, _ = create_cat_model()
+    num_chunks, chunk_size = 3, 4
+    block_len = chunk_size + 2
+    internal_seq_len = num_chunks * block_len + 2
+    hidden_states = torch.arange(internal_seq_len, device=device).view(1, internal_seq_len, 1)
+
+    actual = model.model._rearrange_hidden_states(
+        hidden_states,
+        num_chunks=num_chunks,
+        chunk_size=chunk_size,
+        original_seq_len=original_seq_len,
+    )
+
+    expected_parts = []
+    for chunk_idx in range(num_chunks):
+        block_start = chunk_idx * block_len
+        pred_start = block_start + (2 if chunk_idx == 0 else 1)
+        expected_parts.append(hidden_states[:, pred_start:block_start + block_len - 1])
+    expected_parts.append(hidden_states[:, -1:])
+    expected = torch.cat(expected_parts, dim=1)[:, :original_seq_len]
+
+    assert torch.equal(actual, expected)
+
+
 def test_cat_padding_invariance():
     torch.manual_seed(42)
     model, config = create_cat_model(max_position_embeddings=64, pad_to_multiple_of=8)
