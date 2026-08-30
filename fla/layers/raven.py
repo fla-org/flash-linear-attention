@@ -104,8 +104,8 @@ class Raven(nn.Module):
         self.num_kv_groups = self.num_heads // self.num_kv_heads
         key_dim = hidden_size * expand_k
         value_dim = hidden_size * expand_v
-        self.key_dim = int(key_dim)
-        self.value_dim = int(value_dim)
+        self.key_dim = round(key_dim)
+        self.value_dim = round(value_dim)
         if not math.isclose(key_dim, self.key_dim):
             raise ValueError(f"`hidden_size * expand_k` must be an integer, got {key_dim}.")
         if not math.isclose(value_dim, self.value_dim):
