@@ -49,9 +49,8 @@ def chunk_local_cumsum_scalar_kernel(
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_n = tl.load(chunk_indices + i_t * 2).to(tl.int32)
-        if USE_GRAPH:
-            if i_n < 0:
-                return
+        if USE_GRAPH and i_n < 0:
+            return
         i_t = tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
@@ -108,9 +107,8 @@ def chunk_local_cumsum_vector_kernel(
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_n = tl.load(chunk_indices + i_t * 2).to(tl.int32)
-        if USE_GRAPH:
-            if i_n < 0:
-                return
+        if USE_GRAPH and i_n < 0:
+            return
         i_t = tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos

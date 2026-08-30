@@ -82,7 +82,7 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
 
     if IS_VARLEN:
         i_n = tl.load(chunk_indices + i_t * 2).to(tl.int32)
-        if USE_GRAPH and (i_n < 0):
+        if USE_GRAPH and i_n < 0:
             return
         i_t = tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
@@ -435,7 +435,7 @@ def chunk_kda_bwd_kernel_intra(
     all = B * T
     if IS_VARLEN:
         i_n = tl.load(chunk_indices + i_t * 2).to(tl.int32)
-        if USE_GRAPH and (i_n < 0):
+        if USE_GRAPH and i_n < 0:
             return
         i_t = tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
@@ -716,7 +716,7 @@ def chunk_kda_fwd_kernel_intra_sub_chunk(
 
     if IS_VARLEN:
         i_n = tl.load(chunk_indices + i_t * 2).to(tl.int32)
-        if USE_GRAPH and (i_n < 0):
+        if USE_GRAPH and i_n < 0:
             return
         i_t = tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
@@ -871,6 +871,7 @@ def chunk_kda_fwd_intra(
             cu_seqlens=cu_seqlens,
             chunk_size=BT,
             sub_chunk_size=BC,
+            use_graph=use_graph,
         )
 
     # Step 2: Fused inter + solve_tril (works for both fixed-len and varlen)

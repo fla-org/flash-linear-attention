@@ -68,8 +68,10 @@ class ChunkKDAFunction(torch.autograd.Function):
             if use_graph:
                 if max_num_seqs is None:
                     max_num_seqs = cu_seqlens.shape[0] - 1
-                assert cu_seqlens.shape[0] - 1 <= max_num_seqs, (
-                    f"cu_seqlens has {cu_seqlens.shape[0] - 1} sequences but max_num_seqs is {max_num_seqs}"
+                assert cu_seqlens.shape[0] - 1 == max_num_seqs, (
+                    f"cu_seqlens must be padded with zero-length tail sequences to exactly "
+                    f"max_num_seqs + 1 entries, got {cu_seqlens.shape[0] - 1} sequences "
+                    f"with max_num_seqs={max_num_seqs}"
                 )
                 nt_max = (q.shape[1] + chunk_size - 1) // chunk_size + max_num_seqs - 1
                 chunk_indices, chunk_offsets = prepare_chunk_indices_static(cu_seqlens, chunk_size, nt_max)
@@ -299,9 +301,17 @@ def chunk_kda(
         use_graph (bool):
             Whether to build the varlen chunk list on-device at a fixed shape so the
             forward/backward can be recorded by a platform graph (CUDA graph, NPU graph)
-            and replayed after only the contents of ``cu_seqlens`` change. Requires
-            ``cu_seqlens`` padded with zero-length tail sequences up to ``max_num_seqs + 1``
-            entries; kernels return immediately on sentinel rows (segment id < 0).
+            and replayed after only the contents of ``cu_seqlens`` change. Requires:
+
+            - ``cu_seqlens`` padded with zero-length tail sequences up to exactly
+              ``max_num_seqs + 1`` entries; kernels return immediately on sentinel rows
+              (segment id < 0), so output/gradient rows not covered by real tokens
+              are left undefined.
+            - ``initial_state`` and the incoming ``dht`` gradient (when used) shaped
+              ``[max_num_seqs, ...]``.
+            - the captured step warmed up eagerly beforehand so that kernel autotuning
+              happens outside the graph.
+
             ``cp_context`` and ``disable_recompute=True`` are not supported. Default: ``False``.
         max_num_seqs (Optional[int]):
             Static upper bound of the sequence count used together with ``use_graph``.

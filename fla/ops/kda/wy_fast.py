@@ -62,9 +62,8 @@ def recompute_w_u_fwd_kda_kernel(
     i_h = i_hv // (HV // H)
     if IS_VARLEN:
         i_n = tl.load(chunk_indices + i_t * 2).to(tl.int32)
-        if USE_GRAPH:
-            if i_n < 0:
-                return
+        if USE_GRAPH and i_n < 0:
+            return
         i_t = tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
@@ -179,9 +178,8 @@ def prepare_wy_repr_bwd_kda_kernel(
     i_h = i_hv // (HV // H)
     if IS_VARLEN:
         i_n = tl.load(chunk_indices + i_t * 2).to(tl.int32)
-        if USE_GRAPH:
-            if i_n < 0:
-                return
+        if USE_GRAPH and i_n < 0:
+            return
         i_t = tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos

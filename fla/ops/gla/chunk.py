@@ -371,9 +371,8 @@ def chunk_gla_fwd_kernel_o(
     if IS_VARLEN:
         i_tg = i_t.to(tl.int64)
         i_n = tl.load(chunk_indices + i_t * 2).to(tl.int32)
-        if USE_GRAPH:
-            if i_n < 0:
-                return
+        if USE_GRAPH and i_n < 0:
+            return
         i_t = tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
