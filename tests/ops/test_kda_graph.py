@@ -8,14 +8,19 @@
 """Graph capture/replay tests for KDA chunk training (fwd + bwd).
 
 Captures a fwd+bwd step once, replays it with different ``cu_seqlens`` contents
-(different splits and zero-length tail padding), and compares against the eager
-(``use_graph=False``) path. Requires CUDA + CUDAGraph.
+(different splits, zero-length tail padding, and total_tokens below the static
+capacity), and compares against the eager (``use_graph=False``) path.
+Requires CUDA + CUDAGraph.
 """
+
+import os
 
 import pytest
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 
+from fla.ops.cp import FLACPContext, build_cp_context
 from fla.ops.kda import chunk_kda
 from fla.utils import assert_close, device
 
@@ -36,6 +41,12 @@ _VARLEN_CONFIGS = [
     ("2seq_zerotail", [0, 512, 1024, 1024, 1024]),
     ("4seq_alt", [0, 100, 400, 700, 1024]),
     ("1seq_zerotail", [0, 1024, 1024, 1024, 1024]),
+]
+
+# (tag, cu_seqlens) -- total_tokens < T; rows above cu[-1] are padding and must stay inert
+_PARTIAL_CONFIGS = [
+    ("half", [0, 512, 512, 512, 512]),
+    ("quarter_2seq", [0, 128, 384, 384, 384]),
 ]
 
 _OUT_NAMES = ["o", "ht", "dq", "dk", "dv", "dg", "db", "dh0", "dA", "dbias"]
@@ -222,3 +233,154 @@ def test_chunk_kda_graph_multi_replay_varlen(gate, safe_gate, hv):
             if r is None:
                 continue
             assert_close(f"{tag}::{name}", r, g, 2e-3)
+
+
+@pytest.mark.parametrize(("safe_gate", "hv"), [
+    pytest.param(False, H, id="gate_in_kernel"),
+    pytest.param(True, H, id="gate+safe_gate"),
+    pytest.param(True, 2 * H, id="gva_gate+safe"),
+])
+def test_chunk_kda_graph_partial_tokens(safe_gate, hv):
+    """Replay with total_tokens < T_static: padding rows must not pollute dA/dbias.
+
+    The capture config covers all T rows, so on a partial replay the padding rows
+    of intermediate buffers hold stale nonzero values. Full-tensor reductions in
+    kda_gate_bwd (dA/dbias) must still match the eager path run on real tokens only.
+    """
+    gate = True
+    cu = torch.tensor(_VARLEN_CONFIGS[0][1], dtype=torch.long, device=device)
+    inp0 = _rand_inputs(seed=0, gate=gate, safe_gate=safe_gate, hv=hv)
+    graph, leaves, _do, _dht, cap_o, cap_ht = _make_graphed(inp0, cu, gate, safe_gate)
+
+    update_names = ["q", "k", "v", "g", "beta", "h0", "A_log", "dt_bias"]
+    for seed, (tag, cucfg) in enumerate(_PARTIAL_CONFIGS, start=1):
+        n = cucfg[-1]
+        inp = _rand_inputs(seed=seed * 17, gate=gate, safe_gate=safe_gate, hv=hv)
+        for name in update_names:
+            leaves[name].data.copy_(inp[name])
+        _do.copy_(inp["do"])
+        _dht.copy_(inp["dht"])
+        cu.copy_(torch.tensor(cucfg, dtype=torch.long, device=device))
+
+        graph.replay()
+        torch.cuda.synchronize()
+
+        got = _graphed_outputs(leaves, gate, cap_o, cap_ht)
+        sliced = {k: v[:, :n] if k in ("q", "k", "v", "g", "beta", "do") else v for k, v in inp.items()}
+        ref = _eager(sliced, torch.tensor(cucfg, dtype=torch.long, device=device), gate, safe_gate)
+        for name, r, g in zip(_OUT_NAMES, ref, got):
+            if r is None:
+                continue
+            if name in ("o", "dq", "dk", "dv", "dg", "db"):
+                g = g[:, :n]
+            assert_close(f"partial::{tag}::{name}", r, g, 2e-3)
+
+
+def _eager_cp(inp, cucfg, gate):
+    """Eager CP reference: world_size=1 crosses no rank, so only real tokens matter."""
+    leaves = {n: inp[n].detach().clone().requires_grad_() for n in ("q", "k", "v", "g", "beta")}
+    extra = {}
+    if gate:
+        leaves["A_log"] = inp["A_log"].detach().clone().requires_grad_()
+        leaves["dt_bias"] = inp["dt_bias"].detach().clone().requires_grad_()
+        extra = dict(A_log=leaves["A_log"], dt_bias=leaves["dt_bias"])
+    cu = torch.tensor(cucfg, dtype=torch.long, device=device)
+    o, _ = chunk_kda(
+        q=leaves["q"],
+        k=leaves["k"],
+        v=leaves["v"],
+        g=leaves["g"],
+        beta=leaves["beta"],
+        cp_context=build_cp_context(cu, group=dist.group.WORLD),
+        use_gate_in_kernel=gate,
+        **extra,
+    )
+    (o * inp["do"]).sum().backward()
+    out = [o.detach(), leaves["q"].grad, leaves["k"].grad, leaves["v"].grad, leaves["g"].grad, leaves["beta"].grad]
+    out += [leaves["A_log"].grad, leaves["dt_bias"].grad] if gate else [None, None]
+    return out
+
+
+@pytest.mark.skipif(not dist.is_available(), reason="requires torch.distributed")
+def test_chunk_kda_graph_cp_world1():
+    """world_size=1 CP + graph: exercises the recorded all-gather and device-side CP metadata.
+
+    A single rank is both first and last (pre/post_num_ranks = 0), so no state crosses
+    ranks and the graph-mode CP branch must match the eager CP branch. The context is
+    built once around the persistent buffers: rebuilding it per step would D2H-sync,
+    which capture forbids. Multi-rank numerics are covered by tests/context_parallel.
+    """
+    os.environ.setdefault("MASTER_ADDR", "localhost")
+    os.environ.setdefault("MASTER_PORT", "29617")
+    dist.init_process_group(backend="nccl", rank=0, world_size=1)
+    try:
+        gate = True
+        cu = torch.tensor(_VARLEN_CONFIGS[0][1], dtype=torch.long, device=device)
+        pre_dev = torch.zeros(1, dtype=torch.int32, device=device)
+        post_dev = torch.zeros(1, dtype=torch.int32, device=device)
+        base = build_cp_context(cu, group=dist.group.WORLD)
+        ctx = FLACPContext(
+            group=dist.group.WORLD,
+            cu_seqlens=cu,
+            cu_seqlens_cpu=base.cu_seqlens_cpu,
+            is_last_rank=base.is_last_rank,
+            pre_num_ranks=base.pre_num_ranks,
+            is_first_rank=base.is_first_rank,
+            post_num_ranks=base.post_num_ranks,
+            pre_num_ranks_dev=pre_dev,
+            post_num_ranks_dev=post_dev,
+        )
+
+        inp0 = _rand_inputs(seed=0, gate=gate, safe_gate=False)
+        names = ["q", "k", "v", "g", "beta", "A_log", "dt_bias"]
+        leaves = {n: inp0[n].detach().clone().requires_grad_() for n in names}
+        do = inp0["do"].detach().clone()
+
+        def step():
+            for t in leaves.values():
+                if t.grad is not None:
+                    t.grad.zero_()
+            o, _ = chunk_kda(
+                q=leaves["q"],
+                k=leaves["k"],
+                v=leaves["v"],
+                g=leaves["g"],
+                beta=leaves["beta"],
+                cp_context=ctx,
+                use_gate_in_kernel=gate,
+                A_log=leaves["A_log"],
+                dt_bias=leaves["dt_bias"],
+                use_graph=True,
+                max_num_seqs=MAX_NUM_SEQS,
+            )
+            (o * do).sum().backward()
+            return o.detach().clone()
+
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(s):
+            for _ in range(3):
+                step()
+        torch.cuda.current_stream().wait_stream(s)
+
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            cap_o = step()
+
+        names_out = ["o", "dq", "dk", "dv", "dg", "db", "dA", "dbias"]
+        for seed, (tag, cucfg) in enumerate(_VARLEN_CONFIGS, start=1):
+            inp = _rand_inputs(seed=seed * 17, gate=gate, safe_gate=False)
+            for n in names:
+                leaves[n].data.copy_(inp[n])
+            do.copy_(inp["do"])
+            cu.copy_(torch.tensor(cucfg, dtype=torch.long, device=device))
+
+            graph.replay()
+            torch.cuda.synchronize()
+
+            got = [cap_o] + [leaves[n].grad for n in names]
+            ref = _eager_cp(inp, cucfg, gate)
+            for name, r, g in zip(names_out, ref, got):
+                assert_close(f"cp_world1::{tag}::{name}", r, g, 2e-3)
+    finally:
+        dist.destroy_process_group()

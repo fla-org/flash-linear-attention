@@ -554,7 +554,10 @@ def chunk_kda_fwd_intra_npu(
     chunk_indices: torch.LongTensor | None = None,
     safe_gate: bool = False,
     disable_recompute: bool = False,
+    use_graph: bool = False,
 ):
+    if use_graph:
+        raise NotImplementedError("use_graph is not supported on the Ascend NPU backend")
     B, T, H, K, HV = *k.shape, gk.shape[2]
     BT = chunk_size
     if BT not in (32, 64):
@@ -1102,7 +1105,10 @@ def chunk_kda_bwd_intra_npu(
     chunk_indices: torch.LongTensor | None = None,
     chunk_size: int = 64,
     safe_gate: bool = False,
+    use_graph: bool = False,
 ):
+    if use_graph:
+        raise NotImplementedError("use_graph is not supported on the Ascend NPU backend")
     B, T, H, K, HV = *k.shape, g.shape[2]
     BT = chunk_size
     BC = min(_BWD_INTRA_BC, BT)

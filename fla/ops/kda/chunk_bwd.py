@@ -568,6 +568,7 @@ def chunk_kda_bwd(
             context=cp_context,
             chunk_size=chunk_size,
             state_v_first=state_v_first,
+            use_graph=use_graph,
         )
 
     dh, dh0, dv = chunk_gated_delta_rule_bwd_dhu(

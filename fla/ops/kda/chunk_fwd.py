@@ -94,6 +94,7 @@ def chunk_kda_fwd(
             context=cp_context,
             chunk_size=chunk_size,
             state_v_first=state_v_first,
+            use_graph=use_graph,
         )
 
     h, v_new, final_state = chunk_gated_delta_rule_fwd_h(

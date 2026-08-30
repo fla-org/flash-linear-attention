@@ -425,7 +425,10 @@ def chunk_gla_fwd_o_gk_npu(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
+    use_graph: bool = False,
 ):
+    if use_graph:
+        raise NotImplementedError("use_graph is not supported on the Ascend NPU backend")
     B, T, H, K, HV, V = *q.shape, v.shape[2], v.shape[-1]
     BT = chunk_size
 

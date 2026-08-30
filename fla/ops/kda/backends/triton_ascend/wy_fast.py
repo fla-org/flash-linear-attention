@@ -244,7 +244,10 @@ def recompute_w_u_fwd_kda_npu(
     q: torch.Tensor | None = None,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
+    use_graph: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+    if use_graph:
+        raise NotImplementedError("use_graph is not supported on the Ascend NPU backend")
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
     BT = A.shape[-1]

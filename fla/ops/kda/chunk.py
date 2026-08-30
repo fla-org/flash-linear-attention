@@ -310,9 +310,19 @@ def chunk_kda(
             - ``initial_state`` and the incoming ``dht`` gradient (when used) shaped
               ``[max_num_seqs, ...]``.
             - the captured step warmed up eagerly beforehand so that kernel autotuning
-              happens outside the graph.
+              (and, with ``cp_context``, NCCL communicator setup) happens outside the graph.
 
-            ``cp_context`` and ``disable_recompute=True`` are not supported. Default: ``False``.
+            With ``cp_context``, the cross-rank state all-gathers are recorded into the
+            graph, which additionally requires:
+
+            - a graph-capturable (non-blocking) NCCL communicator, with all ranks
+              capturing and replaying the same collectives in the same order;
+            - ``cp_context.cu_seqlens`` being the persistent padded buffer, refreshed
+              in place before each replay;
+            - ``cp_context.pre_num_ranks_dev``/``post_num_ranks_dev``, persistent int32
+              device scalars refreshed in place before each replay.
+
+            ``disable_recompute=True`` is not supported. Default: ``False``.
         max_num_seqs (Optional[int]):
             Static upper bound of the sequence count used together with ``use_graph``.
             Defaults to ``cu_seqlens.shape[0] - 1``. Default: ``None``.

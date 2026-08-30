@@ -269,7 +269,8 @@ def chunk_local_cumsum_scalar(
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
-    g_org, g = g, torch.empty_like(g, dtype=output_dtype or g.dtype)
+    # graph 模式下未覆盖行须为 0：kda_gate_bwd 对输出做全量归约，脏行会污染 dA/dbias
+    g_org, g = g, (torch.zeros_like if use_graph else torch.empty_like)(g, dtype=output_dtype or g.dtype)
     grid = (NT, B * H)
     chunk_local_cumsum_scalar_kernel[grid](
         s=g_org,
@@ -309,7 +310,8 @@ def chunk_local_cumsum_vector(
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     assert chunk_size == 2**(chunk_size.bit_length()-1), "chunk_size must be a power of 2"
 
-    g_org, g = g, torch.empty_like(g, dtype=output_dtype or g.dtype)
+    # graph 模式下未覆盖行须为 0：kda_gate_bwd 对输出做全量归约，脏行会污染 dA/dbias
+    g_org, g = g, (torch.zeros_like if use_graph else torch.empty_like)(g, dtype=output_dtype or g.dtype)
     def grid(meta): return (triton.cdiv(meta['S'], meta['BS']), NT, B * H)
     # keep cummulative normalizer in fp32
     # this kernel is equivalent to

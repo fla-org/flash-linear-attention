@@ -319,6 +319,7 @@ def pre_process_fwd_kernel_merged(
 
 @triton.heuristics({
     'HAS_H0': lambda args: args['h0'] is not None,
+    'HAS_H_SEQ_IDX': lambda args: args['h_seq_idx'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -340,6 +341,7 @@ def merge_fwd_bwd_kernel(
     init_offsets,        # None for CP, [num_split_seqs+1] for intracard
     h0_seq_ids,          # None for CP, [num_split_seqs] for intracard
     h0,                  # None or [N_orig, HV, K, V] for intracard (or [V, K] when transposed)
+    h_seq_idx,           # None, or a device scalar selecting the target sequence row of h (graph replay)
     HV: tl.constexpr,
     K: tl.constexpr,
     V: tl.constexpr,
@@ -349,8 +351,10 @@ def merge_fwd_bwd_kernel(
     INTRACARD_MODE: tl.constexpr,          # True: intracard mode, False: CP mode
     NUM_SEQ_ENTRIES,         # num_split_seqs for intracard
     HAS_H0: tl.constexpr,                  # Heuristic: whether h0 is provided
+    HAS_H_SEQ_IDX: tl.constexpr,           # Heuristic: whether h_seq_idx is provided
     STATE_V_FIRST: tl.constexpr = False,  # When True, h0/h use [V, K] layout; ag_hm always [K, V+K]
     AFFINE_CHAIN_PRECISION: tl.constexpr = None,  # input_precision for M@h in the state update (h' = M @ h + he)
+    NUM_RANKS_ON_DEVICE: tl.constexpr = False,  # CP mode: load pre_or_post_num_ranks from a device tensor
 ):
     """
     Unified merge kernel for both CP and Intra-card modes.
@@ -434,7 +438,12 @@ def merge_fwd_bwd_kernel(
     else:
         # CP mode
         i_h = tl.program_id(1)
-        num_ranks = pre_or_post_num_ranks.to(tl.int32)
+        if HAS_H_SEQ_IDX:
+            h += tl.load(h_seq_idx).to(tl.int64) * HV * K * V
+        if NUM_RANKS_ON_DEVICE:
+            num_ranks = tl.load(pre_or_post_num_ranks).to(tl.int32)
+        else:
+            num_ranks = pre_or_post_num_ranks.to(tl.int32)
         h += i_h * K * V
         ag_hm += i_h * K * (K + V)
         stride = HV * K * (K + V)
@@ -764,6 +773,7 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
     cu_seqlens: torch.LongTensor | None = None,
     initial_state: torch.Tensor | None = None,
     context: FLACPContext = None,
+    use_graph: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if context is None or context.group is None:
         return initial_state
@@ -792,7 +802,16 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
         initial_state = k.new_zeros(N, HV, V, K, dtype=torch.float32)
     else:
         initial_state = k.new_zeros(N, HV, K, V, dtype=torch.float32)
-    if not context.is_last_rank:
+    cu_last = cu_seqlens[-2:]
+    if use_graph:
+        assert context.pre_num_ranks_dev is not None, "use_graph with CP requires context.pre_num_ranks_dev"
+        # last non-empty sequence window, on-device; zero-length tail padding would
+        # otherwise make cu_seqlens[-2:] point at a padding sequence
+        i_last = (cu_seqlens[1:] > cu_seqlens[:-1]).sum() - 1
+        cu_last = cu_seqlens.index_select(0, torch.stack((i_last, i_last + 1)))
+    # graph mode always launches: a last rank's hm is never read, but the all-gather
+    # needs every rank, and host-side flags are frozen at capture
+    if use_graph or not context.is_last_rank:
         BLOCK_SIZE = 32 if K <= 64 else 64
         grid = (triton.cdiv(V, BLOCK_SIZE) + triton.cdiv(K, BLOCK_SIZE), HV)
         # For DPLR, v provides the original v for computing h contributions,
@@ -806,7 +825,7 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
             bg=bg,
             u=u,
             hm=hm,
-            cu_seqlens=cu_seqlens[-2:],
+            cu_seqlens=cu_last,
             T=T,
             H=H,
             HV=HV,
@@ -822,17 +841,19 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
             ),
         )
     ag_hm, _ = all_gather_into_tensor(hm, group=context.group)
-    if not context.is_first_rank:
+    # a zero num_ranks merge just re-stores the zeros initial_state[0] already holds
+    if use_graph or not context.is_first_rank:
         def grid(meta): return (triton.cdiv(V, meta['BV']), HV)
         merge_fwd_bwd_kernel[grid](
             h=initial_state[0],
             ag_hm=ag_hm,
-            pre_or_post_num_ranks=context.pre_num_ranks,
+            pre_or_post_num_ranks=context.pre_num_ranks_dev if use_graph else context.pre_num_ranks,
             rank=rank,
             seq_offsets=None,
             init_offsets=None,
             h0_seq_ids=None,
             h0=None,
+            h_seq_idx=None,
             HV=HV,
             K=K,
             V=V,
@@ -845,6 +866,7 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
                 "tf32x3" if use_tf32x3_affine_chain and IS_TF32_SUPPORTED
                 else ("ieee" if not IS_TF32_SUPPORTED else None)
             ),
+            NUM_RANKS_ON_DEVICE=use_graph,
         )
     return initial_state
 
@@ -865,6 +887,7 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
     initial_state: torch.Tensor | None = None,
     context: FLACPContext | None = None,
     chunk_size: int = 64,
+    use_graph: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if context is None or context.group is None:
         return dht, initial_state
@@ -894,7 +917,9 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
     else:
         dht = q.new_zeros(N, HV, K, V, dtype=torch.float32)
 
-    if not context.is_first_rank:
+    # graph mode always launches: a first rank's dhm is never read, but the all-gather
+    # needs every rank, and host-side flags are frozen at capture
+    if use_graph or not context.is_first_rank:
         BLOCK_SIZE = 32 if K <= 64 else 64
         grid = (triton.cdiv(V, BLOCK_SIZE) + triton.cdiv(K, BLOCK_SIZE), HV)
         pre_process_bwd_kernel_merged[grid](
@@ -925,17 +950,28 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
 
     ag_dhm, _ = all_gather_into_tensor(dhm, group=context.group)
 
-    if not context.is_last_rank:
+    # a zero num_ranks merge just re-stores the zeros dht already holds
+    if use_graph or not context.is_last_rank:
+        h_seq_idx = None
+        h = dht[-1]
+        if use_graph:
+            assert context.post_num_ranks_dev is not None, "use_graph with CP requires context.post_num_ranks_dev"
+            # merge target is the last non-empty sequence; zero-length tail padding
+            # would otherwise make dht[-1] a padding row
+            h_seq_idx = (cu_seqlens[1:] > cu_seqlens[:-1]).sum() - 1
+            h = dht
+
         def grid(meta): return (triton.cdiv(V, meta['BV']), HV)
         merge_fwd_bwd_kernel[grid](
-            h=dht[-1],
+            h=h,
             ag_hm=ag_dhm,
-            pre_or_post_num_ranks=context.post_num_ranks,
+            pre_or_post_num_ranks=context.post_num_ranks_dev if use_graph else context.post_num_ranks,
             rank=rank,
             seq_offsets=None,
             init_offsets=None,
             h0_seq_ids=None,
             h0=None,
+            h_seq_idx=h_seq_idx,
             HV=HV,
             K=K,
             V=V,
@@ -948,6 +984,7 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
                 "tf32x3" if use_tf32x3_affine_chain and IS_TF32_SUPPORTED
                 else ("ieee" if not IS_TF32_SUPPORTED else None)
             ),
+            NUM_RANKS_ON_DEVICE=use_graph,
         )
 
     # initial_state is None in the CP mode
