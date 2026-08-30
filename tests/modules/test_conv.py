@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from einops import rearrange
 
 from fla.modules.convolution import ShortConvolution, causal_conv1d, causal_conv1d_update
-from fla.utils import assert_close, device
+from fla.utils import IS_NVIDIA, assert_close, device
 
 try:
     from causal_conv1d import causal_conv1d_fn
@@ -147,8 +147,11 @@ def test_conv(
     dtype: torch.dtype,
     backend: str,
 ):
-    if causal_conv1d_fn is None and backend == 'cuda':
-        pytest.skip("causal_conv1d is not installed for CUDA backend")
+    if backend == 'cuda':
+        if causal_conv1d_fn is None:
+            pytest.skip("causal_conv1d is not installed for CUDA backend")
+        if not IS_NVIDIA:
+            pytest.skip("CUDA backend requires an NVIDIA GPU")
     torch.manual_seed(42)
 
     x = torch.randn(B, T, D).to(device, dtype).requires_grad_(True)
@@ -219,8 +222,11 @@ def test_conv_varlen(
     dtype: torch.dtype,
     backend: str,
 ):
-    if causal_conv1d_fn is None and backend == 'cuda':
-        pytest.skip("causal_conv1d is not installed for CUDA backend")
+    if backend == 'cuda':
+        if causal_conv1d_fn is None:
+            pytest.skip("causal_conv1d is not installed for CUDA backend")
+        if not IS_NVIDIA:
+            pytest.skip("CUDA backend requires an NVIDIA GPU")
     torch.manual_seed(42)
     cu_seqlens = torch.cat([
         torch.tensor([0], dtype=torch.long),
@@ -373,8 +379,11 @@ def test_conv_with_cache_prefill_fwd(
     dtype: torch.dtype,
     backend: str,
 ):
-    if causal_conv1d_fn is None and backend == 'cuda':
-        pytest.skip("causal_conv1d is not installed for CUDA backend")
+    if backend == 'cuda':
+        if causal_conv1d_fn is None:
+            pytest.skip("causal_conv1d is not installed for CUDA backend")
+        if not IS_NVIDIA:
+            pytest.skip("CUDA backend requires an NVIDIA GPU")
     torch.manual_seed(42)
 
     x = torch.randn(B, T, D).to(device, dtype)
@@ -448,8 +457,11 @@ def test_conv_varlen_with_cache_prefill_fwd(
     dtype: torch.dtype,
     backend: str,
 ):
-    if causal_conv1d_fn is None and backend == 'cuda':
-        pytest.skip("causal_conv1d is not installed for CUDA backend")
+    if backend == 'cuda':
+        if causal_conv1d_fn is None:
+            pytest.skip("causal_conv1d is not installed for CUDA backend")
+        if not IS_NVIDIA:
+            pytest.skip("CUDA backend requires an NVIDIA GPU")
     torch.manual_seed(42)
 
     min_len_each = max(1, T // N)
@@ -543,8 +555,11 @@ def test_conv_decoding_with_cache(
     dtype: torch.dtype,
     backend: str,
 ):
-    if causal_conv1d_fn is None and backend == 'cuda':
-        pytest.skip("causal_conv1d is not installed for CUDA backend")
+    if backend == 'cuda':
+        if causal_conv1d_fn is None:
+            pytest.skip("causal_conv1d is not installed for CUDA backend")
+        if not IS_NVIDIA:
+            pytest.skip("CUDA backend requires an NVIDIA GPU")
     torch.manual_seed(42)
 
     x = torch.randn(B, 1, D).to(device, dtype)        # (B, 1, D)
@@ -816,6 +831,8 @@ def test_fast_conv_varlen(
     torch.manual_seed(42)
     if causal_conv1d_fn is None:
         pytest.skip("causal_conv1d is not installed for CUDA backend")
+    if not IS_NVIDIA:
+        pytest.skip("fast_causal_conv1d requires an NVIDIA GPU")
     assert has_residual is False
     from fla.modules.convolution import fast_causal_conv1d_fn
     cu_seqlens = torch.cat([
