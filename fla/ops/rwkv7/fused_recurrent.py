@@ -147,7 +147,9 @@ def fused_recurrent_rwkv7_fwd(
     B, T, H, K, V = *k.shape, v.shape[-1]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
     BK = triton.next_power_of_2(K)
-    IS_DECODE = (T == 1)
+    # For packed varlen inputs, decode only when every sequence has exactly one token:
+    # a zero-length sequence would otherwise read/write out of bounds in the decode branch.
+    IS_DECODE = (T == 1) and (cu_seqlens is None or bool((cu_seqlens.diff() == 1).all()))
 
     h0 = initial_state
     if not output_final_state:

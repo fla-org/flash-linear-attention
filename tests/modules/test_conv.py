@@ -1538,3 +1538,44 @@ def test_conv_non_contiguous_dy(B, T, D, W, activation, dtype):
     assert_close(" dx", x_ones.grad, x_sum.grad, 1e-3)
     assert_close(" dw", weight_ones.grad, weight_sum.grad, 1e-3)
     assert_close("dh0", h0_ones.grad, h0_sum.grad, 1e-3)
+
+
+def test_conv_varlen_decode_detection_with_zero_len_seq():
+    """A packed batch with a zero-length sequence must not be misdetected as a decode step."""
+    torch.manual_seed(42)
+    D, W = 16, 4
+    dtype = torch.float32
+    # lens [0, 2]: B*T == N would misfire into the decode shortcut, which ignores cu_seqlens.
+    cu_seqlens = torch.tensor([0, 0, 2], device=device, dtype=torch.int32)
+    N, T = 2, 2
+    x = torch.randn(1, T, D).to(device, dtype)
+
+    conv = ShortConvolution(
+        hidden_size=D,
+        kernel_size=W,
+        bias=False,
+        activation='silu',
+        device=device,
+        dtype=dtype,
+    )
+
+    cache = torch.randn(N, D, W - 1).to(device, dtype)
+    # reference: only the real sequence (index 1) is processed
+    xi = x[:, 0:2, :].transpose(1, 2)
+    ci = cache[1:2]
+    ref = causal_conv1d_ref_torch(
+        x=xi,
+        weight=rearrange(conv.weight, "d 1 w -> d w"),
+        bias=conv.bias,
+        initial_state=ci,
+        activation='silu',
+    ).transpose(1, 2)
+
+    zero_pad = torch.zeros(N, D, 1, device=device, dtype=dtype)
+    tri, _ = conv(
+        x,
+        cache=torch.cat([zero_pad, cache], dim=-1).clone(),
+        cu_seqlens=cu_seqlens,
+        output_final_state=True,
+    )
+    assert_close("varlen zero-len y", ref, tri, 1e-3)
