@@ -541,7 +541,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_oneslab_npu(
     STORE_FINAL_STATE: tl.constexpr,
     SAVE_NEW_VALUE: tl.constexpr,
 ):
-    """Aligned oneslab path: host NT constexpr, no K-slab/varlen/STATE_V_FIRST.
+    """Aligned oneslab path: NT computed at runtime (T // BT), no K-slab/varlen/STATE_V_FIRST.
 
     Oneslab is only launched when ``T % BT == 0`` and not varlen, so gates are
     always host-precomputed (``g``/``gk`` are never passed).
