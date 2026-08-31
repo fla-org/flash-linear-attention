@@ -347,6 +347,39 @@ register_op(OpConfig(
     category='gate_beta',
 ))
 
+register_op(OpConfig(
+    name='chunk_precond_gdn',
+    import_path='fla.ops.precond_gated_delta_rule',
+    inputs={
+        **_simple_qkv,
+        'g': TensorSpec(shape_BTH, transform=logsigmoid),
+        'beta': TensorSpec(shape_BTH, transform=sigmoid_transform),
+        'g_atk': TensorSpec(shape_BTH, transform=logsigmoid),
+        'beta_atk': TensorSpec(shape_BTH, transform=sigmoid_transform),
+        'log_atk_scale': TensorSpec(shape_H, dtype='float32'),
+    },
+    func_name='chunk_precond_gated_delta_rule',
+    extra_kwargs={'use_qk_l2norm_in_kernel': True, 'x': 1.5},
+    category='gate_beta',
+    test_file='tests/ops/test_precond_gated_delta.py',
+))
+
+register_op(OpConfig(
+    name='chunk_precond_kda',
+    import_path='fla.ops.precond_kda',
+    inputs={
+        **_simple_qkv,
+        'g': TensorSpec(shape_BTHD, transform=logsigmoid),
+        'beta': TensorSpec(shape_BTH, transform=sigmoid_transform),
+        'g_atk': TensorSpec(shape_BTH, transform=logsigmoid),
+        'beta_atk': TensorSpec(shape_BTH, transform=sigmoid_transform),
+        'log_atk_scale': TensorSpec(shape_H, dtype='float32'),
+    },
+    extra_kwargs={'x': 1.5},
+    category='gate_beta',
+    test_file='tests/ops/test_precond_kda.py',
+))
+
 # --- +head gate (g=[B,T,H] with logsigmoid) ---
 
 register_op(OpConfig(

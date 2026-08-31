@@ -87,7 +87,8 @@ def chunk_fwd_kernel_h_split(
         p_hr = hr + i_sh * K*V + o_k[:, None] * V + o_v[None, :]
         tl.store(p_hr, b_h.to(p_hr.dtype.element_ty), mask=m_kv)
     for i_t in range(tl.cdiv(i_s * S, BT), tl.cdiv(min(i_s * S + S, T), BT)):
-        o_t = i_t * BT + tl.arange(0, BT)
+        i_t_int64 = i_t.to(tl.int64)
+        o_t = i_t_int64 * BT + tl.arange(0, BT)
         m_t = o_t < T
         p_k = k + (bos*H + i_h) * K + o_k[:, None] + o_t[None, :] * (H*K)
         p_v = v + (bos*H + i_h) * V + o_t[:, None] * (H*V) + o_v[None, :]
@@ -95,14 +96,14 @@ def chunk_fwd_kernel_h_split(
         b_k = tl.load(p_k, mask=(o_k[:, None] < K) & m_t[None, :], other=0.0)
         # [BT, BV]
         b_v = tl.load(p_v, mask=m_t[:, None] & (o_v < V)[None, :], other=0.0)
-        last_idx = min(i_t * BT + BT, T) - 1
+        last_idx = min(i_t_int64 * BT + BT, T) - 1
 
         # scalar decay
         if USE_G:
             b_g_last = tl.load(g + bos * H + last_idx * H + i_h)
-            p_g = g + bos*H + (i_t * BT + tl.arange(0, BT)) * H + i_h
+            p_g = g + bos*H + (i_t_int64 * BT + tl.arange(0, BT)) * H + i_h
             b_h *= exp(b_g_last)
-            b_g = tl.load(p_g, mask=(i_t * BT + tl.arange(0, BT) < T), other=0.)
+            b_g = tl.load(p_g, mask=(i_t_int64 * BT + tl.arange(0, BT) < T), other=0.)
             b_v = (b_v * exp(b_g_last - b_g)[:, None]).to(b_v.dtype)
 
         # vector decay, h = Diag(gk) @ h
@@ -306,7 +307,8 @@ def chunk_bwd_kernel_dh_split(
         tl.store(p_dhr, b_dh.to(p_dhr.dtype.element_ty), mask=m_kv)
 
     for i_t in range(tl.cdiv(min(i_s * S + S, T), BT) - 1, tl.cdiv(i_s * S, BT) - 1, -1):
-        o_t = i_t * BT + tl.arange(0, BT)
+        i_t_int64 = i_t.to(tl.int64)
+        o_t = i_t_int64 * BT + tl.arange(0, BT)
         m_t = o_t < T
         p_q = q + (bos*HQ + i_hq) * K + o_k[:, None] + o_t[None, :] * (HQ*K)
         p_do = do + (bos*HQ + i_hq) * V + o_t[:, None] * (HQ*V) + o_v[None, :]
@@ -316,11 +318,11 @@ def chunk_bwd_kernel_dh_split(
         # [BT, BV]
         b_do = tl.load(p_do, mask=m_t[:, None] & (o_v < V)[None, :], other=0.0)
 
-        last_idx = min(i_t * BT + BT, T) - 1
+        last_idx = min(i_t_int64 * BT + BT, T) - 1
         if USE_G:
-            p_g = g + (bos + i_t * BT + tl.arange(0, BT)) * H + i_h
+            p_g = g + (bos + i_t_int64 * BT + tl.arange(0, BT)) * H + i_h
             b_g_last = tl.load(g + (bos + last_idx) * H + i_h)
-            b_g = tl.load(p_g, mask=(i_t * BT + tl.arange(0, BT) < T), other=0.)
+            b_g = tl.load(p_g, mask=(i_t_int64 * BT + tl.arange(0, BT) < T), other=0.)
             b_q = (b_q * exp(b_g)[None, :]).to(b_q.dtype)
             b_dh *= exp(b_g_last)
 

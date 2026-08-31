@@ -26,7 +26,8 @@ from fla.utils import input_guard
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
         "IS_CONTINUOUS_BATCHING": lambda args: args["ssm_state_indices"] is not None,
         "IS_SPEC_DECODING": lambda args: args["num_accepted_tokens"] is not None,
-        "HAS_DT_BIAS": lambda args: args["dt_bias"] is not None,
+        "HAS_A": lambda args: args["A_log"] is not None,
+        "HAS_BIAS": lambda args: args["dt_bias"] is not None,
         "USE_LOWER_BOUND": lambda args: args["lower_bound"] is not None,
     }
 )
@@ -67,7 +68,8 @@ def fused_recurrent_kda_fwd_kernel(
     IS_CONTINUOUS_BATCHING: tl.constexpr,
     IS_SPEC_DECODING: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
-    HAS_DT_BIAS: tl.constexpr,
+    HAS_A: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
     USE_GATE_IN_KERNEL: tl.constexpr,
     USE_LOWER_BOUND: tl.constexpr,
     APPLY_BETA_SIGMOID: tl.constexpr,
@@ -156,17 +158,17 @@ def fused_recurrent_kda_fwd_kernel(
             b_q = b_q / tl.sqrt(tl.sum(b_q * b_q) + 1e-6)
             b_k = b_k / tl.sqrt(tl.sum(b_k * b_k) + 1e-6)
         b_q = b_q * scale
-        b_g = tl.load(p_g, eviction_policy='evict_last').to(tl.float32)
+        b_g = tl.load(p_g, mask=mask_k, other=0, eviction_policy='evict_last').to(tl.float32)
 
         if USE_GATE_IN_KERNEL:
-            b_A = tl.load(A_log + i_hv).to(tl.float32)
+            b_A = tl.load(A_log + i_hv).to(tl.float32) if HAS_A else 1.0
 
-            if HAS_DT_BIAS:
+            if HAS_BIAS:
                 b_bias = tl.load(dt_bias + i_hv * K + o_k, mask=mask_k, other=0).to(tl.float32)
                 b_g = b_g + b_bias
 
             if USE_LOWER_BOUND:
-                b_gk = lower_bound * tl.sigmoid(exp(b_A) * b_g)
+                b_gk = lower_bound * tl.sigmoid((exp(b_A) if HAS_A else b_A) * b_g)
             else:
                 b_gk = -exp(b_A) * softplus(b_g)
         else:
@@ -368,10 +370,11 @@ def fused_recurrent_kda(
         beta (torch.Tensor):
             betas of shape `[B, T, HV]`.
         A_log (Optional[torch.Tensor]):
-            Decay parameter of shape `[HV]`. Required when `use_gate_in_kernel=True`.
+            Decay parameter of shape `[HV]`.
+            When `use_gate_in_kernel=True` together with `lower_bound`,
+            may be `None` to use `lower_bound * sigmoid(g + dt_bias)`.
         dt_bias (Optional[torch.Tensor]):
-            Bias added to `g` before activation, of shape `[HV]`.
-            Only used when `use_gate_in_kernel=True`.
+            Bias added to `g` before activation, of shape `[HV]`. Only used when `use_gate_in_kernel=True`.
         scale (Optional[float]):
             Scale factor for the RetNet attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
@@ -385,8 +388,8 @@ def fused_recurrent_kda(
             Whether to use L2 normalization in the kernel. Default: `False`.
         use_gate_in_kernel (Optional[bool]):
             Whether to compute the log-space KDA decay internally.
-            When `True`, `g` is the raw input and `A_log` must be provided; the kernel fuses
-            gate activation into the recurrence. Default: `False`.
+            When `True`, `g` is the raw input and the kernel fuses gate activation into the recurrence.
+            Default: `False`.
         use_beta_sigmoid_in_kernel (Optional[bool]):
             Whether to apply `torch.sigmoid(beta)` inside the kernel.
             - If `True`, the passed `beta` acts as the raw beta logits.

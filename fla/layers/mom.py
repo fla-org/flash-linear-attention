@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 from fla.layers.utils import (
     get_layer_cache,
     get_unpad_data,
+    get_unpad_indices_and_cu,
     index_first_axis,
     pad_input,
     repad_hidden_states,
@@ -271,15 +272,15 @@ def reconstruct(
 
     assert (indices >= 0).all(), "Indices should be non-negative"
 
-    resortd_x = torch.zeros((b * s * k, d), device=gathered_x.device, dtype=gathered_x.dtype).scatter_add_(
+    resorted_x = torch.zeros((b * s * k, d), device=gathered_x.device, dtype=gathered_x.dtype).scatter_add_(
         0,
         indices.reshape(-1).unsqueeze(-1).expand(-1, d),
         gathered_x,
     )
-    assert (indices < resortd_x.size(0)).all(), "Indices should be less than resortd_x size"
+    assert (indices < resorted_x.size(0)).all(), "Indices should be less than resorted_x size"
 
     inverse_indices = sorted_indices.argsort()
-    rearranged_x_flat = resortd_x[inverse_indices]
+    rearranged_x_flat = resorted_x[inverse_indices]
     restored_x = rearranged_x_flat.reshape((b, s * k, d))
     restored_x = restored_x.reshape(b, s, k, d) * routing_weights.reshape(b, s, k).unsqueeze(-1)
     restored_x = restored_x.sum(dim=2)
@@ -288,7 +289,7 @@ def reconstruct(
 
 class MomAttention(nn.Module):
     """
-    The layer implementaion for [MoM: Linear Sequence Modeling with Mixture-of-Memories](https://arxiv.org/abs/2502.13685).
+    The layer implementation for [MoM: Linear Sequence Modeling with Mixture-of-Memories](https://arxiv.org/abs/2502.13685).
     """
 
     def __init__(
@@ -338,7 +339,7 @@ class MomAttention(nn.Module):
         self.layer_idx = layer_idx
         self.silu = nn.SiLU()
 
-        assert mode in ['chunk', 'fused_recurrent'], f"Not suppoerted mode `{mode}`."
+        assert mode in ['chunk', 'fused_recurrent'], f"Not supported mode `{mode}`."
 
         self.q_proj = nn.Linear(hidden_size, self.key_dim, bias=False)
         self.gate = nn.Linear(self.hidden_size, self.num_memories, bias=False)
@@ -452,7 +453,12 @@ class MomAttention(nn.Module):
         if origin_cu_seqlens is not None:
             hidden_states, attention_mask = self.cu2pad(hidden_states, origin_cu_seqlens)
 
-        mode = 'fused_recurrent' if (hidden_states.shape[1] <= 64 and not self.training) else self.mode
+        if torch.is_grad_enabled():
+            mode = 'chunk'
+        elif hidden_states.shape[1] <= 64 and not self.training:
+            mode = 'fused_recurrent'
+        else:
+            mode = self.mode
         if self.training:
             assert mode == 'chunk', "Only chunk mode is supported in training."
 
@@ -660,7 +666,7 @@ class MomAttention(nn.Module):
         o = self.o_proj(o)
 
         if origin_cu_seqlens is not None:
-            indices, _, _ = get_unpad_data(attention_mask[:, -seq_len:])
+            indices, _ = get_unpad_indices_and_cu(attention_mask, seq_len)
             o = index_first_axis(rearrange(o, "b s ... -> (b s) ..."), indices).unsqueeze(0)
 
         return o, None, past_key_values, router_logits.view(-1, self.num_memories)
@@ -683,7 +689,12 @@ class MomAttention(nn.Module):
                 "Arbitrary attention masks of shape [batch_size, seq_len, seq_len] are not allowed."
             )
 
-        mode = 'fused_recurrent' if hidden_states.shape[1] <= 64 else self.mode
+        if torch.is_grad_enabled():
+            mode = 'chunk'
+        elif hidden_states.shape[1] <= 64:
+            mode = 'fused_recurrent'
+        else:
+            mode = self.mode
         if self.training:
             assert mode == 'chunk', "Only chunk mode is supported in training."
 

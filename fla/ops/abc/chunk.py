@@ -100,7 +100,8 @@ def chunk_abc_fwd_kernel_intra_K(
     BV: tl.constexpr,
     NC: tl.constexpr,
 ):
-    i_v, i_c, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    NV = tl.cdiv(V, BV)
+    i_v, i_c, i_bh = tl.program_id(0) % NV, (tl.program_id(0) // NV).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_t, i_i = i_c // NC, i_c % NC
 
     o_r = i_t * BT + i_i * BC + tl.arange(0, BC)
@@ -229,9 +230,10 @@ def chunk_abc_fwd_kernel_intra_V(
     BK: tl.constexpr,
     NC: tl.constexpr,
 ):
-    i_k, i_c, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    NK = tl.cdiv(K, BK)
+    i_k, i_c, i_bh = tl.program_id(0) % NK, (tl.program_id(0) // NK).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_t, i_i, i_j = i_c // (NC * NC), (i_c % (NC * NC)) // NC, (i_c % (NC * NC)) % NC
-    n_bh = tl.num_programs(2)
+    n_bh = tl.num_programs(1)
 
     o_q = i_t * BT + i_i * BC + tl.arange(0, BC)
     o_k = i_k * BK + tl.arange(0, BK)
@@ -529,7 +531,8 @@ def chunk_abc_bwd_kernel_intra_V(
     BK: tl.constexpr,
     NC: tl.constexpr,
 ):
-    i_k, i_c, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    NK = tl.cdiv(K, BK)
+    i_k, i_c, i_bh = tl.program_id(0) % NK, (tl.program_id(0) // NK).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_t, i_i = i_c // NC, i_c % NC
 
     o_r = i_t * BT + i_i * BC + tl.arange(0, BC)
@@ -636,9 +639,10 @@ def chunk_abc_bwd_kernel_intra_K(
     BV: tl.constexpr,
     NC: tl.constexpr,
 ):
-    i_v, i_c, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    NV = tl.cdiv(V, BV)
+    i_v, i_c, i_bh = tl.program_id(0) % NV, (tl.program_id(0) // NV).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_t, i_i, i_j = i_c // (NC * NC), (i_c % (NC * NC)) // NC, (i_c % (NC * NC)) % NC
-    n_bh = tl.num_programs(2)
+    n_bh = tl.num_programs(1)
 
     o_r = i_t * BT + i_i * BC + tl.arange(0, BC)
     o_v = i_v * BV + tl.arange(0, BV)
@@ -801,7 +805,8 @@ def chunk_abc_bwd_kernel_intra_KV(
     BV: tl.constexpr,
     NC: tl.constexpr,
 ):
-    i_v, i_c, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    NV = tl.cdiv(V, BV)
+    i_v, i_c, i_bh = tl.program_id(0) % NV, (tl.program_id(0) // NV).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_t, i_i = i_c // NC, i_c % NC
 
     o_r = i_t * BT + i_i * BC + tl.arange(0, BC)
@@ -904,7 +909,8 @@ def chunk_abc_bwd_kernel_rcum_intra(
     BS: tl.constexpr,
     NC: tl.constexpr,
 ):
-    i_s, i_c, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    NS = tl.cdiv(S, BS)
+    i_s, i_c, i_bh = tl.program_id(0) % NS, (tl.program_id(0) // NS).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_t, i_i = i_c // NC, i_c % NC
 
     o_i = tl.arange(0, BC)
@@ -1014,7 +1020,7 @@ class ChunkABCFunction(torch.autograd.Function):
             num_stages=num_stages,
         )
         ok0 = torch.empty_like(s)
-        grid = (NM, NT * NC, B * H)
+        grid = (NM * NT * NC, B * H)
         chunk_abc_fwd_kernel_intra_K[grid](
             s, z, ok0, Ak,
             T=T, V=M, BT=BT, BC=BC, BV=BM, NC=NC,
@@ -1037,7 +1043,7 @@ class ChunkABCFunction(torch.autograd.Function):
             ht=final_state[1] if final_state is not None else None,
         )
         Av = q.new_zeros(NM, B, H, T, BT)
-        grid = (NM, NT * NC * NC, B * H)
+        grid = (NM * NT * NC * NC, B * H)
         chunk_abc_fwd_kernel_intra_V[grid](
             qv, s, z, Av,
             scale=scale,
@@ -1102,7 +1108,7 @@ class ChunkABCFunction(torch.autograd.Function):
                 num_warps=num_warps,
                 num_stages=num_stages,
             )
-            grid = (NS, NT * NC, B * H)
+            grid = (NS * NT * NC, B * H)
             chunk_abc_bwd_kernel_rcum_intra[grid](
                 s, z, ss, doo,
                 T=T, S=S, BT=BT, BC=BC, BS=BS, NC=NC,
@@ -1134,7 +1140,7 @@ class ChunkABCFunction(torch.autograd.Function):
         dv = dv.sum(0)
         dp0 = torch.empty_like(p)
         dsv0 = s.new_zeros(s.shape, dtype=torch.float)
-        grid = (NM, NT * NC, B * H)
+        grid = (NM * NT * NC, B * H)
         chunk_abc_bwd_kernel_intra_V[grid](
             qv, s, z, dAv, dp0, dsv0,
             T=T, K=M, BT=BT, BC=BC, BK=BM, NC=NC,
@@ -1156,7 +1162,7 @@ class ChunkABCFunction(torch.autograd.Function):
             normk=False,
         )
         dAk = q.new_zeros(NM, B, H, T, BT)
-        grid = (NM, NT * NC * NC, B * H)
+        grid = (NM * NT * NC * NC, B * H)
         chunk_abc_bwd_kernel_intra_K[grid](
             s, z, dok, dAk,
             scale=scale,
@@ -1181,7 +1187,7 @@ class ChunkABCFunction(torch.autograd.Function):
         Ak = Ak.sum(0)
         dsk1 = dsk1.sum(0)
         dsk0 = torch.empty_like(s, dtype=torch.float)
-        grid = (NM, NT * NC, B * H)
+        grid = (NM * NT * NC, B * H)
         chunk_abc_bwd_kernel_intra_KV[grid](
             s, z, Ak, dok, dsk0,
             T=T, V=M, BT=BT, BC=BC, BV=BM, NC=NC,
@@ -1202,7 +1208,7 @@ def chunk_abc(
     s: torch.Tensor,
     initial_state: tuple[torch.Tensor] | None = None,
     output_final_state: bool = False,
-    head_first: bool = False,
+    **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
@@ -1218,9 +1224,6 @@ def chunk_abc(
             Initial states of shape `[B, H, K, M]` and `[B, H, M, V]`. Default: `None`.
         output_final_state (Optional[bool]):
             Whether to output the final state of shape `[B, H, K, M]` and `[B, H, M, V]`. Default: `False`.
-        head_first (Optional[bool]):
-            Whether the inputs are in the head-first format. Default: `False`.
-            This argument has been deprecated.
 
     Returns:
         o (torch.Tensor):
@@ -1228,9 +1231,11 @@ def chunk_abc(
         final_state (torch.Tensor):
             Final state of shape `[B, H, K, M]` and `[B, H, M, V]` if `output_final_state=True` else `None`.
     """
-    if not head_first:
-        q, k, v, s = map(lambda x: x.transpose(1, 2), (q, k, v, s))
+    if 'head_first' in kwargs:
+        raise DeprecationWarning(
+            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
+        )
+    q, k, v, s = map(lambda x: x.transpose(1, 2), (q, k, v, s))
     o, final_state = ChunkABCFunction.apply(q, k, v, s, initial_state, output_final_state)
-    if not head_first:
-        o = o.transpose(1, 2)
+    o = o.transpose(1, 2)
     return o, final_state

@@ -11,6 +11,7 @@ import inspect
 import logging
 import os
 import shutil
+import sys
 from importlib.util import find_spec
 from pathlib import Path
 
@@ -18,6 +19,7 @@ import triton
 from packaging import version as package_version
 
 from ._config import FLA_CACHE_RESULTS
+from ._device import IS_NPU
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +29,34 @@ TRITON_ABOVE_3_7_1 = package_version.parse(triton.__version__) >= package_versio
 
 SUPPORTS_AUTOTUNE_CACHE = "cache_results" in inspect.signature(triton.autotune).parameters
 autotune_cache_kwargs = {"cache_results": FLA_CACHE_RESULTS} if SUPPORTS_AUTOTUNE_CACHE else {}
+
+
+def ascend_compile_kwargs(*, blacklist_auto_blockify: bool = False) -> dict:
+    """Return NPU Triton launch kwargs that disable auto-multi-buffer.
+
+    Empty on non-NPU devices. When ``blacklist_auto_blockify`` is set, also
+    disable AutoBlockify if the installed compiler exposes that option.
+    """
+    if not IS_NPU:
+        return {}
+    kwargs = {'multibuffer': False}
+    if blacklist_auto_blockify:
+        try:
+            from triton.backends.ascend.compiler import NPUOptions
+        except ImportError:
+            return kwargs
+        if 'has_auto_blockify_blacklist_op' in getattr(NPUOptions, '__dataclass_fields__', {}):
+            kwargs['has_auto_blockify_blacklist_op'] = True
+    return kwargs
+
+
+# expose extra.cann as extra.ascend for torch_npu inductor
+try:
+    import triton.language as tl
+    if not hasattr(tl.extra, 'ascend') and hasattr(tl.extra, 'cann'):
+        tl.extra.ascend = sys.modules['triton.language.extra.ascend'] = tl.extra.cann
+except (ImportError, AttributeError):
+    logger.debug("could not alias triton.language.extra.cann as extra.ascend")
 
 
 @functools.cache

@@ -84,8 +84,8 @@ def chunk_kda_fwd_kernel_intra_token_parallel_npu(
                     left = mid + 1
         i_n = left
 
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-        T = eos - bos
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = (eos - bos).to(tl.int32)
         i_t = i_tg - bos
     else:
         bos = (i_tg // T) * T

@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import math
 import warnings
 from typing import TYPE_CHECKING
 
@@ -54,8 +55,12 @@ class ABCAttention(nn.Module):
         self.expand_k = expand_k
         self.expand_v = expand_v
         self.num_heads = num_heads
-        self.key_dim = int(self.hidden_size * self.expand_k)
-        self.value_dim = int(self.hidden_size * self.expand_v)
+        key_dim, value_dim = hidden_size * expand_k, hidden_size * expand_v
+        self.key_dim, self.value_dim = round(key_dim), round(value_dim)
+        assert math.isclose(key_dim, self.key_dim), f"`hidden_size * expand_k` must be an integer, got {key_dim}."
+        assert math.isclose(value_dim, self.value_dim), f"`hidden_size * expand_v` must be an integer, got {value_dim}."
+        assert self.key_dim % num_heads == 0, f"key dim must be divisible by num_heads of {num_heads}"
+        assert self.value_dim % num_heads == 0, f"value dim must be divisible by num_heads of {num_heads}"
         self.head_k_dim = self.key_dim // self.num_heads
         self.head_v_dim = self.value_dim // self.num_heads
 
@@ -232,5 +237,9 @@ class ABCAttention(nn.Module):
 
         return o, None, past_key_values
 
-    def state_size(self, seq_len: int = 2048):
-        return 2 * self.num_slots * self.hidden_size
+    def state_size(self, seq_len: int = 2048) -> int:
+        state_size = self.num_slots * (self.key_dim + self.value_dim)
+        for module in self.children():
+            if isinstance(module, ShortConvolution):
+                state_size += module.state_size
+        return state_size

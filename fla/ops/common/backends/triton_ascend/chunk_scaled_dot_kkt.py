@@ -16,53 +16,35 @@ import triton.language as tl
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp2
 from fla.utils import input_guard
-from fla.utils.ascend_ub_manager import (
-    ASCEND_MAX_GRID_DIM,
-    compute_row_tile_block_size,
-    max_grid_axis_chunks,
-)
+from fla.utils.ascend_ub_manager import compute_row_tile_block_size, get_npu_properties
 
-_NUM_WARPS = 4
-_BC = 16
-# One [BC,BC] fp32 tile + two [BC,BK] operand tiles.
-_KKT_MEM_MULT = 4.0
-_SAFETY_MARGIN = 0.80
-_FALLBACK_BK = 8
-_MAX_BK = 64
+# peak live fp32 tiles: b_A[BT,BT], b_k[BT,BK], tl.dot buffer; post-dot gate[BT,BT]
+_CHUNK_SCALED_DOT_KKT_MEM_MULT = 4.0
+_SAFETY_MARGIN = 0.85
+_FALLBACK_BK = 16
+_MAX_BK_FWD = 128
 
 
-def _get_bk(K: int) -> int:
+def _get_fwd_bk(BT: int, K: int) -> int:
+    """UB-safe BK tile size for chunk_scaled_dot_kkt_fwd on NPU."""
     return compute_row_tile_block_size(
-        _BC,
+        BT,
         K,
-        _KKT_MEM_MULT,
+        _CHUNK_SCALED_DOT_KKT_MEM_MULT,
         tiling_row=False,
         safety_margin=_SAFETY_MARGIN,
+        dtype_size=4,
         fallback=_FALLBACK_BK,
-        min_block=8,
-        max_block=min(_MAX_BK, triton.next_power_of_2(K)),
+        min_block=16,
+        max_block=min(_MAX_BK_FWD, triton.next_power_of_2(K)),
     )
 
 
-def _launch_kkt_kernel(kernel, *, NT: int, bh_total: int, kernel_kwargs: dict) -> None:
-    max_nt = max_grid_axis_chunks(NT, bh_total, max_grid=ASCEND_MAX_GRID_DIM)
-    chunk_indices = kernel_kwargs.get('chunk_indices')
-    cu_seqlens = kernel_kwargs.get('cu_seqlens')
-    for nt_off in range(0, NT, max_nt):
-        nt_len = min(max_nt, NT - nt_off)
-        if cu_seqlens is not None and chunk_indices is not None:
-            kernel_kwargs['chunk_indices'] = chunk_indices[nt_off:nt_off + nt_len]
-            kernel_kwargs['NT_OFFSET'] = 0
-        else:
-            kernel_kwargs['NT_OFFSET'] = nt_off
-        max_bh = max_grid_axis_chunks(bh_total, nt_len, max_grid=ASCEND_MAX_GRID_DIM)
-        for bh_off in range(0, bh_total, max_bh):
-            bh_len = min(max_bh, bh_total - bh_off)
-            kernel_kwargs['BH_OFFSET'] = bh_off
-            kernel[(nt_len, bh_len)](num_warps=_NUM_WARPS, **kernel_kwargs)
-
-
-@triton.jit(do_not_specialize=['T'])
+@triton.heuristics({
+    'USE_G': lambda args: args['g'] is not None,
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
+})
+@triton.jit(do_not_specialize=['T', 'B', 'task_num', 'num_core'])
 def chunk_scaled_dot_kkt_fwd_kernel_npu(
     k,
     g,
@@ -71,73 +53,68 @@ def chunk_scaled_dot_kkt_fwd_kernel_npu(
     cu_seqlens,
     chunk_indices,
     T,
+    B,
+    task_num: tl.int64,
+    num_core,
     H: tl.constexpr,
     HV: tl.constexpr,
     K: tl.constexpr,
     BT: tl.constexpr,
-    BC: tl.constexpr,
     BK: tl.constexpr,
-    USE_G: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    NT_OFFSET: tl.constexpr,
-    BH_OFFSET: tl.constexpr,
+    USE_G: tl.constexpr,
 ):
-    i_t = tl.program_id(0) + NT_OFFSET
-    i_bh = tl.program_id(1) + BH_OFFSET
-    i_b, i_h = i_bh // HV, i_bh % HV
-    if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-        T = eos - bos
-    else:
-        bos, eos = i_b * T, i_b * T + T
+    T = T.to(tl.int64)
+    bt_stride = B.to(tl.int64) * T
+    core_id = tl.program_id(0)
+    o_i = tl.arange(0, BT)
+    m_causal = o_i[:, None] > o_i[None, :]
 
-    if i_t * BT >= T:
-        return
-
-    k_base = k + (bos * H + i_h // (HV // H)) * K
-    A_base = A + (bos * HV + i_h) * BT
-    beta_base = beta + bos * HV + i_h
-    g_base = g + bos * HV + i_h
-
-    o_i = tl.arange(0, BC)
-    n_sub = BT // BC
-
-    for s in range(n_sub):
-        i_tc_s = i_t * BT + s * BC
-        m_s = (i_tc_s + o_i) < T
-        p_bs = tl.make_block_ptr(beta_base, (T,), (HV,), (i_tc_s,), (BC,), (0,))
-        b_bs = tl.load(p_bs, boundary_check=(0,))
-        if USE_G:
-            p_gs = tl.make_block_ptr(g_base, (T,), (HV,), (i_tc_s,), (BC,), (0,))
-            b_gs = tl.load(p_gs, boundary_check=(0,))
-
-        for c in range(s + 1):
-            i_tc_c = i_t * BT + c * BC
-            m_c = (i_tc_c + o_i) < T
-            b_A = tl.zeros([BC, BC], dtype=tl.float32)
-            for i_k in range(tl.cdiv(K, BK)):
-                p_ks = tl.make_block_ptr(k_base, (T, K), (H * K, 1), (i_tc_s, i_k * BK), (BC, BK), (1, 0))
-                p_kc = tl.make_block_ptr(k_base, (T, K), (H * K, 1), (i_tc_c, i_k * BK), (BC, BK), (1, 0))
-                b_ks = tl.load(p_ks, boundary_check=(0, 1))
-                b_kc = tl.load(p_kc, boundary_check=(0, 1))
-                b_A += tl.dot(b_ks, tl.trans(b_kc), allow_tf32=False)
+    for task_id in tl.range(core_id, task_num, num_core):
+        bh = B.to(tl.int64) * HV
+        i_t = task_id.to(tl.int64) // bh
+        i_bh = task_id.to(tl.int64) % bh
+        i_b, i_h = i_bh // HV, i_bh % HV
+        if IS_VARLEN:
+            i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+            bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+            T = eos - bos
+        else:
+            bos = i_b * T
+        o_t = i_t * BT + o_i
+        m_t = o_t < T
+        m_A = m_causal & (m_t[:, None] & m_t)
+        # make_block_ptr offsets must be 32-bit; keep 64-bit o_t for regular indexing.
+        t_off = (i_t * BT).to(tl.int32)
+        # 1-token chunks: strictly-lower-tri kkt is 0; T=1 block_ptr misaligns UB.
+        if i_t * BT + 1 < T:
+            p_b = tl.make_block_ptr(beta + i_h * bt_stride + bos, (T,), (1,), (t_off,), (BT,), (0,))
+            b_b = tl.load(p_b, boundary_check=(0,)).to(tl.float32)
 
             if USE_G:
-                p_gc = tl.make_block_ptr(g_base, (T,), (HV,), (i_tc_c,), (BC,), (0,))
-                b_gc = tl.load(p_gc, boundary_check=(0,))
-                b_gdiff = b_gs[:, None] - b_gc[None, :]
-                b_A *= exp2(b_gdiff)
-            b_A *= b_bs[:, None]
+                p_g = tl.make_block_ptr(g + i_h * bt_stride + bos, (T,), (1,), (t_off,), (BT,), (0,))
+                b_g = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
 
-            if s == c:
-                m_blk = (o_i[:, None] > o_i[None, :]) & (m_s[:, None] & m_s)
-            else:
-                m_blk = m_s[:, None] & m_c
-            b_A = tl.where(m_blk, b_A, 0)
+            b_A = tl.zeros([BT, BT], dtype=tl.float32)
+            for i_k in range(tl.cdiv(K, BK)):
+                p_k = tl.make_block_ptr(
+                    k + (bos * H + i_h // (HV // H)) * K, (T, K), (H * K, 1),
+                    (t_off, i_k * BK), (BT, BK), (1, 0),
+                )
+                b_k = tl.load(p_k, boundary_check=(0, 1)).to(tl.float32)
+                # ascend tl.dot may clobber lhs; keep rhs on the original tile.
+                b_k_lhs = b_k + 0.0
+                b_A += tl.dot(b_k_lhs, tl.trans(b_k), allow_tf32=False)
 
-            p_A = tl.make_block_ptr(A_base, (T, BT), (HV * BT, 1), (i_tc_s, c * BC), (BC, BC), (1, 0))
-            tl.store(p_A, b_A.to(p_A.dtype.element_ty), boundary_check=(0, 1))
+            if USE_G:
+                # mask first so upper-triangle g_i-g_j cannot overflow to inf.
+                b_g_diff = tl.where(m_A, b_g[:, None] - b_g[None, :], 0)
+                b_A *= exp2(b_g_diff)
+            b_A *= b_b[:, None]
+            b_A = tl.where(m_A, b_A, 0)
+
+            p_A = A + (bos * HV + i_h) * BT + o_t[:, None] * (BT * HV) + o_i[None, :]
+            tl.store(p_A, b_A.to(p_A.dtype.element_ty), mask=m_t[:, None])
 
 
 @input_guard
@@ -150,37 +127,56 @@ def chunk_scaled_dot_kkt_fwd_npu(
     output_dtype: torch.dtype = torch.float32,
     chunk_indices: torch.LongTensor | None = None,
 ) -> torch.Tensor:
+    r"""
+    Compute beta * K * K^T.
+
+    Args:
+        k (torch.Tensor):
+            The key tensor of shape `[B, T, H, K]` where `H` is the number of query/key heads.
+        g (torch.Tensor):
+            The cumulative sum of the gate tensor of shape `[B, T, HV]`. Default: `None`.
+        beta (torch.Tensor):
+            The beta tensor of shape `[B, T, HV]` where `HV` is the number of value/output heads.
+        cu_seqlens (torch.LongTensor):
+            The cumulative sequence lengths of the input tensor.
+            Default: None
+        chunk_size (int):
+            The chunk size. Default: 64.
+        output_dtype (torch.dtype):
+            The dtype of the output tensor. Default: `torch.float32`
+        chunk_indices (torch.LongTensor):
+            The chunk indices of the input tensor. Default: None.
+
+    Returns:
+        beta * K * K^T of shape `[B, T, HV, BT]` where `BT` is the chunk size.
+        For GVA, H < HV and HV % H == 0. For standard attention, H == HV.
+    """
     B, T, H, K, HV = *k.shape, beta.shape[2]
     BT = chunk_size
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     A = torch.zeros(B, T, HV, BT, device=k.device, dtype=output_dtype)
-    BK = _get_bk(K)
-    use_g = g is not None
-    g_arg = g if use_g else beta
-    _launch_kkt_kernel(
-        chunk_scaled_dot_kkt_fwd_kernel_npu,
-        NT=NT,
-        bh_total=B * HV,
-        kernel_kwargs={
-            'k': k,
-            'g': g_arg,
-            'beta': beta,
-            'A': A,
-            'cu_seqlens': cu_seqlens,
-            'chunk_indices': chunk_indices,
-            'T': T,
-            'H': H,
-            'HV': HV,
-            'K': K,
-            'BT': BT,
-            'BC': _BC,
-            'BK': BK,
-            'USE_G': use_g,
-            'IS_VARLEN': cu_seqlens is not None,
-            'NT_OFFSET': 0,
-            'BH_OFFSET': 0,
-        },
+    BK = _get_fwd_bk(BT, K)
+
+    num_core = get_npu_properties()['num_aicore']
+    g_arg = torch.permute(g, (2, 0, 1)).contiguous() if g is not None else g
+    beta_arg = torch.permute(beta, (2, 0, 1)).contiguous()
+    chunk_scaled_dot_kkt_fwd_kernel_npu[(num_core,)](
+        k=k,
+        g=g_arg,
+        beta=beta_arg,
+        A=A,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        T=T,
+        B=B,
+        task_num=NT * B * HV,
+        num_core=num_core,
+        H=H,
+        HV=HV,
+        K=K,
+        BT=BT,
+        BK=BK,
     )
     return A

@@ -12,6 +12,7 @@ from ._compat import (  # noqa: F401
     TRITON_ABOVE_3_4_0,
     TRITON_ABOVE_3_5_1,
     TRITON_ABOVE_3_7_1,
+    ascend_compile_kwargs,
     autotune_cache_kwargs,
     find_spec_cached,
     has_usable_nvcc,
@@ -58,6 +59,8 @@ from ._device import (  # noqa: F401
     device_torch_lib,
     get_all_max_shared_mem,
     get_available_device,
+    get_device_capability,
+    get_device_smem_optin,
     get_multiprocessor_count,
     map_triton_backend_to_torch_device,
 )

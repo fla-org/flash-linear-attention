@@ -82,9 +82,9 @@ def chunk_dplr_fwd_kernel_h(
         tl.store(p_h, b_h.to(p_h.dtype.element_ty), mask=m_h)
 
         b_hc = tl.zeros([BK, BV], dtype=tl.float32)
-        # since we need to make all DK in the SRAM. we face serve SRAM memory burden. By subchunking we allievate such burden
+        # since all DK values must fit in SRAM, subchunking alleviates the SRAM memory burden.
         for i_c in range(tl.cdiv(min(BT, T - i_t * BT), BC)):
-            o_c = i_t * BT + i_c * BC + tl.arange(0, BC)
+            o_c = i_t.to(tl.int64) * BT + i_c * BC + tl.arange(0, BC)
             m_c = o_c < T
             m_kc = (o_k[:, None] < K) & m_c[None, :]
             m_wc = m_c[:, None] & (o_k[None, :] < K)

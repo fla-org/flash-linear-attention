@@ -14,6 +14,9 @@ from fla.ops.utils.op import exp
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
+@triton.heuristics({
+    'STORE_FINAL_STATE': lambda args: args['hkt'] is not None,
+})
 @triton.jit
 def fused_recurrent_gsa_inference_kernel(
     q,
@@ -33,6 +36,7 @@ def fused_recurrent_gsa_inference_kernel(
     BK: tl.constexpr,
     BV: tl.constexpr,
     NG: tl.constexpr,
+    STORE_FINAL_STATE: tl.constexpr,
 ):
     i_bh = tl.program_id(0).to(tl.int64)
     i_bg = i_bh // NG
@@ -58,9 +62,10 @@ def fused_recurrent_gsa_inference_kernel(
         b_hk = b_hk * b_g[:, None] + b_k[None, :] * b_s[:, None]
         b_ok += tl.sum(b_hk * b_q[None, :], axis=1)
 
-        if i_bh % NG == 0:
-            p_hkt = hkt + i_bg * K * M + o_k[None, :] * M + tl.arange(0, M)[:, None]
-            tl.store(p_hkt, b_hk.to(p_hkt.dtype.element_ty), mask=mask_hk)
+        if STORE_FINAL_STATE:
+            if i_bh % NG == 0:
+                p_hkt = hkt + i_bg * K * M + o_k[None, :] * M + tl.arange(0, M)[:, None]
+                tl.store(p_hkt, b_hk.to(p_hkt.dtype.element_ty), mask=mask_hk)
 
     b_qv = tl.softmax(b_ok)
     for i_v in range(tl.cdiv(V, BV)):
@@ -80,9 +85,10 @@ def fused_recurrent_gsa_inference_kernel(
 
         tl.store(o + i_bh * V + o_v, b_ov.to(o.dtype.element_ty), mask=mask_v)
 
-        if i_bh % NG == 0:
-            p_hvt = hvt + i_bg * M * V + tl.arange(0, M)[None, :] * V + o_v[:, None]
-            tl.store(p_hvt, b_hv.to(p_hvt.dtype.element_ty), mask=mask_hv)
+        if STORE_FINAL_STATE:
+            if i_bh % NG == 0:
+                p_hvt = hvt + i_bg * M * V + tl.arange(0, M)[None, :] * V + o_v[:, None]
+                tl.store(p_hvt, b_hv.to(p_hvt.dtype.element_ty), mask=mask_hv)
 
 
 def fused_recurrent_gsa_inference(
@@ -107,10 +113,7 @@ def fused_recurrent_gsa_inference(
 
     hkt, hvt = None, None
     if output_final_state:
-        if NG == 1:
-            hkt, hvt = hk0, hv0
-        else:
-            hkt, hvt = q.new_empty(B, H, K, M, dtype=torch.float), q.new_empty(B, H, M, V, dtype=torch.float)
+        hkt, hvt = q.new_empty(B, H, K, M, dtype=torch.float), q.new_empty(B, H, M, V, dtype=torch.float)
 
     o = v.new_empty(B, T, HQ, V)
     grid = (B * HQ,)

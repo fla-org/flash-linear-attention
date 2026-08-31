@@ -38,7 +38,7 @@ BLOCK_K = 64
     key=["H", "K", "V"],
     **autotune_cache_kwargs,
 )
-@triton.jit(do_not_specialize=["T"])
+@triton.jit(do_not_specialize=["T", "output_T"])
 def chunkwise_fwd_kernel(
     q,
     k,
@@ -52,7 +52,10 @@ def chunkwise_fwd_kernel(
     offsets,
     new_offsets,
     cu_seqlens,
+    output_cu_seqlens,
+    stride_o_n,
     T,
+    output_T,
     H: tl.constexpr,
     K: tl.constexpr,
     V: tl.constexpr,
@@ -165,16 +168,23 @@ def chunkwise_fwd_kernel(
             p_kv_11 = h0 + ((i_n * L_IN + 11) * H + i_h) * K * V + o_kk[:, None] * V + o_v[None, :]
             kv_11 = tl.load(p_kv_11, mask=m_kv, other=0.0)
 
+    if not USE_INITIAL_STATE:
+        output_T = T
+    elif IS_VARLEN:
+        output_bos = tl.load(output_cu_seqlens + i_n).to(tl.int64)
+        output_eos = tl.load(output_cu_seqlens + i_n + 1).to(tl.int64)
+        output_T = (output_eos - output_bos).to(tl.int32)
+
     NT = tl.cdiv(T, BT)
     output_offset = -1 * (offset % BT)
     for i_t in range(NT):
-        b_h_ptrs = level_scales + ((bos + i_t * BT + i_idx) * H + i_h) * L + b_llut
+        b_h_ptrs = level_scales + ((bos + tl.minimum(i_t * BT + i_idx, T - 1)) * H + i_h) * L + b_llut
         b_h = tl.load(b_h_ptrs, mask=i_idx >= j_idx)
 
         o_t = (i_t * BT).to(tl.int64) + o_i
         o_to = o_t + output_offset
         m_t = o_t < T
-        m_to = (o_to >= 0) & (o_to < T)
+        m_to = (o_to >= 0) & (o_to < output_T)
         m_qk = m_t[:, None] & (o_kk[None, :] < K)
         m_kt = (o_kk[:, None] < K) & m_t[None, :]
         m_tv = m_t[:, None] & (o_v[None, :] < V)
@@ -183,7 +193,14 @@ def chunkwise_fwd_kernel(
         p_q = q + bos * K + o_t[:, None] * K + o_kk[None, :]
         p_k = k + bos * K + o_kk[:, None] + o_t[None, :] * K
         p_v = v + (bos * H + i_h) * V + o_t[:, None] * (H * V) + o_v[None, :]
-        p_o = o + ((bos * H + i_h) * (K // BK) + i_k) * V + o_to[:, None] * (H * (K // BK) * V) + o_v[None, :]
+        if USE_INITIAL_STATE:
+            if IS_VARLEN:
+                p_o = o + ((output_bos * H + i_h) * (K // BK) + i_k) * V
+            else:
+                p_o = o + i_n.to(tl.int64) * stride_o_n + (i_h * (K // BK) + i_k) * V
+        else:
+            p_o = o + ((bos * H + i_h) * (K // BK) + i_k) * V
+        p_o = p_o + o_to[:, None] * (H * (K // BK) * V) + o_v[None, :]
 
         b_g = tl.load(p_g, mask=m_t, other=0.0)
         b_q = tl.load(p_q, mask=m_qk, other=0.0)
@@ -414,7 +431,7 @@ def chunkwise_fwd_kernel(
 @triton.heuristics({
     "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
 })
-@triton.jit(do_not_specialize=["T"])
+@triton.jit(do_not_specialize=["T", "input_T"])
 def copy_input_kernel(
     q,
     k,
@@ -422,6 +439,7 @@ def copy_input_kernel(
     g,
     level_scales,
     cu_seqlens,
+    input_cu_seqlens,
     q_prev,
     k_prev,
     v_prev,
@@ -434,6 +452,7 @@ def copy_input_kernel(
     g_new,
     level_scales_new,
     T,
+    input_T,
     H: tl.constexpr,
     K: tl.constexpr,
     V: tl.constexpr,
@@ -450,9 +469,16 @@ def copy_input_kernel(
             tl.load(cu_seqlens + i_n).to(tl.int64),
             tl.load(cu_seqlens + i_n + 1).to(tl.int64),
         )
+        input_bos, input_eos = (
+            tl.load(input_cu_seqlens + i_n).to(tl.int64),
+            tl.load(input_cu_seqlens + i_n + 1).to(tl.int64),
+        )
         T = (eos - bos).to(tl.int32)
+        input_T = (input_eos - input_bos).to(tl.int32)
     else:
-        bos, eos = (i_n * T).to(tl.int64), (i_n * T + T).to(tl.int64)
+        bos = i_n.to(tl.int64) * T
+        eos = bos + T
+        input_bos = i_n.to(tl.int64) * input_T
 
     offset = tl.load(offsets + i_n)
     input_offset = -1 * (offset % BT)
@@ -465,16 +491,16 @@ def copy_input_kernel(
     for i_t in range(NT):
         o_t = (i_t * BT + input_offset).to(tl.int64) + o_i
         o_tn = (i_t * BT).to(tl.int64) + o_i
-        m_t = (o_t >= 0) & (o_t < T)
+        m_t = (o_t >= 0) & (o_t < input_T)
         m_tn = o_tn < T
         m_tk = m_t[:, None] & (o_k[None, :] < K)
         m_tv = m_t[:, None] & (o_v[None, :] < V)
         m_tnk = m_tn[:, None] & (o_k[None, :] < K)
         m_tnv = m_tn[:, None] & (o_v[None, :] < V)
-        p_g = g + bos * H + i_h + o_t * H
-        p_q = q + bos * K + o_t[:, None] * K + o_k[None, :]
-        p_k = k + bos * K + o_t[:, None] * K + o_k[None, :]
-        p_v = v + (bos * H + i_h) * V + o_t[:, None] * (H * V) + o_v[None, :]
+        p_g = g + input_bos * H + i_h + o_t * H
+        p_q = q + input_bos * K + o_t[:, None] * K + o_k[None, :]
+        p_k = k + input_bos * K + o_t[:, None] * K + o_k[None, :]
+        p_v = v + (input_bos * H + i_h) * V + o_t[:, None] * (H * V) + o_v[None, :]
         p_g_new = g_new + bos * H + i_h + o_tn * H
         p_q_new = q_new + bos * K + o_tn[:, None] * K + o_k[None, :]
         p_k_new = k_new + bos * K + o_tn[:, None] * K + o_k[None, :]
@@ -502,7 +528,7 @@ def copy_input_kernel(
         tl.store(p_v_new, b_v, mask=m_tnv)
 
         for i in range(L):
-            p_l = level_scales + (bos * H + i_h) * L + o_t[:, None] * (H * L) + i
+            p_l = level_scales + (input_bos * H + i_h) * L + o_t[:, None] * (H * L) + i
             p_l_new = level_scales_new + (bos * H + i_h) * L + o_tn[:, None] * (H * L) + i
             b_l = tl.load(p_l, mask=m_t[:, None], other=0.0)
             if i_t == 0:
@@ -857,7 +883,9 @@ def chunkwise_bwd_kernel_dkg(
     b_dg -= tl.sum(b_k * b_dk, axis=1)
     b_dg_last += tl.sum(b_dk * b_k)
 
-    b_dg = tl.where(o_i < BT - 1, b_dg, b_dg + b_dg_last)
+    # deposit the chunk-scalar gradient on the last LIVE row, the one `last_idx` selected the
+    # gate from; on a partial last chunk row BT - 1 is dead and the masked store drops it
+    b_dg = tl.where(o_t < last_idx, b_dg, b_dg + b_dg_last)
 
     tl.store(p_dg, b_dg, mask=m_t)
     tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), mask=m_tk)
@@ -986,7 +1014,7 @@ def chunkwise_bwd_kernel_diag(
     i_idx = o_i[:, None]  # BT x 1
     j_idx = o_i[None, :]  # 1 x BT
 
-    b_h_ptrs = l + ((bos + i_t * BT + i_idx) * H + i_h) * L + b_llut
+    b_h_ptrs = l + ((bos + tl.minimum(i_t * BT + i_idx, T - 1)) * H + i_h) * L + b_llut
     b_h = tl.load(b_h_ptrs, mask=i_idx >= j_idx)
 
     p_g = g + bos * H + i_h + o_t * H
@@ -1133,6 +1161,8 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
 
         h0 = initial_state.ht if initial_state is not None else None
         offsets = initial_state.offsets if initial_state is not None else None
+        original_cu_seqlens = cu_seqlens
+        original_T = T
 
         if cu_seqlens is None:
             NT = ceil_div(T + (torch.max(offsets) if offsets is not None else 0), BT)
@@ -1152,6 +1182,19 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
             MAX_LEVEL = ceil_log(NT, 2) - 1
             B = len(cu_seqlens) - 1
 
+        # Exact powers of two need one more level in the serialized state than in the current outputs.
+        if output_final_state:
+            if cu_seqlens is None:
+                max_sequence_length = T + (offsets.max().item() if offsets is not None else 0)
+            else:
+                sequence_lengths = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+                if offsets is not None:
+                    sequence_lengths = [length + offset for length, offset in zip(sequence_lengths, offsets.tolist())]
+                max_sequence_length = max(sequence_lengths)
+            completed_chunks = max_sequence_length // BT
+            if completed_chunks > 0:
+                MAX_LEVEL = max(MAX_LEVEL, math.floor(math.log2(completed_chunks)))
+
         if MAX_LEVEL > 10:
             raise ValueError("Sequence length must be less than 2**17")
 
@@ -1164,7 +1207,7 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
 
         if initial_state is not None:
             if cu_seqlens is not None:
-                cu_seqlens = cu_seqlens + F.pad(torch.cumsum(offsets % BT), (1, 0))
+                cu_seqlens = cu_seqlens + F.pad(torch.cumsum(offsets % BT, dim=0), (1, 0))
             else:
                 assert (offsets == offsets[0]).all()
                 T += offsets[0].item() % BT
@@ -1182,6 +1225,7 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
                 g=g,
                 level_scales=level_scales,
                 cu_seqlens=cu_seqlens,
+                input_cu_seqlens=original_cu_seqlens,
                 q_prev=initial_state.q_prev,
                 k_prev=initial_state.k_prev,
                 v_prev=initial_state.v_prev,
@@ -1194,6 +1238,7 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
                 level_scales_new=level_scales_new,
                 offsets=offsets,
                 T=T,
+                input_T=original_T,
                 H=H,
                 K=K,
                 V=V,
@@ -1214,6 +1259,8 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
         )
 
         new_offsets = torch.zeros((B,), dtype=torch.int32, device=v.device)
+        # Cache raw decay increments so a continued partial chunk is cumulatively summed exactly once.
+        g_for_state = g
         g = chunk_local_cumsum(g, chunk_size=BT, cu_seqlens=cu_seqlens)
 
         def grid(meta):
@@ -1237,7 +1284,10 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
             offsets=offsets,
             new_offsets=new_offsets,
             cu_seqlens=cu_seqlens,
+            output_cu_seqlens=original_cu_seqlens,
+            stride_o_n=o.stride(0),
             T=T,
+            output_T=original_T,
             H=H,
             K=K,
             V=V,
@@ -1263,7 +1313,7 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
                 q=q,
                 k=k,
                 v=v,
-                g=g,
+                g=g_for_state,
                 level_scales=level_scales,
                 cu_seqlens=cu_seqlens,
                 q_prev=q_prev,

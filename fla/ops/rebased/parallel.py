@@ -476,20 +476,22 @@ def parallel_rebased(
     use_scale: bool = True,
     use_normalize: bool = True,
     return_both: bool = False,
-    head_first: bool = False,
+    **kwargs,
 ):
+    if 'head_first' in kwargs:
+        raise DeprecationWarning(
+            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
+        )
     assert q.shape[-1] <= 128, "only support feature dim up to 128"
     if use_scale:
         scale = q.shape[-1] ** -0.5
     else:
         scale = 1
-    if not head_first:
-        q, k, v = map(lambda x: x.transpose(1, 2), (q, k, v))
+    q, k, v = map(lambda x: x.transpose(1, 2), (q, k, v))
     o, z = ParallelBasedFunction.apply(q, k, v, scale)
     if return_both:
         return o, z
     if use_normalize:
         o = o / (z[..., None] + eps)
-    if not head_first:
-        o = o.transpose(1, 2)
+    o = o.transpose(1, 2)
     return o.to(q.dtype)
