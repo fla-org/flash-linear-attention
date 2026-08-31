@@ -45,7 +45,7 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
         Returns:
             initial_state: Initial state tensor of shape [N, D, W] or None
         """
-        if group is None:
+        if group is None or weight.shape[-1] == 1:
             return None
 
         W = weight.shape[-1]  # weight: [D, W]
@@ -93,7 +93,7 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
                 belong to the first sequence on the current rank. Must match the
                 value used in the forward pass to construct initial_state.
         """
-        if group is None:
+        if group is None or W == 1:
             return
 
         D = dx.shape[-1]
@@ -123,6 +123,7 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
         x: torch.Tensor,
         weight: torch.Tensor,
         bias: torch.Tensor | None,
+        residual: torch.Tensor | None,
         activation: str | None,
         chunk_indices: torch.Tensor | None,
         cp_context: FLACPContext | None,
@@ -149,7 +150,7 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
             group=group,
         )
 
-        ctx.save_for_backward(x, weight, bias, initial_state)
+        ctx.save_for_backward(x, weight, bias, residual, initial_state)
         ctx.activation = activation
         ctx.cu_seqlens = cu_seqlens
         ctx.cu_seqlens_cpu = cu_seqlens_cpu
@@ -165,7 +166,7 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
             x=x,
             weight=weight,
             bias=bias,
-            residual=None,
+            residual=residual,
             initial_state=initial_state,
             output_final_state=False,
             activation=activation,
@@ -182,18 +183,18 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
         # Import here to avoid circular dependency
         from fla.modules.conv.triton.ops import causal_conv1d_bwd
 
-        x, weight, bias, initial_state = ctx.saved_tensors
+        x, weight, bias, residual, initial_state = ctx.saved_tensors
         group = ctx.group
         W = ctx.W
 
         # Call original backward
-        dx, dw, db, _, dh0 = causal_conv1d_bwd(
+        dx, dw, db, dr, dh0 = causal_conv1d_bwd(
             x=x,
             dy=dy,
             dht=None,
             weight=weight,
             bias=bias,
-            residual=None,
+            residual=residual,
             initial_state=initial_state,
             activation=ctx.activation,
             cu_seqlens=ctx.cu_seqlens,
@@ -212,13 +213,14 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
             pre_num_conv_tokens=ctx.pre_num_conv_tokens,
         )
 
-        return dx, dw, db, None, None, None, None, None
+        return dx, dw, db, dr, None, None, None, None, None
 
 
 def causal_conv1d_cp(
     x: torch.Tensor,
     weight: torch.Tensor,
     bias: torch.Tensor | None = None,
+    residual: torch.Tensor | None = None,
     activation: str | None = None,
     chunk_indices: torch.Tensor | None = None,
     cp_context: FLACPContext | None = None,
@@ -236,6 +238,7 @@ def causal_conv1d_cp(
         x: Input tensor of shape [1, T, D]
         weight: Weight tensor of shape [D, W]
         bias: Bias tensor of shape [D] or None
+        residual: Residual tensor of shape [1, T, D] or None
         activation: Activation function name or None
         cu_seqlens: Cumulative sequence lengths
         cu_seqlens_cpu: Cumulative sequence lengths on CPU
@@ -253,6 +256,6 @@ def causal_conv1d_cp(
         chunk_indices = prepare_chunk_indices(cp_context.cu_seqlens, chunk_size, cu_seqlens_cpu=cp_context.cu_seqlens_cpu)
 
     return CausalConv1dFunctionCP.apply(
-        x, weight, bias, activation,
+        x, weight, bias, residual, activation,
         chunk_indices, cp_context, chunk_size, backend
     )

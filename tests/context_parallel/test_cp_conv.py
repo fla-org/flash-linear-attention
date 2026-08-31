@@ -50,6 +50,7 @@ Test Scenarios:
 
 import logging
 import os
+from unittest import mock
 
 import pytest
 import torch
@@ -57,8 +58,8 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 
 from fla.modules.convolution import causal_conv1d
-from fla.ops.cp import build_cp_context
-from fla.utils import assert_close
+from fla.ops.cp import FLACPContext, build_cp_context
+from fla.utils import assert_close, device
 
 # Configure logging to see assert_close messages
 logging.basicConfig(level=logging.INFO, format='%(message)s')
@@ -94,6 +95,7 @@ def run_cp_conv_test_worker(
     W: int,
     lengths: list[int],
     dtype,
+    use_residual: bool = False,
 ):
     """
     Worker function for CP convolution test.
@@ -119,6 +121,7 @@ def run_cp_conv_test_worker(
 
         x_global = torch.randn(B, T, D, device=device, dtype=dtype) * 100
         dy_global = torch.randn(B, T, D, device=device, dtype=dtype)
+        residual_global = torch.randn_like(x_global) if use_residual else None
 
         weight = torch.randn(D, W, device=device, dtype=dtype)
         bias = torch.randn(D, device=device, dtype=dtype)
@@ -132,17 +135,19 @@ def run_cp_conv_test_worker(
         activation = 'swish'
 
         # Step 2: Reference Run
-        ref_out, ref_dx, ref_dw, ref_db = None, None, None, None
+        ref_out, ref_dx, ref_dw, ref_db, ref_dr = None, None, None, None, None
 
         if rank == 0:
             x_ref = x_global.clone().detach().requires_grad_(True)
             weight_ref = weight.clone().detach().requires_grad_(True)
             bias_ref = bias.clone().detach().requires_grad_(True)
+            residual_ref = residual_global.clone().detach().requires_grad_(True) if use_residual else None
 
             y_ref, _ = causal_conv1d(
                 x=x_ref,
                 weight=weight_ref,
                 bias=bias_ref,
+                residual=residual_ref,
                 activation=activation,
                 backend='triton',
                 cu_seqlens=cu_seqlens_global,
@@ -154,6 +159,7 @@ def run_cp_conv_test_worker(
             ref_dx = x_ref.grad.detach()
             ref_dw = weight_ref.grad.detach()
             ref_db = bias_ref.grad.detach()
+            ref_dr = residual_ref.grad.detach() if residual_ref is not None else None
 
         # Step 3: Context Parallel Run
         dist.barrier()
@@ -168,6 +174,9 @@ def run_cp_conv_test_worker(
         dy_local = dy_global[:, start_idx:end_idx, :].clone()
         weight_local = weight.clone().detach().requires_grad_(True)
         bias_local = bias.clone().detach().requires_grad_(True)
+        residual_local = (
+            residual_global[:, start_idx:end_idx, :].clone().detach().requires_grad_(True) if use_residual else None
+        )
 
         print(f"[Rank {rank}] chunk: [{start_idx}, {end_idx}), "
               f"cu_seqlens: {context.cu_seqlens.tolist()}, "
@@ -180,6 +189,7 @@ def run_cp_conv_test_worker(
             x=x_local,
             weight=weight_local,
             bias=bias_local,
+            residual=residual_local,
             activation=activation,
             cp_context=context,
         )
@@ -196,6 +206,12 @@ def run_cp_conv_test_worker(
         dist.all_gather(dx_gathered, x_local.grad)
         dx_cp_global = torch.cat(dx_gathered, dim=1)
 
+        dr_cp_global = None
+        if residual_local is not None:
+            dr_gathered = [torch.zeros_like(residual_local.grad) for _ in range(world_size)]
+            dist.all_gather(dr_gathered, residual_local.grad)
+            dr_cp_global = torch.cat(dr_gathered, dim=1)
+
         dw_cp = weight_local.grad.clone()
         db_cp = bias_local.grad.clone()
         dist.all_reduce(dw_cp, op=dist.ReduceOp.SUM)
@@ -209,6 +225,8 @@ def run_cp_conv_test_worker(
                 assert_close("dx", ref_dx, dx_cp_global, ratio=0.001)
                 assert_close("dw", ref_dw, dw_cp, ratio=0.001)
                 assert_close("db", ref_db, db_cp, ratio=0.001)
+                if use_residual:
+                    assert_close("dr", ref_dr, dr_cp_global, ratio=0.001)
                 print(f"✅ [{test_name}] Test Passed!\n")
             except AssertionError as e:
                 print(f"❌ [{test_name}] Test Failed: {e}\n")
@@ -233,6 +251,7 @@ def run_cp_test_with_spawn(
     W: int,
     lengths: list[int],
     dtype=torch.float32,
+    use_residual: bool = False,
 ):
     """
     Run CP test using torch.multiprocessing.spawn.
@@ -241,7 +260,7 @@ def run_cp_test_with_spawn(
     # Use start_processes with spawn to avoid fork/spawn conflicts
     mp.start_processes(
         run_cp_conv_test_worker,
-        args=(world_size, test_name, T, D, W, lengths, dtype),
+        args=(world_size, test_name, T, D, W, lengths, dtype, use_residual),
         nprocs=world_size,
         join=True,
         start_method='spawn',
@@ -251,6 +270,89 @@ def run_cp_test_with_spawn(
 # ============================================================
 # Test Scenario Definitions
 # ============================================================
+
+
+@pytest.mark.parametrize(
+    ('W', 'use_residual'),
+    [
+        pytest.param(1, False, id="pointwise"),
+        pytest.param(4, True, id="residual"),
+    ],
+)
+def test_cp_single_rank(W: int, use_residual: bool):
+    torch.manual_seed(42)
+    T, D = 128, 32
+    cu_seqlens = torch.tensor([0, T], device=device, dtype=torch.int32)
+    context = FLACPContext(
+        group=mock.sentinel.group if W == 1 else None,
+        cu_seqlens=cu_seqlens,
+        cu_seqlens_cpu=cu_seqlens.cpu(),
+        is_first_rank=True,
+        conv1d_kernel_size=W,
+        pre_num_conv_tokens=0,
+    )
+
+    x = torch.randn(1, T, D, device=device)
+    weight = torch.randn(D, W, device=device)
+    bias = torch.randn(D, device=device)
+    residual = torch.randn_like(x) if use_residual else None
+    dy = torch.randn_like(x)
+
+    def run(cp_context=None):
+        x_ = x.clone().requires_grad_(True)
+        weight_ = weight.clone().requires_grad_(True)
+        bias_ = bias.clone().requires_grad_(True)
+        residual_ = residual.clone().requires_grad_(True) if residual is not None else None
+        y, _ = causal_conv1d(
+            x=x_,
+            weight=weight_,
+            bias=bias_,
+            residual=residual_,
+            activation='swish',
+            cu_seqlens=None if cp_context is not None else cu_seqlens,
+            cp_context=cp_context,
+        )
+        y.backward(dy)
+        values = (y, x_.grad, weight_.grad, bias_.grad)
+        return values + ((residual_.grad,) if residual_ is not None else ())
+
+    ref = run()
+    with (
+        mock.patch("fla.modules.conv.cp.ops.conv_cp_send_recv_fwd") as mock_send_recv_fwd,
+        mock.patch("fla.modules.conv.cp.ops.conv_cp_send_recv_bwd") as mock_send_recv_bwd,
+    ):
+        tri = run(context)
+
+    names = ('output', 'dx', 'dw', 'db', 'dr') if use_residual else ('output', 'dx', 'dw', 'db')
+    for name, ref_value, tri_value in zip(names, ref, tri):
+        assert_close(name, ref_value, tri_value, ratio=0.001)
+    if W == 1:
+        mock_send_recv_fwd.assert_not_called()
+        mock_send_recv_bwd.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ('W', 'use_residual'),
+    [
+        pytest.param(1, False, id="pointwise"),
+        pytest.param(4, True, id="residual"),
+    ],
+)
+def test_cp2_width_and_residual(W: int, use_residual: bool):
+    if torch.cuda.device_count() < 2:
+        pytest.skip("At least 2 GPUs required")
+
+    run_cp_test_with_spawn(
+        world_size=2,
+        test_name=f"CP2_W{W}_Residual{use_residual}",
+        T=1024,
+        D=128,
+        W=W,
+        lengths=[1024],
+        dtype=torch.float32,
+        use_residual=use_residual,
+    )
+
 
 def test_cp2_sequence_cut():
     """
