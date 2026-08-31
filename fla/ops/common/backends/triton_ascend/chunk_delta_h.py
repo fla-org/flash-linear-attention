@@ -513,7 +513,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64_npu(
         "SAVE_NEW_VALUE": lambda args: args["v_new"] is not None,
     }
 )
-@triton.jit(do_not_specialize=["task_num", "num_core"])
+@triton.jit(do_not_specialize=["T", "task_num", "num_core"])
 def chunk_gated_delta_rule_fwd_kernel_h_oneslab_npu(
     k,
     v,
@@ -535,7 +535,6 @@ def chunk_gated_delta_rule_fwd_kernel_h_oneslab_npu(
     BT: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    NT: tl.constexpr,
     USE_G: tl.constexpr,
     USE_GK: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
@@ -553,6 +552,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_oneslab_npu(
     stride_k: tl.constexpr = H * K
     stride_w: tl.constexpr = HV * K
     NV: tl.constexpr = tl.cdiv(V, BV)
+    NT = T // BT
     if USE_GK:
         o_k = tl.arange(0, BK)
 
@@ -747,7 +747,7 @@ def chunk_gated_delta_rule_fwd_h_npu(
         _launch_core_grid(
             chunk_gated_delta_rule_fwd_kernel_h_oneslab_npu,
             task_num=N * HV * triton.cdiv(V, BV),
-            kernel_kwargs={**kwargs, "NT": T // BT},
+            kernel_kwargs={**kwargs},
             **_FWD_H_COMPILE,
         )
     else:

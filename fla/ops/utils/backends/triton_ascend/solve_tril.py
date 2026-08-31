@@ -151,7 +151,7 @@ def merge_16x16_to_32x32_inverse_kernel_npu(
     tl.store(p_Ai_21, b_Ai_21.to(p_Ai_21.dtype.element_ty, fp_downcast_rounding='rtne'), boundary_check=(0, 1))
 
 
-@triton.jit(do_not_specialize=['T'])
+@triton.jit(do_not_specialize=['T', 'NT_OFFSET', 'BH_OFFSET'])
 def merge_16x16_to_64x64_inverse_kernel_npu(
     A,
     Ai,
@@ -161,8 +161,8 @@ def merge_16x16_to_64x64_inverse_kernel_npu(
     H: tl.constexpr,
     BT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    NT_OFFSET: tl.constexpr,
-    BH_OFFSET: tl.constexpr,
+    NT_OFFSET,
+    BH_OFFSET,
 ):
     i_t = tl.program_id(0) + NT_OFFSET
     i_bh = tl.program_id(1) + BH_OFFSET
