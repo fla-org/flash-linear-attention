@@ -27,6 +27,7 @@ from .lightning_attn import chunk_lightning_attn, fused_recurrent_lightning_attn
 from .linear_attn import chunk_linear_attn, fused_chunk_linear_attn, fused_recurrent_linear_attn
 from .log_linear_attn import chunk_log_linear_attn
 from .mesa_net import chunk_mesa_net
+from .momentum_delta_rule import chunk_mode_rule, fused_recurrent_mode_rule
 from .nsa import parallel_nsa
 from .parallax import parallel_parallax
 from .path_attn import parallel_path_attn
@@ -53,6 +54,7 @@ __all__ = [
     'chunk_linear_attn',
     'chunk_log_linear_attn',
     'chunk_mesa_net',
+    'chunk_mode_rule',
     'chunk_precond_gated_delta_rule',
     'chunk_precond_kda',
     'chunk_retention',
@@ -78,6 +80,7 @@ __all__ = [
     'fused_recurrent_kda',
     'fused_recurrent_lightning_attn',
     'fused_recurrent_linear_attn',
+    'fused_recurrent_mode_rule',
     'fused_recurrent_precond_gated_delta_rule',
     'fused_recurrent_precond_kda',
     'fused_recurrent_retention',
