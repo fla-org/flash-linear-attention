@@ -117,7 +117,9 @@ def chunk_mesa_net_h_kv_bwd_intra_kernel(
     b_g_last = tl.load(g + (min(i_t * BT + BT, T) - 1) * H)
 
     # calculation
-    b_dg_last += tl.sum(b_h * b_dh)
+    # h_kv is stored in bf16 (wide exponent range) while dh_kv is fp16
+    # lift both precision to float32 to prevent overflow from large h_kv entries
+    b_dg_last += tl.sum(b_h.to(tl.float32) * b_dh.to(tl.float32))
     b_dg_last *= exp2(b_g_last)
 
     b_m = tl.where((o_t[:, None] >= o_t[None, :]) & (m_t[:, None] & m_t[None, :]), exp2(b_g[:, None] - b_g[None, :]), 0)

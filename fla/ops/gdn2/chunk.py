@@ -26,6 +26,7 @@ GDN-2-specific Triton kernels live in ``chunk_intra.py``,
 from __future__ import annotations
 
 import warnings
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -34,6 +35,9 @@ from fla.ops.gdn2.chunk_bwd import chunk_gdn2_bwd
 from fla.ops.gdn2.chunk_fwd import chunk_gdn2_fwd
 from fla.ops.utils import prepare_chunk_indices
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
+
+if TYPE_CHECKING:
+    from fla.ops.cp import FLACPContext
 
 
 class ChunkGDN2Function(torch.autograd.Function):
@@ -65,6 +69,7 @@ class ChunkGDN2Function(torch.autograd.Function):
         disable_recompute: bool,
         return_intermediate_states: bool,
         state_v_first: bool,
+        cp_context: FLACPContext | None = None,
     ):
         q_rstd, k_rstd = None, None
         if use_qk_l2norm_in_kernel:
@@ -101,6 +106,7 @@ class ChunkGDN2Function(torch.autograd.Function):
             disable_recompute=disable_recompute,
             return_intermediate_states=return_intermediate_states,
             state_v_first=state_v_first,
+            cp_context=cp_context,
         )
 
         if return_intermediate_states:
@@ -125,6 +131,7 @@ class ChunkGDN2Function(torch.autograd.Function):
         ctx.use_gate_in_kernel = use_gate_in_kernel
         ctx.disable_recompute = disable_recompute
         ctx.state_v_first = state_v_first
+        ctx.cp_context = cp_context
         return o.type_as(q), final_state
 
     @staticmethod
@@ -160,6 +167,7 @@ class ChunkGDN2Function(torch.autograd.Function):
             state_v_first=ctx.state_v_first,
             w_wy=w_wy, u_wy=u_wy, qg=qg, kg=kg, v_new=v_new, h=h,
             disable_recompute=ctx.disable_recompute,
+            cp_context=ctx.cp_context,
         )
 
         if ctx.use_qk_l2norm_in_kernel:
@@ -188,6 +196,7 @@ class ChunkGDN2Function(torch.autograd.Function):
             None,                    # disable_recompute
             None,                    # return_intermediate_states
             None,                    # state_v_first
+            None,                    # cp_context
         )
 
 
@@ -211,6 +220,7 @@ def chunk_gdn2(
     disable_recompute: bool = False,
     return_intermediate_states: bool = False,
     state_v_first: bool = False,
+    cp_context: FLACPContext | None = None,
     **kwargs,
 ):
     r"""
@@ -268,6 +278,10 @@ def chunk_gdn2(
             Must be used inside ``torch.inference_mode()``. Default: `False`.
         state_v_first (Optional[bool]):
             store the recurrent state in ``[V, K]`` layout instead of the default ``[K, V]``. Default: `False`.
+        cp_context (Optional[FLACPContext]):
+            context-parallel context for distributed training across multiple devices.
+            When provided, ``initial_state`` and ``output_final_state`` are not supported,
+            and ``cu_seqlens`` / ``cu_seqlens_cpu`` are overridden by the context. Default: `None`.
 
     Returns:
         - Normal mode: ``(o, final_state)``.
@@ -296,6 +310,15 @@ def chunk_gdn2(
             stacklevel=2,
         )
         state_v_first = kwargs.pop('transpose_state_layout')
+
+    if cp_context is not None:
+        assert initial_state is None, "Initial state is not supported for CP"
+        assert output_final_state is False, "Output final state is not supported for CP"
+        assert cp_context.cu_seqlens is not None, "cu_seqlens is required for CP"
+        # Override cu_seqlens and cu_seqlens_cpu with the ones from the context
+        cu_seqlens = cp_context.cu_seqlens
+        if cp_context.cu_seqlens_cpu is not None:
+            cu_seqlens_cpu = cp_context.cu_seqlens_cpu
 
     if cu_seqlens is not None:
         if q.shape[0] != 1:
@@ -369,4 +392,5 @@ def chunk_gdn2(
         disable_recompute,
         return_intermediate_states,
         state_v_first,
+        cp_context,
     )
