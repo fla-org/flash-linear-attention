@@ -16,7 +16,7 @@ import triton.language as tl
 from fla.ops.gdn2.wy_fast import recompute_w_u_fwd_gdn2
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp2
-from fla.utils import input_guard
+from fla.utils import ascend_compile_kwargs, input_guard
 from fla.utils.ascend_ub_manager import ASCEND_MAX_GRID_DIM, compute_row_tile_block_size, max_grid_axis_chunks
 
 _BC = 16
@@ -26,6 +26,8 @@ _SAFETY_MARGIN = 0.80
 _FALLBACK_BK = 16
 _MAX_INTER_BK = 64
 _LAUNCH_BLOCK_BUDGET = 4096
+# Disable auto-multi-buffer and AutoBlockify to avoid AICore watchdog timeouts on CANN 9.1.
+_INTER_COMPILE_KWARGS = ascend_compile_kwargs(blacklist_auto_blockify=True)
 
 
 def _get_inter_bk(K: int) -> int:
@@ -80,7 +82,7 @@ def _launch_inter_kernel(kernel, *, nt: int, bh_total: int, kernel_kwargs: dict)
         for bh_off in range(0, bh_total, max_bh):
             bh_len = min(max_bh, bh_total - bh_off)
             kernel_kwargs['BH_OFFSET'] = bh_off
-            kernel[(nt_len, bh_len)](**kernel_kwargs)
+            kernel[(nt_len, bh_len)](**kernel_kwargs, **_INTER_COMPILE_KWARGS)
 
 
 @triton.jit(do_not_specialize=['T', 'NT_OFFSET', 'NC_OFFSET', 'BH_OFFSET'])
