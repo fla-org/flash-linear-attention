@@ -647,7 +647,12 @@ class CATModel(CATPreTrainedModel):
 class CATForCausalLM(CATPreTrainedModel, FLAGenerationMixin):
     """CAT model with a language modeling head."""
 
-    _tied_weights_keys = ["lm_head.weight"]
+    # transformers 5 requires target-to-source mappings, while 4.x uses a list of tied keys
+    _tied_weights_keys = (
+        {"lm_head.weight": "model.embeddings.weight"}
+        if hasattr(PreTrainedModel, 'get_expanded_tied_weights_keys')
+        else ["lm_head.weight"]
+    )
 
     def __init__(self, config: CATConfig):
         super().__init__(config)

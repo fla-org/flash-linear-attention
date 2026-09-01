@@ -283,7 +283,10 @@ def test_cat_save_load_transformers_5_tied_weight_metadata(tmp_path):
     model, config = create_cat_model(dtype=torch.float32)
     input_ids = torch.randint(0, config.vocab_size, (1, 16), device=device)
 
-    assert model._tied_weights_keys == ["lm_head.weight"]
+    if hasattr(model, 'get_expanded_tied_weights_keys'):
+        assert model._tied_weights_keys == {"lm_head.weight": "model.embeddings.weight"}
+    else:
+        assert model._tied_weights_keys == ["lm_head.weight"]
     model.save_pretrained(tmp_path)
     reloaded = CATForCausalLM.from_pretrained(tmp_path).to(device)
     reloaded.eval()
