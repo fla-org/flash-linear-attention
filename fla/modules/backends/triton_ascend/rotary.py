@@ -145,7 +145,9 @@ def rotary_embedding_fwdbwd_npu(
     R2 = R * 2
 
     assert D <= 256, "Only support D <= 256"
-    assert TR >= T, f"TR must be >= T, got {TR} and {T}"
+    assert R2 <= D, f"Rotary dimension must not exceed head dimension, got rotary_dim={R2} and head_dim={D}"
+    if not is_varlen:
+        assert TR >= T, f"TR must be >= T, got {TR} and {T}"
 
     assert cos.dtype == sin.dtype, f"cos and sin must have the same dtype, got {cos.dtype} and {sin.dtype}"
     assert x.dtype == cos.dtype, f"Input and cos/sin must have the same dtype, got {x.dtype} and {cos.dtype}"
@@ -153,6 +155,11 @@ def rotary_embedding_fwdbwd_npu(
     if isinstance(seqlen_offsets, torch.Tensor):
         assert seqlen_offsets.shape == (N,)
         assert seqlen_offsets.dtype in [torch.int32, torch.int64]
+        sequence_lengths = T if not is_varlen else cu_seqlens[1:] - cu_seqlens[:-1]
+        torch._assert_async(
+            torch.all(sequence_lengths + seqlen_offsets <= TR),
+            f"Rotary cache is too short for tensor offsets, got {TR} positions",
+        )
     else:
         assert seqlen_offsets + T <= TR
 

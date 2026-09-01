@@ -89,17 +89,18 @@ def chunk_ttt_linear_fwd_kernel_h(
     b_b = tl.load(b + i_h * V + offs, mask=offs < V, other=0.)
 
     for i_t in range(NT):
-        o_t = i_t * BT + tl.arange(0, BT)
+        i_t_int64 = i_t.to(tl.int64)
+        o_t = i_t_int64 * BT + tl.arange(0, BT)
         m_v = (o_t[:, None] < T) & (o_v[None, :] < V)
         m_k = (o_k[:, None] < K) & (o_t[None, :] < T)
-        p_h = h + ((boh + i_t) * H + i_h) * K*V + o_k[:, None] * V + o_v[None, :]
-        p_hb = hb + ((boh + i_t) * H + i_h) * V + o_v
+        p_h = h + ((boh + i_t_int64) * H + i_h) * K*V + o_k[:, None] * V + o_v[None, :]
+        p_hb = hb + ((boh + i_t_int64) * H + i_h) * V + o_v
         tl.store(p_h, b_h.to(p_h.dtype.element_ty), mask=m_h)
         tl.store(p_hb, b_hb.to(p_hb.dtype.element_ty), mask=o_v < V)
         p_k = k+(bos*H+i_h)*K + o_k[:, None] + o_t[None, :] * (H*K)
         p_v = v+(bos*H+i_h)*V + o_t[:, None] * (H*V) + o_v[None, :]
         p_v_new = v_new+(bos*H+i_h)*V + o_t[:, None] * (H*V) + o_v[None, :]
-        p_eta_last = eta+bos*H+i_h + (T-1)*H if i_t == NT-1 else eta+bos*H+i_h + (i_t*BT+BT-1)*H
+        p_eta_last = eta+bos*H+i_h + (T-1)*H if i_t_int64 == NT-1 else eta+bos*H+i_h + (i_t_int64*BT+BT-1)*H
         b_k = tl.load(p_k, mask=m_k, other=0.0)
         b_v = tl.load(p_v, mask=m_v, other=0.0)
 
@@ -301,10 +302,11 @@ def chunk_ttt_linear_bwd_kernel_h(
     b_b = tl.load(b + i_h * V + offs, mask=offs < V, other=0.)
 
     for i_t in range(NT):
-        o_t = i_t * BT + tl.arange(0, BT)
+        i_t_int64 = i_t.to(tl.int64)
+        o_t = i_t_int64 * BT + tl.arange(0, BT)
         m_v = (o_t[:, None] < T) & (o_v[None, :] < V)
         m_k = (o_k[:, None] < K) & (o_t[None, :] < T)
-        p_h = h + ((boh + i_t) * H + i_h) * K*V + o_k[:, None] * V + o_v[None, :]
+        p_h = h + ((boh + i_t_int64) * H + i_h) * K*V + o_k[:, None] * V + o_v[None, :]
         tl.store(p_h, b_h.to(p_h.dtype.element_ty), mask=m_h)
         p_k = k+(bos*H+i_h)*K + o_k[:, None] + o_t[None, :] * (H*K)
         p_v = v+(bos*H+i_h)*V + o_t[:, None] * (H*V) + o_v[None, :]
@@ -312,7 +314,7 @@ def chunk_ttt_linear_bwd_kernel_h(
         p_x = x+(bos*H+i_h)*V + o_t[:, None] * (H*V) + o_v[None, :]
         p_y = y+(bos*H+i_h)*V + o_t[:, None] * (H*V) + o_v[None, :]
         p_r = r+bos*H+i_h + o_t[:, None] * H
-        p_eta_last = eta+bos*H+i_h + (T-1)*H if i_t == NT-1 else eta+bos*H+i_h + (i_t*BT+BT-1)*H
+        p_eta_last = eta+bos*H+i_h + (T-1)*H if i_t_int64 == NT-1 else eta+bos*H+i_h + (i_t_int64*BT+BT-1)*H
         b_k = tl.load(p_k, mask=m_k, other=0.0)
         b_v = tl.load(p_v, mask=m_v, other=0.0)
 
@@ -509,15 +511,16 @@ def chunk_ttt_linear_bwd_kernel_norm(
     p_db = db + i_nh * V + o_v
 
     for i_t in range(NT - 1, -1, -1):
-        o_t = i_t * BT + tl.arange(0, BT)
+        i_t_int64 = i_t.to(tl.int64)
+        o_t = i_t_int64 * BT + tl.arange(0, BT)
         m_t = o_t < T
         m_k = m_t[:, None] & (o_k[None, :] < K)
         m_q = (o_k[:, None] < K) & m_t[None, :]
         m_v = m_t[:, None] & (o_v[None, :] < V)
         m_hv = (o_v[:, None] < V) & (o_k[None, :] < K)
-        p_h = h + ((boh+i_t) * H + i_h) * K*V + o_v[:, None] + o_k[None, :] * V
-        p_dh = dh + ((boh+i_t) * H + i_h) * K*V + o_k[:, None] * V + o_v[None, :]
-        p_dhb = dhb + ((boh+i_t) * H + i_h) * V + o_v
+        p_h = h + ((boh+i_t_int64) * H + i_h) * K*V + o_v[:, None] + o_k[None, :] * V
+        p_dh = dh + ((boh+i_t_int64) * H + i_h) * K*V + o_k[:, None] * V + o_v[None, :]
+        p_dhb = dhb + ((boh+i_t_int64) * H + i_h) * V + o_v
         tl.store(p_dh, b_dh.to(p_dh.dtype.element_ty), mask=m_h)
         tl.store(p_dhb, b_dhb.to(p_dhb.dtype.element_ty), mask=o_v < V)
         p_q = q+(bos*H+i_h)*K + o_k[:, None] + o_t[None, :] * (H*K)
@@ -531,7 +534,7 @@ def chunk_ttt_linear_bwd_kernel_norm(
         p_dk = dk+(bos*H+i_h)*K + o_t[:, None] * (H*K) + o_k[None, :]
         p_do = do+(bos*H+i_h)*V + o_t[:, None] * (H*V) + o_v[None, :]
         p_r = r+bos*H+i_h + o_t[:, None] * H
-        p_eta_last = eta+bos*H+i_h + (T-1)*H if i_t == NT-1 else eta+bos*H+i_h + (i_t*BT+BT-1)*H
+        p_eta_last = eta+bos*H+i_h + (T-1)*H if i_t_int64 == NT-1 else eta+bos*H+i_h + (i_t_int64*BT+BT-1)*H
         b_k = tl.load(p_k, mask=m_k, other=0.0)
         b_dv_new = tl.load(p_dv_new, mask=m_v, other=0.0).to(b_k.dtype)
         b_eta_last = tl.load(p_eta_last)
@@ -566,7 +569,7 @@ def chunk_ttt_linear_bwd_kernel_norm(
         b_dkh = b_rstd * (V * b_dx - tl.sum(b_dx, axis=1, keep_dims=True) -
                           b_x * tl.sum(b_x * b_dx, axis=1, keep_dims=True)) / V
         b_dkh -= b_rstd * b_rstd * b_drstd * b_x / V
-        b_dkh = tl.where((offs_v < V)[None, :] * (offs_t < T-i_t*BT)[:, None], b_dkh, 0.)
+        b_dkh = tl.where((offs_v < V)[None, :] * (offs_t < T-i_t_int64*BT)[:, None], b_dkh, 0.)
         b_dk += tl.dot(b_dkh, b_h.to(b_dkh.dtype)).to(b_k.dtype)
         b_dh += tl.dot(b_q, b_do.to(b_q.dtype)) + tl.dot(tl.trans(b_k).to(b_dkh.dtype), b_dkh)
         b_dhb += tl.sum(b_do + b_dkh, axis=0)

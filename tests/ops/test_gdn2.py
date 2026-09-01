@@ -15,20 +15,6 @@
 # whole-vs-streaming and packed-vs-per-sequence equivalence replace the Python
 # recurrence so the reference itself does not build a 32768-step autograd graph.
 #
-# The suite exercises the full feature surface of both public kernels:
-#   * forward + numeric backward (dq, dk, dv, db, dw, dg, dh0, dA_log, dt_bias)
-#   * varlen / packed sequences (cu_seqlens) vs per-sequence reference
-#   * use_gate_in_kernel (fused -exp(A_log)*softplus path) + dt_bias
-#   * safe_gate + lower_bound (bounded gate activation)
-#   * use_qk_l2norm_in_kernel
-#   * state_v_first ([V, K] state layout)
-#   * initial_state propagation
-#   * non-chunk-multiple sequence lengths (boundary masking)
-#   * fp16 and fp32 dtypes
-#   * chunk <-> fused_recurrent cross-agreement
-#   * return_intermediate_states (inference mode)
-#   * the GatedDeltaNet2 layer (incl. GVA + short conv) end to end
-#
 # GDN-2 reuses KDA's gate activation verbatim, so the gate-in-kernel reference
 # uses ``naive_kda_gate`` / ``naive_kda_lowerbound_gate``.
 
@@ -236,27 +222,25 @@ def _activate_g(g, A_log, dt_bias, safe_gate, lower_bound):
     )
 
 
-def _rand_inputs(B, T, H, K, V, dtype, *, gate_in_kernel=False, b_scale=1.0, seed=42):
-    """Well-conditioned GDN-2 inputs.
+def _rand_inputs(B, T, H, HV, K, V, dtype, *, gate_in_kernel=False, b_scale=1.0, seed=42):
+    """Well-conditioned GDN-2 inputs: q/k on H heads, the rest on HV (GVA when HV > H).
 
-    q/k drawn raw (kernels L2-normalize via use_qk_l2norm_in_kernel, or the
-    caller normalizes for the reference). g is a contracting log-decay so the
-    state does not blow up across long sequences; when gate_in_kernel is set, g
-    is instead the raw pre-activation and A_log/dt_bias are returned.
+    g is a contracting log-decay so the recurrent state stays bounded; with
+    gate_in_kernel it is the raw pre-activation instead.
     """
     torch.manual_seed(seed)
     q = torch.randn(B, T, H, K, dtype=dtype, device=device)
     k = torch.randn(B, T, H, K, dtype=dtype, device=device)
-    v = torch.randn(B, T, H, V, dtype=dtype, device=device) * 0.5
-    b = torch.rand(B, T, H, K, dtype=dtype, device=device) * b_scale
-    w = torch.rand(B, T, H, V, dtype=dtype, device=device)
+    v = torch.randn(B, T, HV, V, dtype=dtype, device=device) * 0.5
+    b = torch.rand(B, T, HV, K, dtype=dtype, device=device) * b_scale
+    w = torch.rand(B, T, HV, V, dtype=dtype, device=device)
     A_log, dt_bias = None, None
     if gate_in_kernel:
-        g = torch.randn(B, T, H, K, dtype=dtype, device=device)
-        A_log = torch.log(torch.empty(H, dtype=torch.float32, device=device).uniform_(1, 16))
-        dt_bias = torch.randn(H * K, dtype=torch.float32, device=device)
+        g = torch.randn(B, T, HV, K, dtype=dtype, device=device)
+        A_log = torch.log(torch.empty(HV, dtype=torch.float32, device=device).uniform_(1, 16))
+        dt_bias = torch.randn(HV * K, dtype=torch.float32, device=device)
     else:
-        g = torch.empty(B, T, H, K, device=device, dtype=torch.float32).uniform_(-5.0, -0.1).to(dtype)
+        g = torch.empty(B, T, HV, K, device=device, dtype=torch.float32).uniform_(-5.0, -0.1).to(dtype)
     return q, k, v, g, b, w, A_log, dt_bias
 
 
@@ -265,23 +249,32 @@ def _rand_inputs(B, T, H, K, V, dtype, *, gate_in_kernel=False, b_scale=1.0, see
 # =============================================================================
 @_requires_accelerator
 @pytest.mark.parametrize(
-    ("B", "T", "H", "K", "V", "scale", "use_qk_l2norm_in_kernel", "dtype"),
+    ("B", "T", "H", "HV", "K", "V", "scale", "use_qk_l2norm_in_kernel", "dtype"),
     [
-        pytest.param(*p, id="B{}-T{}-H{}-K{}-V{}-scale{}-l2norm{}-{}".format(*p))
+        pytest.param(*p, id="B{}-T{}-H{}-HV{}-K{}-V{}-scale{}-l2norm{}-{}".format(*p))
         for p in [
-            (1, _test_length(64), 2, 32, 32, 1.0, False, torch.float32),
-            (2, _test_length(128), 2, 64, 64, 0.5, False, torch.float32),
-            (2, _test_length(100), 3, 64, 64, 1.0, True, torch.float32),
-            (1, _test_length(130), 2, 64, 128, 1.0, True, torch.float16),
+            (1, _test_length(64), 2, 2, 32, 32, 1.0, False, torch.float32),
+            (2, _test_length(128), 2, 2, 64, 64, 0.5, False, torch.float32),
+            (2, _test_length(100), 3, 3, 64, 64, 1.0, True, torch.float32),
+            (1, _test_length(130), 2, 2, 64, 128, 1.0, True, torch.float16),
+            (2, _test_length(128), 2, 4, 64, 64, 1.0, False, torch.float32),
+            (2, _test_length(100), 2, 4, 64, 128, 1.0, True, torch.float16),
+            (1, _test_length(4), 1, 1, 48, 16, 1.0, False, torch.float32),
         ]
     ],
 )
-def test_fused_recurrent(B, T, H, K, V, scale, use_qk_l2norm_in_kernel, dtype):
-    q, k, v, g, b, w, _, _ = _rand_inputs(B, T, H, K, V, dtype)
+def test_fused_recurrent(B, T, H, HV, K, V, scale, use_qk_l2norm_in_kernel, dtype):
+    assert HV % H == 0
+    q, k, v, g, b, w, _, _ = _rand_inputs(B, T, H, HV, K, V, dtype)
+    if K & (K - 1):
+        # poison the allocation past g so an unmasked out-of-bounds gate load fails loudly
+        numel = B * T * HV * K
+        storage = torch.full((numel + 64,), float("nan"), device=device)
+        g = storage[:numel].view(B, T, HV, K)
+        g.uniform_(-2.0, -0.1)
 
-    # The naive reference never normalizes internally, so it always receives
-    # pre-normalized q/k. The kernel either normalizes raw inputs itself
-    # (flag on) or is handed the same pre-normalized tensors (flag off).
+    # The reference gets normalized q/k expanded to HV heads; the kernel maps
+    # value heads to qk heads itself (and normalizes when the flag is on).
     qn = F.normalize(q.float(), p=2, dim=-1).to(dtype)
     kn = F.normalize(k.float(), p=2, dim=-1).to(dtype)
     if _LONG_SEQUENCE:
@@ -297,8 +290,8 @@ def test_fused_recurrent(B, T, H, K, V, scale, use_qk_l2norm_in_kernel, dtype):
         )
     else:
         ref, ref_ht = naive_recurrent_gdn2(
-            q=qn,
-            k=kn,
+            q=qn.repeat_interleave(HV // H, dim=2),
+            k=kn.repeat_interleave(HV // H, dim=2),
             v=v,
             g=g,
             b=b,
@@ -307,8 +300,6 @@ def test_fused_recurrent(B, T, H, K, V, scale, use_qk_l2norm_in_kernel, dtype):
             output_final_state=True,
         )
     tri, tri_ht = fused_recurrent_gdn2(
-        # Flag on: hand the kernel raw q/k and let it normalize. Flag off: hand
-        # it the same pre-normalized tensors the reference saw.
         q=q if use_qk_l2norm_in_kernel else qn,
         k=k if use_qk_l2norm_in_kernel else kn,
         v=v,
@@ -316,8 +307,8 @@ def test_fused_recurrent(B, T, H, K, V, scale, use_qk_l2norm_in_kernel, dtype):
         b=b,
         w=w,
         scale=scale,
-        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
         output_final_state=True,
+        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
     )
     assert_close("o", ref, tri, 0.005)
     assert_close("ht", ref_ht, tri_ht, 0.005)
@@ -340,7 +331,7 @@ def test_fused_recurrent(B, T, H, K, V, scale, use_qk_l2norm_in_kernel, dtype):
 def test_fused_recurrent_gate_in_kernel(B, T, H, K, V, has_a_log, has_dt_bias, safe_gate):
     """use_gate_in_kernel=True must match the manually-activated gate path."""
     dtype = torch.float32
-    q, k, v, g, b, w, A_log, dt_bias = _rand_inputs(B, T, H, K, V, dtype, gate_in_kernel=True)
+    q, k, v, g, b, w, A_log, dt_bias = _rand_inputs(B, T, H, H, K, V, dtype, gate_in_kernel=True)
     if not has_a_log:
         A_log = None
     if not has_dt_bias:
@@ -381,10 +372,10 @@ def test_fused_recurrent_gate_in_kernel(B, T, H, K, V, has_a_log, has_dt_bias, s
         w=w,
         A_log=A_log,
         dt_bias=dt_bias,
+        output_final_state=True,
         use_qk_l2norm_in_kernel=True,
         use_gate_in_kernel=True,
         lower_bound=lower_bound,
-        output_final_state=True,
     )
     assert_close("o", ref, tri, 0.005)
     assert_close("ht", ref_ht, tri_ht, 0.005)
@@ -395,19 +386,19 @@ def test_fused_recurrent_state_v_first():
     """state_v_first stores the state transposed to [V, K]; output must match."""
     dtype = torch.float32
     B, T, H, K, V = 2, _test_length(64), 2, 64, 64
-    q, k, v, g, b, w, _, _ = _rand_inputs(B, T, H, K, V, dtype)
+    q, k, v, g, b, w, _, _ = _rand_inputs(B, T, H, H, K, V, dtype)
 
-    o0, ht0 = fused_recurrent_gdn2(q=q, k=k, v=v, g=g, b=b, w=w, state_v_first=False, output_final_state=True)
-    o1, ht1 = fused_recurrent_gdn2(q=q, k=k, v=v, g=g, b=b, w=w, state_v_first=True, output_final_state=True)
+    o0, ht0 = fused_recurrent_gdn2(q=q, k=k, v=v, g=g, b=b, w=w, output_final_state=True, state_v_first=False)
+    o1, ht1 = fused_recurrent_gdn2(q=q, k=k, v=v, g=g, b=b, w=w, output_final_state=True, state_v_first=True)
     assert_close("o", o0, o1, 0.005)
     assert_close("ht", ht0, ht1.transpose(-1, -2), 0.005)
 
 
 @_requires_accelerator
-def test_fused_recurrent_with_initial_state():
+def test_fused_recurrent_initial_state():
     dtype = torch.float32
     B, T, H, K, V = 2, _test_length(64), 2, 64, 64
-    q, k, v, g, b, w, _, _ = _rand_inputs(B, T, H, K, V, dtype)
+    q, k, v, g, b, w, _, _ = _rand_inputs(B, T, H, H, K, V, dtype)
     h0 = torch.randn(B, H, K, V, device=device, dtype=torch.float32)
 
     if _LONG_SEQUENCE:
@@ -440,8 +431,8 @@ def test_fused_recurrent_with_initial_state():
         b=b,
         w=w,
         initial_state=h0,
-        use_qk_l2norm_in_kernel=True,
         output_final_state=True,
+        use_qk_l2norm_in_kernel=True,
     )
     assert_close("o", ref, tri, 0.005)
     assert_close("ht", ref_ht, tri_ht, 0.005)
@@ -463,7 +454,7 @@ def test_fused_recurrent_varlen(cu_seqlens, H, K, V):
     dtype = torch.float32
     cu = torch.LongTensor(cu_seqlens).to(device)
     T, N = cu[-1].item(), len(cu_seqlens) - 1
-    q, k, v, g, b, w, _, _ = _rand_inputs(1, T, H, K, V, dtype)
+    q, k, v, g, b, w, _, _ = _rand_inputs(1, T, H, H, K, V, dtype)
     h0 = torch.randn(N, H, K, V, device=device, dtype=torch.float32)
 
     tri, tri_ht = fused_recurrent_gdn2(
@@ -474,8 +465,8 @@ def test_fused_recurrent_varlen(cu_seqlens, H, K, V):
         b=b,
         w=w,
         initial_state=h0,
-        use_qk_l2norm_in_kernel=True,
         output_final_state=True,
+        use_qk_l2norm_in_kernel=True,
         cu_seqlens=cu,
     )
 
@@ -517,7 +508,7 @@ def test_fused_recurrent_varlen(cu_seqlens, H, K, V):
 @pytest.mark.parametrize("chunk_size", [16, 32])
 def test_chunk_invalid_chunk_size(chunk_size):
     B, T, H, K, V = 1, _test_length(64), 2, 64, 64
-    q, k, v, g, b, w, _, _ = _rand_inputs(B, T, H, K, V, torch.float32)
+    q, k, v, g, b, w, _, _ = _rand_inputs(B, T, H, H, K, V, torch.float32)
 
     with pytest.raises(ValueError, match=r"`chunk_size` must be 64 for GDN-2"):
         chunk_gdn2(q=q, k=k, v=v, g=g, b=b, w=w, chunk_size=chunk_size)
@@ -540,7 +531,7 @@ def test_chunk_invalid_chunk_size(chunk_size):
 def test_chunk(B, T, H, K, V, scale, use_qk_l2norm_in_kernel, use_gate_in_kernel, safe_gate, dtype):
     """Full forward + gradient comparison of the chunkwise kernel vs autograd
     through the naive recurrent reference, or vs streaming at 32K."""
-    q, k, v, g, b, w, A_log, dt_bias = _rand_inputs(B, T, H, K, V, dtype, gate_in_kernel=use_gate_in_kernel)
+    q, k, v, g, b, w, A_log, dt_bias = _rand_inputs(B, T, H, H, K, V, dtype, gate_in_kernel=use_gate_in_kernel)
     lower_bound = -5.0 if safe_gate else None
     h0 = torch.randn(B, H, K, V, dtype=torch.float32, device=device)
 
@@ -576,12 +567,7 @@ def test_chunk(B, T, H, K, V, scale, use_qk_l2norm_in_kernel, use_gate_in_kernel
     do = torch.randn_like(v)
     dht = torch.randn_like(h0)
 
-    # ---- reference (naive recurrent through autograd) ----
-    # The reference never normalizes internally, so it always sees normalized
-    # q/k. To keep gradients flowing to the q/k leaves either way, the
-    # normalization is applied to the leaf tensors directly here, and the
-    # kernel below is handed raw leaves (flag on) or the same normalized
-    # tensors (flag off).
+    # q/k are normalized on the leaves so gradients flow to them either way.
     g_ref = _activate_g(g, A_log, dt_bias, safe_gate, lower_bound) if use_gate_in_kernel else g
     qn = F.normalize(q.float(), p=2, dim=-1).to(dtype)
     kn = F.normalize(k.float(), p=2, dim=-1).to(dtype)
@@ -603,7 +589,6 @@ def test_chunk(B, T, H, K, V, scale, use_qk_l2norm_in_kernel, use_gate_in_kernel
     for t in leaves:
         t.grad = None
 
-    # ---- triton chunk ----
     tri, tri_ht = chunk_gdn2(
         q=q if use_qk_l2norm_in_kernel else qn,
         k=k if use_qk_l2norm_in_kernel else kn,
@@ -611,9 +596,9 @@ def test_chunk(B, T, H, K, V, scale, use_qk_l2norm_in_kernel, use_gate_in_kernel
         g=g,
         b=b,
         w=w,
-        scale=scale,
         A_log=A_log if use_gate_in_kernel else None,
         dt_bias=dt_bias if use_gate_in_kernel else None,
+        scale=scale,
         initial_state=h0,
         output_final_state=True,
         use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
@@ -644,7 +629,7 @@ def test_chunk(B, T, H, K, V, scale, use_qk_l2norm_in_kernel, use_gate_in_kernel
 def test_chunk_npu_forward_backward(monkeypatch):
     """Ascend chunk path must agree with the recurrent reference on the NPU baseline."""
     B, T, H, K, V = 1, _test_length(64), 1, 32, 32
-    q, k, v, g, b, w, _, _ = _rand_inputs(B, T, H, K, V, torch.float16)
+    q, k, v, g, b, w, _, _ = _rand_inputs(B, T, H, H, K, V, torch.float16)
     q = F.normalize(q.float(), p=2, dim=-1).to(torch.float16).detach().requires_grad_()
     k = F.normalize(k.float(), p=2, dim=-1).to(torch.float16).detach().requires_grad_()
     h0 = torch.randn(B, H, K, V, dtype=torch.float32, device=device)
@@ -729,7 +714,7 @@ def test_chunk_npu_varlen_forward_backward():
     cu = torch.tensor(_test_cu_seqlens([0, 7, 31, 65]), dtype=torch.long, device=device)
     cu_cpu = cu.cpu()
     T, N, H, K, V = cu_cpu[-1].item(), len(cu) - 1, 2, 64, 48
-    q, k, v, g, b, w, _, _ = _rand_inputs(1, T, H, K, V, torch.float16)
+    q, k, v, g, b, w, _, _ = _rand_inputs(1, T, H, H, K, V, torch.float16)
     q = F.normalize(q.float(), p=2, dim=-1).to(torch.float16).detach().requires_grad_()
     k = F.normalize(k.float(), p=2, dim=-1).to(torch.float16).detach().requires_grad_()
     h0 = torch.randn(N, H, K, V, dtype=torch.float32, device=device)
@@ -800,15 +785,10 @@ def test_chunk_npu_varlen_forward_backward():
 
 @_requires_accelerator
 def test_chunk_state_v_first():
-    """state_v_first must give the same output and a transposed final state.
-
-    The state-first flag flips the layout of *both* the initial and final state
-    to [V, K], so the v-first call is fed a transposed h0 and its returned ht is
-    transposed back for comparison.
-    """
+    """state_v_first must give the same output and a transposed final state."""
     dtype = torch.float32
     B, T, H, K, V = 2, _test_length(128), 2, 64, 64
-    q, k, v, g, b, w, _, _ = _rand_inputs(B, T, H, K, V, dtype)
+    q, k, v, g, b, w, _, _ = _rand_inputs(B, T, H, H, K, V, dtype)
     h0_kv = torch.randn(B, H, K, V, dtype=torch.float32, device=device)
     h0_vk = h0_kv.transpose(-1, -2).contiguous()
 
@@ -820,8 +800,8 @@ def test_chunk_state_v_first():
         b=b,
         w=w,
         initial_state=h0_kv,
-        use_qk_l2norm_in_kernel=True,
         output_final_state=True,
+        use_qk_l2norm_in_kernel=True,
         state_v_first=False,
     )
     o1, ht1 = chunk_gdn2(
@@ -832,8 +812,8 @@ def test_chunk_state_v_first():
         b=b,
         w=w,
         initial_state=h0_vk,
-        use_qk_l2norm_in_kernel=True,
         output_final_state=True,
+        use_qk_l2norm_in_kernel=True,
         state_v_first=True,
     )
     assert_close("o", o0, o1, 0.005)
@@ -857,7 +837,7 @@ def test_chunk_varlen(cu_seqlens, H, K, V, use_gate_in_kernel, dtype):
     cu = torch.LongTensor(cu_seqlens).to(device)
     cu_cpu = cu.cpu()
     T, N = cu[-1].item(), len(cu_seqlens) - 1
-    q, k, v, g, b, w, A_log, dt_bias = _rand_inputs(1, T, H, K, V, dtype, gate_in_kernel=use_gate_in_kernel)
+    q, k, v, g, b, w, A_log, dt_bias = _rand_inputs(1, T, H, H, K, V, dtype, gate_in_kernel=use_gate_in_kernel)
     h0 = torch.randn(N, H, K, V, dtype=torch.float32, device=device)
 
     leaves = [q, k, v, g, b, w, h0] + ([A_log, dt_bias] if use_gate_in_kernel else [])
@@ -917,7 +897,7 @@ def test_chunk_varlen(cu_seqlens, H, K, V, use_gate_in_kernel, dtype):
             g=g_ref,
             b=b[:, s:e],
             w=w[:, s:e],
-            initial_state=h0[i: i + 1],
+            initial_state=h0[i:i + 1],
             output_final_state=True,
         )
         refs.append(o_i)
@@ -942,8 +922,8 @@ def test_chunk_varlen(cu_seqlens, H, K, V, use_gate_in_kernel, dtype):
 def test_chunk_matches_fused_recurrent(dtype):
     """The two production kernels must agree with each other (and the naive)."""
     B, T, H, K, V = 2, _test_length(256), 2, 64, 64
-    q, k, v, g, b, w, _, _ = _rand_inputs(B, T, H, K, V, dtype)
-    common = dict(use_qk_l2norm_in_kernel=True, output_final_state=True)
+    q, k, v, g, b, w, _, _ = _rand_inputs(B, T, H, H, K, V, dtype)
+    common = dict(output_final_state=True, use_qk_l2norm_in_kernel=True)
 
     o_chunk, ht_chunk = chunk_gdn2(q=q, k=k, v=v, g=g, b=b, w=w, **common)
     o_rec, ht_rec = fused_recurrent_gdn2(q=q, k=k, v=v, g=g, b=b, w=w, **common)
@@ -958,11 +938,19 @@ def test_chunk_return_intermediate_states():
     still match the normal path."""
     dtype = torch.float32
     B, T, H, K, V = 2, _test_length(192), 2, 64, 64
-    q, k, v, g, b, w, _, _ = _rand_inputs(B, T, H, K, V, dtype)
+    q, k, v, g, b, w, _, _ = _rand_inputs(B, T, H, H, K, V, dtype)
 
-    o_ref, ht_ref = chunk_gdn2(q=q, k=k, v=v, g=g, b=b, w=w, use_qk_l2norm_in_kernel=True, output_final_state=True)
+    o_ref, ht_ref = chunk_gdn2(q=q, k=k, v=v, g=g, b=b, w=w, output_final_state=True, use_qk_l2norm_in_kernel=True)
     o, ht, h = chunk_gdn2(
-        q=q, k=k, v=v, g=g, b=b, w=w, use_qk_l2norm_in_kernel=True, output_final_state=True, return_intermediate_states=True
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        b=b,
+        w=w,
+        output_final_state=True,
+        use_qk_l2norm_in_kernel=True,
+        return_intermediate_states=True,
     )
     NT = (T + 63) // 64
     assert h.shape == (B, NT, H, K, V), f"unexpected intermediate-state shape {tuple(h.shape)}"
@@ -987,23 +975,19 @@ def test_chunk_return_intermediate_states():
 )
 def test_layer(num_heads, num_v_heads, use_short_conv):
     """The GatedDeltaNet2 layer must run fwd/bwd and produce finite grads for
-    every parameter, including the GVA (num_v_heads > num_heads) and short-conv
-    paths that the op-level tests do not reach."""
+    every parameter, covering the GVA (num_v_heads > num_heads) head expansion
+    and the short-conv path that the op-level tests do not reach."""
     from fla.layers import GatedDeltaNet2
 
     torch.manual_seed(0)
     hidden_size, head_dim, B, T = 128, 32, 2, _test_length(128)
-    layer = (
-        GatedDeltaNet2(
-            hidden_size=hidden_size,
-            head_dim=head_dim,
-            num_heads=num_heads,
-            num_v_heads=num_v_heads,
-            use_short_conv=use_short_conv,
-        )
-        .to(device)
-        .to(torch.float32)
-    )
+    layer = GatedDeltaNet2(
+        hidden_size=hidden_size,
+        head_dim=head_dim,
+        num_heads=num_heads,
+        num_v_heads=num_v_heads,
+        use_short_conv=use_short_conv,
+    ).to(device).to(torch.float32)
     layer.train()
 
     x = torch.randn(B, T, hidden_size, device=device, dtype=torch.float32, requires_grad=True)

@@ -1,6 +1,6 @@
 # Context Parallel of Linear Attention
 
-Context Parallel of Linear Attention (alias KCP in Moonshot) is context parallelism designed for delta-rule recurrent models such as GDN (Gated Delta Rule) and KDA (Kimi Delta Attention). It enables efficient distributed training by partitioning the sequence dimension across ranks, with each rank processing a local token chunk and CP automatically synchronizing cross-rank states.
+Context Parallel of Linear Attention (alias KCP in Moonshot) is context parallelism designed for delta-rule recurrent models such as GDN (Gated Delta Rule), GDP (Gated DeltaProduct), and KDA (Kimi Delta Attention). It enables efficient distributed training by partitioning the sequence dimension across ranks, with each rank processing a local token chunk and CP automatically synchronizing cross-rank states.
 
 ## Quick Start
 
@@ -386,7 +386,9 @@ In CP mode, only the first sequence in the local batch can be a continuation fro
 ## Test References
 
 - [`tests/context_parallel/test_cp_conv.py`](../../../tests/context_parallel/test_cp_conv.py)
+- [`tests/context_parallel/test_cp_gdp.py`](../../../tests/context_parallel/test_cp_gdp.py)
 - [`tests/context_parallel/test_cp_kda.py`](../../../tests/context_parallel/test_cp_kda.py)
+- [`tests/context_parallel/test_cp_gdn2.py`](../../../tests/context_parallel/test_cp_gdn2.py)
 
 ## Discussion
 
@@ -398,7 +400,7 @@ The only model-specific components are:
 
 As long as these two operations are well-defined, the same CP infrastructure (`build_cp_context`, all-gather, and merge) applies without changing the high-level data flow.
 
-At the time of writing, CP has been implemented and verified for **GDN**, **KDA**, and **DPLR** (a.k.a. RWKV-7). If you would like to see support for another linear-attention variant, please feel free to open an issue.
+At the time of writing, CP has been implemented and verified for **GDN**, **GDP**, **GDN2**, **KDA**, and **DPLR** (a.k.a. RWKV-7). GDP support currently requires `g`. If you would like to see support for another linear-attention variant, please feel free to open an issue.
 
 ## Acknowledgments
 

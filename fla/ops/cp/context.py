@@ -31,6 +31,7 @@ class FLACPContext:
     post_num_ranks: int | None = None
     conv1d_kernel_size: int | None = None
     pre_num_conv_tokens: int | None = None
+    use_tf32x3_affine_chain: bool = False
 
     def copy_for_backward(self) -> FLACPContext:
         """Create a copy for backward pass (useful when PP_SIZE > 1)."""
@@ -44,6 +45,7 @@ class FLACPContext:
             post_num_ranks=self.post_num_ranks,
             conv1d_kernel_size=self.conv1d_kernel_size,
             pre_num_conv_tokens=self.pre_num_conv_tokens,
+            use_tf32x3_affine_chain=self.use_tf32x3_affine_chain,
         )
 
     @property
@@ -64,7 +66,8 @@ def get_cp_cu_seqlens(
     world_size: int | None = None,
     rank: int | None = None,
     group: dist.ProcessGroup | None = None,
-    conv1d_kernel_size: int | None = None
+    conv1d_kernel_size: int | None = None,
+    use_tf32x3_affine_chain: bool = False
 ) -> FLACPContext:
     # 1. Initialize environment info
     if world_size is None:
@@ -156,7 +159,8 @@ def get_cp_cu_seqlens(
         is_first_rank=is_first_rank,
         post_num_ranks=post_num_ranks,
         conv1d_kernel_size=conv1d_kernel_size,
-        pre_num_conv_tokens=pre_num_conv_tokens
+        pre_num_conv_tokens=pre_num_conv_tokens,
+        use_tf32x3_affine_chain=use_tf32x3_affine_chain
     )
 
 
@@ -165,6 +169,7 @@ def build_cp_context(
     group: ProcessGroup,
     conv1d_kernel_size: int | None = None,
     cu_seqlens_cpu: torch.Tensor | None = None,
+    use_tf32x3_affine_chain: bool = False,
 ) -> FLACPContext:
     """Build a CP context for the given cu_seqlens and process group.
 
@@ -173,8 +178,12 @@ def build_cp_context(
         group: Process group for CP communication.
         conv1d_kernel_size: Kernel size for convolution (optional).
         cu_seqlens_cpu: CPU version of cu_seqlens to avoid d2h transfer (optional).
+        use_tf32x3_affine_chain: Use tf32x3 for the affine-chain dots in the CP pre-process and merge kernels (NVIDIA only).
 
     Returns:
         FLACPContext with computed cu_seqlens and rank information.
     """
-    return get_cp_cu_seqlens(cu_seqlens, cu_seqlens_cpu=cu_seqlens_cpu, group=group, conv1d_kernel_size=conv1d_kernel_size)
+    return get_cp_cu_seqlens(
+        cu_seqlens, cu_seqlens_cpu=cu_seqlens_cpu, group=group,
+        conv1d_kernel_size=conv1d_kernel_size, use_tf32x3_affine_chain=use_tf32x3_affine_chain
+    )

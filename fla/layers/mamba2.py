@@ -43,7 +43,7 @@ def apply_mask_to_padding_states(hidden_states, attention_mask):
     """
     Tunes out the hidden states for padding tokens, see https://github.com/state-spaces/mamba/issues/66
     """
-    if attention_mask is not None and attention_mask.shape[1] > 1 and attention_mask.shape[0] > 1:
+    if attention_mask is not None and attention_mask.shape == hidden_states.shape[:2]:
         dtype = hidden_states.dtype
         hidden_states = (hidden_states * attention_mask[:, :, None]).to(dtype)
 
@@ -421,7 +421,7 @@ class Mamba2(nn.Module):
                         raise ValueError(f"Unsupported backend: {self.backend}")
 
                 hidden_states_B_C = (hidden_states_B_C * attention_mask[:, :, None]).to(hidden_states_B_C.dtype) \
-                    if attention_mask is not None and attention_mask.shape[1] > 1 and attention_mask.shape[0] > 1 \
+                    if attention_mask is not None and attention_mask.shape == hidden_states_B_C.shape[:2] \
                     else hidden_states_B_C
                 hidden_states, B, C = torch.split(
                     hidden_states_B_C,
@@ -509,7 +509,7 @@ class Mamba2(nn.Module):
 
         if last_state is None:
             hidden_states_B_C = (hidden_states_B_C * attention_mask[:, :, None]).to(hidden_states_B_C.dtype) \
-                if attention_mask is not None and attention_mask.shape[1] > 1 and attention_mask.shape[0] > 1 \
+                if attention_mask is not None and attention_mask.shape == hidden_states_B_C.shape[:2] \
                 else hidden_states_B_C
         hidden_states, B, C = torch.split(
             hidden_states_B_C,
@@ -678,13 +678,16 @@ class Mamba2(nn.Module):
         output_attentions: bool | None = False,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None, Cache | None]:
+        if hidden_states.shape[1] == 0:
+            return hidden_states, None, past_key_values
+
         last_state = get_layer_cache(self, past_key_values)
 
         if is_fast_path_available and "cuda" in self.in_proj.weight.device.type:
             output, conv_state, ssm_state = self.cuda_kernels_forward(hidden_states, last_state, use_cache, attention_mask)
         else:
             dtype = hidden_states.dtype
-            if last_state is None and attention_mask is not None and attention_mask.shape[1] > 1 and attention_mask.shape[0] > 1:
+            if last_state is None and attention_mask is not None and attention_mask.shape == hidden_states.shape[:2]:
                 hidden_states = (hidden_states * attention_mask[:, :, None]).to(dtype)
             output, conv_state, ssm_state = self.torch_forward(hidden_states, last_state, use_cache, attention_mask)
 

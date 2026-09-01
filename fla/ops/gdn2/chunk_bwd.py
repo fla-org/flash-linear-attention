@@ -30,12 +30,15 @@ wise, V-dim) at the same time.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import torch
 import triton
 import triton.language as tl
 
 from fla.ops.backends import dispatch
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_gated_delta_rule_fwd_h
+from fla.ops.cp.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu_pre_process, expand_h0
 from fla.ops.gdn2.chunk_intra import chunk_gdn2_bwd_intra
 from fla.ops.gdn2.wy_fast import recompute_w_u_fwd_gdn2
 from fla.ops.kda.chunk_bwd import chunk_kda_bwd_dAv
@@ -45,6 +48,9 @@ from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.op import exp2
 from fla.utils import IS_NVIDIA_HOPPER, autotune_cache_kwargs
+
+if TYPE_CHECKING:
+    from fla.ops.cp import FLACPContext
 
 NUM_WARPS_WY = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8]
 
@@ -348,6 +354,7 @@ def chunk_gdn2_bwd(
     v_new: torch.Tensor | None = None,
     h: torch.Tensor | None = None,
     disable_recompute: bool = False,
+    cp_context: FLACPContext | None = None,
 ):
     """End-to-end GDN-2 backward.
 
@@ -355,6 +362,12 @@ def chunk_gdn2_bwd(
     shape [B, T, H, K] (channel-wise erase gate); ``dw`` has shape [B, T, H, V]
     (channel-wise write gate).
     """
+    if cp_context is not None:
+        # If CP was used, the initial_state is guaranteed to have been populated in the fwd
+        # Restore the full initial_state tensor from the compressed version.
+        # Only the first sequence's state is non-zero as it's the only one that could be cross-rank.
+        initial_state = expand_h0(initial_state, context=cp_context)
+
     if not disable_recompute:
         if use_gate_in_kernel:
             g = kda_gate_chunk_cumsum(
@@ -402,6 +415,25 @@ def chunk_gdn2_bwd(
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
     )
+
+    if cp_context is not None:
+        # initial_state is None in the CP mode
+        # We only need to compute dht of current rank and pass it to the backward kernel
+        dht, initial_state = chunk_gated_delta_rule_bwd_dhu_pre_process(
+            q=qg,
+            k=kg,
+            w=w_wy,
+            do=do,
+            dv=dv,
+            gk=g,
+            scale=scale,
+            cu_seqlens=cu_seqlens,
+            dht=dht,
+            initial_state=initial_state,
+            context=cp_context,
+            chunk_size=chunk_size,
+            state_v_first=state_v_first,
+        )
 
     dh, dh0, dv = chunk_gated_delta_rule_bwd_dhu(
         q=qg,

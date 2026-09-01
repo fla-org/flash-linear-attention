@@ -173,7 +173,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     # main recurrence
     for i_t in range(NT):
         i_t_int64 = i_t.to(tl.int64)
-        o_t = i_t * BT + tl.arange(0, BT)
+        o_t = i_t_int64 * BT + tl.arange(0, BT)
         m_t = o_t < T
         if STATE_V_FIRST:
             p_h1 = h + i_t_int64 * HV*K*V + o_v[:, None] * K + o_k1[None, :]
@@ -487,7 +487,7 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
 
     for i_t in range(NT - 1, -1, -1):
         i_t_int64 = i_t.to(tl.int64)
-        o_t = i_t * BT + tl.arange(0, BT)
+        o_t = i_t_int64 * BT + tl.arange(0, BT)
         m_t = o_t < T
         if STATE_V_FIRST:
             p_dh1 = dh + i_t_int64*HV*K*V + o_v[:, None] * K + o_k1[None, :]
@@ -521,7 +521,7 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
                 m_dh4 = m_k4[:, None] & m_v[None, :]
             tl.store(p_dh4, b_dh4.to(p_dh4.dtype.element_ty), mask=m_dh4)
 
-        last_idx = min((i_t + 1) * BT, T) - 1
+        last_idx = min((i_t_int64 + 1) * BT, T) - 1
         if USE_G:
             bg_last = tl.load(g + (bos + last_idx) * HV + i_h).to(tl.float32)
             p_g = g + bos * HV + i_h + o_t * HV

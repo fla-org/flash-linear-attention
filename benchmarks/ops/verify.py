@@ -59,21 +59,16 @@ import os
 import subprocess
 import sys
 
-import torch
-
-from fla.utils import device_name
-
 # Import sibling modules. Works both as a package (python -m benchmarks.ops.verify)
 # and standalone, matching run.py's import strategy.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from registry import SHAPE_CONFIGS, get_op, list_ops  # noqa: E402
 from run import (  # noqa: E402
     _bench_at_ref,
+    _bench_current,
     _device_synchronize,
     _find_project_root,
     _format_machine_line,
-    _get_machine_info,
-    benchmark_op,
     print_results_table,
 )
 
@@ -124,8 +119,11 @@ def profile_op(op_name: str, modes: list[str]) -> None:
     """
     import importlib
 
+    import torch
     from registry import generate_inputs
     from torch.profiler import ProfilerActivity, profile
+
+    from fla.utils import device_name
 
     config = get_op(op_name)
     mod = importlib.import_module(config.import_path)
@@ -246,13 +244,15 @@ def main():
             return 1
         print("\n  GATE PASSED.")
 
-    # 2. Performance measurement (reuses run.py). Baseline compare via git worktree.
-    machine_info = _get_machine_info()
+    # 2. Performance measurement (reuses run.py). Each ref runs in a subprocess
+    # so the parent never holds NPU/CUDA tensors across HEAD vs --base.
+    results, machine_info = _bench_current([args.op], SHAPE_CONFIGS, args.modes)
+    results = results or []
+    machine_info = machine_info or {}
     print(f"\n  {_format_machine_line(machine_info)} | "
           f"Triton {machine_info.get('triton_version', 'N/A')} | "
           f"{machine_info.get('git_label', 'unknown')}")
 
-    results = benchmark_op(args.op, SHAPE_CONFIGS, modes=args.modes)
     baseline, baseline_info = (None, None)
     if args.base:
         baseline, baseline_info = _bench_at_ref(args.base, [args.op], SHAPE_CONFIGS, args.modes)

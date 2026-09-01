@@ -7,14 +7,22 @@
 
 # Forward orchestration for GDN-2 chunkwise training.
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 import torch
 
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_fwd_h
+from fla.ops.cp.chunk_delta_h import chunk_gated_delta_rule_fwd_h_pre_process, compress_h0
 from fla.ops.gdn2.chunk_intra import chunk_gdn2_fwd_intra
 from fla.ops.gla.chunk import chunk_gla_fwd_o_gk
 from fla.ops.kda.gate import kda_gate_chunk_cumsum
 from fla.ops.utils import chunk_local_cumsum
 from fla.ops.utils.constant import RCP_LN2
+
+if TYPE_CHECKING:
+    from fla.ops.cp import FLACPContext
 
 
 def chunk_gdn2_fwd(
@@ -39,6 +47,7 @@ def chunk_gdn2_fwd(
     disable_recompute: bool = False,
     return_intermediate_states: bool = False,
     state_v_first: bool = False,
+    cp_context: FLACPContext | None = None,
 ):
     """Top-level GDN-2 forward pipeline.
 
@@ -89,6 +98,19 @@ def chunk_gdn2_fwd(
         disable_recompute=disable_recompute,
     )
 
+    if cp_context is not None:
+        initial_state = chunk_gated_delta_rule_fwd_h_pre_process(
+            k=kg,
+            w=w_wy,
+            u=u_wy,
+            gk=g,
+            cu_seqlens=cu_seqlens,
+            initial_state=initial_state,
+            context=cp_context,
+            chunk_size=chunk_size,
+            state_v_first=state_v_first,
+        )
+
     h, v_new, final_state = chunk_gated_delta_rule_fwd_h(
         k=kg,
         w=w_wy,
@@ -102,6 +124,13 @@ def chunk_gdn2_fwd(
         chunk_size=chunk_size,
         state_v_first=state_v_first,
     )
+
+    if cp_context is not None:
+        # In Context Parallel (CP) mode, global initial states are not supported at the entry point.
+        # The `initial_state` here is computed internally via inter-rank communication.
+        # Since only the first sequence in the local batch can be a continuation of a cross-rank sequence,
+        # only the first state in the tensor is relevant. We compress it to optimize memory for `save_for_backward`.
+        initial_state = compress_h0(initial_state, context=cp_context)
 
     o = chunk_gla_fwd_o_gk(
         q=q,

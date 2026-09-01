@@ -467,7 +467,7 @@ class LogLinearMamba2ForCausalLM(LogLinearMamba2PreTrainedModel):
         if not fuse_linear_and_cross_entropy or labels is None:
             logits = self.lm_head(
                 hidden_states
-                if logits_to_keep is None
+                if labels is not None or logits_to_keep is None
                 else hidden_states[:, -logits_to_keep:],
             )
         if labels is not None:

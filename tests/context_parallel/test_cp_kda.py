@@ -114,6 +114,7 @@ def run_cp_kda_test_worker(
     safe_gate: bool = False,
     lower_bound: float | None = None,
     state_v_first: bool = False,
+    use_tf32x3_affine_chain: bool = False,
 ):
     """
     Worker function for CP KDA test.
@@ -306,7 +307,9 @@ def run_cp_kda_test_worker(
         dist.barrier()
 
         # Build CP context
-        context = build_cp_context(cu_seqlens_global, group=dist.group.WORLD)
+        context = build_cp_context(
+            cu_seqlens_global, group=dist.group.WORLD, use_tf32x3_affine_chain=use_tf32x3_affine_chain
+        )
 
         chunk_size = T // world_size
         start_idx = rank * chunk_size
@@ -422,6 +425,7 @@ def run_cp_test_with_spawn(
     safe_gate: bool = False,
     lower_bound: float | None = None,
     state_v_first: bool = False,
+    use_tf32x3_affine_chain: bool = False,
 ):
     """
     Run CP test using torch.multiprocessing.spawn.
@@ -430,7 +434,7 @@ def run_cp_test_with_spawn(
     mp.start_processes(
         run_cp_kda_test_worker,
         args=(world_size, test_name, T, H, D, lengths, dtype, disable_recompute,
-              use_gate_in_kernel, safe_gate, lower_bound, state_v_first),
+              use_gate_in_kernel, safe_gate, lower_bound, state_v_first, use_tf32x3_affine_chain),
         nprocs=world_size,
         join=True,
         start_method='spawn',
@@ -583,6 +587,59 @@ def test_cp4_state_v_first():
         lengths=[10240],
         dtype=torch.bfloat16,
         state_v_first=True,
+        **GATE_KWARGS,
+    )
+
+
+# ============================================================
+# tf32x3 Affine Chain Tests
+# ============================================================
+
+def test_cp2_sequence_cut_tf32x3():
+    """CP2: sequences cut across rank boundary, tf32x3 affine chain in CP."""
+    if torch.cuda.device_count() < 2:
+        pytest.skip("At least 2 GPUs required")
+
+    run_cp_test_with_spawn(
+        world_size=2,
+        test_name="CP2_SequenceCut_TF32X3",
+        T=10240, H=12, D=128,
+        lengths=[3000, 4000, 3240],
+        dtype=torch.bfloat16,
+        use_tf32x3_affine_chain=True,
+        **GATE_KWARGS,
+    )
+
+
+def test_cp4_single_sequence_tf32x3():
+    """CP4: single long sequence spanning all ranks, tf32x3 affine chain in CP."""
+    if torch.cuda.device_count() < 4:
+        pytest.skip("At least 4 GPUs required")
+
+    run_cp_test_with_spawn(
+        world_size=4,
+        test_name="CP4_SingleSequence_TF32X3",
+        T=10240, H=12, D=128,
+        lengths=[10240],
+        dtype=torch.bfloat16,
+        use_tf32x3_affine_chain=True,
+        **GATE_KWARGS,
+    )
+
+
+def test_cp2_state_v_first_tf32x3():
+    """CP2: state_v_first=True with sequence cut, tf32x3 affine chain in CP."""
+    if torch.cuda.device_count() < 2:
+        pytest.skip("At least 2 GPUs required")
+
+    run_cp_test_with_spawn(
+        world_size=2,
+        test_name="CP2_TransposeState_TF32X3",
+        T=10240, H=12, D=128,
+        lengths=[3000, 4000, 3240],
+        dtype=torch.bfloat16,
+        state_v_first=True,
+        use_tf32x3_affine_chain=True,
         **GATE_KWARGS,
     )
 

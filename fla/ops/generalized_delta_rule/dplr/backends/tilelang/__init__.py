@@ -88,10 +88,11 @@ class DPLRTileLangBackend(BaseBackend):
             )
         if k.shape[-1] not in (64, 128):
             return False, f"TileLang backend supports head dim 64 or 128 (got {k.shape[-1]}); fall back to Triton"
-        chunk_size = 16 if chunk_size is None else chunk_size
+        from fla.ops.generalized_delta_rule.dplr.chunk import gate_bound_is_safe
+        if chunk_size is None:
+            chunk_size = 64 if lower_bound is not None and gate_bound_is_safe(lower_bound, 64) else 16
         if chunk_size not in (16, 32, 64):
             return False, f"TileLang backend supports chunk_size 16/32/64, got {chunk_size}; fall back to Triton"
-        from fla.ops.generalized_delta_rule.dplr.chunk import gate_bound_is_safe
         bound = lower_bound if lower_bound is not None else (-5.0 if safe_gate else None)
         if bound is None or not gate_bound_is_safe(bound, chunk_size):
             return False, (

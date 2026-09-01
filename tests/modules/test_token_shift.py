@@ -140,6 +140,17 @@ def test_all_with_and_without_varlen(B, T, H, cu_seqlens, split_at):
     _check_passing_vs_whole(B, T, H, cu_seqlens, dtype, split_at)
 
 
+def test_token_shift_varlen_cache_mixed_lengths():
+    x = torch.tensor([[[1.], [2.], [3.]]], device=device)
+    cu_seqlens = torch.tensor([0, 2, 3], dtype=torch.int32, device=device)
+    cache = torch.tensor([[10.], [20.]], device=device)
+
+    output, cache_out = token_shift(x, cu_seqlens, cache=cache, output_cache=True)
+
+    assert_close("output", output, torch.tensor([[[9.], [-1.], [17.]]], device=device), 1e-3)
+    assert_close("cache", cache_out, torch.tensor([[2.], [3.]], device=device), 1e-3)
+
+
 def _packed_cu_seqlens(total_tokens: int, doc_len: int) -> torch.Tensor:
     n_docs = (total_tokens + doc_len - 1) // doc_len
     lens = torch.full((n_docs,), doc_len, device=device, dtype=torch.long)

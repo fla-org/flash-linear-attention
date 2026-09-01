@@ -12,6 +12,7 @@ from ._compat import (  # noqa: F401
     TRITON_ABOVE_3_4_0,
     TRITON_ABOVE_3_5_1,
     TRITON_ABOVE_3_7_1,
+    ascend_compile_kwargs,
     autotune_cache_kwargs,
     find_spec_cached,
     has_usable_nvcc,

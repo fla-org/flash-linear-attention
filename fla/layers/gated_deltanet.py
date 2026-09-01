@@ -233,8 +233,12 @@ class GatedDeltaNet(nn.Module):
             )
 
         batch_size, q_len, _ = hidden_states.shape
-        # change to inference mode.
-        mode = 'fused_recurrent' if (q_len <= 64 and not self.training) else self.mode
+        if torch.is_grad_enabled():
+            mode = 'chunk'
+        elif q_len <= 64 and not self.training:
+            mode = 'fused_recurrent'
+        else:
+            mode = self.mode
         if self.training:
             assert mode == 'chunk', "Only chunk mode is supported in training."
 

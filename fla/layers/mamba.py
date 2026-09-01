@@ -406,6 +406,9 @@ class Mamba(nn.Module):
         output_attentions: bool | None = False,
         **kwargs: Unpack[dict],
     ) -> tuple[torch.Tensor, torch.Tensor | None, Cache | None]:
+        if hidden_states.shape[1] == 0:
+            return hidden_states, None, past_key_values
+
         last_state = get_layer_cache(self, past_key_values)
 
         if is_fast_path_available and "cuda" in self.x_proj.weight.device.type:

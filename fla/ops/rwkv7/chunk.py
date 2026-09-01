@@ -62,7 +62,9 @@ def chunk_rwkv7(
             When `True`, the kernel can use M=16 TensorCore acceleration.
             The safe range is approximately `[-5, 0)`. Default: `False`.
         chunk_size (Optional[int]):
-            Chunk size for the chunked computation. Default: `None`, which means 16.
+            Chunk size for the chunked computation. Default: `None`, which means 64
+            when `lower_bound` is given and `gate_bound_is_safe(lower_bound, 64)`
+            holds, and 16 otherwise.
         disable_recompute (Optional[bool]):
             Whether to disable gradient recomputation in the kernel. Default: `False`.
         cp_context (Optional[FLACPContext]):

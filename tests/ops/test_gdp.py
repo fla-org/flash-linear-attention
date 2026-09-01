@@ -214,3 +214,34 @@ def test_chunk_varlen(
     assert_close('db', ref_dbeta, tri_dbeta, 0.015)
     assert_close('dg', ref_dg, tri_dg, 0.015)
     assert_close('dh0', ref_dh0, tri_dh0, 0.007)
+
+
+def test_naive_varlen():
+    H, D, num_householder = 2, 64, 2
+    torch.manual_seed(42)
+    os.environ['TRITON_F32_DEFAULT'] = 'ieee'
+    cu_seqlens = torch.LongTensor([0, 63, 100, 100, 500]).to(device)
+    T = cu_seqlens[-1]
+    N = len(cu_seqlens) - 1
+
+    q = torch.nn.functional.normalize(torch.randn((1, T, H, D), dtype=torch.float16), dim=-1, p=2)
+    k = torch.nn.functional.normalize(torch.randn(1, T*num_householder, H, D, dtype=torch.float16), dim=-1, p=2)
+    v = torch.randn((1, T*num_householder, H, D), dtype=torch.float16)
+    g = F.logsigmoid(torch.rand(1, T, H, dtype=torch.float16))
+    beta = torch.rand(1, T*num_householder, H, dtype=torch.float16).sigmoid()
+    h0 = torch.randn((N, H, D, D), dtype=torch.float16)
+    q, k, v, beta, g, h0 = map(lambda x: x.to(device), (q, k, v, beta, g, h0))
+    scale = D ** -0.5
+
+    ref, ref_ht = naive_recurrent_gated_delta_product(
+        q, k, v, g, beta, scale, cu_seqlens,
+        initial_state=h0, output_final_state=True, num_householder=num_householder,
+    )
+    tri, tri_ht = chunk_gated_delta_product(
+        q=q, k=k, v=v, g=g, beta=beta, scale=scale,
+        initial_state=h0, output_final_state=True, num_householder=num_householder,
+        cu_seqlens=cu_seqlens,
+    )
+
+    assert_close('o', ref, tri, 0.005)
+    assert_close('ht', ref_ht, tri_ht, 0.005)
