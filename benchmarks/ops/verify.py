@@ -28,6 +28,9 @@ Usage::
     # Gate (full pytest) + benchmark vs. main
     python -m benchmarks.ops.verify --op chunk_gla --base main
 
+    # Gate + benchmark for GDN-2
+    python -m benchmarks.ops.verify --op chunk_gdn2 --base main
+
     # Fast signal: gate on a shape subset (pytest -k selection, test unchanged)
     python -m benchmarks.ops.verify --op chunk_gla --gate-k T15 --modes fwd
 
