@@ -123,12 +123,12 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
         x: torch.Tensor,
         weight: torch.Tensor,
         bias: torch.Tensor | None,
-        residual: torch.Tensor | None,
         activation: str | None,
         chunk_indices: torch.Tensor | None,
         cp_context: FLACPContext | None,
         chunk_size: int | None,
         backend: str = 'triton',
+        residual: torch.Tensor | None = None,
     ):
         # Import here to avoid circular dependency
         from fla.modules.conv.triton.ops import causal_conv1d_fwd
@@ -150,6 +150,7 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
             group=group,
         )
 
+        ctx.num_inputs = len(ctx.needs_input_grad)
         ctx.save_for_backward(x, weight, bias, residual, initial_state)
         ctx.activation = activation
         ctx.cu_seqlens = cu_seqlens
@@ -213,19 +214,19 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
             pre_num_conv_tokens=ctx.pre_num_conv_tokens,
         )
 
-        return dx, dw, db, dr, None, None, None, None, None
+        return (dx, dw, db, None, None, None, None, None, dr)[:ctx.num_inputs]
 
 
 def causal_conv1d_cp(
     x: torch.Tensor,
     weight: torch.Tensor,
     bias: torch.Tensor | None = None,
-    residual: torch.Tensor | None = None,
     activation: str | None = None,
     chunk_indices: torch.Tensor | None = None,
     cp_context: FLACPContext | None = None,
     chunk_size: int | None = None,
     backend: str = 'triton',
+    residual: torch.Tensor | None = None,
 ):
     """
     Context Parallel version of causal_conv1d.
@@ -238,12 +239,12 @@ def causal_conv1d_cp(
         x: Input tensor of shape [1, T, D]
         weight: Weight tensor of shape [D, W]
         bias: Bias tensor of shape [D] or None
-        residual: Residual tensor of shape [1, T, D] or None
         activation: Activation function name or None
         cu_seqlens: Cumulative sequence lengths
         cu_seqlens_cpu: Cumulative sequence lengths on CPU
         chunk_indices: Chunk indices for variable-length sequences
         cp_context: CP context (required for CP mode)
+        residual: Residual tensor of shape [1, T, D] or None
     """
     if cp_context is None:
         raise ValueError("cp_context must be provided for causal_conv1d_cp")
@@ -255,7 +256,4 @@ def causal_conv1d_cp(
     if chunk_indices is None:
         chunk_indices = prepare_chunk_indices(cp_context.cu_seqlens, chunk_size, cu_seqlens_cpu=cp_context.cu_seqlens_cpu)
 
-    return CausalConv1dFunctionCP.apply(
-        x, weight, bias, residual, activation,
-        chunk_indices, cp_context, chunk_size, backend
-    )
+    return CausalConv1dFunctionCP.apply(x, weight, bias, activation, chunk_indices, cp_context, chunk_size, backend, residual)
