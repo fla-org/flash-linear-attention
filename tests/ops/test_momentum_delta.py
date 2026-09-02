@@ -14,16 +14,16 @@ from fla.utils import assert_close, device, device_platform
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'D', 'scale', 'use_qk_l2norm_in_kernel', 'dtype'),
+    ('B', 'T', 'H', 'D', 'use_qk_l2norm_in_kernel', 'dtype'),
     [
-        pytest.param(*test, id="B{}-T{}-H{}-D{}-scale{}-{}".format(*test))
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-{}".format(*test))
         for test in [
-            (1, 63, 1, 64, 1, False, torch.float16),
-            (2, 100, 4, 60, 0.1, False, torch.float16),
-            (2, 1000, 3, 128, 0.1, False, torch.float16),
-            (2, 1024, 4, 128, 1, True, torch.float16),
-            (3, 2000, 4, 128, 0.1, False, torch.float16),
-            (4, 2048, 8, 64, 0.1, False, torch.float16),
+            (1, 63, 1, 64, False, torch.float16),
+            (2, 100, 4, 60, False, torch.float16),
+            (2, 1000, 3, 128, False, torch.float16),
+            (2, 1024, 4, 128, True, torch.float16),
+            (3, 2000, 4, 128, False, torch.float16),
+            (4, 2048, 8, 64, False, torch.float16),
         ]
     ],
 )
@@ -36,7 +36,6 @@ def test_chunk(
     T: int,
     H: int,
     D: int,
-    scale: float,
     use_qk_l2norm_in_kernel: bool,
     dtype: torch.dtype,
 ):
@@ -161,8 +160,7 @@ def test_chunk_varlen(
     reason='Intel Triton Failure',
 )
 def test_chunk_initial_state_grad_count():
-    """Regression for P0 #1: backward must return dh0 in the initial_state slot,
-    not in output_final_state, and must have correct number of grads."""
+    """Backward must return dh0 in the initial_state slot, not in output_final_state."""
     torch.manual_seed(0)
     B, T, H, D = 2, 64, 2, 32
     dtype = torch.bfloat16
@@ -196,9 +194,7 @@ def test_chunk_initial_state_grad_count():
     reason='Intel Triton Failure',
 )
 def test_fused_recurrent_uses_u_not_v():
-    """Regression for P0 #2: fused bwd must use u=v-k·h, not raw v.
-    Parity between chunk and fused catches it; here we also check that
-    fused bwd is finite and matches chunk within tolerance."""
+    """Fused bwd must use u=v-k·h, not raw v; parity between chunk and fused."""
     torch.manual_seed(1)
     B, T, H, D = 2, 32, 2, 32
     dtype = torch.bfloat16
@@ -245,10 +241,7 @@ def test_fused_recurrent_uses_u_not_v():
     reason='Intel Triton Failure',
 )
 def test_qk_l2norm_wiring():
-    """Regression for P0 #3: default qk_norm='l2' must actually normalize.
-    The kernel-side l2 path should match eager F.normalize parity for outputs.
-    Gradients differ in magnitude because the kernel path includes the
-    l2norm backward scaling; we only check they are finite and non-zero."""
+    """Default qk_norm='l2' must normalize; kernel l2 should match eager parity."""
     torch.manual_seed(2)
     B, T, H, D = 2, 64, 2, 32
     dtype = torch.bfloat16
