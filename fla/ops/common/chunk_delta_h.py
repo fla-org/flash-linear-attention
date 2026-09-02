@@ -700,6 +700,7 @@ def chunk_gated_delta_rule_fwd_h(
     cu_seqlens_cpu: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
     chunk_offsets: torch.LongTensor | None = None,
+    use_graph: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     B, T, H, K, V, HV = *k.shape, u.shape[-1], u.shape[2]
     BT = chunk_size
@@ -716,13 +717,13 @@ def chunk_gated_delta_rule_fwd_h(
     assert K <= 256, "current kernel does not support head dimension larger than 256."
 
     if state_v_first:
-        h = k.new_empty(B, NT, HV, V, K)
+        h = k.new_zeros(B, NT, HV, V, K) if use_graph else k.new_empty(B, NT, HV, V, K)
         final_state = k.new_zeros(N, HV, V, K, dtype=torch.float32) if output_final_state else None
     else:
-        h = k.new_empty(B, NT, HV, K, V)
+        h = k.new_zeros(B, NT, HV, K, V) if use_graph else k.new_empty(B, NT, HV, K, V)
         final_state = k.new_zeros(N, HV, K, V, dtype=torch.float32) if output_final_state else None
 
-    v_new = torch.empty_like(u) if save_new_value else None
+    v_new = (torch.zeros_like(u) if use_graph else torch.empty_like(u)) if save_new_value else None
     def grid(meta): return (triton.cdiv(V, meta['BV']) * N * HV, )
     chunk_gated_delta_rule_fwd_kernel_h_blockdim64[grid](
         k=k,

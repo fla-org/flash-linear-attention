@@ -45,11 +45,14 @@ def chunk_scaled_dot_kkt_fwd_kernel(
     BK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     USE_G: tl.constexpr,
+    USE_GRAPH: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // HV, i_bh % HV
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        if USE_GRAPH and i_n < 0:
+            return
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
@@ -89,6 +92,7 @@ def chunk_scaled_dot_kkt_fwd(
     chunk_size: int = 64,
     output_dtype: torch.dtype = torch.float32,
     chunk_indices: torch.LongTensor | None = None,
+    use_graph: bool = False,
 ) -> torch.Tensor:
     r"""
     Compute beta * K * K^T.
@@ -118,7 +122,8 @@ def chunk_scaled_dot_kkt_fwd(
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
-    A = torch.empty(B, T, HV, BT, device=k.device, dtype=output_dtype)
+    factory = torch.zeros if use_graph else torch.empty
+    A = factory(B, T, HV, BT, device=k.device, dtype=output_dtype)
     chunk_scaled_dot_kkt_fwd_kernel[(NT, B * HV)](
         k=k,
         g=g,
@@ -131,5 +136,6 @@ def chunk_scaled_dot_kkt_fwd(
         HV=HV,
         K=K,
         BT=BT,
+        USE_GRAPH=use_graph,
     )
     return A

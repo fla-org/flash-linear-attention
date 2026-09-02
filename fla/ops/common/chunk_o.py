@@ -76,6 +76,7 @@ def chunk_fwd_kernel_o(
     USE_G_GAMMA: tl.constexpr,
     STATE_V_FIRST: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    USE_GRAPH: tl.constexpr,
 ):
     i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_b, i_h = i_bh // HV, i_bh % HV
@@ -83,6 +84,8 @@ def chunk_fwd_kernel_o(
     if IS_VARLEN:
         i_tg = i_t
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        if USE_GRAPH and i_n < 0:
+            return
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
         NT = tl.cdiv(T, BT)
@@ -553,6 +556,7 @@ def chunk_fwd_o(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
+    use_graph: bool = False,
 ) -> torch.Tensor:
     B, T, H, K, V, HV = *q.shape, v.shape[-1], v.shape[2]
     BT = chunk_size
@@ -562,7 +566,7 @@ def chunk_fwd_o(
     if scale is None:
         scale = k.shape[-1] ** -0.5
 
-    o = torch.empty_like(v)
+    o = torch.zeros_like(v) if use_graph else torch.empty_like(v)
     def grid(meta): return (triton.cdiv(V, meta['BV']), NT, B * HV)
     chunk_fwd_kernel_o[grid](
         q=q,
@@ -582,6 +586,7 @@ def chunk_fwd_o(
         V=V,
         BT=BT,
         STATE_V_FIRST=state_v_first,
+        USE_GRAPH=use_graph,
     )
     return o
 

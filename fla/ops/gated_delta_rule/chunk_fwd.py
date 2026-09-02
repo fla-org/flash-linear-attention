@@ -53,6 +53,7 @@ def chunk_gated_delta_rule_fwd_kkt_solve_kernel(
     BK: tl.constexpr,
     USE_G: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    USE_GRAPH: tl.constexpr,
 ):
     """
     Fused kernel: compute beta * K @ K^T (lower triangular) + solve_tril (I+A)^{-1} in one pass.
@@ -72,6 +73,8 @@ def chunk_gated_delta_rule_fwd_kkt_solve_kernel(
 
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        if USE_GRAPH and i_n < 0:
+            return
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
@@ -337,6 +340,7 @@ def chunk_gated_delta_rule_fwd_intra(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
+    use_graph: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     r"""
     GDN intra-chunk forward: fused or unfused kkt + solve_tril + recompute_w_u.
@@ -396,6 +400,7 @@ def chunk_gated_delta_rule_fwd_intra(
             K=K,
             BT=BT,
             BC=BC,
+            USE_GRAPH=use_graph,
         )
     else:
         # Step 1: mathematically equivalent unfused kkt + solve_tril
@@ -407,12 +412,14 @@ def chunk_gated_delta_rule_fwd_intra(
             chunk_indices=chunk_indices,
             chunk_size=BT,
             output_dtype=torch.float32,
+            use_graph=use_graph,
         )
         A = solve_tril(
             A=A,
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
             output_dtype=k.dtype,
+            use_graph=use_graph,
         )
 
     # Step 2: recompute_w_u
@@ -424,5 +431,6 @@ def chunk_gated_delta_rule_fwd_intra(
         g=g,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
+        use_graph=use_graph,
     )
     return w, u, A

@@ -60,11 +60,14 @@ def recompute_w_u_fwd_kernel(
     BV: tl.constexpr,
     USE_G: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    USE_GRAPH: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // HV, i_bh % HV
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        if USE_GRAPH and i_n < 0:
+            return
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
@@ -260,6 +263,7 @@ def recompute_w_u_fwd(
     g: torch.Tensor | None = None,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
+    use_graph: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V, HV = *k.shape, v.shape[-1], v.shape[2]
     BT = A.shape[-1]
@@ -270,8 +274,8 @@ def recompute_w_u_fwd(
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
-    w = k.new_empty(B, T, HV, K)
-    u = torch.empty_like(v)
+    w = k.new_zeros(B, T, HV, K) if use_graph else k.new_empty(B, T, HV, K)
+    u = torch.zeros_like(v) if use_graph else torch.empty_like(v)
     recompute_w_u_fwd_kernel[(NT, B*HV)](
         k=k,
         v=v,
@@ -290,6 +294,7 @@ def recompute_w_u_fwd(
         BT=BT,
         BK=BK,
         BV=BV,
+        USE_GRAPH=use_graph,
     )
     return w, u
 

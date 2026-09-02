@@ -48,7 +48,9 @@ def chunk_gated_delta_rule_fwd(
     A_log: torch.Tensor | None = None,
     dt_bias: torch.Tensor | None = None,
     chunk_size: int = 64,
+    use_graph: bool = False,
 ):
+    graph_kwargs = {'use_graph': True} if use_graph else {}
     g_input = g if use_gate_in_kernel else None
     if use_gate_in_kernel:
         g = gdn_gate_chunk_cumsum(
@@ -59,6 +61,7 @@ def chunk_gated_delta_rule_fwd(
             dt_bias=dt_bias,
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
+            **graph_kwargs,
         )
     else:
         g = chunk_local_cumsum(
@@ -67,6 +70,7 @@ def chunk_gated_delta_rule_fwd(
             scale=RCP_LN2,
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
+            **graph_kwargs,
         )
     # obtain WY representation. u is actually the new v.
     # fused kkt + solve_tril + recompute_w_u
@@ -78,6 +82,7 @@ def chunk_gated_delta_rule_fwd(
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         chunk_size=chunk_size,
+        **graph_kwargs,
     )
 
     if cp_context is not None:
@@ -102,9 +107,9 @@ def chunk_gated_delta_rule_fwd(
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
-        chunk_offsets=chunk_offsets,
         state_v_first=state_v_first,
         chunk_size=chunk_size,
+        **({'chunk_offsets': chunk_offsets, 'use_graph': True} if use_graph else {}),
     )
 
     if cp_context is not None:
@@ -121,6 +126,7 @@ def chunk_gated_delta_rule_fwd(
         chunk_indices=chunk_indices,
         state_v_first=state_v_first,
         chunk_size=chunk_size,
+        **graph_kwargs,
     )
     return g, o, A, final_state, initial_state, g_input
 
@@ -317,6 +323,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             A_log=A_log,
             dt_bias=dt_bias,
             chunk_size=chunk_size,
+            use_graph=use_graph,
         )
         ctx.save_for_backward(
             q,

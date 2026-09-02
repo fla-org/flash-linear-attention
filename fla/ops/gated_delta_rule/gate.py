@@ -75,12 +75,15 @@ def gdn_gate_chunk_cumsum_scalar_kernel(
     HAS_BIAS: tl.constexpr,
     HAS_SCALE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    USE_GRAPH: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
 
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        if USE_GRAPH and i_n < 0:
+            return
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
@@ -169,6 +172,7 @@ def gdn_gate_chunk_cumsum(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
     output_dtype: torch.dtype | None = torch.float,
+    use_graph: bool = False,
 ) -> torch.Tensor:
     B, T, H = g.shape
     BT = chunk_size
@@ -176,7 +180,7 @@ def gdn_gate_chunk_cumsum(
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
-    o = torch.empty_like(g, dtype=output_dtype or g.dtype)
+    o = torch.zeros_like(g, dtype=output_dtype or g.dtype) if use_graph else torch.empty_like(g, dtype=output_dtype or g.dtype)
     gdn_gate_chunk_cumsum_scalar_kernel[(NT, B * H)](
         g=g,
         A_log=A_log,
@@ -189,6 +193,7 @@ def gdn_gate_chunk_cumsum(
         H=H,
         BT=BT,
         REVERSE=False,
+        USE_GRAPH=use_graph,
     )
     return o
 
