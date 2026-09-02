@@ -445,7 +445,7 @@ def chunk_mode_rule_bwd_kernel_dbyz(
     else:
         NT = tl.cdiv(T, BT)
         i_t = i_t_pid
-        i_tg = i_b * NT + i_t
+        i_tg = i_b * NT + i_t  # noqa: F841
         bos, eos = (i_b * T).to(tl.int64), (i_b * T + T).to(tl.int64)
 
     # offset calculation
