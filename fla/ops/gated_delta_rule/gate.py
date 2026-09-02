@@ -128,17 +128,21 @@ def gdn_gate_bwd_kernel(
     dyg,
     dg,
     dA,
+    cu_seqlens,
     T,
+    N: tl.constexpr,
     H: tl.constexpr,
     BT: tl.constexpr,
     HAS_BIAS: tl.constexpr,
+    USE_GRAPH: tl.constexpr,
 ):
     i_t, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1)
 
     b_A = tl.load(A_log + i_h).to(tl.float32)
 
     o_t = i_t * BT + tl.arange(0, BT)
-    m_t = o_t < T
+    actual_t = tl.load(cu_seqlens + N).to(tl.int64) if USE_GRAPH else T
+    m_t = o_t < actual_t
     p_g = g + i_h + o_t * H
     p_dg = dg + i_h + o_t * H
     p_dyg = dyg + i_h + o_t * H
@@ -204,14 +208,16 @@ def gdn_gate_bwd(
     A_log: torch.Tensor,
     dt_bias: torch.Tensor | None,
     dyg: torch.Tensor,
+    cu_seqlens: torch.LongTensor | None = None,
+    use_graph: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     H = g.shape[-1]
     T = g.numel() // H
     BT = 32
     NT = triton.cdiv(T, BT)
 
-    dg = torch.empty_like(g, dtype=torch.float32)
-    dA = A_log.new_empty(NT, H, dtype=torch.float32)
+    dg = torch.zeros_like(g, dtype=torch.float32) if use_graph else torch.empty_like(g, dtype=torch.float32)
+    dA = A_log.new_zeros(NT, H, dtype=torch.float32) if use_graph else A_log.new_empty(NT, H, dtype=torch.float32)
 
     gdn_gate_bwd_kernel[(NT, H)](
         g=g,
@@ -220,9 +226,12 @@ def gdn_gate_bwd(
         dyg=dyg,
         dg=dg,
         dA=dA,
+        cu_seqlens=cu_seqlens,
         T=T,
+        N=len(cu_seqlens) - 1 if use_graph else 0,
         H=H,
         BT=BT,
+        USE_GRAPH=use_graph,
     )
 
     dg = dg.view_as(g).type_as(g)

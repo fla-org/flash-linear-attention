@@ -203,6 +203,7 @@ def chunk_bwd_kernel_dqkwg(
     USE_DW: tl.constexpr,
     STATE_V_FIRST: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    USE_GRAPH: tl.constexpr,
 ):
     i_k, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_b, i_h = i_bh // HV, i_bh % HV
@@ -211,6 +212,8 @@ def chunk_bwd_kernel_dqkwg(
     if IS_VARLEN:
         i_tg = i_t
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        if USE_GRAPH and i_n < 0:
+            return
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
         NT = tl.cdiv(T, BT)
@@ -488,11 +491,14 @@ def chunk_bwd_kernel_dv_local(
     USE_G_GAMMA: tl.constexpr,
     USE_A: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    USE_GRAPH: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // HV, i_bh % HV
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        if USE_GRAPH and i_n < 0:
+            return
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
@@ -660,6 +666,7 @@ def chunk_bwd_dv_local(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
+    use_graph: bool = False,
 ) -> torch.Tensor:
     B, T, H, K, V, HV = *k.shape, do.shape[-1], do.shape[2]
     BT = chunk_size
@@ -676,7 +683,7 @@ def chunk_bwd_dv_local(
     BV = min(max(triton.next_power_of_2(V), 16), CONST_TILING)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
-    dv = torch.empty_like(do)
+    dv = torch.zeros_like(do) if use_graph else torch.empty_like(do)
     grid = (NT, B * HV)
     chunk_bwd_kernel_dv_local[grid](
         q=q,
@@ -697,6 +704,7 @@ def chunk_bwd_dv_local(
         BT=BT,
         BK=BK,
         BV=BV,
+        USE_GRAPH=use_graph,
     )
     return dv
 
@@ -718,6 +726,7 @@ def chunk_bwd_dqkwg(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
+    use_graph: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if g is not None and IS_NVIDIA_HOPPER and TRITON_ABOVE_3_4_0 and not TRITON_ABOVE_3_7_1:
         raise RuntimeError(
@@ -741,10 +750,14 @@ def chunk_bwd_dqkwg(
     BK = min(max(triton.next_power_of_2(K), 16), CONST_TILING)
     BV = min(max(triton.next_power_of_2(V), 16), CONST_TILING)
     NK = triton.cdiv(K, BK)
-    dq = q.new_empty(B, T, HV, K)
-    dk = k.new_empty(B, T, HV, K)
-    dg = torch.empty(NK, *g.shape, dtype=torch.float32, device=g.device) if g is not None else None
-    dw = torch.empty_like(w) if w is not None else None
+    dq = q.new_zeros(B, T, HV, K) if use_graph else q.new_empty(B, T, HV, K)
+    dk = k.new_zeros(B, T, HV, K) if use_graph else k.new_empty(B, T, HV, K)
+    if g is not None:
+        factory = torch.zeros if use_graph else torch.empty
+        dg = factory(NK, *g.shape, dtype=torch.float32, device=g.device)
+    else:
+        dg = None
+    dw = (torch.zeros_like(w) if use_graph else torch.empty_like(w)) if w is not None else None
 
     grid = (NK, NT, B * HV)
     chunk_bwd_kernel_dqkwg[grid](
@@ -774,6 +787,7 @@ def chunk_bwd_dqkwg(
         BK=BK,
         BV=BV,
         STATE_V_FIRST=state_v_first,
+        USE_GRAPH=use_graph,
     )
 
     if H != HV:

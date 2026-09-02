@@ -152,7 +152,10 @@ def chunk_gated_delta_rule_bwd(
     A_log: torch.Tensor | None = None,
     dt_bias: torch.Tensor | None = None,
     chunk_size: int = 64,
+    use_graph: bool = False,
 ):
+    graph_kwargs = {'use_graph': True} if use_graph else {}
+    graph_state_kwargs = {'chunk_offsets': chunk_offsets, 'use_graph': True} if use_graph else {}
     w, u = recompute_w_u_fwd(
         k=k,
         v=v,
@@ -161,6 +164,7 @@ def chunk_gated_delta_rule_bwd(
         g=g,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
+        **graph_kwargs,
     )
 
     if cp_context is not None:
@@ -175,9 +179,9 @@ def chunk_gated_delta_rule_bwd(
         output_final_state=False,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
-        chunk_offsets=chunk_offsets,
         state_v_first=state_v_first,
         chunk_size=chunk_size,
+        **graph_state_kwargs,
     )
     dv = chunk_bwd_dv_local(
         q=q,
@@ -188,6 +192,7 @@ def chunk_gated_delta_rule_bwd(
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         chunk_size=chunk_size,
+        **graph_kwargs,
     )
 
     if cp_context is not None:
@@ -221,9 +226,9 @@ def chunk_gated_delta_rule_bwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
-        chunk_offsets=chunk_offsets,
         state_v_first=state_v_first,
         chunk_size=chunk_size,
+        **graph_state_kwargs,
     )
     dq, dk, dw, dg = chunk_bwd_dqkwg(
         q=q,
@@ -240,6 +245,7 @@ def chunk_gated_delta_rule_bwd(
         chunk_indices=chunk_indices,
         state_v_first=state_v_first,
         chunk_size=chunk_size,
+        **graph_kwargs,
     )
     dk2, dv, db, dg2 = prepare_wy_repr_bwd(
         k=k,
@@ -251,13 +257,22 @@ def chunk_gated_delta_rule_bwd(
         du=dv,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
+        **graph_kwargs,
     )
     dk.add_(dk2)
     dg.add_(dg2)
-    dg = chunk_local_cumsum(dg, chunk_size=chunk_size, reverse=True, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
+    dg = chunk_local_cumsum(
+        dg,
+        chunk_size=chunk_size,
+        reverse=True,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        **graph_kwargs,
+    )
     dA_log, ddt_bias = None, None
     if use_gate_in_kernel:
-        dg, dA_log, ddt_bias = gdn_gate_bwd(g=g_input, A_log=A_log, dt_bias=dt_bias, dyg=dg)
+        gate_kwargs = {'cu_seqlens': cu_seqlens, 'use_graph': True} if use_graph else {}
+        dg, dA_log, ddt_bias = gdn_gate_bwd(g=g_input, A_log=A_log, dt_bias=dt_bias, dyg=dg, **gate_kwargs)
     return dq, dk, dv, db, dg, dh0, dA_log, ddt_bias
 
 
@@ -402,6 +417,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             A_log=A_log,
             dt_bias=dt_bias,
             chunk_size=ctx.chunk_size,
+            use_graph=ctx.use_graph,
         )
         if ctx.use_qk_l2norm_in_kernel:
             dq = l2norm_bwd(q, q_rstd, dq)
