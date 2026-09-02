@@ -989,8 +989,8 @@ def chunk_ttt_linear_bwd_norm(
     assert NK == 1, 'NK > 1 is not supported by TTT.'
     assert NV == 1, 'NV > 1 is not supported by TTT.'
 
-    dh = q.new_empty(B, NT, H, K, V)
-    dhb = q.new_empty(B, NT, H, 1, V)
+    dh = q.new_empty(B, NT, H, K, V, dtype=torch.float32)
+    dhb = q.new_empty(B, NT, H, 1, V, dtype=torch.float32)
     dh0 = torch.empty_like(h0, dtype=torch.float32) if h0 is not None else None
     dhb0 = torch.empty_like(hb0, dtype=torch.float32) if hb0 is not None else None
     dv = torch.empty_like(v)
