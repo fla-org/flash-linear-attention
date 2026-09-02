@@ -16,6 +16,20 @@ from fla.ops.delta_rule.wy_fast import prepare_wy_repr_bwd, prepare_wy_repr_fwd,
 from fla.ops.utils.index import prepare_chunk_indices
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
+# This file implements a simplified MomentumDeltaNet chunk kernel that
+# reuses the DeltaRule WY kernels (prepare_wy_repr_* + chunk_gated_delta_h/o).
+# It corresponds to the special case of the paper's stepwise momentum
+# (arXiv:2605.05838, ICML'26) where log_alpha=0 (alpha=1), log_mu-> -inf (mu=0)
+# and eta=1, p=k. Then M_t collapses, S_t update reduces to the vanilla
+# delta rule and the WY representation is exact. The full momentum
+# formulation with separate decays (log_alpha, log_mu, beta, eta, p) and a
+# dual state [S, M] is implemented in the reference repo
+# MomentumDeltaNet/fla/ops/momentum_delta_rule/{chunk,fused_recurrent}.py
+# (chunk_mode_rule_fwd with u/y/z, chunk_mode_rule_cumsum_scalar_*,
+# prepare_uyz_repr_*). Porting it requires block-pointer kernels
+# which are banned from FLA mainline Triton code, so the full kernel is
+# tracked as a follow-up after the Triton -> TLX migration.
+
 
 def chunk_mode_rule_fwd(
     q: torch.Tensor,
@@ -213,7 +227,10 @@ class ChunkModeRuleFunction(torch.autograd.Function):
         if ctx.use_qk_l2norm_in_kernel:
             dq = l2norm_bwd(q, q_rstd, dq)
             dk = l2norm_bwd(k, k_rstd, dk)
-        return dq.to(q.dtype), dk.to(k.dtype), dv.to(v.dtype), db.to(beta.dtype), None, dh0, None, None, None, None, None
+        # Forward inputs: q,k,v,beta,initial_state,output_final_state,
+        # use_qk_l2norm_in_kernel,cu_seqlens,cu_seqlens_cpu,chunk_size (10).
+        # Return 10 grads: dh0 corresponds to initial_state (5th).
+        return dq.to(q.dtype), dk.to(k.dtype), dv.to(v.dtype), db.to(beta.dtype), dh0, None, None, None, None, None
 
 
 @torch.compiler.disable

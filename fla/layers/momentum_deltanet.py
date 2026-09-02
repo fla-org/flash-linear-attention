@@ -34,6 +34,18 @@ class MomentumDeltaNet(nn.Module):
     Reference: `MDN: Parallelizing Stepwise Momentum for Delta Linear Attention <https://arxiv.org/abs/2605.05838>`_
 
     Combines stepwise momentum with delta linear attention for improved stability and performance.
+
+    Note on momentum coefficient: the current Triton ops reuse the
+    DeltaRule WY kernels (see ``fla/ops/momentum_delta_rule/chunk.py`` header).
+    This is the paper's reduction where ``log_alpha=0``, ``log_mu -> -inf``,
+    ``eta=1``, ``p=k`` and the momentum state ``M_t`` collapses, so the
+    update is numerically the delta rule gated by ``beta``. The full
+    stepwise momentum with separate decays (``log_alpha``, ``log_mu``, ``beta``,
+    ``eta``, ``p``) and dual state ``[S, M]`` is defined in the reference
+    implementation ``MomentumDeltaNet/fla/ops/momentum_delta_rule`` and
+    ``MomentumDeltaNet/fla/layers/momentum_deltanet.py``; porting it to
+    FLA mainline requires TLX-compatible kernels (block-pointer style
+    is banned) and is tracked as a follow-up.
     """
 
     def __init__(
@@ -209,6 +221,10 @@ class MomentumDeltaNet(nn.Module):
             beta = beta * 2.
 
         recurrent_state = last_state['recurrent_state'] if last_state is not None else None
+        # qk_norm='l2' is the default for DeltaNet family; the kernel-side
+        # L2Norm saves memory vs eager norm. Wire the flag so the op
+        # reproduces DeltaNet math (fixes P0 #3: default l2 was silently no-op).
+        use_qk_l2norm = self.qk_norm == 'l2'
         if mode == 'fused_recurrent':
             o, recurrent_state = fused_recurrent_mode_rule(
                 q=q,
@@ -217,6 +233,7 @@ class MomentumDeltaNet(nn.Module):
                 beta=beta,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
+                use_qk_l2norm_in_kernel=use_qk_l2norm,
                 cu_seqlens=cu_seqlens,
             )
         elif mode == 'chunk':
@@ -227,6 +244,7 @@ class MomentumDeltaNet(nn.Module):
                 beta=beta,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
+                use_qk_l2norm_in_kernel=use_qk_l2norm,
                 cu_seqlens=cu_seqlens,
             )
         else:

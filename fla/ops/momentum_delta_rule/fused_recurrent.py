@@ -18,6 +18,13 @@ from fla.ops.delta_rule.fused_recurrent import (
 from fla.ops.delta_rule.wy_fast import prepare_wy_repr_fwd
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
+# Simplified fused_recurrent kernel: see note in chunk.py. Reuses
+# fused_recurrent_delta_rule_{fwd,bwd}_kernel with u = v - k·h.
+# Full momentum (log_alpha, log_mu, eta, p, dual state [S,M]) lives in
+# MomentumDeltaNet/fla/ops/momentum_delta_rule/fused_recurrent.py
+# (fused_recurrent_mode_rule_fwd_kernel with b_S/b_M). Current path is
+# the mu-> -inf / alpha=1 reduction; see chunk.py header.
+
 
 def fused_recurrent_mode_rule_fwd(
     q: torch.Tensor,
@@ -43,7 +50,8 @@ def fused_recurrent_mode_rule_fwd(
     else:
         final_state = None
 
-    # Prepare WY representation
+    # Prepare WY representation (kept for parity with chunk path; kernel
+    # recomputes u = v - k·h internally and overwrites this buffer)
     w, u, A = prepare_wy_repr_fwd(
         k=k,
         v=v,
@@ -53,7 +61,7 @@ def fused_recurrent_mode_rule_fwd(
     )
     u = u.to(q.dtype)
 
-    grid = (NV, NK, N * H)
+    grid = (NV * NK * N * H,)
     fused_recurrent_delta_rule_fwd_kernel[grid](
         q,
         k,
@@ -108,7 +116,7 @@ def fused_recurrent_mode_rule_bwd(
         db = q.new_empty(NV, NK, B, T, H, V)
     else:
         db = q.new_empty(NV, B, T, H)
-    grid = (NV, NK, N * H)
+    grid = (NV * NK * N * H,)
 
     if initial_state is not None and initial_state.requires_grad:
         dh0 = torch.empty_like(initial_state, dtype=torch.float32)
@@ -198,10 +206,13 @@ class FusedRecurrentModeRuleFunction(torch.autograd.Function):
     ):
         q, q_rstd, k, k_rstd, v, beta, initial_state, u = ctx.saved_tensors
 
+        # Fused recurrent backward expects u = v - k·h (saved from forward),
+        # not the raw v. See fused_recurrent_delta_rule_bwd_kernel which
+        # operates on u. Passing raw v yields wrong dk/db/dq (P0 #2).
         dq, dk, dv, db, dh0 = fused_recurrent_mode_rule_bwd(
             q=q,
             k=k,
-            v=v,
+            v=u,
             beta=beta,
             dht=dht,
             do=do,
@@ -211,7 +222,9 @@ class FusedRecurrentModeRuleFunction(torch.autograd.Function):
         if ctx.use_qk_l2norm_in_kernel:
             dq = l2norm_bwd(q, q_rstd, dq)
             dk = l2norm_bwd(k, k_rstd, dk)
-        return dq.to(q.dtype), dk.to(k.dtype), dv.to(v.dtype), db.to(beta.dtype), None, dh0, None, None, None, None, None
+        # Forward inputs: q,k,v,beta,initial_state,output_final_state,
+        # use_qk_l2norm_in_kernel,cu_seqlens (8). dh0 is 5th.
+        return dq.to(q.dtype), dk.to(k.dtype), dv.to(v.dtype), db.to(beta.dtype), dh0, None, None, None
 
 
 @torch.compiler.disable
