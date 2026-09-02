@@ -45,10 +45,10 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
         Returns:
             initial_state: Initial state tensor of shape [N, D, W] or None
         """
-        if group is None or weight.shape[-1] == 1:
+        W = weight.shape[-1]  # weight: [D, W]
+        if group is None or W == 1:
             return None
 
-        W = weight.shape[-1]  # weight: [D, W]
         D = weight.shape[0]
         initial_state = None
         if not context.is_first_rank:
@@ -150,7 +150,6 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
             group=group,
         )
 
-        ctx.num_inputs = len(ctx.needs_input_grad)
         ctx.save_for_backward(x, weight, bias, residual, initial_state)
         ctx.activation = activation
         ctx.cu_seqlens = cu_seqlens
@@ -214,7 +213,7 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
             pre_num_conv_tokens=ctx.pre_num_conv_tokens,
         )
 
-        return (dx, dw, db, None, None, None, None, None, dr)[:ctx.num_inputs]
+        return dx, dw, db, None, None, None, None, None, dr
 
 
 def causal_conv1d_cp(
@@ -240,8 +239,6 @@ def causal_conv1d_cp(
         weight: Weight tensor of shape [D, W]
         bias: Bias tensor of shape [D] or None
         activation: Activation function name or None
-        cu_seqlens: Cumulative sequence lengths
-        cu_seqlens_cpu: Cumulative sequence lengths on CPU
         chunk_indices: Chunk indices for variable-length sequences
         cp_context: CP context (required for CP mode)
         residual: Residual tensor of shape [1, T, D] or None
