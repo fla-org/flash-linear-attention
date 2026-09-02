@@ -12,7 +12,6 @@ import torch.nn.functional as F
 from fla.ops.gated_delta_rule import chunk_gated_delta_rule
 from fla.utils import IS_NVIDIA, assert_close, device
 
-
 T_MAX = 192
 N_MAX = 4
 H = 2

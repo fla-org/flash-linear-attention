@@ -23,7 +23,6 @@ from fla.ops.gated_delta_rule import chunk_gated_delta_rule
 from fla.ops.utils import prepare_chunk_indices
 from fla.utils import device
 
-
 T_MAX = 1024
 N_MAX = 4
 H = 2

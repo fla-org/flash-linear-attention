@@ -310,13 +310,16 @@ All runtime checks used `/home/dulz/miniconda3/envs/lz/bin/python` with PyTorch 
 | `python -m pytest -q tests/ops/test_gdn_graph.py` | physical GPU 3, RTX 4090 | `8 passed, 14 warnings in 1.62s`; every logged graph/eager output and gradient difference was `0.0` |
 | `python -m pytest -q tests/ops/test_gdn.py tests/ops/test_gdn_kernels.py` | physical GPU 3, RTX 4090 | `130 passed, 26 skipped, 14 warnings in 305.10s` |
 | `python -m pytest -q tests/ops/utils/test_index.py tests/ops/utils/test_cumsum.py tests/ops/test_solve_tril.py` | physical GPU 4, RTX 4090 | `166 passed, 1 skipped, 14 warnings in 9.79s` |
+| `python -m pytest -q tests/ops/test_gdn_graph.py tests/ops/utils/test_index.py` | physical GPU 3, RTX 4090 | `132 passed, 14 warnings in 7.27s` after installing the lint dependencies |
 | `python -m py_compile <all changed Python files>` | CPU | Passed |
+| `python -m ruff check <all changed Python files>` | CPU | Passed with Ruff `0.14.10` after two whitespace-only import-block fixes |
+| `pre-commit run --files <all task files>` | CPU | Passed on the second run; Ruff, autopep8, repository hygiene, and banned Triton API checks passed |
 | `git diff --check` for the baseline and worktree diffs | CPU | Passed |
 | Search changed files for `tl.make_block_ptr` or `tl.advance` | CPU | No matches |
 | Added-Python-line length check | CPU | No line exceeds 127 characters |
 | Changed-file copyright-header audit | CPU | Passed for every tracked Python file in the baseline diff |
 
-The 14 warnings in each pytest process are the environment's existing `torch.jit.script_method` deprecation warnings. `ruff` and `pre-commit` were not installed in the `lz` environment: `/home/dulz/miniconda3/envs/lz/bin/python -m ruff check ...` failed before linting with `No module named ruff`. No dependency was installed because the task forbids adding dependencies without approval. The repository-wide header checker also reports three pre-existing, git-ignored files under `profile/gdn-cudagraph/`; the tracked changed-file audit passes, and those local diagnostics were left untouched.
+The 14 warnings in each pytest process are the environment's existing `torch.jit.script_method` deprecation warnings. Ruff `0.14.10`, pre-commit `4.6.2`, and autopep8 `2.3.2` were installed in the `lz` environment after dependency installation was explicitly approved. The first pre-commit run removed one redundant blank line from each of the reproducer and graph test; the second run passed without modifications. The environment-wide `pip check` still reports pre-existing NumPy constraints from `brevitas` and `tonic`; these packages are outside FLA's dependency set and were not changed. The repository-wide header checker also reports three pre-existing, git-ignored files under `profile/gdn-cudagraph/`; the tracked changed-file audit passes, and those local diagnostics were left untouched.
 
 ## Current limitations
 
