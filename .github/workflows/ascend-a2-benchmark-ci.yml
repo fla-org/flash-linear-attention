@@ -160,7 +160,7 @@ jobs:
           print("matplotlib savefig smoke test: ok")
           PY
 
-      - name: Benchmark chunk_gdn, chunk_kda, fused_attnres, and conv1d
+      - name: Benchmark chunk_gdn, chunk_gdn2, chunk_kda, fused_attnres, and conv1d
         shell: bash
         env:
           FLA_BENCH_WARMUP_MS: "25"
@@ -170,9 +170,20 @@ jobs:
           source /usr/local/Ascend/ascend-toolkit/set_env.sh
           set -uo pipefail
 
-          ASCEND_RT_VISIBLE_DEVICES=0 python -m benchmarks.ops.run \
-            --op chunk_gdn --base '' --json benchmark_chunk_gdn.json \
-            > chunk_gdn.log 2>&1 &
+          (
+            set -e
+            ASCEND_RT_VISIBLE_DEVICES=0 python -m benchmarks.ops.run \
+              --op chunk_gdn --base '' --json benchmark_chunk_gdn.json \
+              > chunk_gdn.log 2>&1
+            ASCEND_RT_VISIBLE_DEVICES=0 python -m benchmarks.ops.run \
+              --op chunk_gdn2 --base '' \
+              --custom-shapes '{"gdn2_32k":{"B":1,"T":32768,"H":1,"D":32}}' \
+              --json benchmark_chunk_gdn2.json \
+              > chunk_gdn2.log 2>&1
+            python -c \
+              'import json,sys; r=json.load(open(sys.argv[1]))["results"]; m={x["mode"] for x in r if x["op"]=="chunk_gdn2"}; assert m=={"fwd","fwdbwd"}, sorted(m)' \
+              benchmark_chunk_gdn2.json
+          ) &
           pid_gdn=$!
           ASCEND_RT_VISIBLE_DEVICES=1 python -m benchmarks.ops.run \
             --op chunk_kda --base '' --json benchmark_chunk_kda.json \
@@ -194,6 +205,8 @@ jobs:
 
           echo "========== chunk_gdn =========="
           cat chunk_gdn.log
+          echo "========== chunk_gdn2 (B1 T32768 H1 K32 V32) =========="
+          cat chunk_gdn2.log
           echo "========== chunk_kda =========="
           cat chunk_kda.log
           echo "========== fused_attnres =========="
@@ -209,6 +222,7 @@ jobs:
           name: ascend-a2-benchmark-results
           path: |
             benchmark_chunk_gdn.json
+            benchmark_chunk_gdn2.json
             benchmark_chunk_kda.json
             benchmark_fused_attnres.json
             conv_benchmark/
