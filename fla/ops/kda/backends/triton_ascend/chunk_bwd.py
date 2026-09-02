@@ -80,7 +80,8 @@ def chunk_kda_bwd_kernel_dAv_npu(
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
     else:
-        bos, eos = (i_b * T).to(tl.int64), (i_b * T + T).to(tl.int64)
+        bos = tl.cast(i_b, tl.int64) * T
+        eos = bos + T
 
     v += (bos * HV + i_hv) * V
     do += (bos * HV + i_hv) * V
@@ -376,16 +377,16 @@ def chunk_kda_bwd_kernel_wy_k_part_npu(
             T = (eos - bos).to(tl.int32)
             i_tg = tl.load(chunk_offsets + i_n).to(tl.int64) + i_t.to(tl.int64)
         else:
-            i_tg = (i_b * tl.cdiv(T, BT) + i_t).to(tl.int64)
+            i_tg = tl.cast(i_b, tl.int64) * tl.cdiv(T, BT) + i_t
             bos, eos = tl.cast(i_b, tl.int64) * T, tl.cast(i_b, tl.int64) * T + T
 
         q_ptr = q + (bos * H + i_h) * K
         k_ptr = k + (bos * H + i_h) * K
         v_new_ptr = v_new + (bos * HV + i_hv) * V
         g_ptr = g + (bos * HV + i_hv) * K
-        h_ptr = h + (i_tg * HV + i_hv).to(tl.int64) * K * V
+        h_ptr = h + (i_tg * HV + i_hv) * K * V
         do_ptr = do + (bos * HV + i_hv) * V
-        dh_ptr = dh + (i_tg * HV + i_hv).to(tl.int64) * K * V
+        dh_ptr = dh + (i_tg * HV + i_hv) * K * V
         dq_ptr = dq + (bos * HV + i_hv) * K
         dk_ptr = dk + (bos * HV + i_hv) * K
         dg_ptr = dg + (bos * HV + i_hv) * K
@@ -522,7 +523,7 @@ def chunk_kda_bwd_kernel_wy_dw_part_npu(
             T = (eos - bos).to(tl.int32)
             i_tg = tl.load(chunk_offsets + i_n).to(tl.int64) + i_t.to(tl.int64)
         else:
-            i_tg = (i_b * tl.cdiv(T, BT) + i_t).to(tl.int64)
+            i_tg = tl.cast(i_b, tl.int64) * tl.cdiv(T, BT) + i_t
             bos, eos = tl.cast(i_b, tl.int64) * T, tl.cast(i_b, tl.int64) * T + T
 
         if K_T_CONTIG:
@@ -561,7 +562,7 @@ def chunk_kda_bwd_kernel_wy_dw_part_npu(
             dv_stride_t = HV * V
             beta_stride = HV
 
-        h_ptr = h + (i_tg * HV + i_hv).to(tl.int64) * K * V
+        h_ptr = h + (i_tg * HV + i_hv) * K * V
         dA_ptr = dA_acc + (bos * HV + i_hv) * BT
         db_ptr = db_acc + bos * HV + i_hv
         dg_ptr = dg + (bos * HV + i_hv) * K

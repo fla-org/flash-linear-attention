@@ -59,7 +59,8 @@ def solve_tril_16x16_kernel_npu(
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
     else:
-        bos, eos = i_b * T, i_b * T + T
+        bos = tl.cast(i_b, tl.int64) * T
+        eos = bos + T
 
     o_i = tl.arange(0, 16)
     m_A = o_i[:, None] > o_i[None, :]
@@ -106,7 +107,8 @@ def merge_16x16_to_32x32_inverse_kernel_npu(
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
     else:
-        bos, eos = i_b * T, i_b * T + T
+        bos = tl.cast(i_b, tl.int64) * T
+        eos = bos + T
 
     o_i = tl.arange(0, 16)
     m_A = o_i[:, None] > o_i[None, :]
@@ -172,7 +174,8 @@ def merge_16x16_to_64x64_inverse_kernel_npu(
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
     else:
-        bos, eos = i_b * T, i_b * T + T
+        bos = tl.cast(i_b, tl.int64) * T
+        eos = bos + T
 
     o_i = tl.arange(0, 16)
     m_A = o_i[:, None] > o_i[None, :]

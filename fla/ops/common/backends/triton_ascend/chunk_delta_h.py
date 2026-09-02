@@ -232,27 +232,27 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64_npu(
             NT = tl.cdiv(T, BT)
             boh = tl.load(chunk_offsets + i_n).to(tl.int64)
         else:
-            bos = i_n * T
+            bos = tl.cast(i_n, tl.int64) * T
             NT = tl.cdiv(T, BT)
-            boh = i_n * NT
+            boh = tl.cast(i_n, tl.int64) * NT
 
         v_start = i_v * BV
         # Rebind GM bases each task; do not in-place ``ptr +=`` across ``i_t``
         # (Ascend MTE OOB). ``h`` rebases each chunk via ``i_t * DH_CS``.
-        w_base = w + (bos * HV + i_h).to(tl.int64) * K
-        k_base = k + (bos * H + i_h // (HV // H)).to(tl.int64) * K
-        v_base = v + (bos * HV + i_h).to(tl.int64) * V
+        w_base = w + (bos * HV + i_h) * K
+        k_base = k + (bos * H + i_h // (HV // H)) * K
+        v_base = v + (bos * HV + i_h) * V
         if SAVE_NEW_VALUE:
-            v_new_base = v_new + (bos * HV + i_h).to(tl.int64) * V
-        h_nh = h + (boh * HV + i_h).to(tl.int64) * K * V
+            v_new_base = v_new + (bos * HV + i_h) * V
+        h_nh = h + (boh * HV + i_h) * K * V
 
         if USE_G:
             if USE_G_PRECOMP:
-                g_ratio_ptr = g_ratio + (i_n * HV + i_h).to(tl.int64) * T_max
-                g_last_exp_ptr = g_last_exp + (i_n * HV + i_h).to(tl.int64) * NT
+                g_ratio_ptr = g_ratio + (tl.cast(i_n, tl.int64) * HV + i_h) * T_max
+                g_last_exp_ptr = g_last_exp + (tl.cast(i_n, tl.int64) * HV + i_h) * NT
         if USE_GK:
             if USE_GK_PRECOMP:
-                gk_last_exp_nh = gk_last_exp + (i_n * HV + i_h).to(tl.int64) * NT * K
+                gk_last_exp_nh = gk_last_exp + (tl.cast(i_n, tl.int64) * HV + i_h) * NT * K
 
         # b_h shape: [BK, BV] (default) or [BV, BK] (STATE_V_FIRST)
         if STATE_V_FIRST:
@@ -372,7 +372,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64_npu(
                     if IS_VARLEN:
                         g_ptr = g + bos + i_h * T_max
                     else:
-                        g_ptr = g + i_n * HV * T_max + i_h * T_max
+                        g_ptr = g + tl.cast(i_n, tl.int64) * HV * T_max + i_h * T_max
                     b_g_last = tl.load(g_ptr + last_idx).to(tl.float32)
                     p_g = tl.make_block_ptr(g_ptr, (T,), (1,), (i_t * BT,), (BT,), (0,))
                     b_g = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
@@ -559,21 +559,21 @@ def chunk_gated_delta_rule_fwd_kernel_h_oneslab_npu(
     for task_id in tl.range(core_id, task_num, num_core):
         i_v, i_nh = task_id % NV, (task_id // NV).to(tl.int64)
         i_n, i_h = i_nh // HV, i_nh % HV
-        bos = i_n * T
+        bos = tl.cast(i_n, tl.int64) * T
         v_start = i_v * BV
 
-        w_base = w + (bos * HV + i_h).to(tl.int64) * K
-        k_base = k + (bos * H + i_h // (HV // H)).to(tl.int64) * K
-        v_base = v + (bos * HV + i_h).to(tl.int64) * V
+        w_base = w + (bos * HV + i_h) * K
+        k_base = k + (bos * H + i_h // (HV // H)) * K
+        v_base = v + (bos * HV + i_h) * V
         if SAVE_NEW_VALUE:
-            v_new_base = v_new + (bos * HV + i_h).to(tl.int64) * V
-        h_nh = h + (i_n * NT * HV + i_h).to(tl.int64) * K * V
+            v_new_base = v_new + (bos * HV + i_h) * V
+        h_nh = h + (tl.cast(i_n, tl.int64) * NT * HV + i_h) * K * V
 
         if USE_G:
-            g_ratio_ptr = g_ratio + (i_n * HV + i_h).to(tl.int64) * T
-            g_last_exp_ptr = g_last_exp + (i_n * HV + i_h).to(tl.int64) * NT
+            g_ratio_ptr = g_ratio + (tl.cast(i_n, tl.int64) * HV + i_h) * T
+            g_last_exp_ptr = g_last_exp + (tl.cast(i_n, tl.int64) * HV + i_h) * NT
         if USE_GK:
-            gk_last_exp_nh = gk_last_exp + (i_n * HV + i_h).to(tl.int64) * NT * K
+            gk_last_exp_nh = gk_last_exp + (tl.cast(i_n, tl.int64) * HV + i_h) * NT * K
 
         b_h1 = tl.zeros([BK, BV], dtype=tl.float32)
         if USE_INITIAL_STATE:
@@ -818,36 +818,37 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64_npu(
             NT = tl.cdiv(T, BT)
             boh = tl.load(chunk_offsets + i_n).to(tl.int64)
         else:
-            bos, eos = i_n * T_max, i_n * T_max + T_max
+            bos = tl.cast(i_n, tl.int64) * T_max
+            eos = bos + T_max
             NT = tl.cdiv(T, BT)
-            boh = i_n * NT
+            boh = tl.cast(i_n, tl.int64) * NT
 
         stride_v = HV * V
         stride_k = H * K
         stride_w = HV * K
 
-        q_base = q + (bos * H + i_h // (HV // H)).to(tl.int64) * K
-        k_base = k + (bos * H + i_h // (HV // H)).to(tl.int64) * K
-        w_base = w + (bos * HV + i_h).to(tl.int64) * K
-        do_base = do + (bos * HV + i_h).to(tl.int64) * V
-        dv_base = dv + (bos * HV + i_h).to(tl.int64) * V
-        dv2_base = dv2 + (bos * HV + i_h).to(tl.int64) * V
-        dh_base = dh + (boh * HV + i_h).to(tl.int64) * K * V
+        q_base = q + (bos * H + i_h // (HV // H)) * K
+        k_base = k + (bos * H + i_h // (HV // H)) * K
+        w_base = w + (bos * HV + i_h) * K
+        do_base = do + (bos * HV + i_h) * V
+        dv_base = dv + (bos * HV + i_h) * V
+        dv2_base = dv2 + (bos * HV + i_h) * V
+        dh_base = dh + (boh * HV + i_h) * K * V
         if USE_GK:
-            gk_base = gk + (bos * HV + i_h).to(tl.int64) * K
+            gk_base = gk + (bos * HV + i_h) * K
         if USE_G:
             if USE_G_PRECOMP:
-                g_exp_base = g_exp + (i_n * HV + i_h).to(tl.int64) * T_max
-                g_ratio_base = g_ratio + (i_n * HV + i_h).to(tl.int64) * T_max
-                g_last_exp_base = g_last_exp + (i_n * HV + i_h).to(tl.int64) * NT
+                g_exp_base = g_exp + (tl.cast(i_n, tl.int64) * HV + i_h) * T_max
+                g_ratio_base = g_ratio + (tl.cast(i_n, tl.int64) * HV + i_h) * T_max
+                g_last_exp_base = g_last_exp + (tl.cast(i_n, tl.int64) * HV + i_h) * NT
                 g_base = g
             elif IS_VARLEN:
-                g_base = g + (bos + i_h * T_max).to(tl.int64)
+                g_base = g + (bos + tl.cast(i_h, tl.int64) * T_max)
                 g_exp_base = g_exp
                 g_ratio_base = g_ratio
                 g_last_exp_base = g_last_exp
             else:
-                g_base = g + (i_n * HV + i_h).to(tl.int64) * T_max
+                g_base = g + (tl.cast(i_n, tl.int64) * HV + i_h) * T_max
                 g_exp_base = g_exp
                 g_ratio_base = g_ratio
                 g_last_exp_base = g_last_exp
