@@ -26,8 +26,8 @@ from fla.ops.gated_delta_rule.gate import gdn_gate_bwd, gdn_gate_chunk_cumsum
 from fla.ops.gated_delta_rule.wy_fast import prepare_wy_repr_bwd, recompute_w_u_fwd
 from fla.ops.utils import chunk_local_cumsum
 from fla.ops.utils.constant import RCP_LN2
-from fla.ops.utils.index import prepare_chunk_indices
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
+from fla.ops.utils.index import prepare_chunk_indices, prepare_chunk_indices_static
+from fla.utils import IS_NVIDIA, autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
 def chunk_gated_delta_rule_fwd(
@@ -43,6 +43,7 @@ def chunk_gated_delta_rule_fwd(
     cu_seqlens: torch.LongTensor | None = None,
     cp_context: FLACPContext | None = None,
     chunk_indices: torch.LongTensor | None = None,
+    chunk_offsets: torch.LongTensor | None = None,
     use_gate_in_kernel: bool = False,
     A_log: torch.Tensor | None = None,
     dt_bias: torch.Tensor | None = None,
@@ -101,6 +102,7 @@ def chunk_gated_delta_rule_fwd(
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
+        chunk_offsets=chunk_offsets,
         state_v_first=state_v_first,
         chunk_size=chunk_size,
     )
@@ -138,6 +140,7 @@ def chunk_gated_delta_rule_bwd(
     cu_seqlens: torch.LongTensor | None = None,
     cp_context: FLACPContext | None = None,
     chunk_indices: torch.LongTensor | None = None,
+    chunk_offsets: torch.LongTensor | None = None,
     use_gate_in_kernel: bool = False,
     g_input: torch.Tensor | None = None,
     A_log: torch.Tensor | None = None,
@@ -166,6 +169,7 @@ def chunk_gated_delta_rule_bwd(
         output_final_state=False,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
+        chunk_offsets=chunk_offsets,
         state_v_first=state_v_first,
         chunk_size=chunk_size,
     )
@@ -211,6 +215,7 @@ def chunk_gated_delta_rule_bwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
+        chunk_offsets=chunk_offsets,
         state_v_first=state_v_first,
         chunk_size=chunk_size,
     )
@@ -276,6 +281,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         use_beta_sigmoid_in_kernel: bool = False,
         allow_neg_eigval: bool = False,
         cp_context: FLACPContext | None = None,
+        use_graph: bool = False,
         chunk_size: int = 64,
     ):
         q_rstd, k_rstd = None, None
@@ -287,7 +293,11 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         if use_beta_sigmoid_in_kernel:
             beta = fused_beta_sigmoid(beta_raw, scale=2.0 if allow_neg_eigval else 1.0)
 
-        if chunk_indices is None and cu_seqlens is not None:
+        chunk_offsets = None
+        if use_graph:
+            nt_max = (q.shape[1] + chunk_size - 1) // chunk_size + cu_seqlens.shape[0] - 2
+            chunk_indices, chunk_offsets = prepare_chunk_indices_static(cu_seqlens, chunk_size, nt_max)
+        elif chunk_indices is None and cu_seqlens is not None:
             chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size, cu_seqlens_cpu=cu_seqlens_cpu)
         g, o, A, final_state, initial_state, g_input = chunk_gated_delta_rule_fwd(
             q=q,
@@ -301,6 +311,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             cu_seqlens=cu_seqlens,
             cp_context=cp_context,
             chunk_indices=chunk_indices,
+            chunk_offsets=chunk_offsets,
             state_v_first=state_v_first,
             use_gate_in_kernel=use_gate_in_kernel,
             A_log=A_log,
@@ -320,6 +331,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             initial_state,
             cu_seqlens,
             chunk_indices,
+            chunk_offsets,
             g_input,
             A_log,
             dt_bias,
@@ -332,6 +344,8 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         ctx.cp_context = cp_context
         ctx.state_v_first = state_v_first
         ctx.use_gate_in_kernel = use_gate_in_kernel
+        ctx.use_graph = use_graph
+        ctx.nt_max = len(chunk_indices) if use_graph else None
         return o.to(q.dtype), final_state
 
     @staticmethod
@@ -355,6 +369,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             initial_state,
             cu_seqlens,
             chunk_indices,
+            chunk_offsets,
             g_input,
             A_log,
             dt_bias,
@@ -373,6 +388,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             cu_seqlens=cu_seqlens,
             cp_context=ctx.cp_context,
             chunk_indices=chunk_indices,
+            chunk_offsets=chunk_offsets,
             state_v_first=ctx.state_v_first,
             use_gate_in_kernel=ctx.use_gate_in_kernel,
             g_input=g_input,
@@ -388,7 +404,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         return (
             dq.to(q), dk.to(k), dv.to(v), dg.to(g), db.to(beta_raw),
             None, dh0, None, None, None, None, None, None, None, dA_log, ddt_bias,
-            None, None, None, None,
+            None, None, None, None, None,
         )
 
 
@@ -411,6 +427,7 @@ def chunk_gated_delta_rule(
     cu_seqlens_cpu: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
     cp_context: FLACPContext | None = None,
+    use_graph: bool = False,
     **kwargs,
 ):
     r"""
@@ -471,6 +488,10 @@ def chunk_gated_delta_rule(
             Context parallel context for distributed training across multiple devices.
             When provided, `initial_state` and `output_final_state` are not supported,
             and `cu_seqlens` will be overridden by the context. Default: `None`.
+        use_graph (Optional[bool]):
+            Whether to use fixed-capacity chunk metadata for CUDA Graph capture and replay.
+            This mode requires varlen inputs on NVIDIA CUDA and does not support caller-provided chunk metadata,
+            CPU cumulative lengths, or Context Parallel. Default: `False`.
 
     Returns:
         o (torch.Tensor):
@@ -539,6 +560,18 @@ def chunk_gated_delta_rule(
     if chunk_size not in (16, 32, 64):
         raise ValueError(f"`chunk_size` must be 16, 32, or 64 for Gated Delta Rule, got {chunk_size}.")
 
+    if use_graph:
+        if not IS_NVIDIA:
+            raise RuntimeError("`use_graph=True` requires the NVIDIA CUDA backend.")
+        if cu_seqlens is None:
+            raise ValueError("`use_graph=True` requires variable-length input with `cu_seqlens`.")
+        if cp_context is not None:
+            raise ValueError("`use_graph=True` does not support Context Parallel.")
+        if chunk_indices is not None:
+            raise ValueError("`use_graph=True` builds static chunk metadata and does not accept `chunk_indices`.")
+        if cu_seqlens_cpu is not None:
+            raise ValueError("`use_graph=True` does not accept `cu_seqlens_cpu`.")
+
     if cp_context is not None:
         assert initial_state is None, "Initial state is not supported for CP"
         assert output_final_state is False, "Output final state is not supported for CP"
@@ -588,6 +621,7 @@ def chunk_gated_delta_rule(
         use_beta_sigmoid_in_kernel,
         allow_neg_eigval,
         cp_context,
+        use_graph,
         chunk_size,
     )
     return o, final_state
