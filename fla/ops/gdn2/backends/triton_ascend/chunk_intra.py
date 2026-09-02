@@ -85,33 +85,6 @@ def _launch_inter_kernel(kernel, *, nt: int, bh_total: int, kernel_kwargs: dict)
             kernel[(nt_len, bh_len)](**kernel_kwargs, **_INTER_COMPILE_KWARGS)
 
 
-def _launch_inter_product_kernel(
-    kernel,
-    *,
-    nt: int,
-    pair_count: int,
-    bh_total: int,
-    kernel_kwargs: dict,
-) -> None:
-    budget = _LAUNCH_BLOCK_BUDGET
-    chunk_indices = kernel_kwargs.get('chunk_indices')
-    cu_seqlens = kernel_kwargs.get('cu_seqlens')
-    programs_per_t = max(pair_count * bh_total, 1)
-    nt_step = nt if nt * programs_per_t <= budget else max(1, budget // programs_per_t)
-    for nt_off in range(0, nt, nt_step):
-        nt_len = min(nt_step, nt - nt_off)
-        if cu_seqlens is not None and chunk_indices is not None:
-            kernel_kwargs['chunk_indices'] = chunk_indices[nt_off:nt_off + nt_len]
-            kernel_kwargs['NT_OFFSET'] = 0
-        else:
-            kernel_kwargs['NT_OFFSET'] = nt_off
-        max_bh = max_grid_axis_chunks(bh_total, nt_len * pair_count, max_grid=ASCEND_MAX_GRID_DIM)
-        for bh_off in range(0, bh_total, max_bh):
-            bh_len = min(max_bh, bh_total - bh_off)
-            kernel_kwargs['BH_OFFSET'] = bh_off
-            kernel[(nt_len, pair_count, bh_len)](**kernel_kwargs, **_INTER_COMPILE_KWARGS)
-
-
 @triton.jit(do_not_specialize=['T', 'NT_OFFSET', 'NC_OFFSET', 'BH_OFFSET'])
 def chunk_gdn2_fwd_kernel_intra_grouped_npu(
     q,
@@ -266,13 +239,14 @@ def chunk_gdn2_fwd_kernel_inter_products_npu(
     BT: tl.constexpr,
     BC: tl.constexpr,
     BK: tl.constexpr,
+    DST_BLOCK: tl.constexpr,
+    SRC_BLOCK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     NT_OFFSET,
     BH_OFFSET,
 ):
     i_t = tl.program_id(0) + NT_OFFSET
-    i_pair = tl.program_id(1)
-    i_bh = tl.program_id(2) + BH_OFFSET
+    i_bh = tl.program_id(1) + BH_OFFSET
     i_b, i_h = i_bh // H, i_bh % H
 
     if IS_VARLEN:
@@ -284,10 +258,8 @@ def chunk_gdn2_fwd_kernel_inter_products_npu(
     else:
         bos = tl.cast(i_b, tl.int64) * T
 
-    i_dst = tl.where(i_pair == 0, 1, tl.where(i_pair < 3, 2, 3))
-    i_src = tl.where(i_pair == 0, 0, tl.where(i_pair < 3, i_pair - 1, i_pair - 3))
-    i_tc_dst = i_t * BT + i_dst * BC
-    i_tc_src = i_t * BT + i_src * BC
+    i_tc_dst = i_t * BT + DST_BLOCK * BC
+    i_tc_src = i_t * BT + SRC_BLOCK * BC
 
     base = bos * H + i_h
     q += base * K
@@ -333,7 +305,7 @@ def chunk_gdn2_fwd_kernel_inter_products_npu(
         Aqk,
         (T, BT),
         (H * BT, 1),
-        (i_tc_dst, i_src * BC),
+        (i_tc_dst, SRC_BLOCK * BC),
         (BC, BC),
         (1, 0),
     )
@@ -341,7 +313,7 @@ def chunk_gdn2_fwd_kernel_inter_products_npu(
         Akkx,
         (T, BT),
         (H * BT, 1),
-        (i_tc_dst, i_src * BC),
+        (i_tc_dst, SRC_BLOCK * BC),
         (BC, BC),
         (1, 0),
     )
@@ -508,6 +480,7 @@ def chunk_gdn2_fwd_intra_npu(
     Akkd = torch.zeros(B, T, H, BC, device=k.device, dtype=torch.float32)
     Akkx = torch.zeros(B, T, H, BT, device=k.device, dtype=torch.float32)
 
+    sync_stream = torch.npu.current_stream(k.device)
     for row_group in range(BC // _TOKEN_GROUP):
         _launch_diag_kernel(
             chunk_gdn2_fwd_kernel_intra_grouped_npu,
@@ -538,6 +511,9 @@ def chunk_gdn2_fwd_intra_npu(
                 BH_OFFSET=0,
             ),
         )
+        if row_group == 0:
+            # CANN can stall when the two grouped row kernels are queued together.
+            sync_stream.synchronize()
 
     _launch_diag_kernel(
         chunk_gdn2_fwd_kernel_diag_solve_npu,
@@ -558,33 +534,34 @@ def chunk_gdn2_fwd_intra_npu(
             BH_OFFSET=0,
         ),
     )
-    pair_count = NC * (NC - 1) // 2
-    _launch_inter_product_kernel(
-        chunk_gdn2_fwd_kernel_inter_products_npu,
-        nt=NT,
-        pair_count=pair_count,
-        bh_total=B * H,
-        kernel_kwargs=dict(
-            q=q,
-            k=k,
-            g=gk,
-            b=b,
-            Aqk=Aqk,
-            Akkx=Akkx,
-            scale=scale,
-            cu_seqlens=cu_seqlens,
-            chunk_indices=chunk_indices,
-            T=T,
-            H=H,
-            K=K,
-            BT=BT,
-            BC=BC,
-            BK=_get_inter_bk(K),
-            IS_VARLEN=is_varlen,
-            NT_OFFSET=0,
-            BH_OFFSET=0,
-        ),
+    product_kwargs = dict(
+        q=q,
+        k=k,
+        g=gk,
+        b=b,
+        Aqk=Aqk,
+        Akkx=Akkx,
+        scale=scale,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        T=T,
+        H=H,
+        K=K,
+        BT=BT,
+        BC=BC,
+        BK=_get_inter_bk(K),
+        IS_VARLEN=is_varlen,
+        NT_OFFSET=0,
+        BH_OFFSET=0,
     )
+    for dst_block in range(1, NC):
+        for src_block in range(dst_block):
+            _launch_inter_kernel(
+                chunk_gdn2_fwd_kernel_inter_products_npu,
+                nt=NT,
+                bh_total=B * H,
+                kernel_kwargs=dict(product_kwargs, DST_BLOCK=dst_block, SRC_BLOCK=src_block),
+            )
     _launch_inter_kernel(
         chunk_gdn2_fwd_kernel_inter_solve_npu,
         nt=NT,
@@ -616,4 +593,6 @@ def chunk_gdn2_fwd_intra_npu(
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
     )
+    # Keep intra scratch alive until its last asynchronous consumer completes.
+    sync_stream.synchronize()
     return w, u, qg, kg, Aqk, Akk
