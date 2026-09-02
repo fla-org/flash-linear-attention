@@ -8,18 +8,20 @@
 import pytest
 import torch
 import torch._dynamo
+import triton
 from torch._dynamo.utils import counters
 
 import fla.utils as fu
 from fla.ops.utils.index import (
     prepare_chunk_indices,
+    prepare_chunk_indices_static,
     prepare_chunk_offsets,
     prepare_position_ids,
     prepare_sequence_ids,
     prepare_split_cu_seqlens,
     prepare_token_indices,
 )
-from fla.utils import device
+from fla.utils import IS_NVIDIA, device
 
 # Shared chunk size so all helpers expose a single-arg `(cu_seqlens) -> tensor`.
 CHUNK_SIZE = 16
@@ -172,6 +174,77 @@ def test_edge_cases():
         ref = ref_prepare_chunk_indices(cu_seqlens, chunk_size)
         opt = prepare_chunk_indices(cu_seqlens, chunk_size)
         torch.testing.assert_close(ref.long(), opt.long())
+
+
+@pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
+@pytest.mark.parametrize("chunk_size", [16, 32, 64])
+@pytest.mark.parametrize(
+    "offsets",
+    [
+        [0, 256, 512, 768, 1024],
+        [0, 100, 400, 1024, 1024],
+        [0, 128, 384, 384, 384],
+        [0, 0, 64, 64, 64],
+        [0, 0, 0, 0, 0],
+    ],
+)
+def test_prepare_chunk_indices_static(dtype, chunk_size, offsets):
+    t_max = 1024
+    n_max = len(offsets) - 1
+    nt_max = triton.cdiv(t_max, chunk_size) + n_max - 1
+    cu_seqlens = torch.tensor(offsets, dtype=dtype, device=device)
+
+    expected_indices = prepare_chunk_indices(cu_seqlens.clone(), chunk_size)
+    expected_offsets = prepare_chunk_offsets(cu_seqlens.clone(), chunk_size)
+    chunk_indices, chunk_offsets = prepare_chunk_indices_static(cu_seqlens, chunk_size, nt_max)
+
+    actual_nt = expected_indices.shape[0]
+    assert chunk_indices.shape == (nt_max, 2)
+    assert chunk_offsets.shape == (n_max + 1,)
+    assert chunk_indices.dtype == dtype
+    assert chunk_offsets.dtype == dtype
+    torch.testing.assert_close(chunk_indices[:actual_nt].long(), expected_indices.long())
+    torch.testing.assert_close(chunk_offsets.long(), expected_offsets.long())
+    if actual_nt < nt_max:
+        sentinel = cu_seqlens.new_tensor([-1, 0]).expand(nt_max - actual_nt, -1)
+        torch.testing.assert_close(chunk_indices[actual_nt:], sentinel)
+
+
+@pytest.mark.skipif(not IS_NVIDIA, reason="CUDA Graph capture requires an NVIDIA CUDA device")
+def test_prepare_chunk_indices_static_graph_replay():
+    chunk_size = 64
+    t_max = 1024
+    configs = [
+        [0, 256, 512, 768, 1024],
+        [0, 100, 400, 1024, 1024],
+        [0, 128, 384, 384, 384],
+    ]
+    cu_seqlens = torch.tensor(configs[0], dtype=torch.long, device=device)
+    nt_max = triton.cdiv(t_max, chunk_size) + len(configs[0]) - 2
+
+    warm_stream = torch.cuda.Stream()
+    warm_stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(warm_stream):
+        for _ in range(3):
+            prepare_chunk_indices_static(cu_seqlens, chunk_size, nt_max)
+    torch.cuda.current_stream().wait_stream(warm_stream)
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured_indices, captured_offsets = prepare_chunk_indices_static(cu_seqlens, chunk_size, nt_max)
+
+    for offsets in configs:
+        cu_seqlens.copy_(torch.tensor(offsets, dtype=torch.long, device=device))
+        graph.replay()
+        torch.cuda.synchronize()
+
+        expected_indices = prepare_chunk_indices(cu_seqlens.clone(), chunk_size)
+        expected_offsets = prepare_chunk_offsets(cu_seqlens.clone(), chunk_size)
+        actual_nt = expected_indices.shape[0]
+        torch.testing.assert_close(captured_indices[:actual_nt], expected_indices)
+        torch.testing.assert_close(captured_offsets, expected_offsets)
+        sentinel = cu_seqlens.new_tensor([-1, 0]).expand(nt_max - actual_nt, -1)
+        torch.testing.assert_close(captured_indices[actual_nt:], sentinel)
 
 
 @skip_npu_compile
