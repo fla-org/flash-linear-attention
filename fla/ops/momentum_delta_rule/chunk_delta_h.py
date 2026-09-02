@@ -1,4 +1,9 @@
-# Copyright (c) 2023-2025, v5
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 
 import torch
@@ -1163,7 +1168,6 @@ def chunk_mode_rule_fwd_inter_qS_qM(
     V = v.shape[-1]
     BT = gamma_mask_q.shape[-1]
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size) if cu_seqlens is not None else None
     # N: the actual number of sequences in the batch with either equal or variable lengths
     if cu_seqlens is None:
         N, chunk_offsets = B, None

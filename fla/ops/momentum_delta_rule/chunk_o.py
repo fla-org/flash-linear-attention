@@ -1,4 +1,9 @@
-# Copyright (c) 2023-2025, v5
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 
 import torch
@@ -150,18 +155,18 @@ def chunk_mode_rule_bwd_kernel_dqk(
     i_k, i_t_pid, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
-        i_tg = i_t_pid
+        i_tg = i_t_pid  # noqa: F841
         i_n, i_t = tl.load(chunk_indices + i_t_pid * 2).to(tl.int64), tl.load(chunk_indices + i_t_pid * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
-        all = T
+        all = T  # noqa: F841
         T = eos - bos
         NT = tl.cdiv(T, BT)
     else:
         NT = tl.cdiv(T, BT)
         i_t = i_t_pid
-        i_tg = i_b * NT + i_t
+        i_tg = i_b * NT + i_t  # noqa: F841
         bos, eos = i_b * T, i_b * T + T
-        all = B * T
+        all = B * T  # noqa: F841
 
     # offset calculation
     v += (bos * H + i_h) * V
@@ -597,9 +602,9 @@ def chunk_mode_rule_fwd_o(
     chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size) if cu_seqlens is not None else None
     # N: the actual number of sequences in the batch with either equal or variable lengths
     if cu_seqlens is None:
-        N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
+        N, NT, chunk_offsets = B, triton.cdiv(T, BT), None  # noqa: F841
     else:
-        N, NT, chunk_offsets = len(cu_seqlens) - 1, len(chunk_indices), prepare_chunk_offsets(cu_seqlens, BT)
+        N, NT, chunk_offsets = len(cu_seqlens) - 1, len(chunk_indices), prepare_chunk_offsets(cu_seqlens, BT)  # noqa: F841
 
     if scale is None:
         scale = 1 / (q.shape[-1] ** 0.5)
