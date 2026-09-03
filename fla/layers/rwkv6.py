@@ -55,8 +55,10 @@ class RWKV6Attention(nn.Module):
         self.proj_low_rank_dim = proj_low_rank_dim
         self.gate_low_rank_dim = gate_low_rank_dim
 
-        self.key_dim = int(hidden_size * expand_k)
-        self.value_dim = int(hidden_size * expand_v)
+        key_dim, value_dim = hidden_size * expand_k, hidden_size * expand_v
+        self.key_dim, self.value_dim = round(key_dim), round(value_dim)
+        assert math.isclose(key_dim, self.key_dim), f"`hidden_size * expand_k` must be an integer, got {key_dim}."
+        assert math.isclose(value_dim, self.value_dim), f"`hidden_size * expand_v` must be an integer, got {value_dim}."
         self.layer_idx = layer_idx
 
         assert mode in ['chunk', 'fused_recurrent'], f"Not supported mode `{mode}`."
