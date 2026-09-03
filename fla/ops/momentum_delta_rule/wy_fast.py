@@ -22,7 +22,7 @@ NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8]
 @triton.autotune(
     configs=[
         triton.Config({'BK': BK}, num_warps=num_warps, num_stages=num_stages)
-        for BK in [16, 32, 64]
+        for BK in ([32] if IS_NVIDIA_HOPPER else [16, 32, 64])
         for num_warps in ([2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8])
         for num_stages in ([1] if IS_NVIDIA_HOPPER else [2, 3, 4])
     ],
