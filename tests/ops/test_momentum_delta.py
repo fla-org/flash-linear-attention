@@ -10,7 +10,7 @@ import torch
 import torch.nn.functional as F
 
 from fla.ops.momentum_delta_rule import chunk_mode_rule, fused_recurrent_mode_rule
-from fla.utils import assert_close, device, device_platform
+from fla.utils import assert_close, device, device_platform, IS_NVIDIA_HOPPER
 
 
 @pytest.mark.parametrize(
