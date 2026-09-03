@@ -30,7 +30,7 @@ NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8]
         triton.Config({'BV': BV}, num_warps=warps, num_stages=stages)
         for BV in [16, 32, 64]
         for warps in [2, 4]
-        for stages in ([1, 2, 3] if IS_NVIDIA_HOPPER else [2, 3])
+        for stages in ([1] if IS_NVIDIA_HOPPER else [2, 3])
     ],
     key=['H', 'K', 'V', 'BT'],
     **autotune_cache_kwargs,
@@ -410,7 +410,7 @@ def chunk_mode_rule_fwd_kernel_inter_qh_blockdim64(
         triton.Config({'BV': BV}, num_warps=warps, num_stages=stages)
         for BV in [16, 32, 64]
         for warps in [2, 4]
-        for stages in ([1, 2, 3] if IS_NVIDIA_HOPPER else [2, 3])
+        for stages in ([1] if IS_NVIDIA_HOPPER else [2, 3])
     ],
     key=['H', 'K', 'V', 'BT', 'BV',
          ],
@@ -843,7 +843,7 @@ def chunk_mode_rule_bwd_kernel_dhu_blockdim64(
         triton.Config({'BV': BV}, num_warps=warps, num_stages=stages)
         for BV in [32, 64]
         for warps in [2, 4]
-        for stages in ([1, 2, 3] if IS_NVIDIA_HOPPER else [2, 3, 4])
+        for stages in ([1] if IS_NVIDIA_HOPPER else [2, 3, 4])
     ],
     key=['H', 'K', 'V', 'BT'],
     **autotune_cache_kwargs,

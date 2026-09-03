@@ -25,7 +25,7 @@ NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8]
         triton.Config({'BK': BKV, 'BV': BKV}, num_warps=warps, num_stages=stages)
         for BKV in [32, 64]
         for warps in [2, 4]
-        for stages in [2, 3, 4]
+        for stages in ([1] if IS_NVIDIA_HOPPER else [2, 3, 4])
     ],
     key=['H', 'K', 'V', 'BT'],
     **autotune_cache_kwargs,
@@ -107,7 +107,7 @@ def chunk_mode_rule_fwd_kernel_o(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in NUM_WARPS
-        for num_stages in [2, 3, 4,]
+        for num_stages in ([1] if IS_NVIDIA_HOPPER else [2, 3, 4])
     ],
     key=['H', 'K', 'V', 'BT', 'BK', 'BV',
          ],
@@ -409,7 +409,7 @@ def chunk_mode_rule_bwd_kernel_dqk(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [2, 4]
-        for num_stages in [2, 3, 4,]
+        for num_stages in ([1] if IS_NVIDIA_HOPPER else [2, 3, 4])
     ],
     key=['H', 'K', 'V', 'BT', 'BK', 'BV'],
     **autotune_cache_kwargs,
@@ -500,7 +500,7 @@ def chunk_mode_rule_bwd_kernel_dbyz(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in NUM_WARPS
-        for num_stages in [2, 3, 4]
+        for num_stages in ([1] if IS_NVIDIA_HOPPER else [2, 3, 4])
     ],
     key=['H', 'K', 'V', 'BT', 'BK', 'BV',
          #  'USE_G'

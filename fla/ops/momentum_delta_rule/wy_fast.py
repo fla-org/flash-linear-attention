@@ -24,7 +24,7 @@ NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8]
         triton.Config({'BK': BK}, num_warps=num_warps, num_stages=num_stages)
         for BK in [16, 32, 64]
         for num_warps in ([2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8])
-        for num_stages in ([1, 2, 3] if IS_NVIDIA_HOPPER else [2, 3, 4])
+        for num_stages in ([1] if IS_NVIDIA_HOPPER else [2, 3, 4])
     ],
     key=['H', 'K', 'BT', 'IS_VARLEN'],
     **autotune_cache_kwargs,
@@ -209,7 +209,7 @@ def chunk_scaled_dot_mode_rule_pkt_fwd(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [2, 4]
-        for num_stages in ([1, 2, 3] if IS_NVIDIA_HOPPER else [2, 3, 4, 5])
+        for num_stages in ([1] if IS_NVIDIA_HOPPER else [2, 3, 4, 5])
     ],
     key=['H', 'K', 'V', 'BT', 'BK', 'BV', 'IS_VARLEN'],
     **autotune_cache_kwargs,
