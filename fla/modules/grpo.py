@@ -62,9 +62,12 @@ import triton.language as tl
 
 from fla.modules.backends import dispatch
 from fla.ops.utils.op import exp, log
-from fla.utils import IS_AMD, autotune_cache_kwargs, input_guard
+from fla.utils import IS_AMD, IS_INTEL, autotune_cache_kwargs, input_guard
 
 NUM_WARPS_AUTOTUNE = [4, 8, 16] if IS_AMD else [4, 8, 16, 32]
+# Intel/XPU Triton backend has correctness issues with multi-stage pipelining
+# when memory is cold (e.g. after empty_cache), so limit to single stage.
+NUM_STAGES_AUTOTUNE = [1] if IS_INTEL else [1, 2, 4]
 
 
 @triton.autotune(
@@ -72,7 +75,7 @@ NUM_WARPS_AUTOTUNE = [4, 8, 16] if IS_AMD else [4, 8, 16, 32]
         triton.Config({'BLOCK_SIZE': BLOCK_SIZE},  num_warps=NUM_WARPS, num_stages=NUM_STAGES)
         for BLOCK_SIZE in [1024, 2048, 4096, 8192]
         for NUM_WARPS in NUM_WARPS_AUTOTUNE
-        for NUM_STAGES in [1, 2, 4]
+        for NUM_STAGES in NUM_STAGES_AUTOTUNE
     ],
     key=['B', 'N'],
     **autotune_cache_kwargs,
