@@ -71,23 +71,11 @@ def _bwd_col_tile(BT: int, dim: int, mem_mult: float, max_tile: int) -> int:
     )
 
 
-def _get_bwd_k_tile(BT: int, K: int) -> int:
-    return _bwd_col_tile(BT, K, _PREPARE_BWD_K_MEM_MULT, _MAX_TILE_BWD)
-
-
-def _get_bwd_kv_tiles(BT: int, K: int, V: int) -> tuple[int, int]:
-    """Minimize K/V slab trips under the kv-stage UB budget (larger than finalize)."""
-    return (
-        _bwd_col_tile(BT, K, _PREPARE_BWD_KV_MEM_MULT, _MAX_TILE_BWD_KV),
-        _bwd_col_tile(BT, V, _PREPARE_BWD_KV_MEM_MULT, _MAX_TILE_BWD_KV),
-    )
-
-
 @triton.jit
 def _g_contig_base(g, bos, i_b, i_h, T_seq, HV, IS_VARLEN: tl.constexpr):
     if IS_VARLEN:
         return g + bos + i_h * T_seq
-    return g + i_b * HV * T_seq + i_h * T_seq
+    return g + tl.cast(i_b, tl.int64) * HV * T_seq + i_h * T_seq
 
 
 @triton.jit
@@ -168,8 +156,9 @@ def recompute_w_u_fwd_kernel_npu(
             bos_bh = bos
         else:
             i_t = i_t_o
-            bos, eos = i_b * T, i_b * T + T
-            bos_bh = i_b * HV * T_max
+            bos = tl.cast(i_b, tl.int64) * T
+            eos = bos + T
+            bos_bh = tl.cast(i_b, tl.int64) * HV * T_max
 
         offs_t = tl.arange(0, BT)
         global_offs_t = i_t * BT + offs_t
@@ -385,7 +374,8 @@ def prepare_wy_repr_bwd_da_mask_dot1_npu(
         ).to(tl.int64)
         T = (eos - bos).to(tl.int32)
     else:
-        bos, eos = i_b * T, i_b * T + T
+        bos = tl.cast(i_b, tl.int64) * T
+        eos = bos + T
 
     p_A = tl.make_block_ptr(
         A + (bos * HV + i_h) * BT, (BT, T), (1, HV * BT), (0, i_t * BT), (BT, BT), (0, 1),
@@ -422,7 +412,8 @@ def prepare_wy_repr_bwd_da_dot2_npu(
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
     else:
-        bos, eos = i_b * T, i_b * T + T
+        bos = tl.cast(i_b, tl.int64) * T
+        eos = bos + T
 
     p_A = tl.make_block_ptr(A + (bos * HV + i_h) * BT, (BT, T), (1, HV * BT), (0, i_t * BT), (BT, BT), (0, 1))
     p_in = tl.make_block_ptr(dA_mid + (bos * HV + i_h) * BT, (BT, T), (1, HV * BT), (0, i_t * BT), (BT, BT), (0, 1))
@@ -458,7 +449,7 @@ def prepare_wy_repr_bwd_da_gate_npu(
         ).to(tl.int64)
         T = (eos - bos).to(tl.int32)
     else:
-        bos = i_b * T
+        bos = tl.cast(i_b, tl.int64) * T
 
     if G_T_CONTIG:
         g_ptr = _g_contig_base(g, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
@@ -503,7 +494,7 @@ def prepare_wy_repr_bwd_finalize_k_npu(
             T = (eos - bos).to(tl.int32)
         else:
             i_t = i_t_o
-            bos = i_b * T_seq
+            bos = tl.cast(i_b, tl.int64) * T_seq
 
         if BETA_T_CONTIG:
             beta_ptr = _g_contig_base(beta, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
@@ -563,7 +554,7 @@ def prepare_wy_repr_bwd_finalize_a2_dg_npu(
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
     else:
-        bos = i_b * T
+        bos = tl.cast(i_b, tl.int64) * T
 
     if BETA_T_CONTIG:
         beta_ptr = _g_contig_base(beta, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
@@ -667,8 +658,9 @@ def prepare_wy_repr_bwd_npu(
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
-    BK, BV = _get_bwd_kv_tiles(BT, K, V)
-    BK_FIN = _get_bwd_k_tile(BT, K)
+    BK, BV = _bwd_col_tile(BT, K, _PREPARE_BWD_KV_MEM_MULT, _MAX_TILE_BWD_KV), _bwd_col_tile(
+        BT, V, _PREPARE_BWD_KV_MEM_MULT, _MAX_TILE_BWD_KV)
+    BK_FIN = _bwd_col_tile(BT, K, _PREPARE_BWD_K_MEM_MULT, _MAX_TILE_BWD)
     use_g = g is not None
     is_varlen = cu_seqlens is not None
 
