@@ -30,11 +30,14 @@ def get_npu_properties():
 
 
 # prepare_wy_repr_bwd stage-specific UB models
+# finalize_k / a2 keep a conservative 4.5× slab (BK=256 overflows 192KB UB).
+# kv reuses K/V slabs in-place; 2.25× is calibrated so BK=BV=256 compiles.
 _PREPARE_BWD_K_MEM_MULT = 4.5
-_PREPARE_BWD_V_MEM_MULT = 8.0
+_PREPARE_BWD_KV_MEM_MULT = 2.25
 _SAFETY_MARGIN = 0.75
 _FALLBACK_TILE = 8
 _MAX_TILE_BWD = 128
+_MAX_TILE_BWD_KV = 256
 
 
 def _g_npu_arg(g: torch.Tensor | None, HV: int) -> tuple[torch.Tensor | None, bool]:
@@ -57,30 +60,27 @@ def _t_npu_buf(
     return torch.empty(B, HV, T, dtype=dtype, device=device), True
 
 
+def _bwd_col_tile(BT: int, dim: int, mem_mult: float, max_tile: int) -> int:
+    return compute_row_tile_block_size(
+        BT, dim, mem_mult,
+        tiling_row=False,
+        safety_margin=_SAFETY_MARGIN,
+        fallback=_FALLBACK_TILE,
+        min_block=8,
+        max_block=min(max_tile, triton.next_power_of_2(dim)),
+    )
+
+
 def _get_bwd_k_tile(BT: int, K: int) -> int:
-    return compute_row_tile_block_size(
-        BT, K, _PREPARE_BWD_K_MEM_MULT,
-        tiling_row=False,
-        safety_margin=_SAFETY_MARGIN,
-        fallback=_FALLBACK_TILE,
-        min_block=8,
-        max_block=min(_MAX_TILE_BWD, triton.next_power_of_2(K)),
+    return _bwd_col_tile(BT, K, _PREPARE_BWD_K_MEM_MULT, _MAX_TILE_BWD)
+
+
+def _get_bwd_kv_tiles(BT: int, K: int, V: int) -> tuple[int, int]:
+    """Minimize K/V slab trips under the kv-stage UB budget (larger than finalize)."""
+    return (
+        _bwd_col_tile(BT, K, _PREPARE_BWD_KV_MEM_MULT, _MAX_TILE_BWD_KV),
+        _bwd_col_tile(BT, V, _PREPARE_BWD_KV_MEM_MULT, _MAX_TILE_BWD_KV),
     )
-
-
-def _get_bwd_v_tile(BT: int, V: int) -> int:
-    return compute_row_tile_block_size(
-        BT, V, _PREPARE_BWD_V_MEM_MULT,
-        tiling_row=False,
-        safety_margin=_SAFETY_MARGIN,
-        fallback=_FALLBACK_TILE,
-        min_block=8,
-        max_block=min(_MAX_TILE_BWD, triton.next_power_of_2(V)),
-    )
-
-
-def _get_bwd_tiles(BT: int, K: int, V: int) -> tuple[int, int]:
-    return _get_bwd_k_tile(BT, K), _get_bwd_v_tile(BT, V)
 
 
 @triton.jit
@@ -239,6 +239,11 @@ def prepare_wy_repr_bwd_kv_npu(
     DG_T_CONTIG: tl.constexpr, DB_T_CONTIG: tl.constexpr,
     G_EXP_PRECOMP: tl.constexpr,
 ):
+    """K/V backward stage on a 1D Cube core-grid.
+
+    Flatten (chunk, head) tasks so large NT·B·HV does not host-split at
+    ASCEND_MAX_GRID_DIM. Rebind local pointers every task iteration.
+    """
     T_seq = T
     core_id = tl.program_id(0)
     for task_id in tl.range(core_id, task_num, num_core):
@@ -255,7 +260,7 @@ def prepare_wy_repr_bwd_kv_npu(
             T = (eos - bos).to(tl.int32)
         else:
             i_t = i_t_o
-            bos, eos = i_b * T_seq, i_b * T_seq + T_seq
+            bos = tl.cast(i_b, tl.int64) * T_seq
 
         if BETA_T_CONTIG:
             beta_ptr = _g_contig_base(beta, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
@@ -277,6 +282,7 @@ def prepare_wy_repr_bwd_kv_npu(
         b_b = tl.load(p_b, boundary_check=(0,)).to(tl.float32)
         b_db = tl.zeros([BT], dtype=tl.float32)
         b_dA = tl.zeros([BT, BT], dtype=tl.float32)
+        b_A = tl.load(p_A, boundary_check=(0, 1)).to(tl.float32)
 
         if USE_G:
             if G_T_CONTIG:
@@ -286,58 +292,66 @@ def prepare_wy_repr_bwd_kv_npu(
                 p_g = tl.make_block_ptr(g + (bos * HV + i_h), (T,), (HV,), (i_t * BT,), (BT,), (0,))
             b_g = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
             b_g_exp = b_g if G_EXP_PRECOMP else exp2(b_g)
+            b_bg = b_b * b_g_exp
             b_dg = tl.zeros([BT], dtype=tl.float32)
 
+        k_ptr = k + (bos * H + i_h // (HV // H)) * K
+        dk_ptr = dk + (bos * HV + i_h) * K
+        dw_ptr = dw + (bos * HV + i_h) * K
         for i_k in range(tl.cdiv(K, BK)):
             p_k = tl.make_block_ptr(
-                k + (bos * H + i_h // (HV // H)) * K, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0),
+                k_ptr, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0),
             )
             p_dk = tl.make_block_ptr(
-                dk + (bos * HV + i_h) * K, (T, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0),
+                dk_ptr, (T, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0),
             )
             p_dw = tl.make_block_ptr(
-                dw + (bos * HV + i_h) * K, (T, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0),
+                dw_ptr, (T, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0),
             )
-            b_k = tl.load(p_k, boundary_check=(0, 1)).to(tl.float32)
+            b_k = tl.load(p_k, boundary_check=(0, 1))
             if USE_G:
-                b_kbg = b_k * (b_b * b_g_exp)[:, None]
+                b_kbg = (b_k.to(tl.float32) * b_bg[:, None]).to(b_k.dtype)
             else:
-                b_kbg = b_k * b_b[:, None]
-            b_dw = tl.load(p_dw, boundary_check=(0, 1)).to(tl.float32)
+                b_kbg = (b_k.to(tl.float32) * b_b[:, None]).to(b_k.dtype)
+            b_dw = tl.load(p_dw, boundary_check=(0, 1))
+            # Match CUDA: accumulate dA in fp32. Copy A before downcast so lhs clobber is safe.
             b_dw_c = b_dw + 0.0
-            b_dA += tl.dot(b_dw, tl.trans(b_kbg), allow_tf32=False)
-            # Ascend tl.dot may clobber the left operand; reload A each K tile.
-            b_A = tl.load(p_A, boundary_check=(0, 1)).to(tl.float32)
-            b_dkbg = tl.dot(b_A, b_dw_c, allow_tf32=False)
+            b_A_c = b_A.to(b_dw.dtype) + 0.0
+            b_dA = tl.dot(b_dw, tl.trans(b_kbg), acc=b_dA, allow_tf32=False)
+            b_dkbg = tl.dot(b_A_c, b_dw_c, allow_tf32=False).to(tl.float32)
+            b_k_f = b_k.to(tl.float32)
             if USE_G:
-                b_dk = b_dkbg * (b_g_exp * b_b)[:, None]
-                b_db += tl.sum(b_dkbg * b_k * b_g_exp[:, None], 1)
-                b_dg += tl.sum(b_dkbg * b_kbg, 1)
+                b_dk = b_dkbg * b_bg[:, None]
+                b_db += b_g_exp * tl.sum(b_dkbg * b_k_f, 1)
+                b_dg += tl.sum(b_dkbg * b_kbg.to(tl.float32), 1)
             else:
                 b_dk = b_dkbg * b_b[:, None]
-                b_db += tl.sum(b_dkbg * b_k, 1)
+                b_db += tl.sum(b_dkbg * b_k_f, 1)
             tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
 
+        v_ptr = v + (bos * HV + i_h) * V
+        dv_ptr = dv + (bos * HV + i_h) * V
+        du_ptr = du + (bos * HV + i_h) * V
         for i_v in range(tl.cdiv(V, BV)):
             p_v = tl.make_block_ptr(
-                v + (bos * HV + i_h) * V, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0),
+                v_ptr, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0),
             )
             p_dv = tl.make_block_ptr(
-                dv + (bos * HV + i_h) * V, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0),
+                dv_ptr, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0),
             )
             p_du = tl.make_block_ptr(
-                du + (bos * HV + i_h) * V, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0),
+                du_ptr, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0),
             )
-            b_v = tl.load(p_v, boundary_check=(0, 1)).to(tl.float32)
-            b_du = tl.load(p_du, boundary_check=(0, 1)).to(tl.float32)
+            b_v = tl.load(p_v, boundary_check=(0, 1))
+            b_du = tl.load(p_du, boundary_check=(0, 1))
+            b_vb = (b_v.to(tl.float32) * b_b[:, None]).to(b_v.dtype)
             b_du_c = b_du + 0.0
-            b_vb = b_v * b_b[:, None]
-            b_dA += tl.dot(b_du, tl.trans(b_vb), allow_tf32=False)
-            # Ascend tl.dot may clobber the left operand; reload A each V tile.
-            b_A = tl.load(p_A, boundary_check=(0, 1)).to(tl.float32)
-            b_dvb = tl.dot(b_A, b_du_c, allow_tf32=False)
+            b_A_c = b_A.to(b_du.dtype) + 0.0
+            b_dA = tl.dot(b_du, tl.trans(b_vb), acc=b_dA, allow_tf32=False)
+            b_dvb = tl.dot(b_A_c, b_du_c, allow_tf32=False).to(tl.float32)
+            b_v_f = b_v.to(tl.float32)
             b_dv = b_dvb * b_b[:, None]
-            b_db += tl.sum(b_dvb * b_v, 1)
+            b_db += tl.sum(b_dvb * b_v_f, 1)
             tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
 
         tl.store(p_dA, b_dA.to(p_dA.dtype.element_ty), boundary_check=(0, 1))
@@ -423,14 +437,11 @@ def prepare_wy_repr_bwd_da_dot2_npu(
     tl.store(p_out, b_dA.to(p_out.dtype.element_ty), boundary_check=(0, 1))
 
 
-_DG_BLK = 16
-
-
 @triton.jit(do_not_specialize=['T'])
 def prepare_wy_repr_bwd_da_gate_npu(
     g, dA_out,
     cu_seqlens, chunk_indices, T,
-    HV: tl.constexpr, BT: tl.constexpr, BC: tl.constexpr,
+    HV: tl.constexpr, BT: tl.constexpr,
     IS_VARLEN: tl.constexpr, G_T_CONTIG: tl.constexpr,
     NT_OFFSET: tl.constexpr, BH_OFFSET: tl.constexpr,
 ):
@@ -447,31 +458,21 @@ def prepare_wy_repr_bwd_da_gate_npu(
         ).to(tl.int64)
         T = (eos - bos).to(tl.int32)
     else:
-        bos, eos = i_b * T, i_b * T + T
+        bos = i_b * T
 
-    n_sub = BT // BC
     if G_T_CONTIG:
         g_ptr = _g_contig_base(g, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
+        p_g = _t_block_ptr(g_ptr, T, i_t * BT, BT, True, HV)
     else:
-        g_ptr = g + (bos * HV + i_h)
-
-    for r in range(n_sub):
-        i_tr = i_t * BT + r * BC
-        p_gr = _t_block_ptr(g_ptr, T, i_tr, BC, G_T_CONTIG, HV)
-        b_gr = tl.load(p_gr, boundary_check=(0,)).to(tl.float32)
-        for c in range(n_sub):
-            i_tc = i_t * BT + c * BC
-            p_dA = tl.make_block_ptr(
-                dA_out + (bos * HV + i_h) * BT, (BT, T), (1, HV * BT),
-                (r * BC, i_t * BT + c * BC), (BC, BC), (0, 1),
-            )
-            b_dA = tl.load(p_dA, boundary_check=(0, 1)).to(tl.float32)
-            p_gc = _t_block_ptr(g_ptr, T, i_tc, BC, G_T_CONTIG, HV)
-            b_gc = tl.load(p_gc, boundary_check=(0,)).to(tl.float32)
-            b_gate = exp2(b_gr[:, None] - b_gc[None, :])
-            b_prod = b_dA * b_gate
-            b_dA = tl.where(b_prod == b_prod, b_prod, 0.0)
-            tl.store(p_dA, b_dA.to(p_dA.dtype.element_ty), boundary_check=(0, 1))
+        p_g = tl.make_block_ptr(g + (bos * HV + i_h), (T,), (HV,), (i_t * BT,), (BT,), (0,))
+    p_dA = tl.make_block_ptr(
+        dA_out + (bos * HV + i_h) * BT, (BT, T), (1, HV * BT), (0, i_t * BT), (BT, BT), (0, 1),
+    )
+    b_g = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
+    b_dA = tl.load(p_dA, boundary_check=(0, 1)).to(tl.float32)
+    b_prod = b_dA * exp2(b_g[:, None] - b_g[None, :])
+    b_dA = tl.where(b_prod == b_prod, b_prod, 0.0)
+    tl.store(p_dA, b_dA.to(p_dA.dtype.element_ty), boundary_check=(0, 1))
 
 
 @triton.heuristics({
@@ -502,7 +503,7 @@ def prepare_wy_repr_bwd_finalize_k_npu(
             T = (eos - bos).to(tl.int32)
         else:
             i_t = i_t_o
-            bos, eos = i_b * T_seq, i_b * T_seq + T_seq
+            bos = i_b * T_seq
 
         if BETA_T_CONTIG:
             beta_ptr = _g_contig_base(beta, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
@@ -544,14 +545,15 @@ def prepare_wy_repr_bwd_finalize_k_npu(
 
 
 @triton.jit(do_not_specialize=['T'])
-def prepare_wy_repr_bwd_finalize_a2_npu(
-    k, beta, a2_scr,
+def prepare_wy_repr_bwd_finalize_a2_dg_npu(
+    k, beta, dA_out, dg,
     cu_seqlens, chunk_indices, T,
     H: tl.constexpr, HV: tl.constexpr, K: tl.constexpr,
     BT: tl.constexpr, BK: tl.constexpr,
-    IS_VARLEN: tl.constexpr, BETA_T_CONTIG: tl.constexpr,
+    IS_VARLEN: tl.constexpr, BETA_T_CONTIG: tl.constexpr, DG_T_CONTIG: tl.constexpr,
     NT_OFFSET: tl.constexpr, BH_OFFSET: tl.constexpr,
 ):
+    """Fuse A2 = (k k^T) * beta with dg += row(dA*A2) - col(dA*A2). Keep A2 in UB."""
     i_t = tl.program_id(0) + NT_OFFSET
     i_bh = tl.program_id(1) + BH_OFFSET
     i_b, i_h = i_bh // HV, i_bh % HV
@@ -561,14 +563,22 @@ def prepare_wy_repr_bwd_finalize_a2_npu(
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
     else:
-        bos, eos = i_b * T, i_b * T + T
+        bos = i_b * T
 
     if BETA_T_CONTIG:
         beta_ptr = _g_contig_base(beta, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
         p_b = _t_block_ptr(beta_ptr, T, i_t * BT, BT, True, HV)
     else:
         p_b = tl.make_block_ptr(beta + (bos * HV + i_h), (T,), (HV,), (i_t * BT,), (BT,), (0,))
-    p_a2 = tl.make_block_ptr(a2_scr + (bos * HV + i_h) * BT, (BT, T), (1, HV * BT), (0, i_t * BT), (BT, BT), (0, 1))
+    p_dA = tl.make_block_ptr(
+        dA_out + (bos * HV + i_h) * BT, (BT, T), (1, HV * BT), (0, i_t * BT), (BT, BT), (0, 1),
+    )
+    if DG_T_CONTIG:
+        dg_ptr = _g_contig_base(dg, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
+        p_dg = _t_block_ptr(dg_ptr, T, i_t * BT, BT, True, HV)
+    else:
+        p_dg = tl.make_block_ptr(dg + (bos * HV + i_h), (T,), (HV,), (i_t * BT,), (BT,), (0,))
+
     b_b = tl.load(p_b, boundary_check=(0,)).to(tl.float32)
     b_A2 = tl.zeros([BT, BT], dtype=tl.float32)
     for i_k in range(tl.cdiv(K, BK)):
@@ -576,73 +586,13 @@ def prepare_wy_repr_bwd_finalize_a2_npu(
             k + (bos * H + i_h // (HV // H)) * K, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0),
         )
         b_k = tl.load(p_k, boundary_check=(0, 1)).to(tl.float32)
-        b_A2 += tl.dot(b_k, tl.trans(b_k), allow_tf32=False)
+        b_k_c = b_k + 0.0
+        b_A2 += tl.dot(b_k, tl.trans(b_k_c), allow_tf32=False)
     b_A2 *= b_b[:, None]
-    tl.store(p_a2, b_A2.to(p_a2.dtype.element_ty), boundary_check=(0, 1))
-
-
-@triton.jit(do_not_specialize=['T'])
-def prepare_wy_repr_bwd_finalize_dg_npu(
-    dA_out, a2_scr, dg, col_acc_scr,
-    cu_seqlens, chunk_indices, T,
-    HV: tl.constexpr, BT: tl.constexpr, BC: tl.constexpr,
-    IS_VARLEN: tl.constexpr, DG_T_CONTIG: tl.constexpr,
-    NT_OFFSET: tl.constexpr, BH_OFFSET: tl.constexpr,
-):
-    i_t = tl.program_id(0) + NT_OFFSET
-    i_bh = tl.program_id(1) + BH_OFFSET
-    i_b, i_h = i_bh // HV, i_bh % HV
-    T_seq = T
-    if IS_VARLEN:
-        i_tg = i_t
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
-        T = (eos - bos).to(tl.int32)
-    else:
-        NT = tl.cdiv(T, BT)
-        i_tg = i_b * NT + i_t
-        bos, eos = i_b * T, i_b * T + T
-
-    n_sub = BT // BC
-    col_off = (i_tg * HV + i_h) * BT
-    p_col0 = tl.make_block_ptr(col_acc_scr + col_off, (BT,), (1,), (0,), (BT,), (0,))
-    tl.store(p_col0, tl.zeros([BT], dtype=tl.float32), boundary_check=(0,))
-
-    if DG_T_CONTIG:
-        dg_ptr = _g_contig_base(dg, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
-    else:
-        dg_ptr = dg + (bos * HV + i_h)
-
-    for r in range(n_sub):
-        i_tr = i_t * BT + r * BC
-        p_dg_r = _t_block_ptr(dg_ptr, T, i_tr, BC, DG_T_CONTIG, HV)
-        b_dg_r = tl.load(p_dg_r, boundary_check=(0,)).to(tl.float32)
-        for c in range(n_sub):
-            p_dA = tl.make_block_ptr(
-                dA_out + (bos * HV + i_h) * BT, (BT, T), (1, HV * BT),
-                (r * BC, i_t * BT + c * BC), (BC, BC), (0, 1),
-            )
-            p_a2 = tl.make_block_ptr(
-                a2_scr + (bos * HV + i_h) * BT, (BT, T), (1, HV * BT),
-                (r * BC, i_t * BT + c * BC), (BC, BC), (0, 1),
-            )
-            b_dA = tl.load(p_dA, boundary_check=(0, 1)).to(tl.float32)
-            b_a2 = tl.load(p_a2, boundary_check=(0, 1)).to(tl.float32)
-            prod = b_dA * b_a2
-            b_dg_r += tl.sum(prod, axis=1)
-            p_col = tl.make_block_ptr(
-                col_acc_scr + col_off, (BT,), (1,), (c * BC,), (BC,), (0,),
-            )
-            b_col = tl.load(p_col, boundary_check=(0,)).to(tl.float32)
-            b_col += tl.sum(prod, axis=0)
-            tl.store(p_col, b_col.to(p_col.dtype.element_ty), boundary_check=(0,))
-        tl.store(p_dg_r, b_dg_r.to(p_dg_r.dtype.element_ty), boundary_check=(0,))
-
-    p_dg = _t_block_ptr(dg_ptr, T, i_t * BT, BT, DG_T_CONTIG, HV)
-    p_col = tl.make_block_ptr(col_acc_scr + col_off, (BT,), (1,), (0,), (BT,), (0,))
+    b_dA = tl.load(p_dA, boundary_check=(0, 1)).to(tl.float32)
+    b_prod = b_dA * b_A2
     b_dg = tl.load(p_dg, boundary_check=(0,)).to(tl.float32)
-    b_col = tl.load(p_col, boundary_check=(0,)).to(tl.float32)
-    b_dg -= b_col
+    b_dg += tl.sum(b_prod, axis=1) - tl.sum(b_prod, axis=0)
     tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), boundary_check=(0,))
 
 
@@ -717,32 +667,30 @@ def prepare_wy_repr_bwd_npu(
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
-    BK, BV = _get_bwd_tiles(BT, K, V)
+    BK, BV = _get_bwd_kv_tiles(BT, K, V)
+    BK_FIN = _get_bwd_k_tile(BT, K)
     use_g = g is not None
     is_varlen = cu_seqlens is not None
 
     dk = k.new_empty(B, T, HV, K)
     dv = torch.empty_like(v)
-    dg, dg_t_contig = None, False
-    if use_g:
-        dg, dg_t_contig = _t_npu_buf(B, T, HV, dtype=g.dtype, device=k.device)
     db, db_t_contig = _t_npu_buf(B, T, HV, dtype=beta.dtype, device=k.device)
     beta_arg, beta_t_contig = _beta_npu_arg(beta, HV)
+    dg, dg_t_contig = None, False
     g_gate, g_t_contig = None, False
+    g_k_arg = k
     g_exp_precomp = False
     if use_g:
+        dg, dg_t_contig = _t_npu_buf(B, T, HV, dtype=g.dtype, device=k.device)
         g_gate, g_t_contig = _g_npu_arg(g, HV)
         g_k_arg = g_gate
         if not is_varlen:
             g_k_arg = torch.exp2(g_gate.float()).to(g_gate.dtype)
             g_exp_precomp = True
     dg_arg = dg if use_g else beta
-    dA_scr = torch.zeros_like(A, dtype=torch.float32)
-    dA_mid = torch.zeros_like(A, dtype=torch.float32)
-    dA_out = torch.zeros_like(A, dtype=torch.float32)
-    a2_scr = torch.zeros_like(A, dtype=torch.float32)
-    col_acc_scr = torch.zeros(B, triton.cdiv(T, BT) if cu_seqlens is None else len(
-        chunk_indices), HV, BT, dtype=torch.float32, device=k.device)
+    dA_scr = torch.empty_like(A, dtype=torch.float32)
+    dA_mid = torch.empty_like(A, dtype=torch.float32)
+    dA_out = torch.empty_like(A, dtype=torch.float32)
 
     base = dict(
         cu_seqlens=cu_seqlens,
@@ -757,7 +705,7 @@ def prepare_wy_repr_bwd_npu(
         prepare_wy_repr_bwd_kv_npu,
         task_num=task_num,
         kernel_kwargs=dict(
-            k=k, v=v, beta=beta_arg, g=g_k_arg if use_g else k, A=A, dw=dw, du=du,
+            k=k, v=v, beta=beta_arg, g=g_k_arg, A=A, dw=dw, du=du,
             dk=dk, dv=dv, dA_scr=dA_scr, db=db, dg=dg_arg,
             H=H, HV=HV, K=K, V=V, BK=BK, BV=BV, USE_G=use_g,
             G_T_CONTIG=g_t_contig, BETA_T_CONTIG=beta_t_contig,
@@ -793,7 +741,7 @@ def prepare_wy_repr_bwd_npu(
             bh_total=B * HV,
             kernel_kwargs=dict(
                 g=g_gate, dA_out=dA_out,
-                HV=HV, BC=_DG_BLK, G_T_CONTIG=g_t_contig,
+                HV=HV, G_T_CONTIG=g_t_contig,
                 **base,
             ),
         )
@@ -802,28 +750,19 @@ def prepare_wy_repr_bwd_npu(
         task_num=task_num,
         kernel_kwargs=dict(
             k=k, beta=beta_arg, dA_out=dA_out, dk=dk, db=db,
-            H=H, HV=HV, K=K, BK=BK, BETA_T_CONTIG=beta_t_contig, DB_T_CONTIG=db_t_contig,
+            H=H, HV=HV, K=K, BK=BK_FIN, BETA_T_CONTIG=beta_t_contig, DB_T_CONTIG=db_t_contig,
             **core_base,
         ),
     )
     if use_g:
         _launch_wy_kernel(
-            prepare_wy_repr_bwd_finalize_a2_npu,
+            prepare_wy_repr_bwd_finalize_a2_dg_npu,
             NT=NT,
             bh_total=B * HV,
             kernel_kwargs=dict(
-                k=k, beta=beta_arg, a2_scr=a2_scr,
-                H=H, HV=HV, K=K, BK=BK, BETA_T_CONTIG=beta_t_contig,
-                **base,
-            ),
-        )
-        _launch_wy_kernel(
-            prepare_wy_repr_bwd_finalize_dg_npu,
-            NT=NT,
-            bh_total=B * HV,
-            kernel_kwargs=dict(
-                dA_out=dA_out, a2_scr=a2_scr, dg=dg_arg, col_acc_scr=col_acc_scr,
-                HV=HV, BC=_DG_BLK, DG_T_CONTIG=dg_t_contig,
+                k=k, beta=beta_arg, dA_out=dA_out, dg=dg_arg,
+                H=H, HV=HV, K=K, BK=BK_FIN,
+                BETA_T_CONTIG=beta_t_contig, DG_T_CONTIG=dg_t_contig,
                 **base,
             ),
         )
