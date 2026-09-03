@@ -124,7 +124,10 @@ def chunk_kda_bwd_dAv_npu(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
+    use_graph: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    if use_graph:
+        raise NotImplementedError("use_graph is not supported on the Ascend NPU backend")
     B, T, HV, V = k.shape[0], k.shape[1], do.shape[2], do.shape[-1]
     BT = chunk_size
     if chunk_indices is None and cu_seqlens is not None:
@@ -732,7 +735,11 @@ def chunk_kda_bwd_wy_dqkg_fused_npu(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
+    chunk_offsets: torch.LongTensor | None = None,
+    use_graph: bool = False,
 ):
+    if use_graph:
+        raise NotImplementedError("use_graph is not supported on the Ascend NPU backend")
     B, T, H, K, HV, V = *k.shape, v.shape[2], v.shape[-1]
     BT = chunk_size
     if BT % _BC != 0:
@@ -755,7 +762,8 @@ def chunk_kda_bwd_wy_dqkg_fused_npu(
     BV = _get_bv(V)
     NK = triton.cdiv(K, BK)
     is_varlen = cu_seqlens is not None
-    chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT) if is_varlen else g.new_zeros(1, dtype=torch.int64)
+    if chunk_offsets is None:
+        chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT) if is_varlen else g.new_zeros(1, dtype=torch.int64)
 
     v_arg, g_t_contig = _t_contig_arg(v, HV)
     beta_arg = _t_contig_arg(beta, HV)[0]
