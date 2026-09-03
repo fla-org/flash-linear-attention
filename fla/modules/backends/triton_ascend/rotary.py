@@ -11,7 +11,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.utils import prepare_chunk_indices
+from fla.ops.utils import prepare_chunk_indices, prepare_lens
 from fla.utils import autotune_cache_kwargs, get_multiprocessor_count
 from fla.utils.ascend_ub_manager import (
     ASCEND_MAX_GRID_DIM,
@@ -155,10 +155,15 @@ def rotary_embedding_fwdbwd_npu(
     if isinstance(seqlen_offsets, torch.Tensor):
         assert seqlen_offsets.shape == (N,)
         assert seqlen_offsets.dtype in [torch.int32, torch.int64]
-        sequence_lengths = T if not is_varlen else cu_seqlens[1:] - cu_seqlens[:-1]
+        sequence_lengths = T if not is_varlen else prepare_lens(cu_seqlens)
         torch._assert_async(
             torch.all(sequence_lengths + seqlen_offsets <= TR),
             f"Rotary cache is too short for tensor offsets, got {TR} positions",
+        )
+    elif is_varlen:
+        torch._assert_async(
+            torch.all(prepare_lens(cu_seqlens) + seqlen_offsets <= TR),
+            f"Rotary cache is too short for scalar offset {seqlen_offsets}, got {TR} positions",
         )
     else:
         assert seqlen_offsets + T <= TR
@@ -179,7 +184,9 @@ def rotary_embedding_fwdbwd_npu(
         min_block=1,
     )
     BT = min(bt_cap, desired_bt)
-    BT = compute_grid_limited_tile_size(T, B * H, BT, max_grid=ASCEND_MAX_GRID_DIM)
+    grid_batch = 1 if is_varlen else B
+    BH = grid_batch * H
+    BT = compute_grid_limited_tile_size(T, BH, BT, max_grid=ASCEND_MAX_GRID_DIM)
     if chunk_indices is None and is_varlen:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = len(chunk_indices) if is_varlen else triton.cdiv(T, BT)
@@ -205,7 +212,7 @@ def rotary_embedding_fwdbwd_npu(
         INTERLEAVED=interleaved,
         CONJUGATE=conjugate,
     )
-    max_nt = max_grid_axis_chunks(NT, B * H, max_grid=ASCEND_MAX_GRID_DIM)
+    max_nt = max_grid_axis_chunks(NT, BH, max_grid=ASCEND_MAX_GRID_DIM)
     for nt_off in range(0, NT, max_nt):
         nt_len = min(max_nt, NT - nt_off)
         if is_varlen:
@@ -214,5 +221,5 @@ def rotary_embedding_fwdbwd_npu(
         else:
             kernel_kwargs['chunk_indices'] = chunk_indices
             kernel_kwargs['NT_OFFSET'] = nt_off
-        rotary_embedding_kernel[(nt_len, B, H)](**kernel_kwargs)
+        rotary_embedding_kernel[(nt_len, grid_batch, H)](**kernel_kwargs)
     return y

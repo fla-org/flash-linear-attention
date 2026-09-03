@@ -16,6 +16,7 @@ from transformers.utils import logging
 
 from fla.layers.utils import pad_input, unpad_input
 from fla.modules import FusedRMSNormGated, RMSNorm, RotaryEmbedding
+from fla.modules.rotary import get_max_seqlen
 from fla.ops.moba import parallel_moba
 from fla.ops.utils.index import prepare_lens_from_mask
 
@@ -176,20 +177,24 @@ class MoBA(nn.Module):
 
         # equivalent to cu_seqlens in `flash_attn`
         cu_seqlens = kwargs.get('cu_seqlens')
+        cu_seqlens_q = cu_seqlens[0] if isinstance(cu_seqlens, (tuple, list)) else cu_seqlens
+        cu_seqlens_cpu = kwargs.get('cu_seqlens_cpu')
+        cu_seqlens_cpu = cu_seqlens_cpu[0] if isinstance(cu_seqlens_cpu, (tuple, list)) else cu_seqlens_cpu
+        batch_max_seqlen = q_len if cu_seqlens_q is None else get_max_seqlen(cu_seqlens_q, cu_seqlens_cpu)
 
-        seqlen_offset, max_seqlen = 0, q_len
+        seqlen_offset, rope_cache_length = 0, batch_max_seqlen
         if past_key_values is not None:
             seqlen_offset = past_key_values.get_seq_length(self.layer_idx)
-            max_seqlen = q.shape[1] + seqlen_offset
+            rope_cache_length += seqlen_offset
 
             if attention_mask is not None:
                 # to eliminate the offsets of padding tokens
                 seqlen_offset = seqlen_offset + prepare_lens_from_mask(attention_mask) - attention_mask.shape[-1]
-                max_seqlen = q.shape[1] + max(seqlen_offset)
 
-        if self.max_position_embeddings is not None:
-            max_seqlen = max(max_seqlen, self.max_position_embeddings)
-        q, k = self.rotary(q, k, seqlen_offset=seqlen_offset, max_seqlen=max_seqlen, cu_seqlens=cu_seqlens)
+        if past_key_values is not None and cu_seqlens_q is None and self.max_position_embeddings is not None:
+            rope_cache_length = max(rope_cache_length, self.max_position_embeddings)
+        q, k = self.rotary(
+            q, k, seqlen_offset=seqlen_offset, max_seqlen=rope_cache_length, cu_seqlens=cu_seqlens_q)
 
         if past_key_values is not None:
             cache_has_content = past_key_values.get_seq_length(self.layer_idx) > 0
@@ -280,11 +285,8 @@ class MoBA(nn.Module):
             k_packed = rearrange(k, 'b s h d -> 1 (b s) h d').contiguous()
             v_packed = rearrange(v, 'b s h d -> 1 (b s) h d').contiguous()
 
-            offsets = torch.arange(batch_size + 1, dtype=torch.int32, device=hidden_states.device)
-            if isinstance(cu_seqlens, (tuple, list)):
-                cu_seqlens_q, _ = cu_seqlens
-            else:
-                cu_seqlens_q = offsets * q_len if cu_seqlens is None else cu_seqlens
+            if cu_seqlens_q is None:
+                cu_seqlens_q = torch.arange(batch_size + 1, dtype=torch.int32, device=hidden_states.device) * q_len
 
             if self.use_flash_moba:
                 o = flash_moba_varlen_func(
@@ -293,8 +295,8 @@ class MoBA(nn.Module):
                     v=v_packed.squeeze(0),
                     cu_seqlens_q=cu_seqlens_q,
                     cu_seqlens_k=cu_seqlens_q,
-                    max_seqlen_q=q_len,
-                    max_seqlen_k=q_len,
+                    max_seqlen_q=batch_max_seqlen,
+                    max_seqlen_k=batch_max_seqlen,
                     moba_chunk_size=self.moba_chunk_size,
                     moba_topk=self.moba_topk,
                     causal=True,
@@ -305,7 +307,7 @@ class MoBA(nn.Module):
                     k_packed,
                     v_packed,
                     cu_seqlens=cu_seqlens_q,
-                    max_seqlen=max_seqlen,
+                    max_seqlen=batch_max_seqlen,
                     chunk_size=self.moba_chunk_size,
                     topk=self.moba_topk,
                 ).squeeze(0)
