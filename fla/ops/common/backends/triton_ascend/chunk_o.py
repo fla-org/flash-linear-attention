@@ -184,7 +184,7 @@ def _g_npu_arg(g: torch.Tensor | None, HV: int) -> tuple[torch.Tensor | None, bo
 def _g_contig_base(g, bos, i_b, i_h, T_seq, HV, IS_VARLEN: tl.constexpr):
     if IS_VARLEN:
         return g + bos + i_h * T_seq
-    return g + i_b * HV * T_seq + i_h * T_seq
+    return g + tl.cast(i_b, tl.int64) * HV * T_seq + i_h * T_seq
 
 
 @triton.jit
@@ -266,7 +266,7 @@ def chunk_fwd_kernel_o_npu(
             NT = tl.cdiv(T, BT)
             i_n = global_t // NT
             i_t = global_t % NT
-            bos = i_n * T
+            bos = tl.cast(i_n, tl.int64) * T
             i_tg = global_t
 
         # offset calculation (use local pointers to avoid in-place += accumulation across iterations)
@@ -274,7 +274,7 @@ def chunk_fwd_kernel_o_npu(
         k_ptr = k + (bos * H + i_h // (HV // H)) * K
         v_ptr = v + (bos * HV + i_h) * V
         o_ptr = o + (bos * HV + i_h) * V
-        h_base = h + (i_tg * HV + i_h).to(tl.int64) * K * V
+        h_base = h + (tl.cast(i_tg, tl.int64) * HV + i_h) * K * V
 
         b_o = tl.zeros([BT, BV], dtype=tl.float32)
         b_A = tl.zeros([BT, BT], dtype=tl.float32)
@@ -305,12 +305,12 @@ def chunk_fwd_kernel_o_npu(
 
         if USE_G:
             # g is transposed to [B, HV, T] in wrapper for contiguous T-load.
-            # Non-varlen: g_ptr = g + i_n * HV * T + i_h * T (i_n is batch index)
+            # Non-varlen: g_ptr = g + tl.cast(i_n, tl.int64) * HV * T + i_h * T (i_n is batch index)
             # Varlen (B=1): g_ptr = g + bos + i_h * T (bos is absolute token offset)
             if IS_VARLEN:
                 g_ptr = g + bos + i_h * T
             else:
-                g_ptr = g + i_n * HV * T + i_h * T
+                g_ptr = g + tl.cast(i_n, tl.int64) * HV * T + i_h * T
             p_g = tl.make_block_ptr(g_ptr, (T_cur,), (1,), (i_t * BT,), (BT,), (0,))
             b_g = tl.load(p_g, boundary_check=(0,))
 
@@ -577,7 +577,7 @@ def chunk_bwd_kernel_dv_local_npu(
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
     else:
-        bos = i_b * T
+        bos = tl.cast(i_b, tl.int64) * T
 
     q += (bos * H + i_h // (HV // H)) * K
     k += (bos * H + i_h // (HV // H)) * K
@@ -750,13 +750,13 @@ def chunk_bwd_kernel_dqkwg_npu(
         T = (eos - bos).to(tl.int32)
     else:
         NT = tl.cdiv(T, BT)
-        i_tg = i_b * NT + i_t
-        bos = i_b * T
+        i_tg = tl.cast(i_b, tl.int64) * NT + i_t
+        bos = tl.cast(i_b, tl.int64) * T
 
     v += (bos * HV + i_h) * V
     do += (bos * HV + i_h) * V
-    h += (i_tg * HV + i_h).to(tl.int64) * K * V
-    dh += (i_tg * HV + i_h).to(tl.int64) * K * V
+    h += (tl.cast(i_tg, tl.int64) * HV + i_h) * K * V
+    dh += (tl.cast(i_tg, tl.int64) * HV + i_h) * K * V
     q += (bos * H + i_h // (HV // H)) * K
     k += (bos * H + i_h // (HV // H)) * K
     dq += (bos * HV + i_h) * K
@@ -971,13 +971,13 @@ def chunk_bwd_kernel_dqkwg_full_npu(
             T_cur = (eos - bos).to(tl.int32)
         else:
             NT = tl.cdiv(T_seq, BT)
-            i_tg = i_b * NT + i_t
+            i_tg = tl.cast(i_b, tl.int64) * NT + i_t
             bos = tl.cast(i_b, tl.int64) * T_seq
 
         v_ptr = v + (bos * HV + i_h) * V
         do_ptr = do + (bos * HV + i_h) * V
-        h_ptr = h + (i_tg * HV + i_h).to(tl.int64) * K * V
-        dh_ptr = dh + (i_tg * HV + i_h).to(tl.int64) * K * V
+        h_ptr = h + (tl.cast(i_tg, tl.int64) * HV + i_h) * K * V
+        dh_ptr = dh + (tl.cast(i_tg, tl.int64) * HV + i_h) * K * V
         q_ptr = q + (bos * H + i_h // (HV // H)) * K
         k_ptr = k + (bos * H + i_h // (HV // H)) * K
         dq_ptr = dq + (bos * HV + i_h) * K
@@ -1123,11 +1123,11 @@ def chunk_bwd_kernel_dg_hdh_npu(
             T_cur = (eos - bos).to(tl.int32)
         else:
             NT = tl.cdiv(T_seq, BT)
-            i_tg = i_b * NT + i_t
+            i_tg = tl.cast(i_b, tl.int64) * NT + i_t
             bos = tl.cast(i_b, tl.int64) * T_seq
 
-        h_ptr = h + (i_tg * HV + i_h).to(tl.int64) * K * V
-        dh_ptr = dh + (i_tg * HV + i_h).to(tl.int64) * K * V
+        h_ptr = h + (tl.cast(i_tg, tl.int64) * HV + i_h) * K * V
+        dh_ptr = dh + (tl.cast(i_tg, tl.int64) * HV + i_h) * K * V
         last_idx = min(i_t * BT + BT, T_cur) - 1
         if G_T_CONTIG:
             g_base = _g_contig_base(g, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
@@ -1199,12 +1199,12 @@ def chunk_bwd_kernel_dg_npu(
         T = (eos - bos).to(tl.int32)
     else:
         NT = tl.cdiv(T, BT)
-        i_tg = i_b * NT + i_t
-        bos = i_b * T
+        i_tg = tl.cast(i_b, tl.int64) * NT + i_t
+        bos = tl.cast(i_b, tl.int64) * T
 
     v += (bos * HV + i_h) * V
-    h += (i_tg * HV + i_h).to(tl.int64) * K * V
-    dh += (i_tg * HV + i_h).to(tl.int64) * K * V
+    h += (tl.cast(i_tg, tl.int64) * HV + i_h) * K * V
+    dh += (tl.cast(i_tg, tl.int64) * HV + i_h) * K * V
     q += (bos * H + i_h // (HV // H)) * K
     k += (bos * H + i_h // (HV // H)) * K
     dq_f32 += (bos * HV + i_h) * K
