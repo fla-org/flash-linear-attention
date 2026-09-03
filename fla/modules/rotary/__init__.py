@@ -6,9 +6,9 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 from fla.backends import TritonAscendBackend
-from fla.modules.rotary.ops import RotaryEmbedding, rotary_embedding
+from fla.modules.rotary.ops import RotaryEmbedding, get_max_seqlen, rotary_embedding
 
-__all__ = ['RotaryEmbedding', 'rotary_embedding']
+__all__ = ['RotaryEmbedding', 'get_max_seqlen', 'rotary_embedding']
 
 
 if TritonAscendBackend.is_available():
