@@ -11,10 +11,9 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
-from fla.utils import autotune_cache_kwargs, check_shared_mem
+from fla.utils import IS_NVIDIA_HOPPER, autotune_cache_kwargs, check_shared_mem
 
-NUM_WARPS = [2, 4, 8]
-NUM_WARPS = [2, 4]
+NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8]
 
 
 @triton.heuristics({
@@ -24,8 +23,8 @@ NUM_WARPS = [2, 4]
     configs=[
         triton.Config({'BK': BK}, num_warps=num_warps, num_stages=num_stages)
         for BK in [16, 32, 64]
-        for num_warps in [2, 4, 8]
-        for num_stages in [2, 3, 4]
+        for num_warps in ([2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8])
+        for num_stages in ([1, 2, 3] if IS_NVIDIA_HOPPER else [2, 3, 4])
     ],
     key=['H', 'K', 'BT', 'IS_VARLEN'],
     **autotune_cache_kwargs,
@@ -210,8 +209,7 @@ def chunk_scaled_dot_mode_rule_pkt_fwd(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [2, 4]
-        # for num_warps in NUM_WARPS
-        for num_stages in [2, 3, 4, 5]
+        for num_stages in ([1, 2, 3] if IS_NVIDIA_HOPPER else [2, 3, 4, 5])
     ],
     key=['H', 'K', 'V', 'BT', 'BK', 'BV', 'IS_VARLEN'],
     **autotune_cache_kwargs,
