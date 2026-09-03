@@ -43,7 +43,15 @@ def _get_inter_bk(K: int) -> int:
     )
 
 
-def _launch_diag_kernel(kernel, *, nt: int, nc: int, bh_total: int, kernel_kwargs: dict) -> None:
+def _launch_diag_kernel(
+    kernel,
+    *,
+    nt: int,
+    nc: int,
+    bh_total: int,
+    kernel_kwargs: dict,
+    sync_stream=None,
+) -> None:
     budget = _LAUNCH_BLOCK_BUDGET
     chunk_indices = kernel_kwargs.get('chunk_indices')
     cu_seqlens = kernel_kwargs.get('cu_seqlens')
@@ -64,6 +72,8 @@ def _launch_diag_kernel(kernel, *, nt: int, nc: int, bh_total: int, kernel_kwarg
                 bh_len = min(max_bh, bh_total - bh_off)
                 kernel_kwargs['BH_OFFSET'] = bh_off
                 kernel[(nt_len, nc_len, bh_len)](**kernel_kwargs)
+                if sync_stream is not None:
+                    sync_stream.synchronize()
 
 
 def _launch_inter_kernel(kernel, *, nt: int, bh_total: int, kernel_kwargs: dict) -> None:
@@ -104,6 +114,7 @@ def chunk_gdn2_fwd_kernel_intra_grouped_npu(
     BK: tl.constexpr,
     BR: tl.constexpr,
     ROW_GROUP: tl.constexpr,
+    IS_HEAD_MAJOR: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     NT_OFFSET,
     NC_OFFSET,
@@ -136,17 +147,23 @@ def chunk_gdn2_fwd_kernel_intra_grouped_npu(
     m_k = o_k < K
     m_rk = m_r[:, None] & m_k[None, :]
 
-    q += (bos * H + i_h) * K
-    k += (bos * H + i_h) * K
-    g += (bos * H + i_h) * K
-    b += (bos * H + i_h) * K
+    if IS_HEAD_MAJOR:
+        input_offset = ((tl.cast(i_b, tl.int64) * H + i_h) * T) * K
+        input_stride = K
+    else:
+        input_offset = (bos * H + i_h) * K
+        input_stride = H * K
+    q += input_offset
+    k += input_offset
+    g += input_offset
+    b += input_offset
     Aqk += (bos * H + i_h) * BT
     Akk += (bos * H + i_h) * BC
 
-    p_q = q + o_c[:, None] * (H * K) + o_k[None, :]
-    p_k = k + o_c[:, None] * (H * K) + o_k[None, :]
-    p_g = g + o_c[:, None] * (H * K) + o_k[None, :]
-    p_b = b + o_c[:, None] * (H * K) + o_k[None, :]
+    p_q = q + o_c[:, None] * input_stride + o_k[None, :]
+    p_k = k + o_c[:, None] * input_stride + o_k[None, :]
+    p_g = g + o_c[:, None] * input_stride + o_k[None, :]
+    p_b = b + o_c[:, None] * input_stride + o_k[None, :]
     b_q = tl.load(p_q, mask=m_rk, other=0.0).to(tl.float32)
     b_k = tl.load(p_k, mask=m_rk, other=0.0).to(tl.float32)
     b_g = tl.load(p_g, mask=m_rk, other=0.0).to(tl.float32)
@@ -156,8 +173,8 @@ def chunk_gdn2_fwd_kernel_intra_grouped_npu(
     for j in range(0, (ROW_GROUP + 1) * BR):
         i_j = i_ts + j
         m_j = i_j < T
-        p_kj = k + i_j * (H * K) + o_k
-        p_gj = g + i_j * (H * K) + o_k
+        p_kj = k + i_j * input_stride + o_k
+        p_gj = g + i_j * input_stride + o_k
         b_kj = tl.load(p_kj, mask=m_j & m_k, other=0.0).to(tl.float32)
         b_gj = tl.load(p_gj, mask=m_j & m_k, other=0.0).to(tl.float32)
         b_kgj = tl.where(m_k[None, :], b_kj[None, :] * exp2(b_g - b_gj[None, :]), 0.0)
@@ -389,6 +406,7 @@ def chunk_gdn2_fwd_kernel_inter_solve_npu(
         p_Akk33 = tl.make_block_ptr(Akkd, (T, BC), (H * BC, 1), (i_tc3, 0), (BC, BC), (1, 0))
         b_Ai33 = tl.load(p_Akk33, boundary_check=(0, 1)).to(tl.float32)
 
+    # tl.dot may clobber its lhs on Ascend; materialize copies for later dot and store uses.
     b_Ai11_c = b_Ai11 + 0.0
     if NC >= 3:
         b_Ai22_c = b_Ai22 + 0.0
@@ -481,17 +499,28 @@ def chunk_gdn2_fwd_intra_npu(
     Akkx = torch.zeros(B, T, H, BT, device=k.device, dtype=torch.float32)
 
     sync_stream = torch.npu.current_stream(k.device)
+    use_head_major_intra = not is_varlen
+    # serialize split dense launches to avoid CANN queue stalls.
+    dense_sync_stream = sync_stream if use_head_major_intra else None
+    if use_head_major_intra:
+        q_intra = q.transpose(1, 2).contiguous()
+        k_intra = k.transpose(1, 2).contiguous()
+        g_intra = gk.transpose(1, 2).contiguous()
+        b_intra = b.transpose(1, 2).contiguous()
+    else:
+        q_intra, k_intra, g_intra, b_intra = q, k, gk, b
     for row_group in range(BC // _TOKEN_GROUP):
         _launch_diag_kernel(
             chunk_gdn2_fwd_kernel_intra_grouped_npu,
             nt=NT,
             nc=NC,
             bh_total=B * H,
+            sync_stream=dense_sync_stream,
             kernel_kwargs=dict(
-                q=q,
-                k=k,
-                g=gk,
-                b=b,
+                q=q_intra,
+                k=k_intra,
+                g=g_intra,
+                b=b_intra,
                 Aqk=Aqk,
                 Akk=Akkd,
                 scale=scale,
@@ -505,13 +534,14 @@ def chunk_gdn2_fwd_intra_npu(
                 BK=triton.next_power_of_2(K),
                 BR=_TOKEN_GROUP,
                 ROW_GROUP=row_group,
+                IS_HEAD_MAJOR=use_head_major_intra,
                 IS_VARLEN=is_varlen,
                 NT_OFFSET=0,
                 NC_OFFSET=0,
                 BH_OFFSET=0,
             ),
         )
-        if row_group == 0:
+        if not use_head_major_intra and row_group == 0:
             # CANN can stall when the two grouped row kernels are queued together.
             sync_stream.synchronize()
 

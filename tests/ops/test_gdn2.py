@@ -295,6 +295,8 @@ def test_chunk_invalid_chunk_size(chunk_size):
             (1, 64, 2, 32, 32, 1.0, False, False, False, torch.float32),
             (2, 256, 2, 64, 64, 0.5, True, False, False, torch.float32),
             (2, 100, 3, 64, 64, 1.0, True, False, False, torch.float16),   # non-multiple T, fp16
+            (1, 64, 1, 128, 128, 1.0, True, False, False, torch.bfloat16),
+            (1, 64, 1, 256, 256, 1.0, True, False, False, torch.bfloat16),
             (2, 256, 2, 64, 64, 1.0, True, True, False, torch.float32),    # gate-in-kernel
             (1, 128, 2, 64, 64, 1.0, True, True, True, torch.float32),     # gate-in-kernel + safe_gate
         ]
