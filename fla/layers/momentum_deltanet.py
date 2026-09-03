@@ -37,11 +37,10 @@ class MomentumDeltaNet(nn.Module):
     Momentum DeltaNet (arXiv:2605.05838) with dual state [S,M].
 
     Degenerate mu->0 reproduces DeltaRule (kept as ``chunk_mode_rule``).
-    Full momentum uses chunk/fused kernels; this PR ships a pure PyTorch
-    reference path (CAT-style, 0 Triton) - H100 Triton autotune and
-    ``cu_seqlens`` varlen for the full path are out of scope and fall back
-    to the degenerate DeltaRule kernels. Generation via ``past_key_values``
-    cache is supported for the recurrent state.
+    Full momentum uses a pure PyTorch reference path in this PR; H100 Triton
+    autotune and ``cu_seqlens`` varlen for the full path are out of scope and
+    fall back to the degenerate DeltaRule kernels. Generation via
+    ``past_key_values`` cache is supported for the recurrent state.
     """
 
     def __init__(
