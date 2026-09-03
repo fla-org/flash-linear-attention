@@ -10,7 +10,7 @@ import torch
 import torch.nn.functional as F
 
 from fla.ops.momentum_delta_rule import chunk_mode_rule, fused_recurrent_mode_rule
-from fla.utils import IS_NVIDIA_HOPPER, assert_close, device, device_platform
+from fla.utils import assert_close, device, device_platform
 
 
 @pytest.mark.parametrize(
@@ -285,10 +285,6 @@ def test_qk_l2norm_wiring():
 @pytest.mark.skipif(
     device_platform == 'intel',
     reason='Intel Triton Failure',
-)
-@pytest.mark.skipif(
-    device_platform == 'intel' or IS_NVIDIA_HOPPER,
-    reason='Skip on Intel Triton failure or H100 illegal memory access pending kernel fix',
 )
 def test_momentum_deltanet_layer_default_l2():
     """Layer default qk_norm='l2' should wire through to the op and not NaN."""
