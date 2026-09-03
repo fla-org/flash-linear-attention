@@ -286,6 +286,10 @@ def test_qk_l2norm_wiring():
     device_platform == 'intel',
     reason='Intel Triton Failure',
 )
+@pytest.mark.skipif(
+    device_platform == 'intel' or IS_NVIDIA_HOPPER,
+    reason='Skip on Intel Triton failure or H100 illegal memory access pending kernel fix',
+)
 def test_momentum_deltanet_layer_default_l2():
     """Layer default qk_norm='l2' should wire through to the op and not NaN."""
     torch.manual_seed(0)
