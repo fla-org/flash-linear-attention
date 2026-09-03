@@ -22,6 +22,7 @@ from fla.utils.ascend_ub_manager import (
     max_grid_axis_chunks,
 )
 
+_NUM_WARPS = 4
 # Peak live fp32 tiles: b_s, b_o (and b_z / partial sums for vector/global).
 _CUMSUM_SCALAR_MEM_MULT = 3.0
 # b_s, b_c, b_z, plus tl.cumsum multi-buffer on [BT, BS] tiles.
@@ -115,6 +116,7 @@ def _launch_local_cumsum_vector(
         BT=BT,
         BS=BS,
         REVERSE=reverse,
+        num_warps=_NUM_WARPS,
     )
     max_nt = max_grid_axis_chunks(NT, ns * bh_total, max_grid=ASCEND_MAX_GRID_DIM)
     for nt_off in range(0, NT, max_nt):
@@ -443,6 +445,7 @@ def chunk_global_cumsum_scalar_npu(
         H=H,
         BT=BT,
         REVERSE=reverse,
+        num_warps=_NUM_WARPS,
     )
     for bh_off, bh_len in iter_axis_launch_chunks(bh_total, 1, max_grid=ASCEND_MAX_GRID_DIM):
         kernel_kwargs['BH_OFFSET'] = bh_off
@@ -488,6 +491,7 @@ def chunk_global_cumsum_vector_npu(
         BT=BT,
         BS=BS,
         REVERSE=reverse,
+        num_warps=_NUM_WARPS,
     )
     max_bh = max_grid_axis_chunks(bh_total, ns, max_grid=ASCEND_MAX_GRID_DIM)
     for bh_off in range(0, bh_total, max_bh):

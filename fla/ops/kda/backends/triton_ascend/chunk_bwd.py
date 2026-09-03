@@ -23,6 +23,7 @@ from fla.utils.ascend_ub_manager import (
     max_grid_axis_chunks,
 )
 
+_DAV_NUM_WARPS = 2
 _DAV_MEM_MULT = 8.0
 _DAV_SAFETY_MARGIN = 0.75
 _DAV_FALLBACK_TILE = 8
@@ -49,7 +50,7 @@ def _launch_dAv_2d_kernel(kernel, *, nt: int, bh_total: int, kernel_kwargs: dict
         for bh_off in range(0, bh_total, max_bh):
             bh_len = min(max_bh, bh_total - bh_off)
             kernel_kwargs['BH_OFFSET'] = bh_off
-            kernel[(nt_len, bh_len)](**kernel_kwargs)
+            kernel[(nt_len, bh_len)](num_warps=_DAV_NUM_WARPS, **kernel_kwargs)
 
 
 @triton.jit(do_not_specialize=['T'])
