@@ -292,10 +292,10 @@ def test_momentum_deltanet_layer_default_l2():
     from fla.layers import MomentumDeltaNet
 
     layer = MomentumDeltaNet(
-        hidden_size=128, num_heads=4, head_dim=32, use_short_conv=False, qk_norm='l2',
+        hidden_size=256, num_heads=4, head_dim=64, use_short_conv=False, qk_norm='l2',
     ).to(device=device, dtype=torch.bfloat16)
-    # T=64 avoids T<BT=64 edge case that triggers H100 TMA hang in new kernels
-    x = torch.randn(2, 64, 128, device=device, dtype=torch.bfloat16, requires_grad=True)
+    # T=64 and head_dim=64 avoid H100 TMA hang with small K=32
+    x = torch.randn(2, 64, 256, device=device, dtype=torch.bfloat16, requires_grad=True)
     y, _, _ = layer(x)
     assert not torch.isnan(y).any()
     y.sum().backward()
@@ -304,5 +304,5 @@ def test_momentum_deltanet_layer_default_l2():
     # chunk vs fused inference parity via layer: short seq uses fused, long uses chunk
     layer.eval()
     with torch.no_grad():
-        y_chunk, _, _ = layer(torch.randn(2, 128, 128, device=device, dtype=torch.bfloat16))
+        y_chunk, _, _ = layer(torch.randn(2, 128, 256, device=device, dtype=torch.bfloat16))
         assert not torch.isnan(y_chunk).any()
