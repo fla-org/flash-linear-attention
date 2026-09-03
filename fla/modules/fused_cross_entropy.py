@@ -425,8 +425,8 @@ class FusedCrossEntropyLoss(nn.Module):
             losses: (batch,) if reduction is 'none', else (1,), dtype float
             z_loss: (batch,) if reduction is 'none', else (1,), dtype float (if self.return_z_loss)
         """
-        assert input.device.type in ('cuda', 'npu') and target.device.type in ('cuda', 'npu'), (
-            "Only support CUDA/NPU tensors"
+        assert input.device.type in ('cuda', 'npu', 'xpu') and target.device.type in ('cuda', 'npu', 'xpu'), (
+            "Only support CUDA/NPU/XPU tensors"
         )
         loss, z_loss = cross_entropy_loss(
             input,
