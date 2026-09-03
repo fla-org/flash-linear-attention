@@ -15,7 +15,7 @@ from fla.utils import device
 
 # Models that do not yet support variable sequence lengths (for modeling tests)
 MODELING_UNSUPPORTED_VARLEN = [
-    "ABCConfig", "ForgettingTransformerConfig", "LinearAttentionConfig", "LightNetConfig",
+    "ABCConfig", "CATConfig", "ForgettingTransformerConfig", "LinearAttentionConfig", "LightNetConfig",
     "Mamba2Config", "MambaConfig", "MesaNetConfig", "SambaConfig",
     "RodimusConfig", "WallTransformerConfig",
 ]
