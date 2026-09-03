@@ -88,7 +88,7 @@ def chunk_kda_fwd_kernel_intra_token_parallel_npu(
         T = (eos - bos).to(tl.int32)
         i_t = i_tg - bos
     else:
-        bos = (i_tg // T) * T
+        bos = tl.cast(i_tg // T, tl.int64) * T
         i_t = i_tg % T
 
     if i_t >= T:

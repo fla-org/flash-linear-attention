@@ -66,14 +66,14 @@ def rotary_embedding_kernel(
 
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n), tl.load(cu_seqlens + i_n + 1)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
         x = x + bos * H*D + i_h * D
         y = y + bos * H*D + i_h * D
     else:
         i_n = i_b
-        x = x + i_n * T*H*D + i_h * D
-        y = y + i_n * T*H*D + i_h * D
+        x = x + tl.cast(i_n, tl.int64) * T * H * D + i_h * D
+        y = y + tl.cast(i_n, tl.int64) * T * H * D + i_h * D
 
     if i_t * BT >= T:
         return
