@@ -20,7 +20,7 @@ from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.path_attn import PaTHAttention
 from fla.models.path_attn.configuration_path_attention import PaTHAttentionConfig
-from fla.models.utils import Cache, FLAGenerationMixin
+from fla.models.utils import Cache, FLAGenerationMixin, prepare_causal_lm_labels
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
 from fla.modules import GatedMLP as PaTHAttentionMLP
 from fla.modules.l2warp import l2_warp
@@ -277,6 +277,8 @@ class PaTHAttentionModel(PaTHAttentionPreTrainedModel):
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         use_cache = use_cache if use_cache is not None else (self.config.use_cache if not self.training else False)
+        if kwargs.get('cu_seqlens') is not None:
+            use_cache = False
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         # retrieve input_ids and inputs_embeds
@@ -293,6 +295,12 @@ class PaTHAttentionModel(PaTHAttentionPreTrainedModel):
 
         # embed positions
         hidden_states = inputs_embeds
+        if use_cache and attention_mask is None:
+            past_length = past_key_values.get_seq_length() if past_key_values is not None else 0
+            attention_mask = hidden_states.new_ones(
+                (hidden_states.shape[0], past_length + hidden_states.shape[1]),
+                dtype=torch.bool,
+            )
 
         # list of completed block summaries (kept as separate tensors so
         # `fused_attnres` can ingest them via its pointer-table API
@@ -435,7 +443,7 @@ class PaTHAttentionForCausalLM(PaTHAttentionPreTrainedModel, FLAGenerationMixin)
                 criterion = self.criterion
             # Enable model parallelism
             labels = labels.to(hidden_states.device)
-            labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], criterion.ignore_index)), 1)
+            labels = prepare_causal_lm_labels(labels, criterion.ignore_index, kwargs.get("cu_seqlens"))
             if self.config.fuse_linear_cross_entropy:
                 loss = criterion(hidden_states, labels, self.lm_head.weight, self.lm_head.bias)
             else:
