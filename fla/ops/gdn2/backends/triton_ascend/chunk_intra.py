@@ -406,39 +406,42 @@ def chunk_gdn2_fwd_kernel_inter_solve_npu(
         p_Akk33 = tl.make_block_ptr(Akkd, (T, BC), (H * BC, 1), (i_tc3, 0), (BC, BC), (1, 0))
         b_Ai33 = tl.load(p_Akk33, boundary_check=(0, 1)).to(tl.float32)
 
-    # tl.dot may clobber its lhs on Ascend; materialize copies for later dot and store uses.
-    b_Ai11_c = b_Ai11 + 0.0
+    # preserve Ai11 before the Ai10 Ascend tl.dot clobbers it; later rhs dots and the store need the original
+    b_Ai11_pristine = b_Ai11 + 0.0
     if NC >= 3:
-        b_Ai22_c = b_Ai22 + 0.0
-        b_Ai22_c2 = b_Ai22 + 0.0
-        b_Ai22_c3 = b_Ai22 + 0.0
+        # preserve Ai22 before the Ai21 Ascend tl.dot clobbers it; Ai20, Ai32, and the store need independent values
+        b_Ai22_for_store = b_Ai22 + 0.0
+        b_Ai22_for_Ai20 = b_Ai22 + 0.0
+        b_Ai22_for_Ai32 = b_Ai22 + 0.0
     if NC >= 4:
-        b_Ai33_c = b_Ai33 + 0.0
-        b_Ai33_c2 = b_Ai33 + 0.0
-        b_Ai33_c3 = b_Ai33 + 0.0
-        b_Akk31_c = b_Akk31 + 0.0
-        b_Akk32_c = b_Akk32 + 0.0
+        # preserve Ai33 before the Ai32 Ascend tl.dot clobbers it; Ai31, Ai30, and the store need independent values
+        b_Ai33_for_store = b_Ai33 + 0.0
+        b_Ai33_for_Ai31 = b_Ai33 + 0.0
+        b_Ai33_for_Ai30 = b_Ai33 + 0.0
+        # preserve Akk31/Akk32 before their Ai31 Ascend tl.dot lhs uses; Ai30 needs fresh lhs tiles
+        b_Akk31_for_Ai30 = b_Akk31 + 0.0
+        b_Akk32_for_Ai30 = b_Akk32 + 0.0
 
     b_Ai10 = -tl.dot(tl.dot(b_Ai11, b_Akk10, allow_tf32=False), b_Ai00, allow_tf32=False)
     if NC >= 3:
-        b_Ai21 = -tl.dot(tl.dot(b_Ai22, b_Akk21, allow_tf32=False), b_Ai11_c, allow_tf32=False)
+        b_Ai21 = -tl.dot(tl.dot(b_Ai22, b_Akk21, allow_tf32=False), b_Ai11_pristine, allow_tf32=False)
         b_Ai20 = -tl.dot(
-            b_Ai22_c2,
+            b_Ai22_for_Ai20,
             tl.dot(b_Akk20, b_Ai00, allow_tf32=False) + tl.dot(b_Akk21, b_Ai10, allow_tf32=False),
             allow_tf32=False,
         )
     if NC >= 4:
-        b_Ai32 = -tl.dot(tl.dot(b_Ai33, b_Akk32, allow_tf32=False), b_Ai22_c3, allow_tf32=False)
+        b_Ai32 = -tl.dot(tl.dot(b_Ai33, b_Akk32, allow_tf32=False), b_Ai22_for_Ai32, allow_tf32=False)
         b_Ai31 = -tl.dot(
-            b_Ai33_c2,
-            tl.dot(b_Akk31, b_Ai11_c, allow_tf32=False) + tl.dot(b_Akk32, b_Ai21, allow_tf32=False),
+            b_Ai33_for_Ai31,
+            tl.dot(b_Akk31, b_Ai11_pristine, allow_tf32=False) + tl.dot(b_Akk32, b_Ai21, allow_tf32=False),
             allow_tf32=False,
         )
         b_Ai30 = -tl.dot(
-            b_Ai33_c3,
+            b_Ai33_for_Ai30,
             tl.dot(b_Akk30, b_Ai00, allow_tf32=False)
-            + tl.dot(b_Akk31_c, b_Ai10, allow_tf32=False)
-            + tl.dot(b_Akk32_c, b_Ai20, allow_tf32=False),
+            + tl.dot(b_Akk31_for_Ai30, b_Ai10, allow_tf32=False)
+            + tl.dot(b_Akk32_for_Ai30, b_Ai20, allow_tf32=False),
             allow_tf32=False,
         )
 
@@ -447,14 +450,14 @@ def chunk_gdn2_fwd_kernel_inter_solve_npu(
     p_Akk11 = tl.make_block_ptr(Akk, (T, BT), (H * BT, 1), (i_tc1, BC), (BC, BC), (1, 0))
     tl.store(p_Akk00, b_Ai00.to(Akk.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_Akk10, b_Ai10.to(Akk.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_Akk11, b_Ai11_c.to(Akk.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_Akk11, b_Ai11_pristine.to(Akk.dtype.element_ty), boundary_check=(0, 1))
     if NC >= 3:
         p_Akk20 = tl.make_block_ptr(Akk, (T, BT), (H * BT, 1), (i_tc2, 0), (BC, BC), (1, 0))
         p_Akk21 = tl.make_block_ptr(Akk, (T, BT), (H * BT, 1), (i_tc2, BC), (BC, BC), (1, 0))
         p_Akk22 = tl.make_block_ptr(Akk, (T, BT), (H * BT, 1), (i_tc2, 2 * BC), (BC, BC), (1, 0))
         tl.store(p_Akk20, b_Ai20.to(Akk.dtype.element_ty), boundary_check=(0, 1))
         tl.store(p_Akk21, b_Ai21.to(Akk.dtype.element_ty), boundary_check=(0, 1))
-        tl.store(p_Akk22, b_Ai22_c.to(Akk.dtype.element_ty), boundary_check=(0, 1))
+        tl.store(p_Akk22, b_Ai22_for_store.to(Akk.dtype.element_ty), boundary_check=(0, 1))
     if NC >= 4:
         p_Akk30 = tl.make_block_ptr(Akk, (T, BT), (H * BT, 1), (i_tc3, 0), (BC, BC), (1, 0))
         p_Akk31 = tl.make_block_ptr(Akk, (T, BT), (H * BT, 1), (i_tc3, BC), (BC, BC), (1, 0))
@@ -463,7 +466,7 @@ def chunk_gdn2_fwd_kernel_inter_solve_npu(
         tl.store(p_Akk30, b_Ai30.to(Akk.dtype.element_ty), boundary_check=(0, 1))
         tl.store(p_Akk31, b_Ai31.to(Akk.dtype.element_ty), boundary_check=(0, 1))
         tl.store(p_Akk32, b_Ai32.to(Akk.dtype.element_ty), boundary_check=(0, 1))
-        tl.store(p_Akk33, b_Ai33_c.to(Akk.dtype.element_ty), boundary_check=(0, 1))
+        tl.store(p_Akk33, b_Ai33_for_store.to(Akk.dtype.element_ty), boundary_check=(0, 1))
 
 
 @input_guard

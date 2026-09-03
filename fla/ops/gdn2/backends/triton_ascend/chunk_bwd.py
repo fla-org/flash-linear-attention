@@ -51,39 +51,6 @@ def _get_npu_properties():
     return driver.active.utils.get_device_properties(device)
 
 
-def _launch_dA_finalize(
-    kernel,
-    *,
-    nt: int,
-    bh_total: int,
-    T: int,
-    BT: int,
-    is_varlen: bool,
-    num_core: int,
-    kernel_kwargs: dict,
-) -> None:
-    kwargs = dict(kernel_kwargs)
-    kwargs['num_core'] = num_core
-    if is_varlen:
-        kwargs['TAIL_MODE'] = 1
-        kwargs['NT_OFFSET'] = 0
-        kwargs['task_num'] = nt * bh_total
-        kernel[(num_core,)](**kwargs)
-        return
-
-    n_bulk = nt if T % BT == 0 else max(nt - 1, 0)
-    if n_bulk > 0:
-        kwargs['TAIL_MODE'] = 0
-        kwargs['NT_OFFSET'] = 0
-        kwargs['task_num'] = n_bulk * bh_total
-        kernel[(num_core,)](**kwargs)
-    if T % BT != 0 and nt > 0:
-        kwargs['TAIL_MODE'] = 1
-        kwargs['NT_OFFSET'] = n_bulk
-        kwargs['task_num'] = bh_total
-        kernel[(num_core,)](**kwargs)
-
-
 @triton.jit(do_not_specialize=['T', 'task_num', 'num_core', 'BH'])
 def chunk_gdn2_bwd_kernel_wy_v_part_npu(
     v,
@@ -160,10 +127,12 @@ def chunk_gdn2_bwd_kernel_wy_v_part_npu(
             b_v = tl.load(p_v, boundary_check=(0, 1))
             b_w = tl.load(p_w, boundary_check=(0, 1))
             b_dv = tl.load(p_dv, boundary_check=(0, 1))
-            b_dv_c = b_dv + 0.0
+            # preserve dv for the rhs dot before the first Ascend tl.dot clobbers its lhs
+            b_dv_for_dvb = b_dv + 0.0
             b_dA += tl.dot(b_dv, tl.trans(b_v * b_w), allow_tf32=False)
-            b_A_c = b_A + 0.0
-            b_dvb = tl.dot(b_A_c, b_dv_c, allow_tf32=False)
+            # give each V slab a disposable A lhs because Ascend tl.dot clobbers it
+            b_A_for_dvb = b_A + 0.0
+            b_dvb = tl.dot(b_A_for_dvb, b_dv_for_dvb, allow_tf32=False)
 
             p_dv2 = tl.make_block_ptr(dv2_ptr, (T, V), (H * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
             p_dw = tl.make_block_ptr(dw_ptr, (T, V), (H * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
@@ -288,8 +257,7 @@ def chunk_gdn2_bwd_kernel_wy_gate_part_npu(
 
         p_dA = tl.make_block_ptr(dA_ptr, (T, BT), (H * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
         b_dA = tl.load(p_dA, boundary_check=(0, 1)).to(tl.float32)
-        b_dw_c = b_dw + 0.0
-        b_dA += tl.dot(b_dw_c, tl.trans((b_kg * b_b).to(b_A.dtype)), allow_tf32=False)
+        b_dA += tl.dot(b_dw, tl.trans((b_kg * b_b).to(b_A.dtype)), allow_tf32=False)
         tl.store(p_dA, b_dA.to(p_dA.dtype.element_ty), boundary_check=(0, 1))
 
         p_db = tl.make_block_ptr(db_ptr, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
@@ -520,26 +488,35 @@ def chunk_gdn2_bwd_wy_dqkg_fused_npu(
         gate_kwargs['K_OFFSET'] = k_off
         chunk_gdn2_bwd_kernel_wy_gate_part_npu[(num_core,)](**gate_kwargs)
 
-    _launch_dA_finalize(
-        chunk_gdn2_bwd_kernel_wy_dA_finalize_npu,
-        nt=NT,
-        bh_total=bh_total,
+    finalize_kwargs = dict(
+        A=A_arg,
+        dA_acc=dA_acc,
+        dA=dA,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
         T=T,
-        BT=BT,
-        is_varlen=is_varlen,
+        BH=bh_total,
         num_core=num_core,
-        kernel_kwargs=dict(
-            A=A_arg,
-            dA_acc=dA_acc,
-            dA=dA,
-            cu_seqlens=cu_seqlens,
-            chunk_indices=chunk_indices,
-            T=T,
-            BH=bh_total,
-            H=H,
-            BT=BT,
-            IS_VARLEN=is_varlen,
-            A_T_CONTIG=t_contig,
-        ),
+        H=H,
+        BT=BT,
+        IS_VARLEN=is_varlen,
+        A_T_CONTIG=t_contig,
     )
+    if is_varlen:
+        finalize_kwargs['task_num'] = NT * bh_total
+        finalize_kwargs['NT_OFFSET'] = 0
+        finalize_kwargs['TAIL_MODE'] = 1
+        chunk_gdn2_bwd_kernel_wy_dA_finalize_npu[(num_core,)](**finalize_kwargs)
+    else:
+        n_bulk = NT if T % BT == 0 else max(NT - 1, 0)
+        if n_bulk > 0:
+            finalize_kwargs['task_num'] = n_bulk * bh_total
+            finalize_kwargs['NT_OFFSET'] = 0
+            finalize_kwargs['TAIL_MODE'] = 0
+            chunk_gdn2_bwd_kernel_wy_dA_finalize_npu[(num_core,)](**finalize_kwargs)
+        if T % BT != 0 and NT > 0:
+            finalize_kwargs['task_num'] = bh_total
+            finalize_kwargs['NT_OFFSET'] = n_bulk
+            finalize_kwargs['TAIL_MODE'] = 1
+            chunk_gdn2_bwd_kernel_wy_dA_finalize_npu[(num_core,)](**finalize_kwargs)
     return dq, dk, dv2, db, dw, dg, dA
