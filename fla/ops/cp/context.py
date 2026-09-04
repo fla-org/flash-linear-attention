@@ -32,6 +32,11 @@ class FLACPContext:
     conv1d_kernel_size: int | None = None
     pre_num_conv_tokens: int | None = None
     use_tf32x3_affine_chain: bool = False
+    # Device-resident copies of pre/post_num_ranks for graph replay: kernel scalar
+    # arguments are frozen at capture, so graph mode reads them via tl.load instead.
+    # Persistent int32 tensors the caller refreshes in place before each replay.
+    pre_num_ranks_dev: torch.Tensor | None = None
+    post_num_ranks_dev: torch.Tensor | None = None
 
     def copy_for_backward(self) -> FLACPContext:
         """Create a copy for backward pass (useful when PP_SIZE > 1)."""
@@ -46,6 +51,8 @@ class FLACPContext:
             conv1d_kernel_size=self.conv1d_kernel_size,
             pre_num_conv_tokens=self.pre_num_conv_tokens,
             use_tf32x3_affine_chain=self.use_tf32x3_affine_chain,
+            pre_num_ranks_dev=self.pre_num_ranks_dev,
+            post_num_ranks_dev=self.post_num_ranks_dev,
         )
 
     @property

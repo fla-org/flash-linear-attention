@@ -232,27 +232,27 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64_npu(
             NT = tl.cdiv(T, BT)
             boh = tl.load(chunk_offsets + i_n).to(tl.int64)
         else:
-            bos = i_n * T
+            bos = tl.cast(i_n, tl.int64) * T
             NT = tl.cdiv(T, BT)
-            boh = i_n * NT
+            boh = tl.cast(i_n, tl.int64) * NT
 
         v_start = i_v * BV
         # Rebind GM bases each task; do not in-place ``ptr +=`` across ``i_t``
         # (Ascend MTE OOB). ``h`` rebases each chunk via ``i_t * DH_CS``.
-        w_base = w + (bos * HV + i_h).to(tl.int64) * K
-        k_base = k + (bos * H + i_h // (HV // H)).to(tl.int64) * K
-        v_base = v + (bos * HV + i_h).to(tl.int64) * V
+        w_base = w + (bos * HV + i_h) * K
+        k_base = k + (bos * H + i_h // (HV // H)) * K
+        v_base = v + (bos * HV + i_h) * V
         if SAVE_NEW_VALUE:
-            v_new_base = v_new + (bos * HV + i_h).to(tl.int64) * V
-        h_nh = h + (boh * HV + i_h).to(tl.int64) * K * V
+            v_new_base = v_new + (bos * HV + i_h) * V
+        h_nh = h + (boh * HV + i_h) * K * V
 
         if USE_G:
             if USE_G_PRECOMP:
-                g_ratio_ptr = g_ratio + (i_n * HV + i_h).to(tl.int64) * T_max
-                g_last_exp_ptr = g_last_exp + (i_n * HV + i_h).to(tl.int64) * NT
+                g_ratio_ptr = g_ratio + (tl.cast(i_n, tl.int64) * HV + i_h) * T_max
+                g_last_exp_ptr = g_last_exp + (tl.cast(i_n, tl.int64) * HV + i_h) * NT
         if USE_GK:
             if USE_GK_PRECOMP:
-                gk_last_exp_nh = gk_last_exp + (i_n * HV + i_h).to(tl.int64) * NT * K
+                gk_last_exp_nh = gk_last_exp + (tl.cast(i_n, tl.int64) * HV + i_h) * NT * K
 
         # b_h shape: [BK, BV] (default) or [BV, BK] (STATE_V_FIRST)
         if STATE_V_FIRST:
@@ -372,7 +372,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64_npu(
                     if IS_VARLEN:
                         g_ptr = g + bos + i_h * T_max
                     else:
-                        g_ptr = g + i_n * HV * T_max + i_h * T_max
+                        g_ptr = g + tl.cast(i_n, tl.int64) * HV * T_max + i_h * T_max
                     b_g_last = tl.load(g_ptr + last_idx).to(tl.float32)
                     p_g = tl.make_block_ptr(g_ptr, (T,), (1,), (i_t * BT,), (BT,), (0,))
                     b_g = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
@@ -513,7 +513,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64_npu(
         "SAVE_NEW_VALUE": lambda args: args["v_new"] is not None,
     }
 )
-@triton.jit(do_not_specialize=["task_num", "num_core"])
+@triton.jit(do_not_specialize=["T", "task_num", "num_core"])
 def chunk_gated_delta_rule_fwd_kernel_h_oneslab_npu(
     k,
     v,
@@ -535,14 +535,13 @@ def chunk_gated_delta_rule_fwd_kernel_h_oneslab_npu(
     BT: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    NT: tl.constexpr,
     USE_G: tl.constexpr,
     USE_GK: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
     SAVE_NEW_VALUE: tl.constexpr,
 ):
-    """Aligned oneslab path: host NT constexpr, no K-slab/varlen/STATE_V_FIRST.
+    """Aligned oneslab path: NT computed at runtime (T // BT), no K-slab/varlen/STATE_V_FIRST.
 
     Oneslab is only launched when ``T % BT == 0`` and not varlen, so gates are
     always host-precomputed (``g``/``gk`` are never passed).
@@ -553,27 +552,28 @@ def chunk_gated_delta_rule_fwd_kernel_h_oneslab_npu(
     stride_k: tl.constexpr = H * K
     stride_w: tl.constexpr = HV * K
     NV: tl.constexpr = tl.cdiv(V, BV)
+    NT = T // BT
     if USE_GK:
         o_k = tl.arange(0, BK)
 
     for task_id in tl.range(core_id, task_num, num_core):
         i_v, i_nh = task_id % NV, (task_id // NV).to(tl.int64)
         i_n, i_h = i_nh // HV, i_nh % HV
-        bos = i_n * T
+        bos = tl.cast(i_n, tl.int64) * T
         v_start = i_v * BV
 
-        w_base = w + (bos * HV + i_h).to(tl.int64) * K
-        k_base = k + (bos * H + i_h // (HV // H)).to(tl.int64) * K
-        v_base = v + (bos * HV + i_h).to(tl.int64) * V
+        w_base = w + (bos * HV + i_h) * K
+        k_base = k + (bos * H + i_h // (HV // H)) * K
+        v_base = v + (bos * HV + i_h) * V
         if SAVE_NEW_VALUE:
-            v_new_base = v_new + (bos * HV + i_h).to(tl.int64) * V
-        h_nh = h + (i_n * NT * HV + i_h).to(tl.int64) * K * V
+            v_new_base = v_new + (bos * HV + i_h) * V
+        h_nh = h + (tl.cast(i_n, tl.int64) * NT * HV + i_h) * K * V
 
         if USE_G:
-            g_ratio_ptr = g_ratio + (i_n * HV + i_h).to(tl.int64) * T
-            g_last_exp_ptr = g_last_exp + (i_n * HV + i_h).to(tl.int64) * NT
+            g_ratio_ptr = g_ratio + (tl.cast(i_n, tl.int64) * HV + i_h) * T
+            g_last_exp_ptr = g_last_exp + (tl.cast(i_n, tl.int64) * HV + i_h) * NT
         if USE_GK:
-            gk_last_exp_nh = gk_last_exp + (i_n * HV + i_h).to(tl.int64) * NT * K
+            gk_last_exp_nh = gk_last_exp + (tl.cast(i_n, tl.int64) * HV + i_h) * NT * K
 
         b_h1 = tl.zeros([BK, BV], dtype=tl.float32)
         if USE_INITIAL_STATE:
@@ -687,6 +687,7 @@ def chunk_gated_delta_rule_fwd_h_npu(
     cu_seqlens: torch.LongTensor | None = None,
     cu_seqlens_cpu: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
+    chunk_offsets: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     B, T, H, K, V, HV = *k.shape, u.shape[-1], u.shape[2]
     BT = chunk_size
@@ -697,7 +698,9 @@ def chunk_gated_delta_rule_fwd_h_npu(
     if cu_seqlens is None:
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
     else:
-        N, NT, chunk_offsets = len(cu_seqlens) - 1, len(chunk_indices), prepare_chunk_offsets(cu_seqlens, BT)
+        N, NT = len(cu_seqlens) - 1, len(chunk_indices)
+        if chunk_offsets is None:
+            chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT)
     assert K <= 256, "current kernel does not support head dimension larger than 256."
 
     if state_v_first:
@@ -747,7 +750,7 @@ def chunk_gated_delta_rule_fwd_h_npu(
         _launch_core_grid(
             chunk_gated_delta_rule_fwd_kernel_h_oneslab_npu,
             task_num=N * HV * triton.cdiv(V, BV),
-            kernel_kwargs={**kwargs, "NT": T // BT},
+            kernel_kwargs={**kwargs},
             **_FWD_H_COMPILE,
         )
     else:
@@ -818,36 +821,37 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64_npu(
             NT = tl.cdiv(T, BT)
             boh = tl.load(chunk_offsets + i_n).to(tl.int64)
         else:
-            bos, eos = i_n * T_max, i_n * T_max + T_max
+            bos = tl.cast(i_n, tl.int64) * T_max
+            eos = bos + T_max
             NT = tl.cdiv(T, BT)
-            boh = i_n * NT
+            boh = tl.cast(i_n, tl.int64) * NT
 
         stride_v = HV * V
         stride_k = H * K
         stride_w = HV * K
 
-        q_base = q + (bos * H + i_h // (HV // H)).to(tl.int64) * K
-        k_base = k + (bos * H + i_h // (HV // H)).to(tl.int64) * K
-        w_base = w + (bos * HV + i_h).to(tl.int64) * K
-        do_base = do + (bos * HV + i_h).to(tl.int64) * V
-        dv_base = dv + (bos * HV + i_h).to(tl.int64) * V
-        dv2_base = dv2 + (bos * HV + i_h).to(tl.int64) * V
-        dh_base = dh + (boh * HV + i_h).to(tl.int64) * K * V
+        q_base = q + (bos * H + i_h // (HV // H)) * K
+        k_base = k + (bos * H + i_h // (HV // H)) * K
+        w_base = w + (bos * HV + i_h) * K
+        do_base = do + (bos * HV + i_h) * V
+        dv_base = dv + (bos * HV + i_h) * V
+        dv2_base = dv2 + (bos * HV + i_h) * V
+        dh_base = dh + (boh * HV + i_h) * K * V
         if USE_GK:
-            gk_base = gk + (bos * HV + i_h).to(tl.int64) * K
+            gk_base = gk + (bos * HV + i_h) * K
         if USE_G:
             if USE_G_PRECOMP:
-                g_exp_base = g_exp + (i_n * HV + i_h).to(tl.int64) * T_max
-                g_ratio_base = g_ratio + (i_n * HV + i_h).to(tl.int64) * T_max
-                g_last_exp_base = g_last_exp + (i_n * HV + i_h).to(tl.int64) * NT
+                g_exp_base = g_exp + (tl.cast(i_n, tl.int64) * HV + i_h) * T_max
+                g_ratio_base = g_ratio + (tl.cast(i_n, tl.int64) * HV + i_h) * T_max
+                g_last_exp_base = g_last_exp + (tl.cast(i_n, tl.int64) * HV + i_h) * NT
                 g_base = g
             elif IS_VARLEN:
-                g_base = g + (bos + i_h * T_max).to(tl.int64)
+                g_base = g + (bos + tl.cast(i_h, tl.int64) * T_max)
                 g_exp_base = g_exp
                 g_ratio_base = g_ratio
                 g_last_exp_base = g_last_exp
             else:
-                g_base = g + (i_n * HV + i_h).to(tl.int64) * T_max
+                g_base = g + (tl.cast(i_n, tl.int64) * HV + i_h) * T_max
                 g_exp_base = g_exp
                 g_ratio_base = g_ratio
                 g_last_exp_base = g_last_exp
@@ -1175,6 +1179,7 @@ def chunk_gated_delta_rule_bwd_dhu_npu(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
+    chunk_offsets: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     B, T, H, K, V, HV = *q.shape, do.shape[-1], do.shape[2]
     BT = chunk_size
@@ -1185,7 +1190,9 @@ def chunk_gated_delta_rule_bwd_dhu_npu(
     if cu_seqlens is None:
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
     else:
-        N, NT, chunk_offsets = len(cu_seqlens) - 1, len(chunk_indices), prepare_chunk_offsets(cu_seqlens, BT)
+        N, NT = len(cu_seqlens) - 1, len(chunk_indices)
+        if chunk_offsets is None:
+            chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT)
 
     if state_v_first:
         dh = q.new_empty(B, NT, HV, V, K)

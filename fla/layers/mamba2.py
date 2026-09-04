@@ -160,6 +160,11 @@ class Mamba2(nn.Module):
                 )
             self.num_heads = num_heads
 
+        if self.num_heads % n_groups != 0:
+            raise ValueError(
+                f"`num_heads` ({self.num_heads}) must be divisible by `n_groups` ({n_groups})."
+            )
+
         self.conv_kernel_size = conv_kernel
         self.conv_init = conv_init
         self.use_conv_bias = use_conv_bias

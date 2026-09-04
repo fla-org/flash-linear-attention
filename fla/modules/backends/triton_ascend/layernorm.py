@@ -66,12 +66,12 @@ def layer_norm_fwd_kernel1(
     i_t = tl.program_id(0)
     i_g = i_t % G
 
-    x += i_t * D
-    y += i_t * D
+    x += tl.cast(i_t, tl.int64) * D
+    y += tl.cast(i_t, tl.int64) * D
     if HAS_RESIDUAL:
-        res += i_t * D
+        res += tl.cast(i_t, tl.int64) * D
     if STORE_RESIDUAL_OUT:
-        res_out += i_t * D
+        res_out += tl.cast(i_t, tl.int64) * D
 
     o_d = tl.arange(0, BD)
     m_d = o_d < D
@@ -148,8 +148,8 @@ def layer_norm_bwd_kernel1(
         b_db = tl.zeros((BD,), dtype=tl.float32)
 
     for i_t in range(i_sg * BS * G + i_g, min((i_sg * BS + BS) * G + i_g, T), G):
-        b_x = tl.load(x + i_t * D + o_d, mask=mask, other=0).to(tl.float32)
-        b_dy = tl.load(dy + i_t * D + o_d, mask=mask, other=0).to(tl.float32)
+        b_x = tl.load(x + tl.cast(i_t, tl.int64) * D + o_d, mask=mask, other=0).to(tl.float32)
+        b_dy = tl.load(dy + tl.cast(i_t, tl.int64) * D + o_d, mask=mask, other=0).to(tl.float32)
 
         if not IS_RMS_NORM:
             b_mean = tl.load(mean + i_t)
@@ -160,7 +160,7 @@ def layer_norm_bwd_kernel1(
             b_y = b_xhat * b_w if HAS_WEIGHT else b_xhat
             if HAS_BIAS:
                 b_y = b_y + b_b
-            tl.store(y + i_t * D + o_d, b_y, mask=mask)
+            tl.store(y + tl.cast(i_t, tl.int64) * D + o_d, b_y, mask=mask)
         b_wdy = b_dy
         if HAS_WEIGHT:
             b_wdy = b_dy * b_w
@@ -175,12 +175,12 @@ def layer_norm_bwd_kernel1(
             b_c1 = tl.sum(b_xhat * b_wdy, axis=0) / D
             b_dx = (b_wdy - b_xhat * b_c1) * b_rstd
         if HAS_DRESIDUAL:
-            b_dres = tl.load(dres + i_t * D + o_d, mask=mask, other=0).to(tl.float32)
+            b_dres = tl.load(dres + tl.cast(i_t, tl.int64) * D + o_d, mask=mask, other=0).to(tl.float32)
             b_dx += b_dres
         b_dx = tl.cast(b_dx, dtype=dx.dtype.element_ty, fp_downcast_rounding='rtne')
         if STORE_DRESIDUAL:
-            tl.store(dres_in + i_t * D + o_d, b_dx, mask=mask)
-        tl.store(dx + i_t * D + o_d, b_dx, mask=mask)
+            tl.store(dres_in + tl.cast(i_t, tl.int64) * D + o_d, b_dx, mask=mask)
+        tl.store(dx + tl.cast(i_t, tl.int64) * D + o_d, b_dx, mask=mask)
 
     if HAS_WEIGHT:
         tl.store(dw + i_s * D + o_d, b_dw, mask=mask)

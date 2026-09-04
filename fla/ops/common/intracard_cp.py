@@ -352,6 +352,7 @@ def intracard_merge(
         init_offsets=init_offsets,
         h0_seq_ids=h0_seq_ids,
         h0=initial_state,
+        h_seq_idx=None,
         HV=HV,
         K=K,
         V=V,

@@ -45,10 +45,10 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
         Returns:
             initial_state: Initial state tensor of shape [N, D, W] or None
         """
-        if group is None:
+        W = weight.shape[-1]  # weight: [D, W]
+        if group is None or W == 1:
             return None
 
-        W = weight.shape[-1]  # weight: [D, W]
         D = weight.shape[0]
         initial_state = None
         if not context.is_first_rank:
@@ -93,7 +93,7 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
                 belong to the first sequence on the current rank. Must match the
                 value used in the forward pass to construct initial_state.
         """
-        if group is None:
+        if group is None or W == 1:
             return
 
         D = dx.shape[-1]
@@ -128,6 +128,7 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
         cp_context: FLACPContext | None,
         chunk_size: int | None,
         backend: str = 'triton',
+        residual: torch.Tensor | None = None,
     ):
         # Import here to avoid circular dependency
         from fla.modules.conv.triton.ops import causal_conv1d_fwd
@@ -149,7 +150,7 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
             group=group,
         )
 
-        ctx.save_for_backward(x, weight, bias, initial_state)
+        ctx.save_for_backward(x, weight, bias, residual, initial_state)
         ctx.activation = activation
         ctx.cu_seqlens = cu_seqlens
         ctx.cu_seqlens_cpu = cu_seqlens_cpu
@@ -165,7 +166,7 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
             x=x,
             weight=weight,
             bias=bias,
-            residual=None,
+            residual=residual,
             initial_state=initial_state,
             output_final_state=False,
             activation=activation,
@@ -182,18 +183,18 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
         # Import here to avoid circular dependency
         from fla.modules.conv.triton.ops import causal_conv1d_bwd
 
-        x, weight, bias, initial_state = ctx.saved_tensors
+        x, weight, bias, residual, initial_state = ctx.saved_tensors
         group = ctx.group
         W = ctx.W
 
         # Call original backward
-        dx, dw, db, _, dh0 = causal_conv1d_bwd(
+        dx, dw, db, dr, dh0 = causal_conv1d_bwd(
             x=x,
             dy=dy,
             dht=None,
             weight=weight,
             bias=bias,
-            residual=None,
+            residual=residual,
             initial_state=initial_state,
             activation=ctx.activation,
             cu_seqlens=ctx.cu_seqlens,
@@ -212,7 +213,7 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
             pre_num_conv_tokens=ctx.pre_num_conv_tokens,
         )
 
-        return dx, dw, db, None, None, None, None, None
+        return dx, dw, db, None, None, None, None, None, dr
 
 
 def causal_conv1d_cp(
@@ -224,6 +225,7 @@ def causal_conv1d_cp(
     cp_context: FLACPContext | None = None,
     chunk_size: int | None = None,
     backend: str = 'triton',
+    residual: torch.Tensor | None = None,
 ):
     """
     Context Parallel version of causal_conv1d.
@@ -237,10 +239,9 @@ def causal_conv1d_cp(
         weight: Weight tensor of shape [D, W]
         bias: Bias tensor of shape [D] or None
         activation: Activation function name or None
-        cu_seqlens: Cumulative sequence lengths
-        cu_seqlens_cpu: Cumulative sequence lengths on CPU
         chunk_indices: Chunk indices for variable-length sequences
         cp_context: CP context (required for CP mode)
+        residual: Residual tensor of shape [1, T, D] or None
     """
     if cp_context is None:
         raise ValueError("cp_context must be provided for causal_conv1d_cp")
@@ -252,7 +253,4 @@ def causal_conv1d_cp(
     if chunk_indices is None:
         chunk_indices = prepare_chunk_indices(cp_context.cu_seqlens, chunk_size, cu_seqlens_cpu=cp_context.cu_seqlens_cpu)
 
-    return CausalConv1dFunctionCP.apply(
-        x, weight, bias, activation,
-        chunk_indices, cp_context, chunk_size, backend
-    )
+    return CausalConv1dFunctionCP.apply(x, weight, bias, activation, chunk_indices, cp_context, chunk_size, backend, residual)

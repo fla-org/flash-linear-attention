@@ -73,7 +73,7 @@ def l2norm_fwd_kernel(
     BT: tl.constexpr,
 ):
     i_t = tl.program_id(0) + T_OFFSET
-    rows = i_t * BT + tl.arange(0, BT)
+    rows = tl.cast(i_t, tl.int64) * BT + tl.arange(0, BT)
     cols = tl.arange(0, BD)
     mask = (rows[:, None] < T) & (cols[None, :] < D)
 
@@ -98,7 +98,7 @@ def l2norm_bwd_kernel(
     BT: tl.constexpr,
 ):
     i_t = tl.program_id(0) + T_OFFSET
-    rows = i_t * BT + tl.arange(0, BT)
+    rows = tl.cast(i_t, tl.int64) * BT + tl.arange(0, BT)
     cols = tl.arange(0, BD)
     mask = (rows[:, None] < T) & (cols[None, :] < D)
 
