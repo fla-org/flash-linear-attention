@@ -89,6 +89,8 @@ def chunk_momentum_delta_rule_ref(
     chunk_size: int = 64,
 ):
     BT = chunk_size
+    q_input, k_input, v_input, p_input = q, k, v, p
+    log_alpha_input, log_mu_input, beta_input, eta_input = log_alpha, log_mu, beta, eta
     if scale is None:
         scale = 1 / (q.shape[-1] ** 0.5)
     q, k, v, p, log_alpha, log_mu, beta, eta = map(
@@ -171,8 +173,6 @@ def chunk_momentum_delta_rule_ref(
     if initial_M is not None:
         M_pre = initial_M.to(torch.float32)
 
-    log_m_cum_test = log_m_cum + torch.zeros_like(log_m_cum)
-
     o = torch.zeros_like(v)
     num_chunks = q.shape[2]
     for i in range(num_chunks):
@@ -190,14 +190,30 @@ def chunk_momentum_delta_rule_ref(
             - b_t[:, :, i, -1, None, None] * M_pre \
             + (k_i * decay_s).transpose(-1, -2) @ v_i
 
-        decay_m = (log_m_cum_test[:, :, i, -1, None] - log_m_cum_test[:, :, i]).exp()[..., None]
-        M = log_m_cum_test[:, :, i, -1, None, None].exp() * M_pre \
+        decay_m = (log_m_cum[:, :, i, -1, None] - log_m_cum[:, :, i]).exp()[..., None]
+        M = log_m_cum[:, :, i, -1, None, None].exp() * M_pre \
             - (k_i * decay_m).transpose(-1, -2) @ v_i
 
         S_pre, M_pre = S, M
 
     if output_final_state:
-        final_state = torch.stack([S_pre, M_pre], dim=0)
+        if pad_len:
+            _, final_state = recurrent_momentum_delta_rule_ref(
+                q=q_input,
+                k=k_input,
+                v=v_input,
+                p=p_input,
+                log_alpha=log_alpha_input,
+                log_mu=log_mu_input,
+                beta=beta_input,
+                eta=eta_input,
+                scale=scale,
+                initial_S=initial_S,
+                initial_M=initial_M,
+                output_final_state=True,
+            )
+        else:
+            final_state = torch.stack([S_pre, M_pre], dim=0)
     else:
         final_state = None
 

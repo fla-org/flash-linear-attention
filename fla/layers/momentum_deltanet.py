@@ -17,11 +17,7 @@ from torch.nn import functional as F
 
 from fla.layers.utils import get_layer_cache, get_unpad_data, index_first_axis, pad_input, update_layer_cache
 from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
-
-# Keep degenerate ops for backward compat / fallback
-from fla.ops.momentum_delta_rule import chunk_mode_rule as chunk_mode_rule_degenerate
 from fla.ops.momentum_delta_rule import chunk_momentum_delta_rule, fused_recurrent_momentum_delta_rule
-from fla.ops.momentum_delta_rule import fused_recurrent_mode_rule as fused_recurrent_degenerate
 
 
 def elu_p1(x):
@@ -36,10 +32,8 @@ class MomentumDeltaNet(nn.Module):
     r"""
     Momentum DeltaNet (arXiv:2605.05838) with dual state [S,M].
 
-    Degenerate mu->0 reproduces DeltaRule (kept as ``chunk_mode_rule``).
-    Full momentum uses a pure PyTorch reference path in this PR; H100 Triton
-    autotune and ``cu_seqlens`` varlen for the full path are out of scope and
-    fall back to the degenerate DeltaRule kernels. Generation via
+    The reference implementation is used first; Triton kernels are a follow-up.
+    Variable-length inputs are not currently supported. Generation via
     ``past_key_values`` cache is supported for the recurrent state.
     """
 
@@ -98,13 +92,14 @@ class MomentumDeltaNet(nn.Module):
         self.min_log_mu = min_log_mu
         self.tau_factor = tau_factor
 
-        self.key_dim = int(hidden_size * expand_k)
-        self.value_dim = int(hidden_size * expand_v)
-        self.head_k_dim = head_dim
+        self.head_k_dim = int(head_dim * expand_k)
         self.head_v_dim = int(head_dim * expand_v)
-        # keep num_heads consistent with key/value dims
-        assert self.key_dim % num_heads == 0, f"key dim must be divisible by num_heads of {num_heads}"
-        assert self.value_dim % num_heads == 0, f"value dim must be divisible by num_heads of {num_heads}"
+        self.key_dim = int(num_heads * self.head_k_dim)
+        self.value_dim = int(self.num_v_heads * self.head_v_dim)
+        if not math.isclose(num_heads * head_dim * expand_k, self.key_dim, rel_tol=1e-5):
+            raise ValueError("expand_k must produce an integer key head dimension.")
+        if not math.isclose(self.num_v_heads * head_dim * expand_v, self.value_dim, rel_tol=1e-5):
+            raise ValueError("expand_v must produce an integer value head dimension.")
         if self.num_v_heads > self.num_heads and self.num_v_heads % self.num_heads != 0:
             raise ValueError(f"num_v_heads={self.num_v_heads} must be divisible by num_heads={self.num_heads}.")
 
@@ -191,9 +186,6 @@ class MomentumDeltaNet(nn.Module):
 
         self.o_proj = nn.Linear(self.value_dim, hidden_size, bias=False)
 
-        # flag to allow degenerate fallback for old checkpoints
-        self._use_full_momentum = True
-
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -209,6 +201,7 @@ class MomentumDeltaNet(nn.Module):
                 "for padding purposes (0 indicating padding). "
                 "Arbitrary attention masks of shape [batch_size, seq_len, seq_len] are not allowed.",
             )
+            raise NotImplementedError("attention_mask is not yet supported by MomentumDeltaNet.")
 
         batch_size, q_len, _ = hidden_states.shape
         mode = 'fused_recurrent' if q_len <= 64 and not self.training else self.mode
@@ -216,6 +209,8 @@ class MomentumDeltaNet(nn.Module):
         last_state = get_layer_cache(self, past_key_values)
 
         cu_seqlens = kwargs.get('cu_seqlens')
+        if cu_seqlens is not None:
+            raise NotImplementedError("Variable-length inputs are not yet supported by MomentumDeltaNet.")
         if cu_seqlens is None and attention_mask is not None:
             indices, cu_seqlens, _ = get_unpad_data(attention_mask[:, -q_len:])
             hidden_states = index_first_axis(rearrange(hidden_states, "b s ... -> (b s) ..."), indices).unsqueeze(0)
@@ -273,12 +268,16 @@ class MomentumDeltaNet(nn.Module):
         m = self.m_proj(hidden_states).float()
         e = self.e_proj(hidden_states).float() / self.tau
 
-        log_mu = - self.Mu_log.float().exp() * F.softplus(m + self.mu_bias)
-        log_alpha = - self.A_log.float().exp() * F.softplus(a + self.dt_bias)
+        head_repeat = self.num_v_heads // self.num_heads
+        mu_log = repeat(self.Mu_log, 'h -> (h g)', g=head_repeat)
+        a_log = repeat(self.A_log, 'h -> (h g)', g=head_repeat)
+        log_factor = repeat(self.log_factor, 'h -> (h g)', g=head_repeat)
+        log_mu = - mu_log.float().exp() * F.softplus(m + self.mu_bias)
+        log_alpha = - a_log.float().exp() * F.softplus(a + self.dt_bias)
         eta = F.tanh(e) + 1
-        beta = F.sigmoid(b)
+        beta = F.sigmoid(b) if self.use_beta else torch.ones_like(b)
 
-        theta = torch.arctan(eta * self.log_factor.float().exp())
+        theta = torch.arctan(eta * log_factor.float().exp())
         beta_upper = torch.sin(theta) ** 2
         alpha_upper = torch.cos(theta) ** 2
         beta = beta_upper * beta
@@ -291,71 +290,32 @@ class MomentumDeltaNet(nn.Module):
             beta = beta * 2.
 
         if self.use_output_correction:
-            q = (q - self.D_log.float().exp()[None, None, :, None] * k).to(k.dtype)
+            d_log = repeat(self.D_log, 'h -> (h g)', g=head_repeat)
+            q = (q - d_log.float().exp()[None, None, :, None] * k).to(k.dtype)
 
         recurrent_state = last_state['recurrent_state'] if last_state is not None else None
-        use_full = self._use_full_momentum and cu_seqlens is None
-        if use_full:
-            if mode == 'fused_recurrent':
-                o, recurrent_state = fused_recurrent_momentum_delta_rule(
-                    q=q, k=k, v=v,
-                    log_alpha=log_alpha, log_mu=log_mu,
-                    p=k, beta=beta, eta=eta,
-                    initial_state=recurrent_state,
-                    output_final_state=use_cache,
-                    use_qk_l2norm_in_kernel=self.qk_norm == 'l2',
-                    use_p_times_alpha=self.use_p_times_alpha,
-                    cu_seqlens=cu_seqlens,
-                )
-            elif mode == 'chunk':
-                o, recurrent_state = chunk_momentum_delta_rule(
-                    q=q, k=k, v=v,
-                    log_alpha=log_alpha, log_mu=log_mu,
-                    p=k, beta=beta, eta=eta,
-                    initial_state=recurrent_state,
-                    output_final_state=use_cache,
-                    use_qk_l2norm_in_kernel=self.qk_norm == 'l2',
-                    use_p_times_alpha=self.use_p_times_alpha,
-                    cu_seqlens=cu_seqlens,
-                )
-            else:
-                raise NotImplementedError(f"Not supported mode `{mode}`.")
+        if mode == 'fused_recurrent':
+            o, recurrent_state = fused_recurrent_momentum_delta_rule(
+                q=q, k=k, v=v,
+                log_alpha=log_alpha, log_mu=log_mu,
+                p=k, beta=beta, eta=eta,
+                initial_state=recurrent_state,
+                output_final_state=use_cache,
+                use_qk_l2norm_in_kernel=self.qk_norm == 'l2',
+                use_p_times_alpha=self.use_p_times_alpha,
+            )
+        elif mode == 'chunk':
+            o, recurrent_state = chunk_momentum_delta_rule(
+                q=q, k=k, v=v,
+                log_alpha=log_alpha, log_mu=log_mu,
+                p=k, beta=beta, eta=eta,
+                initial_state=recurrent_state,
+                output_final_state=use_cache,
+                use_qk_l2norm_in_kernel=self.qk_norm == 'l2',
+                use_p_times_alpha=self.use_p_times_alpha,
+            )
         else:
-            if mode == 'fused_recurrent':
-                o, recurrent_state = fused_recurrent_degenerate(
-                    q=q, k=k, v=v, beta=beta,
-                    initial_state=recurrent_state if recurrent_state is None or recurrent_state.ndim == 4 else recurrent_state[
-                        0] if recurrent_state is not None else None,
-                    output_final_state=use_cache,
-                    use_qk_l2norm_in_kernel=self.qk_norm == 'l2',
-                    cu_seqlens=cu_seqlens,
-                )
-                # degenerate returns single state, wrap for cache
-                if recurrent_state is not None and recurrent_state.ndim == 3:
-                    # keep degenerate shape
-                    pass
-            elif mode == 'chunk':
-                o, recurrent_state = chunk_mode_rule_degenerate(
-                    q=q, k=k, v=v, beta=beta,
-                    initial_state=recurrent_state if recurrent_state is None or recurrent_state.ndim == 4 else recurrent_state[
-                        0] if recurrent_state is not None else None,
-                    output_final_state=use_cache,
-                    use_qk_l2norm_in_kernel=self.qk_norm == 'l2',
-                    cu_seqlens=cu_seqlens,
-                )
-                if use_cache and recurrent_state is not None:
-                    # degenerate single state -> expand to dual for cache consistency
-                    # keep as single to avoid breaking old checkpoints
-                    pass
-            else:
-                raise NotImplementedError(f"Not supported mode `{mode}`.")
-
-            # for full cache compatibility, wrap degenerate single state as dual with zero M
-            if use_full is False and use_cache and recurrent_state is not None:
-                if isinstance(recurrent_state, torch.Tensor) and recurrent_state.ndim == 4:
-                    # create dual state with M=0 for cache shape [2, N, H, K, V]
-                    # but keep single for now to not break old checkpoints
-                    pass
+            raise NotImplementedError(f"Not supported mode `{mode}`.")
 
         update_layer_cache(
             self,

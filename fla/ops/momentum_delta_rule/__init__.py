@@ -5,15 +5,13 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from .chunk import chunk_mode_rule, chunk_momentum_delta_rule
-from .fused_recurrent import fused_recurrent_mode_rule, fused_recurrent_momentum_delta_rule
+from .chunk import chunk_momentum_delta_rule
+from .fused_recurrent import fused_recurrent_momentum_delta_rule
 from .naive import chunk_momentum_delta_rule_ref, recurrent_momentum_delta_rule_ref
 
 __all__ = [
-    'chunk_mode_rule',
     'chunk_momentum_delta_rule',
     'chunk_momentum_delta_rule_ref',
-    'fused_recurrent_mode_rule',
     'fused_recurrent_momentum_delta_rule',
     'recurrent_momentum_delta_rule_ref',
 ]

@@ -9,7 +9,12 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from fla.ops.momentum_delta_rule import chunk_mode_rule, fused_recurrent_mode_rule
+from fla.ops.delta_rule import chunk_delta_rule, fused_recurrent_delta_rule
+from fla.ops.momentum_delta_rule import (
+    chunk_momentum_delta_rule,
+    fused_recurrent_momentum_delta_rule,
+    recurrent_momentum_delta_rule_ref,
+)
 from fla.utils import assert_close, device, device_platform
 
 
@@ -49,9 +54,7 @@ def test_chunk(
     do = torch.rand_like(v)
     dht = torch.rand_like(h0)
 
-    # Chunk path (scale is implicit 1/sqrt(D) in momentum ops; we keep the
-    # same normalized q/k handling as delta for parity testing)
-    tri, tri_ht = chunk_mode_rule(
+    tri, tri_ht = chunk_delta_rule(
         q=F.normalize(q.clone(), p=2, dim=-1) if not use_qk_l2norm_in_kernel else q.clone(),
         k=F.normalize(k.clone(), p=2, dim=-1) if not use_qk_l2norm_in_kernel else k.clone(),
         v=v.clone(),
@@ -64,7 +67,7 @@ def test_chunk(
     tri_dq, tri_dk, tri_dv, tri_dbeta, tri_dh0 = q.grad, k.grad, v.grad, beta.grad, h0.grad
     q.grad = k.grad = v.grad = beta.grad = h0.grad = None
 
-    ref, ref_ht = fused_recurrent_mode_rule(
+    ref, ref_ht = fused_recurrent_delta_rule(
         q=F.normalize(q.clone(), p=2, dim=-1) if not use_qk_l2norm_in_kernel else q.clone(),
         k=F.normalize(k.clone(), p=2, dim=-1) if not use_qk_l2norm_in_kernel else k.clone(),
         v=v.clone(),
@@ -121,7 +124,7 @@ def test_chunk_varlen(
     do = torch.randn_like(v)
     dht = torch.rand_like(h0)
 
-    ref, ref_ht = fused_recurrent_mode_rule(
+    ref, ref_ht = fused_recurrent_delta_rule(
         q=q.clone(),
         k=k.clone(),
         v=v.clone(),
@@ -134,7 +137,7 @@ def test_chunk_varlen(
     ref_dq, ref_dk, ref_dv, ref_dbeta, ref_dh0 = q.grad, k.grad, v.grad, beta.grad, h0.grad
     q.grad = k.grad = v.grad = beta.grad = h0.grad = None
 
-    tri, tri_ht = chunk_mode_rule(
+    tri, tri_ht = chunk_delta_rule(
         q=q.clone(),
         k=k.clone(),
         v=v.clone(),
@@ -170,7 +173,7 @@ def test_chunk_initial_state_grad_count():
     beta = torch.rand(B, T, H, dtype=dtype, device=device).sigmoid().requires_grad_(True)
     h0 = torch.randn(B, H, D, D, dtype=torch.float32, device=device, requires_grad=True)
 
-    o, ht = chunk_mode_rule(q, k, v, beta, initial_state=h0, output_final_state=True)
+    o, ht = chunk_delta_rule(q, k, v, beta, initial_state=h0, output_final_state=True)
     assert ht is not None
     assert ht.shape == h0.shape
     (o.sum() + ht.sum()).backward()
@@ -183,7 +186,7 @@ def test_chunk_initial_state_grad_count():
     k2 = torch.randn(B, T, H, D, dtype=dtype, device=device, requires_grad=True)
     v2 = torch.randn(B, T, H, D, dtype=dtype, device=device, requires_grad=True)
     beta2 = torch.rand(B, T, H, dtype=dtype, device=device).sigmoid().requires_grad_(True)
-    o2, ht2 = chunk_mode_rule(q2, k2, v2, beta2, initial_state=None, output_final_state=False)
+    o2, ht2 = chunk_delta_rule(q2, k2, v2, beta2, initial_state=None, output_final_state=False)
     assert ht2 is None
     o2.sum().backward()
     assert q2.grad is not None
@@ -208,7 +211,7 @@ def test_fused_recurrent_uses_u_not_v():
 
     # chunk as reference
     q_c, k_c, v_c, beta_c, h0_c = (x.detach().clone().requires_grad_(True) for x in (q, k, v, beta, h0))
-    o_c, ht_c = chunk_mode_rule(
+    o_c, ht_c = chunk_delta_rule(
         q=F.normalize(q_c, p=2, dim=-1),
         k=F.normalize(k_c, p=2, dim=-1),
         v=v_c,
@@ -221,7 +224,7 @@ def test_fused_recurrent_uses_u_not_v():
 
     # fused
     q_f, k_f, v_f, beta_f, h0_f = (x.detach().clone().requires_grad_(True) for x in (q, k, v, beta, h0))
-    o_f, ht_f = fused_recurrent_mode_rule(
+    o_f, ht_f = fused_recurrent_delta_rule(
         q=F.normalize(q_f, p=2, dim=-1),
         k=F.normalize(k_f, p=2, dim=-1),
         v=v_f,
@@ -234,6 +237,59 @@ def test_fused_recurrent_uses_u_not_v():
 
     for a, b, name in zip(grads_c, grads_f, ['dq', 'dk', 'dv', 'db', 'dh0']):
         assert_close(name, a, b, 0.008)
+
+
+@pytest.mark.skipif(device_platform == 'intel', reason='Intel Triton Failure')
+def test_full_momentum_chunk_recurrent_backward_parity():
+    torch.manual_seed(3)
+    B, T, H, K, V = 2, 33, 2, 8, 6
+    dtype = torch.bfloat16
+    values = [
+        torch.randn(B, T, H, K, dtype=dtype, device=device),
+        torch.randn(B, T, H, K, dtype=dtype, device=device),
+        torch.randn(B, T, H, V, dtype=dtype, device=device),
+        torch.randn(B, T, H, K, dtype=dtype, device=device),
+        torch.randn(B, T, H, dtype=torch.float32, device=device),
+        torch.randn(B, T, H, dtype=torch.float32, device=device),
+        torch.rand(B, T, H, dtype=dtype, device=device),
+        torch.rand(B, T, H, dtype=dtype, device=device) + 0.5,
+        torch.randn(B, H, K, V, dtype=torch.float32, device=device),
+        torch.randn(B, H, K, V, dtype=torch.float32, device=device),
+    ]
+    do = torch.randn(B, T, H, V, dtype=dtype, device=device)
+    dst = torch.randn(B, H, K, V, dtype=torch.float32, device=device)
+    dmt = torch.randn(B, H, K, V, dtype=torch.float32, device=device)
+
+    def run(op, reference=False):
+        xs = [x.detach().clone().requires_grad_(True) for x in values]
+        if reference:
+            o, state = op(q=xs[0], k=xs[1], v=xs[2], p=xs[3], log_alpha=xs[4], log_mu=xs[5], beta=xs[6], eta=xs[7],
+                          initial_S=xs[8], initial_M=xs[9], output_final_state=True, scale=K ** -0.5)
+        else:
+            op_kwargs = dict(q=xs[0], k=xs[1], v=xs[2], p=xs[3], log_alpha=xs[4], log_mu=xs[5], beta=xs[6], eta=xs[7],
+                             initial_state=torch.stack(xs[8:10]), output_final_state=True, use_qk_l2norm_in_kernel=False)
+            if op is chunk_momentum_delta_rule:
+                op_kwargs['chunk_size'] = 16
+            o, state = op(**op_kwargs)
+        loss = (o * do).sum() + (state[0] * dst).sum() + (state[1] * dmt).sum()
+        loss.backward()
+        return o, state, [x.grad for x in xs]
+
+    chunk = run(chunk_momentum_delta_rule)
+    recurrent = run(fused_recurrent_momentum_delta_rule)
+    reference = run(recurrent_momentum_delta_rule_ref, reference=True)
+    assert_close('recurrent reference output', recurrent[0], reference[0], 0.01)
+    assert_close('recurrent reference state', recurrent[1], reference[1], 0.01)
+    for name, grad_a, grad_b in zip(
+        ('q', 'k', 'v', 'p', 'log_alpha', 'log_mu', 'beta', 'eta', 'S0', 'M0'), recurrent[2], reference[2],
+    ):
+        assert_close(f'recurrent reference {name}', grad_a, grad_b, 0.02)
+    assert_close('o', recurrent[0], chunk[0], 0.01)
+    assert_close('state', recurrent[1], chunk[1], 0.01)
+    for name, grad_a, grad_b in zip(
+        ('q', 'k', 'v', 'p', 'log_alpha', 'log_mu', 'beta', 'eta', 'S0', 'M0'), recurrent[2], chunk[2],
+    ):
+        assert_close(name, grad_a, grad_b, 0.02)
 
 
 @pytest.mark.skipif(
@@ -253,7 +309,7 @@ def test_qk_l2norm_wiring():
     # Eager normalized vs kernel l2 - compare outputs
     q_eager = F.normalize(q.float(), p=2, dim=-1).to(dtype)
     k_eager = F.normalize(k.float(), p=2, dim=-1).to(dtype)
-    o_eager, _ = chunk_mode_rule(
+    o_eager, _ = chunk_delta_rule(
         q_eager.clone().requires_grad_(True),
         k_eager.clone().requires_grad_(True),
         v.clone().requires_grad_(True),
@@ -264,12 +320,12 @@ def test_qk_l2norm_wiring():
     k_kern = k.clone().requires_grad_(True)
     v_k = v.clone().requires_grad_(True)
     beta_k = beta.clone().requires_grad_(True)
-    o_kern, _ = chunk_mode_rule(q_kern, k_kern, v_k, beta_k, use_qk_l2norm_in_kernel=True)
+    o_kern, _ = chunk_delta_rule(q_kern, k_kern, v_k, beta_k, use_qk_l2norm_in_kernel=True)
     assert_close('o_l2', o_eager, o_kern, 0.005)
 
     # Also check that the l2 path actually does work (grad finite) and
     # that enabling l2 changes the output vs no-l2 (catches silently no-op)
-    o_no_l2, _ = chunk_mode_rule(
+    o_no_l2, _ = chunk_delta_rule(
         q.clone().requires_grad_(True),
         k.clone().requires_grad_(True),
         v.clone().requires_grad_(True),
@@ -294,7 +350,6 @@ def test_momentum_deltanet_layer_default_l2():
     layer = MomentumDeltaNet(
         hidden_size=256, num_heads=4, head_dim=64, use_short_conv=False, qk_norm='l2',
     ).to(device=device, dtype=torch.bfloat16)
-    # T=64 and head_dim=64 avoid H100 TMA hang with small K=32
     x = torch.randn(2, 64, 256, device=device, dtype=torch.bfloat16, requires_grad=True)
     y, _, _ = layer(x)
     assert not torch.isnan(y).any()
