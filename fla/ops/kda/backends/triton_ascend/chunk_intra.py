@@ -178,7 +178,7 @@ def chunk_kda_fwd_kernel_diag_solve_npu(
     if i_ti >= T:
         return
 
-    Akkd = Akkd + (bos * HV + i_hv).to(tl.int64) * BC
+    Akkd = Akkd + (bos * HV + i_hv) * BC
     o_i = tl.arange(0, BC)
     m_A = o_i[:, None] > o_i[None, :]
     m_I = o_i[:, None] == o_i[None, :]
@@ -239,12 +239,12 @@ def chunk_kda_fwd_kernel_intra_sub_chunk_npu(
     o_c = i_ti + tl.arange(0, BC)
     m_c = o_c < T
 
-    q = q + (bos * H + i_h).to(tl.int64) * K
-    k = k + (bos * H + i_h).to(tl.int64) * K
-    g = g + (bos * HV + i_hv).to(tl.int64) * K
-    beta = beta + (bos * HV + i_hv).to(tl.int64)
-    Aqk = Aqk + (bos * HV + i_hv).to(tl.int64) * BT
-    Akk = Akk + (bos * HV + i_hv).to(tl.int64) * BC
+    q = q + (bos * H + i_h) * K
+    k = k + (bos * H + i_h) * K
+    g = g + (bos * HV + i_hv) * K
+    beta = beta + (bos * HV + i_hv)
+    Aqk = Aqk + (bos * HV + i_hv) * BT
+    Akk = Akk + (bos * HV + i_hv) * BC
 
     p_q = tl.make_block_ptr(q, (T, K), (H * K, 1), (i_ti, 0), (BC, BK), (1, 0))
     p_k = tl.make_block_ptr(k, (T, K), (H * K, 1), (i_ti, 0), (BC, BK), (1, 0))
@@ -330,12 +330,12 @@ def chunk_kda_fwd_kernel_inter_solve_fused_npu(
     i_tc2 = i_t * BT + 2 * BC
     i_tc3 = i_t * BT + 3 * BC
 
-    q += (bos * H + i_h).to(tl.int64) * K
-    k += (bos * H + i_h).to(tl.int64) * K
-    g += (bos * HV + i_hv).to(tl.int64) * K
-    Aqk += (bos * HV + i_hv).to(tl.int64) * BT
-    Akk += (bos * HV + i_hv).to(tl.int64) * BT
-    Akkd += (bos * HV + i_hv).to(tl.int64) * BC
+    q += (bos * H + i_h) * K
+    k += (bos * H + i_h) * K
+    g += (bos * HV + i_hv) * K
+    Aqk += (bos * HV + i_hv) * BT
+    Akk += (bos * HV + i_hv) * BT
+    Akkd += (bos * HV + i_hv) * BC
 
     o_i = tl.arange(0, BC)
     m_tc1 = (i_tc1 + o_i) < T
@@ -428,7 +428,7 @@ def chunk_kda_fwd_kernel_inter_solve_fused_npu(
     p_Aqk10 = tl.make_block_ptr(Aqk, (T, BT), (HV * BT, 1), (i_tc1, 0), (BC, BC), (1, 0))
     tl.store(p_Aqk10, (b_Aqk10 * scale).to(Aqk.dtype.element_ty), boundary_check=(0, 1))
 
-    p_b1 = tl.make_block_ptr(beta + (bos * HV + i_hv).to(tl.int64), (T,), (HV,), (i_tc1,), (BC,), (0,))
+    p_b1 = tl.make_block_ptr(beta + (bos * HV + i_hv), (T,), (HV,), (i_tc1,), (BC,), (0,))
     b_b1 = tl.load(p_b1, boundary_check=(0,)).to(tl.float32)
     b_Akk10 = b_Akk10 * b_b1[:, None]
     if NC >= 3:
@@ -437,7 +437,7 @@ def chunk_kda_fwd_kernel_inter_solve_fused_npu(
         tl.store(p_Aqk20, (b_Aqk20 * scale).to(Aqk.dtype.element_ty), boundary_check=(0, 1))
         tl.store(p_Aqk21, (b_Aqk21 * scale).to(Aqk.dtype.element_ty), boundary_check=(0, 1))
 
-        p_b2 = tl.make_block_ptr(beta + (bos * HV + i_hv).to(tl.int64), (T,), (HV,), (i_tc2,), (BC,), (0,))
+        p_b2 = tl.make_block_ptr(beta + (bos * HV + i_hv), (T,), (HV,), (i_tc2,), (BC,), (0,))
         b_b2 = tl.load(p_b2, boundary_check=(0,)).to(tl.float32)
         b_Akk20 = b_Akk20 * b_b2[:, None]
         b_Akk21 = b_Akk21 * b_b2[:, None]
@@ -449,7 +449,7 @@ def chunk_kda_fwd_kernel_inter_solve_fused_npu(
         tl.store(p_Aqk31, (b_Aqk31 * scale).to(Aqk.dtype.element_ty), boundary_check=(0, 1))
         tl.store(p_Aqk32, (b_Aqk32 * scale).to(Aqk.dtype.element_ty), boundary_check=(0, 1))
 
-        p_b3 = tl.make_block_ptr(beta + (bos * HV + i_hv).to(tl.int64), (T,), (HV,), (i_tc3,), (BC,), (0,))
+        p_b3 = tl.make_block_ptr(beta + (bos * HV + i_hv), (T,), (HV,), (i_tc3,), (BC,), (0,))
         b_b3 = tl.load(p_b3, boundary_check=(0,)).to(tl.float32)
         b_Akk30 = b_Akk30 * b_b3[:, None]
         b_Akk31 = b_Akk31 * b_b3[:, None]
@@ -554,7 +554,10 @@ def chunk_kda_fwd_intra_npu(
     chunk_indices: torch.LongTensor | None = None,
     safe_gate: bool = False,
     disable_recompute: bool = False,
+    use_graph: bool = False,
 ):
+    if use_graph:
+        raise NotImplementedError("use_graph is not supported on the Ascend NPU backend")
     B, T, H, K, HV = *k.shape, gk.shape[2]
     BT = chunk_size
     if BT not in (32, 64):
@@ -751,7 +754,7 @@ def _bwd_intra_beta_base(beta, bos, i_b, i_hv, T_seq, HV, IS_VARLEN: tl.constexp
         if IS_VARLEN:
             return beta + (bos + i_hv.to(tl.int64) * T_seq)
         return beta + (tl.cast(i_b, tl.int64) * HV + i_hv) * T_seq
-    return beta + (bos * HV + i_hv).to(tl.int64)
+    return beta + (bos * HV + i_hv)
 
 
 @triton.jit
@@ -765,9 +768,9 @@ def _bwd_intra_beta_row_stride(BETA_T_CONTIG: tl.constexpr, HV: tl.constexpr):
 def _bwd_intra_g_base(g, bos, i_b, i_hv, T_seq, K, HV, IS_VARLEN: tl.constexpr, G_T_CONTIG: tl.constexpr):
     if G_T_CONTIG:
         if IS_VARLEN:
-            return g + (bos * K).to(tl.int64) + i_hv.to(tl.int64) * T_seq * K
+            return g + (bos * K) + i_hv.to(tl.int64) * T_seq * K
         return g + tl.cast(i_b, tl.int64) * HV * T_seq * K + i_hv.to(tl.int64) * T_seq * K
-    return g + (bos * HV + i_hv).to(tl.int64) * K
+    return g + (bos * HV + i_hv) * K
 
 
 @triton.jit
@@ -815,19 +818,19 @@ def chunk_kda_bwd_kernel_intra_dq_db_npu(
         i_ti = i_t * BT + i_i * BC
         if i_ti < T_cur:
             all = tl.cast(B, tl.int64) * T
-            q_ptr = q + (bos * H + i_h).to(tl.int64) * K
-            k_ptr = k + (bos * H + i_h).to(tl.int64) * K
+            q_ptr = q + (bos * H + i_h) * K
+            k_ptr = k + (bos * H + i_h) * K
             g_base = _bwd_intra_g_base(g, bos, i_b, i_hv, T_seq, K, HV, IS_VARLEN, G_T_CONTIG)
             beta_base = _bwd_intra_beta_base(beta, bos, i_b, i_hv, T_seq, HV, IS_VARLEN, BETA_T_CONTIG)
-            dAqk_ptr = dAqk + (bos * HV + i_hv).to(tl.int64) * BT
-            dAkk_ptr = dAkk + (bos * HV + i_hv).to(tl.int64) * BT
-            dq_ptr = dq + (bos * HV + i_hv).to(tl.int64) * K
-            dq2_ptr = dq2 + (bos * HV + i_hv).to(tl.int64) * K
-            dk2_ptr = dk2 + (bos * HV + i_hv).to(tl.int64) * K
-            dg2_ptr = dg2 + (bos * HV + i_hv).to(tl.int64) * K
+            dAqk_ptr = dAqk + (bos * HV + i_hv) * BT
+            dAkk_ptr = dAkk + (bos * HV + i_hv) * BT
+            dq_ptr = dq + (bos * HV + i_hv) * K
+            dq2_ptr = dq2 + (bos * HV + i_hv) * K
+            dk2_ptr = dk2 + (bos * HV + i_hv) * K
+            dg2_ptr = dg2 + (bos * HV + i_hv) * K
             o_k = i_k * BK + tl.arange(0, BK)
             m_k = o_k < K
-            db_ptr = db + (i_k * all + bos).to(tl.int64) * HV + i_hv
+            db_ptr = db + (tl.cast(i_k, tl.int64) * all + bos) * HV + i_hv
             p_g = _bwd_intra_g_block_ptr(g_base, T_cur, i_ti, i_k * BK, BC, BK, g_row_stride, K)
             b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
             p_b = tl.make_block_ptr(beta_base, (T_cur,), (beta_row_stride,), (i_ti,), (BC,), (0,))
@@ -938,13 +941,13 @@ def chunk_kda_bwd_kernel_intra_dkt_future_npu(
         T_cur = (eos - bos).to(tl.int32)
         i_ti = i_t * BT + i_i * BC
         if i_ti < T_cur:
-            q_ptr = q + (bos * H + i_h).to(tl.int64) * K
-            k_ptr = k + (bos * H + i_h).to(tl.int64) * K
+            q_ptr = q + (bos * H + i_h) * K
+            k_ptr = k + (bos * H + i_h) * K
             g_base = _bwd_intra_g_base(g, bos, i_b, i_hv, T_seq, K, HV, IS_VARLEN, G_T_CONTIG)
             beta_base = _bwd_intra_beta_base(beta, bos, i_b, i_hv, T_seq, HV, IS_VARLEN, BETA_T_CONTIG)
-            dAqk_ptr = dAqk + (bos * HV + i_hv).to(tl.int64) * BT
-            dAkk_ptr = dAkk + (bos * HV + i_hv).to(tl.int64) * BT
-            dkt_part_ptr = dkt_part + (bos * HV + i_hv).to(tl.int64) * K
+            dAqk_ptr = dAqk + (bos * HV + i_hv) * BT
+            dAkk_ptr = dAkk + (bos * HV + i_hv) * BT
+            dkt_part_ptr = dkt_part + (bos * HV + i_hv) * K
             nc_eff = min(NC, tl.cdiv(T_cur - i_t * BT, BC))
             o_k = i_k * BK + tl.arange(0, BK)
             m_k = o_k < K
@@ -1012,17 +1015,17 @@ def chunk_kda_bwd_kernel_intra_dk_dg_npu(
         T_cur = (eos - bos).to(tl.int32)
         i_ti = i_t * BT + i_i * BC
         if i_ti < T_cur:
-            q_ptr = q + (bos * H + i_h).to(tl.int64) * K
-            k_ptr = k + (bos * H + i_h).to(tl.int64) * K
+            q_ptr = q + (bos * H + i_h) * K
+            k_ptr = k + (bos * H + i_h) * K
             g_base = _bwd_intra_g_base(g, bos, i_b, i_hv, T_seq, K, HV, IS_VARLEN, G_T_CONTIG)
             beta_base = _bwd_intra_beta_base(beta, bos, i_b, i_hv, T_seq, HV, IS_VARLEN, BETA_T_CONTIG)
-            dAqk_ptr = dAqk + (bos * HV + i_hv).to(tl.int64) * BT
-            dAkk_ptr = dAkk + (bos * HV + i_hv).to(tl.int64) * BT
-            dk_ptr = dk + (bos * HV + i_hv).to(tl.int64) * K
-            dk2_ptr = dk2 + (bos * HV + i_hv).to(tl.int64) * K
-            dg_ptr = dg + (bos * HV + i_hv).to(tl.int64) * K
-            dg2_ptr = dg2 + (bos * HV + i_hv).to(tl.int64) * K
-            dkt_part_ptr = dkt_part + (bos * HV + i_hv).to(tl.int64) * K
+            dAqk_ptr = dAqk + (bos * HV + i_hv) * BT
+            dAkk_ptr = dAkk + (bos * HV + i_hv) * BT
+            dk_ptr = dk + (bos * HV + i_hv) * K
+            dk2_ptr = dk2 + (bos * HV + i_hv) * K
+            dg_ptr = dg + (bos * HV + i_hv) * K
+            dg2_ptr = dg2 + (bos * HV + i_hv) * K
+            dkt_part_ptr = dkt_part + (bos * HV + i_hv) * K
             o_k = i_k * BK + tl.arange(0, BK)
             m_k = o_k < K
             p_g = _bwd_intra_g_block_ptr(g_base, T_cur, i_ti, i_k * BK, BC, BK, g_row_stride, K)
@@ -1102,7 +1105,10 @@ def chunk_kda_bwd_intra_npu(
     chunk_indices: torch.LongTensor | None = None,
     chunk_size: int = 64,
     safe_gate: bool = False,
+    use_graph: bool = False,
 ):
+    if use_graph:
+        raise NotImplementedError("use_graph is not supported on the Ascend NPU backend")
     B, T, H, K, HV = *k.shape, g.shape[2]
     BT = chunk_size
     BC = min(_BWD_INTRA_BC, BT)

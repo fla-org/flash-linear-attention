@@ -77,6 +77,7 @@ def causal_conv1d(
             x=x,
             weight=weight,
             bias=bias,
+            residual=residual,
             activation=activation,
             chunk_indices=chunk_indices,
             cp_context=cp_context,

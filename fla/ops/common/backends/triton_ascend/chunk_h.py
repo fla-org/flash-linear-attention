@@ -58,8 +58,8 @@ def chunk_fwd_kernel_h_npu(
     i_v = tl.program_id(1) + V_OFFSET
     i_nh = tl.program_id(2).to(tl.int64) + NH_OFFSET
     i_n, i_h = i_nh // H, i_nh % H
-    bos = (i_n * T).to(tl.int64)
-    boh = (i_n * tl.cdiv(T, BS)).to(tl.int64)
+    bos = tl.cast(i_n, tl.int64) * T
+    boh = tl.cast(i_n, tl.int64) * tl.cdiv(T, BS)
     NTS = BS // BT
 
     if USE_G_GAMMA:
@@ -70,7 +70,7 @@ def chunk_fwd_kernel_h_npu(
     o_k = i_k * BK + tl.arange(0, BK)
     o_v = i_v * BV + tl.arange(0, BV)
     if USE_INITIAL_STATE:
-        h0_base = (i_nh * K * V).to(tl.int64)
+        h0_base = (i_nh * K * V)
         if STATE_V_FIRST:
             p_h0 = h0 + h0_base + o_v[:, None].to(tl.int64) * K + o_k[None, :]
             b_h = tl.trans(tl.load(p_h0, mask=(o_v[:, None] < V) & (o_k[None, :] < K), other=0.0)).to(tl.float32)
@@ -82,11 +82,11 @@ def chunk_fwd_kernel_h_npu(
         i_s = i_t // NTS
         o_t = (i_t * BT + tl.arange(0, BT)).to(tl.int64)
         m_t = o_t < T
-        kv_base = (bos * H + i_h).to(tl.int64) * K
+        kv_base = (bos * H + i_h) * K
         p_k = k + kv_base + o_k[:, None] + o_t[None, :] * (H * K)
-        p_v = v + (bos * H + i_h).to(tl.int64) * V + o_t[:, None] * (H * V) + o_v[None, :]
+        p_v = v + (bos * H + i_h) * V + o_t[:, None] * (H * V) + o_v[None, :]
 
-        o_h = ((boh + i_s.to(tl.int64)) * H + i_h).to(tl.int64) * K * V
+        o_h = ((boh + i_s) * H + i_h) * K * V
         if STATE_V_FIRST:
             p_h = h + o_h + o_v[:, None].to(tl.int64) * K + o_k[None, :]
             m_h = (o_v[:, None] < V) & (o_k[None, :] < K)
@@ -123,7 +123,7 @@ def chunk_fwd_kernel_h_npu(
             b_k = b_k * exp2(b_gk_last[:, None] - b_gk)
 
         if USE_GV:
-            p_gv = gv + (bos * H + i_h).to(tl.int64) * V + o_t[:, None] * (H * V) + o_v[None, :]
+            p_gv = gv + (bos * H + i_h) * V + o_t[:, None] * (H * V) + o_v[None, :]
             p_gv_last = gv + (bos + last_idx.to(tl.int64)) * (H * V) + i_h * V + i_v * BV + tl.arange(0, BV)
             b_gv_last = tl.load(p_gv_last, mask=(i_v * BV + tl.arange(0, BV) < V), other=0.).to(tl.float32)
             b_gv = tl.load(p_gv, mask=m_t[:, None] & (o_v < V)[None, :], other=0.0).to(tl.float32)
@@ -133,7 +133,7 @@ def chunk_fwd_kernel_h_npu(
         b_h += tl.dot(b_k, b_v)
 
     if STORE_FINAL_STATE:
-        ht_base = (i_nh * K * V).to(tl.int64)
+        ht_base = (i_nh * K * V)
         if STATE_V_FIRST:
             p_ht = ht + ht_base + o_v[:, None].to(tl.int64) * K + o_k[None, :]
             tl.store(p_ht, tl.trans(b_h).to(p_ht.dtype.element_ty), mask=(o_v[:, None] < V) & (o_k[None, :] < K))
@@ -162,8 +162,8 @@ def chunk_bwd_kernel_dh_npu(
     i_nh = tl.program_id(2).to(tl.int64) + NH_OFFSET
     i_n, i_hq = i_nh // HQ, i_nh % HQ
     i_h = i_hq // NG
-    bos = (i_n * T).to(tl.int64)
-    boh = (i_n * tl.cdiv(T, BS)).to(tl.int64)
+    bos = tl.cast(i_n, tl.int64) * T
+    boh = tl.cast(i_n, tl.int64) * tl.cdiv(T, BS)
 
     if USE_G_GAMMA:
         b_gamma = tl.load(g_gamma + i_h)
@@ -173,7 +173,7 @@ def chunk_bwd_kernel_dh_npu(
     o_k = i_k * BK + tl.arange(0, BK)
     o_v = i_v * BV + tl.arange(0, BV)
     if USE_FINAL_STATE_GRADIENT:
-        dht_base = (i_nh * K * V).to(tl.int64)
+        dht_base = (i_nh * K * V)
         if STATE_V_FIRST:
             p_dht = dht + dht_base + o_v[:, None].to(tl.int64) * K + o_k[None, :]
             b_dh += tl.trans(tl.load(p_dht, mask=(o_v[:, None] < V) & (o_k[None, :] < K), other=0.0)).to(tl.float32)
@@ -184,7 +184,7 @@ def chunk_bwd_kernel_dh_npu(
     for step in tl.static_range(NT):
         i_t = NT - 1 - step
         i_s = i_t // (BS // BT)
-        o_dh = ((boh + i_s.to(tl.int64)) * H + i_h).to(tl.int64) * K * V
+        o_dh = ((boh + i_s) * H + i_h) * K * V
         if STATE_V_FIRST:
             p_dh = dh + o_dh + o_v[:, None].to(tl.int64) * K + o_k[None, :]
             m_dh = (o_v[:, None] < V) & (o_k[None, :] < K)
@@ -198,7 +198,7 @@ def chunk_bwd_kernel_dh_npu(
         last_idx = min(i_t * BT + BT, T) - 1
         o_t = (i_t * BT + tl.arange(0, BT)).to(tl.int64)
         m_t = o_t < T
-        qv_base = (bos * HQ + i_hq).to(tl.int64)
+        qv_base = bos * HQ + i_hq
         p_q = q + qv_base * K + o_k[:, None] + o_t[None, :] * (HQ * K)
         p_do = do + qv_base * V + o_t[:, None] * (HQ * V) + o_v[None, :]
         b_q = tl.load(p_q, mask=(o_k[:, None] < K) & m_t[None, :], other=0.0).to(tl.float32) * scale
@@ -217,7 +217,7 @@ def chunk_bwd_kernel_dh_npu(
             b_dh *= exp2(b_g_last)
 
         if USE_GK:
-            kv_base = (bos * H + i_h).to(tl.int64) * K
+            kv_base = (bos * H + i_h) * K
             p_gk = gk + kv_base + o_k[:, None] + o_t[None, :] * (H * K)
             p_gk_last = gk + (bos + last_idx.to(tl.int64)) * (H * K) + i_h * K + i_k * BK + tl.arange(0, BK)
             b_gk = tl.load(p_gk, mask=(o_k[:, None] < K) & m_t[None, :], other=0.0).to(tl.float32)
@@ -226,7 +226,7 @@ def chunk_bwd_kernel_dh_npu(
             b_dh *= exp2(b_gk_last)[:, None]
 
         if USE_GV:
-            p_gv = gv + (bos * H + i_h).to(tl.int64) * V + o_t[:, None] * (H * V) + o_v[None, :]
+            p_gv = gv + (bos * H + i_h) * V + o_t[:, None] * (H * V) + o_v[None, :]
             p_gv_last = gv + (bos + last_idx.to(tl.int64)) * (H * V) + i_h * V + i_v * BV + tl.arange(0, BV)
             b_gv = tl.load(p_gv, mask=m_t[:, None] & (o_v < V)[None, :], other=0.0).to(tl.float32)
             b_gv_last = tl.load(p_gv_last, mask=(i_v * BV + tl.arange(0, BV) < V), other=0.).to(tl.float32)
@@ -236,7 +236,7 @@ def chunk_bwd_kernel_dh_npu(
         b_dh += tl.dot(b_q, b_do)
 
     if STORE_INITIAL_STATE_GRADIENT:
-        dh0_base = (i_nh * K * V).to(tl.int64)
+        dh0_base = (i_nh * K * V)
         if STATE_V_FIRST:
             p_dh0 = dh0 + dh0_base + o_v[:, None].to(tl.int64) * K + o_k[None, :]
             tl.store(p_dh0, tl.trans(b_dh).to(p_dh0.dtype.element_ty), mask=(o_v[:, None] < V) & (o_k[None, :] < K))
