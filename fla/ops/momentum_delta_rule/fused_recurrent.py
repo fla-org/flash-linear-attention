@@ -68,7 +68,12 @@ class FusedRecurrentMomentumDeltaRuleFunction(torch.autograd.Function):
                 inputs += (initial_S_r, initial_M_r)
             grads = torch.autograd.grad(
                 (o, final_state[0], final_state[1]), inputs,
-                grad_outputs=(do, dst, dmt), allow_unused=True,
+                grad_outputs=(
+                    do,
+                    torch.zeros_like(final_state[0]) if dst is None else dst,
+                    torch.zeros_like(final_state[1]) if dmt is None else dmt,
+                ),
+                allow_unused=True,
             )
         dq, dk, dv, dp, dlog_alpha, dlog_mu, dbeta = grads[:7]
         deta = grads[7] if eta is not None else None

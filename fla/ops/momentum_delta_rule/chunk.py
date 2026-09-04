@@ -70,7 +70,12 @@ class ChunkMomentumDeltaRuleFunction(torch.autograd.Function):
                 differentiable_inputs += (initial_S_r, initial_M_r)
             grads = torch.autograd.grad(
                 (o, final_state[0], final_state[1]), differentiable_inputs,
-                grad_outputs=(do, dst, dmt), retain_graph=False, allow_unused=True,
+                grad_outputs=(
+                    do,
+                    torch.zeros_like(final_state[0]) if dst is None else dst,
+                    torch.zeros_like(final_state[1]) if dmt is None else dmt,
+                ),
+                retain_graph=False, allow_unused=True,
             )
         dq, dk, dv, dp, dlog_alpha, dlog_mu, dbeta = grads[:7]
         deta = grads[7] if eta is not None else None
