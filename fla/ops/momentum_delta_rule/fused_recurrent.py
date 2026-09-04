@@ -80,9 +80,9 @@ class FusedRecurrentMomentumDeltaRuleFunction(torch.autograd.Function):
         state_offset = 8 if eta is not None else 7
         ds0, dm0 = grads[state_offset:state_offset + 2] if initial_S is not None else (None, None)
         if ctx.use_qk_l2norm_in_kernel:
-            dq = l2norm_bwd(q, q_rstd, dq)
-            dk = l2norm_bwd(k, k_rstd, dk)
-            dp = l2norm_bwd(p, p_rstd, dp)
+            dq = l2norm_bwd(q, q_rstd, dq.contiguous())
+            dk = l2norm_bwd(k, k_rstd, dk.contiguous())
+            dp = l2norm_bwd(p, p_rstd, dp.contiguous())
         return dq, dk, dv, dp, dlog_alpha, dlog_mu, dbeta, deta, None, ds0, dm0, None, None, None, None
 
 

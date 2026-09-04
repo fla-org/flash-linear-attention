@@ -83,11 +83,11 @@ class ChunkMomentumDeltaRuleFunction(torch.autograd.Function):
         ds0, dm0 = (grads[state_offset:state_offset + 2] if initial_S is not None else (None, None))
         if ctx.use_qk_l2norm_in_kernel:
             if dq is not None:
-                dq = l2norm_bwd(q, q_rstd, dq)
+                dq = l2norm_bwd(q, q_rstd, dq.contiguous())
             if dk is not None:
-                dk = l2norm_bwd(k, k_rstd, dk)
+                dk = l2norm_bwd(k, k_rstd, dk.contiguous())
             if dp is not None:
-                dp = l2norm_bwd(p, p_rstd, dp)
+                dp = l2norm_bwd(p, p_rstd, dp.contiguous())
         return dq, dk, dv, dp, dlog_alpha, dlog_mu, dbeta, deta, None, ds0, dm0, None, None, None, None, None
 
 
