@@ -267,7 +267,8 @@ def test_full_momentum_chunk_recurrent_backward_parity():
                           initial_S=xs[8], initial_M=xs[9], output_final_state=True, scale=K ** -0.5)
         else:
             op_kwargs = dict(q=xs[0], k=xs[1], v=xs[2], p=xs[3], log_alpha=xs[4], log_mu=xs[5], beta=xs[6], eta=xs[7],
-                             initial_state=torch.stack(xs[8:10]), output_final_state=True, use_qk_l2norm_in_kernel=False)
+                             initial_state=torch.stack(xs[8:10]), output_final_state=True,
+                             use_qk_l2norm_in_kernel=False, use_p_times_alpha=False)
             if op is chunk_momentum_delta_rule:
                 op_kwargs['chunk_size'] = 16
             o, state = op(**op_kwargs)
