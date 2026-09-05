@@ -49,10 +49,14 @@ def chunk_kda_fwd_kernel_intra_token_parallel(
     BC: tl.constexpr,
     BH: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
 ):
     i_tg, i_hg = tl.program_id(0).to(tl.int64), tl.program_id(1)
 
     if IS_VARLEN:
+        # static T may exceed the covered tokens; i_n would converge to N and read OOB
+        if USE_GRAPH and i_tg >= tl.load(cu_seqlens + N).to(tl.int32):
+            return
         i_n = 0
         left, right = 0, N
 
@@ -135,6 +139,7 @@ def chunk_kda_fwd_intra_token_parallel(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     sub_chunk_size: int = 16,
+    use_graph: bool = False,
 ) -> None:
     """
     Token-parallel implementation: each token gets its own thread block.
@@ -178,5 +183,6 @@ def chunk_kda_fwd_intra_token_parallel(
         BK=BK,
         BT=BT,
         BC=BC,
+        USE_GRAPH=use_graph,
     )
     return Aqk, Akk

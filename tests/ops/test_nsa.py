@@ -915,3 +915,91 @@ def test_parallel_varlen_decode(
         scale=scale, window_size=window_size, cu_seqlens=(cu_seqlens_q, cu_seqlens), )
 
     assert_close(' o', o_dec, o_dec_ref, 0.005)
+
+
+@pytest.mark.parametrize(
+    ('T', 'cu_seqlens', 'H', 'HQ', 'K', 'V', 'block_size', 'dtype'),
+    [
+        pytest.param(8192, None, 4, 64, 32, 32, 64, torch.bfloat16, id='dense-T8K-G16-K32-V32-bf16'),
+        pytest.param(16384, None, 4, 64, 32, 32, 64, torch.bfloat16, id='dense-T16K-G16-K32-V32-bf16'),
+        pytest.param(32768, None, 4, 64, 32, 32, 64, torch.bfloat16, id='dense-T32K-G16-K32-V32-bf16'),
+        pytest.param(16384, None, 4, 64, 64, 128, 64, torch.bfloat16, id='dense-T16K-G16-K64-V128-bf16'),
+        pytest.param(
+            16384,
+            [0, 4097, 9220, 16384],
+            1,
+            32,
+            128,
+            64,
+            64,
+            torch.bfloat16,
+            id='varlen-4097-5123-7164-G32-K128-V64-bf16',
+        ),
+        pytest.param(131, None, 4, 64, 32, 32, 64, torch.float16, id='tail-T131-G16-K32-V32-fp16'),
+        pytest.param(131, None, 4, 64, 32, 32, 64, torch.bfloat16, id='tail-T131-G16-K32-V32-bf16'),
+    ],
+)
+def test_parallel_compressive_bq_fixture(
+    T: int,
+    cu_seqlens,
+    H: int,
+    HQ: int,
+    K: int,
+    V: int,
+    block_size: int,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(42)
+    cu_seqlens = (
+        torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+        if cu_seqlens is not None
+        else None
+    )
+    TC = (
+        triton.cdiv(T, block_size)
+        if cu_seqlens is None
+        else int(prepare_chunk_offsets(cu_seqlens, block_size)[-1])
+    )
+    q = torch.randn((1, T, HQ, K), dtype=dtype, device=device).requires_grad_(True)
+    k = torch.randn((1, TC, H, K), dtype=dtype, device=device).requires_grad_(True)
+    v = torch.randn((1, TC, H, V), dtype=dtype, device=device).requires_grad_(True)
+    do = torch.randn((1, T, HQ, V), dtype=dtype, device=device)
+    scale = K**-0.5
+
+    def run(fn):
+        q.grad = k.grad = v.grad = None
+        o, lse = fn(
+            q=q,
+            k=k,
+            v=v,
+            TK=T,
+            block_size=block_size,
+            scale=scale,
+            cu_seqlens=cu_seqlens,
+        ) if fn is parallel_nsa_compression else fn(
+            q=q,
+            k_cmp=k,
+            v_cmp=v,
+            block_size=block_size,
+            scale=scale,
+            cu_seqlens=cu_seqlens,
+        )
+        o.backward(do)
+        return o.detach(), lse.detach(), q.grad.detach().clone(), k.grad.detach().clone(), v.grad.detach().clone()
+
+    tri = run(parallel_nsa_compression)
+    ref = run(naive_nsa_compression)
+    assert_close('  o', tri[0], ref[0], 0.005)
+    assert_close('lse', tri[1], torch.where(ref[1] == float('-inf'), 0, ref[1]), 0.005)
+    assert_close(' dq', tri[2], ref[2], 0.005)
+    assert_close(' dk', tri[3], ref[3], 0.005)
+    assert_close(' dv', tri[4], ref[4], 0.005)
+    for name, tensor in zip(('o', 'lse', 'dq', 'dk', 'dv'), tri):
+        assert torch.isfinite(tensor).all(), f'{name} contains non-finite values'
+
+    if T == 131:
+        repeat = run(parallel_nsa_compression)
+        for name, actual, expected in zip(('o', 'lse', 'dq', 'dk', 'dv'), repeat, tri):
+            assert torch.equal(actual, expected), f'{name} is not deterministic'
+        assert torch.count_nonzero(tri[3][:, -1]) == 0
+        assert torch.count_nonzero(tri[4][:, -1]) == 0

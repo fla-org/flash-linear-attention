@@ -113,6 +113,7 @@ class MoBA(nn.Module):
             self.num_kv_heads = self.num_heads
         else:
             self.num_kv_heads = num_kv_heads
+        assert self.num_heads % self.num_kv_heads == 0, "num_heads must be divisible by num_kv_heads"
         self.num_kv_groups = num_heads // self.num_kv_heads
         self.head_dim = self.hidden_size // self.num_heads
         self.kv_dim = self.num_kv_heads * self.head_dim

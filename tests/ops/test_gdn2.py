@@ -25,6 +25,12 @@ from fla.ops.kda.gate import naive_kda_gate, naive_kda_lowerbound_gate
 from fla.utils import assert_close, device
 
 
+def _unwrap_autotuner(fn):
+    while not hasattr(fn, 'configs'):
+        fn = fn.fn
+    return fn
+
+
 def _activate_g(g, A_log, dt_bias, safe_gate, lower_bound):
     """Reference gate activation matching the kernel's use_gate_in_kernel path."""
     if safe_gate:
@@ -568,3 +574,25 @@ def test_layer(num_heads, num_v_heads, use_short_conv):
         if p.requires_grad:
             assert p.grad is not None, f"{name}.grad is None"
             assert torch.isfinite(p.grad).all(), f"{name}.grad has non-finite values"
+
+
+def test_chunk_bwd_autotune_key_covers_head_dims():
+    """The fused WY/dqkg backward must autotune each (K, V) geometry separately.
+
+    The kernel sweeps BK/BV tile configs whose relative performance depends on
+    the head dimensions, so K and V have to be part of the autotune key. Were
+    they missing, the first (K, V) geometry to reach the kernel in a process
+    would tune it for every other geometry sharing BT: the second geometry
+    cache-hits on the first one's winner and runs a config that was never
+    measured for its shape.
+
+    Checked against the declared key rather than by driving two backwards,
+    which would pay a cold autotune sweep per geometry on every CI run.
+    """
+    from fla.ops.gdn2.chunk_bwd import chunk_gdn2_bwd_kernel_wy_dqkg_fused
+
+    tuner = _unwrap_autotuner(chunk_gdn2_bwd_kernel_wy_dqkg_fused)
+    assert list(tuner.keys) == ['BT', 'K', 'V', 'STATE_V_FIRST'], (
+        f"unexpected autotune key {list(tuner.keys)}; it must carry K and V, "
+        "the head dimensions that bound the swept BK/BV tiles"
+    )

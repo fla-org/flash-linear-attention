@@ -151,7 +151,8 @@ def gdn_gate_chunk_cumsum_scalar_kernel_npu(
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
     else:
-        bos, eos = i_b * T, i_b * T + T
+        bos = tl.cast(i_b, tl.int64) * T
+        eos = bos + T
 
     p_g = tl.make_block_ptr(g + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
     p_o = tl.make_block_ptr(o + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))

@@ -6,23 +6,24 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 """
-Test for Context Parallel (CP) KDA (Kimi Delta Attention)
+Test for Context Parallel (CP) GDN-2 (Gated DeltaNet 2)
 
 Test Architecture Notes:
 ========================
-This test uses naive_recurrent_kda as the reference baseline because:
+This test uses naive_recurrent_gdn2 as the reference baseline because:
 - It represents the exact mathematical definition without chunking approximations
 - It expects per-token g (non-cumsum'd) and pre-normalized q/k
 
 When use_gate_in_kernel=True, the reference path must manually:
-1. Apply L2 normalization to q/k before passing to naive_recurrent_kda
+1. Apply L2 normalization to q/k before passing to naive_recurrent_gdn2
 2. Apply the gate formula (naive_kda_lowerbound_gate or naive_kda_gate)
 3. The output g from these naive gate functions is per-token (non-cumsum'd),
-   which is exactly what naive_recurrent_kda expects
+   which is exactly what naive_recurrent_gdn2 expects
 
 When use_gate_in_kernel=False:
-- For chunk_kda: input g must be pre-processed (gate applied + cumsum'd)
-- For naive_recurrent_kda reference: g should be gate-applied but NOT cumsum'd
+- chunk_gdn2 treats the input g as the log-decay directly (it only cumsums it
+  within each chunk), so the test feeds it the raw g_global
+- naive_recurrent_gdn2 must therefore see that same g, un-gated and NOT cumsum'd
 
 Variable-Length Sequence Handling:
 ==================================
@@ -31,10 +32,10 @@ Variable-Length Sequence Handling:
 - The reference computation loops over sequences and concatenates results
 - CP path uses the same cu_seqlens for correct chunk boundary handling
 
-Context Parallel Principle for KDA:
-===================================
+Context Parallel Principle for GDN-2:
+=====================================
 
-KDA has a recurrent state dependency across tokens. The hidden state h evolves
+GDN-2 has a recurrent state dependency across tokens. The hidden state h evolves
 as tokens are processed, creating dependencies that span the sequence.
 
 With Context Parallel:
@@ -56,8 +57,11 @@ Test Scenarios:
 ===============
 1. CP2 with sequence cut in the middle
 2. CP2 with sequence boundary aligned
-3. CP4 with complex sequence distribution
-4. CP4 with single long sequence
+3. CP2 with many short sequences
+4. CP2 with disable_recompute=True
+5. CP4 with complex sequence distribution (first sequence spans 3 ranks)
+6. CP4 / CP8 with a single long sequence
+7. CP2 / CP4 with state_v_first=True
 """
 
 import logging
@@ -70,9 +74,9 @@ import torch.multiprocessing as mp
 import torch.nn.functional as F
 
 from fla.ops.cp import build_cp_context
-from fla.ops.kda import chunk_kda
+from fla.ops.gdn2 import chunk_gdn2
+from fla.ops.gdn2.naive import naive_recurrent_gdn2
 from fla.ops.kda.gate import naive_kda_lowerbound_gate
-from fla.ops.kda.naive import naive_recurrent_kda
 from fla.utils import assert_close
 
 # Configure logging to see assert_close messages
@@ -85,7 +89,7 @@ def init_distributed(rank, world_size):
     logging.basicConfig(level=logging.INFO, format='%(message)s')
 
     os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '29501'  # Different port from conv test
+    os.environ['MASTER_PORT'] = '29503'  # Different port from the KDA/GDN CP tests
     os.environ['RANK'] = str(rank)
     os.environ['WORLD_SIZE'] = str(world_size)
     os.environ['LOCAL_RANK'] = str(rank)
@@ -100,7 +104,7 @@ def cleanup_distributed():
         dist.destroy_process_group()
 
 
-def run_cp_kda_test_worker(
+def run_cp_gdn2_test_worker(
     rank: int,
     world_size: int,
     test_name: str,
@@ -114,11 +118,9 @@ def run_cp_kda_test_worker(
     safe_gate: bool = False,
     lower_bound: float | None = None,
     state_v_first: bool = False,
-    use_tf32x3_affine_chain: bool = False,
-    layout: str = 'contiguous',
 ):
     """
-    Worker function for CP KDA test.
+    Worker function for CP GDN-2 test.
     Runs in a spawned process with the given rank.
     """
     try:
@@ -126,8 +128,6 @@ def run_cp_kda_test_worker(
         device = torch.device(f'cuda:{rank}')
 
         assert T % world_size == 0, f"T={T} must be divisible by world_size={world_size}"
-        if layout == 'zigzag':
-            assert T % (2 * world_size) == 0, f"T={T} must be divisible by 2*world_size={2 * world_size} for zigzag"
         assert sum(lengths) == T, f"Sum of lengths {sum(lengths)} must equal T={T}"
 
         if rank == 0:
@@ -144,7 +144,8 @@ def run_cp_kda_test_worker(
         k_global = torch.empty(B, T, H, D, device=device, dtype=dtype)
         v_global = torch.empty(B, T, H, D, device=device, dtype=dtype)
         g_global = torch.empty(B, T, H, D, device=device, dtype=dtype if use_gate_in_kernel else torch.float)
-        beta_global = torch.empty(B, T, H, device=device, dtype=dtype)
+        b_global = torch.empty(B, T, H, D, device=device, dtype=dtype)
+        w_global = torch.empty(B, T, H, D, device=device, dtype=dtype)
         do_global = torch.empty(B, T, H, D, device=device, dtype=dtype)
         A_log_global = None
         dt_bias_global = None
@@ -152,17 +153,19 @@ def run_cp_kda_test_worker(
         if rank == 0:
             torch.manual_seed(42)
             # Generate inputs
-            # q gets a +1.0 offset to keep L2 normalization observable; extreme k
-            # magnitudes inflate chunk-vs-naive bf16 error past 8e-3 even without CP.
+            # Asymmetric initialization for q and k to test L2 norm
+            # q: small positive values around 1.0
+            # k: large negative values around -50.0
             q_global.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype) + 1.0)
-            k_global.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype))
+            k_global.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype) * 10.0 - 50.0)
             v_global.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype))
             if use_gate_in_kernel:
                 g_global.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype))
             else:
                 g_global.copy_(F.logsigmoid(torch.randn(B, T, H, D, device=device, dtype=torch.float)))
                 g_global.clamp_(min=-5.0)
-            beta_global.copy_(torch.randn(B, T, H, device=device, dtype=dtype).sigmoid())
+            b_global.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype).sigmoid())
+            w_global.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype).sigmoid())
             do_global.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype))
 
         # Broadcast to ensure all ranks have same data
@@ -170,7 +173,8 @@ def run_cp_kda_test_worker(
         dist.broadcast(k_global, src=0)
         dist.broadcast(v_global, src=0)
         dist.broadcast(g_global, src=0)
-        dist.broadcast(beta_global, src=0)
+        dist.broadcast(b_global, src=0)
+        dist.broadcast(w_global, src=0)
         dist.broadcast(do_global, src=0)
 
         # Prepare and broadcast A_log and dt_bias for gate computation
@@ -207,10 +211,10 @@ def run_cp_kda_test_worker(
         cu_seqlens_list = [0] + torch.cumsum(torch.tensor(lengths), 0).tolist()
         cu_seqlens_global = torch.tensor(cu_seqlens_list, device=device, dtype=torch.long)
 
-        # Step 2: Reference Run using naive_recurrent_kda (ground truth)
+        # Step 2: Reference Run using naive_recurrent_gdn2 (ground truth)
         # Each sequence is computed independently with h0=0 for simplicity
         ref_out = None
-        ref_dq, ref_dk, ref_dv, ref_dg, ref_db = None, None, None, None, None
+        ref_dq, ref_dk, ref_dv, ref_dg, ref_db, ref_dw = None, None, None, None, None, None
 
         if rank == 0:
             N = len(lengths)
@@ -223,13 +227,13 @@ def run_cp_kda_test_worker(
                 q_seq = q_global[:, seq_start:seq_end].clone().detach().requires_grad_(True)
                 k_seq = k_global[:, seq_start:seq_end].clone().detach().requires_grad_(True)
                 v_seq = v_global[:, seq_start:seq_end].clone().detach().requires_grad_(True)
-                g_seq = g_global[:, seq_start:seq_end].clone().detach()
-                beta_seq = beta_global[:, seq_start:seq_end].clone().detach().requires_grad_(True)
+                g_seq = g_global[:, seq_start:seq_end].clone().detach().requires_grad_(True)
+                b_seq = b_global[:, seq_start:seq_end].clone().detach().requires_grad_(True)
+                w_seq = w_global[:, seq_start:seq_end].clone().detach().requires_grad_(True)
                 do_seq = do_global[:, seq_start:seq_end].clone()
 
                 q_seq_norm = F.normalize(q_seq, p=2, dim=-1)
                 k_seq_norm = F.normalize(k_seq, p=2, dim=-1)
-
                 if use_gate_in_kernel:
                     g_seq_input = g_seq.requires_grad_(True)
                     if safe_gate and lower_bound is not None:
@@ -248,28 +252,18 @@ def run_cp_kda_test_worker(
                         )
                     g_for_grad = g_seq_input
                 else:
-                    if safe_gate and lower_bound is not None:
-                        g_processed = naive_kda_lowerbound_gate(
-                            g_seq.to(torch.float),
-                            A_log_global[:H].contiguous(),
-                            dt_bias_global,
-                            lower_bound=lower_bound,
-                        ).requires_grad_(True)
-                    else:
-                        from fla.ops.kda.gate import naive_kda_gate
-                        g_processed = naive_kda_gate(
-                            g_seq.to(torch.float),
-                            A_log_global[:H].contiguous(),
-                            dt_bias_global,
-                        ).requires_grad_(True)
-                    g_for_grad = g_processed
+                    # chunk_gdn2 gets the raw g_local here and only cumsums it,
+                    # so the reference must use the very same log-decay.
+                    g_processed = g_seq
+                    g_for_grad = g_seq
 
-                o_seq, _ = naive_recurrent_kda(
+                o_seq, _ = naive_recurrent_gdn2(
                     q=q_seq_norm,
                     k=k_seq_norm,
                     v=v_seq,
                     g=g_processed,
-                    beta=beta_seq,
+                    b=b_seq,
+                    w=w_seq,
                     initial_state=None,
                     output_final_state=False,
                 )
@@ -280,7 +274,8 @@ def run_cp_kda_test_worker(
                     'k': k_seq,
                     'v': v_seq,
                     'g': g_for_grad,
-                    'beta': beta_seq,
+                    'b': b_seq,
+                    'w': w_seq,
                     'do': do_seq,
                 })
 
@@ -289,6 +284,7 @@ def run_cp_kda_test_worker(
             all_dv = []
             all_dg = []
             all_db = []
+            all_dw = []
 
             for item in ref_outputs:
                 (item['o'] * item['do']).sum().backward()
@@ -296,7 +292,8 @@ def run_cp_kda_test_worker(
                 all_dk.append(item['k'].grad.detach())
                 all_dv.append(item['v'].grad.detach())
                 all_dg.append(item['g'].grad.detach())
-                all_db.append(item['beta'].grad.detach())
+                all_db.append(item['b'].grad.detach())
+                all_dw.append(item['w'].grad.detach())
 
             ref_out = torch.cat([item['o'].detach() for item in ref_outputs], dim=1)
             ref_dq = torch.cat(all_dq, dim=1)
@@ -304,52 +301,40 @@ def run_cp_kda_test_worker(
             ref_dv = torch.cat(all_dv, dim=1)
             ref_dg = torch.cat(all_dg, dim=1)
             ref_db = torch.cat(all_db, dim=1)
+            ref_dw = torch.cat(all_dw, dim=1)
 
         # Step 3: Context Parallel Run
         dist.barrier()
 
         # Build CP context
-        context = build_cp_context(
-            cu_seqlens_global, group=dist.group.WORLD, use_tf32x3_affine_chain=use_tf32x3_affine_chain,
-            layout=layout,
-        )
+        context = build_cp_context(cu_seqlens_global, group=dist.group.WORLD)
 
-        if layout == 'zigzag':
-            # local input = [front part; back part]; part_len = T / (2W)
-            part_len = T // (2 * world_size)
-            front_start = rank * part_len
-            back_start = (2 * world_size - 1 - rank) * part_len
-
-            def slice_local(t):
-                return torch.cat([t[:, front_start: front_start + part_len],
-                                  t[:, back_start: back_start + part_len]], dim=1)
-        else:
-            chunk_size = T // world_size
-            start_idx = rank * chunk_size
-            end_idx = (rank + 1) * chunk_size
-
-            def slice_local(t):
-                return t[:, start_idx:end_idx]
+        chunk_size = T // world_size
+        start_idx = rank * chunk_size
+        end_idx = (rank + 1) * chunk_size
 
         # Get local slices
-        q_local = slice_local(q_global).clone().detach().requires_grad_(True)
-        k_local = slice_local(k_global).clone().detach().requires_grad_(True)
-        v_local = slice_local(v_global).clone().detach().requires_grad_(True)
-        g_local = slice_local(g_global).clone().detach().requires_grad_(True)
-        beta_local = slice_local(beta_global).clone().detach().requires_grad_(True)
-        do_local = slice_local(do_global).clone()
+        q_local = q_global[:, start_idx:end_idx, :].clone().detach().requires_grad_(True)
+        k_local = k_global[:, start_idx:end_idx, :].clone().detach().requires_grad_(True)
+        v_local = v_global[:, start_idx:end_idx, :].clone().detach().requires_grad_(True)
+        g_local = g_global[:, start_idx:end_idx, :].clone().detach().requires_grad_(True)
+        b_local = b_global[:, start_idx:end_idx, :].clone().detach().requires_grad_(True)
+        w_local = w_global[:, start_idx:end_idx, :].clone().detach().requires_grad_(True)
+        do_local = do_global[:, start_idx:end_idx, :].clone()
 
-        print(f"[Rank {rank}] cu_seqlens: {context.cu_seqlens.tolist()}, "
+        print(f"[Rank {rank}] chunk: [{start_idx}, {end_idx}), "
+              f"cu_seqlens: {context.cu_seqlens.tolist()}, "
               f"pre_num_ranks: {context.pre_num_ranks}")
         dist.barrier()
 
         # CP Forward
-        o_local, _ = chunk_kda(
+        o_local, _ = chunk_gdn2(
             q=q_local,
             k=k_local,
             v=v_local,
             g=g_local,
-            beta=beta_local,
+            b=b_local,
+            w=w_local,
             cp_context=context,
             disable_recompute=disable_recompute,
             use_qk_l2norm_in_kernel=True,
@@ -365,29 +350,44 @@ def run_cp_kda_test_worker(
         o_local.backward(do_local)
 
         # Step 4: Result Aggregation and Verification
-        def gather_global(local):
-            gathered = [torch.zeros_like(local) for _ in range(world_size)]
-            dist.all_gather(gathered, local)
-            if layout == 'zigzag':
-                # undo the zigzag permutation: fronts in rank order, then backs reversed
-                return torch.cat([g[:, :part_len] for g in gathered]
-                                 + [g[:, part_len:] for g in reversed(gathered)], dim=1)
-            return torch.cat(gathered, dim=1)
+        o_gathered = [torch.zeros_like(o_local) for _ in range(world_size)]
+        dist.all_gather(o_gathered, o_local)
+        o_cp_global = torch.cat(o_gathered, dim=1)
 
-        o_cp_global = gather_global(o_local)
-        dq_cp_global = gather_global(q_local.grad)
-        dk_cp_global = gather_global(k_local.grad)
-        dv_cp_global = gather_global(v_local.grad)
-        dg_cp_global = gather_global(g_local.grad)
-        db_cp_global = gather_global(beta_local.grad)
+        dq_gathered = [torch.zeros_like(q_local.grad) for _ in range(world_size)]
+        dist.all_gather(dq_gathered, q_local.grad)
+        dq_cp_global = torch.cat(dq_gathered, dim=1)
+
+        dk_gathered = [torch.zeros_like(k_local.grad) for _ in range(world_size)]
+        dist.all_gather(dk_gathered, k_local.grad)
+        dk_cp_global = torch.cat(dk_gathered, dim=1)
+
+        dv_gathered = [torch.zeros_like(v_local.grad) for _ in range(world_size)]
+        dist.all_gather(dv_gathered, v_local.grad)
+        dv_cp_global = torch.cat(dv_gathered, dim=1)
+
+        dg_gathered = [torch.zeros_like(g_local.grad) for _ in range(world_size)]
+        dist.all_gather(dg_gathered, g_local.grad)
+        dg_cp_global = torch.cat(dg_gathered, dim=1)
+
+        db_gathered = [torch.zeros_like(b_local.grad) for _ in range(world_size)]
+        dist.all_gather(db_gathered, b_local.grad)
+        db_cp_global = torch.cat(db_gathered, dim=1)
+
+        dw_gathered = [torch.zeros_like(w_local.grad) for _ in range(world_size)]
+        dist.all_gather(dw_gathered, w_local.grad)
+        dw_cp_global = torch.cat(dw_gathered, dim=1)
 
         test_passed = True
         if rank == 0:
             print(f"\n[{test_name}] Verifying results...")
 
-            # Tolerance: ratio=8e-3 for all tensors; dg/db warning-only: dg's
-            # single-GPU chunk-vs-naive error is already ~0.0085; db sees cross-rank
-            # reduction (~1.5-2.4%).
+            # Tolerance: ratio=8e-3 for all tensors, matching test_cp_kda.py.
+            # Measured ratios are actually ~0.9-1.6% (db ~2.3%): per-dim gating
+            # plus the L2 norm over k ~ N(-50, 10) amplify the bf16 state
+            # communication precision loss.
+            # db (b grad) additionally involves a cross-rank reduction, so it is
+            # marked warning-only unconditionally.
             tensors_to_verify = [
                 ("Output", ref_out, o_cp_global),
                 ("dq", ref_dq, dq_cp_global),
@@ -395,11 +395,12 @@ def run_cp_kda_test_worker(
                 ("dv", ref_dv, dv_cp_global),
                 ("dg", ref_dg, dg_cp_global),
                 ("db", ref_db, db_cp_global),
+                ("dw", ref_dw, dw_cp_global),
             ]
 
             try:
                 for name, ref, cp in tensors_to_verify:
-                    warn = name in ("dg", "db")
+                    warn = (name == "db")
                     assert_close(name, ref, cp, ratio=8e-3, warning=warn)
                 print(f"✅ [{test_name}] Test Passed!\n")
             except AssertionError as e:
@@ -430,17 +431,15 @@ def run_cp_test_with_spawn(
     safe_gate: bool = False,
     lower_bound: float | None = None,
     state_v_first: bool = False,
-    use_tf32x3_affine_chain: bool = False,
-    layout: str = 'contiguous',
 ):
     """
     Run CP test using torch.multiprocessing.spawn.
     This allows running the test directly with pytest.
     """
     mp.start_processes(
-        run_cp_kda_test_worker,
+        run_cp_gdn2_test_worker,
         args=(world_size, test_name, T, H, D, lengths, dtype, disable_recompute,
-              use_gate_in_kernel, safe_gate, lower_bound, state_v_first, use_tf32x3_affine_chain, layout),
+              use_gate_in_kernel, safe_gate, lower_bound, state_v_first),
         nprocs=world_size,
         join=True,
         start_method='spawn',
@@ -593,127 +592,6 @@ def test_cp4_state_v_first():
         lengths=[10240],
         dtype=torch.bfloat16,
         state_v_first=True,
-        **GATE_KWARGS,
-    )
-
-
-# ============================================================
-# tf32x3 Affine Chain Tests
-# ============================================================
-
-def test_cp2_sequence_cut_tf32x3():
-    """CP2: sequences cut across rank boundary, tf32x3 affine chain in CP."""
-    if torch.cuda.device_count() < 2:
-        pytest.skip("At least 2 GPUs required")
-
-    run_cp_test_with_spawn(
-        world_size=2,
-        test_name="CP2_SequenceCut_TF32X3",
-        T=10240, H=12, D=128,
-        lengths=[3000, 4000, 3240],
-        dtype=torch.bfloat16,
-        use_tf32x3_affine_chain=True,
-        **GATE_KWARGS,
-    )
-
-
-def test_cp4_single_sequence_tf32x3():
-    """CP4: single long sequence spanning all ranks, tf32x3 affine chain in CP."""
-    if torch.cuda.device_count() < 4:
-        pytest.skip("At least 4 GPUs required")
-
-    run_cp_test_with_spawn(
-        world_size=4,
-        test_name="CP4_SingleSequence_TF32X3",
-        T=10240, H=12, D=128,
-        lengths=[10240],
-        dtype=torch.bfloat16,
-        use_tf32x3_affine_chain=True,
-        **GATE_KWARGS,
-    )
-
-
-def test_cp2_state_v_first_tf32x3():
-    """CP2: state_v_first=True with sequence cut, tf32x3 affine chain in CP."""
-    if torch.cuda.device_count() < 2:
-        pytest.skip("At least 2 GPUs required")
-
-    run_cp_test_with_spawn(
-        world_size=2,
-        test_name="CP2_TransposeState_TF32X3",
-        T=10240, H=12, D=128,
-        lengths=[3000, 4000, 3240],
-        dtype=torch.bfloat16,
-        state_v_first=True,
-        use_tf32x3_affine_chain=True,
-        **GATE_KWARGS,
-    )
-
-
-# ============================================================
-# Zigzag Layout Tests
-# ============================================================
-
-def test_cp2_zigzag_single_sequence():
-    """CP2 zigzag: single long sequence, state chain snakes through all 4 parts."""
-    if torch.cuda.device_count() < 2:
-        pytest.skip("At least 2 GPUs required")
-
-    run_cp_test_with_spawn(
-        world_size=2,
-        test_name="CP2_Zigzag_SingleSequence",
-        T=10240, H=12, D=128,
-        lengths=[10240],
-        dtype=torch.bfloat16,
-        layout='zigzag',
-        **GATE_KWARGS,
-    )
-
-
-def test_cp2_zigzag_sequence_cut():
-    """CP2 zigzag: sequences cut at every part boundary (2560/5120/7680)."""
-    if torch.cuda.device_count() < 2:
-        pytest.skip("At least 2 GPUs required")
-
-    run_cp_test_with_spawn(
-        world_size=2,
-        test_name="CP2_Zigzag_SequenceCut",
-        T=10240, H=12, D=128,
-        lengths=[3000, 4000, 3240],
-        dtype=torch.bfloat16,
-        layout='zigzag',
-        **GATE_KWARGS,
-    )
-
-
-def test_cp4_zigzag_complex():
-    """CP4 zigzag: 8 parts of 1280, sequences cut everywhere including the middle boundary."""
-    if torch.cuda.device_count() < 4:
-        pytest.skip("At least 4 GPUs required")
-
-    run_cp_test_with_spawn(
-        world_size=4,
-        test_name="CP4_Zigzag_Complex",
-        T=10240, H=12, D=128,
-        lengths=[1500, 2600, 3000, 3140],
-        dtype=torch.bfloat16,
-        layout='zigzag',
-        **GATE_KWARGS,
-    )
-
-
-def test_cp4_zigzag_boundary_aligned():
-    """CP4 zigzag: all sequence boundaries on part boundaries, no cross-rank state."""
-    if torch.cuda.device_count() < 4:
-        pytest.skip("At least 4 GPUs required")
-
-    run_cp_test_with_spawn(
-        world_size=4,
-        test_name="CP4_Zigzag_BoundaryAligned",
-        T=10240, H=12, D=128,
-        lengths=[2560, 2560, 2560, 2560],
-        dtype=torch.bfloat16,
-        layout='zigzag',
         **GATE_KWARGS,
     )
 

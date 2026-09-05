@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import math
 import warnings
 from typing import TYPE_CHECKING
 
@@ -59,9 +60,12 @@ class GatedSlotAttention(nn.Module):
         self.expand_v = expand_v
         self.num_heads = num_heads
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
+        assert self.num_heads % self.num_kv_heads == 0, "num_heads must be divisible by num_kv_heads"
         self.num_kv_groups = self.num_heads // self.num_kv_heads
-        self.key_dim = int(hidden_size * expand_k)
-        self.value_dim = int(hidden_size * expand_v)
+        key_dim, value_dim = hidden_size * expand_k, hidden_size * expand_v
+        self.key_dim, self.value_dim = round(key_dim), round(value_dim)
+        assert math.isclose(key_dim, self.key_dim), f"`hidden_size * expand_k` must be an integer, got {key_dim}."
+        assert math.isclose(value_dim, self.value_dim), f"`hidden_size * expand_v` must be an integer, got {value_dim}."
         self.key_dim_per_group = self.key_dim // self.num_kv_groups
         self.value_dim_per_group = self.value_dim // self.num_kv_groups
         self.head_k_dim = self.key_dim // self.num_heads

@@ -119,15 +119,15 @@ def fused_recurrent_kda_fwd_kernel_npu(
         )
         T_cur = (eos - bos).to(tl.int32)
     else:
-        bos = (i_n * T).to(tl.int64)
+        bos = tl.cast(i_n, tl.int64) * T
         T_cur = T
 
     if T_cur > 0:
         o_k = i_k * BK + tl.arange(0, BK)
         o_v = i_v * BV + tl.arange(0, BV)
 
-        base_qk = (bos * H + i_h).to(tl.int64) * K
-        base_hv = (bos * HV + i_hv).to(tl.int64)
+        base_qk = (bos * H + i_h) * K
+        base_hv = (bos * HV + i_hv)
 
         p_q = q + base_qk + o_k
         p_k = k + base_qk + o_k
@@ -170,7 +170,7 @@ def fused_recurrent_kda_fwd_kernel_npu(
                 )
                 p_h0 = h0 + state_base + i_hv * K * V
             else:
-                p_h0 = h0 + (i_n * HV + i_hv).to(tl.int64) * K * V
+                p_h0 = h0 + (tl.cast(i_n, tl.int64) * HV + i_hv) * K * V
             if STATE_V_FIRST:
                 p_h0 = p_h0 + o_v[:, None] * K + o_k[None, :]
             else:
@@ -239,7 +239,7 @@ def fused_recurrent_kda_fwd_kernel_npu(
                     )
                     p_ht = ht + state_base + i_hv * K * V
                 else:
-                    p_ht = ht + (bos + i_t).to(tl.int64) * stride_final_state_token + i_hv * K * V
+                    p_ht = ht + (bos + i_t) * stride_final_state_token + i_hv * K * V
                 if STATE_V_FIRST:
                     p_ht = p_ht + o_v[:, None] * K + o_k[None, :]
                 else:
@@ -258,7 +258,7 @@ def fused_recurrent_kda_fwd_kernel_npu(
 
         if not IS_CONTINUOUS_BATCHING:
             if STORE_FINAL_STATE:
-                p_ht = ht + (i_n * HV + i_hv).to(tl.int64) * K * V
+                p_ht = ht + (tl.cast(i_n, tl.int64) * HV + i_hv) * K * V
                 if STATE_V_FIRST:
                     p_ht = p_ht + o_v[:, None] * K + o_k[None, :]
                 else:

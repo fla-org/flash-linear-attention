@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 from fla.layers.utils import (
     get_layer_cache,
     get_unpad_data,
+    get_unpad_indices_and_cu,
     index_first_axis,
     pad_input,
     repad_hidden_states,
@@ -332,9 +333,11 @@ class MomAttention(nn.Module):
         self.num_heads = num_heads
 
         self.key_dim = int(self.num_heads * self.head_dim)
-        self.value_dim = int(self.key_dim * self.expand_v)
+        value_dim, head_v_dim = self.key_dim * self.expand_v, head_dim * self.expand_v
+        self.value_dim, self.head_v_dim = round(value_dim), round(head_v_dim)
+        assert math.isclose(value_dim, self.value_dim), f"`key_dim * expand_v` must be an integer, got {value_dim}."
+        assert math.isclose(head_v_dim, self.head_v_dim), f"`head_dim * expand_v` must be an integer, got {head_v_dim}."
         self.head_qk_dim = head_dim
-        self.head_v_dim = int(head_dim * self.expand_v)
         self.layer_idx = layer_idx
         self.silu = nn.SiLU()
 
@@ -665,7 +668,7 @@ class MomAttention(nn.Module):
         o = self.o_proj(o)
 
         if origin_cu_seqlens is not None:
-            indices, _, _ = get_unpad_data(attention_mask[:, -seq_len:])
+            indices, _ = get_unpad_indices_and_cu(attention_mask, seq_len)
             o = index_first_axis(rearrange(o, "b s ... -> (b s) ..."), indices).unsqueeze(0)
 
         return o, None, past_key_values, router_logits.view(-1, self.num_memories)
