@@ -164,7 +164,6 @@ def fused_kl_div_backward_npu(
     dx: torch.Tensor,
     dw: torch.Tensor,
 ):
-    # keep the unit-gradient fast path on device to avoid a host synchronization
     N, H = dx.shape
     B = compute_elementwise_block_size(N * H, _ELEMENTWISE_MEM_MULT)
 

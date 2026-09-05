@@ -211,7 +211,6 @@ def fused_kl_div_backward(
     dx: torch.Tensor,
     dw: torch.Tensor,
 ):
-    # keep the unit-gradient fast path on device to avoid a host synchronization
     # We use a Triton kernel instead of a PyTorch operation because modifying inputs in-place
     # for gradient storage and backward multiple times causes anomalies with PyTorch but not with Triton.
     N, H = dx.shape
