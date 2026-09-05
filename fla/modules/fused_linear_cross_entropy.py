@@ -154,7 +154,7 @@ def cross_entropy_kernel(
         return
 
     if reduction == "mean":
-        b_total = tl.maximum(tl.load(total), 1)
+        b_total = tl.load(total)
 
     # Online softmax: 2 loads + 1 store (compared with 3 loads + 1 store for the safe softmax)
     # Refer to Algorithm 3 in the paper: https://arxiv.org/pdf/1805.02867

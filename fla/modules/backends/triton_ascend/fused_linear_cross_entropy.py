@@ -104,7 +104,7 @@ def cross_entropy_kernel(
         return
 
     if reduction == "mean":
-        b_total = tl.maximum(tl.load(total), 1)
+        b_total = tl.load(total)
 
     b_l = tl.load(logits + b_y).to(tl.float32) * logit_scale
     if HAS_SOFTCAPPING:
@@ -324,6 +324,7 @@ def fused_linear_cross_entropy_backward_npu(
         g=do,
         N=N*H,
         B=B,
+        num_warps=STATIC_WARPS,
     )
 
     if dw is not None:
@@ -334,6 +335,7 @@ def fused_linear_cross_entropy_backward_npu(
             g=do,
             N=V*H,
             B=B_dw,
+            num_warps=STATIC_WARPS,
         )
 
     if db is not None:
@@ -344,5 +346,6 @@ def fused_linear_cross_entropy_backward_npu(
             g=do,
             N=V,
             B=B_db,
+            num_warps=STATIC_WARPS,
         )
     return dx, dw, db
