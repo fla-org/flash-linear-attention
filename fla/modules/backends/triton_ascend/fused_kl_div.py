@@ -89,6 +89,8 @@ def elementwise_mul_kernel(
     o_x = i_x * B + tl.arange(0, B)
 
     b_g = tl.load(g)
+    if b_g == 1.0:
+        return
     b_x = tl.load(x + o_x, mask=o_x < N)
     tl.store(x + o_x, b_x * b_g, mask=o_x < N)
 
@@ -162,27 +164,27 @@ def fused_kl_div_backward_npu(
     dx: torch.Tensor,
     dw: torch.Tensor,
 ):
-    if torch.ne(do, torch.tensor(1.0, device=do.device)):
-        N, H = dx.shape
-        B = compute_elementwise_block_size(N * H, _ELEMENTWISE_MEM_MULT)
+    # keep the unit-gradient fast path on device to avoid a host synchronization
+    N, H = dx.shape
+    B = compute_elementwise_block_size(N * H, _ELEMENTWISE_MEM_MULT)
 
-        elementwise_mul_kernel[(triton.cdiv(N * H, B),)](
-            x=dx,
+    elementwise_mul_kernel[(triton.cdiv(N * H, B),)](
+        x=dx,
+        g=do,
+        N=N*H,
+        B=B,
+        num_warps=STATIC_WARPS,
+    )
+
+    if dw is not None:
+        V, H = dw.shape
+        B_dw = compute_elementwise_block_size(V * H, _ELEMENTWISE_MEM_MULT)
+        elementwise_mul_kernel[(triton.cdiv(V * H, B_dw),)](
+            x=dw,
             g=do,
-            N=N*H,
-            B=B,
+            N=V*H,
+            B=B_dw,
             num_warps=STATIC_WARPS,
         )
-
-        if dw is not None:
-            V, H = dw.shape
-            B_dw = compute_elementwise_block_size(V * H, _ELEMENTWISE_MEM_MULT)
-            elementwise_mul_kernel[(triton.cdiv(V * H, B_dw),)](
-                x=dw,
-                g=do,
-                N=V*H,
-                B=B_dw,
-                num_warps=STATIC_WARPS,
-            )
 
     return dx, dw
