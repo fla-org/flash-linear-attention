@@ -797,6 +797,79 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
         N = len(cu_seqlens) - 1
     assert K <= 256, "current kernel does not support head dimension larger than 256."
 
+    if context.layout == 'zigzag':
+        if use_graph:
+            raise NotImplementedError("use_graph is not supported with zigzag CP layout")
+        fns = context.front_num_seqs
+        hm = k.new_zeros(2, HV, K, V + K, dtype=torch.float32)
+        if state_v_first:
+            initial_state = k.new_zeros(N, HV, V, K, dtype=torch.float32)
+        else:
+            initial_state = k.new_zeros(N, HV, K, V, dtype=torch.float32)
+        BLOCK_SIZE = 32 if K <= 64 else 64
+        grid_hm = (triton.cdiv(V, BLOCK_SIZE) + triton.cdiv(K, BLOCK_SIZE), HV)
+        # each part exports the affine chain of its last segment, skipped when chain-last
+        for part, (cu_win, is_last) in enumerate(zip(
+                (cu_seqlens[fns - 1: fns + 1], cu_seqlens[-2:]), context.is_last_by_part)):
+            if not is_last:
+                pre_process_fwd_kernel_merged[grid_hm](
+                    k=k,
+                    v=u if v is None else v,
+                    w=w,
+                    g=g,
+                    gk=gk,
+                    bg=bg,
+                    u=u,
+                    hm=hm[part],
+                    cu_seqlens=cu_win,
+                    T=T,
+                    H=H,
+                    HV=HV,
+                    K=K,
+                    V=V,
+                    BT=BT,
+                    BK1=BK,
+                    BLOCK_SIZE=BLOCK_SIZE,
+                    MULTI_SEQS=False,
+                    AFFINE_CHAIN_PRECISION=(
+                        "tf32x3" if use_tf32x3_affine_chain and IS_TF32_SUPPORTED
+                        else ("ieee" if not IS_TF32_SUPPORTED else None)
+                    ),
+                )
+        ag_hm, _ = all_gather_into_tensor(hm, group=context.group)
+        # chain order: front parts of ranks 0..W-1, then back parts of ranks W-1..0
+        slots = torch.cat([ag_hm[:, 0], ag_hm[:, 1].flip(0)])
+        world_size = dist.get_world_size(context.group)
+
+        def grid(meta): return (triton.cdiv(V, meta['BV']), HV)
+        for part in range(2):
+            if not context.is_first_by_part[part]:
+                merge_fwd_bwd_kernel[grid](
+                    h=initial_state[0] if part == 0 else initial_state[fns],
+                    ag_hm=slots,
+                    pre_or_post_num_ranks=context.pre_num_ranks_by_part[part],
+                    rank=rank if part == 0 else 2 * world_size - 1 - rank,
+                    seq_offsets=None,
+                    init_offsets=None,
+                    h0_seq_ids=None,
+                    h0=None,
+                    h_seq_idx=None,
+                    HV=HV,
+                    K=K,
+                    V=V,
+                    BK=BK,
+                    FORWARD=True,
+                    INTRACARD_MODE=False,
+                    NUM_SEQ_ENTRIES=0,
+                    STATE_V_FIRST=state_v_first,
+                    AFFINE_CHAIN_PRECISION=(
+                        "tf32x3" if use_tf32x3_affine_chain and IS_TF32_SUPPORTED
+                        else ("ieee" if not IS_TF32_SUPPORTED else None)
+                    ),
+                    NUM_RANKS_ON_DEVICE=False,
+                )
+        return initial_state
+
     hm = k.new_zeros(HV, K, (V + K), dtype=torch.float32)
     if state_v_first:
         initial_state = k.new_zeros(N, HV, V, K, dtype=torch.float32)
@@ -911,6 +984,80 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
     else:
         N = len(cu_seqlens) - 1
 
+    if context.layout == 'zigzag':
+        if use_graph:
+            raise NotImplementedError("use_graph is not supported with zigzag CP layout")
+        fns = context.front_num_seqs
+        dhm = q.new_zeros(2, HV, K, V + K, dtype=torch.float32)
+        if state_v_first:
+            dht = q.new_zeros(N, HV, V, K, dtype=torch.float32)
+        else:
+            dht = q.new_zeros(N, HV, K, V, dtype=torch.float32)
+        BLOCK_SIZE = 32 if K <= 64 else 64
+        grid_hm = (triton.cdiv(V, BLOCK_SIZE) + triton.cdiv(K, BLOCK_SIZE), HV)
+        # each part exports the backward affine chain of its first segment, skipped when chain-first
+        for part, (cu_win, is_first) in enumerate(zip(
+                (cu_seqlens[:2], cu_seqlens[fns: fns + 2]), context.is_first_by_part)):
+            if not is_first:
+                pre_process_bwd_kernel_merged[grid_hm](
+                    q=q,
+                    k=k if bg is None else bg,
+                    w=w,
+                    g=g,
+                    gk=gk,
+                    do=do,
+                    dhm=dhm[part],
+                    dv=dv,
+                    cu_seqlens=cu_win,
+                    scale=scale,
+                    T=T,
+                    H=H,
+                    HV=HV,
+                    K=K,
+                    V=V,
+                    BT=BT,
+                    BK1=BK,
+                    BLOCK_SIZE=BLOCK_SIZE,
+                    USE_BG=bg is not None,
+                    AFFINE_CHAIN_PRECISION=(
+                        "tf32x3" if use_tf32x3_affine_chain and IS_TF32_SUPPORTED
+                        else ("ieee" if not IS_TF32_SUPPORTED else None)
+                    ),
+                )
+        ag_dhm, _ = all_gather_into_tensor(dhm, group=context.group)
+        # chain order: front parts of ranks 0..W-1, then back parts of ranks W-1..0
+        slots = torch.cat([ag_dhm[:, 0], ag_dhm[:, 1].flip(0)])
+        world_size = dist.get_world_size(context.group)
+
+        def grid(meta): return (triton.cdiv(V, meta['BV']), HV)
+        for part in range(2):
+            if not context.is_last_by_part[part]:
+                merge_fwd_bwd_kernel[grid](
+                    h=dht[fns - 1] if part == 0 else dht[-1],
+                    ag_hm=slots,
+                    pre_or_post_num_ranks=context.post_num_ranks_by_part[part],
+                    rank=rank if part == 0 else 2 * world_size - 1 - rank,
+                    seq_offsets=None,
+                    init_offsets=None,
+                    h0_seq_ids=None,
+                    h0=None,
+                    h_seq_idx=None,
+                    HV=HV,
+                    K=K,
+                    V=V,
+                    BK=BK,
+                    FORWARD=False,
+                    INTRACARD_MODE=False,
+                    NUM_SEQ_ENTRIES=0,
+                    STATE_V_FIRST=state_v_first,
+                    AFFINE_CHAIN_PRECISION=(
+                        "tf32x3" if use_tf32x3_affine_chain and IS_TF32_SUPPORTED
+                        else ("ieee" if not IS_TF32_SUPPORTED else None)
+                    ),
+                    NUM_RANKS_ON_DEVICE=False,
+                )
+        return dht, None
+
     dhm = q.new_zeros(HV, K, V + K, dtype=torch.float32)
     if state_v_first:
         dht = q.new_zeros(N, HV, V, K, dtype=torch.float32)
@@ -995,6 +1142,12 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
 def compress_h0(h0: torch.Tensor, context: FLACPContext):
     if h0 is None or len(context.cu_seqlens) == 2:
         return h0
+    if context.layout == 'zigzag':
+        if len(context.cu_seqlens) == 3:
+            # one segment per part; both rows may carry a cross-rank state
+            return h0
+        # only each part's first segment can carry a cross-rank state
+        return h0[[0, context.front_num_seqs]]
     # Here must use clone op or the full tensor will be saved for backward
     return h0[:1].clone()
 
@@ -1003,6 +1156,12 @@ def expand_h0(h0: torch.Tensor, context: FLACPContext):
     if h0 is None or len(context.cu_seqlens) == 2:
         return h0
     B = len(context.cu_seqlens) - 1
+    if context.layout == 'zigzag':
+        if B == 2:
+            return h0
+        expand_h0 = h0.new_zeros(B, *h0.shape[1:])
+        expand_h0[[0, context.front_num_seqs]] = h0
+        return expand_h0
     expand_h0 = h0.new_zeros(B, *h0.shape[1:])
     expand_h0[:1] = h0
     return expand_h0
