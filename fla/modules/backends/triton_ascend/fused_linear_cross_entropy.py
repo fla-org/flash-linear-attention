@@ -103,6 +103,9 @@ def cross_entropy_kernel(
             tl.store(logits + o_v, 0.0, mask=o_v < V)
         return
 
+    if reduction == "mean":
+        b_total = tl.load(total)
+
     b_l = tl.load(logits + b_y).to(tl.float32) * logit_scale
     if HAS_SOFTCAPPING:
         b_t_y = tanh(b_l / logit_softcapping)
@@ -128,7 +131,7 @@ def cross_entropy_kernel(
         if HAS_SOFTCAPPING:
             b_p = b_p * (1.0 - b_t * b_t)
         if reduction == "mean":
-            b_p = b_p / total
+            b_p = b_p / b_total
         tl.store(logits + o_v, b_p, mask=o_v < V)
 
     if label_smoothing > 0:
@@ -142,8 +145,8 @@ def cross_entropy_kernel(
         b_sc_factor = 1.0
 
     if reduction == 'mean':
-        b_loss = b_loss / total
-        b_l += (label_smoothing - 1) / total * logit_scale * b_sc_factor
+        b_loss = b_loss / b_total
+        b_l += (label_smoothing - 1) / b_total * logit_scale * b_sc_factor
     else:
         b_l += (label_smoothing - 1) * logit_scale * b_sc_factor
 
@@ -162,6 +165,8 @@ def elementwise_mul_kernel(
     o_x = i_x * B + tl.arange(0, B)
 
     b_g = tl.load(g)
+    if b_g == 1.0:
+        return
     b_x = tl.load(x + o_x, mask=o_x < N)
     tl.store(x + o_x, b_x * b_g, mask=o_x < N)
 
@@ -236,7 +241,7 @@ def fused_linear_cross_entropy_forward_npu(
     db = torch.zeros_like(bias, device=device, dtype=bias_grad_dtype) if bias is not None else None
     loss = torch.zeros(N, device=device, dtype=torch.float)
 
-    total = target.ne(ignore_index).sum().item()
+    total = target.ne(ignore_index).sum()
 
     for ic in range(NC):
         start, end = ic * C, min((ic + 1) * C, N)
@@ -311,37 +316,36 @@ def fused_linear_cross_entropy_backward_npu(
     dw: torch.Tensor,
     db: torch.Tensor,
 ):
-    if torch.ne(do, torch.tensor(1.0, device=do.device)):
-        N, H = dx.shape
-        B = compute_elementwise_block_size(N * H, _ELEMENTWISE_MEM_MULT)
+    N, H = dx.shape
+    B = compute_elementwise_block_size(N * H, _ELEMENTWISE_MEM_MULT)
 
-        elementwise_mul_kernel[(triton.cdiv(N * H, B),)](
-            x=dx,
+    elementwise_mul_kernel[(triton.cdiv(N * H, B),)](
+        x=dx,
+        g=do,
+        N=N*H,
+        B=B,
+        num_warps=STATIC_WARPS,
+    )
+
+    if dw is not None:
+        V, H = dw.shape
+        B_dw = compute_elementwise_block_size(V * H, _ELEMENTWISE_MEM_MULT)
+        elementwise_mul_kernel[(triton.cdiv(V * H, B_dw),)](
+            x=dw,
             g=do,
-            N=N*H,
-            B=B,
+            N=V*H,
+            B=B_dw,
             num_warps=STATIC_WARPS,
         )
 
-        if dw is not None:
-            V, H = dw.shape
-            B_dw = compute_elementwise_block_size(V * H, _ELEMENTWISE_MEM_MULT)
-            elementwise_mul_kernel[(triton.cdiv(V * H, B_dw),)](
-                x=dw,
-                g=do,
-                N=V*H,
-                B=B_dw,
-                num_warps=STATIC_WARPS,
-            )
-
-        if db is not None:
-            V = db.shape[0]
-            B_db = compute_elementwise_block_size(V, _ELEMENTWISE_MEM_MULT)
-            elementwise_mul_kernel[(triton.cdiv(V, B_db),)](
-                x=db,
-                g=do,
-                N=V,
-                B=B_db,
-                num_warps=STATIC_WARPS,
-            )
+    if db is not None:
+        V = db.shape[0]
+        B_db = compute_elementwise_block_size(V, _ELEMENTWISE_MEM_MULT)
+        elementwise_mul_kernel[(triton.cdiv(V, B_db),)](
+            x=db,
+            g=do,
+            N=V,
+            B=B_db,
+            num_warps=STATIC_WARPS,
+        )
     return dx, dw, db

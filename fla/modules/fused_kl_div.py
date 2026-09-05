@@ -116,6 +116,8 @@ def elementwise_mul_kernel(
 
     # Load the gradient output value
     b_g = tl.load(g)
+    if b_g == 1.0:
+        return
     b_x = tl.load(x + o_x, mask=o_x < N)
     tl.store(x + o_x, b_x * b_g, mask=o_x < N)
 
@@ -209,31 +211,29 @@ def fused_kl_div_backward(
     dx: torch.Tensor,
     dw: torch.Tensor,
 ):
-    # If cross entropy is the last layer, do is 1.0. Skip the mul to save time
-    if torch.ne(do, torch.tensor(1.0, device=do.device)):
-        # We use a Triton kernel instead of a PyTorch operation because modifying inputs in-place
-        # for gradient storage and backward multiple times causes anomalies with PyTorch but not with Triton.
-        N, H = dx.shape
-        B = min(MAX_FUSED_SIZE, triton.next_power_of_2(H))
+    # We use a Triton kernel instead of a PyTorch operation because modifying inputs in-place
+    # for gradient storage and backward multiple times causes anomalies with PyTorch but not with Triton.
+    N, H = dx.shape
+    B = min(MAX_FUSED_SIZE, triton.next_power_of_2(H))
 
-        elementwise_mul_kernel[(triton.cdiv(N * H, B),)](
-            x=dx,
+    elementwise_mul_kernel[(triton.cdiv(N * H, B),)](
+        x=dx,
+        g=do,
+        N=N*H,
+        B=B,
+        num_warps=STATIC_WARPS,
+    )
+
+    # handle dw
+    if dw is not None:
+        V, H = dw.shape
+        elementwise_mul_kernel[(triton.cdiv(V * H, B),)](
+            x=dw,
             g=do,
-            N=N*H,
+            N=V*H,
             B=B,
             num_warps=STATIC_WARPS,
         )
-
-        # handle dw
-        if dw is not None:
-            V, H = dw.shape
-            elementwise_mul_kernel[(triton.cdiv(V * H, B),)](
-                x=dw,
-                g=do,
-                N=V*H,
-                B=B,
-                num_warps=STATIC_WARPS,
-            )
 
     return dx, dw
 
