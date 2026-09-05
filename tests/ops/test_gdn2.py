@@ -22,7 +22,12 @@ import torch.nn.functional as F
 
 from fla.ops.gdn2 import chunk_gdn2, fused_recurrent_gdn2, naive_recurrent_gdn2
 from fla.ops.kda.gate import naive_kda_gate, naive_kda_lowerbound_gate
-from fla.utils import assert_close, device
+from fla.utils import IS_AMD, IS_NPU, IS_NVIDIA, assert_close, device
+
+_requires_accelerator = pytest.mark.skipif(
+    not (IS_NVIDIA or IS_AMD or IS_NPU),
+    reason="CUDA/ROCm or Ascend NPU required",
+)
 
 
 def _unwrap_autotuner(fn):
@@ -72,7 +77,7 @@ def _rand_inputs(B, T, H, HV, K, V, dtype, *, gate_in_kernel=False, b_scale=1.0,
 # =============================================================================
 # fused_recurrent
 # =============================================================================
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@_requires_accelerator
 @pytest.mark.parametrize(
     ("B", "T", "H", "HV", "K", "V", "scale", "use_qk_l2norm_in_kernel", "dtype"),
     [
@@ -127,7 +132,7 @@ def test_fused_recurrent(B, T, H, HV, K, V, scale, use_qk_l2norm_in_kernel, dtyp
     assert_close("ht", ref_ht, tri_ht, 0.005)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@_requires_accelerator
 @pytest.mark.parametrize(
     ("B", "T", "H", "K", "V", "has_a_log", "has_dt_bias", "safe_gate"),
     [
@@ -179,7 +184,7 @@ def test_fused_recurrent_gate_in_kernel(B, T, H, K, V, has_a_log, has_dt_bias, s
     assert_close("ht", ref_ht, tri_ht, 0.005)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@_requires_accelerator
 def test_fused_recurrent_state_v_first():
     """state_v_first stores the state transposed to [V, K]; output must match."""
     dtype = torch.float32
@@ -192,7 +197,7 @@ def test_fused_recurrent_state_v_first():
     assert_close("ht", ht0, ht1.transpose(-1, -2), 0.005)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@_requires_accelerator
 def test_fused_recurrent_initial_state():
     dtype = torch.float32
     B, T, H, K, V = 2, 64, 2, 64, 64
@@ -224,7 +229,7 @@ def test_fused_recurrent_initial_state():
     assert_close("ht", ref_ht, tri_ht, 0.005)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@_requires_accelerator
 @pytest.mark.parametrize(
     ("cu_seqlens", "H", "K", "V"),
     [
@@ -287,7 +292,7 @@ def test_chunk_invalid_chunk_size(chunk_size):
         chunk_gdn2(q=q, k=k, v=v, g=g, b=b, w=w, chunk_size=chunk_size)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@_requires_accelerator
 @pytest.mark.parametrize(
     ("B", "T", "H", "K", "V", "scale", "use_qk_l2norm_in_kernel", "use_gate_in_kernel", "safe_gate", "dtype"),
     [
@@ -296,6 +301,8 @@ def test_chunk_invalid_chunk_size(chunk_size):
             (1, 64, 2, 32, 32, 1.0, False, False, False, torch.float32),
             (2, 256, 2, 64, 64, 0.5, True, False, False, torch.float32),
             (2, 100, 3, 64, 64, 1.0, True, False, False, torch.float16),   # non-multiple T, fp16
+            (1, 64, 1, 128, 128, 1.0, True, False, False, torch.bfloat16),
+            (1, 64, 1, 256, 256, 1.0, True, False, False, torch.bfloat16),
             (2, 256, 2, 64, 64, 1.0, True, True, False, torch.float32),    # gate-in-kernel
             (1, 128, 2, 64, 64, 1.0, True, True, True, torch.float32),     # gate-in-kernel + safe_gate
         ]
@@ -375,7 +382,7 @@ def test_chunk(B, T, H, K, V, scale, use_qk_l2norm_in_kernel, use_gate_in_kernel
         assert_close("dt_bias", ref_grads["dt_bias"], tri_grads["dt_bias"], 0.02)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@_requires_accelerator
 def test_chunk_state_v_first():
     """state_v_first must give the same output and a transposed final state."""
     dtype = torch.float32
@@ -412,7 +419,7 @@ def test_chunk_state_v_first():
     assert_close("ht", ht0, ht1.transpose(-1, -2), 0.005)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@_requires_accelerator
 @pytest.mark.parametrize(
     ("cu_seqlens", "H", "K", "V", "use_gate_in_kernel", "dtype"),
     [
@@ -490,7 +497,7 @@ def test_chunk_varlen(cu_seqlens, H, K, V, use_gate_in_kernel, dtype):
     assert_close("dh0", ref_grads["h0"], tri_grads["h0"], 0.012)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@_requires_accelerator
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
 def test_chunk_matches_fused_recurrent(dtype):
     """The two production kernels must agree with each other."""
@@ -504,7 +511,7 @@ def test_chunk_matches_fused_recurrent(dtype):
     assert_close("ht", ht_rec, ht_chunk, 0.006)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@_requires_accelerator
 @torch.inference_mode()
 def test_chunk_return_intermediate_states():
     """return_intermediate_states yields per-chunk pre-states h; the output must
@@ -534,7 +541,7 @@ def test_chunk_return_intermediate_states():
 # =============================================================================
 # layer — GatedDeltaNet2 (GVA + short conv) end to end
 # =============================================================================
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@_requires_accelerator
 @pytest.mark.parametrize(
     ("num_heads", "num_v_heads", "use_short_conv"),
     [
