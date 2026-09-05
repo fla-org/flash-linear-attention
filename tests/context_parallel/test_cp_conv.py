@@ -94,6 +94,7 @@ def run_cp_conv_test_worker(
     W: int,
     lengths: list[int],
     dtype,
+    layout: str = 'contiguous',
 ):
     """
     Worker function for CP convolution test.
@@ -104,6 +105,8 @@ def run_cp_conv_test_worker(
         device = torch.device(f'cuda:{rank}')
 
         assert T % world_size == 0, f"T={T} must be divisible by world_size={world_size}"
+        if layout == 'zigzag':
+            assert T % (2 * world_size) == 0, f"T={T} must be divisible by 2*world_size={2 * world_size} for zigzag"
         assert sum(lengths) == T, f"Sum of lengths {sum(lengths)} must equal T={T}"
 
         if rank == 0:
@@ -158,19 +161,31 @@ def run_cp_conv_test_worker(
         # Step 3: Context Parallel Run
         dist.barrier()
 
-        context = build_cp_context(cu_seqlens_global, group=dist.group.WORLD, conv1d_kernel_size=W)
+        context = build_cp_context(cu_seqlens_global, group=dist.group.WORLD, conv1d_kernel_size=W, layout=layout)
 
-        chunk_size = T // world_size
-        start_idx = rank * chunk_size
-        end_idx = (rank + 1) * chunk_size
+        if layout == 'zigzag':
+            # local input = [front part; back part]; part_len = T / (2 * world_size)
+            part_len = T // (2 * world_size)
+            front_start = rank * part_len
+            back_start = (2 * world_size - 1 - rank) * part_len
 
-        x_local = x_global[:, start_idx:end_idx, :].clone().detach().requires_grad_(True)
-        dy_local = dy_global[:, start_idx:end_idx, :].clone()
+            def slice_local(t):
+                return torch.cat([t[:, front_start: front_start + part_len],
+                                  t[:, back_start: back_start + part_len]], dim=1)
+        else:
+            chunk_size = T // world_size
+            start_idx = rank * chunk_size
+            end_idx = (rank + 1) * chunk_size
+
+            def slice_local(t):
+                return t[:, start_idx:end_idx]
+
+        x_local = slice_local(x_global).clone().detach().requires_grad_(True)
+        dy_local = slice_local(dy_global).clone()
         weight_local = weight.clone().detach().requires_grad_(True)
         bias_local = bias.clone().detach().requires_grad_(True)
 
-        print(f"[Rank {rank}] chunk: [{start_idx}, {end_idx}), "
-              f"cu_seqlens: {context.cu_seqlens.tolist()}, "
+        print(f"[Rank {rank}] cu_seqlens: {context.cu_seqlens.tolist()}, "
               f"pre_num_ranks: {context.pre_num_ranks}, "
               f"pre_num_conv_tokens: {context.pre_num_conv_tokens}")
         dist.barrier()
@@ -188,13 +203,17 @@ def run_cp_conv_test_worker(
         y_local.backward(dy_local)
 
         # Step 4: Result Aggregation and Verification
-        y_gathered = [torch.zeros_like(y_local) for _ in range(world_size)]
-        dist.all_gather(y_gathered, y_local)
-        y_cp_global = torch.cat(y_gathered, dim=1)
+        def gather_global(local):
+            gathered = [torch.zeros_like(local) for _ in range(world_size)]
+            dist.all_gather(gathered, local)
+            if layout == 'zigzag':
+                # undo the zigzag permutation: fronts in rank order, then backs reversed
+                return torch.cat([g[:, :part_len] for g in gathered]
+                                 + [g[:, part_len:] for g in reversed(gathered)], dim=1)
+            return torch.cat(gathered, dim=1)
 
-        dx_gathered = [torch.zeros_like(x_local.grad) for _ in range(world_size)]
-        dist.all_gather(dx_gathered, x_local.grad)
-        dx_cp_global = torch.cat(dx_gathered, dim=1)
+        y_cp_global = gather_global(y_local)
+        dx_cp_global = gather_global(x_local.grad)
 
         dw_cp = weight_local.grad.clone()
         db_cp = bias_local.grad.clone()
@@ -233,6 +252,7 @@ def run_cp_test_with_spawn(
     W: int,
     lengths: list[int],
     dtype=torch.float32,
+    layout: str = 'contiguous',
 ):
     """
     Run CP test using torch.multiprocessing.spawn.
@@ -241,7 +261,7 @@ def run_cp_test_with_spawn(
     # Use start_processes with spawn to avoid fork/spawn conflicts
     mp.start_processes(
         run_cp_conv_test_worker,
-        args=(world_size, test_name, T, D, W, lengths, dtype),
+        args=(world_size, test_name, T, D, W, lengths, dtype, layout),
         nprocs=world_size,
         join=True,
         start_method='spawn',
@@ -251,6 +271,74 @@ def run_cp_test_with_spawn(
 # ============================================================
 # Test Scenario Definitions
 # ============================================================
+
+def test_cp2_zigzag_single_sequence():
+    """CP2 zigzag: single sequence snaking through all 4 parts (part_len=256)."""
+    if torch.cuda.device_count() < 2:
+        pytest.skip("At least 2 GPUs required")
+
+    run_cp_test_with_spawn(
+        world_size=2,
+        test_name="CP2_Zigzag_SingleSequence",
+        T=1024,
+        D=128,
+        W=4,
+        lengths=[1024],
+        dtype=torch.float32,
+        layout='zigzag',
+    )
+
+
+def test_cp2_zigzag_sequence_cut():
+    """CP2 zigzag: sequences cut at every part boundary (256/512/768)."""
+    if torch.cuda.device_count() < 2:
+        pytest.skip("At least 2 GPUs required")
+
+    run_cp_test_with_spawn(
+        world_size=2,
+        test_name="CP2_Zigzag_SequenceCut",
+        T=1024,
+        D=128,
+        W=4,
+        lengths=[300, 400, 324],
+        dtype=torch.float32,
+        layout='zigzag',
+    )
+
+
+def test_cp4_zigzag_complex():
+    """CP4 zigzag: 8 parts of 128, sequences cut everywhere including the middle boundary."""
+    if torch.cuda.device_count() < 4:
+        pytest.skip("At least 4 GPUs required")
+
+    run_cp_test_with_spawn(
+        world_size=4,
+        test_name="CP4_Zigzag_Complex",
+        T=1024,
+        D=128,
+        W=4,
+        lengths=[150, 260, 300, 314],
+        dtype=torch.float32,
+        layout='zigzag',
+    )
+
+
+def test_cp4_zigzag_boundary_aligned():
+    """CP4 zigzag: all sequence boundaries on part boundaries, no cross-rank state."""
+    if torch.cuda.device_count() < 4:
+        pytest.skip("At least 4 GPUs required")
+
+    run_cp_test_with_spawn(
+        world_size=4,
+        test_name="CP4_Zigzag_BoundaryAligned",
+        T=1024,
+        D=128,
+        W=4,
+        lengths=[256, 256, 256, 256],
+        dtype=torch.float32,
+        layout='zigzag',
+    )
+
 
 def test_cp2_sequence_cut():
     """
