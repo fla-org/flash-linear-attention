@@ -31,6 +31,7 @@ from .mesa_net import MesaNet
 from .mla import MultiheadLatentAttention
 from .moba import MoBA
 from .mom import MomAttention
+from .momentum_deltanet import MomentumDeltaNet
 from .multiscale_retention import MultiScaleRetention
 from .nsa import NativeSparseAttention
 from .parallax import Parallax
@@ -71,6 +72,7 @@ __all__ = [
     'MesaNet',
     'MoBA',
     'MomAttention',
+    'MomentumDeltaNet',
     'MultiScaleRetention',
     'MultiheadLatentAttention',
     'NativeSparseAttention',
