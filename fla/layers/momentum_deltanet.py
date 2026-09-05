@@ -15,7 +15,7 @@ import torch.nn as nn
 from einops import rearrange, repeat
 from torch.nn import functional as F
 
-from fla.layers.utils import get_layer_cache, get_unpad_data, index_first_axis, pad_input, update_layer_cache
+from fla.layers.utils import get_layer_cache, update_layer_cache
 from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
 from fla.ops.momentum_delta_rule import chunk_momentum_delta_rule, fused_recurrent_momentum_delta_rule
 
@@ -211,9 +211,6 @@ class MomentumDeltaNet(nn.Module):
         cu_seqlens = kwargs.get('cu_seqlens')
         if cu_seqlens is not None:
             raise NotImplementedError("Variable-length inputs are not yet supported by MomentumDeltaNet.")
-        if cu_seqlens is None and attention_mask is not None:
-            indices, cu_seqlens, _ = get_unpad_data(attention_mask[:, -q_len:])
-            hidden_states = index_first_axis(rearrange(hidden_states, "b s ... -> (b s) ..."), indices).unsqueeze(0)
 
         if self.use_short_conv:
             conv_state_q, conv_state_k, conv_state_v = None, None, None
@@ -332,7 +329,5 @@ class MomentumDeltaNet(nn.Module):
             o = self.o_norm(o)
         o = rearrange(o, 'b t h d -> b t (h d)')
         o = self.o_proj(o)
-        if attention_mask is not None:
-            o = pad_input(o.squeeze(0), indices, batch_size, q_len)
 
         return o, None, past_key_values

@@ -25,7 +25,7 @@ class ChunkMomentumDeltaRuleFunction(torch.autograd.Function):
             q_rstd, k_rstd, p_rstd = None, None, None
         if cu_seqlens is not None:
             raise NotImplementedError("Variable-length `cu_seqlens` not yet supported for full momentum PyTorch path.")
-        k_eta = k if eta is None else (k * eta.unsqueeze(-1)).to(q.dtype)
+        k_eta = (k * eta.unsqueeze(-1)).to(q.dtype)
         p_eff = p if not use_p_times_alpha else (p * log_alpha.exp().unsqueeze(-1)).to(q.dtype)
         o, final_state = chunk_momentum_delta_rule_ref(
             q=q, k=k_eta, v=v, p=p_eff, log_alpha=log_alpha, log_mu=log_mu,

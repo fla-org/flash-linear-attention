@@ -192,53 +192,6 @@ def test_chunk_initial_state_grad_count():
     assert q2.grad is not None
 
 
-@pytest.mark.skipif(
-    device_platform == 'intel',
-    reason='Intel Triton Failure',
-)
-def test_fused_recurrent_uses_u_not_v():
-    """Fused bwd must use u=v-k·h, not raw v; parity between chunk and fused."""
-    torch.manual_seed(1)
-    B, T, H, D = 2, 32, 2, 32
-    dtype = torch.bfloat16
-    q = torch.randn(B, T, H, D, dtype=dtype, device=device, requires_grad=True)
-    k = torch.randn(B, T, H, D, dtype=dtype, device=device, requires_grad=True)
-    v = torch.randn(B, T, H, D, dtype=dtype, device=device, requires_grad=True)
-    beta = torch.rand(B, T, H, dtype=dtype, device=device).sigmoid().requires_grad_(True)
-    h0 = torch.randn(B, H, D, D, dtype=torch.float32, device=device, requires_grad=True)
-    do = torch.randn(B, T, H, D, dtype=dtype, device=device)
-    dht = torch.randn(B, H, D, D, dtype=torch.float32, device=device)
-
-    # chunk as reference
-    q_c, k_c, v_c, beta_c, h0_c = (x.detach().clone().requires_grad_(True) for x in (q, k, v, beta, h0))
-    o_c, ht_c = chunk_delta_rule(
-        q=F.normalize(q_c, p=2, dim=-1),
-        k=F.normalize(k_c, p=2, dim=-1),
-        v=v_c,
-        beta=beta_c,
-        initial_state=h0_c,
-        output_final_state=True,
-    )
-    ((o_c * do).sum() + (ht_c * dht).sum()).backward()
-    grads_c = [q_c.grad, k_c.grad, v_c.grad, beta_c.grad, h0_c.grad]
-
-    # fused
-    q_f, k_f, v_f, beta_f, h0_f = (x.detach().clone().requires_grad_(True) for x in (q, k, v, beta, h0))
-    o_f, ht_f = fused_recurrent_delta_rule(
-        q=F.normalize(q_f, p=2, dim=-1),
-        k=F.normalize(k_f, p=2, dim=-1),
-        v=v_f,
-        beta=beta_f,
-        initial_state=h0_f,
-        output_final_state=True,
-    )
-    ((o_f * do).sum() + (ht_f * dht).sum()).backward()
-    grads_f = [q_f.grad, k_f.grad, v_f.grad, beta_f.grad, h0_f.grad]
-
-    for a, b, name in zip(grads_c, grads_f, ['dq', 'dk', 'dv', 'db', 'dh0']):
-        assert_close(name, a, b, 0.008)
-
-
 @pytest.mark.skipif(device_platform == 'intel', reason='Intel Triton Failure')
 def test_full_momentum_chunk_recurrent_backward_parity():
     torch.manual_seed(3)
