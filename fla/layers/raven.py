@@ -24,6 +24,7 @@ from fla.modules import FusedRMSNormGated, RMSNorm, RotaryEmbedding
 from fla.modules.activations import ACT2FN
 from fla.modules.feature_map import ReLUFeatureMap, SwishFeatureMap, T2RFeatureMap
 from fla.modules.layernorm import rms_norm_linear
+from fla.modules.rotary import get_max_seqlen
 from fla.ops.gsa import chunk_gsa, fused_recurrent_gsa
 from fla.ops.utils.index import prepare_lens_from_mask
 
@@ -31,12 +32,6 @@ if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
     from fla.models.utils import Cache
-
-
-def _max_offset(seqlen_offset: int | torch.Tensor) -> int:
-    if isinstance(seqlen_offset, int):
-        return seqlen_offset
-    return int(seqlen_offset.max().item())
 
 
 class Raven(nn.Module):
@@ -243,21 +238,23 @@ class Raven(nn.Module):
         mode = 'fused_recurrent' if hidden_states.shape[1] <= 64 else self.mode
 
         last_state = get_layer_cache(self, past_key_values)
-        seqlen_offset, max_seqlen = 0, q_len
+        seqlen_offset, rope_cache_length = 0, q_len
         if past_key_values is not None:
             seqlen_offset = past_key_values.get_seq_length(self.layer_idx)
             if self.use_rope:
-                max_seqlen = q_len + _max_offset(seqlen_offset)
+                rope_cache_length = q_len + seqlen_offset
 
         cu_seqlens = kwargs.get('cu_seqlens')
         hidden_states, indices, cu_seqlens = unpad_hidden_states(hidden_states, cu_seqlens, attention_mask, q_len)
+        if self.use_rope and cu_seqlens is not None:
+            rope_cache_length = get_max_seqlen(
+                cu_seqlens, kwargs.get('cu_seqlens_cpu')) + seqlen_offset
         # Shift RoPE positions by each sequence's left padding only when decoding on
         # top of cached tokens. During prefill the unpadded tokens are already packed
         # contiguously per `cu_seqlens`, so positions start at 0; adding `lens - mask_len`
         # there would push them negative.
-        if self.use_rope and indices is not None and _max_offset(seqlen_offset) > 0:
+        if self.use_rope and indices is not None and seqlen_offset > 0:
             seqlen_offset = seqlen_offset + prepare_lens_from_mask(attention_mask) - attention_mask.shape[-1]
-            max_seqlen = q_len + _max_offset(seqlen_offset)
 
         q = rearrange(self.q_proj(hidden_states), '... (h d) -> ... h d', d=self.head_k_dim)
         k = rearrange(self.k_proj(hidden_states), '... (h d) -> ... h d', d=self.head_k_dim)
@@ -274,9 +271,10 @@ class Raven(nn.Module):
         q, k = self.q_norm(q), self.k_norm(k)
 
         if self.use_rope:
-            if self.max_position_embeddings is not None:
-                max_seqlen = max(max_seqlen, self.max_position_embeddings)
-            q, k = self.rotary(q, k, seqlen_offset=seqlen_offset, max_seqlen=max_seqlen, cu_seqlens=cu_seqlens)
+            if past_key_values is not None and cu_seqlens is None and self.max_position_embeddings is not None:
+                rope_cache_length = max(rope_cache_length, self.max_position_embeddings)
+            q, k = self.rotary(
+                q, k, seqlen_offset=seqlen_offset, max_seqlen=rope_cache_length, cu_seqlens=cu_seqlens)
 
         v = self.gate_fn(v)
 

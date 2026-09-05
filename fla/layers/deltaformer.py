@@ -15,6 +15,7 @@ from einops import rearrange
 from transformers.utils import logging
 
 from fla.modules import RMSNorm, RotaryEmbedding
+from fla.modules.rotary import get_max_seqlen
 from fla.ops.deltaformer import deltaformer_attn
 
 if TYPE_CHECKING:
@@ -128,11 +129,9 @@ class DeltaFormerAttention(nn.Module):
         if past_key_values is not None:
             raise NotImplementedError("DeltaFormerAttention does not support `past_key_values`")
 
-        max_seqlen = q_len
-        if self.max_position_embeddings is not None:
-            max_seqlen = max(max_seqlen, self.max_position_embeddings)
-
-        q, k = self.rotary(q, k, seqlen_offset=0, max_seqlen=max_seqlen, cu_seqlens=cu_seqlens_kw)
+        rope_cache_length = q_len if cu_seqlens_kw is None else get_max_seqlen(
+            cu_seqlens_kw, kwargs.get('cu_seqlens_cpu'))
+        q, k = self.rotary(q, k, seqlen_offset=0, max_seqlen=rope_cache_length, cu_seqlens=cu_seqlens_kw)
 
         o = deltaformer_attn(
             q=q,
@@ -141,6 +140,7 @@ class DeltaFormerAttention(nn.Module):
             beta=beta,
             attention_mask=attention_mask,
             cu_seqlens=cu_seqlens_kw,
+            max_seqlen=rope_cache_length,
         )
 
         o = o.reshape(batch_size, q_len, -1)

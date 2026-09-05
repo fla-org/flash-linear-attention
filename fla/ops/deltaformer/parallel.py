@@ -724,6 +724,7 @@ def deltaformer_attn(
     attention_mask: torch.LongTensor | None = None,
     cu_seqlens: torch.LongTensor | None = None,
     C: int = BLOCK_SIZE_C,
+    max_seqlen: int | None = None,
 ) -> torch.Tensor:
     if flash_attn_func is None:
         raise ImportError("Please install Flash Attention via `pip install flash-attn --no-build-isolation` first")
@@ -754,7 +755,8 @@ def deltaformer_attn(
         )
         o = pad_input(o, indices_q, B, T)
     elif cu_seqlens is not None:
-        max_seqlen = int((cu_seqlens[1:] - cu_seqlens[:-1]).max().item())
+        if max_seqlen is None:
+            max_seqlen = int((cu_seqlens[1:] - cu_seqlens[:-1]).max().item())
         o = flash_attn_varlen_func(
             q.squeeze(0), k.squeeze(0), u.squeeze(0),
             cu_seqlens_q=cu_seqlens,
