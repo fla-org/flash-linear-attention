@@ -65,7 +65,7 @@ def logsumexp_fwd_kernel(
     tl.store(z + i_n * tl.cdiv(D, B) + i_d, b_z)
 
 
-@dispatch('modules')
+@dispatch
 def logsumexp_fwd(
     x,
     scale: float | None = None,
@@ -278,7 +278,7 @@ def elementwise_mul_kernel(
     tl.store(x + o_x, b_x * b_g, mask=o_x < N)
 
 
-@dispatch('modules')
+@dispatch
 def fused_linear_cross_entropy_forward(
     x: torch.Tensor,
     target: torch.LongTensor,
@@ -415,7 +415,7 @@ def fused_linear_cross_entropy_forward(
     return loss, dx, dw, db
 
 
-@dispatch('modules')
+@dispatch
 def fused_linear_cross_entropy_backward(
     do: torch.Tensor,
     dx: torch.Tensor,

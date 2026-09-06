@@ -9,7 +9,6 @@ import warnings
 
 import torch
 
-from fla.backends import dispatch
 from fla.ops.cp import FLACPContext
 from fla.ops.cp.chunk_delta_h import (
     chunk_gated_delta_rule_bwd_dhu_pre_process,
@@ -17,6 +16,7 @@ from fla.ops.cp.chunk_delta_h import (
     compress_h0,
     expand_h0,
 )
+from fla.ops.generalized_delta_rule.dplr.backends import dispatch
 from fla.ops.generalized_delta_rule.dplr.chunk_A_bwd import chunk_dplr_bwd_dqk_intra
 from fla.ops.generalized_delta_rule.dplr.chunk_A_fwd import chunk_dplr_fwd_intra
 from fla.ops.generalized_delta_rule.dplr.chunk_h_bwd import chunk_dplr_bwd_dhu
@@ -458,7 +458,7 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
         )
 
 
-@dispatch('generalized_delta_rule.dplr')
+@dispatch
 @torch.compiler.disable
 def chunk_dplr_delta_rule(
     q: torch.Tensor,

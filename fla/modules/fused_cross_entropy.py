@@ -323,7 +323,7 @@ class CrossEntropyLossFunction(torch.autograd.Function):
         return dlogits, None, None, None, None, None, None, None, None, None
 
 
-@dispatch('modules')
+@dispatch
 def cross_entropy_loss(
     logits: torch.Tensor,
     target: torch.Tensor,

@@ -7,15 +7,14 @@
 
 """AttnRes backends."""
 
-from fla.backends import BackendRegistry, dispatch
+from fla.backends import BackendRegistry
 from fla.ops.attnres.backends.triton_ascend import TritonAscendAttnResBackend
 
 attnres_registry = BackendRegistry("attnres")
 
 attnres_registry.register(TritonAscendAttnResBackend())
 
-# gluon.py imports triton.experimental at module load; without this guard, import fails
-# on NPU and attnres backends never register (including triton_ascend above).
+# gluon.py imports triton.experimental at module load; keep the Ascend backend usable when Gluon is unavailable.
 try:
     from fla.ops.attnres.backends.gluon import AttnResGluonBackend
 
@@ -23,5 +22,7 @@ try:
 except ImportError:
     pass
 
+
+dispatch = attnres_registry.dispatch
 
 __all__ = ['attnres_registry', 'dispatch']

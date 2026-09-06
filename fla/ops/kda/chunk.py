@@ -11,10 +11,10 @@ import warnings
 
 import torch
 
-from fla.backends import dispatch
 from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
 from fla.ops.common.gate import fused_beta_sigmoid, fused_beta_sigmoid_bwd
 from fla.ops.cp import FLACPContext
+from fla.ops.kda.backends import dispatch
 from fla.ops.kda.chunk_bwd import chunk_kda_bwd
 from fla.ops.kda.chunk_fwd import chunk_kda_fwd
 from fla.ops.utils.index import prepare_chunk_indices, prepare_chunk_indices_static
@@ -193,7 +193,7 @@ class ChunkKDAFunction(torch.autograd.Function):
 
 
 @torch.compiler.disable
-@dispatch('kda')
+@dispatch
 def chunk_kda(
     q: torch.Tensor,
     k: torch.Tensor,

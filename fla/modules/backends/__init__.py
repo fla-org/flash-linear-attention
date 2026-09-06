@@ -7,11 +7,15 @@
 
 """Module-level backends for FLA components such as rotary and cross-entropy."""
 
-from fla.backends import BackendRegistry, dispatch
+from fla.backends import BackendRegistry
+
+# this import installs the existing NPU GRPO compile workaround before fla.modules.grpo loads.
 from fla.modules.backends.triton_ascend import TritonAscendBackend
 
 modules_registry = BackendRegistry("modules")
 
 modules_registry.register(TritonAscendBackend())
+
+dispatch = modules_registry.dispatch
 
 __all__ = ['dispatch', 'modules_registry']

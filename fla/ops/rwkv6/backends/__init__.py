@@ -7,11 +7,13 @@
 
 """RWKV6 backends."""
 
-from fla.backends import BackendRegistry, dispatch
+from fla.backends import BackendRegistry
 from fla.ops.rwkv6.backends.tilelang import RWKV6TileLangBackend
 
 rwkv6_registry = BackendRegistry("rwkv6")
 rwkv6_registry.register(RWKV6TileLangBackend())
 
+
+dispatch = rwkv6_registry.dispatch
 
 __all__ = ['dispatch', 'rwkv6_registry']

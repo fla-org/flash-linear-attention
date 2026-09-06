@@ -9,10 +9,10 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.backends import dispatch
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_gated_delta_rule_fwd_h
 from fla.ops.cp import FLACPContext
 from fla.ops.cp.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu_pre_process, expand_h0
+from fla.ops.kda.backends import dispatch
 from fla.ops.kda.chunk_intra import chunk_kda_bwd_intra
 from fla.ops.kda.gate import kda_gate_bwd, kda_gate_chunk_cumsum
 from fla.ops.kda.wy_fast import recompute_w_u_fwd
@@ -320,7 +320,7 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
     tl.store(p_db, b_db.to(p_db.dtype.element_ty), mask=m_t)
 
 
-@dispatch('kda')
+@dispatch
 def chunk_kda_bwd_dAv(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -379,7 +379,7 @@ def chunk_kda_bwd_dAv(
     return dA, dv
 
 
-@dispatch('kda')
+@dispatch
 def chunk_kda_bwd_wy_dqkg_fused(
     q: torch.Tensor,
     k: torch.Tensor,

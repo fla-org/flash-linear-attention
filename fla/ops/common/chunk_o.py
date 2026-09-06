@@ -540,7 +540,7 @@ def chunk_bwd_kernel_dv_local(
         tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), mask=m_t[:, None] & m_v[None, :])
 
 
-@dispatch('common')
+@dispatch
 def chunk_fwd_o(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -643,7 +643,7 @@ def chunk_bwd_dv(
     return dv
 
 
-@dispatch('common')
+@dispatch
 def chunk_bwd_dv_local(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -696,7 +696,7 @@ def chunk_bwd_dv_local(
     return dv
 
 
-@dispatch('common')
+@dispatch
 def chunk_bwd_dqkwg(
     q: torch.Tensor,
     k: torch.Tensor,

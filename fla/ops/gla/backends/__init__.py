@@ -7,11 +7,13 @@
 
 """GLA backends."""
 
-from fla.backends import BackendRegistry, dispatch
+from fla.backends import BackendRegistry
 from fla.ops.gla.backends.triton_ascend import TritonAscendGLABackend
 
 gla_registry = BackendRegistry("gla")
 gla_registry.register(TritonAscendGLABackend())
 
+
+dispatch = gla_registry.dispatch
 
 __all__ = ['dispatch', 'gla_registry']

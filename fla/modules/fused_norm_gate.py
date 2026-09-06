@@ -453,7 +453,7 @@ def layer_norm_gated_bwd_kernel1(
         tl.store(db + i_s * D + o_d, b_db, mask=mask)
 
 
-@dispatch('modules')
+@dispatch
 def layer_norm_gated_fwd(
     x: torch.Tensor,
     g: torch.Tensor,
@@ -538,7 +538,7 @@ def layer_norm_gated_fwd(
     return y, mean, rstd, residual_out if residual_out is not None else x
 
 
-@dispatch('modules')
+@dispatch
 def layer_norm_gated_bwd(
     dy: torch.Tensor,
     x: torch.Tensor,

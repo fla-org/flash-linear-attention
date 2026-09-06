@@ -16,7 +16,7 @@ import triton
 import triton.language as tl
 from einops import reduce
 
-from fla.backends import dispatch
+from fla.ops.attn.backends import dispatch
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.cumsum import chunk_global_cumsum
@@ -644,7 +644,7 @@ def parallel_wall_attn_bwd_kernel_dkv(
         tl.store(p_dc, b_dc.to(p_dc.dtype.element_ty), mask=m_k)
 
 
-@dispatch('attn')
+@dispatch
 def parallel_wall_attn_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -760,7 +760,7 @@ def parallel_wall_attn_bwd_preprocess(
     return delta
 
 
-@dispatch('attn')
+@dispatch
 def parallel_wall_attn_bwd(
     q: torch.Tensor,
     k: torch.Tensor,

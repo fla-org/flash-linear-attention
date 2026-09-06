@@ -8,4 +8,8 @@
 from fla.backends import BackendRegistry
 from fla.ops.common.backends.tilelang import TileLangBackend
 
-BackendRegistry("attn").register(TileLangBackend())
+attn_registry = BackendRegistry("attn")
+attn_registry.register(TileLangBackend())
+dispatch = attn_registry.dispatch
+
+__all__ = ['attn_registry', 'dispatch']

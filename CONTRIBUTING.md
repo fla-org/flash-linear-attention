@@ -114,6 +114,7 @@ pytest tests/
 
 ```
 fla/
+├── backends/        # Shared backend types and registry/dispatch mechanics
 ├── layers/          # PyTorch attention layer implementations
 ├── ops/             # Triton kernel operators (the core of the project)
 │   ├── common/      # Shared kernels reused across operators
@@ -137,6 +138,8 @@ tests/
 ├── utils/              # Tests for fla.utils
 └── conftest.py         # Pytest config with NaN memory poisoning
 ```
+
+Backend packages own their registries and export a bound `dispatch` decorator. Import shared types from `fla.backends` and the decorator from the owning backend package; see [Backend dispatch](fla/backends/README.md) for registration and migration examples.
 
 ## Code Style
 

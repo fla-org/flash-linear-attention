@@ -152,6 +152,8 @@ jobs:
           pytest -s -v --exitfirst -n 8 --dist load \
             tests/modules \
             tests/test_backend_imports.py \
+            tests/test_backend_registry.py \
+            tests/test_backend_dependencies.py \
             tests/ops/utils \
             tests/ops/test_gdn_kernels.py \
             tests/ops/test_gdn.py \
