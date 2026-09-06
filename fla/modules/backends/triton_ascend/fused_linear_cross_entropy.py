@@ -173,7 +173,7 @@ def elementwise_mul_kernel(
 
 def _npu_vocab_block_size(vocab_size: int, num_rows: int, is_backward: bool = True) -> int:
     memory_multiplier = _LCE_BWD_MEM_MULT if is_backward else _LCE_FWD_MEM_MULT
-    return compute_vocab_block_size(vocab_size, num_rows, memory_multiplier)
+    return compute_vocab_block_size(vocab_size=vocab_size, num_rows=num_rows, memory_multiplier=memory_multiplier)
 
 
 def logsumexp_fwd_npu(
@@ -185,12 +185,12 @@ def logsumexp_fwd_npu(
     shape = x.shape
     x = x.view(-1, shape[-1])
     N, D = x.shape
-    B = _npu_vocab_block_size(D, N, is_backward=False)
+    B = _npu_vocab_block_size(vocab_size=D, num_rows=N, is_backward=False)
     has_softcapping = softcapping is not None
     softcap_val = float(softcapping) if has_softcapping else 0.0
 
     z = x.new_empty(N, dtype=torch.float)
-    for row_off, row_len in iter_axis_launch_chunks(N, 1, max_grid=ASCEND_MAX_GRID_DIM):
+    for row_off, row_len in iter_axis_launch_chunks(axis_size=N, other_grid_product=1, max_grid=ASCEND_MAX_GRID_DIM):
         logsumexp_fwd_kernel[(row_len,)](
             x=x[row_off:row_off + row_len],
             z=z[row_off:row_off + row_len],
@@ -224,7 +224,7 @@ def fused_linear_cross_entropy_forward_npu(
 ):
     device = x.device
     N, H, V = *x.shape, weight.shape[0]
-    BV = _npu_vocab_block_size(V, N)
+    BV = _npu_vocab_block_size(vocab_size=V, num_rows=N)
     has_softcapping = logit_softcapping is not None
     softcap_val = float(logit_softcapping) if has_softcapping else 0.0
     NC = min(num_chunks, triton.cdiv(V, H))
@@ -250,7 +250,7 @@ def fused_linear_cross_entropy_forward_npu(
         if weight is not None and c_x.dtype != grad_dtype:
             c_x = c_x.to(dtype=grad_dtype)
         c_target = target[start:end]
-        c_lse = logsumexp_fwd_npu(c_logits, scale=logit_scale, softcapping=logit_softcapping, dtype=torch.float)
+        c_lse = logsumexp_fwd_npu(x=c_logits, scale=logit_scale, softcapping=logit_softcapping, dtype=torch.float)
 
         c_loss = loss[start:end]
         if use_l2warp:
@@ -317,7 +317,7 @@ def fused_linear_cross_entropy_backward_npu(
     db: torch.Tensor,
 ):
     N, H = dx.shape
-    B = compute_elementwise_block_size(N * H, _ELEMENTWISE_MEM_MULT)
+    B = compute_elementwise_block_size(n_elements=N * H, memory_multiplier=_ELEMENTWISE_MEM_MULT)
 
     elementwise_mul_kernel[(triton.cdiv(N * H, B),)](
         x=dx,
@@ -329,23 +329,23 @@ def fused_linear_cross_entropy_backward_npu(
 
     if dw is not None:
         V, H = dw.shape
-        B_dw = compute_elementwise_block_size(V * H, _ELEMENTWISE_MEM_MULT)
-        elementwise_mul_kernel[(triton.cdiv(V * H, B_dw),)](
+        B = compute_elementwise_block_size(n_elements=V * H, memory_multiplier=_ELEMENTWISE_MEM_MULT)
+        elementwise_mul_kernel[(triton.cdiv(V * H, B),)](
             x=dw,
             g=do,
             N=V*H,
-            B=B_dw,
+            B=B,
             num_warps=STATIC_WARPS,
         )
 
     if db is not None:
         V = db.shape[0]
-        B_db = compute_elementwise_block_size(V, _ELEMENTWISE_MEM_MULT)
-        elementwise_mul_kernel[(triton.cdiv(V, B_db),)](
+        B = compute_elementwise_block_size(n_elements=V, memory_multiplier=_ELEMENTWISE_MEM_MULT)
+        elementwise_mul_kernel[(triton.cdiv(V, B),)](
             x=db,
             g=do,
             N=V,
-            B=B_db,
+            B=B,
             num_warps=STATIC_WARPS,
         )
     return dx, dw, db

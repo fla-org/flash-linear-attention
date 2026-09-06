@@ -266,7 +266,7 @@ class FusedKLDivLossFunction(torch.autograd.Function):
     @input_guard
     def backward(ctx, do):
         dx, dw = ctx.saved_tensors
-        dx, dw = fused_kl_div_backward(do, dx, dw)
+        dx, dw = fused_kl_div_backward(do=do, dx=dx, dw=dw)
         return dx, None, dw, None, None, None
 
 

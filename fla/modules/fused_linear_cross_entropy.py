@@ -341,7 +341,7 @@ def fused_linear_cross_entropy_forward(
         c_target = target[start:end]
         # [C]
         # keep lse in fp32 to maintain precision
-        c_lse = logsumexp_fwd(c_logits, scale=logit_scale, softcapping=logit_softcapping, dtype=torch.float)
+        c_lse = logsumexp_fwd(x=c_logits, scale=logit_scale, softcapping=logit_softcapping, dtype=torch.float)
 
         # unreduced loss
         c_loss = loss[start:end]
@@ -522,19 +522,19 @@ class FusedLinearCrossEntropyFunction(torch.autograd.Function):
             back to the parameter dtype. Default: True
         """
         loss, dx, dw, db = fused_linear_cross_entropy_forward(
-            x,
-            target,
-            weight,
-            bias,
-            ignore_index,
-            label_smoothing,
-            logit_scale,
-            logit_softcapping,
-            num_chunks,
-            reduction,
-            use_l2warp,
-            l2_penalty_factor,
-            accumulate_grad_in_fp32,
+            x=x,
+            target=target,
+            weight=weight,
+            bias=bias,
+            ignore_index=ignore_index,
+            label_smoothing=label_smoothing,
+            logit_scale=logit_scale,
+            logit_softcapping=logit_softcapping,
+            num_chunks=num_chunks,
+            reduction=reduction,
+            use_l2warp=use_l2warp,
+            l2_penalty_factor=l2_penalty_factor,
+            accumulate_grad_in_fp32=accumulate_grad_in_fp32,
         )
         # downcast to dtype and store for backward
         ctx.save_for_backward(
@@ -548,7 +548,7 @@ class FusedLinearCrossEntropyFunction(torch.autograd.Function):
     @input_guard
     def backward(ctx, do):
         dx, dw, db = ctx.saved_tensors
-        dx, dw, db = fused_linear_cross_entropy_backward(do, dx, dw, db)
+        dx, dw, db = fused_linear_cross_entropy_backward(do=do, dx=dx, dw=dw, db=db)
         return dx, None, dw, db, None, None, None, None, None, None, None, None, None
 
 
@@ -700,8 +700,8 @@ class FusedLinearCrossEntropyLoss(nn.Module):
             loss
         """
         loss = fused_linear_cross_entropy_loss(
-            x.view(-1, x.shape[-1]),
-            target.view(-1),
+            x=x.view(-1, x.shape[-1]),
+            target=target.view(-1),
             weight=weight,
             bias=bias,
             ignore_index=self.ignore_index,

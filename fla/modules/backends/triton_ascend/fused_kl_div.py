@@ -96,7 +96,7 @@ def elementwise_mul_kernel(
 
 
 def _npu_vocab_block_size(vocab_size: int, num_rows: int) -> int:
-    return compute_vocab_block_size(vocab_size, num_rows, _KLD_FWD_MEM_MULT)
+    return compute_vocab_block_size(vocab_size=vocab_size, num_rows=num_rows, memory_multiplier=_KLD_FWD_MEM_MULT)
 
 
 def fused_kl_div_forward_npu(
@@ -110,7 +110,7 @@ def fused_kl_div_forward_npu(
     device = x.device
 
     N, H, V = *x.shape, weight.shape[0]
-    BV = _npu_vocab_block_size(V, N)
+    BV = _npu_vocab_block_size(vocab_size=V, num_rows=N)
     NC = min(8, triton.cdiv(V, H))
     C = min(triton.next_power_of_2(triton.cdiv(N, NC)), ASCEND_MAX_GRID_DIM)
     NC = triton.cdiv(N, C)
@@ -165,7 +165,7 @@ def fused_kl_div_backward_npu(
     dw: torch.Tensor,
 ):
     N, H = dx.shape
-    B = compute_elementwise_block_size(N * H, _ELEMENTWISE_MEM_MULT)
+    B = compute_elementwise_block_size(n_elements=N * H, memory_multiplier=_ELEMENTWISE_MEM_MULT)
 
     elementwise_mul_kernel[(triton.cdiv(N * H, B),)](
         x=dx,
@@ -177,12 +177,12 @@ def fused_kl_div_backward_npu(
 
     if dw is not None:
         V, H = dw.shape
-        B_dw = compute_elementwise_block_size(V * H, _ELEMENTWISE_MEM_MULT)
-        elementwise_mul_kernel[(triton.cdiv(V * H, B_dw),)](
+        B = compute_elementwise_block_size(n_elements=V * H, memory_multiplier=_ELEMENTWISE_MEM_MULT)
+        elementwise_mul_kernel[(triton.cdiv(V * H, B),)](
             x=dw,
             g=do,
             N=V*H,
-            B=B_dw,
+            B=B,
             num_warps=STATIC_WARPS,
         )
 
