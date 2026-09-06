@@ -231,7 +231,7 @@ def prepare_wy_repr_bwd_kda_kernel(
         b_kbg = b_k * b_b[:, None] * b_gk_exp
         b_dw = tl.load(p_dw, mask=m_k, other=0.0)
 
-        b_dA += tl.dot(b_dw, tl.trans(b_kbg).to(b_dw.dtype))
+        b_dA = tl.dot(b_dw, tl.trans(b_kbg).to(b_dw.dtype), b_dA)
         b_dkbg = tl.dot(b_A, b_dw)
         b_dk = b_dkbg * b_gk_exp * b_b[:, None] + tl.load(p_dk, mask=m_k, other=0.0)
         b_db += tl.sum(b_dkbg * b_k * b_gk_exp, 1)
@@ -249,7 +249,7 @@ def prepare_wy_repr_bwd_kda_kernel(
         b_v = tl.load(p_v, mask=m_v, other=0.0)
         b_vb = (b_v * b_b[:, None]).to(b_v.dtype)
         b_du = tl.load(p_du, mask=m_v, other=0.0)
-        b_dA += tl.dot(b_du, tl.trans(b_vb))
+        b_dA = tl.dot(b_du, tl.trans(b_vb), b_dA)
         b_dvb = tl.dot(b_A, b_du)
         b_dv = b_dvb * b_b[:, None]
         b_db += tl.sum(b_dvb * b_v, 1)
