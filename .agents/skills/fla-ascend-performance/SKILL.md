@@ -15,7 +15,7 @@ description: >
 
 # FLA Ascend NPU: Profiling → Bottlenecks → Optimization
 
-Use this skill for Ascend operator performance work on all files under any `triton_ascend` directory (`**/triton_ascend/**`) or in `fla/modules/backends/*/triton_ascend.py`.
+Use this skill for Ascend operator performance work on all files under any `triton_ascend` directory (`**/triton_ascend/**`).
 
 Multi-round iteration discipline (frozen tests, task contract, when to stop): **`fla-optimization-loop`**. MR packaging: **`fla-mr-readiness`**.
 

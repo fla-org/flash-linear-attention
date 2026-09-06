@@ -5,12 +5,6 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""Public module API. Only symbols exported here have long-term module API compatibility.
-
-Import public components from ``fla.modules``. Submodule and backend paths are internal;
-deprecated paths are removed in the next release. See ``fla/modules/README.md`` for migration details.
-"""
-
 from fla.modules.convolution import ImplicitLongConvolution, LongConvolution, ShortConvolution
 from fla.modules.fused_bitlinear import BitLinear, FusedBitLinear
 from fla.modules.fused_cross_entropy import FusedCrossEntropyLoss

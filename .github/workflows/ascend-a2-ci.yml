@@ -151,9 +151,7 @@ jobs:
           source /usr/local/Ascend/ascend-toolkit/set_env.sh
           pytest -s -v --exitfirst -n 8 --dist load \
             tests/modules \
-            tests/test_module_backends.py \
-            tests/test_backends.py \
-            tests/test_dependent_tests.py \
+            tests/test_backend_imports.py \
             tests/ops/utils \
             tests/ops/test_gdn_kernels.py \
             tests/ops/test_gdn.py \

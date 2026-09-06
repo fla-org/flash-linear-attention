@@ -31,7 +31,7 @@ def get_definitions_from_tree(tree) -> set:
         return set()
     definitions = set()
     for node in tree.body:
-        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             definitions.add(node.name)
     return definitions
 
@@ -112,7 +112,7 @@ def find_dispatch_op_files(methods: set, project_root: Path) -> list:
         if not tree:
             continue
         for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 if node.name in methods:
                     has_dispatch = False
                     for dec in node.decorator_list:
@@ -125,24 +125,6 @@ def find_dispatch_op_files(methods: set, project_root: Path) -> list:
                         op_files.append(str(py_file.relative_to(project_root)))
                         break
     return op_files
-
-
-def find_backend_op_files(changed_files: list[str], project_root: Path) -> list[str]:
-    """Map backend changes to the default entry points whose tests cover them."""
-    backend_pattern = re.compile(r'^(fla/ops/[^/]+/backends|fla/modules/backends/[^/]+)/')
-    op_files = []
-    for file in changed_files:
-        match = backend_pattern.match(file)
-        if file == 'fla/modules/backends/__init__.py' or file.startswith('fla/modules/backends/triton_ascend/'):
-            backend_dir = project_root / 'fla/modules/backends'
-        elif match:
-            backend_dir = project_root / match.group(1)
-        else:
-            continue
-        methods = get_backend_methods_from_dir(backend_dir)
-        if methods:
-            op_files.extend(find_dispatch_op_files(methods, project_root))
-    return list(dict.fromkeys(op_files))
 
 
 def file_to_module_path(file_path: Path, project_root: Path) -> str:
@@ -369,7 +351,20 @@ if __name__ == "__main__":
     search_dir = current_dir.parent / "fla"
     project_root = current_dir.parent
 
-    additional_files = find_backend_op_files(changed_files, project_root)
+    # If a backend file is changed, map it to the dispatched op files so that
+    # regression tests for the original operation are also triggered.
+    backend_pattern = re.compile(r'^fla/ops/([^/]+)/backends/')
+    additional_files = []
+    for file in changed_files:
+        match = backend_pattern.match(file)
+        if match:
+            operation = match.group(1)
+            backend_dir = project_root / "fla" / "ops" / operation / "backends"
+            if backend_dir.exists():
+                methods = get_backend_methods_from_dir(backend_dir)
+                if methods:
+                    op_files = find_dispatch_op_files(methods, project_root)
+                    additional_files.extend(op_files)
     if additional_files:
         changed_files = list(dict.fromkeys(changed_files + additional_files))
 

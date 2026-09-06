@@ -13,7 +13,6 @@ import contextlib
 import logging
 import os
 import threading
-import warnings
 from collections.abc import Callable
 from functools import cache, wraps
 from typing import Any, ClassVar, TypeVar
@@ -90,7 +89,7 @@ class BaseBackend:
 
 
 _OPERATION_BACKEND_MODULES: dict[str, str] = {
-    'modules': 'fla.modules.backends._legacy',
+    'modules': 'fla.modules.backends',
 }
 
 
@@ -148,10 +147,10 @@ class BackendRegistry:
                 return
 
             # Import backend module to trigger registration
-            if operation.startswith('modules.'):
-                module_path = f'fla.modules.backends.{operation.removeprefix("modules.")}'
-            else:
-                module_path = _OPERATION_BACKEND_MODULES.get(operation, f'fla.ops.{operation}.backends')
+            module_path = _OPERATION_BACKEND_MODULES.get(
+                operation,
+                f'fla.ops.{operation}.backends',
+            )
             with contextlib.suppress(ImportError):
                 __import__(module_path, fromlist=[''])
 
@@ -164,14 +163,6 @@ def dispatch(operation: str):
     Iterates through all registered backends and selects the first one
     that passes the verifier for the given function call.
     """
-    if operation == 'modules':
-        warnings.warn(
-            "dispatch('modules') is deprecated and will be removed in the next release after 0.6.0. "
-            "Use an operation-specific key such as dispatch('modules.layernorm').",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-
     def decorator(func: F) -> F:
         if _DISPATCH_DISABLED:
             return func
