@@ -116,6 +116,8 @@ def test_split_wheels_match_release_contract(tmp_path: Path) -> None:
     ext_names = _wheel_names(ext_wheel)
 
     assert "fla/__init__.py" in core_names
+    assert "fla/backends/__init__.py" in core_names
+    assert "fla/modules/backends/layernorm/triton_ascend.py" in core_names
     assert "fla/ops/__init__.py" in core_names
     assert "fla/modules/__init__.py" in core_names
     assert "fla/utils/__init__.py" in core_names
@@ -125,6 +127,7 @@ def test_split_wheels_match_release_contract(tmp_path: Path) -> None:
     assert not any(name.startswith("fla/models/") for name in core_names)
 
     assert "fla/__init__.py" not in ext_names
+    assert not any(name.startswith("fla/backends/") for name in ext_names)
     assert "fla/layers/__init__.py" in ext_names
     assert "fla/models/__init__.py" in ext_names
     assert not any(name.startswith("fla/ops/") for name in ext_names)

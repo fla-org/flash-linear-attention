@@ -2,20 +2,20 @@
 name: fla-dispatch-backends
 description: >
   Workflow for FLA backend dispatch decorators and backend implementations. Use
-  when touching fla.ops.backends, @dispatch-decorated functions, BaseBackend
+  when touching fla.backends, @dispatch-decorated functions, BaseBackend
   subclasses, backend verifier methods, backend env vars, or backend tests.
 ---
 
 # FLA Dispatch Backends Skill
 
 Use this skill for the runtime backend dispatch system implemented in
-`fla/ops/backends/__init__.py`.
+`fla/backends/__init__.py`.
 
 ## Core model
 
 - Public functions opt in with `@dispatch('<operation>')`.
-- First call lazily imports `fla.ops.<operation>.backends`, unless the operation
-  has a custom module in `_OPERATION_BACKEND_MODULES` (for example `modules`).
+- First call lazily imports `fla.ops.<operation>.backends`, while `modules.<operation>` imports `fla.modules.backends.<operation>`.
+  The deprecated `modules` key loads a compatibility registry.
 - Backend modules create `BackendRegistry('<operation>')` and register
   `BaseBackend` subclasses.
 - Dispatch tries registered backends sorted by `priority` where lower means
@@ -67,8 +67,8 @@ For a new backend:
   should be able to set `FLA_DISABLE_BACKEND_DISPATCH=1` and still get the same
   API behavior.
 - Use the operation name that maps to the backend package. For normal ops,
-  `@dispatch('kda')` maps to `fla.ops.kda.backends`; special cases belong in
-  `_OPERATION_BACKEND_MODULES`.
+  `@dispatch('kda')` maps to `fla.ops.kda.backends`, and
+  `@dispatch('modules.layernorm')` maps to `fla.modules.backends.layernorm`.
 - Do not add import-time side effects in backend packages beyond registering
   backends.
 
@@ -80,7 +80,7 @@ For a new backend:
 - Force or disable backend-specific env vars (`FLA_FLASH_KDA`, `FLA_TILELANG`,
   `FLA_INTRACARD_CP`) when testing route behavior.
 - Include at least one rejection test for each verifier branch added or changed.
-- For backend changes under `fla/ops/<op>/backends/`, ensure dependent op tests
+- For changes under `fla/ops/<op>/backends/` or `fla/modules/backends/<op>/`, ensure dependent op tests
   still run; `scripts/find_dependent_tests.py` maps backend changes back to the
   decorated op files.
 

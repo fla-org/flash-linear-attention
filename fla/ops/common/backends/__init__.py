@@ -7,7 +7,7 @@
 
 """Common backends for shared operations like chunk_gated_delta_rule_fwd_h."""
 
-from fla.ops.backends import BackendRegistry, dispatch
+from fla.backends import BackendRegistry, dispatch
 from fla.ops.common.backends.intracard import IntraCardCPBackend
 from fla.ops.common.backends.tilelang import TileLangBackend
 from fla.ops.common.backends.triton_ascend import TritonAscendCommonBackend

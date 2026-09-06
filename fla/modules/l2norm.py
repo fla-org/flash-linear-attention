@@ -10,7 +10,7 @@ import torch.nn as nn
 import triton
 import triton.language as tl
 
-from fla.modules.backends import dispatch
+from fla.backends import dispatch
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.utils import IS_AMD, autotune_cache_kwargs, input_guard
 
@@ -144,7 +144,7 @@ def l2norm_bwd_kernel(
     tl.store(p_dx, b_dx.to(p_dx.dtype.element_ty), mask=m_x)
 
 
-@dispatch('modules')
+@dispatch('modules.l2norm')
 def l2norm_fwd(
     x: torch.Tensor,
     eps: float = 1e-6,
@@ -197,7 +197,7 @@ def l2norm_fwd(
     return y.view(x_shape_og), rstd.view(x_shape_og[:-1])
 
 
-@dispatch('modules')
+@dispatch('modules.l2norm')
 def l2norm_bwd(
     y: torch.Tensor,
     rstd: torch.Tensor,

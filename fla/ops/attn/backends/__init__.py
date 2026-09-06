@@ -5,7 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from fla.ops.backends import BackendRegistry
+from fla.backends import BackendRegistry
 from fla.ops.common.backends.tilelang import TileLangBackend
 
 BackendRegistry("attn").register(TileLangBackend())

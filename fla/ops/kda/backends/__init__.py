@@ -7,7 +7,7 @@
 
 """KDA backends."""
 
-from fla.ops.backends import BackendRegistry, dispatch
+from fla.backends import BackendRegistry, dispatch
 from fla.ops.kda.backends.flash_kda import FlashKDABackend
 from fla.ops.kda.backends.tilelang import KDATileLangBackend
 from fla.ops.kda.backends.triton_ascend import TritonAscendKDABackend

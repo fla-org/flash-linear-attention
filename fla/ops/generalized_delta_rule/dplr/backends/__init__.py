@@ -7,7 +7,7 @@
 
 """DPLR backends."""
 
-from fla.ops.backends import BackendRegistry, dispatch
+from fla.backends import BackendRegistry, dispatch
 from fla.ops.generalized_delta_rule.dplr.backends.tilelang import DPLRTileLangBackend
 
 dplr_registry = BackendRegistry("generalized_delta_rule.dplr")

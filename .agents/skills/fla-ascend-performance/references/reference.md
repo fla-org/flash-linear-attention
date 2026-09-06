@@ -87,7 +87,7 @@ Paths relative to the `flash-linear-attention` repo root. Detailed case notes: [
 - `fla/ops/kda/backends/triton_ascend/chunk_bwd.py` — KDA bwd (`dAv`, wy dw/dqkg); `b_do_c` pattern — [cases.md](cases.md)
 - `fla/ops/utils/backends/triton_ascend/solve_tril.py` — blocked triangular solve; 32×32/64×64 merge clobber guards — [cases.md](cases.md)
 - `fla/ops/utils/backends/triton_ascend/cumsum.py` — scalar/vector split and leftover UB budget
-- `fla/modules/backends/triton_ascend/causal_conv1d.py` — 1D core-grid conv; Vector `num_vectorcore`; constexpr `TAIL_MODE` DMA split; `extract_slice` — [cases.md](cases.md)
+- `fla/modules/backends/causal_conv1d/triton_ascend.py` — 1D core-grid conv; Vector `num_vectorcore`; constexpr `TAIL_MODE` DMA split; `extract_slice` — [cases.md](cases.md)
 
 ### Split / numerics / varlen
 

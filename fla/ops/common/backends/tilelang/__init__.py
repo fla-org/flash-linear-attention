@@ -17,7 +17,7 @@ import os
 
 import torch
 
-from fla.ops.backends import BaseBackend
+from fla.backends import BaseBackend
 from fla.utils import IS_NVIDIA_HOPPER, TRITON_ABOVE_3_4_0, find_spec_cached, has_usable_nvcc
 
 _TILELANG_AVAILABLE = find_spec_cached("tilelang") is not None

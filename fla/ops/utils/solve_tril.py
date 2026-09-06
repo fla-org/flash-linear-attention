@@ -11,7 +11,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.backends import dispatch
+from fla.backends import dispatch
 from fla.ops.utils.index import prepare_chunk_indices
 from fla.ops.utils.op import make_tensor_descriptor
 from fla.utils import IS_TMA_SUPPORTED, autotune_cache_kwargs, input_guard

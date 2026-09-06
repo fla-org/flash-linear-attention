@@ -11,8 +11,8 @@ import warnings
 
 import torch
 
+from fla.backends import dispatch
 from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
-from fla.ops.backends import dispatch
 from fla.ops.common.gate import fused_beta_sigmoid, fused_beta_sigmoid_bwd
 from fla.ops.cp import FLACPContext
 from fla.ops.kda.chunk_bwd import chunk_kda_bwd

@@ -1369,7 +1369,7 @@ _TRITON_ASCEND_KDA_OPS = (
 
 def _spy_on_triton_ascend_kda_backend():
     """Patch every op of the Triton-Ascend KDA backend to record dispatched calls."""
-    from fla.ops.backends import BackendRegistry
+    from fla.backends import BackendRegistry
 
     BackendRegistry.ensure_initialized('kda')
     backend = BackendRegistry._registries['kda']._backends.get('triton_ascend')

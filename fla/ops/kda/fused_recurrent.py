@@ -13,7 +13,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.backends import dispatch
+from fla.backends import dispatch
 from fla.ops.utils.op import exp
 from fla.ops.utils.softplus import softplus
 from fla.utils import input_guard

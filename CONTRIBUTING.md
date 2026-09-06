@@ -223,8 +223,8 @@ Don't hard-wrap prose at an arbitrary short column — this covers Markdown file
   plain `tl.load` / `tl.store`. Masked loads must cover every dimension that
   can overrun at any call site, with `other=` where masked lanes matter; assert
   any divisibility you rely on. Do not use `tl.make_block_ptr` / `tl.advance`:
-  deprecated upstream and removed in triton main. (`backends/triton_ascend/` is
-  exempt — triton-ascend still requires block pointers.)
+  deprecated upstream and removed in triton main. (`backends/triton_ascend/` and
+  `backends/<operation>/triton_ascend.py` are exempt — triton-ascend still requires block pointers.)
 - `tl.make_tensor_descriptor` (TMA) is an opt-in optimization for hot-path
   tiles on Hopper and newer, not a default substitute for block access. It
   requires 16-byte-aligned bases and stride multiples, a stride-1 innermost

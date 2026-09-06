@@ -7,7 +7,7 @@
 
 """GDR backends."""
 
-from fla.ops.backends import BackendRegistry, dispatch
+from fla.backends import BackendRegistry, dispatch
 from fla.ops.gated_delta_rule.backends.flash_qla import FlashQLABackend
 from fla.ops.gated_delta_rule.backends.triton_ascend import TritonAscendGDNBackend
 

@@ -7,7 +7,7 @@
 
 """RWKV6 backends."""
 
-from fla.ops.backends import BackendRegistry, dispatch
+from fla.backends import BackendRegistry, dispatch
 from fla.ops.rwkv6.backends.tilelang import RWKV6TileLangBackend
 
 rwkv6_registry = BackendRegistry("rwkv6")

@@ -7,8 +7,8 @@
 
 """AttnRes backends."""
 
+from fla.backends import BackendRegistry, dispatch
 from fla.ops.attnres.backends.triton_ascend import TritonAscendAttnResBackend
-from fla.ops.backends import BackendRegistry, dispatch
 
 attnres_registry = BackendRegistry("attnres")
 

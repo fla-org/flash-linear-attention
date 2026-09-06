@@ -7,7 +7,7 @@
 
 """Utils op backends."""
 
-from fla.ops.backends import BackendRegistry, dispatch
+from fla.backends import BackendRegistry, dispatch
 from fla.ops.utils.backends.triton_ascend import TritonAscendUtilsBackend
 
 utils_registry = BackendRegistry('utils')

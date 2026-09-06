@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import triton
 
-from fla.ops.backends import BaseBackend
+from fla.backends import BaseBackend
 
 _SUPPORTED_INTRA_CHUNK_SIZES = (32, 64)
 _SUB_CHUNK = 16

@@ -16,7 +16,7 @@ import triton
 import triton.language as tl
 from einops import reduce
 
-from fla.ops.backends import dispatch
+from fla.backends import dispatch
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.cumsum import chunk_global_cumsum

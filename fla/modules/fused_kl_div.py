@@ -11,7 +11,7 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
-from fla.modules.backends import dispatch
+from fla.backends import dispatch
 from fla.ops.utils.op import exp, log
 from fla.utils import IS_AMD, input_guard
 
@@ -122,7 +122,7 @@ def elementwise_mul_kernel(
     tl.store(x + o_x, b_x * b_g, mask=o_x < N)
 
 
-@dispatch('modules')
+@dispatch('modules.fused_kl_div')
 def fused_kl_div_forward(
     x: torch.Tensor,
     target_x: torch.Tensor,
@@ -205,7 +205,7 @@ def fused_kl_div_forward(
     return loss, dx, dw
 
 
-@dispatch('modules')
+@dispatch('modules.fused_kl_div')
 def fused_kl_div_backward(
     do: torch.Tensor,
     dx: torch.Tensor,

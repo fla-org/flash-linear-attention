@@ -12,7 +12,7 @@ import torch.nn as nn
 import triton
 import triton.language as tl
 
-from fla.modules.backends import dispatch
+from fla.backends import dispatch
 from fla.ops.utils.op import exp, log, tanh
 from fla.utils import input_guard
 
@@ -323,7 +323,7 @@ class CrossEntropyLossFunction(torch.autograd.Function):
         return dlogits, None, None, None, None, None, None, None, None, None
 
 
-@dispatch('modules')
+@dispatch('modules.fused_cross_entropy')
 def cross_entropy_loss(
     logits: torch.Tensor,
     target: torch.Tensor,
