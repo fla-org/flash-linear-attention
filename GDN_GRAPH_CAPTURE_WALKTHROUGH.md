@@ -289,6 +289,40 @@ When operator auto routing chooses eager, it clears graph metadata and re-enters
 
 These tests describe coverage, not a claim that every dependent test has run on the current branch.
 
+## Stage-one reference check
+
+This branch is a CUDA-focused stage related to #1155, not completion of the full issue. Ascend changes are limited to eager-call signature compatibility and explicit rejection of newly introduced unsupported graph requests; no unfinished Ascend graph kernels are included. Backend compatibility tests use mocked launches and do not establish NPU numerical correctness.
+
+Integration checks on RTX 4090:
+
+- Layer, short-convolution, routing, graph utility, and backend compatibility checks: 90 passed.
+- GDN replay checks: 13 passed. One older metadata test still expected dense B=1 without `cu_seqlens` to fail; it was updated to check invalid CPU metadata and missing external metadata in explicit forced mode, then passed in the next run. Numerical assertions and tolerances were unchanged.
+- Corrected metadata test, KDA graph tests, index tests, and part of the cumulative-sum suite: 174 completed passes before intentionally interrupting compilation of unchanged global cumulative-sum cases. This is a partial run, not a full-suite pass. The KDA single-rank CP graph case passed; multi-rank CP was not run.
+- Focused local cumulative-sum and triangular-solve checks: 11 passed, 1 skipped because the large-offset case requires Blackwell hardware.
+- Commit hooks and repository copyright-header checks passed.
+
+The following small packed-varlen check ran on the integrated implementation at `d3fa0761`, using an RTX 4090, PyTorch `2.11.0+cu128`, and Triton `3.6.0`:
+
+```bash
+python benchmarks/ops/benchmark_gdn_graph.py --extended \
+  --components operator kda --t-max 512 --n-max 4 --actual-ratio 0.75 \
+  --layouts balanced --heads 4 --value-heads 4 --key-dim 64 --value-dim 64 \
+  --modes fwd fwdbwd --warmup 3 --iterations 10 --repeats 3
+```
+
+Both operators used bf16, `BT=64`, 384 live tokens, and 8 live chunks in an 11-chunk capacity. All four benchmark correctness checks and metadata-address checks passed. Values below are median synchronized wall times in milliseconds; compilation, capture, and warmup are excluded.
+
+| Operator | Mode             | Eager, fixed capacity | Graph replay | Input update + replay |
+| -------- | ---------------- | --------------------: | -----------: | --------------------: |
+| GDN      | Forward          |                 0.843 |        0.036 |                 0.072 |
+| GDN      | Forward+backward |                11.463 |        0.116 |                 0.144 |
+| KDA      | Forward          |                 1.008 |        0.052 |                 0.074 |
+| KDA      | Forward+backward |                 8.526 |        0.162 |                 0.320 |
+
+The update measurement includes device-to-device input and metadata copies, plus output-gradient copies for forward+backward. These are execution-mode comparisons on the same implementation, not upstream-versus-candidate kernel regression measurements or isolated backward timings. The shared host was running other workloads, so these small launch-bound cases are reference checks, not production speedup claims. The benchmark's external auto policy selects eager at `8/11` chunk utilization with its default `0.75` threshold; the table separately measures forced replay and does not claim auto selects the fastest path.
+
+Full dependent regression, multi-rank CP coverage, target datacenter GPU before/after dense and varlen measurements, and profiling remain pre-merge work. No NPU or full-model serving performance claim is made.
+
 ## Historical benchmark results
 
 The small benchmark below predates stage-one integration. It is historical reference evidence, not certification of this branch. Raw local reports are not included in the repository.
