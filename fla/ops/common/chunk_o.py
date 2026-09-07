@@ -15,6 +15,7 @@ from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.op import exp2
 from fla.utils import (
     IS_INTEL,
+    IS_NVIDIA_BLACKWELL,
     IS_NVIDIA_HOPPER,
     TRITON_ABOVE_3_4_0,
     TRITON_ABOVE_3_7_1,
@@ -29,8 +30,15 @@ NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8]
 # On Intel that pairing is off by a factor of two: BK=BV=64 is fastest at 8 warps but is
 # only offered at 4, so the autotuner falls back to the 32x32 config and leaves ~2.2x on
 # the table. Widen the space there instead of changing the defaults for other vendors.
-_O_CONFIGS = [
+# TODO: Triton mainline fixes a Blackwell tl.dot recurrence race.
+# Keep this kernel off its 8-warp (BK=BV=128) config for Blackwell until Triton 3.8
+# is released and we re-validate the wider config space.
+CHUNK_FWD_O_BLACKWELL_DROPPED_CONFIGS = [] if IS_NVIDIA_BLACKWELL else [
     triton.Config({'BK': 128, 'BV': 128}, num_warps=8, num_stages=3),
+]
+
+_O_CONFIGS = [
+    *CHUNK_FWD_O_BLACKWELL_DROPPED_CONFIGS,
     triton.Config({'BK': 64, 'BV': 64}, num_warps=4, num_stages=3),
     triton.Config({'BK': 32, 'BV': 32}, num_warps=2, num_stages=3),
 ]
