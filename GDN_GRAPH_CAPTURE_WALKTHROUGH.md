@@ -321,7 +321,87 @@ Both operators used bf16, `BT=64`, 384 live tokens, and 8 live chunks in an 11-c
 
 The update measurement includes device-to-device input and metadata copies, plus output-gradient copies for forward+backward. These are execution-mode comparisons on the same implementation, not upstream-versus-candidate kernel regression measurements or isolated backward timings. The shared host was running other workloads, so these small launch-bound cases are reference checks, not production speedup claims. The benchmark's external auto policy selects eager at `8/11` chunk utilization with its default `0.75` threshold; the table separately measures forced replay and does not claim auto selects the fastest path.
 
-Full dependent regression, multi-rank CP coverage, target datacenter GPU before/after dense and varlen measurements, and profiling remain pre-merge work. No NPU or full-model serving performance claim is made.
+The follow-up below adds selected two-rank CP coverage and consumer-GPU before/after measurements. Full dependent regression, target datacenter GPU measurements, and profiling remain incomplete. No NPU or full-model serving performance claim is made.
+
+## PR 1230 validation follow-up (2026-09-08)
+
+This is partial validation, not a green merge gate. The unchanged upstream snapshot is `9d981ffe`; candidate operator code is `8a88693d`. This follow-up changes only the benchmark harness, a CP test's port configuration, and this document. Hardware is RTX 4090, PyTorch `2.11.0+cu128`, Triton `3.6.0`.
+
+### Correctness and distributed checks
+
+- Focused eager regression: GDN 45 passed and 9 skipped, shared GDN kernels 56 passed, and KDA 21 passed before stopping at the first failure. The run excluded fused recurrent and FlashQLA paths; it is not a full-suite pass.
+- The failing KDA varlen case uses H4, D60, fp16, boundaries `[0, 31, 96, 160]`, `mask_p=0.1`, fused gate, `safe_gate=False`, `disable_recompute=True`, and chunk size 32. It raises CUDA `misaligned address` in `fla/ops/gla/chunk.py::chunk_gla_fwd_kernel_o`. The exact case also fails on the unchanged upstream snapshot on the same GPU with `CUDA_LAUNCH_BLOCKING=1`. Both runs additionally report a teardown error after the CUDA context is poisoned. This establishes a pre-existing failure on this configuration, not a newly introduced regression; it does not make the KDA gate green.
+- A subsequent KDA tail run was intentionally interrupted after 272 seconds with zero completed tests. It contributes no passing evidence. KDA before/after performance collection was deferred while its correctness gate is red.
+- Triton short convolution eager dense/varlen checks: 11 passed, 9 non-Triton cases deselected.
+- On physical GPUs 2 and 4, KDA Graph CP replay, GDN eager CP, and KDA eager CP passed. Conv CP initially failed before kernel execution because TCP port 29500 was occupied. The test now honors an externally supplied `MASTER_PORT`, retaining 29500 as its default; retrying only that case with `MASTER_PORT=29753` passed. Four distinct selected two-rank CP tests ultimately passed, not an exhaustive distributed matrix.
+
+The eager regression command was:
+
+```bash
+CUDA_VISIBLE_DEVICES=4 python -m pytest \
+  tests/ops/test_gdn.py tests/ops/test_gdn_kernels.py \
+  tests/ops/test_kda.py::test_chunk tests/ops/test_kda.py::test_chunk_varlen \
+  tests/ops/test_kda.py::test_chunk_state_v_first \
+  tests/ops/test_kda.py::test_chunk_use_beta_sigmoid_in_kernel \
+  tests/ops/test_kda.py::test_chunk_return_intermediate_states \
+  tests/modules/test_conv.py::test_conv tests/modules/test_conv.py::test_conv_varlen \
+  -k 'not fused_recurrent and not flash_qla' -q -o log_cli=false --disable-warnings --maxfail=1
+```
+
+The standalone convolution run selects the last two nodes with `-k triton`. CP nodes are `tests/context_parallel/test_cp_kda_graph.py` and `test_cp2_sequence_cut` in each of `test_cp_gdn.py`, `test_cp_kda.py`, and `test_cp_conv.py` under the same directory.
+
+### Same-GPU reference measurements
+
+`benchmarks/ops/benchmark_graph_regression.py` compares outputs, final states, and every input/parameter gradient across checkouts before timing. All eight GDN/Conv cases passed bitwise eager parity; candidate forward and forward+backward Graph checks passed against eager with the repository comparison helper at tolerance 0.005 and explicit finite checks. These fixed-content checks supplement, not replace, the earlier in-place metadata-update tests.
+
+Run the same script sequentially on the same physical GPU, with the baseline output supplied to the candidate:
+
+```bash
+CUDA_VISIBLE_DEVICES=4 FLA_DISABLE_BACKEND_DISPATCH=1 python \
+  /data2/users/dulz/code/FLA-pr-cuda/benchmarks/ops/benchmark_graph_regression.py \
+  --repo /data2/users/dulz/code/FLA-pr-baseline --ops gdn conv \
+  --output /data2/users/dulz/code/FLA/profile/gdn-cudagraph/pr1230-baseline-20260908
+
+CUDA_VISIBLE_DEVICES=4 FLA_DISABLE_BACKEND_DISPATCH=1 python \
+  /data2/users/dulz/code/FLA-pr-cuda/benchmarks/ops/benchmark_graph_regression.py \
+  --repo /data2/users/dulz/code/FLA-pr-cuda --ops gdn conv --graph \
+  --reference /data2/users/dulz/code/FLA/profile/gdn-cudagraph/pr1230-baseline-20260908.pt \
+  --output /data2/users/dulz/code/FLA/profile/gdn-cudagraph/pr1230-candidate-20260908
+```
+
+Workload: seed 42, bf16 activations, B1, H4, D64, T512/2048. GDN uses chunk size 64, fused gates/beta, QK normalization, and initial/final states. Conv uses 256 channels, width 4, bias, SiLU, and initial/final states. Varlen has four sequences with boundaries `[0, 63, T//3, T-17, T]`; all physical tokens are live. Each median uses five samples of 30 calls after three warmup calls. FP32 matmul precision is highest and TF32 is disabled. The script verifies the imported checkout and records software/device metadata.
+
+All values below are synchronized wall milliseconds. F+B means forward plus backward, including gradient-buffer clearing; it is not backward-only. Graph timing is replay-only, excluding input updates, JIT, capture, and warmup. The JSON files also contain raw wall samples and CUDA-event batch times; those event intervals can include GPU idle gaps caused by host submission and are not isolated kernel times.
+
+| Operator | Layout | Tokens | Mode | Baseline eager | Candidate eager | Candidate replay |
+| -------- | ------ | -----: | ---- | -------------: | --------------: | ---------------: |
+| GDN      | dense  |    512 | F    |         0.7289 |          0.7051 |           0.0411 |
+| GDN      | dense  |    512 | F+B  |         7.9636 |          4.8054 |           0.1369 |
+| GDN      | dense  |   2048 | F    |         0.7270 |          0.7246 |           0.0673 |
+| GDN      | dense  |   2048 | F+B  |         6.6925 |         10.5790 |           0.2527 |
+| GDN      | varlen |    512 | F    |         0.7499 |          0.7380 |           0.0627 |
+| GDN      | varlen |    512 | F+B  |         6.9079 |          4.1434 |           0.1537 |
+| GDN      | varlen |   2048 | F    |         0.7505 |          0.7405 |           0.0833 |
+| GDN      | varlen |   2048 | F+B  |         9.0904 |         10.6984 |           0.2437 |
+| Conv     | dense  |    512 | F    |         0.1929 |          0.2636 |           0.0069 |
+| Conv     | dense  |    512 | F+B  |         1.4759 |          1.7801 |           0.0339 |
+| Conv     | dense  |   2048 | F    |         0.1919 |          0.3084 |           0.0083 |
+| Conv     | dense  |   2048 | F+B  |         1.4346 |          1.2444 |           0.0423 |
+| Conv     | varlen |    512 | F    |         0.2019 |          0.3583 |           0.0286 |
+| Conv     | varlen |    512 | F+B  |         1.4805 |          1.4302 |           0.0591 |
+| Conv     | varlen |   2048 | F    |         0.3010 |          0.3088 |           0.0310 |
+| Conv     | varlen |   2048 | F+B  |         1.2272 |          1.3024 |           0.0719 |
+
+The baseline file contains 16 timing rows and the candidate file 32, covering all eight cases. Replay reduces measured submission overhead on these workloads, but this is not evidence that eager performance is preserved: Conv forward latency increased by 2.6%-77.4%, and GDN T2048 F+B increased by 17.7%-58.1%. The shared host and large timing variation limit interpretation. These increases remain unresolved; attributing them solely to environmental noise or declaring no regression would be unsupported. Controlled repeat measurements and diagnosis are still required before a performance conclusion.
+
+### Remaining gates
+
+- KDA has the baseline-reproduced failure above; broader dependent regression is incomplete. No tests or tolerances were weakened to bypass it.
+- Nsight Compute 2024.3.0 was found at `/usr/local/cuda/bin/ncu`. A one-launch full collection targeting GDN `chunk_fwd_kernel_o` failed with `ERR_NVGPUCTRPERM`. No valid counter metrics were obtained; enabling access requires administrator coordination.
+- Target datacenter GPU evidence is unavailable. The RTX 4090 measurements are consumer reference data, not H100/H20-or-newer validation.
+- Eager latency increases need controlled investigation. Do not tick the test/performance checklist items based on this follow-up alone.
+
+Local artifacts are under `/data2/users/dulz/code/FLA/profile/gdn-cudagraph/`, with prefixes `pr1230-{cp,cp-conv-retry,eager,upstream-kda-boundary,eager-tail,conv-eager,baseline,candidate}-20260908`. XML files preserve test outcomes; benchmark JSON/PT files preserve timing samples and numerical snapshots. Raw artifacts are not included in the PR. Earlier pass counts are separate historical evidence and are not added to this run's totals.
 
 ## Historical benchmark results
 
@@ -374,7 +454,7 @@ Raw logs and local environment diagnostics are intentionally excluded from this 
 - Inputs, output gradients, and `cu_seqlens` must keep the captured shapes and addresses. New contents are copied into those buffers with in-place operations such as `copy_` before replay.
 - Fewer than `N_max` live sequences must be encoded as zero-length tail entries by repeating `actual_t`; the operator does not discover `actual_n` with a host synchronization.
 - The graph route covers varlen `chunk_gated_delta_rule`, GatedDeltaNet prefill/chunk, Triton short convolution, and KDA chunk/layer paths on the native NVIDIA Triton backend. Dense B=1 is supported; dense B>1 and GDN Context Parallel graph execution are excluded. Existing KDA CP graph support is preserved. `cu_seqlens_cpu` is routing metadata only, while captured execution uses device-resident `cu_seqlens`.
-- Fused recurrent decode, cache-update decode kernels, full-model capture, graph bucketing, vLLM/SGLang scheduling, NPU, and multi-GPU execution are outside this slice.
+- Fused recurrent decode, cache-update decode kernels, full-model capture, graph bucketing, vLLM/SGLang scheduling, NPU, and general multi-GPU serving integration are outside this slice. Selected two-rank CP checks are documented above.
 - TileLang, intra-card, and FlashQLA implementations do not claim this graph contract and explicitly decline graph dispatch.
 - Fixed `NT_max` launches and graph-only zero initialization can do more work than eager execution when a bucket is sparsely occupied. Bucket policy belongs to the caller and was not designed here.
 - The historical benchmark is a steady-state operator microbenchmark on an RTX 4090. It excludes input-copy latency, graph selection, model-level work, and capture cost, and it is not a datacenter-GPU performance conclusion. The extended benchmark separately reports replay-only and input-update-plus-replay timings.

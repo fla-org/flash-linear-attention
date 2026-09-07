@@ -70,7 +70,7 @@ def init_distributed(rank, world_size):
     logging.basicConfig(level=logging.INFO, format='%(message)s')
 
     os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '29500'
+    os.environ.setdefault('MASTER_PORT', '29500')
     os.environ['RANK'] = str(rank)
     os.environ['WORLD_SIZE'] = str(world_size)
     os.environ['LOCAL_RANK'] = str(rank)
