@@ -26,7 +26,10 @@ def chunk_gated_delta_rule_fwd_intra_npu(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
+    use_graph: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if use_graph:
+        raise NotImplementedError("GDN intra graph mode is not implemented for the Ascend backend yet.")
     if chunk_size not in (16, 32, 64):
         raise ValueError(f'`chunk_size` must be 16, 32, or 64, got {chunk_size}.')
 

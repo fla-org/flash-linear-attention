@@ -711,7 +711,7 @@ def chunk_gated_delta_rule_fwd_h(
     if cu_seqlens is None:
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
     else:
-        N, NT = len(cu_seqlens) - 1, len(chunk_indices)
+        N, NT = len(cu_seqlens) - 1, chunk_indices.shape[0]
         if chunk_offsets is None:
             chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT)
     assert K <= 256, "current kernel does not support head dimension larger than 256."
@@ -777,17 +777,21 @@ def chunk_gated_delta_rule_bwd_dhu(
     if cu_seqlens is None:
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
     else:
-        N, NT = len(cu_seqlens) - 1, len(chunk_indices)
+        N, NT = len(cu_seqlens) - 1, chunk_indices.shape[0]
         if chunk_offsets is None:
             chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT)
 
     if use_graph:
         if state_v_first:
-            dh = get_static_buffer("dhu_dh_vf", (B, NT, HV, V, K), q.dtype, q.device)
+            dh = get_static_buffer("dhu_dh_vf", (B, NT, HV, V, K), q.dtype, q.device, owner=q)
         else:
-            dh = get_static_buffer("dhu_dh", (B, NT, HV, K, V), q.dtype, q.device)
-        dh0 = get_static_buffer("dhu_dh0", tuple(h0.shape), torch.float32, h0.device) if h0 is not None else None
-        dv2 = get_static_buffer("dhu_dv2", tuple(dv.shape), dv.dtype, dv.device)
+            dh = get_static_buffer("dhu_dh", (B, NT, HV, K, V), q.dtype, q.device, owner=q)
+        dh0 = get_static_buffer("dhu_dh0", tuple(h0.shape), torch.float32, h0.device, owner=q) if h0 is not None else None
+        dv2 = get_static_buffer("dhu_dv2", tuple(dv.shape), dv.dtype, dv.device, owner=q)
+        dh.zero_()
+        if dh0 is not None:
+            dh0.zero_()
+        dv2.zero_()
     else:
         if state_v_first:
             dh = q.new_empty(B, NT, HV, V, K)

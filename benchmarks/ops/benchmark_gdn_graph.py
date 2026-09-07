@@ -5,7 +5,11 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""Benchmark eager GDN against captured CUDA Graph replay for varlen inputs."""
+"""Benchmark eager GDN against captured CUDA Graph replay for varlen inputs.
+
+Pass ``--extended`` to run the capacity/layout/component matrix implemented in
+``benchmark_gdn_graph_load.py`` while keeping this historical entry point.
+"""
 
 from __future__ import annotations
 
@@ -13,6 +17,7 @@ import argparse
 import gc
 import statistics
 import subprocess
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
@@ -278,6 +283,14 @@ def _parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    if '--extended' in sys.argv[1:]:
+        sys.argv.remove('--extended')
+        try:
+            from benchmark_gdn_graph_load import main as extended_main
+        except ModuleNotFoundError:
+            from benchmarks.ops.benchmark_gdn_graph_load import main as extended_main
+
+        return extended_main()
     args = _parse_args()
     if not torch.cuda.is_available():
         raise RuntimeError('This benchmark requires an NVIDIA CUDA device.')

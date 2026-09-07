@@ -596,7 +596,10 @@ def recompute_w_u_fwd_npu(
     g: torch.Tensor | None = None,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
+    use_graph: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    if use_graph:
+        raise NotImplementedError("GDN WY graph mode is not implemented for the Ascend backend yet.")
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
     BT = A.shape[-1]
@@ -652,7 +655,10 @@ def prepare_wy_repr_bwd_npu(
     g: torch.Tensor = None,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
+    use_graph: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    if use_graph:
+        raise NotImplementedError("GDN WY backward graph mode is not implemented for the Ascend backend yet.")
     B, T, H, K, V, HV = *k.shape, v.shape[-1], v.shape[2]
     BT = A.shape[-1]
     if chunk_indices is None and cu_seqlens is not None:

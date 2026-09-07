@@ -563,12 +563,16 @@ def chunk_fwd_o(
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
     use_graph: bool = False,
+    chunk_offsets: torch.LongTensor | None = None,
+    graph_nt_max: int | None = None,
 ) -> torch.Tensor:
     B, T, H, K, V, HV = *q.shape, v.shape[-1], v.shape[2]
     BT = chunk_size
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
-    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else chunk_indices.shape[0]
+    if use_graph and graph_nt_max is not None:
+        NT = graph_nt_max
     if scale is None:
         scale = k.shape[-1] ** -0.5
 
@@ -623,7 +627,7 @@ def chunk_bwd_dv(
         CONST_TILING = 32
     BK = min(max(triton.next_power_of_2(K), 16), CONST_TILING)
     BV = min(max(triton.next_power_of_2(V), 16), CONST_TILING)
-    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else chunk_indices.shape[0]
     NV = triton.cdiv(V, BV)
     if scale is None:
         scale = k.shape[-1] ** -0.5
@@ -667,6 +671,8 @@ def chunk_bwd_dv_local(
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
     use_graph: bool = False,
+    chunk_offsets: torch.LongTensor | None = None,
+    graph_nt_max: int | None = None,
 ) -> torch.Tensor:
     B, T, H, K, V, HV = *k.shape, do.shape[-1], do.shape[2]
     BT = chunk_size
@@ -681,7 +687,9 @@ def chunk_bwd_dv_local(
         CONST_TILING = 32
     BK = min(max(triton.next_power_of_2(K), 16), CONST_TILING)
     BV = min(max(triton.next_power_of_2(V), 16), CONST_TILING)
-    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else chunk_indices.shape[0]
+    if use_graph and graph_nt_max is not None:
+        NT = graph_nt_max
 
     dv = torch.zeros_like(do) if use_graph else torch.empty_like(do)
     grid = (NT, B * HV)
@@ -727,6 +735,8 @@ def chunk_bwd_dqkwg(
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
     use_graph: bool = False,
+    chunk_offsets: torch.LongTensor | None = None,
+    graph_nt_max: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if g is not None and IS_NVIDIA_HOPPER and TRITON_ABOVE_3_4_0 and not TRITON_ABOVE_3_7_1:
         raise RuntimeError(
@@ -739,7 +749,9 @@ def chunk_bwd_dqkwg(
     BT = chunk_size
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
-    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else chunk_indices.shape[0]
+    if use_graph and graph_nt_max is not None:
+        NT = graph_nt_max
 
     if check_shared_mem('hopper', k.device.index):
         CONST_TILING = 128

@@ -210,6 +210,33 @@ def test_prepare_chunk_indices_static(dtype, chunk_size, offsets):
         torch.testing.assert_close(chunk_indices[actual_nt:], sentinel)
 
 
+@pytest.mark.parametrize("length", [0, 1, 63, 64, 65])
+@pytest.mark.parametrize("sequence_lengths", [(1,), (1, 0, 2), (0, 0, 0)])
+def test_prepare_chunk_indices_static_boundary_lengths(length, sequence_lengths):
+    # Keep the bucket shape fixed while varying the final sequence length.
+    n_max = len(sequence_lengths)
+    lengths = list(sequence_lengths)
+    lengths[-1] = length
+    offsets = [0]
+    for value in lengths:
+        offsets.append(offsets[-1] + value)
+    t_max = max(65, offsets[-1])
+    nt_max = triton.cdiv(t_max, 64) + n_max - 1
+    cu_seqlens = torch.tensor(offsets, dtype=torch.long, device=device)
+    indices, chunk_offsets = prepare_chunk_indices_static(cu_seqlens, 64, nt_max)
+    dynamic = prepare_chunk_indices(cu_seqlens.clone(), 64)
+    expected_offsets = prepare_chunk_offsets(cu_seqlens.clone(), 64)
+    assert indices.shape == (nt_max, 2)
+    assert chunk_offsets.shape == (n_max + 1,)
+    torch.testing.assert_close(indices[:dynamic.shape[0]], dynamic)
+    torch.testing.assert_close(chunk_offsets, expected_offsets)
+    if dynamic.shape[0] < nt_max:
+        torch.testing.assert_close(
+            indices[dynamic.shape[0]:],
+            torch.tensor([-1, 0], dtype=torch.long, device=device).expand(nt_max - dynamic.shape[0], -1),
+        )
+
+
 @pytest.mark.skipif(not IS_NVIDIA, reason="CUDA Graph capture requires an NVIDIA CUDA device")
 def test_prepare_chunk_indices_static_graph_replay():
     chunk_size = 64

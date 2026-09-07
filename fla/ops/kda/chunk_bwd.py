@@ -349,8 +349,10 @@ def chunk_kda_bwd_dAv(
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     if use_graph:
-        dA = get_static_buffer("dAv_dA", (B, T, HV, BT), torch.float, v.device)
-        dv = get_static_buffer("dAv_dv", tuple(do.shape), do.dtype, do.device)
+        dA = get_static_buffer("dAv_dA", (B, T, HV, BT), torch.float, v.device, owner=q)
+        dv = get_static_buffer("dAv_dv", tuple(do.shape), do.dtype, do.device, owner=q)
+        dA.zero_()
+        dv.zero_()
     else:
         dA = v.new_empty(B, T, HV, BT, dtype=torch.float)
         dv = torch.empty_like(do)
@@ -408,12 +410,18 @@ def chunk_kda_bwd_wy_dqkg_fused(
 
     # dq, dk are allocated at HV dimension; caller reduces to H if GVA
     if use_graph:
-        dq = get_static_buffer("wy_dq", (B, T, HV, K), torch.float, q.device)
-        dk = get_static_buffer("wy_dk", (B, T, HV, K), torch.float, q.device)
-        dv2 = get_static_buffer("wy_dv2", tuple(v.shape), v.dtype, v.device)
-        dg = get_static_buffer("wy_dg", tuple(g.shape), torch.float, g.device)
-        db = get_static_buffer("wy_db", tuple(beta.shape), torch.float, beta.device)
-        dA = get_static_buffer("wy_dA", tuple(A.shape), torch.float, A.device)
+        dq = get_static_buffer("wy_dq", (B, T, HV, K), torch.float, q.device, owner=q)
+        dk = get_static_buffer("wy_dk", (B, T, HV, K), torch.float, q.device, owner=q)
+        dv2 = get_static_buffer("wy_dv2", tuple(v.shape), v.dtype, v.device, owner=q)
+        dg = get_static_buffer("wy_dg", tuple(g.shape), torch.float, g.device, owner=q)
+        db = get_static_buffer("wy_db", tuple(beta.shape), torch.float, beta.device, owner=q)
+        dA = get_static_buffer("wy_dA", tuple(A.shape), torch.float, A.device, owner=q)
+        dq.zero_()
+        dk.zero_()
+        dv2.zero_()
+        dg.zero_()
+        db.zero_()
+        dA.zero_()
     else:
         dq = g.new_empty(B, T, HV, K, dtype=torch.float)
         dk = g.new_empty(B, T, HV, K, dtype=torch.float)
@@ -528,6 +536,7 @@ def chunk_kda_bwd(
             chunk_offsets=chunk_offsets,
             chunk_size=chunk_size,
             state_v_first=state_v_first,
+            use_graph=use_graph,
         )
     else:
         w, u, qg, kg, v_new, h = kwargs["w"], kwargs["u"], kwargs["qg"], kwargs["kg"], kwargs["v_new"], kwargs["h"]
@@ -586,6 +595,7 @@ def chunk_kda_bwd(
         chunk_indices=chunk_indices,
         chunk_offsets=chunk_offsets,
         state_v_first=state_v_first,
+        use_graph=use_graph,
     )
 
     dq, dk, dv, db, dg, dAkk = chunk_kda_bwd_wy_dqkg_fused(
@@ -647,6 +657,8 @@ def chunk_kda_bwd(
             dt_bias=dt_bias,
             dyg=dg,
             lower_bound=lower_bound,
+            cu_seqlens=cu_seqlens,
+            use_graph=use_graph,
         )
 
     return dq, dk, dv, db, dg, dh0, dA, dbias

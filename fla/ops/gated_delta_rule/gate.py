@@ -182,7 +182,7 @@ def gdn_gate_chunk_cumsum(
     BT = chunk_size
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
-    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else chunk_indices.shape[0]
 
     o = torch.zeros_like(g, dtype=output_dtype or g.dtype) if use_graph else torch.empty_like(g, dtype=output_dtype or g.dtype)
     gdn_gate_chunk_cumsum_scalar_kernel[(NT, B * H)](
@@ -215,6 +215,7 @@ def gdn_gate_bwd(
     T = g.numel() // H
     BT = 32
     NT = triton.cdiv(T, BT)
+    kernel_use_graph = use_graph and cu_seqlens is not None
 
     dg = torch.zeros_like(g, dtype=torch.float32) if use_graph else torch.empty_like(g, dtype=torch.float32)
     dA = A_log.new_zeros(NT, H, dtype=torch.float32) if use_graph else A_log.new_empty(NT, H, dtype=torch.float32)
@@ -228,10 +229,10 @@ def gdn_gate_bwd(
         dA=dA,
         cu_seqlens=cu_seqlens,
         T=T,
-        N=len(cu_seqlens) - 1 if use_graph else 0,
+        N=len(cu_seqlens) - 1 if kernel_use_graph else 0,
         H=H,
         BT=BT,
-        USE_GRAPH=use_graph,
+        USE_GRAPH=kernel_use_graph,
     )
 
     dg = dg.view_as(g).type_as(g)

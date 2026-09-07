@@ -4,8 +4,8 @@
 
 - Baseline commit: `35dceaee5408e69a555fec34cb215c93c375dabe`
 - Working branch: `feat/gdn-varlen-cudagraph`
-- In scope: `chunk_gated_delta_rule`, varlen layout, native Triton/CUDA, forward, backward, capture, and replay.
-- Out of scope: KDA, causal convolution, fused recurrent decode, graph bucketing, scheduling frameworks, NPU, and Context Parallel.
+- In scope: the varlen GDN chunk operator, the real `GatedDeltaNet` layer prefill/chunk path, its Triton short convolution, KDA chunk/layer paths, native Triton/CUDA forward, backward, capture, and replay.
+- Out of scope: fused recurrent decode, cache-update decode kernels, graph bucketing, scheduling frameworks, NPU, multi-GPU, and Context Parallel.
 - Mathematical contract: preserve the eager GDN operation, precision staging, accumulation order, output structure, and existing tolerances. Only scheduling metadata and boundary guards may change.
 
 ## Contract cells
@@ -14,10 +14,13 @@
 | ------ | ------- | -------------- | --------------- | ----------- | --------------------- |
 | Existing public API and GDN tests | `use_graph=False`, dense or varlen, existing backends | `BT in {16, 32, 64}` | All previously supported combinations | Existing fallback | Existing tests and naive recurrent oracle; no route, output, or gradient change |
 | New graph mode | `use_graph=True`, varlen, native Triton on NVIDIA CUDA | `BT in {16, 32, 64}`, fixed `T_max` and `N_max` | Precomputed or fused raw gate, post-sigmoid beta, initial/final state | Optimized path | Same-call eager GDN on the real token prefix; existing per-output and per-gradient tolerances |
-| New graph mode boundary | `use_graph=True`, dense input | Any | Any | Explicit unsupported error | Public validation raises before kernel execution |
+| Dense graph mode | `use_graph=True` or explicit graph mode, dense B=1 | Fixed token shape | No layer cache or mask-derived packing | Optimized path | Layer forward/backward replay parity without external varlen metadata |
+| New graph mode boundary | Forced graph, dense B>1 | Any | Any | Explicit unsupported error | Auto retains the eager path |
 | New graph mode boundary | `use_graph=True`, Context Parallel | Any | Any | Explicit unsupported error | Public validation raises before kernel execution |
 | New graph mode boundary | `use_graph=True`, non-NVIDIA backend | Any | Any | Explicit unsupported error | Public validation raises before kernel execution |
 | FlashQLA dispatch | `use_graph=True`, otherwise FlashQLA-compatible | `BT=64` | FlashQLA-supported subset | Existing fallback | FlashQLA verifier rejects graph mode; native Triton graph path supplies public semantics |
+| GatedDeltaNet layer | graph-compatible varlen prefill/chunk | `BT in {16, 32, 64}` | projection, short convolution, GDN chunk, output projection | Optimized path when layer constraints hold | Layer capture/replay tests compare valid output and gradients with eager |
+| KDA chunk/layer | graph-compatible varlen chunk path | `BT in {32, 64}` | KDA gate/state and optional short convolution | Optimized path when layer constraints hold | KDA operator and layer capture/replay tests compare valid output and gradients with eager |
 
 The graph capacity is defined by the physical input shape and the padded cumulative-length buffer:
 
@@ -168,7 +171,7 @@ fixed-address input and cu_seqlens buffers
 | `fla/ops/utils/__init__.py` | utility export | Static helper unavailable through `fla.ops.utils` | Exports the shared helper | Reuse the same implementation across graph-capable operators |
 | `tests/ops/utils/test_index.py` | static metadata tests | Dynamic helper only | Checks `BT=16/32/64`, int32/int64, zero-length sequences, partial capacity, fixed shape, sentinels, and capture/replay | Prove semantic parity and graph-safe regeneration |
 | `scripts/repro_gdn_varlen_cudagraph.py` | baseline reproducer | No focused GDN reproducer | Separates uncached capture failure from stale-cache replay | Preserve the original failure as executable evidence |
-| `fla/ops/gated_delta_rule/chunk.py` | public op, autograd forward/backward, helpers | Eager-only dynamic metadata | Adds opt-in `use_graph`, derives `NT_max`, builds/saves static indices and offsets, and threads graph mode through forward/backward | Give capture an explicit contract while leaving `use_graph=False` unchanged |
+| `fla/ops/gated_delta_rule/chunk.py` | public op, autograd forward/backward, helpers | Eager-only dynamic metadata | Adds opt-in `use_graph`, `graph_mode`, derives `NT_max`, accepts or builds static indices and offsets, and threads graph mode through forward/backward | Give capture an explicit contract while leaving `use_graph=False` unchanged |
 | `fla/ops/gated_delta_rule/chunk_fwd.py` | fused KKT plus triangular solve | Every launched row was assumed valid | Adds a constexpr graph flag and sentinel exit before sequence/data access | Make the `BT=64` intra-chunk path safe at the fixed grid size |
 | `fla/ops/gated_delta_rule/gate.py` | fused gate cumsum and gate backward | Dynamic chunk grid; full physical-token parameter reductions | Adds sentinel handling, graph-only zero initialization, and an on-device `actual_t` mask | Exclude inactive chunks and padding from gate outputs and parameter gradients |
 | `fla/ops/gated_delta_rule/wy_fast.py` | `recompute_w_u_fwd`, `prepare_wy_repr_bwd` | Dynamic chunk grids and partially written `empty` outputs | Adds sentinel exits and graph-only zero initialization | Keep forward recomputation and WY gradients valid under `NT_max` launches |
@@ -180,8 +183,13 @@ fixed-address input and cu_seqlens buffers
 | `fla/ops/common/backends/intracard.py` | backend verifier | Graph mode could reach an unsupported implementation | Rejects `use_graph=True` | Route the public contract only to the validated native Triton path |
 | `fla/ops/common/backends/tilelang/__init__.py` | backend verifier | Graph mode could reach an unsupported implementation | Rejects `use_graph=True` | Avoid silent fallback to an unvalidated graph path |
 | `fla/ops/gated_delta_rule/backends/flash_qla.py` | FlashQLA verifier | Graph mode was unknown to the verifier | Rejects `use_graph=True` | Keep graph semantics on the native Triton implementation |
+| `fla/layers/gated_deltanet.py` | GatedDeltaNet prefill/chunk layer | Layer did not expose the graph contract | Routes graph parameters through projection, short convolution, GDN chunk, and output projection; unsupported cache/decode cases fall back or error | Validate the real layer path rather than an isolated operator |
+| `fla/modules/conv/causal_conv1d.py`, `fla/modules/conv/short_conv.py` | Triton short convolution | Dynamic chunk/state allocation | Adds fixed graph-capacity metadata, grids, and padding-safe forward/backward buffers; decode cache paths remain unchanged | Keep the GDN prefill convolution capture-safe |
+| `fla/ops/kda/*.py`, `fla/layers/kda.py` | KDA chunk and layer paths | Eager-only dynamic chunk metadata | Threads the same static metadata, sentinel, fixed-grid, and route contract through KDA forward/backward and layer prefill | Extend the validated slice without changing KDA decode |
 | `tests/ops/test_gdn_graph.py` | GDN graph tests | No operator-level capture/replay coverage | Captures once, mutates fixed buffers, replays multiple layouts, and compares forward/state/all gradients with eager | Prove the complete varlen forward/backward vertical slice |
+| `tests/layers/test_gated_deltanet_graph.py`, `tests/modules/test_conv_graph.py`, `tests/ops/test_kda_graph.py`, `tests/layers/test_kda_layer_graph.py` | Layer, convolution, and KDA graph tests | No integrated graph coverage | Capture/replay real layer and component paths, update metadata, and check padding and gradients | Prove the extended scope separately before using it in a model |
 | `benchmarks/ops/benchmark_gdn_graph.py` | standalone latency benchmark | No eager-versus-replay benchmark | Warms both paths, captures outside timing, and measures steady eager/replay latency with CUDA Events | Record the cost and launch-overhead benefit without counting JIT/autotune/capture |
+| `benchmarks/ops/benchmark_gdn_graph_load.py` | high-load operator/component benchmark | No capacity/layout/fallback matrix | Measures eager-live, eager-fixed, graph-replay, graph-update, copy-only, capture, p95, memory, and break-even; supports GDN, layer, convolution, and KDA components | Expose sparse-bucket regressions instead of reporting only ideal replay |
 | `GDN_GRAPH_CAPTURE_WALKTHROUGH.md` | learning record | Absent | Records contract, call chains, evidence, and staged changes | Make the scheduling change reviewable without changing operator math |
 
 ## Key before/after code
@@ -263,7 +271,9 @@ def chunk_gated_delta_rule(..., use_graph: bool = False):
         chunk_indices = prepare_chunk_indices(...)
 ```
 
-The default remains the original path. Graph mode is deliberately rejected for dense input, non-NVIDIA devices, Context Parallel, caller-provided chunk indices, and CPU cumulative lengths instead of silently changing backend or metadata semantics.
+The default remains the original path. Dense B=1 inputs can use graph mode without varlen metadata, including at the GDN/KDA layer entry. Forced GDN graph mode rejects dense B>1, Ascend, and Context Parallel; auto uses eager for these cases. This does not remove KDA's existing Context Parallel graph support. Device-resident `cu_seqlens` is required for captured packed-varlen execution; a CPU `cu_seqlens_cpu` may be supplied for host-side routing statistics. Caller-provided `chunk_indices` and `chunk_offsets` are accepted when they have the fixed graph shape, dtype, device, and contiguous layout. Layer inputs requiring mask-based unpadding must be prepacked before capture. Ascend graph execution remains incomplete; host-side backend compatibility tests are not NPU runtime validation.
+
+When operator auto routing chooses eager, it clears graph metadata and re-enters backend dispatch once with explicit eager mode. Eligible FlashQLA/FlashKDA implementations retain their normal priority; otherwise the native eager implementation runs. This adds host dispatch work, not a second kernel execution. Forced Graph and graph-eligible auto calls do not take this re-entry.
 
 ## What each test proves
 
@@ -273,12 +283,15 @@ The default remains the original path. Graph mode is deliberately rejected for d
 - `test_gdn_varlen_graph_backward_replay`: captures forward plus backward, then updates the same input, output-gradient, and cumulative-length buffers. It checks `dq`, `dk`, `dv`, `dg`, `dbeta`, `dinitial_state`, and, for fused gates, `dA_log` and `ddt_bias`; all token-gradient padding must be zero.
 - `tests/ops/test_gdn.py`: protects the existing dense/varlen eager API and numerical behavior when `use_graph=False`.
 - `tests/ops/test_gdn_kernels.py`, `tests/ops/utils/test_cumsum.py`, and `tests/ops/test_solve_tril.py`: protect the shared kernels whose signatures or graph-only branches changed.
+- `tests/layers/test_gated_deltanet_graph.py`: captures the real projection → short convolution → GDN chunk → output projection layer path.
+- `tests/modules/test_conv_graph.py`: checks short-convolution forward/backward replay and state/padding behavior.
+- `tests/ops/test_kda_graph.py`, `tests/layers/test_kda_layer_graph.py`: check KDA chunk and layer forward/backward replay, metadata reuse, and eager fallback.
 
 The final command results are recorded in the verification section after all source and documentation changes are complete.
 
 ## Benchmark results
 
-Command, run twice on physical GPU 3:
+The original small benchmark below is historical evidence from physical GPU 3. The current high-load matrix and component runs use physical GPU 4 and are recorded in `profile/gdn-cudagraph/full_scope_report.md`.
 
 ```bash
 CUDA_VISIBLE_DEVICES=3 /home/dulz/miniconda3/envs/lz/bin/python benchmarks/ops/benchmark_gdn_graph.py \
@@ -326,8 +339,8 @@ The 14 warnings in each pytest process are the environment's existing `torch.jit
 - Graph mode has fixed `T_max` and `N_max` capacities. The caller must select a larger graph bucket or use eager execution above capacity.
 - Inputs, output gradients, and `cu_seqlens` must keep the captured shapes and addresses. New contents are copied into those buffers with in-place operations such as `copy_` before replay.
 - Fewer than `N_max` live sequences must be encoded as zero-length tail entries by repeating `actual_t`; the operator does not discover `actual_n` with a host synchronization.
-- The validated graph route is `chunk_gated_delta_rule` with varlen input on the native NVIDIA Triton backend. Dense input, Context Parallel, `cu_seqlens_cpu`, and caller-provided `chunk_indices` are rejected in graph mode.
-- KDA, causal convolution, fused recurrent decode, full `GatedDeltaNet` layer/model capture, graph bucketing, vLLM/SGLang scheduling, NPU, and multi-GPU execution are outside this slice.
+- The validated graph route covers varlen `chunk_gated_delta_rule`, GatedDeltaNet prefill/chunk, Triton short convolution, and KDA chunk/layer paths on the native NVIDIA Triton backend. Dense input and Context Parallel remain outside the contract; `cu_seqlens_cpu` is routing metadata only, while captured execution uses device-resident `cu_seqlens`.
+- Fused recurrent decode, cache-update decode kernels, full-model capture, graph bucketing, vLLM/SGLang scheduling, NPU, and multi-GPU execution are outside this slice.
 - TileLang, intra-card, and FlashQLA implementations do not claim this graph contract and explicitly decline graph dispatch.
 - Fixed `NT_max` launches and graph-only zero initialization can do more work than eager execution when a bucket is sparsely occupied. Bucket policy belongs to the caller and was not designed here.
 - The benchmark is a steady-state operator microbenchmark on an RTX 4090. It excludes input-copy latency, graph selection, model-level work, and capture cost, and it is not a datacenter-GPU performance conclusion.
@@ -335,9 +348,9 @@ The 14 warnings in each pytest process are the environment's existing `torch.jit
 ## Recommended reading order
 
 1. Start with this document through "Before: dynamic data flow" to understand the dependency that broke replay.
-2. Run `scripts/repro_gdn_varlen_cudagraph.py` and read `fla/ops/utils/index.py` plus `tests/ops/utils/test_index.py` to see the dynamic failure and fixed-capacity metadata contract in isolation.
+2. Run `scripts/repro_gdn_varlen_cudagraph.py` (the original baseline reproducer) and read `fla/ops/utils/index.py` plus `tests/ops/utils/test_index.py` to see the dynamic failure and fixed-capacity metadata contract in isolation.
 3. Read the public API and autograd plumbing in `fla/ops/gated_delta_rule/chunk.py`.
 4. Follow the forward path through `gate.py` or `cumsum.py`, `chunk_fwd.py`, `wy_fast.py`, `common/chunk_delta_h.py`, and `common/chunk_o.py`.
 5. Follow backward from `chunk.py` through `common/chunk_o.py`, `common/chunk_delta_h.py`, `wy_fast.py`, reverse cumsum, and fused gate backward.
 6. Read `tests/ops/test_gdn_graph.py` to see fixed-address capture, in-place buffer updates, replay, eager comparison, and padding assertions together.
-7. Run `benchmarks/ops/benchmark_gdn_graph.py` last; its numbers are meaningful only after the correctness contract and timing exclusions are understood.
+7. Run `benchmarks/ops/benchmark_gdn_graph_load.py` last; its numbers are meaningful only after the correctness contract and timing exclusions are understood.

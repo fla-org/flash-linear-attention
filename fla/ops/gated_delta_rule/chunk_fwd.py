@@ -385,7 +385,7 @@ def chunk_gated_delta_rule_fwd_intra(
     if BT == 64 and not IS_INTEL:
         # Step 1: fused kkt + solve_tril
         BC = 16
-        NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
+        NT = triton.cdiv(T, BT) if cu_seqlens is None else chunk_indices.shape[0]
         A = torch.zeros(B, T, HV, BT, device=k.device, dtype=k.dtype)
         chunk_gated_delta_rule_fwd_kkt_solve_kernel[(NT, B * HV)](
             k=k,

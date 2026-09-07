@@ -198,10 +198,21 @@ def prepare_chunk_indices_static(
     """
     if cu_seqlens.ndim != 1 or cu_seqlens.numel() < 2:
         raise ValueError("cu_seqlens must be a 1-D tensor with at least two entries")
+    if not isinstance(chunk_size, int) or chunk_size < 1:
+        raise ValueError(f"chunk_size must be a positive integer, got {chunk_size!r}")
     if not isinstance(nt_max, int) or nt_max < 1:
         raise ValueError(f"nt_max must be a positive integer, got {nt_max!r}")
     lengths = cu_seqlens[1:] - cu_seqlens[:-1]
     chunk_counts = (lengths + (chunk_size - 1)).div(chunk_size, rounding_mode='floor')
+    required_nt = chunk_counts.clamp_min(0).sum()
+    if cu_seqlens.device.type == 'cpu':
+        if (lengths < 0).any():
+            raise ValueError("cu_seqlens must be non-decreasing")
+        required_nt_value = int(required_nt)
+        if required_nt_value > nt_max:
+            raise ValueError(
+                f"nt_max={nt_max} is smaller than the metadata requirement {required_nt_value}"
+            )
     chunk_offsets = F.pad(chunk_counts.cumsum(0), (1, 0))
     slots = torch.arange(nt_max, device=cu_seqlens.device, dtype=cu_seqlens.dtype)
     sequence_ids = torch.searchsorted(chunk_offsets, slots, right=True) - 1

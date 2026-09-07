@@ -121,7 +121,7 @@ def chunk_scaled_dot_kkt_fwd(
     BT = chunk_size
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
-    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else chunk_indices.shape[0]
     factory = torch.zeros if use_graph else torch.empty
     A = factory(B, T, HV, BT, device=k.device, dtype=output_dtype)
     chunk_scaled_dot_kkt_fwd_kernel[(NT, B * HV)](

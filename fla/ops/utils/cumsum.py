@@ -268,7 +268,7 @@ def chunk_local_cumsum_scalar(
     BT = chunk_size
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
-    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else chunk_indices.shape[0]
     g_org = g
     g = torch.zeros_like(g, dtype=output_dtype or g.dtype) if use_graph else torch.empty_like(g, dtype=output_dtype or g.dtype)
     grid = (NT, B * H)
@@ -307,7 +307,7 @@ def chunk_local_cumsum_vector(
     BT = chunk_size
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
-    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else chunk_indices.shape[0]
     assert chunk_size == 2**(chunk_size.bit_length()-1), "chunk_size must be a power of 2"
 
     g_org = g

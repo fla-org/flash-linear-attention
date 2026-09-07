@@ -390,7 +390,7 @@ def solve_tril(
     B, T, H, BT = A.shape
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
-    NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
+    NT = chunk_indices.shape[0] if cu_seqlens is not None else triton.cdiv(T, BT)
 
     Ai = torch.zeros_like(A, dtype=output_dtype)
     if BT == 16:
