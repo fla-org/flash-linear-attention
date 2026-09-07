@@ -1,0 +1,86 @@
+name: nvidia-h100-smoke
+
+# Fast feedback tier: on every PR push and every main push, run only the
+# smoke-marked core GDN/KDA tests. The full pipeline lives in
+# nvidia-h100.yml and runs on maintainer PRs, on PR approval, and nightly.
+
+concurrency:
+  group: smoke-ci-${{ github.event.pull_request.number || github.ref }}
+  # A new push cancels only the previous smoke run; it must never cancel the
+  # approval-triggered full pipeline, which uses a different concurrency group.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+on:
+  pull_request:
+    branches: [ '*' ]
+    types: [opened, synchronize, reopened]
+  push:
+    branches:
+      - main
+
+jobs:
+  changes:
+    name: Detect smoke-skippable changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      skip: ${{ steps.detect.outputs.skip }}
+    steps:
+      - name: Detect NPU-only or non-code diff
+        id: detect
+        uses: actions/github-script@v9.0.0
+        with:
+          script: |
+            if (context.eventName !== 'pull_request') {
+              core.setOutput('skip', 'false');
+              return;
+            }
+            const pr = context.payload.pull_request;
+            const { owner, repo } = context.repo;
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner, repo, pull_number: pr.number, per_page: 100,
+            });
+            const names = files.map(f => f.filename);
+            // NPU-only PRs: nothing for the GPU smoke to cover.
+            const npuSafe = /^fla\/(.+\/)?backends\/triton_ascend\/(?!.*__init__\.py$)|^\.github\/workflows\/ascend-|^\.agents\/skills\/fla-ascend-performance\//;
+            if (names.length > 0 && names.every(n => npuSafe.test(n))) {
+              core.setOutput('skip', 'true');
+              return;
+            }
+            // PRs touching no code or tests: smoke has nothing to verify.
+            const relevant = /^(fla\/|tests\/|benchmarks\/)|^pyproject\.toml$|^setup\.(py|cfg)$|^\.github\/workflows\//;
+            core.setOutput('skip', names.some(n => relevant.test(n)) ? 'false' : 'true');
+
+  smoke:
+    name: Smoke GDN/KDA (PyTorch 2.12)
+    needs: changes
+    if: needs.changes.outputs.skip != 'true'
+    runs-on: nvidia-h100-1
+    timeout-minutes: 60
+    env:
+      FLA_CI_ENV: 1
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v7.0.0
+
+      - name: Setup CI Environment
+        id: setup
+        uses: ./.github/actions/setup-ci-env
+        with:
+          runner_name: ${{ runner.name }}
+          conda_env_name: 'pytorch_2_12'
+          gpu_type: 'nvidia'
+          install_tilelang: "true"
+          skip_gpu_check: true
+
+      - name: Run GDN/KDA smoke tests
+        if: steps.setup.outputs.skip_tests == 'false'
+        shell: bash
+        run: |
+          # Per-file processes, same as the full suite (avoids runner OOM).
+          for f in tests/ops/test_gdn.py tests/ops/test_gdn2.py tests/ops/test_gdn_kernels.py tests/ops/test_kda.py tests/ops/test_kda_graph.py; do
+            $CONDA_BIN_PATH/pytest -s -v --exitfirst -m smoke "$f" || exit 1
+          done
