@@ -170,20 +170,34 @@ jobs:
           source /usr/local/Ascend/ascend-toolkit/set_env.sh
           set -uo pipefail
 
+          run_benchmark() {
+            local name=$1 device=$2
+            shift 2
+            local started=$SECONDS rc=0
+            echo "Benchmark $name: device=$device started=$(date -u +%FT%TZ)"
+            ASCEND_RT_VISIBLE_DEVICES="$device" "$@" > "$name.log" 2>&1 || rc=$?
+            echo "Benchmark $name: device=$device elapsed=$((SECONDS - started))s exit=$rc"
+            return "$rc"
+          }
+
+          run_benchmark chunk_gdn 0 python -m benchmarks.ops.run \
+            --op chunk_gdn --base '' --json benchmark_chunk_gdn.json &
+          pid_gdn=$!
+          run_benchmark chunk_kda 1 python -m benchmarks.ops.run \
+            --op chunk_kda --base '' --json benchmark_chunk_kda.json &
+          pid_kda=$!
+          # fused_attnres finishes first in the four-card baseline; reuse its card for GDN2.
           (
             set -e
-            ASCEND_RT_VISIBLE_DEVICES=0 python -m benchmarks.ops.run \
-              --op chunk_gdn --base '' --json benchmark_chunk_gdn.json \
-              > chunk_gdn.log 2>&1
-            ASCEND_RT_VISIBLE_DEVICES=0 python -m benchmarks.ops.run \
+            run_benchmark fused_attnres 2 python -m benchmarks.ops.run \
+              --op fused_attnres --base '' --json benchmark_fused_attnres.json
+            run_benchmark chunk_gdn2 2 python -m benchmarks.ops.run \
               --op chunk_gdn2 --base '' \
-              --json benchmark_chunk_gdn2.json \
-              > chunk_gdn2.log 2>&1
-            ASCEND_RT_VISIBLE_DEVICES=0 python -m benchmarks.ops.run \
+              --json benchmark_chunk_gdn2.json
+            run_benchmark chunk_gdn2_32k 2 python -m benchmarks.ops.run \
               --op chunk_gdn2 --base '' \
               --custom-shapes '{"gdn2_32k":{"B":1,"T":32768,"H":1,"D":32}}' \
-              --json benchmark_chunk_gdn2_32k.json \
-              > chunk_gdn2_32k.log 2>&1
+              --json benchmark_chunk_gdn2_32k.json
           python - <<'PY'
           import json
 
@@ -209,17 +223,8 @@ jobs:
           })
           PY
           ) &
-          pid_gdn=$!
-          ASCEND_RT_VISIBLE_DEVICES=1 python -m benchmarks.ops.run \
-            --op chunk_kda --base '' --json benchmark_chunk_kda.json \
-            > chunk_kda.log 2>&1 &
-          pid_kda=$!
-          ASCEND_RT_VISIBLE_DEVICES=2 python -m benchmarks.ops.run \
-            --op fused_attnres --base '' --json benchmark_fused_attnres.json \
-            > fused_attnres.log 2>&1 &
           pid_attnres=$!
-          ASCEND_RT_VISIBLE_DEVICES=3 python benchmarks/modules/benchmark_conv.py \
-            > conv1d.log 2>&1 &
+          run_benchmark conv1d 3 python benchmarks/modules/benchmark_conv.py &
           pid_conv1d=$!
 
           status=0
