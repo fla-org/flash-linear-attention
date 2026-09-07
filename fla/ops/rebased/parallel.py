@@ -193,7 +193,7 @@ def _parallel_rebased_bwd_dq(
         b_s = tl.where(m_s, b_s, 0)
         # [BTL, BK]
         b_dq = tl.dot((2 * b_ds * b_s).to(b_k.dtype),
-                       b_k, b_dq, allow_tf32=False)
+                      b_k, b_dq, allow_tf32=False)
         o_k += BTS
     p_dq = dq + (i_bh + B * H * i_v) * T*K + o_t[:, None] * K + o_kk[None, :]
     tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), mask=m_q)
