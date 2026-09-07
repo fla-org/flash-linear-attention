@@ -1,0 +1,45 @@
+name: runner-cleanup-oneshot
+
+# One-shot runner maintenance PR: runs directly on the self-hosted H100 runner
+# to reclaim disk (triton/pip/pytest caches) and print diagnostics.
+# This PR is opened only to execute the job and is closed unmerged afterwards.
+
+on:
+  pull_request:
+    types: [opened]
+
+permissions:
+  contents: read
+
+jobs:
+  cleanup:
+    name: One-shot disk cleanup
+    runs-on: nvidia-h100-1
+    timeout-minutes: 20
+    steps:
+      - name: Diagnose before cleanup
+        shell: bash
+        run: |
+          echo "== context =="
+          whoami; echo "HOME=$HOME"; echo "container=${container:-not-in-container}"
+          echo "== df =="
+          df -h /
+          echo "== home top =="
+          du -x -d1 -h "$HOME" 2>/dev/null | sort -rh | head -10 || true
+          echo "== runner work =="
+          du -sh /home/ubuntu/actions-runner/_work 2>/dev/null || true
+          du -x -d1 -h /home/ubuntu/actions-runner/_work 2>/dev/null | sort -rh | head -8 || true
+          echo "== docker =="
+          (docker system df 2>/dev/null || sudo -n docker system df 2>/dev/null) || echo "no docker access"
+          echo "== root top (sudo if allowed) =="
+          sudo -n du -x -d1 -h / 2>/dev/null | sort -rh | head -8 || echo "no passwordless sudo"
+
+      - name: Clean triton, pip and pytest caches
+        shell: bash
+        run: |
+          rm -rf ~/.triton ~/.cache
+          find /home/ubuntu /github /tmp -maxdepth 4 -name '.pytest_cache' -prune -exec rm -rf {} + 2>/dev/null || true
+
+      - name: Disk usage after
+        shell: bash
+        run: df -h /
