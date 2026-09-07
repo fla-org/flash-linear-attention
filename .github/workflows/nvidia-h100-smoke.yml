@@ -1,7 +1,9 @@
 name: nvidia-h100-smoke
 
-# Fast feedback tier: on every PR push and every main push, run only the
-# smoke-marked core GDN/KDA tests. The full pipeline lives in
+# Fast feedback tier: on every PR push and every main push, run the PR's
+# dependent test files, but only the smoke-marked core tests under tests/ops.
+# Small non-ops suites (modules/layers/utils/context_parallel) run in full;
+# tests/models is not part of this tier. The full pipeline lives in
 # nvidia-h100.yml and runs on maintainer PRs, on PR approval, and nightly.
 
 concurrency:
@@ -29,7 +31,7 @@ jobs:
     outputs:
       skip: ${{ steps.detect.outputs.skip }}
     steps:
-      - name: Detect NPU-only or non-code diff
+      - name: Detect NPU-only diff
         id: detect
         uses: actions/github-script@v9.0.0
         with:
@@ -43,19 +45,13 @@ jobs:
             const files = await github.paginate(github.rest.pulls.listFiles, {
               owner, repo, pull_number: pr.number, per_page: 100,
             });
-            const names = files.map(f => f.filename);
             // NPU-only PRs: nothing for the GPU smoke to cover.
             const npuSafe = /^fla\/(.+\/)?backends\/triton_ascend\/(?!.*__init__\.py$)|^\.github\/workflows\/ascend-|^\.agents\/skills\/fla-ascend-performance\//;
-            if (names.length > 0 && names.every(n => npuSafe.test(n))) {
-              core.setOutput('skip', 'true');
-              return;
-            }
-            // PRs touching no code or tests: smoke has nothing to verify.
-            const relevant = /^(fla\/|tests\/|benchmarks\/)|^pyproject\.toml$|^setup\.(py|cfg)$|^\.github\/workflows\//;
-            core.setOutput('skip', names.some(n => relevant.test(n)) ? 'false' : 'true');
+            const names = files.map(f => f.filename);
+            core.setOutput('skip', names.length > 0 && names.every(n => npuSafe.test(n)) ? 'true' : 'false');
 
   smoke:
-    name: Smoke GDN/KDA (PyTorch 2.12)
+    name: Smoke (PyTorch 2.12)
     needs: changes
     if: needs.changes.outputs.skip != 'true'
     runs-on: nvidia-h100-1
@@ -76,11 +72,35 @@ jobs:
           install_tilelang: "true"
           skip_gpu_check: true
 
-      - name: Run GDN/KDA smoke tests
+      - name: Find dependent test files (excluding models)
         if: steps.setup.outputs.skip_tests == 'false'
+        id: find-tests
+        shell: bash
+        run: |
+          export TEST_SCOPE="EXCLUDE_MODELS"
+          TEST_FILES=$($CONDA_BIN_PATH/python scripts/find_dependent_tests.py "${{ steps.setup.outputs.all_changed_files }}")
+          echo "Found dependent test files: $TEST_FILES"
+          echo "test_files=$TEST_FILES" >> $GITHUB_OUTPUT
+
+      - name: Run smoke-marked tests in dependent ops files
+        if: steps.find-tests.outputs.test_files && steps.setup.outputs.skip_tests == 'false'
         shell: bash
         run: |
           # Per-file processes, same as the full suite (avoids runner OOM).
-          for f in tests/ops/test_gdn.py tests/ops/test_gdn2.py tests/ops/test_gdn_kernels.py tests/ops/test_kda.py tests/ops/test_kda_graph.py; do
-            $CONDA_BIN_PATH/pytest -s -v --exitfirst -m smoke "$f" || exit 1
+          for f in ${{ steps.find-tests.outputs.test_files }}; do
+            case "$f" in
+              tests/ops/*)
+                $CONDA_BIN_PATH/pytest -s -v --exitfirst -m smoke "$f" || exit 1 ;;
+            esac
+          done
+
+      - name: Run small non-ops suites in full
+        if: steps.find-tests.outputs.test_files && steps.setup.outputs.skip_tests == 'false'
+        shell: bash
+        run: |
+          for f in ${{ steps.find-tests.outputs.test_files }}; do
+            case "$f" in
+              tests/ops/*) ;;
+              *) $CONDA_BIN_PATH/pytest -s -v --exitfirst "$f" || exit 1 ;;
+            esac
           done
