@@ -105,7 +105,7 @@ class TritonAscendBackend(BaseBackend):
         from fla.modules.backends.triton_ascend.fused_linear_cross_entropy import (
             logsumexp_fwd_npu,
         )
-        return logsumexp_fwd_npu(x, scale=scale, softcapping=softcapping, dtype=dtype)
+        return logsumexp_fwd_npu(x=x, scale=scale, softcapping=softcapping, dtype=dtype)
 
     def fused_linear_cross_entropy_forward(
         self,
@@ -127,19 +127,19 @@ class TritonAscendBackend(BaseBackend):
             fused_linear_cross_entropy_forward_npu,
         )
         return fused_linear_cross_entropy_forward_npu(
-            x,
-            target,
-            weight,
-            bias,
-            ignore_index,
-            label_smoothing,
-            logit_scale,
-            logit_softcapping,
-            num_chunks,
-            reduction,
-            use_l2warp,
-            l2_penalty_factor,
-            accumulate_grad_in_fp32,
+            x=x,
+            target=target,
+            weight=weight,
+            bias=bias,
+            ignore_index=ignore_index,
+            label_smoothing=label_smoothing,
+            logit_scale=logit_scale,
+            logit_softcapping=logit_softcapping,
+            num_chunks=num_chunks,
+            reduction=reduction,
+            use_l2warp=use_l2warp,
+            l2_penalty_factor=l2_penalty_factor,
+            accumulate_grad_in_fp32=accumulate_grad_in_fp32,
         )
 
     def fused_linear_cross_entropy_backward(
@@ -152,7 +152,7 @@ class TritonAscendBackend(BaseBackend):
         from fla.modules.backends.triton_ascend.fused_linear_cross_entropy import (
             fused_linear_cross_entropy_backward_npu,
         )
-        return fused_linear_cross_entropy_backward_npu(do, dx, dw, db)
+        return fused_linear_cross_entropy_backward_npu(do=do, dx=dx, dw=dw, db=db)
 
     def sigmoid_fwd(self, x, output_contiguous=False):
         from fla.modules.backends.triton_ascend.activations import sigmoid_fwd_npu
@@ -215,17 +215,17 @@ class TritonAscendBackend(BaseBackend):
     ):
         from fla.modules.backends.triton_ascend.fused_kl_div import fused_kl_div_forward_npu
         return fused_kl_div_forward_npu(
-            x,
-            target_x,
-            weight,
-            target_weight,
-            reduction,
-            accumulate_grad_in_fp32,
+            x=x,
+            target_x=target_x,
+            weight=weight,
+            target_weight=target_weight,
+            reduction=reduction,
+            accumulate_grad_in_fp32=accumulate_grad_in_fp32,
         )
 
     def fused_kl_div_backward(self, do, dx, dw):
         from fla.modules.backends.triton_ascend.fused_kl_div import fused_kl_div_backward_npu
-        return fused_kl_div_backward_npu(do, dx, dw)
+        return fused_kl_div_backward_npu(do=do, dx=dx, dw=dw)
 
     def l2norm_fwd(
         self,
