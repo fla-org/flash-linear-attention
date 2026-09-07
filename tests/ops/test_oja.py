@@ -207,6 +207,7 @@ def test_naive_chunk_oja(
         ]
     ]
 )
+@pytest.mark.smoke
 def test_fused_recurrent(
     B: int,
     T: int,
@@ -308,11 +309,16 @@ def test_chunk_forward(
     ('B', 'T', 'H', 'D', 'scale', 'gate_logit_normalizer', 'mask_p', 'dtype'),
     [
         pytest.param(
+            4, 4096, 4, 128, 1, 1, 0, torch.float16,
+            marks=pytest.mark.smoke,
+            id="B4-T4096-H4-D128-scale1-gate_logit_normalizer1-mask_p0-torch.float16",
+        ),
+    ] + [
+        pytest.param(
             *test,
             id="B{}-T{}-H{}-D{}-scale{}-gate_logit_normalizer{}-mask_p{}-{}".format(*test)
         )
         for test in [
-            (4, 4096, 4, 128, 1, 1, 0, torch.float16),
             (1, 4096, 1, 64, 1, 1, 0, torch.float16),
             (2, 4096, 3, 60, 1, 1, 0, torch.float16),
         ]
@@ -461,11 +467,16 @@ def test_chunk_with_chunk_size(
 @pytest.mark.parametrize(
     ('H', 'D', 'mask_p', 'cu_seqlens', 'dtype'),
     [
+        pytest.param(
+            4, 64, 0.5, [0, 256, 500, 1000], torch.float16,
+            marks=pytest.mark.smoke,
+            id="H4-D64-mask_p0.5-cu_seqlens[0, 256, 500, 1000]-torch.float16",
+        ),
+    ] + [
         pytest.param(*test, id="H{}-D{}-mask_p{}-cu_seqlens{}-{}".format(*test))
         for test in [
             (4, 60, 0, [0, 96, 177], torch.float16),
             (16, 128, 0, [0, 256, 500, 1000], torch.float16),
-            (4, 64, 0.5, [0, 256, 500, 1000], torch.float16),
             (4, 100, 0, [0, 15, 100, 300, 1200, 2000], torch.float16),
         ]
     ]

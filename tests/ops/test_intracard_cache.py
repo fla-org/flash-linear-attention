@@ -27,6 +27,7 @@ def clear_intracard_cache():
 
 @pytest.mark.skipif(os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") == "1", reason="backend dispatch disabled")
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.smoke
 def test_chunk_kda_intracard_cache_hit_same_cu_seqlens_object(monkeypatch):
     """E2E: chunk_kda should reuse intracard precompute cache on second call.
 
@@ -102,6 +103,7 @@ def test_chunk_kda_intracard_cache_hit_same_cu_seqlens_object(monkeypatch):
     assert torch.allclose(o1, o2, atol=1e-4, rtol=1e-4)
 
 
+@pytest.mark.smoke
 def test_intracard_backend_disabled_by_default():
     """Verify that IntraCardCPBackend is disabled by default."""
     from fla.ops.common.backends.intracard import IntraCardCPBackend
@@ -110,6 +112,7 @@ def test_intracard_backend_disabled_by_default():
     assert IntraCardCPBackend.default_enable is False
 
 
+@pytest.mark.smoke
 def test_intracard_backend_disabled_when_env_var_is_zero(monkeypatch):
     """Verify that IntraCardCPBackend is disabled when FLA_INTRACARD_CP=0."""
     from fla.ops.common.backends.intracard import IntraCardCPBackend
@@ -118,6 +121,7 @@ def test_intracard_backend_disabled_when_env_var_is_zero(monkeypatch):
     assert IntraCardCPBackend.is_enabled() is False
 
 
+@pytest.mark.smoke
 def test_intracard_backend_enabled_when_env_var_is_one(monkeypatch):
     """Verify that IntraCardCPBackend is enabled when FLA_INTRACARD_CP=1."""
     from fla.ops.common.backends.intracard import IntraCardCPBackend
@@ -128,6 +132,7 @@ def test_intracard_backend_enabled_when_env_var_is_one(monkeypatch):
 
 @pytest.mark.skipif(os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") == "1", reason="backend dispatch disabled")
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.smoke
 def test_chunk_gdn_intracard_gqa(monkeypatch):
     """E2E: chunk_gated_delta_rule intracard path produces correct results with GQA (Hq < H).
 

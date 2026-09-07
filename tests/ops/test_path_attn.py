@@ -19,13 +19,22 @@ from fla.utils import IS_INTEL_ALCHEMIST, assert_close, device
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'HQ', 'D', 'use_forget_gate', 'dtype'),
     [
+        pytest.param(
+            5, 512, 2, 8, 128, True, torch.bfloat16,
+            marks=pytest.mark.smoke,
+            id="B5-T512-H2-HQ8-D128-use_forget_gateTrue-torch.bfloat16",
+        ),
+        pytest.param(
+            2, 2000, 1, 4, 64, False, torch.bfloat16,
+            marks=pytest.mark.smoke,
+            id="B2-T2000-H1-HQ4-D64-use_forget_gateFalse-torch.bfloat16",
+        ),
+    ] + [
         pytest.param(*test, id="B{}-T{}-H{}-HQ{}-D{}-use_forget_gate{}-{}".format(*test))
         for test in [
             # SY (2025/07/08): It somehow failed on Hopper with error msg: Aborted (core dumped)
             # (10, 62, 2, 8, 128, True, torch.bfloat16),
-            (5, 512, 2, 8, 128, True, torch.bfloat16),
             (3, 1024, 2, 8, 64, True, torch.bfloat16),
-            (2, 2000, 1, 4, 64, False, torch.bfloat16),
             (1, 4000, 1, 2, 128, False, torch.bfloat16),
         ]
     ],
@@ -91,12 +100,21 @@ def test_parallel(
 @pytest.mark.parametrize(
     ('H', 'HQ', 'D', 'use_forget_gate', 'cu_seqlens', 'dtype'),
     [
+        pytest.param(
+            2, 4, 128, True, [0, 15, 333, 2048], torch.float16,
+            marks=pytest.mark.smoke,
+            id="H2-HQ4-D128-use_forget_gateTrue-cu_seqlens[0, 15, 333, 2048]-torch.float16",
+        ),
+        pytest.param(
+            2, 4, 64, False, [0, 841, 889, 2000, 3000, 4096], torch.float16,
+            marks=pytest.mark.smoke,
+            id="H2-HQ4-D64-use_forget_gateFalse-cu_seqlens[0, 841, 889, 2000, 3000, 4096]-torch.float16",
+        ),
+    ] + [
         pytest.param(*test, id="H{}-HQ{}-D{}-use_forget_gate{}-cu_seqlens{}-{}".format(*test))
         for test in [
             (2, 4, 128, False, [0, 15, 333, 2048], torch.float16),
-            (2, 4, 128, True, [0, 15, 333, 2048], torch.float16),
             (2, 4, 64, True, [0, 841, 889, 4096], torch.float16),
-            (2, 4, 64, False, [0, 841, 889, 2000, 3000, 4096], torch.float16),
             (2, 16, 128, True, [0, 500, 1023, 2000, 3000, 4096], torch.float16),
         ]
     ],

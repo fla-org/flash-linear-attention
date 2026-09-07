@@ -19,14 +19,23 @@ from fla.utils import assert_close, device
     ('B', 'T', 'H', 'D', 'scale', 'num_householder', 'use_qk_l2norm_in_kernel', 'dtype'),
     [
         pytest.param(
+            2, 1000, 4, 64, 0.1, 2, False, torch.float16,
+            marks=pytest.mark.smoke,
+            id="B2-T1000-H4-D64-scale0.1-num_householder2-l2normFalse-torch.float16",
+        ),
+        pytest.param(
+            2, 1024, 4, 64, 1, 2, True, torch.float16,
+            marks=pytest.mark.smoke,
+            id="B2-T1024-H4-D64-scale1-num_householder2-l2normTrue-torch.float16",
+        ),
+    ] + [
+        pytest.param(
             *test,
             id="B{}-T{}-H{}-D{}-scale{}-num_householder{}-l2norm{}-{}".format(*test),
         )
         for test in [
             (1, 63, 1, 64, 0.1, 1, False, torch.float16),
             (2, 200, 3, 60, 0.1, 1, False, torch.float16),
-            (2, 1000, 4, 64, 0.1, 2, False, torch.float16),
-            (2, 1024, 4, 64, 1, 2, True, torch.float16),
             (2, 1024, 6, 100, 1, 2, False, torch.float16),
             (4, 1500, 8, 128, 0.1, 3, False, torch.float16),
             (2, 2048, 8, 128, 1, 3, False, torch.float16),
@@ -96,7 +105,7 @@ def test_chunk(
 @pytest.mark.parametrize(
     ('H', 'D', 'num_householder', 'cu_seqlens', 'dtype'),
     [
-        (2, 64, 3, [0, 63], torch.float16),
+        pytest.param(2, 64, 3, [0, 63], torch.float16, marks=pytest.mark.smoke, id="2-64-3-cu_seqlens0-dtype0"),
         (2, 100, 2, [0, 63, 100, 500, 1000], torch.float16),
         (2, 128, 2, [0, 100, 300, 800, 1500, 2000], torch.float16),
         (2, 256, 3, [0, 100, 123, 300, 500, 800, 1000, 1500, 2048], torch.float16),

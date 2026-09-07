@@ -22,6 +22,12 @@ from fla.utils import assert_close, device
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'D', 'scale', 'gate_logit_normalizer', 'dtype'),
     [
+        pytest.param(
+            2, 1024, 8, 128, 1, 0.1, torch.float16,
+            marks=pytest.mark.smoke,
+            id="B2-T1024-H8-D128-scale1-gate_logit_normalizer0.1-torch.float16",
+        ),
+    ] + [
         pytest.param(*test, id="B{}-T{}-H{}-D{}-scale{}-gate_logit_normalizer{}-{}".format(*test))
         for test in [
             (1, 63, 1, 64, 1, 1, torch.float),
@@ -30,7 +36,6 @@ from fla.utils import assert_close, device
             (2, 1024, 8, 128, 0.1, 1, torch.float),
             (2, 1024, 8, 128, 1, 10, torch.float),
             (4, 2048, 8, 64, 0.1, 1, torch.float),
-            (2, 1024, 8, 128, 1, 0.1, torch.float16),
             (2, 1024, 8, 128, 1, 10, torch.float16),
         ]
     ],
@@ -244,11 +249,20 @@ def test_fused_recurrent_varlen(
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'D', 'scale', 'gate_logit_normalizer', 'dtype'),
     [
+        pytest.param(
+            2, 500, 3, 60, 1, 1, torch.float16,
+            marks=pytest.mark.smoke,
+            id="B2-T500-H3-D60-scale1-gate_logit_normalizer1-torch.float16",
+        ),
+        pytest.param(
+            1, 1000, 4, 128, 1, 0.1, torch.float16,
+            marks=pytest.mark.smoke,
+            id="B1-T1000-H4-D128-scale1-gate_logit_normalizer0.1-torch.float16",
+        ),
+    ] + [
         pytest.param(*test, id="B{}-T{}-H{}-D{}-scale{}-gate_logit_normalizer{}-{}".format(*test))
         for test in [
             (1, 63, 1, 64, 1, 1, torch.float16),
-            (2, 500, 3, 60, 1, 1, torch.float16),
-            (1, 1000, 4, 128, 1, 0.1, torch.float16),
             (2, 1000, 4, 128, 0.1, 1, torch.float16),
             (3, 1000, 4, 128, 0.1, 10, torch.float16),
             (4, 2048, 8, 64, 0.1, 1, torch.float16),
@@ -456,6 +470,7 @@ def test_chunk_state_v_first(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
     reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set',
 )
+@pytest.mark.smoke
 def test_chunk_varlen(
     H: int,
     D: int,

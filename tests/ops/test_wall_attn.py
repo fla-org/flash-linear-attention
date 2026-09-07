@@ -42,9 +42,14 @@ def log_decay(*shape, scale=0.05, dtype=torch.float32):
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'HQ', 'K', 'V'),
     [
+        pytest.param(
+            1, 48, 2, 4, 32, 16,
+            marks=pytest.mark.smoke,
+            id="B1-T48-H2-HQ4-K32-V16",
+        ),
+    ] + [
         pytest.param(*test, id="B{}-T{}-H{}-HQ{}-K{}-V{}".format(*test))
         for test in [
-            (1, 48, 2, 4, 32, 16),
             (2, 31, 1, 1, 24, 8),
             (1, 31, 1, 2, 32, 128),
         ]
@@ -87,6 +92,7 @@ def test_parallel_gqa_matches_reference():
     assert_close(" o", ref, tri, RTOL_FWD)
 
 
+@pytest.mark.smoke
 def test_parallel_varlen_matches_reference():
     dtype = torch.float32
     T1, T2 = 17, 23
@@ -147,6 +153,7 @@ def test_parallel_aggressive_gates_long_seq():
         ]
     ],
 )
+@pytest.mark.smoke
 def test_backward_matches_eager_reference(B: int, T: int, H: int, HQ: int, K: int, V: int, monkeypatch):
     if V == 128:
         # force BV=64 in the forward so backward consumes LSE from a split-value launch
@@ -292,9 +299,14 @@ def test_g_gradient_matches_finite_differences():
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'HQ', 'K', 'V'),
     [
+        pytest.param(
+            1, 48, 2, 4, 32, 16,
+            marks=pytest.mark.smoke,
+            id="B1-T48-H2-HQ4-K32-V16",
+        ),
+    ] + [
         pytest.param(*test, id="B{}-T{}-H{}-HQ{}-K{}-V{}".format(*test))
         for test in [
-            (1, 48, 2, 4, 32, 16),
             (2, 31, 1, 1, 24, 8),
         ]
     ],
@@ -383,9 +395,14 @@ def _decode_at(t, q, k, v, P, scale, C, *, g_scalar_cumsum=None):
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'HQ', 'K', 'V', 'C'),
     [
+        pytest.param(
+            1, 256, 4, 4, 64, 64, 64,
+            marks=pytest.mark.smoke,
+            id="B1-T256-H4-HQ4-K64-V64-C64",
+        ),
+    ] + [
         pytest.param(*test, id="B{}-T{}-H{}-HQ{}-K{}-V{}-C{}".format(*test))
         for test in [
-            (1, 256, 4, 4, 64, 64, 64),   # MHA
             (1, 256, 2, 8, 64, 64, 64),   # GQA, G=4
             (2, 128, 1, 2, 32, 32, 32),   # small
             (1, 128, 1, 2, 32, 320, 32),  # split value dimension

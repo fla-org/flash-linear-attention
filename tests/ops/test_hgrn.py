@@ -19,10 +19,15 @@ from fla.utils import assert_close, device
 @pytest.mark.parametrize(
     ('B', 'T', 'D', 'dtype'),
     [
+        pytest.param(
+            2, 1024, 500, torch.float,
+            marks=pytest.mark.smoke,
+            id="B2-T1024-D500-torch.float32",
+        ),
+    ] + [
         pytest.param(*test, id="B{}-T{}-D{}-{}".format(*test))
         for test in [
             (1, 63, 500, torch.float),
-            (2, 1024, 500, torch.float),
             (2, 1024, 512, torch.float),
             (2, 1024, 1000, torch.float),
             (4, 2048, 2048, torch.float),
@@ -68,12 +73,21 @@ def test_fused_recurrent(
 @pytest.mark.parametrize(
     ('D', 'cu_seqlens', 'dtype'),
     [
+        pytest.param(
+            512, [0, 256, 500, 1000], torch.float,
+            marks=pytest.mark.smoke,
+            id="D512-cu_seqlens[0, 256, 500, 1000]-torch.float32",
+        ),
+        pytest.param(
+            2048, [0, 200, 512, 1200, 2048], torch.float16,
+            marks=pytest.mark.smoke,
+            id="D2048-cu_seqlens[0, 200, 512, 1200, 2048]-torch.float16",
+        ),
+    ] + [
         pytest.param(*test, id="D{}-cu_seqlens{}-{}".format(*test))
         for test in [
             (500, [0, 15], torch.float),
-            (512, [0, 256, 500, 1000], torch.float),
             (1000, [0, 15, 100, 300, 1200, 2000], torch.float),
-            (2048, [0, 200, 512, 1200, 2048], torch.float16),
         ]
     ],
 )
@@ -130,11 +144,16 @@ def test_fused_recurrent_varlen(
 @pytest.mark.parametrize(
     ('B', 'T', 'D', 'dtype'),
     [
+        pytest.param(
+            2, 1000, 1024, torch.float16,
+            marks=pytest.mark.smoke,
+            id="B2-T1000-D1024-torch.float16",
+        ),
+    ] + [
         pytest.param(*test, id="B{}-T{}-D{}-{}".format(*test))
         for test in [
             (1, 63, 500, torch.float16),
             (2, 500, 1000, torch.float16),
-            (2, 1000, 1024, torch.float16),
             (4, 2048, 2048, torch.float16),
         ]
     ],

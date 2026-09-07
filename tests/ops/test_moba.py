@@ -37,10 +37,15 @@ def _full_causal_attn(q, k, v, cu_seqlens, max_seqlen):
 @pytest.mark.parametrize(
     ('T', 'H', 'D', 'chunk_size', 'topk'),
     [
+        pytest.param(
+            1024, 8, 64, 256, 100,
+            marks=pytest.mark.smoke,
+            id="T1024-H8-D64-C256-K100",
+        ),
+    ] + [
         pytest.param(*test, id="T{}-H{}-D{}-C{}-K{}".format(*test))
         for test in [
             (512, 4, 64, 128, 100),
-            (1024, 8, 64, 256, 100),
             (2048, 4, 128, 256, 100),
         ]
     ],
@@ -64,6 +69,7 @@ def test_parallel_moba_matches_full_attn(T, H, D, chunk_size, topk):
 # directly calls `flash_attn_varlen_func` (no chunks selectable beyond the
 # local one), which should be a bit-for-bit dense-attention call.
 @pytest.mark.skipif(flash_attn_varlen_func is None, reason="flash-attn is required")
+@pytest.mark.smoke
 def test_parallel_moba_topk1_short_circuits():
     torch.manual_seed(42)
     T, H, D, chunk_size = 1024, 4, 64, 128
@@ -83,9 +89,14 @@ def test_parallel_moba_topk1_short_circuits():
 @pytest.mark.parametrize(
     ('cu_seqlens', 'H', 'D', 'chunk_size', 'topk'),
     [
+        pytest.param(
+            [0, 256, 768, 1024], 4, 64, 128, 100,
+            marks=pytest.mark.smoke,
+            id="cs[0, 256, 768, 1024]-H4-D64-C128-K100",
+        ),
+    ] + [
         pytest.param(*test, id="cs{}-H{}-D{}-C{}-K{}".format(*test))
         for test in [
-            ([0, 256, 768, 1024], 4, 64, 128, 100),
             ([0, 512, 1536], 8, 64, 256, 100),
             ([0, 200, 600, 1400, 2048], 4, 128, 128, 100),
         ]
@@ -108,6 +119,7 @@ def test_parallel_moba_varlen_matches_full_attn(cu_seqlens, H, D, chunk_size, to
 
 
 @pytest.mark.skipif(flash_attn_varlen_func is None, reason="flash-attn is required")
+@pytest.mark.smoke
 def test_parallel_moba_backward():
     torch.manual_seed(42)
     T, H, D, chunk_size, topk = 512, 4, 64, 128, 100

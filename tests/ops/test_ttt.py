@@ -19,10 +19,15 @@ from fla.utils import assert_close, check_shared_mem, device
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'D', 'scale', 'chunk_size', 'dtype'),
     [
+        pytest.param(
+            2, 96, 4, 60, 0.1, 32, torch.float16,
+            marks=pytest.mark.smoke,
+            id="B2-T96-H4-D60-scale0.1-chunk_size32-torch.float16",
+        ),
+    ] + [
         pytest.param(*test, id="B{}-T{}-H{}-D{}-scale{}-chunk_size{}-{}".format(*test))
         for test in [
             (1, 63, 1, 64, 1, 16, torch.float16),
-            (2, 96, 4, 60, 0.1, 32, torch.float16),
             (2, 128, 4, 60, 0.1, 64, torch.float16),
             (2, 1024, 3, 128, 0.1, 16, torch.float16),
             (2, 1024, 4, 128, 1, 16, torch.float16),
@@ -111,9 +116,14 @@ def test_chunk(
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'D', 'scale', 'chunk_size', 'dtype'),
     [
+        pytest.param(
+            1, 63, 1, 64, 1, 16, torch.float16,
+            marks=pytest.mark.smoke,
+            id="B1-T63-H1-D64-scale1-chunk_size16-torch.float16",
+        ),
+    ] + [
         pytest.param(*test, id="B{}-T{}-H{}-D{}-scale{}-chunk_size{}-{}".format(*test))
         for test in [
-            (1, 63, 1, 64, 1, 16, torch.float16),
             (2, 96, 4, 60, 0.1, 32, torch.float16),
             (2, 128, 4, 60, 0.1, 64, torch.float16),
             (2, 1024, 3, 128, 0.1, 16, torch.float16),
@@ -211,6 +221,7 @@ def test_fused_chunk(
         ]
     ],
 )
+@pytest.mark.smoke
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
     reason="Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set",

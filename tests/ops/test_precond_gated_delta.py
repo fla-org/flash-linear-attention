@@ -24,6 +24,12 @@ from fla.utils import assert_close, device
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'HV', 'D', 'gate_logit_normalizer', 'dtype'),
     [
+        pytest.param(
+            2, 1024, 4, 4, 128, 0.1, torch.float16,
+            marks=pytest.mark.smoke,
+            id="B2-T1024-H4-HV4-D128-gln0.1-torch.float16",
+        ),
+    ] + [
         pytest.param(*test, id="B{}-T{}-H{}-HV{}-D{}-gln{}-{}".format(*test))
         for test in [
             (1, 63, 1, 1, 64, 1, torch.float),
@@ -32,7 +38,6 @@ from fla.utils import assert_close, device
             (3, 1024, 2, 2, 128, 1, torch.float),
             (4, 1024, 3, 3, 128, 10, torch.float),
             (4, 2048, 4, 4, 64, 1, torch.float),
-            (2, 1024, 4, 4, 128, 0.1, torch.float16),
             (2, 1024, 4, 8, 128, 10, torch.float16),
         ]
     ],
@@ -109,16 +114,25 @@ def test_fused_recurrent(
     ('B', 'T', 'H', 'D', 'scale', 'gate_logit_normalizer', 'mask_p', 'use_qk_l2norm_in_kernel', 'dtype'),
     [
         pytest.param(
+            2, 500, 3, 60, 1, 1, 0, False, torch.float16,
+            marks=pytest.mark.smoke,
+            id="B2-T500-H3-D60-scale1-gln1-mask_p0-qk_l2normFalse-torch.float16",
+        ),
+        pytest.param(
+            4, 1024, 4, 128, 0.1, 1, 0, True, torch.float16,
+            marks=pytest.mark.smoke,
+            id="B4-T1024-H4-D128-scale0.1-gln1-mask_p0-qk_l2normTrue-torch.float16",
+        ),
+    ] + [
+        pytest.param(
             *test,
             id="B{}-T{}-H{}-D{}-scale{}-gln{}-mask_p{}-qk_l2norm{}-{}".format(*test),
         )
         for test in [
             (2, 75, 4, 64, 1, 0.01, 0, False, torch.float16),
-            (2, 500, 3, 60, 1, 1, 0, False, torch.float16),
             (2, 1000, 3, 64, 0.1, 1, 0.5, False, torch.float16),
             (3, 1024, 4, 100, 1, 0.1, 0, False, torch.float16),
             (4, 1024, 4, 128, 0.1, 1, 0, False, torch.float16),
-            (4, 1024, 4, 128, 0.1, 1, 0, True, torch.float16),
             (2, 1500, 4, 128, 0.1, 10, 0, False, torch.float16),
             (4, 2048, 8, 64, 0.1, 1, 0, False, torch.float16),
         ]
@@ -237,6 +251,7 @@ def test_chunk(
         ]
     ],
 )
+@pytest.mark.smoke
 def test_chunk_varlen(
     H: int,
     D: int,

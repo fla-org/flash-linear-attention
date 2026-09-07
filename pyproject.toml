@@ -50,7 +50,7 @@ version = {attr = "fla.__version__"}
 log_cli = true
 log_cli_level = "INFO"
 markers = [
-    "smoke: core GDN/KDA tests run on every PR push (fast feedback tier)",
+    "smoke: core tests run in the dependent-files smoke tier on every PR push (fast feedback)",
 ]
 pythonpath = [
   "."

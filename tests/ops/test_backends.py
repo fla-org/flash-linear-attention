@@ -84,6 +84,7 @@ def test_nvcc_pip_wheel_without_nvcc_binary(monkeypatch):
     assert _compat.has_usable_nvcc() is False
 
 
+@pytest.mark.smoke
 def test_no_nvcc_logs_fallback_once(monkeypatch, caplog):
     _configure_no_nvcc(monkeypatch)
 
@@ -109,6 +110,7 @@ def _backend_cls(backend_module):
 
 
 @pytest.mark.parametrize("backend_module", [common_tilelang_backend, kda_tilelang_backend, rwkv6_tilelang_backend, dplr_tilelang_backend])
+@pytest.mark.smoke
 def test_tilelang_backend_gated_by_nvcc_probe(monkeypatch, backend_module):
     monkeypatch.setattr(backend_module, "_TILELANG_AVAILABLE", True)
     monkeypatch.setattr(backend_module, "has_usable_nvcc", lambda: False)

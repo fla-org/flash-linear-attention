@@ -119,6 +119,7 @@ def naive_deltaformer_u(q, k, v, beta):
         ]
     ],
 )
+@pytest.mark.smoke
 @pytest.mark.skipif(
     IS_INTEL_ALCHEMIST,
     reason="Skipping test on Intel Alchemist due to known issues with SRAM.",

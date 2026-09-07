@@ -134,6 +134,7 @@ def test_channel_mixing_no_out_of_bounds_writes():
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '0',
     reason='Skipping test because TEST_CHUNK_VARLEN is enabled',
 )
+@pytest.mark.smoke
 def test_fused_mul_recurrent_fwd(
     B: int,
     T: int,
@@ -185,6 +186,7 @@ def test_fused_mul_recurrent_fwd(
 
 
 @pytest.mark.parametrize('chunk_size', [16, 32, 64])
+@pytest.mark.smoke
 def test_chunk_wrapper_chunk_size(chunk_size: int):
     B, T, H, D = 1, 64, 2, 64
     r = torch.empty(B, T, H, D).uniform_(-8, -6).to(device)
@@ -352,7 +354,7 @@ def test_fused_k_update(
 @pytest.mark.parametrize(
     ("B", "T", "H", "D", "dtype"),
     [
-        pytest.param(4, 4096, 64, 64, torch.bfloat16, id="default"),
+        pytest.param(4, 4096, 64, 64, torch.bfloat16, id="default", marks=pytest.mark.smoke),
         pytest.param(1, 65537, 8, 64, torch.bfloat16, id="long_ctx"),
     ],
 )

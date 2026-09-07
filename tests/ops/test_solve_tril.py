@@ -19,11 +19,20 @@ from fla.utils import IS_NVIDIA_BLACKWELL, assert_close, device, device_platform
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'chunk_size'),
     [
+        pytest.param(
+            2, 500, 4, 32,
+            marks=pytest.mark.smoke,
+            id="B2-T500-H4-chunk_size32",
+        ),
+        pytest.param(
+            2, 1000, 5, 64,
+            marks=pytest.mark.smoke,
+            id="B2-T1000-H5-chunk_size64",
+        ),
+    ] + [
         pytest.param(*test, id="B{}-T{}-H{}-chunk_size{}".format(*test))
         for test in [
             (1, 63, 1, 16),
-            (2, 500, 4, 32),
-            (2, 1000, 5, 64),
             (3, 1024, 6, 64),
             (4, 2048, 8, 64),
         ]
@@ -53,13 +62,22 @@ def test_solve_tril(B, T, H, chunk_size):
 @pytest.mark.parametrize(
     ('H', 'D', 'chunk_size', 'cu_seqlens'),
     [
+        pytest.param(
+            4, 64, 32, [0, 256, 500, 1000],
+            marks=pytest.mark.smoke,
+            id="H4-D64-chunk_size32-cu_seqlens[0, 256, 500, 1000]",
+        ),
+        pytest.param(
+            4, 128, 32, [0, 200, 512, 1200, 2048],
+            marks=pytest.mark.smoke,
+            id="H4-D128-chunk_size32-cu_seqlens[0, 200, 512, 1200, 2048]",
+        ),
+    ] + [
         pytest.param(*test, id="H{}-D{}-chunk_size{}-cu_seqlens{}".format(*test))
         for test in [
             (4, 64, 16, [0, 15]),
-            (4, 64, 32, [0, 256, 500, 1000]),
             (4, 100, 64, [0, 15, 100, 300, 1200, 2000]),
             (4, 64, 16, [0, 1, 100, 300, 1200, 2048]),
-            (4, 128, 32, [0, 200, 512, 1200, 2048]),
         ]
     ],
 )
