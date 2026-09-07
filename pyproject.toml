@@ -49,6 +49,9 @@ version = {attr = "fla.__version__"}
 [tool.pytest.ini_options]
 log_cli = true
 log_cli_level = "INFO"
+markers = [
+    "smoke: core GDN/KDA tests run on every PR push (fast feedback tier)",
+]
 pythonpath = [
   "."
 ]

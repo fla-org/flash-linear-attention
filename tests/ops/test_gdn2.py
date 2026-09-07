@@ -76,6 +76,12 @@ def _rand_inputs(B, T, H, HV, K, V, dtype, *, gate_in_kernel=False, b_scale=1.0,
 @pytest.mark.parametrize(
     ("B", "T", "H", "HV", "K", "V", "scale", "use_qk_l2norm_in_kernel", "dtype"),
     [
+        pytest.param(
+            2, 100, 2, 4, 64, 128, 1.0, True, torch.float16,
+            marks=pytest.mark.smoke,
+            id="B2-T100-H2-HV4-K64-V128-scale1.0-l2normTrue-torch.float16",
+        ),
+    ] + [
         pytest.param(*p, id="B{}-T{}-H{}-HV{}-K{}-V{}-scale{}-l2norm{}-{}".format(*p))
         for p in [
             (1, 64, 2, 2, 32, 32, 1.0, False, torch.float32),
@@ -83,7 +89,6 @@ def _rand_inputs(B, T, H, HV, K, V, dtype, *, gate_in_kernel=False, b_scale=1.0,
             (2, 100, 3, 3, 64, 64, 1.0, True, torch.float32),     # non-chunk-multiple T, l2norm
             (1, 130, 2, 2, 64, 128, 1.0, True, torch.float16),    # fp16, V != K
             (2, 128, 2, 4, 64, 64, 1.0, False, torch.float32),    # GVA: HV > H
-            (2, 100, 2, 4, 64, 128, 1.0, True, torch.float16),    # GVA + l2norm + fp16, V != K
             (1, 4, 1, 1, 48, 16, 1.0, False, torch.float32),      # non-power-of-2 K
         ]
     ],
@@ -291,11 +296,20 @@ def test_chunk_invalid_chunk_size(chunk_size):
 @pytest.mark.parametrize(
     ("B", "T", "H", "K", "V", "scale", "use_qk_l2norm_in_kernel", "use_gate_in_kernel", "safe_gate", "dtype"),
     [
+        pytest.param(
+            2, 256, 2, 64, 64, 0.5, True, False, False, torch.float32,
+            marks=pytest.mark.smoke,
+            id="B2-T256-H2-K64-V64-scale0.5-l2normTrue-gateFalse-safeFalse-torch.float32",
+        ),
+        pytest.param(
+            2, 100, 3, 64, 64, 1.0, True, False, False, torch.float16,
+            marks=pytest.mark.smoke,
+            id="B2-T100-H3-K64-V64-scale1.0-l2normTrue-gateFalse-safeFalse-torch.float16",
+        ),
+    ] + [
         pytest.param(*p, id="B{}-T{}-H{}-K{}-V{}-scale{}-l2norm{}-gate{}-safe{}-{}".format(*p))
         for p in [
             (1, 64, 2, 32, 32, 1.0, False, False, False, torch.float32),
-            (2, 256, 2, 64, 64, 0.5, True, False, False, torch.float32),
-            (2, 100, 3, 64, 64, 1.0, True, False, False, torch.float16),   # non-multiple T, fp16
             (2, 256, 2, 64, 64, 1.0, True, True, False, torch.float32),    # gate-in-kernel
             (1, 128, 2, 64, 64, 1.0, True, True, True, torch.float32),     # gate-in-kernel + safe_gate
         ]
@@ -424,6 +438,7 @@ def test_chunk_state_v_first():
         ]
     ],
 )
+@pytest.mark.smoke
 def test_chunk_varlen(cu_seqlens, H, K, V, use_gate_in_kernel, dtype):
     """Packed varlen chunk run (fwd + grads) must equal per-sequence reference."""
     cu = torch.LongTensor(cu_seqlens).to(device)

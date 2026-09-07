@@ -176,10 +176,10 @@ def _graphed_outputs(leaves, gate, cap_o, cap_ht):
 
 # (gate, safe_gate, hv) covering every chunk_kda config axis incl. GVA (hv > H).
 _CFG = [
-    pytest.param(False, False, H, id="default"),
+    pytest.param(False, False, H, id="default", marks=pytest.mark.smoke),
     pytest.param(False, True, H, id="safe_gate"),
     pytest.param(True, False, H, id="gate_in_kernel"),
-    pytest.param(True, True, H, id="gate+safe_gate"),
+    pytest.param(True, True, H, id="gate+safe_gate", marks=pytest.mark.smoke),
     pytest.param(False, False, 2 * H, id="gva_default"),
     pytest.param(True, True, 2 * H, id="gva_gate+safe"),
 ]

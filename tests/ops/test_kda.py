@@ -101,13 +101,18 @@ def test_chunk_invalid_chunk_size():
     ("B", "T", "H", "HV", "D", "scale", "gate_logit_normalizer", "use_qk_l2norm_in_kernel", "dtype"),
     [
         pytest.param(
+            3, 1000, 4, 4, 100, 0.1, 1, True, torch.float,
+            marks=pytest.mark.smoke,
+            id="B3-T1000-H4-HV4-D100-scale0.1-gate_logit_normalizer1-use_qk_l2normTrue-torch.float32",
+        ),
+    ] + [
+        pytest.param(
             *test,
             id="B{}-T{}-H{}-HV{}-D{}-scale{}-gate_logit_normalizer{}-use_qk_l2norm{}-{}".format(*test),
         )
         for test in [
             (1, 64, 1, 1, 64, 1, 1, False, torch.float),
             (2, 512, 3, 3, 60, 1, 1, False, torch.float),
-            (3, 1000, 4, 4, 100, 0.1, 1, True, torch.float),
             (4, 1024, 4, 4, 128, 0.1, 1, False, torch.float),
             (2, 512, 2, 4, 60, 1, 1, False, torch.float),
             (2, 1024, 2, 8, 128, 0.1, 1, True, torch.float),
@@ -381,14 +386,23 @@ def test_fused_recurrent_gate_in_kernel(
     ("B", "H", "D", "scale", "gate_logit_normalizer", "use_qk_l2norm_in_kernel", "use_gate_in_kernel", "safe_gate", "dtype"),
     [
         pytest.param(
+            16, 16, 128, 0.1, 1.0, True, True, False, torch.bfloat16,
+            marks=pytest.mark.smoke,
+            id="B16-H16-D128-scale0.1-norm1.0-qk_l2True-gateTrue-safe_gateFalse-dtypetorch.bfloat16",
+        ),
+        pytest.param(
+            32, 8, 64, 1.0, 1.0, False, False, False, torch.float16,
+            marks=pytest.mark.smoke,
+            id="B32-H8-D64-scale1.0-norm1.0-qk_l2False-gateFalse-safe_gateFalse-dtypetorch.float16",
+        ),
+    ] + [
+        pytest.param(
             *test,
             id="B{}-H{}-D{}-scale{}-norm{}-qk_l2{}-gate{}-safe_gate{}-dtype{}".format(*test),
         )
         for test in [
             (16, 16, 128, 0.1, 1.0, True, False, False, torch.bfloat16),
-            (32, 8, 64, 1.0, 1.0, False, False, False, torch.float16),
             (7, 32, 128, 0.5, 0.5, True, False, False, torch.bfloat16),  # Odd batch size
-            (16, 16, 128, 0.1, 1.0, True, True, False, torch.bfloat16),
             (32, 8, 64, 1.0, 1.0, False, True, False, torch.float16),
             (7, 32, 128, 0.5, 0.5, True, True, True, torch.bfloat16),  # Odd batch size
         ]
@@ -533,6 +547,23 @@ def test_fused_recurrent_vllm_decode(
     ),
     [
         pytest.param(
+            4, 1024, 4, 4, 128, 0.1, 1, 0, False, False, torch.float16, True, True, 64,
+            marks=pytest.mark.smoke,
+            id=(
+                "B4-T1024-H4-HV4-D128-scale0.1-gate_logit_normalizer1-mask_p0"
+                "-use_qk_l2normFalse-use_gateFalse-torch.float16-safe_gateTrue-disable_recomputeTrue-chunk_size64"
+            ),
+        ),
+        pytest.param(
+            2, 1024, 2, 4, 64, 0.1, 1, 0, True, True, torch.bfloat16, True, False, 64,
+            marks=pytest.mark.smoke,
+            id=(
+                "B2-T1024-H2-HV4-D64-scale0.1-gate_logit_normalizer1-mask_p0"
+                "-use_qk_l2normTrue-use_gateTrue-torch.bfloat16-safe_gateTrue-disable_recomputeFalse-chunk_size64"
+            ),
+        ),
+    ] + [
+        pytest.param(
             *test,
             id=(
                 "B{}-T{}-H{}-HV{}-D{}-scale{}-gate_logit_normalizer{}-mask_p{}"
@@ -544,7 +575,6 @@ def test_fused_recurrent_vllm_decode(
             (2, 500, 3, 3, 60, 1, 1, 0, False, False, torch.float16, True, True, 64),
             (2, 1000, 3, 3, 64, 0.1, 1, 0.5, False, False, torch.float16, False, True, 64),
             (3, 1024, 4, 4, 100, 1, 0.1, 0, False, False, torch.float16, False, False, 64),
-            (4, 1024, 4, 4, 128, 0.1, 1, 0, False, False, torch.float16, True, True, 64),
             (4, 1024, 4, 4, 128, 0.1, 1, 0, True, False, torch.float16, True, False, 64),
             (2, 1500, 4, 4, 128, 0.1, 10, 0, False, True, torch.float16, False, True, 64),
             (4, 2048, 8, 8, 64, 0.1, 1, 0, False, True, torch.float16, True, True, 64),
@@ -554,7 +584,6 @@ def test_fused_recurrent_vllm_decode(
             (2, 1024, 4, 8, 128, 0.1, 1, 0, True, True, torch.float16, False, False, 64),
             (2, 160, 2, 4, 64, 0.1, 1, 0, False, True, torch.float16, True, True, 32),
 
-            (2, 1024, 2, 4, 64, 0.1, 1, 0, True, True, torch.bfloat16, True, False, 64),
             (2, 1024, 2, 4, 64, 0.1, 1, 0, False, True, torch.bfloat16, False, False, 64),
             (2, 160, 2, 4, 64, 0.1, 1, 0, False, True, torch.bfloat16, True, True, 32),
             (2, 1024, 2, 8, 128, 0.1, 1, 0, True, True, torch.bfloat16, False, False, 64),
@@ -837,6 +866,15 @@ def test_chunk_use_beta_sigmoid_in_kernel(
     ),
     [
         pytest.param(
+            4, 128, 0.5, [0, 256, 500, 1000], torch.float16, False, False, False, 64,
+            marks=pytest.mark.smoke,
+            id=(
+                "H4-D128-mask_p0.5-cu_seqlens[0, 256, 500, 1000]-torch.float16-gateFalse"
+                "-safe_gateFalse-disable_recomputeFalse-chunk_size64"
+            ),
+        ),
+    ] + [
+        pytest.param(
             *test,
             id=(
                 "H{}-D{}-mask_p{}-cu_seqlens{}-{}-gate{}"
@@ -846,7 +884,6 @@ def test_chunk_use_beta_sigmoid_in_kernel(
         for test in [
             (4, 60, 0.1, [0, 15], torch.float16, True, False, False, 64),
             (4, 64, 0.9, [0, 256, 500, 1000], torch.float16, True, False, False, 64),
-            (4, 128, 0.5, [0, 256, 500, 1000], torch.float16, False, False, False, 64),
             (4, 100, 0, [0, 15, 100, 300, 1200, 2000], torch.float16, True, False, False, 64),
             (4, 256, 0, [0, 100, 300, 1200, 3000, 4096], torch.float16, False, True, True, 64),
             (4, 60, 0.1, [0, 31, 96, 160], torch.float16, True, False, True, 32),
@@ -1054,6 +1091,12 @@ def test_chunk_varlen_prefill(
 @pytest.mark.parametrize(
     ("B", "T", "H", "D", "HAS_A_LOG", "HAS_BIAS", "LOWER_BOUND"),
     [
+        pytest.param(
+            2, 64, 4, 32, True, True, None,
+            marks=pytest.mark.smoke,
+            id="B2-T64-H4-D32-a_logTrue-biasTrue-lowerboundNone",
+        ),
+    ] + [
         pytest.param(*test, id="B{}-T{}-H{}-D{}-a_log{}-bias{}-lowerbound{}".format(*test))
         for test in [
             (1, 2, 2, 12, True, False, -5.0),
@@ -1063,7 +1106,6 @@ def test_chunk_varlen_prefill(
             (4, 128, 8, 128, True, False, None),
             (1, 2, 2, 12, True, True, None),
             (1, 32, 2, 16, True, True, None),
-            (2, 64, 4, 32, True, True, None),
             (4, 128, 8, 64, True, True, None),
             (4, 128, 8, 128, True, True, None),
             (1, 2, 2, 12, False, False, -5.0),
