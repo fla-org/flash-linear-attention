@@ -3,9 +3,9 @@
 ## Scope and baseline
 
 - Baseline commit: `35dceaee5408e69a555fec34cb215c93c375dabe`
-- Working branch: `feat/gdn-varlen-cudagraph`
+- Stage-one branch: `feat/cuda-graph-stage1`
 - In scope: the varlen GDN chunk operator, the real `GatedDeltaNet` layer prefill/chunk path, its Triton short convolution, KDA chunk/layer paths, native Triton/CUDA forward, backward, capture, and replay.
-- Out of scope: fused recurrent decode, cache-update decode kernels, graph bucketing, scheduling frameworks, NPU, multi-GPU, and Context Parallel.
+- Out of scope: fused recurrent decode, cache-update decode kernels, automatic bucket management, scheduling frameworks, NPU graph execution, and new multi-GPU or Context Parallel support. Existing KDA Context Parallel behavior must be preserved.
 - Mathematical contract: preserve the eager GDN operation, precision staging, accumulation order, output structure, and existing tolerances. Only scheduling metadata and boundary guards may change.
 
 ## Contract cells
@@ -16,7 +16,7 @@
 | New graph mode | `use_graph=True`, varlen, native Triton on NVIDIA CUDA | `BT in {16, 32, 64}`, fixed `T_max` and `N_max` | Precomputed or fused raw gate, post-sigmoid beta, initial/final state | Optimized path | Same-call eager GDN on the real token prefix; existing per-output and per-gradient tolerances |
 | Dense graph mode | `use_graph=True` or explicit graph mode, dense B=1 | Fixed token shape | No layer cache or mask-derived packing | Optimized path | Layer forward/backward replay parity without external varlen metadata |
 | New graph mode boundary | Forced graph, dense B>1 | Any | Any | Explicit unsupported error | Auto retains the eager path |
-| New graph mode boundary | `use_graph=True`, Context Parallel | Any | Any | Explicit unsupported error | Public validation raises before kernel execution |
+| GDN graph mode boundary | `use_graph=True`, Context Parallel | Any | Any | Explicit unsupported error | Public validation raises before kernel execution; existing KDA CP support is separate |
 | New graph mode boundary | `use_graph=True`, non-NVIDIA backend | Any | Any | Explicit unsupported error | Public validation raises before kernel execution |
 | FlashQLA dispatch | `use_graph=True`, otherwise FlashQLA-compatible | `BT=64` | FlashQLA-supported subset | Existing fallback | FlashQLA verifier rejects graph mode; native Triton graph path supplies public semantics |
 | GatedDeltaNet layer | graph-compatible varlen prefill/chunk | `BT in {16, 32, 64}` | projection, short convolution, GDN chunk, output projection | Optimized path when layer constraints hold | Layer capture/replay tests compare valid output and gradients with eager |
@@ -287,14 +287,14 @@ When operator auto routing chooses eager, it clears graph metadata and re-enters
 - `tests/modules/test_conv_graph.py`: checks short-convolution forward/backward replay and state/padding behavior.
 - `tests/ops/test_kda_graph.py`, `tests/layers/test_kda_layer_graph.py`: check KDA chunk and layer forward/backward replay, metadata reuse, and eager fallback.
 
-The final command results are recorded in the verification section after all source and documentation changes are complete.
+These tests describe coverage, not a claim that every dependent test has run on the current branch.
 
-## Benchmark results
+## Historical benchmark results
 
-The original small benchmark below is historical evidence from physical GPU 3. The current high-load matrix and component runs use physical GPU 4 and are recorded in `profile/gdn-cudagraph/full_scope_report.md`.
+The small benchmark below predates stage-one integration. It is historical reference evidence, not certification of this branch. Raw local reports are not included in the repository.
 
 ```bash
-CUDA_VISIBLE_DEVICES=3 /home/dulz/miniconda3/envs/lz/bin/python benchmarks/ops/benchmark_gdn_graph.py \
+python benchmarks/ops/benchmark_gdn_graph.py \
   --t-max 256 512 1024 2048 --n-max 4 --heads 16 --dim 128 --chunk-size 64 \
   --actual-ratio 0.75 --dtype bfloat16 --modes fwd fwdbwd --warmup 5 --iterations 100 --repeats 5
 ```
@@ -314,9 +314,9 @@ Environment: ref `06106199`, NVIDIA GeForce RTX 4090, CUDA 12.8, PyTorch `2.11.0
 
 Replay latency was repeatable across the two runs, while eager forward-backward latency showed substantial host-side variation, especially at `T_max=1024`. These measurements demonstrate that the captured slice removes launch/dispatcher overhead on this setup, but the exact speedup ratio is not stable enough for a production performance claim. An RTX 4090 is a consumer reference GPU under the repository performance policy; datacenter H100/H20 or newer measurements are still required for MR-level performance evidence.
 
-## Final verification
+## Historical verification
 
-All runtime checks used `/home/dulz/miniconda3/envs/lz/bin/python` with PyTorch `2.11.0+cu128` and Triton `3.6.0`:
+The original GDN-only checks below used PyTorch `2.11.0+cu128` and Triton `3.6.0`. They predate the expanded stage-one scope and must not be presented as its final regression results:
 
 | Command | Device | Result |
 | ------- | ------ | ------ |
@@ -332,18 +332,18 @@ All runtime checks used `/home/dulz/miniconda3/envs/lz/bin/python` with PyTorch 
 | Added-Python-line length check | CPU | No line exceeds 127 characters |
 | Changed-file copyright-header audit | CPU | Passed for every tracked Python file in the baseline diff |
 
-The 14 warnings in each pytest process are the environment's existing `torch.jit.script_method` deprecation warnings. Ruff `0.14.10`, pre-commit `4.6.2`, and autopep8 `2.3.2` were installed in the `lz` environment after dependency installation was explicitly approved. The first pre-commit run removed one redundant blank line from each of the reproducer and graph test; the second run passed without modifications. The environment-wide `pip check` still reports pre-existing NumPy constraints from `brevitas` and `tonic`; these packages are outside FLA's dependency set and were not changed. The repository-wide header checker also reports three pre-existing, git-ignored files under `profile/gdn-cudagraph/`; the tracked changed-file audit passes, and those local diagnostics were left untouched.
+Raw logs and local environment diagnostics are intentionally excluded from this branch.
 
 ## Current limitations
 
 - Graph mode has fixed `T_max` and `N_max` capacities. The caller must select a larger graph bucket or use eager execution above capacity.
 - Inputs, output gradients, and `cu_seqlens` must keep the captured shapes and addresses. New contents are copied into those buffers with in-place operations such as `copy_` before replay.
 - Fewer than `N_max` live sequences must be encoded as zero-length tail entries by repeating `actual_t`; the operator does not discover `actual_n` with a host synchronization.
-- The validated graph route covers varlen `chunk_gated_delta_rule`, GatedDeltaNet prefill/chunk, Triton short convolution, and KDA chunk/layer paths on the native NVIDIA Triton backend. Dense input and Context Parallel remain outside the contract; `cu_seqlens_cpu` is routing metadata only, while captured execution uses device-resident `cu_seqlens`.
+- The graph route covers varlen `chunk_gated_delta_rule`, GatedDeltaNet prefill/chunk, Triton short convolution, and KDA chunk/layer paths on the native NVIDIA Triton backend. Dense B=1 is supported; dense B>1 and GDN Context Parallel graph execution are excluded. Existing KDA CP graph support is preserved. `cu_seqlens_cpu` is routing metadata only, while captured execution uses device-resident `cu_seqlens`.
 - Fused recurrent decode, cache-update decode kernels, full-model capture, graph bucketing, vLLM/SGLang scheduling, NPU, and multi-GPU execution are outside this slice.
 - TileLang, intra-card, and FlashQLA implementations do not claim this graph contract and explicitly decline graph dispatch.
 - Fixed `NT_max` launches and graph-only zero initialization can do more work than eager execution when a bucket is sparsely occupied. Bucket policy belongs to the caller and was not designed here.
-- The benchmark is a steady-state operator microbenchmark on an RTX 4090. It excludes input-copy latency, graph selection, model-level work, and capture cost, and it is not a datacenter-GPU performance conclusion.
+- The historical benchmark is a steady-state operator microbenchmark on an RTX 4090. It excludes input-copy latency, graph selection, model-level work, and capture cost, and it is not a datacenter-GPU performance conclusion. The extended benchmark separately reports replay-only and input-update-plus-replay timings.
 
 ## Recommended reading order
 

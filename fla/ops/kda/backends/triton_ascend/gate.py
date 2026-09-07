@@ -415,7 +415,11 @@ def kda_gate_bwd_npu(
     dt_bias: torch.Tensor | None = None,
     dyg: torch.Tensor | None = None,
     lower_bound: float | None = None,
+    cu_seqlens: torch.LongTensor | None = None,
+    use_graph: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+    if use_graph:
+        raise NotImplementedError("KDA gate backward graph mode is not implemented for the Ascend backend yet.")
     H, K = g.shape[-2:]
     T = g.numel() // (H * K)
     BT = _get_gate_bwd_bt(T, K)

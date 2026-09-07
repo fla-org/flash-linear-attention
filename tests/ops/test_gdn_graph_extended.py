@@ -490,7 +490,9 @@ def test_gdn_graph_rejects_missing_or_malformed_metadata():
     )
 
     with pytest.raises(ValueError, match='cu_seqlens'):
-        chunk_gated_delta_rule(**{**common, 'cu_seqlens': None})
+        chunk_gated_delta_rule(**{**common, 'cu_seqlens': cu_seqlens.cpu()})
+    with pytest.raises(ValueError, match='caller-provided'):
+        chunk_gated_delta_rule(**common, graph_mode='force_graph')
     with pytest.raises(ValueError, match='chunk_indices'):
         chunk_gated_delta_rule(**{**common, 'chunk_indices': torch.zeros(1, dtype=torch.long, device=device)})
     with pytest.raises(ValueError, match='cu_seqlens_cpu'):

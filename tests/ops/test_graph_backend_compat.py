@@ -15,12 +15,17 @@ import torch
 from fla.ops.gated_delta_rule.backends.triton_ascend import TritonAscendGDNBackend
 
 ASCEND_ENTRIES = [
+    ('gated_delta_rule', 'gate', 'gdn_gate_chunk_cumsum'),
+    ('gated_delta_rule', 'gate', 'gdn_gate_bwd'),
+    ('kda', 'gate', 'kda_gate_bwd'),
+    ('utils', 'solve_tril', 'solve_tril'),
     ('gated_delta_rule', 'chunk_fwd', 'chunk_gated_delta_rule_fwd_intra'),
     ('gated_delta_rule', 'wy_fast', 'recompute_w_u_fwd'),
     ('gated_delta_rule', 'wy_fast', 'prepare_wy_repr_bwd'),
     ('common', 'chunk_delta_h', 'chunk_gated_delta_rule_fwd_h'),
     ('common', 'chunk_delta_h', 'chunk_gated_delta_rule_bwd_dhu'),
     ('common', 'chunk_o', 'chunk_bwd_dv_local'),
+    ('common', 'chunk_o', 'chunk_fwd_o'),
     ('common', 'chunk_o', 'chunk_bwd_dqkwg'),
 ]
 
