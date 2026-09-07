@@ -10,10 +10,7 @@ concurrency:
   # Merge/close cancels an in-flight full run, and a maintainer's new push
   # cancels their stale full run. Everything else (external pushes, approvals)
   # must not cancel the approval-triggered full run.
-  cancel-in-progress: >
-    ${{ github.event.action == 'closed' ||
-        (github.event_name == 'pull_request' &&
-         contains(fromJSON('["OWNER", "MEMBER"]'), github.event.pull_request.author_association)) }}
+  cancel-in-progress: ${{ github.event.action == 'closed' || (github.event_name == 'pull_request' && contains(fromJSON('["OWNER", "MEMBER"]'), github.event.pull_request.author_association)) }}
 
 permissions:
   contents: read
