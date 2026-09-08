@@ -52,7 +52,7 @@ jobs:
             // Unlike the H100 'npu_only' detection, __init__.py is NOT excluded
             // here: a change to it affects the NPU backend too, so it should
             // trigger this CI.
-            const npuPattern = /^fla\/(.+\/)?backends\/triton_ascend\/|^\.github\/workflows\/ascend-|^pyproject\.toml$|^fla\/utils\/|^fla\/modules\/|^tests\/conftest\.py$/;
+            const npuPattern = /^fla\/(.+\/)?backends\/triton_ascend\/|^\.github\/workflows\/ascend-|^pyproject\.toml$|^fla\/utils\/|^fla\/modules\/|^fla\/layers\/attn\.py$|^fla\/ops\/attn\/standard\.py$|^tests\/layers\/test_standard_attention(_npu)?\.py$|^tests\/models\/test_standard_attention_transformers_npu\.py$|^tests\/conftest\.py$/;
             const related = files.filter(f => npuPattern.test(f.filename)).map(f => f.filename);
             if (related.length > 0) {
               core.info('NPU-related files changed: ' + related.join(', '));
@@ -156,4 +156,6 @@ jobs:
             tests/ops/test_kda.py \
             tests/ops/test_gla.py \
             tests/ops/test_attnres.py \
-            tests/ops/test_solve_tril.py
+            tests/ops/test_solve_tril.py \
+            tests/layers/test_standard_attention_npu.py \
+            tests/models/test_standard_attention_transformers_npu.py

@@ -7,8 +7,11 @@
 
 from .naive import naive_parallel_attn
 from .parallel import parallel_attn
+from .standard import select_standard_attention_backend, standard_attention
 
 __all__ = [
     'naive_parallel_attn',
     'parallel_attn',
+    'select_standard_attention_backend',
+    'standard_attention',
 ]

@@ -345,7 +345,14 @@ class GLAModel(GLAPreTrainedModel):
 
 class GLAForCausalLM(GLAPreTrainedModel, FLAUnsupportedCacheGenerationMixin):
 
-    _tied_weights_keys = ["lm_head.weight"]
+    # transformers 5 expects target-to-source mappings, while 4.x uses a list
+    # of regex patterns.  Keep both forms so save_pretrained remains usable
+    # across the supported transformers range.
+    _tied_weights_keys = (
+        {"lm_head.weight": "model.embeddings.weight"}
+        if hasattr(PreTrainedModel, 'get_expanded_tied_weights_keys')
+        else ["lm_head.weight"]
+    )
 
     def __init__(self, config):
         super().__init__(config)
