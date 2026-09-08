@@ -20,34 +20,34 @@ from fla.utils import IS_INTEL, IS_NPU, assert_close, device
     ('N', 'V', 'smoothing', 'scale', 'softcap', 'z_scale', 'strided', 'inplace_backward', 'reduction', 'dtype'),
     [
         pytest.param(1024, 32000, 0.0, 1.0, None, 0.0, False, False, 'mean', torch.bfloat16, id='basic'),
-        pytest.param(1024, 100000, 0.0, 1.0, None, 0.0, False, True, 'mean', torch.bfloat16, id='large_vocab'),
+        pytest.param(63, 131071, 0.0, 1.0, None, 0.0, False, True, 'mean', torch.bfloat16, id='large_vocab'),
         pytest.param(
-            7, 4103, 0.0, 1.0, None, 0.0, True, True, 'none', torch.float16,
+            127, 4103, 0.1, 0.3, None, 0.0, True, True, 'none', torch.float16,
             id='strided_tail',
             marks=pytest.mark.skipif(IS_NPU, reason="Covers the default Triton GPU kernels"),
         ),
         pytest.param(
-            7, 65539, 0.0, 0.5, 3.0, 0.0, False, True, 'mean', torch.bfloat16,
+            2047, 65539, 0.1, 0.5, 3.0, 0.0, False, True, 'mean', torch.bfloat16,
             id='softcap_tail',
             marks=pytest.mark.skipif(IS_NPU, reason="Covers the default Triton GPU kernels"),
         ),
         pytest.param(
-            63, 4103, 0.1, 0.3, None, 0.0, False, False, 'sum', torch.bfloat16,
+            1025, 32000, 0.1, 0.3, None, 0.01, False, False, 'sum', torch.bfloat16,
             id='smoothing',
             marks=pytest.mark.skipif(IS_NPU, reason="Covers the default Triton GPU kernels"),
         ),
         pytest.param(
-            7, 4103, 0.1, 0.3, 3.0, 0.01, True, False, 'none', torch.float32,
+            511, 32003, 0.1, 0.3, 3.0, 0.01, True, False, 'mean', torch.float32,
             id='z_loss',
             marks=pytest.mark.skipif(IS_NPU, reason="Covers the default Triton GPU kernels"),
         ),
         pytest.param(
-            7, 65537, 0.0, 0.0, None, 0.0, False, False, 'mean', torch.bfloat16,
+            255, 65537, 0.1, 0.0, None, 0.0, False, False, 'mean', torch.bfloat16,
             id='zero_scale',
             marks=pytest.mark.skipif(IS_NPU, reason="Covers the default Triton GPU kernels"),
         ),
         pytest.param(
-            7, 4103, 0.0, -0.5, 3.0, 0.0, False, False, 'mean', torch.float32,
+            65, 65537, 0.0, -0.5, 3.0, 0.0, True, True, 'none', torch.float32,
             id='negative_scale',
             marks=pytest.mark.skipif(IS_NPU, reason="Covers the default Triton GPU kernels"),
         ),
