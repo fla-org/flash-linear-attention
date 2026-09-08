@@ -122,17 +122,12 @@ def recurrence_iplr_delta_rule_ref(
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'D', 'scale', 'dtype'),
     [
-        pytest.param(
-            2, 1024, 8, 128, 0.1, torch.float,
-            marks=pytest.mark.smoke,
-            id="B2-T1024-H8-D128-scale0.1-torch.float32",
-        ),
-    ] + [
         pytest.param(*test, id="B{}-T{}-H{}-D{}-scale{}-{}".format(*test))
         for test in [
             (1, 63, 1, 64, 1, torch.float),
             (2, 1024, 4, 60, 1, torch.float),
             (2, 1024, 8, 100, 1, torch.float),
+            (2, 1024, 8, 128, 0.1, torch.float),
             (4, 2048, 8, 64, 0.1, torch.float),
         ]
     ],
@@ -193,22 +188,18 @@ def test_fused_recurrent(
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'D', 'scale', 'dtype'),
     [
-        pytest.param(
-            2, 1024, 4, 100, 1, torch.float16,
-            marks=pytest.mark.smoke,
-            id="B2-T1024-H4-D100-scale1-torch.float16",
-        ),
-    ] + [
         pytest.param(*test, id="B{}-T{}-H{}-D{}-scale{}-{}".format(*test))
         for test in [
             (1, 63, 1, 64, 1, torch.float16),
             (2, 500, 3, 60, 1, torch.float16),
             (2, 1000, 3, 64, 0.1, torch.float16),
+            (2, 1024, 4, 100, 1, torch.float16),
             (3, 1024, 4, 128, 0.1, torch.float16),
             (4, 2048, 8, 64, 0.1, torch.float16),
         ]
     ],
 )
+@pytest.mark.smoke
 def test_chunk(
     B: int,
     T: int,
@@ -260,7 +251,6 @@ def test_chunk(
         ]
     ],
 )
-@pytest.mark.smoke
 def test_chunk_with_chunk_size(
     B: int,
     T: int,

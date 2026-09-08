@@ -28,7 +28,6 @@ from fla.utils import assert_close, device
         ]
     ],
 )
-@pytest.mark.smoke
 def test_chunk(
     B: int,
     T: int,
@@ -119,15 +118,10 @@ def test_chunk_with_chunk_size(
 @pytest.mark.parametrize(
     ('H', 'K', 'expand_ratio', 'cu_seqlens', 'dtype'),
     [
-        pytest.param(
-            4, 64, 2, [0, 256, 500, 1000], torch.float16,
-            marks=pytest.mark.smoke,
-            id="H4-K64-expand_ratio2-cu_seqlens[0, 256, 500, 1000]-torch.float16",
-        ),
-    ] + [
         pytest.param(*test, id="H{}-K{}-expand_ratio{}-cu_seqlens{}-{}".format(*test))
         for test in [
             (4, 64, 1, [0, 15], torch.float16),
+            (4, 64, 2, [0, 256, 500, 1000], torch.float16),
             (4, 100, 2, [0, 15, 100, 300, 1200, 2000], torch.float16),
         ]
     ],
@@ -136,6 +130,7 @@ def test_chunk_with_chunk_size(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
     reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set',
 )
+@pytest.mark.smoke
 def test_chunk_varlen(
     H: int,
     K: int,

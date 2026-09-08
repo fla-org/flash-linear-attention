@@ -19,12 +19,6 @@ from fla.utils import assert_close, check_shared_mem, device, device_platform
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'D', 'M', 'gate_logit_normalizer', 'dtype'),
     [
-        pytest.param(
-            2, 1024, 8, 128, 64, 0.1, torch.float16,
-            marks=pytest.mark.smoke,
-            id="B2-T1024-H8-D128-M64-gate_logit_normalizer0.1-torch.float16",
-        ),
-    ] + [
         pytest.param(*test, id="B{}-T{}-H{}-D{}-M{}-gate_logit_normalizer{}-{}".format(*test))
         for test in [
             (1, 63, 1, 64, 32, 1, torch.float),
@@ -34,6 +28,7 @@ from fla.utils import assert_close, check_shared_mem, device, device_platform
             (2, 1024, 8, 128, 64, 1, torch.float),
             (2, 1024, 8, 128, 64, 10, torch.float),
             (4, 2048, 8, 64, 64, 1, torch.float),
+            (2, 1024, 8, 128, 64, 0.1, torch.float16),
             (2, 1024, 8, 128, 64, 10, torch.float16),
         ]
     ],
@@ -121,7 +116,6 @@ def test_fused_recurrent(
     device_platform == 'intel',
     reason='Intel Triton Failure',
 )
-@pytest.mark.smoke
 def test_fused_recurrent_varlen(
     H: int,
     D: int,
@@ -206,12 +200,6 @@ def test_fused_recurrent_varlen(
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'D', 'M', 'gate_logit_normalizer', 'dtype'),
     [
-        pytest.param(
-            2, 1024, 4, 128, 64, 10, torch.float16,
-            marks=pytest.mark.smoke,
-            id="B2-T1024-H4-D128-M64-gate_logit_normalizer10-torch.float16",
-        ),
-    ] + [
         pytest.param(*test, id="B{}-T{}-H{}-D{}-M{}-gate_logit_normalizer{}-{}".format(*test))
         for test in [
             (1, 63, 1, 64, 32, 1, torch.float16),
@@ -219,6 +207,7 @@ def test_fused_recurrent_varlen(
             (2, 1024, 4, 256, 64, 1, torch.float16),
             (2, 1024, 4, 128, 64, 0.1, torch.float),
             (2, 1024, 4, 128, 128, 1, torch.float16),
+            (2, 1024, 4, 128, 64, 10, torch.float16),
         ]
     ],
 )
@@ -390,15 +379,10 @@ def test_chunk_with_chunk_size(
 @pytest.mark.parametrize(
     ('H', 'D', 'M', 'cu_seqlens', 'dtype'),
     [
-        pytest.param(
-            4, 64, 64, [0, 256, 500, 1000], torch.float16,
-            marks=pytest.mark.smoke,
-            id="H4-D64-M64-cu_seqlens[0, 256, 500, 1000]-torch.float16",
-        ),
-    ] + [
         pytest.param(*test, id="H{}-D{}-M{}-cu_seqlens{}-{}".format(*test))
         for test in [
             (4, 64, 64, [0, 15], torch.float16),
+            (4, 64, 64, [0, 256, 500, 1000], torch.float16),
             (4, 100, 64, [0, 15, 100, 300, 1200, 2000], torch.float16),
         ]
     ],
@@ -411,6 +395,7 @@ def test_chunk_with_chunk_size(
     device_platform == 'intel',
     reason='Intel Triton Failure',
 )
+@pytest.mark.smoke
 def test_chunk_varlen(
     H: int,
     D: int,

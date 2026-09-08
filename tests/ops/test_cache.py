@@ -37,7 +37,6 @@ def _optional_restore_kernel(x, y, N, BLOCK_SIZE: tl.constexpr):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-@pytest.mark.smoke
 def test_fla_cache_autotune_handles_none_restore_value():
     """A None argument listed in restore_value must not crash autotuning.
 
@@ -63,7 +62,6 @@ def test_fla_cache_autotune_handles_none_restore_value():
 
 
 @pytest.mark.parametrize("kernel", [causal_conv1d_fwd_kernel, causal_conv1d_bwd_kernel])
-@pytest.mark.smoke
 def test_causal_conv1d_autotune_key_excludes_unused_nb(kernel):
     """NB (ceil(B*T / 1024)) is never read inside either kernel body, so it must not sit in the
     autotune key: leaving it in forces a redundant re-tune on every distinct B*T even though D

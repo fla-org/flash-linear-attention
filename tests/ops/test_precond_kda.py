@@ -101,17 +101,12 @@ def test_naive_chunk(
     ("B", "T", "H", "K", "V", "scale", "gate_logit_normalizer", "dtype"),
     [
         pytest.param(
-            2, 512, 3, 60, 60, 1, 1, torch.float,
-            marks=pytest.mark.smoke,
-            id="B2-T512-H3-K60-V60-scale1-gate_logit_normalizer1-torch.float32",
-        ),
-    ] + [
-        pytest.param(
             *test,
             id="B{}-T{}-H{}-K{}-V{}-scale{}-gate_logit_normalizer{}-{}".format(*test),
         )
         for test in [
             (1, 64, 1, 64, 64, 1, 1, torch.float),
+            (2, 512, 3, 60, 60, 1, 1, torch.float),
             (3, 1000, 4, 100, 100, 0.1, 1, torch.float),
             (4, 1024, 4, 128, 128, 0.1, 1, torch.float),
         ]
@@ -273,17 +268,6 @@ def test_fused_recurrent_transpose_state(
     ),
     [
         pytest.param(
-            4, 1024, 4, 128, 128, 0.1, 0, True, False, 'tf32', torch.bfloat16,
-            marks=pytest.mark.smoke,
-            id="B4-T1024-H4-K128-V128-scale0.1-mask_p0-qk_l2normTrue-gateFalse-solve_triltf32-torch.bfloat16",
-        ),
-        pytest.param(
-            2, 1500, 4, 128, 128, 0.1, 0, False, True, 'tf32x3', torch.float16,
-            marks=pytest.mark.smoke,
-            id="B2-T1500-H4-K128-V128-scale0.1-mask_p0-qk_l2normFalse-gateTrue-solve_triltf32x3-torch.float16",
-        ),
-    ] + [
-        pytest.param(
             *test,
             id="B{}-T{}-H{}-K{}-V{}-scale{}-mask_p{}-qk_l2norm{}-gate{}-solve_tril{}-{}".format(*test),
         )
@@ -293,6 +277,8 @@ def test_fused_recurrent_transpose_state(
             (2, 1000, 3, 64, 64, 0.1, 0.5, False, False, 'tf32', torch.float16),
             (3, 1024, 4, 100, 100, 1, 0, False, False, 'tf32', torch.float16),
             (4, 1024, 4, 128, 128, 0.1, 0, False, False, 'tf32x3', torch.float16),
+            (4, 1024, 4, 128, 128, 0.1, 0, True, False, 'tf32', torch.bfloat16),
+            (2, 1500, 4, 128, 128, 0.1, 0, False, True, 'tf32x3', torch.float16),
             (4, 2048, 8, 64, 64, 0.1, 0, False, True, 'tf32', torch.float16),
             # High masking + gate: mirrors the failing varlen config in non-varlen form
             (2, 1000, 4, 64, 64, 0.1, 0.9, False, True, 'tf32x3', torch.float16),
@@ -526,24 +512,17 @@ def test_chunk_transpose_state(
 @pytest.mark.parametrize(
     ("H", "K", "V", "mask_p", "cu_seqlens", "dtype", "use_gate_in_kernel", "solve_tril_precision", "safe_gate", "disable_recompute"),
     [
-        pytest.param(
-            4, 128, 128, 0.5, [0, 256, 500, 1000], torch.float16, False, 'tf32x3', False, False,
-            marks=pytest.mark.smoke,
-            id=(
-                "H4-K128-V128-mask_p0.5-cu_seqlens[0, 256, 500, 1000]-torch.float16-gateFalse"
-                "-solve_triltf32x3-safe_gateFalse-disable_recomputeFalse"
-            ),
-        ),
-    ] + [
         pytest.param(*test, id="H{}-K{}-V{}-mask_p{}-cu_seqlens{}-{}-gate{}-solve_tril{}-safe_gate{}-disable_recompute{}".format(*test))
         for test in [
             (4, 60, 60, 0.1, [0, 15], torch.float16, True, 'tf32x3', False, False),
             (4, 64, 64, 0.9, [0, 256, 500, 1000], torch.float16, True, 'tf32', False, False),
+            (4, 128, 128, 0.5, [0, 256, 500, 1000], torch.float16, False, 'tf32x3', False, False),
             (4, 100, 100, 0, [0, 15, 100, 300, 1200, 2000], torch.float16, True, 'tf32', False, False),
             (4, 64, 64, 0, [0, 100, 300, 1200, 3000, 4096], torch.float16, False, 'tf32x3', True, True),
         ]
     ],
 )
+@pytest.mark.smoke
 def test_chunk_varlen(
     H: int,
     K: int,
@@ -855,7 +834,6 @@ def test_gate(
         ]
     ],
 )
-@pytest.mark.smoke
 def test_chunk_A_state(
     B: int,
     T: int,

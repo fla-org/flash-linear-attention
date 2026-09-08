@@ -43,7 +43,6 @@ def build_partial_varlen(x, cu_seqlens, q_lens):
     return partial_x
 
 
-@pytest.mark.smoke
 def test_parallel_value_split_matches_single_tile():
     torch.manual_seed(42)
     B, T, H, HQ, K, V, S, block_size = 1, 63, 1, 16, 64, 320, 16, 32
@@ -64,17 +63,12 @@ def test_parallel_value_split_matches_single_tile():
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'HQ', 'D', 'S', 'block_size', 'scale', 'dtype'),
     [
-        pytest.param(
-            3, 1024, 2, 32, 128, 16, 32, 0.1, torch.float16,
-            marks=pytest.mark.smoke,
-            id="B3-T1024-H2-HQ32-D128-S16-block_size32-scale0.1-torch.float16",
-        ),
-    ] + [
         pytest.param(*test, id="B{}-T{}-H{}-HQ{}-D{}-S{}-block_size{}-scale{}-{}".format(*test))
         for test in [
             (1, 63, 1, 16, 64, 16, 32, 1.0, torch.float16),
             (3, 111, 1, 32, 100, 16, 32, 1.0, torch.float16),
             (3, 1024, 2, 32, 60, 16, 32, 0.1, torch.float16),
+            (3, 1024, 2, 32, 128, 16, 32, 0.1, torch.float16),
             (4, 2048, 2, 32, 64, 16, 32, 0.1, torch.float16),
         ]
     ],
@@ -120,16 +114,11 @@ def test_parallel(
 @pytest.mark.parametrize(
     ('H', 'HQ', 'D', 'S', 'block_size', 'cu_seqlens', 'dtype'),
     [
-        pytest.param(
-            2, 32, 64, 16, 32, [0, 256, 500, 1000], torch.float16,
-            marks=pytest.mark.smoke,
-            id="H2-HQ32-D64-S16-block_size32-cu_seqlens[0, 256, 500, 1000]-torch.float16",
-        ),
-    ] + [
         pytest.param(*test, id="H{}-HQ{}-D{}-S{}-block_size{}-cu_seqlens{}-{}".format(*test))
         for test in [
             (1, 16, 64, 16, 32, [0, 15], torch.float16),
             (1, 16, 64, 8, 16, [0, 15, 205, 550, 800], torch.float16),
+            (2, 32, 64, 16, 32, [0, 256, 500, 1000], torch.float16),
             (2, 32, 100, 16, 32, [0, 15, 100, 300, 1200, 2000], torch.float16),
         ]
     ],
@@ -138,6 +127,7 @@ def test_parallel(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
     reason='Skipping test because SKIP_TEST_CHUNK_VARLEN is set',
 )
+@pytest.mark.smoke
 def test_parallel_varlen(
     H: int,
     HQ: int,
@@ -254,18 +244,13 @@ def test_parallel_selective_decode(
 @pytest.mark.parametrize(
     ('B', 'T', 'Tq', 'H', 'HQ', 'D', 'block_size', 'scale', 'dtype'),
     [
-        pytest.param(
-            3, 1024, 33, 2, 32, 128, 32, 0.1, torch.float16,
-            marks=pytest.mark.smoke,
-            id="B3-T1024-Tq33-H2-HQ32-D128-block_size32-scale0.1-torch.float16",
-        ),
-    ] + [
         pytest.param(*test, id="B{}-T{}-Tq{}-H{}-HQ{}-D{}-block_size{}-scale{}-{}".format(*test))
         for test in [
             # Can't pass this as rel grad error bloats with short inputs. Numerical issue?
             # (1, 63, 1, 1, 16, 64, 32, 1.0, torch.float16),
             (3, 111, 15, 1, 32, 100, 32, 1.0, torch.float16),
             (3, 1024, 3, 2, 32, 60, 32, 0.1, torch.float16),
+            (3, 1024, 33, 2, 32, 128, 32, 0.1, torch.float16),
             (4, 2048, 25, 2, 32, 64, 32, 0.1, torch.float16)
         ]
     ]
@@ -334,15 +319,10 @@ def test_parallel_compressive(
 @pytest.mark.parametrize(
     ('B', 'T', 'Tq', 'H', 'HQ', 'D', 'S', 'block_size', 'scale', 'dtype', 'reuse_lse'),
     [
-        pytest.param(
-            3, 111, 15, 1, 32, 100, 16, 32, 1.0, torch.float16, False,
-            marks=pytest.mark.smoke,
-            id="B3-T111-Tq15-H1-HQ32-D100-S16-block_size32-scale1.0-torch.float16-reuse_lseFalse",
-        ),
-    ] + [
         pytest.param(*test, id="B{}-T{}-Tq{}-H{}-HQ{}-D{}-S{}-block_size{}-scale{}-{}-reuse_lse{}".format(*test))
         for test in [
             (1, 1, 1, 1, 16, 64, 16, 32, 1.0, torch.float16, True),
+            (3, 111, 15, 1, 32, 100, 16, 32, 1.0, torch.float16, False),
             (3, 1024, 3, 2, 32, 60, 16, 32, 0.1, torch.float32, True),
             (3, 1024, 33, 2, 32, 128, 16, 32, 0.1, torch.float32, False),
             (4, 2048, 25, 2, 32, 64, 16, 32, 0.1, torch.float32, True)  # Use FP32 to reduce numerical issues
@@ -459,24 +439,15 @@ def test_parallel_topk_decode(
 @pytest.mark.parametrize(
     ('B', 'T', 'Tq', 'H', 'HQ', 'D', 'S', 'block_size', 'scale', 'window_size', 'dtype'),
     [
-        pytest.param(
-            1, 1, 1, 1, 16, 64, 16, 32, 1.0, 0, torch.float16,
-            marks=pytest.mark.smoke,
-            id="B1-T1-Tq1-H1-HQ16-D64-S16-block_size32-scale1.0-W0-torch.float16",
-        ),
-        pytest.param(
-            3, 1024, 280, 1, 32, 100, 16, 32, 1.0, 0, torch.float32,
-            marks=pytest.mark.smoke,
-            id="B3-T1024-Tq280-H1-HQ32-D100-S16-block_size32-scale1.0-W0-torch.float32",
-        ),
-    ] + [
         pytest.param(*test, id="B{}-T{}-Tq{}-H{}-HQ{}-D{}-S{}-block_size{}-scale{}-W{}-{}".format(*test))
         # The kernel reuses the naive block indices: with independent top-k, naive and the kernel may pick
         # different blocks at near-tied scores, and a single block swap changes that position's output a lot,
         # so the end-to-end output cannot be compared at a tight tolerance. Selection itself is checked in
         # `test_parallel_topk_decode`; here we reuse the indices to verify the rest of the arithmetic.
         for test in [
+            (1, 1, 1, 1, 16, 64, 16, 32, 1.0, 0, torch.float16),
             (3, 111, 15, 1, 32, 100, 16, 32, 1.0, 128, torch.float16),
+            (3, 1024, 280, 1, 32, 100, 16, 32, 1.0, 0, torch.float32),
             (4, 1024, 256, 1, 32, 100, 16, 32, 1.0, 16, torch.float16),
             (3, 1024, 3, 2, 32, 60, 16, 32, 0.1, 128, torch.float16),
             (3, 1024, 33, 2, 32, 128, 16, 32, 0.1, 0, torch.float32),

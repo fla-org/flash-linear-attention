@@ -15,27 +15,13 @@ from fla.utils import IS_NPU, assert_close, device
 @pytest.mark.parametrize(
     ('L', 'B', 'T', 'D', 'scale', 'fuse_output_norm', 'dtype', 'checkpoint_level'),
     [
-        pytest.param(
-            3, 1, 1000, 4096, 4096 ** -0.5, True, torch.float16, 1,
-            marks=pytest.mark.smoke,
-            id="L3-B1-T1000-D4096-scale0.015625-onormTrue-torch.float16-ckpt1",
-        ),
-        pytest.param(
-            1, 1, 1000, 4096, 1.0, False, torch.float16, 1,
-            marks=pytest.mark.smoke,
-            id="L1-B1-T1000-D4096-scale1.0-onormFalse-torch.float16-ckpt1",
-        ),
-        pytest.param(
-            7, 1, 1000, 1000, 1000 ** -0.5, False, torch.float16, 0,
-            marks=pytest.mark.smoke,
-            id="L7-B1-T1000-D1000-scale0.03162277660168379-onormFalse-torch.float16-ckpt0",
-        ),
-    ] + [
         pytest.param(*test, id="L{}-B{}-T{}-D{}-scale{}-onorm{}-{}-ckpt{}".format(*test))
         for test in [
             # single-axis stress (no output norm); checkpoint_level spread across shapes
+            (1,  1, 1000, 4096, 1.0,             False, torch.float16, 1),  # L=1
             (3,  1, 1000, 4096, 4096 ** -0.5,    False, torch.float16, 0),  # L=3
             (15, 1, 15,   4096, 1.0,             False, torch.float16, 1),  # T=15
+            (7,  1, 1000, 1000, 1000 ** -0.5,    False, torch.float16, 0),  # D=1000
             (7,  1, 1000, 2000, 2000 ** -0.5,    False, torch.float16, 1),  # D=2000
             # multi-axis stress (extremes stacked, no output norm)
             (29, 5, 1000, 4096, 4096 ** -0.5,    False, torch.float16, 1),  # L=29 + B=5
@@ -46,12 +32,14 @@ from fla.utils import IS_NPU, assert_close, device
             # fp32 sanity at a larger size
             (10, 2, 8000, 4096, 4096 ** -0.5,    False, torch.float32, 1),
             # output_rms_weight on: fold-in path (fwd + bwd dow)
+            (3,  1, 1000, 4096, 4096 ** -0.5,    True,  torch.float16, 1),  # L=3
             (29, 5, 1000, 4096, 4096 ** -0.5,    True,  torch.float16, 0),  # L=29 + B=5
             (15, 1, 8000, 7186, 1.0,             True,  torch.float16, 1),  # T=8000 + D=7186
             (10, 2, 8000, 4096, 4096 ** -0.5,    True,  torch.float32, 0),  # fp32 sanity
         ]
     ],
 )
+@pytest.mark.smoke
 def test_attnres(
     L: int,
     B: int,

@@ -1100,15 +1100,10 @@ def test_recompute_w_u_fwd_varlen(
 @pytest.mark.parametrize(
     ('H', 'HV', 'D', 'cu_seqlens', 'dtype'),
     [
-        pytest.param(
-            2, 2, 64, [0, 64, 128], torch.bfloat16,
-            marks=pytest.mark.smoke,
-            id="H2-HV2-D64-cu[0, 64, 128]-torch.bfloat16",
-        ),
-    ] + [
         pytest.param(H, HV, D, cu_seqlens, dtype,
                      id=f"H{H}-HV{HV}-D{D}-cu{cu_seqlens}-{dtype}")
         for (H, HV, D, cu_seqlens, dtype) in [
+            (2, 2, 64, [0, 64, 128], torch.bfloat16),
             (2, 4, 64, [0, 128, 256], torch.bfloat16),
             (1, 1, 64, [0, 64, 128], torch.bfloat16),
         ]
@@ -1158,7 +1153,6 @@ def test_prepare_wy_repr_bwd_varlen(
         ]
     ],
 )
-@pytest.mark.smoke
 def test_gdn_full_bwd(
     B: int,
     T: int,

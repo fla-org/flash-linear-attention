@@ -297,7 +297,6 @@ def test_parallel_attn_sink_empty_row_matches_reference():
         pytest.param(64, [0, 97, 173, 300], id="varlen_swa"),
     ],
 )
-@pytest.mark.smoke
 def test_parallel_attn_sink_with_g_matches_reference(window_size, cu_seqlens):
     torch.manual_seed(321)
     os.environ["TRITON_F32_DEFAULT"] = "ieee"
@@ -373,7 +372,6 @@ def test_parallel_attn_sink_with_g_matches_reference(window_size, cu_seqlens):
     assert_close("ds_ref_vs_tri", sink_bias_ref.grad, sink_bias_tri.grad, 0.02)
 
 
-@pytest.mark.smoke
 def test_attn_decoding_sink_matches_reference():
     torch.manual_seed(456)
     os.environ["TRITON_F32_DEFAULT"] = "ieee"

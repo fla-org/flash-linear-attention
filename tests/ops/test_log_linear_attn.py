@@ -26,7 +26,6 @@ from fla.utils import assert_close, device, device_platform
     ],
 )
 @pytest.mark.skipif(device_platform == "intel", reason="Intel Triton Failure")
-@pytest.mark.smoke
 def test_chunk(
     B: int,
     T: int,
@@ -58,7 +57,6 @@ def test_chunk(
 
 @pytest.mark.parametrize("varlen", [False, True], ids=["dense", "varlen"])
 @pytest.mark.skipif(device_platform == "intel", reason="Intel Triton Failure")
-@pytest.mark.smoke
 def test_chunk_initial_state(varlen: bool):
     torch.manual_seed(42)
     H, K, V, L = 1, 64, 32, 15
@@ -107,7 +105,6 @@ def test_chunk_initial_state(varlen: bool):
     ],
 )
 @pytest.mark.skipif(device_platform == "intel", reason="Intel Triton Failure")
-@pytest.mark.smoke
 def test_chunk_bwd(
     B: int,
     T: int,
@@ -161,6 +158,7 @@ def test_chunk_bwd(
     ],
 )
 @pytest.mark.skipif(device_platform == "intel", reason="Intel Triton Failure")
+@pytest.mark.smoke
 def test_chunk_varlen(
     H: int,
     D: int,

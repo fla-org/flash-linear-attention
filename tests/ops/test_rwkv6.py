@@ -23,22 +23,13 @@ from fla.utils import assert_close, device, device_platform
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'D', 'gate_logit_normalizer', 'dtype'),
     [
-        pytest.param(
-            3, 60, 3, 64, 0.1, torch.float16,
-            marks=pytest.mark.smoke,
-            id="B3-T60-H3-D64-gate_logit_normalizer0.1-torch.float16",
-        ),
-        pytest.param(
-            4, 1000, 4, 64, 10, torch.float16,
-            marks=pytest.mark.smoke,
-            id="B4-T1000-H4-D64-gate_logit_normalizer10-torch.float16",
-        ),
-    ] + [
         pytest.param(*test, id="B{}-T{}-H{}-D{}-gate_logit_normalizer{}-{}".format(*test))
         for test in [
             (1, 15, 2, 60, 1.0, torch.float16),
+            (3, 60, 3, 64, 0.1, torch.float16),
             (3, 64, 2, 64, 1, torch.float16),
             (4, 500, 3, 256, 1, torch.float16),
+            (4, 1000, 4, 64, 10, torch.float16),
             (4, 2048, 4, 64, 1, torch.float16),
             (4, 2048, 4, 256, 1, torch.float16),
         ]
@@ -130,7 +121,6 @@ def test_chunk(
         ]
     ],
 )
-@pytest.mark.smoke
 def test_chunk_with_chunk_size(
     B: int,
     T: int,
@@ -178,19 +168,15 @@ def test_chunk_with_chunk_size(
 @pytest.mark.parametrize(
     ('H', 'D', 'cu_seqlens', 'dtype'),
     [
-        pytest.param(
-            4, 64, [0, 256, 500, 1000], torch.float16,
-            marks=pytest.mark.smoke,
-            id="H4-D64-cu_seqlens[0, 256, 500, 1000]-torch.float16",
-        ),
-    ] + [
         pytest.param(*test, id="H{}-D{}-cu_seqlens{}-{}".format(*test))
         for test in [
             (4, 64, [0, 15], torch.float16),
+            (4, 64, [0, 256, 500, 1000], torch.float16),
             (4, 100, [0, 15, 100, 300, 1200, 2000], torch.float16),
         ]
     ],
 )
+@pytest.mark.smoke
 def test_chunk_varlen(
     H: int,
     D: int,

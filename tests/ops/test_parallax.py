@@ -38,16 +38,11 @@ TOL = {torch.float16: 0.005, torch.bfloat16: 0.02}
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'HQ', 'D', 'scale'),
     [
-        pytest.param(
-            3, 1024, 2, 8, 60, 0.1,
-            marks=pytest.mark.smoke,
-            id="B3-T1024-H2-HQ8-D60-scale0.1",
-        ),
-    ] + [
         pytest.param(*test, id="B{}-T{}-H{}-HQ{}-D{}-scale{}".format(*test))
         for test in [
             (1, 63, 1, 1, 64, 1.0),
             (3, 111, 2, 2, 100, 1.0),
+            (3, 1024, 2, 8, 60, 0.1),
             (3, 1024, 2, 8, 128, 0.1),
             (4, 2048, 2, 8, 64, 0.1),
         ]
@@ -99,16 +94,11 @@ def test_parallel(
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'HQ', 'D', 'W'),
     [
-        pytest.param(
-            3, 1024, 2, 8, 128, 64,
-            marks=pytest.mark.smoke,
-            id="B3-T1024-H2-HQ8-D128-W64",
-        ),
-    ] + [
         pytest.param(*test, id="B{}-T{}-H{}-HQ{}-D{}-W{}".format(*test))
         for test in [
             (1, 63, 1, 1, 64, 16),
             (3, 111, 2, 2, 100, 32),
+            (3, 1024, 2, 8, 128, 64),
             (2, 2048, 2, 8, 64, 256),
             (2, 1024, 2, 2, 64, 200),    # W > tile_size and W % tile_size != 0 (safe-zone boundary)
         ]
@@ -160,19 +150,15 @@ def test_parallel_swa(
 @pytest.mark.parametrize(
     ('H', 'HQ', 'D', 'cu_seqlens'),
     [
-        pytest.param(
-            2, 8, 64, [0, 256, 500, 1000],
-            marks=pytest.mark.smoke,
-            id="H2-HQ8-D64-cu[0, 256, 500, 1000]",
-        ),
-    ] + [
         pytest.param(*test, id="H{}-HQ{}-D{}-cu{}".format(*test))
         for test in [
             (2, 2, 64, [0, 15]),
+            (2, 8, 64, [0, 256, 500, 1000]),
             (2, 2, 100, [0, 15, 100, 300, 1200, 2000]),
         ]
     ],
 )
+@pytest.mark.smoke
 def test_parallel_varlen(H: int, HQ: int, D: int, cu_seqlens: list[int], dtype: torch.dtype):
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
@@ -286,15 +272,10 @@ def _decode_ref(q, r, k, v, scale, window_size=None):
 @pytest.mark.parametrize(
     ('B', 'Sq', 'Skv', 'H', 'HQ', 'D', 'W'),
     [
-        pytest.param(
-            2, 1, 137, 2, 2, 64, None,
-            marks=pytest.mark.smoke,
-            id="B2-Sq1-Skv137-H2-HQ2-D64-WNone",
-        ),
-    ] + [
         pytest.param(*test, id="B{}-Sq{}-Skv{}-H{}-HQ{}-D{}-W{}".format(*test))
         for test in [
             (2, 1, 1, 2, 2, 64, None),       # single token, empty-ish cache
+            (2, 1, 137, 2, 2, 64, None),     # single decode step over a cache
             (2, 1, 500, 2, 8, 128, None),    # GQA decode, D128
             (2, 1, 300, 2, 2, 100, 64),      # windowed decode, non-pow2 D
             (2, 64, 64, 2, 2, 64, None),     # full prefill == training causal

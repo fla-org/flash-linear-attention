@@ -19,12 +19,6 @@ from fla.utils import assert_close, device, device_platform
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'D', 'gate_logit_normalizer', 'dtype'),
     [
-        pytest.param(
-            2, 1024, 8, 128, 0.1, torch.float16,
-            marks=pytest.mark.smoke,
-            id="B2-T1024-H8-D128-gate_logit_normalizer0.1-torch.float16",
-        ),
-    ] + [
         pytest.param(*test, id="B{}-T{}-H{}-D{}-gate_logit_normalizer{}-{}".format(*test))
         for test in [
             (1, 63, 1, 64, 1, torch.float),
@@ -33,6 +27,7 @@ from fla.utils import assert_close, device, device_platform
             (2, 1024, 8, 128, 1, torch.float),
             (2, 1024, 8, 128, 10, torch.float),
             (4, 2048, 8, 64, 1, torch.float),
+            (2, 1024, 8, 128, 0.1, torch.float16),
             (2, 1024, 8, 128, 10, torch.float16),
         ]
     ],
@@ -249,26 +244,17 @@ def test_fused_recurrent_varlen(
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'D', 'gate_logit_normalizer', 'dtype'),
     [
-        pytest.param(
-            2, 1024, 8, 128, 1, torch.float16,
-            marks=pytest.mark.smoke,
-            id="B2-T1024-H8-D128-gate_logit_normalizer1-torch.float16",
-        ),
-        pytest.param(
-            1, 128, 4, 512, 1, torch.bfloat16,
-            marks=pytest.mark.smoke,
-            id="B1-T128-H4-D512-gate_logit_normalizer1-torch.bfloat16",
-        ),
-    ] + [
         pytest.param(*test, id="B{}-T{}-H{}-D{}-gate_logit_normalizer{}-{}".format(*test))
         for test in [
             (1, 63, 1, 64, 1, torch.float16),
             (2, 1024, 4, 60, 1, torch.float16),
             (2, 1024, 8, 128, 0.1, torch.float16),
+            (2, 1024, 8, 128, 1, torch.float16),
             (2, 1024, 8, 128, 10, torch.float16),
             (4, 2048, 8, 64, 1, torch.float16),
             (1, 128, 4, 256, 1, torch.float16),
             (1, 64, 2, 320, 1, torch.float16),
+            (1, 128, 4, 512, 1, torch.bfloat16),
         ]
     ],
 )

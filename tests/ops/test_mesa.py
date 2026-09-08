@@ -29,7 +29,6 @@ from fla.utils import IS_INTEL_ALCHEMIST, assert_close, device, device_platform
         ]
     ],
 )
-@pytest.mark.smoke
 @pytest.mark.skipif(
     device_platform == 'intel',
     reason='Intel Triton Failure',
@@ -110,15 +109,10 @@ def test_chunk(
 @pytest.mark.parametrize(
     ('H', 'D', 'gate_range', 'cu_seqlens', 'dtype'),
     [
-        pytest.param(
-            4, 64, [0.8, 0.99], [0, 14, 121, 421, 500], torch.float16,
-            marks=pytest.mark.smoke,
-            id="H4-D64-gate_range[0.8, 0.99]-cu_seqlens[0, 14, 121, 421, 500]-torch.float16",
-        ),
-    ] + [
         pytest.param(*test, id="H{}-D{}-gate_range{}-cu_seqlens{}-{}".format(*test))
         for test in [
             (3, 50, [0.8, 0.99], [0, 15], torch.float16),
+            (4, 64, [0.8, 0.99], [0, 14, 121, 421, 500], torch.float16),
             (4, 64, [0.01, 0.1], [0, 256, 500, 1000], torch.float16),
             (4, 100, [1, 1], [0, 15, 100, 300, 1200, 2000], torch.float16),
         ]
@@ -128,6 +122,7 @@ def test_chunk(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
     reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set',
 )
+@pytest.mark.smoke
 def test_chunk_varlen(
     H: int,
     D: int,
@@ -223,15 +218,10 @@ def test_chunk_varlen(
 @pytest.mark.parametrize(
     ('B', 'H', 'D', 'gate_range', 'max_CG_step', 'dtype'),
     [
-        pytest.param(
-            2, 4, 60, [0.95, 0.99], 5, torch.float16,
-            marks=pytest.mark.smoke,
-            id="B2-H4-D60-gate_range[0.95, 0.99]-max_CG_step5-torch.float16",
-        ),
-    ] + [
         pytest.param(*test, id="B{}-H{}-D{}-gate_range{}-max_CG_step{}-{}".format(*test))
         for test in [
             (1, 3, 50, [0.95, 0.99], 1, torch.float16),
+            (2, 4, 60, [0.95, 0.99], 5, torch.float16),
             (2, 8, 128, [0.95, 0.99], 1, torch.float16),
             (2, 8, 128, [0.95, 0.99], 5, torch.float16),
             (2, 8, 128, [0.95, 0.99], 30, torch.float16),

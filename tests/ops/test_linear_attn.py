@@ -16,18 +16,13 @@ from fla.utils import assert_close, device
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'D', 'scale', 'dtype'),
     [
-        pytest.param(
-            3, 1024, 8, 128, None, torch.float,
-            marks=pytest.mark.smoke,
-            id="B3-T1024-H8-D128-scaleNone-torch.float32",
-        ),
-    ] + [
         pytest.param(*test, id="B{}-T{}-H{}-D{}-scale{}-{}".format(*test))
         for test in [
             (1, 64, 1, 64, None, torch.float),
             (2, 512, 4, 60, None, torch.float),
             (3, 1024, 8, 128, 1., torch.float),
             (3, 1024, 8, 128, 0.1, torch.float),
+            (3, 1024, 8, 128, None, torch.float),
             (2, 2048, 8, 256, None, torch.float16),
             (2, 2048, 4, 256, None, torch.float16),
         ]
@@ -105,21 +100,17 @@ def test_naive_chunk(
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'D', 'dtype'),
     [
-        pytest.param(
-            2, 1000, 3, 128, torch.float16,
-            marks=pytest.mark.smoke,
-            id="B2-T1000-H3-D128-torch.float16",
-        ),
-    ] + [
         pytest.param(*test, id="B{}-T{}-H{}-D{}-{}".format(*test))
         for test in [
             (1, 63, 1, 64, torch.float16),
             (2, 500, 3, 60, torch.float16),
+            (2, 1000, 3, 128, torch.float16),
             (3, 1000, 4, 64, torch.float16),
             (2, 2048, 4, 256, torch.float16),
         ]
     ],
 )
+@pytest.mark.smoke
 def test_chunk(
     B: int,
     T: int,
@@ -174,17 +165,12 @@ def test_chunk(
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'D', 'dtype'),
     [
-        pytest.param(
-            3, 1000, 4, 64, torch.float16,
-            marks=pytest.mark.smoke,
-            id="B3-T1000-H4-D64-torch.float16",
-        ),
-    ] + [
         pytest.param(*test, id="B{}-T{}-H{}-D{}-{}".format(*test))
         for test in [
             (1, 63, 1, 64, torch.float16),
             (2, 500, 3, 60, torch.float16),
             (2, 1000, 3, 128, torch.float16),
+            (3, 1000, 4, 64, torch.float16),
             (2, 2048, 4, 256, torch.float16),
         ]
     ],
@@ -251,7 +237,6 @@ def test_fused_chunk(
         ]
     ],
 )
-@pytest.mark.smoke
 def test_normalize_split_resume(fn, B: int, T: int, split: int, H: int, D: int):
     """Splitting at `split` and resuming via the returned (kv_state, z_state)
     must reproduce the single-call output when normalize=True."""

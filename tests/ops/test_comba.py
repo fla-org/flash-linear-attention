@@ -61,16 +61,11 @@ def test_cumsum_local_scalar_fwd(
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'HV', 'D', 'scale', 'gate_logit_normalizer', 'dtype'),
     [
-        pytest.param(
-            2, 1024, 8, 8, 128, 1, 0.1, torch.float,
-            marks=pytest.mark.smoke,
-            id="B2-T1024-H8-HV8-D128-scale1-gate_logit_normalizer0.1-torch.float32",
-        ),
-    ] + [
         pytest.param(*test, id="B{}-T{}-H{}-HV{}-D{}-scale{}-gate_logit_normalizer{}-{}".format(*test))
         for test in [
             (1, 63, 1, 1, 64, 1, 1, torch.float),
             (2, 1024, 4, 4, 60, 1, 1, torch.float),
+            (2, 1024, 8, 8, 128, 1, 0.1, torch.float),
             (2, 1024, 8, 8, 128, 0.1, 1, torch.float),
             (2, 1024, 8, 8, 128, 1, 10, torch.float),
             (4, 2048, 8, 8, 64, 0.1, 1, torch.float),
@@ -131,25 +126,16 @@ def test_fused_recurrent(
     ('B', 'T', 'H', 'HV', 'D', 'scale', 'gate_logit_normalizer', 'mask_p', 'use_qk_l2norm_in_kernel', 'dtype'),
     [
         pytest.param(
-            2, 1000, 3, 3, 60, 1, 1, 0, False, torch.float16,
-            marks=pytest.mark.smoke,
-            id="B2-T1000-H3-HV3-D60-scale1-gate_logit_normalizer1-mask_p0-use_qk_l2norm_in_kernelFalse-torch.float16",
-        ),
-        pytest.param(
-            2, 1024, 4, 4, 128, 0.1, 1, 0.5, False, torch.float16,
-            marks=pytest.mark.smoke,
-            id="B2-T1024-H4-HV4-D128-scale0.1-gate_logit_normalizer1-mask_p0.5-use_qk_l2norm_in_kernelFalse-torch.float16",
-        ),
-    ] + [
-        pytest.param(
             *test,
             id="B{}-T{}-H{}-HV{}-D{}-scale{}-gate_logit_normalizer{}-mask_p{}-use_qk_l2norm_in_kernel{}-{}".format(*test),
         )
         for test in [
             (1, 63, 1, 1, 64, 1, 1, 0, False, torch.float16),
+            (2, 1000, 3, 3, 60, 1, 1, 0, False, torch.float16),
             (2, 1024, 3, 3, 64, 0.1, 1, 0.5, False, torch.float16),
             (2, 1024, 4, 4, 100, 1, 0.1, 0, False, torch.float16),
             (2, 1024, 4, 4, 128, 0.1, 1, 0, True, torch.float16),
+            (2, 1024, 4, 4, 128, 0.1, 1, 0.5, False, torch.float16),
             (2, 1024, 4, 4, 128, 0.1, 10, 0, False, torch.float16),
             (4, 2048, 8, 8, 64, 0.1, 1, 0, True, torch.float16),
             (2, 1000, 2, 8, 64, 1, 1, 0, False, torch.float16),
@@ -233,18 +219,13 @@ def test_chunk(
 @pytest.mark.parametrize(
     ('H', 'HV', 'D', 'mask_p', 'cu_seqlens', 'dtype'),
     [
-        pytest.param(
-            2, 8, 64, 0, [0, 256, 500, 1000], torch.float16,
-            marks=pytest.mark.smoke,
-            id="H2-HV8-D64-mask_p0-cu_seqlens[0, 256, 500, 1000]-torch.float16",
-        ),
-    ] + [
         pytest.param(*test, id="H{}-HV{}-D{}-mask_p{}-cu_seqlens{}-{}".format(*test))
         for test in [
             (4, 4, 64, 0, [0, 15], torch.float16),
             (4, 4, 64, 0, [0, 256, 500, 1000], torch.float16),
             (4, 4, 64, 0.5, [0, 256, 500, 1000], torch.float16),
             (4, 4, 100, 0, [0, 15, 100, 300, 1200, 2000], torch.float16),
+            (2, 8, 64, 0, [0, 256, 500, 1000], torch.float16),
         ]
     ],
 )
@@ -252,6 +233,7 @@ def test_chunk(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
     reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set',
 )
+@pytest.mark.smoke
 def test_chunk_varlen(
     H: int,
     HV: int,

@@ -21,23 +21,14 @@ from fla.utils import IS_INTEL_ALCHEMIST, assert_close, device
     ('B', 'T', 'H', 'D', 'scale', 'num_householder', 'gate_logit_normalizer', 'mask_p', 'use_qk_l2norm_in_kernel', 'dtype'),
     [
         pytest.param(
-            2, 1000, 4, 64, 0.1, 2, 0.1, 0.5, False, torch.float16,
-            marks=pytest.mark.smoke,
-            id="B2-T1000-H4-D64-scale0.1-num_householder2-gate_logit_normalizer0.1-mask_p0.5-l2normFalse-torch.float16",
-        ),
-        pytest.param(
-            2, 1024, 4, 64, 1, 2, 1, 0, True, torch.float16,
-            marks=pytest.mark.smoke,
-            id="B2-T1024-H4-D64-scale1-num_householder2-gate_logit_normalizer1-mask_p0-l2normTrue-torch.float16",
-        ),
-    ] + [
-        pytest.param(
             *test,
             id="B{}-T{}-H{}-D{}-scale{}-num_householder{}-gate_logit_normalizer{}-mask_p{}-l2norm{}-{}".format(*test),
         )
         for test in [
             (1, 63, 1, 64, 0.1, 1, 1, 0, False, torch.float16),
             (2, 200, 3, 60, 0.1, 1, 1, 0, False, torch.float16),
+            (2, 1000, 4, 64, 0.1, 2, 0.1, 0.5, False, torch.float16),
+            (2, 1024, 4, 64, 1, 2, 1, 0, True, torch.float16),
             (2, 1024, 6, 100, 1, 2, 10, 0, False, torch.float16),
             (4, 1500, 8, 128, 0.1, 3, 1, 0.5, False, torch.float16),
             (2, 2048, 8, 128, 1, 3, 1, 0, False, torch.float16),
@@ -115,15 +106,10 @@ def test_chunk(
 @pytest.mark.parametrize(
     ('H', 'D', 'num_householder', 'mask_p', 'cu_seqlens', 'dtype'),
     [
-        pytest.param(
-            2, 100, 2, 0, [0, 63, 100, 500, 1000], torch.float16,
-            marks=pytest.mark.smoke,
-            id="H2-D100-num_householder2-mask_p0-cu_seqlens[0, 63, 100, 500, 1000]-torch.float16",
-        ),
-    ] + [
         pytest.param(*test, id="H{}-D{}-num_householder{}-mask_p{}-cu_seqlens{}-{}".format(*test))
         for test in [
             (2, 64, 3, 0, [0, 63], torch.float16),
+            (2, 100, 2, 0, [0, 63, 100, 500, 1000], torch.float16),
             (2, 100, 2, 0, [0, 100, 256, 512, 1500, 1500], torch.float16),
             (2, 128, 2, 0, [0, 100, 300, 800, 1500, 2000], torch.float16),
             (2, 128, 2, 0.5, [0, 31, 111, 799, 1000, 1500, 1800, 2000], torch.float16),
@@ -132,6 +118,7 @@ def test_chunk(
         ]
     ],
 )
+@pytest.mark.smoke
 def test_chunk_varlen(
     H: int,
     D: int,
@@ -230,7 +217,6 @@ def test_chunk_varlen(
     assert_close('dh0', ref_dh0, tri_dh0, 0.007)
 
 
-@pytest.mark.smoke
 def test_naive_varlen():
     H, D, num_householder = 2, 64, 2
     torch.manual_seed(42)

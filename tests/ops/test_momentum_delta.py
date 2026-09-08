@@ -36,7 +36,6 @@ from fla.utils import assert_close, device, device_platform
     device_platform == 'intel',
     reason='Intel Triton Failure',
 )
-@pytest.mark.smoke
 def test_chunk(
     B: int,
     T: int,
@@ -92,16 +91,11 @@ def test_chunk(
 @pytest.mark.parametrize(
     ('H', 'D', 'cu_seqlens', 'dtype'),
     [
-        pytest.param(
-            3, 64, [0, 256, 500, 900, 1000], torch.float16,
-            marks=pytest.mark.smoke,
-            id="H3-D64-cu_seqlens[0, 256, 500, 900, 1000]-torch.float16",
-        ),
-    ] + [
         pytest.param(*test, id="H{}-D{}-cu_seqlens{}-{}".format(*test))
         for test in [
             (2, 64, [0, 15], torch.float16),
             (3, 60, [0, 111, 500], torch.float16),
+            (3, 64, [0, 256, 500, 900, 1000], torch.float16),
             (4, 100, [0, 15, 100, 300, 1200, 1599, 1800, 2000], torch.float16),
         ]
     ],
@@ -110,6 +104,7 @@ def test_chunk(
     device_platform == 'intel',
     reason='Intel Triton Failure',
 )
+@pytest.mark.smoke
 def test_chunk_varlen(
     H: int,
     D: int,
@@ -199,7 +194,6 @@ def test_chunk_initial_state_grad_count():
 
 
 @pytest.mark.skipif(device_platform == 'intel', reason='Intel Triton Failure')
-@pytest.mark.smoke
 def test_full_momentum_chunk_recurrent_backward_parity():
     torch.manual_seed(3)
     B, T, H, K, V = 2, 33, 2, 8, 6

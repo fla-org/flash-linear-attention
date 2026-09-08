@@ -16,21 +16,12 @@ from fla.utils import assert_close, device, device_platform
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'D', 'scale', 'use_qk_l2norm_in_kernel', 'dtype'),
     [
-        pytest.param(
-            2, 100, 4, 60, 0.1, False, torch.float16,
-            marks=pytest.mark.smoke,
-            id="B2-T100-H4-D60-scale0.1-False",
-        ),
-        pytest.param(
-            2, 1024, 4, 128, 1, True, torch.float16,
-            marks=pytest.mark.smoke,
-            id="B2-T1024-H4-D128-scale1-True",
-        ),
-    ] + [
         pytest.param(*test, id="B{}-T{}-H{}-D{}-scale{}-{}".format(*test))
         for test in [
             (1, 63, 1, 64, 1, False, torch.float16),
+            (2, 100, 4, 60, 0.1, False, torch.float16),
             (2, 1000, 3, 128, 0.1, False, torch.float16),
+            (2, 1024, 4, 128, 1, True, torch.float16),
             (3, 2000, 4, 128, 0.1, False, torch.float16),
             (4, 2048, 8, 64, 0.1, False, torch.float16),
         ]
@@ -105,7 +96,6 @@ def test_chunk(
         ]
     ],
 )
-@pytest.mark.smoke
 @pytest.mark.skipif(
     device_platform == 'intel',
     reason='Intel Triton Failure',
@@ -172,16 +162,11 @@ def test_chunk_with_chunk_size(
 @pytest.mark.parametrize(
     ('H', 'D', 'cu_seqlens', 'dtype'),
     [
-        pytest.param(
-            3, 64, [0, 256, 500, 900, 1000], torch.float16,
-            marks=pytest.mark.smoke,
-            id="H3-D64-cu_seqlens[0, 256, 500, 900, 1000]-torch.float16",
-        ),
-    ] + [
         pytest.param(*test, id="H{}-D{}-cu_seqlens{}-{}".format(*test))
         for test in [
             (2, 64, [0, 15], torch.float16),
             (3, 60, [0, 111, 500], torch.float16),
+            (3, 64, [0, 256, 500, 900, 1000], torch.float16),
             (4, 100, [0, 15, 100, 300, 1200, 1599, 1800, 2000], torch.float16),
         ]
     ],
@@ -190,6 +175,7 @@ def test_chunk_with_chunk_size(
     device_platform == 'intel',
     reason='Intel Triton Failure',
 )
+@pytest.mark.smoke
 def test_chunk_varlen(
     H: int,
     D: int,

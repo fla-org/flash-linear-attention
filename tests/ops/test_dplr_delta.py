@@ -213,7 +213,6 @@ def test_recurrent_fwd(
         ]
     ],
 )
-@pytest.mark.smoke
 def test_fused_recurrent(
     B: int,
     T: int,
@@ -267,15 +266,6 @@ def test_fused_recurrent(
      'lowerbound', 'scale', 'dtype', 'chunk_size', 'disable_recompute',),
     [
         pytest.param(
-            2, 1024, 3, 64, 0.5, 1, True, -5, 1, torch.float16, 16, False,
-            marks=pytest.mark.smoke,
-            id=(
-                "B2-T1024-H3-D64-mask_p0.5-gate_logit_normalizer1-safe_gateTrue-lowerbound-5-scale1"
-                "-dtypetorch.float16-chunk_size16-disable_recomputeFalse"
-            ),
-        ),
-    ] + [
-        pytest.param(
             *test,
             id="B{}-T{}-H{}-D{}-mask_p{}-gate_logit_normalizer{}-safe_gate{}-lowerbound{}-scale{}-dtype{}-chunk_size{}-disable_recompute{}".format(
                 *test
@@ -285,6 +275,7 @@ def test_fused_recurrent(
             [
                 (1, 63, 1, 64, 0, 1, True, -5, 1, torch.float16, 16, False),
                 (2, 1000, 3, 60, 0, 1, True, -5, 1, torch.float16, 16, False),
+                (2, 1024, 3, 64, 0.5, 1, True, -5, 1, torch.float16, 16, False),
                 (2, 1024, 4, 100, 0, 0.1, True, -5, 1, torch.float16, 16, False),
                 (2, 1024, 3, 64, 0, 1, True, -5, 1, torch.float16, 32, False),
                 (2, 1024, 4, 100, 0, 0.1, True, -0.61, 1, torch.float16, 64, False),
@@ -512,19 +503,11 @@ def test_chunk_default_chunk_size(lower_bound, chunk_size):
 @pytest.mark.parametrize(
     ('H', 'D', 'mask_p', 'gate_logit_normalizer', 'safe_gate', 'cu_seqlens', 'chunk_size', 'dtype'),
     [
-        pytest.param(
-            4, 64, 0.5, 1, True, [0, 256, 500, 1000], 16, torch.float16,
-            marks=pytest.mark.smoke,
-            id=(
-                "H4-D64-mask_p0.5-gate_logit_normalizer1-safe_gateTrue"
-                "-cu_seqlens[0, 256, 500, 1000]-chunk_size16-torch.float16"
-            ),
-        ),
-    ] + [
         pytest.param(*test, id="H{}-D{}-mask_p{}-gate_logit_normalizer{}-safe_gate{}-cu_seqlens{}-chunk_size{}-{}".format(*test))
         for test in [
             (4, 64, 0, 1, True, [0, 15], 16, torch.float16),
             (4, 64, 0, 1, True, [0, 256, 500, 1000], 16, torch.float16),
+            (4, 64, 0.5, 1, True, [0, 256, 500, 1000], 16, torch.float16),
             (4, 64, 0, 1, True, [0, 256, 500, 1000], 32, torch.float16),
             (4, 64, 0.5, 1, True, [0, 256, 500, 1000], 64, torch.float16),
             (4, 64, 0, 1, False, [0, 15], 32, torch.float16),
@@ -538,6 +521,7 @@ def test_chunk_default_chunk_size(lower_bound, chunk_size):
     device_platform == 'intel',
     reason='Intel Triton Failure',
 )
+@pytest.mark.smoke
 def test_chunk_varlen(
     H: int,
     D: int,

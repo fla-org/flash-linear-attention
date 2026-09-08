@@ -15,7 +15,6 @@ concurrency:
 permissions:
   contents: read
   pull-requests: write
-  issues: write
   checks: read
 
 on:
@@ -289,23 +288,3 @@ jobs:
       runner: 'nvidia-h100-1'
       conda_env_name: 'pytorch_2_12'
       base_ref: origin/${{ github.event.pull_request.base.ref }}
-
-  nightly-report:
-    name: Open an issue when the nightly full pipeline fails
-    needs: [gate, test-h100-pytorch-2-12]
-    if: always() && github.event_name == 'schedule' && failure()
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Create issue
-        uses: actions/github-script@v9.0.0
-        with:
-          script: |
-            const { owner, repo } = context.repo;
-            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
-            await github.rest.issues.create({
-              owner, repo,
-              title: `Nightly full CI failed on main (${new Date().toISOString().slice(0, 10)})`,
-              body: `The nightly full pipeline failed.\n\nWorkflow run: ${runUrl}`,
-              labels: ['bug'],
-            });
