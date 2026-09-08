@@ -110,102 +110,85 @@ def test_fused_cross_entropy_options(V, scale, softcap, z_scale, strided, inplac
     assert_close("dlogits", ref_grad, tri_grad, ratio=1e-2)
 
 
-@pytest.mark.parametrize("B", [2])
-@pytest.mark.parametrize("T", [512, 1024])
-@pytest.mark.parametrize("D", [1024, 2048])
-@pytest.mark.parametrize("V", [32000, 100000])
-@pytest.mark.parametrize("reduction", ['mean'])
 @pytest.mark.parametrize(
-    ('scale', 'softcap', 'accumulate_grad_in_fp32'),
-    [(1.0, None, False), (0.5, None, False), (1.0, None, True), (0.5, None, True), (1.0, 30.0, True)],
-    ids=['plain', 'scaled', 'fp32_grad', 'scaled_fp32_grad', 'softcap'],
+    ('B', 'T', 'D', 'V', 'smoothing', 'scale', 'softcap', 'reduction',
+     'with_bias', 'strided', 'ignore_all', 'accumulate_grad_in_fp32', 'dtype'),
+    [
+        pytest.param(
+            2, T, D, V, 0.0, scale, softcap, 'mean', True, False, False, fp32_grad, torch.bfloat16,
+            id=f'T{T}-D{D}-V{V}-{scale=}-{softcap=}-{fp32_grad=}',
+        )
+        for T, D, V, (scale, softcap, fp32_grad) in product(
+            (512, 1024), (1024, 2048), (32000, 100000),
+            ((1.0, None, False), (0.5, None, False), (1.0, None, True), (0.5, None, True), (1.0, 30.0, True)),
+        )
+    ] + [
+        pytest.param(
+            3, 7, 32, V, smoothing, scale, softcap, reduction, with_bias, True, ignore_all, True, dtype,
+            id=f'V{V}-{smoothing=}-{scale=}-{softcap=}-{with_bias=}-{reduction}-{dtype}',
+            marks=pytest.mark.skipif(IS_NPU, reason="Covers the default Triton GPU kernels"),
+        )
+        for (V, smoothing, scale, softcap, ignore_all), with_bias, reduction, dtype in product(
+            ((4103, 0.1, 0.3, None, False), (65539, 0.1, 0.5, 3.0, False), (129, 0.0, 1.0, None, True)),
+            (False, True), ('mean', 'sum'), (torch.bfloat16, torch.float16, torch.float32),
+        )
+    ],
 )
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
-@pytest.mark.skipif(
-    device_platform == 'intel',
-    reason="Intel Triton Failure",
-)
+@pytest.mark.skipif(IS_INTEL, reason="Intel Triton Failure")
 def test_fused_linear_cross_entropy(
     B: int,
     T: int,
     D: int,
     V: int,
+    smoothing: float,
     scale: float,
     softcap: float | None,
     reduction: str,
+    with_bias: bool,
+    strided: bool,
+    ignore_all: bool,
     accumulate_grad_in_fp32: bool,
-    dtype: torch.dtype
+    dtype: torch.dtype,
 ):
     torch.manual_seed(42)
-
-    x = torch.randn(B * T, D).to(device).to(dtype=dtype).requires_grad_()
-    target = torch.randint(0, V, (B, T)).to(device)
-    target = torch.cat((target[..., 1:], torch.full_like(target[..., :1], -100)), -1)
-    target = target.flatten()
-    weight = torch.randn(V, D).to(device).to(dtype=dtype).requires_grad_()
-    bias = torch.randn(V).to(device).to(dtype=dtype).requires_grad_()
-
-    logits = F.linear(x, weight, bias)
-    ref = FusedCrossEntropyLoss(reduction=reduction, logit_scale=scale, logit_softcapping=softcap)(logits, target)
-    do = torch.randn_like(ref).to(device).to(dtype=dtype)
-
-    ref.backward(do)
-    ref_dx, x.grad = x.grad.clone(), None
-    ref_dw, weight.grad = weight.grad.clone(), None
-    ref_db, bias.grad = bias.grad.clone(), None
-
-    tri = FusedLinearCrossEntropyLoss(
-        logit_scale=scale,
-        logit_softcapping=softcap,
-        reduction=reduction,
-        accumulate_grad_in_fp32=accumulate_grad_in_fp32,
-    )(x, target, weight, bias)
-    tri.backward(do)
-    tri_dx, x.grad = x.grad.clone(), None
-    tri_dw, weight.grad = weight.grad.clone(), None
-    tri_db, bias.grad = bias.grad.clone(), None
-
-    assert_close(" o", ref, tri, ratio=1e-2)
-    assert_close("dx", ref_dx, tri_dx, ratio=1e-2)
-    assert_close("dw", ref_dw, tri_dw, ratio=1e-2)
-    assert_close("db", ref_db, tri_db, ratio=1e-2)
-
-
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32], ids=['bf16', 'fp16', 'fp32'])
-@pytest.mark.parametrize("reduction", ['mean', 'sum'])
-@pytest.mark.parametrize("with_bias", [False, True], ids=['no_bias', 'bias'])
-@pytest.mark.parametrize(
-    ('V', 'smoothing', 'scale', 'softcap', 'ignore_all'),
-    [(4103, 0.1, 0.3, None, False), (65539, 0.1, 0.5, 3.0, False), (129, 0.0, 1.0, None, True)],
-    ids=['scaled_smoothing', 'softcap_tail', 'all_ignored'],
-)
-@pytest.mark.skipif(IS_INTEL or IS_NPU, reason="Covers the default Triton GPU kernels")
-def test_fused_linear_cross_entropy_options(V, smoothing, scale, softcap, ignore_all, with_bias, reduction, dtype):
-    torch.manual_seed(42)
-    x = torch.randn(3, 7, 32, device=device, dtype=dtype).transpose(0, 1).requires_grad_()
-    weight = (torch.randn(V, 32, device=device) / 32 ** 0.5).to(dtype).requires_grad_()
-    bias = torch.randn(V, device=device, dtype=dtype).requires_grad_() if with_bias else None
-    target = torch.randint(V, (7, 3), device=device)
-    target[::3] = -100
-    target[1, 0] = V - 1
+    if strided:
+        x = torch.randn(B, T, D, device=device, dtype=dtype).transpose(0, 1).requires_grad_()
+        weight = (torch.randn(V, D, device=device) / D ** 0.5).to(dtype).requires_grad_()
+        bias = torch.randn(V, device=device, dtype=dtype).requires_grad_() if with_bias else None
+        target = torch.randint(V, (T, B), device=device)
+        target[::3] = -100
+        target[1, 0] = V - 1
+    else:
+        x = torch.randn(B * T, D).to(device).to(dtype=dtype).requires_grad_()
+        target = torch.randint(0, V, (B, T)).to(device)
+        target = torch.cat((target[..., 1:], torch.full_like(target[..., :1], -100)), -1).flatten()
+        weight = torch.randn(V, D).to(device).to(dtype=dtype).requires_grad_()
+        bias = torch.randn(V).to(device).to(dtype=dtype).requires_grad_() if with_bias else None
     if ignore_all:
         target.fill_(-100)
     inputs = (x, weight, bias) if with_bias else (x, weight)
-    logits = F.linear(x, weight, bias).float() * scale
-    if softcap is not None:
-        logits = softcap * torch.tanh(logits / softcap)
-    if ignore_all:
-        ref = logits.sum() * 0
+    logits = F.linear(x, weight, bias)
+    if strided:
+        logits = logits.float() * scale
+        if softcap is not None:
+            logits = softcap * torch.tanh(logits / softcap)
+        if ignore_all:
+            ref = logits.sum() * 0
+        else:
+            ref = F.cross_entropy(logits.reshape(-1, V), target.flatten(), label_smoothing=smoothing, reduction=reduction)
+        do = 2
     else:
-        ref = F.cross_entropy(logits.reshape(-1, V), target.flatten(), label_smoothing=smoothing, reduction=reduction)
-    ref_grads = torch.autograd.grad(ref * 2, inputs)
+        ref = FusedCrossEntropyLoss(reduction=reduction, logit_scale=scale, logit_softcapping=softcap)(logits, target)
+        do = torch.randn_like(ref).to(device).to(dtype=dtype)
+    ref_grads = torch.autograd.grad(ref * do, inputs)
     tri = FusedLinearCrossEntropyLoss(
         label_smoothing=smoothing,
         logit_scale=scale,
         logit_softcapping=softcap,
         reduction=reduction,
+        accumulate_grad_in_fp32=accumulate_grad_in_fp32,
     )(x, target, weight, bias)
-    tri_grads = torch.autograd.grad(tri * 2, inputs)
+    tri_grads = torch.autograd.grad(tri * do, inputs)
 
     assert_close("loss", ref, tri, ratio=1e-2)
     for name, expected, actual in zip(('dx', 'dw', 'db'), ref_grads, tri_grads):
