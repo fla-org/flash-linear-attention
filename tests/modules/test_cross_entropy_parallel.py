@@ -62,7 +62,7 @@ def _check_parallel_case(rank, world_size, local_vocab, dtype, option, reduction
             reduction=reduction,
         )
     if kwargs.get('use_l2warp'):
-        ref = l2_warp(ref, raw, kwargs['l2_penalty_factor'])
+        ref = l2_warp(ref, raw.float(), kwargs['l2_penalty_factor'])
     inputs = (x, weight, bias) if with_bias else (x, weight)
     ref_grads = torch.autograd.grad(ref * 2, inputs)
 
