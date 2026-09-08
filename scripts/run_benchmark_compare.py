@@ -76,32 +76,26 @@ def get_changed_files(base: str, head: str) -> list[str]:
     return [f for f in out.split('\n') if f]
 
 
-def _ops_subdirs_from_flapy_imports(relpath: str) -> set[str]:
+def _fla_imports(relpath: str) -> set[str]:
     path = PROJECT_ROOT / relpath
     if not path.is_file():
         return set()
     try:
-        text = path.read_text(encoding='utf-8')
-        tree = ast.parse(text, filename=relpath)
+        tree = ast.parse(path.read_text(encoding='utf-8'), filename=relpath)
     except (OSError, SyntaxError, UnicodeDecodeError):
         return set()
 
-    subdirs: set[str] = set()
+    modules = set()
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom):
-            mod = node.module or ''
-            if mod == 'fla.ops' or mod.startswith('fla.ops.'):
-                parts = mod.split('.')
-                if len(parts) >= 3 and parts[0] == 'fla' and parts[1] == 'ops':
-                    subdirs.add(parts[2])
+        if isinstance(node, ast.ImportFrom) and node.module and node.module.startswith('fla.'):
+            modules.add(node.module)
         elif isinstance(node, ast.Import):
-            for alias in node.names:
-                name = alias.name
-                if name.startswith('fla.ops.'):
-                    parts = name.split('.')
-                    if len(parts) >= 3 and parts[0] == 'fla' and parts[1] == 'ops':
-                        subdirs.add(parts[2])
-    return subdirs
+            modules.update(alias.name for alias in node.names if alias.name.startswith('fla.'))
+    return modules
+
+
+def _ops_subdirs_from_flapy_imports(relpath: str) -> set[str]:
+    return {module.split('.')[2] for module in _fla_imports(relpath) if module.startswith('fla.ops.')}
 
 
 def find_affected_op_names(changed_files: list[str]) -> list[str]:
@@ -119,11 +113,25 @@ def find_affected_op_names(changed_files: list[str]) -> list[str]:
         if len(parts) >= 3 and parts[0] == 'fla' and parts[1] == 'ops':
             import_map.setdefault(parts[2], []).append(name)
 
+    module_ops = {name: cfg for name, cfg in _REGISTRY.items() if cfg.import_path.startswith('fla.modules.')}
+    module_dependencies = {
+        name: {cfg.import_path} | _fla_imports(cfg.import_path.replace('.', '/') + '.py')
+        for name, cfg in module_ops.items()
+    }
+    affected_modules: set[str] = set()
     affected_dirs: set[str] = set()
     common_changed = False
     for fpath in changed_files:
         if not fpath.endswith('.py'):
             continue
+        module = fpath.removesuffix('.py').removesuffix('/__init__').replace('/', '.')
+        for name, cfg in module_ops.items():
+            if (
+                fpath == cfg.test_file
+                or fpath.startswith('fla/modules/backends/')
+                or any(dep == module or dep.startswith(module + '.') for dep in module_dependencies[name])
+            ):
+                affected_modules.add(name)
         if fpath.startswith('fla/ops/common/') or fpath.startswith('fla/ops/utils/'):
             common_changed = True
             continue
@@ -137,7 +145,7 @@ def find_affected_op_names(changed_files: list[str]) -> list[str]:
     if common_changed:
         return sorted(_REGISTRY.keys())
 
-    op_names: set[str] = set()
+    op_names = affected_modules
     for d in affected_dirs:
         if d in import_map:
             op_names.update(import_map[d])

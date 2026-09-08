@@ -22,10 +22,6 @@ if TYPE_CHECKING:
     from torch.distributed import ProcessGroup
 
 
-@triton.heuristics({
-    'HAS_SMOOTHING': lambda args: args['label_smoothing'] > 0.0,
-    'HAS_SOFTCAPPING': lambda args: args['logit_softcapping'] is not None,
-})
 @triton.jit(do_not_specialize=['N'])
 def cross_entropy_fwd_kernel(
     logits,
@@ -33,19 +29,17 @@ def cross_entropy_fwd_kernel(
     loss,
     lse,
     z_loss,
-    label_smoothing,
-    logit_scale,
-    lse_square_scale,
-    logit_softcapping,
-    ignore_index,
-    total_classes,
-    class_start_idx,
+    s_logits,
     N,
     V: tl.constexpr,
-    s_logits,
+    V_TOTAL: tl.constexpr,
+    V_START: tl.constexpr,
+    scale: tl.constexpr,
+    softcap: tl.constexpr,
+    smoothing: tl.constexpr,
+    z_scale: tl.constexpr,
+    ignore_index: tl.constexpr,
     BV: tl.constexpr,
-    HAS_SMOOTHING: tl.constexpr,
-    HAS_SOFTCAPPING: tl.constexpr,
     SPLIT: tl.constexpr,
 ):
     i_n = tl.program_id(0).to(tl.int64)
@@ -54,9 +48,9 @@ def cross_entropy_fwd_kernel(
     m_v = o_v < V
     p_logits = logits + i_n * s_logits
 
-    b_logits = tl.load(p_logits + o_v, mask=m_v, other=0).to(tl.float32) * logit_scale
-    if HAS_SOFTCAPPING:
-        b_logits = logit_softcapping * tanh(b_logits / logit_softcapping)
+    b_logits = tl.load(p_logits + o_v, mask=m_v, other=0).to(tl.float32) * scale
+    if softcap is not None:
+        b_logits = softcap * tanh(b_logits / softcap)
     # mask after softcapping so padded lanes cannot contribute to the normalizer
     b_logits = tl.where(m_v, b_logits, -float('inf'))
     b_max = tl.max(b_logits, 0)
@@ -66,17 +60,17 @@ def cross_entropy_fwd_kernel(
     b_loss = 0.0
     b_z_loss = 0.0
     if b_target != ignore_index:
-        b_target -= class_start_idx
+        b_target -= V_START
         m_target = (b_target >= i_v * BV) & (b_target < tl.minimum(V, (i_v + 1) * BV))
-        b_target_logit = tl.load(p_logits + b_target, mask=m_target, other=0).to(tl.float32) * logit_scale
-        if HAS_SOFTCAPPING:
-            b_target_logit = logit_softcapping * tanh(b_target_logit / logit_softcapping)
+        b_target_logit = tl.load(p_logits + b_target, mask=m_target, other=0).to(tl.float32) * scale
+        if softcap is not None:
+            b_target_logit = softcap * tanh(b_target_logit / softcap)
         b_loss = -b_target_logit
-        if HAS_SMOOTHING:
+        if smoothing > 0:
             b_sum = tl.sum(tl.where(m_v, b_logits, 0.0), 0)
-            b_loss = (1 - label_smoothing) * b_loss - label_smoothing * b_sum / total_classes
+            b_loss = (1 - smoothing) * b_loss - smoothing * b_sum / V_TOTAL
         if not SPLIT:
-            b_z_loss = lse_square_scale * b_lse * b_lse
+            b_z_loss = z_scale * b_lse * b_lse
             b_loss += b_lse + b_z_loss
 
     tl.store(loss + i_v * N + i_n, b_loss)
@@ -85,10 +79,6 @@ def cross_entropy_fwd_kernel(
         tl.store(z_loss + i_n, b_z_loss)
 
 
-@triton.heuristics({
-    'HAS_SMOOTHING': lambda args: args['label_smoothing'] > 0.0,
-    'HAS_SOFTCAPPING': lambda args: args['logit_softcapping'] is not None,
-})
 @triton.jit
 def cross_entropy_bwd_kernel(
     logits,
@@ -96,20 +86,18 @@ def cross_entropy_bwd_kernel(
     lse,
     dloss,
     dlogits,
-    label_smoothing,
-    logit_scale,
-    lse_square_scale,
-    logit_softcapping,
-    ignore_index,
-    total_classes,
-    class_start_idx,
-    V: tl.constexpr,
     s_logits,
     s_dloss,
     s_dlogits,
+    V: tl.constexpr,
+    V_TOTAL: tl.constexpr,
+    V_START: tl.constexpr,
+    scale: tl.constexpr,
+    softcap: tl.constexpr,
+    smoothing: tl.constexpr,
+    z_scale: tl.constexpr,
+    ignore_index: tl.constexpr,
     BV: tl.constexpr,
-    HAS_SMOOTHING: tl.constexpr,
-    HAS_SOFTCAPPING: tl.constexpr,
 ):
     i_n = tl.program_id(0).to(tl.int64)
     i_v = tl.program_id(1).to(tl.int64)
@@ -120,22 +108,22 @@ def cross_entropy_bwd_kernel(
 
     b_target = tl.load(target + i_n).to(tl.int64)
     b_dloss = tl.load(dloss + i_n * s_dloss, mask=b_target != ignore_index, other=0).to(tl.float32)
-    b_logits = tl.load(p_logits, mask=m_v, other=0).to(tl.float32) * logit_scale
-    if HAS_SOFTCAPPING:
-        b_tanh = tanh(b_logits / logit_softcapping)
-        b_logits = logit_softcapping * b_tanh
+    b_logits = tl.load(p_logits, mask=m_v, other=0).to(tl.float32) * scale
+    if softcap is not None:
+        b_tanh = tanh(b_logits / softcap)
+        b_logits = softcap * b_tanh
     b_lse = tl.load(lse + i_n)
     b_probs = exp(b_logits - b_lse)
-    b_dlogits = b_probs + 2.0 * lse_square_scale * b_lse * b_probs
-    b_target -= class_start_idx
-    if HAS_SMOOTHING:
-        b_dlogits -= tl.where(o_v == b_target, 1 - label_smoothing, 0.0)
-        b_dlogits -= label_smoothing / total_classes
+    b_dlogits = b_probs + 2.0 * z_scale * b_lse * b_probs
+    b_target -= V_START
+    if smoothing > 0:
+        b_dlogits -= tl.where(o_v == b_target, 1 - smoothing, 0.0)
+        b_dlogits -= smoothing / V_TOTAL
     else:
         b_dlogits -= tl.where(o_v == b_target, 1.0, 0.0)
-    if HAS_SOFTCAPPING:
+    if softcap is not None:
         b_dlogits *= 1.0 - b_tanh * b_tanh
-    b_dlogits *= b_dloss * logit_scale
+    b_dlogits *= b_dloss * scale
     tl.store(p_dlogits, b_dlogits, mask=m_v)
 
 
@@ -174,16 +162,16 @@ def cross_entropy_fwd(
         loss=loss,
         lse=lse,
         z_loss=z_loss,
-        label_smoothing=label_smoothing,
-        logit_scale=logit_scale,
-        lse_square_scale=lse_square_scale,
-        logit_softcapping=logit_softcapping,
-        ignore_index=ignore_index,
-        total_classes=total_classes,
-        class_start_idx=class_start_idx,
+        s_logits=logits.stride(0),
         N=N,
         V=V,
-        s_logits=logits.stride(0),
+        V_TOTAL=total_classes,
+        V_START=class_start_idx,
+        scale=logit_scale,
+        softcap=logit_softcapping,
+        smoothing=label_smoothing,
+        z_scale=lse_square_scale,
+        ignore_index=ignore_index,
         BV=BV,
         SPLIT=split,
         num_warps=num_warps,
@@ -231,17 +219,17 @@ def cross_entropy_bwd(
         lse=lse,
         dloss=dloss,
         dlogits=dlogits,
-        label_smoothing=label_smoothing,
-        logit_scale=logit_scale,
-        lse_square_scale=lse_square_scale,
-        logit_softcapping=logit_softcapping,
-        ignore_index=ignore_index,
-        total_classes=V if total_classes is None else total_classes,
-        class_start_idx=class_start_idx,
-        V=V,
         s_logits=logits.stride(0),
         s_dloss=dloss.stride(0),
         s_dlogits=dlogits.stride(0),
+        V=V,
+        V_TOTAL=V if total_classes is None else total_classes,
+        V_START=class_start_idx,
+        scale=logit_scale,
+        softcap=logit_softcapping,
+        smoothing=label_smoothing,
+        z_scale=lse_square_scale,
+        ignore_index=ignore_index,
         BV=BV,
         num_warps=4 if BV < 2048 else 8,
     )
