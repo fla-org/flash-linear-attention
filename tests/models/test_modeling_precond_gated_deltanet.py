@@ -13,7 +13,7 @@ import torch
 
 from fla.layers.precond_gated_deltanet import PrecondGatedDeltaNet
 from fla.models import PrecondGatedDeltaNetConfig
-from fla.utils import device
+from fla.utils import assert_close, device
 
 from .test_modeling_base import run_test_generation, run_test_model_forward_backward
 
@@ -115,3 +115,30 @@ def test_layer(
     assert layer.b_atk_proj.weight.grad is not None, "b_atk_proj.weight.grad is None"
     assert layer.A_log_atk.grad is not None, "A_log_atk.grad is None"
     assert layer.dt_bias_atk.grad is not None, "dt_bias_atk.grad is None"
+
+
+def test_naive_layer_varlen():
+    B, T, H, D = 3, 7, 2, 8
+    torch.manual_seed(42)
+    layer = PrecondGatedDeltaNet(
+        hidden_size=H * D,
+        num_heads=H,
+        head_dim=D,
+        expand_v=1,
+        mode='naive',
+    ).to(device)
+    hidden_states = torch.randn(B, T, H * D, device=device, requires_grad=True)
+    seq_start = [0, 3, 5]
+    attention_mask = torch.arange(T, device=device) >= torch.tensor(seq_start, device=device)[:, None]
+
+    actual = layer(hidden_states, attention_mask=attention_mask)[0][attention_mask]
+    expected = torch.cat([
+        layer(hidden_states[i:i + 1, start:])[0].squeeze(0) for i, start in enumerate(seq_start)
+    ])
+
+    assert_close('o', expected, actual, 1e-5)
+
+    do = torch.randn_like(actual)
+    actual_grad = torch.autograd.grad((actual * do).sum(), hidden_states)[0]
+    expected_grad = torch.autograd.grad((expected * do).sum(), hidden_states)[0]
+    assert_close('dx', expected_grad, actual_grad, 1e-5)

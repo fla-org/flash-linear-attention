@@ -80,7 +80,8 @@ def chunk_kda_bwd_kernel_dAv_npu(
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
     else:
-        bos, eos = (i_b * T).to(tl.int64), (i_b * T + T).to(tl.int64)
+        bos = tl.cast(i_b, tl.int64) * T
+        eos = bos + T
 
     v += (bos * HV + i_hv) * V
     do += (bos * HV + i_hv) * V
@@ -123,7 +124,10 @@ def chunk_kda_bwd_dAv_npu(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
+    use_graph: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    if use_graph:
+        raise NotImplementedError("use_graph is not supported on the Ascend NPU backend")
     B, T, HV, V = k.shape[0], k.shape[1], do.shape[2], do.shape[-1]
     BT = chunk_size
     if chunk_indices is None and cu_seqlens is not None:
@@ -376,16 +380,16 @@ def chunk_kda_bwd_kernel_wy_k_part_npu(
             T = (eos - bos).to(tl.int32)
             i_tg = tl.load(chunk_offsets + i_n).to(tl.int64) + i_t.to(tl.int64)
         else:
-            i_tg = (i_b * tl.cdiv(T, BT) + i_t).to(tl.int64)
+            i_tg = tl.cast(i_b, tl.int64) * tl.cdiv(T, BT) + i_t
             bos, eos = tl.cast(i_b, tl.int64) * T, tl.cast(i_b, tl.int64) * T + T
 
         q_ptr = q + (bos * H + i_h) * K
         k_ptr = k + (bos * H + i_h) * K
         v_new_ptr = v_new + (bos * HV + i_hv) * V
         g_ptr = g + (bos * HV + i_hv) * K
-        h_ptr = h + (i_tg * HV + i_hv).to(tl.int64) * K * V
+        h_ptr = h + (i_tg * HV + i_hv) * K * V
         do_ptr = do + (bos * HV + i_hv) * V
-        dh_ptr = dh + (i_tg * HV + i_hv).to(tl.int64) * K * V
+        dh_ptr = dh + (i_tg * HV + i_hv) * K * V
         dq_ptr = dq + (bos * HV + i_hv) * K
         dk_ptr = dk + (bos * HV + i_hv) * K
         dg_ptr = dg + (bos * HV + i_hv) * K
@@ -522,7 +526,7 @@ def chunk_kda_bwd_kernel_wy_dw_part_npu(
             T = (eos - bos).to(tl.int32)
             i_tg = tl.load(chunk_offsets + i_n).to(tl.int64) + i_t.to(tl.int64)
         else:
-            i_tg = (i_b * tl.cdiv(T, BT) + i_t).to(tl.int64)
+            i_tg = tl.cast(i_b, tl.int64) * tl.cdiv(T, BT) + i_t
             bos, eos = tl.cast(i_b, tl.int64) * T, tl.cast(i_b, tl.int64) * T + T
 
         if K_T_CONTIG:
@@ -561,7 +565,7 @@ def chunk_kda_bwd_kernel_wy_dw_part_npu(
             dv_stride_t = HV * V
             beta_stride = HV
 
-        h_ptr = h + (i_tg * HV + i_hv).to(tl.int64) * K * V
+        h_ptr = h + (i_tg * HV + i_hv) * K * V
         dA_ptr = dA_acc + (bos * HV + i_hv) * BT
         db_ptr = db_acc + bos * HV + i_hv
         dg_ptr = dg + (bos * HV + i_hv) * K
@@ -731,7 +735,11 @@ def chunk_kda_bwd_wy_dqkg_fused_npu(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
+    chunk_offsets: torch.LongTensor | None = None,
+    use_graph: bool = False,
 ):
+    if use_graph:
+        raise NotImplementedError("use_graph is not supported on the Ascend NPU backend")
     B, T, H, K, HV, V = *k.shape, v.shape[2], v.shape[-1]
     BT = chunk_size
     if BT % _BC != 0:
@@ -754,7 +762,8 @@ def chunk_kda_bwd_wy_dqkg_fused_npu(
     BV = _get_bv(V)
     NK = triton.cdiv(K, BK)
     is_varlen = cu_seqlens is not None
-    chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT) if is_varlen else g.new_zeros(1, dtype=torch.int64)
+    if chunk_offsets is None:
+        chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT) if is_varlen else g.new_zeros(1, dtype=torch.int64)
 
     v_arg, g_t_contig = _t_contig_arg(v, HV)
     beta_arg = _t_contig_arg(beta, HV)[0]

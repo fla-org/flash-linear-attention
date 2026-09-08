@@ -29,7 +29,7 @@ from torch.distributed.tensor import Replicate, Shard, distribute_module
 from torch.distributed.tensor.parallel import ParallelStyle
 
 from fla.modules.backends import dispatch
-from fla.utils import autotune_cache_kwargs, get_multiprocessor_count, input_guard
+from fla.utils import IS_INTEL, autotune_cache_kwargs, get_multiprocessor_count, input_guard
 
 try:
     from torch.distributed.tensor import DTensor
@@ -580,7 +580,9 @@ def layer_norm_fwd(
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
     # heuristics for number of warps
 
-    if D <= 512:
+    # Devices with limited per-thread scratch space (e.g. Intel) cannot fit the
+    # fused forward kernel when BD == 512, so fall back to the loop-based one.
+    if D <= 512 and not (D == 512 and IS_INTEL):
         NB = triton.cdiv(T, 2048)
         def grid(meta): return (triton.cdiv(T, meta['BT']), )
         layer_norm_fwd_kernel[grid](
@@ -673,7 +675,10 @@ def layer_norm_bwd(
     db = torch.empty((NS, D), dtype=torch.float, device=bias.device) if bias is not None else None
     grid = (NS,)
 
-    if D <= 512:
+    # Devices with limited per-thread scratch space (e.g. Intel) cannot fit the
+    # (BT, BD) accumulators of layer_norm_bwd_kernel when BD == 512. Fall back
+    # to the loop-based kernel in that case.
+    if D <= 512 and not (D == 512 and IS_INTEL):
         NB = triton.cdiv(T, 2048)
         layer_norm_bwd_kernel[grid](
             x,

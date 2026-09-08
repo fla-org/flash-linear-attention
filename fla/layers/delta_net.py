@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import math
 import warnings
 from typing import TYPE_CHECKING
 
@@ -30,7 +31,7 @@ def elu_p1(x):
 
 
 def sum_norm(x):
-    return (x / x.sum(-1, keepdim=True)).to(x)
+    return F.normalize(x, p=1, dim=-1, eps=1e-6).to(x)
 
 
 class DeltaNet(nn.Module):
@@ -115,8 +116,10 @@ class DeltaNet(nn.Module):
         self.conv_bias = conv_bias
         self.allow_neg_eigval = allow_neg_eigval
 
-        self.key_dim = int(hidden_size * expand_k)
-        self.value_dim = int(hidden_size * expand_v)
+        key_dim, value_dim = hidden_size * expand_k, hidden_size * expand_v
+        self.key_dim, self.value_dim = round(key_dim), round(value_dim)
+        assert math.isclose(key_dim, self.key_dim), f"`hidden_size * expand_k` must be an integer, got {key_dim}."
+        assert math.isclose(value_dim, self.value_dim), f"`hidden_size * expand_v` must be an integer, got {value_dim}."
         self.head_k_dim = self.key_dim // num_heads
         self.head_v_dim = self.value_dim // num_heads
         self.layer_idx = layer_idx

@@ -133,6 +133,7 @@ class PaTHAttention(nn.Module):
                 last_state = None
             # Decoding
             if last_state is not None:
+                assert q_len == 1, "only support q_len == 1 for decoding"
                 if g is not None:
                     past_k, past_v, past_g = last_state['attn_state']
                 else:
@@ -177,7 +178,6 @@ class PaTHAttention(nn.Module):
                 q = rearrange(q, '... (h d) -> ... h d', d=self.head_dim)
                 k = rearrange(k, '... (h d) -> ... h d', d=self.head_dim)
                 v = rearrange(v, '... (h d) -> ... h d', d=self.head_dim)
-                assert max_seqlen_q == 1, "only support q_len == 1 for decoding"
                 o = attn_decoding_one_step(q, k, v, g, cu_seqlens=cu_seqlens, do_gate_scale=True)  # reduced to fox's decoding
             # Prefilling
             else:

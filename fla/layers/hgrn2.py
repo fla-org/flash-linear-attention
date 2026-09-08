@@ -212,3 +212,10 @@ class HGRN2Attention(nn.Module):
         o = repad_hidden_states(o, indices, batch_size, q_len)
 
         return o, None, past_key_values
+
+    def state_size(self, **kwargs) -> int:
+        state_size = self.input_dim * self.expand_ratio
+        for module in self.children():
+            if isinstance(module, ShortConvolution):
+                state_size += module.state_size
+        return state_size

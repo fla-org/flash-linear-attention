@@ -15,7 +15,13 @@ import torch.nn as nn
 from einops import rearrange, repeat
 from torch.nn import functional as F
 
-from fla.layers.utils import get_layer_cache, get_unpad_data, index_first_axis, pad_input, update_layer_cache
+from fla.layers.utils import (
+    get_layer_cache,
+    get_unpad_indices_and_cu,
+    index_first_axis,
+    pad_input,
+    update_layer_cache,
+)
 from fla.modules import FusedRMSNormGated, ShortConvolution
 from fla.ops.kda.gate import fused_kda_gate
 from fla.ops.precond_kda import chunk_precond_kda, fused_recurrent_precond_kda
@@ -253,7 +259,7 @@ class PrecondKDA(nn.Module):
 
         cu_seqlens = kwargs.get("cu_seqlens")
         if attention_mask is not None:
-            indices, cu_seqlens, _ = get_unpad_data(attention_mask[:, -q_len:])
+            indices, cu_seqlens = get_unpad_indices_and_cu(attention_mask, q_len)
             hidden_states = index_first_axis(rearrange(hidden_states, "b s ... -> (b s) ..."), indices).unsqueeze(0)
 
         if self.use_short_conv:

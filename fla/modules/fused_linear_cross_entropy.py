@@ -123,8 +123,8 @@ def cross_entropy_kernel(
             Pointer to tensor to store the loss.
         V (int):
             The number of columns in the input tensor.
-        total (int):
-            The number of non-ignored classes.
+        total:
+            Pointer to the number of non-ignored elements.
         ignore_index (int):
             The index to ignore in the target.
         label_smoothing (float):
@@ -152,6 +152,9 @@ def cross_entropy_kernel(
             o_v = i + tl.arange(0, BV)
             tl.store(logits + o_v, 0.0, mask=o_v < V)
         return
+
+    if reduction == "mean":
+        b_total = tl.load(total)
 
     # Online softmax: 2 loads + 1 store (compared with 3 loads + 1 store for the safe softmax)
     # Refer to Algorithm 3 in the paper: https://arxiv.org/pdf/1805.02867
@@ -203,7 +206,7 @@ def cross_entropy_kernel(
         if logit_softcapping is not None:
             b_p = b_p * (1.0 - b_t * b_t)
         if reduction == "mean":
-            b_p = b_p / total
+            b_p = b_p / b_total
         tl.store(logits + o_v, b_p, mask=o_v < V)
 
         tl.debug_barrier()
@@ -232,8 +235,8 @@ def cross_entropy_kernel(
 
     # Normalize the loss by the number of non-ignored elements if reduction is "mean"
     if reduction == 'mean':
-        b_loss = b_loss / total
-        b_l += (label_smoothing - 1) / total * logit_scale * b_sc_factor
+        b_loss = b_loss / b_total
+        b_l += (label_smoothing - 1) / b_total * logit_scale * b_sc_factor
     else:
         b_l += (label_smoothing - 1) * logit_scale * b_sc_factor
 
@@ -269,6 +272,8 @@ def elementwise_mul_kernel(
 
     # Load the gradient output value
     b_g = tl.load(g)
+    if b_g == 1.0:
+        return
     b_x = tl.load(x + o_x, mask=o_x < N)
     tl.store(x + o_x, b_x * b_g, mask=o_x < N)
 
@@ -322,7 +327,7 @@ def fused_linear_cross_entropy_forward(
     # [N]
     loss = torch.zeros(N, device=device, dtype=torch.float)
 
-    total = target.ne(ignore_index).sum().item()
+    total = target.ne(ignore_index).sum()
 
     for ic in range(NC):
         start, end = ic * C, min((ic + 1) * C, N)
@@ -336,7 +341,7 @@ def fused_linear_cross_entropy_forward(
         c_target = target[start:end]
         # [C]
         # keep lse in fp32 to maintain precision
-        c_lse = logsumexp_fwd(c_logits, scale=logit_scale, softcapping=logit_softcapping, dtype=torch.float)
+        c_lse = logsumexp_fwd(x=c_logits, scale=logit_scale, softcapping=logit_softcapping, dtype=torch.float)
 
         # unreduced loss
         c_loss = loss[start:end]
@@ -417,41 +422,39 @@ def fused_linear_cross_entropy_backward(
     dw: torch.Tensor,
     db: torch.Tensor,
 ):
-    # If cross entropy is the last layer, do is 1.0. Skip the mul to save time
-    if torch.ne(do, torch.tensor(1.0, device=do.device)):
-        # We use a Triton kernel instead of a PyTorch operation because modifying inputs in-place
-        # for gradient storage and backward multiple times causes anomalies with PyTorch but not with Triton.
-        N, H = dx.shape
-        B = min(MAX_FUSED_SIZE, triton.next_power_of_2(H))
+    # We use a Triton kernel instead of a PyTorch operation because modifying inputs in-place
+    # for gradient storage and backward multiple times causes anomalies with PyTorch but not with Triton.
+    N, H = dx.shape
+    B = min(MAX_FUSED_SIZE, triton.next_power_of_2(H))
 
-        elementwise_mul_kernel[(triton.cdiv(N * H, B),)](
-            x=dx,
+    elementwise_mul_kernel[(triton.cdiv(N * H, B),)](
+        x=dx,
+        g=do,
+        N=N*H,
+        B=B,
+        num_warps=STATIC_WARPS,
+    )
+
+    # handle dw
+    if dw is not None:
+        V, H = dw.shape
+        elementwise_mul_kernel[(triton.cdiv(V * H, B),)](
+            x=dw,
             g=do,
-            N=N*H,
+            N=V*H,
             B=B,
             num_warps=STATIC_WARPS,
         )
 
-        # handle dw
-        if dw is not None:
-            V, H = dw.shape
-            elementwise_mul_kernel[(triton.cdiv(V * H, B),)](
-                x=dw,
-                g=do,
-                N=V*H,
-                B=B,
-                num_warps=STATIC_WARPS,
-            )
-
-        if db is not None:
-            V = db.shape[0]
-            elementwise_mul_kernel[(triton.cdiv(V, B),)](
-                x=db,
-                g=do,
-                N=V,
-                B=B,
-                num_warps=STATIC_WARPS,
-            )
+    if db is not None:
+        V = db.shape[0]
+        elementwise_mul_kernel[(triton.cdiv(V, B),)](
+            x=db,
+            g=do,
+            N=V,
+            B=B,
+            num_warps=STATIC_WARPS,
+        )
     return dx, dw, db
 
 
@@ -519,19 +522,19 @@ class FusedLinearCrossEntropyFunction(torch.autograd.Function):
             back to the parameter dtype. Default: True
         """
         loss, dx, dw, db = fused_linear_cross_entropy_forward(
-            x,
-            target,
-            weight,
-            bias,
-            ignore_index,
-            label_smoothing,
-            logit_scale,
-            logit_softcapping,
-            num_chunks,
-            reduction,
-            use_l2warp,
-            l2_penalty_factor,
-            accumulate_grad_in_fp32,
+            x=x,
+            target=target,
+            weight=weight,
+            bias=bias,
+            ignore_index=ignore_index,
+            label_smoothing=label_smoothing,
+            logit_scale=logit_scale,
+            logit_softcapping=logit_softcapping,
+            num_chunks=num_chunks,
+            reduction=reduction,
+            use_l2warp=use_l2warp,
+            l2_penalty_factor=l2_penalty_factor,
+            accumulate_grad_in_fp32=accumulate_grad_in_fp32,
         )
         # downcast to dtype and store for backward
         ctx.save_for_backward(
@@ -545,7 +548,7 @@ class FusedLinearCrossEntropyFunction(torch.autograd.Function):
     @input_guard
     def backward(ctx, do):
         dx, dw, db = ctx.saved_tensors
-        dx, dw, db = fused_linear_cross_entropy_backward(do, dx, dw, db)
+        dx, dw, db = fused_linear_cross_entropy_backward(do=do, dx=dx, dw=dw, db=db)
         return dx, None, dw, db, None, None, None, None, None, None, None, None, None
 
 
@@ -697,8 +700,8 @@ class FusedLinearCrossEntropyLoss(nn.Module):
             loss
         """
         loss = fused_linear_cross_entropy_loss(
-            x.view(-1, x.shape[-1]),
-            target.view(-1),
+            x=x.view(-1, x.shape[-1]),
+            target=target.view(-1),
             weight=weight,
             bias=bias,
             ignore_index=self.ignore_index,

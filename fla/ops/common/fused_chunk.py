@@ -107,8 +107,8 @@ def fused_chunk_fwd_kernel(
         b_h = tl.load(p_h, mask=(o_k[:, None] < K) & (o_v[None, :] < V), other=0.0).to(tl.float32)
 
     for i_t in range(0, NT):
-        i_t = i_t.to(tl.int64)
-        o_t = i_t * BT + tl.arange(0, BT)
+        i_t_int64 = i_t.to(tl.int64)
+        o_t = i_t_int64 * BT + tl.arange(0, BT)
         m_t = o_t < T
         o_k = i_k * BK + tl.arange(0, BK)
         o_v = i_v * BV + tl.arange(0, BV)
@@ -124,7 +124,7 @@ def fused_chunk_fwd_kernel(
         b_k = tl.load(p_k, mask=(o_k[:, None] < K) & m_t[None, :], other=0.0)
         # [BT, BV]
         b_v = tl.load(p_v, mask=m_t[:, None] & (o_v < V)[None, :], other=0.0)
-        last_idx = min(i_t * BT + BT, T) - 1
+        last_idx = min(i_t_int64 * BT + BT, T) - 1
 
         # [BT, BT]
         b_s = tl.dot(b_q, b_k)
@@ -139,7 +139,7 @@ def fused_chunk_fwd_kernel(
             b_gk = exp2(b_g_last - b_g)
             b_gn = exp2(b_g_last)
         if USE_G_GAMMA:
-            b_g_last = b_gamma * min(BT, T - i_t * BT)
+            b_g_last = b_gamma * min(BT, T - i_t_int64 * BT)
             b_gk = exp2(b_g_last - b_g)
             b_gn = exp2(b_g_last)
         if USE_G or USE_G_GAMMA:
@@ -254,8 +254,8 @@ def fused_chunk_bwd_kernel(
         b_h = tl.load(p_h, mask=(o_v[:, None] < V) & (o_k[None, :] < K), other=0.0).to(tl.float32)
 
     for i_t in range(0, NT):
-        i_t = i_t.to(tl.int64)
-        o_t = i_t * BT + tl.arange(0, BT)
+        i_t_int64 = i_t.to(tl.int64)
+        o_t = i_t_int64 * BT + tl.arange(0, BT)
         m_t = o_t < T
         o_k = i_k * BK + tl.arange(0, BK)
         o_v = i_v * BV + tl.arange(0, BV)
@@ -271,7 +271,7 @@ def fused_chunk_bwd_kernel(
         b_v = tl.load(p_v, mask=(o_v[:, None] < V) & m_t[None, :], other=0.0)
         # [BT, BV]
         b_do = tl.load(p_do, mask=m_t[:, None] & (o_v < V)[None, :], other=0.0)
-        last_idx = min(i_t * BT + BT, T) - 1
+        last_idx = min(i_t_int64 * BT + BT, T) - 1
 
         # [BT, BT]
         b_ds = tl.dot(b_do, b_v) * scale
@@ -300,7 +300,7 @@ def fused_chunk_bwd_kernel(
             b_h = b_h * b_gn + tl.dot(b_v, (b_k * b_gk[:, None]).to(b_k.dtype))
 
         elif USE_G_GAMMA:
-            b_g_last = b_gamma * min(BT, T - i_t * BT)
+            b_g_last = b_gamma * min(BT, T - i_t_int64 * BT)
             b_gk = exp2(b_g_last - b_g)
             b_gn = exp2(b_g_last)
 
@@ -340,8 +340,8 @@ def fused_chunk_bwd_kernel(
     tl.debug_barrier()
 
     for i_t in range(NT - 1, -1, -1):
-        i_t = i_t.to(tl.int64)
-        o_t = i_t * BT + tl.arange(0, BT)
+        i_t_int64 = i_t.to(tl.int64)
+        o_t = i_t_int64 * BT + tl.arange(0, BT)
         m_t = o_t < T
         o_k = i_k * BK + tl.arange(0, BK)
         o_v = i_v * BV + tl.arange(0, BV)
@@ -358,7 +358,7 @@ def fused_chunk_bwd_kernel(
         # [BT, BV]
         b_v = tl.load(p_v, mask=m_t[:, None] & (o_v < V)[None, :], other=0.0)
         b_do = tl.load(p_do, mask=m_t[:, None] & (o_v < V)[None, :], other=0.0)
-        last_idx = min(i_t * BT + BT, T) - 1
+        last_idx = min(i_t_int64 * BT + BT, T) - 1
 
         # [BT, BT]
         b_s = tl.dot(b_k, b_q)
@@ -394,7 +394,7 @@ def fused_chunk_bwd_kernel(
             tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), mask=m_t)
 
         elif USE_G_GAMMA:
-            b_g_last = b_gamma * min(BT, T - i_t * BT)
+            b_g_last = b_gamma * min(BT, T - i_t_int64 * BT)
             b_gk = exp2(b_g_last - b_g)
             b_gn = exp2(b_g_last)
             b_gs = tl.trans(tl.where(m_s & (m_t[:, None] & m_t), exp2(b_g[:, None] - b_g[None, :]), 0)) * scale

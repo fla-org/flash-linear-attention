@@ -38,7 +38,7 @@ def _launch_solve_tril_kernel(kernel, *, NT: int, bh_total: int, kernel_kwargs: 
             kernel[(nt_len, bh_len)](num_warps=_NUM_WARPS, **kernel_kwargs)
 
 
-@triton.jit(do_not_specialize=['T'])
+@triton.jit(do_not_specialize=['T', 'NT_OFFSET', 'BH_OFFSET'])
 def solve_tril_16x16_kernel_npu(
     A,
     Ai,
@@ -48,8 +48,8 @@ def solve_tril_16x16_kernel_npu(
     H: tl.constexpr,
     BT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    NT_OFFSET: tl.constexpr,
-    BH_OFFSET: tl.constexpr,
+    NT_OFFSET,
+    BH_OFFSET,
 ):
     i_t = tl.program_id(0) + NT_OFFSET
     i_bh = tl.program_id(1) + BH_OFFSET
@@ -59,7 +59,8 @@ def solve_tril_16x16_kernel_npu(
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
     else:
-        bos, eos = i_b * T, i_b * T + T
+        bos = tl.cast(i_b, tl.int64) * T
+        eos = bos + T
 
     o_i = tl.arange(0, 16)
     m_A = o_i[:, None] > o_i[None, :]
@@ -85,7 +86,7 @@ def solve_tril_16x16_kernel_npu(
     tl.store(p_Ai, b_A.to(p_Ai.dtype.element_ty, fp_downcast_rounding='rtne'), boundary_check=(0, 1))
 
 
-@triton.jit(do_not_specialize=['T'])
+@triton.jit(do_not_specialize=['T', 'NT_OFFSET', 'BH_OFFSET'])
 def merge_16x16_to_32x32_inverse_kernel_npu(
     A,
     Ai,
@@ -95,8 +96,8 @@ def merge_16x16_to_32x32_inverse_kernel_npu(
     H: tl.constexpr,
     BT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    NT_OFFSET: tl.constexpr,
-    BH_OFFSET: tl.constexpr,
+    NT_OFFSET,
+    BH_OFFSET,
 ):
     i_t = tl.program_id(0) + NT_OFFSET
     i_bh = tl.program_id(1) + BH_OFFSET
@@ -106,7 +107,8 @@ def merge_16x16_to_32x32_inverse_kernel_npu(
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
     else:
-        bos, eos = i_b * T, i_b * T + T
+        bos = tl.cast(i_b, tl.int64) * T
+        eos = bos + T
 
     o_i = tl.arange(0, 16)
     m_A = o_i[:, None] > o_i[None, :]
@@ -151,7 +153,7 @@ def merge_16x16_to_32x32_inverse_kernel_npu(
     tl.store(p_Ai_21, b_Ai_21.to(p_Ai_21.dtype.element_ty, fp_downcast_rounding='rtne'), boundary_check=(0, 1))
 
 
-@triton.jit(do_not_specialize=['T'])
+@triton.jit(do_not_specialize=['T', 'NT_OFFSET', 'BH_OFFSET'])
 def merge_16x16_to_64x64_inverse_kernel_npu(
     A,
     Ai,
@@ -161,8 +163,8 @@ def merge_16x16_to_64x64_inverse_kernel_npu(
     H: tl.constexpr,
     BT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    NT_OFFSET: tl.constexpr,
-    BH_OFFSET: tl.constexpr,
+    NT_OFFSET,
+    BH_OFFSET,
 ):
     i_t = tl.program_id(0) + NT_OFFSET
     i_bh = tl.program_id(1) + BH_OFFSET
@@ -172,7 +174,8 @@ def merge_16x16_to_64x64_inverse_kernel_npu(
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
     else:
-        bos, eos = i_b * T, i_b * T + T
+        bos = tl.cast(i_b, tl.int64) * T
+        eos = bos + T
 
     o_i = tl.arange(0, 16)
     m_A = o_i[:, None] > o_i[None, :]

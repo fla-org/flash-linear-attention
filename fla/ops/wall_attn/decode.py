@@ -110,7 +110,9 @@ def parallel_wall_attn_decode_kernel(
         o_c = (i_c + tl.arange(0, 1)).to(tl.int64)
         p_r = r_cache + (bos_nc * HQ + i_hq) * K + o_c[:, None] * (HQ * K) + o_d[None, :]
         b_R = tl.load(p_r, mask=(o_c[:, None] < NC) & (o_d[None, :] < K), other=0.0).to(tl.float32)
-        b_q_til = (b_q.to(tl.float32) * exp2(b_pq - b_R)).to(b_q.dtype)
+        # dot in the cache's dtype: the rescale runs in fp32, so casting down to the
+        # (range-safe) storage dtype here loses only mantissa, matching training.
+        b_q_til = (b_q.to(tl.float32) * exp2(b_pq - b_R)).to(k_tilde.dtype.element_ty)
 
         p_kt = k_tilde + (bos_kv * HQ + i_hq) * K + o_d[:, None] + o_k[None, :] * (HQ * K)
         p_v = v + (bos_kv * H + i_h) * V + o_k[:, None] * (H * V) + o_v[None, :]

@@ -49,7 +49,7 @@ def _select_coregrid_bd(D: int, preferred: int) -> int | None:
     'USE_INITIAL_STATE': lambda args: args['initial_state'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
-@triton.jit
+@triton.jit(do_not_specialize=['B', 'T', 'NUM_CHKS', 'NUM_BLKS_D'])
 def causal_conv1d_fwd_coregrid_kernel(
     x,
     y,
@@ -220,7 +220,7 @@ def causal_conv1d_fwd_coregrid_kernel(
     'USE_FINAL_STATE': lambda args: args['dht'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
-@triton.jit
+@triton.jit(do_not_specialize=['B', 'T', 'NUM_BLKS_D', 'NUM_CHKS', 'NT_STRIDE', 'I_T_OFFSET'])
 def causal_conv1d_bwd_coregrid_kernel(
     x,
     y,

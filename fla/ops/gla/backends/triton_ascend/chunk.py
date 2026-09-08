@@ -56,7 +56,8 @@ def chunk_gla_fwd_A_kernel_intra_sub_inter_npu(
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
-        bos, eos = i_b * T, i_b * T + T
+        bos = tl.cast(i_b, tl.int64) * T
+        eos = bos + T
 
     if i_t * BT + i_i * BC >= T:
         return
@@ -112,7 +113,8 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra_npu(
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
-        bos, eos = i_b * T, i_b * T + T
+        bos = tl.cast(i_b, tl.int64) * T
+        eos = bos + T
 
     if i_t * BT + i_i * BC >= T:
         return
@@ -178,7 +180,8 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra_split_npu(
         all = T
         T = eos - bos
     else:
-        bos, eos = i_b * T, i_b * T + T
+        bos = tl.cast(i_b, tl.int64) * T
+        eos = bos + T
         all = B * T
 
     if i_t * BT + i_i * BC >= T:
@@ -240,7 +243,8 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra_merge_npu(
         all = T
         T = eos - bos
     else:
-        bos, eos = i_b * T, i_b * T + T
+        bos = tl.cast(i_b, tl.int64) * T
+        eos = bos + T
         all = B * T
 
     if i_t * BT + i_c * BC >= T:
@@ -378,7 +382,7 @@ def chunk_gla_fwd_kernel_o_npu(
         g_ptr = g + (bos * HV + i_hv) * K
         v_ptr = v + (bos * HV + i_hv) * V
         o_ptr = o + (bos * HV + i_hv) * V
-        h_base = h + (i_tg * HV + i_hv).to(tl.int64) * K * V
+        h_base = h + (i_tg * HV + i_hv) * K * V
         a_ptr = A + (bos * HV + i_hv) * BT
 
         b_o = tl.zeros([BT, BV], dtype=tl.float32)
@@ -425,7 +429,10 @@ def chunk_gla_fwd_o_gk_npu(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
+    use_graph: bool = False,
 ):
+    if use_graph:
+        raise NotImplementedError("use_graph is not supported on the Ascend NPU backend")
     B, T, H, K, HV, V = *q.shape, v.shape[2], v.shape[-1]
     BT = chunk_size
 
@@ -497,7 +504,8 @@ def chunk_gla_bwd_kernel_dA_npu(
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
     else:
-        bos, eos = i_b * T, i_b * T + T
+        bos = tl.cast(i_b, tl.int64) * T
+        eos = bos + T
     T = eos - bos
 
     if i_t * BT >= T:
@@ -579,8 +587,9 @@ def chunk_gla_bwd_kernel_dv_npu(
         NT = tl.cdiv(T, BT)
     else:
         NT = tl.cdiv(T, BT)
-        i_tg = i_b * NT + i_t
-        bos, eos = i_b * T, i_b * T + T
+        i_tg = tl.cast(i_b, tl.int64) * NT + i_t
+        bos = tl.cast(i_b, tl.int64) * T
+        eos = bos + T
 
     if i_t * BT >= T:
         return
@@ -688,7 +697,8 @@ def chunk_gla_bwd_kernel_intra_npu(
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
     else:
-        bos, eos = i_b * T, i_b * T + T
+        bos = tl.cast(i_b, tl.int64) * T
+        eos = bos + T
     T = eos - bos
     if i_t * BT + i_i * BC >= T:
         return
@@ -857,8 +867,9 @@ def chunk_gla_bwd_kernel_inter_npu(
         NT = tl.cdiv(T, BT)
     else:
         NT = tl.cdiv(T, BT)
-        i_tg = i_b * NT + i_t
-        bos, eos = i_b * T, i_b * T + T
+        i_tg = tl.cast(i_b, tl.int64) * NT + i_t
+        bos = tl.cast(i_b, tl.int64) * T
+        eos = bos + T
 
     if i_t * BT >= T:
         return

@@ -55,6 +55,7 @@ class BitAttention(nn.Module):
             self.num_kv_heads = self.num_heads
         else:
             self.num_kv_heads = num_kv_heads
+        assert self.num_heads % self.num_kv_heads == 0, "num_heads must be divisible by num_kv_heads"
         self.num_kv_groups = num_heads // self.num_kv_heads
         self.hidden_size = hidden_size
         self.head_dim = self.hidden_size // self.num_heads
@@ -113,6 +114,8 @@ class BitAttention(nn.Module):
 
         if past_key_values is not None:
             cache_has_content = past_key_values.get_seq_length(self.layer_idx) > 0
+            assert cu_seqlens is None or not cache_has_content, \
+                "cu_seqlens should not be provided when past_key_values has content"
             k_cached, v_cached = past_key_values.update(
                 attn_state=(k.flatten(-2, -1), v.flatten(-2, -1)),
                 layer_idx=self.layer_idx,

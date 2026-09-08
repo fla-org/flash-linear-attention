@@ -16,7 +16,6 @@ from transformers.utils import logging
 
 from fla.modules import RMSNorm, RotaryEmbedding
 from fla.ops.deltaformer import deltaformer_attn
-from fla.ops.utils.index import prepare_lens_from_mask
 
 if TYPE_CHECKING:
     from fla.models.utils import Cache
@@ -57,7 +56,7 @@ class DeltaFormerAttention(nn.Module):
         max_position_embeddings (int, Optional):
             The maximum position embeddings. Default: None.
         layer_idx (int, Optional):
-            The index of the layer (used for cache compatibility). Default: None.
+            The index of the layer. Default: None.
     """
 
     def __init__(
@@ -76,6 +75,7 @@ class DeltaFormerAttention(nn.Module):
         self.hidden_size = hidden_size
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads if num_kv_heads is not None else num_heads
+        assert self.num_heads % self.num_kv_heads == 0, "num_heads must be divisible by num_kv_heads"
         self.num_kv_groups = num_heads // self.num_kv_heads
         self.head_dim = self.hidden_size // self.num_heads
         self.kv_dim = self.num_kv_heads * self.head_dim
@@ -125,19 +125,14 @@ class DeltaFormerAttention(nn.Module):
             q, k = self.q_norm(q), self.k_norm(k)
 
         cu_seqlens_kw = kwargs.get('cu_seqlens')
-        seqlen_offset, max_seqlen = 0, q_len
         if past_key_values is not None:
-            seqlen_offset = past_key_values.get_seq_length(self.layer_idx)
-            max_seqlen = q_len + seqlen_offset
+            raise NotImplementedError("DeltaFormerAttention does not support `past_key_values`")
 
-            if attention_mask is not None:
-                seqlen_offset = seqlen_offset + prepare_lens_from_mask(attention_mask) - attention_mask.shape[-1]
-                max_seqlen = q_len + max(seqlen_offset)
-
+        max_seqlen = q_len
         if self.max_position_embeddings is not None:
             max_seqlen = max(max_seqlen, self.max_position_embeddings)
 
-        q, k = self.rotary(q, k, seqlen_offset=seqlen_offset, max_seqlen=max_seqlen, cu_seqlens=cu_seqlens_kw)
+        q, k = self.rotary(q, k, seqlen_offset=0, max_seqlen=max_seqlen, cu_seqlens=cu_seqlens_kw)
 
         o = deltaformer_attn(
             q=q,

@@ -55,12 +55,16 @@ def recompute_w_u_fwd_kda_kernel(
     STORE_QG: tl.constexpr,
     STORE_KG: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
 ):
     i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_hv = i_bh // HV, i_bh % HV
     i_h = i_hv // (HV // H)
     if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        i_n = tl.load(chunk_indices + i_t * 2).to(tl.int32)
+        if USE_GRAPH and i_n < 0:
+            return
+        i_t = tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
@@ -167,12 +171,16 @@ def prepare_wy_repr_bwd_kda_kernel(
     BK: tl.constexpr,
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
 ):
     i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_hv = i_bh // HV, i_bh % HV
     i_h = i_hv // (HV // H)
     if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        i_n = tl.load(chunk_indices + i_t * 2).to(tl.int32)
+        if USE_GRAPH and i_n < 0:
+            return
+        i_t = tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
@@ -270,6 +278,7 @@ def recompute_w_u_fwd(
     q: torch.Tensor | None = None,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
+    use_graph: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
@@ -306,6 +315,7 @@ def recompute_w_u_fwd(
         BT=BT,
         BK=BK,
         BV=BV,
+        USE_GRAPH=use_graph,
     )
     return w, u, qg, kg
 
@@ -322,6 +332,7 @@ def prepare_wy_repr_bwd(
     dg: torch.Tensor,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
+    use_graph: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
@@ -363,6 +374,7 @@ def prepare_wy_repr_bwd(
         BT=BT,
         BK=BK,
         BV=BV,
+        USE_GRAPH=use_graph,
     )
     dk = dk2
     dg = dg2

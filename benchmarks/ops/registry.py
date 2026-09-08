@@ -559,6 +559,92 @@ register_op(OpConfig(
 # explicitly — the generic randn/randint input factory cannot produce a valid one.
 
 
+def _shape_nsa_gate(B, T, H, D, HQ=None, **kw):
+    if HQ is None:
+        raise ValueError("NSA gate shape requires HQ")
+    return (B, T, HQ)
+
+
+def _shape_nsa_compressed_k(B, T, H, D, block_size=64, **kw):
+    return (B, (T + block_size - 1) // block_size, H, D)
+
+
+def _shape_nsa_compressed_v(B, T, H, D, V=None, block_size=64, **kw):
+    if V is None:
+        raise ValueError("NSA value shape requires V")
+    return (B, (T + block_size - 1) // block_size, H, V)
+
+
+def _shape_nsa_v(B, T, H, D, V=None, **kw):
+    if V is None:
+        raise ValueError("NSA value shape requires V")
+    return (B, T, H, V)
+
+
+def _nsa_compression_post_init(inputs, B, T, H, D, block_size=64, **kw):
+    inputs['TK'] = T
+    inputs['block_size'] = block_size
+    inputs['scale'] = D**-0.5
+
+
+def _nsa_windowed_post_init(inputs, B, T, H, D, S=16, block_size=64, window_size=512, **kw):
+    inputs['block_counts'] = S
+    inputs['block_size'] = block_size
+    inputs['scale'] = D**-0.5
+    inputs['window_size'] = window_size
+
+
+_nsa_compression_bq_shapes = {
+    'B1_T8K_H4_HQ64_K32_V32': {
+        'B': 1, 'T': 8192, 'H': 4, 'HQ': 64, 'D': 32, 'V': 32, 'S': 16, 'block_size': 64,
+    },
+    'B1_T16K_H4_HQ64_K32_V32': {
+        'B': 1, 'T': 16384, 'H': 4, 'HQ': 64, 'D': 32, 'V': 32, 'S': 16, 'block_size': 64,
+    },
+    'B1_T32K_H4_HQ64_K32_V32': {
+        'B': 1, 'T': 32768, 'H': 4, 'HQ': 64, 'D': 32, 'V': 32, 'S': 16, 'block_size': 64,
+    },
+    'B1_T16K_H4_HQ64_K64_V128': {
+        'B': 1, 'T': 16384, 'H': 4, 'HQ': 64, 'D': 64, 'V': 128, 'S': 16, 'block_size': 64,
+    },
+}
+
+
+register_op(OpConfig(
+    name='parallel_nsa_compression',
+    import_path='fla.ops.nsa.compression',
+    inputs={
+        'q': TensorSpec(shape_q_hq),
+        'k': TensorSpec(_shape_nsa_compressed_k),
+        'v': TensorSpec(_shape_nsa_compressed_v),
+    },
+    post_init=_nsa_compression_post_init,
+    output_is_tuple=True,
+    default_shapes=_nsa_compression_bq_shapes,
+    category='nsa',
+    test_file='tests/ops/test_nsa.py',
+))
+
+register_op(OpConfig(
+    name='parallel_nsa_windowed',
+    import_path='fla.ops.nsa',
+    func_name='parallel_nsa',
+    inputs={
+        'q': TensorSpec(shape_q_hq),
+        'k': TensorSpec(shape_BTHD),
+        'v': TensorSpec(_shape_nsa_v),
+        'g_cmp': TensorSpec(_shape_nsa_gate, transform=sigmoid_transform),
+        'g_slc': TensorSpec(_shape_nsa_gate, transform=sigmoid_transform),
+        'g_swa': TensorSpec(_shape_nsa_gate, transform=sigmoid_transform),
+    },
+    post_init=_nsa_windowed_post_init,
+    output_is_tuple=False,
+    default_shapes=_nsa_compression_bq_shapes,
+    category='nsa',
+    test_file='tests/ops/test_nsa.py',
+))
+
+
 def _nsa_post_init(inputs, B, T, H, D, HQ=None, S=16, block_size=64, **kw):
     # build block_indices [B, T, H, S]: for each query t, pick S of the causal
     # blocks (block i is selectable iff i <= t // block_size), -1-padded when

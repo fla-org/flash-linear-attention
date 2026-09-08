@@ -174,7 +174,8 @@ def chunk_local_cumsum_scalar_kernel_npu(
             )
             T = eos - bos
         else:
-            bos, eos = i_b * T, i_b * T + T
+            bos = tl.cast(i_b, tl.int64) * T
+            eos = bos + T
 
         o_t = i_t * BT + tl.arange(0, BT)
         m_t = o_t < T
@@ -221,7 +222,8 @@ def chunk_local_cumsum_vector_kernel_npu(
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
     else:
-        bos, eos = i_b * T, i_b * T + T
+        bos = tl.cast(i_b, tl.int64) * T
+        eos = bos + T
 
     p_s = tl.make_block_ptr(s + (bos * H + i_h) * S, (T, S), (H*S, 1), (i_t * BT, i_s * BS), (BT, BS), (1, 0))
     p_o = tl.make_block_ptr(o + (bos * H + i_h) * S, (T, S), (H*S, 1), (i_t * BT, i_s * BS), (BT, BS), (1, 0))
@@ -260,7 +262,8 @@ def chunk_global_cumsum_scalar_kernel_npu(
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
     else:
-        bos, eos = i_n * T, i_n * T + T
+        bos = tl.cast(i_n, tl.int64) * T
+        eos = bos + T
 
     b_z = tl.zeros([], dtype=tl.float32)
     NT = tl.cdiv(T, BT)
@@ -309,7 +312,8 @@ def chunk_global_cumsum_vector_kernel_npu(
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
     else:
-        bos, eos = i_n * T, i_n * T + T
+        bos = tl.cast(i_n, tl.int64) * T
+        eos = bos + T
 
     b_z = tl.zeros([BS], dtype=tl.float32)
     NT = tl.cdiv(T, BT)
@@ -336,6 +340,7 @@ def chunk_local_cumsum_scalar_npu(
     cu_seqlens: torch.Tensor | None = None,
     output_dtype: torch.dtype | None = torch.float,
     chunk_indices: torch.LongTensor | None = None,
+    use_graph: bool = False,
     **kwargs,
 ) -> torch.Tensor:
     if 'head_first' in kwargs:
@@ -347,7 +352,8 @@ def chunk_local_cumsum_scalar_npu(
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
     num_blocks = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, chunk_size)
-    g_org, g = g, torch.empty_like(g, dtype=output_dtype or g.dtype)
+    # graph 模式下未覆盖行须为 0：kda_gate_bwd 对输出做全量归约，脏行会污染 dA/dbias
+    g_org, g = g, (torch.zeros_like if use_graph else torch.empty_like)(g, dtype=output_dtype or g.dtype)
 
     num_core = get_multiprocessor_count()
     task_num = num_blocks * B * H
@@ -377,6 +383,7 @@ def chunk_local_cumsum_vector_npu(
     cu_seqlens: torch.Tensor | None = None,
     output_dtype: torch.dtype | None = torch.float,
     chunk_indices: torch.LongTensor | None = None,
+    use_graph: bool = False,
     **kwargs,
 ) -> torch.Tensor:
     if 'head_first' in kwargs:
@@ -397,7 +404,8 @@ def chunk_local_cumsum_vector_npu(
         BS,
         max_grid=ASCEND_MAX_GRID_DIM,
     )
-    g_org, g = g, torch.empty_like(g, dtype=output_dtype or g.dtype)
+    # graph 模式下未覆盖行须为 0：kda_gate_bwd 对输出做全量归约，脏行会污染 dA/dbias
+    g_org, g = g, (torch.zeros_like if use_graph else torch.empty_like)(g, dtype=output_dtype or g.dtype)
     _launch_local_cumsum_vector(
         g_org=g_org,
         g=g,
@@ -547,6 +555,7 @@ def chunk_local_cumsum_npu(
     cu_seqlens: torch.Tensor | None = None,
     output_dtype: torch.dtype | None = torch.float,
     chunk_indices: torch.LongTensor | None = None,
+    use_graph: bool = False,
     **kwargs,
 ) -> torch.Tensor:
     if 'head_first' in kwargs:
@@ -564,6 +573,7 @@ def chunk_local_cumsum_npu(
             cu_seqlens=cu_seqlens,
             output_dtype=output_dtype,
             chunk_indices=chunk_indices,
+            use_graph=use_graph,
         )
     if len(g.shape) == 4:
         return chunk_local_cumsum_vector_npu(
@@ -574,6 +584,7 @@ def chunk_local_cumsum_npu(
             cu_seqlens=cu_seqlens,
             output_dtype=output_dtype,
             chunk_indices=chunk_indices,
+            use_graph=use_graph,
         )
     raise ValueError(
         f"Unsupported input shape {g.shape}, "

@@ -177,7 +177,7 @@ class HGRNAttention(nn.Module):
         return o, None, past_key_values
 
     def state_size(self, **kwargs) -> int:
-        state_size = self.hidden_size
+        state_size = self.input_dim
         for module in self.children():
             if isinstance(module, ShortConvolution):
                 state_size += module.state_size

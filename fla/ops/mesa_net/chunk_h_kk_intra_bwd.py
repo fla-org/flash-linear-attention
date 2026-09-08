@@ -118,7 +118,7 @@ def chunk_mesa_net_h_kk_bwd_intra_kernel(
     b_dk += tl.dot(tl.trans(b_ds.to(b_q_star.dtype)), b_q_star)
 
     b_h = tl.load(p_h, mask=m_h, other=0.0)
-    b_dg += tl.sum(tl.dot(b_dq, tl.trans(b_h)) * exp2(b_g)[:, None] * b_q_star, axis=1)
+    b_dg += tl.sum(tl.dot(b_dq.to(b_h.dtype), tl.trans(b_h)) * exp2(b_g)[:, None] * b_q_star, axis=1)
     b_dh = tl.load(p_dh, mask=m_h, other=0.0)
     b_dk2 = tl.dot(b_v, b_dh.to(b_v.dtype)) * b_gk[:, None]
     b_dg -= tl.sum(b_dk2 * b_k, axis=1)

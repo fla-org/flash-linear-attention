@@ -80,7 +80,7 @@ def chunk_scaled_dot_kkt_fwd_kernel_npu(
             bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
             T = eos - bos
         else:
-            bos = i_b * T
+            bos = tl.cast(i_b, tl.int64) * T
         o_t = i_t * BT + o_i
         m_t = o_t < T
         m_A = m_causal & (m_t[:, None] & m_t)
