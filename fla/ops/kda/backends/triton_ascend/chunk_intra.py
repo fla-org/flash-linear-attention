@@ -377,8 +377,8 @@ def chunk_kda_fwd_kernel_inter_solve_fused_npu(
         b_gn1 = tl.load(g + i_tc1.to(tl.int64) * HV * K + o_k, mask=m_k & (i_tc1 < T), other=0).to(tl.float32)
         b_gqn = tl.where(m_tc1[:, None], exp2(b_g1 - b_gn1[None, :]), 0)
         b_kgt = tl.trans(b_k0 * exp2(b_gn1[None, :] - b_g0))
-        b_Aqk10 += tl.dot(b_q1 * b_gqn, b_kgt, allow_tf32=False)
-        b_Akk10 += tl.dot(b_k1 * b_gqn, b_kgt, allow_tf32=False)
+        b_Aqk10 = tl.dot(b_q1 * b_gqn, b_kgt, b_Aqk10, allow_tf32=False)
+        b_Akk10 = tl.dot(b_k1 * b_gqn, b_kgt, b_Akk10, allow_tf32=False)
 
         if NC >= 3:
             p_q2 = tl.make_block_ptr(q, (T, K), (H * K, 1), (i_tc2, i_k * BK), (BC, BK), (1, 0))
@@ -394,11 +394,11 @@ def chunk_kda_fwd_kernel_inter_solve_fused_npu(
             b_qg2_c = b_qg2 + 0.0
             b_kg2_c = b_kg2 + 0.0
             b_kgt = tl.trans(b_k0 * exp2(b_gn2[None, :] - b_g0))
-            b_Aqk20 += tl.dot(b_qg2, b_kgt, allow_tf32=False)
-            b_Akk20 += tl.dot(b_kg2, b_kgt, allow_tf32=False)
+            b_Aqk20 = tl.dot(b_qg2, b_kgt, b_Aqk20, allow_tf32=False)
+            b_Akk20 = tl.dot(b_kg2, b_kgt, b_Akk20, allow_tf32=False)
             b_kgt = tl.trans(b_k1 * exp2(b_gn2[None, :] - b_g1))
-            b_Aqk21 += tl.dot(b_qg2_c, b_kgt, allow_tf32=False)
-            b_Akk21 += tl.dot(b_kg2_c, b_kgt, allow_tf32=False)
+            b_Aqk21 = tl.dot(b_qg2_c, b_kgt, b_Aqk21, allow_tf32=False)
+            b_Akk21 = tl.dot(b_kg2_c, b_kgt, b_Akk21, allow_tf32=False)
 
             if NC >= 4:
                 p_q3 = tl.make_block_ptr(q, (T, K), (H * K, 1), (i_tc3, i_k * BK), (BC, BK), (1, 0))
@@ -416,14 +416,14 @@ def chunk_kda_fwd_kernel_inter_solve_fused_npu(
                 b_qg3_c2 = b_qg3 + 0.0
                 b_kg3_c2 = b_kg3 + 0.0
                 b_kgt = tl.trans(b_k0 * exp2(b_gn3[None, :] - b_g0))
-                b_Aqk30 += tl.dot(b_qg3, b_kgt, allow_tf32=False)
-                b_Akk30 += tl.dot(b_kg3, b_kgt, allow_tf32=False)
+                b_Aqk30 = tl.dot(b_qg3, b_kgt, b_Aqk30, allow_tf32=False)
+                b_Akk30 = tl.dot(b_kg3, b_kgt, b_Akk30, allow_tf32=False)
                 b_kgt = tl.trans(b_k1 * exp2(b_gn3[None, :] - b_g1))
-                b_Aqk31 += tl.dot(b_qg3_c1, b_kgt, allow_tf32=False)
-                b_Akk31 += tl.dot(b_kg3_c1, b_kgt, allow_tf32=False)
+                b_Aqk31 = tl.dot(b_qg3_c1, b_kgt, b_Aqk31, allow_tf32=False)
+                b_Akk31 = tl.dot(b_kg3_c1, b_kgt, b_Akk31, allow_tf32=False)
                 b_kgt = tl.trans(b_k2 * exp2(b_gn3[None, :] - b_g2))
-                b_Aqk32 += tl.dot(b_qg3_c2, b_kgt, allow_tf32=False)
-                b_Akk32 += tl.dot(b_kg3_c2, b_kgt, allow_tf32=False)
+                b_Aqk32 = tl.dot(b_qg3_c2, b_kgt, b_Aqk32, allow_tf32=False)
+                b_Akk32 = tl.dot(b_kg3_c2, b_kgt, b_Akk32, allow_tf32=False)
 
     p_Aqk10 = tl.make_block_ptr(Aqk, (T, BT), (HV * BT, 1), (i_tc1, 0), (BC, BC), (1, 0))
     tl.store(p_Aqk10, (b_Aqk10 * scale).to(Aqk.dtype.element_ty), boundary_check=(0, 1))
@@ -790,8 +790,8 @@ def chunk_kda_bwd_kernel_intra_npu(
                                      (i_j * BC + o_i)[None, :], mask=m_ij, other=0.0)
                     b_dAkk = tl.load(dAkk_l + i_ti * (HV * BT) + o_i[:, None] * (HV * BT) +
                                      (i_j * BC + o_i)[None, :], mask=m_ij, other=0.0)
-                    b_dq2 += tl.dot(b_dAqk.to(tl.float32), b_kg.to(tl.float32), allow_tf32=False)
-                    b_dk2 += tl.dot(b_dAkk.to(tl.float32), b_kg.to(tl.float32), allow_tf32=False)
+                    b_dq2 = tl.dot(b_dAqk.to(tl.float32), b_kg.to(tl.float32), b_dq2, allow_tf32=False)
+                    b_dk2 = tl.dot(b_dAkk.to(tl.float32), b_kg.to(tl.float32), b_dk2, allow_tf32=False)
                 b_gqn = exp2(b_g - b_gn)
                 b_dq2 *= b_gqn
                 b_dk2 *= b_gqn
@@ -860,8 +860,8 @@ def chunk_kda_bwd_kernel_intra_npu(
                     b_gkn = exp2(b_gkf - b_gn_f)
                     b_qg = b_qf * tl.where(m_rowj[:, None], b_gkn, 0)
                     b_kbg = b_kf * b_bf.to(tl.float32)[:, None] * tl.where(m_rowj[:, None], b_gkn, 0)
-                    b_dkt += tl.dot(b_dAqk_f.to(tl.float32), b_qg.to(tl.float32), allow_tf32=False)
-                    b_dkt += tl.dot(b_dAkk_f.to(tl.float32), b_kbg.to(tl.float32), allow_tf32=False)
+                    b_dkt = tl.dot(b_dAqk_f.to(tl.float32), b_qg.to(tl.float32), b_dkt, allow_tf32=False)
+                    b_dkt = tl.dot(b_dAkk_f.to(tl.float32), b_kbg.to(tl.float32), b_dkt, allow_tf32=False)
                 b_dkt *= exp2(b_gn_f - b_g)
 
             if SAFE_GATE:

@@ -343,23 +343,23 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64_npu(
                 p_w2 = tl.make_block_ptr(w_base, (T, K), (stride_w, 1), (i_t * BT, BK), (BT, BK), (1, 0))
                 b_w = tl.load(p_w2, boundary_check=(0, 1)).to(tl.float32)
                 if STATE_V_FIRST:
-                    b_v += tl.dot(b_w, tl.trans(b_h2).to(b_w.dtype))
+                    b_v = tl.dot(b_w, tl.trans(b_h2).to(b_w.dtype), b_v)
                 else:
-                    b_v += tl.dot(b_w, b_h2.to(b_w.dtype))
+                    b_v = tl.dot(b_w, b_h2.to(b_w.dtype), b_v)
             if K > BK * 2:
                 p_w3 = tl.make_block_ptr(w_base, (T, K), (stride_w, 1), (i_t * BT, BK * 2), (BT, BK), (1, 0))
                 b_w = tl.load(p_w3, boundary_check=(0, 1)).to(tl.float32)
                 if STATE_V_FIRST:
-                    b_v += tl.dot(b_w, tl.trans(b_h3).to(b_w.dtype))
+                    b_v = tl.dot(b_w, tl.trans(b_h3).to(b_w.dtype), b_v)
                 else:
-                    b_v += tl.dot(b_w, b_h3.to(b_w.dtype))
+                    b_v = tl.dot(b_w, b_h3.to(b_w.dtype), b_v)
             if K > BK * 3:
                 p_w4 = tl.make_block_ptr(w_base, (T, K), (stride_w, 1), (i_t * BT, BK * 3), (BT, BK), (1, 0))
                 b_w = tl.load(p_w4, boundary_check=(0, 1)).to(tl.float32)
                 if STATE_V_FIRST:
-                    b_v += tl.dot(b_w, tl.trans(b_h4).to(b_w.dtype))
+                    b_v = tl.dot(b_w, tl.trans(b_h4).to(b_w.dtype), b_v)
                 else:
-                    b_v += tl.dot(b_w, b_h4.to(b_w.dtype))
+                    b_v = tl.dot(b_w, b_h4.to(b_w.dtype), b_v)
 
             if USE_G:
                 if USE_G_PRECOMP:
@@ -451,28 +451,28 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64_npu(
             if STATE_V_FIRST:
                 b_h1 += tl.trans(tl.dot(b_k, b_v))
             else:
-                b_h1 += tl.dot(b_k, b_v)
+                b_h1 = tl.dot(b_k, b_v, b_h1)
             if K > BK:
                 p_k2 = tl.make_block_ptr(k_base, (K, T), (1, stride_k), (BK, i_t * BT), (BK, BT), (0, 1))
                 b_k = tl.load(p_k2, boundary_check=(0, 1)).to(tl.float32)
                 if STATE_V_FIRST:
                     b_h2 += tl.trans(tl.dot(b_k, b_v))
                 else:
-                    b_h2 += tl.dot(b_k, b_v)
+                    b_h2 = tl.dot(b_k, b_v, b_h2)
             if K > BK * 2:
                 p_k3 = tl.make_block_ptr(k_base, (K, T), (1, stride_k), (BK * 2, i_t * BT), (BK, BT), (0, 1))
                 b_k = tl.load(p_k3, boundary_check=(0, 1)).to(tl.float32)
                 if STATE_V_FIRST:
                     b_h3 += tl.trans(tl.dot(b_k, b_v))
                 else:
-                    b_h3 += tl.dot(b_k, b_v)
+                    b_h3 = tl.dot(b_k, b_v, b_h3)
             if K > BK * 3:
                 p_k4 = tl.make_block_ptr(k_base, (K, T), (1, stride_k), (BK * 3, i_t * BT), (BK, BT), (0, 1))
                 b_k = tl.load(p_k4, boundary_check=(0, 1)).to(tl.float32)
                 if STATE_V_FIRST:
                     b_h4 += tl.trans(tl.dot(b_k, b_v))
                 else:
-                    b_h4 += tl.dot(b_k, b_v)
+                    b_h4 = tl.dot(b_k, b_v, b_h4)
 
         # epilogue: store final state for this V segment (K-segmented)
         if STORE_FINAL_STATE:
@@ -612,7 +612,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_oneslab_npu(
 
             p_k1 = tl.make_block_ptr(k_base, (K, T), (1, stride_k), (0, i_t * BT), (BK, BT), (0, 1))
             b_k = tl.load(p_k1).to(tl.float32)
-            b_h1 += tl.dot(b_k, b_v)
+            b_h1 = tl.dot(b_k, b_v, b_h1)
 
         if STORE_FINAL_STATE:
             ht_ptr = ht + i_nh * K * V
@@ -980,7 +980,7 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64_npu(
                         b_dv_part = tl.dot(b_dh2.to(b_k.dtype), tl.trans(b_k), allow_tf32=False)
                         b_dv += tl.trans(b_dv_part)
                     else:
-                        b_dv += tl.dot(b_k, b_dh2.to(b_k.dtype), allow_tf32=False)
+                        b_dv = tl.dot(b_k, b_dh2.to(b_k.dtype), b_dv, allow_tf32=False)
 
                 if K > 128:
                     p_k = tl.make_block_ptr(k_base, (T, K), (stride_k, 1), (i_t * BT, 128), (BT, 64), (1, 0))
@@ -992,7 +992,7 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64_npu(
                         b_dv_part = tl.dot(b_dh3.to(b_k.dtype), tl.trans(b_k), allow_tf32=False)
                         b_dv += tl.trans(b_dv_part)
                     else:
-                        b_dv += tl.dot(b_k, b_dh3.to(b_k.dtype), allow_tf32=False)
+                        b_dv = tl.dot(b_k, b_dh3.to(b_k.dtype), b_dv, allow_tf32=False)
 
                 if K > 192:
                     p_k = tl.make_block_ptr(k_base, (T, K), (stride_k, 1), (i_t * BT, 192), (BT, 64), (1, 0))
@@ -1004,7 +1004,7 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64_npu(
                         b_dv_part = tl.dot(b_dh4.to(b_k.dtype), tl.trans(b_k), allow_tf32=False)
                         b_dv += tl.trans(b_dv_part)
                     else:
-                        b_dv += tl.dot(b_k, b_dh4.to(b_k.dtype), allow_tf32=False)
+                        b_dv = tl.dot(b_k, b_dh4.to(b_k.dtype), b_dv, allow_tf32=False)
 
                 if USE_G:
                     if USE_G_PRECOMP:
@@ -1043,7 +1043,7 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64_npu(
                     else:
                         b_dh1 *= exp2(b_gk_last1[:, None])
                 if STATE_V_FIRST:
-                    b_dh1 += tl.dot(tl.trans(b_do.to(b_q.dtype)), tl.trans(b_q), allow_tf32=False)
+                    b_dh1 = tl.dot(tl.trans(b_do.to(b_q.dtype)), tl.trans(b_q), b_dh1, allow_tf32=False)
                     b_dv_i = b_dv_pristine + 0.0
                     b_dh1 -= tl.dot(tl.trans(b_dv_i.to(b_w.dtype)), tl.trans(b_w), allow_tf32=False)
                 else:
@@ -1062,7 +1062,7 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64_npu(
                         else:
                             b_dh2 *= exp2(b_gk_last2[:, None])
                     if STATE_V_FIRST:
-                        b_dh2 += tl.dot(tl.trans(b_do_c.to(b_q.dtype)), tl.trans(b_q), allow_tf32=False)
+                        b_dh2 = tl.dot(tl.trans(b_do_c.to(b_q.dtype)), tl.trans(b_q), b_dh2, allow_tf32=False)
                         b_dv_i = b_dv_pristine + 0.0
                         b_dh2 -= tl.dot(tl.trans(b_dv_i.to(b_w.dtype)), tl.trans(b_w), allow_tf32=False)
                     else:
@@ -1081,7 +1081,7 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64_npu(
                         else:
                             b_dh3 *= exp2(b_gk_last3[:, None])
                     if STATE_V_FIRST:
-                        b_dh3 += tl.dot(tl.trans(b_do_c2.to(b_q.dtype)), tl.trans(b_q), allow_tf32=False)
+                        b_dh3 = tl.dot(tl.trans(b_do_c2.to(b_q.dtype)), tl.trans(b_q), b_dh3, allow_tf32=False)
                         b_dv_i = b_dv_pristine + 0.0
                         b_dh3 -= tl.dot(tl.trans(b_dv_i.to(b_w.dtype)), tl.trans(b_w), allow_tf32=False)
                     else:
@@ -1100,7 +1100,7 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64_npu(
                         else:
                             b_dh4 *= exp2(b_gk_last4[:, None])
                     if STATE_V_FIRST:
-                        b_dh4 += tl.dot(tl.trans(b_do_c3.to(b_q.dtype)), tl.trans(b_q), allow_tf32=False)
+                        b_dh4 = tl.dot(tl.trans(b_do_c3.to(b_q.dtype)), tl.trans(b_q), b_dh4, allow_tf32=False)
                         b_dv_i = b_dv_pristine + 0.0
                         b_dh4 -= tl.dot(tl.trans(b_dv_i.to(b_w.dtype)), tl.trans(b_w), allow_tf32=False)
                     else:
