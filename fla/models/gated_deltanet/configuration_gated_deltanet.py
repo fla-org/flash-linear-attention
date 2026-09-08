@@ -48,6 +48,7 @@ class GatedDeltaNetConfig(_HybridAttentionConfigMixin, PretrainedConfig):
         use_l2warp: bool = False,
         vocab_size: int = 32000,
         attnres_block_size: int | None = None,
+        output_gate_activation: str = "swish",
         **kwargs,
     ):
         self.attn_mode = attn_mode
@@ -78,6 +79,10 @@ class GatedDeltaNetConfig(_HybridAttentionConfigMixin, PretrainedConfig):
         self.vocab_size = vocab_size
         self.allow_neg_eigval = allow_neg_eigval
         self.attnres_block_size = attnres_block_size
+        self.output_gate_activation = output_gate_activation
+        if self.output_gate_activation not in ("swish", "silu", "sigmoid"):
+            raise ValueError(
+                f"output_gate_activation must be one of 'swish', 'silu', 'sigmoid', got {self.output_gate_activation!r}")
 
         if fuse_cross_entropy and fuse_linear_cross_entropy:
             raise ValueError(
