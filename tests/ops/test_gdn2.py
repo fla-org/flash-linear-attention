@@ -16,6 +16,9 @@
 # GDN-2 reuses KDA's gate activation verbatim, so the gate-in-kernel reference
 # uses ``naive_kda_gate`` / ``naive_kda_lowerbound_gate``.
 
+import os
+from unittest.mock import Mock
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -303,9 +306,20 @@ def test_chunk_invalid_chunk_size(chunk_size):
             (2, 100, 3, 64, 64, 1.0, True, False, False, torch.float16),   # non-multiple T, fp16
             (1, 64, 1, 128, 128, 1.0, True, False, False, torch.bfloat16),
             (1, 64, 1, 256, 256, 1.0, True, False, False, torch.bfloat16),
+            (1, 65, 2, 48, 32, 1.0, True, False, False, torch.float16),
+            (1, 65, 2, 32, 48, 1.0, True, False, False, torch.float16),
             (2, 256, 2, 64, 64, 1.0, True, True, False, torch.float32),    # gate-in-kernel
             (1, 128, 2, 64, 64, 1.0, True, True, True, torch.float32),     # gate-in-kernel + safe_gate
         ]
+    ] + [
+        pytest.param(
+            1, 32768, 1, 32, 32, 1.0, True, False, False, torch.float16,
+            id='32k',
+            marks=pytest.mark.skipif(
+                os.environ.get('FLA_TEST_GDN2_32K') != '1',
+                reason='set FLA_TEST_GDN2_32K=1 for the 32K output/gradient reference check',
+            ),
+        ),
     ],
 )
 def test_chunk(B, T, H, K, V, scale, use_qk_l2norm_in_kernel, use_gate_in_kernel, safe_gate, dtype):
@@ -428,6 +442,7 @@ def test_chunk_state_v_first():
             ([0, 64, 128], 2, 64, 64, False, torch.float32),
             ([0, 15, 100, 256], 2, 64, 64, False, torch.float16),     # ragged, non-multiple, fp16
             ([0, 100, 300, 512], 2, 64, 64, True, torch.float16),     # gate-in-kernel + varlen
+            ([0, 15, 80, 145], 2, 48, 32, False, torch.float16),
         ]
     ],
 )
@@ -495,6 +510,37 @@ def test_chunk_varlen(cu_seqlens, H, K, V, use_gate_in_kernel, dtype):
     assert_close("dw", ref_grads["w"], tri_grads["w"], 0.02)
     assert_close("dg", ref_grads["g"], tri_grads["g"], 0.02)
     assert_close("dh0", ref_grads["h0"], tri_grads["h0"], 0.012)
+
+
+@pytest.mark.skipif(not IS_NPU, reason='Ascend dispatch and launch splitting require NPU')
+@pytest.mark.parametrize('varlen', [False, True], ids=['dense', 'varlen'])
+def test_chunk_npu_launch_splits(varlen, monkeypatch):
+    """Split launches must retain native-reference numerics and dispatch both leaf stages."""
+    from fla.ops.gdn2.backends.triton_ascend import chunk_bwd, chunk_intra
+
+    # exercise multiple launches and packed sequence boundaries with a small reference workload.
+    monkeypatch.setattr(chunk_intra, '_LAUNCH_BLOCK_BUDGET', 4)
+    fwd = Mock(wraps=chunk_intra.chunk_gdn2_fwd_intra_npu)
+    bwd = Mock(wraps=chunk_bwd.chunk_gdn2_bwd_wy_dqkg_fused_npu)
+    monkeypatch.setattr(chunk_intra, 'chunk_gdn2_fwd_intra_npu', fwd)
+    monkeypatch.setattr(chunk_bwd, 'chunk_gdn2_bwd_wy_dqkg_fused_npu', bwd)
+    if varlen:
+        test_chunk_varlen(cu_seqlens=[0, 15, 100, 257], H=2, K=48, V=32, use_gate_in_kernel=False, dtype=torch.float16)
+    else:
+        test_chunk(
+            B=2,
+            T=257,
+            H=2,
+            K=48,
+            V=32,
+            scale=1.0,
+            use_qk_l2norm_in_kernel=True,
+            use_gate_in_kernel=False,
+            safe_gate=False,
+            dtype=torch.float16,
+        )
+    fwd.assert_called_once()
+    bwd.assert_called_once()
 
 
 @_requires_accelerator
