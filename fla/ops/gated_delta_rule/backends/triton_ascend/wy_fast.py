@@ -578,7 +578,7 @@ def prepare_wy_repr_bwd_finalize_a2_dg_npu(
         )
         b_k = tl.load(p_k, boundary_check=(0, 1)).to(tl.float32)
         b_k_c = b_k + 0.0
-        b_A2 += tl.dot(b_k, tl.trans(b_k_c), allow_tf32=False)
+        b_A2 = tl.dot(b_k, tl.trans(b_k_c), b_A2, allow_tf32=False)
     b_A2 *= b_b[:, None]
     b_dA = tl.load(p_dA, boundary_check=(0, 1)).to(tl.float32)
     b_prod = b_dA * b_A2

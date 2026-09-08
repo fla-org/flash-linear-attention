@@ -139,34 +139,34 @@ def chunk_gated_delta_rule_fwd_kkt_solve_kernel(
         p_k0 = k + (i_tc0 + o_i)[:, None] * (H*K) + o_k[None, :]
         b_k0 = tl.load(p_k0, mask=m_tc0[:, None] & (o_k[None, :] < K), other=0.0)
         # diagonal block 0
-        b_A00 += tl.dot(b_k0, tl.trans(b_k0))
+        b_A00 = tl.dot(b_k0, tl.trans(b_k0), b_A00)
 
         if i_tc1 < T:
             p_k1 = k + (i_tc1 + o_i)[:, None] * (H*K) + o_k[None, :]
             b_k1 = tl.load(p_k1, mask=m_tc1[:, None] & (o_k[None, :] < K), other=0.0)
             # diagonal block 1
-            b_A11 += tl.dot(b_k1, tl.trans(b_k1))
+            b_A11 = tl.dot(b_k1, tl.trans(b_k1), b_A11)
             # off-diagonal (1,0)
-            b_A10 += tl.dot(b_k1, tl.trans(b_k0))
+            b_A10 = tl.dot(b_k1, tl.trans(b_k0), b_A10)
 
             if i_tc2 < T:
                 p_k2 = k + (i_tc2 + o_i)[:, None] * (H*K) + o_k[None, :]
                 b_k2 = tl.load(p_k2, mask=m_tc2[:, None] & (o_k[None, :] < K), other=0.0)
                 # diagonal block 2
-                b_A22 += tl.dot(b_k2, tl.trans(b_k2))
+                b_A22 = tl.dot(b_k2, tl.trans(b_k2), b_A22)
                 # off-diagonal (2,0), (2,1)
-                b_A20 += tl.dot(b_k2, tl.trans(b_k0))
-                b_A21 += tl.dot(b_k2, tl.trans(b_k1))
+                b_A20 = tl.dot(b_k2, tl.trans(b_k0), b_A20)
+                b_A21 = tl.dot(b_k2, tl.trans(b_k1), b_A21)
 
                 if i_tc3 < T:
                     p_k3 = k + (i_tc3 + o_i)[:, None] * (H*K) + o_k[None, :]
                     b_k3 = tl.load(p_k3, mask=m_tc3[:, None] & (o_k[None, :] < K), other=0.0)
                     # diagonal block 3
-                    b_A33 += tl.dot(b_k3, tl.trans(b_k3))
+                    b_A33 = tl.dot(b_k3, tl.trans(b_k3), b_A33)
                     # off-diagonal (3,0), (3,1), (3,2)
-                    b_A30 += tl.dot(b_k3, tl.trans(b_k0))
-                    b_A31 += tl.dot(b_k3, tl.trans(b_k1))
-                    b_A32 += tl.dot(b_k3, tl.trans(b_k2))
+                    b_A30 = tl.dot(b_k3, tl.trans(b_k0), b_A30)
+                    b_A31 = tl.dot(b_k3, tl.trans(b_k1), b_A31)
+                    b_A32 = tl.dot(b_k3, tl.trans(b_k2), b_A32)
 
     ############################################################################
     # Step 2: apply gate and beta scaling
