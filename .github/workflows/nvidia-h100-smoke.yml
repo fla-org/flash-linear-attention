@@ -87,10 +87,15 @@ jobs:
         shell: bash
         run: |
           # Per-file processes, same as the full suite (avoids runner OOM).
+          # find_dependent_tests.py prints absolute paths; match */tests/ops/*.
+          # pytest exit 5 = no smoke-marked tests collected in this file, skip.
+          rc=0
           for f in ${{ steps.find-tests.outputs.test_files }}; do
             case "$f" in
-              tests/ops/*)
-                $CONDA_BIN_PATH/pytest -s -v --exitfirst -m smoke "$f" || exit 1 ;;
+              */tests/ops/*)
+                $CONDA_BIN_PATH/pytest -s -v --exitfirst -m smoke "$f" || rc=$?
+                if [ "$rc" -ne 0 ] && [ "$rc" -ne 5 ]; then exit 1; fi
+                rc=0 ;;
             esac
           done
 
@@ -100,7 +105,15 @@ jobs:
         run: |
           for f in ${{ steps.find-tests.outputs.test_files }}; do
             case "$f" in
-              tests/ops/*) ;;
+              */tests/ops/*) ;;
               *) $CONDA_BIN_PATH/pytest -s -v --exitfirst "$f" || exit 1 ;;
             esac
           done
+
+      # The self-hosted runner shares one disk across jobs; never fail the job here.
+      - name: Clean up caches
+        if: always()
+        shell: bash
+        run: |
+          rm -rf ~/.triton ~/.cache/pip || true
+          ${CONDA:-$HOME/miniconda3}/bin/conda clean --all -y || true
