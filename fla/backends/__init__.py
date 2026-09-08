@@ -5,15 +5,9 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""RWKV6 backends."""
+"""Shared backend contracts and registry mechanics."""
 
-from fla.backends import BackendRegistry
-from fla.ops.rwkv6.backends.tilelang import RWKV6TileLangBackend
+from fla.backends.base import BaseBackend
+from fla.backends.registry import BackendRegistry
 
-rwkv6_registry = BackendRegistry("rwkv6")
-rwkv6_registry.register(RWKV6TileLangBackend())
-
-
-dispatch = rwkv6_registry.dispatch
-
-__all__ = ['dispatch', 'rwkv6_registry']
+__all__ = ['BackendRegistry', 'BaseBackend']

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import torch
 
-from fla.ops.backends import BaseBackend
+from fla.backends import BaseBackend
 from fla.utils import find_spec_cached, has_usable_nvcc
 
 _TILELANG_AVAILABLE = find_spec_cached("tilelang") is not None

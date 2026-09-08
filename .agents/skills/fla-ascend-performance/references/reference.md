@@ -71,7 +71,9 @@ Paths relative to the `flash-linear-attention` repo root. Detailed case notes: [
 
 ### Backend wiring
 
-- `fla/ops/backends/__init__.py` — `BaseBackend` / `dispatch` / verifier
+- `fla/backends/base.py` — `BaseBackend` availability and verifier contract
+- `fla/backends/registry.py` — registry-owned dispatch and fallback
+- `fla/modules/backends/__init__.py` — module adapter registration and bound dispatcher
 - `fla/ops/common/backends/triton_ascend/__init__.py` — `IS_NPU` + lazy import
 - `fla/ops/gated_delta_rule/backends/triton_ascend/__init__.py` — multi-function backend example
 

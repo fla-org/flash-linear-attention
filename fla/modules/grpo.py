@@ -299,7 +299,7 @@ class GrpoLoss(torch.autograd.Function):
         return dlogits.view(*ctx.input_shape), None, None, None, None, None, None, None
 
 
-@dispatch('modules')
+@dispatch
 def fused_grpo_loss(logits, ref_logp, input_ids, advantages,
                     beta=0.1, completion_mask=None, save_kl=False, inplace=False) -> torch.Tensor:
     '''

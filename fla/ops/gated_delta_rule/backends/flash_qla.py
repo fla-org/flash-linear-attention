@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from fla.ops.backends import BaseBackend
+from fla.backends import BaseBackend
 from fla.utils import IS_NVIDIA_HOPPER, IS_NVIDIA_SM100, IS_NVIDIA_SM120
 
 if TYPE_CHECKING:

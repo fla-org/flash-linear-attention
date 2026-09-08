@@ -32,7 +32,7 @@ def _has_non_standard_layout(x: torch.Tensor) -> bool:
     return stride_d == 1 and stride_t != x.shape[-1]
 
 
-@dispatch('modules')
+@dispatch
 @input_guard(no_guard_contiguous=["x"])
 def causal_conv1d_fwd(
     x: torch.Tensor,
@@ -96,7 +96,7 @@ def causal_conv1d_fwd(
     return y.view(shape), final_state
 
 
-@dispatch('modules')
+@dispatch
 def compute_dh0_triton(
     dy: torch.Tensor,
     y: torch.Tensor | None,
@@ -143,7 +143,7 @@ def compute_dh0_triton(
     return dh0
 
 
-@dispatch('modules')
+@dispatch
 def causal_conv1d_bwd(
     x: torch.Tensor,
     dy: torch.Tensor,
@@ -247,7 +247,7 @@ def causal_conv1d_bwd(
     return dx.view(shape), dw, db, dr, dh0
 
 
-@dispatch('modules')
+@dispatch
 @input_guard(no_guard_contiguous=["x"])
 def causal_conv1d_update_states(
     x: torch.Tensor,
@@ -296,7 +296,7 @@ def causal_conv1d_update_states(
     return final_state
 
 
-@dispatch('modules')
+@dispatch
 @input_guard(no_guard_contiguous=["x"])
 def causal_conv1d_update(
     x: torch.Tensor,

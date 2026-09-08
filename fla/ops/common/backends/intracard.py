@@ -20,7 +20,7 @@ import warnings
 
 import torch
 
-from fla.ops.backends import BaseBackend
+from fla.backends import BaseBackend
 from fla.utils import IS_TF32_SUPPORTED
 
 # Maximum number of sub-sequences per original sequence
