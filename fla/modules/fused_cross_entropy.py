@@ -55,6 +55,8 @@ def cross_entropy_fwd_kernel(
     # these transforms do not preserve -inf in padded lanes
     if softcap is not None or scale <= 0:
         b_logits = tl.where(m_v, b_logits, -float('inf'))
+    if smoothing > 0:
+        b_sum = tl.sum(tl.where(m_v, b_logits, 0.0), 0)
     b_max = tl.max(b_logits, 0)
     b_lse = log(tl.sum(exp(b_logits - b_max), 0)) + b_max
 
@@ -69,7 +71,6 @@ def cross_entropy_fwd_kernel(
             b_target_logit = softcap * tanh(b_target_logit / softcap)
         b_loss = -b_target_logit
         if smoothing > 0:
-            b_sum = tl.sum(tl.where(m_v, b_logits, 0.0), 0)
             b_loss = (1 - smoothing) * b_loss - smoothing * b_sum / V_TOTAL
         if not SPLIT:
             b_z_loss = z_scale * b_lse * b_lse
@@ -151,6 +152,9 @@ def cross_entropy_fwd(
     if logits.stride(-1) != 1:
         logits = logits.contiguous()
     BV = min(triton.next_power_of_2(V), 64 * 1024)
+    # reduce softcap register pressure without introducing an additional split reduction
+    if logit_softcapping is not None and V > BV:
+        BV = 8 * 1024
     num_warps = 4 if BV < 2048 else (8 if BV < 8192 else 16)
     # vocab partitions contribute partial loss until the global LSE is available
     NV = triton.cdiv(V, BV)
