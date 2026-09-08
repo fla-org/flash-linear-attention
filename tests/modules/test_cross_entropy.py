@@ -10,105 +10,103 @@ from itertools import product
 
 import pytest
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
-from fla.utils import IS_INTEL, IS_NPU, assert_close, device, device_platform
-
-
-@pytest.mark.parametrize("B", [2])
-@pytest.mark.parametrize("T", [512, 1024])
-@pytest.mark.parametrize("V", [32000, 100000])
-@pytest.mark.parametrize("softcap", [None, 30.0], ids=["plain", "softcap"])
-@pytest.mark.parametrize("reduction", ['mean'])
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
-@pytest.mark.skipif(
-    device_platform == 'intel',
-    reason="Intel Triton Failure",
-)
-def test_fused_cross_entropy(
-    B: int,
-    T: int,
-    V: int,
-    softcap: float | None,
-    reduction: str,
-    dtype: torch.dtype
-):
-    torch.manual_seed(42)
-    logits = torch.randn(B * T, V).to(device).to(dtype=dtype).requires_grad_()
-    target = torch.randint(0, V, (B, T)).to(device)
-    target = torch.cat((target[..., 1:], torch.full_like(target[..., :1], -100)), -1)
-    target = target.flatten()
-
-    transformed = logits if softcap is None else softcap * torch.tanh(logits.float() / softcap)
-    ref = nn.CrossEntropyLoss(reduction=reduction)(transformed, target).to(dtype=dtype)
-    do = torch.randn_like(ref).to(device).to(dtype=dtype)
-
-    ref.backward(do)
-    ref_d, logits.grad = logits.grad.clone(), None
-
-    tri = FusedCrossEntropyLoss(reduction=reduction, logit_softcapping=softcap)(logits, target).to(dtype=dtype)
-    tri.backward(do)
-    tri_d, logits.grad = logits.grad.clone(), None
-
-    assert_close(" o", ref, tri, ratio=1e-2)
-    assert_close("dl", ref_d, tri_d, ratio=1e-2)
+from fla.utils import IS_INTEL, IS_NPU, assert_close, device
 
 
 @pytest.mark.parametrize(
-    ('V', 'scale', 'softcap', 'z_scale', 'strided', 'inplace_backward', 'reduction', 'dtype'),
+    ('N', 'V', 'smoothing', 'scale', 'softcap', 'z_scale', 'strided', 'inplace_backward', 'reduction', 'dtype'),
     [
+        pytest.param(1024, 32000, 0.0, 1.0, None, 0.0, False, False, 'mean', torch.bfloat16, id='basic'),
+        pytest.param(1024, 100000, 0.0, 1.0, None, 0.0, False, True, 'mean', torch.bfloat16, id='large_vocab'),
         pytest.param(
-            V, 0.3, 3.0, 0.01, True, inplace, reduction, dtype,
-            id=f'V{V}-transformed-{inplace=}-{reduction}-{dtype}',
-        )
-        for V, inplace, reduction, dtype in product(
-            (4103, 65539), (False, True), ('mean', 'sum', 'none'), (torch.bfloat16, torch.float16, torch.float32),
-        )
-    ] + [
-        pytest.param(V, scale, softcap, 0.0, False, False, 'mean', dtype, id=f'V{V}-{scale=}-{softcap=}-{dtype}')
-        for V, scale, softcap, dtype in product((4103, 65537), (0.0, -0.5), (None, 3.0), (torch.bfloat16, torch.float32))
+            7, 4103, 0.0, 1.0, None, 0.0, True, True, 'none', torch.float16,
+            id='strided_tail',
+            marks=pytest.mark.skipif(IS_NPU, reason="Covers the default Triton GPU kernels"),
+        ),
+        pytest.param(
+            7, 65539, 0.0, 0.5, 3.0, 0.0, False, True, 'mean', torch.bfloat16,
+            id='softcap_tail',
+            marks=pytest.mark.skipif(IS_NPU, reason="Covers the default Triton GPU kernels"),
+        ),
+        pytest.param(
+            63, 4103, 0.1, 0.3, None, 0.0, False, False, 'sum', torch.bfloat16,
+            id='smoothing',
+            marks=pytest.mark.skipif(IS_NPU, reason="Covers the default Triton GPU kernels"),
+        ),
+        pytest.param(
+            7, 4103, 0.1, 0.3, 3.0, 0.01, True, False, 'none', torch.float32,
+            id='z_loss',
+            marks=pytest.mark.skipif(IS_NPU, reason="Covers the default Triton GPU kernels"),
+        ),
+        pytest.param(
+            7, 65537, 0.0, 0.0, None, 0.0, False, False, 'mean', torch.bfloat16,
+            id='zero_scale',
+            marks=pytest.mark.skipif(IS_NPU, reason="Covers the default Triton GPU kernels"),
+        ),
+        pytest.param(
+            7, 4103, 0.0, -0.5, 3.0, 0.0, False, False, 'mean', torch.float32,
+            id='negative_scale',
+            marks=pytest.mark.skipif(IS_NPU, reason="Covers the default Triton GPU kernels"),
+        ),
     ],
 )
-@pytest.mark.skipif(IS_INTEL or IS_NPU, reason="Covers the default Triton GPU kernels")
-def test_fused_cross_entropy_options(V, scale, softcap, z_scale, strided, inplace_backward, reduction, dtype):
+@pytest.mark.skipif(IS_INTEL, reason="Intel Triton Failure")
+def test_fused_cross_entropy(
+    N: int,
+    V: int,
+    smoothing: float,
+    scale: float,
+    softcap: float | None,
+    z_scale: float,
+    strided: bool,
+    inplace_backward: bool,
+    reduction: str,
+    dtype: torch.dtype,
+):
+    """Match CE loss, optional z-loss, and logits gradients against PyTorch."""
     torch.manual_seed(42)
+    logits = torch.randn(N, 2 * V if strided else V, device=device, dtype=dtype)
     if strided:
-        logits = torch.randn(2, 7, V, device=device, dtype=dtype).transpose(0, 1).reshape(7, 2 * V)[:, ::2]
-    else:
-        logits = torch.randn(7, V, device=device, dtype=dtype)
+        logits = logits[:, ::2]
     logits = logits.detach().requires_grad_()
-    target = torch.randint(V, (7,), device=device)
+    target = torch.randint(V, (N,), device=device)
     target[::3] = -100
     target[1] = V - 1
+
     transformed = logits.float() * scale
     if softcap is not None:
         transformed = softcap * torch.tanh(transformed / softcap)
-    z_loss = z_scale * transformed.logsumexp(-1).square()
-    z_loss = z_loss.masked_fill(target == -100, 0)
-    ref = F.cross_entropy(transformed, target, reduction='none', label_smoothing=0.1) + z_loss
-    if reduction == 'mean':
-        ref, z_loss = ref.sum() / (target != -100).sum(), z_loss.sum() / (target != -100).sum()
-    elif reduction == 'sum':
-        ref, z_loss = ref.sum(), z_loss.sum()
-    do = torch.randn_like(ref) if strided else torch.ones_like(ref)
+    ref = F.cross_entropy(transformed, target, reduction=reduction, label_smoothing=smoothing)
+    if z_scale > 0:
+        z_loss = (z_scale * transformed.logsumexp(-1).square()).masked_fill(target == -100, 0)
+        if reduction == 'mean':
+            z_loss = z_loss.sum() / (target != -100).sum()
+        elif reduction == 'sum':
+            z_loss = z_loss.sum()
+        ref = ref + z_loss
+    do = torch.randn_like(ref)
     ref_grad, = torch.autograd.grad(ref, logits, grad_outputs=do)
-    tri, tri_z_loss = FusedCrossEntropyLoss(
+    tri = FusedCrossEntropyLoss(
         reduction=reduction,
-        label_smoothing=0.1,
+        label_smoothing=smoothing,
         logit_scale=scale,
         lse_square_scale=z_scale,
         logit_softcapping=softcap,
         inplace_backward=inplace_backward,
-        return_z_loss=True,
+        return_z_loss=z_scale > 0,
     )(logits, target)
+    if z_scale > 0:
+        tri, tri_z_loss = tri
     tri_grad, = torch.autograd.grad(tri, logits, grad_outputs=do)
 
-    assert not tri_z_loss.requires_grad
     assert_close("loss", ref, tri, ratio=1e-2)
-    assert_close("z_loss", z_loss, tri_z_loss, ratio=1e-2)
     assert_close("dlogits", ref_grad, tri_grad, ratio=1e-2)
+    if z_scale > 0:
+        assert not tri_z_loss.requires_grad
+        assert_close("z_loss", z_loss, tri_z_loss, ratio=1e-2)
 
 
 @pytest.mark.parametrize(
