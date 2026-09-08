@@ -110,10 +110,16 @@ jobs:
             esac
           done
 
-      # The self-hosted runner shares one disk across jobs; never fail the job here.
-      - name: Clean up caches
+      # The self-hosted runner shares one disk across jobs; trim caches only
+      # under disk pressure so normal runs keep their warm kernel caches.
+      - name: Trim caches under disk pressure
         if: always()
         shell: bash
         run: |
+          used=$(df --output=pcent "$HOME" | tail -1 | tr -dc '0-9')
+          echo "disk usage: ${used}%"
+          if [ "${used:-0}" -lt 80 ]; then exit 0; fi
+          du -sh ~/.triton ~/.cache/pip 2>/dev/null || true
           rm -rf ~/.triton ~/.cache/pip || true
           ${CONDA:-$HOME/miniconda3}/bin/conda clean --all -y || true
+          df -h "$HOME"
