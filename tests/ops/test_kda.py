@@ -853,6 +853,7 @@ def test_chunk_use_beta_sigmoid_in_kernel(
         ]
     ],
 )
+@pytest.mark.smoke
 def test_chunk_varlen(
     H: int,
     D: int,

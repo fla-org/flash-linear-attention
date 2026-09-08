@@ -521,6 +521,7 @@ def test_chunk_default_chunk_size(lower_bound, chunk_size):
     device_platform == 'intel',
     reason='Intel Triton Failure',
 )
+@pytest.mark.smoke
 def test_chunk_varlen(
     H: int,
     D: int,
