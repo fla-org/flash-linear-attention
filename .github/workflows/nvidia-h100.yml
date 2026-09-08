@@ -96,8 +96,13 @@ jobs:
                 core.setOutput('run_full', 'false');
                 return;
               }
-              const maintainers = ['OWNER', 'MEMBER'];
-              core.setOutput('run_full', maintainers.includes(pr.author_association) ? 'true' : 'false');
+              // author_association hides private org members, so check the
+              // collaborator permission instead (admin/write -> maintainer).
+              const { owner, repo } = context.repo;
+              const perm = (await github.rest.repos.getCollaboratorPermissionLevel({
+                owner, repo, username: pr.user.login,
+              })).data;
+              core.setOutput('run_full', ['admin', 'write'].includes(perm.permission) ? 'true' : 'false');
               return;
             }
             if (eventName === 'pull_request_review') {
