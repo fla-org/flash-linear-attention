@@ -504,6 +504,8 @@ def chunk_gdn2_fwd_intra_npu(
 
     sync_stream = torch.npu.current_stream(k.device)
     use_head_major_intra = not is_varlen
+    # serialize split packed launches as well as dense launches to avoid CANN queue stalls.
+    sync_each_launch = use_head_major_intra or NT * NC * B * H > _LAUNCH_BLOCK_BUDGET
     if use_head_major_intra:
         q_intra = q.transpose(1, 2).contiguous()
         k_intra = k.transpose(1, 2).contiguous()
@@ -511,14 +513,13 @@ def chunk_gdn2_fwd_intra_npu(
         b_intra = b.transpose(1, 2).contiguous()
     else:
         q_intra, k_intra, g_intra, b_intra = q, k, gk, b
-    # serialize grouped launches to avoid CANN queue stalls, including packed splits.
     for row_group in range(BC // _TOKEN_GROUP):
         _launch_diag_kernel(
             chunk_gdn2_fwd_kernel_intra_grouped_npu,
             nt=NT,
             nc=NC,
             bh_total=B * H,
-            sync_stream=sync_stream,
+            sync_stream=sync_stream if sync_each_launch else None,
             kernel_kwargs=dict(
                 q=q_intra,
                 k=k_intra,
@@ -544,6 +545,9 @@ def chunk_gdn2_fwd_intra_npu(
                 BH_OFFSET=0,
             ),
         )
+        if not sync_each_launch and row_group == 0:
+            # CANN can stall when the two grouped row kernels are queued together.
+            sync_stream.synchronize()
 
     _launch_diag_kernel(
         chunk_gdn2_fwd_kernel_diag_solve_npu,
