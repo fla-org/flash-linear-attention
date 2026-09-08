@@ -711,7 +711,7 @@ def _ce_post_init(inputs, B, T, H, D, **kw):
             inputs['weight'].mul_(H ** -0.5)
 
 
-# CE uses T for tokens, H for hidden width and D for vocabulary size in the shared runner.
+# cross entropy uses T for tokens, H for hidden width and D for vocabulary size in the shared runner
 _ce_shapes = {
     f'N{N}_V{V}': {'B': 1, 'T': N, 'H': 1, 'D': V}
     for N, V in [

@@ -438,6 +438,7 @@ def fused_linear_cross_entropy_loss(
         process_group (ProcessGroup, Optional):
             Group with equal contiguous vocabulary shards of weight and bias, and replicated inputs and targets.
             Loss and input gradients are replicated; weight and bias gradients remain sharded. Default: `None`.
+            Multi-rank groups are not supported by the Ascend backend.
     Returns:
         Scalar loss in fp32.
     """
@@ -505,6 +506,7 @@ class FusedLinearCrossEntropyLoss(nn.Module):
             process_group (ProcessGroup, Optional):
                 Group with equal contiguous vocabulary shards of weight and bias, and replicated inputs and targets.
                 Loss and input gradients are replicated; weight and bias gradients remain sharded. Default: `None`.
+                Multi-rank groups are not supported by the Ascend backend.
         """
         super().__init__()
 
