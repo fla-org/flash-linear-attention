@@ -24,7 +24,8 @@ jobs:
   smoke:
     name: Smoke (PyTorch 2.12)
     runs-on: nvidia-h100-1
-    timeout-minutes: 60
+    # Cold triton cache makes the first run much slower; warm runs are ~20 min.
+    timeout-minutes: 120
     env:
       FLA_CI_ENV: 1
       # Triton baseline only; dispatch/tilelang coverage stays in the full pipeline.
@@ -99,7 +100,7 @@ jobs:
           used=$(df --output=pcent "$HOME" | tail -1 | tr -dc '0-9')
           echo "disk usage: ${used}%"
           if [ "${used:-0}" -lt 80 ]; then exit 0; fi
-          du -sh ~/.triton ~/.cache/pip 2>/dev/null || true
-          rm -rf ~/.triton ~/.cache/pip || true
+          du -sh ~/.triton ~/.tilelang/cache ~/.cache/pip 2>/dev/null || true
+          rm -rf ~/.triton ~/.tilelang/cache ~/.cache/pip || true
           ${CONDA:-$HOME/miniconda3}/bin/conda clean --all -y || true
           df -h "$HOME"
