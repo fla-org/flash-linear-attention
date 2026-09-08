@@ -27,11 +27,6 @@ from fla.ops.gdn2 import chunk_gdn2, fused_recurrent_gdn2, naive_recurrent_gdn2
 from fla.ops.kda.gate import naive_kda_gate, naive_kda_lowerbound_gate
 from fla.utils import IS_AMD, IS_NPU, IS_NVIDIA, assert_close, device
 
-_requires_accelerator = pytest.mark.skipif(
-    not (IS_NVIDIA or IS_AMD or IS_NPU),
-    reason="CUDA/ROCm or Ascend NPU required",
-)
-
 
 def _unwrap_autotuner(fn):
     while not hasattr(fn, 'configs'):
@@ -80,7 +75,7 @@ def _rand_inputs(B, T, H, HV, K, V, dtype, *, gate_in_kernel=False, b_scale=1.0,
 # =============================================================================
 # fused_recurrent
 # =============================================================================
-@_requires_accelerator
+@pytest.mark.skipif(not (IS_NVIDIA or IS_AMD or IS_NPU), reason="CUDA/ROCm or Ascend NPU required")
 @pytest.mark.parametrize(
     ("B", "T", "H", "HV", "K", "V", "scale", "use_qk_l2norm_in_kernel", "dtype"),
     [
@@ -135,7 +130,7 @@ def test_fused_recurrent(B, T, H, HV, K, V, scale, use_qk_l2norm_in_kernel, dtyp
     assert_close("ht", ref_ht, tri_ht, 0.005)
 
 
-@_requires_accelerator
+@pytest.mark.skipif(not (IS_NVIDIA or IS_AMD or IS_NPU), reason="CUDA/ROCm or Ascend NPU required")
 @pytest.mark.parametrize(
     ("B", "T", "H", "K", "V", "has_a_log", "has_dt_bias", "safe_gate"),
     [
@@ -187,7 +182,7 @@ def test_fused_recurrent_gate_in_kernel(B, T, H, K, V, has_a_log, has_dt_bias, s
     assert_close("ht", ref_ht, tri_ht, 0.005)
 
 
-@_requires_accelerator
+@pytest.mark.skipif(not (IS_NVIDIA or IS_AMD or IS_NPU), reason="CUDA/ROCm or Ascend NPU required")
 def test_fused_recurrent_state_v_first():
     """state_v_first stores the state transposed to [V, K]; output must match."""
     dtype = torch.float32
@@ -200,7 +195,7 @@ def test_fused_recurrent_state_v_first():
     assert_close("ht", ht0, ht1.transpose(-1, -2), 0.005)
 
 
-@_requires_accelerator
+@pytest.mark.skipif(not (IS_NVIDIA or IS_AMD or IS_NPU), reason="CUDA/ROCm or Ascend NPU required")
 def test_fused_recurrent_initial_state():
     dtype = torch.float32
     B, T, H, K, V = 2, 64, 2, 64, 64
@@ -232,7 +227,7 @@ def test_fused_recurrent_initial_state():
     assert_close("ht", ref_ht, tri_ht, 0.005)
 
 
-@_requires_accelerator
+@pytest.mark.skipif(not (IS_NVIDIA or IS_AMD or IS_NPU), reason="CUDA/ROCm or Ascend NPU required")
 @pytest.mark.parametrize(
     ("cu_seqlens", "H", "K", "V"),
     [
@@ -295,11 +290,12 @@ def test_chunk_invalid_chunk_size(chunk_size):
         chunk_gdn2(q=q, k=k, v=v, g=g, b=b, w=w, chunk_size=chunk_size)
 
 
-@_requires_accelerator
+@pytest.mark.skipif(not (IS_NVIDIA or IS_AMD or IS_NPU), reason="CUDA/ROCm or Ascend NPU required")
 @pytest.mark.parametrize(
-    ("B", "T", "H", "K", "V", "scale", "use_qk_l2norm_in_kernel", "use_gate_in_kernel", "safe_gate", "dtype"),
+    ("B", "T", "H", "K", "V", "scale", "use_qk_l2norm_in_kernel", "use_gate_in_kernel", "safe_gate", "dtype",
+     "state_v_first", "disable_recompute"),
     [
-        pytest.param(*p, id="B{}-T{}-H{}-K{}-V{}-scale{}-l2norm{}-gate{}-safe{}-{}".format(*p))
+        pytest.param(*p, False, False, id="B{}-T{}-H{}-K{}-V{}-scale{}-l2norm{}-gate{}-safe{}-{}".format(*p))
         for p in [
             (1, 64, 2, 32, 32, 1.0, False, False, False, torch.float32),
             (2, 256, 2, 64, 64, 0.5, True, False, False, torch.float32),
@@ -313,7 +309,13 @@ def test_chunk_invalid_chunk_size(chunk_size):
         ]
     ] + [
         pytest.param(
-            1, 32768, 1, 32, 32, 1.0, True, False, False, torch.float16,
+            1, 65, 2, 48, 32, 1.0, True, False, False, torch.float16, state_v_first, disable_recompute,
+            id=f'state-v-first{state_v_first}-disable-recompute{disable_recompute}',
+        )
+        for state_v_first, disable_recompute in [(True, False), (False, True), (True, True)]
+    ] + [
+        pytest.param(
+            1, 32768, 1, 32, 32, 1.0, True, False, False, torch.float16, False, False,
             id='32k',
             marks=pytest.mark.skipif(
                 os.environ.get('FLA_TEST_GDN2_32K') != '1',
@@ -322,7 +324,9 @@ def test_chunk_invalid_chunk_size(chunk_size):
         ),
     ],
 )
-def test_chunk(B, T, H, K, V, scale, use_qk_l2norm_in_kernel, use_gate_in_kernel, safe_gate, dtype):
+def test_chunk(
+    B, T, H, K, V, scale, use_qk_l2norm_in_kernel, use_gate_in_kernel, safe_gate, dtype, state_v_first, disable_recompute,
+):
     """Forward + gradient comparison: chunk kernel vs autograd through the naive reference."""
     q, k, v, g, b, w, A_log, dt_bias = _rand_inputs(B, T, H, H, K, V, dtype, gate_in_kernel=use_gate_in_kernel)
     lower_bound = -5.0 if safe_gate else None
@@ -369,13 +373,17 @@ def test_chunk(B, T, H, K, V, scale, use_qk_l2norm_in_kernel, use_gate_in_kernel
         A_log=A_log if use_gate_in_kernel else None,
         dt_bias=dt_bias if use_gate_in_kernel else None,
         scale=scale,
-        initial_state=h0,
+        initial_state=h0.transpose(-1, -2).contiguous() if state_v_first else h0,
         output_final_state=True,
         use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
         use_gate_in_kernel=use_gate_in_kernel,
         safe_gate=safe_gate,
         lower_bound=lower_bound,
+        disable_recompute=disable_recompute,
+        state_v_first=state_v_first,
     )
+    if state_v_first:
+        tri_ht = tri_ht.transpose(-1, -2)
     ((tri * do).sum() + (tri_ht * dht).sum()).backward(retain_graph=True)
     tri_grads = {n: t.grad.clone() for n, t in
                  zip(("q", "k", "v", "g", "b", "w", "h0"), (q, k, v, g, b, w, h0))}
@@ -396,7 +404,7 @@ def test_chunk(B, T, H, K, V, scale, use_qk_l2norm_in_kernel, use_gate_in_kernel
         assert_close("dt_bias", ref_grads["dt_bias"], tri_grads["dt_bias"], 0.02)
 
 
-@_requires_accelerator
+@pytest.mark.skipif(not (IS_NVIDIA or IS_AMD or IS_NPU), reason="CUDA/ROCm or Ascend NPU required")
 def test_chunk_state_v_first():
     """state_v_first must give the same output and a transposed final state."""
     dtype = torch.float32
@@ -433,20 +441,25 @@ def test_chunk_state_v_first():
     assert_close("ht", ht0, ht1.transpose(-1, -2), 0.005)
 
 
-@_requires_accelerator
+@pytest.mark.skipif(not (IS_NVIDIA or IS_AMD or IS_NPU), reason="CUDA/ROCm or Ascend NPU required")
 @pytest.mark.parametrize(
-    ("cu_seqlens", "H", "K", "V", "use_gate_in_kernel", "dtype"),
+    ("cu_seqlens", "H", "K", "V", "use_gate_in_kernel", "dtype", "state_v_first", "disable_recompute"),
     [
-        pytest.param(*p, id="cu_seqlens{}-H{}-K{}-V{}-gate{}-{}".format(*p))
+        pytest.param(*p, False, False, id="cu_seqlens{}-H{}-K{}-V{}-gate{}-{}".format(*p))
         for p in [
             ([0, 64, 128], 2, 64, 64, False, torch.float32),
             ([0, 15, 100, 256], 2, 64, 64, False, torch.float16),     # ragged, non-multiple, fp16
             ([0, 100, 300, 512], 2, 64, 64, True, torch.float16),     # gate-in-kernel + varlen
             ([0, 15, 80, 145], 2, 48, 32, False, torch.float16),
         ]
+    ] + [
+        pytest.param(
+            [0, 15, 80, 145], 2, 48, 32, False, torch.float16, True, True,
+            id='ragged-state-v-first-disable-recompute',
+        ),
     ],
 )
-def test_chunk_varlen(cu_seqlens, H, K, V, use_gate_in_kernel, dtype):
+def test_chunk_varlen(cu_seqlens, H, K, V, use_gate_in_kernel, dtype, state_v_first, disable_recompute):
     """Packed varlen chunk run (fwd + grads) must equal per-sequence reference."""
     cu = torch.LongTensor(cu_seqlens).to(device)
     cu_cpu = cu.cpu()
@@ -469,13 +482,17 @@ def test_chunk_varlen(cu_seqlens, H, K, V, use_gate_in_kernel, dtype):
         w=w,
         A_log=A_log if use_gate_in_kernel else None,
         dt_bias=dt_bias if use_gate_in_kernel else None,
-        initial_state=h0,
+        initial_state=h0.transpose(-1, -2).contiguous() if state_v_first else h0,
         output_final_state=True,
         use_qk_l2norm_in_kernel=True,
         use_gate_in_kernel=use_gate_in_kernel,
         cu_seqlens=cu,
         cu_seqlens_cpu=cu_cpu,
+        disable_recompute=disable_recompute,
+        state_v_first=state_v_first,
     )
+    if state_v_first:
+        tri_ht = tri_ht.transpose(-1, -2)
     ((tri * do).sum() + (tri_ht * dht).sum()).backward(retain_graph=True)
     tri_grads = {n: t.grad.clone() for n, t in zip(("q", "k", "v", "g", "b", "w", "h0"), (q, k, v, g, b, w, h0))}
     for t in leaves:
@@ -512,6 +529,54 @@ def test_chunk_varlen(cu_seqlens, H, K, V, use_gate_in_kernel, dtype):
     assert_close("dh0", ref_grads["h0"], tri_grads["h0"], 0.012)
 
 
+@pytest.mark.skipif(not IS_NPU, reason='Ascend verifier checks require NPU')
+@pytest.mark.parametrize(
+    ('name', 'tensor_names'),
+    [
+        pytest.param('chunk_gdn2_fwd_intra', ('q', 'k', 'v', 'gk', 'b', 'w_gate'), id='fwd'),
+        pytest.param(
+            'chunk_gdn2_bwd_wy_dqkg_fused',
+            ('q', 'k', 'v', 'v_new', 'g', 'b', 'w_gate', 'A', 'h', 'do', 'dh', 'dv'),
+            id='bwd',
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    ('case', 'dtype', 'reason'),
+    [
+        pytest.param('accept', torch.float16, None, id='fp16'),
+        pytest.param('accept', torch.bfloat16, None, id='bf16'),
+        pytest.param('accept', torch.float32, None, id='fp32'),
+        pytest.param('chunk_size', torch.float32, 'chunk_size=64', id='chunk-size'),
+        pytest.param('q_device', torch.float32, 'NPU tensors', id='mixed-device'),
+        pytest.param('q_dtype', torch.float32, 'unsupported dtype', id='integer-input'),
+        pytest.param('cu_seqlens', torch.float32, 'NPU tensors', id='cpu-cu-seqlens'),
+        pytest.param('chunk_indices', torch.float32, 'NPU tensors', id='cpu-chunk-indices'),
+    ],
+)
+def test_chunk_npu_verifier(name, tensor_names, case, dtype, reason):
+    """Check leaf metadata acceptance and rejection without launching kernels."""
+    from fla.ops.gdn2.backends.triton_ascend import TritonAscendGDN2Backend
+
+    tensor = torch.zeros(1, dtype=dtype, device=device)
+    kwargs = dict.fromkeys(tensor_names, tensor)
+    if case == 'chunk_size':
+        kwargs['chunk_size'] = 32
+    elif case == 'q_device':
+        kwargs['q'] = tensor.cpu()
+    elif case == 'q_dtype':
+        kwargs['q'] = tensor.to(torch.int32)
+    elif case in ('cu_seqlens', 'chunk_indices'):
+        kwargs[case] = torch.tensor([0, 1], dtype=torch.int64)
+    verifier = getattr(TritonAscendGDN2Backend(), f'{name}_verifier')
+    accepted, actual_reason = verifier(**kwargs, scale=1.0)
+    assert accepted == (reason is None)
+    if reason is None:
+        assert actual_reason is None
+    else:
+        assert reason in actual_reason
+
+
 @pytest.mark.skipif(not IS_NPU, reason='Ascend dispatch and launch splitting require NPU')
 @pytest.mark.parametrize('varlen', [False, True], ids=['dense', 'varlen'])
 def test_chunk_npu_launch_splits(varlen, monkeypatch):
@@ -525,7 +590,16 @@ def test_chunk_npu_launch_splits(varlen, monkeypatch):
     monkeypatch.setattr(chunk_intra, 'chunk_gdn2_fwd_intra_npu', fwd)
     monkeypatch.setattr(chunk_bwd, 'chunk_gdn2_bwd_wy_dqkg_fused_npu', bwd)
     if varlen:
-        test_chunk_varlen(cu_seqlens=[0, 15, 100, 257], H=2, K=48, V=32, use_gate_in_kernel=False, dtype=torch.float16)
+        test_chunk_varlen(
+            cu_seqlens=[0, 15, 100, 257],
+            H=2,
+            K=48,
+            V=32,
+            use_gate_in_kernel=False,
+            dtype=torch.float16,
+            state_v_first=False,
+            disable_recompute=False,
+        )
     else:
         test_chunk(
             B=2,
@@ -538,12 +612,14 @@ def test_chunk_npu_launch_splits(varlen, monkeypatch):
             use_gate_in_kernel=False,
             safe_gate=False,
             dtype=torch.float16,
+            state_v_first=False,
+            disable_recompute=False,
         )
     fwd.assert_called_once()
     bwd.assert_called_once()
 
 
-@_requires_accelerator
+@pytest.mark.skipif(not (IS_NVIDIA or IS_AMD or IS_NPU), reason="CUDA/ROCm or Ascend NPU required")
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
 def test_chunk_matches_fused_recurrent(dtype):
     """The two production kernels must agree with each other."""
@@ -557,7 +633,7 @@ def test_chunk_matches_fused_recurrent(dtype):
     assert_close("ht", ht_rec, ht_chunk, 0.006)
 
 
-@_requires_accelerator
+@pytest.mark.skipif(not (IS_NVIDIA or IS_AMD or IS_NPU), reason="CUDA/ROCm or Ascend NPU required")
 @torch.inference_mode()
 def test_chunk_return_intermediate_states():
     """return_intermediate_states yields per-chunk pre-states h; the output must
@@ -587,7 +663,7 @@ def test_chunk_return_intermediate_states():
 # =============================================================================
 # layer — GatedDeltaNet2 (GVA + short conv) end to end
 # =============================================================================
-@_requires_accelerator
+@pytest.mark.skipif(not (IS_NVIDIA or IS_AMD or IS_NPU), reason="CUDA/ROCm or Ascend NPU required")
 @pytest.mark.parametrize(
     ("num_heads", "num_v_heads", "use_short_conv"),
     [

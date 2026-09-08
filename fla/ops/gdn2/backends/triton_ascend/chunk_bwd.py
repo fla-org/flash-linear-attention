@@ -12,13 +12,12 @@ from __future__ import annotations
 import torch
 import triton
 import triton.language as tl
-from triton.runtime import driver
 
 from fla.ops.kda.backends.triton_ascend.chunk_bwd import chunk_kda_bwd_kernel_wy_k_part_npu
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 from fla.ops.utils.op import exp2
 from fla.utils import input_guard
-from fla.utils.ascend_ub_manager import compute_row_tile_block_size
+from fla.utils.ascend_ub_manager import compute_row_tile_block_size, get_npu_properties
 
 _BC = 16
 _BWD_MEM_MULT = 10.0
@@ -44,11 +43,6 @@ def _t_contig_arg(x: torch.Tensor, num_heads: int) -> tuple[torch.Tensor, bool]:
     if num_heads == 1:
         return x, False
     return x.transpose(1, 2).contiguous(), True
-
-
-def _get_npu_properties():
-    device = torch.npu.current_device()
-    return driver.active.utils.get_device_properties(device)
 
 
 @triton.jit(do_not_specialize=['T', 'task_num', 'num_core', 'BH'])
@@ -390,7 +384,7 @@ def chunk_gdn2_bwd_wy_dqkg_fused_npu(
     chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT) if is_varlen else g.new_zeros(1, dtype=torch.int64)
     bh_total = B * H
     task_num = NT * bh_total
-    num_core = _get_npu_properties()['num_vectorcore']
+    num_core = get_npu_properties()['num_vectorcore']
 
     v_arg, t_contig = _t_contig_arg(v, H)
     w_arg = _t_contig_arg(w_gate, H)[0]

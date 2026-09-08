@@ -17,7 +17,7 @@ from fla.ops.gdn2.wy_fast import recompute_w_u_fwd_gdn2
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp2
 from fla.utils import ascend_compile_kwargs, input_guard
-from fla.utils.ascend_ub_manager import ASCEND_MAX_GRID_DIM, compute_row_tile_block_size, max_grid_axis_chunks
+from fla.utils.ascend_ub_manager import compute_row_tile_block_size, iter_axis_launch_chunks
 
 _BC = 16
 _TOKEN_GROUP = 8
@@ -63,13 +63,9 @@ def _launch_diag_kernel(
             kernel_kwargs['NT_OFFSET'] = 0
         else:
             kernel_kwargs['NT_OFFSET'] = nt_off
-        max_nc = max_grid_axis_chunks(nc, nt_len * bh_total, max_grid=ASCEND_MAX_GRID_DIM)
-        for nc_off in range(0, nc, max_nc):
-            nc_len = min(max_nc, nc - nc_off)
+        for nc_off, nc_len in iter_axis_launch_chunks(nc, nt_len * bh_total):
             kernel_kwargs['NC_OFFSET'] = nc_off
-            max_bh = max_grid_axis_chunks(bh_total, nt_len * nc_len, max_grid=ASCEND_MAX_GRID_DIM)
-            for bh_off in range(0, bh_total, max_bh):
-                bh_len = min(max_bh, bh_total - bh_off)
+            for bh_off, bh_len in iter_axis_launch_chunks(bh_total, nt_len * nc_len):
                 kernel_kwargs['BH_OFFSET'] = bh_off
                 kernel[(nt_len, nc_len, bh_len)](**kernel_kwargs)
                 if sync_stream is not None:
@@ -88,9 +84,7 @@ def _launch_inter_kernel(kernel, *, nt: int, bh_total: int, kernel_kwargs: dict)
             kernel_kwargs['NT_OFFSET'] = 0
         else:
             kernel_kwargs['NT_OFFSET'] = nt_off
-        max_bh = max_grid_axis_chunks(bh_total, nt_len, max_grid=ASCEND_MAX_GRID_DIM)
-        for bh_off in range(0, bh_total, max_bh):
-            bh_len = min(max_bh, bh_total - bh_off)
+        for bh_off, bh_len in iter_axis_launch_chunks(bh_total, nt_len):
             kernel_kwargs['BH_OFFSET'] = bh_off
             kernel[(nt_len, bh_len)](**kernel_kwargs, **_INTER_COMPILE_KWARGS)
 
