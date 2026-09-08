@@ -127,6 +127,7 @@ def test_parallel(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
     reason='Skipping test because SKIP_TEST_CHUNK_VARLEN is set',
 )
+@pytest.mark.smoke
 def test_parallel_varlen(
     H: int,
     HQ: int,
