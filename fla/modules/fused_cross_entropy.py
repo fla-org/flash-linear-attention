@@ -24,35 +24,37 @@ if TYPE_CHECKING:
 
 @triton.jit(do_not_specialize=['N'])
 def cross_entropy_fwd_kernel(
-    logits,
-    target,
-    loss,
-    lse,
-    z_loss,
+    logits,  # [N, V]
+    target,  # [N]
+    loss,  # [NV, N] or [N] when NV == 1
+    lse,  # [NV, N] or [N] when NV == 1
+    z_loss,  # [N]
     s_logits,
-    N,
-    V: tl.constexpr,
-    V_TOTAL: tl.constexpr,
-    V_START: tl.constexpr,
     scale: tl.constexpr,
     softcap: tl.constexpr,
     smoothing: tl.constexpr,
     z_scale: tl.constexpr,
     ignore_index: tl.constexpr,
+    N,
+    V: tl.constexpr,
+    V_TOTAL: tl.constexpr,
+    V_START: tl.constexpr,
     BV: tl.constexpr,
     SPLIT: tl.constexpr,
 ):
     i_n = tl.program_id(0).to(tl.int64)
-    i_v = tl.program_id(1).to(tl.int64)
-    o_v = i_v * BV + tl.arange(0, BV).to(tl.int64)
+    i_v = tl.program_id(1)
+    o_v = i_v * BV + tl.arange(0, BV)
     m_v = o_v < V
     p_logits = logits + i_n * s_logits
 
-    b_logits = tl.load(p_logits + o_v, mask=m_v, other=0).to(tl.float32) * scale
+    # [BV]
+    b_logits = tl.load(p_logits + o_v, mask=m_v, other=-float('inf')).to(tl.float32) * scale
     if softcap is not None:
         b_logits = softcap * tanh(b_logits / softcap)
-    # mask after softcapping so padded lanes cannot contribute to the normalizer
-    b_logits = tl.where(m_v, b_logits, -float('inf'))
+    # these transforms do not preserve -inf in padded lanes
+    if softcap is not None or scale <= 0:
+        b_logits = tl.where(m_v, b_logits, -float('inf'))
     b_max = tl.max(b_logits, 0)
     b_lse = log(tl.sum(exp(b_logits - b_max), 0)) + b_max
 
@@ -81,22 +83,22 @@ def cross_entropy_fwd_kernel(
 
 @triton.jit
 def cross_entropy_bwd_kernel(
-    logits,
-    target,
-    lse,
-    dloss,
-    dlogits,
+    logits,  # [N, V]
+    target,  # [N]
+    lse,  # [N]
+    dloss,  # [N]
+    dlogits,  # [N, V]
     s_logits,
     s_dloss,
     s_dlogits,
-    V: tl.constexpr,
-    V_TOTAL: tl.constexpr,
-    V_START: tl.constexpr,
     scale: tl.constexpr,
     softcap: tl.constexpr,
     smoothing: tl.constexpr,
     z_scale: tl.constexpr,
     ignore_index: tl.constexpr,
+    V: tl.constexpr,
+    V_TOTAL: tl.constexpr,
+    V_START: tl.constexpr,
     BV: tl.constexpr,
 ):
     i_n = tl.program_id(0).to(tl.int64)
@@ -108,11 +110,13 @@ def cross_entropy_bwd_kernel(
 
     b_target = tl.load(target + i_n).to(tl.int64)
     b_dloss = tl.load(dloss + i_n * s_dloss, mask=b_target != ignore_index, other=0).to(tl.float32)
+    # [BV]
     b_logits = tl.load(p_logits, mask=m_v, other=0).to(tl.float32) * scale
     if softcap is not None:
         b_tanh = tanh(b_logits / softcap)
         b_logits = softcap * b_tanh
     b_lse = tl.load(lse + i_n)
+    # [BV]
     b_probs = exp(b_logits - b_lse)
     b_dlogits = b_probs + 2.0 * z_scale * b_lse * b_probs
     b_target -= V_START
@@ -163,15 +167,15 @@ def cross_entropy_fwd(
         lse=lse,
         z_loss=z_loss,
         s_logits=logits.stride(0),
-        N=N,
-        V=V,
-        V_TOTAL=total_classes,
-        V_START=class_start_idx,
         scale=logit_scale,
         softcap=logit_softcapping,
         smoothing=label_smoothing,
         z_scale=lse_square_scale,
         ignore_index=ignore_index,
+        N=N,
+        V=V,
+        V_TOTAL=total_classes,
+        V_START=class_start_idx,
         BV=BV,
         SPLIT=split,
         num_warps=num_warps,
@@ -188,10 +192,13 @@ def cross_entropy_fwd(
             lse = torch.logsumexp(gathered_lse, dim=0)
             work.wait()
         loss += lse
-        z_loss = lse_square_scale * lse.square()
-        loss += z_loss
+        if lse_square_scale != 0:
+            z_loss = lse_square_scale * lse.square()
+            z_loss.masked_fill_(target == ignore_index, 0.0)
+            loss += z_loss
+        else:
+            z_loss = torch.zeros_like(loss)
         loss.masked_fill_(target == ignore_index, 0.0)
-        z_loss.masked_fill_(target == ignore_index, 0.0)
 
     return loss, z_loss, lse, total_classes, class_start_idx
 
@@ -222,14 +229,14 @@ def cross_entropy_bwd(
         s_logits=logits.stride(0),
         s_dloss=dloss.stride(0),
         s_dlogits=dlogits.stride(0),
-        V=V,
-        V_TOTAL=V if total_classes is None else total_classes,
-        V_START=class_start_idx,
         scale=logit_scale,
         softcap=logit_softcapping,
         smoothing=label_smoothing,
         z_scale=lse_square_scale,
         ignore_index=ignore_index,
+        V=V,
+        V_TOTAL=V if total_classes is None else total_classes,
+        V_START=class_start_idx,
         BV=BV,
         num_warps=4 if BV < 2048 else 8,
     )

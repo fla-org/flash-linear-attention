@@ -49,19 +49,20 @@ STATIC_WARPS = 32 if not IS_AMD else 16
 })
 @triton.jit
 def logsumexp_fwd_kernel(
-    x,
-    z,
+    x,  # [N, D]
+    z,  # [N, ND]
     scale,
     softcapping,
     D: tl.constexpr,
-    B: tl.constexpr,
+    BD: tl.constexpr,
     HAS_SCALE: tl.constexpr,
     HAS_SOFTCAPPING: tl.constexpr,
 ):
     i_n, i_d = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
-    o_d = i_d * B + tl.arange(0, B)
+    o_d = i_d * BD + tl.arange(0, BD)
     m_d = o_d < D
 
+    # [BD]
     b_x = tl.load(x + i_n * D + o_d, mask=m_d, other=-float('inf'))
     if HAS_SCALE:
         b_x = b_x * scale
@@ -69,7 +70,7 @@ def logsumexp_fwd_kernel(
         b_x = softcapping * tanh(b_x / softcapping)
     b_m = tl.max(b_x, 0)
     b_z = log(tl.sum(exp(b_x - b_m), 0)) + b_m
-    tl.store(z + i_n * tl.cdiv(D, B) + i_d, b_z)
+    tl.store(z + i_n * tl.cdiv(D, BD) + i_d, b_z)
 
 
 @dispatch('modules')
@@ -82,8 +83,8 @@ def logsumexp_fwd(
     shape = x.shape
     x = x.view(-1, shape[-1])
     N, D = x.shape
-    B = min(triton.next_power_of_2(D), 64 * 1024)
-    ND = triton.cdiv(D, B)
+    BD = min(triton.next_power_of_2(D), 64 * 1024)
+    ND = triton.cdiv(D, BD)
 
     z = x.new_empty(N, ND, dtype=torch.float)
     logsumexp_fwd_kernel[(N, ND)](
@@ -92,7 +93,7 @@ def logsumexp_fwd(
         scale=scale,
         softcapping=softcapping,
         D=D,
-        B=B,
+        BD=BD,
     )
     z = z.logsumexp(-1).view(*shape[:-1])
     if dtype is not None and dtype != torch.float:
@@ -102,34 +103,18 @@ def logsumexp_fwd(
 
 @triton.jit
 def elementwise_mul_kernel(
-    x,
-    g,
+    x,  # [N]
+    g,  # scalar
     N: tl.constexpr,
-    B: tl.constexpr,
+    BN: tl.constexpr,
 ):
-    """
-    This function multiplies each element of the tensor pointed by x with the value pointed by g.
-    The multiplication is performed in-place on the tensor pointed by x.
-
-    Parameters:
-    x:
-        Pointer to the input tensor.
-    g:
-        Pointer to the gradient output value.
-    N (int):
-        The number of columns in the input tensor.
-    B (int):
-        The block size for Triton operations.
-    """
-
-    # Get the program ID and convert it to int64 to avoid overflow
     i_x = tl.program_id(0).to(tl.int64)
-    o_x = i_x * B + tl.arange(0, B)
+    o_x = i_x * BN + tl.arange(0, BN)
 
-    # Load the gradient output value
     b_g = tl.load(g)
     if b_g == 1.0:
         return
+    # [BN]
     b_x = tl.load(x + o_x, mask=o_x < N)
     tl.store(x + o_x, b_x * b_g, mask=o_x < N)
 
@@ -293,34 +278,34 @@ def fused_linear_cross_entropy_bwd(
     # We use a Triton kernel instead of a PyTorch operation because modifying inputs in-place
     # for gradient storage and backward multiple times causes anomalies with PyTorch but not with Triton.
     N, H = dx.shape
-    B = min(MAX_FUSED_SIZE, triton.next_power_of_2(H))
+    BN = min(MAX_FUSED_SIZE, triton.next_power_of_2(H))
 
-    elementwise_mul_kernel[(triton.cdiv(N * H, B),)](
+    elementwise_mul_kernel[(triton.cdiv(N * H, BN),)](
         x=dx,
         g=do,
         N=N*H,
-        B=B,
+        BN=BN,
         num_warps=STATIC_WARPS,
     )
 
     # handle dw
     if dw is not None:
         V, H = dw.shape
-        elementwise_mul_kernel[(triton.cdiv(V * H, B),)](
+        elementwise_mul_kernel[(triton.cdiv(V * H, BN),)](
             x=dw,
             g=do,
             N=V*H,
-            B=B,
+            BN=BN,
             num_warps=STATIC_WARPS,
         )
 
     if db is not None:
         V = db.shape[0]
-        elementwise_mul_kernel[(triton.cdiv(V, B),)](
+        elementwise_mul_kernel[(triton.cdiv(V, BN),)](
             x=db,
             g=do,
             N=V,
-            B=B,
+            BN=BN,
             num_warps=STATIC_WARPS,
         )
     return dx, dw, db

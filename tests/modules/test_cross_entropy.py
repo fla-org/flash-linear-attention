@@ -94,6 +94,29 @@ def test_fused_cross_entropy_softcap(
     assert_close("dl", ref_d, tri_d, ratio=1e-2)
 
 
+@pytest.mark.parametrize('V', [4103, 65537])
+@pytest.mark.parametrize('scale', [0.0, -0.5])
+@pytest.mark.parametrize('softcap', [None, 3.0])
+@pytest.mark.parametrize('dtype', [torch.bfloat16, torch.float32])
+@pytest.mark.skipif(IS_INTEL or IS_NPU, reason="Covers the default Triton GPU kernels")
+def test_fused_cross_entropy_nonpositive_scale(V, scale, softcap, dtype):
+    torch.manual_seed(42)
+    logits = torch.randn(7, V, device=device, dtype=dtype).requires_grad_()
+    target = torch.randint(V, (7,), device=device)
+    target[::3] = -100
+    target[1] = V - 1
+    transformed = logits.float() * scale
+    if softcap is not None:
+        transformed = softcap * torch.tanh(transformed / softcap)
+    ref = F.cross_entropy(transformed, target, label_smoothing=0.1)
+    ref_grad, = torch.autograd.grad(ref, logits)
+    tri = FusedCrossEntropyLoss(label_smoothing=0.1, logit_scale=scale, logit_softcapping=softcap)(logits, target)
+    tri_grad, = torch.autograd.grad(tri, logits)
+
+    assert_close('loss', ref, tri, ratio=1e-2)
+    assert_close('dlogits', ref_grad, tri_grad, ratio=1e-2)
+
+
 @pytest.mark.parametrize("B", [2])
 @pytest.mark.parametrize("T", [512, 1024])
 @pytest.mark.parametrize("D", [1024, 2048])

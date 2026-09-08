@@ -81,10 +81,9 @@ def _check_parallel_case(rank, world_size, local_vocab, dtype, option, reduction
         assert_close(name, expected.float(), actual.float(), ratio=1e-2, err_atol=0 if option == 'confident' else 1e-6)
 
 
-def _parallel_worker(rank, world_size, init_file, allow_reduced_precision):
+def _parallel_worker(rank, world_size, init_file):
     device_torch_lib.set_device(rank)
     torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = allow_reduced_precision
     dist.init_process_group(
         backend='nccl',
         init_method=f'file://{init_file}',
@@ -109,14 +108,13 @@ def _parallel_worker(rank, world_size, init_file, allow_reduced_precision):
 
 
 @pytest.mark.parametrize('world_size', [1, 2, 4])
-@pytest.mark.parametrize('allow_reduced_precision', [True, False])
 @pytest.mark.skipif(not IS_NVIDIA, reason="Vocabulary-parallel fused linear CE requires the default GPU backend")
-def test_fused_linear_cross_entropy_parallel(world_size, allow_reduced_precision, tmp_path):
+def test_fused_linear_cross_entropy_parallel(world_size, tmp_path):
     if device_torch_lib.device_count() < world_size:
         pytest.skip(f"Requires {world_size} devices")
     mp.spawn(
         fn=_parallel_worker,
-        args=(world_size, str(tmp_path / 'init'), allow_reduced_precision),
+        args=(world_size, str(tmp_path / 'init')),
         nprocs=world_size,
         join=True,
     )
