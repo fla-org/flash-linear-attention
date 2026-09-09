@@ -191,9 +191,9 @@ def chunk_gdn2_bwd_kernel_wy_dqkg_fused(
             b_dv = tl.load(p_dv, mask=m_vv, other=0.0)
 
             b_dgk += tl.sum(b_h * b_dh, axis=0)
-            b_dq += tl.dot(b_do, b_h.to(b_do.dtype))
-            b_dk += tl.dot(b_v_new, b_dh.to(b_v_new.dtype))
-            b_dw_flow += tl.dot(b_dv.to(b_v_new.dtype), b_h.to(b_v_new.dtype))
+            b_dq = tl.dot(b_do, b_h.to(b_do.dtype), b_dq)
+            b_dk = tl.dot(b_v_new, b_dh.to(b_v_new.dtype), b_dk)
+            b_dw_flow = tl.dot(b_dv.to(b_v_new.dtype), b_h.to(b_v_new.dtype), b_dw_flow)
             tl.debug_barrier()
 
             if i_k == 0:
@@ -205,7 +205,7 @@ def chunk_gdn2_bwd_kernel_wy_dqkg_fused(
                 b_v = tl.load(p_v, mask=m_vv, other=0.0)
                 b_wg = tl.load(p_wg, mask=m_vv, other=0.0)
                 # dA gets (w_gate * v) on the value side - the GDN-2 channel-wise twist.
-                b_dA += tl.dot(b_dv, tl.trans(b_v * b_wg))
+                b_dA = tl.dot(b_dv, tl.trans(b_v * b_wg), b_dA)
 
                 b_dvb = tl.dot(b_A, b_dv)
                 b_dv2 = b_dvb * b_wg
@@ -224,7 +224,7 @@ def chunk_gdn2_bwd_kernel_wy_dqkg_fused(
 
         b_dw_flow = -b_dw_flow.to(b_A.dtype)
         # dA gets (b * exp(gk) * k) on the key side - the GDN-2 channel-wise twist.
-        b_dA += tl.dot(b_dw_flow, tl.trans((b_kg * b_b).to(b_A.dtype)))
+        b_dA = tl.dot(b_dw_flow, tl.trans((b_kg * b_b).to(b_A.dtype)), b_dA)
 
         b_dkgb = tl.dot(b_A, b_dw_flow)
         p_db = db + o_t[:, None] * (H * K) + o_k[None, :]

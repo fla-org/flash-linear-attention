@@ -424,6 +424,7 @@ def test_chunk_state_v_first():
         ]
     ],
 )
+@pytest.mark.smoke
 def test_chunk_varlen(cu_seqlens, H, K, V, use_gate_in_kernel, dtype):
     """Packed varlen chunk run (fwd + grads) must equal per-sequence reference."""
     cu = torch.LongTensor(cu_seqlens).to(device)

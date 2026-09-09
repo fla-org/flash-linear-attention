@@ -171,7 +171,7 @@ def prepare_wy_repr_bwd_kernel(
         b_vbg = b_v * b_b[:, None] * b_gv_exp
         b_dw = tl.load(p_dw, mask=m_tv, other=0.0)
 
-        b_dA += tl.dot(b_dw, tl.trans(b_vbg).to(b_dw.dtype))
+        b_dA = tl.dot(b_dw, tl.trans(b_vbg).to(b_dw.dtype), b_dA)
         b_dvbg = tl.dot(b_A, b_dw)
         b_dv = b_dvbg * b_gv_exp * b_b[:, None]
         b_db += tl.sum(b_dvbg * b_v * b_gv_exp, 1)
@@ -191,7 +191,7 @@ def prepare_wy_repr_bwd_kernel(
         b_k = tl.load(p_k, mask=m_tk, other=0.0)
         b_kb = (b_k * b_b[:, None]).to(b_k.dtype)  # BT BK
         b_du = tl.load(p_du, mask=m_tk, other=0.0)  # BT BK
-        b_dA += tl.dot(b_du, tl.trans(b_kb))  # BT BT
+        b_dA = tl.dot(b_du, tl.trans(b_kb), b_dA)  # BT BT
         b_dkb = tl.dot(b_A, b_du)  # BT BK
         b_dk = b_dkb * b_b[:, None]
         b_db += tl.sum(b_dkb * b_k, 1)

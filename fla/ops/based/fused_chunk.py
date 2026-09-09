@@ -79,7 +79,7 @@ def fused_chunk_based_fwd_kernel(
         b_o += b_h_0o
         b_z += k_0o
         # first-order
-        b_o += tl.dot(b_q, b_h_1o.to(b_q.dtype), allow_tf32=False)
+        b_o = tl.dot(b_q, b_h_1o.to(b_q.dtype), b_o, allow_tf32=False)
         b_z += tl.sum(b_q * k_1o, axis=1)
         # second-order
         b_q_2o = b_q[:, :, None] * b_q[:, None, :]
@@ -98,7 +98,7 @@ def fused_chunk_based_fwd_kernel(
         b_s = 1 + b_s + 0.5 * b_s * b_s
         b_s = tl.where(m_s, b_s, 0)
         b_z += tl.sum(b_s, axis=1)
-        b_o += tl.dot(b_s.to(b_q.dtype), b_v, allow_tf32=False)
+        b_o = tl.dot(b_s.to(b_q.dtype), b_v, b_o, allow_tf32=False)
         # [TB, BV]
         tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=m_v)
         # only one V-split program writes z: its address does not depend on
@@ -110,8 +110,8 @@ def fused_chunk_based_fwd_kernel(
 
         # update hidden state
         # [BK, BV]
-        b_h_2o = b_h_2o + tl.dot(b_k_2o.to(b_v.dtype), b_v, allow_tf32=False)
-        b_h_1o = b_h_1o + tl.dot(b_k, b_v, allow_tf32=False)
+        b_h_2o = tl.dot(b_k_2o.to(b_v.dtype), b_v, b_h_2o, allow_tf32=False)
+        b_h_1o = tl.dot(b_k, b_v, b_h_1o, allow_tf32=False)
         b_h_0o = b_h_0o + tl.sum(b_v, axis=0)
 
         p_z += BT
@@ -181,7 +181,7 @@ def fused_chunk_based_bwd_kernel(
         b_v = tl.load(p_v, mask=m_kv, other=0.0)
 
         # inter-chunk
-        b_dq += tl.dot(b_do, (b_h_1o).to(b_do.dtype), allow_tf32=False)
+        b_dq = tl.dot(b_do, (b_h_1o).to(b_do.dtype), b_dq, allow_tf32=False)
         if i_v == 0:
             b_dq += b_dz[:, None] * k_1o
         b_dq_2o = tl.dot(b_do, (b_h_2o).to(b_do.dtype), allow_tf32=False) * 0.5
@@ -200,7 +200,7 @@ def fused_chunk_based_bwd_kernel(
         b_ds = tl.where(m_s, b_ds, 0) * scale
         b_s = tl.dot(b_q, tl.trans(b_k), allow_tf32=False)
         b_s = tl.where(m_s, b_s, 0)
-        b_dq += tl.dot((b_ds * (1 + b_s)).to(b_q.dtype), b_k, allow_tf32=False)
+        b_dq = tl.dot((b_ds * (1 + b_s)).to(b_q.dtype), b_k, b_dq, allow_tf32=False)
 
         # store
         tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), mask=m_q)
@@ -210,9 +210,9 @@ def fused_chunk_based_bwd_kernel(
         b_k_2o = b_k[:, :, None] * b_k[:, None, :]
         b_k_2o = tl.reshape(b_k_2o, [BT, BK * BK]).to(b_k.dtype)
         # [BV, BK*BK]
-        b_h_2o = b_h_2o + tl.dot(b_v, b_k_2o.to(b_v.dtype), allow_tf32=False)
+        b_h_2o = tl.dot(b_v, b_k_2o.to(b_v.dtype), b_h_2o, allow_tf32=False)
         # [BV, BK]
-        b_h_1o = b_h_1o + tl.dot(b_v, b_k, allow_tf32=False)
+        b_h_1o = tl.dot(b_v, b_k, b_h_1o, allow_tf32=False)
 
         if i_v == 0:
             # update running statistics
@@ -268,18 +268,18 @@ def fused_chunk_based_bwd_kernel(
         b_s2 = tl.where(m_s, b_s2, 0)
         b_ds *= (1+b_s)
 
-        b_dk += tl.dot(b_ds.to(b_k.dtype), tl.trans(b_q), allow_tf32=False)
-        b_dv += tl.dot(b_s2.to(b_do.dtype), b_do, allow_tf32=False)
+        b_dk = tl.dot(b_ds.to(b_k.dtype), tl.trans(b_q), b_dk, allow_tf32=False)
+        b_dv = tl.dot(b_s2.to(b_do.dtype), b_do, b_dv, allow_tf32=False)
 
         # inter chunk
         b_k_2o = b_k[:, :, None] * b_k[:, None, :]
         b_k_2o = tl.reshape(b_k_2o, [BT, BK * BK]).to(b_k.dtype)
 
-        b_dv += tl.dot(b_k, b_dh_1o.to(b_k.dtype), allow_tf32=False)
-        b_dv += tl.dot(b_k_2o, b_dh_2o.to(b_k.dtype), allow_tf32=False)
+        b_dv = tl.dot(b_k, b_dh_1o.to(b_k.dtype), b_dv, allow_tf32=False)
+        b_dv = tl.dot(b_k_2o, b_dh_2o.to(b_k.dtype), b_dv, allow_tf32=False)
         b_dv += b_dh_0o
 
-        b_dk += tl.dot(b_v, tl.trans(b_dh_1o).to(b_k.dtype), allow_tf32=False)
+        b_dk = tl.dot(b_v, tl.trans(b_dh_1o).to(b_k.dtype), b_dk, allow_tf32=False)
 
         if i_v == 0:
             b_dk += dq_1o
@@ -295,7 +295,7 @@ def fused_chunk_based_bwd_kernel(
 
         # hidden state update
         b_dh_0o += tl.sum(b_do, axis=0)
-        b_dh_1o = b_dh_1o + tl.dot(b_q, b_do, allow_tf32=False)
+        b_dh_1o = tl.dot(b_q, b_do, b_dh_1o, allow_tf32=False)
         b_q_2o = b_q[None, :, :] * b_q[:, None, :]
         b_q_2o = tl.reshape(b_q_2o, [BK * BK, BT]).to(b_k.dtype)
         b_dh_2o = b_dh_2o + tl.dot(b_q_2o, b_do, allow_tf32=False) * 0.5

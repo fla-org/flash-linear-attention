@@ -107,7 +107,7 @@ class TritonAscendBackend(BaseBackend):
         )
         return logsumexp_fwd_npu(x=x, scale=scale, softcapping=softcapping, dtype=dtype)
 
-    def fused_linear_cross_entropy_forward(
+    def fused_linear_cross_entropy_fwd(
         self,
         x,
         target,
@@ -122,7 +122,10 @@ class TritonAscendBackend(BaseBackend):
         use_l2warp=False,
         l2_penalty_factor=1e-4,
         accumulate_grad_in_fp32=True,
+        process_group=None,
     ):
+        if process_group is not None and torch.distributed.get_world_size(process_group) > 1:
+            raise NotImplementedError("Vocabulary-parallel fused linear cross entropy is not supported by the Ascend backend")
         from fla.modules.backends.triton_ascend.fused_linear_cross_entropy import (
             fused_linear_cross_entropy_forward_npu,
         )
@@ -142,7 +145,7 @@ class TritonAscendBackend(BaseBackend):
             accumulate_grad_in_fp32=accumulate_grad_in_fp32,
         )
 
-    def fused_linear_cross_entropy_backward(
+    def fused_linear_cross_entropy_bwd(
         self,
         do,
         dx,
@@ -153,6 +156,9 @@ class TritonAscendBackend(BaseBackend):
             fused_linear_cross_entropy_backward_npu,
         )
         return fused_linear_cross_entropy_backward_npu(do=do, dx=dx, dw=dw, db=db)
+
+    fused_linear_cross_entropy_forward = fused_linear_cross_entropy_fwd
+    fused_linear_cross_entropy_backward = fused_linear_cross_entropy_bwd
 
     def sigmoid_fwd(self, x, output_contiguous=False):
         from fla.modules.backends.triton_ascend.activations import sigmoid_fwd_npu
