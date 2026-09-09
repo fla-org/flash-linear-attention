@@ -131,11 +131,11 @@ def chunk_fwd_kernel_o(
 
         # [BT, BK] @ [BK, BV] -> [BT, BV]
         if STATE_V_FIRST:
-            b_o += tl.dot(b_q, tl.trans(b_h))
+            b_o = tl.dot(b_q, tl.trans(b_h), b_o)
         else:
-            b_o += tl.dot(b_q, b_h)
+            b_o = tl.dot(b_q, b_h, b_o)
         # [BT, BK] @ [BK, BT] -> [BT, BT]
-        b_A += tl.dot(b_q, b_k)
+        b_A = tl.dot(b_q, b_k, b_A)
 
     if USE_G:
         g += bos * HV + i_h
@@ -278,15 +278,15 @@ def chunk_bwd_kernel_dqkwg(
         if USE_G:
             b_dg_last += (tl.sum(b_h * b_dh))
         # [BT, BV] @ [BV, BT] -> [BT, BT]
-        b_ds += tl.dot(b_do, tl.trans(b_v))
+        b_ds = tl.dot(b_do, tl.trans(b_v), b_ds)
         # [BT, BV] @ [BV, BK] -> [BT, BK]
-        b_dq += tl.dot(b_do, b_h.to(b_do.dtype))
+        b_dq = tl.dot(b_do, b_h.to(b_do.dtype), b_dq)
         # [BT, BV] @ [BV, BK] -> [BT, BK]
-        b_dk += tl.dot(b_v, b_dh.to(b_v.dtype))
+        b_dk = tl.dot(b_v, b_dh.to(b_v.dtype), b_dk)
         if USE_DW:
             p_dv = dv + o_t[:, None] * (HV*V) + o_v[None, :]
             b_dv = tl.load(p_dv, mask=m_hv, other=0.0)
-            b_dw += tl.dot(b_dv.to(b_v.dtype), b_h.to(b_v.dtype))
+            b_dw = tl.dot(b_dv.to(b_v.dtype), b_h.to(b_v.dtype), b_dw)
 
     if USE_DW:
         p_dw = dw + o_t[:, None] * (HV*K) + o_k[None, :]
@@ -316,8 +316,8 @@ def chunk_bwd_kernel_dqkwg(
         b_ds = tl.where(m_A, b_ds * exp2(b_g[:, None] - b_g[None, :]), 0) * scale
         b_ds = b_ds.to(b_k.dtype)
         # [BT, BK]
-        b_dq += tl.dot(b_ds, b_k)
-        b_dk += tl.dot(tl.trans(b_ds), b_q)
+        b_dq = tl.dot(b_ds, b_k, b_dq)
+        b_dk = tl.dot(tl.trans(b_ds), b_q, b_dk)
 
         b_dg = tl.sum(b_dq * b_q, axis=1) - tl.sum(b_dk * b_k, axis=1)
 
@@ -335,15 +335,15 @@ def chunk_bwd_kernel_dqkwg(
         b_ds = tl.where(m_A, b_ds * exp2(b_g[:, None] - b_g[None, :]), 0) * scale
         b_ds = b_ds.to(b_k.dtype)
         # [BT, BK]
-        b_dq += tl.dot(b_ds, b_k)
-        b_dk += tl.dot(tl.trans(b_ds), b_q)
+        b_dq = tl.dot(b_ds, b_k, b_dq)
+        b_dk = tl.dot(tl.trans(b_ds), b_q, b_dk)
         tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), mask=m_qk)
         tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), mask=m_qk)
 
     else:
         b_ds = tl.where(m_A, b_ds, 0)
         b_ds = b_ds.to(b_k.dtype)
-        b_dq += tl.dot(b_ds, b_k)
+        b_dq = tl.dot(b_ds, b_k, b_dq)
         b_dk += tl.dot(tl.trans(b_ds), b_q) * scale
         b_dq *= scale
         tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), mask=m_qk)
@@ -422,14 +422,14 @@ def chunk_bwd_kernel_dv(
         p_q = q + o_k[:, None] + o_t[None, :] * (H*K)
         b_q = tl.load(p_q, mask=m_k[:, None] & m_t[None, :], other=0.0)
         b_k = tl.load(p_k, mask=m_t[:, None] & m_k[None, :], other=0.0)
-        b_A += tl.dot(b_k, b_q)
+        b_A = tl.dot(b_k, b_q, b_A)
         if STATE_V_FIRST:
             p_dh = dh + o_v[:, None] * K + o_k[None, :]
             b_dh = tl.trans(tl.load(p_dh, mask=(o_v[:, None] < V) & m_k[None, :], other=0.0))
         else:
             p_dh = dh + o_k[:, None] * V + o_v[None, :]
             b_dh = tl.load(p_dh, mask=m_k[:, None] & (o_v[None, :] < V), other=0.0)
-        b_dv += tl.dot(b_k, b_dh.to(b_k.dtype))
+        b_dv = tl.dot(b_k, b_dh.to(b_k.dtype), b_dv)
 
     if USE_G:
         g += bos * HV + i_h
@@ -450,7 +450,7 @@ def chunk_bwd_kernel_dv(
     p_do = do + o_t[:, None] * (HV*V) + o_v[None, :]
     p_dv = dv + o_t[:, None] * (HV*V) + o_v[None, :]
     b_do = tl.load(p_do, mask=m_t[:, None] & (o_v < V)[None, :], other=0.0)
-    b_dv += tl.dot(b_A.to(b_do.dtype), b_do)
+    b_dv = tl.dot(b_A.to(b_do.dtype), b_do, b_dv)
     tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), mask=m_t[:, None] & (o_v < V)[None, :])
 
 
