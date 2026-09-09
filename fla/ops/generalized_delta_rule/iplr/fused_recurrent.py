@@ -50,7 +50,9 @@ def fused_recurrent_fwd_kernel(
     STORE_FINAL_STATE: tl.constexpr,  # whether to store final state
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_nh = tl.program_id(0), tl.program_id(1)
+    pid = tl.program_id(0)
+    NV = tl.cdiv(V, BV)
+    i_v, i_nh = pid % NV, (pid // NV).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
 
     if IS_VARLEN:
@@ -152,7 +154,9 @@ def fused_recurrent_bwd_kernel(
     USE_DHT: tl.constexpr,  # whether to use dht
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_nh = tl.program_id(0), tl.program_id(1)
+    pid = tl.program_id(0)
+    NV = tl.cdiv(V, BV)
+    i_v, i_nh = (pid % NV).to(tl.int64), (pid // NV).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
     dk += i_v * B * H * K * T
     db += i_v * B * H * K * T
@@ -306,8 +310,7 @@ class FusedRecurrentIPLRDeltaRuleFunction(torch.autograd.Function):
         ha = torch.empty_like(v, dtype=torch.float32)
 
         def grid(meta): return (
-            triton.cdiv(V, meta['BV']),
-            N * H,
+            triton.cdiv(V, meta['BV']) * N * H,
         )
         o = torch.empty_like(v)
         fused_recurrent_fwd_kernel[grid](
@@ -349,7 +352,7 @@ class FusedRecurrentIPLRDeltaRuleFunction(torch.autograd.Function):
         db = b.new_empty(NV, *b.shape)
         dv = torch.empty_like(v)
         dha = torch.empty_like(ha)
-        grid = (NV, N * H)
+        grid = (NV * N * H,)
 
         if initial_state is not None and initial_state.requires_grad:
             dh0 = torch.empty_like(initial_state, dtype=torch.float32)

@@ -19,6 +19,7 @@ from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.attn import Attention
 from fla.layers.mamba import Mamba
+from fla.models.hybrid import get_hybrid_attention_spec
 from fla.models.samba.configuration_samba import SambaConfig
 from fla.models.utils import Cache, FLAGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
@@ -47,14 +48,15 @@ class SambaBlock(GradientCheckpointingLayer):
         self.layer_idx = layer_idx
 
         self.mixer_norm = RMSNorm(hidden_size=config.hidden_size, eps=config.norm_eps, dtype=torch.float32)
-        if config.attn is not None and layer_idx in config.attn['layers']:
+        attn_spec = get_hybrid_attention_spec(config.attn, layer_idx=layer_idx)
+        if attn_spec is not None:
             self.mixer = Attention(
                 hidden_size=config.hidden_size,
-                num_heads=config.attn['num_heads'],
-                num_kv_heads=config.attn['num_kv_heads'],
-                qkv_bias=config.attn['qkv_bias'],
-                window_size=config.attn['window_size'],
-                rope_theta=config.attn['rope_theta'],
+                num_heads=attn_spec['num_heads'],
+                num_kv_heads=attn_spec['num_kv_heads'],
+                qkv_bias=attn_spec['qkv_bias'],
+                window_size=attn_spec['window_size'],
+                rope_theta=attn_spec['rope_theta'],
                 max_position_embeddings=config.max_position_embeddings,
                 layer_idx=layer_idx,
             )
@@ -227,7 +229,7 @@ class SambaPreTrainedModel(PreTrainedModel):
             #   > the weights of residual layers at initialization by a factor of 1/√N where N is the # of residual layers.
             #   >   -- GPT-2 :: https://openai.com/blog/better-language-models/
             #
-            # Reference (Megatron-LM): https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/model/gpt_model.py
+            # Reference (Megatron-LM): https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/models/gpt/gpt_model.py
             for name, p in module.named_parameters():
                 if name in ["out_proj.weight"]:
                     # Special Scaled Initialization --> There are 2 Layer Norms per Transformer Block
@@ -409,7 +411,11 @@ class SambaForCausalLM(SambaPreTrainedModel, FLAGenerationMixin):
 
         loss, logits = None, None
         if not self.config.fuse_linear_cross_entropy or labels is None:
-            logits = self.lm_head(hidden_states if logits_to_keep is None else hidden_states[:, -logits_to_keep:])
+            logits = self.lm_head(
+                hidden_states
+                if labels is not None or logits_to_keep is None
+                else hidden_states[:, -logits_to_keep:]
+            )
         if labels is not None:
             if getattr(self, 'criterion', None) is None:
                 if self.config.fuse_linear_cross_entropy:

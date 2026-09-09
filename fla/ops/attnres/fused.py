@@ -70,7 +70,7 @@ def attnres_fwd_kernel(
     b_o = tl.zeros([BD], dtype=tl.float32)
     for i_l in range(tl.cdiv(L, BL)):
         # [BL]
-        o_l = i_l * BL + tl.arange(0, BL)
+        o_l = (i_l * BL).to(tl.int64) + tl.arange(0, BL)
         m_l = o_l < L
         # per-tile base pointers from the length-L2 padded tuple; OOB rows keep res[0] and are masked by m_l
         p_v = res[0] + o_l * 0
@@ -100,25 +100,25 @@ def attnres_fwd_kernel(
         b_o = b_o * b_r + tl.sum(b_p[:, None] * b_v, axis=0)
 
         # rstd and logit saved for bwd_dv
-        p_rstd = tl.make_block_ptr(rstd + i_n, (L,), (N,), (i_l * BL,), (BL,), (0,))
-        p_logit = tl.make_block_ptr(logit + i_n, (L,), (N,), (i_l * BL,), (BL,), (0,))
-        tl.store(p_rstd, b_rstd.to(rstd.dtype.element_ty), boundary_check=(0,))
-        tl.store(p_logit, b_logit.to(logit.dtype.element_ty), boundary_check=(0,))
+        p_rstd = rstd + i_n + o_l * N
+        p_logit = logit + i_n + o_l * N
+        tl.store(p_rstd, b_rstd.to(rstd.dtype.element_ty), mask=m_l)
+        tl.store(p_logit, b_logit.to(logit.dtype.element_ty), mask=m_l)
 
     tl.store(lse + i_n, b_m + tl.log(b_acc))
 
     # [BD] pre-norm mixed residual sum_l p_l * v_l
     b_o = b_o / b_acc
     if SAVE_OPRE:
-        p_o_pre = tl.make_block_ptr(o_pre + i_n * D, (D,), (1,), (0,), (BD,), (0,))
-        tl.store(p_o_pre, b_o.to(p_o_pre.dtype.element_ty), boundary_check=(0,))
+        p_o_pre = o_pre + i_n * D + o_d
+        tl.store(p_o_pre, b_o.to(p_o_pre.dtype.element_ty), mask=m_d)
     # fold the optional output RMSNorm into the returned output o (o_rstd is recomputed from o_pre in bwd, not stored)
     if HAS_ONORM:
         b_o_rstd = tl.rsqrt(tl.sum(tl.where(m_d, b_o * b_o, 0.0), axis=0) / D + eps)
         b_ow = tl.load(ow + o_d, mask=m_d, other=0.).to(tl.float32)
         b_o = b_o * b_o_rstd * b_ow
-    p_o = tl.make_block_ptr(o + i_n * D, (D,), (1,), (0,), (BD,), (0,))
-    tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0,))
+    p_o = o + i_n * D + o_d
+    tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=m_d)
 
 
 @fla_cache_autotune(
@@ -163,16 +163,16 @@ def attnres_bwd_kernel_dv(
     m_d = o_d < D
     b_qw = tl.load(q + o_d, mask=m_d, other=0.).to(tl.float32) * tl.load(w + o_d, mask=m_d, other=0.).to(tl.float32)
     b_lse = tl.load(lse + i_n).to(tl.float32)
-    p_do = tl.make_block_ptr(do + i_n * D, (D,), (1,), (0,), (BD,), (0,))
-    b_do = tl.load(p_do, boundary_check=(0,), padding_option="zero").to(tl.float32)
+    p_do = do + i_n * D + o_d
+    b_do = tl.load(p_do, mask=m_d, other=0.0).to(tl.float32)
     if SAVE_OPRE:
-        p_o_pre = tl.make_block_ptr(o_pre + i_n * D, (D,), (1,), (0,), (BD,), (0,))
-        b_o_pre = tl.load(p_o_pre, boundary_check=(0,), padding_option="zero").to(tl.float32)
+        p_o_pre = o_pre + i_n * D + o_d
+        b_o_pre = tl.load(p_o_pre, mask=m_d, other=0.0).to(tl.float32)
     else:
         # level 1: recompute the mix sum_l p_l * v_l from V
         b_o_pre = tl.zeros([BD], dtype=tl.float32)
         for i_l in range(tl.cdiv(L, BL)):
-            o_l = i_l * BL + tl.arange(0, BL)
+            o_l = (i_l * BL).to(tl.int64) + tl.arange(0, BL)
             m_l = o_l < L
             p_v = res[0] + o_l * 0
             for i in tl.static_range(1, L2):
@@ -183,8 +183,8 @@ def attnres_bwd_kernel_dv(
                 mask=m_l[:, None] & m_d[None, :],
                 other=0.0,
             ).to(tl.float32)
-            p_logit = tl.make_block_ptr(logit + i_n, (L,), (N,), (i_l * BL,), (BL,), (0,))
-            b_logit = tl.load(p_logit, boundary_check=(0,), padding_option="zero").to(tl.float32)
+            p_logit = logit + i_n + o_l * N
+            b_logit = tl.load(p_logit, mask=m_l, other=0.0).to(tl.float32)
             b_p = tl.where(m_l, exp(b_logit * scale - b_lse), 0.0)
             b_o_pre += tl.sum(b_p[:, None] * b_v, axis=0)
 
@@ -194,8 +194,8 @@ def attnres_bwd_kernel_dv(
         b_ow = tl.load(ow + o_d, mask=m_d, other=0.).to(tl.float32)
         b_xhat = b_o_pre * b_o_rstd
         b_c1 = tl.sum(tl.where(m_d, b_xhat * b_ow * b_do, 0.0), axis=0) / D
-        p_dow = tl.make_block_ptr(dow_partial + i_n * D, (D,), (1,), (0,), (BD,), (0,))
-        tl.store(p_dow, (b_xhat * b_do).to(p_dow.dtype.element_ty), boundary_check=(0,))
+        p_dow = dow_partial + i_n * D + o_d
+        tl.store(p_dow, (b_xhat * b_do).to(p_dow.dtype.element_ty), mask=m_d)
         b_do = (b_ow * b_do - b_xhat * b_c1) * b_o_rstd
     # delta = sum_l p*dp = <do_pre, o_pre>
     b_delta = tl.sum(tl.where(m_d, b_do * b_o_pre, 0.0), axis=0)
@@ -204,7 +204,7 @@ def attnres_bwd_kernel_dv(
     b_dqw = tl.zeros([BD], dtype=tl.float32)
     for i_l in range(tl.cdiv(L, BL)):
         # [BL]
-        o_l = i_l * BL + tl.arange(0, BL)
+        o_l = (i_l * BL).to(tl.int64) + tl.arange(0, BL)
         m_l = o_l < L
         m_v = m_l[:, None] & m_d[None, :]
         # per-tile source / dv base pointers from the length-L2 padded tuple
@@ -222,11 +222,11 @@ def attnres_bwd_kernel_dv(
             other=0.0,
         ).to(tl.float32)
 
-        p_rstd = tl.make_block_ptr(rstd + i_n, (L,), (N,), (i_l * BL,), (BL,), (0,))
-        p_logit = tl.make_block_ptr(logit + i_n, (L,), (N,), (i_l * BL,), (BL,), (0,))
+        p_rstd = rstd + i_n + o_l * N
+        p_logit = logit + i_n + o_l * N
         # [BL]; recompute probs from logit + lse, OOB rows masked to 0
-        b_rstd = tl.load(p_rstd, boundary_check=(0,), padding_option="zero").to(tl.float32)
-        b_logit = tl.load(p_logit, boundary_check=(0,), padding_option="zero").to(tl.float32)
+        b_rstd = tl.load(p_rstd, mask=m_l, other=0.0).to(tl.float32)
+        b_logit = tl.load(p_logit, mask=m_l, other=0.0).to(tl.float32)
         b_p = tl.where(m_l, exp(b_logit * scale - b_lse), 0.0)
 
         # softmax bwd with delta already known
@@ -243,8 +243,8 @@ def attnres_bwd_kernel_dv(
         # [BD]
         b_dqw += tl.sum(b_ds[:, None] * b_k, axis=0)
 
-    p_dqw = tl.make_block_ptr(dqw + i_n * D, (D,), (1,), (0,), (BD,), (0,))
-    tl.store(p_dqw, b_dqw, boundary_check=(0,))
+    p_dqw = dqw + i_n * D + o_d
+    tl.store(p_dqw, b_dqw, mask=m_d)
 
 
 @fla_cache_autotune(
@@ -282,11 +282,13 @@ def attnres_bwd_kernel_dqdw(
     b_dqw = tl.zeros([BD], dtype=tl.float32)
     b_dow = tl.zeros([BD], dtype=tl.float32)
     for i_n in range(0, N, BN):
-        p_dqw = tl.make_block_ptr(dqw, (N, D), (D, 1), (i_n, i_d * BD), (BN, BD), (1, 0))
-        b_dqw += tl.sum(tl.load(p_dqw, boundary_check=(0, 1), padding_option="zero").to(tl.float32), axis=0)
+        o_n = i_n.to(tl.int64) + tl.arange(0, BN)
+        m_nd = (o_n[:, None] < N) & m_d[None, :]
+        p_dqw = dqw + o_n[:, None] * D + o_d[None, :]
+        b_dqw += tl.sum(tl.load(p_dqw, mask=m_nd, other=0.0).to(tl.float32), axis=0)
         if HAS_ONORM:
-            p_dow = tl.make_block_ptr(dow_partial, (N, D), (D, 1), (i_n, i_d * BD), (BN, BD), (1, 0))
-            b_dow += tl.sum(tl.load(p_dow, boundary_check=(0, 1), padding_option="zero").to(tl.float32), axis=0)
+            p_dow = dow_partial + o_n[:, None] * D + o_d[None, :]
+            b_dow += tl.sum(tl.load(p_dow, mask=m_nd, other=0.0).to(tl.float32), axis=0)
 
     # the logit uses the q * w product, so dq = (sum_n dqw) * w and dw = (sum_n dqw) * q
     # [BD]

@@ -9,7 +9,7 @@ import importlib
 from pkgutil import extend_path
 
 __path__ = extend_path(__path__, __name__)
-__version__ = "0.5.2"
+__version__ = "0.6.0"
 
 __all__: list[str] = []
 

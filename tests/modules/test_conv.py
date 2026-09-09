@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from einops import rearrange
 
 from fla.modules.convolution import ShortConvolution, causal_conv1d, causal_conv1d_update
-from fla.utils import assert_close, device
+from fla.utils import IS_NVIDIA, assert_close, device
 
 try:
     from causal_conv1d import causal_conv1d_fn
@@ -147,8 +147,11 @@ def test_conv(
     dtype: torch.dtype,
     backend: str,
 ):
-    if causal_conv1d_fn is None and backend == 'cuda':
-        pytest.skip("causal_conv1d is not installed for CUDA backend")
+    if backend == 'cuda':
+        if causal_conv1d_fn is None:
+            pytest.skip("causal_conv1d is not installed for CUDA backend")
+        if not IS_NVIDIA:
+            pytest.skip("CUDA backend requires an NVIDIA GPU")
     torch.manual_seed(42)
 
     x = torch.randn(B, T, D).to(device, dtype).requires_grad_(True)
@@ -219,8 +222,11 @@ def test_conv_varlen(
     dtype: torch.dtype,
     backend: str,
 ):
-    if causal_conv1d_fn is None and backend == 'cuda':
-        pytest.skip("causal_conv1d is not installed for CUDA backend")
+    if backend == 'cuda':
+        if causal_conv1d_fn is None:
+            pytest.skip("causal_conv1d is not installed for CUDA backend")
+        if not IS_NVIDIA:
+            pytest.skip("CUDA backend requires an NVIDIA GPU")
     torch.manual_seed(42)
     cu_seqlens = torch.cat([
         torch.tensor([0], dtype=torch.long),
@@ -373,8 +379,11 @@ def test_conv_with_cache_prefill_fwd(
     dtype: torch.dtype,
     backend: str,
 ):
-    if causal_conv1d_fn is None and backend == 'cuda':
-        pytest.skip("causal_conv1d is not installed for CUDA backend")
+    if backend == 'cuda':
+        if causal_conv1d_fn is None:
+            pytest.skip("causal_conv1d is not installed for CUDA backend")
+        if not IS_NVIDIA:
+            pytest.skip("CUDA backend requires an NVIDIA GPU")
     torch.manual_seed(42)
 
     x = torch.randn(B, T, D).to(device, dtype)
@@ -448,8 +457,11 @@ def test_conv_varlen_with_cache_prefill_fwd(
     dtype: torch.dtype,
     backend: str,
 ):
-    if causal_conv1d_fn is None and backend == 'cuda':
-        pytest.skip("causal_conv1d is not installed for CUDA backend")
+    if backend == 'cuda':
+        if causal_conv1d_fn is None:
+            pytest.skip("causal_conv1d is not installed for CUDA backend")
+        if not IS_NVIDIA:
+            pytest.skip("CUDA backend requires an NVIDIA GPU")
     torch.manual_seed(42)
 
     min_len_each = max(1, T // N)
@@ -543,8 +555,11 @@ def test_conv_decoding_with_cache(
     dtype: torch.dtype,
     backend: str,
 ):
-    if causal_conv1d_fn is None and backend == 'cuda':
-        pytest.skip("causal_conv1d is not installed for CUDA backend")
+    if backend == 'cuda':
+        if causal_conv1d_fn is None:
+            pytest.skip("causal_conv1d is not installed for CUDA backend")
+        if not IS_NVIDIA:
+            pytest.skip("CUDA backend requires an NVIDIA GPU")
     torch.manual_seed(42)
 
     x = torch.randn(B, 1, D).to(device, dtype)        # (B, 1, D)
@@ -816,6 +831,8 @@ def test_fast_conv_varlen(
     torch.manual_seed(42)
     if causal_conv1d_fn is None:
         pytest.skip("causal_conv1d is not installed for CUDA backend")
+    if not IS_NVIDIA:
+        pytest.skip("fast_causal_conv1d requires an NVIDIA GPU")
     assert has_residual is False
     from fla.modules.convolution import fast_causal_conv1d_fn
     cu_seqlens = torch.cat([
@@ -883,6 +900,9 @@ def test_fast_conv_varlen(
             (2, 128, 2048, 3, True, True, "swish", torch.float32),
             (2, 128, 4096, 4, True, True, "swish", torch.float32),
             (2, 128, 8192, 4, True, True, "swish", torch.float32),
+            (1, 1, 128, 4, True, True, "swish", torch.float32),
+            (2, 2, 128, 4, True, True, "swish", torch.float32),
+            (1, 1, 64, 3, True, True, "swish", torch.float32),
         ]
     ],
 )
@@ -1488,19 +1508,22 @@ def test_conv_non_contiguous_dy(B, T, D, W, activation, dtype):
 
     weight = torch.randn(D, W, device=device, dtype=dtype).requires_grad_(True)
     weight_ref = weight.detach().clone().requires_grad_(True)
+    h0 = torch.randn(B, D, W, device=device, dtype=dtype)
+    h0_ref = h0.clone().requires_grad_(True)
 
     # --- Reference: contiguous path ---
     x_ref = torch.randn(B, T, D, device=device, dtype=dtype, requires_grad=True)
-    y_ref, _ = causal_conv1d(x_ref, weight_ref, activation=activation)
+    y_ref, _ = causal_conv1d(x_ref, weight_ref, initial_state=h0_ref, activation=activation)
     dy = torch.randn_like(y_ref)
     y_ref.backward(dy)
 
     # --- Test: non-contiguous dy via cat/split pattern ---
     x_test = x_ref.detach().clone().requires_grad_(True)
     weight_test = weight.detach().clone().requires_grad_(True)
+    h0_test = h0.clone().requires_grad_(True)
 
     # Forward through conv
-    y_test, _ = causal_conv1d(x_test, weight_test, activation=activation)
+    y_test, _ = causal_conv1d(x_test, weight_test, initial_state=h0_test, activation=activation)
 
     # Simulate non-contiguous dy: cat into [B, T, 3D] then split back
     dummy = torch.zeros_like(dy)
@@ -1514,3 +1537,62 @@ def test_conv_non_contiguous_dy(B, T, D, W, activation, dtype):
 
     assert_close(" dx", x_ref.grad, x_test.grad, 1e-3)
     assert_close(" dw", weight_ref.grad, weight_test.grad, 1e-3)
+    assert_close("dh0", h0_ref.grad, h0_test.grad, 1e-3)
+
+    # a gradient autograd expanded, e.g. from `y.sum()`, has stride 0 in every dimension
+    x_sum = x_ref.detach().clone().requires_grad_(True)
+    weight_sum = weight.detach().clone().requires_grad_(True)
+    h0_sum = h0.clone().requires_grad_(True)
+    y_sum, _ = causal_conv1d(x_sum, weight_sum, initial_state=h0_sum, activation=activation)
+    y_sum.sum().backward()
+
+    x_ones = x_ref.detach().clone().requires_grad_(True)
+    weight_ones = weight.detach().clone().requires_grad_(True)
+    h0_ones = h0.clone().requires_grad_(True)
+    y_ones, _ = causal_conv1d(x_ones, weight_ones, initial_state=h0_ones, activation=activation)
+    y_ones.backward(torch.ones_like(y_ones))
+
+    assert_close(" dx", x_ones.grad, x_sum.grad, 1e-3)
+    assert_close(" dw", weight_ones.grad, weight_sum.grad, 1e-3)
+    assert_close("dh0", h0_ones.grad, h0_sum.grad, 1e-3)
+
+
+def test_conv_varlen_decode_detection_with_zero_len_seq():
+    """A packed batch with a zero-length sequence must not be misdetected as a decode step."""
+    torch.manual_seed(42)
+    D, W = 16, 4
+    dtype = torch.float32
+    # lens [0, 2]: B*T == N would misfire into the decode shortcut, which ignores cu_seqlens.
+    cu_seqlens = torch.tensor([0, 0, 2], device=device, dtype=torch.int32)
+    N, T = 2, 2
+    x = torch.randn(1, T, D).to(device, dtype)
+
+    conv = ShortConvolution(
+        hidden_size=D,
+        kernel_size=W,
+        bias=False,
+        activation='silu',
+        device=device,
+        dtype=dtype,
+    )
+
+    cache = torch.randn(N, D, W - 1).to(device, dtype)
+    # reference: only the real sequence (index 1) is processed
+    xi = x[:, 0:2, :].transpose(1, 2)
+    ci = cache[1:2]
+    ref = causal_conv1d_ref_torch(
+        x=xi,
+        weight=rearrange(conv.weight, "d 1 w -> d w"),
+        bias=conv.bias,
+        initial_state=ci,
+        activation='silu',
+    ).transpose(1, 2)
+
+    zero_pad = torch.zeros(N, D, 1, device=device, dtype=dtype)
+    tri, _ = conv(
+        x,
+        cache=torch.cat([zero_pad, cache], dim=-1).clone(),
+        cu_seqlens=cu_seqlens,
+        output_final_state=True,
+    )
+    assert_close("varlen zero-len y", ref, tri, 1e-3)

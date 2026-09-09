@@ -11,6 +11,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.backends import dispatch
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.op import exp2
 from fla.utils import autotune_cache_kwargs
@@ -43,14 +44,19 @@ def chunk_kda_fwd_kernel_intra_token_parallel(
     H: tl.constexpr,
     HV: tl.constexpr,
     K: tl.constexpr,
+    BK: tl.constexpr,
     BT: tl.constexpr,
     BC: tl.constexpr,
     BH: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
 ):
-    i_tg, i_hg = tl.program_id(0), tl.program_id(1)
+    i_tg, i_hg = tl.program_id(0).to(tl.int64), tl.program_id(1)
 
     if IS_VARLEN:
+        # static T may exceed the covered tokens; i_n would converge to N and read OOB
+        if USE_GRAPH and i_tg >= tl.load(cu_seqlens + N).to(tl.int32):
+            return
         i_n = 0
         left, right = 0, N
 
@@ -66,7 +72,7 @@ def chunk_kda_fwd_kernel_intra_token_parallel(
                     left = mid + 1
         i_n = left
 
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
         i_t = i_tg - bos
     else:
@@ -90,7 +96,6 @@ def chunk_kda_fwd_kernel_intra_token_parallel(
     Akk += bos * HV*BC
     beta += bos * HV
 
-    BK: tl.constexpr = triton.next_power_of_2(K)
     o_hv = i_hg * BH + tl.arange(0, BH)
     o_h = o_hv // G
     o_k = tl.arange(0, BK)
@@ -104,15 +109,15 @@ def chunk_kda_fwd_kernel_intra_token_parallel(
     b_k = tl.load(k + i_t * H * K + p_qk, mask=m_hk, other=0).to(tl.float32)
 
     # g: [B, T, HV, K], beta: [B, T, HV]
-    p_g = tl.make_block_ptr(g + i_t * HV * K, (HV, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0))
-    p_beta = tl.make_block_ptr(beta + i_t * HV, (HV,), (1,), (i_hg * BH,), (BH,), (0,))
-    b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
-    b_k = b_k * tl.load(p_beta, boundary_check=(0,)).to(tl.float32)[:, None]
+    p_g = g + i_t * HV * K + o_hv[:, None] * K + o_k[None, :]
+    p_beta = beta + i_t * HV + o_hv
+    b_g = tl.load(p_g, mask=m_hk, other=0.0).to(tl.float32)
+    b_k = b_k * tl.load(p_beta, mask=m_hv, other=0.0).to(tl.float32)[:, None]
 
     for j in range(i_ts, min(i_t + 1, min(T, i_ts + BC))):
         b_kj = tl.load(k + j * H * K + p_qk, mask=m_hk, other=0).to(tl.float32)
-        p_gj = tl.make_block_ptr(g + j * HV * K, (HV, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0))
-        b_gj = tl.load(p_gj, boundary_check=(0, 1)).to(tl.float32)
+        p_gj = g + j * HV * K + o_hv[:, None] * K + o_k[None, :]
+        b_gj = tl.load(p_gj, mask=m_hk, other=0.0).to(tl.float32)
 
         b_kgj = tl.where(m_k[None, :], b_kj * exp2(b_g - b_gj), 0.0)
         b_Aqk = tl.sum(b_q * b_kgj, axis=1) * scale
@@ -122,6 +127,7 @@ def chunk_kda_fwd_kernel_intra_token_parallel(
         tl.store(Akk + i_t * HV * BC + o_hv * BC + j - i_ts, b_Akk.to(Akk.dtype.element_ty), mask=m_hv)
 
 
+@dispatch('kda')
 def chunk_kda_fwd_intra_token_parallel(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -133,6 +139,7 @@ def chunk_kda_fwd_intra_token_parallel(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     sub_chunk_size: int = 16,
+    use_graph: bool = False,
 ) -> None:
     """
     Token-parallel implementation: each token gets its own thread block.
@@ -156,6 +163,7 @@ def chunk_kda_fwd_intra_token_parallel(
     N = len(cu_seqlens) - 1 if cu_seqlens is not None else B
     BT = chunk_size
     BC = sub_chunk_size
+    BK = triton.next_power_of_2(K)
 
     def grid(meta): return (B * T, triton.cdiv(HV, meta['BH']))
     chunk_kda_fwd_kernel_intra_token_parallel[grid](
@@ -172,7 +180,9 @@ def chunk_kda_fwd_intra_token_parallel(
         H=H,
         HV=HV,
         K=K,
+        BK=BK,
         BT=BT,
         BC=BC,
+        USE_GRAPH=use_graph,
     )
     return Aqk, Akk

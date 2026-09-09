@@ -104,6 +104,7 @@ def compute_dh0_triton(
     initial_state: torch.Tensor,
     activation: str | None,
     cu_seqlens: torch.Tensor | None,
+    dht: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
     Compute dh0 (gradient w.r.t. initial_state) using a separate Triton kernel.
@@ -117,21 +118,22 @@ def compute_dh0_triton(
     dh0 = torch.zeros_like(initial_state)
 
     BD = 32
-    grid = (triton.cdiv(D, BD), N)
+    grid = (triton.cdiv(D, BD) * N,)
 
     y_to_pass = y if activation in ('swish', 'silu') else None
-    # dy is [B, T, D], stride_n = T*D, stride_t = D
-    stride_dy_n = dy.stride(0)
-    stride_dy_t = dy.stride(1)
+    # dy is [B, T, D] but may be a strided view; `y` is always contiguous
+    stride_dy_n, stride_dy_t, stride_dy_d = dy.stride()
 
     compute_dh0_kernel[grid](
         dy=dy,
         y=y_to_pass,
         weight=weight,
         dh0=dh0,
+        dht=dht,
         cu_seqlens=cu_seqlens,
         stride_dy_n=stride_dy_n,
         stride_dy_t=stride_dy_t,
+        stride_dy_d=stride_dy_d,
         T=T,
         D=D,
         W=W,
@@ -239,6 +241,7 @@ def causal_conv1d_bwd(
             initial_state=initial_state,
             activation=activation,
             cu_seqlens=cu_seqlens,
+            dht=dht,
         )
 
     return dx.view(shape), dw, db, dr, dh0
@@ -274,7 +277,7 @@ def causal_conv1d_update_states(
     BD = min(triton.next_power_of_2(D), 256)
     BW = triton.next_power_of_2(W)
 
-    grid = (triton.cdiv(D, BD), N)
+    grid = (triton.cdiv(D, BD) * N,)
 
     causal_conv1d_states_fwd_kernel[grid](
         x=x,
@@ -339,7 +342,7 @@ def causal_conv1d_update(
     elif y.dim() == 3:
         stride_y_n, stride_y_d = y.stride(0), y.stride(2)
 
-    def grid(meta): return (triton.cdiv(D, meta['BD']), N)
+    def grid(meta): return (triton.cdiv(D, meta['BD']) * N,)
 
     causal_conv1d_update_kernel[grid](
         x=x,

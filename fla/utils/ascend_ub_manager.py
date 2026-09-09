@@ -19,9 +19,12 @@ import warnings
 
 import torch
 import triton
+import triton.runtime.driver as driver
 
 # Ascend Triton launch limits (see triton_ascend/activations.py).
 ASCEND_MAX_GRID_DIM = 65535
+# Per-launch block-count budget for host-chunked grid launches.
+ASCEND_LAUNCH_BLOCK_BUDGET = 4096
 # Legacy fused kernel byte cap (65536 // fp16 element size).
 _FALLBACK_MAX_FUSED_BLOCK = 65536 // 2
 # Conservative UB fallback when runtime detection is unavailable (64 KiB).
@@ -574,3 +577,54 @@ def iter_axis_launch_chunks(
     max_chunks = max_grid_axis_chunks(axis_size, other_grid_product, max_grid=max_grid)
     for offset in range(0, axis_size, max_chunks):
         yield offset, min(max_chunks, axis_size - offset)
+
+
+def get_npu_properties() -> dict:
+    """Return the triton NPU device properties dict for the current device."""
+    return driver.active.utils.get_device_properties(torch.npu.current_device())
+
+
+def launch_grid_chunked(
+    kernel,
+    grid: tuple[int, ...],
+    *,
+    offset_keys: tuple[str, ...],
+    kernel_kwargs: dict,
+    quanta: tuple[int, ...] | None = None,
+    budget: int = ASCEND_LAUNCH_BLOCK_BUDGET,
+    compile_kwargs: dict | None = None,
+) -> None:
+    """Launch a triton kernel over `grid` in host-side chunks.
+
+    Ascend caps the number of blocks per launch, so axes are chunked such
+    that the per-launch block product stays within `budget`. The global
+    offset of each chunk is forwarded via `kernel_kwargs[offset_keys[ax]]`;
+    declare these args `do_not_specialize` in the kernel to avoid recompiles.
+    `quanta[ax]` snaps chunk boundaries of axis `ax` to multiples of that many
+    blocks, for grids packing several logical indices into one axis
+    (e.g. ``nt * nc``). Keeping the product within `budget`
+    (<= `ASCEND_MAX_GRID_DIM`) also keeps every axis within the per-axis limit.
+    `compile_kwargs` is forwarded unchanged to each ``kernel[grid](...)`` launch.
+    """
+    dims = len(grid)
+    quanta = quanta or (1,) * dims
+    extra = compile_kwargs or {}
+    lens = [0] * dims
+
+    def _recurse(ax: int, prod_so_far: int) -> None:
+        quantum = quanta[ax]
+        rest = prod_so_far * quantum
+        for size in grid[ax + 1:]:
+            rest *= size
+        for off_q, len_q in iter_axis_launch_chunks(
+            triton.cdiv(grid[ax], quantum), rest, max_grid=budget,
+        ):
+            offset = off_q * quantum
+            lens[ax] = min(len_q * quantum, grid[ax] - offset)
+            kernel_kwargs[offset_keys[ax]] = offset
+            if ax == dims - 1:
+                kernel[tuple(lens)](**kernel_kwargs, **extra)
+            else:
+                _recurse(ax + 1, prod_so_far * len_q * quantum)
+
+    _recurse(0, 1)

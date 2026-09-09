@@ -40,26 +40,28 @@ def chunk_comba_cumsum_scalar_fwd_kernel(
     HAS_SCALE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_bh = tl.program_id(0), tl.program_id(1)
+    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
 
-    p_g = tl.make_block_ptr(g + bos*H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
-    p_g0 = tl.make_block_ptr(g0 + bos*H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
-    p_g1 = tl.make_block_ptr(g1 + bos*H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
+    o_t = i_t * BT + tl.arange(0, BT)
+    m_t = o_t < T
+    p_g = g + bos*H + i_h + o_t * H
+    p_g0 = g0 + bos*H + i_h + o_t * H
+    p_g1 = g1 + bos*H + i_h + o_t * H
     # [BT]
-    b_g = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
+    b_g = tl.load(p_g, mask=m_t, other=0.0).to(tl.float32)
     if HAS_SCALE:
         b_g = b_g * scale
     b_g1 = tl.cumsum(b_g, axis=0)
     b_g0 = b_g1 - b_g
-    tl.store(p_g0, b_g0.to(p_g0.dtype.element_ty), boundary_check=(0,))
-    tl.store(p_g1, b_g1.to(p_g1.dtype.element_ty), boundary_check=(0,))
+    tl.store(p_g0, b_g0.to(p_g0.dtype.element_ty), mask=m_t)
+    tl.store(p_g1, b_g1.to(p_g1.dtype.element_ty), mask=m_t)
 
 
 def chunk_comba_cumsum_scalar_fwd(
@@ -116,17 +118,19 @@ def chunk_comba_cumsum_scalar_bwd_kernel(
     BT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_bh = tl.program_id(0), tl.program_id(1)
+    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
 
-    p_dg0 = tl.make_block_ptr(dg0 + bos*H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
-    p_dgr = tl.make_block_ptr(dgr + bos*H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
+    o_t = i_t * BT + tl.arange(0, BT)
+    m_t = o_t < T
+    p_dg0 = dg0 + bos*H + i_h + o_t * H
+    p_dgr = dgr + bos*H + i_h + o_t * H
     # [BT]
     """
     b_dg:   1,2,3,4
@@ -135,11 +139,11 @@ def chunk_comba_cumsum_scalar_bwd_kernel(
     b_dz:   6
     b_dgr:  6,5,3,0
     """
-    b_dg0 = tl.load(p_dg0, boundary_check=(0,)).to(tl.float32)
+    b_dg0 = tl.load(p_dg0, mask=m_t, other=0.0).to(tl.float32)
     b_temp = tl.cumsum(b_dg0, axis=0)
     b_dz = tl.sum(b_dg0, axis=0)
     b_dgr = -b_temp + b_dz[None]
-    tl.store(p_dgr, b_dgr.to(p_dgr.dtype.element_ty), boundary_check=(0,))
+    tl.store(p_dgr, b_dgr.to(p_dgr.dtype.element_ty), mask=m_t)
 
 
 def chunk_comba_cumsum_scalar_bwd(

@@ -126,14 +126,16 @@ fla/
 │       └── README.md            # (optional) Mathematical derivations
 ├── models/          # Full language model definitions (config + modeling)
 ├── modules/         # Utility modules (norms, feature maps, rotary, etc.)
-└── utils.py         # Global utilities and decorators
+└── utils/           # Global utilities and decorators
 
 tests/
-├── conftest.py      # Pytest config with NaN memory poisoning
-├── ops/             # Operator tests
-├── layers/          # Layer tests
-├── models/          # Model tests
-└── modules/         # Module tests
+├── context_parallel/   # Context-parallel tests
+├── layers/             # Layer tests
+├── models/             # Model tests
+├── modules/            # Module tests
+├── ops/                # Operator tests
+├── utils/              # Tests for fla.utils
+└── conftest.py         # Pytest config with NaN memory poisoning
 ```
 
 ## Code Style
@@ -163,9 +165,15 @@ Key rules:
 - **Import sorting**: `isort`-compatible via Ruff (`fla` as first-party)
 - **Type hints**: Use modern syntax (`X | None` instead of `Optional[X]`, `list[str]` instead of `List[str]`)
 - Use `TYPE_CHECKING` for imports only needed at type-check time
-- **Multi-line calls**: don't wrap a call that fits within the line limit. When a call does overflow, use a hanging indent with **one keyword argument per line**, not several per line.
+- **Line width**: use the full 127 characters before reaching for a line break — a statement that fits on one line stays on one line.
+- **Calls**: prefer keyword arguments over positional ones. A call that fits within the limit stays on one line; a call that overflows breaks with a hanging indent, **one keyword argument per line** — never several.
+- **Parameter order**: keep related parameters adjacent, and pass keyword arguments at call sites in the same order they appear in the signature.
 
 ### Docstrings and Comments
+
+Comments and docstrings are hints for other readers, not a chain of thought. Give the reader what the code cannot say for itself, in as few words as possible — correct, simple, and with no narration of your reasoning.
+
+Write docstrings at a high level: say what the function or test does and the contract it guarantees, and let the code speak for its own mechanics. A docstring that only restates the body is better left unwritten.
 
 Use a two-line hanging format for `Args:` / `Returns:` entries: a `name (type, Optional):` header line, then the description and `Default:` on the next indented line(s).
 
@@ -182,6 +190,17 @@ Capitalize `Optional` (not `optional`), put the default as `Default: <value>` (n
 Keep inline comments restrained, especially in Triton kernels: shape annotations (e.g. `# [BL, BD]`) plus at most a one-line "why" for genuinely non-obvious tricks. Avoid multi-line derivations and narration that just restates the next line — math derivations belong in the operator's `README.md`, the PR description, or a single pointer, not inline.
 
 Put explanatory comments on their own line **above** the code they describe, not trailing it — write `# why` on the line above `x = f()`, not `x = f()  # why`. Start the comment text with a lowercase letter (`# guard against overflow`, not `# Guard against overflow`), and wrap a multi-line comment at clause boundaries like other prose. Reserve inline trailing comments for terse shape / type annotations like `# [BL, BD]`.
+
+Comments and docstrings must not go stale: when a change makes one factually wrong — a renamed symbol, a changed default, a removed code path — update or delete it in the same commit. An outdated comment is worse than none. If you can't tell whether a comment is still true, keep it and say so in the PR description; don't delete a "why" comment you merely can't verify. Fixing stale content means fixing the words, not reformatting the surrounding comment or docstring style.
+
+Beyond narration that restates the next line, these comment patterns are banned:
+
+- **Banner blocks** (`##### ... #####`): section boundaries should be visible from the code structure; use a blank line.
+- **Commented-out code**: delete it — git has the history. Exception: commented-out *configurations* deliberately kept as documented alternatives (e.g. known-good autotune configs for a future dtype) may stay if a one-line comment says why they are kept.
+- **Personal asides** (`# XY: remove this?`): a name in a comment is not an owner. Convert it to a TODO with an anchor, or delete it.
+- **Anchorless TODOs**: a TODO must name when it can be acted on — a link to a tracking issue (this repo or upstream), a version bound (`TODO: drop once we require triton>=3.5`), or an externally checkable event. This applies to TODOs in docstrings too; see `fla/ops/utils/op.py::safe_dot` for the pattern.
+
+Never treated as excess comments: the license header required by `scripts/check_header.py`, a one-line attribution with a URL for adapted code, shape/dtype annotations, and `NOTE:` / `WARNING:` prefixes on a genuine "why" comment.
 
 ### Prose and Markdown
 
@@ -200,10 +219,18 @@ Don't hard-wrap prose at an arbitrary short column — this covers Markdown file
 
 - Kernel functions use `@triton.jit` with `do_not_specialize=['T']` for the sequence-length argument.
 - Use `tl.constexpr` for compile-time constants (block sizes, flags like `USE_INITIAL_STATE`).
-- Do not introduce new `tl.make_block_ptr` use; Triton marks it deprecated. Prefer
-  `TensorDescriptor` / `tl.make_tensor_descriptor` when descriptor semantics are
-  needed, or explicit `tl.load` / `tl.store` pointer arithmetic following an
-  existing validated kernel pattern.
+- Write block accesses as explicit offset vectors (`offset + tl.arange`) with
+  plain `tl.load` / `tl.store`. Masked loads must cover every dimension that
+  can overrun at any call site, with `other=` where masked lanes matter; assert
+  any divisibility you rely on. Do not use `tl.make_block_ptr` / `tl.advance`:
+  deprecated upstream and removed in triton main. (`backends/triton_ascend/` is
+  exempt — triton-ascend still requires block pointers.)
+- `tl.make_tensor_descriptor` (TMA) is an opt-in optimization for hot-path
+  tiles on Hopper and newer, not a default substitute for block access. It
+  requires 16-byte-aligned bases and stride multiples, a stride-1 innermost
+  dim, no transposed blocks, and a registered allocator for device-side
+  descriptors. Use it when a per-kernel benchmark in the PR shows it pays off,
+  e.g. behind a flag as in `fla/ops/utils/solve_tril.py`.
 - Treat program IDs and grid-derived indices as potentially narrow integers.
   Cast them to `tl.int64` before multiplying by sizes, strides, or sequence
   offsets. This is especially important for non-first grid dimensions on NVIDIA
@@ -213,7 +240,7 @@ Don't hard-wrap prose at an arbitrary short column — this covers Markdown file
   `int32` overflow behavior.
 - Gate autotune configs with `autotune_cache_kwargs` for cache support.
 - Kernel naming: `<op>_fwd_kernel_<suffix>` / `<op>_bwd_kernel_<suffix>`.
-- When renaming a symbol or adding/moving a parameter, sweep **every** site in one pass: the tensor, its `b_*` value, the `p_*` block pointer, comments, and — across the forward/backward kernels, host wrappers, and autograd `Function` — every signature, launch, return tuple, and `save_for_backward`/`saved_tensors` list. Keyword-argument order at each call site must match the parameter order in the signature.
+- When renaming a symbol or adding/moving a parameter, sweep **every** site in one pass: the tensor, its `b_*` value, the `p_*` block pointer, comments, and — across the forward/backward kernels, host wrappers, and autograd `Function` — every signature, launch, return tuple, and `save_for_backward`/`saved_tensors` list.
 
 ### PyTorch Operators
 
@@ -274,7 +301,7 @@ from fla.utils import assert_close, device, device_platform
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'D', 'dtype'),
     [
-        pytest.param(*test, id="B{}-T{}-H{}-D{}".format(*test))
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-{}".format(*test))
         for test in [
             (1, 63, 1, 64, torch.float16),
             (2, 1000, 4, 128, torch.float16),
@@ -309,7 +336,6 @@ Key guidelines:
 
 - **Always use `torch.manual_seed(42)`** for reproducibility.
 - **Use `assert_close`** from `fla.utils` for numerical comparison with relative tolerance.
-- **Test both forward and backward** passes by computing gradients.
 - **Use `device` from `fla.utils`** for device-agnostic tests.
 - **Parametrize** with diverse shapes including non-power-of-2 sequence lengths (e.g., 63, 100, 2000).
 - **Skip unsupported platforms** with `@pytest.mark.skipif(device_platform == 'intel', ...)` when needed.
@@ -360,6 +386,8 @@ Once your change is implemented, tested, and (if it touches performance) benchma
 
 - **Keep the scope focused**: one PR should do one thing. If you have multiple unrelated changes, please split them into separate PRs.
 - **Use Draft PRs**: feel free to open a draft early for design feedback or work-in-progress discussion.
+- **Read `AGENTS.md` and `.agents/skills/fla-mr-readiness` first**: they cover the PR checklist, test-plan requirements, and benchmark evidence standards expected of every pull request.
+- **No busywork PRs**: don't open standalone PRs for typos or isolated style tweaks; fold them into a related substantive change instead.
 
 ### Commit Message Convention
 

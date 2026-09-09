@@ -46,12 +46,12 @@ def intra_chunk_preprocess_fwd_kernel(
     IS_VARLEN: tl.constexpr,
     USE_G: tl.constexpr,
 ):
-    i_t, i_nh = tl.program_id(0), tl.program_id(1)
+    i_t, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1)
     i_n, i_hq = i_nh // HQ, i_nh % HQ
     i_h = i_hq // G
 
     if IS_VARLEN:
-        i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
+        i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int64)
         bos, eos = tl.load(offsets + i_n).to(tl.int64), tl.load(offsets + i_n + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
     else:
@@ -74,22 +74,28 @@ def intra_chunk_preprocess_fwd_kernel(
     L += (bos*HQ + i_hq)
     M += (bos*HQ + i_hq)
 
-    p_q = tl.make_block_ptr(q, (T, K), (HQ*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
-    p_k = tl.make_block_ptr(k, (K, T), (1, H*K), (0, i_t * BT), (BK, BT), (0, 1))
-    p_w = tl.make_block_ptr(w, (T, K), (H*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
-    p_v = tl.make_block_ptr(v, (T, V), (H*V, 1), (i_t * BT, 0), (BT, BV), (1, 0))
-    p_beta = tl.make_block_ptr(beta, (T, ), (H, ), (i_t * BT, ), (BT, ), (0, ))
-    p_T = tl.make_block_ptr(A, (T, BT), (BT*H, 1), (i_t * BT, 0), (BT, BT), (1, 0))
+    o_t = i_t * BT + tl.arange(0, BT)
+    o_i = tl.arange(0, BT)
+    o_d = tl.arange(0, BK)
+    o_v = tl.arange(0, BV)
+    m_r = o_t < T
+    m_k = m_r[:, None] & (o_d[None, :] < K)
+    m_v = m_r[:, None] & (o_v[None, :] < V)
+    p_q = q + o_t[:, None] * (HQ*K) + o_d[None, :]
+    p_k = k + o_d[:, None] + o_t[None, :] * (H*K)
+    p_w = w + o_t[:, None] * (H*K) + o_d[None, :]
+    p_v = v + o_t[:, None] * (H*V) + o_v[None, :]
+    p_beta = beta + o_t * H
+    p_T = A + o_t[:, None] * (BT*H) + o_i[None, :]
 
-    b_beta = tl.load(p_beta, boundary_check=(0, ))
-    b_q = tl.load(p_q, boundary_check=(0, 1))
-    b_kt = tl.load(p_k, boundary_check=(0, 1))
-    b_v = tl.load(p_v, boundary_check=(0, 1))
-    b_w = tl.load(p_w, boundary_check=(0, 1))
-    b_T = tl.load(p_T, boundary_check=(0, 1))
+    b_beta = tl.load(p_beta, mask=m_r, other=0.0)
+    b_q = tl.load(p_q, mask=m_k, other=0.0)
+    b_kt = tl.load(p_k, mask=(o_d[:, None] < K) & m_r[None, :], other=0.0)
+    b_v = tl.load(p_v, mask=m_v, other=0.0)
+    b_w = tl.load(p_w, mask=m_k, other=0.0)
+    b_T = tl.load(p_T, mask=m_r[:, None] & (o_i[None, :] < BT), other=0.0)
     b_T = b_T * b_beta[None, :]
 
-    o_i = tl.arange(0, BT)
     m_t = o_i[:, None] >= o_i[None, :]
 
     b_qw = tl.where(m_t, tl.dot(b_q, tl.trans(b_w.to(b_q.dtype))), 0).to(b_q.dtype)
@@ -98,21 +104,21 @@ def intra_chunk_preprocess_fwd_kernel(
     b_A = tl.where(m_t, tl.dot(b_q, b_kt) - tl.dot(b_qwT.to(b_q.dtype), b_wbk), 0)
 
     b_q = b_q.to(tl.float32) - tl.dot(b_qwT, b_w.to(b_q.dtype))
-    p_q_new = tl.make_block_ptr(q_new, (T, K), (K*HQ, 1), (i_t * BT, 0), (BT, K), (1, 0))
-    tl.store(p_q_new, b_q.to(p_q_new.dtype.element_ty), boundary_check=(0, 1))
+    p_q_new = q_new + o_t[:, None] * (K*HQ) + o_d[None, :]
+    tl.store(p_q_new, b_q.to(p_q_new.dtype.element_ty), mask=m_k)
 
     if i_hq % G == 0:
         b_Twb = tl.dot(b_T, b_w)
-        p_w2 = tl.make_block_ptr(w2, (T, K), (K*H, 1), (i_t * BT, 0), (BT, BK), (1, 0))
-        tl.store(p_w2, b_Twb.to(p_w2.dtype.element_ty), boundary_check=(0, 1))
+        p_w2 = w2 + o_t[:, None] * (K*H) + o_d[None, :]
+        tl.store(p_w2, b_Twb.to(p_w2.dtype.element_ty), mask=m_k)
         b_T_wbk = tl.dot(b_T.to(b_kt.dtype), b_wbk).to(b_kt.dtype)
-        p_k_new = tl.make_block_ptr(k_new, (K, T), (1, K*H), (0, i_t * BT), (BK, BT), (0, 1))
+        p_k_new = k_new + o_d[:, None] + o_t[None, :] * (K*H)
         tl.store(p_k_new, (b_kt - tl.dot(tl.trans(b_w.to(b_kt.dtype)), b_T_wbk)
-                           ).to(p_k_new.dtype.element_ty), boundary_check=(0, 1))
+                           ).to(p_k_new.dtype.element_ty), mask=(o_d[:, None] < K) & m_r[None, :])
 
     if USE_G:
-        p_g_cumsum = tl.make_block_ptr(g_cumsum, (T, ), (HQ, ), (i_t * BT, ), (BT, ), (0, ))
-        b_g_cumsum = tl.load(p_g_cumsum, boundary_check=(0, ))
+        p_g_cumsum = g_cumsum + o_t * HQ
+        b_g_cumsum = tl.load(p_g_cumsum, mask=m_r, other=0.0)
         b_A = b_A + (b_g_cumsum[:, None] - b_g_cumsum[None, :])
         b_A = tl.where((i_t * BT + tl.arange(0, BT) < T)[:, None], b_A, float("-inf"))  # avoid nan
 
@@ -121,12 +127,12 @@ def intra_chunk_preprocess_fwd_kernel(
     b_qkT_softmax = tl.math.exp2(b_qkT_softmax - m_i[:, None])
     l_i = tl.sum(b_qkT_softmax, 1)
     b_o = tl.dot(b_qkT_softmax.to(b_v.dtype), b_v)
-    p_o = tl.make_block_ptr(o, (T, V), (V*HQ, 1), (i_t * BT, 0), (BT, BV), (1, 0))
-    tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
-    p_l = tl.make_block_ptr(L, (T, ), (HQ, ), (i_t * BT, ), (BT, ), (0, ))
-    p_m = tl.make_block_ptr(M, (T, ), (HQ, ), (i_t * BT, ), (BT, ), (0, ))
-    tl.store(p_m, m_i.to(p_m.dtype.element_ty), boundary_check=(0,))
-    tl.store(p_l, l_i.to(p_l.dtype.element_ty), boundary_check=(0,))
+    p_o = o + o_t[:, None] * (V*HQ) + o_v[None, :]
+    tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=m_v)
+    p_l = L + o_t * HQ
+    p_m = M + o_t * HQ
+    tl.store(p_m, m_i.to(p_m.dtype.element_ty), mask=m_r)
+    tl.store(p_l, l_i.to(p_l.dtype.element_ty), mask=m_r)
 
 
 def intra_chunk_preprocess_fwd_fn(q, k, v, w, beta, g_cumsum, A, scale, BT, cu_seqlens,

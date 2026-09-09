@@ -111,11 +111,8 @@ class PaTHAttention(nn.Module):
         beta = self.bt_proj(hidden_states).float().sigmoid() * 2  # allowing negative eigenvalues
         g = F.logsigmoid(self.g_proj(hidden_states).float()) if self.use_forget_gate else None
         cu_seqlens = kwargs.get('cu_seqlens')
-        assert not (cu_seqlens is not None and attention_mask is not None), (
-            "cu_seqlens should not be provided when attention_mask is not None"
-        )
         # Training
-        if attention_mask is None:
+        if cu_seqlens is not None or attention_mask is None:
             assert use_cache is False, "use_cache should be False in training"
             if self.use_w_shortconv:
                 w, _ = self.w_conv1d(w, cache=None, output_final_state=False, cu_seqlens=cu_seqlens)
@@ -136,6 +133,7 @@ class PaTHAttention(nn.Module):
                 last_state = None
             # Decoding
             if last_state is not None:
+                assert q_len == 1, "only support q_len == 1 for decoding"
                 if g is not None:
                     past_k, past_v, past_g = last_state['attn_state']
                 else:
@@ -180,7 +178,6 @@ class PaTHAttention(nn.Module):
                 q = rearrange(q, '... (h d) -> ... h d', d=self.head_dim)
                 k = rearrange(k, '... (h d) -> ... h d', d=self.head_dim)
                 v = rearrange(v, '... (h d) -> ... h d', d=self.head_dim)
-                assert max_seqlen_q == 1, "only support q_len == 1 for decoding"
                 o = attn_decoding_one_step(q, k, v, g, cu_seqlens=cu_seqlens, do_gate_scale=True)  # reduced to fox's decoding
             # Prefilling
             else:

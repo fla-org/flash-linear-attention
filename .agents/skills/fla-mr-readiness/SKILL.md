@@ -42,7 +42,7 @@ well-scoped, well-tested, and well-documented.
      workloads if applicable, and a summary of any NCU profiling you did.
 
 6. **Write PR summary**
-   - Use the structure below.
+   - Use the CI-enforced structure below. The source of truth is `.github/pull_request_template.md`; the `check-pr-title` workflow rejects bodies that drop the checklist, so never trim it to save space.
 
 7. **Code style review**
    - Follow `CONTRIBUTING.md` for Python style, docstrings, comments, and commit prefixes.
@@ -54,7 +54,9 @@ well-scoped, well-tested, and well-documented.
    - Keep NVIDIA-only profiling commands in performance docs or scripts, not in
      generic correctness tests.
 
-## Suggested PR body structure
+## PR body structure
+
+Follow `.github/pull_request_template.md` exactly, checklist included:
 
 ```markdown
 ## Summary
@@ -65,16 +67,35 @@ One-paragraph description of what changed and why.
 - Dependent tests run: `<list>`
 - Varlen / CP / model tests: `<yes/no + details>`
 
-## Benchmark / NCU
+## Benchmark / NCU (kernel changes only)
 - Hardware: `<e.g., H100>`
 - Workload: `<batch, seq_len, dtype>`
 - Before: `<throughput or latency>`
 - After: `<throughput or latency>`
 - Conclusion: `<improvement / neutral / trade-off>`
+  (state "neutral" when the change is not performance-related)
 
 ## Breaking changes
 - None / list any API or behavior changes.
+
+## Checklist
+
+- [x] I have read [CONTRIBUTING.md](../CONTRIBUTING.md) and follow its conventions (code style, docstrings, commit prefixes).
+- [x] I have read [AGENTS.md](../AGENTS.md) and, where my change matches its scope, the relevant skill under [.agents/skills](../.agents/skills).
+- [x] Dependent tests pass locally or in CI, and new behavior is covered by tests where applicable (tick as N/A for changes with no testable code, e.g. docs-only).
+- [x] Kernel changes include same-hardware before/after benchmark numbers, dense + varlen where applicable (tick as N/A when no kernel code changed).
+- [ ] This PR is minor/cosmetic-only (typo, formatting, style-only tweaks) — tick only if it is, and justify below.
+
+### If you ticked the "minor" box above
+
+<justification — required when the "minor" box is ticked; otherwise delete this section>
 ```
+
+What `check-pr-title` (`.github/workflows/check-pr-title.yml`) enforces:
+
+- The first four checklist boxes must always be ticked; each item carries its own N/A reading, so a tick means "considered — done or not applicable" (e.g. benchmark numbers on a docs-only PR).
+- The "minor" box is the inverse: leave it unticked for normal PRs. Tick it only when the PR genuinely is a typo/formatting/style-only tweak — then a justification of at least a sentence (≥ 20 non-whitespace characters, HTML comments stripped) under `### If you ticked` is required.
+- Editing the body re-triggers the check. To edit a PR title/body on this repo, use the REST API, not `gh pr edit` (see AGENTS.md "Opening PRs").
 
 ## Important reminders
 

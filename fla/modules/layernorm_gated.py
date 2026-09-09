@@ -73,7 +73,7 @@ def layer_norm_fwd_kernel(
     IS_RMS_NORM: tl.constexpr,
 ):
     # Map the program id to the row of X and Y it should compute.
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)
     group = tl.program_id(1)
     X += row * stride_x_row + group * N
     Y += row * stride_y_row + group * N
@@ -217,7 +217,7 @@ def layer_norm_bwd_kernel(
     BLOCK_N: tl.constexpr,
 ):
     # Map the program id to the elements of X, DX, and DY it should compute.
-    row_block_id = tl.program_id(0)
+    row_block_id = tl.program_id(0).to(tl.int64)
     group = tl.program_id(1)
     row_start = row_block_id * rows_per_program
     cols = tl.arange(0, BLOCK_N)

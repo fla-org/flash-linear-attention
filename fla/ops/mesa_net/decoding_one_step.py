@@ -34,7 +34,7 @@ def mesa_net_decoding_one_step_kernel(
     BV: tl.constexpr,
     MAX_CG_STEP: tl.constexpr,
 ):
-    i_nh = tl.program_id(0)
+    i_nh = tl.program_id(0).to(tl.int64)
     i_h = i_nh % H
 
     o_k = tl.arange(0, BK)

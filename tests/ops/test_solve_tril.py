@@ -34,7 +34,7 @@ from fla.utils import IS_NVIDIA_BLACKWELL, assert_close, device, device_platform
     reason='Intel Pytorch Failure',
 )
 def test_solve_tril(B, T, H, chunk_size):
-    # do not randomly intiialize A otherwise the inverse is not stable
+    # do not randomly initialize A otherwise the inverse is not stable
     k = F.normalize(torch.randn((B, H, T, 64), dtype=torch.float32, device=device), dim=-1)
     # Pad the second-to-last dimension (T) to be a multiple of chunk_size
     padding_size = (chunk_size - T % chunk_size) % chunk_size
@@ -71,6 +71,7 @@ def test_solve_tril(B, T, H, chunk_size):
     device_platform == 'intel',
     reason='Intel Pytorch Failure',
 )
+@pytest.mark.smoke
 def test_solve_tril_varlen(
     H: int,
     D: int,

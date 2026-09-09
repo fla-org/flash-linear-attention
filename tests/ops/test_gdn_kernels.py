@@ -106,6 +106,56 @@ def recompute_w_u_fwd_ref(
     return w, u
 
 
+def recompute_w_u_fwd_varlen_ref(
+    k: torch.Tensor,
+    v: torch.Tensor,
+    beta: torch.Tensor,
+    A: torch.Tensor,
+    g: torch.Tensor | None,
+    cu_seqlens: torch.LongTensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Per-sequence torch baseline for varlen `recompute_w_u_fwd`."""
+    assert k.shape[0] == 1
+    w = k.new_empty(k.shape[0], k.shape[1], v.shape[2], k.shape[-1])
+    u = torch.empty_like(v)
+    for i in range(len(cu_seqlens) - 1):
+        s, e = cu_seqlens[i].item(), cu_seqlens[i + 1].item()
+        g_seq = g[:, s:e] if g is not None else None
+        w_seq, u_seq = recompute_w_u_fwd_ref(k[:, s:e], v[:, s:e], beta[:, s:e], A[:, s:e], g_seq)
+        w[:, s:e] = w_seq
+        u[:, s:e] = u_seq
+    return w, u
+
+
+def prepare_wy_repr_bwd_varlen_ref(
+    k: torch.Tensor,
+    v: torch.Tensor,
+    beta: torch.Tensor,
+    A: torch.Tensor,
+    dw: torch.Tensor,
+    du: torch.Tensor,
+    g: torch.Tensor | None,
+    cu_seqlens: torch.LongTensor,
+    chunk_size: int = 64,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Per-sequence torch baseline for varlen `prepare_wy_repr_bwd`."""
+    assert k.shape[0] == 1
+    dk = k.new_zeros(k.shape)
+    dv = torch.zeros_like(v)
+    db = torch.zeros_like(beta)
+    for i in range(len(cu_seqlens) - 1):
+        s, e = cu_seqlens[i].item(), cu_seqlens[i + 1].item()
+        g_seq = g[:, s:e] if g is not None else None
+        dk_seq, dv_seq, db_seq = prepare_wy_repr_bwd_ref(
+            k[:, s:e], v[:, s:e], beta[:, s:e], A[:, s:e],
+            dw[:, s:e], du[:, s:e], g_seq, chunk_size,
+        )
+        dk[:, s:e] = dk_seq
+        dv[:, s:e] = dv_seq
+        db[:, s:e] = db_seq
+    return dk, dv, db
+
+
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'HV', 'D', 'use_g', 'dtype'),
     [
@@ -530,6 +580,53 @@ def test_chunk_gated_delta_rule_fwd_h(
     assert_close('final_state', fs_ref, fs_tri, 0.005)
 
 
+def _uniform_cu_seqlens(n_docs: int, doc_len: int) -> torch.Tensor:
+    return torch.arange(n_docs + 1, dtype=torch.long, device=device) * doc_len
+
+
+def test_chunk_gated_delta_rule_fwd_h_varlen_many_documents():
+    """A packed batch with N*HV > 65535 must launch and stay per-document exact.
+
+    Sequences are independent, so running the same batch as two halves must reproduce
+    the single launch; only the grid geometry differs between the two.
+    """
+    torch.manual_seed(42)
+    BT, H, HV, D, dtype = 64, 32, 32, 32, torch.bfloat16
+    n_docs, doc_len = 2050, 16
+    T, split = n_docs * doc_len, n_docs // 2
+
+    cu_seqlens = _uniform_cu_seqlens(n_docs, doc_len)
+    k = torch.randn(1, T, H, D, dtype=dtype, device=device)
+    w = torch.randn(1, T, HV, D, dtype=dtype, device=device)
+    u = torch.randn(1, T, HV, D, dtype=dtype, device=device)
+    g = torch.randn(1, T, HV, dtype=torch.float32, device=device) * 0.1
+    h0 = torch.randn(n_docs, HV, D, D, dtype=torch.float32, device=device)
+
+    h_tri, vn_tri, fs_tri = chunk_gated_delta_rule_fwd_h(
+        k=k, w=w, u=u, g=g, initial_state=h0, output_final_state=True,
+        cu_seqlens=cu_seqlens, chunk_size=BT,
+    )
+
+    halves = [(0, split), (split, n_docs)]
+    parts = [
+        chunk_gated_delta_rule_fwd_h(
+            k=k[:, lo * doc_len:hi * doc_len],
+            w=w[:, lo * doc_len:hi * doc_len],
+            u=u[:, lo * doc_len:hi * doc_len],
+            g=g[:, lo * doc_len:hi * doc_len],
+            initial_state=h0[lo:hi],
+            output_final_state=True,
+            cu_seqlens=_uniform_cu_seqlens(hi - lo, doc_len),
+            chunk_size=BT,
+        )
+        for lo, hi in halves
+    ]
+
+    assert_close('h', torch.cat([p[0] for p in parts], dim=1), h_tri, 0.005)
+    assert_close('v_new', torch.cat([p[1] for p in parts], dim=1), vn_tri, 0.005)
+    assert_close('final_state', torch.cat([p[2] for p in parts], dim=0), fs_tri, 0.005)
+
+
 def chunk_bwd_dv_local_ref(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -709,17 +806,20 @@ def chunk_bwd_dqkwg_ref(
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'HV', 'D', 'dtype'),
+    ('B', 'T', 'H', 'HV', 'D', 'use_g', 'use_w', 'dtype'),
     [
-        pytest.param(B, T, H, HV, D, dtype, id=f"B{B}-T{T}-H{H}-HV{HV}-D{D}-{dtype}")
-        for (B, T, H, HV, D, dtype) in [
-            (2, 128, 2, 2, 64, torch.bfloat16),
-            (2, 128, 2, 4, 64, torch.bfloat16),
-            (1, 256, 4, 4, 32, torch.float16),
+        pytest.param(B, T, H, HV, D, use_g, use_w, dtype,
+                     id=f"B{B}-T{T}-H{H}-HV{HV}-D{D}-use_g{use_g}-use_w{use_w}-{dtype}")
+        for (B, T, H, HV, D, use_g, use_w, dtype) in [
+            (2, 128, 2, 2, 64, True, True, torch.bfloat16),
+            (2, 128, 2, 4, 64, True, True, torch.bfloat16),
+            (1, 256, 4, 4, 32, True, True, torch.float16),
+            (2, 128, 2, 2, 64, False, True, torch.bfloat16),
+            (2, 128, 2, 2, 64, False, False, torch.bfloat16),
         ]
     ],
 )
-def test_chunk_bwd_dqkwg(B: int, T: int, H: int, HV: int, D: int, dtype: torch.dtype):
+def test_chunk_bwd_dqkwg(B: int, T: int, H: int, HV: int, D: int, use_g: bool, use_w: bool, dtype: torch.dtype):
     torch.manual_seed(42)
     BT = 64
     NT = T // BT
@@ -730,9 +830,9 @@ def test_chunk_bwd_dqkwg(B: int, T: int, H: int, HV: int, D: int, dtype: torch.d
     do = torch.randn(B, T, HV, D, dtype=dtype, device=device)
     h = torch.randn(B, NT, HV, D, D, dtype=dtype, device=device)
     dh = torch.randn(B, NT, HV, D, D, dtype=dtype, device=device)
-    w = torch.randn(B, T, HV, D, dtype=dtype, device=device)
-    dv = torch.randn(B, T, HV, D, dtype=dtype, device=device)
-    g = torch.randn(B, T, HV, dtype=torch.float32, device=device) * 0.1
+    w = torch.randn(B, T, HV, D, dtype=dtype, device=device) if use_w else None
+    dv = torch.randn(B, T, HV, D, dtype=dtype, device=device) if use_w else None
+    g = torch.randn(B, T, HV, dtype=torch.float32, device=device) * 0.1 if use_g else None
 
     dq_ref, dk_ref, dw_ref, dg_ref = chunk_bwd_dqkwg_ref(q, k, v_new, do, h, dh, w, dv, g, scale, BT)
     dq_tri, dk_tri, dw_tri, dg_tri = chunk_bwd_dqkwg(
@@ -741,8 +841,14 @@ def test_chunk_bwd_dqkwg(B: int, T: int, H: int, HV: int, D: int, dtype: torch.d
 
     assert_close('dq', dq_ref, dq_tri, 0.006)
     assert_close('dk', dk_ref, dk_tri, 0.006)
-    assert_close('dw', dw_ref, dw_tri, 0.006)
-    assert_close('dg', dg_ref, dg_tri, 0.006)
+    if use_w:
+        assert_close('dw', dw_ref, dw_tri, 0.006)
+    else:
+        assert dw_ref is None and dw_tri is None
+    if use_g:
+        assert_close('dg', dg_ref, dg_tri, 0.006)
+    else:
+        assert dg_ref is None and dg_tri is None
 
 
 def gdn_fwd_torch(
@@ -919,6 +1025,8 @@ def prepare_wy_repr_bwd_ref(
             (2, 128, 2, 4, 64, True, torch.bfloat16),
             (1, 256, 4, 4, 32, True, torch.float16),
             (2, 128, 2, 2, 64, False, torch.bfloat16),
+            (2, 128, 2, 4, 64, False, torch.bfloat16),
+            (1, 128, 1, 1, 64, False, torch.bfloat16),
         ]
     ],
 )
@@ -940,11 +1048,97 @@ def test_prepare_wy_repr_bwd(B: int, T: int, H: int, HV: int, D: int, use_g: boo
     du = torch.randn(B, T, HV, D, dtype=dtype, device=device)
 
     dk_ref, dv_ref, db_ref = prepare_wy_repr_bwd_ref(k, v, beta, A, dw, du, g, BT)
-    dk_tri, dv_tri, db_tri, _ = prepare_wy_repr_bwd(k=k, v=v, beta=beta, A=A, dw=dw, du=du, g=g)
+    dk_tri, dv_tri, db_tri, dg_tri = prepare_wy_repr_bwd(k=k, v=v, beta=beta, A=A, dw=dw, du=du, g=g)
 
     assert_close('dk', dk_ref, dk_tri, 0.006)
     assert_close('dv', dv_ref, dv_tri, 0.006)
     assert_close('db', db_ref, db_tri, 0.006)
+    if use_g:
+        assert dg_tri is not None
+    else:
+        assert dg_tri is None
+
+
+@pytest.mark.parametrize(
+    ('H', 'HV', 'D', 'cu_seqlens', 'use_g', 'dtype'),
+    [
+        pytest.param(H, HV, D, cu_seqlens, use_g, dtype,
+                     id=f"H{H}-HV{HV}-D{D}-cu{cu_seqlens}-use_g{use_g}-{dtype}")
+        for (H, HV, D, cu_seqlens, use_g, dtype) in [
+            (2, 2, 64, [0, 64, 128], False, torch.bfloat16),
+            (2, 4, 64, [0, 128, 256], False, torch.bfloat16),
+            (1, 1, 64, [0, 64, 128], False, torch.bfloat16),
+            (2, 2, 64, [0, 64, 128], True, torch.bfloat16),
+        ]
+    ],
+)
+def test_recompute_w_u_fwd_varlen(
+    H: int,
+    HV: int,
+    D: int,
+    cu_seqlens: list[int],
+    use_g: bool,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(42)
+    BT = 64
+    cu_seqlens = torch.LongTensor(cu_seqlens).to(device)
+    T = cu_seqlens[-1].item()
+    k = torch.randn(1, T, H, D, dtype=dtype, device=device)
+    v = torch.randn(1, T, HV, D, dtype=dtype, device=device)
+    beta = torch.rand(1, T, HV, dtype=dtype, device=device).sigmoid()
+    g = torch.randn(1, T, HV, dtype=torch.float32, device=device) * 0.1 if use_g else None
+    A = _make_wy_inverse(1, T, HV, BT, dtype)
+
+    w_ref, u_ref = recompute_w_u_fwd_varlen_ref(k, v, beta, A, g, cu_seqlens)
+    w_tri, u_tri = recompute_w_u_fwd(k, v, beta, A, g, cu_seqlens=cu_seqlens)
+
+    assert_close('u', u_ref, u_tri, 0.005)
+    assert_close('w', w_ref, w_tri, 0.005)
+
+
+@pytest.mark.parametrize(
+    ('H', 'HV', 'D', 'cu_seqlens', 'dtype'),
+    [
+        pytest.param(H, HV, D, cu_seqlens, dtype,
+                     id=f"H{H}-HV{HV}-D{D}-cu{cu_seqlens}-{dtype}")
+        for (H, HV, D, cu_seqlens, dtype) in [
+            (2, 2, 64, [0, 64, 128], torch.bfloat16),
+            (2, 4, 64, [0, 128, 256], torch.bfloat16),
+            (1, 1, 64, [0, 64, 128], torch.bfloat16),
+        ]
+    ],
+)
+def test_prepare_wy_repr_bwd_varlen(
+    H: int,
+    HV: int,
+    D: int,
+    cu_seqlens: list[int],
+    dtype: torch.dtype,
+):
+    torch.manual_seed(42)
+    BT = 64
+    cu_seqlens = torch.LongTensor(cu_seqlens).to(device)
+    T = cu_seqlens[-1].item()
+    k = torch.randn(1, T, H, D, dtype=dtype, device=device)
+    k = F.normalize(k, p=2, dim=-1)
+    v = torch.randn(1, T, HV, D, dtype=dtype, device=device)
+    beta = torch.rand(1, T, HV, dtype=dtype, device=device).sigmoid()
+    A = chunk_kkt_solve_ref(k, None, beta, BT)
+    dw = torch.randn(1, T, HV, D, dtype=dtype, device=device)
+    du = torch.randn(1, T, HV, D, dtype=dtype, device=device)
+
+    dk_ref, dv_ref, db_ref = prepare_wy_repr_bwd_varlen_ref(
+        k, v, beta, A, dw, du, None, cu_seqlens, BT,
+    )
+    dk_tri, dv_tri, db_tri, dg_tri = prepare_wy_repr_bwd(
+        k=k, v=v, beta=beta, A=A, dw=dw, du=du, g=None, cu_seqlens=cu_seqlens,
+    )
+
+    assert_close('dk', dk_ref, dk_tri, 0.006)
+    assert_close('dv', dv_ref, dv_tri, 0.006)
+    assert_close('db', db_ref, db_tri, 0.006)
+    assert dg_tri is None
 
 
 @pytest.mark.parametrize(
@@ -1027,6 +1221,8 @@ def chunk_gated_delta_rule_bwd_dhu_ref(
     dv_local: torch.Tensor,
     scale: float,
     chunk_size: int = 64,
+    gk: torch.Tensor | None = None,
+    state_v_first: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
     """Torch baseline for `chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64`.
 
@@ -1034,20 +1230,22 @@ def chunk_gated_delta_rule_bwd_dhu_ref(
     reverse recurrence that autodiff on the forward states cannot reproduce
     directly (the reverse-pass gradient flows through a running accumulator, not
     through the stored forward states). We therefore evaluate that same reverse
-    recurrence in plain torch (state_v_first=False, USE_GK=False):
+    recurrence in plain torch:
 
         b_dh = dht
         for it = NT-1 ... 0:
             dh[it]  = b_dh
             b_dv    = (k[it] @ b_dh) * exp2(g_last[it] - g[it]) + dv_local[it]
             dv2[it] = b_dv
-            b_dh    = b_dh * exp2(g_last[it])
+            b_dh    = b_dh * exp2(g_last[it]) [* exp2(gk_last[it])]
                       + (q_gated[it]^T @ do[it]) * scale
                       - w[it]^T @ b_dv
         dh0   = b_dh
 
-    Returns (dh, dh0, dv2) matching the kernel. `u` is unused (the kernel consumes
-    `dv_local` instead) and kept only for a uniform call signature.
+    With `state_v_first=True`, `b_dh`/`dh`/`dht`/`dh0` are `[..., V, K]` and the
+    contractions are transposed accordingly. `gk` is the per-key vector gate
+    `[B, T, HV, K]`. `u` is unused (the kernel consumes `dv_local`) and kept only
+    for a uniform call signature.
     """
     del u  # unused: the kernel differentiates w.r.t. dv_local, not u
     B, T, H, K = k.shape
@@ -1067,13 +1265,21 @@ def chunk_gated_delta_rule_bwd_dhu_ref(
     do_f = do.float()
     dv_f = dv_local.float()
     g_f = g.float() if g is not None else None
+    gk_f = gk.float() if gk is not None else None
 
-    dh = torch.zeros(B, NT, HV, K, V, dtype=torch.float32, device=k.device)
+    if state_v_first:
+        dh = torch.zeros(B, NT, HV, V, K, dtype=torch.float32, device=k.device)
+        dh_shape = (B, HV, V, K)
+        kdh_eq, qdo_eq, wdv_eq = 'bthk,bhvk->bthv', 'bthk,bthv->bhvk', 'bthk,bthv->bhvk'
+    else:
+        dh = torch.zeros(B, NT, HV, K, V, dtype=torch.float32, device=k.device)
+        dh_shape = (B, HV, K, V)
+        kdh_eq, qdo_eq, wdv_eq = 'bthk,bhkv->bthv', 'bthk,bthv->bhkv', 'bthk,bthv->bhkv'
     dv2 = torch.zeros(B, T, HV, V, dtype=torch.float32, device=k.device)
     if dht is not None:
         b_dh = dht.float().clone()
     else:
-        b_dh = torch.zeros(B, HV, K, V, dtype=torch.float32, device=k.device)
+        b_dh = torch.zeros(*dh_shape, dtype=torch.float32, device=k.device)
 
     for it in range(NT - 1, -1, -1):
         s, e = it * BT, (it + 1) * BT
@@ -1083,7 +1289,7 @@ def chunk_gated_delta_rule_bwd_dhu_ref(
         w_c = w_f[:, s:e]             # [B, BT, HV, K]
         do_c = do_f[:, s:e]           # [B, BT, HV, V]
         dv_c = dv_f[:, s:e]           # [B, BT, HV, V]
-        kdh = torch.einsum('bthk,bhkv->bthv', k_c, b_dh)   # [B, BT, HV, V]
+        kdh = torch.einsum(kdh_eq, k_c, b_dh)   # [B, BT, HV, V]
         if g_f is not None:
             g_c = g_f[:, s:e]         # [B, BT, HV]
             g_last = g_c[:, -1]       # [B, HV]
@@ -1094,22 +1300,29 @@ def chunk_gated_delta_rule_bwd_dhu_ref(
             b_dv = kdh + dv_c
             q_gated = q_c
         dv2[:, s:e] = b_dv
-        b_dh = b_dh + torch.einsum('bthk,bthv->bhkv', q_gated, do_c) * scale
-        b_dh = b_dh - torch.einsum('bthk,bthv->bhkv', w_c, b_dv)
+        if gk_f is not None:
+            gk_last = torch.exp2(gk_f[:, e - 1])  # [B, HV, K]
+            if state_v_first:
+                b_dh = b_dh * gk_last[:, :, None, :]
+            else:
+                b_dh = b_dh * gk_last[:, :, :, None]
+        b_dh = b_dh + torch.einsum(qdo_eq, q_gated, do_c) * scale
+        b_dh = b_dh - torch.einsum(wdv_eq, w_c, b_dv)
 
     dh0 = b_dh if h0 is not None else None
     return dh, dh0, dv2
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'HV', 'D', 'use_h0', 'dtype'),
+    ('B', 'T', 'H', 'HV', 'D', 'use_h0', 'use_g', 'dtype'),
     [
-        pytest.param(B, T, H, HV, D, use_h0, dtype,
-                     id=f"B{B}-T{T}-H{H}-HV{HV}-D{D}-use_h0{use_h0}-{dtype}")
-        for (B, T, H, HV, D, use_h0, dtype) in [
-            (2, 128, 2, 2, 64, True, torch.bfloat16),
-            (2, 128, 2, 4, 64, False, torch.bfloat16),
-            (1, 256, 4, 4, 32, True, torch.float16),
+        pytest.param(B, T, H, HV, D, use_h0, use_g, dtype,
+                     id=f"B{B}-T{T}-H{H}-HV{HV}-D{D}-use_h0{use_h0}-use_g{use_g}-{dtype}")
+        for (B, T, H, HV, D, use_h0, use_g, dtype) in [
+            (2, 128, 2, 2, 64, True, True, torch.bfloat16),
+            (2, 128, 2, 4, 64, False, True, torch.bfloat16),
+            (1, 256, 4, 4, 32, True, True, torch.float16),
+            (2, 128, 2, 2, 64, True, False, torch.bfloat16),
         ]
     ],
 )
@@ -1120,6 +1333,7 @@ def test_chunk_gated_delta_rule_bwd_dhu(
     HV: int,
     D: int,
     use_h0: bool,
+    use_g: bool,
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
@@ -1130,7 +1344,7 @@ def test_chunk_gated_delta_rule_bwd_dhu(
     w = torch.randn(B, T, HV, D, dtype=dtype, device=device)
     u = torch.randn(B, T, HV, D, dtype=dtype, device=device)
     do = torch.randn(B, T, HV, D, dtype=dtype, device=device)
-    g = _make_gate(B, T, HV)
+    g = _make_gate(B, T, HV) if use_g else None
     h0 = torch.randn(B, HV, D, D, dtype=torch.float32, device=device) if use_h0 else None
     dht = torch.randn(B, HV, D, D, dtype=torch.float32, device=device)
 
@@ -1147,3 +1361,79 @@ def test_chunk_gated_delta_rule_bwd_dhu(
     assert_close('dv2', dv2_ref.to(dtype), dv2_tri, 0.006)
     if use_h0:
         assert_close('dh0', dh0_ref, dh0_tri, 0.006)
+
+
+def test_chunk_gated_delta_rule_bwd_dhu_k256_state_v_first_gk():
+    """K=V=256 + state_v_first + USE_GK so K-slabs 3/4 actually run."""
+    torch.manual_seed(42)
+    B, T, H, HV, D, BT = 1, 128, 1, 1, 256, 64
+    dtype = torch.bfloat16
+    scale = D ** -0.5
+    q = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    k = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    w = torch.randn(B, T, HV, D, dtype=dtype, device=device)
+    u = torch.randn(B, T, HV, D, dtype=dtype, device=device)
+    do = torch.randn(B, T, HV, D, dtype=dtype, device=device)
+    gk = torch.randn(B, T, HV, D, dtype=torch.float32, device=device) * 0.1
+    h0 = torch.randn(B, HV, D, D, dtype=torch.float32, device=device)
+    dht = torch.randn(B, HV, D, D, dtype=torch.float32, device=device)
+
+    dv_local = torch.randn(B, T, HV, D, dtype=dtype, device=device)
+    dh_ref, dh0_ref, dv2_ref = chunk_gated_delta_rule_bwd_dhu_ref(
+        q, k, w, u, None, h0, do, dht, dv_local, scale, BT,
+        gk=gk, state_v_first=True,
+    )
+    dh_tri, dh0_tri, dv2_tri = chunk_gated_delta_rule_bwd_dhu(
+        q=q, k=k, w=w, g=None, gk=gk, h0=h0, dht=dht, do=do, dv=dv_local,
+        scale=scale, chunk_size=BT, state_v_first=True,
+    )
+
+    assert_close('dh', dh_ref.to(dtype), dh_tri, 0.006)
+    assert_close('dv2', dv2_ref.to(dtype), dv2_tri, 0.006)
+    assert_close('dh0', dh0_ref, dh0_tri, 0.006)
+
+
+def test_chunk_gated_delta_rule_bwd_dhu_varlen_many_documents():
+    """The backward counterpart of `test_chunk_gated_delta_rule_fwd_h_varlen_many_documents`."""
+    torch.manual_seed(42)
+    BT, H, HV, D, dtype = 64, 32, 32, 32, torch.bfloat16
+    n_docs, doc_len = 2050, 16
+    T, split = n_docs * doc_len, n_docs // 2
+    scale = D ** -0.5
+
+    cu_seqlens = _uniform_cu_seqlens(n_docs, doc_len)
+    q = torch.randn(1, T, H, D, dtype=dtype, device=device)
+    k = torch.randn(1, T, H, D, dtype=dtype, device=device)
+    w = torch.randn(1, T, HV, D, dtype=dtype, device=device)
+    do = torch.randn(1, T, HV, D, dtype=dtype, device=device)
+    dv = torch.randn(1, T, HV, D, dtype=dtype, device=device)
+    g = torch.randn(1, T, HV, dtype=torch.float32, device=device) * 0.1
+    h0 = torch.randn(n_docs, HV, D, D, dtype=torch.float32, device=device)
+    dht = torch.randn(n_docs, HV, D, D, dtype=torch.float32, device=device)
+
+    dh_tri, dh0_tri, dv2_tri = chunk_gated_delta_rule_bwd_dhu(
+        q=q, k=k, w=w, g=g, h0=h0, dht=dht, do=do, dv=dv, scale=scale,
+        cu_seqlens=cu_seqlens, chunk_size=BT,
+    )
+
+    halves = [(0, split), (split, n_docs)]
+    parts = [
+        chunk_gated_delta_rule_bwd_dhu(
+            q=q[:, lo * doc_len:hi * doc_len],
+            k=k[:, lo * doc_len:hi * doc_len],
+            w=w[:, lo * doc_len:hi * doc_len],
+            g=g[:, lo * doc_len:hi * doc_len],
+            h0=h0[lo:hi],
+            dht=dht[lo:hi],
+            do=do[:, lo * doc_len:hi * doc_len],
+            dv=dv[:, lo * doc_len:hi * doc_len],
+            scale=scale,
+            cu_seqlens=_uniform_cu_seqlens(hi - lo, doc_len),
+            chunk_size=BT,
+        )
+        for lo, hi in halves
+    ]
+
+    assert_close('dh', torch.cat([p[0] for p in parts], dim=1), dh_tri, 0.006)
+    assert_close('dh0', torch.cat([p[1] for p in parts], dim=0), dh0_tri, 0.006)
+    assert_close('dv2', torch.cat([p[2] for p in parts], dim=1), dv2_tri, 0.006)

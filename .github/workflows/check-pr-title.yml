@@ -25,3 +25,31 @@ jobs:
             echo "Actual title: $PR_TITLE"
             exit 1
           fi
+
+      - name: Check the PR body for a complete checklist
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          fail() { echo "::error::$1"; exit 1; }
+          [ -z "$PR_BODY" ] && fail "PR body is empty. Please fill in the template — every checklist box matters."
+
+          require_checked() {
+            local pattern="$1" label="$2"
+            if ! grep -qiE "^[[:space:]]*- \[x\][[:space:]].*$pattern" <<<"$PR_BODY"; then
+              fail "Checklist item not ticked: \"$label\". Read it, act on it, and tick it before merging."
+            fi
+          }
+
+          require_checked "I have read \[CONTRIBUTING.md\]" "I have read CONTRIBUTING.md"
+          require_checked "I have read \[AGENTS.md\]" "I have read AGENTS.md"
+          require_checked "Dependent tests pass" "dependent tests"
+          require_checked "Kernel changes include" "benchmark numbers (kernel changes)"
+
+          if grep -qiE "^[[:space:]]*- \[x\][[:space:]].*This PR is minor/cosmetic-only" <<<"$PR_BODY"; then
+            just=$(sed -n '/### If you ticked/,$p' <<<"$PR_BODY" | sed 's/<!--[^>]*-->//g' | tail -n +2 | tr -d '[:space:]')
+            if [ ${#just} -lt 20 ]; then
+              fail "You ticked the 'minor/cosmetic-only' box: add a justification under the '### If you ticked' heading explaining why this minor change is worth a maintainer's review time, or untick the box if the PR is not minor."
+            fi
+          fi
+
+          echo "PR checklist complete."

@@ -56,23 +56,26 @@ def layer_norm_gated_fwd_kernel(
     HAS_WEIGHT: tl.constexpr,
     HAS_BIAS: tl.constexpr,
 ):
-    i_t = tl.program_id(0)
+    i_t = tl.program_id(0).to(tl.int64)
 
+    o_t = i_t * BT + tl.arange(0, BT)
     o_d = tl.arange(0, BD)
     m_d = o_d < D
+    m_t = o_t < T
+    m_x = m_t[:, None] & m_d[None, :]
 
-    p_x = tl.make_block_ptr(x, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
-    b_x = tl.load(p_x, boundary_check=(0, 1)).to(tl.float32)
+    p_x = x + o_t[:, None] * D + o_d[None, :]
+    b_x = tl.load(p_x, mask=m_x, other=0.0).to(tl.float32)
     if HAS_RESIDUAL:
-        p_res = tl.make_block_ptr(residual, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
-        b_x += tl.load(p_res, boundary_check=(0, 1)).to(tl.float32)
+        p_res = residual + o_t[:, None] * D + o_d[None, :]
+        b_x += tl.load(p_res, mask=m_x, other=0.0).to(tl.float32)
     if STORE_RESIDUAL_OUT:
-        p_res_out = tl.make_block_ptr(residual_out, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
-        tl.store(p_res_out, b_x.to(p_res_out.dtype.element_ty), boundary_check=(0, 1))
+        p_res_out = residual_out + o_t[:, None] * D + o_d[None, :]
+        tl.store(p_res_out, b_x.to(p_res_out.dtype.element_ty), mask=m_x)
     if not IS_RMS_NORM:
         b_mean = tl.sum(b_x, axis=1) / D
-        p_mean = tl.make_block_ptr(mean, (T,), (1,), (i_t * BT,), (BT,), (0,))
-        tl.store(p_mean, b_mean.to(p_mean.dtype.element_ty), boundary_check=(0,))
+        p_mean = mean + o_t
+        tl.store(p_mean, b_mean.to(p_mean.dtype.element_ty), mask=m_t)
         b_xbar = tl.where(m_d[None, :], b_x - b_mean[:, None], 0.0)
         b_var = tl.sum(b_xbar * b_xbar, axis=1) / D
     else:
@@ -80,8 +83,8 @@ def layer_norm_gated_fwd_kernel(
         b_var = tl.sum(b_xbar * b_xbar, axis=1) / D
     b_rstd = 1 / tl.sqrt(b_var + eps)
 
-    p_rstd = tl.make_block_ptr(rstd, (T,), (1,), (i_t * BT,), (BT,), (0,))
-    tl.store(p_rstd, b_rstd.to(p_rstd.dtype.element_ty), boundary_check=(0,))
+    p_rstd = rstd + o_t
+    tl.store(p_rstd, b_rstd.to(p_rstd.dtype.element_ty), mask=m_t)
 
     if HAS_WEIGHT:
         b_w = tl.load(w + o_d, mask=m_d).to(tl.float32)
@@ -93,16 +96,16 @@ def layer_norm_gated_fwd_kernel(
         b_y = b_y + b_b[None, :]
 
     # swish/sigmoid output gate
-    p_g = tl.make_block_ptr(g, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
-    b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
+    p_g = g + o_t[:, None] * D + o_d[None, :]
+    b_g = tl.load(p_g, mask=m_x, other=0.0).to(tl.float32)
     if ACTIVATION == "swish" or ACTIVATION == "silu":
         b_y = b_y * b_g * tl.sigmoid(b_g)
     elif ACTIVATION == "sigmoid":
         b_y = b_y * tl.sigmoid(b_g)
 
     # Write output
-    p_y = tl.make_block_ptr(y, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
-    tl.store(p_y, b_y.to(p_y.dtype.element_ty), boundary_check=(0, 1))
+    p_y = y + o_t[:, None] * D + o_d[None, :]
+    tl.store(p_y, b_y.to(p_y.dtype.element_ty), mask=m_x)
 
 
 @triton.heuristics(
@@ -139,7 +142,7 @@ def layer_norm_gated_fwd_kernel1(
     HAS_WEIGHT: tl.constexpr,
     HAS_BIAS: tl.constexpr,
 ):
-    i_t = tl.program_id(0)
+    i_t = tl.program_id(0).to(tl.int64)
     x += i_t * D
     y += i_t * D
     g += i_t * D
@@ -241,25 +244,28 @@ def layer_norm_gated_bwd_kernel(
 
     # the caller guarantees NS = min(SM, T), so every program has at least one token.
     # the last program's range may slightly exceed T (since BS = ceil(T/NS));
-    # make_block_ptr uses the true tensor shape (T, D), so boundary_check
-    # handles the partial tail tile by zero-padding loads and skipping stores.
+    # accesses are bounded by the true tensor shape (T, D), so the partial
+    # tail tile is handled by zero-padding loads and skipping stores.
     # the m_t mask below further ensures dw/db only accumulate valid rows (< T).
     for i_t in range(i_s * BS, i_s * BS + BS, BT):
-        p_x = tl.make_block_ptr(x, (T, D), (D, 1), (i_t, 0), (BT, BD), (1, 0))
-        p_g = tl.make_block_ptr(g, (T, D), (D, 1), (i_t, 0), (BT, BD), (1, 0))
-        p_dy = tl.make_block_ptr(dy, (T, D), (D, 1), (i_t, 0), (BT, BD), (1, 0))
-        p_dx = tl.make_block_ptr(dx, (T, D), (D, 1), (i_t, 0), (BT, BD), (1, 0))
-        p_dg = tl.make_block_ptr(dg, (T, D), (D, 1), (i_t, 0), (BT, BD), (1, 0))
+        o_t = (i_t + tl.arange(0, BT)).to(tl.int64)
+        m_t = o_t < T
+        m_x = m_t[:, None] & m_d[None, :]
+        p_x = x + o_t[:, None] * D + o_d[None, :]
+        p_g = g + o_t[:, None] * D + o_d[None, :]
+        p_dy = dy + o_t[:, None] * D + o_d[None, :]
+        p_dx = dx + o_t[:, None] * D + o_d[None, :]
+        p_dg = dg + o_t[:, None] * D + o_d[None, :]
         # [BT, BD]
-        b_x = tl.load(p_x, boundary_check=(0, 1)).to(tl.float32)
-        b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
-        b_dy = tl.load(p_dy, boundary_check=(0, 1)).to(tl.float32)
+        b_x = tl.load(p_x, mask=m_x, other=0.0).to(tl.float32)
+        b_g = tl.load(p_g, mask=m_x, other=0.0).to(tl.float32)
+        b_dy = tl.load(p_dy, mask=m_x, other=0.0).to(tl.float32)
 
         if not IS_RMS_NORM:
-            p_mean = tl.make_block_ptr(mean, (T,), (1,), (i_t,), (BT,), (0,))
-            b_mean = tl.load(p_mean, boundary_check=(0,))
-        p_rstd = tl.make_block_ptr(rstd, (T,), (1,), (i_t,), (BT,), (0,))
-        b_rstd = tl.load(p_rstd, boundary_check=(0,))
+            p_mean = mean + o_t
+            b_mean = tl.load(p_mean, mask=m_t, other=0.0)
+        p_rstd = rstd + o_t
+        b_rstd = tl.load(p_rstd, mask=m_t, other=0.0)
         # Compute dx
         b_xhat = (b_x - b_mean[:, None]) * b_rstd[:, None] if not IS_RMS_NORM else b_x * b_rstd[:, None]
         b_xhat = tl.where(m_d[None, :], b_xhat, 0.0)
@@ -267,17 +273,20 @@ def layer_norm_gated_bwd_kernel(
         b_y = b_xhat * b_w[None, :] if HAS_WEIGHT else b_xhat
         if HAS_BIAS:
             b_y = b_y + b_b[None, :]
-        if RECOMPUTE_OUTPUT:
-            p_y = tl.make_block_ptr(y, (T, D), (D, 1), (i_t, 0), (BT, BD), (1, 0))
-            tl.store(p_y, b_y.to(p_y.dtype.element_ty), boundary_check=(0, 1))
 
         b_sigmoid_g = tl.sigmoid(b_g)
         if ACTIVATION == "swish" or ACTIVATION == "silu":
+            b_gate = b_g * b_sigmoid_g
             b_dg = b_dy * b_y * (b_sigmoid_g + b_g * b_sigmoid_g * (1 - b_sigmoid_g))
-            b_dy = b_dy * b_g * b_sigmoid_g
         elif ACTIVATION == "sigmoid":
+            b_gate = b_sigmoid_g
             b_dg = b_dy * b_y * b_sigmoid_g * (1 - b_sigmoid_g)
-            b_dy = b_dy * b_sigmoid_g
+        # b_dg needs the pre-gate b_y, but the recomputed output must match what the
+        # forward stored, i.e. the gated value the caller fed to its linear layer.
+        if RECOMPUTE_OUTPUT:
+            p_y = y + o_t[:, None] * D + o_d[None, :]
+            tl.store(p_y, (b_y * b_gate).to(p_y.dtype.element_ty), mask=m_x)
+        b_dy = b_dy * b_gate
         b_wdy = b_dy
 
         if HAS_WEIGHT or HAS_BIAS:
@@ -297,16 +306,16 @@ def layer_norm_gated_bwd_kernel(
             b_c1 = tl.sum(b_xhat * b_wdy, axis=1) / D
             b_dx = (b_wdy - b_xhat * b_c1[:, None]) * b_rstd[:, None]
         if HAS_DRESIDUAL:
-            p_dres = tl.make_block_ptr(dresidual, (T, D), (D, 1), (i_t, 0), (BT, BD), (1, 0))
-            b_dres = tl.load(p_dres, boundary_check=(0, 1)).to(tl.float32)
+            p_dres = dresidual + o_t[:, None] * D + o_d[None, :]
+            b_dres = tl.load(p_dres, mask=m_x, other=0.0).to(tl.float32)
             b_dx += b_dres
         # Write dx
         if STORE_DRESIDUAL:
-            p_dres_in = tl.make_block_ptr(dresidual_in, (T, D), (D, 1), (i_t, 0), (BT, BD), (1, 0))
-            tl.store(p_dres_in, b_dx.to(p_dres_in.dtype.element_ty), boundary_check=(0, 1))
+            p_dres_in = dresidual_in + o_t[:, None] * D + o_d[None, :]
+            tl.store(p_dres_in, b_dx.to(p_dres_in.dtype.element_ty), mask=m_x)
 
-        tl.store(p_dx, b_dx.to(p_dx.dtype.element_ty), boundary_check=(0, 1))
-        tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), boundary_check=(0, 1))
+        tl.store(p_dx, b_dx.to(p_dx.dtype.element_ty), mask=m_x)
+        tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), mask=m_x)
 
     if HAS_WEIGHT:
         tl.store(dw + i_s * D + o_d, tl.sum(b_dw, axis=0), mask=m_d)
@@ -355,7 +364,7 @@ def layer_norm_gated_bwd_kernel1(
     HAS_BIAS: tl.constexpr,
     RECOMPUTE_OUTPUT: tl.constexpr,
 ):
-    i_s = tl.program_id(0)
+    i_s = tl.program_id(0).to(tl.int64)
     o_d = tl.arange(0, BD)
     mask = o_d < D
     x += i_s * BS * D
@@ -392,16 +401,19 @@ def layer_norm_gated_bwd_kernel1(
         b_y = b_xhat * b_w if HAS_WEIGHT else b_xhat
         if HAS_BIAS:
             b_y = b_y + b_b
-        if RECOMPUTE_OUTPUT:
-            tl.store(y + o_d, b_y, mask=mask)
 
         b_sigmoid_g = tl.sigmoid(b_g)
         if ACTIVATION == "swish" or ACTIVATION == "silu":
+            b_gate = b_g * b_sigmoid_g
             b_dg = b_dy * b_y * (b_sigmoid_g + b_g * b_sigmoid_g * (1 - b_sigmoid_g))
-            b_dy = b_dy * b_g * b_sigmoid_g
         elif ACTIVATION == "sigmoid":
+            b_gate = b_sigmoid_g
             b_dg = b_dy * b_y * b_sigmoid_g * (1 - b_sigmoid_g)
-            b_dy = b_dy * b_sigmoid_g
+        # b_dg needs the pre-gate b_y, but the recomputed output must match what the
+        # forward stored, i.e. the gated value the caller fed to its linear layer.
+        if RECOMPUTE_OUTPUT:
+            tl.store(y + o_d, b_y * b_gate, mask=mask)
+        b_dy = b_dy * b_gate
         b_wdy = b_dy
         if HAS_WEIGHT:
             b_wdy = b_dy * b_w
@@ -564,7 +576,7 @@ def layer_norm_gated_bwd(
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
     # cap program count to T so no program is completely idle.
     # without this, high-SM GPUs (e.g. B200, 160 SMs) with small T would
-    # launch idle programs whose make_block_ptr offsets exceed the tensor shape.
+    # launch idle programs whose tile offsets exceed the tensor shape.
     NS = min(get_multiprocessor_count(x.device.index), T)
     BS = math.ceil(T / NS)
 

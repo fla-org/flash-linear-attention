@@ -19,9 +19,8 @@ from transformers.utils import logging
 
 from fla.layers.utils import (
     get_layer_cache,
-    get_unpad_data,
-    index_first_axis,
-    pad_input,
+    repad_hidden_states,
+    unpad_hidden_states,
     update_layer_cache,
 )
 from fla.modules.layernorm_gated import RMSNormGated
@@ -111,6 +110,16 @@ class Mamba3(nn.Module):
                 f"`expand * hidden_size` ({self.intermediate_size}) must be divisible by `head_dim` ({head_dim})."
             )
         self.num_heads = self.intermediate_size // head_dim
+        if self.n_groups < 1 or self.num_heads % self.n_groups != 0:
+            raise ValueError(
+                f"`n_groups` ({self.n_groups}) must be a positive divisor of `num_heads` ({self.num_heads})."
+            )
+        if not self.is_mimo:
+            self.register_buffer(
+                "_siso_proj",
+                torch.ones(1, self.num_heads, self.head_dim, **factory_kwargs),
+                persistent=False,
+            )
 
         if self.is_mimo and mamba3_mimo_combined is None:
             logger.warning_once(
@@ -321,8 +330,15 @@ class Mamba3(nn.Module):
 
         B = rearrange(B, "b (r g s) -> b r g s", g=self.n_groups, r=self.mimo_rank)
         C = rearrange(C, "b (r g s) -> b r g s", g=self.n_groups, r=self.mimo_rank)
-        B = self.B_norm(B).expand(-1, -1, self.num_heads, -1)
-        C = self.C_norm(C).expand(-1, -1, self.num_heads, -1)
+        B = self.B_norm(B)
+        C = self.C_norm(C)
+        if self.n_groups not in (1, self.num_heads):
+            repeats = self.num_heads // self.n_groups
+            B = B.repeat_interleave(repeats, dim=2)
+            C = C.repeat_interleave(repeats, dim=2)
+        else:
+            B = B.expand(-1, -1, self.num_heads, -1)
+            C = C.expand(-1, -1, self.num_heads, -1)
 
         x = rearrange(x, "b (h p) -> b h p", p=self.head_dim)
         z = rearrange(z, "b (h p) -> b h p", p=self.head_dim)
@@ -336,10 +352,9 @@ class Mamba3(nn.Module):
             zpj = rearrange(self.mimo_z, "h r p -> r h p", p=self.head_dim).contiguous()
             outpj = rearrange(self.mimo_o, "h r p -> r h p", p=self.head_dim).contiguous()
             return xpj, zpj, outpj
-        # SISO: pass identity-style ones tensors so the kernel signature stays uniform.
-        shape = (self.mimo_rank, self.num_heads, self.head_dim)
-        xpj = torch.ones(shape, device=self.in_proj.weight.device, dtype=x_dtype)
-        zpj = torch.ones(shape, device=self.in_proj.weight.device, dtype=z_dtype)
+        # SISO reuses an identity-style ones tensor so the kernel signature stays uniform.
+        xpj = self._siso_proj.to(dtype=x_dtype)
+        zpj = xpj if z_dtype == x_dtype else self._siso_proj.to(dtype=z_dtype)
         return xpj, zpj, xpj
 
     def step(
@@ -424,11 +439,8 @@ class Mamba3(nn.Module):
         # Prefill with padding mask: pack [B, T, D] -> [1, sum(lens), D] so the
         # upstream varlen kernels (which require batch=1) can consume it.
         indices_q = None
-        if last_state is None and cu_seqlens is None and attention_mask is not None and q_len > 1:
-            indices_q, cu_seqlens, _ = get_unpad_data(attention_mask[:, -q_len:])
-            hidden_states = index_first_axis(
-                rearrange(hidden_states, "b s ... -> (b s) ..."), indices_q,
-            ).unsqueeze(0)
+        if last_state is None and q_len > 1:
+            hidden_states, indices_q, cu_seqlens = unpad_hidden_states(hidden_states, cu_seqlens, attention_mask, q_len)
 
         output, new_state = self.cuda_kernels_forward(
             hidden_states,
@@ -440,8 +452,7 @@ class Mamba3(nn.Module):
         if new_state is not None:
             update_layer_cache(self, past_key_values, recurrent_state=new_state, offset=q_len)
 
-        if indices_q is not None:
-            output = pad_input(output.squeeze(0), indices_q, batch_size, q_len)
+        output = repad_hidden_states(output, indices_q, batch_size, q_len)
 
         return output, None, past_key_values
 

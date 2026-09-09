@@ -346,6 +346,39 @@ register_op(OpConfig(
     category='gate_beta',
 ))
 
+register_op(OpConfig(
+    name='chunk_precond_gdn',
+    import_path='fla.ops.precond_gated_delta_rule',
+    inputs={
+        **_simple_qkv,
+        'g': TensorSpec(shape_BTH, transform=logsigmoid),
+        'beta': TensorSpec(shape_BTH, transform=sigmoid_transform),
+        'g_atk': TensorSpec(shape_BTH, transform=logsigmoid),
+        'beta_atk': TensorSpec(shape_BTH, transform=sigmoid_transform),
+        'log_atk_scale': TensorSpec(shape_H, dtype='float32'),
+    },
+    func_name='chunk_precond_gated_delta_rule',
+    extra_kwargs={'use_qk_l2norm_in_kernel': True, 'x': 1.5},
+    category='gate_beta',
+    test_file='tests/ops/test_precond_gated_delta.py',
+))
+
+register_op(OpConfig(
+    name='chunk_precond_kda',
+    import_path='fla.ops.precond_kda',
+    inputs={
+        **_simple_qkv,
+        'g': TensorSpec(shape_BTHD, transform=logsigmoid),
+        'beta': TensorSpec(shape_BTH, transform=sigmoid_transform),
+        'g_atk': TensorSpec(shape_BTH, transform=logsigmoid),
+        'beta_atk': TensorSpec(shape_BTH, transform=sigmoid_transform),
+        'log_atk_scale': TensorSpec(shape_H, dtype='float32'),
+    },
+    extra_kwargs={'x': 1.5},
+    category='gate_beta',
+    test_file='tests/ops/test_precond_kda.py',
+))
+
 # --- +head gate (g=[B,T,H] with logsigmoid) ---
 
 register_op(OpConfig(
@@ -489,10 +522,21 @@ _attnres_inputs = {
     'rms_weight': TensorSpec(shape_D),
 }
 
+
+def _attnres_post_init(inputs, B, T, H, D, L=None, **kw):
+    # fused_attnres expects a sequence of [B, T, D] tensors, not the stacked [L, B, T, D] buffer.
+    res = inputs['residuals']
+    if isinstance(res, torch.Tensor) and res.ndim == 4:
+        inputs['residuals'] = [
+            res[i].detach().clone().requires_grad_(True) for i in range(res.shape[0])
+        ]
+
+
 register_op(OpConfig(
     name='fused_attnres',
     import_path='fla.ops.attnres',
     inputs=_attnres_inputs,
+    post_init=_attnres_post_init,
     output_is_tuple=False,
     default_shapes=_layer_default_shapes,
     category='fused_attnres',
@@ -503,6 +547,7 @@ register_op(OpConfig(
     name='naive_attnres',
     import_path='fla.ops.attnres',
     inputs=_attnres_inputs,
+    post_init=_attnres_post_init,
     output_is_tuple=False,
     default_shapes=_layer_default_shapes,
     category='naive_attnres',
@@ -512,6 +557,92 @@ register_op(OpConfig(
 # q carries HQ query heads while k/v carry H kv heads (GQA; HQ/H a power of two
 # and >= 16). block_indices is a causal random selection that must be built
 # explicitly — the generic randn/randint input factory cannot produce a valid one.
+
+
+def _shape_nsa_gate(B, T, H, D, HQ=None, **kw):
+    if HQ is None:
+        raise ValueError("NSA gate shape requires HQ")
+    return (B, T, HQ)
+
+
+def _shape_nsa_compressed_k(B, T, H, D, block_size=64, **kw):
+    return (B, (T + block_size - 1) // block_size, H, D)
+
+
+def _shape_nsa_compressed_v(B, T, H, D, V=None, block_size=64, **kw):
+    if V is None:
+        raise ValueError("NSA value shape requires V")
+    return (B, (T + block_size - 1) // block_size, H, V)
+
+
+def _shape_nsa_v(B, T, H, D, V=None, **kw):
+    if V is None:
+        raise ValueError("NSA value shape requires V")
+    return (B, T, H, V)
+
+
+def _nsa_compression_post_init(inputs, B, T, H, D, block_size=64, **kw):
+    inputs['TK'] = T
+    inputs['block_size'] = block_size
+    inputs['scale'] = D**-0.5
+
+
+def _nsa_windowed_post_init(inputs, B, T, H, D, S=16, block_size=64, window_size=512, **kw):
+    inputs['block_counts'] = S
+    inputs['block_size'] = block_size
+    inputs['scale'] = D**-0.5
+    inputs['window_size'] = window_size
+
+
+_nsa_compression_bq_shapes = {
+    'B1_T8K_H4_HQ64_K32_V32': {
+        'B': 1, 'T': 8192, 'H': 4, 'HQ': 64, 'D': 32, 'V': 32, 'S': 16, 'block_size': 64,
+    },
+    'B1_T16K_H4_HQ64_K32_V32': {
+        'B': 1, 'T': 16384, 'H': 4, 'HQ': 64, 'D': 32, 'V': 32, 'S': 16, 'block_size': 64,
+    },
+    'B1_T32K_H4_HQ64_K32_V32': {
+        'B': 1, 'T': 32768, 'H': 4, 'HQ': 64, 'D': 32, 'V': 32, 'S': 16, 'block_size': 64,
+    },
+    'B1_T16K_H4_HQ64_K64_V128': {
+        'B': 1, 'T': 16384, 'H': 4, 'HQ': 64, 'D': 64, 'V': 128, 'S': 16, 'block_size': 64,
+    },
+}
+
+
+register_op(OpConfig(
+    name='parallel_nsa_compression',
+    import_path='fla.ops.nsa.compression',
+    inputs={
+        'q': TensorSpec(shape_q_hq),
+        'k': TensorSpec(_shape_nsa_compressed_k),
+        'v': TensorSpec(_shape_nsa_compressed_v),
+    },
+    post_init=_nsa_compression_post_init,
+    output_is_tuple=True,
+    default_shapes=_nsa_compression_bq_shapes,
+    category='nsa',
+    test_file='tests/ops/test_nsa.py',
+))
+
+register_op(OpConfig(
+    name='parallel_nsa_windowed',
+    import_path='fla.ops.nsa',
+    func_name='parallel_nsa',
+    inputs={
+        'q': TensorSpec(shape_q_hq),
+        'k': TensorSpec(shape_BTHD),
+        'v': TensorSpec(_shape_nsa_v),
+        'g_cmp': TensorSpec(_shape_nsa_gate, transform=sigmoid_transform),
+        'g_slc': TensorSpec(_shape_nsa_gate, transform=sigmoid_transform),
+        'g_swa': TensorSpec(_shape_nsa_gate, transform=sigmoid_transform),
+    },
+    post_init=_nsa_windowed_post_init,
+    output_is_tuple=False,
+    default_shapes=_nsa_compression_bq_shapes,
+    category='nsa',
+    test_file='tests/ops/test_nsa.py',
+))
 
 
 def _nsa_post_init(inputs, B, T, H, D, HQ=None, S=16, block_size=64, **kw):

@@ -318,7 +318,16 @@ def main():
     parser.add_argument("--output", help="Save comparison results to JSON file")
     parser.add_argument("--no-fail-on-regression", action="store_true",
                         help="Do not exit with non-zero code on performance regression")
+    parser.add_argument("--plot", default=None,
+                        help="Save comparison visualization plots to this directory")
     args = parser.parse_args()
+
+    if args.plot and not args.output:
+        print(
+            "Warning: --plot requires --output to save comparison JSON first; "
+            "no plots will be generated.",
+            file=sys.stderr,
+        )
 
     # Resolve commit SHAs
     head_sha = get_commit_sha(args.head)
@@ -442,6 +451,17 @@ def main():
             with open(args.output, 'w') as f:
                 json.dump(comparison, f, indent=2)
             print(f"\nFull results saved to {args.output}")
+
+            if args.plot:
+                sys.path.insert(0, str(PROJECT_ROOT))
+                from benchmarks.visualize import visualize_comparison
+                plot_paths = visualize_comparison(
+                    args.output,
+                    save_dir=args.plot,
+                    threshold=args.threshold,
+                )
+                for p in plot_paths:
+                    print(f"  Plot saved: {p}")
 
         if args.no_fail_on_regression:
             print("\n  --no-fail-on-regression set, exiting with code 0 despite regressions.")

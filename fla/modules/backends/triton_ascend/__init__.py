@@ -9,7 +9,25 @@
 
 from __future__ import annotations
 
+import torch
+
 from fla.ops.backends import BaseBackend
+from fla.utils import IS_NPU
+
+# NPU inductor mis-compiles grpo_loss_with_old_logps; keep eager fn from fla.modules.grpo.
+if IS_NPU and not getattr(torch.compile, "_fla_npu_skip_grpo_old_logps_compile", False):
+    _orig_torch_compile = torch.compile
+
+    def _torch_compile(fn=None, /, **kwargs):
+        def _dec(f):
+            if f.__name__ == "grpo_loss_with_old_logps":
+                return f
+            return _orig_torch_compile(f, **kwargs)
+
+        return _dec(fn) if fn is not None else _dec
+
+    _torch_compile._fla_npu_skip_grpo_old_logps_compile = True
+    torch.compile = _torch_compile
 
 
 class TritonAscendBackend(BaseBackend):
@@ -87,9 +105,9 @@ class TritonAscendBackend(BaseBackend):
         from fla.modules.backends.triton_ascend.fused_linear_cross_entropy import (
             logsumexp_fwd_npu,
         )
-        return logsumexp_fwd_npu(x, scale=scale, softcapping=softcapping, dtype=dtype)
+        return logsumexp_fwd_npu(x=x, scale=scale, softcapping=softcapping, dtype=dtype)
 
-    def fused_linear_cross_entropy_forward(
+    def fused_linear_cross_entropy_fwd(
         self,
         x,
         target,
@@ -104,27 +122,30 @@ class TritonAscendBackend(BaseBackend):
         use_l2warp=False,
         l2_penalty_factor=1e-4,
         accumulate_grad_in_fp32=True,
+        process_group=None,
     ):
+        if process_group is not None and torch.distributed.get_world_size(process_group) > 1:
+            raise NotImplementedError("Vocabulary-parallel fused linear cross entropy is not supported by the Ascend backend")
         from fla.modules.backends.triton_ascend.fused_linear_cross_entropy import (
             fused_linear_cross_entropy_forward_npu,
         )
         return fused_linear_cross_entropy_forward_npu(
-            x,
-            target,
-            weight,
-            bias,
-            ignore_index,
-            label_smoothing,
-            logit_scale,
-            logit_softcapping,
-            num_chunks,
-            reduction,
-            use_l2warp,
-            l2_penalty_factor,
-            accumulate_grad_in_fp32,
+            x=x,
+            target=target,
+            weight=weight,
+            bias=bias,
+            ignore_index=ignore_index,
+            label_smoothing=label_smoothing,
+            logit_scale=logit_scale,
+            logit_softcapping=logit_softcapping,
+            num_chunks=num_chunks,
+            reduction=reduction,
+            use_l2warp=use_l2warp,
+            l2_penalty_factor=l2_penalty_factor,
+            accumulate_grad_in_fp32=accumulate_grad_in_fp32,
         )
 
-    def fused_linear_cross_entropy_backward(
+    def fused_linear_cross_entropy_bwd(
         self,
         do,
         dx,
@@ -134,7 +155,10 @@ class TritonAscendBackend(BaseBackend):
         from fla.modules.backends.triton_ascend.fused_linear_cross_entropy import (
             fused_linear_cross_entropy_backward_npu,
         )
-        return fused_linear_cross_entropy_backward_npu(do, dx, dw, db)
+        return fused_linear_cross_entropy_backward_npu(do=do, dx=dx, dw=dw, db=db)
+
+    fused_linear_cross_entropy_forward = fused_linear_cross_entropy_fwd
+    fused_linear_cross_entropy_backward = fused_linear_cross_entropy_bwd
 
     def sigmoid_fwd(self, x, output_contiguous=False):
         from fla.modules.backends.triton_ascend.activations import sigmoid_fwd_npu
@@ -197,17 +221,17 @@ class TritonAscendBackend(BaseBackend):
     ):
         from fla.modules.backends.triton_ascend.fused_kl_div import fused_kl_div_forward_npu
         return fused_kl_div_forward_npu(
-            x,
-            target_x,
-            weight,
-            target_weight,
-            reduction,
-            accumulate_grad_in_fp32,
+            x=x,
+            target_x=target_x,
+            weight=weight,
+            target_weight=target_weight,
+            reduction=reduction,
+            accumulate_grad_in_fp32=accumulate_grad_in_fp32,
         )
 
     def fused_kl_div_backward(self, do, dx, dw):
         from fla.modules.backends.triton_ascend.fused_kl_div import fused_kl_div_backward_npu
-        return fused_kl_div_backward_npu(do, dx, dw)
+        return fused_kl_div_backward_npu(do=do, dx=dx, dw=dw)
 
     def l2norm_fwd(
         self,
@@ -226,7 +250,7 @@ class TritonAscendBackend(BaseBackend):
         eps=1e-6,
     ):
         from fla.modules.backends.triton_ascend.l2norm import l2norm_bwd_npu
-        return l2norm_bwd_npu(y, rstd, dy, eps)
+        return l2norm_bwd_npu(y, rstd, dy)
 
     def layer_norm_gated_fwd(
         self,
@@ -441,6 +465,7 @@ class TritonAscendBackend(BaseBackend):
         initial_state,
         activation,
         cu_seqlens,
+        dht=None,
     ):
         from fla.modules.backends.triton_ascend.causal_conv1d import compute_dh0_npu
         return compute_dh0_npu(
@@ -450,6 +475,7 @@ class TritonAscendBackend(BaseBackend):
             initial_state,
             activation,
             cu_seqlens,
+            dht,
         )
 
     def causal_conv1d_update_states(

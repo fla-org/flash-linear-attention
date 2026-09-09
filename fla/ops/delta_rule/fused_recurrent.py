@@ -42,15 +42,17 @@ def fused_recurrent_delta_rule_fwd_kernel(
     IS_BETA_HEADWISE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_k, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    pid = tl.program_id(0)
+    NV, NK = tl.cdiv(V, BV), tl.cdiv(K, BK)
+    i_v, i_k, i_nh = pid % NV, (pid // NV) % NK, (pid // (NV * NK)).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
-        all = T
+        all = T.to(tl.int64)
         T = eos - bos
     else:
         bos, eos = i_n * T, i_n * T + T
-        all = B * T
+        all = B * T.to(tl.int64)
 
     p_q = q + (bos * H + i_h) * K + i_k * BK + tl.arange(0, BK)
     p_k = k + (bos * H + i_h) * K + i_k * BK + tl.arange(0, BK)
@@ -134,25 +136,27 @@ def fused_recurrent_delta_rule_bwd_kernel(
     USE_FINAL_STATE_GRADIENT: tl.constexpr,  # whether to use dht
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_k, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    pid = tl.program_id(0)
+    NV = tl.cdiv(V, BV)
+    i_v, i_k, i_nh = pid % NV, (pid // NV) % NK, (pid // (NV * NK)).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
-        all = T
+        all = T.to(tl.int64)
         T = eos - bos
     else:
         bos, eos = i_n * T, i_n * T + T
-        all = B * T
+        all = B * T.to(tl.int64)
 
     mask_k = i_k * BK + tl.arange(0, BK) < K
     mask_v = i_v * BV + tl.arange(0, BV) < V
 
-    p_q = q + (bos * H + i_h) * K + i_k * BK + tl.arange(0, BK) + (T - 1) * H*K
-    p_k = k + (bos * H + i_h) * K + i_k * BK + tl.arange(0, BK) + (T - 1) * H*K
-    p_v = v + (bos * H + i_h) * V + i_v * BV + tl.arange(0, BV) + (T - 1) * H*V
-    p_do = do + (bos * H + i_h) * V + i_v * BV + tl.arange(0, BV) + (T - 1) * H*V
-    p_dk = dk + ((i_v * all + bos) * H + i_h) * K + i_k * BK + tl.arange(0, BK) + (T - 1) * H*K
-    p_dv = dv + ((i_k * all + bos) * H + i_h) * V + i_v * BV + tl.arange(0, BV) + (T - 1) * H*V
+    p_q = q + (bos * H + i_h) * K + i_k * BK + tl.arange(0, BK) + (T - 1).to(tl.int64) * H*K
+    p_k = k + (bos * H + i_h) * K + i_k * BK + tl.arange(0, BK) + (T - 1).to(tl.int64) * H*K
+    p_v = v + (bos * H + i_h) * V + i_v * BV + tl.arange(0, BV) + (T - 1).to(tl.int64) * H*V
+    p_do = do + (bos * H + i_h) * V + i_v * BV + tl.arange(0, BV) + (T - 1).to(tl.int64) * H*V
+    p_dk = dk + ((i_v * all + bos) * H + i_h) * K + i_k * BK + tl.arange(0, BK) + (T - 1).to(tl.int64) * H*K
+    p_dv = dv + ((i_k * all + bos) * H + i_h) * V + i_v * BV + tl.arange(0, BV) + (T - 1).to(tl.int64) * H*V
     if IS_BETA_HEADWISE:
         p_beta = beta + (bos + T - 1) * H*V + i_h * V + i_v * BV + tl.arange(0, BV)
         p_dbeta = db + ((i_v * NK + i_k) * all + bos + T - 1) * H*V + i_h * V + tl.arange(0, BV)
@@ -277,7 +281,7 @@ def fused_recurrent_delta_rule_fwd(
     else:
         final_state = None
 
-    grid = (NV, NK, N * H)
+    grid = (NV * NK * N * H,)
     u = torch.empty_like(v)
     fused_recurrent_delta_rule_fwd_kernel[grid](
         q,
@@ -333,7 +337,7 @@ def fused_recurrent_delta_rule_bwd(
         db = q.new_empty(NV, NK, B, T, H, V)
     else:
         db = q.new_empty(NV, B, T, H)
-    grid = (NV, NK, N * H)
+    grid = (NV * NK * N * H,)
 
     if initial_state is not None and initial_state.requires_grad:
         dh0 = torch.empty_like(initial_state, dtype=torch.float32)

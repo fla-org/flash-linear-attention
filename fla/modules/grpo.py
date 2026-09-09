@@ -62,9 +62,12 @@ import triton.language as tl
 
 from fla.modules.backends import dispatch
 from fla.ops.utils.op import exp, log
-from fla.utils import IS_AMD, autotune_cache_kwargs, input_guard
+from fla.utils import IS_AMD, IS_INTEL, autotune_cache_kwargs, input_guard
 
 NUM_WARPS_AUTOTUNE = [4, 8, 16] if IS_AMD else [4, 8, 16, 32]
+# Intel/XPU Triton backend has correctness issues with multi-stage pipelining
+# when memory is cold (e.g. after empty_cache), so limit to single stage.
+NUM_STAGES_AUTOTUNE = [1] if IS_INTEL else [1, 2, 4]
 
 
 @triton.autotune(
@@ -72,7 +75,7 @@ NUM_WARPS_AUTOTUNE = [4, 8, 16] if IS_AMD else [4, 8, 16, 32]
         triton.Config({'BLOCK_SIZE': BLOCK_SIZE},  num_warps=NUM_WARPS, num_stages=NUM_STAGES)
         for BLOCK_SIZE in [1024, 2048, 4096, 8192]
         for NUM_WARPS in NUM_WARPS_AUTOTUNE
-        for NUM_STAGES in [1, 2, 4]
+        for NUM_STAGES in NUM_STAGES_AUTOTUNE
     ],
     key=['B', 'N'],
     **autotune_cache_kwargs,
@@ -303,15 +306,15 @@ def fused_grpo_loss(logits, ref_logp, input_ids, advantages,
     compute grpo loss, save memory(no addition usage) and fast speed(6X for A800)
 
     Args:
-        logtits: Tensor, [B, L+1, vocab_size], the origin output of model, it's not logits[:, :-1]
-        ref_logp: Tensor, [B, L], the origin output of model, it's not ref_logits[:, :-1]
+        logits: Tensor, [B, L+1, vocab_size], the original output of model, it's not logits[:, :-1]
+        ref_logp: Tensor, [B, L], the original output of model, it's not ref_logits[:, :-1]
         input_ids: Tensor, [B, K+L], it's prompt_completion_id, it contains the prompt ids and output ids
         advantages: Tensor, [B], the advantages of each prompt
         beta: float, the weight of kl loss
         completion_mask: Tensor, loss mask
         save_kl: bool, if true will save kl
 
-    Retutn:
+    Returns:
         loss: Tensor, [B, L], the loss of grpo, it contains the advantage part and kl part
 
     NOTE: logits(ref_logits) is computed by these steps
@@ -416,6 +419,6 @@ def grpo_loss_with_old_logps(
                    importance_weights_clipped) - beta * per_token_kl) * completion_mask
 
     # Calculate the final loss by summing the token losses and normalizing by the number of valid tokens
-    loss = -token_loss.sum() / completion_mask.sum()
+    loss = token_loss.sum() / completion_mask.sum()
 
     return loss

@@ -47,7 +47,9 @@ def fused_recurrent_oja_fwd_kernel(
     STORE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_nh = tl.program_id(0), tl.program_id(1)
+    pid = tl.program_id(0)
+    NV = tl.cdiv(V, BV)
+    i_v, i_nh = pid % NV, (pid // NV).to(tl.int64)
     i_n, i_hv = i_nh // HV, i_nh % HV
     i_h = i_hv // (HV // H)
     if IS_VARLEN:
@@ -143,7 +145,7 @@ def fused_recurrent_oja_fwd(
     o = torch.empty_like(v)
     final_state = q.new_empty(N, HV, K, V, dtype=torch.float32) if output_final_state else None
 
-    grid = (NV, N * HV)
+    grid = (NV * N * HV,)
     fused_recurrent_oja_fwd_kernel[grid](
         q=q,
         k=k,

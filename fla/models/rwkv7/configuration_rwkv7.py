@@ -9,8 +9,10 @@ import warnings
 
 from transformers.configuration_utils import PretrainedConfig
 
+from fla.models.hybrid import HybridAttentionConfig, _HybridAttentionConfigMixin
 
-class RWKV7Config(PretrainedConfig):
+
+class RWKV7Config(_HybridAttentionConfigMixin, PretrainedConfig):
 
     model_type = 'rwkv7'
     keys_to_ignore_at_inference = ['past_key_values']
@@ -33,7 +35,7 @@ class RWKV7Config(PretrainedConfig):
         norm_first: bool = True,
         norm_bias: bool = True,
         norm_eps: float = 1e-5,
-        attn: dict | None = None,
+        attn: HybridAttentionConfig = None,
         use_cache: bool = True,
         pad_token_id: int | None = None,
         bos_token_id: int = 1,
@@ -103,18 +105,6 @@ class RWKV7Config(PretrainedConfig):
                 "at the potential cost of reduced precision. "
                 "If you observe issues like loss divergence, consider disabling this setting.",
             )
-
-        if attn is not None:
-            if not isinstance(attn, dict):
-                raise ValueError("attn must be a dictionary")
-            if 'layers' not in attn:
-                raise ValueError("Layer indices must be provided to initialize hybrid attention layers")
-            if 'num_heads' not in attn:
-                raise ValueError("Number of heads must be provided to initialize hybrid attention layers")
-            attn['num_kv_heads'] = attn.get('num_kv_heads', attn['num_heads'])
-            attn['qkv_bias'] = attn.get('qkv_bias', False)
-            attn['window_size'] = attn.get('window_size', None)
-            attn['rope_theta'] = attn.get('rope_theta', 10000.)
 
         super().__init__(
             pad_token_id=pad_token_id,

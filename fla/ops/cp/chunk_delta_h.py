@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import warnings
 from typing import TYPE_CHECKING
 
 import torch
@@ -16,7 +17,7 @@ import triton.language as tl
 
 from fla.ops.cp.comm import all_gather_into_tensor
 from fla.ops.utils.op import exp2
-from fla.utils import autotune_cache_kwargs, check_shared_mem
+from fla.utils import IS_TF32_SUPPORTED, autotune_cache_kwargs, check_shared_mem
 
 if TYPE_CHECKING:
     from fla.ops.cp.context import FLACPContext
@@ -61,10 +62,11 @@ def pre_process_fwd_kernel_merged(
     USE_BG: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     MULTI_SEQS: tl.constexpr,
+    AFFINE_CHAIN_PRECISION: tl.constexpr = None,
 ):
     i_col, i_h = tl.program_id(0), tl.program_id(1)
     if MULTI_SEQS:
-        i_n = tl.program_id(2)
+        i_n = tl.program_id(2).to(tl.int64)
         # Offset hm for this subseq: hm[i_n, h, k, v+k]
         hm += i_n * HV * K * (K + V) + i_h * K * (K + V)
     else:
@@ -116,43 +118,55 @@ def pre_process_fwd_kernel_merged(
         if K > 192:
             b_h4 = tl.zeros([64, BLOCK_SIZE], dtype=tl.float32)
 
+        o_vb = i_v * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        m_vb = o_vb < V
+        o_k1 = tl.arange(0, 64)
+        m_k1 = o_k1 < K
+        o_k2 = 64 + o_k1
+        m_k2 = o_k2 < K
+        o_k3 = 128 + o_k1
+        m_k3 = o_k3 < K
+        o_k4 = 192 + o_k1
+        m_k4 = o_k4 < K
+
         # Main recurrence for h
         for i_t in range(NT):
+            o_t = i_t * BT + tl.arange(0, BT)
+            m_t = o_t < T
             # Compute decayed v
-            p_w = tl.make_block_ptr(w, (T, K), (stride_w, 1), (i_t * BT, 0), (BT, 64), (1, 0))
-            b_w = tl.load(p_w, boundary_check=(0, 1))
+            p_w = w + o_t[:, None] * stride_w + o_k1[None, :]
+            b_w = tl.load(p_w, mask=m_t[:, None] & m_k1[None, :], other=0.0)
             b_v_decay = tl.dot(b_w, b_h1.to(b_w.dtype))
             if K > 64:
-                p_w = tl.make_block_ptr(w, (T, K), (stride_w, 1), (i_t * BT, 64), (BT, 64), (1, 0))
-                b_w = tl.load(p_w, boundary_check=(0, 1))
-                b_v_decay += tl.dot(b_w, b_h2.to(b_w.dtype))
+                p_w = w + o_t[:, None] * stride_w + o_k2[None, :]
+                b_w = tl.load(p_w, mask=m_t[:, None] & m_k2[None, :], other=0.0)
+                b_v_decay = tl.dot(b_w, b_h2.to(b_w.dtype), b_v_decay)
             if K > 128:
-                p_w = tl.make_block_ptr(w, (T, K), (stride_w, 1), (i_t * BT, 128), (BT, 64), (1, 0))
-                b_w = tl.load(p_w, boundary_check=(0, 1))
-                b_v_decay += tl.dot(b_w, b_h3.to(b_w.dtype))
+                p_w = w + o_t[:, None] * stride_w + o_k3[None, :]
+                b_w = tl.load(p_w, mask=m_t[:, None] & m_k3[None, :], other=0.0)
+                b_v_decay = tl.dot(b_w, b_h3.to(b_w.dtype), b_v_decay)
             if K > 192:
-                p_w = tl.make_block_ptr(w, (T, K), (stride_w, 1), (i_t * BT, 192), (BT, 64), (1, 0))
-                b_w = tl.load(p_w, boundary_check=(0, 1))
-                b_v_decay += tl.dot(b_w, b_h4.to(b_w.dtype))
+                p_w = w + o_t[:, None] * stride_w + o_k4[None, :]
+                b_w = tl.load(p_w, mask=m_t[:, None] & m_k4[None, :], other=0.0)
+                b_v_decay = tl.dot(b_w, b_h4.to(b_w.dtype), b_v_decay)
 
-            p_v = tl.make_block_ptr(v, (T, V), (stride_v, 1), (i_t * BT, i_v * BLOCK_SIZE), (BT, BLOCK_SIZE), (1, 0))
+            p_v = v + o_t[:, None] * stride_v + o_vb[None, :]
             if USE_BG:
                 # DPLR mode: v2 = w @ h + u, h += kg^T @ v + bg^T @ v2
-                b_v_orig = tl.load(p_v, boundary_check=(0, 1))
-                p_u = tl.make_block_ptr(u, (T, V), (stride_v, 1), (i_t * BT, i_v * BLOCK_SIZE), (BT, BLOCK_SIZE), (1, 0))
-                b_v = b_v_decay + tl.load(p_u, boundary_check=(0, 1))
+                b_v_orig = tl.load(p_v, mask=m_t[:, None] & m_vb[None, :], other=0.0)
+                p_u = u + o_t[:, None] * stride_v + o_vb[None, :]
+                b_v = b_v_decay + tl.load(p_u, mask=m_t[:, None] & m_vb[None, :], other=0.0)
             else:
                 # GDN/KDA mode: v_new = v - w @ h
-                b_v = tl.load(p_v, boundary_check=(0, 1)) - b_v_decay
+                b_v = tl.load(p_v, mask=m_t[:, None] & m_vb[None, :], other=0.0) - b_v_decay
 
             last_idx = min((i_t + 1) * BT, T) - 1
 
             # Apply g decay
             if USE_G:
-                m_t = (i_t * BT + tl.arange(0, BT)) < T
                 b_g_last = tl.load(g + last_idx * HV).to(tl.float32)
-                p_g = tl.make_block_ptr(g, (T,), (HV,), (i_t * BT,), (BT,), (0,))
-                b_g = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
+                p_g = g + o_t * HV
+                b_g = tl.load(p_g, mask=m_t, other=0.0).to(tl.float32)
                 b_v = b_v * tl.where(m_t, exp2(b_g_last - b_g), 0)[:, None]
                 b_g_last = exp2(b_g_last)
                 b_h1 *= b_g_last
@@ -184,60 +198,60 @@ def pre_process_fwd_kernel_merged(
             b_v = b_v.to(k.dtype.element_ty)
 
             # Update h
-            p_k = tl.make_block_ptr(k, (K, T), (1, stride_k), (0, i_t * BT), (64, BT), (0, 1))
-            b_k = tl.load(p_k, boundary_check=(0, 1))
+            p_k = k + o_k1[:, None] + o_t[None, :] * stride_k
+            b_k = tl.load(p_k, mask=m_k1[:, None] & m_t[None, :], other=0.0)
             if USE_BG:
                 # DPLR mode: h += kg^T @ v + bg^T @ v2
-                p_bg = tl.make_block_ptr(bg, (K, T), (1, stride_k), (0, i_t * BT), (64, BT), (0, 1))
-                b_bg = tl.load(p_bg, boundary_check=(0, 1))
+                p_bg = bg + o_k1[:, None] + o_t[None, :] * stride_k
+                b_bg = tl.load(p_bg, mask=m_k1[:, None] & m_t[None, :], other=0.0)
                 b_h1 += tl.dot(b_k, b_v_orig.to(b_k.dtype)) + tl.dot(b_bg, b_v)
                 if K > 64:
-                    p_k = tl.make_block_ptr(k, (K, T), (1, stride_k), (64, i_t * BT), (64, BT), (0, 1))
-                    b_k = tl.load(p_k, boundary_check=(0, 1))
-                    p_bg = tl.make_block_ptr(bg, (K, T), (1, stride_k), (64, i_t * BT), (64, BT), (0, 1))
-                    b_bg = tl.load(p_bg, boundary_check=(0, 1))
+                    p_k = k + o_k2[:, None] + o_t[None, :] * stride_k
+                    b_k = tl.load(p_k, mask=m_k2[:, None] & m_t[None, :], other=0.0)
+                    p_bg = bg + o_k2[:, None] + o_t[None, :] * stride_k
+                    b_bg = tl.load(p_bg, mask=m_k2[:, None] & m_t[None, :], other=0.0)
                     b_h2 += tl.dot(b_k, b_v_orig.to(b_k.dtype)) + tl.dot(b_bg, b_v)
                 if K > 128:
-                    p_k = tl.make_block_ptr(k, (K, T), (1, stride_k), (128, i_t * BT), (64, BT), (0, 1))
-                    b_k = tl.load(p_k, boundary_check=(0, 1))
-                    p_bg = tl.make_block_ptr(bg, (K, T), (1, stride_k), (128, i_t * BT), (64, BT), (0, 1))
-                    b_bg = tl.load(p_bg, boundary_check=(0, 1))
+                    p_k = k + o_k3[:, None] + o_t[None, :] * stride_k
+                    b_k = tl.load(p_k, mask=m_k3[:, None] & m_t[None, :], other=0.0)
+                    p_bg = bg + o_k3[:, None] + o_t[None, :] * stride_k
+                    b_bg = tl.load(p_bg, mask=m_k3[:, None] & m_t[None, :], other=0.0)
                     b_h3 += tl.dot(b_k, b_v_orig.to(b_k.dtype)) + tl.dot(b_bg, b_v)
                 if K > 192:
-                    p_k = tl.make_block_ptr(k, (K, T), (1, stride_k), (192, i_t * BT), (64, BT), (0, 1))
-                    b_k = tl.load(p_k, boundary_check=(0, 1))
-                    p_bg = tl.make_block_ptr(bg, (K, T), (1, stride_k), (192, i_t * BT), (64, BT), (0, 1))
-                    b_bg = tl.load(p_bg, boundary_check=(0, 1))
+                    p_k = k + o_k4[:, None] + o_t[None, :] * stride_k
+                    b_k = tl.load(p_k, mask=m_k4[:, None] & m_t[None, :], other=0.0)
+                    p_bg = bg + o_k4[:, None] + o_t[None, :] * stride_k
+                    b_bg = tl.load(p_bg, mask=m_k4[:, None] & m_t[None, :], other=0.0)
                     b_h4 += tl.dot(b_k, b_v_orig.to(b_k.dtype)) + tl.dot(b_bg, b_v)
             else:
                 # GDN/KDA mode: h += k^T @ v_new
-                b_h1 += tl.dot(b_k, b_v)
+                b_h1 = tl.dot(b_k, b_v, b_h1)
                 if K > 64:
-                    p_k = tl.make_block_ptr(k, (K, T), (1, stride_k), (64, i_t * BT), (64, BT), (0, 1))
-                    b_k = tl.load(p_k, boundary_check=(0, 1))
-                    b_h2 += tl.dot(b_k, b_v)
+                    p_k = k + o_k2[:, None] + o_t[None, :] * stride_k
+                    b_k = tl.load(p_k, mask=m_k2[:, None] & m_t[None, :], other=0.0)
+                    b_h2 = tl.dot(b_k, b_v, b_h2)
                 if K > 128:
-                    p_k = tl.make_block_ptr(k, (K, T), (1, stride_k), (128, i_t * BT), (64, BT), (0, 1))
-                    b_k = tl.load(p_k, boundary_check=(0, 1))
-                    b_h3 += tl.dot(b_k, b_v)
+                    p_k = k + o_k3[:, None] + o_t[None, :] * stride_k
+                    b_k = tl.load(p_k, mask=m_k3[:, None] & m_t[None, :], other=0.0)
+                    b_h3 = tl.dot(b_k, b_v, b_h3)
                 if K > 192:
-                    p_k = tl.make_block_ptr(k, (K, T), (1, stride_k), (192, i_t * BT), (64, BT), (0, 1))
-                    b_k = tl.load(p_k, boundary_check=(0, 1))
-                    b_h4 += tl.dot(b_k, b_v)
+                    p_k = k + o_k4[:, None] + o_t[None, :] * stride_k
+                    b_k = tl.load(p_k, mask=m_k4[:, None] & m_t[None, :], other=0.0)
+                    b_h4 = tl.dot(b_k, b_v, b_h4)
 
         # Store h results
         stride_hm_kv = K + V
-        p_h1 = tl.make_block_ptr(hm, (K, V), (stride_hm_kv, 1), (0, i_v * BLOCK_SIZE), (64, BLOCK_SIZE), (1, 0))
-        tl.store(p_h1, b_h1.to(p_h1.dtype.element_ty), boundary_check=(0, 1))
+        p_h1 = hm + o_k1[:, None] * stride_hm_kv + o_vb[None, :]
+        tl.store(p_h1, b_h1.to(p_h1.dtype.element_ty), mask=m_k1[:, None] & m_vb[None, :])
         if K > 64:
-            p_h2 = tl.make_block_ptr(hm, (K, V), (stride_hm_kv, 1), (64, i_v * BLOCK_SIZE), (64, BLOCK_SIZE), (1, 0))
-            tl.store(p_h2, b_h2.to(p_h2.dtype.element_ty), boundary_check=(0, 1))
+            p_h2 = hm + o_k2[:, None] * stride_hm_kv + o_vb[None, :]
+            tl.store(p_h2, b_h2.to(p_h2.dtype.element_ty), mask=m_k2[:, None] & m_vb[None, :])
         if K > 128:
-            p_h3 = tl.make_block_ptr(hm, (K, V), (stride_hm_kv, 1), (128, i_v * BLOCK_SIZE), (64, BLOCK_SIZE), (1, 0))
-            tl.store(p_h3, b_h3.to(p_h3.dtype.element_ty), boundary_check=(0, 1))
+            p_h3 = hm + o_k3[:, None] * stride_hm_kv + o_vb[None, :]
+            tl.store(p_h3, b_h3.to(p_h3.dtype.element_ty), mask=m_k3[:, None] & m_vb[None, :])
         if K > 192:
-            p_h4 = tl.make_block_ptr(hm, (K, V), (stride_hm_kv, 1), (192, i_v * BLOCK_SIZE), (64, BLOCK_SIZE), (1, 0))
-            tl.store(p_h4, b_h4.to(p_h4.dtype.element_ty), boundary_check=(0, 1))
+            p_h4 = hm + o_k4[:, None] * stride_hm_kv + o_vb[None, :]
+            tl.store(p_h4, b_h4.to(p_h4.dtype.element_ty), mask=m_k4[:, None] & m_vb[None, :])
     else:
         # ====== Stage 2: Compute m (K x K) ======
         # i_col is for m part, map to K dimension
@@ -256,24 +270,25 @@ def pre_process_fwd_kernel_merged(
         b_m = tl.where(row[:, None] == col[None, :], 1.0, 0.0)
 
         for i_t in range(NT):
+            o_t = i_t * BT + tl.arange(0, BT)
+            m_t = o_t < T
             # Load k and w with full BK1 rows
             if USE_BG:
                 # DPLR mode: use bg for transition matrix
                 # bg was already offset at the beginning of the kernel
-                p_k = tl.make_block_ptr(bg, (T, K), (stride_k, 1), (i_t * BT, 0), (BT, BK1), (1, 0))
+                p_k = bg + o_t[:, None] * stride_k + row[None, :]
             else:
-                p_k = tl.make_block_ptr(k, (T, K), (stride_k, 1), (i_t * BT, 0), (BT, BK1), (1, 0))
-            b_k = tl.load(p_k, boundary_check=(0, 1))
-            p_w = tl.make_block_ptr(w, (T, K), (stride_w, 1), (i_t * BT, 0), (BT, BK1), (1, 0))
-            b_w = tl.load(p_w, boundary_check=(0, 1))
+                p_k = k + o_t[:, None] * stride_k + row[None, :]
+            b_k = tl.load(p_k, mask=m_t[:, None] & (row < K)[None, :], other=0.0)
+            p_w = w + o_t[:, None] * stride_w + row[None, :]
+            b_w = tl.load(p_w, mask=m_t[:, None] & (row < K)[None, :], other=0.0)
 
             last_idx = min((i_t + 1) * BT, T) - 1
 
             if USE_G:
-                m_t = (i_t * BT + tl.arange(0, BT)) < T
                 b_g_last = tl.load(g + last_idx * HV).to(tl.float32)
-                p_g = tl.make_block_ptr(g, (T,), (HV,), (i_t * BT,), (BT,), (0,))
-                b_g = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
+                p_g = g + o_t * HV
+                b_g = tl.load(p_g, mask=m_t, other=0.0).to(tl.float32)
                 b_k = b_k * tl.where(m_t, exp2(b_g_last - b_g), 0)[:, None]
                 b_g_last = exp2(b_g_last)
                 b_diag = tl.where(row[:, None] == row[None, :], b_g_last, 0.0)
@@ -294,16 +309,17 @@ def pre_process_fwd_kernel_merged(
                 # GDN/KDA mode: M = (diag - k^T @ w) @ M
                 b_kw = tl.dot(tl.trans(b_k.to(b_w.dtype)), b_w)
                 b_m_i = b_diag - b_kw
-            b_m = tl.dot(b_m_i.to(tl.float32), b_m.to(tl.float32))
+            b_m = tl.dot(b_m_i.to(tl.float32), b_m.to(tl.float32), input_precision=AFFINE_CHAIN_PRECISION)
 
         # Store m result
         stride_hm_kv = K + V
-        p_m = tl.make_block_ptr(hm + V, (K, K), (stride_hm_kv, 1), (0, i_k_col * BLOCK_SIZE), (BK1, BLOCK_SIZE), (1, 0))
-        tl.store(p_m, b_m.to(p_m.dtype.element_ty), boundary_check=(0, 1))
+        p_m = hm + V + row[:, None] * stride_hm_kv + col[None, :]
+        tl.store(p_m, b_m.to(p_m.dtype.element_ty), mask=(row < K)[:, None] & (col < K)[None, :])
 
 
 @triton.heuristics({
     'HAS_H0': lambda args: args['h0'] is not None,
+    'HAS_H_SEQ_IDX': lambda args: args['h_seq_idx'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -325,6 +341,7 @@ def merge_fwd_bwd_kernel(
     init_offsets,        # None for CP, [num_split_seqs+1] for intracard
     h0_seq_ids,          # None for CP, [num_split_seqs] for intracard
     h0,                  # None or [N_orig, HV, K, V] for intracard (or [V, K] when transposed)
+    h_seq_idx,           # None, or a device scalar selecting the target sequence row of h (graph replay)
     HV: tl.constexpr,
     K: tl.constexpr,
     V: tl.constexpr,
@@ -334,7 +351,10 @@ def merge_fwd_bwd_kernel(
     INTRACARD_MODE: tl.constexpr,          # True: intracard mode, False: CP mode
     NUM_SEQ_ENTRIES,         # num_split_seqs for intracard
     HAS_H0: tl.constexpr,                  # Heuristic: whether h0 is provided
+    HAS_H_SEQ_IDX: tl.constexpr,           # Heuristic: whether h_seq_idx is provided
     STATE_V_FIRST: tl.constexpr = False,  # When True, h0/h use [V, K] layout; ag_hm always [K, V+K]
+    AFFINE_CHAIN_PRECISION: tl.constexpr = None,  # input_precision for M@h in the state update (h' = M @ h + he)
+    NUM_RANKS_ON_DEVICE: tl.constexpr = False,  # CP mode: load pre_or_post_num_ranks from a device tensor
 ):
     """
     Unified merge kernel for both CP and Intra-card modes.
@@ -352,6 +372,10 @@ def merge_fwd_bwd_kernel(
     The recurrence h' = M @ h + he becomes h_T' = h_T @ M^T + he^T.
     """
     i_v = tl.program_id(0)
+    o_k = tl.arange(0, BK)
+    m_k = o_k < K
+    o_v = i_v * BV + tl.arange(0, BV)
+    m_v = o_v < V
     if INTRACARD_MODE:
         i_seq = tl.program_id(1)
         i_h = tl.program_id(2)
@@ -372,17 +396,11 @@ def merge_fwd_bwd_kernel(
         if HAS_H0:
             orig_seq_id = tl.load(h0_seq_ids + i_seq).to(tl.int32)
             if STATE_V_FIRST:
-                p_h0 = tl.make_block_ptr(
-                    h0 + (orig_seq_id * HV + i_h) * V * K,
-                    (V, K), (K, 1), (i_v * BV, 0), (BV, BK), (1, 0)
-                )
-                b_h = tl.load(p_h0, boundary_check=(0, 1)).to(tl.float32)
+                p_h0 = h0 + (orig_seq_id * HV + i_h) * V * K + o_v[:, None] * K + o_k[None, :]
+                b_h = tl.load(p_h0, mask=m_v[:, None] & m_k[None, :], other=0.0).to(tl.float32)
             else:
-                p_h0 = tl.make_block_ptr(
-                    h0 + (orig_seq_id * HV + i_h) * K * V,
-                    (K, V), (V, 1), (0, i_v * BV), (BK, BV), (1, 0)
-                )
-                b_h = tl.load(p_h0, boundary_check=(0, 1)).to(tl.float32)
+                p_h0 = h0 + (orig_seq_id * HV + i_h) * K * V + o_k[:, None] * V + o_v[None, :]
+                b_h = tl.load(p_h0, mask=m_k[:, None] & m_v[None, :], other=0.0).to(tl.float32)
         else:
             if STATE_V_FIRST:
                 b_h = tl.zeros([BV, BK], dtype=tl.float32)
@@ -395,39 +413,37 @@ def merge_fwd_bwd_kernel(
             base = i_ss * stride_hm_s + i_h * stride_hm_h
 
             # he and m are always in [K, V+K] layout from pre_scan
-            p_he = tl.make_block_ptr(
-                ag_hm + base, (K, V), (V + K, 1), (0, i_v * BV), (BK, BV), (1, 0)
-            )
-            b_he = tl.load(p_he, boundary_check=(0, 1)).to(tl.float32)
-            p_m = tl.make_block_ptr(
-                ag_hm + base + V, (K, K), (V + K, 1), (0, 0), (BK, BK), (1, 0)
-            )
-            b_m = tl.load(p_m, boundary_check=(0, 1)).to(tl.float32)
+            p_he = ag_hm + base + o_k[:, None] * (V + K) + o_v[None, :]
+            b_he = tl.load(p_he, mask=m_k[:, None] & m_v[None, :], other=0.0).to(tl.float32)
+            p_m = ag_hm + base + V + o_k[:, None] * (V + K) + o_k[None, :]
+            b_m = tl.load(p_m, mask=m_k[:, None] & m_k[None, :], other=0.0).to(tl.float32)
             if STATE_V_FIRST:
                 # h_T' = h_T @ M^T + he^T
-                b_h = tl.dot(b_h.to(tl.float32), tl.trans(b_m)) + tl.trans(b_he)
+                b_h = tl.dot(b_h.to(tl.float32), tl.trans(b_m), input_precision=AFFINE_CHAIN_PRECISION) + tl.trans(b_he)
             else:
-                b_h = tl.dot(b_m.to(tl.float32), b_h.to(tl.float32)) + b_he.to(tl.float32)
+                b_h = tl.dot(b_m.to(tl.float32), b_h.to(tl.float32),
+                             input_precision=AFFINE_CHAIN_PRECISION) + b_he.to(tl.float32)
 
             # Store for non-first subseqs
             if idx < num_subseqs - 1:
                 init_idx = init_base + idx
                 stride_init = HV * K * V
                 if STATE_V_FIRST:
-                    p_out = tl.make_block_ptr(
-                        h + init_idx * stride_init + i_h * V * K,
-                        (V, K), (K, 1), (i_v * BV, 0), (BV, BK), (1, 0)
-                    )
+                    p_out = h + init_idx * stride_init + i_h * V * K + o_v[:, None] * K + o_k[None, :]
+                    m_out = m_v[:, None] & m_k[None, :]
                 else:
-                    p_out = tl.make_block_ptr(
-                        h + init_idx * stride_init + i_h * K * V,
-                        (K, V), (V, 1), (0, i_v * BV), (BK, BV), (1, 0)
-                    )
-                tl.store(p_out, b_h.to(p_out.dtype.element_ty), boundary_check=(0, 1))
+                    p_out = h + init_idx * stride_init + i_h * K * V + o_k[:, None] * V + o_v[None, :]
+                    m_out = m_k[:, None] & m_v[None, :]
+                tl.store(p_out, b_h.to(p_out.dtype.element_ty), mask=m_out)
     else:
         # CP mode
         i_h = tl.program_id(1)
-        num_ranks = pre_or_post_num_ranks.to(tl.int32)
+        if HAS_H_SEQ_IDX:
+            h += tl.load(h_seq_idx).to(tl.int64) * HV * K * V
+        if NUM_RANKS_ON_DEVICE:
+            num_ranks = tl.load(pre_or_post_num_ranks).to(tl.int32)
+        else:
+            num_ranks = pre_or_post_num_ranks.to(tl.int32)
         h += i_h * K * V
         ag_hm += i_h * K * (K + V)
         stride = HV * K * (K + V)
@@ -440,19 +456,23 @@ def merge_fwd_bwd_kernel(
                 cur_rank = rank - num_ranks + idx
             else:
                 cur_rank = rank + num_ranks - idx
-            p_ag_h = tl.make_block_ptr(ag_hm + cur_rank * stride, (K, V), (K + V, 1), (0, i_v * BV), (BK, BV), (1, 0))
-            b_ag_h = tl.load(p_ag_h, boundary_check=(0, 1))
-            p_ag_m = tl.make_block_ptr(ag_hm + cur_rank * stride + V, (K, K), (K + V, 1), (0, 0), (BK, BK), (1, 0))
-            b_ag_m = tl.load(p_ag_m, boundary_check=(0, 1))
+            p_ag_h = ag_hm + cur_rank * stride + o_k[:, None] * (K + V) + o_v[None, :]
+            b_ag_h = tl.load(p_ag_h, mask=m_k[:, None] & m_v[None, :], other=0.0)
+            p_ag_m = ag_hm + cur_rank * stride + V + o_k[:, None] * (K + V) + o_k[None, :]
+            b_ag_m = tl.load(p_ag_m, mask=m_k[:, None] & m_k[None, :], other=0.0)
             if STATE_V_FIRST:
-                b_h = tl.dot(b_h.to(tl.float32), tl.trans(b_ag_m).to(tl.float32)) + tl.trans(b_ag_h).to(tl.float32)
+                b_h = tl.dot(b_h.to(tl.float32), tl.trans(b_ag_m).to(tl.float32),
+                             input_precision=AFFINE_CHAIN_PRECISION) + tl.trans(b_ag_h).to(tl.float32)
             else:
-                b_h = tl.dot(b_ag_m.to(tl.float32), b_h.to(tl.float32)) + b_ag_h.to(tl.float32)
+                b_h = tl.dot(b_ag_m.to(tl.float32), b_h.to(tl.float32),
+                             input_precision=AFFINE_CHAIN_PRECISION) + b_ag_h.to(tl.float32)
         if STATE_V_FIRST:
-            p_h = tl.make_block_ptr(h, (V, K), (K, 1), (i_v * BV, 0), (BV, BK), (1, 0))
+            p_h = h + o_v[:, None] * K + o_k[None, :]
+            m_h = m_v[:, None] & m_k[None, :]
         else:
-            p_h = tl.make_block_ptr(h, (K, V), (V, 1), (0, i_v * BV), (BK, BV), (1, 0))
-        tl.store(p_h, b_h.to(p_h.dtype.element_ty), boundary_check=(0, 1))
+            p_h = h + o_k[:, None] * V + o_v[None, :]
+            m_h = m_k[:, None] & m_v[None, :]
+        tl.store(p_h, b_h.to(p_h.dtype.element_ty), mask=m_h)
 
 
 @triton.heuristics({
@@ -493,6 +513,7 @@ def pre_process_bwd_kernel_merged(
     USE_GK: tl.constexpr,
     USE_BG: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    AFFINE_CHAIN_PRECISION: tl.constexpr = None,
 ):
     """
     Merged backward kernel that computes both dh (K x V) and dm (K x K) in a single kernel.
@@ -547,64 +568,72 @@ def pre_process_bwd_kernel_merged(
         if K > 192:
             b_dh4 = tl.zeros([64, BLOCK_SIZE], dtype=tl.float32)
 
+        o_vb = i_v * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        m_vb = o_vb < V
+        o_k1 = tl.arange(0, 64)
+        m_k1 = o_k1 < K
+        o_k2 = 64 + o_k1
+        m_k2 = o_k2 < K
+        o_k3 = 128 + o_k1
+        m_k3 = o_k3 < K
+        o_k4 = 192 + o_k1
+        m_k4 = o_k4 < K
+
         # Main recurrence for dh (reverse order)
         for i_t in range(NT - 1, -1, -1):
             last_idx = min((i_t + 1) * BT, T) - 1
+            o_t = i_t * BT + tl.arange(0, BT)
+            m_t = o_t < T
 
             if USE_G:
                 bg_last = tl.load(g + last_idx * HV).to(tl.float32)
-                p_g = tl.make_block_ptr(g, (T,), (HV,), (i_t * BT,), (BT,), (0,))
-                b_g = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
+                p_g = g + o_t * HV
+                b_g = tl.load(p_g, mask=m_t, other=0.0).to(tl.float32)
                 bg_last_exp = exp2(bg_last)
                 b_g_exp = exp2(b_g)
 
-            p_dv = tl.make_block_ptr(dv, (T, V), (stride_v, 1), (i_t * BT, i_v * BLOCK_SIZE), (BT, BLOCK_SIZE), (1, 0))
-            p_do = tl.make_block_ptr(do, (T, V), (stride_v, 1), (i_t * BT, i_v * BLOCK_SIZE), (BT, BLOCK_SIZE), (1, 0))
-            b_do = tl.load(p_do, boundary_check=(0, 1))
+            p_dv = dv + o_t[:, None] * stride_v + o_vb[None, :]
+            p_do = do + o_t[:, None] * stride_v + o_vb[None, :]
+            b_do = tl.load(p_do, mask=m_t[:, None] & m_vb[None, :], other=0.0)
 
             # Update dv
-            p_k = tl.make_block_ptr(k, (T, K), (stride_qk, 1), (i_t * BT, 0), (BT, 64), (1, 0))
-            b_k = tl.load(p_k, boundary_check=(0, 1))
+            p_k = k + o_t[:, None] * stride_qk + o_k1[None, :]
+            b_k = tl.load(p_k, mask=m_t[:, None] & m_k1[None, :], other=0.0)
             if USE_GK:
-                o_k1 = tl.arange(0, 64)
                 p_gk_last = gk + last_idx * HV * K
                 b_gk_last1 = tl.load(p_gk_last + o_k1, mask=(o_k1 < K), other=0.).to(tl.float32)
             b_dv = tl.dot(b_k, b_dh1.to(b_k.dtype))
 
             if K > 64:
-                p_k = tl.make_block_ptr(k, (T, K), (stride_qk, 1), (i_t * BT, 64), (BT, 64), (1, 0))
-                b_k = tl.load(p_k, boundary_check=(0, 1))
+                p_k = k + o_t[:, None] * stride_qk + o_k2[None, :]
+                b_k = tl.load(p_k, mask=m_t[:, None] & m_k2[None, :], other=0.0)
                 if USE_GK:
-                    o_k2 = 64 + o_k1
                     b_gk_last2 = tl.load(p_gk_last + o_k2, mask=(o_k2 < K), other=0.).to(tl.float32)
-                b_dv += tl.dot(b_k, b_dh2.to(b_k.dtype))
+                b_dv = tl.dot(b_k, b_dh2.to(b_k.dtype), b_dv)
 
             if K > 128:
-                p_k = tl.make_block_ptr(k, (T, K), (stride_qk, 1), (i_t * BT, 128), (BT, 64), (1, 0))
-                b_k = tl.load(p_k, boundary_check=(0, 1))
+                p_k = k + o_t[:, None] * stride_qk + o_k3[None, :]
+                b_k = tl.load(p_k, mask=m_t[:, None] & m_k3[None, :], other=0.0)
                 if USE_GK:
-                    o_k3 = 128 + o_k1
                     b_gk_last3 = tl.load(p_gk_last + o_k3, mask=(o_k3 < K), other=0.).to(tl.float32)
-                b_dv += tl.dot(b_k, b_dh3.to(b_k.dtype))
+                b_dv = tl.dot(b_k, b_dh3.to(b_k.dtype), b_dv)
 
             if K > 192:
-                p_k = tl.make_block_ptr(k, (T, K), (stride_qk, 1), (i_t * BT, 192), (BT, 64), (1, 0))
-                b_k = tl.load(p_k, boundary_check=(0, 1))
+                p_k = k + o_t[:, None] * stride_qk + o_k4[None, :]
+                b_k = tl.load(p_k, mask=m_t[:, None] & m_k4[None, :], other=0.0)
                 if USE_GK:
-                    o_k4 = 192 + o_k1
                     b_gk_last4 = tl.load(p_gk_last + o_k4, mask=(o_k4 < K), other=0.).to(tl.float32)
-                b_dv += tl.dot(b_k, b_dh4.to(b_k.dtype))
+                b_dv = tl.dot(b_k, b_dh4.to(b_k.dtype), b_dv)
 
             if USE_G:
-                m_t = (i_t * BT + tl.arange(0, BT)) < T
                 b_dv *= tl.where(m_t, exp2(bg_last - b_g), 0)[:, None]
-            b_dv += tl.load(p_dv, boundary_check=(0, 1))
+            b_dv += tl.load(p_dv, mask=m_t[:, None] & m_vb[None, :], other=0.0)
 
             # Update dh
-            p_w = tl.make_block_ptr(w, (K, T), (1, stride_w), (0, i_t * BT), (64, BT), (0, 1))
-            p_q = tl.make_block_ptr(q, (K, T), (1, stride_qk), (0, i_t * BT), (64, BT), (0, 1))
-            b_w = tl.load(p_w, boundary_check=(0, 1))
-            b_q = tl.load(p_q, boundary_check=(0, 1))
+            p_w = w + o_k1[:, None] + o_t[None, :] * stride_w
+            p_q = q + o_k1[:, None] + o_t[None, :] * stride_qk
+            b_w = tl.load(p_w, mask=m_k1[:, None] & m_t[None, :], other=0.0)
+            b_q = tl.load(p_q, mask=m_k1[:, None] & m_t[None, :], other=0.0)
             if USE_G:
                 b_dh1 *= bg_last_exp
                 b_q = b_q * b_g_exp[None, :]
@@ -617,10 +646,10 @@ def pre_process_bwd_kernel_merged(
                 b_dh1 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) * scale - tl.dot(b_w, b_dv.to(b_w.dtype))
 
             if K > 64:
-                p_q = tl.make_block_ptr(q, (K, T), (1, stride_qk), (64, i_t * BT), (64, BT), (0, 1))
-                p_w = tl.make_block_ptr(w, (K, T), (1, stride_w), (64, i_t * BT), (64, BT), (0, 1))
-                b_q = tl.load(p_q, boundary_check=(0, 1))
-                b_w = tl.load(p_w, boundary_check=(0, 1))
+                p_q = q + o_k2[:, None] + o_t[None, :] * stride_qk
+                p_w = w + o_k2[:, None] + o_t[None, :] * stride_w
+                b_q = tl.load(p_q, mask=m_k2[:, None] & m_t[None, :], other=0.0)
+                b_w = tl.load(p_w, mask=m_k2[:, None] & m_t[None, :], other=0.0)
                 if USE_G:
                     b_dh2 *= bg_last_exp
                     b_q = b_q * b_g_exp[None, :]
@@ -632,10 +661,10 @@ def pre_process_bwd_kernel_merged(
                     b_dh2 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) * scale - tl.dot(b_w, b_dv.to(b_w.dtype))
 
             if K > 128:
-                p_q = tl.make_block_ptr(q, (K, T), (1, stride_qk), (128, i_t * BT), (64, BT), (0, 1))
-                p_w = tl.make_block_ptr(w, (K, T), (1, stride_w), (128, i_t * BT), (64, BT), (0, 1))
-                b_q = tl.load(p_q, boundary_check=(0, 1))
-                b_w = tl.load(p_w, boundary_check=(0, 1))
+                p_q = q + o_k3[:, None] + o_t[None, :] * stride_qk
+                p_w = w + o_k3[:, None] + o_t[None, :] * stride_w
+                b_q = tl.load(p_q, mask=m_k3[:, None] & m_t[None, :], other=0.0)
+                b_w = tl.load(p_w, mask=m_k3[:, None] & m_t[None, :], other=0.0)
                 if USE_G:
                     b_dh3 *= bg_last_exp
                     b_q = b_q * b_g_exp[None, :]
@@ -647,10 +676,10 @@ def pre_process_bwd_kernel_merged(
                     b_dh3 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) * scale - tl.dot(b_w, b_dv.to(b_w.dtype))
 
             if K > 192:
-                p_q = tl.make_block_ptr(q, (K, T), (1, stride_qk), (192, i_t * BT), (64, BT), (0, 1))
-                p_w = tl.make_block_ptr(w, (K, T), (1, stride_w), (192, i_t * BT), (64, BT), (0, 1))
-                b_q = tl.load(p_q, boundary_check=(0, 1))
-                b_w = tl.load(p_w, boundary_check=(0, 1))
+                p_q = q + o_k4[:, None] + o_t[None, :] * stride_qk
+                p_w = w + o_k4[:, None] + o_t[None, :] * stride_w
+                b_q = tl.load(p_q, mask=m_k4[:, None] & m_t[None, :], other=0.0)
+                b_w = tl.load(p_w, mask=m_k4[:, None] & m_t[None, :], other=0.0)
                 if USE_G:
                     b_dh4 *= bg_last_exp
                     b_q = b_q * b_g_exp[None, :]
@@ -662,17 +691,17 @@ def pre_process_bwd_kernel_merged(
                     b_dh4 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) * scale - tl.dot(b_w, b_dv.to(b_w.dtype))
 
         # Store dh results
-        p_dh1 = tl.make_block_ptr(dhm, (K, V), (V + K, 1), (0, i_v * BLOCK_SIZE), (64, BLOCK_SIZE), (1, 0))
-        tl.store(p_dh1, b_dh1.to(p_dh1.dtype.element_ty), boundary_check=(0, 1))
+        p_dh1 = dhm + o_k1[:, None] * (V + K) + o_vb[None, :]
+        tl.store(p_dh1, b_dh1.to(p_dh1.dtype.element_ty), mask=m_k1[:, None] & m_vb[None, :])
         if K > 64:
-            p_dh2 = tl.make_block_ptr(dhm, (K, V), (V + K, 1), (64, i_v * BLOCK_SIZE), (64, BLOCK_SIZE), (1, 0))
-            tl.store(p_dh2, b_dh2.to(p_dh2.dtype.element_ty), boundary_check=(0, 1))
+            p_dh2 = dhm + o_k2[:, None] * (V + K) + o_vb[None, :]
+            tl.store(p_dh2, b_dh2.to(p_dh2.dtype.element_ty), mask=m_k2[:, None] & m_vb[None, :])
         if K > 128:
-            p_dh3 = tl.make_block_ptr(dhm, (K, V), (V + K, 1), (128, i_v * BLOCK_SIZE), (64, BLOCK_SIZE), (1, 0))
-            tl.store(p_dh3, b_dh3.to(p_dh3.dtype.element_ty), boundary_check=(0, 1))
+            p_dh3 = dhm + o_k3[:, None] * (V + K) + o_vb[None, :]
+            tl.store(p_dh3, b_dh3.to(p_dh3.dtype.element_ty), mask=m_k3[:, None] & m_vb[None, :])
         if K > 192:
-            p_dh4 = tl.make_block_ptr(dhm, (K, V), (V + K, 1), (192, i_v * BLOCK_SIZE), (64, BLOCK_SIZE), (1, 0))
-            tl.store(p_dh4, b_dh4.to(p_dh4.dtype.element_ty), boundary_check=(0, 1))
+            p_dh4 = dhm + o_k4[:, None] * (V + K) + o_vb[None, :]
+            tl.store(p_dh4, b_dh4.to(p_dh4.dtype.element_ty), mask=m_k4[:, None] & m_vb[None, :])
     else:
         # ====== Stage 2: Compute dm (K x K) ======
         # i_col is for dm part, map to K dimension
@@ -690,20 +719,21 @@ def pre_process_bwd_kernel_merged(
         for _i_t in range(NT):
             # Reverse order for backward
             i_t = NT - 1 - _i_t
+            o_t = i_t * BT + tl.arange(0, BT)
+            m_t = o_t < T
 
             # Load k and w with full BK1 rows
-            p_k = tl.make_block_ptr(k, (T, K), (stride_qk, 1), (i_t * BT, 0), (BT, BK1), (1, 0))
-            b_k = tl.load(p_k, boundary_check=(0, 1))
-            p_w = tl.make_block_ptr(w, (T, K), (stride_w, 1), (i_t * BT, 0), (BT, BK1), (1, 0))
-            b_w = tl.load(p_w, boundary_check=(0, 1))
+            p_k = k + o_t[:, None] * stride_qk + row[None, :]
+            b_k = tl.load(p_k, mask=m_t[:, None] & (row < K)[None, :], other=0.0)
+            p_w = w + o_t[:, None] * stride_w + row[None, :]
+            b_w = tl.load(p_w, mask=m_t[:, None] & (row < K)[None, :], other=0.0)
 
             last_idx = min((i_t + 1) * BT, T) - 1
 
             if USE_G:
-                m_t = (i_t * BT + tl.arange(0, BT)) < T
                 b_g_last = tl.load(g + last_idx * HV).to(tl.float32)
-                p_g = tl.make_block_ptr(g, (T,), (HV,), (i_t * BT,), (BT,), (0,))
-                b_g = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
+                p_g = g + o_t * HV
+                b_g = tl.load(p_g, mask=m_t, other=0.0).to(tl.float32)
                 b_k = b_k * tl.where(m_t, exp2(b_g_last - b_g), 0)[:, None]
                 b_g_last = exp2(b_g_last)
                 b_diag = tl.where(row[:, None] == row[None, :], b_g_last, 0.0)
@@ -723,11 +753,11 @@ def pre_process_bwd_kernel_merged(
                 # GDN/KDA mode: dM = (diag - w^T @ k) @ dM
                 b_m_i = b_diag - b_kw
             # Keep m chain in fp32 to avoid precision loss from repeated bf16 casting
-            b_m = tl.dot(b_m_i.to(tl.float32), b_m.to(tl.float32))
+            b_m = tl.dot(b_m_i.to(tl.float32), b_m.to(tl.float32), input_precision=AFFINE_CHAIN_PRECISION)
 
         # Store dm result
-        p_m = tl.make_block_ptr(dhm + V, (K, K), (V + K, 1), (0, i_k_col * BLOCK_SIZE), (BK1, BLOCK_SIZE), (1, 0))
-        tl.store(p_m, b_m.to(p_m.dtype.element_ty), boundary_check=(0, 1))
+        p_m = dhm + V + row[:, None] * (V + K) + col[None, :]
+        tl.store(p_m, b_m.to(p_m.dtype.element_ty), mask=(row < K)[:, None] & (col < K)[None, :])
 
 
 def chunk_gated_delta_rule_fwd_h_pre_process(
@@ -743,10 +773,17 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
     cu_seqlens: torch.LongTensor | None = None,
     initial_state: torch.Tensor | None = None,
     context: FLACPContext = None,
+    use_graph: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if context is None or context.group is None:
         return initial_state
     assert initial_state is None, "When enable CP, the provided initial_state must be None."
+    use_tf32x3_affine_chain = context.use_tf32x3_affine_chain
+    if use_tf32x3_affine_chain and not IS_TF32_SUPPORTED:
+        warnings.warn(
+            "tf32x3 affine chain requires an NVIDIA GPU with compute capability >= 8.0; falling back to ieee precision",
+            stacklevel=2,
+        )
     rank = dist.get_rank(group=context.group)
 
     B, T, H, K, V, HV = *k.shape, u.shape[-1], u.shape[2]
@@ -760,12 +797,94 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
         N = len(cu_seqlens) - 1
     assert K <= 256, "current kernel does not support head dimension larger than 256."
 
+    if context.layout == 'zigzag':
+        if use_graph:
+            raise NotImplementedError("use_graph is not supported with zigzag CP layout")
+        fns = context.front_num_seqs
+        hm = k.new_zeros(2, HV, K, V + K, dtype=torch.float32)
+        if state_v_first:
+            initial_state = k.new_zeros(N, HV, V, K, dtype=torch.float32)
+        else:
+            initial_state = k.new_zeros(N, HV, K, V, dtype=torch.float32)
+        BLOCK_SIZE = 32 if K <= 64 else 64
+        grid_hm = (triton.cdiv(V, BLOCK_SIZE) + triton.cdiv(K, BLOCK_SIZE), HV)
+        # each part exports the affine chain of its last segment, skipped when chain-last
+        for part, (cu_win, is_last) in enumerate(zip(
+                (cu_seqlens[fns - 1: fns + 1], cu_seqlens[-2:]), context.is_last_by_part)):
+            if not is_last:
+                pre_process_fwd_kernel_merged[grid_hm](
+                    k=k,
+                    v=u if v is None else v,
+                    w=w,
+                    g=g,
+                    gk=gk,
+                    bg=bg,
+                    u=u,
+                    hm=hm[part],
+                    cu_seqlens=cu_win,
+                    T=T,
+                    H=H,
+                    HV=HV,
+                    K=K,
+                    V=V,
+                    BT=BT,
+                    BK1=BK,
+                    BLOCK_SIZE=BLOCK_SIZE,
+                    MULTI_SEQS=False,
+                    AFFINE_CHAIN_PRECISION=(
+                        "tf32x3" if use_tf32x3_affine_chain and IS_TF32_SUPPORTED
+                        else ("ieee" if not IS_TF32_SUPPORTED else None)
+                    ),
+                )
+        ag_hm, _ = all_gather_into_tensor(hm, group=context.group)
+        # chain order: front parts of ranks 0..W-1, then back parts of ranks W-1..0
+        slots = torch.cat([ag_hm[:, 0], ag_hm[:, 1].flip(0)])
+        world_size = dist.get_world_size(context.group)
+
+        def grid(meta): return (triton.cdiv(V, meta['BV']), HV)
+        for part in range(2):
+            if not context.is_first_by_part[part]:
+                merge_fwd_bwd_kernel[grid](
+                    h=initial_state[0] if part == 0 else initial_state[fns],
+                    ag_hm=slots,
+                    pre_or_post_num_ranks=context.pre_num_ranks_by_part[part],
+                    rank=rank if part == 0 else 2 * world_size - 1 - rank,
+                    seq_offsets=None,
+                    init_offsets=None,
+                    h0_seq_ids=None,
+                    h0=None,
+                    h_seq_idx=None,
+                    HV=HV,
+                    K=K,
+                    V=V,
+                    BK=BK,
+                    FORWARD=True,
+                    INTRACARD_MODE=False,
+                    NUM_SEQ_ENTRIES=0,
+                    STATE_V_FIRST=state_v_first,
+                    AFFINE_CHAIN_PRECISION=(
+                        "tf32x3" if use_tf32x3_affine_chain and IS_TF32_SUPPORTED
+                        else ("ieee" if not IS_TF32_SUPPORTED else None)
+                    ),
+                    NUM_RANKS_ON_DEVICE=False,
+                )
+        return initial_state
+
     hm = k.new_zeros(HV, K, (V + K), dtype=torch.float32)
     if state_v_first:
         initial_state = k.new_zeros(N, HV, V, K, dtype=torch.float32)
     else:
         initial_state = k.new_zeros(N, HV, K, V, dtype=torch.float32)
-    if not context.is_last_rank:
+    cu_last = cu_seqlens[-2:]
+    if use_graph:
+        assert context.pre_num_ranks_dev is not None, "use_graph with CP requires context.pre_num_ranks_dev"
+        # last non-empty sequence window, on-device; zero-length tail padding would
+        # otherwise make cu_seqlens[-2:] point at a padding sequence
+        i_last = (cu_seqlens[1:] > cu_seqlens[:-1]).sum() - 1
+        cu_last = cu_seqlens.index_select(0, torch.stack((i_last, i_last + 1)))
+    # graph mode always launches: a last rank's hm is never read, but the all-gather
+    # needs every rank, and host-side flags are frozen at capture
+    if use_graph or not context.is_last_rank:
         BLOCK_SIZE = 32 if K <= 64 else 64
         grid = (triton.cdiv(V, BLOCK_SIZE) + triton.cdiv(K, BLOCK_SIZE), HV)
         # For DPLR, v provides the original v for computing h contributions,
@@ -779,7 +898,7 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
             bg=bg,
             u=u,
             hm=hm,
-            cu_seqlens=cu_seqlens[-2:],
+            cu_seqlens=cu_last,
             T=T,
             H=H,
             HV=HV,
@@ -789,19 +908,25 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
             BK1=BK,
             BLOCK_SIZE=BLOCK_SIZE,
             MULTI_SEQS=False,
+            AFFINE_CHAIN_PRECISION=(
+                "tf32x3" if use_tf32x3_affine_chain and IS_TF32_SUPPORTED
+                else ("ieee" if not IS_TF32_SUPPORTED else None)
+            ),
         )
     ag_hm, _ = all_gather_into_tensor(hm, group=context.group)
-    if not context.is_first_rank:
+    # a zero num_ranks merge just re-stores the zeros initial_state[0] already holds
+    if use_graph or not context.is_first_rank:
         def grid(meta): return (triton.cdiv(V, meta['BV']), HV)
         merge_fwd_bwd_kernel[grid](
             h=initial_state[0],
             ag_hm=ag_hm,
-            pre_or_post_num_ranks=context.pre_num_ranks,
+            pre_or_post_num_ranks=context.pre_num_ranks_dev if use_graph else context.pre_num_ranks,
             rank=rank,
             seq_offsets=None,
             init_offsets=None,
             h0_seq_ids=None,
             h0=None,
+            h_seq_idx=None,
             HV=HV,
             K=K,
             V=V,
@@ -810,6 +935,11 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
             INTRACARD_MODE=False,
             NUM_SEQ_ENTRIES=0,
             STATE_V_FIRST=state_v_first,
+            AFFINE_CHAIN_PRECISION=(
+                "tf32x3" if use_tf32x3_affine_chain and IS_TF32_SUPPORTED
+                else ("ieee" if not IS_TF32_SUPPORTED else None)
+            ),
+            NUM_RANKS_ON_DEVICE=use_graph,
         )
     return initial_state
 
@@ -830,10 +960,17 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
     initial_state: torch.Tensor | None = None,
     context: FLACPContext | None = None,
     chunk_size: int = 64,
+    use_graph: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if context is None or context.group is None:
         return dht, initial_state
     assert dht is None, "When enable CP, the provided dht must be None."
+    use_tf32x3_affine_chain = context.use_tf32x3_affine_chain
+    if use_tf32x3_affine_chain and not IS_TF32_SUPPORTED:
+        warnings.warn(
+            "tf32x3 affine chain requires an NVIDIA GPU with compute capability >= 8.0; falling back to ieee precision",
+            stacklevel=2,
+        )
     rank = dist.get_rank(context.group)
 
     B, T, H, K, V, HV = *q.shape, do.shape[-1], do.shape[2]
@@ -847,13 +984,89 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
     else:
         N = len(cu_seqlens) - 1
 
+    if context.layout == 'zigzag':
+        if use_graph:
+            raise NotImplementedError("use_graph is not supported with zigzag CP layout")
+        fns = context.front_num_seqs
+        dhm = q.new_zeros(2, HV, K, V + K, dtype=torch.float32)
+        if state_v_first:
+            dht = q.new_zeros(N, HV, V, K, dtype=torch.float32)
+        else:
+            dht = q.new_zeros(N, HV, K, V, dtype=torch.float32)
+        BLOCK_SIZE = 32 if K <= 64 else 64
+        grid_hm = (triton.cdiv(V, BLOCK_SIZE) + triton.cdiv(K, BLOCK_SIZE), HV)
+        # each part exports the backward affine chain of its first segment, skipped when chain-first
+        for part, (cu_win, is_first) in enumerate(zip(
+                (cu_seqlens[:2], cu_seqlens[fns: fns + 2]), context.is_first_by_part)):
+            if not is_first:
+                pre_process_bwd_kernel_merged[grid_hm](
+                    q=q,
+                    k=k if bg is None else bg,
+                    w=w,
+                    g=g,
+                    gk=gk,
+                    do=do,
+                    dhm=dhm[part],
+                    dv=dv,
+                    cu_seqlens=cu_win,
+                    scale=scale,
+                    T=T,
+                    H=H,
+                    HV=HV,
+                    K=K,
+                    V=V,
+                    BT=BT,
+                    BK1=BK,
+                    BLOCK_SIZE=BLOCK_SIZE,
+                    USE_BG=bg is not None,
+                    AFFINE_CHAIN_PRECISION=(
+                        "tf32x3" if use_tf32x3_affine_chain and IS_TF32_SUPPORTED
+                        else ("ieee" if not IS_TF32_SUPPORTED else None)
+                    ),
+                )
+        ag_dhm, _ = all_gather_into_tensor(dhm, group=context.group)
+        # chain order: front parts of ranks 0..W-1, then back parts of ranks W-1..0
+        slots = torch.cat([ag_dhm[:, 0], ag_dhm[:, 1].flip(0)])
+        world_size = dist.get_world_size(context.group)
+
+        def grid(meta): return (triton.cdiv(V, meta['BV']), HV)
+        for part in range(2):
+            if not context.is_last_by_part[part]:
+                merge_fwd_bwd_kernel[grid](
+                    h=dht[fns - 1] if part == 0 else dht[-1],
+                    ag_hm=slots,
+                    pre_or_post_num_ranks=context.post_num_ranks_by_part[part],
+                    rank=rank if part == 0 else 2 * world_size - 1 - rank,
+                    seq_offsets=None,
+                    init_offsets=None,
+                    h0_seq_ids=None,
+                    h0=None,
+                    h_seq_idx=None,
+                    HV=HV,
+                    K=K,
+                    V=V,
+                    BK=BK,
+                    FORWARD=False,
+                    INTRACARD_MODE=False,
+                    NUM_SEQ_ENTRIES=0,
+                    STATE_V_FIRST=state_v_first,
+                    AFFINE_CHAIN_PRECISION=(
+                        "tf32x3" if use_tf32x3_affine_chain and IS_TF32_SUPPORTED
+                        else ("ieee" if not IS_TF32_SUPPORTED else None)
+                    ),
+                    NUM_RANKS_ON_DEVICE=False,
+                )
+        return dht, None
+
     dhm = q.new_zeros(HV, K, V + K, dtype=torch.float32)
     if state_v_first:
         dht = q.new_zeros(N, HV, V, K, dtype=torch.float32)
     else:
         dht = q.new_zeros(N, HV, K, V, dtype=torch.float32)
 
-    if not context.is_first_rank:
+    # graph mode always launches: a first rank's dhm is never read, but the all-gather
+    # needs every rank, and host-side flags are frozen at capture
+    if use_graph or not context.is_first_rank:
         BLOCK_SIZE = 32 if K <= 64 else 64
         grid = (triton.cdiv(V, BLOCK_SIZE) + triton.cdiv(K, BLOCK_SIZE), HV)
         pre_process_bwd_kernel_merged[grid](
@@ -876,21 +1089,36 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
             BK1=BK,
             BLOCK_SIZE=BLOCK_SIZE,
             USE_BG=bg is not None,
+            AFFINE_CHAIN_PRECISION=(
+                "tf32x3" if use_tf32x3_affine_chain and IS_TF32_SUPPORTED
+                else ("ieee" if not IS_TF32_SUPPORTED else None)
+            ),
         )
 
     ag_dhm, _ = all_gather_into_tensor(dhm, group=context.group)
 
-    if not context.is_last_rank:
+    # a zero num_ranks merge just re-stores the zeros dht already holds
+    if use_graph or not context.is_last_rank:
+        h_seq_idx = None
+        h = dht[-1]
+        if use_graph:
+            assert context.post_num_ranks_dev is not None, "use_graph with CP requires context.post_num_ranks_dev"
+            # merge target is the last non-empty sequence; zero-length tail padding
+            # would otherwise make dht[-1] a padding row
+            h_seq_idx = (cu_seqlens[1:] > cu_seqlens[:-1]).sum() - 1
+            h = dht
+
         def grid(meta): return (triton.cdiv(V, meta['BV']), HV)
         merge_fwd_bwd_kernel[grid](
-            h=dht[-1],
+            h=h,
             ag_hm=ag_dhm,
-            pre_or_post_num_ranks=context.post_num_ranks,
+            pre_or_post_num_ranks=context.post_num_ranks_dev if use_graph else context.post_num_ranks,
             rank=rank,
             seq_offsets=None,
             init_offsets=None,
             h0_seq_ids=None,
             h0=None,
+            h_seq_idx=h_seq_idx,
             HV=HV,
             K=K,
             V=V,
@@ -899,6 +1127,11 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
             INTRACARD_MODE=False,
             NUM_SEQ_ENTRIES=0,
             STATE_V_FIRST=state_v_first,
+            AFFINE_CHAIN_PRECISION=(
+                "tf32x3" if use_tf32x3_affine_chain and IS_TF32_SUPPORTED
+                else ("ieee" if not IS_TF32_SUPPORTED else None)
+            ),
+            NUM_RANKS_ON_DEVICE=use_graph,
         )
 
     # initial_state is None in the CP mode
@@ -909,6 +1142,12 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
 def compress_h0(h0: torch.Tensor, context: FLACPContext):
     if h0 is None or len(context.cu_seqlens) == 2:
         return h0
+    if context.layout == 'zigzag':
+        if len(context.cu_seqlens) == 3:
+            # one segment per part; both rows may carry a cross-rank state
+            return h0
+        # only each part's first segment can carry a cross-rank state
+        return h0[[0, context.front_num_seqs]]
     # Here must use clone op or the full tensor will be saved for backward
     return h0[:1].clone()
 
@@ -917,6 +1156,12 @@ def expand_h0(h0: torch.Tensor, context: FLACPContext):
     if h0 is None or len(context.cu_seqlens) == 2:
         return h0
     B = len(context.cu_seqlens) - 1
+    if context.layout == 'zigzag':
+        if B == 2:
+            return h0
+        expand_h0 = h0.new_zeros(B, *h0.shape[1:])
+        expand_h0[[0, context.front_num_seqs]] = h0
+        return expand_h0
     expand_h0 = h0.new_zeros(B, *h0.shape[1:])
     expand_h0[:1] = h0
     return expand_h0

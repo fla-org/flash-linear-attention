@@ -62,7 +62,7 @@ def chunk_hgrn_fwd_kernel_h(
     BD: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
 ):
-    i_d, i_t, i_b = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_d, i_t, i_b = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
     o_d = i_d * BD + tl.arange(0, BD)
     mask = o_d < D
 
@@ -103,21 +103,23 @@ def chunk_hgrn_fwd_kernel_o(
     BT: tl.constexpr,
     BD: tl.constexpr,
 ):
-    i_d, i_b = tl.program_id(0), tl.program_id(1)
+    i_d, i_b = tl.program_id(0), tl.program_id(1).to(tl.int64)
     o_d = i_d * BD + tl.arange(0, BD)
     mask = o_d < D
 
     for i_t in range(1, tl.cdiv(T, BT)):
-        p_gc = tl.make_block_ptr(gc + i_b * s_b, (T, D), (s_t, s_d), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
-        p_o = tl.make_block_ptr(o + i_b * s_b, (T, D), (s_t, s_d), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
+        o_t = (i_t * BT).to(tl.int64) + tl.arange(0, BT)
+        m_g = (o_t[:, None] < T) & mask[None, :]
+        p_gc = gc + i_b * s_b + o_t[:, None] * s_t + o_d[None, :] * s_d
+        p_o = o + i_b * s_b + o_t[:, None] * s_t + o_d[None, :] * s_d
 
         # [BD,]
         b_h0 = tl.load(o + i_b * T * D + i_t * BT * D - D + o_d, mask=mask, other=0).to(tl.float32)
         # [BT, BD]
-        b_gc = tl.load(p_gc, boundary_check=(0, 1)).to(tl.float32)
-        b_o = tl.load(p_o, boundary_check=(0, 1)).to(tl.float32)
+        b_gc = tl.load(p_gc, mask=m_g, other=0.0).to(tl.float32)
+        b_o = tl.load(p_o, mask=m_g, other=0.0).to(tl.float32)
         b_o = b_o + exp(b_gc) * b_h0[None, :]
-        tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
+        tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=m_g)
 
 
 @triton.autotune(
@@ -140,7 +142,7 @@ def chunk_hgrn_bwd_kernel_h(
     BT: tl.constexpr,
     BD: tl.constexpr,
 ):
-    i_d, i_t, i_b = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_d, i_t, i_b = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
     o_d = i_d * BD + tl.arange(0, BD)
     mask = o_d < D
     BC = min(BT, T - i_t * BT)
@@ -190,30 +192,34 @@ def chunk_hgrn_bwd_kernel_o(
     BT: tl.constexpr,
     BD: tl.constexpr,
 ):
-    i_d, i_b = tl.program_id(0), tl.program_id(1)
+    i_d, i_b = tl.program_id(0), tl.program_id(1).to(tl.int64)
     o_d = i_d * BD + tl.arange(0, BD)
     mask = o_d < D
 
     for i_t in range(tl.cdiv(T, BT) - 1, -1, -1):
-        p_g = tl.make_block_ptr(g + i_b * s_b, (T, D), (s_t, s_d), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
-        p_gc = tl.make_block_ptr(gc + i_b * s_b, (T, D), (s_t, s_d), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
-        p_o = tl.make_block_ptr(o + i_b * s_b, (T, D), (s_t, s_d), (i_t * BT - 1, i_d * BD), (BT, BD), (1, 0))
-        p_dx = tl.make_block_ptr(dx + i_b * s_b, (T, D), (s_t, s_d), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
-        p_dg = tl.make_block_ptr(dg + i_b * s_b, (T, D), (s_t, s_d), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
+        o_t = (i_t * BT).to(tl.int64) + tl.arange(0, BT)
+        o_to = (i_t * BT - 1).to(tl.int64) + tl.arange(0, BT)
+        m_g = (o_t[:, None] < T) & mask[None, :]
+        m_go = ((o_to >= 0) & (o_to < T))[:, None] & mask[None, :]
+        p_g = g + i_b * s_b + o_t[:, None] * s_t + o_d[None, :] * s_d
+        p_gc = gc + i_b * s_b + o_t[:, None] * s_t + o_d[None, :] * s_d
+        p_o = o + i_b * s_b + o_to[:, None] * s_t + o_d[None, :] * s_d
+        p_dx = dx + i_b * s_b + o_t[:, None] * s_t + o_d[None, :] * s_d
+        p_dg = dg + i_b * s_b + o_t[:, None] * s_t + o_d[None, :] * s_d
 
         # [BD,]
         mask_t = mask & ((i_t + 1) * BT < T)
         b_ht = tl.load(dx + i_b * T * D + (i_t + 1) * BT * D + o_d, mask=mask_t, other=0).to(tl.float32)
         # [BT, BD]
-        b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
-        b_gc = tl.load(p_gc, boundary_check=(0, 1)).to(tl.float32)
-        b_o = tl.load(p_o, boundary_check=(0, 1)).to(tl.float32)
-        b_dx = tl.load(p_dx, boundary_check=(0, 1)).to(tl.float32)
+        b_g = tl.load(p_g, mask=m_g, other=0.0).to(tl.float32)
+        b_gc = tl.load(p_gc, mask=m_g, other=0.0).to(tl.float32)
+        b_o = tl.load(p_o, mask=m_go, other=0.0).to(tl.float32)
+        b_dx = tl.load(p_dx, mask=m_g, other=0.0).to(tl.float32)
 
         b_dx = b_dx + exp(b_gc) * b_ht[None, :]
         b_dg = b_o * b_dx * exp(b_g)
-        tl.store(p_dx, b_dx.to(p_dx.dtype.element_ty), boundary_check=(0, 1))
-        tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), boundary_check=(0, 1))
+        tl.store(p_dx, b_dx.to(p_dx.dtype.element_ty), mask=m_g)
+        tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), mask=m_g)
 
 
 class ChunkHGRNFunction(torch.autograd.Function):

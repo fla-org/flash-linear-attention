@@ -7,8 +7,10 @@
 
 from transformers.configuration_utils import PretrainedConfig
 
+from fla.models.hybrid import HybridAttentionConfig, _HybridAttentionConfigMixin
 
-class MomConfig(PretrainedConfig):
+
+class MomConfig(_HybridAttentionConfigMixin, PretrainedConfig):
     model_type = 'mom'
     keys_to_ignore_at_inference = ['past_key_values']
 
@@ -28,7 +30,7 @@ class MomConfig(PretrainedConfig):
         hidden_act: str = "swish",
         num_hidden_layers: int = 24,
         norm_eps: float = 1e-6,
-        attn: dict | None = None,
+        attn: HybridAttentionConfig = None,
         use_cache: bool = True,
         pad_token_id: int | None = None,
         bos_token_id: int = 1,
@@ -86,16 +88,6 @@ class MomConfig(PretrainedConfig):
 
         if self.mom_backend not in ['gated_deltanet']:
             raise NotImplementedError(f"The MoM backend {mom_backend} is not currently supported.")
-
-        if attn is not None:
-            if not isinstance(attn, dict):
-                raise ValueError("attn must be a dictionary")
-            if 'layers' not in attn:
-                raise ValueError("Layer indices must be provided to initialize hybrid attention layers")
-            if 'num_heads' not in attn:
-                raise ValueError("Number of heads must be provided to initialize hybrid attention layers")
-            attn['num_kv_heads'] = attn.get('num_kv_heads', attn['num_heads'])
-            attn['window_size'] = attn.get('window_size', None)
 
         if attnres_block_size is not None and attnres_block_size != 1:
             if attnres_block_size < 2 or attnres_block_size % 2 != 0:

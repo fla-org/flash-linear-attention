@@ -56,11 +56,11 @@ def chunk_dplr_fwd_A_kernel_intra_sub_intra(
     IS_VARLEN: tl.constexpr,
     GATHER_SUPPORTED: tl.constexpr,
 ):
-    i_t, i_b, i_h = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_t, i_b, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2)
 
     if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
@@ -69,31 +69,33 @@ def chunk_dplr_fwd_A_kernel_intra_sub_intra(
         return
 
     o_i = tl.arange(0, BC)
+    o_c = i_t * BT + o_i
     o_k = tl.arange(0, BK)
     m_k = o_k < K
+    m_kk = ((i_t * BT + tl.arange(0, BC)) < T)[:, None] & m_k[None, :]
     m_A = (i_t * BT + tl.arange(0, BC)) < T
     last_idx = min((i_t+1) * BT, T) - 1
     o_A = (bos + i_t * BT + tl.arange(0, BC)) * H*BT + i_h * BT
-    p_q = tl.make_block_ptr(q + (bos * H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, 0), (BC, BK), (1, 0))
-    p_k = tl.make_block_ptr(k + (bos * H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, 0), (BC, BK), (1, 0))
-    p_a = tl.make_block_ptr(a + (bos * H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, 0), (BC, BK), (1, 0))
-    p_b = tl.make_block_ptr(b + (bos * H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, 0), (BC, BK), (1, 0))
-    p_gi = tl.make_block_ptr(gi + (bos * H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, 0), (BC, BK), (1, 0))
-    p_ge = tl.make_block_ptr(ge + (bos * H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, 0), (BC, BK), (1, 0))
+    p_q = q + (bos * H + i_h) * K + o_c[:, None] * (H*K) + o_k[None, :]
+    p_k = k + (bos * H + i_h) * K + o_c[:, None] * (H*K) + o_k[None, :]
+    p_a = a + (bos * H + i_h) * K + o_c[:, None] * (H*K) + o_k[None, :]
+    p_b = b + (bos * H + i_h) * K + o_c[:, None] * (H*K) + o_k[None, :]
+    p_gi = gi + (bos * H + i_h) * K + o_c[:, None] * (H*K) + o_k[None, :]
+    p_ge = ge + (bos * H + i_h) * K + o_c[:, None] * (H*K) + o_k[None, :]
     p_g_last = gi + (bos * H + i_h) * K + last_idx * H * K + tl.arange(0, BK)
     b_g_last = tl.load(p_g_last, mask=m_k, other=0)
-    p_qg = tl.make_block_ptr(qg + (bos * H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, 0), (BC, BK), (1, 0))
-    p_kg = tl.make_block_ptr(kg + (bos * H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, 0), (BC, BK), (1, 0))
-    p_ag = tl.make_block_ptr(ag + (bos * H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, 0), (BC, BK), (1, 0))
-    p_bg = tl.make_block_ptr(bg + (bos * H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, 0), (BC, BK), (1, 0))
+    p_qg = qg + (bos * H + i_h) * K + o_c[:, None] * (H*K) + o_k[None, :]
+    p_kg = kg + (bos * H + i_h) * K + o_c[:, None] * (H*K) + o_k[None, :]
+    p_ag = ag + (bos * H + i_h) * K + o_c[:, None] * (H*K) + o_k[None, :]
+    p_bg = bg + (bos * H + i_h) * K + o_c[:, None] * (H*K) + o_k[None, :]
 
-    b_q = tl.load(p_q, boundary_check=(0, 1))
+    b_q = tl.load(p_q, mask=m_kk, other=0.0)
     b_q = b_q * scale
-    b_k = tl.load(p_k, boundary_check=(0, 1))
-    b_a = tl.load(p_a, boundary_check=(0, 1))
-    b_b = tl.load(p_b, boundary_check=(0, 1))
-    b_gi = tl.load(p_gi, boundary_check=(0, 1)).to(tl.float32)
-    b_ge = tl.load(p_ge, boundary_check=(0, 1)).to(tl.float32)
+    b_k = tl.load(p_k, mask=m_kk, other=0.0)
+    b_a = tl.load(p_a, mask=m_kk, other=0.0)
+    b_b = tl.load(p_b, mask=m_kk, other=0.0)
+    b_gi = tl.load(p_gi, mask=m_kk, other=0.0).to(tl.float32)
+    b_ge = tl.load(p_ge, mask=m_kk, other=0.0).to(tl.float32)
 
     # deal with decay term.
     g_exp = exp2(b_gi)
@@ -102,10 +104,10 @@ def chunk_dplr_fwd_A_kernel_intra_sub_intra(
     b_kg = b_k * g_exp_inv
     b_bg = b_b * g_exp_inv
     b_ag = b_a * exp2(b_ge)
-    tl.store(p_qg, b_qg.to(p_qg.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
-    tl.store(p_bg, b_bg.to(p_bg.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
-    tl.store(p_ag, b_ag.to(p_ag.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
-    tl.store(p_kg, b_kg.to(p_kg.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
+    tl.store(p_qg, b_qg.to(p_qg.dtype.element_ty, fp_downcast_rounding="rtne"), mask=m_kk)
+    tl.store(p_bg, b_bg.to(p_bg.dtype.element_ty, fp_downcast_rounding="rtne"), mask=m_kk)
+    tl.store(p_ag, b_ag.to(p_ag.dtype.element_ty, fp_downcast_rounding="rtne"), mask=m_kk)
+    tl.store(p_kg, b_kg.to(p_kg.dtype.element_ty, fp_downcast_rounding="rtne"), mask=m_kk)
     # tl.debug_barrier()
 
     b_q = b_q.to(b_k.dtype)
@@ -182,11 +184,11 @@ def chunk_dplr_fwd_A_kernel_intra_tensorcore(
     IS_VARLEN: tl.constexpr,
     GATHER_SUPPORTED: tl.constexpr,
 ):
-    i_t, i_b, i_h = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_t, i_b, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2)
 
     if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T_len = eos - bos
     else:
         bos = i_b * T
@@ -199,19 +201,23 @@ def chunk_dplr_fwd_A_kernel_intra_tensorcore(
     offset_base = (bos * H + i_h) * K
 
     # Load the current chunk of Q, K, A, B and their gates
-    p_q = tl.make_block_ptr(q + offset_base, (T_len, K), (H*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
-    p_k = tl.make_block_ptr(k + offset_base, (T_len, K), (H*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
-    p_a = tl.make_block_ptr(a + offset_base, (T_len, K), (H*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
-    p_b = tl.make_block_ptr(b + offset_base, (T_len, K), (H*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
-    p_gi = tl.make_block_ptr(gi + offset_base, (T_len, K), (H*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
-    p_ge = tl.make_block_ptr(ge + offset_base, (T_len, K), (H*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
+    o_t = i_t * BT + tl.arange(0, BT)
+    o_b = tl.arange(0, BK)
+    m_t = o_t < T_len
+    m_kb = m_t[:, None] & (o_b[None, :] < K)
+    p_q = q + offset_base + o_t[:, None] * (H*K) + o_b[None, :]
+    p_k = k + offset_base + o_t[:, None] * (H*K) + o_b[None, :]
+    p_a = a + offset_base + o_t[:, None] * (H*K) + o_b[None, :]
+    p_b = b + offset_base + o_t[:, None] * (H*K) + o_b[None, :]
+    p_gi = gi + offset_base + o_t[:, None] * (H*K) + o_b[None, :]
+    p_ge = ge + offset_base + o_t[:, None] * (H*K) + o_b[None, :]
 
-    b_q = tl.load(p_q, boundary_check=(0, 1))
-    b_k = tl.load(p_k, boundary_check=(0, 1))
-    b_a = tl.load(p_a, boundary_check=(0, 1))
-    b_b = tl.load(p_b, boundary_check=(0, 1))
-    b_gi_val = tl.load(p_gi, boundary_check=(0, 1)).to(tl.float32)
-    b_ge_val = tl.load(p_ge, boundary_check=(0, 1)).to(tl.float32)
+    b_q = tl.load(p_q, mask=m_kb, other=0.0)
+    b_k = tl.load(p_k, mask=m_kb, other=0.0)
+    b_a = tl.load(p_a, mask=m_kb, other=0.0)
+    b_b = tl.load(p_b, mask=m_kb, other=0.0)
+    b_gi_val = tl.load(p_gi, mask=m_kb, other=0.0).to(tl.float32)
+    b_ge_val = tl.load(p_ge, mask=m_kb, other=0.0).to(tl.float32)
 
     # Calculate the index of the middle element of the valid part of the chunk
     valid_len = min(T_len - i_t * BT, BT)
@@ -220,7 +226,7 @@ def chunk_dplr_fwd_A_kernel_intra_tensorcore(
     # Load the offset vector from Global Memory
     # p_offset points to gi[i_t*BT + mid_idx, :]
     m_k = tl.arange(0, BK) < K
-    p_offset = gi + offset_base + (i_t * BT + mid_idx) * K + tl.arange(0, BK)
+    p_offset = gi + offset_base + (i_t * BT + mid_idx) * H * K + tl.arange(0, BK)
     b_offset = tl.load(p_offset, mask=m_k, other=0.0).to(tl.float32)
 
     # Apply offset to gate values
@@ -254,20 +260,20 @@ def chunk_dplr_fwd_A_kernel_intra_tensorcore(
     exp_g_centered = exp2(b_g_centered)
 
     # Create pointers for writing
-    p_qg = tl.make_block_ptr(qg + offset_base, (T_len, K), (H*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
-    p_kg = tl.make_block_ptr(kg + offset_base, (T_len, K), (H*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
-    p_ag = tl.make_block_ptr(ag + offset_base, (T_len, K), (H*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
-    p_bg = tl.make_block_ptr(bg + offset_base, (T_len, K), (H*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
+    p_qg = qg + offset_base + o_t[:, None] * (H*K) + o_b[None, :]
+    p_kg = kg + offset_base + o_t[:, None] * (H*K) + o_b[None, :]
+    p_ag = ag + offset_base + o_t[:, None] * (H*K) + o_b[None, :]
+    p_bg = bg + offset_base + o_t[:, None] * (H*K) + o_b[None, :]
 
     # Store gated Q and A
-    tl.store(p_qg, (q_ops * exp_offset[None, :]).to(p_qg.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_ag, (a_ops * exp_offset[None, :]).to(p_ag.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_qg, (q_ops * exp_offset[None, :]).to(p_qg.dtype.element_ty), mask=m_kb)
+    tl.store(p_ag, (a_ops * exp_offset[None, :]).to(p_ag.dtype.element_ty), mask=m_kb)
 
     # Store gated K and B
     b_kg_g = k_ops * exp_g_centered[None, :]
     b_bg_g = b_ops * exp_g_centered[None, :]
-    tl.store(p_kg, b_kg_g.to(p_kg.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_bg, b_bg_g.to(p_bg.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_kg, b_kg_g.to(p_kg.dtype.element_ty), mask=m_kb)
+    tl.store(p_bg, b_bg_g.to(p_bg.dtype.element_ty), mask=m_kb)
 
     # Transpose K and B for dot product
     k_ops_t = tl.trans(k_ops)
@@ -295,15 +301,17 @@ def chunk_dplr_fwd_A_kernel_intra_tensorcore(
     # Store the intra-chunk attention matrices
     offset_out_base = (bos * H + i_h) * BT
 
-    p_Aqk = tl.make_block_ptr(Aqk + offset_out_base, (T_len, BT), (H*BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
-    p_Aqb = tl.make_block_ptr(Aqb + offset_out_base, (T_len, BT), (H*BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
-    p_Aak = tl.make_block_ptr(Aak + offset_out_base, (T_len, BT), (H*BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
-    p_Aab = tl.make_block_ptr(Aab + offset_out_base, (T_len, BT), (H*BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
+    o_A = tl.arange(0, BT)
+    m_AO = m_t[:, None] & (o_A[None, :] < BT)
+    p_Aqk = Aqk + offset_out_base + o_t[:, None] * (H*BT) + o_A[None, :]
+    p_Aqb = Aqb + offset_out_base + o_t[:, None] * (H*BT) + o_A[None, :]
+    p_Aak = Aak + offset_out_base + o_t[:, None] * (H*BT) + o_A[None, :]
+    p_Aab = Aab + offset_out_base + o_t[:, None] * (H*BT) + o_A[None, :]
 
-    tl.store(p_Aqk, b_A_qk.to(p_Aqk.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_Aqb, b_A_qb.to(p_Aqb.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_Aak, b_A_ak.to(p_Aak.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_Aab, b_A_ab.to(p_Aab.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_Aqk, b_A_qk.to(p_Aqk.dtype.element_ty), mask=m_AO)
+    tl.store(p_Aqb, b_A_qb.to(p_Aqb.dtype.element_ty), mask=m_AO)
+    tl.store(p_Aak, b_A_ak.to(p_Aak.dtype.element_ty), mask=m_AO)
+    tl.store(p_Aab, b_A_ab.to(p_Aab.dtype.element_ty), mask=m_AO)
 
 
 def chunk_dplr_fwd_intra(

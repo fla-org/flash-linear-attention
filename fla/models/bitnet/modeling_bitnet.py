@@ -248,7 +248,7 @@ class BitNetPreTrainedModel(PreTrainedModel):
             #   > the weights of residual layers at initialization by a factor of 1/√N where N is the # of residual layers.
             #   >   -- GPT-2 :: https://openai.com/blog/better-language-models/
             #
-            # Reference (Megatron-LM): https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/model/gpt_model.py
+            # Reference (Megatron-LM): https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/models/gpt/gpt_model.py
             p = None
             if hasattr(module, 'o_proj'):
                 p = module.o_proj.weight
@@ -454,7 +454,11 @@ class BitNetForCausalLM(BitNetPreTrainedModel, FLAGenerationMixin):
 
         hidden_states = outputs[0]
 
-        logits = None if self.config.fuse_linear_cross_entropy else self.lm_head(hidden_states[:, -logits_to_keep:])
+        logits = None if self.config.fuse_linear_cross_entropy and labels is not None else self.lm_head(
+            hidden_states
+            if labels is not None or logits_to_keep is None
+            else hidden_states[:, -logits_to_keep:]
+        )
 
         loss = None
         if labels is not None:
