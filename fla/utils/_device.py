@@ -163,8 +163,6 @@ IS_TF32_SUPPORTED = (IS_NVIDIA and torch.cuda.get_device_capability(0)[0] >= 8)
 IS_GATHER_SUPPORTED = hasattr(triton.language, 'gather')
 # AMD architectures whose Triton backend lowers `tl.make_tensor_descriptor` onto real
 # hardware tensor-descriptor loads/stores. gfx1250 is the first one; gfx942/gfx950 are not.
-# NOTE: this is an allowlist, not a floor — a newer gfx number does not imply support.
-# No CI runner has such an arch (amd-mi300 is gfx942), so this path is locally tested only.
 IS_AMD_TMA_ARCH = (IS_AMD and get_device_arch() in ('gfx1250',))
 
 IS_TMA_SUPPORTED = (
