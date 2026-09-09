@@ -965,7 +965,9 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64_npu(
                     last_idx = min((i_t + 1) * BT, T) - 1
                     b_gk_last1 = tl.load(gk_base + last_idx * stride_w + o_k1, mask=(o_k1 < K), other=0.0).to(tl.float32)
                 if STATE_V_FIRST:
-                    b_dv = tl.dot(b_dh1.to(b_k.dtype), tl.trans(b_k), allow_tf32=False)
+                    # Padded state columns can be non-finite after the previous dot.
+                    b_dh_for_dv = tl.where((tl.arange(0, 64) < K)[None, :], b_dh1, 0.)
+                    b_dv = tl.dot(b_dh_for_dv.to(b_k.dtype), tl.trans(b_k), allow_tf32=False)
                     b_dv = tl.trans(b_dv)
                 else:
                     b_dv = tl.dot(b_k, b_dh1.to(b_k.dtype), allow_tf32=False)
@@ -977,7 +979,8 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64_npu(
                         o_k2 = 64 + o_k1
                         b_gk_last2 = tl.load(gk_base + last_idx * stride_w + o_k2, mask=(o_k2 < K), other=0.0).to(tl.float32)
                     if STATE_V_FIRST:
-                        b_dv_part = tl.dot(b_dh2.to(b_k.dtype), tl.trans(b_k), allow_tf32=False)
+                        b_dh_for_dv = tl.where((64 + tl.arange(0, 64) < K)[None, :], b_dh2, 0.)
+                        b_dv_part = tl.dot(b_dh_for_dv.to(b_k.dtype), tl.trans(b_k), allow_tf32=False)
                         b_dv += tl.trans(b_dv_part)
                     else:
                         b_dv = tl.dot(b_k, b_dh2.to(b_k.dtype), b_dv, allow_tf32=False)
@@ -989,7 +992,8 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64_npu(
                         o_k3 = 128 + o_k1
                         b_gk_last3 = tl.load(gk_base + last_idx * stride_w + o_k3, mask=(o_k3 < K), other=0.0).to(tl.float32)
                     if STATE_V_FIRST:
-                        b_dv_part = tl.dot(b_dh3.to(b_k.dtype), tl.trans(b_k), allow_tf32=False)
+                        b_dh_for_dv = tl.where((128 + tl.arange(0, 64) < K)[None, :], b_dh3, 0.)
+                        b_dv_part = tl.dot(b_dh_for_dv.to(b_k.dtype), tl.trans(b_k), allow_tf32=False)
                         b_dv += tl.trans(b_dv_part)
                     else:
                         b_dv = tl.dot(b_k, b_dh3.to(b_k.dtype), b_dv, allow_tf32=False)
@@ -1001,7 +1005,8 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64_npu(
                         o_k4 = 192 + o_k1
                         b_gk_last4 = tl.load(gk_base + last_idx * stride_w + o_k4, mask=(o_k4 < K), other=0.0).to(tl.float32)
                     if STATE_V_FIRST:
-                        b_dv_part = tl.dot(b_dh4.to(b_k.dtype), tl.trans(b_k), allow_tf32=False)
+                        b_dh_for_dv = tl.where((192 + tl.arange(0, 64) < K)[None, :], b_dh4, 0.)
+                        b_dv_part = tl.dot(b_dh_for_dv.to(b_k.dtype), tl.trans(b_k), allow_tf32=False)
                         b_dv += tl.trans(b_dv_part)
                     else:
                         b_dv = tl.dot(b_k, b_dh4.to(b_k.dtype), b_dv, allow_tf32=False)
@@ -1013,6 +1018,8 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64_npu(
                         m_t = (i_t * BT + tl.arange(0, BT)) < T
                         b_dv *= tl.where(m_t, b_g_ratio, 0)[:, None]
                 b_dv += tl.load(p_dv, boundary_check=(0, 1))
+                # Tail dot lanes must not enter the state-gradient reduction.
+                b_dv = tl.where((i_t * BT + tl.arange(0, BT) < T)[:, None], b_dv, 0.)
                 tl.store(p_dv2, b_dv.to(p_dv2.dtype.element_ty), boundary_check=(0, 1))
                 # Ascend tl.dot clobbers lhs; b_dv is lhs in the subtract dot across K-slabs.
                 b_dv_pristine = b_dv + 0.0
