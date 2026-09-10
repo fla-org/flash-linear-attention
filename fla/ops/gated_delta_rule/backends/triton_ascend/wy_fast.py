@@ -39,6 +39,12 @@ _FALLBACK_TILE = 8
 _MAX_TILE_BWD = 128
 _MAX_TILE_BWD_KV = 256
 
+# recompute_w_u_fwd: peak UB is max(u-slab, w-slab), not sum — tile BK/BV independently.
+# Each slab is ~3.5× BT×{BV or BK} + BT×BT (no gk/qg vs KDA).
+_RECOMPUTE_FWD_MEM_MULT = 3.5
+_MAX_TILE_FWD = 128
+_PREFERRED_TILE = 64
+
 
 def _g_npu_arg(g: torch.Tensor | None, HV: int) -> tuple[torch.Tensor | None, bool]:
     if g is None or HV == 1:
@@ -69,6 +75,11 @@ def _bwd_col_tile(BT: int, dim: int, mem_mult: float, max_tile: int) -> int:
         min_block=8,
         max_block=min(max_tile, triton.next_power_of_2(dim)),
     )
+
+
+def _candidate_fwd_tiles(dim: int) -> list[int]:
+    cap = min(_MAX_TILE_FWD, triton.next_power_of_2(dim))
+    return [b for b in (_PREFERRED_TILE, _MAX_TILE_FWD, 32, 16, _FALLBACK_TILE) if b <= cap] or [_FALLBACK_TILE]
 
 
 @triton.jit
@@ -137,10 +148,11 @@ def recompute_w_u_fwd_kernel_npu(
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     USE_G: tl.constexpr,
+    G_T_CONTIG: tl.constexpr,
+    BETA_T_CONTIG: tl.constexpr,
 ):
-    T_max = T
+    T_seq = T
     core_id = tl.program_id(0)
-
     for task_id in tl.range(core_id, task_num, num_core):
         i_t_o = task_id // (B * HV)
         i_bh = task_id % (B * HV)
@@ -153,64 +165,58 @@ def recompute_w_u_fwd_kernel_npu(
                 cu_seqlens + i_n + 1
             ).to(tl.int64)
             T = (eos - bos).to(tl.int32)
-            bos_bh = bos
         else:
             i_t = i_t_o
-            bos = tl.cast(i_b, tl.int64) * T
-            eos = bos + T
-            bos_bh = tl.cast(i_b, tl.int64) * HV * T_max
+            bos = tl.cast(i_b, tl.int64) * T_seq
 
-        offs_t = tl.arange(0, BT)
-        global_offs_t = i_t * BT + offs_t
-        mask_t = global_offs_t < T
-
-        offs_t_2d = global_offs_t[:, None]
-        offs_bt = tl.arange(0, BT)[None, :]
-        ptr_A = A + (bos * HV + i_h) * BT + offs_t_2d * (HV * BT) + offs_bt * 1
-        mask_A = mask_t[:, None]
-
-        ptr_beta = beta + bos_bh + i_h * T_max + global_offs_t
-        b_beta = tl.load(ptr_beta, mask=mask_t, other=0.0).to(tl.float32)
-
-        for i_v in range(tl.cdiv(V, BV)):
-            offs_v = i_v * BV + tl.arange(0, BV)[None, :]
-            mask_v = (mask_t[:, None]) & (offs_v < V)
-
-            ptr_v = v + (bos * HV + i_h) * V + offs_t_2d * (HV * V) + offs_v * 1
-            b_v = tl.load(ptr_v, mask=mask_v, other=0.0).to(tl.float32)
-
-            b_vb = b_v * b_beta[:, None]
-            # Ascend tl.dot may clobber the left operand; reload A each V tile.
-            b_A = tl.load(ptr_A, mask=mask_A, other=0.0).to(tl.float32)
-            b_u = tl.dot(b_A, b_vb, allow_tf32=False)
-
-            ptr_u = u + (bos * HV + i_h) * V + offs_t_2d * (HV * V) + offs_v * 1
-            tl.store(ptr_u, b_u.to(ptr_u.dtype.element_ty), mask=mask_v)
-
+        k_ptr = k + (bos * H + i_h // (HV // H)) * K
+        v_ptr = v + (bos * HV + i_h) * V
+        u_ptr = u + (bos * HV + i_h) * V
+        w_ptr = w + (bos * HV + i_h) * K
+        if BETA_T_CONTIG:
+            beta_ptr = _g_contig_base(beta, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
+        else:
+            beta_ptr = beta + bos * HV + i_h
+        p_b = _t_block_ptr(beta_ptr, T, i_t * BT, BT, BETA_T_CONTIG, HV)
+        b_b = tl.load(p_b, boundary_check=(0,))
+        p_A = tl.make_block_ptr(
+            A + (bos * HV + i_h) * BT, (T, BT), (HV * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0),
+        )
         if USE_G:
-            ptr_g = g + bos_bh + i_h * T_max + global_offs_t
-            b_g = exp2(tl.load(ptr_g, mask=mask_t, other=0.0)).to(tl.float32)
-
-        for i_k in range(tl.cdiv(K, BK)):
-            offs_k = i_k * BK + tl.arange(0, BK)[None, :]
-            mask_k = (mask_t[:, None]) & (offs_k < K)
-            ptr_k = (
-                k
-                + (bos * H + i_h // (HV // H)) * K
-                + offs_t_2d * (H * K)
-                + offs_k * 1
+            if G_T_CONTIG:
+                g_ptr = _g_contig_base(g, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
+            else:
+                g_ptr = g + bos * HV + i_h
+            p_g = _t_block_ptr(g_ptr, T, i_t * BT, BT, G_T_CONTIG, HV)
+            b_g = exp2(tl.load(p_g, boundary_check=(0,)).to(tl.float32))
+        for i_v in range(tl.cdiv(V, BV)):
+            p_v = tl.make_block_ptr(
+                v_ptr, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0),
             )
-            b_k = tl.load(ptr_k, mask=mask_k, other=0.0).to(tl.float32)
-
-            b_kb = b_k * b_beta[:, None]
+            p_u = tl.make_block_ptr(
+                u_ptr, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0),
+            )
+            b_v = tl.load(p_v, boundary_check=(0, 1))
+            b_vb = (b_v * b_b[:, None]).to(b_v.dtype)
+            # Ascend tl.dot may clobber the left operand; reload A each V tile.
+            b_A = tl.load(p_A, boundary_check=(0, 1))
+            b_u = tl.dot(b_A, b_vb, allow_tf32=False)
+            tl.store(p_u, b_u.to(p_u.dtype.element_ty), boundary_check=(0, 1))
+        for i_k in range(tl.cdiv(K, BK)):
+            p_k = tl.make_block_ptr(
+                k_ptr, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0),
+            )
+            p_w = tl.make_block_ptr(
+                w_ptr, (T, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0),
+            )
+            b_k = tl.load(p_k, boundary_check=(0, 1))
+            b_kb = b_k * b_b[:, None]
             if USE_G:
                 b_kb = b_kb * b_g[:, None]
             # Ascend tl.dot may clobber the left operand; reload A each K tile.
-            b_A = tl.load(ptr_A, mask=mask_A, other=0.0).to(tl.float32)
-            b_w = tl.dot(b_A, b_kb, allow_tf32=False)
-
-            ptr_w = w + (bos * HV + i_h) * K + offs_t_2d * (HV * K) + offs_k * 1
-            tl.store(ptr_w, b_w.to(ptr_w.dtype.element_ty), mask=mask_k)
+            b_A = tl.load(p_A, boundary_check=(0, 1))
+            b_w = tl.dot(b_A, b_kb.to(b_k.dtype), allow_tf32=False)
+            tl.store(p_w, b_w.to(p_w.dtype.element_ty), boundary_check=(0, 1))
 
 
 @triton.heuristics({
@@ -578,7 +584,7 @@ def prepare_wy_repr_bwd_finalize_a2_dg_npu(
         )
         b_k = tl.load(p_k, boundary_check=(0, 1)).to(tl.float32)
         b_k_c = b_k + 0.0
-        b_A2 += tl.dot(b_k, tl.trans(b_k_c), allow_tf32=False)
+        b_A2 = tl.dot(b_k, tl.trans(b_k_c), b_A2, allow_tf32=False)
     b_A2 *= b_b[:, None]
     b_dA = tl.load(p_dA, boundary_check=(0, 1)).to(tl.float32)
     b_prod = b_dA * b_A2
@@ -605,16 +611,27 @@ def recompute_w_u_fwd_npu(
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
-    BK = 64
-    BV = 64
+    # Minimize V/K slab iterations under independent UB budgets for u- and w-slabs.
+    max_bk = _bwd_col_tile(BT, K, _RECOMPUTE_FWD_MEM_MULT, _MAX_TILE_FWD)
+    max_bv = _bwd_col_tile(BT, V, _RECOMPUTE_FWD_MEM_MULT, _MAX_TILE_FWD)
+    BK = max(8, min(max_bk, triton.next_power_of_2(K)))
+    BV = max(8, min(max_bv, triton.next_power_of_2(V)))
+    best_cost = None
+    for bk in _candidate_fwd_tiles(K):
+        if bk > max_bk:
+            continue
+        for bv in _candidate_fwd_tiles(V):
+            if bv > max_bv:
+                continue
+            cost = triton.cdiv(V, bv) + triton.cdiv(K, bk)
+            if best_cost is None or cost < best_cost or (cost == best_cost and bk + bv > BK + BV):
+                best_cost, BK, BV = cost, bk, bv
 
     u = torch.empty_like(v)
     w = k.new_empty(B, T, HV, K)
-    beta = beta.transpose(1, 2).contiguous()
-    if g is not None:
-        g = g.transpose(1, 2).contiguous()
+    beta, beta_t_contig = _beta_npu_arg(beta, HV)
+    g, g_t_contig = _g_npu_arg(g, HV)
 
-    # disable auto-multi-buffer on this core-grid launch
     _launch_wy_core_grid(
         recompute_w_u_fwd_kernel_npu,
         task_num=NT * B * HV,
@@ -637,6 +654,8 @@ def recompute_w_u_fwd_npu(
             BT=BT,
             BK=BK,
             BV=BV,
+            G_T_CONTIG=g_t_contig,
+            BETA_T_CONTIG=beta_t_contig,
         ),
     )
     return w, u

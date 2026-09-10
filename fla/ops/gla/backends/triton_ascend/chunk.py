@@ -88,7 +88,7 @@ def chunk_gla_fwd_A_kernel_intra_sub_inter_npu(
         b_k = tl.load(p_k, mask=m_kj, other=0.0).to(tl.float32)
         b_gk = tl.load(p_gk, mask=m_kj, other=0.0).to(tl.float32)
         b_kg = b_k * exp2(b_gn[:, None] - b_gk)
-        b_A += tl.dot(b_qg, b_kg, allow_tf32=False)
+        b_A = tl.dot(b_qg, b_kg, b_A, allow_tf32=False)
 
     o_jA = i_j * BC + tl.arange(0, BC)
     m_A = m_i[:, None] & (o_jA[None, :] < BT)
@@ -400,9 +400,9 @@ def chunk_gla_fwd_kernel_o_npu(
             b_qg = (b_q * exp2(b_g) * scale).to(b_q.dtype)
             b_h = tl.load(p_h, boundary_check=(0, 1))
             if STATE_V_FIRST:
-                b_o += tl.dot(b_qg, tl.trans(b_h).to(b_qg.dtype))
+                b_o = tl.dot(b_qg, tl.trans(b_h).to(b_qg.dtype), b_o)
             else:
-                b_o += tl.dot(b_qg, b_h.to(b_qg.dtype))
+                b_o = tl.dot(b_qg, b_h.to(b_qg.dtype), b_o)
 
         o_t = i_t * BT + tl.arange(0, BT)
         m_t = o_t < T_cur
@@ -413,7 +413,7 @@ def chunk_gla_fwd_kernel_o_npu(
         m_s = tl.arange(0, BT)[:, None] >= tl.arange(0, BT)[None, :]
         b_A = tl.where(m_s & (m_t[:, None] & m_t[None, :]), b_A, 0.0)
         b_v = tl.load(p_v, boundary_check=(0, 1))
-        b_o += tl.dot(b_A.to(b_v.dtype), b_v)
+        b_o = tl.dot(b_A.to(b_v.dtype), b_v, b_o)
         tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
 
 
@@ -529,7 +529,7 @@ def chunk_gla_bwd_kernel_dA_npu(
             v + (bos * H + i_h) * V + o_v[:, None] + o_t[None, :] * (H * V),
             mask=m_vt, other=0.0,
         ).to(tl.float32)
-        b_dA += tl.dot(b_do, b_v, allow_tf32=False)
+        b_dA = tl.dot(b_do, b_v, b_dA, allow_tf32=False)
 
     m_s = tl.arange(0, BT)[:, None] >= tl.arange(0, BT)[None, :]
     b_dA = tl.where(m_s, b_dA * scale, 0.)
@@ -640,7 +640,7 @@ def chunk_gla_bwd_kernel_dv_npu(
                 mask=m_kvd, other=0.0,
             ).to(tl.float32)
         b_k = b_k * exp2(b_gn[None, :] - b_gk)
-        b_dv += tl.dot(b_k, b_dh, allow_tf32=False)
+        b_dv = tl.dot(b_k, b_dh, b_dv, allow_tf32=False)
 
     tl.store(
         dv + (bos * H + i_h) * V + o_t[:, None] * (H * V) + o_v[None, :],
@@ -735,7 +735,7 @@ def chunk_gla_bwd_kernel_intra_npu(
                 dA + (bos * H + i_h) * BT + o_c[:, None] * (H * BT) + o_jA[None, :],
                 mask=m_da, other=0.0,
             ).to(tl.float32)
-            b_dq += tl.dot(b_dA, b_kg, allow_tf32=False)
+            b_dq = tl.dot(b_dA, b_kg, b_dq, allow_tf32=False)
         b_dq *= exp2(b_g - b_gn[None, :])
 
     o_i = tl.arange(0, BC)
@@ -786,7 +786,7 @@ def chunk_gla_bwd_kernel_intra_npu(
                 dA + (bos * H + i_h) * BT + o_iA[:, None] + o_j[None, :] * (H * BT),
                 mask=m_da, other=0.0,
             ).to(tl.float32)
-            b_dk += tl.dot(b_dA, b_qg, allow_tf32=False)
+            b_dk = tl.dot(b_dA, b_qg, b_dk, allow_tf32=False)
         b_dk *= exp2(b_gn2[None, :] - b_g)
 
     o_dA2 = bos * H * BT + (i_t * BT + i_i * BC) * H * BT + i_h * BT + i_i * BC + tl.arange(0, BC)
@@ -913,8 +913,8 @@ def chunk_gla_bwd_kernel_inter_npu(
             b_h = tl.load(h_base + o_v[:, None] + o_k[None, :] * V, mask=m_vk, other=0.0).to(tl.float32)
             b_dh = tl.load(dh_base + o_v[:, None] + o_k[None, :] * V, mask=m_vk, other=0.0).to(tl.float32)
         b_dgk += tl.sum(b_h * b_dh, axis=0)
-        b_dq += tl.dot(b_do, b_h, allow_tf32=False)
-        b_dk += tl.dot(b_v, b_dh, allow_tf32=False)
+        b_dq = tl.dot(b_do, b_h, b_dq, allow_tf32=False)
+        b_dk = tl.dot(b_v, b_dh, b_dk, allow_tf32=False)
 
     b_dgk *= exp2(b_gn)
     b_dq *= scale

@@ -252,8 +252,8 @@ def chunk_gdn2_fwd_kernel_inter_solve_fused(
             b_gqn = tl.where(m_tc1[:, None], exp2(b_g1 - b_gn1[None, :]), 0)
             b_kgt = tl.trans(b_k0 * exp2(b_gn1[None, :] - b_g0))
             b_bk1 = b_b1 * b_k1
-            b_Aqk10 += tl.dot(b_q1 * b_gqn, b_kgt)
-            b_Akk10 += tl.dot(b_bk1 * b_gqn, b_kgt)
+            b_Aqk10 = tl.dot(b_q1 * b_gqn, b_kgt, b_Aqk10)
+            b_Akk10 = tl.dot(b_bk1 * b_gqn, b_kgt, b_Akk10)
 
             if i_tc2 < T:
                 p_q2 = q + (i_tc2 + o_i)[:, None] * (H * K) + o_k[None, :]
@@ -269,11 +269,11 @@ def chunk_gdn2_fwd_kernel_inter_solve_fused(
                 b_qg2 = b_q2 * b_gqn2
                 b_bkg2 = (b_b2 * b_k2) * b_gqn2
                 b_kgt = tl.trans(b_k0 * exp2(b_gn2[None, :] - b_g0))
-                b_Aqk20 += tl.dot(b_qg2, b_kgt)
-                b_Akk20 += tl.dot(b_bkg2, b_kgt)
+                b_Aqk20 = tl.dot(b_qg2, b_kgt, b_Aqk20)
+                b_Akk20 = tl.dot(b_bkg2, b_kgt, b_Akk20)
                 b_kgt = tl.trans(b_k1 * exp2(b_gn2[None, :] - b_g1))
-                b_Aqk21 += tl.dot(b_qg2, b_kgt)
-                b_Akk21 += tl.dot(b_bkg2, b_kgt)
+                b_Aqk21 = tl.dot(b_qg2, b_kgt, b_Aqk21)
+                b_Akk21 = tl.dot(b_bkg2, b_kgt, b_Akk21)
 
                 if i_tc3 < T:
                     p_q3 = q + (i_tc3 + o_i)[:, None] * (H * K) + o_k[None, :]
@@ -289,14 +289,14 @@ def chunk_gdn2_fwd_kernel_inter_solve_fused(
                     b_qg3 = b_q3 * b_gqn3
                     b_bkg3 = (b_b3 * b_k3) * b_gqn3
                     b_kgt = tl.trans(b_k0 * exp2(b_gn3[None, :] - b_g0))
-                    b_Aqk30 += tl.dot(b_qg3, b_kgt)
-                    b_Akk30 += tl.dot(b_bkg3, b_kgt)
+                    b_Aqk30 = tl.dot(b_qg3, b_kgt, b_Aqk30)
+                    b_Akk30 = tl.dot(b_bkg3, b_kgt, b_Akk30)
                     b_kgt = tl.trans(b_k1 * exp2(b_gn3[None, :] - b_g1))
-                    b_Aqk31 += tl.dot(b_qg3, b_kgt)
-                    b_Akk31 += tl.dot(b_bkg3, b_kgt)
+                    b_Aqk31 = tl.dot(b_qg3, b_kgt, b_Aqk31)
+                    b_Akk31 = tl.dot(b_bkg3, b_kgt, b_Akk31)
                     b_kgt = tl.trans(b_k2 * exp2(b_gn3[None, :] - b_g2))
-                    b_Aqk32 += tl.dot(b_qg3, b_kgt)
-                    b_Akk32 += tl.dot(b_bkg3, b_kgt)
+                    b_Aqk32 = tl.dot(b_qg3, b_kgt, b_Aqk32)
+                    b_Akk32 = tl.dot(b_bkg3, b_kgt, b_Akk32)
 
     if i_tc1 < T:
         p_Aqk10 = Aqk + (i_tc1 + o_i)[:, None] * (H * BT) + o_i[None, :]
@@ -522,8 +522,8 @@ def chunk_gdn2_bwd_kernel_intra(
             b_kg = b_kj * exp2(b_gn - b_gk)
             b_dAqk = tl.load(p_dAqk, mask=m_dj, other=0.0)
             b_dAkk = tl.load(p_dAkk, mask=m_dj, other=0.0)
-            b_dq2 += tl.dot(b_dAqk, b_kg)
-            b_dk2 += tl.dot(b_dAkk, b_kg)
+            b_dq2 = tl.dot(b_dAqk, b_kg, b_dq2)
+            b_dk2 = tl.dot(b_dAkk, b_kg, b_dk2)
         b_gqn = exp2(b_g - b_gn)
         b_dq2 *= b_gqn
         b_dk2 *= b_gqn
@@ -620,8 +620,8 @@ def chunk_gdn2_bwd_kernel_intra(
             b_gkn = exp2(b_gk - b_gn)
             b_qg = b_qj * tl.where(m_j[:, None], b_gkn, 0)
             b_kbg = b_kbj * tl.where(m_j[:, None], b_gkn, 0)
-            b_dkt += tl.dot(b_dAqk, b_qg)
-            b_dkt += tl.dot(b_dAkk, b_kbg)
+            b_dkt = tl.dot(b_dAqk, b_qg, b_dkt)
+            b_dkt = tl.dot(b_dAkk, b_kbg, b_dkt)
         b_dkt *= exp2(b_gn - b_g)
 
     o_dA = i_ti * H * BT + i_i * BC + o_i

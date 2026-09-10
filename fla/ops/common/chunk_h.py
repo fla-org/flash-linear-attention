@@ -150,7 +150,7 @@ def chunk_fwd_kernel_h(
             b_h *= exp2(b_gv_last)[None, :]
             b_v = (b_v * exp2(b_gv_last[None, :] - b_gv)).to(b_v.dtype)
 
-        b_h += tl.dot(b_k, b_v)
+        b_h = tl.dot(b_k, b_v, b_h)
 
     if STORE_FINAL_STATE:
         if STATE_V_FIRST:
@@ -295,7 +295,7 @@ def chunk_bwd_kernel_dh(
             b_do = (b_do * exp2(b_gv))
             b_dh *= exp2(b_gv_last)[None, :]
 
-        b_dh += tl.dot(b_q, b_do.to(b_q.dtype))
+        b_dh = tl.dot(b_q, b_do.to(b_q.dtype), b_dh)
 
     if STORE_INITIAL_STATE_GRADIENT:
         if STATE_V_FIRST:
