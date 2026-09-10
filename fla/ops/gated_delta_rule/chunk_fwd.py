@@ -15,9 +15,9 @@ from fla.ops.gated_delta_rule.wy_fast import recompute_w_u_fwd
 from fla.ops.utils import prepare_chunk_indices, solve_tril
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.op import exp2
-from fla.utils import IS_INTEL, IS_TF32_SUPPORTED, autotune_cache_kwargs
+from fla.utils import IS_INTEL, IS_TF32_FASTER_THAN_FP32, autotune_cache_kwargs
 
-if IS_TF32_SUPPORTED:
+if IS_TF32_FASTER_THAN_FP32:
     SOLVE_TRIL_DOT_PRECISION = tl.constexpr('tf32')
 else:
     SOLVE_TRIL_DOT_PRECISION = tl.constexpr('ieee')

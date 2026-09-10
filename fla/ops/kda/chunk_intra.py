@@ -16,9 +16,9 @@ from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.graph import get_static_buffer
 from fla.ops.utils.op import exp2, gather
-from fla.utils import IS_GATHER_SUPPORTED, IS_TF32_SUPPORTED, autotune_cache_kwargs
+from fla.utils import IS_GATHER_SUPPORTED, IS_TF32_FASTER_THAN_FP32, autotune_cache_kwargs
 
-if IS_TF32_SUPPORTED:
+if IS_TF32_FASTER_THAN_FP32:
     SOLVE_TRIL_DOT_PRECISION = tl.constexpr('tf32')
 else:
     SOLVE_TRIL_DOT_PRECISION = tl.constexpr('ieee')

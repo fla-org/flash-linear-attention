@@ -150,6 +150,22 @@ IS_NVIDIA_BLACKWELL = (IS_NVIDIA and torch.cuda.get_device_capability()[0] in (1
 
 # Nvidia Ampere or newer, haven't check AMD and intel yet.
 IS_TF32_SUPPORTED = (IS_NVIDIA and torch.cuda.get_device_capability(0)[0] >= 8)
+
+# Whether TF32 is AVAILABLE (above) is a different question from whether it is
+# FASTER. On the datacenter dies it is, by a lot: A100 runs fp32 at 19.5 and
+# tf32 at 156 TFLOPS. On the GeForce/Ada dies it is not — an RTX 4090 (sm_89)
+# runs fp32 and tf32 alike at 82.6 TFLOPS, as do the other 8.9 parts (L40S,
+# RTX 6000 Ada) at their own clocks. There, choosing tf32 for a dot whose
+# operands are already fp32 spends 13 mantissa bits and buys no throughput.
+#
+# Only capabilities we can source are listed, so no unlisted part changes
+# behaviour. (RTX 30xx at 8.6 and Blackwell GeForce at 12.0 are believed to be
+# in the same position; left out until someone can confirm them.)
+TF32_NOT_FASTER_CAPABILITIES = frozenset({(8, 9)})
+IS_TF32_FASTER_THAN_FP32 = (
+    IS_TF32_SUPPORTED
+    and torch.cuda.get_device_capability(0) not in TF32_NOT_FASTER_CAPABILITIES
+)
 IS_GATHER_SUPPORTED = hasattr(triton.language, 'gather')
 IS_TMA_SUPPORTED = (
     IS_NVIDIA
