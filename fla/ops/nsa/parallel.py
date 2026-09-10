@@ -759,7 +759,6 @@ def parallel_nsa_bwd(
     return dq, dk, dv
 
 
-@torch.compile
 class ParallelNSAFunction(torch.autograd.Function):
 
     @staticmethod
