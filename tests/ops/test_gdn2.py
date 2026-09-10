@@ -16,7 +16,6 @@
 # GDN-2 reuses KDA's gate activation verbatim, so the gate-in-kernel reference
 # uses ``naive_kda_gate`` / ``naive_kda_lowerbound_gate``.
 
-import os
 from unittest.mock import Mock
 
 import pytest
@@ -311,8 +310,8 @@ def test_chunk_invalid_chunk_size(chunk_size):
             1, 32768, 1, 32, 32, 1.0, True, False, False, torch.float16,
             id='32k',
             marks=pytest.mark.skipif(
-                os.environ.get('FLA_TEST_GDN2_32K') != '1',
-                reason='set FLA_TEST_GDN2_32K=1 for the 32K output/gradient reference check',
+                not IS_NPU,
+                reason='32K GDN-2 output/gradient reference check requires Ascend NPU',
             ),
         ),
     ],
