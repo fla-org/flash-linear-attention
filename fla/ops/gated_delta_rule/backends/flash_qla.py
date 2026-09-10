@@ -65,8 +65,12 @@ class FlashQLABackend(BaseBackend):
         cu_seqlens: torch.LongTensor | None = None,
         cu_seqlens_cpu: torch.LongTensor | None = None,
         cp_context: FLACPContext | None = None,
+        use_graph: bool = False,
+        graph_mode: str | None = None,
         **kwargs,
     ) -> tuple[bool, str | None]:
+        if use_graph or graph_mode not in (None, 'eager'):
+            return False, "FlashQLA does not support CUDA Graph mode"
         if not (IS_NVIDIA_HOPPER or IS_NVIDIA_SM100 or IS_NVIDIA_SM120):
             return False, "FlashQLA requires NVIDIA SM90, SM100/SM103 or SM120"
         if IS_NVIDIA_SM120 and _needs_backward(q, k, v, g, beta, initial_state):

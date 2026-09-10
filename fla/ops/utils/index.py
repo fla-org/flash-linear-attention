@@ -188,24 +188,37 @@ def prepare_chunk_indices_static(
     chunk_size: int,
     nt_max: int,
 ) -> tuple[torch.LongTensor, torch.LongTensor]:
-    """Device-side, fixed-shape chunk-index construction for graph capture.
+    """Build fixed-shape chunk metadata on-device for platform graph capture.
 
-    Builds ``chunk_indices`` of shape ``[nt_max, 2]`` and ``chunk_offsets`` of shape
-    ``[N_max + 1]`` with on-device ops, so their construction can be recorded in a
-    platform graph. ``cu_seqlens`` must be padded with zero-length tail sequences up to
-    ``N_max + 1`` entries. Rows beyond the real chunk count carry the sentinel
-    ``i_n = -1``; kernels must return immediately on a negative segment id.
-    Not cached: the construction runs (and is recorded) on every call.
-
-    Returns both tensors with the same dtype as ``cu_seqlens``.
+    Builds ``chunk_indices`` with shape ``[nt_max, 2]`` and ``chunk_offsets``
+    with shape ``[N_max + 1]``. ``cu_seqlens`` must contain ``N_max + 1``
+    entries, with unused tail sequences represented by repeated final offsets.
+    Rows after the actual chunk count contain ``[-1, 0]`` and must be guarded by consuming kernels.
+    The construction uses only device operations and is therefore safe to record.
     """
-    lens = cu_seqlens[1:] - cu_seqlens[:-1]
-    chunks = (lens + (chunk_size - 1)).div(chunk_size, rounding_mode='floor')
-    chunk_offsets = F.pad(chunks.cumsum(0), (1, 0))
-    slots = torch.arange(nt_max, device=cu_seqlens.device, dtype=chunk_offsets.dtype)
-    i_n = torch.searchsorted(chunk_offsets, slots, right=True) - 1
-    i_t = slots - chunk_offsets[i_n]
+    if cu_seqlens.ndim != 1 or cu_seqlens.numel() < 2:
+        raise ValueError("cu_seqlens must be a 1-D tensor with at least two entries")
+    if not isinstance(chunk_size, int) or chunk_size < 1:
+        raise ValueError(f"chunk_size must be a positive integer, got {chunk_size!r}")
+    if not isinstance(nt_max, int) or nt_max < 1:
+        raise ValueError(f"nt_max must be a positive integer, got {nt_max!r}")
+    lengths = cu_seqlens[1:] - cu_seqlens[:-1]
+    chunk_counts = (lengths + (chunk_size - 1)).div(chunk_size, rounding_mode='floor')
+    required_nt = chunk_counts.clamp_min(0).sum()
+    if cu_seqlens.device.type == 'cpu':
+        if (lengths < 0).any():
+            raise ValueError("cu_seqlens must be non-decreasing")
+        required_nt_value = int(required_nt)
+        if required_nt_value > nt_max:
+            raise ValueError(
+                f"nt_max={nt_max} is smaller than the metadata requirement {required_nt_value}"
+            )
+    chunk_offsets = F.pad(chunk_counts.cumsum(0), (1, 0))
+    slots = torch.arange(nt_max, device=cu_seqlens.device, dtype=cu_seqlens.dtype)
+    sequence_ids = torch.searchsorted(chunk_offsets, slots, right=True) - 1
+    safe_sequence_ids = sequence_ids.clamp(min=0, max=chunk_offsets.numel() - 1)
+    local_chunk_ids = slots - chunk_offsets[safe_sequence_ids]
     valid = slots < chunk_offsets[-1]
-    i_n = torch.where(valid, i_n, torch.full_like(i_n, -1))
-    i_t = torch.where(valid, i_t, torch.zeros_like(i_t))
-    return torch.stack([i_n, i_t], 1).to(cu_seqlens), chunk_offsets.to(cu_seqlens)
+    sequence_ids = torch.where(valid, sequence_ids, torch.full_like(sequence_ids, -1))
+    local_chunk_ids = torch.where(valid, local_chunk_ids, torch.zeros_like(local_chunk_ids))
+    return torch.stack([sequence_ids, local_chunk_ids], 1).to(cu_seqlens), chunk_offsets.to(cu_seqlens)

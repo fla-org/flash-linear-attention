@@ -162,7 +162,9 @@ class ShortConvolution(nn.Conv1d):
         # in decoding phase, the cache (if provided) is updated inplace
         # For packed varlen inputs, decode only when every sequence has exactly one token:
         # a zero-length or multi-token sequence makes the shape check misfire.
-        if B * T == N and (cu_seqlens is None or bool((cu_seqlens.diff() == 1).all())):
+        if not kwargs.get('use_graph', False) and B * T == N and (
+            cu_seqlens is None or bool((cu_seqlens.diff() == 1).all())
+        ):
             y, cache = self.step(
                 x=x,
                 residual=residual,

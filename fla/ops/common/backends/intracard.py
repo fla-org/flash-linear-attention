@@ -64,8 +64,12 @@ class IntraCardCPBackend(BaseBackend):
         cu_seqlens: torch.LongTensor | None = None,
         cu_seqlens_cpu: torch.LongTensor | None = None,
         chunk_indices: torch.LongTensor | None = None,
+        chunk_offsets: torch.LongTensor | None = None,
+        use_graph: bool = False,
     ) -> tuple[bool, str | None]:
         """Check if intracard CP should handle this call."""
+        if use_graph:
+            return False, "Intra-card CP does not support CUDA Graph mode"
         # Only in inference mode
         if not torch.is_inference_mode_enabled():
             return False, "Not in inference mode"
@@ -91,6 +95,8 @@ class IntraCardCPBackend(BaseBackend):
         cu_seqlens: torch.LongTensor | None = None,
         cu_seqlens_cpu: torch.LongTensor | None = None,
         chunk_indices: torch.LongTensor | None = None,
+        chunk_offsets: torch.LongTensor | None = None,
+        use_graph: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """Intra-card CP implementation of chunk_gated_delta_rule_fwd_h."""
         from fla.ops.common.intracard_cp import intracard_fwd_h

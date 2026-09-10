@@ -59,8 +59,12 @@ class FlashKDABackend(BaseBackend):
         disable_recompute: bool = False,
         return_intermediate_states: bool = False,
         cp_context: FLACPContext | None = None,
+        use_graph: bool = False,
+        graph_mode: str | None = None,
         **kwargs,
     ) -> tuple[bool, str | None]:
+        if use_graph or graph_mode not in (None, 'eager'):
+            return False, "FlashKDA does not support CUDA Graph mode"
         if torch.is_grad_enabled():
             return False, "FlashKDA only supports inference mode"
         if q.dtype != torch.bfloat16:

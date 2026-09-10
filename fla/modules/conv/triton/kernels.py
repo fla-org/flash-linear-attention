@@ -60,11 +60,14 @@ def causal_conv1d_fwd_kernel(
     HAS_RESIDUAL: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    USE_GRAPH: tl.constexpr,
 ):
     i_d, i_t, i_b = tl.program_id(0), tl.program_id(1), tl.program_id(2)
 
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        if USE_GRAPH and i_n < 0:
+            return
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
         p_x = x + bos * stride_x_t
@@ -190,11 +193,14 @@ def causal_conv1d_bwd_kernel(
     USE_INITIAL_STATE: tl.constexpr,
     USE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    USE_GRAPH: tl.constexpr,
 ):
     i_d, i_t, i_b = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     if IS_VARLEN:
         i_tg = i_t
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        if USE_GRAPH and i_n < 0:
+            return
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
         p_x = x + bos * stride_x_t
@@ -444,6 +450,7 @@ def compute_dh0_kernel(
     USE_ACTIVATION: tl.constexpr,
     USE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    USE_GRAPH: tl.constexpr,
 ):
     """
     Compute dh0 (gradient w.r.t. initial_state) in a separate kernel.
@@ -532,6 +539,7 @@ def causal_conv1d_states_fwd_kernel(
     BW: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    USE_GRAPH: tl.constexpr,
 ):
     pid = tl.program_id(0)
     ND = tl.cdiv(D, BD)
@@ -626,6 +634,7 @@ def causal_conv1d_update_states(
         stride_x_d=stride_x_d,
         BW=BW,
         BD=BD,
+        USE_GRAPH=False,
     )
     return final_state
 

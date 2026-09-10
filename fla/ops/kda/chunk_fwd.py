@@ -110,6 +110,7 @@ def chunk_kda_fwd(
         chunk_offsets=chunk_offsets,
         chunk_size=chunk_size,
         state_v_first=state_v_first,
+        use_graph=use_graph,
     )
 
     if cp_context is not None:

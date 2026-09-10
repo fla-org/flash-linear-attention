@@ -828,11 +828,15 @@ def chunk_kda_fwd_intra(
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     NC = triton.cdiv(BT, BC)
 
-    Aqk = torch.empty(B, T, HV, BT, device=k.device, dtype=k.dtype)
+    Aqk = torch.zeros(B, T, HV, BT, device=k.device, dtype=k.dtype) if use_graph else torch.empty(
+        B, T, HV, BT, device=k.device, dtype=k.dtype
+    )
     # Akk must be zero-initialized - kernel only writes lower triangular
     Akk = torch.zeros(B, T, HV, BT, device=k.device, dtype=k.dtype)
     # Separate fp32 buffer for diagonal 16x16 blocks (for precision in solve_tril)
-    Akkd = torch.empty(B, T, HV, BC, device=k.device, dtype=torch.float32)
+    Akkd = torch.zeros(B, T, HV, BC, device=k.device, dtype=torch.float32) if use_graph else torch.empty(
+        B, T, HV, BC, device=k.device, dtype=torch.float32
+    )
 
     # Step 1: Run token_parallel first to compute diagonal blocks into Akkd (fp32)
     # Step 1: compute diagonal blocks into Akk_diag (fp32)
@@ -941,10 +945,14 @@ def chunk_kda_bwd_intra(
     NK = triton.cdiv(K, BK)
 
     if use_graph:
-        dq2 = get_static_buffer("intra_dq2", tuple(dq.shape), dq.dtype, dq.device)
-        dk2 = get_static_buffer("intra_dk2", tuple(dk.shape), dk.dtype, dk.device)
-        db2 = get_static_buffer("intra_db2", (NK, *beta.shape), torch.float, beta.device)
-        dg2 = get_static_buffer("intra_dg2", tuple(dg.shape), torch.float, dg.device)
+        dq2 = get_static_buffer("intra_dq2", tuple(dq.shape), dq.dtype, dq.device, owner=q)
+        dk2 = get_static_buffer("intra_dk2", tuple(dk.shape), dk.dtype, dk.device, owner=q)
+        db2 = get_static_buffer("intra_db2", (NK, *beta.shape), torch.float, beta.device, owner=q)
+        dg2 = get_static_buffer("intra_dg2", tuple(dg.shape), torch.float, dg.device, owner=q)
+        dq2.zero_()
+        dk2.zero_()
+        db2.zero_()
+        dg2.zero_()
     else:
         dq2 = torch.empty_like(dq)
         dk2 = torch.empty_like(dk)

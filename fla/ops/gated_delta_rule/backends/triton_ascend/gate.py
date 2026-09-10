@@ -321,7 +321,10 @@ def gdn_gate_chunk_cumsum_npu(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
     output_dtype: torch.dtype | None = torch.float,
+    use_graph: bool = False,
 ) -> torch.Tensor:
+    if use_graph:
+        raise NotImplementedError("GDN gate graph mode is not implemented for the Ascend backend yet.")
     B, T, H = g.shape
     assert chunk_size == 2 ** (chunk_size.bit_length() - 1), "chunk_size must be a power of 2"
     BT = chunk_size
@@ -352,7 +355,11 @@ def gdn_gate_bwd_npu(
     A_log: torch.Tensor,
     dt_bias: torch.Tensor | None,
     dyg: torch.Tensor,
+    cu_seqlens: torch.LongTensor | None = None,
+    use_graph: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    if use_graph:
+        raise NotImplementedError("GDN gate backward graph mode is not implemented for the Ascend backend yet.")
     H = g.shape[-1]
     T = g.numel() // H
     BT = _get_gate_bwd_bt(T)
