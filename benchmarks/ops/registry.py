@@ -14,6 +14,7 @@ See ``benchmarks/ops/run.py`` docstring for full usage and how to register new o
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -81,6 +82,42 @@ def logsigmoid_clamp(t):
     return F.logsigmoid(t).clamp_min(-5)
 
 
+def silu_transform(t):
+    return F.silu(t)
+
+
+def normalized_logsigmoid(t, normalizer: float = 16.0):
+    return F.logsigmoid(t) / normalizer
+
+
+def _inv_softplus(t):
+    return t + torch.log(-torch.expm1(-t))
+
+
+def learned_decay_transform(t):
+    """Match the activated decay range used by GDN and Comba layers."""
+    feature_shape = t.shape[2:]
+    log_dt = torch.empty(feature_shape, dtype=torch.float32, device=t.device).uniform_(math.log(0.001), math.log(0.1))
+    dt = log_dt.exp()
+    dt_bias = _inv_softplus(dt)
+    scale_shape = (t.shape[2],) + (1,) * (t.ndim - 3)
+    scale = torch.empty(scale_shape, dtype=torch.float32, device=t.device).uniform_(1, 16)
+    return (-scale * F.softplus(t.float() + dt_bias)).to(t.dtype)
+
+
+def safe_decay_transform(t, lower_bound: float = -5.0):
+    """Match KDA's bounded gate with its log-uniform step-size initialization."""
+    feature_shape = t.shape[2:]
+    log_dt = torch.empty(feature_shape, dtype=torch.float32, device=t.device).uniform_(
+        math.log(0.001),
+        math.log(0.1),
+    )
+    dt_bias = _inv_softplus(log_dt.exp())
+    scale_shape = (t.shape[2],) + (1,) * (t.ndim - 3)
+    scale = torch.empty(scale_shape, dtype=torch.float32, device=t.device).uniform_(1, 16)
+    return (lower_bound * torch.sigmoid(scale * (t.float() + dt_bias))).to(t.dtype)
+
+
 RWKV7_W_MIN = -0.6065306597126334
 
 
@@ -103,11 +140,13 @@ class TensorSpec:
         requires_grad:  whether the tensor needs gradients
         dtype:          'default' inherits from the benchmark, or 'float32'/'long'
         transform:      applied after randn, e.g. F.logsigmoid
+        realistic_transform: layer-shaped transform selected by the realistic input profile
     """
     shape_fn: Callable
     requires_grad: bool = True
     dtype: str = 'default'
     transform: Callable | None = None
+    realistic_transform: Callable | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -216,6 +255,7 @@ def generate_inputs(
     B: int, T: int, H: int, D: int,
     dtype: torch.dtype = torch.bfloat16,
     device: str | torch.device = 'cuda',
+    input_profile: str = 'synthetic',
     **extra_shape_kw,
 ) -> dict[str, torch.Tensor]:
     """Create input tensors for *config* at the given shape.
@@ -223,6 +263,9 @@ def generate_inputs(
     Returns a dict mapping parameter names to tensors.
     Raises ValueError if dim_constraints are not satisfied (caller should skip).
     """
+    if input_profile not in ('synthetic', 'realistic'):
+        raise ValueError(f"input_profile must be 'synthetic' or 'realistic', got {input_profile!r}")
+
     # Check dim constraints
     if config.dim_constraints:
         shape_vals = {'B': B, 'T': T, 'H': H, 'D': D, **extra_shape_kw}
@@ -252,8 +295,10 @@ def generate_inputs(
         else:
             tensor = torch.randn(shape, dtype=tensor_dtype, device=device)
 
-        if spec.transform is not None:
-            tensor = spec.transform(tensor)
+        transform = spec.realistic_transform if input_profile == 'realistic' else None
+        transform = transform or spec.transform
+        if transform is not None:
+            tensor = transform(tensor)
 
         if spec.requires_grad and tensor.is_floating_point():
             tensor = tensor.requires_grad_(True)
@@ -262,7 +307,7 @@ def generate_inputs(
 
     # Custom post-init mutation
     if config.post_init is not None:
-        config.post_init(inputs, B=B, T=T, H=H, D=D, **extra_shape_kw)
+        config.post_init(inputs, B=B, T=T, H=H, D=D, input_profile=input_profile, **extra_shape_kw)
 
     return inputs
 
@@ -277,6 +322,12 @@ _simple_qkv = {
     'q': TensorSpec(shape_BTHD),
     'k': TensorSpec(shape_BTHD),
     'v': TensorSpec(shape_BTHD),
+}
+
+_silu_qkv = {
+    'q': TensorSpec(shape_BTHD, realistic_transform=silu_transform),
+    'k': TensorSpec(shape_BTHD, realistic_transform=silu_transform),
+    'v': TensorSpec(shape_BTHD, realistic_transform=silu_transform),
 }
 
 register_op(OpConfig(
@@ -300,7 +351,11 @@ register_op(OpConfig(
     import_path='fla.ops.gla',
     inputs={
         **_simple_qkv,
-        'g': TensorSpec(shape_BTHD, transform=logsigmoid_clamp),
+        'g': TensorSpec(
+            shape_BTHD,
+            transform=logsigmoid_clamp,
+            realistic_transform=normalized_logsigmoid,
+        ),
     },
     category='elem_gate',
 ))
@@ -311,7 +366,7 @@ register_op(OpConfig(
     name='chunk_delta_rule',
     import_path='fla.ops.delta_rule',
     inputs={
-        **_simple_qkv,
+        **_silu_qkv,
         'beta': TensorSpec(shape_BTH, transform=sigmoid_transform),
     },
     category='beta',
@@ -324,8 +379,8 @@ register_op(OpConfig(
     name='chunk_gdn',
     import_path='fla.ops.gated_delta_rule',
     inputs={
-        **_simple_qkv,
-        'g': TensorSpec(shape_BTH, transform=logsigmoid),
+        **_silu_qkv,
+        'g': TensorSpec(shape_BTH, transform=logsigmoid, realistic_transform=learned_decay_transform),
         'beta': TensorSpec(shape_BTH, transform=sigmoid_transform),
     },
     func_name='chunk_gated_delta_rule',
@@ -334,12 +389,20 @@ register_op(OpConfig(
     test_file='tests/ops/test_gdn.py',
 ))
 
+
+def _comba_post_init(inputs, B, T, H, D, input_profile='synthetic', **kw):
+    """Comba derives p from k, optionally scaled by a learned per-head decay."""
+    if input_profile == 'realistic':
+        decay = torch.ones(H, dtype=inputs['k'].dtype, device=inputs['k'].device).sigmoid()
+        inputs['p'] = (inputs['k'].detach() * decay[None, None, :, None]).requires_grad_(True)
+
+
 register_op(OpConfig(
     name='chunk_kda',
     import_path='fla.ops.kda',
     inputs={
-        **_simple_qkv,
-        'g': TensorSpec(shape_BTHD, transform=logsigmoid),
+        **_silu_qkv,
+        'g': TensorSpec(shape_BTHD, transform=logsigmoid, realistic_transform=safe_decay_transform),
         'beta': TensorSpec(shape_BTH, transform=sigmoid_transform),
     },
     extra_kwargs={'use_qk_l2norm_in_kernel': True, 'safe_gate': True, 'lower_bound': -5},
@@ -386,7 +449,7 @@ register_op(OpConfig(
     import_path='fla.ops.simple_gla',
     inputs={
         **_simple_qkv,
-        'g': TensorSpec(shape_BTH, transform=logsigmoid),
+        'g': TensorSpec(shape_BTH, transform=logsigmoid, realistic_transform=normalized_logsigmoid),
     },
     category='head_gate',
 ))
@@ -436,12 +499,13 @@ register_op(OpConfig(
     name='chunk_comba',
     import_path='fla.ops.comba',
     inputs={
-        **_simple_qkv,
+        **_silu_qkv,
         'p': TensorSpec(shape_BTHD),
-        'g': TensorSpec(shape_BTH, transform=logsigmoid),
+        'g': TensorSpec(shape_BTH, transform=logsigmoid, realistic_transform=learned_decay_transform),
         'beta': TensorSpec(shape_BTH, transform=sigmoid_transform),
     },
     extra_kwargs={'use_qk_l2norm_in_kernel': True},
+    post_init=_comba_post_init,
     category='comba',
 ))
 

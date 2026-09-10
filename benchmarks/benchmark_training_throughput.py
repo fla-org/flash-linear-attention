@@ -20,6 +20,7 @@ from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig
 from transformers.optimization import get_cosine_schedule_with_warmup
 
 import fla
+from benchmarks.distributions import sample_lognormal_packed_lengths
 
 classes = [getattr(fla.models, i) for i in fla.models.__all__]
 configs = {i.model_type: i() for i in classes if issubclass(i, PretrainedConfig)}
@@ -66,19 +67,46 @@ def prepare_inputs(
     varlen: bool,
     vocab_size: int,
     device: torch.device,
+    length_distribution: str = 'random',
+    num_sequences: int | None = None,
+    length_sigma: float = 1.0,
+    generator: torch.Generator | None = None,
 ):
     if varlen:
-        tokens = torch.randint(high=vocab_size, size=(1, batch_size * seq_len), device=device)
-        cu_seqlens = torch.cat([
-            torch.tensor([0]),
-            torch.randperm(batch_size * seq_len - 16)[:torch.randint(8, 64, size=(1,))] + 16,
-            torch.tensor([batch_size * seq_len]),
-        ], 0).sort()[0].to(dtype=torch.int32, device=device)
-        if context_len is not None:
-            cu_seqlens = torch.cat(
-                [torch.arange(i, j, context_len) for i, j in zip(cu_seqlens[:-1].tolist(), cu_seqlens[1:].tolist())] +
-                [torch.tensor([len(tokens[0])])],
-            ).to(dtype=torch.int32, device=device)
+        total_tokens = batch_size * seq_len
+        tokens = torch.randint(high=vocab_size, size=(1, total_tokens), device=device)
+        if length_distribution == 'random':
+            num_cuts = int(torch.randint(8, 64, size=(1,), generator=generator))
+            cut_points = torch.randperm(total_tokens - 16, generator=generator)[:num_cuts] + 16
+            cu_seqlens = torch.cat([
+                torch.tensor([0]),
+                cut_points,
+                torch.tensor([total_tokens]),
+            ], 0).sort()[0]
+            if context_len is not None:
+                cu_seqlens = torch.cat(
+                    [torch.arange(i, j, context_len) for i, j in zip(cu_seqlens[:-1].tolist(), cu_seqlens[1:].tolist())] +
+                    [torch.tensor([total_tokens])],
+                )
+        elif length_distribution == 'lognormal':
+            max_length = context_len or seq_len
+            min_sequences = (total_tokens + max_length - 1) // max_length
+            max_sequences = total_tokens // 16
+            if num_sequences is None:
+                default_sequences = min(64, max(8, batch_size * 4))
+                num_sequences = min(max(default_sequences, min_sequences), max_sequences)
+            lengths = sample_lognormal_packed_lengths(
+                total_tokens=total_tokens,
+                num_sequences=num_sequences,
+                max_length=max_length,
+                min_length=16,
+                sigma=length_sigma,
+                generator=generator,
+            )
+            cu_seqlens = torch.cat([torch.zeros(1, dtype=torch.long), lengths.cumsum(0)])
+        else:
+            raise ValueError(f"unsupported length_distribution: {length_distribution!r}")
+        cu_seqlens = cu_seqlens.to(dtype=torch.int32, device=device)
     else:
         tokens = torch.randint(high=vocab_size, size=(batch_size, seq_len), device=device)
         cu_seqlens = None
@@ -106,8 +134,13 @@ def profile(
     enable_profile: bool = False,
     profile_steps: int = 64,
     profile_trace: str | None = None,
+    length_distribution: str = 'random',
+    num_sequences: int | None = None,
+    length_sigma: float = 1.0,
+    seed: int = 42,
 ):
     device = torch.device('cuda')
+    torch.manual_seed(seed)
     config = configs[name] if name in configs else AutoConfig.from_pretrained(name)
     if num_heads is not None:
         if not hasattr(config, 'num_heads'):
@@ -149,7 +182,8 @@ def profile(
     _print_run_header({
         'model':    name,
         'arch':     ' '.join(arch_parts),
-        'data':     f"B={batch_size} T={seq_len} ctx={context_len} varlen={varlen}",
+        'data':     f"B={batch_size} T={seq_len} ctx={context_len} varlen={varlen} "
+                    f"lengths={length_distribution} n={num_sequences} sigma={length_sigma} seed={seed}",
         'training': f"{dtype} (mixed={mixed_precision}) compile={compile} "
         f"warmup={warmup_steps} steps={steps}",
         'profile':  profile_str,
@@ -178,6 +212,7 @@ def profile(
     bar = trange(warmup_steps)
 
     model, optimizer, scheduler = accelerator.prepare(model, optimizer, scheduler)
+    length_generator = torch.Generator().manual_seed(seed)
     torch.cuda.synchronize(device)
     for _ in bar:
         # forward pass
@@ -188,6 +223,10 @@ def profile(
             varlen=varlen,
             vocab_size=config.vocab_size,
             device=device,
+            length_distribution=length_distribution,
+            num_sequences=num_sequences,
+            length_sigma=length_sigma,
+            generator=length_generator,
         )
         outputs = model(tokens, labels=tokens, cu_seqlens=cu_seqlens)
         # backward pass
@@ -209,6 +248,10 @@ def profile(
             varlen=varlen,
             vocab_size=config.vocab_size,
             device=device,
+            length_distribution=length_distribution,
+            num_sequences=num_sequences,
+            length_sigma=length_sigma,
+            generator=length_generator,
         )
         outputs = model(tokens, labels=tokens, cu_seqlens=cu_seqlens)
         # backward pass
@@ -246,6 +289,10 @@ def profile(
                         varlen=varlen,
                         vocab_size=config.vocab_size,
                         device=device,
+                        length_distribution=length_distribution,
+                        num_sequences=num_sequences,
+                        length_sigma=length_sigma,
+                        generator=length_generator,
                     )
                     outputs = model(tokens, labels=tokens, cu_seqlens=cu_seqlens)
                     accelerator.backward(outputs.loss)
@@ -276,6 +323,10 @@ if __name__ == "__main__":
     parser.add_argument("--seq_len", default=4096, type=int)
     parser.add_argument("--context_len", default=None, type=int)
     parser.add_argument("--varlen", action='store_true')
+    parser.add_argument("--length_distribution", choices=['random', 'lognormal'], default='random')
+    parser.add_argument("--num_sequences", default=None, type=int)
+    parser.add_argument("--length_sigma", default=1.0, type=float)
+    parser.add_argument("--seed", default=42, type=int)
     parser.add_argument("--num_heads", default=None, type=int)
     parser.add_argument("--head_dim", default=None, type=int)
     parser.add_argument("--num_hidden_layers", default=None, type=int)
@@ -291,6 +342,10 @@ if __name__ == "__main__":
         seq_len=args.seq_len,
         context_len=args.context_len,
         varlen=args.varlen,
+        length_distribution=args.length_distribution,
+        num_sequences=args.num_sequences,
+        length_sigma=args.length_sigma,
+        seed=args.seed,
         num_heads=args.num_heads,
         head_dim=args.head_dim,
         num_hidden_layers=args.num_hidden_layers,
