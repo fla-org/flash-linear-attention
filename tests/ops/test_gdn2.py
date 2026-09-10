@@ -292,10 +292,9 @@ def test_chunk_invalid_chunk_size(chunk_size):
 
 @pytest.mark.skipif(not (IS_NVIDIA or IS_AMD or IS_NPU), reason="CUDA/ROCm or Ascend NPU required")
 @pytest.mark.parametrize(
-    ("B", "T", "H", "K", "V", "scale", "use_qk_l2norm_in_kernel", "use_gate_in_kernel", "safe_gate", "dtype",
-     "state_v_first", "disable_recompute"),
+    ("B", "T", "H", "K", "V", "scale", "use_qk_l2norm_in_kernel", "use_gate_in_kernel", "safe_gate", "dtype"),
     [
-        pytest.param(*p, False, False, id="B{}-T{}-H{}-K{}-V{}-scale{}-l2norm{}-gate{}-safe{}-{}".format(*p))
+        pytest.param(*p, id="B{}-T{}-H{}-K{}-V{}-scale{}-l2norm{}-gate{}-safe{}-{}".format(*p))
         for p in [
             (1, 64, 2, 32, 32, 1.0, False, False, False, torch.float32),
             (2, 256, 2, 64, 64, 0.5, True, False, False, torch.float32),
@@ -309,13 +308,7 @@ def test_chunk_invalid_chunk_size(chunk_size):
         ]
     ] + [
         pytest.param(
-            1, 65, 2, 48, 32, 1.0, True, False, False, torch.float16, state_v_first, disable_recompute,
-            id=f'state-v-first{state_v_first}-disable-recompute{disable_recompute}',
-        )
-        for state_v_first, disable_recompute in [(True, False), (False, True), (True, True)]
-    ] + [
-        pytest.param(
-            1, 32768, 1, 32, 32, 1.0, True, False, False, torch.float16, False, False,
+            1, 32768, 1, 32, 32, 1.0, True, False, False, torch.float16,
             id='32k',
             marks=pytest.mark.skipif(
                 os.environ.get('FLA_TEST_GDN2_32K') != '1',
@@ -324,9 +317,7 @@ def test_chunk_invalid_chunk_size(chunk_size):
         ),
     ],
 )
-def test_chunk(
-    B, T, H, K, V, scale, use_qk_l2norm_in_kernel, use_gate_in_kernel, safe_gate, dtype, state_v_first, disable_recompute,
-):
+def test_chunk(B, T, H, K, V, scale, use_qk_l2norm_in_kernel, use_gate_in_kernel, safe_gate, dtype):
     """Forward + gradient comparison: chunk kernel vs autograd through the naive reference."""
     q, k, v, g, b, w, A_log, dt_bias = _rand_inputs(B, T, H, H, K, V, dtype, gate_in_kernel=use_gate_in_kernel)
     lower_bound = -5.0 if safe_gate else None
@@ -373,17 +364,13 @@ def test_chunk(
         A_log=A_log if use_gate_in_kernel else None,
         dt_bias=dt_bias if use_gate_in_kernel else None,
         scale=scale,
-        initial_state=h0.transpose(-1, -2).contiguous() if state_v_first else h0,
+        initial_state=h0,
         output_final_state=True,
         use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
         use_gate_in_kernel=use_gate_in_kernel,
         safe_gate=safe_gate,
         lower_bound=lower_bound,
-        disable_recompute=disable_recompute,
-        state_v_first=state_v_first,
     )
-    if state_v_first:
-        tri_ht = tri_ht.transpose(-1, -2)
     ((tri * do).sum() + (tri_ht * dht).sum()).backward(retain_graph=True)
     tri_grads = {n: t.grad.clone() for n, t in
                  zip(("q", "k", "v", "g", "b", "w", "h0"), (q, k, v, g, b, w, h0))}
@@ -613,8 +600,6 @@ def test_chunk_npu_launch_splits(varlen, monkeypatch):
             use_gate_in_kernel=False,
             safe_gate=False,
             dtype=torch.float16,
-            state_v_first=False,
-            disable_recompute=False,
         )
     fwd.assert_called_once()
     bwd.assert_called_once()
