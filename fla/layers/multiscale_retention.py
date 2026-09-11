@@ -17,7 +17,7 @@ from transformers.activations import ACT2FN
 
 from fla.layers.utils import get_layer_cache, repad_hidden_states, unpad_hidden_states, update_layer_cache
 from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
-from fla.modules.rotary import RotaryEmbedding
+from fla.modules.rotary import RotaryEmbedding, get_max_seqlen
 from fla.ops.retention import chunk_retention, fused_chunk_retention, fused_recurrent_retention, parallel_retention
 from fla.ops.utils.index import prepare_lens_from_mask
 
@@ -233,17 +233,19 @@ class MultiScaleRetention(nn.Module):
         if self.feature_map_fn is not None:
             q, k = map(self.feature_map_fn, (q, k))
 
-        seqlen_offset, max_seqlen = 0, q.shape[1]
+        rope_cache_length = q_len if cu_seqlens is None else get_max_seqlen(
+            cu_seqlens, kwargs.get('cu_seqlens_cpu'))
+        seqlen_offset = 0
         if past_key_values is not None:
             seqlen_offset = past_key_values.get_seq_length(self.layer_idx)
-            max_seqlen = q.shape[1] + seqlen_offset
+            rope_cache_length += seqlen_offset
 
             if attention_mask is not None and seqlen_offset > 0:
                 # to eliminate the offsets of padding tokens
                 seqlen_offset = seqlen_offset + prepare_lens_from_mask(attention_mask) - attention_mask.shape[-1]
-                max_seqlen = q.shape[1] + seqlen_offset.max().item()
 
-        q, k = self.rotary(q, k, seqlen_offset=seqlen_offset, max_seqlen=max_seqlen, cu_seqlens=cu_seqlens)
+        q, k = self.rotary(
+            q, k, seqlen_offset=seqlen_offset, max_seqlen=rope_cache_length, cu_seqlens=cu_seqlens)
 
         if self.num_kv_groups > 1:
             k = repeat(k, '... h d -> ... (h g) d', g=self.num_kv_groups)

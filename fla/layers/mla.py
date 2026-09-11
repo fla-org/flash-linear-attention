@@ -24,6 +24,7 @@ from transformers.utils import logging
 
 from fla.layers.utils import pad_input, unpad_input
 from fla.modules import RMSNorm, RotaryEmbedding
+from fla.modules.rotary import get_max_seqlen
 from fla.ops.utils.index import prepare_lens_from_mask
 
 if TYPE_CHECKING:
@@ -126,7 +127,7 @@ class MultiheadLatentAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: torch.Tensor | None,
+        attention_mask: torch.Tensor | None = None,
         past_key_values: Cache | None = None,
         output_attentions: bool = False,
         use_cache: bool = False,
@@ -153,20 +154,20 @@ class MultiheadLatentAttention(nn.Module):
         k_pass, v = torch.split(k_pass, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
 
         # apply rotary position embedding
-        seqlen_offset, max_seqlen = 0, q_len
+        cu_seqlens = kwargs.get("cu_seqlens")
+        batch_max_seqlen = q_len if cu_seqlens is None else get_max_seqlen(cu_seqlens, kwargs.get('cu_seqlens_cpu'))
+        seqlen_offset, rope_cache_length = 0, batch_max_seqlen
         if past_key_values is not None:
             seqlen_offset = past_key_values.get_seq_length(self.layer_idx)
-            max_seqlen = q_len + seqlen_offset
+            rope_cache_length += seqlen_offset
 
             if attention_mask is not None:
                 seqlen_offset = seqlen_offset + prepare_lens_from_mask(attention_mask) - attention_mask.shape[-1]
-                max_seqlen = q_len + max(seqlen_offset)
 
-        if self.max_position_embeddings is not None:
-            max_seqlen = max(max_seqlen, self.max_position_embeddings)
-        cu_seqlens = kwargs.get("cu_seqlens")
+        if past_key_values is not None and cu_seqlens is None and self.max_position_embeddings is not None:
+            rope_cache_length = max(rope_cache_length, self.max_position_embeddings)
         q_rot, k_rot = self.rotary(
-            q_rot, k_rot, seqlen_offset=seqlen_offset, max_seqlen=max_seqlen, cu_seqlens=cu_seqlens,
+            q_rot, k_rot, seqlen_offset=seqlen_offset, max_seqlen=rope_cache_length, cu_seqlens=cu_seqlens,
         )
 
         k_rot = repeat(k_rot, 'b t 1 d -> b t h d', h=self.num_heads)
@@ -213,8 +214,8 @@ class MultiheadLatentAttention(nn.Module):
                 q.squeeze(0), k.squeeze(0), v.squeeze(0),
                 cu_seqlens_q=cu_seqlens,
                 cu_seqlens_k=cu_seqlens,
-                max_seqlen_q=max_seqlen,
-                max_seqlen_k=max_seqlen,
+                max_seqlen_q=batch_max_seqlen,
+                max_seqlen_k=batch_max_seqlen,
                 causal=True,
                 window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0),
             ).unsqueeze(0)
