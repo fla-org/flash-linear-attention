@@ -31,6 +31,9 @@ from fla.utils import IS_NPU, assert_close, device
             (29, 3, 63,   7186, 7186 ** -0.5,    False, torch.float16, 1),  # L=29 + D=7186 + T=63
             # fp32 sanity at a larger size
             (10, 2, 8000, 4096, 4096 ** -0.5,    False, torch.float32, 1),
+            # split-N reduction threshold
+            (3,  1, 16384, 128, 128 ** -0.5,      False, torch.bfloat16, 0),
+            (3,  1, 16384, 128, 128 ** -0.5,      True,  torch.bfloat16, 1),
             # output_rms_weight on: fold-in path (fwd + bwd dow)
             (3,  1, 1000, 4096, 4096 ** -0.5,    True,  torch.float16, 1),  # L=3
             (29, 5, 1000, 4096, 4096 ** -0.5,    True,  torch.float16, 0),  # L=29 + B=5
