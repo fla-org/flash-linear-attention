@@ -13,6 +13,7 @@ from fla.ops.simple_gla import chunk_simple_gla
 from fla.utils import assert_close, device
 
 
+@pytest.mark.smoke
 @pytest.mark.skipif(device != 'cuda', reason='CUDA graph capture requires CUDA')
 @pytest.mark.parametrize('state_v_first', [False, True])
 def test_chunk_varlen_cudagraph(state_v_first: bool):
