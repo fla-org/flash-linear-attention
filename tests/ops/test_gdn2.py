@@ -564,6 +564,25 @@ def test_chunk_npu_verifier(name, tensor_names, case, dtype, reason):
         assert reason in actual_reason
 
 
+@pytest.mark.skipif(not IS_NPU, reason='Ascend verifier checks require NPU')
+def test_chunk_npu_fwd_verifier_rejects_oversized_k():
+    """Reject K values that exceed the grouped kernel's single-slab UB bound."""
+    from fla.ops.gdn2.backends.triton_ascend import TritonAscendGDN2Backend
+
+    x = torch.zeros(1, 1, 1, 257, dtype=torch.float16, device=device)
+    accepted, reason = TritonAscendGDN2Backend().chunk_gdn2_fwd_intra_verifier(
+        q=x,
+        k=x,
+        v=x,
+        gk=x,
+        b=x,
+        w_gate=x,
+        scale=1.0,
+    )
+    assert not accepted
+    assert reason == 'GDN-2 Ascend intra requires next_power_of_2(K) <= 256 for UB capacity, got K=257 (BK=512)'
+
+
 @pytest.mark.skipif(not IS_NPU, reason='Ascend dispatch and launch splitting require NPU')
 @pytest.mark.parametrize('varlen', [False, True], ids=['dense', 'varlen'])
 def test_chunk_npu_launch_splits(varlen, monkeypatch):
