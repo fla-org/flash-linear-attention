@@ -33,7 +33,7 @@ from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.mamba2 import Mamba2
 from fla.models.mamba2.configuration_mamba2 import Mamba2Config
-from fla.models.utils import Cache, FLAGenerationMixin
+from fla.models.utils import Cache, FLAGenerationMixin, prepare_causal_lm_labels
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
 from fla.modules.l2warp import l2_warp
 
@@ -402,7 +402,7 @@ class Mamba2ForCausalLM(Mamba2PreTrainedModel, FLAGenerationMixin):
             else:
                 criterion = self.criterion
             labels = labels.to(hidden_states.device)
-            labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], criterion.ignore_index)), 1)
+            labels = prepare_causal_lm_labels(labels, criterion.ignore_index, kwargs.get("cu_seqlens"))
             if self.config.fuse_linear_cross_entropy:
                 loss = criterion(hidden_states, labels, self.lm_head.weight, self.lm_head.bias)
             else:

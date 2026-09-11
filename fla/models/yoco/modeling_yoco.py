@@ -20,7 +20,7 @@ from transformers.utils.deprecation import deprecate_kwarg
 from fla.layers.attn import Attention
 from fla.layers.gated_deltanet import GatedDeltaNet
 from fla.layers.yoco import YOCOCrossAttention, YOCOGatedRetention, YOCOSharedKVBuilder
-from fla.models.utils import Cache, FLAUnsupportedCacheGenerationMixin
+from fla.models.utils import Cache, FLAUnsupportedCacheGenerationMixin, prepare_causal_lm_labels
 from fla.models.yoco.configuration_yoco import YOCOConfig
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
 from fla.modules import GatedMLP as YOCOMLP
@@ -728,7 +728,7 @@ class YOCOForCausalLM(YOCOPreTrainedModel, FLAUnsupportedCacheGenerationMixin):
             else:
                 criterion = self.criterion
             labels = labels.to(hidden_states.device)
-            labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], criterion.ignore_index)), 1)
+            labels = prepare_causal_lm_labels(labels, criterion.ignore_index, kwargs.get("cu_seqlens"))
             if fuse_linear_and_cross_entropy:
                 loss = criterion(hidden_states, labels, self.lm_head.weight, self.lm_head.bias)
             else:

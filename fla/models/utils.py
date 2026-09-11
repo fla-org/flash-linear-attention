@@ -21,6 +21,25 @@ _TF_VERSION = transformers.__version__
 _NEED_NEW = "4.53.3"
 _IS_TRANSFORMERS_4_56_PLUS = version.parse(_TF_VERSION) >= version.parse("4.56.0")
 
+
+def prepare_causal_lm_labels(
+    labels: torch.Tensor,
+    ignore_index: int,
+    cu_seqlens: torch.Tensor | None = None,
+) -> torch.Tensor:
+    labels = torch.cat(
+        (labels[..., 1:], torch.full_like(labels[..., :1], ignore_index)),
+        dim=-1,
+    )
+    if cu_seqlens is not None:
+        if labels.shape[0] != 1:
+            raise ValueError("Packed `cu_seqlens` loss currently requires batch size 1.")
+        starts, ends = cu_seqlens[:-1], cu_seqlens[1:]
+        last_token_indices = ends[ends > starts].to(device=labels.device, dtype=torch.long) - 1
+        labels.view(-1).index_fill_(0, last_token_indices, ignore_index)
+    return labels
+
+
 if version.parse(_TF_VERSION) > version.parse(_NEED_NEW):
     from transformers.cache_utils import CacheLayerMixin
 else:
