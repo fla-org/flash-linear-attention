@@ -321,6 +321,7 @@ def chunk_fwd_h(
     chunk_size: int = 64,
     split_size: int | None = None,
     states_in_fp32: bool = False,
+    chunk_indices: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = chunk_size
@@ -331,7 +332,8 @@ def chunk_fwd_h(
         N, NS, split_offsets = B, triton.cdiv(T, BS), None
     else:
         split_offsets = prepare_chunk_offsets(cu_seqlens, BS)
-        N, NS = len(cu_seqlens) - 1, split_offsets[-1].item()
+        N = len(cu_seqlens) - 1
+        NS = len(chunk_indices) if BS == BT and chunk_indices is not None else split_offsets[-1].item()
 
     # `state_v_first` stores the states in V-first `[V, K]` layout instead of `[K, V]`
     state_shape = (V, K) if state_v_first else (K, V)
@@ -383,6 +385,7 @@ def chunk_bwd_dh(
     chunk_size: int = 64,
     split_size: int | None = None,
     states_in_fp32: bool = False,
+    chunk_indices: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     HQ = q.shape[2]
@@ -395,7 +398,8 @@ def chunk_bwd_dh(
         N, NS, split_offsets = B, triton.cdiv(T, BS), None
     else:
         split_offsets = prepare_chunk_offsets(cu_seqlens, BS)
-        N, NS = len(cu_seqlens) - 1, split_offsets[-1].item()
+        N = len(cu_seqlens) - 1
+        NS = len(chunk_indices) if BS == BT and chunk_indices is not None else split_offsets[-1].item()
     NG = HQ // H
 
     # `state_v_first` stores the states in V-first `[V, K]` layout instead of `[K, V]`

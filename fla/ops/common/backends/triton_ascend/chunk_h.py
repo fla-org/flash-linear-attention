@@ -264,6 +264,7 @@ def chunk_fwd_h_npu(
     chunk_size: int = 64,
     split_size: int | None = None,
     states_in_fp32: bool = False,
+    chunk_indices: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = chunk_size
@@ -275,7 +276,7 @@ def chunk_fwd_h_npu(
         assert B == 1, "NPU varlen chunk_h expects packed batch B=1"
         split_offsets = prepare_chunk_offsets(cu_seqlens, BS)
         N = len(cu_seqlens) - 1
-        NS = int(split_offsets[-1].item())
+        NS = len(chunk_indices) if BS == BT and chunk_indices is not None else int(split_offsets[-1].item())
         state_shape = (V, K) if state_v_first else (K, V)
         # zero-init: kernels may only partially store each tile
         h = k.new_zeros(B, NS, H, *state_shape, dtype=torch.float if states_in_fp32 else k.dtype)
@@ -351,6 +352,7 @@ def chunk_bwd_dh_npu(
     chunk_size: int = 64,
     split_size: int | None = None,
     states_in_fp32: bool = False,
+    chunk_indices: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     HQ = q.shape[2]
@@ -363,7 +365,7 @@ def chunk_bwd_dh_npu(
         assert B == 1, "NPU varlen chunk_bwd_dh expects packed batch B=1"
         split_offsets = prepare_chunk_offsets(cu_seqlens, BS)
         N = len(cu_seqlens) - 1
-        NS = int(split_offsets[-1].item())
+        NS = len(chunk_indices) if BS == BT and chunk_indices is not None else int(split_offsets[-1].item())
         state_shape = (V, K) if state_v_first else (K, V)
         dh = k.new_zeros(B, NS, HQ, *state_shape, dtype=torch.float if states_in_fp32 else k.dtype)
         dh0 = torch.zeros_like(h0, dtype=torch.float) if h0 is not None else None
