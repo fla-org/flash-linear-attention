@@ -41,6 +41,7 @@ def chunk_simple_gla_fwd(
         chunk_size=chunk_size,
         states_in_fp32=False,
         state_v_first=state_v_first,
+        chunk_indices=chunk_indices,
     )
     o = chunk_fwd_o(
         q=q,
@@ -87,6 +88,7 @@ def chunk_simple_gla_bwd(
         chunk_size=chunk_size,
         states_in_fp32=True,
         state_v_first=state_v_first,
+        chunk_indices=chunk_indices,
     )
     dh, dh0 = chunk_bwd_dh(
         q=q,
@@ -104,6 +106,7 @@ def chunk_simple_gla_bwd(
         chunk_size=chunk_size,
         states_in_fp32=True,
         state_v_first=state_v_first,
+        chunk_indices=chunk_indices,
     )
     dq, dk, _, dg = chunk_bwd_dqkwg(
         q=q,
