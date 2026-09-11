@@ -860,3 +860,41 @@ def test_simple_gla_to_mamba2(vary_A, dtype):
     assert y_rearrange.allclose(outputs_gla_fuse, 0, atol), f'y diff: {torch.abs(y_rearrange - outputs_gla_fuse).max()}'
     final_gla_fuse = final_gla_fuse.to(dtype)  # states hard-coded to float32 in FLA kernel
     assert final_rearrange.allclose(final_gla_fuse, 0, atol), f'final diff: {torch.abs(final_ssd - final_gla_fuse).max()}'
+
+
+def _many_doc_cu_seqlens(n_docs: int, doc_len: int) -> torch.Tensor:
+    return torch.arange(n_docs + 1, dtype=torch.long, device=device) * doc_len
+
+
+def test_chunk_varlen_many_documents():
+    """A packed batch with N*H > 65535 must launch and stay per-document exact.
+
+    Sequences are independent, so running the same batch as two halves must reproduce
+    the single launch; only the grid geometry differs between the two.
+    """
+    torch.manual_seed(42)
+    H, D, dtype = 32, 32, torch.bfloat16
+    n_docs, doc_len = 2050, 16
+    T, split = n_docs * doc_len, n_docs // 2
+
+    cu_seqlens = _many_doc_cu_seqlens(n_docs, doc_len)
+    q = torch.randn(1, T, H, D, dtype=dtype, device=device)
+    k = torch.randn(1, T, H, D, dtype=dtype, device=device)
+    v = torch.randn(1, T, H, D, dtype=dtype, device=device)
+    g = F.logsigmoid(torch.randn(1, T, H, dtype=torch.float32, device=device))
+
+    o, ht = chunk_simple_gla(q=q, k=k, v=v, g=g, cu_seqlens=cu_seqlens, output_final_state=True)
+    parts = [
+        chunk_simple_gla(
+            q=q[:, lo * doc_len:hi * doc_len],
+            k=k[:, lo * doc_len:hi * doc_len],
+            v=v[:, lo * doc_len:hi * doc_len],
+            g=g[:, lo * doc_len:hi * doc_len],
+            cu_seqlens=_many_doc_cu_seqlens(hi - lo, doc_len),
+            output_final_state=True,
+        )
+        for lo, hi in [(0, split), (split, n_docs)]
+    ]
+
+    assert_close('o', torch.cat([p[0] for p in parts], dim=1), o, 0.005)
+    assert_close('ht', torch.cat([p[1] for p in parts], dim=0), ht, 0.005)
