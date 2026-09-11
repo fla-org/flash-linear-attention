@@ -584,6 +584,45 @@ def get_npu_properties() -> dict:
     return driver.active.utils.get_device_properties(torch.npu.current_device())
 
 
+def _launch_grid_chunked_recursive(
+    kernel,
+    grid: tuple[int, ...],
+    offset_keys: tuple[str, ...],
+    kernel_kwargs: dict,
+    quanta: tuple[int, ...],
+    budget: int,
+    extra: dict,
+    lens: list[int],
+    ax: int,
+    prod_so_far: int,
+) -> None:
+    quantum = quanta[ax]
+    rest = prod_so_far * quantum
+    for size in grid[ax + 1:]:
+        rest *= size
+    for off_q, len_q in iter_axis_launch_chunks(
+        triton.cdiv(grid[ax], quantum), rest, max_grid=budget,
+    ):
+        offset = off_q * quantum
+        lens[ax] = min(len_q * quantum, grid[ax] - offset)
+        kernel_kwargs[offset_keys[ax]] = offset
+        if ax == len(grid) - 1:
+            kernel[tuple(lens)](**kernel_kwargs, **extra)
+        else:
+            _launch_grid_chunked_recursive(
+                kernel,
+                grid,
+                offset_keys,
+                kernel_kwargs,
+                quanta,
+                budget,
+                extra,
+                lens,
+                ax + 1,
+                prod_so_far * len_q * quantum,
+            )
+
+
 def launch_grid_chunked(
     kernel,
     grid: tuple[int, ...],
@@ -611,20 +650,15 @@ def launch_grid_chunked(
     extra = compile_kwargs or {}
     lens = [0] * dims
 
-    def _recurse(ax: int, prod_so_far: int) -> None:
-        quantum = quanta[ax]
-        rest = prod_so_far * quantum
-        for size in grid[ax + 1:]:
-            rest *= size
-        for off_q, len_q in iter_axis_launch_chunks(
-            triton.cdiv(grid[ax], quantum), rest, max_grid=budget,
-        ):
-            offset = off_q * quantum
-            lens[ax] = min(len_q * quantum, grid[ax] - offset)
-            kernel_kwargs[offset_keys[ax]] = offset
-            if ax == dims - 1:
-                kernel[tuple(lens)](**kernel_kwargs, **extra)
-            else:
-                _recurse(ax + 1, prod_so_far * len_q * quantum)
-
-    _recurse(0, 1)
+    _launch_grid_chunked_recursive(
+        kernel,
+        grid,
+        offset_keys,
+        kernel_kwargs,
+        quanta,
+        budget,
+        extra,
+        lens,
+        0,
+        1,
+    )
