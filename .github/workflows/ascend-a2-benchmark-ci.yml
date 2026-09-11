@@ -194,14 +194,10 @@ jobs:
             run_benchmark chunk_gdn2 2 python -m benchmarks.ops.run \
               --op chunk_gdn2 --base '' \
               --json benchmark_chunk_gdn2.json
-            run_benchmark chunk_gdn2_32k 2 python -m benchmarks.ops.run \
-              --op chunk_gdn2 --base '' \
-              --custom-shapes '{"gdn2_32k":{"B":1,"T":32768,"H":1,"D":32}}' \
-              --json benchmark_chunk_gdn2_32k.json
           python - <<'PY'
           import json
 
-          from benchmarks.ops.registry import SHAPE_CONFIGS
+          from benchmarks.ops.registry import SHAPE_CONFIGS, get_op
 
           def verify(path, shapes):
               with open(path) as f:
@@ -217,10 +213,8 @@ jobs:
                   'unexpected': sorted(actual - expected),
               }
 
-          verify('benchmark_chunk_gdn2.json', SHAPE_CONFIGS)
-          verify('benchmark_chunk_gdn2_32k.json', {
-              'gdn2_32k': {'B': 1, 'T': 32768, 'H': 1, 'D': 32},
-          })
+          shapes = get_op('chunk_gdn2').default_shapes or SHAPE_CONFIGS
+          verify('benchmark_chunk_gdn2.json', shapes)
           PY
           ) &
           pid_attnres=$!
@@ -235,10 +229,8 @@ jobs:
 
           echo "========== chunk_gdn =========="
           cat chunk_gdn.log
-          echo "========== chunk_gdn2 (default shape matrix) =========="
+          echo "========== chunk_gdn2 (default shape matrix, including 32K) =========="
           cat chunk_gdn2.log
-          echo "========== chunk_gdn2 (B1 T32768 H1 K32 V32) =========="
-          cat chunk_gdn2_32k.log
           echo "========== chunk_kda =========="
           cat chunk_kda.log
           echo "========== fused_attnres =========="
@@ -255,7 +247,6 @@ jobs:
           path: |
             benchmark_chunk_gdn.json
             benchmark_chunk_gdn2.json
-            benchmark_chunk_gdn2_32k.json
             benchmark_chunk_kda.json
             benchmark_fused_attnres.json
             conv_benchmark/
