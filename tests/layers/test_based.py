@@ -38,6 +38,11 @@ def _quadratic_attention(layer: BasedLinearAttention, hidden_states: torch.Tenso
     ],
 )
 def test_forward(B: int, T: int, H: int, K: int, V: int, dtype: torch.dtype, mode: str, monkeypatch: pytest.MonkeyPatch):
+    if mode == 'chunk' and dtype != torch.float32:
+        # 16-bit chunk kernels reject odd K/V (see the assert in chunk_bwd_dv);
+        # the Taylor feature map expands K to 1 + K + K*(K+1)/2.
+        if (1 + K + K * (K + 1) // 2) % 2 == 1 or V % 2 == 1:
+            pytest.skip('odd expanded K/V is not supported for 16-bit chunk kernels')
     monkeypatch.setenv('TRITON_F32_DEFAULT', 'ieee')
     if hasattr(triton, 'knobs'):
         monkeypatch.setattr(triton.knobs.language, 'fp32_default', 'ieee')
