@@ -608,6 +608,10 @@ def chunk_bwd_dv(
     chunk_indices: torch.LongTensor | None = None,
 ) -> torch.Tensor:
     B, T, H, K, V, HV = *k.shape, do.shape[-1], do.shape[2]
+    if q.dtype in (torch.float16, torch.bfloat16):
+        # Triton miscompiles masked K-tail iterations into OOB shared-memory access for 16-bit odd K/V (IMA)
+        assert K % 2 == 0 and V % 2 == 0, \
+            f"chunk_bwd_dv requires even K and V for {q.dtype}, got K={K}, V={V}"
     BT = chunk_size
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
