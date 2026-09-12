@@ -20,17 +20,34 @@ from fla.utils import ascend_compile_kwargs, input_guard
 from fla.utils.ascend_ub_manager import compute_row_tile_block_size, get_npu_properties, iter_axis_launch_chunks
 
 _BC = 16
-_TOKEN_GROUP = 8
+_LEAF_SIZE = 4
+_DIAG_MEM_MULT = 20.0
 _INTER_MEM_MULT = 18.0
 _SAFETY_MARGIN = 0.80
 _FALLBACK_BK = 16
+_MAX_DIAG_BK = 64
 _MAX_INTER_BK = 64
 _LAUNCH_BLOCK_BUDGET = 4096
 _BWD_MEM_MULT = 24.0
 _BWD_SAFETY_MARGIN = 0.75
 _MAX_BWD_BK = 32
+# Keep the two dot accumulators and their input tiles below the CANN 9.1 UB envelope.
+_DIAG_COMPILE_KWARGS = ascend_compile_kwargs(blacklist_auto_blockify=True)
 # Disable auto-multi-buffer and AutoBlockify on the inter kernels for CANN 9.1.
 _INTER_COMPILE_KWARGS = ascend_compile_kwargs(blacklist_auto_blockify=True)
+
+
+def _get_diag_bk(K: int) -> int:
+    return compute_row_tile_block_size(
+        _BC,
+        K,
+        _DIAG_MEM_MULT,
+        tiling_row=False,
+        safety_margin=_SAFETY_MARGIN,
+        fallback=_FALLBACK_BK,
+        min_block=16,
+        max_block=min(_MAX_DIAG_BK, max(16, triton.next_power_of_2(K))),
+    )
 
 
 def _get_inter_bk(K: int) -> int:
@@ -59,6 +76,30 @@ def _get_bwd_bk(K: int) -> int:
         min_block=16,
         max_block=max(16, min(_MAX_BWD_BK, triton.next_power_of_2(K))),
     )
+
+
+def _launch_diag_core_grid(
+    kernel,
+    *,
+    task_num: int,
+    kernel_kwargs: dict,
+    sync_stream=None,
+    sync_each_launch: bool = False,
+) -> None:
+    num_core = get_npu_properties()["num_aicore"]
+    for task_offset in range(0, task_num, _LAUNCH_BLOCK_BUDGET):
+        task_count = min(_LAUNCH_BLOCK_BUDGET, task_num - task_offset)
+        kernel[(num_core,)](
+            TASK_OFFSET=task_offset,
+            TASK_COUNT=task_count,
+            num_core=num_core,
+            **kernel_kwargs,
+            **_DIAG_COMPILE_KWARGS,
+        )
+        if sync_each_launch:
+            sync_stream.synchronize()
+    if sync_stream is not None and not sync_each_launch:
+        sync_stream.synchronize()
 
 
 def _launch_diag_kernel(
@@ -107,8 +148,8 @@ def _launch_inter_kernel(kernel, *, nt: int, bh_total: int, kernel_kwargs: dict)
             kernel[(nt_len, bh_len)](**kernel_kwargs, **_INTER_COMPILE_KWARGS)
 
 
-@triton.jit(do_not_specialize=['T', 'NT_OFFSET', 'NC_OFFSET', 'BH_OFFSET'])
-def chunk_gdn2_fwd_kernel_intra_grouped_npu(
+@triton.jit(do_not_specialize=['BH', 'T', 'TASK_OFFSET', 'TASK_COUNT', 'num_core'])
+def chunk_gdn2_fwd_kernel_intra_direct_leaf_npu(
     q,
     k,
     g,
@@ -118,92 +159,238 @@ def chunk_gdn2_fwd_kernel_intra_grouped_npu(
     scale,
     cu_seqlens,
     chunk_indices,
+    BH,
     T,
+    TASK_OFFSET,
+    TASK_COUNT,
+    num_core,
     H: tl.constexpr,
     K: tl.constexpr,
     BT: tl.constexpr,
     BC: tl.constexpr,
     BK: tl.constexpr,
-    BR: tl.constexpr,
-    ROW_GROUP: tl.constexpr,
+    BL: tl.constexpr,
     IS_HEAD_MAJOR: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    NT_OFFSET,
-    NC_OFFSET,
-    BH_OFFSET,
 ):
-    """Build one group of causal Aqk/Akk rows without unstable gate factoring."""
-    i_t = tl.program_id(0) + NT_OFFSET
-    i_i = tl.program_id(1) + NC_OFFSET
-    i_bh = tl.program_id(2) + BH_OFFSET
-    i_b, i_h = i_bh // H, i_bh % H
+    T_seq = T
+    core_id = tl.program_id(0)
+    for local_task in tl.range(core_id, TASK_COUNT, num_core):
+        task_id = tl.cast(TASK_OFFSET, tl.int32) + local_task
+        i_i = task_id % (BT // BC)
+        rem = task_id // (BT // BC)
+        i_bh = rem % BH
+        i_t_o = rem // BH
+        i_b, i_h = i_bh // H, i_bh % H
 
-    if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(
-            chunk_indices + i_t * 2 + 1,
-        ).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
-        T = (eos - bos).to(tl.int32)
-    else:
-        bos = tl.cast(i_b, tl.int64) * T
+        if IS_VARLEN:
+            i_t_o64 = tl.cast(i_t_o, tl.int64)
+            i_n = tl.load(chunk_indices + i_t_o64 * 2).to(tl.int32)
+            i_t = tl.load(chunk_indices + i_t_o64 * 2 + 1).to(tl.int32)
+            bos = tl.load(cu_seqlens + i_n).to(tl.int64)
+            eos = tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+            T_cur = (eos - bos).to(tl.int32)
+        else:
+            i_t = i_t_o
+            bos = tl.cast(i_b, tl.int64) * T_seq
+            T_cur = T_seq
 
-    # promote before token-stride products, including packed inputs and Aqk/Akk stores.
-    i_ts = tl.cast(i_t, tl.int64) * BT + i_i * BC
-    i_ti = i_ts + ROW_GROUP * BR
-    if i_ti >= T:
-        return
+        i_ts = tl.cast(i_t, tl.int64) * BT + i_i * BC
+        if IS_HEAD_MAJOR:
+            input_offset = (tl.cast(i_b, tl.int64) * H + i_h) * tl.cast(T_seq, tl.int64) * K
+            input_stride = K
+        else:
+            input_offset = (bos * H + i_h) * K
+            input_stride = H * K
+        q_l = q + input_offset
+        k_l = k + input_offset
+        g_l = g + input_offset
+        b_l = b + input_offset
+        Aqk_l = Aqk + (bos * H + i_h) * BT
+        Akk_l = Akk + (bos * H + i_h) * BC
 
-    o_r = tl.arange(0, BR)
-    o_k = tl.arange(0, BK)
-    o_c = i_ti + o_r
-    m_r = o_c < T
-    m_k = o_k < K
-    m_rk = m_r[:, None] & m_k[None, :]
+        o_r = tl.arange(0, BC)
+        o_j = tl.arange(0, BL)
+        row_in_leaf = o_r % BL
+        leaf_start = o_r // BL * BL
+        row_t = i_ts + o_r
+        m_row = row_t < T_cur
+        b_Aqk_leaf = tl.zeros([BC, BL], dtype=tl.float32)
+        b_Akk_leaf = tl.zeros([BC, BL], dtype=tl.float32)
+        for i_k in range(tl.cdiv(K, BK)):
+            o_k = i_k * BK + tl.arange(0, BK)
+            m_k = o_k < K
+            m_rowk = m_row[:, None] & m_k[None, :]
+            p_q = q_l + row_t[:, None] * input_stride + o_k[None, :]
+            p_k = k_l + row_t[:, None] * input_stride + o_k[None, :]
+            p_g = g_l + row_t[:, None] * input_stride + o_k[None, :]
+            p_b = b_l + row_t[:, None] * input_stride + o_k[None, :]
+            b_q = tl.load(p_q, mask=m_rowk, other=0.0).to(tl.float32)
+            b_k = tl.load(p_k, mask=m_rowk, other=0.0).to(tl.float32)
+            b_g = tl.load(p_g, mask=m_rowk, other=0.0).to(tl.float32)
+            b_b = tl.load(p_b, mask=m_rowk, other=0.0).to(tl.float32)
+            for j in range(0, BL):
+                source_t = i_ts + leaf_start + j
+                m_source = source_t < T_cur
+                m_pair = m_row & m_source & (row_in_leaf >= j)
+                b_kj = tl.load(
+                    k_l + source_t[:, None] * input_stride + o_k[None, :],
+                    mask=m_source[:, None] & m_k[None, :],
+                    other=0.0,
+                ).to(tl.float32)
+                b_gj = tl.load(
+                    g_l + source_t[:, None] * input_stride + o_k[None, :],
+                    mask=m_source[:, None] & m_k[None, :],
+                    other=0.0,
+                ).to(tl.float32)
+                m_pairk = m_pair[:, None] & m_k[None, :]
+                b_delta = tl.where(m_pairk, b_g - b_gj, 0.0)
+                b_kgj = tl.where(m_pairk, b_kj * exp2(b_delta), 0.0)
+                b_Aqk_j = tl.sum(b_q * b_kgj, axis=1)
+                b_Akk_j = tl.sum((b_b * b_k) * b_kgj, axis=1)
+                b_Aqk_leaf += tl.where(o_j[None, :] == j, b_Aqk_j[:, None], 0.0)
+                b_Akk_leaf += tl.where(o_j[None, :] == j, b_Akk_j[:, None], 0.0)
 
-    if IS_HEAD_MAJOR:
-        input_offset = ((tl.cast(i_b, tl.int64) * H + i_h) * T) * K
-        input_stride = K
-    else:
-        input_offset = (bos * H + i_h) * K
-        input_stride = H * K
-    q += input_offset
-    k += input_offset
-    g += input_offset
-    b += input_offset
-    Aqk += (bos * H + i_h) * BT
-    Akk += (bos * H + i_h) * BC
-
-    p_q = q + o_c[:, None] * input_stride + o_k[None, :]
-    p_k = k + o_c[:, None] * input_stride + o_k[None, :]
-    p_g = g + o_c[:, None] * input_stride + o_k[None, :]
-    p_b = b + o_c[:, None] * input_stride + o_k[None, :]
-    b_q = tl.load(p_q, mask=m_rk, other=0.0).to(tl.float32)
-    b_k = tl.load(p_k, mask=m_rk, other=0.0).to(tl.float32)
-    b_g = tl.load(p_g, mask=m_rk, other=0.0).to(tl.float32)
-    b_b = tl.load(p_b, mask=m_rk, other=0.0).to(tl.float32)
-    b_k *= b_b
-
-    for j in range(0, (ROW_GROUP + 1) * BR):
-        i_j = i_ts + j
-        m_j = i_j < T
-        p_kj = k + i_j * input_stride + o_k
-        p_gj = g + i_j * input_stride + o_k
-        b_kj = tl.load(p_kj, mask=m_j & m_k, other=0.0).to(tl.float32)
-        b_gj = tl.load(p_gj, mask=m_j & m_k, other=0.0).to(tl.float32)
-        b_kgj = tl.where(m_k[None, :], b_kj[None, :] * exp2(b_g - b_gj[None, :]), 0.0)
-        b_Aqk = tl.sum(b_q * b_kgj, axis=1) * scale
-        b_Akk = tl.sum(b_k * b_kgj, axis=1)
-        row_in_subchunk = ROW_GROUP * BR + o_r
+        col_in_subchunk = leaf_start[:, None] + o_j[None, :]
+        m_leaf_pair = m_row[:, None] & ((i_ts + col_in_subchunk) < T_cur)
+        p_Aqk_leaf = (
+            Aqk_l
+            + row_t[:, None] * (H * BT)
+            + i_i * BC
+            + col_in_subchunk
+        )
+        p_Akk_leaf = Akk_l + row_t[:, None] * (H * BC) + col_in_subchunk
         tl.store(
-            Aqk + o_c * (H * BT) + i_i * BC + j,
-            b_Aqk.to(Aqk.dtype.element_ty),
-            mask=m_r & m_j & (j <= row_in_subchunk),
+            p_Aqk_leaf,
+            (b_Aqk_leaf * scale).to(Aqk.dtype.element_ty),
+            mask=m_leaf_pair & (row_in_leaf[:, None] >= o_j[None, :]),
         )
         tl.store(
-            Akk + o_c * (H * BC) + j,
-            b_Akk.to(Akk.dtype.element_ty),
-            mask=m_r & m_j & (j < row_in_subchunk),
+            p_Akk_leaf,
+            b_Akk_leaf.to(Akk.dtype.element_ty),
+            mask=m_leaf_pair & (row_in_leaf[:, None] > o_j[None, :]),
         )
+
+
+@triton.jit(do_not_specialize=['BH', 'T', 'TASK_OFFSET', 'TASK_COUNT', 'num_core'])
+def chunk_gdn2_fwd_kernel_intra_cross_leaf_npu(
+    q,
+    k,
+    g,
+    b,
+    Aqk,
+    Akk,
+    scale,
+    cu_seqlens,
+    chunk_indices,
+    BH,
+    T,
+    TASK_OFFSET,
+    TASK_COUNT,
+    num_core,
+    H: tl.constexpr,
+    K: tl.constexpr,
+    BT: tl.constexpr,
+    BC: tl.constexpr,
+    BK: tl.constexpr,
+    BL: tl.constexpr,
+    IS_HEAD_MAJOR: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+):
+    T_seq = T
+    NL = BC // BL
+    core_id = tl.program_id(0)
+    for local_task in tl.range(core_id, TASK_COUNT, num_core):
+        task_id = tl.cast(TASK_OFFSET, tl.int32) + local_task
+        i_leaf = task_id % (NL - 1) + 1
+        rem = task_id // (NL - 1)
+        i_i = rem % (BT // BC)
+        rem = rem // (BT // BC)
+        i_bh = rem % BH
+        i_t_o = rem // BH
+        i_b, i_h = i_bh // H, i_bh % H
+
+        if IS_VARLEN:
+            i_t_o64 = tl.cast(i_t_o, tl.int64)
+            i_n = tl.load(chunk_indices + i_t_o64 * 2).to(tl.int32)
+            i_t = tl.load(chunk_indices + i_t_o64 * 2 + 1).to(tl.int32)
+            bos = tl.load(cu_seqlens + i_n).to(tl.int64)
+            eos = tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+            T_cur = (eos - bos).to(tl.int32)
+        else:
+            i_t = i_t_o
+            bos = tl.cast(i_b, tl.int64) * T_seq
+            T_cur = T_seq
+
+        i_ts = tl.cast(i_t, tl.int64) * BT + i_i * BC
+        leaf_start = i_leaf * BL
+        i_ti = i_ts + leaf_start
+        if IS_HEAD_MAJOR:
+            input_offset = (tl.cast(i_b, tl.int64) * H + i_h) * tl.cast(T_seq, tl.int64) * K
+            input_stride = K
+        else:
+            input_offset = (bos * H + i_h) * K
+            input_stride = H * K
+        q_l = q + input_offset
+        k_l = k + input_offset
+        g_l = g + input_offset
+        b_l = b + input_offset
+        Aqk_l = Aqk + (bos * H + i_h) * BT
+        Akk_l = Akk + (bos * H + i_h) * BC
+
+        o_i = tl.arange(0, BC)
+        m_sub = (i_ts + o_i) < T_cur
+        has_dst = i_ti < T_cur
+        m_dst = m_sub & (o_i >= leaf_start) & (o_i < leaf_start + BL)
+        m_src = m_sub & (o_i < leaf_start) & has_dst
+        b_Aqk_cross = tl.zeros([BC, BC], dtype=tl.float32)
+        b_Akk_cross = tl.zeros([BC, BC], dtype=tl.float32)
+        for i_k in range(tl.cdiv(K, BK)):
+            o_k = i_k * BK + tl.arange(0, BK)
+            m_k = o_k < K
+            m_subk = m_sub[:, None] & m_k[None, :]
+            p_q = q_l + (i_ts + o_i)[:, None] * input_stride + o_k[None, :]
+            p_k = k_l + (i_ts + o_i)[:, None] * input_stride + o_k[None, :]
+            p_g = g_l + (i_ts + o_i)[:, None] * input_stride + o_k[None, :]
+            p_b = b_l + (i_ts + o_i)[:, None] * input_stride + o_k[None, :]
+            b_q = tl.load(p_q, mask=m_subk, other=0.0).to(tl.float32)
+            b_k = tl.load(p_k, mask=m_subk, other=0.0).to(tl.float32)
+            b_g = tl.load(p_g, mask=m_subk, other=0.0).to(tl.float32)
+            b_b = tl.load(p_b, mask=m_subk, other=0.0).to(tl.float32)
+            b_ga = tl.load(
+                g_l + (i_ts + leaf_start) * input_stride + o_k,
+                mask=has_dst & m_k,
+                other=0.0,
+            ).to(tl.float32)
+            m_left = m_dst[:, None] & m_k[None, :]
+            m_right = m_src[:, None] & m_k[None, :]
+            b_left_delta = tl.where(m_left, b_g - b_ga[None, :], 0.0)
+            b_right_delta = tl.where(m_right, b_ga[None, :] - b_g, 0.0)
+            b_left_exp = tl.where(m_left, exp2(b_left_delta), 0.0)
+            b_right_exp = tl.where(m_right, exp2(b_right_delta), 0.0)
+            b_k_right = b_k * b_right_exp
+            b_q_left = b_q * b_left_exp
+            b_bk_left = b_b * b_k * b_left_exp
+            b_Aqk_cross = tl.dot(
+                b_q_left,
+                tl.trans(b_k_right),
+                b_Aqk_cross,
+                allow_tf32=False,
+            )
+            b_Akk_cross = tl.dot(
+                b_bk_left,
+                tl.trans(b_k_right),
+                b_Akk_cross,
+                allow_tf32=False,
+            )
+
+        p_Aqk_cross = (
+            Aqk_l + (i_ts + o_i)[:, None] * (H * BT) + (i_i * BC + o_i)[None, :]
+        )
+        p_Akk_cross = Akk_l + (i_ts + o_i)[:, None] * (H * BC) + o_i[None, :]
+        m_cross = m_dst[:, None] & m_src[None, :]
+        tl.store(p_Aqk_cross, (b_Aqk_cross * scale).to(Aqk.dtype.element_ty), mask=m_cross)
+        tl.store(p_Akk_cross, b_Akk_cross.to(Akk.dtype.element_ty), mask=m_cross)
 
 
 @triton.jit(do_not_specialize=['T', 'NT_OFFSET', 'NC_OFFSET', 'BH_OFFSET'])
@@ -503,6 +690,8 @@ def chunk_gdn2_fwd_intra_npu(
     B, T, H, K = k.shape
     BT = chunk_size
     BC = _BC
+    if cu_seqlens is not None and B != 1:
+        raise ValueError('GDN-2 Ascend intra requires batch size 1 for packed sequences')
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
@@ -516,8 +705,12 @@ def chunk_gdn2_fwd_intra_npu(
 
     sync_stream = torch.npu.current_stream(k.device)
     use_head_major_intra = not is_varlen
-    # serialize split packed launches as well as dense launches to avoid CANN queue stalls.
-    sync_each_launch = use_head_major_intra or NT * NC * B * H > _LAUNCH_BLOCK_BUDGET
+    logical_task_num = NT * NC * B * H
+    direct_task_num = logical_task_num
+    cross_task_num = logical_task_num * (BC // _LEAF_SIZE - 1)
+    # Dense and oversized packed slices stay serialized; ordinary packed launches retain
+    # the established single fence between the two diagonal construction stages.
+    sync_each_launch = use_head_major_intra or logical_task_num > _LAUNCH_BLOCK_BUDGET
     if use_head_major_intra:
         q_intra = q.transpose(1, 2).contiguous()
         k_intra = k.transpose(1, 2).contiguous()
@@ -525,41 +718,41 @@ def chunk_gdn2_fwd_intra_npu(
         b_intra = b.transpose(1, 2).contiguous()
     else:
         q_intra, k_intra, g_intra, b_intra = q, k, gk, b
-    for row_group in range(BC // _TOKEN_GROUP):
-        _launch_diag_kernel(
-            chunk_gdn2_fwd_kernel_intra_grouped_npu,
-            nt=NT,
-            nc=NC,
-            bh_total=B * H,
-            sync_stream=sync_stream if sync_each_launch else None,
-            kernel_kwargs=dict(
-                q=q_intra,
-                k=k_intra,
-                g=g_intra,
-                b=b_intra,
-                Aqk=Aqk,
-                Akk=Akkd,
-                scale=scale,
-                cu_seqlens=cu_seqlens,
-                chunk_indices=chunk_indices,
-                T=T,
-                H=H,
-                K=K,
-                BT=BT,
-                BC=BC,
-                BK=triton.next_power_of_2(K),
-                BR=_TOKEN_GROUP,
-                ROW_GROUP=row_group,
-                IS_HEAD_MAJOR=use_head_major_intra,
-                IS_VARLEN=is_varlen,
-                NT_OFFSET=0,
-                NC_OFFSET=0,
-                BH_OFFSET=0,
-            ),
-        )
-        if not sync_each_launch and row_group == 0:
-            # CANN can stall when the two grouped row kernels are queued together.
-            sync_stream.synchronize()
+    diag_kwargs = dict(
+        q=q_intra,
+        k=k_intra,
+        g=g_intra,
+        b=b_intra,
+        Aqk=Aqk,
+        Akk=Akkd,
+        scale=scale,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        BH=B * H,
+        T=T,
+        H=H,
+        K=K,
+        BT=BT,
+        BC=BC,
+        BK=_get_diag_bk(K),
+        BL=_LEAF_SIZE,
+        IS_HEAD_MAJOR=use_head_major_intra,
+        IS_VARLEN=is_varlen,
+    )
+    _launch_diag_core_grid(
+        chunk_gdn2_fwd_kernel_intra_direct_leaf_npu,
+        task_num=direct_task_num,
+        kernel_kwargs=diag_kwargs,
+        sync_stream=sync_stream,
+        sync_each_launch=sync_each_launch,
+    )
+    _launch_diag_core_grid(
+        chunk_gdn2_fwd_kernel_intra_cross_leaf_npu,
+        task_num=cross_task_num,
+        kernel_kwargs=diag_kwargs,
+        sync_stream=sync_stream if sync_each_launch else None,
+        sync_each_launch=sync_each_launch,
+    )
 
     _launch_diag_kernel(
         chunk_gdn2_fwd_kernel_diag_solve_npu,
