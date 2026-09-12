@@ -16,6 +16,8 @@
 # GDN-2 reuses KDA's gate activation verbatim, so the gate-in-kernel reference
 # uses ``naive_kda_gate`` / ``naive_kda_lowerbound_gate``.
 
+import math
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -596,4 +598,69 @@ def test_chunk_bwd_autotune_key_covers_head_dims():
     assert list(tuner.keys) == ['BT', 'K', 'V', 'STATE_V_FIRST'], (
         f"unexpected autotune key {list(tuner.keys)}; it must carry K and V, "
         "the head dimensions that bound the swept BK/BV tiles"
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize(
+    ("T", "P", "H", "K", "V"),
+    [
+        (22, 21, 2, 64, 64),
+        (70, 69, 2, 64, 64),
+    ],
+)
+def test_chunk_gdn2_prefix_causality(T: int, P: int, H: int, K: int, V: int):
+    """Gates at positions >= P must not change the output at positions < P.
+
+    ``chunk_gdn2_fwd_kernel_intra_sub_chunk`` anchors the exponentials of a diagonal
+    sub-chunk on one of its own rows. Anchoring on the middle row made that anchor a
+    *future* row for the first half of the sub-chunk, so editing a gate after the prefix
+    moved an anchor shared by every row of the sub-chunk and changed the prefix output and
+    its gradients. Each case below ends the sequence inside a sub-chunk whose middle row
+    is its last valid token, which is the shape that triggered the leak.
+    """
+    torch.manual_seed(42)
+    generator = torch.Generator().manual_seed(42)
+    shape = (1, T, H, K)
+    q = F.normalize(torch.randn(shape, generator=generator), dim=-1).bfloat16().to(device)
+    k = F.normalize(torch.randn(shape, generator=generator), dim=-1).bfloat16().to(device)
+    v = (0.5 * torch.randn((1, T, H, V), generator=generator)).bfloat16().to(device)
+    b = torch.rand(shape, generator=generator).bfloat16().to(device)
+    w = torch.rand((1, T, H, V), generator=generator).bfloat16().to(device)
+    g = torch.randn(shape, generator=generator).bfloat16().to(device)
+    a_log = torch.log(torch.empty(H).uniform_(1.0, 16.0, generator=generator)).float().to(device)
+    dt_bias = (0.1 * torch.rand(H * K, generator=generator) - 0.05).float().to(device)
+
+    def run(gates: torch.Tensor) -> torch.Tensor:
+        return chunk_gdn2(
+            q=q,
+            k=k,
+            v=v,
+            g=gates,
+            b=b,
+            w=w,
+            A_log=a_log,
+            dt_bias=dt_bias,
+            scale=1.0,
+            output_final_state=False,
+            use_gate_in_kernel=True,
+            safe_gate=True,
+            lower_bound=-5.0,
+            use_qk_l2norm_in_kernel=False,
+        )[0]
+
+    base = run(g)
+
+    # Move every gate at position >= P to the opposite end of the [lower_bound, 0) range,
+    # leaving the prefix bit-identical. Only the anchor for the trailing sub-chunk changes.
+    edited = g.clone()
+    edited[:, P:] = (
+        math.log(0.99 / 0.01) / a_log.exp().view(1, 1, H, 1) - dt_bias.view(1, 1, H, K)
+    ).to(edited.dtype)
+    assert not torch.equal(g[:, P:], edited[:, P:])
+
+    perturbed = run(edited)
+    assert torch.equal(base[:, :P], perturbed[:, :P]), (
+        f"changing gates at positions >= {P} changed the output at positions < {P}: "
+        f"max abs diff {(base[:, :P].float() - perturbed[:, :P].float()).abs().max().item()}"
     )

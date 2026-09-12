@@ -486,6 +486,7 @@ def chunk_gdn2_bwd(
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
         safe_gate=safe_gate,
+        lower_bound=lower_bound,
     )
 
     dA_log, dt_bias_grad = None, None
