@@ -14,7 +14,7 @@ import triton
 
 from fla.ops.backends import BaseBackend
 
-# Keep the backend verifier aligned with chunk_gdn2's public K <= 256 contract.
+# keep the backend verifier aligned with chunk_gdn2's public K <= 256 contract.
 _MAX_FWD_INTRA_BK = 256
 
 

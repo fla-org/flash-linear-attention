@@ -18,7 +18,7 @@ from fla.ops.utils.op import exp2
 from fla.utils import ascend_compile_kwargs, input_guard
 from fla.utils.ascend_ub_manager import compute_row_tile_block_size, get_npu_properties
 
-# A is shared by both stages, but the channel-wise gates make the V and K
+# share A between both stages, while the channel-wise gates keep the V and K
 # slabs independent. The multipliers conservatively include the extra gate tile.
 _RECOMPUTE_FWD_U_MEM_MULT = 4.5
 _RECOMPUTE_FWD_W_MEM_MULT = 5.5
@@ -156,7 +156,7 @@ def recompute_w_u_fwd_gdn2_kernel_npu(
             b_v = tl.load(p_v, mask=m_v, other=0.0)
             b_wg = tl.load(p_wg, mask=m_v, other=0.0)
             b_vb = (b_v * b_wg).to(b_v.dtype)
-            # Ascend tl.dot may clobber the left operand; reload A for each tile.
+            # reload A for each tile because Ascend tl.dot may clobber the left operand.
             b_A = tl.load(p_A, mask=m_t[:, None], other=0.0)
             b_u = tl.dot(b_A, b_vb, allow_tf32=False)
             p_u = u + head_v + local_t64[:, None] * (H * V) + o_v64[None, :]
@@ -190,7 +190,7 @@ def recompute_w_u_fwd_gdn2_kernel_npu(
             p_kg = kg + head_k + local_t64[:, None] * (H * K) + o_k64[None, :]
             tl.store(p_kg, b_kg.to(p_kg.dtype.element_ty), mask=m_k)
 
-            # Reload A after every prior dot because it is reused as the next lhs.
+            # reload A after every prior dot because it is reused as the next lhs.
             b_A = tl.load(p_A, mask=m_t[:, None], other=0.0)
             b_w = tl.dot(b_A, b_kb.to(b_k.dtype), allow_tf32=False)
             p_w = w + head_k + local_t64[:, None] * (H * K) + o_k64[None, :]

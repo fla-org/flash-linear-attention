@@ -31,7 +31,7 @@ _LAUNCH_BLOCK_BUDGET = 4096
 _BWD_MEM_MULT = 24.0
 _BWD_SAFETY_MARGIN = 0.75
 _MAX_BWD_BK = 32
-# Keep the two dot accumulators and their input tiles below the CANN 9.1 UB envelope.
+# keep the two dot accumulators and their input tiles below the CANN 9.1 UB envelope.
 _DIAG_COMPILE_KWARGS = ascend_compile_kwargs(blacklist_auto_blockify=True)
 # Disable auto-multi-buffer and AutoBlockify on the inter kernels for CANN 9.1.
 _INTER_COMPILE_KWARGS = ascend_compile_kwargs(blacklist_auto_blockify=True)
@@ -64,7 +64,7 @@ def _get_inter_bk(K: int) -> int:
 
 
 def _get_bwd_bk(K: int) -> int:
-    # BC=16 matches the score-matrix subchunks; split K instead of retaining a
+    # use BC=16 to match the score-matrix subchunks; split K instead of retaining a
     # full padded head dimension when the backward live set approaches UB capacity.
     return compute_row_tile_block_size(
         _BC,
@@ -708,7 +708,7 @@ def chunk_gdn2_fwd_intra_npu(
     logical_task_num = NT * NC * B * H
     direct_task_num = logical_task_num
     cross_task_num = logical_task_num * (BC // _LEAF_SIZE - 1)
-    # Dense and oversized packed slices stay serialized; ordinary packed launches retain
+    # dense and oversized packed slices stay serialized; ordinary packed launches retain
     # the established single fence between the two diagonal construction stages.
     sync_each_launch = use_head_major_intra or logical_task_num > _LAUNCH_BLOCK_BUDGET
     if use_head_major_intra:
@@ -1042,7 +1042,7 @@ def chunk_gdn2_bwd_kernel_intra_npu(
             tl.store(p_dq2, b_dq2.to(p_dq2.dtype.element_ty), mask=m_ik)
             tl.store(p_db, b_db.to(p_db.dtype.element_ty), mask=m_ik)
 
-            # Preserve the fence used by the mainline kernel before the future-token phase.
+            # preserve the fence used by the mainline kernel before the future-token phase.
             tl.debug_barrier()
             b_dkt = tl.zeros([BC, BK], dtype=tl.float32)
 
