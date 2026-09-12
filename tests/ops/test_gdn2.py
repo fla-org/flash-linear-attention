@@ -440,6 +440,10 @@ def test_chunk_state_v_first():
         ]
     ] + [
         pytest.param(
+            [0, 15, 80], 1, 32, 48, False, torch.bfloat16, False, False,
+            id='ragged-bf16-k32-v48',
+        ),
+        pytest.param(
             [0, 15, 80, 145], 2, 48, 32, False, torch.float16, True, True,
             id='ragged-state-v-first-disable-recompute',
         ),
