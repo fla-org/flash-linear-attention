@@ -148,14 +148,17 @@ def recompute_w_u_fwd_kda_kernel_npu(
         i_bh = task_id % BH
         i_hv = i_bh % HV
         i_h = i_hv // (HV // H)
+        is_valid = True
         if IS_VARLEN:
             i_n, i_t = tl.load(chunk_indices + i_t_o * 2).to(tl.int32), tl.load(
                 chunk_indices + i_t_o * 2 + 1,
             ).to(tl.int32)
+            is_valid = i_n >= 0
+            i_n = tl.maximum(i_n, 0)
             bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(
                 cu_seqlens + i_n + 1,
             ).to(tl.int64)
-            T = (eos - bos).to(tl.int32)
+            T = tl.where(is_valid, eos - bos, 0).to(tl.int32)
             beta_bh = bos + i_hv * T_max
             gk_bh = i_hv * T_max * K + bos * K
         else:
@@ -218,7 +221,7 @@ def recompute_w_u_fwd_kda_kernel_npu(
 
             if STORE_KG:
                 o_k = i_k * BK + tl.arange(0, BK)
-                m_k = o_k < K
+                m_k = (o_k < K) & is_valid
                 if GK_T_CONTIG:
                     b_gn = tl.load(gk_ptr + last_idx * K + o_k, mask=m_k, other=0.0).to(tl.float32)
                 else:
@@ -246,8 +249,6 @@ def recompute_w_u_fwd_kda_npu(
     chunk_indices: torch.LongTensor | None = None,
     use_graph: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
-    if use_graph:
-        raise NotImplementedError("use_graph is not supported on the Ascend NPU backend")
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
     BT = A.shape[-1]

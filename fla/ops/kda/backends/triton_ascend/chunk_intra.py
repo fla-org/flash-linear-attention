@@ -168,6 +168,8 @@ def chunk_kda_fwd_kernel_diag_solve_npu(
 
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        if i_n < 0:
+            return
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
     else:
@@ -226,6 +228,8 @@ def chunk_kda_fwd_kernel_intra_sub_chunk_npu(
 
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        if i_n < 0:
+            return
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
     else:
@@ -316,6 +320,8 @@ def chunk_kda_fwd_kernel_inter_solve_fused_npu(
 
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        if i_n < 0:
+            return
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
     else:
@@ -556,8 +562,6 @@ def chunk_kda_fwd_intra_npu(
     disable_recompute: bool = False,
     use_graph: bool = False,
 ):
-    if use_graph:
-        raise NotImplementedError("use_graph is not supported on the Ascend NPU backend")
     B, T, H, K, HV = *k.shape, gk.shape[2]
     BT = chunk_size
     if BT not in (32, 64):
@@ -729,13 +733,18 @@ def chunk_kda_bwd_kernel_intra_npu(
 
         if cu_seqlens is not None:
             i_n, i_t = tl.load(chunk_indices + i_t * 2), tl.load(chunk_indices + i_t * 2 + 1)
+            is_valid = i_n >= 0
+            i_n = tl.maximum(i_n, 0)
             # int64 guarantees: cu_seqlens may arrive as int32 and chunk_indices
             # follows its dtype, but the global offsets must stay 64-bit
             bos, eos = tl.cast(tl.load(cu_seqlens + i_n), tl.int64), tl.cast(tl.load(cu_seqlens + i_n + 1), tl.int64)
         else:
             bos, eos = i_b * T, i_b * T + T
-        # T is a loop-carried arg (int32); the reassignment must keep its type
-        T = tl.cast(eos - bos, tl.int32)
+        # T is a loop-carried arg (int32); the reassignment must keep its type.
+        if cu_seqlens is not None:
+            T = tl.cast(tl.where(is_valid, eos - bos, 0), tl.int32)
+        else:
+            T = tl.cast(eos - bos, tl.int32)
 
         # rebind pointers per task (ptr-arg += inside the task loop would both
         # accumulate offsets across tasks and break loop-carried typecheck)
@@ -926,8 +935,6 @@ def chunk_kda_bwd_intra_npu(
     safe_gate: bool = False,
     use_graph: bool = False,
 ):
-    if use_graph:
-        raise NotImplementedError("use_graph is not supported on the Ascend NPU backend")
     B, T, H, K, HV = *k.shape, g.shape[2]
     BT = chunk_size
     BK = triton.next_power_of_2(K)
@@ -952,10 +959,10 @@ def chunk_kda_bwd_intra_npu(
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
-    dq2 = torch.empty_like(dq)
-    dk2 = torch.empty_like(dk)
-    db2 = beta.new_empty(1, *beta.shape, dtype=torch.float)
-    dg2 = torch.empty_like(dg, dtype=torch.float)
+    dq2 = (torch.zeros_like if use_graph else torch.empty_like)(dq)
+    dk2 = (torch.zeros_like if use_graph else torch.empty_like)(dk)
+    db2 = (beta.new_zeros if use_graph else beta.new_empty)(1, *beta.shape, dtype=torch.float)
+    dg2 = (torch.zeros_like if use_graph else torch.empty_like)(dg, dtype=torch.float)
     num_core = get_npu_properties()['num_aicore']
     chunk_kda_bwd_kernel_intra_npu[(num_core,)](
         NT_TOTAL=NT,
