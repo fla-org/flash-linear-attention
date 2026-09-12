@@ -5,7 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""GDN-2 forward intra kernels for triton-ascend."""
+"""GDN-2 intra kernels for triton-ascend."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from fla.ops.gdn2.wy_fast import recompute_w_u_fwd_gdn2
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp2
 from fla.utils import ascend_compile_kwargs, input_guard
-from fla.utils.ascend_ub_manager import compute_row_tile_block_size, iter_axis_launch_chunks
+from fla.utils.ascend_ub_manager import compute_row_tile_block_size, get_npu_properties, iter_axis_launch_chunks
 
 _BC = 16
 _TOKEN_GROUP = 8
@@ -26,6 +26,9 @@ _SAFETY_MARGIN = 0.80
 _FALLBACK_BK = 16
 _MAX_INTER_BK = 64
 _LAUNCH_BLOCK_BUDGET = 4096
+_BWD_MEM_MULT = 24.0
+_BWD_SAFETY_MARGIN = 0.75
+_MAX_BWD_BK = 32
 # Disable auto-multi-buffer and AutoBlockify on the inter kernels for CANN 9.1.
 _INTER_COMPILE_KWARGS = ascend_compile_kwargs(blacklist_auto_blockify=True)
 
@@ -40,6 +43,21 @@ def _get_inter_bk(K: int) -> int:
         fallback=_FALLBACK_BK,
         min_block=16,
         max_block=min(_MAX_INTER_BK, triton.next_power_of_2(K)),
+    )
+
+
+def _get_bwd_bk(K: int) -> int:
+    # BC=16 matches the score-matrix subchunks; split K instead of retaining a
+    # full padded head dimension when the backward live set approaches UB capacity.
+    return compute_row_tile_block_size(
+        _BC,
+        K,
+        _BWD_MEM_MULT,
+        tiling_row=False,
+        safety_margin=_BWD_SAFETY_MARGIN,
+        fallback=_FALLBACK_BK,
+        min_block=16,
+        max_block=max(16, min(_MAX_BWD_BK, triton.next_power_of_2(K))),
     )
 
 
@@ -624,3 +642,403 @@ def chunk_gdn2_fwd_intra_npu(
     # Keep intra scratch alive until its last asynchronous consumer completes.
     sync_stream.synchronize()
     return w, u, qg, kg, Aqk, Akk
+
+
+@triton.heuristics({
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
+})
+@triton.jit(do_not_specialize=['B', 'T', 'NT_TOTAL', 'task_num', 'num_core'])
+def chunk_gdn2_bwd_kernel_intra_npu(
+    q,
+    k,
+    g,
+    b,
+    dAqk,
+    dAkk,
+    dq,
+    dq2,
+    dk,
+    dk2,
+    dg,
+    dg2,
+    db,
+    cu_seqlens,
+    chunk_indices,
+    B,
+    T,
+    NT_TOTAL,
+    task_num,
+    num_core,
+    H: tl.constexpr,
+    K: tl.constexpr,
+    BT: tl.constexpr,
+    BC: tl.constexpr,
+    BK: tl.constexpr,
+    SAFE_GATE: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+):
+    NC = tl.cdiv(BT, BC)
+    T_seq = T
+    nt_total = tl.cast(NT_TOTAL, tl.int64)
+    bh_total = tl.cast(B, tl.int64) * H
+    core_id = tl.program_id(0)
+
+    for tid in tl.range(core_id, task_num, num_core):
+        task_id = tl.cast(tid, tl.int64)
+        i_bh = task_id % bh_total
+        rem = task_id // bh_total
+        i_t_o = rem % nt_total
+        rem = rem // nt_total
+        i_i = rem % NC
+        i_k = rem // NC
+        i_b, i_h = i_bh // H, i_bh % H
+
+        if IS_VARLEN:
+            i_n = tl.load(chunk_indices + i_t_o * 2).to(tl.int32)
+            i_t = tl.load(chunk_indices + i_t_o * 2 + 1).to(tl.int32)
+            bos = tl.load(cu_seqlens + i_n).to(tl.int64)
+            eos = tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+            T_cur = (eos - bos).to(tl.int32)
+        else:
+            i_t = i_t_o
+            bos = tl.cast(i_b, tl.int64) * T_seq
+            T_cur = T_seq
+
+        i_t64 = tl.cast(i_t, tl.int64)
+        i_i64 = tl.cast(i_i, tl.int64)
+        i_k64 = tl.cast(i_k, tl.int64)
+        nc_cur = min(NC, tl.cdiv(tl.cast(T_cur, tl.int64) - i_t64 * BT, BC))
+        if i_i < nc_cur:
+            i_ti = i_t64 * BT + i_i64 * BC
+            o_i = tl.arange(0, BC)
+            o_i64 = tl.cast(o_i, tl.int64)
+            o_k64 = i_k64 * BK + tl.cast(tl.arange(0, BK), tl.int64)
+            o_c = i_ti + o_i64
+            m_row = o_c < T_cur
+            m_k = o_k64 < K
+            m_ik = m_row[:, None] & m_k[None, :]
+            a_row = i_i64 * BC + o_i64
+
+            head_k = (bos * H + i_h) * K
+            head_A = (bos * H + i_h) * BT
+            q_l = q + head_k
+            k_l = k + head_k
+            g_l = g + head_k
+            b_l = b + head_k
+            dAqk_l = dAqk + head_A
+            dAkk_l = dAkk + head_A
+            dq_l = dq + head_k
+            dq2_l = dq2 + head_k
+            dk_l = dk + head_k
+            dk2_l = dk2 + head_k
+            dg_l = dg + head_k
+            dg2_l = dg2 + head_k
+            db_l = db + head_k
+
+            p_g = g_l + o_c[:, None] * (H * K) + o_k64[None, :]
+            p_b = b_l + o_c[:, None] * (H * K) + o_k64[None, :]
+            p_q = q_l + o_c[:, None] * (H * K) + o_k64[None, :]
+            p_k = k_l + o_c[:, None] * (H * K) + o_k64[None, :]
+            b_g = tl.load(p_g, mask=m_ik, other=0.0).to(tl.float32)
+            b_b = tl.load(p_b, mask=m_ik, other=0.0)
+            b_q = tl.load(p_q, mask=m_ik, other=0.0)
+            b_k = tl.load(p_k, mask=m_ik, other=0.0)
+
+            b_dq2 = tl.zeros([BC, BK], dtype=tl.float32)
+            b_dk2 = tl.zeros([BC, BK], dtype=tl.float32)
+
+            if i_i > 0:
+                p_gn = g_l + i_ti * (H * K) + o_k64
+                b_gn = tl.load(p_gn, mask=m_k, other=0.0).to(tl.float32)[None, :]
+                for i_j in range(0, i_i):
+                    i_j64 = tl.cast(i_j, tl.int64)
+                    row_j = i_t64 * BT + i_j64 * BC
+                    o_j = row_j + o_i64
+                    m_row_j = o_j < T_cur
+                    m_jk = m_row_j[:, None] & m_k[None, :]
+                    p_kj = k_l + o_j[:, None] * (H * K) + o_k64[None, :]
+                    p_gkj = g_l + o_j[:, None] * (H * K) + o_k64[None, :]
+                    b_kj = tl.load(p_kj, mask=m_jk, other=0.0)
+                    b_gkj = tl.load(p_gkj, mask=m_jk, other=0.0).to(tl.float32)
+                    b_gate = tl.where(m_jk, b_gn - b_gkj, 0.0)
+                    b_kg = tl.where(m_jk, b_kj * exp2(b_gate), 0.0)
+
+                    m_dA = m_row[:, None] & ((i_j64 * BC + o_i64)[None, :] < BT)
+                    p_dAqk = (
+                        dAqk_l
+                        + o_c[:, None] * (H * BT)
+                        + (i_j64 * BC + o_i64)[None, :]
+                    )
+                    p_dAkk = (
+                        dAkk_l
+                        + o_c[:, None] * (H * BT)
+                        + (i_j64 * BC + o_i64)[None, :]
+                    )
+                    b_dAqk = tl.load(p_dAqk, mask=m_dA, other=0.0).to(tl.float32)
+                    b_dAkk = tl.load(p_dAkk, mask=m_dA, other=0.0).to(tl.float32)
+                    b_dq2 = tl.dot(b_dAqk, b_kg, b_dq2, allow_tf32=False)
+                    b_dk2 = tl.dot(b_dAkk, b_kg, b_dk2, allow_tf32=False)
+                b_gate = tl.where(m_ik, b_g - b_gn, 0.0)
+                b_gate_to_row = tl.where(m_ik, exp2(b_gate), 0.0)
+                b_dq2 *= b_gate_to_row
+                b_dk2 *= b_gate_to_row
+
+            if SAFE_GATE:
+                mid = i_ti + min(BC // 2, T_cur - i_ti - 1)
+                b_gm = tl.load(
+                    g_l + mid * (H * K) + o_k64,
+                    mask=m_k,
+                    other=0.0,
+                ).to(tl.float32)[None, :]
+                m_dA = m_row[:, None] & ((i_i64 * BC + o_i64)[None, :] < BT)
+                p_dAqk = (
+                    dAqk_l
+                    + o_c[:, None] * (H * BT)
+                    + (i_i64 * BC + o_i64)[None, :]
+                )
+                p_dAkk = (
+                    dAkk_l
+                    + o_c[:, None] * (H * BT)
+                    + (i_i64 * BC + o_i64)[None, :]
+                )
+                b_dAqk = tl.load(p_dAqk, mask=m_dA, other=0.0).to(tl.float32)
+                b_dAkk = tl.load(p_dAkk, mask=m_dA, other=0.0).to(tl.float32)
+                m_causal = (o_i[:, None] >= o_i[None, :]) & m_row[:, None] & m_row[None, :]
+                b_dAqk = tl.where(m_causal, b_dAqk, 0.0)
+                b_dAkk = tl.where(m_causal, b_dAkk, 0.0)
+                b_gate = tl.where(m_row[:, None], b_g - b_gm, 0.0)
+                b_gate_pos = tl.where(m_row[:, None], exp2(b_gate), 0.0)
+                b_gate_neg = tl.where(m_row[:, None], exp2(-b_gate), 0.0)
+                b_k_exp = b_k * b_gate_neg
+                b_dq2 += tl.dot(b_dAqk, b_k_exp, allow_tf32=False) * b_gate_pos
+                b_dk2 += tl.dot(b_dAkk, b_k_exp, allow_tf32=False) * b_gate_pos
+            else:
+                n_rows = min(BC, T_cur - i_ti)
+                for j in range(0, n_rows):
+                    j64 = tl.cast(j, tl.int64)
+                    p_dAqk = dAqk_l + o_c * (H * BT) + i_i64 * BC + j64
+                    p_dAkk = dAkk_l + o_c * (H * BT) + i_i64 * BC + j64
+                    b_dAqk = tl.load(p_dAqk, mask=m_row, other=0.0).to(tl.float32)
+                    b_dAkk = tl.load(p_dAkk, mask=m_row, other=0.0).to(tl.float32)
+                    row_j = i_ti + j
+                    b_kj = tl.load(
+                        k_l + row_j * (H * K) + o_k64,
+                        mask=m_k,
+                        other=0.0,
+                    ).to(tl.float32)
+                    b_gkj = tl.load(
+                        g_l + row_j * (H * K) + o_k64,
+                        mask=m_k,
+                        other=0.0,
+                    ).to(tl.float32)
+                    m_causal = (o_i[:, None] >= j) & m_ik
+                    b_gate_delta = tl.where(m_causal, b_g - b_gkj[None, :], 0.0)
+                    b_gate = tl.where(m_causal, exp2(b_gate_delta), 0.0)
+                    b_dq2 += b_dAqk[:, None] * b_kj[None, :] * b_gate
+                    b_dk2 += b_dAkk[:, None] * b_kj[None, :] * b_gate
+
+            b_db = b_dk2 * b_k
+            b_dk2 *= b_b
+            b_dg2 = b_q * b_dq2
+
+            p_dq = dq_l + o_c[:, None] * (H * K) + o_k64[None, :]
+            p_dq2 = dq2_l + o_c[:, None] * (H * K) + o_k64[None, :]
+            p_db = db_l + o_c[:, None] * (H * K) + o_k64[None, :]
+            b_dq2 += tl.load(p_dq, mask=m_ik, other=0.0).to(tl.float32)
+            b_db += tl.load(p_db, mask=m_ik, other=0.0).to(tl.float32)
+            tl.store(p_dq2, b_dq2.to(p_dq2.dtype.element_ty), mask=m_ik)
+            tl.store(p_db, b_db.to(p_db.dtype.element_ty), mask=m_ik)
+
+            # Preserve the fence used by the mainline kernel before the future-token phase.
+            tl.debug_barrier()
+            b_dkt = tl.zeros([BC, BK], dtype=tl.float32)
+
+            if i_i < nc_cur - 1:
+                last = min(i_ti + BC, T_cur) - 1
+                b_gn = tl.load(
+                    g_l + last * (H * K) + o_k64,
+                    mask=m_k,
+                    other=0.0,
+                ).to(tl.float32)[None, :]
+                for i_j in range(i_i + 1, nc_cur):
+                    row_j = i_t64 * BT + tl.cast(i_j, tl.int64) * BC
+                    o_j = row_j + o_i64
+                    m_row_j = o_j < T_cur
+                    m_jk = m_row_j[:, None] & m_k[None, :]
+                    p_qj = q_l + o_j[:, None] * (H * K) + o_k64[None, :]
+                    p_kj = k_l + o_j[:, None] * (H * K) + o_k64[None, :]
+                    p_gkj = g_l + o_j[:, None] * (H * K) + o_k64[None, :]
+                    p_bj = b_l + o_j[:, None] * (H * K) + o_k64[None, :]
+                    b_qj = tl.load(p_qj, mask=m_jk, other=0.0)
+                    b_kj = tl.load(p_kj, mask=m_jk, other=0.0)
+                    b_gkj = tl.load(p_gkj, mask=m_jk, other=0.0).to(tl.float32)
+                    b_bj = tl.load(p_bj, mask=m_jk, other=0.0)
+
+                    m_dA = (a_row[:, None] < BT) & m_row_j[None, :]
+                    p_dAqk = (
+                        dAqk_l
+                        + o_j[None, :] * (H * BT)
+                        + a_row[:, None]
+                    )
+                    p_dAkk = (
+                        dAkk_l
+                        + o_j[None, :] * (H * BT)
+                        + a_row[:, None]
+                    )
+                    b_dAqk = tl.load(p_dAqk, mask=m_dA, other=0.0).to(tl.float32)
+                    b_dAkk = tl.load(p_dAkk, mask=m_dA, other=0.0).to(tl.float32)
+                    b_gate_delta = tl.where(m_jk, b_gkj - b_gn, 0.0)
+                    b_gate = tl.where(m_jk, exp2(b_gate_delta), 0.0)
+                    b_qg = b_qj * b_gate
+                    b_kbg = b_kj * b_bj * b_gate
+                    b_dkt = tl.dot(b_dAqk, b_qg, b_dkt, allow_tf32=False)
+                    b_dkt = tl.dot(b_dAkk, b_kbg, b_dkt, allow_tf32=False)
+                b_gate = tl.where(m_ik, b_gn - b_g, 0.0)
+                b_dkt *= tl.where(m_ik, exp2(b_gate), 0.0)
+
+            if SAFE_GATE:
+                mid = i_ti + min(BC // 2, T_cur - i_ti - 1)
+                b_gm = tl.load(
+                    g_l + mid * (H * K) + o_k64,
+                    mask=m_k,
+                    other=0.0,
+                ).to(tl.float32)[None, :]
+                b_col = i_ti + o_i64
+                m_dA = (a_row[:, None] < BT) & (b_col[None, :] < T_cur)
+                p_dAqk = (
+                    dAqk_l
+                    + b_col[None, :] * (H * BT)
+                    + a_row[:, None]
+                )
+                p_dAkk = (
+                    dAkk_l
+                    + b_col[None, :] * (H * BT)
+                    + a_row[:, None]
+                )
+                b_dAqk = tl.load(p_dAqk, mask=m_dA, other=0.0).to(tl.float32)
+                b_dAkk = tl.load(p_dAkk, mask=m_dA, other=0.0).to(tl.float32)
+                m_causal = (o_i[:, None] <= o_i[None, :]) & m_row[:, None] & m_row[None, :]
+                b_dAqk = tl.where(m_causal, b_dAqk, 0.0)
+                b_dAkk = tl.where(m_causal, b_dAkk, 0.0)
+                b_gate = tl.where(m_row[:, None], b_g - b_gm, 0.0)
+                b_gate_pos = tl.where(m_row[:, None], exp2(b_gate), 0.0)
+                b_gate_neg = tl.where(m_row[:, None], exp2(-b_gate), 0.0)
+                b_q_exp = b_q * b_gate_pos
+                b_kb_exp = b_k * b_b * b_gate_pos
+                b_dkt += tl.dot(b_dAqk, b_q_exp, allow_tf32=False) * b_gate_neg
+                b_dkt += tl.dot(b_dAkk, b_kb_exp, allow_tf32=False) * b_gate_neg
+            else:
+                n_rows = min(BC, T_cur - i_ti)
+                for j in range(0, n_rows):
+                    row_j = i_ti + j
+                    p_dAqk = dAqk_l + row_j * (H * BT) + i_i64 * BC + o_i64
+                    p_dAkk = dAkk_l + row_j * (H * BT) + i_i64 * BC + o_i64
+                    b_dAqk = tl.load(p_dAqk).to(tl.float32)
+                    b_dAkk = tl.load(p_dAkk).to(tl.float32)
+                    b_qj = tl.load(
+                        q_l + row_j * (H * K) + o_k64,
+                        mask=m_k,
+                        other=0.0,
+                    ).to(tl.float32)
+                    b_kj = tl.load(
+                        k_l + row_j * (H * K) + o_k64,
+                        mask=m_k,
+                        other=0.0,
+                    ).to(tl.float32)
+                    b_bj = tl.load(
+                        b_l + row_j * (H * K) + o_k64,
+                        mask=m_k,
+                        other=0.0,
+                    ).to(tl.float32)
+                    b_gkj = tl.load(
+                        g_l + row_j * (H * K) + o_k64,
+                        mask=m_k,
+                        other=0.0,
+                    ).to(tl.float32)
+                    m_causal = (o_i[:, None] <= j) & m_ik
+                    b_gate_delta = tl.where(m_causal, b_gkj[None, :] - b_g, 0.0)
+                    b_gate = tl.where(m_causal, exp2(b_gate_delta), 0.0)
+                    b_dkt += b_dAqk[:, None] * b_qj[None, :] * b_gate
+                    b_dkt += b_dAkk[:, None] * b_kj[None, :] * b_bj[None, :] * b_gate
+
+            p_dk = dk_l + o_c[:, None] * (H * K) + o_k64[None, :]
+            p_dk2 = dk2_l + o_c[:, None] * (H * K) + o_k64[None, :]
+            p_dg = dg_l + o_c[:, None] * (H * K) + o_k64[None, :]
+            p_dg2 = dg2_l + o_c[:, None] * (H * K) + o_k64[None, :]
+            b_dg2 += (b_dk2 - b_dkt) * b_k
+            b_dg2 += tl.load(p_dg, mask=m_ik, other=0.0).to(tl.float32)
+            b_dk2 += tl.load(p_dk, mask=m_ik, other=0.0).to(tl.float32)
+            b_dk2 += b_dkt
+            tl.store(p_dk2, b_dk2.to(p_dk2.dtype.element_ty), mask=m_ik)
+            tl.store(p_dg2, b_dg2.to(p_dg2.dtype.element_ty), mask=m_ik)
+
+
+@input_guard
+def chunk_gdn2_bwd_intra_npu(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    g: torch.Tensor,
+    b: torch.Tensor,
+    dAqk: torch.Tensor,
+    dAkk: torch.Tensor,
+    dq: torch.Tensor,
+    dk: torch.Tensor,
+    db: torch.Tensor,
+    dg: torch.Tensor,
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
+    chunk_size: int = 64,
+    safe_gate: bool = False,
+):
+    B, T, H, K = k.shape
+    BT = chunk_size
+    if BT != 64:
+        raise ValueError(f'GDN-2 Ascend bwd intra requires chunk_size=64, got {BT}')
+    if not 1 <= K <= 256:
+        raise ValueError(f'GDN-2 Ascend bwd intra requires 1 <= K <= 256, got K={K}')
+    if cu_seqlens is not None and B != 1:
+        raise ValueError('GDN-2 Ascend bwd intra requires batch size 1 for packed sequences')
+    BC = _BC
+    BK = _get_bwd_bk(K)
+
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
+    NC = triton.cdiv(BT, BC)
+    NK = triton.cdiv(K, BK)
+
+    dq2 = torch.empty_like(q)
+    dk2 = torch.empty_like(k)
+    dg2 = torch.empty_like(dg, dtype=torch.float32)
+    num_core = get_npu_properties()['num_aicore']
+    task_num = NK * NC * NT * B * H
+    chunk_gdn2_bwd_kernel_intra_npu[(num_core,)](
+        q=q,
+        k=k,
+        g=g,
+        b=b,
+        dAqk=dAqk,
+        dAkk=dAkk,
+        dq=dq,
+        dq2=dq2,
+        dk=dk,
+        dk2=dk2,
+        dg=dg,
+        dg2=dg2,
+        db=db,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        B=B,
+        T=T,
+        NT_TOTAL=NT,
+        task_num=task_num,
+        num_core=num_core,
+        H=H,
+        K=K,
+        BT=BT,
+        BC=BC,
+        BK=BK,
+        SAFE_GATE=safe_gate,
+        **ascend_compile_kwargs(),
+    )
+    return dq2, dk2, db, dg2

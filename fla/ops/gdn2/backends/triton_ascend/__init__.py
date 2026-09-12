@@ -123,6 +123,57 @@ class TritonAscendGDN2Backend(BaseBackend):
         from fla.ops.gdn2.backends.triton_ascend.wy_fast import recompute_w_u_fwd_gdn2_npu
         return recompute_w_u_fwd_gdn2_npu(*args, **kwargs)
 
+    def chunk_gdn2_bwd_intra_verifier(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        g: torch.Tensor,
+        b: torch.Tensor,
+        dAqk: torch.Tensor,
+        dAkk: torch.Tensor,
+        dq: torch.Tensor,
+        dk: torch.Tensor,
+        db: torch.Tensor,
+        dg: torch.Tensor,
+        cu_seqlens: torch.LongTensor | None = None,
+        chunk_indices: torch.LongTensor | None = None,
+        chunk_size: int = 64,
+        safe_gate: bool = False,
+    ) -> tuple[bool, str | None]:
+        del safe_gate
+        if chunk_size != 64:
+            return False, f"GDN-2 Ascend bwd intra requires chunk_size=64, got {chunk_size}"
+        float_tensors = (q, k, g, b, dAqk, dAkk, dq, dk, db, dg)
+        if any(t.ndim != 4 for t in float_tensors):
+            return False, "GDN-2 Ascend bwd intra requires rank-4 tensors"
+        if cu_seqlens is not None and k.shape[0] != 1:
+            return False, "GDN-2 Ascend bwd intra requires batch size 1 for packed sequences"
+        if cu_seqlens is not None and cu_seqlens.ndim != 1:
+            return False, "GDN-2 Ascend bwd intra requires rank-1 cu_seqlens"
+        if chunk_indices is not None and (chunk_indices.ndim != 2 or chunk_indices.shape[-1] != 2):
+            return False, "GDN-2 Ascend bwd intra requires chunk_indices shaped [NT, 2]"
+        if any(t.shape != k.shape for t in (q, g, b, dq, dk, db, dg)):
+            return False, "GDN-2 Ascend bwd intra requires q/k/g/b and gradient shapes to match"
+        if dAqk.shape != dAkk.shape or dAqk.shape[:3] != k.shape[:3] or dAqk.shape[-1] != chunk_size:
+            return False, "GDN-2 Ascend bwd intra requires dAqk/dAkk shaped [B, T, H, 64]"
+        K = int(k.shape[-1])
+        if not 1 <= K <= 256:
+            return False, f"GDN-2 Ascend bwd intra requires 1 <= K <= 256, got K={K}"
+        tensors = (*float_tensors, *(t for t in (cu_seqlens, chunk_indices) if t is not None))
+        if any(t.device.type != "npu" or t.device != k.device for t in tensors):
+            return False, "GDN-2 Ascend bwd intra requires tensors on the same NPU device"
+        supported = (torch.float16, torch.bfloat16, torch.float32)
+        if any(t.dtype not in supported for t in float_tensors):
+            return False, "GDN-2 Ascend bwd intra received an unsupported dtype"
+        index_tensors = tuple(t for t in (cu_seqlens, chunk_indices) if t is not None)
+        if any(t.dtype not in (torch.int32, torch.int64) for t in index_tensors):
+            return False, "GDN-2 Ascend bwd intra requires int32 or int64 sequence indices"
+        return True, None
+
+    def chunk_gdn2_bwd_intra(self, *args, **kwargs):
+        from fla.ops.gdn2.backends.triton_ascend.chunk_intra import chunk_gdn2_bwd_intra_npu
+        return chunk_gdn2_bwd_intra_npu(*args, **kwargs)
+
     def chunk_gdn2_bwd_wy_dqkg_fused_verifier(
         self,
         q: torch.Tensor,
