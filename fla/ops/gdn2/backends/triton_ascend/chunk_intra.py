@@ -20,7 +20,7 @@ from fla.utils import ascend_compile_kwargs, input_guard
 from fla.utils.ascend_ub_manager import compute_row_tile_block_size, get_npu_properties, iter_axis_launch_chunks
 
 _BC = 16
-_LEAF_SIZE = 4
+_LEAF_SIZE = 2
 _DIAG_MEM_MULT = 20.0
 _INTER_MEM_MULT = 18.0
 _SAFETY_MARGIN = 0.80
