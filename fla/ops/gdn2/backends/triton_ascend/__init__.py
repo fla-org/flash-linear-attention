@@ -54,7 +54,7 @@ class TritonAscendGDN2Backend(BaseBackend):
         if BK > _MAX_FWD_INTRA_BK:
             return False, (
                 f"GDN-2 Ascend intra requires next_power_of_2(K) <= {_MAX_FWD_INTRA_BK} "
-                f"to match the public K <= 256 contract, got K={K} (BK={BK})"
+                f"for UB capacity, got K={K} (BK={BK})"
             )
         float_tensors = (q, k, v, gk, b, w_gate)
         tensors = (*float_tensors, *(t for t in (cu_seqlens, chunk_indices) if t is not None))

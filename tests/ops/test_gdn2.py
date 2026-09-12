@@ -570,7 +570,7 @@ def test_chunk_npu_verifier(name, tensor_names, case, dtype, reason):
 
 @pytest.mark.skipif(not IS_NPU, reason='Ascend verifier checks require NPU')
 def test_chunk_npu_fwd_verifier_rejects_oversized_k():
-    """Reject K values that exceed the grouped kernel's single-slab UB bound."""
+    """Reject K values that exceed the public GDN-2 contract."""
     from fla.ops.gdn2.backends.triton_ascend import TritonAscendGDN2Backend
 
     x = torch.zeros(1, 1, 1, 257, dtype=torch.float16, device=device)
