@@ -168,11 +168,13 @@ def chunk_local_cumsum_scalar_kernel_npu(
                 tl.load(chunk_indices + i_t * 2).to(tl.int64),
                 tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64),
             )
+            is_valid = i_n >= 0
+            i_n = tl.maximum(i_n, 0)
             bos, eos = (
                 tl.load(cu_seqlens + i_n).to(tl.int64),
                 tl.load(cu_seqlens + i_n + 1).to(tl.int64),
             )
-            T = eos - bos
+            T = tl.where(is_valid, eos - bos, 0)
         else:
             bos = tl.cast(i_b, tl.int64) * T
             eos = bos + T
@@ -219,6 +221,8 @@ def chunk_local_cumsum_vector_kernel_npu(
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        if i_n < 0:
+            return
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
     else:

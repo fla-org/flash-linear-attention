@@ -368,8 +368,10 @@ def chunk_gla_fwd_kernel_o_npu(
         if IS_VARLEN:
             i_n = tl.load(chunk_indices + global_t * 2).to(tl.int32)
             i_t = tl.load(chunk_indices + global_t * 2 + 1).to(tl.int32)
+            is_valid = i_n >= 0
+            i_n = tl.maximum(i_n, 0)
             bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
-            T_cur = (eos - bos).to(tl.int32)
+            T_cur = tl.where(is_valid, eos - bos, 0).to(tl.int32)
             i_tg = global_t.to(tl.int64)
         else:
             NT = tl.cdiv(T, BT)
@@ -431,8 +433,6 @@ def chunk_gla_fwd_o_gk_npu(
     chunk_indices: torch.LongTensor | None = None,
     use_graph: bool = False,
 ):
-    if use_graph:
-        raise NotImplementedError("use_graph is not supported on the Ascend NPU backend")
     B, T, H, K, HV, V = *q.shape, v.shape[2], v.shape[-1]
     BT = chunk_size
 
