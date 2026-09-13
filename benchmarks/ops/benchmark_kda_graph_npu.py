@@ -135,21 +135,26 @@ def main():
             max_num_seqs=args.num_seqs,
         )
 
-    graph_inputs = make_inputs(0, args.tokens, args.heads, args.dim, args.num_seqs, dtype, args.device)
+    capture_inputs = make_inputs(0, args.tokens, args.heads, args.dim, args.num_seqs, dtype, args.device)
+    capture_cu_seqlens = cu_seqlens.clone()
     graphed_step = torch.npu.make_graphed_callables(
         graph_step,
-        graph_inputs + (cu_seqlens,),
+        capture_inputs + (capture_cu_seqlens,),
         allow_unused_input=True,
     )
+    graph_inputs = make_inputs(0, args.tokens, args.heads, args.dim, args.num_seqs, dtype, args.device)
+    graph_cu_seqlens = cu_seqlens.clone()
+    assert all(captured.data_ptr() != live.data_ptr() for captured, live in zip(capture_inputs, graph_inputs))
+    assert capture_cu_seqlens.data_ptr() != graph_cu_seqlens.data_ptr()
     eager_inputs = make_inputs(0, args.tokens, args.heads, args.dim, args.num_seqs, dtype, args.device)
 
     eager_result = run_once(eager_step, eager_inputs, cu_seqlens, do, dht)
-    graph_result = run_once(graphed_step, graph_inputs, cu_seqlens, do, dht)
+    graph_result = run_once(graphed_step, graph_inputs, graph_cu_seqlens, do, dht)
     for actual, reference in zip(graph_result, eager_result):
         torch.testing.assert_close(actual, reference, rtol=2e-3, atol=2e-3)
 
     eager = measure(eager_step, eager_inputs, cu_seqlens, do, dht, args.warmup, args.iterations)
-    graph = measure(graphed_step, graph_inputs, cu_seqlens, do, dht, args.warmup, args.iterations)
+    graph = measure(graphed_step, graph_inputs, graph_cu_seqlens, do, dht, args.warmup, args.iterations)
     result = {
         "config": {
             "tokens": args.tokens,
