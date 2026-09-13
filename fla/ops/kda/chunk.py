@@ -322,7 +322,8 @@ def chunk_kda(
             - ``cp_context.pre_num_ranks_dev``/``post_num_ranks_dev``, persistent int32
               device scalars refreshed in place before each replay.
 
-            ``disable_recompute=True`` is not supported. Default: ``False``.
+            Ascend currently requires flattened variable-length inputs and does not support
+            context parallelism in graph mode. Default: ``False``.
         max_num_seqs (Optional[int]):
             Static upper bound of the sequence count used together with ``use_graph``.
             Defaults to ``cu_seqlens.shape[0] - 1``. Default: ``None``.
@@ -415,12 +416,6 @@ def chunk_kda(
             raise NotImplementedError("Ascend KDA graph mode does not currently support context parallelism.")
         if cu_seqlens is None:
             raise NotImplementedError("Ascend KDA graph mode currently requires flattened variable-length inputs.")
-        if use_gate_in_kernel:
-            raise NotImplementedError("Ascend KDA graph mode does not currently support in-kernel gate activation.")
-        if disable_recompute:
-            raise NotImplementedError("Ascend KDA graph mode does not currently support `disable_recompute=True`.")
-        if return_intermediate_states:
-            raise NotImplementedError("Ascend KDA graph mode does not currently support returning intermediate states.")
 
     if cp_context is not None:
         assert initial_state is None, "Initial state is not supported for CP"

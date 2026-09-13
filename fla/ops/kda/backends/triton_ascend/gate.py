@@ -287,6 +287,7 @@ def kda_gate_chunk_cumsum_vector_kernel_npu(
     HAS_SCALE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     USE_LOWER_BOUND: tl.constexpr,
+    USE_GRAPH: tl.constexpr,
     NT_OFFSET: tl.constexpr,
     BH_OFFSET: tl.constexpr,
 ):
@@ -297,6 +298,8 @@ def kda_gate_chunk_cumsum_vector_kernel_npu(
 
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        if USE_GRAPH and i_n < 0:
+            return
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
     else:
@@ -346,6 +349,7 @@ def _launch_gate_chunk_cumsum(
     BS: int,
     NT: int,
     reverse: bool,
+    use_graph: bool,
 ) -> None:
     bh_total = B * H
     ns = triton.cdiv(S, BS)
@@ -364,6 +368,7 @@ def _launch_gate_chunk_cumsum(
         BT=BT,
         BS=BS,
         REVERSE=reverse,
+        USE_GRAPH=use_graph,
         num_warps=_NUM_WARPS,
     )
     max_nt = max_grid_axis_chunks(NT, ns * bh_total, max_grid=ASCEND_MAX_GRID_DIM)
@@ -452,7 +457,7 @@ def kda_gate_chunk_cumsum_npu(
     output_dtype: torch.dtype | None = torch.float,
     chunk_indices: torch.LongTensor | None = None,
     lower_bound: float | None = None,
-    **kwargs,
+    use_graph: bool = False,
 ) -> torch.Tensor:
     if cu_seqlens is not None:
         assert g.shape[0] == 1, "Only batch size 1 is supported when cu_seqlens are provided"
@@ -465,7 +470,7 @@ def kda_gate_chunk_cumsum_npu(
     assert chunk_size == 2 ** (chunk_size.bit_length() - 1), "chunk_size must be a power of 2"
 
     BS = _get_chunk_cumsum_bs(BT, S)
-    g_org, o = g, torch.empty_like(g, dtype=output_dtype or g.dtype)
+    g_org, o = g, (torch.zeros_like if use_graph else torch.empty_like)(g, dtype=output_dtype or g.dtype)
     _launch_gate_chunk_cumsum(
         s=g_org,
         A_log=A_log,
@@ -483,6 +488,7 @@ def kda_gate_chunk_cumsum_npu(
         BS=BS,
         NT=NT,
         reverse=False,
+        use_graph=use_graph,
     )
     return o
 

@@ -141,9 +141,6 @@ def test_chunk_kda_npugraph_multi_replay_matches_eager(cu_dtype):
             id="context-parallel",
         ),
         pytest.param({"cu_seqlens": None}, "requires flattened variable-length inputs", id="dense"),
-        pytest.param({"use_gate_in_kernel": True}, "does not currently support in-kernel gate activation", id="gate"),
-        pytest.param({"disable_recompute": True}, "does not currently support `disable_recompute=True`", id="recompute"),
-        pytest.param({"return_intermediate_states": True}, "does not currently support returning intermediate states", id="states"),
     ],
 )
 def test_chunk_kda_npugraph_rejects_unsupported_options(kwargs, message):
