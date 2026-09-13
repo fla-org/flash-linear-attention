@@ -218,6 +218,8 @@ class TritonAscendBackend(BaseBackend):
         target_weight,
         reduction='batchmean',
         accumulate_grad_in_fp32=True,
+        need_dx=True,
+        need_dw=True,
     ):
         from fla.modules.backends.triton_ascend.fused_kl_div import fused_kl_div_forward_npu
         return fused_kl_div_forward_npu(
@@ -227,6 +229,8 @@ class TritonAscendBackend(BaseBackend):
             target_weight=target_weight,
             reduction=reduction,
             accumulate_grad_in_fp32=accumulate_grad_in_fp32,
+            need_dx=need_dx,
+            need_dw=need_dw,
         )
 
     def fused_kl_div_backward(self, do, dx, dw):
