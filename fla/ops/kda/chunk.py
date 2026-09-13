@@ -310,6 +310,8 @@ def chunk_kda(
               are left undefined.
             - ``initial_state`` and the incoming ``dht`` gradient (when used) shaped
               ``[max_num_seqs, ...]``.
+            - the capture sample containing ``NT_max = ceil(T / chunk_size) + max_num_seqs - 1``
+              valid chunks; for example, use sequence lengths ``[1, ..., 1, T-N+1]``.
             - the captured step warmed up eagerly beforehand so that kernel autotuning
               (and, with ``cp_context``, NCCL communicator setup) happens outside the graph.
 

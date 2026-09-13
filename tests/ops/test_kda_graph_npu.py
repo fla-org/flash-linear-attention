@@ -178,9 +178,9 @@ def _active_input_names(case: _GraphCase) -> tuple[str, ...]:
     return tuple(names)
 
 
-def _assert_training_case(case: _GraphCase, offsets: list[int]) -> None:
+def _assert_training_case(case: _GraphCase, offsets: list[int] | tuple[list[int], ...]) -> None:
     sample = _make_case_inputs(case, seed=0)
-    sample_offsets = [index * case.T // case.N for index in range(case.N)] + [case.T]
+    sample_offsets = [*range(case.N), case.T]
     sample_cu = torch.tensor(sample_offsets, dtype=torch.int64, device=device)
 
     def graph_step(q, k, v, g, beta, h0, A_log, dt_bias, cu_seqlens):
@@ -191,47 +191,62 @@ def _assert_training_case(case: _GraphCase, offsets: list[int]) -> None:
         sample + (sample_cu,),
         allow_unused_input=True,
     )
-    inputs = _make_case_inputs(case, seed=1)
-    reference_inputs = tuple(tensor.detach().clone().requires_grad_() for tensor in inputs)
-    cu_seqlens = torch.tensor(offsets, dtype=torch.int64, device=device)
-    generator = torch.Generator(device).manual_seed(2)
-    do = torch.randn(1, case.T, case.HV, case.V, dtype=case.dtype, device=device, generator=generator)
-    state_shape = (case.N, case.HV, case.V, case.K) if case.state_v_first else (case.N, case.HV, case.K, case.V)
-    dht = torch.randn(*state_shape, dtype=torch.float32, device=device, generator=generator)
+    replay_offsets = (offsets,) if isinstance(offsets[0], int) else offsets
+    for replay, current_offsets in enumerate(replay_offsets, start=1):
+        inputs = _make_case_inputs(case, seed=replay)
+        reference_inputs = tuple(tensor.detach().clone().requires_grad_() for tensor in inputs)
+        cu_seqlens = torch.tensor(current_offsets, dtype=torch.int64, device=device)
+        generator = torch.Generator(device).manual_seed(replay + 100)
+        do = torch.randn(1, case.T, case.HV, case.V, dtype=case.dtype, device=device, generator=generator)
+        state_shape = (case.N, case.HV, case.V, case.K) if case.state_v_first else (
+            case.N,
+            case.HV,
+            case.K,
+            case.V,
+        )
+        dht = torch.randn(*state_shape, dtype=torch.float32, device=device, generator=generator)
 
-    o, ht = graphed_step(*inputs, cu_seqlens)
-    ((o * do).sum() + (ht * dht).sum()).backward()
-    torch.npu.synchronize()
+        o, ht = graphed_step(*inputs, cu_seqlens)
+        ((o * do).sum() + (ht * dht).sum()).backward()
+        torch.npu.synchronize()
 
-    actual_t = offsets[-1]
-    cropped_reference_inputs = tuple(
-        tensor[:, :actual_t].detach().clone().requires_grad_() if index < 5 else tensor
-        for index, tensor in enumerate(reference_inputs)
-    )
-    reference_o, reference_ht = _call_case(case, cropped_reference_inputs, cu_seqlens, use_graph=False)
-    ((reference_o * do[:, :actual_t]).sum() + (reference_ht * dht).sum()).backward()
-    torch.npu.synchronize()
+        actual_t = current_offsets[-1]
+        cropped_reference_inputs = tuple(
+            tensor[:, :actual_t].detach().clone().requires_grad_() if index < 5 else tensor
+            for index, tensor in enumerate(reference_inputs)
+        )
+        reference_o, reference_ht = _call_case(case, cropped_reference_inputs, cu_seqlens, use_graph=False)
+        ((reference_o * do[:, :actual_t]).sum() + (reference_ht * dht).sum()).backward()
+        torch.npu.synchronize()
 
-    torch.testing.assert_close(o[:, :actual_t], reference_o, rtol=3e-3, atol=3e-3)
-    torch.testing.assert_close(ht, reference_ht, rtol=3e-3, atol=3e-3)
-    names = ("q", "k", "v", "g", "beta", "h0", "A_log", "dt_bias")
-    active_names = _active_input_names(case)
-    for index, (name, actual, reference) in enumerate(zip(names, inputs, cropped_reference_inputs)):
-        if name not in active_names:
-            assert actual.grad is None
-            continue
-        actual_grad = actual.grad[:, :actual_t] if index < 5 else actual.grad
-        torch.testing.assert_close(actual_grad, reference.grad, rtol=3e-3, atol=3e-3, msg=lambda m: f"{name}: {m}")
-
-    if actual_t < case.T:
-        for name, tensor in zip(("o", "dq", "dk", "dv", "dg", "db"), (o, *(inputs[i].grad for i in range(5)))):
+        torch.testing.assert_close(o[:, :actual_t], reference_o, rtol=3e-3, atol=3e-3)
+        torch.testing.assert_close(ht, reference_ht, rtol=3e-3, atol=3e-3)
+        names = ("q", "k", "v", "g", "beta", "h0", "A_log", "dt_bias")
+        active_names = _active_input_names(case)
+        for index, (name, actual, reference) in enumerate(zip(names, inputs, cropped_reference_inputs)):
+            if name not in active_names:
+                assert actual.grad is None
+                continue
+            actual_grad = actual.grad[:, :actual_t] if index < 5 else actual.grad
+            assert torch.isfinite(actual_grad).all(), f"{current_offsets}::{name} graph gradient is not finite"
+            assert torch.isfinite(reference.grad).all(), f"{current_offsets}::{name} eager gradient is not finite"
             torch.testing.assert_close(
-                tensor[:, actual_t:],
-                torch.zeros_like(tensor[:, actual_t:]),
-                rtol=0,
-                atol=0,
-                msg=lambda m, name=name: f"{name} padding: {m}",
+                actual_grad,
+                reference.grad,
+                rtol=3e-3,
+                atol=3e-3,
+                msg=lambda m: f"{current_offsets}::{name}: {m}",
             )
+
+        if actual_t < case.T:
+            for name, tensor in zip(("o", "dq", "dk", "dv", "dg", "db"), (o, *(inputs[i].grad for i in range(5)))):
+                torch.testing.assert_close(
+                    tensor[:, actual_t:],
+                    torch.zeros_like(tensor[:, actual_t:]),
+                    rtol=0,
+                    atol=0,
+                    msg=lambda m, name=name: f"{name} padding: {m}",
+                )
 
 
 @pytest.mark.parametrize("cu_dtype", [torch.int32, torch.int64])
@@ -321,7 +336,11 @@ def test_chunk_kda_npugraph_multi_replay_matches_eager(cu_dtype):
                 safe_gate=True,
                 state_v_first=True,
             ),
-            [0, 64, 64],
+            (
+                [0, 1, 96],
+                [0, 65, 96],
+                [0, 64, 64],
+            ),
             id="bf16-production-safe-gate-partial",
         ),
         pytest.param(

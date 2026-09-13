@@ -196,7 +196,8 @@ def main():
         args.fused_options,
     )
     capture_inputs = make_inputs(0, *input_args)
-    capture_cu_seqlens = cu_seqlens.clone()
+    capture_offsets = [*range(args.num_seqs), args.tokens]
+    capture_cu_seqlens = torch.tensor(capture_offsets, dtype=torch.long, device=args.device)
     graphed_step = torch.npu.make_graphed_callables(
         graph_step,
         capture_inputs + (capture_cu_seqlens,),
