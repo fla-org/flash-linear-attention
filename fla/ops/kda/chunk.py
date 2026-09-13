@@ -68,11 +68,12 @@ class ChunkKDAFunction(torch.autograd.Function):
             if use_graph:
                 if max_num_seqs is None:
                     max_num_seqs = cu_seqlens.shape[0] - 1
-                assert cu_seqlens.shape[0] - 1 == max_num_seqs, (
-                    f"cu_seqlens must be padded with zero-length tail sequences to exactly "
-                    f"max_num_seqs + 1 entries, got {cu_seqlens.shape[0] - 1} sequences "
-                    f"with max_num_seqs={max_num_seqs}"
-                )
+                if cu_seqlens.shape[0] - 1 != max_num_seqs:
+                    raise ValueError(
+                        f"cu_seqlens must be padded with zero-length tail sequences to exactly "
+                        f"max_num_seqs + 1 entries, got {cu_seqlens.shape[0] - 1} sequences "
+                        f"with max_num_seqs={max_num_seqs}"
+                    )
                 nt_max = (q.shape[1] + chunk_size - 1) // chunk_size + max_num_seqs - 1
                 chunk_indices, chunk_offsets = prepare_chunk_indices_static(cu_seqlens, chunk_size, nt_max)
             else:
@@ -344,6 +345,9 @@ def chunk_kda(
                 - For equal-length sequences: ``NT = ceil(T / chunk_size)``
                 - For variable-length sequences (cu_seqlens): B is always 1 (flattened),
                   NT is the total number of chunks across all sequences.
+                - With ``use_graph=True``, ``NT`` is the static capacity
+                  ``ceil(T / chunk_size) + max_num_seqs - 1``; only the prefix described
+                  by the current ``cu_seqlens`` contains valid intermediate states.
 
     Examples::
         >>> import torch

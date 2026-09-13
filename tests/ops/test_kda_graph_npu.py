@@ -5,7 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""Ascend NPUGraph capture/replay coverage for KDA training."""
+"""Ascend NPUGraph capture/replay coverage for KDA."""
 
 from dataclasses import dataclass
 
@@ -45,6 +45,8 @@ class _GraphCase:
     chunk_size: int = 64
     use_qk_l2norm_in_kernel: bool = False
     use_gate_in_kernel: bool = False
+    use_a_log: bool = True
+    use_dt_bias: bool = True
     use_beta_sigmoid_in_kernel: bool = False
     allow_neg_eigval: bool = False
     safe_gate: bool = False
@@ -158,8 +160,8 @@ def _call_case(case: _GraphCase, inputs: tuple[torch.Tensor, ...], cu_seqlens: t
         cu_seqlens=cu_seqlens,
         use_graph=use_graph,
         max_num_seqs=case.N,
-        A_log=A_log if case.use_gate_in_kernel else None,
-        dt_bias=dt_bias if case.use_gate_in_kernel else None,
+        A_log=A_log if case.use_gate_in_kernel and case.use_a_log else None,
+        dt_bias=dt_bias if case.use_gate_in_kernel and case.use_dt_bias else None,
         chunk_size=case.chunk_size,
     )
 
@@ -169,7 +171,10 @@ def _active_input_names(case: _GraphCase) -> tuple[str, ...]:
     if case.use_initial_state:
         names.append("h0")
     if case.use_gate_in_kernel:
-        names.extend(("A_log", "dt_bias"))
+        if case.use_a_log:
+            names.append("A_log")
+        if case.use_dt_bias:
+            names.append("dt_bias")
     return tuple(names)
 
 
@@ -319,6 +324,21 @@ def test_chunk_kda_npugraph_multi_replay_matches_eager(cu_dtype):
             [0, 64, 64],
             id="bf16-production-safe-gate-partial",
         ),
+        pytest.param(
+            _GraphCase(
+                T=64,
+                H=1,
+                HV=1,
+                V=32,
+                use_gate_in_kernel=True,
+                use_a_log=False,
+                use_dt_bias=False,
+                use_beta_sigmoid_in_kernel=True,
+                safe_gate=True,
+            ),
+            [0, 32, 64],
+            id="fp16-safe-gate-without-a-or-bias",
+        ),
     ],
 )
 def test_chunk_kda_npugraph_option_matrix_matches_eager(case, offsets):
@@ -389,6 +409,20 @@ def test_chunk_kda_npugraph_intermediate_states_match_eager():
     torch.testing.assert_close(ht, reference_ht, rtol=3e-3, atol=3e-3)
     torch.testing.assert_close(h[:, :reference_h.shape[1]], reference_h, rtol=3e-3, atol=3e-3)
     assert h.shape[1] == (case.T + case.chunk_size - 1) // case.chunk_size + case.N - 1
+
+
+def test_chunk_kda_npugraph_rejects_mismatched_sequence_capacity():
+    inputs = _make_inputs(seed=0)
+    cu_seqlens = torch.tensor([0, 64, T], dtype=torch.int64, device=device)
+
+    with pytest.raises(ValueError, match=r"max_num_seqs \+ 1 entries"):
+        chunk_kda(
+            *(inputs[name] for name in ("q", "k", "v", "g", "beta")),
+            initial_state=inputs["h0"],
+            cu_seqlens=cu_seqlens,
+            use_graph=True,
+            max_num_seqs=N + 1,
+        )
 
 
 @pytest.mark.parametrize(
