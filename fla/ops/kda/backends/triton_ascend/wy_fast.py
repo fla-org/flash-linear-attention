@@ -262,10 +262,10 @@ def recompute_w_u_fwd_kda_npu(
     beta, beta_t_contig = _hv_t_npu_arg(beta, HV)
     gk, gk_t_contig = _hv_t_npu_arg(gk, HV)
 
-    w = k.new_empty(B, T, HV, K)
-    u = torch.empty_like(v)
-    qg = k.new_empty(B, T, HV, K) if store_qg else None
-    kg = k.new_empty(B, T, HV, K)
+    w = (k.new_zeros if use_graph else k.new_empty)(B, T, HV, K)
+    u = (torch.zeros_like if use_graph else torch.empty_like)(v)
+    qg = (k.new_zeros if use_graph else k.new_empty)(B, T, HV, K) if store_qg else None
+    kg = (k.new_zeros if use_graph else k.new_empty)(B, T, HV, K)
 
     _launch_wy_core_grid(
         recompute_w_u_fwd_kda_kernel_npu,

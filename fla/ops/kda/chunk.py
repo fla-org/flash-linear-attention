@@ -18,7 +18,7 @@ from fla.ops.cp import FLACPContext
 from fla.ops.kda.chunk_bwd import chunk_kda_bwd
 from fla.ops.kda.chunk_fwd import chunk_kda_fwd
 from fla.ops.utils.index import prepare_chunk_indices, prepare_chunk_indices_static
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
+from fla.utils import IS_NPU, autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
 class ChunkKDAFunction(torch.autograd.Function):
@@ -409,6 +409,18 @@ def chunk_kda(
             stacklevel=2,
         )
         state_v_first = kwargs.pop('transpose_state_layout')
+
+    if use_graph and IS_NPU:
+        if cp_context is not None:
+            raise NotImplementedError("Ascend KDA graph mode does not currently support context parallelism.")
+        if cu_seqlens is None:
+            raise NotImplementedError("Ascend KDA graph mode currently requires flattened variable-length inputs.")
+        if use_gate_in_kernel:
+            raise NotImplementedError("Ascend KDA graph mode does not currently support in-kernel gate activation.")
+        if disable_recompute:
+            raise NotImplementedError("Ascend KDA graph mode does not currently support `disable_recompute=True`.")
+        if return_intermediate_states:
+            raise NotImplementedError("Ascend KDA graph mode does not currently support returning intermediate states.")
 
     if cp_context is not None:
         assert initial_state is None, "Initial state is not supported for CP"

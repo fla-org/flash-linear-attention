@@ -41,22 +41,25 @@ def percentile(values, fraction):
     return ordered[min(math.ceil(fraction * len(ordered)) - 1, len(ordered) - 1)]
 
 
+def run_once(step, inputs, cu_seqlens, do, dht):
+    for tensor in inputs:
+        if tensor.grad is not None:
+            tensor.grad.zero_()
+    o, ht = step(*inputs, cu_seqlens)
+    ((o * do).sum() + (ht * dht).sum()).backward()
+    torch.npu.synchronize()
+    return (o, ht, *(tensor.grad for tensor in inputs))
+
+
 def measure(step, inputs, cu_seqlens, do, dht, warmup, iterations):
-    def run_once():
-        for tensor in inputs:
-            if tensor.grad is not None:
-                tensor.grad.zero_()
-        o, ht = step(*inputs, cu_seqlens)
-        ((o * do).sum() + (ht * dht).sum()).backward()
-        torch.npu.synchronize()
 
     for _ in range(warmup):
-        run_once()
+        run_once(step, inputs, cu_seqlens, do, dht)
 
     samples = []
     for _ in range(iterations):
         start = time.perf_counter_ns()
-        run_once()
+        run_once(step, inputs, cu_seqlens, do, dht)
         samples.append((time.perf_counter_ns() - start) / 1e6)
     return {
         "p50_ms": statistics.median(samples),
@@ -139,6 +142,11 @@ def main():
         allow_unused_input=True,
     )
     eager_inputs = make_inputs(0, args.tokens, args.heads, args.dim, args.num_seqs, dtype, args.device)
+
+    eager_result = run_once(eager_step, eager_inputs, cu_seqlens, do, dht)
+    graph_result = run_once(graphed_step, graph_inputs, cu_seqlens, do, dht)
+    for actual, reference in zip(graph_result, eager_result):
+        torch.testing.assert_close(actual, reference, rtol=2e-3, atol=2e-3)
 
     eager = measure(eager_step, eager_inputs, cu_seqlens, do, dht, args.warmup, args.iterations)
     graph = measure(graphed_step, graph_inputs, cu_seqlens, do, dht, args.warmup, args.iterations)

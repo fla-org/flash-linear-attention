@@ -619,6 +619,7 @@ def chunk_kda_fwd_intra_npu(
             cu_seqlens=cu_seqlens,
             chunk_size=BT,
             sub_chunk_size=BC,
+            use_graph=use_graph,
         )
 
     # Invert diagonal Akkd blocks first; inter then only merges off-diagonals.
@@ -680,6 +681,7 @@ def chunk_kda_fwd_intra_npu(
         gk=gk,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
+        use_graph=use_graph,
     )
     return w, u, qg, kg, Aqk, Akk
 

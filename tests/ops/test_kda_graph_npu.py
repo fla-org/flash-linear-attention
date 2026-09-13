@@ -11,13 +11,16 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from fla.ops.cp import FLACPContext
 from fla.ops.kda import chunk_kda
 from fla.utils import IS_NPU, device
 
-pytestmark = pytest.mark.skipif(
-    not IS_NPU or not hasattr(torch, "npu") or not hasattr(torch.npu, "make_graphed_callables"),
-    reason="KDA NPUGraph tests require an Ascend NPU with make_graphed_callables",
-)
+pytestmark = pytest.mark.skipif(not IS_NPU, reason="KDA NPUGraph tests require an Ascend NPU")
+
+if IS_NPU:
+    assert hasattr(torch, "npu") and hasattr(torch.npu, "make_graphed_callables"), (
+        "The Ascend graph test job requires torch.npu.make_graphed_callables"
+    )
 
 T = 128
 H = 2
@@ -127,3 +130,32 @@ def test_chunk_kda_npugraph_multi_replay_matches_eager(cu_dtype):
                     atol=0,
                     msg=lambda m, name=name: f"{tag}::{name} padding: {m}",
                 )
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        pytest.param(
+            {"cp_context": FLACPContext()},
+            "does not currently support context parallelism",
+            id="context-parallel",
+        ),
+        pytest.param({"cu_seqlens": None}, "requires flattened variable-length inputs", id="dense"),
+        pytest.param({"use_gate_in_kernel": True}, "does not currently support in-kernel gate activation", id="gate"),
+        pytest.param({"disable_recompute": True}, "does not currently support `disable_recompute=True`", id="recompute"),
+        pytest.param({"return_intermediate_states": True}, "does not currently support returning intermediate states", id="states"),
+    ],
+)
+def test_chunk_kda_npugraph_rejects_unsupported_options(kwargs, message):
+    inputs = _make_inputs(seed=0)
+    cu_seqlens = torch.tensor([0, 64, T], dtype=torch.int64, device=device)
+    kwargs.setdefault("cu_seqlens", cu_seqlens)
+
+    with pytest.raises(NotImplementedError, match=message):
+        chunk_kda(
+            *(inputs[name] for name in ("q", "k", "v", "g", "beta")),
+            initial_state=inputs["h0"],
+            use_graph=True,
+            max_num_seqs=N,
+            **kwargs,
+        )

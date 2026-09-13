@@ -72,6 +72,9 @@ def chunk_kda_fwd_kernel_intra_token_parallel_npu(
     i_hg = tl.program_id(1) + HG_OFFSET
 
     if IS_VARLEN:
+        actual_t = tl.load(cu_seqlens + N).to(tl.int64)
+        if tl.cast(i_tg, tl.int64) >= actual_t:
+            return
         i_n = 0
         left, right = 0, N
 
@@ -150,6 +153,7 @@ def chunk_kda_fwd_intra_token_parallel_npu(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     sub_chunk_size: int = 16,
+    use_graph: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Token-parallel NPU implementation: each token gets its own thread block.
