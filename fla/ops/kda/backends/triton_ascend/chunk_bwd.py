@@ -16,7 +16,7 @@ from triton.runtime import driver
 
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 from fla.ops.utils.op import exp2
-from fla.utils import ascend_compile_kwargs, input_guard
+from fla.utils import ascend_compile_kwargs, input_guard, npu_leftover_mask, npu_require_last_dims
 from fla.utils.ascend_ub_manager import (
     ASCEND_MAX_GRID_DIM,
     compute_row_tile_block_size,
@@ -66,9 +66,11 @@ def chunk_kda_bwd_kernel_dAv_npu(
     T,
     HV: tl.constexpr,
     V: tl.constexpr,
+    VP: tl.constexpr,
     BT: tl.constexpr,
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    MASK_LEFTOVER: tl.constexpr,
     NT_OFFSET: tl.constexpr,
     BH_OFFSET: tl.constexpr,
 ):
@@ -85,7 +87,7 @@ def chunk_kda_bwd_kernel_dAv_npu(
 
     v += (bos * HV + i_hv) * V
     do += (bos * HV + i_hv) * V
-    dv += (bos * HV + i_hv) * V
+    dv += (bos * HV + i_hv) * VP
     dA += (bos * HV + i_hv) * BT
 
     p_A = tl.make_block_ptr(A + (bos * HV + i_hv) * BT, (BT, T), (1, HV * BT), (0, i_t * BT), (BT, BT), (0, 1))
@@ -98,9 +100,15 @@ def chunk_kda_bwd_kernel_dAv_npu(
     for i_v in range(tl.cdiv(V, BV)):
         p_v = tl.make_block_ptr(v, (V, T), (1, HV * V), (i_v * BV, i_t * BT), (BV, BT), (0, 1))
         p_do = tl.make_block_ptr(do, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-        p_dv = tl.make_block_ptr(dv, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+        p_dv = tl.make_block_ptr(dv, (T, VP), (HV * VP, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
         b_v = tl.load(p_v, boundary_check=(0, 1))
         b_do = tl.load(p_do, boundary_check=(0, 1))
+        if MASK_LEFTOVER:
+            o_v = i_v * BV + tl.arange(0, BV)
+            m_tv = m_t[:, None] & (o_v < V)[None, :]
+            m_vt = (o_v < V)[:, None] & m_t[None, :]
+            b_do = tl.where(m_tv, b_do, 0)
+            b_v = tl.where(m_vt, b_v, 0)
         b_do_c = b_do + 0.0
         b_dA = tl.dot(b_do, b_v, b_dA, allow_tf32=False)
         b_A_i = tl.load(p_A, boundary_check=(0, 1))
@@ -129,14 +137,20 @@ def chunk_kda_bwd_dAv_npu(
     if use_graph:
         raise NotImplementedError("use_graph is not supported on the Ascend NPU backend")
     B, T, HV, V = k.shape[0], k.shape[1], do.shape[2], do.shape[-1]
+    K = k.shape[-1]
+    npu_require_last_dims(K, V, labels=('K', 'V'), dtypes=(k.dtype, v.dtype))
+
     BT = chunk_size
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     BV = _get_dAv_bv(BT, V)
+    mask_leftover = npu_leftover_mask(
+        T=T, BT=BT, V=V, BV=BV, varlen=cu_seqlens is not None,
+    )
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
-    dA = v.new_empty(B, T, HV, BT, dtype=torch.float)
-    dv = torch.zeros_like(do)
+    dA = v.new_zeros(B, T, HV, BT, dtype=torch.float) if mask_leftover else v.new_empty(B, T, HV, BT, dtype=torch.float)
+    dv = do.new_zeros(B, T, HV, V)
 
     _launch_dAv_2d_kernel(
         chunk_kda_bwd_kernel_dAv_npu,
@@ -154,9 +168,11 @@ def chunk_kda_bwd_dAv_npu(
             T=T,
             HV=HV,
             V=V,
+            VP=V,
             BT=BT,
             BV=BV,
             IS_VARLEN=cu_seqlens is not None,
+            MASK_LEFTOVER=mask_leftover,
             NT_OFFSET=0,
             BH_OFFSET=0,
         ),
@@ -259,10 +275,12 @@ def chunk_kda_bwd_kernel_wy_v_part_npu(
     num_core,
     HV: tl.constexpr,
     V: tl.constexpr,
+    VP: tl.constexpr,
     BT: tl.constexpr,
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     G_T_CONTIG: tl.constexpr,
+    MASK_LEFTOVER: tl.constexpr,
 ):
     core_id = tl.program_id(0)
     T_seq = T
@@ -303,7 +321,7 @@ def chunk_kda_bwd_kernel_wy_v_part_npu(
             a_stride_t = HV * BT
             beta_stride = HV
 
-        dv2_ptr = dv2 + (bos * HV + i_hv) * V
+        dv2_ptr = dv2 + (bos * HV + i_hv) * VP
         dA_ptr = dA_acc + (bos * HV + i_hv) * BT
         db_ptr = db_acc + bos * HV + i_hv
 
@@ -311,6 +329,10 @@ def chunk_kda_bwd_kernel_wy_v_part_npu(
         p_beta = tl.make_block_ptr(beta_ptr, (T,), (beta_stride,), (i_t * BT,), (BT,), (0,))
         b_A = tl.load(p_A, boundary_check=(0, 1))
         b_beta = tl.load(p_beta, boundary_check=(0,))
+        o_t = i_t * BT + tl.arange(0, BT)
+        m_t = o_t < T
+        if MASK_LEFTOVER:
+            b_beta = tl.where(m_t, b_beta, 0)
 
         b_dA = tl.zeros([BT, BT], dtype=tl.float32)
         b_db = tl.zeros([BT], dtype=tl.float32)
@@ -319,12 +341,17 @@ def chunk_kda_bwd_kernel_wy_v_part_npu(
             p_v = tl.make_block_ptr(v_ptr, (T, V), (v_stride_t, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
             b_dv = tl.load(p_dv, boundary_check=(0, 1))
             b_v = tl.load(p_v, boundary_check=(0, 1))
+            if MASK_LEFTOVER:
+                o_v = i_v * BV + tl.arange(0, BV)
+                m_tv = m_t[:, None] & (o_v < V)[None, :]
+                b_dv = tl.where(m_tv, b_dv, 0)
+                b_v = tl.where(m_tv, b_v, 0)
             b_dA = tl.dot(b_dv, tl.trans(b_v), b_dA, allow_tf32=False)
             # Ascend tl.dot clobbers lhs; copy A before every V-slab use.
             b_A_c = b_A + 0.0
             b_dvb = tl.dot(b_A_c, b_dv, allow_tf32=False)
             b_db += tl.sum(b_dvb * b_v, 1)
-            p_dv2 = tl.make_block_ptr(dv2_ptr, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+            p_dv2 = tl.make_block_ptr(dv2_ptr, (T, VP), (HV * VP, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
             tl.store(p_dv2, (b_dvb * b_beta[:, None]).to(p_dv2.dtype.element_ty), boundary_check=(0, 1))
 
         p_dA = tl.make_block_ptr(dA_ptr, (T, BT), (HV * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
@@ -356,6 +383,7 @@ def chunk_kda_bwd_kernel_wy_k_part_npu(
     H: tl.constexpr,
     HV: tl.constexpr,
     K: tl.constexpr,
+    KP: tl.constexpr,
     V: tl.constexpr,
     BT: tl.constexpr,
     BC: tl.constexpr,
@@ -363,6 +391,9 @@ def chunk_kda_bwd_kernel_wy_k_part_npu(
     BV: tl.constexpr,
     STATE_V_FIRST: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    MASK_LEFTOVER: tl.constexpr,
+    KS: tl.constexpr,
+    VS: tl.constexpr,
     K_OFFSET: tl.constexpr,
 ):
     i_k = K_OFFSET
@@ -387,12 +418,12 @@ def chunk_kda_bwd_kernel_wy_k_part_npu(
         k_ptr = k + (bos * H + i_h) * K
         v_new_ptr = v_new + (bos * HV + i_hv) * V
         g_ptr = g + (bos * HV + i_hv) * K
-        h_ptr = h + (i_tg * HV + i_hv) * K * V
+        h_ptr = h + (i_tg * HV + i_hv) * KS * VS
         do_ptr = do + (bos * HV + i_hv) * V
-        dh_ptr = dh + (i_tg * HV + i_hv) * K * V
-        dq_ptr = dq + (bos * HV + i_hv) * K
-        dk_ptr = dk + (bos * HV + i_hv) * K
-        dg_ptr = dg + (bos * HV + i_hv) * K
+        dh_ptr = dh + (i_tg * HV + i_hv) * KS * VS
+        dq_ptr = dq + (bos * HV + i_hv) * KP
+        dk_ptr = dk + (bos * HV + i_hv) * KP
+        dg_ptr = dg + (bos * HV + i_hv) * KP
 
         o_k = i_k * BK + tl.arange(0, BK)
         m_k = o_k < K
@@ -405,14 +436,27 @@ def chunk_kda_bwd_kernel_wy_k_part_npu(
         b_dgk = tl.zeros([BK], dtype=tl.float32)
 
         for i_v in range(tl.cdiv(V, BV)):
+            o_v = i_v * BV + tl.arange(0, BV)
             if STATE_V_FIRST:
-                p_h = tl.make_block_ptr(h_ptr, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
-                p_dh = tl.make_block_ptr(dh_ptr, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
+                p_h = tl.make_block_ptr(h_ptr, (VS, KS), (KS, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
+                p_dh = tl.make_block_ptr(dh_ptr, (VS, KS), (KS, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
             else:
-                p_h = tl.make_block_ptr(h_ptr, (V, K), (1, V), (i_v * BV, i_k * BK), (BV, BK), (0, 1))
-                p_dh = tl.make_block_ptr(dh_ptr, (V, K), (1, V), (i_v * BV, i_k * BK), (BV, BK), (0, 1))
+                p_h = tl.make_block_ptr(h_ptr, (KS, VS), (VS, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
+                p_dh = tl.make_block_ptr(dh_ptr, (KS, VS), (VS, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
             b_h = tl.load(p_h, boundary_check=(0, 1))
             b_dh = tl.load(p_dh, boundary_check=(0, 1))
+            if STATE_V_FIRST:
+                if MASK_LEFTOVER:
+                    m_h = (o_v[:, None] < V) & m_k[None, :]
+                    b_h = tl.where(m_h, b_h, 0)
+                    b_dh = tl.where(m_h, b_dh, 0)
+            else:
+                if MASK_LEFTOVER:
+                    m_h = m_k[:, None] & (o_v < V)[None, :]
+                    b_h = tl.where(m_h, b_h, 0)
+                    b_dh = tl.where(m_h, b_dh, 0)
+                b_h = tl.trans(b_h + 0.0)
+                b_dh = tl.trans(b_dh + 0.0)
             b_dgk += tl.sum(b_h * b_dh, axis=0)
 
         b_dgk *= exp2(b_gn)
@@ -421,26 +465,44 @@ def chunk_kda_bwd_kernel_wy_k_part_npu(
         for s in range(n_sub):
             i_tc_s = i_t * BT + s * BC
             m_s = (i_tc_s + o_i) < T
+            m_sk = m_s[:, None] & m_k[None, :]
 
             p_k = tl.make_block_ptr(k_ptr, (T, K), (H * K, 1), (i_tc_s, i_k * BK), (BC, BK), (1, 0))
             p_g = tl.make_block_ptr(g_ptr, (T, K), (HV * K, 1), (i_tc_s, i_k * BK), (BC, BK), (1, 0))
             b_k = tl.load(p_k, boundary_check=(0, 1))
             b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
+            if MASK_LEFTOVER:
+                b_k = tl.where(m_sk, b_k, 0)
+                b_g = tl.where(m_sk, b_g, 0)
 
             b_dk = tl.zeros([BC, BK], dtype=tl.float32)
             for i_v in range(tl.cdiv(V, BV)):
+                o_v = i_v * BV + tl.arange(0, BV)
                 p_v_new = tl.make_block_ptr(v_new_ptr, (T, V), (HV * V, 1), (i_tc_s, i_v * BV), (BC, BV), (1, 0))
                 if STATE_V_FIRST:
-                    p_dh = tl.make_block_ptr(dh_ptr, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
+                    p_dh = tl.make_block_ptr(dh_ptr, (VS, KS), (KS, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
                 else:
-                    p_dh = tl.make_block_ptr(dh_ptr, (V, K), (1, V), (i_v * BV, i_k * BK), (BV, BK), (0, 1))
+                    p_dh = tl.make_block_ptr(dh_ptr, (KS, VS), (VS, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
                 b_v_new = tl.load(p_v_new, boundary_check=(0, 1))
                 b_dh = tl.load(p_dh, boundary_check=(0, 1))
+                if MASK_LEFTOVER:
+                    b_v_new = tl.where(m_s[:, None] & (o_v < V)[None, :], b_v_new, 0)
+                if STATE_V_FIRST:
+                    if MASK_LEFTOVER:
+                        b_dh = tl.where((o_v[:, None] < V) & m_k[None, :], b_dh, 0)
+                else:
+                    if MASK_LEFTOVER:
+                        b_dh = tl.where(m_k[:, None] & (o_v < V)[None, :], b_dh, 0)
+                    b_dh = tl.trans(b_dh + 0.0)
                 b_dk = tl.dot(b_v_new, b_dh.to(b_v_new.dtype), b_dk, allow_tf32=False)
 
-            b_dk = b_dk * tl.where(m_s[:, None], exp2(b_gn[None, :] - b_g), 0)
+            if MASK_LEFTOVER:
+                b_g_diff = tl.where(m_sk, b_gn[None, :] - b_g, 0)
+                b_dk = b_dk * tl.where(m_sk, exp2(b_g_diff), 0)
+            else:
+                b_dk = b_dk * exp2(b_gn[None, :] - b_g)
             b_kdk_sum += tl.sum(b_k * b_dk, axis=0)
-            p_dk = tl.make_block_ptr(dk_ptr, (T, K), (HV * K, 1), (i_tc_s, i_k * BK), (BC, BK), (1, 0))
+            p_dk = tl.make_block_ptr(dk_ptr, (T, KP), (HV * KP, 1), (i_tc_s, i_k * BK), (BC, BK), (1, 0))
             tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
 
         b_dgk_total = b_dgk + b_kdk_sum
@@ -452,28 +514,44 @@ def chunk_kda_bwd_kernel_wy_k_part_npu(
             p_k = tl.make_block_ptr(k_ptr, (T, K), (H * K, 1), (i_tc_s, i_k * BK), (BC, BK), (1, 0))
             p_g = tl.make_block_ptr(g_ptr, (T, K), (HV * K, 1), (i_tc_s, i_k * BK), (BC, BK), (1, 0))
             p_q = tl.make_block_ptr(q_ptr, (T, K), (H * K, 1), (i_tc_s, i_k * BK), (BC, BK), (1, 0))
-            p_dk = tl.make_block_ptr(dk_ptr, (T, K), (HV * K, 1), (i_tc_s, i_k * BK), (BC, BK), (1, 0))
+            p_dk = tl.make_block_ptr(dk_ptr, (T, KP), (HV * KP, 1), (i_tc_s, i_k * BK), (BC, BK), (1, 0))
             b_k = tl.load(p_k, boundary_check=(0, 1))
             b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
             b_q = tl.load(p_q, boundary_check=(0, 1))
             b_dk = tl.load(p_dk, boundary_check=(0, 1)).to(tl.float32)
+            m_s = (i_tc_s + o_i) < T
+            m_sk = m_s[:, None] & m_k[None, :]
+            if MASK_LEFTOVER:
+                b_k = tl.where(m_sk, b_k, 0)
+                b_g = tl.where(m_sk, b_g, 0)
+                b_q = tl.where(m_sk, b_q, 0)
 
             b_dq = tl.zeros([BC, BK], dtype=tl.float32)
             for i_v in range(tl.cdiv(V, BV)):
+                o_v = i_v * BV + tl.arange(0, BV)
                 p_do = tl.make_block_ptr(do_ptr, (T, V), (HV * V, 1), (i_tc_s, i_v * BV), (BC, BV), (1, 0))
                 if STATE_V_FIRST:
-                    p_h = tl.make_block_ptr(h_ptr, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
+                    p_h = tl.make_block_ptr(h_ptr, (VS, KS), (KS, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
                 else:
-                    p_h = tl.make_block_ptr(h_ptr, (V, K), (1, V), (i_v * BV, i_k * BK), (BV, BK), (0, 1))
+                    p_h = tl.make_block_ptr(h_ptr, (KS, VS), (VS, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
                 b_do = tl.load(p_do, boundary_check=(0, 1))
                 b_h = tl.load(p_h, boundary_check=(0, 1))
+                if MASK_LEFTOVER:
+                    b_do = tl.where(m_s[:, None] & (o_v < V)[None, :], b_do, 0)
+                if STATE_V_FIRST:
+                    if MASK_LEFTOVER:
+                        b_h = tl.where((o_v[:, None] < V) & m_k[None, :], b_h, 0)
+                else:
+                    if MASK_LEFTOVER:
+                        b_h = tl.where(m_k[:, None] & (o_v < V)[None, :], b_h, 0)
+                    b_h = tl.trans(b_h + 0.0)
                 b_dq = tl.dot(b_do, b_h.to(b_do.dtype), b_dq, allow_tf32=False)
 
-            b_dq = b_dq * exp2(b_g) * scale
+            b_dq = b_dq * (tl.where(m_sk, exp2(b_g), 0) if MASK_LEFTOVER else exp2(b_g)) * scale
             b_dg = b_q * b_dq - b_k * b_dk + m_last_s[:, None] * b_dgk_total
 
-            p_dq = tl.make_block_ptr(dq_ptr, (T, K), (HV * K, 1), (i_tc_s, i_k * BK), (BC, BK), (1, 0))
-            p_dg = tl.make_block_ptr(dg_ptr, (T, K), (HV * K, 1), (i_tc_s, i_k * BK), (BC, BK), (1, 0))
+            p_dq = tl.make_block_ptr(dq_ptr, (T, KP), (HV * KP, 1), (i_tc_s, i_k * BK), (BC, BK), (1, 0))
+            p_dg = tl.make_block_ptr(dg_ptr, (T, KP), (HV * KP, 1), (i_tc_s, i_k * BK), (BC, BK), (1, 0))
             tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), boundary_check=(0, 1))
             tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), boundary_check=(0, 1))
 
@@ -500,6 +578,7 @@ def chunk_kda_bwd_kernel_wy_dw_part_npu(
     H: tl.constexpr,
     HV: tl.constexpr,
     K: tl.constexpr,
+    KP: tl.constexpr,
     V: tl.constexpr,
     BT: tl.constexpr,
     BK: tl.constexpr,
@@ -508,6 +587,9 @@ def chunk_kda_bwd_kernel_wy_dw_part_npu(
     IS_VARLEN: tl.constexpr,
     K_T_CONTIG: tl.constexpr,
     G_T_CONTIG: tl.constexpr,
+    MASK_LEFTOVER: tl.constexpr,
+    KS: tl.constexpr,
+    VS: tl.constexpr,
     K_OFFSET: tl.constexpr,
 ):
     i_k = K_OFFSET
@@ -565,21 +647,35 @@ def chunk_kda_bwd_kernel_wy_dw_part_npu(
             dv_stride_t = HV * V
             beta_stride = HV
 
-        h_ptr = h + (i_tg * HV + i_hv) * K * V
+        h_ptr = h + (i_tg * HV + i_hv) * KS * VS
         dA_ptr = dA_acc + (bos * HV + i_hv) * BT
         db_ptr = db_acc + bos * HV + i_hv
-        dg_ptr = dg + (bos * HV + i_hv) * K
-        dk_ptr = dk + (bos * HV + i_hv) * K
+        dg_ptr = dg + (bos * HV + i_hv) * KP
+        dk_ptr = dk + (bos * HV + i_hv) * KP
 
         b_dw = tl.zeros([BT, BK], dtype=tl.float32)
+        o_t = i_t * BT + tl.arange(0, BT)
+        m_t = o_t < T
+        o_k = i_k * BK + tl.arange(0, BK)
+        m_k = o_k < K
         for i_v in range(tl.cdiv(V, BV)):
+            o_v = i_v * BV + tl.arange(0, BV)
             p_dv = tl.make_block_ptr(dv_ptr, (T, V), (dv_stride_t, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
             if STATE_V_FIRST:
-                p_h = tl.make_block_ptr(h_ptr, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
+                p_h = tl.make_block_ptr(h_ptr, (VS, KS), (KS, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
             else:
-                p_h = tl.make_block_ptr(h_ptr, (V, K), (1, V), (i_v * BV, i_k * BK), (BV, BK), (0, 1))
+                p_h = tl.make_block_ptr(h_ptr, (KS, VS), (VS, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
             b_dv = tl.load(p_dv, boundary_check=(0, 1))
             b_h = tl.load(p_h, boundary_check=(0, 1))
+            if MASK_LEFTOVER:
+                b_dv = tl.where(m_t[:, None] & (o_v < V)[None, :], b_dv, 0)
+            if STATE_V_FIRST:
+                if MASK_LEFTOVER:
+                    b_h = tl.where((o_v[:, None] < V) & m_k[None, :], b_h, 0)
+            else:
+                if MASK_LEFTOVER:
+                    b_h = tl.where(m_k[:, None] & (o_v < V)[None, :], b_h, 0)
+                b_h = tl.trans(b_h + 0.0)
             b_dw = tl.dot(b_dv, b_h.to(b_dv.dtype), b_dw, allow_tf32=False)
 
         p_k = tl.make_block_ptr(k_ptr, (T, K), (k_stride_t, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
@@ -590,7 +686,12 @@ def chunk_kda_bwd_kernel_wy_dw_part_npu(
         b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
         b_beta = tl.load(p_beta, boundary_check=(0,))
         b_A = tl.load(p_A, boundary_check=(0, 1))
-        b_gk_exp = exp2(b_g)
+        m_tk = m_t[:, None] & m_k[None, :]
+        if MASK_LEFTOVER:
+            b_k = tl.where(m_tk, b_k, 0)
+            b_g = tl.where(m_tk, b_g, 0)
+            b_beta = tl.where(m_t, b_beta, 0)
+        b_gk_exp = tl.where(m_tk, exp2(b_g), 0) if MASK_LEFTOVER else exp2(b_g)
         b_kg = b_k * b_gk_exp
         b_gb = b_gk_exp * b_beta[:, None]
         # Match CUDA: downcast dw/kg to A.dtype before dA / dkgb GEMMs.
@@ -609,12 +710,12 @@ def chunk_kda_bwd_kernel_wy_dw_part_npu(
         b_db += tl.sum(b_dkgb * b_kg, 1)
         tl.store(p_db_acc, b_db.to(p_db_acc.dtype.element_ty), boundary_check=(0,))
 
-        p_dk = tl.make_block_ptr(dk_ptr, (T, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+        p_dk = tl.make_block_ptr(dk_ptr, (T, KP), (HV * KP, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         b_dk = tl.load(p_dk, boundary_check=(0, 1)).to(tl.float32)
         b_dk = b_dk + b_dkgb * b_gb
         tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
 
-        p_dg = tl.make_block_ptr(dg_ptr, (T, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+        p_dg = tl.make_block_ptr(dg_ptr, (T, KP), (HV * KP, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         b_dg = tl.load(p_dg, boundary_check=(0, 1)).to(tl.float32)
         b_dg = b_dg + b_kg * b_dkgb * b_beta[:, None]
         tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), boundary_check=(0, 1))
@@ -742,6 +843,8 @@ def chunk_kda_bwd_wy_dqkg_fused_npu(
         raise NotImplementedError("use_graph is not supported on the Ascend NPU backend")
     B, T, H, K, HV, V = *k.shape, v.shape[2], v.shape[-1]
     BT = chunk_size
+    npu_require_last_dims(K, V, labels=('K', 'V'), dtypes=(k.dtype, v.dtype))
+
     if BT % _BC != 0:
         raise ValueError(f'KDA Ascend bwd requires chunk_size % {_BC} == 0, got {BT}')
 
@@ -749,17 +852,29 @@ def chunk_kda_bwd_wy_dqkg_fused_npu(
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
-    dq = g.new_empty(B, T, HV, K, dtype=torch.float)
-    dk = g.new_empty(B, T, HV, K, dtype=torch.float)
-    dv2 = torch.empty_like(v)
-    dg = torch.empty_like(g, dtype=torch.float)
+    BK = _get_bk(K)
+    BV = _get_bv(V)
+    mask_leftover = npu_leftover_mask(
+        T=T, BT=BT, K=K, BK=BK, V=V, BV=BV, varlen=cu_seqlens is not None,
+    )
+    if mask_leftover:
+        BK = min(64, BK)
+        BV = min(64, BV)
+    KS, VS = K, V
+    if mask_leftover:
+        dq = g.new_zeros(B, T, HV, K, dtype=torch.float)
+        dk = g.new_zeros(B, T, HV, K, dtype=torch.float)
+        dv2 = v.new_zeros(B, T, HV, V)
+        dg = g.new_zeros(B, T, HV, K, dtype=torch.float)
+    else:
+        dq = g.new_empty(B, T, HV, K, dtype=torch.float)
+        dk = g.new_empty(B, T, HV, K, dtype=torch.float)
+        dv2 = v.new_empty(B, T, HV, V)
+        dg = g.new_empty(B, T, HV, K, dtype=torch.float)
     db = torch.empty_like(beta, dtype=torch.float)
     dA = torch.empty_like(A, dtype=torch.float)
     dA_acc = torch.zeros(B, T, HV, BT, dtype=torch.float, device=A.device)
     db_acc = torch.zeros(B, T, HV, dtype=torch.float, device=beta.device)
-
-    BK = _get_bk(K)
-    BV = _get_bv(V)
     NK = triton.cdiv(K, BK)
     is_varlen = cu_seqlens is not None
     if chunk_offsets is None:
@@ -790,10 +905,12 @@ def chunk_kda_bwd_wy_dqkg_fused_npu(
         num_core=num_core,
         HV=HV,
         V=V,
+        VP=V,
         BT=BT,
         BV=BV,
         IS_VARLEN=is_varlen,
         G_T_CONTIG=g_t_contig,
+        MASK_LEFTOVER=mask_leftover,
         **ascend_compile_kwargs(),
     )
 
@@ -819,6 +936,7 @@ def chunk_kda_bwd_wy_dqkg_fused_npu(
         H=H,
         HV=HV,
         K=K,
+        KP=K,
         V=V,
         BT=BT,
         BC=32 if BT >= 32 else _BC,
@@ -826,6 +944,9 @@ def chunk_kda_bwd_wy_dqkg_fused_npu(
         BV=BV,
         STATE_V_FIRST=state_v_first,
         IS_VARLEN=is_varlen,
+        MASK_LEFTOVER=mask_leftover,
+        KS=KS,
+        VS=VS,
     )
     for k_off in range(NK):
         k_part_kwargs['K_OFFSET'] = k_off
@@ -854,6 +975,7 @@ def chunk_kda_bwd_wy_dqkg_fused_npu(
         H=H,
         HV=HV,
         K=K,
+        KP=K,
         V=V,
         BT=BT,
         BK=BK,
@@ -862,6 +984,9 @@ def chunk_kda_bwd_wy_dqkg_fused_npu(
         IS_VARLEN=is_varlen,
         K_T_CONTIG=k_t_contig,
         G_T_CONTIG=g_t_contig,
+        MASK_LEFTOVER=mask_leftover,
+        KS=KS,
+        VS=VS,
     )
     for k_off in range(NK):
         dw_kwargs['K_OFFSET'] = k_off
@@ -893,5 +1018,4 @@ def chunk_kda_bwd_wy_dqkg_fused_npu(
         ),
     )
 
-    dv = dv2
-    return dq, dk, dv, db, dg, dA
+    return dq, dk, dv2, db, dg, dA

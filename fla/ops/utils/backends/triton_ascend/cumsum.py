@@ -12,7 +12,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.index import prepare_chunk_indices
-from fla.utils import get_multiprocessor_count, input_guard
+from fla.utils import get_multiprocessor_count, input_guard, npu_leftover_mask, npu_require_last_dims
 from fla.utils.ascend_ub_manager import (
     ASCEND_MAX_GRID_DIM,
     compute_grid_limited_tile_size,
@@ -397,6 +397,8 @@ def chunk_local_cumsum_vector_npu(
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     assert chunk_size == 2**(chunk_size.bit_length()-1), "chunk_size must be a power of 2"
 
+    npu_require_last_dims(S, labels=('S',), dtypes=(g.dtype,))
+
     BS = _get_vector_bs(BT, S, fallback=_FALLBACK_BS_LOCAL)
     BS = compute_grid_limited_tile_size(
         S,
@@ -404,11 +406,18 @@ def chunk_local_cumsum_vector_npu(
         BS,
         max_grid=ASCEND_MAX_GRID_DIM,
     )
+    mask_leftover = npu_leftover_mask(
+        T=T, BT=BT, K=S, BK=BS, varlen=cu_seqlens is not None,
+    )
     # graph 模式下未覆盖行须为 0：kda_gate_bwd 对输出做全量归约，脏行会污染 dA/dbias
-    g_org, g = g, (torch.zeros_like if use_graph else torch.empty_like)(g, dtype=output_dtype or g.dtype)
+    out_dtype = output_dtype or g.dtype
+    if use_graph or mask_leftover:
+        g_out = g.new_zeros(*g.shape[:-1], S, dtype=out_dtype)
+    else:
+        g_out = g.new_empty(*g.shape[:-1], S, dtype=out_dtype)
     _launch_local_cumsum_vector(
-        g_org=g_org,
-        g=g,
+        g_org=g,
+        g=g_out,
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
@@ -421,7 +430,7 @@ def chunk_local_cumsum_vector_npu(
         NT=NT,
         reverse=reverse,
     )
-    return g
+    return g_out
 
 
 @input_guard
@@ -475,6 +484,7 @@ def chunk_global_cumsum_vector_npu(
             "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
         )
     B, T, H, S = s.shape
+    npu_require_last_dims(S, labels=('S',), dtypes=(s.dtype,))
     N = len(cu_seqlens) - 1 if cu_seqlens is not None else B
     BT, BS = _get_global_vector_tile_config(T, S)
     BS = compute_grid_limited_tile_size(
@@ -484,8 +494,14 @@ def chunk_global_cumsum_vector_npu(
         max_grid=ASCEND_MAX_GRID_DIM,
     )
     ns = triton.cdiv(S, BS)
-
-    z = torch.empty_like(s, dtype=output_dtype or s.dtype)
+    mask_leftover = npu_leftover_mask(
+        T=T, BT=BT, K=S, BK=BS, varlen=cu_seqlens is not None,
+    )
+    out_dtype = output_dtype or s.dtype
+    if mask_leftover:
+        z = s.new_zeros(*s.shape[:-1], S, dtype=out_dtype)
+    else:
+        z = s.new_empty(*s.shape[:-1], S, dtype=out_dtype)
     bh_total = N * H
     kernel_kwargs = dict(
         s=s,

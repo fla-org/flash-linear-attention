@@ -14,6 +14,12 @@ import torch
 from fla.ops.backends import BaseBackend
 
 
+def _verify_gdn_npu_kv(k, v, *, extra=()) -> tuple[bool, str | None]:
+    from fla.utils import npu_verify_kv
+
+    return npu_verify_kv(k, v, extra=extra)
+
+
 class TritonAscendGDNBackend(BaseBackend):
     """Ascend NPU backend for GDN gate and WY-representation kernels."""
 
@@ -58,15 +64,7 @@ class TritonAscendGDNBackend(BaseBackend):
         cu_seqlens=None,
         chunk_indices=None,
     ) -> tuple[bool, str | None]:
-        from fla.utils import IS_NPU
-        if not IS_NPU:
-            return False, "not running on NPU"
-        if k.device.type != "npu":
-            return False, "input device is not NPU"
-        if all(t.dtype in (torch.float32, torch.float16, torch.bfloat16)
-               for t in (k, v, beta, A)):
-            return True, None
-        return False, "unsupported dtype for NPU recompute_w_u_fwd"
+        return _verify_gdn_npu_kv(k, v, extra=(beta, A))
 
     def recompute_w_u_fwd(
         self,
@@ -81,15 +79,16 @@ class TritonAscendGDNBackend(BaseBackend):
         from fla.ops.gated_delta_rule.backends.triton_ascend.wy_fast import recompute_w_u_fwd_npu
         return recompute_w_u_fwd_npu(k, v, beta, A, g, cu_seqlens, chunk_indices)
 
-    def prepare_wy_repr_bwd_verifier(self, *args, **kwargs):
-        return True, None
+    def prepare_wy_repr_bwd_verifier(self, k, v, beta, A, dw, du, g=None, **kwargs):
+        return _verify_gdn_npu_kv(k, v, extra=(beta, A, dw, du))
 
     def prepare_wy_repr_bwd(self, *args, **kwargs):
         from fla.ops.gated_delta_rule.backends.triton_ascend.wy_fast import prepare_wy_repr_bwd_npu
         return prepare_wy_repr_bwd_npu(*args, **kwargs)
 
-    def chunk_gated_delta_rule_fwd_intra_verifier(self, *args, **kwargs):
-        return True, None
+    def chunk_gated_delta_rule_fwd_intra_verifier(self, k, v, g=None, beta=None, **kwargs):
+        extra = tuple(t for t in (g, beta) if t is not None)
+        return _verify_gdn_npu_kv(k, v, extra=extra)
 
     def chunk_gated_delta_rule_fwd_intra(self, *args, **kwargs):
         from fla.ops.gated_delta_rule.backends.triton_ascend.chunk_fwd import chunk_gated_delta_rule_fwd_intra_npu

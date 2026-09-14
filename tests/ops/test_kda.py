@@ -1505,3 +1505,80 @@ def test_triton_ascend_backend_routing():
     finally:
         for name in _TRITON_ASCEND_KDA_OPS:
             delattr(backend, name)
+
+
+@pytest.mark.skipif(not IS_NPU, reason='Ascend KDA verifier checks require NPU')
+def test_kda_npu_verifier_rejects_unaligned_k():
+    from fla.ops.kda.backends.triton_ascend import TritonAscendKDABackend
+
+    x = torch.zeros(1, 1, 1, 60, dtype=torch.float16, device=device)
+    accepted, reason = TritonAscendKDABackend().recompute_w_u_fwd_verifier(
+        k=x,
+        v=x,
+        beta=torch.zeros(1, 1, 1, dtype=torch.float16, device=device),
+        A=x,
+    )
+    assert not accepted
+    assert 'K=60' in reason
+
+
+@pytest.mark.skipif(not IS_NPU, reason='Ascend KDA verifier checks require NPU')
+def test_kda_npu_verifier_accepts_byte_aligned_k():
+    from fla.ops.kda.backends.triton_ascend import TritonAscendKDABackend
+
+    x = torch.zeros(1, 1, 1, 48, dtype=torch.float16, device=device)
+    accepted, reason = TritonAscendKDABackend().recompute_w_u_fwd_verifier(
+        k=x,
+        v=x,
+        beta=torch.zeros(1, 1, 1, dtype=torch.float16, device=device),
+        A=x,
+    )
+    assert accepted and reason is None
+
+
+@pytest.mark.skipif(not IS_NPU, reason='Ascend KDA verifier checks require NPU')
+def test_kda_npu_bwd_intra_verifier_accepts_kwargs_without_v():
+    from fla.ops.kda.backends.triton_ascend import TritonAscendKDABackend
+
+    q = torch.zeros(1, 64, 1, 64, dtype=torch.float, device=device)
+    k = torch.zeros(1, 64, 1, 64, dtype=torch.float, device=device)
+    g = torch.zeros(1, 64, 1, 64, dtype=torch.float, device=device)
+    accepted, reason = TritonAscendKDABackend().chunk_kda_bwd_intra_verifier(
+        q=q, k=k, g=g, chunk_size=64, safe_gate=True,
+    )
+    assert accepted and reason is None
+
+
+@pytest.mark.skipif(not IS_NPU, reason='Ascend KDA verifier checks require NPU')
+def test_kda_npu_verifier_positional_recompute_w_u_fwd():
+    """Dispatch may pass (k, v, beta, A, gk). Do not treat beta's head dim as V."""
+    from fla.ops.kda.backends.triton_ascend import TritonAscendKDABackend
+
+    backend = TritonAscendKDABackend()
+    k60 = torch.zeros(1, 1, 1, 60, dtype=torch.float16, device=device)
+    v64 = torch.zeros(1, 1, 1, 64, dtype=torch.float16, device=device)
+    beta = torch.zeros(1, 1, 1, dtype=torch.float16, device=device)
+    A = torch.zeros(1, 1, 1, 64, dtype=torch.float16, device=device)
+    gk60 = torch.zeros(1, 1, 1, 60, dtype=torch.float16, device=device)
+    accepted, reason = backend.recompute_w_u_fwd_verifier(k60, v64, beta, A, gk60)
+    assert not accepted
+    assert 'K=60' in reason
+
+    k48 = torch.zeros(1, 1, 1, 48, dtype=torch.float16, device=device)
+    v48 = torch.zeros(1, 1, 1, 48, dtype=torch.float16, device=device)
+    gk48 = torch.zeros(1, 1, 1, 48, dtype=torch.float16, device=device)
+    accepted, reason = backend.recompute_w_u_fwd_verifier(k48, v48, beta, A, gk48)
+    assert accepted and reason is None
+
+
+@pytest.mark.skipif(not IS_NPU, reason='Ascend KDA verifier checks require NPU')
+def test_kda_npu_token_parallel_verifier_has_no_v():
+    from fla.ops.kda.backends.triton_ascend import TritonAscendKDABackend
+
+    q = torch.zeros(1, 64, 1, 48, dtype=torch.float16, device=device)
+    k = torch.zeros(1, 64, 1, 48, dtype=torch.float16, device=device)
+    gk = torch.zeros(1, 64, 1, 48, dtype=torch.float16, device=device)
+    accepted, reason = TritonAscendKDABackend().chunk_kda_fwd_intra_token_parallel_verifier(
+        q, k, gk, chunk_size=64,
+    )
+    assert accepted and reason is None

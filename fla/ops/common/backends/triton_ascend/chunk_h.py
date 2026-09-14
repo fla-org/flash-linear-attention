@@ -21,7 +21,7 @@ import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_offsets
 from fla.ops.utils.op import exp2
-from fla.utils import input_guard
+from fla.utils import input_guard, npu_leftover_mask, npu_require_last_dims
 from fla.utils.ascend_ub_manager import launch_grid_chunked
 
 # Fixed tiles: avoids autotune picking UB-overflowing configs on Ascend.
@@ -48,6 +48,7 @@ def _chunk_h_tile_size(K: int, V: int) -> tuple[int, int]:
 def chunk_fwd_kernel_h_npu(
     k, v, h, g, g_gamma, gk, gv, h0, ht, T,
     H: tl.constexpr, K: tl.constexpr, V: tl.constexpr,
+    KS: tl.constexpr, VS: tl.constexpr,
     BT: tl.constexpr, BS: tl.constexpr, BK: tl.constexpr, BV: tl.constexpr, NT: tl.constexpr,
     USE_G: tl.constexpr, USE_G_GAMMA: tl.constexpr, USE_GK: tl.constexpr, USE_GV: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr, STORE_FINAL_STATE: tl.constexpr,
@@ -70,12 +71,12 @@ def chunk_fwd_kernel_h_npu(
     o_k = i_k * BK + tl.arange(0, BK)
     o_v = i_v * BV + tl.arange(0, BV)
     if USE_INITIAL_STATE:
-        h0_base = (i_nh * K * V)
+        h0_base = (i_nh * KS * VS)
         if STATE_V_FIRST:
-            p_h0 = h0 + h0_base + o_v[:, None].to(tl.int64) * K + o_k[None, :]
+            p_h0 = h0 + h0_base + o_v[:, None].to(tl.int64) * KS + o_k[None, :]
             b_h = tl.trans(tl.load(p_h0, mask=(o_v[:, None] < V) & (o_k[None, :] < K), other=0.0)).to(tl.float32)
         else:
-            p_h0 = h0 + h0_base + o_k[:, None].to(tl.int64) * V + o_v[None, :]
+            p_h0 = h0 + h0_base + o_k[:, None].to(tl.int64) * VS + o_v[None, :]
             b_h = tl.load(p_h0, mask=(o_k[:, None] < K) & (o_v[None, :] < V), other=0.0).to(tl.float32)
 
     for i_t in tl.static_range(NT):
@@ -86,12 +87,12 @@ def chunk_fwd_kernel_h_npu(
         p_k = k + kv_base + o_k[:, None] + o_t[None, :] * (H * K)
         p_v = v + (bos * H + i_h) * V + o_t[:, None] * (H * V) + o_v[None, :]
 
-        o_h = ((boh + i_s) * H + i_h) * K * V
+        o_h = ((boh + i_s) * H + i_h) * KS * VS
         if STATE_V_FIRST:
-            p_h = h + o_h + o_v[:, None].to(tl.int64) * K + o_k[None, :]
+            p_h = h + o_h + o_v[:, None].to(tl.int64) * KS + o_k[None, :]
             m_h = (o_v[:, None] < V) & (o_k[None, :] < K)
         else:
-            p_h = h + o_h + o_k[:, None].to(tl.int64) * V + o_v[None, :]
+            p_h = h + o_h + o_k[:, None].to(tl.int64) * VS + o_v[None, :]
             m_h = (o_k[:, None] < K) & (o_v[None, :] < V)
 
         if i_t % NTS == 0:
@@ -133,12 +134,12 @@ def chunk_fwd_kernel_h_npu(
         b_h = tl.dot(b_k, b_v, b_h)
 
     if STORE_FINAL_STATE:
-        ht_base = (i_nh * K * V)
+        ht_base = (i_nh * KS * VS)
         if STATE_V_FIRST:
-            p_ht = ht + ht_base + o_v[:, None].to(tl.int64) * K + o_k[None, :]
+            p_ht = ht + ht_base + o_v[:, None].to(tl.int64) * KS + o_k[None, :]
             tl.store(p_ht, tl.trans(b_h).to(p_ht.dtype.element_ty), mask=(o_v[:, None] < V) & (o_k[None, :] < K))
         else:
-            p_ht = ht + ht_base + o_k[:, None].to(tl.int64) * V + o_v[None, :]
+            p_ht = ht + ht_base + o_k[:, None].to(tl.int64) * VS + o_v[None, :]
             tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=(o_k[:, None] < K) & (o_v[None, :] < V))
 
 
@@ -151,6 +152,7 @@ def chunk_bwd_kernel_dh_npu(
     q, g, g_gamma, gk, gv, do, dh, dht, dh0,
     scale, T,
     HQ: tl.constexpr, H: tl.constexpr, K: tl.constexpr, V: tl.constexpr,
+    KS: tl.constexpr, VS: tl.constexpr,
     BT: tl.constexpr, BS: tl.constexpr, BK: tl.constexpr, BV: tl.constexpr, NT: tl.constexpr, NG: tl.constexpr,
     USE_G: tl.constexpr, USE_G_GAMMA: tl.constexpr, USE_GK: tl.constexpr, USE_GV: tl.constexpr,
     STORE_INITIAL_STATE_GRADIENT: tl.constexpr, USE_FINAL_STATE_GRADIENT: tl.constexpr,
@@ -173,23 +175,23 @@ def chunk_bwd_kernel_dh_npu(
     o_k = i_k * BK + tl.arange(0, BK)
     o_v = i_v * BV + tl.arange(0, BV)
     if USE_FINAL_STATE_GRADIENT:
-        dht_base = (i_nh * K * V)
+        dht_base = (i_nh * KS * VS)
         if STATE_V_FIRST:
-            p_dht = dht + dht_base + o_v[:, None].to(tl.int64) * K + o_k[None, :]
+            p_dht = dht + dht_base + o_v[:, None].to(tl.int64) * KS + o_k[None, :]
             b_dh += tl.trans(tl.load(p_dht, mask=(o_v[:, None] < V) & (o_k[None, :] < K), other=0.0)).to(tl.float32)
         else:
-            p_dht = dht + dht_base + o_k[:, None].to(tl.int64) * V + o_v[None, :]
+            p_dht = dht + dht_base + o_k[:, None].to(tl.int64) * VS + o_v[None, :]
             b_dh += tl.load(p_dht, mask=(o_k[:, None] < K) & (o_v[None, :] < V), other=0.0).to(tl.float32)
 
     for step in tl.static_range(NT):
         i_t = NT - 1 - step
         i_s = i_t // (BS // BT)
-        o_dh = ((boh + i_s) * H + i_h) * K * V
+        o_dh = ((boh + i_s) * H + i_h) * KS * VS
         if STATE_V_FIRST:
-            p_dh = dh + o_dh + o_v[:, None].to(tl.int64) * K + o_k[None, :]
+            p_dh = dh + o_dh + o_v[:, None].to(tl.int64) * KS + o_k[None, :]
             m_dh = (o_v[:, None] < V) & (o_k[None, :] < K)
         else:
-            p_dh = dh + o_dh + o_k[:, None].to(tl.int64) * V + o_v[None, :]
+            p_dh = dh + o_dh + o_k[:, None].to(tl.int64) * VS + o_v[None, :]
             m_dh = (o_k[:, None] < K) & (o_v[None, :] < V)
 
         if i_t % (BS // BT) == 0:
@@ -236,12 +238,12 @@ def chunk_bwd_kernel_dh_npu(
         b_dh = tl.dot(b_q, b_do, b_dh)
 
     if STORE_INITIAL_STATE_GRADIENT:
-        dh0_base = (i_nh * K * V)
+        dh0_base = (i_nh * KS * VS)
         if STATE_V_FIRST:
-            p_dh0 = dh0 + dh0_base + o_v[:, None].to(tl.int64) * K + o_k[None, :]
+            p_dh0 = dh0 + dh0_base + o_v[:, None].to(tl.int64) * KS + o_k[None, :]
             tl.store(p_dh0, tl.trans(b_dh).to(p_dh0.dtype.element_ty), mask=(o_v[:, None] < V) & (o_k[None, :] < K))
         else:
-            p_dh0 = dh0 + dh0_base + o_k[:, None].to(tl.int64) * V + o_v[None, :]
+            p_dh0 = dh0 + dh0_base + o_k[:, None].to(tl.int64) * VS + o_v[None, :]
             tl.store(p_dh0, b_dh.to(p_dh0.dtype.element_ty), mask=(o_k[:, None] < K) & (o_v[None, :] < V))
 
 
@@ -309,28 +311,33 @@ def chunk_fwd_h_npu(
                 ht[i_n].copy_(ht_i[0])
         return h, ht
 
+    npu_require_last_dims(K, V, labels=('K', 'V'), dtypes=(k.dtype, v.dtype))
+
     N, NS = B, triton.cdiv(T, BS)
     NT = triton.cdiv(T, BT)
-    state_shape = (V, K) if state_v_first else (K, V)
-    # zero-init: kernels may only partially store each tile
-    h = k.new_zeros(B, NS, H, *state_shape, dtype=torch.float if states_in_fp32 else k.dtype)
-    ht = k.new_zeros(N, H, *state_shape, dtype=torch.float) if output_final_state else None
-
     BK, BV = _chunk_h_tile_size(K, V)
+    KS, VS = K, V
+    state_shape = (V, K) if state_v_first else (K, V)
+    mask_leftover = npu_leftover_mask(T=T, BT=BT, K=K, BK=BK, V=V, BV=BV)
+    alloc = k.new_zeros if mask_leftover else k.new_empty
+    h = alloc(B, NS, H, *state_shape, dtype=torch.float if states_in_fp32 else k.dtype)
+    ht_pad = alloc(N, H, *state_shape, dtype=torch.float) if output_final_state else None
+    h0_pad = h0
+
     launch_grid_chunked(
         chunk_fwd_kernel_h_npu,
         (triton.cdiv(K, BK), triton.cdiv(V, BV), N * H),
         offset_keys=('K_OFFSET', 'V_OFFSET', 'NH_OFFSET'),
         kernel_kwargs=dict(
-            k=k, v=v, h=h, g=g, g_gamma=g_gamma, gk=gk, gv=gv, h0=h0, ht=ht, T=T,
-            H=H, K=K, V=V, BT=BT, BS=BS, BK=BK, BV=BV, NT=NT,
+            k=k, v=v, h=h, g=g, g_gamma=g_gamma, gk=gk, gv=gv, h0=h0_pad, ht=ht_pad, T=T,
+            H=H, K=K, V=V, KS=KS, VS=VS, BT=BT, BS=BS, BK=BK, BV=BV, NT=NT,
             USE_G=g is not None, USE_G_GAMMA=g_gamma is not None,
             USE_GK=gk is not None, USE_GV=gv is not None,
             STATE_V_FIRST=state_v_first,
             K_OFFSET=0, V_OFFSET=0, NH_OFFSET=0,
         ),
     )
-    return h, ht
+    return h, ht_pad
 
 
 @input_guard
@@ -399,27 +406,32 @@ def chunk_bwd_dh_npu(
                 dh0[i_n].copy_(dh0_i[0])
         return dh, dh0
 
+    npu_require_last_dims(K, V, labels=('K', 'V'), dtypes=(k.dtype, v.dtype))
+
     N, NS = B, triton.cdiv(T, BS)
     NG = HQ // H
     NT = triton.cdiv(T, BT)
-
-    state_shape = (V, K) if state_v_first else (K, V)
-    dh = k.new_zeros(B, NS, HQ, *state_shape, dtype=torch.float if states_in_fp32 else k.dtype)
-    dh0 = torch.zeros_like(h0, dtype=torch.float) if h0 is not None else None
-
     BK, BV = _chunk_h_tile_size(K, V)
+    KS, VS = K, V
+    state_shape = (V, K) if state_v_first else (K, V)
+    mask_leftover = npu_leftover_mask(T=T, BT=BT, K=K, BK=BK, V=V, BV=BV)
+    alloc = k.new_zeros if mask_leftover else k.new_empty
+    dh = alloc(B, NS, HQ, *state_shape, dtype=torch.float if states_in_fp32 else k.dtype)
+    dh0_pad = k.new_zeros(h0.shape[0], HQ, *state_shape, dtype=torch.float) if h0 is not None else None
+    dht_pad = dht
+
     launch_grid_chunked(
         chunk_bwd_kernel_dh_npu,
         (triton.cdiv(K, BK), triton.cdiv(V, BV), N * HQ),
         offset_keys=('K_OFFSET', 'V_OFFSET', 'NH_OFFSET'),
         kernel_kwargs=dict(
-            q=q, g=g, g_gamma=g_gamma, gk=gk, gv=gv, do=do, dh=dh, dht=dht, dh0=dh0,
+            q=q, g=g, g_gamma=g_gamma, gk=gk, gv=gv, do=do, dh=dh, dht=dht_pad, dh0=dh0_pad,
             scale=scale, T=T,
-            HQ=HQ, H=H, K=K, V=V, BT=BT, BS=BS, BK=BK, BV=BV, NT=NT, NG=NG,
+            HQ=HQ, H=H, K=K, V=V, KS=KS, VS=VS, BT=BT, BS=BS, BK=BK, BV=BV, NT=NT, NG=NG,
             USE_G=g is not None, USE_G_GAMMA=g_gamma is not None,
             USE_GK=gk is not None, USE_GV=gv is not None,
             STATE_V_FIRST=state_v_first,
             K_OFFSET=0, V_OFFSET=0, NH_OFFSET=0,
         ),
     )
-    return dh, dh0
+    return dh, dh0_pad

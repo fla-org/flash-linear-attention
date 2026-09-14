@@ -16,7 +16,7 @@ import triton.runtime.driver as driver
 
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp2
-from fla.utils import input_guard
+from fla.utils import input_guard, npu_leftover_mask, npu_require_last_dims
 from fla.utils.ascend_ub_manager import compute_row_tile_block_size
 
 # recompute_w_u_fwd: peak UB is max(u-slab, w-slab), not sum — tile BK/BV independently.
@@ -133,11 +133,14 @@ def recompute_w_u_fwd_kda_kernel_npu(
     BT: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
+    KP: tl.constexpr,
+    VP: tl.constexpr,
     STORE_QG: tl.constexpr,
     STORE_KG: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     BETA_T_CONTIG: tl.constexpr,
     GK_T_CONTIG: tl.constexpr,
+    MASK_LEFTOVER: tl.constexpr,
 ):
     T_max = T
     BH = B * HV
@@ -167,10 +170,10 @@ def recompute_w_u_fwd_kda_kernel_npu(
 
         k_ptr = k + (bos * H + i_h) * K
         v_ptr = v + (bos * HV + i_hv) * V
-        u_ptr = u + (bos * HV + i_hv) * V
-        w_ptr = w + (bos * HV + i_hv) * K
+        u_ptr = u + (bos * HV + i_hv) * VP
+        w_ptr = w + (bos * HV + i_hv) * KP
         A_ptr = A + (bos * HV + i_hv) * BT
-        kg_ptr = kg + (bos * HV + i_hv) * K
+        kg_ptr = kg + (bos * HV + i_hv) * KP
         if BETA_T_CONTIG:
             beta_ptr = beta + beta_bh
         else:
@@ -181,10 +184,14 @@ def recompute_w_u_fwd_kda_kernel_npu(
             gk_ptr = gk + (bos * HV + i_hv) * K
         if STORE_QG:
             q_ptr = q + (bos * H + i_h) * K
-            qg_ptr = qg + (bos * HV + i_hv) * K
+            qg_ptr = qg + (bos * HV + i_hv) * KP
 
         p_b = _beta_block_ptr(beta_ptr, T, i_t, BT, BETA_T_CONTIG, HV)
         b_b = tl.load(p_b, boundary_check=(0,))
+        o_t = i_t * BT + tl.arange(0, BT)
+        m_t = o_t < T
+        if MASK_LEFTOVER:
+            b_b = tl.where(m_t, b_b, 0)
 
         p_A = tl.make_block_ptr(A_ptr, (T, BT), (HV * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
 
@@ -192,8 +199,11 @@ def recompute_w_u_fwd_kda_kernel_npu(
 
         for i_v in range(tl.cdiv(V, BV)):
             p_v = tl.make_block_ptr(v_ptr, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-            p_u = tl.make_block_ptr(u_ptr, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+            p_u = tl.make_block_ptr(u_ptr, (T, VP), (HV * VP, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
             b_v = tl.load(p_v, boundary_check=(0, 1))
+            if MASK_LEFTOVER:
+                o_v = i_v * BV + tl.arange(0, BV)
+                b_v = tl.where(m_t[:, None] & (o_v < V)[None, :], b_v, 0)
             b_vb = (b_v * b_b[:, None]).to(b_v.dtype)
             # Ascend tl.dot may clobber the left operand; reload A each V tile.
             b_A = tl.load(p_A, boundary_check=(0, 1))
@@ -203,34 +213,45 @@ def recompute_w_u_fwd_kda_kernel_npu(
         for i_k in range(tl.cdiv(K, BK)):
             p_k = tl.make_block_ptr(k_ptr, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
             b_k = tl.load(p_k, boundary_check=(0, 1))
+            o_k = i_k * BK + tl.arange(0, BK)
+            m_k = o_k < K
+            m_tk = m_t[:, None] & m_k[None, :]
+            if MASK_LEFTOVER:
+                b_k = tl.where(m_tk, b_k, 0)
             b_kb = b_k * b_b[:, None]
 
             p_gk = _gk_block_ptr(gk_ptr, T, K, i_t, i_k, BT, BK, GK_T_CONTIG, HV)
             b_gk = tl.load(p_gk, boundary_check=(0, 1)).to(tl.float32)
-            b_gk_exp = exp2(b_gk)
+            if MASK_LEFTOVER:
+                b_gk = tl.where(m_tk, b_gk, 0)
+            b_gk_exp = tl.where(m_tk, exp2(b_gk), 0) if MASK_LEFTOVER else exp2(b_gk)
             b_kb = b_kb * b_gk_exp
 
             if STORE_QG:
                 p_q = tl.make_block_ptr(q_ptr, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-                p_qg = tl.make_block_ptr(qg_ptr, (T, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+                p_qg = tl.make_block_ptr(qg_ptr, (T, KP), (HV * KP, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
                 b_q = tl.load(p_q, boundary_check=(0, 1))
+                if MASK_LEFTOVER:
+                    b_q = tl.where(m_tk, b_q, 0)
                 tl.store(p_qg, (b_q * b_gk_exp).to(p_qg.dtype.element_ty), boundary_check=(0, 1))
 
             if STORE_KG:
-                o_k = i_k * BK + tl.arange(0, BK)
-                m_k = o_k < K
                 if GK_T_CONTIG:
                     b_gn = tl.load(gk_ptr + last_idx * K + o_k, mask=m_k, other=0.0).to(tl.float32)
                 else:
                     b_gn = tl.load(gk_ptr + last_idx * HV * K + o_k, mask=m_k, other=0.0).to(tl.float32)
-                b_kg = b_k * exp2(b_gn[None, :] - b_gk)
-                p_kg = tl.make_block_ptr(kg_ptr, (T, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+                if MASK_LEFTOVER:
+                    b_g_diff = tl.where(m_tk, b_gn[None, :] - b_gk, 0)
+                else:
+                    b_g_diff = b_gn[None, :] - b_gk
+                b_kg = b_k * exp2(b_g_diff)
+                p_kg = tl.make_block_ptr(kg_ptr, (T, KP), (HV * KP, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
                 tl.store(p_kg, b_kg.to(p_kg.dtype.element_ty), boundary_check=(0, 1))
 
             # Ascend tl.dot may clobber the left operand; reload A each K tile.
             b_A = tl.load(p_A, boundary_check=(0, 1))
             b_w = tl.dot(b_A, b_kb.to(b_k.dtype), allow_tf32=False)
-            p_w = tl.make_block_ptr(w_ptr, (T, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+            p_w = tl.make_block_ptr(w_ptr, (T, KP), (HV * KP, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
             tl.store(p_w, b_w.to(p_w.dtype.element_ty), boundary_check=(0, 1))
 
 
@@ -251,8 +272,16 @@ def recompute_w_u_fwd_kda_npu(
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
     BT = A.shape[-1]
+    npu_require_last_dims(K, V, labels=('K', 'V'), dtypes=(k.dtype, v.dtype))
+
     store_qg = q is not None
     BK, BV = _get_fwd_tiles(BT, K, V, store_qg=store_qg)
+    mask_leftover = npu_leftover_mask(
+        T=T, BT=BT, K=K, BK=BK, V=V, BV=BV, varlen=cu_seqlens is not None,
+    )
+    if mask_leftover:
+        BK = min(64, BK)
+        BV = min(64, BV)
 
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
@@ -261,10 +290,12 @@ def recompute_w_u_fwd_kda_npu(
     beta, beta_t_contig = _hv_t_npu_arg(beta, HV)
     gk, gk_t_contig = _hv_t_npu_arg(gk, HV)
 
-    w = k.new_empty(B, T, HV, K)
-    u = torch.empty_like(v)
-    qg = k.new_empty(B, T, HV, K) if store_qg else None
-    kg = k.new_empty(B, T, HV, K)
+    alloc_k = k.new_zeros if mask_leftover else k.new_empty
+    alloc_v = v.new_zeros if mask_leftover else v.new_empty
+    w = alloc_k(B, T, HV, K)
+    u = alloc_v(B, T, HV, V)
+    qg = alloc_k(B, T, HV, K) if store_qg else None
+    kg = alloc_k(B, T, HV, K)
 
     _launch_wy_core_grid(
         recompute_w_u_fwd_kda_kernel_npu,
@@ -291,8 +322,11 @@ def recompute_w_u_fwd_kda_npu(
             BT=BT,
             BK=BK,
             BV=BV,
+            KP=K,
+            VP=V,
             BETA_T_CONTIG=beta_t_contig,
             GK_T_CONTIG=gk_t_contig,
+            MASK_LEFTOVER=mask_leftover,
         ),
     )
     return w, u, qg, kg

@@ -26,6 +26,9 @@ from fla.utils import (
     IS_NVIDIA_SM120,
     assert_close,
     device,
+    npu_leftover_mask,
+    npu_require_last_dims,
+    npu_verify_last_dims,
 )
 
 
@@ -1760,3 +1763,48 @@ def test_flash_qla_chunk_forward_only(B, T, H, HV, D, dtype, monkeypatch):
     assert torch.isfinite(tri_o).all() and torch.isfinite(tri_ht).all()
     assert_close("  o", ref_o, tri_o, _FLASH_QLA_RTOL)
     assert_close(" ht", ref_ht, tri_ht.to(ref_ht.dtype), _FLASH_QLA_RTOL)
+
+
+def test_npu_verify_last_dims_contract():
+    fp16 = torch.float16
+    fp32 = torch.float32
+    assert npu_verify_last_dims(64, 128, dtypes=(fp16, fp16)) == (True, None)
+    assert npu_verify_last_dims(48, 48, dtypes=(fp16, fp16)) == (True, None)
+    ok, reason = npu_verify_last_dims(60, 128, labels=('K', 'V'), dtypes=(fp16, fp16))
+    assert not ok and 'K=60' in reason and '1250' in reason
+    ok, reason = npu_verify_last_dims(50, 64, labels=('K', 'V'), dtypes=(fp16, fp16))
+    assert not ok and 'K=50' in reason
+    with pytest.raises(ValueError, match='1250'):
+        npu_require_last_dims(60, labels=('V',), dtypes=(fp32,))
+    assert npu_leftover_mask(T=64, BT=64, K=48, BK=64) is False
+    assert npu_leftover_mask(T=63, BT=64) is True
+    assert npu_leftover_mask(T=64, BT=64, varlen=True) is True
+
+
+@pytest.mark.skipif(not IS_NPU, reason='Ascend GDN verifier checks require NPU')
+def test_gdn_npu_verifier_rejects_unsupported_k():
+    from fla.ops.gated_delta_rule.backends.triton_ascend import TritonAscendGDNBackend
+
+    x = torch.zeros(1, 1, 1, 60, dtype=torch.float16, device=device)
+    accepted, reason = TritonAscendGDNBackend().recompute_w_u_fwd_verifier(
+        k=x,
+        v=x,
+        beta=torch.zeros(1, 1, 1, dtype=torch.float16, device=device),
+        A=x,
+    )
+    assert not accepted
+    assert 'K=60' in reason
+
+
+@pytest.mark.skipif(not IS_NPU, reason='Ascend GDN verifier checks require NPU')
+def test_gdn_npu_verifier_accepts_byte_aligned_k():
+    from fla.ops.gated_delta_rule.backends.triton_ascend import TritonAscendGDNBackend
+
+    x = torch.zeros(1, 1, 1, 48, dtype=torch.float16, device=device)
+    accepted, reason = TritonAscendGDNBackend().recompute_w_u_fwd_verifier(
+        k=x,
+        v=x,
+        beta=torch.zeros(1, 1, 1, dtype=torch.float16, device=device),
+        A=x,
+    )
+    assert accepted and reason is None

@@ -545,7 +545,9 @@ def test_chunk_npu_verifier(name, tensor_names, case, dtype, reason):
     """Check leaf metadata acceptance and rejection without launching kernels."""
     from fla.ops.gdn2.backends.triton_ascend import TritonAscendGDN2Backend
 
-    tensor = torch.zeros(1, dtype=dtype, device=device)
+    # Dummy metadata tensors still need a 32-byte last-dim stride
+    # (fp16/bf16: 16 elems, fp32: 8 elems) or npu_verify_kv rejects them.
+    tensor = torch.zeros(1, 1, 1, 16, dtype=dtype, device=device)
     kwargs = dict.fromkeys(tensor_names, tensor)
     if case == 'chunk_size':
         kwargs['chunk_size'] = 32
@@ -557,11 +559,30 @@ def test_chunk_npu_verifier(name, tensor_names, case, dtype, reason):
         kwargs[case] = torch.tensor([0, 1], dtype=torch.int64)
     verifier = getattr(TritonAscendGDN2Backend(), f'{name}_verifier')
     accepted, actual_reason = verifier(**kwargs, scale=1.0)
-    assert accepted == (reason is None)
+    assert accepted == (reason is None), actual_reason
     if reason is None:
         assert actual_reason is None
     else:
         assert reason in actual_reason
+
+
+@pytest.mark.skipif(not IS_NPU, reason='Ascend verifier checks require NPU')
+def test_chunk_npu_verifier_rejects_unaligned_k():
+    """Reject K/V last dims whose byte stride is not 32-byte aligned."""
+    from fla.ops.gdn2.backends.triton_ascend import TritonAscendGDN2Backend
+
+    x = torch.zeros(1, 1, 1, 60, dtype=torch.float16, device=device)
+    accepted, reason = TritonAscendGDN2Backend().chunk_gdn2_fwd_intra_verifier(
+        q=x,
+        k=x,
+        v=x,
+        gk=x,
+        b=x,
+        w_gate=x,
+        scale=1.0,
+    )
+    assert not accepted
+    assert 'K=60' in reason
 
 
 @pytest.mark.skipif(not IS_NPU, reason='Ascend verifier checks require NPU')

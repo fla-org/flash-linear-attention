@@ -15,7 +15,7 @@ import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp2
-from fla.utils import input_guard
+from fla.utils import input_guard, npu_leftover_mask, npu_require_last_dims
 from fla.utils.ascend_ub_manager import compute_row_tile_block_size, get_npu_properties
 
 # peak live fp32 tiles: b_A[BT,BT], b_k[BT,BK], tl.dot buffer; post-dot gate[BT,BT]
@@ -63,6 +63,7 @@ def chunk_scaled_dot_kkt_fwd_kernel_npu(
     BK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     USE_G: tl.constexpr,
+    MASK_LEFTOVER: tl.constexpr,
 ):
     T = T.to(tl.int64)
     bt_stride = B.to(tl.int64) * T
@@ -90,6 +91,8 @@ def chunk_scaled_dot_kkt_fwd_kernel_npu(
         if i_t * BT + 1 < T:
             p_b = tl.make_block_ptr(beta + i_h * bt_stride + bos, (T,), (1,), (t_off,), (BT,), (0,))
             b_b = tl.load(p_b, boundary_check=(0,)).to(tl.float32)
+            if MASK_LEFTOVER:
+                b_b = tl.where(m_t, b_b, 0)
 
             if USE_G:
                 p_g = tl.make_block_ptr(g + i_h * bt_stride + bos, (T,), (1,), (t_off,), (BT,), (0,))
@@ -102,6 +105,9 @@ def chunk_scaled_dot_kkt_fwd_kernel_npu(
                     (t_off, i_k * BK), (BT, BK), (1, 0),
                 )
                 b_k = tl.load(p_k, boundary_check=(0, 1)).to(tl.float32)
+                if MASK_LEFTOVER:
+                    o_k = i_k * BK + tl.arange(0, BK)
+                    b_k = tl.where(m_t[:, None] & (o_k < K)[None, :], b_k, 0)
                 # ascend tl.dot may clobber lhs; keep rhs on the original tile.
                 b_k_lhs = b_k + 0.0
                 b_A = tl.dot(b_k_lhs, tl.trans(b_k), b_A, allow_tf32=False)
@@ -152,12 +158,18 @@ def chunk_scaled_dot_kkt_fwd_npu(
         For GVA, H < HV and HV % H == 0. For standard attention, H == HV.
     """
     B, T, H, K, HV = *k.shape, beta.shape[2]
+    npu_require_last_dims(K, labels=('K',), dtypes=(k.dtype,))
     BT = chunk_size
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     A = torch.zeros(B, T, HV, BT, device=k.device, dtype=output_dtype)
     BK = _get_fwd_bk(BT, K)
+    mask_leftover = npu_leftover_mask(
+        T=T, BT=BT, K=K, BK=BK, varlen=cu_seqlens is not None,
+    )
+    if mask_leftover:
+        BK = min(64, BK)
 
     num_core = get_npu_properties()['num_aicore']
     g_arg = torch.permute(g, (2, 0, 1)).contiguous() if g is not None else g
@@ -178,5 +190,6 @@ def chunk_scaled_dot_kkt_fwd_npu(
         K=K,
         BT=BT,
         BK=BK,
+        MASK_LEFTOVER=mask_leftover,
     )
     return A

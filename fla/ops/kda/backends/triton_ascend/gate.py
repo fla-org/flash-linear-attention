@@ -16,7 +16,13 @@ import triton.language as tl
 from fla.ops.utils.index import prepare_chunk_indices
 from fla.ops.utils.op import exp
 from fla.ops.utils.softplus import softplus
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
+from fla.utils import (
+    autocast_custom_bwd,
+    autocast_custom_fwd,
+    input_guard,
+    npu_leftover_mask,
+    npu_require_last_dims,
+)
 from fla.utils.ascend_ub_manager import (
     ASCEND_MAX_GRID_DIM,
     compute_row_tile_block_size,
@@ -391,9 +397,12 @@ def kda_gate_fwd_npu(
     output_dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     H, K = g.shape[-2:]
+    npu_require_last_dims(K, labels=('K',), dtypes=(g.dtype,))
     T = g.numel() // (H * K)
     BT = _get_gate_fwd_bt(T, K)
-    yg = torch.empty_like(g, dtype=output_dtype)
+    zero_ws = npu_leftover_mask(T=T, BT=BT, K=K, BK=triton.next_power_of_2(K))
+    alloc = g.new_zeros if zero_ws else g.new_empty
+    yg = alloc(*g.shape[:-1], K, dtype=output_dtype)
     _launch_gate_fwd(
         g=g,
         A_log=A_log,
@@ -405,7 +414,7 @@ def kda_gate_fwd_npu(
         K=K,
         BT=BT,
     )
-    return yg
+    return yg.reshape(g.shape[:-1] + (K,))
 
 
 @input_guard
@@ -417,9 +426,13 @@ def kda_gate_bwd_npu(
     lower_bound: float | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
     H, K = g.shape[-2:]
+    npu_require_last_dims(K, labels=('K',), dtypes=(g.dtype,))
     T = g.numel() // (H * K)
     BT = _get_gate_bwd_bt(T, K)
-    dg = torch.empty_like(g, dtype=torch.float32)
+    bias_ref = dt_bias
+    zero_ws = npu_leftover_mask(T=T, BT=BT, K=K, BK=triton.next_power_of_2(K))
+    alloc = g.new_zeros if zero_ws else g.new_empty
+    dg = alloc(*g.shape[:-1], K, dtype=torch.float32)
     NT = triton.cdiv(T, BT)
     dA = g.new_empty(NT, H, dtype=torch.float32) if A_log is not None else None
     _launch_gate_bwd(
@@ -435,9 +448,9 @@ def kda_gate_bwd_npu(
         K=K,
         BT=BT,
     )
-    dg = dg.view_as(g).type_as(g)
+    dg = dg.reshape(g.shape).type_as(g)
     dA = dA.sum(0).view_as(A_log).type_as(A_log) if A_log is not None else None
-    dbias = dg.view(-1, H * K).sum(0).to(dt_bias) if dt_bias is not None else None
+    dbias = dg.reshape(-1, H * K).sum(0).to(bias_ref) if bias_ref is not None else None
     return dg, dA, dbias
 
 
@@ -464,10 +477,16 @@ def kda_gate_chunk_cumsum_npu(
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     assert chunk_size == 2 ** (chunk_size.bit_length() - 1), "chunk_size must be a power of 2"
 
+    npu_require_last_dims(S, labels=('S',), dtypes=(g.dtype,))
+
     BS = _get_chunk_cumsum_bs(BT, S)
-    g_org, o = g, torch.empty_like(g, dtype=output_dtype or g.dtype)
+    zero_ws = npu_leftover_mask(
+        T=T, BT=BT, K=S, BK=BS, varlen=cu_seqlens is not None,
+    )
+    alloc = g.new_zeros if zero_ws else g.new_empty
+    o = alloc(*g.shape[:-1], S, dtype=output_dtype or g.dtype)
     _launch_gate_chunk_cumsum(
-        s=g_org,
+        s=g,
         A_log=A_log,
         dt_bias=dt_bias,
         o=o,

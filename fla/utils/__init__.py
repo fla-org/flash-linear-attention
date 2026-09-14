@@ -7,6 +7,16 @@
 
 import sys
 
+from ._ascend_align import (  # noqa: F401
+    NPU_DMA_ALIGN_BYTES,
+    npu_last_dim_elem_align,
+    npu_leftover_mask,
+    npu_require_last_dims,
+    npu_supported_last_dim,
+    npu_verify_kv,
+    npu_verify_last_dim_tensor,
+    npu_verify_last_dims,
+)
 from ._compat import (  # noqa: F401
     SUPPORTS_AUTOTUNE_CACHE,
     TRITON_ABOVE_3_4_0,

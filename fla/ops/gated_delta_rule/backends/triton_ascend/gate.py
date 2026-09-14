@@ -16,7 +16,7 @@ import triton.language as tl
 from fla.ops.utils.index import prepare_chunk_indices
 from fla.ops.utils.op import exp
 from fla.ops.utils.softplus import softplus
-from fla.utils import input_guard
+from fla.utils import input_guard, npu_leftover_mask
 from fla.utils.ascend_ub_manager import (
     ASCEND_MAX_GRID_DIM,
     compute_ub_block_size,
@@ -306,7 +306,10 @@ def gdn_gate_fwd_npu(
     H = g.shape[-1]
     T = g.numel() // H
     BT = _get_gate_fwd_bt(T)
-    yg = torch.empty_like(g, dtype=output_dtype)
+    if npu_leftover_mask(T=T, BT=BT):
+        yg = g.new_zeros(g.shape, dtype=output_dtype)
+    else:
+        yg = torch.empty_like(g, dtype=output_dtype)
     _launch_gate_fwd(g=g, A_log=A_log, dt_bias=dt_bias, yg=yg, T=T, H=H, BT=BT)
     return yg
 
@@ -328,7 +331,11 @@ def gdn_gate_chunk_cumsum_npu(
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
-    o = torch.empty_like(g, dtype=output_dtype or g.dtype)
+    o = (
+        g.new_zeros(g.shape, dtype=output_dtype or g.dtype)
+        if npu_leftover_mask(T=T, BT=BT, varlen=cu_seqlens is not None)
+        else torch.empty_like(g, dtype=output_dtype or g.dtype)
+    )
     _launch_gate_chunk_cumsum(
         g=g,
         A_log=A_log,
@@ -356,7 +363,10 @@ def gdn_gate_bwd_npu(
     H = g.shape[-1]
     T = g.numel() // H
     BT = _get_gate_bwd_bt(T)
-    dg = torch.empty_like(g, dtype=torch.float32)
+    if npu_leftover_mask(T=T, BT=BT):
+        dg = g.new_zeros(g.shape, dtype=torch.float32)
+    else:
+        dg = torch.empty_like(g, dtype=torch.float32)
     NT = triton.cdiv(T, BT)
     dA = A_log.new_empty(NT, H, dtype=torch.float32)
     _launch_gate_bwd(

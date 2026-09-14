@@ -13,6 +13,7 @@ import torch
 import triton
 
 from fla.ops.backends import BaseBackend
+from fla.utils import npu_verify_kv
 
 # The grouped diagonal kernel keeps the padded K dimension in one UB slab.
 _MAX_FWD_INTRA_BK = 256
@@ -63,7 +64,7 @@ class TritonAscendGDN2Backend(BaseBackend):
         supported = (torch.float16, torch.bfloat16, torch.float32)
         if any(t.dtype not in supported for t in float_tensors):
             return False, "GDN-2 Ascend intra received an unsupported dtype"
-        return True, None
+        return npu_verify_kv(k, v)
 
     def chunk_gdn2_fwd_intra(self, *args, **kwargs):
         from fla.ops.gdn2.backends.triton_ascend.chunk_intra import chunk_gdn2_fwd_intra_npu
@@ -99,7 +100,7 @@ class TritonAscendGDN2Backend(BaseBackend):
         supported = (torch.float16, torch.bfloat16, torch.float32)
         if any(t.dtype not in supported for t in float_tensors):
             return False, "GDN-2 Ascend backward received an unsupported dtype"
-        return True, None
+        return npu_verify_kv(k, v)
 
     def chunk_gdn2_bwd_wy_dqkg_fused(self, *args, **kwargs):
         from fla.ops.gdn2.backends.triton_ascend.chunk_bwd import chunk_gdn2_bwd_wy_dqkg_fused_npu

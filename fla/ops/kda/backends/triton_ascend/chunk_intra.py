@@ -18,7 +18,7 @@ from fla.ops.kda.backends.triton_ascend.wy_fast import recompute_w_u_fwd_kda_npu
 from fla.ops.kda.chunk_intra_token_parallel import chunk_kda_fwd_intra_token_parallel
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp2
-from fla.utils import ascend_compile_kwargs, input_guard
+from fla.utils import ascend_compile_kwargs, input_guard, npu_require_last_dims
 from fla.utils.ascend_ub_manager import (
     ASCEND_MAX_GRID_DIM,
     compute_row_tile_block_size,
@@ -541,6 +541,9 @@ def chunk_kda_fwd_intra_npu(
     if use_graph:
         raise NotImplementedError("use_graph is not supported on the Ascend NPU backend")
     B, T, H, K, HV = *k.shape, gk.shape[2]
+    V = v.shape[-1]
+    npu_require_last_dims(K, V, labels=('K', 'V'), dtypes=(k.dtype, v.dtype))
+
     BT = chunk_size
     if BT not in (32, 64):
         raise ValueError(f"KDA intra chunk kernel only supports chunk_size 32 or 64, got {BT}.")
@@ -917,6 +920,7 @@ def chunk_kda_bwd_intra_npu(
     if use_graph:
         raise NotImplementedError("use_graph is not supported on the Ascend NPU backend")
     B, T, H, K, HV = *k.shape, g.shape[2]
+    npu_require_last_dims(K, labels=('K',), dtypes=(k.dtype,))
     BT = chunk_size
     BK = triton.next_power_of_2(K)
     if (safe_gate and BK > 512) or (not safe_gate and BK > 256):

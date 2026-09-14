@@ -30,15 +30,17 @@ class TritonAscendUtilsBackend(BaseBackend):
         from fla.ops.utils.backends.triton_ascend.solve_tril import solve_tril_npu
         return solve_tril_npu(*args, **kwargs)
 
-    def chunk_global_cumsum_verifier(self, *args, **kwargs):
-        return True, None
+    def chunk_global_cumsum_verifier(self, s, *args, **kwargs):
+        from fla.utils import npu_verify_last_dim_tensor
+        return npu_verify_last_dim_tensor(s, label='S')
 
     def chunk_global_cumsum(self, *args, **kwargs):
         from fla.ops.utils.backends.triton_ascend.cumsum import chunk_global_cumsum_npu
         return chunk_global_cumsum_npu(*args, **kwargs)
 
-    def chunk_local_cumsum_verifier(self, *args, **kwargs):
-        return True, None
+    def chunk_local_cumsum_verifier(self, g, *args, **kwargs):
+        from fla.utils import npu_verify_last_dim_tensor
+        return npu_verify_last_dim_tensor(g, label='S')
 
     def chunk_local_cumsum(self, *args, **kwargs):
         from fla.ops.utils.backends.triton_ascend.cumsum import chunk_local_cumsum_npu

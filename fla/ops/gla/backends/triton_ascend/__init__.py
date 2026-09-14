@@ -9,17 +9,25 @@
 
 from __future__ import annotations
 
+import torch
+
 from fla.ops.backends import BaseBackend
 
 _MAX_KV = 512
 
 
-def _verify_kv(K: int, V: int | None = None) -> tuple[bool, str | None]:
+def _verify_kv(k: torch.Tensor, v: torch.Tensor | None = None) -> tuple[bool, str | None]:
+    from fla.utils import npu_verify_kv, npu_verify_last_dim_tensor
+
+    K = int(k.shape[-1])
     if K > _MAX_KV:
         return False, f'NPU GLA supports K<={_MAX_KV}, got K={K}'
-    if V is not None and V > _MAX_KV:
+    if v is None:
+        return npu_verify_last_dim_tensor(k, label='K')
+    V = int(v.shape[-1])
+    if V > _MAX_KV:
         return False, f'NPU GLA supports V<={_MAX_KV}, got V={V}'
-    return True, None
+    return npu_verify_kv(k, v)
 
 
 class TritonAscendGLABackend(BaseBackend):
@@ -34,42 +42,42 @@ class TritonAscendGLABackend(BaseBackend):
         return IS_NPU
 
     def chunk_gla_fwd_intra_gk_verifier(self, q, k, *args, **kwargs):
-        return _verify_kv(k.shape[-1])
+        return _verify_kv(k)
 
     def chunk_gla_fwd_intra_gk(self, *args, **kwargs):
         from fla.ops.gla.backends.triton_ascend.chunk import chunk_gla_fwd_intra_gk_npu
         return chunk_gla_fwd_intra_gk_npu(*args, **kwargs)
 
     def chunk_gla_fwd_o_gk_verifier(self, q, v, *args, **kwargs):
-        return _verify_kv(q.shape[-1], v.shape[-1])
+        return _verify_kv(q, v)
 
     def chunk_gla_fwd_o_gk(self, *args, **kwargs):
         from fla.ops.gla.backends.triton_ascend.chunk import chunk_gla_fwd_o_gk_npu
         return chunk_gla_fwd_o_gk_npu(*args, **kwargs)
 
     def chunk_gla_bwd_dA_verifier(self, v, do, *args, **kwargs):
-        return _verify_kv(v.shape[-1])
+        return _verify_kv(v, do)
 
     def chunk_gla_bwd_dA(self, *args, **kwargs):
         from fla.ops.gla.backends.triton_ascend.chunk import chunk_gla_bwd_dA_npu
         return chunk_gla_bwd_dA_npu(*args, **kwargs)
 
     def chunk_gla_bwd_dv_verifier(self, k, g, A, do, dh, *args, **kwargs):
-        return _verify_kv(k.shape[-1], do.shape[-1])
+        return _verify_kv(k, do)
 
     def chunk_gla_bwd_dv(self, *args, **kwargs):
         from fla.ops.gla.backends.triton_ascend.chunk import chunk_gla_bwd_dv_npu
         return chunk_gla_bwd_dv_npu(*args, **kwargs)
 
     def chunk_gla_bwd_dqk_intra_verifier(self, q, k, *args, **kwargs):
-        return _verify_kv(k.shape[-1])
+        return _verify_kv(k)
 
     def chunk_gla_bwd_dqk_intra(self, *args, **kwargs):
         from fla.ops.gla.backends.triton_ascend.chunk import chunk_gla_bwd_dqk_intra_npu
         return chunk_gla_bwd_dqk_intra_npu(*args, **kwargs)
 
     def chunk_gla_bwd_dqkg_verifier(self, q, k, v, *args, **kwargs):
-        return _verify_kv(k.shape[-1], v.shape[-1])
+        return _verify_kv(k, v)
 
     def chunk_gla_bwd_dqkg(self, *args, **kwargs):
         from fla.ops.gla.backends.triton_ascend.chunk import chunk_gla_bwd_dqkg_npu

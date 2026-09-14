@@ -14,6 +14,12 @@ import torch
 from fla.ops.backends import BaseBackend
 
 
+def _verify_npu_kv(k: torch.Tensor, v: torch.Tensor, *extra: torch.Tensor) -> tuple[bool, str | None]:
+    from fla.utils import npu_verify_kv
+
+    return npu_verify_kv(k, v, extra=extra)
+
+
 class TritonAscendCommonBackend(BaseBackend):
     backend_type = 'triton_ascend'
     package_name = None
@@ -35,22 +41,16 @@ class TritonAscendCommonBackend(BaseBackend):
         output_dtype=torch.float32,
         chunk_indices=None,
     ) -> tuple[bool, str | None]:
-        from fla.utils import IS_NPU
-        if not IS_NPU:
-            return False, "not running on NPU"
-        if k.device.type != "npu":
-            return False, "input device is not NPU"
-        tensors = (k, beta) if g is None else (k, g, beta)
-        if all(t.dtype in (torch.float32, torch.float16, torch.bfloat16) for t in tensors):
-            return True, None
-        return False, "unsupported dtype for NPU chunk_scaled_dot_kkt_fwd"
+        extra = (beta,) if g is None else (g, beta)
+        return _verify_npu_kv(k, k, *extra)
 
     def chunk_scaled_dot_kkt_fwd(self, *args, **kwargs):
         from fla.ops.common.backends.triton_ascend.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd_npu
         return chunk_scaled_dot_kkt_fwd_npu(*args, **kwargs)
 
-    def chunk_gated_delta_rule_fwd_h_verifier(self, *args, **kwargs):
-        return True, None
+    def chunk_gated_delta_rule_fwd_h_verifier(self, k, w, u, g=None, gk=None, **kwargs):
+        extra = tuple(t for t in (w, u, g, gk) if t is not None)
+        return _verify_npu_kv(k, u, *extra)
 
     def chunk_gated_delta_rule_fwd_h(self, *args, **kwargs):
         from fla.ops.common.backends.triton_ascend.chunk_delta_h import chunk_gated_delta_rule_fwd_h_npu
@@ -60,7 +60,7 @@ class TritonAscendCommonBackend(BaseBackend):
         K, V = k.shape[-1], v.shape[-1]
         if K > 512 or V > 512:
             return False, f'NPU chunk_fwd_h supports K,V<=512, got K={K}, V={V}'
-        return True, None
+        return _verify_npu_kv(k, v)
 
     def chunk_fwd_h(self, *args, **kwargs):
         from fla.ops.common.backends.triton_ascend.chunk_h import chunk_fwd_h_npu
@@ -70,35 +70,41 @@ class TritonAscendCommonBackend(BaseBackend):
         K, V = k.shape[-1], v.shape[-1]
         if K > 512 or V > 512:
             return False, f'NPU chunk_bwd_dh supports K,V<=512, got K={K}, V={V}'
-        return True, None
+        return _verify_npu_kv(k, v, q)
 
     def chunk_bwd_dh(self, *args, **kwargs):
         from fla.ops.common.backends.triton_ascend.chunk_h import chunk_bwd_dh_npu
         return chunk_bwd_dh_npu(*args, **kwargs)
 
-    def chunk_fwd_o_verifier(self, *args, **kwargs):
-        return True, None
+    def chunk_fwd_o_verifier(self, q, k, v, h, g=None, g_gamma=None, **kwargs):
+        extra = tuple(t for t in (q, h, g, g_gamma) if t is not None)
+        return _verify_npu_kv(k, v, *extra)
 
     def chunk_fwd_o(self, *args, **kwargs):
         from fla.ops.common.backends.triton_ascend.chunk_o import chunk_fwd_o_npu
         return chunk_fwd_o_npu(*args, **kwargs)
 
-    def chunk_bwd_dv_local_verifier(self, *args, **kwargs):
-        return True, None
+    def chunk_bwd_dv_local_verifier(self, q, k, do, g=None, g_gamma=None, **kwargs):
+        extra = tuple(t for t in (q, do, g, g_gamma) if t is not None)
+        return _verify_npu_kv(k, do, *extra)
 
     def chunk_bwd_dv_local(self, *args, **kwargs):
         from fla.ops.common.backends.triton_ascend.chunk_o import chunk_bwd_dv_local_npu
         return chunk_bwd_dv_local_npu(*args, **kwargs)
 
-    def chunk_bwd_dqkwg_verifier(self, *args, **kwargs):
-        return True, None
+    def chunk_bwd_dqkwg_verifier(self, q, k, v, do, h, dh, w=None, g=None, g_gamma=None, dv=None, **kwargs):
+        extra = tuple(t for t in (q, do, h, dh, w, g, g_gamma, dv) if t is not None)
+        return _verify_npu_kv(k, v, *extra)
 
     def chunk_bwd_dqkwg(self, *args, **kwargs):
         from fla.ops.common.backends.triton_ascend.chunk_o import chunk_bwd_dqkwg_npu
         return chunk_bwd_dqkwg_npu(*args, **kwargs)
 
-    def chunk_gated_delta_rule_bwd_dhu_verifier(self, *args, **kwargs):
-        return True, None
+    def chunk_gated_delta_rule_bwd_dhu_verifier(
+        self, q, k, w, do, dv, g=None, gk=None, h0=None, dht=None, **kwargs,
+    ):
+        extra = tuple(t for t in (q, w, do, dv, g, gk, h0, dht) if t is not None)
+        return _verify_npu_kv(k, do, *extra)
 
     def chunk_gated_delta_rule_bwd_dhu(self, *args, **kwargs):
         from fla.ops.common.backends.triton_ascend.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu_npu

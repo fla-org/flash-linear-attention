@@ -41,12 +41,25 @@ class TritonAscendAttnResBackend(BaseBackend):
         checkpoint_level: int = 1,
         **kwargs,
     ) -> tuple[bool, str | None]:
-        del query, rms_weight, output_rms_weight, rms_eps, scale, return_weights, kwargs
+        from fla.utils import npu_verify_last_dim_tensor
+
+        del rms_weight, output_rms_weight, rms_eps, scale, return_weights, kwargs
+        ok, reason = npu_verify_last_dim_tensor(query, label='D')
+        if not ok:
+            return ok, reason
         if isinstance(residuals, torch.Tensor):
             if residuals.ndim != 4 or residuals.shape[0] == 0:
                 return False, 'attnres requires at least one residual source'
+            ok, reason = npu_verify_last_dim_tensor(residuals, label='D')
+            if not ok:
+                return ok, reason
         elif not residuals:
             return False, 'attnres requires at least one residual source'
+        else:
+            for i, r in enumerate(residuals):
+                ok, reason = npu_verify_last_dim_tensor(r, label=f'residual[{i}]')
+                if not ok:
+                    return ok, reason
         return True, None
 
     def fused_attnres(self, *args, **kwargs):

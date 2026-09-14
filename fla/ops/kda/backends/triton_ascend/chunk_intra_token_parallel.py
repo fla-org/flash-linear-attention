@@ -14,7 +14,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.op import exp2
-from fla.utils import input_guard
+from fla.utils import input_guard, npu_require_last_dims
 from fla.utils.ascend_ub_manager import (
     ASCEND_MAX_GRID_DIM,
     max_grid_axis_chunks,
@@ -158,6 +158,7 @@ def chunk_kda_fwd_intra_token_parallel_npu(
     Writes directly to Aqk and Akk tensors (in-place).
     """
     B, T, H, K, HV = *q.shape, gk.shape[2]
+    npu_require_last_dims(K, labels=('K',), dtypes=(k.dtype,))
     N = len(cu_seqlens) - 1 if cu_seqlens is not None else B
     BT = chunk_size
     BC = sub_chunk_size
