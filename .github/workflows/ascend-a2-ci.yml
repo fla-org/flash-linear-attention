@@ -142,13 +142,14 @@ jobs:
           assert IS_NPU, "Expected NPU backend (IS_NPU=True)"
           PY
 
-      - name: Run tests/modules and tests/ops/utils, gdn, kda, gla, attnres, solve_tril
+      - name: Run benchmark unit tests, modules, ops/utils, gdn, kda, gla, attnres, solve_tril
         shell: bash
         env:
           FLA_NPU_XDIST: "1"
         run: |
           source /usr/local/Ascend/ascend-toolkit/set_env.sh
           pytest -s -v --exitfirst -n 8 --dist load \
+            tests/benchmarks \
             tests/modules \
             tests/ops/utils \
             tests/ops/test_gdn_kernels.py \

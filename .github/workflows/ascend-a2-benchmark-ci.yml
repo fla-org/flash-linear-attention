@@ -160,7 +160,7 @@ jobs:
           print("matplotlib savefig smoke test: ok")
           PY
 
-      - name: Benchmark chunk_gdn, chunk_kda, fused_attnres, and conv1d
+      - name: Benchmark chunk_gdn, chunk_kda, KDA graph, fused_attnres, and conv1d
         shell: bash
         env:
           FLA_BENCH_WARMUP_MS: "25"
@@ -185,12 +185,19 @@ jobs:
           ASCEND_RT_VISIBLE_DEVICES=3 python benchmarks/modules/benchmark_conv.py \
             > conv1d.log 2>&1 &
           pid_conv1d=$!
+          ASCEND_RT_VISIBLE_DEVICES=4 python -m benchmarks.ops.run_graph \
+            --op chunk_kda --no-base --modes fwdbwd \
+            --custom-shapes '{"smoke": {"B": 1, "T": 128, "H": 2, "D": 64, "N": 2}}' \
+            --warmup 3 --iterations 10 --json benchmark_kda_graph.json \
+            > chunk_kda_graph.log 2>&1 &
+          pid_kda_graph=$!
 
           status=0
           wait "$pid_gdn" || status=1
           wait "$pid_kda" || status=1
           wait "$pid_attnres" || status=1
           wait "$pid_conv1d" || status=1
+          wait "$pid_kda_graph" || status=1
 
           echo "========== chunk_gdn =========="
           cat chunk_gdn.log
@@ -198,6 +205,8 @@ jobs:
           cat chunk_kda.log
           echo "========== fused_attnres =========="
           cat fused_attnres.log
+          echo "========== chunk_kda graph =========="
+          cat chunk_kda_graph.log
           echo "========== conv1d =========="
           cat conv1d.log
           exit "$status"
@@ -211,6 +220,7 @@ jobs:
             benchmark_chunk_gdn.json
             benchmark_chunk_kda.json
             benchmark_fused_attnres.json
+            benchmark_kda_graph.json
             conv_benchmark/
           if-no-files-found: ignore
           retention-days: 10
