@@ -180,6 +180,7 @@ def test_result_table_reports_base_and_graph_speedups(capsys):
     output = capsys.readouterr().out
     assert "main[def] eager / ascend_graph[abc] eager / ascend_graph[abc] graph" in output
     header = next(line for line in output.splitlines() if line.startswith("mode"))
+    assert "graph x    config" in header
     assert header.endswith("config")
     assert output.count("1.50x") == 2
     assert output.count("2.00x") == 2
