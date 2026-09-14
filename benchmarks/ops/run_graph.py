@@ -366,8 +366,8 @@ def print_results(current, current_info, baseline=None, baseline_info=None) -> N
     print(f"Device: {current_info['device']} | torch {current_info['torch']} | torch_npu {current_info['torch_npu']}")
     header = (
         f"{'mode':<8} {'shape':<24} {'stat':<5} {'B':>3} {'T':>6} {'H':>4} {'D':>4} {'N':>4} "
-        f"{'config':<48} "
-        f"{'base eager':>12} {'HEAD eager':>12} {'HEAD graph':>12} {'eager x':>9} {'graph x':>9}"
+        f"{'base eager':>12} {'HEAD eager':>12} {'HEAD graph':>12} {'eager x':>9} {'graph x':>9} "
+        f"config"
     )
     print(header)
     print("-" * len(header))
@@ -386,11 +386,11 @@ def print_results(current, current_info, baseline=None, baseline_info=None) -> N
             print(
                 f"{row['mode']:<8} {row['shape']:<24} {statistic:<5} "
                 f"{row['B']:>3} {row['T']:>6} {row['H']:>4} {row['D']:>4} {row.get('N', row['B']):>4} "
-                f"{_format_config(row):<48} "
                 f"{_format_latency(base_metrics, statistic):>12} "
                 f"{_format_latency(eager_metrics, statistic):>12} "
                 f"{_format_latency(graph_metrics, statistic):>12} "
-                f"{eager_speedup:>9} {graph_speedup:>9}"
+                f"{eager_speedup:>9} {graph_speedup:>9} "
+                f"{_format_config(row)}"
             )
 
 
