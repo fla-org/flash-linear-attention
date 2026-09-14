@@ -185,19 +185,20 @@ jobs:
           ASCEND_RT_VISIBLE_DEVICES=3 python benchmarks/modules/benchmark_conv.py \
             > conv1d.log 2>&1 &
           pid_conv1d=$!
-          ASCEND_RT_VISIBLE_DEVICES=4 python -m benchmarks.ops.run_graph \
-            --op chunk_kda --no-base --modes fwdbwd \
-            --custom-shapes '{"smoke": {"B": 1, "T": 128, "H": 2, "D": 64, "N": 2}}' \
-            --warmup 3 --iterations 10 --json benchmark_kda_graph.json \
-            > chunk_kda_graph.log 2>&1 &
-          pid_kda_graph=$!
-
           status=0
           wait "$pid_gdn" || status=1
           wait "$pid_kda" || status=1
           wait "$pid_attnres" || status=1
           wait "$pid_conv1d" || status=1
-          wait "$pid_kda_graph" || status=1
+
+          # The runner exposes devices 0-3. Reuse device 0 only after the
+          # parallel benchmarks finish so graph latency is not affected by
+          # another workload sharing the same NPU.
+          ASCEND_RT_VISIBLE_DEVICES=0 python -m benchmarks.ops.run_graph \
+            --op chunk_kda --no-base --modes fwdbwd \
+            --custom-shapes '{"smoke": {"B": 1, "T": 128, "H": 2, "D": 64, "N": 2}}' \
+            --warmup 3 --iterations 10 --json benchmark_kda_graph.json \
+            > chunk_kda_graph.log 2>&1 || status=1
 
           echo "========== chunk_gdn =========="
           cat chunk_gdn.log

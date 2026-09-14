@@ -15,6 +15,7 @@ from .cumsum import (
     chunk_local_cumsum_vector,
 )
 from .index import (
+    get_max_num_chunks,
     get_max_num_splits,
     prepare_chunk_indices,
     prepare_chunk_indices_static,
@@ -43,6 +44,7 @@ __all__ = [
     "chunk_local_cumsum",
     "chunk_local_cumsum_scalar",
     "chunk_local_cumsum_vector",
+    "get_max_num_chunks",
     "get_max_num_splits",
     "logsumexp_fwd",
     "matmul",

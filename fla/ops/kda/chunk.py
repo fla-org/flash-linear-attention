@@ -17,7 +17,7 @@ from fla.ops.common.gate import fused_beta_sigmoid, fused_beta_sigmoid_bwd
 from fla.ops.cp import FLACPContext
 from fla.ops.kda.chunk_bwd import chunk_kda_bwd
 from fla.ops.kda.chunk_fwd import chunk_kda_fwd
-from fla.ops.utils.index import prepare_chunk_indices, prepare_chunk_indices_static
+from fla.ops.utils.index import get_max_num_chunks, prepare_chunk_indices, prepare_chunk_indices_static
 from fla.utils import IS_NPU, autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
@@ -74,7 +74,7 @@ class ChunkKDAFunction(torch.autograd.Function):
                         f"max_num_seqs + 1 entries, got {cu_seqlens.shape[0] - 1} sequences "
                         f"with max_num_seqs={max_num_seqs}"
                     )
-                nt_max = (q.shape[1] + chunk_size - 1) // chunk_size + max_num_seqs - 1
+                nt_max = get_max_num_chunks(q.shape[1], max_num_seqs, chunk_size)
                 chunk_indices, chunk_offsets = prepare_chunk_indices_static(cu_seqlens, chunk_size, nt_max)
             else:
                 chunk_indices = prepare_chunk_indices(
@@ -304,14 +304,16 @@ def chunk_kda(
             forward/backward can be recorded by a platform graph (CUDA graph, NPU graph)
             and replayed after only the contents of ``cu_seqlens`` change. Requires:
 
-            - ``cu_seqlens`` padded with zero-length tail sequences up to exactly
-              ``max_num_seqs + 1`` entries; kernels return immediately on sentinel rows
-              (segment id < 0), so output/gradient rows not covered by real tokens
-              are left undefined.
+            - ``cu_seqlens`` containing exactly ``max_num_seqs + 1`` entries;
+              represent unused sequence slots with repeated terminal offsets.
             - ``initial_state`` and the incoming ``dht`` gradient (when used) shaped
               ``[max_num_seqs, ...]``.
-            - the capture sample containing ``NT_max = ceil(T / chunk_size) + max_num_seqs - 1``
-              valid chunks; for example, use sequence lengths ``[1, ..., 1, T-N+1]``.
+            - chunk metadata allocated to the tight capacity
+              ``NT_max = M + floor((T - M) / chunk_size)``, where
+              ``M = min(T, max_num_seqs)``. The capture layout must produce
+              ``NT_max`` valid chunks so every task is initialized before replay;
+              this is always achievable with ``M`` nonempty sequences of lengths
+              ``[1, ..., 1, T-M+1]`` and zero-length tail sequences.
             - the captured step warmed up eagerly beforehand so that kernel autotuning
               (and, with ``cp_context``, NCCL communicator setup) happens outside the graph.
 
@@ -348,8 +350,9 @@ def chunk_kda(
                 - For variable-length sequences (cu_seqlens): B is always 1 (flattened),
                   NT is the total number of chunks across all sequences.
                 - With ``use_graph=True``, ``NT`` is the static capacity
-                  ``ceil(T / chunk_size) + max_num_seqs - 1``; only the prefix described
-                  by the current ``cu_seqlens`` contains valid intermediate states.
+                  ``M + floor((T-M) / chunk_size)``, where
+                  ``M = min(T, max_num_seqs)``; only the prefix described by the
+                  current ``cu_seqlens`` contains valid intermediate states.
 
     Examples::
         >>> import torch

@@ -15,6 +15,7 @@ import torch.nn.functional as F
 
 from fla.ops.cp import FLACPContext
 from fla.ops.kda import chunk_kda
+from fla.ops.utils import get_max_num_chunks
 from fla.utils import IS_NPU, device
 
 pytestmark = pytest.mark.skipif(not IS_NPU, reason="KDA NPUGraph tests require an Ascend NPU")
@@ -180,7 +181,11 @@ def _active_input_names(case: _GraphCase) -> tuple[str, ...]:
 
 def _assert_training_case(case: _GraphCase, offsets: list[int] | tuple[list[int], ...]) -> None:
     sample = _make_case_inputs(case, seed=0)
-    sample_offsets = [*range(case.N), case.T]
+    num_nonempty_seqs = min(case.T, case.N)
+    sample_offsets = [
+        *range(num_nonempty_seqs),
+        *([case.T] * (case.N - num_nonempty_seqs + 1)),
+    ]
     sample_cu = torch.tensor(sample_offsets, dtype=torch.int64, device=device)
 
     def graph_step(q, k, v, g, beta, h0, A_log, dt_bias, cu_seqlens):
@@ -358,6 +363,11 @@ def test_chunk_kda_npugraph_multi_replay_matches_eager(cu_dtype):
             [0, 32, 64],
             id="fp16-safe-gate-without-a-or-bias",
         ),
+        pytest.param(
+            _GraphCase(T=4, N=8),
+            [0, 0, 1, 1, 2, 2, 3, 3, 4],
+            id="fp16-more-sequence-slots-than-tokens",
+        ),
     ],
 )
 def test_chunk_kda_npugraph_option_matrix_matches_eager(case, offsets):
@@ -427,7 +437,7 @@ def test_chunk_kda_npugraph_intermediate_states_match_eager():
     torch.testing.assert_close(o[:, :64], reference_o, rtol=3e-3, atol=3e-3)
     torch.testing.assert_close(ht, reference_ht, rtol=3e-3, atol=3e-3)
     torch.testing.assert_close(h[:, :reference_h.shape[1]], reference_h, rtol=3e-3, atol=3e-3)
-    assert h.shape[1] == (case.T + case.chunk_size - 1) // case.chunk_size + case.N - 1
+    assert h.shape[1] == get_max_num_chunks(case.T, case.N, case.chunk_size)
 
 
 def test_chunk_kda_npugraph_rejects_mismatched_sequence_capacity():

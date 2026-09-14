@@ -100,6 +100,15 @@ def benchmark_case(
 
         inference_context = torch.inference_mode
 
+    # Measure eager before graph construction so branch-to-branch eager
+    # comparisons have the same lifecycle as an eager-only baseline worker.
+    if "eager" in engines:
+        def eager_invocation():
+            with inference_context():
+                case.run_once(case.eager_step, case.eager_args, False)
+
+        result["eager"] = _measure(eager_invocation, synchronize, warmup, iterations, clock_ns)
+
     graphed_step = None
     if "graph" in engines:
         if len(case.capture_args) != len(case.graph_args):
@@ -126,14 +135,6 @@ def benchmark_case(
         case.assert_close(actual, reference)
         result["validation"] = "passed"
 
-    if "eager" in engines:
-        def eager_invocation():
-            with inference_context():
-                case.run_once(case.eager_step, case.eager_args, False)
-
-        result["eager"] = _measure(eager_invocation, synchronize, warmup, iterations, clock_ns)
-
-    if "graph" in engines:
         def graph_invocation():
             with inference_context():
                 case.run_once(graphed_step, case.graph_args, False)
@@ -231,6 +232,7 @@ def benchmark_graph_op(
                 "shape": shape_name,
                 "mode": mode,
                 **shape,
+                **case.metadata,
                 **measured,
             })
             del case
@@ -338,6 +340,23 @@ def _format_latency(metrics: dict[str, float] | None, statistic: str) -> str:
     return "-" if metrics is None else f"{metrics[f'{statistic}_ms']:.3f}"
 
 
+def _format_config(row: dict[str, Any]) -> str:
+    """Format graph-specific workload axes without hard-coding an operator schema."""
+
+    excluded = {
+        "op", "shape", "mode", "B", "T", "H", "D", "N",
+        "eager", "graph", "capture_ms", "validation",
+    }
+    preferred = ("dtype", "chunk_size", "actual_T", "HV", "DV")
+    parts = [f"{name}={row[name]}" for name in preferred if name in row]
+    for name in sorted(set(row) - excluded - set(preferred)):
+        value = row[name]
+        if value is False or value in (None, "balanced"):
+            continue
+        parts.append(f"{name}={value}")
+    return ",".join(parts) or "-"
+
+
 def print_results(current, current_info, baseline=None, baseline_info=None) -> None:
     baseline_map = {_result_key(row): row for row in baseline or []}
     old_label = baseline_info["git_label"] if baseline_info else "base"
@@ -347,6 +366,7 @@ def print_results(current, current_info, baseline=None, baseline_info=None) -> N
     print(f"Device: {current_info['device']} | torch {current_info['torch']} | torch_npu {current_info['torch_npu']}")
     header = (
         f"{'mode':<8} {'shape':<24} {'stat':<5} {'B':>3} {'T':>6} {'H':>4} {'D':>4} {'N':>4} "
+        f"{'config':<48} "
         f"{'base eager':>12} {'HEAD eager':>12} {'HEAD graph':>12} {'eager x':>9} {'graph x':>9}"
     )
     print(header)
@@ -366,6 +386,7 @@ def print_results(current, current_info, baseline=None, baseline_info=None) -> N
             print(
                 f"{row['mode']:<8} {row['shape']:<24} {statistic:<5} "
                 f"{row['B']:>3} {row['T']:>6} {row['H']:>4} {row['D']:>4} {row.get('N', row['B']):>4} "
+                f"{_format_config(row):<48} "
                 f"{_format_latency(base_metrics, statistic):>12} "
                 f"{_format_latency(eager_metrics, statistic):>12} "
                 f"{_format_latency(graph_metrics, statistic):>12} "

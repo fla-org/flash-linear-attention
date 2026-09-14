@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -30,6 +30,7 @@ class GraphBenchmarkCase:
     graph_args: tuple[Any, ...]
     run_once: Callable[[Callable, tuple[Any, ...], bool], dict[str, Any]]
     assert_close: Callable[[dict[str, Any], dict[str, Any]], None]
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -92,8 +93,6 @@ def normalize_kda_shape(shape: dict[str, Any], default_dtype: str = "float16") -
         raise ValueError("T, H, D, N, HV, and DV must all be positive")
     if not 0 < normalized["actual_T"] <= normalized["T"]:
         raise ValueError("actual_T must satisfy 0 < actual_T <= T")
-    if normalized["T"] < normalized["N"]:
-        raise ValueError("T must be greater than or equal to N so capture metadata can expose full chunk capacity")
     if normalized["HV"] % normalized["H"]:
         raise ValueError("HV must be divisible by H")
     if normalized["chunk_size"] not in (32, 64):
@@ -123,6 +122,13 @@ def make_cu_seqlens(actual_t: int, num_seqs: int, profile: str) -> list[int]:
         tail = [first + i * (actual_t - first) // (num_seqs - 1) for i in range(1, num_seqs)]
         return [0, first, *tail]
     raise ValueError(f"Unknown sequence profile: {profile}")
+
+
+def make_capture_cu_seqlens(total_tokens: int, num_seqs: int) -> list[int]:
+    """Create a valid layout that reaches the tight static chunk capacity."""
+
+    num_nonempty_seqs = min(total_tokens, num_seqs)
+    return [*range(num_nonempty_seqs), *([total_tokens] * (num_seqs - num_nonempty_seqs + 1))]
 
 
 def _build_kda_case(shape: dict[str, Any], mode: str, device: str, seed: int) -> GraphBenchmarkCase:
@@ -170,7 +176,7 @@ def _build_kda_case(shape: dict[str, Any], mode: str, device: str, seed: int) ->
         else tensor.detach().clone().requires_grad_(requires_grad)
         for index, tensor in enumerate(graph_inputs)
     )
-    capture_offsets = [*range(N), T]
+    capture_offsets = make_capture_cu_seqlens(T, N)
     replay_offsets = make_cu_seqlens(actual_t, N, shape["sequence_profile"])
     capture_cu = torch.tensor(capture_offsets, dtype=torch.long, device=device)
     graph_cu = torch.tensor(replay_offsets, dtype=torch.long, device=device)
@@ -268,6 +274,7 @@ def _build_kda_case(shape: dict[str, Any], mode: str, device: str, seed: int) ->
         graph_args=graph_inputs + (graph_cu,),
         run_once=run_once,
         assert_close=assert_close,
+        metadata=shape,
     )
 
 
