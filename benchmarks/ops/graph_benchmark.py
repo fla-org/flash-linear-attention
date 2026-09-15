@@ -5,19 +5,20 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""Reusable eager-vs-graph benchmark runner.
+"""Eager-vs-graph benchmark implementation used by run.py --graph.
 
 Examples::
 
     # Compare HEAD eager/graph with origin/main eager on default KDA shapes.
-    python -m benchmarks.ops.run_graph --op chunk_kda --base origin/main
+    python -m benchmarks.ops.run --graph --op chunk_kda --base origin/main
 
     # Current ref only, using a shared B/T/H/D shape plus graph-specific axes.
-    python -m benchmarks.ops.run_graph --op chunk_kda --no-base \
+    python -m benchmarks.ops.run --graph --op chunk_kda --no-base \
         --custom-shapes '{"test": {"B":1,"T":128,"H":2,"D":64,"N":2}}'
 
 The graph capture cost is reported but excluded from replay latency. Graph
 latency includes the live-input update performed by the graphed callable.
+Forward-only runs use no_grad, not inference_mode, for both eager and graph execution.
 """
 
 from __future__ import annotations
@@ -98,7 +99,8 @@ def benchmark_case(
     if mode == "fwd":
         import torch
 
-        inference_context = torch.inference_mode
+        # inference tensors in shared NPU graph RNG state cannot be updated by later training captures.
+        inference_context = torch.no_grad
 
     # Measure eager before graph construction so branch-to-branch eager
     # comparisons have the same lifecycle as an eager-only baseline worker.
@@ -252,6 +254,7 @@ def _worker_command(
     return [
         sys.executable,
         runner,
+        "--graph",
         "--worker",
         "--op",
         *op_names,
@@ -293,7 +296,8 @@ def _bench_current(op_names, shapes, modes, engines, args):
     temporary = tempfile.mkdtemp(prefix="fla_graph_HEAD_")
     try:
         output = os.path.join(temporary, "results.json")
-        command = _worker_command(os.path.abspath(__file__), op_names, shapes, modes, engines, args, output)
+        runner = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run.py")
+        command = _worker_command(runner, op_names, shapes, modes, engines, args, output)
         print("\nBenchmarking HEAD in an isolated process...", flush=True)
         _run_subprocess(root, command)
         return _read_json(output)
@@ -308,7 +312,7 @@ def _bench_at_ref(ref, op_names, shapes, modes, args):
     worktree = os.path.join(temporary, "worktree")
     runner_dir = os.path.join(temporary, "runner")
     os.makedirs(runner_dir)
-    for filename in ("run_graph.py", "graph_registry.py"):
+    for filename in ("run.py", "registry.py", "graph_benchmark.py", "graph_registry.py"):
         shutil.copy2(os.path.join(os.path.dirname(os.path.abspath(__file__)), filename), runner_dir)
 
     try:
@@ -316,7 +320,7 @@ def _bench_at_ref(ref, op_names, shapes, modes, args):
         subprocess.run(["git", "worktree", "add", worktree, ref], cwd=root, capture_output=True, text=True, check=True)
         subprocess.run([sys.executable, "-m", "pip", "install", "-e", ".", "-q"], cwd=worktree, check=True)
         output = os.path.join(temporary, "baseline.json")
-        runner = os.path.join(runner_dir, "run_graph.py")
+        runner = os.path.join(runner_dir, "run.py")
         command = _worker_command(runner, op_names, shapes, modes, ("eager",), args, output)
         _run_subprocess(worktree, command)
         results, info = _read_json(output)
@@ -416,7 +420,7 @@ def _parse_args(argv=None):
     return parser, args
 
 
-def main(argv=None):
+def run_graph_benchmark(argv=None):
     parser, args = _parse_args(argv)
     if args.list:
         for name in list_graph_ops():
@@ -484,7 +488,3 @@ def main(argv=None):
             json.dump(payload, file, indent=2)
         print(f"\nResults saved to {args.json_file}")
     return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

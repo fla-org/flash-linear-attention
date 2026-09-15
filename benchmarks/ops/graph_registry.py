@@ -124,13 +124,6 @@ def make_cu_seqlens(actual_t: int, num_seqs: int, profile: str) -> list[int]:
     raise ValueError(f"Unknown sequence profile: {profile}")
 
 
-def make_capture_cu_seqlens(total_tokens: int, num_seqs: int) -> list[int]:
-    """Create a valid layout that reaches the tight static chunk capacity."""
-
-    num_nonempty_seqs = min(total_tokens, num_seqs)
-    return [*range(num_nonempty_seqs), *([total_tokens] * (num_seqs - num_nonempty_seqs + 1))]
-
-
 def _build_kda_case(shape: dict[str, Any], mode: str, device: str, seed: int) -> GraphBenchmarkCase:
     import torch
     import torch.nn.functional as F
@@ -176,7 +169,7 @@ def _build_kda_case(shape: dict[str, Any], mode: str, device: str, seed: int) ->
         else tensor.detach().clone().requires_grad_(requires_grad)
         for index, tensor in enumerate(graph_inputs)
     )
-    capture_offsets = make_capture_cu_seqlens(T, N)
+    capture_offsets = make_cu_seqlens(T, N, "balanced")
     replay_offsets = make_cu_seqlens(actual_t, N, shape["sequence_profile"])
     capture_cu = torch.tensor(capture_offsets, dtype=torch.long, device=device)
     graph_cu = torch.tensor(replay_offsets, dtype=torch.long, device=device)

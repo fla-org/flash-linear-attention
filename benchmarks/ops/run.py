@@ -39,6 +39,9 @@ Usage::
     # Current ref only (no baseline subprocess)
     python -m benchmarks.ops.run --op chunk_gla --no-base
 
+    # Ascend eager-vs-graph latency (graph-specific options: --graph --help)
+    python -m benchmarks.ops.run --graph --op chunk_kda --no-base
+
     # Save results to JSON
     python -m benchmarks.ops.run --op chunk_gla --json results.json
 
@@ -663,8 +666,19 @@ def _bench_at_ref(ref, op_names, shape_configs, modes, backend=None):
 
 
 def main():
+    if '--graph' in sys.argv[1:]:
+        if __package__:
+            from .graph_benchmark import run_graph_benchmark
+        else:
+            from graph_benchmark import run_graph_benchmark
+        return run_graph_benchmark([arg for arg in sys.argv[1:] if arg != '--graph'])
+
     parser = argparse.ArgumentParser(
         description='Unified benchmark runner for flash-linear-attention ops',
+    )
+    parser.add_argument(
+        '--graph', action='store_true',
+        help='Run Ascend eager-vs-graph benchmarks; use --graph --help for graph-specific options',
     )
     parser.add_argument(
         '--op', nargs='+', default=None,

@@ -5,18 +5,19 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-import pytest
+import sys
 
+import pytest
+import torch
+
+from benchmarks.ops.graph_benchmark import benchmark_case, print_results
 from benchmarks.ops.graph_registry import (
     GraphBenchmarkCase,
     get_graph_op,
     list_graph_ops,
-    make_capture_cu_seqlens,
     make_cu_seqlens,
     normalize_kda_shape,
 )
-from benchmarks.ops.run_graph import benchmark_case, print_results
-from fla.ops.utils import get_max_num_chunks
 
 
 def test_kda_graph_registration_and_common_shape_defaults():
@@ -56,12 +57,6 @@ def test_kda_sequence_profiles_are_valid_cumulative_offsets():
         assert offsets == sorted(offsets)
 
 
-def test_kda_capture_layout_is_valid_when_sequence_slots_exceed_tokens():
-    assert make_capture_cu_seqlens(total_tokens=4, num_seqs=8) == [0, 1, 2, 3, 4, 4, 4, 4, 4]
-    assert get_max_num_chunks(total_tokens=4, max_num_seqs=8, chunk_size=64) == 4
-    assert get_max_num_chunks(total_tokens=128, max_num_seqs=65, chunk_size=64) == 65
-
-
 def test_kda_shape_rejects_dense_batch_and_invalid_fused_options():
     with pytest.raises(ValueError, match="B=1"):
         normalize_kda_shape({"B": 2, "T": 128, "H": 2, "D": 64})
@@ -69,9 +64,14 @@ def test_kda_shape_rejects_dense_batch_and_invalid_fused_options():
         normalize_kda_shape({"B": 1, "T": 128, "H": 2, "D": 64, "safe_gate": True})
 
 
-def test_benchmark_case_captures_once_validates_and_times_both_engines():
+@pytest.mark.parametrize("mode", ["fwd", "fwdbwd"])
+def test_benchmark_case_captures_once_validates_and_times_both_engines(mode):
     calls = []
     events = []
+
+    def check_context():
+        assert torch.is_grad_enabled() == (mode == "fwdbwd")
+        assert not torch.is_inference_mode_enabled()
 
     def eager_step(*args):
         calls.append(("eager-step", args))
@@ -81,6 +81,7 @@ def test_benchmark_case_captures_once_validates_and_times_both_engines():
         calls.append(("graph-step", args))
 
     def run_once(step, args, collect):
+        check_context()
         step(*args)
         return {"value": 1} if collect else {}
 
@@ -98,6 +99,7 @@ def test_benchmark_case_captures_once_validates_and_times_both_engines():
     captures = []
 
     def graph_factory(step, args):
+        check_context()
         captures.append((step, args))
         events.append("capture")
 
@@ -109,7 +111,7 @@ def test_benchmark_case_captures_once_validates_and_times_both_engines():
     clock_values = iter(range(0, 15_000_000, 1_000_000))
     result = benchmark_case(
         case=case,
-        mode="fwdbwd",
+        mode=mode,
         engines=("eager", "graph"),
         warmup=1,
         iterations=2,
@@ -126,6 +128,37 @@ def test_benchmark_case_captures_once_validates_and_times_both_engines():
     assert result["graph"]["p95_ms"] == 1.0
     assert events.index("eager") < events.index("capture")
     assert any(kind == "graph-replay" and args == ("live",) for kind, args in calls)
+
+
+@pytest.mark.parametrize("graph_index", [0, 2])
+def test_run_routes_graph_arguments(monkeypatch, graph_index):
+    from benchmarks.ops import graph_benchmark, run
+
+    arguments = ["--op", "chunk_kda", "--no-base", "--modes", "fwd", "fwdbwd", "--iterations", "2"]
+    forwarded = []
+    monkeypatch.setattr(graph_benchmark, "run_graph_benchmark", lambda argv: forwarded.append(argv))
+    argv = arguments.copy()
+    argv.insert(graph_index, "--graph")
+    monkeypatch.setattr(sys, "argv", ["run.py", *argv])
+    run.main()
+    assert forwarded == [arguments]
+
+
+@pytest.mark.parametrize("graph", [False, True])
+def test_run_help_and_list(monkeypatch, capsys, graph):
+    from benchmarks.ops import run
+
+    prefix = ["run.py", "--graph"] if graph else ["run.py"]
+    monkeypatch.setattr(sys, "argv", [*prefix, "--help"])
+    with pytest.raises(SystemExit) as error:
+        run.main()
+    assert error.value.code == 0
+    help_text = capsys.readouterr().out
+    assert ("--iterations" if graph else "--graph") in help_text
+
+    monkeypatch.setattr(sys, "argv", [*prefix, "--list"])
+    run.main()
+    assert "chunk_kda" in capsys.readouterr().out
 
 
 def test_benchmark_case_rejects_reusing_capture_tensor_as_live_input():

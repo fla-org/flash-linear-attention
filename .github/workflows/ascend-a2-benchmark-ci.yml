@@ -194,7 +194,7 @@ jobs:
           # The runner exposes devices 0-3. Reuse device 0 only after the
           # parallel benchmarks finish so graph latency is not affected by
           # another workload sharing the same NPU.
-          ASCEND_RT_VISIBLE_DEVICES=0 python -m benchmarks.ops.run_graph \
+          ASCEND_RT_VISIBLE_DEVICES=0 python -m benchmarks.ops.run --graph \
             --op chunk_kda --no-base --modes fwdbwd \
             --custom-shapes '{"smoke": {"B": 1, "T": 128, "H": 2, "D": 64, "N": 2}}' \
             --warmup 3 --iterations 10 --json benchmark_kda_graph.json \
