@@ -183,21 +183,6 @@ def get_max_num_splits(
     return triton.cdiv(int(max(prepare_lens(cu_seqlens))), chunk_size)
 
 
-def get_max_num_chunks(total_tokens: int, max_num_seqs: int, chunk_size: int) -> int:
-    """Return the tight maximum chunk count for a packed variable-length tensor."""
-
-    if total_tokens < 0:
-        raise ValueError("total_tokens must be non-negative")
-    if max_num_seqs < 0:
-        raise ValueError("max_num_seqs must be non-negative")
-    if chunk_size <= 0:
-        raise ValueError("chunk_size must be positive")
-    if total_tokens == 0 or max_num_seqs == 0:
-        return 0
-    num_nonempty_seqs = min(total_tokens, max_num_seqs)
-    return num_nonempty_seqs + (total_tokens - num_nonempty_seqs) // chunk_size
-
-
 def prepare_chunk_indices_static(
     cu_seqlens: torch.LongTensor,
     chunk_size: int,
@@ -207,9 +192,9 @@ def prepare_chunk_indices_static(
 
     Builds ``chunk_indices`` of shape ``[nt_max, 2]`` and ``chunk_offsets`` of shape
     ``[N_max + 1]`` with on-device ops, so their construction can be recorded in a
-    platform graph. ``cu_seqlens`` must contain exactly ``N_max + 1`` entries, with
-    unused sequence slots represented by repeated terminal offsets. Rows beyond the
-    real chunk count carry the sentinel ``i_n = -1`` and are handled as no-op tasks.
+    platform graph. ``cu_seqlens`` must be padded with zero-length tail sequences up to
+    ``N_max + 1`` entries. Rows beyond the real chunk count carry the sentinel
+    ``i_n = -1``; kernels must return immediately on a negative segment id.
     Not cached: the construction runs (and is recorded) on every call.
 
     Returns both tensors with the same dtype as ``cu_seqlens``.

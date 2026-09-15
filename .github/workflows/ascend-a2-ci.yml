@@ -52,8 +52,15 @@ jobs:
             // Unlike the H100 'npu_only' detection, __init__.py is NOT excluded
             // here: a change to it affects the NPU backend too, so it should
             // trigger this CI.
-            const npuPattern = /^fla\/(.+\/)?backends\/triton_ascend\/|^\.github\/workflows\/ascend-|^pyproject\.toml$|^fla\/utils\/|^fla\/modules\/|^tests\/.+graph.*_npu\.py$|^tests\/conftest\.py$/;
-            const related = files.filter(f => npuPattern.test(f.filename)).map(f => f.filename);
+            const npuPattern = /^fla\/(.+\/)?backends\/triton_ascend\/|^\.github\/workflows\/ascend-|^pyproject\.toml$|^fla\/utils\/|^fla\/modules\/|^tests\/conftest\.py$/;
+            const graphPaths = new Set([
+              'tests/ops/test_kda_graph.py',
+              'tests/benchmarks/test_graph_benchmark.py',
+              'benchmarks/ops/run.py',
+              'benchmarks/ops/graph_benchmark.py',
+              'benchmarks/ops/graph_registry.py',
+            ]);
+            const related = files.filter(f => npuPattern.test(f.filename) || graphPaths.has(f.filename)).map(f => f.filename);
             if (related.length > 0) {
               core.info('NPU-related files changed: ' + related.join(', '));
             }
@@ -166,4 +173,4 @@ jobs:
           FLA_NPU_XDIST: "0"
         run: |
           source /usr/local/Ascend/ascend-toolkit/set_env.sh
-          pytest -s -v --exitfirst tests/ops/test_kda_graph_npu.py
+          pytest -s -v --exitfirst tests/ops/test_kda_graph.py
