@@ -135,6 +135,9 @@ def fused_linear_cross_entropy_fwd(
     l2_penalty_factor: float = 1e-4,
     accumulate_grad_in_fp32: bool = True,
     process_group: ProcessGroup | None = None,
+    need_dx: bool = True,
+    need_dw: bool = True,
+    need_db: bool = True,
 ):
     device = x.device
     world_size = 1 if process_group is None else torch.distributed.get_world_size(process_group)
@@ -154,16 +157,16 @@ def fused_linear_cross_entropy_fwd(
     NC = triton.cdiv(N, C)
 
     # [N, H]
-    dx = torch.zeros_like(x, device=device)
+    dx = torch.zeros_like(x, device=device) if need_dx or world_size > 1 else None
     grad_dtype = torch.float32 if accumulate_grad_in_fp32 else weight.dtype
     bias_grad_dtype = None
     if bias is not None:
         bias_grad_dtype = torch.float32 if accumulate_grad_in_fp32 else bias.dtype
 
     # [V, H]
-    dw = torch.zeros_like(weight, device=device, dtype=grad_dtype) if weight is not None else None
+    dw = torch.zeros_like(weight, device=device, dtype=grad_dtype) if need_dw else None
     # [V]
-    db = torch.zeros_like(bias, device=device, dtype=bias_grad_dtype) if bias is not None else None
+    db = torch.zeros_like(bias, device=device, dtype=bias_grad_dtype) if bias is not None and need_db else None
     # [N]
     loss = torch.zeros(N, device=device, dtype=torch.float)
 
@@ -177,7 +180,7 @@ def fused_linear_cross_entropy_fwd(
         # when doing matmul, use the original precision
         # [C, V]
         c_logits = F.linear(c_x, weight, bias)
-        if weight is not None and c_x.dtype != grad_dtype:
+        if dw is not None and c_x.dtype != grad_dtype:
             c_x = c_x.to(dtype=grad_dtype)
         c_target = target[start:end]
         c_loss, _, c_lse, total_classes, class_start_idx = cross_entropy_fwd(
@@ -190,6 +193,8 @@ def fused_linear_cross_entropy_fwd(
             process_group=process_group,
         )
         loss[start:end] = c_loss
+        if dx is None and dw is None and db is None:
+            continue
         if use_l2warp:
             c_maxx, c_ids = torch.max(c_logits, -1, keepdim=True)
             if world_size > 1:
@@ -229,23 +234,24 @@ def fused_linear_cross_entropy_fwd(
             # Total_dx = CE_dx + L2_dx
             # Total_dw = CE_dw + L2_dw
             # Total_db = CE_db + L2_db
-            if weight is not None:
+            if dw is not None:
                 torch.addmm(
                     input=dw,
                     mat1=g_logits_l2.t().to(dtype=grad_dtype),
                     mat2=c_x,
                     out=dw,
                 )
-            if bias is not None:
+            if db is not None:
                 torch.add(input=db, other=g_logits_l2.sum(0, dtype=bias_grad_dtype), out=db)
             # The dx contribution must be added to the final dx calculation
-            dx_l2_contribution = torch.mm(g_logits_l2, weight)
+            dx_l2_contribution = torch.mm(g_logits_l2, weight) if dx is not None else 0.0
         else:
             dx_l2_contribution = 0.0
 
-        dx[start:end] = torch.mm(c_logits, weight) + dx_l2_contribution
+        if dx is not None:
+            dx[start:end] = torch.mm(c_logits, weight) + dx_l2_contribution
 
-        if weight is not None:
+        if dw is not None:
             torch.addmm(
                 input=dw,
                 mat1=c_logits.t().to(dtype=grad_dtype),
@@ -253,7 +259,7 @@ def fused_linear_cross_entropy_fwd(
                 out=dw,
             )
 
-        if bias is not None:
+        if db is not None:
             torch.add(input=db, other=c_logits.sum(0, dtype=bias_grad_dtype), out=db)
 
     if world_size > 1:
@@ -265,46 +271,26 @@ def fused_linear_cross_entropy_fwd(
         dw = dw.to(weight)
     if db is not None:
         db = db.to(bias)
-    return loss, dx, dw, db
+    return loss, dx if need_dx else None, dw, db
 
 
 @dispatch('modules')
 def fused_linear_cross_entropy_bwd(
     do: torch.Tensor,
-    dx: torch.Tensor,
-    dw: torch.Tensor,
-    db: torch.Tensor,
+    dx: torch.Tensor | None,
+    dw: torch.Tensor | None,
+    db: torch.Tensor | None,
 ):
-    # We use a Triton kernel instead of a PyTorch operation because modifying inputs in-place
-    # for gradient storage and backward multiple times causes anomalies with PyTorch but not with Triton.
-    N, H = dx.shape
+    H = next((grad.shape[-1] for grad in (dx, dw, db) if grad is not None), 1)
     BN = min(MAX_FUSED_SIZE, triton.next_power_of_2(H))
-
-    elementwise_mul_kernel[(triton.cdiv(N * H, BN),)](
-        x=dx,
-        g=do,
-        N=N*H,
-        BN=BN,
-        num_warps=STATIC_WARPS,
-    )
-
-    # handle dw
-    if dw is not None:
-        V, H = dw.shape
-        elementwise_mul_kernel[(triton.cdiv(V * H, BN),)](
-            x=dw,
+    for grad in (dx, dw, db):
+        if grad is None:
+            continue
+        N = grad.numel()
+        elementwise_mul_kernel[(triton.cdiv(N, BN),)](
+            x=grad,
             g=do,
-            N=V*H,
-            BN=BN,
-            num_warps=STATIC_WARPS,
-        )
-
-    if db is not None:
-        V = db.shape[0]
-        elementwise_mul_kernel[(triton.cdiv(V, BN),)](
-            x=db,
-            g=do,
-            N=V,
+            N=N,
             BN=BN,
             num_warps=STATIC_WARPS,
         )
@@ -335,6 +321,7 @@ class FusedLinearCrossEntropyFunction(torch.autograd.Function):
         l2_penalty_factor: float = 1e-4,
         accumulate_grad_in_fp32: bool = True,
         process_group: ProcessGroup | None = None,
+        grad_enabled: bool = True,
     ):
         """Precompute gradients per token chunk so backward does not retain the logits."""
         loss, dx, dw, db = fused_linear_cross_entropy_fwd(
@@ -352,13 +339,11 @@ class FusedLinearCrossEntropyFunction(torch.autograd.Function):
             l2_penalty_factor=l2_penalty_factor,
             accumulate_grad_in_fp32=accumulate_grad_in_fp32,
             process_group=process_group,
+            need_dx=grad_enabled and ctx.needs_input_grad[0],
+            need_dw=grad_enabled and ctx.needs_input_grad[2],
+            need_db=grad_enabled and bias is not None and ctx.needs_input_grad[3],
         )
-        # downcast to dtype and store for backward
-        ctx.save_for_backward(
-            dx.detach(),
-            dw.detach() if weight is not None else None,
-            db.detach() if bias is not None else None,
-        )
+        ctx.save_for_backward(dx, dw, db)
         return loss
 
     @staticmethod
@@ -366,7 +351,7 @@ class FusedLinearCrossEntropyFunction(torch.autograd.Function):
     def backward(ctx, do):
         dx, dw, db = ctx.saved_tensors
         dx, dw, db = fused_linear_cross_entropy_bwd(do=do, dx=dx, dw=dw, db=db)
-        return dx, None, dw, db, None, None, None, None, None, None, None, None, None, None
+        return dx, None, dw, db, None, None, None, None, None, None, None, None, None, None, None
 
 
 def fused_linear_cross_entropy_loss(
@@ -442,6 +427,7 @@ def fused_linear_cross_entropy_loss(
         l2_penalty_factor,
         accumulate_grad_in_fp32,
         process_group,
+        torch.is_grad_enabled(),
     )
 
 
