@@ -132,6 +132,9 @@ def _select_bwd_dhu_tiles(
     # bwd kernel is blockdim64: K is covered by up to four BK=64 slabs only.
     max_bk = 64
     desired_v = triton.next_power_of_2(V)
+    # partial K/V slabs plus tail-token masking can exceed UB with BV > 64 (e.g. D=100).
+    if K % 64 or V % 64:
+        desired_v = min(desired_v, 64)
     best: tuple[int, int, int] | None = None  # cost, BK, BV
 
     bk = 64

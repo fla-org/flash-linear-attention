@@ -654,6 +654,11 @@ def test_chunk_kda_graph_callable_multi_replay_matches_eager(cu_dtype):
             id="fp16-long-sequence-large-head",
         ),
         pytest.param(
+            _GraphCase(T=128, K=100, V=100),
+            ([0, 1, 128], [0, 64, 64], [0, 1, 128]),
+            id="fp16-unaligned-head-partial",
+        ),
+        pytest.param(
             _GraphCase(T=4, N=8),
             [0, 0, 1, 1, 2, 2, 3, 3, 4],
             id="fp16-more-sequence-slots-than-tokens",
