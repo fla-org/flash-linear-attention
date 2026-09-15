@@ -345,14 +345,17 @@ def _format_latency(metrics: dict[str, float] | None, statistic: str) -> str:
 
 
 def _format_config(row: dict[str, Any]) -> str:
-    """Format graph-specific workload axes without hard-coding an operator schema."""
+    """Format extra configuration, omitting dimensions already shown in the table."""
 
     excluded = {
         "op", "shape", "mode", "B", "T", "H", "D", "N",
         "eager", "graph", "capture_ms", "validation",
     }
     preferred = ("dtype", "chunk_size", "actual_T", "HV", "DV")
-    parts = [f"{name}={row[name]}" for name in preferred if name in row]
+    for name, column in (("actual_T", "T"), ("HV", "H"), ("DV", "D")):
+        if name in row and column in row and row[name] == row[column]:
+            excluded.add(name)
+    parts = [f"{name}={row[name]}" for name in preferred if name in row and name not in excluded]
     for name in sorted(set(row) - excluded - set(preferred)):
         value = row[name]
         if value is False or value in (None, "balanced"):
@@ -369,7 +372,7 @@ def print_results(current, current_info, baseline=None, baseline_info=None) -> N
     print(f"\n{title}")
     print(f"Device: {current_info['device']} | torch {current_info['torch']} | torch_npu {current_info['torch_npu']}")
     header = (
-        f"{'mode':<8} {'shape':<24} {'stat':<5} {'B':>3} {'T':>6} {'H':>4} {'D':>4} {'N':>4} "
+        f"{'mode':<8} {'case':<24} {'stat':<5} {'B':>3} {'T':>6} {'H':>4} {'D':>4} {'N':>4} "
         f"{'base eager':>12} {'HEAD eager':>12} {'HEAD graph':>12} {'eager x':>9} {'graph x':>9}    "
         f"config"
     )

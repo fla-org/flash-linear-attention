@@ -213,13 +213,15 @@ def test_result_table_reports_base_and_graph_speedups(capsys):
     output = capsys.readouterr().out
     assert "main[def] eager / ascend_graph[abc] eager / ascend_graph[abc] graph" in output
     header = next(line for line in output.splitlines() if line.startswith("mode"))
+    assert header.split()[:3] == ["mode", "case", "stat"]
     assert "graph x    config" in header
     assert header.endswith("config")
     assert output.count("1.50x") == 2
     assert output.count("2.00x") == 2
 
 
-def test_result_table_reports_graph_specific_configuration(capsys):
+@pytest.mark.parametrize("extra_dimensions", [False, True])
+def test_result_table_reports_graph_specific_configuration(capsys, extra_dimensions):
     current = [{
         "op": "chunk_kda",
         "shape": "custom",
@@ -231,9 +233,9 @@ def test_result_table_reports_graph_specific_configuration(capsys):
         "N": 2,
         "dtype": "bfloat16",
         "chunk_size": 32,
-        "actual_T": 96,
-        "HV": 4,
-        "DV": 32,
+        "actual_T": 96 if extra_dimensions else 128,
+        "HV": 4 if extra_dimensions else 2,
+        "DV": 32 if extra_dimensions else 64,
         "fused_options": True,
         "sequence_profile": "ragged",
         "eager": {"p50_ms": 2.0, "p95_ms": 2.0},
@@ -245,8 +247,13 @@ def test_result_table_reports_graph_specific_configuration(capsys):
     output = capsys.readouterr().out
     assert "dtype=bfloat16" in output
     assert "chunk_size=32" in output
-    assert "actual_T=96" in output
-    assert "HV=4" in output
-    assert "DV=32" in output
+    if extra_dimensions:
+        assert "actual_T=96" in output
+        assert "HV=4" in output
+        assert "DV=32" in output
+    else:
+        assert "actual_T=" not in output
+        assert "HV=" not in output
+        assert "DV=" not in output
     assert "fused_options=True" in output
     assert "sequence_profile=ragged" in output
