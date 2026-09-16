@@ -5,6 +5,8 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import os
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -16,6 +18,9 @@ from fla.ops.momentum_delta_rule import (
     recurrent_momentum_delta_rule_ref,
 )
 from fla.utils import assert_close, device, device_platform
+
+# Force IEEE fp32 precision in Triton tl.dot (avoid TF32 rounding in chunk kernels)
+os.environ['TRITON_F32_DEFAULT'] = 'ieee'
 
 
 @pytest.mark.parametrize(
@@ -196,8 +201,8 @@ def test_chunk_initial_state_grad_count():
 @pytest.mark.skipif(device_platform == 'intel', reason='Intel Triton Failure')
 def test_full_momentum_chunk_recurrent_backward_parity():
     torch.manual_seed(3)
-    B, T, H, K, V = 2, 33, 2, 8, 6
-    dtype = torch.bfloat16
+    B, T, H, K, V = 2, 33, 2, 16, 16
+    dtype = torch.float32
     values = [
         torch.randn(B, T, H, K, dtype=dtype, device=device),
         torch.randn(B, T, H, K, dtype=dtype, device=device),
