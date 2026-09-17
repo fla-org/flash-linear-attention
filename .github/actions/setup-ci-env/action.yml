@@ -108,6 +108,17 @@ runs:
         echo "CONDA_ENV_NAME = ${TARGET_CONDA_ENV}"
         echo "CONDA_BIN_PATH = ${CONDA_BASE}/envs/${TARGET_CONDA_ENV}/bin"
 
+    - name: Reclaim H100 pip cache space
+      if: steps.check_skip.outputs.skip_tests == 'false' && startsWith(inputs.runner_name, 'nvidia-h100')
+      shell: bash
+      run: |
+        # Persistent wheel/download caches can exhaust the runner during TileLang installation.
+        df -h "$CONDA_BIN_PATH" "$RUNNER_TEMP"
+        $CONDA_BIN_PATH/pip cache info
+        $CONDA_BIN_PATH/pip cache purge
+        df -h "$CONDA_BIN_PATH" "$RUNNER_TEMP"
+        echo "PIP_NO_CACHE_DIR=1" >> "$GITHUB_ENV"
+
     - name: Install/Update Dependencies
       if: steps.check_skip.outputs.skip_tests == 'false'
       shell: bash

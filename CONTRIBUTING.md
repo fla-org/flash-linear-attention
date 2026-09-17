@@ -225,12 +225,9 @@ Don't hard-wrap prose at an arbitrary short column — this covers Markdown file
   any divisibility you rely on. Do not use `tl.make_block_ptr` / `tl.advance`:
   deprecated upstream and removed in triton main. (`backends/triton_ascend/` is
   exempt — triton-ascend still requires block pointers.)
-- `tl.make_tensor_descriptor` (TMA) is an opt-in optimization for hot-path
-  tiles on Hopper and newer, not a default substitute for block access. It
-  requires 16-byte-aligned bases and stride multiples, a stride-1 innermost
-  dim, no transposed blocks, and a registered allocator for device-side
-  descriptors. Use it when a per-kernel benchmark in the PR shows it pays off,
-  e.g. behind a flag as in `fla/ops/utils/solve_tril.py`.
+- `tl.make_tensor_descriptor` (TMA) is an opt-in optimization for hot-path tiles, not a default substitute for block access. Availability is `IS_TMA_SUPPORTED` in `fla/utils/_device.py`, which covers Nvidia Hopper and newer plus AMD gfx1250, and is gated behind `FLA_USE_TMA=1` on every backend. The AMD side is an arch allowlist rather than a version floor — gfx942 and gfx950 have no such lowering — so extend `IS_AMD_TMA_ARCH` explicitly when another arch gains it, and don't assume a higher `gfx` number implies support. Note that no CI runner currently has a TMA-capable AMD arch, so that path is only exercised by local runs.
+- Descriptors require 16-byte-aligned bases and stride multiples, a stride-1 innermost dim, no transposed blocks, and a registered allocator for device-side descriptors. Nothing verifies the alignment for you and a violation faults at launch rather than failing to compile, so derive a guard on the host from the dtype and the shapes the op is actually tested at, and fall back to the plain-pointer path when it fails — a head dim of `K=60` in fp16, as KDA is tested at, is 120 bytes per row and cannot back a descriptor. Descriptor stores are also asynchronous, so a kernel must never read back a location it just stored through a descriptor.
+- Use TMA when a per-kernel benchmark in the PR shows it pays off, behind a `USE_TMA: tl.constexpr` flag that keeps the plain-pointer path intact, as in `fla/ops/utils/solve_tril.py`. A benchmark on one vendor does not carry over to the other: the descriptor path in `solve_tril` was tuned on Hopper and has not been measured on gfx1250.
 - Treat program IDs and grid-derived indices as potentially narrow integers.
   Cast them to `tl.int64` before multiplying by sizes, strides, or sequence
   offsets. This is especially important for non-first grid dimensions on NVIDIA
