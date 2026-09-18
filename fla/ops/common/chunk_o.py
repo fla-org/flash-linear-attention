@@ -608,10 +608,6 @@ def chunk_bwd_dv(
     chunk_indices: torch.LongTensor | None = None,
 ) -> torch.Tensor:
     B, T, H, K, V, HV = *k.shape, do.shape[-1], do.shape[2]
-    if q.dtype in (torch.float16, torch.bfloat16):
-        # Triton miscompiles masked K-tail iterations into OOB shared-memory access for 16-bit odd K/V (IMA)
-        assert K % 2 == 0 and V % 2 == 0, \
-            f"chunk_bwd_dv requires even K and V for {q.dtype}, got K={K}, V={V}"
     BT = chunk_size
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
@@ -624,6 +620,9 @@ def chunk_bwd_dv(
         CONST_TILING = 32
     BK = min(max(triton.next_power_of_2(K), 16), CONST_TILING)
     BV = min(max(triton.next_power_of_2(V), 16), CONST_TILING)
+    if IS_NVIDIA_HOPPER and q.dtype in (torch.float16, torch.bfloat16) and (K % 2 or V % 2):
+        # avoid Triton's WGMMA miscompile for odd 16-bit dimensions with narrow V tiles.
+        BV = max(BV, 64)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     NV = triton.cdiv(V, BV)
     if scale is None:
