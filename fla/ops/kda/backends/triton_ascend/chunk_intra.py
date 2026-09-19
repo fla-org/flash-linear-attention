@@ -744,7 +744,9 @@ def chunk_kda_bwd_kernel_intra_npu(
         if cu_seqlens is not None:
             i_n, i_t = tl.load(chunk_indices + i_t * 2), tl.load(chunk_indices + i_t * 2 + 1)
             if USE_GRAPH:
+                # graph padding uses [-1, 0]; exclude it before sequence-dependent memory accesses.
                 is_valid = i_n >= 0
+        # skip only this task: returning would drop later valid tasks assigned to this core.
         if is_valid:
             if cu_seqlens is not None:
                 # int64 guarantees: cu_seqlens may arrive as int32 and chunk_indices

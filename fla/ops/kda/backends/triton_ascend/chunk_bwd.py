@@ -279,7 +279,9 @@ def chunk_kda_bwd_kernel_wy_v_part_npu(
         if IS_VARLEN:
             i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
             if USE_GRAPH:
+                # graph padding uses [-1, 0]; exclude it before sequence-dependent memory accesses.
                 is_valid = i_n >= 0
+        # skip only this task: returning would drop later valid tasks assigned to this core.
         if is_valid:
             if IS_VARLEN:
                 bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
@@ -387,7 +389,9 @@ def chunk_kda_bwd_kernel_wy_k_part_npu(
         if IS_VARLEN:
             i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
             if USE_GRAPH:
+                # graph padding uses [-1, 0]; exclude it before sequence-dependent memory accesses.
                 is_valid = i_n >= 0
+        # skip only this task: returning would drop later valid tasks assigned to this core.
         if is_valid:
             if IS_VARLEN:
                 bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
@@ -539,7 +543,9 @@ def chunk_kda_bwd_kernel_wy_dw_part_npu(
         if IS_VARLEN:
             i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
             if USE_GRAPH:
+                # graph padding uses [-1, 0]; exclude it before sequence-dependent memory accesses.
                 is_valid = i_n >= 0
+        # skip only this task: returning would drop later valid tasks assigned to this core.
         if is_valid:
             if IS_VARLEN:
                 bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
@@ -680,7 +686,9 @@ def chunk_kda_bwd_kernel_wy_dA_finalize_npu(
         if IS_VARLEN:
             i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
             if USE_GRAPH:
+                # graph padding uses [-1, 0]; exclude it before sequence-dependent memory accesses.
                 is_valid = i_n >= 0
+        # skip only this task: returning would drop later valid tasks assigned to this core.
         if is_valid:
             if IS_VARLEN:
                 bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)

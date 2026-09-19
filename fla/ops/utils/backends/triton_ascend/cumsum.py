@@ -173,7 +173,9 @@ def chunk_local_cumsum_scalar_kernel_npu(
                 tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64),
             )
             if USE_GRAPH:
+                # graph padding uses [-1, 0]; exclude it before sequence-dependent memory accesses.
                 is_valid = i_n >= 0
+        # skip only this task: returning would drop later valid tasks assigned to this core.
         if is_valid:
             if IS_VARLEN:
                 bos, eos = (
