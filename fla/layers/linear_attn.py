@@ -168,6 +168,9 @@ class LinearAttention(nn.Module):
         if self.norm_k:
             k = k / (k.sum(-1, True) + 1e-4)
 
+        if attention_mask is not None:
+            k = k.mul(attention_mask[:, -k.shape[1]:, None, None])
+
         recurrent_state = last_state['recurrent_state'] if last_state is not None else None
         if mode == 'chunk':
             o, final_state = chunk_linear_attn(
