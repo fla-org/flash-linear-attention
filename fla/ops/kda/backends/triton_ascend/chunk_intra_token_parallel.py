@@ -160,6 +160,7 @@ def chunk_kda_fwd_intra_token_parallel_npu(
     Supports both fixed-length and variable-length sequences (GVA: HV >= H).
 
     Writes directly to Aqk and Akk tensors (in-place).
+    ``use_graph`` preserves the dispatch signature; token bounds come from ``cu_seqlens[N]`` in both modes.
     """
     B, T, H, K, HV = *q.shape, gk.shape[2]
     N = len(cu_seqlens) - 1 if cu_seqlens is not None else B

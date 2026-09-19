@@ -10,11 +10,12 @@
 Captures a fwd+bwd step once, replays it with different ``cu_seqlens`` contents
 (different splits, zero-length tail padding, and total_tokens below the static
 capacity), and compares against the eager (``use_graph=False``) path.
-Covers CUDA direct capture and CUDA/NPU graphed callables.
+Covers CUDA direct capture and NPU graphed callables.
 """
 
 import os
 from dataclasses import dataclass
+from importlib import import_module
 
 import pytest
 import torch
@@ -30,6 +31,7 @@ pytestmark = pytest.mark.skipif(
     reason="KDA graph tests require CUDA/HIP or Ascend NPU",
 )
 cuda_only = pytest.mark.skipif(IS_NPU, reason="direct CUDA capture and NCCL require a CUDA/HIP device")
+npu_only = pytest.mark.skipif(not IS_NPU, reason="graphed callable coverage is currently validated on Ascend NPU")
 graph_device = torch.npu if IS_NPU else torch.cuda
 
 
@@ -572,11 +574,30 @@ def _assert_training_case(case: _GraphCase, offsets: list[int] | tuple[list[int]
 
 
 @pytest.mark.parametrize("cu_dtype", [torch.int32, torch.int64])
+@npu_only
 def test_chunk_kda_graph_callable_multi_replay_matches_eager(cu_dtype):
     _assert_training_case(
         case=_GraphCase(cu_dtype=cu_dtype, normalize_q=False, initial_state_scale=1.0),
         offsets=([0, 1, 128], [0, 65, 128], [0, 64, 64], [0, 1, 128]),
         tolerance=2e-3,
+    )
+
+
+@npu_only
+def test_chunk_kda_graph_callable_skips_sentinels_between_tasks(monkeypatch):
+    """Invalid tasks must not prevent the same core from processing later valid tasks."""
+    for name in (
+        "fla.ops.kda.backends.triton_ascend.chunk_bwd",
+        "fla.ops.kda.backends.triton_ascend.chunk_intra",
+        "fla.ops.kda.backends.triton_ascend.wy_fast",
+        "fla.ops.gla.backends.triton_ascend.chunk",
+    ):
+        module = import_module(name)
+        properties = {**module.get_npu_properties(), "num_aicore": 1, "num_vectorcore": 1}
+        monkeypatch.setattr(module, "get_npu_properties", lambda properties=properties: properties)
+    _assert_training_case(
+        case=_GraphCase(T=128, N=4),
+        offsets=([0, 0, 64, 128, 128], [0, 64, 64, 64, 64], [0, 0, 64, 128, 128]),
     )
 
 
@@ -665,10 +686,12 @@ def test_chunk_kda_graph_callable_multi_replay_matches_eager(cu_dtype):
         ),
     ],
 )
+@npu_only
 def test_chunk_kda_graph_callable_option_matrix_matches_eager(case, offsets):
     _assert_training_case(case, offsets)
 
 
+@npu_only
 def test_chunk_kda_graph_callable_intermediate_states_match_eager():
     case = _GraphCase(
         T=96,
@@ -707,6 +730,7 @@ def test_chunk_kda_graph_callable_intermediate_states_match_eager():
             assert h.shape[1] == (case.T + case.chunk_size - 1) // case.chunk_size + case.N - 1
 
 
+@npu_only
 def test_chunk_kda_graph_callable_rejects_mismatched_sequence_capacity():
     case = _GraphCase()
     inputs = _make_case_inputs(case, seed=0)

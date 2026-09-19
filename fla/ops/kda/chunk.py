@@ -323,7 +323,8 @@ def chunk_kda(
               device scalars refreshed in place before each replay.
 
             Ascend currently requires flattened variable-length inputs and does not support
-            context parallelism in graph mode. Default: ``False``.
+            context parallelism in graph mode.
+            ``disable_recompute=True`` is not supported. Default: ``False``.
         max_num_seqs (Optional[int]):
             Static upper bound of the sequence count used together with ``use_graph``.
             Defaults to ``cu_seqlens.shape[0] - 1``. Default: ``None``.

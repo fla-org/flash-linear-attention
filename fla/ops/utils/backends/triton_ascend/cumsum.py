@@ -101,6 +101,7 @@ def _launch_local_cumsum_vector(
     BS,
     NT,
     reverse,
+    use_graph=False,
 ):
     bh_total = B * H
     ns = triton.cdiv(S, BS)
@@ -116,6 +117,7 @@ def _launch_local_cumsum_vector(
         BT=BT,
         BS=BS,
         REVERSE=reverse,
+        USE_GRAPH=use_graph,
         num_warps=_NUM_WARPS,
     )
     max_nt = max_grid_axis_chunks(NT, ns * bh_total, max_grid=ASCEND_MAX_GRID_DIM)
@@ -154,6 +156,7 @@ def chunk_local_cumsum_scalar_kernel_npu(
     REVERSE: tl.constexpr,
     HAS_SCALE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    USE_GRAPH: tl.constexpr,
 ):
     core_id = tl.program_id(0)
     T = T.to(tl.int64)
@@ -163,32 +166,35 @@ def chunk_local_cumsum_scalar_kernel_npu(
         i_bh = task_id % (B * H)
         i_b, i_h = i_bh // H, i_bh % H
 
+        is_valid = True
         if IS_VARLEN:
             i_n, i_t = (
                 tl.load(chunk_indices + i_t * 2).to(tl.int64),
                 tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64),
             )
-            is_valid = i_n >= 0
-            i_n = tl.maximum(i_n, 0)
-            bos, eos = (
-                tl.load(cu_seqlens + i_n).to(tl.int64),
-                tl.load(cu_seqlens + i_n + 1).to(tl.int64),
-            )
-            T = tl.where(is_valid, eos - bos, 0)
-        else:
-            bos = tl.cast(i_b, tl.int64) * T
-            eos = bos + T
+            if USE_GRAPH:
+                is_valid = i_n >= 0
+        if is_valid:
+            if IS_VARLEN:
+                bos, eos = (
+                    tl.load(cu_seqlens + i_n).to(tl.int64),
+                    tl.load(cu_seqlens + i_n + 1).to(tl.int64),
+                )
+                T = eos - bos
+            else:
+                bos = tl.cast(i_b, tl.int64) * T
+                eos = bos + T
 
-        o_t = i_t * BT + tl.arange(0, BT)
-        m_t = o_t < T
-        p_s = s + bos * H + i_h + o_t * H
-        p_o = o + bos * H + i_h + o_t * H
-        # [BT]
-        b_s = tl.load(p_s, mask=m_t, other=0.0).to(tl.float32)
-        b_o = tl.cumsum(b_s, axis=0, reverse=REVERSE)
-        if HAS_SCALE:
-            b_o *= scale
-        tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=m_t)
+            o_t = i_t * BT + tl.arange(0, BT)
+            m_t = o_t < T
+            p_s = s + bos * H + i_h + o_t * H
+            p_o = o + bos * H + i_h + o_t * H
+            # [BT]
+            b_s = tl.load(p_s, mask=m_t, other=0.0).to(tl.float32)
+            b_o = tl.cumsum(b_s, axis=0, reverse=REVERSE)
+            if HAS_SCALE:
+                b_o *= scale
+            tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=m_t)
     return
 
 
@@ -214,6 +220,7 @@ def chunk_local_cumsum_vector_kernel_npu(
     IS_VARLEN: tl.constexpr,
     NT_OFFSET: tl.constexpr,
     BH_OFFSET: tl.constexpr,
+    USE_GRAPH: tl.constexpr,
 ):
     i_s, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_t += NT_OFFSET
@@ -221,7 +228,7 @@ def chunk_local_cumsum_vector_kernel_npu(
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        if i_n < 0:
+        if USE_GRAPH and i_n < 0:
             return
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
@@ -375,6 +382,7 @@ def chunk_local_cumsum_scalar_npu(
         H=H,
         BT=chunk_size,
         REVERSE=reverse,
+        USE_GRAPH=use_graph,
     )
     return g
 
@@ -424,6 +432,7 @@ def chunk_local_cumsum_vector_npu(
         BS=BS,
         NT=NT,
         reverse=reverse,
+        use_graph=use_graph,
     )
     return g
 
