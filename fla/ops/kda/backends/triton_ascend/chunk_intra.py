@@ -785,7 +785,8 @@ def chunk_kda_bwd_kernel_intra_npu(
                 m_ik = m_row[:, None] & m_k[None, :]
                 a_row = i_i * BC + o_i
 
-                b_g = tl.load(g_l + i_ti * (HV * K) + o_i[:, None] * (HV * K) + o_k[None, :], mask=m_ik, other=0.0).to(tl.float32)
+                b_g = tl.load(g_l + i_ti * (HV * K) + o_i[:, None] * (HV * K) +
+                              o_k[None, :], mask=m_ik, other=0.0).to(tl.float32)
                 b_b = tl.load(beta_l + i_ti * HV + o_i * HV, mask=m_row, other=0.0)
                 b_q = tl.load(q_l + i_ti * (H * K) + o_i[:, None] * (H * K) + o_k[None, :], mask=m_ik, other=0.0)
                 b_k = tl.load(k_l + i_ti * (H * K) + o_i[:, None] * (H * K) + o_k[None, :], mask=m_ik, other=0.0)

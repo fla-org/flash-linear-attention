@@ -372,7 +372,7 @@ def chunk_kda_bwd_kernel_wy_k_part_npu(
     STATE_V_FIRST: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     K_OFFSET: tl.constexpr,
-    USE_GRAPH: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
 ):
     i_k = K_OFFSET
     core_id = tl.program_id(0)

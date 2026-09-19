@@ -441,6 +441,7 @@ def chunk_gdn2_bwd_wy_dqkg_fused_npu(
         BV=BV,
         STATE_V_FIRST=state_v_first,
         IS_VARLEN=is_varlen,
+        USE_GRAPH=False,
     )
     for k_off in range(NK):
         k_part_kwargs['K_OFFSET'] = k_off
