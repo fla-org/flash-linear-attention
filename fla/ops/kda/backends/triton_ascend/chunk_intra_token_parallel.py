@@ -72,6 +72,8 @@ def chunk_kda_fwd_kernel_intra_token_parallel_npu(
     i_hg = tl.program_id(1) + HG_OFFSET
 
     if IS_VARLEN:
+        # graph replay can leave unused token slots in the fixed grid;
+        # skip them before sequence lookup, which would yield i_n=N and read cu_seqlens[N+1] out of bounds.
         actual_t = tl.load(cu_seqlens + N).to(tl.int64)
         if tl.cast(i_tg, tl.int64) >= actual_t:
             return
