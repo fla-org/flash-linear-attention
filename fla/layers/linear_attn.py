@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from einops import rearrange, repeat
 
 from fla.layers.utils import get_layer_cache, update_layer_cache
@@ -96,7 +95,11 @@ class LinearAttention(nn.Module):
 
         elif feature_map == 'elu':
             def elu(x):
-                return F.elu(x) + 1
+                return torch.where(
+                    x >= 0,
+                    x + 1,
+                    x.clamp_max(0).exp(),
+                ).to(x.dtype)
             self.feature_map_q = elu
             self.feature_map_k = elu
 
