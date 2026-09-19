@@ -61,15 +61,18 @@ def test_linear_attn_left_padding(dtype, length, padding_length):
 @pytest.mark.parametrize('dtype', [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize('mode', ['chunk', 'fused_chunk', 'fused_recurrent'])
 @pytest.mark.parametrize('feature_map', ['elu', 'elementwise_product'])
-def test_linear_attn_padding_values_do_not_affect_valid_tokens(dtype, mode, feature_map):
+@pytest.mark.parametrize('norm_k', [False, True])
+def test_linear_attn_padding_values_do_not_affect_valid_tokens(dtype, mode, feature_map, norm_k):
     torch.manual_seed(42)
     layer = LinearAttention(
         hidden_size=128,
         num_heads=2,
         feature_map=feature_map,
+        norm_k=norm_k,
         do_feature_map_norm=True,
         output_norm='identity',
         mode=mode,
+        layer_idx=0,
     ).to(device=device, dtype=dtype)
     x = torch.randn(2, 129, 128, device=device, dtype=dtype)
     mask = torch.ones(2, 129, device=device, dtype=torch.bool)
@@ -78,8 +81,15 @@ def test_linear_attn_padding_values_do_not_affect_valid_tokens(dtype, mode, feat
     changed = x.clone()
     changed[~mask] = torch.randn_like(changed[~mask])
     with torch.no_grad():
-        expected = layer(x, attention_mask=mask)[0]
-        actual = layer(changed, attention_mask=mask)[0]
+        expected, _, expected_cache = layer(x, attention_mask=mask, past_key_values=Cache(), use_cache=True)
+        actual, _, actual_cache = layer(changed, attention_mask=mask, past_key_values=Cache(), use_cache=True)
+        for actual_state, expected_state in zip(actual_cache[0]['recurrent_state'], expected_cache[0]['recurrent_state']):
+            torch.testing.assert_close(actual_state, expected_state, rtol=0, atol=0)
+        next_x = torch.randn(2, 1, 128, device=device, dtype=dtype)
+        next_mask = torch.cat([mask, torch.ones_like(mask[:, :1])], dim=1)
+        expected_next = layer(next_x, attention_mask=next_mask, past_key_values=expected_cache, use_cache=True)[0]
+        actual_next = layer(next_x, attention_mask=next_mask, past_key_values=actual_cache, use_cache=True)[0]
+        torch.testing.assert_close(actual_next, expected_next, rtol=0, atol=0)
     torch.testing.assert_close(actual[mask], expected[mask], rtol=0, atol=0)
     x.requires_grad_()
     changed.requires_grad_()
