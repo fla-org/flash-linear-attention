@@ -544,8 +544,7 @@ def chunk_kda_fwd_intra_npu(
     BT = chunk_size
     if BT not in (32, 64):
         raise ValueError(f"KDA intra chunk kernel only supports chunk_size 32 or 64, got {BT}.")
-    # BC=32 tiles need NC>=2 (chunk_size 32 keeps BC=16) and K<=128 (K>BK reintroduces the
-    # K loop; combined with 32x32 fp16 varlen solve it exceeds tolerance - fall back to BC=16)
+    # BC=32 tiles need NC>=2 (chunk_size 32 keeps BC=16).
     # BC=32 tile envelope: sub BK is next_pow2(K), and [32, 512] sub tiles exceed the
     # UB budget (compile failure) - keep stock BC=16 for K > 256.
     BC = _BC if (BT >= 64 and K <= 256) else 16
