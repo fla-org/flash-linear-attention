@@ -789,6 +789,7 @@ def chunk_gdn2_fwd_intra(
     return w, u, qg, kg, Aqk, Akk
 
 
+@dispatch('gdn2')
 def chunk_gdn2_bwd_intra(
     q: torch.Tensor,
     k: torch.Tensor,
