@@ -22,7 +22,7 @@ from fla.layers.attn import Attention
 from fla.layers.rwkv7 import RWKV7Attention
 from fla.models.hybrid import get_hybrid_attention_spec
 from fla.models.rwkv7.configuration_rwkv7 import RWKV7Config
-from fla.models.utils import Cache, FLAUnsupportedCacheGenerationMixin
+from fla.models.utils import Cache, FLAUnsupportedCacheGenerationMixin, prepare_causal_lm_labels
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, LayerNorm
 from fla.modules.activations import ACT2FN
 from fla.modules.l2warp import l2_warp
@@ -523,7 +523,7 @@ class RWKV7ForCausalLM(RWKV7PreTrainedModel, FLAUnsupportedCacheGenerationMixin)
 
             # shift_labels: See https://github.com/huggingface/transformers/pull/36607/files.
             if shift_labels is None:
-                shift_labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], criterion.ignore_index)), 1)
+                shift_labels = prepare_causal_lm_labels(labels, criterion.ignore_index, kwargs.get("cu_seqlens"))
             shift_labels = shift_labels.to(hidden_states.device)
 
             if self.config.fuse_linear_cross_entropy:

@@ -16,7 +16,7 @@ from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.log_linear_mamba2 import LogLinearMamba2
 from fla.models.log_linear_mamba2.configuration_log_linear_mamba2 import LogLinearMamba2Config
-from fla.models.utils import Cache, FLAGenerationMixin
+from fla.models.utils import Cache, FLAGenerationMixin, prepare_causal_lm_labels
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, GatedMLP, RMSNorm
 from fla.ops.attnres import fused_attnres
 
@@ -481,13 +481,7 @@ class LogLinearMamba2ForCausalLM(LogLinearMamba2PreTrainedModel):
             else:
                 criterion = self.criterion
             labels = labels.to(hidden_states.device)
-            labels = torch.cat(
-                (
-                    labels[..., 1:],
-                    torch.full_like(labels[:, :1], criterion.ignore_index),
-                ),
-                1,
-            )
+            labels = prepare_causal_lm_labels(labels, criterion.ignore_index, kwargs.get("cu_seqlens"))
             if fuse_linear_and_cross_entropy:
                 loss = criterion(
                     hidden_states, labels, self.lm_head.weight, self.lm_head.bias,

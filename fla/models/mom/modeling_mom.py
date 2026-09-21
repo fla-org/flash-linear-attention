@@ -22,7 +22,7 @@ from fla.layers import MomAttention
 from fla.layers.attn import Attention
 from fla.models.hybrid import get_hybrid_attention_spec
 from fla.models.mom.configuration_mom import MomConfig
-from fla.models.utils import Cache, FLAUnsupportedCacheGenerationMixin
+from fla.models.utils import Cache, FLAUnsupportedCacheGenerationMixin, prepare_causal_lm_labels
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
 from fla.modules import GatedMLP as MomMLP
 from fla.ops.attnres import fused_attnres
@@ -532,7 +532,7 @@ class MomForCausalLM(MomPreTrainedModel, FLAUnsupportedCacheGenerationMixin):
                 loss_fct = nn.CrossEntropyLoss()
             # Enable model parallelism
             labels = labels.to(hidden_states.device)
-            labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], loss_fct.ignore_index)), 1)
+            labels = prepare_causal_lm_labels(labels, loss_fct.ignore_index, kwargs.get("cu_seqlens"))
             if fuse_linear_and_cross_entropy:
                 loss = loss_fct(hidden_states.view(-1, self.config.hidden_size),
                                 labels.view(-1),
