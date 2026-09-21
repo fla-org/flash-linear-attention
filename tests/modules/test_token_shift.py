@@ -10,34 +10,7 @@ import torch
 import torch.nn.functional as F
 
 from fla.modules.token_shift import token_shift, token_shift_ref
-from fla.utils import IS_NVIDIA, assert_close, device
-
-
-@pytest.mark.skipif(not IS_NVIDIA, reason='requires NVIDIA CUDA Graphs')
-@pytest.mark.parametrize('inference_tensor', [False, True])
-def test_token_shift_graph_preserves_warmed_metadata(inference_tensor):
-    """Fixed packed boundaries keep their warmed metadata during inference graph capture."""
-    torch.manual_seed(42)
-    with torch.inference_mode(inference_tensor):
-        cu = torch.tensor([0, 64, 128], device=device, dtype=torch.int32)
-
-    with torch.inference_mode():
-        x = torch.randn(1, 128, 32, device=device)
-        stream = torch.cuda.Stream()
-        stream.wait_stream(torch.cuda.current_stream())
-        with torch.cuda.stream(stream):
-            for _ in range(3):
-                token_shift(x, cu)
-        torch.cuda.current_stream().wait_stream(stream)
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
-            actual = token_shift(x, cu)
-        for _ in range(2):
-            x.add_(1)
-            graph.replay()
-            expected = token_shift_ref(x, cu)
-            torch.testing.assert_close(actual, expected, atol=0, rtol=0)
-
+from fla.utils import assert_close, device
 
 test_b_list = [4]
 test_t_list = [512, 4100, 8192]

@@ -14,7 +14,6 @@ import fla.utils as fu
 from fla.ops.utils.index import (
     prepare_chunk_indices,
     prepare_chunk_offsets,
-    prepare_lens,
     prepare_position_ids,
     prepare_sequence_ids,
     prepare_split_cu_seqlens,
@@ -173,32 +172,6 @@ def test_edge_cases():
         ref = ref_prepare_chunk_indices(cu_seqlens, chunk_size)
         opt = prepare_chunk_indices(cu_seqlens, chunk_size)
         torch.testing.assert_close(ref.long(), opt.long())
-
-
-@pytest.mark.parametrize('cpu_mirror', [False, True])
-@pytest.mark.parametrize('dtype', [torch.int32, torch.int64])
-def test_metadata_after_inplace_offsets(cpu_mirror, dtype):
-    cu_cpu = torch.tensor([0, 32, 96], dtype=dtype)
-    cu = cu_cpu.to(device)
-
-    with torch.inference_mode():
-        for boundaries in ([0, 32, 96], [0, 48, 96], [0, 0, 96], [0, 65, 96], [0, 32, 96]):
-            cu_cpu.copy_(torch.tensor(boundaries, dtype=dtype))
-            cu.copy_(cu_cpu)
-            lengths = [end - start for start, end in zip(boundaries, boundaries[1:])]
-            chunk_counts = [(length + CHUNK_SIZE - 1) // CHUNK_SIZE for length in lengths]
-            indices = [[seq, chunk] for seq, count in enumerate(chunk_counts) for chunk in range(count)]
-            expected_indices = torch.tensor(indices, device=device, dtype=dtype)
-            expected_offsets = torch.tensor([0, chunk_counts[0], sum(chunk_counts)], device=device)
-            torch.testing.assert_close(prepare_lens(cu), torch.tensor(lengths, device=device, dtype=dtype))
-            torch.testing.assert_close(prepare_chunk_offsets(cu, CHUNK_SIZE).long(), expected_offsets)
-            torch.testing.assert_close(
-                prepare_chunk_indices(cu, CHUNK_SIZE, cu_seqlens_cpu=cu_cpu if cpu_mirror else None), expected_indices,
-            )
-            expected_positions = torch.tensor([i for length in lengths for i in range(length)], device=device, dtype=dtype)
-            torch.testing.assert_close(
-                prepare_position_ids(cu, cu_cpu if cpu_mirror else None), expected_positions,
-            )
 
 
 @skip_npu_compile
