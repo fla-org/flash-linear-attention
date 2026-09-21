@@ -32,8 +32,6 @@ def prepare_causal_lm_labels(
         dim=-1,
     )
     if cu_seqlens is not None:
-        if labels.shape[0] != 1:
-            raise ValueError("Packed `cu_seqlens` loss currently requires batch size 1.")
         starts, ends = cu_seqlens[:-1], cu_seqlens[1:]
         last_token_indices = ends[ends > starts].to(device=labels.device, dtype=torch.long) - 1
         labels.view(-1).index_fill_(0, last_token_indices, ignore_index)
