@@ -17,6 +17,7 @@ from torch.nn import functional as F
 
 from fla.layers.utils import get_layer_cache, repad_hidden_states, unpad_hidden_states, update_layer_cache
 from fla.modules import FusedRMSNormGated, ShortConvolution
+from fla.modules.conv.short_conv import _is_single_token
 from fla.ops.kda import chunk_kda, fused_recurrent_kda
 
 if TYPE_CHECKING:
@@ -223,6 +224,12 @@ class KimiDeltaAttention(nn.Module):
         hidden_states, indices, cu_seqlens = unpad_hidden_states(hidden_states, cu_seqlens, attention_mask, q_len)
 
         if self.use_short_conv:
+            all_lengths_one = _is_single_token(
+                x=hidden_states,
+                cu_seqlens=cu_seqlens,
+                cu_seqlens_cpu=kwargs.get("cu_seqlens_cpu"),
+                all_lengths_one=kwargs.get("all_lengths_one"),
+            )
             conv_state_q, conv_state_k, conv_state_v = None, None, None
             if last_state is not None:
                 conv_state_q, conv_state_k, conv_state_v = last_state["conv_state"]
@@ -231,18 +238,21 @@ class KimiDeltaAttention(nn.Module):
                 cache=conv_state_q,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
+                all_lengths_one=all_lengths_one,
             )
             k, conv_state_k = self.k_conv1d(
                 x=self.k_proj(hidden_states),
                 cache=conv_state_k,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
+                all_lengths_one=all_lengths_one,
             )
             v, conv_state_v = self.v_conv1d(
                 x=self.v_proj(hidden_states),
                 cache=conv_state_v,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
+                all_lengths_one=all_lengths_one,
             )
         else:
             q = F.silu(self.q_proj(hidden_states))

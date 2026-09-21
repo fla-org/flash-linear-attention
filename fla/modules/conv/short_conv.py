@@ -21,6 +21,23 @@ except ImportError:
     causal_conv1d_update_cuda = None
 
 
+def _is_single_token(
+    x: torch.Tensor,
+    cu_seqlens: torch.Tensor | None = None,
+    cu_seqlens_cpu: torch.Tensor | None = None,
+    all_lengths_one: bool | None = None,
+) -> bool:
+    B, T = x.shape[:2]
+    if cu_seqlens is None:
+        return B * T == B
+    if len(cu_seqlens) - 1 != B * T:
+        return False
+    if all_lengths_one is not None:
+        return all_lengths_one
+    lengths = cu_seqlens_cpu if cu_seqlens_cpu is not None else cu_seqlens
+    return bool((lengths.diff() == 1).all())
+
+
 class ShortConvolution(nn.Conv1d):
     """Short convolution layer for efficient causal convolution operations.
 
@@ -125,6 +142,8 @@ class ShortConvolution(nn.Conv1d):
         output_final_state: bool = False,
         cu_seqlens: torch.LongTensor | None = None,
         chunk_indices: torch.LongTensor | None = None,
+        cu_seqlens_cpu: torch.LongTensor | None = None,
+        all_lengths_one: bool | None = None,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """
@@ -145,6 +164,11 @@ class ShortConvolution(nn.Conv1d):
                 Shape: [B+1]
             chunk_indices (Optional[torch.LongTensor]):
                 Chunk indices for variable-length sequences. Default: `None`.
+            cu_seqlens_cpu (torch.LongTensor, Optional):
+                CPU copy of `cu_seqlens` to avoid synchronizing for decode detection. Default: `None`.
+            all_lengths_one (bool, Optional):
+                Whether every packed sequence has exactly one token. Must match the current `cu_seqlens`.
+                If omitted, infer from `cu_seqlens_cpu` or `cu_seqlens`. Default: `None`.
 
         Returns:
             Tensor of shape `[B, T, D]`.
@@ -152,8 +176,6 @@ class ShortConvolution(nn.Conv1d):
         # Import here to avoid circular dependency
         from fla.modules.conv.causal_conv1d import causal_conv1d
 
-        B, T, *_ = x.shape
-        N = B if cu_seqlens is None else len(cu_seqlens) - 1
         if mask is not None:
             if cu_seqlens is not None:
                 raise ValueError("`mask` and `cu_seqlens` cannot be provided at the same time")
@@ -162,7 +184,7 @@ class ShortConvolution(nn.Conv1d):
         # in decoding phase, the cache (if provided) is updated inplace
         # For packed varlen inputs, decode only when every sequence has exactly one token:
         # a zero-length or multi-token sequence makes the shape check misfire.
-        if B * T == N and (cu_seqlens is None or bool((cu_seqlens.diff() == 1).all())):
+        if _is_single_token(x=x, cu_seqlens=cu_seqlens, cu_seqlens_cpu=cu_seqlens_cpu, all_lengths_one=all_lengths_one):
             y, cache = self.step(
                 x=x,
                 residual=residual,
@@ -196,6 +218,7 @@ class ShortConvolution(nn.Conv1d):
             activation=self.activation,
             backend=self.backend,
             cu_seqlens=cu_seqlens,
+            cu_seqlens_cpu=cu_seqlens_cpu,
             chunk_indices=chunk_indices,
             **kwargs,
         )
