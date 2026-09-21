@@ -14,6 +14,7 @@ from fla.ops.kda.chunk_intra_token_parallel import chunk_kda_fwd_intra_token_par
 from fla.ops.kda.wy_fast import recompute_w_u_fwd
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.cache import fla_cache_autotune
+from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.graph import get_static_buffer
 from fla.ops.utils.op import exp2, gather
 from fla.utils import IS_GATHER_SUPPORTED, IS_TF32_SUPPORTED, autotune_cache_kwargs
@@ -424,6 +425,7 @@ def chunk_kda_bwd_kernel_intra(
     NC: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     SAFE_GATE: tl.constexpr,
+    LOWER_BOUND_LOG2: tl.constexpr,
     USE_GATHER: tl.constexpr,
     USE_GRAPH: tl.constexpr = False,
 ):
@@ -517,10 +519,11 @@ def chunk_kda_bwd_kernel_intra(
 
     if SAFE_GATE:
         if USE_GATHER:
-            b_gn = gather(b_g, tl.full([1, BK], min(BC//2, T - i_ti - 1), dtype=tl.int16), axis=0)
+            b_gn = gather(b_g, tl.zeros([1, BK], dtype=tl.int16), axis=0)
         else:
-            p_gn = g + (i_ti + min(BC // 2, T - i_ti - 1)) * HV*K + o_k
+            p_gn = g + i_ti * HV*K + o_k
             b_gn = tl.load(p_gn, mask=m_k, other=0)[None, :]
+        b_gn = b_gn + 0.5 * (BC - 1) * LOWER_BOUND_LOG2
 
         p_dAqk = dAqk + o_c[:, None] * (HV*BT) + (i_i * BC + o_i)[None, :]
         p_dAkk = dAkk + o_c[:, None] * (HV*BT) + (i_i * BC + o_i)[None, :]
@@ -615,10 +618,11 @@ def chunk_kda_bwd_kernel_intra(
 
     if SAFE_GATE:
         if USE_GATHER:
-            b_gn = gather(b_g, tl.full([1, BK], min(BC//2, T - i_ti - 1), dtype=tl.int16), axis=0)
+            b_gn = gather(b_g, tl.zeros([1, BK], dtype=tl.int16), axis=0)
         else:
-            p_gn = g + (i_ti + min(BC // 2, T - i_ti - 1)) * HV*K + o_k
+            p_gn = g + i_ti * HV*K + o_k
             b_gn = tl.load(p_gn, mask=m_k, other=0).to(tl.float32)[None, :]
+        b_gn = b_gn + 0.5 * (BC - 1) * LOWER_BOUND_LOG2
         p_q = q + o_c[:, None] * (H*K) + o_k[None, :]
         b_q = tl.load(p_q, mask=m_ck, other=0.0)
         p_b = beta + o_c * HV
@@ -708,6 +712,7 @@ def chunk_kda_fwd_kernel_intra_sub_chunk(
     BK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     USE_GATHER: tl.constexpr,
+    LOWER_BOUND_LOG2: tl.constexpr,
     USE_GRAPH: tl.constexpr = False,
 ):
     i_t, i_i, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1), tl.program_id(2).to(tl.int64)
@@ -752,15 +757,18 @@ def chunk_kda_fwd_kernel_intra_sub_chunk(
     b_g = tl.load(p_g, mask=m_ck, other=0.0)
     b_beta = tl.load(p_beta, mask=m_c, other=0.0)
 
+    # Row 0 of the sub-chunk is in the past of every row here, and the centre is a fixed function
+    # of BC and the gate's lower bound, so the anchor cannot depend on a future gate or on T.
     if USE_GATHER:
-        b_gn = gather(b_g, tl.full([1, BK], min(BC//2, T - i_ti - 1), dtype=tl.int16), axis=0)
+        b_gn = gather(b_g, tl.zeros([1, BK], dtype=tl.int16), axis=0)
     else:
         # caculate offset
-        p_gn = g + (i_ti + min(BC // 2, T - i_ti - 1)) * HV*K + tl.arange(0, BK)
+        p_gn = g + i_ti * HV*K + tl.arange(0, BK)
         b_gn = tl.load(p_gn, mask=tl.arange(0, BK) < K, other=0.0)
         b_gn = b_gn[None, :]
+    b_gn = b_gn + 0.5 * (BC - 1) * LOWER_BOUND_LOG2
 
-    # current block, keep numerical stability by subtracting the left boundary
+    # current block, keep numerical stability by subtracting the anchor
     # less than 85 to avoid overflow in exp2
     b_gm = (b_g - b_gn).to(tl.float32)
 
@@ -815,6 +823,7 @@ def chunk_kda_fwd_intra(
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
     safe_gate: bool = False,
+    lower_bound: float | None = None,
     disable_recompute: bool = False,
     use_graph: bool = False,
 ):
@@ -823,6 +832,8 @@ def chunk_kda_fwd_intra(
     if BT not in (32, 64):
         raise ValueError(f"KDA intra chunk kernel only supports chunk_size 32 or 64, got {BT}.")
     BC = 16
+    # Centres the exponent range of the diagonal fast path; see the anchor comment in the kernel.
+    lower_bound_log2 = 0.0 if lower_bound is None else lower_bound * RCP_LN2
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
@@ -857,6 +868,7 @@ def chunk_kda_fwd_intra(
             BC=BC,
             BK=BK,
             USE_GATHER=IS_GATHER_SUPPORTED,
+            LOWER_BOUND_LOG2=lower_bound_log2,
             USE_GRAPH=use_graph,
         )
     else:
@@ -927,12 +939,15 @@ def chunk_kda_bwd_intra(
     chunk_indices: torch.LongTensor | None = None,
     chunk_size: int = 64,
     safe_gate: bool = False,
+    lower_bound: float | None = None,
     use_graph: bool = False,
 ):
     B, T, H, K, HV = *k.shape, g.shape[2]
     BT = chunk_size
     BC = min(16, BT)
     BK = min(32, triton.next_power_of_2(K))
+    # Centres the exponent range of the diagonal fast path; see the anchor comment in the kernel.
+    lower_bound_log2 = 0.0 if lower_bound is None else lower_bound * RCP_LN2
 
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
@@ -978,6 +993,7 @@ def chunk_kda_bwd_intra(
         NC=NC,
         SAFE_GATE=safe_gate,
         USE_GATHER=IS_GATHER_SUPPORTED,
+        LOWER_BOUND_LOG2=lower_bound_log2,
         USE_GRAPH=use_graph,
     )
     dq = dq2
