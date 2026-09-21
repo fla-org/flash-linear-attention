@@ -24,6 +24,7 @@ from torch.nn import functional as F
 
 from fla.layers.utils import get_layer_cache, repad_hidden_states, unpad_hidden_states, update_layer_cache
 from fla.modules import FusedRMSNormGated, ShortConvolution
+from fla.modules.conv.short_conv import _is_single_token
 from fla.ops.gdn2 import chunk_gdn2, fused_recurrent_gdn2
 
 if TYPE_CHECKING:
@@ -227,6 +228,7 @@ class GatedDeltaNet2(nn.Module):
         hidden_states, indices, cu_seqlens = unpad_hidden_states(hidden_states, cu_seqlens, attention_mask, q_len)
 
         if self.use_short_conv:
+            is_decode = _is_single_token(x=hidden_states, cu_seqlens=cu_seqlens)
             conv_state_q, conv_state_k, conv_state_v = None, None, None
             if last_state is not None:
                 conv_state_q, conv_state_k, conv_state_v = last_state["conv_state"]
@@ -235,18 +237,21 @@ class GatedDeltaNet2(nn.Module):
                 cache=conv_state_q,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
+                _is_decode=is_decode,
             )
             k, conv_state_k = self.k_conv1d(
                 x=self.k_proj(hidden_states),
                 cache=conv_state_k,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
+                _is_decode=is_decode,
             )
             v, conv_state_v = self.v_conv1d(
                 x=self.v_proj(hidden_states),
                 cache=conv_state_v,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
+                _is_decode=is_decode,
             )
         else:
             q = F.silu(self.q_proj(hidden_states))

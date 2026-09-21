@@ -18,6 +18,7 @@ from torch.nn import functional as F
 
 from fla.layers.utils import get_layer_cache, repad_hidden_states, unpad_hidden_states, update_layer_cache
 from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
+from fla.modules.conv.short_conv import _is_single_token
 from fla.modules.convolution import causal_conv1d
 from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
 
@@ -278,6 +279,7 @@ class GatedDeltaNet(nn.Module):
             )
             q, k, v = torch.split(qkv, [self.key_dim, self.key_dim, self.value_dim], dim=-1)
         elif self.use_short_conv:
+            is_decode = _is_single_token(x=hidden_states, cu_seqlens=cu_seqlens)
             if last_state is not None:
                 conv_state_q, conv_state_k, conv_state_v = last_state['conv_state']
             q, conv_state_q = self.q_conv1d(
@@ -285,18 +287,21 @@ class GatedDeltaNet(nn.Module):
                 cache=conv_state_q,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
+                _is_decode=is_decode,
             )
             k, conv_state_k = self.k_conv1d(
                 x=self.k_proj(hidden_states),
                 cache=conv_state_k,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
+                _is_decode=is_decode,
             )
             v, conv_state_v = self.v_conv1d(
                 x=self.v_proj(hidden_states),
                 cache=conv_state_v,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
+                _is_decode=is_decode,
             )
         else:
             q = F.silu(self.q_proj(hidden_states))
