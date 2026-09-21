@@ -828,9 +828,9 @@ def chunk_kda_fwd_intra(
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     NC = triton.cdiv(BT, BC)
 
-    Aqk = torch.empty(B, T, HV, BT, device=k.device, dtype=k.dtype)
+    Aqk = k.new_empty(B, T, HV, BT)
     # Akk must be zero-initialized - kernel only writes lower triangular
-    Akk = torch.zeros(B, T, HV, BT, device=k.device, dtype=k.dtype)
+    Akk = k.new_zeros(B, T, HV, BT)
     # Separate fp32 buffer for diagonal 16x16 blocks (for precision in solve_tril)
     Akkd = torch.empty(B, T, HV, BC, device=k.device, dtype=torch.float32)
 

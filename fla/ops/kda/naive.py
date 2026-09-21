@@ -52,7 +52,7 @@ def naive_recurrent_kda(
     q = q.repeat_interleave(G, dim=2) * scale   # [B, T, HV, K]
     k = k.repeat_interleave(G, dim=2)           # [B, T, HV, K]
 
-    S = k.new_zeros(B, HV, K, V).to(q)
+    S = q.new_zeros(B, HV, K, V)
     if initial_state is not None:
         S += initial_state
     o = torch.zeros_like(v)
@@ -138,7 +138,7 @@ def naive_chunk_kda(
     w = A @ (g.exp() * k)
     u = A @ v
 
-    S = k.new_zeros(B, HV, K, V).to(q)
+    S = q.new_zeros(B, HV, K, V)
     if initial_state is not None:
         S += initial_state
     o = torch.zeros_like(v)

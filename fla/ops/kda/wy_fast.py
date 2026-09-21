@@ -290,10 +290,10 @@ def recompute_w_u_fwd(
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
-    w = torch.empty(B, T, HV, K, device=k.device, dtype=k.dtype)
+    w = k.new_empty(B, T, HV, K)
     u = torch.empty_like(v)
-    qg = torch.empty(B, T, HV, K, device=k.device, dtype=k.dtype) if q is not None else None
-    kg = torch.empty(B, T, HV, K, device=k.device, dtype=k.dtype)
+    qg = k.new_empty(B, T, HV, K) if q is not None else None
+    kg = k.new_empty(B, T, HV, K)
     recompute_w_u_fwd_kda_kernel[(NT, B*HV)](
         q=q,
         k=k,

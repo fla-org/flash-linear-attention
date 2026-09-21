@@ -554,8 +554,8 @@ def chunk_kda_fwd_intra_npu(
     NC = triton.cdiv(BT, BC)
     is_varlen = cu_seqlens is not None
 
-    Aqk = torch.zeros(B, T, HV, BT, device=k.device, dtype=k.dtype)
-    Akk = torch.zeros(B, T, HV, BT, device=k.device, dtype=k.dtype)
+    Aqk = k.new_zeros(B, T, HV, BT)
+    Akk = k.new_zeros(B, T, HV, BT)
     Akkd = torch.zeros(B, T, HV, BC, device=k.device, dtype=torch.float32)
 
     if safe_gate:
