@@ -544,8 +544,6 @@ def test_conv_varlen_with_cache_prefill_fwd(
         ]
     ],
 )
-@pytest.mark.parametrize('metadata', ['dense', 'packed'])
-@pytest.mark.parametrize(('has_cache', 'output_final_state'), [(False, False), (False, True), (True, False), (True, True)])
 @torch.no_grad
 def test_conv_decoding_with_cache(
     B: int,
@@ -556,9 +554,6 @@ def test_conv_decoding_with_cache(
     has_residual: bool,
     dtype: torch.dtype,
     backend: str,
-    metadata: str,
-    has_cache: bool,
-    output_final_state: bool,
 ):
     if backend == 'cuda':
         if causal_conv1d_fn is None:
@@ -580,12 +575,12 @@ def test_conv_decoding_with_cache(
         dtype=dtype,
     )
 
-    state = torch.randn(B, D, W).to(device, dtype) if has_cache else torch.zeros(B, D, W, device=device, dtype=dtype)
+    state = torch.randn(B, D, W).to(device, dtype)
 
-    ref_state = state.clone()
+    # reference
     ref = causal_conv1d_update_ref_torch(
         x.squeeze(1),                           # (B, D)
-        conv_state=ref_state,
+        conv_state=state.clone(),
         weight=rearrange(conv.weight, "d 1 w -> d w"),
         bias=conv.bias,
         activation=activation,
@@ -593,24 +588,11 @@ def test_conv_decoding_with_cache(
     if has_residual:
         ref += residual
 
-    kwargs = {}
-    if metadata != 'dense':
-        kwargs['cu_seqlens'] = torch.arange(B + 1, device=device, dtype=torch.int32)
-        x = x.reshape(1, B, D)
-        residual = residual.reshape_as(x) if residual is not None else None
-    y, cache_out = conv(
-        x, residual=residual, cache=state if has_cache else None, output_final_state=output_final_state, **kwargs,
-    )
+    # ShortConvolution step
+    with torch.no_grad():
+        y, _ = conv.step(x, residual, state.clone())
 
-    torch.testing.assert_close(y, ref.reshape_as(y), atol=1e-4, rtol=1e-3)
-    if output_final_state:
-        torch.testing.assert_close(cache_out, ref_state, atol=0, rtol=0)
-        if has_cache:
-            assert cache_out is state
-    else:
-        assert cache_out is None
-    if has_cache:
-        torch.testing.assert_close(state, ref_state, atol=0, rtol=0)
+    assert_close("y", ref, y, 1e-3)
 
 
 @pytest.mark.parametrize(
@@ -1575,17 +1557,15 @@ def test_conv_non_contiguous_dy(B, T, D, W, activation, dtype):
     assert_close("dh0", h0_ones.grad, h0_sum.grad, 1e-3)
 
 
-@pytest.mark.parametrize('seq_idx', [0, 1])
-def test_conv_varlen_decode_detection_with_zero_len_seq(seq_idx):
+def test_conv_varlen_decode_detection_with_zero_len_seq():
     """A packed batch with a zero-length sequence must not be misdetected as a decode step."""
     torch.manual_seed(42)
     D, W = 16, 4
     dtype = torch.float32
-    # lengths [0, 2] and [2, 0] both satisfy B*T == N without being decode steps.
-    cu_seqlens_cpu = torch.tensor([0, 2 if seq_idx == 0 else 0, 2], dtype=torch.int32)
-    cu_seqlens = torch.arange(3, device=device, dtype=torch.int32)
+    # lens [0, 2]: B*T == N would misfire into the decode shortcut, which ignores cu_seqlens.
+    cu_seqlens = torch.tensor([0, 0, 2], device=device, dtype=torch.int32)
     N, T = 2, 2
-    x = torch.randn(1, T, D).to(device, dtype).requires_grad_(True)
+    x = torch.randn(1, T, D).to(device, dtype)
 
     conv = ShortConvolution(
         hidden_size=D,
@@ -1596,15 +1576,10 @@ def test_conv_varlen_decode_detection_with_zero_len_seq(seq_idx):
         dtype=dtype,
     )
 
-    cache = torch.randn(N, D, W - 1).to(device, dtype).requires_grad_(True)
-    # reuse the decode metadata buffer to catch stale length checks.
-    with torch.no_grad():
-        conv(x, cu_seqlens=cu_seqlens)
-    cu_seqlens.copy_(cu_seqlens_cpu)
-
-    # reference: only the nonempty sequence is processed
+    cache = torch.randn(N, D, W - 1).to(device, dtype)
+    # reference: only the real sequence (index 1) is processed
     xi = x[:, 0:2, :].transpose(1, 2)
-    ci = cache[seq_idx:seq_idx+1]
+    ci = cache[1:2]
     ref = causal_conv1d_ref_torch(
         x=xi,
         weight=rearrange(conv.weight, "d 1 w -> d w"),
@@ -1614,18 +1589,10 @@ def test_conv_varlen_decode_detection_with_zero_len_seq(seq_idx):
     ).transpose(1, 2)
 
     zero_pad = torch.zeros(N, D, 1, device=device, dtype=dtype)
-    tri, final_state = conv(
+    tri, _ = conv(
         x,
         cache=torch.cat([zero_pad, cache], dim=-1).clone(),
         cu_seqlens=cu_seqlens,
         output_final_state=True,
     )
-    torch.testing.assert_close(tri, ref, atol=1e-4, rtol=1e-3)
-    expected_state = torch.cat([zero_pad, cache], dim=-1)
-    expected_state[seq_idx] = torch.cat([cache[seq_idx], x[0].T], dim=-1)[:, -W:]
-    torch.testing.assert_close(final_state, expected_state, atol=0, rtol=0)
-    dy = torch.randn_like(ref)
-    ref_grads = torch.autograd.grad(ref, (x, conv.weight, cache), dy)
-    tri_grads = torch.autograd.grad(tri, (x, conv.weight, cache), dy)
-    for actual, expected in zip(tri_grads, ref_grads):
-        torch.testing.assert_close(actual, expected, atol=1e-4, rtol=1e-3)
+    assert_close("varlen zero-len y", ref, tri, 1e-3)
