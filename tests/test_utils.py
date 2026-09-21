@@ -46,6 +46,69 @@ def test_tensor_cache_uses_identity_until_disabled(monkeypatch):
     assert calls['count'] == 3
 
 
+@pytest.mark.parametrize('inference_mode', [False, True])
+@pytest.mark.parametrize('keyword', [False, True])
+@pytest.mark.parametrize('mutate_view', [False, True])
+def test_tensor_cache_invalidates_mutated_inputs(inference_mode, keyword, mutate_view):
+    calls = 0
+
+    @fu.tensor_cache
+    def add_one(x):
+        nonlocal calls
+        calls += 1
+        return x + 1
+
+    x = torch.tensor([1, 2], device=fu.device)
+    alias = x.view_as(x) if mutate_view else x
+
+    def run():
+        return add_one(x=x) if keyword else add_one(x)
+
+    with torch.inference_mode(inference_mode):
+        first = run()
+        torch.testing.assert_close(run(), first, atol=0, rtol=0)
+        assert calls == 1
+        alias.copy_(torch.tensor([3, 4], device=fu.device))
+        actual = run()
+        torch.testing.assert_close(actual, torch.tensor([4, 5], device=fu.device), atol=0, rtol=0)
+        torch.testing.assert_close(run(), actual, atol=0, rtol=0)
+        assert calls == 2
+
+
+def test_tensor_cache_reordered_keywords():
+    @fu.tensor_cache
+    def add(x, y):
+        return x + y
+
+    x, y = torch.tensor([1]), torch.tensor([2])
+    y.add_(1)
+    first = add(x=x, y=y)
+    assert add(y=y, x=x) is first
+    x.add_(2)
+    torch.testing.assert_close(add(y=y, x=x), torch.tensor([6]), atol=0, rtol=0)
+
+
+@pytest.mark.skipif(not fu.IS_NVIDIA, reason='requires NVIDIA synchronization checks')
+def test_tensor_cache_version_check_does_not_synchronize():
+    @fu.tensor_cache
+    def add_one(x):
+        return x + 1
+
+    x = torch.tensor([1, 2], device=fu.device)
+    updated = torch.tensor([3, 4], device=fu.device)
+    original = add_one(x)
+    previous = torch.cuda.get_sync_debug_mode()
+    try:
+        torch.cuda.set_sync_debug_mode('error')
+        assert add_one(x) is original
+        x.copy_(updated)
+        actual = add_one(x)
+        assert add_one(x) is actual
+    finally:
+        torch.cuda.set_sync_debug_mode(previous)
+    torch.testing.assert_close(actual, updated + 1, atol=0, rtol=0)
+
+
 def test_input_guard_makes_tensors_contiguous_except_skipped():
     @fu.input_guard
     def guarded(x, y=None):

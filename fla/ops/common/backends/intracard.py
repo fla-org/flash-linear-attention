@@ -64,6 +64,7 @@ class IntraCardCPBackend(BaseBackend):
         cu_seqlens: torch.LongTensor | None = None,
         cu_seqlens_cpu: torch.LongTensor | None = None,
         chunk_indices: torch.LongTensor | None = None,
+        chunk_offsets: torch.LongTensor | None = None,
     ) -> tuple[bool, str | None]:
         """Check if intracard CP should handle this call."""
         # Only in inference mode
@@ -73,6 +74,13 @@ class IntraCardCPBackend(BaseBackend):
         # Only for varlen
         if cu_seqlens is None:
             return False, "cu_seqlens is None"
+
+        if k.shape[1] == 0:
+            return False, "No tokens to split"
+
+        # Static chunk metadata must stay on device and be rebuilt during graph replay.
+        if chunk_offsets is not None:
+            return False, "Static chunk metadata requires the graph-compatible backend"
 
         return True, None
 
@@ -91,6 +99,7 @@ class IntraCardCPBackend(BaseBackend):
         cu_seqlens: torch.LongTensor | None = None,
         cu_seqlens_cpu: torch.LongTensor | None = None,
         chunk_indices: torch.LongTensor | None = None,
+        chunk_offsets: torch.LongTensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """Intra-card CP implementation of chunk_gated_delta_rule_fwd_h."""
         from fla.ops.common.intracard_cp import intracard_fwd_h

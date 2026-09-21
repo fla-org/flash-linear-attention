@@ -34,14 +34,17 @@ def tensor_cache(
     fn: Callable[..., torch.Tensor],
 ) -> Callable[..., torch.Tensor]:
     """
-    A decorator that memoizes the most recent results of a function call by argument identity.
+    A decorator that memoizes results by argument identity and tensor mutation version.
 
     The decorator keeps a bounded queue of up to ``FLA_TENSOR_CACHE_SIZE`` (default 4)
-    recent ``(args, kwargs, result)`` triples. On each call, every cached entry is checked
+    recent ``(args, kwargs, versions, result)`` entries. On each call, every cached entry is checked
     in order; an entry is considered a hit when the positional arg count and kwarg key set
-    match and every argument is the *same object* (``is`` identity) as the cached one. On a
+    match, every argument is the *same object* (``is`` identity), and ordinary tensor versions are unchanged. On a
     hit the cached result is returned and ``fn`` is skipped; on a miss ``fn`` is invoked and
-    the new triple is appended (evicting the oldest when the queue is full).
+    the new entry is appended (evicting the oldest when the queue is full).
+
+    Inference tensors have no mutation version and retain identity-only caching. Callers
+    must use new inference tensor objects when their metadata changes.
 
     Caching is fully bypassed when the ``FLA_DISABLE_TENSOR_CACHE`` environment variable is
     set to ``'1'``.
@@ -66,7 +69,14 @@ def tensor_cache(
         if cache_disabled():
             return fn(*args, **kwargs)
 
-        for cached_args, cached_kwargs, cached_result in cached:
+        versions = {}
+        for arg in (*args, *kwargs.values()):
+            if isinstance(arg, torch.Tensor) and not arg.is_inference():
+                versions[id(arg)] = arg._version
+
+        for cached_args, cached_kwargs, cached_versions, cached_result in cached:
+            if versions != cached_versions:
+                continue
             if len(args) != len(cached_args) or len(kwargs) != len(cached_kwargs):
                 continue
             if all(a is b for a, b in zip(args, cached_args, strict=False)) and \
@@ -74,7 +84,7 @@ def tensor_cache(
                 return cached_result
 
         result = fn(*args, **kwargs)
-        cached.append((args, kwargs, result))
+        cached.append((args, kwargs, versions, result))
         return result
 
     return wrapper

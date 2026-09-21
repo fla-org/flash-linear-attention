@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 
 # Cache for intracard_fwd_h precomputation (Python results + GPU tensors)
-# Key: object id of cu_seqlens (consistent with tensor_cache philosophy)
+# Key includes the offsets snapshot so in-place updates cannot reuse stale metadata.
 _intracard_cache: OrderedDict[tuple, _CacheEntry] = OrderedDict()
 _INTRACARD_CACHE_MAXSIZE = 32
 
@@ -481,10 +481,10 @@ def intracard_fwd_h(
     cache_key = None
 
     if not early_return:
-        # Use object identity (id) for cache key, consistent with tensor_cache philosophy
-        # vLLM slice creates new Python objects per batch, so id(cu_seqlens) is safe
+        # Inference tensors have no version counter; snapshot the CPU offsets instead.
         cache_key = (
-            id(cu_seqlens),  # Object identity, not content hash
+            id(cu_seqlens),
+            tuple(cu_seqlens_cpu.tolist()),
             subseq_len,
             chunk_size,
             max_splits,
