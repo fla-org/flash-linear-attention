@@ -12,10 +12,19 @@ import triton.language as tl
 from einops import rearrange, repeat
 
 from fla.modules.backends import dispatch
-from fla.ops.utils import prepare_chunk_indices
-from fla.utils import IS_AMD, autotune_cache_kwargs, get_multiprocessor_count, input_guard
+from fla.ops.utils import prepare_chunk_indices, prepare_lens
+from fla.utils import IS_AMD, autotune_cache_kwargs, get_multiprocessor_count, input_guard, tensor_cache
 
 NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if IS_AMD else [2, 4, 8, 16, 32]
+
+
+@tensor_cache
+def get_max_seqlen(
+    cu_seqlens: torch.LongTensor,
+    cu_seqlens_cpu: torch.LongTensor | None = None,
+) -> int:
+    src = cu_seqlens_cpu if cu_seqlens_cpu is not None else cu_seqlens
+    return prepare_lens(src).max().item()
 
 
 def rotate_half(x, interleaved=False):
@@ -179,10 +188,15 @@ def rotary_embedding_fwdbwd(
     if isinstance(seqlen_offsets, torch.Tensor):
         assert seqlen_offsets.shape == (N,)
         assert seqlen_offsets.dtype in [torch.int32, torch.int64]
-        sequence_lengths = T if not is_varlen else cu_seqlens[1:] - cu_seqlens[:-1]
+        sequence_lengths = T if not is_varlen else prepare_lens(cu_seqlens)
         torch._assert_async(
             torch.all(sequence_lengths + seqlen_offsets <= TR),
             f"Rotary cache is too short for tensor offsets, got {TR} positions",
+        )
+    elif is_varlen:
+        torch._assert_async(
+            torch.all(prepare_lens(cu_seqlens) + seqlen_offsets <= TR),
+            f"Rotary cache is too short for scalar offset {seqlen_offsets}, got {TR} positions",
         )
     else:
         assert seqlen_offsets + T <= TR
@@ -198,7 +212,7 @@ def rotary_embedding_fwdbwd(
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = len(chunk_indices) if is_varlen else triton.cdiv(T, BT)
 
-    grid = (NT, B, H)
+    grid = (NT, 1 if is_varlen else B, H)
     rotary_embedding_kernel[grid](
         x,
         cos,

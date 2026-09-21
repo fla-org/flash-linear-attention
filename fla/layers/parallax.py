@@ -19,6 +19,7 @@ from transformers.utils import logging
 
 from fla.layers.utils import pad_input, unpad_input
 from fla.modules import RMSNorm, RotaryEmbedding
+from fla.modules.rotary import get_max_seqlen
 from fla.ops.parallax import parallel_parallax
 from fla.ops.parallax.decode import parallax_decode, parallax_decode_one_step
 from fla.ops.utils.index import prepare_lens_from_mask
@@ -136,19 +137,22 @@ class Parallax(nn.Module):
         # equivalent to cu_seqlens in `flash_attn`
         cu_seqlens = kwargs.get('cu_seqlens')
 
-        seqlen_offset, max_seqlen = 0, q_len
+        rope_cache_length = q_len if cu_seqlens is None else get_max_seqlen(
+            cu_seqlens, kwargs.get('cu_seqlens_cpu'))
+        seqlen_offset = 0
         if past_key_values is not None:
             seqlen_offset = past_key_values.get_seq_length(self.layer_idx)
-            max_seqlen = q_len + seqlen_offset
+            rope_cache_length += seqlen_offset
             if attention_mask is not None:
                 # account for left-padding when indexing rotary positions
                 seqlen_offset = seqlen_offset + prepare_lens_from_mask(attention_mask) - attention_mask.shape[-1]
-                max_seqlen = q_len + seqlen_offset.max().item()
-        if self.max_position_embeddings is not None:
-            max_seqlen = max(max_seqlen, self.max_position_embeddings)
+        if past_key_values is not None and cu_seqlens is None and self.max_position_embeddings is not None:
+            rope_cache_length = max(rope_cache_length, self.max_position_embeddings)
         # rope on q, k and r; `r` shares q's positions (same cos/sin), then is rotated alone.
-        q, k = self.rotary(q, k, seqlen_offset=seqlen_offset, max_seqlen=max_seqlen, cu_seqlens=cu_seqlens)
-        r, _ = self.rotary(r, r, seqlen_offset=seqlen_offset, max_seqlen=max_seqlen, cu_seqlens=cu_seqlens)
+        q, k = self.rotary(
+            q, k, seqlen_offset=seqlen_offset, max_seqlen=rope_cache_length, cu_seqlens=cu_seqlens)
+        r, _ = self.rotary(
+            r, r, seqlen_offset=seqlen_offset, max_seqlen=rope_cache_length, cu_seqlens=cu_seqlens)
 
         if past_key_values is not None:
             cache_has_content = past_key_values.get_seq_length(self.layer_idx) > 0

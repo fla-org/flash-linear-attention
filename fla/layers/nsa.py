@@ -16,6 +16,7 @@ from transformers.utils import logging
 
 from fla.layers.utils import pad_input, unpad_input
 from fla.modules import RotaryEmbedding
+from fla.modules.rotary import get_max_seqlen
 from fla.ops.nsa.parallel import parallel_nsa
 from fla.ops.utils.index import prepare_lens_from_mask
 
@@ -94,20 +95,21 @@ class NativeSparseAttention(nn.Module):
         g = rearrange(self.g_proj(hidden_states), '... (h d) -> ... h d', d=3)
 
         cu_seqlens = kwargs.get('cu_seqlens')
-
-        seqlen_offset, max_seqlen = 0, q_len
+        rope_cache_length = q_len if cu_seqlens is None else get_max_seqlen(
+            cu_seqlens, kwargs.get('cu_seqlens_cpu'))
+        seqlen_offset = 0
         if past_key_values is not None:
             seqlen_offset = past_key_values.get_seq_length(self.layer_idx)
-            max_seqlen = q.shape[1] + seqlen_offset
+            rope_cache_length += seqlen_offset
 
             if attention_mask is not None:
                 # to eliminate the offsets of padding tokens
                 seqlen_offset = seqlen_offset + prepare_lens_from_mask(attention_mask) - attention_mask.shape[-1]
-                max_seqlen = q.shape[1] + max(seqlen_offset)
 
-        if self.max_position_embeddings is not None:
-            max_seqlen = max(max_seqlen, self.max_position_embeddings)
-        q, k = self.rotary(q, k, seqlen_offset=seqlen_offset, max_seqlen=max_seqlen, cu_seqlens=cu_seqlens)
+        if past_key_values is not None and cu_seqlens is None and self.max_position_embeddings is not None:
+            rope_cache_length = max(rope_cache_length, self.max_position_embeddings)
+        q, k = self.rotary(
+            q, k, seqlen_offset=seqlen_offset, max_seqlen=rope_cache_length, cu_seqlens=cu_seqlens)
 
         if past_key_values is not None:
             cache_has_content = past_key_values.get_seq_length(self.layer_idx) > 0

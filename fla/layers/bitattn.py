@@ -18,6 +18,7 @@ from transformers.utils import logging
 from fla.layers.utils import pad_input, unpad_input
 from fla.modules import RotaryEmbedding
 from fla.modules.fused_bitlinear import FusedBitLinear
+from fla.modules.rotary import get_max_seqlen
 from fla.ops.utils.index import prepare_lens_from_mask
 
 if TYPE_CHECKING:
@@ -97,20 +98,21 @@ class BitAttention(nn.Module):
 
         # equivalent to cu_seqlens in `flash_attn`
         cu_seqlens = kwargs.get('cu_seqlens')
+        batch_max_seqlen = q_len if cu_seqlens is None else get_max_seqlen(cu_seqlens, kwargs.get('cu_seqlens_cpu'))
 
-        seqlen_offset, max_seqlen = 0, q_len
+        seqlen_offset, rope_cache_length = 0, batch_max_seqlen
         if past_key_values is not None:
             seqlen_offset = past_key_values.get_seq_length(self.layer_idx)
-            max_seqlen = q.shape[1] + seqlen_offset
+            rope_cache_length += seqlen_offset
 
             if attention_mask is not None:
                 # to eliminate the offsets of padding tokens
                 seqlen_offset = seqlen_offset + prepare_lens_from_mask(attention_mask) - attention_mask.shape[-1]
-                max_seqlen = q.shape[1] + max(seqlen_offset)
 
-        if self.max_position_embeddings is not None:
-            max_seqlen = max(max_seqlen, self.max_position_embeddings)
-        q, k = self.rotary(q, k, seqlen_offset=seqlen_offset, max_seqlen=max_seqlen, cu_seqlens=cu_seqlens)
+        if past_key_values is not None and cu_seqlens is None and self.max_position_embeddings is not None:
+            rope_cache_length = max(rope_cache_length, self.max_position_embeddings)
+        q, k = self.rotary(
+            q, k, seqlen_offset=seqlen_offset, max_seqlen=rope_cache_length, cu_seqlens=cu_seqlens)
 
         if past_key_values is not None:
             cache_has_content = past_key_values.get_seq_length(self.layer_idx) > 0
@@ -150,8 +152,8 @@ class BitAttention(nn.Module):
                 q.squeeze(0), k.squeeze(0), v.squeeze(0),
                 cu_seqlens_q=cu_seqlens,
                 cu_seqlens_k=cu_seqlens,
-                max_seqlen_q=max_seqlen,
-                max_seqlen_k=max_seqlen,
+                max_seqlen_q=batch_max_seqlen,
+                max_seqlen_k=batch_max_seqlen,
                 causal=True,
                 window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0),
             ).unsqueeze(0)
