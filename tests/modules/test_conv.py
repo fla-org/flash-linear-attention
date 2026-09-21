@@ -1596,3 +1596,19 @@ def test_conv_varlen_decode_detection_with_zero_len_seq():
         output_final_state=True,
     )
     assert_close("varlen zero-len y", ref, tri, 1e-3)
+
+
+def test_short_conv_backend_env_override_is_validated(monkeypatch):
+    """The effective backend after the FLA_CONV_BACKEND override must be validated."""
+    monkeypatch.setenv('FLA_CONV_BACKEND', 'bogus')
+    with pytest.raises(ValueError, match='Invalid backend'):
+        ShortConvolution(hidden_size=8, kernel_size=3)
+
+
+@pytest.mark.skipif(causal_conv1d_fn is not None, reason='requires the cuda conv library to be unavailable')
+def test_short_conv_env_backend_cuda_falls_back_without_cuda_lib(monkeypatch):
+    """FLA_CONV_BACKEND=cuda must warn and fall back to triton when the cuda library is missing."""
+    monkeypatch.setenv('FLA_CONV_BACKEND', 'cuda')
+    with pytest.warns(UserWarning, match='Switching to the Triton implementation'):
+        conv = ShortConvolution(hidden_size=8, kernel_size=3, backend='triton')
+    assert conv.backend == 'triton'
