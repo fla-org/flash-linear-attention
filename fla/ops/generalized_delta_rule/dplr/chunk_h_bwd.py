@@ -56,7 +56,13 @@ def chunk_dplr_bwd_kernel_dhu(
     USE_INITIAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    # grid dims 1 and 2 are capped at 65535 blocks, so fold the whole grid into dim 0
+    pid = tl.program_id(0)
+    NK = tl.cdiv(K, BK)
+    NV = tl.cdiv(V, BV)
+    i_k = pid % NK
+    i_v = (pid // NK) % NV
+    i_nh = (pid // (NK * NV)).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
@@ -161,7 +167,7 @@ def chunk_dplr_bwd_dhu(
     dh0 = torch.empty_like(h0, dtype=torch.float32) if h0 is not None else None
     dv2 = torch.zeros_like(dv)
 
-    grid = (NK, NV, N * H)
+    grid = (NK * NV * N * H,)
     chunk_dplr_bwd_kernel_dhu[grid](
         qg=qg,
         bg=bg,

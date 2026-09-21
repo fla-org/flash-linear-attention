@@ -63,7 +63,13 @@ def chunk_fwd_kernel_h(
     IS_VARLEN: tl.constexpr,
     STATE_V_FIRST: tl.constexpr,
 ):
-    i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    # grid dims 1 and 2 are capped at 65535 blocks, so fold the whole grid into dim 0
+    pid = tl.program_id(0)
+    NK = tl.cdiv(K, BK)
+    NV = tl.cdiv(V, BV)
+    i_k = pid % NK
+    i_v = (pid // NK) % NV
+    i_nh = (pid // (NK * NV)).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
@@ -210,7 +216,13 @@ def chunk_bwd_kernel_dh(
     IS_VARLEN: tl.constexpr,
     STATE_V_FIRST: tl.constexpr,
 ):
-    i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    # grid dims 1 and 2 are capped at 65535 blocks, so fold the whole grid into dim 0
+    pid = tl.program_id(0)
+    NK = tl.cdiv(K, BK)
+    NV = tl.cdiv(V, BV)
+    i_k = pid % NK
+    i_v = (pid // NK) % NV
+    i_nh = (pid // (NK * NV)).to(tl.int64)
     i_n, i_hq = i_nh // HQ, i_nh % HQ
     i_h = i_hq // NG
     if IS_VARLEN:
@@ -337,7 +349,7 @@ def chunk_fwd_h(
     state_shape = (V, K) if state_v_first else (K, V)
     h = k.new_empty(B, NS, H, *state_shape, dtype=k.dtype if not states_in_fp32 else torch.float)
     ht = k.new_empty(N, H, *state_shape, dtype=torch.float) if output_final_state else None
-    def grid(meta): return (triton.cdiv(K, meta['BK']), triton.cdiv(V, meta['BV']), N * H)
+    def grid(meta): return (triton.cdiv(K, meta['BK']) * triton.cdiv(V, meta['BV']) * N * H,)
     chunk_fwd_kernel_h[grid](
         k=k,
         v=v,
@@ -403,7 +415,7 @@ def chunk_bwd_dh(
     dh = k.new_empty(B, NS, HQ, *state_shape, dtype=k.dtype if not states_in_fp32 else torch.float)
     dh0 = torch.empty_like(h0, dtype=torch.float) if h0 is not None else None
 
-    def grid(meta): return (triton.cdiv(K, meta['BK']), triton.cdiv(V, meta['BV']), N * H)
+    def grid(meta): return (triton.cdiv(K, meta['BK']) * triton.cdiv(V, meta['BV']) * N * H,)
     chunk_bwd_kernel_dh[grid](
         q=q,
         g=g,
