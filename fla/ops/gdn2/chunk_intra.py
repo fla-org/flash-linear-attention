@@ -24,6 +24,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.backends import dispatch
 from fla.ops.gdn2.chunk_intra_token_parallel import chunk_gdn2_fwd_intra_token_parallel
 from fla.ops.gdn2.wy_fast import recompute_w_u_fwd_gdn2
 from fla.ops.utils import prepare_chunk_indices
@@ -690,6 +691,7 @@ def chunk_gdn2_bwd_kernel_intra(
     tl.store(p_dg2, b_dg2.to(p_dg2.dtype.element_ty), mask=m_kc)
 
 
+@dispatch('gdn2')
 def chunk_gdn2_fwd_intra(
     q: torch.Tensor,
     k: torch.Tensor,
