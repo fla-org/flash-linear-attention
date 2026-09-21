@@ -59,7 +59,7 @@ def test_modeling(
     )
 
 
-@pytest.mark.parametrize("batch_size", [1, 2], ids=["flattened", "batched"])
+@pytest.mark.parametrize("batch_size", [1, 2, 7], ids=["flattened", "batched", "cross-row"])
 @pytest.mark.parametrize(
     ("fuse_cross_entropy", "fuse_linear_cross_entropy"),
     [(False, False), (True, False), (False, True)],
@@ -96,7 +96,9 @@ def test_packed_loss(batch_size: int, fuse_cross_entropy: bool, fuse_linear_cros
     output.hidden_states[-1].retain_grad()
     actual = output.loss
     actual.backward()
-    assert output.hidden_states[-1].grad.reshape(2, 7, -1)[:, -1].count_nonzero() == 0
+    has_gradient = output.hidden_states[-1].grad.reshape(2, 7, -1).ne(0).any(dim=-1)
+    assert torch.equal(has_gradient[:, :-1], labels[:, 1:].ne(-100))
+    assert not has_gradient[:, -1].any()
     assert_close("loss", expected.float(), actual.float(), 2e-3)
     for name, param in model.named_parameters():
         assert_close(name, expected_grads[name], param.grad.float(), 2e-3)

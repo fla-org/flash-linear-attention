@@ -27,6 +27,9 @@ def prepare_causal_lm_labels(
     ignore_index: int,
     cu_seqlens: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    label_shape = labels.shape
+    if cu_seqlens is not None:
+        labels = labels.reshape(-1)
     labels = torch.cat(
         (labels[..., 1:], torch.full_like(labels[..., :1], ignore_index)),
         dim=-1,
@@ -35,7 +38,7 @@ def prepare_causal_lm_labels(
         starts, ends = cu_seqlens[:-1], cu_seqlens[1:]
         last_token_indices = ends[ends > starts].to(device=labels.device, dtype=torch.long) - 1
         labels.view(-1).index_fill_(0, last_token_indices, ignore_index)
-    return labels
+    return labels.view(label_shape)
 
 
 if version.parse(_TF_VERSION) > version.parse(_NEED_NEW):
