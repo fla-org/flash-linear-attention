@@ -144,7 +144,7 @@ class PackSequenceFunction(torch.autograd.Function):
             padding_side=ctx.padding_side,
             desired_shape=ctx.desired_shape,
         )
-        return dx, *[None] * 10
+        return dx, None, None
 
 
 class UnpackSequenceFunction(torch.autograd.Function):
