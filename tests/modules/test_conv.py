@@ -544,7 +544,7 @@ def test_conv_varlen_with_cache_prefill_fwd(
         ]
     ],
 )
-@pytest.mark.parametrize('metadata', ['dense', 'infer', 'hint', 'cpu'])
+@pytest.mark.parametrize('metadata', ['dense', 'packed'])
 @pytest.mark.parametrize(('has_cache', 'output_final_state'), [(False, False), (False, True), (True, False), (True, True)])
 @torch.no_grad
 def test_conv_decoding_with_cache(
@@ -595,12 +595,7 @@ def test_conv_decoding_with_cache(
 
     kwargs = {}
     if metadata != 'dense':
-        cu_seqlens_cpu = torch.arange(B + 1, dtype=torch.int32)
-        kwargs['cu_seqlens'] = cu_seqlens_cpu.to(device)
-        if metadata == 'hint':
-            kwargs['all_lengths_one'] = True
-        elif metadata == 'cpu':
-            kwargs['cu_seqlens_cpu'] = cu_seqlens_cpu
+        kwargs['cu_seqlens'] = torch.arange(B + 1, device=device, dtype=torch.int32)
         x = x.reshape(1, B, D)
         residual = residual.reshape_as(x) if residual is not None else None
     y, cache_out = conv(
@@ -1580,9 +1575,8 @@ def test_conv_non_contiguous_dy(B, T, D, W, activation, dtype):
     assert_close("dh0", h0_ones.grad, h0_sum.grad, 1e-3)
 
 
-@pytest.mark.parametrize('metadata', ['infer', 'hint', 'cpu'])
 @pytest.mark.parametrize('seq_idx', [0, 1])
-def test_conv_varlen_decode_detection_with_zero_len_seq(metadata, seq_idx):
+def test_conv_varlen_decode_detection_with_zero_len_seq(seq_idx):
     """A packed batch with a zero-length sequence must not be misdetected as a decode step."""
     torch.manual_seed(42)
     D, W = 16, 4
@@ -1620,15 +1614,11 @@ def test_conv_varlen_decode_detection_with_zero_len_seq(metadata, seq_idx):
     ).transpose(1, 2)
 
     zero_pad = torch.zeros(N, D, 1, device=device, dtype=dtype)
-    kwargs = {'all_lengths_one': False} if metadata == 'hint' else {}
-    if metadata == 'cpu':
-        kwargs['cu_seqlens_cpu'] = cu_seqlens_cpu
     tri, final_state = conv(
         x,
         cache=torch.cat([zero_pad, cache], dim=-1).clone(),
         cu_seqlens=cu_seqlens,
         output_final_state=True,
-        **kwargs,
     )
     torch.testing.assert_close(tri, ref, atol=1e-4, rtol=1e-3)
     expected_state = torch.cat([zero_pad, cache], dim=-1)

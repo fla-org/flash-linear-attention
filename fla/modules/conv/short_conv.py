@@ -24,18 +24,10 @@ except ImportError:
 def _is_single_token(
     x: torch.Tensor,
     cu_seqlens: torch.Tensor | None = None,
-    cu_seqlens_cpu: torch.Tensor | None = None,
-    all_lengths_one: bool | None = None,
 ) -> bool:
     B, T = x.shape[:2]
-    if cu_seqlens is None:
-        return B * T == B
-    if len(cu_seqlens) - 1 != B * T:
-        return False
-    if all_lengths_one is not None:
-        return all_lengths_one
-    lengths = cu_seqlens_cpu if cu_seqlens_cpu is not None else cu_seqlens
-    return bool((lengths.diff() == 1).all())
+    N = B if cu_seqlens is None else len(cu_seqlens) - 1
+    return B * T == N and (cu_seqlens is None or bool((cu_seqlens.diff() == 1).all()))
 
 
 class ShortConvolution(nn.Conv1d):
@@ -142,8 +134,6 @@ class ShortConvolution(nn.Conv1d):
         output_final_state: bool = False,
         cu_seqlens: torch.LongTensor | None = None,
         chunk_indices: torch.LongTensor | None = None,
-        cu_seqlens_cpu: torch.LongTensor | None = None,
-        all_lengths_one: bool | None = None,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """
@@ -164,11 +154,6 @@ class ShortConvolution(nn.Conv1d):
                 Shape: [B+1]
             chunk_indices (Optional[torch.LongTensor]):
                 Chunk indices for variable-length sequences. Default: `None`.
-            cu_seqlens_cpu (torch.LongTensor, Optional):
-                CPU copy of `cu_seqlens` to avoid synchronizing for decode detection. Default: `None`.
-            all_lengths_one (bool, Optional):
-                Whether every packed sequence has exactly one token. Must match the current `cu_seqlens`.
-                If omitted, infer from `cu_seqlens_cpu` or `cu_seqlens`. Default: `None`.
 
         Returns:
             Tensor of shape `[B, T, D]`.
@@ -184,7 +169,11 @@ class ShortConvolution(nn.Conv1d):
         # in decoding phase, the cache (if provided) is updated inplace
         # For packed varlen inputs, decode only when every sequence has exactly one token:
         # a zero-length or multi-token sequence makes the shape check misfire.
-        if _is_single_token(x=x, cu_seqlens=cu_seqlens, cu_seqlens_cpu=cu_seqlens_cpu, all_lengths_one=all_lengths_one):
+        # layers share this check across their Q/K/V convolutions within one forward call.
+        is_decode = kwargs.pop('_is_decode', None)
+        if is_decode is None:
+            is_decode = _is_single_token(x=x, cu_seqlens=cu_seqlens)
+        if is_decode:
             y, cache = self.step(
                 x=x,
                 residual=residual,
@@ -218,7 +207,6 @@ class ShortConvolution(nn.Conv1d):
             activation=self.activation,
             backend=self.backend,
             cu_seqlens=cu_seqlens,
-            cu_seqlens_cpu=cu_seqlens_cpu,
             chunk_indices=chunk_indices,
             **kwargs,
         )
