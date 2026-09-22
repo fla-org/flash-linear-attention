@@ -30,8 +30,6 @@ pytestmark = pytest.mark.skipif(
     not (IS_NVIDIA or IS_AMD or IS_NPU),
     reason="KDA graph tests require CUDA/HIP or Ascend NPU",
 )
-cuda_only = pytest.mark.skipif(IS_NPU, reason="direct CUDA capture and NCCL require a CUDA/HIP device")
-npu_only = pytest.mark.skipif(not IS_NPU, reason="graphed callable coverage is currently validated on Ascend NPU")
 graph_device = torch.npu if IS_NPU else torch.cuda
 
 
@@ -192,7 +190,7 @@ _CFG = [
 
 
 @pytest.mark.parametrize(("gate", "safe_gate", "hv"), _CFG)
-@cuda_only
+@pytest.mark.skipif(IS_NPU, reason="direct CUDA capture and NCCL require a CUDA/HIP device")
 def test_chunk_kda_graph_replay_matches_eager(gate, safe_gate, hv):
     """Capture fwd+bwd, replay with the captured inputs, and compare to the eager path."""
     cu = torch.tensor(_VARLEN_CONFIGS[0][1], dtype=torch.long, device=device)
@@ -211,7 +209,7 @@ def test_chunk_kda_graph_replay_matches_eager(gate, safe_gate, hv):
 
 
 @pytest.mark.parametrize(("gate", "safe_gate", "hv"), _CFG)
-@cuda_only
+@pytest.mark.skipif(IS_NPU, reason="direct CUDA capture and NCCL require a CUDA/HIP device")
 def test_chunk_kda_graph_multi_replay_varlen(gate, safe_gate, hv):
     """Capture once, then replay against several different cu_seqlens layouts.
 
@@ -248,7 +246,7 @@ def test_chunk_kda_graph_multi_replay_varlen(gate, safe_gate, hv):
     pytest.param(True, H, id="gate+safe_gate"),
     pytest.param(True, 2 * H, id="gva_gate+safe"),
 ])
-@cuda_only
+@pytest.mark.skipif(IS_NPU, reason="direct CUDA capture and NCCL require a CUDA/HIP device")
 def test_chunk_kda_graph_partial_tokens(safe_gate, hv):
     """Replay with total_tokens < T_static: padding rows must not pollute dA/dbias.
 
@@ -311,7 +309,7 @@ def _eager_cp(inp, cucfg, gate):
 
 
 @pytest.mark.skipif(not dist.is_available(), reason="requires torch.distributed")
-@cuda_only
+@pytest.mark.skipif(IS_NPU, reason="direct CUDA capture and NCCL require a CUDA/HIP device")
 def test_chunk_kda_graph_cp_world1():
     """world_size=1 CP + graph: exercises the recorded all-gather and device-side CP metadata.
 
@@ -540,9 +538,9 @@ def _assert_training_case(case: _GraphCase, offsets: list[int] | tuple[list[int]
         reference_loss.backward()
         graph_device.synchronize()
 
-        torch.testing.assert_close(o[:, :actual_t], reference_o, rtol=tolerance, atol=tolerance)
+        assert_close(f"{current_offsets}::o", reference_o, o[:, :actual_t], tolerance)
         if case.output_final_state:
-            torch.testing.assert_close(ht, reference_ht, rtol=tolerance, atol=tolerance)
+            assert_close(f"{current_offsets}::ht", reference_ht, ht, tolerance)
         else:
             assert reference_ht is None
         names = ("q", "k", "v", "g", "beta", "h0", "A_log", "dt_bias")
@@ -554,27 +552,21 @@ def _assert_training_case(case: _GraphCase, offsets: list[int] | tuple[list[int]
             actual_grad = actual.grad[:, :actual_t] if index < 5 else actual.grad
             assert torch.isfinite(actual_grad).all(), f"{current_offsets}::{name} graph gradient is not finite"
             assert torch.isfinite(reference.grad).all(), f"{current_offsets}::{name} eager gradient is not finite"
-            torch.testing.assert_close(
-                actual_grad,
-                reference.grad,
-                rtol=tolerance,
-                atol=tolerance,
-                msg=lambda m: f"{current_offsets}::{name}: {m}",
-            )
+            assert_close(f"{current_offsets}::{name}", reference.grad, actual_grad, tolerance)
 
         if IS_NPU and actual_t < case.T:
             for name, tensor in zip(("o", "dq", "dk", "dv", "dg", "db"), (o, *(inputs[i].grad for i in range(5)))):
-                torch.testing.assert_close(
-                    tensor[:, actual_t:],
+                assert_close(
+                    f"{current_offsets}::{name} padding",
                     torch.zeros_like(tensor[:, actual_t:]),
-                    rtol=0,
-                    atol=0,
-                    msg=lambda m, name=name: f"{name} padding: {m}",
+                    tensor[:, actual_t:],
+                    0,
+                    err_atol=0,
                 )
 
 
 @pytest.mark.parametrize("cu_dtype", [torch.int32, torch.int64])
-@npu_only
+@pytest.mark.skipif(not IS_NPU, reason="graphed callable coverage is currently validated on Ascend NPU")
 def test_chunk_kda_graph_callable_multi_replay_matches_eager(cu_dtype):
     _assert_training_case(
         case=_GraphCase(cu_dtype=cu_dtype, normalize_q=False, initial_state_scale=1.0),
@@ -583,7 +575,7 @@ def test_chunk_kda_graph_callable_multi_replay_matches_eager(cu_dtype):
     )
 
 
-@npu_only
+@pytest.mark.skipif(not IS_NPU, reason="graphed callable coverage is currently validated on Ascend NPU")
 def test_chunk_kda_graph_callable_skips_sentinels_between_tasks(monkeypatch):
     """Invalid tasks must not prevent the same core from processing later valid tasks."""
     for name in (
@@ -686,12 +678,12 @@ def test_chunk_kda_graph_callable_skips_sentinels_between_tasks(monkeypatch):
         ),
     ],
 )
-@npu_only
+@pytest.mark.skipif(not IS_NPU, reason="graphed callable coverage is currently validated on Ascend NPU")
 def test_chunk_kda_graph_callable_option_matrix_matches_eager(case, offsets):
     _assert_training_case(case, offsets)
 
 
-@npu_only
+@pytest.mark.skipif(not IS_NPU, reason="graphed callable coverage is currently validated on Ascend NPU")
 def test_chunk_kda_graph_callable_intermediate_states_match_eager():
     case = _GraphCase(
         T=96,
@@ -724,13 +716,13 @@ def test_chunk_kda_graph_callable_intermediate_states_match_eager():
             )
             graph_device.synchronize()
 
-            torch.testing.assert_close(o[:, :actual_t], reference_o, rtol=3e-3, atol=3e-3)
-            torch.testing.assert_close(ht, reference_ht, rtol=3e-3, atol=3e-3)
-            torch.testing.assert_close(h[:, :reference_h.shape[1]], reference_h, rtol=3e-3, atol=3e-3)
+            assert_close(f"{offsets}::o", reference_o, o[:, :actual_t], 3e-3)
+            assert_close(f"{offsets}::ht", reference_ht, ht, 3e-3)
+            assert_close(f"{offsets}::h", reference_h, h[:, :reference_h.shape[1]], 3e-3)
             assert h.shape[1] == (case.T + case.chunk_size - 1) // case.chunk_size + case.N - 1
 
 
-@npu_only
+@pytest.mark.skipif(not IS_NPU, reason="graphed callable coverage is currently validated on Ascend NPU")
 def test_chunk_kda_graph_callable_rejects_mismatched_sequence_capacity():
     case = _GraphCase()
     inputs = _make_case_inputs(case, seed=0)
