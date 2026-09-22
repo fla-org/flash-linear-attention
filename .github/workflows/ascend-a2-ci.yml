@@ -53,7 +53,14 @@ jobs:
             // here: a change to it affects the NPU backend too, so it should
             // trigger this CI.
             const npuPattern = /^fla\/(.+\/)?backends\/triton_ascend\/|^\.github\/workflows\/ascend-|^pyproject\.toml$|^fla\/utils\/|^fla\/modules\/|^tests\/conftest\.py$/;
-            const related = files.filter(f => npuPattern.test(f.filename)).map(f => f.filename);
+            const graphPaths = new Set([
+              'tests/ops/test_kda_graph.py',
+              'tests/benchmarks/test_graph_benchmark.py',
+              'benchmarks/ops/run.py',
+              'benchmarks/ops/graph_benchmark.py',
+              'benchmarks/ops/graph_registry.py',
+            ]);
+            const related = files.filter(f => npuPattern.test(f.filename) || graphPaths.has(f.filename)).map(f => f.filename);
             if (related.length > 0) {
               core.info('NPU-related files changed: ' + related.join(', '));
             }
@@ -142,13 +149,14 @@ jobs:
           assert IS_NPU, "Expected NPU backend (IS_NPU=True)"
           PY
 
-      - name: Run tests/modules and tests/ops/utils, gdn, gdn2, kda, gla, attnres, solve_tril
+      - name: Run benchmark unit tests, modules, ops/utils, gdn, gdn2, kda, gla, attnres, solve_tril
         shell: bash
         env:
           FLA_NPU_XDIST: "1"
         run: |
           source /usr/local/Ascend/ascend-toolkit/set_env.sh
           pytest -s -v --exitfirst -n 8 --dist load \
+            tests/benchmarks \
             tests/modules \
             tests/ops/utils \
             tests/ops/test_gdn_kernels.py \
@@ -158,3 +166,12 @@ jobs:
             tests/ops/test_gla.py \
             tests/ops/test_attnres.py \
             tests/ops/test_solve_tril.py
+
+      - name: Run NPU graph tests serially
+        shell: bash
+        env:
+          ASCEND_RT_VISIBLE_DEVICES: "0"
+          FLA_NPU_XDIST: "0"
+        run: |
+          source /usr/local/Ascend/ascend-toolkit/set_env.sh
+          pytest -s -v --exitfirst tests/ops/test_kda_graph.py

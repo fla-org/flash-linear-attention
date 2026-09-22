@@ -17,11 +17,24 @@ import torch
 _BUFFERS: dict[tuple, torch.Tensor] = {}
 
 
-def get_static_buffer(name: str, shape: tuple, dtype: torch.dtype, device: torch.device | str) -> torch.Tensor:
-    """Return the persistent buffer for the given key, allocated on first use and reused after."""
+def get_static_buffer(
+    name: str,
+    shape: tuple,
+    dtype: torch.dtype,
+    device: torch.device | str,
+    zero: bool = False,
+) -> torch.Tensor:
+    """Return the persistent buffer for the given key, allocated on first use and reused after.
+
+    With ``zero=True`` the buffer is zeroed on every call, not just at allocation.
+    Ascend graph replay requires padding rows to be physically zero: tl.dot padding
+    can carry UB residue, and NaN x 0 = NaN defeats zero-weight masks. Called inside
+    the capture region, the zero-fill is recorded into the graph and re-executed on
+    every replay.
+    """
     key = (name, tuple(shape), dtype, str(device))
     buf = _BUFFERS.get(key)
     if buf is None:
         buf = torch.empty(shape, dtype=dtype, device=device)
         _BUFFERS[key] = buf
-    return buf
+    return buf.zero_() if zero else buf
