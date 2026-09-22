@@ -156,7 +156,7 @@ def chunk_local_cumsum_scalar_kernel_npu(
     REVERSE: tl.constexpr,
     HAS_SCALE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    USE_GRAPH: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
 ):
     core_id = tl.program_id(0)
     T = T.to(tl.int64)
@@ -222,7 +222,7 @@ def chunk_local_cumsum_vector_kernel_npu(
     IS_VARLEN: tl.constexpr,
     NT_OFFSET: tl.constexpr,
     BH_OFFSET: tl.constexpr,
-    USE_GRAPH: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
 ):
     i_s, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_t += NT_OFFSET

@@ -287,9 +287,9 @@ def kda_gate_chunk_cumsum_vector_kernel_npu(
     HAS_SCALE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     USE_LOWER_BOUND: tl.constexpr,
-    USE_GRAPH: tl.constexpr,
     NT_OFFSET: tl.constexpr,
     BH_OFFSET: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
 ):
     i_s, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_t += NT_OFFSET

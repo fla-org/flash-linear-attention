@@ -15,6 +15,7 @@ import triton.language as tl
 from triton.runtime import driver
 
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
+from fla.ops.utils.graph import get_zeroed_static_buffer
 from fla.ops.utils.op import exp2
 from fla.utils import ascend_compile_kwargs, input_guard
 from fla.utils.ascend_ub_manager import (
@@ -71,7 +72,7 @@ def chunk_kda_bwd_kernel_dAv_npu(
     IS_VARLEN: tl.constexpr,
     NT_OFFSET: tl.constexpr,
     BH_OFFSET: tl.constexpr,
-    USE_GRAPH: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
 ):
     i_t = tl.program_id(0) + NT_OFFSET
     i_bh = tl.program_id(1) + BH_OFFSET
@@ -136,8 +137,14 @@ def chunk_kda_bwd_dAv_npu(
     BV = _get_dAv_bv(BT, V)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
-    dA = (v.new_zeros if use_graph else v.new_empty)(B, T, HV, BT, dtype=torch.float)
-    dv = torch.zeros_like(do)
+    if use_graph:
+        dA = get_zeroed_static_buffer("dAv_dA", (B, T, HV, BT), torch.float, v.device)
+        dv = get_zeroed_static_buffer("dAv_dv", tuple(do.shape), do.dtype, do.device)
+    else:
+        dA = v.new_empty(B, T, HV, BT, dtype=torch.float)
+        # dv stays zero-initialized on Ascend eager as well: boundary_check stores
+        # can read-modify-write destination lanes of NaN-poisoned empty buffers.
+        dv = torch.zeros_like(do)
 
     _launch_dAv_2d_kernel(
         chunk_kda_bwd_kernel_dAv_npu,
@@ -265,7 +272,7 @@ def chunk_kda_bwd_kernel_wy_v_part_npu(
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     G_T_CONTIG: tl.constexpr,
-    USE_GRAPH: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
 ):
     core_id = tl.program_id(0)
     T_seq = T
@@ -527,7 +534,7 @@ def chunk_kda_bwd_kernel_wy_dw_part_npu(
     K_T_CONTIG: tl.constexpr,
     G_T_CONTIG: tl.constexpr,
     K_OFFSET: tl.constexpr,
-    USE_GRAPH: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
 ):
     i_k = K_OFFSET
     core_id = tl.program_id(0)
@@ -666,7 +673,7 @@ def chunk_kda_bwd_kernel_wy_dA_finalize_npu(
     IS_VARLEN: tl.constexpr,
     G_T_CONTIG: tl.constexpr,
     TAIL_MODE: tl.constexpr,
-    USE_GRAPH: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
 ):
     """dA = mask(-A @ ((mask * dA_acc * beta) @ A)); copy db_acc into db.
 
@@ -781,12 +788,20 @@ def chunk_kda_bwd_wy_dqkg_fused_npu(
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
-    dq = (g.new_zeros if use_graph else g.new_empty)(B, T, HV, K, dtype=torch.float)
-    dk = (g.new_zeros if use_graph else g.new_empty)(B, T, HV, K, dtype=torch.float)
-    dv2 = (torch.zeros_like if use_graph else torch.empty_like)(v)
-    dg = (torch.zeros_like if use_graph else torch.empty_like)(g, dtype=torch.float)
-    db = (torch.zeros_like if use_graph else torch.empty_like)(beta, dtype=torch.float)
-    dA = (torch.zeros_like if use_graph else torch.empty_like)(A, dtype=torch.float)
+    if use_graph:
+        dq = get_zeroed_static_buffer("wy_dq", (B, T, HV, K), torch.float, q.device)
+        dk = get_zeroed_static_buffer("wy_dk", (B, T, HV, K), torch.float, q.device)
+        dv2 = get_zeroed_static_buffer("wy_dv2", tuple(v.shape), v.dtype, v.device)
+        dg = get_zeroed_static_buffer("wy_dg", tuple(g.shape), torch.float, g.device)
+        db = get_zeroed_static_buffer("wy_db", tuple(beta.shape), torch.float, beta.device)
+        dA = get_zeroed_static_buffer("wy_dA", tuple(A.shape), torch.float, A.device)
+    else:
+        dq = g.new_empty(B, T, HV, K, dtype=torch.float)
+        dk = g.new_empty(B, T, HV, K, dtype=torch.float)
+        dv2 = torch.empty_like(v)
+        dg = torch.empty_like(g, dtype=torch.float)
+        db = torch.empty_like(beta, dtype=torch.float)
+        dA = torch.empty_like(A, dtype=torch.float)
     dA_acc = torch.zeros(B, T, HV, BT, dtype=torch.float, device=A.device)
     db_acc = torch.zeros(B, T, HV, dtype=torch.float, device=beta.device)
 

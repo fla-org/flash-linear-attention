@@ -353,7 +353,7 @@ def chunk_gla_fwd_kernel_o_npu(
     BT: tl.constexpr, BK: tl.constexpr, BV: tl.constexpr,
     total_chunks, task_num, num_core,
     STATE_V_FIRST: tl.constexpr, IS_VARLEN: tl.constexpr,
-    USE_GRAPH: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
 ):
     core_id = tl.program_id(0)
     total_chunks_i64 = total_chunks.to(tl.int64)

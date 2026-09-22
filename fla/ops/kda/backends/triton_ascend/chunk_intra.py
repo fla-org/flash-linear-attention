@@ -17,6 +17,7 @@ from triton.runtime import driver
 from fla.ops.kda.backends.triton_ascend.wy_fast import recompute_w_u_fwd_kda_npu as _recompute_w_u_fwd_npu
 from fla.ops.kda.chunk_intra_token_parallel import chunk_kda_fwd_intra_token_parallel
 from fla.ops.utils import prepare_chunk_indices
+from fla.ops.utils.graph import get_zeroed_static_buffer
 from fla.ops.utils.op import exp2
 from fla.utils import ascend_compile_kwargs, input_guard
 from fla.utils.ascend_ub_manager import (
@@ -144,7 +145,7 @@ def chunk_kda_fwd_kernel_diag_solve_npu(
     NT_OFFSET,
     NC_OFFSET,
     BH_OFFSET,
-    USE_GRAPH: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
 ):
     """Per-subchunk lower-triangular forward substitution into Akkd.
 
@@ -209,7 +210,7 @@ def chunk_kda_fwd_kernel_intra_sub_chunk_npu(
     NT_OFFSET,
     NC_OFFSET,
     BH_OFFSET,
-    USE_GRAPH: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
 ):
     i_t = tl.program_id(0) + NT_OFFSET
     i_i = tl.program_id(1) + NC_OFFSET
@@ -302,7 +303,7 @@ def chunk_kda_fwd_kernel_inter_solve_fused_npu(
     IS_VARLEN: tl.constexpr,
     NT_OFFSET,
     BH_OFFSET,
-    USE_GRAPH: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
 ):
     # Diagonal Akkd blocks are inverted by diag_solve before this kernel.
     i_t = tl.program_id(0) + NT_OFFSET
@@ -712,7 +713,7 @@ def chunk_kda_bwd_kernel_intra_npu(
     BK: tl.constexpr,
     SAFE_GATE: tl.constexpr,
     NT_TOTAL,
-    USE_GRAPH: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
 ):
     NC = tl.cdiv(BT, BC)
     core_id = tl.program_id(0)
@@ -959,10 +960,17 @@ def chunk_kda_bwd_intra_npu(
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
-    dq2 = (torch.zeros_like if use_graph else torch.empty_like)(dq)
-    dk2 = (torch.zeros_like if use_graph else torch.empty_like)(dk)
-    db2 = (beta.new_zeros if use_graph else beta.new_empty)(1, *beta.shape, dtype=torch.float)
-    dg2 = (torch.zeros_like if use_graph else torch.empty_like)(dg, dtype=torch.float)
+    if use_graph:
+        dq2 = get_zeroed_static_buffer("intra_dq2", tuple(dq.shape), dq.dtype, dq.device)
+        dk2 = get_zeroed_static_buffer("intra_dk2", tuple(dk.shape), dk.dtype, dk.device)
+        # single slab: the persistent kernel accumulates db internally, unlike the NK-slab GPU kernel
+        db2 = get_zeroed_static_buffer("intra_db2", (1, *beta.shape), torch.float, beta.device)
+        dg2 = get_zeroed_static_buffer("intra_dg2", tuple(dg.shape), torch.float, dg.device)
+    else:
+        dq2 = torch.empty_like(dq)
+        dk2 = torch.empty_like(dk)
+        db2 = beta.new_empty(1, *beta.shape, dtype=torch.float)
+        dg2 = torch.empty_like(dg, dtype=torch.float)
     num_core = get_npu_properties()['num_aicore']
     chunk_kda_bwd_kernel_intra_npu[(num_core,)](
         NT_TOTAL=NT,

@@ -138,7 +138,7 @@ def recompute_w_u_fwd_kda_kernel_npu(
     IS_VARLEN: tl.constexpr,
     BETA_T_CONTIG: tl.constexpr,
     GK_T_CONTIG: tl.constexpr,
-    USE_GRAPH: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
 ):
     T_max = T
     BH = B * HV
