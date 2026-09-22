@@ -10,7 +10,8 @@ import triton
 from einops import rearrange
 
 from fla.modules.backends import dispatch
-from fla.ops.utils import prepare_chunk_indices
+from fla.ops.utils import prepare_chunk_indices, prepare_chunk_indices_static
+from fla.ops.utils.graph import validate_graph_capacity
 from fla.utils import input_guard
 
 from .kernels import (
@@ -47,6 +48,8 @@ def causal_conv1d_fwd(
     chunk_indices: torch.LongTensor | None = None,
     BT: int = 64,
     layout_fallback: bool = False,
+    use_graph: bool = False,
+    graph_nt_max: int | None = None,
 ) -> torch.Tensor:
     shape = x.shape
     if x.shape[-1] != weight.shape[0]:
@@ -56,12 +59,25 @@ def causal_conv1d_fwd(
     stride_x_n, stride_x_t, stride_x_d = x.stride()
 
     BW = triton.next_power_of_2(W)
+    if use_graph and graph_nt_max is None and chunk_indices is not None:
+        graph_nt_max = chunk_indices.shape[0]
+    if use_graph and cu_seqlens is not None:
+        if graph_nt_max is None:
+            raise ValueError("graph_nt_max is required for static convolution metadata")
+        validate_graph_capacity(T, len(cu_seqlens) - 1, graph_nt_max, BT)
     if cu_seqlens is not None and chunk_indices is None:
-        chunk_indices = prepare_chunk_indices(cu_seqlens, BT, cu_seqlens_cpu=cu_seqlens_cpu)
-    NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
+        if use_graph:
+            if graph_nt_max is None:
+                raise ValueError("graph_nt_max is required when generating static convolution metadata")
+            chunk_indices, _ = prepare_chunk_indices_static(cu_seqlens, BT, graph_nt_max)
+        else:
+            chunk_indices = prepare_chunk_indices(cu_seqlens, BT, cu_seqlens_cpu=cu_seqlens_cpu)
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else (graph_nt_max if use_graph else chunk_indices.shape[0])
     NB = triton.cdiv(B*T, 1024)
 
-    y = torch.empty_like(x, memory_format=torch.contiguous_format)
+    y = torch.zeros_like(x, memory_format=torch.contiguous_format) if use_graph else torch.empty_like(
+        x, memory_format=torch.contiguous_format
+    )
 
     def grid(meta): return (triton.cdiv(D, meta['BD']), NT, B)
     causal_conv1d_fwd_kernel[grid](
@@ -84,6 +100,7 @@ def causal_conv1d_fwd(
         stride_x_t=stride_x_t,
         stride_x_d=stride_x_d,
         ACTIVATION=activation,
+        USE_GRAPH=use_graph,
     )
     final_state = None
     if output_final_state:
@@ -92,6 +109,7 @@ def causal_conv1d_fwd(
             state_len=W,
             initial_state=initial_state,
             cu_seqlens=cu_seqlens,
+            use_graph=use_graph,
         )
     return y.view(shape), final_state
 
@@ -105,6 +123,7 @@ def compute_dh0_triton(
     activation: str | None,
     cu_seqlens: torch.Tensor | None,
     dht: torch.Tensor | None = None,
+    use_graph: bool = False,
 ) -> torch.Tensor:
     """
     Compute dh0 (gradient w.r.t. initial_state) using a separate Triton kernel.
@@ -138,6 +157,7 @@ def compute_dh0_triton(
         D=D,
         W=W,
         BD=BD,
+        USE_GRAPH=use_graph,
     )
 
     return dh0
@@ -158,6 +178,8 @@ def causal_conv1d_bwd(
     chunk_indices: torch.LongTensor | None = None,
     BT: int = 64,
     layout_fallback: bool = False,
+    use_graph: bool = False,
+    graph_nt_max: int | None = None,
 ):
     shape = x.shape
     if x.shape[-1] != weight.shape[0]:
@@ -169,9 +191,20 @@ def causal_conv1d_bwd(
     stride_dy_n, stride_dy_t, stride_dy_d = dy.stride()
 
     BW = triton.next_power_of_2(W)
+    if use_graph and graph_nt_max is None and chunk_indices is not None:
+        graph_nt_max = chunk_indices.shape[0]
+    if use_graph and cu_seqlens is not None:
+        if graph_nt_max is None:
+            raise ValueError("graph_nt_max is required for static convolution metadata")
+        validate_graph_capacity(T, len(cu_seqlens) - 1, graph_nt_max, BT)
     if cu_seqlens is not None and chunk_indices is None:
-        chunk_indices = prepare_chunk_indices(cu_seqlens, BT, cu_seqlens_cpu=cu_seqlens_cpu)
-    NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
+        if use_graph:
+            if graph_nt_max is None:
+                raise ValueError("graph_nt_max is required when generating static convolution metadata")
+            chunk_indices, _ = prepare_chunk_indices_static(cu_seqlens, BT, graph_nt_max)
+        else:
+            chunk_indices = prepare_chunk_indices(cu_seqlens, BT, cu_seqlens_cpu=cu_seqlens_cpu)
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else (graph_nt_max if use_graph else chunk_indices.shape[0])
     NB = triton.cdiv(B*T, 1024)
 
     y = None
@@ -187,11 +220,36 @@ def causal_conv1d_bwd(
             cu_seqlens_cpu=cu_seqlens_cpu,
             output_final_state=False,
             chunk_indices=chunk_indices,
+            BT=BT,
+            use_graph=use_graph,
+            graph_nt_max=graph_nt_max,
         )
-    dx = torch.empty_like(x)
-    dw = weight.new_empty(B*NT, *weight.shape, dtype=torch.float) if weight is not None else None
-    db = bias.new_empty(B*NT, *bias.shape, dtype=torch.float) if bias is not None else None
-    dr = dy if residual is not None else None
+    dx = torch.zeros_like(x) if use_graph else torch.empty_like(x)
+    if weight is not None:
+        dw = weight.new_zeros(B * NT, *weight.shape, dtype=torch.float) if use_graph else weight.new_empty(
+            B * NT, *weight.shape, dtype=torch.float
+        )
+    else:
+        dw = None
+    if bias is not None:
+        db = bias.new_zeros(B * NT, *bias.shape, dtype=torch.float) if use_graph else bias.new_empty(
+            B * NT, *bias.shape, dtype=torch.float
+        )
+    else:
+        db = None
+    if residual is not None:
+        if use_graph and cu_seqlens is not None:
+            # Graph buckets keep a fixed token capacity.  Residual is an
+            # elementwise path, so mask its tail using device metadata before
+            # returning the gradient to autograd.
+            token_ids = torch.arange(dy.shape[-2], device=dy.device)
+            valid_tokens = token_ids < cu_seqlens[-1]
+            mask_shape = (1,) * (dy.ndim - 2) + (dy.shape[-2], 1)
+            dr = dy * valid_tokens.reshape(mask_shape).to(dtype=dy.dtype)
+        else:
+            dr = dy
+    else:
+        dr = None
 
     stride_dx_n, stride_dx_t, stride_dx_d = dx.stride()
 
@@ -225,6 +283,7 @@ def causal_conv1d_bwd(
         stride_dy_t=stride_dy_t,
         stride_dy_d=stride_dy_d,
         ACTIVATION=activation,
+        USE_GRAPH=use_graph,
     )
     if weight is not None:
         dw = dw.sum(0).to(weight)
@@ -242,6 +301,7 @@ def causal_conv1d_bwd(
             activation=activation,
             cu_seqlens=cu_seqlens,
             dht=dht,
+            use_graph=use_graph,
         )
 
     return dx.view(shape), dw, db, dr, dh0
@@ -254,6 +314,7 @@ def causal_conv1d_update_states(
     state_len: int,
     initial_state: torch.Tensor | None = None,
     cu_seqlens: torch.Tensor | None = None,
+    use_graph: bool = False,
 ) -> torch.Tensor:
     if cu_seqlens is not None:
         N = len(cu_seqlens) - 1
@@ -272,7 +333,9 @@ def causal_conv1d_update_states(
         stride_x_n, stride_x_t, stride_x_d = x.stride()
 
     W = state_len
-    final_state = torch.empty(N, D, W, dtype=x.dtype, device=x.device)
+    final_state = torch.zeros(N, D, W, dtype=x.dtype, device=x.device) if use_graph else torch.empty(
+        N, D, W, dtype=x.dtype, device=x.device
+    )
 
     BD = min(triton.next_power_of_2(D), 256)
     BW = triton.next_power_of_2(W)
@@ -292,6 +355,7 @@ def causal_conv1d_update_states(
         stride_x_d=stride_x_d,
         BW=BW,
         BD=BD,
+        USE_GRAPH=use_graph,
     )
     return final_state
 
@@ -380,14 +444,30 @@ class CausalConv1dFunction(torch.autograd.Function):
         cu_seqlens_cpu: torch.LongTensor | None = None,
         chunk_indices: torch.LongTensor | None = None,
         chunk_size: int = 64,
+        use_graph: bool = False,
+        graph_nt_max: int | None = None,
     ):
         BT = chunk_size
+        if use_graph and graph_nt_max is None and chunk_indices is not None:
+            graph_nt_max = chunk_indices.shape[0]
+        if use_graph and cu_seqlens is not None:
+            if graph_nt_max is None:
+                raise ValueError("graph_nt_max is required for static convolution metadata")
+            validate_graph_capacity(x.shape[1], len(cu_seqlens) - 1, graph_nt_max, BT)
         if cu_seqlens is not None and chunk_indices is None:
-            chunk_indices = prepare_chunk_indices(cu_seqlens, BT, cu_seqlens_cpu=cu_seqlens_cpu)
+            if use_graph:
+                if graph_nt_max is None:
+                    raise ValueError("graph_nt_max is required when generating static convolution metadata")
+                chunk_indices, _ = prepare_chunk_indices_static(cu_seqlens, BT, graph_nt_max)
+            else:
+                chunk_indices = prepare_chunk_indices(cu_seqlens, BT, cu_seqlens_cpu=cu_seqlens_cpu)
         ctx.activation = activation
         ctx.cu_seqlens = cu_seqlens
         ctx.cu_seqlens_cpu = cu_seqlens_cpu
         ctx.chunk_indices = chunk_indices
+        ctx.chunk_size = chunk_size
+        ctx.use_graph = use_graph
+        ctx.graph_nt_max = graph_nt_max
         ctx.layout_fallback = _has_non_standard_layout(x)
         ctx.save_for_backward(x, weight, bias, residual, initial_state)
         y, final_state = causal_conv1d_fwd(
@@ -403,6 +483,8 @@ class CausalConv1dFunction(torch.autograd.Function):
             chunk_indices=chunk_indices,
             BT=BT,
             layout_fallback=ctx.layout_fallback,
+            use_graph=use_graph,
+            graph_nt_max=graph_nt_max,
         )
         return y, final_state
 
@@ -422,6 +504,9 @@ class CausalConv1dFunction(torch.autograd.Function):
             cu_seqlens=ctx.cu_seqlens,
             cu_seqlens_cpu=ctx.cu_seqlens_cpu,
             chunk_indices=ctx.chunk_indices,
+            BT=ctx.chunk_size,
             layout_fallback=ctx.layout_fallback,
+            use_graph=ctx.use_graph,
+            graph_nt_max=ctx.graph_nt_max,
         )
-        return dx, dw, db, dr, dh0, None, None, None, None, None, None
+        return dx, dw, db, dr, dh0, None, None, None, None, None, None, None, None

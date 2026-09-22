@@ -183,7 +183,9 @@ def kda_gate_bwd_kernel(
     dA,
     dbeta,
     lower_bound,
+    cu_seqlens,
     T,
+    N,
     H: tl.constexpr,
     D: tl.constexpr,
     BT: tl.constexpr,
@@ -192,6 +194,7 @@ def kda_gate_bwd_kernel(
     HAS_BIAS: tl.constexpr,
     HAS_BETA: tl.constexpr,
     USE_LOWER_BOUND: tl.constexpr,
+    USE_GRAPH: tl.constexpr,
 ):
     i_t, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1)
 
@@ -199,7 +202,8 @@ def kda_gate_bwd_kernel(
 
     o_t = i_t * BT + tl.arange(0, BT)
     o_d = tl.arange(0, BD)
-    m_t = o_t < T
+    actual_t = tl.load(cu_seqlens + N).to(tl.int64) if USE_GRAPH else T
+    m_t = (o_t < T) & (o_t < actual_t)
     m_g = m_t[:, None] & (o_d[None, :] < D)
     p_g = g + i_h * D + o_t[:, None] * (H * D) + o_d[None, :]
     p_dg = dg + i_h * D + o_t[:, None] * (H * D) + o_d[None, :]
@@ -283,14 +287,19 @@ def kda_gate_bwd(
     dt_bias: torch.Tensor | None = None,
     dyg: torch.Tensor | None = None,
     lower_bound: float | None = None,
+    cu_seqlens: torch.LongTensor | None = None,
+    use_graph: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
     H, K = g.shape[-2:]
     T = g.numel() // (H * K)
     BT = 32
     NT = triton.cdiv(T, BT)
+    kernel_use_graph = use_graph and cu_seqlens is not None
 
-    dg = torch.empty_like(g, dtype=torch.float32)
-    dA = g.new_empty(NT, H, dtype=torch.float32) if A_log is not None else None
+    dg = torch.zeros_like(g, dtype=torch.float32) if use_graph else torch.empty_like(g, dtype=torch.float32)
+    dA = None
+    if A_log is not None:
+        dA = g.new_zeros(NT, H, dtype=torch.float32) if use_graph else g.new_empty(NT, H, dtype=torch.float32)
 
     grid = (triton.cdiv(T, BT), H)
     kda_gate_bwd_kernel[grid](
@@ -304,11 +313,14 @@ def kda_gate_bwd(
         dA=dA,
         dbeta=None,
         T=T,
+        N=len(cu_seqlens) - 1 if kernel_use_graph else 0,
+        cu_seqlens=cu_seqlens,
         H=H,
         D=K,
         BT=BT,
         BD=triton.next_power_of_2(K),
         lower_bound=lower_bound,
+        USE_GRAPH=kernel_use_graph,
     )
 
     dg = dg.view_as(g).type_as(g)
@@ -494,7 +506,9 @@ def kda_gate_chunk_cumsum(
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     assert chunk_size == 2**(chunk_size.bit_length()-1), "chunk_size must be a power of 2"
 
-    g_org, g = g, torch.empty_like(g, dtype=output_dtype or g.dtype)
+    g_org, g = g, torch.zeros_like(g, dtype=output_dtype or g.dtype) if use_graph else torch.empty_like(
+        g, dtype=output_dtype or g.dtype
+    )
     def grid(meta): return (triton.cdiv(meta['S'], meta['BS']), NT, B * H)
     kda_gate_chunk_cumsum_vector_kernel[grid](
         s=g_org,

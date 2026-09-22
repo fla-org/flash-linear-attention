@@ -84,6 +84,9 @@ def causal_conv1d(
         )
         return output, None
 
+    if kwargs.get('use_graph', False) and backend != 'triton':
+        raise ValueError("CUDA Graph convolution mode requires the Triton backend.")
+
     if backend == 'triton':
         y, final_state = CausalConv1dFunction.apply(
             x,
@@ -96,6 +99,9 @@ def causal_conv1d(
             cu_seqlens,
             cu_seqlens_cpu,
             chunk_indices,
+            kwargs.get('chunk_size', 64),
+            kwargs.get('use_graph', False),
+            kwargs.get('graph_nt_max'),
         )
         return y, final_state
     elif backend == 'mix':

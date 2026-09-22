@@ -60,7 +60,10 @@ class TileLangBackend(BaseBackend):
         cu_seqlens: torch.LongTensor | None = None,
         chunk_size: int = 64,
         chunk_indices: torch.LongTensor | None = None,
+        use_graph: bool = False,
     ) -> tuple[bool, str | None]:
+        if use_graph:
+            return False, "TileLang chunk backward does not support CUDA Graph mode"
         if g is None:
             return False, "TileLang backend only supports gated case (g != None)"
         if g_gamma is not None:
@@ -94,6 +97,7 @@ class TileLangBackend(BaseBackend):
         cu_seqlens: torch.LongTensor | None = None,
         chunk_size: int = 64,
         chunk_indices: torch.LongTensor | None = None,
+        use_graph: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         from fla.ops.common.backends.tilelang.chunk_bwd import (
             chunk_bwd_dqkwg_tilelang,

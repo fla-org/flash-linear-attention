@@ -407,7 +407,11 @@ class TritonAscendBackend(BaseBackend):
         chunk_indices=None,
         BT=64,
         layout_fallback=False,
+        use_graph=False,
+        graph_nt_max=None,
     ):
+        if use_graph:
+            raise NotImplementedError("use_graph is not supported on the Ascend NPU convolution backend")
         from fla.modules.backends.triton_ascend.causal_conv1d import causal_conv1d_fwd_npu
         return causal_conv1d_fwd_npu(
             x,
@@ -439,7 +443,11 @@ class TritonAscendBackend(BaseBackend):
         chunk_indices=None,
         BT=64,
         layout_fallback=False,
+        use_graph=False,
+        graph_nt_max=None,
     ):
+        if use_graph:
+            raise NotImplementedError("use_graph is not supported on the Ascend NPU convolution backend")
         from fla.modules.backends.triton_ascend.causal_conv1d import causal_conv1d_bwd_npu
         return causal_conv1d_bwd_npu(
             x,
@@ -466,7 +474,10 @@ class TritonAscendBackend(BaseBackend):
         activation,
         cu_seqlens,
         dht=None,
+        use_graph=False,
     ):
+        if use_graph:
+            raise NotImplementedError("use_graph is not supported on the Ascend NPU convolution backend")
         from fla.modules.backends.triton_ascend.causal_conv1d import compute_dh0_npu
         return compute_dh0_npu(
             dy,
@@ -484,7 +495,10 @@ class TritonAscendBackend(BaseBackend):
         state_len,
         initial_state=None,
         cu_seqlens=None,
+        use_graph=False,
     ):
+        if use_graph:
+            raise NotImplementedError("use_graph is not supported on the Ascend NPU convolution backend")
         from fla.modules.backends.triton_ascend.causal_conv1d import causal_conv1d_update_states_npu
         return causal_conv1d_update_states_npu(
             x,
