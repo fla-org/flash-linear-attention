@@ -15,7 +15,7 @@ import triton.language as tl
 from triton.runtime import driver
 
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
-from fla.ops.utils.graph import get_zeroed_static_buffer
+from fla.ops.utils.graph import get_static_buffer
 from fla.ops.utils.op import exp2
 from fla.utils import ascend_compile_kwargs, input_guard
 from fla.utils.ascend_ub_manager import (
@@ -138,8 +138,8 @@ def chunk_kda_bwd_dAv_npu(
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     if use_graph:
-        dA = get_zeroed_static_buffer("dAv_dA", (B, T, HV, BT), torch.float, v.device)
-        dv = get_zeroed_static_buffer("dAv_dv", tuple(do.shape), do.dtype, do.device)
+        dA = get_static_buffer("dAv_dA", (B, T, HV, BT), torch.float, v.device, zero=True)
+        dv = get_static_buffer("dAv_dv", tuple(do.shape), do.dtype, do.device, zero=True)
     else:
         dA = v.new_empty(B, T, HV, BT, dtype=torch.float)
         # dv stays zero-initialized on Ascend eager as well: boundary_check stores
@@ -789,12 +789,12 @@ def chunk_kda_bwd_wy_dqkg_fused_npu(
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     if use_graph:
-        dq = get_zeroed_static_buffer("wy_dq", (B, T, HV, K), torch.float, q.device)
-        dk = get_zeroed_static_buffer("wy_dk", (B, T, HV, K), torch.float, q.device)
-        dv2 = get_zeroed_static_buffer("wy_dv2", tuple(v.shape), v.dtype, v.device)
-        dg = get_zeroed_static_buffer("wy_dg", tuple(g.shape), torch.float, g.device)
-        db = get_zeroed_static_buffer("wy_db", tuple(beta.shape), torch.float, beta.device)
-        dA = get_zeroed_static_buffer("wy_dA", tuple(A.shape), torch.float, A.device)
+        dq = get_static_buffer("wy_dq", (B, T, HV, K), torch.float, q.device, zero=True)
+        dk = get_static_buffer("wy_dk", (B, T, HV, K), torch.float, q.device, zero=True)
+        dv2 = get_static_buffer("wy_dv2", tuple(v.shape), v.dtype, v.device, zero=True)
+        dg = get_static_buffer("wy_dg", tuple(g.shape), torch.float, g.device, zero=True)
+        db = get_static_buffer("wy_db", tuple(beta.shape), torch.float, beta.device, zero=True)
+        dA = get_static_buffer("wy_dA", tuple(A.shape), torch.float, A.device, zero=True)
     else:
         dq = g.new_empty(B, T, HV, K, dtype=torch.float)
         dk = g.new_empty(B, T, HV, K, dtype=torch.float)

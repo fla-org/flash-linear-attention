@@ -17,7 +17,7 @@ from triton.runtime import driver
 from fla.ops.kda.backends.triton_ascend.wy_fast import recompute_w_u_fwd_kda_npu as _recompute_w_u_fwd_npu
 from fla.ops.kda.chunk_intra_token_parallel import chunk_kda_fwd_intra_token_parallel
 from fla.ops.utils import prepare_chunk_indices
-from fla.ops.utils.graph import get_zeroed_static_buffer
+from fla.ops.utils.graph import get_static_buffer
 from fla.ops.utils.op import exp2
 from fla.utils import ascend_compile_kwargs, input_guard
 from fla.utils.ascend_ub_manager import (
@@ -961,11 +961,11 @@ def chunk_kda_bwd_intra_npu(
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     if use_graph:
-        dq2 = get_zeroed_static_buffer("intra_dq2", tuple(dq.shape), dq.dtype, dq.device)
-        dk2 = get_zeroed_static_buffer("intra_dk2", tuple(dk.shape), dk.dtype, dk.device)
+        dq2 = get_static_buffer("intra_dq2", tuple(dq.shape), dq.dtype, dq.device, zero=True)
+        dk2 = get_static_buffer("intra_dk2", tuple(dk.shape), dk.dtype, dk.device, zero=True)
         # single slab: the persistent kernel accumulates db internally, unlike the NK-slab GPU kernel
-        db2 = get_zeroed_static_buffer("intra_db2", (1, *beta.shape), torch.float, beta.device)
-        dg2 = get_zeroed_static_buffer("intra_dg2", tuple(dg.shape), torch.float, dg.device)
+        db2 = get_static_buffer("intra_db2", (1, *beta.shape), torch.float, beta.device, zero=True)
+        dg2 = get_static_buffer("intra_dg2", tuple(dg.shape), torch.float, dg.device, zero=True)
     else:
         dq2 = torch.empty_like(dq)
         dk2 = torch.empty_like(dk)
