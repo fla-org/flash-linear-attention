@@ -213,7 +213,7 @@ def chunkwise_fwd_kernel(
         b_v = tl.load(p_v, mask=m_tv, other=0.0)
         b_o = tl.zeros((BT, V), dtype=tl.float32)
         if MIN_LEVEL == 0:
-            b_o += tl.dot(b_s, b_v)
+            b_o = tl.dot(b_s, b_v, b_o)
 
         chunk_index = (
             first_chunk_index + i_t
@@ -316,27 +316,27 @@ def chunkwise_fwd_kernel(
 
             b_v = (b_v * tl.exp(b_g_last - b_g)[:, None]).to(b_v.dtype)
             if MIN_LEVEL <= 1:
-                kv_0 += tl.dot(b_k, b_v)
+                kv_0 = tl.dot(b_k, b_v, kv_0)
             elif MIN_LEVEL == 2:
-                kv_1 += tl.dot(b_k, b_v)
+                kv_1 = tl.dot(b_k, b_v, kv_1)
             elif MIN_LEVEL == 3:
-                kv_2 += tl.dot(b_k, b_v)
+                kv_2 = tl.dot(b_k, b_v, kv_2)
             elif MIN_LEVEL == 4:
-                kv_3 += tl.dot(b_k, b_v)
+                kv_3 = tl.dot(b_k, b_v, kv_3)
             elif MIN_LEVEL == 5:
-                kv_4 += tl.dot(b_k, b_v)
+                kv_4 = tl.dot(b_k, b_v, kv_4)
             elif MIN_LEVEL == 6:
-                kv_5 += tl.dot(b_k, b_v)
+                kv_5 = tl.dot(b_k, b_v, kv_5)
             elif MIN_LEVEL == 7:
-                kv_6 += tl.dot(b_k, b_v)
+                kv_6 = tl.dot(b_k, b_v, kv_6)
             elif MIN_LEVEL == 8:
-                kv_7 += tl.dot(b_k, b_v)
+                kv_7 = tl.dot(b_k, b_v, kv_7)
             elif MIN_LEVEL == 9:
-                kv_8 += tl.dot(b_k, b_v)
+                kv_8 = tl.dot(b_k, b_v, kv_8)
             elif MIN_LEVEL == 10:
-                kv_9 += tl.dot(b_k, b_v)
+                kv_9 = tl.dot(b_k, b_v, kv_9)
             elif MIN_LEVEL == 11:
-                kv_10 += tl.dot(b_k, b_v)
+                kv_10 = tl.dot(b_k, b_v, kv_10)
 
             check_value = (~chunk_index & (chunk_index + 1)) - 1
 
@@ -807,7 +807,7 @@ def chunkwise_bwd_kernel_hdqgl(
             b_k = tl.load(p_k, mask=m_tk, other=0.0)
             b_v = tl.load(p_v, mask=(o_v[:, None] < V) & m_t[None, :], other=0.0)
             b_k = (b_k * tl.exp(b_g_last - b_g)[:, None]).to(b_k.dtype)
-            b_h += tl.dot(b_v, b_k)
+            b_h = tl.dot(b_v, b_k, b_h)
 
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})

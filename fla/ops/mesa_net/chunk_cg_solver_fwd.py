@@ -24,7 +24,7 @@ def chunk_update_once(
     b_lamb,
 ):
     b_o = tl.dot((tl.dot(b_p.to(b_k.dtype), tl.trans(b_k)) * b_m).to(b_v.dtype), b_v)
-    b_o += tl.dot((b_p * b_g_exp_q).to(b_h.dtype), b_h)
+    b_o = tl.dot((b_p * b_g_exp_q).to(b_h.dtype), b_h, b_o)
     if b_lamb is not None:
         b_o += b_lamb[None, :] * b_p
     return b_o

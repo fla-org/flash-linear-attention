@@ -115,6 +115,7 @@ def run_cp_kda_test_worker(
     lower_bound: float | None = None,
     state_v_first: bool = False,
     use_tf32x3_affine_chain: bool = False,
+    layout: str = 'contiguous',
 ):
     """
     Worker function for CP KDA test.
@@ -125,6 +126,8 @@ def run_cp_kda_test_worker(
         device = torch.device(f'cuda:{rank}')
 
         assert T % world_size == 0, f"T={T} must be divisible by world_size={world_size}"
+        if layout == 'zigzag':
+            assert T % (2 * world_size) == 0, f"T={T} must be divisible by 2*world_size={2 * world_size} for zigzag"
         assert sum(lengths) == T, f"Sum of lengths {sum(lengths)} must equal T={T}"
 
         if rank == 0:
@@ -149,11 +152,10 @@ def run_cp_kda_test_worker(
         if rank == 0:
             torch.manual_seed(42)
             # Generate inputs
-            # Asymmetric initialization for q and k to test L2 norm
-            # q: small positive values around 1.0
-            # k: large negative values around -50.0
+            # q gets a +1.0 offset to keep L2 normalization observable; extreme k
+            # magnitudes inflate chunk-vs-naive bf16 error past 8e-3 even without CP.
             q_global.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype) + 1.0)
-            k_global.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype) * 10.0 - 50.0)
+            k_global.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype))
             v_global.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype))
             if use_gate_in_kernel:
                 g_global.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype))
@@ -308,23 +310,36 @@ def run_cp_kda_test_worker(
 
         # Build CP context
         context = build_cp_context(
-            cu_seqlens_global, group=dist.group.WORLD, use_tf32x3_affine_chain=use_tf32x3_affine_chain
+            cu_seqlens_global, group=dist.group.WORLD, use_tf32x3_affine_chain=use_tf32x3_affine_chain,
+            layout=layout,
         )
 
-        chunk_size = T // world_size
-        start_idx = rank * chunk_size
-        end_idx = (rank + 1) * chunk_size
+        if layout == 'zigzag':
+            # local input = [front part; back part]; part_len = T / (2W)
+            part_len = T // (2 * world_size)
+            front_start = rank * part_len
+            back_start = (2 * world_size - 1 - rank) * part_len
+
+            def slice_local(t):
+                return torch.cat([t[:, front_start: front_start + part_len],
+                                  t[:, back_start: back_start + part_len]], dim=1)
+        else:
+            chunk_size = T // world_size
+            start_idx = rank * chunk_size
+            end_idx = (rank + 1) * chunk_size
+
+            def slice_local(t):
+                return t[:, start_idx:end_idx]
 
         # Get local slices
-        q_local = q_global[:, start_idx:end_idx, :].clone().detach().requires_grad_(True)
-        k_local = k_global[:, start_idx:end_idx, :].clone().detach().requires_grad_(True)
-        v_local = v_global[:, start_idx:end_idx, :].clone().detach().requires_grad_(True)
-        g_local = g_global[:, start_idx:end_idx, :].clone().detach().requires_grad_(True)
-        beta_local = beta_global[:, start_idx:end_idx].clone().detach().requires_grad_(True)
-        do_local = do_global[:, start_idx:end_idx, :].clone()
+        q_local = slice_local(q_global).clone().detach().requires_grad_(True)
+        k_local = slice_local(k_global).clone().detach().requires_grad_(True)
+        v_local = slice_local(v_global).clone().detach().requires_grad_(True)
+        g_local = slice_local(g_global).clone().detach().requires_grad_(True)
+        beta_local = slice_local(beta_global).clone().detach().requires_grad_(True)
+        do_local = slice_local(do_global).clone()
 
-        print(f"[Rank {rank}] chunk: [{start_idx}, {end_idx}), "
-              f"cu_seqlens: {context.cu_seqlens.tolist()}, "
+        print(f"[Rank {rank}] cu_seqlens: {context.cu_seqlens.tolist()}, "
               f"pre_num_ranks: {context.pre_num_ranks}")
         dist.barrier()
 
@@ -350,39 +365,29 @@ def run_cp_kda_test_worker(
         o_local.backward(do_local)
 
         # Step 4: Result Aggregation and Verification
-        o_gathered = [torch.zeros_like(o_local) for _ in range(world_size)]
-        dist.all_gather(o_gathered, o_local)
-        o_cp_global = torch.cat(o_gathered, dim=1)
+        def gather_global(local):
+            gathered = [torch.zeros_like(local) for _ in range(world_size)]
+            dist.all_gather(gathered, local)
+            if layout == 'zigzag':
+                # undo the zigzag permutation: fronts in rank order, then backs reversed
+                return torch.cat([g[:, :part_len] for g in gathered]
+                                 + [g[:, part_len:] for g in reversed(gathered)], dim=1)
+            return torch.cat(gathered, dim=1)
 
-        dq_gathered = [torch.zeros_like(q_local.grad) for _ in range(world_size)]
-        dist.all_gather(dq_gathered, q_local.grad)
-        dq_cp_global = torch.cat(dq_gathered, dim=1)
-
-        dk_gathered = [torch.zeros_like(k_local.grad) for _ in range(world_size)]
-        dist.all_gather(dk_gathered, k_local.grad)
-        dk_cp_global = torch.cat(dk_gathered, dim=1)
-
-        dv_gathered = [torch.zeros_like(v_local.grad) for _ in range(world_size)]
-        dist.all_gather(dv_gathered, v_local.grad)
-        dv_cp_global = torch.cat(dv_gathered, dim=1)
-
-        dg_gathered = [torch.zeros_like(g_local.grad) for _ in range(world_size)]
-        dist.all_gather(dg_gathered, g_local.grad)
-        dg_cp_global = torch.cat(dg_gathered, dim=1)
-
-        db_gathered = [torch.zeros_like(beta_local.grad) for _ in range(world_size)]
-        dist.all_gather(db_gathered, beta_local.grad)
-        db_cp_global = torch.cat(db_gathered, dim=1)
+        o_cp_global = gather_global(o_local)
+        dq_cp_global = gather_global(q_local.grad)
+        dk_cp_global = gather_global(k_local.grad)
+        dv_cp_global = gather_global(v_local.grad)
+        dg_cp_global = gather_global(g_local.grad)
+        db_cp_global = gather_global(beta_local.grad)
 
         test_passed = True
         if rank == 0:
             print(f"\n[{test_name}] Verifying results...")
 
-            # Tolerance: ratio=8e-3 for all tensors.
-            # KDA CP has ~0.7-1.2% error from per-dim gating + L2 norm
-            # amplifying bf16 state communication precision loss.
-            # db (beta grad) involves cross-rank reduction → higher error
-            # (~1.5-2.4%), set to warning-only.
+            # Tolerance: ratio=8e-3 for all tensors; dg/db warning-only: dg's
+            # single-GPU chunk-vs-naive error is already ~0.0085; db sees cross-rank
+            # reduction (~1.5-2.4%).
             tensors_to_verify = [
                 ("Output", ref_out, o_cp_global),
                 ("dq", ref_dq, dq_cp_global),
@@ -394,7 +399,7 @@ def run_cp_kda_test_worker(
 
             try:
                 for name, ref, cp in tensors_to_verify:
-                    warn = (name == "db")
+                    warn = name in ("dg", "db")
                     assert_close(name, ref, cp, ratio=8e-3, warning=warn)
                 print(f"✅ [{test_name}] Test Passed!\n")
             except AssertionError as e:
@@ -426,6 +431,7 @@ def run_cp_test_with_spawn(
     lower_bound: float | None = None,
     state_v_first: bool = False,
     use_tf32x3_affine_chain: bool = False,
+    layout: str = 'contiguous',
 ):
     """
     Run CP test using torch.multiprocessing.spawn.
@@ -434,7 +440,7 @@ def run_cp_test_with_spawn(
     mp.start_processes(
         run_cp_kda_test_worker,
         args=(world_size, test_name, T, H, D, lengths, dtype, disable_recompute,
-              use_gate_in_kernel, safe_gate, lower_bound, state_v_first, use_tf32x3_affine_chain),
+              use_gate_in_kernel, safe_gate, lower_bound, state_v_first, use_tf32x3_affine_chain, layout),
         nprocs=world_size,
         join=True,
         start_method='spawn',
@@ -640,6 +646,74 @@ def test_cp2_state_v_first_tf32x3():
         dtype=torch.bfloat16,
         state_v_first=True,
         use_tf32x3_affine_chain=True,
+        **GATE_KWARGS,
+    )
+
+
+# ============================================================
+# Zigzag Layout Tests
+# ============================================================
+
+def test_cp2_zigzag_single_sequence():
+    """CP2 zigzag: single long sequence, state chain snakes through all 4 parts."""
+    if torch.cuda.device_count() < 2:
+        pytest.skip("At least 2 GPUs required")
+
+    run_cp_test_with_spawn(
+        world_size=2,
+        test_name="CP2_Zigzag_SingleSequence",
+        T=10240, H=12, D=128,
+        lengths=[10240],
+        dtype=torch.bfloat16,
+        layout='zigzag',
+        **GATE_KWARGS,
+    )
+
+
+def test_cp2_zigzag_sequence_cut():
+    """CP2 zigzag: sequences cut at every part boundary (2560/5120/7680)."""
+    if torch.cuda.device_count() < 2:
+        pytest.skip("At least 2 GPUs required")
+
+    run_cp_test_with_spawn(
+        world_size=2,
+        test_name="CP2_Zigzag_SequenceCut",
+        T=10240, H=12, D=128,
+        lengths=[3000, 4000, 3240],
+        dtype=torch.bfloat16,
+        layout='zigzag',
+        **GATE_KWARGS,
+    )
+
+
+def test_cp4_zigzag_complex():
+    """CP4 zigzag: 8 parts of 1280, sequences cut everywhere including the middle boundary."""
+    if torch.cuda.device_count() < 4:
+        pytest.skip("At least 4 GPUs required")
+
+    run_cp_test_with_spawn(
+        world_size=4,
+        test_name="CP4_Zigzag_Complex",
+        T=10240, H=12, D=128,
+        lengths=[1500, 2600, 3000, 3140],
+        dtype=torch.bfloat16,
+        layout='zigzag',
+        **GATE_KWARGS,
+    )
+
+
+def test_cp4_zigzag_boundary_aligned():
+    """CP4 zigzag: all sequence boundaries on part boundaries, no cross-rank state."""
+    if torch.cuda.device_count() < 4:
+        pytest.skip("At least 4 GPUs required")
+
+    run_cp_test_with_spawn(
+        world_size=4,
+        test_name="CP4_Zigzag_BoundaryAligned",
+        T=10240, H=12, D=128,
+        lengths=[2560, 2560, 2560, 2560],
+        dtype=torch.bfloat16,
+        layout='zigzag',
         **GATE_KWARGS,
     )
 

@@ -101,8 +101,8 @@ def chunk_dplr_fwd_kernel_h(
             b_w = tl.load(p_w, mask=m_wc, other=0.0)
             b_bg = tl.load(p_bg, mask=m_kc, other=0.0)
             b_v2 = tl.dot(b_w, b_h.to(b_w.dtype)) + tl.load(p_u, mask=m_vc, other=0.0)
-            b_hc += tl.dot(b_kg, b_v)
-            b_hc += tl.dot(b_bg.to(b_hc.dtype), b_v2)
+            b_hc = tl.dot(b_kg, b_v, b_hc)
+            b_hc = tl.dot(b_bg.to(b_hc.dtype), b_v2, b_hc)
             tl.store(p_v_new, b_v2.to(p_v_new.dtype.element_ty), mask=m_vc)
 
         last_idx = min((i_t + 1) * BT, T) - 1

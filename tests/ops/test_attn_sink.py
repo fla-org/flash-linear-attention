@@ -172,6 +172,7 @@ def test_attn_sink_empty_row_ref_matches_gpt_oss_eager():
         pytest.param(64, [0, 97, 173, 300], id="varlen_swa"),
     ],
 )
+@pytest.mark.smoke
 def test_parallel_attn_sink_matches_reference(window_size, cu_seqlens):
     torch.manual_seed(123)
     os.environ["TRITON_F32_DEFAULT"] = "ieee"

@@ -105,8 +105,8 @@ def chunk_dplr_bwd_kernel_dhu(
             b_dv2 = b_dv + tl.dot(b_bg, b_dh.to(b_bg.dtype))
             tl.store(p_dv2, b_dv2.to(p_dv.dtype.element_ty), mask=m_vc)
             # [BK, BV]
-            b_dh_tmp += tl.dot(b_qg, b_do.to(b_qg.dtype))
-            b_dh_tmp += tl.dot(b_w, b_dv2.to(b_qg.dtype))
+            b_dh_tmp = tl.dot(b_qg, b_do.to(b_qg.dtype), b_dh_tmp)
+            b_dh_tmp = tl.dot(b_w, b_dv2.to(b_qg.dtype), b_dh_tmp)
         last_idx = min((i_t + 1) * BT, T) - 1
         bg_last = tl.load(gk + ((bos + last_idx) * H + i_h) * K + tl.arange(0, BK), mask=mask_k)
         b_dh *= exp2(bg_last)[:, None]

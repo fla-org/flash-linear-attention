@@ -87,6 +87,7 @@ def test_parallel_gqa_matches_reference():
     assert_close(" o", ref, tri, RTOL_FWD)
 
 
+@pytest.mark.smoke
 def test_parallel_varlen_matches_reference():
     dtype = torch.float32
     T1, T2 = 17, 23

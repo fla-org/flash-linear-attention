@@ -12,6 +12,7 @@ import triton.language as tl
 from fla.ops.backends import dispatch
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 from fla.ops.utils.cache import fla_cache_autotune
+from fla.ops.utils.graph import get_static_buffer
 from fla.ops.utils.op import exp2
 from fla.utils import (
     IS_INTEL,
@@ -217,23 +218,23 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
             p_w = w + o_t[:, None] * (HV*K) + o_k2[None, :]
             b_w = tl.load(p_w, mask=m_t[:, None] & m_k2[None, :], other=0.0)
             if STATE_V_FIRST:
-                b_v += tl.dot(b_w, tl.trans(b_h2).to(b_w.dtype))
+                b_v = tl.dot(b_w, tl.trans(b_h2).to(b_w.dtype), b_v)
             else:
-                b_v += tl.dot(b_w, b_h2.to(b_w.dtype))
+                b_v = tl.dot(b_w, b_h2.to(b_w.dtype), b_v)
         if K > 128:
             p_w = w + o_t[:, None] * (HV*K) + o_k3[None, :]
             b_w = tl.load(p_w, mask=m_t[:, None] & m_k3[None, :], other=0.0)
             if STATE_V_FIRST:
-                b_v += tl.dot(b_w, tl.trans(b_h3).to(b_w.dtype))
+                b_v = tl.dot(b_w, tl.trans(b_h3).to(b_w.dtype), b_v)
             else:
-                b_v += tl.dot(b_w, b_h3.to(b_w.dtype))
+                b_v = tl.dot(b_w, b_h3.to(b_w.dtype), b_v)
         if K > 192:
             p_w = w + o_t[:, None] * (HV*K) + o_k4[None, :]
             b_w = tl.load(p_w, mask=m_t[:, None] & m_k4[None, :], other=0.0)
             if STATE_V_FIRST:
-                b_v += tl.dot(b_w, tl.trans(b_h4).to(b_w.dtype))
+                b_v = tl.dot(b_w, tl.trans(b_h4).to(b_w.dtype), b_v)
             else:
-                b_v += tl.dot(b_w, b_h4.to(b_w.dtype))
+                b_v = tl.dot(b_w, b_h4.to(b_w.dtype), b_v)
         p_v = v + o_t[:, None] * (HV*V) + o_v[None, :]
         b_v = tl.load(p_v, mask=m_t[:, None] & m_v[None, :], other=0.0) - b_v
 
@@ -291,28 +292,28 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
         if STATE_V_FIRST:
             b_h1 += tl.trans(tl.dot(b_k, b_v))
         else:
-            b_h1 += tl.dot(b_k, b_v)
+            b_h1 = tl.dot(b_k, b_v, b_h1)
         if K > 64:
             p_k = k + o_k2[:, None] + o_t[None, :] * (H*K)
             b_k = tl.load(p_k, mask=m_k2[:, None] & m_t[None, :], other=0.0)
             if STATE_V_FIRST:
                 b_h2 += tl.trans(tl.dot(b_k, b_v))
             else:
-                b_h2 += tl.dot(b_k, b_v)
+                b_h2 = tl.dot(b_k, b_v, b_h2)
         if K > 128:
             p_k = k + o_k3[:, None] + o_t[None, :] * (H*K)
             b_k = tl.load(p_k, mask=m_k3[:, None] & m_t[None, :], other=0.0)
             if STATE_V_FIRST:
                 b_h3 += tl.trans(tl.dot(b_k, b_v))
             else:
-                b_h3 += tl.dot(b_k, b_v)
+                b_h3 = tl.dot(b_k, b_v, b_h3)
         if K > 192:
             p_k = k + o_k4[:, None] + o_t[None, :] * (H*K)
             b_k = tl.load(p_k, mask=m_k4[:, None] & m_t[None, :], other=0.0)
             if STATE_V_FIRST:
                 b_h4 += tl.trans(tl.dot(b_k, b_v))
             else:
-                b_h4 += tl.dot(b_k, b_v)
+                b_h4 = tl.dot(b_k, b_v, b_h4)
 
     if STORE_FINAL_STATE:
         if STATE_V_FIRST:
@@ -551,9 +552,9 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
             if USE_GK:
                 b_gk_last2 = tl.load(gk + last_idx * HV*K + o_k2, mask=(o_k2 < K), other=0.).to(tl.float32)
             if STATE_V_FIRST:
-                b_dv += tl.dot(b_k, tl.trans(b_dh2).to(b_k.dtype))
+                b_dv = tl.dot(b_k, tl.trans(b_dh2).to(b_k.dtype), b_dv)
             else:
-                b_dv += tl.dot(b_k, b_dh2.to(b_k.dtype))
+                b_dv = tl.dot(b_k, b_dh2.to(b_k.dtype), b_dv)
 
         if K > 128:
             p_k = k + o_t[:, None] * (H*K) + o_k3[None, :]
@@ -561,9 +562,9 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
             if USE_GK:
                 b_gk_last3 = tl.load(gk + last_idx * HV*K + o_k3, mask=(o_k3 < K), other=0.).to(tl.float32)
             if STATE_V_FIRST:
-                b_dv += tl.dot(b_k, tl.trans(b_dh3).to(b_k.dtype))
+                b_dv = tl.dot(b_k, tl.trans(b_dh3).to(b_k.dtype), b_dv)
             else:
-                b_dv += tl.dot(b_k, b_dh3.to(b_k.dtype))
+                b_dv = tl.dot(b_k, b_dh3.to(b_k.dtype), b_dv)
 
         if K > 192:
             p_k = k + o_t[:, None] * (H*K) + o_k4[None, :]
@@ -571,9 +572,9 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
             if USE_GK:
                 b_gk_last4 = tl.load(gk + last_idx * HV*K + o_k4, mask=(o_k4 < K), other=0.).to(tl.float32)
             if STATE_V_FIRST:
-                b_dv += tl.dot(b_k, tl.trans(b_dh4).to(b_k.dtype))
+                b_dv = tl.dot(b_k, tl.trans(b_dh4).to(b_k.dtype), b_dv)
             else:
-                b_dv += tl.dot(b_k, b_dh4.to(b_k.dtype))
+                b_dv = tl.dot(b_k, b_dh4.to(b_k.dtype), b_dv)
 
         if USE_G:
             b_dv *= tl.where(m_t, exp2(bg_last - b_g), 0)[:, None]
@@ -698,6 +699,7 @@ def chunk_gated_delta_rule_fwd_h(
     cu_seqlens: torch.LongTensor | None = None,
     cu_seqlens_cpu: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
+    chunk_offsets: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     B, T, H, K, V, HV = *k.shape, u.shape[-1], u.shape[2]
     BT = chunk_size
@@ -708,7 +710,9 @@ def chunk_gated_delta_rule_fwd_h(
     if cu_seqlens is None:
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
     else:
-        N, NT, chunk_offsets = len(cu_seqlens) - 1, len(chunk_indices), prepare_chunk_offsets(cu_seqlens, BT)
+        N, NT = len(cu_seqlens) - 1, len(chunk_indices)
+        if chunk_offsets is None:
+            chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT)
     assert K <= 256, "current kernel does not support head dimension larger than 256."
 
     if state_v_first:
@@ -759,6 +763,8 @@ def chunk_gated_delta_rule_bwd_dhu(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
+    chunk_offsets: torch.LongTensor | None = None,
+    use_graph: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     B, T, H, K, V, HV = *q.shape, do.shape[-1], do.shape[2]
     # N: the actual number of sequences in the batch with either equal or variable lengths
@@ -770,14 +776,24 @@ def chunk_gated_delta_rule_bwd_dhu(
     if cu_seqlens is None:
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
     else:
-        N, NT, chunk_offsets = len(cu_seqlens) - 1, len(chunk_indices), prepare_chunk_offsets(cu_seqlens, BT)
+        N, NT = len(cu_seqlens) - 1, len(chunk_indices)
+        if chunk_offsets is None:
+            chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT)
 
-    if state_v_first:
-        dh = q.new_empty(B, NT, HV, V, K)
+    if use_graph:
+        if state_v_first:
+            dh = get_static_buffer("dhu_dh_vf", (B, NT, HV, V, K), q.dtype, q.device)
+        else:
+            dh = get_static_buffer("dhu_dh", (B, NT, HV, K, V), q.dtype, q.device)
+        dh0 = get_static_buffer("dhu_dh0", tuple(h0.shape), torch.float32, h0.device) if h0 is not None else None
+        dv2 = get_static_buffer("dhu_dv2", tuple(dv.shape), dv.dtype, dv.device)
     else:
-        dh = q.new_empty(B, NT, HV, K, V)
-    dh0 = torch.empty_like(h0, dtype=torch.float32) if h0 is not None else None
-    dv2 = torch.empty_like(dv)
+        if state_v_first:
+            dh = q.new_empty(B, NT, HV, V, K)
+        else:
+            dh = q.new_empty(B, NT, HV, K, V)
+        dh0 = torch.empty_like(h0, dtype=torch.float32) if h0 is not None else None
+        dv2 = torch.empty_like(dv)
 
     def grid(meta): return (triton.cdiv(V, meta['BV']) * N * HV, )
     chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64[grid](

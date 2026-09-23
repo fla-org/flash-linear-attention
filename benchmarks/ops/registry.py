@@ -373,7 +373,7 @@ register_op(OpConfig(
     test_file='tests/ops/test_delta.py',
 ))
 
-# --- +gate + beta ---
+# --- Delta-rule variants with decay and update gates ---
 
 register_op(OpConfig(
     name='chunk_gdn',
@@ -396,6 +396,25 @@ def _comba_post_init(inputs, B, T, H, D, input_profile='synthetic', **kw):
         decay = torch.ones(H, dtype=inputs['k'].dtype, device=inputs['k'].device).sigmoid()
         inputs['p'] = (inputs['k'].detach() * decay[None, None, :, None]).requires_grad_(True)
 
+_gdn2_default_shapes = {
+    **SHAPE_CONFIGS,
+    'B1_T32768_H1_D32': {'B': 1, 'T': 32768, 'H': 1, 'D': 32},
+}
+
+register_op(OpConfig(
+    name='chunk_gdn2',
+    import_path='fla.ops.gdn2',
+    inputs={
+        **_simple_qkv,
+        'g': TensorSpec(shape_BTHD, transform=logsigmoid),
+        'b': TensorSpec(shape_BTHD, transform=sigmoid_transform),
+        'w': TensorSpec(shape_BTHD, transform=sigmoid_transform),
+    },
+    extra_kwargs={'use_qk_l2norm_in_kernel': True},
+    category='gate_beta',
+    default_shapes=_gdn2_default_shapes,
+    test_file='tests/ops/test_gdn2.py',
+))
 
 register_op(OpConfig(
     name='chunk_kda',
@@ -621,6 +640,92 @@ register_op(OpConfig(
 # q carries HQ query heads while k/v carry H kv heads (GQA; HQ/H a power of two
 # and >= 16). block_indices is a causal random selection that must be built
 # explicitly — the generic randn/randint input factory cannot produce a valid one.
+
+
+def _shape_nsa_gate(B, T, H, D, HQ=None, **kw):
+    if HQ is None:
+        raise ValueError("NSA gate shape requires HQ")
+    return (B, T, HQ)
+
+
+def _shape_nsa_compressed_k(B, T, H, D, block_size=64, **kw):
+    return (B, (T + block_size - 1) // block_size, H, D)
+
+
+def _shape_nsa_compressed_v(B, T, H, D, V=None, block_size=64, **kw):
+    if V is None:
+        raise ValueError("NSA value shape requires V")
+    return (B, (T + block_size - 1) // block_size, H, V)
+
+
+def _shape_nsa_v(B, T, H, D, V=None, **kw):
+    if V is None:
+        raise ValueError("NSA value shape requires V")
+    return (B, T, H, V)
+
+
+def _nsa_compression_post_init(inputs, B, T, H, D, block_size=64, **kw):
+    inputs['TK'] = T
+    inputs['block_size'] = block_size
+    inputs['scale'] = D**-0.5
+
+
+def _nsa_windowed_post_init(inputs, B, T, H, D, S=16, block_size=64, window_size=512, **kw):
+    inputs['block_counts'] = S
+    inputs['block_size'] = block_size
+    inputs['scale'] = D**-0.5
+    inputs['window_size'] = window_size
+
+
+_nsa_compression_bq_shapes = {
+    'B1_T8K_H4_HQ64_K32_V32': {
+        'B': 1, 'T': 8192, 'H': 4, 'HQ': 64, 'D': 32, 'V': 32, 'S': 16, 'block_size': 64,
+    },
+    'B1_T16K_H4_HQ64_K32_V32': {
+        'B': 1, 'T': 16384, 'H': 4, 'HQ': 64, 'D': 32, 'V': 32, 'S': 16, 'block_size': 64,
+    },
+    'B1_T32K_H4_HQ64_K32_V32': {
+        'B': 1, 'T': 32768, 'H': 4, 'HQ': 64, 'D': 32, 'V': 32, 'S': 16, 'block_size': 64,
+    },
+    'B1_T16K_H4_HQ64_K64_V128': {
+        'B': 1, 'T': 16384, 'H': 4, 'HQ': 64, 'D': 64, 'V': 128, 'S': 16, 'block_size': 64,
+    },
+}
+
+
+register_op(OpConfig(
+    name='parallel_nsa_compression',
+    import_path='fla.ops.nsa.compression',
+    inputs={
+        'q': TensorSpec(shape_q_hq),
+        'k': TensorSpec(_shape_nsa_compressed_k),
+        'v': TensorSpec(_shape_nsa_compressed_v),
+    },
+    post_init=_nsa_compression_post_init,
+    output_is_tuple=True,
+    default_shapes=_nsa_compression_bq_shapes,
+    category='nsa',
+    test_file='tests/ops/test_nsa.py',
+))
+
+register_op(OpConfig(
+    name='parallel_nsa_windowed',
+    import_path='fla.ops.nsa',
+    func_name='parallel_nsa',
+    inputs={
+        'q': TensorSpec(shape_q_hq),
+        'k': TensorSpec(shape_BTHD),
+        'v': TensorSpec(_shape_nsa_v),
+        'g_cmp': TensorSpec(_shape_nsa_gate, transform=sigmoid_transform),
+        'g_slc': TensorSpec(_shape_nsa_gate, transform=sigmoid_transform),
+        'g_swa': TensorSpec(_shape_nsa_gate, transform=sigmoid_transform),
+    },
+    post_init=_nsa_windowed_post_init,
+    output_is_tuple=False,
+    default_shapes=_nsa_compression_bq_shapes,
+    category='nsa',
+    test_file='tests/ops/test_nsa.py',
+))
 
 
 def _nsa_post_init(inputs, B, T, H, D, HQ=None, S=16, block_size=64, **kw):

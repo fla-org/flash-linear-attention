@@ -60,12 +60,15 @@ class RWKV7Attention(nn.Module):
         if head_dim is None and num_heads is None:
             raise ValueError("Either `head_dim` or `num_heads` must be specified.")
         elif head_dim is not None:
+            assert hidden_size % head_dim == 0, f"`hidden_size` must be divisible by `head_dim`, got {hidden_size} and {head_dim}."
             self.head_dim = head_dim
-            self.num_heads = int(hidden_size // head_dim)
+            self.num_heads = hidden_size // head_dim
         elif num_heads is not None:
-            self.head_dim = int(hidden_size // num_heads)
+            assert hidden_size % num_heads == 0, f"`hidden_size` must be divisible by `num_heads`, got {hidden_size} and {num_heads}."
+            self.head_dim = hidden_size // num_heads
             self.num_heads = num_heads
-        self.head_v_dim = int(self.value_dim // self.num_heads)
+        assert self.value_dim % self.num_heads == 0, f"`value_dim` must be divisible by `num_heads`, got {self.value_dim} and {self.num_heads}."
+        self.head_v_dim = self.value_dim // self.num_heads
 
         # Increase lora dimension for headdim>64
         factor = self.head_dim / 64

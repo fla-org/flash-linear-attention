@@ -135,7 +135,8 @@ def test_fused_grpos(B: int, T: int, V: int, dtype: torch.dtype, inplace: bool, 
                     log_probs = torch.randn_like(logits_row).log_softmax(dim=-1)
                     token_log_prob = torch.gather(log_probs, dim=1, index=input_ids_row.unsqueeze(1)).squeeze(1)
                     per_token_logps.append(token_log_prob)
-                device_torch_lib.empty_cache()
+                if hasattr(device_torch_lib, 'empty_cache'):
+                    device_torch_lib.empty_cache()
                 return torch.stack(per_token_logps)
 
         logits = torch.randn(B, T + 1, V, device=device, dtype=dtype)
@@ -151,7 +152,8 @@ def test_fused_grpos(B: int, T: int, V: int, dtype: torch.dtype, inplace: bool, 
         gold_logits = logits.detach().clone().float()
         gold_logits.requires_grad_(True)
         gold_ref_logp = ref_logp.clone().float()
-        device_torch_lib.empty_cache()
+        if hasattr(device_torch_lib, 'empty_cache'):
+            device_torch_lib.empty_cache()
         y1 = fused_grpo_loss(logits, ref_logp, input_ids, advantages, beta, completion_mask, save_kl=save_kl, inplace=inplace)
         y2 = grpo_loss_torch(gold_logits, gold_ref_logp, input_ids, advantages, beta, completion_mask, save_kl)
         if save_kl:

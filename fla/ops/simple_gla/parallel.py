@@ -133,7 +133,7 @@ def parallel_simple_gla_fwd_kernel(
         b_s = tl.where(m_s, b_s, 0)
         # [BT, BV]
         if i_s >= 0:
-            b_o += tl.dot(b_s.to(b_q.dtype), b_v)
+            b_o = tl.dot(b_s.to(b_q.dtype), b_v, b_o)
         if OUTPUT_ATTENTIONS:
             p_a = attn + o_q[:, None] * T + o_k[None, :]
             tl.store(p_a, b_s.to(p_a.dtype.element_ty), mask=m_q[:, None] & m_k[None, :])
@@ -163,7 +163,7 @@ def parallel_simple_gla_fwd_kernel(
             p_a = attn + o_q[:, None] * T + o_k[None, :]
             tl.store(p_a, b_s.to(p_a.dtype.element_ty), mask=m_q[:, None] & m_k[None, :])
         if i_s >= 0:
-            b_o += tl.dot(b_s.to(b_v.dtype), b_v)
+            b_o = tl.dot(b_s.to(b_v.dtype), b_v, b_o)
     p_o = o + o_q[:, None] * (H*V) + o_vv[None, :]
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=m_qv)
 
@@ -225,7 +225,7 @@ def parallel_simple_gla_bwd_kernel_dq(
             if i_s > 0:
                 b_dq *= exp2(b_gn - b_gp)
         # [BT, BS] @ [BS, BK] = [BT, BK]
-        b_dq += tl.dot(b_ds.to(b_v.dtype), b_k)
+        b_dq = tl.dot(b_ds.to(b_v.dtype), b_k, b_dq)
 
     if USE_G:
         # [BT,]
@@ -252,7 +252,7 @@ def parallel_simple_gla_bwd_kernel_dq(
         m_s = (o_q[:, None] >= o_k[None, :]) & (m_q[:, None] & m_k[None, :])
         b_ds = tl.where(m_s, b_ds, 0)
         # [BT, BK]
-        b_dq += tl.dot(b_ds.to(b_k.dtype), b_k)
+        b_dq = tl.dot(b_ds.to(b_k.dtype), b_k, b_dq)
 
     b_dq *= scale
     p_dq = dq + o_q[:, None] * (H*K) + o_kk[None, :]
@@ -333,9 +333,9 @@ def parallel_simple_gla_bwd_kernel_dkv(
                 b_ds *= b_gqn[None, :]
                 b_s *= b_gqn[None, :]
         # [BT, BK]
-        b_dk += tl.dot(b_ds.to(b_q.dtype), b_q)
+        b_dk = tl.dot(b_ds.to(b_q.dtype), b_q, b_dk)
         # [BT, BV]
-        b_dv += tl.dot(b_s.to(b_do.dtype), b_do)
+        b_dv = tl.dot(b_s.to(b_do.dtype), b_do, b_dv)
 
     if USE_G:
         b_gn = tl.load(g + (min(i_t * BT + BT, T) - 1) * H)
@@ -368,8 +368,8 @@ def parallel_simple_gla_bwd_kernel_dkv(
         b_s = tl.where(m_s, b_s, 0)
         b_ds = tl.where(m_s, b_ds, 0)
         # [BT, BK]
-        b_dk += tl.dot(b_ds.to(b_q.dtype), b_q)
-        b_dv += tl.dot(b_s.to(b_do.dtype), b_do)
+        b_dk = tl.dot(b_ds.to(b_q.dtype), b_q, b_dk)
+        b_dv = tl.dot(b_s.to(b_do.dtype), b_do, b_dv)
     b_dk *= scale
     b_dv *= scale
     p_dk = dk + o_k[:, None] * (H*K) + o_kk[None, :]

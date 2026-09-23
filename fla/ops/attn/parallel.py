@@ -304,7 +304,7 @@ def parallel_attn_bwd_kernel_dq(
         b_dp = tl.dot(b_do, b_v)
         b_ds = b_p * (b_dp.to(tl.float32) - b_delta[:, None])
         # [BT, BS] @ [BS, BK] -> [BT, BK]
-        b_dq += tl.dot(b_ds.to(b_k.dtype), tl.trans(b_k))
+        b_dq = tl.dot(b_ds.to(b_k.dtype), tl.trans(b_k), b_dq)
         if USE_G:
             b_dg += tl.sum(b_ds, 1)
 
@@ -338,7 +338,7 @@ def parallel_attn_bwd_kernel_dq(
         b_dp = tl.dot(b_do, b_v)
         b_ds = b_p * (b_dp.to(tl.float32) - b_delta[:, None])
         # [BT, BS] @ [BS, BK] -> [BT, BK]
-        b_dq += tl.dot(b_ds.to(b_k.dtype), tl.trans(b_k))
+        b_dq = tl.dot(b_ds.to(b_k.dtype), tl.trans(b_k), b_dq)
         if USE_G:
             b_dg += tl.sum(b_ds, 1)
 
@@ -452,13 +452,13 @@ def parallel_attn_bwd_kernel_dkv(
         else:
             b_p = tl.where((o_k[:, None] <= o_q[None, :]) & m_q[None, :], exp2(b_s - b_lse[None, :]), 0)
         # [BT, BS] @ [BS, BV] -> [BT, BV]
-        b_dv += tl.dot(b_p.to(b_do.dtype), b_do)
+        b_dv = tl.dot(b_p.to(b_do.dtype), b_do, b_dv)
         # [BT, BV] @ [BV, BS] -> [BT, BS]
         b_dp = tl.dot(b_v, tl.trans(b_do))
         # [BT, BS]
         b_ds = b_p * (b_dp - b_delta[None, :])
         # [BT, BS] @ [BS, BK] -> [BT, BK]
-        b_dk += tl.dot(b_ds.to(b_q.dtype), b_q)
+        b_dk = tl.dot(b_ds.to(b_q.dtype), b_q, b_dk)
         if USE_G:
             b_dg -= tl.sum(b_ds, 1)
 
@@ -494,13 +494,13 @@ def parallel_attn_bwd_kernel_dkv(
         else:
             b_p = tl.where(m_q[None, :], exp2(b_s - b_lse[None, :]), 0)
         # [BT, BS] @ [BS, BV] -> [BT, BV]
-        b_dv += tl.dot(b_p.to(b_do.dtype), b_do)
+        b_dv = tl.dot(b_p.to(b_do.dtype), b_do, b_dv)
         # [BT, BV] @ [BV, BS] -> [BT, BS]
         b_dp = tl.dot(b_v, tl.trans(b_do))
         # [BT, BS]
         b_ds = b_p * (b_dp - b_delta[None, :])
         # [BT, BS] @ [BS, BK] -> [BT, BK]
-        b_dk += tl.dot(b_ds.to(b_q.dtype), b_q)
+        b_dk = tl.dot(b_ds.to(b_q.dtype), b_q, b_dk)
         if USE_G:
             b_dg -= tl.sum(b_ds, 1)
 
@@ -723,7 +723,6 @@ def parallel_attn_bwd(
     return dq, dk, dv, dg_cumsum, dsink_bias
 
 
-@torch.compile
 class ParallelAttentionFunction(torch.autograd.Function):
 
     @staticmethod

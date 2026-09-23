@@ -186,7 +186,7 @@ def layer_norm_gated_fwd_kernel(
 
     NT = tl.cdiv(T, BT)
     for i_t in range(i_s, NT, NS):
-        rows = i_t * BT + tl.arange(0, BT)
+        rows = tl.cast(i_t, tl.int64) * BT + tl.arange(0, BT)
         row_mask = rows < T
         mask = row_mask[:, None] & col_mask[None, :]
         row_off = rows[:, None] * D + cols[None, :]
@@ -269,7 +269,7 @@ def layer_norm_gated_bwd_kernel(
 
     NT = tl.cdiv(T, BT)
     for i_t in range(i_s, NT, NS):
-        rows = i_t * BT + tl.arange(0, BT)
+        rows = tl.cast(i_t, tl.int64) * BT + tl.arange(0, BT)
         row_mask = rows < T
         mask = row_mask[:, None] & col_mask[None, :]
         row_off = rows[:, None] * D + cols[None, :]

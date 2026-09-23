@@ -374,7 +374,9 @@ class FusedRecurrentGSAFunction(torch.autograd.Function):
         cu_seqlens: torch.LongTensor | None = None,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor]]:
         T = q.shape[1]
-        if T == 1 and not q.requires_grad:
+        # The inference shortcut treats the input as a single dense batch; it is only
+        # valid without cu_seqlens (a packed batch would read seq0's state and misshape the output).
+        if T == 1 and not q.requires_grad and cu_seqlens is None:
             o, (hkt, hvt) = fused_recurrent_gsa_inference(
                 q=q,
                 k=k,

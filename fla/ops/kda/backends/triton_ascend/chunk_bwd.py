@@ -80,7 +80,8 @@ def chunk_kda_bwd_kernel_dAv_npu(
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
     else:
-        bos, eos = (i_b * T).to(tl.int64), (i_b * T + T).to(tl.int64)
+        bos = tl.cast(i_b, tl.int64) * T
+        eos = bos + T
 
     v += (bos * HV + i_hv) * V
     do += (bos * HV + i_hv) * V
@@ -101,7 +102,7 @@ def chunk_kda_bwd_kernel_dAv_npu(
         b_v = tl.load(p_v, boundary_check=(0, 1))
         b_do = tl.load(p_do, boundary_check=(0, 1))
         b_do_c = b_do + 0.0
-        b_dA += tl.dot(b_do, b_v, allow_tf32=False)
+        b_dA = tl.dot(b_do, b_v, b_dA, allow_tf32=False)
         b_A_i = tl.load(p_A, boundary_check=(0, 1))
         b_A_i = tl.where(m_A, b_A_i, 0).to(b_do.dtype)
         b_dv = tl.dot(b_A_i, b_do_c, allow_tf32=False)
@@ -123,7 +124,10 @@ def chunk_kda_bwd_dAv_npu(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
+    use_graph: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    if use_graph:
+        raise NotImplementedError("use_graph is not supported on the Ascend NPU backend")
     B, T, HV, V = k.shape[0], k.shape[1], do.shape[2], do.shape[-1]
     BT = chunk_size
     if chunk_indices is None and cu_seqlens is not None:
@@ -315,7 +319,7 @@ def chunk_kda_bwd_kernel_wy_v_part_npu(
             p_v = tl.make_block_ptr(v_ptr, (T, V), (v_stride_t, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
             b_dv = tl.load(p_dv, boundary_check=(0, 1))
             b_v = tl.load(p_v, boundary_check=(0, 1))
-            b_dA += tl.dot(b_dv, tl.trans(b_v), allow_tf32=False)
+            b_dA = tl.dot(b_dv, tl.trans(b_v), b_dA, allow_tf32=False)
             # Ascend tl.dot clobbers lhs; copy A before every V-slab use.
             b_A_c = b_A + 0.0
             b_dvb = tl.dot(b_A_c, b_dv, allow_tf32=False)
@@ -376,16 +380,16 @@ def chunk_kda_bwd_kernel_wy_k_part_npu(
             T = (eos - bos).to(tl.int32)
             i_tg = tl.load(chunk_offsets + i_n).to(tl.int64) + i_t.to(tl.int64)
         else:
-            i_tg = (i_b * tl.cdiv(T, BT) + i_t).to(tl.int64)
+            i_tg = tl.cast(i_b, tl.int64) * tl.cdiv(T, BT) + i_t
             bos, eos = tl.cast(i_b, tl.int64) * T, tl.cast(i_b, tl.int64) * T + T
 
         q_ptr = q + (bos * H + i_h) * K
         k_ptr = k + (bos * H + i_h) * K
         v_new_ptr = v_new + (bos * HV + i_hv) * V
         g_ptr = g + (bos * HV + i_hv) * K
-        h_ptr = h + (i_tg * HV + i_hv).to(tl.int64) * K * V
+        h_ptr = h + (i_tg * HV + i_hv) * K * V
         do_ptr = do + (bos * HV + i_hv) * V
-        dh_ptr = dh + (i_tg * HV + i_hv).to(tl.int64) * K * V
+        dh_ptr = dh + (i_tg * HV + i_hv) * K * V
         dq_ptr = dq + (bos * HV + i_hv) * K
         dk_ptr = dk + (bos * HV + i_hv) * K
         dg_ptr = dg + (bos * HV + i_hv) * K
@@ -432,7 +436,7 @@ def chunk_kda_bwd_kernel_wy_k_part_npu(
                     p_dh = tl.make_block_ptr(dh_ptr, (V, K), (1, V), (i_v * BV, i_k * BK), (BV, BK), (0, 1))
                 b_v_new = tl.load(p_v_new, boundary_check=(0, 1))
                 b_dh = tl.load(p_dh, boundary_check=(0, 1))
-                b_dk += tl.dot(b_v_new, b_dh.to(b_v_new.dtype), allow_tf32=False)
+                b_dk = tl.dot(b_v_new, b_dh.to(b_v_new.dtype), b_dk, allow_tf32=False)
 
             b_dk = b_dk * tl.where(m_s[:, None], exp2(b_gn[None, :] - b_g), 0)
             b_kdk_sum += tl.sum(b_k * b_dk, axis=0)
@@ -463,7 +467,7 @@ def chunk_kda_bwd_kernel_wy_k_part_npu(
                     p_h = tl.make_block_ptr(h_ptr, (V, K), (1, V), (i_v * BV, i_k * BK), (BV, BK), (0, 1))
                 b_do = tl.load(p_do, boundary_check=(0, 1))
                 b_h = tl.load(p_h, boundary_check=(0, 1))
-                b_dq += tl.dot(b_do, b_h.to(b_do.dtype), allow_tf32=False)
+                b_dq = tl.dot(b_do, b_h.to(b_do.dtype), b_dq, allow_tf32=False)
 
             b_dq = b_dq * exp2(b_g) * scale
             b_dg = b_q * b_dq - b_k * b_dk + m_last_s[:, None] * b_dgk_total
@@ -522,7 +526,7 @@ def chunk_kda_bwd_kernel_wy_dw_part_npu(
             T = (eos - bos).to(tl.int32)
             i_tg = tl.load(chunk_offsets + i_n).to(tl.int64) + i_t.to(tl.int64)
         else:
-            i_tg = (i_b * tl.cdiv(T, BT) + i_t).to(tl.int64)
+            i_tg = tl.cast(i_b, tl.int64) * tl.cdiv(T, BT) + i_t
             bos, eos = tl.cast(i_b, tl.int64) * T, tl.cast(i_b, tl.int64) * T + T
 
         if K_T_CONTIG:
@@ -561,7 +565,7 @@ def chunk_kda_bwd_kernel_wy_dw_part_npu(
             dv_stride_t = HV * V
             beta_stride = HV
 
-        h_ptr = h + (i_tg * HV + i_hv).to(tl.int64) * K * V
+        h_ptr = h + (i_tg * HV + i_hv) * K * V
         dA_ptr = dA_acc + (bos * HV + i_hv) * BT
         db_ptr = db_acc + bos * HV + i_hv
         dg_ptr = dg + (bos * HV + i_hv) * K
@@ -576,7 +580,7 @@ def chunk_kda_bwd_kernel_wy_dw_part_npu(
                 p_h = tl.make_block_ptr(h_ptr, (V, K), (1, V), (i_v * BV, i_k * BK), (BV, BK), (0, 1))
             b_dv = tl.load(p_dv, boundary_check=(0, 1))
             b_h = tl.load(p_h, boundary_check=(0, 1))
-            b_dw += tl.dot(b_dv, b_h.to(b_dv.dtype), allow_tf32=False)
+            b_dw = tl.dot(b_dv, b_h.to(b_dv.dtype), b_dw, allow_tf32=False)
 
         p_k = tl.make_block_ptr(k_ptr, (T, K), (k_stride_t, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         p_g = tl.make_block_ptr(g_ptr, (T, K), (g_stride_t, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
@@ -597,7 +601,7 @@ def chunk_kda_bwd_kernel_wy_dw_part_npu(
         p_dA_acc = tl.make_block_ptr(dA_ptr, (T, BT), (HV * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
         b_dA = tl.load(p_dA_acc, boundary_check=(0, 1)).to(tl.float32)
         b_dw_c = b_dw + 0.0
-        b_dA += tl.dot(b_dw_c, tl.trans(b_kg_a), allow_tf32=False)
+        b_dA = tl.dot(b_dw_c, tl.trans(b_kg_a), b_dA, allow_tf32=False)
         tl.store(p_dA_acc, b_dA.to(p_dA_acc.dtype.element_ty), boundary_check=(0, 1))
 
         p_db_acc = tl.make_block_ptr(db_ptr, (T,), (HV,), (i_t * BT,), (BT,), (0,))
@@ -731,7 +735,11 @@ def chunk_kda_bwd_wy_dqkg_fused_npu(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
+    chunk_offsets: torch.LongTensor | None = None,
+    use_graph: bool = False,
 ):
+    if use_graph:
+        raise NotImplementedError("use_graph is not supported on the Ascend NPU backend")
     B, T, H, K, HV, V = *k.shape, v.shape[2], v.shape[-1]
     BT = chunk_size
     if BT % _BC != 0:
@@ -754,7 +762,8 @@ def chunk_kda_bwd_wy_dqkg_fused_npu(
     BV = _get_bv(V)
     NK = triton.cdiv(K, BK)
     is_varlen = cu_seqlens is not None
-    chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT) if is_varlen else g.new_zeros(1, dtype=torch.int64)
+    if chunk_offsets is None:
+        chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT) if is_varlen else g.new_zeros(1, dtype=torch.int64)
 
     v_arg, g_t_contig = _t_contig_arg(v, HV)
     beta_arg = _t_contig_arg(beta, HV)[0]

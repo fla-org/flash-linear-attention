@@ -104,8 +104,8 @@ def chunk_generalized_iplr_delta_rule_fwd_kernel_h(
             b_d = tl.load(p_d, mask=m_dc, other=0.0)
             b_b = tl.load(p_b, mask=m_kc, other=0.0)
             b_v2 = tl.dot(b_d, b_h.to(b_d.dtype)) + tl.load(p_u, mask=m_vc, other=0.0)
-            b_hc += tl.dot(b_k, b_v)
-            b_hc += tl.dot(b_b, b_v2.to(b_k.dtype))
+            b_hc = tl.dot(b_k, b_v, b_hc)
+            b_hc = tl.dot(b_b, b_v2.to(b_k.dtype), b_hc)
             tl.store(p_v_new, b_v2.to(p_v_new.dtype.element_ty), mask=m_vc)
         b_h += b_hc
 
@@ -197,11 +197,11 @@ def chunk_generalized_iplr_delta_rule_fwd_kernel_o(
         # [BK, BV]
         b_h = tl.load(p_h, mask=m_h, other=0.0)
         # [BT, BK] @ [BK, BV] -> [BT, BV]
-        b_o += tl.dot(b_q, b_h)
+        b_o = tl.dot(b_q, b_h, b_o)
         # [BT, BK] @ [BK, BT] -> [BT, BT]
-        b_Aqk += tl.dot(b_q, b_k)
+        b_Aqk = tl.dot(b_q, b_k, b_Aqk)
         # [BT, BK] @ [BK, BT] -> [BT, BT]
-        b_Aqb += tl.dot(b_q, b_b)
+        b_Aqb = tl.dot(b_q, b_b, b_Aqb)
 
     o_i = tl.arange(0, BT)
     m_A = o_i[:, None] >= o_i[None, :]

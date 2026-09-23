@@ -134,15 +134,15 @@ def chunk_oja_fwd_kernel_h_blockdim64(
         if V > 64:
             p_w = w + o_t[:, None] * stride_v + (64 + o_v1)[None, :]
             b_w = tl.load(p_w, mask=m_t[:, None] & ((64 + o_v1)[None, :] < V), other=0.0)
-            b_k += tl.dot(b_w, tl.trans(b_h2).to(b_w.dtype))
+            b_k = tl.dot(b_w, tl.trans(b_h2).to(b_w.dtype), b_k)
         if V > 128:
             p_w = w + o_t[:, None] * stride_v + (128 + o_v1)[None, :]
             b_w = tl.load(p_w, mask=m_t[:, None] & ((128 + o_v1)[None, :] < V), other=0.0)
-            b_k += tl.dot(b_w, tl.trans(b_h3).to(b_w.dtype))
+            b_k = tl.dot(b_w, tl.trans(b_h3).to(b_w.dtype), b_k)
         if V > 192:
             p_w = w + o_t[:, None] * stride_v + (192 + o_v1)[None, :]
             b_w = tl.load(p_w, mask=m_t[:, None] & ((192 + o_v1)[None, :] < V), other=0.0)
-            b_k += tl.dot(b_w, tl.trans(b_h4).to(b_w.dtype))
+            b_k = tl.dot(b_w, tl.trans(b_h4).to(b_w.dtype), b_k)
 
         p_u = u + o_t[:, None] * stride_k + o_k[None, :]
         b_k = tl.load(p_u, mask=m_tk, other=0.0) - b_k
@@ -173,19 +173,19 @@ def chunk_oja_fwd_kernel_h_blockdim64(
 
         p_v = v + o_t[:, None] * stride_v + o_v1[None, :]
         b_v = tl.load(p_v, mask=m_t[:, None] & (o_v1[None, :] < V), other=0.0)  # BT BV
-        b_h1 += tl.dot(tl.trans(b_k), b_v)
+        b_h1 = tl.dot(tl.trans(b_k), b_v, b_h1)
         if V > 64:
             p_v = v + o_t[:, None] * stride_v + (64 + o_v1)[None, :]
             b_v = tl.load(p_v, mask=m_t[:, None] & ((64 + o_v1)[None, :] < V), other=0.0)
-            b_h2 += tl.dot(tl.trans(b_k), b_v)
+            b_h2 = tl.dot(tl.trans(b_k), b_v, b_h2)
         if V > 128:
             p_v = v + o_t[:, None] * stride_v + (128 + o_v1)[None, :]
             b_v = tl.load(p_v, mask=m_t[:, None] & ((128 + o_v1)[None, :] < V), other=0.0)
-            b_h3 += tl.dot(tl.trans(b_k), b_v)
+            b_h3 = tl.dot(tl.trans(b_k), b_v, b_h3)
         if V > 192:
             p_v = v + o_t[:, None] * stride_v + (192 + o_v1)[None, :]
             b_v = tl.load(p_v, mask=m_t[:, None] & ((192 + o_v1)[None, :] < V), other=0.0)
-            b_h4 += tl.dot(tl.trans(b_k), b_v)
+            b_h4 = tl.dot(tl.trans(b_k), b_v, b_h4)
     # epilogue
     if STORE_FINAL_STATE:
         p_ht = ht + o_k[:, None] * V + o_v1[None, :]
@@ -378,17 +378,17 @@ def chunk_oja_bwd_kernel_dhu_blockdim64(
         if V > 64:
             p_v = vg + o_t[:, None] * stride_v + (64 + o_v1)[None, :]
             b_v = tl.load(p_v, mask=m_t[:, None] & ((64 + o_v1)[None, :] < V), other=0.0)
-            b_dk += tl.dot(b_v, tl.trans(b_dh2).to(b_v.dtype))
+            b_dk = tl.dot(b_v, tl.trans(b_dh2).to(b_v.dtype), b_dk)
 
         if V > 128:
             p_v = vg + o_t[:, None] * stride_v + (128 + o_v1)[None, :]
             b_v = tl.load(p_v, mask=m_t[:, None] & ((128 + o_v1)[None, :] < V), other=0.0)
-            b_dk += tl.dot(b_v, tl.trans(b_dh3).to(b_v.dtype))
+            b_dk = tl.dot(b_v, tl.trans(b_dh3).to(b_v.dtype), b_dk)
 
         if V > 192:
             p_v = vg + o_t[:, None] * stride_v + (192 + o_v1)[None, :]
             b_v = tl.load(p_v, mask=m_t[:, None] & ((192 + o_v1)[None, :] < V), other=0.0)
-            b_dk += tl.dot(b_v, tl.trans(b_dh4).to(b_v.dtype))
+            b_dk = tl.dot(b_v, tl.trans(b_dh4).to(b_v.dtype), b_dk)
 
         b_dk += tl.load(p_dk, mask=m_tk, other=0.0)
 
@@ -639,8 +639,8 @@ def chunk_gsa_bwd_k_kernel_dqkvg(
 
         b_dh = b_dh.to(b_k.dtype)
         # [BT, BK]
-        b_dq += tl.dot(b_do, b_h.to(b_k.dtype))
-        b_dk += tl.dot((b_v * b_gv).to(b_v.dtype), tl.trans(b_dh))
+        b_dq = tl.dot(b_do, b_h.to(b_k.dtype), b_dq)
+        b_dk = tl.dot((b_v * b_gv).to(b_v.dtype), tl.trans(b_dh), b_dk)
         # [BT, BV]
         b_dv = tl.dot(b_k, b_dh) * b_gv
         # [BV]
@@ -659,8 +659,8 @@ def chunk_gsa_bwd_k_kernel_dqkvg(
     # [BT, BT]
     b_dA = tl.load(p_dA, mask=m_AT, other=0.0)
     # [BT, BK]
-    b_dq += tl.dot(b_dA, b_k)
-    b_dk += tl.dot(tl.trans(b_dA).to(b_k.dtype), b_q)
+    b_dq = tl.dot(b_dA, b_k, b_dq)
+    b_dk = tl.dot(tl.trans(b_dA).to(b_k.dtype), b_q, b_dk)
 
     tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), mask=m_tk)
     tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), mask=m_tk)
@@ -756,8 +756,8 @@ def chunk_oja_bwd_kernel_dvwg_h(
         b_h = tl.load(p_h, mask=m_kv, other=0.0)  # BK BV
         b_dh = tl.load(p_dh, mask=m_kv, other=0.0)  # BK BV
 
-        b_dvg += tl.dot(b_k, b_dh.to(b_k.dtype))  # BT BK @ BK BV -> BT BV
-        b_dw += tl.dot(b_dk.to(b_k.dtype), b_h.to(b_k.dtype))  # BT BK @ BK BV -> BT BV
+        b_dvg = tl.dot(b_k, b_dh.to(b_k.dtype), b_dvg)  # BT BK @ BK BV -> BT BV
+        b_dw = tl.dot(b_dk.to(b_k.dtype), b_h.to(b_k.dtype), b_dw)  # BT BK @ BK BV -> BT BV
         b_dgv_last += tl.sum((b_h * b_dh) * exp(b_gn), axis=0)
 
     if USE_GV:

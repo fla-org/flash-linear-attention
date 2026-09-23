@@ -22,6 +22,7 @@ from fla.utils import assert_close, device
         ]
     ],
 )
+@pytest.mark.smoke
 def test_chunk_with_chunk_size(
     B: int,
     T: int,

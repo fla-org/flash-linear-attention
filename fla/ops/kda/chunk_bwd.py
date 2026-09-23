@@ -19,6 +19,7 @@ from fla.ops.kda.wy_fast import recompute_w_u_fwd
 from fla.ops.utils import chunk_local_cumsum, prepare_chunk_indices
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.constant import RCP_LN2
+from fla.ops.utils.graph import get_static_buffer
 from fla.ops.utils.op import exp2
 from fla.utils import IS_NVIDIA_HOPPER, IS_NVIDIA_SM100, autotune_cache_kwargs, check_shared_mem
 
@@ -60,12 +61,16 @@ def chunk_kda_bwd_kernel_dAv(
     BK: tl.constexpr,
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
 ):
     i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_hv = i_bh // HV, i_bh % HV
     i_h = i_hv // (HV // H)
     if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        i_n = tl.load(chunk_indices + i_t * 2).to(tl.int32)
+        if USE_GRAPH and i_n < 0:
+            return
+        i_t = tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
@@ -103,7 +108,7 @@ def chunk_kda_bwd_kernel_dAv(
         # [BT, BV]
         b_do = tl.load(p_do, mask=m_tv, other=0.0)
         # [BT, BT]
-        b_dA += tl.dot(b_do, b_v)
+        b_dA = tl.dot(b_do, b_v, b_dA)
         # [BT, BV]
         b_dv = tl.dot(b_A.to(b_do.dtype), b_do)
         tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), mask=m_tv)
@@ -162,6 +167,7 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
     BV: tl.constexpr,
     STATE_V_FIRST: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
 ):
     i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1)
     i_b, i_hv = i_bh // HV, i_bh % HV
@@ -169,7 +175,10 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
 
     if IS_VARLEN:
         i_tg = i_t.to(tl.int64)
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        i_n = tl.load(chunk_indices + i_t * 2).to(tl.int32)
+        if USE_GRAPH and i_n < 0:
+            return
+        i_t = tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
         NT = tl.cdiv(T, BT)
@@ -252,9 +261,9 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
             b_dv = tl.load(p_dv, mask=m_tv, other=0.0)
 
             b_dgk += tl.sum(b_h * b_dh, axis=0)
-            b_dq += tl.dot(b_do, b_h.to(b_do.dtype))
-            b_dk += tl.dot(b_v_new, b_dh.to(b_v_new.dtype))
-            b_dw += tl.dot(b_dv.to(b_v_new.dtype), b_h.to(b_v_new.dtype))
+            b_dq = tl.dot(b_do, b_h.to(b_do.dtype), b_dq)
+            b_dk = tl.dot(b_v_new, b_dh.to(b_v_new.dtype), b_dk)
+            b_dw = tl.dot(b_dv.to(b_v_new.dtype), b_h.to(b_v_new.dtype), b_dw)
             tl.debug_barrier()  # DO NOT REMOVE THIS LINE!
             if i_k == 0:
                 p_v = v + o_t[:, None] * (HV*V) + o_v[None, :]
@@ -262,7 +271,7 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
 
                 b_v = tl.load(p_v, mask=m_tv, other=0.0)
 
-                b_dA += tl.dot(b_dv, tl.trans(b_v))
+                b_dA = tl.dot(b_dv, tl.trans(b_v), b_dA)
 
                 b_dvb = tl.dot(b_A, b_dv)
                 b_dv2 = b_dvb * b_beta[:, None]
@@ -279,7 +288,7 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
         b_kg = b_k * b_gk_exp
 
         b_dw = -b_dw.to(b_A.dtype)
-        b_dA += tl.dot(b_dw, tl.trans(b_kg.to(b_A.dtype)))
+        b_dA = tl.dot(b_dw, tl.trans(b_kg.to(b_A.dtype)), b_dA)
 
         b_dkgb = tl.dot(b_A, b_dw)
         b_db += tl.sum(b_dkgb * b_kg, 1)
@@ -322,6 +331,7 @@ def chunk_kda_bwd_dAv(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
+    use_graph: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, HV, V = *k.shape, do.shape[2], do.shape[-1]
     BT = chunk_size
@@ -338,8 +348,12 @@ def chunk_kda_bwd_dAv(
     BV = min(max(triton.next_power_of_2(V), 16), CONST_TILING)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
-    dA = v.new_empty(B, T, HV, BT, dtype=torch.float)
-    dv = torch.empty_like(do)
+    if use_graph:
+        dA = get_static_buffer("dAv_dA", (B, T, HV, BT), torch.float, v.device)
+        dv = get_static_buffer("dAv_dv", tuple(do.shape), do.dtype, do.device)
+    else:
+        dA = v.new_empty(B, T, HV, BT, dtype=torch.float)
+        dv = torch.empty_like(do)
     grid = (NT, B * HV)
     chunk_kda_bwd_kernel_dAv[grid](
         q=q,
@@ -360,6 +374,7 @@ def chunk_kda_bwd_dAv(
         BT=BT,
         BK=BK,
         BV=BV,
+        USE_GRAPH=use_graph,
     )
     return dA, dv
 
@@ -382,6 +397,7 @@ def chunk_kda_bwd_wy_dqkg_fused(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
+    use_graph: bool = False,
 ):
     B, T, H, K, HV, V = *k.shape, v.shape[2], v.shape[-1]
     BT = chunk_size
@@ -391,12 +407,20 @@ def chunk_kda_bwd_wy_dqkg_fused(
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     # dq, dk are allocated at HV dimension; caller reduces to H if GVA
-    dq = g.new_empty(B, T, HV, K, dtype=torch.float)
-    dk = g.new_empty(B, T, HV, K, dtype=torch.float)
-    dv2 = torch.empty_like(v)
-    dg = torch.empty_like(g, dtype=torch.float)
-    db = torch.empty_like(beta, dtype=torch.float)
-    dA = torch.empty_like(A, dtype=torch.float)
+    if use_graph:
+        dq = get_static_buffer("wy_dq", (B, T, HV, K), torch.float, q.device)
+        dk = get_static_buffer("wy_dk", (B, T, HV, K), torch.float, q.device)
+        dv2 = get_static_buffer("wy_dv2", tuple(v.shape), v.dtype, v.device)
+        dg = get_static_buffer("wy_dg", tuple(g.shape), torch.float, g.device)
+        db = get_static_buffer("wy_db", tuple(beta.shape), torch.float, beta.device)
+        dA = get_static_buffer("wy_dA", tuple(A.shape), torch.float, A.device)
+    else:
+        dq = g.new_empty(B, T, HV, K, dtype=torch.float)
+        dk = g.new_empty(B, T, HV, K, dtype=torch.float)
+        dv2 = torch.empty_like(v)
+        dg = torch.empty_like(g, dtype=torch.float)
+        db = torch.empty_like(beta, dtype=torch.float)
+        dA = torch.empty_like(A, dtype=torch.float)
 
     grid = (NT, B * HV)
     chunk_kda_bwd_kernel_wy_dqkg_fused[grid](
@@ -427,6 +451,7 @@ def chunk_kda_bwd_wy_dqkg_fused(
         V=V,
         BT=BT,
         STATE_V_FIRST=state_v_first,
+        USE_GRAPH=use_graph,
     )
     dv = dv2
     return dq, dk, dv, db, dg, dA
@@ -456,6 +481,8 @@ def chunk_kda_bwd(
     dt_bias: torch.Tensor | None = None,
     disable_recompute: bool = False,
     cp_context: FLACPContext | None = None,
+    use_graph: bool = False,
+    chunk_offsets: torch.LongTensor | None = None,
     **kwargs,
 ):
     H, HV = q.shape[2], v.shape[2]
@@ -471,7 +498,8 @@ def chunk_kda_bwd(
                 chunk_size=chunk_size,
                 cu_seqlens=cu_seqlens,
                 chunk_indices=chunk_indices,
-                lower_bound=lower_bound
+                lower_bound=lower_bound,
+                use_graph=use_graph,
             )
         w, u, qg, kg = recompute_w_u_fwd(
             q=q,
@@ -482,6 +510,7 @@ def chunk_kda_bwd(
             gk=g,
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
+            use_graph=use_graph,
         )
         if cp_context is not None:
             # Restore the full initial_state tensor from the compressed version.
@@ -496,6 +525,7 @@ def chunk_kda_bwd(
             output_final_state=False,
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
+            chunk_offsets=chunk_offsets,
             chunk_size=chunk_size,
             state_v_first=state_v_first,
         )
@@ -518,6 +548,7 @@ def chunk_kda_bwd(
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
+        use_graph=use_graph,
     )
 
     if cp_context is not None:
@@ -537,6 +568,7 @@ def chunk_kda_bwd(
             context=cp_context,
             chunk_size=chunk_size,
             state_v_first=state_v_first,
+            use_graph=use_graph,
         )
 
     dh, dh0, dv = chunk_gated_delta_rule_bwd_dhu(
@@ -552,6 +584,7 @@ def chunk_kda_bwd(
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
+        chunk_offsets=chunk_offsets,
         state_v_first=state_v_first,
     )
 
@@ -572,6 +605,7 @@ def chunk_kda_bwd(
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
         state_v_first=state_v_first,
+        use_graph=use_graph,
     )
 
     dq, dk, db, dg = chunk_kda_bwd_intra(
@@ -588,7 +622,8 @@ def chunk_kda_bwd(
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
-        safe_gate=safe_gate
+        safe_gate=safe_gate,
+        use_graph=use_graph,
     )
 
     # For GVA, reduce dq and dk from [B, T, HV, K] back to [B, T, H, K]
@@ -603,6 +638,7 @@ def chunk_kda_bwd(
         reverse=True,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
+        use_graph=use_graph,
     )
     if use_gate_in_kernel:
         dg, dA, dbias = kda_gate_bwd(
@@ -610,7 +646,7 @@ def chunk_kda_bwd(
             A_log=A_log,
             dt_bias=dt_bias,
             dyg=dg,
-            lower_bound=lower_bound
+            lower_bound=lower_bound,
         )
 
     return dq, dk, dv, db, dg, dh0, dA, dbias

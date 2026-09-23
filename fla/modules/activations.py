@@ -19,9 +19,23 @@ import triton.language as tl
 
 from fla.modules.backends import dispatch
 from fla.ops.utils.op import exp, log
-from fla.utils import IS_AMD, autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, input_guard
+from fla.utils import IS_AMD, IS_INTEL, autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, input_guard
 
-NUM_WARPS_AUTOTUNE = [1, 2, 4, 8, 16] if IS_AMD else [1, 2, 4, 8, 16, 32]
+
+def _activation_autotune_configs():
+    """Return autotune configs scaled to the device's scratch-space budget."""
+    if IS_INTEL:
+        # Intel/XPU has a smaller per-thread scratch space (PTSS) limit; smaller
+        # block sizes and warp counts avoid register spilling on larger D.
+        bs_list = [512, 1024]
+        nw_list = [1, 2, 4, 8]
+    elif IS_AMD:
+        bs_list = [512, 1024, 2048, 4096, 8192]
+        nw_list = [1, 2, 4, 8, 16]
+    else:
+        bs_list = [512, 1024, 2048, 4096, 8192]
+        nw_list = [1, 2, 4, 8, 16, 32]
+    return [triton.Config({'B': bs}, num_warps=nw) for bs in bs_list for nw in nw_list]
 
 
 def _get_stride(x: torch.Tensor) -> int:
@@ -90,11 +104,7 @@ def _alloc_output(x: torch.Tensor, contiguous: bool = False) -> torch.Tensor:
 
 
 @triton.autotune(
-    configs=[
-        triton.Config({'B': bs}, num_warps=num_warps)
-        for bs in [512, 1024, 2048, 4096, 8192]
-        for num_warps in NUM_WARPS_AUTOTUNE
-    ],
+    configs=_activation_autotune_configs(),
     key=['D'],
     **autotune_cache_kwargs,
 )
@@ -118,11 +128,7 @@ def sigmoid_fwd_kernel(
 
 
 @triton.autotune(
-    configs=[
-        triton.Config({'B': bs}, num_warps=num_warps)
-        for bs in [512, 1024, 2048, 4096, 8192]
-        for num_warps in NUM_WARPS_AUTOTUNE
-    ],
+    configs=_activation_autotune_configs(),
     key=['D'],
     **autotune_cache_kwargs,
 )
@@ -202,11 +208,7 @@ sigmoid = SigmoidFunction.apply
 
 
 @triton.autotune(
-    configs=[
-        triton.Config({'B': bs}, num_warps=num_warps)
-        for bs in [512, 1024, 2048, 4096, 8192]
-        for num_warps in NUM_WARPS_AUTOTUNE
-    ],
+    configs=_activation_autotune_configs(),
     key=['D'],
     **autotune_cache_kwargs,
 )
@@ -234,11 +236,7 @@ def logsigmoid_fwd_kernel(
 
 
 @triton.autotune(
-    configs=[
-        triton.Config({'B': bs}, num_warps=num_warps)
-        for bs in [512, 1024, 2048, 4096, 8192]
-        for num_warps in NUM_WARPS_AUTOTUNE
-    ],
+    configs=_activation_autotune_configs(),
     key=['D'],
     **autotune_cache_kwargs,
 )
@@ -329,11 +327,7 @@ def logsigmoid(x: torch.Tensor, temperature: float = 1.) -> torch.Tensor:
 
 
 @triton.autotune(
-    configs=[
-        triton.Config({'B': bs}, num_warps=num_warps)
-        for bs in [512, 1024, 2048, 4096, 8192]
-        for num_warps in NUM_WARPS_AUTOTUNE
-    ],
+    configs=_activation_autotune_configs(),
     key=['D'],
     **autotune_cache_kwargs,
 )
@@ -357,11 +351,7 @@ def swish_fwd_kernel(
 
 
 @triton.autotune(
-    configs=[
-        triton.Config({'B': bs}, num_warps=num_warps)
-        for bs in [512, 1024, 2048, 4096, 8192]
-        for num_warps in NUM_WARPS_AUTOTUNE
-    ],
+    configs=_activation_autotune_configs(),
     key=['D'],
     **autotune_cache_kwargs,
 )
@@ -557,11 +547,7 @@ sqrelu = SquaredReLUFunction.apply
 
 
 @triton.autotune(
-    configs=[
-        triton.Config({'B': bs}, num_warps=num_warps)
-        for bs in [512, 1024, 2048, 4096, 8192]
-        for num_warps in NUM_WARPS_AUTOTUNE
-    ],
+    configs=_activation_autotune_configs(),
     key=['D'],
     **autotune_cache_kwargs,
 )
@@ -590,11 +576,7 @@ def swiglu_fwd_kernel(
     'HAS_WEIGHT': lambda args: args['z'] is not None,
 })
 @triton.autotune(
-    configs=[
-        triton.Config({'B': bs}, num_warps=num_warps)
-        for bs in [512, 1024, 2048, 4096, 8192]
-        for num_warps in NUM_WARPS_AUTOTUNE
-    ],
+    configs=_activation_autotune_configs(),
     key=['D'],
     **autotune_cache_kwargs,
 )
@@ -756,11 +738,7 @@ def swiglu_linear(x, y, weight, bias):
 
 
 @triton.autotune(
-    configs=[
-        triton.Config({'B': bs}, num_warps=num_warps)
-        for bs in [512, 1024, 2048, 4096, 8192]
-        for num_warps in NUM_WARPS_AUTOTUNE
-    ],
+    configs=_activation_autotune_configs(),
     key=['D'],
     **autotune_cache_kwargs,
 )
@@ -789,11 +767,7 @@ def sigmoidglu_fwd_kernel(
     'HAS_WEIGHT': lambda args: args['z'] is not None,
 })
 @triton.autotune(
-    configs=[
-        triton.Config({'B': bs}, num_warps=num_warps)
-        for bs in [512, 1024, 2048, 4096, 8192]
-        for num_warps in NUM_WARPS_AUTOTUNE
-    ],
+    configs=_activation_autotune_configs(),
     key=['D'],
     **autotune_cache_kwargs,
 )
@@ -952,11 +926,7 @@ sigmoidglu_linear = SigmoidGLULinearFunction.apply
 
 
 @triton.autotune(
-    configs=[
-        triton.Config({'B': bs}, num_warps=num_warps)
-        for bs in [512, 1024, 2048, 4096, 8192]
-        for num_warps in NUM_WARPS_AUTOTUNE
-    ],
+    configs=_activation_autotune_configs(),
     key=['D'],
     **autotune_cache_kwargs,
 )
@@ -994,11 +964,7 @@ def powglu_fwd_kernel(
     'HAS_WEIGHT': lambda args: args['z'] is not None,
 })
 @triton.autotune(
-    configs=[
-        triton.Config({'B': bs}, num_warps=num_warps)
-        for bs in [512, 1024, 2048, 4096, 8192]
-        for num_warps in NUM_WARPS_AUTOTUNE
-    ],
+    configs=_activation_autotune_configs(),
     key=['D'],
     **autotune_cache_kwargs,
 )

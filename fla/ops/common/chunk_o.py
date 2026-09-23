@@ -15,6 +15,7 @@ from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.op import exp2
 from fla.utils import (
     IS_INTEL,
+    IS_NVIDIA_BLACKWELL,
     IS_NVIDIA_HOPPER,
     TRITON_ABOVE_3_4_0,
     TRITON_ABOVE_3_7_1,
@@ -29,8 +30,15 @@ NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8]
 # On Intel that pairing is off by a factor of two: BK=BV=64 is fastest at 8 warps but is
 # only offered at 4, so the autotuner falls back to the 32x32 config and leaves ~2.2x on
 # the table. Widen the space there instead of changing the defaults for other vendors.
-_O_CONFIGS = [
+# TODO: Triton mainline fixes a Blackwell tl.dot recurrence race.
+# Keep this kernel off its 8-warp (BK=BV=128) config for Blackwell until Triton 3.8
+# is released and we re-validate the wider config space.
+CHUNK_FWD_O_BLACKWELL_DROPPED_CONFIGS = [] if IS_NVIDIA_BLACKWELL else [
     triton.Config({'BK': 128, 'BV': 128}, num_warps=8, num_stages=3),
+]
+
+_O_CONFIGS = [
+    *CHUNK_FWD_O_BLACKWELL_DROPPED_CONFIGS,
     triton.Config({'BK': 64, 'BV': 64}, num_warps=4, num_stages=3),
     triton.Config({'BK': 32, 'BV': 32}, num_warps=2, num_stages=3),
 ]
@@ -123,11 +131,11 @@ def chunk_fwd_kernel_o(
 
         # [BT, BK] @ [BK, BV] -> [BT, BV]
         if STATE_V_FIRST:
-            b_o += tl.dot(b_q, tl.trans(b_h))
+            b_o = tl.dot(b_q, tl.trans(b_h), b_o)
         else:
-            b_o += tl.dot(b_q, b_h)
+            b_o = tl.dot(b_q, b_h, b_o)
         # [BT, BK] @ [BK, BT] -> [BT, BT]
-        b_A += tl.dot(b_q, b_k)
+        b_A = tl.dot(b_q, b_k, b_A)
 
     if USE_G:
         g += bos * HV + i_h
@@ -270,15 +278,15 @@ def chunk_bwd_kernel_dqkwg(
         if USE_G:
             b_dg_last += (tl.sum(b_h * b_dh))
         # [BT, BV] @ [BV, BT] -> [BT, BT]
-        b_ds += tl.dot(b_do, tl.trans(b_v))
+        b_ds = tl.dot(b_do, tl.trans(b_v), b_ds)
         # [BT, BV] @ [BV, BK] -> [BT, BK]
-        b_dq += tl.dot(b_do, b_h.to(b_do.dtype))
+        b_dq = tl.dot(b_do, b_h.to(b_do.dtype), b_dq)
         # [BT, BV] @ [BV, BK] -> [BT, BK]
-        b_dk += tl.dot(b_v, b_dh.to(b_v.dtype))
+        b_dk = tl.dot(b_v, b_dh.to(b_v.dtype), b_dk)
         if USE_DW:
             p_dv = dv + o_t[:, None] * (HV*V) + o_v[None, :]
             b_dv = tl.load(p_dv, mask=m_hv, other=0.0)
-            b_dw += tl.dot(b_dv.to(b_v.dtype), b_h.to(b_v.dtype))
+            b_dw = tl.dot(b_dv.to(b_v.dtype), b_h.to(b_v.dtype), b_dw)
 
     if USE_DW:
         p_dw = dw + o_t[:, None] * (HV*K) + o_k[None, :]
@@ -308,8 +316,8 @@ def chunk_bwd_kernel_dqkwg(
         b_ds = tl.where(m_A, b_ds * exp2(b_g[:, None] - b_g[None, :]), 0) * scale
         b_ds = b_ds.to(b_k.dtype)
         # [BT, BK]
-        b_dq += tl.dot(b_ds, b_k)
-        b_dk += tl.dot(tl.trans(b_ds), b_q)
+        b_dq = tl.dot(b_ds, b_k, b_dq)
+        b_dk = tl.dot(tl.trans(b_ds), b_q, b_dk)
 
         b_dg = tl.sum(b_dq * b_q, axis=1) - tl.sum(b_dk * b_k, axis=1)
 
@@ -327,15 +335,15 @@ def chunk_bwd_kernel_dqkwg(
         b_ds = tl.where(m_A, b_ds * exp2(b_g[:, None] - b_g[None, :]), 0) * scale
         b_ds = b_ds.to(b_k.dtype)
         # [BT, BK]
-        b_dq += tl.dot(b_ds, b_k)
-        b_dk += tl.dot(tl.trans(b_ds), b_q)
+        b_dq = tl.dot(b_ds, b_k, b_dq)
+        b_dk = tl.dot(tl.trans(b_ds), b_q, b_dk)
         tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), mask=m_qk)
         tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), mask=m_qk)
 
     else:
         b_ds = tl.where(m_A, b_ds, 0)
         b_ds = b_ds.to(b_k.dtype)
-        b_dq += tl.dot(b_ds, b_k)
+        b_dq = tl.dot(b_ds, b_k, b_dq)
         b_dk += tl.dot(tl.trans(b_ds), b_q) * scale
         b_dq *= scale
         tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), mask=m_qk)
@@ -414,14 +422,14 @@ def chunk_bwd_kernel_dv(
         p_q = q + o_k[:, None] + o_t[None, :] * (H*K)
         b_q = tl.load(p_q, mask=m_k[:, None] & m_t[None, :], other=0.0)
         b_k = tl.load(p_k, mask=m_t[:, None] & m_k[None, :], other=0.0)
-        b_A += tl.dot(b_k, b_q)
+        b_A = tl.dot(b_k, b_q, b_A)
         if STATE_V_FIRST:
             p_dh = dh + o_v[:, None] * K + o_k[None, :]
             b_dh = tl.trans(tl.load(p_dh, mask=(o_v[:, None] < V) & m_k[None, :], other=0.0))
         else:
             p_dh = dh + o_k[:, None] * V + o_v[None, :]
             b_dh = tl.load(p_dh, mask=m_k[:, None] & (o_v[None, :] < V), other=0.0)
-        b_dv += tl.dot(b_k, b_dh.to(b_k.dtype))
+        b_dv = tl.dot(b_k, b_dh.to(b_k.dtype), b_dv)
 
     if USE_G:
         g += bos * HV + i_h
@@ -442,7 +450,7 @@ def chunk_bwd_kernel_dv(
     p_do = do + o_t[:, None] * (HV*V) + o_v[None, :]
     p_dv = dv + o_t[:, None] * (HV*V) + o_v[None, :]
     b_do = tl.load(p_do, mask=m_t[:, None] & (o_v < V)[None, :], other=0.0)
-    b_dv += tl.dot(b_A.to(b_do.dtype), b_do)
+    b_dv = tl.dot(b_A.to(b_do.dtype), b_do, b_dv)
     tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), mask=m_t[:, None] & (o_v < V)[None, :])
 
 
@@ -600,6 +608,10 @@ def chunk_bwd_dv(
     chunk_indices: torch.LongTensor | None = None,
 ) -> torch.Tensor:
     B, T, H, K, V, HV = *k.shape, do.shape[-1], do.shape[2]
+    if q.dtype in (torch.float16, torch.bfloat16):
+        # Triton miscompiles masked K-tail iterations into OOB shared-memory access for 16-bit odd K/V (IMA)
+        assert K % 2 == 0 and V % 2 == 0, \
+            f"chunk_bwd_dv requires even K and V for {q.dtype}, got K={K}, V={V}"
     BT = chunk_size
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)

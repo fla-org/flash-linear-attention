@@ -162,6 +162,7 @@ def test_parallel_with_g(
         ]
     ],
 )
+@pytest.mark.smoke
 def test_parallel_varlen(
     H: int,
     HQ: int,

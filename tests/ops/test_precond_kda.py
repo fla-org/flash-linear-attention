@@ -522,6 +522,7 @@ def test_chunk_transpose_state(
         ]
     ],
 )
+@pytest.mark.smoke
 def test_chunk_varlen(
     H: int,
     K: int,

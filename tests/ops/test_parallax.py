@@ -158,6 +158,7 @@ def test_parallel_swa(
         ]
     ],
 )
+@pytest.mark.smoke
 def test_parallel_varlen(H: int, HQ: int, D: int, cu_seqlens: list[int], dtype: torch.dtype):
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'

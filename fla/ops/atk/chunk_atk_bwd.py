@@ -178,7 +178,7 @@ def _atk_backward_chunk_out(
             tl.store(dh0 + (i_n * H + h) * D + D_range, gac_tile, mask=mask_D)
 
         gbase_decays += tl.sum(graw_state * ac_val[None, :], 1)
-        gM += tl.dot(graw_state, tl.trans(U))
+        gM = tl.dot(graw_state, tl.trans(U), gM)
 
         if IS_VARLEN:
             gk_ptr = gk_out + (bos + T_range)[:, None] * gk_stride_t + h * gk_stride_h + D_range[None, :] * gk_stride_d

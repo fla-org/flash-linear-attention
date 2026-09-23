@@ -156,7 +156,7 @@ def fused_chunk_fwd_kernel(
             # [BT, BV]
             b_o = tl.dot(b_s.to(b_q.dtype), b_v) + tl.dot(b_q, b_h.to(b_q.dtype))
 
-        b_h += tl.dot(b_k, b_v)
+        b_h = tl.dot(b_k, b_v, b_h)
 
         tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=m_t[:, None] & (o_v < V)[None, :])
 
@@ -319,7 +319,7 @@ def fused_chunk_bwd_kernel(
             # [BT, BK]
             b_dq = tl.dot(b_ds.to(b_k.dtype), b_k) + tl.dot((b_do * scale).to(b_k.dtype), b_h.to(b_k.dtype))
             # [BV, BK]
-            b_h += tl.dot(b_v, b_k)
+            b_h = tl.dot(b_v, b_k, b_h)
 
         tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), mask=m_t[:, None] & (o_k < K)[None, :])
 
@@ -417,7 +417,7 @@ def fused_chunk_bwd_kernel(
             # [BT, BV]
             b_dv = tl.dot(b_s.to(b_do.dtype), b_do) + tl.dot(b_k, b_dh.to(b_k.dtype))
             # [BK, BV]
-            b_dh += tl.dot(b_q, (b_do * scale).to(b_do.dtype))
+            b_dh = tl.dot(b_q, (b_do * scale).to(b_do.dtype), b_dh)
 
         tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), mask=m_t[:, None] & (o_k < K)[None, :])
         tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), mask=m_t[:, None] & (o_v < V)[None, :])

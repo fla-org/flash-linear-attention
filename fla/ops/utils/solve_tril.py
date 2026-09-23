@@ -14,12 +14,18 @@ import triton.language as tl
 from fla.ops.backends import dispatch
 from fla.ops.utils.index import prepare_chunk_indices
 from fla.ops.utils.op import make_tensor_descriptor
-from fla.utils import IS_TMA_SUPPORTED, autotune_cache_kwargs, input_guard
+from fla.utils import IS_TF32_SUPPORTED, IS_TMA_SUPPORTED, autotune_cache_kwargs, input_guard
 
 FLA_TRIL_PRECISION = os.environ.get('FLA_TRIL_PRECISION', 'ieee')
 assert FLA_TRIL_PRECISION in ['ieee', 'tf32', 'tf32x3'], \
     f"FLA_TRIL_PRECISION must be one of 'ieee', 'tf32', or 'tf32x3', but got {FLA_TRIL_PRECISION}"
-DOT_PRECISION_AUTOTUNE_LIST = ["ieee"] if not IS_TMA_SUPPORTED else list({"ieee", FLA_TRIL_PRECISION})
+# NOTE: `IS_TF32_SUPPORTED` keeps the tf32 configs off non-Nvidia backends now that
+# `IS_TMA_SUPPORTED` can also be true on AMD. The order is fixed instead of derived from a set so
+# the autotune config order does not vary with the interpreter hash seed.
+if IS_TMA_SUPPORTED and IS_TF32_SUPPORTED and FLA_TRIL_PRECISION != "ieee":
+    DOT_PRECISION_AUTOTUNE_LIST = ["ieee", FLA_TRIL_PRECISION]
+else:
+    DOT_PRECISION_AUTOTUNE_LIST = ["ieee"]
 
 
 @triton.heuristics({

@@ -400,7 +400,7 @@ def chunk_ttt_linear_bwd_kernel_dv_local(
         p_q = q + o_k[:, None] + o_t[None, :] * stride_qk
         b_q = tl.load(p_q, mask=m_q, other=0.0)
         b_k = tl.load(p_k, mask=m_k, other=0.0)
-        b_A += tl.dot(b_k, b_q)
+        b_A = tl.dot(b_k, b_q, b_A)
 
     p_eta = eta + o_t * stride_eta
     b_eta = tl.load(p_eta, mask=m_t, other=0.0)
@@ -690,9 +690,9 @@ def chunk_bwd_kernel_dqke(
         # [BV]
         b_dhb = tl.load(p_dhb, mask=o_v < V, other=0.0)
         # [BT, BV] @ [BV, BT] -> [BT, BT]
-        b_ds += tl.dot(b_do, tl.trans(b_v))
+        b_ds = tl.dot(b_do, tl.trans(b_v), b_ds)
         # [BT, BV] @ [BV, BK] -> [BT, BK]
-        b_dq += tl.dot(b_do, b_h.to(b_do.dtype))
+        b_dq = tl.dot(b_do, b_h.to(b_do.dtype), b_dq)
         # [BT, BV] @ [BV, BK] -> [BT, BK]
         b_dk -= b_e_last * tl.dot(b_v, b_dh.to(b_v.dtype))
         b_de -= mask * tl.sum(tl.trans(b_dh) * tl.dot(tl.trans(b_k), b_v.to(b_k.dtype)))
@@ -989,8 +989,8 @@ def chunk_ttt_linear_bwd_norm(
     assert NK == 1, 'NK > 1 is not supported by TTT.'
     assert NV == 1, 'NV > 1 is not supported by TTT.'
 
-    dh = q.new_empty(B, NT, H, K, V)
-    dhb = q.new_empty(B, NT, H, 1, V)
+    dh = q.new_empty(B, NT, H, K, V, dtype=torch.float32)
+    dhb = q.new_empty(B, NT, H, 1, V, dtype=torch.float32)
     dh0 = torch.empty_like(h0, dtype=torch.float32) if h0 is not None else None
     dhb0 = torch.empty_like(hb0, dtype=torch.float32) if hb0 is not None else None
     dv = torch.empty_like(v)

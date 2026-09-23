@@ -80,13 +80,13 @@ def intra_chunk_preprocess_bwd_kernel(
     b_dqw = -tl.dot(b_dA_local, tl.trans(b_Twbk)) - tl.dot(b_dq.to(b_Twb.dtype), tl.trans(b_Twb))
     p_dw2 = dw2 + (bos * HQ + i_hq) * K + o_t[:, None] * (K*HQ) + o_d[None, :]
     b_dTwb = -tl.dot(tl.trans(b_qw), b_dq) + tl.load(p_dw2, mask=m_k, other=0.0)
-    b_dT += tl.dot(b_dTwb.to(b_w_beta.dtype), tl.trans(b_w_beta))
-    b_dw_beta += tl.dot(tl.trans(b_T), b_dTwb.to(b_T.dtype))
+    b_dT = tl.dot(b_dTwb.to(b_w_beta.dtype), tl.trans(b_w_beta), b_dT)
+    b_dw_beta = tl.dot(tl.trans(b_T), b_dTwb.to(b_T.dtype), b_dw_beta)
 
     b_dqw = tl.where(tl.arange(0, BT)[:, None] >= tl.arange(0, BT)[None, :], b_dqw, 0)
     b_dq += tl.dot(b_dA_local.to(b_k.dtype), b_k)
     b_dq += tl.dot(b_dqw.to(b_w.dtype), b_w)
-    b_dw += tl.dot(tl.trans(b_dqw.to(b_q.dtype)), b_q)
+    b_dw = tl.dot(tl.trans(b_dqw.to(b_q.dtype)), b_q, b_dw)
     p_q_new = dq_new + (bos * HQ + i_hq) * K + o_t[:, None] * (K*HQ) + o_d[None, :]
     tl.store(p_q_new, b_dq.to(dq_new.dtype.element_ty), mask=m_k)
 
@@ -95,9 +95,9 @@ def intra_chunk_preprocess_bwd_kernel(
     b_dk = tl.load(p_dk, mask=m_k, other=0.0)
     b_dTwbk = -tl.dot(tl.trans(b_qw), b_dA_local.to(b_qw.dtype)) - tl.dot(b_w, tl.trans(b_dk.to(b_w.dtype)))
     b_dw -= tl.dot(b_Twbk, b_dk.to(b_w.dtype))
-    b_dT += tl.dot(b_dTwbk.to(b_wbk.dtype), tl.trans(b_wbk))
+    b_dT = tl.dot(b_dTwbk.to(b_wbk.dtype), tl.trans(b_wbk), b_dT)
     b_dwbk = tl.where(o_i[:, None] > o_i[None, :], tl.dot(tl.trans(b_T), b_dTwbk.to(b_T.dtype)), 0).to(b_w.dtype)
-    b_dw_beta += tl.dot(b_dwbk, b_k)
+    b_dw_beta = tl.dot(b_dwbk, b_k, b_dw_beta)
 
     b_dk += tl.dot(tl.trans(b_dwbk), b_w_beta)
     b_dk += tl.dot(tl.trans(b_dA_local), b_q)
@@ -112,8 +112,8 @@ def intra_chunk_preprocess_bwd_kernel(
     b_dT = tl.dot(b_dT, b_Tt)
     b_dT = tl.where(tl.arange(0, BT)[:, None] > tl.arange(0, BT)[None, :], -b_dT, 0).to(b_k.dtype)
 
-    b_dw_beta += tl.dot(b_dT, b_w)
-    b_dw += tl.dot(tl.trans(b_dT), b_w_beta)
+    b_dw_beta = tl.dot(b_dT, b_w, b_dw_beta)
+    b_dw = tl.dot(tl.trans(b_dT), b_w_beta, b_dw)
     b_dw += b_dw_beta * b_beta[:, None]
     b_dbeta = tl.sum(b_dw_beta * b_w, axis=1)
 

@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+import triton
+
 from fla.ops.backends import BaseBackend
 
 _SUPPORTED_INTRA_CHUNK_SIZES = (32, 64)
@@ -32,6 +34,17 @@ def _verify_subchunk_aligned(args, kwargs):
     chunk_size = _chunk_size_from(args, kwargs)
     if chunk_size % _SUB_CHUNK != 0:
         return False, f'KDA Ascend bwd requires chunk_size % {_SUB_CHUNK} == 0, got {chunk_size}'
+    return True, None
+
+
+def _verify_bwd_intra_k(args, kwargs):
+    # beyond the single-block UB envelope dispatch falls back to the mainline kernel
+    k = args[1] if len(args) > 1 else kwargs['k']
+    K = int(k.shape[-1])
+    safe_gate = kwargs.get('safe_gate', False)
+    limit = 512 if safe_gate else 256
+    if triton.next_power_of_2(K) > limit:
+        return False, f'KDA Ascend bwd_intra only supports K <= {limit} with safe_gate={safe_gate}, got K={K}'
     return True, None
 
 
@@ -72,7 +85,10 @@ class TritonAscendKDABackend(BaseBackend):
         return recompute_w_u_fwd_kda_npu(*args, **kwargs)
 
     def chunk_kda_bwd_intra_verifier(self, *args, **kwargs):
-        return _verify_intra_chunk_size(args, kwargs)
+        ok, reason = _verify_intra_chunk_size(args, kwargs)
+        if not ok:
+            return ok, reason
+        return _verify_bwd_intra_k(args, kwargs)
 
     def chunk_kda_bwd_intra(self, *args, **kwargs):
         from fla.ops.kda.backends.triton_ascend.chunk_intra import chunk_kda_bwd_intra_npu

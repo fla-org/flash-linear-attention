@@ -110,6 +110,7 @@ def test_naive_chunk(
         ]
     ],
 )
+@pytest.mark.smoke
 def test_chunk(
     B: int,
     T: int,

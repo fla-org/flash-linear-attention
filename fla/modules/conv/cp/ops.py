@@ -8,7 +8,7 @@
 import torch
 import torch.distributed as dist
 
-from fla.ops.cp import FLACPContext, conv_cp_send_recv_bwd, conv_cp_send_recv_fwd
+from fla.ops.cp import FLACPContext, all_gather_into_tensor, conv_cp_send_recv_bwd, conv_cp_send_recv_fwd
 from fla.ops.utils import prepare_chunk_indices
 
 
@@ -45,12 +45,36 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
         Returns:
             initial_state: Initial state tensor of shape [N, D, W] or None
         """
-        if group is None:
+        W = weight.shape[-1]  # weight: [D, W]
+        if group is None or W == 1:
             return None
 
-        W = weight.shape[-1]  # weight: [D, W]
         D = weight.shape[0]
         initial_state = None
+        if context.layout == 'zigzag':
+            world_size = dist.get_world_size(group)
+            rank = dist.get_rank(group)
+            part_len = context.part_len
+            assert part_len >= W - 1, (
+                f"zigzag CP requires part_len ({part_len}) >= conv1d_kernel_size - 1 ({W - 1}); "
+                "increase total tokens or reduce world size"
+            )
+            assert x.dim() == 3 and x.shape[0] == 1, f"CP requires [1, T, D], got {x.shape}"
+            x_2d = x.squeeze(0)  # [T, D]
+            # last W-1 tokens of each chain part (front, back)
+            tails = torch.stack([x_2d[part_len - (W - 1): part_len], x_2d[-(W - 1):]])
+            gathered, _ = all_gather_into_tensor(tails, group=group)
+            # chain order: front parts of ranks 0..W-1, then back parts of ranks W-1..0
+            slots = torch.cat([gathered[:, 0], gathered[:, 1].flip(0)])
+            N = len(cu_seqlens) - 1
+            initial_state = torch.zeros(N, D, W, device=x.device, dtype=x.dtype)
+            for part, row in enumerate((0, context.front_num_seqs)):
+                if not context.is_first_by_part[part]:
+                    valid_len = min(W - 1, context.pre_num_conv_tokens_by_part[part])
+                    if valid_len > 0:
+                        chain_pos = rank if part == 0 else 2 * world_size - 1 - rank
+                        initial_state[row, :, -valid_len:] = slots[chain_pos - 1][-valid_len:].T
+            return initial_state
         if not context.is_first_rank:
             # Non-first rank needs initial_state
             assert x.dim() == 3 and x.shape[0] == 1, f"CP requires [1, T, D], got {x.shape}"
@@ -78,8 +102,7 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
         dh0: torch.Tensor | None,
         W: int,
         group: dist.ProcessGroup | None,
-        is_first_rank: bool,
-        pre_num_conv_tokens: int = 0,
+        cp_context: FLACPContext,
     ) -> None:
         """Correct dx gradients for CP backward pass by communicating with next rank.
 
@@ -88,15 +111,32 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
             dh0: Gradient w.r.t. initial_state, shape [N, D, W] or None
             W: Kernel size
             group: Process group for communication
-            is_first_rank: Whether this is the first rank in the sequence's processing chain
-            pre_num_conv_tokens: Number of tokens from the previous rank that
-                belong to the first sequence on the current rank. Must match the
-                value used in the forward pass to construct initial_state.
+            cp_context: CP context
         """
-        if group is None:
+        if group is None or W == 1:
             return
 
         D = dx.shape[-1]
+        if cp_context.layout == 'zigzag':
+            world_size = dist.get_world_size(group)
+            rank = dist.get_rank(group)
+            part_len = cp_context.part_len
+            # dh0 rows for chain-first parts stay zero: their forward initial_state was zeros
+            d_initial_state = torch.zeros(2, W - 1, D, device=dx.device, dtype=dx.dtype)
+            for part, row in enumerate((0, cp_context.front_num_seqs)):
+                if not cp_context.is_first_by_part[part]:
+                    valid_len = min(W - 1, cp_context.pre_num_conv_tokens_by_part[part])
+                    if valid_len > 0:
+                        d_initial_state[part, -valid_len:] = dh0[row, :, -valid_len:].T
+            gathered, _ = all_gather_into_tensor(d_initial_state, group=group)
+            # chain order: front parts of ranks 0..W-1, then back parts of ranks W-1..0
+            slots = torch.cat([gathered[:, 0], gathered[:, 1].flip(0)])
+            # the front part's chain successor is the next rank's front or own back part
+            dx[0, part_len - (W - 1): part_len, :].add_(slots[rank + 1])
+            # the back part's successor exists unless it is chain-last (rank 0)
+            if rank > 0:
+                dx[0, -(W - 1):, :].add_(slots[2 * world_size - rank])
+            return
         # dh0: [N, D, W] or None
         # We only care about the first sequence's initial_state gradient
         if dh0 is not None:
@@ -104,13 +144,13 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
             # previous rank. The forward fills only the last valid_len positions
             # of initial_state; gradients for the remaining (zero-padded) positions
             # must not flow back, otherwise they leak into unrelated sequences.
-            valid_len = min(W - 1, pre_num_conv_tokens)
+            valid_len = min(W - 1, cp_context.pre_num_conv_tokens)
             d_initial_state = torch.zeros(W-1, D, device=dx.device, dtype=dx.dtype)
             if valid_len > 0:
                 d_initial_state[-valid_len:] = dh0[0, :, -valid_len:].T
         else:
             # dh0 is None only when this is the first rank (no initial_state needed)
-            assert is_first_rank, "dh0 should not be None when is_first_rank=False"
+            assert cp_context.is_first_rank, "dh0 should not be None when is_first_rank=False"
             d_initial_state = torch.zeros(W-1, D, device=dx.device, dtype=dx.dtype)
         # Sync communication: send d_initial_state to previous rank, receive from next rank
         recv_d_init = conv_cp_send_recv_bwd(d_initial_state, group)  # [W-1, D]
@@ -128,6 +168,7 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
         cp_context: FLACPContext | None,
         chunk_size: int | None,
         backend: str = 'triton',
+        residual: torch.Tensor | None = None,
     ):
         # Import here to avoid circular dependency
         from fla.modules.conv.triton.ops import causal_conv1d_fwd
@@ -149,7 +190,7 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
             group=group,
         )
 
-        ctx.save_for_backward(x, weight, bias, initial_state)
+        ctx.save_for_backward(x, weight, bias, residual, initial_state)
         ctx.activation = activation
         ctx.cu_seqlens = cu_seqlens
         ctx.cu_seqlens_cpu = cu_seqlens_cpu
@@ -157,15 +198,14 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
         ctx.chunk_size = chunk_size
         ctx.group = group
         ctx.W = W
-        ctx.is_first_rank = cp_context.is_first_rank
-        ctx.pre_num_conv_tokens = cp_context.pre_num_conv_tokens
+        ctx.cp_context = cp_context
 
         # Call original forward
         y, _ = causal_conv1d_fwd(
             x=x,
             weight=weight,
             bias=bias,
-            residual=None,
+            residual=residual,
             initial_state=initial_state,
             output_final_state=False,
             activation=activation,
@@ -182,18 +222,18 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
         # Import here to avoid circular dependency
         from fla.modules.conv.triton.ops import causal_conv1d_bwd
 
-        x, weight, bias, initial_state = ctx.saved_tensors
+        x, weight, bias, residual, initial_state = ctx.saved_tensors
         group = ctx.group
         W = ctx.W
 
         # Call original backward
-        dx, dw, db, _, dh0 = causal_conv1d_bwd(
+        dx, dw, db, dr, dh0 = causal_conv1d_bwd(
             x=x,
             dy=dy,
             dht=None,
             weight=weight,
             bias=bias,
-            residual=None,
+            residual=residual,
             initial_state=initial_state,
             activation=ctx.activation,
             cu_seqlens=ctx.cu_seqlens,
@@ -208,11 +248,10 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
             dh0=dh0,
             W=W,
             group=group,
-            is_first_rank=ctx.is_first_rank,
-            pre_num_conv_tokens=ctx.pre_num_conv_tokens,
+            cp_context=ctx.cp_context,
         )
 
-        return dx, dw, db, None, None, None, None, None
+        return dx, dw, db, None, None, None, None, None, dr
 
 
 def causal_conv1d_cp(
@@ -224,6 +263,7 @@ def causal_conv1d_cp(
     cp_context: FLACPContext | None = None,
     chunk_size: int | None = None,
     backend: str = 'triton',
+    residual: torch.Tensor | None = None,
 ):
     """
     Context Parallel version of causal_conv1d.
@@ -237,10 +277,9 @@ def causal_conv1d_cp(
         weight: Weight tensor of shape [D, W]
         bias: Bias tensor of shape [D] or None
         activation: Activation function name or None
-        cu_seqlens: Cumulative sequence lengths
-        cu_seqlens_cpu: Cumulative sequence lengths on CPU
         chunk_indices: Chunk indices for variable-length sequences
         cp_context: CP context (required for CP mode)
+        residual: Residual tensor of shape [1, T, D] or None
     """
     if cp_context is None:
         raise ValueError("cp_context must be provided for causal_conv1d_cp")
@@ -252,7 +291,4 @@ def causal_conv1d_cp(
     if chunk_indices is None:
         chunk_indices = prepare_chunk_indices(cp_context.cu_seqlens, chunk_size, cu_seqlens_cpu=cp_context.cu_seqlens_cpu)
 
-    return CausalConv1dFunctionCP.apply(
-        x, weight, bias, activation,
-        chunk_indices, cp_context, chunk_size, backend
-    )
+    return CausalConv1dFunctionCP.apply(x, weight, bias, activation, chunk_indices, cp_context, chunk_size, backend, residual)

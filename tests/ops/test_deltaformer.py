@@ -184,6 +184,7 @@ def test_parallel_deltaformer_u(
     IS_INTEL_ALCHEMIST,
     reason="Skipping test on Intel Alchemist due to known issues with SRAM.",
 )
+@pytest.mark.smoke
 def test_deltaformer_attn_varlen(
     H: int,
     D: int,

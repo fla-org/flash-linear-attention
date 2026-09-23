@@ -80,7 +80,7 @@ def chunk_scaled_dot_kkt_fwd_kernel_npu(
             bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
             T = eos - bos
         else:
-            bos = i_b * T
+            bos = tl.cast(i_b, tl.int64) * T
         o_t = i_t * BT + o_i
         m_t = o_t < T
         m_A = m_causal & (m_t[:, None] & m_t)
@@ -104,7 +104,7 @@ def chunk_scaled_dot_kkt_fwd_kernel_npu(
                 b_k = tl.load(p_k, boundary_check=(0, 1)).to(tl.float32)
                 # ascend tl.dot may clobber lhs; keep rhs on the original tile.
                 b_k_lhs = b_k + 0.0
-                b_A += tl.dot(b_k_lhs, tl.trans(b_k), allow_tf32=False)
+                b_A = tl.dot(b_k_lhs, tl.trans(b_k), b_A, allow_tf32=False)
 
             if USE_G:
                 # mask first so upper-triangle g_i-g_j cannot overflow to inf.

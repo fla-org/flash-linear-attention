@@ -29,6 +29,7 @@
 
 ## News
 
+- [2026-07] 🐈 Add CAT (Compress and Attend Transformer) implementation to `fla` ([paper](https://arxiv.org/abs/2511.05313)) - a _meta_-sequence mixer that unlocks test-time control of inference costs.
 - [2026-07] 🧱 Add a [Gluon](https://triton-lang.org/main/getting-started/tutorials/gluon/) backend for [AttnRes](fla/ops/attnres).
 - [2026-07] 🚀 Add [FlashQLA](https://github.com/QwenLM/FlashQLA) backend for [Gated DeltaNet](fla/ops/gated_delta_rule).
 - [2026-06] 🔭 Add Parallax implementation to `fla` ([paper](https://arxiv.org/abs/2605.29157)).
@@ -117,6 +118,7 @@
 | 2026  |           Parallax            | [Parallax: Parameterized Local Linear Attention for Language Modeling](https://arxiv.org/abs/2605.29157)                                      | [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/ops/parallax)                   |
 | 2026  | Preconditioned Gated DeltaNet | [Preconditioned DeltaNet: Curvature-aware Sequence Modeling for Linear Recurrences](https://arxiv.org/abs/2604.21100)                         | [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/ops/precond_gated_delta_rule)   |
 | 2026  |      Preconditioned KDA       | [Preconditioned DeltaNet: Curvature-aware Sequence Modeling for Linear Recurrences](https://arxiv.org/abs/2604.21100)                         | [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/ops/precond_kda)                |
+| 2026  |              CAT              | [Controllably Efficient Language Models](https://arxiv.org/abs/2511.05313)                                                                    | [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/models/cat)                     |
 
 ## Installation
 
@@ -464,76 +466,9 @@ Check out [the GLA example](https://github.com/fla-org/flash-linear-attention/bl
 
 ## Evaluation
 
-The [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness) library allows you to easily perform (zero-shot) model evaluations.
-Follow the steps below to use this library:
+We support benchmark evaluation through [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness) with `python -m evals.harness`, and perplexity evaluation with `python -m evals.ppl`.
 
-1. Install `lm_eval` following [their instructions](https://github.com/EleutherAI/lm-evaluation-harness/blob/main/README.md).
-
-2. Run evaluation with:
-```sh
-$ MODEL='fla-hub/gla-1.3B-100B'
-$ python -m evals.harness --model hf \
-    --model_args pretrained=$MODEL,dtype=bfloat16 \
-    --tasks wikitext,lambada_openai,piqa,hellaswag,winogrande,arc_easy,arc_challenge,boolq,sciq,copa,openbookqa \
-    --batch_size 64 \
-    --num_fewshot 0 \
-    --device cuda \
-    --show_config
-```
-
-We've made `fla` compatible with hf-style evaluations, you can call [evals.harness](evals/harness.py) to finish the evaluations.
-Running the command above will provide the task results reported in the GLA paper.
-
-3. Multi-GPU Evaluation with Hugging Face accelerate 🚀
-
-To perform data-parallel evaluation (where each GPU loads a separate full copy of the model), we leverage the accelerate launcher as follows:
-```sh
-$ MODEL='fla-hub/gla-1.3B-100B'
-$ accelerate launch -m evals.harness --model hf  \
-    --model_args pretrained=$MODEL,dtype=bfloat16,trust_remote_code=True  \
-    --tasks wikitext,lambada_openai,piqa,hellaswag,winogrande,arc_easy,arc_challenge,boolq,sciq,copa,openbookqa \
-    --batch_size 64  \
-    --num_fewshot 0  \
-    --device cuda  \
-    --show_config  \
-    --trust_remote_code
-```
-
-4. 📏 RULER Benchmark suite
-
-The RULER benchmarks are commonly used for evaluating model performance on long-context tasks.
-You can evaluate `fla` models on RULER directly using `lm-evaluation-harness`. RULER is only available in a relatively recent version of `lm-evaluation-harness`, so make sure you have the latest version installed.
-
-```
-git clone --depth 1 https://github.com/EleutherAI/lm-evaluation-harness
-cd lm-evaluation-harness
-pip install -e .
-```
-
-
-Then, install the necessary dependencies for RULER:
-```sh
-pip install lm_eval["ruler"]
-```
-and run evaluation by (e.g., 32k contexts):
-```sh
-$ accelerate launch -m evals.harness \
-    --output_path $OUTPUT \
-    --tasks niah_single_1,niah_single_2,niah_single_3,niah_multikey_1,niah_multikey_2,niah_multikey_3,niah_multiquery,niah_multivalue,ruler_vt,ruler_cwe,ruler_fwe,ruler_qa_hotpot,ruler_qa_squad \
-    --model_args pretrained=$MODEL,dtype=bfloat16,max_length=32768,trust_remote_code=True \
-    --metadata='{"max_seq_lengths":[4096,8192,16384,32768]}' \
-    --batch_size 2 \
-    --show_config  \
-    --trust_remote_code
-```
-
-If a GPU can't load a full copy of the model, please refer to [this link](https://github.com/EleutherAI/lm-evaluation-harness?tab=readme-ov-file#multi-gpu-evaluation-with-hugging-face-accelerate) for FSDP settings.
-
-> [!TIP]
-> If you are using `lm-evaluation-harness` as an external library and can't find (almost) any tasks available, before calling `lm_eval.evaluate()` or `lm_eval.simple_evaluate()`, simply run the following to load the library's stock tasks:
-> ```py
-> >>> from lm_eval.tasks import TaskManager; TaskManager().initialize_tasks()
-> ```
+See the [evaluation guide](evals/README.md) for setup, single- and multi-GPU commands, RULER benchmarks, and perplexity evaluation settings.
 
 ## Benchmarks
 

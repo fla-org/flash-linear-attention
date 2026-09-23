@@ -85,7 +85,7 @@ def chunk_precond_kkt_fwd_kernel(
         p_kp = k_precond + (bos*H + i_h) * K + o_t[:, None] * (H*K) + o_k[None, :]
         b_kp = tl.load(p_kp, mask=m_tk, other=0.0)
 
-        b_A += tl.dot(b_k, tl.trans(b_kp))
+        b_A = tl.dot(b_k, tl.trans(b_kp), b_A)
 
     # Attention gating and beta scaling (gates are pre-scaled by RCP_LN2 upstream)
     b_A *= exp2(b_g[:, None] - b_g[None, :])

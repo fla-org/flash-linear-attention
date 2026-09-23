@@ -102,6 +102,7 @@ def test_chunk(
         (2, 256, 3, [0, 100, 123, 300, 500, 800, 1000, 1500, 2048], torch.float16),
     ],
 )
+@pytest.mark.smoke
 def test_chunk_varlen(
     H: int,
     D: int,

@@ -77,7 +77,7 @@ def chunk_dplr_fwd_kernel_o(
         p_h = h + (i_tg * H + i_h) * K*V + o_k[:, None] * V + o_v[None, :]
         b_qg = tl.load(p_qg, mask=m_qg, other=0.0)
         b_h = tl.load(p_h, mask=m_h, other=0.0)
-        b_o += tl.dot(b_qg, b_h)
+        b_o = tl.dot(b_qg, b_h, b_o)
 
     o_A = tl.arange(0, BT)
     m_A = m_t[:, None] & (o_A[None, :] < BT)
