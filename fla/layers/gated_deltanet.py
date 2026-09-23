@@ -279,7 +279,10 @@ class GatedDeltaNet(nn.Module):
             q, k, v = torch.split(qkv, [self.key_dim, self.key_dim, self.value_dim], dim=-1)
         elif self.use_short_conv:
             if last_state is not None:
-                conv_state_q, conv_state_k, conv_state_v = last_state['conv_state']
+                conv_state_q, conv_state_k, conv_state_v = (
+                    state.clone() if state is not None and not use_cache else state
+                    for state in last_state['conv_state']
+                )
             q, conv_state_q = self.q_conv1d(
                 x=self.q_proj(hidden_states),
                 cache=conv_state_q,
@@ -348,13 +351,14 @@ class GatedDeltaNet(nn.Module):
         else:
             raise NotImplementedError(f"Not supported mode `{mode}`.")
 
-        update_layer_cache(
-            self,
-            past_key_values,
-            recurrent_state=recurrent_state,
-            conv_state=(conv_state_q, conv_state_k, conv_state_v) if self.use_short_conv else None,
-            offset=q_len,
-        )
+        if use_cache:
+            update_layer_cache(
+                self,
+                past_key_values,
+                recurrent_state=recurrent_state,
+                conv_state=(conv_state_q, conv_state_k, conv_state_v) if self.use_short_conv else None,
+                offset=q_len,
+            )
 
         if self.use_gate:
             g = rearrange(self.g_proj(hidden_states), '... (h d) -> ... h d', d=self.head_v_dim)
