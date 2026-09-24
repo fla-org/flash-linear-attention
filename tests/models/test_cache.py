@@ -172,6 +172,16 @@ def test_cache_get_seq_length_nonexistent_layer():
     assert cache.get_seq_length(0) == 10
 
 
+def test_legacy_cache_update_defaults_none_offset():
+    torch.manual_seed(42)
+    cache = _raw_legacy_cache()
+    state = (torch.randn(1, 1, 1, 1), torch.randn(1, 1, 1, 1))
+
+    cache.update(attn_state=state, offset=None)
+
+    assert cache.get_seq_length(0) == 1
+
+
 def test_cache_window_size_does_not_undercount():
     """
     Test that window_size truncation doesn't undercount sequence length.
