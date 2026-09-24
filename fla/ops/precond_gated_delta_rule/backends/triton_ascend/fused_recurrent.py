@@ -9,9 +9,8 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.backends import dispatch
-from fla.ops.utils.op import exp, unflatten_program_id
-from fla.utils import input_guard
+from fla.ops.utils.op import exp
+from fla.utils import ascend_compile_kwargs, input_guard
 
 
 @triton.heuristics({
@@ -64,7 +63,7 @@ def fused_recurrent_precond_gated_delta_rule_fwd_kernel(
     TRANSPOSE_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_nh = unflatten_program_id(tl.cdiv(V, BV))
+    i_v, i_nh = tl.program_id(0), tl.program_id(1).to(tl.int64)
     i_n, i_hv = i_nh // HV, i_nh % HV
     i_h = i_hv // (HV // H)
 
@@ -207,7 +206,6 @@ def fused_recurrent_precond_gated_delta_rule_fwd_kernel(
             tl.store(p_at, b_a.to(p_at.dtype.element_ty), mask=mask_k)
 
 
-@dispatch('precond_gated_delta_rule')
 def fused_recurrent_precond_gated_delta_rule_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -242,15 +240,15 @@ def fused_recurrent_precond_gated_delta_rule_fwd(
     o = torch.empty_like(v)
     if output_final_state:
         if transpose_state_layout:
-            final_state = q.new_empty(N, HV, V, K, dtype=torch.float32)
+            final_state = q.new_zeros(N, HV, V, K, dtype=torch.float32)
         else:
-            final_state = q.new_empty(N, HV, K, V, dtype=torch.float32)
-        final_A_state = q.new_empty(N, H, K, dtype=torch.float32)
+            final_state = q.new_zeros(N, HV, K, V, dtype=torch.float32)
+        final_A_state = q.new_zeros(N, H, K, dtype=torch.float32)
     else:
         final_state = None
         final_A_state = None
 
-    grid = (NV * N * HV,)
+    grid = (NV, N * HV)
     fused_recurrent_precond_gated_delta_rule_fwd_kernel[grid](
         q=q,
         k=k,
@@ -281,8 +279,7 @@ def fused_recurrent_precond_gated_delta_rule_fwd(
         IS_BETA_HEADWISE=beta.ndim != v.ndim,
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
         TRANSPOSE_STATE=transpose_state_layout,
-        num_warps=1,
-        num_stages=3,
+        **ascend_compile_kwargs(),
     )
     return o, final_state, final_A_state
 

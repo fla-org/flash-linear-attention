@@ -151,7 +151,7 @@ jobs:
           assert IS_NPU, "Expected NPU backend (IS_NPU=True)"
           PY
 
-      - name: Run benchmark unit tests, modules, ops/utils, gdn, gdn2, kda, gla, attnres, solve_tril, delta
+      - name: Run benchmark unit tests, modules, ops/utils, gdn, gdn2, kda, gla, attnres, solve_tril, delta, pgdn
         shell: bash
         env:
           FLA_NPU_XDIST: "1"
@@ -172,7 +172,8 @@ jobs:
             tests/ops/test_gla.py \
             tests/ops/test_attnres.py \
             tests/ops/test_solve_tril.py \
-            tests/ops/test_delta.py
+            tests/ops/test_delta.py \
+            tests/ops/test_precond_gated_delta.py
 
       - name: Run NPU graph tests serially
         shell: bash
