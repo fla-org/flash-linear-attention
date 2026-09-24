@@ -7,6 +7,7 @@
 
 import sys
 
+from ._ascend_align import npu_leftover_mask  # noqa: F401
 from ._compat import (  # noqa: F401
     SUPPORTS_AUTOTUNE_CACHE,
     TRITON_ABOVE_3_4_0,

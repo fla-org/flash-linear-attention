@@ -13,6 +13,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.backends import dispatch
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp2
 from fla.utils import autotune_cache_kwargs
@@ -100,6 +101,7 @@ def chunk_precond_kkt_fwd_kernel(
     tl.store(p_A, b_A.to(A.dtype.element_ty), mask=m_t[:, None] & (o_A[None, :] < BT))
 
 
+@dispatch('precond_gated_delta_rule')
 def chunk_precond_kkt_fwd(
     k: torch.Tensor,
     k_precond: torch.Tensor,

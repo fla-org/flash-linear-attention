@@ -160,7 +160,7 @@ jobs:
           print("matplotlib savefig smoke test: ok")
           PY
 
-      - name: Benchmark chunk_gdn, chunk_gdn2, chunk_kda, fused_attnres, and conv1d
+      - name: Benchmark chunk_gdn, chunk_gdn2, chunk_kda, fused_attnres, conv1d, and chunk_precond_gdn
         shell: bash
         env:
           FLA_BENCH_WARMUP_MS: "25"
@@ -222,10 +222,16 @@ jobs:
           pid_conv1d=$!
 
           status=0
+          wait "$pid_conv1d" || status=1
+          ASCEND_RT_VISIBLE_DEVICES=3 python -m benchmarks.ops.run \
+            --op chunk_precond_gdn --base '' --json benchmark_chunk_precond_gdn.json \
+            > chunk_precond_gdn.log 2>&1 &
+          pid_precond_gdn=$!
+
           wait "$pid_gdn" || status=1
           wait "$pid_kda" || status=1
           wait "$pid_attnres" || status=1
-          wait "$pid_conv1d" || status=1
+          wait "$pid_precond_gdn" || status=1
 
           echo "========== chunk_gdn =========="
           cat chunk_gdn.log
@@ -237,6 +243,8 @@ jobs:
           cat fused_attnres.log
           echo "========== conv1d =========="
           cat conv1d.log
+          echo "========== chunk_precond_gdn =========="
+          cat chunk_precond_gdn.log
           exit "$status"
 
       - name: Upload benchmark results
@@ -249,6 +257,7 @@ jobs:
             benchmark_chunk_gdn2.json
             benchmark_chunk_kda.json
             benchmark_fused_attnres.json
+            benchmark_chunk_precond_gdn.json
             conv_benchmark/
           if-no-files-found: ignore
           retention-days: 10

@@ -9,6 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.backends import dispatch
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp2
 from fla.utils import IS_NVIDIA_BLACKWELL, autotune_cache_kwargs, check_shared_mem
@@ -244,6 +245,7 @@ def prepare_precond_wy_repr_bwd_kernel(
         tl.store(dg + (bos*HV + i_hv) + o_t*HV, b_dg.to(dg.dtype.element_ty), mask=m_t)
 
 
+@dispatch('precond_gated_delta_rule')
 def prepare_precond_wy_repr_bwd(
     k: torch.Tensor,
     k_precond: torch.Tensor,

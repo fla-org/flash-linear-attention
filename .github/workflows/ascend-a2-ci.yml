@@ -157,4 +157,5 @@ jobs:
             tests/ops/test_kda.py \
             tests/ops/test_gla.py \
             tests/ops/test_attnres.py \
-            tests/ops/test_solve_tril.py
+            tests/ops/test_solve_tril.py \
+            tests/ops/test_precond_gated_delta_rule.py

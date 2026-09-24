@@ -9,9 +9,8 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.backends import dispatch
 from fla.ops.utils.op import exp
-from fla.utils import input_guard
+from fla.utils import ascend_compile_kwargs, input_guard, npu_leftover_mask
 
 
 @triton.heuristics({
@@ -63,6 +62,7 @@ def fused_recurrent_precond_gated_delta_rule_fwd_kernel(
     STORE_FINAL_ATK: tl.constexpr,
     TRANSPOSE_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    MASK_LEFTOVER: tl.constexpr,
 ):
     i_v, i_nh = tl.program_id(0), tl.program_id(1).to(tl.int64)
     i_n, i_hv = i_nh // HV, i_nh % HV
@@ -117,17 +117,25 @@ def fused_recurrent_precond_gated_delta_rule_fwd_kernel(
         else:
             p_h0 = h0 + i_nh * K*V + o_k[:, None] * V + o_v[None, :]
         b_h += tl.load(p_h0, mask=mask_h, other=0).to(tl.float32)
+        if MASK_LEFTOVER:
+            b_h = tl.where(mask_h, b_h, 0)
 
     # ATK state (per key head: [N, H, K])
     b_a = tl.zeros([BK], dtype=tl.float32)
     if USE_INITIAL_ATK:
         p_a0 = a0 + (i_n * H + i_h) * K + o_k
         b_a += tl.load(p_a0, mask=mask_k, other=0).to(tl.float32)
+        if MASK_LEFTOVER:
+            b_a = tl.where(mask_k, b_a, 0)
 
     for _ in tl.range(0, T):
         b_q = tl.load(p_q, mask=mask_k, other=0).to(tl.float32)
         b_k = tl.load(p_k, mask=mask_k, other=0).to(tl.float32)
         b_v = tl.load(p_v, mask=mask_v, other=0).to(tl.float32)
+        if MASK_LEFTOVER:
+            b_q = tl.where(mask_k, b_q, 0)
+            b_k = tl.where(mask_k, b_k, 0)
+            b_v = tl.where(mask_v, b_v, 0)
         if USE_QK_L2NORM_IN_KERNEL:
             b_q = b_q / tl.sqrt(tl.sum(b_q * b_q) + 1e-6)
             b_k = b_k / tl.sqrt(tl.sum(b_k * b_k) + 1e-6)
@@ -155,6 +163,8 @@ def fused_recurrent_precond_gated_delta_rule_fwd_kernel(
 
         if USE_GK:
             b_gk = tl.load(p_gk, mask=mask_k, other=0).to(tl.float32)
+            if MASK_LEFTOVER:
+                b_gk = tl.where(mask_k, b_gk, 0)
             if TRANSPOSE_STATE:
                 b_h *= exp(b_gk[None, :])
             else:
@@ -162,6 +172,8 @@ def fused_recurrent_precond_gated_delta_rule_fwd_kernel(
 
         if USE_GV:
             b_gv = tl.load(p_gv, mask=mask_v, other=0).to(tl.float32)
+            if MASK_LEFTOVER:
+                b_gv = tl.where(mask_v, b_gv, 0)
             if TRANSPOSE_STATE:
                 b_h *= exp(b_gv[:, None])
             else:
@@ -207,7 +219,6 @@ def fused_recurrent_precond_gated_delta_rule_fwd_kernel(
             tl.store(p_at, b_a.to(p_at.dtype.element_ty), mask=mask_k)
 
 
-@dispatch('precond_gated_delta_rule')
 def fused_recurrent_precond_gated_delta_rule_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -235,17 +246,18 @@ def fused_recurrent_precond_gated_delta_rule_fwd(
     BK = triton.next_power_of_2(K)
     BV = min(8, triton.next_power_of_2(V)) if gv is None else triton.next_power_of_2(V)
     NV = triton.cdiv(V, BV)
+    mask_leftover = npu_leftover_mask(T=T, varlen=cu_seqlens is not None)
 
     if log_atk_scale is None:
         log_atk_scale = torch.full((H,), -0.2, device=k.device, dtype=torch.float32)
 
-    o = torch.empty_like(v)
+    o = v.new_zeros(B, T, HV, V) if mask_leftover else torch.empty_like(v)
     if output_final_state:
         if transpose_state_layout:
-            final_state = q.new_empty(N, HV, V, K, dtype=torch.float32)
+            final_state = q.new_zeros(N, HV, V, K, dtype=torch.float32)
         else:
-            final_state = q.new_empty(N, HV, K, V, dtype=torch.float32)
-        final_A_state = q.new_empty(N, H, K, dtype=torch.float32)
+            final_state = q.new_zeros(N, HV, K, V, dtype=torch.float32)
+        final_A_state = q.new_zeros(N, H, K, dtype=torch.float32)
     else:
         final_state = None
         final_A_state = None
@@ -281,8 +293,10 @@ def fused_recurrent_precond_gated_delta_rule_fwd(
         IS_BETA_HEADWISE=beta.ndim != v.ndim,
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
         TRANSPOSE_STATE=transpose_state_layout,
+        MASK_LEFTOVER=mask_leftover,
         num_warps=1,
         num_stages=3,
+        **ascend_compile_kwargs(),
     )
     return o, final_state, final_A_state
 
