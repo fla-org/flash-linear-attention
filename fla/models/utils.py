@@ -503,8 +503,21 @@ class FLAGenerationMixin(GenerationMixin):
         use_cache: bool = True,
         logits_to_keep: int | None = None,
         cache_position: torch.LongTensor | None = None,
+        next_sequence_length: int | None = None,
+        is_first_iteration: bool | None = None,
         **kwargs,
     ):
+        has_past = False
+        if past_key_values is not None:
+            if hasattr(past_key_values, 'get_seq_length'):
+                has_past = past_key_values.get_seq_length() > 0
+            else:
+                has_past = len(past_key_values) > 0
+        if next_sequence_length is not None and input_ids is not None:
+            input_ids = input_ids[:, -next_sequence_length:]
+        if is_first_iteration and inputs_embeds is not None and next_sequence_length is not None:
+            inputs_embeds = inputs_embeds[:, -next_sequence_length:]
+
         # Use pre-computed version comparison for performance
         if _IS_TRANSFORMERS_4_56_PLUS:
             # For transformers 4.56.0+, use cache_position-based logic
@@ -519,16 +532,22 @@ class FLAGenerationMixin(GenerationMixin):
                     inputs_embeds, input_ids = self._cache_dependant_input_preparation(
                         input_ids, inputs_embeds, cache_position,
                     )
-                elif cache_position is not None:
+                elif cache_position is not None and input_ids is not None and input_ids.shape[1] != cache_position.shape[0]:
                     # Fallback: manually slice using cache_position
-                    if input_ids is not None and input_ids.shape[1] != cache_position.shape[0]:
-                        input_ids = input_ids[:, cache_position]
-                elif (past_key_values.get_seq_length() if hasattr(past_key_values, 'get_seq_length') else len(past_key_values)) > 0:
+                    input_ids = input_ids[:, cache_position]
+                elif has_past and input_ids is not None and next_sequence_length is None:
                     # Ultimate fallback to old behavior
                     input_ids = input_ids[:, -1:]
 
-            # Handle input format (similar to base class logic)
-            if inputs_embeds is not None and (cache_position is None or len(cache_position) == inputs_embeds.shape[1]):
+            use_inputs_embeds = inputs_embeds is not None and (
+                is_first_iteration is True
+                or (
+                    is_first_iteration is None
+                    and not has_past
+                    and (cache_position is None or len(cache_position) == inputs_embeds.shape[1])
+                )
+            )
+            if use_inputs_embeds:
                 model_inputs['inputs_embeds'] = inputs_embeds
                 model_inputs['input_ids'] = None
             else:
@@ -540,18 +559,26 @@ class FLAGenerationMixin(GenerationMixin):
         else:
             # For older transformers versions, use the original logic
             model_inputs = {}
-            # only last token for `inputs_ids` if the `past_key_values` is not empty.
-            if past_key_values is not None and (past_key_values.get_seq_length() if hasattr(past_key_values, 'get_seq_length') else len(past_key_values)) > 0:
+            if has_past and input_ids is not None and next_sequence_length is None:
                 input_ids = input_ids[:, -1:]
-            # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
-            if inputs_embeds is not None and hasattr(past_key_values, '__len__') and len(past_key_values) == 0:
-                model_inputs = {'inputs_embeds': inputs_embeds}
+            use_inputs_embeds = inputs_embeds is not None and (
+                is_first_iteration is True
+                or (is_first_iteration is None and not has_past)
+            )
+            if use_inputs_embeds:
+                model_inputs = {
+                    'input_ids': None,
+                    'inputs_embeds': inputs_embeds,
+                }
             else:
                 # The `contiguous()` here is necessary to have a static stride during decoding. torchdynamo otherwise
                 # recompiles graphs as the stride of the inputs is a guard.
                 # Ref: https://github.com/huggingface/transformers/pull/29114
                 # TODO: use `next_tokens` directly instead.
-                model_inputs = {'input_ids': input_ids.contiguous()}
+                model_inputs = {
+                    'input_ids': input_ids.contiguous() if input_ids is not None else None,
+                    'inputs_embeds': None,
+                }
 
         if logits_to_keep is not None:
             model_inputs['logits_to_keep'] = logits_to_keep
