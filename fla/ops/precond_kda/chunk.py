@@ -21,6 +21,7 @@ from fla.ops.precond_kda.chunk_intra import chunk_precond_kda_bwd_intra, chunk_p
 from fla.ops.precond_kda.wy_fast import recompute_w_u_fwd
 from fla.ops.utils import chunk_local_cumsum
 from fla.ops.utils.constant import RCP_LN2
+from fla.ops.backends import dispatch
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
@@ -563,6 +564,7 @@ class ChunkPrecondKDAFunction(torch.autograd.Function):
 
 
 @torch.compiler.disable
+@dispatch('precond_kda')
 def chunk_precond_kda(
     q: torch.Tensor,
     k: torch.Tensor,

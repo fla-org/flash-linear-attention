@@ -12,7 +12,7 @@ import torch.nn.functional as F
 from fla.ops.kda.gate import fused_kda_gate, naive_kda_gate
 from fla.ops.precond_kda import chunk_precond_kda, fused_recurrent_precond_kda
 from fla.ops.precond_kda.naive import naive_recurrent_precond_kda
-from fla.utils import assert_close, device
+from fla.utils import IS_NPU, assert_close, device
 
 
 @pytest.mark.parametrize(
@@ -926,3 +926,73 @@ def test_chunk_A_state(
     assert_close("dh0", h0.grad, tri_dh0, 0.008)
     assert_close("dh0_atk", A0.grad, tri_dA0, 0.02)
     assert_close("d_log_atk_scale", log_atk_scale.grad, tri_dlog_atk_scale, 0.02)
+
+
+_TRITON_ASCEND_PRECOND_KDA_OPS = ('chunk_precond_kda', 'fused_recurrent_precond_kda')
+
+
+def _spy_on_triton_ascend_precond_kda_backend():
+    """Patch every op of the Triton-Ascend Precond KDA backend to record dispatched calls."""
+    from fla.ops.backends import BackendRegistry
+
+    BackendRegistry.ensure_initialized('precond_kda')
+    backend = BackendRegistry._registries['precond_kda']._backends.get('triton_ascend')
+    assert backend is not None, 'Triton-Ascend Precond KDA backend is not registered'
+
+    calls = []
+    originals = {}
+    for name in _TRITON_ASCEND_PRECOND_KDA_OPS:
+        original = getattr(backend, name)
+        originals[name] = original
+
+        def make_spy(name, original):
+            def spy(*args, **kwargs):
+                calls.append(name)
+                return original(*args, **kwargs)
+            return spy
+
+        setattr(backend, name, make_spy(name, original))
+    return backend, calls, originals
+
+
+@pytest.mark.skipif(not IS_NPU, reason='Triton-Ascend Precond KDA backend routing is only exercised on NPU')
+def test_triton_ascend_backend_routing():
+    """Precond KDA ops must actually dispatch to the Triton-Ascend backend on NPU.
+
+    Numerical parity tests alone cannot catch silently-failing verifiers: if
+    every verifier rejected, the public entries would fall back to the mainline
+    kernels and parity tests would still pass, leaving the NPU backend dead.
+    """
+    from fla.ops.precond_kda import chunk_precond_kda, fused_recurrent_precond_kda
+
+    backend, calls, originals = _spy_on_triton_ascend_precond_kda_backend()
+    try:
+        B, T, H, K, V = 1, 64, 1, 64, 64
+        torch.manual_seed(42)
+        q = torch.randn(B, T, H, K, dtype=torch.float32, device=device)
+        k = torch.randn(B, T, H, K, dtype=torch.float32, device=device)
+        v = torch.randn(B, T, H, V, dtype=torch.float32, device=device)
+        g = -torch.rand(B, T, H, K, dtype=torch.float32, device=device) * 0.5
+        g_atk = -torch.rand(B, T, H, dtype=torch.float32, device=device) * 0.5
+        beta_atk = torch.rand(B, T, H, dtype=torch.float32, device=device).sigmoid()
+        beta = torch.rand(B, T, H, dtype=torch.float32, device=device).sigmoid()
+
+        calls.clear()
+        h0 = torch.zeros(B, H, K, V, dtype=torch.float32, device=device)
+        a0 = torch.zeros(B, H, K, dtype=torch.float32, device=device)
+        log_atk_scale = torch.full((H,), -0.2, dtype=torch.float32, device=device)
+        chunk_precond_kda(q=q, k=k, v=v, g=g, g_atk=g_atk, beta_atk=beta_atk, beta=beta,
+                          scale=1.0, initial_state=h0, initial_A_state=a0,
+                          x=1.5, log_atk_scale=log_atk_scale)
+        assert 'chunk_precond_kda' in calls, f'chunk_precond_kda not routed to the Triton-Ascend backend (calls: {calls})'
+
+        calls.clear()
+        fused_recurrent_precond_kda(q=q, k=k, v=v, g=g, g_atk=g_atk, beta_atk=beta_atk, beta=beta,
+                                    initial_state=h0, output_final_state=True,
+                                    x=1.5, log_atk_scale=log_atk_scale)
+        assert 'fused_recurrent_precond_kda' in calls, \
+            f'fused_recurrent_precond_kda not routed to the Triton-Ascend backend (calls: {calls})'
+    finally:
+        # restore the originals
+        for name, original in originals.items():
+            setattr(backend, name, original)
