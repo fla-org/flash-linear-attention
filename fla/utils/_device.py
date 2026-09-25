@@ -225,6 +225,14 @@ class Backend(Enum):
 
 @cache
 def check_shared_mem(arch: str = "none", tensor_idx: int = 0) -> bool:
+    # NPU shared-memory is not directly comparable to GPU Hopper/Ampere
+    # bytes; the device-properties query path returns -1 on NPU, which
+    # causes every Hopper/Ampere gate to fail. Treat NPU as "no gate"
+    # so tests that guard on shared-mem budget (e.g. ``test_chunk`` with
+    # D>64) still run on Ascend.
+    from fla.utils import IS_NPU
+    if IS_NPU:
+        return True
     try:
         device_shared_mem_list = get_all_max_shared_mem()
         max_shared_memory = device_shared_mem_list[tensor_idx]
