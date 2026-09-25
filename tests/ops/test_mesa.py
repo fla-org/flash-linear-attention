@@ -16,16 +16,19 @@ from fla.utils import IS_INTEL_ALCHEMIST, assert_close, device, device_platform
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'D', 'gate_range', 'dtype'),
+    ('B', 'T', 'H', 'D', 'gate_range', 'grad_scale', 'dtype'),
     [
-        pytest.param(*test, id="B{}-T{}-H{}-D{}-gate_range{}-{}".format(*test))
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-gate_range{}-grad_scale{}-{}".format(*test))
         for test in [
-            (1, 63, 1, 64, [0.8, 0.99], torch.float16),
-            (2, 500, 4, 60, [0.8, 0.99], torch.float16),
-            (2, 1024, 8, 128, [0.8, 0.99], torch.float16),
-            (2, 1024, 8, 128, [0.01, 0.1], torch.float16),
-            (2, 1024, 8, 128, [1, 1], torch.float16),
-            (4, 2048, 8, 64, [0.8, 0.99], torch.float16),
+            (1, 63, 1, 64, [0.8, 0.99], 1, torch.float16),
+            (2, 500, 4, 60, [0.8, 0.99], 1, torch.float16),
+            (2, 1024, 8, 128, [0.8, 0.99], 1, torch.float16),
+            (2, 1024, 8, 128, [0.01, 0.1], 1, torch.float16),
+            (2, 1024, 8, 128, [1, 1], 1, torch.float16),
+            (4, 2048, 8, 64, [0.8, 0.99], 1, torch.float16),
+            (2, 1024, 8, 128, [0.8, 0.99], 2**-10, torch.float16),
+            (2, 500, 4, 60, [0.8, 0.99], 2**-20, torch.bfloat16),
+            (2, 1024, 8, 128, [0.01, 0.1], 2**-20, torch.bfloat16),
         ]
     ],
 )
@@ -39,6 +42,7 @@ def test_chunk(
     H: int,
     D: int,
     gate_range: tuple[float, float],
+    grad_scale: float,
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
@@ -50,13 +54,14 @@ def test_chunk(
     g = torch.rand(B, T, H, dtype=dtype).float().uniform_(lower_gate, upper_gate).log()
     lamb = torch.rand(H, D, dtype=dtype).sigmoid() * 0.75 + 0.25
     q, k, v, beta, g, lamb = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, beta, g, lamb))
-    do = torch.rand_like(v)
+    # small upstream gradients, as produced by a loss averaged over many tokens, must not degrade the backward
+    do = torch.rand_like(v) * grad_scale
 
     k_init_rand = torch.nn.functional.normalize(torch.rand(B, H, D, device=device, dtype=dtype), dim=-1, p=2)
     h_kk_init = (k_init_rand.unsqueeze(-1) * k_init_rand.unsqueeze(-2)).detach().clone().float().requires_grad_(True)
     h_kv_init = torch.rand(B, H, D, D, dtype=torch.float32, device=device).requires_grad_(True)
-    d_h_kk_final = torch.rand_like(h_kk_init)
-    d_h_kv_final = torch.rand_like(h_kv_init)
+    d_h_kk_final = torch.rand_like(h_kk_init) * grad_scale
+    d_h_kv_final = torch.rand_like(h_kv_init) * grad_scale
 
     tri, tri_kk_final, tri_kv_final = chunk_mesa_net(
         q=q.clone(),
@@ -96,14 +101,16 @@ def test_chunk(
     assert_close('o', ref, tri, 0.007)
     assert_close('h_kk_final', ref_hkk_final, tri_kk_final, 0.008)
     assert_close('h_kv_final', ref_hkv_final, tri_kv_final, 0.008)
-    assert_close('dq', ref_dq, tri_dq, 0.008)
-    assert_close('dk', ref_dk, tri_dk, 0.008)
-    assert_close('dv', ref_dv, tri_dv, 0.008)
-    assert_close('db', ref_dbeta, tri_dbeta, 0.008)
-    assert_close('dg', ref_dg, tri_dg, 0.008)
-    assert_close('dlamb', ref_dlamb, tri_dlamb, 0.015)
-    assert_close('dh_kk_init', ref_dh_kk_init, tri_dh_kk_init, 0.008)
-    assert_close('dh_kv_init', ref_dh_kv_init, tri_dh_kv_init, 0.008)
+    # compare gradients at unit scale so the absolute tolerance of assert_close cannot hide errors;
+    # grad_scale is a power of two, so this division is exact
+    assert_close('dq', ref_dq / grad_scale, tri_dq / grad_scale, 0.008)
+    assert_close('dk', ref_dk / grad_scale, tri_dk / grad_scale, 0.008)
+    assert_close('dv', ref_dv / grad_scale, tri_dv / grad_scale, 0.008)
+    assert_close('db', ref_dbeta / grad_scale, tri_dbeta / grad_scale, 0.008)
+    assert_close('dg', ref_dg / grad_scale, tri_dg / grad_scale, 0.008)
+    assert_close('dlamb', ref_dlamb / grad_scale, tri_dlamb / grad_scale, 0.015)
+    assert_close('dh_kk_init', ref_dh_kk_init / grad_scale, tri_dh_kk_init / grad_scale, 0.008)
+    assert_close('dh_kv_init', ref_dh_kv_init / grad_scale, tri_dh_kv_init / grad_scale, 0.008)
 
 
 @pytest.mark.parametrize(
