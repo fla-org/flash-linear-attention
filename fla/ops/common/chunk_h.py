@@ -12,7 +12,7 @@ import triton.language as tl
 from fla.ops.backends import dispatch
 from fla.ops.utils import prepare_chunk_offsets
 from fla.ops.utils.op import exp2
-from fla.utils import autotune_cache_kwargs, check_shared_mem
+from fla.utils import IS_NVIDIA_HOPPER, autotune_cache_kwargs, check_shared_mem
 
 BKV_LIST = [32, 64] if check_shared_mem() else [16, 32]
 
@@ -177,7 +177,8 @@ def chunk_fwd_kernel_h(
     key=['BT', 'USE_G', 'USE_GK', 'USE_GV', 'STATE_V_FIRST', 'K', 'V'],
     **autotune_cache_kwargs,
 )
-@triton.jit(do_not_specialize=['T'])
+# keep scale=1 dynamic to avoid a Hopper masked-load shared-memory miscompile.
+@triton.jit(do_not_specialize=['T', 'scale'] if IS_NVIDIA_HOPPER else ['T'])
 def chunk_bwd_kernel_dh(
     q,
     g,
