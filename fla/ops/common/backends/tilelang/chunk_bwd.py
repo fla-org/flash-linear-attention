@@ -19,7 +19,6 @@ from fla.utils import check_shared_mem
     tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
 })
 def _build_kernel(
-    B,
     H,
     HV,
     K,
@@ -45,8 +44,8 @@ def _build_kernel(
 
     # Rebind to underscore-prefixed locals so the kernel body (a closure below)
     # stays identical to the previous nested layout. tilelang caches _build_kernel
-    # by the outer (B, H, K, V, BT, BK, BV, NK, hD1, hD2, dtype_str, ...) tuple.
-    _B, _H, _HV, _K, _V = B, H, HV, K, V
+    # by the outer (H, HV, K, V, BT, BK, BV, NK, hD1, hD2, dtype_str, ...) tuple.
+    _H, _HV, _K, _V = H, HV, K, V
     _G = HV // H
     _BT, _BK, _BV, _NK = BT, BK, BV, NK
     _NV = NV
@@ -55,20 +54,19 @@ def _build_kernel(
     _USE_G, _USE_DW = USE_G, USE_DW
     _TS, _VAR = STATE_V_FIRST, IS_VARLEN
 
-    # T, NT, total_h are dynamic (vary with sequence length, no recompilation).
-    # B, H are compile-time (stable across batches, enables fast integer division).
-    T_d, NT_d, total_h_d, Ncu_d = T.dynamic("T, NT, total_h, Ncu")
+    # batch and sequence extents are dynamic; head counts stay static for index division
+    B_d, T_d, NT_d, total_h_d, Ncu_d = T.dynamic("B, T, NT, total_h, Ncu")
 
-    # 4D tensor shapes using dynamic T + compile-time B, H, K, V.
+    # 4D tensor shapes using dynamic B/T + compile-time H, HV, K, V.
     # q/k carry H qk-heads; dq/dk/dw and v/do/g/dg carry HV value-heads
     # (HV >= H for GVA). dq/dk/dw are written at value-head granularity and
     # reduced to qk-heads by the caller when HV > H.
-    qk_s = (_B, T_d, _H, _K)
-    dqk_s = (_B, T_d, _HV, _K)
-    v_s = (_B, T_d, _HV, _V)
+    qk_s = (B_d, T_d, _H, _K)
+    dqk_s = (B_d, T_d, _HV, _K)
+    v_s = (B_d, T_d, _HV, _V)
     h_s = (total_h_d, _hD1, _hD2)
-    g_s = (_B, T_d, _HV)
-    dg_s = (_NK, _B, T_d, _HV)
+    g_s = (B_d, T_d, _HV)
+    dg_s = (_NK, B_d, T_d, _HV)
 
     @T.macro
     def kernel_body(q, k, v, g, h, do, dh, dq, dk, dw, dv, dg, scale,
@@ -291,7 +289,7 @@ def _build_kernel(
             dv: T.Tensor(v_s, _dtype), dg: T.Tensor(dg_s, T.float32),
             scale: T.float32,
         ):
-            with T.Kernel(_NK, T.ceildiv(T_d, _BT), _B * _HV, threads=_threads) as (i_k, i_t, i_bh):
+            with T.Kernel(_NK, T.ceildiv(T_d, _BT), B_d * _HV, threads=_threads) as (i_k, i_t, i_bh):
                 i_b = i_bh // _HV
                 i_h = i_bh % _HV
                 NT_local = T.ceildiv(T_d, _BT)
@@ -350,12 +348,11 @@ def chunk_bwd_dqkwg_tilelang(
     hD1, hD2 = h_flat.shape[-2], h_flat.shape[-1]
     dtype_str = {torch.float16: 'float16', torch.bfloat16: 'bfloat16', torch.float32: 'float32'}[q.dtype]
 
-    # Cache key: B, H, HV, tile sizes, flags. T is dynamic (no recompilation for different seq lengths).
+    # cache key: H, HV, tile sizes, flags; B and T are runtime tensor extents
     # Small head dims (< 64) cannot be warp-partitioned across 4 warps by TileLang's
     # GEMM (tile too small); drop to 2 warps so the kernel still compiles.
     num_warps = 4 if min(K, V) >= 64 else 2
     kernel = _build_kernel(
-        B,
         H,
         HV,
         K,
