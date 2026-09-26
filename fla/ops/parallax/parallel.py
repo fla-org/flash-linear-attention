@@ -11,7 +11,6 @@ import triton.language as tl
 from einops import reduce
 
 from fla.ops.utils import prepare_chunk_indices
-from fla.ops.utils.head import get_gqa_group_size
 from fla.ops.utils.op import exp2
 from fla.utils import IS_NVIDIA_BLACKWELL, autocast_custom_bwd, autocast_custom_fwd, check_shared_mem, contiguous
 
@@ -805,7 +804,9 @@ def parallel_parallax(
         raise TypeError(f"parallel_parallax requires bf16 or fp16 inputs, got q.dtype={q.dtype}")
     if scale is None:
         scale = k.shape[-1] ** -0.5
-    get_gqa_group_size(q.shape[2], k.shape[2])
+    HQ, H = q.shape[2], k.shape[2]
+    if H == 0 or HQ % H != 0:
+        raise ValueError(f"The number of query heads ({HQ}) must be divisible by the number of key/value heads ({H}).")
     if cu_seqlens is not None and q.shape[0] != 1:
         raise ValueError(
             f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`. "

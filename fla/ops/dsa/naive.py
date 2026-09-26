@@ -11,8 +11,6 @@ import torch
 import torch.nn.functional as F
 from einops import repeat
 
-from fla.ops.utils.head import get_gqa_group_size
-
 
 def naive_dsa_indexer(
     q_idx: torch.Tensor,
@@ -157,7 +155,10 @@ def naive_dsa(
         assert q.shape[0] == 1, "batch size must be 1 when cu_seqlens are provided"
 
     dtype = q.dtype
-    G = get_gqa_group_size(q.shape[2], k.shape[2])
+    HQ, H = q.shape[2], k.shape[2]
+    if H == 0 or HQ % H != 0:
+        raise ValueError(f"The number of query heads ({HQ}) must be divisible by the number of key/value heads ({H}).")
+    G = HQ // H
     q, k, v = (x.float() for x in (q, k, v))
     k, v = (repeat(x, 'b t h d -> b t (h g) d', g=G) for x in (k, v))
 

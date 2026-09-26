@@ -9,8 +9,6 @@ import torch
 import torch.nn.functional as F
 from einops import rearrange, repeat
 
-from fla.ops.utils.head import get_gqa_group_size
-
 
 def naive_forgetting_attn(
     q: torch.Tensor,
@@ -37,7 +35,9 @@ def naive_forgetting_attn(
     """
     _, T, HQ, D = q.shape
     H = k.shape[2]
-    G = get_gqa_group_size(HQ, H)
+    if H == 0 or HQ % H != 0:
+        raise ValueError(f"The number of query heads ({HQ}) must be divisible by the number of key/value heads ({H}).")
+    G = HQ // H
 
     if scale is None:
         scale = D ** -0.5

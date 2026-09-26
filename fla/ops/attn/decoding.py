@@ -10,7 +10,6 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.cumsum import chunk_global_cumsum
-from fla.ops.utils.head import get_gqa_group_size
 from fla.ops.utils.op import exp
 from fla.utils import autotune_cache_kwargs, check_shared_mem
 
@@ -166,7 +165,9 @@ def attn_decoding_one_step(
     B, T, H, K, V = *k.shape, v.shape[-1]
     N = len(cu_seqlens) - 1
     HQ = q.shape[2]
-    G = get_gqa_group_size(HQ, H)
+    if H == 0 or HQ % H != 0:
+        raise ValueError(f"The number of query heads ({HQ}) must be divisible by the number of key/value heads ({H}).")
+    G = HQ // H
     if scale is None:
         scale = K ** -0.5
     if sink_bias is not None:

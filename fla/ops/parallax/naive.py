@@ -7,8 +7,6 @@
 
 import torch
 
-from fla.ops.utils.head import get_gqa_group_size
-
 
 def naive_parallax(
     q: torch.Tensor,
@@ -58,7 +56,9 @@ def naive_parallax(
     """
     B, T, HQ, D = q.shape
     H = k.shape[2]
-    G = get_gqa_group_size(HQ, H)
+    if H == 0 or HQ % H != 0:
+        raise ValueError(f"The number of query heads ({HQ}) must be divisible by the number of key/value heads ({H}).")
+    G = HQ // H
 
     if scale is None:
         scale = D ** -0.5

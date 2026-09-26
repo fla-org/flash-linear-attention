@@ -14,7 +14,6 @@ from fla.ops.backends import dispatch
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.cumsum import chunk_global_cumsum
-from fla.ops.utils.head import get_gqa_group_size
 from fla.ops.utils.op import exp2, log2
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, check_shared_mem, contiguous
 
@@ -832,7 +831,9 @@ def parallel_attn(
         )
     if scale is None:
         scale = k.shape[-1] ** -0.5
-    get_gqa_group_size(q.shape[2], k.shape[2])
+    HQ, H = q.shape[2], k.shape[2]
+    if H == 0 or HQ % H != 0:
+        raise ValueError(f"The number of query heads ({HQ}) must be divisible by the number of key/value heads ({H}).")
     if cu_seqlens is not None and q.shape[0] != 1:
         raise ValueError(
             f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`. "

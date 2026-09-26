@@ -11,7 +11,6 @@ import triton.language as tl
 
 from fla.ops.attn.parallel import parallel_attn_bwd_preprocess
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets, prepare_token_indices
-from fla.ops.utils.head import get_gqa_group_size
 from fla.ops.utils.op import exp, log
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, check_shared_mem, contiguous
 
@@ -619,7 +618,9 @@ def parallel_nsa_compression(
     scale: float = None,
     cu_seqlens: torch.LongTensor | tuple[torch.LongTensor, torch.LongTensor] | None = None
 ):
-    get_gqa_group_size(q.shape[2], k.shape[2])
+    HQ, H = q.shape[2], k.shape[2]
+    if H == 0 or HQ % H != 0:
+        raise ValueError(f"The number of query heads ({HQ}) must be divisible by the number of key/value heads ({H}).")
     if scale is None:
         scale = k.shape[-1] ** -0.5
     return ParallelNSACompressionFunction.apply(
