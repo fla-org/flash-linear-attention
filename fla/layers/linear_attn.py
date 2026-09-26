@@ -209,8 +209,9 @@ class LinearAttention(nn.Module):
             recurrent_state=final_state,
             offset=q_len,
         )
+        # keep fully masked batches nonempty for output normalization
+        o = repad_hidden_states(o, indices, batch_size, q_len)
         o = self.norm(o)
         o = rearrange(o, '... h d -> ... (h d)')
         o = self.o_proj(o)
-        o = repad_hidden_states(o, indices, batch_size, q_len)
         return o, None, past_key_values

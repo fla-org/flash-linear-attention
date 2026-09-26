@@ -10,6 +10,7 @@ import torch
 
 from fla.layers.linear_attn import LinearAttention
 from fla.models.utils import Cache
+from fla.modules import RMSNorm
 from fla.ops.linear_attn import chunk_linear_attn, fused_chunk_linear_attn, fused_recurrent_linear_attn
 from fla.ops.linear_attn.naive import naive_chunk_linear_attn, naive_recurrent_linear_attn
 from fla.utils import assert_close, device
@@ -393,9 +394,10 @@ def test_layer_padding_grad(dtype, packed):
     assert torch.count_nonzero(grads[0][1]) == 0
     for ref_grad, grad in zip(ref_grads, grads):
         assert_close('grad', ref_grad, grad, 1e-3)
+    layer.norm = RMSNorm(layer.head_v_dim).to(device=device, dtype=dtype)
     out = layer(x, attention_mask=torch.zeros_like(mask))[0]
     assert torch.count_nonzero(out) == 0
-    for grad in torch.autograd.grad(out.sum(), inputs):
+    for grad in torch.autograd.grad(out.sum(), (x, *layer.parameters())):
         assert torch.count_nonzero(grad) == 0
 
 
