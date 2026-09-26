@@ -449,6 +449,8 @@ def test_chunk_state_v_first(
             (4, 64, [0, 15], torch.float16),
             (4, 64, [0, 256, 500, 1000], torch.float16),
             (4, 100, [0, 15, 100, 300, 1200, 2000], torch.float16),
+            # exceed the 65535-block limit on grid axes 1 and 2
+            (32, 32, range(0, 32801, 16), torch.float16),
         ]
     ],
 )
@@ -460,7 +462,7 @@ def test_chunk_state_v_first(
 def test_chunk_varlen(
     H: int,
     D: int,
-    cu_seqlens: list[int],
+    cu_seqlens: list[int] | range,
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
