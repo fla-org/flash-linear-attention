@@ -233,6 +233,47 @@ def test_chunk(
     assert_close('dh0', ref_dh0, tri_dh0, 0.008)
 
 
+@pytest.mark.parametrize('dtype', [torch.bfloat16, torch.float16])
+def test_chunk_tilelang_batch_cache(monkeypatch, dtype):
+    from fla.ops.common.backends.tilelang import TileLangBackend
+
+    if not IS_NVIDIA_HOPPER or not TileLangBackend.is_available():
+        pytest.skip(reason='TileLang cache regression requires Hopper and a usable TileLang compiler')
+    if os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") == "1":
+        pytest.skip(reason='TileLang dispatch is disabled')
+
+    from fla.ops.common.backends.tilelang import chunk_bwd
+
+    monkeypatch.setenv('FLA_TILELANG', '1')
+    build = chunk_bwd._build_kernel
+    kernels = []
+
+    def record_kernel(*args, **kwargs):
+        kernel = build(*args, **kwargs)
+        kernels.append(kernel)
+        return kernel
+
+    monkeypatch.setattr(chunk_bwd, '_build_kernel', record_kernel)
+    shapes = [(1, 63), (2, 65), (5, 129), (11, 65), (13, 63), (2, 129)]
+    for B, T in shapes:
+        test_chunk(
+            B=B,
+            T=T,
+            H=2,
+            HV=2,
+            D=128,
+            scale=0.1,
+            gate_logit_normalizer=1,
+            mask_p=0,
+            use_qk_l2norm_in_kernel=True,
+            dtype=dtype,
+        )
+
+    # require actual TileLang dispatch and one compiled object across batch/sequence extents
+    assert len(kernels) == len(shapes)
+    assert all(kernel is kernels[0] for kernel in kernels)
+
+
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'HV', 'D', 'scale', 'gate_logit_normalizer', 'dtype', 'chunk_size'),
     [
