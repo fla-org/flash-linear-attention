@@ -694,7 +694,6 @@ def parallel_simple_gla(
     output_attentions: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     cu_seqlens_cpu: torch.LongTensor | None = None,
-    **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
@@ -724,10 +723,6 @@ def parallel_simple_gla(
         attn (torch.Tensor):
             Attention scores of shape `[B, H, T, T]` if `output_attentions=True` else `None`.
     """
-    if 'head_first' in kwargs:
-        raise DeprecationWarning(
-            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
-        )
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(

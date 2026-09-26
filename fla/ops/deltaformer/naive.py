@@ -55,7 +55,7 @@ def naive_causal_attention_bhtd(
     return o
 
 
-def naive_deltaformer_attn_head_first(
+def _naive_deltaformer_attn_bhtd(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -142,7 +142,7 @@ def naive_deltaformer_attn(
     else:
         beta_bhtd = None
 
-    o_bhtd = naive_deltaformer_attn_head_first(q_bhtd, k_bhtd, v_bhtd, beta_bhtd)
+    o_bhtd = _naive_deltaformer_attn_bhtd(q_bhtd, k_bhtd, v_bhtd, beta_bhtd)
 
     o_bthd = o_bhtd.transpose(1, 2)  # [B, H, T, D] -> [B, T, H, D]
 

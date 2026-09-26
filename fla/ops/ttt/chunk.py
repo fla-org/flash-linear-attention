@@ -1435,7 +1435,6 @@ def chunk_ttt_linear(
     output_final_state: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     cu_seqlens_cpu: torch.LongTensor | None = None,
-    **kwargs,
 ):
     r"""
     Args:
@@ -1480,10 +1479,6 @@ def chunk_ttt_linear(
     assert k.shape[-1] == v.shape[-1], "DK must equal to DV."
     if isinstance(eta, float):
         eta = torch.full_like(q[:, :, :, :1], eta)
-    if 'head_first' in kwargs:
-        raise DeprecationWarning(
-            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
-        )
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(

@@ -476,12 +476,7 @@ def parallel_rebased(
     use_scale: bool = True,
     use_normalize: bool = True,
     return_both: bool = False,
-    **kwargs,
 ):
-    if 'head_first' in kwargs:
-        raise DeprecationWarning(
-            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
-        )
     assert q.shape[-1] <= 128, "only support feature dim up to 128"
     if use_scale:
         scale = q.shape[-1] ** -0.5
