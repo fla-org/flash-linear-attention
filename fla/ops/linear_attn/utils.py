@@ -28,6 +28,9 @@ class StatefulNormalizeFunction(torch.autograd.Function):
                 z_init_b = z_init
             k_cum = k_cum + z_init_b
         denom = (q * scale * k_cum).sum(-1, keepdim=True) + 1e-10
+        # the epsilon underflows in fp16 for fully masked prefixes
+        if denom.dtype == torch.float16:
+            denom = denom.masked_fill(denom == 0, 1)
         o_out = o / denom
         if cu_seqlens is not None:
             idx = (cu_seqlens[:-1] if reverse else cu_seqlens[1:] - 1).to(torch.long)
