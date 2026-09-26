@@ -160,7 +160,7 @@ jobs:
           print("matplotlib savefig smoke test: ok")
           PY
 
-      - name: Benchmark chunk_gdn, chunk_kda, fused_attnres, and conv1d
+      - name: Benchmark chunk_gdn, chunk_gdn2, chunk_kda, fused_attnres, and conv1d
         shell: bash
         env:
           FLA_BENCH_WARMUP_MS: "25"
@@ -170,20 +170,55 @@ jobs:
           source /usr/local/Ascend/ascend-toolkit/set_env.sh
           set -uo pipefail
 
-          ASCEND_RT_VISIBLE_DEVICES=0 python -m benchmarks.ops.run \
-            --op chunk_gdn --base '' --json benchmark_chunk_gdn.json \
-            > chunk_gdn.log 2>&1 &
+          run_benchmark() {
+            local name=$1 device=$2
+            shift 2
+            local started=$SECONDS rc=0
+            echo "Benchmark $name: device=$device started=$(date -u +%FT%TZ)"
+            ASCEND_RT_VISIBLE_DEVICES="$device" "$@" > "$name.log" 2>&1 || rc=$?
+            echo "Benchmark $name: device=$device elapsed=$((SECONDS - started))s exit=$rc"
+            return "$rc"
+          }
+
+          run_benchmark chunk_gdn 0 python -m benchmarks.ops.run \
+            --op chunk_gdn --base '' --json benchmark_chunk_gdn.json &
           pid_gdn=$!
-          ASCEND_RT_VISIBLE_DEVICES=1 python -m benchmarks.ops.run \
-            --op chunk_kda --base '' --json benchmark_chunk_kda.json \
-            > chunk_kda.log 2>&1 &
+          run_benchmark chunk_kda 1 python -m benchmarks.ops.run \
+            --op chunk_kda --base '' --json benchmark_chunk_kda.json &
           pid_kda=$!
-          ASCEND_RT_VISIBLE_DEVICES=2 python -m benchmarks.ops.run \
-            --op fused_attnres --base '' --json benchmark_fused_attnres.json \
-            > fused_attnres.log 2>&1 &
+          # fused_attnres finishes first in the four-card baseline; reuse its card for GDN2.
+          (
+            set -e
+            run_benchmark fused_attnres 2 python -m benchmarks.ops.run \
+              --op fused_attnres --base '' --json benchmark_fused_attnres.json
+            run_benchmark chunk_gdn2 2 python -m benchmarks.ops.run \
+              --op chunk_gdn2 --base '' \
+              --json benchmark_chunk_gdn2.json
+          python - <<'PY'
+          import json
+
+          from benchmarks.ops.registry import SHAPE_CONFIGS, get_op
+
+          def verify(path, shapes):
+              with open(path) as f:
+                  results = [r for r in json.load(f)['results'] if r['op'] == 'chunk_gdn2']
+              actual = {(r['mode'], r['B'], r['T'], r['H'], r['D']) for r in results}
+              expected = {
+                  (mode, shape['B'], shape['T'], shape['H'], shape['D'])
+                  for shape in shapes.values()
+                  for mode in ('fwd', 'fwdbwd')
+              }
+              assert len(results) == len(expected) and actual == expected, {
+                  'missing': sorted(expected - actual),
+                  'unexpected': sorted(actual - expected),
+              }
+
+          shapes = get_op('chunk_gdn2').default_shapes or SHAPE_CONFIGS
+          verify('benchmark_chunk_gdn2.json', shapes)
+          PY
+          ) &
           pid_attnres=$!
-          ASCEND_RT_VISIBLE_DEVICES=3 python benchmarks/modules/benchmark_conv.py \
-            > conv1d.log 2>&1 &
+          run_benchmark conv1d 3 python benchmarks/modules/benchmark_conv.py &
           pid_conv1d=$!
 
           status=0
@@ -194,6 +229,8 @@ jobs:
 
           echo "========== chunk_gdn =========="
           cat chunk_gdn.log
+          echo "========== chunk_gdn2 (default shape matrix, including 32K) =========="
+          cat chunk_gdn2.log
           echo "========== chunk_kda =========="
           cat chunk_kda.log
           echo "========== fused_attnres =========="
@@ -209,6 +246,7 @@ jobs:
           name: ascend-a2-benchmark-results
           path: |
             benchmark_chunk_gdn.json
+            benchmark_chunk_gdn2.json
             benchmark_chunk_kda.json
             benchmark_fused_attnres.json
             conv_benchmark/

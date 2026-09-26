@@ -391,6 +391,8 @@ def layer_norm_bwd_kernel(
         o_t = (i_t + tl.arange(0, BT)).to(tl.int64)
         m_t = o_t < Tg
         m_x = m_t[:, None] & m_d[None, :]
+        m_o = o_t < min(i_sg * BS + BS, Tg)
+        m_ox = m_o[:, None] & m_d[None, :]
         p_x = x + i_g * D + o_t[:, None] * (G*D) + o_d[None, :]
         p_dy = dy + i_g * D + o_t[:, None] * (G*D) + o_d[None, :]
         p_dx = dx + i_g * D + o_t[:, None] * (G*D) + o_d[None, :]
@@ -412,19 +414,15 @@ def layer_norm_bwd_kernel(
             b_y = b_y + b_b[None, :]
         if RECOMPUTE_OUTPUT:
             p_y = y + i_g * D + o_t[:, None] * (G*D) + o_d[None, :]
-            tl.store(p_y, b_y.to(p_y.dtype.element_ty), mask=m_x)
+            tl.store(p_y, b_y.to(p_y.dtype.element_ty), mask=m_ox)
 
         b_wdy = b_dy
 
-        if HAS_WEIGHT or HAS_BIAS:
-            # when BT > BS, a tile may span into the next program's range;
-            # mask to this program's upper bound to avoid double-counting dw/db.
-            m_t = (i_t + tl.arange(0, BT)) < min(i_sg * BS + BS, Tg)
         if HAS_WEIGHT:
             b_wdy = b_dy * b_w
-            b_dw += tl.where(m_t[:, None], b_dy * b_xhat, 0.0)
+            b_dw += tl.where(m_o[:, None], b_dy * b_xhat, 0.0)
         if HAS_BIAS:
-            b_db += tl.where(m_t[:, None], b_dy, 0.0)
+            b_db += tl.where(m_o[:, None], b_dy, 0.0)
         if not IS_RMS_NORM:
             b_c1 = tl.sum(b_xhat * b_wdy, axis=1) / D
             b_c2 = tl.sum(b_wdy, axis=1) / D
@@ -439,9 +437,9 @@ def layer_norm_bwd_kernel(
         # Write dx
         if STORE_DRESIDUAL:
             p_dres_in = dres_in + i_g * D + o_t[:, None] * (G*D) + o_d[None, :]
-            tl.store(p_dres_in, b_dx.to(p_dres_in.dtype.element_ty), mask=m_x)
+            tl.store(p_dres_in, b_dx.to(p_dres_in.dtype.element_ty), mask=m_ox)
 
-        tl.store(p_dx, b_dx.to(p_dx.dtype.element_ty), mask=m_x)
+        tl.store(p_dx, b_dx.to(p_dx.dtype.element_ty), mask=m_ox)
 
     if HAS_WEIGHT:
         tl.store(dw + i_s * D + o_d, tl.sum(b_dw, axis=0), mask=m_d)

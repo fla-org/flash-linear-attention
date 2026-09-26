@@ -114,6 +114,16 @@ def get_available_device() -> str:
         return 'cpu'
 
 
+@cache
+def get_device_arch() -> str:
+    """Triton target arch, e.g. 'gfx1250' on AMD or '90' on Nvidia. Empty when unavailable."""
+    try:
+        # AMD may append feature flags, e.g. 'gfx1250:xnack-'.
+        return str(triton.runtime.driver.active.get_current_target().arch).split(':')[0]
+    except Exception:
+        return ''
+
+
 def map_triton_backend_to_torch_device() -> str:
     backend = get_available_device()        # 'cuda' | 'hip' | 'xpu' | 'cpu' | ...
     return {'cuda': 'cuda', 'hip': 'cuda', 'xpu': 'xpu'}.get(backend, backend)
@@ -151,9 +161,15 @@ IS_NVIDIA_BLACKWELL = (IS_NVIDIA and torch.cuda.get_device_capability()[0] in (1
 # Nvidia Ampere or newer, haven't check AMD and intel yet.
 IS_TF32_SUPPORTED = (IS_NVIDIA and torch.cuda.get_device_capability(0)[0] >= 8)
 IS_GATHER_SUPPORTED = hasattr(triton.language, 'gather')
+# AMD architectures whose Triton backend lowers `tl.make_tensor_descriptor` onto real
+# hardware tensor-descriptor loads/stores. gfx1250 is the first one; gfx942/gfx950 are not.
+IS_AMD_TMA_ARCH = (IS_AMD and get_device_arch() in ('gfx1250',))
+
 IS_TMA_SUPPORTED = (
-    IS_NVIDIA
-    and torch.cuda.get_device_capability(0)[0] >= 9
+    (
+        (IS_NVIDIA and torch.cuda.get_device_capability(0)[0] >= 9)
+        or IS_AMD_TMA_ARCH
+    )
     and os.environ.get('FLA_USE_TMA', '0') == '1'
     and (
         hasattr(triton.language, '_experimental_make_tensor_descriptor')

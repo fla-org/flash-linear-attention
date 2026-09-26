@@ -210,7 +210,7 @@ class TritonAscendBackend(BaseBackend):
         from fla.modules.backends.triton_ascend.activations import powglu_linear_npu
         return powglu_linear_npu(x, y, weight, bias, power)
 
-    def fused_kl_div_forward(
+    def fused_kl_div_fwd(
         self,
         x,
         target_x,
@@ -218,20 +218,24 @@ class TritonAscendBackend(BaseBackend):
         target_weight,
         reduction='batchmean',
         accumulate_grad_in_fp32=True,
+        use_dx=True,
+        use_dw=True,
     ):
-        from fla.modules.backends.triton_ascend.fused_kl_div import fused_kl_div_forward_npu
-        return fused_kl_div_forward_npu(
+        from fla.modules.backends.triton_ascend.fused_kl_div import fused_kl_div_fwd_npu
+        return fused_kl_div_fwd_npu(
             x=x,
             target_x=target_x,
             weight=weight,
             target_weight=target_weight,
             reduction=reduction,
             accumulate_grad_in_fp32=accumulate_grad_in_fp32,
+            use_dx=use_dx,
+            use_dw=use_dw,
         )
 
-    def fused_kl_div_backward(self, do, dx, dw):
-        from fla.modules.backends.triton_ascend.fused_kl_div import fused_kl_div_backward_npu
-        return fused_kl_div_backward_npu(do=do, dx=dx, dw=dw)
+    def fused_kl_div_bwd(self, do, dx, dw):
+        from fla.modules.backends.triton_ascend.fused_kl_div import fused_kl_div_bwd_npu
+        return fused_kl_div_bwd_npu(do=do, dx=dx, dw=dw)
 
     def l2norm_fwd(
         self,

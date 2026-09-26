@@ -34,6 +34,7 @@ from ._decorators import (  # noqa: F401
 )
 from ._device import (  # noqa: F401
     IS_AMD,
+    IS_AMD_TMA_ARCH,
     IS_ARM,
     IS_GATHER_SUPPORTED,
     IS_INTEL,
@@ -59,6 +60,7 @@ from ._device import (  # noqa: F401
     device_torch_lib,
     get_all_max_shared_mem,
     get_available_device,
+    get_device_arch,
     get_device_capability,
     get_device_smem_optin,
     get_multiprocessor_count,
@@ -71,6 +73,7 @@ def _register_aliases():
     current_module = sys.modules[__name__]
     for key in (
         'IS_AMD',
+        'IS_AMD_TMA_ARCH',
         'IS_ARM',
         'IS_INTEL',
         'IS_INTEL_ALCHEMIST',
