@@ -371,11 +371,11 @@ def test_layer_padding_grad(dtype, packed):
     ).to(device=device, dtype=dtype)
     x = torch.randn(3, 73, 128, device=device, dtype=dtype, requires_grad=True)
     mask = torch.zeros(3, 73, device=device, dtype=torch.bool)
-    mask[1, 7:72], mask[2, :3] = True, True
-    cu_seqlens = torch.tensor([0, 0, 65, 68], device=device, dtype=torch.int32)
+    mask[1, 7:72], mask[2, :67] = True, True
+    cu_seqlens = torch.tensor([0, 0, 65, 132], device=device, dtype=torch.int32)
     refs = [layer(x[i:i+1, mask[i]], past_key_values=Cache(), use_cache=True) for i in [1, 2]]
     ref = torch.cat([r[0].squeeze(0) for r in refs])
-    ref_z = sum(r[2][0]['recurrent_state'][1].sum() for r in refs)
+    ref_z = refs[-1][2][0]['recurrent_state'][1].sum()
     cache = Cache()
     if packed:
         out = layer(x[mask].unsqueeze(0), past_key_values=cache, use_cache=True, cu_seqlens=cu_seqlens)[0].squeeze(0)
@@ -384,11 +384,13 @@ def test_layer_padding_grad(dtype, packed):
         assert torch.count_nonzero(out[~mask]) == 0
         out = out[mask]
     assert_close('o', ref, out, 1e-3)
-    do = torch.randn_like(ref)
+    do = torch.zeros_like(ref)
+    do[65:] = torch.randn_like(ref[65:])
     inputs = (x, *layer.parameters())
     ref_grads = torch.autograd.grad((ref * do).sum() + ref_z, inputs)
-    grads = torch.autograd.grad((out * do).sum() + cache[0]['recurrent_state'][1].sum(), inputs)
+    grads = torch.autograd.grad((out * do).sum() + cache[0]['recurrent_state'][1][-1].sum(), inputs)
     assert torch.count_nonzero(grads[0][~mask]) == 0
+    assert torch.count_nonzero(grads[0][1]) == 0
     for ref_grad, grad in zip(ref_grads, grads):
         assert_close('grad', ref_grad, grad, 1e-3)
     out = layer(x, attention_mask=torch.zeros_like(mask))[0]
@@ -400,7 +402,7 @@ def test_layer_padding_grad(dtype, packed):
 @pytest.mark.smoke
 @pytest.mark.parametrize('dtype', [torch.float32, torch.bfloat16, torch.float16])
 @pytest.mark.parametrize('mode', ['chunk', 'fused_chunk', 'fused_recurrent'])
-@pytest.mark.parametrize('lengths', [(0, 65, 3), (0, 0, 0)])
+@pytest.mark.parametrize('lengths', [(0, 65, 67), (0, 0, 0)])
 @torch.no_grad()
 def test_layer_padding_cache(dtype, mode, lengths):
     torch.manual_seed(42)
