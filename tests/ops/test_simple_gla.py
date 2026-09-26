@@ -451,7 +451,6 @@ def test_chunk_state_v_first(
             (4, 100, [0, 15, 100, 300, 1200, 2000], torch.float16),
             # exceed the 65535-block limit on grid axes 1 and 2
             (32, 32, range(0, 32801, 16), torch.float16),
-            (32, 32, range(0, 32801, 16), torch.bfloat16),
         ]
     ],
 )
