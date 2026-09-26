@@ -15,7 +15,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, repeat
 
-from fla.layers.utils import get_layer_cache, update_layer_cache
+from fla.layers.utils import get_layer_cache, repad_hidden_states, unpad_hidden_states, update_layer_cache
 from fla.modules import RMSNorm
 from fla.modules.feature_map import DPFPFeatureMap, HadamardFeatureMap, HedgehogFeatureMap, T2RFeatureMap
 from fla.ops.linear_attn import chunk_linear_attn, fused_chunk_linear_attn, fused_recurrent_linear_attn
@@ -136,6 +136,9 @@ class LinearAttention(nn.Module):
         output_attentions: bool | None = False,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None, Cache | None]:
+        if attention_mask is not None:
+            assert attention_mask.ndim == 2, 'Expected attention_mask with shape [batch_size, seq_len].'
+        batch_size, q_len, _ = hidden_states.shape
         # Match other recurrent layers: use the recurrent kernel for decode/small chunks.
         if torch.is_grad_enabled():
             mode = 'chunk'
@@ -144,13 +147,12 @@ class LinearAttention(nn.Module):
         else:
             mode = self.mode
         last_state = get_layer_cache(self, past_key_values)
+        cu_seqlens = kwargs.get('cu_seqlens')
+        hidden_states, indices, cu_seqlens = unpad_hidden_states(hidden_states, cu_seqlens, attention_mask, q_len)
 
         q = self.q_proj(hidden_states)
         k = self.k_proj(hidden_states)
         v = self.v_proj(hidden_states)
-
-        if attention_mask is not None:
-            v = v.mul(attention_mask[:, -v.shape[-2]:, None])
 
         q = rearrange(q, '... (h d) -> ... h d', d=self.head_k_dim)
         if self.num_kv_groups > 1:
@@ -168,9 +170,6 @@ class LinearAttention(nn.Module):
         if self.norm_k:
             k = k / (k.sum(-1, True) + 1e-4)
 
-        if attention_mask is not None:
-            k = k.mul(attention_mask[:, -k.shape[1]:, None, None])
-
         recurrent_state = last_state['recurrent_state'] if last_state is not None else None
         if mode == 'chunk':
             o, final_state = chunk_linear_attn(
@@ -180,6 +179,7 @@ class LinearAttention(nn.Module):
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
                 normalize=self.do_feature_map_norm,
+                cu_seqlens=cu_seqlens,
             )
         elif mode == 'fused_chunk':
             o, final_state = fused_chunk_linear_attn(
@@ -189,6 +189,7 @@ class LinearAttention(nn.Module):
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
                 normalize=self.do_feature_map_norm,
+                cu_seqlens=cu_seqlens,
             )
         elif mode == 'fused_recurrent':
             o, final_state = fused_recurrent_linear_attn(
@@ -198,6 +199,7 @@ class LinearAttention(nn.Module):
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
                 normalize=self.do_feature_map_norm,
+                cu_seqlens=cu_seqlens,
             )
         else:
             raise NotImplementedError
@@ -205,9 +207,10 @@ class LinearAttention(nn.Module):
             self,
             past_key_values,
             recurrent_state=final_state,
-            offset=q.shape[1],
+            offset=q_len,
         )
         o = self.norm(o)
         o = rearrange(o, '... h d -> ... (h d)')
         o = self.o_proj(o)
+        o = repad_hidden_states(o, indices, batch_size, q_len)
         return o, None, past_key_values
