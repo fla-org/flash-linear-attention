@@ -10,9 +10,69 @@ import os
 import pytest
 import torch
 
-from fla.ops.attn.naive import naive_parallel_attn
+from fla.ops.attn.decoding import attn_decoding_one_step
+from fla.ops.attn.naive import naive_attn_decoding, naive_parallel_attn
 from fla.ops.attn.parallel import parallel_attn
 from fla.utils import assert_close, check_shared_mem, device
+
+
+@pytest.mark.parametrize(
+    ('H', 'HQ', 'K', 'V', 'W', 'use_g', 'do_gate_scale', 'use_sink', 'dtype'),
+    [
+        pytest.param(*test, id="H{}-HQ{}-K{}-V{}-W{}-g{}-scale{}-sink{}-{}".format(*test))
+        for test in [
+            (2, 2, 64, 64, None, False, False, False, torch.float16),
+            (2, 8, 64, 100, None, True, True, True, torch.float16),
+            (2, 2, 64, 64, 0, False, False, False, torch.float16),
+            (2, 8, 64, 100, 0, True, True, True, torch.float16),
+            (2, 8, 64, 100, 1, True, False, True, torch.float16),
+            (2, 2, 100, 64, 17, False, False, False, torch.float16),
+            (2, 8, 64, 320, 63, False, False, True, torch.float16),
+            (2, 8, 64, 100, 64, True, False, False, torch.float16),
+            (2, 8, 64, 100, 65, True, True, True, torch.float16),
+            (2, 8, 64, 100, 1024, True, True, True, torch.float16),
+            (2, 8, 64, 100, 17, True, True, True, torch.bfloat16),
+            (2, 2, 64, 64, -1, False, False, False, torch.float16),
+        ]
+    ],
+)
+def test_decoding(
+    H: int,
+    HQ: int,
+    K: int,
+    V: int,
+    W: int | None,
+    use_g: bool,
+    do_gate_scale: bool,
+    use_sink: bool,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(42)
+    lengths = [0, 15, 64, 127]
+    B, T = len(lengths), sum(lengths)
+    q = torch.randn(1, B, HQ, K, dtype=dtype, device=device)
+    k = torch.randn(1, T, H, K, dtype=dtype, device=device)
+    v = torch.randn(1, T, H, V, dtype=dtype, device=device)
+    g = torch.empty(1, T, HQ, dtype=dtype, device=device).uniform_(-0.1, -0.01) if use_g else None
+    sink_bias = torch.randn(HQ, dtype=torch.float32, device=device) if use_sink else None
+    cu_seqlens = torch.tensor([0, *torch.tensor(lengths).cumsum(0).tolist()], dtype=torch.int32, device=device)
+    kwargs = dict(scale=0.1, cu_seqlens=cu_seqlens, do_gate_scale=do_gate_scale, window_size=W, sink_bias=sink_bias)
+
+    if W is not None and W < 0:
+        for implementation in (naive_attn_decoding, attn_decoding_one_step):
+            with pytest.raises(ValueError, match="window_size must be nonnegative"):
+                implementation(q=q, k=k, v=v, g=g, **kwargs)
+        return
+
+    ref = naive_attn_decoding(q=q.float(), k=k.float(), v=v.float(), g=g.float() if use_g else None, **kwargs).to(dtype)
+    tri = attn_decoding_one_step(q=q, k=k, v=v, g=g, **kwargs)
+    assert torch.isfinite(tri).all()
+    assert_close("o", ref, tri, 0.01)
+
+    if W is None:
+        del kwargs['window_size']
+        default = attn_decoding_one_step(q=q, k=k, v=v, g=g, **kwargs)
+        torch.testing.assert_close(default, tri, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize(
