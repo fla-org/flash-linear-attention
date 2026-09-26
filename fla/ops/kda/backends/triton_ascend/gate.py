@@ -109,7 +109,7 @@ def kda_gate_fwd_kernel_npu(
         p_b = tl.make_block_ptr(dt_bias, (H * D,), (1,), (i_h * D,), (BD,), (0,))
         b_g = b_g + tl.load(p_b, boundary_check=(0,)).to(tl.float32)
     if not USE_LOWER_BOUND:
-        b_yg = -exp(b_A) * softplus(b_g)
+        b_yg = -(exp(b_A) if HAS_A else b_A) * softplus(b_g)
     else:
         b_yg = lower_bound * tl.sigmoid((exp(b_A) if HAS_A else b_A) * b_g)
     tl.store(p_yg, b_yg.to(p_yg.dtype.element_ty), boundary_check=(0, 1))
@@ -197,7 +197,7 @@ def kda_gate_bwd_kernel_npu(
         b_g = b_g + tl.load(p_b, boundary_check=(0,)).to(tl.float32)
 
     if not USE_LOWER_BOUND:
-        b_A = -exp(b_A)
+        b_A = -(exp(b_A) if HAS_A else b_A)
         b_yg = b_A * softplus(b_g)
         b_dg = b_A * (b_dyg * tl.sigmoid(b_g))
         b_dA = tl.sum(tl.sum(b_dyg * b_yg, 1), 0)
@@ -314,7 +314,7 @@ def kda_gate_chunk_cumsum_vector_kernel_npu(
 
     b_A = tl.load(A_log + i_h).to(tl.float32) if HAS_A else 1.0
     if not USE_LOWER_BOUND:
-        b_gate = -exp(b_A) * softplus(b_s)
+        b_gate = -(exp(b_A) if HAS_A else b_A) * softplus(b_s)
     else:
         b_gate = lower_bound * tl.sigmoid((exp(b_A) if HAS_A else b_A) * b_s)
 
