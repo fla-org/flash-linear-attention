@@ -12,7 +12,24 @@ import torch
 
 from fla.ops.attn.naive import naive_parallel_attn
 from fla.ops.attn.parallel import parallel_attn
+from fla.ops.forgetting_attn import parallel_forgetting_attn
+from fla.ops.nsa.naive import naive_nsa_selection
+from fla.ops.parallax import parallel_parallax
 from fla.utils import assert_close, check_shared_mem, device
+
+
+@pytest.mark.parametrize(
+    ('op', 'kwargs'),
+    [
+        pytest.param(parallel_attn, {}, id='attn'),
+        pytest.param(parallel_parallax, {'r': None}, id='parallax'),
+        pytest.param(parallel_forgetting_attn, {'g': None}, id='forgetting'),
+        pytest.param(naive_nsa_selection, {'block_indices': None}, id='nsa-selection'),
+    ],
+)
+def test_rejects_unknown_kwargs(op, kwargs):
+    with pytest.raises(TypeError, match="unexpected keyword argument 'window_szie'"):
+        op(q=None, k=None, v=None, window_szie=64, **kwargs)
 
 
 @pytest.mark.parametrize(
