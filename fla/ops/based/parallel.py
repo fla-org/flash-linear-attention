@@ -423,12 +423,7 @@ def parallel_based(
     v: torch.Tensor,
     scale: float | None = None,
     use_norm: bool = True,
-    **kwargs,
 ):
-    if 'head_first' in kwargs:
-        raise DeprecationWarning(
-            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
-        )
     assert q.shape[-1] <= 128, "only support feature dim up to 128"
     if scale is None:
         scale = q.shape[-1] ** -0.5

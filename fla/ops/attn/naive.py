@@ -24,10 +24,10 @@ def naive_parallel_attn(
     Reference PyTorch implementation of parallel attention that returns both output and max_logits.
 
     Args:
-        q: [B, T, HQ, D]
-        k: [B, T, H, D]
-        v: [B, T, H, D]
-        scale: float, optional. If None, defaults to 1 / sqrt(D)
+        q: [B, T, HQ, K]
+        k: [B, T, H, K]
+        v: [B, T, H, V]
+        scale: float, optional. If None, defaults to 1 / sqrt(K)
         window_size: int, optional. If provided, each query at position i only attends to
             keys in [i - window_size + 1, i]. If None, full causal attention is used.
         causal: bool, default True
@@ -40,23 +40,24 @@ def naive_parallel_attn(
             mass but does not contribute to the output.
 
     Returns:
-        output: [B, T, HQ, D]
+        output: [B, T, HQ, V]
         max_logits: [B, T, HQ]
     """
-    B, T, HQ, D = q.shape
+    B, T, HQ, K = q.shape
+    V = v.shape[-1]
     H = k.shape[2]
     if H == 0 or HQ % H != 0:
         raise ValueError(f"The number of query heads ({HQ}) must be divisible by the number of key/value heads ({H}).")
     G = HQ // H
 
     if scale is None:
-        scale = D ** -0.5
+        scale = K ** -0.5
 
-    # reshape q to separate groups: [B, T, HQ, D] -> [B, T, H, G, D]
-    q = q.reshape(B, T, H, G, D)
+    # reshape q to separate groups: [B, T, HQ, K] -> [B, T, H, G, K]
+    q = q.reshape(B, T, H, G, K)
 
     # compute attention scores via einsum: [B, H, G, T, T]
-    # k is [B, T, H, D] — no group dim, so each group shares the same k
+    # k is [B, T, H, K] — no group dim, so each group shares the same k
     scores = torch.einsum('bqhgd,bkhd->bhgqk', q, k) * scale
 
     # apply causal mask
@@ -81,15 +82,15 @@ def naive_parallel_attn(
         max_logits = torch.maximum(max_logits, sink_bias_logits)
 
     if sink_bias is None:
-        # compute output via einsum: [B, H, G, T, T] x [B, T, H, D] -> [B, T, H, G, D]
+        # compute output via einsum: [B, H, G, T, T] x [B, T, H, V] -> [B, T, H, G, V]
         attn_weights = F.softmax(scores, dim=-1)
-        output = torch.einsum('bhgqk,bkhd->bqhgd', attn_weights, v).reshape(B, T, HQ, D)
+        output = torch.einsum('bhgqk,bkhd->bqhgd', attn_weights, v).reshape(B, T, HQ, V)
     else:
         probs_unnorm = torch.exp(scores - max_logits[..., None])
         sink_bias_unnorm = torch.exp(sink_bias_logits - max_logits)
         denom = probs_unnorm.sum(dim=-1) + sink_bias_unnorm
         output = torch.einsum('bhgqk,bkhd->bqhgd', probs_unnorm, v)
-        output = (output / denom.permute(0, 3, 1, 2)[..., None]).reshape(B, T, HQ, D)
+        output = (output / denom.permute(0, 3, 1, 2)[..., None]).reshape(B, T, HQ, V)
 
     return output, max_logits.permute(0, 3, 1, 2).reshape(B, T, HQ)
 
@@ -103,36 +104,41 @@ def naive_attn_decoding(
     cu_seqlens: torch.LongTensor | None = None,
     do_gate_scale: bool = False,
     *,
+    window_size: int | None = None,
     sink_bias: torch.Tensor | None = None,
 ):
     """
     Reference PyTorch implementation of packed-varlen decoding attention,
     mirroring `attn_decoding_one_step`. A single query per sequence attends
-    to all of its KV (no causal mask needed — query is at the last position).
+    to its most recent KV within the window (query is at the last position).
 
     Args:
-        q: [1, B, HQ, D] — one query token per sequence
-        k: [1, T_total, H, D]
-        v: [1, T_total, H, D]
+        q: [1, B, HQ, K] — one query token per sequence
+        k: [1, T_total, H, K]
+        v: [1, T_total, H, V]
         g: [1, T_total, HQ], optional log decay factors
-        scale: float, defaults to 1/sqrt(D)
+        scale: float, defaults to 1/sqrt(K)
         cu_seqlens: [B+1]
         do_gate_scale: bool, if True scales `g` by `scale` before use
             (matches PaTH / Forgetting Transformer convention).
+        window_size: nonnegative int, optional. Attend to the last window_size keys in each sequence.
+            None attends to all keys; zero returns zeros.
         sink_bias: [HQ], optional GPT-OSS-style sink bias logits
 
     Returns:
         o: [1, B, HQ, V]
     """
     assert cu_seqlens is not None, "cu_seqlens must be provided for varlen decoding"
-    HQ, D = q.shape[-2], q.shape[-1]
+    if window_size is not None and window_size < 0:
+        raise ValueError("window_size must be nonnegative")
+    HQ, K = q.shape[-2], q.shape[-1]
     V = v.shape[-1]
     H = k.shape[2]
     if H == 0 or HQ % H != 0:
         raise ValueError(f"The number of query heads ({HQ}) must be divisible by the number of key/value heads ({H}).")
     G = HQ // H
     if scale is None:
-        scale = D ** -0.5
+        scale = K ** -0.5
     if sink_bias is not None:
         assert sink_bias.shape == (HQ,), "sink_bias must have shape [HQ]"
 
@@ -140,19 +146,21 @@ def naive_attn_decoding(
     for i in range(len(cu_seqlens) - 1):
         bos, eos = int(cu_seqlens[i]), int(cu_seqlens[i + 1])
         T_i = eos - bos
-        qi = q[:, i:i + 1]  # [1, 1, HQ, D]
+        qi = q[:, i:i + 1]  # [1, 1, HQ, K]
 
-        if T_i == 0:
-            # no KV for this sequence → output zeros (sink_bias has no value to contribute)
+        if T_i == 0 or window_size == 0:
+            # no visible KV → output zeros (sink_bias has no value to contribute)
             outputs.append(torch.zeros((1, 1, HQ, V), dtype=q.dtype, device=q.device))
             continue
 
-        ki = k[:, bos:eos]  # [1, T_i, H, D]
-        vi = v[:, bos:eos]  # [1, T_i, H, D]
+        ki = k[:, bos:eos]  # [1, T_i, H, K]
+        vi = v[:, bos:eos]  # [1, T_i, H, V]
 
         # scores: [1, H, G, 1, T_i]
-        qi_g = qi.reshape(1, 1, H, G, D)
+        qi_g = qi.reshape(1, 1, H, G, K)
         scores = torch.einsum('bqhgd,bkhd->bhgqk', qi_g, ki) * scale
+        if window_size is not None:
+            scores = scores.masked_fill(torch.arange(T_i, device=q.device) < T_i - window_size, float('-inf'))
 
         if g is not None:
             gi = g[:, bos:eos].float()

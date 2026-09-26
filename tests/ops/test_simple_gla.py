@@ -844,7 +844,6 @@ def test_simple_gla_to_mamba2(vary_A, dtype):
         assert final_ssd.allclose(final_fuse, 0, atol), f'final diff: {torch.abs(final_ssd - final_fuse).max()}'
 
     # mapping inputs Mamba2 -> FLA
-    # FLA Now use head_first = False, therefore there is no need to transpose inputs
     q = C
     k = B
     v = x

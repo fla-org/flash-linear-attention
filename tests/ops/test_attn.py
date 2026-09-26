@@ -35,15 +35,76 @@ def test_rejects_invalid_gqa_head_counts(op, HQ, H):
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'HQ', 'D', 'scale'),
+    ('H', 'HQ', 'K', 'V', 'W', 'use_g', 'do_gate_scale', 'use_sink', 'dtype'),
     [
-        pytest.param(*test, id="B{}-T{}-H{}-HQ{}-D{}-scale{}".format(*test))
+        pytest.param(*test, id="H{}-HQ{}-K{}-V{}-W{}-g{}-scale{}-sink{}-{}".format(*test))
         for test in [
-            (1, 63, 1, 1, 64, 1.0),
-            (3, 111, 2, 2, 100, 1.0),
-            (3, 1024, 2, 8, 60, 0.1),
-            (3, 1024, 2, 8, 128, 0.1),
-            (4, 2048, 2, 8, 64, 0.1),
+            (2, 2, 64, 64, None, False, False, False, torch.float16),
+            (2, 8, 64, 100, None, True, True, True, torch.float16),
+            (2, 2, 64, 64, 0, False, False, False, torch.float16),
+            (2, 8, 64, 100, 0, True, True, True, torch.float16),
+            (2, 8, 64, 100, 1, True, False, True, torch.float16),
+            (2, 2, 100, 64, 17, False, False, False, torch.float16),
+            (2, 8, 64, 320, 63, False, False, True, torch.float16),
+            (2, 8, 64, 100, 64, True, False, False, torch.float16),
+            (2, 8, 64, 100, 65, True, True, True, torch.float16),
+            (2, 8, 64, 100, 1024, True, True, True, torch.float16),
+            (2, 8, 64, 100, 17, True, True, True, torch.bfloat16),
+            (2, 2, 64, 64, -1, False, False, False, torch.float16),
+        ]
+    ],
+)
+def test_decoding(
+    H: int,
+    HQ: int,
+    K: int,
+    V: int,
+    W: int | None,
+    use_g: bool,
+    do_gate_scale: bool,
+    use_sink: bool,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(42)
+    lengths = [0, 15, 64, 127]
+    B, T = len(lengths), sum(lengths)
+    q = torch.randn(1, B, HQ, K, dtype=dtype, device=device)
+    k = torch.randn(1, T, H, K, dtype=dtype, device=device)
+    v = torch.randn(1, T, H, V, dtype=dtype, device=device)
+    g = torch.empty(1, T, HQ, dtype=dtype, device=device).uniform_(-0.1, -0.01) if use_g else None
+    sink_bias = torch.randn(HQ, dtype=torch.float32, device=device) if use_sink else None
+    cu_seqlens = torch.tensor([0, *torch.tensor(lengths).cumsum(0).tolist()], dtype=torch.int32, device=device)
+    kwargs = dict(scale=0.1, cu_seqlens=cu_seqlens, do_gate_scale=do_gate_scale, window_size=W, sink_bias=sink_bias)
+
+    if W is not None and W < 0:
+        for implementation in (naive_attn_decoding, attn_decoding_one_step):
+            with pytest.raises(ValueError, match="window_size must be nonnegative"):
+                implementation(q=q, k=k, v=v, g=g, **kwargs)
+        return
+
+    ref = naive_attn_decoding(q=q.float(), k=k.float(), v=v.float(), g=g.float() if use_g else None, **kwargs).to(dtype)
+    tri = attn_decoding_one_step(q=q, k=k, v=v, g=g, **kwargs)
+    assert torch.isfinite(tri).all()
+    assert_close("o", ref, tri, 0.01)
+
+    if W is None:
+        del kwargs['window_size']
+        default = attn_decoding_one_step(q=q, k=k, v=v, g=g, **kwargs)
+        torch.testing.assert_close(default, tri, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'HQ', 'K', 'V', 'scale'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-HQ{}-K{}-V{}-scale{}".format(*test))
+        for test in [
+            (1, 63, 1, 1, 64, 64, 1.0),
+            (3, 111, 2, 2, 100, 100, 1.0),
+            (3, 1024, 2, 8, 60, 60, 0.1),
+            (3, 1024, 2, 8, 128, 128, 0.1),
+            (4, 2048, 2, 8, 64, 64, 0.1),
+            (2, 127, 2, 8, 64, 100, 0.1),
+            (1, 63, 2, 2, 100, 64, 0.1),
         ]
     ],
 )
@@ -52,17 +113,18 @@ def test_parallel(
     T: int,
     H: int,
     HQ: int,
-    D: int,
+    K: int,
+    V: int,
     scale: float,
 ):
-    if not check_shared_mem('hopper') and D > 128:
+    if not check_shared_mem('hopper') and max(K, V) > 128:
         pytest.skip(reason="Skip test, do not have enough shard mem")
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
-    q = torch.randn((B, T, HQ, D), dtype=torch.float16, device=device).requires_grad_(True)
-    k = torch.randn((B, T, H, D), dtype=torch.float16, device=device).requires_grad_(True)
-    v = torch.randn((B, T, H, D), dtype=torch.float16, device=device).requires_grad_(True)
-    do = torch.randn((B, T, HQ, D), dtype=torch.float16, device=device)
+    q = torch.randn((B, T, HQ, K), dtype=torch.float16, device=device).requires_grad_(True)
+    k = torch.randn((B, T, H, K), dtype=torch.float16, device=device).requires_grad_(True)
+    v = torch.randn((B, T, H, V), dtype=torch.float16, device=device).requires_grad_(True)
+    do = torch.randn((B, T, HQ, V), dtype=torch.float16, device=device)
 
     ref, _ = naive_parallel_attn(q=q.float(), k=k.float(), v=v.float(), scale=scale)
     ref = ref.to(q.dtype)
@@ -171,13 +233,15 @@ def test_parallel_with_g(
 
 
 @pytest.mark.parametrize(
-    ('H', 'HQ', 'D', 'cu_seqlens'),
+    ('H', 'HQ', 'K', 'V', 'cu_seqlens'),
     [
-        pytest.param(*test, id="H{}-HQ{}-D{}-cu_seqlens{}".format(*test))
+        pytest.param(*test, id="H{}-HQ{}-K{}-V{}-cu_seqlens{}".format(*test))
         for test in [
-            (2, 2, 64, [0, 15]),
-            (2, 8, 64, [0, 256, 500, 1000]),
-            (2, 2, 100, [0, 15, 100, 300, 1200, 2000]),
+            (2, 2, 64, 64, [0, 15]),
+            (2, 8, 64, 64, [0, 256, 500, 1000]),
+            (2, 2, 100, 100, [0, 15, 100, 300, 1200, 2000]),
+            (2, 8, 64, 100, [0, 15, 142, 270]),
+            (2, 2, 100, 64, [0, 15, 142, 270]),
         ]
     ],
 )
@@ -185,7 +249,8 @@ def test_parallel_with_g(
 def test_parallel_varlen(
     H: int,
     HQ: int,
-    D: int,
+    K: int,
+    V: int,
     cu_seqlens: list[int],
 ):
     torch.manual_seed(42)
@@ -193,12 +258,12 @@ def test_parallel_varlen(
     cu_seqlens_th = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
     dtype = torch.float16
 
-    q = torch.randn((1, T, HQ, D), dtype=dtype, device=device).requires_grad_()
-    k = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
-    v = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
-    do = torch.randn((1, T, HQ, D), dtype=dtype, device=device)
+    q = torch.randn((1, T, HQ, K), dtype=dtype, device=device).requires_grad_()
+    k = torch.randn((1, T, H, K), dtype=dtype, device=device).requires_grad_()
+    v = torch.randn((1, T, H, V), dtype=dtype, device=device).requires_grad_()
+    do = torch.randn((1, T, HQ, V), dtype=dtype, device=device)
 
-    ref = q.new_empty(1, T, HQ, D)
+    ref = q.new_empty(1, T, HQ, V)
     for bos, eos in zip(cu_seqlens[:-1], cu_seqlens[1:], strict=False):
         ref[:, bos:eos], _ = naive_parallel_attn(
             q=q[:, bos:eos].float(),
@@ -276,34 +341,36 @@ def test_parallel_swa(
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'HQ', 'D', 'scale', 'window_size', 'cu_seqlens', 'use_g', 'tol'),
+    ('B', 'T', 'H', 'HQ', 'K', 'V', 'scale', 'window_size', 'cu_seqlens', 'use_g', 'tol'),
     [
-        pytest.param(1, 63, 1, 1, 64, None, None, None, False, (0.005, 0.005), id="mha"),
-        pytest.param(3, 111, 2, 2, 100, None, None, None, False, (0.005, 0.005), id="mha-D100"),
-        pytest.param(3, 1024, 2, 8, 128, None, None, None, False, (0.005, 0.005), id="gqa-D128"),
-        pytest.param(2, 192, 2, 8, 64, 0.1, None, None, False, (0.01, 0.02), id="full", marks=pytest.mark.smoke),
-        pytest.param(2, 192, 2, 8, 64, 0.1, 64, None, False, (0.01, 0.02), id="swa", marks=pytest.mark.smoke),
+        pytest.param(1, 63, 1, 1, 64, 64, None, None, None, False, (0.005, 0.005), id="mha"),
+        pytest.param(3, 111, 2, 2, 100, 100, None, None, None, False, (0.005, 0.005), id="mha-K100"),
+        pytest.param(3, 1024, 2, 8, 128, 128, None, None, None, False, (0.005, 0.005), id="gqa-K128"),
+        pytest.param(2, 127, 2, 8, 64, 100, None, None, None, False, (0.005, 0.005), id="gqa-K64-V100"),
+        pytest.param(1, 63, 2, 2, 100, 64, None, None, None, False, (0.005, 0.005), id="mha-K100-V64"),
+        pytest.param(2, 192, 2, 8, 64, 64, 0.1, None, None, False, (0.01, 0.02), id="full", marks=pytest.mark.smoke),
+        pytest.param(2, 192, 2, 8, 64, 64, 0.1, 64, None, False, (0.01, 0.02), id="swa", marks=pytest.mark.smoke),
         pytest.param(
-            1, 300, 2, 8, 64, 0.1, 64, [0, 97, 173, 300], False, (0.01, 0.02),
+            1, 300, 2, 8, 64, 64, 0.1, 64, [0, 97, 173, 300], False, (0.01, 0.02),
             id="varlen-swa",
             marks=pytest.mark.smoke,
         ),
-        pytest.param(2, 96, 2, 8, 64, 0.1, 0, None, False, (0.01, 0.02), id="empty-row"),
-        pytest.param(2, 192, 2, 8, 64, 0.1, None, None, True, (0.01, 0.02), id="gate-full"),
-        pytest.param(2, 192, 2, 8, 64, 0.1, 64, None, True, (0.01, 0.02), id="gate-swa"),
-        pytest.param(1, 300, 2, 8, 64, 0.1, 64, [0, 97, 173, 300], True, (0.01, 0.02), id="gate-varlen-swa"),
+        pytest.param(2, 96, 2, 8, 64, 64, 0.1, 0, None, False, (0.01, 0.02), id="empty-row"),
+        pytest.param(2, 192, 2, 8, 64, 64, 0.1, None, None, True, (0.01, 0.02), id="gate-full"),
+        pytest.param(2, 192, 2, 8, 64, 64, 0.1, 64, None, True, (0.01, 0.02), id="gate-swa"),
+        pytest.param(1, 300, 2, 8, 64, 64, 0.1, 64, [0, 97, 173, 300], True, (0.01, 0.02), id="gate-varlen-swa"),
     ],
 )
-def test_parallel_sink(B, T, H, HQ, D, scale, window_size, cu_seqlens, use_g, tol, monkeypatch):
+def test_parallel_sink(B, T, H, HQ, K, V, scale, window_size, cu_seqlens, use_g, tol, monkeypatch):
     torch.manual_seed(42)
     monkeypatch.setenv('TRITON_F32_DEFAULT', 'ieee')
     dtype = torch.float16
-    q = torch.randn((B, T, HQ, D), dtype=dtype, device=device).requires_grad_(True)
-    k = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_(True)
-    v = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_(True)
+    q = torch.randn((B, T, HQ, K), dtype=dtype, device=device).requires_grad_(True)
+    k = torch.randn((B, T, H, K), dtype=dtype, device=device).requires_grad_(True)
+    v = torch.randn((B, T, H, V), dtype=dtype, device=device).requires_grad_(True)
     g = torch.empty((B, T, HQ), dtype=dtype, device=device).uniform_(-0.1, -0.01).requires_grad_(True) if use_g else None
     sink_bias = torch.randn((HQ,), dtype=torch.float32, device=device).requires_grad_(True)
-    do = torch.randn((B, T, HQ, D), dtype=dtype, device=device)
+    do = torch.randn((B, T, HQ, V), dtype=dtype, device=device)
     inputs = (q, k, v, sink_bias) if g is None else (q, k, v, sink_bias, g)
     names = ('dq', 'dk', 'dv', 'dsink') if g is None else ('dq', 'dk', 'dv', 'dsink', 'dg')
 

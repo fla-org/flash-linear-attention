@@ -764,7 +764,6 @@ def parallel_parallax(
     scale: float | None = None,
     window_size: int | None = None,
     cu_seqlens: torch.LongTensor | None = None,
-    **kwargs,
 ) -> torch.Tensor:
     r"""
     Causal Parallax (parameterized local linear attention) with autograd,
@@ -796,10 +795,6 @@ def parallel_parallax(
         o (torch.Tensor):
             output of shape `[B, T, HQ, D]`.
     """
-    if 'head_first' in kwargs:
-        raise DeprecationWarning(
-            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
-        )
     if q.dtype not in (torch.bfloat16, torch.float16):
         raise TypeError(f"parallel_parallax requires bf16 or fp16 inputs, got q.dtype={q.dtype}")
     if scale is None:

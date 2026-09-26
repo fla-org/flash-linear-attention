@@ -31,7 +31,6 @@ def naive_nsa_selection(
     block_size: int = 64,
     scale: float | None = None,
     cu_seqlens: torch.LongTensor | tuple[torch.LongTensor, torch.LongTensor] | None = None,
-    **kwargs,
 ) -> torch.Tensor:
     r"""
     Args:
@@ -60,10 +59,6 @@ def naive_nsa_selection(
         o (torch.Tensor):
             Outputs of shape `[B, TQ, HQ, V]`.
     """
-    if 'head_first' in kwargs:
-        raise DeprecationWarning(
-            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
-        )
     if scale is None:
         scale = k.shape[-1] ** -0.5
 
