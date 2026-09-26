@@ -41,7 +41,9 @@ def test_rejects_invalid_gqa_head_counts(op, HQ, H, varlen):
     v = torch.empty_like(k)
     cu_seqlens = torch.tensor([0, 1], dtype=torch.int32) if varlen else None
     if op in (naive_nsa, naive_nsa_selection, parallel_nsa):
-        kwargs = dict(k=k, v=v, block_indices=torch.zeros(1, 1, H, 1, dtype=torch.long), block_counts=1)
+        kwargs = dict(k=k, v=v, block_indices=torch.zeros(1, 1, H, 1, dtype=torch.long))
+        if op is not naive_nsa_selection:
+            kwargs['block_counts'] = 1
     elif op is naive_nsa_compression:
         kwargs = dict(k_cmp=k, v_cmp=v)
     elif op is parallel_nsa_compression:
