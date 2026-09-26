@@ -23,15 +23,41 @@ from fla.ops.utils.pooling import mean_pooling  # noqa: E402
 from fla.utils import assert_close, device  # noqa: E402
 
 
-@pytest.mark.parametrize("op", [naive_nsa, parallel_nsa], ids=["naive", "parallel"])
-def test_parallel_nsa_rejects_invalid_gqa_head_counts(op):
-    q = torch.empty(1, 1, 33, 16, dtype=torch.float16)
-    k = torch.empty(1, 1, 2, 16, dtype=torch.float16)
-    v = torch.empty(1, 1, 2, 16, dtype=torch.float16)
-    block_indices = torch.zeros(1, 1, 2, 1, dtype=torch.long)
+@pytest.mark.parametrize("op", [naive_nsa, naive_nsa_selection, parallel_nsa], ids=["naive", "selection", "parallel"])
+@pytest.mark.parametrize(("HQ", "H"), [(33, 2), (1, 2), (32, 0)], ids=["remainder", "fewer-query-heads", "zero-kv-heads"])
+def test_parallel_nsa_rejects_invalid_gqa_head_counts(op, HQ, H):
+    q = torch.empty(1, 1, HQ, 16, dtype=torch.float16)
+    k = torch.empty(1, 1, H, 16, dtype=torch.float16)
+    v = torch.empty_like(k)
+    block_indices = torch.zeros(1, 1, H, 1, dtype=torch.long)
 
     with pytest.raises(ValueError, match="must be divisible"):
         op(q=q, k=k, v=v, block_indices=block_indices, block_counts=1)
+
+
+@pytest.mark.parametrize("op", [naive_nsa_compression, parallel_nsa_compression], ids=["naive", "parallel"])
+@pytest.mark.parametrize("varlen", [False, True], ids=["dense", "varlen"])
+def test_parallel_compression_rejects_invalid_gqa_head_counts(op, varlen):
+    q = torch.empty(1, 1, 33, 16, dtype=torch.float16)
+    k = torch.empty(1, 1, 2, 16, dtype=torch.float16)
+    v = torch.empty_like(k)
+    cu_seqlens = torch.tensor([0, 1], dtype=torch.int32) if varlen else None
+    kwargs = dict(k_cmp=k, v_cmp=v) if op is naive_nsa_compression else dict(k=k, v=v, TK=1)
+
+    with pytest.raises(ValueError, match="must be divisible"):
+        op(q=q, block_size=16, scale=1.0, cu_seqlens=cu_seqlens, **kwargs)
+
+
+@pytest.mark.parametrize("op", [naive_nsa_topk, parallel_nsa_topk], ids=["naive", "parallel"])
+@pytest.mark.parametrize("varlen", [False, True], ids=["dense", "varlen"])
+def test_parallel_topk_rejects_invalid_gqa_head_counts(op, varlen):
+    q = torch.empty(1, 1, 33, 16, dtype=torch.float16)
+    k = torch.empty(1, 1, 2, 16, dtype=torch.float16)
+    cu_seqlens = torch.tensor([0, 1], dtype=torch.int32) if varlen else None
+    kwargs = dict(k_cmp=k) if op is naive_nsa_topk else dict(k=k, TK=1, lse=None)
+
+    with pytest.raises(ValueError, match="must be divisible"):
+        op(q=q, block_counts=1, block_size=16, scale=1.0, cu_seqlens=cu_seqlens, **kwargs)
 
 
 def build_block_indices(B, T, H, S, block_size, seq_indices=None):

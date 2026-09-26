@@ -392,7 +392,7 @@ def parallel_nsa_compression_fwd(
 ):
     B, TQ, HQ, K, V = *q.shape, v.shape[-1]
     H = k.shape[2]
-    G = get_gqa_group_size(HQ, H)
+    G = HQ // H
     BC = BS = block_size
     if check_shared_mem('hopper', q.device.index):
         BK = min(256, triton.next_power_of_2(K))
@@ -452,7 +452,7 @@ def parallel_nsa_compression_bwd(
     B, T, HQ, K, V = *q.shape, v.shape[-1]
     TC = k.shape[1]
     H = k.shape[2]
-    G = get_gqa_group_size(HQ, H)
+    G = HQ // H
     BC = BS = block_size
     BK = max(triton.next_power_of_2(K), 16)
     BV = min(128, max(triton.next_power_of_2(v.shape[-1]), 16))
@@ -619,6 +619,7 @@ def parallel_nsa_compression(
     scale: float = None,
     cu_seqlens: torch.LongTensor | tuple[torch.LongTensor, torch.LongTensor] | None = None
 ):
+    get_gqa_group_size(q.shape[2], k.shape[2])
     if scale is None:
         scale = k.shape[-1] ** -0.5
     return ParallelNSACompressionFunction.apply(

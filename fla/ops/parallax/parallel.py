@@ -659,7 +659,7 @@ def parallel_parallax_fwd(q, r, k, v, scale, cu_seqlens=None, chunk_indices=None
     """
     B, T, HQ, K = q.shape
     H = k.shape[2]
-    G = get_gqa_group_size(HQ, H)
+    G = HQ // H
     BK = triton.next_power_of_2(K)
     BT = _block_size(K, q.device.index)
     o = torch.empty_like(q)
@@ -684,7 +684,7 @@ def parallel_parallax_bwd(q, r, k, v, o, barv, d1, bart, m, grad_o, scale, cu_se
     """Parallax backward (Triton). Returns grads matching `q, r, k, v`."""
     B, T, HQ, K = q.shape
     H = k.shape[2]
-    G = get_gqa_group_size(HQ, H)
+    G = HQ // H
     BK = triton.next_power_of_2(K)
     BT = _block_size(K, q.device.index)
 

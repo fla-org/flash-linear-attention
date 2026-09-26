@@ -39,10 +39,11 @@ TOL = {torch.float16: 0.005, torch.bfloat16: 0.02}
     [naive_parallax, parallel_parallax, parallax_decode, parallax_decode_one_step],
     ids=["naive", "parallel", "decode", "decode_one_step"],
 )
-def test_rejects_invalid_gqa_head_counts(op):
-    q = torch.empty(1, 1, 3, 16, dtype=torch.float16)
+@pytest.mark.parametrize(("HQ", "H"), [(3, 2), (1, 2), (2, 0)], ids=["remainder", "fewer-query-heads", "zero-kv-heads"])
+def test_rejects_invalid_gqa_head_counts(op, HQ, H):
+    q = torch.empty(1, 1, HQ, 16, dtype=torch.float16)
     r = torch.empty_like(q)
-    k = torch.empty(1, 1, 2, 16, dtype=torch.float16)
+    k = torch.empty(1, 1, H, 16, dtype=torch.float16)
     v = torch.empty_like(k)
 
     with pytest.raises(ValueError, match="must be divisible"):

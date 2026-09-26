@@ -16,10 +16,11 @@ from fla.utils import assert_close, check_shared_mem, device
 
 
 @pytest.mark.parametrize("op", [naive_parallel_attn, parallel_attn], ids=["naive", "parallel"])
-def test_parallel_rejects_invalid_gqa_head_counts(op):
-    q = torch.empty(1, 1, 3, 16, dtype=torch.float16)
-    k = torch.empty(1, 1, 2, 16, dtype=torch.float16)
-    v = torch.empty(1, 1, 2, 16, dtype=torch.float16)
+@pytest.mark.parametrize(("HQ", "H"), [(3, 2), (1, 2), (2, 0)], ids=["remainder", "fewer-query-heads", "zero-kv-heads"])
+def test_parallel_rejects_invalid_gqa_head_counts(op, HQ, H):
+    q = torch.empty(1, 1, HQ, 16, dtype=torch.float16)
+    k = torch.empty(1, 1, H, 16, dtype=torch.float16)
+    v = torch.empty_like(k)
 
     with pytest.raises(ValueError, match="must be divisible"):
         op(q=q, k=k, v=v)

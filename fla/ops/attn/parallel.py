@@ -527,7 +527,7 @@ def parallel_attn_fwd(
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
     HQ = q.shape[2]
-    G = get_gqa_group_size(HQ, H)
+    G = HQ // H
     BT = 128
     if check_shared_mem('hopper', q.device.index):
         BS = min(64, max(16, triton.next_power_of_2(T)))
@@ -617,7 +617,7 @@ def parallel_attn_bwd(
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
     HQ = q.shape[2]
-    G = get_gqa_group_size(HQ, H)
+    G = HQ // H
     # dq/dk are reduced over the full value dim in one program (no cross-program accumulation),
     # so BV must span all of V (NV == 1). Don't cap it here -- the forward can, the backward can't.
     if check_shared_mem('hopper'):

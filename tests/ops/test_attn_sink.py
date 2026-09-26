@@ -18,10 +18,11 @@ from fla.utils import assert_close, device
 
 
 @pytest.mark.parametrize("op", [naive_attn_decoding, attn_decoding_one_step], ids=["naive", "triton"])
-def test_attn_decoding_rejects_invalid_gqa_head_counts(op):
-    q = torch.empty(1, 1, 3, 16, dtype=torch.float16)
-    k = torch.empty(1, 2, 2, 16, dtype=torch.float16)
-    v = torch.empty(1, 2, 2, 16, dtype=torch.float16)
+@pytest.mark.parametrize(("HQ", "H"), [(3, 2), (1, 2), (2, 0)], ids=["remainder", "fewer-query-heads", "zero-kv-heads"])
+def test_attn_decoding_rejects_invalid_gqa_head_counts(op, HQ, H):
+    q = torch.empty(1, 1, HQ, 16, dtype=torch.float16)
+    k = torch.empty(1, 2, H, 16, dtype=torch.float16)
+    v = torch.empty_like(k)
     cu_seqlens = torch.tensor([0, 2], dtype=torch.int32)
 
     with pytest.raises(ValueError, match="must be divisible"):

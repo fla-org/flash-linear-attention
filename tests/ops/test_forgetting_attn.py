@@ -186,11 +186,13 @@ def test_parallel_swa(
     assert_close("dg", ref_dg, tri_dg, 0.005)
 
 
-def test_naive_forgetting_attn_rejects_invalid_gqa_head_counts():
-    q = torch.empty(1, 1, 3, 16)
-    k = torch.empty(1, 1, 2, 16)
+@pytest.mark.parametrize("op", [naive_forgetting_attn, parallel_forgetting_attn], ids=["naive", "parallel"])
+@pytest.mark.parametrize(("HQ", "H"), [(3, 2), (1, 2), (2, 0)], ids=["remainder", "fewer-query-heads", "zero-kv-heads"])
+def test_parallel_rejects_invalid_gqa_head_counts(op, HQ, H):
+    q = torch.empty(1, 1, HQ, 16)
+    k = torch.empty(1, 1, H, 16)
     v = torch.empty_like(k)
-    g = torch.empty(1, 1, 3)
+    g = torch.empty(1, 1, HQ)
 
     with pytest.raises(ValueError, match="must be divisible"):
-        naive_forgetting_attn(q=q, k=k, v=v, g=g)
+        op(q=q, k=k, v=v, g=g)
