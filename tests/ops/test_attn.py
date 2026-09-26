@@ -16,9 +16,9 @@ from fla.utils import assert_close, check_shared_mem, device
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'HQ', 'D', 'V', 'scale'),
+    ('B', 'T', 'H', 'HQ', 'K', 'V', 'scale'),
     [
-        pytest.param(*test, id="B{}-T{}-H{}-HQ{}-D{}-V{}-scale{}".format(*test))
+        pytest.param(*test, id="B{}-T{}-H{}-HQ{}-K{}-V{}-scale{}".format(*test))
         for test in [
             (1, 63, 1, 1, 64, 64, 1.0),
             (3, 111, 2, 2, 100, 100, 1.0),
@@ -35,16 +35,16 @@ def test_parallel(
     T: int,
     H: int,
     HQ: int,
-    D: int,
+    K: int,
     V: int,
     scale: float,
 ):
-    if not check_shared_mem('hopper') and max(D, V) > 128:
+    if not check_shared_mem('hopper') and max(K, V) > 128:
         pytest.skip(reason="Skip test, do not have enough shard mem")
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
-    q = torch.randn((B, T, HQ, D), dtype=torch.float16, device=device).requires_grad_(True)
-    k = torch.randn((B, T, H, D), dtype=torch.float16, device=device).requires_grad_(True)
+    q = torch.randn((B, T, HQ, K), dtype=torch.float16, device=device).requires_grad_(True)
+    k = torch.randn((B, T, H, K), dtype=torch.float16, device=device).requires_grad_(True)
     v = torch.randn((B, T, H, V), dtype=torch.float16, device=device).requires_grad_(True)
     do = torch.randn((B, T, HQ, V), dtype=torch.float16, device=device)
 
@@ -155,9 +155,9 @@ def test_parallel_with_g(
 
 
 @pytest.mark.parametrize(
-    ('H', 'HQ', 'D', 'V', 'cu_seqlens'),
+    ('H', 'HQ', 'K', 'V', 'cu_seqlens'),
     [
-        pytest.param(*test, id="H{}-HQ{}-D{}-V{}-cu_seqlens{}".format(*test))
+        pytest.param(*test, id="H{}-HQ{}-K{}-V{}-cu_seqlens{}".format(*test))
         for test in [
             (2, 2, 64, 64, [0, 15]),
             (2, 8, 64, 64, [0, 256, 500, 1000]),
@@ -171,7 +171,7 @@ def test_parallel_with_g(
 def test_parallel_varlen(
     H: int,
     HQ: int,
-    D: int,
+    K: int,
     V: int,
     cu_seqlens: list[int],
 ):
@@ -180,8 +180,8 @@ def test_parallel_varlen(
     cu_seqlens_th = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
     dtype = torch.float16
 
-    q = torch.randn((1, T, HQ, D), dtype=dtype, device=device).requires_grad_()
-    k = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
+    q = torch.randn((1, T, HQ, K), dtype=dtype, device=device).requires_grad_()
+    k = torch.randn((1, T, H, K), dtype=dtype, device=device).requires_grad_()
     v = torch.randn((1, T, H, V), dtype=dtype, device=device).requires_grad_()
     do = torch.randn((1, T, HQ, V), dtype=dtype, device=device)
 
@@ -263,9 +263,9 @@ def test_parallel_swa(
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'HQ', 'D', 'V'),
+    ('B', 'T', 'H', 'HQ', 'K', 'V'),
     [
-        pytest.param(*test, id="B{}-T{}-H{}-HQ{}-D{}-V{}".format(*test))
+        pytest.param(*test, id="B{}-T{}-H{}-HQ{}-K{}-V{}".format(*test))
         for test in [
             (1, 63, 1, 1, 64, 64),
             (3, 111, 2, 2, 100, 100),
@@ -275,13 +275,13 @@ def test_parallel_swa(
         ]
     ],
 )
-def test_parallel_sink(B: int, T: int, H: int, HQ: int, D: int, V: int):
-    if not check_shared_mem('hopper') and max(D, V) > 128:
+def test_parallel_sink(B: int, T: int, H: int, HQ: int, K: int, V: int):
+    if not check_shared_mem('hopper') and max(K, V) > 128:
         pytest.skip(reason="Skip test, do not have enough shard mem")
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
-    q = torch.randn((B, T, HQ, D), dtype=torch.float16, device=device).requires_grad_(True)
-    k = torch.randn((B, T, H, D), dtype=torch.float16, device=device).requires_grad_(True)
+    q = torch.randn((B, T, HQ, K), dtype=torch.float16, device=device).requires_grad_(True)
+    k = torch.randn((B, T, H, K), dtype=torch.float16, device=device).requires_grad_(True)
     v = torch.randn((B, T, H, V), dtype=torch.float16, device=device).requires_grad_(True)
     sink_bias = torch.randn((HQ,), dtype=torch.float32, device=device).requires_grad_(True)
     do = torch.randn((B, T, HQ, V), dtype=torch.float16, device=device)

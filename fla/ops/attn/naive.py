@@ -24,10 +24,10 @@ def naive_parallel_attn(
     Reference PyTorch implementation of parallel attention that returns both output and max_logits.
 
     Args:
-        q: [B, T, HQ, D]
-        k: [B, T, H, D]
+        q: [B, T, HQ, K]
+        k: [B, T, H, K]
         v: [B, T, H, V]
-        scale: float, optional. If None, defaults to 1 / sqrt(D)
+        scale: float, optional. If None, defaults to 1 / sqrt(K)
         window_size: int, optional. If provided, each query at position i only attends to
             keys in [i - window_size + 1, i]. If None, full causal attention is used.
         causal: bool, default True
@@ -43,19 +43,19 @@ def naive_parallel_attn(
         output: [B, T, HQ, V]
         max_logits: [B, T, HQ]
     """
-    B, T, HQ, D = q.shape
+    B, T, HQ, K = q.shape
     V = v.shape[-1]
     H = k.shape[2]
     G = HQ // H
 
     if scale is None:
-        scale = D ** -0.5
+        scale = K ** -0.5
 
-    # reshape q to separate groups: [B, T, HQ, D] -> [B, T, H, G, D]
-    q = q.reshape(B, T, H, G, D)
+    # reshape q to separate groups: [B, T, HQ, K] -> [B, T, H, G, K]
+    q = q.reshape(B, T, H, G, K)
 
     # compute attention scores via einsum: [B, H, G, T, T]
-    # k is [B, T, H, D] — no group dim, so each group shares the same k
+    # k is [B, T, H, K] — no group dim, so each group shares the same k
     scores = torch.einsum('bqhgd,bkhd->bhgqk', q, k) * scale
 
     # apply causal mask
