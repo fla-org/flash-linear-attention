@@ -15,7 +15,14 @@ import torch.nn.functional as F
 from einops import rearrange
 from transformers.utils import logging
 
-from fla.layers.utils import get_layer_cache, get_unpad_data, index_first_axis, pad_input, unpad_input, update_layer_cache
+from fla.layers.utils import (
+    get_layer_cache,
+    pad_input,
+    repad_hidden_states,
+    unpad_hidden_states,
+    unpad_input,
+    update_layer_cache,
+)
 from fla.modules import FusedRMSNormGated, RMSNorm, RotaryEmbedding
 from fla.modules.activations import swiglu
 from fla.modules.rotary import rotary_embedding
@@ -71,6 +78,8 @@ class YOCORotaryEmbedding(RotaryEmbedding):
             self._update_cos_sin_cache(max_seqlen, device=states.device, dtype=states.dtype)
         elif isinstance(seqlen_offset, int):
             self._update_cos_sin_cache(states.shape[1] + seqlen_offset, device=states.device, dtype=states.dtype)
+        else:
+            assert self._cos_cached is not None, "Tensor offsets require an initialized cache; pass max_seqlen on the first call"
         return rotary_embedding(
             states,
             self._cos_cached,
@@ -151,14 +160,16 @@ class YOCOGatedRetention(nn.Module):
             )
 
         batch_size, q_len, _ = hidden_states.shape
-        mode = 'fused_recurrent' if q_len <= 64 else self.mode
+        if torch.is_grad_enabled():
+            mode = 'chunk'
+        elif q_len <= 64:
+            mode = 'fused_recurrent'
+        else:
+            mode = self.mode
         last_state = get_layer_cache(self, past_key_values)
 
         cu_seqlens = kwargs.get('cu_seqlens')
-        indices = None
-        if attention_mask is not None:
-            indices, cu_seqlens, _ = get_unpad_data(attention_mask[:, -q_len:])
-            hidden_states = index_first_axis(rearrange(hidden_states, 'b s ... -> (b s) ...'), indices).unsqueeze(0)
+        hidden_states, indices, cu_seqlens = unpad_hidden_states(hidden_states, cu_seqlens, attention_mask, q_len)
 
         q = rearrange(self.q_proj(hidden_states), '... (h d) -> ... h d', d=self.head_dim)
         k = rearrange(self.k_proj(hidden_states), '... (h d) -> ... h d', d=self.head_dim)
@@ -172,8 +183,8 @@ class YOCOGatedRetention(nn.Module):
             max_seqlen = q.shape[1] + seqlen_offset
 
             if attention_mask is not None and seqlen_offset > 0:
-                seqlen_offset = prepare_lens_from_mask(attention_mask) - q_len
-                max_seqlen = q.shape[1] + seqlen_offset.max().item()
+                seqlen_offset = seqlen_offset + prepare_lens_from_mask(attention_mask) - attention_mask.shape[-1]
+                max_seqlen = attention_mask.shape[-1]
 
         if self.max_position_embeddings is not None:
             max_seqlen = max(max_seqlen, self.max_position_embeddings)
@@ -217,8 +228,7 @@ class YOCOGatedRetention(nn.Module):
             o = swiglu(g, o)
 
         o = self.o_proj(o)
-        if attention_mask is not None:
-            o = pad_input(o.squeeze(0), indices, batch_size, q_len)
+        o = repad_hidden_states(o, indices, batch_size, q_len)
         attentions = None
         return o, attentions, past_key_values
 
@@ -287,11 +297,13 @@ class YOCOSharedKVBuilder(nn.Module):
         if use_cache and past_key_values is not None:
             seqlen_offset = past_key_values.get_seq_length(self.layer_idx)
             max_seqlen = k.shape[1] + seqlen_offset
+            if seqlen_offset > 0:
+                assert q_len == 1, "only support q_len == 1 for decoding"
 
         if attention_mask is not None and (past_key_values is None or use_cache):
             # Left-padded prefills should use the same effective RoPE positions as the unpadded sequence.
             seqlen_offset = seqlen_offset + prepare_lens_from_mask(attention_mask) - attention_mask.shape[-1]
-            max_seqlen = k.shape[1] + seqlen_offset.max().item()
+            max_seqlen = attention_mask.shape[-1]
 
         if self.max_position_embeddings is not None:
             max_seqlen = max(max_seqlen, self.max_position_embeddings)
@@ -387,7 +399,7 @@ class YOCOCrossAttention(nn.Module):
 
         if attention_mask is not None:
             seqlen_offset = seqlen_offset + prepare_lens_from_mask(attention_mask) - attention_mask.shape[-1]
-            max_seqlen = max(max_seqlen, q.shape[1] + max(seqlen_offset))
+            max_seqlen = max(max_seqlen, attention_mask.shape[-1])
         if self.max_position_embeddings is not None:
             max_seqlen = max(max_seqlen, self.max_position_embeddings)
 
@@ -409,7 +421,6 @@ class YOCOCrossAttention(nn.Module):
             _, cu_seqlens = cu_seqlens
             max_seqlen_q, max_seqlen_k = max_seq_lens
             if max_seqlen_q != max_seqlen_k:
-                assert max_seqlen_q == 1, "only support q_len == 1 for decoding"
                 o = attn_decoding_one_step(q, shared_k, shared_v, cu_seqlens=cu_seqlens)
             else:
                 o = parallel_attn(q, shared_k, shared_v, window_size=self.window_size, cu_seqlens=cu_seqlens)

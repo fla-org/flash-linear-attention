@@ -38,7 +38,7 @@ runtime. Variables are grouped by what they control:
 
 | Variable             | Default | Options    | Description                                                                                                  |
 | -------------------- | ------- | ---------- | ------------------------------------------------------------------------------------------------------------ |
-| `FLA_USE_TMA`        | `0`     | `0` / `1`  | Enable the Tensor Memory Accelerator (TMA) on Hopper / Blackwell GPUs. Requires Triton with TMA support.     |
+| `FLA_USE_TMA`        | `0`     | `0` / `1`  | Enable the Tensor Memory Accelerator (TMA) on Nvidia Hopper / Blackwell and AMD gfx1250 GPUs. Requires Triton with TMA support. |
 | `FLA_USE_COMPILE`    | `1`     | `1` / `0`, `true` / `false`, `yes` / `no` | Use `torch.compile` for the RWKV7 fused addcmul path. Auto-disabled on Python < 3.11. |
 
 ---
@@ -55,6 +55,7 @@ Each backend is gated by a single env var below.
 | `FLA_FLASH_KDA`                | unset (`1`) | `0` / `1`  | Enable the [FlashKDA](https://github.com/MoonshotAI/FlashKDA) CUTLASS forward for `chunk_kda` (inference only). Requires `flash_kda`.    |
 | `FLA_INTRACARD_CP`             | unset (`0`) | `0` / `1`  | Opt in to the intra-card context-parallel backend for shared delta-rule ops (`chunk_gated_delta_rule_fwd_h`). Inference + varlen only.  |
 | `FLA_INTRACARD_MAX_SPLITS`     | `32`        | int ≥ 1    | Max number of sub-sequences per original sequence used by the intra-card CP backend. Caps merge-chain depth to control precision loss.  |
+| `FLA_INTRACARD_TF32X3`         | `0`         | `0` / `1`  | Use tf32x3 for the affine-chain dots in the pre-scan/merge kernels of the intra-card CP backend. NVIDIA only.                            |
 
 ---
 

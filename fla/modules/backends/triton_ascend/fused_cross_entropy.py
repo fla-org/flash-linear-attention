@@ -54,7 +54,7 @@ def cross_entropy_fwd_kernel(
     row_idx = tl.program_id(0)
     abs_row_idx = row_idx + ROW_OFFSET
     col_block_idx = tl.program_id(1)
-    logits_ptr = logits_ptr + row_idx * logits_row_stride.to(tl.int64)
+    logits_ptr = logits_ptr + tl.cast(row_idx, tl.int64) * logits_row_stride
     col_offsets = col_block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     label_idx = tl.load(labels_ptr + row_idx)
     logits = tl.load(logits_ptr + col_offsets, mask=col_offsets < n_cols, other=-float("inf"))
@@ -129,8 +129,8 @@ def cross_entropy_bwd_kernel(
     row_idx = tl.program_id(0)
     abs_row_idx = row_idx + ROW_OFFSET
     col_block_idx = tl.program_id(1)
-    logits_ptr = logits_ptr + row_idx * logits_row_stride.to(tl.int64)
-    dlogits_ptr = dlogits_ptr + row_idx * dlogits_row_stride.to(tl.int64)
+    logits_ptr = logits_ptr + tl.cast(row_idx, tl.int64) * logits_row_stride
+    dlogits_ptr = dlogits_ptr + tl.cast(row_idx, tl.int64) * dlogits_row_stride
     col_offsets = col_block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     label_idx = tl.load(labels_ptr + row_idx)
     if label_idx != ignore_index:

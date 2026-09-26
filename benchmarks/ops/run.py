@@ -28,11 +28,16 @@ Usage::
     # Forward only
     python -m benchmarks.ops.run --op chunk_gla --modes fwd
 
-    # Compare against main (auto git worktree, no stash needed)
+    # Compare against main (auto git worktree, no stash needed).
+    # HEAD and the baseline each run in an isolated subprocess so the parent
+    # never holds NPU/CUDA tensors across refs.
     python -m benchmarks.ops.run --op chunk_gla --base main
 
     # Compare against any branch/tag/commit
     python -m benchmarks.ops.run --op chunk_gla --base HEAD~3
+
+    # Current ref only (no baseline subprocess)
+    python -m benchmarks.ops.run --op chunk_gla --no-base
 
     # Save results to JSON
     python -m benchmarks.ops.run --op chunk_gla --json results.json
@@ -123,6 +128,9 @@ Benchmark methodology
    ``FLA_BENCH_WARMUP_MS`` / ``FLA_BENCH_REP_MS`` for noisier machines / CI).
 3. Input tensors (including gate transforms like logsigmoid) are prepared
    **before** timing — only the op call itself is measured.
+4. **Isolation**: HEAD and ``--base`` each run in a subprocess. The parent
+   never holds accelerator tensors, so a large HEAD shape cannot starve the
+   baseline process of HBM (and vice versa).
 """
 
 from __future__ import annotations
@@ -141,10 +149,10 @@ import tempfile
 
 import torch
 
-from fla.utils import device_name
-
 # Import registry — works both as a package (python -m benchmarks.ops.run)
 # and standalone (python /tmp/fla_bench_xxx/run.py) for cross-commit use.
+# ``device_name`` is imported inside ``benchmark_op`` so the parent compare
+# process never initializes the accelerator.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from registry import (  # noqa: E402
     SHAPE_CONFIGS,
@@ -159,7 +167,9 @@ logger = logging.getLogger(__name__)
 
 def _device_synchronize(device: str | None = None) -> None:
     """Synchronize the active accelerator before/after timed runs."""
-    dev = device or device_name
+    if device is None:
+        from fla.utils import device_name as device
+    dev = device
     dev_mod = getattr(torch, dev, None)
     if dev_mod is not None and hasattr(dev_mod, 'synchronize'):
         dev_mod.synchronize()
@@ -275,6 +285,8 @@ def benchmark_op(
     Returns a list of result dicts (one per shape x mode).
     """
     import triton
+
+    from fla.utils import device_name
 
     if modes is None:
         modes = ['fwd', 'fwdbwd']
@@ -548,6 +560,56 @@ def _find_project_root() -> str:
     return os.getcwd()
 
 
+_WORKER_ENV = 'FLA_BENCH_WORKER'
+
+
+def _isolated_bench_cmd(runner, op_names, shape_configs, modes, backend, out_json):
+    """Worker argv. ``--no-base`` plus ``FLA_BENCH_WORKER`` block nested compares."""
+    cmd = [sys.executable, runner, '--op', *op_names,
+           '--custom-shapes', json.dumps(shape_configs),
+           '--modes', *modes, '--json', out_json, '--no-base']
+    if backend is not None:
+        cmd += ['--backend', backend]
+    return cmd
+
+
+def _run_isolated_bench(cwd, cmd):
+    env = os.environ.copy()
+    env[_WORKER_ENV] = '1'
+    subprocess.run(cmd, cwd=cwd, env=env)
+
+
+def _read_bench_json(out_json):
+    if os.path.exists(out_json):
+        with open(out_json) as f:
+            data = json.load(f)
+        return data.get('results', []), data.get('machine_info')
+    return None, None
+
+
+def _bench_current(op_names, shape_configs, modes, backend=None):
+    """Run the current working tree in a subprocess, then exit to free HBM.
+
+    Returns (results_list, machine_info_dict) or (None, None) on failure.
+    """
+    project_root = _find_project_root()
+    tmpdir = tempfile.mkdtemp(prefix='fla_bench_HEAD_')
+    try:
+        print("\n  Benchmarking at HEAD (isolated subprocess)...")
+        runner = os.path.abspath(__file__)
+        out_json = os.path.join(tmpdir, 'results.json')
+        _run_isolated_bench(
+            project_root,
+            _isolated_bench_cmd(runner, op_names, shape_configs, modes, backend, out_json),
+        )
+        return _read_bench_json(out_json)
+    except Exception as e:
+        logger.warning(f"Failed to benchmark at HEAD: {e}")
+        return None, None
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 def _bench_at_ref(ref, op_names, shape_configs, modes, backend=None):
     """Run benchmarks at a git ref using a temporary worktree.
 
@@ -579,18 +641,11 @@ def _bench_at_ref(ref, op_names, shape_configs, modes, backend=None):
 
         runner = os.path.join(runner_dir, 'run.py')
         out_json = os.path.join(tmpdir, 'results.json')
-        cmd = [sys.executable, runner, '--op', *op_names,
-               '--custom-shapes', json.dumps(shape_configs),
-               '--modes', *modes, '--json', out_json]
-        if backend is not None:
-            cmd += ['--backend', backend]
-        subprocess.run(cmd, cwd=worktree_dir)
-
-        if os.path.exists(out_json):
-            with open(out_json) as f:
-                data = json.load(f)
-            return data.get('results', []), data.get('machine_info')
-        return None, None
+        _run_isolated_bench(
+            worktree_dir,
+            _isolated_bench_cmd(runner, op_names, shape_configs, modes, backend, out_json),
+        )
+        return _read_bench_json(out_json)
     except Exception as e:
         logger.warning(f"Failed to benchmark at '{ref}': {e}")
         return None, None
@@ -637,7 +692,13 @@ def main():
     parser.add_argument(
         '--base', default=None,
         help='Git ref for the baseline (old) column, e.g. "main" or "HEAD~3". '
-             'Auto-detected as "main" when on a feature branch.',
+             'Auto-detected as "main" when on a feature branch. '
+             'HEAD and the baseline each run in an isolated subprocess.',
+    )
+    parser.add_argument(
+        '--no-base', action='store_true',
+        help='Skip baseline comparison. Nested worker processes pass this '
+             'so they never spawn another compare.',
     )
     parser.add_argument(
         '--list', action='store_true',
@@ -685,29 +746,42 @@ def main():
         op_names = list_ops() if args.op == ['all'] else args.op
     shape_configs = json.loads(args.custom_shapes) if args.custom_shapes else SHAPE_CONFIGS
 
-    machine_info = _get_machine_info()
-    print(_format_machine_line(machine_info))
+    is_worker = os.environ.get(_WORKER_ENV) == '1'
+    print(f"Git: {_get_git_label()}")
     print(f"Shapes: {len(shape_configs)} configs")
     print(f"Ops: {op_names}")
 
-    all_results = []
-    for op_name in op_names:
-        try:
-            all_results.extend(benchmark_op(op_name, shape_configs, modes=args.modes, backend=args.backend))
-        except Exception as e:
-            logger.error(f"Failed to benchmark {op_name}: {e}")
+    if is_worker:
+        machine_info = _get_machine_info()
+        print(_format_machine_line(machine_info))
+        all_results = []
+        for op_name in op_names:
+            try:
+                all_results.extend(
+                    benchmark_op(op_name, shape_configs, modes=args.modes, backend=args.backend),
+                )
+            except Exception as e:
+                logger.error(f"Failed to benchmark {op_name}: {e}")
+        baseline, baseline_info = None, None
+    else:
+        all_results, machine_info = _bench_current(
+            op_names, shape_configs, args.modes, backend=args.backend,
+        )
+        all_results = all_results or []
+        machine_info = machine_info or {'git_label': _get_git_label()}
 
-    # Determine baseline ref: explicit --base, or auto-detect main if on a feature branch.
-    git_label = machine_info.get('git_label', 'unknown')
-    current_branch = git_label.split('[')[0] if '[' in git_label else git_label
-    base_ref = args.base
-    if base_ref is None and current_branch not in ('main', 'master', 'unknown'):
-        base_ref = 'main'
+        git_label = machine_info.get('git_label', 'unknown')
+        current_branch = git_label.split('[')[0] if '[' in git_label else git_label
+        base_ref = None if args.no_base else args.base
+        if base_ref is None and not args.no_base and current_branch not in ('main', 'master', 'unknown'):
+            base_ref = 'main'
+        if base_ref == '':
+            base_ref = None
 
-    baseline, baseline_info = None, None
-    if base_ref:
-        baseline, baseline_info = _bench_at_ref(
-            base_ref, op_names, shape_configs, args.modes, backend=args.backend)
+        baseline, baseline_info = None, None
+        if base_ref:
+            baseline, baseline_info = _bench_at_ref(
+                base_ref, op_names, shape_configs, args.modes, backend=args.backend)
 
     # Sort by (mode, L, B, T, H, D, op) so the table groups by mode first
     # and (when present) by L so different residual-source counts cluster.
@@ -718,7 +792,10 @@ def main():
         r['B'], r['T'], r['H'], r['D'], r['op'],
     ))
 
-    print_results_table(all_results, machine_info, baseline=baseline, baseline_info=baseline_info)
+    # Workers print a per-ref table. The orchestrator prints the comparison
+    # (or nothing extra when --no-base, because the worker already printed).
+    if is_worker or baseline:
+        print_results_table(all_results, machine_info, baseline=baseline, baseline_info=baseline_info)
 
     if args.json_file:
         output = {'machine_info': machine_info, 'results': all_results}

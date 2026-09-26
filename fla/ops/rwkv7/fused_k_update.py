@@ -37,11 +37,11 @@ def k_update_fwd_kernel_short(
     BD: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_b, i_t = tl.program_id(0), tl.program_id(1)
+    i_b, i_t = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
 
     if IS_VARLEN:
-        bos = tl.load(cu_seqlens + i_b).to(tl.int32)
-        eos = tl.load(cu_seqlens + i_b + 1).to(tl.int32)
+        bos = tl.load(cu_seqlens + i_b).to(tl.int64)
+        eos = tl.load(cu_seqlens + i_b + 1).to(tl.int64)
         g_t = bos + i_t
         if g_t >= eos:
             return
@@ -80,13 +80,13 @@ def k_update_fwd_kernel_long(
     BD: tl.constexpr, BT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_d, i_t_blk, i_b = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_d, i_t_blk, i_b = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
 
     if IS_VARLEN:
         i_n, i_t_blk = tl.load(chunk_indices + i_t_blk * 2).to(tl.int32), \
             tl.load(chunk_indices + i_t_blk * 2 + 1).to(tl.int32)
-        bos = tl.load(cu_seqlens + i_n).to(tl.int32)
-        eos = tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos = tl.load(cu_seqlens + i_n).to(tl.int64)
+        eos = tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         t_start = i_t_blk * BT
         t_end = tl.minimum(t_start + BT, eos - bos)
     else:
@@ -129,11 +129,11 @@ def k_update_bwd_kernel_short(
     BD: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_b, i_t_base = tl.program_id(0), tl.program_id(1) * BT
+    i_b, i_t_base = tl.program_id(0).to(tl.int64), tl.program_id(1) * BT
 
     if IS_VARLEN:
-        bos = tl.load(cu_seqlens + i_b).to(tl.int32)
-        eos = tl.load(cu_seqlens + i_b + 1).to(tl.int32)
+        bos = tl.load(cu_seqlens + i_b).to(tl.int64)
+        eos = tl.load(cu_seqlens + i_b + 1).to(tl.int64)
         seq_len = eos - bos
     else:
         bos = i_b * T
@@ -180,13 +180,13 @@ def k_update_bwd_kernel_long(
     BD: tl.constexpr, BT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_d, i_t_blk, i_b = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_d, i_t_blk, i_b = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
 
     if IS_VARLEN:
         i_n, i_t_blk = tl.load(chunk_indices + i_t_blk * 2).to(tl.int32), \
             tl.load(chunk_indices + i_t_blk * 2 + 1).to(tl.int32)
-        bos = tl.load(cu_seqlens + i_n).to(tl.int32)
-        eos = tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos = tl.load(cu_seqlens + i_n).to(tl.int64)
+        eos = tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         t_start = i_t_blk * BT
         t_end = tl.minimum(t_start + BT, eos - bos)
     else:

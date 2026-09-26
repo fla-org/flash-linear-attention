@@ -51,19 +51,19 @@ def chunk_transform_qk_bwd_kernel_prepare(
     USE_GATE: tl.constexpr,
     RETURN_H: tl.constexpr,
 ):
-    i_t, i_nh = tl.program_id(0), tl.program_id(1)
+    i_t, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1)
     i_n, i_hq = i_nh // HQ, i_nh % HQ
     i_h = i_hq // G
 
     if IS_VARLEN:
-        i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
+        i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int64)
         bos, eos = tl.load(offsets + i_n).to(tl.int64), tl.load(offsets + i_n + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
-        boh = tl.load(chunk_offsets + i_n).to(tl.int32)
+        boh = tl.load(chunk_offsets + i_n).to(tl.int64)
     else:
         bos, eos = (i_n * T).to(tl.int64), (i_n * T + T).to(tl.int64)
         NT = tl.cdiv(T, BT)
-        boh = i_n * NT
+        boh = (i_n * NT).to(tl.int64)
 
     sm_scale = scale * 1.44269504
     # offset calculations
@@ -88,19 +88,26 @@ def chunk_transform_qk_bwd_kernel_prepare(
     L += (bos*HQ + i_hq)
     D += (bos*HQ + i_hq)
 
-    p_q = tl.make_block_ptr(q, (T, K), (HQ*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
-    p_k = tl.make_block_ptr(k, (K, T), (1, H*K), (0, i_t * BT), (BK, BT), (0, 1))
-    p_w = tl.make_block_ptr(w, (T, K), (H*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
-    p_beta = tl.make_block_ptr(beta, (T, ), (H, ), (i_t * BT, ), (BT, ), (0, ))
-
-    b_q = tl.load(p_q, boundary_check=(0, 1))
-    b_kt = tl.load(p_k, boundary_check=(0, 1))
-    b_w = tl.load(p_w, boundary_check=(0, 1))
-    b_beta = tl.load(p_beta, boundary_check=(0, ))
-    p_T = tl.make_block_ptr(AT, (T, BT), (BT*H, 1), (i_t * BT, 0), (BT, BT), (1, 0))
-    b_T = tl.load(p_T, boundary_check=(0, 1)) * b_beta[None, :]
-
+    o_t = i_t * BT + tl.arange(0, BT)
     o_i = tl.arange(0, BT)
+    o_d = tl.arange(0, BK)
+    o_v = tl.arange(0, BV)
+    m_r = o_t < T
+    m_k = m_r[:, None] & (o_d[None, :] < K)
+    m_v = m_r[:, None] & (o_v[None, :] < V)
+    m_T = m_r[:, None] & (o_i[None, :] < BT)
+    p_q = q + o_t[:, None] * (HQ*K) + o_d[None, :]
+    p_k = k + o_d[:, None] + o_t[None, :] * (H*K)
+    p_w = w + o_t[:, None] * (H*K) + o_d[None, :]
+    p_beta = beta + o_t * H
+
+    b_q = tl.load(p_q, mask=m_k, other=0.0)
+    b_kt = tl.load(p_k, mask=(o_d[:, None] < K) & m_r[None, :], other=0.0)
+    b_w = tl.load(p_w, mask=m_k, other=0.0)
+    b_beta = tl.load(p_beta, mask=m_r, other=0.0)
+    p_T = AT + o_t[:, None] * (BT*H) + o_i[None, :]
+    b_T = tl.load(p_T, mask=m_T, other=0.0) * b_beta[None, :]
+
     m_t = o_i[:, None] >= o_i[None, :]
     b_qw = tl.where(m_t, tl.dot(b_q, tl.trans(b_w.to(b_q.dtype))), 0).to(b_q.dtype)
     b_qwT = tl.dot(b_qw, b_T.to(b_q.dtype)).to(b_q.dtype)
@@ -108,46 +115,46 @@ def chunk_transform_qk_bwd_kernel_prepare(
     b_A = tl.where(m_t, tl.dot(b_q, b_kt) - tl.dot(b_qwT, b_wbk), 0)
 
     b_q = b_q.to(tl.float32) - tl.dot(b_qwT, b_w.to(b_qwT.dtype))
-    p_q_new = tl.make_block_ptr(q_new, (T, K), (K*HQ, 1), (i_t * BT, 0), (BT, K), (1, 0))
-    tl.store(p_q_new, b_q.to(p_q_new.dtype.element_ty), boundary_check=(0, 1))
+    p_q_new = q_new + o_t[:, None] * (K*HQ) + o_d[None, :]
+    tl.store(p_q_new, b_q.to(p_q_new.dtype.element_ty), mask=m_k)
 
     if i_hq % G == 0:
         b_Twb = tl.dot(b_T, b_w)  # tf32
-        p_h = tl.make_block_ptr(h, (T, K), (K * H, 1), (i_t * BT, 0), (BT, BK), (1, 0))
-        tl.store(p_h, b_Twb.to(p_h.dtype.element_ty), boundary_check=(0, 1))
+        p_h = h + o_t[:, None] * (K * H) + o_d[None, :]
+        tl.store(p_h, b_Twb.to(p_h.dtype.element_ty), mask=m_k)
         b_T_wbk = tl.dot(b_T.to(b_wbk.dtype), b_wbk).to(b_kt.dtype)
-        p_k_new = tl.make_block_ptr(k_new, (K, T), (1, K*H), (0, i_t * BT), (BK, BT), (0, 1))
+        p_k_new = k_new + o_d[:, None] + o_t[None, :] * (K*H)
         tl.store(p_k_new, (b_kt - tl.dot(tl.trans(b_w.to(b_kt.dtype)), b_T_wbk)
-                           ).to(p_k_new.dtype.element_ty), boundary_check=(0, 1))
+                           ).to(p_k_new.dtype.element_ty), mask=(o_d[:, None] < K) & m_r[None, :])
 
     if USE_GATE:
-        p_g_cumsum = tl.make_block_ptr(g_cumsum, (T, ), (HQ, ), (i_t * BT, ), (BT, ), (0, ))
-        b_g_cumsum = tl.load(p_g_cumsum, boundary_check=(0, ))
+        p_g_cumsum = g_cumsum + o_t * HQ
+        b_g_cumsum = tl.load(p_g_cumsum, mask=m_r, other=0.0)
         b_A = b_A + (b_g_cumsum[:, None] - b_g_cumsum[None, :])
         b_A = tl.where((i_t * BT + tl.arange(0, BT) < T)[:, None], b_A, float("-inf"))  # avoid nan
 
-    p_l = tl.make_block_ptr(L, (T, ), (HQ, ), (i_t * BT, ), (BT, ), (0, ))
-    b_l = tl.load(p_l, boundary_check=(0, ))
-    p_delta = tl.make_block_ptr(D, (T, ), (HQ, ), (i_t * BT, ), (BT, ), (0, ))
-    delta = tl.load(p_delta, boundary_check=(0, ))
+    p_l = L + o_t * HQ
+    b_l = tl.load(p_l, mask=m_r, other=0.0)
+    p_delta = D + o_t * HQ
+    delta = tl.load(p_delta, mask=m_r, other=0.0)
 
     b_A_softmax = tl.exp2(tl.where(o_i[:, None] >= o_i[None, :], b_A * sm_scale - b_l[:, None], float("-inf")))
-    p_do = tl.make_block_ptr(do, (T, V), (HQ*V, 1), (i_t * BT, 0), (BT, BV), (1, 0))
-    b_do = tl.load(p_do, boundary_check=(0, 1))
+    p_do = do + o_t[:, None] * (HQ*V) + o_v[None, :]
+    b_do = tl.load(p_do, mask=m_v, other=0.0)
     b_dv = tl.dot(tl.trans(b_A_softmax.to(b_do.dtype)), b_do)
-    p_dv = tl.make_block_ptr(dv, (T, V), (HQ*V, 1), (i_t * BT, 0), (BT, BV), (1, 0))
-    tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
+    p_dv = dv + o_t[:, None] * (HQ*V) + o_v[None, :]
+    tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), mask=m_v)
 
-    p_v = tl.make_block_ptr(v, (V, T), (1, H*V), (0, i_t * BT), (BV, BT), (0, 1))
-    b_v = tl.load(p_v, boundary_check=(0, 1))
+    p_v = v + o_v[:, None] + o_t[None, :] * (H*V)
+    b_v = tl.load(p_v, mask=(o_v[:, None] < V) & m_r[None, :], other=0.0)
     b_dp = tl.dot(b_do, b_v)
     b_dA = ((b_dp - delta[:, None]) * b_A_softmax * scale)
     if USE_GATE:
         b_dgq = tl.sum(b_dA, axis=1) - tl.sum(b_dA, axis=0)
-        p_dg = tl.make_block_ptr(dg_cumsum, (T, ), (HQ, ), (i_t * BT, ), (BT, ), (0, ))
-        tl.store(p_dg, b_dgq.to(p_dg.dtype.element_ty), boundary_check=(0,))
-    p_dA = tl.make_block_ptr(dA_local, (T, BT), (BT*HQ, 1), (i_t * BT, 0), (BT, BT), (1, 0))
-    tl.store(p_dA, b_dA.to(p_dA.dtype.element_ty), boundary_check=(0, 1))
+        p_dg = dg_cumsum + o_t * HQ
+        tl.store(p_dg, b_dgq.to(p_dg.dtype.element_ty), mask=m_r)
+    p_dA = dA_local + o_t[:, None] * (BT*HQ) + o_i[None, :]
+    tl.store(p_dA, b_dA.to(p_dA.dtype.element_ty), mask=m_T)
 
 
 def intra_chunk_preprocess_bwd_prepare_fn(q, k, v, w, beta, g_cumsum, A, L, D, do, scale, return_h=True, cu_seqlens=None,

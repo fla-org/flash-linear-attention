@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
 import torch
@@ -14,7 +15,7 @@ import torch.nn as nn
 from einops import rearrange, repeat
 from transformers.activations import ACT2FN
 
-from fla.layers.utils import get_layer_cache, get_unpad_data, index_first_axis, pad_input, update_layer_cache
+from fla.layers.utils import get_layer_cache, repad_hidden_states, unpad_hidden_states, update_layer_cache
 from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
 from fla.modules.rotary import RotaryEmbedding
 from fla.ops.retention import chunk_retention, fused_chunk_retention, fused_recurrent_retention, parallel_retention
@@ -28,7 +29,7 @@ if TYPE_CHECKING:
 
 class MultiScaleRetention(nn.Module):
     r"""
-    The layer implementaion for [Retentive Network: A Successor to Transformer for Large Language Models](https://arxiv.org/pdf/2307.08621.pdf).  # noqa
+    The layer implementation for [Retentive Network: A Successor to Transformer for Large Language Models](https://arxiv.org/pdf/2307.08621.pdf).  # noqa
 
     Args:
         mode (str, Optional):
@@ -95,6 +96,7 @@ class MultiScaleRetention(nn.Module):
         self.expand_v = expand_v
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads if num_kv_heads is not None else num_heads
+        assert self.num_heads % self.num_kv_heads == 0, "num_heads must be divisible by num_kv_heads"
         self.num_kv_groups = self.num_heads // self.num_kv_heads
         self.feature_map_fn = ACT2FN[feature_map] if feature_map is not None else None
 
@@ -103,8 +105,10 @@ class MultiScaleRetention(nn.Module):
         self.conv_bias = conv_bias
         self.use_output_gate = use_output_gate
 
-        self.key_dim = int(hidden_size * expand_k)
-        self.value_dim = int(hidden_size * expand_v)
+        key_dim, value_dim = hidden_size * expand_k, hidden_size * expand_v
+        self.key_dim, self.value_dim = round(key_dim), round(value_dim)
+        assert math.isclose(key_dim, self.key_dim), f"`hidden_size * expand_k` must be an integer, got {key_dim}."
+        assert math.isclose(value_dim, self.value_dim), f"`hidden_size * expand_v` must be an integer, got {value_dim}."
         self.key_dim_per_group = self.key_dim // self.num_kv_groups
         self.value_dim_per_group = self.value_dim // self.num_kv_groups
         self.layer_idx = layer_idx
@@ -185,14 +189,17 @@ class MultiScaleRetention(nn.Module):
             )
 
         batch_size, q_len, _ = hidden_states.shape
-        mode = 'fused_recurrent' if q_len <= 64 else self.mode
+        if torch.is_grad_enabled():
+            mode = 'chunk'
+        elif q_len <= 64:
+            mode = 'fused_recurrent'
+        else:
+            mode = self.mode
 
         last_state = get_layer_cache(self, past_key_values)
 
         cu_seqlens = kwargs.get('cu_seqlens')
-        if cu_seqlens is None and attention_mask is not None:
-            indices, cu_seqlens, _ = get_unpad_data(attention_mask[:, -q_len:])
-            hidden_states = index_first_axis(rearrange(hidden_states, "b s ... -> (b s) ..."), indices).unsqueeze(0)
+        hidden_states, indices, cu_seqlens = unpad_hidden_states(hidden_states, cu_seqlens, attention_mask, q_len)
 
         if self.use_short_conv:
             conv_state_q, conv_state_k, conv_state_v = None, None, None
@@ -232,8 +239,8 @@ class MultiScaleRetention(nn.Module):
             max_seqlen = q.shape[1] + seqlen_offset
 
             if attention_mask is not None and seqlen_offset > 0:
-                # to deliminate the offsets of padding tokens
-                seqlen_offset = prepare_lens_from_mask(attention_mask) - q_len
+                # to eliminate the offsets of padding tokens
+                seqlen_offset = seqlen_offset + prepare_lens_from_mask(attention_mask) - attention_mask.shape[-1]
                 max_seqlen = q.shape[1] + seqlen_offset.max().item()
 
         q, k = self.rotary(q, k, seqlen_offset=seqlen_offset, max_seqlen=max_seqlen, cu_seqlens=cu_seqlens)
@@ -302,7 +309,6 @@ class MultiScaleRetention(nn.Module):
         else:
             o = rearrange(self.g_norm(o), '... h d -> ... (h d)')
         o = self.o_proj(o)
-        if attention_mask is not None:
-            o = pad_input(o.squeeze(0), indices, batch_size, q_len)
+        o = repad_hidden_states(o, indices, batch_size, q_len)
 
         return o, None, past_key_values

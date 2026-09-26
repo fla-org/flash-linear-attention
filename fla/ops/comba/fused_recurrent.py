@@ -45,7 +45,9 @@ def fused_recurrent_comba_fwd_kernel(
     USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    pid = tl.program_id(0)
+    NK, NV = tl.cdiv(K, BK), tl.cdiv(V, BV)
+    i_k, i_v, i_nh = pid % NK, (pid // NK) % NV, (pid // (NK * NV)).to(tl.int64)
     i_n, i_hv = i_nh // HV, i_nh % HV
     i_h = i_hv // (HV // H)
     if IS_VARLEN:
@@ -146,7 +148,7 @@ def fused_recurrent_comba_fwd(
     else:
         final_state = None
 
-    grid = (NK, NV, N * HV)
+    grid = (NK * NV * N * HV,)
     fused_recurrent_comba_fwd_kernel[grid](
         q=q,
         k=k,

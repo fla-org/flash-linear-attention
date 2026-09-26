@@ -172,6 +172,16 @@ def test_cache_get_seq_length_nonexistent_layer():
     assert cache.get_seq_length(0) == 10
 
 
+def test_legacy_cache_update_defaults_none_offset():
+    torch.manual_seed(42)
+    cache = _raw_legacy_cache()
+    state = (torch.randn(1, 1, 1, 1), torch.randn(1, 1, 1, 1))
+
+    cache.update(attn_state=state, offset=None)
+
+    assert cache.get_seq_length(0) == 1
+
+
 def test_cache_window_size_does_not_undercount():
     """
     Test that window_size truncation doesn't undercount sequence length.
@@ -310,6 +320,28 @@ def test_cache_from_legacy_preserves_seen_tokens():
 
     assert cache.get_seq_length(0) == seen_tokens
     _assert_attn_state_tokens(cache[0]["attn_state"], torch.arange(10, 14))
+
+
+def test_legacy_cache_tuple_round_trip():
+    class InitializableLegacyFLACache(LegacyFLACache):
+        def __init__(self, seen_tokens: int = 0):
+            self.states = []
+            self._seen_tokens = seen_tokens
+
+    seen_tokens = 17
+    cache = InitializableLegacyFLACache(seen_tokens=seen_tokens)
+    cache.states.append({
+        "recurrent_state": None,
+        "attn_state": _make_attn_state(10, 4),
+        "conv_state": None,
+        "ffn_state": None,
+    })
+
+    legacy_cache = cache.to_legacy_cache()
+    restored = InitializableLegacyFLACache.from_legacy_cache(legacy_cache, seen_tokens=seen_tokens)
+
+    assert restored.to_legacy_cache() == legacy_cache
+    assert restored.get_seq_length(0) == seen_tokens
 
 
 # ===================================================================================

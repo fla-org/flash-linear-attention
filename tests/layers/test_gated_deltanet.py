@@ -14,6 +14,30 @@ from fla.layers.gated_deltanet import GatedDeltaNet
 from fla.utils import assert_close, device
 
 
+@pytest.mark.parametrize('mode', ['chunk', 'fused_recurrent'])
+def test_gated_deltanet_eval_with_grad_uses_chunk(mode: str):
+    torch.manual_seed(42)
+    layer = GatedDeltaNet(
+        hidden_size=512,
+        head_dim=64,
+        num_heads=6,
+        expand_v=2,
+        mode=mode,
+    ).to(device=device, dtype=torch.bfloat16).eval()
+    x = torch.randn(1, 32, 512, device=device, dtype=torch.bfloat16, requires_grad=True)
+
+    with mock.patch(
+        'fla.layers.gated_deltanet.fused_recurrent_gated_delta_rule',
+        side_effect=AssertionError("eval with autograd must not use the forward-only fused recurrent kernel"),
+    ) as fused_recurrent:
+        y = layer(x)[0]
+        y.sum().backward()
+
+    fused_recurrent.assert_not_called()
+    assert x.grad is not None
+    assert torch.isfinite(x.grad).all()
+
+
 @pytest.mark.parametrize(
     ('B', 'T', 'D', 'dtype'),
     [

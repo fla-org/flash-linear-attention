@@ -181,3 +181,31 @@ def get_max_num_splits(
     if cu_seqlens_cpu is not None:
         return triton.cdiv(int(max(prepare_lens(cu_seqlens_cpu))), chunk_size)
     return triton.cdiv(int(max(prepare_lens(cu_seqlens))), chunk_size)
+
+
+def prepare_chunk_indices_static(
+    cu_seqlens: torch.LongTensor,
+    chunk_size: int,
+    nt_max: int,
+) -> tuple[torch.LongTensor, torch.LongTensor]:
+    """Device-side, fixed-shape chunk-index construction for graph capture.
+
+    Builds ``chunk_indices`` of shape ``[nt_max, 2]`` and ``chunk_offsets`` of shape
+    ``[N_max + 1]`` with on-device ops, so their construction can be recorded in a
+    platform graph. ``cu_seqlens`` must be padded with zero-length tail sequences up to
+    ``N_max + 1`` entries. Rows beyond the real chunk count carry the sentinel
+    ``i_n = -1``; kernels must return immediately on a negative segment id.
+    Not cached: the construction runs (and is recorded) on every call.
+
+    Returns both tensors with the same dtype as ``cu_seqlens``.
+    """
+    lens = cu_seqlens[1:] - cu_seqlens[:-1]
+    chunks = (lens + (chunk_size - 1)).div(chunk_size, rounding_mode='floor')
+    chunk_offsets = F.pad(chunks.cumsum(0), (1, 0))
+    slots = torch.arange(nt_max, device=cu_seqlens.device, dtype=chunk_offsets.dtype)
+    i_n = torch.searchsorted(chunk_offsets, slots, right=True) - 1
+    i_t = slots - chunk_offsets[i_n]
+    valid = slots < chunk_offsets[-1]
+    i_n = torch.where(valid, i_n, torch.full_like(i_n, -1))
+    i_t = torch.where(valid, i_t, torch.zeros_like(i_t))
+    return torch.stack([i_n, i_t], 1).to(cu_seqlens), chunk_offsets.to(cu_seqlens)

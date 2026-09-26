@@ -85,9 +85,9 @@ class ShortConvolution(nn.Conv1d):
             )
         import os
         self.backend = os.environ.get('FLA_CONV_BACKEND', backend)
-        if backend not in ['cuda', 'triton']:
-            raise ValueError(f"Invalid backend: {backend}, must be one of ['cuda', 'triton']")
-        if backend == 'cuda':
+        if self.backend not in ['cuda', 'triton']:
+            raise ValueError(f"Invalid backend: {self.backend}, must be one of ['cuda', 'triton']")
+        if self.backend == 'cuda':
             if causal_conv1d_fn_cuda is None:
                 warnings.warn(
                     "The `backend` parameter is set to `cuda`, but `causal_conv1d_fn` is not available. "
@@ -160,7 +160,9 @@ class ShortConvolution(nn.Conv1d):
             x = x.mul_(mask.unsqueeze(-1))
 
         # in decoding phase, the cache (if provided) is updated inplace
-        if B * T == N:
+        # For packed varlen inputs, decode only when every sequence has exactly one token:
+        # a zero-length or multi-token sequence makes the shape check misfire.
+        if B * T == N and (cu_seqlens is None or bool((cu_seqlens.diff() == 1).all())):
             y, cache = self.step(
                 x=x,
                 residual=residual,
@@ -247,4 +249,4 @@ class ShortConvolution(nn.Conv1d):
 
     @property
     def state_size(self) -> int:
-        return self.hidden_size * self.kernel_size
+        return self.hidden_size * self.kernel_size[0]

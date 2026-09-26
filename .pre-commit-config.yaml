@@ -23,3 +23,15 @@ repos:
   - id: autopep8
     args: [--in-place]
     exclude: ^tests/conftest\.py$
+
+- repo: local
+  hooks:
+  # tl.make_block_ptr / tl.advance were removed in triton main (issue #1059);
+  # GPU kernels were migrated off them in #1062. The triton-ascend fork still
+  # supports these APIs, so NPU backend files are exempt.
+  - id: no-make-block-ptr
+    name: forbid tl.make_block_ptr / tl.advance (removed in triton main)
+    language: pygrep
+    entry: 'make_block_ptr|tl\.advance\b'
+    types: [python]
+    exclude: 'backends/triton_ascend/'

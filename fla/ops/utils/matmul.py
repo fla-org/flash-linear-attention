@@ -87,7 +87,7 @@ def matmul_kernel(
     # Map program ids `pid` to the block of C it should compute.
     # This is done in a grouped ordering to promote L2 data reuse.
     # See above `L2 Cache Optimizations` section for details.
-    i_b, i_m, i_n = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_b, i_m, i_n = tl.program_id(0).to(tl.int64), tl.program_id(1), tl.program_id(2)
 
     NM, NN = tl.num_programs(1), tl.num_programs(2)
     i_m, i_n = tl.swizzle2d(i_m, i_n, NM, NN, G)

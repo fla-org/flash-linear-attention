@@ -55,7 +55,9 @@ def fused_recurrent_rwkv7_fwd_kernel(
     IS_VARLEN: tl.constexpr,
     IS_DECODE: tl.constexpr,
 ):
-    i_v, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
+    pid = tl.program_id(0)
+    NV = tl.cdiv(V, BV)
+    i_v, i_nh = (pid % NV).to(tl.int64), (pid // NV).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
 
     if IS_VARLEN:
@@ -145,7 +147,9 @@ def fused_recurrent_rwkv7_fwd(
     B, T, H, K, V = *k.shape, v.shape[-1]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
     BK = triton.next_power_of_2(K)
-    IS_DECODE = (T == 1)
+    # For packed varlen inputs, decode only when every sequence has exactly one token:
+    # a zero-length sequence would otherwise read/write out of bounds in the decode branch.
+    IS_DECODE = (T == 1) and (cu_seqlens is None or bool((cu_seqlens.diff() == 1).all()))
 
     h0 = initial_state
     if not output_final_state:
@@ -154,7 +158,7 @@ def fused_recurrent_rwkv7_fwd(
         ht = r.new_empty(N, H, K, V, dtype=torch.float32)
     o = torch.empty_like(v)
 
-    def grid(meta): return (triton.cdiv(V, meta['BV']), N * H)
+    def grid(meta): return (triton.cdiv(V, meta['BV']) * N * H,)
     fused_recurrent_rwkv7_fwd_kernel[grid](
         r,
         w,

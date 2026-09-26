@@ -17,9 +17,20 @@ from fla.utils import assert_close, device
 def reversed_cumsum(x, dim=-1):
     dtype = x.dtype
     x = x.float()
-    c = x.cumsum(dim)
-    y = x + c.index_select(dim, x.new_tensor([c.shape[dim]-1], dtype=torch.long)) - c
-    return y.to(dtype)
+    return x.flip(dim).cumsum(dim).flip(dim).to(dtype)
+
+
+def test_scalar_reversed_cumsum_preserves_small_suffix():
+    prefix = torch.full((32,), 1e8, dtype=torch.float, device=device)
+    suffix = torch.ones(32, dtype=torch.float, device=device)
+    s = torch.cat((prefix, suffix)).reshape(1, 64, 1)
+    expected_suffix = torch.arange(32, 0, -1, dtype=torch.float, device=device)
+
+    local = chunk_local_cumsum(s, chunk_size=64, reverse=True)
+    global_ = chunk_global_cumsum(s, reverse=True)
+
+    torch.testing.assert_close(local[0, 32:, 0], expected_suffix, rtol=0, atol=0)
+    torch.testing.assert_close(global_[0, 32:, 0], expected_suffix, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize(

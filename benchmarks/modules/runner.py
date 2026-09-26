@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -71,6 +72,10 @@ def run_module_benchmark(
         if script_file is None:
             raise ValueError("save_dir or script_file must be provided")
         save_dir = default_save_dir(script_file)
+
+    save_dir = str(Path(save_dir).resolve())
+    os.environ.setdefault('MPLBACKEND', 'Agg')
+    Path(save_dir).mkdir(parents=True, exist_ok=True)
 
     mark.run(print_data=print_data, save_path=save_dir, **run_kwargs)
 

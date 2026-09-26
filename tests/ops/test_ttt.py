@@ -215,6 +215,7 @@ def test_fused_chunk(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
     reason="Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set",
 )
+@pytest.mark.smoke
 def test_chunk_varlen(
     H: int,
     D: int,

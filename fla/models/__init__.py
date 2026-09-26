@@ -7,6 +7,7 @@
 
 from fla.models.abc import ABCConfig, ABCForCausalLM, ABCModel
 from fla.models.bitnet import BitNetConfig, BitNetForCausalLM, BitNetModel
+from fla.models.cat import CATConfig, CATForCausalLM, CATModel
 from fla.models.comba import CombaConfig, CombaForCausalLM, CombaModel
 from fla.models.delta_net import DeltaNetConfig, DeltaNetForCausalLM, DeltaNetModel
 from fla.models.deltaformer import DeltaFormerConfig, DeltaFormerForCausalLM, DeltaFormerModel
@@ -35,6 +36,16 @@ from fla.models.mom import MomConfig, MomForCausalLM, MomModel
 from fla.models.nsa import NSAConfig, NSAForCausalLM, NSAModel
 from fla.models.parallax import ParallaxConfig, ParallaxForCausalLM, ParallaxModel
 from fla.models.path_attn import PaTHAttentionConfig, PaTHAttentionForCausalLM, PaTHAttentionModel
+from fla.models.precond_gated_deltanet import (
+    PrecondGatedDeltaNetConfig,
+    PrecondGatedDeltaNetForCausalLM,
+    PrecondGatedDeltaNetModel,
+)
+from fla.models.precond_kda import (
+    PrecondKDAConfig,
+    PrecondKDAForCausalLM,
+    PrecondKDAModel,
+)
 from fla.models.raven import RavenConfig, RavenForCausalLM, RavenModel
 from fla.models.retnet import RetNetConfig, RetNetForCausalLM, RetNetModel
 from fla.models.rodimus import RodimusConfig, RodimusForCausalLM, RodimusModel
@@ -52,6 +63,9 @@ __all__ = [
     'BitNetConfig',
     'BitNetForCausalLM',
     'BitNetModel',
+    'CATConfig',
+    'CATForCausalLM',
+    'CATModel',
     'CombaConfig',
     'CombaForCausalLM',
     'CombaModel',
@@ -124,6 +138,12 @@ __all__ = [
     'ParallaxConfig',
     'ParallaxForCausalLM',
     'ParallaxModel',
+    'PrecondGatedDeltaNetConfig',
+    'PrecondGatedDeltaNetForCausalLM',
+    'PrecondGatedDeltaNetModel',
+    'PrecondKDAConfig',
+    'PrecondKDAForCausalLM',
+    'PrecondKDAModel',
     'RWKV6Config',
     'RWKV6ForCausalLM',
     'RWKV6Model',

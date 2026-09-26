@@ -132,6 +132,8 @@ class TokenShiftCPFunction(torch.autograd.Function):
     ):
         if cp_context is None:
             raise ValueError("cp_context must be provided for TokenShiftCPFunction")
+        if cp_context.layout != 'contiguous':
+            raise NotImplementedError(f"token_shift CP does not support layout {cp_context.layout!r}")
 
         cu_seqlens = cp_context.cu_seqlens
         group = cp_context.group
