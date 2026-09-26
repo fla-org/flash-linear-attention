@@ -24,10 +24,10 @@ def naive_parallel_attn(
     Reference PyTorch implementation of parallel attention that returns both output and max_logits.
 
     Args:
-        q: [B, T, HQ, D]
-        k: [B, T, H, D]
-        v: [B, T, H, D]
-        scale: float, optional. If None, defaults to 1 / sqrt(D)
+        q: [B, T, HQ, K]
+        k: [B, T, H, K]
+        v: [B, T, H, V]
+        scale: float, optional. If None, defaults to 1 / sqrt(K)
         window_size: int, optional. If provided, each query at position i only attends to
             keys in [i - window_size + 1, i]. If None, full causal attention is used.
         causal: bool, default True
@@ -40,21 +40,22 @@ def naive_parallel_attn(
             mass but does not contribute to the output.
 
     Returns:
-        output: [B, T, HQ, D]
+        output: [B, T, HQ, V]
         max_logits: [B, T, HQ]
     """
-    B, T, HQ, D = q.shape
+    B, T, HQ, K = q.shape
+    V = v.shape[-1]
     H = k.shape[2]
     G = HQ // H
 
     if scale is None:
-        scale = D ** -0.5
+        scale = K ** -0.5
 
-    # reshape q to separate groups: [B, T, HQ, D] -> [B, T, H, G, D]
-    q = q.reshape(B, T, H, G, D)
+    # reshape q to separate groups: [B, T, HQ, K] -> [B, T, H, G, K]
+    q = q.reshape(B, T, H, G, K)
 
     # compute attention scores via einsum: [B, H, G, T, T]
-    # k is [B, T, H, D] — no group dim, so each group shares the same k
+    # k is [B, T, H, K] — no group dim, so each group shares the same k
     scores = torch.einsum('bqhgd,bkhd->bhgqk', q, k) * scale
 
     # apply causal mask
@@ -79,15 +80,15 @@ def naive_parallel_attn(
         max_logits = torch.maximum(max_logits, sink_bias_logits)
 
     if sink_bias is None:
-        # compute output via einsum: [B, H, G, T, T] x [B, T, H, D] -> [B, T, H, G, D]
+        # compute output via einsum: [B, H, G, T, T] x [B, T, H, V] -> [B, T, H, G, V]
         attn_weights = F.softmax(scores, dim=-1)
-        output = torch.einsum('bhgqk,bkhd->bqhgd', attn_weights, v).reshape(B, T, HQ, D)
+        output = torch.einsum('bhgqk,bkhd->bqhgd', attn_weights, v).reshape(B, T, HQ, V)
     else:
         probs_unnorm = torch.exp(scores - max_logits[..., None])
         sink_bias_unnorm = torch.exp(sink_bias_logits - max_logits)
         denom = probs_unnorm.sum(dim=-1) + sink_bias_unnorm
         output = torch.einsum('bhgqk,bkhd->bqhgd', probs_unnorm, v)
-        output = (output / denom.permute(0, 3, 1, 2)[..., None]).reshape(B, T, HQ, D)
+        output = (output / denom.permute(0, 3, 1, 2)[..., None]).reshape(B, T, HQ, V)
 
     return output, max_logits.permute(0, 3, 1, 2).reshape(B, T, HQ)
 
