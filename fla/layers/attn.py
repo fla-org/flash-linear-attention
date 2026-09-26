@@ -156,7 +156,10 @@ class Attention(nn.Module):
                 window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0),
             )
             o = pad_input(o, indices_q, batch_size, q_len)
-        elif cu_seqlens is not None:
+        elif cu_seqlens is not None or q_len == k.shape[1]:
+            if cu_seqlens is None:
+                # same kernel as packed input; the dense kernel may pick split-KV, which drifts in bf16
+                cu_seqlens = torch.arange(0, (batch_size + 1) * q_len, q_len, dtype=torch.int32, device=q.device)
             o = flash_attn_varlen_func(
                 rearrange(q, 'b l ... -> (b l) ...').contiguous(),
                 rearrange(k, 'b l ... -> (b l) ...').contiguous(),
