@@ -10,7 +10,6 @@ import torch
 
 from fla.layers.linear_attn import LinearAttention
 from fla.models.utils import Cache
-from fla.modules import RMSNorm
 from fla.ops.linear_attn import chunk_linear_attn, fused_chunk_linear_attn, fused_recurrent_linear_attn
 from fla.ops.linear_attn.naive import naive_chunk_linear_attn, naive_recurrent_linear_attn
 from fla.utils import assert_close, device
@@ -357,9 +356,9 @@ def test_normalize_zinit_grad(fn, B: int, T: int, split: int, H: int, D: int):
 
 
 @pytest.mark.smoke
-@pytest.mark.parametrize('dtype', [torch.float32, torch.bfloat16, torch.float16])
-@pytest.mark.parametrize('packed', [False, True])
-def test_layer_padding_grad(dtype, packed):
+@pytest.mark.parametrize('dtype', [torch.float32, torch.bfloat16, torch.float16], ids=['fp32', 'bf16', 'fp16'])
+@pytest.mark.parametrize('packed', [False, True], ids=['padded', 'packed'])
+def test_layer_padding_grad(dtype: torch.dtype, packed: bool):
     torch.manual_seed(42)
     layer = LinearAttention(
         hidden_size=128,
@@ -367,16 +366,21 @@ def test_layer_padding_grad(dtype, packed):
         feature_map='elu',
         norm_k=True,
         do_feature_map_norm=True,
-        output_norm='identity',
         layer_idx=0,
     ).to(device=device, dtype=dtype)
     x = torch.randn(3, 73, 128, device=device, dtype=dtype, requires_grad=True)
     mask = torch.zeros(3, 73, device=device, dtype=torch.bool)
-    mask[1, 7:72], mask[2, :67] = True, True
+    mask[1, 7:72] = True
+    mask[2, :67] = True
     cu_seqlens = torch.tensor([0, 0, 65, 132], device=device, dtype=torch.int32)
-    refs = [layer(x[i:i+1, mask[i]], past_key_values=Cache(), use_cache=True) for i in [1, 2]]
-    ref = torch.cat([r[0].squeeze(0) for r in refs])
-    ref_z = refs[-1][2][0]['recurrent_state'][1].sum()
+
+    refs = []
+    for i in [1, 2]:
+        ref, _, ref_cache = layer(x[i:i+1, mask[i]], past_key_values=Cache(), use_cache=True)
+        refs.append(ref.squeeze(0))
+    ref = torch.cat(refs)
+    ref_z = ref_cache[0]['recurrent_state'][1][-1]
+
     cache = Cache()
     if packed:
         out = layer(x[mask].unsqueeze(0), past_key_values=cache, use_cache=True, cu_seqlens=cu_seqlens)[0].squeeze(0)
@@ -384,51 +388,58 @@ def test_layer_padding_grad(dtype, packed):
         out = layer(x, attention_mask=mask, past_key_values=cache, use_cache=True)[0]
         assert torch.count_nonzero(out[~mask]) == 0
         out = out[mask]
+    z = cache[0]['recurrent_state'][1][-1]
     assert_close('o', ref, out, 1e-3)
+
+    # a loss on the last sequence must not affect the preceding sequences
     do = torch.zeros_like(ref)
     do[65:] = torch.randn_like(ref[65:])
-    inputs = (x, *layer.parameters())
-    ref_grads = torch.autograd.grad((ref * do).sum() + ref_z, inputs)
-    grads = torch.autograd.grad((out * do).sum() + cache[0]['recurrent_state'][1][-1].sum(), inputs)
+    inputs = {'x': x, **dict(layer.named_parameters())}
+    ref_grads = torch.autograd.grad((ref * do).sum() + ref_z.sum(), tuple(inputs.values()))
+    grads = torch.autograd.grad((out * do).sum() + z.sum(), tuple(inputs.values()))
     assert torch.count_nonzero(grads[0][~mask]) == 0
     assert torch.count_nonzero(grads[0][1]) == 0
-    for ref_grad, grad in zip(ref_grads, grads):
-        assert_close('grad', ref_grad, grad, 1e-3)
-    layer.norm = RMSNorm(layer.head_v_dim).to(device=device, dtype=dtype)
+    for name, ref_grad, grad in zip(inputs, ref_grads, grads):
+        assert_close(f'd{name}', ref_grad, grad, 1e-3)
+
     out = layer(x, attention_mask=torch.zeros_like(mask))[0]
     assert torch.count_nonzero(out) == 0
-    for grad in torch.autograd.grad(out.sum(), (x, *layer.parameters())):
+    for grad in torch.autograd.grad(out.sum(), tuple(inputs.values())):
         assert torch.count_nonzero(grad) == 0
 
 
 @pytest.mark.smoke
-@pytest.mark.parametrize('dtype', [torch.float32, torch.bfloat16, torch.float16])
+@pytest.mark.parametrize('dtype', [torch.float32, torch.bfloat16, torch.float16], ids=['fp32', 'bf16', 'fp16'])
 @pytest.mark.parametrize('mode', ['chunk', 'fused_chunk', 'fused_recurrent'])
-@pytest.mark.parametrize('lengths', [(0, 65, 67), (0, 0, 0)])
+@pytest.mark.parametrize('lengths', [(0, 65, 67), (0, 0, 0)], ids=['mixed', 'empty'])
 @torch.no_grad()
-def test_layer_padding_cache(dtype, mode, lengths):
+def test_layer_padding_cache(dtype: torch.dtype, mode: str, lengths: tuple[int, ...]):
     torch.manual_seed(42)
     layer = LinearAttention(
+        mode=mode,
         hidden_size=128,
         num_heads=2,
         feature_map='elu',
         do_feature_map_norm=True,
-        output_norm='identity',
-        mode=mode,
         layer_idx=0,
     ).to(device=device, dtype=dtype)
     x = torch.randn(3, 73, 128, device=device, dtype=dtype)
     mask = torch.arange(73, device=device)[None] < torch.tensor(lengths, device=device)[:, None]
+
     out, _, cache = layer(x, attention_mask=mask, past_key_values=Cache(), use_cache=True)
     assert torch.count_nonzero(out[~mask]) == 0
-    states = cache[0]['recurrent_state']
+    states = tuple(state.clone() for state in cache[0]['recurrent_state'])
+
     next_x = torch.randn(3, 1, 128, device=device, dtype=dtype)
-    layer(next_x, attention_mask=torch.zeros_like(mask[:, :1]), past_key_values=cache, use_cache=True)
+    mask = torch.cat([mask, torch.zeros_like(mask[:, :1])], dim=1)
+    layer(next_x, attention_mask=mask, past_key_values=cache, use_cache=True)
     for before, after in zip(states, cache[0]['recurrent_state']):
         torch.testing.assert_close(before, after, rtol=0, atol=0)
-    next_mask = torch.cat([mask, torch.ones_like(mask[:, :1])], dim=1)
-    next_out = layer(next_x, attention_mask=next_mask, past_key_values=cache, use_cache=True)[0]
-    assert cache.get_seq_length(0) == 75
+
+    mask = torch.cat([mask, torch.ones_like(mask[:, :1])], dim=1)
+    next_out = layer(next_x, attention_mask=mask, past_key_values=cache, use_cache=True)[0]
+    assert cache.get_seq_length(0) == x.shape[1] + 2
+
     for i, length in enumerate(lengths):
         ref_cache = Cache()
         if length:
