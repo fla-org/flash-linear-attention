@@ -452,7 +452,7 @@ def chunk_rwkv6_bwd_kernel_dh(
     USE_FINAL_STATE_GRADIENT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_v, i_nh = unflatten_program_id(NX=tl.cdiv(K, BK), NY=tl.cdiv(V, BV))
+    i_k, i_v, i_nh = unflatten_program_id(X=tl.cdiv(K, BK), Y=tl.cdiv(V, BV))
     i_n, i_hq = i_nh // HQ, i_nh % HQ
     i_h = i_hq // NG
     if IS_VARLEN:

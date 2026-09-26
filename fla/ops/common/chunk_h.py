@@ -63,7 +63,7 @@ def chunk_fwd_kernel_h(
     IS_VARLEN: tl.constexpr,
     STATE_V_FIRST: tl.constexpr,
 ):
-    i_k, i_v, i_nh = unflatten_program_id(NX=tl.cdiv(K, BK), NY=tl.cdiv(V, BV))
+    i_k, i_v, i_nh = unflatten_program_id(X=tl.cdiv(K, BK), Y=tl.cdiv(V, BV))
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
@@ -211,7 +211,7 @@ def chunk_bwd_kernel_dh(
     IS_VARLEN: tl.constexpr,
     STATE_V_FIRST: tl.constexpr,
 ):
-    i_k, i_v, i_nh = unflatten_program_id(NX=tl.cdiv(K, BK), NY=tl.cdiv(V, BV))
+    i_k, i_v, i_nh = unflatten_program_id(X=tl.cdiv(K, BK), Y=tl.cdiv(V, BV))
     i_n, i_hq = i_nh // HQ, i_nh % HQ
     i_h = i_hq // NG
     if IS_VARLEN:

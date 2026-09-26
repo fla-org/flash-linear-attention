@@ -220,7 +220,7 @@ def chunk_global_cumsum_vector_kernel(
     HAS_SCALE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_s, i_nh = unflatten_program_id(NX=tl.cdiv(S, BS))
+    i_s, i_nh = unflatten_program_id(X=tl.cdiv(S, BS))
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)

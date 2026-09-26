@@ -15,13 +15,13 @@ from fla.utils import IS_GATHER_SUPPORTED, IS_NVIDIA_BLACKWELL
 
 
 @triton.jit
-def unflatten_program_id(NX: tl.constexpr, NY: tl.constexpr = None):
+def unflatten_program_id(X: tl.constexpr, Y: tl.constexpr = None):
     """Recover x-fastest 2D/3D indices from a 1D launch that avoids CUDA's y/z grid limits."""
     pid = tl.program_id(0)
-    if NY is None:
-        return pid % NX, (pid // NX).to(tl.int64)
+    if Y is None:
+        return pid % X, (pid // X).to(tl.int64)
     else:
-        return pid % NX, (pid // NX) % NY, (pid // (NX * NY)).to(tl.int64)
+        return pid % X, (pid // X) % Y, (pid // (X * Y)).to(tl.int64)
 
 
 if os.environ.get('FLA_USE_FAST_OPS', '0') == '1':
