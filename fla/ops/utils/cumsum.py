@@ -12,6 +12,7 @@ import triton.language as tl
 from fla.ops.backends import dispatch
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.index import prepare_chunk_indices
+from fla.ops.utils.op import unflatten_program_id
 from fla.utils import autotune_cache_kwargs, check_shared_mem, input_guard
 
 BS_LIST = [32, 64] if check_shared_mem() else [16, 32]
@@ -219,11 +220,7 @@ def chunk_global_cumsum_vector_kernel(
     HAS_SCALE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    # grid dims 1 and 2 are capped at 65535 blocks, so fold the whole grid into dim 0
-    pid = tl.program_id(0)
-    NS = tl.cdiv(S, BS)
-    i_s = pid % NS
-    i_nh = (pid // NS).to(tl.int64)
+    i_s, i_nh = unflatten_program_id(NX=tl.cdiv(S, BS))
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)

@@ -11,7 +11,7 @@ import triton.language as tl
 
 from fla.ops.backends import dispatch
 from fla.ops.utils import prepare_chunk_offsets
-from fla.ops.utils.op import exp2
+from fla.ops.utils.op import exp2, unflatten_program_id
 from fla.utils import IS_NVIDIA_HOPPER, autotune_cache_kwargs, check_shared_mem
 
 BKV_LIST = [32, 64] if check_shared_mem() else [16, 32]
@@ -63,13 +63,7 @@ def chunk_fwd_kernel_h(
     IS_VARLEN: tl.constexpr,
     STATE_V_FIRST: tl.constexpr,
 ):
-    # grid dims 1 and 2 are capped at 65535 blocks, so fold the whole grid into dim 0
-    pid = tl.program_id(0)
-    NK = tl.cdiv(K, BK)
-    NV = tl.cdiv(V, BV)
-    i_k = pid % NK
-    i_v = (pid // NK) % NV
-    i_nh = (pid // (NK * NV)).to(tl.int64)
+    i_k, i_v, i_nh = unflatten_program_id(NX=tl.cdiv(K, BK), NY=tl.cdiv(V, BV))
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
@@ -217,13 +211,7 @@ def chunk_bwd_kernel_dh(
     IS_VARLEN: tl.constexpr,
     STATE_V_FIRST: tl.constexpr,
 ):
-    # grid dims 1 and 2 are capped at 65535 blocks, so fold the whole grid into dim 0
-    pid = tl.program_id(0)
-    NK = tl.cdiv(K, BK)
-    NV = tl.cdiv(V, BV)
-    i_k = pid % NK
-    i_v = (pid // NK) % NV
-    i_nh = (pid // (NK * NV)).to(tl.int64)
+    i_k, i_v, i_nh = unflatten_program_id(NX=tl.cdiv(K, BK), NY=tl.cdiv(V, BV))
     i_n, i_hq = i_nh // HQ, i_nh % HQ
     i_h = i_hq // NG
     if IS_VARLEN:

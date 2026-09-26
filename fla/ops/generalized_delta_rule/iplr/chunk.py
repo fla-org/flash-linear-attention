@@ -11,6 +11,7 @@ import triton.language as tl
 
 from fla.ops.generalized_delta_rule.iplr.wy_fast import prepare_wy_repr_fwd
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
+from fla.ops.utils.op import unflatten_program_id
 from fla.utils import (
     autocast_custom_bwd,
     autocast_custom_fwd,
@@ -60,13 +61,7 @@ def chunk_generalized_iplr_delta_rule_fwd_kernel_h(
     STORE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    # grid dims 1 and 2 are capped at 65535 blocks, so fold the whole grid into dim 0
-    pid = tl.program_id(0)
-    NK = tl.cdiv(K, BK)
-    NV = tl.cdiv(V, BV)
-    i_k = pid % NK
-    i_v = (pid // NK) % NV
-    i_nh = (pid // (NK * NV)).to(tl.int64)
+    i_k, i_v, i_nh = unflatten_program_id(NX=tl.cdiv(K, BK), NY=tl.cdiv(V, BV))
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)

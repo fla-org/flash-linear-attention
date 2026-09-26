@@ -14,7 +14,7 @@ from fla.ops.common.chunk_h import chunk_fwd_h
 from fla.ops.gla.chunk import chunk_gla_bwd_dA, chunk_gla_bwd_dv, chunk_gla_fwd_o_gk
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 from fla.ops.utils.constant import RCP_LN2
-from fla.ops.utils.op import exp2
+from fla.ops.utils.op import exp2, unflatten_program_id
 from fla.utils import (
     autocast_custom_bwd,
     autocast_custom_fwd,
@@ -452,13 +452,7 @@ def chunk_rwkv6_bwd_kernel_dh(
     USE_FINAL_STATE_GRADIENT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    # grid dims 1 and 2 are capped at 65535 blocks, so fold the whole grid into dim 0
-    pid = tl.program_id(0)
-    NK = tl.cdiv(K, BK)
-    NV = tl.cdiv(V, BV)
-    i_k = pid % NK
-    i_v = (pid // NK) % NV
-    i_nh = (pid // (NK * NV)).to(tl.int64)
+    i_k, i_v, i_nh = unflatten_program_id(NX=tl.cdiv(K, BK), NY=tl.cdiv(V, BV))
     i_n, i_hq = i_nh // HQ, i_nh % HQ
     i_h = i_hq // NG
     if IS_VARLEN:
