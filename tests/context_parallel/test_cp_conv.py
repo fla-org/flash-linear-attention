@@ -95,6 +95,7 @@ def run_cp_conv_test_worker(
     lengths: list[int],
     dtype,
     layout: str = 'contiguous',
+    backend: str = 'triton',
 ):
     """
     Worker function for CP convolution test.
@@ -197,6 +198,7 @@ def run_cp_conv_test_worker(
             bias=bias_local,
             activation=activation,
             cp_context=context,
+            backend=backend,
         )
 
         # CP Backward
@@ -253,15 +255,18 @@ def run_cp_test_with_spawn(
     lengths: list[int],
     dtype=torch.float32,
     layout: str = 'contiguous',
+    backend: str = 'triton',
 ):
     """
     Run CP test using torch.multiprocessing.spawn.
     This allows running the test directly with pytest.
     """
+    if backend == 'cuda':
+        pytest.importorskip('causal_conv1d')
     # Use start_processes with spawn to avoid fork/spawn conflicts
     mp.start_processes(
         run_cp_conv_test_worker,
-        args=(world_size, test_name, T, D, W, lengths, dtype, layout),
+        args=(world_size, test_name, T, D, W, lengths, dtype, layout, backend),
         nprocs=world_size,
         join=True,
         start_method='spawn',
@@ -340,7 +345,8 @@ def test_cp4_zigzag_boundary_aligned():
     )
 
 
-def test_cp2_sequence_cut():
+@pytest.mark.parametrize("backend", ["triton", "cuda"])
+def test_cp2_sequence_cut(backend):
     """
     Test Case 1: CP2 with sequences cut in the middle.
 
@@ -361,10 +367,12 @@ def test_cp2_sequence_cut():
         W=4,
         lengths=[300, 400, 324],
         dtype=torch.float32,
+        backend=backend,
     )
 
 
-def test_cp2_boundary_aligned():
+@pytest.mark.parametrize("backend", ["triton", "cuda"])
+def test_cp2_boundary_aligned(backend):
     """
     Test Case 2: CP2 with sequence boundaries aligned with rank boundaries.
 
@@ -386,10 +394,12 @@ def test_cp2_boundary_aligned():
         W=4,
         lengths=[512, 512],
         dtype=torch.float32,
+        backend=backend,
     )
 
 
-def test_cp4_complex():
+@pytest.mark.parametrize("backend", ["triton", "cuda"])
+def test_cp4_complex(backend):
     """
     Test Case 3: CP4 with complex sequence distribution.
 
@@ -412,10 +422,12 @@ def test_cp4_complex():
         W=4,
         lengths=[700, 324],
         dtype=torch.float32,
+        backend=backend,
     )
 
 
-def test_cp4_single_sequence():
+@pytest.mark.parametrize("backend", ["triton", "cuda"])
+def test_cp4_single_sequence(backend):
     """
     Test Case 4: CP4 with a single long sequence spanning all ranks.
 
@@ -435,10 +447,12 @@ def test_cp4_single_sequence():
         W=4,
         lengths=[1024],
         dtype=torch.float32,
+        backend=backend,
     )
 
 
-def test_cp2_many_short_sequences():
+@pytest.mark.parametrize("backend", ["triton", "cuda"])
+def test_cp2_many_short_sequences(backend):
     """
     Test Case 5: CP2 with many short sequences.
 
@@ -458,6 +472,7 @@ def test_cp2_many_short_sequences():
         W=4,
         lengths=[100, 150, 200, 250, 124, 100, 100],
         dtype=torch.float32,
+        backend=backend,
     )
 
 
@@ -471,7 +486,7 @@ def test_cp2_many_short_sequences():
 # reads from dy and producing NaN in dw.
 # ============================================================
 
-@pytest.mark.parametrize("backend", ["triton"])
+@pytest.mark.parametrize("backend", ["triton", "cuda"])
 def test_cp2_short_tail_len1(backend):
     """
     CP2: seq0 has 513 tokens, so rank 1 gets a length-1 tail (T=1 < W=4).
@@ -490,10 +505,11 @@ def test_cp2_short_tail_len1(backend):
         W=4,
         lengths=[513, 511],
         dtype=torch.float32,
+        backend=backend,
     )
 
 
-@pytest.mark.parametrize("backend", ["triton"])
+@pytest.mark.parametrize("backend", ["triton", "cuda"])
 def test_cp2_short_tail_len2(backend):
     """
     CP2: seq0 has 514 tokens, so rank 1 gets a length-2 tail (T=2 < W=4).
@@ -511,10 +527,11 @@ def test_cp2_short_tail_len2(backend):
         W=4,
         lengths=[514, 510],
         dtype=torch.float32,
+        backend=backend,
     )
 
 
-@pytest.mark.parametrize("backend", ["triton"])
+@pytest.mark.parametrize("backend", ["triton", "cuda"])
 def test_cp4_every_rank_gets_short_tail(backend):
     """
     CP4: every non-first rank gets a length-1 local sequence tail.
@@ -538,10 +555,11 @@ def test_cp4_every_rank_gets_short_tail(backend):
         W=4,
         lengths=[257, 255, 257, 255],
         dtype=torch.float32,
+        backend=backend,
     )
 
 
-@pytest.mark.parametrize("backend", ["triton"])
+@pytest.mark.parametrize("backend", ["triton", "cuda"])
 def test_cp2_multiple_short_tails(backend):
     """
     CP2: multiple sequences each end 1 token into rank 1.
@@ -561,10 +579,11 @@ def test_cp2_multiple_short_tails(backend):
         W=4,
         lengths=[200, 313, 511],
         dtype=torch.float32,
+        backend=backend,
     )
 
 
-@pytest.mark.parametrize("backend", ["triton"])
+@pytest.mark.parametrize("backend", ["triton", "cuda"])
 def test_cp2_global_len1_sequence(backend):
     """
     CP2: a globally length-1 sequence sits right at the rank boundary.
@@ -586,10 +605,11 @@ def test_cp2_global_len1_sequence(backend):
         W=4,
         lengths=[512, 1, 511],
         dtype=torch.float32,
+        backend=backend,
     )
 
 
-@pytest.mark.parametrize("backend", ["triton"])
+@pytest.mark.parametrize("backend", ["triton", "cuda"])
 def test_cp4_multiple_short_tails(backend):
     """
     CP4: multiple sequences each end 1-2 tokens past a rank boundary,
@@ -614,10 +634,11 @@ def test_cp4_multiple_short_tails(backend):
         W=4,
         lengths=[257, 253, 257, 257],
         dtype=torch.float32,
+        backend=backend,
     )
 
 
-@pytest.mark.parametrize("backend", ["triton"])
+@pytest.mark.parametrize("backend", ["triton", "cuda"])
 def test_cp4_worst_case_many_len1(backend):
     """
     CP4: globally length-1 sequences + short tails across multiple ranks.
@@ -639,6 +660,7 @@ def test_cp4_worst_case_many_len1(backend):
         W=4,
         lengths=[257, 1, 253, 257, 1, 253, 2],
         dtype=torch.float32,
+        backend=backend,
     )
 
 
