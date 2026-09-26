@@ -205,12 +205,7 @@ def mean_pooling(
     x: torch.Tensor,
     chunk_size: int,
     cu_seqlens: torch.LongTensor | None = None,
-    **kwargs,
 ) -> torch.Tensor:
-    if 'head_first' in kwargs:
-        raise DeprecationWarning(
-            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
-        )
     if cu_seqlens is not None:
         if x.shape[0] != 1:
             raise ValueError(

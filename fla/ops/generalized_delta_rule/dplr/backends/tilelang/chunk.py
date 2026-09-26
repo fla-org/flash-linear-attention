@@ -1349,15 +1349,8 @@ def chunk_dplr_delta_rule_tilelang(
     chunk_size: int | None = None,
     disable_recompute: bool = False,
     cp_context=None,
-    **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     del cu_seqlens_cpu, safe_gate
-    if "head_first" in kwargs:
-        raise DeprecationWarning(
-            "head_first has been removed; inputs must use [B, T, H, ...]"
-        )
-    if kwargs:
-        raise TypeError(f"unexpected DPLR kwargs: {', '.join(sorted(kwargs))}")
     if cp_context is not None:
         assert initial_state is None, "Initial state is not supported for CP"
         assert output_final_state is False, "Output final state is not supported for CP"

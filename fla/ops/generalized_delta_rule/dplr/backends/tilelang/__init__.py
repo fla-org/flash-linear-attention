@@ -59,7 +59,6 @@ class DPLRTileLangBackend(BaseBackend):
         disable_recompute: bool = False,
         cp_context=None,
         lower_bound: float | None = None,
-        **kwargs,
     ) -> tuple[bool, str | None]:
         if lower_bound is not None and lower_bound >= 0:
             # rejected so the default implementation surfaces the ValueError
@@ -204,7 +203,6 @@ class DPLRTileLangBackend(BaseBackend):
         disable_recompute: bool = False,
         cp_context=None,
         lower_bound: float | None = None,
-        **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         from fla.ops.generalized_delta_rule.dplr.backends.tilelang.chunk import (
             chunk_dplr_delta_rule_tilelang,

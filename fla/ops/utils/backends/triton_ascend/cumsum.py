@@ -341,12 +341,7 @@ def chunk_local_cumsum_scalar_npu(
     output_dtype: torch.dtype | None = torch.float,
     chunk_indices: torch.LongTensor | None = None,
     use_graph: bool = False,
-    **kwargs,
 ) -> torch.Tensor:
-    if 'head_first' in kwargs:
-        raise DeprecationWarning(
-            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
-        )
     B, T, H = g.shape
     assert chunk_size == 2**(chunk_size.bit_length()-1), "chunk_size must be a power of 2"
     if chunk_indices is None and cu_seqlens is not None:
@@ -384,12 +379,7 @@ def chunk_local_cumsum_vector_npu(
     output_dtype: torch.dtype | None = torch.float,
     chunk_indices: torch.LongTensor | None = None,
     use_graph: bool = False,
-    **kwargs,
 ) -> torch.Tensor:
-    if 'head_first' in kwargs:
-        raise DeprecationWarning(
-            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
-        )
     B, T, H, S = g.shape
     BT = chunk_size
     if chunk_indices is None and cu_seqlens is not None:
@@ -431,12 +421,7 @@ def chunk_global_cumsum_scalar_npu(
     cu_seqlens: torch.Tensor | None = None,
     scale: float = None,
     output_dtype: torch.dtype | None = torch.float,
-    **kwargs,
 ) -> torch.Tensor:
-    if 'head_first' in kwargs:
-        raise DeprecationWarning(
-            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
-        )
     B, T, H = s.shape
     N = len(cu_seqlens) - 1 if cu_seqlens is not None else B
 
@@ -468,12 +453,7 @@ def chunk_global_cumsum_vector_npu(
     cu_seqlens: torch.Tensor | None = None,
     scale: float = None,
     output_dtype: torch.dtype | None = torch.float,
-    **kwargs,
 ) -> torch.Tensor:
-    if 'head_first' in kwargs:
-        raise DeprecationWarning(
-            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
-        )
     B, T, H, S = s.shape
     N = len(cu_seqlens) - 1 if cu_seqlens is not None else B
     BT, BS = _get_global_vector_tile_config(T, S)
@@ -516,12 +496,7 @@ def chunk_global_cumsum_npu(
     cu_seqlens: torch.Tensor | None = None,
     scale: float = None,
     output_dtype: torch.dtype | None = torch.float,
-    **kwargs,
 ) -> torch.Tensor:
-    if 'head_first' in kwargs:
-        raise DeprecationWarning(
-            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
-        )
     if cu_seqlens is not None:
         assert s.shape[0] == 1, "Only batch size 1 is supported when cu_seqlens are provided"
     if len(s.shape) == 3:
@@ -556,12 +531,7 @@ def chunk_local_cumsum_npu(
     output_dtype: torch.dtype | None = torch.float,
     chunk_indices: torch.LongTensor | None = None,
     use_graph: bool = False,
-    **kwargs,
 ) -> torch.Tensor:
-    if 'head_first' in kwargs:
-        raise DeprecationWarning(
-            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
-        )
     if cu_seqlens is not None:
         assert g.shape[0] == 1, "Only batch size 1 is supported when cu_seqlens are provided"
     if len(g.shape) == 3:

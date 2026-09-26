@@ -477,7 +477,6 @@ def chunk_dplr_delta_rule(
     disable_recompute: bool = False,
     cp_context: FLACPContext | None = None,
     lower_bound: float | None = None,
-    **kwargs,
 ):
     r"""
     Args:
@@ -538,10 +537,6 @@ def chunk_dplr_delta_rule(
             If you want to use float32, please solve the issue by yourself.""",
             category=RuntimeWarning,
             stacklevel=2,
-        )
-    if 'head_first' in kwargs:
-        raise DeprecationWarning(
-            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
         )
     if lower_bound is not None and lower_bound >= 0:
         raise ValueError(f"`lower_bound` must be negative (gk is a log-decay < 0), got {lower_bound}.")
