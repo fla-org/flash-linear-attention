@@ -354,8 +354,9 @@ def benchmark_op(
 
             def _fwdbwd_fn(inputs=inputs, do=do):
                 result = op_fn(**inputs, **call_kwargs)
-                t = result[0] if config.output_is_tuple else result
-                t.backward(do)
+                if not config.skip_backward:
+                    t = result[0] if config.output_is_tuple else result
+                    t.backward(do)
 
             _warmup_autotune(_fwdbwd_fn, device=device_name)
         except Exception as e:
