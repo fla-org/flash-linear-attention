@@ -54,6 +54,7 @@ def test_rejects_invalid_gqa_head_counts(op, HQ, H):
         ]
     ],
 )
+@pytest.mark.parametrize('strided', [False, True], ids=['contiguous', 'strided'])
 def test_decoding(
     H: int,
     HQ: int,
@@ -64,6 +65,7 @@ def test_decoding(
     do_gate_scale: bool,
     use_sink: bool,
     dtype: torch.dtype,
+    strided: bool,
 ):
     torch.manual_seed(42)
     lengths = [0, 15, 64, 127]
@@ -74,6 +76,11 @@ def test_decoding(
     g = torch.empty(1, T, HQ, dtype=dtype, device=device).uniform_(-0.1, -0.01) if use_g else None
     sink_bias = torch.randn(HQ, dtype=torch.float32, device=device) if use_sink else None
     cu_seqlens = torch.tensor([0, *torch.tensor(lengths).cumsum(0).tolist()], dtype=torch.int32, device=device)
+    if strided:
+        q, k, v, g, sink_bias, cu_seqlens = [
+            torch.stack((x, x), dim=-1)[..., 0] if x is not None else None
+            for x in (q, k, v, g, sink_bias, cu_seqlens)
+        ]
     kwargs = dict(scale=0.1, cu_seqlens=cu_seqlens, do_gate_scale=do_gate_scale, window_size=W, sink_bias=sink_bias)
 
     if W is not None and W < 0:

@@ -11,7 +11,7 @@ import triton.language as tl
 
 from fla.ops.utils.cumsum import chunk_global_cumsum
 from fla.ops.utils.op import exp
-from fla.utils import autotune_cache_kwargs, check_shared_mem
+from fla.utils import autotune_cache_kwargs, check_shared_mem, input_guard
 
 
 @triton.heuristics({
@@ -124,6 +124,7 @@ def naive_attn_decoding_kernel(
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=o_v < V)
 
 
+@input_guard
 def attn_decoding_one_step(
     q: torch.Tensor,
     k: torch.Tensor,
