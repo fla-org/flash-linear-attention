@@ -1236,20 +1236,24 @@ def test_chunk_gate_in_kernel_varlen(
         ]
     ],
 )
+@pytest.mark.parametrize('dtype', [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize('grad_scale', [1., 1e-8])
 def test_gate(
     B: int,
     T: int,
     HV: int,
     HAS_BIAS: bool,
+    dtype: torch.dtype,
+    grad_scale: float,
 ):
     torch.manual_seed(42)
-    g = torch.randn(B, T, HV, dtype=torch.float32)
+    g = torch.randn(B, T, HV, dtype=dtype)
     A_log = torch.log(torch.randn(HV, dtype=torch.float32).uniform_(1, 16))
     dt_bias = torch.randn(HV, dtype=torch.float32) if HAS_BIAS else None
     g, A_log = map(lambda x: x.to(device).requires_grad_(True), (g, A_log))
     if dt_bias is not None:
         dt_bias = dt_bias.to(device).requires_grad_(True)
-    do = torch.randn_like(g)
+    do = torch.randn_like(g, dtype=torch.float32) * grad_scale
 
     ref = naive_gdn_gate(
         g.clone(), A_log.clone(), dt_bias.clone() if dt_bias is not None else None,
@@ -1273,7 +1277,7 @@ def test_gate(
     assert_close("dg", ref_dg, tri_dg, 1e-4)
     assert_close("dA", ref_dA, tri_dA, 1e-4)
     if HAS_BIAS:
-        assert_close("dbias", ref_dbias, tri_dbias, 1e-4)
+        assert_close("dbias", ref_dbias / grad_scale, tri_dbias / grad_scale, 1e-4)
 
 
 @pytest.mark.parametrize(

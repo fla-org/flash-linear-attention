@@ -1074,6 +1074,8 @@ def test_chunk_varlen_prefill(
         ]
     ],
 )
+@pytest.mark.parametrize('dtype', [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize('grad_scale', [1., 1e-8])
 def test_gate(
     B: int,
     T: int,
@@ -1082,9 +1084,11 @@ def test_gate(
     HAS_A_LOG: bool,
     HAS_BIAS: bool,
     LOWER_BOUND: float | None,
+    dtype: torch.dtype,
+    grad_scale: float,
 ):
     torch.manual_seed(42)
-    g = torch.randn(B, T, H, D, dtype=torch.float32) * 10
+    g = torch.randn(B, T, H, D, dtype=dtype) * 10
     A_log = torch.log(torch.randn(1, 1, H, 1, dtype=torch.float32).uniform_(1, 16)) if HAS_A_LOG else None
     dt_bias = torch.randn(H * D, dtype=torch.float32) if HAS_BIAS else None
     g = g.to(device).requires_grad_(True)
@@ -1092,7 +1096,7 @@ def test_gate(
         A_log = A_log.to(device).requires_grad_(True)
     if dt_bias is not None:
         dt_bias = dt_bias.to(device).requires_grad_(True)
-    do = torch.randn_like(g).view(B, T, H, D)
+    do = torch.randn_like(g, dtype=torch.float32).view(B, T, H, D) * grad_scale
 
     if LOWER_BOUND is not None:
         ref = naive_kda_lowerbound_gate(
@@ -1134,7 +1138,7 @@ def test_gate(
     if HAS_A_LOG:
         assert_close("dA", ref_dA, tri_dA, 1e-4)
     if HAS_BIAS:
-        assert_close("dbias", ref_dbias, tri_dbias, 1e-4)
+        assert_close("dbias", ref_dbias / grad_scale, tri_dbias / grad_scale, 1e-4)
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
