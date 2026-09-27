@@ -24,7 +24,7 @@ NUM_WARPS_AUTOTUNE = [1, 2, 4, 8, 16] if IS_AMD else [1, 2, 4, 8, 16, 32]
     **autotune_cache_kwargs,
 )
 @triton.jit
-def l2norm_fwd_kernel1(
+def l2norm_fwd_kernel_row(
     x,
     y,
     rstd,
@@ -35,14 +35,14 @@ def l2norm_fwd_kernel1(
     i_t = tl.program_id(0).to(tl.int64)
     x += i_t * D
     y += i_t * D
-    # Compute mean and variance
-    cols = tl.arange(0, BD)
-    mask = cols < D
 
-    b_x = tl.load(x + cols, mask=mask, other=0.0).to(tl.float32)
+    o_d = tl.arange(0, BD)
+    mask = o_d < D
+
+    b_x = tl.load(x + o_d, mask=mask, other=0.0).to(tl.float32)
     b_rstd = 1 / tl.sqrt(tl.sum(b_x * b_x) + eps)
     b_y = b_x * b_rstd
-    tl.store(y + cols, b_y, mask=mask)
+    tl.store(y + o_d, b_y, mask=mask)
     tl.store(rstd + i_t, b_rstd)
 
 
@@ -52,7 +52,7 @@ def l2norm_fwd_kernel1(
     **autotune_cache_kwargs,
 )
 @triton.jit
-def l2norm_bwd_kernel1(
+def l2norm_bwd_kernel_row(
     y,
     rstd,
     dy,
@@ -66,13 +66,13 @@ def l2norm_bwd_kernel1(
     dx += i_t * D
     dy += i_t * D
 
-    cols = tl.arange(0, BD)
-    mask = cols < D
-    b_y = tl.load(y + cols, mask=mask, other=0.0).to(tl.float32)
+    o_d = tl.arange(0, BD)
+    mask = o_d < D
+    b_y = tl.load(y + o_d, mask=mask, other=0.0).to(tl.float32)
     b_rstd = tl.load(rstd + i_t).to(tl.float32)
-    b_dy = tl.load(dy + cols, mask=mask, other=0.0).to(tl.float32)
+    b_dy = tl.load(dy + o_d, mask=mask, other=0.0).to(tl.float32)
     b_dx = b_dy * b_rstd - tl.sum(b_dy * b_y) * b_y * b_rstd
-    tl.store(dx + cols, b_dx, mask=mask)
+    tl.store(dx + o_d, b_dx, mask=mask)
 
 
 @fla_cache_autotune(
@@ -81,7 +81,7 @@ def l2norm_bwd_kernel1(
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=["T"])
-def l2norm_fwd_kernel(
+def l2norm_fwd_kernel_tiled(
     x,
     y,
     rstd,
@@ -115,7 +115,7 @@ def l2norm_fwd_kernel(
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=["T"])
-def l2norm_bwd_kernel(
+def l2norm_bwd_kernel_tiled(
     y,
     rstd,
     dy,
@@ -152,14 +152,14 @@ def l2norm_fwd(
 ):
     x_shape_og = x.shape
     x = x.view(-1, x.shape[-1])
-    # allocate output
+
     if output_dtype is None:
         y = torch.empty_like(x)
     else:
         y = torch.empty_like(x, dtype=output_dtype)
     assert y.stride(-1) == 1
     T, D = x.shape[0], x.shape[-1]
-    # Less than 64KB per feature: enqueue fused kernel
+
     MAX_FUSED_SIZE = 65536 // x.element_size()
     BD = min(MAX_FUSED_SIZE, triton.next_power_of_2(D))
     if D > BD:
@@ -167,33 +167,15 @@ def l2norm_fwd(
 
     rstd = torch.empty((T,), dtype=torch.float32, device=x.device)
     if D <= 512:
-        # NOTE(tylerr): Avoid excessive recompilation and autotuning by tolerating a larger range
-        # of T before recompiling the kernel.
-        # NB = triton.cdiv(T, 2048)
+        # bucket token counts to limit autotuning across sequence lengths.
         NB = triton.cdiv(T, 2048 * 32)
 
         def grid(meta):
             return (triton.cdiv(T, meta["BT"]),)
 
-        l2norm_fwd_kernel[grid](
-            x=x,
-            y=y,
-            rstd=rstd,
-            eps=eps,
-            T=T,
-            D=D,
-            BD=BD,
-            NB=NB,
-        )
+        l2norm_fwd_kernel_tiled[grid](x=x, y=y, rstd=rstd, eps=eps, T=T, D=D, BD=BD, NB=NB)
     else:
-        l2norm_fwd_kernel1[(T,)](
-            x=x,
-            y=y,
-            rstd=rstd,
-            eps=eps,
-            D=D,
-            BD=BD,
-        )
+        l2norm_fwd_kernel_row[(T,)](x=x, y=y, rstd=rstd, eps=eps, D=D, BD=BD)
     return y.view(x_shape_og), rstd.view(x_shape_og[:-1])
 
 
@@ -208,45 +190,25 @@ def l2norm_bwd(
     y = y.view(-1, dy.shape[-1])
     dy = dy.view(-1, dy.shape[-1])
     assert dy.shape == y.shape
-    # allocate output
+
     dx = torch.empty_like(y)
     T, D = y.shape[0], y.shape[-1]
-    # Less than 64KB per feature: enqueue fused kernel
+
     MAX_FUSED_SIZE = 65536 // y.element_size()
     BD = min(MAX_FUSED_SIZE, triton.next_power_of_2(D))
     if D > BD:
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
 
     if D <= 512:
-        # NOTE(tylerr): Avoid excessive recompilation and autotuning by tolerating a larger range
-        # of T before recompiling the kernel.
-        # NB = triton.cdiv(T, 2048)
+        # bucket token counts to limit autotuning across sequence lengths.
         NB = triton.cdiv(T, 2048 * 32)
 
         def grid(meta):
             return (triton.cdiv(T, meta["BT"]),)
 
-        l2norm_bwd_kernel[grid](
-            y=y,
-            rstd=rstd,
-            dy=dy,
-            dx=dx,
-            eps=eps,
-            T=T,
-            D=D,
-            BD=BD,
-            NB=NB,
-        )
+        l2norm_bwd_kernel_tiled[grid](y=y, rstd=rstd, dy=dy, dx=dx, eps=eps, T=T, D=D, BD=BD, NB=NB)
     else:
-        l2norm_bwd_kernel1[(T,)](
-            y=y,
-            rstd=rstd,
-            dy=dy,
-            dx=dx,
-            eps=eps,
-            D=D,
-            BD=BD,
-        )
+        l2norm_bwd_kernel_row[(T,)](y=y, rstd=rstd, dy=dy, dx=dx, eps=eps, D=D, BD=BD)
 
     return dx.view(y_shape_og)
 
@@ -260,7 +222,7 @@ class L2NormFunction(torch.autograd.Function):
         eps=1e-6,
         output_dtype=None,
     ):
-        y, rstd = l2norm_fwd(x, eps, output_dtype)
+        y, rstd = l2norm_fwd(x=x, eps=eps, output_dtype=output_dtype)
         ctx.eps = eps
         ctx.x_dtype = x.dtype
         ctx.save_for_backward(y, rstd)
@@ -270,7 +232,7 @@ class L2NormFunction(torch.autograd.Function):
     @input_guard
     def backward(ctx, dy):
         y, rstd = ctx.saved_tensors
-        dx = l2norm_bwd(y, rstd, dy, ctx.eps)
+        dx = l2norm_bwd(y=y, rstd=rstd, dy=dy, eps=ctx.eps)
         return dx, None, None
 
 
@@ -296,4 +258,4 @@ class L2Norm(nn.Module):
         self.output_dtype = output_dtype
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return l2norm(x, self.eps, self.output_dtype)
+        return l2norm(x=x, eps=self.eps, output_dtype=self.output_dtype)

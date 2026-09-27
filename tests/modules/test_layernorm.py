@@ -12,7 +12,7 @@ from einops import rearrange
 from transformers.models.llama.modeling_llama import LlamaRMSNorm
 
 from fla.modules import GroupNorm, GroupNormLinear, LayerNorm, LayerNormLinear, RMSNorm, RMSNormLinear
-from fla.modules.layernorm import GroupNormRef
+from fla.modules.layernorm import GroupNormRef, group_norm
 from fla.utils import assert_close, device
 
 
@@ -224,12 +224,12 @@ def test_rmsnorm_linear(N: int, D: int):
 
 
 # ============================================================
-# Regression tests: layer_norm_bwd_kernel with few tokens
+# Regression tests: layer_norm_bwd_kernel_tiled with few tokens
 # ============================================================
 #
 # On GPUs with many SMs (e.g., Blackwell B200 with 160+ SMs),
 # when T (total tokens) is small relative to the SM count,
-# some Triton programs in layer_norm_bwd_kernel have no work
+# some Triton programs in layer_norm_bwd_kernel_tiled have no work
 # (i_sg * BS >= T // G). Without an early-exit guard, these
 # idle programs access invalid memory via out-of-bounds tile loads,
 # causing "CUDA error: illegal memory access."
@@ -329,3 +329,52 @@ def test_groupnorm_small_t(T: int, D: int, G: int, is_rms_norm: bool):
     ref_db = torch.autograd.grad(ref(ref_x).sum(), ref.bias)[0]
     tri_db = torch.autograd.grad(tri(x).sum(), tri.bias)[0]
     assert_close('db', ref_db, tri_db, 1e-3)
+
+
+@pytest.mark.parametrize(
+    ('T', 'D', 'G', 'dtype'),
+    [
+        pytest.param(*case, id='T{}-D{}-G{}-{}'.format(*case))
+        for case in [
+            (1, 50, 1, torch.float32),
+            (63, 200, 4, torch.float16),
+            (65, 512, 1, torch.bfloat16),
+            (33, 2052, 4, torch.bfloat16),
+        ]
+    ],
+)
+@pytest.mark.parametrize('is_rms_norm', [False, True], ids=['layer', 'rms'])
+def test_group_norm_prenorm(T: int, D: int, G: int, dtype: torch.dtype, is_rms_norm: bool):
+    torch.manual_seed(42)
+    x = torch.randn(2, T, D * 2, device=device, dtype=dtype)[..., ::2].requires_grad_(True)
+    residual = torch.randn(2, T, D, device=device, requires_grad=True)
+    weight = torch.randn(D, device=device, requires_grad=True)
+    bias = torch.randn(D, device=device, requires_grad=True)
+    inputs = (x, residual, weight, bias)
+    do, dr = torch.randn_like(x), torch.randn_like(residual)
+    tri, tri_res = group_norm(
+        x=x,
+        weight=weight,
+        bias=bias,
+        residual=residual,
+        eps=1e-5,
+        prenorm=True,
+        is_rms_norm=is_rms_norm,
+        num_groups=G,
+    )
+    tri_grads = torch.autograd.grad((tri, tri_res), inputs, (do, dr))
+
+    ref_res = x.float() + residual
+    grouped = ref_res.reshape(2, T, G, D // G)
+    if not is_rms_norm:
+        grouped = grouped - grouped.mean(-1, keepdim=True)
+    ref = ((grouped * torch.rsqrt(grouped.square().mean(-1, keepdim=True) + 1e-5)).reshape_as(x) * weight + bias).to(dtype)
+    ref_grads = torch.autograd.grad((ref, ref_res), inputs, (do, dr))
+
+    tolerance = 5e-3 if dtype == torch.bfloat16 else 1e-3
+    assert tri.dtype == dtype
+    assert tri_res.dtype == residual.dtype
+    assert_close('y', ref, tri, tolerance)
+    assert_close('residual', ref_res, tri_res, 1e-3)
+    for name, expected, actual in zip(('dx', 'dresidual', 'dw', 'db'), ref_grads, tri_grads):
+        assert_close(name, expected, actual, tolerance)

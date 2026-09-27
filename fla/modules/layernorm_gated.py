@@ -8,9 +8,7 @@
 # Copyright (c) 2024, Tri Dao.
 #
 # Based on the Triton LayerNorm tutorial: https://triton-lang.org/main/getting-started/tutorials/05-layer-norm.html
-# For the backward pass, we keep weight_grad and bias_grad in registers and accumulate.
-# This backward pass is faster for dimensions up to 8k, but after that it's much slower due to register spilling.
-# The models we train have hidden dim up to 8k anyway (e.g. Llama 70B), so this is fine.
+# accumulate affine gradients in registers; wide dimensions can cause register spilling.
 
 import math
 
@@ -48,71 +46,70 @@ def rms_norm_ref(x, weight, bias, z=None, eps=1e-6, group_size=None, norm_before
 
 
 @triton.heuristics({
-    "HAS_BIAS": lambda args: args["B"] is not None,
-    "HAS_Z": lambda args: args["Z"] is not None,
+    "HAS_BIAS": lambda args: args["b"] is not None,
+    "HAS_GATE": lambda args: args["g"] is not None,
 })
-@triton.jit
-def layer_norm_fwd_kernel(
-    X,  # pointer to the input
-    Y,  # pointer to the output
-    W,  # pointer to the weights
-    B,  # pointer to the biases
-    Z,  # pointer to the other branch
-    Mean,  # pointer to the mean
-    Rstd,  # pointer to the 1/std
-    stride_x_row,  # how much to increase the pointer when moving by 1 row
+@triton.jit(do_not_specialize=['T'])
+def layer_norm_fwd_kernel_group(
+    x,
+    y,
+    w,
+    b,
+    g,
+    mean,
+    rstd,
+    stride_x_row,
     stride_y_row,
-    stride_z_row,
-    M,  # number of rows in X
-    N,  # number of columns in X
-    eps,  # epsilon to avoid division by zero
-    BLOCK_N: tl.constexpr,
+    stride_g_row,
+    T,
+    D,
+    eps,
+    BD: tl.constexpr,
     HAS_BIAS: tl.constexpr,
-    HAS_Z: tl.constexpr,
+    HAS_GATE: tl.constexpr,
     NORM_BEFORE_GATE: tl.constexpr,
     IS_RMS_NORM: tl.constexpr,
 ):
-    # Map the program id to the row of X and Y it should compute.
-    row = tl.program_id(0).to(tl.int64)
-    group = tl.program_id(1)
-    X += row * stride_x_row + group * N
-    Y += row * stride_y_row + group * N
-    if HAS_Z:
-        Z += row * stride_z_row + group * N
+    i_t = tl.program_id(0).to(tl.int64)
+    i_g = tl.program_id(1).to(tl.int64)
+    x += i_t * stride_x_row + i_g * D
+    y += i_t * stride_y_row + i_g * D
+    if HAS_GATE:
+        g += i_t * stride_g_row + i_g * D
     if not IS_RMS_NORM:
-        Mean += group * M
-    Rstd += group * M
-    W += group * N
+        mean += i_g * T
+    rstd += i_g * T
+    w += i_g * D
     if HAS_BIAS:
-        B += group * N
-    # Compute mean and variance
-    cols = tl.arange(0, BLOCK_N)
-    x = tl.load(X + cols, mask=cols < N, other=0.).to(tl.float32)
-    if HAS_Z and not NORM_BEFORE_GATE:
-        z = tl.load(Z + cols, mask=cols < N).to(tl.float32)
-        x *= z * tl.sigmoid(z)
+        b += i_g * D
+
+    o_d = tl.arange(0, BD)
+    b_x = tl.load(x + o_d, mask=o_d < D, other=0.).to(tl.float32)
+    if HAS_GATE and not NORM_BEFORE_GATE:
+        b_g = tl.load(g + o_d, mask=o_d < D).to(tl.float32)
+        b_x *= b_g * tl.sigmoid(b_g)
     if not IS_RMS_NORM:
-        mean = tl.sum(x, axis=0) / N
-        tl.store(Mean + row, mean)
-        xbar = tl.where(cols < N, x - mean, 0.)
-        var = tl.sum(xbar * xbar, axis=0) / N
+        b_mean = tl.sum(b_x, axis=0) / D
+        tl.store(mean + i_t, b_mean)
+        b_xbar = tl.where(o_d < D, b_x - b_mean, 0.)
+        b_var = tl.sum(b_xbar * b_xbar, axis=0) / D
     else:
-        xbar = tl.where(cols < N, x, 0.)
-        var = tl.sum(xbar * xbar, axis=0) / N
-    rstd = 1 / tl.sqrt(var + eps)
-    tl.store(Rstd + row, rstd)
-    # Normalize and apply linear transformation
-    mask = cols < N
-    w = tl.load(W + cols, mask=mask).to(tl.float32)
+        b_xbar = tl.where(o_d < D, b_x, 0.)
+        b_var = tl.sum(b_xbar * b_xbar, axis=0) / D
+    b_rstd = 1 / tl.sqrt(b_var + eps)
+    tl.store(rstd + i_t, b_rstd)
+
+    m_d = o_d < D
+    b_w = tl.load(w + o_d, mask=m_d).to(tl.float32)
     if HAS_BIAS:
-        b = tl.load(B + cols, mask=mask).to(tl.float32)
-    x_hat = (x - mean) * rstd if not IS_RMS_NORM else x * rstd
-    y = x_hat * w + b if HAS_BIAS else x_hat * w
-    if HAS_Z and NORM_BEFORE_GATE:
-        z = tl.load(Z + cols, mask=mask).to(tl.float32)
-        y *= z * tl.sigmoid(z)
-    # Write output
-    tl.store(Y + cols, y, mask=mask)
+        b_b = tl.load(b + o_d, mask=m_d).to(tl.float32)
+    b_xhat = (b_x - b_mean) * b_rstd if not IS_RMS_NORM else b_x * b_rstd
+    b_y = b_xhat * b_w + b_b if HAS_BIAS else b_xhat * b_w
+    if HAS_GATE and NORM_BEFORE_GATE:
+        b_g = tl.load(g + o_d, mask=m_d).to(tl.float32)
+        b_y *= b_g * tl.sigmoid(b_g)
+
+    tl.store(y + o_d, b_y, mask=m_d)
 
 
 def layer_norm_fwd(
@@ -120,57 +117,56 @@ def layer_norm_fwd(
     weight: torch.Tensor,
     bias: torch.Tensor,
     eps: float,
-    z: torch.Tensor = None,
-    out: torch.Tensor = None,
-    group_size: int = None,
+    z: torch.Tensor | None = None,
+    out: torch.Tensor | None = None,
+    group_size: int | None = None,
     norm_before_gate: bool = True,
     is_rms_norm: bool = False,
 ):
-    M, N = x.shape
+    T, D = x.shape
     if group_size is None:
-        group_size = N
-    assert N % group_size == 0
-    ngroups = N // group_size
+        group_size = D
+    assert D % group_size == 0
+    G = D // group_size
     assert x.stride(-1) == 1
     if z is not None:
         assert z.stride(-1) == 1
-        assert z.shape == (M, N)
-    assert weight.shape == (N,)
+        assert z.shape == (T, D)
+    assert weight.shape == (D,)
     assert weight.stride(-1) == 1
     if bias is not None:
         assert bias.stride(-1) == 1
-        assert bias.shape == (N,)
-    # allocate output
+        assert bias.shape == (D,)
+
     if out is not None:
         assert out.shape == x.shape
     else:
         out = torch.empty_like(x)
     assert out.stride(-1) == 1
-    mean = torch.empty((ngroups * M, ), dtype=torch.float32, device=x.device) if not is_rms_norm else None
-    rstd = torch.empty((ngroups * M, ), dtype=torch.float32, device=x.device)
-    # Less than 64KB per feature: enqueue fused kernel
+    mean = torch.empty((G * T, ), dtype=torch.float32, device=x.device) if not is_rms_norm else None
+    rstd = torch.empty((G * T, ), dtype=torch.float32, device=x.device)
+
     MAX_FUSED_SIZE = 65536 // x.element_size()
-    BLOCK_N = min(MAX_FUSED_SIZE, triton.next_power_of_2(group_size))
-    if group_size > BLOCK_N:
+    BD = min(MAX_FUSED_SIZE, triton.next_power_of_2(group_size))
+    if group_size > BD:
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
-    # heuristics for number of warps
-    num_warps = min(max(BLOCK_N // 256, 1), 8)
-    grid = (M, ngroups)
-    layer_norm_fwd_kernel[grid](
-        x,
-        out,
-        weight,
-        bias,
-        z,
-        mean,
-        rstd,
-        x.stride(0),
-        out.stride(0),
-        z.stride(0) if z is not None else 0,
-        M,
-        group_size,
-        eps,
-        BLOCK_N=BLOCK_N,
+    num_warps = min(max(BD // 256, 1), 8)
+    grid = (T, G)
+    layer_norm_fwd_kernel_group[grid](
+        x=x,
+        y=out,
+        w=weight,
+        b=bias,
+        g=z,
+        mean=mean,
+        rstd=rstd,
+        stride_x_row=x.stride(0),
+        stride_y_row=out.stride(0),
+        stride_g_row=z.stride(0) if z is not None else 0,
+        T=T,
+        D=group_size,
+        eps=eps,
+        BD=BD,
         NORM_BEFORE_GATE=norm_before_gate,
         IS_RMS_NORM=is_rms_norm,
         num_warps=num_warps,
@@ -179,125 +175,123 @@ def layer_norm_fwd(
 
 
 @triton.heuristics({
-    "HAS_BIAS": lambda args: args["B"] is not None,
-    "HAS_Z": lambda args: args["Z"] is not None,
-    "RECOMPUTE_OUTPUT": lambda args: args["Y"] is not None,
+    "HAS_BIAS": lambda args: args["b"] is not None,
+    "HAS_GATE": lambda args: args["g"] is not None,
+    "RECOMPUTE_OUTPUT": lambda args: args["y"] is not None,
 })
-@triton.jit
-def layer_norm_bwd_kernel(
-    X,   # pointer to the input
-    W,   # pointer to the weights
-    B,   # pointer to the biases
-    Z,   # pointer to the other branch
-    Y,   # pointer to the output to be recomputed
-    DY,  # pointer to the output gradient
-    DX,  # pointer to the input gradient
-    DW,  # pointer to the partial sum of weights gradient
-    DB,  # pointer to the partial sum of biases gradient
-    DZ,  # pointer to the other branch
-    Mean,   # pointer to the mean
-    Rstd,   # pointer to the 1/std
-    stride_x_row,  # how much to increase the pointer when moving by 1 row
-    stride_z_row,
+@triton.jit(do_not_specialize=['T'])
+def layer_norm_bwd_kernel_group(
+    x,
+    w,
+    b,
+    g,
+    y,
+    dy,
+    dx,
+    dw,
+    db,
+    dg,
+    mean,
+    rstd,
+    stride_x_row,
+    stride_g_row,
     stride_y_row,
     stride_dy_row,
     stride_dx_row,
-    stride_dz_row,
+    stride_dg_row,
     stride_dw_row,
     stride_db_row,
-    M,  # number of rows in X
-    N,  # number of columns in X
-    eps,  # epsilon to avoid division by zero
-    rows_per_program,
+    T,
+    D,
+    eps,
+    BS,
     NORM_BEFORE_GATE: tl.constexpr,
     IS_RMS_NORM: tl.constexpr,
     HAS_BIAS: tl.constexpr,
-    HAS_Z: tl.constexpr,
+    HAS_GATE: tl.constexpr,
     RECOMPUTE_OUTPUT: tl.constexpr,
-    BLOCK_N: tl.constexpr,
+    BD: tl.constexpr,
 ):
-    # Map the program id to the elements of X, DX, and DY it should compute.
-    row_block_id = tl.program_id(0).to(tl.int64)
-    group = tl.program_id(1)
-    row_start = row_block_id * rows_per_program
-    cols = tl.arange(0, BLOCK_N)
-    mask = cols < N
-    X += row_start * stride_x_row + group * N
-    if HAS_Z:
-        Z += row_start * stride_z_row + group * N
-        DZ += row_start * stride_dz_row + group * N
-    DY += row_start * stride_dy_row + group * N
-    DX += row_start * stride_dx_row + group * N
+    i_s = tl.program_id(0).to(tl.int64)
+    i_g = tl.program_id(1).to(tl.int64)
+    bos = i_s * BS
+    o_d = tl.arange(0, BD)
+    m_d = o_d < D
+    x += bos * stride_x_row + i_g * D
+    if HAS_GATE:
+        g += bos * stride_g_row + i_g * D
+        dg += bos * stride_dg_row + i_g * D
+    dy += bos * stride_dy_row + i_g * D
+    dx += bos * stride_dx_row + i_g * D
     if RECOMPUTE_OUTPUT:
-        Y += row_start * stride_y_row + group * N
+        y += bos * stride_y_row + i_g * D
     if not IS_RMS_NORM:
-        Mean += group * M
-    Rstd += group * M
-    W += group * N
-    w = tl.load(W + cols, mask=mask).to(tl.float32)
-    if (RECOMPUTE_OUTPUT or HAS_Z) and HAS_BIAS:
-        B += group * N
-        b = tl.load(B + cols, mask=mask, other=0.).to(tl.float32)
-    dw = tl.zeros((BLOCK_N,), dtype=tl.float32)
+        mean += i_g * T
+    rstd += i_g * T
+    w += i_g * D
+    b_w = tl.load(w + o_d, mask=m_d).to(tl.float32)
+    if (RECOMPUTE_OUTPUT or HAS_GATE) and HAS_BIAS:
+        b += i_g * D
+        b_b = tl.load(b + o_d, mask=m_d, other=0.).to(tl.float32)
+    b_dw = tl.zeros((BD,), dtype=tl.float32)
     if HAS_BIAS:
-        db = tl.zeros((BLOCK_N,), dtype=tl.float32)
-    row_end = min((row_block_id + 1) * rows_per_program, M)
-    for row in range(row_start, row_end):
-        # Load data to SRAM
-        x = tl.load(X + cols, mask=mask, other=0).to(tl.float32)
-        dy = tl.load(DY + cols, mask=mask, other=0).to(tl.float32)
+        b_db = tl.zeros((BD,), dtype=tl.float32)
+    eos = min((i_s + 1) * BS, T)
+    for i_t in range(bos, eos):
+        b_x = tl.load(x + o_d, mask=m_d, other=0).to(tl.float32)
+        b_dy = tl.load(dy + o_d, mask=m_d, other=0).to(tl.float32)
         if not IS_RMS_NORM:
-            mean = tl.load(Mean + row)
-        if HAS_Z and not NORM_BEFORE_GATE:
-            z = tl.load(Z + cols, mask=mask, other=0.).to(tl.float32)
-            x_og = x
-            x = x_og * z * tl.sigmoid(z)
-        rstd = tl.load(Rstd + row)
-        # Compute dx
-        xhat = (x - mean) * rstd if not IS_RMS_NORM else x * rstd
-        xhat = tl.where(mask, xhat, 0.)
-        if HAS_Z and NORM_BEFORE_GATE:
-            z = tl.load(Z + cols, mask=mask, other=0.).to(tl.float32)
-            z_sigmoid = tl.sigmoid(z)
-            y = xhat * w + b if HAS_BIAS else xhat * w
-            if RECOMPUTE_OUTPUT:
-                tl.store(Y + cols, y * z * z_sigmoid, mask=mask)
-            dz = dy * y * z_sigmoid * (1 + z * (1 - z_sigmoid))
-            tl.store(DZ + cols, dz, mask=mask)
-            dy *= z * z_sigmoid
-        else:
-            if RECOMPUTE_OUTPUT:
-                y = xhat * w + b if HAS_BIAS else xhat * w
-                tl.store(Y + cols, y, mask=mask)
-        wdy = w * dy
-        c1 = tl.sum(xhat * wdy, axis=0) / N
-        if not IS_RMS_NORM:
-            c2 = tl.sum(wdy, axis=0) / N
-            dx = (wdy - (xhat * c1 + c2)) * rstd
-        else:
-            dx = (wdy - xhat * c1) * rstd
-        dw += dy * xhat
-        if HAS_BIAS:
-            db += dy
-        if HAS_Z and not NORM_BEFORE_GATE:
-            z_sigmoid = tl.sigmoid(z)
-            dz = dx * x_og * z_sigmoid * (1 + z * (1 - z_sigmoid))
-            tl.store(DZ + cols, dz, mask=mask)
-            dx *= z * z_sigmoid
-        # Write dx
-        tl.store(DX + cols, dx, mask=mask)
+            b_mean = tl.load(mean + i_t)
+        if HAS_GATE and not NORM_BEFORE_GATE:
+            b_g = tl.load(g + o_d, mask=m_d, other=0.).to(tl.float32)
+            b_x_og = b_x
+            b_x = b_x_og * b_g * tl.sigmoid(b_g)
+        b_rstd = tl.load(rstd + i_t)
 
-        X += stride_x_row
-        if HAS_Z:
-            Z += stride_z_row
-            DZ += stride_dz_row
+        b_xhat = (b_x - b_mean) * b_rstd if not IS_RMS_NORM else b_x * b_rstd
+        b_xhat = tl.where(m_d, b_xhat, 0.)
+        if HAS_GATE and NORM_BEFORE_GATE:
+            b_g = tl.load(g + o_d, mask=m_d, other=0.).to(tl.float32)
+            b_sigmoid_g = tl.sigmoid(b_g)
+            b_y = b_xhat * b_w + b_b if HAS_BIAS else b_xhat * b_w
+            if RECOMPUTE_OUTPUT:
+                tl.store(y + o_d, b_y * b_g * b_sigmoid_g, mask=m_d)
+            b_dg = b_dy * b_y * b_sigmoid_g * (1 + b_g * (1 - b_sigmoid_g))
+            tl.store(dg + o_d, b_dg, mask=m_d)
+            b_dy *= b_g * b_sigmoid_g
+        else:
+            if RECOMPUTE_OUTPUT:
+                b_y = b_xhat * b_w + b_b if HAS_BIAS else b_xhat * b_w
+                tl.store(y + o_d, b_y, mask=m_d)
+        b_wdy = b_w * b_dy
+        b_c1 = tl.sum(b_xhat * b_wdy, axis=0) / D
+        if not IS_RMS_NORM:
+            b_c2 = tl.sum(b_wdy, axis=0) / D
+            b_dx = (b_wdy - (b_xhat * b_c1 + b_c2)) * b_rstd
+        else:
+            b_dx = (b_wdy - b_xhat * b_c1) * b_rstd
+        b_dw += b_dy * b_xhat
+        if HAS_BIAS:
+            b_db += b_dy
+        if HAS_GATE and not NORM_BEFORE_GATE:
+            b_sigmoid_g = tl.sigmoid(b_g)
+            b_dg = b_dx * b_x_og * b_sigmoid_g * (1 + b_g * (1 - b_sigmoid_g))
+            tl.store(dg + o_d, b_dg, mask=m_d)
+            b_dx *= b_g * b_sigmoid_g
+
+        tl.store(dx + o_d, b_dx, mask=m_d)
+
+        x += stride_x_row
+        if HAS_GATE:
+            g += stride_g_row
+            dg += stride_dg_row
         if RECOMPUTE_OUTPUT:
-            Y += stride_y_row
-        DY += stride_dy_row
-        DX += stride_dx_row
-    tl.store(DW + row_block_id * stride_dw_row + group * N + cols, dw, mask=mask)
+            y += stride_y_row
+        dy += stride_dy_row
+        dx += stride_dx_row
+    tl.store(dw + i_s * stride_dw_row + i_g * D + o_d, b_dw, mask=m_d)
     if HAS_BIAS:
-        tl.store(DB + row_block_id * stride_db_row + group * N + cols, db, mask=mask)
+        tl.store(db + i_s * stride_db_row + i_g * D + o_d, b_db, mask=m_d)
 
 
 def layer_norm_bwd(
@@ -308,31 +302,31 @@ def layer_norm_bwd(
     eps: float,
     mean: torch.Tensor,
     rstd: torch.Tensor,
-    z: torch.Tensor = None,
-    group_size: int = None,
+    z: torch.Tensor | None = None,
+    group_size: int | None = None,
     norm_before_gate: bool = True,
     is_rms_norm: bool = False,
     recompute_output: bool = False,
-    dz: torch.Tensor = None,
-    out: torch.Tensor = None,
+    dz: torch.Tensor | None = None,
+    out: torch.Tensor | None = None,
 ):
-    M, N = x.shape
+    T, D = x.shape
     if group_size is None:
-        group_size = N
-    assert N % group_size == 0
-    ngroups = N // group_size
+        group_size = D
+    assert D % group_size == 0
+    G = D // group_size
     assert x.stride(-1) == 1
     assert dy.stride(-1) == 1
-    assert dy.shape == (M, N)
+    assert dy.shape == (T, D)
     if z is not None:
         assert z.stride(-1) == 1
-        assert z.shape == (M, N)
-    assert weight.shape == (N,)
+        assert z.shape == (T, D)
+    assert weight.shape == (D,)
     assert weight.stride(-1) == 1
     if bias is not None:
         assert bias.stride(-1) == 1
-        assert bias.shape == (N,)
-    # allocate output
+        assert bias.shape == (D,)
+
     dx = torch.empty_like(x)
     if dz is not None:
         assert z is not None
@@ -345,47 +339,46 @@ def layer_norm_bwd(
             out = torch.empty_like(x)
         assert out.shape == x.shape
 
-    # Less than 64KB per feature: enqueue fused kernel
     MAX_FUSED_SIZE = 65536 // x.element_size()
-    BLOCK_N = min(MAX_FUSED_SIZE, triton.next_power_of_2(group_size))
-    if group_size > BLOCK_N:
+    BD = min(MAX_FUSED_SIZE, triton.next_power_of_2(group_size))
+    if group_size > BD:
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
-    # heuristics for number of warps
-    num_warps = min(max(BLOCK_N // 256, 1), 8)
+    num_warps = min(max(BD // 256, 1), 8)
     sm_count = get_multiprocessor_count(x.device.index)
-    # If group size is small (e.g., 64), we're only using 1 warp. So having just 108 programs
-    # would limit the occupancy.
-    nrow_groups = math.ceil(sm_count * math.ceil(4 / num_warps) / ngroups)
-    _dw = torch.empty((nrow_groups, N), dtype=torch.float32, device=weight.device)
-    _db = torch.empty((nrow_groups, N), dtype=torch.float32, device=bias.device) if bias is not None else None
-    rows_per_program = math.ceil(M / nrow_groups)
-    grid = (nrow_groups, ngroups)
-    layer_norm_bwd_kernel[grid](
-        x,
-        weight,
-        bias,
-        z,
-        out if recompute_output else None,
-        dy,
-        dx,
-        _dw,
-        _db,
-        dz,
-        mean,
-        rstd,
-        x.stride(0),
-        z.stride(0) if z is not None else 0,
-        0 if not recompute_output else out.stride(0),
-        dy.stride(0),
-        dx.stride(0),
-        dz.stride(0) if dz is not None else 0,
-        _dw.stride(0),
-        _db.stride(0) if _db is not None else 0,
-        M, group_size, eps,
-        rows_per_program,
-        BLOCK_N=BLOCK_N,
+    # use more programs for small groups to keep enough warps resident.
+    NS = math.ceil(sm_count * math.ceil(4 / num_warps) / G)
+    _dw = torch.empty((NS, D), dtype=torch.float32, device=weight.device)
+    _db = torch.empty((NS, D), dtype=torch.float32, device=bias.device) if bias is not None else None
+    BS = math.ceil(T / NS)
+    grid = (NS, G)
+    layer_norm_bwd_kernel_group[grid](
+        x=x,
+        w=weight,
+        b=bias,
+        g=z,
+        y=out if recompute_output else None,
+        dy=dy,
+        dx=dx,
+        dw=_dw,
+        db=_db,
+        dg=dz,
+        mean=mean,
+        rstd=rstd,
+        stride_x_row=x.stride(0),
+        stride_g_row=z.stride(0) if z is not None else 0,
+        stride_y_row=0 if not recompute_output else out.stride(0),
+        stride_dy_row=dy.stride(0),
+        stride_dx_row=dx.stride(0),
+        stride_dg_row=dz.stride(0) if dz is not None else 0,
+        stride_dw_row=_dw.stride(0),
+        stride_db_row=_db.stride(0) if _db is not None else 0,
+        T=T,
+        D=group_size,
+        eps=eps,
+        BS=BS,
         NORM_BEFORE_GATE=norm_before_gate,
         IS_RMS_NORM=is_rms_norm,
+        BD=BD,
         num_warps=num_warps,
     )
     dw = _dw.sum(0).to(weight.dtype)
@@ -395,15 +388,23 @@ def layer_norm_bwd(
 
 class LayerNormFn(torch.autograd.Function):
 
-    @input_guard
     @staticmethod
-    def forward(ctx, x, weight, bias, z=None, eps=1e-6, group_size=None, norm_before_gate=True,
-                is_rms_norm=False):
-        """If z is not None, we do norm(x) * silu(z) if norm_before_gate, else norm(x * silu(z))
-        """
+    @input_guard
+    def forward(
+        ctx,
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor | None,
+        z: torch.Tensor | None = None,
+        eps: float = 1e-6,
+        group_size: int | None = None,
+        norm_before_gate: bool = True,
+        is_rms_norm: bool = False,
+    ):
+        """Apply normalization before or after the optional SiLU gate."""
 
         x_shape_og = x.shape
-        # reshape input data into 2D tensor
+
         x = x.reshape(-1, x.shape[-1])
         if x.stride(-1) != 1:
             x = x.contiguous()
@@ -416,10 +417,10 @@ class LayerNormFn(torch.autograd.Function):
         if bias is not None:
             bias = bias.contiguous()
         y, mean, rstd = layer_norm_fwd(
-            x,
-            weight,
-            bias,
-            eps,
+            x=x,
+            weight=weight,
+            bias=bias,
+            eps=eps,
             z=z,
             group_size=group_size,
             norm_before_gate=norm_before_gate,
@@ -433,8 +434,8 @@ class LayerNormFn(torch.autograd.Function):
         ctx.is_rms_norm = is_rms_norm
         return y.reshape(x_shape_og)
 
-    @input_guard
     @staticmethod
+    @input_guard
     def backward(ctx, dy):
         x, weight, bias, mean, rstd, z = ctx.saved_tensors
         dy = dy.reshape(-1, dy.shape[-1])
@@ -442,28 +443,45 @@ class LayerNormFn(torch.autograd.Function):
             dy = dy.contiguous()
         assert dy.shape == x.shape
         dx, dw, db, dz = layer_norm_bwd(
-            dy,
-            x,
-            weight,
-            bias,
-            ctx.eps,
-            mean,
-            rstd,
-            z,
-            ctx.group_size,
-            ctx.norm_before_gate,
-            ctx.is_rms_norm,
+            dy=dy,
+            x=x,
+            weight=weight,
+            bias=bias,
+            eps=ctx.eps,
+            mean=mean,
+            rstd=rstd,
+            z=z,
+            group_size=ctx.group_size,
+            norm_before_gate=ctx.norm_before_gate,
+            is_rms_norm=ctx.is_rms_norm,
         )
         dx = dx.reshape(ctx.x_shape_og)
         dz = dz.reshape(ctx.x_shape_og) if dz is not None else None
         return dx, dw, db, dz, None, None, None, None
 
 
-def layernorm_fn(x, weight, bias, z=None, eps=1e-6, group_size=None, norm_before_gate=True, is_rms_norm=False):
+def layernorm_fn(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    z: torch.Tensor | None = None,
+    eps: float = 1e-6,
+    group_size: int | None = None,
+    norm_before_gate: bool = True,
+    is_rms_norm: bool = False,
+) -> torch.Tensor:
     return LayerNormFn.apply(x, weight, bias, z, eps, group_size, norm_before_gate, is_rms_norm)
 
 
-def rmsnorm_fn(x, weight, bias, z=None, eps=1e-6, group_size=None, norm_before_gate=True):
+def rmsnorm_fn(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    z: torch.Tensor | None = None,
+    eps: float = 1e-6,
+    group_size: int | None = None,
+    norm_before_gate: bool = True,
+) -> torch.Tensor:
     return LayerNormFn.apply(x, weight, bias, z, eps, group_size, norm_before_gate, True)
 
 
@@ -471,7 +489,7 @@ class LayerNormGated(nn.Module):
 
     def __init__(
         self,
-        hidden_size,
+        hidden_size: int,
         eps: float = 1e-5,
         group_size: int | None = None,
         norm_before_gate: bool = True,
@@ -495,18 +513,24 @@ class LayerNormGated(nn.Module):
         torch.nn.init.ones_(self.weight)
         torch.nn.init.zeros_(self.bias)
 
-    def forward(self, x, z=None):
-        """If z is not None, we do norm(x) * silu(z) if norm_before_gate, else norm(x * silu(z))
-        """
-        return layernorm_fn(x, self.weight, self.bias, z=z, group_size=self.group_size, eps=self.eps,
-                            norm_before_gate=self.norm_before_gate)
+    def forward(self, x: torch.Tensor, z: torch.Tensor | None = None) -> torch.Tensor:
+        """Apply normalization before or after the optional SiLU gate."""
+        return layernorm_fn(
+            x=x,
+            weight=self.weight,
+            bias=self.bias,
+            z=z,
+            eps=self.eps,
+            group_size=self.group_size,
+            norm_before_gate=self.norm_before_gate,
+        )
 
 
 class RMSNormGated(nn.Module):
 
     def __init__(
         self,
-        hidden_size,
+        hidden_size: int,
         eps: float = 1e-5,
         group_size: int | None = None,
         norm_before_gate: bool = False,
@@ -528,8 +552,14 @@ class RMSNormGated(nn.Module):
     def reset_parameters(self):
         torch.nn.init.ones_(self.weight)
 
-    def forward(self, x, z=None):
-        """If z is not None, we do norm(x) * silu(z) if norm_before_gate, else norm(x * silu(z))
-        """
-        return rmsnorm_fn(x, self.weight, self.bias, z=z, eps=self.eps, group_size=self.group_size,
-                          norm_before_gate=self.norm_before_gate)
+    def forward(self, x: torch.Tensor, z: torch.Tensor | None = None) -> torch.Tensor:
+        """Apply normalization before or after the optional SiLU gate."""
+        return rmsnorm_fn(
+            x=x,
+            weight=self.weight,
+            bias=self.bias,
+            z=z,
+            eps=self.eps,
+            group_size=self.group_size,
+            norm_before_gate=self.norm_before_gate,
+        )
