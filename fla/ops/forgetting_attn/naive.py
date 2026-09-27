@@ -35,6 +35,8 @@ def naive_forgetting_attn(
     """
     _, T, HQ, D = q.shape
     H = k.shape[2]
+    if H == 0 or HQ % H != 0:
+        raise ValueError(f"The number of query heads ({HQ}) must be divisible by the number of key/value heads ({H}).")
     G = HQ // H
 
     if scale is None:

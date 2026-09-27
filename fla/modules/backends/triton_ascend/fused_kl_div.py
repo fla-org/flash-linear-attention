@@ -99,13 +99,15 @@ def _npu_vocab_block_size(vocab_size: int, num_rows: int) -> int:
     return compute_vocab_block_size(vocab_size=vocab_size, num_rows=num_rows, memory_multiplier=_KLD_FWD_MEM_MULT)
 
 
-def fused_kl_div_forward_npu(
+def fused_kl_div_fwd_npu(
     x: torch.Tensor,
     target_x: torch.Tensor,
     weight: torch.Tensor,
     target_weight: torch.Tensor,
     reduction: str = 'batchmean',
     accumulate_grad_in_fp32: bool = True,
+    use_dx: bool = True,
+    use_dw: bool = True,
 ):
     device = x.device
 
@@ -117,8 +119,8 @@ def fused_kl_div_forward_npu(
 
     grad_dtype = torch.float32 if accumulate_grad_in_fp32 else weight.dtype
 
-    dx = torch.zeros_like(x, device=device)
-    dw = torch.zeros_like(weight, device=device, dtype=grad_dtype) if weight is not None else None
+    dx = torch.zeros_like(x, device=device) if use_dx else None
+    dw = torch.zeros_like(weight, device=device, dtype=grad_dtype) if use_dw else None
     loss = torch.zeros(N, dtype=torch.float32, device=device)
 
     for ic in range(NC):
@@ -127,7 +129,7 @@ def fused_kl_div_forward_npu(
         c_tx = target_x[start:end]
         c_sl = F.linear(c_sx, weight)
         c_tl = F.linear(c_tx, target_weight)
-        if weight is not None and c_sx.dtype != grad_dtype:
+        if dw is not None and c_sx.dtype != grad_dtype:
             c_sx = c_sx.to(dtype=grad_dtype)
 
         c_loss = loss[start:end]
@@ -146,9 +148,10 @@ def fused_kl_div_forward_npu(
         )
 
         c_grad = c_sl if c_sl.is_contiguous() else c_sl.contiguous()
-        dx[start:end] = torch.mm(c_grad, weight)
+        if dx is not None:
+            dx[start:end] = torch.mm(c_grad, weight)
 
-        if weight is not None:
+        if dw is not None:
             grad_w = c_grad.t().to(dtype=grad_dtype)
             grad_x = c_sx if c_sx.dtype == grad_dtype else c_sx.to(dtype=grad_dtype)
             dw.add_(grad_w @ grad_x)
@@ -159,29 +162,20 @@ def fused_kl_div_forward_npu(
     return loss, dx, dw
 
 
-def fused_kl_div_backward_npu(
+def fused_kl_div_bwd_npu(
     do: torch.Tensor,
-    dx: torch.Tensor,
-    dw: torch.Tensor,
+    dx: torch.Tensor | None,
+    dw: torch.Tensor | None,
 ):
-    N, H = dx.shape
-    B = compute_elementwise_block_size(n_elements=N * H, memory_multiplier=_ELEMENTWISE_MEM_MULT)
-
-    elementwise_mul_kernel[(triton.cdiv(N * H, B),)](
-        x=dx,
-        g=do,
-        N=N*H,
-        B=B,
-        num_warps=STATIC_WARPS,
-    )
-
-    if dw is not None:
-        V, H = dw.shape
-        B = compute_elementwise_block_size(n_elements=V * H, memory_multiplier=_ELEMENTWISE_MEM_MULT)
-        elementwise_mul_kernel[(triton.cdiv(V * H, B),)](
-            x=dw,
+    for grad in (dx, dw):
+        if grad is None:
+            continue
+        N, H = grad.shape
+        B = compute_elementwise_block_size(n_elements=N * H, memory_multiplier=_ELEMENTWISE_MEM_MULT)
+        elementwise_mul_kernel[(triton.cdiv(N * H, B),)](
+            x=grad,
             g=do,
-            N=V*H,
+            N=N*H,
             B=B,
             num_warps=STATIC_WARPS,
         )
