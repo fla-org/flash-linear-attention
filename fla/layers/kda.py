@@ -225,27 +225,27 @@ class KimiDeltaAttention(nn.Module):
         if self.use_short_conv:
             conv_state_q, conv_state_k, conv_state_v = None, None, None
             if last_state is not None:
-                conv_state_q, conv_state_k, conv_state_v = (
-                    state.clone() if state is not None and not use_cache else state
-                    for state in last_state["conv_state"]
-                )
+                conv_state_q, conv_state_k, conv_state_v = last_state["conv_state"]
             q, conv_state_q = self.q_conv1d(
                 x=self.q_proj(hidden_states),
                 cache=conv_state_q,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
+                update_cache=use_cache,
             )
             k, conv_state_k = self.k_conv1d(
                 x=self.k_proj(hidden_states),
                 cache=conv_state_k,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
+                update_cache=use_cache,
             )
             v, conv_state_v = self.v_conv1d(
                 x=self.v_proj(hidden_states),
                 cache=conv_state_v,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
+                update_cache=use_cache,
             )
         else:
             q = F.silu(self.q_proj(hidden_states))

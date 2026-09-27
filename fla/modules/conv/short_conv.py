@@ -125,6 +125,8 @@ class ShortConvolution(nn.Conv1d):
         output_final_state: bool = False,
         cu_seqlens: torch.LongTensor | None = None,
         chunk_indices: torch.LongTensor | None = None,
+        *,
+        update_cache: bool = True,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """
@@ -137,7 +139,7 @@ class ShortConvolution(nn.Conv1d):
                 Attention mask dealing with padded positions.
             cache (`Optional[torch.Tensor]`):
                 Previous cache tensor of shape `[N, D, W]`, where `W` is the kernel size.
-                If provided, the cache is updated **inplace**.
+                Updated in place during single-token decoding when `update_cache=True`.
             output_final_state (Optional[bool]):
                 Whether to output the final state of shape `[N, D, W]`. Default: `False`.
             cu_seqlens (Optional[torch.LongTensor]):
@@ -145,6 +147,8 @@ class ShortConvolution(nn.Conv1d):
                 Shape: [B+1]
             chunk_indices (Optional[torch.LongTensor]):
                 Chunk indices for variable-length sequences. Default: `None`.
+            update_cache (bool, Optional):
+                Whether single-token decoding may update the supplied cache in place. Default: `True`.
 
         Returns:
             Tensor of shape `[B, T, D]`.
@@ -159,7 +163,7 @@ class ShortConvolution(nn.Conv1d):
                 raise ValueError("`mask` and `cu_seqlens` cannot be provided at the same time")
             x = x.mul_(mask.unsqueeze(-1))
 
-        # in decoding phase, the cache (if provided) is updated inplace
+        # single-token decoding can update the supplied cache in place
         # For packed varlen inputs, decode only when every sequence has exactly one token:
         # a zero-length or multi-token sequence makes the shape check misfire.
         if B * T == N and (cu_seqlens is None or bool((cu_seqlens.diff() == 1).all())):
@@ -169,6 +173,7 @@ class ShortConvolution(nn.Conv1d):
                 cache=cache,
                 output_final_state=output_final_state,
                 cu_seqlens=cu_seqlens,
+                update_cache=update_cache,
             )
             return y, cache
 
@@ -207,6 +212,8 @@ class ShortConvolution(nn.Conv1d):
         cache: torch.Tensor | None,
         output_final_state: bool = False,
         cu_seqlens: torch.LongTensor | None = None,
+        *,
+        update_cache: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         from fla.modules.conv.triton.ops import causal_conv1d_update
 
@@ -217,6 +224,8 @@ class ShortConvolution(nn.Conv1d):
         # to maintain consistency with the non-step path in forward().
         if cache is None:
             cache = x.new_zeros(N, D, W)
+        elif not update_cache:
+            cache = cache.clone()
         # NOTE: we follow the fast mode that updates the cache in-place
         if self.backend == 'triton':
             y, cache = causal_conv1d_update(
