@@ -63,7 +63,10 @@ def naive_nsa_selection(
         scale = k.shape[-1] ** -0.5
 
     dtype = q.dtype
-    G = q.shape[2] // k.shape[2]
+    HQ, H = q.shape[2], k.shape[2]
+    if H == 0 or HQ % H != 0:
+        raise ValueError(f"The number of query heads ({HQ}) must be divisible by the number of key/value heads ({H}).")
+    G = HQ // H
     BS = block_size
     k, v, block_indices = (repeat(x, 'b t h d -> b t (h g) d', g=G) for x in (k, v, block_indices))
     q, k, v = map(lambda x: x.float(), (q, k, v))
@@ -152,8 +155,10 @@ def naive_nsa_compression(
             Log-sum-exp of attention scores of shape `[B, TQ, HQ]`, `-inf` where no block is visible yet.
     """
     dtype = q.dtype
-    H = k_cmp.shape[2]
-    G = q.shape[2] // H
+    HQ, H = q.shape[2], k_cmp.shape[2]
+    if H == 0 or HQ % H != 0:
+        raise ValueError(f"The number of query heads ({HQ}) must be divisible by the number of key/value heads ({H}).")
+    G = HQ // H
     q, k_cmp, v_cmp = (x.float() for x in (q, k_cmp, v_cmp))
     k_cmp, v_cmp = (repeat(x, 'b t h d -> b t (h g) d', g=G) for x in (k_cmp, v_cmp))
 
@@ -220,6 +225,8 @@ def naive_nsa_topk(
     """
     B, TQ, HQ, _ = q.shape
     H = k_cmp.shape[2]
+    if H == 0 or HQ % H != 0:
+        raise ValueError(f"The number of query heads ({HQ}) must be divisible by the number of key/value heads ({H}).")
     G = HQ // H
     k_cmp = repeat(k_cmp, 'b t h d -> b t (h g) d', g=G)
 
@@ -359,7 +366,10 @@ def naive_nsa(
         scale = k.shape[-1] ** -0.5
     if cu_seqlens is not None:
         assert q.shape[0] == 1, "batch size must be 1 when cu_seqlens are provided"
-    G = q.shape[2] // k.shape[2]
+    HQ, H = q.shape[2], k.shape[2]
+    if H == 0 or HQ % H != 0:
+        raise ValueError(f"The number of query heads ({HQ}) must be divisible by the number of key/value heads ({H}).")
+    G = HQ // H
     assert G >= 16 and (G & (G - 1)) == 0, "Group size (HQ/H) must be a power of 2 and >= 16 in NSA"
 
     if cu_seqlens is not None:

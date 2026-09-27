@@ -548,6 +548,9 @@ def parallel_nsa_topk(
 
     assert k.shape[0] == q.shape[0] and k.shape[-1] == q.shape[-1], "The last dimension of k and q must match"
     assert lse is None or lse.shape == (B, TQ, HQ), "The shape of lse must be (B, TQ, HQ)"
+    if H == 0 or HQ % H != 0:
+        raise ValueError(f"The number of query heads ({HQ}) must be divisible by the number of key/value heads ({H}).")
+    G = HQ // H
 
     if cu_seqlens is not None:
         if isinstance(cu_seqlens, tuple):
@@ -558,7 +561,6 @@ def parallel_nsa_topk(
     else:
         cu_seqlens_q = cu_seqlens_k = token_indices_q = None
 
-    G = HQ // H
     # the number of selected blocks for each token
     S = block_counts if isinstance(block_counts, int) else block_counts.max().item()
     S = triton.next_power_of_2(S)
@@ -895,7 +897,10 @@ def parallel_nsa(
             f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`. "
             f"Please flatten variable-length inputs before processing.",
         )
-    G = q.shape[2] // k.shape[2]
+    HQ, H = q.shape[2], k.shape[2]
+    if H == 0 or HQ % H != 0:
+        raise ValueError(f"The number of query heads ({HQ}) must be divisible by the number of key/value heads ({H}).")
+    G = HQ // H
     assert G >= 16 and (G & (G - 1)) == 0, "Group size (HQ/H) must be a power of 2 and >= 16 in NSA"
 
     if cu_seqlens is not None:
