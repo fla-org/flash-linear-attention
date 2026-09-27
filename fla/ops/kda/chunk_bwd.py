@@ -108,7 +108,7 @@ def chunk_kda_bwd_kernel_dAv(
         # [BT, BV]
         b_do = tl.load(p_do, mask=m_tv, other=0.0)
         # [BT, BT]
-        b_dA += tl.dot(b_do, b_v)
+        b_dA = tl.dot(b_do, b_v, b_dA)
         # [BT, BV]
         b_dv = tl.dot(b_A.to(b_do.dtype), b_do)
         tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), mask=m_tv)
@@ -261,9 +261,9 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
             b_dv = tl.load(p_dv, mask=m_tv, other=0.0)
 
             b_dgk += tl.sum(b_h * b_dh, axis=0)
-            b_dq += tl.dot(b_do, b_h.to(b_do.dtype))
-            b_dk += tl.dot(b_v_new, b_dh.to(b_v_new.dtype))
-            b_dw += tl.dot(b_dv.to(b_v_new.dtype), b_h.to(b_v_new.dtype))
+            b_dq = tl.dot(b_do, b_h.to(b_do.dtype), b_dq)
+            b_dk = tl.dot(b_v_new, b_dh.to(b_v_new.dtype), b_dk)
+            b_dw = tl.dot(b_dv.to(b_v_new.dtype), b_h.to(b_v_new.dtype), b_dw)
             tl.debug_barrier()  # DO NOT REMOVE THIS LINE!
             if i_k == 0:
                 p_v = v + o_t[:, None] * (HV*V) + o_v[None, :]
@@ -271,7 +271,7 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
 
                 b_v = tl.load(p_v, mask=m_tv, other=0.0)
 
-                b_dA += tl.dot(b_dv, tl.trans(b_v))
+                b_dA = tl.dot(b_dv, tl.trans(b_v), b_dA)
 
                 b_dvb = tl.dot(b_A, b_dv)
                 b_dv2 = b_dvb * b_beta[:, None]
@@ -288,7 +288,7 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
         b_kg = b_k * b_gk_exp
 
         b_dw = -b_dw.to(b_A.dtype)
-        b_dA += tl.dot(b_dw, tl.trans(b_kg.to(b_A.dtype)))
+        b_dA = tl.dot(b_dw, tl.trans(b_kg.to(b_A.dtype)), b_dA)
 
         b_dkgb = tl.dot(b_A, b_dw)
         b_db += tl.sum(b_dkgb * b_kg, 1)

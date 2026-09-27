@@ -39,6 +39,7 @@ from fla.utils import IS_NPU, assert_close, device
         ]
     ],
 )
+@pytest.mark.smoke
 def test_attnres(
     L: int,
     B: int,

@@ -140,15 +140,15 @@ def pre_process_fwd_kernel_merged(
             if K > 64:
                 p_w = w + o_t[:, None] * stride_w + o_k2[None, :]
                 b_w = tl.load(p_w, mask=m_t[:, None] & m_k2[None, :], other=0.0)
-                b_v_decay += tl.dot(b_w, b_h2.to(b_w.dtype))
+                b_v_decay = tl.dot(b_w, b_h2.to(b_w.dtype), b_v_decay)
             if K > 128:
                 p_w = w + o_t[:, None] * stride_w + o_k3[None, :]
                 b_w = tl.load(p_w, mask=m_t[:, None] & m_k3[None, :], other=0.0)
-                b_v_decay += tl.dot(b_w, b_h3.to(b_w.dtype))
+                b_v_decay = tl.dot(b_w, b_h3.to(b_w.dtype), b_v_decay)
             if K > 192:
                 p_w = w + o_t[:, None] * stride_w + o_k4[None, :]
                 b_w = tl.load(p_w, mask=m_t[:, None] & m_k4[None, :], other=0.0)
-                b_v_decay += tl.dot(b_w, b_h4.to(b_w.dtype))
+                b_v_decay = tl.dot(b_w, b_h4.to(b_w.dtype), b_v_decay)
 
             p_v = v + o_t[:, None] * stride_v + o_vb[None, :]
             if USE_BG:
@@ -225,19 +225,19 @@ def pre_process_fwd_kernel_merged(
                     b_h4 += tl.dot(b_k, b_v_orig.to(b_k.dtype)) + tl.dot(b_bg, b_v)
             else:
                 # GDN/KDA mode: h += k^T @ v_new
-                b_h1 += tl.dot(b_k, b_v)
+                b_h1 = tl.dot(b_k, b_v, b_h1)
                 if K > 64:
                     p_k = k + o_k2[:, None] + o_t[None, :] * stride_k
                     b_k = tl.load(p_k, mask=m_k2[:, None] & m_t[None, :], other=0.0)
-                    b_h2 += tl.dot(b_k, b_v)
+                    b_h2 = tl.dot(b_k, b_v, b_h2)
                 if K > 128:
                     p_k = k + o_k3[:, None] + o_t[None, :] * stride_k
                     b_k = tl.load(p_k, mask=m_k3[:, None] & m_t[None, :], other=0.0)
-                    b_h3 += tl.dot(b_k, b_v)
+                    b_h3 = tl.dot(b_k, b_v, b_h3)
                 if K > 192:
                     p_k = k + o_k4[:, None] + o_t[None, :] * stride_k
                     b_k = tl.load(p_k, mask=m_k4[:, None] & m_t[None, :], other=0.0)
-                    b_h4 += tl.dot(b_k, b_v)
+                    b_h4 = tl.dot(b_k, b_v, b_h4)
 
         # Store h results
         stride_hm_kv = K + V
@@ -609,21 +609,21 @@ def pre_process_bwd_kernel_merged(
                 b_k = tl.load(p_k, mask=m_t[:, None] & m_k2[None, :], other=0.0)
                 if USE_GK:
                     b_gk_last2 = tl.load(p_gk_last + o_k2, mask=(o_k2 < K), other=0.).to(tl.float32)
-                b_dv += tl.dot(b_k, b_dh2.to(b_k.dtype))
+                b_dv = tl.dot(b_k, b_dh2.to(b_k.dtype), b_dv)
 
             if K > 128:
                 p_k = k + o_t[:, None] * stride_qk + o_k3[None, :]
                 b_k = tl.load(p_k, mask=m_t[:, None] & m_k3[None, :], other=0.0)
                 if USE_GK:
                     b_gk_last3 = tl.load(p_gk_last + o_k3, mask=(o_k3 < K), other=0.).to(tl.float32)
-                b_dv += tl.dot(b_k, b_dh3.to(b_k.dtype))
+                b_dv = tl.dot(b_k, b_dh3.to(b_k.dtype), b_dv)
 
             if K > 192:
                 p_k = k + o_t[:, None] * stride_qk + o_k4[None, :]
                 b_k = tl.load(p_k, mask=m_t[:, None] & m_k4[None, :], other=0.0)
                 if USE_GK:
                     b_gk_last4 = tl.load(p_gk_last + o_k4, mask=(o_k4 < K), other=0.).to(tl.float32)
-                b_dv += tl.dot(b_k, b_dh4.to(b_k.dtype))
+                b_dv = tl.dot(b_k, b_dh4.to(b_k.dtype), b_dv)
 
             if USE_G:
                 b_dv *= tl.where(m_t, exp2(bg_last - b_g), 0)[:, None]

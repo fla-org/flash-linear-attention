@@ -185,6 +185,7 @@ def test_fused_mul_recurrent_fwd(
 
 
 @pytest.mark.parametrize('chunk_size', [16, 32, 64])
+@pytest.mark.smoke
 def test_chunk_wrapper_chunk_size(chunk_size: int):
     B, T, H, D = 1, 64, 2, 64
     r = torch.empty(B, T, H, D).uniform_(-8, -6).to(device)

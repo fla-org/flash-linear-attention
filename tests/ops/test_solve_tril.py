@@ -71,6 +71,7 @@ def test_solve_tril(B, T, H, chunk_size):
     device_platform == 'intel',
     reason='Intel Pytorch Failure',
 )
+@pytest.mark.smoke
 def test_solve_tril_varlen(
     H: int,
     D: int,

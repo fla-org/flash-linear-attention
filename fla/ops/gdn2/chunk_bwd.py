@@ -38,6 +38,7 @@ import triton.language as tl
 
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_gated_delta_rule_fwd_h
 from fla.ops.cp.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu_pre_process, expand_h0
+from fla.ops.gdn2.backends import dispatch
 from fla.ops.gdn2.chunk_intra import chunk_gdn2_bwd_intra
 from fla.ops.gdn2.wy_fast import recompute_w_u_fwd_gdn2
 from fla.ops.kda.chunk_bwd import chunk_kda_bwd_dAv
@@ -191,9 +192,9 @@ def chunk_gdn2_bwd_kernel_wy_dqkg_fused(
             b_dv = tl.load(p_dv, mask=m_vv, other=0.0)
 
             b_dgk += tl.sum(b_h * b_dh, axis=0)
-            b_dq += tl.dot(b_do, b_h.to(b_do.dtype))
-            b_dk += tl.dot(b_v_new, b_dh.to(b_v_new.dtype))
-            b_dw_flow += tl.dot(b_dv.to(b_v_new.dtype), b_h.to(b_v_new.dtype))
+            b_dq = tl.dot(b_do, b_h.to(b_do.dtype), b_dq)
+            b_dk = tl.dot(b_v_new, b_dh.to(b_v_new.dtype), b_dk)
+            b_dw_flow = tl.dot(b_dv.to(b_v_new.dtype), b_h.to(b_v_new.dtype), b_dw_flow)
             tl.debug_barrier()
 
             if i_k == 0:
@@ -205,7 +206,7 @@ def chunk_gdn2_bwd_kernel_wy_dqkg_fused(
                 b_v = tl.load(p_v, mask=m_vv, other=0.0)
                 b_wg = tl.load(p_wg, mask=m_vv, other=0.0)
                 # dA gets (w_gate * v) on the value side - the GDN-2 channel-wise twist.
-                b_dA += tl.dot(b_dv, tl.trans(b_v * b_wg))
+                b_dA = tl.dot(b_dv, tl.trans(b_v * b_wg), b_dA)
 
                 b_dvb = tl.dot(b_A, b_dv)
                 b_dv2 = b_dvb * b_wg
@@ -224,7 +225,7 @@ def chunk_gdn2_bwd_kernel_wy_dqkg_fused(
 
         b_dw_flow = -b_dw_flow.to(b_A.dtype)
         # dA gets (b * exp(gk) * k) on the key side - the GDN-2 channel-wise twist.
-        b_dA += tl.dot(b_dw_flow, tl.trans((b_kg * b_b).to(b_A.dtype)))
+        b_dA = tl.dot(b_dw_flow, tl.trans((b_kg * b_b).to(b_A.dtype)), b_dA)
 
         b_dkgb = tl.dot(b_A, b_dw_flow)
         p_db = db + o_t[:, None] * (H * K) + o_k[None, :]
@@ -254,6 +255,7 @@ def chunk_gdn2_bwd_kernel_wy_dqkg_fused(
     tl.store(p_dA, b_dA.to(p_dA.dtype.element_ty), mask=m_dA)
 
 
+@dispatch
 def chunk_gdn2_bwd_wy_dqkg_fused(
     q: torch.Tensor,
     k: torch.Tensor,

@@ -237,6 +237,7 @@ def test_chunk(
         ]
     ],
 )
+@pytest.mark.smoke
 def test_chunk_varlen(
     H: int,
     D: int,

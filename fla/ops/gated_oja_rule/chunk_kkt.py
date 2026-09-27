@@ -62,7 +62,7 @@ def chunk_scaled_dot_kkt_fwd_kernel(
         m_tk = m_t[:, None] & (o_k[None, :] < K)
         p_k = k + (bos*H + i_h) * K + o_t[:, None] * (H*K) + o_k[None, :]
         b_k = tl.load(p_k, mask=m_tk, other=0.0)
-        b_A += tl.dot(b_k, tl.trans(b_k))
+        b_A = tl.dot(b_k, tl.trans(b_k), b_A)
 
     if USE_G:
         p_g = g + bos*H + i_h + o_t * H
@@ -153,7 +153,7 @@ def chunk_scaled_dot_kkt_fwd_kernel_intra_sub_inter(
         b_gk = tl.load(p_gk, mask=m_kj, other=0.0)
         b_kt = tl.load(b_kt, mask=m_kj, other=0.0) * exp(b_gn[:, None] - b_gk)
         # [BC, BC]
-        b_A += tl.dot(b_k, b_kt)
+        b_A = tl.dot(b_k, b_kt, b_A)
     b_A *= b_b[:, None]
 
     o_Aj = i_j * BC + tl.arange(0, BC)
@@ -374,7 +374,7 @@ def chunk_scaled_dot_kkt_bwd_kernel_gk(
             b_dA = tl.load(p_dA, mask=(o_dAi[:, None] < BT) & m_j[None, :], other=0.0)
             # [BC, BK]
             # (SY 09/17) important to not use bf16 here to have a good precision.
-            b_dkt += tl.dot(b_dA, b_kbg)
+            b_dkt = tl.dot(b_dA, b_kbg, b_dkt)
         b_dkt *= exp(b_gn[None, :] - b_g)
     o_dA = (i_t * BT + i_i * BC) * H*BT + i_i * BC + o_i
     p_kj = k + (i_t * BT + i_i * BC) * H*K + o_k

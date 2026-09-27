@@ -18,7 +18,6 @@ def parallel_forgetting_attn(
     scale: float | None = None,
     window_size: int | None = None,
     cu_seqlens: torch.LongTensor | None = None,
-    **kwargs
 ) -> torch.Tensor:
     r"""
     Args:
@@ -46,10 +45,6 @@ def parallel_forgetting_attn(
         o (torch.Tensor):
             Outputs of shape `[B, T, HQ, V]`.
     """
-    if 'head_first' in kwargs:
-        raise DeprecationWarning(
-            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
-        )
     if scale is None:
         scale = k.shape[-1] ** -0.5
     if cu_seqlens is not None and q.shape[0] != 1:

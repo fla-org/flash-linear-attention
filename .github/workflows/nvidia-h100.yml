@@ -1,13 +1,20 @@
 name: nvidia-h100-ci
 
+# Full pipeline tier. Runs on maintainer PR pushes (maintainers cannot approve
+# their own PRs), on PR approval (external PRs), nightly on main, and manually.
+# Every push still gets the fast smoke tier from nvidia-h100-smoke.yml.
+# Once this pipeline has gone green for a PR, later approvals only need smoke.
+
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: full-ci-${{ github.event.pull_request.number || github.ref }}
+  # Merge/close cancels an in-flight full run, and a maintainer's new push
+  # cancels their stale full run. Everything else (external pushes, approvals)
+  # must not cancel the approval-triggered full run.
+  cancel-in-progress: ${{ github.event.action == 'closed' || (github.event_name == 'pull_request' && contains(fromJSON('["OWNER", "MEMBER"]'), github.event.pull_request.author_association)) }}
 
 permissions:
   contents: read
   pull-requests: write
-  issues: write
   checks: read
 
 on:
@@ -16,16 +23,17 @@ on:
     types: [opened, synchronize, reopened, closed]
   pull_request_review:
     types: [submitted]
-  push:
-    branches:
-      - main
+  schedule:
+    # Nightly full pipeline on main (03:00 +08:00).
+    - cron: '0 19 * * *'
+  workflow_dispatch:
 
 jobs:
   # Detect PRs that only touch NPU-only code (triton-ascend backend files,
   # Ascend workflow definitions) so the H100 jobs below can skip them.
   # Shared files — including backend __init__.py files, which GPU imports
-  # unconditionally — always get the full GPU pipeline. Push events and
-  # titles containing '[nv]' force the full pipeline.
+  # unconditionally — always get the full GPU pipeline. Non-PR events
+  # (nightly, manual) and titles containing '[nv]' force the full pipeline.
   changes:
     name: Detect NPU-only changes
     runs-on: ubuntu-latest
@@ -62,12 +70,84 @@ jobs:
             }
             core.setOutput('npu_only', files.length > 0 && unsafe.length === 0 ? 'true' : 'false');
 
+  # Gate for the full pipeline: maintainer PRs always run it (they cannot
+  # approve their own PRs); external PRs run it once approved, unless it has
+  # already gone green for this PR — after that, smoke is the only gate.
+  gate:
+    name: Decide whether the full pipeline runs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run_full: ${{ steps.decide.outputs.run_full }}
+    steps:
+      - name: Decide
+        id: decide
+        uses: actions/github-script@v9.0.0
+        with:
+          script: |
+            const eventName = context.eventName;
+            if (eventName === 'schedule' || eventName === 'workflow_dispatch') {
+              core.setOutput('run_full', 'true');
+              return;
+            }
+            const pr = context.payload.pull_request;
+            if (eventName === 'pull_request') {
+              if (context.payload.action === 'closed') {
+                core.setOutput('run_full', 'false');
+                return;
+              }
+              // author_association hides private org members, so check the
+              // collaborator permission instead (admin/write -> maintainer).
+              const { owner, repo } = context.repo;
+              const perm = (await github.rest.repos.getCollaboratorPermissionLevel({
+                owner, repo, username: pr.user.login,
+              })).data;
+              core.setOutput('run_full', ['admin', 'write'].includes(perm.permission) ? 'true' : 'false');
+              return;
+            }
+            if (eventName === 'pull_request_review') {
+              const review = context.payload.review;
+              if (review.state !== 'approved' || pr.state !== 'open') {
+                core.setOutput('run_full', 'false');
+                return;
+              }
+              // If the full pipeline already went green on any commit of this
+              // PR, re-approvals after a stale-dismiss only need smoke.
+              const { owner, repo } = context.repo;
+              const requiredChecks = [
+                'Test H100 (PyTorch 2.12) / test-ops',
+                'Test H100 (PyTorch 2.12) / test-models',
+              ];
+              const commits = await github.paginate(github.rest.pulls.listCommits, {
+                owner, repo, pull_number: pr.number, per_page: 100,
+              });
+              for (const commit of commits.reverse()) {
+                const checkRuns = await github.paginate(github.rest.checks.listForRef, {
+                  owner, repo, ref: commit.sha, per_page: 100,
+                });
+                const latestByName = new Map();
+                for (const run of checkRuns) {
+                  if (run.app?.slug !== 'github-actions') continue;
+                  const prev = latestByName.get(run.name);
+                  const t = Date.parse(run.started_at || run.completed_at || run.created_at || 0);
+                  const pt = prev ? Date.parse(prev.started_at || prev.completed_at || prev.created_at || 0) : 0;
+                  if (!prev || t > pt) latestByName.set(run.name, run);
+                }
+                if (requiredChecks.every(name => latestByName.get(name)?.conclusion === 'success')) {
+                  core.info(`Full pipeline already green at ${commit.sha}; smoke only from now on`);
+                  core.setOutput('run_full', 'false');
+                  return;
+                }
+              }
+              core.setOutput('run_full', 'true');
+              return;
+            }
+            core.setOutput('run_full', 'false');
+
   test-h100-pytorch-2-12:
     name: Test H100 (PyTorch 2.12)
-    # Test on all main commits and PRs, but skip on closed PRs
-    # to avoid running tests on merged PRs, and skip NPU-only PRs.
-    needs: changes
-    if: needs.changes.outputs.npu_only != 'true' && github.event_name != 'pull_request_review' && (github.event_name != 'pull_request' || github.event.action != 'closed')
+    needs: [changes, gate]
+    if: needs.changes.outputs.npu_only != 'true' && needs.gate.outputs.run_full == 'true'
     uses: ./.github/workflows/reusable-ci-tests.yml
     with:
       runner: 'nvidia-h100-1'
@@ -77,11 +157,11 @@ jobs:
 
   check_h100_pytorch_2_7:
     name: Check H100 PyTorch 2.7 Eligibility
-    needs: changes
+    needs: [changes, gate]
     if: >
       needs.changes.outputs.npu_only != 'true' &&
-      ((github.event_name == 'pull_request' && github.event.action != 'closed') ||
-      (github.event_name == 'pull_request_review' && github.event.review.state == 'approved' && github.event.pull_request.state == 'open'))
+      needs.gate.outputs.run_full == 'true' &&
+      (github.event_name == 'pull_request' || github.event_name == 'pull_request_review')
     runs-on: ubuntu-latest
     timeout-minutes: 90
     outputs:

@@ -65,7 +65,7 @@ def chunk_scaled_dot_kkt_fwd_kernel(
         o_k = i_k * BK + tl.arange(0, BK)
         p_k = k + (bos*H + i_h // (HV // H)) * K + o_t[:, None] * (H*K) + o_k[None, :]
         b_k = tl.load(p_k, mask=m_t[:, None] & (o_k < K)[None, :], other=0.0)
-        b_A += tl.dot(b_k, tl.trans(b_k))
+        b_A = tl.dot(b_k, tl.trans(b_k), b_A)
 
     if USE_G:
         p_g = g + bos*HV + i_h + o_t * HV

@@ -10,7 +10,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
-from fla.ops.utils.op import exp2
+from fla.ops.utils.op import exp2, unflatten_program_id
 from fla.utils import IS_AMD, autotune_cache_kwargs, check_shared_mem
 
 NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if IS_AMD else [2, 4, 8, 16, 32]
@@ -56,7 +56,7 @@ def chunk_dplr_fwd_kernel_h(
     STORE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    i_k, i_v, i_nh = unflatten_program_id(X=tl.cdiv(K, BK), Y=tl.cdiv(V, BV))
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
@@ -101,8 +101,8 @@ def chunk_dplr_fwd_kernel_h(
             b_w = tl.load(p_w, mask=m_wc, other=0.0)
             b_bg = tl.load(p_bg, mask=m_kc, other=0.0)
             b_v2 = tl.dot(b_w, b_h.to(b_w.dtype)) + tl.load(p_u, mask=m_vc, other=0.0)
-            b_hc += tl.dot(b_kg, b_v)
-            b_hc += tl.dot(b_bg.to(b_hc.dtype), b_v2)
+            b_hc = tl.dot(b_kg, b_v, b_hc)
+            b_hc = tl.dot(b_bg.to(b_hc.dtype), b_v2, b_hc)
             tl.store(p_v_new, b_v2.to(p_v_new.dtype.element_ty), mask=m_vc)
 
         last_idx = min((i_t + 1) * BT, T) - 1
@@ -160,7 +160,7 @@ def chunk_dplr_fwd_h(
     h = kg.new_empty(B, NT, H, K, V)
     final_state = kg.new_empty(N, H, K, V, dtype=torch.float32) if output_final_state else None
     v_new = torch.empty_like(u)
-    grid = (NK, NV, N * H)
+    grid = (NK * NV * N * H,)
     chunk_dplr_fwd_kernel_h[grid](
         kg=kg,
         v=v,

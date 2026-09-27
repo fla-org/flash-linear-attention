@@ -1596,3 +1596,16 @@ def test_conv_varlen_decode_detection_with_zero_len_seq():
         output_final_state=True,
     )
     assert_close("varlen zero-len y", ref, tri, 1e-3)
+
+
+def test_conv_backend_override(monkeypatch):
+    torch.manual_seed(42)
+    monkeypatch.setenv('FLA_CONV_BACKEND', 'bogus')
+    with pytest.raises(ValueError, match='Invalid backend'):
+        ShortConvolution(hidden_size=8, kernel_size=3)
+
+    monkeypatch.setenv('FLA_CONV_BACKEND', 'cuda')
+    monkeypatch.setattr('fla.modules.conv.short_conv.causal_conv1d_fn_cuda', None)
+    with pytest.warns(UserWarning, match='Switching to the Triton implementation'):
+        conv = ShortConvolution(hidden_size=8, kernel_size=3, backend='triton')
+    assert conv.backend == 'triton'

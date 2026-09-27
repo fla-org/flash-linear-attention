@@ -44,9 +44,11 @@ def test_legacy_dispatch_uses_directory_registry(first_import):
         assert any('next release after 0.6.0' in str(w.message) for w in caught)
 
         from fla.backends import BaseBackend
+        from fla.ops.gdn2.backends import gdn2_registry
         from fla.ops.kda.backends import kda_registry
         from fla.modules.backends import modules_registry
         assert legacy.BaseBackend is BaseBackend
+        assert legacy.BackendRegistry('gdn2') is gdn2_registry
         assert legacy.BackendRegistry('kda') is kda_registry
         assert legacy.BackendRegistry('modules') is modules_registry
         legacy.BackendRegistry.ensure_initialized('kda')
@@ -98,7 +100,7 @@ def test_local_dispatch_policy_and_optional_dependencies(disabled):
         from fla.modules import RMSNorm, ShortConvolution
         assert 'fla.ops.backends' not in sys.modules
         enabled = os.environ['FLA_DISABLE_BACKEND_DISPATCH'] != '1'
-        for operation in ['attn', 'attnres', 'common', 'gated_delta_rule', 'generalized_delta_rule.dplr',
+        for operation in ['attn', 'attnres', 'common', 'gated_delta_rule', 'gdn2', 'generalized_delta_rule.dplr',
                           'gla', 'kda', 'rwkv6', 'utils']:
             package = importlib.import_module('fla.ops.' + operation + '.backends')
             registry = package.dispatch.__self__

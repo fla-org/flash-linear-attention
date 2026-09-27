@@ -45,6 +45,19 @@ def test_chunk_gated_delta_rule_fwd_h_blackwell_triton_guard():
     assert {config.num_warps for config in tuner.configs} == {2}
 
 
+def test_chunk_fwd_o_blackwell_triton_guard():
+    if not IS_NVIDIA_BLACKWELL:
+        pytest.skip(reason='Blackwell guard is only active on Blackwell GPUs')
+
+    from fla.ops.common.chunk_o import chunk_fwd_kernel_o
+
+    tuner = _unwrap_autotuner(chunk_fwd_kernel_o)
+    # The 8-warp (BK=BV=128) config yields distinct outputs for identical
+    # inputs on Blackwell / Triton<3.8 (tl.dot recurrence race). The guard
+    # drops it, so no offered config may run more than 4 warps.
+    assert all(config.num_warps <= 4 for config in tuner.configs)
+
+
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'HV', 'D', 'scale', 'gate_logit_normalizer', 'dtype'),
     [
@@ -747,6 +760,7 @@ def test_fused_recurrent_gate_in_kernel_varlen(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
     reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set',
 )
+@pytest.mark.smoke
 def test_chunk_varlen(
     H: int,
     HV: int,

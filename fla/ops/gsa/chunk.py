@@ -98,9 +98,9 @@ def chunk_gsa_fwd_k_kernel_inter(
         # [BK, BV]
         b_h = tl.load(p_h, mask=m_kv, other=0.0)
         # [BT, BV]
-        b_o += tl.dot(b_q, b_h)
+        b_o = tl.dot(b_q, b_h, b_o)
         # [BT, BT]
-        b_A += tl.dot(b_q, b_k)
+        b_A = tl.dot(b_q, b_k, b_A)
     m_A = m_t[:, None] & (o_i[None, :] < BT)
     p_g = g + (bos * H + i_h) * V + o_t[:, None] * (H*V) + o_v[None, :]
     p_o = o + (bos * HQ + i_hq) * V + o_t[:, None] * (HQ*V) + o_v[None, :]
@@ -180,7 +180,7 @@ def chunk_gsa_fwd_k_kernel_intra(
         b_vg = (b_v * exp2(b_gn[None, :] - b_gv)).to(b_v.dtype)
         # [BC, BC]
         b_A = tl.load(p_A, mask=m_A, other=0.0)
-        b_o += tl.dot(b_A, b_vg)
+        b_o = tl.dot(b_A, b_vg, b_o)
     # [BC, BV]
     b_g = tl.load(p_g, mask=m_cv, other=0.0)
     b_o *= exp2(b_g - b_gn[None, :])
@@ -430,7 +430,7 @@ def chunk_gsa_bwd_k_kernel_dqkvg(
         b_dh = b_dh.to(b_k.dtype)
         # [BT, BK]
         b_dq += tl.dot(b_do, b_h.to(b_k.dtype)) * scale
-        b_dk += tl.dot((b_v * b_gv).to(b_v.dtype), tl.trans(b_dh))
+        b_dk = tl.dot((b_v * b_gv).to(b_v.dtype), tl.trans(b_dh), b_dk)
         # [BT, BV]
         b_dv = tl.dot(b_k, b_dh) * b_gv
         # [BV]
@@ -449,8 +449,8 @@ def chunk_gsa_bwd_k_kernel_dqkvg(
     # [BT, BT]
     b_dA = tl.load(p_dA, mask=m_A, other=0.0)
     # [BT, BK]
-    b_dq += tl.dot(b_dA, b_k)
-    b_dk += tl.dot(tl.trans(b_dA).to(b_k.dtype), b_q)
+    b_dq = tl.dot(b_dA, b_k, b_dq)
+    b_dk = tl.dot(tl.trans(b_dA).to(b_k.dtype), b_q, b_dk)
 
     tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), mask=m_qk)
     tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), mask=m_qk)
@@ -525,7 +525,7 @@ def chunk_gsa_bwd_k_kernel_intra_dvg(
         # [BC, BC]
         b_A = tl.load(p_A, mask=m_A, other=0.0)
         # [BC, BV]
-        b_dv += tl.dot(b_A, b_do.to(b_A.dtype))
+        b_dv = tl.dot(b_A, b_do.to(b_A.dtype), b_dv)
     b_dv *= exp2(b_gn[None, :] - b_gv)
 
     p_g = g + (bos + i_t * BT + i_i * BC) * H*V + i_h * V + o_v

@@ -28,7 +28,6 @@ def chunk_rwkv7(
     disable_recompute: bool = False,
     cp_context: FLACPContext | None = None,
     lower_bound: float | None = None,
-    **kwargs,
 ):
     """
     Args:
@@ -76,10 +75,6 @@ def chunk_rwkv7(
             the guarantee). Licenses the same tensor-core scheme as `safe_gate=True`
             when the bound fits the chunk size. Default: `None`.
     """
-    if 'head_first' in kwargs:
-        raise DeprecationWarning(
-            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
-        )
     return chunk_dplr_delta_rule(
         q=r,
         k=k,

@@ -92,7 +92,7 @@ def chunk_fwd_kernel_o(
         # [BK, BV]
         b_h = tl.load(p_h, mask=m_h, other=0.0)
         # [BT, BK] @ [BK, BV] -> [BT, BV]
-        b_o += tl.dot(b_q, b_h)
+        b_o = tl.dot(b_q, b_h, b_o)
 
     if USE_G:
         g += bos * H + i_h
@@ -117,11 +117,11 @@ def chunk_fwd_kernel_o(
             # [BK, BT]
             b_k = tl.load(p_k, mask=m_k, other=0.0)
             # [BT, BK] @ [BK, BT] -> [BT, BT]
-            b_A += tl.dot(b_q, b_k)
+            b_A = tl.dot(b_q, b_k, b_A)
         b_A = b_A * b_m
         p_v = v+i_dp*H*V + o_t[:, None] * (H*V*num_householder) + o_v[None, :]
         b_v = tl.load(p_v, mask=m_v, other=0.0)
-        b_o += tl.dot(b_A.to(b_v.dtype), b_v)
+        b_o = tl.dot(b_A.to(b_v.dtype), b_v, b_o)
     b_o = b_o * scale
     p_o = o + o_t[:, None] * (H*V) + o_v[None, :]
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=m_v)

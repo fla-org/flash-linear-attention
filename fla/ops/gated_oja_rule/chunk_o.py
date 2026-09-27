@@ -92,9 +92,9 @@ def chunk_oja_fwd_inter(
         # [BK, BV]
         b_h = tl.load(p_h, mask=m_kv, other=0.0)
         # [BT, BV]
-        b_o += tl.dot(b_q, b_h)
+        b_o = tl.dot(b_q, b_h, b_o)
         # [BT, BT]
-        b_A += tl.dot(b_q, b_k)
+        b_A = tl.dot(b_q, b_k, b_A)
     p_g = gv + (bos * H + i_h) * V + o_t[:, None] * (H*V) + o_v[None, :]
     p_o = o + (bos * HQ + i_hq) * V + o_t[:, None] * (HQ*V) + o_v[None, :]
     o_A = tl.arange(0, BT)
@@ -173,7 +173,7 @@ def chunk_oja_fwd_intra(
         b_vg = (b_v * exp(b_gn[None, :] - b_gv)).to(b_v.dtype)
         # [BC, BC]
         b_A = tl.load(p_A, mask=m_A, other=0.0)
-        b_o += tl.dot(b_A, b_vg)
+        b_o = tl.dot(b_A, b_vg, b_o)
     # [BC, BV]
     b_g = tl.load(p_g, mask=m_rv, other=0.0)
     b_o *= exp(b_g - b_gn[None, :])
@@ -500,7 +500,7 @@ def chunk_oja_bwd_kernel_dqk(
         b_do = tl.load(p_do, mask=m_tv, other=0.0)
         b_gv = tl.load(p_gv, mask=m_tv, other=0.0)
         b_do = (b_do * exp(b_gv) * scale).to(b_do.dtype)
-        b_dq += tl.dot(b_do, b_h.to(b_do.dtype))
+        b_dq = tl.dot(b_do, b_h.to(b_do.dtype), b_dq)
 
     # 接着计算dA对应的dq, dk
     p_dA = dA + (bos*H + i_h) * BT + o_t[:, None] * (H*BT) + o_A[None, :]
@@ -509,7 +509,7 @@ def chunk_oja_bwd_kernel_dqk(
     # [BT, BT]
     b_dA = tl.load(p_dA, mask=m_AT, other=0.0)
     # [BT, BK]
-    b_dq += tl.dot(b_dA.to(b_q.dtype), b_k)
+    b_dq = tl.dot(b_dA.to(b_q.dtype), b_k, b_dq)
     b_dk = tl.dot(tl.trans(b_dA).to(b_q.dtype), b_q)
 
     tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), mask=m_tk)
@@ -635,7 +635,7 @@ def chunk_oja_bwd_kernel_dv_o(
         # [BC, BC]
         b_A = tl.load(p_A, mask=m_A, other=0.0)
         # [BC, BV]
-        b_dvg += tl.dot(b_A, b_do.to(b_A.dtype))
+        b_dvg = tl.dot(b_A, b_do.to(b_A.dtype), b_dvg)
     b_dv = b_dvg * exp(b_gn[None, :] - b_gv)
 
     o_i = tl.arange(0, BC)

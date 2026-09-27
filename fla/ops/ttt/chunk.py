@@ -400,7 +400,7 @@ def chunk_ttt_linear_bwd_kernel_dv_local(
         p_q = q + o_k[:, None] + o_t[None, :] * stride_qk
         b_q = tl.load(p_q, mask=m_q, other=0.0)
         b_k = tl.load(p_k, mask=m_k, other=0.0)
-        b_A += tl.dot(b_k, b_q)
+        b_A = tl.dot(b_k, b_q, b_A)
 
     p_eta = eta + o_t * stride_eta
     b_eta = tl.load(p_eta, mask=m_t, other=0.0)
@@ -690,9 +690,9 @@ def chunk_bwd_kernel_dqke(
         # [BV]
         b_dhb = tl.load(p_dhb, mask=o_v < V, other=0.0)
         # [BT, BV] @ [BV, BT] -> [BT, BT]
-        b_ds += tl.dot(b_do, tl.trans(b_v))
+        b_ds = tl.dot(b_do, tl.trans(b_v), b_ds)
         # [BT, BV] @ [BV, BK] -> [BT, BK]
-        b_dq += tl.dot(b_do, b_h.to(b_do.dtype))
+        b_dq = tl.dot(b_do, b_h.to(b_do.dtype), b_dq)
         # [BT, BV] @ [BV, BK] -> [BT, BK]
         b_dk -= b_e_last * tl.dot(b_v, b_dh.to(b_v.dtype))
         b_de -= mask * tl.sum(tl.trans(b_dh) * tl.dot(tl.trans(b_k), b_v.to(b_k.dtype)))
@@ -1435,7 +1435,6 @@ def chunk_ttt_linear(
     output_final_state: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     cu_seqlens_cpu: torch.LongTensor | None = None,
-    **kwargs,
 ):
     r"""
     Args:
@@ -1480,10 +1479,6 @@ def chunk_ttt_linear(
     assert k.shape[-1] == v.shape[-1], "DK must equal to DV."
     if isinstance(eta, float):
         eta = torch.full_like(q[:, :, :, :1], eta)
-    if 'head_first' in kwargs:
-        raise DeprecationWarning(
-            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
-        )
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(

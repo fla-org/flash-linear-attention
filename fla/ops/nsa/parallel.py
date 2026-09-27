@@ -402,7 +402,7 @@ def parallel_nsa_bwd_kernel_dq(
             b_dp = tl.dot(b_do, b_v)
             b_ds = b_p * (b_dp.to(tl.float32) - b_delta[:, None])
             # [G, BS] @ [BS, BK] -> [G, BK]
-            b_dq += tl.dot(b_ds.to(b_k.dtype), tl.trans(b_k))
+            b_dq = tl.dot(b_ds.to(b_k.dtype), tl.trans(b_k), b_dq)
     b_dq *= scale
 
     tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), mask=m_q)
@@ -520,12 +520,12 @@ def parallel_nsa_bwd_kernel_dkv(
         b_p = tl.where((o_q[None, :] >= o_t[:, None]) & m_q[None, :], b_p, 0.)
 
         # [BS, BQ*G] @ [BQ*G, BV] -> [BS, BV]
-        b_dv += tl.dot(b_p.to(b_do.dtype), b_do)
+        b_dv = tl.dot(b_p.to(b_do.dtype), b_do, b_dv)
         # [BS, BV] @ [BV, BQ*G] -> [BS, BQ*G]
         b_dp = tl.dot(b_v, tl.trans(b_do))
         b_ds = b_p * (b_dp.to(tl.float32) - b_delta[None, :])
         # [BS, BQ*G] @ [BQ*G, BK] -> [BS, BK]
-        b_dk += tl.dot(b_ds.to(b_q.dtype), b_q)
+        b_dk = tl.dot(b_ds.to(b_q.dtype), b_q, b_dk)
 
     o_dk = (i_v * all + o_t)[:, None] * H*K + o_d[None, :]
     o_dv = o_t[:, None] * H*V + o_v[None, :]
@@ -548,6 +548,9 @@ def parallel_nsa_topk(
 
     assert k.shape[0] == q.shape[0] and k.shape[-1] == q.shape[-1], "The last dimension of k and q must match"
     assert lse is None or lse.shape == (B, TQ, HQ), "The shape of lse must be (B, TQ, HQ)"
+    if H == 0 or HQ % H != 0:
+        raise ValueError(f"The number of query heads ({HQ}) must be divisible by the number of key/value heads ({H}).")
+    G = HQ // H
 
     if cu_seqlens is not None:
         if isinstance(cu_seqlens, tuple):
@@ -558,7 +561,6 @@ def parallel_nsa_topk(
     else:
         cu_seqlens_q = cu_seqlens_k = token_indices_q = None
 
-    G = HQ // H
     # the number of selected blocks for each token
     S = block_counts if isinstance(block_counts, int) else block_counts.max().item()
     S = triton.next_power_of_2(S)
@@ -759,7 +761,6 @@ def parallel_nsa_bwd(
     return dq, dk, dv
 
 
-@torch.compile
 class ParallelNSAFunction(torch.autograd.Function):
 
     @staticmethod
@@ -896,7 +897,10 @@ def parallel_nsa(
             f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`. "
             f"Please flatten variable-length inputs before processing.",
         )
-    G = q.shape[2] // k.shape[2]
+    HQ, H = q.shape[2], k.shape[2]
+    if H == 0 or HQ % H != 0:
+        raise ValueError(f"The number of query heads ({HQ}) must be divisible by the number of key/value heads ({H}).")
+    G = HQ // H
     assert G >= 16 and (G & (G - 1)) == 0, "Group size (HQ/H) must be a power of 2 and >= 16 in NSA"
 
     if cu_seqlens is not None:

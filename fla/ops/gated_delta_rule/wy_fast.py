@@ -187,7 +187,7 @@ def prepare_wy_repr_bwd_kernel(
             b_kbg = b_k * b_b[:, None]
         b_dw = tl.load(p_dw, mask=m_k, other=0.0)
 
-        b_dA += tl.dot(b_dw, tl.trans(b_kbg).to(b_dw.dtype))
+        b_dA = tl.dot(b_dw, tl.trans(b_kbg).to(b_dw.dtype), b_dA)
         b_dkbg = tl.dot(b_A, b_dw)
         if USE_G:
             b_dk = b_dkbg * (b_g_exp * b_b)[:, None]
@@ -207,7 +207,7 @@ def prepare_wy_repr_bwd_kernel(
         b_v = tl.load(p_v, mask=m_v, other=0.0)
         b_vb = (b_v * b_b[:, None]).to(b_v.dtype)
         b_du = tl.load(p_du, mask=m_v, other=0.0)
-        b_dA += tl.dot(b_du, tl.trans(b_vb))
+        b_dA = tl.dot(b_du, tl.trans(b_vb), b_dA)
         b_dvb = tl.dot(b_A, b_du)
         b_dv = b_dvb * b_b[:, None]
         b_db += tl.sum(b_dvb * b_v, 1)
@@ -234,7 +234,7 @@ def prepare_wy_repr_bwd_kernel(
         b_kt = tl.trans(b_k)
         b_kb = b_k * b_b[:, None]
 
-        b_A += tl.dot(b_k, b_kt)
+        b_A = tl.dot(b_k, b_kt, b_A)
         b_dkb = tl.dot(b_dA, b_k)
         b_db += tl.sum(b_dkb * b_k, 1)
         b_dk = b_dkb * b_b[:, None] + tl.trans(tl.dot(tl.trans(b_kb).to(b_dA.dtype), b_dA))

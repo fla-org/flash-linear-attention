@@ -378,7 +378,7 @@ def parallel_wall_attn_bwd_kernel_dq(
         b_p = exp2(b_s - b_lse[:, None])
         b_dp = tl.dot(b_do, b_v)
         b_ds = b_p * (b_dp.to(tl.float32) - b_delta[:, None])
-        b_dq_til += tl.dot(b_ds.to(b_k.dtype), tl.trans(b_k_til))
+        b_dq_til = tl.dot(b_ds.to(b_k.dtype), tl.trans(b_k_til), b_dq_til)
         if USE_SCALAR_G:
             b_dc += tl.sum(b_ds, 1)
 
@@ -582,7 +582,7 @@ def parallel_wall_attn_bwd_kernel_dkv(
             )
         else:
             b_p = tl.where((o_k[:, None] <= o_q[None, :]) & m_q[None, :], exp2(b_s - b_lse[None, :]), 0)
-        b_dv += tl.dot(b_p.to(b_do.dtype), b_do)
+        b_dv = tl.dot(b_p.to(b_do.dtype), b_do, b_dv)
         b_dp = tl.dot(b_v, tl.trans(b_do))
         b_ds = b_p * (b_dp - b_delta[None, :])
         if DIAG_BF16:
@@ -626,7 +626,7 @@ def parallel_wall_attn_bwd_kernel_dkv(
             b_p = tl.where((o_q[None, :] - o_k[:, None] < W) & m_q[None, :], exp2(b_s - b_lse[None, :]), 0)
         else:
             b_p = tl.where(m_q[None, :], exp2(b_s - b_lse[None, :]), 0)
-        b_dv += tl.dot(b_p.to(b_do.dtype), b_do)
+        b_dv = tl.dot(b_p.to(b_do.dtype), b_do, b_dv)
         b_dp = tl.dot(b_v, tl.trans(b_do))
         b_ds = b_p * (b_dp - b_delta[None, :])
         b_dk_til = tl.dot(b_ds.to(b_q.dtype), b_q_til)

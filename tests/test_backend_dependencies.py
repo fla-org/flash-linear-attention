@@ -13,10 +13,11 @@ from scripts.find_dependent_tests import find_backend_op_files
 @pytest.mark.parametrize(
     ('changed', 'expected'),
     [
-        ('fla/backends/registry.py', {'kda', 'dplr', 'norm'}),
-        ('fla/ops/backends/__init__.py', {'kda', 'dplr', 'norm'}),
+        ('fla/backends/registry.py', {'kda', 'gdn2', 'dplr', 'norm'}),
+        ('fla/ops/backends/__init__.py', {'kda', 'gdn2', 'dplr', 'norm'}),
         ('fla/ops/kda/backends/__init__.py', {'kda'}),
         ('fla/ops/kda/backends/triton_ascend/chunk.py', {'kda'}),
+        ('fla/ops/gdn2/backends/triton_ascend/__init__.py', {'gdn2'}),
         ('fla/ops/generalized_delta_rule/dplr/backends/__init__.py', {'dplr'}),
         ('fla/modules/backends/triton_ascend/layernorm.py', {'norm'}),
         ('fla/modules/backends/__init__.py', {'norm'}),
@@ -28,6 +29,7 @@ def test_backend_changes_follow_dispatch_ownership(tmp_path, changed, expected):
     directory.mkdir()
     owners = {
         'kda': 'fla.ops.kda.backends',
+        'gdn2': 'fla.ops.gdn2.backends',
         'dplr': 'fla.ops.generalized_delta_rule.dplr.backends',
         'norm': 'fla.modules.backends',
     }

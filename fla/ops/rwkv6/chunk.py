@@ -14,7 +14,7 @@ from fla.ops.gla.chunk import chunk_gla_bwd_dA, chunk_gla_bwd_dv, chunk_gla_fwd_
 from fla.ops.rwkv6.backends import dispatch
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 from fla.ops.utils.constant import RCP_LN2
-from fla.ops.utils.op import exp2
+from fla.ops.utils.op import exp2, unflatten_program_id
 from fla.utils import (
     autocast_custom_bwd,
     autocast_custom_fwd,
@@ -194,7 +194,7 @@ def chunk_rwkv6_fwd_A_kernel_intra_sub_inter(
         b_gk = tl.load(p_gk, mask=m_kj, other=0.0)
         b_kg = b_k * exp2(b_gn[:, None] - b_gk)
         # [BC, BC] using tf32 to improve precision here.
-        b_A += tl.dot(b_qg, b_kg)
+        b_A = tl.dot(b_qg, b_kg, b_A)
 
     o_Ai = i_t * BT + i_i * BC + tl.arange(0, BC)
     o_Aj = i_j * BC + tl.arange(0, BC)
@@ -452,7 +452,7 @@ def chunk_rwkv6_bwd_kernel_dh(
     USE_FINAL_STATE_GRADIENT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    i_k, i_v, i_nh = unflatten_program_id(X=tl.cdiv(K, BK), Y=tl.cdiv(V, BV))
     i_n, i_hq = i_nh // HQ, i_nh % HQ
     i_h = i_hq // NG
     if IS_VARLEN:
@@ -496,7 +496,7 @@ def chunk_rwkv6_bwd_kernel_dh(
         b_q = (b_q * exp2(b_gk) * scale).to(b_q.dtype)
         b_gk_last = tl.load(p_gk_last, mask=(i_k * BK + tl.arange(0, BK) < K), other=0.)
         b_dh *= exp2(b_gk_last)[:, None]
-        b_dh += tl.dot(b_q, b_do)
+        b_dh = tl.dot(b_q, b_do, b_dh)
 
     if STORE_INITIAL_STATE_GRADIENT:
         p_dh0 = dh0 + i_nh * K*V + o_k[:, None] * V + o_v[None, :]
@@ -573,7 +573,7 @@ def chunk_rwkv6_bwd_kernel_intra(
             # [BC, BC]
             b_dA = tl.load(p_dA, mask=(o_r[:, None] < T) & (o_dAj[None, :] < BT), other=0.0)
             # [BC, BK]
-            b_dq += tl.dot(b_dA, b_kg)
+            b_dq = tl.dot(b_dA, b_kg, b_dq)
         b_dq *= exp2(b_ge - b_gn[None, :])
 
     o_i = tl.arange(0, BC)
@@ -627,7 +627,7 @@ def chunk_rwkv6_bwd_kernel_intra(
             b_dA = tl.load(p_dA, mask=(o_dAi[:, None] < BT) & m_j[None, :], other=0.0)
             # [BC, BK]
             # (SY 09/17) important to not use bf16 here to have a good precision.
-            b_dk += tl.dot(b_dA, b_qg)
+            b_dk = tl.dot(b_dA, b_qg, b_dk)
         b_dk *= exp2(b_gn[None, :] - b_gk)
     o_dA = bos*H*BT + (i_t * BT + i_i * BC) * H*BT + i_h * BT + i_i * BC + tl.arange(0, BC)
     p_qj = q + (bos + i_t * BT + i_i * BC) * H*K + i_h * K + o_k
@@ -733,8 +733,8 @@ def chunk_rwkv6_bwd_kernel_inter(
         # [BK]
         b_dgk += tl.sum(b_h * b_dh, axis=0)
         # [BT, BK]
-        b_dq += tl.dot(b_do, b_h.to(b_do.dtype))
-        b_dk += tl.dot(b_v, b_dh.to(b_v.dtype))
+        b_dq = tl.dot(b_do, b_h.to(b_do.dtype), b_dq)
+        b_dk = tl.dot(b_v, b_dh.to(b_v.dtype), b_dk)
     b_dgk *= exp2(b_gn)
     b_dq *= scale
     b_gk = tl.load(p_gk, mask=m_tk, other=0.0)
@@ -910,7 +910,7 @@ def chunk_rwkv6_bwd_dh(
     dh = k.new_empty(B, NT, HQ, K, V, dtype=k.dtype if not states_in_fp32 else torch.float)
     dh0 = torch.empty_like(h0, dtype=torch.float) if h0 is not None else None
 
-    def grid(meta): return (triton.cdiv(K, meta['BK']), triton.cdiv(V, meta['BV']), N * H)
+    def grid(meta): return (triton.cdiv(K, meta['BK']) * triton.cdiv(V, meta['BV']) * N * H,)
     chunk_rwkv6_bwd_kernel_dh[grid](
         q=q,
         gi=gi,

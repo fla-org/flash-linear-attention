@@ -221,7 +221,7 @@ def parallel_delta_rule_fwd_kernel(
         b_s = tl.dot(b_q.to(b_k.dtype), b_k, allow_tf32=False)
         b_s = tl.where(m_s[:, None], b_s, 0)
 
-        b_o += tl.dot(b_s.to(b_v.dtype), b_v, allow_tf32=False)
+        b_o = tl.dot(b_s.to(b_v.dtype), b_v, b_o, allow_tf32=False)
         b_k2 = (tl.load(p_k2, mask=m_k2, other=0.0) * b_beta[:, None]).to(b_v.dtype)
         b_q -= tl.dot(b_s.to(b_v.dtype), b_k2, allow_tf32=False)
 
@@ -251,7 +251,7 @@ def parallel_delta_rule_fwd_kernel(
         # [BT, BS]
         b_s = (tl.dot(b_q.to(b_k.dtype), b_k, allow_tf32=False))
         # [BT, BV]
-        b_o += tl.dot(b_s.to(b_v.dtype), b_v, allow_tf32=False)
+        b_o = tl.dot(b_s.to(b_v.dtype), b_v, b_o, allow_tf32=False)
         b_k2 = (tl.load(p_k2, mask=m_k2, other=0.0) * b_beta[:, None]).to(b_v.dtype)
         b_q -= tl.dot(b_s.to(b_v.dtype), b_k2, allow_tf32=False).to(b_q.dtype)
 
@@ -338,7 +338,6 @@ def parallel_delta_rule(
     beta: torch.Tensor,
     scale: float | None = None,
     output_attentions: bool = False,
-    **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
@@ -362,10 +361,6 @@ def parallel_delta_rule(
         attn (torch.Tensor):
             Attention scores of shape `[B, H, T, T]` if `output_attentions=True` else `None`.
     """
-    if 'head_first' in kwargs:
-        raise DeprecationWarning(
-            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
-        )
     o, attn = ParallelDeltaRuleFunction.apply(q, k, v, beta, scale, output_attentions)
     return o, attn
 

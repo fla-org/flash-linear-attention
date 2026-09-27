@@ -130,7 +130,7 @@ def chunk_fwd_kernel_h_npu(
             b_h *= exp2(b_gv_last)[None, :]
             b_v = b_v * exp2(b_gv_last[None, :] - b_gv)
 
-        b_h += tl.dot(b_k, b_v)
+        b_h = tl.dot(b_k, b_v, b_h)
 
     if STORE_FINAL_STATE:
         ht_base = (i_nh * K * V)
@@ -233,7 +233,7 @@ def chunk_bwd_kernel_dh_npu(
             b_do = b_do * exp2(b_gv)
             b_dh *= exp2(b_gv_last)[None, :]
 
-        b_dh += tl.dot(b_q, b_do)
+        b_dh = tl.dot(b_q, b_do, b_dh)
 
     if STORE_INITIAL_STATE_GRADIENT:
         dh0_base = (i_nh * K * V)

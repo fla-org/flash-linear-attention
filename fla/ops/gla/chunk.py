@@ -111,7 +111,7 @@ def chunk_gla_fwd_A_kernel_intra_sub_inter(
         b_gk = tl.load(p_gk, mask=m_kj, other=0.0)
         b_kg = b_k * exp2(b_gn[:, None] - b_gk)
         # [BC, BC] using tf32 to improve precision here.
-        b_A += tl.dot(b_qg, b_kg)
+        b_A = tl.dot(b_qg, b_kg, b_A)
 
     o_jA = i_j * BC + tl.arange(0, BC)
     m_A = m_i[:, None] & (o_jA[None, :] < BT)
@@ -421,9 +421,9 @@ def chunk_gla_fwd_kernel_o(
         b_h = tl.load(p_h, mask=m_h, other=0.0)
         if i_k >= 0:
             if STATE_V_FIRST:
-                b_o += tl.dot(b_qg, tl.trans(b_h).to(b_qg.dtype))
+                b_o = tl.dot(b_qg, tl.trans(b_h).to(b_qg.dtype), b_o)
             else:
-                b_o += tl.dot(b_qg, b_h.to(b_qg.dtype))
+                b_o = tl.dot(b_qg, b_h.to(b_qg.dtype), b_o)
     b_o *= scale
     p_v = v + o_t[:, None] * (HV*V) + o_v[None, :]
     p_o = o + o_t[:, None] * (HV*V) + o_v[None, :]
@@ -433,7 +433,7 @@ def chunk_gla_fwd_kernel_o(
     # [BT, BT]
     b_A = tl.load(p_A, mask=m_A, other=0.0)
     b_A = tl.where(m_s, b_A, 0.).to(b_v.dtype)
-    b_o += tl.dot(b_A, b_v)
+    b_o = tl.dot(b_A, b_v, b_o)
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=m_tv)
 
 
@@ -510,7 +510,7 @@ def chunk_gla_bwd_kernel_intra(
             # [BC, BC]
             b_dA = tl.load(p_dA, mask=m_da, other=0.0)
 
-            b_dq += tl.dot(b_dA, b_kg)
+            b_dq = tl.dot(b_dA, b_kg, b_dq)
         b_dq *= exp2(b_g - b_gn[None, :])
     o_i = tl.arange(0, BC)
     m_dA = (i_t * BT + i_i * BC + tl.arange(0, BC)) < T
@@ -561,7 +561,7 @@ def chunk_gla_bwd_kernel_intra(
             b_dA = tl.load(p_dA, mask=m_da, other=0.0)
             # [BC, BK]
             # (SY 09/17) important to not use bf16 here to have a good precision.
-            b_dk += tl.dot(b_dA, b_qg)
+            b_dk = tl.dot(b_dA, b_qg, b_dk)
         b_dk *= exp2(b_gn[None, :] - b_g)
     o_dA = bos*H*BT + (i_t * BT + i_i * BC) * H*BT + i_h * BT + i_i * BC + tl.arange(0, BC)
     p_qj = q + (bos + i_t * BT + i_i * BC) * H*K + i_h * K + o_k
@@ -632,7 +632,7 @@ def chunk_gla_bwd_kernel_dA(
         b_v = tl.load(p_v, mask=m_vt, other=0.0)
         b_do = tl.load(p_do, mask=m_tv, other=0.0)
 
-        b_dA += tl.dot(b_do, b_v)
+        b_dA = tl.dot(b_do, b_v, b_dA)
 
     p_dA = dA + (bos * H + i_h) * BT + o_t[:, None] * (H*BT) + o_i[None, :]
     m_s = tl.arange(0, BT)[:, None] >= tl.arange(0, BT)[None, :]
@@ -728,7 +728,7 @@ def chunk_gla_bwd_kernel_dv(
         b_k = (b_k * b_gn).to(b_k.dtype)
         # [BT, BV]
         # (SY 09/17) it is ok to have bf16 interchunk gradient contribution here
-        b_dv += tl.dot(b_k, b_dh.to(b_k.dtype))
+        b_dv = tl.dot(b_k, b_dh.to(b_k.dtype), b_dv)
 
     tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), mask=m_tv)
 
@@ -838,8 +838,8 @@ def chunk_gla_bwd_kernel_inter(
         # [BK]
         b_dgk += tl.sum(b_h * b_dh, axis=0)
         # [BT, BK]
-        b_dq += tl.dot(b_do, b_h.to(b_do.dtype))
-        b_dk += tl.dot(b_v, b_dh.to(b_v.dtype))
+        b_dq = tl.dot(b_do, b_h.to(b_do.dtype), b_dq)
+        b_dk = tl.dot(b_v, b_dh.to(b_v.dtype), b_dk)
 
     b_dgk *= exp2(b_gn)
     b_dq *= scale

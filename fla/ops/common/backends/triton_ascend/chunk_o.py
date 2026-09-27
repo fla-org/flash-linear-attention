@@ -297,11 +297,11 @@ def chunk_fwd_kernel_o_npu(
             b_q_c = b_q + 0.0
             # [BT, BK] @ [BK, BV] -> [BT, BV]
             if STATE_V_FIRST:
-                b_o += tl.dot(b_q, tl.trans(b_h))
+                b_o = tl.dot(b_q, tl.trans(b_h), b_o)
             else:
-                b_o += tl.dot(b_q, b_h)
+                b_o = tl.dot(b_q, b_h, b_o)
             # [BT, BK] @ [BK, BT] -> [BT, BT]
-            b_A += tl.dot(b_q_c, b_k)
+            b_A = tl.dot(b_q_c, b_k, b_A)
 
         if USE_G:
             # g is transposed to [B, HV, T] in wrapper for contiguous T-load.
@@ -645,9 +645,9 @@ def chunk_bwd_kernel_dv_local_npu(
             p_do1 = tl.make_block_ptr(do, (T, V), (HV * V, 1), (i_tc1, i_v * BV), (BC, BV), (1, 0))
             b_do0 = tl.load(p_do0, boundary_check=(0, 1))
             b_do1 = tl.load(p_do1, boundary_check=(0, 1))
-            b_dv0 += tl.dot(b_A00.to(b_do0.dtype), b_do0, allow_tf32=False)
-            b_dv0 += tl.dot(b_A01.to(b_do1.dtype), b_do1, allow_tf32=False)
-            b_dv1 += tl.dot(b_A11.to(b_do1.dtype), b_do1, allow_tf32=False)
+            b_dv0 = tl.dot(b_A00.to(b_do0.dtype), b_do0, b_dv0, allow_tf32=False)
+            b_dv0 = tl.dot(b_A01.to(b_do1.dtype), b_do1, b_dv0, allow_tf32=False)
+            b_dv1 = tl.dot(b_A11.to(b_do1.dtype), b_do1, b_dv1, allow_tf32=False)
 
             p_dv0 = tl.make_block_ptr(dv, (T, V), (HV * V, 1), (i_tc0, i_v * BV), (BC, BV), (1, 0))
             p_dv1 = tl.make_block_ptr(dv, (T, V), (HV * V, 1), (i_tc1, i_v * BV), (BC, BV), (1, 0))
@@ -692,7 +692,7 @@ def chunk_bwd_kernel_dv_local_npu(
 
                     p_doc = tl.make_block_ptr(do, (T, V), (HV * V, 1), (i_tc_c, i_v * BV), (BC, BV), (1, 0))
                     b_doc = tl.load(p_doc, boundary_check=(0, 1))
-                    b_dv += tl.dot(b_A.to(b_doc.dtype), b_doc, allow_tf32=False)
+                    b_dv = tl.dot(b_A.to(b_doc.dtype), b_doc, b_dv, allow_tf32=False)
 
                 p_dv = tl.make_block_ptr(dv, (T, V), (HV * V, 1), (i_tc_r, i_v * BV), (BC, BV), (1, 0))
                 tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
@@ -799,7 +799,7 @@ def chunk_bwd_kernel_dqkwg_npu(
             p_dv = tl.make_block_ptr(dv, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
             b_h = tl.load(p_h, boundary_check=(0, 1))
             b_dv = tl.load(p_dv, boundary_check=(0, 1))
-            b_dw += tl.dot(b_dv.to(b_h.dtype), b_h.to(b_h.dtype), allow_tf32=False)
+            b_dw = tl.dot(b_dv.to(b_h.dtype), b_h.to(b_h.dtype), b_dw, allow_tf32=False)
         p_dw = tl.make_block_ptr(dw, (T, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         tl.store(p_dw, -b_dw.to(p_dw.dtype.element_ty), boundary_check=(0, 1))
 
@@ -824,7 +824,7 @@ def chunk_bwd_kernel_dqkwg_npu(
                 p_h = tl.make_block_ptr(h, (V, K), (1, V), (i_v * BV, i_k * BK), (BV, BK), (0, 1))
             b_do_r = tl.load(p_do_r, boundary_check=(0, 1))
             b_h = tl.load(p_h, boundary_check=(0, 1))
-            b_dq_r += tl.dot(b_do_r, b_h.to(b_do_r.dtype), allow_tf32=False)
+            b_dq_r = tl.dot(b_do_r, b_h.to(b_do_r.dtype), b_dq_r, allow_tf32=False)
 
         if USE_G:
             p_gr = _g_block_ptr(g_base, T, i_tc_r, BC, G_T_CONTIG, HV)
@@ -846,7 +846,7 @@ def chunk_bwd_kernel_dqkwg_npu(
                 p_v_c = tl.make_block_ptr(v, (T, V), (HV * V, 1), (i_tc_c, i_v * BV), (BC, BV), (1, 0))
                 b_do_r2 = tl.load(p_do_r2, boundary_check=(0, 1))
                 b_v_c = tl.load(p_v_c, boundary_check=(0, 1))
-                b_ds += tl.dot(b_do_r2, tl.trans(b_v_c), allow_tf32=False)
+                b_ds = tl.dot(b_do_r2, tl.trans(b_v_c), b_ds, allow_tf32=False)
 
             if USE_G:
                 p_gc = _g_block_ptr(g_base, T, i_tc_c, BC, G_T_CONTIG, HV)
@@ -864,7 +864,7 @@ def chunk_bwd_kernel_dqkwg_npu(
             b_k_c = tl.load(p_k_c, boundary_check=(0, 1))
             b_ds = tl.where(m_blk, b_ds, 0).to(b_k_c.dtype)
             b_ds_c = b_ds + 0.0
-            b_dq_r += tl.dot(b_ds, b_k_c, allow_tf32=False)
+            b_dq_r = tl.dot(b_ds, b_k_c, b_dq_r, allow_tf32=False)
 
             p_dk_acc = tl.make_block_ptr(dk_f32, (T, K), (HV * K, 1), (i_tc_c, i_k * BK), (BC, BK), (1, 0))
             b_dk_acc = tl.load(p_dk_acc, boundary_check=(0, 1))
@@ -895,7 +895,7 @@ def chunk_bwd_kernel_dqkwg_npu(
                 p_dh = tl.make_block_ptr(dh, (V, K), (1, V), (i_v * BV, i_k * BK), (BV, BK), (0, 1))
             b_v = tl.load(p_v, boundary_check=(0, 1))
             b_dh = tl.load(p_dh, boundary_check=(0, 1))
-            b_dk_c += tl.dot(b_v.to(tl.float32), b_dh.to(tl.float32), allow_tf32=False)
+            b_dk_c = tl.dot(b_v.to(tl.float32), b_dh.to(tl.float32), b_dk_c, allow_tf32=False)
 
         if USE_G:
             p_gc = _g_block_ptr(g_base, T, i_tc_c, BC, G_T_CONTIG, HV)
@@ -1012,7 +1012,7 @@ def chunk_bwd_kernel_dqkwg_full_npu(
             p_do = tl.make_block_ptr(do_ptr, (T_cur, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
             b_v = tl.load(p_v, boundary_check=(0, 1))
             b_do = tl.load(p_do, boundary_check=(0, 1))
-            b_ds += tl.dot(b_do, tl.trans(b_v), allow_tf32=False)
+            b_ds = tl.dot(b_do, tl.trans(b_v), b_ds, allow_tf32=False)
 
         if USE_G or USE_G_GAMMA:
             b_ds = tl.where(m_A, b_ds * exp2(b_g[:, None] - b_g[None, :]), 0) * scale
@@ -1039,12 +1039,12 @@ def chunk_bwd_kernel_dqkwg_full_npu(
                 b_do = tl.load(p_do, boundary_check=(0, 1))
                 b_h = tl.load(p_h, boundary_check=(0, 1))
                 b_dh = tl.load(p_dh, boundary_check=(0, 1))
-                b_dq += tl.dot(b_do, b_h.to(b_do.dtype), allow_tf32=False)
-                b_dk += tl.dot(b_v, b_dh.to(b_v.dtype), allow_tf32=False)
+                b_dq = tl.dot(b_do, b_h.to(b_do.dtype), b_dq, allow_tf32=False)
+                b_dk = tl.dot(b_v, b_dh.to(b_v.dtype), b_dk, allow_tf32=False)
                 if USE_DW:
                     p_dv = tl.make_block_ptr(dv_ptr, (T_cur, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
                     b_dv = tl.load(p_dv, boundary_check=(0, 1))
-                    b_dw += tl.dot(b_dv.to(b_h.dtype), b_h.to(b_h.dtype), allow_tf32=False)
+                    b_dw = tl.dot(b_dv.to(b_h.dtype), b_h.to(b_h.dtype), b_dw, allow_tf32=False)
 
             if USE_DW:
                 p_dw = tl.make_block_ptr(dw_ptr, (T_cur, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
@@ -1062,11 +1062,11 @@ def chunk_bwd_kernel_dqkwg_full_npu(
                 b_dk = b_dk * tl.where(m_t, exp2(-b_g + b_g_last), 0)[:, None]
                 if USE_G:
                     b_dg_last = tl.sum(b_dk * b_k.to(tl.float32))
-                b_dq += tl.dot(b_ds_lhs, b_k, allow_tf32=False)
-                b_dk += tl.dot(tl.trans(b_ds_rhs), b_q, allow_tf32=False)
+                b_dq = tl.dot(b_ds_lhs, b_k, b_dq, allow_tf32=False)
+                b_dk = tl.dot(tl.trans(b_ds_rhs), b_q, b_dk, allow_tf32=False)
             else:
                 b_dq = b_dq * scale + tl.dot(b_ds_lhs, b_k, allow_tf32=False)
-                b_dk += tl.dot(tl.trans(b_ds_rhs), b_q, allow_tf32=False)
+                b_dk = tl.dot(tl.trans(b_ds_rhs), b_q, b_dk, allow_tf32=False)
 
             p_dq = tl.make_block_ptr(dq_ptr, (T_cur, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
             p_dk = tl.make_block_ptr(dk_ptr, (T_cur, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
@@ -1251,7 +1251,7 @@ def chunk_bwd_kernel_dg_npu(
                 p_dh = tl.make_block_ptr(dh, (V, K), (1, V), (i_v * BV, i_k * BK), (BV, BK), (0, 1))
             b_v = tl.load(p_v, boundary_check=(0, 1))
             b_dh = tl.load(p_dh, boundary_check=(0, 1))
-            b_dk_pre += tl.dot(b_v.to(tl.float32), b_dh.to(tl.float32), allow_tf32=False)
+            b_dk_pre = tl.dot(b_v.to(tl.float32), b_dh.to(tl.float32), b_dk_pre, allow_tf32=False)
 
         p_k_c = tl.make_block_ptr(k, (T, K), (H * K, 1), (i_tc_c, i_k * BK), (BC, BK), (1, 0))
         b_k_c = tl.load(p_k_c, boundary_check=(0, 1))

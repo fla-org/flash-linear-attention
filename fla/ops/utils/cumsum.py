@@ -12,6 +12,7 @@ import triton.language as tl
 from fla.ops.utils.backends import dispatch
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.index import prepare_chunk_indices
+from fla.ops.utils.op import unflatten_program_id
 from fla.utils import autotune_cache_kwargs, check_shared_mem, input_guard
 
 BS_LIST = [32, 64] if check_shared_mem() else [16, 32]
@@ -219,7 +220,7 @@ def chunk_global_cumsum_vector_kernel(
     HAS_SCALE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_s, i_nh = tl.program_id(0), tl.program_id(1).to(tl.int64)
+    i_s, i_nh = unflatten_program_id(X=tl.cdiv(S, BS))
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
@@ -382,7 +383,7 @@ def chunk_global_cumsum_vector(
     BS = min(32, triton.next_power_of_2(S))
 
     z = torch.empty_like(s, dtype=output_dtype or s.dtype)
-    grid = (triton.cdiv(S, BS), N * H)
+    grid = (triton.cdiv(S, BS) * N * H,)
     chunk_global_cumsum_vector_kernel[grid](
         s=s,
         o=z,

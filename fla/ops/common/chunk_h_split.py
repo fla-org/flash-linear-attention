@@ -128,7 +128,7 @@ def chunk_fwd_kernel_h_split(
             b_gv = tl.load(p_gv, mask=m_t[:, None] & (o_v < V)[None, :], other=0.0)
             b_v = (b_v * exp(b_gv_last[None, :] - b_gv)).to(b_v.dtype)
 
-        b_h += tl.dot(b_k, b_v)
+        b_h = tl.dot(b_k, b_v, b_h)
 
     # if there are more than one splits, we store the result to (unreduced) hs
     # otherwise, we store the result to ht as the final state
@@ -345,7 +345,7 @@ def chunk_bwd_kernel_dh_split(
             b_gv_last = tl.load(p_gv_last, mask=(i_v * BV + tl.arange(0, BV) < V), other=0.)
             b_dh *= exp(b_gv_last)[None, :]
 
-        b_dh += tl.dot(b_q, b_do)
+        b_dh = tl.dot(b_q, b_do, b_dh)
 
     if NS > 1:
         p_dhs = dhs + i_sh * K*V + o_k[:, None] * V + o_v[None, :]

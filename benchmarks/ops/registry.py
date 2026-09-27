@@ -318,7 +318,7 @@ register_op(OpConfig(
     test_file='tests/ops/test_delta.py',
 ))
 
-# --- +gate + beta ---
+# --- Delta-rule variants with decay and update gates ---
 
 register_op(OpConfig(
     name='chunk_gdn',
@@ -332,6 +332,26 @@ register_op(OpConfig(
     extra_kwargs={'use_qk_l2norm_in_kernel': True},
     category='gate_beta',
     test_file='tests/ops/test_gdn.py',
+))
+
+_gdn2_default_shapes = {
+    **SHAPE_CONFIGS,
+    'B1_T32768_H1_D32': {'B': 1, 'T': 32768, 'H': 1, 'D': 32},
+}
+
+register_op(OpConfig(
+    name='chunk_gdn2',
+    import_path='fla.ops.gdn2',
+    inputs={
+        **_simple_qkv,
+        'g': TensorSpec(shape_BTHD, transform=logsigmoid),
+        'b': TensorSpec(shape_BTHD, transform=sigmoid_transform),
+        'w': TensorSpec(shape_BTHD, transform=sigmoid_transform),
+    },
+    extra_kwargs={'use_qk_l2norm_in_kernel': True},
+    category='gate_beta',
+    default_shapes=_gdn2_default_shapes,
+    test_file='tests/ops/test_gdn2.py',
 ))
 
 register_op(OpConfig(

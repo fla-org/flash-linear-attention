@@ -144,19 +144,19 @@ def chunk_gated_delta_product_fwd_kernel_h_blockdim64(
         b_v_new = tl.zeros([BT, BV], dtype=tl.float32)
         p_w = w + o_t[:, None] * stride_k + o_k1[None, :]
         b_w = tl.load(p_w, mask=m_t[:, None] & (o_k1[None, :] < K), other=0.0)
-        b_v_new += tl.dot(b_w, b_h1.to(b_w.dtype))
+        b_v_new = tl.dot(b_w, b_h1.to(b_w.dtype), b_v_new)
         if K > 64:
             p_w = w + o_t[:, None] * stride_k + o_k2[None, :]
             b_w = tl.load(p_w, mask=m_t[:, None] & (o_k2[None, :] < K), other=0.0)
-            b_v_new += tl.dot(b_w, b_h2.to(b_w.dtype))
+            b_v_new = tl.dot(b_w, b_h2.to(b_w.dtype), b_v_new)
         if K > 128:
             p_w = w + o_t[:, None] * stride_k + o_k3[None, :]
             b_w = tl.load(p_w, mask=m_t[:, None] & (o_k3[None, :] < K), other=0.0)
-            b_v_new += tl.dot(b_w, b_h3.to(b_w.dtype))
+            b_v_new = tl.dot(b_w, b_h3.to(b_w.dtype), b_v_new)
         if K > 192:
             p_w = w + o_t[:, None] * stride_k + o_k4[None, :]
             b_w = tl.load(p_w, mask=m_t[:, None] & (o_k4[None, :] < K), other=0.0)
-            b_v_new += tl.dot(b_w, b_h4.to(b_w.dtype))
+            b_v_new = tl.dot(b_w, b_h4.to(b_w.dtype), b_v_new)
         b_v_new = -b_v_new + tl.load(p_v, mask=m_vv, other=0.0)
 
         if SAVE_NEW_VALUE:
@@ -181,19 +181,19 @@ def chunk_gated_delta_product_fwd_kernel_h_blockdim64(
         b_v_new = b_v_new.to(k.dtype.element_ty)
         p_k = k + o_k1[:, None] + o_t[None, :] * stride_k
         b_k = tl.load(p_k, mask=(o_k1[:, None] < K) & m_t[None, :], other=0.0)
-        b_h1 += tl.dot(b_k, b_v_new)
+        b_h1 = tl.dot(b_k, b_v_new, b_h1)
         if K > 64:
             p_k = k + o_k2[:, None] + o_t[None, :] * stride_k
             b_k = tl.load(p_k, mask=(o_k2[:, None] < K) & m_t[None, :], other=0.0)
-            b_h2 += tl.dot(b_k, b_v_new)
+            b_h2 = tl.dot(b_k, b_v_new, b_h2)
         if K > 128:
             p_k = k + o_k3[:, None] + o_t[None, :] * stride_k
             b_k = tl.load(p_k, mask=(o_k3[:, None] < K) & m_t[None, :], other=0.0)
-            b_h3 += tl.dot(b_k, b_v_new)
+            b_h3 = tl.dot(b_k, b_v_new, b_h3)
         if K > 192:
             p_k = k + o_k4[:, None] + o_t[None, :] * stride_k
             b_k = tl.load(p_k, mask=(o_k4[:, None] < K) & m_t[None, :], other=0.0)
-            b_h4 += tl.dot(b_k, b_v_new)
+            b_h4 = tl.dot(b_k, b_v_new, b_h4)
     # epilogue
     if STORE_FINAL_STATE:
         p_ht = ht + o_k1[:, None] * V + o_v[None, :]
@@ -352,22 +352,22 @@ def chunk_gated_delta_product_bwd_kernel_dhu_blockdim64(
         # Update dv
         p_k = k + o_t[:, None] * stride_k + o_k1[None, :]
         b_k = tl.load(p_k, mask=m_t[:, None] & (o_k1[None, :] < K), other=0.0)
-        b_dv += tl.dot(b_k, b_dh1.to(b_k.dtype))
+        b_dv = tl.dot(b_k, b_dh1.to(b_k.dtype), b_dv)
 
         if K > 64:
             p_k = k + o_t[:, None] * stride_k + o_k2[None, :]
             b_k = tl.load(p_k, mask=m_t[:, None] & (o_k2[None, :] < K), other=0.0)
-            b_dv += tl.dot(b_k, b_dh2.to(b_k.dtype))
+            b_dv = tl.dot(b_k, b_dh2.to(b_k.dtype), b_dv)
 
         if K > 128:
             p_k = k + o_t[:, None] * stride_k + o_k3[None, :]
             b_k = tl.load(p_k, mask=m_t[:, None] & (o_k3[None, :] < K), other=0.0)
-            b_dv += tl.dot(b_k, b_dh3.to(b_k.dtype))
+            b_dv = tl.dot(b_k, b_dh3.to(b_k.dtype), b_dv)
 
         if K > 192:
             p_k = k + o_t[:, None] * stride_k + o_k4[None, :]
             b_k = tl.load(p_k, mask=m_t[:, None] & (o_k4[None, :] < K), other=0.0)
-            b_dv += tl.dot(b_k, b_dh4.to(b_k.dtype))
+            b_dv = tl.dot(b_k, b_dh4.to(b_k.dtype), b_dv)
 
         if USE_G:
             m_t = (i_t * BT + tl.arange(0, BT)) < T

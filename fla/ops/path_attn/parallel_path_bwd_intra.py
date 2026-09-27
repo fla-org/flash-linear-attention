@@ -149,7 +149,7 @@ def parallel_path_bwd_intra_chunk_kernel(
         tl.atomic_add(dw1 + (offset + tl.arange(0, BT))[:, None] * HQ*K + tl.arange(0,
                       BK)[None, :], b_dw1, mask=mask[:, None], sem='relaxed')
         b_dq -= tl.dot(b_dA2, b_w1.to(b_v.dtype))
-        b_dq += tl.dot(b_dA.to(b_k.dtype), b_k)
+        b_dq = tl.dot(b_dA.to(b_k.dtype), b_k, b_dq)
 
     p_dq_new = dq_new + o_t[:, None] * (HQ*K) + o_d[None, :]
     tl.store(p_dq_new, b_dq.to(dq_new.dtype.element_ty), mask=m_k)

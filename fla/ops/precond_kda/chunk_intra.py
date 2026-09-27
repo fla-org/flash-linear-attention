@@ -163,8 +163,8 @@ def chunk_precond_kda_fwd_kernel_inter_solve_fused(
             # [BK, BC]
             b_kpgt = b_kpt0 * exp2(b_gn1[:, None] - b_gt0)  # k_precond for column
             # [BC, BC]
-            b_Aqk10 += tl.dot(b_qg1, b_kpgt)
-            b_Akk10 += tl.dot(b_kg1, b_kpgt)  # Asymmetric: k @ k_precond^T
+            b_Aqk10 = tl.dot(b_qg1, b_kpgt, b_Aqk10)
+            b_Akk10 = tl.dot(b_kg1, b_kpgt, b_Akk10)  # Asymmetric: k @ k_precond^T
 
         if i_tc2 < T:
             m_c2k = m_tc2[:, None] & m_k[None, :]
@@ -185,12 +185,12 @@ def chunk_precond_kda_fwd_kernel_inter_solve_fused(
             b_qg2 = b_q2 * b_gqn2
             b_kg2 = b_k2 * b_gqn2
             b_kpgt = b_kpt0 * exp2(b_gn2[:, None] - b_gt0)
-            b_Aqk20 += tl.dot(b_qg2, b_kpgt)
-            b_Akk20 += tl.dot(b_kg2, b_kpgt)
+            b_Aqk20 = tl.dot(b_qg2, b_kpgt, b_Aqk20)
+            b_Akk20 = tl.dot(b_kg2, b_kpgt, b_Akk20)
 
             b_kpgt = b_kpt1 * exp2(b_gn2[:, None] - b_gt1)
-            b_Aqk21 += tl.dot(b_qg2, b_kpgt)
-            b_Akk21 += tl.dot(b_kg2, b_kpgt)
+            b_Aqk21 = tl.dot(b_qg2, b_kpgt, b_Aqk21)
+            b_Akk21 = tl.dot(b_kg2, b_kpgt, b_Akk21)
 
         if i_tc3 < T:
             m_c3k = m_tc3[:, None] & m_k[None, :]
@@ -206,16 +206,16 @@ def chunk_precond_kda_fwd_kernel_inter_solve_fused(
             b_qg3 = b_q3 * b_gqn3
             b_kg3 = b_k3 * b_gqn3
             b_kpgt = b_kpt0 * exp2(b_gn3[:, None] - b_gt0)
-            b_Aqk30 += tl.dot(b_qg3, b_kpgt)
-            b_Akk30 += tl.dot(b_kg3, b_kpgt)
+            b_Aqk30 = tl.dot(b_qg3, b_kpgt, b_Aqk30)
+            b_Akk30 = tl.dot(b_kg3, b_kpgt, b_Akk30)
 
             b_kpgt = b_kpt1 * exp2(b_gn3[:, None] - b_gt1)
-            b_Aqk31 += tl.dot(b_qg3, b_kpgt)
-            b_Akk31 += tl.dot(b_kg3, b_kpgt)
+            b_Aqk31 = tl.dot(b_qg3, b_kpgt, b_Aqk31)
+            b_Akk31 = tl.dot(b_kg3, b_kpgt, b_Akk31)
 
             b_kpgt = b_kpt2 * exp2(b_gn3[:, None] - b_gt2)
-            b_Aqk32 += tl.dot(b_qg3, b_kpgt)
-            b_Akk32 += tl.dot(b_kg3, b_kpgt)
+            b_Aqk32 = tl.dot(b_qg3, b_kpgt, b_Aqk32)
+            b_Akk32 = tl.dot(b_kg3, b_kpgt, b_Akk32)
 
     ################################################################################
     # 2. save off-diagonal Aqk blocks and prepare Akk
@@ -743,8 +743,8 @@ def chunk_precond_kda_bwd_kernel_intra(
         b_dAqk = tl.load(p_dAqk, mask=m_ti[:, None] & (o_i[None, :] < BC), other=0.0).to(tl.float32)
         b_dAkk = tl.load(p_dAkk, mask=m_ti[:, None] & (o_i[None, :] < BC), other=0.0).to(tl.float32)
         # [BC, BK]
-        b_dq2 += tl.dot(b_dAqk, b_kpg)
-        b_dk2 += tl.dot(b_dAkk, b_kpg)
+        b_dq2 = tl.dot(b_dAqk, b_kpg, b_dq2)
+        b_dk2 = tl.dot(b_dAkk, b_kpg, b_dk2)
 
     b_gqn = exp2(b_g - b_gn_start[None, :])
     b_dq2 *= b_gqn
@@ -856,8 +856,8 @@ def chunk_precond_kda_bwd_kernel_intra(
             b_qg_t = b_q_t * b_gkn_t
             b_kg_t = b_k_t * b_gkn_t * b_b_row[:, None]  # beta from ROW positions
             # [BC, BK]
-            b_dkt += tl.dot(b_dAqk_t, b_qg_t)
-            b_dkt += tl.dot(b_dAkk_t, b_kg_t)
+            b_dkt = tl.dot(b_dAqk_t, b_qg_t, b_dkt)
+            b_dkt = tl.dot(b_dAkk_t, b_kg_t, b_dkt)
 
         b_dkt *= exp2(b_gn_t[None, :] - b_g)
 

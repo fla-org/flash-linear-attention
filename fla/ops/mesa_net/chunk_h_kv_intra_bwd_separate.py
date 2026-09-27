@@ -132,7 +132,7 @@ def chunk_mesa_net_h_kv_bwd_intra_kernel_dkv(
     b_dg_last += tl.sum(b_dk * b_k)
     b_dg -= tl.sum(b_dk * b_k, axis=1)
     b_dv += tl.dot(b_k, tl.trans(b_dh).to(b_k.dtype)) * b_g_exp_k[:, None] + tl.dot(tl.trans(b_s.to(b_do.dtype)), b_do)
-    b_dk += tl.dot(tl.trans(b_ds.to(b_q.dtype)), b_q)
+    b_dk = tl.dot(tl.trans(b_ds.to(b_q.dtype)), b_q, b_dk)
     b_dg = tl.where(o_t < min(i_t * BT + BT, T) - 1, b_dg, b_dg + b_dg_last)
     p_dk = dk_beta + o_t[:, None] * (H*K) + o_k[None, :]
     p_dv = dv + o_t[:, None] * (H*V) + o_v[None, :]
@@ -239,7 +239,7 @@ def chunk_mesa_net_h_kv_bwd_intra_kernel_dq(
     b_g_exp_q = exp2(b_g)
     b_dq = tl.dot(b_do, b_h.to(b_do.dtype)) * b_g_exp_q[:, None]
     b_dg = tl.sum(b_dq * b_q, axis=1) + tl.load(p_dg_prev, mask=m_t, other=0.0)
-    b_dq += tl.dot(b_ds.to(b_k.dtype), b_k)
+    b_dq = tl.dot(b_ds.to(b_k.dtype), b_k, b_dq)
 
     tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), mask=m_tk)
     tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), mask=m_t)

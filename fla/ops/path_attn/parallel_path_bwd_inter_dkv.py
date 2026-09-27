@@ -127,13 +127,13 @@ def parallel_path_bwd_dkv_kernel(
         b_A_softmax = tl.math.exp2(b_A * sm_scale - b_l[None, :])
         p_do = do + o_q[:, None] * (HQ*V) + o_v[None, :]
         b_do = tl.load(p_do, mask=m_q[:, None] & (o_v[None, :] < V), other=0.0)
-        b_dv += tl.dot(b_A_softmax.to(b_do.dtype), b_do)
+        b_dv = tl.dot(b_A_softmax.to(b_do.dtype), b_do, b_dv)
         b_dp = tl.dot(b_v, tl.trans(b_do))
 
         b_dA = ((b_dp - b_delta[None, :]) * b_A_softmax * scale)
         if USE_GATE:
             b_dg_cumsum_k -= tl.sum(b_dA, axis=1)
-        b_dk += tl.dot(b_dA.to(b_q.dtype), b_q)
+        b_dk = tl.dot(b_dA.to(b_q.dtype), b_q, b_dk)
 
     p_dk = dk + o_k[:, None] * (HQ*K) + o_d[None, :]
     tl.store(p_dk, b_dk.to(dk.dtype.element_ty), mask=m_k[:, None] & (o_d[None, :] < K))

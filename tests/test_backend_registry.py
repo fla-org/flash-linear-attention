@@ -5,6 +5,8 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import importlib
+
 import pytest
 import torch
 
@@ -112,3 +114,29 @@ def test_deprecated_bound_operation_key():
         return x + 1
 
     assert compute(1) == 2
+
+
+@pytest.mark.parametrize(
+    ('module_name', 'func_name'),
+    [
+        ('chunk_intra', 'chunk_gdn2_fwd_intra'),
+        ('chunk_bwd', 'chunk_gdn2_bwd_wy_dqkg_fused'),
+    ],
+    ids=['forward', 'backward'],
+)
+def test_gdn2_dispatch_uses_local_registry(monkeypatch, module_name, func_name):
+    from fla.ops.gdn2.backends.triton_ascend import TritonAscendGDN2Backend
+
+    entry = getattr(importlib.import_module(f'fla.ops.gdn2.{module_name}'), func_name)
+    if registry_module._DISPATCH_DISABLED or not hasattr(entry, '__wrapped__'):
+        pytest.skip('Backend dispatch was disabled before import')
+    monkeypatch.setattr(TritonAscendGDN2Backend, 'is_available', classmethod(lambda cls: True))
+    monkeypatch.setattr(TritonAscendGDN2Backend, 'is_enabled', classmethod(lambda cls: True))
+    monkeypatch.setattr(TritonAscendGDN2Backend, f'{func_name}_verifier', lambda self, q: (True, None))
+    monkeypatch.setattr(TritonAscendGDN2Backend, func_name, lambda self, q: q.square())
+
+    q = torch.tensor([1.0, 2.0], requires_grad=True)
+    result = entry(q=q)
+    torch.testing.assert_close(result, q.square())
+    result.sum().backward()
+    torch.testing.assert_close(q.grad, 2 * q)
