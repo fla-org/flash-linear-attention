@@ -260,6 +260,7 @@ class LegacyFLACache(HFCacheBase):
 
         if cache_kwargs is None:
             cache_kwargs = {}
+        offset = 1 if offset is None else offset
         if attn_state is not None:
             input_size = attn_state[0].shape[1]
             window_size = cache_kwargs.get('window_size')
