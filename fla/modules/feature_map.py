@@ -121,8 +121,7 @@ class DPFPFeatureMap(nn.Module):
         self.nu = nu
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        relu = x.relu()
-        x = torch.cat([relu, -relu], dim=-1)
+        x = torch.cat([x.relu(), (-x).relu()], dim=-1)
         x_rolled = torch.cat([x.roll(shifts=j, dims=-1) for j in range(1, self.nu+1)], dim=-1)
         x_repeat = torch.cat([x] * self.nu, dim=-1)
         return x_repeat * x_rolled

@@ -103,6 +103,8 @@ def test_global_cumsum(
             (4, 256, [0, 15, 100, 300, 1200, 2000], torch.float),
             (4, 500, [0, 1, 100, 300, 1200, 2048], torch.float16),
             (2, 1024, [0, 200, 512, 1200, 2048], torch.float16),
+            # exceed the y-axis grid limit with multiple feature tiles
+            (32, 33, range(0, 32801, 16), torch.float),
         ]
     ],
 )
@@ -113,7 +115,7 @@ def test_global_cumsum(
 def test_global_cumsum_varlen(
     H: int,
     D: int,
-    cu_seqlens: list[int],
+    cu_seqlens: list[int] | range,
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)

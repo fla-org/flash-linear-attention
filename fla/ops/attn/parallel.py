@@ -785,7 +785,6 @@ def parallel_attn(
     chunk_indices: torch.LongTensor | None = None,
     *,
     sink_bias: torch.Tensor | None = None,
-    **kwargs
 ) -> torch.Tensor:
     r"""
     Args:
@@ -817,20 +816,17 @@ def parallel_attn(
             attention mass to a learnable "no-op" target:
                 p_i    = exp(s_i)          / (sum_j exp(s_j) + exp(sink_bias[h]))
                 o      = sum_i p_i * v_i   # sink slot contributes no value
-            When `None`, standard softmax is used. Reserved name: the future
-            `sink_tokens_*` kwargs will support Xiao 2024-style K/V sink tokens
-            and may be combined with `sink_bias`.
+            When `None`, standard softmax is used.
 
     Returns:
         o (torch.Tensor):
             Outputs of shape `[B, T, HQ, V]`.
     """
-    if 'head_first' in kwargs:
-        raise DeprecationWarning(
-            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
-        )
     if scale is None:
         scale = k.shape[-1] ** -0.5
+    HQ, H = q.shape[2], k.shape[2]
+    if H == 0 or HQ % H != 0:
+        raise ValueError(f"The number of query heads ({HQ}) must be divisible by the number of key/value heads ({H}).")
     if cu_seqlens is not None and q.shape[0] != 1:
         raise ValueError(
             f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`. "

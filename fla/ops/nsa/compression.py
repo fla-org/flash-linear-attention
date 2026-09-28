@@ -618,6 +618,9 @@ def parallel_nsa_compression(
     scale: float = None,
     cu_seqlens: torch.LongTensor | tuple[torch.LongTensor, torch.LongTensor] | None = None
 ):
+    HQ, H = q.shape[2], k.shape[2]
+    if H == 0 or HQ % H != 0:
+        raise ValueError(f"The number of query heads ({HQ}) must be divisible by the number of key/value heads ({H}).")
     if scale is None:
         scale = k.shape[-1] ** -0.5
     return ParallelNSACompressionFunction.apply(

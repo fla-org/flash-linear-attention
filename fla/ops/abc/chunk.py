@@ -1208,7 +1208,6 @@ def chunk_abc(
     s: torch.Tensor,
     initial_state: tuple[torch.Tensor] | None = None,
     output_final_state: bool = False,
-    **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
@@ -1231,10 +1230,6 @@ def chunk_abc(
         final_state (torch.Tensor):
             Final state of shape `[B, H, K, M]` and `[B, H, M, V]` if `output_final_state=True` else `None`.
     """
-    if 'head_first' in kwargs:
-        raise DeprecationWarning(
-            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
-        )
     q, k, v, s = map(lambda x: x.transpose(1, 2), (q, k, v, s))
     o, final_state = ChunkABCFunction.apply(q, k, v, s, initial_state, output_final_state)
     o = o.transpose(1, 2)
