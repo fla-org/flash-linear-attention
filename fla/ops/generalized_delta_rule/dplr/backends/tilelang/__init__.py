@@ -13,7 +13,7 @@ import logging
 
 import torch
 
-from fla.ops.backends import BaseBackend
+from fla.backends import BaseBackend
 from fla.utils import (
     find_spec_cached,
     get_device_capability,

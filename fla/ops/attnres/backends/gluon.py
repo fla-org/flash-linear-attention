@@ -27,7 +27,7 @@ from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
 from triton.experimental.gluon.language.nvidia.ampere import async_copy as cp
 
-from fla.ops.backends import BaseBackend
+from fla.backends import BaseBackend
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.utils import (
     autocast_custom_bwd,

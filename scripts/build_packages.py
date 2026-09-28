@@ -140,6 +140,7 @@ def build_split_packages(output_dir: str | Path | None = None):
     # copy core files
     fla_core = core_dir / 'fla'
     ignore = shutil.ignore_patterns('__pycache__')
+    shutil.copytree(root_dir / 'fla' / 'backends', fla_core / 'backends', ignore=ignore)
     shutil.copytree(root_dir / 'fla' / 'ops', fla_core / 'ops', ignore=ignore)
     shutil.copytree(root_dir / 'fla' / 'modules', fla_core / 'modules', ignore=ignore)
     shutil.copytree(root_dir / 'fla' / 'utils', fla_core / 'utils', ignore=ignore)

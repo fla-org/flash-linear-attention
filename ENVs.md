@@ -45,8 +45,7 @@ runtime. Variables are grouped by what they control:
 
 ## Operator backend dispatch
 
-FLA can dispatch certain ops to specialized backends (TileLang, FlashKDA, intra-card CP).
-Each backend is gated by a single env var below.
+FLA dispatches selected operator and module calls through registries owned by their backend packages. Optional backends such as TileLang, FlashKDA, and intra-card CP use the policy flags below. Set `FLA_DISABLE_BACKEND_DISPATCH` before importing FLA; decorators capture this global policy at import time. See [Backend dispatch](fla/backends/README.md) for the registration model.
 
 | Variable                       | Default     | Options    | Description                                                                                                                              |
 | ------------------------------ | ----------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------- |

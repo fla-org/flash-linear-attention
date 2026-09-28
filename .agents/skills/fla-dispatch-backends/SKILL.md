@@ -2,22 +2,21 @@
 name: fla-dispatch-backends
 description: >
   Workflow for FLA backend dispatch decorators and backend implementations. Use
-  when touching fla.ops.backends, @dispatch-decorated functions, BaseBackend
+  when touching fla.backends, @dispatch-decorated functions, BaseBackend
   subclasses, backend verifier methods, backend env vars, or backend tests.
 ---
 
 # FLA Dispatch Backends Skill
 
 Use this skill for the runtime backend dispatch system implemented in
-`fla/ops/backends/__init__.py`.
+`fla/backends/base.py` and `fla/backends/registry.py`. The package initializer only exports shared types.
 
 ## Core model
 
-- Public functions opt in with `@dispatch('<operation>')`.
-- First call lazily imports `fla.ops.<operation>.backends`, unless the operation
-  has a custom module in `_OPERATION_BACKEND_MODULES` (for example `modules`).
-- Backend modules create `BackendRegistry('<operation>')` and register
-  `BaseBackend` subclasses.
+- Each backend package constructs its own `BackendRegistry` and registers its adapters at import time.
+- It exports `dispatch = registry.dispatch`; callers import that decorator and use bare `@dispatch`.
+- The registry name is a diagnostic label. Shared code has no operation-to-module map or global registry lookup.
+- Registration only records adapters. Optional implementation imports stay inside adapter methods where already supported.
 - Dispatch tries registered backends sorted by `priority` where lower means
   higher priority.
 - A backend is considered only when `is_available()` and `is_enabled()` are both
@@ -43,7 +42,7 @@ For a new backend:
    surface as the decorated function.
 4. Implement `<public_function_name>(...)` and keep return values identical to
    the default implementation.
-5. Register the backend in the operation's `backends/__init__.py`.
+5. Register the backend in the operation's `backends/__init__.py`, which exports the bound dispatcher.
 6. Add tests that cover accepted dispatch, verifier rejection, and fallback.
 
 ## Verifier rules
@@ -56,7 +55,7 @@ For a new backend:
   implementation only when it is part of the backend contract.
 - If a backend supports only inference, check `torch.is_grad_enabled()` or
   `torch.is_inference_mode_enabled()` as appropriate.
-- Do not mutate global backend registries, environment variables, tensors, RNG
+- Do not mutate backend registries, environment variables, tensors, RNG
   state, or caches from a verifier.
 
 ## Decorator placement
@@ -66,9 +65,8 @@ For a new backend:
 - Keep the decorated function as the semantic fallback implementation. A user
   should be able to set `FLA_DISABLE_BACKEND_DISPATCH=1` and still get the same
   API behavior.
-- Use the operation name that maps to the backend package. For normal ops,
-  `@dispatch('kda')` maps to `fla.ops.kda.backends`; special cases belong in
-  `_OPERATION_BACKEND_MODULES`.
+- Import the dispatcher from the registry owner: `from fla.ops.kda.backends import dispatch` or
+  `from fla.modules.backends import dispatch`. Use `@dispatch` without an operation string.
 - Do not add import-time side effects in backend packages beyond registering
   backends.
 
@@ -80,7 +78,7 @@ For a new backend:
 - Force or disable backend-specific env vars (`FLA_FLASH_KDA`, `FLA_TILELANG`,
   `FLA_INTRACARD_CP`) when testing route behavior.
 - Include at least one rejection test for each verifier branch added or changed.
-- For backend changes under `fla/ops/<op>/backends/`, ensure dependent op tests
+- For changes to shared dispatch or to an operation/module backend package, ensure dependent tests
   still run; `scripts/find_dependent_tests.py` maps backend changes back to the
   decorated op files.
 
@@ -93,3 +91,7 @@ For a new backend:
   optional package would otherwise break environments without that package.
 - Keep error/rejection messages precise and user-facing; they appear in logs and
   tests may assert them.
+
+## Compatibility
+
+`fla.ops.backends` contains the deprecated global registry factory and string-based dispatch resolver. Keep directory discovery in that compatibility entry point. New code imports shared types from `fla.backends` and dispatches through its owning registry. Bound operation strings warn and remain available until the next release after 0.6.0. See [the backend guide](../../../fla/backends/README.md) for the migration contract.

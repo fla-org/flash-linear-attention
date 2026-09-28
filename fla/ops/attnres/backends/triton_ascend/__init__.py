@@ -13,7 +13,7 @@ from collections.abc import Sequence
 
 import torch
 
-from fla.ops.backends import BaseBackend
+from fla.backends import BaseBackend
 
 
 class TritonAscendAttnResBackend(BaseBackend):

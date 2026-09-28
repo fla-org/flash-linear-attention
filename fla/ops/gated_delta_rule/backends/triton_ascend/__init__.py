@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import torch
 
-from fla.ops.backends import BaseBackend
+from fla.backends import BaseBackend
 
 
 class TritonAscendGDNBackend(BaseBackend):

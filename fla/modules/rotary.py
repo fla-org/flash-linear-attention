@@ -138,7 +138,7 @@ def rotary_embedding_kernel(
         tl.store(p_y, b_y, mask=mask)
 
 
-@dispatch('modules')
+@dispatch
 def rotary_embedding_fwdbwd(
     x: torch.Tensor,
     cos: torch.Tensor,

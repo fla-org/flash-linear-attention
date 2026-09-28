@@ -534,7 +534,7 @@ def layer_norm_bwd_kernel_row(
         tl.store(db + i_s * D + o_d, b_db, mask=mask)
 
 
-@dispatch('modules')
+@dispatch
 def layer_norm_fwd(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -620,7 +620,7 @@ def layer_norm_fwd(
     return y, mean, rstd, res_out if res_out is not None else x
 
 
-@dispatch('modules')
+@dispatch
 def layer_norm_bwd(
     dy: torch.Tensor,
     x: torch.Tensor,

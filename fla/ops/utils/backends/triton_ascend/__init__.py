@@ -9,7 +9,7 @@
 
 from __future__ import annotations
 
-from fla.ops.backends import BaseBackend
+from fla.backends import BaseBackend
 
 
 class TritonAscendUtilsBackend(BaseBackend):

@@ -314,7 +314,7 @@ fused_cross_entropy_forward = cross_entropy_fwd
 CrossEntropyLossFunction = FusedCrossEntropyFunction
 
 
-@dispatch('modules')
+@dispatch
 def cross_entropy_loss(
     logits: torch.Tensor,
     target: torch.Tensor,

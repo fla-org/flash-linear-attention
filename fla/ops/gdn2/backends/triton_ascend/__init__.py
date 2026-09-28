@@ -12,7 +12,7 @@ from __future__ import annotations
 import torch
 import triton
 
-from fla.ops.backends import BaseBackend
+from fla.backends import BaseBackend
 
 # The grouped diagonal kernel keeps the padded K dimension in one UB slab.
 _MAX_FWD_INTRA_BK = 256

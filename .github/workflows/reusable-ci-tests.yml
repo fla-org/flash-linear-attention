@@ -75,15 +75,15 @@ jobs:
         shell: bash
         run: |
           CHANGED="${{ steps.setup.outputs.all_changed_files }}"
-          # Any change under fla/ops/ triggers the dispatch-on suite: backend dirs
+          # Any change under fla/ops/ or fla/backends/ triggers the dispatch-on suite: backend dirs
           # obviously need it, but op changes also do because backend impls may rely
           # on op internals (shared helpers, default kwargs, chunk layout). Skipping
           # saves CI only on PRs that touch no op code (e.g. models/, docs, benches).
-          if echo "$CHANGED" | tr ' ' '\n' | grep -qE '^fla/ops/'; then
+          if echo "$CHANGED" | tr ' ' '\n' | grep -qE '^fla/(ops|backends)/'; then
             echo "Op/backend changes detected; will run dispatch-on suite"
             echo "dispatch_changed=true" >> $GITHUB_OUTPUT
           else
-            echo "No op changes; skipping dispatch-on suite"
+            echo "No op/backend changes; skipping dispatch-on suite"
             echo "dispatch_changed=false" >> $GITHUB_OUTPUT
           fi
 

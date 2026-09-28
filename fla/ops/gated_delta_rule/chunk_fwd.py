@@ -9,8 +9,8 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.backends import dispatch
 from fla.ops.common.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
+from fla.ops.gated_delta_rule.backends import dispatch
 from fla.ops.gated_delta_rule.wy_fast import recompute_w_u_fwd
 from fla.ops.utils import prepare_chunk_indices, solve_tril
 from fla.ops.utils.cache import fla_cache_autotune
@@ -328,7 +328,7 @@ def chunk_gated_delta_rule_fwd_kkt_solve_kernel(
     tl.store(p_A33, b_Ai33.to(A.dtype.element_ty), mask=m_A33)
 
 
-@dispatch('gated_delta_rule')
+@dispatch
 def chunk_gated_delta_rule_fwd_intra(
     k: torch.Tensor,
     v: torch.Tensor,

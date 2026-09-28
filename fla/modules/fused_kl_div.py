@@ -122,7 +122,7 @@ def elementwise_mul_kernel(
     tl.store(x + o_x, b_x * b_g, mask=o_x < N)
 
 
-@dispatch('modules')
+@dispatch
 def fused_kl_div_fwd(
     x: torch.Tensor,
     target_x: torch.Tensor,
@@ -208,7 +208,7 @@ def fused_kl_div_fwd(
     return loss, dx, dw
 
 
-@dispatch('modules')
+@dispatch
 def fused_kl_div_bwd(
     do: torch.Tensor,
     dx: torch.Tensor | None,
