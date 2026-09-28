@@ -350,7 +350,12 @@ def chunk_fwd_o_npu(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
+    use_graph: bool = False,
+    chunk_offsets: torch.LongTensor | None = None,
+    graph_nt_max: int | None = None,
 ) -> torch.Tensor:
+    if use_graph:
+        raise NotImplementedError("Output graph mode is not implemented for the Ascend backend yet.")
     B, T, H, K, V, HV = *q.shape, v.shape[-1], v.shape[2]
     BT = chunk_size
     if scale is None:
@@ -362,10 +367,9 @@ def chunk_fwd_o_npu(
         NT = triton.cdiv(T, BT)
         total_chunks = N * NT
     else:
-        N, chunk_offsets = (
-            len(cu_seqlens) - 1,
-            prepare_chunk_offsets(cu_seqlens, BT),
-        )
+        N = len(cu_seqlens) - 1
+        if chunk_offsets is None:
+            chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT)
         # chunk_offsets[-1] stores the cumulative total chunks across all batches
         total_chunks = chunk_offsets[-1].item()
 
@@ -1289,7 +1293,12 @@ def chunk_bwd_dv_local_npu(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
+    use_graph: bool = False,
+    chunk_offsets: torch.LongTensor | None = None,
+    graph_nt_max: int | None = None,
 ) -> torch.Tensor:
+    if use_graph:
+        raise NotImplementedError("Local value backward graph mode is not implemented for the Ascend backend yet.")
     B, T, H, K, V, HV = *k.shape, do.shape[-1], do.shape[2]
     BT = chunk_size
     if chunk_indices is None and cu_seqlens is not None:
@@ -1380,7 +1389,12 @@ def chunk_bwd_dqkwg_npu(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
+    use_graph: bool = False,
+    chunk_offsets: torch.LongTensor | None = None,
+    graph_nt_max: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+    if use_graph:
+        raise NotImplementedError("Chunk backward graph mode is not implemented for the Ascend backend yet.")
     B, T, H, K, V, HV = *k.shape, v.shape[-1], v.shape[2]
     BT = chunk_size
     if chunk_indices is None and cu_seqlens is not None:

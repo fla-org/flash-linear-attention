@@ -14,6 +14,15 @@ from .cumsum import (
     chunk_local_cumsum_scalar,
     chunk_local_cumsum_vector,
 )
+from .graph import (
+    GraphRouteDecision,
+    host_chunk_statistics,
+    is_graph_capable_device,
+    normalize_graph_mode,
+    route_graph_execution,
+    static_chunk_capacity,
+    validate_graph_capacity,
+)
 from .index import (
     get_max_num_splits,
     prepare_chunk_indices,
@@ -36,6 +45,7 @@ from .softplus import softplus
 from .solve_tril import solve_tril
 
 __all__ = [
+    "GraphRouteDecision",
     "addmm",
     "chunk_global_cumsum",
     "chunk_global_cumsum_scalar",
@@ -44,9 +54,12 @@ __all__ = [
     "chunk_local_cumsum_scalar",
     "chunk_local_cumsum_vector",
     "get_max_num_splits",
+    "host_chunk_statistics",
+    "is_graph_capable_device",
     "logsumexp_fwd",
     "matmul",
     "mean_pooling",
+    "normalize_graph_mode",
     "pack_sequence",
     "prepare_block_csr",
     "prepare_chunk_indices",
@@ -59,9 +72,12 @@ __all__ = [
     "prepare_position_ids",
     "prepare_sequence_ids",
     "prepare_token_indices",
+    "route_graph_execution",
     "softmax_bwd",
     "softmax_fwd",
     "softplus",
     "solve_tril",
+    "static_chunk_capacity",
     "unpack_sequence",
+    "validate_graph_capacity",
 ]

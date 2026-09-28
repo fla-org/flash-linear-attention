@@ -18,6 +18,15 @@ from torch.nn import functional as F
 from fla.layers.utils import get_layer_cache, repad_hidden_states, unpad_hidden_states, update_layer_cache
 from fla.modules import FusedRMSNormGated, ShortConvolution
 from fla.ops.kda import chunk_kda, fused_recurrent_kda
+from fla.ops.utils.graph import (
+    host_chunk_statistics,
+    is_graph_capable_device,
+    normalize_graph_mode,
+    route_graph_execution,
+    static_chunk_capacity,
+)
+from fla.ops.utils.index import prepare_chunk_indices_static
+from fla.utils import IS_NPU, IS_NVIDIA
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
@@ -200,6 +209,20 @@ class KimiDeltaAttention(nn.Module):
         output_attentions: bool | None = False,
         **kwargs: Unpack[dict],
     ) -> tuple[torch.Tensor, torch.Tensor | None, Cache | None]:
+        graph_mode = kwargs.pop("graph_mode", None)
+        use_graph = kwargs.pop("use_graph", False)
+        graph_t_max = kwargs.pop("graph_t_max", None)
+        graph_n_max = kwargs.pop("graph_n_max", None)
+        graph_nt_max = kwargs.pop("graph_nt_max", None)
+        graph_actual_tokens = kwargs.pop("graph_actual_tokens", None)
+        graph_actual_sequences = kwargs.pop("graph_actual_sequences", None)
+        graph_actual_nt = kwargs.pop("graph_actual_nt", None)
+        min_graph_utilization = kwargs.pop("min_graph_utilization", 0.75)
+        graph_chunk_size = kwargs.pop("chunk_size", 64)
+        graph_chunk_indices = kwargs.pop("chunk_indices", None)
+        graph_chunk_offsets = kwargs.pop("chunk_offsets", None)
+        normalized_graph_mode = normalize_graph_mode(graph_mode, use_graph)
+
         if attention_mask is not None:
             assert len(attention_mask.shape) == 2, (
                 "Expected attention_mask as a 0-1 matrix with shape [batch_size, seq_len] "
@@ -208,18 +231,117 @@ class KimiDeltaAttention(nn.Module):
             )
 
         batch_size, q_len, _ = hidden_states.shape
+        cu_seqlens = kwargs.get("cu_seqlens")
+        cu_seqlens_cpu = kwargs.get("cu_seqlens_cpu")
+        last_state = get_layer_cache(self, past_key_values)
+
+        graph_requested = normalized_graph_mode != "eager"
+        graph_force = normalized_graph_mode == "force_graph"
+        graph_selected = False
+        if graph_requested and IS_NPU:
+            if graph_force:
+                raise NotImplementedError("Layer graph mode is not implemented for the Ascend backend yet.")
+            graph_requested = False
+        if graph_requested:
+            if not (IS_NVIDIA or IS_NPU) and graph_force:
+                raise RuntimeError("Graph mode requires the CUDA or Ascend NPU backend.")
+            if cu_seqlens is None and attention_mask is not None:
+                if graph_force:
+                    raise ValueError("Graph mode requires prepacked inputs when using an attention mask.")
+            elif batch_size != 1:
+                if graph_force:
+                    raise ValueError("CUDA Graph mode requires a flattened batch with batch size 1.")
+            elif graph_t_max is None:
+                graph_t_max = q_len
+
+            if batch_size == 1 and graph_t_max is not None and (cu_seqlens is not None or attention_mask is None):
+                input_sequences = 1 if cu_seqlens is None else len(cu_seqlens) - 1
+                if graph_n_max is None:
+                    graph_n_max = input_sequences
+                if graph_nt_max is None:
+                    graph_nt_max = static_chunk_capacity(graph_t_max, graph_n_max, graph_chunk_size)
+
+                actual_tokens, actual_sequences, actual_nt = (
+                    graph_actual_tokens,
+                    graph_actual_sequences,
+                    graph_actual_nt,
+                )
+                if cu_seqlens is None:
+                    actual_tokens, actual_sequences, actual_nt = q_len, 1, (q_len + graph_chunk_size - 1) // graph_chunk_size
+                elif cu_seqlens_cpu is not None and any(value is None for value in (actual_tokens, actual_sequences, actual_nt)):
+                    actual_tokens, actual_sequences, actual_nt = host_chunk_statistics(cu_seqlens_cpu, graph_chunk_size)
+                elif cu_seqlens.device.type == 'cpu' and any(
+                    value is None for value in (actual_tokens, actual_sequences, actual_nt)
+                ):
+                    actual_tokens, actual_sequences, actual_nt = host_chunk_statistics(cu_seqlens, graph_chunk_size)
+
+                decision = route_graph_execution(
+                    normalized_graph_mode,
+                    actual_tokens=actual_tokens,
+                    actual_sequences=actual_sequences,
+                    actual_nt=actual_nt,
+                    t_max=graph_t_max,
+                    n_max=graph_n_max,
+                    nt_max=graph_nt_max,
+                    min_graph_utilization=min_graph_utilization,
+                    chunk_size=graph_chunk_size,
+                    input_tokens=q_len,
+                    input_sequences=input_sequences,
+                )
+                graph_selected = decision.selected_path == "graph"
+                if graph_selected:
+                    if not is_graph_capable_device(hidden_states.device if cu_seqlens is None else cu_seqlens.device):
+                        if graph_force:
+                            raise ValueError("Graph mode requires device-resident `cu_seqlens`.")
+                        graph_selected = False
+                    if q_len != graph_t_max:
+                        if graph_force:
+                            raise ValueError(f"graph input shape must use graph_t_max={graph_t_max}, got q_len={q_len}")
+                        graph_selected = False
+                    if past_key_values is not None or last_state is not None or use_cache:
+                        if graph_force:
+                            raise ValueError("Graph layer mode does not support cache or `use_cache=True`.")
+                        graph_selected = False
+                    if self.use_short_conv and any(
+                        conv.backend != "triton" for conv in (self.q_conv1d, self.k_conv1d, self.v_conv1d)
+                    ):
+                        if graph_force:
+                            raise ValueError("Graph layer mode requires a graph-capable short convolution backend.")
+                        graph_selected = False
+
+        if graph_selected and cu_seqlens is not None:
+            if graph_mode == "force_graph" and (graph_chunk_indices is None or graph_chunk_offsets is None):
+                raise ValueError(
+                    "graph_mode='force_graph' requires caller-provided fixed `chunk_indices` and `chunk_offsets`"
+                )
+            if graph_chunk_indices is None:
+                graph_chunk_indices, generated_offsets = prepare_chunk_indices_static(
+                    cu_seqlens,
+                    graph_chunk_size,
+                    graph_nt_max,
+                )
+                if graph_chunk_offsets is None:
+                    graph_chunk_offsets = generated_offsets
+            elif graph_chunk_offsets is None:
+                _, graph_chunk_offsets = prepare_chunk_indices_static(
+                    cu_seqlens,
+                    graph_chunk_size,
+                    graph_nt_max,
+                )
+        elif normalized_graph_mode == "auto" or graph_mode == "eager":
+            graph_chunk_indices = None
+            graph_chunk_offsets = None
+
         if torch.is_grad_enabled():
             mode = "chunk"
         elif q_len <= 64 and not self.training:
             mode = "fused_recurrent"
         else:
             mode = self.mode
+        if graph_selected:
+            mode = "chunk"
         if self.training:
             assert mode == "chunk", "Only chunk mode is supported in training."
-
-        last_state = get_layer_cache(self, past_key_values)
-
-        cu_seqlens = kwargs.get("cu_seqlens")
         hidden_states, indices, cu_seqlens = unpad_hidden_states(hidden_states, cu_seqlens, attention_mask, q_len)
 
         if self.use_short_conv:
@@ -231,18 +353,30 @@ class KimiDeltaAttention(nn.Module):
                 cache=conv_state_q,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
+                chunk_indices=graph_chunk_indices,
+                chunk_size=graph_chunk_size,
+                use_graph=graph_selected,
+                graph_nt_max=graph_nt_max,
             )
             k, conv_state_k = self.k_conv1d(
                 x=self.k_proj(hidden_states),
                 cache=conv_state_k,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
+                chunk_indices=graph_chunk_indices,
+                chunk_size=graph_chunk_size,
+                use_graph=graph_selected,
+                graph_nt_max=graph_nt_max,
             )
             v, conv_state_v = self.v_conv1d(
                 x=self.v_proj(hidden_states),
                 cache=conv_state_v,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
+                chunk_indices=graph_chunk_indices,
+                chunk_size=graph_chunk_size,
+                use_graph=graph_selected,
+                graph_nt_max=graph_nt_max,
             )
         else:
             q = F.silu(self.q_proj(hidden_states))
@@ -277,6 +411,13 @@ class KimiDeltaAttention(nn.Module):
                 lower_bound=self.lower_bound,
                 state_v_first=True,
                 cu_seqlens=cu_seqlens,
+                chunk_indices=graph_chunk_indices,
+                chunk_offsets=graph_chunk_offsets,
+                use_graph=graph_selected,
+                graph_t_max=graph_t_max,
+                graph_n_max=graph_n_max,
+                graph_nt_max=graph_nt_max,
+                chunk_size=graph_chunk_size,
             )
         elif mode == "fused_recurrent":
             o, recurrent_state = fused_recurrent_kda(

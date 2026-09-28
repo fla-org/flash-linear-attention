@@ -307,7 +307,10 @@ def solve_tril_npu(
     cu_seqlens: torch.Tensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
     output_dtype: torch.dtype = torch.float,
+    use_graph: bool = False,
 ) -> torch.Tensor:
+    if use_graph:
+        raise NotImplementedError("Triangular solve graph mode is not implemented for the Ascend backend yet.")
     assert A.shape[-1] in [16, 32, 64]
     output_dtype = A.dtype if output_dtype is None else output_dtype
 

@@ -22,7 +22,9 @@ import torch.nn.functional as F
 
 from fla.ops.cp import FLACPContext, build_cp_context
 from fla.ops.kda import chunk_kda
-from fla.utils import assert_close, device
+from fla.ops.utils.graph import static_chunk_capacity
+from fla.ops.utils.index import prepare_chunk_indices_static
+from fla.utils import IS_NVIDIA, assert_close, device
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available() or not hasattr(torch.cuda, "CUDAGraph"),
@@ -111,7 +113,7 @@ def _eager(inp, cu, gate, safe_gate):
     return out
 
 
-def _make_graphed(inp, cu, gate, safe_gate):
+def _make_graphed(inp, cu, gate, safe_gate, metadata=None):
     """Build static leaf buffers and capture a fwd+bwd step. Returns (graph, leaves, do, dht, cap_o, cap_ht)."""
     leaves = {n: inp[n].detach().clone().requires_grad_() for n in ("q", "k", "v", "g", "beta", "h0")}
     extra = {}
@@ -122,6 +124,13 @@ def _make_graphed(inp, cu, gate, safe_gate):
     do = inp["do"].detach().clone()
     dht = inp["dht"].detach().clone()
     grad_leaves = [leaves[n] for n in leaves]
+    graph_kwargs = {}
+    if metadata is not None:
+        graph_kwargs = {
+            "chunk_indices": metadata[0],
+            "chunk_offsets": metadata[1],
+            "graph_nt_max": metadata[2],
+        }
 
     def step():
         for t in grad_leaves:
@@ -141,6 +150,7 @@ def _make_graphed(inp, cu, gate, safe_gate):
             lower_bound=(-5 if safe_gate else None),
             use_graph=True,
             max_num_seqs=MAX_NUM_SEQS,
+            **graph_kwargs,
             **extra,
         )
         ((o * do).sum() + (ht * dht).sum()).backward()
@@ -274,6 +284,53 @@ def test_chunk_kda_graph_partial_tokens(safe_gate, hv):
             if name in ("o", "dq", "dk", "dv", "dg", "db"):
                 g = g[:, :n]
             assert_close(f"partial::{tag}::{name}", r, g, 2e-3)
+
+
+@pytest.mark.skipif(not IS_NVIDIA, reason="caller-owned metadata requires CUDA Graph capture")
+def test_chunk_kda_graph_caller_owned_metadata_replay():
+    """The direct API must keep caller-owned metadata addresses across replay."""
+    gate, safe_gate, hv = True, True, H
+    cu = torch.tensor(_VARLEN_CONFIGS[0][1], dtype=torch.long, device=device)
+    nt_max = static_chunk_capacity(T, MAX_NUM_SEQS, 64)
+    indices, offsets = prepare_chunk_indices_static(cu, 64, nt_max)
+    metadata = (indices.clone(), offsets.clone(), nt_max)
+    inp = _rand_inputs(seed=23, gate=gate, safe_gate=safe_gate, hv=hv)
+    graph, leaves, _do, _dht, cap_o, cap_ht = _make_graphed(inp, cu, gate, safe_gate, metadata=metadata)
+    pointers = tuple(t.data_ptr() for t in metadata[:2])
+
+    next_offsets = torch.tensor(_VARLEN_CONFIGS[2][1], dtype=torch.long, device=device)
+    cu.copy_(next_offsets)
+    fresh_indices, fresh_offsets = prepare_chunk_indices_static(cu, 64, nt_max)
+    metadata[0].copy_(fresh_indices)
+    metadata[1].copy_(fresh_offsets)
+    graph.replay()
+    torch.cuda.synchronize()
+
+    assert tuple(t.data_ptr() for t in metadata[:2]) == pointers
+    reference = _eager(inp, cu, gate, safe_gate)
+    assert_close("caller-owned graph output", reference[0], cap_o, 2e-3)
+    assert_close("caller-owned graph final state", reference[1], cap_ht, 2e-3)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"chunk_indices": torch.empty(1, 2, dtype=torch.long)},
+        {"chunk_offsets": torch.empty(2, dtype=torch.long)},
+        {"graph_nt_max": 1},
+    ],
+    ids=["indices-shape", "offsets-shape", "capacity"],
+)
+def test_chunk_kda_graph_rejects_invalid_metadata(kwargs):
+    """Invalid graph metadata is rejected before dispatching a device kernel."""
+    q = torch.empty(1, 128, 1, 16, device=device)
+    k = torch.empty_like(q)
+    v = torch.empty(1, 128, 1, 16, device=device)
+    g = torch.empty_like(q)
+    beta = torch.empty(1, 128, 1, device=device)
+    cu = torch.tensor([0, 64, 128], dtype=torch.long, device=device)
+    with pytest.raises(ValueError):
+        chunk_kda(q, k, v, g, beta, cu_seqlens=cu, use_graph=True, max_num_seqs=2, **kwargs)
 
 
 def _eager_cp(inp, cucfg, gate):

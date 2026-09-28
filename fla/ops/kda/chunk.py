@@ -17,8 +17,16 @@ from fla.ops.common.gate import fused_beta_sigmoid, fused_beta_sigmoid_bwd
 from fla.ops.cp import FLACPContext
 from fla.ops.kda.chunk_bwd import chunk_kda_bwd
 from fla.ops.kda.chunk_fwd import chunk_kda_fwd
+from fla.ops.utils.graph import (
+    host_chunk_statistics,
+    is_graph_capable_device,
+    normalize_graph_mode,
+    route_graph_execution,
+    static_chunk_capacity,
+    validate_graph_capacity,
+)
 from fla.ops.utils.index import prepare_chunk_indices, prepare_chunk_indices_static
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
+from fla.utils import IS_NPU, IS_NVIDIA, autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
 class ChunkKDAFunction(torch.autograd.Function):
@@ -52,6 +60,9 @@ class ChunkKDAFunction(torch.autograd.Function):
         cp_context: FLACPContext | None = None,
         use_graph: bool = False,
         max_num_seqs: int | None = None,
+        chunk_indices: torch.LongTensor | None = None,
+        chunk_offsets: torch.LongTensor | None = None,
+        graph_nt_max: int | None = None,
     ):
         # Apply l2norm
         q_rstd, k_rstd = None, None
@@ -63,19 +74,29 @@ class ChunkKDAFunction(torch.autograd.Function):
         if use_beta_sigmoid_in_kernel:
             beta = fused_beta_sigmoid(beta_raw, scale=2.0 if allow_neg_eigval else 1.0)
 
-        chunk_indices, chunk_offsets = None, None
         if cu_seqlens is not None:
             if use_graph:
                 if max_num_seqs is None:
                     max_num_seqs = cu_seqlens.shape[0] - 1
-                assert cu_seqlens.shape[0] - 1 == max_num_seqs, (
-                    f"cu_seqlens must be padded with zero-length tail sequences to exactly "
-                    f"max_num_seqs + 1 entries, got {cu_seqlens.shape[0] - 1} sequences "
-                    f"with max_num_seqs={max_num_seqs}"
-                )
-                nt_max = (q.shape[1] + chunk_size - 1) // chunk_size + max_num_seqs - 1
-                chunk_indices, chunk_offsets = prepare_chunk_indices_static(cu_seqlens, chunk_size, nt_max)
-            else:
+                if cu_seqlens.shape[0] - 1 != max_num_seqs:
+                    raise ValueError(
+                        f"cu_seqlens must be padded with zero-length tail sequences to exactly "
+                        f"max_num_seqs + 1 entries, got {cu_seqlens.shape[0] - 1} sequences "
+                        f"with max_num_seqs={max_num_seqs}"
+                    )
+                if graph_nt_max is None:
+                    graph_nt_max = (
+                        chunk_indices.shape[0]
+                        if chunk_indices is not None
+                        else (q.shape[1] + chunk_size - 1) // chunk_size + max_num_seqs - 1
+                    )
+                if chunk_indices is None:
+                    chunk_indices, generated_offsets = prepare_chunk_indices_static(cu_seqlens, chunk_size, graph_nt_max)
+                    if chunk_offsets is None:
+                        chunk_offsets = generated_offsets
+                elif chunk_offsets is None:
+                    _, chunk_offsets = prepare_chunk_indices_static(cu_seqlens, chunk_size, graph_nt_max)
+            elif chunk_indices is None:
                 chunk_indices = prepare_chunk_indices(
                     cu_seqlens,
                     chunk_size,
@@ -122,6 +143,7 @@ class ChunkKDAFunction(torch.autograd.Function):
         )
         ctx.use_graph = use_graph
         ctx.chunk_size = chunk_size
+        ctx.graph_nt_max = graph_nt_max
         ctx.safe_gate = safe_gate
         ctx.scale = scale
         ctx.lower_bound = lower_bound
@@ -187,9 +209,11 @@ class ChunkKDAFunction(torch.autograd.Function):
         if ctx.use_beta_sigmoid_in_kernel:
             db = fused_beta_sigmoid_bwd(beta_raw, db, scale=2.0 if ctx.allow_neg_eigval else 1.0)
 
-        return (dq.to(q), dk.to(k), dv.to(v), dg.to(g_input), db.to(beta_raw), dA, dbias, None, dh0,
-                None, None, None, None, None, None, None, None, None, None, None, None, None, None,
-                None, None)
+        return (
+            dq.to(q), dk.to(k), dv.to(v), dg.to(g_input), db.to(beta_raw), dA, dbias, None, dh0,
+            None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+            None, None, None, None, None,
+        )
 
 
 @torch.compiler.disable
@@ -217,6 +241,16 @@ def chunk_kda(
     cp_context: FLACPContext = None,
     use_graph: bool = False,
     max_num_seqs: int | None = None,
+    chunk_indices: torch.LongTensor | None = None,
+    chunk_offsets: torch.LongTensor | None = None,
+    graph_nt_max: int | None = None,
+    graph_mode: str | None = None,
+    graph_t_max: int | None = None,
+    graph_n_max: int | None = None,
+    graph_actual_tokens: int | None = None,
+    graph_actual_sequences: int | None = None,
+    graph_actual_nt: int | None = None,
+    min_graph_utilization: float = 0.75,
     **kwargs,
 ):
     r"""
@@ -300,8 +334,9 @@ def chunk_kda(
             and ``cu_seqlens`` will be overridden by the context. Default: ``None``.
         use_graph (bool):
             Whether to build the varlen chunk list on-device at a fixed shape so the
-            forward/backward can be recorded by a platform graph (CUDA graph, NPU graph)
-            and replayed after only the contents of ``cu_seqlens`` change. Requires:
+            forward/backward can be recorded by a CUDA graph and replayed after only
+            the contents of ``cu_seqlens`` change. The validated path requires a
+            native NVIDIA Triton backend. Requires:
 
             - ``cu_seqlens`` padded with zero-length tail sequences up to exactly
               ``max_num_seqs + 1`` entries; kernels return immediately on sentinel rows
@@ -326,6 +361,17 @@ def chunk_kda(
         max_num_seqs (Optional[int]):
             Static upper bound of the sequence count used together with ``use_graph``.
             Defaults to ``cu_seqlens.shape[0] - 1``. Default: ``None``.
+        chunk_indices (Optional[torch.LongTensor]):
+            Caller-owned fixed-shape chunk indices for graph capture, with shape
+            ``[graph_nt_max, 2]``. When supplied, the operator uses this buffer
+            directly. Default: ``None``.
+        chunk_offsets (Optional[torch.LongTensor]):
+            Caller-owned chunk prefix offsets for graph capture, with shape
+            ``[max_num_seqs + 1]``. Default: ``None``.
+        graph_nt_max (Optional[int]):
+            Static chunk-slot capacity. Defaults to the supplied
+            ``chunk_indices`` length or the capacity implied by ``q`` and
+            ``max_num_seqs``. Default: ``None``.
 
     Returns:
         - Normal mode (return_intermediate_states=False): A tuple (o, final_state)
@@ -452,6 +498,151 @@ def chunk_kda(
     if allow_neg_eigval and not use_beta_sigmoid_in_kernel:
         raise ValueError("`allow_neg_eigval=True` requires `use_beta_sigmoid_in_kernel=True`.")
 
+    normalized_graph_mode = normalize_graph_mode(graph_mode, use_graph)
+    graph_selected = False
+    if normalized_graph_mode != 'eager':
+        graph_force = normalized_graph_mode == 'force_graph'
+        if not (IS_NVIDIA or IS_NPU):
+            if graph_force:
+                raise RuntimeError("Graph mode requires the CUDA or Ascend NPU backend.")
+        elif cu_seqlens is None:
+            # Dense inputs are the single-sequence graph special case.  Keep the
+            # restriction explicit so a dense batch cannot be mistaken for N_max.
+            if q.shape[0] != 1:
+                if graph_force:
+                    raise ValueError("Dense graph mode requires batch size 1 (the N=1 special case).")
+            else:
+                graph_t_max = q.shape[1] if graph_t_max is None else graph_t_max
+                graph_n_max = 1 if graph_n_max is None else graph_n_max
+                if graph_n_max != 1 and graph_force:
+                    raise ValueError("Dense graph mode requires graph_n_max=1.")
+                graph_n_max = 1
+                graph_nt_max = (
+                    static_chunk_capacity(graph_t_max, graph_n_max, chunk_size)
+                    if graph_nt_max is None else graph_nt_max
+                )
+                decision = route_graph_execution(
+                    normalized_graph_mode,
+                    actual_tokens=q.shape[1],
+                    actual_sequences=1,
+                    actual_nt=(q.shape[1] + chunk_size - 1) // chunk_size,
+                    t_max=graph_t_max,
+                    n_max=graph_n_max,
+                    nt_max=graph_nt_max,
+                    min_graph_utilization=min_graph_utilization,
+                    chunk_size=chunk_size,
+                    input_tokens=q.shape[1],
+                    input_sequences=1,
+                )
+                graph_selected = decision.selected_path == 'graph'
+        else:
+            if q.shape[0] != 1:
+                if graph_force:
+                    raise ValueError("Graph mode with `cu_seqlens` requires a flattened batch with batch size 1.")
+            else:
+                if max_num_seqs is not None:
+                    if graph_n_max is not None and graph_n_max != max_num_seqs:
+                        raise ValueError("`max_num_seqs` and `graph_n_max` must agree when both are provided.")
+                    graph_n_max = max_num_seqs
+                graph_t_max = q.shape[1] if graph_t_max is None else graph_t_max
+                graph_n_max = cu_seqlens.shape[0] - 1 if graph_n_max is None else graph_n_max
+                if cu_seqlens.shape != (graph_n_max + 1,):
+                    if graph_force:
+                        raise ValueError(
+                            f"graph cu_seqlens must have shape {(graph_n_max + 1,)}, got {tuple(cu_seqlens.shape)}"
+                        )
+                else:
+                    graph_nt_max = (
+                        static_chunk_capacity(graph_t_max, graph_n_max, chunk_size)
+                        if graph_nt_max is None else graph_nt_max
+                    )
+                    actual_tokens, actual_sequences, actual_nt = (
+                        graph_actual_tokens,
+                        graph_actual_sequences,
+                        graph_actual_nt,
+                    )
+                    if cu_seqlens_cpu is not None and any(
+                        value is None for value in (actual_tokens, actual_sequences, actual_nt)
+                    ):
+                        host_tokens, host_sequences, host_nt = host_chunk_statistics(cu_seqlens_cpu, chunk_size)
+                        actual_tokens = host_tokens if actual_tokens is None else actual_tokens
+                        actual_sequences = host_sequences if actual_sequences is None else actual_sequences
+                        actual_nt = host_nt if actual_nt is None else actual_nt
+                    elif cu_seqlens.device.type == 'cpu' and any(
+                        value is None for value in (actual_tokens, actual_sequences, actual_nt)
+                    ):
+                        host_tokens, host_sequences, host_nt = host_chunk_statistics(cu_seqlens, chunk_size)
+                        actual_tokens = host_tokens if actual_tokens is None else actual_tokens
+                        actual_sequences = host_sequences if actual_sequences is None else actual_sequences
+                        actual_nt = host_nt if actual_nt is None else actual_nt
+                    decision = route_graph_execution(
+                        normalized_graph_mode,
+                        actual_tokens=actual_tokens,
+                        actual_sequences=actual_sequences,
+                        actual_nt=actual_nt,
+                        t_max=graph_t_max,
+                        n_max=graph_n_max,
+                        nt_max=graph_nt_max,
+                        min_graph_utilization=min_graph_utilization,
+                        chunk_size=chunk_size,
+                        input_tokens=q.shape[1],
+                        input_sequences=cu_seqlens.shape[0] - 1,
+                    )
+                    graph_selected = decision.selected_path == 'graph'
+
+        if graph_selected:
+            if q.device.type == 'npu':
+                if graph_force:
+                    raise NotImplementedError("KDA graph mode is not implemented for the Ascend backend yet.")
+                graph_selected = False
+            elif cu_seqlens is not None:
+                if not is_graph_capable_device(cu_seqlens.device):
+                    if graph_force:
+                        raise ValueError("Graph mode requires device-resident `cu_seqlens`.")
+                    graph_selected = False
+                elif q.shape[1] != graph_t_max:
+                    if graph_force:
+                        raise ValueError(
+                            f"graph input shape must use graph_t_max={graph_t_max}, got q.shape[1]={q.shape[1]}"
+                        )
+                    graph_selected = False
+            elif q.shape[1] != graph_t_max:
+                if graph_force:
+                    raise ValueError(
+                        f"graph input shape must use graph_t_max={graph_t_max}, got q.shape[1]={q.shape[1]}"
+                    )
+                graph_selected = False
+
+            if graph_selected and cu_seqlens is not None:
+                validate_graph_capacity(q.shape[1], graph_n_max, graph_nt_max, chunk_size)
+                if chunk_indices is not None:
+                    if chunk_indices.shape != (graph_nt_max, 2):
+                        raise ValueError(
+                            f"graph chunk_indices must have shape {(graph_nt_max, 2)}, got {tuple(chunk_indices.shape)}"
+                        )
+                    if chunk_indices.device != cu_seqlens.device or chunk_indices.dtype != cu_seqlens.dtype:
+                        raise ValueError("graph chunk_indices must share device and dtype with cu_seqlens")
+                    if not chunk_indices.is_contiguous():
+                        raise ValueError("graph chunk_indices must be contiguous")
+                if chunk_offsets is not None:
+                    if chunk_offsets.shape != (graph_n_max + 1,):
+                        raise ValueError(
+                            f"graph chunk_offsets must have shape {(graph_n_max + 1,)}, got {tuple(chunk_offsets.shape)}"
+                        )
+                    if chunk_offsets.device != cu_seqlens.device or chunk_offsets.dtype != cu_seqlens.dtype:
+                        raise ValueError("graph chunk_offsets must share device and dtype with cu_seqlens")
+                    if not chunk_offsets.is_contiguous():
+                        raise ValueError("graph chunk_offsets must be contiguous")
+                max_num_seqs = graph_n_max
+    if not graph_selected and (normalized_graph_mode == 'auto' or graph_mode == 'eager'):
+        # Backend rejection can happen after the capacity route selected graph.
+        # Eager kernels must not consume the graph bucket's sentinel rows.
+        chunk_indices = None
+        chunk_offsets = None
+        graph_nt_max = None
+        max_num_seqs = None
+    use_graph = graph_selected
+
     # Validate head dimensions for GVA
     B, T, H, K, HV = *q.shape, v.shape[2]
     assert q.shape == k.shape, f"q and k must have the same shape, got q={q.shape} vs k={k.shape}"
@@ -465,6 +656,33 @@ def chunk_kda(
 
     if scale is None:
         scale = K ** -0.5
+    if normalized_graph_mode == 'auto' and not use_graph:
+        # Re-enter once with eager so existing backend priority still applies.
+        return chunk_kda(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            scale=scale,
+            initial_state=initial_state,
+            output_final_state=output_final_state,
+            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+            use_gate_in_kernel=use_gate_in_kernel,
+            use_beta_sigmoid_in_kernel=use_beta_sigmoid_in_kernel,
+            allow_neg_eigval=allow_neg_eigval,
+            state_v_first=state_v_first,
+            cu_seqlens=cu_seqlens,
+            cu_seqlens_cpu=cu_seqlens_cpu,
+            safe_gate=safe_gate,
+            lower_bound=lower_bound,
+            disable_recompute=disable_recompute,
+            return_intermediate_states=return_intermediate_states,
+            cp_context=cp_context,
+            graph_mode='eager',
+            chunk_size=chunk_size,
+            **kwargs,
+        )
     return ChunkKDAFunction.apply(
         q,
         k,
@@ -491,4 +709,7 @@ def chunk_kda(
         cp_context,
         use_graph,
         max_num_seqs,
+        chunk_indices,
+        chunk_offsets,
+        graph_nt_max,
     )

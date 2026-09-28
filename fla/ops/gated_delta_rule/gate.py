@@ -75,12 +75,15 @@ def gdn_gate_chunk_cumsum_scalar_kernel(
     HAS_BIAS: tl.constexpr,
     HAS_SCALE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    USE_GRAPH: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
 
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        if USE_GRAPH and i_n < 0:
+            return
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
@@ -125,17 +128,21 @@ def gdn_gate_bwd_kernel(
     dyg,
     dg,
     dA,
+    cu_seqlens,
     T,
+    N: tl.constexpr,
     H: tl.constexpr,
     BT: tl.constexpr,
     HAS_BIAS: tl.constexpr,
+    USE_GRAPH: tl.constexpr,
 ):
     i_t, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1)
 
     b_A = tl.load(A_log + i_h).to(tl.float32)
 
     o_t = i_t * BT + tl.arange(0, BT)
-    m_t = o_t < T
+    actual_t = tl.load(cu_seqlens + N).to(tl.int64) if USE_GRAPH else T
+    m_t = o_t < actual_t
     p_g = g + i_h + o_t * H
     p_dg = dg + i_h + o_t * H
     p_dyg = dyg + i_h + o_t * H
@@ -169,14 +176,15 @@ def gdn_gate_chunk_cumsum(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
     output_dtype: torch.dtype | None = torch.float,
+    use_graph: bool = False,
 ) -> torch.Tensor:
     B, T, H = g.shape
     BT = chunk_size
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
-    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else chunk_indices.shape[0]
 
-    o = torch.empty_like(g, dtype=output_dtype or g.dtype)
+    o = torch.zeros_like(g, dtype=output_dtype or g.dtype) if use_graph else torch.empty_like(g, dtype=output_dtype or g.dtype)
     gdn_gate_chunk_cumsum_scalar_kernel[(NT, B * H)](
         g=g,
         A_log=A_log,
@@ -189,6 +197,7 @@ def gdn_gate_chunk_cumsum(
         H=H,
         BT=BT,
         REVERSE=False,
+        USE_GRAPH=use_graph,
     )
     return o
 
@@ -199,14 +208,17 @@ def gdn_gate_bwd(
     A_log: torch.Tensor,
     dt_bias: torch.Tensor | None,
     dyg: torch.Tensor,
+    cu_seqlens: torch.LongTensor | None = None,
+    use_graph: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     H = g.shape[-1]
     T = g.numel() // H
     BT = 32
     NT = triton.cdiv(T, BT)
+    kernel_use_graph = use_graph and cu_seqlens is not None
 
-    dg = torch.empty_like(g, dtype=torch.float32)
-    dA = A_log.new_empty(NT, H, dtype=torch.float32)
+    dg = torch.zeros_like(g, dtype=torch.float32) if use_graph else torch.empty_like(g, dtype=torch.float32)
+    dA = A_log.new_zeros(NT, H, dtype=torch.float32) if use_graph else A_log.new_empty(NT, H, dtype=torch.float32)
 
     gdn_gate_bwd_kernel[(NT, H)](
         g=g,
@@ -215,9 +227,12 @@ def gdn_gate_bwd(
         dyg=dyg,
         dg=dg,
         dA=dA,
+        cu_seqlens=cu_seqlens,
         T=T,
+        N=len(cu_seqlens) - 1 if kernel_use_graph else 0,
         H=H,
         BT=BT,
+        USE_GRAPH=kernel_use_graph,
     )
 
     dg = dg.view_as(g).type_as(g)

@@ -57,6 +57,7 @@ class TritonAscendGDNBackend(BaseBackend):
         g=None,
         cu_seqlens=None,
         chunk_indices=None,
+        use_graph=False,
     ) -> tuple[bool, str | None]:
         from fla.utils import IS_NPU
         if not IS_NPU:
@@ -77,9 +78,10 @@ class TritonAscendGDNBackend(BaseBackend):
         g=None,
         cu_seqlens=None,
         chunk_indices=None,
+        use_graph=False,
     ):
         from fla.ops.gated_delta_rule.backends.triton_ascend.wy_fast import recompute_w_u_fwd_npu
-        return recompute_w_u_fwd_npu(k, v, beta, A, g, cu_seqlens, chunk_indices)
+        return recompute_w_u_fwd_npu(k, v, beta, A, g, cu_seqlens, chunk_indices, use_graph=use_graph)
 
     def prepare_wy_repr_bwd_verifier(self, *args, **kwargs):
         return True, None

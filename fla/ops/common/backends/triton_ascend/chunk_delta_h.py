@@ -688,7 +688,10 @@ def chunk_gated_delta_rule_fwd_h_npu(
     cu_seqlens_cpu: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
     chunk_offsets: torch.LongTensor | None = None,
+    use_graph: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    if use_graph:
+        raise NotImplementedError("Delta state graph mode is not implemented for the Ascend backend yet.")
     B, T, H, K, V, HV = *k.shape, u.shape[-1], u.shape[2]
     BT = chunk_size
 
@@ -1180,7 +1183,10 @@ def chunk_gated_delta_rule_bwd_dhu_npu(
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
     chunk_offsets: torch.LongTensor | None = None,
+    use_graph: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if use_graph:
+        raise NotImplementedError("Delta state backward graph mode is not implemented for the Ascend backend yet.")
     B, T, H, K, V, HV = *q.shape, do.shape[-1], do.shape[2]
     BT = chunk_size
     assert K <= 256, "current kernel does not support head dimension being larger than 256."
