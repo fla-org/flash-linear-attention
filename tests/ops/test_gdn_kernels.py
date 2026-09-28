@@ -1325,6 +1325,9 @@ def chunk_gated_delta_rule_bwd_dhu_ref(
             (2, 128, 2, 2, 64, True, False, torch.bfloat16),
             (1, 128, 2, 2, 96, True, True, torch.bfloat16),
             (1, 128, 2, 2, 100, True, False, torch.float16),
+            # unaligned T forces the inline-gate (in-kernel exp2) path at the
+            # tightest tile: D=256 -> BK=256/BV=64
+            (1, 300, 2, 2, 256, True, True, torch.bfloat16),
         ]
     ],
 )
@@ -1351,18 +1354,36 @@ def test_chunk_gated_delta_rule_bwd_dhu(
     dht = torch.randn(B, HV, D, D, dtype=torch.float32, device=device)
 
     # the kernel takes dv_local as input; compute it via its own baseline
-    dv_local = chunk_bwd_dv_local_ref(q, k, do, g, scale, BT)
-    dh_ref, dh0_ref, dv2_ref = chunk_gated_delta_rule_bwd_dhu_ref(
-        q, k, w, u, g, h0, do, dht, dv_local, scale, BT,
-    )
+    if T % BT == 0:
+        dv_local = chunk_bwd_dv_local_ref(q, k, do, g, scale, BT)
+        dh_ref, dh0_ref, dv2_ref = chunk_gated_delta_rule_bwd_dhu_ref(
+            q, k, w, u, g, h0, do, dht, dv_local, scale, BT,
+        )
+    else:
+        # The references need T divisible by BT; zero-pad the tail, g holding
+        # its last value so the tail chunk's g_last matches the kernel's.
+        Tp = (T + BT - 1) // BT * BT
+
+        def pad(x):
+            return torch.cat([x, x.new_zeros(B, Tp - T, *x.shape[2:])], dim=1)
+        g_pad = None if g is None else torch.cat(
+            [g, g[:, -1:].expand(B, Tp - T, HV)], dim=1)
+        dv_local = chunk_bwd_dv_local_ref(pad(q), pad(k), pad(do), g_pad, scale, BT)[:, :T]
+        dh_ref, dh0_ref, dv2_ref = chunk_gated_delta_rule_bwd_dhu_ref(
+            pad(q), pad(k), pad(w), pad(u), g_pad, h0, pad(do), dht, pad(dv_local), scale, BT,
+        )
+        dv2_ref = dv2_ref[:, :T]
     dh_tri, dh0_tri, dv2_tri = chunk_gated_delta_rule_bwd_dhu(
         q=q, k=k, w=w, g=g, h0=h0, dht=dht, do=do, dv=dv_local, scale=scale, chunk_size=BT,
     )
 
-    assert_close('dh', dh_ref.to(dtype), dh_tri, 0.006)
-    assert_close('dv2', dv2_ref.to(dtype), dv2_tri, 0.006)
+    # D=256+g is above the generic dv2 bar; the retired kernel is
+    # bit-identical here, so it is the corner, not the rewrite.
+    tol = 0.008 if D == 256 and use_g else 0.006
+    assert_close('dh', dh_ref.to(dtype), dh_tri, tol)
+    assert_close('dv2', dv2_ref.to(dtype), dv2_tri, tol)
     if use_h0:
-        assert_close('dh0', dh0_ref, dh0_tri, 0.006)
+        assert_close('dh0', dh0_ref, dh0_tri, tol)
 
 
 def test_chunk_gated_delta_rule_bwd_dhu_k256_state_v_first_gk():
