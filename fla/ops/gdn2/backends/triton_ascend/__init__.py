@@ -19,7 +19,7 @@ _MAX_FWD_INTRA_BK = 256
 
 
 class TritonAscendGDN2Backend(BaseBackend):
-    """Ascend NPU backend for GDN-2 chunk kernels."""
+    """Ascend NPU backend for GDN-2 kernels."""
 
     backend_type = "triton_ascend"
     package_name = None
@@ -104,3 +104,53 @@ class TritonAscendGDN2Backend(BaseBackend):
     def chunk_gdn2_bwd_wy_dqkg_fused(self, *args, **kwargs):
         from fla.ops.gdn2.backends.triton_ascend.chunk_bwd import chunk_gdn2_bwd_wy_dqkg_fused_npu
         return chunk_gdn2_bwd_wy_dqkg_fused_npu(*args, **kwargs)
+
+    def fused_recurrent_gdn2_fwd_verifier(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g: torch.Tensor,
+        b: torch.Tensor,
+        w: torch.Tensor,
+        A_log: torch.Tensor | None = None,
+        dt_bias: torch.Tensor | None = None,
+        initial_state: torch.Tensor | None = None,
+        scale: float | None = None,
+        output_final_state: bool = False,
+        inplace_final_state: bool = False,
+        state_v_first: bool = False,
+        cu_seqlens: torch.LongTensor | None = None,
+        ssm_state_indices: torch.Tensor | None = None,
+        num_accepted_tokens: torch.Tensor | None = None,
+        use_qk_l2norm_in_kernel: bool = False,
+        use_gate_in_kernel: bool = False,
+        lower_bound: float | None = None,
+        out: torch.Tensor | None = None,
+        **kwargs,
+    ) -> tuple[bool, str | None]:
+        del scale, output_final_state, inplace_final_state, state_v_first
+        del use_qk_l2norm_in_kernel, use_gate_in_kernel, lower_bound, kwargs
+        required = {'q': q, 'k': k, 'v': v, 'g': g, 'b': b, 'w': w}
+        if any(not isinstance(t, torch.Tensor) for t in required.values()):
+            return False, 'GDN-2 Ascend recurrent requires tensor inputs'
+        optional = (A_log, dt_bias, initial_state, cu_seqlens, ssm_state_indices, num_accepted_tokens, out)
+        bad_device = [name for name, t in required.items() if t.device.type != 'npu']
+        bad_device.extend(
+            f'optional[{i}]' for i, t in enumerate(optional)
+            if isinstance(t, torch.Tensor) and t.device.type != 'npu'
+        )
+        if bad_device:
+            return False, f'GDN-2 Ascend recurrent requires NPU tensors, got {bad_device}'
+        float_tensors = (
+            *required.values(),
+            *(t for t in (A_log, dt_bias, initial_state, out) if isinstance(t, torch.Tensor)),
+        )
+        supported = (torch.float16, torch.bfloat16, torch.float32)
+        if any(t.dtype not in supported for t in float_tensors):
+            return False, 'GDN-2 Ascend recurrent received an unsupported dtype'
+        return True, None
+
+    def fused_recurrent_gdn2_fwd(self, *args, **kwargs):
+        from fla.ops.gdn2.backends.triton_ascend.fused_recurrent import fused_recurrent_gdn2_fwd_npu
+        return fused_recurrent_gdn2_fwd_npu(*args, **kwargs)
