@@ -265,7 +265,7 @@ def fused_recurrent_kda_fwd(
     HV = v.shape[2]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
     BK = triton.next_power_of_2(K)
-    BV = 32
+    BV = 8
 
     if out is None:
         out = torch.zeros_like(v)
@@ -328,8 +328,8 @@ def fused_recurrent_kda_fwd(
         APPLY_BETA_SIGMOID=use_beta_sigmoid_in_kernel,
         ALLOW_NEG_EIGVAL=allow_neg_eigval,
         STATE_V_FIRST=state_v_first,
-        num_warps=4,
-        num_stages=2,
+        num_warps=1,
+        num_stages=3,
     )
 
     return out, final_state
