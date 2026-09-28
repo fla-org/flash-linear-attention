@@ -15,12 +15,19 @@ from fla.ops.utils.cumsum import chunk_global_cumsum, chunk_local_cumsum
 from fla.ops.utils.op import exp2
 from fla.utils import (
     IS_INTEL_ALCHEMIST,
+    IS_NPU,
     IS_NVIDIA_HOPPER,
     autocast_custom_bwd,
     autocast_custom_fwd,
     autotune_cache_kwargs,
+    autotune_configs,
     check_shared_mem,
     input_guard,
+)
+from fla.utils.ascend_ub_manager import (
+    ASCEND_LAUNCH_BLOCK_BUDGET,
+    ASCEND_MAX_GRID_DIM,
+    launch_grid_chunked,
 )
 
 # https://github.com/intel/intel-xpu-backend-for-triton/issues/3449
@@ -35,11 +42,11 @@ NUM_WARPS = [2, 4, 8] if IS_NVIDIA_HOPPER else [2, 4, 8, 16]
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
-    configs=[
+    configs=autotune_configs([
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [2, 4, 8, 16]
         for num_stages in [2, 3, 4]
-    ],
+    ]),
     key=["BT", "BS", "BK", "BV", "USE_G"],
     **autotune_cache_kwargs,
 )
@@ -388,10 +395,10 @@ def parallel_simple_gla_bwd_kernel_dkv(
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
-    configs=[
+    configs=autotune_configs([
         triton.Config(triton_config, num_warps=num_warps)
         for num_warps in NUM_WARPS
-    ],
+    ]),
     key=['BT', 'BS', 'BK', 'BV', 'USE_G'],
     **autotune_cache_kwargs,
 )
@@ -685,6 +692,97 @@ class ParallelSimpleGLAFunction(torch.autograd.Function):
         return dq.to(q), dk.to(k), dv.to(v), dg.to(ctx.dtype) if dg is not None else None, None, None, None, None
 
 
+@triton.jit(do_not_specialize=['T', 'TQ_OFFSET', 'TS_OFFSET', 'BH_OFFSET'])
+def parallel_attn_npu_kernel(
+    q,
+    k,
+    gc,
+    attn,
+    scale,
+    T,
+    H: tl.constexpr,
+    K: tl.constexpr,
+    BT: tl.constexpr,
+    BK: tl.constexpr,
+    NT: tl.constexpr,
+    NK: tl.constexpr,
+    USE_G: tl.constexpr,
+    TQ_OFFSET,
+    TS_OFFSET,
+    BH_OFFSET,
+):
+    """Materialize the parallel attention scores on Ascend.
+
+    One program owns a single (query block, key block) tile of the score
+    matrix, so no loop bound depends on a program value (Ascend cannot lower
+    those; see parallel_simple_gla_fwd_kernel). The upper triangle returns
+    immediately, which halves the launched work on a full NT x NT grid.
+    """
+    i_t = tl.program_id(0) + TQ_OFFSET
+    i_s = tl.program_id(1) + TS_OFFSET
+    i_bh = tl.program_id(2).to(tl.int64) + BH_OFFSET
+    if i_s > i_t:
+        return
+    i_b, i_h = i_bh // H, i_bh % H
+    o_q = i_t * BT + tl.arange(0, BT)
+    m_q = o_q < T
+    o_k = i_s * BT + tl.arange(0, BT)
+    m_k = o_k < T
+    qk_base = (i_b * T * H + i_h) * K
+    g_base = i_b * T * H + i_h
+    if USE_G:
+        b_gq = tl.load(gc + g_base + o_q * H, mask=m_q, other=0.0).to(tl.float32)
+        b_gk = tl.load(gc + g_base + o_k * H, mask=m_k, other=0.0).to(tl.float32)
+
+    b_s = tl.zeros([BT, BT], dtype=tl.float32)
+    for i_kk in tl.static_range(NK):
+        o_kk = i_kk * BK + tl.arange(0, BK)
+        m_kk = (o_kk < K)[:, None]
+        b_q = tl.load(
+            q + qk_base + o_q[:, None] * (H * K) + o_kk[None, :],
+            mask=m_q[:, None] & (o_kk < K)[None, :], other=0.0,
+        )
+        # load K in [BK, BT] layout: no in-register transpose needed
+        b_k = tl.load(
+            k + qk_base + o_kk[:, None] + o_k[None, :] * (H * K),
+            mask=m_kk & m_k[None, :], other=0.0,
+        )
+        b_s += tl.dot(b_q, b_k)
+    if USE_G:
+        b_s = b_s * exp2(b_gq[:, None] - b_gk[None, :])
+    b_s = b_s * scale
+    m_blk = m_q[:, None] & m_k[None, :] & (o_q[:, None] >= o_k[None, :])
+    p_a = attn + (i_bh * T + o_q[:, None]) * T + o_k[None, :]
+    tl.store(p_a, tl.where(m_blk, b_s, 0.0).to(p_a.dtype.element_ty),
+             mask=m_q[:, None] & m_k[None, :])
+
+
+def _parallel_attn_npu(q: torch.Tensor, k: torch.Tensor, g: torch.Tensor | None,
+                       scale: float) -> torch.Tensor:
+    """Ascend implementation of `parallel_simple_gla(output_attentions=True)`."""
+    B, T, H, K = q.shape
+    BT = 64
+    BK = min(64, triton.next_power_of_2(K))
+    NT, NK = triton.cdiv(T, BT), triton.cdiv(K, BK)
+    gc = chunk_global_cumsum(g, scale=RCP_LN2) if g is not None else None
+    # zero-init: the upper triangle is skipped by the causal early-exit above
+    attn = torch.zeros(B, H, T, T, dtype=q.dtype, device=q.device)
+    grid = (NT, NT, B * H)
+    kwargs = dict(q=q, k=k, gc=gc, attn=attn, scale=scale, T=T, H=H, K=K,
+                  BT=BT, BK=BK, NT=NT, NK=NK, USE_G=g is not None,
+                  TQ_OFFSET=0, TS_OFFSET=0, BH_OFFSET=0)
+    if grid[0] * grid[1] * grid[2] > ASCEND_MAX_GRID_DIM:
+        launch_grid_chunked(
+            parallel_attn_npu_kernel, grid,
+            offset_keys=('TQ_OFFSET', 'TS_OFFSET', 'BH_OFFSET'),
+            kernel_kwargs=kwargs,
+            budget=ASCEND_LAUNCH_BLOCK_BUDGET,
+        )
+    else:
+        parallel_attn_npu_kernel[grid](**kwargs)
+    return attn
+
+
 def parallel_simple_gla(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -731,6 +829,27 @@ def parallel_simple_gla(
             )
     if output_attentions:
         assert cu_seqlens is None, "output_attentions=True is not supported with variable-length sequences"
+
+    if IS_NPU:
+        # Triton-Ascend cannot compile parallel_simple_gla_fwd_kernel (bishengir
+        # SIGSEGV in ConvertLinalgRToBinary: the sub-block loops are bounded by
+        # program-dependent values). Realize the same parallel-block semantics
+        # with the chunk decomposition, whose kernels are NPU-verified.
+        if output_attentions:
+            attn = _parallel_attn_npu(q, k, g, k.shape[-1] ** -0.5 if scale is None else scale)
+        else:
+            attn = None
+        from fla.ops.simple_gla.chunk import chunk_simple_gla
+        o, _ = chunk_simple_gla(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            scale=scale,
+            cu_seqlens=cu_seqlens,
+            cu_seqlens_cpu=cu_seqlens_cpu,
+        )
+        return o, attn
 
     if scale is None:
         scale = k.shape[-1] ** -0.5

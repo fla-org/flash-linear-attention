@@ -195,6 +195,7 @@ def fused_recurrent_gsa_fwd(
         USE_GK=False,
         USE_GV=True,
         REVERSE=reverse,
+        PID_OFFSET=0,
     )
     ok = ok.sum(0)
 
@@ -227,6 +228,7 @@ def fused_recurrent_gsa_fwd(
         USE_GK=True,
         USE_GV=False,
         REVERSE=reverse,
+        PID_OFFSET=0,
     )
     ov = ov.sum(0)
     return ok, hkt, qv, ov, hvt
@@ -295,6 +297,7 @@ def fused_recurrent_gsa_bwd(
         USE_GK=True,
         USE_GV=False,
         REVERSE=reverse,
+        PID_OFFSET=0,
     )
     dqv = dqv.sum(0)
     dsv = dsv.sum(0)
@@ -342,6 +345,7 @@ def fused_recurrent_gsa_bwd(
         USE_GK=False,
         USE_GV=True,
         REVERSE=reverse,
+        PID_OFFSET=0,
     )
     dq = dq.sum(0)
     dk = dk.sum(0)

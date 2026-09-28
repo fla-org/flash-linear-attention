@@ -17,6 +17,7 @@ from fla.utils import (
     autocast_custom_bwd,
     autocast_custom_fwd,
     autotune_cache_kwargs,
+    autotune_configs,
     check_shared_mem,
     input_guard,
 )
@@ -33,12 +34,12 @@ NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8]
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
-    configs=[
+    configs=autotune_configs([
         triton.Config({'BV': BV}, num_warps=num_warps, num_stages=num_stages)
         for BV in BKV_LIST
         for num_warps in NUM_WARPS
         for num_stages in [2, 3, 4]
-    ],
+    ]),
     key=['H', 'K', 'V', 'BT'],
     **autotune_cache_kwargs,
 )
@@ -175,11 +176,11 @@ def fused_chunk_fwd_kernel(
     'USE_FINAL_STATE': lambda args: args['dht'] is not None,
 })
 @triton.autotune(
-    configs=[
+    configs=autotune_configs([
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in NUM_WARPS
         for num_stages in [2, 3, 4]
-    ],
+    ]),
     key=['H', 'K', 'V', 'BT'],
     **autotune_cache_kwargs,
 )

@@ -8,6 +8,7 @@
 import torch
 
 from fla.ops.common.fused_chunk import fused_chunk
+from fla.utils import IS_NPU
 
 
 def fused_chunk_simple_gla(
@@ -96,6 +97,24 @@ def fused_chunk_simple_gla(
             )
     if scale is None:
         scale = k.shape[-1] ** -0.5
+    if IS_NPU:
+        # The fused single-kernel path cannot be lowered by Triton-Ascend on
+        # Ascend NPU: fused_chunk_bwd_kernel faults with an unaligned vector UB
+        # access (AICore 507015) at BT=64 and miscompiles dk at BT=32. Realize
+        # the same fused-chunk semantics through the chunk decomposition, whose
+        # kernels are the NPU-verified ones.
+        from fla.ops.simple_gla.chunk import chunk_simple_gla
+        return chunk_simple_gla(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            g_gamma=g_gamma,
+            scale=scale,
+            initial_state=initial_state,
+            output_final_state=output_final_state,
+            cu_seqlens=cu_seqlens,
+        )
     o, final_state = fused_chunk(
         q=q,
         k=k,

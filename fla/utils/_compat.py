@@ -50,6 +50,28 @@ def ascend_compile_kwargs(*, blacklist_auto_blockify: bool = False) -> dict:
     return kwargs
 
 
+def autotune_configs(configs: list[triton.Config]) -> list[triton.Config]:
+    """Return `@triton.autotune` configs that are valid for the active device.
+
+    Ascend Triton does not support the CUDA launch parameters ``num_warps`` and
+    ``num_stages``: the compiler does not translate them, so tuning over them
+    only multiplies compile time and, for some kernels, produces binaries whose
+    vector unit accesses unaligned UB (AICore error 507015). On NPU collapse the
+    grid to the distinct tile shapes and let Triton-Ascend pick the schedule.
+    """
+    if not IS_NPU:
+        return configs
+    collapsed: list[triton.Config] = []
+    seen: set = set()
+    for config in configs:
+        key = tuple(sorted(dict(config.kwargs).items()))
+        if key in seen:
+            continue
+        seen.add(key)
+        collapsed.append(triton.Config(dict(config.kwargs)))
+    return collapsed
+
+
 # expose extra.cann as extra.ascend for torch_npu inductor
 try:
     import triton.language as tl
