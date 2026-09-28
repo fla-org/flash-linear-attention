@@ -33,7 +33,7 @@ from fla.utils import autotune_cache_kwargs, get_multiprocessor_count, input_gua
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
-def layer_norm_gated_fwd_kernel_tiled(
+def layer_norm_gated_fwd_kernel(
     x,
     g,
     y,
@@ -201,7 +201,7 @@ def layer_norm_gated_fwd_kernel_row(
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
-def layer_norm_gated_bwd_kernel_tiled(
+def layer_norm_gated_bwd_kernel(
     x,
     g,
     w,
@@ -488,7 +488,7 @@ def layer_norm_gated_fwd(
         def grid(meta):
             return (triton.cdiv(T, meta["BT"]),)
 
-        layer_norm_gated_fwd_kernel_tiled[grid](
+        layer_norm_gated_fwd_kernel[grid](
             x=x,
             g=g,
             y=y,
@@ -574,7 +574,7 @@ def layer_norm_gated_bwd(
         # bucket token counts to limit autotuning across sequence lengths.
         NB = triton.cdiv(T, 2048 * 32)
 
-        layer_norm_gated_bwd_kernel_tiled[grid](
+        layer_norm_gated_bwd_kernel[grid](
             x=x,
             g=g,
             w=weight,

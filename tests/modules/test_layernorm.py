@@ -224,12 +224,12 @@ def test_rmsnorm_linear(N: int, D: int):
 
 
 # ============================================================
-# Regression tests: layer_norm_bwd_kernel_tiled with few tokens
+# Regression tests: layer_norm_bwd_kernel with few tokens
 # ============================================================
 #
 # On GPUs with many SMs (e.g., Blackwell B200 with 160+ SMs),
 # when T (total tokens) is small relative to the SM count,
-# some Triton programs in layer_norm_bwd_kernel_tiled have no work
+# some Triton programs in layer_norm_bwd_kernel have no work
 # (i_sg * BS >= T // G). Without an early-exit guard, these
 # idle programs access invalid memory via out-of-bounds tile loads,
 # causing "CUDA error: illegal memory access."

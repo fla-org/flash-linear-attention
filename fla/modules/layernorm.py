@@ -190,7 +190,7 @@ class GroupNormRef(nn.Module):
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
-def layer_norm_fwd_kernel_tiled(
+def layer_norm_fwd_kernel(
     x,
     y,
     w,
@@ -337,7 +337,7 @@ def layer_norm_fwd_kernel_row(
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
-def layer_norm_bwd_kernel_tiled(
+def layer_norm_bwd_kernel(
     x,
     w,
     b,
@@ -575,7 +575,7 @@ def layer_norm_fwd(
         def grid(meta):
             return (triton.cdiv(T, meta['BT']),)
 
-        layer_norm_fwd_kernel_tiled[grid](
+        layer_norm_fwd_kernel[grid](
             x=x,
             y=y,
             w=weight,
@@ -664,7 +664,7 @@ def layer_norm_bwd(
     # use the row kernel at D == 512 to fit Intel scratch-space limits.
     if D <= 512 and not (D == 512 and IS_INTEL):
         NB = triton.cdiv(T, 2048)
-        layer_norm_bwd_kernel_tiled[grid](
+        layer_norm_bwd_kernel[grid](
             x=x,
             w=weight,
             b=bias,

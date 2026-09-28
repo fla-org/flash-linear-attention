@@ -81,7 +81,7 @@ def l2norm_bwd_kernel_row(
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=["T"])
-def l2norm_fwd_kernel_tiled(
+def l2norm_fwd_kernel(
     x,
     y,
     rstd,
@@ -115,7 +115,7 @@ def l2norm_fwd_kernel_tiled(
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=["T"])
-def l2norm_bwd_kernel_tiled(
+def l2norm_bwd_kernel(
     y,
     rstd,
     dy,
@@ -173,7 +173,7 @@ def l2norm_fwd(
         def grid(meta):
             return (triton.cdiv(T, meta["BT"]),)
 
-        l2norm_fwd_kernel_tiled[grid](x=x, y=y, rstd=rstd, eps=eps, T=T, D=D, BD=BD, NB=NB)
+        l2norm_fwd_kernel[grid](x=x, y=y, rstd=rstd, eps=eps, T=T, D=D, BD=BD, NB=NB)
     else:
         l2norm_fwd_kernel_row[(T,)](x=x, y=y, rstd=rstd, eps=eps, D=D, BD=BD)
     return y.view(x_shape_og), rstd.view(x_shape_og[:-1])
@@ -206,7 +206,7 @@ def l2norm_bwd(
         def grid(meta):
             return (triton.cdiv(T, meta["BT"]),)
 
-        l2norm_bwd_kernel_tiled[grid](y=y, rstd=rstd, dy=dy, dx=dx, eps=eps, T=T, D=D, BD=BD, NB=NB)
+        l2norm_bwd_kernel[grid](y=y, rstd=rstd, dy=dy, dx=dx, eps=eps, T=T, D=D, BD=BD, NB=NB)
     else:
         l2norm_bwd_kernel_row[(T,)](y=y, rstd=rstd, dy=dy, dx=dx, eps=eps, D=D, BD=BD)
 
