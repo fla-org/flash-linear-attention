@@ -511,6 +511,9 @@ class FLAGenerationMixin(GenerationMixin):
             # For transformers 4.56.0+, use cache_position-based logic
             model_inputs = {}
 
+            # transformers 5.x reports the new-token count even when `cache_position` is absent
+            num_new_tokens = cache_position.shape[0] if cache_position is not None else kwargs.get("next_sequence_length")
+
             # Handle cache-dependent input preparation
             if past_key_values is not None:
                 model_inputs["past_key_values"] = past_key_values
@@ -528,6 +531,12 @@ class FLAGenerationMixin(GenerationMixin):
                     # Ultimate fallback to old behavior
                     input_ids = input_ids[:, -1:]
 
+            # transformers only narrows `inputs_embeds` when `input_ids` is empty, so finish the
+            # trim here rather than falling through to `input_ids` and dropping the embeddings
+            if inputs_embeds is not None and num_new_tokens is not None and inputs_embeds.shape[1] > num_new_tokens:
+                inputs_embeds = inputs_embeds[:, -num_new_tokens:, :]
+                input_ids = None
+
             # Handle input format (similar to base class logic)
             if inputs_embeds is not None and (cache_position is None or len(cache_position) == inputs_embeds.shape[1]):
                 model_inputs['inputs_embeds'] = inputs_embeds
@@ -544,8 +553,12 @@ class FLAGenerationMixin(GenerationMixin):
             # only last token for `inputs_ids` if the `past_key_values` is not empty.
             if past_key_values is not None and (past_key_values.get_seq_length() if hasattr(past_key_values, 'get_seq_length') else len(past_key_values)) > 0:
                 input_ids = input_ids[:, -1:]
+            # transformers 5.x reports this directly; older releases only expose the cache
+            is_first_iteration = kwargs.get("is_first_iteration")
+            if is_first_iteration is None:
+                is_first_iteration = hasattr(past_key_values, '__len__') and len(past_key_values) == 0
             # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
-            if inputs_embeds is not None and hasattr(past_key_values, '__len__') and len(past_key_values) == 0:
+            if inputs_embeds is not None and is_first_iteration:
                 model_inputs = {'inputs_embeds': inputs_embeds}
             else:
                 # The `contiguous()` here is necessary to have a static stride during decoding. torchdynamo otherwise
