@@ -14,7 +14,8 @@ import torch.nn.functional as F
 from fla.ops.gated_delta_product import chunk_gated_delta_product
 from fla.ops.gated_delta_product.chunk_ref import chunk_gated_delta_product_ref
 from fla.ops.gated_delta_product.naive import naive_recurrent_gated_delta_product
-from fla.utils import IS_INTEL_ALCHEMIST, assert_close, device
+from fla.ops.utils.index import prepare_chunk_indices
+from fla.utils import IS_INTEL_ALCHEMIST, IS_NVIDIA, assert_close, device, device_torch_lib
 
 
 @pytest.mark.parametrize(
@@ -246,3 +247,79 @@ def test_naive_varlen():
 
     assert_close('o', ref, tri, 0.005)
     assert_close('ht', ref_ht, tri_ht, 0.005)
+
+
+@pytest.mark.skipif(not IS_NVIDIA, reason='requires CUDA graph capture')
+@pytest.mark.parametrize('num_householder', [1, 3], ids=['hh1', 'hh3'])
+@pytest.mark.parametrize('use_qk_l2norm_in_kernel', [False, True], ids=['normalized', 'fused_l2norm'])
+def test_chunk_varlen_cuda_graph(num_householder: int, use_qk_l2norm_in_kernel: bool):
+    """Replay packed forward/backward with refreshed boundaries and chunk descriptors."""
+    torch.manual_seed(42)
+    T, H, K, V = 256, 2, 64, 80
+    dtype = torch.bfloat16
+    names = ('q', 'k', 'v', 'g', 'beta', 'initial_state')
+
+    def make_inputs():
+        q = torch.randn(1, T, H, K, dtype=dtype, device=device)
+        k = torch.randn(1, T * num_householder, H, K, dtype=dtype, device=device)
+        if not use_qk_l2norm_in_kernel:
+            q, k = F.normalize(q, dim=-1), F.normalize(k, dim=-1)
+        return dict(zip(names, (
+            q, k,
+            torch.randn(1, T * num_householder, H, V, dtype=dtype, device=device),
+            F.logsigmoid(torch.randn(1, T, H, dtype=torch.float32, device=device)),
+            torch.randn(1, T * num_householder, H, dtype=dtype, device=device).sigmoid(),
+            torch.randn(2, H, K, V, dtype=torch.float32, device=device),
+        ), strict=True))
+
+    def descriptors(cu):
+        return prepare_chunk_indices(cu, 64), prepare_chunk_indices(cu * num_householder, 64)
+
+    leaves = {name: value.requires_grad_() for name, value in make_inputs().items()}
+    cu = torch.tensor([0, 112, T], dtype=torch.long, device=device)
+    chunk_indices, chunk_indices_dp = descriptors(cu)
+    do = torch.randn(1, T, H, V, dtype=dtype, device=device)
+    dht = torch.randn_like(leaves['initial_state'])
+
+    def step(inputs, boundaries, grad_output, grad_state, **kwargs):
+        output, state = chunk_gated_delta_product(
+            **inputs, num_householder=num_householder, output_final_state=True,
+            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel, cu_seqlens=boundaries, **kwargs,
+        )
+        gradients = torch.autograd.grad((output, state), tuple(inputs.values()), (grad_output, grad_state))
+        return (output, state, *gradients)
+
+    stream = device_torch_lib.Stream()
+    stream.wait_stream(device_torch_lib.current_stream())
+    with device_torch_lib.stream(stream):
+        for _ in range(3):
+            step(leaves, cu, do, dht, chunk_indices=chunk_indices, chunk_indices_dp=chunk_indices_dp)
+    device_torch_lib.current_stream().wait_stream(stream)
+    device_torch_lib.synchronize()
+    graph = device_torch_lib.CUDAGraph()
+    try:
+        with device_torch_lib.graph(graph, stream=stream):
+            captured = step(leaves, cu, do, dht, chunk_indices=chunk_indices, chunk_indices_dp=chunk_indices_dp)
+        device_torch_lib.current_stream().wait_stream(stream)
+        for cut in (112, 144, 112):
+            fresh = {name: value.requires_grad_() for name, value in make_inputs().items()}
+            boundaries = torch.tensor([0, cut, T], dtype=cu.dtype, device=device)
+            new_indices, new_indices_dp = descriptors(boundaries)
+            assert new_indices.shape == chunk_indices.shape
+            assert new_indices_dp.shape == chunk_indices_dp.shape
+            with torch.no_grad():
+                for name in names:
+                    leaves[name].copy_(fresh[name])
+                cu.copy_(boundaries)
+                chunk_indices.copy_(new_indices)
+                chunk_indices_dp.copy_(new_indices_dp)
+                do.normal_()
+                dht.normal_()
+            eager = step(fresh, boundaries, do, dht)
+            graph.replay()
+            device_torch_lib.synchronize()
+            for name, expected, actual in zip(('output', 'state', *names), eager, captured, strict=True):
+                assert_close(name, expected, actual, ratio=0, err_atol=0)
+    finally:
+        device_torch_lib.synchronize()
+        graph.reset()

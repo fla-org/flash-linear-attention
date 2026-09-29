@@ -156,6 +156,8 @@ class ChunkGatedDeltaProductFunction(torch.autograd.Function):
         cu_seqlens: torch.LongTensor | None = None,
         cu_seqlens_cpu: torch.LongTensor | None = None,
         cp_context: FLACPContext | None = None,
+        chunk_indices: torch.LongTensor | None = None,
+        chunk_indices_dp: torch.LongTensor | None = None,
     ):
         if use_qk_l2norm_in_kernel:
             q, q_rstd = l2norm_fwd(q)
@@ -163,16 +165,16 @@ class ChunkGatedDeltaProductFunction(torch.autograd.Function):
         else:
             q_rstd, k_rstd = None, None
 
-        chunk_indices = None
-        chunk_indices_dp = None
         if cu_seqlens is not None:
-            chunk_indices = prepare_chunk_indices(cu_seqlens, 64, cu_seqlens_cpu=cu_seqlens_cpu)
-            cu_seqlens_cpu_dp = None
-            if cu_seqlens_cpu is not None:
-                cu_seqlens_cpu_dp = cu_seqlens_cpu * num_householder
-            chunk_indices_dp = prepare_chunk_indices(
-                cu_seqlens * num_householder, 64, cu_seqlens_cpu=cu_seqlens_cpu_dp
-            )
+            if chunk_indices is None:
+                chunk_indices = prepare_chunk_indices(cu_seqlens, 64, cu_seqlens_cpu=cu_seqlens_cpu)
+            if chunk_indices_dp is None:
+                cu_seqlens_cpu_dp = None
+                if cu_seqlens_cpu is not None:
+                    cu_seqlens_cpu_dp = cu_seqlens_cpu * num_householder
+                chunk_indices_dp = prepare_chunk_indices(
+                    cu_seqlens * num_householder, 64, cu_seqlens_cpu=cu_seqlens_cpu_dp
+                )
 
         g, g_interleaved, o, A, final_state, initial_state = chunk_gated_delta_product_fwd(
             q=q,
@@ -273,7 +275,7 @@ class ChunkGatedDeltaProductFunction(torch.autograd.Function):
         if ctx.use_qk_l2norm_in_kernel:
             dq = l2norm_bwd(q_org, q_rstd, dq)
             dk = l2norm_bwd(k, k_rstd, dk)
-        return dq.to(q), dk.to(k), dv.to(v), dg, db.to(beta), None, None, dh0, None, None, None, None, None
+        return dq.to(q), dk.to(k), dv.to(v), dg, db.to(beta), None, None, dh0, None, None, None, None, None, None, None
 
 
 @torch.compiler.disable
@@ -291,6 +293,8 @@ def chunk_gated_delta_product(
     cu_seqlens: torch.LongTensor | None = None,
     cu_seqlens_cpu: torch.LongTensor | None = None,
     cp_context: FLACPContext | None = None,
+    chunk_indices: torch.LongTensor | None = None,
+    chunk_indices_dp: torch.LongTensor | None = None,
 ):
     r"""
     Args:
@@ -326,6 +330,13 @@ def chunk_gated_delta_product(
             When provided, `g` is required, `initial_state` and `output_final_state`
             are not supported, and `cu_seqlens` will be overridden by the context.
             Default: `None`.
+        chunk_indices (torch.LongTensor, Optional):
+            Precomputed ``prepare_chunk_indices(cu_seqlens, 64)`` descriptors. Default: `None`.
+        chunk_indices_dp (torch.LongTensor, Optional):
+            Precomputed descriptors for ``cu_seqlens * num_householder``. Default: `None`.
+            Supply both descriptor tensors for packed CUDA graph capture.
+            Refresh their contents before replay when sequence boundaries change;
+            different descriptor shapes require another graph.
 
     Returns:
         o (torch.Tensor):
@@ -379,6 +390,9 @@ def chunk_gated_delta_product(
         if cp_context.cu_seqlens_cpu is not None:
             cu_seqlens_cpu = cp_context.cu_seqlens_cpu
 
+    if cu_seqlens is None and (chunk_indices is not None or chunk_indices_dp is not None):
+        raise ValueError("Precomputed chunk indices require cu_seqlens")
+
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(
@@ -406,5 +420,7 @@ def chunk_gated_delta_product(
         cu_seqlens,
         cu_seqlens_cpu,
         cp_context,
+        chunk_indices,
+        chunk_indices_dp,
     )
     return o, final_state
