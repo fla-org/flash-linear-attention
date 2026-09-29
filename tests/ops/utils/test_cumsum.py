@@ -6,12 +6,40 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import os
+from importlib import import_module
 
 import pytest
 import torch
 
 from fla.ops.utils import chunk_global_cumsum, chunk_local_cumsum
-from fla.utils import assert_close, device
+from fla.utils import IS_NPU, assert_close, device
+
+
+@pytest.mark.skipif(not IS_NPU, reason="Ascend task-loop sentinel handling")
+@pytest.mark.parametrize("vector", [False, True])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_local_cumsum_graph_sentinels(monkeypatch, vector, reverse):
+    """Sentinels between valid tasks must not read state or terminate the task loop."""
+    module = import_module("fla.ops.utils.backends.triton_ascend.cumsum")
+    monkeypatch.setattr(module, "get_multiprocessor_count", lambda: 1)
+    torch.manual_seed(42)
+    shape = (1, 128, 2, 32) if vector else (1, 128, 2)
+    s = torch.randn(shape, device=device)
+    cu_seqlens = torch.tensor([0, 64, 128], dtype=torch.int32, device=device)
+    indices = torch.tensor([[-1, 0], [0, 0], [-1, 0], [1, 0], [-1, 0]], dtype=torch.int32, device=device)
+    ref = torch.cat([
+        reversed_cumsum(part, dim=1) if reverse else part.cumsum(1)
+        for part in s.split(64, dim=1)
+    ], dim=1)
+    actual = chunk_local_cumsum(
+        s,
+        chunk_size=64,
+        reverse=reverse,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=indices,
+        use_graph=True,
+    )
+    assert_close("local_cumsum_sentinels", ref, actual, 1e-3)
 
 
 def reversed_cumsum(x, dim=-1):
