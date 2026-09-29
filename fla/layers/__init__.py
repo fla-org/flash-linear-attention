@@ -12,6 +12,7 @@ from .bitattn import BitAttention
 from .comba import Comba
 from .delta_net import DeltaNet
 from .deltaformer import DeltaFormerAttention
+from .diag_kdn import DiagKDN
 from .forgetting_attn import ForgettingAttention
 from .gated_deltanet import GatedDeltaNet
 from .gated_deltaproduct import GatedDeltaProduct
@@ -54,6 +55,7 @@ __all__ = [
     'Comba',
     'DeltaFormerAttention',
     'DeltaNet',
+    'DiagKDN',
     'ForgettingAttention',
     'GatedDeltaNet',
     'GatedDeltaNet2',

@@ -11,6 +11,7 @@ from fla.models.cat import CATConfig, CATForCausalLM, CATModel
 from fla.models.comba import CombaConfig, CombaForCausalLM, CombaModel
 from fla.models.delta_net import DeltaNetConfig, DeltaNetForCausalLM, DeltaNetModel
 from fla.models.deltaformer import DeltaFormerConfig, DeltaFormerForCausalLM, DeltaFormerModel
+from fla.models.diag_kdn import DiagKDNConfig, DiagKDNForCausalLM, DiagKDNModel
 from fla.models.forgetting_transformer import (
     ForgettingTransformerConfig,
     ForgettingTransformerForCausalLM,
@@ -75,6 +76,9 @@ __all__ = [
     'DeltaNetConfig',
     'DeltaNetForCausalLM',
     'DeltaNetModel',
+    'DiagKDNConfig',
+    'DiagKDNForCausalLM',
+    'DiagKDNModel',
     'ForgettingTransformerConfig',
     'ForgettingTransformerForCausalLM',
     'ForgettingTransformerModel',
