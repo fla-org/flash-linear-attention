@@ -16,6 +16,7 @@ from fla.layers.linear_attn import LinearAttention
 from fla.layers.mamba2 import Mamba2
 from fla.layers.multiscale_retention import MultiScaleRetention
 from fla.layers.path_attn import PaTHAttention
+from fla.layers.rebased import ReBasedLinearAttention
 from fla.layers.rwkv6 import RWKV6Attention
 from fla.layers.rwkv7 import RWKV7Attention
 from fla.layers.simple_gla import SimpleGatedLinearAttention
@@ -68,6 +69,8 @@ def test_hgrn2_state_size():
 _KEY_DIVIDED_HEAD_LAYERS = [GatedLinearAttention, GatedSlotAttention, SimpleGatedLinearAttention]
 # layers that derive `head_dim` by dividing `hidden_size` by `num_heads`
 _HIDDEN_DIVIDED_HEAD_LAYERS = [PaTHAttention, ForgettingAttention, WallAttention]
+# `ReBasedLinearAttention` splits `hidden_size` across `num_key_value_heads` instead
+_REBASED_HEAD_LAYERS = [ReBasedLinearAttention]
 
 
 @pytest.mark.parametrize("layer_cls", _KEY_DIVIDED_HEAD_LAYERS)
@@ -88,3 +91,13 @@ def test_hidden_size_head_dim_divisibility(layer_cls):
     # 100 / 3 == 33.33: truncating to 33 drops a feature and breaks the later head reshape
     with pytest.raises(AssertionError, match="must be divisible by `num_heads`"):
         layer_cls(hidden_size=100, num_heads=3, num_kv_heads=1)
+
+
+@pytest.mark.parametrize("layer_cls", _REBASED_HEAD_LAYERS)
+def test_rebased_head_dim_divisibility(layer_cls):
+    """`hidden_size` not divisible by `num_key_value_heads` must fail loudly, not truncate `head_dim`."""
+    # 100 is divisible by 4, so the head split is exact
+    layer_cls(hidden_size=100, num_key_value_heads=4, num_heads=4)
+    # 100 / 3 == 33.33: truncating to 33 makes `v_proj` emit 99 channels against a 100-channel residual
+    with pytest.raises(AssertionError, match="must be divisible by `num_key_value_heads`"):
+        layer_cls(hidden_size=100, num_key_value_heads=3, num_heads=3)
