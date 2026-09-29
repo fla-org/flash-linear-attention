@@ -232,7 +232,7 @@ def fused_recurrent_kda_fwd_kernel_npu(
                 b_o = tl.sum(b_h * b_q[:, None], 0)
             tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=mask_v)
 
-            if IS_CONTINUOUS_BATCHING:
+            if IS_CONTINUOUS_BATCHING and STORE_FINAL_STATE:
                 if INPLACE_FINAL_STATE:
                     state_base = (
                         tl.load(ssm_state_indices + i_n * stride_indices_seq + i_t).to(tl.int64) * stride_final_state_token
@@ -311,10 +311,11 @@ def fused_recurrent_kda_fwd_npu(
         assert initial_state is not None
         final_state = initial_state
     elif output_final_state:
+        num_states = B * T if ssm_state_indices is not None else N
         if state_v_first:
-            final_state = q.new_empty(N, HV, V, K, dtype=torch.float32)
+            final_state = q.new_empty(num_states, HV, V, K, dtype=torch.float32)
         else:
-            final_state = q.new_empty(N, HV, K, V, dtype=torch.float32)
+            final_state = q.new_empty(num_states, HV, K, V, dtype=torch.float32)
     else:
         final_state = None
 
