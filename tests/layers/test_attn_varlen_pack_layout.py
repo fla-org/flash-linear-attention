@@ -20,6 +20,8 @@ from fla.layers import (
     KimiDeltaAttention,
     MesaNet,
     MultiScaleRetention,
+    PrecondGatedDeltaNet,
+    PrecondKDA,
     RodimusAttention,
     YOCOGatedRetention,
 )
@@ -114,6 +116,16 @@ def test_attention_varlen_accepts_batched_layout_with_cu_seqlens(B: int, T: int,
             MultiScaleRetention,
             dict(hidden_size=16, num_heads=2, num_kv_heads=2, expand_k=1, expand_v=1),
             id="multiscale-retention",
+        ),
+        pytest.param(
+            PrecondGatedDeltaNet,
+            dict(hidden_size=16, head_dim=8, num_heads=2, num_v_heads=2, expand_v=1, use_short_conv=False),
+            id="precond-gated-deltanet",
+        ),
+        pytest.param(
+            PrecondKDA,
+            dict(hidden_size=16, head_dim=8, num_heads=2, num_v_heads=2, expand_v=1, use_short_conv=False),
+            id="precond-kda",
         ),
         pytest.param(
             RodimusAttention,
