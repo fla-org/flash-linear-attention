@@ -120,7 +120,7 @@ Special cases:
 
 Benchmark methodology
 =====================
-1. **Warmup**: For each (op, shape), run fwd+bwd several times (default 5;
+1. **Warmup**: For each (op, shape), run the requested modes several times (default 5;
    override with ``FLA_BENCH_OP_WARMUP_ITERS``) to trigger triton autotuning.
    All shapes are warmed up before any timing begins.
 2. **Timing**: ``triton.testing.do_bench`` with quantiles ``[0.5, 0.2, 0.8]``,
@@ -352,12 +352,13 @@ def benchmark_op(
             out_tensor = out[0] if config.output_is_tuple else out
             do = torch.randn_like(out_tensor)
 
-            def _fwdbwd_fn(inputs=inputs, do=do):
+            def _warmup_fn(inputs=inputs, do=do):
                 result = op_fn(**inputs, **call_kwargs)
-                t = result[0] if config.output_is_tuple else result
-                t.backward(do)
+                if 'fwdbwd' in modes:
+                    t = result[0] if config.output_is_tuple else result
+                    t.backward(do)
 
-            _warmup_autotune(_fwdbwd_fn, device=device_name)
+            _warmup_autotune(_warmup_fn, device=device_name)
         except Exception as e:
             logger.warning(f"Warmup failed for {op_name} @ {shape_name}: {e}")
             failed_shapes.add(shape_name)
