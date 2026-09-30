@@ -6,6 +6,7 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import importlib.util
+import logging
 
 import pytest
 import torch
@@ -592,13 +593,12 @@ def test_fused_recurrent_indexed_state(state_v_first, packed, index_stride, acce
                     head_errors = error.amax(dim=(-2, -1)).tolist()
                     head, offset = divmod(error.argmax().item(), K * V)
                     key, value = divmod(offset, V)
-                    print(
+                    logging.getLogger(__name__).error(
                         f'Indexed state sequence={sequence} token={token} slot={slot} '
                         f'terminal={token == length - 1} head_max_abs={head_errors} '
                         f'head={head} key={key} value={value} '
                         f'expected={expected_pool[slot, head, key, value].item()} '
                         f'actual={pool_k_first[slot, head, key, value].item()}',
-                        flush=True,
                     )
             raise
         terminal_states = pool_k_first[indices[torch.arange(2, device=device),
