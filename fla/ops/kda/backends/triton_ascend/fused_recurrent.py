@@ -15,7 +15,7 @@ import triton.language as tl
 
 from fla.ops.utils.op import exp
 from fla.ops.utils.softplus import softplus
-from fla.utils import input_guard
+from fla.utils import ascend_compile_kwargs, input_guard
 from fla.utils.ascend_ub_manager import (
     ASCEND_MAX_GRID_DIM,
     compute_row_tile_block_size,
@@ -23,7 +23,6 @@ from fla.utils.ascend_ub_manager import (
 )
 
 # Peak fp32 live set: b_h[BK,BV] + b_q,b_k,b_g[BK] + b_v,b_o,b_beta[BV].
-# Compiler multi-buffer (~3× analytical peak) is folded into mem_mult.
 _RECUR_MEM_MULT = 3.0
 _SAFETY_MARGIN = 0.80
 _FALLBACK_BV = 32
@@ -365,6 +364,6 @@ def fused_recurrent_kda_fwd_npu(
     for task_off in range(0, task_num, max_tasks):
         task_len = min(max_tasks, task_num - task_off)
         kernel_kwargs["TASK_OFFSET"] = task_off
-        fused_recurrent_kda_fwd_kernel_npu[(task_len,)](**kernel_kwargs)
+        fused_recurrent_kda_fwd_kernel_npu[(task_len,)](**ascend_compile_kwargs(), **kernel_kwargs)
 
     return out, final_state
