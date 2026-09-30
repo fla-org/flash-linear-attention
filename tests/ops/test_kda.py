@@ -575,12 +575,14 @@ def test_fused_recurrent_indexed_state(state_v_first, packed, index_stride, acce
     assert_close('indexed output', expected_output, output.reshape_as(expected_output), 0.002)
     pool_k_first = pool.transpose(-1, -2) if state_v_first else pool
     if state_output == 'inplace':
-        assert_close('updated pool', expected_pool, pool_k_first, 0.002)
         untouched = torch.ones(16, dtype=torch.bool, device=device)
         for sequence, length in enumerate(lengths):
             untouched[indices[sequence, :length].long()] = False
         if not torch.equal(original_state[untouched], pool_k_first[untouched]):
-            pytest.fail('Unaddressed state slots changed during indexed updates')
+            changed = (original_state != pool_k_first).flatten(1).any(1)
+            unexpected_slots = torch.nonzero(untouched & changed).flatten().tolist()
+            pytest.fail(f'Unaddressed state slots changed during indexed updates: {unexpected_slots}')
+        assert_close('updated pool', expected_pool, pool_k_first, 0.002)
         terminal_states = pool_k_first[indices[torch.arange(2, device=device),
                                                torch.tensor(lengths, device=device) - 1].long()]
     else:
