@@ -520,7 +520,8 @@ def test_fused_recurrent_vllm_decode(
 @pytest.mark.parametrize('accepted_tokens', [1, 2])
 @pytest.mark.parametrize('state_output', ['inplace', 'separate', 'none'])
 @pytest.mark.skipif(not (IS_NVIDIA or IS_NPU), reason='Indexed KDA requires CUDA or NPU')
-def test_fused_recurrent_indexed_state(state_v_first, packed, index_stride, accepted_tokens, state_output):
+def test_fused_recurrent_indexed_state(state_v_first, packed, index_stride, accepted_tokens, state_output, monkeypatch):
+    monkeypatch.setattr("fla.utils._testing.FLA_CI_ENV", False)
     torch.manual_seed(42)
     H, HV, K, V = 2, 4, 32, 24
     lengths = [2, 4] if packed else [3, 3]
