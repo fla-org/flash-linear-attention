@@ -582,7 +582,25 @@ def test_fused_recurrent_indexed_state(state_v_first, packed, index_stride, acce
             changed = (original_state != pool_k_first).flatten(1).any(1)
             unexpected_slots = torch.nonzero(untouched & changed).flatten().tolist()
             pytest.fail(f'Unaddressed state slots changed during indexed updates: {unexpected_slots}')
-        assert_close('updated pool', expected_pool, pool_k_first, 0.002)
+        try:
+            assert_close('updated pool', expected_pool, pool_k_first, 0.002)
+        except AssertionError:
+            for sequence, length in enumerate(lengths):
+                for token in range(length):
+                    slot = indices[sequence, token].item()
+                    error = (expected_pool[slot] - pool_k_first[slot]).abs()
+                    head_errors = error.amax(dim=(-2, -1)).tolist()
+                    head, offset = divmod(error.argmax().item(), K * V)
+                    key, value = divmod(offset, V)
+                    print(
+                        f'Indexed state sequence={sequence} token={token} slot={slot} '
+                        f'terminal={token == length - 1} head_max_abs={head_errors} '
+                        f'head={head} key={key} value={value} '
+                        f'expected={expected_pool[slot, head, key, value].item()} '
+                        f'actual={pool_k_first[slot, head, key, value].item()}',
+                        flush=True,
+                    )
+            raise
         terminal_states = pool_k_first[indices[torch.arange(2, device=device),
                                                torch.tensor(lengths, device=device) - 1].long()]
     else:
