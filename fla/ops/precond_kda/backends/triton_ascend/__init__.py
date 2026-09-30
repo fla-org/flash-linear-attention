@@ -41,6 +41,38 @@ class TritonAscendPrecondKDABackend(BaseBackend):
         from fla.ops.precond_kda.backends.triton_ascend.chunk import chunk_precond_kda_npu
         return chunk_precond_kda_npu(*args, **kwargs)
 
+    def chunk_precond_kda_fwd_intra_verifier(self, *args, **kwargs) -> tuple[bool, str | None]:
+        q = args[0] if args else kwargs.get('q')
+        return _verify_on_npu(q)
+
+    def chunk_precond_kda_fwd_intra(self, *args, **kwargs):
+        from fla.ops.precond_kda.backends.triton_ascend.chunk_intra import chunk_precond_kda_fwd_intra_npu
+        return chunk_precond_kda_fwd_intra_npu(*args, **kwargs)
+
+    def chunk_precond_kda_bwd_intra_verifier(self, *args, **kwargs) -> tuple[bool, str | None]:
+        q = args[0] if args else kwargs.get('q')
+        return _verify_on_npu(q)
+
+    def chunk_precond_kda_bwd_intra(self, *args, **kwargs):
+        from fla.ops.precond_kda.backends.triton_ascend.chunk_intra import chunk_precond_kda_bwd_intra_npu
+        return chunk_precond_kda_bwd_intra_npu(*args, **kwargs)
+
+    def chunk_precond_kda_bwd_dAv_verifier(self, *args, **kwargs) -> tuple[bool, str | None]:
+        q = args[0] if args else kwargs.get('q')
+        return _verify_on_npu(q)
+
+    def chunk_precond_kda_bwd_dAv(self, *args, **kwargs):
+        from fla.ops.precond_kda.backends.triton_ascend.chunk_bwd import chunk_precond_kda_bwd_dAv_npu
+        return chunk_precond_kda_bwd_dAv_npu(*args, **kwargs)
+
+    def chunk_precond_kda_bwd_wy_dqkg_verifier(self, *args, **kwargs) -> tuple[bool, str | None]:
+        q = args[0] if args else kwargs.get('q')
+        return _verify_on_npu(q)
+
+    def chunk_precond_kda_bwd_wy_dqkg(self, *args, **kwargs):
+        from fla.ops.precond_kda.backends.triton_ascend.chunk_bwd import chunk_precond_kda_bwd_wy_dqkg_npu
+        return chunk_precond_kda_bwd_wy_dqkg_npu(*args, **kwargs)
+
     def fused_recurrent_precond_kda_verifier(self, *args, **kwargs) -> tuple[bool, str | None]:
         q = args[0] if args else kwargs.get('q')
         k = args[1] if len(args) > 1 else kwargs.get('k')

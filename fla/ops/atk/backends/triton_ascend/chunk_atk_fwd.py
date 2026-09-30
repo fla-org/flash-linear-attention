@@ -368,6 +368,9 @@ def _atk_fwd_stages_npu(
         sa.stride(0), sa.stride(1), sa.stride(2),
         ac.stride(0), ac.stride(1), ac.stride(2), ac.stride(3),
         BK,
+        # num_stages=1: multi-buffering miscompiles this loop-carried scan
+        # under the CANN-bundled hivmc.
+        num_stages=1,
     )
 
     for grid, ci, off in _chunk_windows(chunk_indices, B, H, num_chunks):
