@@ -14,6 +14,26 @@ from fla.utils import IS_INTEL_ALCHEMIST, assert_close, check_shared_mem, device
 TOL = {torch.float16: 0.005, torch.bfloat16: 0.02}
 
 
+def naive_varlen(q, k, v, cu_seqlens, **kwargs):
+    o, rem = q.new_empty(*q.shape[:-1], v.shape[-1]), q.new_empty(q.shape[:-1])
+    for bos, eos in zip(cu_seqlens[:-1], cu_seqlens[1:], strict=False):
+        o[:, bos:eos], rem[:, bos:eos] = naive_stickbreaking_attn(q[:, bos:eos], k[:, bos:eos], v[:, bos:eos], **kwargs)
+    return o, rem
+
+
+def forward_backward(op, q, k, v, do, drem, **kwargs):
+    o, rem = op(q, k, v, **kwargs)
+    torch.autograd.backward((o, rem), (do, drem))
+    grads = [x.grad.clone() for x in (q, k, v)]
+    q.grad = k.grad = v.grad = None
+    return o, rem, *grads
+
+
+def assert_all_close(ref, tri, ratio):
+    for name, x, y in zip(("  o", "rem", " dq", " dk", " dv"), ref, tri, strict=True):
+        assert_close(name, x, y, ratio)
+
+
 @pytest.mark.parametrize('attend_current', [False, True])
 def test_naive_matches_definition(attend_current: bool):
     torch.manual_seed(42)
@@ -69,15 +89,15 @@ def test_parallel(
     if not check_shared_mem('hopper') and max(K, V) > 128:
         pytest.skip("Skipping test because global shared memory is not available")
 
-    q = torch.randn((B, T, HQ, K), dtype=dtype, device=device)
-    k = torch.randn((B, T, H, K), dtype=dtype, device=device)
-    v = torch.randn((B, T, H, V), dtype=dtype, device=device)
+    q = torch.randn((B, T, HQ, K), dtype=dtype, device=device).requires_grad_()
+    k = torch.randn((B, T, H, K), dtype=dtype, device=device).requires_grad_()
+    v = torch.randn((B, T, H, V), dtype=dtype, device=device).requires_grad_()
+    do = torch.randn((B, T, HQ, V), dtype=dtype, device=device)
+    drem = torch.randn((B, T, HQ), dtype=dtype, device=device)
 
-    ref_o, ref_rem = naive_stickbreaking_attn(q, k, v, scale=scale, attend_current=attend_current)
-    tri_o, tri_rem = parallel_stickbreaking_attn(q, k, v, scale=scale, attend_current=attend_current)
-
-    assert_close("  o", ref_o, tri_o, TOL[dtype])
-    assert_close("rem", ref_rem, tri_rem, TOL[dtype])
+    ref = forward_backward(naive_stickbreaking_attn, q, k, v, do, drem, scale=scale, attend_current=attend_current)
+    tri = forward_backward(parallel_stickbreaking_attn, q, k, v, do, drem, scale=scale, attend_current=attend_current)
+    assert_all_close(ref, tri, TOL[dtype])
 
 
 @pytest.mark.parametrize(
@@ -108,24 +128,17 @@ def test_parallel_varlen(
     cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
     dtype = torch.float16
     # seq-first required for inputs with variable lengths
-    q = torch.randn((1, T, HQ, D), dtype=dtype, device=device)
-    k = torch.randn((1, T, H, D), dtype=dtype, device=device)
-    v = torch.randn((1, T, H, D), dtype=dtype, device=device)
+    q = torch.randn((1, T, HQ, D), dtype=dtype, device=device).requires_grad_()
+    k = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
+    v = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
+    do = torch.randn((1, T, HQ, D), dtype=dtype, device=device)
+    drem = torch.randn((1, T, HQ), dtype=dtype, device=device)
 
-    ref_o = q.new_empty(1, T, HQ, D)
-    ref_rem = q.new_empty(1, T, HQ)
-    for bos, eos in zip(cu_seqlens[:-1], cu_seqlens[1:], strict=False):
-        ref_o[:, bos:eos], ref_rem[:, bos:eos] = naive_stickbreaking_attn(
-            q=q[:, bos:eos],
-            k=k[:, bos:eos],
-            v=v[:, bos:eos],
-            attend_current=attend_current,
-        )
+    kwargs = dict(cu_seqlens=cu_seqlens, attend_current=attend_current)
 
-    tri_o, tri_rem = parallel_stickbreaking_attn(q=q, k=k, v=v, attend_current=attend_current, cu_seqlens=cu_seqlens)
-
-    assert_close("  o", ref_o, tri_o, 0.005)
-    assert_close("rem", ref_rem, tri_rem, 0.005)
+    ref = forward_backward(naive_varlen, q, k, v, do, drem, **kwargs)
+    tri = forward_backward(parallel_stickbreaking_attn, q, k, v, do, drem, **kwargs)
+    assert_all_close(ref, tri, 0.005)
 
 
 @pytest.mark.parametrize(
@@ -157,35 +170,37 @@ def test_parallel_long_range(
     # zero-mean logits use up the stick within a few dozen keys, hiding the key blocks past the first one below the diagonal;
     # a negative logit offset keeps sigmoid(z) small, so the stick lasts across the sequence
     q[..., 0], k[..., 0] = 8, -8
-    scale = 0.1
+    q, k, v = (x.requires_grad_() for x in (q, k, v))
+    do = torch.randn((B, T, HQ, D), dtype=dtype, device=device)
+    drem = torch.randn((B, T, HQ), dtype=dtype, device=device)
+    kwargs = dict(scale=0.1, attend_current=attend_current)
 
     if cu_seqlens is None:
-        ref_o, ref_rem = naive_stickbreaking_attn(q, k, v, scale=scale, attend_current=attend_current)
+        ref = forward_backward(naive_stickbreaking_attn, q, k, v, do, drem, **kwargs)
     else:
-        ref_o, ref_rem = q.new_empty(B, T, HQ, D), q.new_empty(B, T, HQ)
-        for bos, eos in zip(cu_seqlens[:-1], cu_seqlens[1:], strict=False):
-            ref_o[:, bos:eos], ref_rem[:, bos:eos] = naive_stickbreaking_attn(
-                q=q[:, bos:eos],
-                k=k[:, bos:eos],
-                v=v[:, bos:eos],
-                scale=scale,
-                attend_current=attend_current,
-            )
         cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
-    tri_o, tri_rem = parallel_stickbreaking_attn(q, k, v, scale=scale, attend_current=attend_current, cu_seqlens=cu_seqlens)
+        ref = forward_backward(naive_varlen, q, k, v, do, drem, cu_seqlens=cu_seqlens, **kwargs)
+    tri = forward_backward(parallel_stickbreaking_attn, q, k, v, do, drem, cu_seqlens=cu_seqlens, **kwargs)
+    assert_all_close(ref, tri, TOL[dtype])
 
-    assert_close("  o", ref_o, tri_o, TOL[dtype])
-    assert_close("rem", ref_rem, tri_rem, TOL[dtype])
 
+@pytest.mark.parametrize('cu_seqlens', [None, [0, 100, 1100, 2000]], ids=['dense', 'varlen'])
+def test_parallel_backward_deterministic(cu_seqlens: list[int] | None):
+    torch.manual_seed(42)
+    T, H, HQ, D, dtype = 2000, 2, 4, 64, torch.bfloat16
+    q = torch.randn((1, T, HQ, D), dtype=dtype, device=device).requires_grad_()
+    k = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
+    v = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
+    do = torch.randn((1, T, HQ, D), dtype=dtype, device=device)
+    drem = torch.randn((1, T, HQ), dtype=dtype, device=device)
+    if cu_seqlens is not None:
+        cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
 
-def test_parallel_backward_not_implemented():
-    q = torch.randn((1, 64, 2, 64), dtype=torch.float16, device=device).requires_grad_()
-    k = torch.randn((1, 64, 2, 64), dtype=torch.float16, device=device).requires_grad_()
-    v = torch.randn((1, 64, 2, 64), dtype=torch.float16, device=device).requires_grad_()
-
-    o, _ = parallel_stickbreaking_attn(q, k, v)
-    with pytest.raises(NotImplementedError, match="Backward pass is not implemented"):
-        o.sum().backward()
+    # no atomics: two runs must agree bit for bit
+    first = forward_backward(parallel_stickbreaking_attn, q, k, v, do, drem, cu_seqlens=cu_seqlens)
+    second = forward_backward(parallel_stickbreaking_attn, q, k, v, do, drem, cu_seqlens=cu_seqlens)
+    for x, y in zip(first, second, strict=True):
+        assert torch.equal(x, y)
 
 
 @pytest.mark.parametrize("op", [naive_stickbreaking_attn, parallel_stickbreaking_attn], ids=["naive", "parallel"])
@@ -197,6 +212,16 @@ def test_parallel_rejects_invalid_gqa_head_counts(op, HQ, H):
 
     with pytest.raises(ValueError, match="must be divisible"):
         op(q=q, k=k, v=v)
+
+
+@pytest.mark.parametrize(("K", "V", "match"), [(257, 64, "key dimension"), (64, 257, "value dimension")], ids=["K", "V"])
+def test_parallel_rejects_head_dims_above_256(K, V, match):
+    q = torch.empty(1, 8, 2, K)
+    k = torch.empty_like(q)
+    v = torch.empty(1, 8, 2, V)
+
+    with pytest.raises(ValueError, match=match):
+        parallel_stickbreaking_attn(q=q, k=k, v=v)
 
 
 def test_parallel_rejects_batched_varlen():
