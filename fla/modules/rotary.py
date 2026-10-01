@@ -79,9 +79,7 @@ def rotary_embedding_kernel(
         x = x + i_n * T*H*D + i_h * D
         y = y + i_n * T*H*D + i_h * D
 
-    if i_t * BT >= T:
-        return
-
+    # Omit `if i_t * BT >= T: return` (upstream): triton-ext Apple backend bug, reported.
     o_t = i_t * BT + tl.arange(0, BT)
     if not IS_SEQLEN_OFFSETS_TENSOR:
         o_cs = o_t + seq_offsets

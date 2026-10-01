@@ -17,7 +17,7 @@ from fla.ops.kda.fused_recurrent import fused_recurrent_kda_fwd
 from fla.ops.kda.gate import fused_kda_gate, naive_kda_gate, naive_kda_lowerbound_gate
 from fla.ops.kda.naive import naive_chunk_kda, naive_recurrent_kda
 from fla.ops.utils.cache import FLA_CACHE_MODE
-from fla.utils import IS_INTEL_ALCHEMIST, IS_NPU, IS_NVIDIA, assert_close, device
+from fla.utils import IS_INTEL_ALCHEMIST, IS_MPS, IS_NPU, IS_NVIDIA, assert_close, device, device_torch_lib
 
 
 @pytest.mark.parametrize(
@@ -776,6 +776,10 @@ def test_chunk_use_beta_sigmoid_in_kernel(
     do = torch.randn_like(v)
     dht = torch.randn_like(h0)
 
+    # MPS unified memory: T8192×H96 runs ref+tri back-to-back OOM if graphs are retained.
+    mps_stress = IS_MPS and T >= 8192 and H >= 96
+    retain_graph = not mps_stress
+
     ref, ref_ht = chunk_kda(
         q=F.normalize(q.clone(), p=2, dim=-1),
         k=F.normalize(k.clone(), p=2, dim=-1),
@@ -786,11 +790,13 @@ def test_chunk_use_beta_sigmoid_in_kernel(
         initial_state=h0.clone(),
         output_final_state=True,
     )
-    ((ref * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=True)
+    ((ref * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=retain_graph)
     ref_dq, ref_dk, ref_dv, ref_dg, ref_db, ref_dh0 = (
         q.grad, k.grad, v.grad, g.grad, beta_post.grad, h0.grad
     )
     q.grad = k.grad = v.grad = g.grad = beta_post.grad = h0.grad = None
+    if mps_stress and hasattr(device_torch_lib, "empty_cache"):
+        device_torch_lib.empty_cache()
 
     tri, tri_ht = chunk_kda(
         q=F.normalize(q.clone(), p=2, dim=-1),
@@ -804,7 +810,7 @@ def test_chunk_use_beta_sigmoid_in_kernel(
         use_beta_sigmoid_in_kernel=True,
         allow_neg_eigval=allow_neg_eigval,
     )
-    ((tri * do).sum() + (tri_ht * dht).sum()).backward(retain_graph=True)
+    ((tri * do).sum() + (tri_ht * dht).sum()).backward(retain_graph=retain_graph)
     tri_dq, tri_dk, tri_dv, tri_dg, tri_db_raw, tri_dh0 = (
         q.grad, k.grad, v.grad, g.grad, beta_raw.grad, h0.grad
     )

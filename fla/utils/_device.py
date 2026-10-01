@@ -22,6 +22,10 @@ from packaging import version as package_version
 logger = logging.getLogger(__name__)
 
 
+with contextlib.suppress(ImportError):
+    import triton_apple_backend  # noqa: F401 - registers AppleGPU when installed
+
+
 @lru_cache(maxsize=1)
 def check_environments():
     """
@@ -81,7 +85,10 @@ def check_pytorch_version(version_s: str = '2.4') -> bool:
 @cache
 def get_multiprocessor_count(tensor_idx: int = 0, *, use_aicore: bool = False) -> int:
     try:
-        return triton.runtime.driver.active.utils.get_device_properties(tensor_idx)['multiprocessor_count']
+        props = triton.runtime.driver.active.utils.get_device_properties(tensor_idx)
+        if 'multiprocessor_count' in props:
+            return props['multiprocessor_count']
+        return props['multiprocessorCount']
     except Exception:
         # Maybe we use a NPU device.
         try:
@@ -95,12 +102,16 @@ def get_multiprocessor_count(tensor_idx: int = 0, *, use_aicore: bool = False) -
 
 @cache
 def get_device_capability(device_index: int = 0) -> tuple[int, int]:
+    if not torch.cuda.is_available():
+        return (0, 0)
     major, minor = torch.cuda.get_device_capability(device_index)
     return int(major), int(minor)
 
 
 @cache
 def get_device_smem_optin(device_index: int = 0) -> int:
+    if not torch.cuda.is_available():
+        return 0
     props = torch.cuda.get_device_properties(device_index)
     return int(getattr(props, 'shared_memory_per_block_optin', props.shared_memory_per_block))
 
@@ -125,8 +136,8 @@ def get_device_arch() -> str:
 
 
 def map_triton_backend_to_torch_device() -> str:
-    backend = get_available_device()        # 'cuda' | 'hip' | 'xpu' | 'cpu' | ...
-    return {'cuda': 'cuda', 'hip': 'cuda', 'xpu': 'xpu'}.get(backend, backend)
+    backend = get_available_device()        # 'cuda' | 'hip' | 'xpu' | 'mps' | 'cpu' | ...
+    return {'cuda': 'cuda', 'hip': 'cuda', 'xpu': 'xpu', 'mps': 'mps'}.get(backend, backend)
 
 
 # For AMD GPUs, the triton backend is 'hip', while for Nvidia GPUs, the triton backend is 'cuda'.
@@ -145,6 +156,8 @@ IS_INTEL = (device_platform == 'xpu')
 IS_INTEL_ALCHEMIST = (IS_INTEL and 'Intel(R) Arc(TM) A' in torch.xpu.get_device_name(0))
 
 IS_NPU = (device_platform == 'npu')
+
+IS_MPS = (device_platform == 'mps')
 
 IS_NVIDIA = (device_platform == 'cuda')
 IS_NVIDIA_HOPPER = (
@@ -234,7 +247,7 @@ def check_shared_mem(arch: str = "none", tensor_idx: int = 0) -> bool:
 
 
 if check_pytorch_version('2.4'):
-    if device == 'cpu':
+    if device == 'cpu' and torch.cuda.is_available():
         device = 'cuda'
         device_torch_lib = getattr(torch, device)
     autocast_custom_fwd = functools.partial(torch.amp.custom_fwd, device_type=device)
