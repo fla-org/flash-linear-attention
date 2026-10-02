@@ -12,12 +12,10 @@ import triton.language as tl
 from fla.ops.utils import prepare_chunk_indices, prepare_lens
 from fla.ops.utils.op import exp2
 from fla.ops.utils.softplus import softplus2
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, check_shared_mem, contiguous
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, check_shared_mem, input_guard
 
 
-@triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
-})
+@triton.heuristics({'IS_VARLEN': lambda args: args['cu_seqlens'] is not None})
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
@@ -76,11 +74,10 @@ def parallel_stickbreaking_attn_fwd_kernel(
     b_q = tl.load(p_q, mask=m_q[:, None] & (o_d[None, :] < K), other=0.0)
     # [BT, BV]
     b_o = tl.zeros([BT, BV], dtype=tl.float32)
-    # [BT], log2 of the stick left over by the keys visited so far
+    # [BT]
     b_acc = tl.zeros([BT], dtype=tl.float32)
 
-    # keys are visited nearest first, so a key block only needs the stick left over by the blocks after it.
-    # the first loop covers the diagonal block, where the causal mask applies
+    # visit nearer blocks first to carry their remaining stick into earlier blocks
     for i_s in range(0, BT, BS):
         # [BS]
         o_k = i_t * BT + BT - BS - i_s + tl.arange(0, BS)
@@ -98,14 +95,13 @@ def parallel_stickbreaking_attn_fwd_kernel(
             m_s = (o_q[:, None] > o_k[None, :]) & m_k[None, :]
         # [BT, BS]
         b_s = tl.dot(b_q, b_k) * scale * RCP_LN2
-        # log2(1 - sigmoid(z)), zeroed for masked keys so they take no part of the stick
+        # masked keys must leave the remaining stick unchanged
         b_lb = tl.where(m_s, -softplus2(b_s), 0.)
-        # log2(A) = b_s + reverse_cumsum(b_lb) + b_acc: log2(sigmoid(z)), then the stick left by the nearer keys
         b_p = tl.where(m_s, exp2(b_s + tl.cumsum(b_lb, axis=1, reverse=True) + b_acc[:, None]), 0.)
         b_o += tl.dot(b_p.to(b_v.dtype), b_v)
         b_acc += tl.sum(b_lb, 1)
 
-    # the blocks below the diagonal are fully visible, walked from the nearest one down to the first
+    # blocks below the diagonal need no causal mask
     for i_s in range(BT, (i_t + 1) * BT, BS):
         # [BS]
         o_k = (i_t + 1) * BT - BS - i_s + tl.arange(0, BS)
@@ -130,7 +126,7 @@ def parallel_stickbreaking_attn_fwd_kernel(
 
 @triton.jit
 def _stickbreaking_attn_tile(b_s, b_acc, m_s, AXIS: tl.constexpr):
-    # A for one tile whose keys run along AXIS, given b_acc, the log2 stick left by the nearer key blocks
+    # the scan axis follows keys, which are transposed in the dkv kernel
     b_lb = tl.where(m_s, -softplus2(b_s), 0.)
     b_p = tl.where(m_s, exp2(b_s + tl.cumsum(b_lb, axis=AXIS, reverse=True) + b_acc), 0.)
     return b_lb, b_p
@@ -138,16 +134,14 @@ def _stickbreaking_attn_tile(b_s, b_acc, m_s, AXIS: tl.constexpr):
 
 @triton.jit
 def _stickbreaking_attn_bwd_tile(b_s, b_lb, b_p, b_dp, b_sa, b_c, m_s, AXIS: tl.constexpr):
-    # dz = a - beta * (c - sum of a over the nearer keys), with a = A * <dO, v>
+    # see README.md for the logit gradient formula
     b_a = b_p * b_dp
     b_near = tl.cumsum(b_a, axis=AXIS, reverse=True) - b_a + b_sa
     b_dz = tl.where(m_s, b_a - exp2(b_s + b_lb) * (b_c - b_near), 0.)
     return b_a, b_dz
 
 
-@triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
-})
+@triton.heuristics({'IS_VARLEN': lambda args: args['cu_seqlens'] is not None})
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
@@ -215,7 +209,7 @@ def parallel_stickbreaking_attn_bwd_kernel_dq(
     b_acc = tl.zeros([BS], dtype=tl.float32)
     b_sa = tl.zeros([BS], dtype=tl.float32)
 
-    # first walk, nearest key block first: the row totals, and the snapshots the dkv pass restarts from
+    # snapshots let the dkv kernel reconstruct each tile independently
     for i_s in range(0, (i_t + 1) * BS, BS):
         i_k = i_t - i_s // BS
         o_k = i_k * BS + tl.arange(0, BS)
@@ -235,15 +229,14 @@ def parallel_stickbreaking_attn_bwd_kernel_dq(
             m_s = (o_q[:, None] > o_k[None, :]) & m_k[None, :]
         # [BS, BS]
         b_s = tl.dot(b_q, b_k) * scale * RCP_LN2
-        b_lb, b_p = _stickbreaking_attn_tile(b_s, b_acc[:, None], m_s, 1)
+        b_lb, b_p = _stickbreaking_attn_tile(b_s=b_s, b_acc=b_acc[:, None], m_s=m_s, AXIS=1)
         b_acc += tl.sum(b_lb, 1)
         b_sa += tl.sum(b_p * tl.dot(b_do, b_v), 1)
 
-    # c = sum_j A_ij <dO_i, v_j> + drem_i * rem_i, from the backward's own fp32 sums rather than from the stored o
+    # recompute row totals in fp32 to avoid cancellation against rounded outputs
     b_c = b_sa + tl.load(drem + (bos + o_q) * HQ + i_hq, mask=m_q, other=0.).to(tl.float32) * exp2(b_acc)
     tl.store(c + (bos + o_q) * HQ + i_hq, b_c, mask=m_q)
 
-    # second walk: dq
     b_acc = tl.zeros([BS], dtype=tl.float32)
     b_sa = tl.zeros([BS], dtype=tl.float32)
     # [BS, BK]
@@ -266,8 +259,17 @@ def parallel_stickbreaking_attn_bwd_kernel_dq(
         # [BS, BS]
         b_s = tl.dot(b_q, b_k) * scale * RCP_LN2
         b_dp = tl.dot(b_do, b_v)
-        b_lb, b_p = _stickbreaking_attn_tile(b_s, b_acc[:, None], m_s, 1)
-        b_a, b_dz = _stickbreaking_attn_bwd_tile(b_s, b_lb, b_p, b_dp, b_sa[:, None], b_c[:, None], m_s, 1)
+        b_lb, b_p = _stickbreaking_attn_tile(b_s=b_s, b_acc=b_acc[:, None], m_s=m_s, AXIS=1)
+        b_a, b_dz = _stickbreaking_attn_bwd_tile(
+            b_s=b_s,
+            b_lb=b_lb,
+            b_p=b_p,
+            b_dp=b_dp,
+            b_sa=b_sa[:, None],
+            b_c=b_c[:, None],
+            m_s=m_s,
+            AXIS=1,
+        )
         b_dq += tl.dot(b_dz.to(b_k.dtype), tl.trans(b_k))
         b_acc += tl.sum(b_lb, 1)
         b_sa += tl.sum(b_a, 1)
@@ -275,9 +277,7 @@ def parallel_stickbreaking_attn_bwd_kernel_dq(
     tl.store(p_dq, (b_dq * scale).to(p_dq.dtype.element_ty), mask=m_q[:, None] & (o_d[None, :] < K))
 
 
-@triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
-})
+@triton.heuristics({'IS_VARLEN': lambda args: args['cu_seqlens'] is not None})
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
@@ -315,7 +315,7 @@ def parallel_stickbreaking_attn_bwd_kernel_dkv(
     ATTEND_CURRENT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    # one program sums dk and dv for its key block over every query that sees it, in a fixed order: no atomics
+    # each key block has one owner so gradient accumulation needs no atomics
     i_s, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
 
@@ -367,11 +367,20 @@ def parallel_stickbreaking_attn_bwd_kernel_dkv(
                 m_s = (o_k[:, None] <= o_q[None, :]) & m_k[:, None] & m_q[None, :]
             else:
                 m_s = (o_k[:, None] < o_q[None, :]) & m_k[:, None] & m_q[None, :]
-            # [BS, BT], keys along axis 0 as in parallel_attn_bwd_kernel_dkv
+            # [BS, BT]
             b_s = tl.dot(b_k, tl.trans(b_q)) * scale * RCP_LN2
             b_dp = tl.dot(b_v, tl.trans(b_do))
-            b_lb, b_p = _stickbreaking_attn_tile(b_s, b_acc[None, :], m_s, 0)
-            b_a, b_dz = _stickbreaking_attn_bwd_tile(b_s, b_lb, b_p, b_dp, b_sa[None, :], b_c[None, :], m_s, 0)
+            b_lb, b_p = _stickbreaking_attn_tile(b_s=b_s, b_acc=b_acc[None, :], m_s=m_s, AXIS=0)
+            b_a, b_dz = _stickbreaking_attn_bwd_tile(
+                b_s=b_s,
+                b_lb=b_lb,
+                b_p=b_p,
+                b_dp=b_dp,
+                b_sa=b_sa[None, :],
+                b_c=b_c[None, :],
+                m_s=m_s,
+                AXIS=0,
+            )
             # [BS, BV]
             b_dv = tl.dot(b_p.to(b_do.dtype), b_do, b_dv)
             # [BS, BK]
@@ -393,13 +402,13 @@ def parallel_stickbreaking_attn_fwd(
     HQ = q.shape[2]
     G = HQ // H
     BT = 64
-    BS = 64 if check_shared_mem('hopper', q.device.index) else 32
+    BS = 64 if check_shared_mem(arch='hopper', tensor_idx=q.device.index) else 32
     BK = max(16, triton.next_power_of_2(K))
     BV = min(128, max(16, triton.next_power_of_2(V)))
     NV = triton.cdiv(V, BV)
     assert BT % BS == 0
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    chunk_indices = prepare_chunk_indices(cu_seqlens=cu_seqlens, chunk_size=BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     o = torch.empty(B, T, HQ, V, dtype=v.dtype, device=q.device)
@@ -442,21 +451,21 @@ def parallel_stickbreaking_attn_bwd(
     B, T, H, K, V = *k.shape, v.shape[-1]
     HQ = q.shape[2]
     G = HQ // H
-    # the dq pass takes one key block per query block, so its query blocks are BS rows as well
-    BS = 64 if check_shared_mem('hopper', q.device.index) else 32
+    # the dq query blocks match the snapshot key blocks
+    BS = 64 if check_shared_mem(arch='hopper', tensor_idx=q.device.index) else 32
     BT = 32
     BK = max(16, triton.next_power_of_2(K))
     BV = max(16, triton.next_power_of_2(V))
 
     if cu_seqlens is not None:
-        chunk_indices = prepare_chunk_indices(cu_seqlens, BS)
+        chunk_indices = prepare_chunk_indices(cu_seqlens=cu_seqlens, chunk_size=BS)
         NT = len(chunk_indices)
-        NS = triton.cdiv(int(prepare_lens(cu_seqlens).max()), BS)
+        NS = triton.cdiv(int(prepare_lens(cu_seqlens=cu_seqlens).max()), BS)
     else:
         chunk_indices = None
         NT = NS = triton.cdiv(T, BS)
 
-    # per (query row, key block), on entry: log2 of the stick left, and the sum of A * <dO, v> over the nearer keys
+    # snapshots store the remaining stick log and weighted gradient sum before each key block
     acc = q.new_empty(B, T, HQ, NS, dtype=torch.float)
     sa = q.new_empty(B, T, HQ, NS, dtype=torch.float)
     c = q.new_empty(B, T, HQ, dtype=torch.float)
@@ -520,7 +529,7 @@ def parallel_stickbreaking_attn_bwd(
 class StickBreakingAttentionFunction(torch.autograd.Function):
 
     @staticmethod
-    @contiguous
+    @input_guard
     @autocast_custom_fwd
     def forward(ctx, q, k, v, scale, attend_current, cu_seqlens):
         o, rem = parallel_stickbreaking_attn_fwd(
@@ -538,7 +547,7 @@ class StickBreakingAttentionFunction(torch.autograd.Function):
         return o.to(q.dtype), rem
 
     @staticmethod
-    @contiguous
+    @input_guard
     @autocast_custom_bwd
     def backward(ctx, do, drem):
         q, k, v = ctx.saved_tensors
@@ -574,15 +583,13 @@ def parallel_stickbreaking_attn(
 
     Args:
         q (torch.Tensor):
-            queries of shape `[B, T, HQ, K]`.
+            Queries of shape `[B, T, HQ, K]`.
         k (torch.Tensor):
-            keys of shape `[B, T, H, K]`.
-            GQA will be applied if HQ is divisible by H.
+            Keys of shape `[B, T, H, K]`. GQA is applied if HQ is divisible by H.
         v (torch.Tensor):
-            values of shape `[B, T, H, V]`.
+            Values of shape `[B, T, H, V]`.
         scale (float, Optional):
-            Scale factor for attention scores.
-            If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
+            Scale factor for attention scores. Default: `1 / sqrt(K)`.
         attend_current (bool, Optional):
             Whether a query also attends to the key at its own position.
             If `False`, query `i` only sees keys `j < i`, and the first query outputs zeros. Default: `False`.

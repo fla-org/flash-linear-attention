@@ -26,11 +26,11 @@ def naive_stickbreaking_attn(
 
     Args:
         q (torch.Tensor):
-            queries of shape `[B, T, HQ, K]`.
+            Queries of shape `[B, T, HQ, K]`.
         k (torch.Tensor):
-            keys of shape `[B, T, H, K]`. GQA is applied if HQ is divisible by H.
+            Keys of shape `[B, T, H, K]`. GQA is applied if HQ is divisible by H.
         v (torch.Tensor):
-            values of shape `[B, T, H, V]`.
+            Values of shape `[B, T, H, V]`.
         scale (float, Optional):
             Scale factor for the attention logits. Default: `1 / sqrt(K)`.
         attend_current (bool, Optional):
@@ -57,9 +57,8 @@ def naive_stickbreaking_attn(
 
     i = torch.arange(T, device=q.device)
     mask = i[None, :] <= i[:, None] if attend_current else i[None, :] < i[:, None]
-    # log(1 - beta) of every visible key, and 0 elsewhere so masked keys use none of the stick
+    # masked keys must leave the remaining stick unchanged
     log_om_beta = F.logsigmoid(-z).masked_fill(~mask, 0.)
-    # log(beta_ij) plus the stick used by the keys strictly between j and i
     log_att = F.logsigmoid(z) + log_om_beta.flip(-1).cumsum(-1).flip(-1) - log_om_beta
     att = log_att.masked_fill(~mask, float('-inf')).exp()
 

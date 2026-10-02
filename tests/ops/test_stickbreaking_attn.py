@@ -14,24 +14,24 @@ from fla.utils import IS_INTEL_ALCHEMIST, assert_close, check_shared_mem, device
 TOL = {torch.float16: 0.005, torch.bfloat16: 0.02}
 
 
-def naive_varlen(q, k, v, cu_seqlens, **kwargs):
+def _naive_varlen(q, k, v, cu_seqlens, **kwargs):
     o, rem = q.new_empty(*q.shape[:-1], v.shape[-1]), q.new_empty(q.shape[:-1])
     for bos, eos in zip(cu_seqlens[:-1], cu_seqlens[1:], strict=False):
-        o[:, bos:eos], rem[:, bos:eos] = naive_stickbreaking_attn(q[:, bos:eos], k[:, bos:eos], v[:, bos:eos], **kwargs)
+        o[:, bos:eos], rem[:, bos:eos] = naive_stickbreaking_attn(q=q[:, bos:eos], k=k[:, bos:eos], v=v[:, bos:eos], **kwargs)
     return o, rem
 
 
-def forward_backward(op, q, k, v, do, drem, **kwargs):
-    o, rem = op(q, k, v, **kwargs)
+def _forward_backward(op, q, k, v, do, drem, **kwargs):
+    o, rem = op(q=q, k=k, v=v, **kwargs)
     torch.autograd.backward((o, rem), (do, drem))
     grads = [x.grad.clone() for x in (q, k, v)]
     q.grad = k.grad = v.grad = None
     return o, rem, *grads
 
 
-def assert_all_close(ref, tri, ratio):
+def _assert_all_close(ref, tri, ratio):
     for name, x, y in zip(("  o", "rem", " dq", " dk", " dv"), ref, tri, strict=True):
-        assert_close(name, x, y, ratio)
+        assert_close(prefix=name, ref=x, tri=y, ratio=ratio)
 
 
 @pytest.mark.parametrize('attend_current', [False, True])
@@ -43,7 +43,6 @@ def test_naive_matches_definition(attend_current: bool):
     v = torch.randn((B, T, H, D), dtype=torch.float64, device=device)
     scale = D ** -0.5
 
-    # A_ij = beta_ij * prod_l (1 - beta_il) over the visible keys l after j, written out key by key
     beta = torch.einsum('bqhd,bkhd->bhqk', q, k).mul(scale).sigmoid()
     att = torch.zeros_like(beta)
     for i in range(T):
@@ -54,7 +53,7 @@ def test_naive_matches_definition(attend_current: bool):
     ref_o = torch.einsum('bhqk,bkhd->bqhd', att, v)
     ref_rem = (1 - att.sum(-1)).transpose(1, 2)
 
-    o, rem = naive_stickbreaking_attn(q, k, v, scale=scale, attend_current=attend_current)
+    o, rem = naive_stickbreaking_attn(q=q, k=k, v=v, scale=scale, attend_current=attend_current)
     torch.testing.assert_close(o, ref_o, rtol=1e-5, atol=1e-5)
     torch.testing.assert_close(rem, ref_rem, rtol=1e-5, atol=1e-5)
 
@@ -73,7 +72,7 @@ def test_naive_matches_definition(attend_current: bool):
         ]
     ],
 )
-@pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16], ids=['fp16', 'bf16'])
 def test_parallel(
     B: int,
     T: int,
@@ -86,8 +85,8 @@ def test_parallel(
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
-    if not check_shared_mem('hopper') and max(K, V) > 128:
-        pytest.skip("Skipping test because global shared memory is not available")
+    if not check_shared_mem(arch='hopper') and max(K, V) > 128:
+        pytest.skip("This test requires Hopper-class shared memory for head dimensions above 128.")
 
     q = torch.randn((B, T, HQ, K), dtype=dtype, device=device).requires_grad_()
     k = torch.randn((B, T, H, K), dtype=dtype, device=device).requires_grad_()
@@ -95,9 +94,27 @@ def test_parallel(
     do = torch.randn((B, T, HQ, V), dtype=dtype, device=device)
     drem = torch.randn((B, T, HQ), dtype=dtype, device=device)
 
-    ref = forward_backward(naive_stickbreaking_attn, q, k, v, do, drem, scale=scale, attend_current=attend_current)
-    tri = forward_backward(parallel_stickbreaking_attn, q, k, v, do, drem, scale=scale, attend_current=attend_current)
-    assert_all_close(ref, tri, TOL[dtype])
+    ref = _forward_backward(
+        op=naive_stickbreaking_attn,
+        q=q,
+        k=k,
+        v=v,
+        do=do,
+        drem=drem,
+        scale=scale,
+        attend_current=attend_current,
+    )
+    tri = _forward_backward(
+        op=parallel_stickbreaking_attn,
+        q=q,
+        k=k,
+        v=v,
+        do=do,
+        drem=drem,
+        scale=scale,
+        attend_current=attend_current,
+    )
+    _assert_all_close(ref=ref, tri=tri, ratio=TOL[dtype])
 
 
 @pytest.mark.parametrize(
@@ -111,23 +128,13 @@ def test_parallel(
         ]
     ],
 )
-@pytest.mark.skipif(
-    IS_INTEL_ALCHEMIST,
-    reason="Intel Triton Failure",
-)
+@pytest.mark.skipif(IS_INTEL_ALCHEMIST, reason="Intel Triton Failure")
 @pytest.mark.smoke
-def test_parallel_varlen(
-    H: int,
-    HQ: int,
-    D: int,
-    cu_seqlens: list[int],
-    attend_current: bool,
-):
+def test_parallel_varlen(H: int, HQ: int, D: int, cu_seqlens: list[int], attend_current: bool):
     torch.manual_seed(42)
     T = cu_seqlens[-1]
     cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
     dtype = torch.float16
-    # seq-first required for inputs with variable lengths
     q = torch.randn((1, T, HQ, D), dtype=dtype, device=device).requires_grad_()
     k = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
     v = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
@@ -136,9 +143,9 @@ def test_parallel_varlen(
 
     kwargs = dict(cu_seqlens=cu_seqlens, attend_current=attend_current)
 
-    ref = forward_backward(naive_varlen, q, k, v, do, drem, **kwargs)
-    tri = forward_backward(parallel_stickbreaking_attn, q, k, v, do, drem, **kwargs)
-    assert_all_close(ref, tri, 0.005)
+    ref = _forward_backward(op=_naive_varlen, q=q, k=k, v=v, do=do, drem=drem, **kwargs)
+    tri = _forward_backward(op=parallel_stickbreaking_attn, q=q, k=k, v=v, do=do, drem=drem, **kwargs)
+    _assert_all_close(ref=ref, tri=tri, ratio=0.005)
 
 
 @pytest.mark.parametrize(
@@ -152,7 +159,7 @@ def test_parallel_varlen(
         ]
     ],
 )
-@pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16], ids=['fp16', 'bf16'])
 def test_parallel_long_range(
     B: int,
     T: int,
@@ -167,8 +174,7 @@ def test_parallel_long_range(
     q = torch.randn((B, T, HQ, D), dtype=dtype, device=device)
     k = torch.randn((B, T, H, D), dtype=dtype, device=device)
     v = torch.randn((B, T, H, D), dtype=dtype, device=device)
-    # zero-mean logits use up the stick within a few dozen keys, hiding the key blocks past the first one below the diagonal;
-    # a negative logit offset keeps sigmoid(z) small, so the stick lasts across the sequence
+    # negative logits keep the stick alive across key blocks, exposing long-range errors
     q[..., 0], k[..., 0] = 8, -8
     q, k, v = (x.requires_grad_() for x in (q, k, v))
     do = torch.randn((B, T, HQ, D), dtype=dtype, device=device)
@@ -176,12 +182,12 @@ def test_parallel_long_range(
     kwargs = dict(scale=0.1, attend_current=attend_current)
 
     if cu_seqlens is None:
-        ref = forward_backward(naive_stickbreaking_attn, q, k, v, do, drem, **kwargs)
+        ref = _forward_backward(op=naive_stickbreaking_attn, q=q, k=k, v=v, do=do, drem=drem, **kwargs)
     else:
         cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
-        ref = forward_backward(naive_varlen, q, k, v, do, drem, cu_seqlens=cu_seqlens, **kwargs)
-    tri = forward_backward(parallel_stickbreaking_attn, q, k, v, do, drem, cu_seqlens=cu_seqlens, **kwargs)
-    assert_all_close(ref, tri, TOL[dtype])
+        ref = _forward_backward(op=_naive_varlen, q=q, k=k, v=v, do=do, drem=drem, cu_seqlens=cu_seqlens, **kwargs)
+    tri = _forward_backward(op=parallel_stickbreaking_attn, q=q, k=k, v=v, do=do, drem=drem, cu_seqlens=cu_seqlens, **kwargs)
+    _assert_all_close(ref=ref, tri=tri, ratio=TOL[dtype])
 
 
 @pytest.mark.parametrize('cu_seqlens', [None, [0, 100, 1100, 2000]], ids=['dense', 'varlen'])
@@ -196,9 +202,8 @@ def test_parallel_backward_deterministic(cu_seqlens: list[int] | None):
     if cu_seqlens is not None:
         cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
 
-    # no atomics: two runs must agree bit for bit
-    first = forward_backward(parallel_stickbreaking_attn, q, k, v, do, drem, cu_seqlens=cu_seqlens)
-    second = forward_backward(parallel_stickbreaking_attn, q, k, v, do, drem, cu_seqlens=cu_seqlens)
+    first = _forward_backward(op=parallel_stickbreaking_attn, q=q, k=k, v=v, do=do, drem=drem, cu_seqlens=cu_seqlens)
+    second = _forward_backward(op=parallel_stickbreaking_attn, q=q, k=k, v=v, do=do, drem=drem, cu_seqlens=cu_seqlens)
     for x, y in zip(first, second, strict=True):
         assert torch.equal(x, y)
 

@@ -5,8 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 #
-# Stick-breaking attention (Tan et al., https://arxiv.org/abs/2410.17980).
-# Reference implementation: https://github.com/shawntan/stickbreaking-attention.
+# reference: Tan et al., https://github.com/shawntan/stickbreaking-attention
 
 from .naive import naive_stickbreaking_attn
 from .parallel import parallel_stickbreaking_attn
