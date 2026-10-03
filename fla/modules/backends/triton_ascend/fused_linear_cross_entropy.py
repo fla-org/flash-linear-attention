@@ -221,6 +221,9 @@ def fused_linear_cross_entropy_forward_npu(
     use_l2warp: bool = False,
     l2_penalty_factor: float = 1e-4,
     accumulate_grad_in_fp32: bool = True,
+    need_dx: bool = True,
+    need_dw: bool = True,
+    need_db: bool = True,
 ):
     device = x.device
     N, H, V = *x.shape, weight.shape[0]
@@ -231,14 +234,14 @@ def fused_linear_cross_entropy_forward_npu(
     C = min(triton.next_power_of_2(triton.cdiv(N, NC)), ASCEND_MAX_GRID_DIM)
     NC = triton.cdiv(N, C)
 
-    dx = torch.zeros_like(x, device=device)
+    dx = torch.zeros_like(x, device=device) if need_dx else None
     grad_dtype = torch.float32 if accumulate_grad_in_fp32 else weight.dtype
     bias_grad_dtype = None
     if bias is not None:
         bias_grad_dtype = torch.float32 if accumulate_grad_in_fp32 else bias.dtype
 
-    dw = torch.zeros_like(weight, device=device, dtype=grad_dtype) if weight is not None else None
-    db = torch.zeros_like(bias, device=device, dtype=bias_grad_dtype) if bias is not None else None
+    dw = torch.zeros_like(weight, device=device, dtype=grad_dtype) if need_dw else None
+    db = torch.zeros_like(bias, device=device, dtype=bias_grad_dtype) if bias is not None and need_db else None
     loss = torch.zeros(N, device=device, dtype=torch.float)
 
     total = target.ne(ignore_index).sum()
@@ -247,13 +250,13 @@ def fused_linear_cross_entropy_forward_npu(
         start, end = ic * C, min((ic + 1) * C, N)
         c_x = x[start:end]
         c_logits = F.linear(c_x, weight, bias)
-        if weight is not None and c_x.dtype != grad_dtype:
+        if dw is not None and c_x.dtype != grad_dtype:
             c_x = c_x.to(dtype=grad_dtype)
         c_target = target[start:end]
         c_lse = logsumexp_fwd_npu(x=c_logits, scale=logit_scale, softcapping=logit_softcapping, dtype=torch.float)
 
         c_loss = loss[start:end]
-        if use_l2warp:
+        if use_l2warp and (dx is not None or dw is not None or db is not None):
             c_maxx, c_ids = torch.max(c_logits, -1, keepdim=True)
 
         cross_entropy_kernel[(c_logits.shape[0],)](
@@ -272,34 +275,37 @@ def fused_linear_cross_entropy_forward_npu(
             BV=BV,
             num_warps=STATIC_WARPS,
         )
+        if dx is None and dw is None and db is None:
+            continue
         if use_l2warp:
             g_logits_l2 = torch.zeros_like(c_logits)
             l2_factor = l2_penalty_factor / N
             penalty_grad = c_maxx * l2_factor
             g_logits_l2.scatter_(-1, c_ids, penalty_grad)
 
-            if weight is not None:
+            if dw is not None:
                 torch.addmm(
                     input=dw,
                     mat1=g_logits_l2.t().to(dtype=grad_dtype),
                     mat2=c_x,
                     out=dw,
                 )
-            if bias is not None:
+            if db is not None:
                 torch.add(input=db, other=g_logits_l2.sum(0, dtype=bias_grad_dtype), out=db)
-            dx_l2_contribution = torch.mm(g_logits_l2, weight)
+            dx_l2_contribution = torch.mm(g_logits_l2, weight) if dx is not None else 0.0
         else:
             dx_l2_contribution = 0.0
 
         c_grad = c_logits if c_logits.is_contiguous() else c_logits.contiguous()
-        dx[start:end] = torch.mm(c_grad, weight) + dx_l2_contribution
+        if dx is not None:
+            dx[start:end] = torch.mm(c_grad, weight) + dx_l2_contribution
 
-        if weight is not None:
+        if dw is not None:
             grad_w = c_grad.t().to(dtype=grad_dtype)
             grad_x = c_x if c_x.dtype == grad_dtype else c_x.to(dtype=grad_dtype)
             dw.add_(grad_w @ grad_x)
 
-        if bias is not None:
+        if db is not None:
             torch.add(input=db, other=c_logits.sum(0, dtype=bias_grad_dtype), out=db)
 
     loss = loss.sum()
@@ -312,39 +318,19 @@ def fused_linear_cross_entropy_forward_npu(
 
 def fused_linear_cross_entropy_backward_npu(
     do: torch.Tensor,
-    dx: torch.Tensor,
-    dw: torch.Tensor,
-    db: torch.Tensor,
+    dx: torch.Tensor | None,
+    dw: torch.Tensor | None,
+    db: torch.Tensor | None,
 ):
-    N, H = dx.shape
-    B = compute_elementwise_block_size(n_elements=N * H, memory_multiplier=_ELEMENTWISE_MEM_MULT)
-
-    elementwise_mul_kernel[(triton.cdiv(N * H, B),)](
-        x=dx,
-        g=do,
-        N=N*H,
-        B=B,
-        num_warps=STATIC_WARPS,
-    )
-
-    if dw is not None:
-        V, H = dw.shape
-        B = compute_elementwise_block_size(n_elements=V * H, memory_multiplier=_ELEMENTWISE_MEM_MULT)
-        elementwise_mul_kernel[(triton.cdiv(V * H, B),)](
-            x=dw,
+    for grad in (dx, dw, db):
+        if grad is None:
+            continue
+        N = grad.numel()
+        B = compute_elementwise_block_size(n_elements=N, memory_multiplier=_ELEMENTWISE_MEM_MULT)
+        elementwise_mul_kernel[(triton.cdiv(N, B),)](
+            x=grad,
             g=do,
-            N=V*H,
-            B=B,
-            num_warps=STATIC_WARPS,
-        )
-
-    if db is not None:
-        V = db.shape[0]
-        B = compute_elementwise_block_size(n_elements=V, memory_multiplier=_ELEMENTWISE_MEM_MULT)
-        elementwise_mul_kernel[(triton.cdiv(V, B),)](
-            x=db,
-            g=do,
-            N=V,
+            N=N,
             B=B,
             num_warps=STATIC_WARPS,
         )

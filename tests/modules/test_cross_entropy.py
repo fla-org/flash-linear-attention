@@ -115,10 +115,10 @@ def test_fused_cross_entropy(
 
 @pytest.mark.parametrize(
     ('B', 'T', 'D', 'V', 'smoothing', 'scale', 'softcap', 'num_chunks', 'reduction',
-     'with_bias', 'strided', 'ignore_all', 'confident_target', 'accumulate_grad_in_fp32', 'dtype'),
+     'with_bias', 'strided', 'ignore_all', 'confident_target', 'accumulate_grad_in_fp32', 'dtype', 'gradient_mode', 'use_l2warp'),
     [
         pytest.param(
-            2, T, D, V, 0.0, scale, softcap, 8, 'mean', True, False, False, False, fp32_grad, torch.bfloat16,
+            2, T, D, V, 0.0, scale, softcap, 8, 'mean', True, False, False, False, fp32_grad, torch.bfloat16, 'all', False,
             id=f'T{T}-D{D}-V{V}-{scale=}-{softcap=}-{fp32_grad=}',
         )
         for T, D, V, (scale, softcap, fp32_grad) in product(
@@ -127,7 +127,7 @@ def test_fused_cross_entropy(
         )
     ] + [
         pytest.param(
-            3, 7, 32, V, smoothing, scale, softcap, 8, reduction, with_bias, True, ignore_all, False, True, dtype,
+            3, 7, 32, V, smoothing, scale, softcap, 8, reduction, with_bias, True, ignore_all, False, True, dtype, 'all', False,
             id=f'V{V}-{smoothing=}-{scale=}-{softcap=}-{with_bias=}-{reduction}-{dtype}',
             marks=pytest.mark.skipif(IS_NPU, reason="Covers the default Triton GPU kernels"),
         )
@@ -137,7 +137,7 @@ def test_fused_cross_entropy(
         )
     ] + [
         pytest.param(
-            1, T, 64, V, 0.0, 1.0, None, num_chunks, reduction, True, False, False, True, True, dtype,
+            1, T, 64, V, 0.0, 1.0, None, num_chunks, reduction, True, False, False, True, True, dtype, 'all', False,
             id=f'T{T}-V{V}-confident_target-{num_chunks=}-{reduction}-{dtype}',
             marks=pytest.mark.skipif(IS_NPU, reason="Covers the default Triton GPU kernels"),
         )
@@ -145,6 +145,22 @@ def test_fused_cross_entropy(
             ((128, 128), (63, 4103), (63, 65539)), (1, 8), ('mean', 'sum'),
             (torch.bfloat16, torch.float16, torch.float32),
         )
+    ] + [
+        pytest.param(
+            2, 63, 64, 4103, 0.1, 0.3, 3.0, 8, reduction, True, True, False, False, True, dtype,
+            gradient_mode, use_l2warp, id=f'demand-{gradient_mode}-{use_l2warp=}-{reduction}-{dtype}',
+            marks=pytest.mark.skipif(IS_NPU, reason="Covers transformed logits in the default GPU kernels"),
+        )
+        for gradient_mode, use_l2warp, reduction, dtype in product(
+            ('input', 'weight', 'bias', 'frozen', 'no_grad'), (False, True), ('mean', 'sum'),
+            (torch.bfloat16, torch.float32),
+        )
+    ] + [
+        pytest.param(
+            2, 63, 64, 4103, 0.0, 1.0, None, 8, 'mean', True, False, False, False, True, torch.bfloat16,
+            gradient_mode, use_l2warp, id=f'demand-backend-{gradient_mode}-{use_l2warp=}',
+        )
+        for gradient_mode, use_l2warp in product(('input', 'weight', 'bias', 'frozen', 'no_grad'), (False, True))
     ],
 )
 @pytest.mark.skipif(IS_INTEL, reason="Intel Triton Failure")
@@ -164,6 +180,8 @@ def test_fused_linear_cross_entropy(
     confident_target: bool,
     accumulate_grad_in_fp32: bool,
     dtype: torch.dtype,
+    gradient_mode: str,
+    use_l2warp: bool,
 ):
     """Match linear CE loss and input/parameter gradients against the reference implementations."""
     torch.manual_seed(42)
@@ -193,7 +211,13 @@ def test_fused_linear_cross_entropy(
     if ignore_all:
         target.fill_(-100)
     inputs = (x, weight, bias) if with_bias else (x, weight)
-    logits = F.linear(x, weight, bias)
+    for name, value in zip(('input', 'weight', 'bias'), inputs):
+        value.requires_grad_(gradient_mode in ('all', 'no_grad', name))
+    gradient_names = tuple(name for name, value in zip(('dx', 'dw', 'db'), inputs)
+                           if value.requires_grad and gradient_mode != 'no_grad')
+    inputs = tuple(value for value in inputs if value.requires_grad and gradient_mode != 'no_grad')
+    raw_logits = F.linear(x, weight, bias)
+    logits = raw_logits
     if strided or confident_target:
         logits = logits.float() * scale
         if softcap is not None:
@@ -206,20 +230,35 @@ def test_fused_linear_cross_entropy(
     else:
         ref = FusedCrossEntropyLoss(reduction=reduction, logit_scale=scale, logit_softcapping=softcap)(logits, target)
         do = torch.randn_like(ref).to(device).to(dtype=dtype)
-    ref_grads = torch.autograd.grad(ref * do, inputs)
-    tri = FusedLinearCrossEntropyLoss(
-        label_smoothing=smoothing,
-        logit_scale=scale,
-        logit_softcapping=softcap,
-        num_chunks=num_chunks,
-        reduction=reduction,
-        accumulate_grad_in_fp32=accumulate_grad_in_fp32,
-    )(x, target, weight, bias)
-    tri_grads = torch.autograd.grad(tri * do, inputs)
+    if use_l2warp:
+        ref = l2_warp(ref, raw_logits.float().reshape(1, -1, V))
+    ref_grads = torch.autograd.grad(ref * do, inputs) if inputs else ()
+    saved = []
+
+    def pack(tensor):
+        saved.append(tensor.numel() * tensor.element_size())
+        return tensor
+
+    with torch.set_grad_enabled(gradient_mode != 'no_grad'), torch.autograd.graph.saved_tensors_hooks(pack, lambda x: x):
+        tri = FusedLinearCrossEntropyLoss(
+            label_smoothing=smoothing,
+            logit_scale=scale,
+            logit_softcapping=softcap,
+            num_chunks=num_chunks,
+            reduction=reduction,
+            accumulate_grad_in_fp32=accumulate_grad_in_fp32,
+            use_l2warp=use_l2warp,
+        )(x, target, weight, bias)
+    expected_saved = [value.numel() * value.element_size() for value in inputs]
+    if saved != expected_saved:
+        pytest.fail(f'Gradient storage bytes: expected {expected_saved}, got {saved}')
+    if tri.requires_grad != bool(inputs):
+        pytest.fail(f'Loss gradient requirement: expected {bool(inputs)}, got {tri.requires_grad}')
+    tri_grads = torch.autograd.grad(tri * do, inputs) if inputs else ()
 
     err_atol = 0 if confident_target else 1e-6
     assert_close("loss", ref, tri, ratio=1e-2, err_atol=err_atol)
-    for name, expected, actual in zip(('dx', 'dw', 'db'), ref_grads, tri_grads):
+    for name, expected, actual in zip(gradient_names, ref_grads, tri_grads):
         assert_close(name, expected, actual, ratio=1e-2, err_atol=err_atol)
     if ignore_all:
         assert tri.item() == 0
@@ -227,7 +266,7 @@ def test_fused_linear_cross_entropy(
             assert torch.count_nonzero(grad).item() == 0
 
 
-def _check_parallel_linear_cross_entropy(rank, world_size, local_vocab, dtype, option, reduction):
+def _check_parallel_linear_cross_entropy(rank, world_size, local_vocab, dtype, option, reduction, gradient_mode="all"):
     torch.manual_seed(42)
     N, H, V = 63, 64, world_size * local_vocab
     x = torch.randn(1, N, H, device=device, dtype=dtype).requires_grad_()
@@ -279,12 +318,22 @@ def _check_parallel_linear_cross_entropy(rank, world_size, local_vocab, dtype, o
     local_weight = weight[start:end].detach().clone().requires_grad_()
     local_bias = bias[start:end].detach().clone().requires_grad_() if with_bias else None
     local_inputs = (local_x, local_weight, local_bias) if with_bias else (local_x, local_weight)
-    tri = FusedLinearCrossEntropyLoss(process_group=dist.group.WORLD, **kwargs)(
-        local_x, target, local_weight, local_bias,
-    )
-    tri_grads = torch.autograd.grad(tri * 2, local_inputs)
+    for name, value in zip(('input', 'weight', 'bias'), local_inputs):
+        need_grad = gradient_mode in ('all', 'no_grad', name)
+        if gradient_mode == 'mixed':
+            need_grad = rank == 0 if name == 'input' else rank != 0
+        value.requires_grad_(need_grad)
     expected_grads = (ref_grads[0],) + tuple(grad[start:end] for grad in ref_grads[1:])
-    for name, expected, actual in zip(('loss', 'dx', 'dw', 'db'), (ref, *expected_grads), (tri, *tri_grads)):
+    selected = [(name, value, grad) for name, value, grad in zip(('dx', 'dw', 'db'), local_inputs, expected_grads)
+                if value.requires_grad and gradient_mode != 'no_grad']
+    with torch.set_grad_enabled(gradient_mode != 'no_grad'):
+        tri = FusedLinearCrossEntropyLoss(process_group=dist.group.WORLD, **kwargs)(
+            local_x, target, local_weight, local_bias,
+        )
+    tri_grads = torch.autograd.grad(tri * 2, tuple(value for _, value, _ in selected)) if selected else ()
+    names = ('loss',) + tuple(name for name, _, _ in selected)
+    expected_grads = tuple(grad for _, _, grad in selected)
+    for name, expected, actual in zip(names, (ref, *expected_grads), (tri, *tri_grads)):
         assert torch.isfinite(actual).all(), name
         assert_close(name, expected.float(), actual.float(), ratio=1e-2, err_atol=0 if option == 'confident' else 1e-6)
 
@@ -300,6 +349,8 @@ def _run_parallel_linear_cross_entropy_worker(rank, world_size, init_file):
         timeout=timedelta(minutes=5),
     )
     try:
+        for gradient_mode, option in product(('input', 'weight', 'bias', 'frozen', 'no_grad', 'mixed'), ('combined', 'l2')):
+            _check_parallel_linear_cross_entropy(rank, world_size, 4103, torch.float32, option, 'mean', gradient_mode)
         for local_vocab, dtype, option, reduction in product(
             (67, 4103, 65539),
             (torch.bfloat16, torch.float32),
