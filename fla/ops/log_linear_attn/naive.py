@@ -51,7 +51,7 @@ def construct_H_matrix(a, L):
     return H
 
 
-def naive_log_linear_attn(q, k, v, g, level_scales, scale: float | None = None):
+def naive_log_linear_attn(q, k, v, g, level_scales, scale: float | None = 1.0):
     """Compute grouped log-linear attention with the same scaling as the chunk operator."""
     if scale is None:
         scale = q.shape[-1] ** -0.5

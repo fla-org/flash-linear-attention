@@ -19,7 +19,7 @@ from fla.utils import assert_close, device, device_platform
 
 
 @pytest.mark.parametrize(("G", "H"), [(1, 4), (2, 4), (4, 4)], ids=["G1-H4", "G2-H4", "G4-H4"])
-@pytest.mark.parametrize("scale", [None, 1.0, 0.37], ids=["default", "unscaled", "custom"])
+@pytest.mark.parametrize("scale", [None, 1.0, 0.37], ids=["normalized", "default", "custom"])
 def test_naive_scale(G: int, H: int, scale: float | None):
     K = 4
     q = torch.arange(1, G + 1, dtype=torch.float32, device=device)[None, None, :, None].expand(1, 1, G, K)
@@ -28,7 +28,8 @@ def test_naive_scale(G: int, H: int, scale: float | None):
     g = torch.zeros(1, 1, H, dtype=torch.float32, device=device)
     level_scales = torch.ones(1, 1, H, 1, dtype=torch.float32, device=device)
 
-    out = naive_log_linear_attn(q, k, v, g, level_scales, scale=scale)
+    kwargs = {} if scale == 1.0 else {"scale": scale}
+    out = naive_log_linear_attn(q, k, v, g, level_scales, **kwargs)
 
     expected_scale = 0.5 if scale is None else scale
     expected = torch.tensor(
@@ -44,8 +45,8 @@ def test_naive_scale(G: int, H: int, scale: float | None):
     [
         pytest.param(*test, id="B{}-T{}-G{}-H{}-D{}-{}-scale{}".format(*test))
         for test in [
-            (2, 1024, 1, 8, 128, torch.float32, None),
-            (4, 2048, 1, 8, 64, torch.float32, None),
+            (2, 1024, 1, 8, 128, torch.float32, 1.0),
+            (4, 2048, 1, 8, 64, torch.float32, 1.0),
             (2, 70, 2, 4, 64, torch.float32, None),
             (1, 130, 4, 4, 128, torch.float32, 0.37),
             (1, 63, 2, 4, 64, torch.float32, 1.0),
@@ -77,9 +78,10 @@ def test_chunk(
     v = (x * dt.unsqueeze(-1)).to(dtype=dtype)
     g = a * dt
 
-    out, _ = chunk_log_linear_attn(q, k, v, g, level_scales, scale=scale)
+    kwargs = {} if scale == 1.0 else {"scale": scale}
+    out, _ = chunk_log_linear_attn(q, k, v, g, level_scales, **kwargs)
 
-    ref = naive_log_linear_attn(q, k, v, g, level_scales, scale=scale)
+    ref = naive_log_linear_attn(q, k, v, g, level_scales, **kwargs)
 
     assert_close("o", ref, out, 0.004)
 
@@ -132,8 +134,8 @@ def test_chunk_initial_state(varlen: bool, G: int, H: int):
     [
         pytest.param(*test, id="B{}-T{}-G{}-H{}-D{}-{}-scale{}".format(*test))
         for test in [
-            (2, 512, 1, 8, 64, torch.float32, None),
-            (2, 1024, 1, 8, 128, torch.float32, None),
+            (2, 512, 1, 8, 64, torch.float32, 1.0),
+            (2, 1024, 1, 8, 128, torch.float32, 1.0),
             (2, 70, 2, 4, 64, torch.float32, None),
             (1, 130, 4, 4, 128, torch.float32, 0.37),
             (1, 63, 2, 4, 64, torch.float32, 1.0),
@@ -167,12 +169,13 @@ def test_chunk_bwd(
     do = torch.randn_like(v)
     q, k, v, g, level_scales = map(lambda x: x.to(device).requires_grad_(), (q, k, v, g, level_scales))
 
-    out, _ = chunk_log_linear_attn(q, k, v, g, level_scales, scale=scale)
+    kwargs = {} if scale == 1.0 else {"scale": scale}
+    out, _ = chunk_log_linear_attn(q, k, v, g, level_scales, **kwargs)
     (out * do).sum().backward()
     tri_dq, tri_dk, tri_dv, tri_dg, tri_dl = q.grad, k.grad, v.grad, g.grad, level_scales.grad
     q.grad = k.grad = v.grad = g.grad = level_scales.grad = None
 
-    ref = naive_log_linear_attn(q, k, v, g, level_scales, scale=scale)
+    ref = naive_log_linear_attn(q, k, v, g, level_scales, **kwargs)
     (ref * do).sum().backward()
     ref_dq, ref_dk, ref_dv, ref_dg, ref_dl = q.grad, k.grad, v.grad, g.grad, level_scales.grad
 

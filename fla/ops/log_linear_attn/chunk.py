@@ -1544,7 +1544,7 @@ def chunk_log_linear_attn(
     initial_state: LogLinearAttentionState | None = None,
     output_final_state: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
-    scale: float | None = None,
+    scale: float | None = 1.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
@@ -1568,7 +1568,7 @@ def chunk_log_linear_attn(
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
         scale (float, Optional):
-            Attention score scale. Default: `None`, which uses `K ** -0.5`.
+            Attention score scale. Default: 1.0. Pass `None` to use `K ** -0.5`.
 
     Returns:
         o (torch.Tensor):
