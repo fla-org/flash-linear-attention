@@ -416,6 +416,11 @@ def test_conv_with_cache_prefill_fwd(
     tri, cache_out = conv(x, residual=residual, cache=tri_cache.clone(), output_final_state=True)
 
     assert_close("y", ref, tri, 1e-3)
+    saved_cache = tri_cache.clone()
+    replay, replay_cache = conv(x, residual=residual, cache=tri_cache, update_cache=False)
+    assert_close("replay", ref, replay, 1e-3)
+    assert torch.equal(tri_cache, saved_cache)
+    assert replay_cache is None
     for p in range(1, W):
         if p <= T:
             expected = x[:, -p, :]
@@ -578,9 +583,10 @@ def test_conv_decoding_with_cache(
     state = torch.randn(B, D, W).to(device, dtype)
 
     # reference
+    ref_state = state.clone()
     ref = causal_conv1d_update_ref_torch(
         x.squeeze(1),                           # (B, D)
-        conv_state=state.clone(),
+        conv_state=ref_state,
         weight=rearrange(conv.weight, "d 1 w -> d w"),
         bias=conv.bias,
         activation=activation,
@@ -588,11 +594,26 @@ def test_conv_decoding_with_cache(
     if has_residual:
         ref += residual
 
-    # ShortConvolution step
-    with torch.no_grad():
-        y, _ = conv.step(x, residual, state.clone())
+    saved_state = state.clone()
+    for output_final_state in (False, True):
+        y, cache_out = conv(
+            x=x,
+            residual=residual,
+            cache=state,
+            output_final_state=output_final_state,
+            update_cache=False,
+        )
+        assert_close("replay", ref, y, 1e-3)
+        assert torch.equal(state, saved_state)
+        if output_final_state:
+            assert_close("replay cache", ref_state, cache_out, 1e-3)
+        else:
+            assert cache_out is None
 
+    y, cache_out = conv.step(x=x, residual=residual, cache=state, output_final_state=True)
     assert_close("y", ref, y, 1e-3)
+    assert cache_out is state
+    assert_close("cache", ref_state, state, 1e-3)
 
 
 @pytest.mark.parametrize(
