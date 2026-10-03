@@ -9,6 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.backends import dispatch
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp2
 from fla.utils import autotune_cache_kwargs
@@ -127,6 +128,7 @@ def recompute_w_u_fwd_kernel(
         tl.store(p_w, b_w.to(w.dtype.element_ty), mask=m_tk)
 
 
+@dispatch('precond_kda')
 def recompute_w_u_fwd(
     k: torch.Tensor,
     k_precond: torch.Tensor,

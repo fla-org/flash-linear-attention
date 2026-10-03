@@ -26,6 +26,8 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.backends import dispatch
+
 
 @triton.heuristics({
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
@@ -418,7 +420,7 @@ def _atk_fwd_stages(
     return k_precond.to(k.dtype), ac, a, sa, at
 
 
-@torch._dynamo.disable
+@dispatch('atk')
 def chunk_atk_fwd(
     k: torch.Tensor,
     beta: torch.Tensor,
@@ -442,7 +444,7 @@ def chunk_atk_fwd(
     return k_precond, at
 
 
-@torch._dynamo.disable
+@dispatch('atk')
 def recompute_atk_fwd(
     k: torch.Tensor,
     beta: torch.Tensor,

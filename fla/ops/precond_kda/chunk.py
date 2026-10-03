@@ -12,6 +12,7 @@ import torch
 from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
 from fla.ops.atk.chunk_atk_bwd import chunk_atk_bwd
 from fla.ops.atk.chunk_atk_fwd import chunk_atk_fwd, recompute_atk_fwd
+from fla.ops.backends import dispatch
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_gated_delta_rule_fwd_h
 from fla.ops.cp import FLACPContext
 from fla.ops.gla.chunk import chunk_gla_fwd_o_gk
@@ -563,6 +564,7 @@ class ChunkPrecondKDAFunction(torch.autograd.Function):
 
 
 @torch.compiler.disable
+@dispatch('precond_kda')
 def chunk_precond_kda(
     q: torch.Tensor,
     k: torch.Tensor,
