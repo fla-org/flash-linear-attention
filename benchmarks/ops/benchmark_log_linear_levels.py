@@ -43,6 +43,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--geometry-only', action='store_true')
     parser.add_argument('--layout', choices=('dense', 'varlen', 'packed'), default='dense')
+    parser.add_argument('--batch-size', type=int, default=2, help='batch size for the dense layout')
+    parser.add_argument('--length', type=int, default=512, help='sequence length for the dense layout')
     parser.add_argument('--sequences', type=int, choices=(32, 128), default=32)
     parser.add_argument('--rounds', type=int, default=7)
     parser.add_argument('--repeats', type=int, default=10)
@@ -51,6 +53,8 @@ def main():
     args = parser.parse_args()
     if args.rounds < 1 or args.repeats < 1:
         parser.error('rounds and repeats must be positive')
+    if args.batch_size < 1 or args.length < 1:
+        parser.error('batch size and length must be positive')
     if args.geometry_only:
         print(json.dumps({'geometry_cells': check_geometry()}))
         return
@@ -63,10 +67,10 @@ def main():
 
     torch.manual_seed(42)
     torch.backends.cuda.matmul.allow_tf32 = False
-    lengths = [512, 512] if args.layout == 'dense' else [127, 257]
+    lengths = [args.length] * args.batch_size if args.layout == 'dense' else [127, 257]
     if args.layout == 'packed':
         lengths = [31, 63, 65, 127] * (args.sequences // 4)
-    batch, length = (2, 512) if args.layout == 'dense' else (1, sum(lengths))
+    batch, length = (args.batch_size, args.length) if args.layout == 'dense' else (1, sum(lengths))
     groups, heads, key_dim, value_dim = 2, 4, 128, 64
     levels = max(7, math.ceil(math.log2(max(lengths))) + 1)
     cu_seqlens = (

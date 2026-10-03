@@ -62,6 +62,7 @@ def chunkwise_fwd_kernel(
     L: tl.constexpr,
     BT: tl.constexpr,
     BK: tl.constexpr,
+    BV: tl.constexpr,
     L_IN: tl.constexpr,
     L_OUT: tl.constexpr,
     MIN_LEVEL: tl.constexpr,
@@ -79,9 +80,10 @@ def chunkwise_fwd_kernel(
     for bit in tl.static_range(n_bits):
         b_level += (b_xor >= (1 << bit)).to(tl.int32)
     b_level = tl.where(o_i[:, None] >= o_i[None, :], b_level, 0)
-    # parallel over sequences and heads
-    i_k, i_nh = unflatten_program_id(X=tl.cdiv(K, BK))
+    # parallel over sequences, heads, and key/value tiles
+    i_k, i_v, i_nh = unflatten_program_id(X=tl.cdiv(K, BK), Y=tl.cdiv(V, BV))
     i_k = i_k.to(tl.int64)
+    i_v = i_v.to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
     i_g = i_h // (H // G)
 
@@ -95,7 +97,7 @@ def chunkwise_fwd_kernel(
         bos, eos = (i_n * T).to(tl.int64), (i_n * T + T).to(tl.int64)
 
     o_kk = i_k * BK + tl.arange(0, BK)
-    o_v = tl.arange(0, V)
+    o_v = i_v * BV + tl.arange(0, BV)
     m_kv = (o_kk[:, None] < K) & (o_v[None, :] < V)
 
     # For hierarchical masking
@@ -118,18 +120,18 @@ def chunkwise_fwd_kernel(
     KV_10_CREATED = MIN_LEVEL <= 11 and MAX_LEVEL >= 9
     KV_11_CREATED = MIN_LEVEL <= 12 and MAX_LEVEL >= 10
 
-    kv_0 = tl.zeros([BK, V], dtype=tl.float32)
-    kv_1 = tl.zeros([BK, V], dtype=tl.float32)
-    kv_2 = tl.zeros([BK, V], dtype=tl.float32)
-    kv_3 = tl.zeros([BK, V], dtype=tl.float32)
-    kv_4 = tl.zeros([BK, V], dtype=tl.float32)
-    kv_5 = tl.zeros([BK, V], dtype=tl.float32)
-    kv_6 = tl.zeros([BK, V], dtype=tl.float32)
-    kv_7 = tl.zeros([BK, V], dtype=tl.float32)
-    kv_8 = tl.zeros([BK, V], dtype=tl.float32)
-    kv_9 = tl.zeros([BK, V], dtype=tl.float32)
-    kv_10 = tl.zeros([BK, V], dtype=tl.float32)
-    kv_11 = tl.zeros([BK, V], dtype=tl.float32)
+    kv_0 = tl.zeros([BK, BV], dtype=tl.float32)
+    kv_1 = tl.zeros([BK, BV], dtype=tl.float32)
+    kv_2 = tl.zeros([BK, BV], dtype=tl.float32)
+    kv_3 = tl.zeros([BK, BV], dtype=tl.float32)
+    kv_4 = tl.zeros([BK, BV], dtype=tl.float32)
+    kv_5 = tl.zeros([BK, BV], dtype=tl.float32)
+    kv_6 = tl.zeros([BK, BV], dtype=tl.float32)
+    kv_7 = tl.zeros([BK, BV], dtype=tl.float32)
+    kv_8 = tl.zeros([BK, BV], dtype=tl.float32)
+    kv_9 = tl.zeros([BK, BV], dtype=tl.float32)
+    kv_10 = tl.zeros([BK, BV], dtype=tl.float32)
+    kv_11 = tl.zeros([BK, BV], dtype=tl.float32)
 
     offset = 0  # total number to cached tokens
     first_chunk_index = 0  # next chunk index to compute
@@ -218,7 +220,7 @@ def chunkwise_fwd_kernel(
         b_s = (tl.dot(b_q, b_k) * b_s).to(b_q.dtype) * b_h
 
         b_v = tl.load(p_v, mask=m_tv, other=0.0)
-        b_o = tl.zeros((BT, V), dtype=tl.float32)
+        b_o = tl.zeros((BT, BV), dtype=tl.float32)
         if MIN_LEVEL == 0:
             b_o = tl.dot(b_s, b_v, b_o)
 
@@ -350,47 +352,47 @@ def chunkwise_fwd_kernel(
             if MIN_LEVEL <= 1 and MAX_LEVEL >= 0:
                 if check_value & 1:
                     kv_1 += kv_0
-                    kv_0 = tl.zeros([BK, V], dtype=tl.float32)
+                    kv_0 = tl.zeros([BK, BV], dtype=tl.float32)
             if MIN_LEVEL <= 2 and MAX_LEVEL >= 1:
                 if check_value & 2:
                     kv_2 += kv_1
-                    kv_1 = tl.zeros([BK, V], dtype=tl.float32)
+                    kv_1 = tl.zeros([BK, BV], dtype=tl.float32)
             if MIN_LEVEL <= 3 and MAX_LEVEL >= 2:
                 if check_value & 4:
                     kv_3 += kv_2
-                    kv_2 = tl.zeros([BK, V], dtype=tl.float32)
+                    kv_2 = tl.zeros([BK, BV], dtype=tl.float32)
             if MIN_LEVEL <= 4 and MAX_LEVEL >= 3:
                 if check_value & 8:
                     kv_4 += kv_3
-                    kv_3 = tl.zeros([BK, V], dtype=tl.float32)
+                    kv_3 = tl.zeros([BK, BV], dtype=tl.float32)
             if MIN_LEVEL <= 5 and MAX_LEVEL >= 4:
                 if check_value & 16:
                     kv_5 += kv_4
-                    kv_4 = tl.zeros([BK, V], dtype=tl.float32)
+                    kv_4 = tl.zeros([BK, BV], dtype=tl.float32)
             if MIN_LEVEL <= 6 and MAX_LEVEL >= 5:
                 if check_value & 32:
                     kv_6 += kv_5
-                    kv_5 = tl.zeros([BK, V], dtype=tl.float32)
+                    kv_5 = tl.zeros([BK, BV], dtype=tl.float32)
             if MIN_LEVEL <= 7 and MAX_LEVEL >= 6:
                 if check_value & 64:
                     kv_7 += kv_6
-                    kv_6 = tl.zeros([BK, V], dtype=tl.float32)
+                    kv_6 = tl.zeros([BK, BV], dtype=tl.float32)
             if MIN_LEVEL <= 8 and MAX_LEVEL >= 7:
                 if check_value & 128:
                     kv_8 += kv_7
-                    kv_7 = tl.zeros([BK, V], dtype=tl.float32)
+                    kv_7 = tl.zeros([BK, BV], dtype=tl.float32)
             if MIN_LEVEL <= 9 and MAX_LEVEL >= 8:
                 if check_value & 256:
                     kv_9 += kv_8
-                    kv_8 = tl.zeros([BK, V], dtype=tl.float32)
+                    kv_8 = tl.zeros([BK, BV], dtype=tl.float32)
             if MIN_LEVEL <= 10 and MAX_LEVEL >= 9:
                 if check_value & 512:
                     kv_10 += kv_9
-                    kv_9 = tl.zeros([BK, V], dtype=tl.float32)
+                    kv_9 = tl.zeros([BK, BV], dtype=tl.float32)
             if MIN_LEVEL <= 11 and MAX_LEVEL >= 10:
                 if check_value & 1024:
                     kv_11 += kv_10
-                    kv_10 = tl.zeros([BK, V], dtype=tl.float32)
+                    kv_10 = tl.zeros([BK, BV], dtype=tl.float32)
 
     chunk_index = offset // BT + T // BT
 
@@ -432,7 +434,8 @@ def chunkwise_fwd_kernel(
             p_kv = ht + ((i_n * L_OUT + 11) * H + i_h) * K * V + o_kk[:, None] * V + o_v[None, :]
             tl.store(p_kv, kv_11, mask=m_kv)
 
-        tl.store(new_offsets + i_n, (offset // BT) * BT + T)
+        if i_k == 0 and i_v == 0 and i_h == 0:
+            tl.store(new_offsets + i_n, (offset // BT) * BT + T)
 
 
 @triton.heuristics({
@@ -987,7 +990,7 @@ def chunkwise_bwd_kernel_dv(
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [4]
+        for num_warps in [8]
         for num_stages in [2, 3, 4]
     ],
     key=["G", "H", "K", "V"],
@@ -1255,7 +1258,7 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
         g = chunk_local_cumsum(g, chunk_size=BT, cu_seqlens=cu_seqlens)
 
         def grid(meta):
-            return (triton.cdiv(K, meta["BK"]) * B * H,)
+            return (triton.cdiv(K, meta["BK"]) * triton.cdiv(V, meta["BV"]) * B * H,)
 
         l_in = h0.shape[1] if initial_state is not None else None
         l_out = ht.shape[1] if output_final_state else None
@@ -1282,6 +1285,7 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
             V=V,
             L=L,
             BT=BT,
+            BV=V if MAX_LEVEL < 0 else min(V, 32),
             L_IN=l_in,
             L_OUT=l_out,
             MIN_LEVEL=0,
