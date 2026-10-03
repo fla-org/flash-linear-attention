@@ -32,20 +32,20 @@ from fla.utils import autotune_cache_kwargs, get_multiprocessor_count, input_gua
     key=["D", "NB", "IS_RMS_NORM", "STORE_RESIDUAL_OUT", "HAS_RESIDUAL", "HAS_WEIGHT"],
     **autotune_cache_kwargs,
 )
-@triton.jit
+@triton.jit(do_not_specialize=['T'])
 def layer_norm_gated_fwd_kernel(
-    x,  # pointer to the input
-    g,  # pointer to the gate
-    y,  # pointer to the output
-    w,  # pointer to the weights
-    b,  # pointer to the biases
-    residual,  # pointer to the residual
-    residual_out,  # pointer to the residual
-    mean,  # pointer to the mean
-    rstd,  # pointer to the 1/std
-    eps,  # epsilon to avoid division by zero
-    T,  # number of rows in x
-    D: tl.constexpr,  # number of columns in x
+    x,
+    g,
+    y,
+    w,
+    b,
+    residual,
+    residual_out,
+    mean,
+    rstd,
+    eps,
+    T,
+    D: tl.constexpr,
     BT: tl.constexpr,
     BD: tl.constexpr,
     NB: tl.constexpr,
@@ -103,7 +103,6 @@ def layer_norm_gated_fwd_kernel(
     elif ACTIVATION == "sigmoid":
         b_y = b_y * tl.sigmoid(b_g)
 
-    # Write output
     p_y = y + o_t[:, None] * D + o_d[None, :]
     tl.store(p_y, b_y.to(p_y.dtype.element_ty), mask=m_x)
 
@@ -122,18 +121,18 @@ def layer_norm_gated_fwd_kernel(
     **autotune_cache_kwargs,
 )
 @triton.jit
-def layer_norm_gated_fwd_kernel1(
-    x,  # pointer to the input
-    g,  # pointer to the gate
-    y,  # pointer to the output
-    w,  # pointer to the weights
-    b,  # pointer to the biases
-    residual,  # pointer to the residual
-    residual_out,  # pointer to the residual
-    mean,  # pointer to the mean
-    rstd,  # pointer to the 1/std
-    eps,  # epsilon to avoid division by zero
-    D: tl.constexpr,  # number of columns in x
+def layer_norm_gated_fwd_kernel_row(
+    x,
+    g,
+    y,
+    w,
+    b,
+    residual,
+    residual_out,
+    mean,
+    rstd,
+    eps,
+    D: tl.constexpr,
     BD: tl.constexpr,
     ACTIVATION: tl.constexpr,
     IS_RMS_NORM: tl.constexpr,
@@ -185,7 +184,6 @@ def layer_norm_gated_fwd_kernel1(
     elif ACTIVATION == "sigmoid":
         b_y = b_y * tl.sigmoid(b_g)
 
-    # Write output
     tl.store(y + o_d, b_y, mask=m_d)
 
 
@@ -202,18 +200,18 @@ def layer_norm_gated_fwd_kernel1(
     key=["D", "NB", "IS_RMS_NORM", "HAS_DRESIDUAL", "HAS_WEIGHT"],
     **autotune_cache_kwargs,
 )
-@triton.jit
+@triton.jit(do_not_specialize=['T'])
 def layer_norm_gated_bwd_kernel(
-    x,  # pointer to the input
-    g,  # pointer to the gate
-    w,  # pointer to the weights
-    b,  # pointer to the biases
-    y,  # pointer to the output to be recomputed
-    dy,  # pointer to the output gradient
-    dx,  # pointer to the input gradient
-    dg,  # pointer to the gate gradient
-    dw,  # pointer to the partial sum of weights gradient
-    db,  # pointer to the partial sum of biases gradient
+    x,
+    g,
+    w,
+    b,
+    y,
+    dy,
+    dx,
+    dg,
+    dw,
+    db,
     dresidual,
     dresidual_in,
     mean,
@@ -232,7 +230,7 @@ def layer_norm_gated_bwd_kernel(
     HAS_BIAS: tl.constexpr,
     RECOMPUTE_OUTPUT: tl.constexpr,
 ):
-    i_s = tl.program_id(0)
+    i_s = tl.program_id(0).to(tl.int64)
     o_d = tl.arange(0, BD)
     m_d = o_d < D
     if HAS_WEIGHT:
@@ -242,11 +240,6 @@ def layer_norm_gated_bwd_kernel(
         b_b = tl.load(b + o_d, mask=m_d, other=0.0).to(tl.float32)
         b_db = tl.zeros((BT, BD), dtype=tl.float32)
 
-    # the caller guarantees NS = min(SM, T), so every program has at least one token.
-    # the last program's range may slightly exceed T (since BS = ceil(T/NS));
-    # accesses are bounded by the true tensor shape (T, D), so the partial
-    # tail tile is handled by zero-padding loads and skipping stores.
-    # the m_t mask below further ensures dw/db only accumulate valid rows (< T).
     for i_t in range(i_s * BS, i_s * BS + BS, BT):
         o_t = (i_t + tl.arange(0, BT)).to(tl.int64)
         m_t = o_t < T
@@ -266,7 +259,7 @@ def layer_norm_gated_bwd_kernel(
             b_mean = tl.load(p_mean, mask=m_t, other=0.0)
         p_rstd = rstd + o_t
         b_rstd = tl.load(p_rstd, mask=m_t, other=0.0)
-        # Compute dx
+
         b_xhat = (b_x - b_mean[:, None]) * b_rstd[:, None] if not IS_RMS_NORM else b_x * b_rstd[:, None]
         b_xhat = tl.where(m_d[None, :], b_xhat, 0.0)
 
@@ -309,7 +302,7 @@ def layer_norm_gated_bwd_kernel(
             p_dres = dresidual + o_t[:, None] * D + o_d[None, :]
             b_dres = tl.load(p_dres, mask=m_x, other=0.0).to(tl.float32)
             b_dx += b_dres
-        # Write dx
+
         if STORE_DRESIDUAL:
             p_dres_in = dresidual_in + o_t[:, None] * D + o_d[None, :]
             tl.store(p_dres_in, b_dx.to(p_dres_in.dtype.element_ty), mask=m_x)
@@ -336,18 +329,18 @@ def layer_norm_gated_bwd_kernel(
     key=["D", "IS_RMS_NORM", "STORE_DRESIDUAL", "HAS_DRESIDUAL", "HAS_WEIGHT"],
     **autotune_cache_kwargs,
 )
-@triton.jit
-def layer_norm_gated_bwd_kernel1(
-    x,  # pointer to the input
-    g,  # pointer to the gate
-    w,  # pointer to the weights
-    b,  # pointer to the biases
-    y,  # pointer to the output to be recomputed
-    dy,  # pointer to the output gradient
-    dx,  # pointer to the input gradient
-    dg,  # pointer to the gate gradient
-    dw,  # pointer to the partial sum of weights gradient
-    db,  # pointer to the partial sum of biases gradient
+@triton.jit(do_not_specialize=['T'])
+def layer_norm_gated_bwd_kernel_row(
+    x,
+    g,
+    w,
+    b,
+    y,
+    dy,
+    dx,
+    dg,
+    dw,
+    db,
     dresidual,
     dresidual_in,
     mean,
@@ -386,7 +379,7 @@ def layer_norm_gated_bwd_kernel1(
         b_db = tl.zeros((BD,), dtype=tl.float32)
 
     for i_t in range(i_s * BS, min(i_s * BS + BS, T)):
-        # Load data to SRAM
+
         b_x = tl.load(x + o_d, mask=mask, other=0).to(tl.float32)
         b_g = tl.load(g + o_d, mask=mask, other=0).to(tl.float32)
         b_dy = tl.load(dy + o_d, mask=mask, other=0).to(tl.float32)
@@ -394,7 +387,7 @@ def layer_norm_gated_bwd_kernel1(
         if not IS_RMS_NORM:
             b_mean = tl.load(mean + i_t)
         b_rstd = tl.load(rstd + i_t)
-        # Compute dx
+
         b_xhat = (b_x - b_mean) * b_rstd if not IS_RMS_NORM else b_x * b_rstd
         b_xhat = tl.where(mask, b_xhat, 0.0)
 
@@ -430,7 +423,7 @@ def layer_norm_gated_bwd_kernel1(
         if HAS_DRESIDUAL:
             b_dres = tl.load(dresidual + o_d, mask=mask, other=0).to(tl.float32)
             b_dx += b_dres
-        # Write dx
+
         if STORE_DRESIDUAL:
             tl.store(dresidual_in + o_d, b_dx, mask=mask)
         tl.store(dx + o_d, b_dx, mask=mask)
@@ -461,9 +454,9 @@ def layer_norm_gated_fwd(
     bias: torch.Tensor,
     activation: str = "swish",
     eps: float = 1e-5,
-    residual: torch.Tensor = None,
-    out_dtype: torch.dtype = None,
-    residual_dtype: torch.dtype = None,
+    residual: torch.Tensor | None = None,
+    out_dtype: torch.dtype | None = None,
+    residual_dtype: torch.dtype | None = None,
     is_rms_norm: bool = False,
 ):
     if residual is not None:
@@ -475,7 +468,7 @@ def layer_norm_gated_fwd(
         assert weight.shape == (D,)
     if bias is not None:
         assert bias.shape == (D,)
-    # allocate output
+
     y = torch.empty_like(x, dtype=x.dtype if out_dtype is None else out_dtype)
     if residual is not None or (residual_dtype is not None and residual_dtype != x.dtype):
         residual_out = torch.empty(T, D, device=x.device, dtype=residual_dtype)
@@ -483,17 +476,13 @@ def layer_norm_gated_fwd(
         residual_out = None
     mean = torch.empty((T,), dtype=torch.float, device=x.device) if not is_rms_norm else None
     rstd = torch.empty((T,), dtype=torch.float, device=x.device)
-    # Less than 64KB per feature: enqueue fused kernel
+
     MAX_FUSED_SIZE = 65536 // x.element_size()
     BD = min(MAX_FUSED_SIZE, triton.next_power_of_2(D))
     if D > BD:
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
-    # heuristics for number of warps
-
     if D <= 512:
-        # NOTE(tylerr): Avoid excessive recompilation and autotuning by tolerating a larger range
-        # of T before recompiling the kernel.
-        # NB = triton.cdiv(T, 2048)
+        # bucket token counts to limit autotuning across sequence lengths.
         NB = triton.cdiv(T, 2048 * 32)
 
         def grid(meta):
@@ -518,7 +507,7 @@ def layer_norm_gated_fwd(
             IS_RMS_NORM=is_rms_norm,
         )
     else:
-        layer_norm_gated_fwd_kernel1[(T,)](
+        layer_norm_gated_fwd_kernel_row[(T,)](
             x=x,
             g=g,
             y=y,
@@ -547,12 +536,12 @@ def layer_norm_gated_bwd(
     bias: torch.Tensor,
     activation: str = "swish",
     eps: float = 1e-5,
-    mean: torch.Tensor = None,
-    rstd: torch.Tensor = None,
-    dresidual: torch.Tensor = None,
+    mean: torch.Tensor | None = None,
+    rstd: torch.Tensor | None = None,
+    dresidual: torch.Tensor | None = None,
     has_residual: bool = False,
     is_rms_norm: bool = False,
-    x_dtype: torch.dtype = None,
+    x_dtype: torch.dtype | None = None,
     recompute_output: bool = False,
 ):
     T, D = x.shape
@@ -563,20 +552,17 @@ def layer_norm_gated_bwd(
         assert weight.shape == (D,)
     if bias is not None:
         assert bias.shape == (D,)
-    # allocate output
+
     dx = torch.empty_like(x) if x_dtype is None else torch.empty(T, D, dtype=x_dtype, device=x.device)
     dg = torch.empty_like(g) if x_dtype is None else torch.empty(T, D, dtype=x_dtype, device=x.device)
     dresidual_in = torch.empty_like(x) if has_residual and dx.dtype != x.dtype else None
     y = torch.empty(T, D, dtype=dy.dtype, device=dy.device) if recompute_output else None
 
-    # Less than 64KB per feature: enqueue fused kernel
     MAX_FUSED_SIZE = 65536 // x.element_size()
     BD = min(MAX_FUSED_SIZE, triton.next_power_of_2(D))
     if D > BD:
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
-    # cap program count to T so no program is completely idle.
-    # without this, high-SM GPUs (e.g. B200, 160 SMs) with small T would
-    # launch idle programs whose tile offsets exceed the tensor shape.
+    # cap the program count for short sequences.
     NS = min(get_multiprocessor_count(x.device.index), T)
     BS = math.ceil(T / NS)
 
@@ -585,9 +571,7 @@ def layer_norm_gated_bwd(
     grid = (NS,)
 
     if D <= 512:
-        # NOTE(tylerr): Avoid excessive recompilation and autotuning by tolerating a larger range
-        # of T before recompiling the kernel.
-        # NB = triton.cdiv(T, 2048)
+        # bucket token counts to limit autotuning across sequence lengths.
         NB = triton.cdiv(T, 2048 * 32)
 
         layer_norm_gated_bwd_kernel[grid](
@@ -606,8 +590,8 @@ def layer_norm_gated_bwd(
             mean=mean,
             rstd=rstd,
             T=T,
-            D=D,
             BS=BS,
+            D=D,
             BD=BD,
             NB=NB,
             ACTIVATION=activation,
@@ -615,7 +599,7 @@ def layer_norm_gated_bwd(
             STORE_DRESIDUAL=dresidual_in is not None,
         )
     else:
-        layer_norm_gated_bwd_kernel1[grid](
+        layer_norm_gated_bwd_kernel_row[grid](
             x=x,
             g=g,
             w=weight,
@@ -631,8 +615,8 @@ def layer_norm_gated_bwd(
             mean=mean,
             rstd=rstd,
             T=T,
-            D=D,
             BS=BS,
+            D=D,
             BD=BD,
             ACTIVATION=activation,
             IS_RMS_NORM=is_rms_norm,
@@ -640,7 +624,7 @@ def layer_norm_gated_bwd(
         )
     dw = dw.sum(0).to(weight.dtype) if weight is not None else None
     db = db.sum(0).to(bias.dtype) if bias is not None else None
-    # Don't need to compute dresidual_in separately in this case
+    # reuse dx when the residual gradient has the same dtype.
     if has_residual and dx.dtype == x.dtype:
         dresidual_in = dx
     return (dx, dg, dw, db, dresidual_in) if not recompute_output else (dx, dg, dw, db, dresidual_in, y)
@@ -664,7 +648,7 @@ class LayerNormGatedFunction(torch.autograd.Function):
     ):
         x_shape_og = x.shape
         g_shape_og = g.shape
-        # reshape input data into 2D tensor
+
         x = x.reshape(-1, x.shape[-1])
         g = g.reshape(-1, g.shape[-1])
         if residual is not None:
@@ -754,7 +738,7 @@ class LayerNormGatedLinearFunction(torch.autograd.Function):
     ):
         x_shape_og = x.shape
         g_shape_og = g.shape
-        # reshape input data into 2D tensor
+
         x = x.reshape(-1, x.shape[-1])
         g = g.reshape(-1, g.shape[-1])
         if residual is not None:
@@ -776,7 +760,7 @@ class LayerNormGatedLinearFunction(torch.autograd.Function):
         linear_weight = linear_weight.to(dtype)
         linear_bias = linear_bias.to(dtype) if linear_bias is not None else None
         out = F.linear(y.to(linear_weight.dtype), linear_weight, linear_bias)
-        # We don't store y, will be recomputed in the backward pass to save memory
+        # recompute y in backward to save memory.
         ctx.save_for_backward(residual_out, g, norm_weight, norm_bias, linear_weight, mean, rstd)
         ctx.x_shape_og = x_shape_og
         ctx.g_shape_og = g_shape_og
@@ -947,7 +931,7 @@ class FusedLayerNormGated(nn.Module):
         eps: float = 1e-5,
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
-    ) -> FusedLayerNormGated:
+    ) -> None:
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
 
@@ -990,17 +974,17 @@ class FusedLayerNormGated(nn.Module):
         residual: torch.Tensor | None = None,
         prenorm: bool = False,
         residual_in_fp32: bool = False,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         return layer_norm_gated(
-            x,
-            g,
-            self.weight,
-            self.bias,
-            self.activation,
+            x=x,
+            g=g,
+            weight=self.weight,
+            bias=self.bias,
+            activation=self.activation,
             residual=residual,
-            eps=self.eps,
             prenorm=prenorm,
             residual_in_fp32=residual_in_fp32,
+            eps=self.eps,
         )
 
 
@@ -1013,7 +997,7 @@ class FusedRMSNormGated(nn.Module):
         activation: str = "swish",
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
-    ) -> FusedRMSNormGated:
+    ) -> None:
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
 
@@ -1053,17 +1037,17 @@ class FusedRMSNormGated(nn.Module):
         residual: torch.Tensor | None = None,
         prenorm: bool = False,
         residual_in_fp32: bool = False,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         return rms_norm_gated(
-            x,
-            g,
-            self.weight,
-            self.bias,
-            self.activation,
+            x=x,
+            g=g,
+            weight=self.weight,
+            bias=self.bias,
+            activation=self.activation,
             residual=residual,
-            eps=self.eps,
             prenorm=prenorm,
             residual_in_fp32=residual_in_fp32,
+            eps=self.eps,
         )
 
 
@@ -1076,7 +1060,7 @@ class FusedLayerNormSwishGate(FusedLayerNormGated):
         eps: float = 1e-5,
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
-    ) -> FusedLayerNormSwishGate:
+    ) -> None:
         super().__init__(
             hidden_size=hidden_size,
             elementwise_affine=elementwise_affine,
@@ -1095,7 +1079,7 @@ class FusedRMSNormSwishGate(FusedRMSNormGated):
         eps: float = 1e-5,
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
-    ) -> FusedRMSNormSwishGate:
+    ) -> None:
         super().__init__(
             hidden_size=hidden_size,
             elementwise_affine=elementwise_affine,
@@ -1113,7 +1097,7 @@ class FusedLayerNormGatedLinear(nn.Module):
         eps: float = 1e-5,
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
-    ) -> FusedLayerNormGatedLinear:
+    ) -> None:
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
 
@@ -1150,18 +1134,18 @@ class FusedLayerNormGatedLinear(nn.Module):
         residual: torch.Tensor | None = None,
         prenorm: bool = False,
         residual_in_fp32: bool = False,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         return layer_norm_swish_gate_linear(
-            x,
-            g,
-            self.weight,
-            self.bias,
-            weight,
-            bias,
+            x=x,
+            g=g,
+            norm_weight=self.weight,
+            norm_bias=self.bias,
+            linear_weight=weight,
+            linear_bias=bias,
             residual=residual,
-            eps=self.eps,
             prenorm=prenorm,
             residual_in_fp32=residual_in_fp32,
+            eps=self.eps,
         )
 
 
@@ -1173,7 +1157,7 @@ class FusedLayerNormSwishGateLinear(FusedLayerNormGatedLinear):
         eps: float = 1e-5,
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
-    ) -> FusedLayerNormSwishGateLinear:
+    ) -> None:
         super().__init__(
             hidden_size=hidden_size,
             elementwise_affine=elementwise_affine,
@@ -1186,12 +1170,12 @@ class FusedLayerNormSwishGateLinear(FusedLayerNormGatedLinear):
 class FusedRMSNormGatedLinear(nn.Module):
     def __init__(
         self,
-        hidden_size,
+        hidden_size: int,
         elementwise_affine: bool = True,
         eps: float = 1e-5,
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
-    ) -> FusedRMSNormGatedLinear:
+    ) -> None:
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
 
@@ -1227,18 +1211,18 @@ class FusedRMSNormGatedLinear(nn.Module):
         residual: torch.Tensor | None = None,
         prenorm: bool = False,
         residual_in_fp32: bool = False,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         return rms_norm_swish_gate_linear(
-            x,
-            g,
-            self.weight,
-            self.bias,
-            weight,
-            bias,
+            x=x,
+            g=g,
+            norm_weight=self.weight,
+            norm_bias=self.bias,
+            linear_weight=weight,
+            linear_bias=bias,
             residual=residual,
-            eps=self.eps,
             prenorm=prenorm,
             residual_in_fp32=residual_in_fp32,
+            eps=self.eps,
         )
 
 
@@ -1250,7 +1234,7 @@ class FusedRMSNormSwishGateLinear(FusedRMSNormGatedLinear):
         eps: float = 1e-5,
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
-    ) -> FusedRMSNormSwishGateLinear:
+    ) -> None:
         super().__init__(
             hidden_size=hidden_size,
             elementwise_affine=elementwise_affine,

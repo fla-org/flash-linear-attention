@@ -12,6 +12,7 @@ import triton.language as tl
 from fla.ops.backends import dispatch
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.index import prepare_chunk_indices
+from fla.ops.utils.op import unflatten_program_id
 from fla.utils import autotune_cache_kwargs, check_shared_mem, input_guard
 
 BS_LIST = [32, 64] if check_shared_mem() else [16, 32]
@@ -45,7 +46,8 @@ def chunk_local_cumsum_scalar_kernel(
     IS_VARLEN: tl.constexpr,
     USE_GRAPH: tl.constexpr = False,
 ):
-    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
+    i_bh, i_t = unflatten_program_id(X=B * H)
+    i_bh = i_bh.to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_n = tl.load(chunk_indices + i_t * 2).to(tl.int32)
@@ -219,7 +221,7 @@ def chunk_global_cumsum_vector_kernel(
     HAS_SCALE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_s, i_nh = tl.program_id(0), tl.program_id(1).to(tl.int64)
+    i_s, i_nh = unflatten_program_id(X=tl.cdiv(S, BS))
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
@@ -271,7 +273,7 @@ def chunk_local_cumsum_scalar(
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     # graph 模式下未覆盖行须为 0：kda_gate_bwd 对输出做全量归约，脏行会污染 dA/dbias
     g_org, g = g, (torch.zeros_like if use_graph else torch.empty_like)(g, dtype=output_dtype or g.dtype)
-    grid = (NT, B * H)
+    grid = (NT * B * H,)
     chunk_local_cumsum_scalar_kernel[grid](
         s=g_org,
         o=g,
@@ -382,7 +384,7 @@ def chunk_global_cumsum_vector(
     BS = min(32, triton.next_power_of_2(S))
 
     z = torch.empty_like(s, dtype=output_dtype or s.dtype)
-    grid = (triton.cdiv(S, BS), N * H)
+    grid = (triton.cdiv(S, BS) * N * H,)
     chunk_global_cumsum_vector_kernel[grid](
         s=s,
         o=z,
