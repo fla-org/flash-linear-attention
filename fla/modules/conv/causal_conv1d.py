@@ -60,6 +60,10 @@ def causal_conv1d(
             Cumulative sequence lengths (optional)
         chunk_indices (Optional[torch.LongTensor]):
             Chunk indices for variable-length sequences (optional)
+        cp_context (FLACPContext, Optional):
+            Context-parallel metadata. CP supports the `triton` and `cuda` backends without initial or final states.
+            CUDA requires contiguous layout, kernel width 2–4, and at least `W - 1` tokens per rank;
+            zigzag layout and decoding caches are unsupported. Default: `None`.
 
     Returns:
         Tuple of (output, final_state).
@@ -81,6 +85,7 @@ def causal_conv1d(
             activation=activation,
             chunk_indices=chunk_indices,
             cp_context=cp_context,
+            backend=backend,
         )
         return output, None
 
