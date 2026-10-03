@@ -184,3 +184,15 @@ def test_parallel_swa(
     assert_close("dk", ref_dk, tri_dk, 0.005)
     assert_close("dv", ref_dv, tri_dv, 0.005)
     assert_close("dg", ref_dg, tri_dg, 0.005)
+
+
+@pytest.mark.parametrize("op", [naive_forgetting_attn, parallel_forgetting_attn], ids=["naive", "parallel"])
+@pytest.mark.parametrize(("HQ", "H"), [(3, 2), (1, 2), (2, 0)], ids=["remainder", "fewer-query-heads", "zero-kv-heads"])
+def test_parallel_rejects_invalid_gqa_head_counts(op, HQ, H):
+    q = torch.empty(1, 1, HQ, 16)
+    k = torch.empty(1, 1, H, 16)
+    v = torch.empty_like(k)
+    g = torch.empty(1, 1, HQ)
+
+    with pytest.raises(ValueError, match="must be divisible"):
+        op(q=q, k=k, v=v, g=g)

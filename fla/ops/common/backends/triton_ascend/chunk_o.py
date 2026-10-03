@@ -1388,6 +1388,7 @@ def chunk_bwd_dqkwg_npu(
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     if scale is None:
         scale = K ** -0.5
+    scale = float(scale)
 
     use_dw = w is not None
     # Ungated full-BT hits Triton-Ascend `tl.trans` cc→cc copy on Cube-resident
