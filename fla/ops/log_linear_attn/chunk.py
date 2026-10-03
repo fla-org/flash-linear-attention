@@ -749,11 +749,12 @@ def chunkwise_bwd_kernel_hdqgl(
     L: tl.constexpr,
     BT: tl.constexpr,
     NT: tl.constexpr,
+    NUM_INTERVALS: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     SCALE: tl.constexpr,
 ):
-    # parallel over batches and heads
-    i_nh = tl.program_id(0).to(tl.int64)
+    i_interval, i_nh = unflatten_program_id(X=NUM_INTERVALS)
+    i_interval = i_interval.to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
     i_g = i_h // (H // G)
 
@@ -767,6 +768,12 @@ def chunkwise_bwd_kernel_hdqgl(
         bos, eos = (i_n * T).to(tl.int64), (i_n * T + T).to(tl.int64)
 
     b_h = tl.zeros([V, K], dtype=tl.float32)
+    chunk_start = i_interval * (2 << ell)
+    chunk_end = tl.minimum(chunk_start + (2 << ell), tl.cdiv(T, BT))
+    # each interval inherits only the preceding reset-and-decay boundary.
+    if chunk_start > 0 and chunk_start < tl.cdiv(T, BT):
+        previous_last = (chunk_start * BT - 1).to(tl.int64)
+        b_h *= tl.exp(tl.load(g + bos * H + previous_last * H + i_h))
 
     num_intra_levels = (tl.log2(float(BT))).to(tl.int32) + 1
 
@@ -774,7 +781,7 @@ def chunkwise_bwd_kernel_hdqgl(
     o_v = tl.arange(0, V)
     o_i = tl.arange(0, BT)
     m_vk = (o_v[:, None] < V) & (o_k[None, :] < K)
-    for i_t in range(tl.cdiv(T, BT)):
+    for i_t in range(chunk_start, chunk_end):
         o_t = (i_t * BT).to(tl.int64) + o_i
         m_t = o_t < T
         m_tk = m_t[:, None] & (o_k[None, :] < K)
@@ -1089,7 +1096,9 @@ def chunkwise_bwd_kernel_diag(
     num_intra_levels = (tl.log2(float(BT))).to(tl.int32) + 1
 
     for i in range(num_intra_levels):
-        b_mask = (i_idx >= j_idx) & (b_level == i)
+        b_xor = i_idx ^ j_idx
+        upper = 1 << i
+        b_mask = (i_idx >= j_idx) & (b_xor >= (upper >> 1)) & (b_xor < upper)
         dl_i = tl.sum(tl.where(b_mask, b_dl, 0), axis=1)
         p_dl_i = dl + (bos * H + i_h) * L + i + o_t * (H * L)
         tl.store(p_dl_i, dl_i, mask=m_t)
@@ -1158,32 +1167,20 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
         original_T = T
 
         if cu_seqlens is None:
-            NT = ceil_div(T + (torch.max(offsets) if offsets is not None else 0), BT)
-            MAX_LEVEL = ceil_log(NT, 2) - 1
+            max_sequence_length = T + (offsets.max().item() if offsets is not None else 0)
         else:
-            NT = max(
-                [
-                    ceil_div(
-                        cu_seqlens[i + 1]
-                        - cu_seqlens[i]
-                        + (offsets[i] if offsets is not None else 0),
-                        BT,
-                    )
-                    for i in range(len(cu_seqlens) - 1)
-                ],
-            )
-            MAX_LEVEL = ceil_log(NT, 2) - 1
+            if len(cu_seqlens) <= 1:
+                raise ValueError("cu_seqlens must contain at least two entries")
+            sequence_lengths = torch.diff(cu_seqlens)
+            if offsets is not None:
+                sequence_lengths = sequence_lengths + offsets
+            max_sequence_length = sequence_lengths.max().item()
             B = len(cu_seqlens) - 1
+        NT = ceil_div(max_sequence_length, BT)
+        MAX_LEVEL = ceil_log(NT, 2) - 1
 
         # Exact powers of two need one more level in the serialized state than in the current outputs.
         if output_final_state:
-            if cu_seqlens is None:
-                max_sequence_length = T + (offsets.max().item() if offsets is not None else 0)
-            else:
-                sequence_lengths = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
-                if offsets is not None:
-                    sequence_lengths = [length + offset for length, offset in zip(sequence_lengths, offsets.tolist())]
-                max_sequence_length = max(sequence_lengths)
             completed_chunks = max_sequence_length // BT
             if completed_chunks > 0:
                 MAX_LEVEL = max(MAX_LEVEL, math.floor(math.log2(completed_chunks)))
@@ -1294,6 +1291,7 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
 
         ctx.save_for_backward(q, k, v, g, level_scales, initial_state, cu_seqlens)
         ctx.chunk_size = BT
+        ctx.max_num_chunks = NT
         ctx.scale = scale
 
         if output_final_state:
@@ -1358,15 +1356,7 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
         _, _, H, V = v.shape
         _, _, _, L = level_scales.shape
         BT = chunk_size
-        if cu_seqlens is not None:
-            NT = max(
-                [
-                    ceil_div(cu_seqlens[i + 1] - cu_seqlens[i], BT)
-                    for i in range(len(cu_seqlens) - 1)
-                ],
-            )
-        else:
-            NT = ceil_div(T, BT)
+        NT = ctx.max_num_chunks
 
         if cu_seqlens is not None:
             B = len(cu_seqlens) - 1
@@ -1381,8 +1371,6 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
         dg_last = torch.zeros((B, NT, H), dtype=torch.float, device=v.device)
         do = do.to(v.dtype)
 
-        grid = (B * H,)
-
         def grid_f(meta):
             return (triton.cdiv(K, meta["BK"]) * B * H,)
 
@@ -1390,7 +1378,8 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
 
         num_inter_chunk_levels = ceil_log(NT, 2)
         for ell in range(num_inter_chunk_levels - 1, -1, -1):
-            chunkwise_bwd_kernel_hdqgl[grid](
+            num_intervals = triton.cdiv(NT, 2 << ell)
+            chunkwise_bwd_kernel_hdqgl[(num_intervals * B * H,)](
                 do=do,
                 q=q,
                 k=k,
@@ -1411,6 +1400,7 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
                 L=L,
                 BT=BT,
                 NT=NT,
+                NUM_INTERVALS=num_intervals,
                 SCALE=scale,
             )
             chunkwise_bwd_kernel_dhg[grid_f](

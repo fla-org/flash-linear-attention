@@ -20,7 +20,8 @@ def check_geometry():
     for size in (1, 2, 4, 8, 16, 32, 64, 128):
         for row in range(size):
             for col in range(size):
-                level = (row ^ col).bit_length()
+                xor = row ^ col
+                level = sum(xor >= (1 << bit) for bit in range(size.bit_length() - 1)) if row >= col else 0
                 for index in range(size.bit_length()):
                     if index == 0:
                         expected = row == col
@@ -29,8 +30,10 @@ def check_geometry():
                         start = row // width * width
                         midpoint = start + width // 2
                         expected = midpoint <= row < start + width and start <= col < midpoint
+                    upper = 1 << index
                     actual = row >= col and level == index
-                    if expected != actual:
+                    interval = row >= col and upper // 2 <= xor < upper
+                    if expected != actual or expected != interval:
                         raise RuntimeError(f"Level mismatch: {size=}, {row=}, {col=}, {index=}")
                     checked += 1
     return checked
@@ -39,7 +42,8 @@ def check_geometry():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--geometry-only', action='store_true')
-    parser.add_argument('--layout', choices=('dense', 'varlen'), default='dense')
+    parser.add_argument('--layout', choices=('dense', 'varlen', 'packed'), default='dense')
+    parser.add_argument('--sequences', type=int, choices=(32, 128), default=32)
     parser.add_argument('--rounds', type=int, default=7)
     parser.add_argument('--repeats', type=int, default=10)
     parser.add_argument('--json', type=Path)
@@ -60,12 +64,14 @@ def main():
     torch.manual_seed(42)
     torch.backends.cuda.matmul.allow_tf32 = False
     lengths = [512, 512] if args.layout == 'dense' else [127, 257]
+    if args.layout == 'packed':
+        lengths = [31, 63, 65, 127] * (args.sequences // 4)
     batch, length = (2, 512) if args.layout == 'dense' else (1, sum(lengths))
     groups, heads, key_dim, value_dim = 2, 4, 128, 64
     levels = max(7, math.ceil(math.log2(max(lengths))) + 1)
     cu_seqlens = (
         torch.tensor([0, *lengths], dtype=torch.int64, device='cuda').cumsum(0)
-        if args.layout == 'varlen' else None
+        if args.layout != 'dense' else None
     )
     q = torch.randn(batch, length, groups, key_dim, device='cuda')
     k = torch.randn_like(q)
