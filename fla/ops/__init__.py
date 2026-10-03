@@ -11,6 +11,7 @@ from .attnres import fused_attnres
 from .based import fused_chunk_based, parallel_based
 from .comba import chunk_comba, fused_recurrent_comba
 from .delta_rule import chunk_delta_rule, fused_chunk_delta_rule, fused_recurrent_delta_rule
+from .diag_kdn import chunk_diag_kdn, fused_recurrent_diag_kdn
 from .forgetting_attn import parallel_forgetting_attn
 from .gated_delta_rule import chunk_gated_delta_rule, chunk_gdn, fused_recurrent_gated_delta_rule, fused_recurrent_gdn
 from .generalized_delta_rule import (
@@ -46,6 +47,7 @@ __all__ = [
     'chunk_abc',
     'chunk_comba',
     'chunk_delta_rule',
+    'chunk_diag_kdn',
     'chunk_dplr_delta_rule',
     'chunk_gated_delta_rule',
     'chunk_gdn',
@@ -73,6 +75,7 @@ __all__ = [
     'fused_chunk_simple_gla',
     'fused_recurrent_comba',
     'fused_recurrent_delta_rule',
+    'fused_recurrent_diag_kdn',
     'fused_recurrent_dplr_delta_rule',
     'fused_recurrent_gated_delta_rule',
     'fused_recurrent_gdn',

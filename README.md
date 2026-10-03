@@ -29,6 +29,7 @@
 
 ## News
 
+- [2026-09] 🛰️ Add Diagonal Kalman Delta Network (DiagKDN) to `fla` ([paper](https://arxiv.org/abs/2609.07816)) — KDA's gated delta-rule memory written along a per-channel Kalman gain.
 - [2026-07] 🐈 Add CAT (Compress and Attend Transformer) implementation to `fla` ([paper](https://arxiv.org/abs/2511.05313)) - a _meta_-sequence mixer that unlocks test-time control of inference costs.
 - [2026-07] 🧱 Add a [Gluon](https://triton-lang.org/main/getting-started/tutorials/gluon/) backend for [AttnRes](fla/ops/attnres).
 - [2026-07] 🚀 Add [FlashQLA](https://github.com/QwenLM/FlashQLA) backend for [Gated DeltaNet](fla/ops/gated_delta_rule).
@@ -119,6 +120,7 @@
 | 2026  | Preconditioned Gated DeltaNet | [Preconditioned DeltaNet: Curvature-aware Sequence Modeling for Linear Recurrences](https://arxiv.org/abs/2604.21100)                         | [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/ops/precond_gated_delta_rule)   |
 | 2026  |      Preconditioned KDA       | [Preconditioned DeltaNet: Curvature-aware Sequence Modeling for Linear Recurrences](https://arxiv.org/abs/2604.21100)                         | [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/ops/precond_kda)                |
 | 2026  |              CAT              | [Controllably Efficient Language Models](https://arxiv.org/abs/2511.05313)                                                                    | [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/models/cat)                     |
+| 2026  |            DiagKDN            | [Kalman Delta Networks: Uncertainty-aware Associative Memory](https://arxiv.org/abs/2609.07816)                                               | [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/ops/diag_kdn)                   |
 
 ## Installation
 
