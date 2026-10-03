@@ -10,6 +10,7 @@ from .attn import parallel_attn
 from .attnres import fused_attnres
 from .based import fused_chunk_based, parallel_based
 from .comba import chunk_comba, fused_recurrent_comba
+from .cyfa import chunk_cyfa, fused_recurrent_cyfa
 from .delta_rule import chunk_delta_rule, fused_chunk_delta_rule, fused_recurrent_delta_rule
 from .forgetting_attn import parallel_forgetting_attn
 from .gated_delta_rule import chunk_gated_delta_rule, chunk_gdn, fused_recurrent_gated_delta_rule, fused_recurrent_gdn
@@ -45,6 +46,7 @@ from .wall_attn import parallel_wall_attn, parallel_wall_attn_decode
 __all__ = [
     'chunk_abc',
     'chunk_comba',
+    'chunk_cyfa',
     'chunk_delta_rule',
     'chunk_dplr_delta_rule',
     'chunk_gated_delta_rule',
@@ -72,6 +74,7 @@ __all__ = [
     'fused_chunk_retention',
     'fused_chunk_simple_gla',
     'fused_recurrent_comba',
+    'fused_recurrent_cyfa',
     'fused_recurrent_delta_rule',
     'fused_recurrent_dplr_delta_rule',
     'fused_recurrent_gated_delta_rule',
