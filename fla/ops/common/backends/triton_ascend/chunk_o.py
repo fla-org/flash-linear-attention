@@ -16,7 +16,7 @@ import triton.runtime.driver as driver
 
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 from fla.ops.utils.op import exp2
-from fla.utils import input_guard
+from fla.utils import ascend_compile_kwargs, input_guard
 from fla.utils.ascend_ub_manager import (
     ASCEND_MAX_GRID_DIM,
     compute_row_tile_block_size,
@@ -1534,5 +1534,6 @@ def chunk_bwd_dqkwg_npu(
                 G_T_CONTIG=g_t_contig,
                 STATE_V_FIRST=state_v_first,
                 IS_VARLEN=cu_seqlens is not None,
+                **ascend_compile_kwargs(),
             )
     return dq, dk, dw, dg

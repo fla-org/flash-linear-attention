@@ -10,7 +10,20 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.op import exp
-from fla.utils import ascend_compile_kwargs, autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, input_guard
+from fla.utils import (
+    IS_NPU,
+    ascend_compile_kwargs,
+    autocast_custom_bwd,
+    autocast_custom_fwd,
+    autotune_cache_kwargs,
+    autotune_configs,
+    input_guard,
+)
+from fla.utils.ascend_ub_manager import (
+    ASCEND_LAUNCH_BLOCK_BUDGET,
+    ASCEND_MAX_GRID_DIM,
+    launch_grid_chunked,
+)
 
 
 @triton.heuristics({
@@ -19,14 +32,14 @@ from fla.utils import ascend_compile_kwargs, autocast_custom_bwd, autocast_custo
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
-    configs=[
+    configs=autotune_configs([
         triton.Config({}, num_warps=num_warps)
         for num_warps in [4, 8]
-    ],
+    ]),
     key=['BK', 'BV', 'USE_G', 'USE_G_GAMMA', 'USE_GK', 'USE_GV', 'STATE_V_FIRST'],
     **autotune_cache_kwargs,
 )
-@triton.jit(do_not_specialize=['B', 'T'])
+@triton.jit(do_not_specialize=['B', 'T', 'PID_OFFSET'])
 def fused_recurrent_fwd_kernel(
     q,
     k,
@@ -55,9 +68,10 @@ def fused_recurrent_fwd_kernel(
     USE_INITIAL_STATE: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    PID_OFFSET,
     STATE_V_FIRST: tl.constexpr = False,
 ):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0) + PID_OFFSET
     NV, NK = tl.cdiv(V, BV), tl.cdiv(K, BK)
     i_v, i_k, i_nh = (pid % NV).to(tl.int64), ((pid // NV) % NK).to(tl.int64), (pid // (NV * NK)).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
@@ -154,14 +168,14 @@ def fused_recurrent_fwd_kernel(
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
-    configs=[
+    configs=autotune_configs([
         triton.Config({}, num_warps=num_warps)
         for num_warps in [4]
-    ],
+    ]),
     key=['BK', 'BV', 'USE_G', 'USE_G_GAMMA', 'USE_GK', 'USE_GV', 'STATE_V_FIRST'],
     **autotune_cache_kwargs,
 )
-@triton.jit(do_not_specialize=['B', 'T'])
+@triton.jit(do_not_specialize=['B', 'T', 'PID_OFFSET'])
 def fused_recurrent_bwd_kernel(
     q,
     k,
@@ -199,9 +213,10 @@ def fused_recurrent_bwd_kernel(
     STORE_INITIAL_STATE_GRADIENT: tl.constexpr,
     USE_FINAL_STATE_GRADIENT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    PID_OFFSET,
     STATE_V_FIRST: tl.constexpr = False,
 ):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0) + PID_OFFSET
     NV, NK = tl.cdiv(V, BV), tl.cdiv(K, BK)
     i_v, i_k, i_nh = (pid % NV).to(tl.int64), ((pid // NV) % NK).to(tl.int64), (pid // (NV * NK)).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
@@ -437,7 +452,7 @@ def fused_recurrent_fwd(
     o = q.new_empty(NK, *v.shape, dtype=torch.float32)
 
     grid = (NV * NK * N * H,)
-    fused_recurrent_fwd_kernel[grid](
+    fwd_kwargs = dict(
         q=q,
         k=k,
         v=v,
@@ -463,7 +478,21 @@ def fused_recurrent_fwd(
         USE_GV=gv is not None,
         REVERSE=reverse,
         STATE_V_FIRST=state_v_first,
+        PID_OFFSET=0,
     )
+    if IS_NPU and grid[0] > ASCEND_MAX_GRID_DIM:
+        # Ascend caps the number of blocks per launch (coreDim <= 65535); long
+        # varlen batches pack N*H into a single grid axis and exceed it.
+        launch_grid_chunked(
+            fused_recurrent_fwd_kernel,
+            grid,
+            offset_keys=('PID_OFFSET',),
+            kernel_kwargs=fwd_kwargs,
+            # Keep each launch inside the AICore execution timeout.
+            budget=ASCEND_LAUNCH_BLOCK_BUDGET,
+        )
+    else:
+        fused_recurrent_fwd_kernel[grid](**fwd_kwargs)
     o = o.sum(0)
     return o, ht
 
@@ -507,7 +536,7 @@ def fused_recurrent_bwd(
 
     grid = (NV * NK * N * H,)
     # disable auto-multi-buffer on the gate-gradient accumulate
-    fused_recurrent_bwd_kernel[grid](
+    bwd_kwargs = dict(
         q=q,
         k=k,
         v=v,
@@ -541,8 +570,19 @@ def fused_recurrent_bwd(
         USE_GV=gv is not None,
         REVERSE=reverse,
         STATE_V_FIRST=state_v_first,
-        **ascend_compile_kwargs(),
+        PID_OFFSET=0,
     )
+    if IS_NPU and grid[0] > ASCEND_MAX_GRID_DIM:
+        launch_grid_chunked(
+            fused_recurrent_bwd_kernel,
+            grid,
+            offset_keys=('PID_OFFSET',),
+            kernel_kwargs=bwd_kwargs,
+            budget=ASCEND_LAUNCH_BLOCK_BUDGET,
+            compile_kwargs=ascend_compile_kwargs(),
+        )
+    else:
+        fused_recurrent_bwd_kernel[grid](**bwd_kwargs, **ascend_compile_kwargs())
     dq = dq.sum(0)
     dk = dk.sum(0)
     dv = dv.sum(0)

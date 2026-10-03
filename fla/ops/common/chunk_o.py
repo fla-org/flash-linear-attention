@@ -15,12 +15,18 @@ from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.op import exp2
 from fla.utils import (
     IS_INTEL,
+    IS_NPU,
     IS_NVIDIA_BLACKWELL,
     IS_NVIDIA_HOPPER,
     TRITON_ABOVE_3_4_0,
     TRITON_ABOVE_3_7_1,
     autotune_cache_kwargs,
     check_shared_mem,
+)
+from fla.utils.ascend_ub_manager import (
+    ASCEND_LAUNCH_BLOCK_BUDGET,
+    ASCEND_MAX_GRID_DIM,
+    launch_grid_chunked,
 )
 
 BKV_LIST = [64, 128] if check_shared_mem() else ([32, 64] if check_shared_mem('ada') else [32])
@@ -364,7 +370,7 @@ def chunk_bwd_kernel_dqkwg(
     key=['H', 'HV', 'K', 'V', 'BT', 'BK', 'BV', 'USE_G', 'USE_G_GAMMA', 'STATE_V_FIRST'],
     **autotune_cache_kwargs,
 )
-@triton.jit(do_not_specialize=['T'])
+@triton.jit(do_not_specialize=['T', 'V_OFFSET', 'NT_OFFSET', 'BH_OFFSET'])
 def chunk_bwd_kernel_dv(
     q,
     k,
@@ -388,8 +394,13 @@ def chunk_bwd_kernel_dv(
     USE_G_GAMMA: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     STATE_V_FIRST: tl.constexpr,
+    V_OFFSET,
+    NT_OFFSET,
+    BH_OFFSET,
 ):
-    i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_v, i_t, i_bh = tl.program_id(0) + V_OFFSET, tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_t += NT_OFFSET
+    i_bh += BH_OFFSET
     i_b, i_h = i_bh // HV, i_bh % HV
     if IS_VARLEN:
         i_tg = i_t
@@ -631,7 +642,7 @@ def chunk_bwd_dv(
 
     dv = torch.empty_like(do)
     grid = (NV, NT, B * HV)
-    chunk_bwd_kernel_dv[grid](
+    dv_kwargs = dict(
         q=q,
         k=k,
         g=g,
@@ -651,7 +662,24 @@ def chunk_bwd_dv(
         BK=BK,
         BV=BV,
         STATE_V_FIRST=state_v_first,
+        V_OFFSET=0,
+        NT_OFFSET=0,
+        BH_OFFSET=0,
     )
+    if IS_NPU and grid[0] * grid[1] * grid[2] > ASCEND_MAX_GRID_DIM:
+        # Ascend caps the number of blocks per launch (coreDim <= 65535); very
+        # large varlen batches exceed it on the packed (chunk, batch*head) grid.
+        launch_grid_chunked(
+            chunk_bwd_kernel_dv,
+            grid,
+            offset_keys=('V_OFFSET', 'NT_OFFSET', 'BH_OFFSET'),
+            kernel_kwargs=dv_kwargs,
+            # Keep each launch small enough to stay inside the AICore execution
+            # timeout on very large packed grids.
+            budget=ASCEND_LAUNCH_BLOCK_BUDGET,
+        )
+    else:
+        chunk_bwd_kernel_dv[grid](**dv_kwargs)
     return dv
 
 
