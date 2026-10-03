@@ -550,6 +550,7 @@ def bit_linear(x, weight, bias=None, norm_weight=None, norm_bias=None, eps=1e-8)
         norm_bias,
         weight,
         bias,
+        eps=eps,
         is_rms_norm=True,
     )
 
@@ -634,5 +635,6 @@ class FusedBitLinear(BitLinear):
             self.norm.bias,
             self.weight,
             self.bias,
+            eps=self.norm.eps,
             is_rms_norm=True,
         )
