@@ -15,10 +15,6 @@ from fla.utils import device
 DTYPE = torch.bfloat16
 
 
-def elu_p1_ref(x):
-    return torch.where(x >= 0, x + 1, x.clamp_max(0).exp()).to(x.dtype)
-
-
 def fwd(fn, *args):
     return fn(*args)
 
@@ -41,7 +37,6 @@ def fwdbwd(fn, *args):
         line_arg='provider',
         line_vals=[
             'elu_p1_fwd', 'elu_p1_fwdbwd',
-            'elu_p1_torch_fwd', 'elu_p1_torch_fwdbwd',
             'sigmoid_fwd', 'sigmoid_fwdbwd',
             'logsigmoid_fwd', 'logsigmoid_fwdbwd',
             'swish_fwd', 'swish_fwdbwd',
@@ -52,7 +47,6 @@ def fwdbwd(fn, *args):
         ],
         line_names=[
             'elu_p1_fwd', 'elu_p1_fwdbwd',
-            'elu_p1_torch_fwd', 'elu_p1_torch_fwdbwd',
             'sigmoid_fwd', 'sigmoid_fwdbwd',
             'logsigmoid_fwd', 'logsigmoid_fwdbwd',
             'swish_fwd', 'swish_fwdbwd',
@@ -62,7 +56,6 @@ def fwdbwd(fn, *args):
             'powglu_fwd', 'powglu_fwdbwd',
         ],
         styles=[('orange', '-'), ('orange', '--'),
-                ('purple', '-'), ('purple', '--'),
                 ('green', '-'), ('green', '--'),
                 ('blue', '-'), ('blue', '--'),
                 ('red', '-'), ('red', '--'),
@@ -88,9 +81,7 @@ def benchmark(B, T, D, provider):
     else:
         inputs = (x,)
 
-    if provider.startswith('elu_p1_torch'):
-        fn = elu_p1_ref
-    elif provider.startswith('elu_p1'):
+    if provider.startswith('elu_p1'):
         fn = elu_p1
     elif provider.startswith('sigmoid'):
         fn = sigmoid
