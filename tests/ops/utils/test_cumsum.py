@@ -48,17 +48,18 @@ def reversed_cumsum(x, dim=-1):
     return x.flip(dim).cumsum(dim).flip(dim).to(dtype)
 
 
-def test_scalar_reversed_cumsum_preserves_small_suffix():
+@pytest.mark.parametrize(('B', 'H'), [(1, 1), (2050, 32)], ids=['B1-H1', 'B2050-H32'])
+def test_scalar_reversed_cumsum_preserves_small_suffix(B: int, H: int):
     prefix = torch.full((32,), 1e8, dtype=torch.float, device=device)
     suffix = torch.ones(32, dtype=torch.float, device=device)
-    s = torch.cat((prefix, suffix)).reshape(1, 64, 1)
-    expected_suffix = torch.arange(32, 0, -1, dtype=torch.float, device=device)
+    s = torch.cat((prefix, suffix)).reshape(1, 64, 1).expand(B, 64, H).contiguous()
+    expected_suffix = torch.arange(32, 0, -1, dtype=torch.float, device=device).view(1, 32, 1).expand(B, 32, H)
 
     local = chunk_local_cumsum(s, chunk_size=64, reverse=True)
     global_ = chunk_global_cumsum(s, reverse=True)
 
-    torch.testing.assert_close(local[0, 32:, 0], expected_suffix, rtol=0, atol=0)
-    torch.testing.assert_close(global_[0, 32:, 0], expected_suffix, rtol=0, atol=0)
+    torch.testing.assert_close(local[:, 32:], expected_suffix, rtol=0, atol=0)
+    torch.testing.assert_close(global_[:, 32:], expected_suffix, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize(
