@@ -244,6 +244,28 @@ def test_parallel_dimensions(gluon_route, dtype, K, V, T, varlen, supplied_indic
 
 
 @requires_gluon
+@pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize('varlen', [False, True], ids=['dense', 'varlen'])
+@pytest.mark.parametrize('dim', [256, 512])
+def test_parallel_long_large_dimensions(gluon_route, dtype, varlen, dim):
+    _compare(
+        B=1,
+        T=2048,
+        H=1,
+        HQ=2,
+        K=dim,
+        V=dim,
+        dtype=dtype,
+        use_g=False,
+        use_sink=False,
+        window=None,
+        varlen=varlen,
+        supplied_indices=False,
+    )
+    assert gluon_route == {'fwd': 1, 'bwd': 1}
+
+
+@requires_gluon
 @pytest.mark.parametrize('window', [0, 1, 63, 64, 65, 1024])
 @pytest.mark.parametrize('varlen', [False, True])
 def test_parallel_window_boundary(gluon_route, window, varlen):
