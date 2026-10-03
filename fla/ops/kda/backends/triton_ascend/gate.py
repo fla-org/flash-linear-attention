@@ -440,9 +440,9 @@ def kda_gate_bwd_npu(
         K=K,
         BT=BT,
     )
-    dg = dg.view_as(g).type_as(g)
     dA = dA.sum(0).view_as(A_log).type_as(A_log) if A_log is not None else None
     dbias = dg.view(-1, H * K).sum(0).to(dt_bias) if dt_bias is not None else None
+    dg = dg.view_as(g).type_as(g)
     return dg, dA, dbias
 
 
