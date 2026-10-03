@@ -127,26 +127,27 @@ def _chunk_cyfa_qk_norm_bwd_kernel(
         m_acc = o_n < min((i_s + 1) * BS, N)
         mask = m_n[:, None] & m_d[None, :]
         acc_mask = m_acc[:, None] & m_d[None, :]
-        offsets = o_n[:, None] * D + o_d[None, :]
+        o_n_local = tl.arange(0, BT)
+        offsets = o_n_local[:, None] * D + o_d[None, :]
 
-        b_q = tl.load(q + offsets, mask=mask, other=0.0).to(tl.float32)
-        b_dq_out = tl.load(dq_out + offsets, mask=mask, other=0.0).to(tl.float32)
-        b_q_rstd = tl.load(q_rstd + o_n, mask=m_n, other=0.0)
+        b_q = tl.load((q + i_n * D) + offsets, mask=mask, other=0.0).to(tl.float32)
+        b_dq_out = tl.load((dq_out + i_n * D) + offsets, mask=mask, other=0.0).to(tl.float32)
+        b_q_rstd = tl.load((q_rstd + i_n) + o_n_local, mask=m_n, other=0.0)
         b_q_hat = tl.where(m_d[None, :], b_q * b_q_rstd[:, None], 0.0)
         b_q_wdy = b_dq_out * b_q_weight[None, :]
         b_q_proj = tl.sum(b_q_hat * b_q_wdy, axis=1) / D
         b_dq = (b_q_wdy - b_q_hat * b_q_proj[:, None]) * b_q_rstd[:, None]
-        tl.store(dq + offsets, b_dq.to(dq.dtype.element_ty), mask=mask)
+        tl.store((dq + i_n * D) + offsets, b_dq.to(dq.dtype.element_ty), mask=mask)
         b_dq_weight += tl.where(acc_mask, b_dq_out * b_q_hat, 0.0)
 
-        b_k = tl.load(k + offsets, mask=mask, other=0.0).to(tl.float32)
-        b_dk_out = tl.load(dk_out + offsets, mask=mask, other=0.0).to(tl.float32)
-        b_k_rstd = tl.load(k_rstd + o_n, mask=m_n, other=0.0)
+        b_k = tl.load((k + i_n * D) + offsets, mask=mask, other=0.0).to(tl.float32)
+        b_dk_out = tl.load((dk_out + i_n * D) + offsets, mask=mask, other=0.0).to(tl.float32)
+        b_k_rstd = tl.load((k_rstd + i_n) + o_n_local, mask=m_n, other=0.0)
         b_k_hat = tl.where(m_d[None, :], b_k * b_k_rstd[:, None], 0.0)
         b_k_wdy = b_dk_out * b_k_weight[None, :]
         b_k_proj = tl.sum(b_k_hat * b_k_wdy, axis=1) / D
         b_dk = (b_k_wdy - b_k_hat * b_k_proj[:, None]) * b_k_rstd[:, None]
-        tl.store(dk + offsets, b_dk.to(dk.dtype.element_ty), mask=mask)
+        tl.store((dk + i_n * D) + offsets, b_dk.to(dk.dtype.element_ty), mask=mask)
         b_dk_weight += tl.where(acc_mask, b_dk_out * b_k_hat, 0.0)
 
     partial_offset = i_s * D + o_d
@@ -1089,8 +1090,15 @@ def _chunk_cyfa_fused_readout_bwd_kernel(
     i_blk_global = i_blk.to(tl.int64)
     i_h_global = i_h.to(tl.int64)
     token_head_base = i_blk_global * BT * H + i_h_global
-    p_lambda = token_head_base + o_n_local * H
-    p_x = token_head_base * M + o_n_local[:, None] * (H * M) + o_j[None, :]
+    lambdas += token_head_base
+    dlambda += token_head_base
+    raw_logits += token_head_base * M
+    dweights += token_head_base * M
+    draw_logits += token_head_base * M
+    probs += token_head_base * C
+    dlogits += token_head_base * C
+    p_lambda = o_n_local * H
+    p_x = o_n_local[:, None] * (H * M) + o_j[None, :]
     b_lambda = tl.load(lambdas + p_lambda, mask=mask_n, other=0.0).to(tl.float32)
     raw = tl.load(raw_logits + p_x, mask=mask_n[:, None] & mask_j[None, :], other=0.0).to(tl.float32)
     dw = tl.load(dweights + p_x, mask=mask_n[:, None] & mask_j[None, :], other=0.0).to(tl.float32)
@@ -1117,7 +1125,7 @@ def _chunk_cyfa_fused_readout_bwd_kernel(
     p *= tl.where(denom > 0.0, 1.0 / denom, 0.0)[:, None]
     correction = tl.sum(p * dp, axis=1)
     dl = p * (dp - correction[:, None])
-    p_probs = token_head_base * C + o_n_local[:, None] * (H * C) + o_r[None, :]
+    p_probs = o_n_local[:, None] * (H * C) + o_r[None, :]
     p_store = p.to(probs.dtype.element_ty)
     dl_store = dl.to(dlogits.dtype.element_ty)
     tl.store(probs + p_probs, p_store, mask=mask_n[:, None] & mask_r[None, :])
@@ -1231,15 +1239,17 @@ def _chunk_cyfa_readout_table_grad_kernel(
     n_splits = tl.num_programs(2) // H
     i_h_global = i_h.to(tl.int64)
     for start in range(i_n * BN, T, n_splits * BN):
-        o_n = start + tl.arange(0, BN)
+        o_n_local = tl.arange(0, BN)
+        o_n = start + o_n_local
+        token_head_base = start * H + i_h_global
         m_n = o_n < T
-        b_lambda = tl.load(lambdas + o_n * H + i_h_global, mask=m_n, other=0.0).to(tl.float32)
-        p_l = (o_n[:, None] * H + i_h_global) * C + o_r[None, :]
-        p_x = (o_n[:, None] * H + i_h_global) * M + o_c[None, :]
-        l_a = tl.load(left_a + p_l, mask=m_n[:, None] & m_r[None, :], other=0.0)
-        l_b = tl.load(left_b + p_l, mask=m_n[:, None] & m_r[None, :], other=0.0)
-        x_a = tl.load(right_a + p_x, mask=m_n[:, None] & m_c[None, :], other=0.0).to(tl.float32)
-        x_b = tl.load(right_b + p_x, mask=m_n[:, None] & m_c[None, :], other=0.0).to(tl.float32)
+        b_lambda = tl.load((lambdas + token_head_base) + o_n_local * H, mask=m_n, other=0.0).to(tl.float32)
+        p_l = o_n_local[:, None] * (H * C) + o_r[None, :]
+        p_x = o_n_local[:, None] * (H * M) + o_c[None, :]
+        l_a = tl.load((left_a + token_head_base * C) + p_l, mask=m_n[:, None] & m_r[None, :], other=0.0)
+        l_b = tl.load((left_b + token_head_base * C) + p_l, mask=m_n[:, None] & m_r[None, :], other=0.0)
+        x_a = tl.load((right_a + token_head_base * M) + p_x, mask=m_n[:, None] & m_c[None, :], other=0.0).to(tl.float32)
+        x_b = tl.load((right_b + token_head_base * M) + p_x, mask=m_n[:, None] & m_c[None, :], other=0.0).to(tl.float32)
         a_even, a_odd = tl.split(tl.reshape(x_a, (BN, BC // 2, 2)))
         b_even, b_odd = tl.split(tl.reshape(x_b, (BN, BC // 2, 2)))
         o_even = i_c * BC + 2 * tl.arange(0, BC // 2)
