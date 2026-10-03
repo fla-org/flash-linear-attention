@@ -1,5 +1,20 @@
 # Stick-breaking attention
 
+## Usage
+
+`parallel_stickbreaking_attn` supports dense and packed variable-length inputs, grouped-query attention, and forward/backward in fp16 and bf16. Queries, keys, and values must have the same sequence length; KV-cache decoding with a shorter query sequence is not supported.
+
+```python
+from fla.ops.stickbreaking_attn import parallel_stickbreaking_attn
+
+# q: [B, T, HQ, K], k: [B, T, H, K], v: [B, T, H, V]
+o, rem = parallel_stickbreaking_attn(q=q, k=k, v=v)
+```
+
+`HQ` must be divisible by `H`, and the key/value head dimensions must be at most 256. For packed sequences, use batch size 1 and pass cumulative sequence boundaries as `cu_seqlens`. The output shapes are `[B, T, HQ, V]` for `o` and `[B, T, HQ]` for `rem`; both support gradients. By default, a query attends only to preceding keys; pass `attend_current=True` to include its own key.
+
+## Formulation
+
 For each visible key $j$, query $i$ assigns the weight
 
 $$
