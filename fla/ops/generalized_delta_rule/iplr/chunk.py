@@ -11,6 +11,7 @@ import triton.language as tl
 
 from fla.ops.generalized_delta_rule.iplr.wy_fast import prepare_wy_repr_fwd
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
+from fla.ops.utils.op import unflatten_program_id
 from fla.utils import (
     autocast_custom_bwd,
     autocast_custom_fwd,
@@ -60,7 +61,7 @@ def chunk_generalized_iplr_delta_rule_fwd_kernel_h(
     STORE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    i_k, i_v, i_nh = unflatten_program_id(X=tl.cdiv(K, BK), Y=tl.cdiv(V, BV))
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
@@ -313,7 +314,7 @@ def chunk_generalized_iplr_delta_rule_fwd_h(
     final_state = k.new_empty(N, H, K, V, dtype=torch.float32) if output_final_state else None
 
     v_new = torch.empty_like(u)
-    grid = (NK, NV, N * H)
+    grid = (NK * NV * N * H,)
 
     chunk_generalized_iplr_delta_rule_fwd_kernel_h[grid](
         k=k,

@@ -132,6 +132,9 @@ def _select_bwd_dhu_tiles(
     # bwd kernel is blockdim64: K is covered by up to four BK=64 slabs only.
     max_bk = 64
     desired_v = triton.next_power_of_2(V)
+    # partial K/V slabs plus tail-token masking can exceed UB with BV > 64 (e.g. D=100).
+    if K % 64 or V % 64:
+        desired_v = min(desired_v, 64)
     best: tuple[int, int, int] | None = None  # cost, BK, BV
 
     bk = 64
@@ -1013,6 +1016,10 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64_npu(
                         m_t = (i_t * BT + tl.arange(0, BT)) < T
                         b_dv *= tl.where(m_t, b_g_ratio, 0)[:, None]
                 b_dv += tl.load(p_dv, boundary_check=(0, 1))
+                # dot padding on Ascend can retain NaNs across replays with different tails.
+                # clear invalid tokens before the dH reduction: zero weights do not cancel NaNs.
+                m_t = (i_t * BT + tl.arange(0, BT)) < T
+                b_dv = tl.where(m_t[:, None], b_dv, 0.)
                 tl.store(p_dv2, b_dv.to(p_dv2.dtype.element_ty), boundary_check=(0, 1))
                 # Ascend tl.dot clobbers lhs; b_dv is lhs in the subtract dot across K-slabs.
                 b_dv_pristine = b_dv + 0.0

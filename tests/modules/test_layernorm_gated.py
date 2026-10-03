@@ -16,6 +16,7 @@ from fla.modules import (
     FusedRMSNormGated,
     FusedRMSNormSwishGateLinear,
 )
+from fla.modules.layernorm_gated import layernorm_fn
 from fla.utils import IS_NVIDIA_BLACKWELL, assert_close, device
 
 
@@ -196,3 +197,61 @@ def test_rmsnorm_gated_large_batch_offsets_large_d():
     assert x.grad is not None
     assert g.grad is not None
     assert tri.weight.grad is not None
+
+
+@pytest.mark.parametrize(
+    ('T', 'D', 'group_size', 'dtype', 'gate_mode'),
+    [
+        pytest.param(*test, id="T{}-D{}-group{}-{}-{}".format(*test))
+        for test in [
+            (1, 64, None, torch.float32, "none"),
+            (63, 200, 50, torch.float32, "none"),
+            (65, 1024, 256, torch.float16, "before"),
+            (100, 1028, 257, torch.bfloat16, "after"),
+            (33, 513, None, torch.float32, "before"),
+            (33, 513, None, torch.bfloat16, "after"),
+        ]
+    ],
+)
+@pytest.mark.parametrize("is_rms_norm", [False, True], ids=["layer", "rms"])
+def test_groupnorm_gated(T: int, D: int, group_size: int | None, dtype: torch.dtype, gate_mode: str, is_rms_norm: bool):
+    torch.manual_seed(42)
+    eps = 1e-5
+    x = torch.randn(2, T, D * 2, device=device, dtype=dtype)[..., ::2].requires_grad_(True)
+    weight = torch.randn(D, device=device, requires_grad=True)
+    bias = torch.randn(D, device=device, requires_grad=True) if not is_rms_norm else None
+    z = torch.randn_like(x, requires_grad=True) if gate_mode != 'none' else None
+    inputs = [t for t in (x, weight, bias, z) if t is not None]
+    do = torch.randn_like(x)
+
+    tri_y = layernorm_fn(
+        x=x,
+        weight=weight,
+        bias=bias,
+        z=z,
+        eps=eps,
+        group_size=group_size,
+        norm_before_gate=gate_mode != 'before',
+        is_rms_norm=is_rms_norm,
+    )
+    tri_grads = torch.autograd.grad(tri_y, inputs, do)
+
+    ref_x = x.float()
+    if gate_mode == 'before':
+        ref_x = ref_x * F.silu(z.float())
+    grouped = ref_x.reshape(2, T, -1, group_size or D)
+    if not is_rms_norm:
+        grouped = grouped - grouped.mean(-1, keepdim=True)
+    ref_y = (grouped * torch.rsqrt(grouped.square().mean(-1, keepdim=True) + eps)).reshape_as(x) * weight
+    if bias is not None:
+        ref_y = ref_y + bias
+    if gate_mode == 'after':
+        ref_y = ref_y * F.silu(z.float())
+    ref_y = ref_y.to(dtype)
+    ref_grads = torch.autograd.grad(ref_y, inputs, do)
+
+    tolerance = 5e-3 if dtype == torch.bfloat16 else 1e-3
+    assert_close(' y', ref_y, tri_y, tolerance)
+    names = [name for name, t in zip(('dx', 'dw', 'db', 'dz'), (x, weight, bias, z)) if t is not None]
+    for name, expected, actual in zip(names, ref_grads, tri_grads):
+        assert_close(name, expected, actual, tolerance)

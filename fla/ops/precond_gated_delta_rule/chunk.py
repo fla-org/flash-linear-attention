@@ -426,7 +426,6 @@ def chunk_precond_gated_delta_rule(
     x: float = 1.5,
     eps: float = 1e-6,
     log_atk_scale: torch.Tensor = None,
-    **kwargs,
 ):
     r"""
     Args:
@@ -524,11 +523,6 @@ def chunk_precond_gated_delta_rule(
         raise ValueError(
             f"For GVA, num_v_heads (HV={HV}) must be evenly divisible by "
             f"num_heads (H={H}), but got HV % H = {HV % H}"
-        )
-
-    if 'head_first' in kwargs:
-        raise DeprecationWarning(
-            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
         )
 
     if cp_context is not None:

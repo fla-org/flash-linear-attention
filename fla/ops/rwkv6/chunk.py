@@ -14,7 +14,7 @@ from fla.ops.common.chunk_h import chunk_fwd_h
 from fla.ops.gla.chunk import chunk_gla_bwd_dA, chunk_gla_bwd_dv, chunk_gla_fwd_o_gk
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 from fla.ops.utils.constant import RCP_LN2
-from fla.ops.utils.op import exp2
+from fla.ops.utils.op import exp2, unflatten_program_id
 from fla.utils import (
     autocast_custom_bwd,
     autocast_custom_fwd,
@@ -452,7 +452,7 @@ def chunk_rwkv6_bwd_kernel_dh(
     USE_FINAL_STATE_GRADIENT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    i_k, i_v, i_nh = unflatten_program_id(X=tl.cdiv(K, BK), Y=tl.cdiv(V, BV))
     i_n, i_hq = i_nh // HQ, i_nh % HQ
     i_h = i_hq // NG
     if IS_VARLEN:
@@ -910,7 +910,7 @@ def chunk_rwkv6_bwd_dh(
     dh = k.new_empty(B, NT, HQ, K, V, dtype=k.dtype if not states_in_fp32 else torch.float)
     dh0 = torch.empty_like(h0, dtype=torch.float) if h0 is not None else None
 
-    def grid(meta): return (triton.cdiv(K, meta['BK']), triton.cdiv(V, meta['BV']), N * H)
+    def grid(meta): return (triton.cdiv(K, meta['BK']) * triton.cdiv(V, meta['BV']) * N * H,)
     chunk_rwkv6_bwd_kernel_dh[grid](
         q=q,
         gi=gi,

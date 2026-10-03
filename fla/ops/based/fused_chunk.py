@@ -380,12 +380,7 @@ def fused_chunk_based(
     v: torch.Tensor,
     scale: float | None = None,
     use_norm: bool = True,
-    **kwargs,
 ):
-    if 'head_first' in kwargs:
-        raise DeprecationWarning(
-            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
-        )
     assert q.shape[-1] <= 16, 'only support feature dimension up to 16.'
     if scale is None:
         scale = q.shape[-1] ** -0.5
