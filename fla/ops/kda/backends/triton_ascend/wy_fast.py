@@ -138,6 +138,7 @@ def recompute_w_u_fwd_kda_kernel_npu(
     IS_VARLEN: tl.constexpr,
     BETA_T_CONTIG: tl.constexpr,
     GK_T_CONTIG: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
 ):
     T_max = T
     BH = B * HV
@@ -148,90 +149,97 @@ def recompute_w_u_fwd_kda_kernel_npu(
         i_bh = task_id % BH
         i_hv = i_bh % HV
         i_h = i_hv // (HV // H)
+        is_valid = True
         if IS_VARLEN:
             i_n, i_t = tl.load(chunk_indices + i_t_o * 2).to(tl.int32), tl.load(
                 chunk_indices + i_t_o * 2 + 1,
             ).to(tl.int32)
-            bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(
-                cu_seqlens + i_n + 1,
-            ).to(tl.int64)
-            T = (eos - bos).to(tl.int32)
-            beta_bh = bos + i_hv * T_max
-            gk_bh = i_hv * T_max * K + bos * K
-        else:
-            i_b = i_bh // HV
-            i_t = i_t_o
-            bos = tl.cast(i_b, tl.int64) * T
-            beta_bh = (tl.cast(i_b, tl.int64) * HV + i_hv) * T_max
-            gk_bh = (tl.cast(i_b, tl.int64) * HV + i_hv) * T_max * K
+            if USE_GRAPH:
+                # graph padding uses [-1, 0]; exclude it before sequence-dependent memory accesses.
+                is_valid = i_n >= 0
+        # skip only this task: returning would drop later valid tasks assigned to this core.
+        if is_valid:
+            if IS_VARLEN:
+                bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(
+                    cu_seqlens + i_n + 1,
+                ).to(tl.int64)
+                T = (eos - bos).to(tl.int32)
+                beta_bh = bos + i_hv * T_max
+                gk_bh = i_hv * T_max * K + bos * K
+            else:
+                i_b = i_bh // HV
+                i_t = i_t_o
+                bos = tl.cast(i_b, tl.int64) * T
+                beta_bh = (tl.cast(i_b, tl.int64) * HV + i_hv) * T_max
+                gk_bh = (tl.cast(i_b, tl.int64) * HV + i_hv) * T_max * K
 
-        k_ptr = k + (bos * H + i_h) * K
-        v_ptr = v + (bos * HV + i_hv) * V
-        u_ptr = u + (bos * HV + i_hv) * V
-        w_ptr = w + (bos * HV + i_hv) * K
-        A_ptr = A + (bos * HV + i_hv) * BT
-        kg_ptr = kg + (bos * HV + i_hv) * K
-        if BETA_T_CONTIG:
-            beta_ptr = beta + beta_bh
-        else:
-            beta_ptr = beta + bos * HV + i_hv
-        if GK_T_CONTIG:
-            gk_ptr = gk + gk_bh
-        else:
-            gk_ptr = gk + (bos * HV + i_hv) * K
-        if STORE_QG:
-            q_ptr = q + (bos * H + i_h) * K
-            qg_ptr = qg + (bos * HV + i_hv) * K
-
-        p_b = _beta_block_ptr(beta_ptr, T, i_t, BT, BETA_T_CONTIG, HV)
-        b_b = tl.load(p_b, boundary_check=(0,))
-
-        p_A = tl.make_block_ptr(A_ptr, (T, BT), (HV * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
-
-        last_idx = min(i_t * BT + BT, T) - 1
-
-        for i_v in range(tl.cdiv(V, BV)):
-            p_v = tl.make_block_ptr(v_ptr, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-            p_u = tl.make_block_ptr(u_ptr, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-            b_v = tl.load(p_v, boundary_check=(0, 1))
-            b_vb = (b_v * b_b[:, None]).to(b_v.dtype)
-            # Ascend tl.dot may clobber the left operand; reload A each V tile.
-            b_A = tl.load(p_A, boundary_check=(0, 1))
-            b_u = tl.dot(b_A, b_vb, allow_tf32=False)
-            tl.store(p_u, b_u.to(p_u.dtype.element_ty), boundary_check=(0, 1))
-
-        for i_k in range(tl.cdiv(K, BK)):
-            p_k = tl.make_block_ptr(k_ptr, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-            b_k = tl.load(p_k, boundary_check=(0, 1))
-            b_kb = b_k * b_b[:, None]
-
-            p_gk = _gk_block_ptr(gk_ptr, T, K, i_t, i_k, BT, BK, GK_T_CONTIG, HV)
-            b_gk = tl.load(p_gk, boundary_check=(0, 1)).to(tl.float32)
-            b_gk_exp = exp2(b_gk)
-            b_kb = b_kb * b_gk_exp
-
+            k_ptr = k + (bos * H + i_h) * K
+            v_ptr = v + (bos * HV + i_hv) * V
+            u_ptr = u + (bos * HV + i_hv) * V
+            w_ptr = w + (bos * HV + i_hv) * K
+            A_ptr = A + (bos * HV + i_hv) * BT
+            kg_ptr = kg + (bos * HV + i_hv) * K
+            if BETA_T_CONTIG:
+                beta_ptr = beta + beta_bh
+            else:
+                beta_ptr = beta + bos * HV + i_hv
+            if GK_T_CONTIG:
+                gk_ptr = gk + gk_bh
+            else:
+                gk_ptr = gk + (bos * HV + i_hv) * K
             if STORE_QG:
-                p_q = tl.make_block_ptr(q_ptr, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-                p_qg = tl.make_block_ptr(qg_ptr, (T, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-                b_q = tl.load(p_q, boundary_check=(0, 1))
-                tl.store(p_qg, (b_q * b_gk_exp).to(p_qg.dtype.element_ty), boundary_check=(0, 1))
+                q_ptr = q + (bos * H + i_h) * K
+                qg_ptr = qg + (bos * HV + i_hv) * K
 
-            if STORE_KG:
-                o_k = i_k * BK + tl.arange(0, BK)
-                m_k = o_k < K
-                if GK_T_CONTIG:
-                    b_gn = tl.load(gk_ptr + last_idx * K + o_k, mask=m_k, other=0.0).to(tl.float32)
-                else:
-                    b_gn = tl.load(gk_ptr + last_idx * HV * K + o_k, mask=m_k, other=0.0).to(tl.float32)
-                b_kg = b_k * exp2(b_gn[None, :] - b_gk)
-                p_kg = tl.make_block_ptr(kg_ptr, (T, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-                tl.store(p_kg, b_kg.to(p_kg.dtype.element_ty), boundary_check=(0, 1))
+            p_b = _beta_block_ptr(beta_ptr, T, i_t, BT, BETA_T_CONTIG, HV)
+            b_b = tl.load(p_b, boundary_check=(0,))
 
-            # Ascend tl.dot may clobber the left operand; reload A each K tile.
-            b_A = tl.load(p_A, boundary_check=(0, 1))
-            b_w = tl.dot(b_A, b_kb.to(b_k.dtype), allow_tf32=False)
-            p_w = tl.make_block_ptr(w_ptr, (T, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-            tl.store(p_w, b_w.to(p_w.dtype.element_ty), boundary_check=(0, 1))
+            p_A = tl.make_block_ptr(A_ptr, (T, BT), (HV * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
+
+            last_idx = min(i_t * BT + BT, T) - 1
+
+            for i_v in range(tl.cdiv(V, BV)):
+                p_v = tl.make_block_ptr(v_ptr, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+                p_u = tl.make_block_ptr(u_ptr, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+                b_v = tl.load(p_v, boundary_check=(0, 1))
+                b_vb = (b_v * b_b[:, None]).to(b_v.dtype)
+                # Ascend tl.dot may clobber the left operand; reload A each V tile.
+                b_A = tl.load(p_A, boundary_check=(0, 1))
+                b_u = tl.dot(b_A, b_vb, allow_tf32=False)
+                tl.store(p_u, b_u.to(p_u.dtype.element_ty), boundary_check=(0, 1))
+
+            for i_k in range(tl.cdiv(K, BK)):
+                p_k = tl.make_block_ptr(k_ptr, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+                b_k = tl.load(p_k, boundary_check=(0, 1))
+                b_kb = b_k * b_b[:, None]
+
+                p_gk = _gk_block_ptr(gk_ptr, T, K, i_t, i_k, BT, BK, GK_T_CONTIG, HV)
+                b_gk = tl.load(p_gk, boundary_check=(0, 1)).to(tl.float32)
+                b_gk_exp = exp2(b_gk)
+                b_kb = b_kb * b_gk_exp
+
+                if STORE_QG:
+                    p_q = tl.make_block_ptr(q_ptr, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+                    p_qg = tl.make_block_ptr(qg_ptr, (T, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+                    b_q = tl.load(p_q, boundary_check=(0, 1))
+                    tl.store(p_qg, (b_q * b_gk_exp).to(p_qg.dtype.element_ty), boundary_check=(0, 1))
+
+                if STORE_KG:
+                    o_k = i_k * BK + tl.arange(0, BK)
+                    m_k = o_k < K
+                    if GK_T_CONTIG:
+                        b_gn = tl.load(gk_ptr + last_idx * K + o_k, mask=m_k, other=0.0).to(tl.float32)
+                    else:
+                        b_gn = tl.load(gk_ptr + last_idx * HV * K + o_k, mask=m_k, other=0.0).to(tl.float32)
+                    b_kg = b_k * exp2(b_gn[None, :] - b_gk)
+                    p_kg = tl.make_block_ptr(kg_ptr, (T, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+                    tl.store(p_kg, b_kg.to(p_kg.dtype.element_ty), boundary_check=(0, 1))
+
+                # Ascend tl.dot may clobber the left operand; reload A each K tile.
+                b_A = tl.load(p_A, boundary_check=(0, 1))
+                b_w = tl.dot(b_A, b_kb.to(b_k.dtype), allow_tf32=False)
+                p_w = tl.make_block_ptr(w_ptr, (T, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+                tl.store(p_w, b_w.to(p_w.dtype.element_ty), boundary_check=(0, 1))
 
 
 @input_guard
@@ -246,8 +254,6 @@ def recompute_w_u_fwd_kda_npu(
     chunk_indices: torch.LongTensor | None = None,
     use_graph: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
-    if use_graph:
-        raise NotImplementedError("use_graph is not supported on the Ascend NPU backend")
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
     BT = A.shape[-1]
@@ -261,10 +267,10 @@ def recompute_w_u_fwd_kda_npu(
     beta, beta_t_contig = _hv_t_npu_arg(beta, HV)
     gk, gk_t_contig = _hv_t_npu_arg(gk, HV)
 
-    w = k.new_empty(B, T, HV, K)
-    u = torch.empty_like(v)
-    qg = k.new_empty(B, T, HV, K) if store_qg else None
-    kg = k.new_empty(B, T, HV, K)
+    w = (k.new_zeros if use_graph else k.new_empty)(B, T, HV, K)
+    u = (torch.zeros_like if use_graph else torch.empty_like)(v)
+    qg = (k.new_zeros if use_graph else k.new_empty)(B, T, HV, K) if store_qg else None
+    kg = (k.new_zeros if use_graph else k.new_empty)(B, T, HV, K)
 
     _launch_wy_core_grid(
         recompute_w_u_fwd_kda_kernel_npu,
@@ -293,6 +299,7 @@ def recompute_w_u_fwd_kda_npu(
             BV=BV,
             BETA_T_CONTIG=beta_t_contig,
             GK_T_CONTIG=gk_t_contig,
+            USE_GRAPH=use_graph,
         ),
     )
     return w, u, qg, kg
