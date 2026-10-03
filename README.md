@@ -29,7 +29,7 @@
 
 ## News
 
-- [2026-10] Add [Stick-Breaking Attention](fla/ops/stickbreaking_attn) kernels with dense and variable-length forward/backward passes and grouped-query attention ([paper](https://arxiv.org/abs/2410.17980)).
+- [2026-10] 🎉 Add Stick-Breaking Attention kernels to `fla` ([paper](https://arxiv.org/abs/2410.17980)).
 - [2026-07] 🐈 Add CAT (Compress and Attend Transformer) implementation to `fla` ([paper](https://arxiv.org/abs/2511.05313)) - a _meta_-sequence mixer that unlocks test-time control of inference costs.
 - [2026-07] 🧱 Add a [Gluon](https://triton-lang.org/main/getting-started/tutorials/gluon/) backend for [AttnRes](fla/ops/attnres).
 - [2026-07] 🚀 Add [FlashQLA](https://github.com/QwenLM/FlashQLA) backend for [Gated DeltaNet](fla/ops/gated_delta_rule).
@@ -45,13 +45,13 @@
 - [2026-04] 🧱 Add [TileLang](https://github.com/tile-ai/tilelang) backend support for selected kernels.
 - [2026-04] 🎯 Add [GPT-OSS](https://openai.com/index/introducing-gpt-oss/)-style attention sink support to `fla`'s attention kernels.
 - [2026-03] 🚀 Add [Context Parallel](fla/ops/cp/README.md) support for KDA and GDN, enabling efficient distributed training across sequence dimension.
-- [2025-10] 🌘 Add Kimi Delta Attention (KDA) implementation to `fla` ([paper](https://arxiv.org/abs/2510.26692)).
-- [2025-09] 🌲 Add DeltaFormer implementation to `fla` ([paper](https://arxiv.org/abs/2505.19488v1)).
-- [2025-09] 🐻 Thrilled to announce that [GDN](fla/ops/gated_delta_rule) has been integrated into Qwen3-Next. Check out their [blog post](https://qwen.ai/blog?id=4074cca80393150c248e508aa62983f9cb7d27cd&from=research.latest-advancements-list) for more info!
 
 <details>
 <summary>Older news</summary>
 
+- [2025-10] 🌘 Add Kimi Delta Attention (KDA) implementation to `fla` ([paper](https://arxiv.org/abs/2510.26692)).
+- [2025-09] 🌲 Add DeltaFormer implementation to `fla` ([paper](https://arxiv.org/abs/2505.19488v1)).
+- [2025-09] 🐻 Thrilled to announce that [GDN](fla/ops/gated_delta_rule) has been integrated into Qwen3-Next. Check out their [blog post](https://qwen.ai/blog?id=4074cca80393150c248e508aa62983f9cb7d27cd&from=research.latest-advancements-list) for more info!
 - [2025-08] 🌲 Add Log-Linear Attention implementation to `fla` ([paper](https://arxiv.org/abs/2506.04761)).
 - [2025-08] 🎓 Add MoM implementation to `fla` ([paper](https://arxiv.org/abs/2502.13685)).
 - [2025-07] 🐳 Add MLA implementation to `fla` ([paper](https://arxiv.org/abs/2405.04434)).
@@ -144,8 +144,6 @@ See [INSTALL.md](INSTALL.md) for the full backend table, XPU / NPU (Ascend) / CP
 
 
 ## Usage
-
-Stick-breaking attention is available through `fla.ops.stickbreaking_attn` for fp16/bf16 inputs. See the [operator documentation](fla/ops/stickbreaking_attn/README.md) for usage and supported shapes. Layer/model integration and KV-cache decoding are not yet implemented.
 
 ### Token Mixing
 
