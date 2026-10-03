@@ -43,7 +43,7 @@ Let $d\mathbf{o}_i = \partial\mathcal{L}/\partial\mathbf{o}_i$ and $dr_i = \part
 ```math
 \begin{aligned}
 a_{ij} &= A_{ij}(d\mathbf{o}_i)^\top\mathbf{v}_j, \\
-c_i &= \sum_{j \in \mathcal{V}_i} a_{ij} + dr_i r_i, \\
+\delta_i &= \sum_{j \in \mathcal{V}_i} a_{ij} + dr_i r_i, \\
 n_{ij} &= \sum_{\substack{\ell \in \mathcal{V}_i \\ \ell > j}} a_{i\ell}.
 \end{aligned}
 ```
@@ -51,10 +51,10 @@ n_{ij} &= \sum_{\substack{\ell \in \mathcal{V}_i \\ \ell > j}} a_{i\ell}.
 The logit gradient is:
 
 ```math
-dz_{ij} = \frac{\partial\mathcal{L}}{\partial z_{ij}} = a_{ij} - \beta_{ij}(c_i - n_{ij}).
+dz_{ij} = \frac{\partial\mathcal{L}}{\partial z_{ij}} = a_{ij} - \beta_{ij}(\delta_i - n_{ij}).
 ```
 
-The backward computes $c_i$ from fp32 sums because using the rounded output in $(d\mathbf{o}_i)^\top\mathbf{o}_i$ loses precision during subtraction. It stores the remaining stick log and the sum over nearer keys before each key block, allowing the separate key/value gradient kernel to reconstruct each tile. Each key block has one owner, so gradient accumulation uses a fixed order without atomics.
+The backward computes $\delta_i$ from fp32 sums because using the rounded output in $(d\mathbf{o}_i)^\top\mathbf{o}_i$ loses precision during subtraction. It stores the remaining stick log and the sum over nearer keys before each key block, allowing the separate key/value gradient kernel to reconstruct each tile. Each key block has one owner, so gradient accumulation uses a fixed order without atomics.
 
 [^1]: https://arxiv.org/abs/2410.17980
 [^2]: https://github.com/shawntan/stickbreaking-attention

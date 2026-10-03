@@ -75,7 +75,7 @@ def parallel_stickbreaking_attn_fwd_kernel(
     # [BT, BV]
     b_o = tl.zeros([BT, BV], dtype=tl.float32)
     # [BT]
-    b_acc = tl.zeros([BT], dtype=tl.float32)
+    b_log_rem = tl.zeros([BT], dtype=tl.float32)
 
     # visit nearer blocks first to carry their remaining stick into earlier blocks
     for i_s in range(0, BT, BS):
@@ -96,10 +96,10 @@ def parallel_stickbreaking_attn_fwd_kernel(
         # [BT, BS]
         b_s = tl.dot(b_q, b_k) * scale * RCP_LN2
         # masked keys must leave the remaining stick unchanged
-        b_lb = tl.where(m_s, -softplus2(b_s), 0.)
-        b_p = tl.where(m_s, exp2(b_s + tl.cumsum(b_lb, axis=1, reverse=True) + b_acc[:, None]), 0.)
+        b_log_om_beta = tl.where(m_s, -softplus2(b_s), 0.)
+        b_p = tl.where(m_s, exp2(b_s + tl.cumsum(b_log_om_beta, axis=1, reverse=True) + b_log_rem[:, None]), 0.)
         b_o += tl.dot(b_p.to(b_v.dtype), b_v)
-        b_acc += tl.sum(b_lb, 1)
+        b_log_rem += tl.sum(b_log_om_beta, 1)
 
     # blocks below the diagonal need no causal mask
     for i_s in range(BT, (i_t + 1) * BT, BS):
@@ -114,31 +114,22 @@ def parallel_stickbreaking_attn_fwd_kernel(
 
         # [BT, BS]
         b_s = tl.dot(b_q, b_k) * scale * RCP_LN2
-        b_lb = -softplus2(b_s)
-        b_p = exp2(b_s + tl.cumsum(b_lb, axis=1, reverse=True) + b_acc[:, None])
+        b_log_om_beta = -softplus2(b_s)
+        b_p = exp2(b_s + tl.cumsum(b_log_om_beta, axis=1, reverse=True) + b_log_rem[:, None])
         b_o += tl.dot(b_p.to(b_v.dtype), b_v)
-        b_acc += tl.sum(b_lb, 1)
+        b_log_rem += tl.sum(b_log_om_beta, 1)
 
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=m_q[:, None] & (o_v[None, :] < V))
     if i_v == 0:
-        tl.store(p_rem, exp2(b_acc).to(p_rem.dtype.element_ty), mask=m_q)
+        tl.store(p_rem, exp2(b_log_rem).to(p_rem.dtype.element_ty), mask=m_q)
 
 
 @triton.jit
-def _stickbreaking_attn_tile(b_s, b_acc, m_s, AXIS: tl.constexpr):
+def _stickbreaking_attn_weights(b_s, b_log_rem, m_s, AXIS: tl.constexpr):
     # the scan axis follows keys, which are transposed in the dkv kernel
-    b_lb = tl.where(m_s, -softplus2(b_s), 0.)
-    b_p = tl.where(m_s, exp2(b_s + tl.cumsum(b_lb, axis=AXIS, reverse=True) + b_acc), 0.)
-    return b_lb, b_p
-
-
-@triton.jit
-def _stickbreaking_attn_bwd_tile(b_s, b_lb, b_p, b_dp, b_sa, b_c, m_s, AXIS: tl.constexpr):
-    # see README.md for the logit gradient formula
-    b_a = b_p * b_dp
-    b_near = tl.cumsum(b_a, axis=AXIS, reverse=True) - b_a + b_sa
-    b_dz = tl.where(m_s, b_a - exp2(b_s + b_lb) * (b_c - b_near), 0.)
-    return b_a, b_dz
+    b_log_om_beta = tl.where(m_s, -softplus2(b_s), 0.)
+    b_p = tl.where(m_s, exp2(b_s + tl.cumsum(b_log_om_beta, axis=AXIS, reverse=True) + b_log_rem), 0.)
+    return b_log_om_beta, b_p
 
 
 @triton.heuristics({'IS_VARLEN': lambda args: args['cu_seqlens'] is not None})
@@ -159,9 +150,9 @@ def parallel_stickbreaking_attn_bwd_kernel_dq(
     do,
     drem,
     dq,
-    acc,
-    sa,
-    c,
+    log_rem,
+    delta_acc,
+    delta,
     scale,
     cu_seqlens,
     chunk_indices,
@@ -199,23 +190,23 @@ def parallel_stickbreaking_attn_bwd_kernel_dq(
     p_q = q + (bos * HQ + i_hq) * K + o_q[:, None] * (HQ*K) + o_d[None, :]
     p_do = do + (bos * HQ + i_hq) * V + o_q[:, None] * (HQ*V) + o_v[None, :]
     p_dq = dq + (bos * HQ + i_hq) * K + o_q[:, None] * (HQ*K) + o_d[None, :]
-    p_snap = (bos + o_q) * HQ * NS + i_hq * NS
+    o_snap = (bos + o_q) * HQ * NS + i_hq * NS
 
     # [BS, BK]
     b_q = tl.load(p_q, mask=m_q[:, None] & (o_d[None, :] < K), other=0.0)
     # [BS, BV]
     b_do = tl.load(p_do, mask=m_q[:, None] & (o_v[None, :] < V), other=0.0)
     # [BS]
-    b_acc = tl.zeros([BS], dtype=tl.float32)
-    b_sa = tl.zeros([BS], dtype=tl.float32)
+    b_log_rem = tl.zeros([BS], dtype=tl.float32)
+    b_delta_acc = tl.zeros([BS], dtype=tl.float32)
 
     # snapshots let the dkv kernel reconstruct each tile independently
     for i_s in range(0, (i_t + 1) * BS, BS):
         i_k = i_t - i_s // BS
         o_k = i_k * BS + tl.arange(0, BS)
         m_k = o_k < T
-        tl.store(acc + p_snap + i_k, b_acc, mask=m_q)
-        tl.store(sa + p_snap + i_k, b_sa, mask=m_q)
+        tl.store(log_rem + o_snap + i_k, b_log_rem, mask=m_q)
+        tl.store(delta_acc + o_snap + i_k, b_delta_acc, mask=m_q)
         p_k = k + (bos * H + i_h) * K + o_d[:, None] + o_k[None, :] * (H*K)
         p_v = v + (bos * H + i_h) * V + o_v[:, None] + o_k[None, :] * (H*V)
         # [BK, BS]
@@ -229,16 +220,16 @@ def parallel_stickbreaking_attn_bwd_kernel_dq(
             m_s = (o_q[:, None] > o_k[None, :]) & m_k[None, :]
         # [BS, BS]
         b_s = tl.dot(b_q, b_k) * scale * RCP_LN2
-        b_lb, b_p = _stickbreaking_attn_tile(b_s=b_s, b_acc=b_acc[:, None], m_s=m_s, AXIS=1)
-        b_acc += tl.sum(b_lb, 1)
-        b_sa += tl.sum(b_p * tl.dot(b_do, b_v), 1)
+        b_log_om_beta, b_p = _stickbreaking_attn_weights(b_s=b_s, b_log_rem=b_log_rem[:, None], m_s=m_s, AXIS=1)
+        b_log_rem += tl.sum(b_log_om_beta, 1)
+        b_delta_acc += tl.sum(b_p * tl.dot(b_do, b_v), 1)
 
     # recompute row totals in fp32 to avoid cancellation against rounded outputs
-    b_c = b_sa + tl.load(drem + (bos + o_q) * HQ + i_hq, mask=m_q, other=0.).to(tl.float32) * exp2(b_acc)
-    tl.store(c + (bos + o_q) * HQ + i_hq, b_c, mask=m_q)
+    b_delta = b_delta_acc + tl.load(drem + (bos + o_q) * HQ + i_hq, mask=m_q, other=0.).to(tl.float32) * exp2(b_log_rem)
+    tl.store(delta + (bos + o_q) * HQ + i_hq, b_delta, mask=m_q)
 
-    b_acc = tl.zeros([BS], dtype=tl.float32)
-    b_sa = tl.zeros([BS], dtype=tl.float32)
+    b_log_rem = tl.zeros([BS], dtype=tl.float32)
+    b_delta_acc = tl.zeros([BS], dtype=tl.float32)
     # [BS, BK]
     b_dq = tl.zeros([BS, BK], dtype=tl.float32)
     for i_s in range(0, (i_t + 1) * BS, BS):
@@ -259,20 +250,14 @@ def parallel_stickbreaking_attn_bwd_kernel_dq(
         # [BS, BS]
         b_s = tl.dot(b_q, b_k) * scale * RCP_LN2
         b_dp = tl.dot(b_do, b_v)
-        b_lb, b_p = _stickbreaking_attn_tile(b_s=b_s, b_acc=b_acc[:, None], m_s=m_s, AXIS=1)
-        b_a, b_dz = _stickbreaking_attn_bwd_tile(
-            b_s=b_s,
-            b_lb=b_lb,
-            b_p=b_p,
-            b_dp=b_dp,
-            b_sa=b_sa[:, None],
-            b_c=b_c[:, None],
-            m_s=m_s,
-            AXIS=1,
-        )
-        b_dq += tl.dot(b_dz.to(b_k.dtype), tl.trans(b_k))
-        b_acc += tl.sum(b_lb, 1)
-        b_sa += tl.sum(b_a, 1)
+        b_log_om_beta, b_p = _stickbreaking_attn_weights(b_s=b_s, b_log_rem=b_log_rem[:, None], m_s=m_s, AXIS=1)
+        # see README.md for the logit gradient formula
+        b_pdp = b_p * b_dp
+        b_delta_cumsum = tl.cumsum(b_pdp, axis=1, reverse=True) - b_pdp + b_delta_acc[:, None]
+        b_ds = tl.where(m_s, b_pdp - exp2(b_s + b_log_om_beta) * (b_delta[:, None] - b_delta_cumsum), 0.)
+        b_dq += tl.dot(b_ds.to(b_k.dtype), tl.trans(b_k))
+        b_log_rem += tl.sum(b_log_om_beta, 1)
+        b_delta_acc += tl.sum(b_pdp, 1)
 
     tl.store(p_dq, (b_dq * scale).to(p_dq.dtype.element_ty), mask=m_q[:, None] & (o_d[None, :] < K))
 
@@ -295,9 +280,9 @@ def parallel_stickbreaking_attn_bwd_kernel_dkv(
     do,
     dk,
     dv,
-    acc,
-    sa,
-    c,
+    log_rem,
+    delta_acc,
+    delta,
     scale,
     cu_seqlens,
     chunk_indices,
@@ -353,15 +338,15 @@ def parallel_stickbreaking_attn_bwd_kernel_dkv(
             m_q = o_q < T
             p_q = q + (bos * HQ + i_hq) * K + o_q[:, None] * (HQ*K) + o_d[None, :]
             p_do = do + (bos * HQ + i_hq) * V + o_q[:, None] * (HQ*V) + o_v[None, :]
-            p_snap = (bos + o_q) * HQ * NS + i_hq * NS + i_s
+            o_snap = (bos + o_q) * HQ * NS + i_hq * NS + i_s
             # [BT, BK]
             b_q = tl.load(p_q, mask=m_q[:, None] & (o_d[None, :] < K), other=0.0)
             # [BT, BV]
             b_do = tl.load(p_do, mask=m_q[:, None] & (o_v[None, :] < V), other=0.0)
             # [BT]
-            b_acc = tl.load(acc + p_snap, mask=m_q, other=0.0)
-            b_sa = tl.load(sa + p_snap, mask=m_q, other=0.0)
-            b_c = tl.load(c + (bos + o_q) * HQ + i_hq, mask=m_q, other=0.0)
+            b_log_rem = tl.load(log_rem + o_snap, mask=m_q, other=0.0)
+            b_delta_acc = tl.load(delta_acc + o_snap, mask=m_q, other=0.0)
+            b_delta = tl.load(delta + (bos + o_q) * HQ + i_hq, mask=m_q, other=0.0)
 
             if ATTEND_CURRENT:
                 m_s = (o_k[:, None] <= o_q[None, :]) & m_k[:, None] & m_q[None, :]
@@ -370,21 +355,14 @@ def parallel_stickbreaking_attn_bwd_kernel_dkv(
             # [BS, BT]
             b_s = tl.dot(b_k, tl.trans(b_q)) * scale * RCP_LN2
             b_dp = tl.dot(b_v, tl.trans(b_do))
-            b_lb, b_p = _stickbreaking_attn_tile(b_s=b_s, b_acc=b_acc[None, :], m_s=m_s, AXIS=0)
-            b_a, b_dz = _stickbreaking_attn_bwd_tile(
-                b_s=b_s,
-                b_lb=b_lb,
-                b_p=b_p,
-                b_dp=b_dp,
-                b_sa=b_sa[None, :],
-                b_c=b_c[None, :],
-                m_s=m_s,
-                AXIS=0,
-            )
+            b_log_om_beta, b_p = _stickbreaking_attn_weights(b_s=b_s, b_log_rem=b_log_rem[None, :], m_s=m_s, AXIS=0)
+            b_pdp = b_p * b_dp
+            b_delta_cumsum = tl.cumsum(b_pdp, axis=0, reverse=True) - b_pdp + b_delta_acc[None, :]
+            b_ds = tl.where(m_s, b_pdp - exp2(b_s + b_log_om_beta) * (b_delta[None, :] - b_delta_cumsum), 0.)
             # [BS, BV]
             b_dv = tl.dot(b_p.to(b_do.dtype), b_do, b_dv)
             # [BS, BK]
-            b_dk = tl.dot(b_dz.to(b_q.dtype), b_q, b_dk)
+            b_dk = tl.dot(b_ds.to(b_q.dtype), b_q, b_dk)
 
     tl.store(p_dk, (b_dk * scale).to(p_dk.dtype.element_ty), mask=m_k[:, None] & (o_d[None, :] < K))
     tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), mask=m_k[:, None] & (o_v[None, :] < V))
@@ -466,9 +444,9 @@ def parallel_stickbreaking_attn_bwd(
         NT = NS = triton.cdiv(T, BS)
 
     # snapshots store the remaining stick log and weighted gradient sum before each key block
-    acc = q.new_empty(B, T, HQ, NS, dtype=torch.float)
-    sa = q.new_empty(B, T, HQ, NS, dtype=torch.float)
-    c = q.new_empty(B, T, HQ, dtype=torch.float)
+    log_rem = q.new_empty(B, T, HQ, NS, dtype=torch.float)
+    delta_acc = q.new_empty(B, T, HQ, NS, dtype=torch.float)
+    delta = q.new_empty(B, T, HQ, dtype=torch.float)
     dq = torch.empty_like(q)
     dk = torch.empty_like(k)
     dv = torch.empty_like(v)
@@ -479,9 +457,9 @@ def parallel_stickbreaking_attn_bwd(
         do=do,
         drem=drem,
         dq=dq,
-        acc=acc,
-        sa=sa,
-        c=c,
+        log_rem=log_rem,
+        delta_acc=delta_acc,
+        delta=delta,
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
@@ -504,9 +482,9 @@ def parallel_stickbreaking_attn_bwd(
         do=do,
         dk=dk,
         dv=dv,
-        acc=acc,
-        sa=sa,
-        c=c,
+        log_rem=log_rem,
+        delta_acc=delta_acc,
+        delta=delta,
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
@@ -526,7 +504,7 @@ def parallel_stickbreaking_attn_bwd(
     return dq, dk, dv
 
 
-class StickBreakingAttentionFunction(torch.autograd.Function):
+class ParallelStickBreakingAttentionFunction(torch.autograd.Function):
 
     @staticmethod
     @input_guard
@@ -618,5 +596,5 @@ def parallel_stickbreaking_attn(
             f"Please flatten variable-length inputs before processing.",
         )
 
-    o, rem = StickBreakingAttentionFunction.apply(q, k, v, scale, attend_current, cu_seqlens)
+    o, rem = ParallelStickBreakingAttentionFunction.apply(q, k, v, scale, attend_current, cu_seqlens)
     return o, rem
