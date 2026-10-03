@@ -17,7 +17,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from fla.utils import device_torch_lib
+from fla.utils import IS_MPS, device_torch_lib
 
 try:
     from torch.compiler import is_compiling
@@ -146,3 +146,5 @@ def poison_torch_memory(request):
         yield
         if hasattr(device_torch_lib, 'synchronize'):
             device_torch_lib.synchronize()
+        if IS_MPS and hasattr(device_torch_lib, 'empty_cache'):
+            device_torch_lib.empty_cache()

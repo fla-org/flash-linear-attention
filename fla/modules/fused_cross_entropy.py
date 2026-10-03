@@ -419,8 +419,11 @@ class FusedCrossEntropyLoss(nn.Module):
         Return FP32 scalars for `mean` or `sum`, and `[N]` tensors for `none`.
         When `return_z_loss=True`, also return the reduced z-loss component.
         """
-        assert input.device.type in ('cuda', 'npu', 'xpu') and target.device.type in ('cuda', 'npu', 'xpu'), (
-            "Only support CUDA/NPU/XPU tensors"
+        assert (
+            input.device.type in ('cuda', 'npu', 'xpu', 'mps')
+            and target.device.type in ('cuda', 'npu', 'xpu', 'mps')
+        ), (
+            "Only support CUDA/NPU/XPU/MPS tensors"
         )
         loss, z_loss = cross_entropy_loss(
             logits=input,
