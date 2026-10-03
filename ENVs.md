@@ -51,7 +51,8 @@ Each backend is gated by a single env var below.
 | Variable                       | Default     | Options    | Description                                                                                                                              |
 | ------------------------------ | ----------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
 | `FLA_DISABLE_BACKEND_DISPATCH` | unset (`0`) | `0` / `1`  | Master switch. Set to `1` to bypass *all* backend dispatch and always use the default Triton implementation. Useful for debugging.       |
-| `FLA_TILELANG`                 | unset (`1`) | `0` / `1`  | Enable the TileLang backend when the `tilelang` package is installed. Set to `0` to force the Triton path (e.g. to work around #640).    |
+| `FLA_TILELANG`                 | unset (`1`) | `0` / `1`  | Enable the TileLang backend when the `tilelang` package is installed. Set to `0` to disable it (e.g. to work around #640).    |
+| `FLA_ATTN_GLUON`              | unset (`0`) | `0` / `1`  | Opt in to Gluon attention prefill, backward, and decoding. Requires Triton >= 3.5.1 and NVIDIA compute capability 9.x or 10.x. See [attention backend](fla/ops/attn/backends/gluon/README.md). |
 | `FLA_FLASH_KDA`                | unset (`1`) | `0` / `1`  | Enable the [FlashKDA](https://github.com/MoonshotAI/FlashKDA) CUTLASS forward for `chunk_kda` (inference only). Requires `flash_kda`.    |
 | `FLA_INTRACARD_CP`             | unset (`0`) | `0` / `1`  | Opt in to the intra-card context-parallel backend for shared delta-rule ops (`chunk_gated_delta_rule_fwd_h`). Inference + varlen only.  |
 | `FLA_INTRACARD_MAX_SPLITS`     | `32`        | int ≥ 1    | Max number of sub-sequences per original sequence used by the intra-card CP backend. Caps merge-chain depth to control precision loss.  |
