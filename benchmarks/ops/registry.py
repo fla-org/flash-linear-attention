@@ -367,6 +367,20 @@ register_op(OpConfig(
 ))
 
 register_op(OpConfig(
+    name='fused_recurrent_gdn2',
+    import_path='fla.ops.gdn2',
+    inputs={
+        **_simple_qkv,
+        'g': TensorSpec(shape_BTHD, transform=logsigmoid),
+        'b': TensorSpec(shape_BTHD, transform=sigmoid_transform),
+        'w': TensorSpec(shape_BTHD, transform=sigmoid_transform),
+    },
+    extra_kwargs={'use_qk_l2norm_in_kernel': True, 'output_final_state': True},
+    skip_backward=True,
+    category='gdn2',
+))
+
+register_op(OpConfig(
     name='chunk_precond_gdn',
     import_path='fla.ops.precond_gated_delta_rule',
     inputs={
