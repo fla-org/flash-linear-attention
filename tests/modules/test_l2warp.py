@@ -81,30 +81,36 @@ def test_fused_linear_cross_entropy_l2_warp(
 
 
 @pytest.mark.parametrize("grad_scale", [3.0])
+@pytest.mark.parametrize(
+    ("logits_dtype", "loss_dtype"),
+    [
+        pytest.param(torch.float32, torch.float32, id="fp32-logits-fp32-loss"),
+        pytest.param(torch.bfloat16, torch.float32, id="bf16-logits-fp32-loss"),
+    ],
+)
 @pytest.mark.skipif(
     IS_INTEL_ALCHEMIST is True,
     reason="Intel Triton Failure",
 )
-def test_l2_warp_grad_output_scaling(grad_scale: float):
-    # an autograd.Function must return input gradients that are linear in the upstream gradient;
-    # L2Wrap injects a logits gradient in backward that must be scaled by grad_output too
+def test_l2_warp_grad_output_scaling(grad_scale: float, logits_dtype: torch.dtype, loss_dtype: torch.dtype):
     torch.manual_seed(42)
 
-    logits = torch.randn(2, 64, 100, device=device, requires_grad=True)
-    loss = torch.randn((), device=device, requires_grad=True)
+    logits = torch.randn(2, 64, 100, device=device, dtype=logits_dtype, requires_grad=True)
+    loss = torch.randn((), device=device, dtype=loss_dtype, requires_grad=True)
     wrapped = standalone_l2_warp(loss, logits, 1.0)
 
-    g_loss_1, g_logits_1 = torch.autograd.grad(
+    dloss_1, dlogits_1 = torch.autograd.grad(
         wrapped,
         (loss, logits),
-        grad_outputs=torch.ones((), device=device),
+        grad_outputs=torch.ones((), device=device, dtype=loss_dtype),
         retain_graph=True,
     )
-    g_loss_k, g_logits_k = torch.autograd.grad(
+    dloss_k, dlogits_k = torch.autograd.grad(
         wrapped,
         (loss, logits),
-        grad_outputs=torch.full((), grad_scale, device=device),
+        grad_outputs=torch.full((), grad_scale, device=device, dtype=loss_dtype),
     )
 
-    assert_close("  dloss", g_loss_k, grad_scale * g_loss_1, 1e-5)
-    assert_close("dlogits", g_logits_k, grad_scale * g_logits_1, 1e-5)
+    assert dlogits_k.dtype == logits_dtype
+    assert_close("  dloss", dloss_k, grad_scale * dloss_1, 1e-5)
+    assert_close("dlogits", dlogits_k, grad_scale * dlogits_1, 1e-5)
