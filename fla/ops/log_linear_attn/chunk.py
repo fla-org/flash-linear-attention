@@ -434,7 +434,7 @@ def chunkwise_fwd_kernel(
             p_kv = ht + ((i_n * L_OUT + 11) * H + i_h) * K * V + o_kk[:, None] * V + o_v[None, :]
             tl.store(p_kv, kv_11, mask=m_kv)
 
-        if i_k == 0 and i_v == 0 and i_h == 0:
+        if (i_k == 0 and i_v == 0) and i_h == 0:
             tl.store(new_offsets + i_n, (offset // BT) * BT + T)
 
 
