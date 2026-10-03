@@ -314,6 +314,9 @@ def test_fused_recurrent_state_v_first(
             (4, 1024, 4, 4, 128, 0.1, True, True, True, torch.float16),
             (1, 64, 1, 1, 64, 1, False, False, True, torch.float),
             (2, 256, 2, 4, 64, 1, False, True, True, torch.float),
+            (1, 1, 1, 1, 64, 1, False, False, False, torch.float),
+            (2, 63, 2, 4, 64, 1, False, True, False, torch.bfloat16),
+            (1, 129, 2, 2, 64, 1, False, False, False, torch.float16),
         ]
     ],
 )
@@ -345,7 +348,8 @@ def test_fused_recurrent_gate_in_kernel(
 
     lower_bound = -5.0 if safe_gate else None
     naive_gate_fn = naive_kda_lowerbound_gate if safe_gate else naive_kda_gate
-    g_ref = naive_gate_fn(g_raw, A_log, dt_bias)
+    A_log_ref = A_log if A_log is not None else torch.zeros(HV, dtype=torch.float32, device=device)
+    g_ref = naive_gate_fn(g_raw, A_log_ref, dt_bias)
 
     ref, ref_ht = fused_recurrent_kda(
         q=q.clone(),
