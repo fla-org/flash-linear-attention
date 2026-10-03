@@ -986,14 +986,22 @@ def chunkwise_bwd_kernel_dv(
     tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), mask=m_tv)
 
 
+def _prune_diag_configs(configs, named_args, **kwargs):
+    args = {**named_args, **kwargs}
+    # preserve four-warp 16-bit MMA layouts supported by older Triton compilers.
+    num_warps = 8 if args["q"].dtype == torch.float32 else 4
+    return [config for config in configs if config.num_warps == num_warps]
+
+
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [8]
+        for num_warps in [4, 8]
         for num_stages in [2, 3, 4]
     ],
     key=["G", "H", "K", "V"],
+    prune_configs_by={"early_config_prune": _prune_diag_configs},
     restore_value=["dl", "dq", "dk", "dv", "dg"],
     **autotune_cache_kwargs,
 )
