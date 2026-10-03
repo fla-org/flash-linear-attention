@@ -45,7 +45,6 @@ def chunkwise_fwd_kernel(
     v,
     g,
     level_scales,
-    llut,
     o,
     h0,
     ht,
@@ -73,8 +72,13 @@ def chunkwise_fwd_kernel(
     SCALE: tl.constexpr,
 ):
     o_i = tl.arange(0, BT)
-    p_llut = llut + o_i[:, None] * BT + o_i[None, :]
-    b_llut = tl.load(p_llut, mask=(o_i[:, None] < BT) & (o_i[None, :] < BT), other=0.0)
+    # the highest differing bit identifies the common binary interval.
+    b_xor = o_i[:, None] ^ o_i[None, :]
+    b_level = tl.full((BT, BT), 0, tl.int32)
+    n_bits: tl.constexpr = tl.standard._log2(BT)
+    for bit in tl.static_range(n_bits):
+        b_level += (b_xor >= (1 << bit)).to(tl.int32)
+    b_level = tl.where(o_i[:, None] >= o_i[None, :], b_level, 0)
     # parallel over sequences and heads
     i_k, i_nh = unflatten_program_id(X=tl.cdiv(K, BK))
     i_k = i_k.to(tl.int64)
@@ -181,7 +185,7 @@ def chunkwise_fwd_kernel(
     NT = tl.cdiv(T, BT)
     output_offset = -1 * (offset % BT)
     for i_t in range(NT):
-        b_h_ptrs = level_scales + ((bos + tl.minimum(i_t * BT + i_idx, T - 1)) * H + i_h) * L + b_llut
+        b_h_ptrs = level_scales + ((bos + tl.minimum(i_t * BT + i_idx, T - 1)) * H + i_h) * L + b_level
         b_h = tl.load(b_h_ptrs, mask=i_idx >= j_idx)
 
         o_t = (i_t * BT).to(tl.int64) + o_i
@@ -991,8 +995,6 @@ def chunkwise_bwd_kernel_diag(
     v,
     g,
     l,
-    llut,
-    mask,
     dq,
     dk,
     dv,
@@ -1011,8 +1013,13 @@ def chunkwise_bwd_kernel_diag(
     SCALE: tl.constexpr,
 ):
     o_i = tl.arange(0, BT)
-    p_llut = llut + o_i[:, None] * BT + o_i[None, :]
-    b_llut = tl.load(p_llut, mask=(o_i[:, None] < BT) & (o_i[None, :] < BT), other=0.0)
+    # the highest differing bit identifies the common binary interval.
+    b_xor = o_i[:, None] ^ o_i[None, :]
+    b_level = tl.full((BT, BT), 0, tl.int32)
+    n_bits: tl.constexpr = tl.standard._log2(BT)
+    for bit in tl.static_range(n_bits):
+        b_level += (b_xor >= (1 << bit)).to(tl.int32)
+    b_level = tl.where(o_i[:, None] >= o_i[None, :], b_level, 0)
     i_t, i_nh = unflatten_program_id(X=NT)
     i_t = i_t.to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
@@ -1038,7 +1045,7 @@ def chunkwise_bwd_kernel_diag(
     i_idx = o_i[:, None]  # BT x 1
     j_idx = o_i[None, :]  # 1 x BT
 
-    b_h_ptrs = l + ((bos + tl.minimum(i_t * BT + i_idx, T - 1)) * H + i_h) * L + b_llut
+    b_h_ptrs = l + ((bos + tl.minimum(i_t * BT + i_idx, T - 1)) * H + i_h) * L + b_level
     b_h = tl.load(b_h_ptrs, mask=i_idx >= j_idx)
 
     p_g = g + bos * H + i_h + o_t * H
@@ -1082,49 +1089,10 @@ def chunkwise_bwd_kernel_diag(
     num_intra_levels = (tl.log2(float(BT))).to(tl.int32) + 1
 
     for i in range(num_intra_levels):
-        p_mask = mask + i * (BT * BT) + o_i[:, None] * BT + o_i[None, :]
-        b_mask = tl.load(p_mask, mask=(o_i[:, None] < BT) & (o_i[None, :] < BT), other=0.0)
-        dl_i = tl.sum(tl.where(b_mask == 1, b_dl, 0), axis=1)
+        b_mask = (i_idx >= j_idx) & (b_level == i)
+        dl_i = tl.sum(tl.where(b_mask, b_dl, 0), axis=1)
         p_dl_i = dl + (bos * H + i_h) * L + i + o_t * (H * L)
         tl.store(p_dl_i, dl_i, mask=m_t)
-
-
-def construct_binary_level_mask(level, T):
-    if level == 0:
-        return torch.diag(torch.ones(T, dtype=torch.bool))
-
-    indices = torch.cartesian_prod(torch.arange(T), torch.arange(T))
-
-    mask = torch.where(
-        torch.logical_and(
-            torch.logical_and(
-                indices[:, 0] % (1 << level) >= (1 << (level - 1)),
-                indices[:, 1] + (1 << (level - 1))
-                >= indices[:, 0] - (indices[:, 0] % (1 << (level - 1))),
-            ),
-            indices[:, 1] < indices[:, 0] - (indices[:, 0] % (1 << (level - 1))),
-        ).view(T, T),
-        1,
-        0,
-    )
-
-    return mask
-
-
-def level_lut(BT, device):
-    lut = torch.zeros((BT, BT), dtype=torch.int32, device=device)
-    for level in range(1, ceil_log(BT, 2) + 1):
-        mask = construct_binary_level_mask(level, BT).to(device)
-        lut = torch.where(mask.to(torch.bool), level, lut)
-    return lut
-
-
-def masks(BT, device):
-    masks = []
-    for level in range(0, ceil_log(BT, 2) + 1):
-        mask = construct_binary_level_mask(level, BT).to(device).to(torch.int32)
-        masks.append(mask)
-    return torch.stack(masks)
 
 
 def ceil_div(x: int, y: int) -> int:
@@ -1295,15 +1263,12 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
         l_in = h0.shape[1] if initial_state is not None else None
         l_out = ht.shape[1] if output_final_state else None
 
-        ctx.llut = level_lut(BT, v.device)
-
         chunkwise_fwd_kernel[grid](
             q=q,
             k=k,
             v=v,
             g=g,
             level_scales=level_scales,
-            llut=ctx.llut,
             o=o,
             h0=h0,
             ht=ht,
@@ -1383,8 +1348,6 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
         q, k, v, g, level_scales, initial_state, cu_seqlens = ctx.saved_tensors
         chunk_size = ctx.chunk_size
         scale = ctx.scale
-        llut = ctx.llut
-        mask = masks(chunk_size, v.device)
 
         if initial_state is not None:
             raise NotImplementedError(
@@ -1513,8 +1476,6 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
             v=v,
             g=g,
             l=level_scales,
-            llut=llut,
-            mask=mask,
             dq=dq,
             dk=dk,
             dv=dv,
