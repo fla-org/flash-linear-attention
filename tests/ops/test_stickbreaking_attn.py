@@ -1,0 +1,239 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
+import pytest
+import torch
+
+from fla.ops.stickbreaking_attn import naive_stickbreaking_attn, parallel_stickbreaking_attn
+from fla.utils import IS_INTEL_ALCHEMIST, assert_close, check_shared_mem, device
+
+TOL = {torch.float16: 0.005, torch.bfloat16: 0.02}
+
+
+def _naive_varlen(q, k, v, cu_seqlens, **kwargs):
+    o, rem = q.new_empty(*q.shape[:-1], v.shape[-1]), q.new_empty(q.shape[:-1])
+    for bos, eos in zip(cu_seqlens[:-1], cu_seqlens[1:], strict=False):
+        o[:, bos:eos], rem[:, bos:eos] = naive_stickbreaking_attn(q=q[:, bos:eos], k=k[:, bos:eos], v=v[:, bos:eos], **kwargs)
+    return o, rem
+
+
+def _forward_backward(op, q, k, v, do, drem, **kwargs):
+    o, rem = op(q=q, k=k, v=v, **kwargs)
+    torch.autograd.backward((o, rem), (do, drem))
+    grads = [x.grad.clone() for x in (q, k, v)]
+    q.grad = k.grad = v.grad = None
+    return o, rem, *grads
+
+
+def _assert_all_close(ref, tri, ratio):
+    for name, x, y in zip(("  o", "rem", " dq", " dk", " dv"), ref, tri, strict=True):
+        assert_close(prefix=name, ref=x, tri=y, ratio=ratio)
+
+
+@pytest.mark.parametrize('attend_current', [False, True])
+def test_naive_matches_definition(attend_current: bool):
+    torch.manual_seed(42)
+    B, T, H, D = 2, 16, 2, 8
+    q = torch.randn((B, T, H, D), dtype=torch.float64, device=device)
+    k = torch.randn((B, T, H, D), dtype=torch.float64, device=device)
+    v = torch.randn((B, T, H, D), dtype=torch.float64, device=device)
+    scale = D ** -0.5
+
+    beta = torch.einsum('bqhd,bkhd->bhqk', q, k).mul(scale).sigmoid()
+    att = torch.zeros_like(beta)
+    for i in range(T):
+        stick = torch.ones_like(beta[..., i, 0])
+        for j in range(i if attend_current else i - 1, -1, -1):
+            att[..., i, j] = beta[..., i, j] * stick
+            stick = stick * (1 - beta[..., i, j])
+    ref_o = torch.einsum('bhqk,bkhd->bqhd', att, v)
+    ref_rem = (1 - att.sum(-1)).transpose(1, 2)
+
+    o, rem = naive_stickbreaking_attn(q=q, k=k, v=v, scale=scale, attend_current=attend_current)
+    torch.testing.assert_close(o, ref_o, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(rem, ref_rem, rtol=1e-5, atol=1e-5)
+
+
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'HQ', 'K', 'V', 'scale', 'attend_current'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-HQ{}-K{}-V{}-scale{}-attend_current{}".format(*test))
+        for test in [
+            (1, 63, 1, 1, 64, 64, 1.0, False),
+            (3, 111, 2, 2, 100, 100, 1.0, True),
+            (3, 127, 2, 8, 60, 60, 0.1, False),
+            (2, 1024, 2, 8, 64, 128, 0.1, True),
+            (2, 1024, 2, 2, 128, 128, 0.1, False),
+            (2, 1024, 1, 4, 256, 64, 0.1, True),
+        ]
+    ],
+)
+@pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16], ids=['fp16', 'bf16'])
+def test_parallel(
+    B: int,
+    T: int,
+    H: int,
+    HQ: int,
+    K: int,
+    V: int,
+    scale: float,
+    attend_current: bool,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(42)
+    if not check_shared_mem(arch='hopper') and max(K, V) > 128:
+        pytest.skip("This test requires Hopper-class shared memory for head dimensions above 128.")
+
+    q = torch.randn((B, T, HQ, K), dtype=dtype, device=device).requires_grad_()
+    k = torch.randn((B, T, H, K), dtype=dtype, device=device).requires_grad_()
+    v = torch.randn((B, T, H, V), dtype=dtype, device=device).requires_grad_()
+    do = torch.randn((B, T, HQ, V), dtype=dtype, device=device)
+    drem = torch.randn((B, T, HQ), dtype=dtype, device=device)
+
+    ref = _forward_backward(
+        op=naive_stickbreaking_attn,
+        q=q,
+        k=k,
+        v=v,
+        do=do,
+        drem=drem,
+        scale=scale,
+        attend_current=attend_current,
+    )
+    tri = _forward_backward(
+        op=parallel_stickbreaking_attn,
+        q=q,
+        k=k,
+        v=v,
+        do=do,
+        drem=drem,
+        scale=scale,
+        attend_current=attend_current,
+    )
+    _assert_all_close(ref=ref, tri=tri, ratio=TOL[dtype])
+
+
+@pytest.mark.parametrize(
+    ('H', 'HQ', 'D', 'cu_seqlens', 'attend_current'),
+    [
+        pytest.param(*test, id="H{}-HQ{}-D{}-cu_seqlens{}-attend_current{}".format(*test))
+        for test in [
+            (2, 2, 64, [0, 15], False),
+            (2, 8, 64, [0, 256, 500, 1000], True),
+            (2, 2, 100, [0, 15, 100, 300, 1200, 2000], False),
+        ]
+    ],
+)
+@pytest.mark.skipif(IS_INTEL_ALCHEMIST, reason="Intel Triton Failure")
+@pytest.mark.smoke
+def test_parallel_varlen(H: int, HQ: int, D: int, cu_seqlens: list[int], attend_current: bool):
+    torch.manual_seed(42)
+    T = cu_seqlens[-1]
+    cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+    dtype = torch.float16
+    q = torch.randn((1, T, HQ, D), dtype=dtype, device=device).requires_grad_()
+    k = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
+    v = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
+    do = torch.randn((1, T, HQ, D), dtype=dtype, device=device)
+    drem = torch.randn((1, T, HQ), dtype=dtype, device=device)
+
+    kwargs = dict(cu_seqlens=cu_seqlens, attend_current=attend_current)
+
+    ref = _forward_backward(op=_naive_varlen, q=q, k=k, v=v, do=do, drem=drem, **kwargs)
+    tri = _forward_backward(op=parallel_stickbreaking_attn, q=q, k=k, v=v, do=do, drem=drem, **kwargs)
+    _assert_all_close(ref=ref, tri=tri, ratio=0.005)
+
+
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'HQ', 'D', 'cu_seqlens', 'attend_current'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-HQ{}-D{}-cu_seqlens{}-attend_current{}".format(*test))
+        for test in [
+            (2, 1024, 2, 2, 64, None, False),
+            (2, 1024, 1, 4, 128, None, True),
+            (1, 2000, 2, 2, 64, [0, 15, 100, 300, 1200, 2000], True),
+        ]
+    ],
+)
+@pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16], ids=['fp16', 'bf16'])
+def test_parallel_long_range(
+    B: int,
+    T: int,
+    H: int,
+    HQ: int,
+    D: int,
+    cu_seqlens: list[int] | None,
+    attend_current: bool,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(42)
+    q = torch.randn((B, T, HQ, D), dtype=dtype, device=device)
+    k = torch.randn((B, T, H, D), dtype=dtype, device=device)
+    v = torch.randn((B, T, H, D), dtype=dtype, device=device)
+    # negative logits keep the stick alive across key blocks, exposing long-range errors
+    q[..., 0], k[..., 0] = 8, -8
+    q, k, v = (x.requires_grad_() for x in (q, k, v))
+    do = torch.randn((B, T, HQ, D), dtype=dtype, device=device)
+    drem = torch.randn((B, T, HQ), dtype=dtype, device=device)
+    kwargs = dict(scale=0.1, attend_current=attend_current)
+
+    if cu_seqlens is None:
+        ref = _forward_backward(op=naive_stickbreaking_attn, q=q, k=k, v=v, do=do, drem=drem, **kwargs)
+    else:
+        cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+        ref = _forward_backward(op=_naive_varlen, q=q, k=k, v=v, do=do, drem=drem, cu_seqlens=cu_seqlens, **kwargs)
+    tri = _forward_backward(op=parallel_stickbreaking_attn, q=q, k=k, v=v, do=do, drem=drem, cu_seqlens=cu_seqlens, **kwargs)
+    _assert_all_close(ref=ref, tri=tri, ratio=TOL[dtype])
+
+
+@pytest.mark.parametrize('cu_seqlens', [None, [0, 100, 1100, 2000]], ids=['dense', 'varlen'])
+def test_parallel_backward_deterministic(cu_seqlens: list[int] | None):
+    torch.manual_seed(42)
+    T, H, HQ, D, dtype = 2000, 2, 4, 64, torch.bfloat16
+    q = torch.randn((1, T, HQ, D), dtype=dtype, device=device).requires_grad_()
+    k = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
+    v = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
+    do = torch.randn((1, T, HQ, D), dtype=dtype, device=device)
+    drem = torch.randn((1, T, HQ), dtype=dtype, device=device)
+    if cu_seqlens is not None:
+        cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+
+    first = _forward_backward(op=parallel_stickbreaking_attn, q=q, k=k, v=v, do=do, drem=drem, cu_seqlens=cu_seqlens)
+    second = _forward_backward(op=parallel_stickbreaking_attn, q=q, k=k, v=v, do=do, drem=drem, cu_seqlens=cu_seqlens)
+    for x, y in zip(first, second, strict=True):
+        assert torch.equal(x, y)
+
+
+@pytest.mark.parametrize("op", [naive_stickbreaking_attn, parallel_stickbreaking_attn], ids=["naive", "parallel"])
+@pytest.mark.parametrize(("HQ", "H"), [(3, 2), (1, 2), (2, 0)], ids=["remainder", "fewer-query-heads", "zero-kv-heads"])
+def test_parallel_rejects_invalid_gqa_head_counts(op, HQ, H):
+    q = torch.empty(1, 1, HQ, 16)
+    k = torch.empty(1, 1, H, 16)
+    v = torch.empty_like(k)
+
+    with pytest.raises(ValueError, match="must be divisible"):
+        op(q=q, k=k, v=v)
+
+
+@pytest.mark.parametrize(("K", "V", "match"), [(257, 64, "key dimension"), (64, 257, "value dimension")], ids=["K", "V"])
+def test_parallel_rejects_head_dims_above_256(K, V, match):
+    q = torch.empty(1, 8, 2, K)
+    k = torch.empty_like(q)
+    v = torch.empty(1, 8, 2, V)
+
+    with pytest.raises(ValueError, match=match):
+        parallel_stickbreaking_attn(q=q, k=k, v=v)
+
+
+def test_parallel_rejects_batched_varlen():
+    q = torch.empty(2, 8, 2, 16)
+    k = torch.empty_like(q)
+    v = torch.empty_like(q)
+    cu_seqlens = torch.tensor([0, 8], dtype=torch.int32)
+
+    with pytest.raises(ValueError, match="batch size is expected to be 1"):
+        parallel_stickbreaking_attn(q=q, k=k, v=v, cu_seqlens=cu_seqlens)
