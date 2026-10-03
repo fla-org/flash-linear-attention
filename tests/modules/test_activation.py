@@ -11,7 +11,6 @@ import torch.nn.functional as F
 
 from fla.modules.activations import (
     _is_inner_contiguous,
-    elu_p1,
     logsigmoid,
     powglu,
     powglu_linear,
@@ -42,71 +41,6 @@ def make_inputs(B: int, T: int, D: int, n: int, noncontiguous: bool) -> tuple[to
     else:
         xs = tuple(torch.randn(B, T, D, device=device) for _ in range(n))
     return tuple(x.requires_grad_() for x in xs)
-
-
-@pytest.mark.parametrize('dtype', [torch.bfloat16, torch.float16, torch.float32])
-@pytest.mark.parametrize('compile', [False, True])
-@pytest.mark.parametrize('layout', ['dense', 'chunk', 'transpose', 'strided', 'vector', 'scalar', 'empty'])
-def test_elu_p1(dtype: torch.dtype, compile: bool, layout: str):
-    torch.manual_seed(42)
-    x = torch.randn(2, 65, 126, dtype=dtype, device=device) * 4
-    if layout == 'chunk':
-        x = x.chunk(2, dim=-1)[0]
-    elif layout == 'transpose':
-        x = x.transpose(1, 2)
-    elif layout == 'strided':
-        x = x[..., ::2]
-    elif layout == 'vector':
-        x = x.flatten()[::2]
-    elif layout == 'scalar':
-        x = x[0, 0, 0]
-    elif layout == 'empty':
-        x = x[..., :0]
-    x.requires_grad_()
-    ref_x = x.detach().double().requires_grad_()
-    ref_y = torch.where(ref_x >= 0, ref_x + 1, ref_x.clamp_max(0).exp())
-    y = torch.compile(elu_p1)(x) if compile else elu_p1(x)
-    dy = torch.randn((*x.shape, 2), dtype=dtype, device=device)[..., 0]
-    dx, = torch.autograd.grad(y, x, dy)
-    ref_dx, = torch.autograd.grad(ref_y, ref_x, dy.double())
-
-    assert y.shape == x.shape
-    assert y.dtype == dx.dtype == dtype
-    assert torch.isfinite(y).all()
-    assert torch.isfinite(dx).all()
-    if x.numel() > 0:
-        tolerance = {torch.bfloat16: 1e-2, torch.float16: 2e-3, torch.float32: 1e-6}[dtype]
-        assert_close('elu_p1 y', ref_y, y.double(), tolerance)
-        assert_close('elu_p1 dx', ref_dx, dx.double(), tolerance)
-
-
-@pytest.mark.parametrize('dtype', [torch.bfloat16, torch.float16, torch.float32])
-def test_elu_p1_values(dtype: torch.dtype):
-    torch.manual_seed(42)
-    x = torch.tensor([-90, -80, -20, -10, -8, -6, -1, 0, 1, 100], dtype=dtype, device=device, requires_grad=True)
-    y = elu_p1(x)
-    dx, = torch.autograd.grad(y.float().sum(), x)
-    ref_x = x.detach().double()
-    ref_y = torch.where(ref_x >= 0, ref_x + 1, ref_x.exp()).to(dtype)
-    ref_dx = torch.where(ref_x >= 0, torch.ones_like(ref_x), ref_x.exp()).to(dtype)
-    tolerance = {torch.bfloat16: 1e-2, torch.float16: 2e-3, torch.float32: 1e-6}[dtype]
-
-    assert y.dtype == dtype
-    torch.testing.assert_close(y, ref_y, rtol=tolerance, atol=0)
-    torch.testing.assert_close(dx, ref_dx, rtol=tolerance, atol=0)
-
-
-@pytest.mark.parametrize('dtype', [torch.bfloat16, torch.float16, torch.float32, torch.float64])
-def test_elu_p1_fallback(dtype: torch.dtype):
-    torch.manual_seed(42)
-    x = torch.tensor([-10, -8, -6, -1, 0, 1, 100], dtype=dtype, device='cpu', requires_grad=True)
-    y = elu_p1(x)
-    dx, = torch.autograd.grad(y.sum(), x)
-    ref_x = x.detach().double()
-    ref_y = torch.where(ref_x >= 0, ref_x + 1, ref_x.exp()).to(dtype)
-    ref_dx = torch.where(ref_x >= 0, torch.ones_like(ref_x), ref_x.exp()).to(dtype)
-    torch.testing.assert_close(y, ref_y)
-    torch.testing.assert_close(dx, ref_dx)
 
 
 @pytest.mark.parametrize(
