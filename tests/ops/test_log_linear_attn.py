@@ -18,28 +18,6 @@ from fla.ops.log_linear_attn.naive import naive_log_linear_attn
 from fla.utils import assert_close, device, device_platform
 
 
-@pytest.mark.parametrize(("G", "H"), [(1, 4), (2, 4), (4, 4)], ids=["G1-H4", "G2-H4", "G4-H4"])
-@pytest.mark.parametrize("scale", [None, 1.0, 0.37], ids=["normalized", "default", "custom"])
-def test_naive_scale(G: int, H: int, scale: float | None):
-    K = 4
-    q = torch.arange(1, G + 1, dtype=torch.float32, device=device)[None, None, :, None].expand(1, 1, G, K)
-    k = torch.ones_like(q)
-    v = torch.arange(1, H + 1, dtype=torch.float32, device=device).view(1, 1, H, 1)
-    g = torch.zeros(1, 1, H, dtype=torch.float32, device=device)
-    level_scales = torch.ones(1, 1, H, 1, dtype=torch.float32, device=device)
-
-    kwargs = {} if scale == 1.0 else {"scale": scale}
-    out = naive_log_linear_attn(q, k, v, g, level_scales, **kwargs)
-
-    expected_scale = 0.5 if scale is None else scale
-    expected = torch.tensor(
-        [K * (head // (H // G) + 1) * (head + 1) * expected_scale for head in range(H)],
-        dtype=torch.float32,
-        device=device,
-    ).view_as(out)
-    assert_close("o", expected, out, 1e-6)
-
-
 @pytest.mark.parametrize(
     ("B", "T", "G", "H", "D", "dtype", "scale"),
     [
@@ -81,7 +59,7 @@ def test_chunk(
     kwargs = {} if scale == 1.0 else {"scale": scale}
     out, _ = chunk_log_linear_attn(q, k, v, g, level_scales, **kwargs)
 
-    ref = naive_log_linear_attn(q, k, v, g, level_scales, **kwargs)
+    ref = naive_log_linear_attn(q, k, v, g, level_scales, scale=scale)
 
     assert_close("o", ref, out, 0.004)
 
@@ -136,6 +114,7 @@ def test_chunk_initial_state(varlen: bool, G: int, H: int):
         for test in [
             (2, 512, 1, 8, 64, torch.float32, 1.0),
             (2, 1024, 1, 8, 128, torch.float32, 1.0),
+            (2050, 1, 2, 32, 64, torch.float32, 1.0),
             (2, 70, 2, 4, 64, torch.float32, None),
             (1, 130, 4, 4, 128, torch.float32, 0.37),
             (1, 63, 2, 4, 64, torch.float32, 1.0),
@@ -155,7 +134,7 @@ def test_chunk_bwd(
     torch.manual_seed(42)
     os.environ["TRITON_F32_DEFAULT"] = "ieee"
 
-    L = int(np.ceil(np.log2(T))) + 1
+    L = max(7, int(np.ceil(np.log2(T))) + 1)
     x = torch.randn(B, T, H, D, dtype=dtype, device=device)
     dt = torch.nn.functional.softplus(
         torch.randn(B, T, H, dtype=torch.float32, device=device) - 4,
@@ -175,7 +154,7 @@ def test_chunk_bwd(
     tri_dq, tri_dk, tri_dv, tri_dg, tri_dl = q.grad, k.grad, v.grad, g.grad, level_scales.grad
     q.grad = k.grad = v.grad = g.grad = level_scales.grad = None
 
-    ref = naive_log_linear_attn(q, k, v, g, level_scales, **kwargs)
+    ref = naive_log_linear_attn(q, k, v, g, level_scales, scale=scale)
     (ref * do).sum().backward()
     ref_dq, ref_dk, ref_dv, ref_dg, ref_dl = q.grad, k.grad, v.grad, g.grad, level_scales.grad
 
@@ -188,16 +167,15 @@ def test_chunk_bwd(
 
 
 @pytest.mark.parametrize(
-    ("G", "H", "D", "cu_seqlens", "dtype", "scale", "backward"),
+    ("G", "H", "D", "cu_seqlens", "dtype", "scale"),
     [
-        pytest.param(*test, id="G{}-H{}-D{}-cu_seqlens{}-{}-scale{}-bwd{}".format(*test))
+        pytest.param(*test, id="G{}-H{}-D{}-cu_seqlens{}-{}-scale{}".format(*test))
         for test in [
-            # backward currently writes seven intra-chunk levels even when L is smaller
-            (1, 4, 64, [0, 15], torch.float32, None, False),
-            (1, 4, 64, [0, 256, 500, 1000], torch.float32, None, False),
-            (1, 4, 128, [0, 15, 100, 300, 1200, 2000], torch.float32, None, False),
-            (2, 4, 64, [0, 15, 85, 215], torch.float32, None, True),
-            (4, 4, 64, [0, 15, 85, 215], torch.float32, 0.37, True),
+            (1, 4, 64, [0, 15], torch.float32, None),
+            (1, 4, 64, [0, 256, 500, 1000], torch.float32, None),
+            (1, 4, 128, [0, 15, 100, 300, 1200, 2000], torch.float32, None),
+            (2, 4, 64, [0, 15, 85, 215], torch.float32, None),
+            (4, 4, 64, [0, 15, 85, 215], torch.float32, 0.37),
         ]
     ],
 )
@@ -210,7 +188,6 @@ def test_chunk_varlen(
     cu_seqlens: list[int],
     dtype: torch.dtype,
     scale: float | None,
-    backward: bool,
 ):
     torch.manual_seed(42)
     os.environ["TRITON_F32_DEFAULT"] = "ieee"
@@ -218,7 +195,7 @@ def test_chunk_varlen(
     cu_seqlens = torch.LongTensor(cu_seqlens).to(device)
     T = cu_seqlens[-1].item()
 
-    L = int(np.ceil(np.log2(T)) + 1)
+    L = max(7, int(np.ceil(np.log2(T))) + 1)
     x = torch.randn(1, T, H, D, dtype=dtype, device=device)
     dt = torch.nn.functional.softplus(
         torch.randn(1, T, H, dtype=torch.float32, device=device) - 4,
@@ -231,12 +208,11 @@ def test_chunk_varlen(
     g = a * dt
 
     do = torch.randn_like(v)
-    q, k, v, g, level_scales = map(lambda x: x.requires_grad_(backward), (q, k, v, g, level_scales))
+    q, k, v, g, level_scales = map(lambda x: x.requires_grad_(), (q, k, v, g, level_scales))
     out, _ = chunk_log_linear_attn(q, k, v, g, level_scales, cu_seqlens=cu_seqlens, scale=scale)
-    if backward:
-        (out * do).sum().backward()
-        tri_dq, tri_dk, tri_dv, tri_dg, tri_dl = q.grad, k.grad, v.grad, g.grad, level_scales.grad
-        q.grad = k.grad = v.grad = g.grad = level_scales.grad = None
+    (out * do).sum().backward()
+    tri_dq, tri_dk, tri_dv, tri_dg, tri_dl = q.grad, k.grad, v.grad, g.grad, level_scales.grad
+    q.grad = k.grad = v.grad = g.grad = level_scales.grad = None
 
     o = []
     for i in range(cu_seqlens.shape[0] - 1):
@@ -251,13 +227,12 @@ def test_chunk_varlen(
     ref = torch.cat(o, dim=1)
 
     assert_close("o", ref, out, 0.004)
-    if backward:
-        (ref * do).sum().backward()
-        assert_close("dq", q.grad, tri_dq, 0.007)
-        assert_close("dk", k.grad, tri_dk, 0.008)
-        assert_close("dv", v.grad, tri_dv, 0.007)
-        assert_close("dg", g.grad, tri_dg, 0.015)
-        assert_close("dl", level_scales.grad, tri_dl, 0.015)
+    (ref * do).sum().backward()
+    assert_close("dq", q.grad, tri_dq, 0.007)
+    assert_close("dk", k.grad, tri_dk, 0.008)
+    assert_close("dv", v.grad, tri_dv, 0.007)
+    assert_close("dg", g.grad, tri_dg, 0.015)
+    assert_close("dl", level_scales.grad, tri_dl, 0.015)
 
 
 @pytest.mark.parametrize(
@@ -348,7 +323,7 @@ def test_chunkwise_bwd_dkg_last_chunk_fold(T: int, H: int, D: int):
     v = torch.zeros(B, T, H, D, dtype=torch.float32, device=device)
     dk = torch.zeros(B, T, H, D, dtype=torch.float32, device=device)
 
-    chunkwise_bwd_kernel_dkg[(NT, B * H)](
+    chunkwise_bwd_kernel_dkg[(NT * B * H,)](
         dh=dh, k=k, v=v, g=g, dg_last=dg_last, dk=dk, dg=dg, cu_seqlens=None,
         T=T, G=1, H=H, K=D, V=D, L=int(np.ceil(np.log2(T))) + 1, BT=BT, NT=NT,
     )

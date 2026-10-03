@@ -16,7 +16,7 @@ import triton.language as tl
 from einops import reduce
 
 from fla.ops.utils import chunk_local_cumsum
-from fla.ops.utils.op import exp
+from fla.ops.utils.op import exp, unflatten_program_id
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, input_guard
 
 BLOCK_K = 64
@@ -76,8 +76,8 @@ def chunkwise_fwd_kernel(
     p_llut = llut + o_i[:, None] * BT + o_i[None, :]
     b_llut = tl.load(p_llut, mask=(o_i[:, None] < BT) & (o_i[None, :] < BT), other=0.0)
     # parallel over sequences and heads
-    i_k = tl.program_id(0)
-    i_nh = tl.program_id(1).to(tl.int64)
+    i_k, i_nh = unflatten_program_id(X=tl.cdiv(K, BK))
+    i_k = i_k.to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
     i_g = i_h // (H // G)
 
@@ -651,8 +651,8 @@ def chunkwise_bwd_kernel_dhg(
     SCALE: tl.constexpr,
 ):
     # parallel over batches and heads
-    i_k = tl.program_id(0)
-    i_nh = tl.program_id(1).to(tl.int64)
+    i_k, i_nh = unflatten_program_id(X=tl.cdiv(K, BK))
+    i_k = i_k.to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
     i_g = i_h // (H // G)
 
@@ -854,7 +854,8 @@ def chunkwise_bwd_kernel_dkg(
     NT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
+    i_t, i_nh = unflatten_program_id(X=NT)
+    i_t = i_t.to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
     i_g = i_h // (H // G)
 
@@ -934,7 +935,8 @@ def chunkwise_bwd_kernel_dv(
     NT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
+    i_t, i_nh = unflatten_program_id(X=NT)
+    i_t = i_t.to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
     i_g = i_h // (H // G)
 
@@ -1004,13 +1006,15 @@ def chunkwise_bwd_kernel_diag(
     V: tl.constexpr,
     L: tl.constexpr,
     BT: tl.constexpr,
+    NT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     SCALE: tl.constexpr,
 ):
     o_i = tl.arange(0, BT)
     p_llut = llut + o_i[:, None] * BT + o_i[None, :]
     b_llut = tl.load(p_llut, mask=(o_i[:, None] < BT) & (o_i[None, :] < BT), other=0.0)
-    i_t, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
+    i_t, i_nh = unflatten_program_id(X=NT)
+    i_t = i_t.to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
     i_g = i_h // (H // G)
 
@@ -1286,7 +1290,7 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
         g = chunk_local_cumsum(g, chunk_size=BT, cu_seqlens=cu_seqlens)
 
         def grid(meta):
-            return (triton.cdiv(K, meta["BK"]), B * H)
+            return (triton.cdiv(K, meta["BK"]) * B * H,)
 
         l_in = h0.shape[1] if initial_state is not None else None
         l_out = ht.shape[1] if output_final_state else None
@@ -1417,9 +1421,9 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
         grid = (B * H,)
 
         def grid_f(meta):
-            return (triton.cdiv(K, meta["BK"]), B * H)
+            return (triton.cdiv(K, meta["BK"]) * B * H,)
 
-        grid_t = (NT, B * H)
+        grid_t = (NT * B * H,)
 
         num_inter_chunk_levels = ceil_log(NT, 2)
         for ell in range(num_inter_chunk_levels - 1, -1, -1):
@@ -1524,6 +1528,7 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
             V=V,
             L=L,
             BT=BT,
+            NT=NT,
             SCALE=scale,
         )
 
