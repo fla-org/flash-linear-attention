@@ -16,6 +16,7 @@ import torch
 import torch.nn.functional as F
 import triton
 import triton.language as tl
+import triton.language.extra.libdevice as tldevice
 
 from fla.modules.backends import dispatch
 from fla.ops.utils.op import exp, log
@@ -205,6 +206,118 @@ class SigmoidFunction(torch.autograd.Function):
 
 
 sigmoid = SigmoidFunction.apply
+
+
+@triton.autotune(
+    configs=_activation_autotune_configs(),
+    key=['D'],
+    **autotune_cache_kwargs,
+)
+@triton.jit(do_not_specialize=['T'])
+def elu_p1_fwd_kernel(
+    x, y,
+    stride_x_row,
+    stride_y_row,
+    T,
+    D: tl.constexpr,
+    B: tl.constexpr,
+):
+    i_n = tl.program_id(0).to(tl.int64)
+    offs = i_n * B + tl.arange(0, B)
+    mask = offs < T
+    row = offs // D
+    col = offs % D
+    b_x = tl.load(x + row * stride_x_row + col, mask=mask, other=0.).to(tl.float32)
+    # libdevice preserves representable subnormal exponentials
+    b_y = tl.where(b_x >= 0, b_x + 1., tldevice.exp(tl.minimum(b_x, 0.)))
+    tl.store(y + row * stride_y_row + col, b_y.to(y.dtype.element_ty), mask=mask)
+
+
+@triton.autotune(
+    configs=_activation_autotune_configs(),
+    key=['D'],
+    **autotune_cache_kwargs,
+)
+@triton.jit(do_not_specialize=['T'])
+def elu_p1_bwd_kernel(
+    x, dy, dx,
+    stride_x_row,
+    stride_dy_row,
+    stride_dx_row,
+    T,
+    D: tl.constexpr,
+    B: tl.constexpr,
+):
+    i_n = tl.program_id(0).to(tl.int64)
+    offs = i_n * B + tl.arange(0, B)
+    mask = offs < T
+    row = offs // D
+    col = offs % D
+    b_x = tl.load(x + row * stride_x_row + col, mask=mask, other=0.).to(tl.float32)
+    b_dy = tl.load(dy + row * stride_dy_row + col, mask=mask, other=0.).to(tl.float32)
+    b_dx = b_dy * tldevice.exp(tl.minimum(b_x, 0.))
+    tl.store(dx + row * stride_dx_row + col, b_dx.to(dx.dtype.element_ty), mask=mask)
+
+
+@dispatch('modules')
+def elu_p1_fwd(x: torch.Tensor) -> torch.Tensor:
+    x = x.contiguous() if x.ndim < 2 else _ensure_inner_contiguous(x)
+    T, D = x.numel(), x.shape[-1] if x.ndim else 1
+    y = _alloc_output(x)
+    if T > 0:
+        elu_p1_fwd_kernel[lambda meta: (triton.cdiv(T, meta['B']),)](
+            x=x,
+            y=y,
+            stride_x_row=_get_stride(x),
+            stride_y_row=_get_stride(y),
+            T=T,
+            D=D,
+        )
+    return y
+
+
+@dispatch('modules')
+def elu_p1_bwd(x: torch.Tensor, dy: torch.Tensor) -> torch.Tensor:
+    x = x.contiguous() if x.ndim < 2 else _ensure_inner_contiguous(x)
+    dy = dy.contiguous() if dy.ndim < 2 else _ensure_inner_contiguous(dy)
+    T, D = x.numel(), x.shape[-1] if x.ndim else 1
+    dx = _alloc_output(x)
+    if T > 0:
+        elu_p1_bwd_kernel[lambda meta: (triton.cdiv(T, meta['B']),)](
+            x=x,
+            dy=dy,
+            dx=dx,
+            stride_x_row=_get_stride(x),
+            stride_dy_row=_get_stride(dy),
+            stride_dx_row=_get_stride(dx),
+            T=T,
+            D=D,
+        )
+    return dx
+
+
+class ELUPlusOneFunction(torch.autograd.Function):
+
+    @staticmethod
+    @input_guard(no_guard_contiguous=True)
+    @autocast_custom_fwd
+    def forward(ctx, x):
+        ctx.save_for_backward(x)
+        return elu_p1_fwd(x)
+
+    @staticmethod
+    @input_guard(no_guard_contiguous=True)
+    @autocast_custom_bwd
+    def backward(ctx, dout):
+        x, = ctx.saved_tensors
+        return elu_p1_bwd(x, dout)
+
+
+def elu_p1(x: torch.Tensor) -> torch.Tensor:
+    """Compute ELU + 1 without cancellation in the negative branch."""
+    if x.device.type == 'cpu' or x.dtype == torch.float64:
+        return torch.where(x >= 0, x + 1, x.clamp_max(0).exp()).to(x.dtype)
+    return ELUPlusOneFunction.apply(x)
 
 
 @triton.autotune(
