@@ -7,6 +7,7 @@
 
 import importlib.util
 import inspect
+import os
 
 import pytest
 import torch
@@ -1218,8 +1219,8 @@ def test_chunk_return_intermediate_states(dtype):
 
 _FLASH_KDA_AVAILABLE = importlib.util.find_spec("flash_kda") is not None
 _SKIP_FLASH_KDA = pytest.mark.skipif(
-    device == "cpu" or not _FLASH_KDA_AVAILABLE,
-    reason="FlashKDA backend requires GPU and the flash_kda package",
+    device == "cpu" or not _FLASH_KDA_AVAILABLE or os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") == "1",
+    reason="FlashKDA tests require GPU, the flash_kda package, and backend dispatch",
 )
 
 _FLASH_KDA_REQUIRED_KWARGS = dict(
