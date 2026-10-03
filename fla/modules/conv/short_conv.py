@@ -21,6 +21,15 @@ except ImportError:
     causal_conv1d_update_cuda = None
 
 
+def _is_single_token(
+    x: torch.Tensor,
+    cu_seqlens: torch.Tensor | None = None,
+) -> bool:
+    B, T = x.shape[:2]
+    N = B if cu_seqlens is None else len(cu_seqlens) - 1
+    return B * T == N and (cu_seqlens is None or bool((cu_seqlens.diff() == 1).all()))
+
+
 class ShortConvolution(nn.Conv1d):
     """Short convolution layer for efficient causal convolution operations.
 
@@ -152,8 +161,6 @@ class ShortConvolution(nn.Conv1d):
         # Import here to avoid circular dependency
         from fla.modules.conv.causal_conv1d import causal_conv1d
 
-        B, T, *_ = x.shape
-        N = B if cu_seqlens is None else len(cu_seqlens) - 1
         if mask is not None:
             if cu_seqlens is not None:
                 raise ValueError("`mask` and `cu_seqlens` cannot be provided at the same time")
@@ -162,7 +169,11 @@ class ShortConvolution(nn.Conv1d):
         # in decoding phase, the cache (if provided) is updated inplace
         # For packed varlen inputs, decode only when every sequence has exactly one token:
         # a zero-length or multi-token sequence makes the shape check misfire.
-        if B * T == N and (cu_seqlens is None or bool((cu_seqlens.diff() == 1).all())):
+        # layers share this check across their Q/K/V convolutions within one forward call.
+        is_decode = kwargs.pop('_is_decode', None)
+        if is_decode is None:
+            is_decode = _is_single_token(x=x, cu_seqlens=cu_seqlens)
+        if is_decode:
             y, cache = self.step(
                 x=x,
                 residual=residual,
