@@ -29,7 +29,7 @@
 
 ## News
 
-- [2026-10] Add [CyFA](https://arxiv.org/abs/2609.36259) (Cyclic Flow Attention) implementation to `fla` - a Linear RNN that partitions memory by relative time through learned cyclic transport.
+- [2026-10] 🔄 Add [CyFA](https://arxiv.org/abs/2609.36259) (Cyclic Flow Attention) implementation to `fla` - a Linear RNN that partitions memory by relative time through learned cyclic transport.
 - [2026-07] 🐈 Add CAT (Compress and Attend Transformer) implementation to `fla` ([paper](https://arxiv.org/abs/2511.05313)) - a _meta_-sequence mixer that unlocks test-time control of inference costs.
 - [2026-07] 🧱 Add a [Gluon](https://triton-lang.org/main/getting-started/tutorials/gluon/) backend for [AttnRes](fla/ops/attnres).
 - [2026-07] 🚀 Add [FlashQLA](https://github.com/QwenLM/FlashQLA) backend for [Gated DeltaNet](fla/ops/gated_delta_rule).
