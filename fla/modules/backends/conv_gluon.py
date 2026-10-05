@@ -5,6 +5,8 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import torch
+
 from fla.ops.backends import BaseBackend
 from fla.utils import IS_NVIDIA, find_spec_cached
 
@@ -26,6 +28,10 @@ class ConvGluonBackend(BaseBackend):
         self, x, weight, bias=None, residual=None, initial_state=None, output_final_state=False,
         activation=None, cu_seqlens=None, cu_seqlens_cpu=None, chunk_indices=None, BT=64, layout_fallback=False,
     ):
+        if torch.distributed.is_initialized():
+            return False, 'Gluon convolution uses the existing backend in distributed processes'
+        if x.dtype not in (torch.float16, torch.bfloat16, torch.float32):
+            return False, 'Gluon convolution supports float16, bfloat16, and float32'
         if x.ndim != 3 or x.stride(-1) != 1:
             return False, 'Gluon convolution requires [B, T, D] with contiguous channels'
         if weight is None or weight.shape[0] != x.shape[-1] or weight.shape[1] not in (2, 3, 4):

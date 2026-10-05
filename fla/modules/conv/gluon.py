@@ -5,6 +5,8 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+"""Register-window convolution with explicit channel layouts and fused backward recomputation."""
+
 import torch
 import triton
 from triton.experimental import gluon
@@ -19,13 +21,15 @@ def causal_conv1d_fwd_kernel_gluon(
     x, weight, bias, residual, initial_state, y, cu_seqlens, chunk_indices,
     T, stride_x_n: gl.constexpr, stride_x_t: gl.constexpr,
     D: gl.constexpr, W: gl.constexpr, BT: gl.constexpr, BD: gl.constexpr, R: gl.constexpr,
-    V: gl.constexpr, NW: gl.constexpr, ACTIVATION: gl.constexpr,
+    V: gl.constexpr, NW: gl.constexpr, ACTIVATION: gl.constexpr, SPLIT: gl.constexpr = 1,
 ):
     # lanes own adjacent channels; each lane keeps R overlapping windows in registers.
     layout: gl.constexpr = gl.BlockedLayout([1, V], [1, 32], [NW, 1], [1, 0])
     i_d = gl.program_id(0).to(gl.int64)
     i_t = gl.program_id(1).to(gl.int64)
     i_n = gl.program_id(2).to(gl.int64)
+    i_sub = i_t % SPLIT
+    i_t //= SPLIT
     if cu_seqlens is not None:
         i_n = gl.load(chunk_indices + 2 * i_t).to(gl.int64)
         i_t = gl.load(chunk_indices + 2 * i_t + 1).to(gl.int64)
@@ -36,7 +40,7 @@ def causal_conv1d_fwd_kernel_gluon(
         bos = i_n * T
         x += i_n * stride_x_n
     d = i_d * BD + gl.arange(0, BD, layout=gl.SliceLayout(0, layout)).to(gl.int64)
-    t = i_t * BT + gl.arange(0, BT // R, layout=gl.SliceLayout(1, layout)).to(gl.int64) * R
+    t = (i_t * SPLIT + i_sub) * BT + gl.arange(0, BT // R, layout=gl.SliceLayout(1, layout)).to(gl.int64) * R
     values = ()
     weights = ()
     for k in gl.static_range(W):
@@ -76,15 +80,40 @@ def causal_conv1d_fwd(
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT, cu_seqlens_cpu=cu_seqlens_cpu)
     NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
     y = torch.empty_like(x, memory_format=torch.contiguous_format)
-    causal_conv1d_fwd_kernel_gluon[(triton.cdiv(D, 64), NT, B)](
-        x, weight, bias, residual, initial_state, y, cu_seqlens, chunk_indices,
-        T, x.stride(0), x.stride(1), D, weight.shape[1], BT, 64, 8, 2, 4, activation,
+    small = B * T * D <= 262144
+    BD, split = (32, 2) if small else (64, 1)
+    causal_conv1d_fwd_kernel_gluon[(triton.cdiv(D, BD), NT * split, B)](
+        x=x,
+        weight=weight,
+        bias=bias,
+        residual=residual,
+        initial_state=initial_state,
+        y=y,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        T=T,
+        stride_x_n=x.stride(0),
+        stride_x_t=x.stride(1),
+        D=D,
+        W=weight.shape[1],
+        BT=BT // split,
+        BD=BD,
+        R=8,
+        V=BD // 32,
+        NW=4,
+        ACTIVATION=activation,
+        SPLIT=split,
         num_warps=4,
     )
     final_state = None
     if output_final_state:
         from fla.modules.conv.triton.ops import causal_conv1d_update_states
-        final_state = causal_conv1d_update_states(x=x, state_len=weight.shape[1], initial_state=initial_state, cu_seqlens=cu_seqlens)
+        final_state = causal_conv1d_update_states(
+            x=x,
+            state_len=weight.shape[1],
+            initial_state=initial_state,
+            cu_seqlens=cu_seqlens,
+        )
     return y, final_state
 
 
@@ -171,9 +200,30 @@ def causal_conv1d_bwd(
     dx = torch.empty_like(x, memory_format=torch.contiguous_format)
     dw = weight.new_empty(B * NT, D, W, dtype=torch.float32)
     db = bias.new_empty(B * NT, D, dtype=torch.float32) if bias is not None else None
-    causal_conv1d_bwd_kernel_gluon[(triton.cdiv(D, 64), NT, B)](
-        x, weight, bias, dy, dx, dw, db, cu_seqlens, chunk_indices,
-        T, x.stride(0), x.stride(1), *dy.stride(), D, W, BT, 64, 8, 2, 4, activation,
+    causal_conv1d_bwd_kernel_gluon[(triton.cdiv(D, 32), NT, B)](
+        x=x,
+        weight=weight,
+        bias=bias,
+        dy=dy,
+        dx=dx,
+        dw=dw,
+        db=db,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        T=T,
+        stride_x_n=x.stride(0),
+        stride_x_t=x.stride(1),
+        stride_dy_n=dy.stride(0),
+        stride_dy_t=dy.stride(1),
+        stride_dy_d=dy.stride(2),
+        D=D,
+        W=W,
+        BT=BT,
+        BD=32,
+        R=16,
+        V=1,
+        NW=4,
+        ACTIVATION=activation,
         num_warps=4,
     )
     return dx, dw.sum(0).to(weight), db.sum(0).to(bias) if db is not None else None, dy if residual is not None else None, None

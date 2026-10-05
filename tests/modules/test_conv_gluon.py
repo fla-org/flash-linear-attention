@@ -14,7 +14,11 @@ from fla.utils import IS_NVIDIA, assert_close, device
 
 
 @pytest.mark.skipif(not IS_NVIDIA, reason='Gluon convolution requires NVIDIA')
-@pytest.mark.parametrize('dtype', [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(
+    ('dtype', 'weight_dtype'),
+    [(torch.float32, torch.float32), (torch.float16, torch.float32), (torch.bfloat16, torch.float32),
+     (torch.float16, torch.float16), (torch.bfloat16, torch.bfloat16)],
+)
 @pytest.mark.parametrize('activation', [None, 'silu'])
 @pytest.mark.parametrize(
     ('B', 'T', 'D', 'W', 'packed', 'state', 'strided'),
@@ -28,13 +32,13 @@ from fla.utils import IS_NVIDIA, assert_close, device
     ],
     ids=['one-token', 'channel-tail', 'time-tail', 'packed-qkv', 'packed-state', 'short-state'],
 )
-def test_causal_conv1d_gluon(monkeypatch, B, T, D, W, packed, state, strided, activation, dtype):
+def test_causal_conv1d_gluon(monkeypatch, B, T, D, W, packed, state, strided, activation, dtype, weight_dtype):
     torch.manual_seed(42)
     x = torch.randn(B, T, D * (3 if strided else 1), device=device, dtype=dtype)
     x = x[..., D:2 * D] if strided else x
     x.requires_grad_(True)
-    weight = torch.randn(D, W, device=device, dtype=torch.float32, requires_grad=True)
-    bias = torch.randn(D, device=device, requires_grad=True)
+    weight = torch.randn(D, W, device=device, dtype=weight_dtype, requires_grad=True)
+    bias = torch.randn(D, device=device, dtype=weight_dtype, requires_grad=True)
     residual = torch.randn(B, T, D, device=device, dtype=dtype, requires_grad=True)
     cu = torch.tensor([0, 0, 1, 3, T], device=device) if packed else None
     N = 4 if packed else B
@@ -45,8 +49,16 @@ def test_causal_conv1d_gluon(monkeypatch, B, T, D, W, packed, state, strided, ac
     results = []
     for enabled in ['0', '1']:
         monkeypatch.setenv('FLA_CONV_GLUON', enabled)
-        y, ht = causal_conv1d(x, weight, bias, residual=residual, initial_state=h0,
-                             output_final_state=state, activation=activation, cu_seqlens=cu)
+        y, ht = causal_conv1d(
+            x=x,
+            weight=weight,
+            bias=bias,
+            residual=residual,
+            initial_state=h0,
+            output_final_state=state,
+            activation=activation,
+            cu_seqlens=cu,
+        )
         grads = torch.autograd.grad((y, ht) if state else y, inputs, (dy, dht) if state else dy)
         results.append((y, ht, grads))
     ref, out = results
@@ -57,13 +69,17 @@ def test_causal_conv1d_gluon(monkeypatch, B, T, D, W, packed, state, strided, ac
         assert_close(name, expected, actual, 1e-3)
 
 
-@pytest.mark.parametrize('case', ['rank', 'channels', 'width', 'weight', 'packed-batch', 'chunk', 'state'])
-def test_conv_gluon_verifier(case):
+@pytest.mark.parametrize('case', ['rank', 'channels', 'width', 'weight', 'packed-batch', 'chunk', 'state', 'dtype', 'distributed'])
+def test_conv_gluon_verifier(monkeypatch, case):
     backend = ConvGluonBackend()
     x = torch.empty(2, 64, 32)
     weight = torch.empty(32, 4)
     kwargs = {}
-    if case == 'rank':
+    if case == 'dtype':
+        x = x.double()
+    elif case == 'distributed':
+        monkeypatch.setattr(torch.distributed, 'is_initialized', lambda: True)
+    elif case == 'rank':
         x = x.unsqueeze(-1)
     elif case == 'channels':
         x = x[..., ::2]
@@ -76,8 +92,13 @@ def test_conv_gluon_verifier(case):
     elif case == 'chunk':
         kwargs['BT'] = 32
     if case == 'state':
-        accepted, reason = backend.causal_conv1d_bwd_verifier(x=x, dy=x, dht=None, weight=weight,
-                                                           initial_state=torch.empty(2, 32, 4))
+        accepted, reason = backend.causal_conv1d_bwd_verifier(
+            x=x,
+            dy=x,
+            dht=None,
+            weight=weight,
+            initial_state=torch.empty(2, 32, 4),
+        )
     else:
         accepted, reason = backend.causal_conv1d_fwd_verifier(x=x, weight=weight, **kwargs)
     assert not accepted and reason
