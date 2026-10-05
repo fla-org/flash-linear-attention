@@ -20,7 +20,7 @@ import triton.language.extra.libdevice as tldevice
 
 from fla.modules.backends import dispatch
 from fla.ops.utils.op import exp, log
-from fla.utils import IS_AMD, IS_INTEL, autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, input_guard
+from fla.utils import IS_AMD, IS_INTEL, IS_NPU, autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, input_guard
 
 
 def _activation_autotune_configs():
@@ -315,7 +315,8 @@ class ELUPlusOneFunction(torch.autograd.Function):
 
 def elu_p1(x: torch.Tensor) -> torch.Tensor:
     """Compute ELU + 1 without cancellation in the negative branch."""
-    if x.device.type == 'cpu' or x.dtype == torch.float64:
+    # triton-ascend 3.2.2 does not implement libdevice.exp
+    if IS_NPU or x.device.type == 'cpu' or x.dtype == torch.float64:
         return torch.where(x >= 0, x + 1, x.clamp_max(0).exp()).to(x.dtype)
     return ELUPlusOneFunction.apply(x)
 
