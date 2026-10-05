@@ -52,6 +52,10 @@ def shape_D(B, T, H, D, **kw):
     return (D,)
 
 
+def shape_conv_weight(B, T, H, D, W=4, **kw):
+    return (H * D, W)
+
+
 def shape_LBTD(B, T, H, D, L=None, **kw):
     """AttnRes-style residuals stack: [L, B, T, D] where L is the number of residual sources."""
     if L is None:
@@ -500,6 +504,42 @@ register_op(OpConfig(
     inputs={**_simple_qkv},
     extra_kwargs={'layer_idx': 0, 'num_layers': 12},
     category='lightning',
+))
+
+
+_conv_default_shapes = {
+    f'B{B}_T{T}_D{D}_{"packed" if packed else "dense"}':
+    {'B': B, 'T': T, 'H': 1, 'D': D, 'W': 4, 'packed': packed}
+    for packed in [False, True]
+    for B, T, D in [
+        (1, 128, 1024), (1, 256, 1024), (1, 257, 1024), (1, 1024, 1024), (1, 1025, 1024),
+        (1, 2048, 2048), (1, 8192, 2048), (4, 8192, 4096), (1, 32768, 4096),
+    ]
+    if not packed or B == 1
+}
+
+
+def _conv_post_init(inputs, B, T, H, D, packed=False, **kw):
+    if packed:
+        from fla.ops.utils import prepare_chunk_indices
+
+        if B != 1 or T < 12:
+            raise ValueError('The packed convolution profile requires B=1 and T>=12')
+        cu = torch.tensor([0, 1, T // 4 + 3, T // 2, T], dtype=torch.long, device=inputs['x'].device)
+        inputs['cu_seqlens'] = cu
+        inputs['chunk_indices'] = prepare_chunk_indices(cu, 64)
+
+
+register_op(OpConfig(
+    name='causal_conv1d',
+    import_path='fla.modules.conv',
+    inputs={'x': TensorSpec(shape_BTD), 'weight': TensorSpec(shape_conv_weight)},
+    extra_kwargs={'activation': 'silu', 'backend': 'triton'},
+    post_init=_conv_post_init,
+    default_shapes=_conv_default_shapes,
+    category='convolution',
+    test_file='tests/modules/test_conv.py',
+    backend_env={'gluon': 'FLA_CONV_GLUON'},
 ))
 
 # --- Attention baselines ---

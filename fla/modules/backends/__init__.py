@@ -7,13 +7,17 @@
 
 """Module-level backends for FLA components such as rotary and cross-entropy."""
 
-from fla.modules.backends.conv_gluon import ConvGluonBackend
 from fla.modules.backends.triton_ascend import TritonAscendBackend
 from fla.ops.backends import BackendRegistry, dispatch
+from fla.utils import IS_NVIDIA, find_spec_cached
 
 modules_registry = BackendRegistry("modules")
 
 modules_registry.register(TritonAscendBackend())
-modules_registry.register(ConvGluonBackend())
+
+if IS_NVIDIA and find_spec_cached('triton.experimental.gluon') is not None:
+    from fla.modules.backends.conv_gluon import ConvGluonBackend
+
+    modules_registry.register(ConvGluonBackend())
 
 __all__ = ['dispatch', 'modules_registry']
