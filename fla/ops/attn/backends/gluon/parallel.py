@@ -713,11 +713,11 @@ def parallel_attn_bwd_kernel_gluon(
         scores = _acc_read(acc=score_acc, M=BM, N=BN, TCGEN=TCGEN, NW=NW) * (SCALE * 1.4426950216)
         cols = stream_start + cols_local
         if MODE == 0:
-            distance = rows[:, None] - cols[None, :]
+            needs_mask = (stream_start + BN > start) | (start + BM > end)
             norm = lse[:, None]
             delta_b = delta[:, None]
         else:
-            distance = cols[None, :] - rows[:, None]
+            needs_mask = (start + BM > stream_start) | (stream_start + BN > end)
             lse_col = gl.load(LSE + cols * HQ + hq, cols < end, other=0)
             delta_col = gl.load(DELTA + cols * HQ + hq, cols < end, other=0)
             norm = lse_col[None, :]
@@ -728,10 +728,16 @@ def parallel_attn_bwd_kernel_gluon(
                 scores += gate_row[:, None] - gate_col[None, :]
             else:
                 scores += gate_col[None, :] - gate_row[:, None]
-        mask = (distance >= 0) & (cols[None, :] < end) & (rows[:, None] < end)
-        if W is not None:
-            mask &= distance < W
-        prob = gl.where(mask, gl.exp2(scores - norm), 0.)
+        prob = gl.exp2(scores - norm)
+        if W is not None or needs_mask:
+            if MODE == 0:
+                distance = rows[:, None] - cols[None, :]
+            else:
+                distance = cols[None, :] - rows[:, None]
+            mask = (distance >= 0) & (cols[None, :] < end) & (rows[:, None] < end)
+            if W is not None:
+                mask &= distance < W
+            prob = gl.where(mask, prob, 0.)
         if MODE != 3:
             dp = _acc_read(acc=dp_acc, M=BM, N=BN, TCGEN=TCGEN, NW=NW)
             if USE_SINK and MODE == 0:
