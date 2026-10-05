@@ -36,6 +36,7 @@ from fla.utils import IS_NVIDIA, assert_close, device
          'small-tile-boundary', 'large-tile-boundary'],
 )
 def test_causal_conv1d_gluon(monkeypatch, B, T, D, W, packed, state, strided, activation, dtype, weight_dtype):
+    monkeypatch.setenv('FLA_CONV_GLUON', '0')
     torch.manual_seed(42)
     x = torch.randn(B, T, D * (3 if strided else 1), device=device, dtype=dtype)
     x = x[..., D:2 * D] if strided else x
@@ -51,7 +52,7 @@ def test_causal_conv1d_gluon(monkeypatch, B, T, D, W, packed, state, strided, ac
     dht = torch.randn_like(h0) if state else None
     results = []
     for enabled in ['0', '1']:
-        monkeypatch.setenv('FLA_CONV_GLUON', enabled)
+        monkeypatch.setenv('FLA_GLUON', enabled)
         y, ht = causal_conv1d(
             x=x,
             weight=weight,
@@ -125,10 +126,13 @@ def test_conv_gluon_dispatch(monkeypatch):
 
     monkeypatch.setattr(gluon, 'causal_conv1d_fwd', forward)
     monkeypatch.setattr(gluon, 'causal_conv1d_bwd', backward)
-    monkeypatch.setenv('FLA_CONV_GLUON', '1')
     x = torch.randn(1, 65, 64, device=device, requires_grad=True)
-    for W in [4, 5]:
-        weight = torch.randn(64, W, device=device, requires_grad=True)
-        y, _ = causal_conv1d(x, weight, activation='silu')
-        y.sum().backward()
-    assert calls == ['fwd', 'bwd']
+    for shared, local, enabled in [('0', '0', False), ('0', '1', True), ('1', '0', True), ('0', '0', False)]:
+        monkeypatch.setenv('FLA_GLUON', shared)
+        monkeypatch.setenv('FLA_CONV_GLUON', local)
+        calls.clear()
+        for W in [4, 5]:
+            weight = torch.randn(64, W, device=device, requires_grad=True)
+            y, _ = causal_conv1d(x, weight, activation='silu')
+            y.sum().backward()
+        assert calls == (['fwd', 'bwd'] if enabled else [])

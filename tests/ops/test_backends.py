@@ -133,6 +133,54 @@ def test_rwkv6_tilelang_backend_requires_opt_in(monkeypatch):
     assert rwkv6_tilelang_backend.RWKV6TileLangBackend.is_enabled() is True
 
 
+@pytest.mark.parametrize(
+    ('shared', 'conv', 'attnres', 'expected'),
+    [
+        (None, None, None, (False, False)),
+        (None, '1', '0', (True, False)),
+        (None, '0', '1', (False, True)),
+        ('0', '0', '0', (False, False)),
+        ('0', '1', '1', (True, True)),
+        ('1', None, None, (True, True)),
+        ('1', '0', '0', (True, True)),
+        ('1', '1', '0', (True, True)),
+        ('1', '0', '1', (True, True)),
+    ],
+)
+def test_gluon_backend_switch(monkeypatch, shared, conv, attnres, expected):
+    from fla.modules.backends.conv_gluon import ConvGluonBackend
+
+    attnres_backend = pytest.importorskip('fla.ops.attnres.backends.gluon').AttnResGluonBackend
+    for name, value in [('FLA_GLUON', shared), ('FLA_CONV_GLUON', conv), ('FLA_ATTNRES_GLUON', attnres)]:
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+
+    assert (ConvGluonBackend.is_enabled(), attnres_backend.is_enabled()) == expected
+
+
+@pytest.mark.parametrize(('backend', 'enabled'), [(None, True), ('triton', False), ('gluon', True)])
+def test_gluon_benchmark_selection(monkeypatch, backend, enabled):
+    from benchmarks.ops import run
+
+    attnres_backend = pytest.importorskip('fla.ops.attnres.backends.gluon').AttnResGluonBackend
+    monkeypatch.setenv('FLA_GLUON', '1')
+    monkeypatch.setenv('FLA_ATTNRES_GLUON', '0')
+    config = SimpleNamespace(
+        extra_kwargs={},
+        backend_env={'gluon': 'FLA_ATTNRES_GLUON'},
+        skip_backward=False,
+        default_shapes=None,
+        dim_constraints=None,
+    )
+    monkeypatch.setattr(run, 'get_op', lambda name: config)
+    monkeypatch.setattr(run, '_import_op', lambda config: None)
+
+    assert run.benchmark_op(op_name='fused_attnres', shapes={}, backend=backend) == []
+    assert attnres_backend.is_enabled() is enabled
+
+
 def test_rwkv6_tilelang_backend_verifier_accepts_supported_shape():
     q = SimpleNamespace(dtype=torch.bfloat16, is_cuda=True, shape=(1, 64, 2, 64), ndim=4)
     k = SimpleNamespace(dtype=torch.bfloat16, shape=q.shape)

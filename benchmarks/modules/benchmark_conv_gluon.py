@@ -54,7 +54,7 @@ def benchmark(args):
 
             outputs, gradients = [], []
             for enabled in ['0', '1']:
-                os.environ['FLA_CONV_GLUON'] = enabled
+                os.environ['FLA_GLUON'] = enabled
                 y = forward()
                 outputs.append(y.detach())
                 gradients.append(torch.autograd.grad(y, inputs, dy))
@@ -72,7 +72,7 @@ def benchmark(args):
                 samples = {'0': [], '1': []}
                 for repeat in range(args.repeats):
                     for enabled in (['0', '1'] if repeat % 2 == 0 else ['1', '0']):
-                        os.environ['FLA_CONV_GLUON'] = enabled
+                        os.environ['FLA_GLUON'] = enabled
                         samples[enabled].append(do_bench_cudagraph(run, rep=100) * 1000)
                 times = {key: statistics.median(value) for key, value in samples.items()}
                 row = dict(
@@ -102,10 +102,11 @@ def main():
     args = parser.parse_args()
     if args.repeats < 1:
         parser.error('--repeats must be positive')
-    old_backend = os.environ.get('FLA_CONV_GLUON')
+    old_backends = {name: os.environ.get(name) for name in ['FLA_GLUON', 'FLA_CONV_GLUON']}
     old_tf32 = torch.backends.cuda.matmul.allow_tf32
     old_cudnn_tf32 = torch.backends.cudnn.allow_tf32
     try:
+        os.environ['FLA_CONV_GLUON'] = '0'
         torch.backends.cuda.matmul.allow_tf32 = False
         torch.backends.cudnn.allow_tf32 = False
         metadata = dict(gpu=torch.cuda.get_device_name(), torch=torch.__version__, triton=triton.__version__, **vars(args))
@@ -117,10 +118,11 @@ def main():
     finally:
         torch.backends.cuda.matmul.allow_tf32 = old_tf32
         torch.backends.cudnn.allow_tf32 = old_cudnn_tf32
-        if old_backend is None:
-            os.environ.pop('FLA_CONV_GLUON', None)
-        else:
-            os.environ['FLA_CONV_GLUON'] = old_backend
+        for name, value in old_backends.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
 
 if __name__ == '__main__':

@@ -7,17 +7,15 @@
 
 import torch
 
-from fla.ops.backends import BaseBackend
+from fla.ops.backends.gluon import GluonBackend
 from fla.utils import IS_NVIDIA, find_spec_cached
 
 
-class ConvGluonBackend(BaseBackend):
-    """Opt-in register-window causal convolution, enabled with FLA_CONV_GLUON=1."""
+class ConvGluonBackend(GluonBackend):
+    """Opt-in register-window causal convolution, enabled with FLA_GLUON=1 or FLA_CONV_GLUON=1."""
 
     backend_type = 'conv_gluon'
-    package_name = None
     env_var = 'FLA_CONV_GLUON'
-    default_enable = False
     priority = 5
 
     @classmethod

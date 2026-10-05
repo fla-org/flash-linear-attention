@@ -12,8 +12,8 @@ port makes them explicit: residual sources are indexed statically (``L`` is a co
 pointer-table gather), V tiles are staged through shared memory with ``cp.async``, and the backward
 keeps all ``L`` tiles resident when they fit and streams a 2-deep ring otherwise.
 
-Opt-in and auto-dispatched like the other FLA backends: enable with ``FLA_ATTNRES_GLUON=1`` (off by
-default); the verifier then selects it for suitable CUDA calls and falls back to Triton elsewhere.
+Opt-in and auto-dispatched like the other FLA backends: enable with ``FLA_GLUON=1`` or ``FLA_ATTNRES_GLUON=1``;
+both are off by default. The verifier selects it for suitable CUDA calls and falls back to Triton elsewhere.
 Numerical parity with Triton is the frozen ``tests/ops/test_attnres.py``.
 """
 
@@ -27,7 +27,7 @@ from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
 from triton.experimental.gluon.language.nvidia.ampere import async_copy as cp
 
-from fla.ops.backends import BaseBackend
+from fla.ops.backends.gluon import GluonBackend
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.utils import (
     autocast_custom_bwd,
@@ -729,17 +729,14 @@ def _run(
     return o
 
 
-class AttnResGluonBackend(BaseBackend):
+class AttnResGluonBackend(GluonBackend):
     """Dispatch entry for the Gluon AttnRes kernels (see the module docstring for the design).
 
-    Off by default; enable with ``FLA_ATTNRES_GLUON=1``. The verifier then accepts any CUDA call
-    on SM80+ with ``D * itemsize >= 128`` bytes and otherwise defers to the Triton path.
+    Off by default; enable with ``FLA_GLUON=1`` or ``FLA_ATTNRES_GLUON=1``.
+    The verifier accepts CUDA calls on SM80+ with ``D * itemsize >= 128`` bytes and otherwise defers to Triton.
     """
 
-    backend_type = "gluon"
-    package_name = "triton.experimental.gluon"  # ships with Triton 3.5+; absent on older builds
     env_var = "FLA_ATTNRES_GLUON"
-    default_enable = False
     priority = 3
 
     def fused_attnres_verifier(

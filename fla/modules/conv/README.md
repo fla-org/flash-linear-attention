@@ -1,6 +1,6 @@
 # Gluon causal convolution
 
-Set `FLA_CONV_GLUON=1` to select the optional Gluon implementation through the existing module backend dispatcher. The public `causal_conv1d` and `ShortConvolution` interfaces stay unchanged; use their default `backend='triton'` entry point. Gluon is disabled by default.
+Set `FLA_CONV_GLUON=1` to enable the optional Gluon convolution implementation, or `FLA_GLUON=1` to enable all Gluon backends. The global switch takes precedence even when `FLA_CONV_GLUON=0`; when the global switch is unset or `0`, the convolution switch applies. The public `causal_conv1d` and `ShortConvolution` interfaces stay unchanged; use their default `backend='triton'` entry point. Gluon is disabled by default.
 
 The kernel assigns adjacent channels to adjacent lanes and independent time groups to warps. Each thread retains a sliding window of input values, sharing them across eight forward outputs instead of reloading every convolution tap. Backward retains sixteen time steps per thread, reuses shifted output gradients, and fuses the convolution recomputation needed by SiLU. It keeps FP32 arithmetic and preserves the existing backward's intermediate rounding to the input dtype. Weight and bias gradients use FP32 partial reductions.
 
