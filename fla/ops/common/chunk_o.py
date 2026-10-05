@@ -324,8 +324,7 @@ def chunk_bwd_kernel_dqkwg(
         b_dg = tl.sum(b_dq * b_q, axis=1) - tl.sum(b_dk * b_k, axis=1)
 
         p_dg = dg + o_t * HV
-        # (SY 09/21) revcumsum in a separate kernel due to strange triton compiler issue
-        # b_dg = tl.dot(tl.where(o_t[:, None] <= o_t[None, :], 1., 0.), b_dg, allow_tf32=False) + b_dg_last)
+        # reverse cumsum runs in a separate kernel to avoid a Triton compiler issue
         b_dg = tl.where(o_t < min(i_t * BT + BT, T) - 1, b_dg, b_dg + b_dg_last)
         tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), mask=m_qk)
         tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), mask=m_qk)

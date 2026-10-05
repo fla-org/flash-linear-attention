@@ -975,7 +975,7 @@ class ChunkABCFunction(torch.autograd.Function):
         num_stages = 1
 
         def fwd_pre(s, B, H, T, S):
-            # keep cummulative normalizer in fp32
+            # keep cumulative normalizer in fp32
             z = torch.empty_like(s, dtype=torch.float)
             grid = (B * H,)
             logcumsumexp_fwd_kernel[grid](

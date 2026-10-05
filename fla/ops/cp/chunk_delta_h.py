@@ -100,7 +100,7 @@ def pre_process_fwd_kernel_merged(
     stride_w = H * K if USE_BG else HV * K
 
     if is_h_part:
-        # ====== Stage 1: Compute h (K x V) ======
+        # h: [K, V]
         v += ((bos * HV + i_h) * V).to(tl.int64)
         if USE_BG:
             # DPLR keeps u and v as separate tensors; both need the per-head offset.
@@ -253,16 +253,11 @@ def pre_process_fwd_kernel_merged(
             p_h4 = hm + o_k4[:, None] * stride_hm_kv + o_vb[None, :]
             tl.store(p_h4, b_h4.to(p_h4.dtype.element_ty), mask=m_k4[:, None] & m_vb[None, :])
     else:
-        # ====== Stage 2: Compute m (K x K) ======
-        # i_col is for m part, map to K dimension
-        # m starts at column V, so offset = i_col * BLOCK_SIZE - V
-        # Use tl.cdiv to correctly compute the number of blocks for V dimension
+        # m: [K, K]
+        # m tiles follow the h tiles, including any padded V tile
         i_k_col = i_col - tl.cdiv(V, BLOCK_SIZE)
 
-        # Following stage2 kernel design:
-        # - BK1 is the full K dimension (next_power_of_2(K))
-        # - BLOCK_SIZE is the column block size (like BK2=32 in stage2)
-        # Each block computes a (BK1, BLOCK_SIZE) sub-matrix of m
+        # [BK1, BLOCK_SIZE] tile of m
         row = tl.arange(0, BK1)
         col = tl.arange(0, BLOCK_SIZE) + i_k_col * BLOCK_SIZE
 
@@ -553,7 +548,7 @@ def pre_process_bwd_kernel_merged(
     stride_w = H * K if USE_BG else HV * K
 
     if is_dh_part:
-        # ====== Stage 1: Compute dh (K x V) ======
+        # dh: [K, V]
         do += ((bos * HV + i_h) * V).to(tl.int64)
         dv += ((bos * HV + i_h) * V).to(tl.int64)
         stride_v = HV * V
@@ -703,13 +698,11 @@ def pre_process_bwd_kernel_merged(
             p_dh4 = dhm + o_k4[:, None] * (V + K) + o_vb[None, :]
             tl.store(p_dh4, b_dh4.to(p_dh4.dtype.element_ty), mask=m_k4[:, None] & m_vb[None, :])
     else:
-        # ====== Stage 2: Compute dm (K x K) ======
-        # i_col is for dm part, map to K dimension
+        # dm: [K, K]
+        # dm tiles follow the dh tiles, including any padded V tile
         i_k_col = i_col - tl.cdiv(V, BLOCK_SIZE)
 
-        # Following stage2 kernel design for backward (FORWARD=False)
-        # - BK1 is the full K dimension (next_power_of_2(K))
-        # - BLOCK_SIZE is the column block size
+        # [BK1, BLOCK_SIZE] tile of dm
         row = tl.arange(0, BK1)
         col = tl.arange(0, BLOCK_SIZE) + i_k_col * BLOCK_SIZE
 

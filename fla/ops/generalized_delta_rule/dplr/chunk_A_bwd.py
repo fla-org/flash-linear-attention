@@ -456,8 +456,6 @@ def chunk_dplr_bwd_dgk_kernel(
     p_dgk = dgk + o_t[:, None] * stride_qk + o_k[None, :]
     b_dgk = tl.load(p_dgk, mask=m_kk, other=0.0)
     b_dgk_offset = tl.load(p_dgk_offset, mask=m_kk, other=0.0)
-    # m_inv_cumsum = (tl.arange(0, BT)[:, None] <= tl.arange(0, BT)[None, :]).to(tl.float32)
-    # b_dgk_cumsum = tl.dot(m_inv_cumsum, b_dgk, allow_tf32=False)
     b_dgk_cumsum = tl.cumsum(b_dgk, 0, reverse=True)
     b_dgk_cumsum += b_dgk_last[None, :]
     b_dgk_cumsum -= b_dgk_offset

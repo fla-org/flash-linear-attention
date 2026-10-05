@@ -860,11 +860,8 @@ def chunk_gla_bwd_kernel_inter(
     b_dq += tl.load(p_dq, mask=m_tk, other=0.0)
     b_dk += tl.load(p_dk, mask=m_tk, other=0.0)
     b_dg = b_q * b_dq - b_k * b_dk
-    # tl.debug_barrier()
+    # use a prefix sum here to avoid the dot-based reverse cumsum compiler issue
     b_dg = b_dg - tl.cumsum(b_dg, axis=0) + tl.sum(b_dg, axis=0)[None, :] + b_dgk[None, :]
-    # Buggy due to strange triton compiler issue.
-    # m_s = tl.where(tl.arange(0, BT)[:, None] <= tl.arange(0, BT)[None, :], 1., 0.)
-    # b_dg = tl.dot(m_s, b_dg, allow_tf32=False) + b_dgk[None, :]
     p_dq = dq2 + o_t[:, None] * (H*K) + o_k[None, :]
     p_dk = dk2 + o_t[:, None] * (H*K) + o_k[None, :]
     p_dg = dg + o_t[:, None] * (H*K) + o_k[None, :]

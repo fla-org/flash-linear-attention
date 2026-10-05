@@ -83,29 +83,19 @@ def matmul_kernel(
     """Kernel for computing the matmul C = A x B.
     A has shape (M, K), B has shape (K, N) and C has shape (M, N)
     """
-    # -----------------------------------------------------------
-    # Map program ids `pid` to the block of C it should compute.
-    # This is done in a grouped ordering to promote L2 data reuse.
-    # See above `L2 Cache Optimizations` section for details.
+    # grouped tile ordering improves L2 data reuse
     i_b, i_m, i_n = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
 
     NM, NN = tl.num_programs(1).to(tl.int64), tl.num_programs(2).to(tl.int64)
     i_m, i_n = tl.swizzle2d(i_m, i_n, NM, NN, G)
 
-    # ----------------------------------------------------------
-    # Create pointers for the first blocks of A and B.
-    # We will advance this pointer as we move in the K direction
-    # and accumulate
-    # `p_a` is a block of [BM, BK] pointers
-    # `p_b` is a block of [BK, BN] pointers
-    # See above `Pointer Arithmetic` section for details
     a_batch_ptr = a + i_b * stride_ab
     o_am = (i_m * BM + tl.arange(0, BM)) % M
     o_bn = (i_n * BN + tl.arange(0, BN)) % N
     o_k = tl.arange(0, BK)
 
-    p_a = a_batch_ptr + (o_am[:, None] * stride_am + o_k[None, :] * stride_ak)
-    p_b = b + (o_k[:, None] * stride_bk + o_bn[None, :] * stride_bn)
+    p_a = a_batch_ptr + (o_am[:, None] * stride_am + o_k[None, :] * stride_ak)  # [BM, BK]
+    p_b = b + (o_k[:, None] * stride_bk + o_bn[None, :] * stride_bn)  # [BK, BN]
 
     b_acc = tl.zeros((BM, BN), dtype=tl.float32)
     for k in range(0, tl.cdiv(K, BK)):
@@ -146,8 +136,6 @@ def matmul_kernel(
             b_i *= tl.load(beta)
         b_c += b_i
 
-    # -----------------------------------------------------------
-    # Write back the block of the output matrix C with masks.
     c_batch_ptr = c + i_b * stride_cb
     p_c = c_batch_ptr + stride_cm * o_cm[:, None] + stride_cn * o_cn[None, :]
     tl.store(p_c, b_c.to(c.dtype.element_ty), mask=mask)

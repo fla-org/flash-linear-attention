@@ -92,9 +92,7 @@ def parallel_nsa_kernel_topk(
 
     # number of complete compression blocks visible to the query (q tokens are the last TQ of the sequence)
     NC = (i_t + Q_OFFSET + 1) // BS
-    ################################
-    # 1. lse computation
-    ################################
+    # lse computation
     if lse is not None:
         b_lse = tl.load(lse + (bos_q + i_t) * HQ + i_h * G + tl.arange(0, G))
     else:
@@ -126,10 +124,7 @@ def parallel_nsa_kernel_topk(
             b_lse = tl.zeros([G], dtype=tl.float32)
         else:
             b_lse = b_m + log(b_acc)
-
-    ################################
-    # 2. topk selection
-    ################################
+    # topk selection
     # [BC]
     b_i = tl.full([BC], -1, dtype=tl.float32)
     o_i = tl.zeros([BC], dtype=tl.int32)
