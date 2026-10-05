@@ -15,7 +15,6 @@ import triton.language as tl
 import triton.runtime.driver as driver
 
 from fla.ops.utils import prepare_chunk_indices
-from fla.ops.utils.backends.triton_ascend.op import make_block_ptr
 from fla.ops.utils.op import exp2
 from fla.utils import input_guard
 from fla.utils.ascend_ub_manager import compute_row_tile_block_size
@@ -93,15 +92,15 @@ def _hv_t_npu_arg(x: torch.Tensor, HV: int) -> tuple[torch.Tensor, bool]:
 @triton.jit
 def _beta_block_ptr(beta_ptr, T, i_t, BT, BETA_T_CONTIG: tl.constexpr, HV: tl.constexpr):
     if BETA_T_CONTIG:
-        return make_block_ptr(beta_ptr, (T,), (1,), (i_t * BT,), (BT,), (0,))
-    return make_block_ptr(beta_ptr, (T,), (HV,), (i_t * BT,), (BT,), (0,))
+        return tl.make_block_ptr(beta_ptr, (T,), (1,), (i_t * BT,), (BT,), (0,))
+    return tl.make_block_ptr(beta_ptr, (T,), (HV,), (i_t * BT,), (BT,), (0,))
 
 
 @triton.jit
 def _gk_block_ptr(gk_ptr, T, K, i_t, i_k, BT, BK, GK_T_CONTIG: tl.constexpr, HV: tl.constexpr):
     if GK_T_CONTIG:
-        return make_block_ptr(gk_ptr, (T, K), (K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-    return make_block_ptr(gk_ptr, (T, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+        return tl.make_block_ptr(gk_ptr, (T, K), (K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+    return tl.make_block_ptr(gk_ptr, (T, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
 
 
 @triton.heuristics({
@@ -143,7 +142,7 @@ def recompute_w_u_fwd_kda_kernel_npu(
 ):
     T_max = T
     BH = B * HV
-    core_id = tl.program_id(0).to(tl.int64)
+    core_id = tl.program_id(0)
 
     for task_id in tl.range(core_id, task_num, num_core):
         i_t_o = task_id // BH
@@ -195,13 +194,13 @@ def recompute_w_u_fwd_kda_kernel_npu(
             p_b = _beta_block_ptr(beta_ptr, T, i_t, BT, BETA_T_CONTIG, HV)
             b_b = tl.load(p_b, boundary_check=(0,))
 
-            p_A = make_block_ptr(A_ptr, (T, BT), (HV * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
+            p_A = tl.make_block_ptr(A_ptr, (T, BT), (HV * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
 
             last_idx = min(i_t * BT + BT, T) - 1
 
             for i_v in range(tl.cdiv(V, BV)):
-                p_v = make_block_ptr(v_ptr, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-                p_u = make_block_ptr(u_ptr, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+                p_v = tl.make_block_ptr(v_ptr, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+                p_u = tl.make_block_ptr(u_ptr, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
                 b_v = tl.load(p_v, boundary_check=(0, 1))
                 b_vb = (b_v * b_b[:, None]).to(b_v.dtype)
                 # Ascend tl.dot may clobber the left operand; reload A each V tile.
@@ -210,7 +209,7 @@ def recompute_w_u_fwd_kda_kernel_npu(
                 tl.store(p_u, b_u.to(p_u.dtype.element_ty), boundary_check=(0, 1))
 
             for i_k in range(tl.cdiv(K, BK)):
-                p_k = make_block_ptr(k_ptr, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+                p_k = tl.make_block_ptr(k_ptr, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
                 b_k = tl.load(p_k, boundary_check=(0, 1))
                 b_kb = b_k * b_b[:, None]
 
@@ -220,8 +219,8 @@ def recompute_w_u_fwd_kda_kernel_npu(
                 b_kb = b_kb * b_gk_exp
 
                 if STORE_QG:
-                    p_q = make_block_ptr(q_ptr, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-                    p_qg = make_block_ptr(qg_ptr, (T, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+                    p_q = tl.make_block_ptr(q_ptr, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+                    p_qg = tl.make_block_ptr(qg_ptr, (T, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
                     b_q = tl.load(p_q, boundary_check=(0, 1))
                     tl.store(p_qg, (b_q * b_gk_exp).to(p_qg.dtype.element_ty), boundary_check=(0, 1))
 
@@ -233,13 +232,13 @@ def recompute_w_u_fwd_kda_kernel_npu(
                     else:
                         b_gn = tl.load(gk_ptr + last_idx * HV * K + o_k, mask=m_k, other=0.0).to(tl.float32)
                     b_kg = b_k * exp2(b_gn[None, :] - b_gk)
-                    p_kg = make_block_ptr(kg_ptr, (T, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+                    p_kg = tl.make_block_ptr(kg_ptr, (T, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
                     tl.store(p_kg, b_kg.to(p_kg.dtype.element_ty), boundary_check=(0, 1))
 
                 # Ascend tl.dot may clobber the left operand; reload A each K tile.
                 b_A = tl.load(p_A, boundary_check=(0, 1))
                 b_w = tl.dot(b_A, b_kb.to(b_k.dtype), allow_tf32=False)
-                p_w = make_block_ptr(w_ptr, (T, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+                p_w = tl.make_block_ptr(w_ptr, (T, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
                 tl.store(p_w, b_w.to(p_w.dtype.element_ty), boundary_check=(0, 1))
 
 

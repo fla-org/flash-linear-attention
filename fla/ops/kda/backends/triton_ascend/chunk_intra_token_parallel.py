@@ -13,7 +13,6 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.utils.backends.triton_ascend.op import make_block_ptr
 from fla.ops.utils.op import exp2
 from fla.utils import input_guard
 from fla.utils.ascend_ub_manager import (
@@ -69,8 +68,8 @@ def chunk_kda_fwd_kernel_intra_token_parallel_npu(
     TG_OFFSET: tl.constexpr,
     HG_OFFSET: tl.constexpr,
 ):
-    i_tg = tl.program_id(0).to(tl.int64) + TG_OFFSET
-    i_hg = tl.program_id(1).to(tl.int64) + HG_OFFSET
+    i_tg = tl.program_id(0) + TG_OFFSET
+    i_hg = tl.program_id(1) + HG_OFFSET
 
     if IS_VARLEN:
         # graph replay can leave unused token slots in the fixed grid;
@@ -126,14 +125,14 @@ def chunk_kda_fwd_kernel_intra_token_parallel_npu(
     b_q = tl.load(q + i_t * H * K + p_qk, mask=m_hk, other=0).to(tl.float32)
     b_k = tl.load(k + i_t * H * K + p_qk, mask=m_hk, other=0).to(tl.float32)
 
-    p_g = make_block_ptr(g + i_t * HV * K, (HV, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0))
-    p_beta = make_block_ptr(beta + i_t * HV, (HV,), (1,), (i_hg * BH,), (BH,), (0,))
+    p_g = tl.make_block_ptr(g + i_t * HV * K, (HV, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0))
+    p_beta = tl.make_block_ptr(beta + i_t * HV, (HV,), (1,), (i_hg * BH,), (BH,), (0,))
     b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
     b_k = b_k * tl.load(p_beta, boundary_check=(0,)).to(tl.float32)[:, None]
 
     for j in range(i_ts, min(i_t + 1, min(T, i_ts + BC))):
         b_kj = tl.load(k + j * H * K + p_qk, mask=m_hk, other=0).to(tl.float32)
-        p_gj = make_block_ptr(g + j * HV * K, (HV, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0))
+        p_gj = tl.make_block_ptr(g + j * HV * K, (HV, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0))
         b_gj = tl.load(p_gj, boundary_check=(0, 1)).to(tl.float32)
 
         b_kgj = tl.where(m_k[None, :], b_kj * exp2(b_g - b_gj), 0.0)

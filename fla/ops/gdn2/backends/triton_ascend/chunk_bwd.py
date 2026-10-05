@@ -15,7 +15,6 @@ import triton.language as tl
 
 from fla.ops.kda.backends.triton_ascend.chunk_bwd import chunk_kda_bwd_kernel_wy_k_part_npu
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
-from fla.ops.utils.backends.triton_ascend.op import make_block_ptr
 from fla.ops.utils.op import exp2
 from fla.utils import input_guard
 from fla.utils.ascend_ub_manager import compute_row_tile_block_size, get_npu_properties
@@ -68,7 +67,7 @@ def chunk_gdn2_bwd_kernel_wy_v_part_npu(
     IS_VARLEN: tl.constexpr,
     T_CONTIG: tl.constexpr,
 ):
-    core_id = tl.program_id(0).to(tl.int64)
+    core_id = tl.program_id(0)
     T_seq = T
 
     for task_id in tl.range(core_id, task_num, num_core):
@@ -111,14 +110,14 @@ def chunk_gdn2_bwd_kernel_wy_v_part_npu(
         dv2_ptr = dv2 + (bos * H + i_h) * V
         dw_ptr = dw + (bos * H + i_h) * V
         dA_ptr = dA_acc + (bos * H + i_h) * BT
-        p_A = make_block_ptr(A_ptr, (BT, T), (1, a_stride_t), (0, i_t * BT), (BT, BT), (0, 1))
+        p_A = tl.make_block_ptr(A_ptr, (BT, T), (1, a_stride_t), (0, i_t * BT), (BT, BT), (0, 1))
         b_A = tl.load(p_A, boundary_check=(0, 1))
         b_dA = tl.zeros([BT, BT], dtype=tl.float32)
 
         for i_v in range(tl.cdiv(V, BV)):
-            p_v = make_block_ptr(v_ptr, (T, V), (value_stride_t, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-            p_w = make_block_ptr(w_ptr, (T, V), (value_stride_t, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-            p_dv = make_block_ptr(dv_ptr, (T, V), (value_stride_t, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+            p_v = tl.make_block_ptr(v_ptr, (T, V), (value_stride_t, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+            p_w = tl.make_block_ptr(w_ptr, (T, V), (value_stride_t, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+            p_dv = tl.make_block_ptr(dv_ptr, (T, V), (value_stride_t, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
             b_v = tl.load(p_v, boundary_check=(0, 1))
             b_w = tl.load(p_w, boundary_check=(0, 1))
             b_dv = tl.load(p_dv, boundary_check=(0, 1))
@@ -129,12 +128,12 @@ def chunk_gdn2_bwd_kernel_wy_v_part_npu(
             b_A_for_dvb = b_A + 0.0
             b_dvb = tl.dot(b_A_for_dvb, b_dv_for_dvb, allow_tf32=False)
 
-            p_dv2 = make_block_ptr(dv2_ptr, (T, V), (H * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-            p_dw = make_block_ptr(dw_ptr, (T, V), (H * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+            p_dv2 = tl.make_block_ptr(dv2_ptr, (T, V), (H * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+            p_dw = tl.make_block_ptr(dw_ptr, (T, V), (H * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
             tl.store(p_dv2, (b_dvb * b_w).to(p_dv2.dtype.element_ty), boundary_check=(0, 1))
             tl.store(p_dw, (b_dvb * b_v).to(p_dw.dtype.element_ty), boundary_check=(0, 1))
 
-        p_dA = make_block_ptr(dA_ptr, (T, BT), (H * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
+        p_dA = tl.make_block_ptr(dA_ptr, (T, BT), (H * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
         tl.store(p_dA, b_dA.to(p_dA.dtype.element_ty), boundary_check=(0, 1))
 
 
@@ -170,7 +169,7 @@ def chunk_gdn2_bwd_kernel_wy_gate_part_npu(
     K_OFFSET: tl.constexpr,
 ):
     i_k = K_OFFSET
-    core_id = tl.program_id(0).to(tl.int64)
+    core_id = tl.program_id(0)
     T_seq = T
 
     for task_id in tl.range(core_id, task_num, num_core):
@@ -228,19 +227,19 @@ def chunk_gdn2_bwd_kernel_wy_gate_part_npu(
 
         b_dw = tl.zeros([BT, BK], dtype=tl.float32)
         for i_v in range(tl.cdiv(V, BV)):
-            p_dv = make_block_ptr(dv_ptr, (T, V), (dv_stride_t, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+            p_dv = tl.make_block_ptr(dv_ptr, (T, V), (dv_stride_t, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
             if STATE_V_FIRST:
-                p_h = make_block_ptr(h_ptr, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
+                p_h = tl.make_block_ptr(h_ptr, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
             else:
-                p_h = make_block_ptr(h_ptr, (V, K), (1, V), (i_v * BV, i_k * BK), (BV, BK), (0, 1))
+                p_h = tl.make_block_ptr(h_ptr, (V, K), (1, V), (i_v * BV, i_k * BK), (BV, BK), (0, 1))
             b_dv = tl.load(p_dv, boundary_check=(0, 1))
             b_h = tl.load(p_h, boundary_check=(0, 1))
             b_dw += tl.dot(b_dv, b_h.to(b_dv.dtype), allow_tf32=False)
 
-        p_k = make_block_ptr(k_ptr, (T, K), (k_stride_t, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-        p_g = make_block_ptr(g_ptr, (T, K), (g_stride_t, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-        p_b = make_block_ptr(b_ptr, (T, K), (g_stride_t, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-        p_A = make_block_ptr(A_ptr, (BT, T), (1, a_stride_t), (0, i_t * BT), (BT, BT), (0, 1))
+        p_k = tl.make_block_ptr(k_ptr, (T, K), (k_stride_t, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+        p_g = tl.make_block_ptr(g_ptr, (T, K), (g_stride_t, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+        p_b = tl.make_block_ptr(b_ptr, (T, K), (g_stride_t, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+        p_A = tl.make_block_ptr(A_ptr, (BT, T), (1, a_stride_t), (0, i_t * BT), (BT, BT), (0, 1))
         b_k = tl.load(p_k, boundary_check=(0, 1))
         b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
         b_b = tl.load(p_b, boundary_check=(0, 1))
@@ -250,20 +249,20 @@ def chunk_gdn2_bwd_kernel_wy_gate_part_npu(
         b_dw = -b_dw.to(b_A.dtype)
         b_dkgb = tl.dot(b_A, b_dw, allow_tf32=False)
 
-        p_dA = make_block_ptr(dA_ptr, (T, BT), (H * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
+        p_dA = tl.make_block_ptr(dA_ptr, (T, BT), (H * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
         b_dA = tl.load(p_dA, boundary_check=(0, 1)).to(tl.float32)
         b_dA += tl.dot(b_dw, tl.trans((b_kg * b_b).to(b_A.dtype)), allow_tf32=False)
         tl.store(p_dA, b_dA.to(p_dA.dtype.element_ty), boundary_check=(0, 1))
 
-        p_db = make_block_ptr(db_ptr, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+        p_db = tl.make_block_ptr(db_ptr, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         tl.store(p_db, (b_dkgb * b_kg).to(p_db.dtype.element_ty), boundary_check=(0, 1))
 
-        p_dk = make_block_ptr(dk_ptr, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+        p_dk = tl.make_block_ptr(dk_ptr, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         b_dk = tl.load(p_dk, boundary_check=(0, 1)).to(tl.float32)
         b_dk += b_dkgb * b_gk_exp * b_b
         tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
 
-        p_dg = make_block_ptr(dg_ptr, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+        p_dg = tl.make_block_ptr(dg_ptr, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         b_dg = tl.load(p_dg, boundary_check=(0, 1)).to(tl.float32)
         b_dg += b_kg * b_dkgb * b_b
         tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), boundary_check=(0, 1))
@@ -287,7 +286,7 @@ def chunk_gdn2_bwd_kernel_wy_dA_finalize_npu(
     A_T_CONTIG: tl.constexpr,
     TAIL_MODE: tl.constexpr,
 ):
-    core_id = tl.program_id(0).to(tl.int64)
+    core_id = tl.program_id(0)
     T_seq = T
 
     for task_id in tl.range(core_id, task_num, num_core):
@@ -316,9 +315,9 @@ def chunk_gdn2_bwd_kernel_wy_dA_finalize_npu(
 
         dA_acc_ptr = dA_acc + (bos * H + i_h) * BT
         dA_ptr = dA + (bos * H + i_h) * BT
-        p_A = make_block_ptr(A_ptr, (BT, T), (1, a_stride_t), (0, i_t * BT), (BT, BT), (0, 1))
-        p_dA_acc = make_block_ptr(dA_acc_ptr, (T, BT), (H * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
-        p_dA = make_block_ptr(dA_ptr, (T, BT), (H * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
+        p_A = tl.make_block_ptr(A_ptr, (BT, T), (1, a_stride_t), (0, i_t * BT), (BT, BT), (0, 1))
+        p_dA_acc = tl.make_block_ptr(dA_acc_ptr, (T, BT), (H * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
+        p_dA = tl.make_block_ptr(dA_ptr, (T, BT), (H * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
 
         o_t = i_t * BT + tl.arange(0, BT)
         if TAIL_MODE == 0:

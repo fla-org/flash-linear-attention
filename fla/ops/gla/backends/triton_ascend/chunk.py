@@ -14,7 +14,6 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
-from fla.ops.utils.backends.triton_ascend.op import make_block_ptr
 from fla.ops.utils.op import exp2
 from fla.utils import ascend_compile_kwargs, input_guard
 from fla.utils.ascend_ub_manager import (
@@ -48,7 +47,7 @@ def chunk_gla_fwd_A_kernel_intra_sub_inter_npu(
     IS_VARLEN: tl.constexpr, NT_OFFSET, NC_OFFSET, BH_OFFSET,
 ):
     i_t = tl.program_id(0).to(tl.int64) + NT_OFFSET
-    i_c = tl.program_id(1).to(tl.int64) + NC_OFFSET
+    i_c = tl.program_id(1) + NC_OFFSET
     i_bh = tl.program_id(2).to(tl.int64) + BH_OFFSET
     i_b, i_h = i_bh // H, i_bh % H
     i_i, i_j = i_c // NC, i_c % NC
@@ -105,7 +104,7 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra_npu(
     IS_VARLEN: tl.constexpr, NT_OFFSET, NC_OFFSET, BH_OFFSET,
 ):
     i_t = tl.program_id(0).to(tl.int64) + NT_OFFSET
-    i_i = tl.program_id(1).to(tl.int64) + NC_OFFSET
+    i_i = tl.program_id(1) + NC_OFFSET
     i_bh = tl.program_id(2).to(tl.int64) + BH_OFFSET
     i_b, i_h = i_bh // H, i_bh % H
     i_j = i_i
@@ -169,8 +168,8 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra_split_npu(
     BT: tl.constexpr, BC: tl.constexpr, BK: tl.constexpr, NC: tl.constexpr,
     IS_VARLEN: tl.constexpr, NK_OFFSET, NTNC_OFFSET, BH_OFFSET,
 ):
-    i_k = tl.program_id(0).to(tl.int64) + NK_OFFSET
-    i_tc = tl.program_id(1).to(tl.int64) + NTNC_OFFSET
+    i_k = tl.program_id(0) + NK_OFFSET
+    i_tc = tl.program_id(1) + NTNC_OFFSET
     i_bh = tl.program_id(2).to(tl.int64) + BH_OFFSET
     i_b, i_h = i_bh // H, i_bh % H
     i_t, i_i = (i_tc // NC).to(tl.int64), i_tc % NC
@@ -235,7 +234,7 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra_merge_npu(
     IS_VARLEN: tl.constexpr, NT_OFFSET, NC_OFFSET, BH_OFFSET,
 ):
     i_t = tl.program_id(0).to(tl.int64) + NT_OFFSET
-    i_c = tl.program_id(1).to(tl.int64) + NC_OFFSET
+    i_c = tl.program_id(1) + NC_OFFSET
     i_bh = tl.program_id(2).to(tl.int64) + BH_OFFSET
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
@@ -356,7 +355,7 @@ def chunk_gla_fwd_kernel_o_npu(
     STATE_V_FIRST: tl.constexpr, IS_VARLEN: tl.constexpr,
     USE_GRAPH: tl.constexpr = False,
 ):
-    core_id = tl.program_id(0).to(tl.int64)
+    core_id = tl.program_id(0)
     total_chunks_i64 = total_chunks.to(tl.int64)
     h_t_step = total_chunks_i64 * HV
     for task_id in tl.range(core_id, task_num, num_core):
@@ -396,12 +395,12 @@ def chunk_gla_fwd_kernel_o_npu(
 
             b_o = tl.zeros([BT, BV], dtype=tl.float32)
             for i_k in range(tl.cdiv(K, BK)):
-                p_q = make_block_ptr(q_ptr, (T_cur, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-                p_g = make_block_ptr(g_ptr, (T_cur, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+                p_q = tl.make_block_ptr(q_ptr, (T_cur, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+                p_g = tl.make_block_ptr(g_ptr, (T_cur, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
                 if STATE_V_FIRST:
-                    p_h = make_block_ptr(h_base, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
+                    p_h = tl.make_block_ptr(h_base, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
                 else:
-                    p_h = make_block_ptr(h_base, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
+                    p_h = tl.make_block_ptr(h_base, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
                 b_q = tl.load(p_q, boundary_check=(0, 1))
                 b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
                 # fold scale into the operand: an elementwise op on the accumulator
@@ -415,9 +414,9 @@ def chunk_gla_fwd_kernel_o_npu(
 
             o_t = i_t * BT + tl.arange(0, BT)
             m_t = o_t < T_cur
-            p_a = make_block_ptr(a_ptr, (T_cur, BT), (HV * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
-            p_v = make_block_ptr(v_ptr, (T_cur, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-            p_o = make_block_ptr(o_ptr, (T_cur, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+            p_a = tl.make_block_ptr(a_ptr, (T_cur, BT), (HV * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
+            p_v = tl.make_block_ptr(v_ptr, (T_cur, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+            p_o = tl.make_block_ptr(o_ptr, (T_cur, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
             b_A = tl.load(p_a, boundary_check=(0, 1))
             m_s = tl.arange(0, BT)[:, None] >= tl.arange(0, BT)[None, :]
             b_A = tl.where(m_s & (m_t[:, None] & m_t[None, :]), b_A, 0.0)
@@ -583,7 +582,7 @@ def chunk_gla_bwd_kernel_dv_npu(
     IS_VARLEN: tl.constexpr, STATE_V_FIRST: tl.constexpr,
     A_OFFSET, NT_OFFSET, BH_OFFSET,
 ):
-    i_v = tl.program_id(0).to(tl.int64) + A_OFFSET
+    i_v = tl.program_id(0) + A_OFFSET
     i_t = tl.program_id(1).to(tl.int64) + NT_OFFSET
     i_bh = tl.program_id(2).to(tl.int64) + BH_OFFSET
     i_b, i_h = i_bh // H, i_bh % H
@@ -696,7 +695,7 @@ def chunk_gla_bwd_kernel_intra_npu(
     H: tl.constexpr, K: tl.constexpr, BT: tl.constexpr, BC: tl.constexpr, BK: tl.constexpr, NC: tl.constexpr,
     IS_VARLEN: tl.constexpr, A_OFFSET, NT_OFFSET, BH_OFFSET,
 ):
-    i_kc = tl.program_id(0).to(tl.int64) + A_OFFSET
+    i_kc = tl.program_id(0) + A_OFFSET
     i_t = tl.program_id(1).to(tl.int64) + NT_OFFSET
     i_bh = tl.program_id(2).to(tl.int64) + BH_OFFSET
     i_b, i_h = i_bh // H, i_bh % H
@@ -863,7 +862,7 @@ def chunk_gla_bwd_kernel_inter_npu(
     IS_VARLEN: tl.constexpr, STATE_V_FIRST: tl.constexpr,
     A_OFFSET, NT_OFFSET, BH_OFFSET,
 ):
-    i_k = tl.program_id(0).to(tl.int64) + A_OFFSET
+    i_k = tl.program_id(0) + A_OFFSET
     i_t = tl.program_id(1).to(tl.int64) + NT_OFFSET
     i_bh = tl.program_id(2).to(tl.int64) + BH_OFFSET
     i_b, i_h = i_bh // H, i_bh % H

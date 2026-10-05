@@ -13,7 +13,6 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.utils.backends.triton_ascend.op import make_block_ptr
 from fla.ops.utils.index import prepare_chunk_indices
 from fla.ops.utils.op import exp
 from fla.ops.utils.softplus import softplus
@@ -71,13 +70,13 @@ def gdn_gate_fwd_kernel_npu(
     NT_OFFSET: tl.constexpr,
     H_OFFSET: tl.constexpr,
 ):
-    i_t = tl.program_id(0).to(tl.int64) + NT_OFFSET
-    i_h = tl.program_id(1).to(tl.int64) + H_OFFSET
+    i_t = tl.program_id(0) + NT_OFFSET
+    i_h = tl.program_id(1) + H_OFFSET
 
     b_A = tl.load(A_log + i_h).to(tl.float32)
 
-    p_g = make_block_ptr(g + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
-    p_yg = make_block_ptr(yg + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
+    p_g = tl.make_block_ptr(g + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
+    p_yg = tl.make_block_ptr(yg + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
     b_g = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
     if HAS_BIAS:
         b_g = b_g + tl.load(dt_bias + i_h).to(tl.float32)
@@ -143,8 +142,8 @@ def gdn_gate_chunk_cumsum_scalar_kernel_npu(
     NT_OFFSET: tl.constexpr,
     BH_OFFSET: tl.constexpr,
 ):
-    i_t = tl.program_id(0).to(tl.int64) + NT_OFFSET
-    i_bh = tl.program_id(1).to(tl.int64) + BH_OFFSET
+    i_t = tl.program_id(0) + NT_OFFSET
+    i_bh = tl.program_id(1) + BH_OFFSET
     i_b, i_h = i_bh // H, i_bh % H
 
     if IS_VARLEN:
@@ -155,8 +154,8 @@ def gdn_gate_chunk_cumsum_scalar_kernel_npu(
         bos = tl.cast(i_b, tl.int64) * T
         eos = bos + T
 
-    p_g = make_block_ptr(g + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
-    p_o = make_block_ptr(o + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
+    p_g = tl.make_block_ptr(g + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
+    p_o = tl.make_block_ptr(o + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
 
     b_g = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
     if HAS_BIAS:
@@ -235,14 +234,14 @@ def gdn_gate_bwd_kernel_npu(
     NT_OFFSET: tl.constexpr,
     H_OFFSET: tl.constexpr,
 ):
-    i_t = tl.program_id(0).to(tl.int64) + NT_OFFSET
-    i_h = tl.program_id(1).to(tl.int64) + H_OFFSET
+    i_t = tl.program_id(0) + NT_OFFSET
+    i_h = tl.program_id(1) + H_OFFSET
 
     b_A = tl.load(A_log + i_h).to(tl.float32)
 
-    p_g = make_block_ptr(g + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
-    p_dg = make_block_ptr(dg + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
-    p_dyg = make_block_ptr(dyg + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
+    p_g = tl.make_block_ptr(g + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
+    p_dg = tl.make_block_ptr(dg + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
+    p_dyg = tl.make_block_ptr(dyg + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
 
     b_g = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
     b_dyg = tl.load(p_dyg, boundary_check=(0,)).to(tl.float32)
