@@ -61,7 +61,7 @@ def chunk_generalized_iplr_delta_rule_fwd_kernel_h(
     STORE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_v, i_nh = unflatten_program_id(X=tl.cdiv(K, BK), Y=tl.cdiv(V, BV))
+    i_k, i_v, i_nh = unflatten_program_id(tl.cdiv(K, BK), tl.cdiv(V, BV))
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
@@ -149,7 +149,7 @@ def chunk_generalized_iplr_delta_rule_fwd_kernel_o(
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_t = unflatten_program_id(X=tl.cdiv(V, BV))
+    i_v, i_t = unflatten_program_id(tl.cdiv(V, BV))
     i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
 

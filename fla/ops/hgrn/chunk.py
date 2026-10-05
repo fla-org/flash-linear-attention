@@ -62,7 +62,7 @@ def chunk_hgrn_fwd_kernel_h(
     BD: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
 ):
-    i_d, i_t = unflatten_program_id(X=tl.cdiv(D, BD))
+    i_d, i_t = unflatten_program_id(tl.cdiv(D, BD))
     i_b = tl.program_id(1).to(tl.int64)
     o_d = i_d * BD + tl.arange(0, BD)
     mask = o_d < D
@@ -143,7 +143,7 @@ def chunk_hgrn_bwd_kernel_h(
     BT: tl.constexpr,
     BD: tl.constexpr,
 ):
-    i_d, i_t = unflatten_program_id(X=tl.cdiv(D, BD))
+    i_d, i_t = unflatten_program_id(tl.cdiv(D, BD))
     i_b = tl.program_id(1).to(tl.int64)
     o_d = i_d * BD + tl.arange(0, BD)
     mask = o_d < D
@@ -236,16 +236,15 @@ class ChunkHGRNFunction(torch.autograd.Function):
         gc = torch.empty_like(g, dtype=torch.float)
         o = torch.empty_like(x, dtype=torch.float)
         def grid(meta): return (triton.cdiv(D, meta['BD']) * triton.cdiv(T, meta['BT']), B)
-        chunk_hgrn_fwd_kernel_h[grid](
-            x, g, gc, o, initial_state,
-            T=T, D=D, BT=BT,
-            USE_INITIAL_STATE=initial_state is not None,
-        )
+        chunk_hgrn_fwd_kernel_h[grid](x, g, gc, o, initial_state, T=T, D=D, BT=BT, USE_INITIAL_STATE=initial_state is not None)
         def grid(meta): return (triton.cdiv(D, meta['BD']), B)
         chunk_hgrn_fwd_kernel_o[grid](
             gc, o,
             o.stride(-3), o.stride(-2), o.stride(-1),
-            T=T, D=D, BT=BT, BD=BD,
+            T=T,
+            D=D,
+            BT=BT,
+            BD=BD,
             num_warps=num_warps,
         )
         final_state = None
@@ -266,17 +265,17 @@ class ChunkHGRNFunction(torch.autograd.Function):
         gc = torch.empty_like(g, dtype=torch.float)
         dx = torch.empty_like(o, dtype=torch.float)
         def grid(meta): return (triton.cdiv(D, meta['BD']) * triton.cdiv(T, meta['BT']), B)
-        chunk_hgrn_bwd_kernel_h[grid](
-            g, gc, dx, do,
-            T=T, D=D, BT=BT,
-        )
+        chunk_hgrn_bwd_kernel_h[grid](g, gc, dx, do, T=T, D=D, BT=BT)
 
         dg = torch.empty_like(g, dtype=torch.float)
         def grid(meta): return (triton.cdiv(D, meta['BD']), B)
         chunk_hgrn_bwd_kernel_o[grid](
             g, gc, o, dx, dg,
             o.stride(-3), o.stride(-2), o.stride(-1),
-            T=T, D=D, BT=BT, BD=BD,
+            T=T,
+            D=D,
+            BT=BT,
+            BD=BD,
             num_warps=num_warps,
         )
         if initial_state is not None:

@@ -46,7 +46,7 @@ def chunk_local_cumsum_scalar_kernel(
     IS_VARLEN: tl.constexpr,
     USE_GRAPH: tl.constexpr = False,
 ):
-    i_bh, i_t = unflatten_program_id(X=B * H)
+    i_bh, i_t = unflatten_program_id(B * H)
     i_bh = i_bh.to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
@@ -105,7 +105,7 @@ def chunk_local_cumsum_vector_kernel(
     IS_VARLEN: tl.constexpr,
     USE_GRAPH: tl.constexpr = False,
 ):
-    i_s, i_t = unflatten_program_id(X=tl.cdiv(S, BS))
+    i_s, i_t = unflatten_program_id(tl.cdiv(S, BS))
     i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
@@ -222,7 +222,7 @@ def chunk_global_cumsum_vector_kernel(
     HAS_SCALE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_s, i_nh = unflatten_program_id(X=tl.cdiv(S, BS))
+    i_s, i_nh = unflatten_program_id(tl.cdiv(S, BS))
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
@@ -316,9 +316,7 @@ def chunk_local_cumsum_vector(
     # graph 模式下未覆盖行须为 0：kda_gate_bwd 对输出做全量归约，脏行会污染 dA/dbias
     g_org, g = g, (torch.zeros_like if use_graph else torch.empty_like)(g, dtype=output_dtype or g.dtype)
     def grid(meta): return (triton.cdiv(meta['S'], meta['BS']) * NT, B * H)
-    # keep cummulative normalizer in fp32
-    # this kernel is equivalent to
-    # g = g.view(B, H, NT, BT, -1).cumsum(-2).view(B, H, T, -1)
+    # keep cumulative normalizer in fp32
     chunk_local_cumsum_vector_kernel[grid](
         s=g_org,
         o=g,

@@ -61,7 +61,7 @@ def chunk_fwd_kernel_h_split(
     # i_h: head index
     # i_n: sequence index
     # i_s: local split index inside a sequence
-    i_k, i_v, i_sh = unflatten_program_id(X=tl.cdiv(K, BK), Y=tl.cdiv(V, BV))
+    i_k, i_v, i_sh = unflatten_program_id(tl.cdiv(K, BK), tl.cdiv(V, BV))
     i_ss, i_h = i_sh // H, i_sh % H
     if IS_VARLEN:
         i_n, i_s = tl.load(split_indices + i_ss * 2).to(tl.int32), tl.load(split_indices + i_ss * 2 + 1).to(tl.int32)
@@ -179,7 +179,7 @@ def chunk_fwd_kernel_h_reduction(
     STORE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_v, i_nh = unflatten_program_id(X=tl.cdiv(K, BK), Y=tl.cdiv(V, BV))
+    i_k, i_v, i_nh = unflatten_program_id(tl.cdiv(K, BK), tl.cdiv(V, BV))
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
@@ -280,7 +280,7 @@ def chunk_bwd_kernel_dh_split(
     # i_h: head index
     # i_n: sequence index
     # i_s: local split index inside a sequence
-    i_k, i_v, i_sh = unflatten_program_id(X=tl.cdiv(K, BK), Y=tl.cdiv(V, BV))
+    i_k, i_v, i_sh = unflatten_program_id(tl.cdiv(K, BK), tl.cdiv(V, BV))
     i_ss, i_hq = i_sh // HQ, i_sh % HQ
     if IS_VARLEN:
         i_n, i_s = tl.load(split_indices + i_ss * 2).to(tl.int32), tl.load(split_indices + i_ss * 2 + 1).to(tl.int32)
@@ -396,7 +396,7 @@ def chunk_bwd_kernel_dh_reduction(
     STORE_INITIAL_STATE_GRADIENT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_v, i_nh = unflatten_program_id(X=tl.cdiv(K, BK), Y=tl.cdiv(V, BV))
+    i_k, i_v, i_nh = unflatten_program_id(tl.cdiv(K, BK), tl.cdiv(V, BV))
     i_n, i_hq = i_nh // HQ, i_nh % HQ
     i_h = i_hq // NG
     if IS_VARLEN:

@@ -68,7 +68,7 @@ def fused_chunk_fwd_kernel(
     STORE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_k, i_nh = unflatten_program_id(X=tl.cdiv(V, BV), Y=tl.cdiv(K, BK))
+    i_v, i_k, i_nh = unflatten_program_id(tl.cdiv(V, BV), tl.cdiv(K, BK))
     i_n, i_h = i_nh // H, i_nh % H
 
     all = B * T
@@ -214,7 +214,7 @@ def fused_chunk_bwd_kernel(
     USE_INITIAL_STATE: tl.constexpr,
     USE_FINAL_STATE: tl.constexpr,
 ):
-    i_v, i_k, i_nh = unflatten_program_id(X=tl.cdiv(V, BV), Y=tl.cdiv(K, BK))
+    i_v, i_k, i_nh = unflatten_program_id(tl.cdiv(V, BV), tl.cdiv(K, BK))
     i_n, i_h = i_nh // H, i_nh % H
 
     all = B * T

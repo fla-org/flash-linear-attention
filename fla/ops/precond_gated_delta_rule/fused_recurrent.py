@@ -63,7 +63,7 @@ def fused_recurrent_precond_gated_delta_rule_fwd_kernel(
     TRANSPOSE_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_nh = unflatten_program_id(X=tl.cdiv(V, BV))
+    i_v, i_nh = unflatten_program_id(tl.cdiv(V, BV))
     i_n, i_hv = i_nh // HV, i_nh % HV
     i_h = i_hv // (HV // H)
 

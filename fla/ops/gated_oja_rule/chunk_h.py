@@ -57,7 +57,7 @@ def chunk_oja_fwd_kernel_h_blockdim64(
     SAVE_NEW_KEY: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_nh = unflatten_program_id(X=tl.cdiv(K, BK))
+    i_k, i_nh = unflatten_program_id(tl.cdiv(K, BK))
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
@@ -289,7 +289,7 @@ def chunk_oja_bwd_kernel_dhu_blockdim64(
     USE_FINAL_STATE_GRADIENT: tl.constexpr,
     IS_VARLEN: tl.constexpr
 ):
-    i_k, i_nh = unflatten_program_id(X=tl.cdiv(K, BK))
+    i_k, i_nh = unflatten_program_id(tl.cdiv(K, BK))
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
@@ -703,7 +703,7 @@ def chunk_oja_bwd_kernel_dvwg_h(
     HAVE_GK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_t = unflatten_program_id(X=tl.cdiv(V, BV))
+    i_v, i_t = unflatten_program_id(tl.cdiv(V, BV))
     i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
 

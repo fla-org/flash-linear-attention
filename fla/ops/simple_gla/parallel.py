@@ -68,7 +68,7 @@ def parallel_simple_gla_fwd_kernel(
     IS_VARLEN: tl.constexpr,
     USE_G: tl.constexpr,
 ):
-    i_kv, i_t = unflatten_program_id(X=tl.cdiv(K, BK) * NV)
+    i_kv, i_t = unflatten_program_id(tl.cdiv(K, BK) * NV)
     i_bh = tl.program_id(1).to(tl.int64)
     i_k, i_v = i_kv // NV, i_kv % NV
     i_b, i_h = i_bh // H, i_bh % H
@@ -423,7 +423,7 @@ def parallel_simple_gla_bwd_kernel(
     IS_VARLEN: tl.constexpr,
     USE_G: tl.constexpr,
 ):
-    i_kv, i_t = unflatten_program_id(X=tl.cdiv(K, BK) * NV)
+    i_kv, i_t = unflatten_program_id(tl.cdiv(K, BK) * NV)
     i_bh = tl.program_id(1).to(tl.int64)
     i_k, i_v = i_kv // NV, i_kv % NV
     i_b, i_h = i_bh // H, i_bh % H

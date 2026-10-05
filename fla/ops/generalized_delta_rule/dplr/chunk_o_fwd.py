@@ -52,7 +52,7 @@ def chunk_dplr_fwd_kernel_o(
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_t = unflatten_program_id(X=tl.cdiv(V, BV))
+    i_v, i_t = unflatten_program_id(tl.cdiv(V, BV))
     i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
 

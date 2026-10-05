@@ -164,7 +164,7 @@ def chunk_abc_fwd_kernel_K(
     BV: tl.constexpr,
     NT: tl.constexpr,
 ):
-    i_v, i_t = unflatten_program_id(X=tl.cdiv(V, BV))
+    i_v, i_t = unflatten_program_id(tl.cdiv(V, BV))
     i_bh = tl.program_id(1).to(tl.int64)
     i_p = tl.maximum(i_t * BT - 1, 0)
 
@@ -298,7 +298,7 @@ def chunk_abc_fwd_kernel_V(
     BV: tl.constexpr,
     NT: tl.constexpr,
 ):
-    i_v, i_t = unflatten_program_id(X=tl.cdiv(V, BV))
+    i_v, i_t = unflatten_program_id(tl.cdiv(V, BV))
     i_bh = tl.program_id(1).to(tl.int64)
     i_p = tl.maximum(i_t * BT - 1, 0)
 
@@ -434,7 +434,7 @@ def chunk_abc_bwd_kernel_V(
     BV: tl.constexpr,
     NT: tl.constexpr,
 ):
-    i_k, i_t = unflatten_program_id(X=tl.cdiv(K, BK))
+    i_k, i_t = unflatten_program_id(tl.cdiv(K, BK))
     i_bh = tl.program_id(1).to(tl.int64)
     i_p = tl.maximum(i_t * BT - 1, 0)
     n_bh = tl.num_programs(1).to(tl.int64)
@@ -715,7 +715,7 @@ def chunk_abc_bwd_kernel_K(
     BV: tl.constexpr,
     NT: tl.constexpr,
 ):
-    i_k, i_t = unflatten_program_id(X=tl.cdiv(K, BK))
+    i_k, i_t = unflatten_program_id(tl.cdiv(K, BK))
     i_bh = tl.program_id(1).to(tl.int64)
     i_p = tl.maximum(i_t * BT - 1, 0)
     n_bh = tl.num_programs(1).to(tl.int64)

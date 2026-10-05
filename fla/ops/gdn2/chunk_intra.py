@@ -459,7 +459,7 @@ def chunk_gdn2_bwd_kernel_intra(
     SAFE_GATE: tl.constexpr,
     USE_GATHER: tl.constexpr,
 ):
-    i_kc, i_t = unflatten_program_id(X=tl.cdiv(K, BK) * NC)
+    i_kc, i_t = unflatten_program_id(tl.cdiv(K, BK) * NC)
     i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     i_k, i_i = i_kc // NC, i_kc % NC

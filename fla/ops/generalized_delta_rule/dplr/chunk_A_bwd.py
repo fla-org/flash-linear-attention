@@ -62,7 +62,7 @@ def chunk_dplr_bwd_kernel_intra(
     IS_VARLEN: tl.constexpr,
     GATHER_SUPPORTED: tl.constexpr,
 ):
-    i_k, i_t = unflatten_program_id(X=tl.cdiv(K, BK))
+    i_k, i_t = unflatten_program_id(tl.cdiv(K, BK))
     i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
@@ -271,7 +271,7 @@ def chunk_dplr_bwd_kernel_intra_tensorcore(
     IS_VARLEN: tl.constexpr,
     GATHER_SUPPORTED: tl.constexpr,
 ):
-    i_k, i_t = unflatten_program_id(X=tl.cdiv(K, BK))
+    i_k, i_t = unflatten_program_id(tl.cdiv(K, BK))
     i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
 

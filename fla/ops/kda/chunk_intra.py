@@ -427,7 +427,7 @@ def chunk_kda_bwd_kernel_intra(
     USE_GATHER: tl.constexpr,
     USE_GRAPH: tl.constexpr = False,
 ):
-    i_kc, i_t = unflatten_program_id(X=tl.cdiv(K, BK) * NC)
+    i_kc, i_t = unflatten_program_id(tl.cdiv(K, BK) * NC)
     i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_hv = i_bh // HV, i_bh % HV
     i_h = i_hv // (HV // H)

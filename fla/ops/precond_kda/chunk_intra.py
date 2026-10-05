@@ -677,7 +677,7 @@ def chunk_precond_kda_bwd_kernel_intra(
         Aqk[t, s] = q[t] @ k_precond[s]^T * exp(g[t] - g[s]) * beta[s]  (for t >= s)
         Akk[t, s] = k[t] @ k_precond[s]^T * exp(g[t] - g[s]) * beta[s]  (for t > s)
     """
-    i_kc, i_t = unflatten_program_id(X=tl.cdiv(K, BK) * NC)
+    i_kc, i_t = unflatten_program_id(tl.cdiv(K, BK) * NC)
     i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     i_k = i_kc // NC

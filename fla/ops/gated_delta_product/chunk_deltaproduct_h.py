@@ -58,7 +58,7 @@ def chunk_gated_delta_product_fwd_kernel_h_blockdim64(
     SAVE_NEW_VALUE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_nh = unflatten_program_id(X=tl.cdiv(V, BV))
+    i_v, i_nh = unflatten_program_id(tl.cdiv(V, BV))
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
@@ -251,7 +251,7 @@ def chunk_gated_delta_product_bwd_kernel_dhu_blockdim64(
     USE_FINAL_STATE_GRADIENT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_nh = unflatten_program_id(X=tl.cdiv(V, BV))
+    i_v, i_nh = unflatten_program_id(tl.cdiv(V, BV))
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)

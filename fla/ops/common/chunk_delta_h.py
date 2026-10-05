@@ -723,7 +723,7 @@ def chunk_gated_delta_rule_fwd_h(
         final_state = k.new_zeros(N, HV, K, V, dtype=torch.float32) if output_final_state else None
 
     v_new = torch.empty_like(u) if save_new_value else None
-    def grid(meta): return (triton.cdiv(V, meta['BV']) * N * HV, )
+    def grid(meta): return (triton.cdiv(V, meta['BV']) * N * HV,)
     chunk_gated_delta_rule_fwd_kernel_h_blockdim64[grid](
         k=k,
         v=u,
@@ -795,7 +795,7 @@ def chunk_gated_delta_rule_bwd_dhu(
         dh0 = torch.empty_like(h0, dtype=torch.float32) if h0 is not None else None
         dv2 = torch.empty_like(dv)
 
-    def grid(meta): return (triton.cdiv(V, meta['BV']) * N * HV, )
+    def grid(meta): return (triton.cdiv(V, meta['BV']) * N * HV,)
     chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64[grid](
         q=q,
         k=k,

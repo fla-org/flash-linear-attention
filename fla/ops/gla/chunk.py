@@ -225,7 +225,7 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra_split(
     NC: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_tc = unflatten_program_id(X=tl.cdiv(K, BK))
+    i_k, i_tc = unflatten_program_id(tl.cdiv(K, BK))
     i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     i_t, i_i = (i_tc // NC).to(tl.int64), i_tc % NC
@@ -366,7 +366,7 @@ def chunk_gla_fwd_kernel_o(
     IS_VARLEN: tl.constexpr,
     USE_GRAPH: tl.constexpr = False,
 ):
-    i_v, i_t = unflatten_program_id(X=tl.cdiv(V, BV))
+    i_v, i_t = unflatten_program_id(tl.cdiv(V, BV))
     i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_hv = i_bh // HV, i_bh % HV
     i_h = i_hv // (HV // H)
@@ -470,7 +470,7 @@ def chunk_gla_bwd_kernel_intra(
     NC: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_kc, i_t = unflatten_program_id(X=tl.cdiv(K, BK) * NC)
+    i_kc, i_t = unflatten_program_id(tl.cdiv(K, BK) * NC)
     i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     i_k, i_i = i_kc // NC, i_kc % NC
@@ -678,7 +678,7 @@ def chunk_gla_bwd_kernel_dv(
     IS_VARLEN: tl.constexpr,
     STATE_V_FIRST: tl.constexpr,
 ):
-    i_v, i_t = unflatten_program_id(X=tl.cdiv(V, BV))
+    i_v, i_t = unflatten_program_id(tl.cdiv(V, BV))
     i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
@@ -779,7 +779,7 @@ def chunk_gla_bwd_kernel_inter(
     IS_VARLEN: tl.constexpr,
     STATE_V_FIRST: tl.constexpr,
 ):
-    i_k, i_t = unflatten_program_id(X=tl.cdiv(K, BK))
+    i_k, i_t = unflatten_program_id(tl.cdiv(K, BK))
     i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:

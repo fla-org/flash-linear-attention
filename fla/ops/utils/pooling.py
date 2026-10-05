@@ -39,7 +39,7 @@ def mean_pooling_fwd_kernel(
     BD: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_d, i_t = unflatten_program_id(X=tl.cdiv(D, BD))
+    i_d, i_t = unflatten_program_id(tl.cdiv(D, BD))
     i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
@@ -90,7 +90,7 @@ def mean_pooling_bwd_kernel(
     BD: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_d, i_t = unflatten_program_id(X=tl.cdiv(D, BD))
+    i_d, i_t = unflatten_program_id(tl.cdiv(D, BD))
     i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:

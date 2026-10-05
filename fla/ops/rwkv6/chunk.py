@@ -57,7 +57,7 @@ def chunk_rwkv6_fwd_cumsum_kernel(
     HAS_SCALE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_s, i_t = unflatten_program_id(X=tl.cdiv(S, BS))
+    i_s, i_t = unflatten_program_id(tl.cdiv(S, BS))
     i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
@@ -104,7 +104,7 @@ def chunk_rwkv6_fwd_cumsum(
 
     gi, ge = torch.empty_like(g, dtype=torch.float), torch.empty_like(g, dtype=torch.float)
     def grid(meta): return (triton.cdiv(meta['S'], meta['BS']) * NT, B * H)
-    # keep cummulative normalizer in fp32
+    # keep cumulative normalizer in fp32
     chunk_rwkv6_fwd_cumsum_kernel[grid](
         g,
         gi,
@@ -311,7 +311,7 @@ def chunk_rwkv6_fwd_A_kernel_intra_sub_intra_split(
     NC: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_tc = unflatten_program_id(X=tl.cdiv(K, BK))
+    i_k, i_tc = unflatten_program_id(tl.cdiv(K, BK))
     i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     i_t, i_i = i_tc // NC, i_tc % NC
@@ -454,7 +454,7 @@ def chunk_rwkv6_bwd_kernel_dh(
     USE_FINAL_STATE_GRADIENT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_v, i_nh = unflatten_program_id(X=tl.cdiv(K, BK), Y=tl.cdiv(V, BV))
+    i_k, i_v, i_nh = unflatten_program_id(tl.cdiv(K, BK), tl.cdiv(V, BV))
     i_n, i_hq = i_nh // HQ, i_nh % HQ
     i_h = i_hq // NG
     if IS_VARLEN:
@@ -536,7 +536,7 @@ def chunk_rwkv6_bwd_kernel_intra(
     NC: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_c = unflatten_program_id(X=tl.cdiv(K, BK))
+    i_k, i_c = unflatten_program_id(tl.cdiv(K, BK))
     i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     i_t, i_i = i_c // NC, i_c % NC
@@ -693,7 +693,7 @@ def chunk_rwkv6_bwd_kernel_inter(
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_t = unflatten_program_id(X=tl.cdiv(K, BK))
+    i_k, i_t = unflatten_program_id(tl.cdiv(K, BK))
     i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
 

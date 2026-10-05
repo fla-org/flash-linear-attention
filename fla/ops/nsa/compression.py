@@ -303,7 +303,7 @@ def parallel_nsa_compression_bwd_kernel_dkv(
     BQ: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_c = unflatten_program_id(X=tl.cdiv(V, BV))
+    i_v, i_c = unflatten_program_id(tl.cdiv(V, BV))
     i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
 

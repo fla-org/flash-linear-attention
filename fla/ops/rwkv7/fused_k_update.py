@@ -81,7 +81,7 @@ def k_update_fwd_kernel_long(
     BD: tl.constexpr, BT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_d, i_t_blk = unflatten_program_id(X=tl.cdiv(D, BD))
+    i_d, i_t_blk = unflatten_program_id(tl.cdiv(D, BD))
     i_b = tl.program_id(1).to(tl.int64)
 
     if IS_VARLEN:
@@ -182,7 +182,7 @@ def k_update_bwd_kernel_long(
     BD: tl.constexpr, BT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_d, i_t_blk = unflatten_program_id(X=tl.cdiv(D, BD))
+    i_d, i_t_blk = unflatten_program_id(tl.cdiv(D, BD))
     i_b = tl.program_id(1).to(tl.int64)
 
     if IS_VARLEN:
@@ -257,12 +257,7 @@ def k_update_fwd(
         def grid(meta):
             return (triton.cdiv(D, meta['BD']) * NT, N)
 
-        k_update_fwd_kernel_long[grid](
-            k, a, ka, out,
-            cu_seqlens, chunk_idx,
-            T, D,
-            BD=BD, BT=BT,
-        )
+        k_update_fwd_kernel_long[grid](k, a, ka, out, cu_seqlens, chunk_idx, T, D, BD=BD, BT=BT)
 
     return out, use_short, N, T
 
@@ -309,13 +304,7 @@ def k_update_bwd(
         def grid(meta):
             return (triton.cdiv(D, meta['BD']) * NT, N)
 
-        k_update_bwd_kernel_long[grid](
-            grad_out, k, a, ka,
-            dk, da, dka_tmp,
-            cu_seqlens, chunk_idx,
-            T, D,
-            BD=BD, BT=BT,
-        )
+        k_update_bwd_kernel_long[grid](grad_out, k, a, ka, dk, da, dka_tmp, cu_seqlens, chunk_idx, T, D, BD=BD, BT=BT)
 
     if dka_tmp.dim() == 3:
         dka = dka_tmp.sum(dim=(0, 1), keepdim=True).type_as(ka)

@@ -54,7 +54,7 @@ def chunk_mesa_net_fwd_kernel_h(
     STORE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_v, i_nh = unflatten_program_id(X=tl.cdiv(K, 64), Y=tl.cdiv(V, 64))
+    i_k, i_v, i_nh = unflatten_program_id(tl.cdiv(K, 64), tl.cdiv(V, 64))
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)

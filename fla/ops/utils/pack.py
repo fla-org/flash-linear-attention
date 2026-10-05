@@ -36,7 +36,7 @@ def packunpack_sequence_kernel(
     PADDING_SIDE: tl.constexpr,
     PACK: tl.constexpr,
 ):
-    i_d, i_s, i_b = unflatten_program_id(X=tl.cdiv(D, BD), Y=S)
+    i_d, i_s, i_b = unflatten_program_id(tl.cdiv(D, BD), S)
     bos, eos = tl.load(cu_seqlens + i_b).to(tl.int64), tl.load(cu_seqlens + i_b + 1).to(tl.int64)
 
     T = eos - bos

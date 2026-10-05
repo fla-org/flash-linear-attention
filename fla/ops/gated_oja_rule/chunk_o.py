@@ -52,7 +52,7 @@ def chunk_oja_fwd_inter(
     NG: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_t = unflatten_program_id(X=tl.cdiv(V, BV))
+    i_v, i_t = unflatten_program_id(tl.cdiv(V, BV))
     i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
     i_h = i_hq // NG
@@ -452,7 +452,7 @@ def chunk_oja_bwd_kernel_dqk(
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_t = unflatten_program_id(X=tl.cdiv(K, BK))
+    i_k, i_t = unflatten_program_id(tl.cdiv(K, BK))
     i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:

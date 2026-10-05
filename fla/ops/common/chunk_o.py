@@ -85,7 +85,7 @@ def chunk_fwd_kernel_o(
     STATE_V_FIRST: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_t = unflatten_program_id(X=tl.cdiv(V, BV))
+    i_v, i_t = unflatten_program_id(tl.cdiv(V, BV))
     i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // HV, i_bh % HV
 
@@ -210,7 +210,7 @@ def chunk_bwd_kernel_dqkwg(
     STATE_V_FIRST: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_t = unflatten_program_id(X=tl.cdiv(K, BK))
+    i_k, i_t = unflatten_program_id(tl.cdiv(K, BK))
     i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // HV, i_bh % HV
 
@@ -391,7 +391,7 @@ def chunk_bwd_kernel_dv(
     IS_VARLEN: tl.constexpr,
     STATE_V_FIRST: tl.constexpr,
 ):
-    i_v, i_t = unflatten_program_id(X=tl.cdiv(V, BV))
+    i_v, i_t = unflatten_program_id(tl.cdiv(V, BV))
     i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // HV, i_bh % HV
     if IS_VARLEN:

@@ -459,7 +459,7 @@ def parallel_nsa_bwd_kernel_dkv(
     BQ: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_blk = unflatten_program_id(X=tl.cdiv(V, BV))
+    i_v, i_blk = unflatten_program_id(tl.cdiv(V, BV))
     all = B * T.to(tl.int64)
     if IS_VARLEN:
         i_c, i_h = i_blk // H, i_blk % H

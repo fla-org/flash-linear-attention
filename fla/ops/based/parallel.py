@@ -35,7 +35,7 @@ def parallel_based_fwd_kernel(
     BV: tl.constexpr,
 ):
     # i_c: chunk index. used for sequence parallelism
-    i_kv, i_c = unflatten_program_id(X=tl.cdiv(K, BK) * tl.cdiv(V, BV))
+    i_kv, i_c = unflatten_program_id(tl.cdiv(K, BK) * tl.cdiv(V, BV))
     i_bh = tl.program_id(1).to(tl.int64)
     NV = tl.cdiv(V, BV)
     i_k = i_kv // (NV)
@@ -316,7 +316,7 @@ def parallel_based_bwd_kernel(
     BK: tl.constexpr,
     BV: tl.constexpr,
 ):
-    i_kv, i_c = unflatten_program_id(X=tl.cdiv(K, BK) * tl.cdiv(V, BV))
+    i_kv, i_c = unflatten_program_id(tl.cdiv(K, BK) * tl.cdiv(V, BV))
     i_bh = tl.program_id(1).to(tl.int64)
     NV = tl.cdiv(V, BV)
     i_k = i_kv // (NV)
