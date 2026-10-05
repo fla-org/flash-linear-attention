@@ -321,7 +321,9 @@ def chunk_local_cumsum_vector(
     else:
         o = torch.empty_like(g, dtype=output_dtype or g.dtype)
 
-    def grid(meta): return (triton.cdiv(meta['S'], meta['BS']) * NT, B * H)
+    def grid(meta):
+        return (triton.cdiv(meta['S'], meta['BS']) * NT, B * H)
+
     # keep cumulative normalizer in fp32
     # this kernel is equivalent to the following for full dense chunks without scaling or reversal
     # g.view(B, NT, BT, H, S).cumsum(2, dtype=torch.float32).view(B, T, H, S)

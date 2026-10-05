@@ -495,13 +495,16 @@ def kda_gate_chunk_cumsum(
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     assert chunk_size == 2**(chunk_size.bit_length()-1), "chunk_size must be a power of 2"
 
-    g_org, g = g, torch.empty_like(g, dtype=output_dtype or g.dtype)
-    def grid(meta): return (triton.cdiv(meta['S'], meta['BS']) * NT, B * H)
+    o = torch.empty_like(g, dtype=output_dtype or g.dtype)
+
+    def grid(meta):
+        return (triton.cdiv(meta['S'], meta['BS']) * NT, B * H)
+
     kda_gate_chunk_cumsum_vector_kernel[grid](
-        s=g_org,
+        s=g,
         A_log=A_log,
         dt_bias=dt_bias,
-        o=g,
+        o=o,
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
@@ -513,4 +516,4 @@ def kda_gate_chunk_cumsum(
         REVERSE=False,
         USE_GRAPH=use_graph,
     )
-    return g
+    return o

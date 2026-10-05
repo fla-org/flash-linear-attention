@@ -103,7 +103,10 @@ def chunk_rwkv6_fwd_cumsum(
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     gi, ge = torch.empty_like(g, dtype=torch.float), torch.empty_like(g, dtype=torch.float)
-    def grid(meta): return (triton.cdiv(meta['S'], meta['BS']) * NT, B * H)
+
+    def grid(meta):
+        return (triton.cdiv(meta['S'], meta['BS']) * NT, B * H)
+
     # keep cumulative normalizer in fp32
     chunk_rwkv6_fwd_cumsum_kernel[grid](
         g,
