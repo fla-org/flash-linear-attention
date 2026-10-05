@@ -21,7 +21,7 @@ o = parallel_attn(q=q, k=k, v=v)
 o.float().square().mean().backward()
 ```
 
-The kernels explicitly manage shared-memory layouts, TMA buffering, and asynchronous matrix operations. Compute capability 9.x uses WGMMA and register accumulators; 10.x uses tcgen05 and TMEM accumulators. Large dimensions use smaller tiles, split forward value tiles, and separate dK/dV passes when necessary to keep live accumulators within the memory budget. Unaligned dimensions or storage, and runs with `FLA_USE_TMA=0`, use masked loads. Forward tiling accounts for available CTA parallelism; wide TMEM output tiles are rescaled in smaller register slices. Decoding splits long KV sequences across CTAs, distributes warps across wide value dimensions to reduce shared-memory reduction traffic, overlaps copies with computation, and merges partial softmax statistics in fp32.
+The kernels explicitly manage shared-memory layouts, TMA buffering, and asynchronous matrix operations. Compute capability 9.x uses WGMMA and register accumulators; its small-dimension forward path keeps probabilities in registers and uses 64-row query tiles. On compute capability 10.x, aligned dimensions up to 128 use separate TMA, matrix, and softmax partitions. The next QK tile overlaps normalization of the current tile, and consumed score TMEM holds packed probabilities until PV completes. Larger dimensions use smaller tiles, split forward value tiles, and separate dK/dV passes when necessary to keep live accumulators within the memory budget; wide TMEM output tiles are rescaled in smaller register slices. Unaligned dimensions or storage, and runs with `FLA_USE_TMA=0`, use masked loads. Immutable descriptor layouts are cached by tile geometry and dtype; tensor addresses and descriptors are rebuilt for each call. Decoding splits long KV sequences across CTAs, distributes warps across wide value dimensions to reduce shared-memory reduction traffic, overlaps copies with computation, and merges partial softmax statistics in fp32.
 
 Tensor-core operands retain the input dtype and accumulate in fp32. Probability and score-gradient operands retain the same casts as the original attention kernel. The opt-in sink gradient uses the fp32 backward probability expectation instead of the rounded forward output; the motivation and numerical impact are described in [the design discussion](https://github.com/fla-org/flash-linear-attention/issues/1322#issuecomment-5971334761).
 
@@ -34,7 +34,7 @@ FLA_TILELANG=0 FLA_ATTN_GLUON=1 FLA_USE_TMA=1 python -m pytest tests/ops/test_at
 FLA_TILELANG=0 FLA_ATTN_GLUON=1 FLA_USE_TMA=1 python -m benchmarks.ops.verify --op parallel_attn
 ```
 
-Use the unified runner to measure dense attention forward and forward plus backward. Run both backends on the same device and software, with backend dispatch enabled:
+Use the unified runner to measure attention forward and forward plus backward. Run both backends on the same device and software, with backend dispatch enabled:
 
 ```bash
 FLA_DISABLE_BACKEND_DISPATCH=0 FLA_TILELANG=0 FLA_USE_TMA=1 python -m benchmarks.ops.run \
@@ -44,3 +44,9 @@ FLA_DISABLE_BACKEND_DISPATCH=0 FLA_TILELANG=0 FLA_USE_TMA=1 python -m benchmarks
 ```
 
 Use `--custom-shapes '{"large": {"B": 1, "T": 4096, "H": 8, "D": 512}}'` to measure a large head dimension. The original parallel-attention implementation does not support K > 256; unsupported or resource-limited baseline cases have no speedup ratio. The backend remains experimental: current measurements show forward-only regressions, and long-sequence dense training gains are limited.
+
+The same registry accepts `HQ`, `V`, `input_dtype`, `cu_seqlens`, `use_gate`, `use_sink`, and `window_size`. For example, append this shape configuration to either command above to compare packed fp16 GQA with unequal query/key and value dimensions:
+
+```bash
+--custom-shapes '{"packed": {"B": 1, "T": 4096, "H": 2, "HQ": 8, "D": 128, "V": 64, "input_dtype": "float16", "cu_seqlens": [0, 1000, 2048, 4096], "use_gate": true, "use_sink": true, "window_size": 257}}'
+```

@@ -7,6 +7,8 @@
 
 # async MMA staging follows https://triton-lang.org/main/getting-started/tutorials/gluon/06-tcgen05.html
 
+import functools
+
 import torch
 import triton
 from triton.experimental import gluon
@@ -23,7 +25,7 @@ from triton.experimental.gluon.language.nvidia.hopper import (
 from triton.experimental.gluon.nvidia.hopper import TensorDescriptor
 
 from fla.ops.utils import prepare_chunk_indices
-from fla.utils import IS_TMA_SUPPORTED, get_device_capability, get_multiprocessor_count
+from fla.utils import IS_TMA_SUPPORTED, get_device_capability
 
 
 @gluon.constexpr_function
@@ -47,6 +49,24 @@ def _tmem_layout(M, N):
     if hasattr(bw, 'get_tmem_32x32b_reg_layout'):
         return bw.TensorMemoryLayout((M, min(N, 256)), unpacked=True)
     return bw.TensorMemoryLayout((M, min(N, 256)), col_stride=1)
+
+
+@gluon.constexpr_function
+def _packed_layout(M, N):
+    if hasattr(bw, 'get_tmem_32x32b_reg_layout'):
+        return bw.TensorMemoryLayout((M, N), unpacked=False)
+    return bw.TensorMemoryLayout((M, N), col_stride=1)
+
+
+@gluon.jit
+def _packed_operand(score, dtype: gl.constexpr, BM: gl.constexpr, BN: gl.constexpr):
+    # packed operands reuse accumulators after their fp32 values have been consumed.
+    ref = score.slice(0, BN // 2)
+    layout: gl.constexpr = _packed_layout(BM, BN)
+    if gl.constexpr(hasattr(bw.tensor_memory_descriptor, '_reinterpret')):
+        return ref._reinterpret(dtype, [BM, BN], layout)
+    else:
+        return ref.reinterpret(dtype, [BM, BN], layout)
 
 
 @gluon.jit
@@ -140,7 +160,8 @@ def parallel_attn_fwd_kernel_gluon(
     qs = gl.allocate_shared_memory(dtype, [1, BM, BK], q_layout)
     ks = gl.allocate_shared_memory(dtype, [BUFFERS, 1, BN, BK], k_layout)
     vs = gl.allocate_shared_memory(dtype, [BUFFERS, 1, BN, BV], v_layout)
-    ps = gl.allocate_shared_memory(dtype, [BM, BN], p_layout)
+    if not PIPELINED:
+        ps = gl.allocate_shared_memory(dtype, [BM, BN], p_layout)
     bars = gl.allocate_shared_memory(gl.int64, [BUFFERS + 2, 1], mbarrier.MBarrierLayout())
     for i in gl.static_range(BUFFERS + 2):
         mbarrier.init(bars.index(i), count=1)
@@ -299,10 +320,13 @@ def parallel_attn_fwd_kernel_gluon(
                 out_acc.store(old_out)
             else:
                 out_acc = old_out
-            ps.store(prob.to(dtype))
-            fence_async_shared()
+            if PIPELINED:
+                p_reg = gl.convert_layout(prob.to(dtype), gl.DotOperandLayout(0, ol, 2))
+            else:
+                ps.store(prob.to(dtype))
+                fence_async_shared()
         if PIPELINED:
-            out_acc = warpgroup_mma(ps, vs.index(slot).reshape([BN, BV]), out_acc, is_async=True)
+            out_acc = warpgroup_mma(p_reg, vs.index(slot).reshape([BN, BV]), out_acc, is_async=True)
         else:
             out_acc, phase = _mma(
                 a=ps,
@@ -337,16 +361,19 @@ def parallel_attn_fwd_kernel_gluon(
         mbarrier.invalidate(bars.index(i))
 
 
+@functools.lru_cache(maxsize=32)
+def _descriptor_layout(rows, dim, dtype):
+    return gl.NVMMASharedLayout.get_default_for([1, rows, dim], getattr(gl, str(dtype).split('.')[-1]))
+
+
 def _descriptor(x, rows, dim):
     b, t, h, d = x.shape
-    dtype = getattr(gl, str(x.dtype).split('.')[-1])
-    block = [1, rows, dim]
     return TensorDescriptor(
         x,
         shape=[h, b * t, d],
         strides=[d, h * d, 1],
-        block_shape=block,
-        layout=gl.NVMMASharedLayout.get_default_for(block, dtype),
+        block_shape=[1, rows, dim],
+        layout=_descriptor_layout(rows=rows, dim=dim, dtype=x.dtype),
     )
 
 
@@ -358,20 +385,49 @@ def parallel_attn_fwd_gluon(q, k, v, g_cumsum, sink_bias, scale, window_size=Non
     nw = 4 if tcgen else 8
     bm, bn = (64, 32) if max(dk, dv) > 256 else (128, 64)
     if not tcgen and max(dk, dv) <= 128:
-        # small row tiles raise parallelism for grids estimated below two CTA waves.
-        blocks = b * hq * triton.cdiv(t, 128)
-        if max(dk, dv) <= 64 or blocks <= 2 * get_multiprocessor_count(q.device.index):
-            bm, nw = 64, 4
+        bm, nw = 64, 4
+    tma_qk = IS_TMA_SUPPORTED and dk % 8 == 0 and q.data_ptr() % 16 == 0 and k.data_ptr() % 16 == 0
+    tma_v = IS_TMA_SUPPORTED and dv % 8 == 0 and v.data_ptr() % 16 == 0
+    blackwell_pipeline = tcgen and tma_qk and tma_v and bk <= 128 and bv <= 128
     chunk = 128 if chunk_indices is not None else bm
     if cu_seqlens is not None and chunk_indices is None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, chunk)
     nt = triton.cdiv(t, bm) if cu_seqlens is None else len(chunk_indices) * (chunk // bm)
-    tma_qk = IS_TMA_SUPPORTED and dk % 8 == 0 and q.data_ptr() % 16 == 0 and k.data_ptr() % 16 == 0
-    tma_v = IS_TMA_SUPPORTED and dv % 8 == 0 and v.data_ptr() % 16 == 0
     q_desc, k_desc = (_descriptor(x=q, rows=bm, dim=bk), _descriptor(x=k, rows=bn, dim=bk)) if tma_qk else (q, k)
     v_desc = _descriptor(x=v, rows=bn, dim=bv) if tma_v else v
     o = torch.empty(b, t, hq, dv, device=q.device, dtype=q.dtype)
     lse = torch.empty(b, t, hq, device=q.device, dtype=torch.float32)
+    if blackwell_pipeline:
+        from fla.ops.attn.backends.gluon.parallel_fwd import WARP_SPECIALIZE_V2, parallel_attn_fwd_kernel_pipeline
+
+        parallel_attn_fwd_kernel_pipeline[(triton.cdiv(dv, bv), nt, b * hq)](
+            Q_DESC=q_desc,
+            K_DESC=k_desc,
+            V_DESC=v_desc,
+            O=o,
+            LSE=lse,
+            GATE=g_cumsum,
+            SINK=sink_bias,
+            CU=cu_seqlens,
+            INDICES=chunk_indices,
+            T=t,
+            H=h,
+            HQ=hq,
+            DV=dv,
+            SCALE=scale,
+            W=window_size,
+            BM=bm,
+            BN=bn,
+            BK=bk,
+            BV=bv,
+            VARLEN=cu_seqlens is not None,
+            USE_GATE=g_cumsum is not None,
+            USE_SINK=sink_bias is not None,
+            WS_V2=WARP_SPECIALIZE_V2,
+            num_warps=4,
+            maxnreg=128,
+        )
+        return o, lse
     parallel_attn_fwd_kernel_gluon[(triton.cdiv(dv, bv), nt, b * hq)](
         Q=q,
         K=k,

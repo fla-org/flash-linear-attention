@@ -5,6 +5,8 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import os
+
 import pytest
 import torch
 
@@ -15,8 +17,9 @@ from fla.ops.utils import prepare_chunk_indices
 from fla.utils import assert_close, device, get_device_capability
 
 requires_gluon = pytest.mark.skipif(
-    not AttnGluonBackend.is_available() or get_device_capability()[0] not in (9, 10),
-    reason='Gluon attention requires Triton >= 3.5.1 and compute capability 9.x or 10.x',
+    os.environ.get('FLA_DISABLE_BACKEND_DISPATCH') == '1'
+    or not AttnGluonBackend.is_available() or get_device_capability()[0] not in (9, 10),
+    reason='Gluon attention requires backend dispatch, Triton >= 3.5.1, and compute capability 9.x or 10.x',
 )
 
 

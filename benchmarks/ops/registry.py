@@ -504,10 +504,35 @@ register_op(OpConfig(
 
 # --- Attention baselines ---
 
+
+def _attn_post_init(
+    inputs, B, T, H, D, HQ=None, V=None, input_dtype=None, cu_seqlens=None,
+    use_gate=False, use_sink=False, window_size=None, **kw,
+):
+    hq, dv = H if HQ is None else HQ, D if V is None else V
+    device, dtype = inputs['q'].device, inputs['q'].dtype
+    if input_dtype is not None:
+        dtype = {'float16': torch.float16, 'bfloat16': torch.bfloat16}[input_dtype]
+    for name, shape in [('q', (B, T, hq, D)), ('k', (B, T, H, D)), ('v', (B, T, H, dv))]:
+        if inputs[name].shape != shape or inputs[name].dtype != dtype:
+            inputs[name] = torch.randn(shape, device=device, dtype=dtype, requires_grad=True)
+    if cu_seqlens is not None:
+        if B != 1 or cu_seqlens[0] != 0 or cu_seqlens[-1] != T or cu_seqlens != sorted(cu_seqlens):
+            raise ValueError('Packed attention requires B=1 and sorted offsets covering [0, T]')
+        inputs['cu_seqlens'] = torch.tensor(cu_seqlens, device=device, dtype=torch.int32)
+    if use_gate:
+        inputs['g'] = torch.empty(B, T, hq, device=device, dtype=torch.float32).uniform_(-0.1, -0.01).requires_grad_()
+    if use_sink:
+        inputs['sink_bias'] = torch.randn(hq, device=device, dtype=torch.float32, requires_grad=True)
+    if window_size is not None:
+        inputs['window_size'] = window_size
+
+
 register_op(OpConfig(
     name='parallel_attn',
     import_path='fla.ops.attn',
     inputs={**_simple_qkv},
+    post_init=_attn_post_init,
     output_is_tuple=False,
     category='attn',
     backend_env={'gluon': 'FLA_ATTN_GLUON'},
