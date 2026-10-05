@@ -46,6 +46,7 @@ def transform_q_fwd_kernel(
     else:
         i_n = i_b
         bos, eos = (i_n * T).to(tl.int64), (i_n * T + T).to(tl.int64)
+        # boh = i_n * tl.cdiv(T, BS)
     o_q = i_t * BT + tl.arange(0, BT)
     o_d = tl.arange(0, BK)
     m_q = (o_q[:, None] < T) & (o_d[None, :] < K)

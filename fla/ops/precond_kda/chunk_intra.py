@@ -18,7 +18,9 @@ from fla.utils import IS_GATHER_SUPPORTED, IS_TF32_SUPPORTED, autotune_cache_kwa
 DEFAULT_SOLVE_TRIL_PRECISION = 'tf32x3' if IS_TF32_SUPPORTED else 'ieee'
 
 
-# fuse off-diagonal Akk computation with the triangular solve
+################################################################################
+# Fused inter + solve_tril kernel: compute off-diagonal Akk and solve in one pass
+################################################################################
 
 
 @triton.heuristics({
@@ -120,7 +122,9 @@ def chunk_precond_kda_fwd_kernel_inter_solve_fused(
     b_Aqk32 = tl.zeros([BC, BC], dtype=tl.float32)
     b_Akk32 = tl.zeros([BC, BC], dtype=tl.float32)
 
-    # off-diagonal blocks: columns use k_precond, rows use k
+    ################################################################################
+    # 1. off-diagonal blocks - ASYMMETRIC: column uses k_precond, row uses k
+    ################################################################################
     for i_k in range(tl.cdiv(K, BK)):
         o_k = i_k * BK + tl.arange(0, BK)
         m_k = o_k < K
@@ -213,7 +217,9 @@ def chunk_precond_kda_fwd_kernel_inter_solve_fused(
             b_Aqk32 = tl.dot(b_qg3, b_kpgt, b_Aqk32)
             b_Akk32 = tl.dot(b_kg3, b_kpgt, b_Akk32)
 
-    # save off-diagonal Aqk blocks and prepare Akk
+    ################################################################################
+    # 2. save off-diagonal Aqk blocks and prepare Akk
+    ################################################################################
     if i_tc1 < T:
         p_Aqk10 = Aqk + o_c1[:, None] * (H*BT) + o_i[None, :]
         tl.store(p_Aqk10, (b_Aqk10 * scale).to(Aqk.dtype.element_ty), mask=m_tc1[:, None] & (o_i[None, :] < BC))
@@ -242,7 +248,9 @@ def chunk_precond_kda_fwd_kernel_inter_solve_fused(
         b_Akk31 = b_Akk31 * b_b3[:, None]
         b_Akk32 = b_Akk32 * b_b3[:, None]
 
-    # load diagonal Akk blocks
+    ################################################################################
+    # 3. load diagonal Akk blocks
+    ################################################################################
     p_Akk00 = Akk_diag + o_c0[:, None] * (H*BC) + o_i[None, :]
     p_Akk11 = Akk_diag + o_c1[:, None] * (H*BC) + o_i[None, :]
     p_Akk22 = Akk_diag + o_c2[:, None] * (H*BC) + o_i[None, :]
@@ -252,7 +260,9 @@ def chunk_precond_kda_fwd_kernel_inter_solve_fused(
     b_Ai22 = tl.load(p_Akk22, mask=m_tc2[:, None] & (o_i[None, :] < BC), other=0.0).to(tl.float32)
     b_Ai33 = tl.load(p_Akk33, mask=m_tc3[:, None] & (o_i[None, :] < BC), other=0.0).to(tl.float32)
 
-    # forward substitution on diagonals
+    ################################################################################
+    # 4. forward substitution on diagonals
+    ################################################################################
     o_i = tl.arange(0, BC)
     m_A = o_i[:, None] > o_i[None, :]
     m_I = o_i[:, None] == o_i[None, :]
@@ -289,7 +299,9 @@ def chunk_precond_kda_fwd_kernel_inter_solve_fused(
         b_Ai22 += m_I
         b_Ai33 += m_I
 
-    # compute merged inverse using off-diagonals
+    ################################################################################
+    # 5. compute merged inverse using off-diagonals
+    ################################################################################
 
     # we used tf32 to maintain matrix inverse's precision whenever possible.
     b_Ai10 = -tl.dot(
@@ -328,7 +340,9 @@ def chunk_precond_kda_fwd_kernel_inter_solve_fused(
         input_precision=SOLVE_TRIL_DOT_PRECISION
     )
 
-    # store full Akk_inv to Akk
+    ################################################################################
+    # 6. store full Akk_inv to Akk
+    ################################################################################
     m_col = o_i[None, :] < BC
     p_Akk00 = Akk + o_c0[:, None] * (H*BT) + o_i[None, :]
     p_Akk10 = Akk + o_c1[:, None] * (H*BT) + o_i[None, :]
@@ -465,7 +479,9 @@ def chunk_precond_kda_fwd_kernel_intra_sub_chunk(
 
     tl.debug_barrier()
 
+    ################################################################################
     # forward substitution
+    ################################################################################
 
     b_Ai = -b_Akk
     for i in range(2, min(BC, T - i_ti)):
@@ -523,11 +539,12 @@ def chunk_precond_kda_fwd_intra(
     NC = triton.cdiv(BT, BC)
 
     Aqk = torch.empty(B, T, H, BT, device=k.device, dtype=k.dtype)
-    # zero the upper triangle, which the kernel does not write
+    # Akk must be zero-initialized - kernel only writes lower triangular
     Akk = torch.zeros(B, T, H, BT, device=k.device, dtype=k.dtype)
-    # preserve fp32 diagonal blocks for solve_tril
+    # Separate fp32 buffer for diagonal 16x16 blocks (for precision in solve_tril)
     Akk_diag = torch.empty(B, T, H, BC, device=k.device, dtype=torch.float32)
 
+    # Step 1: Compute diagonal blocks into Akk_diag (fp32)
     if safe_gate:
         grid = (NT, NC, B * H)
         BK = triton.next_power_of_2(K)
@@ -565,6 +582,7 @@ def chunk_precond_kda_fwd_intra(
             sub_chunk_size=BC,
         )
 
+    # Step 2: Fused inter + solve_tril
     grid = (NT, B * H)
     chunk_precond_kda_fwd_kernel_inter_solve_fused[grid](
         q=q,
@@ -587,10 +605,11 @@ def chunk_precond_kda_fwd_intra(
         USE_SAFE_GATE=safe_gate,
     )
 
+    # Step 3: WY representation
     # w uses original k (for read/correction), kg uses k_precond (for write/h update)
     w, u, _, kg = recompute_w_u_fwd(
-        k=k,
-        k_precond=k_precond,
+        k=k,           # Original k for w
+        k_precond=k_precond,  # k_precond for kg
         v=v,
         beta=beta,
         A=Akk,

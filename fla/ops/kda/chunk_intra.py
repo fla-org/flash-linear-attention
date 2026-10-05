@@ -23,8 +23,9 @@ if IS_TF32_SUPPORTED:
 else:
     SOLVE_TRIL_DOT_PRECISION = tl.constexpr('ieee')
 
-
-# fuse off-diagonal Akk computation with the triangular solve
+################################################################################
+# Fused inter + solve_tril kernel: compute off-diagonal Akk and solve in one pass
+################################################################################
 
 
 @triton.heuristics({
@@ -133,7 +134,9 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
     b_Aqk32 = tl.zeros([BC, BC], dtype=tl.float32)
     b_Akk32 = tl.zeros([BC, BC], dtype=tl.float32)
 
+    ################################################################################
     # off-diagonal blocks
+    ################################################################################
     for i_k in range(tl.cdiv(K, BK)):
         o_k = i_k * BK + tl.arange(0, BK)
         m_k = o_k < K
@@ -219,7 +222,9 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
                     b_Aqk32 = tl.dot(b_qg3, b_kgt, b_Aqk32)
                     b_Akk32 = tl.dot(b_kg3, b_kgt, b_Akk32)
 
+    ################################################################################
     # save off-diagonal Aqk blocks and prepare Akk
+    ################################################################################
     if i_tc1 < T:
         p_Aqk10 = Aqk + o_c1[:, None] * (HV*BT) + o_i[None, :]
         tl.store(p_Aqk10, (b_Aqk10 * scale).to(Aqk.dtype.element_ty), mask=m_A1)
@@ -262,7 +267,9 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
         p_Akk33 = Akkd + o_c3[:, None] * (HV*BC) + o_i[None, :]
         b_Ai33 = tl.load(p_Akk33, mask=m_A3, other=0.0).to(tl.float32)
 
+    ################################################################################
     # forward substitution on diagonals
+    ################################################################################
 
     if not USE_SAFE_GATE:
         m_A = o_i[:, None] > o_i[None, :]
@@ -305,7 +312,9 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
         if NC >= 4:
             b_Ai33 += m_I
 
+    ################################################################################
     # compute merged inverse using off-diagonals
+    ################################################################################
 
     # we used tf32 to maintain matrix inverse's precision whenever possible.
     b_Ai10 = -tl.dot(
@@ -346,7 +355,9 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
             input_precision=SOLVE_TRIL_DOT_PRECISION
         )
 
+    ################################################################################
     # store full Akk_inv to Akk
+    ################################################################################
 
     p_Akk00 = Akk + o_c0[:, None] * (HV*BT) + o_i[None, :]
     p_Akk10 = Akk + o_c1[:, None] * (HV*BT) + o_i[None, :]
@@ -779,7 +790,9 @@ def chunk_kda_fwd_kernel_intra_sub_chunk(
 
     tl.debug_barrier()
 
+    ################################################################################
     # forward substitution
+    ################################################################################
 
     b_Ai = -b_Akk
     for i in range(2, min(BC, T - i_ti)):
@@ -817,11 +830,12 @@ def chunk_kda_fwd_intra(
     NC = triton.cdiv(BT, BC)
 
     Aqk = torch.empty(B, T, HV, BT, device=k.device, dtype=k.dtype)
-    # zero the upper triangle, which the kernel does not write
+    # Akk must be zero-initialized - kernel only writes lower triangular
     Akk = torch.zeros(B, T, HV, BT, device=k.device, dtype=k.dtype)
-    # preserve fp32 diagonal blocks for solve_tril
+    # Separate fp32 buffer for diagonal 16x16 blocks (for precision in solve_tril)
     Akkd = torch.empty(B, T, HV, BC, device=k.device, dtype=torch.float32)
 
+    # step 1: compute diagonal blocks into Akkd (fp32)
     if safe_gate:
         grid = (NT, NC, B * HV)
         BK = triton.next_power_of_2(K)
@@ -860,6 +874,7 @@ def chunk_kda_fwd_intra(
             use_graph=use_graph,
         )
 
+    # Step 2: Fused inter + solve_tril (works for both fixed-len and varlen)
     grid = (NT, B * HV)
     chunk_kda_fwd_kernel_inter_solve_fused[grid](
         q=q,

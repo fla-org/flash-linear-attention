@@ -144,6 +144,8 @@ def fused_chunk_based_bwd_kernel(
     o_i = tl.arange(0, BT)
     m_s = o_i[:, None] >= o_i[None, :]
 
+    # [BV], zero-order taylor expansion
+    # b_h_0o = tl.zeros([BV], dtype=tl.float32)
     # [BK, BV], first-order taylor expansion
     b_h_1o = tl.zeros([BV, BK], dtype=tl.float32)
     # [BK, BK, BV] second-order taylor expansion

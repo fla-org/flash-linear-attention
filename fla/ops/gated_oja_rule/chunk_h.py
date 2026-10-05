@@ -365,7 +365,7 @@ def chunk_oja_bwd_kernel_dhu_blockdim64(
 
         last_idx = min((i_t + 1) * BT, T) - 1
 
-        # each K tile reduces dk over all V tiles
+        # update dk_new in K tiles
         p_dk = dk + o_t[:, None] * stride_k + o_k[None, :]  # [BT, BK]
         p_dk2 = dk2 + o_t[:, None] * stride_k + o_k[None, :]  # [BT, BK]
 
@@ -393,7 +393,7 @@ def chunk_oja_bwd_kernel_dhu_blockdim64(
 
         tl.store(p_dk2, b_dk.to(p_dk.dtype.element_ty), mask=m_tk)
 
-        # reuse q across V tiles when updating dh
+        # update dh in K tiles across all V tiles; load q once and w/do for each V tile
 
         p_q = q + o_k[:, None] + o_t[None, :] * stride_k  # [BK, BT]
         b_q = tl.load(p_q, mask=(o_k[:, None] < K) & m_t[None, :], other=0.0)
@@ -771,7 +771,7 @@ def chunk_oja_bwd_kernel_dvwg_h(
 
     b_dgv_last += tl.sum(b_dv * b_v, axis=0)
 
-    # include the optional key-gate gradient
+    # reserved for GSA2
     if HAVE_GK:
         dgk += (bos * H + i_h) * V
         p_dgk = dgk + o_t[:, None] * (H*V) + o_v[None, :]

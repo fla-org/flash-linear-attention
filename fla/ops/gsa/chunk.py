@@ -1235,6 +1235,7 @@ def chunk_gsa(
             )
     assert checkpoint_level in [0, 1, 2]
     if g is None:
+        # TODO: this 3 steps took huge amount of time, ought to be optimized
         z = s.float().logcumsumexp(2)
         g = torch.cat((z[:, :, :1], z[:, :, :-1]), 1) - z
         s = torch.exp(s - z).to(k.dtype)

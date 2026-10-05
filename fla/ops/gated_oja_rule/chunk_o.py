@@ -393,6 +393,7 @@ def chunk_oja_bwd_dA(
     NV = triton.cdiv(V, BV)
 
     dA = v.new_empty(NV, B, T, H, BT)
+    # compute dA
     grid = (NV * NT * NC * NC, B * H)
     chunk_oja_bwd_kernel_dA[grid](
         v,
@@ -489,7 +490,7 @@ def chunk_oja_bwd_kernel_dqk(
 
     b_dq = tl.zeros([BT, BK], dtype=tl.float32)
 
-    # state contribution to dq
+    # compute dq from do
     for i_v in range(tl.cdiv(V, BV)):
         o_v = i_v * BV + tl.arange(0, BV)
         m_h = (o_v[:, None] < V) & (o_k[None, :] < K)
@@ -503,7 +504,7 @@ def chunk_oja_bwd_kernel_dqk(
         b_do = (b_do * exp(b_gv) * scale).to(b_do.dtype)
         b_dq = tl.dot(b_do, b_h.to(b_do.dtype), b_dq)
 
-    # intra-chunk contributions to dq and dk
+    # compute dq and dk from dA
     p_dA = dA + (bos*H + i_h) * BT + o_t[:, None] * (H*BT) + o_A[None, :]
     p_dq = dq + (bos*H + i_h) * K + o_t[:, None] * (H*K) + o_k[None, :]
     p_dk = dk + (bos*H + i_h) * K + o_t[:, None] * (H*K) + o_k[None, :]
@@ -542,6 +543,7 @@ def chunk_oja_bwd_dqk(
     dq = torch.empty_like(q)
     dk = torch.empty_like(k)
     A = dA.new_empty(NK, B, T, H, BT)
+    # compute A, dq and dk
     grid = (NK * NT, B * H)
     chunk_oja_bwd_kernel_dqk[grid](
         q,
@@ -696,6 +698,7 @@ def chunk_oja_bwd_dv_o(
 
     dv2 = torch.empty_like(v, dtype=torch.float)
     dgv = torch.empty_like(gv)
+    # compute dv and dgv
     def grid(meta): return (triton.cdiv(V, meta['BV']) * NT * NC, B * H)
     chunk_oja_bwd_kernel_dv_o[grid](
         v=v,
