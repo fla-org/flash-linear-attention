@@ -8,10 +8,11 @@
 import pytest
 import torch
 
+from fla.modules.backends.gluon import GluonBackend
 from fla.modules.conv.causal_conv1d import causal_conv1d
 from fla.utils import IS_NVIDIA, assert_close, device
 
-gluon = pytest.importorskip('fla.modules.backends.conv_gluon')
+conv_gluon = pytest.importorskip('fla.modules.backends.gluon.causal_conv1d')
 
 
 @pytest.mark.skipif(not IS_NVIDIA, reason='Gluon convolution requires NVIDIA')
@@ -76,7 +77,7 @@ def test_causal_conv1d_gluon(monkeypatch, B, T, D, W, packed, state, strided, ac
 
 @pytest.mark.parametrize('case', ['rank', 'channels', 'width', 'weight', 'packed-batch', 'chunk', 'state', 'dtype', 'distributed'])
 def test_conv_gluon_verifier(monkeypatch, case):
-    backend = gluon.ConvGluonBackend()
+    backend = GluonBackend()
     x = torch.empty(2, 64, 32)
     weight = torch.empty(32, 4)
     kwargs = {}
@@ -113,7 +114,7 @@ def test_conv_gluon_verifier(monkeypatch, case):
 def test_conv_gluon_dispatch(monkeypatch):
     torch.manual_seed(42)
     calls = []
-    fwd, bwd = gluon.causal_conv1d_fwd, gluon.causal_conv1d_bwd
+    fwd, bwd = conv_gluon.causal_conv1d_fwd, conv_gluon.causal_conv1d_bwd
 
     def forward(*args, **kwargs):
         calls.append('fwd')
@@ -123,8 +124,8 @@ def test_conv_gluon_dispatch(monkeypatch):
         calls.append('bwd')
         return bwd(*args, **kwargs)
 
-    monkeypatch.setattr(gluon, 'causal_conv1d_fwd', forward)
-    monkeypatch.setattr(gluon, 'causal_conv1d_bwd', backward)
+    monkeypatch.setattr(conv_gluon, 'causal_conv1d_fwd', forward)
+    monkeypatch.setattr(conv_gluon, 'causal_conv1d_bwd', backward)
     x = torch.randn(1, 65, 64, device=device, requires_grad=True)
     for shared, local, enabled in [('0', '0', False), ('0', '1', True), ('1', '0', True), ('0', '0', False)]:
         monkeypatch.setenv('FLA_GLUON', shared)

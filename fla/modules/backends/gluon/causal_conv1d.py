@@ -5,15 +5,15 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""Register-window convolution with explicit channel layouts and fused backward recomputation."""
+"""Causal depthwise convolution with register reuse and fused backward recomputation."""
 
 import torch
 import triton
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
 
-from fla.ops.backends import BaseBackend
-from fla.utils import IS_NVIDIA, find_spec_cached, input_guard
+from fla.ops.utils import prepare_chunk_indices
+from fla.utils import input_guard
 
 
 @gluon.jit(do_not_specialize=['T'])
@@ -77,7 +77,6 @@ def causal_conv1d_fwd(
 ):
     B, T, D = x.shape
     if cu_seqlens is not None and chunk_indices is None:
-        from fla.ops.utils import prepare_chunk_indices
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT, cu_seqlens_cpu=cu_seqlens_cpu)
     NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
     y = torch.empty_like(x, memory_format=torch.contiguous_format)
@@ -196,7 +195,6 @@ def causal_conv1d_bwd(
     B, T, D = x.shape
     W = weight.shape[1]
     if cu_seqlens is not None and chunk_indices is None:
-        from fla.ops.utils import prepare_chunk_indices
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT, cu_seqlens_cpu=cu_seqlens_cpu)
     NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
     dx = torch.empty_like(x, memory_format=torch.contiguous_format)
@@ -229,50 +227,3 @@ def causal_conv1d_bwd(
         num_warps=4,
     )
     return dx, dw.sum(0).to(weight), db.sum(0).to(bias) if db is not None else None, dy if residual is not None else None, None
-
-
-class ConvGluonBackend(BaseBackend):
-    """Opt-in register-window causal convolution, enabled with FLA_GLUON=1 or FLA_CONV_GLUON=1."""
-
-    backend_type = 'conv_gluon'
-    package_name = 'triton.experimental.gluon'
-    env_var = 'FLA_CONV_GLUON'
-    global_env_var = 'FLA_GLUON'
-    default_enable = False
-    priority = 5
-
-    @classmethod
-    def is_available(cls):
-        return IS_NVIDIA and find_spec_cached('triton.experimental.gluon') is not None
-
-    def causal_conv1d_fwd_verifier(
-        self, x, weight, bias=None, residual=None, initial_state=None, output_final_state=False,
-        activation=None, cu_seqlens=None, cu_seqlens_cpu=None, chunk_indices=None, BT=64, layout_fallback=False,
-    ):
-        if torch.distributed.is_initialized():
-            return False, 'Gluon convolution uses the existing backend in distributed processes'
-        if x.dtype not in (torch.float16, torch.bfloat16, torch.float32):
-            return False, 'Gluon convolution supports float16, bfloat16, and float32'
-        if x.ndim != 3 or x.stride(-1) != 1:
-            return False, 'Gluon convolution requires [B, T, D] with contiguous channels'
-        if weight is None or weight.shape[0] != x.shape[-1] or weight.shape[1] not in (2, 3, 4):
-            return False, 'Gluon convolution requires a width of 2, 3, or 4'
-        if cu_seqlens is not None and x.shape[0] != 1:
-            return False, 'Gluon packed convolution requires batch size 1'
-        if BT != 64:
-            return False, 'Gluon convolution requires 64-token chunk indices'
-        return True, None
-
-    def causal_conv1d_fwd(self, *args, **kwargs):
-        return causal_conv1d_fwd(*args, **kwargs)
-
-    def causal_conv1d_bwd_verifier(
-        self, x, dy, dht, weight=None, bias=None, residual=None, initial_state=None, activation=None,
-        cu_seqlens=None, cu_seqlens_cpu=None, chunk_indices=None, BT=64, layout_fallback=False,
-    ):
-        if initial_state is not None or dht is not None:
-            return False, 'Gluon convolution uses the existing backward for state gradients'
-        return self.causal_conv1d_fwd_verifier(x, weight, cu_seqlens=cu_seqlens, BT=BT)
-
-    def causal_conv1d_bwd(self, *args, **kwargs):
-        return causal_conv1d_bwd(*args, **kwargs)

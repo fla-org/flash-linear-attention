@@ -148,7 +148,8 @@ def test_rwkv6_tilelang_backend_requires_opt_in(monkeypatch):
     ],
 )
 def test_gluon_backend_switch(monkeypatch, shared, conv, attnres, expected):
-    conv_backend = pytest.importorskip('fla.modules.backends.conv_gluon').ConvGluonBackend
+    from fla.modules.backends.gluon import GluonBackend
+
     attnres_backend = pytest.importorskip('fla.ops.attnres.backends.gluon').AttnResGluonBackend
     for name, value in [('FLA_GLUON', shared), ('FLA_CONV_GLUON', conv), ('FLA_ATTNRES_GLUON', attnres)]:
         if value is None:
@@ -156,7 +157,7 @@ def test_gluon_backend_switch(monkeypatch, shared, conv, attnres, expected):
         else:
             monkeypatch.setenv(name, value)
 
-    assert (conv_backend.is_enabled(), attnres_backend.is_enabled()) == expected
+    assert (GluonBackend.is_enabled(), attnres_backend.is_enabled()) == expected
 
 
 @pytest.mark.parametrize(('backend', 'enabled'), [(None, True), ('triton', False), ('gluon', True)])
