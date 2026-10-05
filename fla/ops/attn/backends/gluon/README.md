@@ -32,7 +32,15 @@ Run correctness checks before collecting timings:
 ```bash
 FLA_TILELANG=0 FLA_ATTN_GLUON=1 FLA_USE_TMA=1 python -m pytest tests/ops/test_attn.py tests/ops/test_attn_gluon.py
 FLA_TILELANG=0 FLA_ATTN_GLUON=1 FLA_USE_TMA=1 python -m benchmarks.ops.verify --op parallel_attn
-FLA_USE_TMA=1 python -m benchmarks.ops.benchmark_attn_gluon --output attn-gluon.json
 ```
 
-The comparison script records CUDA Graph latency for forward, backward, forward plus backward, and decoding on identical inputs and software. It reports repeated timing statistics for each shape; K > 256 has no Triton parallel-attention baseline and is recorded as unsupported instead of assigned a speedup. Add `--quick` for a smaller development matrix or `--dtype float16` for fp16.
+Use the unified runner to measure dense attention forward and forward plus backward. Run both backends on the same device and software, with backend dispatch enabled:
+
+```bash
+FLA_DISABLE_BACKEND_DISPATCH=0 FLA_TILELANG=0 FLA_USE_TMA=1 python -m benchmarks.ops.run \
+    --op parallel_attn --backend triton --no-base --json attn-triton.json
+FLA_DISABLE_BACKEND_DISPATCH=0 FLA_TILELANG=0 FLA_USE_TMA=1 python -m benchmarks.ops.run \
+    --op parallel_attn --backend gluon --no-base --json attn-gluon.json
+```
+
+Use `--custom-shapes '{"large": {"B": 1, "T": 4096, "H": 8, "D": 512}}'` to measure a large head dimension. The original parallel-attention implementation does not support K > 256; unsupported or resource-limited baseline cases have no speedup ratio. The backend remains experimental: current measurements show forward-only regressions, and long-sequence dense training gains are limited.

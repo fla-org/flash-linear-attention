@@ -510,6 +510,7 @@ register_op(OpConfig(
     inputs={**_simple_qkv},
     output_is_tuple=False,
     category='attn',
+    backend_env={'gluon': 'FLA_ATTN_GLUON'},
 ))
 
 
