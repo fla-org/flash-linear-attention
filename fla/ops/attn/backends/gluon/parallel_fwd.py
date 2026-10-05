@@ -119,10 +119,13 @@ def _compute(args, descs, cfg: gl.constexpr):
         if USE_GATE:
             gate_k = gl.load(GATE + cols * HQ + hq, cols < end, other=0)
             score += gate_q[:, None] - gate_k[None, :]
-        mask = (rows[:, None] >= cols[None, :]) & (cols[None, :] < end)
         if W is not None:
+            mask = (rows[:, None] >= cols[None, :]) & (cols[None, :] < end)
             mask &= rows[:, None] - cols[None, :] < W
-        score = gl.where(mask, score, float('-inf'))
+            score = gl.where(mask, score, float('-inf'))
+        elif first + (i + 1) * BN > start:
+            mask = (rows[:, None] >= cols[None, :]) & (cols[None, :] < end)
+            score = gl.where(mask, score, float('-inf'))
         new_max = gl.maximum(maximum, gl.max(score, 1))
         finite_max = gl.where(new_max == float('-inf'), 0., new_max)
         alpha = gl.exp2(maximum - finite_max)
