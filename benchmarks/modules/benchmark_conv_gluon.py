@@ -25,10 +25,10 @@ def benchmark(args):
     torch.manual_seed(42)
     dtype = getattr(torch, args.dtype)
     weight_dtype = getattr(torch, args.weight_dtype)
-    shapes = [(1, 128, 1024), (1, 256, 1024), (1, 257, 1024), (1, 2048, 2048),
+    shapes = [(1, 128, 1024), (1, 256, 1024), (1, 257, 1024), (1, 1024, 1024), (1, 1025, 1024), (1, 2048, 2048),
               (1, 8192, 2048), (4, 8192, 4096), (1, 32768, 4096)]
     if args.quick:
-        shapes = [shapes[0], shapes[3], shapes[4]]
+        shapes = [(1, 128, 1024), (1, 2048, 2048), (1, 8192, 2048)]
     rows = []
     for packed in [False, True]:
         for B, T, D in shapes:

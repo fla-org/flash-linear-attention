@@ -80,7 +80,7 @@ def causal_conv1d_fwd(
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT, cu_seqlens_cpu=cu_seqlens_cpu)
     NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
     y = torch.empty_like(x, memory_format=torch.contiguous_format)
-    small = B * T * D <= 262144
+    small = B * T * D <= 1048576
     BD, split = (32, 2) if small else (64, 1)
     causal_conv1d_fwd_kernel_gluon[(triton.cdiv(D, BD), NT * split, B)](
         x=x,

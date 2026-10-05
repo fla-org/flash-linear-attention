@@ -29,8 +29,11 @@ from fla.utils import IS_NVIDIA, assert_close, device
         (1, 257, 256, 4, True, False, True),
         (1, 129, 65, 4, True, True, False),
         (2, 3, 65, 4, False, True, True),
+        (1, 1024, 1024, 4, False, False, False),
+        (1, 1025, 1024, 4, False, False, False),
     ],
-    ids=['one-token', 'channel-tail', 'time-tail', 'packed-qkv', 'packed-state', 'short-state'],
+    ids=['one-token', 'channel-tail', 'time-tail', 'packed-qkv', 'packed-state', 'short-state',
+         'small-tile-boundary', 'large-tile-boundary'],
 )
 def test_causal_conv1d_gluon(monkeypatch, B, T, D, W, packed, state, strided, activation, dtype, weight_dtype):
     torch.manual_seed(42)
