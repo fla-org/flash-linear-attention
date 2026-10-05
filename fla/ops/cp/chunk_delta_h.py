@@ -328,7 +328,7 @@ def pre_process_fwd_kernel_merged(
         for num_stages in [2, 3, 4]
         for BV in [32, 64]
     ],
-    key=['HV', 'K', 'V', 'BT'],
+    key=['HV', 'K', 'V'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['pre_or_post_num_ranks', 'rank', 'NUM_SEQ_ENTRIES'])
