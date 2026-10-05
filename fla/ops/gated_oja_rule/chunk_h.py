@@ -57,6 +57,7 @@ def chunk_oja_fwd_kernel_h_blockdim64(
     SAVE_NEW_KEY: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
+    # (triton.cdiv(K, meta['BK']) * N * H,)
     i_k, i_nh = unflatten_program_id(tl.cdiv(K, BK))
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:

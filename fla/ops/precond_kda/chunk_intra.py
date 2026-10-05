@@ -822,6 +822,8 @@ def chunk_precond_kda_bwd_kernel_intra(
     tl.debug_barrier()
     b_dkt = tl.zeros([BC, BK], dtype=tl.float32)  # Final dk_precond (with beta from rows)
 
+    # keep int64: `i_t` is int64 for pointer arithmetic, and the loop
+    # counter below must match the type of its int64 initial value `i_i + 1`
     NC_actual = min(NC, tl.cdiv(T - i_t * BT, BC))
     if i_i < NC_actual - 1:
         p_gn_t = g + (min(i_ti + BC, T) - 1) * H*K + o_k

@@ -835,7 +835,8 @@ def chunk_kda_fwd_intra(
     # Separate fp32 buffer for diagonal 16x16 blocks (for precision in solve_tril)
     Akkd = torch.empty(B, T, HV, BC, device=k.device, dtype=torch.float32)
 
-    # step 1: compute diagonal blocks into Akkd (fp32)
+    # Step 1: Run token_parallel first to compute diagonal blocks into Akkd (fp32)
+    # Step 1: compute diagonal blocks into Akk_diag (fp32)
     if safe_gate:
         grid = (NT, NC, B * HV)
         BK = triton.next_power_of_2(K)
