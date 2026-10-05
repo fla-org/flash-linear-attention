@@ -14,6 +14,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
+from fla.ops.utils.backends.triton_ascend.op import make_block_ptr
 from fla.ops.utils.op import exp2
 from fla.utils import input_guard
 from fla.utils.ascend_ub_manager import compute_row_tile_block_size, get_npu_properties
@@ -88,16 +89,16 @@ def chunk_scaled_dot_kkt_fwd_kernel_npu(
         t_off = (i_t * BT).to(tl.int32)
         # 1-token chunks: strictly-lower-tri kkt is 0; T=1 block_ptr misaligns UB.
         if i_t * BT + 1 < T:
-            p_b = tl.make_block_ptr(beta + i_h * bt_stride + bos, (T,), (1,), (t_off,), (BT,), (0,))
+            p_b = make_block_ptr(beta + i_h * bt_stride + bos, (T,), (1,), (t_off,), (BT,), (0,))
             b_b = tl.load(p_b, boundary_check=(0,)).to(tl.float32)
 
             if USE_G:
-                p_g = tl.make_block_ptr(g + i_h * bt_stride + bos, (T,), (1,), (t_off,), (BT,), (0,))
+                p_g = make_block_ptr(g + i_h * bt_stride + bos, (T,), (1,), (t_off,), (BT,), (0,))
                 b_g = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
 
             b_A = tl.zeros([BT, BT], dtype=tl.float32)
             for i_k in range(tl.cdiv(K, BK)):
-                p_k = tl.make_block_ptr(
+                p_k = make_block_ptr(
                     k + (bos * H + i_h // (HV // H)) * K, (T, K), (H * K, 1),
                     (t_off, i_k * BK), (BT, BK), (1, 0),
                 )

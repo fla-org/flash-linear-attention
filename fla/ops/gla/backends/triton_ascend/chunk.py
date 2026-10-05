@@ -14,6 +14,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
+from fla.ops.utils.backends.triton_ascend.op import make_block_ptr
 from fla.ops.utils.op import exp2
 from fla.utils import ascend_compile_kwargs, input_guard
 from fla.utils.ascend_ub_manager import (
@@ -395,12 +396,12 @@ def chunk_gla_fwd_kernel_o_npu(
 
             b_o = tl.zeros([BT, BV], dtype=tl.float32)
             for i_k in range(tl.cdiv(K, BK)):
-                p_q = tl.make_block_ptr(q_ptr, (T_cur, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-                p_g = tl.make_block_ptr(g_ptr, (T_cur, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+                p_q = make_block_ptr(q_ptr, (T_cur, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+                p_g = make_block_ptr(g_ptr, (T_cur, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
                 if STATE_V_FIRST:
-                    p_h = tl.make_block_ptr(h_base, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
+                    p_h = make_block_ptr(h_base, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
                 else:
-                    p_h = tl.make_block_ptr(h_base, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
+                    p_h = make_block_ptr(h_base, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
                 b_q = tl.load(p_q, boundary_check=(0, 1))
                 b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
                 # fold scale into the operand: an elementwise op on the accumulator
@@ -414,9 +415,9 @@ def chunk_gla_fwd_kernel_o_npu(
 
             o_t = i_t * BT + tl.arange(0, BT)
             m_t = o_t < T_cur
-            p_a = tl.make_block_ptr(a_ptr, (T_cur, BT), (HV * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
-            p_v = tl.make_block_ptr(v_ptr, (T_cur, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-            p_o = tl.make_block_ptr(o_ptr, (T_cur, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+            p_a = make_block_ptr(a_ptr, (T_cur, BT), (HV * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
+            p_v = make_block_ptr(v_ptr, (T_cur, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+            p_o = make_block_ptr(o_ptr, (T_cur, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
             b_A = tl.load(p_a, boundary_check=(0, 1))
             m_s = tl.arange(0, BT)[:, None] >= tl.arange(0, BT)[None, :]
             b_A = tl.where(m_s & (m_t[:, None] & m_t[None, :]), b_A, 0.0)

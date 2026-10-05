@@ -13,6 +13,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.utils.backends.triton_ascend.op import make_block_ptr
 from fla.ops.utils.index import prepare_chunk_indices
 from fla.ops.utils.op import exp
 from fla.ops.utils.softplus import softplus
@@ -102,11 +103,11 @@ def kda_gate_fwd_kernel_npu(
 
     b_A = tl.load(A_log + i_h).to(tl.float32) if HAS_A else 1.0
 
-    p_g = tl.make_block_ptr(g + i_h * D, (T, D), (H * D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
-    p_yg = tl.make_block_ptr(yg + i_h * D, (T, D), (H * D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
+    p_g = make_block_ptr(g + i_h * D, (T, D), (H * D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
+    p_yg = make_block_ptr(yg + i_h * D, (T, D), (H * D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
     b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
     if HAS_BIAS:
-        p_b = tl.make_block_ptr(dt_bias, (H * D,), (1,), (i_h * D,), (BD,), (0,))
+        p_b = make_block_ptr(dt_bias, (H * D,), (1,), (i_h * D,), (BD,), (0,))
         b_g = b_g + tl.load(p_b, boundary_check=(0,)).to(tl.float32)
     if not USE_LOWER_BOUND:
         b_yg = -exp(b_A) * softplus(b_g)
@@ -185,15 +186,15 @@ def kda_gate_bwd_kernel_npu(
 
     b_A = tl.load(A_log + i_h).to(tl.float32) if HAS_A else 1.0
 
-    p_g = tl.make_block_ptr(g + i_h * D, (T, D), (H * D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
-    p_dg = tl.make_block_ptr(dg + i_h * D, (T, D), (H * D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
-    p_dyg = tl.make_block_ptr(dyg + i_h * D, (T, D), (H * D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
+    p_g = make_block_ptr(g + i_h * D, (T, D), (H * D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
+    p_dg = make_block_ptr(dg + i_h * D, (T, D), (H * D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
+    p_dyg = make_block_ptr(dyg + i_h * D, (T, D), (H * D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
 
     b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
     b_dyg = tl.load(p_dyg, boundary_check=(0, 1)).to(tl.float32)
 
     if HAS_BIAS:
-        p_b = tl.make_block_ptr(dt_bias, (H * D,), (1,), (i_h * D,), (BD,), (0,))
+        p_b = make_block_ptr(dt_bias, (H * D,), (1,), (i_h * D,), (BD,), (0,))
         b_g = b_g + tl.load(p_b, boundary_check=(0,)).to(tl.float32)
 
     if not USE_LOWER_BOUND:
@@ -306,12 +307,12 @@ def kda_gate_chunk_cumsum_vector_kernel_npu(
         bos = tl.cast(i_b, tl.int64) * T
         eos = bos + T
 
-    p_s = tl.make_block_ptr(s + (bos * H + i_h) * S, (T, S), (H * S, 1), (i_t * BT, i_s * BS), (BT, BS), (1, 0))
-    p_o = tl.make_block_ptr(o + (bos * H + i_h) * S, (T, S), (H * S, 1), (i_t * BT, i_s * BS), (BT, BS), (1, 0))
+    p_s = make_block_ptr(s + (bos * H + i_h) * S, (T, S), (H * S, 1), (i_t * BT, i_s * BS), (BT, BS), (1, 0))
+    p_o = make_block_ptr(o + (bos * H + i_h) * S, (T, S), (H * S, 1), (i_t * BT, i_s * BS), (BT, BS), (1, 0))
     b_s = tl.load(p_s, boundary_check=(0, 1)).to(tl.float32)
 
     if HAS_BIAS:
-        p_b = tl.make_block_ptr(dt_bias + i_h * S, (S,), (1,), (i_s * BS,), (BS,), (0,))
+        p_b = make_block_ptr(dt_bias + i_h * S, (S,), (1,), (i_s * BS,), (BS,), (0,))
         b_bias = tl.load(p_b, boundary_check=(0,)).to(tl.float32)
         b_s = b_s + b_bias[None, :]
 

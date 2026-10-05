@@ -15,6 +15,7 @@ import triton.language as tl
 import triton.runtime.driver as driver
 
 from fla.ops.utils import prepare_chunk_indices
+from fla.ops.utils.backends.triton_ascend.op import make_block_ptr
 from fla.ops.utils.op import exp2
 from fla.utils import ascend_compile_kwargs, input_guard
 from fla.utils.ascend_ub_manager import (
@@ -92,8 +93,8 @@ def _g_contig_base(g, bos, i_b, i_h, T_seq, HV, IS_VARLEN: tl.constexpr):
 @triton.jit
 def _t_block_ptr(base, T, offset, BLK, CONTIG: tl.constexpr, HV: tl.constexpr):
     if CONTIG:
-        return tl.make_block_ptr(base, (T,), (1,), (offset,), (BLK,), (0,))
-    return tl.make_block_ptr(base, (T,), (HV,), (offset,), (BLK,), (0,))
+        return make_block_ptr(base, (T,), (1,), (offset,), (BLK,), (0,))
+    return make_block_ptr(base, (T,), (HV,), (offset,), (BLK,), (0,))
 
 
 def _launch_wy_kernel(kernel, *, NT: int, bh_total: int, kernel_kwargs: dict) -> None:
@@ -179,7 +180,7 @@ def recompute_w_u_fwd_kernel_npu(
             beta_ptr = beta + bos * HV + i_h
         p_b = _t_block_ptr(beta_ptr, T, i_t * BT, BT, BETA_T_CONTIG, HV)
         b_b = tl.load(p_b, boundary_check=(0,))
-        p_A = tl.make_block_ptr(
+        p_A = make_block_ptr(
             A + (bos * HV + i_h) * BT, (T, BT), (HV * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0),
         )
         if USE_G:
@@ -190,10 +191,10 @@ def recompute_w_u_fwd_kernel_npu(
             p_g = _t_block_ptr(g_ptr, T, i_t * BT, BT, G_T_CONTIG, HV)
             b_g = exp2(tl.load(p_g, boundary_check=(0,)).to(tl.float32))
         for i_v in range(tl.cdiv(V, BV)):
-            p_v = tl.make_block_ptr(
+            p_v = make_block_ptr(
                 v_ptr, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0),
             )
-            p_u = tl.make_block_ptr(
+            p_u = make_block_ptr(
                 u_ptr, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0),
             )
             b_v = tl.load(p_v, boundary_check=(0, 1))
@@ -203,10 +204,10 @@ def recompute_w_u_fwd_kernel_npu(
             b_u = tl.dot(b_A, b_vb, allow_tf32=False)
             tl.store(p_u, b_u.to(p_u.dtype.element_ty), boundary_check=(0, 1))
         for i_k in range(tl.cdiv(K, BK)):
-            p_k = tl.make_block_ptr(
+            p_k = make_block_ptr(
                 k_ptr, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0),
             )
-            p_w = tl.make_block_ptr(
+            p_w = make_block_ptr(
                 w_ptr, (T, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0),
             )
             b_k = tl.load(p_k, boundary_check=(0, 1))
@@ -261,16 +262,16 @@ def prepare_wy_repr_bwd_kv_npu(
             beta_ptr = _g_contig_base(beta, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
             p_b = _t_block_ptr(beta_ptr, T, i_t * BT, BT, True, HV)
         else:
-            p_b = tl.make_block_ptr(beta + (bos * HV + i_h), (T,), (HV,), (i_t * BT,), (BT,), (0,))
+            p_b = make_block_ptr(beta + (bos * HV + i_h), (T,), (HV,), (i_t * BT,), (BT,), (0,))
         if DB_T_CONTIG:
             db_ptr = _g_contig_base(db, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
             p_db = _t_block_ptr(db_ptr, T, i_t * BT, BT, True, HV)
         else:
-            p_db = tl.make_block_ptr(db + (bos * HV + i_h), (T,), (HV,), (i_t * BT,), (BT,), (0,))
-        p_A = tl.make_block_ptr(
+            p_db = make_block_ptr(db + (bos * HV + i_h), (T,), (HV,), (i_t * BT,), (BT,), (0,))
+        p_A = make_block_ptr(
             A + (bos * HV + i_h) * BT, (BT, T), (1, HV * BT), (0, i_t * BT), (BT, BT), (0, 1),
         )
-        p_dA = tl.make_block_ptr(
+        p_dA = make_block_ptr(
             dA_scr + (bos * HV + i_h) * BT, (BT, T), (1, HV * BT), (0, i_t * BT), (BT, BT), (0, 1),
         )
 
@@ -284,7 +285,7 @@ def prepare_wy_repr_bwd_kv_npu(
                 g_ptr = _g_contig_base(g, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
                 p_g = _t_block_ptr(g_ptr, T, i_t * BT, BT, True, HV)
             else:
-                p_g = tl.make_block_ptr(g + (bos * HV + i_h), (T,), (HV,), (i_t * BT,), (BT,), (0,))
+                p_g = make_block_ptr(g + (bos * HV + i_h), (T,), (HV,), (i_t * BT,), (BT,), (0,))
             b_g = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
             b_g_exp = b_g if G_EXP_PRECOMP else exp2(b_g)
             b_bg = b_b * b_g_exp
@@ -294,13 +295,13 @@ def prepare_wy_repr_bwd_kv_npu(
         dk_ptr = dk + (bos * HV + i_h) * K
         dw_ptr = dw + (bos * HV + i_h) * K
         for i_k in range(tl.cdiv(K, BK)):
-            p_k = tl.make_block_ptr(
+            p_k = make_block_ptr(
                 k_ptr, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0),
             )
-            p_dk = tl.make_block_ptr(
+            p_dk = make_block_ptr(
                 dk_ptr, (T, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0),
             )
-            p_dw = tl.make_block_ptr(
+            p_dw = make_block_ptr(
                 dw_ptr, (T, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0),
             )
             b_k = tl.load(p_k, boundary_check=(0, 1))
@@ -328,13 +329,13 @@ def prepare_wy_repr_bwd_kv_npu(
         dv_ptr = dv + (bos * HV + i_h) * V
         du_ptr = du + (bos * HV + i_h) * V
         for i_v in range(tl.cdiv(V, BV)):
-            p_v = tl.make_block_ptr(
+            p_v = make_block_ptr(
                 v_ptr, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0),
             )
-            p_dv = tl.make_block_ptr(
+            p_dv = make_block_ptr(
                 dv_ptr, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0),
             )
-            p_du = tl.make_block_ptr(
+            p_du = make_block_ptr(
                 du_ptr, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0),
             )
             b_v = tl.load(p_v, boundary_check=(0, 1))
@@ -356,7 +357,7 @@ def prepare_wy_repr_bwd_kv_npu(
                 dg_ptr = _g_contig_base(dg, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
                 p_dg = _t_block_ptr(dg_ptr, T, i_t * BT, BT, True, HV)
             else:
-                p_dg = tl.make_block_ptr(dg + (bos * HV + i_h), (T,), (HV,), (i_t * BT,), (BT,), (0,))
+                p_dg = make_block_ptr(dg + (bos * HV + i_h), (T,), (HV,), (i_t * BT,), (BT,), (0,))
             tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), boundary_check=(0,))
 
 
@@ -383,13 +384,13 @@ def prepare_wy_repr_bwd_da_mask_dot1_npu(
         bos = tl.cast(i_b, tl.int64) * T
         eos = bos + T
 
-    p_A = tl.make_block_ptr(
+    p_A = make_block_ptr(
         A + (bos * HV + i_h) * BT, (BT, T), (1, HV * BT), (0, i_t * BT), (BT, BT), (0, 1),
     )
-    p_in = tl.make_block_ptr(
+    p_in = make_block_ptr(
         dA_scr + (bos * HV + i_h) * BT, (BT, T), (1, HV * BT), (0, i_t * BT), (BT, BT), (0, 1),
     )
-    p_out = tl.make_block_ptr(
+    p_out = make_block_ptr(
         dA_mid + (bos * HV + i_h) * BT, (BT, T), (1, HV * BT), (0, i_t * BT), (BT, BT), (0, 1),
     )
     b_A = tl.load(p_A, boundary_check=(0, 1)).to(tl.float32)
@@ -421,9 +422,9 @@ def prepare_wy_repr_bwd_da_dot2_npu(
         bos = tl.cast(i_b, tl.int64) * T
         eos = bos + T
 
-    p_A = tl.make_block_ptr(A + (bos * HV + i_h) * BT, (BT, T), (1, HV * BT), (0, i_t * BT), (BT, BT), (0, 1))
-    p_in = tl.make_block_ptr(dA_mid + (bos * HV + i_h) * BT, (BT, T), (1, HV * BT), (0, i_t * BT), (BT, BT), (0, 1))
-    p_out = tl.make_block_ptr(dA_out + (bos * HV + i_h) * BT, (BT, T), (1, HV * BT), (0, i_t * BT), (BT, BT), (0, 1))
+    p_A = make_block_ptr(A + (bos * HV + i_h) * BT, (BT, T), (1, HV * BT), (0, i_t * BT), (BT, BT), (0, 1))
+    p_in = make_block_ptr(dA_mid + (bos * HV + i_h) * BT, (BT, T), (1, HV * BT), (0, i_t * BT), (BT, BT), (0, 1))
+    p_out = make_block_ptr(dA_out + (bos * HV + i_h) * BT, (BT, T), (1, HV * BT), (0, i_t * BT), (BT, BT), (0, 1))
     b_A = tl.load(p_A, boundary_check=(0, 1)).to(tl.float32)
     b_dA = tl.load(p_in, boundary_check=(0, 1)).to(tl.float32)
     b_dA = tl.dot(b_A, b_dA, allow_tf32=False)
@@ -461,8 +462,8 @@ def prepare_wy_repr_bwd_da_gate_npu(
         g_ptr = _g_contig_base(g, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
         p_g = _t_block_ptr(g_ptr, T, i_t * BT, BT, True, HV)
     else:
-        p_g = tl.make_block_ptr(g + (bos * HV + i_h), (T,), (HV,), (i_t * BT,), (BT,), (0,))
-    p_dA = tl.make_block_ptr(
+        p_g = make_block_ptr(g + (bos * HV + i_h), (T,), (HV,), (i_t * BT,), (BT,), (0,))
+    p_dA = make_block_ptr(
         dA_out + (bos * HV + i_h) * BT, (BT, T), (1, HV * BT), (0, i_t * BT), (BT, BT), (0, 1),
     )
     b_g = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
@@ -506,13 +507,13 @@ def prepare_wy_repr_bwd_finalize_k_npu(
             beta_ptr = _g_contig_base(beta, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
             p_b = _t_block_ptr(beta_ptr, T, i_t * BT, BT, True, HV)
         else:
-            p_b = tl.make_block_ptr(beta + (bos * HV + i_h), (T,), (HV,), (i_t * BT,), (BT,), (0,))
+            p_b = make_block_ptr(beta + (bos * HV + i_h), (T,), (HV,), (i_t * BT,), (BT,), (0,))
         if DB_T_CONTIG:
             db_ptr = _g_contig_base(db, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
             p_db = _t_block_ptr(db_ptr, T, i_t * BT, BT, True, HV)
         else:
-            p_db = tl.make_block_ptr(db + (bos * HV + i_h), (T,), (HV,), (i_t * BT,), (BT,), (0,))
-        p_dA = tl.make_block_ptr(
+            p_db = make_block_ptr(db + (bos * HV + i_h), (T,), (HV,), (i_t * BT,), (BT,), (0,))
+        p_dA = make_block_ptr(
             dA_out + (bos * HV + i_h) * BT, (BT, T), (1, HV * BT), (0, i_t * BT), (BT, BT), (0, 1),
         )
 
@@ -522,10 +523,10 @@ def prepare_wy_repr_bwd_finalize_k_npu(
         b_dA_c = b_dA + 0.0
 
         for i_k in range(tl.cdiv(K, BK)):
-            p_k = tl.make_block_ptr(
+            p_k = make_block_ptr(
                 k + (bos * H + i_h // (HV // H)) * K, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0),
             )
-            p_dk = tl.make_block_ptr(
+            p_dk = make_block_ptr(
                 dk + (bos * HV + i_h) * K, (T, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0),
             )
             b_k = tl.load(p_k, boundary_check=(0, 1)).to(tl.float32)
@@ -566,20 +567,20 @@ def prepare_wy_repr_bwd_finalize_a2_dg_npu(
         beta_ptr = _g_contig_base(beta, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
         p_b = _t_block_ptr(beta_ptr, T, i_t * BT, BT, True, HV)
     else:
-        p_b = tl.make_block_ptr(beta + (bos * HV + i_h), (T,), (HV,), (i_t * BT,), (BT,), (0,))
-    p_dA = tl.make_block_ptr(
+        p_b = make_block_ptr(beta + (bos * HV + i_h), (T,), (HV,), (i_t * BT,), (BT,), (0,))
+    p_dA = make_block_ptr(
         dA_out + (bos * HV + i_h) * BT, (BT, T), (1, HV * BT), (0, i_t * BT), (BT, BT), (0, 1),
     )
     if DG_T_CONTIG:
         dg_ptr = _g_contig_base(dg, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
         p_dg = _t_block_ptr(dg_ptr, T, i_t * BT, BT, True, HV)
     else:
-        p_dg = tl.make_block_ptr(dg + (bos * HV + i_h), (T,), (HV,), (i_t * BT,), (BT,), (0,))
+        p_dg = make_block_ptr(dg + (bos * HV + i_h), (T,), (HV,), (i_t * BT,), (BT,), (0,))
 
     b_b = tl.load(p_b, boundary_check=(0,)).to(tl.float32)
     b_A2 = tl.zeros([BT, BT], dtype=tl.float32)
     for i_k in range(tl.cdiv(K, BK)):
-        p_k = tl.make_block_ptr(
+        p_k = make_block_ptr(
             k + (bos * H + i_h // (HV // H)) * K, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0),
         )
         b_k = tl.load(p_k, boundary_check=(0, 1)).to(tl.float32)

@@ -15,6 +15,7 @@ import triton.language as tl
 
 from fla.ops.gdn2.wy_fast import recompute_w_u_fwd_gdn2
 from fla.ops.utils import prepare_chunk_indices
+from fla.ops.utils.backends.triton_ascend.op import make_block_ptr
 from fla.ops.utils.op import exp2
 from fla.utils import ascend_compile_kwargs, input_guard
 from fla.utils.ascend_ub_manager import compute_row_tile_block_size, iter_axis_launch_chunks
@@ -222,7 +223,7 @@ def chunk_gdn2_fwd_kernel_diag_solve_npu(
     o_i = tl.arange(0, BC)
     m_A = o_i[:, None] > o_i[None, :]
     m_I = o_i[:, None] == o_i[None, :]
-    p_Akk = tl.make_block_ptr(Akkd, (T, BC), (H * BC, 1), (i_ti, 0), (BC, BC), (1, 0))
+    p_Akk = make_block_ptr(Akkd, (T, BC), (H * BC, 1), (i_ti, 0), (BC, BC), (1, 0))
     b_Akk = tl.load(p_Akk, boundary_check=(0, 1)).to(tl.float32)
     b_Ai = -tl.where(m_A, b_Akk, 0)
     for i in range(2, min(BC, T - i_ti)):
@@ -290,15 +291,15 @@ def chunk_gdn2_fwd_kernel_inter_products_npu(
         o_k = i_k * BK + tl.arange(0, BK)
         m_k = o_k < K
 
-        p_k_src = tl.make_block_ptr(k, (T, K), (H * K, 1), (i_tc_src, i_k * BK), (BC, BK), (1, 0))
-        p_g_src = tl.make_block_ptr(g, (T, K), (H * K, 1), (i_tc_src, i_k * BK), (BC, BK), (1, 0))
+        p_k_src = make_block_ptr(k, (T, K), (H * K, 1), (i_tc_src, i_k * BK), (BC, BK), (1, 0))
+        p_g_src = make_block_ptr(g, (T, K), (H * K, 1), (i_tc_src, i_k * BK), (BC, BK), (1, 0))
         b_k_src = tl.load(p_k_src, boundary_check=(0, 1)).to(tl.float32)
         b_g_src = tl.load(p_g_src, boundary_check=(0, 1)).to(tl.float32)
 
-        p_q_dst = tl.make_block_ptr(q, (T, K), (H * K, 1), (i_tc_dst, i_k * BK), (BC, BK), (1, 0))
-        p_k_dst = tl.make_block_ptr(k, (T, K), (H * K, 1), (i_tc_dst, i_k * BK), (BC, BK), (1, 0))
-        p_g_dst = tl.make_block_ptr(g, (T, K), (H * K, 1), (i_tc_dst, i_k * BK), (BC, BK), (1, 0))
-        p_b_dst = tl.make_block_ptr(b, (T, K), (H * K, 1), (i_tc_dst, i_k * BK), (BC, BK), (1, 0))
+        p_q_dst = make_block_ptr(q, (T, K), (H * K, 1), (i_tc_dst, i_k * BK), (BC, BK), (1, 0))
+        p_k_dst = make_block_ptr(k, (T, K), (H * K, 1), (i_tc_dst, i_k * BK), (BC, BK), (1, 0))
+        p_g_dst = make_block_ptr(g, (T, K), (H * K, 1), (i_tc_dst, i_k * BK), (BC, BK), (1, 0))
+        p_b_dst = make_block_ptr(b, (T, K), (H * K, 1), (i_tc_dst, i_k * BK), (BC, BK), (1, 0))
         b_q_dst = tl.load(p_q_dst, boundary_check=(0, 1)).to(tl.float32)
         b_k_dst = tl.load(p_k_dst, boundary_check=(0, 1)).to(tl.float32)
         b_g_dst = tl.load(p_g_dst, boundary_check=(0, 1)).to(tl.float32)
@@ -313,7 +314,7 @@ def chunk_gdn2_fwd_kernel_inter_products_npu(
         b_Aqk += tl.dot(b_q_dst * b_gq, b_kgt, allow_tf32=False)
         b_Akk += tl.dot((b_b_dst * b_k_dst) * b_gq, b_kgt, allow_tf32=False)
 
-    p_Aqk = tl.make_block_ptr(
+    p_Aqk = make_block_ptr(
         Aqk,
         (T, BT),
         (H * BT, 1),
@@ -321,7 +322,7 @@ def chunk_gdn2_fwd_kernel_inter_products_npu(
         (BC, BC),
         (1, 0),
     )
-    p_Akkx = tl.make_block_ptr(
+    p_Akkx = make_block_ptr(
         Akkx,
         (T, BT),
         (H * BT, 1),
@@ -375,30 +376,30 @@ def chunk_gdn2_fwd_kernel_inter_solve_npu(
     Akkx += base * BT
     Akk += base * BT
 
-    p_Akkx10 = tl.make_block_ptr(Akkx, (T, BT), (H * BT, 1), (i_tc1, 0), (BC, BC), (1, 0))
+    p_Akkx10 = make_block_ptr(Akkx, (T, BT), (H * BT, 1), (i_tc1, 0), (BC, BC), (1, 0))
     b_Akk10 = tl.load(p_Akkx10, boundary_check=(0, 1)).to(tl.float32)
     if NC >= 3:
-        p_Akkx20 = tl.make_block_ptr(Akkx, (T, BT), (H * BT, 1), (i_tc2, 0), (BC, BC), (1, 0))
-        p_Akkx21 = tl.make_block_ptr(Akkx, (T, BT), (H * BT, 1), (i_tc2, BC), (BC, BC), (1, 0))
+        p_Akkx20 = make_block_ptr(Akkx, (T, BT), (H * BT, 1), (i_tc2, 0), (BC, BC), (1, 0))
+        p_Akkx21 = make_block_ptr(Akkx, (T, BT), (H * BT, 1), (i_tc2, BC), (BC, BC), (1, 0))
         b_Akk20 = tl.load(p_Akkx20, boundary_check=(0, 1)).to(tl.float32)
         b_Akk21 = tl.load(p_Akkx21, boundary_check=(0, 1)).to(tl.float32)
     if NC >= 4:
-        p_Akkx30 = tl.make_block_ptr(Akkx, (T, BT), (H * BT, 1), (i_tc3, 0), (BC, BC), (1, 0))
-        p_Akkx31 = tl.make_block_ptr(Akkx, (T, BT), (H * BT, 1), (i_tc3, BC), (BC, BC), (1, 0))
-        p_Akkx32 = tl.make_block_ptr(Akkx, (T, BT), (H * BT, 1), (i_tc3, 2 * BC), (BC, BC), (1, 0))
+        p_Akkx30 = make_block_ptr(Akkx, (T, BT), (H * BT, 1), (i_tc3, 0), (BC, BC), (1, 0))
+        p_Akkx31 = make_block_ptr(Akkx, (T, BT), (H * BT, 1), (i_tc3, BC), (BC, BC), (1, 0))
+        p_Akkx32 = make_block_ptr(Akkx, (T, BT), (H * BT, 1), (i_tc3, 2 * BC), (BC, BC), (1, 0))
         b_Akk30 = tl.load(p_Akkx30, boundary_check=(0, 1)).to(tl.float32)
         b_Akk31 = tl.load(p_Akkx31, boundary_check=(0, 1)).to(tl.float32)
         b_Akk32 = tl.load(p_Akkx32, boundary_check=(0, 1)).to(tl.float32)
 
-    p_Akk00 = tl.make_block_ptr(Akkd, (T, BC), (H * BC, 1), (i_tc0, 0), (BC, BC), (1, 0))
-    p_Akk11 = tl.make_block_ptr(Akkd, (T, BC), (H * BC, 1), (i_tc1, 0), (BC, BC), (1, 0))
+    p_Akk00 = make_block_ptr(Akkd, (T, BC), (H * BC, 1), (i_tc0, 0), (BC, BC), (1, 0))
+    p_Akk11 = make_block_ptr(Akkd, (T, BC), (H * BC, 1), (i_tc1, 0), (BC, BC), (1, 0))
     b_Ai00 = tl.load(p_Akk00, boundary_check=(0, 1)).to(tl.float32)
     b_Ai11 = tl.load(p_Akk11, boundary_check=(0, 1)).to(tl.float32)
     if NC >= 3:
-        p_Akk22 = tl.make_block_ptr(Akkd, (T, BC), (H * BC, 1), (i_tc2, 0), (BC, BC), (1, 0))
+        p_Akk22 = make_block_ptr(Akkd, (T, BC), (H * BC, 1), (i_tc2, 0), (BC, BC), (1, 0))
         b_Ai22 = tl.load(p_Akk22, boundary_check=(0, 1)).to(tl.float32)
     if NC >= 4:
-        p_Akk33 = tl.make_block_ptr(Akkd, (T, BC), (H * BC, 1), (i_tc3, 0), (BC, BC), (1, 0))
+        p_Akk33 = make_block_ptr(Akkd, (T, BC), (H * BC, 1), (i_tc3, 0), (BC, BC), (1, 0))
         b_Ai33 = tl.load(p_Akk33, boundary_check=(0, 1)).to(tl.float32)
 
     # preserve Ai11 before the Ai10 Ascend tl.dot clobbers it; later rhs dots and the store need the original
@@ -440,24 +441,24 @@ def chunk_gdn2_fwd_kernel_inter_solve_npu(
             allow_tf32=False,
         )
 
-    p_Akk00 = tl.make_block_ptr(Akk, (T, BT), (H * BT, 1), (i_tc0, 0), (BC, BC), (1, 0))
-    p_Akk10 = tl.make_block_ptr(Akk, (T, BT), (H * BT, 1), (i_tc1, 0), (BC, BC), (1, 0))
-    p_Akk11 = tl.make_block_ptr(Akk, (T, BT), (H * BT, 1), (i_tc1, BC), (BC, BC), (1, 0))
+    p_Akk00 = make_block_ptr(Akk, (T, BT), (H * BT, 1), (i_tc0, 0), (BC, BC), (1, 0))
+    p_Akk10 = make_block_ptr(Akk, (T, BT), (H * BT, 1), (i_tc1, 0), (BC, BC), (1, 0))
+    p_Akk11 = make_block_ptr(Akk, (T, BT), (H * BT, 1), (i_tc1, BC), (BC, BC), (1, 0))
     tl.store(p_Akk00, b_Ai00.to(Akk.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_Akk10, b_Ai10.to(Akk.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_Akk11, b_Ai11_pristine.to(Akk.dtype.element_ty), boundary_check=(0, 1))
     if NC >= 3:
-        p_Akk20 = tl.make_block_ptr(Akk, (T, BT), (H * BT, 1), (i_tc2, 0), (BC, BC), (1, 0))
-        p_Akk21 = tl.make_block_ptr(Akk, (T, BT), (H * BT, 1), (i_tc2, BC), (BC, BC), (1, 0))
-        p_Akk22 = tl.make_block_ptr(Akk, (T, BT), (H * BT, 1), (i_tc2, 2 * BC), (BC, BC), (1, 0))
+        p_Akk20 = make_block_ptr(Akk, (T, BT), (H * BT, 1), (i_tc2, 0), (BC, BC), (1, 0))
+        p_Akk21 = make_block_ptr(Akk, (T, BT), (H * BT, 1), (i_tc2, BC), (BC, BC), (1, 0))
+        p_Akk22 = make_block_ptr(Akk, (T, BT), (H * BT, 1), (i_tc2, 2 * BC), (BC, BC), (1, 0))
         tl.store(p_Akk20, b_Ai20.to(Akk.dtype.element_ty), boundary_check=(0, 1))
         tl.store(p_Akk21, b_Ai21.to(Akk.dtype.element_ty), boundary_check=(0, 1))
         tl.store(p_Akk22, b_Ai22_for_store.to(Akk.dtype.element_ty), boundary_check=(0, 1))
     if NC >= 4:
-        p_Akk30 = tl.make_block_ptr(Akk, (T, BT), (H * BT, 1), (i_tc3, 0), (BC, BC), (1, 0))
-        p_Akk31 = tl.make_block_ptr(Akk, (T, BT), (H * BT, 1), (i_tc3, BC), (BC, BC), (1, 0))
-        p_Akk32 = tl.make_block_ptr(Akk, (T, BT), (H * BT, 1), (i_tc3, 2 * BC), (BC, BC), (1, 0))
-        p_Akk33 = tl.make_block_ptr(Akk, (T, BT), (H * BT, 1), (i_tc3, 3 * BC), (BC, BC), (1, 0))
+        p_Akk30 = make_block_ptr(Akk, (T, BT), (H * BT, 1), (i_tc3, 0), (BC, BC), (1, 0))
+        p_Akk31 = make_block_ptr(Akk, (T, BT), (H * BT, 1), (i_tc3, BC), (BC, BC), (1, 0))
+        p_Akk32 = make_block_ptr(Akk, (T, BT), (H * BT, 1), (i_tc3, 2 * BC), (BC, BC), (1, 0))
+        p_Akk33 = make_block_ptr(Akk, (T, BT), (H * BT, 1), (i_tc3, 3 * BC), (BC, BC), (1, 0))
         tl.store(p_Akk30, b_Ai30.to(Akk.dtype.element_ty), boundary_check=(0, 1))
         tl.store(p_Akk31, b_Ai31.to(Akk.dtype.element_ty), boundary_check=(0, 1))
         tl.store(p_Akk32, b_Ai32.to(Akk.dtype.element_ty), boundary_check=(0, 1))
