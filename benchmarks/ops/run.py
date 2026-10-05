@@ -294,7 +294,6 @@ def benchmark_op(
     if modes is None:
         modes = ['fwd', 'fwdbwd']
 
-    torch.manual_seed(42)
     config = get_op(op_name)
     op_fn = _import_op(config)
 

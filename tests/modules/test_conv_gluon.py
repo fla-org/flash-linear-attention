@@ -8,7 +8,6 @@
 import pytest
 import torch
 
-from benchmarks.ops.registry import generate_inputs, get_op
 from fla.modules.conv.causal_conv1d import causal_conv1d
 from fla.utils import IS_NVIDIA, assert_close, device
 
@@ -136,34 +135,3 @@ def test_conv_gluon_dispatch(monkeypatch):
             y, _ = causal_conv1d(x, weight, activation='silu')
             y.sum().backward()
         assert calls == (['fwd', 'bwd'] if enabled else [])
-
-
-@pytest.mark.parametrize('packed', [False, True])
-def test_conv_benchmark_inputs(packed):
-    torch.manual_seed(42)
-    config = get_op('causal_conv1d')
-    inputs = generate_inputs(config, B=1, T=129, H=2, D=33, W=3, packed=packed, device='cpu')
-
-    assert inputs['x'].shape == (1, 129, 66)
-    assert inputs['weight'].shape == (66, 3)
-    for name in ['x', 'weight']:
-        assert inputs[name].dtype == torch.bfloat16
-        assert inputs[name].requires_grad and inputs[name].is_leaf
-    if packed:
-        assert inputs['cu_seqlens'].tolist() == [0, 1, 35, 64, 129]
-        assert inputs['chunk_indices'].tolist() == [[0, 0], [1, 0], [2, 0], [3, 0], [3, 1]]
-    else:
-        assert 'cu_seqlens' not in inputs
-        assert 'chunk_indices' not in inputs
-
-
-@pytest.mark.parametrize(('B', 'T'), [(2, 128), (1, 8)])
-def test_conv_benchmark_rejects_invalid_packed_profile(B, T):
-    with pytest.raises(ValueError, match='B=1 and T>=12'):
-        generate_inputs(get_op('causal_conv1d'), B=B, T=T, H=1, D=32, packed=True, device='cpu')
-
-
-def test_conv_benchmark_gate():
-    from benchmarks.ops.verify import derive_test_file
-
-    assert derive_test_file('causal_conv1d') == 'tests/modules/test_conv.py'

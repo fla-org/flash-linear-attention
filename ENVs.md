@@ -62,7 +62,7 @@ Backend switches enable implementations; operator verifiers select supported cal
 
 `FLA_GLUON=1` enables every Gluon backend, regardless of individual operator switches. When it is unset or `0`, each operator keeps its own switch. `FLA_DISABLE_BACKEND_DISPATCH=1` still bypasses all backends.
 
-Gluon convolution uses the existing `backend='triton'` entry point. It supports NVIDIA FP32/FP16/BF16 inputs with contiguous channels, widths 2/3/4, and dense or packed sequences. Decode, state-gradient backward, and distributed processes retain the existing implementation. Compare backends with `python -m benchmarks.ops.run --op causal_conv1d --backend triton --no-base` and `--backend gluon`; `FLA_GLUON=0 FLA_CONV_GLUON=1 python -m benchmarks.ops.verify --op causal_conv1d` runs the frozen correctness gate before timing.
+Gluon convolution uses the existing `backend='triton'` entry point. It supports NVIDIA FP32/FP16/BF16 inputs with contiguous channels, widths 2/3/4, and dense or packed sequences. Decode, state-gradient backward, and distributed processes retain the existing implementation. Compare Triton and Gluon with `python -m benchmarks.modules.benchmark_conv`.
 
 ---
 
