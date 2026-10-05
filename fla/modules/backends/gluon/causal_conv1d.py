@@ -20,54 +20,56 @@ from fla.utils import input_guard
 def causal_conv1d_fwd_kernel_gluon(
     x, weight, bias, residual, initial_state, y, cu_seqlens, chunk_indices,
     T, stride_x_n: gl.constexpr, stride_x_t: gl.constexpr,
-    D: gl.constexpr, W: gl.constexpr, BT: gl.constexpr, BD: gl.constexpr, R: gl.constexpr,
-    V: gl.constexpr, NW: gl.constexpr, ACTIVATION: gl.constexpr, SPLIT: gl.constexpr = 1,
+    D: gl.constexpr, W: gl.constexpr, BT: gl.constexpr, BD: gl.constexpr, BT_UNROLL: gl.constexpr,
+    NUM_WARPS: gl.constexpr, ACTIVATION: gl.constexpr, NUM_SPLITS: gl.constexpr = 1,
 ):
-    # lanes own adjacent channels; each lane keeps R overlapping windows in registers.
-    layout: gl.constexpr = gl.BlockedLayout([1, V], [1, 32], [NW, 1], [1, 0])
+    # lanes own adjacent channels; each lane reuses its input window across BT_UNROLL outputs.
+    layout: gl.constexpr = gl.BlockedLayout([1, BD // 32], [1, 32], [NUM_WARPS, 1], [1, 0])
     i_d = gl.program_id(0).to(gl.int64)
     i_t = gl.program_id(1).to(gl.int64)
-    i_n = gl.program_id(2).to(gl.int64)
-    i_sub = i_t % SPLIT
-    i_t //= SPLIT
+    i_b = gl.program_id(2).to(gl.int64)
+    i_split = i_t % NUM_SPLITS
+    i_t //= NUM_SPLITS
     if cu_seqlens is not None:
         i_n = gl.load(chunk_indices + 2 * i_t).to(gl.int64)
         i_t = gl.load(chunk_indices + 2 * i_t + 1).to(gl.int64)
         bos = gl.load(cu_seqlens + i_n).to(gl.int64)
         T = gl.load(cu_seqlens + i_n + 1).to(gl.int64) - bos
-        x += bos * stride_x_t
+        p_x = x + bos * stride_x_t
     else:
-        bos = i_n * T
-        x += i_n * stride_x_n
-    d = i_d * BD + gl.arange(0, BD, layout=gl.SliceLayout(0, layout)).to(gl.int64)
-    t = (i_t * SPLIT + i_sub) * BT + gl.arange(0, BT // R, layout=gl.SliceLayout(1, layout)).to(gl.int64) * R
-    values = ()
-    weights = ()
-    for k in gl.static_range(W):
-        weights += (gl.load(weight + d * W + k, d < D, other=0).to(gl.float32),)
-    for k in gl.static_range(R + W - 1):
-        tx = t + k - W + 1
-        value = gl.load(x + tx[:, None] * stride_x_t + d[None, :],
-                        (tx[:, None] >= 0) & (tx[:, None] < T) & (d[None, :] < D), other=0).to(gl.float32)
+        i_n = i_b
+        bos = i_b * T
+        p_x = x + i_b * stride_x_n
+    o_d = i_d * BD + gl.arange(0, BD, layout=gl.SliceLayout(0, layout)).to(gl.int64)
+    o_t = (i_t * NUM_SPLITS + i_split) * BT
+    o_t += gl.arange(0, BT // BT_UNROLL, layout=gl.SliceLayout(1, layout)).to(gl.int64) * BT_UNROLL
+    b_x = ()
+    b_w = ()
+    for i_w in gl.static_range(W):
+        b_w += (gl.load(weight + o_d * W + i_w, o_d < D, other=0).to(gl.float32),)
+    for i_x in gl.static_range(BT_UNROLL + W - 1):
+        o_x = o_t + i_x - W + 1
+        b_xi = gl.load(p_x + o_x[:, None] * stride_x_t + o_d[None, :],
+                       (o_x[:, None] >= 0) & (o_x[:, None] < T) & (o_d[None, :] < D), other=0).to(gl.float32)
         if initial_state is not None:
-            value += gl.load(initial_state + i_n * D * W + d[None, :] * W + (tx[:, None] + W),
-                             (tx[:, None] < 0) & (tx[:, None] >= 1 - W) & (d[None, :] < D), other=0).to(gl.float32)
-        values += (value,)
+            b_xi += gl.load(initial_state + i_n * D * W + o_d[None, :] * W + (o_x[:, None] + W),
+                            (o_x[:, None] < 0) & (o_x[:, None] >= 1 - W) & (o_d[None, :] < D), other=0).to(gl.float32)
+        b_x += (b_xi,)
     if bias is not None:
-        b = gl.load(bias + d, d < D, other=0).to(gl.float32)
-    for r in gl.static_range(R):
-        acc = gl.full((BT // R, BD), 0, gl.float32, layout)
-        for k in gl.static_range(W):
-            acc += values[r + k] * weights[k][None, :]
+        b_bias = gl.load(bias + o_d, o_d < D, other=0).to(gl.float32)
+    for i_r in gl.static_range(BT_UNROLL):
+        b_y = gl.full((BT // BT_UNROLL, BD), 0, gl.float32, layout)
+        for i_w in gl.static_range(W):
+            b_y += b_x[i_r + i_w] * b_w[i_w][None, :]
         if bias is not None:
-            acc += b[None, :]
+            b_y += b_bias[None, :]
         if ACTIVATION == 'silu' or ACTIVATION == 'swish':
-            acc *= 1. / (1. + gl.exp(-acc))
-        offset = (bos + t[:, None] + r) * D + d[None, :]
-        mask = (t[:, None] + r < T) & (d[None, :] < D)
+            b_y *= 1. / (1. + gl.exp(-b_y))
+        o_y = (bos + o_t[:, None] + i_r) * D + o_d[None, :]
+        m_y = (o_t[:, None] + i_r < T) & (o_d[None, :] < D)
         if residual is not None:
-            acc += gl.load(residual + offset, mask, other=0).to(gl.float32)
-        gl.store(y + offset, acc, mask)
+            b_y += gl.load(residual + o_y, m_y, other=0).to(gl.float32)
+        gl.store(y + o_y, b_y, m_y)
 
 
 @input_guard(no_guard_contiguous=['x'])
@@ -80,9 +82,10 @@ def causal_conv1d_fwd(
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT, cu_seqlens_cpu=cu_seqlens_cpu)
     NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
     y = torch.empty_like(x, memory_format=torch.contiguous_format)
-    small = B * T * D <= 1048576
-    BD, split = (32, 2) if small else (64, 1)
-    causal_conv1d_fwd_kernel_gluon[(triton.cdiv(D, BD), NT * split, B)](
+    use_small_tile = B * T * D <= 1048576
+    BD, num_splits = (32, 2) if use_small_tile else (64, 1)
+    num_warps = 4
+    causal_conv1d_fwd_kernel_gluon[(triton.cdiv(D, BD), NT * num_splits, B)](
         x=x,
         weight=weight,
         bias=bias,
@@ -96,14 +99,13 @@ def causal_conv1d_fwd(
         stride_x_t=x.stride(1),
         D=D,
         W=weight.shape[1],
-        BT=BT // split,
+        BT=BT // num_splits,
         BD=BD,
-        R=8,
-        V=BD // 32,
-        NW=4,
+        BT_UNROLL=8,
+        NUM_WARPS=num_warps,
         ACTIVATION=activation,
-        SPLIT=split,
-        num_warps=4,
+        NUM_SPLITS=num_splits,
+        num_warps=num_warps,
     )
     final_state = None
     if output_final_state:
@@ -119,73 +121,73 @@ def causal_conv1d_fwd(
 
 @gluon.jit(do_not_specialize=['T'])
 def causal_conv1d_bwd_kernel_gluon(
-    x, weight, bias, dy, dx, dw, db, cu_seqlens, chunk_indices,
+    x, weight, bias, dy, dx, dw_partial, db_partial, cu_seqlens, chunk_indices,
     T, stride_x_n: gl.constexpr, stride_x_t: gl.constexpr,
     stride_dy_n: gl.constexpr, stride_dy_t: gl.constexpr, stride_dy_d: gl.constexpr,
-    D: gl.constexpr, W: gl.constexpr, BT: gl.constexpr, BD: gl.constexpr, R: gl.constexpr,
-    V: gl.constexpr, NW: gl.constexpr, ACTIVATION: gl.constexpr,
+    D: gl.constexpr, W: gl.constexpr, BT: gl.constexpr, BD: gl.constexpr, BT_UNROLL: gl.constexpr,
+    NUM_WARPS: gl.constexpr, ACTIVATION: gl.constexpr,
 ):
-    layout: gl.constexpr = gl.BlockedLayout([1, V], [1, 32], [NW, 1], [1, 0])
+    layout: gl.constexpr = gl.BlockedLayout([1, BD // 32], [1, 32], [NUM_WARPS, 1], [1, 0])
     i_d = gl.program_id(0).to(gl.int64)
     i_t = gl.program_id(1).to(gl.int64)
-    i_n = gl.program_id(2).to(gl.int64)
-    i_partial = i_n * gl.num_programs(1) + i_t
+    i_b = gl.program_id(2).to(gl.int64)
+    i_tg = i_b * gl.num_programs(1) + i_t
     if cu_seqlens is not None:
         i_n = gl.load(chunk_indices + 2 * i_t).to(gl.int64)
         i_t = gl.load(chunk_indices + 2 * i_t + 1).to(gl.int64)
         bos = gl.load(cu_seqlens + i_n).to(gl.int64)
         T = gl.load(cu_seqlens + i_n + 1).to(gl.int64) - bos
-        x += bos * stride_x_t
-        dy += bos * stride_dy_t
+        p_x = x + bos * stride_x_t
+        p_dy = dy + bos * stride_dy_t
     else:
-        bos = i_n * T
-        x += i_n * stride_x_n
-        dy += i_n * stride_dy_n
-    d = i_d * BD + gl.arange(0, BD, layout=gl.SliceLayout(0, layout)).to(gl.int64)
-    t = i_t * BT + gl.arange(0, BT // R, layout=gl.SliceLayout(1, layout)).to(gl.int64) * R
-    weights = ()
-    values = ()
-    grads = ()
-    dweights = ()
-    for k in gl.static_range(W):
-        weights += (gl.load(weight + d * W + k, d < D, other=0).to(gl.float32),)
-        dweights += (gl.full((BT // R, BD), 0, gl.float32, layout),)
+        bos = i_b * T
+        p_x = x + i_b * stride_x_n
+        p_dy = dy + i_b * stride_dy_n
+    o_d = i_d * BD + gl.arange(0, BD, layout=gl.SliceLayout(0, layout)).to(gl.int64)
+    o_t = i_t * BT + gl.arange(0, BT // BT_UNROLL, layout=gl.SliceLayout(1, layout)).to(gl.int64) * BT_UNROLL
+    b_w = ()
+    b_x = ()
+    b_dy = ()
+    b_dw = ()
+    for i_w in gl.static_range(W):
+        b_w += (gl.load(weight + o_d * W + i_w, o_d < D, other=0).to(gl.float32),)
+        b_dw += (gl.full((BT // BT_UNROLL, BD), 0, gl.float32, layout),)
     if bias is not None:
-        b = gl.load(bias + d, d < D, other=0).to(gl.float32)
-    for k in gl.static_range(R + 2 * W - 2):
-        tx = t + k - W + 1
-        values += (gl.load(x + tx[:, None] * stride_x_t + d[None, :],
-                           (tx[:, None] >= 0) & (tx[:, None] < T) & (d[None, :] < D), other=0).to(gl.float32),)
-    for r in gl.static_range(R + W - 1):
-        grad = gl.load(dy + (t[:, None] + r) * stride_dy_t + d[None, :] * stride_dy_d,
-                       (t[:, None] + r < T) & (d[None, :] < D), other=0).to(gl.float32)
+        b_bias = gl.load(bias + o_d, o_d < D, other=0).to(gl.float32)
+    for i_x in gl.static_range(BT_UNROLL + 2 * W - 2):
+        o_x = o_t + i_x - W + 1
+        b_x += (gl.load(p_x + o_x[:, None] * stride_x_t + o_d[None, :],
+                        (o_x[:, None] >= 0) & (o_x[:, None] < T) & (o_d[None, :] < D), other=0).to(gl.float32),)
+    for i_r in gl.static_range(BT_UNROLL + W - 1):
+        b_dyi = gl.load(p_dy + (o_t[:, None] + i_r) * stride_dy_t + o_d[None, :] * stride_dy_d,
+                        (o_t[:, None] + i_r < T) & (o_d[None, :] < D), other=0).to(gl.float32)
         if ACTIVATION == 'silu' or ACTIVATION == 'swish':
-            pre = gl.full((BT // R, BD), 0, gl.float32, layout)
-            for k in gl.static_range(W):
-                pre += values[r + k] * weights[k][None, :]
+            b_y = gl.full((BT // BT_UNROLL, BD), 0, gl.float32, layout)
+            for i_w in gl.static_range(W):
+                b_y += b_x[i_r + i_w] * b_w[i_w][None, :]
             if bias is not None:
-                pre += b[None, :]
+                b_y += b_bias[None, :]
             # backward preserves the baseline's rounded recomputed preactivation.
-            pre = pre.to(x.dtype.element_ty).to(gl.float32)
-            sig = 1. / (1. + gl.exp(-pre))
-            grad = grad * sig * (1 + pre * (1 - sig))
-        grads += (grad,)
-    dbias = gl.full((BT // R, BD), 0, gl.float32, layout)
-    for r in gl.static_range(R):
-        acc = gl.full((BT // R, BD), 0, gl.float32, layout)
-        updated = ()
-        for k in gl.static_range(W):
-            grad = grads[r + k]
-            acc += grad * weights[W - k - 1][None, :]
-            updated += (dweights[k] + grad * values[r + W - 1],)
-        dweights = updated
-        dbias += grads[r]
-        gl.store(dx + (bos + t[:, None] + r) * D + d[None, :], acc,
-                 (t[:, None] + r < T) & (d[None, :] < D))
-    for k in gl.static_range(W):
-        gl.store(dw + i_partial * D * W + d * W + W - k - 1, gl.sum(dweights[k], 0), d < D)
-    if db is not None:
-        gl.store(db + i_partial * D + d, gl.sum(dbias, 0), d < D)
+            b_y = b_y.to(x.dtype.element_ty).to(gl.float32)
+            b_ys = 1. / (1. + gl.exp(-b_y))
+            b_dyi = b_dyi * b_ys * (1 + b_y * (1 - b_ys))
+        b_dy += (b_dyi,)
+    b_db = gl.full((BT // BT_UNROLL, BD), 0, gl.float32, layout)
+    for i_r in gl.static_range(BT_UNROLL):
+        b_dx = gl.full((BT // BT_UNROLL, BD), 0, gl.float32, layout)
+        b_dw_new = ()
+        for i_w in gl.static_range(W):
+            b_dyi = b_dy[i_r + i_w]
+            b_dx += b_dyi * b_w[W - i_w - 1][None, :]
+            b_dw_new += (b_dw[i_w] + b_dyi * b_x[i_r + W - 1],)
+        b_dw = b_dw_new
+        b_db += b_dy[i_r]
+        gl.store(dx + (bos + o_t[:, None] + i_r) * D + o_d[None, :], b_dx,
+                 (o_t[:, None] + i_r < T) & (o_d[None, :] < D))
+    for i_w in gl.static_range(W):
+        gl.store(dw_partial + i_tg * D * W + o_d * W + W - i_w - 1, gl.sum(b_dw[i_w], 0), o_d < D)
+    if db_partial is not None:
+        gl.store(db_partial + i_tg * D + o_d, gl.sum(b_db, 0), o_d < D)
 
 
 def causal_conv1d_bwd(
@@ -194,20 +196,21 @@ def causal_conv1d_bwd(
 ):
     B, T, D = x.shape
     W = weight.shape[1]
+    BD, num_warps = 32, 4
     if cu_seqlens is not None and chunk_indices is None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT, cu_seqlens_cpu=cu_seqlens_cpu)
     NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
     dx = torch.empty_like(x, memory_format=torch.contiguous_format)
-    dw = weight.new_empty(B * NT, D, W, dtype=torch.float32)
-    db = bias.new_empty(B * NT, D, dtype=torch.float32) if bias is not None else None
-    causal_conv1d_bwd_kernel_gluon[(triton.cdiv(D, 32), NT, B)](
+    dw_partial = weight.new_empty(B * NT, D, W, dtype=torch.float32)
+    db_partial = bias.new_empty(B * NT, D, dtype=torch.float32) if bias is not None else None
+    causal_conv1d_bwd_kernel_gluon[(triton.cdiv(D, BD), NT, B)](
         x=x,
         weight=weight,
         bias=bias,
         dy=dy,
         dx=dx,
-        dw=dw,
-        db=db,
+        dw_partial=dw_partial,
+        db_partial=db_partial,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         T=T,
@@ -219,11 +222,13 @@ def causal_conv1d_bwd(
         D=D,
         W=W,
         BT=BT,
-        BD=32,
-        R=16,
-        V=1,
-        NW=4,
+        BD=BD,
+        BT_UNROLL=16,
+        NUM_WARPS=num_warps,
         ACTIVATION=activation,
-        num_warps=4,
+        num_warps=num_warps,
     )
-    return dx, dw.sum(0).to(weight), db.sum(0).to(bias) if db is not None else None, dy if residual is not None else None, None
+    dw = dw_partial.sum(0).to(weight)
+    db = db_partial.sum(0).to(bias) if db_partial is not None else None
+    dr = dy if residual is not None else None
+    return dx, dw, db, dr, None
