@@ -54,8 +54,8 @@ def chunk_fwd_kernel_h_npu(
     STATE_V_FIRST: tl.constexpr,
     K_OFFSET, V_OFFSET, NH_OFFSET,
 ):
-    i_k = tl.program_id(0) + K_OFFSET
-    i_v = tl.program_id(1) + V_OFFSET
+    i_k = tl.program_id(0).to(tl.int64) + K_OFFSET
+    i_v = tl.program_id(1).to(tl.int64) + V_OFFSET
     i_nh = tl.program_id(2).to(tl.int64) + NH_OFFSET
     i_n, i_h = i_nh // H, i_nh % H
     bos = tl.cast(i_n, tl.int64) * T
@@ -157,8 +157,8 @@ def chunk_bwd_kernel_dh_npu(
     STATE_V_FIRST: tl.constexpr,
     K_OFFSET, V_OFFSET, NH_OFFSET,
 ):
-    i_k = tl.program_id(0) + K_OFFSET
-    i_v = tl.program_id(1) + V_OFFSET
+    i_k = tl.program_id(0).to(tl.int64) + K_OFFSET
+    i_v = tl.program_id(1).to(tl.int64) + V_OFFSET
     i_nh = tl.program_id(2).to(tl.int64) + NH_OFFSET
     i_n, i_hq = i_nh // HQ, i_nh % HQ
     i_h = i_hq // NG

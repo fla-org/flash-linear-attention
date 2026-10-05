@@ -67,7 +67,7 @@ def chunk_gdn2_bwd_kernel_wy_v_part_npu(
     IS_VARLEN: tl.constexpr,
     T_CONTIG: tl.constexpr,
 ):
-    core_id = tl.program_id(0)
+    core_id = tl.program_id(0).to(tl.int64)
     T_seq = T
 
     for task_id in tl.range(core_id, task_num, num_core):
@@ -169,7 +169,7 @@ def chunk_gdn2_bwd_kernel_wy_gate_part_npu(
     K_OFFSET: tl.constexpr,
 ):
     i_k = K_OFFSET
-    core_id = tl.program_id(0)
+    core_id = tl.program_id(0).to(tl.int64)
     T_seq = T
 
     for task_id in tl.range(core_id, task_num, num_core):
@@ -286,7 +286,7 @@ def chunk_gdn2_bwd_kernel_wy_dA_finalize_npu(
     A_T_CONTIG: tl.constexpr,
     TAIL_MODE: tl.constexpr,
 ):
-    core_id = tl.program_id(0)
+    core_id = tl.program_id(0).to(tl.int64)
     T_seq = T
 
     for task_id in tl.range(core_id, task_num, num_core):

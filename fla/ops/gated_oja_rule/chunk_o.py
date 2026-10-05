@@ -10,7 +10,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
-from fla.ops.utils.op import exp
+from fla.ops.utils.op import exp, unflatten_program_id
 from fla.utils import check_shared_mem, is_nvidia_hopper
 
 BKV_LIST = [64, 128] if check_shared_mem() else [32, 64]
@@ -52,7 +52,8 @@ def chunk_oja_fwd_inter(
     NG: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_v, i_t = unflatten_program_id(X=tl.cdiv(V, BV))
+    i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
     i_h = i_hq // NG
     if IS_VARLEN:
@@ -134,7 +135,7 @@ def chunk_oja_fwd_intra(
     IS_VARLEN: tl.constexpr,
 ):
     NV = tl.cdiv(V, BV)
-    i_v, i_c, i_bh = tl.program_id(0) % NV, (tl.program_id(0) // NV).to(tl.int64), tl.program_id(1).to(tl.int64)
+    i_v, i_c, i_bh = tl.program_id(0).to(tl.int64) % NV, tl.program_id(0).to(tl.int64) // NV, tl.program_id(1).to(tl.int64)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
     i_h = i_hq // NG
     i_t, i_i = i_c // NC, i_c % NC
@@ -223,7 +224,7 @@ def chunk_oja_fwd_o(
 
     o = v.new_empty(B, T, HQ, V)
     A = q.new_empty(B, T, HQ, BT)
-    def grid(meta): return (triton.cdiv(V, meta['BV']), NT, B * HQ)
+    def grid(meta): return (triton.cdiv(V, meta['BV']) * NT, B * HQ)
     chunk_oja_fwd_inter[grid](
         q,
         k,
@@ -296,7 +297,7 @@ def chunk_oja_bwd_kernel_dA(
     IS_VARLEN: tl.constexpr,
 ):
     NV = tl.cdiv(V, BV)
-    i_v, i_c, i_bh = tl.program_id(0) % NV, (tl.program_id(0) // NV).to(tl.int64), tl.program_id(1).to(tl.int64)
+    i_v, i_c, i_bh = tl.program_id(0).to(tl.int64) % NV, tl.program_id(0).to(tl.int64) // NV, tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     i_t, i_i, i_j = i_c // (NC * NC), (i_c % (NC * NC)) // NC, (i_c % (NC * NC)) % NC
     if IS_VARLEN:
@@ -451,7 +452,8 @@ def chunk_oja_bwd_kernel_dqk(
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_k, i_t = unflatten_program_id(X=tl.cdiv(K, BK))
+    i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_tg = i_t
@@ -542,7 +544,7 @@ def chunk_oja_bwd_dqk(
     dk = torch.empty_like(k)
     A = dA.new_empty(NK, B, T, H, BT)
     # 计算dA
-    grid = (NK, NT, B * H)
+    grid = (NK * NT, B * H)
     chunk_oja_bwd_kernel_dqk[grid](
         q,
         k,
@@ -596,7 +598,7 @@ def chunk_oja_bwd_kernel_dv_o(
     IS_VARLEN: tl.constexpr,
 ):
     NV = tl.cdiv(V, BV)
-    i_v, i_c, i_bh = tl.program_id(0) % NV, (tl.program_id(0) // NV).to(tl.int64), tl.program_id(1).to(tl.int64)
+    i_v, i_c, i_bh = tl.program_id(0).to(tl.int64) % NV, tl.program_id(0).to(tl.int64) // NV, tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     i_t, i_i = i_c // NC, i_c % NC
     if IS_VARLEN:

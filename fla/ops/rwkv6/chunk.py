@@ -57,7 +57,8 @@ def chunk_rwkv6_fwd_cumsum_kernel(
     HAS_SCALE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_s, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_s, i_t = unflatten_program_id(X=tl.cdiv(S, BS))
+    i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
@@ -102,7 +103,7 @@ def chunk_rwkv6_fwd_cumsum(
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     gi, ge = torch.empty_like(g, dtype=torch.float), torch.empty_like(g, dtype=torch.float)
-    def grid(meta): return (triton.cdiv(meta['S'], meta['BS']), NT, B * H)
+    def grid(meta): return (triton.cdiv(meta['S'], meta['BS']) * NT, B * H)
     # keep cummulative normalizer in fp32
     chunk_rwkv6_fwd_cumsum_kernel[grid](
         g,
@@ -151,7 +152,7 @@ def chunk_rwkv6_fwd_A_kernel_intra_sub_inter(
     NC: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_c, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    i_t, i_c, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     i_i, i_j = i_c // NC, i_c % NC
     if IS_VARLEN:
@@ -232,7 +233,7 @@ def chunk_rwkv6_fwd_A_kernel_intra_sub_intra(
     BK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_i, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    i_t, i_i, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     i_j = i_i
     if IS_VARLEN:
@@ -310,7 +311,8 @@ def chunk_rwkv6_fwd_A_kernel_intra_sub_intra_split(
     NC: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_tc, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_k, i_tc = unflatten_program_id(X=tl.cdiv(K, BK))
+    i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     i_t, i_i = i_tc // NC, i_tc % NC
     i_j = i_i
@@ -385,7 +387,7 @@ def chunk_rwkv6_fwd_A_kernel_intra_sub_intra_merge(
     NK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_c, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    i_t, i_c, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
@@ -534,7 +536,8 @@ def chunk_rwkv6_bwd_kernel_intra(
     NC: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_c, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_k, i_c = unflatten_program_id(X=tl.cdiv(K, BK))
+    i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     i_t, i_i = i_c // NC, i_c % NC
     if IS_VARLEN:
@@ -690,7 +693,8 @@ def chunk_rwkv6_bwd_kernel_inter(
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_k, i_t = unflatten_program_id(X=tl.cdiv(K, BK))
+    i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
 
     if IS_VARLEN:
@@ -843,7 +847,7 @@ def chunk_rwkv6_fwd_intra(
         NK = triton.cdiv(K, BK)
         A_intra = q.new_empty(NK, B, T, H, BC, dtype=torch.float)
 
-        grid = (NK, NT * NC, B * H)
+        grid = (NK * NT * NC, B * H)
         chunk_rwkv6_fwd_A_kernel_intra_sub_intra_split[grid](
             q,
             k,
@@ -956,7 +960,7 @@ def chunk_rwkv6_bwd_dqk_intra(
 
     dq = torch.empty_like(q, dtype=torch.float)
     dk = torch.empty_like(k, dtype=torch.float)
-    grid = (NK, NT * NC, B * H)
+    grid = (NK * NT * NC, B * H)
     chunk_rwkv6_bwd_kernel_intra[grid](
         q,
         k,
@@ -1008,7 +1012,7 @@ def chunk_rwkv6_bwd_dqkgu(
     dk2 = torch.empty_like(dk)
     dg = torch.empty_like(g)
     du = u.new_empty(B * NT, H, K, dtype=torch.float)
-    def grid(meta): return (triton.cdiv(K, meta['BK']), NT, B * H)
+    def grid(meta): return (triton.cdiv(K, meta['BK']) * NT, B * H)
     chunk_rwkv6_bwd_kernel_inter[grid](
         q,
         k,

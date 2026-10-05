@@ -20,7 +20,7 @@ from fla.ops.backends import dispatch
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.cumsum import chunk_global_cumsum
-from fla.ops.utils.op import exp2, log2
+from fla.ops.utils.op import exp2, log2, unflatten_program_id
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, check_shared_mem, contiguous
 
 _DEBUG_ASSERTS = os.environ.get("WALL_ATTN_DEBUG", "0") == "1"
@@ -123,7 +123,8 @@ def parallel_wall_attn_fwd_kernel(
     IS_VARLEN: tl.constexpr,
     USE_SCALAR_G: tl.constexpr,
 ):
-    i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_v, i_t = unflatten_program_id(X=tl.cdiv(V, BV))
+    i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
     i_h = i_hq // G
 
@@ -300,7 +301,8 @@ def parallel_wall_attn_bwd_kernel_dq(
     IS_VARLEN: tl.constexpr,
     USE_SCALAR_G: tl.constexpr,
 ):
-    i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_v, i_t = unflatten_program_id(X=tl.cdiv(V, BV))
+    i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
     i_h = i_hq // G
 
@@ -491,7 +493,8 @@ def parallel_wall_attn_bwd_kernel_dkv(
     USE_SCALAR_G: tl.constexpr,
     DIAG_BF16: tl.constexpr,
 ):
-    i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_v, i_t = unflatten_program_id(X=tl.cdiv(V, BV))
+    i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
     i_h = i_hq // G
 
@@ -697,7 +700,7 @@ def parallel_wall_attn_fwd(
         NT = len(chunk_indices)
         o = torch.empty(B, T, HQ, V, dtype=v.dtype, device=q.device)
         lse = torch.empty(B, T, HQ, dtype=torch.float, device=q.device)
-        parallel_wall_attn_fwd_kernel.fn[(NV, NT, B * HQ)](
+        parallel_wall_attn_fwd_kernel.fn[(NV * NT, B * HQ)](
             q=q, k=k, v=v, o=o,
             g_cumsum=g_cumsum, g_scalar_cumsum=g_scalar_cumsum, sink_bias=sink_bias,
             lse=lse, scale=scale, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices,
@@ -712,7 +715,7 @@ def parallel_wall_attn_fwd(
     T_BUCKET = triton.next_power_of_2(T)
 
     def grid(meta):
-        return (NV, triton.cdiv(T, meta['BT']), B * HQ)
+        return (NV * triton.cdiv(T, meta['BT']), B * HQ)
     parallel_wall_attn_fwd_kernel[grid](
         q=q,
         k=k,
@@ -808,11 +811,11 @@ def parallel_wall_attn_bwd(
         if chunk_indices is None:
             chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
         NT = len(chunk_indices)
-        grid = (NV, NT, B * HQ)
+        grid = (NV * NT, B * HQ)
         extra = dict(BT=BT, BS=BS, num_warps=num_warps, num_stages=2)
     else:
         def grid(meta):
-            return (NV, triton.cdiv(T, meta['BT']), B * HQ)
+            return (NV * triton.cdiv(T, meta['BT']), B * HQ)
 
     delta = parallel_wall_attn_bwd_preprocess(o, do, BV)
 

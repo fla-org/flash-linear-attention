@@ -243,7 +243,7 @@ def chunk_fwd_kernel_o_npu(
     STATE_V_FIRST: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    core_id = tl.program_id(0)
+    core_id = tl.program_id(0).to(tl.int64)
     h_t_step = HV * total_chunks
     for task_id in tl.range(core_id, task_num, num_core):
         # Flatten (i_v, i_h, global_t) into task_id
@@ -483,7 +483,7 @@ def chunk_bwd_kernel_dv_local_full_npu(
     large NT·B·HV does not host-split at ASCEND_MAX_GRID_DIM. Rebind local
     pointers every task — do not in-place += kernel args.
     """
-    core_id = tl.program_id(0)
+    core_id = tl.program_id(0).to(tl.int64)
     bh = B * HV
     for task_id in tl.range(core_id, task_num, num_core):
         i_t = task_id // bh
@@ -567,8 +567,8 @@ def chunk_bwd_kernel_dv_local_npu(
     NT_OFFSET: tl.constexpr,
     BH_OFFSET: tl.constexpr,
 ):
-    i_t = tl.program_id(0) + NT_OFFSET
-    i_bh = tl.program_id(1) + BH_OFFSET
+    i_t = tl.program_id(0).to(tl.int64) + NT_OFFSET
+    i_bh = tl.program_id(1).to(tl.int64) + BH_OFFSET
     i_b, i_h = i_bh // HV, i_bh % HV
     T_seq = T
 
@@ -737,9 +737,9 @@ def chunk_bwd_kernel_dqkwg_npu(
     BH_OFFSET: tl.constexpr,
 ):
     """BC-tiled dq/dk/dw with fused ds: each (r,c) block computes do@v.T once for both grads."""
-    i_k = tl.program_id(0) + K_OFFSET
-    i_t = tl.program_id(1) + NT_OFFSET
-    i_bh = tl.program_id(2) + BH_OFFSET
+    i_k = tl.program_id(0).to(tl.int64) + K_OFFSET
+    i_t = tl.program_id(1).to(tl.int64) + NT_OFFSET
+    i_bh = tl.program_id(2).to(tl.int64) + BH_OFFSET
     i_b, i_h = i_bh // HV, i_bh % HV
     T_seq = T
 
@@ -955,7 +955,7 @@ def chunk_bwd_kernel_dqkwg_full_npu(
     Rebind local pointers every task — do not in-place += kernel args.
     Frobenius <h, dh> for last-token dg is `chunk_bwd_kernel_dg_hdh_npu`.
     """
-    core_id = tl.program_id(0)
+    core_id = tl.program_id(0).to(tl.int64)
     bh = B * HV
     for task_id in tl.range(core_id, task_num, num_core):
         i_t = task_id // bh
@@ -1107,7 +1107,7 @@ def chunk_bwd_kernel_dg_hdh_npu(
     MIX Cube cannot vectorize the 64x64 fp32 mul-sum (~22 ms). This kernel has
     no Cube tiles so the same reduction can run on all vector cores.
     """
-    core_id = tl.program_id(0)
+    core_id = tl.program_id(0).to(tl.int64)
     bh = B * HV
     for task_id in tl.range(core_id, task_num, num_core):
         i_t = task_id // bh
@@ -1185,9 +1185,9 @@ def chunk_bwd_kernel_dg_npu(
     BH_OFFSET: tl.constexpr,
 ):
     """dg kernel: b_dg_last + sum(dq*q) - sum(dk*k) from fp32 scratch."""
-    i_k = tl.program_id(0) + K_OFFSET
-    i_t = tl.program_id(1) + NT_OFFSET
-    i_bh = tl.program_id(2) + BH_OFFSET
+    i_k = tl.program_id(0).to(tl.int64) + K_OFFSET
+    i_t = tl.program_id(1).to(tl.int64) + NT_OFFSET
+    i_bh = tl.program_id(2).to(tl.int64) + BH_OFFSET
     i_b, i_h = i_bh // HV, i_bh % HV
     T_seq = T
 

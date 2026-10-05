@@ -15,7 +15,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
-from fla.ops.utils.op import exp
+from fla.ops.utils.op import exp, unflatten_program_id
 from fla.utils import autotune_cache_kwargs
 
 
@@ -61,7 +61,8 @@ def chunk_fwd_kernel_h_parallel(
     STORE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_kv, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_kv, i_t = unflatten_program_id(X=tl.cdiv(K, BK) * tl.cdiv(V, BV))
+    i_bh = tl.program_id(1).to(tl.int64)
 
     NV = tl.cdiv(V, BV)
     # i_b: batch index
@@ -178,7 +179,7 @@ def chunk_fwd_kernel_h_reduction(
     STORE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    i_k, i_v, i_nh = unflatten_program_id(X=tl.cdiv(K, BK), Y=tl.cdiv(V, BV))
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
@@ -273,7 +274,8 @@ def chunk_bwd_kernel_dh_parallel(
     USE_FINAL_STATE_GRADIENT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_kv, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_kv, i_t = unflatten_program_id(X=tl.cdiv(K, BK) * tl.cdiv(V, BV))
+    i_bh = tl.program_id(1).to(tl.int64)
 
     NV = tl.cdiv(V, BV)
     i_k, i_v = i_kv // NV, i_kv % NV
@@ -378,7 +380,7 @@ def chunk_bwd_kernel_dh_reduction(
     STORE_INITIAL_STATE_GRADIENT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    i_k, i_v, i_nh = unflatten_program_id(X=tl.cdiv(K, BK), Y=tl.cdiv(V, BV))
     i_n, i_hq = i_nh // HQ, i_nh % HQ
     i_h = i_hq // NG
     if IS_VARLEN:
@@ -450,7 +452,7 @@ def chunk_fwd_h(
 
     h = k.new_empty(B, NT, H, K, V, dtype=torch.float)
     ht = k.new_empty(N, H, K, V, dtype=torch.float) if output_final_state else None
-    def grid(meta): return (triton.cdiv(K, meta['BK']) * triton.cdiv(V, meta['BV']), NT, B * H)
+    def grid(meta): return (triton.cdiv(K, meta['BK']) * triton.cdiv(V, meta['BV']) * NT, B * H)
     chunk_fwd_kernel_h_parallel[grid](
         k=k,
         v=v,
@@ -472,7 +474,7 @@ def chunk_fwd_h(
         USE_GV=gv is not None,
     )
     kvt, ht = ht, (torch.empty_like(ht) if output_final_state else None)
-    def grid(meta): return (triton.cdiv(K, meta['BK']), triton.cdiv(V, meta['BV']), N * H)
+    def grid(meta): return (triton.cdiv(K, meta['BK']) * triton.cdiv(V, meta['BV']) * N * H,)
     chunk_fwd_kernel_h_reduction[grid](
         h=h,
         g=g,
@@ -528,7 +530,7 @@ def chunk_bwd_dh(
     dh = k.new_empty(B, NT, HQ, K, V, dtype=k.dtype if not states_in_fp32 else torch.float)
     dh0 = torch.empty_like(h0, dtype=torch.float) if h0 is not None else None
 
-    def grid(meta): return (triton.cdiv(K, meta['BK']) * triton.cdiv(V, meta['BV']), NT, B * HQ)
+    def grid(meta): return (triton.cdiv(K, meta['BK']) * triton.cdiv(V, meta['BV']) * NT, B * HQ)
     chunk_bwd_kernel_dh_parallel[grid](
         q=q,
         g=g,
@@ -554,7 +556,7 @@ def chunk_bwd_dh(
     )
 
     doq0, dh0 = dh0, (torch.empty_like(dh0) if dh0 is not None else None)
-    def grid(meta): return (triton.cdiv(K, meta['BK']), triton.cdiv(V, meta['BV']), N * HQ)
+    def grid(meta): return (triton.cdiv(K, meta['BK']) * triton.cdiv(V, meta['BV']) * N * HQ,)
     chunk_bwd_kernel_dh_reduction[grid](
         g=g,
         gk=gk,

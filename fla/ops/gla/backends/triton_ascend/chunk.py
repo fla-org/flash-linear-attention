@@ -47,7 +47,7 @@ def chunk_gla_fwd_A_kernel_intra_sub_inter_npu(
     IS_VARLEN: tl.constexpr, NT_OFFSET, NC_OFFSET, BH_OFFSET,
 ):
     i_t = tl.program_id(0).to(tl.int64) + NT_OFFSET
-    i_c = tl.program_id(1) + NC_OFFSET
+    i_c = tl.program_id(1).to(tl.int64) + NC_OFFSET
     i_bh = tl.program_id(2).to(tl.int64) + BH_OFFSET
     i_b, i_h = i_bh // H, i_bh % H
     i_i, i_j = i_c // NC, i_c % NC
@@ -104,7 +104,7 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra_npu(
     IS_VARLEN: tl.constexpr, NT_OFFSET, NC_OFFSET, BH_OFFSET,
 ):
     i_t = tl.program_id(0).to(tl.int64) + NT_OFFSET
-    i_i = tl.program_id(1) + NC_OFFSET
+    i_i = tl.program_id(1).to(tl.int64) + NC_OFFSET
     i_bh = tl.program_id(2).to(tl.int64) + BH_OFFSET
     i_b, i_h = i_bh // H, i_bh % H
     i_j = i_i
@@ -168,8 +168,8 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra_split_npu(
     BT: tl.constexpr, BC: tl.constexpr, BK: tl.constexpr, NC: tl.constexpr,
     IS_VARLEN: tl.constexpr, NK_OFFSET, NTNC_OFFSET, BH_OFFSET,
 ):
-    i_k = tl.program_id(0) + NK_OFFSET
-    i_tc = tl.program_id(1) + NTNC_OFFSET
+    i_k = tl.program_id(0).to(tl.int64) + NK_OFFSET
+    i_tc = tl.program_id(1).to(tl.int64) + NTNC_OFFSET
     i_bh = tl.program_id(2).to(tl.int64) + BH_OFFSET
     i_b, i_h = i_bh // H, i_bh % H
     i_t, i_i = (i_tc // NC).to(tl.int64), i_tc % NC
@@ -234,7 +234,7 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra_merge_npu(
     IS_VARLEN: tl.constexpr, NT_OFFSET, NC_OFFSET, BH_OFFSET,
 ):
     i_t = tl.program_id(0).to(tl.int64) + NT_OFFSET
-    i_c = tl.program_id(1) + NC_OFFSET
+    i_c = tl.program_id(1).to(tl.int64) + NC_OFFSET
     i_bh = tl.program_id(2).to(tl.int64) + BH_OFFSET
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
@@ -355,7 +355,7 @@ def chunk_gla_fwd_kernel_o_npu(
     STATE_V_FIRST: tl.constexpr, IS_VARLEN: tl.constexpr,
     USE_GRAPH: tl.constexpr = False,
 ):
-    core_id = tl.program_id(0)
+    core_id = tl.program_id(0).to(tl.int64)
     total_chunks_i64 = total_chunks.to(tl.int64)
     h_t_step = total_chunks_i64 * HV
     for task_id in tl.range(core_id, task_num, num_core):
@@ -582,7 +582,7 @@ def chunk_gla_bwd_kernel_dv_npu(
     IS_VARLEN: tl.constexpr, STATE_V_FIRST: tl.constexpr,
     A_OFFSET, NT_OFFSET, BH_OFFSET,
 ):
-    i_v = tl.program_id(0) + A_OFFSET
+    i_v = tl.program_id(0).to(tl.int64) + A_OFFSET
     i_t = tl.program_id(1).to(tl.int64) + NT_OFFSET
     i_bh = tl.program_id(2).to(tl.int64) + BH_OFFSET
     i_b, i_h = i_bh // H, i_bh % H
@@ -695,7 +695,7 @@ def chunk_gla_bwd_kernel_intra_npu(
     H: tl.constexpr, K: tl.constexpr, BT: tl.constexpr, BC: tl.constexpr, BK: tl.constexpr, NC: tl.constexpr,
     IS_VARLEN: tl.constexpr, A_OFFSET, NT_OFFSET, BH_OFFSET,
 ):
-    i_kc = tl.program_id(0) + A_OFFSET
+    i_kc = tl.program_id(0).to(tl.int64) + A_OFFSET
     i_t = tl.program_id(1).to(tl.int64) + NT_OFFSET
     i_bh = tl.program_id(2).to(tl.int64) + BH_OFFSET
     i_b, i_h = i_bh // H, i_bh % H
@@ -862,7 +862,7 @@ def chunk_gla_bwd_kernel_inter_npu(
     IS_VARLEN: tl.constexpr, STATE_V_FIRST: tl.constexpr,
     A_OFFSET, NT_OFFSET, BH_OFFSET,
 ):
-    i_k = tl.program_id(0) + A_OFFSET
+    i_k = tl.program_id(0).to(tl.int64) + A_OFFSET
     i_t = tl.program_id(1).to(tl.int64) + NT_OFFSET
     i_bh = tl.program_id(2).to(tl.int64) + BH_OFFSET
     i_b, i_h = i_bh // H, i_bh % H

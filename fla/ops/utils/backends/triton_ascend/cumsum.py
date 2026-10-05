@@ -158,7 +158,7 @@ def chunk_local_cumsum_scalar_kernel_npu(
     IS_VARLEN: tl.constexpr,
     USE_GRAPH: tl.constexpr = False,
 ):
-    core_id = tl.program_id(0)
+    core_id = tl.program_id(0).to(tl.int64)
     T = T.to(tl.int64)
     for tid in tl.range(core_id, task_num, num_core):
         task_id = tid.to(tl.int64)
@@ -224,7 +224,7 @@ def chunk_local_cumsum_vector_kernel_npu(
     BH_OFFSET: tl.constexpr,
     USE_GRAPH: tl.constexpr = False,
 ):
-    i_s, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_s, i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_t += NT_OFFSET
     i_bh += BH_OFFSET
     i_b, i_h = i_bh // H, i_bh % H
@@ -269,7 +269,7 @@ def chunk_global_cumsum_scalar_kernel_npu(
     IS_VARLEN: tl.constexpr,
     BH_OFFSET: tl.constexpr,
 ):
-    i_nh = tl.program_id(0) + BH_OFFSET
+    i_nh = tl.program_id(0).to(tl.int64) + BH_OFFSET
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
@@ -319,7 +319,7 @@ def chunk_global_cumsum_vector_kernel_npu(
     IS_VARLEN: tl.constexpr,
     BH_OFFSET: tl.constexpr,
 ):
-    i_s, i_nh = tl.program_id(0), tl.program_id(1) + BH_OFFSET
+    i_s, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64) + BH_OFFSET
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)

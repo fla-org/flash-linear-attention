@@ -11,7 +11,7 @@ import triton.language as tl
 
 from fla.ops.utils import softmax_bwd, softmax_fwd
 from fla.ops.utils.logcumsumexp import logcumsumexp_fwd_kernel
-from fla.ops.utils.op import exp
+from fla.ops.utils.op import exp, unflatten_program_id
 from fla.utils import input_guard
 
 
@@ -34,7 +34,7 @@ def chunk_abc_fwd_kernel_h(
     USE_INITIAL_STATE: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
 ):
-    i_v, i_k, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    i_v, i_k, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
 
     o_k = i_k * BK + tl.arange(0, BK)
     o_v = i_v * BV + tl.arange(0, BV)
@@ -101,7 +101,7 @@ def chunk_abc_fwd_kernel_intra_K(
     NC: tl.constexpr,
 ):
     NV = tl.cdiv(V, BV)
-    i_v, i_c, i_bh = tl.program_id(0) % NV, (tl.program_id(0) // NV).to(tl.int64), tl.program_id(1).to(tl.int64)
+    i_v, i_c, i_bh = tl.program_id(0).to(tl.int64) % NV, tl.program_id(0).to(tl.int64) // NV, tl.program_id(1).to(tl.int64)
     i_t, i_i = i_c // NC, i_c % NC
 
     o_r = i_t * BT + i_i * BC + tl.arange(0, BC)
@@ -164,7 +164,8 @@ def chunk_abc_fwd_kernel_K(
     BV: tl.constexpr,
     NT: tl.constexpr,
 ):
-    i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_v, i_t = unflatten_program_id(X=tl.cdiv(V, BV))
+    i_bh = tl.program_id(1).to(tl.int64)
     i_p = tl.maximum(i_t * BT - 1, 0)
 
     o_i = tl.arange(0, BT)
@@ -231,9 +232,9 @@ def chunk_abc_fwd_kernel_intra_V(
     NC: tl.constexpr,
 ):
     NK = tl.cdiv(K, BK)
-    i_k, i_c, i_bh = tl.program_id(0) % NK, (tl.program_id(0) // NK).to(tl.int64), tl.program_id(1).to(tl.int64)
+    i_k, i_c, i_bh = tl.program_id(0).to(tl.int64) % NK, tl.program_id(0).to(tl.int64) // NK, tl.program_id(1).to(tl.int64)
     i_t, i_i, i_j = i_c // (NC * NC), (i_c % (NC * NC)) // NC, (i_c % (NC * NC)) % NC
-    n_bh = tl.num_programs(1)
+    n_bh = tl.num_programs(1).to(tl.int64)
 
     o_q = i_t * BT + i_i * BC + tl.arange(0, BC)
     o_k = i_k * BK + tl.arange(0, BK)
@@ -297,7 +298,8 @@ def chunk_abc_fwd_kernel_V(
     BV: tl.constexpr,
     NT: tl.constexpr,
 ):
-    i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_v, i_t = unflatten_program_id(X=tl.cdiv(V, BV))
+    i_bh = tl.program_id(1).to(tl.int64)
     i_p = tl.maximum(i_t * BT - 1, 0)
 
     o_t = i_t * BT + tl.arange(0, BT)
@@ -358,7 +360,7 @@ def chunk_abc_bwd_kernel_dh(
     NT: tl.constexpr,
     NORMK: tl.constexpr,
 ):
-    i_k, i_v, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    i_k, i_v, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
 
     o_k = i_k * BK + tl.arange(0, BK)
     o_v = i_v * BV + tl.arange(0, BV)
@@ -432,9 +434,10 @@ def chunk_abc_bwd_kernel_V(
     BV: tl.constexpr,
     NT: tl.constexpr,
 ):
-    i_k, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_k, i_t = unflatten_program_id(X=tl.cdiv(K, BK))
+    i_bh = tl.program_id(1).to(tl.int64)
     i_p = tl.maximum(i_t * BT - 1, 0)
-    n_bh = tl.num_programs(2)
+    n_bh = tl.num_programs(1).to(tl.int64)
 
     o_t = i_t * BT + tl.arange(0, BT)
     o_k = i_k * BK + tl.arange(0, BK)
@@ -532,7 +535,7 @@ def chunk_abc_bwd_kernel_intra_V(
     NC: tl.constexpr,
 ):
     NK = tl.cdiv(K, BK)
-    i_k, i_c, i_bh = tl.program_id(0) % NK, (tl.program_id(0) // NK).to(tl.int64), tl.program_id(1).to(tl.int64)
+    i_k, i_c, i_bh = tl.program_id(0).to(tl.int64) % NK, tl.program_id(0).to(tl.int64) // NK, tl.program_id(1).to(tl.int64)
     i_t, i_i = i_c // NC, i_c % NC
 
     o_r = i_t * BT + i_i * BC + tl.arange(0, BC)
@@ -640,9 +643,9 @@ def chunk_abc_bwd_kernel_intra_K(
     NC: tl.constexpr,
 ):
     NV = tl.cdiv(V, BV)
-    i_v, i_c, i_bh = tl.program_id(0) % NV, (tl.program_id(0) // NV).to(tl.int64), tl.program_id(1).to(tl.int64)
+    i_v, i_c, i_bh = tl.program_id(0).to(tl.int64) % NV, tl.program_id(0).to(tl.int64) // NV, tl.program_id(1).to(tl.int64)
     i_t, i_i, i_j = i_c // (NC * NC), (i_c % (NC * NC)) // NC, (i_c % (NC * NC)) % NC
-    n_bh = tl.num_programs(1)
+    n_bh = tl.num_programs(1).to(tl.int64)
 
     o_r = i_t * BT + i_i * BC + tl.arange(0, BC)
     o_v = i_v * BV + tl.arange(0, BV)
@@ -712,9 +715,10 @@ def chunk_abc_bwd_kernel_K(
     BV: tl.constexpr,
     NT: tl.constexpr,
 ):
-    i_k, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_k, i_t = unflatten_program_id(X=tl.cdiv(K, BK))
+    i_bh = tl.program_id(1).to(tl.int64)
     i_p = tl.maximum(i_t * BT - 1, 0)
-    n_bh = tl.num_programs(2)
+    n_bh = tl.num_programs(1).to(tl.int64)
 
     o_i = tl.arange(0, BT)
     m_s = o_i[:, None] >= o_i[None, :]
@@ -806,7 +810,7 @@ def chunk_abc_bwd_kernel_intra_KV(
     NC: tl.constexpr,
 ):
     NV = tl.cdiv(V, BV)
-    i_v, i_c, i_bh = tl.program_id(0) % NV, (tl.program_id(0) // NV).to(tl.int64), tl.program_id(1).to(tl.int64)
+    i_v, i_c, i_bh = tl.program_id(0).to(tl.int64) % NV, tl.program_id(0).to(tl.int64) // NV, tl.program_id(1).to(tl.int64)
     i_t, i_i = i_c // NC, i_c % NC
 
     o_r = i_t * BT + i_i * BC + tl.arange(0, BC)
@@ -868,7 +872,7 @@ def chunk_abc_bwd_kernel_rcum_inter(
     BS: tl.constexpr,
     NT: tl.constexpr,
 ):
-    i_m, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64)
+    i_m, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
 
     o_s = i_m * BS + tl.arange(0, BS)
     b_sp = tl.zeros([BS], dtype=tl.float32)
@@ -910,7 +914,7 @@ def chunk_abc_bwd_kernel_rcum_intra(
     NC: tl.constexpr,
 ):
     NS = tl.cdiv(S, BS)
-    i_s, i_c, i_bh = tl.program_id(0) % NS, (tl.program_id(0) // NS).to(tl.int64), tl.program_id(1).to(tl.int64)
+    i_s, i_c, i_bh = tl.program_id(0).to(tl.int64) % NS, tl.program_id(0).to(tl.int64) // NS, tl.program_id(1).to(tl.int64)
     i_t, i_i = i_c // NC, i_c % NC
 
     o_i = tl.arange(0, BC)
@@ -1011,7 +1015,7 @@ class ChunkABCFunction(torch.autograd.Function):
         )
         ok1 = torch.empty_like(s)
         Ak = q.new_empty(B, H, T, BT)
-        grid = (NM, NT, B * H)
+        grid = (NM * NT, B * H)
         chunk_abc_fwd_kernel_K[grid](
             q, k, z, hk, ok1, Ak,
             scale=scale,
@@ -1053,7 +1057,7 @@ class ChunkABCFunction(torch.autograd.Function):
         )
         Av = Av.sum(0)
         ov = torch.empty_like(v)
-        grid = (NV, NT, B * H)
+        grid = (NV * NT, B * H)
         chunk_abc_fwd_kernel_V[grid](
             qv, v, z, hv, ov, Av,
             scale=scale,
@@ -1129,7 +1133,7 @@ class ChunkABCFunction(torch.autograd.Function):
         dsv1 = torch.empty_like(s, dtype=torch.float)
         dv = v.new_empty(NM, *v.shape)
         dAv = q.new_zeros(B, H, T, BT)
-        grid = (NM, NT, B * H)
+        grid = (NM * NT, B * H)
         chunk_abc_bwd_kernel_V[grid](
             s, v, z, hv, Av, dov, dhv, dp1, dsv1, dv, dAv,
             scale=scale,
@@ -1176,7 +1180,7 @@ class ChunkABCFunction(torch.autograd.Function):
         dq = torch.empty_like(q)
         dk = torch.empty_like(k)
         dsk1 = s.new_empty(NK, *s.shape, dtype=torch.float)
-        grid = (NK, NT, B * H)
+        grid = (NK * NT, B * H)
         chunk_abc_bwd_kernel_K[grid](
             q, k, s, z, hk, Ak, dok, dhk, dq, dk, dsk1, dAk,
             scale=scale,

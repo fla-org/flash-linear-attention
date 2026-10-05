@@ -10,7 +10,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
-from fla.ops.utils.op import exp2
+from fla.ops.utils.op import exp2, unflatten_program_id
 from fla.utils import IS_NVIDIA_HOPPER, autotune_cache_kwargs, check_shared_mem
 
 BKV_LIST = [64, 128] if check_shared_mem() else [32, 64]
@@ -54,7 +54,8 @@ def chunk_fwd_kernel_o(
     USE_G: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_v, i_t = unflatten_program_id(X=tl.cdiv(V, BV))
+    i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
 
     if IS_VARLEN:
@@ -146,7 +147,7 @@ def chunk_gated_delta_product_fwd_o(
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     o = v.new_empty(B, T, H, V).fill_(-float('inf'))
-    def grid(meta): return (triton.cdiv(V, meta['BV']), NT, B * H)
+    def grid(meta): return (triton.cdiv(V, meta['BV']) * NT, B * H)
     chunk_fwd_kernel_o[grid](
         q,
         k,

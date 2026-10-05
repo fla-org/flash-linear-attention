@@ -66,7 +66,7 @@ def chunk_scaled_dot_kkt_fwd_kernel_npu(
 ):
     T = T.to(tl.int64)
     bt_stride = B.to(tl.int64) * T
-    core_id = tl.program_id(0)
+    core_id = tl.program_id(0).to(tl.int64)
     o_i = tl.arange(0, BT)
     m_causal = o_i[:, None] > o_i[None, :]
 

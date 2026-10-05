@@ -10,7 +10,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
-from fla.ops.utils.op import exp2, gather
+from fla.ops.utils.op import exp2, gather, unflatten_program_id
 from fla.utils import IS_AMD, IS_GATHER_SUPPORTED, autotune_cache_kwargs, check_shared_mem
 
 NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if IS_AMD else [2, 4, 8, 16, 32]
@@ -62,7 +62,8 @@ def chunk_dplr_bwd_kernel_intra(
     IS_VARLEN: tl.constexpr,
     GATHER_SUPPORTED: tl.constexpr,
 ):
-    i_k, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_k, i_t = unflatten_program_id(X=tl.cdiv(K, BK))
+    i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
@@ -270,7 +271,8 @@ def chunk_dplr_bwd_kernel_intra_tensorcore(
     IS_VARLEN: tl.constexpr,
     GATHER_SUPPORTED: tl.constexpr,
 ):
-    i_k, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_k, i_t = unflatten_program_id(X=tl.cdiv(K, BK))
+    i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
 
     if IS_VARLEN:
@@ -426,7 +428,7 @@ def chunk_dplr_bwd_dgk_kernel(
     BK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_k, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    i_t, i_k, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_tg = i_t
@@ -501,7 +503,7 @@ def chunk_dplr_bwd_dqk_intra(
     dgk = torch.empty_like(gi, dtype=torch.float)
     dgk_offset = torch.empty_like(gi, dtype=torch.float)
 
-    grid = (NK, NT, B * H)
+    grid = (NK * NT, B * H)
     if safe_gate:
         chunk_dplr_bwd_kernel_intra_func = chunk_dplr_bwd_kernel_intra_tensorcore
     else:

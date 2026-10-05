@@ -10,6 +10,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
+from fla.ops.utils.op import unflatten_program_id
 from fla.utils import IS_AMD, autotune_cache_kwargs, get_multiprocessor_count, input_guard
 
 NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if IS_AMD else [2, 4, 8, 16, 32]
@@ -80,7 +81,8 @@ def k_update_fwd_kernel_long(
     BD: tl.constexpr, BT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_d, i_t_blk, i_b = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    i_d, i_t_blk = unflatten_program_id(X=tl.cdiv(D, BD))
+    i_b = tl.program_id(1).to(tl.int64)
 
     if IS_VARLEN:
         i_n, i_t_blk = tl.load(chunk_indices + i_t_blk * 2).to(tl.int32), \
@@ -129,7 +131,7 @@ def k_update_bwd_kernel_short(
     BD: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_b, i_t_base = tl.program_id(0).to(tl.int64), tl.program_id(1) * BT
+    i_b, i_t_base = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64) * BT
 
     if IS_VARLEN:
         bos = tl.load(cu_seqlens + i_b).to(tl.int64)
@@ -180,7 +182,8 @@ def k_update_bwd_kernel_long(
     BD: tl.constexpr, BT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_d, i_t_blk, i_b = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    i_d, i_t_blk = unflatten_program_id(X=tl.cdiv(D, BD))
+    i_b = tl.program_id(1).to(tl.int64)
 
     if IS_VARLEN:
         i_n, i_t_blk = tl.load(chunk_indices + i_t_blk * 2).to(tl.int32), \
@@ -252,7 +255,7 @@ def k_update_fwd(
         BD = triton.next_power_of_2(D)
 
         def grid(meta):
-            return (triton.cdiv(D, meta['BD']), NT, N)
+            return (triton.cdiv(D, meta['BD']) * NT, N)
 
         k_update_fwd_kernel_long[grid](
             k, a, ka, out,
@@ -304,7 +307,7 @@ def k_update_bwd(
         BD = triton.next_power_of_2(D)
 
         def grid(meta):
-            return (triton.cdiv(D, meta['BD']), NT, N)
+            return (triton.cdiv(D, meta['BD']) * NT, N)
 
         k_update_bwd_kernel_long[grid](
             grad_out, k, a, ka,

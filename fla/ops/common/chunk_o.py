@@ -12,7 +12,7 @@ import triton.language as tl
 from fla.ops.common.backends import dispatch
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.cache import fla_cache_autotune
-from fla.ops.utils.op import exp2
+from fla.ops.utils.op import exp2, unflatten_program_id
 from fla.utils import (
     IS_INTEL,
     IS_NVIDIA_BLACKWELL,
@@ -85,7 +85,8 @@ def chunk_fwd_kernel_o(
     STATE_V_FIRST: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_v, i_t = unflatten_program_id(X=tl.cdiv(V, BV))
+    i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // HV, i_bh % HV
 
     if IS_VARLEN:
@@ -209,7 +210,8 @@ def chunk_bwd_kernel_dqkwg(
     STATE_V_FIRST: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_k, i_t = unflatten_program_id(X=tl.cdiv(K, BK))
+    i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // HV, i_bh % HV
 
     all = (B * T).to(tl.int64)
@@ -389,7 +391,8 @@ def chunk_bwd_kernel_dv(
     IS_VARLEN: tl.constexpr,
     STATE_V_FIRST: tl.constexpr,
 ):
-    i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_v, i_t = unflatten_program_id(X=tl.cdiv(V, BV))
+    i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // HV, i_bh % HV
     if IS_VARLEN:
         i_tg = i_t
@@ -571,7 +574,7 @@ def chunk_fwd_o(
         scale = k.shape[-1] ** -0.5
 
     o = torch.empty_like(v)
-    def grid(meta): return (triton.cdiv(V, meta['BV']), NT, B * HV)
+    def grid(meta): return (triton.cdiv(V, meta['BV']) * NT, B * HV)
     chunk_fwd_kernel_o[grid](
         q=q,
         k=k,
@@ -630,7 +633,7 @@ def chunk_bwd_dv(
         scale = k.shape[-1] ** -0.5
 
     dv = torch.empty_like(do)
-    grid = (NV, NT, B * HV)
+    grid = (NV * NT, B * HV)
     chunk_bwd_kernel_dv[grid](
         q=q,
         k=k,
@@ -753,7 +756,7 @@ def chunk_bwd_dqkwg(
     dg = torch.empty(NK, *g.shape, dtype=torch.float32, device=g.device) if g is not None else None
     dw = torch.empty_like(w) if w is not None else None
 
-    grid = (NK, NT, B * HV)
+    grid = (NK * NT, B * HV)
     chunk_bwd_kernel_dqkwg[grid](
         q=q,
         k=k,

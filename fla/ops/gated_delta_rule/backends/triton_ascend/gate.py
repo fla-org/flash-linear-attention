@@ -70,8 +70,8 @@ def gdn_gate_fwd_kernel_npu(
     NT_OFFSET: tl.constexpr,
     H_OFFSET: tl.constexpr,
 ):
-    i_t = tl.program_id(0) + NT_OFFSET
-    i_h = tl.program_id(1) + H_OFFSET
+    i_t = tl.program_id(0).to(tl.int64) + NT_OFFSET
+    i_h = tl.program_id(1).to(tl.int64) + H_OFFSET
 
     b_A = tl.load(A_log + i_h).to(tl.float32)
 
@@ -142,8 +142,8 @@ def gdn_gate_chunk_cumsum_scalar_kernel_npu(
     NT_OFFSET: tl.constexpr,
     BH_OFFSET: tl.constexpr,
 ):
-    i_t = tl.program_id(0) + NT_OFFSET
-    i_bh = tl.program_id(1) + BH_OFFSET
+    i_t = tl.program_id(0).to(tl.int64) + NT_OFFSET
+    i_bh = tl.program_id(1).to(tl.int64) + BH_OFFSET
     i_b, i_h = i_bh // H, i_bh % H
 
     if IS_VARLEN:
@@ -234,8 +234,8 @@ def gdn_gate_bwd_kernel_npu(
     NT_OFFSET: tl.constexpr,
     H_OFFSET: tl.constexpr,
 ):
-    i_t = tl.program_id(0) + NT_OFFSET
-    i_h = tl.program_id(1) + H_OFFSET
+    i_t = tl.program_id(0).to(tl.int64) + NT_OFFSET
+    i_h = tl.program_id(1).to(tl.int64) + H_OFFSET
 
     b_A = tl.load(A_log + i_h).to(tl.float32)
 

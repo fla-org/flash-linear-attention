@@ -97,8 +97,8 @@ def kda_gate_fwd_kernel_npu(
     NT_OFFSET: tl.constexpr,
     H_OFFSET: tl.constexpr,
 ):
-    i_t = tl.program_id(0) + NT_OFFSET
-    i_h = tl.program_id(1) + H_OFFSET
+    i_t = tl.program_id(0).to(tl.int64) + NT_OFFSET
+    i_h = tl.program_id(1).to(tl.int64) + H_OFFSET
 
     b_A = tl.load(A_log + i_h).to(tl.float32) if HAS_A else 1.0
 
@@ -180,8 +180,8 @@ def kda_gate_bwd_kernel_npu(
     NT_OFFSET: tl.constexpr,
     H_OFFSET: tl.constexpr,
 ):
-    i_t = tl.program_id(0) + NT_OFFSET
-    i_h = tl.program_id(1) + H_OFFSET
+    i_t = tl.program_id(0).to(tl.int64) + NT_OFFSET
+    i_h = tl.program_id(1).to(tl.int64) + H_OFFSET
 
     b_A = tl.load(A_log + i_h).to(tl.float32) if HAS_A else 1.0
 
@@ -291,7 +291,7 @@ def kda_gate_chunk_cumsum_vector_kernel_npu(
     BH_OFFSET: tl.constexpr,
     USE_GRAPH: tl.constexpr = False,
 ):
-    i_s, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_s, i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_t += NT_OFFSET
     i_bh += BH_OFFSET
     i_b, i_h = i_bh // H, i_bh % H

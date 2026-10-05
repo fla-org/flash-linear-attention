@@ -15,7 +15,7 @@ import triton.language as tl
 from fla.ops.backends import dispatch
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.index import prepare_chunk_indices
-from fla.ops.utils.op import exp
+from fla.ops.utils.op import exp, unflatten_program_id
 from fla.ops.utils.softplus import softplus
 from fla.utils import IS_AMD, autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, check_shared_mem, input_guard
 
@@ -128,7 +128,7 @@ def kda_gate_fwd_kernel(
     HAS_BETA: tl.constexpr,
     USE_LOWER_BOUND: tl.constexpr,
 ):
-    i_t, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1)
+    i_t, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
 
     b_A = tl.load(A_log + i_h).to(tl.float32) if HAS_A else 1.0
 
@@ -193,7 +193,7 @@ def kda_gate_bwd_kernel(
     HAS_BETA: tl.constexpr,
     USE_LOWER_BOUND: tl.constexpr,
 ):
-    i_t, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1)
+    i_t, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
 
     b_A = tl.load(A_log + i_h).to(tl.float32) if HAS_A else 1.0
 
@@ -426,7 +426,8 @@ def kda_gate_chunk_cumsum_vector_kernel(
     USE_LOWER_BOUND: tl.constexpr,
     USE_GRAPH: tl.constexpr = False,
 ):
-    i_s, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_s, i_t = unflatten_program_id(X=tl.cdiv(S, BS))
+    i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_n = tl.load(chunk_indices + i_t * 2).to(tl.int32)
@@ -495,7 +496,7 @@ def kda_gate_chunk_cumsum(
     assert chunk_size == 2**(chunk_size.bit_length()-1), "chunk_size must be a power of 2"
 
     g_org, g = g, torch.empty_like(g, dtype=output_dtype or g.dtype)
-    def grid(meta): return (triton.cdiv(meta['S'], meta['BS']), NT, B * H)
+    def grid(meta): return (triton.cdiv(meta['S'], meta['BS']) * NT, B * H)
     kda_gate_chunk_cumsum_vector_kernel[grid](
         s=g_org,
         A_log=A_log,

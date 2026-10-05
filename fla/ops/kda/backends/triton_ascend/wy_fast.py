@@ -142,7 +142,7 @@ def recompute_w_u_fwd_kda_kernel_npu(
 ):
     T_max = T
     BH = B * HV
-    core_id = tl.program_id(0)
+    core_id = tl.program_id(0).to(tl.int64)
 
     for task_id in tl.range(core_id, task_num, num_core):
         i_t_o = task_id // BH

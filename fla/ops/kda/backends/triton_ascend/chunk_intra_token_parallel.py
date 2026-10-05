@@ -68,8 +68,8 @@ def chunk_kda_fwd_kernel_intra_token_parallel_npu(
     TG_OFFSET: tl.constexpr,
     HG_OFFSET: tl.constexpr,
 ):
-    i_tg = tl.program_id(0) + TG_OFFSET
-    i_hg = tl.program_id(1) + HG_OFFSET
+    i_tg = tl.program_id(0).to(tl.int64) + TG_OFFSET
+    i_hg = tl.program_id(1).to(tl.int64) + HG_OFFSET
 
     if IS_VARLEN:
         # graph replay can leave unused token slots in the fixed grid;

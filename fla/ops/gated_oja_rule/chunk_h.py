@@ -10,7 +10,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
-from fla.ops.utils.op import exp
+from fla.ops.utils.op import exp, unflatten_program_id
 from fla.utils import check_shared_mem, is_nvidia_hopper
 
 BKV_LIST = [64, 128] if check_shared_mem() else [32, 64]
@@ -57,8 +57,7 @@ def chunk_oja_fwd_kernel_h_blockdim64(
     SAVE_NEW_KEY: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    # (triton.cdiv(K, meta['BK']), N*H)
-    i_k, i_nh = tl.program_id(0), tl.program_id(1).to(tl.int64)
+    i_k, i_nh = unflatten_program_id(X=tl.cdiv(K, BK))
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
@@ -228,7 +227,7 @@ def chunk_oja_fwd_h(
     final_state = v.new_empty(N, H, K, V, dtype=torch.float32) if output_final_state else None
 
     k_new = torch.empty_like(u) if save_new_key else None
-    def grid(meta): return (triton.cdiv(K, meta['BK']), N*H)
+    def grid(meta): return (triton.cdiv(K, meta['BK']) * N * H,)
     chunk_oja_fwd_kernel_h_blockdim64[grid](
         v=v,
         u=u,
@@ -290,7 +289,7 @@ def chunk_oja_bwd_kernel_dhu_blockdim64(
     USE_FINAL_STATE_GRADIENT: tl.constexpr,
     IS_VARLEN: tl.constexpr
 ):
-    i_k, i_nh = tl.program_id(0), tl.program_id(1).to(tl.int64)
+    i_k, i_nh = unflatten_program_id(X=tl.cdiv(K, BK))
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
@@ -499,7 +498,7 @@ def chunk_oja_bwd_dhu(
     dh0 = torch.empty_like(h0, dtype=torch.float32) if h0 is not None else None
     dk2 = torch.empty_like(dk)
 
-    def grid(meta): return (triton.cdiv(K, meta['BK']), N*H)
+    def grid(meta): return (triton.cdiv(K, meta['BK']) * N * H,)
     chunk_oja_bwd_kernel_dhu_blockdim64[grid](
         q=q,
         vg=vg,
@@ -565,7 +564,7 @@ def chunk_gsa_bwd_k_kernel_dqkvg(
     NG: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_k, i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
     i_h = i_hq // NG
     if IS_VARLEN:
@@ -704,7 +703,8 @@ def chunk_oja_bwd_kernel_dvwg_h(
     HAVE_GK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_v, i_t = unflatten_program_id(X=tl.cdiv(V, BV))
+    i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
 
     if IS_VARLEN:
@@ -812,7 +812,7 @@ def chunk_oja_bwd_dvwg_h(
     dw = torch.empty_like(v)
     dgv_last = torch.empty_like(gv)
 
-    grid = (NV, NT, B * H)
+    grid = (NV * NT, B * H)
     chunk_oja_bwd_kernel_dvwg_h[grid](
         k=k,
         v=v,

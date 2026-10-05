@@ -11,7 +11,7 @@ import triton.language as tl
 
 from fla.ops.utils import chunk_local_cumsum
 from fla.ops.utils.constant import RCP_LN2
-from fla.ops.utils.op import exp2
+from fla.ops.utils.op import exp2, unflatten_program_id
 from fla.utils import (
     IS_NVIDIA_HOPPER,
     autocast_custom_bwd,
@@ -68,7 +68,7 @@ def fused_chunk_fwd_kernel(
     STORE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_k, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    i_v, i_k, i_nh = unflatten_program_id(X=tl.cdiv(V, BV), Y=tl.cdiv(K, BK))
     i_n, i_h = i_nh // H, i_nh % H
 
     all = B * T
@@ -214,7 +214,7 @@ def fused_chunk_bwd_kernel(
     USE_INITIAL_STATE: tl.constexpr,
     USE_FINAL_STATE: tl.constexpr,
 ):
-    i_v, i_k, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    i_v, i_k, i_nh = unflatten_program_id(X=tl.cdiv(V, BV), Y=tl.cdiv(K, BK))
     i_n, i_h = i_nh // H, i_nh % H
 
     all = B * T
@@ -449,7 +449,7 @@ def fused_chunk_fwd(
 
     o = v.new_empty(NK, *v.shape, dtype=torch.float) if NK > 1 else torch.empty_like(v)
     ht = k.new_empty(N, H, K, V, dtype=torch.float) if output_final_state else None
-    def grid(meta): return (triton.cdiv(V, meta['BV']), NK, N * H)
+    def grid(meta): return (triton.cdiv(V, meta['BV']) * NK * N * H,)
     fused_chunk_fwd_kernel[grid](
         q=q,
         k=k,
@@ -500,7 +500,7 @@ def fused_chunk_bwd(
     dg = g.new_empty(NK*NV, *g.shape, dtype=torch.float) if g is not None else None
     dh0 = torch.empty_like(initial_state) if initial_state is not None else None
 
-    grid = (NV, NK, N * H)
+    grid = (NV * NK * N * H,)
     fused_chunk_bwd_kernel[grid](
         q=q,
         k=k,

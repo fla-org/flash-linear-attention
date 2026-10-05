@@ -215,7 +215,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64_npu(
     STATE_V_FIRST: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    core_id = tl.program_id(0)
+    core_id = tl.program_id(0).to(tl.int64)
     NV: tl.constexpr = tl.cdiv(V, BV)
     DH_CS: tl.constexpr = HV * K * V
     stride_v: tl.constexpr = HV * V
@@ -549,7 +549,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_oneslab_npu(
     Oneslab is only launched when ``T % BT == 0`` and not varlen, so gates are
     always host-precomputed (``g``/``gk`` are never passed).
     """
-    core_id = tl.program_id(0)
+    core_id = tl.program_id(0).to(tl.int64)
     DH_CS: tl.constexpr = HV * K * V
     stride_v: tl.constexpr = HV * V
     stride_k: tl.constexpr = H * K
@@ -810,7 +810,7 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64_npu(
     STATE_V_FIRST: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    core_id = tl.program_id(0)
+    core_id = tl.program_id(0).to(tl.int64)
     T_max = T
     for task_id in tl.range(core_id, task_num, num_core):
         i_nh = task_id.to(tl.int64)

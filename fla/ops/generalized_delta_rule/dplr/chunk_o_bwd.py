@@ -10,7 +10,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
-from fla.ops.utils.op import exp2
+from fla.ops.utils.op import exp2, unflatten_program_id
 from fla.utils import IS_AMD, autotune_cache_kwargs, check_shared_mem
 
 NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if IS_AMD else [2, 4, 8, 16, 32]
@@ -137,7 +137,8 @@ def chunk_dplr_bwd_o_kernel(
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_k, i_t = unflatten_program_id(X=tl.cdiv(K, BK))
+    i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
 
     if IS_VARLEN:
@@ -263,7 +264,8 @@ def chunk_dplr_bwd_kernel_dv(
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_v, i_t = unflatten_program_id(X=tl.cdiv(V, BV))
+    i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_tg = i_t
@@ -332,7 +334,7 @@ def chunk_dplr_bwd_dv(
 
     dv = torch.empty_like(do)
 
-    def grid(meta): return (triton.cdiv(V, meta['BV']), NT, B * H)
+    def grid(meta): return (triton.cdiv(V, meta['BV']) * NT, B * H)
     chunk_dplr_bwd_kernel_dv[grid](
         A_qk=A_qk,
         kg=kg,
@@ -381,7 +383,7 @@ def chunk_dplr_bwd_o(
     dk = torch.empty_like(k)
     dw = torch.empty_like(w)
     db = torch.empty_like(b)
-    grid = (NK, NT, B * H)
+    grid = (NK * NT, B * H)
 
     dgk_last = torch.empty(B, NT, H, K, dtype=torch.float, device=w.device)
 

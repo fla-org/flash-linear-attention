@@ -74,8 +74,8 @@ def chunk_kda_bwd_kernel_dAv_npu(
     BH_OFFSET: tl.constexpr,
     USE_GRAPH: tl.constexpr = False,
 ):
-    i_t = tl.program_id(0) + NT_OFFSET
-    i_bh = tl.program_id(1) + BH_OFFSET
+    i_t = tl.program_id(0).to(tl.int64) + NT_OFFSET
+    i_bh = tl.program_id(1).to(tl.int64) + BH_OFFSET
     i_b, i_hv = i_bh // HV, i_bh % HV
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
@@ -274,7 +274,7 @@ def chunk_kda_bwd_kernel_wy_v_part_npu(
     G_T_CONTIG: tl.constexpr,
     USE_GRAPH: tl.constexpr = False,
 ):
-    core_id = tl.program_id(0)
+    core_id = tl.program_id(0).to(tl.int64)
     T_seq = T
 
     for task_id in tl.range(core_id, task_num, num_core):
@@ -384,7 +384,7 @@ def chunk_kda_bwd_kernel_wy_k_part_npu(
     USE_GRAPH: tl.constexpr = False,
 ):
     i_k = K_OFFSET
-    core_id = tl.program_id(0)
+    core_id = tl.program_id(0).to(tl.int64)
 
     for task_id in tl.range(core_id, task_num, num_core):
         i_t = task_id // BH
@@ -537,7 +537,7 @@ def chunk_kda_bwd_kernel_wy_dw_part_npu(
     USE_GRAPH: tl.constexpr = False,
 ):
     i_k = K_OFFSET
-    core_id = tl.program_id(0)
+    core_id = tl.program_id(0).to(tl.int64)
     T_seq = T
 
     for task_id in tl.range(core_id, task_num, num_core):
@@ -681,7 +681,7 @@ def chunk_kda_bwd_kernel_wy_dA_finalize_npu(
     TAIL_MODE 0 = aligned bulk (no boundary_check). TAIL_MODE 1 = tail/varlen.
     First tl.dot clobbers masked dA (dead). Second uses b_A as lhs (dead after store).
     """
-    core_id = tl.program_id(0)
+    core_id = tl.program_id(0).to(tl.int64)
     T_seq = T
 
     for task_id in tl.range(core_id, task_num, num_core):

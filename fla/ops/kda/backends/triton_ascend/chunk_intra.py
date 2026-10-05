@@ -152,9 +152,9 @@ def chunk_kda_fwd_kernel_diag_solve_npu(
     Run before inter_solve so the fused inter kernel only merges off-diagonal
     blocks, keeping scalar BC loops off the large (NT, BH) grid.
     """
-    i_t = tl.program_id(0) + NT_OFFSET
-    i_i = tl.program_id(1) + NC_OFFSET
-    i_bh = tl.program_id(2) + BH_OFFSET
+    i_t = tl.program_id(0).to(tl.int64) + NT_OFFSET
+    i_i = tl.program_id(1).to(tl.int64) + NC_OFFSET
+    i_bh = tl.program_id(2).to(tl.int64) + BH_OFFSET
     i_b, i_hv = i_bh // HV, i_bh % HV
 
     if IS_VARLEN:
@@ -212,9 +212,9 @@ def chunk_kda_fwd_kernel_intra_sub_chunk_npu(
     BH_OFFSET,
     USE_GRAPH: tl.constexpr = False,
 ):
-    i_t = tl.program_id(0) + NT_OFFSET
-    i_i = tl.program_id(1) + NC_OFFSET
-    i_bh = tl.program_id(2) + BH_OFFSET
+    i_t = tl.program_id(0).to(tl.int64) + NT_OFFSET
+    i_i = tl.program_id(1).to(tl.int64) + NC_OFFSET
+    i_bh = tl.program_id(2).to(tl.int64) + BH_OFFSET
     i_b, i_hv = i_bh // HV, i_bh % HV
     i_h = i_hv // (HV // H)
 
@@ -306,8 +306,8 @@ def chunk_kda_fwd_kernel_inter_solve_fused_npu(
     USE_GRAPH: tl.constexpr = False,
 ):
     # Diagonal Akkd blocks are inverted by diag_solve before this kernel.
-    i_t = tl.program_id(0) + NT_OFFSET
-    i_bh = tl.program_id(1) + BH_OFFSET
+    i_t = tl.program_id(0).to(tl.int64) + NT_OFFSET
+    i_bh = tl.program_id(1).to(tl.int64) + BH_OFFSET
     i_b, i_hv = i_bh // HV, i_bh % HV
     i_h = i_hv // (HV // H)
 
@@ -716,8 +716,8 @@ def chunk_kda_bwd_kernel_intra_npu(
     USE_GRAPH: tl.constexpr = False,
 ):
     NC = tl.cdiv(BT, BC)
-    core_id = tl.program_id(0)
-    num_core = tl.num_programs(0)
+    core_id = tl.program_id(0).to(tl.int64)
+    num_core = tl.num_programs(0).to(tl.int64)
     # widen before multiplying; the task decomposition stays in int64 end to end
     task_num = tl.cast(NT_TOTAL, tl.int64) * NC * B * HV
     BH_TOTAL = B * HV

@@ -152,7 +152,7 @@ def recompute_w_u_fwd_kernel_npu(
     BETA_T_CONTIG: tl.constexpr,
 ):
     T_seq = T
-    core_id = tl.program_id(0)
+    core_id = tl.program_id(0).to(tl.int64)
     for task_id in tl.range(core_id, task_num, num_core):
         i_t_o = task_id // (B * HV)
         i_bh = task_id % (B * HV)
@@ -240,7 +240,7 @@ def prepare_wy_repr_bwd_kv_npu(
     ASCEND_MAX_GRID_DIM. Rebind local pointers every task iteration.
     """
     T_seq = T
-    core_id = tl.program_id(0)
+    core_id = tl.program_id(0).to(tl.int64)
     for task_id in tl.range(core_id, task_num, num_core):
         i_t_o = task_id // (B * HV)
         i_bh = task_id % (B * HV)
@@ -368,8 +368,8 @@ def prepare_wy_repr_bwd_da_mask_dot1_npu(
     IS_VARLEN: tl.constexpr,
     NT_OFFSET: tl.constexpr, BH_OFFSET: tl.constexpr,
 ):
-    i_t = tl.program_id(0) + NT_OFFSET
-    i_bh = tl.program_id(1) + BH_OFFSET
+    i_t = tl.program_id(0).to(tl.int64) + NT_OFFSET
+    i_bh = tl.program_id(1).to(tl.int64) + BH_OFFSET
     i_b, i_h = i_bh // HV, i_bh % HV
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(
@@ -410,8 +410,8 @@ def prepare_wy_repr_bwd_da_dot2_npu(
     IS_VARLEN: tl.constexpr,
     NT_OFFSET: tl.constexpr, BH_OFFSET: tl.constexpr,
 ):
-    i_t = tl.program_id(0) + NT_OFFSET
-    i_bh = tl.program_id(1) + BH_OFFSET
+    i_t = tl.program_id(0).to(tl.int64) + NT_OFFSET
+    i_bh = tl.program_id(1).to(tl.int64) + BH_OFFSET
     i_b, i_h = i_bh // HV, i_bh % HV
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
@@ -442,8 +442,8 @@ def prepare_wy_repr_bwd_da_gate_npu(
     IS_VARLEN: tl.constexpr, G_T_CONTIG: tl.constexpr,
     NT_OFFSET: tl.constexpr, BH_OFFSET: tl.constexpr,
 ):
-    i_t = tl.program_id(0) + NT_OFFSET
-    i_bh = tl.program_id(1) + BH_OFFSET
+    i_t = tl.program_id(0).to(tl.int64) + NT_OFFSET
+    i_bh = tl.program_id(1).to(tl.int64) + BH_OFFSET
     i_b, i_h = i_bh // HV, i_bh % HV
     T_seq = T
     if IS_VARLEN:
@@ -485,7 +485,7 @@ def prepare_wy_repr_bwd_finalize_k_npu(
     IS_VARLEN: tl.constexpr, BETA_T_CONTIG: tl.constexpr, DB_T_CONTIG: tl.constexpr,
 ):
     T_seq = T
-    core_id = tl.program_id(0)
+    core_id = tl.program_id(0).to(tl.int64)
     for task_id in tl.range(core_id, task_num, num_core):
         i_t_o = task_id // (B * HV)
         i_bh = task_id % (B * HV)
@@ -551,8 +551,8 @@ def prepare_wy_repr_bwd_finalize_a2_dg_npu(
     NT_OFFSET: tl.constexpr, BH_OFFSET: tl.constexpr,
 ):
     """Fuse A2 = (k k^T) * beta with dg += row(dA*A2) - col(dA*A2). Keep A2 in UB."""
-    i_t = tl.program_id(0) + NT_OFFSET
-    i_bh = tl.program_id(1) + BH_OFFSET
+    i_t = tl.program_id(0).to(tl.int64) + NT_OFFSET
+    i_bh = tl.program_id(1).to(tl.int64) + BH_OFFSET
     i_b, i_h = i_bh // HV, i_bh % HV
     T_seq = T
     if IS_VARLEN:

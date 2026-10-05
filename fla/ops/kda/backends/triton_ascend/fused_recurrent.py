@@ -101,7 +101,7 @@ def fused_recurrent_kda_fwd_kernel_npu(
     ALLOW_NEG_EIGVAL: tl.constexpr,
     STATE_V_FIRST: tl.constexpr,
 ):
-    task_id = tl.program_id(0) + TASK_OFFSET
+    task_id = tl.program_id(0).to(tl.int64) + TASK_OFFSET
     NV = tl.cdiv(V, BV)
     NK = tl.cdiv(K, BK)
 

@@ -115,9 +115,9 @@ def chunk_gdn2_fwd_kernel_intra_grouped_npu(
     BH_OFFSET,
 ):
     """Build one group of causal Aqk/Akk rows without unstable gate factoring."""
-    i_t = tl.program_id(0) + NT_OFFSET
-    i_i = tl.program_id(1) + NC_OFFSET
-    i_bh = tl.program_id(2) + BH_OFFSET
+    i_t = tl.program_id(0).to(tl.int64) + NT_OFFSET
+    i_i = tl.program_id(1).to(tl.int64) + NC_OFFSET
+    i_bh = tl.program_id(2).to(tl.int64) + BH_OFFSET
     i_b, i_h = i_bh // H, i_bh % H
 
     if IS_VARLEN:
@@ -202,9 +202,9 @@ def chunk_gdn2_fwd_kernel_diag_solve_npu(
     NC_OFFSET,
     BH_OFFSET,
 ):
-    i_t = tl.program_id(0) + NT_OFFSET
-    i_i = tl.program_id(1) + NC_OFFSET
-    i_bh = tl.program_id(2) + BH_OFFSET
+    i_t = tl.program_id(0).to(tl.int64) + NT_OFFSET
+    i_i = tl.program_id(1).to(tl.int64) + NC_OFFSET
+    i_bh = tl.program_id(2).to(tl.int64) + BH_OFFSET
     i_b, i_h = i_bh // H, i_bh % H
 
     if IS_VARLEN:
@@ -257,8 +257,8 @@ def chunk_gdn2_fwd_kernel_inter_products_npu(
     NT_OFFSET,
     BH_OFFSET,
 ):
-    i_t = tl.program_id(0) + NT_OFFSET
-    i_bh = tl.program_id(1) + BH_OFFSET
+    i_t = tl.program_id(0).to(tl.int64) + NT_OFFSET
+    i_bh = tl.program_id(1).to(tl.int64) + BH_OFFSET
     i_b, i_h = i_bh // H, i_bh % H
 
     if IS_VARLEN:
@@ -349,8 +349,8 @@ def chunk_gdn2_fwd_kernel_inter_solve_npu(
     NT_OFFSET,
     BH_OFFSET,
 ):
-    i_t = tl.program_id(0) + NT_OFFSET
-    i_bh = tl.program_id(1) + BH_OFFSET
+    i_t = tl.program_id(0).to(tl.int64) + NT_OFFSET
+    i_bh = tl.program_id(1).to(tl.int64) + BH_OFFSET
     i_b, i_h = i_bh // H, i_bh % H
 
     if IS_VARLEN:

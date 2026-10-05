@@ -83,7 +83,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     STATE_V_FIRST: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     NV = tl.cdiv(V, BV)
     i_v, i_nh = pid % NV, (pid // NV).to(tl.int64)
     i_n, i_h = i_nh // HV, i_nh % HV
@@ -396,7 +396,7 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
     STATE_V_FIRST: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     NV = tl.cdiv(V, BV)
     i_v, i_nh = pid % NV, (pid // NV).to(tl.int64)
     i_n, i_h = i_nh // HV, i_nh % HV
