@@ -173,8 +173,18 @@ class LightNetAttention(nn.Module):
         last_z = last_state['ffn_state'] if last_state is not None and last_state.get('ffn_state') is not None else None
         if last_z is not None:
             # Decode path: continue logcumsumexp from cached state
-            z = torch.logaddexp(last_z, k.float().logcumsumexp(1))
-            k, g = torch.exp(k - z).to(k.dtype), (torch.cat((last_z, z[:, :-1]), 1) - z).to(k.dtype)
+            k_float = k.float()
+            if attention_mask is not None:
+                pad_mask = attention_mask[:, -k.shape[1]:, None, None]
+                k_float = k_float.masked_fill(pad_mask == 0, float('-inf'))
+            z = torch.logaddexp(last_z, k_float.logcumsumexp(1))
+            g_new = torch.cat((last_z, z[:, :-1]), 1) - z
+            # an empty cached prefix has zero recurrent state, as in prefill.
+            g = torch.nan_to_num(g_new, nan=0.0, posinf=0.0, neginf=0.0).to(k.dtype)
+            k = torch.exp(k_float - z).to(k.dtype)
+            if attention_mask is not None:
+                # an all-padding prefix leaves the cached normalizer at -inf.
+                k = k.masked_fill(pad_mask == 0, 0)
         else:
             # Prefill path: mask padding positions to -inf so they don't affect logcumsumexp
             if cu_seqlens is not None:
