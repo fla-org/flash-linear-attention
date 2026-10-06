@@ -151,7 +151,7 @@ def parallel_deltaformer_fwd_kernel(
     BLOCK_T: tl.constexpr,
 ):
     pid_c = tl.program_id(axis=0).to(tl.int64)
-    pid_h = tl.program_id(axis=1)
+    pid_h = tl.program_id(axis=1).to(tl.int64)
 
     rowid_block = tl.arange(0, BLOCK_C) + pid_c * BLOCK_C
     colid_block = tl.arange(0, BLOCK_T)
@@ -245,7 +245,7 @@ def parallel_deltaformer_bwd_kernel_u(
     BLOCK_T: tl.constexpr,
 ):
     pid_c = tl.program_id(axis=0).to(tl.int64)
-    pid_h = tl.program_id(axis=1)
+    pid_h = tl.program_id(axis=1).to(tl.int64)
 
     acc = tl.zeros([BLOCK_C, D], dtype=tl.float32)
 
@@ -294,7 +294,7 @@ def parallel_deltaformer_bwd_kernel_row_sum(
     BLOCK_T: tl.constexpr,
 ):
     pid_c = tl.program_id(axis=0).to(tl.int64)
-    pid_h = tl.program_id(axis=1)
+    pid_h = tl.program_id(axis=1).to(tl.int64)
 
     rowid_block = tl.arange(0, BLOCK_C) + pid_c * BLOCK_C
     colid_block = tl.arange(0, BLOCK_T)
@@ -353,7 +353,7 @@ def parallel_deltaformer_bwd_kernel_qk(
     BLOCK_C: tl.constexpr,
 ):
     pid_c = tl.program_id(axis=0).to(tl.int64)
-    pid_h = tl.program_id(axis=1)
+    pid_h = tl.program_id(axis=1).to(tl.int64)
     block_i = tl.arange(0, BLOCK_C)
 
     acc = tl.zeros([BLOCK_C, D], dtype=tl.float32)

@@ -64,7 +64,7 @@ def pre_process_fwd_kernel_merged(
     MULTI_SEQS: tl.constexpr,
     AFFINE_CHAIN_PRECISION: tl.constexpr = None,
 ):
-    i_col, i_h = tl.program_id(0), tl.program_id(1)
+    i_col, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     if MULTI_SEQS:
         i_n = tl.program_id(2).to(tl.int64)
         # Offset hm for this subseq: hm[i_n, h, k, v+k]
@@ -371,14 +371,14 @@ def merge_fwd_bwd_kernel(
     ag_hm always uses [K, V+K] layout (from pre_scan).
     The recurrence h' = M @ h + he becomes h_T' = h_T @ M^T + he^T.
     """
-    i_v = tl.program_id(0)
+    i_v = tl.program_id(0).to(tl.int64)
     o_k = tl.arange(0, BK)
     m_k = o_k < K
     o_v = i_v * BV + tl.arange(0, BV)
     m_v = o_v < V
     if INTRACARD_MODE:
-        i_seq = tl.program_id(1)
-        i_h = tl.program_id(2)
+        i_seq = tl.program_id(1).to(tl.int64)
+        i_h = tl.program_id(2).to(tl.int64)
 
         if i_seq >= NUM_SEQ_ENTRIES:
             return
@@ -437,7 +437,7 @@ def merge_fwd_bwd_kernel(
                 tl.store(p_out, b_h.to(p_out.dtype.element_ty), mask=m_out)
     else:
         # CP mode
-        i_h = tl.program_id(1)
+        i_h = tl.program_id(1).to(tl.int64)
         if HAS_H_SEQ_IDX:
             h += tl.load(h_seq_idx).to(tl.int64) * HV * K * V
         if NUM_RANKS_ON_DEVICE:
@@ -522,7 +522,7 @@ def pre_process_bwd_kernel_merged(
     - Columns [0, V) are for computing dh (stage 1)
     - Columns [V, V+K) are for computing dm (stage 2)
     """
-    i_col, i_h = tl.program_id(0), tl.program_id(1)
+    i_col, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_n = 0
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
