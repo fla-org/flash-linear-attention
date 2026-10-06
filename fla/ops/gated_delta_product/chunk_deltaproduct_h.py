@@ -10,7 +10,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
-from fla.ops.utils.op import exp2
+from fla.ops.utils.op import exp2, unflatten_program_id
 from fla.utils import IS_NVIDIA_HOPPER, autotune_cache_kwargs
 
 NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8, 16]
@@ -58,7 +58,7 @@ def chunk_gated_delta_product_fwd_kernel_h_blockdim64(
     SAVE_NEW_VALUE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_nh = tl.program_id(0), tl.program_id(1).to(tl.int64)
+    i_v, i_nh = unflatten_program_id(tl.cdiv(V, BV))
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
@@ -251,7 +251,7 @@ def chunk_gated_delta_product_bwd_kernel_dhu_blockdim64(
     USE_FINAL_STATE_GRADIENT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_nh = tl.program_id(0), tl.program_id(1).to(tl.int64)
+    i_v, i_nh = unflatten_program_id(tl.cdiv(V, BV))
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
@@ -460,7 +460,7 @@ def chunk_gated_delta_product_fwd_h(
     final_state = k.new_empty(N, H, K, V, dtype=torch.float32) if output_final_state else None
     v_new = torch.empty_like(u) if save_new_value else None
 
-    def grid(meta): return (triton.cdiv(V, meta['BV']), N*H)
+    def grid(meta): return (triton.cdiv(V, meta['BV']) * N * H,)
     chunk_gated_delta_product_fwd_kernel_h_blockdim64[grid](
         k=k,
         v=u,
@@ -513,7 +513,7 @@ def chunk_gated_delta_product_bwd_dhu(
     dh0 = torch.empty_like(h0, dtype=torch.float32) if h0 is not None else None
     dv2 = torch.empty_like(dv)
 
-    def grid(meta): return (triton.cdiv(V, meta['BV']), N*H)
+    def grid(meta): return (triton.cdiv(V, meta['BV']) * N * H,)
     chunk_gated_delta_product_bwd_kernel_dhu_blockdim64[grid](
         q=q,
         k=k,

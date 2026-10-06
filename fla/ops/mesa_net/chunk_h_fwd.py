@@ -10,7 +10,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_offsets
-from fla.ops.utils.op import exp2, safe_dot
+from fla.ops.utils.op import exp2, safe_dot, unflatten_program_id
 from fla.utils import autotune_cache_kwargs
 
 
@@ -54,7 +54,7 @@ def chunk_mesa_net_fwd_kernel_h(
     STORE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    i_k, i_v, i_nh = unflatten_program_id(tl.cdiv(K, 64), tl.cdiv(V, 64))
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
@@ -155,7 +155,7 @@ def chunk_mesa_fwd_h(
     h_final = k.new_empty(N, H, K, V, dtype=torch.float) if output_final_state else None
     h_kv_final = k.new_empty(N, H, K, V, dtype=torch.float)
 
-    def grid(meta): return (triton.cdiv(K, 64), triton.cdiv(V, 64), N * H)
+    def grid(meta): return (triton.cdiv(K, 64) * triton.cdiv(V, 64) * N * H,)
 
     chunk_mesa_net_fwd_kernel_h[grid](
         k=k,

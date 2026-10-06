@@ -10,6 +10,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.index import prepare_chunk_indices
+from fla.ops.utils.op import unflatten_program_id
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, input_guard
 
 
@@ -38,7 +39,8 @@ def mean_pooling_fwd_kernel(
     BD: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_d, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_d, i_t = unflatten_program_id(tl.cdiv(D, BD))
+    i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_tg = i_t
@@ -88,7 +90,8 @@ def mean_pooling_bwd_kernel(
     BD: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_d, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_d, i_t = unflatten_program_id(tl.cdiv(D, BD))
+    i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_tg = i_t
@@ -126,7 +129,7 @@ def mean_pooling_fwd(
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     o = x.new_empty(B, NT, H, D)
-    def grid(meta): return (triton.cdiv(D, meta['BD']), NT, B * H)
+    def grid(meta): return (triton.cdiv(D, meta['BD']) * NT, B * H)
     mean_pooling_fwd_kernel[grid](
         x,
         o,
@@ -155,7 +158,7 @@ def mean_pooling_bwd(
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     dx = do.new_empty(B, T, H, D)
-    def grid(meta): return (triton.cdiv(D, meta['BD']), NT, B * H)
+    def grid(meta): return (triton.cdiv(D, meta['BD']) * NT, B * H)
     mean_pooling_bwd_kernel[grid](
         do,
         dx,

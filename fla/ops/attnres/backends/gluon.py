@@ -464,7 +464,7 @@ def attnres_bwd_kernel_dqdw_gluon(
     NW: gl.constexpr,
     HAS_ONORM: gl.constexpr,
 ):
-    i_d = gl.program_id(0).to(gl.int32)
+    i_d = gl.program_id(0).to(gl.int64)
 
     # [BN, BD] fp32 rows; 4-wide lane segments along D, warps along the partial rows
     T: gl.constexpr = _lane_split(BD)
