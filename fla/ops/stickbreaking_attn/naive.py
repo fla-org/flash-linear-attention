@@ -17,7 +17,7 @@ def naive_stickbreaking_attn(
     attend_current: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
-    Reference stick-breaking attention, computed in fp32 log space.
+    Reference stick-breaking attention, computed in log space in fp32, or in fp64 for fp64 inputs.
 
     Query `i` gives each visible key `j` the weight `A_ij = sigmoid(z_ij) * prod_l (1 - sigmoid(z_il))`,
     where `z_ij = scale * q_i k_j` and `l` runs over the visible keys after `j`,
@@ -42,6 +42,12 @@ def naive_stickbreaking_attn(
         rem (torch.Tensor):
             Stick left over by each query, `1 - sum_j A_ij`, of shape `[B, T, HQ]`.
     """
+    if q.shape[:2] != k.shape[:2] or k.shape[:3] != v.shape[:3] or q.shape[-1] != k.shape[-1]:
+        raise ValueError(
+            f"Expected q, k and v of shapes [B, T, HQ, K], [B, T, H, K] and [B, T, H, V], "
+            f"got {tuple(q.shape)}, {tuple(k.shape)} and {tuple(v.shape)}. "
+            f"Decoding against a longer key/value prefix is not supported.",
+        )
     B, T, HQ, K = q.shape
     H, V = k.shape[2], v.shape[-1]
     if H == 0 or HQ % H != 0:
@@ -51,7 +57,9 @@ def naive_stickbreaking_attn(
         scale = K ** -0.5
 
     dtype = q.dtype
-    q, k, v = q.float(), k.float(), v.float()
+    # fp64 inputs stay in fp64 so the reference stays accurate where fp32 cancels near saturated logits
+    compute_dtype = torch.double if torch.double in (q.dtype, k.dtype, v.dtype) else torch.float
+    q, k, v = q.to(compute_dtype), k.to(compute_dtype), v.to(compute_dtype)
     # [B, H, G, T, T]
     z = torch.einsum('bqhgd,bkhd->bhgqk', q.reshape(B, T, H, G, K), k) * scale
 

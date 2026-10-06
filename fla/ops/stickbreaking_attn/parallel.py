@@ -9,7 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.utils import prepare_chunk_indices, prepare_lens
+from fla.ops.utils import get_max_num_splits, prepare_chunk_indices
 from fla.ops.utils.op import exp2
 from fla.ops.utils.softplus import softplus2
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, check_shared_mem, input_guard
@@ -132,6 +132,18 @@ def _stickbreaking_attn_weights(b_s, b_log_rem, m_s, AXIS: tl.constexpr):
     return b_log_om_beta, b_p
 
 
+@triton.jit
+def _stickbreaking_attn_exclusive_cumsum_combine(b_s1, b_x1, b_s2, b_x2):
+    return b_s1 + b_x1 + b_s2, b_x2
+
+
+@triton.jit
+def _stickbreaking_attn_exclusive_cumsum(b_x, AXIS: tl.constexpr):
+    # pairs of (sum before the last element, last element) give an exclusive sum built only by additions
+    b_s, _ = tl.associative_scan((tl.zeros_like(b_x), b_x), axis=AXIS, combine_fn=_stickbreaking_attn_exclusive_cumsum_combine)
+    return b_s
+
+
 @triton.heuristics({'IS_VARLEN': lambda args: args['cu_seqlens'] is not None})
 @triton.autotune(
     configs=[
@@ -152,7 +164,6 @@ def parallel_stickbreaking_attn_bwd_kernel_dq(
     dq,
     log_rem,
     delta_acc,
-    delta,
     scale,
     cu_seqlens,
     chunk_indices,
@@ -198,7 +209,6 @@ def parallel_stickbreaking_attn_bwd_kernel_dq(
     b_do = tl.load(p_do, mask=m_q[:, None] & (o_v[None, :] < V), other=0.0)
     # [BS]
     b_log_rem = tl.zeros([BS], dtype=tl.float32)
-    b_delta_acc = tl.zeros([BS], dtype=tl.float32)
 
     # snapshots let the dkv kernel reconstruct each tile independently
     for i_s in range(0, (i_t + 1) * BS, BS):
@@ -206,13 +216,9 @@ def parallel_stickbreaking_attn_bwd_kernel_dq(
         o_k = i_k * BS + tl.arange(0, BS)
         m_k = o_k < T
         tl.store(log_rem + o_snap + i_k, b_log_rem, mask=m_q)
-        tl.store(delta_acc + o_snap + i_k, b_delta_acc, mask=m_q)
         p_k = k + (bos * H + i_h) * K + o_d[:, None] + o_k[None, :] * (H*K)
-        p_v = v + (bos * H + i_h) * V + o_v[:, None] + o_k[None, :] * (H*V)
         # [BK, BS]
         b_k = tl.load(p_k, mask=(o_d[:, None] < K) & m_k[None, :], other=0.0)
-        # [BV, BS]
-        b_v = tl.load(p_v, mask=(o_v[:, None] < V) & m_k[None, :], other=0.0)
 
         if ATTEND_CURRENT:
             m_s = (o_q[:, None] >= o_k[None, :]) & m_k[None, :]
@@ -220,22 +226,20 @@ def parallel_stickbreaking_attn_bwd_kernel_dq(
             m_s = (o_q[:, None] > o_k[None, :]) & m_k[None, :]
         # [BS, BS]
         b_s = tl.dot(b_q, b_k) * scale * RCP_LN2
-        b_log_om_beta, b_p = _stickbreaking_attn_weights(b_s=b_s, b_log_rem=b_log_rem[:, None], m_s=m_s, AXIS=1)
-        b_log_rem += tl.sum(b_log_om_beta, 1)
-        b_delta_acc += tl.sum(b_p * tl.dot(b_do, b_v), 1)
+        b_log_rem += tl.sum(tl.where(m_s, -softplus2(b_s), 0.), 1)
 
-    # recompute row totals in fp32 to avoid cancellation against rounded outputs
-    b_delta = b_delta_acc + tl.load(drem + (bos + o_q) * HQ + i_hq, mask=m_q, other=0.).to(tl.float32) * exp2(b_log_rem)
-    tl.store(delta + (bos + o_q) * HQ + i_hq, b_delta, mask=m_q)
-
-    b_log_rem = tl.zeros([BS], dtype=tl.float32)
-    b_delta_acc = tl.zeros([BS], dtype=tl.float32)
+    # [BS]
+    b_delta_acc = tl.load(drem + (bos + o_q) * HQ + i_hq, mask=m_q, other=0.).to(tl.float32) * exp2(b_log_rem)
+    # the second walk reads log_rem snapshots stored by other threads of this program
+    tl.debug_barrier()
     # [BS, BK]
     b_dq = tl.zeros([BS, BK], dtype=tl.float32)
-    for i_s in range(0, (i_t + 1) * BS, BS):
-        i_k = i_t - i_s // BS
+    # visit farther blocks first so the gradient through the remaining stick is built by additions
+    for i_k in range(0, i_t + 1):
         o_k = i_k * BS + tl.arange(0, BS)
         m_k = o_k < T
+        tl.store(delta_acc + o_snap + i_k, b_delta_acc, mask=m_q)
+        b_log_rem = tl.load(log_rem + o_snap + i_k, mask=m_q, other=0.)
         p_k = k + (bos * H + i_h) * K + o_d[:, None] + o_k[None, :] * (H*K)
         p_v = v + (bos * H + i_h) * V + o_v[:, None] + o_k[None, :] * (H*V)
         # [BK, BS]
@@ -251,12 +255,11 @@ def parallel_stickbreaking_attn_bwd_kernel_dq(
         b_s = tl.dot(b_q, b_k) * scale * RCP_LN2
         b_dp = tl.dot(b_do, b_v)
         b_log_om_beta, b_p = _stickbreaking_attn_weights(b_s=b_s, b_log_rem=b_log_rem[:, None], m_s=m_s, AXIS=1)
-        # see README.md for the logit gradient formula
         b_pdp = b_p * b_dp
-        b_delta_cumsum = tl.cumsum(b_pdp, axis=1, reverse=True) - b_pdp + b_delta_acc[:, None]
-        b_ds = tl.where(m_s, b_pdp - exp2(b_s + b_log_om_beta) * (b_delta[:, None] - b_delta_cumsum), 0.)
+        # see README.md for the logit gradient formula
+        b_delta = b_delta_acc[:, None] + _stickbreaking_attn_exclusive_cumsum(b_x=b_pdp, AXIS=1)
+        b_ds = tl.where(m_s, exp2(b_log_om_beta) * b_pdp - exp2(b_s + b_log_om_beta) * b_delta, 0.)
         b_dq += tl.dot(b_ds.to(b_k.dtype), tl.trans(b_k))
-        b_log_rem += tl.sum(b_log_om_beta, 1)
         b_delta_acc += tl.sum(b_pdp, 1)
 
     tl.store(p_dq, (b_dq * scale).to(p_dq.dtype.element_ty), mask=m_q[:, None] & (o_d[None, :] < K))
@@ -282,7 +285,6 @@ def parallel_stickbreaking_attn_bwd_kernel_dkv(
     dv,
     log_rem,
     delta_acc,
-    delta,
     scale,
     cu_seqlens,
     chunk_indices,
@@ -346,7 +348,6 @@ def parallel_stickbreaking_attn_bwd_kernel_dkv(
             # [BT]
             b_log_rem = tl.load(log_rem + o_snap, mask=m_q, other=0.0)
             b_delta_acc = tl.load(delta_acc + o_snap, mask=m_q, other=0.0)
-            b_delta = tl.load(delta + (bos + o_q) * HQ + i_hq, mask=m_q, other=0.0)
 
             if ATTEND_CURRENT:
                 m_s = (o_k[:, None] <= o_q[None, :]) & m_k[:, None] & m_q[None, :]
@@ -357,8 +358,8 @@ def parallel_stickbreaking_attn_bwd_kernel_dkv(
             b_dp = tl.dot(b_v, tl.trans(b_do))
             b_log_om_beta, b_p = _stickbreaking_attn_weights(b_s=b_s, b_log_rem=b_log_rem[None, :], m_s=m_s, AXIS=0)
             b_pdp = b_p * b_dp
-            b_delta_cumsum = tl.cumsum(b_pdp, axis=0, reverse=True) - b_pdp + b_delta_acc[None, :]
-            b_ds = tl.where(m_s, b_pdp - exp2(b_s + b_log_om_beta) * (b_delta[None, :] - b_delta_cumsum), 0.)
+            b_delta = b_delta_acc[None, :] + _stickbreaking_attn_exclusive_cumsum(b_x=b_pdp, AXIS=0)
+            b_ds = tl.where(m_s, exp2(b_log_om_beta) * b_pdp - exp2(b_s + b_log_om_beta) * b_delta, 0.)
             # [BS, BV]
             b_dv = tl.dot(b_p.to(b_do.dtype), b_do, b_dv)
             # [BS, BK]
@@ -438,15 +439,14 @@ def parallel_stickbreaking_attn_bwd(
     if cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens=cu_seqlens, chunk_size=BS)
         NT = len(chunk_indices)
-        NS = triton.cdiv(int(prepare_lens(cu_seqlens=cu_seqlens).max()), BS)
+        NS = get_max_num_splits(cu_seqlens=cu_seqlens, chunk_size=BS)
     else:
         chunk_indices = None
         NT = NS = triton.cdiv(T, BS)
 
-    # snapshots store the remaining stick log and weighted gradient sum before each key block
+    # snapshots store the remaining stick log left by nearer key blocks and the gradient through it from farther ones
     log_rem = q.new_empty(B, T, HQ, NS, dtype=torch.float)
     delta_acc = q.new_empty(B, T, HQ, NS, dtype=torch.float)
-    delta = q.new_empty(B, T, HQ, dtype=torch.float)
     dq = torch.empty_like(q)
     dk = torch.empty_like(k)
     dv = torch.empty_like(v)
@@ -459,7 +459,6 @@ def parallel_stickbreaking_attn_bwd(
         dq=dq,
         log_rem=log_rem,
         delta_acc=delta_acc,
-        delta=delta,
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
@@ -484,7 +483,6 @@ def parallel_stickbreaking_attn_bwd(
         dv=dv,
         log_rem=log_rem,
         delta_acc=delta_acc,
-        delta=delta,
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
@@ -581,6 +579,12 @@ def parallel_stickbreaking_attn(
         rem (torch.Tensor):
             The stick each query leaves unused, `1 - sum_j A_ij`, of shape `[B, T, HQ]`.
     """
+    if q.shape[:2] != k.shape[:2] or k.shape[:3] != v.shape[:3] or q.shape[-1] != k.shape[-1]:
+        raise ValueError(
+            f"Expected q, k and v of shapes [B, T, HQ, K], [B, T, H, K] and [B, T, H, V], "
+            f"got {tuple(q.shape)}, {tuple(k.shape)} and {tuple(v.shape)}. "
+            f"Decoding against a longer key/value prefix is not supported.",
+        )
     if scale is None:
         scale = k.shape[-1] ** -0.5
     HQ, H = q.shape[2], k.shape[2]
