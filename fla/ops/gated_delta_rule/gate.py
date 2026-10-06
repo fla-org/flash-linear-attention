@@ -130,7 +130,7 @@ def gdn_gate_bwd_kernel(
     BT: tl.constexpr,
     HAS_BIAS: tl.constexpr,
 ):
-    i_t, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1)
+    i_t, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
 
     b_A = tl.load(A_log + i_h).to(tl.float32)
 
@@ -251,7 +251,7 @@ def gdn_gate_fwd_kernel(
     BT: tl.constexpr,
     HAS_BIAS: tl.constexpr,
 ):
-    i_t, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1)
+    i_t, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
 
     b_A = tl.load(A_log + i_h).to(tl.float32)
 

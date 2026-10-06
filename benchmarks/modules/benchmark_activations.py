@@ -8,8 +8,8 @@
 import torch
 import triton
 
+from fla.modules.activations import elu_p1, logsigmoid, powglu, sigmoid, sqrelu, swiglu, swish
 from fla.modules.activations import fast_gelu_impl as gelu
-from fla.modules.activations import logsigmoid, powglu, sigmoid, sqrelu, swiglu, swish
 from fla.utils import device
 
 DTYPE = torch.bfloat16
@@ -36,6 +36,7 @@ def fwdbwd(fn, *args):
         ],
         line_arg='provider',
         line_vals=[
+            'elu_p1_fwd', 'elu_p1_fwdbwd',
             'sigmoid_fwd', 'sigmoid_fwdbwd',
             'logsigmoid_fwd', 'logsigmoid_fwdbwd',
             'swish_fwd', 'swish_fwdbwd',
@@ -45,6 +46,7 @@ def fwdbwd(fn, *args):
             'powglu_fwd', 'powglu_fwdbwd',
         ],
         line_names=[
+            'elu_p1_fwd', 'elu_p1_fwdbwd',
             'sigmoid_fwd', 'sigmoid_fwdbwd',
             'logsigmoid_fwd', 'logsigmoid_fwdbwd',
             'swish_fwd', 'swish_fwdbwd',
@@ -53,7 +55,8 @@ def fwdbwd(fn, *args):
             'swiglu_fwd', 'swiglu_fwdbwd',
             'powglu_fwd', 'powglu_fwdbwd',
         ],
-        styles=[('green', '-'), ('green', '--'),
+        styles=[('orange', '-'), ('orange', '--'),
+                ('green', '-'), ('green', '--'),
                 ('blue', '-'), ('blue', '--'),
                 ('red', '-'), ('red', '--'),
                 ('cyan', '-'), ('cyan', '--'),
@@ -78,7 +81,9 @@ def benchmark(B, T, D, provider):
     else:
         inputs = (x,)
 
-    if provider.startswith('sigmoid'):
+    if provider.startswith('elu_p1'):
+        fn = elu_p1
+    elif provider.startswith('sigmoid'):
         fn = sigmoid
     elif provider.startswith('logsigmoid'):
         fn = logsigmoid

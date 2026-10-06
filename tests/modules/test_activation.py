@@ -11,6 +11,7 @@ import torch.nn.functional as F
 
 from fla.modules.activations import (
     _is_inner_contiguous,
+    elu_p1,
     logsigmoid,
     powglu,
     powglu_linear,
@@ -41,6 +42,16 @@ def make_inputs(B: int, T: int, D: int, n: int, noncontiguous: bool) -> tuple[to
     else:
         xs = tuple(torch.randn(B, T, D, device=device) for _ in range(n))
     return tuple(x.requires_grad_() for x in xs)
+
+
+def test_elu_p1():
+    # bf16 rounds ELU(-8) to -1, so adding 1 loses the positive feature
+    x = torch.tensor([-8.], device=device, dtype=torch.bfloat16, requires_grad=True)
+    y = elu_p1(x)
+    dx, = torch.autograd.grad(y.sum(), x)
+    expected = x.detach().float().exp().to(x.dtype)
+    torch.testing.assert_close(y, expected, rtol=0, atol=0)
+    torch.testing.assert_close(dx, expected, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize(

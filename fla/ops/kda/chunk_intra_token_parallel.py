@@ -51,7 +51,7 @@ def chunk_kda_fwd_kernel_intra_token_parallel(
     IS_VARLEN: tl.constexpr,
     USE_GRAPH: tl.constexpr = False,
 ):
-    i_tg, i_hg = tl.program_id(0).to(tl.int64), tl.program_id(1)
+    i_tg, i_hg = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
 
     if IS_VARLEN:
         # static T may exceed the covered tokens; i_n would converge to N and read OOB
