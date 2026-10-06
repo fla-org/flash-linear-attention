@@ -28,8 +28,19 @@ class GluonBackend(BaseBackend):
         return IS_NVIDIA and find_spec_cached('triton.experimental.gluon') is not None
 
     def causal_conv1d_fwd_verifier(
-        self, x, weight, bias=None, residual=None, initial_state=None, output_final_state=False,
-        activation=None, cu_seqlens=None, cu_seqlens_cpu=None, chunk_indices=None, BT=64, layout_fallback=False,
+        self,
+        x,
+        weight,
+        bias=None,
+        residual=None,
+        initial_state=None,
+        output_final_state=False,
+        activation=None,
+        cu_seqlens=None,
+        cu_seqlens_cpu=None,
+        chunk_indices=None,
+        BT=64,
+        layout_fallback=False,
     ):
         if torch.distributed.is_initialized():
             return False, 'Gluon convolution uses the existing backend in distributed processes'
@@ -50,8 +61,20 @@ class GluonBackend(BaseBackend):
         return causal_conv1d_fwd(*args, **kwargs)
 
     def causal_conv1d_bwd_verifier(
-        self, x, dy, dht, weight=None, bias=None, residual=None, initial_state=None, activation=None,
-        cu_seqlens=None, cu_seqlens_cpu=None, chunk_indices=None, BT=64, layout_fallback=False,
+        self,
+        x,
+        dy,
+        dht,
+        weight=None,
+        bias=None,
+        residual=None,
+        initial_state=None,
+        activation=None,
+        cu_seqlens=None,
+        cu_seqlens_cpu=None,
+        chunk_indices=None,
+        BT=64,
+        layout_fallback=False,
     ):
         if initial_state is not None or dht is not None:
             return False, 'Gluon convolution uses the existing backward for state gradients'
