@@ -12,7 +12,21 @@ import triton.language as tl
 from fla.ops.utils import get_max_num_splits, prepare_chunk_indices
 from fla.ops.utils.op import exp2
 from fla.ops.utils.softplus import softplus2
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, check_shared_mem, input_guard
+from fla.utils import (
+    autocast_custom_bwd,
+    autocast_custom_fwd,
+    autotune_cache_kwargs,
+    check_shared_mem,
+    input_guard,
+    tensor_cache,
+)
+
+
+@tensor_cache
+def _prepare_heavy_first_chunk_indices(cu_seqlens: torch.LongTensor, chunk_size: int) -> torch.LongTensor:
+    # later blocks of a sequence walk more keys, so the blocks of all sequences go in descending block index
+    chunk_indices = prepare_chunk_indices(cu_seqlens=cu_seqlens, chunk_size=chunk_size)
+    return chunk_indices[torch.argsort(chunk_indices[:, 1], descending=True, stable=True)]
 
 
 @triton.heuristics({'IS_VARLEN': lambda args: args['cu_seqlens'] is not None})
@@ -48,7 +62,7 @@ def parallel_stickbreaking_attn_fwd_kernel(
     ATTEND_CURRENT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_v, i_bh, i_t = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
     i_h = i_hq // G
 
@@ -59,6 +73,8 @@ def parallel_stickbreaking_attn_fwd_kernel(
     else:
         i_n = i_b
         bos, eos = (i_n * T).to(tl.int64), (i_n * T + T).to(tl.int64)
+        # last query blocks first, as in the varlen chunk indices
+        i_t = tl.cdiv(T, BT) - 1 - i_t
     RCP_LN2: tl.constexpr = 1.4426950216
 
     # [BT]
@@ -381,18 +397,21 @@ def parallel_stickbreaking_attn_fwd(
     HQ = q.shape[2]
     G = HQ // H
     BT = 64
-    BS = 64 if check_shared_mem(arch='hopper', tensor_idx=q.device.index) else 32
+    BS = 32
     BK = max(16, triton.next_power_of_2(K))
     BV = min(128, max(16, triton.next_power_of_2(V)))
     NV = triton.cdiv(V, BV)
     assert BT % BS == 0
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens=cu_seqlens, chunk_size=BT) if cu_seqlens is not None else None
+    chunk_indices = None
+    if cu_seqlens is not None:
+        chunk_indices = _prepare_heavy_first_chunk_indices(cu_seqlens=cu_seqlens, chunk_size=BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     o = torch.empty(B, T, HQ, V, dtype=v.dtype, device=q.device)
     rem = torch.empty(B, T, HQ, dtype=q.dtype, device=q.device)
-    grid = (NV, NT, B * HQ)
+    # later query blocks walk more key blocks, so they go on the slowest grid axis and launch first to avoid a heavy tail
+    grid = (NV, B * HQ, NT)
     parallel_stickbreaking_attn_fwd_kernel[grid](
         q=q,
         k=k,
