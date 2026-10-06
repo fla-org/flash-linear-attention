@@ -5,17 +5,14 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from transformers.configuration_utils import PreTrainedConfig
+import warnings
 
-from fla.models.configuration_utils import (
-    AttentionConfig,
-    AttentionConfigBase,
-    validate_attnres_config,
-    validate_loss_config,
-)
+from transformers.configuration_utils import PretrainedConfig
+
+from fla.models.hybrid import HybridAttentionConfig, _HybridAttentionConfigMixin
 
 
-class GLAConfig(AttentionConfigBase, PreTrainedConfig):
+class GLAConfig(_HybridAttentionConfigMixin, PretrainedConfig):
 
     model_type = 'gla'
     keys_to_ignore_at_inference = ['past_key_values']
@@ -42,7 +39,7 @@ class GLAConfig(AttentionConfigBase, PreTrainedConfig):
         norm_eps: float = 1e-6,
         use_gk: bool = True,
         use_gv: bool = False,
-        attn: AttentionConfig = None,
+        attn: HybridAttentionConfig = None,
         use_cache: bool = True,
         pad_token_id: int | None = None,
         bos_token_id: int = 1,
@@ -55,7 +52,8 @@ class GLAConfig(AttentionConfigBase, PreTrainedConfig):
         fuse_linear_cross_entropy: bool = False,
         use_l2warp: bool = False,
         vocab_size: int = 32000,
-        attnres_block_size: int | None = None,
+        residual_mode: str = 'standard',
+        residual_kwargs: dict | None = None,
         **kwargs,
     ):
         self.hidden_size = hidden_size
@@ -88,11 +86,28 @@ class GLAConfig(AttentionConfigBase, PreTrainedConfig):
         self.fuse_linear_cross_entropy = fuse_linear_cross_entropy
         self.use_l2warp = use_l2warp
         self.vocab_size = vocab_size
-        self.attnres_block_size = attnres_block_size
 
-        validate_loss_config(fuse_cross_entropy=fuse_cross_entropy, fuse_linear_cross_entropy=fuse_linear_cross_entropy)
+        if residual_kwargs is not None and not isinstance(residual_kwargs, dict):
+            raise TypeError('residual_kwargs must be a dict or None')
+        self.residual_kwargs = dict(residual_kwargs or {})
+        reserved = {'hidden_size', 'sub_layer_idx', 'num_sublayers'} & self.residual_kwargs.keys()
+        if reserved:
+            raise ValueError(f'{sorted(reserved)} are supplied by the model, not residual_kwargs')
 
-        validate_attnres_config(attnres_block_size=attnres_block_size)
+        self.residual_mode = residual_mode
+        if num_hidden_layers < 1:
+            raise ValueError('num_hidden_layers must be positive')
+
+        if fuse_cross_entropy and fuse_linear_cross_entropy:
+            raise ValueError(
+                "`fuse_cross_entropy` and `fuse_linear_cross_entropy` cannot be True at the same time.",
+            )
+        if fuse_linear_cross_entropy:
+            warnings.warn(
+                "`fuse_linear_cross_entropy` is enabled, which can improves memory efficiency "
+                "at the potential cost of reduced precision. "
+                "If you observe issues like loss divergence, consider disabling this setting.",
+            )
 
         super().__init__(
             pad_token_id=pad_token_id,
@@ -100,4 +115,15 @@ class GLAConfig(AttentionConfigBase, PreTrainedConfig):
             eos_token_id=eos_token_id,
             tie_word_embeddings=tie_word_embeddings,
             **kwargs,
+        )
+
+    def get_residual_kwargs(self, sub_layer_idx: int) -> dict:
+        """Build constructor arguments for the selected residual and sublayer."""
+        return dict(
+            norm_eps=self.norm_eps,
+            fuse_norm=self.fuse_norm,
+        ) | self.residual_kwargs | dict(
+            hidden_size=self.hidden_size,
+            sub_layer_idx=sub_layer_idx,
+            num_sublayers=2 * self.num_hidden_layers,
         )

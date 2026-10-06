@@ -5,102 +5,84 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from typing import NamedTuple
-
 import torch
 from torch import nn
 
+from fla.modules.layernorm import RMSNorm
 from fla.modules.residuals.base import BaseResidual
 from fla.ops.attnres import fused_attnres
 
 
-class AttentionResidualState(NamedTuple):
-    blocks: list[torch.Tensor]
-    num_branches: int
+class AttentionResidual(BaseResidual[list[torch.Tensor]]):
+    """Keep completed blocks and the current partial sum in an immutable-by-convention list.
 
-
-class AttentionResidual(BaseResidual[AttentionResidualState, AttentionResidualState]):
-    r"""Residual aggregation with softmax weights over branch outputs or block sums.
-
-    In Full AttnRes, state retains the embedding v_0 = h_1 and all preceding branch outputs v_i = f_i(h_i).
-    The learned query w_l defines the depth mixing weights:
-
-    .. math::
-        M_{i\to l} = \alpha_{i\to l}
-        = \operatorname{softmax}_i\!\left(w_l^\top\operatorname{RMSNorm}(v_i)\right),
-        \qquad h_l = \sum_{i=0}^{l-1} \alpha_{i\to l} v_i.
-
-    `readout` computes h_l; `pre` additionally applies the branch norm and returns the existing state as context.
-    `attnres_norm` normalizes keys to compute attention weights; the values v_i remain unnormalized.
-    `post` appends the new branch output v_l, making it available to the next residual module's query.
-
-    Block AttnRes stores b_0 = h_1, completed block sums b_n, and the nonempty current partial sum b_n^j.
-    Each attention branch and each MLP branch contributes one output; `block_size` counts these outputs.
-    The same attention rule operates over these stored sources.
-    All outputs in a source block share its mixing weight: M_{i->l} = alpha_{n->l} for i in block n.
-    With v_l as the j-th output in block n, `post` updates the partial sum:
-
-    .. math::
-        b_n = \sum_{i\in\mathcal{B}_n} v_i,
-        \qquad b_n^j = b_n^{j-1} + v_l, \quad b_n^0 = 0.
-
-    At a block boundary, `post` starts a new block with v_l; completed blocks remain unchanged.
-    State also records the completed branch count to determine these boundaries.
-    `block_size=1` gives Full AttnRes. The output residual aggregates all sources with its own query,
-    then applies output normalization. Gradient checkpointing requires `use_reentrant=False`.
-    See Sections 3 and 6.2 of `Attention Residuals <https://arxiv.org/abs/2603.15031>`_.
+    The query, key norm and output norm prepare the *next* sublayer. Boundaries instead refer to
+    the current sublayer whose output is being added. The existing AttnRes op fuses the output norm.
+    Initial embedding history is cast to the first branch output dtype. Later branches must share this dtype.
     """
 
-    supports_reentrant_checkpointing = False
-
-    def __init__(self, hidden_size: int, block_size: int = 1, norm_eps: float = 1e-6, fuse_norm: bool = True):
-        super().__init__(hidden_size=hidden_size, norm_eps=norm_eps, fuse_norm=fuse_norm)
+    def __init__(self, hidden_size: int, sub_layer_idx: int = 0, block_size: int = 1, **kwargs):
+        super().__init__()
+        if isinstance(sub_layer_idx, bool) or not isinstance(sub_layer_idx, int) or sub_layer_idx < 0:
+            raise ValueError('sub_layer_idx must be a non-negative integer')
+        self.hidden_size = hidden_size
+        self.sub_layer_idx = sub_layer_idx
+        norm_eps = kwargs.pop('norm_eps', 1e-6)
+        norm_cls = RMSNorm if kwargs.pop('fuse_norm', True) else nn.RMSNorm
+        kwargs.pop('num_sublayers', None)
+        if kwargs:
+            raise TypeError(f'Unexpected AttentionResidual arguments: {sorted(kwargs)}')
+        self.norm = norm_cls(hidden_size, eps=norm_eps)
+        self.input_norm = norm_cls(hidden_size, eps=norm_eps) if sub_layer_idx == 0 else None
         if isinstance(block_size, bool) or not isinstance(block_size, int) or block_size < 1:
             raise ValueError('block_size must be a positive integer')
-        self.block_size = block_size
+        self.is_boundary = sub_layer_idx % block_size == 0
         self.query = nn.Linear(hidden_size, 1, bias=False)
-        self.attnres_norm = nn.RMSNorm(hidden_size, eps=self.norm.eps)
-        self.reset_parameters()
+        self.query._is_attnres_proj = True
+        nn.init.zeros_(self.query.weight)
+        self.key_norm = nn.RMSNorm(hidden_size, eps=self.norm.eps)
+        if sub_layer_idx == 0:
+            # retain the single-source query parameters for official checkpoint compatibility.
+            self.input_query = nn.Linear(hidden_size, 1, bias=False)
+            self.input_query._is_attnres_proj = True
+            nn.init.zeros_(self.input_query.weight)
+            self.input_key_norm = nn.RMSNorm(hidden_size, eps=self.norm.eps)
 
     def reset_parameters(self) -> None:
-        super().reset_parameters()
+        for name in ('norm', 'input_norm', 'key_norm', 'input_key_norm'):
+            norm = getattr(self, name, None)
+            if norm is not None:
+                norm.reset_parameters()
         nn.init.zeros_(self.query.weight)
-        self.attnres_norm.reset_parameters()
+        if self.sub_layer_idx == 0:
+            nn.init.zeros_(self.input_query.weight)
 
-    def initialize(self, x: torch.Tensor) -> AttentionResidualState:
-        return AttentionResidualState([x], 0)
+    def initialize(self, x: torch.Tensor) -> tuple[torch.Tensor, list[torch.Tensor]]:
+        if self.sub_layer_idx != 0:
+            raise ValueError('Only the first sublayer can initialize residual history')
+        history = [x]
+        return self.input_norm(x), history
 
-    def pre(self, state: AttentionResidualState) -> tuple[torch.Tensor, AttentionResidualState]:
-        if state.num_branches == 0:
-            return self.norm(state.blocks[0]), state
-        return self(state), state
+    def forward(
+        self, branch_output: torch.Tensor, history: list[torch.Tensor],
+    ) -> tuple[torch.Tensor, list[torch.Tensor]]:
+        # the fused kernel requires all sources to share a dtype.
+        if self.sub_layer_idx == 0:
+            history = [history[0].to(branch_output.dtype)]
 
-    def post(self, branch_output: torch.Tensor, context: AttentionResidualState) -> AttentionResidualState:
-        blocks, num_branches = context
-        # all sources passed to fused_attnres must share the first branch's dtype.
-        if num_branches == 0:
-            blocks = [blocks[0].to(branch_output.dtype)]
-        if num_branches % self.block_size == 0:
-            blocks = [*blocks, branch_output]
+        if self.is_boundary:
+            history = [*history, branch_output]
         else:
-            blocks = [*blocks[:-1], blocks[-1] + branch_output]
-        return AttentionResidualState(blocks, num_branches + 1)
-
-    def readout(self, state: AttentionResidualState) -> torch.Tensor:
-        if state.num_branches == 0:
-            return state.blocks[0]
-        return fused_attnres(
-            query=self.query.weight.squeeze(0),
-            residuals=state.blocks,
-            rms_weight=self.attnres_norm.weight,
-            rms_eps=self.norm.eps,
-        )
-
-    def forward(self, state: AttentionResidualState) -> torch.Tensor:
-        return fused_attnres(
-            query=self.query.weight.squeeze(0),
-            residuals=state.blocks,
-            rms_weight=self.attnres_norm.weight,
+            history = [*history[:-1], history[-1] + branch_output]
+        output = fused_attnres(
+            query=self.query.weight,
+            residuals=history,
+            rms_weight=self.key_norm.weight,
             output_rms_weight=self.norm.weight,
-            rms_eps=self.norm.eps,
+            rms_eps=self.key_norm.eps,
         )
+        return output, history
+
+    @staticmethod
+    def get_hidden_state(history: list[torch.Tensor]) -> torch.Tensor:
+        return history[-1]

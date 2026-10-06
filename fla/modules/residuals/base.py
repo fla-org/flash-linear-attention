@@ -11,74 +11,51 @@ from typing import Generic, TypeVar
 import torch
 from torch import nn
 
-from fla.modules.norm import RMSNorm
-
 StateT = TypeVar('StateT')
-ContextT = TypeVar('ContextT')
 
 
-class BaseResidual(nn.Module, ABC, Generic[StateT, ContextT]):
-    r"""Residual aggregation, normalization, and state updates.
+class BaseResidual(nn.Module, ABC, Generic[StateT]):
+    """Prepare branch inputs and carry implementation-specific residual state between sublayers.
 
-    Let v_0 = h_1 be the embedding and v_i = f_i(h_i) be a branch output.
-    The depth mixing weights M_{i->l} determine the input h_l to branch l:
+    Implementations own their parameters and state layout. Initialization and updates return a branch input
+    and history; `get_hidden_state` exposes a representation for intermediate model hidden states.
+    Histories and their reported representations retain autograd connections without in-place updates.
 
-    .. math::
-        h_l = \sum_{i=0}^{l-1} M_{i\to l} v_i,
-        \qquad h_{l+1} = \sum_{i=0}^{l} M_{i\to l+1} v_i.
-
-    Each implementation defines these weights and the state needed to evaluate the sums.
-    State may retain individual outputs, block sums, or a recurrent summary.
-    The module owns three operations:
-
-    * `readout(state)` computes h_l without branch normalization.
-    * `pre(state)` returns the normalized h_l and the context needed to update state.
-    * `post(branch_output, context)` incorporates v_l into the state used by the next branch.
-
-    The model executes its branch between `pre` and `post` to produce v_l = f_l(h_l).
-    Here f_l includes the normalization performed by `pre`; the model owns the remaining branch computation.
-    Context carries the old state and any update coefficients needed after that computation.
-    The next residual module reads the updated state using its own mixing weights.
-
-    `initialize(x)` creates the initial state from embeddings.
-    Calling the output residual module applies output normalization to its readout.
-    State and context retain autograd connections and must not be mutated or cached on the module.
-    See Section 6.2 of `Attention Residuals <https://arxiv.org/abs/2603.15031>`_.
+    Parameter initialization belongs to `reset_parameters`, independently of history initialization.
+    Model integrations call it instead of initializing residual children with their generic weight policy.
+    Custom initial values must be reproducible by this method, including after construction on the meta device.
     """
 
-    supports_reentrant_checkpointing = True
-
-    def __init__(
-        self,
-        hidden_size: int,
-        norm_eps: float = 1e-6,
-        fuse_norm: bool = True,
-    ):
-        super().__init__()
-        self.hidden_size = hidden_size
-        self.fuse_norm = fuse_norm
-        self.norm = (RMSNorm if fuse_norm else nn.RMSNorm)(hidden_size, eps=norm_eps)
-
     def reset_parameters(self) -> None:
-        """Initialize owned parameters; custom implementations may override this method."""
-        self.norm.reset_parameters()
+        """Initialize child modules using their own reset methods.
+
+        Override to initialize parameters or buffers owned directly by the residual, or to customize child defaults.
+        Call `super().reset_parameters()` first when retaining the other child defaults, and call this method after
+        constructing all fields for standalone use. Use `torch.nn.init` functions on the original tensors so
+        checkpoint loading can protect already loaded weights; avoid `.data`, tensor views and in-place arithmetic.
+        """
+        def reset(module):
+            if hasattr(module, 'reset_parameters'):
+                module.reset_parameters()
+            else:
+                for child in module.children():
+                    reset(child)
+
+        for child in self.children():
+            reset(child)
 
     @abstractmethod
-    def initialize(self, x: torch.Tensor) -> StateT:
+    def initialize(self, x: torch.Tensor) -> tuple[torch.Tensor, StateT]:
+        """Create the first sublayer's history and prepare its branch input from model embeddings."""
         raise NotImplementedError
 
     @abstractmethod
-    def pre(self, state: StateT) -> tuple[torch.Tensor, ContextT]:
+    def forward(self, branch_output: torch.Tensor, history: StateT) -> tuple[torch.Tensor, StateT]:
+        """Return the next branch input (or final model output) and a new history without mutating the input history."""
         raise NotImplementedError
 
+    @staticmethod
     @abstractmethod
-    def post(self, branch_output: torch.Tensor, context: ContextT) -> StateT:
+    def get_hidden_state(history: StateT) -> torch.Tensor:
+        """Expose a `[..., hidden_size]` representation without copying, detaching, or mutating history."""
         raise NotImplementedError
-
-    @abstractmethod
-    def readout(self, state: StateT) -> torch.Tensor:
-        raise NotImplementedError
-
-    def forward(self, state: StateT) -> torch.Tensor:
-        """Normalize the final readout; implementations may fuse aggregation and normalization."""
-        return self.norm(self.readout(state))

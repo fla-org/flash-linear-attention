@@ -5,69 +5,55 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from typing import NamedTuple
-
 import torch
+from torch import nn
 
+from fla.modules.layernorm import RMSNorm
 from fla.modules.residuals.base import BaseResidual
 
 
-class StandardResidualState(NamedTuple):
-    residual: torch.Tensor
-    branch_output: torch.Tensor | None
+class StandardResidual(BaseResidual[torch.Tensor]):
+    """Add the branch output to tensor history and normalize the next sublayer input.
 
-
-class StandardResidual(BaseResidual[StandardResidualState, torch.Tensor]):
-    r"""Standard residual accumulation, optionally fusing addition with the next normalization.
-
-    All depth mixing weights are M_{i->l} = 1, so state only needs the running sum h_l.
-    With v_l = f_l(h_l) as the branch output, the update is
-
-    .. math::
-        h_{l+1} = h_l + v_l.
-
-    State stores two summands `(residual, branch_output)` of h_l; `None` means the sum is already materialized.
-    `readout` returns their sum, and `pre` normalizes it while returning h_l as the context for `post`.
-    `post` stores `(h_l + v_l, None)` when fusion is disabled, or `(h_l, v_l)` when enabled.
-    The latter lets the next `pre` fuse addition and normalization without changing the residual rule.
-
-    Unfused addition follows PyTorch dtype promotion.
-    Fused addition retains the residual dtype and returns the normalized input in the branch dtype.
-    The final readout always adds before normalizing.
-
-    Args:
-        fuse_residual (bool, Optional):
-            Keep the branch output for addition during the next `pre` call. Default: `False`.
+    The first residual owns the input norm. Each residual's output norm belongs to the next
+    sublayer, or to the model output at the end.
     """
 
     def __init__(
         self,
         hidden_size: int,
+        sub_layer_idx: int = 0,
         norm_eps: float = 1e-6,
         fuse_norm: bool = True,
-        fuse_residual: bool = False,
+        **kwargs,
     ):
-        super().__init__(hidden_size=hidden_size, norm_eps=norm_eps, fuse_norm=fuse_norm)
-        self.fuse_residual = fuse_residual
+        super().__init__()
+        kwargs.pop('num_sublayers', None)
+        if kwargs:
+            raise TypeError(f'Unexpected StandardResidual arguments: {sorted(kwargs)}')
+        if isinstance(sub_layer_idx, bool) or not isinstance(sub_layer_idx, int) or sub_layer_idx < 0:
+            raise ValueError('sub_layer_idx must be a non-negative integer')
+        self.hidden_size = hidden_size
+        self.sub_layer_idx = sub_layer_idx
+        self.fuse_norm = fuse_norm
+        norm_cls = RMSNorm if fuse_norm else nn.RMSNorm
+        self.norm = norm_cls(hidden_size, eps=norm_eps)
+        self.input_norm = norm_cls(hidden_size, eps=norm_eps) if sub_layer_idx == 0 else None
 
-    def initialize(self, x: torch.Tensor) -> StandardResidualState:
-        return StandardResidualState(x, None)
+    def initialize(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.sub_layer_idx != 0:
+            raise ValueError('Only the first sublayer can initialize residual history')
+        return self.input_norm(x), x
 
-    def pre(self, state: StandardResidualState) -> tuple[torch.Tensor, torch.Tensor]:
-        residual, branch_output = state
-        if branch_output is None:
-            return self.norm(residual), residual
+    def forward(self, branch_output: torch.Tensor, history: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         if self.fuse_norm:
-            return self.norm(branch_output, residual, prenorm=True)
-        residual = residual + branch_output
-        return self.norm(residual), residual
+            normed_x, history = self.norm(branch_output, residual=history, prenorm=True)
+        else:
+            history = branch_output + history
+            normed_x = self.norm(history)
 
-    def post(self, branch_output: torch.Tensor, context: torch.Tensor) -> StandardResidualState:
-        if self.fuse_residual:
-            return StandardResidualState(context, branch_output)
-        return StandardResidualState(context + branch_output, None)
+        return normed_x, history
 
-    def readout(self, state: StandardResidualState) -> torch.Tensor:
-        if state.branch_output is None:
-            return state.residual
-        return state.residual + state.branch_output
+    @staticmethod
+    def get_hidden_state(history: torch.Tensor) -> torch.Tensor:
+        return history
