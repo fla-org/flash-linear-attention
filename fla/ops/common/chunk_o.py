@@ -19,16 +19,19 @@ from fla.utils import (
     IS_NVIDIA_HOPPER,
     TRITON_ABOVE_3_4_0,
     TRITON_ABOVE_3_7_1,
+    TRITON_ABOVE_3_8_0,
     autotune_cache_kwargs,
     check_shared_mem,
 )
 
 BKV_LIST = [64, 128] if check_shared_mem() else ([32, 64] if check_shared_mem('ada') else [32])
 NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8]
+# older Triton compilers race at eight warps on Blackwell: fla-org/flash-linear-attention#1327
+CHUNK_BWD_DV_LOCAL_NUM_WARPS = [2, 4] if IS_NVIDIA_BLACKWELL and not TRITON_ABOVE_3_8_0 else NUM_WARPS
 
 # Intel needs 8 warps for BK=BV=64; the NVIDIA pairing only offers 4 and falls back to slower 32x32 tiles.
-# TODO: revalidate Blackwell's 8-warp BK=BV=128 config after Triton 3.8 fixes the tl.dot recurrence race.
-CHUNK_FWD_O_BLACKWELL_DROPPED_CONFIGS = [] if IS_NVIDIA_BLACKWELL else [
+# older Triton compilers race at eight warps on Blackwell: triton-lang/triton#10590
+CHUNK_FWD_O_BLACKWELL_DROPPED_CONFIGS = [] if IS_NVIDIA_BLACKWELL and not TRITON_ABOVE_3_8_0 else [
     triton.Config({'BK': 128, 'BV': 128}, num_warps=8, num_stages=3),
 ]
 
@@ -453,7 +456,7 @@ def chunk_bwd_kernel_dv(
 @fla_cache_autotune(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in NUM_WARPS
+        for num_warps in CHUNK_BWD_DV_LOCAL_NUM_WARPS
         for num_stages in [2, 3, 4]
     ],
     key=['H', 'HV', 'K', 'V', 'BT', 'BK', 'BV', 'USE_G'],

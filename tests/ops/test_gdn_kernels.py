@@ -24,7 +24,7 @@ from fla.ops.gated_delta_rule.gate import gdn_gate_bwd, gdn_gate_chunk_cumsum, g
 from fla.ops.gated_delta_rule.naive import naive_recurrent_gated_delta_rule
 from fla.ops.gated_delta_rule.wy_fast import prepare_wy_repr_bwd, recompute_w_u_fwd
 from fla.ops.utils.constant import RCP_LN2
-from fla.utils import assert_close, device
+from fla.utils import IS_NVIDIA_BLACKWELL, assert_close, device
 
 
 def _make_wy_inverse(B: int, T: int, HV: int, BT: int, dtype: torch.dtype) -> torch.Tensor:
@@ -479,6 +479,56 @@ def test_chunk_fwd_o(B: int, T: int, H: int, HV: int, D: int, use_g: bool, dtype
     assert_close('o', ref, tri, 0.005)
 
 
+@pytest.mark.skipif(not IS_NVIDIA_BLACKWELL, reason='Blackwell determinism regression')
+@pytest.mark.parametrize('varlen', [False, True], ids=['dense', 'varlen'])
+def test_chunk_fwd_o_deterministic(varlen, monkeypatch):
+    from fla.ops.common.chunk_o import chunk_fwd_kernel_o
+    from fla.ops.utils import cache as cache_module
+    from fla.ops.utils import chunk_local_cumsum
+
+    monkeypatch.setattr(cache_module, 'FLA_CACHE_MODE', cache_module.FlaCacheMode.DISABLED)
+    torch.manual_seed(42)
+    T, H, D, BT = 256, 4, 128, 64
+    q = F.normalize(torch.randn(1, T, H, D, device=device), dim=-1).bfloat16()
+    k = F.normalize(torch.randn(1, T, H, D, device=device), dim=-1).bfloat16()
+    v = torch.randn(1, T, H, D, device=device).bfloat16()
+    boundaries = [0, 63, T] if varlen else [0, T]
+    cu = torch.tensor(boundaries, dtype=torch.int32, device=device) if varlen else None
+    g = chunk_local_cumsum(-torch.rand(1, T, H, device=device), chunk_size=BT, cu_seqlens=cu)
+    lengths = [end - start for start, end in zip(boundaries[:-1], boundaries[1:])]
+    nt = sum((length + BT - 1) // BT for length in lengths)
+    h = (torch.randn(1, nt, H, D, D, device=device) * 0.01).bfloat16()
+    scale = D ** -0.5
+    parts = []
+    offset = 0
+    for start, length in zip(boundaries[:-1], lengths):
+        end = start + length
+        pad = (-length) % BT
+        count = (length + BT - 1) // BT
+        q_part = F.pad(q[:, start:end], (0, 0, 0, 0, 0, pad))
+        k_part = F.pad(k[:, start:end], (0, 0, 0, 0, 0, pad))
+        v_part = F.pad(v[:, start:end], (0, 0, 0, 0, 0, pad))
+        g_part = F.pad(g[:, start:end], (0, 0, 0, pad))
+        h_part = h[:, offset:offset + count]
+        parts.append(chunk_fwd_o_ref(q_part, k_part, v_part, h_part, g_part, scale, BT)[:, :length])
+        offset += count
+    ref = torch.cat(parts, dim=1)
+    tuner = chunk_fwd_kernel_o
+    while not hasattr(tuner, 'configs'):
+        tuner = tuner.fn
+    try:
+        for config in list(tuner.configs):
+            monkeypatch.setattr(tuner, 'configs', [config])
+            tuner.cache.clear()
+            first = chunk_fwd_o(q=q, k=k, v=v, h=h, g=g, scale=scale, cu_seqlens=cu)
+            assert_close('o', ref, first, 0.005)
+            for _ in range(19):
+                actual = chunk_fwd_o(q=q, k=k, v=v, h=h, g=g, scale=scale, cu_seqlens=cu)
+                assert torch.equal(first, actual), f'tile={config.kwargs}, warps={config.num_warps}'
+    finally:
+        tuner.cache.clear()
+
+
 def chunk_gated_delta_rule_fwd_h_ref(
     k: torch.Tensor,
     w: torch.Tensor,
@@ -700,6 +750,52 @@ def test_chunk_bwd_dv_local(B: int, T: int, H: int, HV: int, D: int, use_g: bool
     tri = chunk_bwd_dv_local(q=q, k=k, do=do, g=g, scale=scale, chunk_size=BT)
 
     assert_close('dv', ref, tri, 0.005)
+
+
+@pytest.mark.skipif(not IS_NVIDIA_BLACKWELL, reason='Blackwell determinism regression')
+@pytest.mark.parametrize('varlen', [False, True], ids=['dense', 'varlen'])
+@pytest.mark.parametrize('use_g', [False, True], ids=['ungated', 'gated'])
+def test_chunk_bwd_dv_local_deterministic(varlen, use_g, monkeypatch):
+    from fla.ops.common.chunk_o import chunk_bwd_kernel_dv_local
+    from fla.ops.utils import cache as cache_module
+    from fla.ops.utils import chunk_local_cumsum
+
+    monkeypatch.setattr(cache_module, 'FLA_CACHE_MODE', cache_module.FlaCacheMode.DISABLED)
+    torch.manual_seed(42)
+    T, H, HV, K, V, BT = 256, 2, 4, 128, 96, 64
+    q = F.normalize(torch.randn(1, T, H, K, device=device), dim=-1).bfloat16()
+    k = F.normalize(torch.randn(1, T, H, K, device=device), dim=-1).bfloat16()
+    do = torch.randn(1, T, HV, V, device=device).bfloat16()
+    boundaries = [0, 63, T] if varlen else [0, T]
+    cu = torch.tensor(boundaries, dtype=torch.int32, device=device) if varlen else None
+    g = chunk_local_cumsum(-torch.rand(1, T, HV, device=device), chunk_size=BT, cu_seqlens=cu) if use_g else None
+    scale = K ** -0.5
+    parts = []
+    for start, end in zip(boundaries[:-1], boundaries[1:]):
+        length = end - start
+        pad = (-length) % BT
+        q_part = F.pad(q[:, start:end], (0, 0, 0, 0, 0, pad))
+        k_part = F.pad(k[:, start:end], (0, 0, 0, 0, 0, pad))
+        do_part = F.pad(do[:, start:end], (0, 0, 0, 0, 0, pad))
+        g_part = F.pad(g[:, start:end], (0, 0, 0, pad)) if g is not None else None
+        parts.append(chunk_bwd_dv_local_ref(q_part, k_part, do_part, g_part, scale, BT)[:, :length])
+    ref = torch.cat(parts, dim=1)
+
+    tuner = chunk_bwd_kernel_dv_local
+    while not hasattr(tuner, 'configs'):
+        tuner = tuner.fn
+    configs = list(tuner.configs)
+    try:
+        for config in configs:
+            monkeypatch.setattr(tuner, 'configs', [config])
+            tuner.cache.clear()
+            first = chunk_bwd_dv_local(q=q, k=k, do=do, g=g, scale=scale, cu_seqlens=cu)
+            assert_close('dv', ref, first, 0.005)
+            for _ in range(19):
+                actual = chunk_bwd_dv_local(q=q, k=k, do=do, g=g, scale=scale, cu_seqlens=cu)
+                assert torch.equal(first, actual), f'warps={config.num_warps}, stages={config.num_stages}'
+    finally:
+        tuner.cache.clear()
 
 
 def chunk_bwd_dqkwg_ref(

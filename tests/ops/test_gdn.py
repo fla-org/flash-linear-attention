@@ -24,6 +24,7 @@ from fla.utils import (
     IS_NVIDIA_HOPPER,
     IS_NVIDIA_SM100,
     IS_NVIDIA_SM120,
+    TRITON_ABOVE_3_8_0,
     assert_close,
     device,
 )
@@ -47,15 +48,44 @@ def test_chunk_gated_delta_rule_fwd_h_blackwell_triton_guard():
 
 def test_chunk_fwd_o_blackwell_triton_guard():
     if not IS_NVIDIA_BLACKWELL:
-        pytest.skip(reason='Blackwell guard is only active on Blackwell GPUs')
+        pytest.skip(reason='Blackwell version guard')
+
+    import triton
+    from packaging.version import parse
 
     from fla.ops.common.chunk_o import chunk_fwd_kernel_o
 
-    tuner = _unwrap_autotuner(chunk_fwd_kernel_o)
-    # The 8-warp (BK=BV=128) config yields distinct outputs for identical
-    # inputs on Blackwell / Triton<3.8 (tl.dot recurrence race). The guard
-    # drops it, so no offered config may run more than 4 warps.
-    assert all(config.num_warps <= 4 for config in tuner.configs)
+    assert (parse(triton.__version__) >= parse('3.8.0')) == TRITON_ABOVE_3_8_0
+    configs = _unwrap_autotuner(chunk_fwd_kernel_o).configs
+    expected = {(32, 32, 2, 3), (64, 64, 4, 3)}
+    if TRITON_ABOVE_3_8_0:
+        expected.add((128, 128, 8, 3))
+    assert {(c.kwargs['BK'], c.kwargs['BV'], c.num_warps, c.num_stages) for c in configs} == expected
+
+
+def test_chunk_bwd_dv_local_blackwell_triton_guard():
+    import triton
+    from packaging.version import parse
+
+    from fla.ops.common.chunk_o import (
+        chunk_bwd_kernel_dqkwg,
+        chunk_bwd_kernel_dv,
+        chunk_bwd_kernel_dv_local,
+    )
+
+    assert (parse(triton.__version__) >= parse('3.8.0')) == TRITON_ABOVE_3_8_0
+    guarded = IS_NVIDIA_BLACKWELL and not TRITON_ABOVE_3_8_0
+    expected_warps = {2, 4} if guarded or IS_NVIDIA_HOPPER else {2, 4, 8}
+    expected = {(w, s) for w in expected_warps for s in (2, 3, 4)}
+    configs = _unwrap_autotuner(chunk_bwd_kernel_dv_local).configs
+    assert len(configs) == len(expected)
+    assert {(c.num_warps, c.num_stages) for c in configs} == expected
+    assert all(c.kwargs == {} for c in configs)
+
+    sibling_warps = {2, 4} if IS_NVIDIA_HOPPER else {2, 4, 8}
+    sibling_expected = {(w, s) for w in sibling_warps for s in (2, 3, 4)}
+    for kernel in (chunk_bwd_kernel_dqkwg, chunk_bwd_kernel_dv):
+        assert {(c.num_warps, c.num_stages) for c in _unwrap_autotuner(kernel).configs} == sibling_expected
 
 
 @pytest.mark.parametrize(
