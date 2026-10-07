@@ -55,7 +55,7 @@ When you keep a candidate worth returning to, put a short header at the top of i
 Keep provenance (specific iter numbers, exact ms, dates) in `OPT_LOG.md` and these headers —
 not in the promoted PR diff or the shared SKILL docs.
 The PR carries only the final minimal change plus the perf evidence (`fla-nvidia-performance`)
-and PR structure (`fla-mr-readiness`).
+and PR structure (`fla-pr-readiness`).
 
 ---
 
