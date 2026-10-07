@@ -914,7 +914,6 @@ def _fused_recurrent_cyfa_fwd(
 
 class FusedRecurrentCyFAFunction(torch.autograd.Function):
     @staticmethod
-    @input_guard
     def forward(
         ctx,
         q: torch.Tensor,
@@ -959,6 +958,7 @@ class FusedRecurrentCyFAFunction(torch.autograd.Function):
         raise NotImplementedError("`fused_recurrent_cyfa` is inference-only; use chunk mode for training.")
 
 
+@input_guard
 def fused_recurrent_cyfa(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -987,6 +987,8 @@ def fused_recurrent_cyfa(
         readout,
         require_cuda=True,
     )
+    if q.shape != k.shape or q.shape[-1] != q_norm_weight.numel() or q.shape[-1] != k_norm_weight.numel():
+        raise ValueError("Fused Q/K RMSNorm requires matching contiguous Q/K tensors and weights.")
     grad_inputs = (q, k, v, g, delta, beta, readout, q_norm_weight, k_norm_weight, *(initial_state or ()))
     if torch.is_grad_enabled() and any(x is not None and x.requires_grad for x in grad_inputs):
         raise NotImplementedError("`fused_recurrent_cyfa` is inference-only; use chunk mode for training.")

@@ -5,6 +5,8 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+from unittest import mock
+
 import pytest
 import torch
 
@@ -26,6 +28,27 @@ def test_layer(use_short_conv):
     assert output.shape == x.shape
     assert torch.isfinite(output).all()
     output.sum().backward()
+    assert x.grad is not None
+    assert torch.isfinite(x.grad).all()
+    for parameter in layer.parameters():
+        assert parameter.grad is not None
+        assert torch.isfinite(parameter.grad).all()
+
+
+@pytest.mark.parametrize('mode', ['chunk', 'fused_recurrent'])
+def test_layer_eval_with_grad_uses_chunk(mode):
+    torch.manual_seed(42)
+    layer = CyclicFlowAttention(
+        hidden_size=256, num_heads=4, head_dim=64, num_slots=128, mode=mode, layer_idx=0,
+    ).to(device=device, dtype=torch.bfloat16).eval()
+    x = torch.randn(1, 32, 256, device=device, dtype=torch.bfloat16, requires_grad=True)
+    with mock.patch(
+        'fla.layers.cyfa.fused_recurrent_cyfa',
+        side_effect=AssertionError("eval with autograd must use chunk mode"),
+    ) as fused_recurrent:
+        output = layer(x)[0]
+        output.sum().backward()
+    fused_recurrent.assert_not_called()
     assert x.grad is not None
     assert torch.isfinite(x.grad).all()
     for parameter in layer.parameters():

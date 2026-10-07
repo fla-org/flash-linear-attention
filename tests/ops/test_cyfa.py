@@ -127,6 +127,35 @@ def test_fused_recurrent(T, varlen, dtype):
 
 
 @pytest.mark.smoke
+@pytest.mark.parametrize('T', [1, 64])
+@pytest.mark.parametrize('name', ['k', 'q_norm_weight', 'k_norm_weight'])
+@torch.no_grad()
+def test_fused_recurrent_invalid_shape(T, name):
+    torch.manual_seed(42)
+    inputs = make_inputs(1, T, 1, 32, 32, 16, torch.float32)
+    inputs[name] = inputs[name][..., :-1]
+    with pytest.raises(ValueError, match='Q/K RMSNorm'):
+        fused_recurrent_cyfa(**inputs)
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize('T', [1, 64])
+@torch.no_grad()
+def test_fused_recurrent_noncontiguous_weights(T):
+    torch.manual_seed(42)
+    inputs = make_inputs(1, T, 2, 64, 64, 128, torch.bfloat16, initial_state=True)
+    for name in ('q_norm_weight', 'k_norm_weight'):
+        inputs[name] = torch.stack((inputs[name], torch.zeros_like(inputs[name])), dim=-1)[:, 0]
+        assert not inputs[name].is_contiguous()
+    ref, ref_state = naive_recurrent_cyfa(**inputs)
+    actual, state = fused_recurrent_cyfa(**inputs)
+    assert_close('o', ref.float(), actual.float(), 0.005)
+    for name, expected, result in zip(('hkt', 'hvt', 'lambda'), ref_state, state, strict=True):
+        assert torch.isfinite(result).all(), name
+        assert_close(name, expected, result, 0.005)
+
+
+@pytest.mark.smoke
 @torch.no_grad()
 def test_fused_recurrent_prefill():
     torch.manual_seed(42)
