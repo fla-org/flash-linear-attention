@@ -111,6 +111,6 @@ def test_gla_cached_config_respects_pruning(monkeypatch, BK, num_warps, accepted
     autotuner.maybe_load_cached_config(key=key, nargs={}, runtime_kwargs={'K': 32, 'V': 64, 'STATE_V_FIRST': True})
 
     if accepted:
-        assert autotuner.cache[key.autotune_key] == cfg
+        assert autotuner.cache[key.autotune_key].all_kwargs() == cfg.all_kwargs()
     else:
         assert key.autotune_key not in autotuner.cache
