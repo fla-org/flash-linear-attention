@@ -10,7 +10,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
-from fla.ops.utils.op import exp
+from fla.ops.utils.op import exp, unflatten_program_id
 from fla.utils import check_shared_mem, is_nvidia_hopper
 
 BKV_LIST = [64, 128] if check_shared_mem() else [32, 64]
@@ -57,8 +57,8 @@ def chunk_oja_fwd_kernel_h_blockdim64(
     SAVE_NEW_KEY: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    # (triton.cdiv(K, meta['BK']), N*H)
-    i_k, i_nh = tl.program_id(0), tl.program_id(1).to(tl.int64)
+    # (triton.cdiv(K, meta['BK']) * N * H,)
+    i_k, i_nh = unflatten_program_id(tl.cdiv(K, BK))
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
@@ -228,7 +228,7 @@ def chunk_oja_fwd_h(
     final_state = v.new_empty(N, H, K, V, dtype=torch.float32) if output_final_state else None
 
     k_new = torch.empty_like(u) if save_new_key else None
-    def grid(meta): return (triton.cdiv(K, meta['BK']), N*H)
+    def grid(meta): return (triton.cdiv(K, meta['BK']) * N * H,)
     chunk_oja_fwd_kernel_h_blockdim64[grid](
         v=v,
         u=u,
@@ -290,7 +290,7 @@ def chunk_oja_bwd_kernel_dhu_blockdim64(
     USE_FINAL_STATE_GRADIENT: tl.constexpr,
     IS_VARLEN: tl.constexpr
 ):
-    i_k, i_nh = tl.program_id(0), tl.program_id(1).to(tl.int64)
+    i_k, i_nh = unflatten_program_id(tl.cdiv(K, BK))
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
@@ -366,7 +366,7 @@ def chunk_oja_bwd_kernel_dhu_blockdim64(
 
         last_idx = min((i_t + 1) * BT, T) - 1
 
-        # Update dk_new, 按K切分
+        # update dk_new in K tiles
         p_dk = dk + o_t[:, None] * stride_k + o_k[None, :]  # [BT, BK]
         p_dk2 = dk2 + o_t[:, None] * stride_k + o_k[None, :]  # [BT, BK]
 
@@ -394,7 +394,7 @@ def chunk_oja_bwd_kernel_dhu_blockdim64(
 
         tl.store(p_dk2, b_dk.to(p_dk.dtype.element_ty), mask=m_tk)
 
-        # Update dh, 按照K切分，收集所有V维度，q一次就好，wdo要收集所有
+        # update dh in K tiles across all V tiles; load q once and w/do for each V tile
 
         p_q = q + o_k[:, None] + o_t[None, :] * stride_k  # [BK, BT]
         b_q = tl.load(p_q, mask=(o_k[:, None] < K) & m_t[None, :], other=0.0)
@@ -499,7 +499,7 @@ def chunk_oja_bwd_dhu(
     dh0 = torch.empty_like(h0, dtype=torch.float32) if h0 is not None else None
     dk2 = torch.empty_like(dk)
 
-    def grid(meta): return (triton.cdiv(K, meta['BK']), N*H)
+    def grid(meta): return (triton.cdiv(K, meta['BK']) * N * H,)
     chunk_oja_bwd_kernel_dhu_blockdim64[grid](
         q=q,
         vg=vg,
@@ -565,7 +565,7 @@ def chunk_gsa_bwd_k_kernel_dqkvg(
     NG: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_k, i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
     i_h = i_hq // NG
     if IS_VARLEN:
@@ -704,7 +704,8 @@ def chunk_oja_bwd_kernel_dvwg_h(
     HAVE_GK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_v, i_t = unflatten_program_id(tl.cdiv(V, BV))
+    i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
 
     if IS_VARLEN:
@@ -771,7 +772,7 @@ def chunk_oja_bwd_kernel_dvwg_h(
 
     b_dgv_last += tl.sum(b_dv * b_v, axis=0)
 
-    # 留给GSA2的接口
+    # reserved for GSA2
     if HAVE_GK:
         dgk += (bos * H + i_h) * V
         p_dgk = dgk + o_t[:, None] * (H*V) + o_v[None, :]
@@ -812,7 +813,7 @@ def chunk_oja_bwd_dvwg_h(
     dw = torch.empty_like(v)
     dgv_last = torch.empty_like(gv)
 
-    grid = (NV, NT, B * H)
+    grid = (NV * NT, B * H)
     chunk_oja_bwd_kernel_dvwg_h[grid](
         k=k,
         v=v,
