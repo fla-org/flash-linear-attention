@@ -440,20 +440,20 @@ Use the same convention for the PR title: `[Tag] <specific outcome>`. CI checks 
 
 Use the [PR template](.github/pull_request_template.md). The description should let a reviewer identify the problem, outcome, affected users, and evidence before opening the diff. Keep it accurate as the implementation changes.
 
-**What does this PR do?** Start with `**TL;DR:**` and one or two sentences stating the concrete outcome: what now works, what becomes faster, or what capability is added. For a bug, name the triggering condition and resulting behavior. Link the issue or design discussion. A routine fix usually needs only one short paragraph; a complex change may need a short explanation of the approach and its trade-offs.
+**Summary.** Start with `**TL;DR:**` and one or two sentences stating the concrete outcome: what now works, what becomes faster, or what capability is added. For a bug, name the triggering condition and resulting behavior. Link the issue or design discussion. A routine fix usually needs only one short paragraph; a complex change may need a short explanation of the approach and its trade-offs.
 
 Keep the description focused on observable behavior and review decisions. Include an implementation detail only when it explains correctness, the choice of algorithm, compatibility, or a material risk. Public API names can identify the contract being changed. Leave variable inventories, file-by-file summaries, line-by-line mechanics, and the history of attempted approaches to the diff or linked investigation. Avoid unsupported claims such as "more robust", "cleaner", or "bit-identical"; describe the behavior or equivalence actually verified. Do not repeat the same point in the title, summary, and a separate list of changes.
 
 For example, these short openings are adapted from FLA PRs [#1299](https://github.com/fla-org/flash-linear-attention/pull/1299) and [#1293](https://github.com/fla-org/flash-linear-attention/pull/1293):
 
 ```markdown
-## What does this PR do?
+## Summary
 
 **TL;DR:** KDA calls with negative eigenvalues or missing optional gate parameters now use the Triton implementation, preventing incorrect results or failures when FlashKDA is installed.
 ```
 
 ```markdown
-## What does this PR do?
+## Summary
 
 **TL;DR:** Adds optional sliding-window attention to single-step decoding. Existing calls keep full-context attention by default.
 ```
