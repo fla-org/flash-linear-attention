@@ -10,6 +10,8 @@ import torch
 import triton
 import triton.language as tl
 
+import fla.ops.gla.chunk as gla
+import fla.ops.utils.cache as cache
 from fla.modules.conv.triton.kernels import causal_conv1d_bwd_kernel, causal_conv1d_fwd_kernel
 from fla.ops.utils.cache import AutotuneKey, fla_cache_autotune
 from fla.utils import device
@@ -78,3 +80,37 @@ def test_causal_conv1d_autotune_key_excludes_unused_nb(kernel):
         return AutotuneKey.build(arg_names, autotuner.keys, args, {})
 
     assert build_key(nb=5).autotune_key == build_key(nb=7).autotune_key
+
+
+@pytest.mark.parametrize(
+    ('BK', 'num_warps', 'accepted'),
+    [
+        pytest.param(32, 4, False, id='unsafe-wgmma'),
+        pytest.param(64, 2, False, id='oversized-key-tile'),
+        pytest.param(32, 2, True, id='builtin-config'),
+        pytest.param(16, 4, True, id='external-config'),
+    ],
+)
+def test_gla_cached_config_respects_pruning(monkeypatch, BK, num_warps, accepted):
+    autotuner = gla.chunk_gla_bwd_kernel_inter.fn
+    configs = [triton.Config({'BK': bk, 'BV': 64}, num_warps=2, num_stages=2) for bk in (32, 64)]
+    cfg = triton.Config({'BK': BK, 'BV': 64}, num_warps=num_warps, num_stages=2)
+    key = AutotuneKey(autotune_key=(64, True, 32, 64))
+    monkeypatch.setattr(gla, 'IS_NVIDIA_HOPPER', True)
+    monkeypatch.setattr(gla, 'TRITON_ABOVE_3_6_0', True)
+    monkeypatch.setattr(gla, 'TRITON_ABOVE_3_8_0', False)
+    monkeypatch.setattr(autotuner, 'configs', configs)
+    monkeypatch.setattr(autotuner, 'cache', {key.autotune_key: cfg})
+    monkeypatch.setattr(cache, 'load_cached_config', lambda kernel_name, key: {
+        'kwargs': cfg.kwargs,
+        'num_warps': cfg.num_warps,
+        'num_stages': cfg.num_stages,
+        'num_ctas': 1,
+    })
+
+    autotuner.maybe_load_cached_config(key=key, nargs={}, runtime_kwargs={'K': 32, 'V': 64, 'STATE_V_FIRST': True})
+
+    if accepted:
+        assert autotuner.cache[key.autotune_key] == cfg
+    else:
+        assert key.autotune_key not in autotuner.cache
