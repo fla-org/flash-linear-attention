@@ -29,6 +29,7 @@ Thank you for your interest in contributing to Flash Linear Attention! All pull 
   * [NaN Memory Poisoning](#nan-memory-poisoning)
 * [Benchmarking](#benchmarking)
 * [Submit Pull Requests](#submit-pull-requests)
+  * [PR Scope and Size](#pr-scope-and-size)
   * [Commit Message Convention](#commit-message-convention)
   * [PR Description](#pr-description)
   * [CI Pipeline](#ci-pipeline)
@@ -385,6 +386,22 @@ Once your change is implemented, tested, and (if it touches performance) benchma
 - **Use Draft PRs**: feel free to open a draft early for design feedback or work-in-progress discussion.
 - **Read `AGENTS.md` and `.agents/skills/fla-mr-readiness` first**: they cover the PR checklist, test-plan requirements, and benchmark evidence standards expected of every pull request.
 - **No busywork PRs**: don't open standalone PRs for typos or isolated style tweaks; fold them into a related substantive change instead.
+
+### PR Scope and Size
+
+One PR should solve one concrete problem or deliver one concrete capability. State that outcome in a sentence: what input or use case is affected, and what changes for the user. "Fix cached KDA state updates when caching is disabled" is a scope; "various attention improvements" is not. Changes sharing a directory or a broad label such as "cleanup" or "performance" are not necessarily one task.
+
+Keep implementation, regression tests, and documentation for the same outcome together. Split unrelated fixes, speculative helpers, and independent optimizations into separate PRs. For a larger feature, prefer independently reviewable steps that each work and pass their relevant tests; link their dependencies.
+
+The default limit is **500 changed lines**, counted as additions plus deletions in the complete PR diff against its base. A replaced line counts twice. Tests, documentation, renames with edits, and generated files count as GitHub reports them; the limit is not per commit. Do not remove tests, compress code, or hide generated changes to fit the limit.
+
+A PR above 500 lines must tick the large-PR acknowledgement in the template and fill in `### Large PR justification`. Explain the single outcome, why these changes need to be reviewed together, and how to review them. Legitimate reasons include:
+
+- A mechanical migration to one agreed style or API rule across its callers.
+- One complete kernel or model implementation with its reference, registration, tests, and documentation.
+- One coherent test suite or benchmark reorganization whose shared fixtures or entry points need to change together.
+
+"Many files changed" or "all changes are related to performance" is not a justification. An exception acknowledges the review cost; reviewers can still ask for a split. Small PRs must satisfy the same scope rule.
 
 ### Commit Message Convention
 
