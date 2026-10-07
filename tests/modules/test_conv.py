@@ -1672,7 +1672,10 @@ def test_conv_backend_parity(monkeypatch, B, T, D, W, packed, state, strided, ac
         assert_close(name, expected, actual, 1e-3)
 
 
-@pytest.mark.parametrize('case', ['rank', 'channels', 'width', 'weight', 'packed-batch', 'chunk', 'state', 'dtype', 'distributed'])
+@pytest.mark.parametrize(
+    'case',
+    ['rank', 'channels', 'width', 'weight', 'packed-batch', 'chunk', 'state', 'dtype', 'distributed'],
+)
 def test_conv_backend_verifier(monkeypatch, case):
     from fla.modules.backends.gluon import GluonBackend
 

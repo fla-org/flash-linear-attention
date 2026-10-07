@@ -20,7 +20,7 @@ Guidance for AI coding agents (Claude Code, Codex, etc.) working in this repo.
 
 ## Scope and direction
 
-- **Align before coding when a design decision is involved**: a new operator or model, a new public API, a kernel rewrite with a different algorithm, or a repo-wide policy change (e.g. adding a dtype everywhere). Open an issue or a draft PR first; if a matching issue/PR already exists, comment there instead of opening a duplicate. Line count is only a heuristic — tests, config boilerplate, and mechanical repetition of an existing pattern don't count toward it.
+- **Align before coding when a design decision is involved**: a new operator or model, a new public API, a kernel rewrite with a different algorithm, or a repo-wide policy change (e.g. adding a dtype everywhere). Open an issue or a draft PR first; if a matching issue/PR already exists, comment there instead of opening a duplicate. Judge design impact separately from the PR size check: tests, config boilerplate, and mechanical repetition of an existing pattern alone do not make a change a design decision.
 - **RFC first for precision or algorithm changes**: changing the precision a validated kernel computes or accumulates in (e.g. fp32 → bf16, bf16 → fp16), relaxing a tolerance, or replacing a numerical algorithm (e.g. a different inversion or solve scheme) needs an RFC issue before a PR, even if it would stay within test tolerance. FLA's kernels are widely validated and downstream users rely on their numerics, so these are design decisions to agree on, not fixes to ship. Ordinary reorderings within the same precision — tiling, accumulation order, scheduling — do not need an RFC; they are normal optimization PRs with before/after benchmarks as usual.
 - **Stop and ask before breaking changes**: renaming or removing public symbols or arguments in `fla/layers/` / `fla/models/` or documented config fields; changing checkpoint/state-dict compatibility; changing observable behavior, including numerics beyond the existing test tolerance. Bug fixes that restore intended behavior are not breaking. If the user doesn't answer — or you are running non-interactively — do the non-breaking parts, leave the breaking part out, and describe it in your final report. Silence is not consent.
 
@@ -46,16 +46,6 @@ Keep review/PR comments concise and natural — skip heavy `**1.** **2.**` scaff
 
 ## Repo-local Skills
 
-This repo provides task-specific workflow skills under `.agents/skills/*/SKILL.md`:
+Use the [skill index](.agents/skills/README.md) to select task-specific workflows and their execution order. Skills supplement `CONTRIBUTING.md` and this file; they do not define competing contribution policies.
 
-- **`fla-optimization-loop`** — disciplined, reproducible kernel optimization loop with a frozen pytest correctness gate (`benchmarks/ops/verify.py`)
-- **`fla-nvidia-performance`** — NVIDIA GPU kernel / Triton / Gluon / TileLang / CUDA backend performance work
-- **`fla-kda`** — KDA-specific gate, intra/inter, backend, and test workflow
-- **`fla-dispatch-backends`** — `@dispatch` decorator and backend registry workflow
-- **`fla-correctness-coverage`** — Kernel correctness testing and coverage for `fla/ops/**`
-- **`fla-design-coverage`** — Contract-first design: contract cells, numerical budgets, dispatch semantics, layered coverage, and production benchmarks
-- **`fla-mr-readiness`** — Preparing MR/PR, test plans, and contribution compliance
-
-Load the relevant skill when your task matches its scope — in particular, load
-**`fla-mr-readiness`** before opening any PR. See `.agents/skills/README.md`
-for the directory convention.
+Load a relevant skill when the task matches its scope. In particular, load [fla-pr-readiness](.agents/skills/fla-pr-readiness/SKILL.md) before opening any PR.
