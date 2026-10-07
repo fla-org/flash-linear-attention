@@ -36,6 +36,11 @@ from fla.utils import (
     input_guard,
 )
 
+try:
+    from triton.experimental.gluon.language import barrier
+except ImportError:
+    from triton.experimental.gluon.language import thread_barrier as barrier
+
 # tokens per bwd program (BT * KT); each program spills one fp32 dqw/dow partial row
 GROUP = 32
 
@@ -219,7 +224,7 @@ def attnres_fwd_kernel_gluon(
         gl.store(rstd + i_l * N + o_t, b_rstd.to(rstd.dtype.element_ty), mask=m_t)
         gl.store(logit + i_l * N + o_t, b_logit.to(logit.dtype.element_ty), mask=m_t)
         # cp.async is same-lane staging, but the CTA must sync before the next issue reuses slot i_l % 2
-        gl.thread_barrier()
+        barrier()
 
     gl.store(lse + o_t, b_m + gl.log(b_acc), mask=m_t)
 
@@ -375,7 +380,7 @@ def attnres_bwd_kernel_dv_gluon(
                 b_opre += b_p[:, None] * b_v
                 if not RESIDENT:
                     # the slot just read is the next issue target
-                    gl.thread_barrier()
+                    barrier()
 
         # output RMSNorm bwd: turn b_do into the gradient w.r.t. the pre-norm output
         if HAS_ONORM:
@@ -430,9 +435,9 @@ def attnres_bwd_kernel_dv_gluon(
             gl.store(dres[i_l] + o_v, b_dv.to(dres[0].dtype.element_ty), mask=m_t[:, None] & m_d[None, :])
             b_dqw += b_inc
             if not RESIDENT:
-                gl.thread_barrier()
+                barrier()
         # tiles of iteration t are fully consumed before iteration t+1 refills the buffers
-        gl.thread_barrier()
+        barrier()
 
     i_p = gl.program_id(0).to(gl.int64)
     gl.store(dqw + i_p * D + o_d, b_dqw, mask=m_d)
@@ -739,7 +744,6 @@ class AttnResGluonBackend(BaseBackend):
     backend_type = "gluon"
     package_name = "triton.experimental.gluon"  # ships with Triton 3.5+; absent on older builds
     env_var = "FLA_ATTNRES_GLUON"
-    global_env_var = "FLA_GLUON"
     default_enable = False
     priority = 3
 

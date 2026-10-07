@@ -36,6 +36,7 @@ class BaseBackend:
     Attributes:
         backend_type (str, Optional):
             Identifier for the backend type, used to distinguish different backend implementations.
+            `FLA_<BACKEND_TYPE>` enables all backends of this type, overriding individual switches set to `0`.
             Default: `"base"`.
         package_name (str, Optional):
             Name of the external package required by the backend.
@@ -43,9 +44,6 @@ class BaseBackend:
         env_var (str, Optional):
             Environment variable name that controls whether the backend is enabled.
             `None` means always enabled. Default: `None`.
-        global_env_var (str, Optional):
-            Optional group switch that enables this backend even when `env_var` is `0`.
-            When unset or `0`, `env_var` controls enablement. Default: `None`.
         default_enable (bool, Optional):
             Whether the backend is enabled by default when `env_var` is not set.
             Set to `False` to require explicit user opt-in. Default: `True`.
@@ -56,7 +54,6 @@ class BaseBackend:
     backend_type: ClassVar[str] = "base"
     package_name: ClassVar[str | None] = None
     env_var: ClassVar[str | None] = None
-    global_env_var: ClassVar[str | None] = None
     default_enable: ClassVar[bool] = True
     # Lower number = higher priority, default is 5
     priority: ClassVar[int] = 5
@@ -69,9 +66,9 @@ class BaseBackend:
 
     @classmethod
     def is_enabled(cls) -> bool:
-        if cls.global_env_var is not None and os.environ.get(cls.global_env_var, "0") != "0":
-            return True
         if cls.env_var is None:
+            return True
+        if os.environ.get(f"FLA_{cls.backend_type.upper()}", "0") != "0":
             return True
         default_value = "1" if cls.default_enable else "0"
         return os.environ.get(cls.env_var, default_value) != "0"

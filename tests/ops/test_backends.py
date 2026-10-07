@@ -17,6 +17,7 @@ import fla.ops.common.backends.tilelang as common_tilelang_backend
 import fla.ops.generalized_delta_rule.dplr.backends.tilelang as dplr_tilelang_backend
 import fla.ops.kda.backends.tilelang as kda_tilelang_backend
 import fla.ops.rwkv6.backends.tilelang as rwkv6_tilelang_backend
+from fla.modules.backends.gluon import GluonBackend
 from fla.utils import _compat
 
 _REAL_PATH_EXISTS = Path.exists
@@ -125,60 +126,31 @@ def test_tilelang_backend_unavailable_without_tilelang(monkeypatch, backend_modu
     assert _backend_cls(backend_module).is_available() is False
 
 
-def test_rwkv6_tilelang_backend_requires_opt_in(monkeypatch):
-    monkeypatch.delenv("FLA_TILELANG", raising=False)
-    assert rwkv6_tilelang_backend.RWKV6TileLangBackend.is_enabled() is False
-
-    monkeypatch.setenv("FLA_TILELANG", "1")
-    assert rwkv6_tilelang_backend.RWKV6TileLangBackend.is_enabled() is True
-
-
 @pytest.mark.parametrize(
-    ('shared', 'conv', 'attnres', 'expected'),
-    [
-        (None, None, None, (False, False)),
-        (None, '1', '0', (True, False)),
-        (None, '0', '1', (False, True)),
-        ('0', '0', '0', (False, False)),
-        ('0', '1', '1', (True, True)),
-        ('1', None, None, (True, True)),
-        ('1', '0', '0', (True, True)),
-        ('1', '1', '0', (True, True)),
-        ('1', '0', '1', (True, True)),
-    ],
+    'backend',
+    [rwkv6_tilelang_backend.RWKV6TileLangBackend, GluonBackend],
+    ids=['tilelang', 'gluon'],
 )
-def test_gluon_backend_switch(monkeypatch, shared, conv, attnres, expected):
-    from fla.modules.backends.gluon import GluonBackend
+def test_backend_requires_opt_in(monkeypatch, backend):
+    env_var = f'FLA_{backend.backend_type.upper()}'
+    monkeypatch.delenv(env_var, raising=False)
+    monkeypatch.delenv(backend.env_var, raising=False)
+    assert backend.is_enabled() is False
 
-    attnres_backend = pytest.importorskip('fla.ops.attnres.backends.gluon').AttnResGluonBackend
-    for name, value in [('FLA_GLUON', shared), ('FLA_CONV_GLUON', conv), ('FLA_ATTNRES_GLUON', attnres)]:
-        if value is None:
-            monkeypatch.delenv(name, raising=False)
-        else:
-            monkeypatch.setenv(name, value)
+    monkeypatch.setenv(backend.env_var, '1')
+    assert backend.is_enabled() is True
 
-    assert (GluonBackend.is_enabled(), attnres_backend.is_enabled()) == expected
+    monkeypatch.setenv(backend.env_var, '0')
+    assert backend.is_enabled() is False
 
+    monkeypatch.setenv(env_var, '1')
+    assert backend.is_enabled() is True
 
-@pytest.mark.parametrize(('backend', 'enabled'), [(None, True), ('triton', False), ('gluon', True)])
-def test_gluon_benchmark_selection(monkeypatch, backend, enabled):
-    from benchmarks.ops import run
+    monkeypatch.setenv(env_var, '0')
+    assert backend.is_enabled() is False
 
-    attnres_backend = pytest.importorskip('fla.ops.attnres.backends.gluon').AttnResGluonBackend
-    monkeypatch.setenv('FLA_GLUON', '1')
-    monkeypatch.setenv('FLA_ATTNRES_GLUON', '0')
-    config = SimpleNamespace(
-        extra_kwargs={},
-        backend_env={'gluon': 'FLA_ATTNRES_GLUON'},
-        skip_backward=False,
-        default_shapes=None,
-        dim_constraints=None,
-    )
-    monkeypatch.setattr(run, 'get_op', lambda name: config)
-    monkeypatch.setattr(run, '_import_op', lambda config: None)
-
-    assert run.benchmark_op(op_name='fused_attnres', shapes={}, backend=backend) == []
-    assert attnres_backend.is_enabled() is enabled
+    monkeypatch.setenv(backend.env_var, '1')
+    assert backend.is_enabled() is True
 
 
 def test_rwkv6_tilelang_backend_verifier_accepts_supported_shape():

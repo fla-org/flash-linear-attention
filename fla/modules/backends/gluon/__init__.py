@@ -19,7 +19,6 @@ class GluonBackend(BaseBackend):
     backend_type = 'gluon'
     package_name = 'triton.experimental.gluon'
     env_var = 'FLA_CONV_GLUON'
-    global_env_var = 'FLA_GLUON'
     default_enable = False
     priority = 5
 
