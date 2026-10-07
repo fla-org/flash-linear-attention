@@ -693,7 +693,7 @@ class MomAttention(nn.Module):
 
         if torch.is_grad_enabled():
             mode = 'chunk'
-        elif hidden_states.shape[1] <= 64:
+        elif hidden_states.shape[1] <= 64 and not self.training:
             mode = 'fused_recurrent'
         else:
             mode = self.mode
