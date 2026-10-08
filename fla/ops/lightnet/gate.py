@@ -8,17 +8,9 @@
 import torch
 import triton
 import triton.language as tl
-import triton.language.extra.libdevice as tldevice
 
-from fla.ops.utils.op import exp, unflatten_program_id
+from fla.ops.utils.op import exp, logaddexp, unflatten_program_id
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, input_guard
-
-
-@triton.jit
-def _logaddexp(a, b):
-    maximum = tl.maximum(a, b)
-    difference = tl.where(maximum == float('-inf'), 0., -tl.abs(a - b))
-    return maximum + tldevice.log1p(exp(difference))
 
 
 @triton.heuristics({
@@ -75,8 +67,8 @@ def fused_lightnet_gate_fwd_kernel(
         o_t = i_t + o_i
         m_x = (o_t[:, None] < T) & m_s[None, :]
         b_x = tl.load(p_x + o_t[:, None] * S, mask=m_x, other=float('-inf')).to(tl.float32)
-        b_z = tl.associative_scan(b_x, axis=0, combine_fn=_logaddexp)
-        b_z = _logaddexp(b_z, b_previous[None, :])
+        b_z = tl.associative_scan(b_x, axis=0, combine_fn=logaddexp)
+        b_z = logaddexp(b_z, b_previous[None, :])
         o_prev = tl.broadcast_to(tl.maximum(o_i - 1, 0)[:, None], (BT, BS))
         b_prev_z = tl.gather(b_z, o_prev, axis=0)
         b_prev_z = tl.where(o_i[:, None] == 0, b_previous[None, :], b_prev_z)
