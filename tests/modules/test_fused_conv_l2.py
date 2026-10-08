@@ -154,6 +154,52 @@ def test_fused_short_conv_varlen(lengths, head_dim, has_initial_state, output_fi
     )
 
 
+@pytest.mark.parametrize('dtype', [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize('use_norm', [False, True])
+@pytest.mark.parametrize('W', [1, 4])
+@pytest.mark.parametrize(
+    ('lengths', 'packed'),
+    [
+        pytest.param([0, 2, 0, 5, 0], True, id='packed-empty-head-middle-tail'),
+        pytest.param([0, 0], False, id='dense-all-empty'),
+        pytest.param([0, 0, 0], True, id='packed-all-empty'),
+    ],
+)
+def test_fused_short_conv_empty_state_identity(lengths, packed, W, use_norm, dtype):
+    torch.manual_seed(42)
+    N, H, head_dim = len(lengths), 2, 80
+    B, T, D = (1 if packed else N), (sum(lengths) if packed else lengths[0]), H * head_dim
+    x = torch.randn(B, T, D, device=device, dtype=dtype)
+    weight = torch.randn(D, W, device=device, dtype=dtype)
+    initial_state = torch.randn(N, D, W, device=device, dtype=dtype, requires_grad=True)
+    cu_seqlens = torch.tensor([0, *lengths], device=device, dtype=torch.long).cumsum(0) if packed else None
+    _, final_state = fused_short_conv(
+        x=x,
+        weight=weight,
+        initial_state=initial_state,
+        output_final_state=True,
+        activation='silu',
+        cu_seqlens=cu_seqlens,
+        use_norm=use_norm,
+        head_dim=head_dim,
+    )
+    dht = torch.randn_like(final_state)
+    dh0, = torch.autograd.grad(outputs=final_state, inputs=initial_state, grad_outputs=dht)
+
+    expected_states = []
+    expected_dh0 = torch.zeros_like(initial_state)
+    bos = 0
+    for i_n, length in enumerate(lengths):
+        sequence = x[0, bos:bos + length] if packed else x[i_n, :length]
+        history = torch.cat((initial_state[i_n].detach(), sequence.T), dim=-1)
+        expected_states.append(history[:, -W:])
+        if length < W:
+            expected_dh0[i_n, :, length:] = dht[i_n, :, :W - length]
+        bos += length
+    torch.testing.assert_close(actual=final_state, expected=torch.stack(expected_states), rtol=0, atol=0)
+    torch.testing.assert_close(actual=dh0, expected=expected_dh0, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize('use_norm', [False, True])
 def test_fused_short_conv_norm_options(use_norm):
     _check_fused_short_conv(

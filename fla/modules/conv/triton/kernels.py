@@ -527,6 +527,13 @@ def compute_dh0_kernel(
     o_d = i_d * BD + tl.arange(0, BD)
     m_d = o_d < D
 
+    if USE_FINAL_STATE:
+        if seq_len == 0:
+            # Empty sequences preserve the oldest cache slot as well.
+            p_state = i_n * D * W + o_d * W
+            b_dht = tl.load(dht + p_state, mask=m_d, other=0)
+            tl.store(dh0 + p_state, b_dht.to(dh0.dtype.element_ty), mask=m_d)
+
     # For each i_w in [1, W), compute dh0[i_n, :, i_w]
     for i_w in tl.static_range(1, W):
         b_dh0 = tl.zeros([BD], dtype=tl.float32)
