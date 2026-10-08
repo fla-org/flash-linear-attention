@@ -1233,8 +1233,9 @@ def parallel_attn_bwd_gluon(
             NW=nw,
             num_warps=nw,
         )
-    dk_out = reduce(dk_out, 'b t (h g) k -> b t h k', g=hq // h, reduction='sum')
-    dv_out = reduce(dv_out, 'b t (h g) v -> b t h v', g=hq // h, reduction='sum')
+    if hq != h:
+        dk_out = reduce(dk_out, 'b t (h g) k -> b t h k', g=hq // h, reduction='sum')
+        dv_out = reduce(dv_out, 'b t (h g) v -> b t h v', g=hq // h, reduction='sum')
     if g_cumsum is not None:
         dg_q.add_(dg_k)
     dsink = None if dsink_rows is None else dsink_rows.sum((0, 1))
