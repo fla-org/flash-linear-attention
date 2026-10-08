@@ -20,7 +20,7 @@ from fla.layers.utils import get_layer_cache, repad_hidden_states, unpad_hidden_
 from fla.modules import FusedRMSNormGated, ShortConvolution
 from fla.modules.fused_norm_gate import rms_norm_swish_gate_linear
 from fla.ops.gla import chunk_gla, fused_recurrent_gla
-from fla.ops.utils.logcumsumexp import logcumsumexp_normalize
+from fla.ops.lightnet.gate import fused_lightnet_gate
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
@@ -168,7 +168,7 @@ class LightNetAttention(nn.Module):
         q, k = map(lambda x: rearrange(x, '... (h d) -> ... h d', d=self.head_f_dim), (q, k))
         v = rearrange(v, '... (h d) -> ... h d', d=self.head_i_dim)
         last_z = last_state['ffn_state'] if last_state is not None and last_state.get('ffn_state') is not None else None
-        k, g, last_z = logcumsumexp_normalize(x=k, initial_state=last_z, cu_seqlens=cu_seqlens)
+        k, g, last_z = fused_lightnet_gate(x=k, initial_state=last_z, cu_seqlens=cu_seqlens)
 
         recurrent_state = last_state['recurrent_state'] if last_state is not None else None
         if mode == 'fused_recurrent':

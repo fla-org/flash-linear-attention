@@ -8,43 +8,9 @@
 import pytest
 import torch
 
-from fla.ops.utils.logcumsumexp import logcumsumexp_normalize
+from fla.ops.lightnet.gate import fused_lightnet_gate
+from fla.ops.lightnet.naive import naive_lightnet_gate
 from fla.utils import assert_close, device
-
-
-def naive_logcumsumexp_normalize(
-    x: torch.Tensor,
-    initial_state: torch.Tensor | None,
-    lengths: tuple[int, ...],
-    layout: str,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    sequences = x.unbind(0) if layout == "dense" else x.squeeze(0).split(lengths)
-    keys, gates, final_states = [], [], []
-    for i, sequence in enumerate(sequences):
-        state = initial_state[i] if initial_state is not None else None
-        if sequence.shape[0] == 0:
-            keys.append(sequence)
-            gates.append(sequence)
-            if state is None:
-                state = x.new_full((1, *x.shape[2:]), float("-inf"), dtype=torch.float32)
-            final_states.append(state)
-            continue
-
-        z = sequence.float().logcumsumexp(0)
-        if state is not None:
-            z = torch.logaddexp(state, z)
-            previous = torch.cat([state, z[:-1]], dim=0)
-        else:
-            previous = torch.cat([z[:1], z[:-1]], dim=0)
-        keys.append((sequence.float() - z).exp().to(x.dtype))
-        gates.append(torch.nan_to_num(previous - z, nan=0.0, posinf=0.0, neginf=0.0).to(x.dtype))
-        final_states.append(z[-1:])
-
-    if layout == "dense":
-        k, g = torch.stack(keys), torch.stack(gates)
-    else:
-        k, g = torch.cat(keys).unsqueeze(0), torch.cat(gates).unsqueeze(0)
-    return k, g, torch.stack(final_states)
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16], ids=["fp32", "fp16", "bf16"])
@@ -65,7 +31,7 @@ def naive_logcumsumexp_normalize(
         pytest.param("packed", (1024, 1, 0, 65), "mixed", 2, 17, id="varlen-T1024-mixed-cache"),
     ],
 )
-def test_logcumsumexp_normalize(dtype: torch.dtype, layout: str, lengths: tuple[int, ...], state_mode: str, H: int, K: int):
+def test_fused_gate(dtype: torch.dtype, layout: str, lengths: tuple[int, ...], state_mode: str, H: int, K: int):
     torch.manual_seed(42)
     N = len(lengths)
     B, T = (N, lengths[0]) if layout == "dense" else (1, sum(lengths))
@@ -82,8 +48,8 @@ def test_logcumsumexp_normalize(dtype: torch.dtype, layout: str, lengths: tuple[
     if layout == "packed":
         cu_seqlens = torch.tensor((0, *lengths), device=device, dtype=torch.int32).cumsum(0, dtype=torch.int32)
 
-    actual = logcumsumexp_normalize(x=x, initial_state=initial_state, cu_seqlens=cu_seqlens)
-    expected = naive_logcumsumexp_normalize(x=reference_x, initial_state=reference_state, lengths=lengths, layout=layout)
+    actual = fused_lightnet_gate(x=x, initial_state=initial_state, cu_seqlens=cu_seqlens)
+    expected = naive_lightnet_gate(x=reference_x, initial_state=reference_state, lengths=lengths, layout=layout)
     tol = {torch.float32: 1e-3, torch.float16: 5e-3, torch.bfloat16: 2e-2}[dtype]
     for name, reference, result in zip(("k", "g"), expected[:2], actual[:2]):
         assert result.shape == x.shape
