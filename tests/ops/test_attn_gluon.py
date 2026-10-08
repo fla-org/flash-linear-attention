@@ -136,6 +136,18 @@ def test_parallel(gluon_route, dtype, varlen, use_g, use_sink, window, HQ):
 def test_parallel_copy_path(gluon_route, monkeypatch, use_tma, varlen, dim):
     from fla.ops.attn.backends.gluon import parallel
 
+    calls = {'generic': 0, 'pipeline': 0}
+    for name, kernel in (
+        ('generic', parallel.parallel_attn_fwd_kernel_gluon),
+        ('pipeline', parallel.parallel_attn_fwd_kernel_pipeline),
+    ):
+        original = kernel.run
+
+        def wrapped(*args, _original=original, _name=name, **kwargs):
+            calls[_name] += 1
+            return _original(*args, **kwargs)
+
+        monkeypatch.setattr(kernel, 'run', wrapped)
     monkeypatch.setattr(parallel, 'IS_TMA_SUPPORTED', use_tma)
     _compare(
         B=1,
@@ -152,6 +164,8 @@ def test_parallel_copy_path(gluon_route, monkeypatch, use_tma, varlen, dim):
         supplied_indices=varlen,
     )
     assert gluon_route == {'fwd': 1, 'bwd': 1}
+    pipeline = use_tma and dim <= 128 and get_device_capability()[0] == 10
+    assert calls == {'generic': int(not pipeline), 'pipeline': int(pipeline)}
 
 
 @requires_gluon
