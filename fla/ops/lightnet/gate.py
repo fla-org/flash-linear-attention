@@ -91,6 +91,9 @@ def _reverse_recurrence(a_left, b_left, a_right, b_right):
 @triton.heuristics({
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
     'USE_INITIAL_STATE': lambda args: args['initial_state'] is not None,
+    'HAS_DK': lambda args: args['dk'] is not None,
+    'HAS_DG': lambda args: args['dg'] is not None,
+    'USE_FINAL_STATE_GRADIENT': lambda args: args['dfinal_state'] is not None,
 })
 @triton.jit(do_not_specialize=['T'])
 def fused_lightnet_gate_bwd_kernel(
@@ -109,6 +112,9 @@ def fused_lightnet_gate_bwd_kernel(
     BS: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
+    HAS_DK: tl.constexpr,
+    HAS_DG: tl.constexpr,
+    USE_FINAL_STATE_GRADIENT: tl.constexpr,
 ):
     i_s, i_n = unflatten_program_id(tl.cdiv(S, BS))
     if IS_VARLEN:
@@ -122,15 +128,20 @@ def fused_lightnet_gate_bwd_kernel(
     m_s = o_s < S
     p_x = x + bos * S + o_s
     p_z = z + bos * S + o_s
-    p_dk = dk + bos * S + o_s
-    p_dg = dg + bos * S + o_s
+    if HAS_DK:
+        p_dk = dk + bos * S + o_s
+    if HAS_DG:
+        p_dg = dg + bos * S + o_s
     p_dx = dx + bos * S + o_s
     if USE_INITIAL_STATE:
         b_z0 = tl.load(initial_state + i_n * S + o_s, mask=m_s, other=float('-inf')).to(tl.float32)
     else:
         b_z0 = tl.full((BS,), float('-inf'), tl.float32)
     b_dzp = tl.full((BS,), 0., tl.float32)
-    b_dzt = tl.load(dfinal_state + i_n * S + o_s, mask=m_s, other=0.).to(tl.float32)
+    if USE_FINAL_STATE_GRADIENT:
+        b_dzt = tl.load(dfinal_state + i_n * S + o_s, mask=m_s, other=0.).to(tl.float32)
+    else:
+        b_dzt = tl.zeros((BS,), tl.float32)
     for i_t in range(0, T, BT):
         o_t = T - 1 - i_t - o_i
         m_x = (o_t[:, None] >= 0) & m_s[None, :]
@@ -139,12 +150,16 @@ def fused_lightnet_gate_bwd_kernel(
         b_z = tl.load(p_z + o_t[:, None] * S, mask=m_x, other=0.)
         b_zn = tl.load(p_z + (o_t[:, None] + 1) * S, mask=m_next, other=0.)
         b_k = exp(b_x - b_z)
-        b_dk = tl.load(p_dk + o_t[:, None] * S, mask=m_x, other=0.).to(tl.float32)
-        b_dg = tl.load(p_dg + o_t[:, None] * S, mask=m_x, other=0.).to(tl.float32)
-        b_dgn = tl.load(p_dg + (o_t[:, None] + 1) * S, mask=m_next, other=0.).to(tl.float32)
-        b_dg = tl.where((o_t[:, None] > 0) | (b_z0[None, :] != float('-inf')), b_dg, 0.)
+        if HAS_DK:
+            b_dk = tl.load(p_dk + o_t[:, None] * S, mask=m_x, other=0.).to(tl.float32)
+        else:
+            b_dk = tl.zeros((BT, BS), tl.float32)
         b_dzc = -b_dk * b_k
-        b_dzc += b_dgn - b_dg
+        if HAS_DG:
+            b_dg = tl.load(p_dg + o_t[:, None] * S, mask=m_x, other=0.).to(tl.float32)
+            b_dgn = tl.load(p_dg + (o_t[:, None] + 1) * S, mask=m_next, other=0.).to(tl.float32)
+            b_dg = tl.where((o_t[:, None] > 0) | (b_z0[None, :] != float('-inf')), b_dg, 0.)
+            b_dzc += b_dgn - b_dg
         b_dzc += tl.where(o_t[:, None] == T - 1, b_dzt[None, :], 0.)
         # all exponent differences in the reverse recurrence are nonpositive.
         b_r = exp(tl.where(m_next, b_z - b_zn, 0.))
@@ -157,8 +172,9 @@ def fused_lightnet_gate_bwd_kernel(
         if T > 0:
             b_z1 = tl.load(p_z, mask=m_s, other=0.)
             b_dz0 = exp(b_z0 - b_z1) * b_dzp
-            b_dg0 = tl.load(p_dg, mask=m_s, other=0.).to(tl.float32)
-            b_dz0 += tl.where(b_z0 != float('-inf'), b_dg0, 0.)
+            if HAS_DG:
+                b_dg0 = tl.load(p_dg, mask=m_s, other=0.).to(tl.float32)
+                b_dz0 += tl.where(b_z0 != float('-inf'), b_dg0, 0.)
         else:
             b_dz0 = b_dzt
         tl.store(dinitial_state + i_n * S + o_s, b_dz0, mask=m_s)
@@ -196,9 +212,9 @@ def fused_lightnet_gate_bwd(
     z: torch.Tensor,
     initial_state: torch.Tensor | None,
     cu_seqlens: torch.Tensor | None,
-    dk: torch.Tensor,
-    dg: torch.Tensor,
-    dfinal_state: torch.Tensor,
+    dk: torch.Tensor | None,
+    dg: torch.Tensor | None,
+    dfinal_state: torch.Tensor | None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     B, T, H, K = x.shape
     N = B if cu_seqlens is None else cu_seqlens.numel() - 1
@@ -236,6 +252,7 @@ class FusedLightNetGateFunction(torch.autograd.Function):
             save_z=ctx.needs_input_grad[0] or ctx.needs_input_grad[1],
         )
         ctx.save_for_backward(x, z, initial_state, cu_seqlens)
+        ctx.set_materialize_grads(False)
         return k, g, final_state
 
     @staticmethod
