@@ -103,5 +103,5 @@ cumulative AB deltas across separate runs do not compose.
 summing N independent deltas accumulates noise that can reverse sign.
 
 **How to apply:** For iteration *signal*, rank by the solution's own runtime in one run.
-For the *verdict*, run the full `--base main` compare in one session.
+For the *verdict*, run the full comparison against the recorded baseline SHA (`--base <baseline-sha>`) in one session.
 Don't claim a cumulative win as the sum of prior separate measurements — re-measure directly against the baseline.

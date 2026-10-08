@@ -3,7 +3,7 @@ name: fla-correctness-coverage
 description: >
   Guidelines for kernel correctness testing and coverage in fla/ops/** and related
   modules, including common Triton grid/addressing pitfalls. Helps decide what
-  tests to add or run before an MR.
+  tests to add or run before a PR.
 ---
 
 # FLA Correctness & Coverage Skill
@@ -11,6 +11,10 @@ description: >
 Use this skill when adding or modifying a kernel in `fla/ops/` (e.g., KDA, GDN,
 GLA, DeltaNet, NSA, etc.) and you need to verify correctness or close a coverage
 gap.
+
+For a new kernel contract, backend route, or numerical change, use `fla-design-coverage` first. This skill supplies the test axes for that contract; operator and backend skills supply their specific cases.
+
+Gradient and backward coverage applies to training APIs. For forward-only inference APIs, state that contract explicitly and compare outputs and final states against the reference.
 
 ## Workflow
 
@@ -36,16 +40,16 @@ test depends on that operator's math or distributed protocol.
 
 For each kernel, check coverage across these dimensions:
 
-| Axis | Values to cover |
-|------|-----------------|
-| **Sequence layout** | dense, variable-length (`varlen`) |
-| **Direction** | forward, backward |
-| **Gate mode** | safe gate, non-safe gate (if applicable) |
-| **Beta mode** | raw beta, post-sigmoid beta (if applicable) |
-| **QK normalization** | with L2 norm, without L2 norm |
-| **State** | initial state, final state (if the op supports state passing) |
-| **GVA** | grouped value attention (GVA) enabled vs disabled |
-| **Head dimensions** | `D != Dv` (different qk and v head dims) |
+| Axis                 | Values to cover                                                                          |
+| -------------------- | ---------------------------------------------------------------------------------------- |
+| **Sequence layout**  | dense, variable-length (`varlen`)                                                        |
+| **Direction**        | forward, backward                                                                        |
+| **Gate mode**        | safe gate, non-safe gate (if applicable)                                                 |
+| **Beta mode**        | raw beta, post-sigmoid beta (if applicable)                                              |
+| **QK normalization** | with L2 norm, without L2 norm                                                            |
+| **State**            | initial state, final state (if the op supports state passing)                            |
+| **GVA**              | grouped value attention (GVA) enabled vs disabled                                        |
+| **Head dimensions**  | `D != Dv` (different qk and v head dims)                                                 |
 | **Backend verifier** | reference implementation, `torch.autograd.gradcheck`, and backend-specific sanity checks |
 
 ## Kernel implementation safety checks
@@ -60,10 +64,7 @@ addition to numerical tests:
 - Keep tensor address arithmetic in `tl.int64`, including block bases, strides,
   varlen sequence offsets, head offsets, and element offsets. Do not rely on
   `int16` or `int32` overflow behavior.
-- Do not introduce new `tl.make_block_ptr` use. Triton marks it deprecated; use
-  `TensorDescriptor` / `tl.make_tensor_descriptor` when descriptor semantics are
-  needed, or explicit `tl.load` / `tl.store` pointer arithmetic following an
-  existing validated kernel pattern.
+- Mainline Triton kernels must use explicit `tl.load` / `tl.store` pointer arithmetic rather than `tl.make_block_ptr` / `tl.advance`. The `triton_ascend` backend is exempt; follow `fla-ascend-performance` for its block-pointer constraints. TMA descriptors are an opt-in optimization subject to the capability, alignment, fallback, and benchmark requirements in `CONTRIBUTING.md`.
 - If a change touches grid shape, program-id mapping, varlen offsets, or pointer
   math, run a shape that exercises the changed path on NVIDIA and any supported
   non-NVIDIA backend, or add a precise verifier/skip for unsupported platforms.
@@ -106,6 +107,8 @@ pytest tests/context_parallel/test_cp_kda.py -v
 # Model-level test
 pytest tests/models/test_modeling_kda.py -v
 
-# All dependent tests (see fla-mr-readiness skill)
+# Discover dependent tests (see fla-pr-readiness skill)
 python scripts/find_dependent_tests.py <changed_files>
 ```
+
+The dependency helper lists test files; it does not run them. Run the reported targets with `pytest` and record their results.

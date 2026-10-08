@@ -15,7 +15,7 @@ from fla.ops.attn.parallel import parallel_attn_bwd_preprocess
 from fla.ops.nsa.compression import parallel_nsa_compression
 from fla.ops.nsa.utils import _bitonic_merge
 from fla.ops.utils import prepare_block_csr, prepare_chunk_indices, prepare_chunk_offsets, prepare_lens, prepare_token_indices
-from fla.ops.utils.op import exp, log
+from fla.ops.utils.op import exp, log, unflatten_program_id
 from fla.ops.utils.pooling import mean_pooling
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, check_shared_mem, contiguous
 
@@ -210,7 +210,7 @@ def parallel_nsa_fwd_kernel(
     IS_VARLEN: tl.constexpr,
     USE_BLOCK_COUNTS: tl.constexpr,
 ):
-    i_t, i_v, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    i_t, i_v, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     # k/v: [B, TK, H, *], q: [B, TQ, HQ, K], block_indices: [B, TQ, H, S], lse: [B, TQ, HQ]; G = HQ // H
 
@@ -331,7 +331,7 @@ def parallel_nsa_bwd_kernel_dq(
     IS_VARLEN: tl.constexpr,
     USE_BLOCK_COUNTS: tl.constexpr,
 ):
-    i_t, i_v, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    i_t, i_v, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
 
     all = B * T.to(tl.int64)
@@ -459,7 +459,7 @@ def parallel_nsa_bwd_kernel_dkv(
     BQ: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_blk = tl.program_id(0), tl.program_id(1).to(tl.int64)
+    i_v, i_blk = unflatten_program_id(tl.cdiv(V, BV))
     all = B * T.to(tl.int64)
     if IS_VARLEN:
         i_c, i_h = i_blk // H, i_blk % H
@@ -730,7 +730,7 @@ def parallel_nsa_bwd(
         block_size=block_size,
     )
     NB = chunk_indices.shape[0] * H if cu_seqlens is not None else B * H * M
-    grid = (NV, NB)
+    grid = (NV * NB,)
     parallel_nsa_bwd_kernel_dkv[grid](
         q=q,
         k=k,

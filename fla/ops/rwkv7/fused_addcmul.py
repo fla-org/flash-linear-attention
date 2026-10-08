@@ -63,7 +63,7 @@ def fused_addcmul_fwd_kernel(
     D: tl.constexpr,
     BD: tl.constexpr,
 ):
-    i_b, i_t = tl.program_id(0).to(tl.int64), tl.program_id(1) * BT
+    i_b, i_t = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64) * BT
 
     bos = i_b * (T + T_OFFSET)
     t_vec = i_t + T_OFFSET + tl.arange(0, BT)
