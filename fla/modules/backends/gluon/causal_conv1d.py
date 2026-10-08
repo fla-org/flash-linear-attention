@@ -34,6 +34,7 @@ def causal_conv1d_fwd_kernel(
     BT: gl.constexpr,
     BD: gl.constexpr,
     BT_UNROLL: gl.constexpr,
+    NUM_WARPS: gl.constexpr,
     ACTIVATION: gl.constexpr,
     NUM_SPLITS: gl.constexpr = 1,
 ):
@@ -41,7 +42,7 @@ def causal_conv1d_fwd_kernel(
     layout: gl.constexpr = gl.BlockedLayout(
         size_per_thread=[1, BD // 32],
         threads_per_warp=[1, 32],
-        warps_per_cta=[gl.num_warps(), 1],
+        warps_per_cta=[NUM_WARPS, 1],
         order=[1, 0],
     )
     i_d = gl.program_id(0).to(gl.int64)
@@ -119,12 +120,13 @@ def causal_conv1d_bwd_kernel(
     BT: gl.constexpr,
     BD: gl.constexpr,
     BT_UNROLL: gl.constexpr,
+    NUM_WARPS: gl.constexpr,
     ACTIVATION: gl.constexpr,
 ):
     layout: gl.constexpr = gl.BlockedLayout(
         size_per_thread=[1, BD // 32],
         threads_per_warp=[1, 32],
-        warps_per_cta=[gl.num_warps(), 1],
+        warps_per_cta=[NUM_WARPS, 1],
         order=[1, 0],
     )
     i_d = gl.program_id(0).to(gl.int64)
@@ -214,11 +216,12 @@ def causal_conv1d_bwd_kernel_dwdb(
     W: gl.constexpr,
     BN: gl.constexpr,
     BD: gl.constexpr,
+    NUM_WARPS: gl.constexpr,
 ):
     layout: gl.constexpr = gl.BlockedLayout(
         size_per_thread=[1, BD // 32],
         threads_per_warp=[1, 32],
-        warps_per_cta=[gl.num_warps(), 1],
+        warps_per_cta=[NUM_WARPS, 1],
         order=[1, 0],
     )
     i_d = gl.program_id(0).to(gl.int64)
@@ -286,6 +289,7 @@ def causal_conv1d_fwd(
         BT=chunk_size // num_splits,
         BD=BD,
         BT_UNROLL=8,
+        NUM_WARPS=num_warps,
         ACTIVATION=activation,
         NUM_SPLITS=num_splits,
         num_warps=num_warps,
@@ -346,6 +350,7 @@ def causal_conv1d_bwd(
         BT=chunk_size,
         BD=BD,
         BT_UNROLL=16,
+        NUM_WARPS=num_warps,
         ACTIVATION=activation,
         num_warps=num_warps,
     )
@@ -361,6 +366,7 @@ def causal_conv1d_bwd(
         W=W,
         BN=128,
         BD=BD,
+        NUM_WARPS=num_warps,
         num_warps=num_warps,
     )
     dr = dy if residual is not None else None
