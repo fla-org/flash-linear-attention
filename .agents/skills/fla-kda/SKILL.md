@@ -38,13 +38,11 @@ exercise KDA behavior.
    - `A_log`, `dt_bias`, and `lower_bound` are not part of the gate activation.
 2. In-kernel mode: `use_gate_in_kernel=True`.
    - `g` is raw gate input.
-   - `A_log` is required and `dt_bias` is optional.
-   - Without `safe_gate`, activation is `-exp(A_log) * softplus(g + dt_bias)`.
-   - With `safe_gate`, activation is
-     `lower_bound * sigmoid(exp(A_log) * (g + dt_bias))`.
+   - `dt_bias` is optional. `A_log` is required when `lower_bound` is absent and optional when it is provided.
+   - Without `lower_bound`, activation is `-exp(A_log) * softplus(g + dt_bias)`.
+   - With `lower_bound`, activation is `lower_bound * sigmoid(exp(A_log) * (g + dt_bias))`; omitting `A_log` uses a multiplier of one.
 
-`safe_gate=True` requires `use_gate_in_kernel=True`, `lower_bound is not None`,
-and `-5 <= lower_bound < 0`.
+`safe_gate` selects the safe intra path independently of where gate activation happens. With `use_gate_in_kernel=True`, `safe_gate=True` requires `lower_bound is not None` and `-5 <= lower_bound < 0`. Pre-gated safe mode is also supported: the caller supplies bounded log-space gates, with `[-5, 0]` covered by `tests/ops/test_kda.py`. The public wrapper does not validate the values of pre-gated tensors.
 
 ## Safe gate numerical note
 
@@ -94,7 +92,7 @@ only axes affected by the change:
 
 - dense and varlen sequence layout;
 - forward and backward if training path is touched;
-- pre-gated, non-safe in-kernel, and safe in-kernel gate modes where supported;
+- pre-gated safe/non-safe, non-safe in-kernel, and safe in-kernel gate modes where supported;
 - raw beta logits and post-sigmoid beta where supported;
 - `use_qk_l2norm_in_kernel=True/False` where relevant;
 - MHA and GVA (`HV > H`);

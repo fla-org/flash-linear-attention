@@ -27,7 +27,7 @@ def intra_chunk_preprocess_bwd_kernel(
     K: tl.constexpr, BT: tl.constexpr, BK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1)
+    i_t, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_n, i_hq = i_nh // HQ, i_nh % HQ
     i_h = i_hq // G
 

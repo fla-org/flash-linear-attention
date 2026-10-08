@@ -10,7 +10,7 @@ import warnings
 
 import torch
 
-from ._config import FLA_CI_ENV
+from fla.utils.env import FLA_CI_ENV
 
 logger = logging.getLogger(__name__)
 

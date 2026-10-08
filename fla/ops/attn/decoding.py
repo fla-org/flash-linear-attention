@@ -52,7 +52,7 @@ def naive_attn_decoding_kernel(
     USE_G: tl.constexpr,
     USE_SINK_BIAS: tl.constexpr,
 ):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     NV = tl.cdiv(V, BV)
     i_v, i_bh = pid % NV, (pid // NV).to(tl.int64)
     i_b, i_hq = i_bh // HQ, i_bh % HQ

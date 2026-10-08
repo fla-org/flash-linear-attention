@@ -42,7 +42,7 @@ def fused_recurrent_delta_rule_fwd_kernel(
     IS_BETA_HEADWISE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     NV, NK = tl.cdiv(V, BV), tl.cdiv(K, BK)
     i_v, i_k, i_nh = pid % NV, (pid // NV) % NK, (pid // (NV * NK)).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
@@ -136,7 +136,7 @@ def fused_recurrent_delta_rule_bwd_kernel(
     USE_FINAL_STATE_GRADIENT: tl.constexpr,  # whether to use dht
     IS_VARLEN: tl.constexpr,
 ):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     NV = tl.cdiv(V, BV)
     i_v, i_k, i_nh = pid % NV, (pid // NV) % NK, (pid // (NV * NK)).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
