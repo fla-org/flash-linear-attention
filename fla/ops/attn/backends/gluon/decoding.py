@@ -104,7 +104,7 @@ def attn_decoding_fwd_kernel_split(
             async_copy.commit_group()
         keys = ks.index(slot).load(layout)
         values = vs.index(slot).load(layout)
-        scores = gl.sum(q[None, :] * keys, 1)
+        scores = gl.sum(q[None, :] * keys, 1).to(gl.float32)
         if USE_G:
             gk = gl.load(G + (start + rows) * HQ + hq, start + rows < last, other=0).to(gl.float32)
             scores += gq - gk

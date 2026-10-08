@@ -426,6 +426,35 @@ def test_decoding_split(monkeypatch, dtype, K, V, offset, window):
 
 
 @requires_gluon
+@pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(('T', 'K'), [(256, 128), (8192, 512)])
+def test_decoding_score_precision(monkeypatch, dtype, T, K):
+    from fla.ops.attn.backends.gluon import decoding
+    from fla.ops.attn.decoding import attn_decoding_one_step
+    from fla.ops.attn.naive import naive_attn_decoding
+
+    monkeypatch.setenv('FLA_GLUON', '1')
+    monkeypatch.setenv('FLA_ATTN_GLUON', '0')
+    calls = []
+    original = decoding.attn_decoding_fwd_kernel_split.run
+
+    def wrapped(*args, **kwargs):
+        calls.append(True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(decoding.attn_decoding_fwd_kernel_split, 'run', wrapped)
+    torch.manual_seed(42)
+    q = torch.randn(1, 1, 8, K, device=device, dtype=dtype)
+    k = torch.randn(1, T, 2, K, device=device, dtype=dtype)
+    v = torch.randn_like(k)
+    cu = torch.tensor([0, T], device=device, dtype=torch.int32)
+    actual = attn_decoding_one_step(q=q, k=k, v=v, cu_seqlens=cu)
+    ref = naive_attn_decoding(q=q.float(), k=k.float(), v=v.float(), cu_seqlens=cu)
+    assert_close('o', ref, actual, 0.01)
+    assert len(calls) == 1
+
+
+@requires_gluon
 def test_decoding_large_grid(monkeypatch):
     from fla.ops.attn.backends.gluon import decoding
     from fla.ops.attn.decoding import attn_decoding_one_step
