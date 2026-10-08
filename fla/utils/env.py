@@ -12,16 +12,77 @@ import logging
 import os
 import shutil
 import sys
+from functools import cache, lru_cache
 from importlib.util import find_spec
 from pathlib import Path
 
+import torch
 import triton
 from packaging import version as package_version
 
-from ._config import FLA_CACHE_RESULTS
-from ._device import IS_NPU
-
 logger = logging.getLogger(__name__)
+
+FLA_CI_ENV = os.getenv("FLA_CI_ENV") == "1"
+FLA_CACHE_RESULTS = os.getenv('FLA_CACHE_RESULTS', '1') == '1'
+
+FLA_DISABLE_TENSOR_CACHE = os.getenv('FLA_DISABLE_TENSOR_CACHE', '0') == '1'
+try:
+    FLA_TENSOR_CACHE_SIZE = int(os.getenv('FLA_TENSOR_CACHE_SIZE', "4"))
+except ValueError:
+    FLA_TENSOR_CACHE_SIZE = 4
+
+
+@lru_cache(maxsize=1)
+def check_environments():
+    """
+    Checks the current operating system, Triton version, and Python version,
+    issuing warnings if they don't meet recommendations.
+    This function's body only runs once due to lru_cache.
+    """
+    # Check Operating System
+    if sys.platform == 'win32':
+        # Check if triton-windows is installed
+        try:
+            from importlib.metadata import PackageNotFoundError, metadata
+            metadata('triton-windows')
+            # triton-windows is installed, no warning needed
+        except PackageNotFoundError:
+            logger.warning(
+                "Detected Windows operating system. Consider installing triton-windows "
+                "(https://github.com/triton-lang/triton-windows) for better compatibility. "
+                "Without it, some features may not work correctly.",
+            )
+
+    triton_version = package_version.parse(triton.__version__)
+    required_triton_version = package_version.parse("3.3.0")
+
+    if triton_version < required_triton_version:
+        logger.warning(
+            f"Current Triton version {triton_version} is below the recommended 3.3.0 version. "
+            "Errors may occur and these issues will not be fixed. "
+            "Please consider upgrading Triton.",
+        )
+
+    # Check Python version
+    py_version = package_version.parse(f"{sys.version_info.major}.{sys.version_info.minor}")
+    required_py_version = package_version.parse("3.11")
+
+    if py_version < required_py_version:
+        logger.warning(
+            f"Current Python version {py_version} is below the recommended 3.11 version. "
+            "It is recommended to upgrade to Python 3.11 or higher for the best experience.",
+        )
+
+    return None
+
+
+check_environments()
+
+
+@cache
+def check_pytorch_version(version_s: str = '2.4') -> bool:
+    return package_version.parse(torch.__version__) >= package_version.parse(version_s)
+
 
 TRITON_ABOVE_3_4_0 = package_version.parse(triton.__version__) >= package_version.parse("3.4.0")
 TRITON_ABOVE_3_5_1 = package_version.parse(triton.__version__) >= package_version.parse("3.5.1")
@@ -31,34 +92,6 @@ TRITON_ABOVE_3_8_0 = package_version.parse(triton.__version__) >= package_versio
 
 SUPPORTS_AUTOTUNE_CACHE = "cache_results" in inspect.signature(triton.autotune).parameters
 autotune_cache_kwargs = {"cache_results": FLA_CACHE_RESULTS} if SUPPORTS_AUTOTUNE_CACHE else {}
-
-
-def ascend_compile_kwargs(*, blacklist_auto_blockify: bool = False) -> dict:
-    """Return NPU Triton launch kwargs that disable auto-multi-buffer.
-
-    Empty on non-NPU devices. When ``blacklist_auto_blockify`` is set, also
-    disable AutoBlockify if the installed compiler exposes that option.
-    """
-    if not IS_NPU:
-        return {}
-    kwargs = {'multibuffer': False}
-    if blacklist_auto_blockify:
-        try:
-            from triton.backends.ascend.compiler import NPUOptions
-        except ImportError:
-            return kwargs
-        if 'has_auto_blockify_blacklist_op' in getattr(NPUOptions, '__dataclass_fields__', {}):
-            kwargs['has_auto_blockify_blacklist_op'] = True
-    return kwargs
-
-
-# expose extra.cann as extra.ascend for torch_npu inductor
-try:
-    import triton.language as tl
-    if not hasattr(tl.extra, 'ascend') and hasattr(tl.extra, 'cann'):
-        tl.extra.ascend = sys.modules['triton.language.extra.ascend'] = tl.extra.cann
-except (ImportError, AttributeError):
-    logger.debug("could not alias triton.language.extra.cann as extra.ascend")
 
 
 @functools.cache
