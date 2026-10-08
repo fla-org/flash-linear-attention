@@ -19,52 +19,62 @@ from fla.utils import assert_close, device, device_platform
 
 
 @pytest.mark.parametrize(
-    ("B", "T", "H", "D", "dtype"),
+    ("B", "T", "G", "H", "D", "dtype", "scale"),
     [
-        pytest.param(*test, id="B{}-T{}-H{}-D{}-{}".format(*test))
-        for test in [(2, 1024, 8, 128, torch.float32), (4, 2048, 8, 64, torch.float32)]
+        pytest.param(*test, id="B{}-T{}-G{}-H{}-D{}-{}-scale{}".format(*test))
+        for test in [
+            (2, 1024, 1, 8, 128, torch.float32, 1.0),
+            (4, 2048, 1, 8, 64, torch.float32, 1.0),
+            (2, 70, 2, 4, 64, torch.float32, None),
+            (1, 130, 4, 4, 128, torch.float32, 0.37),
+            (1, 63, 2, 4, 64, torch.float32, 1.0),
+        ]
     ],
 )
 @pytest.mark.skipif(device_platform == "intel", reason="Intel Triton Failure")
 def test_chunk(
     B: int,
     T: int,
+    G: int,
     H: int,
     D: int,
     dtype: torch.dtype,
+    scale: float | None,
 ):
     torch.manual_seed(42)
     os.environ["TRITON_F32_DEFAULT"] = "ieee"
 
-    L = int(np.log2(T) + 1)
+    L = int(np.ceil(np.log2(T))) + 1
     x = torch.randn(B, T, H, D, dtype=dtype, device=device)
     dt = torch.nn.functional.softplus(
         torch.randn(B, T, H, dtype=torch.float32, device=device) - 4,
     )
     a = -torch.exp(torch.rand(H, dtype=torch.float32, device=device))
-    q = torch.randn(B, T, 1, D, dtype=dtype, device=device)
-    k = torch.randn(B, T, 1, D, dtype=dtype, device=device)
+    q = torch.randn(B, T, G, D, dtype=dtype, device=device)
+    k = torch.randn(B, T, G, D, dtype=dtype, device=device)
     level_scales = torch.randn(B, T, H, L, dtype=dtype, device=device)
     v = (x * dt.unsqueeze(-1)).to(dtype=dtype)
     g = a * dt
 
-    out, _ = chunk_log_linear_attn(q, k, v, g, level_scales)
+    kwargs = {} if scale == 1.0 else {"scale": scale}
+    out, _ = chunk_log_linear_attn(q, k, v, g, level_scales, **kwargs)
 
-    ref = naive_log_linear_attn(q, k, v, g, level_scales)
+    ref = naive_log_linear_attn(q, k, v, g, level_scales, scale=scale)
 
     assert_close("o", ref, out, 0.004)
 
 
 @pytest.mark.parametrize("varlen", [False, True], ids=["dense", "varlen"])
+@pytest.mark.parametrize(("G", "H"), [(1, 1), (2, 4), (4, 4)], ids=["G1-H1", "G2-H4", "G4-H4"])
 @pytest.mark.skipif(device_platform == "intel", reason="Intel Triton Failure")
-def test_chunk_initial_state(varlen: bool):
+def test_chunk_initial_state(varlen: bool, G: int, H: int):
     torch.manual_seed(42)
-    H, K, V, L = 1, 64, 32, 15
+    K, V, L = 64, 32, 15
     prefix_lengths = [64, 70, 75, 128] if varlen else [64, 64]
     sequences = [
         (
-            torch.randn(1, length + 1, 1, K, dtype=torch.float32, device=device),
-            torch.randn(1, length + 1, 1, K, dtype=torch.float32, device=device),
+            torch.randn(1, length + 1, G, K, dtype=torch.float32, device=device),
+            torch.randn(1, length + 1, G, K, dtype=torch.float32, device=device),
             torch.randn(1, length + 1, H, V, dtype=torch.float32, device=device),
             -torch.rand(1, length + 1, H, dtype=torch.float32, device=device),
             torch.rand(1, length + 1, H, L, dtype=torch.float32, device=device),
@@ -92,49 +102,59 @@ def test_chunk_initial_state(varlen: bool):
         cu_seqlens=decode_cu_seqlens,
     )
 
-    expected = [chunk_log_linear_attn(*sequence)[0][:, -1:] for sequence in sequences]
+    expected = [naive_log_linear_attn(*sequence)[:, -1:] for sequence in sequences]
 
     assert_close("suffix", torch.cat(expected, dim=cat_dim), suffix, 0.004)
 
 
 @pytest.mark.parametrize(
-    ("B", "T", "H", "D", "dtype"),
+    ("B", "T", "G", "H", "D", "dtype", "scale"),
     [
-        pytest.param(*test, id="B{}-T{}-H{}-D{}-{}".format(*test))
-        for test in [(2, 512, 8, 64, torch.float32), (2, 1024, 8, 128, torch.float32)]
+        pytest.param(*test, id="B{}-T{}-G{}-H{}-D{}-{}-scale{}".format(*test))
+        for test in [
+            (2, 512, 1, 8, 64, torch.float32, 1.0),
+            (2, 1024, 1, 8, 128, torch.float32, 1.0),
+            (2050, 1, 2, 32, 64, torch.float32, 1.0),
+            (2, 70, 2, 4, 64, torch.float32, None),
+            (1, 130, 4, 4, 128, torch.float32, 0.37),
+            (1, 63, 2, 4, 64, torch.float32, 1.0),
+        ]
     ],
 )
 @pytest.mark.skipif(device_platform == "intel", reason="Intel Triton Failure")
 def test_chunk_bwd(
     B: int,
     T: int,
+    G: int,
     H: int,
     D: int,
     dtype: torch.dtype,
+    scale: float | None,
 ):
     torch.manual_seed(42)
     os.environ["TRITON_F32_DEFAULT"] = "ieee"
 
-    L = int(np.log2(T) + 1)
+    L = max(7, int(np.ceil(np.log2(T))) + 1)
     x = torch.randn(B, T, H, D, dtype=dtype, device=device)
     dt = torch.nn.functional.softplus(
         torch.randn(B, T, H, dtype=torch.float32, device=device) - 4,
     )
     a = -torch.exp(torch.rand(H, dtype=torch.float32, device=device))
-    q = torch.randn(B, T, 1, D, dtype=dtype, device=device)
-    k = torch.randn(B, T, 1, D, dtype=dtype, device=device)
+    q = torch.randn(B, T, G, D, dtype=dtype, device=device)
+    k = torch.randn(B, T, G, D, dtype=dtype, device=device)
     level_scales = torch.randn(B, T, H, L, dtype=dtype, device=device)
     v = (x * dt.unsqueeze(-1)).to(dtype=dtype)
     g = a * dt
     do = torch.randn_like(v)
     q, k, v, g, level_scales = map(lambda x: x.to(device).requires_grad_(), (q, k, v, g, level_scales))
 
-    out, _ = chunk_log_linear_attn(q, k, v, g, level_scales)
+    kwargs = {} if scale == 1.0 else {"scale": scale}
+    out, _ = chunk_log_linear_attn(q, k, v, g, level_scales, **kwargs)
     (out * do).sum().backward()
     tri_dq, tri_dk, tri_dv, tri_dg, tri_dl = q.grad, k.grad, v.grad, g.grad, level_scales.grad
     q.grad = k.grad = v.grad = g.grad = level_scales.grad = None
 
-    ref = naive_log_linear_attn(q, k, v, g, level_scales)
+    ref = naive_log_linear_attn(q, k, v, g, level_scales, scale=scale)
     (ref * do).sum().backward()
     ref_dq, ref_dk, ref_dv, ref_dg, ref_dl = q.grad, k.grad, v.grad, g.grad, level_scales.grad
 
@@ -147,23 +167,27 @@ def test_chunk_bwd(
 
 
 @pytest.mark.parametrize(
-    ("H", "D", "cu_seqlens", "dtype"),
+    ("G", "H", "D", "cu_seqlens", "dtype", "scale"),
     [
-        pytest.param(*test, id="H{}-D{}-cu_seqlens{}-{}".format(*test))
+        pytest.param(*test, id="G{}-H{}-D{}-cu_seqlens{}-{}-scale{}".format(*test))
         for test in [
-            (4, 64, [0, 15], torch.float32),
-            (4, 64, [0, 256, 500, 1000], torch.float32),
-            (4, 128, [0, 15, 100, 300, 1200, 2000], torch.float32),
+            (1, 4, 64, [0, 15], torch.float32, None),
+            (1, 4, 64, [0, 256, 500, 1000], torch.float32, None),
+            (1, 4, 128, [0, 15, 100, 300, 1200, 2000], torch.float32, None),
+            (2, 4, 64, [0, 15, 85, 215], torch.float32, None),
+            (4, 4, 64, [0, 15, 85, 215], torch.float32, 0.37),
         ]
     ],
 )
 @pytest.mark.skipif(device_platform == "intel", reason="Intel Triton Failure")
 @pytest.mark.smoke
 def test_chunk_varlen(
+    G: int,
     H: int,
     D: int,
     cu_seqlens: list[int],
     dtype: torch.dtype,
+    scale: float | None,
 ):
     torch.manual_seed(42)
     os.environ["TRITON_F32_DEFAULT"] = "ieee"
@@ -171,19 +195,24 @@ def test_chunk_varlen(
     cu_seqlens = torch.LongTensor(cu_seqlens).to(device)
     T = cu_seqlens[-1].item()
 
-    L = int(np.ceil(np.log2(T)) + 1)
+    L = max(7, int(np.ceil(np.log2(T))) + 1)
     x = torch.randn(1, T, H, D, dtype=dtype, device=device)
     dt = torch.nn.functional.softplus(
         torch.randn(1, T, H, dtype=torch.float32, device=device) - 4,
     )
     a = -torch.exp(torch.rand(H, dtype=torch.float32, device=device))
-    q = torch.randn(1, T, 1, D, dtype=dtype, device=device)
-    k = torch.randn(1, T, 1, D, dtype=dtype, device=device)
+    q = torch.randn(1, T, G, D, dtype=dtype, device=device)
+    k = torch.randn(1, T, G, D, dtype=dtype, device=device)
     level_scales = torch.randn(1, T, H, L, dtype=dtype, device=device)
     v = (x * dt.unsqueeze(-1)).to(dtype=dtype)
     g = a * dt
 
-    out, _ = chunk_log_linear_attn(q, k, v, g, level_scales, cu_seqlens=cu_seqlens)
+    do = torch.randn_like(v)
+    q, k, v, g, level_scales = map(lambda x: x.requires_grad_(), (q, k, v, g, level_scales))
+    out, _ = chunk_log_linear_attn(q, k, v, g, level_scales, cu_seqlens=cu_seqlens, scale=scale)
+    (out * do).sum().backward()
+    tri_dq, tri_dk, tri_dv, tri_dg, tri_dl = q.grad, k.grad, v.grad, g.grad, level_scales.grad
+    q.grad = k.grad = v.grad = g.grad = level_scales.grad = None
 
     o = []
     for i in range(cu_seqlens.shape[0] - 1):
@@ -194,10 +223,16 @@ def test_chunk_varlen(
         q_s = q[:, bos:eos]
         level_scales_s = level_scales[:, bos:eos]
 
-        o.append(naive_log_linear_attn(q_s, k_s, v_s, g_s, level_scales_s))
+        o.append(naive_log_linear_attn(q_s, k_s, v_s, g_s, level_scales_s, scale=scale))
     ref = torch.cat(o, dim=1)
 
     assert_close("o", ref, out, 0.004)
+    (ref * do).sum().backward()
+    assert_close("dq", q.grad, tri_dq, 0.007)
+    assert_close("dk", k.grad, tri_dk, 0.008)
+    assert_close("dv", v.grad, tri_dv, 0.007)
+    assert_close("dg", g.grad, tri_dg, 0.015)
+    assert_close("dl", level_scales.grad, tri_dl, 0.015)
 
 
 @pytest.mark.parametrize(
@@ -288,9 +323,9 @@ def test_chunkwise_bwd_dkg_last_chunk_fold(T: int, H: int, D: int):
     v = torch.zeros(B, T, H, D, dtype=torch.float32, device=device)
     dk = torch.zeros(B, T, H, D, dtype=torch.float32, device=device)
 
-    chunkwise_bwd_kernel_dkg[(NT, B * H)](
+    chunkwise_bwd_kernel_dkg[(NT * B * H,)](
         dh=dh, k=k, v=v, g=g, dg_last=dg_last, dk=dk, dg=dg, cu_seqlens=None,
-        T=T, H=H, K=D, V=D, L=int(np.ceil(np.log2(T))) + 1, BT=BT, NT=NT,
+        T=T, G=1, H=H, K=D, V=D, L=int(np.ceil(np.log2(T))) + 1, BT=BT, NT=NT,
     )
 
     ref = torch.zeros_like(dg)

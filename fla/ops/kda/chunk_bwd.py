@@ -169,7 +169,7 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
     IS_VARLEN: tl.constexpr,
     USE_GRAPH: tl.constexpr = False,
 ):
-    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1)
+    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_hv = i_bh // HV, i_bh % HV
     i_h = i_hv // (HV // H)
 
@@ -397,6 +397,7 @@ def chunk_kda_bwd_wy_dqkg_fused(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
+    chunk_offsets: torch.LongTensor | None = None,
     use_graph: bool = False,
 ):
     B, T, H, K, HV, V = *k.shape, v.shape[2], v.shape[-1]
@@ -604,6 +605,7 @@ def chunk_kda_bwd(
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
+        chunk_offsets=chunk_offsets,
         state_v_first=state_v_first,
         use_graph=use_graph,
     )

@@ -217,10 +217,9 @@ class RWKV7Attention(nn.Module):
 
     @staticmethod
     def _orthogonal_init(weight, gain=1.0):
-        oringinal_dtype = weight.dtype
-        weight = weight.float()
-        nn.init.orthogonal_(weight, gain=gain)
-        weight = weight.to(oringinal_dtype)
+        float_weight = weight.float()
+        nn.init.orthogonal_(float_weight, gain=gain)
+        weight.copy_(float_weight)
 
     def forward(
         self,

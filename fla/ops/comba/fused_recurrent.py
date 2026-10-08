@@ -45,7 +45,7 @@ def fused_recurrent_comba_fwd_kernel(
     USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     NK, NV = tl.cdiv(K, BK), tl.cdiv(V, BV)
     i_k, i_v, i_nh = pid % NK, (pid // NK) % NV, (pid // (NK * NV)).to(tl.int64)
     i_n, i_hv = i_nh // HV, i_nh % HV

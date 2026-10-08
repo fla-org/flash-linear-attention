@@ -51,14 +51,20 @@ class FlashKDABackend(BaseBackend):
         use_qk_l2norm_in_kernel: bool = False,
         use_gate_in_kernel: bool = False,
         use_beta_sigmoid_in_kernel: bool = False,
-        state_v_first: bool = False,
-        cu_seqlens: torch.LongTensor | None = None,
-        cu_seqlens_cpu: torch.LongTensor | None = None,
+        allow_neg_eigval: bool = False,
         safe_gate: bool = False,
         lower_bound: float | None = None,
         disable_recompute: bool = False,
         return_intermediate_states: bool = False,
+        state_v_first: bool = False,
+        cu_seqlens: torch.LongTensor | None = None,
+        cu_seqlens_cpu: torch.LongTensor | None = None,
         cp_context: FLACPContext | None = None,
+        use_graph: bool = False,
+        max_num_seqs: int | None = None,
+        *,
+        A_log: torch.Tensor | None = None,
+        dt_bias: torch.Tensor | None = None,
         **kwargs,
     ) -> tuple[bool, str | None]:
         if torch.is_grad_enabled():
@@ -77,6 +83,10 @@ class FlashKDABackend(BaseBackend):
             return False, "FlashKDA requires use_qk_l2norm_in_kernel=True"
         if not use_beta_sigmoid_in_kernel:
             return False, "FlashKDA requires use_beta_sigmoid_in_kernel=True"
+        if allow_neg_eigval:
+            return False, "FlashKDA requires allow_neg_eigval=False"
+        if A_log is None or dt_bias is None:
+            return False, "FlashKDA requires A_log and dt_bias tensors"
         if not state_v_first:
             return False, "FlashKDA requires state_v_first=True"
         if cp_context is not None:
@@ -100,14 +110,18 @@ class FlashKDABackend(BaseBackend):
         use_qk_l2norm_in_kernel: bool = False,
         use_gate_in_kernel: bool = False,
         use_beta_sigmoid_in_kernel: bool = False,
-        state_v_first: bool = False,
-        cu_seqlens: torch.LongTensor | None = None,
-        cu_seqlens_cpu: torch.LongTensor | None = None,
+        allow_neg_eigval: bool = False,
         safe_gate: bool = False,
         lower_bound: float | None = None,
         disable_recompute: bool = False,
         return_intermediate_states: bool = False,
+        state_v_first: bool = False,
+        cu_seqlens: torch.LongTensor | None = None,
+        cu_seqlens_cpu: torch.LongTensor | None = None,
         cp_context: FLACPContext | None = None,
+        use_graph: bool = False,
+        max_num_seqs: int | None = None,
+        *,
         A_log: torch.Tensor | None = None,
         dt_bias: torch.Tensor | None = None,
         **kwargs,
