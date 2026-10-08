@@ -7,26 +7,9 @@
 
 import triton
 import triton.language as tl
-import triton.language.extra.libdevice as tldevice
 
 from fla.ops.utils.op import exp, log
 from fla.utils import autotune_cache_kwargs
-
-
-@triton.jit
-def _logaddexp(a, b):
-    maximum = tl.maximum(a, b)
-    difference = tl.where(maximum == float('-inf'), 0., -tl.abs(a - b))
-    return maximum + tldevice.log1p(exp(difference))
-
-
-@triton.jit
-def logcumsumexp(
-    x,
-    initial_state,
-):
-    b_z = tl.associative_scan(x, axis=0, combine_fn=_logaddexp)
-    return _logaddexp(b_z, initial_state[None, :])
 
 
 @triton.autotune(

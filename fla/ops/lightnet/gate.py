@@ -8,12 +8,24 @@
 import torch
 import triton
 import triton.language as tl
+import triton.language.extra.libdevice as tldevice
 
-from fla.ops.utils.logcumsumexp import logcumsumexp
 from fla.ops.utils.op import exp, unflatten_program_id
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, input_guard
 
 
+@triton.jit
+def _logaddexp(a, b):
+    maximum = tl.maximum(a, b)
+    difference = tl.where(maximum == float('-inf'), 0., -tl.abs(a - b))
+    return maximum + tldevice.log1p(exp(difference))
+
+
+@triton.heuristics({
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
+    'USE_INITIAL_STATE': lambda args: args['initial_state'] is not None,
+    'STORE_Z': lambda args: args['z'] is not None,
+})
 @triton.autotune(
     configs=[
         triton.Config({'BT': BT}, num_warps=num_warps)
@@ -23,11 +35,6 @@ from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_k
     key=['S'],
     **autotune_cache_kwargs,
 )
-@triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
-    'USE_INITIAL_STATE': lambda args: args['initial_state'] is not None,
-    'STORE_Z': lambda args: args['z'] is not None,
-})
 @triton.jit(do_not_specialize=['T'])
 def fused_lightnet_gate_fwd_kernel(
     x,
@@ -51,30 +58,37 @@ def fused_lightnet_gate_fwd_kernel(
         eos = tl.load(cu_seqlens + i_n + 1).to(tl.int64)
     else:
         bos, eos = i_n * T, (i_n + 1) * T
+    T = eos - bos
     o_s = i_s * BS + tl.arange(0, BS)
     o_i = tl.arange(0, BT)
+    m_s = o_s < S
+    p_x = x + bos * S + o_s
+    p_k = k + bos * S + o_s
+    p_g = g + bos * S + o_s
+    if STORE_Z:
+        p_z = z + bos * S + o_s
     if USE_INITIAL_STATE:
-        b_previous = tl.load(initial_state + i_n * S + o_s, mask=o_s < S, other=float('-inf'))
+        b_previous = tl.load(initial_state + i_n * S + o_s, mask=m_s, other=float('-inf')).to(tl.float32)
     else:
         b_previous = tl.full((BS,), float('-inf'), tl.float32)
-    for i_t in range(tl.cdiv(eos - bos, BT)):
-        o_t = i_t * BT + o_i
-        offsets = (bos + o_t[:, None]) * S + o_s[None, :]
-        mask = (o_t[:, None] < eos - bos) & (o_s[None, :] < S)
-        b_x = tl.load(x + offsets, mask=mask, other=float('-inf')).to(tl.float32)
-        b_z = logcumsumexp(x=b_x, initial_state=b_previous)
-        previous_indices = tl.broadcast_to(tl.maximum(o_i - 1, 0)[:, None], (BT, BS))
-        b_prev_z = tl.gather(b_z, previous_indices, axis=0)
+    for i_t in range(0, T, BT):
+        o_t = i_t + o_i
+        m_x = (o_t[:, None] < T) & m_s[None, :]
+        b_x = tl.load(p_x + o_t[:, None] * S, mask=m_x, other=float('-inf')).to(tl.float32)
+        b_z = tl.associative_scan(b_x, axis=0, combine_fn=_logaddexp)
+        b_z = _logaddexp(b_z, b_previous[None, :])
+        o_prev = tl.broadcast_to(tl.maximum(o_i - 1, 0)[:, None], (BT, BS))
+        b_prev_z = tl.gather(b_z, o_prev, axis=0)
         b_prev_z = tl.where(o_i[:, None] == 0, b_previous[None, :], b_prev_z)
         b_k = exp(b_x - b_z)
         b_g = tl.where(b_prev_z == float('-inf'), 0., b_prev_z - b_z)
-        tl.store(k + offsets, b_k, mask=mask)
-        tl.store(g + offsets, b_g, mask=mask)
+        tl.store(p_k + o_t[:, None] * S, b_k, mask=m_x)
+        tl.store(p_g + o_t[:, None] * S, b_g, mask=m_x)
         if STORE_Z:
-            tl.store(z + offsets, b_z, mask=mask)
-        last = tl.minimum((i_t + 1) * BT, eos - bos) - 1
-        b_previous = tl.sum(tl.where(o_t[:, None] == last, b_z, 0.), axis=0)
-    tl.store(final_state + i_n * S + o_s, b_previous, mask=o_s < S)
+            tl.store(p_z + o_t[:, None] * S, b_z, mask=m_x)
+        o_last = tl.full((1, BS), tl.minimum(T - i_t, BT) - 1, tl.int32)
+        b_previous = tl.gather(b_z, o_last, axis=0).reshape((BS,))
+    tl.store(final_state + i_n * S + o_s, b_previous, mask=m_s)
 
 
 @triton.jit
@@ -85,9 +99,6 @@ def _reverse_recurrence(a_left, b_left, a_right, b_right):
 @triton.heuristics({
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
     'USE_INITIAL_STATE': lambda args: args['initial_state'] is not None,
-    'HAS_DK': lambda args: args['dk'] is not None,
-    'HAS_DG': lambda args: args['dg'] is not None,
-    'HAS_DFINAL_STATE': lambda args: args['dfinal_state'] is not None,
 })
 @triton.jit(do_not_specialize=['T'])
 def fused_lightnet_gate_bwd_kernel(
@@ -106,9 +117,6 @@ def fused_lightnet_gate_bwd_kernel(
     BS: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
-    HAS_DK: tl.constexpr,
-    HAS_DG: tl.constexpr,
-    HAS_DFINAL_STATE: tl.constexpr,
 ):
     i_s, i_n = unflatten_program_id(tl.cdiv(S, BS))
     if IS_VARLEN:
@@ -116,53 +124,52 @@ def fused_lightnet_gate_bwd_kernel(
         eos = tl.load(cu_seqlens + i_n + 1).to(tl.int64)
     else:
         bos, eos = i_n * T, (i_n + 1) * T
+    T = eos - bos
     o_s = i_s * BS + tl.arange(0, BS)
+    o_i = tl.arange(0, BT)
+    m_s = o_s < S
+    p_x = x + bos * S + o_s
+    p_z = z + bos * S + o_s
+    p_dk = dk + bos * S + o_s
+    p_dg = dg + bos * S + o_s
+    p_dx = dx + bos * S + o_s
     if USE_INITIAL_STATE:
-        b_initial = tl.load(initial_state + i_n * S + o_s, mask=o_s < S, other=float('-inf'))
+        b_initial = tl.load(initial_state + i_n * S + o_s, mask=m_s, other=float('-inf')).to(tl.float32)
     else:
         b_initial = tl.full((BS,), float('-inf'), tl.float32)
     b_carry = tl.full((BS,), 0., tl.float32)
-    if HAS_DFINAL_STATE:
-        b_dfinal = tl.load(dfinal_state + i_n * S + o_s, mask=o_s < S, other=0.).to(tl.float32)
-    else:
-        b_dfinal = tl.full((BS,), 0., tl.float32)
-    for i_t in range(tl.cdiv(eos - bos, BT)):
-        o_t = eos - bos - 1 - i_t * BT - tl.arange(0, BT)
-        offsets = (bos + o_t[:, None]) * S + o_s[None, :]
-        mask = (o_t[:, None] >= 0) & (o_s[None, :] < S)
-        next_mask = mask & (o_t[:, None] + 1 < eos - bos)
-        b_x = tl.load(x + offsets, mask=mask, other=0.).to(tl.float32)
-        b_z = tl.load(z + offsets, mask=mask, other=0.)
-        b_z_next = tl.load(z + offsets + S, mask=next_mask, other=0.)
+    b_dfinal = tl.load(dfinal_state + i_n * S + o_s, mask=m_s, other=0.).to(tl.float32)
+    for i_t in range(0, T, BT):
+        o_t = T - 1 - i_t - o_i
+        m_x = (o_t[:, None] >= 0) & m_s[None, :]
+        m_next = m_x & (o_t[:, None] + 1 < T)
+        b_x = tl.load(p_x + o_t[:, None] * S, mask=m_x, other=0.).to(tl.float32)
+        b_z = tl.load(p_z + o_t[:, None] * S, mask=m_x, other=0.)
+        b_z_next = tl.load(p_z + (o_t[:, None] + 1) * S, mask=m_next, other=0.)
         b_a = exp(b_x - b_z)
-        if HAS_DK:
-            b_dk = tl.load(dk + offsets, mask=mask, other=0.).to(tl.float32)
-        else:
-            b_dk = tl.full((BT, BS), 0., tl.float32)
+        b_dk = tl.load(p_dk + o_t[:, None] * S, mask=m_x, other=0.).to(tl.float32)
+        b_dg = tl.load(p_dg + o_t[:, None] * S, mask=m_x, other=0.).to(tl.float32)
+        b_dg_next = tl.load(p_dg + (o_t[:, None] + 1) * S, mask=m_next, other=0.).to(tl.float32)
+        b_dg = tl.where((o_t[:, None] > 0) | (b_initial[None, :] != float('-inf')), b_dg, 0.)
         b_dz = -b_dk * b_a
-        if HAS_DG:
-            b_dg = tl.load(dg + offsets, mask=mask, other=0.).to(tl.float32)
-            b_dg = tl.where((o_t[:, None] > 0) | (b_initial[None, :] != float('-inf')), b_dg, 0.)
-            b_dg_next = tl.load(dg + offsets + S, mask=next_mask, other=0.).to(tl.float32)
-            b_dz += b_dg_next - b_dg
-        b_dz += tl.where(o_t[:, None] == eos - bos - 1, b_dfinal[None, :], 0.)
+        b_dz += b_dg_next - b_dg
+        b_dz += tl.where(o_t[:, None] == T - 1, b_dfinal[None, :], 0.)
         # all exponent differences in the reverse recurrence are nonpositive.
-        b_decay = exp(tl.where(next_mask, b_z - b_z_next, 0.))
+        b_decay = exp(tl.where(m_next, b_z - b_z_next, 0.))
         b_decay, b_dz = tl.associative_scan((b_decay, b_dz), axis=0, combine_fn=_reverse_recurrence)
         b_r = b_dz + b_decay * b_carry[None, :]
-        tl.store(dx + offsets, b_a * (b_dk + b_r), mask=mask)
-        last = tl.maximum(eos - bos - (i_t + 1) * BT, 0)
-        b_carry = tl.sum(tl.where(o_t[:, None] == last, b_r, 0.), axis=0)
+        tl.store(p_dx + o_t[:, None] * S, b_a * (b_dk + b_r), mask=m_x)
+        o_last = tl.full((1, BS), tl.minimum(T - i_t, BT) - 1, tl.int32)
+        b_carry = tl.gather(b_r, o_last, axis=0).reshape((BS,))
     if USE_INITIAL_STATE:
-        if eos > bos:
-            b_first = tl.load(z + bos * S + o_s, mask=o_s < S, other=0.)
+        if T > 0:
+            b_first = tl.load(p_z, mask=m_s, other=0.)
             b_dinitial = exp(b_initial - b_first) * b_carry
-            if HAS_DG:
-                b_dg_first = tl.load(dg + bos * S + o_s, mask=o_s < S, other=0.).to(tl.float32)
-                b_dinitial += tl.where(b_initial != float('-inf'), b_dg_first, 0.)
+            b_dg_first = tl.load(p_dg, mask=m_s, other=0.).to(tl.float32)
+            b_dinitial += tl.where(b_initial != float('-inf'), b_dg_first, 0.)
         else:
             b_dinitial = b_dfinal
-        tl.store(dinitial_state + i_n * S + o_s, b_dinitial, mask=o_s < S)
+        tl.store(dinitial_state + i_n * S + o_s, b_dinitial, mask=m_s)
 
 
 def fused_lightnet_gate_fwd(
@@ -197,9 +204,9 @@ def fused_lightnet_gate_bwd(
     z: torch.Tensor,
     initial_state: torch.Tensor | None,
     cu_seqlens: torch.Tensor | None,
-    dk: torch.Tensor | None,
-    dg: torch.Tensor | None,
-    dfinal_state: torch.Tensor | None,
+    dk: torch.Tensor,
+    dg: torch.Tensor,
+    dfinal_state: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     B, T, H, K = x.shape
     N = B if cu_seqlens is None else cu_seqlens.numel() - 1
@@ -237,7 +244,6 @@ class FusedLightNetGateFunction(torch.autograd.Function):
             save_z=ctx.needs_input_grad[0] or ctx.needs_input_grad[1],
         )
         ctx.save_for_backward(x, z, initial_state, cu_seqlens)
-        ctx.set_materialize_grads(False)
         return k, g, final_state
 
     @staticmethod

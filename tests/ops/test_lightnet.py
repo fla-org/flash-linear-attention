@@ -82,3 +82,30 @@ def test_fused_gate(dtype: torch.dtype, layout: str, lengths: tuple[int, ...], s
         assert initial_state.grad is not None
         assert torch.isfinite(initial_state.grad).all()
         assert_close("dinitial_state", reference_state.grad, initial_state.grad, tol)
+
+
+@pytest.mark.parametrize("output", [0, 1, 2], ids=["keys", "gates", "final-state"])
+def test_fused_gate_partial_backward(output: int):
+    torch.manual_seed(42)
+    lengths = (0, 1, 33, 0, 1)
+    x = torch.randn(1, sum(lengths), 2, 17, device=device, dtype=torch.float32, requires_grad=True)
+    initial_state = torch.randn(len(lengths), 1, 2, 17, device=device, dtype=torch.float32) + 2
+    initial_state[::2] = float('-inf')
+    initial_state.requires_grad_()
+    reference_x = x.detach().clone().requires_grad_()
+    reference_state = initial_state.detach().clone().requires_grad_()
+    cu_seqlens = torch.tensor((0, *lengths), device=device, dtype=torch.int32).cumsum(0, dtype=torch.int32)
+
+    actual = fused_lightnet_gate(x=x, initial_state=initial_state, cu_seqlens=cu_seqlens)
+    expected = naive_lightnet_gate(x=reference_x, initial_state=reference_state, lengths=lengths, layout="packed")
+    gradient = torch.randn_like(actual[output])
+    dx, dstate = torch.autograd.grad(actual[output], (x, initial_state), grad_outputs=gradient)
+    reference_dx, reference_dstate = torch.autograd.grad(
+        outputs=expected[output],
+        inputs=(reference_x, reference_state),
+        grad_outputs=gradient,
+    )
+    assert torch.isfinite(dx).all()
+    assert torch.isfinite(dstate).all()
+    assert_close("dx", reference_dx, dx, 1e-3)
+    assert_close("dinitial_state", reference_dstate, dstate, 1e-3)
