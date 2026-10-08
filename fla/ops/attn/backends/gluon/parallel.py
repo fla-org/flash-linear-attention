@@ -138,7 +138,7 @@ def _load_tile(
         b_x_smem.reshape([BT, BD]).store(b_x)
 
 
-@gluon.jit(do_not_specialize=['T'])
+@gluon.jit(do_not_specialize=['T', 'NT'])
 def parallel_attn_fwd_kernel_gluon(
     q,
     k,
@@ -153,7 +153,7 @@ def parallel_attn_fwd_kernel_gluon(
     desc_k,
     desc_v,
     T,
-    NT: gl.constexpr,
+    NT,
     H: gl.constexpr,
     HQ: gl.constexpr,
     K: gl.constexpr,
@@ -606,7 +606,7 @@ def _pipeline_compute(args, descs, cfg: gl.constexpr):
         gl.store(lse + o_t * HQ + i_hq, b_m + gl.log2(b_acc), o_t < eos)
 
 
-@gluon.jit(do_not_specialize=['T'])
+@gluon.jit(do_not_specialize=['T', 'NT'])
 def parallel_attn_fwd_kernel_pipeline(
     desc_q,
     desc_k,
@@ -618,7 +618,7 @@ def parallel_attn_fwd_kernel_pipeline(
     cu_seqlens,
     chunk_indices,
     T,
-    NT: gl.constexpr,
+    NT,
     H: gl.constexpr,
     HQ: gl.constexpr,
     V: gl.constexpr,
@@ -864,7 +864,7 @@ def _mma_pair(a, b, c, d, acc_a, acc_b, bar, phase, USE_TCGEN05: gl.constexpr, U
     return acc_a, acc_b, phase
 
 
-@gluon.jit(do_not_specialize=['T'])
+@gluon.jit(do_not_specialize=['T', 'NT'])
 def parallel_attn_bwd_kernel_gluon(
     q,
     k,
@@ -886,7 +886,7 @@ def parallel_attn_bwd_kernel_gluon(
     desc_v,
     desc_do,
     T,
-    NT: gl.constexpr,
+    NT,
     H: gl.constexpr,
     HQ: gl.constexpr,
     K: gl.constexpr,

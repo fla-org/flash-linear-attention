@@ -170,6 +170,44 @@ def test_parallel_copy_path(gluon_route, monkeypatch, use_tma, varlen, dim):
 
 
 @requires_gluon
+@pytest.mark.parametrize('use_tma', [False, True])
+def test_parallel_varlen_compilation(gluon_route, monkeypatch, use_tma):
+    from fla.ops.attn.backends.gluon import parallel
+
+    monkeypatch.setattr(parallel, 'IS_TMA_SUPPORTED', use_tma)
+    torch.manual_seed(42)
+    tensors = [torch.randn(1, 512, 3, 64, device=device, dtype=torch.bfloat16).requires_grad_() for _ in range(3)]
+    refs = [x.detach().float().requires_grad_() for x in tensors]
+    do = torch.randn_like(tensors[0])
+    kernels = (
+        parallel.parallel_attn_fwd_kernel_gluon,
+        parallel.parallel_attn_fwd_kernel_pipeline,
+        parallel.parallel_attn_bwd_kernel_gluon,
+    )
+    counts = None
+    for offsets in ([0, 512], [0, 63, 512], [0, 63, 127, 512], [0, 1, 1, 63, 127, 256, 512]):
+        cu_seqlens = torch.tensor(offsets, device=device, dtype=torch.int32)
+        expected = []
+        for left, right in zip(offsets[:-1], offsets[1:]):
+            if left < right:
+                out, _ = naive_parallel_attn(q=refs[0][:, left:right], k=refs[1][:, left:right], v=refs[2][:, left:right])
+                expected.append(out)
+        ref = torch.cat(expected, dim=1)
+        actual = parallel_attn(q=tensors[0], k=tensors[1], v=tensors[2], cu_seqlens=cu_seqlens)
+        grads = torch.autograd.grad(actual, tensors, do)
+        ref_grads = torch.autograd.grad(ref, refs, do.float())
+        for name, value, expected in zip(('o', 'dq', 'dk', 'dv'), (actual, *grads), (ref, *ref_grads)):
+            assert torch.isfinite(value).all(), name
+            assert_close(name, expected, value, 0.005)
+        current = [sum(len(state[0]) for state in kernel.device_caches.values()) for kernel in kernels]
+        if counts is None:
+            counts = current
+        else:
+            assert current == counts, 'Changing packed boundaries must reuse compiled attention kernels'
+    assert gluon_route == {'fwd': 4, 'bwd': 4}
+
+
+@requires_gluon
 @pytest.mark.parametrize('chunk_size', [32, 64])
 def test_backward_supplied_indices(gluon_route, chunk_size):
     from fla.ops.attn.parallel import parallel_attn_bwd, parallel_attn_fwd
