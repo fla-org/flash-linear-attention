@@ -53,6 +53,13 @@ else:
     def tanh(x): return tldevice.tanh(x.to(tl.float32))
 
 
+@triton.jit
+def logaddexp(a, b):
+    maximum = tl.maximum(a, b)
+    difference = tl.where(maximum == float('-inf'), 0., -tl.abs(a - b))
+    return maximum + tldevice.log1p(exp(difference))
+
+
 if IS_NVIDIA_BLACKWELL:
     """
     Compute tl.dot with Blackwell workaround.
