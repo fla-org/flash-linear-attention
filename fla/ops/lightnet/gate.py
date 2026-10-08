@@ -78,8 +78,8 @@ def fused_lightnet_gate_fwd_kernel(
         tl.store(p_g + o_t[:, None] * S, b_g, mask=m_x)
         if STORE_Z:
             tl.store(p_z + o_t[:, None] * S, b_z, mask=m_x)
-        o_last = tl.full((1, BS), tl.minimum(T - i_t, BT) - 1, tl.int32)
-        b_zp = tl.gather(b_z, o_last, axis=0).reshape((BS,))
+        o_last = tl.minimum(i_t + BT, T) - 1
+        b_zp = tl.sum(tl.where(o_t[:, None] == o_last, b_z, 0.), axis=0)
     tl.store(final_state + i_n * S + o_s, b_zp, mask=m_s)
 
 
