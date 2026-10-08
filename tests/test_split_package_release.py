@@ -119,7 +119,10 @@ def test_split_wheels_match_release_contract(tmp_path: Path) -> None:
     assert "fla/ops/__init__.py" in core_names
     assert "fla/modules/__init__.py" in core_names
     assert "fla/utils/__init__.py" in core_names
-    assert "fla/utils/_device.py" in core_names
+    for module in ("env", "hardware", "decorators", "testing", "ascend_ub_manager"):
+        assert f"fla/utils/{module}.py" in core_names
+    for module in ("_compat", "_config", "_decorators", "_device", "_testing"):
+        assert f"fla/utils/{module}.py" not in core_names
     assert "fla/utils.py" not in core_names
     assert not any(name.startswith("fla/layers/") for name in core_names)
     assert not any(name.startswith("fla/models/") for name in core_names)
