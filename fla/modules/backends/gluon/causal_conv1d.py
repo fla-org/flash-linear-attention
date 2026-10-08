@@ -205,6 +205,51 @@ def causal_conv1d_bwd_kernel(
         gl.store(db_partial + i_tg * D + o_d, gl.sum(b_db, axis=0), mask=o_d < D)
 
 
+@gluon.jit(do_not_specialize=['NP'])
+def causal_conv1d_bwd_kernel_dwdb(
+    dw_partial,
+    db_partial,
+    dw,
+    db,
+    NP,
+    D: gl.constexpr,
+    W: gl.constexpr,
+    BN: gl.constexpr,
+    BD: gl.constexpr,
+    NUM_WARPS: gl.constexpr,
+):
+    layout: gl.constexpr = gl.BlockedLayout(
+        size_per_thread=[1, BD // 32],
+        threads_per_warp=[1, 32],
+        warps_per_cta=[NUM_WARPS, 1],
+        order=[1, 0],
+    )
+    i_d = gl.program_id(0).to(gl.int64)
+    o_d = i_d * BD + gl.arange(0, BD, layout=gl.SliceLayout(0, layout)).to(gl.int64)
+    b_dw = gl.full((BD,), 0, gl.float32, gl.SliceLayout(0, layout))
+    for i_n in range(0, NP, BN):
+        o_n = i_n + gl.arange(0, BN, layout=gl.SliceLayout(1, layout)).to(gl.int64)
+        b_partial = gl.load(
+            pointer=dw_partial + o_n[:, None] * D * W + o_d[None, :],
+            mask=(o_n[:, None] < NP) & (o_d[None, :] < D * W),
+            other=0,
+        )
+        b_dw += gl.sum(b_partial, axis=0)
+    gl.store(dw + o_d, b_dw.to(dw.dtype.element_ty), mask=o_d < D * W)
+    if db_partial is not None:
+        if i_d * BD < D:
+            b_db = gl.full((BD,), 0, gl.float32, gl.SliceLayout(0, layout))
+            for i_n in range(0, NP, BN):
+                o_n = i_n + gl.arange(0, BN, layout=gl.SliceLayout(1, layout)).to(gl.int64)
+                b_partial = gl.load(
+                    pointer=db_partial + o_n[:, None] * D + o_d[None, :],
+                    mask=(o_n[:, None] < NP) & (o_d[None, :] < D),
+                    other=0,
+                )
+                b_db += gl.sum(b_partial, axis=0)
+            gl.store(db + o_d, b_db.to(db.dtype.element_ty), mask=o_d < D)
+
+
 @input_guard(no_guard_contiguous=['x'])
 def causal_conv1d_fwd(
     x: torch.Tensor,
@@ -311,7 +356,20 @@ def causal_conv1d_bwd(
         ACTIVATION=activation,
         num_warps=num_warps,
     )
-    dw = dw_partial.sum(0).to(weight)
-    db = db_partial.sum(0).to(bias) if db_partial is not None else None
+    dw = weight.new_empty((D, W))
+    db = bias.new_empty((D,)) if bias is not None else None
+    causal_conv1d_bwd_kernel_dwdb[(triton.cdiv(D * W, BD),)](
+        dw_partial=dw_partial,
+        db_partial=db_partial,
+        dw=dw,
+        db=db,
+        NP=B * NT,
+        D=D,
+        W=W,
+        BN=128,
+        BD=BD,
+        NUM_WARPS=num_warps,
+        num_warps=num_warps,
+    )
     dr = dy if residual is not None else None
     return dx, dw, db, dr, None

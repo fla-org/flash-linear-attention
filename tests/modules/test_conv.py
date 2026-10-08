@@ -1627,11 +1627,16 @@ def test_conv_backend_override(monkeypatch):
         (1, 257, 256, 4, True, False, True),
         (1, 129, 65, 4, True, True, False),
         (2, 3, 65, 4, False, True, True),
+        (2, 32, 65, 4, False, True, True),
+        (2, 33, 65, 4, False, True, True),
         (1, 1024, 1024, 4, False, False, False),
         (1, 1025, 1024, 4, False, False, False),
+        (1, 8193, 65, 3, False, False, True),
+        (1, 8193, 65, 4, True, False, True),
     ],
     ids=['one-token', 'channel-tail', 'time-tail', 'packed-qkv', 'packed-state', 'short-state',
-         'small-tile-boundary', 'large-tile-boundary'],
+         'split-boundary', 'split-tail', 'small-tile-boundary', 'large-tile-boundary',
+         'reduction-tail', 'packed-reduction-tail'],
 )
 def test_conv_backend_parity(monkeypatch, B, T, D, W, packed, state, strided, activation, dtype, weight_dtype):
     pytest.importorskip('fla.modules.backends.gluon.causal_conv1d')
