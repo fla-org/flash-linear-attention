@@ -181,6 +181,9 @@ jobs:
           result_root="$GITHUB_WORKSPACE/benchmark_comparison"
           mkdir -p "$result_root/base" "$result_root/head"
           npu-smi info > "$result_root/npu-smi.txt"
+          for repo_root in "$GITHUB_WORKSPACE" "$RUNNER_TEMP/fla-pr1347-base" "$RUNNER_TEMP/fla-pr1347-head"; do
+            git config --global --add safe.directory "$repo_root"
+          done
           git worktree add --detach "$RUNNER_TEMP/fla-pr1347-base" "$BASE_REF"
           git worktree add --detach "$RUNNER_TEMP/fla-pr1347-head" "$HEAD_REF"
 
