@@ -29,6 +29,7 @@ from fla.ops.lightning_attn import chunk_lightning_attn, fused_recurrent_lightni
 from fla.ops.linear_attn import chunk_linear_attn, fused_chunk_linear_attn, fused_recurrent_linear_attn
 from fla.ops.log_linear_attn import chunk_log_linear_attn
 from fla.ops.mesa_net import chunk_mesa_net
+from fla.ops.mlstm import chunk_mlstm
 from fla.ops.momentum_delta_rule import (
     chunk_momentum_delta_rule,
     fused_recurrent_momentum_delta_rule,
@@ -61,6 +62,7 @@ __all__ = [
     'chunk_linear_attn',
     'chunk_log_linear_attn',
     'chunk_mesa_net',
+    'chunk_mlstm',
     'chunk_momentum_delta_rule',
     'chunk_precond_gated_delta_rule',
     'chunk_precond_kda',
