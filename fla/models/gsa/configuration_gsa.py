@@ -1,10 +1,18 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import warnings
 
 from transformers.configuration_utils import PretrainedConfig
 
+from fla.models.hybrid import HybridAttentionConfig, _HybridAttentionConfigMixin
 
-class GSAConfig(PretrainedConfig):
+
+class GSAConfig(_HybridAttentionConfigMixin, PretrainedConfig):
 
     model_type = 'gsa'
     keys_to_ignore_at_inference = ['past_key_values']
@@ -32,7 +40,7 @@ class GSAConfig(PretrainedConfig):
         hidden_act: str = "swish",
         elementwise_affine: bool | None = True,
         norm_eps: float = 1e-6,
-        attn: dict | None = None,
+        attn: HybridAttentionConfig = None,
         use_cache: bool = True,
         pad_token_id: int | None = None,
         bos_token_id: int = 1,
@@ -45,6 +53,7 @@ class GSAConfig(PretrainedConfig):
         fuse_linear_cross_entropy: bool = False,
         use_l2warp: bool = False,
         vocab_size: int = 32000,
+        attnres_block_size: int | None = None,
         **kwargs,
     ):
         self.hidden_size = hidden_size
@@ -78,6 +87,7 @@ class GSAConfig(PretrainedConfig):
         self.fuse_linear_cross_entropy = fuse_linear_cross_entropy
         self.use_l2warp = use_l2warp
         self.vocab_size = vocab_size
+        self.attnres_block_size = attnres_block_size
 
         if fuse_cross_entropy and fuse_linear_cross_entropy:
             raise ValueError(
@@ -90,17 +100,12 @@ class GSAConfig(PretrainedConfig):
                 "If you observe issues like loss divergence, consider disabling this setting.",
             )
 
-        if attn is not None:
-            if not isinstance(attn, dict):
-                raise ValueError("attn must be a dictionary")
-            if 'layers' not in attn:
-                raise ValueError("Layer indices must be provided to initialize hybrid attention layers")
-            if 'num_heads' not in attn:
-                raise ValueError("Number of heads must be provided to initialize hybrid attention layers")
-            attn['num_kv_heads'] = attn.get('num_kv_heads', attn['num_heads'])
-            attn['qkv_bias'] = attn.get('qkv_bias', False)
-            attn['window_size'] = attn.get('window_size', None)
-            attn['rope_theta'] = attn.get('rope_theta', 10000.)
+        if attnres_block_size is not None and attnres_block_size != 1:
+            if attnres_block_size < 2 or attnres_block_size % 2 != 0:
+                raise ValueError(
+                    "`attnres_block_size` must be `None`, `1` (full mode), or an even integer (one block "
+                    f"contains `attnres_block_size // 2` transformer layers); got {attnres_block_size}."
+                )
 
         super().__init__(
             pad_token_id=pad_token_id,

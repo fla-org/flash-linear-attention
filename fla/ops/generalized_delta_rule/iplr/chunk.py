@@ -1,6 +1,9 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
-
-import warnings
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 import triton
@@ -8,8 +11,8 @@ import triton.language as tl
 
 from fla.ops.generalized_delta_rule.iplr.wy_fast import prepare_wy_repr_fwd
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
+from fla.ops.utils.op import unflatten_program_id
 from fla.utils import (
-    USE_CUDA_GRAPH,
     autocast_custom_bwd,
     autocast_custom_fwd,
     autotune_cache_kwargs,
@@ -31,7 +34,6 @@ BKV_LIST = [64, 128] if check_shared_mem() else [32, 64]
         for num_warps in [2, 4] + ([] if check_shared_mem('hopper') else [8])
     ],
     key=['BT', 'BK', 'BV'],
-    use_cuda_graph=USE_CUDA_GRAPH,
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -59,50 +61,58 @@ def chunk_generalized_iplr_delta_rule_fwd_kernel_h(
     STORE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_k, i_v, i_nh = unflatten_program_id(tl.cdiv(K, BK), tl.cdiv(V, BV))
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
         NT = tl.cdiv(T, BT)
-        boh = tl.load(chunk_offsets + i_n).to(tl.int32)
+        boh = tl.load(chunk_offsets + i_n).to(tl.int64)
     else:
         bos, eos = i_n * T, i_n * T + T
         NT = tl.cdiv(T, BT)
         boh = i_n * NT
 
+    o_k = i_k * BK + tl.arange(0, BK)
+    o_v = i_v * BV + tl.arange(0, BV)
+    m_h = (o_k[:, None] < K) & (o_v[None, :] < V)
     # [BK, BV]
     b_h = tl.zeros([BK, BV], dtype=tl.float32)
     if USE_INITIAL_STATE:
-        p_h0 = tl.make_block_ptr(h0 + i_nh * K*V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
-        b_h = tl.load(p_h0, boundary_check=(0, 1)).to(tl.float32)
+        p_h0 = h0 + i_nh * K*V + o_k[:, None] * V + o_v[None, :]
+        b_h = tl.load(p_h0, mask=m_h, other=0.0).to(tl.float32)
 
     for i_t in range(NT):
-        p_h = tl.make_block_ptr(h + ((boh + i_t) * H + i_h) * K*V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
-        tl.store(p_h, b_h.to(p_h.dtype.element_ty), boundary_check=(0, 1))
+        p_h = h + ((boh + i_t) * H + i_h) * K*V + o_k[:, None] * V + o_v[None, :]
+        tl.store(p_h, b_h.to(p_h.dtype.element_ty), mask=m_h)
         b_hc = tl.zeros([BK, BV], dtype=tl.float32)
-        # since we need to make all DK in the SRAM. we face serve SRAM memory burden. By subchunking we allievate such burden
+        # since all DK values must fit in SRAM, subchunking alleviates the SRAM memory burden.
         for i_c in range(tl.cdiv(min(BT, T - i_t * BT), BC)):
-            p_k = tl.make_block_ptr(k+(bos*H+i_h)*K, (K, T), (1, H*K), (i_k * BK, i_t * BT + i_c * BC), (BK, BC), (0, 1))
-            p_b = tl.make_block_ptr(b+(bos*H+i_h)*K, (K, T), (1, H*K), (i_k * BK, i_t * BT + i_c * BC), (BK, BC), (0, 1))
-            p_d = tl.make_block_ptr(d+(bos*H+i_h)*K, (T, K), (H*K, 1), (i_t * BT + i_c * BC, i_k * BK), (BC, BK), (1, 0))
-            p_v = tl.make_block_ptr(v+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t * BT + i_c * BC, i_v * BV), (BC, BV), (1, 0))
-            p_u = tl.make_block_ptr(u+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t * BT + i_c * BC, i_v * BV), (BC, BV), (1, 0))
-            p_v_new = tl.make_block_ptr(v_new+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t*BT+i_c*BC, i_v * BV), (BC, BV), (1, 0))
+            o_c = i_t.to(tl.int64) * BT + i_c * BC + tl.arange(0, BC)
+            m_c = o_c < T
+            m_kc = (o_k[:, None] < K) & m_c[None, :]
+            m_dc = m_c[:, None] & (o_k[None, :] < K)
+            m_vc = m_c[:, None] & (o_v[None, :] < V)
+            p_k = k+(bos*H+i_h)*K + o_k[:, None] + o_c[None, :] * (H*K)
+            p_b = b+(bos*H+i_h)*K + o_k[:, None] + o_c[None, :] * (H*K)
+            p_d = d+(bos*H+i_h)*K + o_c[:, None] * (H*K) + o_k[None, :]
+            p_v = v+(bos*H+i_h)*V + o_c[:, None] * (H*V) + o_v[None, :]
+            p_u = u+(bos*H+i_h)*V + o_c[:, None] * (H*V) + o_v[None, :]
+            p_v_new = v_new+(bos*H+i_h)*V + o_c[:, None] * (H*V) + o_v[None, :]
             # [BK, BC]
-            b_k = tl.load(p_k, boundary_check=(0, 1))
-            b_v = tl.load(p_v, boundary_check=(0, 1))
-            b_d = tl.load(p_d, boundary_check=(0, 1))
-            b_b = tl.load(p_b, boundary_check=(0, 1))
-            b_v2 = tl.dot(b_d, b_h.to(b_d.dtype)) + tl.load(p_u, boundary_check=(0, 1))
-            b_hc += tl.dot(b_k, b_v)
-            b_hc += tl.dot(b_b, b_v2.to(b_k.dtype))
-            tl.store(p_v_new, b_v2.to(p_v_new.dtype.element_ty), boundary_check=(0, 1))
+            b_k = tl.load(p_k, mask=m_kc, other=0.0)
+            b_v = tl.load(p_v, mask=m_vc, other=0.0)
+            b_d = tl.load(p_d, mask=m_dc, other=0.0)
+            b_b = tl.load(p_b, mask=m_kc, other=0.0)
+            b_v2 = tl.dot(b_d, b_h.to(b_d.dtype)) + tl.load(p_u, mask=m_vc, other=0.0)
+            b_hc = tl.dot(b_k, b_v, b_hc)
+            b_hc = tl.dot(b_b, b_v2.to(b_k.dtype), b_hc)
+            tl.store(p_v_new, b_v2.to(p_v_new.dtype.element_ty), mask=m_vc)
         b_h += b_hc
 
     if STORE_FINAL_STATE:
-        p_ht = tl.make_block_ptr(ht + i_nh * K*V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
-        tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), boundary_check=(0, 1))
+        p_ht = ht + i_nh * K*V + o_k[:, None] * V + o_v[None, :]
+        tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=m_h)
 
 
 @triton.heuristics({
@@ -116,7 +126,6 @@ def chunk_generalized_iplr_delta_rule_fwd_kernel_h(
         for num_warps in [2, 4, 8]
     ],
     key=['BT'],
-    use_cuda_graph=USE_CUDA_GRAPH,
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -140,13 +149,14 @@ def chunk_generalized_iplr_delta_rule_fwd_kernel_o(
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_v, i_t = unflatten_program_id(tl.cdiv(V, BV))
+    i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
 
     if IS_VARLEN:
         i_tg = i_t
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
         NT = tl.cdiv(T, BT)
     else:
@@ -169,37 +179,45 @@ def chunk_generalized_iplr_delta_rule_fwd_kernel_o(
     b_Aqk = tl.zeros([BT, BT], dtype=tl.float32)
     b_Aqb = tl.zeros([BT, BT], dtype=tl.float32)
 
+    o_t = i_t * BT + tl.arange(0, BT)
+    o_v = i_v * BV + tl.arange(0, BV)
+    m_t = o_t < T
     for i_k in range(tl.cdiv(K, BK)):
-        p_q = tl.make_block_ptr(q, (T, K), (stride_qk, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-        p_k = tl.make_block_ptr(k, (K, T), (1, stride_qk), (i_k * BK, i_t * BT), (BK, BT), (0, 1))
-        p_h = tl.make_block_ptr(h, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
-        p_b = tl.make_block_ptr(b, (K, T), (1, stride_qk), (i_k * BK, i_t * BT), (BK, BT), (0, 1))
+        o_k = i_k * BK + tl.arange(0, BK)
+        m_q = m_t[:, None] & (o_k[None, :] < K)
+        m_k = (o_k[:, None] < K) & m_t[None, :]
+        m_h = (o_k[:, None] < K) & (o_v[None, :] < V)
+        p_q = q + o_t[:, None] * stride_qk + o_k[None, :]
+        p_k = k + o_k[:, None] + o_t[None, :] * stride_qk
+        p_h = h + o_k[:, None] * V + o_v[None, :]
+        p_b = b + o_k[:, None] + o_t[None, :] * stride_qk
         # [BT, BK]
-        b_q = tl.load(p_q, boundary_check=(0, 1))
+        b_q = tl.load(p_q, mask=m_q, other=0.0)
         # [BK, BT]
-        b_k = tl.load(p_k, boundary_check=(0, 1))
-        b_b = tl.load(p_b, boundary_check=(0, 1))
+        b_k = tl.load(p_k, mask=m_k, other=0.0)
+        b_b = tl.load(p_b, mask=m_k, other=0.0)
         # [BK, BV]
-        b_h = tl.load(p_h, boundary_check=(0, 1))
+        b_h = tl.load(p_h, mask=m_h, other=0.0)
         # [BT, BK] @ [BK, BV] -> [BT, BV]
-        b_o += tl.dot(b_q, b_h)
+        b_o = tl.dot(b_q, b_h, b_o)
         # [BT, BK] @ [BK, BT] -> [BT, BT]
-        b_Aqk += tl.dot(b_q, b_k)
+        b_Aqk = tl.dot(b_q, b_k, b_Aqk)
         # [BT, BK] @ [BK, BT] -> [BT, BT]
-        b_Aqb += tl.dot(b_q, b_b)
+        b_Aqb = tl.dot(b_q, b_b, b_Aqb)
 
     o_i = tl.arange(0, BT)
     m_A = o_i[:, None] >= o_i[None, :]
     b_Aqk = tl.where(m_A, b_Aqk, 0)
     b_Aqb = tl.where(m_A, b_Aqb, 0)
 
-    p_v = tl.make_block_ptr(v, (T, V), (stride_vo, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-    p_u = tl.make_block_ptr(u, (T, V), (stride_vo, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-    p_o = tl.make_block_ptr(o, (T, V), (stride_vo, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-    b_v = tl.load(p_v, boundary_check=(0, 1))
-    b_u = tl.load(p_u, boundary_check=(0, 1))
+    m_v = m_t[:, None] & (o_v[None, :] < V)
+    p_v = v + o_t[:, None] * stride_vo + o_v[None, :]
+    p_u = u + o_t[:, None] * stride_vo + o_v[None, :]
+    p_o = o + o_t[:, None] * stride_vo + o_v[None, :]
+    b_v = tl.load(p_v, mask=m_v, other=0.0)
+    b_u = tl.load(p_u, mask=m_v, other=0.0)
     b_o = (b_o + tl.dot(b_Aqk.to(b_v.dtype), b_v) + tl.dot(b_Aqb.to(b_u.dtype), b_u)) * scale
-    tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=m_v)
 
 
 def chunk_generalized_iplr_delta_rule_fwd_o(
@@ -212,22 +230,20 @@ def chunk_generalized_iplr_delta_rule_fwd_o(
     scale: float | None = None,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
+    chunk_indices: torch.LongTensor | None = None,
 ) -> torch.Tensor:
     B, T, H, K, V = *q.shape, v.shape[-1]
     if scale is None:
         scale = k.shape[-1] ** -0.5
     BT = chunk_size
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     o = torch.empty_like(v)
 
-    def grid(meta): return (
-        triton.cdiv(V, meta['BV']),
-        NT,
-        B * H,
-    )
+    def grid(meta): return (triton.cdiv(V, meta['BV']) * NT, B * H)
     chunk_generalized_iplr_delta_rule_fwd_kernel_o[grid](
         q=q,
         k=k,
@@ -258,11 +274,13 @@ def chunk_generalized_iplr_delta_rule_fwd_h(
     output_final_state: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
+    chunk_indices: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, u.shape[-1]
     BT = chunk_size
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     # N: the actual number of sequences in the batch with either equal or variable lengths
     if cu_seqlens is None:
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
@@ -293,7 +311,7 @@ def chunk_generalized_iplr_delta_rule_fwd_h(
     final_state = k.new_empty(N, H, K, V, dtype=torch.float32) if output_final_state else None
 
     v_new = torch.empty_like(u)
-    grid = (NK, NV, N * H)
+    grid = (NK * NV * N * H,)
 
     chunk_generalized_iplr_delta_rule_fwd_kernel_h[grid](
         k=k,
@@ -330,6 +348,7 @@ def chunk_generalized_iplr_delta_rule_fwd(
     output_final_state: bool,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
+    chunk_indices: torch.LongTensor | None = None,
 ):
     w, u, _ = prepare_wy_repr_fwd(
         a=a,
@@ -338,6 +357,7 @@ def chunk_generalized_iplr_delta_rule_fwd(
         v=v,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
+        chunk_indices=chunk_indices,
     )
 
     h, v_new, final_state = chunk_generalized_iplr_delta_rule_fwd_h(
@@ -350,6 +370,7 @@ def chunk_generalized_iplr_delta_rule_fwd(
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
+        chunk_indices=chunk_indices,
     )
     o = chunk_generalized_iplr_delta_rule_fwd_o(
         q=q,
@@ -361,6 +382,7 @@ def chunk_generalized_iplr_delta_rule_fwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
+        chunk_indices=chunk_indices,
     )
     return o, final_state
 
@@ -381,8 +403,13 @@ class ChunkGeneralizedIPLRDeltaRuleFunction(torch.autograd.Function):
         initial_state: torch.Tensor,
         output_final_state: bool,
         cu_seqlens: torch.LongTensor | None = None,
+        cu_seqlens_cpu: torch.LongTensor | None = None,
+        chunk_size: int | None = None,
     ):
-        chunk_size = min(64, max(triton.next_power_of_2(q.shape[1]), 16))
+        if chunk_size is None:
+            chunk_size = 64
+        chunk_indices = prepare_chunk_indices(
+            cu_seqlens, chunk_size, cu_seqlens_cpu=cu_seqlens_cpu) if cu_seqlens is not None else None
         o, final_state = chunk_generalized_iplr_delta_rule_fwd(
             q=q,
             k=k,
@@ -394,6 +421,7 @@ class ChunkGeneralizedIPLRDeltaRuleFunction(torch.autograd.Function):
             output_final_state=output_final_state,
             cu_seqlens=cu_seqlens,
             chunk_size=chunk_size,
+            chunk_indices=chunk_indices,
         )
         return o.to(q.dtype), final_state
 
@@ -418,11 +446,12 @@ def chunk_iplr_delta_rule(
     v: torch.Tensor,
     a: torch.Tensor,
     b: torch.Tensor,
-    scale: float = None,
-    initial_state: torch.Tensor = None,
+    scale: float | None = None,
+    initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
-    head_first: bool = False,
+    cu_seqlens_cpu: torch.LongTensor | None = None,
+    **kwargs,
 ):
     r"""
     Args:
@@ -437,7 +466,7 @@ def chunk_iplr_delta_rule(
         b (torch.Tensor):
             betas of shape `[B, T, H, K]`.
         scale (Optional[float]):
-            Scale factor for the RetNet attention scores.
+            Scale factor for the attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         initial_state (Optional[torch.Tensor]):
             Initial state of shape `[N, H, K, V]` for `N` input sequences.
@@ -448,9 +477,8 @@ def chunk_iplr_delta_rule(
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
-        head_first (Optional[bool]):
-            Whether the inputs are in the head-first format. Default: `False`.
-            This argument has been deprecated.
+        cu_seqlens_cpu (torch.LongTensor):
+            CPU copy of `cu_seqlens` to avoid unnecessary device synchronization. Default: `None`.
 
     Returns:
         o (torch.Tensor):
@@ -458,22 +486,17 @@ def chunk_iplr_delta_rule(
         final_state (torch.Tensor):
             Final state of shape `[N, H, K, V]` if `output_final_state=True` else `None`.
     """
-    if head_first:
+    if 'head_first' in kwargs:
         raise DeprecationWarning(
-            "head_first is deprecated and will be removed in a future version. "
-            "Please use head_first=False for now instead.",
+            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
         )
-    if not head_first and q.shape[1] < q.shape[2]:
-        warnings.warn(
-            f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
-            "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
-            "when head_first=False was specified. "
-            "Please verify your input tensor format matches the expected shape [B, T, H, ...].",
-        )
+    chunk_size = kwargs.pop('chunk_size', None)
+    if chunk_size is not None and chunk_size != 2 ** (chunk_size.bit_length() - 1):
+        raise ValueError(f"`chunk_size` must be a power of 2, got {chunk_size}.")
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(
-                f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
+                f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`. "
                 f"Please flatten variable-length inputs before processing.",
             )
         if initial_state is not None and initial_state.shape[0] != len(cu_seqlens) - 1:
@@ -492,5 +515,7 @@ def chunk_iplr_delta_rule(
         initial_state,
         output_final_state,
         cu_seqlens,
+        cu_seqlens_cpu,
+        chunk_size,
     )
     return o, final_state

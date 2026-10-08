@@ -1,4 +1,9 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 from __future__ import annotations
 
@@ -11,6 +16,7 @@ from einops import rearrange
 from torch.nn import functional as F
 
 from fla.layers.rwkv6 import LoRA
+from fla.layers.utils import get_layer_cache, update_layer_cache
 from fla.modules import GroupNorm
 from fla.modules.l2norm import l2_norm
 from fla.modules.token_shift import token_shift
@@ -54,12 +60,15 @@ class RWKV7Attention(nn.Module):
         if head_dim is None and num_heads is None:
             raise ValueError("Either `head_dim` or `num_heads` must be specified.")
         elif head_dim is not None:
+            assert hidden_size % head_dim == 0, f"`hidden_size` must be divisible by `head_dim`, got {hidden_size} and {head_dim}."
             self.head_dim = head_dim
-            self.num_heads = int(hidden_size // head_dim)
+            self.num_heads = hidden_size // head_dim
         elif num_heads is not None:
-            self.head_dim = int(hidden_size // num_heads)
+            assert hidden_size % num_heads == 0, f"`hidden_size` must be divisible by `num_heads`, got {hidden_size} and {num_heads}."
+            self.head_dim = hidden_size // num_heads
             self.num_heads = num_heads
-        self.head_v_dim = int(self.value_dim // self.num_heads)
+        assert self.value_dim % self.num_heads == 0, f"`value_dim` must be divisible by `num_heads`, got {self.value_dim} and {self.num_heads}."
+        self.head_v_dim = self.value_dim // self.num_heads
 
         # Increase lora dimension for headdim>64
         factor = self.head_dim / 64
@@ -208,10 +217,9 @@ class RWKV7Attention(nn.Module):
 
     @staticmethod
     def _orthogonal_init(weight, gain=1.0):
-        oringinal_dtype = weight.dtype
-        weight = weight.float()
-        nn.init.orthogonal_(weight, gain=gain)
-        weight = weight.to(oringinal_dtype)
+        float_weight = weight.float()
+        nn.init.orthogonal_(float_weight, gain=gain)
+        weight.copy_(float_weight)
 
     def forward(
         self,
@@ -233,9 +241,7 @@ class RWKV7Attention(nn.Module):
             )
             am = attention_mask.narrow(1, attention_mask.size(1) - seq_len, seq_len).unsqueeze(-1)
 
-        last_state = None
-        if past_key_values is not None and len(past_key_values) > self.layer_idx:
-            last_state = past_key_values[self.layer_idx]
+        last_state = get_layer_cache(self, past_key_values)
 
         if attention_mask is not None:
             hidden_states = hidden_states.mul(am)
@@ -250,8 +256,8 @@ class RWKV7Attention(nn.Module):
             recurrent_state = last_state['recurrent_state']
 
         delta, conv_state = token_shift(
-                hidden_states, cu_seqlens, output_cache=True, cache=conv_cache,
-            )
+            hidden_states, cu_seqlens, output_cache=True, cache=conv_cache,
+        )
         xr, xw, xk, xv, xa, xg = fused_addcmul_rwkv7(hidden_states, delta, self.x_r, self.x_w,
                                                      self.x_k, self.x_v, self.x_a, self.x_g)
 
@@ -298,7 +304,7 @@ class RWKV7Attention(nn.Module):
         r, w, k, a = map(lambda x: rearrange(x, 'b t (h d) -> b t h d', d=self.head_dim), (r, w, k, a))
         v = rearrange(v, 'b t (h d) -> b t h d', d=self.head_v_dim)
 
-        if self.training or seq_len >= 64:
+        if self.training or seq_len >= 64 or torch.is_grad_enabled():
             # if training, use chunk mode no matter how short the sequence is
             # launching the triton kernel for just one token will actually be slower
             o, recurrent_state = chunk_rwkv7(
@@ -312,6 +318,9 @@ class RWKV7Attention(nn.Module):
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
+                safe_gate=True,
+                lower_bound=-0.6065306597126334,
+                chunk_size=64,
             )
         else:
             o, recurrent_state = fused_mul_recurrent_rwkv7(
@@ -327,13 +336,13 @@ class RWKV7Attention(nn.Module):
                 cu_seqlens=cu_seqlens,
             )
 
-        if past_key_values is not None:
-            past_key_values.update(
-                recurrent_state=recurrent_state,
-                conv_state=conv_state,
-                layer_idx=self.layer_idx,
-                offset=r.shape[1],
-            )
+        update_layer_cache(
+            self,
+            past_key_values,
+            recurrent_state=recurrent_state,
+            conv_state=conv_state,
+            offset=r.shape[1],
+        )
 
         if self.fuse_norm:
             o = self.g_norm(rearrange(o, '... h d -> ... (h d)'))

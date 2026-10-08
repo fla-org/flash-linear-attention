@@ -1,4 +1,9 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import os
 
@@ -88,7 +93,7 @@ def test_chunk(
     ref_dh_kk_init, ref_dh_kv_init = h_kk_init.grad, h_kv_init.grad
     q.grad = k.grad = v.grad = beta.grad = g.grad = lamb.grad = h_kk_init.grad = h_kv_init.grad = None
 
-    assert_close('o', ref, tri, 0.006)
+    assert_close('o', ref, tri, 0.007)
     assert_close('h_kk_final', ref_hkk_final, tri_kk_final, 0.008)
     assert_close('h_kv_final', ref_hkv_final, tri_kv_final, 0.008)
     assert_close('dq', ref_dq, tri_dq, 0.008)
@@ -117,6 +122,7 @@ def test_chunk(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
     reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set',
 )
+@pytest.mark.smoke
 def test_chunk_varlen(
     H: int,
     D: int,

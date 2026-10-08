@@ -1,8 +1,13 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
-
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
 import torch
@@ -10,7 +15,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, repeat
 
-from fla.layers.utils import get_unpad_data, index_first_axis, pad_input
+from fla.layers.utils import get_layer_cache, repad_hidden_states, unpad_hidden_states, update_layer_cache
 from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
 from fla.modules.activations import ACT2FN
 from fla.ops.gla import chunk_gla, fused_chunk_gla, fused_recurrent_gla
@@ -23,7 +28,7 @@ if TYPE_CHECKING:
 
 class GatedLinearAttention(nn.Module):
     r"""
-    The layer implementaion for [Gated Linear Attention Transformers with Hardware-Efficient Training](https://arxiv.org/abs/2312.06635).  # noqa
+    The layer implementation for [Gated Linear Attention Transformers with Hardware-Efficient Training](https://arxiv.org/abs/2312.06635).  # noqa
 
     Args:
         mode (str, Optional):
@@ -98,6 +103,7 @@ class GatedLinearAttention(nn.Module):
         self.expand_v = expand_v
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads if num_kv_heads is not None else num_heads
+        assert self.num_heads % self.num_kv_heads == 0, "num_heads must be divisible by num_kv_heads"
         self.num_kv_groups = self.num_heads // self.num_kv_heads
         self.feature_map_fn = ACT2FN[feature_map] if feature_map is not None else None
 
@@ -106,8 +112,10 @@ class GatedLinearAttention(nn.Module):
         self.conv_bias = conv_bias
         self.use_output_gate = use_output_gate
 
-        self.key_dim = int(hidden_size * expand_k)
-        self.value_dim = int(hidden_size * expand_v)
+        key_dim, value_dim = hidden_size * expand_k, hidden_size * expand_v
+        self.key_dim, self.value_dim = round(key_dim), round(value_dim)
+        assert math.isclose(key_dim, self.key_dim), f"`hidden_size * expand_k` must be an integer, got {key_dim}."
+        assert math.isclose(value_dim, self.value_dim), f"`hidden_size * expand_v` must be an integer, got {value_dim}."
         self.key_dim_per_group = self.key_dim // self.num_kv_groups
         self.value_dim_per_group = self.value_dim // self.num_kv_groups
         self.clamp_min = clamp_min
@@ -164,6 +172,7 @@ class GatedLinearAttention(nn.Module):
                 hidden_size=self.head_v_dim,
                 elementwise_affine=elementwise_affine,
                 eps=norm_eps,
+                dtype=torch.float32
             )
             self.gate_fn = ACT2FN[gate_fn]
 
@@ -188,14 +197,10 @@ class GatedLinearAttention(nn.Module):
         batch_size, q_len, _ = hidden_states.shape
         mode = 'fused_recurrent' if hidden_states.shape[1] <= 64 else self.mode
 
-        last_state = None
-        if past_key_values is not None and len(past_key_values) > self.layer_idx:
-            last_state = past_key_values[self.layer_idx]
+        last_state = get_layer_cache(self, past_key_values)
 
         cu_seqlens = kwargs.get('cu_seqlens')
-        if attention_mask is not None:
-            indices, cu_seqlens, _ = get_unpad_data(attention_mask[:, -q_len:])
-            hidden_states = index_first_axis(rearrange(hidden_states, "b s ... -> (b s) ..."), indices).unsqueeze(0)
+        hidden_states, indices, cu_seqlens = unpad_hidden_states(hidden_states, cu_seqlens, attention_mask, q_len)
 
         if self.use_short_conv:
             conv_state_q, conv_state_k, conv_state_v = None, None, None
@@ -249,6 +254,7 @@ class GatedLinearAttention(nn.Module):
                 gk=gk,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
+                state_v_first=True,
                 cu_seqlens=cu_seqlens,
             )
         elif mode == 'fused_chunk':
@@ -268,18 +274,19 @@ class GatedLinearAttention(nn.Module):
                 g=gk,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
+                state_v_first=True,
                 cu_seqlens=cu_seqlens,
             )
         else:
             raise NotImplementedError(f"Not supported mode `{mode}`.")
 
-        if past_key_values is not None:
-            past_key_values.update(
-                recurrent_state=recurrent_state,
-                conv_state=(conv_state_q, conv_state_k, conv_state_v) if self.use_short_conv else None,
-                layer_idx=self.layer_idx,
-                offset=q_len,
-            )
+        update_layer_cache(
+            self,
+            past_key_values,
+            recurrent_state=recurrent_state,
+            conv_state=(conv_state_q, conv_state_k, conv_state_v) if self.use_short_conv else None,
+            offset=q_len,
+        )
 
         if self.use_output_gate:
             g = self.g_proj(hidden_states)
@@ -293,7 +300,6 @@ class GatedLinearAttention(nn.Module):
         else:
             o = rearrange(self.g_norm(o), '... h d -> ... (h d)')
         o = self.o_proj(o)
-        if attention_mask is not None:
-            o = pad_input(o.squeeze(0), indices, batch_size, q_len)
+        o = repad_hidden_states(o, indices, batch_size, q_len)
 
         return o, None, past_key_values

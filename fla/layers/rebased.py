@@ -1,4 +1,9 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 """
 https://github.com/corl-team/rebased/blob/main/flash_linear_attention/fla/layers/rebased_fast.py
@@ -80,7 +85,7 @@ class ReBasedLinearAttention(nn.Module):
         )
         q, k = self.feature_map(q, flatten=(mode != 'parallel')), self.feature_map(k, flatten=(mode != 'parallel'))
         if mode == "fused_chunk":
-            o = fused_chunk_linear_attn(
+            o, _ = fused_chunk_linear_attn(
                 q=q,
                 k=k,
                 v=v,
@@ -88,7 +93,7 @@ class ReBasedLinearAttention(nn.Module):
                 scale=1,
             )
         elif mode == 'chunk':
-            o = chunk_linear_attn(
+            o, _ = chunk_linear_attn(
                 q=q,
                 k=k,
                 v=v,

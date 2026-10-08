@@ -1,3 +1,9 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import os
 
@@ -85,6 +91,70 @@ def test_fused_recurrent(
     assert_close('dv', ref_dv, tri_dv, 0.005)
     assert_close('dg', ref_dg, tri_dg, 0.005)
     assert_close('dh0', ref_dh0, tri_dh0, 0.005)
+
+
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'D', 'dtype'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-{}".format(*test))
+        for test in [
+            (2, 256, 4, 64, torch.float),
+            (2, 1024, 4, 128, torch.float16),
+        ]
+    ],
+)
+@pytest.mark.skipif(
+    device_platform == 'intel',
+    reason='Intel Triton Failure',
+)
+def test_fused_recurrent_state_v_first(
+    B: int,
+    T: int,
+    H: int,
+    D: int,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(42)
+
+    q = torch.rand((B, T, H, D), dtype=dtype, device=device)
+    k = torch.rand((B, T, H, D), dtype=dtype, device=device)
+    v = torch.rand((B, T, H, D), dtype=dtype, device=device)
+    g = F.logsigmoid(torch.rand((B, T, H, D), dtype=dtype, device=device))
+    h0 = torch.rand(B, H, D, D, device=device)
+    do = torch.randn_like(v)
+    dht = torch.randn_like(h0)
+
+    def run(state_v_first: bool):
+        q_, k_, v_, g_ = (x.detach().clone().requires_grad_() for x in (q, k, v, g))
+        h0_in = h0.transpose(-1, -2).contiguous() if state_v_first else h0.clone()
+        dht_in = dht.transpose(-1, -2).contiguous() if state_v_first else dht
+        h0_in = h0_in.requires_grad_()
+        out, ht = fused_recurrent_gla(
+            q=q_, k=k_, v=v_, gk=g_,
+            initial_state=h0_in,
+            output_final_state=True,
+            state_v_first=state_v_first,
+        )
+        ((out * do).sum() + (ht * dht_in).sum()).backward()
+        return out, ht, q_.grad, k_.grad, v_.grad, g_.grad, h0_in.grad
+
+    ref_o, ref_ht, ref_dq, ref_dk, ref_dv, ref_dg, ref_dh0 = run(False)
+    tri_o, tri_ht, tri_dq, tri_dk, tri_dv, tri_dg, tri_dh0 = run(True)
+
+    assert_close('o', ref_o, tri_o, 0.005)
+    assert_close('ht', ref_ht, tri_ht.transpose(-1, -2), 0.005)
+    assert_close('dq', ref_dq, tri_dq, 0.005)
+    assert_close('dk', ref_dk, tri_dk, 0.005)
+    assert_close('dv', ref_dv, tri_dv, 0.005)
+    assert_close('dg', ref_dg, tri_dg, 0.005)
+    assert_close('dh0', ref_dh0, tri_dh0.transpose(-1, -2), 0.005)
+
+    # the legacy `transpose_state_layout` kwarg maps to `state_v_first` with a warning,
+    # and passing both names at once is rejected
+    with pytest.warns(DeprecationWarning):
+        fused_recurrent_gla(q, k, v, gk=g, transpose_state_layout=True)
+    with pytest.raises(ValueError):
+        fused_recurrent_gla(q, k, v, gk=g, state_v_first=True, transpose_state_layout=True)
 
 
 @pytest.mark.parametrize(
@@ -182,6 +252,9 @@ def test_fused_recurrent_varlen(
             (2, 1024, 8, 128, 1, torch.float16),
             (2, 1024, 8, 128, 10, torch.float16),
             (4, 2048, 8, 64, 1, torch.float16),
+            (1, 128, 4, 256, 1, torch.float16),
+            (1, 64, 2, 320, 1, torch.float16),
+            (1, 128, 4, 512, 1, torch.bfloat16),
         ]
     ],
 )
@@ -248,13 +321,80 @@ def test_chunk(
 
 
 @pytest.mark.parametrize(
-    ('H', 'D', 'cu_seqlens', 'dtype'),
+    ('B', 'T', 'H', 'K', 'V', 'dtype'),
     [
-        pytest.param(*test, id="H{}-D{}-cu_seqlens{}-{}".format(*test))
+        pytest.param(*test, id="B{}-T{}-H{}-K{}-V{}-{}".format(*test))
         for test in [
-            (4, 64, [0, 15], torch.float16),
-            (4, 64, [0, 256, 500, 1000], torch.float16),
-            (4, 100, [0, 15, 100, 300, 1200, 2000], torch.float16),
+            (2, 256, 4, 64, 64, torch.float),
+            (2, 1024, 4, 128, 128, torch.float16),
+            (2, 256, 4, 32, 64, torch.float),
+            (4, 1024, 4, 32, 64, torch.float16),
+            (4, 1024, 4, 32, 64, torch.bfloat16),
+            (2, 256, 4, 128, 256, torch.bfloat16),
+        ]
+    ],
+)
+@pytest.mark.skipif(
+    device_platform == 'intel',
+    reason='Intel Triton Failure',
+)
+def test_chunk_state_v_first(
+    B: int,
+    T: int,
+    H: int,
+    K: int,
+    V: int,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(42)
+    os.environ['TRITON_F32_DEFAULT'] = 'ieee'
+
+    q = torch.rand((B, T, H, K), dtype=dtype, device=device)
+    k = torch.rand((B, T, H, K), dtype=dtype, device=device)
+    v = torch.rand((B, T, H, V), dtype=dtype, device=device)
+    g = F.logsigmoid(torch.rand((B, T, H, K), dtype=dtype, device=device))
+    h0 = torch.rand(B, H, K, V, dtype=torch.float32, device=device)
+    do = torch.randn_like(v)
+    dht = torch.randn_like(h0)
+
+    def run(state_v_first: bool):
+        q_, k_, v_, g_ = (x.detach().clone().requires_grad_() for x in (q, k, v, g))
+        # the [V, K] state layout takes a transposed initial state / final-state gradient
+        h0_in = h0.transpose(-1, -2).contiguous() if state_v_first else h0.clone()
+        dht_in = dht.transpose(-1, -2).contiguous() if state_v_first else dht
+        h0_in = h0_in.requires_grad_()
+        out, ht = chunk_gla(
+            q=q_, k=k_, v=v_, g=g_,
+            initial_state=h0_in,
+            output_final_state=True,
+            state_v_first=state_v_first,
+        )
+        ((out * do).sum() + (ht * dht_in).sum()).backward()
+        return out, ht, q_.grad, k_.grad, v_.grad, g_.grad, h0_in.grad
+
+    ref_o, ref_ht, ref_dq, ref_dk, ref_dv, ref_dg, ref_dh0 = run(False)
+    tri_o, tri_ht, tri_dq, tri_dk, tri_dv, tri_dg, tri_dh0 = run(True)
+
+    assert_close('o', ref_o, tri_o, 0.005)
+    assert_close('ht', ref_ht, tri_ht.transpose(-1, -2), 0.005)
+    assert_close('dq', ref_dq, tri_dq, 0.005)
+    assert_close('dk', ref_dk, tri_dk, 0.005)
+    assert_close('dv', ref_dv, tri_dv, 0.005)
+    assert_close('dg', ref_dg, tri_dg, 0.005)
+    assert_close('dh0', ref_dh0, tri_dh0.transpose(-1, -2), 0.005)
+
+
+@pytest.mark.parametrize(
+    ('H', 'K', 'V', 'cu_seqlens', 'dtype', 'state_v_first'),
+    [
+        pytest.param(*test, id="H{}-K{}-V{}-cu_seqlens{}-{}-state_v_first{}".format(*test))
+        for test in [
+            (4, 64, 64, [0, 15], torch.float16, False),
+            (4, 64, 64, [0, 0, 16], torch.float16, False),
+            (4, 64, 64, [0, 256, 500, 1000], torch.float16, False),
+            (4, 100, 100, [0, 15, 100, 300, 1200, 2000], torch.float16, False),
+            (4, 32, 64, [0, 1024, 2048, 3072, 4096], torch.bfloat16, True),
+            (4, 32, 64, [0, 1, 63, 128, 257], torch.float16, True),
         ]
     ],
 )
@@ -262,11 +402,14 @@ def test_chunk(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
     reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set',
 )
+@pytest.mark.smoke
 def test_chunk_varlen(
     H: int,
-    D: int,
+    K: int,
+    V: int,
     cu_seqlens: list[int],
     dtype: torch.dtype,
+    state_v_first: bool,
 ):
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
@@ -275,13 +418,14 @@ def test_chunk_varlen(
     T = cu_seqlens[-1]
     cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
 
-    q = torch.rand((1, T, H, D), dtype=dtype, device=device).requires_grad_()
-    k = torch.rand((1, T, H, D), dtype=dtype, device=device).requires_grad_()
-    v = torch.rand((1, T, H, D), dtype=dtype, device=device).requires_grad_()
-    g = F.logsigmoid(torch.rand((1, T, H, D), dtype=dtype, device=device)).requires_grad_()
-    h0 = torch.rand((N, H, D, D), dtype=torch.float32, device=device).requires_grad_()
+    q = torch.rand((1, T, H, K), dtype=dtype, device=device).requires_grad_()
+    k = torch.rand((1, T, H, K), dtype=dtype, device=device).requires_grad_()
+    v = torch.rand((1, T, H, V), dtype=dtype, device=device).requires_grad_()
+    g = F.logsigmoid(torch.rand((1, T, H, K), dtype=dtype, device=device)).requires_grad_()
+    state_shape = (N, H, V, K) if state_v_first else (N, H, K, V)
+    h0 = torch.rand(state_shape, dtype=torch.float32, device=device).requires_grad_()
     do = torch.randn_like(v)
-    dht = torch.rand((N, H, D, D), dtype=torch.float32, device=device)
+    dht = torch.rand(state_shape, dtype=torch.float32, device=device)
 
     ref, ref_ht = fused_recurrent_gla(
         q=q,
@@ -290,6 +434,7 @@ def test_chunk_varlen(
         gk=g,
         initial_state=h0,
         output_final_state=True,
+        state_v_first=state_v_first,
         cu_seqlens=cu_seqlens,
     )
 
@@ -307,6 +452,7 @@ def test_chunk_varlen(
         g=g,
         initial_state=h0,
         output_final_state=True,
+        state_v_first=state_v_first,
         cu_seqlens=cu_seqlens,
     )
     ((tri * do).sum() + (tri_ht * dht).sum()).backward()

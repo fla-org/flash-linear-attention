@@ -1,13 +1,23 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 # Code is adapted from flash-attn.bert_padding.py
-
 
 import torch
 from einops import rearrange, repeat
 
-from fla.ops.utils.index import prepare_cu_seqlens_from_mask, prepare_lens_from_mask
+from fla.ops.utils.index import (
+    prepare_cu_seqlens_from_lens,
+    prepare_cu_seqlens_from_mask,
+    prepare_lens_from_mask,
+)
 from fla.utils import tensor_cache
+
+_LAYER_IDX_REQUIRED_MSG = "{cls} requires `layer_idx` when `past_key_values` is provided."
 
 
 class IndexFirstAxis(torch.autograd.Function):
@@ -70,6 +80,35 @@ index_put_first_axis = IndexPutFirstAxis.apply
 
 
 @tensor_cache
+def _get_unpad_indices_and_cu(
+    attention_mask: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    lens = prepare_lens_from_mask(attention_mask)
+    indices = torch.nonzero(attention_mask.flatten(), as_tuple=False).flatten()
+    cu_seqlens = prepare_cu_seqlens_from_lens(lens)
+    return indices, cu_seqlens
+
+
+@tensor_cache
+def _get_last_token_unpad_indices_and_cu(
+    attention_mask: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return _get_unpad_indices_and_cu(attention_mask[:, -1:])
+
+
+def get_unpad_indices_and_cu(
+    attention_mask: torch.Tensor,
+    q_len: int | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return unpadding indices and cumulative sequence lengths."""
+    if q_len is None or attention_mask.shape[-1] == q_len:
+        return _get_unpad_indices_and_cu(attention_mask)
+    if q_len == 1:
+        return _get_last_token_unpad_indices_and_cu(attention_mask)
+    return _get_unpad_indices_and_cu(attention_mask[:, -q_len:])
+
+
+@tensor_cache
 def get_unpad_data(
     attention_mask: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, int]:
@@ -96,8 +135,74 @@ def get_unpad_data(
     return indices, cu_seqlens, max_seqlen_in_batch
 
 
+def unpad_hidden_states(
+    hidden_states: torch.Tensor,
+    cu_seqlens: torch.LongTensor | None,
+    attention_mask: torch.Tensor | None,
+    q_len: int,
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.LongTensor | None]:
+    """Unpad hidden states via attention_mask, unless explicit cu_seqlens are given.
+
+    Explicit `cu_seqlens` take precedence: when they are provided, the input is
+    returned unchanged and no unpadding happens. Only when `cu_seqlens` is None
+    and `attention_mask` is present are the hidden states unpadded via the mask.
+
+    Arguments:
+        hidden_states (`torch.Tensor`):
+            Input hidden states with padding. Shape: [batch_size, q_len, ...].
+        cu_seqlens (`torch.LongTensor | None`):
+            Explicit cumulative sequence lengths provided by the caller.
+        attention_mask (`torch.Tensor | None`):
+            Boolean or int tensor of shape (batch_size, sequence_length), 1 means valid and 0 means not valid.
+        q_len (`int`):
+            Target length.
+
+    Return:
+        hidden_states (`torch.Tensor`):
+            The unpadded hidden states of shape [1, total_tokens, ...],
+            or the input unchanged when unpadding is skipped.
+        indices (`torch.Tensor | None`):
+            The indices of non-masked tokens, or None when unpadding is skipped.
+        cu_seqlens (`torch.LongTensor | None`):
+            The cumulative sequence lengths derived from the mask,
+            or the explicit value passed in when unpadding is skipped.
+    """
+    if cu_seqlens is None and attention_mask is not None:
+        indices, cu_seqlens = get_unpad_indices_and_cu(attention_mask, q_len)
+        hidden_states = index_first_axis(rearrange(hidden_states, "b s ... -> (b s) ..."), indices).unsqueeze(0)
+        return hidden_states, indices, cu_seqlens
+    return hidden_states, None, cu_seqlens
+
+
+def repad_hidden_states(
+    hidden_states: torch.Tensor,
+    indices: torch.Tensor | None,
+    batch_size: int,
+    q_len: int,
+) -> torch.Tensor:
+    """Inverse of `unpad_hidden_states`; a no-op when `indices` is None.
+
+    Arguments:
+        hidden_states (`torch.Tensor`):
+            Hidden states of shape [1, total_tokens, ...].
+        indices (`torch.Tensor | None`):
+            The indices returned by `unpad_hidden_states`, or None.
+        batch_size (`int`):
+            Batch size for the padded sequence.
+        q_len (`int`):
+            Target length.
+
+    Return:
+        hidden_states of shape [batch_size, q_len, ...],
+        or the input unchanged when `indices` is None.
+    """
+    if indices is None:
+        return hidden_states
+    return pad_input(hidden_states.squeeze(0), indices, batch_size, q_len)
+
+
 def unpad_input(
-    q: torch.Tensor,
+    q: torch.Tensor | tuple[torch.Tensor, ...],
     states: tuple[torch.Tensor],
     attention_mask: torch.Tensor,
     q_len: int,
@@ -109,8 +214,9 @@ def unpad_input(
 
 
     Arguments:
-        q (`torch.Tensor`):
+        q (`torch.Tensor` or `Tuple[torch.Tensor]`):
             Query state with padding. Shape: [batch_size, q_len, ...].
+            When it is a tuple, do unpadding for each tensor in the tuple.
         states (`Tuple[torch.Tensor]`):
             Attention state with padding. Shape: [batch_size, seq_len, ...].
         attention_mask (`torch.Tensor`):
@@ -121,19 +227,20 @@ def unpad_input(
             Whether to keep the batch dimension. Default: `False`.
 
     Return:
-        q (`torch.Tensor`):
+        q (`torch.Tensor` or `Tuple[torch.Tensor]`):
             Query state without padding.
             Shape: [1, total_target_length, ...] if `keepdim=True` else [total_target_length, ...].
+            When the `q` passed in is a tuple, return a tuple of such unpadded tensors.
         states (`Tuple[torch.Tensor]`):
             Attention state without padding.
             Shape: [1, total_source_length, ...] if `keepdim=True` else [total_source_length, ...].
         indices_q (`torch.Tensor`):
             The indices of non-masked tokens from the flattened input target sequence.
-        (cu_seqlens_q, cu_seqlens_k) (`Tuple[int]`):
+        (cu_seqlens_q, cu_seqlens_k) (`Tuple[torch.LongTensor, torch.LongTensor]`):
             The cumulative sequence lengths for the target (query) and source (key, value),
             used to index into ragged (unpadded) tensors.
             `cu_seqlens` shape is [batch_size + 1].
-        (max_seqlen_in_batch_q, max_seqlen_in_batch_k) (`Tuple[int]`):
+        (max_seqlen_in_batch_q, max_seqlen_in_batch_k) (`Tuple[int, int]`):
             Maximum sequence length in batch (`max_seqlen_in_batch_q` for the target sequence
             i.e. query, `max_seqlen_in_batch_k` for the source sequence i.e. key/value).
     """
@@ -144,23 +251,30 @@ def unpad_input(
         index_first_axis(rearrange(s, "b s ... -> (b s) ..."), indices_k)
         for s in states
     )
+    if isinstance(q, torch.Tensor):
+        q = (q,)
+        cast_tuple = True
+    else:
+        cast_tuple = False
 
     if q_len == seq_len:
-        q = index_first_axis(rearrange(q, "b s ... -> (b s) ..."), indices_k)
+        q = tuple(index_first_axis(rearrange(q_, "b s ... -> (b s) ..."), indices_k) for q_ in q)
         cu_seqlens_q = cu_seqlens_k
         max_seqlen_in_batch_q = max_seqlen_in_batch_k
         indices_q = indices_k
     elif q_len == 1:
         max_seqlen_in_batch_q = 1
-        cu_seqlens_q = torch.arange(batch_size + 1, dtype=torch.int32, device=q.device)
+        cu_seqlens_q = torch.arange(batch_size + 1, dtype=torch.int32, device=q[0].device)
         indices_q = cu_seqlens_q[:-1]
-        q = q.squeeze(1)
+        q = tuple(q_.squeeze(1) for q_ in q)
     else:
         raise NotImplementedError("We only support either q_len == k_len (prefilling) or q_len == 1 (decoding)")
 
     if keepdim:
-        q = q.unsqueeze(0)
+        q = tuple(q_.unsqueeze(0) for q_ in q)
         state = tuple(s.unsqueeze(0) for s in state)
+    if cast_tuple:
+        q = q[0]
 
     return (
         q,
@@ -193,3 +307,24 @@ def pad_input(
     """
     output = index_put_first_axis(hidden_states, indices, batch_size * seq_len)
     return rearrange(output, "(b s) ... -> b s ...", b=batch_size)
+
+
+def require_cache_layer_idx(module, past_key_values):
+    layer_idx = getattr(module, "layer_idx", None)
+    if past_key_values is not None and layer_idx is None:
+        raise ValueError(_LAYER_IDX_REQUIRED_MSG.format(cls=module.__class__.__name__))
+    return layer_idx
+
+
+def get_layer_cache(module, past_key_values):
+    layer_idx = require_cache_layer_idx(module, past_key_values)
+    if past_key_values is not None and len(past_key_values) > layer_idx:
+        return past_key_values[layer_idx]
+    return None
+
+
+def update_layer_cache(module, past_key_values, **kwargs):
+    layer_idx = require_cache_layer_idx(module, past_key_values)
+    if past_key_values is not None:
+        return past_key_values.update(layer_idx=layer_idx, **kwargs)
+    return None

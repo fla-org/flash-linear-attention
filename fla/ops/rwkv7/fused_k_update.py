@@ -1,16 +1,21 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
+from fla.ops.utils.op import unflatten_program_id
 from fla.utils import IS_AMD, autotune_cache_kwargs, get_multiprocessor_count, input_guard
 
 NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if IS_AMD else [2, 4, 8, 16, 32]
 
 
-@torch.jit.script
 def k_update_ref(k: torch.Tensor, a: torch.Tensor, ka: torch.Tensor) -> torch.Tensor:
     return k.addcmul(k * (a - 1), ka)
 
@@ -33,11 +38,11 @@ def k_update_fwd_kernel_short(
     BD: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_b, i_t = tl.program_id(0), tl.program_id(1)
+    i_b, i_t = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
 
     if IS_VARLEN:
-        bos = tl.load(cu_seqlens + i_b).to(tl.int32)
-        eos = tl.load(cu_seqlens + i_b + 1).to(tl.int32)
+        bos = tl.load(cu_seqlens + i_b).to(tl.int64)
+        eos = tl.load(cu_seqlens + i_b + 1).to(tl.int64)
         g_t = bos + i_t
         if g_t >= eos:
             return
@@ -76,13 +81,14 @@ def k_update_fwd_kernel_long(
     BD: tl.constexpr, BT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_d, i_t_blk, i_b = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_d, i_t_blk = unflatten_program_id(tl.cdiv(D, BD))
+    i_b = tl.program_id(1).to(tl.int64)
 
     if IS_VARLEN:
         i_n, i_t_blk = tl.load(chunk_indices + i_t_blk * 2).to(tl.int32), \
             tl.load(chunk_indices + i_t_blk * 2 + 1).to(tl.int32)
-        bos = tl.load(cu_seqlens + i_n).to(tl.int32)
-        eos = tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos = tl.load(cu_seqlens + i_n).to(tl.int64)
+        eos = tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         t_start = i_t_blk * BT
         t_end = tl.minimum(t_start + BT, eos - bos)
     else:
@@ -125,11 +131,11 @@ def k_update_bwd_kernel_short(
     BD: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_b, i_t_base = tl.program_id(0), tl.program_id(1) * BT
+    i_b, i_t_base = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64) * BT
 
     if IS_VARLEN:
-        bos = tl.load(cu_seqlens + i_b).to(tl.int32)
-        eos = tl.load(cu_seqlens + i_b + 1).to(tl.int32)
+        bos = tl.load(cu_seqlens + i_b).to(tl.int64)
+        eos = tl.load(cu_seqlens + i_b + 1).to(tl.int64)
         seq_len = eos - bos
     else:
         bos = i_b * T
@@ -176,13 +182,14 @@ def k_update_bwd_kernel_long(
     BD: tl.constexpr, BT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_d, i_t_blk, i_b = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_d, i_t_blk = unflatten_program_id(tl.cdiv(D, BD))
+    i_b = tl.program_id(1).to(tl.int64)
 
     if IS_VARLEN:
         i_n, i_t_blk = tl.load(chunk_indices + i_t_blk * 2).to(tl.int32), \
             tl.load(chunk_indices + i_t_blk * 2 + 1).to(tl.int32)
-        bos = tl.load(cu_seqlens + i_n).to(tl.int32)
-        eos = tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos = tl.load(cu_seqlens + i_n).to(tl.int64)
+        eos = tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         t_start = i_t_blk * BT
         t_end = tl.minimum(t_start + BT, eos - bos)
     else:
@@ -213,6 +220,7 @@ def k_update_fwd(
     a: torch.Tensor,
     ka: torch.Tensor,
     cu_seqlens: torch.Tensor | None = None,
+    cu_seqlens_cpu: torch.LongTensor | None = None,
 ) -> torch.Tensor:
     B, T, D = k.shape
     out = torch.empty_like(k)
@@ -236,7 +244,7 @@ def k_update_fwd(
             triton.cdiv(max(16, B * T), get_multiprocessor_count(k.device.index)),
         ))
         if cu_seqlens is not None:
-            chunk_idx = prepare_chunk_indices(cu_seqlens, BT)
+            chunk_idx = prepare_chunk_indices(cu_seqlens, BT, cu_seqlens_cpu=cu_seqlens_cpu)
             NT = len(chunk_idx)
             N = len(cu_seqlens) - 1
         else:
@@ -247,14 +255,9 @@ def k_update_fwd(
         BD = triton.next_power_of_2(D)
 
         def grid(meta):
-            return (triton.cdiv(D, meta['BD']), NT, N)
+            return (triton.cdiv(D, meta['BD']) * NT, N)
 
-        k_update_fwd_kernel_long[grid](
-            k, a, ka, out,
-            cu_seqlens, chunk_idx,
-            T, D,
-            BD=BD, BT=BT,
-        )
+        k_update_fwd_kernel_long[grid](k, a, ka, out, cu_seqlens, chunk_idx, T, D, BD=BD, BT=BT)
 
     return out, use_short, N, T
 
@@ -268,6 +271,7 @@ def k_update_bwd(
     use_short: bool,
     N: int,
     T: int,
+    cu_seqlens_cpu: torch.LongTensor | None = None,
 ):
     B, _, D = grad_out.shape
     dk = torch.empty_like(k)
@@ -289,7 +293,7 @@ def k_update_bwd(
             triton.cdiv(max(16, B * T), get_multiprocessor_count(grad_out.device.index)),
         ))
         if cu_seqlens is not None:
-            chunk_idx = prepare_chunk_indices(cu_seqlens, BT)
+            chunk_idx = prepare_chunk_indices(cu_seqlens, BT, cu_seqlens_cpu=cu_seqlens_cpu)
             NT = len(chunk_idx)
         else:
             chunk_idx = None
@@ -298,15 +302,9 @@ def k_update_bwd(
         BD = triton.next_power_of_2(D)
 
         def grid(meta):
-            return (triton.cdiv(D, meta['BD']), NT, N)
+            return (triton.cdiv(D, meta['BD']) * NT, N)
 
-        k_update_bwd_kernel_long[grid](
-            grad_out, k, a, ka,
-            dk, da, dka_tmp,
-            cu_seqlens, chunk_idx,
-            T, D,
-            BD=BD, BT=BT,
-        )
+        k_update_bwd_kernel_long[grid](grad_out, k, a, ka, dk, da, dka_tmp, cu_seqlens, chunk_idx, T, D, BD=BD, BT=BT)
 
     if dka_tmp.dim() == 3:
         dka = dka_tmp.sum(dim=(0, 1), keepdim=True).type_as(ka)
@@ -319,13 +317,14 @@ def k_update_bwd(
 class KUpdateFunction(torch.autograd.Function):
     @staticmethod
     @input_guard
-    def forward(ctx, k, a, ka, cu_seqlens=None):
-        out, use_short, N, T = k_update_fwd(k, a, ka, cu_seqlens)
+    def forward(ctx, k, a, ka, cu_seqlens=None, cu_seqlens_cpu=None):
+        out, use_short, N, T = k_update_fwd(k, a, ka, cu_seqlens, cu_seqlens_cpu=cu_seqlens_cpu)
         ctx.save_for_backward(k, a, ka)
         ctx.use_short = use_short
         ctx.N = N
         ctx.T = T
         ctx.cu_seqlens = cu_seqlens
+        ctx.cu_seqlens_cpu = cu_seqlens_cpu
         return out
 
     @staticmethod
@@ -338,11 +337,12 @@ class KUpdateFunction(torch.autograd.Function):
             ctx.use_short,
             ctx.N,
             ctx.T,
+            cu_seqlens_cpu=ctx.cu_seqlens_cpu,
         )
-        return dk, da, dka, None
+        return dk, da, dka, None, None
 
 
-def fused_k_rwkv7(k, a, ka, cu_seqlens=None):
+def fused_k_rwkv7(k, a, ka, cu_seqlens=None, cu_seqlens_cpu=None):
     if k.shape[1] == 1:
         return k_update_ref(k, a, ka)
-    return KUpdateFunction.apply(k, a, ka, cu_seqlens)
+    return KUpdateFunction.apply(k, a, ka, cu_seqlens, cu_seqlens_cpu)

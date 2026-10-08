@@ -1,7 +1,13 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 from __future__ import annotations
 
+import math
 import warnings
 from typing import TYPE_CHECKING
 
@@ -9,6 +15,7 @@ import torch
 import torch.nn as nn
 from einops import rearrange
 
+from fla.layers.utils import get_layer_cache, update_layer_cache
 from fla.modules import FusedRMSNormGated, RMSNorm, RotaryEmbedding, ShortConvolution
 from fla.modules.activations import swiglu, swish
 from fla.ops.abc.chunk import chunk_abc
@@ -48,8 +55,12 @@ class ABCAttention(nn.Module):
         self.expand_k = expand_k
         self.expand_v = expand_v
         self.num_heads = num_heads
-        self.key_dim = int(self.hidden_size * self.expand_k)
-        self.value_dim = int(self.hidden_size * self.expand_v)
+        key_dim, value_dim = hidden_size * expand_k, hidden_size * expand_v
+        self.key_dim, self.value_dim = round(key_dim), round(value_dim)
+        assert math.isclose(key_dim, self.key_dim), f"`hidden_size * expand_k` must be an integer, got {key_dim}."
+        assert math.isclose(value_dim, self.value_dim), f"`hidden_size * expand_v` must be an integer, got {value_dim}."
+        assert self.key_dim % num_heads == 0, f"key dim must be divisible by num_heads of {num_heads}"
+        assert self.value_dim % num_heads == 0, f"value dim must be divisible by num_heads of {num_heads}"
         self.head_k_dim = self.key_dim // self.num_heads
         self.head_v_dim = self.value_dim // self.num_heads
 
@@ -124,6 +135,7 @@ class ABCAttention(nn.Module):
                     hidden_size=self.head_v_dim,
                     elementwise_affine=elementwise_affine,
                     eps=norm_eps,
+                    dtype=torch.float32,
                 )
 
         if self.use_rope:
@@ -145,9 +157,7 @@ class ABCAttention(nn.Module):
                 "Arbitrary attention masks of shape [batch_size, seq_len, seq_len] are not allowed."
             )
 
-        last_state = None
-        if past_key_values is not None and len(past_key_values) > self.layer_idx:
-            last_state = past_key_values[self.layer_idx]
+        last_state = get_layer_cache(self, past_key_values)
 
         cu_seqlens = kwargs.get('cu_seqlens')
         if cu_seqlens is not None:
@@ -209,13 +219,13 @@ class ABCAttention(nn.Module):
             initial_state=recurrent_state,
             output_final_state=use_cache,
         )
-        if past_key_values is not None:
-            past_key_values.update(
-                recurrent_state=recurrent_state,
-                conv_state=(conv_state_q, conv_state_k, conv_state_v) if self.use_short_conv else None,
-                layer_idx=self.layer_idx,
-                offset=q.shape[1],
-            )
+        update_layer_cache(
+            self,
+            past_key_values,
+            recurrent_state=recurrent_state,
+            conv_state=(conv_state_q, conv_state_k, conv_state_v) if self.use_short_conv else None,
+            offset=q.shape[1],
+        )
 
         if self.use_norm and not self.use_output_gate:
             o = self.g_norm(o)
@@ -227,5 +237,9 @@ class ABCAttention(nn.Module):
 
         return o, None, past_key_values
 
-    def state_size(self, seq_len: int = 2048):
-        return 2 * self.num_slots * self.hidden_size
+    def state_size(self, seq_len: int = 2048) -> int:
+        state_size = self.num_slots * (self.key_dim + self.value_dim)
+        for module in self.children():
+            if isinstance(module, ShortConvolution):
+                state_size += module.state_size
+        return state_size

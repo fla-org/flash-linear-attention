@@ -1,7 +1,13 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 from __future__ import annotations
 
+import math
 import warnings
 from typing import TYPE_CHECKING
 
@@ -10,8 +16,9 @@ import torch.nn as nn
 from einops import rearrange
 from torch.nn import functional as F
 
-from fla.layers.utils import get_unpad_data, index_first_axis, pad_input
+from fla.layers.utils import get_layer_cache, repad_hidden_states, unpad_hidden_states, update_layer_cache
 from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
+from fla.modules.activations import elu_p1
 from fla.ops.delta_rule import chunk_delta_rule, fused_recurrent_delta_rule
 
 if TYPE_CHECKING:
@@ -20,17 +27,13 @@ if TYPE_CHECKING:
     from fla.models.utils import Cache
 
 
-def elu_p1(x):
-    return (F.elu(x, 1., False) + 1.).to(x)
-
-
 def sum_norm(x):
-    return (x / x.sum(-1, keepdim=True)).to(x)
+    return F.normalize(x, p=1, dim=-1, eps=1e-6).to(x)
 
 
 class DeltaNet(nn.Module):
     r"""
-    The layer implementaion for [Parallelizing Linear Transformers with the Delta Rule over Sequence Length](https://arxiv.org/abs/2406.06484).  # noqa:
+    The layer implementation for [Parallelizing Linear Transformers with the Delta Rule over Sequence Length](https://arxiv.org/abs/2406.06484).  # noqa:
     DeltaNet was originally proposed in [Linear Transformers Are Secretly Fast Weight Programmers](https://arxiv.org/abs/2102.11174). # noqa
 
     Args:
@@ -61,6 +64,8 @@ class DeltaNet(nn.Module):
             See reference: [Unlocking State-Tracking in Linear RNNs Through Negative Eigenvalues](https://arxiv.org/abs/2411.12537)
         layer_idx (int, Optional):
             The index of the layer. Default: None.
+        fuse_conv_l2 (bool, Optional):
+            Whether to fuse Q/K short convolution and L2 normalization in chunk mode. Default: `False`.
         norm_eps (float, Optional):
             The epsilon value for the layernorm/rmsnorm layer. Default: 1e-5.
         qk_activation (str, Optional):
@@ -87,8 +92,7 @@ class DeltaNet(nn.Module):
         qk_activation: str = 'silu',
         qk_norm: str = 'l2',
         norm_eps: float = 1e-5,
-        fuse_conv_l2: bool = True,
-        fuse_norm: bool | None = None,
+        fuse_conv_l2: bool = False,
         **kwargs,
     ) -> DeltaNet:
         super().__init__()
@@ -96,14 +100,6 @@ class DeltaNet(nn.Module):
         self.mode = mode
         self.qk_activation = qk_activation
         self.qk_norm = qk_norm
-        if fuse_norm is not None:
-            warnings.warn(
-                "`fuse_norm` is deprecated for DeltaNet; use `fuse_conv_l2` to control the fused "
-                "ShortConvolution + L2 kernel.",
-                stacklevel=2,
-            )
-            fuse_conv_l2 = fuse_norm
-        self.fuse_conv_l2 = fuse_conv_l2 and use_short_conv and (qk_norm == 'l2')
 
         assert self.qk_activation in ['silu', 'relu', 'elu', 'identity']
         assert self.qk_norm in ['l2', 'sum']
@@ -116,12 +112,15 @@ class DeltaNet(nn.Module):
         self.num_heads = num_heads
         self.use_gate = use_gate
         self.use_short_conv = use_short_conv
+        self.fuse_conv_l2 = fuse_conv_l2 and use_short_conv and qk_norm == 'l2' and qk_activation in ('silu', 'identity')
         self.conv_size = conv_size
         self.conv_bias = conv_bias
         self.allow_neg_eigval = allow_neg_eigval
 
-        self.key_dim = int(hidden_size * expand_k)
-        self.value_dim = int(hidden_size * expand_v)
+        key_dim, value_dim = hidden_size * expand_k, hidden_size * expand_v
+        self.key_dim, self.value_dim = round(key_dim), round(value_dim)
+        assert math.isclose(key_dim, self.key_dim), f"`hidden_size * expand_k` must be an integer, got {key_dim}."
+        assert math.isclose(value_dim, self.value_dim), f"`hidden_size * expand_v` must be an integer, got {value_dim}."
         self.head_k_dim = self.key_dim // num_heads
         self.head_v_dim = self.value_dim // num_heads
         self.layer_idx = layer_idx
@@ -147,7 +146,6 @@ class DeltaNet(nn.Module):
                 bias=conv_bias,
                 activation='silu' if qk_activation == 'silu' else None,
                 norm='l2' if self.fuse_conv_l2 else None,
-                norm_eps=norm_eps,
             )
             self.k_conv1d = ShortConvolution(
                 hidden_size=self.key_dim,
@@ -155,7 +153,6 @@ class DeltaNet(nn.Module):
                 bias=conv_bias,
                 activation='silu' if qk_activation == 'silu' else None,
                 norm='l2' if self.fuse_conv_l2 else None,
-                norm_eps=norm_eps,
             )
             self.v_conv1d = ShortConvolution(
                 hidden_size=self.value_dim,
@@ -172,7 +169,7 @@ class DeltaNet(nn.Module):
             self.g_proj = nn.Linear(hidden_size, self.value_dim, bias=False)
             self.o_norm = FusedRMSNormGated(self.head_v_dim, eps=norm_eps)
         else:
-            self.o_norm = RMSNorm(self.head_v_dim, eps=norm_eps)
+            self.o_norm = RMSNorm(self.head_v_dim, eps=norm_eps, dtype=torch.float32)
 
         self.o_proj = nn.Linear(self.value_dim, hidden_size, bias=False)
 
@@ -196,15 +193,12 @@ class DeltaNet(nn.Module):
         # change to inference mode.
         mode = 'fused_recurrent' if q_len <= 64 else self.mode
 
-        last_state = None
-        if past_key_values is not None and len(past_key_values) > self.layer_idx:
-            last_state = past_key_values[self.layer_idx]
+        last_state = get_layer_cache(self, past_key_values)
 
         cu_seqlens = kwargs.get('cu_seqlens')
-        if attention_mask is not None:
-            indices, cu_seqlens, _ = get_unpad_data(attention_mask[:, -q_len:])
-            hidden_states = index_first_axis(rearrange(hidden_states, "b s ... -> (b s) ..."), indices).unsqueeze(0)
+        hidden_states, indices, cu_seqlens = unpad_hidden_states(hidden_states, cu_seqlens, attention_mask, q_len)
 
+        use_conv_l2 = self.fuse_conv_l2 and mode == 'chunk'
         if self.use_short_conv:
             conv_state_q, conv_state_k, conv_state_v = None, None, None
             if last_state is not None:
@@ -214,14 +208,16 @@ class DeltaNet(nn.Module):
                 cache=conv_state_q,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
-                head_dim=self.head_k_dim if self.fuse_conv_l2 else None
+                head_dim=self.head_k_dim,
+                use_norm=use_conv_l2,
             )
             k, conv_state_k = self.k_conv1d(
                 x=self.k_proj(hidden_states),
                 cache=conv_state_k,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
-                head_dim=self.head_k_dim if self.fuse_conv_l2 else None
+                head_dim=self.head_k_dim,
+                use_norm=use_conv_l2,
             )
             v, conv_state_v = self.v_conv1d(
                 x=self.v_proj(hidden_states),
@@ -268,7 +264,7 @@ class DeltaNet(nn.Module):
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
-                use_qk_l2norm_in_kernel=(self.qk_norm == 'l2' and not self.fuse_conv_l2),
+                use_qk_l2norm_in_kernel=(self.qk_norm == 'l2'),
             )
         elif mode == 'chunk':
             o, recurrent_state = chunk_delta_rule(
@@ -279,18 +275,18 @@ class DeltaNet(nn.Module):
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
-                use_qk_l2norm_in_kernel=(self.qk_norm == 'l2' and not self.fuse_conv_l2),
+                use_qk_l2norm_in_kernel=(self.qk_norm == 'l2' and not use_conv_l2),
             )
         else:
             raise NotImplementedError(f"Not supported mode `{mode}`.")
 
-        if past_key_values is not None:
-            past_key_values.update(
-                recurrent_state=recurrent_state,
-                conv_state=(conv_state_q, conv_state_k, conv_state_v) if self.use_short_conv else None,
-                layer_idx=self.layer_idx,
-                offset=q_len,
-            )
+        update_layer_cache(
+            self,
+            past_key_values,
+            recurrent_state=recurrent_state,
+            conv_state=(conv_state_q, conv_state_k, conv_state_v) if self.use_short_conv else None,
+            offset=q_len,
+        )
 
         if self.use_gate:
             g = rearrange(self.g_proj(hidden_states), '... (h d) -> ... h d', d=self.head_v_dim)
@@ -299,7 +295,6 @@ class DeltaNet(nn.Module):
             o = self.o_norm(o)
         o = rearrange(o, 'b t h d -> b t (h d)')
         o = self.o_proj(o)
-        if attention_mask is not None:
-            o = pad_input(o.squeeze(0), indices, batch_size, q_len)
+        o = repad_hidden_states(o, indices, batch_size, q_len)
 
         return o, None, past_key_values

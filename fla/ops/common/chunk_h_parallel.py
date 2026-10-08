@@ -1,4 +1,9 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 """
 Fully parallelized state passing.
@@ -10,7 +15,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
-from fla.ops.utils.op import exp
+from fla.ops.utils.op import exp, unflatten_program_id
 from fla.utils import autotune_cache_kwargs
 
 
@@ -56,7 +61,8 @@ def chunk_fwd_kernel_h_parallel(
     STORE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_kv, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_kv, i_t = unflatten_program_id(tl.cdiv(K, BK) * tl.cdiv(V, BV))
+    i_bh = tl.program_id(1).to(tl.int64)
 
     NV = tl.cdiv(V, BV)
     # i_b: batch index
@@ -68,8 +74,8 @@ def chunk_fwd_kernel_h_parallel(
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_tg = i_t
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
         NT = tl.cdiv(T, BT)
     else:
@@ -78,22 +84,27 @@ def chunk_fwd_kernel_h_parallel(
         i_n, i_tg = i_b, i_b * NT + i_t
     i_nh = i_n * H + i_h
 
-    p_k = tl.make_block_ptr(k + (bos*H + i_h) * K, (K, T), (1, H*K), (i_k * BK, i_t * BT), (BK, BT), (0, 1))
-    p_v = tl.make_block_ptr(v + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-    p_h = tl.make_block_ptr(h + (i_tg * H + i_h) * K*V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
+    o_k = i_k * BK + tl.arange(0, BK)
+    o_v = i_v * BV + tl.arange(0, BV)
+    o_t = i_t * BT + tl.arange(0, BT)
+    m_t = o_t < T
+    m_kv = (o_k[:, None] < K) & (o_v[None, :] < V)
+    p_k = k + (bos*H + i_h) * K + o_k[:, None] + o_t[None, :] * (H*K)
+    p_v = v + (bos*H + i_h) * V + o_t[:, None] * (H*V) + o_v[None, :]
+    p_h = h + (i_tg * H + i_h) * K*V + o_k[:, None] * V + o_v[None, :]
 
     if i_t == 0:
         if USE_INITIAL_STATE:
-            p_h0 = tl.make_block_ptr(h0 + i_nh * K*V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
-            b_h = tl.load(p_h0, boundary_check=(0, 1)).to(tl.float32)
+            p_h0 = h0 + i_nh * K*V + o_k[:, None] * V + o_v[None, :]
+            b_h = tl.load(p_h0, mask=m_kv, other=0.0).to(tl.float32)
         else:
             b_h = tl.zeros([BK, BV], dtype=tl.float32)
-        tl.store(p_h, b_h.to(p_h.dtype.element_ty), boundary_check=(0, 1))
+        tl.store(p_h, b_h.to(p_h.dtype.element_ty), mask=m_kv)
 
     # [BK, BT]
-    b_k = tl.load(p_k, boundary_check=(0, 1))
+    b_k = tl.load(p_k, mask=(o_k[:, None] < K) & m_t[None, :], other=0.0)
     # [BT, BV]
-    b_v = tl.load(p_v, boundary_check=(0, 1))
+    b_v = tl.load(p_v, mask=m_t[:, None] & (o_v < V)[None, :], other=0.0)
 
     last_idx = min(i_t * BT + BT, T) - 1
     # scalar decay
@@ -105,29 +116,29 @@ def chunk_fwd_kernel_h_parallel(
 
     # vector decay, h = Diag(gk) @ h
     if USE_GK:
-        p_gk = tl.make_block_ptr(gk + (bos*H + i_h) * K, (K, T), (1, H*K), (i_k * BK, i_t * BT), (BK, BT), (0, 1))
+        p_gk = gk + (bos*H + i_h) * K + o_k[:, None] + o_t[None, :] * (H*K)
         p_gk_last = gk + (bos + last_idx) * H*K + i_h * K + i_k * BK + tl.arange(0, BK)
         b_gk_last = tl.load(p_gk_last, mask=(i_k * BK + tl.arange(0, BK) < K), other=0.)
 
-        b_gk = tl.load(p_gk, boundary_check=(0, 1))
+        b_gk = tl.load(p_gk, mask=(o_k[:, None] < K) & m_t[None, :], other=0.0)
         b_k = (b_k * exp(b_gk_last[:, None] - b_gk)).to(b_k.dtype)
 
     # vector decay, h = h @ Diag(gv)
     if USE_GV:
-        p_gv = tl.make_block_ptr(gv + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+        p_gv = gv + (bos*H + i_h) * V + o_t[:, None] * (H*V) + o_v[None, :]
         p_gv_last = gv + (bos + last_idx) * H*V + i_h * V + i_v * BV + tl.arange(0, BV)
 
         b_gv_last = tl.load(p_gv_last, mask=(i_v * BV + tl.arange(0, BV) < V), other=0.)
-        b_gv = tl.load(p_gv, boundary_check=(0, 1))
+        b_gv = tl.load(p_gv, mask=m_t[:, None] & (o_v < V)[None, :], other=0.0)
         b_v = (b_v * exp(b_gv_last[None, :] - b_gv)).to(b_v.dtype)
 
     b_h = tl.dot(b_k, b_v)
     if i_t < NT - 1:
-        p_h = tl.make_block_ptr(h + ((i_tg + 1) * H + i_h) * K*V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
-        tl.store(p_h, b_h.to(p_h.dtype.element_ty), boundary_check=(0, 1))
+        p_h = h + ((i_tg + 1) * H + i_h) * K*V + o_k[:, None] * V + o_v[None, :]
+        tl.store(p_h, b_h.to(p_h.dtype.element_ty), mask=m_kv)
     elif STORE_FINAL_STATE:
-        p_ht = tl.make_block_ptr(ht + i_nh * K*V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
-        tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), boundary_check=(0, 1))
+        p_ht = ht + i_nh * K*V + o_k[:, None] * V + o_v[None, :]
+        tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=m_kv)
 
 
 @triton.heuristics({
@@ -168,13 +179,13 @@ def chunk_fwd_kernel_h_reduction(
     STORE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_k, i_v, i_nh = unflatten_program_id(tl.cdiv(K, BK), tl.cdiv(V, BV))
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
         NT = tl.cdiv(T, BT)
-        boh = tl.load(chunk_offsets + i_n).to(tl.int32)
+        boh = tl.load(chunk_offsets + i_n).to(tl.int64)
     else:
         bos, eos = i_n * T, i_n * T + T
         NT = tl.cdiv(T, BT)
@@ -182,11 +193,14 @@ def chunk_fwd_kernel_h_reduction(
 
     # [BK, BV]
     b_h = tl.zeros([BK, BV], dtype=tl.float32)
+    o_k = i_k * BK + tl.arange(0, BK)
+    o_v = i_v * BV + tl.arange(0, BV)
+    m_kv = (o_k[:, None] < K) & (o_v[None, :] < V)
     for i_t in range(NT):
-        p_h = tl.make_block_ptr(h + ((boh + i_t) * H + i_h) * K*V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
-        b_h += tl.load(p_h, boundary_check=(0, 1)).to(tl.float32)
+        p_h = h + ((boh + i_t) * H + i_h) * K*V + o_k[:, None] * V + o_v[None, :]
+        b_h += tl.load(p_h, mask=m_kv, other=0.0).to(tl.float32)
         if i_t > 0:
-            tl.store(p_h, b_h.to(p_h.dtype.element_ty), boundary_check=(0, 1))
+            tl.store(p_h, b_h.to(p_h.dtype.element_ty), mask=m_kv)
 
         last_idx = min(i_t * BT + BT, T) - 1
         # scalar decay
@@ -209,10 +223,10 @@ def chunk_fwd_kernel_h_reduction(
             b_h *= exp(b_gv_last)[None, :]
 
     if STORE_FINAL_STATE:
-        p_kvt = tl.make_block_ptr(kvt + i_nh * K*V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
-        p_ht = tl.make_block_ptr(ht + i_nh * K*V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
-        b_h += tl.load(p_kvt, boundary_check=(0, 1)).to(tl.float32)
-        tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), boundary_check=(0, 1))
+        p_kvt = kvt + i_nh * K*V + o_k[:, None] * V + o_v[None, :]
+        p_ht = ht + i_nh * K*V + o_k[:, None] * V + o_v[None, :]
+        b_h += tl.load(p_kvt, mask=m_kv, other=0.0).to(tl.float32)
+        tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=m_kv)
 
 
 @triton.heuristics({
@@ -260,7 +274,8 @@ def chunk_bwd_kernel_dh_parallel(
     USE_FINAL_STATE_GRADIENT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_kv, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_kv, i_t = unflatten_program_id(tl.cdiv(K, BK) * tl.cdiv(V, BV))
+    i_bh = tl.program_id(1).to(tl.int64)
 
     NV = tl.cdiv(V, BV)
     i_k, i_v = i_kv // NV, i_kv % NV
@@ -268,8 +283,8 @@ def chunk_bwd_kernel_dh_parallel(
     i_h = i_hq // NG
     if IS_VARLEN:
         i_tg = i_t
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
         NT = tl.cdiv(T, BT)
     else:
@@ -278,23 +293,28 @@ def chunk_bwd_kernel_dh_parallel(
         i_n, i_tg = i_b, i_b * NT + i_t
     i_nh = i_n * HQ + i_hq
 
-    p_q = tl.make_block_ptr(q + (bos*HQ + i_hq) * K, (K, T), (1, HQ*K), (i_k * BK, i_t * BT), (BK, BT), (0, 1))
-    p_do = tl.make_block_ptr(do + (bos*HQ + i_hq) * V, (T, V), (HQ*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-    p_dh = tl.make_block_ptr(dh + (i_tg * H + i_h) * K*V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
+    o_k = i_k * BK + tl.arange(0, BK)
+    o_v = i_v * BV + tl.arange(0, BV)
+    o_t = i_t * BT + tl.arange(0, BT)
+    m_t = o_t < T
+    m_kv = (o_k[:, None] < K) & (o_v[None, :] < V)
+    p_q = q + (bos*HQ + i_hq) * K + o_k[:, None] + o_t[None, :] * (HQ*K)
+    p_do = do + (bos*HQ + i_hq) * V + o_t[:, None] * (HQ*V) + o_v[None, :]
+    p_dh = dh + (i_tg * H + i_h) * K*V + o_k[:, None] * V + o_v[None, :]
 
     if i_t == NT - 1:
         if USE_FINAL_STATE_GRADIENT:
-            p_dht = tl.make_block_ptr(dht + i_nh * K*V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
-            b_dh = tl.load(p_dht, boundary_check=(0, 1)).to(tl.float32)
+            p_dht = dht + i_nh * K*V + o_k[:, None] * V + o_v[None, :]
+            b_dh = tl.load(p_dht, mask=m_kv, other=0.0).to(tl.float32)
         else:
             b_dh = tl.zeros([BK, BV], dtype=tl.float32)
-        tl.store(p_dh, b_dh.to(p_dh.dtype.element_ty), boundary_check=(0, 1))
+        tl.store(p_dh, b_dh.to(p_dh.dtype.element_ty), mask=m_kv)
 
     # [BK, BT]
-    b_q = tl.load(p_q, boundary_check=(0, 1))
+    b_q = tl.load(p_q, mask=(o_k[:, None] < K) & m_t[None, :], other=0.0)
     b_q = (b_q * scale).to(b_q.dtype)
     # [BT, BV]
-    b_do = tl.load(p_do, boundary_check=(0, 1))
+    b_do = tl.load(p_do, mask=m_t[:, None] & (o_v < V)[None, :], other=0.0)
 
     if USE_G:
         p_g = g + (bos + i_t * BT + tl.arange(0, BT)) * H + i_h
@@ -302,22 +322,22 @@ def chunk_bwd_kernel_dh_parallel(
         b_q = (b_q * exp(b_g)[None, :]).to(b_q.dtype)
 
     if USE_GK:
-        p_gk = tl.make_block_ptr(gk + (bos*H + i_h) * K, (K, T), (1, H*K), (i_k * BK, i_t * BT), (BK, BT), (0, 1))
-        b_gk = tl.load(p_gk, boundary_check=(0, 1))
+        p_gk = gk + (bos*H + i_h) * K + o_k[:, None] + o_t[None, :] * (H*K)
+        b_gk = tl.load(p_gk, mask=(o_k[:, None] < K) & m_t[None, :], other=0.0)
         b_q = (b_q * exp(b_gk)).to(b_q.dtype)
 
     if USE_GV:
-        p_gv = tl.make_block_ptr(gv + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-        b_gv = tl.load(p_gv, boundary_check=(0, 1))
+        p_gv = gv + (bos*H + i_h) * V + o_t[:, None] * (H*V) + o_v[None, :]
+        b_gv = tl.load(p_gv, mask=m_t[:, None] & (o_v < V)[None, :], other=0.0)
         b_do = (b_do * exp(b_gv)).to(b_do.dtype)
 
     b_dh = tl.dot(b_q, b_do)
     if i_t > 0:
-        p_dh = tl.make_block_ptr(dh + ((i_tg - 1) * H + i_h) * K*V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
-        tl.store(p_dh, b_dh.to(p_dh.dtype.element_ty), boundary_check=(0, 1))
+        p_dh = dh + ((i_tg - 1) * H + i_h) * K*V + o_k[:, None] * V + o_v[None, :]
+        tl.store(p_dh, b_dh.to(p_dh.dtype.element_ty), mask=m_kv)
     elif STORE_INITIAL_STATE_GRADIENT:
-        p_dh0 = tl.make_block_ptr(dh0 + i_nh * K*V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
-        tl.store(p_dh0, b_dh.to(p_dh0.dtype.element_ty), boundary_check=(0, 1))
+        p_dh0 = dh0 + i_nh * K*V + o_k[:, None] * V + o_v[None, :]
+        tl.store(p_dh0, b_dh.to(p_dh0.dtype.element_ty), mask=m_kv)
 
 
 @triton.heuristics({
@@ -360,14 +380,14 @@ def chunk_bwd_kernel_dh_reduction(
     STORE_INITIAL_STATE_GRADIENT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_k, i_v, i_nh = unflatten_program_id(tl.cdiv(K, BK), tl.cdiv(V, BV))
     i_n, i_hq = i_nh // HQ, i_nh % HQ
     i_h = i_hq // NG
     if IS_VARLEN:
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
         NT = tl.cdiv(T, BT)
-        boh = tl.load(chunk_offsets + i_n).to(tl.int32)
+        boh = tl.load(chunk_offsets + i_n).to(tl.int64)
     else:
         bos, eos = i_n * T, i_n * T + T
         NT = tl.cdiv(T, BT)
@@ -375,11 +395,14 @@ def chunk_bwd_kernel_dh_reduction(
 
     # [BK, BV]
     b_dh = tl.zeros([BK, BV], dtype=tl.float32)
+    o_k = i_k * BK + tl.arange(0, BK)
+    o_v = i_v * BV + tl.arange(0, BV)
+    m_kv = (o_k[:, None] < K) & (o_v[None, :] < V)
     for i_t in range(NT - 1, -1, -1):
-        p_dh = tl.make_block_ptr(dh + ((boh+i_t) * H + i_h) * K*V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
-        b_dh += tl.load(p_dh, boundary_check=(0, 1)).to(tl.float32)
+        p_dh = dh + ((boh+i_t) * H + i_h) * K*V + o_k[:, None] * V + o_v[None, :]
+        b_dh += tl.load(p_dh, mask=m_kv, other=0.0).to(tl.float32)
         if i_t < NT - 1:
-            tl.store(p_dh, b_dh.to(p_dh.dtype.element_ty), boundary_check=(0, 1))
+            tl.store(p_dh, b_dh.to(p_dh.dtype.element_ty), mask=m_kv)
 
         last_idx = min(i_t * BT + BT, T) - 1
         if USE_G:
@@ -397,10 +420,10 @@ def chunk_bwd_kernel_dh_reduction(
             b_dh *= exp(b_gv_last)[None, :]
 
     if STORE_INITIAL_STATE_GRADIENT:
-        p_doq0 = tl.make_block_ptr(doq0 + i_nh * K*V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
-        p_dh0 = tl.make_block_ptr(dh0 + i_nh * K*V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
-        b_dh += tl.load(p_doq0, boundary_check=(0, 1)).to(tl.float32)
-        tl.store(p_dh0, b_dh.to(p_dh0.dtype.element_ty), boundary_check=(0, 1))
+        p_doq0 = doq0 + i_nh * K*V + o_k[:, None] * V + o_v[None, :]
+        p_dh0 = dh0 + i_nh * K*V + o_k[:, None] * V + o_v[None, :]
+        b_dh += tl.load(p_doq0, mask=m_kv, other=0.0).to(tl.float32)
+        tl.store(p_dh0, b_dh.to(p_dh0.dtype.element_ty), mask=m_kv)
 
 
 def chunk_fwd_h(
@@ -414,11 +437,13 @@ def chunk_fwd_h(
     states_in_fp32: bool = False,
     cu_seqlens: torch.Tensor | None = None,
     chunk_size: int = 64,
+    chunk_indices: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = chunk_size
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     # N: the actual number of sequences in the batch with either equal or variable lengths
     if cu_seqlens is None:
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
@@ -427,7 +452,7 @@ def chunk_fwd_h(
 
     h = k.new_empty(B, NT, H, K, V, dtype=torch.float)
     ht = k.new_empty(N, H, K, V, dtype=torch.float) if output_final_state else None
-    def grid(meta): return (triton.cdiv(K, meta['BK']) * triton.cdiv(V, meta['BV']), NT, B * H)
+    def grid(meta): return (triton.cdiv(K, meta['BK']) * triton.cdiv(V, meta['BV']) * NT, B * H)
     chunk_fwd_kernel_h_parallel[grid](
         k=k,
         v=v,
@@ -449,7 +474,7 @@ def chunk_fwd_h(
         USE_GV=gv is not None,
     )
     kvt, ht = ht, (torch.empty_like(ht) if output_final_state else None)
-    def grid(meta): return (triton.cdiv(K, meta['BK']), triton.cdiv(V, meta['BV']), N * H)
+    def grid(meta): return (triton.cdiv(K, meta['BK']) * triton.cdiv(V, meta['BV']) * N * H,)
     chunk_fwd_kernel_h_reduction[grid](
         h=h,
         g=g,
@@ -486,12 +511,14 @@ def chunk_bwd_dh(
     states_in_fp32: bool = False,
     cu_seqlens: torch.Tensor | None = None,
     chunk_size: int = 64,
+    chunk_indices: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     HQ = q.shape[2]
     BT = chunk_size
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     # N: the actual number of sequences in the batch with either equal or variable lengths
     # NG: number of groups in GQA
     if cu_seqlens is None:
@@ -503,7 +530,7 @@ def chunk_bwd_dh(
     dh = k.new_empty(B, NT, HQ, K, V, dtype=k.dtype if not states_in_fp32 else torch.float)
     dh0 = torch.empty_like(h0, dtype=torch.float) if h0 is not None else None
 
-    def grid(meta): return (triton.cdiv(K, meta['BK']) * triton.cdiv(V, meta['BV']), NT, B * HQ)
+    def grid(meta): return (triton.cdiv(K, meta['BK']) * triton.cdiv(V, meta['BV']) * NT, B * HQ)
     chunk_bwd_kernel_dh_parallel[grid](
         q=q,
         g=g,
@@ -529,7 +556,7 @@ def chunk_bwd_dh(
     )
 
     doq0, dh0 = dh0, (torch.empty_like(dh0) if dh0 is not None else None)
-    def grid(meta): return (triton.cdiv(K, meta['BK']), triton.cdiv(V, meta['BV']), N * HQ)
+    def grid(meta): return (triton.cdiv(K, meta['BK']) * triton.cdiv(V, meta['BV']) * N * HQ,)
     chunk_bwd_kernel_dh_reduction[grid](
         g=g,
         gk=gk,

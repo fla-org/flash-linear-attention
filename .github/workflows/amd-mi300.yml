@@ -1,0 +1,45 @@
+name: amd-mi300-ci
+
+# Disabled by default: fla does not yet operate an amd-mi300 runner. Flip the
+# `if:` guard below (or replace with a real condition) once a runner is wired
+# in. Workflow lives here so the install / sanity-check pattern is documented.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-mi300:
+    if: false
+    name: Test MI300 (PyTorch 2.10 / ROCm 7.2)
+    runs-on:
+      group: amd-mi300
+    container:
+      image: rocm/pytorch:rocm7.2.2_ubuntu22.04_py3.10_pytorch_release_2.10.0
+      options: --device /dev/kfd --device /dev/dri --group-add video --env ROCR_VISIBLE_DEVICES --ipc=host --shm-size "16gb"
+    defaults:
+      run:
+        shell: bash
+    env:
+      FLA_CI_ENV: 1
+    steps:
+      - name: Git checkout
+        uses: actions/checkout@v7.0.0
+
+      - name: Install system dependencies
+        run: apt-get update && apt-get install -y --no-install-recommends make git curl
+
+      - name: Install fla and test deps
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install -e ".[rocm,test]"
+
+      - name: Verify ROCm torch is intact
+        run: |
+          python3 -c "import torch; assert torch.version.hip, 'CUDA torch got installed'; print('ROCm torch', torch.__version__, '| HIP', torch.version.hip)"
+          python3 -c "import triton; print('triton', triton.__version__)"
+
+      - name: Run ops tests
+        run: python3 -m pytest tests/ops/ -x -v --tb=short

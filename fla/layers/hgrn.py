@@ -1,4 +1,9 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 # "Hierarchically Gated Recurrent Neural Network for Sequence Modeling" [https://arxiv.org/abs/2311.04823]
 
@@ -10,6 +15,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from fla.layers.utils import get_layer_cache, update_layer_cache
 from fla.modules import FusedRMSNormGated, ShortConvolution
 from fla.modules.activations import swiglu
 from fla.ops.hgrn import chunk_hgrn, fused_recurrent_hgrn
@@ -93,11 +99,14 @@ class HGRNAttention(nn.Module):
             )
 
         # launching the triton kernel for just one token will actually be slower
-        mode = 'fused_recurrent' if not self.training and hidden_states.shape[1] <= 64 else self.mode
+        if torch.is_grad_enabled() and kwargs.get('cu_seqlens') is None:
+            mode = 'chunk'
+        elif not self.training and hidden_states.shape[1] <= 64:
+            mode = 'fused_recurrent'
+        else:
+            mode = self.mode
 
-        last_state = None
-        if past_key_values is not None and len(past_key_values) > self.layer_idx:
-            last_state = past_key_values[self.layer_idx]
+        last_state = get_layer_cache(self, past_key_values)
 
         cu_seqlens = kwargs.get('cu_seqlens')
         if self.use_short_conv:
@@ -131,7 +140,7 @@ class HGRNAttention(nn.Module):
 
         # dealing with left-padding
         if attention_mask is not None:
-            i = i.mul_(attention_mask[:, -i.shape[-2]:, None])
+            i = i.mul(attention_mask[:, -i.shape[-2]:, None])
 
         recurrent_state = last_state['recurrent_state'] if last_state is not None else None
         if mode == 'chunk':
@@ -154,13 +163,13 @@ class HGRNAttention(nn.Module):
         else:
             raise NotImplementedError(f"Not supported mode `{mode}`.")
 
-        if past_key_values is not None:
-            past_key_values.update(
-                recurrent_state=recurrent_state,
-                conv_state=(conv_state_i, conv_state_f) if self.use_short_conv else None,
-                layer_idx=self.layer_idx,
-                offset=i.shape[2],
-            )
+        update_layer_cache(
+            self,
+            past_key_values,
+            recurrent_state=recurrent_state,
+            conv_state=(conv_state_i, conv_state_f) if self.use_short_conv else None,
+            offset=i.shape[1],
+        )
 
         o = self.g_norm(o, self.g_proj(hidden_states))
         o = self.o_proj(o)
@@ -168,7 +177,7 @@ class HGRNAttention(nn.Module):
         return o, None, past_key_values
 
     def state_size(self, **kwargs) -> int:
-        state_size = self.hidden_size
+        state_size = self.input_dim
         for module in self.children():
             if isinstance(module, ShortConvolution):
                 state_size += module.state_size

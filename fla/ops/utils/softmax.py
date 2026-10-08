@@ -1,4 +1,9 @@
-# Copyright (c) 2023-2024, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 import triton
@@ -25,7 +30,7 @@ def softmax_fwd_kernel(
     D: tl.constexpr,
     B: tl.constexpr,
 ):
-    i_n = tl.program_id(0)
+    i_n = tl.program_id(0).to(tl.int64)
     o_d = tl.arange(0, B)
     m_d = o_d < D
 
@@ -53,7 +58,7 @@ def softmax_bwd_kernel(
     D: tl.constexpr,
     B: tl.constexpr,
 ):
-    i_n = tl.program_id(0)
+    i_n = tl.program_id(0).to(tl.int64)
     o_d = tl.arange(0, B)
     m_d = o_d < D
 

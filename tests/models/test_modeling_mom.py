@@ -1,3 +1,9 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import pytest
 import torch
@@ -12,13 +18,15 @@ from .test_modeling_base import run_test_generation, run_test_model_forward_back
 # ===================================================================================
 @pytest.mark.skip(reason="Bug not fixed yet")
 @pytest.mark.parametrize(
-    ['L', 'B', 'T', 'H', 'D', 'use_l2warp', 'dtype'],
+    ['L', 'B', 'T', 'H', 'D', 'use_l2warp', 'attnres_block_size', 'dtype'],
     [
-        pytest.param(*test, id="L{}-B{}-T{}-H{}-D{}-use_l2warp{}-{}".format(*test))
+        pytest.param(*test, id="L{}-B{}-T{}-H{}-D{}-l2{}-bs{}-{}".format(*test))
         for test in [
-            (4, 4, 1024, 4, 64, True, torch.bfloat16),
-            (4, 4, 1024, 4, 64, False, torch.bfloat16),
-            (4, 4, 1024, 4, 128, False, torch.bfloat16),
+            (4, 4, 1024, 4, 64,  True,  None, torch.bfloat16),
+            (4, 4, 1024, 4, 64,  False, None, torch.bfloat16),
+            (4, 4, 1024, 4, 128, False, None, torch.bfloat16),
+            (4, 4, 1024, 4, 64,  False, 1,    torch.bfloat16),
+            (4, 4, 1024, 4, 64,  False, 4,    torch.bfloat16),
         ]
     ],
 )
@@ -29,9 +37,20 @@ def test_modeling(
     H: int,
     D: int,
     use_l2warp: bool,
+    attnres_block_size: int | None,
     dtype: torch.dtype,
 ):
-    run_test_model_forward_backward(L, B, T, H, D, MomConfig, use_l2warp=use_l2warp, dtype=dtype)
+    run_test_model_forward_backward(
+        L,
+        B,
+        T,
+        H,
+        D,
+        MomConfig,
+        use_l2warp=use_l2warp,
+        attnres_block_size=attnres_block_size,
+        dtype=dtype,
+    )
 
 
 # ===================================================================================

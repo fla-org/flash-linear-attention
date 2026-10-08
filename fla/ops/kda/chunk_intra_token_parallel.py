@@ -1,27 +1,35 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
 # Token-parallel implementation of KDA intra chunk kernel
 
 import torch
 import triton
 import triton.language as tl
 
-from fla.ops.utils.op import exp, exp2
+from fla.ops.backends import dispatch
+from fla.ops.utils.cache import fla_cache_autotune
+from fla.ops.utils.op import exp2
 from fla.utils import autotune_cache_kwargs
 
 
 @triton.heuristics({
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
-@triton.autotune(
+@fla_cache_autotune(
     configs=[
         triton.Config({'BH': BH}, num_warps=num_warps)
-        for BH in [1, 2, 4, 8]  # Let autotune choose freely
+        for BH in [1, 2, 4, 8]
         for num_warps in [1, 2, 4, 8]
     ],
-    key=["K", "H"],
+    key=["K", "H", "HV"],
     **autotune_cache_kwargs,
 )
-@triton.jit(do_not_specialize=['T', 'B'])
+@triton.jit(do_not_specialize=['T', 'N'])
 def chunk_kda_fwd_kernel_intra_token_parallel(
     q,
     k,
@@ -31,30 +39,26 @@ def chunk_kda_fwd_kernel_intra_token_parallel(
     Akk,
     scale,
     cu_seqlens,
-    B,
+    N,
     T,
     H: tl.constexpr,
+    HV: tl.constexpr,
     K: tl.constexpr,
+    BK: tl.constexpr,
     BT: tl.constexpr,
     BC: tl.constexpr,
     BH: tl.constexpr,
-    USE_EXP2: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
 ):
-    # Each block processes one token (i) for BH heads
-    i_tg = tl.program_id(0)  # global token index
-    i_hg = tl.program_id(1)  # head_group index
-
-    i_h_start = i_hg * BH
+    i_tg, i_hg = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
 
     if IS_VARLEN:
-        # Binary search to find which sequence this token belongs to
-        # i_tg is the global token index
-        # Range [0, B) where B is num_sequences passed from python
-
-        left = 0
-        right = B
+        # static T may exceed the covered tokens; i_n would converge to N and read OOB
+        if USE_GRAPH and i_tg >= tl.load(cu_seqlens + N).to(tl.int32):
+            return
         i_n = 0
+        left, right = 0, N
 
         # Unrolled binary search (max B=2^32)
         # We can limit iterations based on expected max batch size if needed
@@ -62,92 +66,68 @@ def chunk_kda_fwd_kernel_intra_token_parallel(
         for _ in range(20):
             if left < right:
                 mid = (left + right) // 2
-                end_val = tl.load(cu_seqlens + mid + 1).to(tl.int32)
-                if i_tg < end_val:
+                if i_tg < tl.load(cu_seqlens + mid + 1).to(tl.int32):
                     right = mid
                 else:
                     left = mid + 1
         i_n = left
 
-        bos = tl.load(cu_seqlens + i_n).to(tl.int32)
-        eos = tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = eos - bos
         i_t = i_tg - bos
-        T = eos - bos  # Current sequence length
-
-        # Safety check
-        if i_t >= T or i_tg >= eos:
-            return
-
     else:
-        i_b = i_tg // T
+        bos = (i_tg // T) * T
         i_t = i_tg % T
-        bos = i_b * T
 
-        if i_t >= T:
-            return
+    if i_t >= T:
+        return
 
-    i_chunk = i_t // BT  # which BT=64 chunk
-    i_subchunk = (i_t % BT) // BC  # which BC=16 sub-chunk within the BT chunk
+    i_c = i_t // BT
+    i_s = (i_t % BT) // BC
+    i_tc = i_c * BT
+    i_ts = i_tc + i_s * BC
 
-    subchunk_start = i_chunk * BT + i_subchunk * BC
-    subchunk_end = tl.minimum(subchunk_start + BC, T)
+    G: tl.constexpr = HV // H
 
-    o_h = tl.arange(0, BH)
-    m_h = (i_h_start + o_h) < H
+    q += bos * H*K
+    k += bos * H*K
+    g += bos * HV*K
+    Aqk += bos * HV*BT
+    Akk += bos * HV*BC
+    beta += bos * HV
 
-    # Marginalize over entire K dimension at once
-    BK: tl.constexpr = triton.next_power_of_2(K)
+    o_hv = i_hg * BH + tl.arange(0, BH)
+    o_h = o_hv // G
     o_k = tl.arange(0, BK)
+    m_hv = o_hv < HV
     m_k = o_k < K
+    m_hk = m_hv[:, None] & m_k[None, :]
 
-    # Load q[i_t, h:h+BH, :] - shape [BH, K]
-    # For varlen, we use global offset: bos + i_t = i_tg
-    p_q = tl.make_block_ptr(q + (bos + i_t) * H * K, (H, K), (K, 1), (i_h_start, 0), (BH, BK), (0, 1))
-    b_q = tl.load(p_q, boundary_check=(0, 1)).to(tl.float32)  # [BH, BK]
+    # q/k: [B, T, H, K], manual load via mapped qk head index
+    p_qk = o_h[:, None] * K + o_k[None, :]
+    b_q = tl.load(q + i_t * H * K + p_qk, mask=m_hk, other=0).to(tl.float32)
+    b_k = tl.load(k + i_t * H * K + p_qk, mask=m_hk, other=0).to(tl.float32)
 
-    # Load g[i_t, h:h+BH, :]
-    p_g = tl.make_block_ptr(g + (bos + i_t) * H * K, (H, K), (K, 1), (i_h_start, 0), (BH, BK), (0, 1))
-    b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)  # [BH, BK]
+    # g: [B, T, HV, K], beta: [B, T, HV]
+    p_g = g + i_t * HV * K + o_hv[:, None] * K + o_k[None, :]
+    p_beta = beta + i_t * HV + o_hv
+    b_g = tl.load(p_g, mask=m_hk, other=0.0).to(tl.float32)
+    b_k = b_k * tl.load(p_beta, mask=m_hv, other=0.0).to(tl.float32)[:, None]
 
-    # Load k[i_t, h:h+BH, :] and beta[i_t, h:h+BH]
-    p_k = tl.make_block_ptr(k + (bos + i_t) * H * K, (H, K), (K, 1), (i_h_start, 0), (BH, BK), (0, 1))
-    b_k_self = tl.load(p_k, boundary_check=(0, 1)).to(tl.float32)  # [BH, BK]
+    for j in range(i_ts, min(i_t + 1, min(T, i_ts + BC))):
+        b_kj = tl.load(k + j * H * K + p_qk, mask=m_hk, other=0).to(tl.float32)
+        p_gj = g + j * HV * K + o_hv[:, None] * K + o_k[None, :]
+        b_gj = tl.load(p_gj, mask=m_hk, other=0.0).to(tl.float32)
 
-    p_beta = beta + (bos + i_t) * H + i_h_start + o_h
-    b_beta = tl.load(p_beta, mask=m_h, other=0).to(tl.float32)  # [BH]
-    b_k_self = b_k_self * b_beta[:, None]  # [BH, K]
+        b_kgj = tl.where(m_k[None, :], b_kj * exp2(b_g - b_gj), 0.0)
+        b_Aqk = tl.sum(b_q * b_kgj, axis=1) * scale
+        b_Akk = tl.sum(b_k * b_kgj, axis=1) * tl.where(j < i_t, 1.0, 0.0)
 
-    for j in range(subchunk_start, tl.minimum(i_t + 1, subchunk_end)):
-
-        # Load k[j, h:h+BH, :] with pointer arithmetic
-        p_kj = tl.make_block_ptr(k + (bos + j) * H * K, (H, K), (K, 1), (i_h_start, 0), (BH, BK), (0, 1))
-        b_kj = tl.load(p_kj, boundary_check=(0, 1)).to(tl.float32)  # [BH, BK]
-
-        # Load g[j, h:h+BH, :]
-        p_gj = tl.make_block_ptr(g + (bos + j) * H * K, (H, K), (K, 1), (i_h_start, 0), (BH, BK), (0, 1))
-        b_gj = tl.load(p_gj, boundary_check=(0, 1)).to(tl.float32)  # [BH, BK]
-
-        # Compute gated key for all BH heads: [BH, BK]
-        if USE_EXP2:
-            b_kgj = b_kj * exp2(b_g - b_gj)
-        else:
-            b_kgj = b_kj * exp(b_g - b_gj)
-
-        # Apply mask for valid K dimension
-        b_kgj = tl.where(m_k[None, :], b_kgj, 0.0)
-
-        b_Aqk = tl.sum(b_q * b_kgj, axis=1) * scale  # [BH]
-        # Akk: only accumulate if j < i_t
-        b_Akk = tl.sum(b_k_self * b_kgj, axis=1) * tl.where(j < i_t, 1.0, 0.0)  # [BH]
-
-        # Store with [B, T, H, BT] layout (no transpose needed later)
-        j_pos = j % BT
-        offs_h = i_h_start + o_h
-        offs_out = (bos + i_t) * H * BT + offs_h * BT + j_pos
-        tl.store(Aqk + offs_out, b_Aqk.to(Aqk.dtype.element_ty), mask=m_h)
-        tl.store(Akk + offs_out, b_Akk.to(Akk.dtype.element_ty), mask=m_h)
+        tl.store(Aqk + i_t * HV * BT + o_hv * BT + j % BT, b_Aqk.to(Aqk.dtype.element_ty), mask=m_hv)
+        tl.store(Akk + i_t * HV * BC + o_hv * BC + j - i_ts, b_Akk.to(Akk.dtype.element_ty), mask=m_hv)
 
 
+@dispatch('kda')
 def chunk_kda_fwd_intra_token_parallel(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -159,7 +139,7 @@ def chunk_kda_fwd_intra_token_parallel(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     sub_chunk_size: int = 16,
-    use_exp2: bool = False,
+    use_graph: bool = False,
 ) -> None:
     """
     Token-parallel implementation: each token gets its own thread block.
@@ -171,31 +151,21 @@ def chunk_kda_fwd_intra_token_parallel(
     Args:
         q: [B, T, H, K]
         k: [B, T, H, K]
-        gk: [B, T, H, K] cumsum of gates
-        beta: [B, T, H]
-        Aqk: [B, T, H, BT] output tensor to write to
-        Akk: [B, T, H, BT] output tensor to write to
+        gk: [B, T, HV, K] cumsum of gates (HV >= H for GVA)
+        beta: [B, T, HV]
+        Aqk: [B, T, HV, BT] output tensor to write to
+        Akk: [B, T, HV, BC] output tensor for diagonal blocks (fp32)
         scale: attention scale
         chunk_size: BT (default 64)
-        use_exp2: use exp2 vs exp
+        sub_chunk_size: BC (default 16)
     """
-    B, T, H, K = q.shape
+    B, T, H, K, HV = *q.shape, gk.shape[2]
+    N = len(cu_seqlens) - 1 if cu_seqlens is not None else B
     BT = chunk_size
     BC = sub_chunk_size
+    BK = triton.next_power_of_2(K)
 
-    # Grid: (total_tokens, H/BH) - each token gets its own block
-    if cu_seqlens is not None:
-        total_tokens = q.shape[1]
-        # Use num_sequences as B for binary search
-        B_kernel = len(cu_seqlens) - 1
-    else:
-        total_tokens = B * T
-        B_kernel = B
-
-    def grid(meta):
-        BH = meta['BH']
-        return (total_tokens, triton.cdiv(H, BH))
-
+    def grid(meta): return (B * T, triton.cdiv(HV, meta['BH']))
     chunk_kda_fwd_kernel_intra_token_parallel[grid](
         q=q,
         k=k,
@@ -205,11 +175,14 @@ def chunk_kda_fwd_intra_token_parallel(
         Akk=Akk,
         scale=scale,
         cu_seqlens=cu_seqlens,
-        B=B_kernel,
+        N=N,
         T=T,
         H=H,
+        HV=HV,
         K=K,
+        BK=BK,
         BT=BT,
         BC=BC,
-        USE_EXP2=use_exp2,
+        USE_GRAPH=use_graph,
     )
+    return Aqk, Akk

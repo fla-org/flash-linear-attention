@@ -1,3 +1,9 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import pytest
 import torch
@@ -13,6 +19,8 @@ from fla.utils import assert_close, device
         pytest.param(*test, id="B{}-T{}-H{}-D{}-{}".format(*test))
         for test in [
             (1, 63, 1, 60, torch.float),
+            (1, 65, 2, 512, torch.float16),
+            (1, 65, 2, 513, torch.bfloat16),
             (2, 500, 4, 64, torch.float),
             (2, 1000, 2, 100, torch.float),
             (3, 1024, 4, 128, torch.float),

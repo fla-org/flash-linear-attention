@@ -1,3 +1,9 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 from __future__ import annotations
 
@@ -15,10 +21,12 @@ from transformers.utils.deprecation import deprecate_kwarg
 from fla.layers.attn import Attention
 from fla.layers.gated_deltanet import GatedDeltaNet
 from fla.models.gated_deltanet.configuration_gated_deltanet import GatedDeltaNetConfig
-from fla.models.utils import Cache, FLAGenerationMixin
+from fla.models.hybrid import get_hybrid_attention_spec
+from fla.models.utils import Cache, FLAUnsupportedCacheGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
 from fla.modules import GatedMLP as GatedDeltaNetMLP
 from fla.modules.l2warp import l2_warp
+from fla.ops.attnres import fused_attnres
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
@@ -41,14 +49,15 @@ class GatedDeltaNetBlock(GradientCheckpointingLayer):
         self.layer_idx = layer_idx
 
         self.attn_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
-        if config.attn is not None and layer_idx in config.attn['layers']:
+        attn_spec = get_hybrid_attention_spec(config.attn, layer_idx=layer_idx)
+        if attn_spec is not None:
             self.attn = Attention(
                 hidden_size=config.hidden_size,
-                num_heads=config.attn['num_heads'],
-                num_kv_heads=config.attn['num_kv_heads'],
-                qkv_bias=config.attn['qkv_bias'],
-                window_size=config.attn['window_size'],
-                rope_theta=config.attn['rope_theta'],
+                num_heads=attn_spec['num_heads'],
+                num_kv_heads=attn_spec['num_kv_heads'],
+                qkv_bias=attn_spec['qkv_bias'],
+                window_size=attn_spec['window_size'],
+                rope_theta=attn_spec['rope_theta'],
                 max_position_embeddings=config.max_position_embeddings,
                 layer_idx=layer_idx,
             )
@@ -62,11 +71,11 @@ class GatedDeltaNetBlock(GradientCheckpointingLayer):
                 num_v_heads=config.num_v_heads,
                 use_gate=config.use_gate,
                 use_short_conv=config.use_short_conv,
+                fuse_conv_l2=config.fuse_conv_l2,
                 allow_neg_eigval=config.allow_neg_eigval,
                 conv_size=config.conv_size,
                 norm_eps=config.norm_eps,
                 layer_idx=layer_idx,
-                fuse_conv_l2=config.fuse_conv_l2,
             )
         self.mlp_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
         self.mlp = GatedDeltaNetMLP(
@@ -77,6 +86,18 @@ class GatedDeltaNetBlock(GradientCheckpointingLayer):
             fuse_swiglu=config.fuse_swiglu,
         )
 
+        self.use_attnres = config.attnres_block_size is not None
+        if self.use_attnres:
+            self.attn_res_proj = nn.Linear(in_features=config.hidden_size, out_features=1, bias=False)
+            self.attn_res_norm = nn.RMSNorm(normalized_shape=config.hidden_size, eps=config.norm_eps)
+            self.mlp_res_proj = nn.Linear(in_features=config.hidden_size, out_features=1, bias=False)
+            self.mlp_res_norm = nn.RMSNorm(normalized_shape=config.hidden_size, eps=config.norm_eps)
+            block_size = config.attnres_block_size
+            self.attnres_is_attn_boundary = (2 * layer_idx) % block_size == 0
+            self.attnres_is_mlp_boundary = (2 * layer_idx + 1) % block_size == 0
+            self.attn_res_proj._is_attnres_proj = True
+            self.mlp_res_proj._is_attnres_proj = True
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -84,10 +105,34 @@ class GatedDeltaNetBlock(GradientCheckpointingLayer):
         past_key_values: Cache | list[torch.FloatTensor] | None = None,
         use_cache: bool | None = False,
         output_attentions: bool | None = False,
+        attnres_states: list[torch.Tensor] | None = None,
         **kwargs: Unpack[dict],
     ) -> tuple[torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None]:
-        residual = hidden_states
-        hidden_states = self.attn_norm(hidden_states)
+        if self.use_attnres:
+            prefix_sum = hidden_states
+            if attnres_states is None:
+                # L=1 single-source: attnres is trivially identity (p=1, mix=v[0]);
+                # apply the prenorm directly, matching the L>1 kernel path which
+                # folds it via `output_rms_weight`. Mirrors Megatron-LM's bypass
+                # at the first layer (where `block_residual` is empty).
+                hidden_states = self.attn_norm(prefix_sum)
+                attnres_states = [prefix_sum]
+                prefix_sum = None
+            else:
+                residuals = [*attnres_states, prefix_sum]
+                if self.attnres_is_attn_boundary:
+                    attnres_states = residuals
+                    prefix_sum = None
+                hidden_states = fused_attnres(
+                    query=self.attn_res_proj.weight,
+                    residuals=residuals,
+                    rms_weight=self.attn_res_norm.weight,
+                    output_rms_weight=self.attn_norm.weight,
+                    rms_eps=self.attn_res_norm.eps,
+                )
+        else:
+            residual = hidden_states
+            hidden_states = self.attn_norm(hidden_states)
         hidden_states, attentions, past_key_values = self.attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
@@ -96,16 +141,34 @@ class GatedDeltaNetBlock(GradientCheckpointingLayer):
             output_attentions=output_attentions,
             **kwargs,
         )
-        if self.config.fuse_norm:
+
+        if self.use_attnres:
+            prefix_sum = hidden_states if prefix_sum is None else prefix_sum + hidden_states
+            residuals = [*attnres_states, prefix_sum]
+            if self.attnres_is_mlp_boundary:
+                attnres_states = residuals
+                prefix_sum = None
+            hidden_states = fused_attnres(
+                query=self.mlp_res_proj.weight,
+                residuals=residuals,
+                rms_weight=self.mlp_res_norm.weight,
+                output_rms_weight=self.mlp_norm.weight,
+                rms_eps=self.mlp_res_norm.eps,
+            )
+        elif self.config.fuse_norm:
             hidden_states, residual = self.mlp_norm(hidden_states, residual, True)
         else:
             hidden_states = residual + hidden_states
             residual = hidden_states
             hidden_states = self.mlp_norm(hidden_states)
         hidden_states = self.mlp(hidden_states, **kwargs)
-        hidden_states = residual + hidden_states
 
-        outputs = (hidden_states, attentions, past_key_values)
+        if self.use_attnres:
+            hidden_states = hidden_states if prefix_sum is None else prefix_sum + hidden_states
+        else:
+            hidden_states = residual + hidden_states
+
+        outputs = (hidden_states, attentions, past_key_values, attnres_states)
 
         return outputs
 
@@ -129,20 +192,25 @@ class GatedDeltaNetPreTrainedModel(PreTrainedModel):
     ):
         if isinstance(module, GatedDeltaNet) and next(module.parameters()).device.type != 'meta':
             with torch.no_grad():
-                module.A_log.copy_(nn.init.uniform_(module.A_log, a=0, b=16).log())
+                if not getattr(module.A_log, '_is_hf_initialized', False):
+                    module.A_log.copy_(nn.init.uniform_(module.A_log, a=0, b=16).log())
                 module.A_log._no_weight_decay = True
-                dt = torch.exp(
-                    nn.init.uniform_(module.dt_bias) * (math.log(0.1) - math.log(0.001)) + math.log(0.001),
-                ).clamp(min=1e-4)
-                # Inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
-                inv_dt = dt + torch.log(-torch.expm1(-dt))
-                module.dt_bias.copy_(inv_dt)
+                if not getattr(module.dt_bias, '_is_hf_initialized', False):
+                    dt = torch.exp(
+                        nn.init.uniform_(module.dt_bias) * (math.log(0.1) - math.log(0.001)) + math.log(0.001),
+                    ).clamp(min=1e-4)
+                    # Inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
+                    inv_dt = dt + torch.log(-torch.expm1(-dt))
+                    module.dt_bias.copy_(inv_dt)
                 module.dt_bias._no_weight_decay = True
 
         elif isinstance(module, (nn.Linear, nn.Conv1d)):
-            # Slightly different from the TF version which uses truncated_normal for initialization
-            # cf https://github.com/pytorch/pytorch/pull/5617
-            nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
+            if getattr(module, '_is_attnres_proj', False):
+                nn.init.zeros_(module.weight)
+            else:
+                # Slightly different from the TF version which uses truncated_normal for initialization
+                # cf https://github.com/pytorch/pytorch/pull/5617
+                nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
@@ -156,7 +224,7 @@ class GatedDeltaNetPreTrainedModel(PreTrainedModel):
             #   > the weights of residual layers at initialization by a factor of 1/√N where N is the # of residual layers.
             #   >   -- GPT-2 :: https://openai.com/blog/better-language-models/
             #
-            # Reference (Megatron-LM): https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/model/gpt_model.py
+            # Reference (Megatron-LM): https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/models/gpt/gpt_model.py
             p = None
             if hasattr(module, 'o_proj'):
                 p = module.o_proj.weight
@@ -187,6 +255,12 @@ class GatedDeltaNetModel(GatedDeltaNetPreTrainedModel):
         self.embeddings = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
         self.layers = nn.ModuleList([GatedDeltaNetBlock(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
         self.norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
+
+        self.use_attnres = config.attnres_block_size is not None
+        if self.use_attnres:
+            self.res_proj = nn.Linear(in_features=config.hidden_size, out_features=1, bias=False)
+            self.res_norm = nn.RMSNorm(normalized_shape=config.hidden_size, eps=config.norm_eps)
+            self.res_proj._is_attnres_proj = True
 
         self.gradient_checkpointing = False
 
@@ -231,25 +305,40 @@ class GatedDeltaNetModel(GatedDeltaNetPreTrainedModel):
         if use_cache and not isinstance(past_key_values, Cache):
             past_key_values = Cache.from_legacy_cache(past_key_values)
 
+        attnres_states: list[torch.Tensor] | None = None
+
         all_hidden_states = () if output_hidden_states else None
         all_attns = () if output_attentions else None
         for layer in self.layers:
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
-            hidden_states, attentions, past_key_values = layer(
+            hidden_states, attentions, past_key_values, attnres_states = layer(
                 hidden_states,
                 attention_mask=attention_mask,
                 past_key_values=past_key_values,
                 use_cache=use_cache,
                 output_attentions=output_attentions,
+                attnres_states=attnres_states,
                 **kwargs,
             )
 
             if output_attentions:
                 all_attns += (attentions,)
 
-        hidden_states = self.norm(hidden_states)
+        if self.use_attnres:
+            # top-level attnres aggregation; `self.norm` is folded into the
+            # kernel via `output_rms_weight` so we don't double-norm.
+            residuals = [*attnres_states, hidden_states]
+            hidden_states = fused_attnres(
+                query=self.res_proj.weight,
+                residuals=residuals,
+                rms_weight=self.res_norm.weight,
+                output_rms_weight=self.norm.weight,
+                rms_eps=self.res_norm.eps,
+            )
+        else:
+            hidden_states = self.norm(hidden_states)
 
         # add hidden states from the last decoder layer
         if output_hidden_states:
@@ -265,7 +354,7 @@ class GatedDeltaNetModel(GatedDeltaNetPreTrainedModel):
         )
 
 
-class GatedDeltaNetForCausalLM(GatedDeltaNetPreTrainedModel, FLAGenerationMixin):
+class GatedDeltaNetForCausalLM(GatedDeltaNetPreTrainedModel, FLAUnsupportedCacheGenerationMixin):
 
     _tied_weights_keys = ["lm_head.weight"]
 
@@ -296,21 +385,6 @@ class GatedDeltaNetForCausalLM(GatedDeltaNetPreTrainedModel, FLAGenerationMixin)
 
     def get_decoder(self):
         return self.model
-
-    def generate(self, *args, **kwargs):
-        try:
-            return super().generate(*args, **kwargs)
-        except AttributeError as exception:
-            if 'past_key_values' in str(exception):
-                raise AttributeError(
-                    f"You tried to call `generate` with a decoding strategy that manipulates `past_key_values`, "
-                    f"which is not supported for {self.__class__.__name__}. "
-                    f"Try another generation strategy instead. "
-                    f"For the available generation strategies, check this doc: "
-                    f"https://huggingface.co/docs/transformers/en/generation_strategies#decoding-strategies",
-                )
-            else:
-                raise exception
 
     @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
     def forward(
@@ -349,7 +423,11 @@ class GatedDeltaNetForCausalLM(GatedDeltaNetPreTrainedModel, FLAGenerationMixin)
 
         loss, logits = None, None
         if not self.config.fuse_linear_cross_entropy or labels is None:
-            logits = self.lm_head(hidden_states if logits_to_keep is None else hidden_states[:, -logits_to_keep:])
+            logits = self.lm_head(
+                hidden_states
+                if labels is not None or logits_to_keep is None
+                else hidden_states[:, -logits_to_keep:]
+            )
         if labels is not None:
             if getattr(self, 'criterion', None) is None:
                 if self.config.fuse_linear_cross_entropy:

@@ -1,4 +1,9 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import math
 
@@ -34,77 +39,6 @@ def tril_softmax(scores: torch.Tensor, strict: bool = True) -> torch.Tensor:
     return probs
 
 
-def naive_causal_attention_bhtd(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-) -> torch.Tensor:
-    B, H, T, D = q.shape
-    qk_scale = 1.0 / math.sqrt(D)
-    scores = torch.matmul(q, k.transpose(-1, -2)) * qk_scale  # [B, H, T, T]
-    causal_mask = torch.triu(torch.ones(T, T, device=q.device), diagonal=1).bool()
-    scores = scores.masked_fill(causal_mask, float('-inf'))
-    attn_weights = torch.softmax(scores, dim=-1)  # [B, H, T, T]
-    o = torch.matmul(attn_weights, v)  # [B, H, T, D]
-
-    return o
-
-
-def naive_deltaformer_attn_head_first(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    beta: torch.Tensor | None = None,
-) -> torch.Tensor:
-    """
-    Naive reference implementation of DeltaFormer attention for head-first format.
-
-    Two-stage process:
-    1. Computes u[i] = v[i] - beta[i] * sum_{j<i} softmax(q[i] @ k[:i]^T) @ u[:i]
-    2. Applies causal attention: o = causal_attn(q, k, u)
-
-    Args:
-        q: [B, H, T, D]
-        k: [B, H, T, D]
-        v: [B, H, T, D]
-        beta: [B, H, T] or None (defaults to ones)
-
-    Returns:
-        o: [B, H, T, D]
-    """
-    assert q.dim() == 4 and k.dim() == 4 and v.dim() == 4, "q,k,v must be [B,H,T,D]"
-    B, H, T, D = q.shape
-    assert k.shape == (B, H, T, D) and v.shape == (B, H, T, D)
-    orig_dtype = q.dtype
-    qf = q.float()
-    kf = k.float()
-    vf = v.float()
-    if beta is None:
-        betaf = torch.ones((B, H, T), dtype=torch.float32, device=q.device)
-    else:
-        assert beta.shape == (B, H, T)
-        betaf = beta.float()
-
-    qk_scale = 1.0 / math.sqrt(D)
-    scores = torch.matmul(qf, kf.transpose(-1, -2)) * qk_scale
-    probs = tril_softmax(scores, strict=True)  # [B,H,T,T] float32
-
-    u_list = []
-    for t in range(T):
-        if t == 0:
-            u_t = vf[:, :, t, :]
-        else:
-            w = probs[:, :, t, :t]  # [B,H,t]
-            u_prev = torch.stack(u_list, dim=-2)  # [B,H,t,D]
-            weighted_sum = (w.unsqueeze(-1) * u_prev).sum(dim=-2)  # [B,H,D]
-            u_t = vf[:, :, t, :] - betaf[:, :, t].unsqueeze(-1) * weighted_sum
-        u_list.append(u_t)
-    u = torch.stack(u_list, dim=2)  # [B,H,T,D]
-
-    o = naive_causal_attention_bhtd(q, k, u.to(orig_dtype))
-    return o.to(orig_dtype)
-
-
 def naive_deltaformer_attn(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -126,22 +60,38 @@ def naive_deltaformer_attn(
     assert q.dim() == 4 and k.dim() == 4 and v.dim() == 4, "q,k,v must be [B,T,H,D]"
     B, T, H, D = q.shape
     assert k.shape == (B, T, H, D) and v.shape == (B, T, H, D)
-
-    q_bhtd = q.transpose(1, 2)  # [B, T, H, D] -> [B, H, T, D]
-    k_bhtd = k.transpose(1, 2)  # [B, T, H, D] -> [B, H, T, D]
-    v_bhtd = v.transpose(1, 2)  # [B, T, H, D] -> [B, H, T, D]
-
-    if beta is not None:
-        assert beta.shape == (B, T, H)
-        beta_bhtd = beta.transpose(1, 2)  # [B, T, H] -> [B, H, T]
+    orig_dtype = q.dtype
+    qf = q.float()
+    kf = k.float()
+    vf = v.float()
+    if beta is None:
+        betaf = torch.ones((B, T, H), dtype=torch.float32, device=q.device)
     else:
-        beta_bhtd = None
+        assert beta.shape == (B, T, H)
+        betaf = beta.float()
 
-    o_bhtd = naive_deltaformer_attn_head_first(q_bhtd, k_bhtd, v_bhtd, beta_bhtd)
+    qk_scale = 1.0 / math.sqrt(D)
+    scores = torch.einsum('bthd,bshd->bhts', qf, kf) * qk_scale
+    probs = tril_softmax(scores, strict=True)  # [B,H,T,T] float32
 
-    o_bthd = o_bhtd.transpose(1, 2)  # [B, H, T, D] -> [B, T, H, D]
+    u_list = []
+    for t in range(T):
+        if t == 0:
+            u_t = vf[:, t]
+        else:
+            w = probs[:, :, t, :t].transpose(1, 2)  # [B,t,H]
+            u_prev = torch.stack(u_list, dim=1)  # [B,t,H,D]
+            weighted_sum = (w.unsqueeze(-1) * u_prev).sum(dim=1)  # [B,H,D]
+            u_t = vf[:, t] - betaf[:, t].unsqueeze(-1) * weighted_sum
+        u_list.append(u_t)
+    u = torch.stack(u_list, dim=1)  # [B,T,H,D]
 
-    return o_bthd
+    scores = torch.einsum('bthd,bshd->bhts', q, k) * qk_scale
+    causal_mask = torch.triu(torch.ones(T, T, device=q.device), diagonal=1).bool()
+    scores = scores.masked_fill(causal_mask, float('-inf'))
+    attn_weights = torch.softmax(scores, dim=-1)  # [B,H,T,T]
+    o = torch.einsum('bhts,bshd->bthd', attn_weights, u.to(orig_dtype))
+    return o.to(orig_dtype)
 
 
 __all__ = [

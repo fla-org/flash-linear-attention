@@ -1,5 +1,9 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
-
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 
@@ -8,7 +12,8 @@ from fla.ops.comba.utils import chunk_comba_cumsum_scalar_bwd, chunk_comba_cumsu
 from fla.ops.comba.wy_fast import chunk_scaled_dot_comba_pkt_fwd, prepare_wy_repr_bwd, recompute_w_u_fwd
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_gated_delta_rule_fwd_h
 from fla.ops.common.chunk_o import chunk_bwd_dqkwg, chunk_bwd_dv_local, chunk_fwd_o
-from fla.ops.utils import chunk_local_cumsum, solve_tril
+from fla.ops.utils import chunk_local_cumsum, prepare_chunk_indices, solve_tril
+from fla.ops.utils.constant import RCP_LN2
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
@@ -23,8 +28,15 @@ def chunk_comba_fwd(
     initial_state: torch.Tensor,
     output_final_state: bool,
     cu_seqlens: torch.LongTensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
 ):
-    g0, g = chunk_comba_cumsum_scalar_fwd(g, chunk_size=64, cu_seqlens=cu_seqlens)
+    g0, g = chunk_comba_cumsum_scalar_fwd(
+        g,
+        chunk_size=64,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        scale=RCP_LN2,
+    )
     # obtain WY representation. u is actually the new v.
     A = chunk_scaled_dot_comba_pkt_fwd(
         k=k,
@@ -34,10 +46,12 @@ def chunk_comba_fwd(
         g=g,
         cu_seqlens=cu_seqlens,
         output_dtype=torch.float32,
+        chunk_indices=chunk_indices,
     )
     A = solve_tril(
         A=A,
         cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
         output_dtype=k.dtype,
     )
     w, u = recompute_w_u_fwd(
@@ -47,6 +61,7 @@ def chunk_comba_fwd(
         A=A,
         g_cumsum=g0,
         cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
     )
     h, v_new, final_state = chunk_gated_delta_rule_fwd_h(
         k=k,
@@ -56,6 +71,7 @@ def chunk_comba_fwd(
         initial_state=initial_state,
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
     )
     o = chunk_fwd_o(
         q=q,
@@ -65,6 +81,7 @@ def chunk_comba_fwd(
         g=g,
         scale=scale,
         cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
     )
     return g0, g, o, A, final_state
 
@@ -83,6 +100,7 @@ def chunk_comba_bwd(
     do: torch.Tensor,
     dht: torch.Tensor,
     cu_seqlens: torch.LongTensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
 ):
     w, u = recompute_w_u_fwd(
         k=p,
@@ -91,6 +109,7 @@ def chunk_comba_bwd(
         A=A,
         g_cumsum=g0,
         cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
     )
     h, v_new, _ = chunk_gated_delta_rule_fwd_h(
         k=k,
@@ -100,6 +119,7 @@ def chunk_comba_bwd(
         initial_state=initial_state,
         output_final_state=False,
         cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
     )
     dv = chunk_bwd_dv_local(
         q=q,
@@ -108,6 +128,7 @@ def chunk_comba_bwd(
         do=do,
         scale=scale,
         cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
     )
     dh, dh0, dv = chunk_gated_delta_rule_bwd_dhu(
         q=q,
@@ -120,6 +141,7 @@ def chunk_comba_bwd(
         dv=dv,
         scale=scale,
         cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
     )
     dq, dk, dw, dg = chunk_bwd_dqkwg(
         q=q,
@@ -133,6 +155,7 @@ def chunk_comba_bwd(
         dh=dh,
         scale=scale,
         cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
     )
     dk2, dv, dp, db, dg0, dg2 = prepare_wy_repr_bwd(
         k=k,
@@ -145,13 +168,14 @@ def chunk_comba_bwd(
         dw=dw,
         du=dv,
         cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
     )
     dk.add_(dk2)
     dg.add_(dg2)
     assert dg.dtype == torch.float32, "dg should be fp32"
-    dg = chunk_local_cumsum(dg, chunk_size=64, reverse=True, cu_seqlens=cu_seqlens)
+    dg = chunk_local_cumsum(dg, chunk_size=64, reverse=True, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
     # dg0 = d(g_cumsum - g)
-    dg += chunk_comba_cumsum_scalar_bwd(dg0, chunk_size=64, cu_seqlens=cu_seqlens)
+    dg += chunk_comba_cumsum_scalar_bwd(dg0, chunk_size=64, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
     return dq, dk, dv, dp, db, dg, dh0
 
 
@@ -173,6 +197,7 @@ class ChunkCombaFunction(torch.autograd.Function):
         output_final_state: bool,
         use_qk_l2norm_in_kernel: bool = False,
         cu_seqlens: torch.LongTensor | None = None,
+        cu_seqlens_cpu: torch.LongTensor | None = None,
     ):
         if use_qk_l2norm_in_kernel:
             q, q_rstd = l2norm_fwd(q)
@@ -180,6 +205,10 @@ class ChunkCombaFunction(torch.autograd.Function):
             p, p_rstd = l2norm_fwd(p)
         else:
             q_rstd, k_rstd, p_rstd = None, None, None
+
+        chunk_indices = None
+        if cu_seqlens is not None:
+            chunk_indices = prepare_chunk_indices(cu_seqlens, 64, cu_seqlens_cpu=cu_seqlens_cpu)
 
         g0, g, o, A, final_state = chunk_comba_fwd(
             q=q,
@@ -192,8 +221,24 @@ class ChunkCombaFunction(torch.autograd.Function):
             initial_state=initial_state,
             output_final_state=output_final_state,
             cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
         )
-        ctx.save_for_backward(q, q_rstd, k, k_rstd, p, p_rstd, v, g0, g, beta, A, initial_state, cu_seqlens)
+        ctx.save_for_backward(
+            q,
+            q_rstd,
+            k,
+            k_rstd,
+            p,
+            p_rstd,
+            v,
+            g0,
+            g,
+            beta,
+            A,
+            initial_state,
+            cu_seqlens,
+            chunk_indices,
+        )
         ctx.scale = scale
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
         return o.to(q.dtype), final_state
@@ -206,7 +251,22 @@ class ChunkCombaFunction(torch.autograd.Function):
         do: torch.Tensor,
         dht: torch.Tensor,
     ):
-        q, q_rstd, k, k_rstd, p, p_rstd, v, g0, g, beta, A, initial_state, cu_seqlens = ctx.saved_tensors
+        (
+            q,
+            q_rstd,
+            k,
+            k_rstd,
+            p,
+            p_rstd,
+            v,
+            g0,
+            g,
+            beta,
+            A,
+            initial_state,
+            cu_seqlens,
+            chunk_indices,
+        ) = ctx.saved_tensors
         dq, dk, dv, dp, db, dg, dh0 = chunk_comba_bwd(
             q=q,
             k=k,
@@ -221,12 +281,13 @@ class ChunkCombaFunction(torch.autograd.Function):
             do=do,
             dht=dht,
             cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
         )
         if ctx.use_qk_l2norm_in_kernel:
             dq = l2norm_bwd(q, q_rstd, dq)
             dk = l2norm_bwd(k, k_rstd, dk)
             dp = l2norm_bwd(p, p_rstd, dp)
-        return dq.to(q), dk.to(k), dv.to(v), dp.to(p), dg.to(g), db.to(beta), None, dh0, None, None, None
+        return dq.to(q), dk.to(k), dv.to(v), dp.to(p), dg.to(g), db.to(beta), None, dh0, None, None, None, None
 
 
 @torch.compiler.disable
@@ -242,6 +303,7 @@ def chunk_comba(
     output_final_state: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
+    cu_seqlens_cpu: torch.LongTensor | None = None,
 ):
     r"""
     Args:
@@ -250,22 +312,23 @@ def chunk_comba(
         k (torch.Tensor):
             keys of shape `[B, T, H, K]`.
         v (torch.Tensor):
-            values of shape `[B, T, H, V]`.
+            values of shape `[B, T, HV, V]`.
+            GVA (Grouped Value Attention) is applied if `HV > H`, where `HV` must be divisible by `H`.
         p (torch.Tensor):
             auxiliary keys of shape `[B, T, H, K]`.
         g (torch.Tensor):
-            (forget) gating tensor (in log space!) of shape `[B, T, H]`.
+            (forget) gating tensor (in log space!) of shape `[B, T, HV]`.
         beta (torch.Tensor):
-            betas of shape `[B, T, H]`.
+            betas of shape `[B, T, HV]`.
         scale (Optional[int]):
             Scale factor for the RetNet attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         initial_state (Optional[torch.Tensor]):
-            Initial state of shape `[N, H, K, V]` for `N` input sequences.
+            Initial state of shape `[N, HV, K, V]` for `N` input sequences.
             For equal-length input sequences, `N` equals the batch size `B`.
             Default: `None`.
         output_final_state (Optional[bool]):
-            Whether to output the final state of shape `[N, H, K, V]`. Default: `False`.
+            Whether to output the final state of shape `[N, HV, K, V]`. Default: `False`.
         use_qk_l2norm_in_kernel (bool):
             Whether to apply L2norm to the q/k tensor internally. Default: `False`.
         cu_seqlens (torch.LongTensor):
@@ -274,9 +337,9 @@ def chunk_comba(
 
     Returns:
         o (torch.Tensor):
-            Outputs of shape `[B, T, H, V]`.
+            Outputs of shape `[B, T, HV, V]`.
         final_state (torch.Tensor):
-            Final state of shape `[N, H, K, V]` if `output_final_state=True` else `None`.
+            Final state of shape `[N, HV, K, V]` if `output_final_state=True` else `None`.
 
     Examples::
         >>> import torch
@@ -311,6 +374,17 @@ def chunk_comba(
     """
     if p is None:
         p = k
+    if q.shape[2] != k.shape[2] or q.shape[2] != p.shape[2]:
+        raise ValueError(
+            f"q, k and p must have the same number of heads, "
+            f"but got q.shape[2]={q.shape[2]}, k.shape[2]={k.shape[2]} and p.shape[2]={p.shape[2]}"
+        )
+    H, HV = q.shape[2], v.shape[2]
+    if HV % H != 0:
+        raise ValueError(
+            f"For GVA, num_v_heads (HV={HV}) must be evenly divisible by "
+            f"num_heads (H={H}), but got HV % H = {HV % H}"
+        )
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(
@@ -336,5 +410,6 @@ def chunk_comba(
         output_final_state,
         use_qk_l2norm_in_kernel,
         cu_seqlens,
+        cu_seqlens_cpu,
     )
     return o, final_state

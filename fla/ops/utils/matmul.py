@@ -1,4 +1,9 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 # code adapted from
 # https://triton-lang.org/main/getting-started/tutorials/03-matrix-multiplication.html
@@ -82,9 +87,9 @@ def matmul_kernel(
     # Map program ids `pid` to the block of C it should compute.
     # This is done in a grouped ordering to promote L2 data reuse.
     # See above `L2 Cache Optimizations` section for details.
-    i_b, i_m, i_n = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_b, i_m, i_n = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
 
-    NM, NN = tl.num_programs(1), tl.num_programs(2)
+    NM, NN = tl.num_programs(1).to(tl.int64), tl.num_programs(2).to(tl.int64)
     i_m, i_n = tl.swizzle2d(i_m, i_n, NM, NN, G)
 
     # ----------------------------------------------------------

@@ -1,4 +1,9 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import os
 
@@ -6,8 +11,17 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from fla.ops.generalized_delta_rule.dplr import chunk_dplr_delta_rule
 from fla.ops.generalized_delta_rule.dplr.fused_recurrent import fused_recurrent_dplr_delta_rule
-from fla.ops.rwkv7.channel_mixing import channel_mixing_rwkv7, channel_mixing_rwkv7_torch
+from fla.ops.rwkv7 import chunk_rwkv7
+from fla.ops.rwkv7.channel_mixing import (
+    channel_mixing_rwkv7,
+    channel_mixing_rwkv7_torch,
+    relu_square_bwd_kernel,
+    rwkv_channel_mixing_bwd,
+    rwkv_mix_fwd,
+    rwkv_relu_and_square_fwd,
+)
 from fla.ops.rwkv7.fused_addcmul import fused_addcmul_rwkv7, torch_addcmul_rwkv7
 from fla.ops.rwkv7.fused_k_update import fused_k_rwkv7, k_update_ref
 from fla.ops.rwkv7.fused_recurrent import fused_mul_recurrent_rwkv7
@@ -72,6 +86,44 @@ def test_channel_mixing_gradients(B, T, n_embd, dim_ffn, dtype, inplace, xprevdi
     assert_close(" dV_", V_.grad, V_2.grad, ratio=5e-3)
 
 
+def test_channel_mixing_no_out_of_bounds_writes():
+    torch.manual_seed(42)
+    # element counts that no block size in [128, 8192] divides, so every launch has a partial tail block
+    B, T, n_embd, dim_ffn = 1, 7, 200, 700
+    sentinel = 777.0
+    n_ffn = B * T * dim_ffn
+    # the store window the fixed 4096 grid covers
+    window = (n_ffn + 4095) // 4096 * 4096
+
+    # rwkv_relu_and_square_fwd writes into its input's storage when inplace, so hand it a
+    # view of a guard-banded buffer and check the band past the tensor end stays intact
+    buf = torch.full((2 * window,), sentinel, device=device)
+    rwkv_relu_and_square_fwd(buf[:n_ffn].view(B, T, dim_ffn), inplace=True)
+    assert (buf[n_ffn:] == sentinel).all(), 'rwkv_channel_mixing_pow_and_relu stored past the tensor end'
+
+    # relu_square_bwd_kernel operates on tensors rwkv_channel_mixing_bwd allocates internally;
+    # launch it exactly as that wrapper does, on guard-banded views
+    buf = torch.full((2 * window,), sentinel, device=device)
+    dk, k1_K = buf[:n_ffn], buf[window:window + n_ffn]
+    relu_square_bwd_kernel[((n_ffn + 4095) // 4096,)](dk, k1_K, dk.numel(), BLOCK_SIZE=4096)
+    assert (buf[n_ffn:window] == sentinel).all(), 'relu_square_bwd_kernel stored past the end of dk'
+
+    # rwkv_mix_bwd_kenel with inplace=True uses the caller's x_prev as dx_prev; dead tail
+    # lanes whose seq_idx wraps to 0 must not store past its (B, n_embd) extent
+    big = torch.full((1 << 20,), sentinel, device=device)
+    x = torch.randn(B, T, n_embd, device=device)
+    x_prev = big[:B * n_embd].view(B, n_embd)
+    x_k = torch.randn(1, 1, n_embd, device=device)
+    key_weight = torch.randn(n_embd, dim_ffn, device=device)
+    value_weight = torch.randn(dim_ffn, n_embd, device=device)
+    k1 = rwkv_mix_fwd(x, x_prev, x_k)
+    k1_K = k1 @ key_weight
+    k = rwkv_relu_and_square_fwd(k1_K, inplace=False)
+    grad_output = torch.randn(B, T, n_embd, device=device)
+    rwkv_channel_mixing_bwd(grad_output, x, x_prev, x_k, key_weight, value_weight, k1, k1_K, k, inplace=True)
+    assert (big[B * n_embd:] == sentinel).all(), 'rwkv_mix_bwd_kenel stored past the end of dx_prev'
+
+
 @pytest.mark.parametrize('B', [2])
 @pytest.mark.parametrize('T', [1, 1024])
 @pytest.mark.parametrize('H', [1])
@@ -128,6 +180,44 @@ def test_fused_mul_recurrent_fwd(
         initial_state=h0.clone(),
         output_final_state=True,
     )
+    assert_close('o', ref, tri, 0.002)
+    assert_close('ht', ref_ht, tri_ht, 0.002)
+
+
+@pytest.mark.parametrize('chunk_size', [16, 32, 64])
+@pytest.mark.smoke
+def test_chunk_wrapper_chunk_size(chunk_size: int):
+    B, T, H, D = 1, 64, 2, 64
+    r = torch.empty(B, T, H, D).uniform_(-8, -6).to(device)
+    k = torch.empty(B, T, H, D).uniform_(-8, -6).to(device)
+    v = torch.empty(B, T, H, D).uniform_(-8, -6).to(device)
+    w = torch.empty(B, T, H, D).uniform_(-8, -6).to(device)
+    kk = F.normalize(torch.empty(B, T, H, D).uniform_(-1, 1), dim=-1).to(device)
+    a = -kk
+    b = kk * torch.empty(B, T, H, D).uniform_(0, 0.1).to(device)
+
+    ref, ref_ht = chunk_dplr_delta_rule(
+        q=r.clone(),
+        k=k.clone(),
+        v=v.clone(),
+        a=a.clone(),
+        b=b.clone(),
+        gk=w.clone(),
+        scale=1.0,
+        output_final_state=True,
+        chunk_size=chunk_size,
+    )
+    tri, tri_ht = chunk_rwkv7(
+        r=r.clone(),
+        w=w.clone(),
+        k=k.clone(),
+        v=v.clone(),
+        a=a.clone(),
+        b=b.clone(),
+        output_final_state=True,
+        chunk_size=chunk_size,
+    )
+
     assert_close('o', ref, tri, 0.002)
     assert_close('ht', ref_ht, tri_ht, 0.002)
 
@@ -260,11 +350,13 @@ def test_fused_k_update(
     assert_close("dka", ref_dka, ka.grad, ratio=ratio)
 
 
-@pytest.mark.parametrize("B", [4])
-@pytest.mark.parametrize("T", [4096])
-@pytest.mark.parametrize("H", [64])
-@pytest.mark.parametrize("D", [64])
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize(
+    ("B", "T", "H", "D", "dtype"),
+    [
+        pytest.param(4, 4096, 64, 64, torch.bfloat16, id="default"),
+        pytest.param(1, 65537, 8, 64, torch.bfloat16, id="long_ctx"),
+    ],
+)
 def test_gate_output_correction(
     B: int,
     T: int,

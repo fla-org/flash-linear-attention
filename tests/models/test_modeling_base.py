@@ -1,4 +1,11 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
+import os
 
 import pytest
 import torch
@@ -31,6 +38,7 @@ def run_test_model_forward_backward(
     config_class: type,
     use_l2warp: bool,
     dtype: torch.dtype,
+    **kwargs,
 ):
     """
     A foundational test for the forward and backward passes of a model.
@@ -42,7 +50,7 @@ def run_test_model_forward_backward(
     if config_class.__name__ in NOT_READY_FOR_TESTING:
         pytest.skip(f"{config_class.__name__} is not yet ready for testing.")
 
-    model, config = create_model_and_config(config_class, L, H, D, use_l2warp=use_l2warp, dtype=dtype)
+    model, config = create_model_and_config(config_class, L, H, D, use_l2warp=use_l2warp, dtype=dtype, **kwargs)
     input_ids = torch.randint(low=0, high=config.vocab_size, size=(B, T), device=device)
     output_fixed = model(input_ids, output_hidden_states=True).hidden_states[-1]
     assert output_fixed.shape == (B, T, config.hidden_size)
@@ -62,6 +70,7 @@ def run_test_model_forward_backward(
 # ===================================================================================
 # BASE TEST FOR GENERATION (K/V CACHE)
 # ===================================================================================
+@torch.no_grad()
 def run_test_generation(
     L: int,
     B: int,
@@ -79,6 +88,7 @@ def run_test_generation(
     A foundational test for K/V cache-based generation.
     """
     torch.manual_seed(42)
+    os.environ['FLA_CONV_BACKEND'] = 'triton'
     if config_class.__name__ in GENERATION_UNSUPPORTED:
         pytest.skip(f"Generation test not supported for {config_class.__name__}.")
     if config_class.__name__ in NOT_READY_FOR_TESTING:
@@ -122,3 +132,59 @@ def run_test_generation(
     gen = torch.cat(logits, 1)
     gen = torch.cat([gen[i:i+1, start:] for i, start in enumerate(seq_start)], 1)
     assert_close('logits', ref, gen, tol)
+
+
+# ===================================================================================
+# REGRESSION TEST FOR FULL-PROMPT PREFILL IN GENERATION
+# ===================================================================================
+def run_test_generate_matches_forward(
+    L: int,
+    B: int,
+    T: int,
+    H: int,
+    D: int,
+    config_class: type,
+    dtype: torch.dtype,
+    num_new_tokens: int = 8,
+):
+    """
+    A regression test that `generate()` conditions on the whole prompt, not just the last token.
+    """
+    torch.manual_seed(42)
+    os.environ['FLA_CONV_BACKEND'] = 'triton'
+    if config_class.__name__ in GENERATION_UNSUPPORTED:
+        pytest.skip(f"Generation test not supported for {config_class.__name__}.")
+    if config_class.__name__ in NOT_READY_FOR_TESTING:
+        pytest.skip(f"{config_class.__name__} is not yet ready for testing.")
+
+    model, config = create_model_and_config(config_class, L, H, D, dtype=dtype)
+    model.eval()
+    model = model.to(dtype).to(device)
+    # avoid the pad/eos id so attention_mask is all ones and tokens are unambiguous
+    input_ids = torch.randint(low=1, high=config.vocab_size, size=(B, T)).to(device)
+    attention_mask = torch.ones_like(input_ids)
+
+    with torch.no_grad():
+        out = model(input_ids=input_ids, use_cache=True)
+        past_key_values = out.past_key_values
+        next_token = out.logits[:, -1:].argmax(dim=-1)
+        manual = [next_token]
+        for _ in range(num_new_tokens - 1):
+            out = model(input_ids=next_token, use_cache=True, past_key_values=past_key_values)
+            past_key_values = out.past_key_values
+            next_token = out.logits[:, -1:].argmax(dim=-1)
+            manual.append(next_token)
+        manual = torch.cat(manual, dim=1)
+
+        generated = model.generate(
+            input_ids,
+            attention_mask=attention_mask,
+            max_new_tokens=num_new_tokens,
+            do_sample=False,
+        )[:, T:]
+
+    assert torch.equal(generated, manual), (
+        "generate() output diverges from a manual greedy decode that prefills the full prompt; "
+        "prepare_inputs_for_generation likely dropped the prompt on the first step.\n"
+        f"generate={generated.tolist()}\nmanual={manual.tolist()}"
+    )

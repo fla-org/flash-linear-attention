@@ -1,3 +1,10 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+#
 # Copyright 2024 The HuggingFace Inc. team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,7 +19,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import math
 import warnings
 
 from transformers.configuration_utils import PretrainedConfig
@@ -56,6 +62,12 @@ class Mamba2Config(PretrainedConfig):
             Whether or not to use bias in ["in_proj", "out_proj"] of the mixer block
         use_conv_bias (`bool`, *optional*, defaults to `True`):
             Whether or not to use bias in the convolution layer of the mixer block.
+        conv_init (`float`, *optional*, defaults to `None`):
+            Value for initialization range for the convolution layer.
+        A_init_range (`tuple`, *optional*, defaults to `(1, 16)`):
+            Range of values for the A matrix initialization.
+        D_has_hdim (`bool`, *optional*, defaults to `False`):
+            Whether the D matrix has a head dimension or a single value is shared across dimensions in the same head.
         hidden_act (`str`, *optional*, defaults to `"silu"`):
             The non-linear activation function (function or string) in the decoder.
         initializer_range (`float`, *optional*, defaults to 0.02):
@@ -63,22 +75,19 @@ class Mamba2Config(PretrainedConfig):
         residual_in_fp32 (`bool`, *optional*, defaults to `True`):
             Whether or not residuals should be in `float32`.
             If set to `False` residuals will keep the same `dtype` as the rest of the model
-        time_step_rank (`Union[int,str]`, *optional*, defaults to `"auto"`):
-            Rank of the discretization projection matrix.
-            `"auto"` means that it will default to `math.ceil(self.hidden_size / 16)`
-        time_step_min (`float`, *optional*, defaults to 0.001):
-            Minimum `time_step` used to bound `dt_proj.bias`.
-        time_step_max (`float`, *optional*, defaults to 0.1):
-            Maximum `time_step` used to bound `dt_proj.bias`.
-        time_step_floor (`float`, *optional*, defaults to 0.0001):
+        dt_min (`float`, *optional*, defaults to 0.001):
+            Minimum `dt` used to bound `dt_proj.bias`.
+        dt_max (`float`, *optional*, defaults to 0.1):
+            Maximum `dt` used to bound `dt_proj.bias`.
+        dt_init_floor (`float`, *optional*, defaults to 0.0001):
             Minimum clamping value of the `dt_proj.bias` layer initialization.
-        time_step_limit (`tuple`, *optional*, defaults to `(0.0, inf)`):
+        dt_limit (`tuple`, *optional*, defaults to `(0.0, inf)`):
             Accepted range of time step values.
         rescale_prenorm_residual (`bool`, *optional*, defaults to `True`):
             Whether or not to rescale `out_proj` weights when initializing.
         use_cache (`bool`, *optional*, defaults to `True`):
             Whether or not the cache should be used.
-        rms_norm (`bool`, *optional*, defaults to `True`):
+        rmsnorm (`bool`, *optional*, defaults to `True`):
             Whether to use RMS norm or not.
         chunk_size (`int`, *optional*, defaults to 256):
             Size of the chunks that will comprise the sequence.
@@ -104,17 +113,20 @@ class Mamba2Config(PretrainedConfig):
         n_groups: int = 1,
         use_bias: bool = False,
         use_conv_bias: bool = True,
+        conv_init: float | None = None,
+        A_init_range: tuple[float, float] = (1, 16),
+        D_has_hdim: bool = False,
         hidden_act: str = "silu",
         initializer_range: float = 0.02,
         residual_in_fp32: bool = True,
-        time_step_rank: str = "auto",
-        time_step_min: float = 0.001,
-        time_step_max: float = 0.1,
-        time_step_floor: float = 1e-4,
-        time_step_limit=(0.0, float("inf")),
+        dt_min: float = 0.001,
+        dt_max: float = 0.1,
+        dt_init_floor: float = 1e-4,
+        dt_limit: tuple[float, float] = (0.0, float("inf")),
         rescale_prenorm_residual: bool = True,
         use_cache: bool = True,
-        rms_norm: bool = True,
+        rmsnorm: bool = True,
+        norm_before_gate: bool = False,
         chunk_size: int = 256,
         fuse_norm: bool = True,
         fuse_cross_entropy: bool = True,
@@ -129,7 +141,9 @@ class Mamba2Config(PretrainedConfig):
         self.num_hidden_layers = num_hidden_layers
         self.norm_eps = norm_eps
         self.conv_kernel = conv_kernel
+        self.conv_init = conv_init
         self.expand = expand
+        self.A_init_range = A_init_range
 
         self.bos_token_id = bos_token_id
         self.eos_token_id = eos_token_id
@@ -138,29 +152,33 @@ class Mamba2Config(PretrainedConfig):
         self.use_conv_bias = use_conv_bias
         self.hidden_act = hidden_act
         self.initializer_range = initializer_range
-        self.time_step_rank = (
-            math.ceil(self.hidden_size / 16)
-            if time_step_rank == "auto"
-            else time_step_rank
-        )
-        self.time_step_min = time_step_min
-        self.time_step_max = time_step_max
-        self.time_step_floor = time_step_floor
+        self.dt_min = dt_min
+        self.dt_max = dt_max
+        self.dt_init_floor = dt_init_floor
         self.rescale_prenorm_residual = rescale_prenorm_residual
         self.residual_in_fp32 = residual_in_fp32
         self.use_cache = use_cache
         self.n_groups = n_groups
         self.head_dim = head_dim
         self.num_heads = int(self.expand * self.hidden_size / self.head_dim)
-        self.rms_norm = rms_norm
+        self.rmsnorm = rmsnorm
+        self.D_has_hdim = D_has_hdim
+        self.norm_before_gate = norm_before_gate
         self.state_size = state_size
         self.chunk_size = chunk_size
-        self.time_step_limit = time_step_limit
+        self.dt_limit = dt_limit
         self.fuse_norm = fuse_norm
         self.fuse_cross_entropy = fuse_cross_entropy
         self.fuse_linear_cross_entropy = fuse_linear_cross_entropy
         self.use_l2warp = use_l2warp
         self.tie_word_embeddings = tie_word_embeddings
+
+        if len(A_init_range) != 2 or A_init_range[0] <= 0 or A_init_range[0] > A_init_range[1]:
+            raise ValueError("`A_init_range` must be a positive (min, max) pair.")
+        if dt_min <= 0 or dt_max < dt_min:
+            raise ValueError("`dt_min` and `dt_max` must satisfy 0 < dt_min <= dt_max.")
+        if dt_init_floor <= 0:
+            raise ValueError("`dt_init_floor` must be > 0.")
 
         if fuse_cross_entropy and fuse_linear_cross_entropy:
             raise ValueError(

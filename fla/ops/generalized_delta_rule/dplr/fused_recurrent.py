@@ -1,11 +1,16 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 import triton
 import triton.language as tl
 
 from fla.ops.utils.op import exp
-from fla.utils import USE_CUDA_GRAPH, autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, input_guard
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, input_guard
 
 
 @triton.heuristics({
@@ -21,7 +26,6 @@ from fla.utils import USE_CUDA_GRAPH, autocast_custom_bwd, autocast_custom_fwd, 
         for num_stages in [2, 3, 4]
     ],
     key=['BK'],
-    use_cuda_graph=USE_CUDA_GRAPH,
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -49,7 +53,9 @@ def fused_recurrent_dplr_delta_rule_fwd_kernel(
     STORE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
+    pid = tl.program_id(0).to(tl.int64)
+    NV = tl.cdiv(V, BV)
+    i_v, i_nh = (pid % NV).to(tl.int64), (pid // NV).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
 
     if IS_VARLEN:
@@ -124,7 +130,7 @@ def fused_recurrent_dplr_delta_rule_fwd(
     ht = q.new_empty(N, H, K, V, dtype=torch.float32) if output_final_state else None
     o = torch.empty_like(v)
 
-    def grid(meta): return (triton.cdiv(V, meta['BV']), N * H)
+    def grid(meta): return (triton.cdiv(V, meta['BV']) * N * H,)
     fused_recurrent_dplr_delta_rule_fwd_kernel[grid](
         q=q,
         k=k,

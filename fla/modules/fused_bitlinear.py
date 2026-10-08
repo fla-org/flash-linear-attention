@@ -1,5 +1,10 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
 #
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
 # Implementations of BitLinear layer with fused LayerNorm and quantized Linear layer.
 # [The Era of 1-bit LLMs: All Large Language Models are in 1.58 Bits](https://arxiv.org/abs/2402.17764)
 # [Scalable MatMul-free Language Modeling](https://arxiv.org/abs/2406.02528)
@@ -88,7 +93,7 @@ def layer_norm_fwd_kernel_quant(
     HAS_BIAS: tl.constexpr,
 ):
     # Map the program id to the row of X and Y it should compute.
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)
     X += row * stride_x_row
     Y += row * stride_y_row
     if HAS_RESIDUAL:
@@ -128,7 +133,7 @@ def layer_norm_fwd_kernel_quant(
     # Aply quantization to the output
     scale = 127.0 / tl.maximum(tl.max(tl.abs(y), 0), 1e-5)
     # Quantize and then de-quantize the tensor
-    y = tl.extra.cuda.libdevice.round(y * scale)
+    y = tl.extra.libdevice.round(y * scale)
     y = tl.maximum(tl.minimum(y, 127), -128) / scale
 
     # Write output
@@ -232,7 +237,7 @@ def layer_norm_bwd_kernel(
     RECOMPUTE_OUTPUT: tl.constexpr,
 ):
     # Map the program id to the elements of X, DX, and DY it should compute.
-    row_block_id = tl.program_id(0)
+    row_block_id = tl.program_id(0).to(tl.int64)
     row_start = row_block_id * rows_per_program
     cols = tl.arange(0, BLOCK_N)
     mask = cols < N
@@ -271,7 +276,7 @@ def layer_norm_bwd_kernel(
             # Aply quantization to the output
             scale = 127.0 / tl.maximum(tl.max(tl.abs(y), 0), 1e-5)
             # Quantize and then de-quantize the tensor
-            y = tl.extra.cuda.libdevice.round(y * scale)
+            y = tl.extra.libdevice.round(y * scale)
             y = tl.maximum(tl.minimum(y, 127), -128) / scale
 
             tl.store(Y + cols, y, mask=mask)
@@ -573,7 +578,7 @@ class BitLinear(nn.Linear):
         # Initialize the superclass nn.Linear with the given parameters
         super().__init__(in_features, out_features, bias=bias)
 
-        self.norm = RMSNorm(in_features, eps=norm_eps)
+        self.norm = RMSNorm(in_features, eps=norm_eps, dtype=torch.float32)
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}({super().extra_repr()}, norm_eps={self.norm.eps})"

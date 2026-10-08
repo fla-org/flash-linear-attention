@@ -1,3 +1,9 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 from functools import partial
 
@@ -59,4 +65,9 @@ def benchmark(B, H, D, T, provider):
 
 
 if __name__ == '__main__':
-    benchmark.run(print_data=True)
+    try:
+        from runner import run_module_benchmark
+    except ModuleNotFoundError:
+        from benchmarks.modules.runner import run_module_benchmark
+
+    run_module_benchmark(benchmark, script_file=__file__)

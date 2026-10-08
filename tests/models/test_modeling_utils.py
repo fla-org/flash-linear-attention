@@ -1,3 +1,9 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import math
 
@@ -9,9 +15,9 @@ from fla.utils import device
 
 # Models that do not yet support variable sequence lengths (for modeling tests)
 MODELING_UNSUPPORTED_VARLEN = [
-    "ABCConfig", "ForgettingTransformerConfig", "LinearAttentionConfig", "LightNetConfig",
+    "ABCConfig", "CATConfig", "ForgettingTransformerConfig", "LinearAttentionConfig", "LightNetConfig",
     "Mamba2Config", "MambaConfig", "MesaNetConfig", "SambaConfig",
-    "RodimusConfig",
+    "RodimusConfig", "WallTransformerConfig",
 ]
 
 # Models not yet ready for basic testing
@@ -21,9 +27,11 @@ NOT_READY_FOR_TESTING = ['RodimusConfig']
 HOPPER_EXCLUSIVE = []
 
 GENERATION_UNSUPPORTED = [
-    "ABCConfig", "LinearAttentionConfig", "LightNetConfig",
-    "Mamba2Config", "MambaConfig", "NSAConfig", "SambaConfig", "RWKV6Config", "RWKV7Config",
+    "ABCConfig",
+    "CATConfig",
     "DeltaFormerConfig",
+    "MoBAConfig",
+    "WallTransformerConfig",
 ]
 
 

@@ -1,4 +1,9 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 # Code adapted from https://github.com/mayank31398/cute-kernels
 
@@ -8,6 +13,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.index import prepare_lens
+from fla.ops.utils.op import unflatten_program_id
 from fla.utils import autotune_cache_kwargs, input_guard
 
 
@@ -30,8 +36,8 @@ def packunpack_sequence_kernel(
     PADDING_SIDE: tl.constexpr,
     PACK: tl.constexpr,
 ):
-    i_d, i_s, i_b = tl.program_id(0), tl.program_id(1), tl.program_id(2)
-    bos, eos = tl.load(cu_seqlens + i_b), tl.load(cu_seqlens + i_b + 1)
+    i_d, i_s, i_b = unflatten_program_id(tl.cdiv(D, BD), S)
+    bos, eos = tl.load(cu_seqlens + i_b).to(tl.int64), tl.load(cu_seqlens + i_b + 1).to(tl.int64)
 
     T = eos - bos
     if PADDING_SIDE == 'left':
@@ -66,7 +72,7 @@ def pack_sequence_fwdbwd(
     ND = triton.cdiv(D, BD)
 
     y = torch.empty(cu_seqlens[-1].item(), *x.shape[2:], device=x.device, dtype=x.dtype)
-    packunpack_sequence_kernel[ND, S, B](
+    packunpack_sequence_kernel[(ND * S * B,)](
         x=x,
         y=y,
         cu_seqlens=cu_seqlens,
@@ -93,7 +99,7 @@ def unpack_sequence_fwdbwd(
     BD = min(triton.next_power_of_2(D), 4096)
     ND = triton.cdiv(D, BD)
 
-    packunpack_sequence_kernel[ND, S, B](
+    packunpack_sequence_kernel[(ND * S * B,)](
         x=x,
         y=y,
         cu_seqlens=cu_seqlens,
@@ -139,7 +145,7 @@ class PackSequenceFunction(torch.autograd.Function):
             padding_side=ctx.padding_side,
             desired_shape=ctx.desired_shape,
         )
-        return dx, *[None] * 10
+        return dx, None, None
 
 
 class UnpackSequenceFunction(torch.autograd.Function):

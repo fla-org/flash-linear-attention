@@ -1,5 +1,9 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
-
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 import triton
@@ -38,7 +42,9 @@ def fused_recurrent_hgrn_fwd_kernel(
     STORE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_d, i_n = tl.program_id(0), tl.program_id(1)
+    pid = tl.program_id(0).to(tl.int64)
+    ND = tl.cdiv(D, BD)
+    i_d, i_n = pid % ND, (pid // ND).to(tl.int64)
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
@@ -103,7 +109,9 @@ def fused_recurrent_hgrn_bwd_kernel(
     USE_FINAL_STATE_GRADIENT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_d, i_n = tl.program_id(0), tl.program_id(1)
+    pid = tl.program_id(0).to(tl.int64)
+    ND = tl.cdiv(D, BD)
+    i_d, i_n = pid % ND, (pid // ND).to(tl.int64)
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
@@ -165,7 +173,7 @@ def fused_recurrent_hgrn_fwd(
     o = torch.empty_like(x)
     final_state = x.new_empty(N, D) if output_final_state else None
 
-    def grid(meta): return (triton.cdiv(D, meta['BD']), N)
+    def grid(meta): return (triton.cdiv(D, meta['BD']) * N,)
     fused_recurrent_hgrn_fwd_kernel[grid](
         x=x,
         g=g,
@@ -193,7 +201,7 @@ def fused_recurrent_hgrn_bwd(
     dx = torch.empty_like(o, dtype=torch.float)
     dg = torch.empty_like(g, dtype=torch.float)
     dh0 = torch.empty_like(initial_state, dtype=torch.float) if initial_state is not None else None
-    def grid(meta): return (triton.cdiv(D, meta['BD']), N)
+    def grid(meta): return (triton.cdiv(D, meta['BD']) * N,)
     fused_recurrent_hgrn_bwd_kernel[grid](
         g=g,
         o=o,
@@ -299,6 +307,17 @@ def fused_recurrent_hgrn(
         >>> assert o.allclose(o_var.view(o.shape))
         >>> assert ht.allclose(ht_var)
     """
+    if cu_seqlens is not None:
+        if x.shape[0] != 1:
+            raise ValueError(
+                f"The batch size is expected to be 1 rather than {x.shape[0]} when using `cu_seqlens`. "
+                f"Please flatten variable-length inputs before processing.",
+            )
+        if initial_state is not None and initial_state.shape[0] != len(cu_seqlens) - 1:
+            raise ValueError(
+                f"The number of initial states is expected to be equal to the number of input sequences, "
+                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}.",
+            )
     return FusedRecurrentHGRNFunction.apply(
         x,
         g,

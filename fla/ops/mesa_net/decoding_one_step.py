@@ -1,4 +1,9 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 import triton
@@ -29,7 +34,7 @@ def mesa_net_decoding_one_step_kernel(
     BV: tl.constexpr,
     MAX_CG_STEP: tl.constexpr,
 ):
-    i_nh = tl.program_id(0)
+    i_nh = tl.program_id(0).to(tl.int64)
     i_h = i_nh % H
 
     o_k = tl.arange(0, BK)

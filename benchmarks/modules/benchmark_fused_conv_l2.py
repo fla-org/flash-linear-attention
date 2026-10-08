@@ -1,178 +1,144 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
+"""Compare fused convolution/L2 with convolution followed by the existing L2 kernel."""
+
+import argparse
+import hashlib
+import json
+import os
+import statistics
+import subprocess
+from pathlib import Path
+
 import torch
-from einops import rearrange
+import triton
+from triton.testing import do_bench_cudagraph
 
-from fla.modules.convolution import ShortConvolution
-from fla.modules.l2norm import l2norm
-from fla.utils import device
+from fla.modules.convolution import causal_conv1d
+from fla.modules.l2norm import l2_norm
+from fla.ops.convolution import fused_short_conv
+from fla.utils import assert_close
 
-def separate_conv_l2(x, conv, head_dim):
-    """Separate Conv + L2 Norm"""
-    y, _ = conv(x)
-    y = rearrange(y, 'b t (h d) -> b t h d', d=head_dim)
-    y = l2norm(y, eps=1e-5)
-    y = rearrange(y, 'b t h d -> b t (h d)')
-    return y
 
-def fused_conv_l2(x, conv_fused, head_dim):
-    """Fused Conv + L2 Norm"""
-    y, _ = conv_fused(x, head_dim=head_dim)
-    return y
+def benchmark(B, T, H, head_dim, packed, modes, repeats, rep_ms):
+    torch.manual_seed(42)
+    channels = H * head_dim
+    x = torch.randn(B, T, channels, device='cuda', dtype=torch.bfloat16, requires_grad=True)
+    weight = torch.randn(channels, 4, device='cuda', dtype=torch.bfloat16, requires_grad=True)
+    bias = torch.randn(channels, device='cuda', dtype=torch.bfloat16, requires_grad=True)
+    dy = torch.randn_like(x)
+    cu_seqlens = torch.tensor([0, 1, T // 4 + 3, T // 2, T], device=x.device) if packed else None
+    kwargs = dict(x=x, weight=weight, bias=bias, activation='silu', cu_seqlens=cu_seqlens)
 
-if __name__ == "__main__":
-    import torch.utils.benchmark as benchmark
-    
-    # Test configurations
-    B, T, D, W = 4, 2048, 2048, 4
-    H = 16
-    head_dim = D // H
-    
-    print("="*80)
-    print(f"Benchmarking Conv + L2 Norm: B={B}, T={T}, D={D}, W={W}, H={H}, head_dim={head_dim}")
-    print("="*80)
-    
-    dtype = torch.bfloat16
-    
-    # Create input
-    x = torch.randn(B, T, D, device=device, dtype=dtype, requires_grad=True)
-    
-    # Separate Conv (no norm)
-    conv_separate = ShortConvolution(
-        hidden_size=D,
-        kernel_size=W,
-        bias=False,
-        activation='silu',
-        norm=None,
-        device=device,
-        dtype=dtype,
+    def separate():
+        y, _ = causal_conv1d(**kwargs, backend='triton')
+        return l2_norm(x=y.reshape(B, T, H, head_dim), eps=1e-6).reshape_as(x)
+
+    def fused():
+        return fused_short_conv(**kwargs, use_norm=True, norm_eps=1e-6, head_dim=head_dim)[0]
+
+    functions = {'separate': separate, 'fused': fused}
+    inputs = (x, weight, bias)
+    ref = separate()
+    ref_grads = torch.autograd.grad(outputs=ref, inputs=inputs, grad_outputs=dy)
+    out = fused()
+    grads = torch.autograd.grad(outputs=out, inputs=inputs, grad_outputs=dy)
+    assert_close('y', ref, out, 1e-3)
+    for name, reference, result in zip(('dx', 'dw', 'db'), ref_grads, grads):
+        assert_close(name, reference, result, 1e-3)
+
+    results = []
+    for mode in modes:
+        samples = {provider: [] for provider in functions}
+
+        def run(provider):
+            if mode == 'fwd':
+                with torch.no_grad():
+                    return functions[provider]()
+            return torch.autograd.grad(outputs=functions[provider](), inputs=inputs, grad_outputs=dy)
+
+        for provider in functions:
+            run(provider)
+        torch.cuda.synchronize()
+        for repeat in range(repeats):
+            providers = ('separate', 'fused') if repeat % 2 == 0 else ('fused', 'separate')
+            for provider in providers:
+                samples[provider].append(do_bench_cudagraph(lambda: run(provider), rep=rep_ms))
+        medians = {provider: statistics.median(times) for provider, times in samples.items()}
+        result = dict(
+            B=B, T=T, H=H, head_dim=head_dim, packed=packed, mode=mode,
+            separate_ms=medians['separate'], fused_ms=medians['fused'],
+            speedup=medians['separate'] / medians['fused'], samples_ms=samples,
+        )
+        results.append(result)
+        print(json.dumps(result), flush=True)
+    return results
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--modes', nargs='+', choices=['fwd', 'fwdbwd'], default=['fwd', 'fwdbwd'])
+    parser.add_argument('--lengths', nargs='+', type=int, default=[128, 1024, 8192])
+    parser.add_argument('--batch-size', type=int, default=1)
+    parser.add_argument('--num-heads', type=int, default=16)
+    parser.add_argument('--head-dim', type=int, default=128)
+    parser.add_argument('--layouts', nargs='+', choices=['dense', 'varlen'], default=['dense', 'varlen'])
+    parser.add_argument('--repeats', type=int, default=5)
+    parser.add_argument('--rep-ms', type=int, default=100)
+    parser.add_argument('--json', type=Path)
+    args = parser.parse_args()
+    if args.repeats < 3:
+        parser.error('--repeats must be at least 3 for alternating paired measurements.')
+    if min(args.lengths) < 16 or min(args.batch_size, args.num_heads, args.head_dim, args.rep_ms) < 1:
+        parser.error('Sequence lengths must be at least 16; dimensions and timing duration must be positive.')
+    if args.batch_size != 1 and 'varlen' in args.layouts:
+        parser.error('Packed variable-length inputs require --batch-size 1.')
+    if not torch.cuda.is_available():
+        parser.error('This benchmark requires an NVIDIA GPU.')
+
+    source_root = Path(__file__).resolve().parents[2]
+    commit = subprocess.run(
+        ['git', '-c', f'safe.directory={source_root}', 'rev-parse', 'HEAD'],
+        cwd=source_root, capture_output=True, text=True, check=False,
+    ).stdout.strip()
+    sources = [
+        'fla/ops/convolution/fused_short_conv.py', 'fla/modules/conv/triton/kernels.py',
+        'fla/modules/conv/triton/ops.py', 'fla/modules/l2norm.py',
+    ]
+    metadata = dict(
+        commit=commit, gpu=torch.cuda.get_device_name(), capability=torch.cuda.get_device_capability(),
+        torch=torch.__version__, triton=triton.__version__, cuda=torch.version.cuda,
+        input_dtype='bfloat16', weight_dtype='bfloat16', width=4, activation='silu', bias=True,
+        eps=1e-6, seed=42, repeats=args.repeats, rep_ms=args.rep_ms, timing='CUDA graph',
+        source_sha256={name: hashlib.sha256((source_root / name).read_bytes()).hexdigest() for name in sources},
+        environment={name: os.environ.get(name) for name in (
+            'CUDA_VISIBLE_DEVICES', 'FLA_CI_ENV', 'FLA_DISABLE_BACKEND_DISPATCH', 'FLA_GLUON', 'FLA_CONV_GLUON',
+            'TRITON_F32_DEFAULT',
+        )},
     )
-    
-    # Fused Conv + L2 Norm
-    conv_fused = ShortConvolution(
-        hidden_size=D,
-        kernel_size=W,
-        bias=False,
-        activation='silu',
-        norm='l2',
-        norm_eps=1e-5,
-        device=device,
-        dtype=dtype,
-    )
-    
-    # Copy weights
-    conv_fused.weight.data.copy_(conv_separate.weight.data)
-    
-    # Benchmark Forward
-    print("\n" + "="*80)
-    print("Forward Pass")
-    print("="*80)
-    
-    t_sep_fwd = benchmark.Timer(
-        stmt="separate_conv_l2(x, conv, head_dim)",
-        globals={"separate_conv_l2": separate_conv_l2, "x": x, "conv": conv_separate, "head_dim": head_dim},
-    )
-    m_sep_fwd = t_sep_fwd.timeit(100)
-    print(f"Separate: {m_sep_fwd}")
-    
-    t_fused_fwd = benchmark.Timer(
-        stmt="fused_conv_l2(x, conv, head_dim)",
-        globals={"fused_conv_l2": fused_conv_l2, "x": x, "conv": conv_fused, "head_dim": head_dim},
-    )
-    m_fused_fwd = t_fused_fwd.timeit(100)
-    print(f"Fused:    {m_fused_fwd}")
-    
-    # Benchmark Backward
-    print("\n" + "="*80)
-    print("Backward Pass")
-    print("="*80)
-    
-    # Pre-compute forward for backward benchmark
-    y_sep = separate_conv_l2(x, conv_separate, head_dim)
-    grad_sep = torch.randn_like(y_sep)
-    
-    def backward_sep():
-        for xi in [x]:
-            if isinstance(xi, torch.Tensor):
-                xi.grad = None
-        y_sep.backward(grad_sep, retain_graph=True)
-    
-    t_sep_bwd = benchmark.Timer(
-        stmt="backward_sep()",
-        globals={"backward_sep": backward_sep},
-    )
-    m_sep_bwd = t_sep_bwd.timeit(100)
-    print(f"Separate: {m_sep_bwd}")
-    
-    y_fused = fused_conv_l2(x, conv_fused, head_dim)
-    grad_fused = torch.randn_like(y_fused)
-    
-    def backward_fused():
-        for xi in [x]:
-            if isinstance(xi, torch.Tensor):
-                xi.grad = None
-        y_fused.backward(grad_fused, retain_graph=True)
-    
-    t_fused_bwd = benchmark.Timer(
-        stmt="backward_fused()",
-        globals={"backward_fused": backward_fused},
-    )
-    m_fused_bwd = t_fused_bwd.timeit(100)
-    print(f"Fused:    {m_fused_bwd}")
-    
-    # Benchmark Combined
-    print("\n" + "="*80)
-    print("Forward + Backward Pass")
-    print("="*80)
-    
-    def combined_sep():
-        for xi in [x]:
-            if isinstance(xi, torch.Tensor):
-                xi.grad = None
-        y = separate_conv_l2(x, conv_separate, head_dim)
-        y.backward(grad_sep, retain_graph=True)
-    
-    t_sep_combined = benchmark.Timer(
-        stmt="combined_sep()",
-        globals={"combined_sep": combined_sep},
-    )
-    m_sep_combined = t_sep_combined.timeit(100)
-    print(f"Separate: {m_sep_combined}")
-    
-    def combined_fused():
-        for xi in [x]:
-            if isinstance(xi, torch.Tensor):
-                xi.grad = None
-        y = fused_conv_l2(x, conv_fused, head_dim)
-        y.backward(grad_fused, retain_graph=True)
-    
-    t_fused_combined = benchmark.Timer(
-        stmt="combined_fused()",
-        globals={"combined_fused": combined_fused},
-    )
-    m_fused_combined = t_fused_combined.timeit(100)
-    print(f"Fused:    {m_fused_combined}")
-    
-    # Summary
-    time_sep_fwd = m_sep_fwd.median * 1000
-    time_sep_bwd = m_sep_bwd.median * 1000
-    time_sep_combined = m_sep_combined.median * 1000
-    
-    time_fused_fwd = m_fused_fwd.median * 1000
-    time_fused_bwd = m_fused_bwd.median * 1000
-    time_fused_combined = m_fused_combined.median * 1000
-    
-    print(f"\n{'='*80}")
-    print(f"{'Method':<35} {'Forward':<12} {'Backward':<12} {'Combined':<12} {'Speedup':<10}")
-    print("-"*80)
-    print(f"{'Separate (FLA)':<35} {time_sep_fwd:>10.3f}ms {time_sep_bwd:>10.3f}ms {time_sep_combined:>10.3f}ms {'1.00x':<10}")
-    print(f"{'Fused (Recompute)':<35} {time_fused_fwd:>10.3f}ms {time_fused_bwd:>10.3f}ms {time_fused_combined:>10.3f}ms {time_sep_combined/time_fused_combined:<10.2f}x")
-    
-    speedup_fwd = (time_sep_fwd / time_fused_fwd - 1) * 100
-    speedup_bwd = (time_sep_bwd / time_fused_bwd - 1) * 100
-    speedup_combined = (time_sep_combined / time_fused_combined - 1) * 100
-    
-    print(f"\n{'='*80}")
-    print(f"Forward Speedup:   {speedup_fwd:>+8.2f}%")
-    print(f"Backward Speedup:  {speedup_bwd:>+8.2f}%")
-    print(f"Combined Speedup:  {speedup_combined:>+8.2f}%")
-    print(f"\nMemory Saved: {B*T*D*2/1024/1024:.2f} MB per Conv layer (Y_act not stored)")
-    print(f"{'='*80}")
+    print(json.dumps(metadata), flush=True)
+    results = []
+    for layout in args.layouts:
+        for length in args.lengths:
+            results.extend(benchmark(
+                B=args.batch_size,
+                T=length,
+                H=args.num_heads,
+                head_dim=args.head_dim,
+                packed=layout == 'varlen',
+                modes=args.modes,
+                repeats=args.repeats,
+                rep_ms=args.rep_ms,
+            ))
+            if args.json:
+                args.json.parent.mkdir(parents=True, exist_ok=True)
+                args.json.write_text(json.dumps(dict(metadata=metadata, results=results), indent=2) + '\n')
+
+
+if __name__ == '__main__':
+    main()

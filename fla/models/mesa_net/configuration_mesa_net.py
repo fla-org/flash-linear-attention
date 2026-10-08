@@ -1,10 +1,18 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import warnings
 
 from transformers.configuration_utils import PretrainedConfig
 
+from fla.models.hybrid import HybridAttentionConfig, _HybridAttentionConfigMixin
 
-class MesaNetConfig(PretrainedConfig):
+
+class MesaNetConfig(_HybridAttentionConfigMixin, PretrainedConfig):
     model_type = 'mesa_net'
     keys_to_ignore_at_inference = ['past_key_values']
 
@@ -24,7 +32,7 @@ class MesaNetConfig(PretrainedConfig):
         hidden_act: str = "swish",
         num_hidden_layers: int = 24,
         norm_eps: float = 1e-6,
-        attn: dict | None = None,
+        attn: HybridAttentionConfig = None,
         use_cache: bool = True,
         pad_token_id: int | None = None,
         bos_token_id: int = 1,
@@ -39,13 +47,15 @@ class MesaNetConfig(PretrainedConfig):
         vocab_size: int = 32000,
         max_cg_step_training: int = 30,
         max_cg_step_decoding: int = 30,
-        fuse_conv_l2: bool = True,
+        attnres_block_size: int | None = None,
+        fuse_conv_l2: bool = False,
         **kwargs,
     ):
         self.attn_mode = attn_mode
         self.hidden_size = hidden_size
         self.use_output_gate = use_output_gate
         self.use_short_conv = use_short_conv
+        self.fuse_conv_l2 = fuse_conv_l2
         self.conv_size = conv_size
         self.num_heads = num_heads
         self.head_dim = head_dim
@@ -69,7 +79,7 @@ class MesaNetConfig(PretrainedConfig):
         self.vocab_size = vocab_size
         self.max_cg_step_training = max_cg_step_training
         self.max_cg_step_decoding = max_cg_step_decoding
-        self.fuse_conv_l2 = fuse_conv_l2
+        self.attnres_block_size = attnres_block_size
 
         if fuse_cross_entropy and fuse_linear_cross_entropy:
             raise ValueError(
@@ -82,17 +92,12 @@ class MesaNetConfig(PretrainedConfig):
                 "If you observe issues like loss divergence, consider disabling this setting.",
             )
 
-        if attn is not None:
-            if not isinstance(attn, dict):
-                raise ValueError("attn must be a dictionary")
-            if 'layers' not in attn:
-                raise ValueError("Layer indices must be provided to initialize hybrid attention layers")
-            if 'num_heads' not in attn:
-                raise ValueError("Number of heads must be provided to initialize hybrid attention layers")
-            attn['num_kv_heads'] = attn.get('num_kv_heads', attn['num_heads'])
-            attn['qkv_bias'] = attn.get('qkv_bias', False)
-            attn['window_size'] = attn.get('window_size', None)
-            attn['rope_theta'] = attn.get('rope_theta', 10000.)
+        if attnres_block_size is not None and attnres_block_size != 1:
+            if attnres_block_size < 2 or attnres_block_size % 2 != 0:
+                raise ValueError(
+                    "`attnres_block_size` must be `None`, `1` (full mode), or an even integer (one block "
+                    f"contains `attnres_block_size // 2` transformer layers); got {attnres_block_size}."
+                )
 
         super().__init__(
             pad_token_id=pad_token_id,

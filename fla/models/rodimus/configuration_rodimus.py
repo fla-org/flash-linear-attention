@@ -1,13 +1,29 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import warnings
 
 from transformers.configuration_utils import PretrainedConfig
 
+from fla.models.hybrid import HybridAttentionConfig, _HybridAttentionConfigMixin
 
-class RodimusConfig(PretrainedConfig):
+
+class RodimusConfig(_HybridAttentionConfigMixin, PretrainedConfig):
 
     model_type = 'rodimus'
     keys_to_ignore_at_inference = ['past_key_values']
+
+    def _normalize_hybrid_attention_config(self, attn: HybridAttentionConfig) -> HybridAttentionConfig:
+        attn = super()._normalize_hybrid_attention_config(attn)
+        specs = [attn] if isinstance(attn, dict) else attn
+        if specs is not None:
+            for attn_spec in specs:
+                attn_spec.setdefault('qk_norm', False)
+        return attn
 
     def __init__(
         self,
@@ -27,7 +43,7 @@ class RodimusConfig(PretrainedConfig):
         max_position_embeddings: int = 2048,
         norm_eps: float = 1e-5,
         k_norm_eps: float | None = None,
-        attn: dict | None = None,
+        attn: HybridAttentionConfig = None,
         ska_attn: dict | None = None,
         use_cache: bool = True,
         pad_token_id: int | None = None,
@@ -83,19 +99,6 @@ class RodimusConfig(PretrainedConfig):
                 "at the potential cost of reduced precision. "
                 "If you observe issues like loss divergence, consider disabling this setting.",
             )
-
-        if attn is not None:
-            if not isinstance(attn, dict):
-                raise ValueError("attn must be a dictionary")
-            if 'layers' not in attn:
-                raise ValueError("Layer indices must be provided to initialize hybrid attention layers")
-            if 'num_heads' not in attn:
-                raise ValueError("Number of heads must be provided to initialize hybrid attention layers")
-            attn['num_kv_heads'] = attn.get('num_kv_heads', attn['num_heads'])
-            attn['qkv_bias'] = attn.get('qkv_bias', False)
-            attn['qk_norm'] = attn.get('qk_norm', False)
-            attn['window_size'] = attn.get('window_size', None)
-            attn['rope_theta'] = attn.get('rope_theta', 10000.)
 
         if ska_attn is not None:
             if not isinstance(ska_attn, dict):

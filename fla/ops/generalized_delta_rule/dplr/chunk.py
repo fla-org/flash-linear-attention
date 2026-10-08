@@ -1,9 +1,22 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import warnings
 
 import torch
 
+from fla.ops.backends import dispatch
+from fla.ops.cp import FLACPContext
+from fla.ops.cp.chunk_delta_h import (
+    chunk_gated_delta_rule_bwd_dhu_pre_process,
+    chunk_gated_delta_rule_fwd_h_pre_process,
+    compress_h0,
+    expand_h0,
+)
 from fla.ops.generalized_delta_rule.dplr.chunk_A_bwd import chunk_dplr_bwd_dqk_intra
 from fla.ops.generalized_delta_rule.dplr.chunk_A_fwd import chunk_dplr_fwd_intra
 from fla.ops.generalized_delta_rule.dplr.chunk_h_bwd import chunk_dplr_bwd_dhu
@@ -13,7 +26,23 @@ from fla.ops.generalized_delta_rule.dplr.chunk_o_fwd import chunk_dplr_fwd_o
 from fla.ops.generalized_delta_rule.dplr.wy_fast_bwd import chunk_dplr_bwd_wy
 from fla.ops.generalized_delta_rule.dplr.wy_fast_fwd import prepare_wy_repr_fwd
 from fla.ops.rwkv6.chunk import chunk_rwkv6_fwd_cumsum
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
+from fla.ops.utils import prepare_chunk_indices
+from fla.ops.utils.constant import RCP_LN2
+from fla.utils import TRITON_ABOVE_3_4_0, autocast_custom_bwd, autocast_custom_fwd, input_guard
+
+
+def gate_bound_is_safe(lower_bound: float, chunk_size: int) -> bool:
+    """Whether `gk >= lower_bound` keeps the centered tensor-core A-stage in fp32 range.
+
+    The A-stages factorize exp2(gi[i] - gi[j]) around the mid-chunk row. The
+    largest positive exponent is on the a-side: the exclusive cumsum ge is
+    centered against the inclusive gi[mid], so it spans chunk_size/2 + 1 rows
+    and per-row exponents reach (chunk_size/2 + 1) * |lower_bound| * log2(e).
+    124 is the fp32 exponent limit (~128 log2) minus 4 log2 of headroom for
+    the activation multiply. A non-negative bound is invalid (gk is a
+    log-decay < 0) and never licenses the scheme.
+    """
+    return lower_bound < 0 and abs(lower_bound) * (chunk_size // 2 + 1) * RCP_LN2 <= 124
 
 
 def chunk_dplr_fwd(
@@ -27,9 +56,19 @@ def chunk_dplr_fwd(
     initial_state: torch.Tensor,
     output_final_state: bool,
     cu_seqlens: torch.LongTensor | None = None,
-    chunk_size: int = 64,
+    chunk_size: int = 16,
+    safe_gate: bool = False,
+    chunk_indices: torch.LongTensor | None = None,
+    disable_recompute: bool = False,
+    cp_context: FLACPContext | None = None,
 ):
-    gi, ge = chunk_rwkv6_fwd_cumsum(gk, chunk_size, cu_seqlens=cu_seqlens)
+    gi, ge = chunk_rwkv6_fwd_cumsum(
+        gk,
+        chunk_size,
+        scale=RCP_LN2,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+    )
 
     A_ab, A_qk, A_ak, A_qb, qg, kg, ag, bg = chunk_dplr_fwd_intra(
         q=q,
@@ -40,21 +79,38 @@ def chunk_dplr_fwd(
         ge=ge,
         scale=scale,
         cu_seqlens=cu_seqlens,
+        safe_gate=safe_gate,
         chunk_size=chunk_size,
+        chunk_indices=chunk_indices,
     )
-    del ge
 
     # A_ab, A_ak, gi, ge torch.float32
     # A_qk, A_qb, qg, kg, ag, bg, dtype=q.dtype, eg: bf16
-    w, u, _ = prepare_wy_repr_fwd(
+    w, u, A_ab_inv = prepare_wy_repr_fwd(
         ag=ag,
         A_ab=A_ab,
         A_ak=A_ak,
         v=v,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
+        chunk_indices=chunk_indices,
+        safe_gate=safe_gate,
     )
-    del A_ab, A_ak
+
+    if cp_context is not None:
+        initial_state = chunk_gated_delta_rule_fwd_h_pre_process(
+            k=kg,
+            w=w,
+            u=u,
+            gk=gi,
+            bg=bg,
+            v=v,
+            cu_seqlens=cu_seqlens,
+            initial_state=initial_state,
+            context=cp_context,
+            chunk_size=chunk_size,
+        )
+
     h, v_new, final_state = chunk_dplr_fwd_h(
         kg=kg,
         bg=bg,
@@ -66,8 +122,11 @@ def chunk_dplr_fwd(
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
+        chunk_indices=chunk_indices,
     )
-    del u, kg, bg, gi
+
+    if cp_context is not None:
+        initial_state = compress_h0(initial_state, context=cp_context)
 
     o = chunk_dplr_fwd_o(
         qg=qg,
@@ -78,10 +137,13 @@ def chunk_dplr_fwd(
         h=h,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
+        chunk_indices=chunk_indices,
     )
-    del v_new, h, A_qk, A_qb
 
-    return o, final_state
+    if disable_recompute:
+        return o, final_state, initial_state, (gi, ge, A_qk, A_qb, A_ak, qg, kg, ag, bg, w, h, v_new, A_ab_inv)
+    else:
+        return o, final_state, initial_state, None
 
 
 class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
@@ -101,9 +163,39 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
         initial_state: torch.Tensor,
         output_final_state: bool,
         cu_seqlens: torch.LongTensor | None = None,
+        cu_seqlens_cpu: torch.LongTensor | None = None,
+        safe_gate: bool = False,
+        lower_bound: float | None = None,
+        chunk_size: int | None = None,
+        disable_recompute: bool = False,
+        cp_context: FLACPContext | None = None,
     ):
-        chunk_size = 16
-        o, final_state = chunk_dplr_fwd(
+        if chunk_size is None:
+            if TRITON_ABOVE_3_4_0 and lower_bound is not None and gate_bound_is_safe(lower_bound, 64):
+                chunk_size = 64
+            else:
+                chunk_size = 16
+        elif not TRITON_ABOVE_3_4_0:
+            # Avoid Triton Compiler error
+            warnings.warn(
+                "Set chunk_size to 16, to avoid triton compiler erorr. "
+                f"original chunk_size {chunk_size}",
+                category=RuntimeWarning,
+                stacklevel=2,
+            )
+            chunk_size = 16
+        if not safe_gate and lower_bound is not None and gate_bound_is_safe(lower_bound, chunk_size):
+            # the caller-asserted gate bound licenses the same centered
+            # tensor-core scheme as safe_gate=True
+            safe_gate = True
+        chunk_indices = None
+        if cu_seqlens is not None:
+            chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size, cu_seqlens_cpu=cu_seqlens_cpu)
+
+        # chunk_dplr_fwd returns the possibly CP-merged + compressed initial_state;
+        # for CP this is the [1, HV, K, V] state we must save for backward so the
+        # forward recomputation can rebuild the correct per-rank h.
+        o, final_state, initial_state, cache = chunk_dplr_fwd(
             q=q,
             k=k,
             v=v,
@@ -115,11 +207,45 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
             output_final_state=output_final_state,
             cu_seqlens=cu_seqlens,
             chunk_size=chunk_size,
+            safe_gate=safe_gate,
+            chunk_indices=chunk_indices,
+            disable_recompute=disable_recompute,
+            cp_context=cp_context,
         )
-        ctx.save_for_backward(q, k, v, a, b, gk, initial_state)
+
+        if disable_recompute:
+            gi, ge, A_qk, A_qb, A_ak, qg, kg, ag, bg, w, h, v_new, A_ab_inv = cache
+            ctx.save_for_backward(
+                q,
+                k,
+                v,
+                a,
+                b,
+                gk,
+                initial_state,
+                gi,
+                ge,
+                A_qk,
+                A_qb,
+                A_ak,
+                qg,
+                kg,
+                ag,
+                bg,
+                w,
+                h,
+                v_new,
+                A_ab_inv,
+            )
+        else:
+            ctx.save_for_backward(q, k, v, a, b, gk, initial_state)
         ctx.cu_seqlens = cu_seqlens
         ctx.scale = scale
         ctx.chunk_size = chunk_size
+        ctx.chunk_indices = chunk_indices
+        ctx.safe_gate = safe_gate
+        ctx.disable_recompute = disable_recompute
+        ctx.cp_context = cp_context
         return o.to(q.dtype), final_state
 
     @staticmethod
@@ -130,47 +256,91 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
         do: torch.Tensor,
         dht: torch.Tensor,
     ):
-        q, k, v, a, b, gk, initial_state = ctx.saved_tensors
+        if ctx.disable_recompute:
+            (
+                q,
+                k,
+                v,
+                a,
+                b,
+                gk,
+                initial_state,
+                gi,
+                ge,
+                A_qk,
+                A_qb,
+                A_ak,
+                qg,
+                kg,
+                ag,
+                bg,
+                w,
+                h,
+                v_new,
+                A_ab_inv,
+            ) = ctx.saved_tensors
+        else:
+            q, k, v, a, b, gk, initial_state = ctx.saved_tensors
         chunk_size = ctx.chunk_size
         cu_seqlens = ctx.cu_seqlens
         scale = ctx.scale
+        cp_context = ctx.cp_context
 
-        # ******* start recomputing everything, otherwise i believe the gpu memory will be exhausted *******
-        gi, ge = chunk_rwkv6_fwd_cumsum(gk, chunk_size, cu_seqlens=cu_seqlens)
+        # When CP compressed the saved initial_state to a single [1, HV, K, V] entry
+        # (for the first local sequence only), expand it back to [N_local, HV, K, V]
+        # BEFORE the forward recomputation. Otherwise chunk_dplr_fwd_h indexes past
+        # the buffer for the non-first sequences on this rank and reads garbage.
+        if cp_context is not None and initial_state is not None and initial_state.shape[0] == 1:
+            initial_state = expand_h0(initial_state, context=cp_context)
 
-        A_ab, A_qk, A_ak, A_qb, qg, kg, ag, bg = chunk_dplr_fwd_intra(
-            q=q,
-            k=k,
-            a=a,
-            b=b,
-            gi=gi,
-            ge=ge,
-            scale=scale,
-            cu_seqlens=cu_seqlens,
-            chunk_size=chunk_size,
-        )
-        w, u, A_ab_inv = prepare_wy_repr_fwd(
-            ag=ag,
-            A_ab=A_ab,
-            A_ak=A_ak,
-            v=v,
-            cu_seqlens=cu_seqlens,
-            chunk_size=chunk_size,
-        )
-        del A_ab
-        h, v_new, _ = chunk_dplr_fwd_h(
-            kg=kg,
-            bg=bg,
-            v=v,
-            w=w,
-            u=u,
-            gk=gi,
-            initial_state=initial_state,
-            cu_seqlens=cu_seqlens,
-            chunk_size=chunk_size,
-        )
-        del u
-        # ******* end of recomputation *******
+        if not ctx.disable_recompute:
+            # ******* start recomputing everything, otherwise i believe the gpu memory will be exhausted *******
+            gi, ge = chunk_rwkv6_fwd_cumsum(
+                gk,
+                chunk_size,
+                scale=RCP_LN2,
+                cu_seqlens=cu_seqlens,
+                chunk_indices=ctx.chunk_indices,
+            )
+
+            A_ab, A_qk, A_ak, A_qb, qg, kg, ag, bg = chunk_dplr_fwd_intra(
+                q=q,
+                k=k,
+                a=a,
+                b=b,
+                gi=gi,
+                ge=ge,
+                scale=scale,
+                cu_seqlens=cu_seqlens,
+                safe_gate=ctx.safe_gate,
+                chunk_size=chunk_size,
+                chunk_indices=ctx.chunk_indices,
+            )
+            w, u, A_ab_inv = prepare_wy_repr_fwd(
+                ag=ag,
+                A_ab=A_ab,
+                A_ak=A_ak,
+                v=v,
+                cu_seqlens=cu_seqlens,
+                chunk_size=chunk_size,
+                chunk_indices=ctx.chunk_indices,
+                safe_gate=ctx.safe_gate,
+            )
+            del A_ab
+            h, v_new, _ = chunk_dplr_fwd_h(
+                kg=kg,
+                bg=bg,
+                v=v,
+                w=w,
+                u=u,
+                gk=gi,
+                initial_state=initial_state,
+                cu_seqlens=cu_seqlens,
+                chunk_size=chunk_size,
+                chunk_indices=ctx.chunk_indices,
+            )
+            del u
+            # ******* end of recomputation *******
         # A_ak, A_ab_inv, gi, ge torch.float32
         # A_qk, A_qb, qg, kg, ag, bg, v_new dtype=q.dtype, eg: bf16
 
@@ -182,7 +352,25 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
             scale=scale,
             cu_seqlens=cu_seqlens,
             chunk_size=chunk_size,
+            chunk_indices=ctx.chunk_indices,
         )
+
+        if cp_context is not None:
+            dht, initial_state = chunk_gated_delta_rule_bwd_dhu_pre_process(
+                q=qg,
+                k=kg,
+                w=w,
+                do=do,
+                dv=dv_new_intra,
+                gk=gi,
+                bg=bg,
+                scale=1.0,
+                cu_seqlens=cu_seqlens,
+                dht=dht,
+                initial_state=initial_state,
+                context=cp_context,
+                chunk_size=chunk_size,
+            )
 
         dh, dh0, dv_new = chunk_dplr_bwd_dhu(
             qg=qg,
@@ -195,6 +383,7 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
             dv=dv_new_intra,
             cu_seqlens=cu_seqlens,
             chunk_size=chunk_size,
+            chunk_indices=ctx.chunk_indices,
         )
 
         dv = chunk_dplr_bwd_dv(
@@ -204,6 +393,7 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
             dh=dh,
             cu_seqlens=cu_seqlens,
             chunk_size=chunk_size,
+            chunk_indices=ctx.chunk_indices,
         )
         del A_qk
 
@@ -221,6 +411,7 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
             cu_seqlens=cu_seqlens,
             chunk_size=chunk_size,
             scale=scale,
+            chunk_indices=ctx.chunk_indices,
         )
         del v_new
 
@@ -234,6 +425,7 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
             dv0=dv,
             cu_seqlens=cu_seqlens,
             chunk_size=chunk_size,
+            chunk_indices=ctx.chunk_indices,
         )
         del A_ak
 
@@ -256,11 +448,17 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
             chunk_size=chunk_size,
             scale=scale,
             cu_seqlens=cu_seqlens,
+            safe_gate=ctx.safe_gate,
+            chunk_indices=ctx.chunk_indices,
         )
 
-        return dq.to(q), dk.to(k), dv.to(v), da.to(a), db.to(b), dgk.to(gk), None, dh0, None, None
+        return (
+            dq.to(q), dk.to(k), dv.to(v), da.to(a), db.to(b), dgk.to(gk),
+            None, dh0, None, None, None, None, None, None, None, None,
+        )
 
 
+@dispatch('generalized_delta_rule.dplr')
 @torch.compiler.disable
 def chunk_dplr_delta_rule(
     q: torch.Tensor,
@@ -273,7 +471,13 @@ def chunk_dplr_delta_rule(
     initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
-    head_first: bool = False,
+    cu_seqlens_cpu: torch.LongTensor | None = None,
+    safe_gate: bool = False,
+    chunk_size: int | None = None,
+    disable_recompute: bool = False,
+    cp_context: FLACPContext | None = None,
+    lower_bound: float | None = None,
+    **kwargs,
 ):
     r"""
     Args:
@@ -288,9 +492,9 @@ def chunk_dplr_delta_rule(
         b (torch.Tensor):
             betas of shape `[B, T, H, K]`.
         gk (torch.Tensor):
-            gk of shape `[B, T, H, K]`. decay term in log space!
+            gk of shape `[B, T, H, K]`. Decay term in log space.
         scale (Optional[float]):
-            Scale factor for the RetNet attention scores.
+            Scale factor for the attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         initial_state (Optional[torch.Tensor]):
             Initial state of shape `[N, H, K, V]` for `N` input sequences.
@@ -301,9 +505,26 @@ def chunk_dplr_delta_rule(
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
-        head_first (Optional[bool]):
-            Whether the inputs are in the head-first format. Default: `False`.
-            This argument has been deprecated.
+        cu_seqlens_cpu (torch.LongTensor):
+            CPU copy of `cu_seqlens` to avoid unnecessary device synchronization. Default: `None`.
+        safe_gate (Optional[bool]):
+            Whether the kernel can assume the input gate values `g` are in a safe range.
+            When `True`, the kernel can use M=16 TensorCore acceleration.
+            The safe range is approximately `[-5, 0)`. Default: `False`.
+        chunk_size (Optional[int]):
+            Chunk size for the chunked computation. Default: `None`, which means 64
+            when `lower_bound` is given and `gate_bound_is_safe(lower_bound, 64)`
+            holds, and 16 otherwise.
+        disable_recompute (Optional[bool]):
+            Whether to disable gradient recomputation in the kernel. Default: `False`.
+        cp_context (Optional[FLACPContext]):
+            Context parallel context for distributed training across multiple devices.
+            When provided, `initial_state` and `output_final_state` are not supported.
+            Default: `None`.
+        lower_bound (Optional[float]):
+            When set, asserts `lower_bound <= gk < 0` (the caller is responsible for
+            the guarantee). Licenses the same tensor-core scheme as `safe_gate=True`
+            when the bound fits the chunk size. Default: `None`.
 
     Returns:
         o (torch.Tensor):
@@ -311,18 +532,6 @@ def chunk_dplr_delta_rule(
         final_state (torch.Tensor):
             Final state of shape `[N, H, K, V]` if `output_final_state=True` else `None`.
     """
-    if head_first:
-        raise DeprecationWarning(
-            "head_first is deprecated and will be removed in a future version. "
-            "Please use head_first=False for now instead.",
-        )
-    if not head_first and q.shape[1] < q.shape[2]:
-        warnings.warn(
-            f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
-            "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
-            "when head_first=False was specified. "
-            "Please verify your input tensor format matches the expected shape [B, T, H, ...].",
-        )
     if q.dtype == torch.float32:
         warnings.warn(
             """ChunkDeltaRuleFunction does not support float32 on some platforms. Please use bfloat16/float16.
@@ -330,6 +539,19 @@ def chunk_dplr_delta_rule(
             category=RuntimeWarning,
             stacklevel=2,
         )
+    if 'head_first' in kwargs:
+        raise DeprecationWarning(
+            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
+        )
+    if lower_bound is not None and lower_bound >= 0:
+        raise ValueError(f"`lower_bound` must be negative (gk is a log-decay < 0), got {lower_bound}.")
+    if cp_context is not None:
+        assert initial_state is None, "Initial state is not supported for CP"
+        assert output_final_state is False, "Output final state is not supported for CP"
+        assert cp_context.cu_seqlens is not None, "cu_seqlens is required for CP"
+        cu_seqlens = cp_context.cu_seqlens
+        if cp_context.cu_seqlens_cpu is not None:
+            cu_seqlens_cpu = cp_context.cu_seqlens_cpu
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(
@@ -353,5 +575,11 @@ def chunk_dplr_delta_rule(
         initial_state,
         output_final_state,
         cu_seqlens,
+        cu_seqlens_cpu,
+        safe_gate,
+        lower_bound,
+        chunk_size,
+        disable_recompute,
+        cp_context,
     )
     return o, final_state

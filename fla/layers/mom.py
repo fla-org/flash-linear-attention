@@ -1,3 +1,9 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 from __future__ import annotations
 
@@ -17,7 +23,17 @@ if TYPE_CHECKING:
 
     from fla.models.utils import Cache
 
-from fla.layers.utils import get_unpad_data, index_first_axis, pad_input, unpad_input
+from fla.layers.utils import (
+    get_layer_cache,
+    get_unpad_data,
+    get_unpad_indices_and_cu,
+    index_first_axis,
+    pad_input,
+    repad_hidden_states,
+    unpad_hidden_states,
+    unpad_input,
+    update_layer_cache,
+)
 
 
 def _upad_input(
@@ -256,15 +272,15 @@ def reconstruct(
 
     assert (indices >= 0).all(), "Indices should be non-negative"
 
-    resortd_x = torch.zeros((b * s * k, d), device=gathered_x.device, dtype=gathered_x.dtype).scatter_add_(
+    resorted_x = torch.zeros((b * s * k, d), device=gathered_x.device, dtype=gathered_x.dtype).scatter_add_(
         0,
         indices.reshape(-1).unsqueeze(-1).expand(-1, d),
         gathered_x,
     )
-    assert (indices < resortd_x.size(0)).all(), "Indices should be less than resortd_x size"
+    assert (indices < resorted_x.size(0)).all(), "Indices should be less than resorted_x size"
 
     inverse_indices = sorted_indices.argsort()
-    rearranged_x_flat = resortd_x[inverse_indices]
+    rearranged_x_flat = resorted_x[inverse_indices]
     restored_x = rearranged_x_flat.reshape((b, s * k, d))
     restored_x = restored_x.reshape(b, s, k, d) * routing_weights.reshape(b, s, k).unsqueeze(-1)
     restored_x = restored_x.sum(dim=2)
@@ -273,7 +289,9 @@ def reconstruct(
 
 class MomAttention(nn.Module):
     """
-    The layer implementaion for [MoM: Linear Sequence Modeling with Mixture-of-Memories](https://arxiv.org/abs/2502.13685).
+    The layer implementation for [MoM: Linear Sequence Modeling with Mixture-of-Memories](https://arxiv.org/abs/2502.13685).
+
+    Set `fuse_conv_l2=True` to fuse Q/K convolution and L2 normalization in chunk mode. Default: `False`.
     """
 
     def __init__(
@@ -289,12 +307,12 @@ class MomAttention(nn.Module):
         conv_bias: bool = False,
         layer_idx: int = None,
         norm_eps: float = 1e-5,
-        fuse_conv_l2: bool = True,
         num_memories: int = 8,
         topk: int = 2,
         capacity: float = 1.0,
         shared_mem: bool = False,
         single_kv_proj: bool = False,
+        fuse_conv_l2: bool = False,
         **kwargs,
     ) -> MomAttention:
         super().__init__()
@@ -311,21 +329,23 @@ class MomAttention(nn.Module):
 
         self.use_output_gate = use_output_gate
         self.use_short_conv = use_short_conv
+        self.fuse_conv_l2 = fuse_conv_l2 and use_short_conv
         self.conv_size = conv_size
         self.conv_bias = conv_bias
-        self.fuse_conv_l2 = fuse_conv_l2 and self.use_short_conv
 
         self.head_dim = head_dim
         self.num_heads = num_heads
 
         self.key_dim = int(self.num_heads * self.head_dim)
-        self.value_dim = int(self.key_dim * self.expand_v)
+        value_dim, head_v_dim = self.key_dim * self.expand_v, head_dim * self.expand_v
+        self.value_dim, self.head_v_dim = round(value_dim), round(head_v_dim)
+        assert math.isclose(value_dim, self.value_dim), f"`key_dim * expand_v` must be an integer, got {value_dim}."
+        assert math.isclose(head_v_dim, self.head_v_dim), f"`head_dim * expand_v` must be an integer, got {head_v_dim}."
         self.head_qk_dim = head_dim
-        self.head_v_dim = int(head_dim * self.expand_v)
         self.layer_idx = layer_idx
         self.silu = nn.SiLU()
 
-        assert mode in ['chunk', 'fused_recurrent'], f"Not suppoerted mode `{mode}`."
+        assert mode in ['chunk', 'fused_recurrent'], f"Not supported mode `{mode}`."
 
         self.q_proj = nn.Linear(hidden_size, self.key_dim, bias=False)
         self.gate = nn.Linear(self.hidden_size, self.num_memories, bias=False)
@@ -384,7 +404,6 @@ class MomAttention(nn.Module):
                 bias=conv_bias,
                 activation='silu',
                 norm='l2' if self.fuse_conv_l2 else None,
-                norm_eps=norm_eps,
             )
             self.k_conv1d = ShortConvolution(
                 hidden_size=self.key_dim,
@@ -392,7 +411,6 @@ class MomAttention(nn.Module):
                 bias=conv_bias,
                 activation='silu',
                 norm='l2' if self.fuse_conv_l2 else None,
-                norm_eps=norm_eps,
             )
             self.v_conv1d = ShortConvolution(
                 hidden_size=self.value_dim,
@@ -409,7 +427,7 @@ class MomAttention(nn.Module):
             self.g_proj = nn.Linear(hidden_size, self.value_dim, bias=False)
             self.o_norm = FusedRMSNormGated(self.head_v_dim, eps=norm_eps)
         else:
-            self.o_norm = RMSNorm(self.head_v_dim, eps=norm_eps)
+            self.o_norm = RMSNorm(self.head_v_dim, eps=norm_eps, dtype=torch.float32)
         self.o_proj = nn.Linear(self.value_dim, hidden_size, bias=False)
         self.apply(self._initialize_weights)
 
@@ -443,14 +461,17 @@ class MomAttention(nn.Module):
         if origin_cu_seqlens is not None:
             hidden_states, attention_mask = self.cu2pad(hidden_states, origin_cu_seqlens)
 
-        mode = 'fused_recurrent' if (hidden_states.shape[1] <= 64 and not self.training) else self.mode
+        if torch.is_grad_enabled():
+            mode = 'chunk'
+        elif hidden_states.shape[1] <= 64 and not self.training:
+            mode = 'fused_recurrent'
+        else:
+            mode = self.mode
         if self.training:
             assert mode == 'chunk', "Only chunk mode is supported in training."
 
-        last_state = None
+        last_state = get_layer_cache(self, past_key_values)
         # _, q_len = hidden_states.shape[0], hidden_states.shape[1]
-        if past_key_values is not None and len(past_key_values) > self.layer_idx:
-            last_state = past_key_values[self.layer_idx]
 
         # 🔍 topk gating
         router_logits = self.gate(hidden_states)  # (bsz, q_len, num_memories)
@@ -494,6 +515,7 @@ class MomAttention(nn.Module):
         cu_seqlens, reverse_indices = cu_seqlen_all[0].to(torch.long).unique(return_inverse=True)
         cu_q, cu_k, cu_v, cu_g, cu_beta = (x.unsqueeze(0).contiguous() for x in (cu_q, cu_k, cu_v, cu_g, cu_beta))
 
+        use_conv_l2 = self.fuse_conv_l2 and mode == 'chunk'
         if self.use_short_conv:
             conv_state_q, conv_state_k, conv_state_v = [None, None], [None, None], [None, None]
             if last_state is not None:
@@ -519,7 +541,8 @@ class MomAttention(nn.Module):
                 cache=conv_q,
                 output_final_state=use_cache,
                 cu_seqlens=conv_cu_seqlens,
-                head_dim=self.head_qk_dim if self.fuse_conv_l2 else None,
+                head_dim=self.head_qk_dim,
+                use_norm=use_conv_l2,
             )
             conv_state_q[0] = self.handle_recurrent_state(
                 conv_state_q[0],
@@ -540,7 +563,8 @@ class MomAttention(nn.Module):
                 cache=conv_k,
                 output_final_state=use_cache,
                 cu_seqlens=conv_cu_seqlens,
-                head_dim=self.head_qk_dim if self.fuse_conv_l2 else None,
+                head_dim=self.head_qk_dim,
+                use_norm=use_conv_l2,
             )
             conv_state_k[0] = self.handle_recurrent_state(
                 conv_state_k[0],
@@ -588,7 +612,8 @@ class MomAttention(nn.Module):
                 beta=cu_beta,
                 initial_state=recurrent_state[0],
                 output_final_state=use_cache,
-                use_qk_l2norm_in_kernel=not self.fuse_conv_l2,
+                use_qk_l2norm_in_kernel=not use_conv_l2,
+                state_v_first=True,
                 cu_seqlens=cu_seqlens,
             )
             recurrent_state[0] = self.handle_recurrent_state(
@@ -613,7 +638,8 @@ class MomAttention(nn.Module):
                 beta=cu_beta,
                 initial_state=memories,
                 output_final_state=use_cache,
-                use_qk_l2norm_in_kernel=not self.fuse_conv_l2,
+                use_qk_l2norm_in_kernel=True,
+                state_v_first=True,
                 cu_seqlens=cu_seqlens,
             )
             recurrent_state[0] = self.handle_recurrent_state(
@@ -636,13 +662,13 @@ class MomAttention(nn.Module):
                                      use_cache, conv_state_q, conv_state_k, conv_state_v)
             o += shared_o
 
-        if past_key_values is not None:
-            past_key_values.update(
-                recurrent_state=recurrent_state,
-                conv_state=(conv_state_q, conv_state_k, conv_state_v) if self.use_short_conv else None,
-                layer_idx=self.layer_idx,
-                offset=q.shape[2],
-            )
+        update_layer_cache(
+            self,
+            past_key_values,
+            recurrent_state=recurrent_state,
+            conv_state=(conv_state_q, conv_state_k, conv_state_v) if self.use_short_conv else None,
+            offset=q.shape[2],
+        )
 
         if self.use_output_gate:
             g = rearrange(self.g_proj(shared_hidden_states), '... (h d) -> ... h d', d=self.head_v_dim)
@@ -653,7 +679,7 @@ class MomAttention(nn.Module):
         o = self.o_proj(o)
 
         if origin_cu_seqlens is not None:
-            indices, _, _ = get_unpad_data(attention_mask[:, -seq_len:])
+            indices, _ = get_unpad_indices_and_cu(attention_mask, seq_len)
             o = index_first_axis(rearrange(o, "b s ... -> (b s) ..."), indices).unsqueeze(0)
 
         return o, None, past_key_values, router_logits.view(-1, self.num_memories)
@@ -676,30 +702,36 @@ class MomAttention(nn.Module):
                 "Arbitrary attention masks of shape [batch_size, seq_len, seq_len] are not allowed."
             )
 
-        mode = 'fused_recurrent' if hidden_states.shape[1] <= 64 else self.mode
+        if torch.is_grad_enabled():
+            mode = 'chunk'
+        elif hidden_states.shape[1] <= 64 and not self.training:
+            mode = 'fused_recurrent'
+        else:
+            mode = self.mode
         if self.training:
             assert mode == 'chunk', "Only chunk mode is supported in training."
 
-        cu_seqlens = None
-        if attention_mask is not None:
-            batch_size, q_len = hidden_states.shape[0], hidden_states.shape[1]
-            indices, cu_seqlens, _ = get_unpad_data(attention_mask[:, -q_len:])
-            hidden_states = index_first_axis(rearrange(hidden_states, "b s ... -> (b s) ..."), indices).unsqueeze(0)
+        cu_seqlens = kwargs.get('cu_seqlens')
+        batch_size, q_len = hidden_states.shape[0], hidden_states.shape[1]
+        hidden_states, indices, cu_seqlens = unpad_hidden_states(hidden_states, cu_seqlens, attention_mask, q_len)
 
+        use_conv_l2 = self.fuse_conv_l2 and mode == 'chunk'
         if self.use_short_conv:
             q, conv_state_q[1] = self.q_conv1d(
                 x=self.q_proj(hidden_states),
                 cache=conv_state_q[1],
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
-                head_dim=self.head_qk_dim if self.fuse_conv_l2 else None,
+                head_dim=self.head_qk_dim,
+                use_norm=use_conv_l2,
             )
             k, conv_state_k[1] = self.k_conv1d(
                 x=self.shared_k(hidden_states),
                 cache=conv_state_k[1],
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
-                head_dim=self.head_qk_dim if self.fuse_conv_l2 else None,
+                head_dim=self.head_qk_dim,
+                use_norm=use_conv_l2,
             )
             v, conv_state_v[1] = self.v_conv1d(
                 x=self.shared_v(hidden_states),
@@ -725,8 +757,9 @@ class MomAttention(nn.Module):
                 beta=beta,
                 initial_state=recurrent_state[-1],
                 output_final_state=use_cache,
+                use_qk_l2norm_in_kernel=not use_conv_l2,
+                state_v_first=True,
                 cu_seqlens=cu_seqlens,
-                use_qk_l2norm_in_kernel=not self.fuse_conv_l2,
             )
         elif mode == 'fused_recurrent':
             o, recurrent_state[-1] = fused_recurrent_gated_delta_rule(
@@ -737,14 +770,14 @@ class MomAttention(nn.Module):
                 beta=beta,
                 initial_state=recurrent_state[-1],
                 output_final_state=use_cache,
+                use_qk_l2norm_in_kernel=True,
+                state_v_first=True,
                 cu_seqlens=cu_seqlens,
-                use_qk_l2norm_in_kernel=not self.fuse_conv_l2,
             )
         else:
             raise NotImplementedError(f"Not supported mode `{mode}`.")
 
-        if attention_mask is not None:
-            o = pad_input(o.squeeze(0), indices, batch_size, q_len)
+        o = repad_hidden_states(o, indices, batch_size, q_len)
         return o
 
     def cu2pad(self, x, cu_seqlens):

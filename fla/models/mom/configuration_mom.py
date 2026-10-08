@@ -1,9 +1,16 @@
-
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 from transformers.configuration_utils import PretrainedConfig
 
+from fla.models.hybrid import HybridAttentionConfig, _HybridAttentionConfigMixin
 
-class MomConfig(PretrainedConfig):
+
+class MomConfig(_HybridAttentionConfigMixin, PretrainedConfig):
     model_type = 'mom'
     keys_to_ignore_at_inference = ['past_key_values']
 
@@ -23,7 +30,7 @@ class MomConfig(PretrainedConfig):
         hidden_act: str = "swish",
         num_hidden_layers: int = 24,
         norm_eps: float = 1e-6,
-        attn: dict | None = None,
+        attn: HybridAttentionConfig = None,
         use_cache: bool = True,
         pad_token_id: int | None = None,
         bos_token_id: int = 1,
@@ -41,8 +48,9 @@ class MomConfig(PretrainedConfig):
         fuse_norm: bool = True,
         fuse_swiglu: bool = True,
         fuse_cross_entropy: bool = True,
-        fuse_conv_l2: bool = True,
         vocab_size: int = 32000,
+        attnres_block_size: int | None = None,
+        fuse_conv_l2: bool = False,
         **kwargs,
     ):
         self.attn_mode = attn_mode
@@ -53,6 +61,7 @@ class MomConfig(PretrainedConfig):
         self.conv_size = conv_size
         self.use_output_gate = use_output_gate
         self.use_short_conv = use_short_conv
+        self.fuse_conv_l2 = fuse_conv_l2
         self.max_position_embeddings = max_position_embeddings
 
         self.hidden_ratio = hidden_ratio
@@ -76,21 +85,18 @@ class MomConfig(PretrainedConfig):
         self.fuse_norm = fuse_norm
         self.fuse_swiglu = fuse_swiglu
         self.fuse_cross_entropy = fuse_cross_entropy
-        self.fuse_conv_l2 = fuse_conv_l2
         self.vocab_size = vocab_size
+        self.attnres_block_size = attnres_block_size
 
         if self.mom_backend not in ['gated_deltanet']:
             raise NotImplementedError(f"The MoM backend {mom_backend} is not currently supported.")
 
-        if attn is not None:
-            if not isinstance(attn, dict):
-                raise ValueError("attn must be a dictionary")
-            if 'layers' not in attn:
-                raise ValueError("Layer indices must be provided to initialize hybrid attention layers")
-            if 'num_heads' not in attn:
-                raise ValueError("Number of heads must be provided to initialize hybrid attention layers")
-            attn['num_kv_heads'] = attn.get('num_kv_heads', attn['num_heads'])
-            attn['window_size'] = attn.get('window_size', None)
+        if attnres_block_size is not None and attnres_block_size != 1:
+            if attnres_block_size < 2 or attnres_block_size % 2 != 0:
+                raise ValueError(
+                    "`attnres_block_size` must be `None`, `1` (full mode), or an even integer (one block "
+                    f"contains `attnres_block_size // 2` transformer layers); got {attnres_block_size}."
+                )
 
         super().__init__(
             pad_token_id=pad_token_id,
