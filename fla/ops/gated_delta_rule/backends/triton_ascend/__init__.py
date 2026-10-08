@@ -11,9 +11,10 @@ from __future__ import annotations
 
 import torch
 
-from fla.ops.backends import BaseBackend
+from fla.backends import BaseBackend, register_backend
 
 
+@register_backend('gated_delta_rule')
 class TritonAscendGDNBackend(BaseBackend):
     """Ascend NPU backend for GDN gate and WY-representation kernels."""
 

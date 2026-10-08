@@ -13,7 +13,7 @@ import logging
 
 import torch
 
-from fla.ops.backends import BaseBackend
+from fla.backends import BaseBackend, register_backend
 from fla.utils import (
     find_spec_cached,
     get_device_capability,
@@ -31,6 +31,7 @@ _TILELANG_AVAILABLE = find_spec_cached("tilelang") is not None
 _FALLBACK_LOGGED: set[str] = set()
 
 
+@register_backend('generalized_delta_rule.dplr')
 class DPLRTileLangBackend(BaseBackend):
 
     backend_type = "tilelang"

@@ -7,14 +7,11 @@
 
 """GDR backends."""
 
-from fla.ops.backends import BackendRegistry, dispatch
+from fla.backends import _registry_for
 from fla.ops.gated_delta_rule.backends.flash_qla import FlashQLABackend
 from fla.ops.gated_delta_rule.backends.triton_ascend import TritonAscendGDNBackend
 
-gdr_registry = BackendRegistry("gated_delta_rule")
+gdr_registry = _registry_for('gated_delta_rule')
+dispatch = gdr_registry.dispatch
 
-gdr_registry.register(TritonAscendGDNBackend())
-gdr_registry.register(FlashQLABackend())
-
-
-__all__ = ['dispatch', 'gdr_registry']
+__all__ = ['FlashQLABackend', 'TritonAscendGDNBackend', 'dispatch', 'gdr_registry']

@@ -7,17 +7,19 @@
 
 """Common backends for shared operations like chunk_gated_delta_rule_fwd_h."""
 
-from fla.ops.backends import BackendRegistry, dispatch
+from fla.backends import _registry_for
 from fla.ops.common.backends.intracard import IntraCardCPBackend
-from fla.ops.common.backends.tilelang import TileLangBackend
+from fla.ops.common.backends.tilelang import CommonTileLangBackend, TileLangBackend
 from fla.ops.common.backends.triton_ascend import TritonAscendCommonBackend
 
-common_registry = BackendRegistry("common")
+common_registry = _registry_for('common')
+dispatch = common_registry.dispatch
 
-
-common_registry.register(IntraCardCPBackend())
-common_registry.register(TileLangBackend())
-common_registry.register(TritonAscendCommonBackend())
-
-
-__all__ = ['common_registry', 'dispatch']
+__all__ = [
+    'CommonTileLangBackend',
+    'IntraCardCPBackend',
+    'TileLangBackend',
+    'TritonAscendCommonBackend',
+    'common_registry',
+    'dispatch',
+]

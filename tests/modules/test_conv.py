@@ -1337,7 +1337,7 @@ def test_conv_backend_dispatch(
     local_enable: str,
     W: int,
 ):
-    from fla.ops.backends import _DISPATCH_DISABLED
+    from fla.backends import _DISPATCH_DISABLED
 
     if conv_backend_calls is None:
         pytest.skip('Gluon convolution is unavailable')

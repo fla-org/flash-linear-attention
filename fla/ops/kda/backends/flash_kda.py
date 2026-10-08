@@ -15,12 +15,13 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from fla.ops.backends import BaseBackend
+from fla.backends import BaseBackend, register_backend
 
 if TYPE_CHECKING:
     from fla.ops.cp import FLACPContext
 
 
+@register_backend('kda')
 class FlashKDABackend(BaseBackend):
     """Copyright (c) 2026 Moonshot AI
 
