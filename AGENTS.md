@@ -1,6 +1,6 @@
 # FLA Guidelines
 
-Guidance for coding agents working in this repo.
+Guidance for AI coding agents (Claude Code, Codex, etc.) working in this repo.
 
 **Read `CONTRIBUTING.md` first.** It is the authoritative source for all code style, docstring, comment, commit, PR, and testing conventions, and applies to humans and agents alike. This file only covers agent-specific operational behavior that doesn't belong in a human contributor doc.
 
