@@ -8,104 +8,133 @@
 import pytest
 import torch
 
-from fla.ops.lightnet.gate import fused_lightnet_gate
-from fla.ops.lightnet.naive import naive_lightnet_gate
+from fla.ops.gla.naive import naive_recurrent_gla
+from fla.ops.lightnet import chunk_lightnet, fused_recurrent_lightnet
 from fla.utils import assert_close, device
 
 
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16], ids=["fp32", "fp16", "bf16"])
+def naive_lightnet_gate(
+    x: torch.Tensor,
+    initial_state: torch.Tensor | None,
+    lengths: tuple[int, ...],
+    layout: str,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    sequences = x.unbind(0) if layout == "dense" else x.squeeze(0).split(lengths)
+    keys, gates, final_states = [], [], []
+    for i, sequence in enumerate(sequences):
+        state = initial_state[i] if initial_state is not None else None
+        if sequence.shape[0] == 0:
+            keys.append(sequence)
+            gates.append(sequence)
+            if state is None:
+                state = x.new_full((1, *x.shape[2:]), float("-inf"), dtype=torch.float32)
+            final_states.append(state)
+            continue
+
+        z = sequence.float().logcumsumexp(0)
+        if state is not None:
+            z = torch.logaddexp(state, z)
+            previous = torch.cat([state, z[:-1]], dim=0)
+        else:
+            previous = torch.cat([z[:1], z[:-1]], dim=0)
+        keys.append((sequence.float() - z).exp().to(x.dtype))
+        gates.append(torch.nan_to_num(previous - z, nan=0.0, posinf=0.0, neginf=0.0).to(x.dtype))
+        final_states.append(z[-1:])
+
+    if layout == "dense":
+        k, g = torch.stack(keys), torch.stack(gates)
+    else:
+        k, g = torch.cat(keys).unsqueeze(0), torch.cat(gates).unsqueeze(0)
+    return k, g, torch.stack(final_states)
+
+
+@pytest.mark.parametrize("impl", [chunk_lightnet, fused_recurrent_lightnet], ids=["chunk", "fused-recurrent"])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16], ids=["fp16", "bf16"])
 @pytest.mark.parametrize(
-    ("layout", "lengths", "state_mode", "H", "K"),
+    ("layout", "lengths", "use_initial_state", "state_v_first", "output_final_state"),
     [
-        pytest.param("dense", (1, 1), "cold", 2, 17, id="dense-singleton-cold"),
-        pytest.param("dense", (33, 33), "cold", 1, 32, id="dense-T33-cold"),
-        pytest.param("dense", (65, 65), "warm", 2, 17, id="dense-T65-warm"),
-        pytest.param("dense", (1024, 1024), "warm", 3, 64, id="dense-T1024-warm"),
-        pytest.param("dense", (0, 0, 0), "cold", 2, 17, id="dense-empty-cold"),
-        pytest.param("dense", (0, 0, 0), "mixed", 2, 17, id="dense-empty-mixed-cache"),
-        pytest.param("packed", (0, 1, 31, 32, 33, 0, 63, 64, 65, 0), "cold", 2, 17, id="varlen-boundaries-cold"),
-        pytest.param("packed", (0, 1, 31, 32, 33, 0, 63, 64, 65, 0), "warm", 2, 17, id="varlen-boundaries-warm"),
-        pytest.param("packed", (0, 1, 31, 32, 33, 0, 63, 64, 65, 0), "mixed", 2, 17, id="varlen-mixed-cache"),
-        pytest.param("packed", (0, 0, 0), "cold", 2, 17, id="varlen-empty-cold"),
-        pytest.param("packed", (0, 0, 0), "mixed", 2, 17, id="varlen-empty-mixed-cache"),
-        pytest.param("packed", (1024, 1, 0, 65), "mixed", 2, 17, id="varlen-T1024-mixed-cache"),
+        pytest.param("dense", (1, 1), False, False, False, id="dense-singleton-cold"),
+        pytest.param("dense", (65, 65), True, True, True, id="dense-T65-warm"),
+        pytest.param("packed", (0, 1, 33, 65, 0), False, False, True, id="varlen-cold"),
+        pytest.param("packed", (0, 1, 65, 0), True, True, True, id="varlen-warm"),
     ],
 )
-def test_fused_gate(dtype: torch.dtype, layout: str, lengths: tuple[int, ...], state_mode: str, H: int, K: int):
+def test_chunk(
+    impl,
+    dtype: torch.dtype,
+    layout: str,
+    lengths: tuple[int, ...],
+    use_initial_state: bool,
+    state_v_first: bool,
+    output_final_state: bool,
+):
     torch.manual_seed(42)
-    N = len(lengths)
+    N, H, K, V = len(lengths), 2, 32, 16
     B, T = (N, lengths[0]) if layout == "dense" else (1, sum(lengths))
-    x = torch.randn(B, T, H, K, device=device, dtype=dtype, requires_grad=True)
-    reference_x = x.detach().clone().requires_grad_()
-    initial_state = None
-    if state_mode != "cold":
-        initial_state = torch.randn(N, 1, H, K, device=device, dtype=torch.float32) + 2
-        if state_mode == "mixed":
-            initial_state[::2] = float("-inf")
-        initial_state.requires_grad_()
-    reference_state = initial_state.detach().clone().requires_grad_() if initial_state is not None else None
+    q = torch.randn(B, T, H, K, device=device, dtype=dtype, requires_grad=True)
+    k = torch.randn(B, T, H, K, device=device, dtype=dtype, requires_grad=True)
+    v = torch.randn(B, T, H, V, device=device, dtype=dtype, requires_grad=True)
+    ref_q, ref_k, ref_v = (x.detach().clone().requires_grad_() for x in (q, k, v))
+    h0, z0 = None, None
+    if use_initial_state:
+        state_shape = (N, H, V, K) if state_v_first else (N, H, K, V)
+        h0 = torch.randn(state_shape, device=device, dtype=torch.float32, requires_grad=True)
+        z0 = (torch.randn(N, 1, H, K, device=device, dtype=torch.float32) + 2).requires_grad_()
+    ref_h0 = h0.detach().clone().requires_grad_() if h0 is not None else None
+    ref_z0 = z0.detach().clone().requires_grad_() if z0 is not None else None
     cu_seqlens = None
     if layout == "packed":
         cu_seqlens = torch.tensor((0, *lengths), device=device, dtype=torch.int32).cumsum(0, dtype=torch.int32)
 
-    actual = fused_lightnet_gate(x=x, initial_state=initial_state, cu_seqlens=cu_seqlens)
-    expected = naive_lightnet_gate(x=reference_x, initial_state=reference_state, lengths=lengths, layout=layout)
-    tol = {torch.float32: 1e-3, torch.float16: 5e-3, torch.bfloat16: 2e-2}[dtype]
-    for name, reference, result in zip(("k", "g"), expected[:2], actual[:2]):
-        assert result.shape == x.shape
-        assert result.dtype == dtype
-        assert torch.isfinite(result).all()
-        if reference.numel():
-            assert_close(name, reference, result, tol)
-
-    assert actual[2].shape == (N, 1, H, K)
-    assert actual[2].dtype == torch.float32
-    assert torch.equal(torch.isneginf(actual[2]), torch.isneginf(expected[2]))
-    finite = torch.isfinite(expected[2])
-    if finite.any():
-        assert_close("final_state", expected[2][finite], actual[2][finite], tol)
-
-    gradients = [torch.randn_like(output) for output in expected]
-    assert all(output.requires_grad for output in actual[:2])
-    if x.numel() or initial_state is not None:
-        assert actual[2].requires_grad
-    # direct upstream gradients also exercise identity state propagation through empty sequences.
-    for outputs in (actual, expected):
-        differentiable = [(output, grad) for output, grad in zip(outputs, gradients) if output.requires_grad]
-        torch.autograd.backward([output for output, _ in differentiable], [grad for _, grad in differentiable])
-    assert x.grad is not None
-    assert torch.isfinite(x.grad).all()
-    if x.numel():
-        assert_close("dx", reference_x.grad, x.grad, tol)
-    if initial_state is not None:
-        assert torch.equal(initial_state, reference_state)
-        assert initial_state.grad is not None
-        assert torch.isfinite(initial_state.grad).all()
-        assert_close("dinitial_state", reference_state.grad, initial_state.grad, tol)
-
-
-@pytest.mark.parametrize("output", [0, 1, 2], ids=["keys", "gates", "final-state"])
-def test_fused_gate_partial_backward(output: int):
-    torch.manual_seed(42)
-    lengths = (0, 1, 33, 0, 1)
-    x = torch.randn(1, sum(lengths), 2, 17, device=device, dtype=torch.float32, requires_grad=True)
-    initial_state = torch.randn(len(lengths), 1, 2, 17, device=device, dtype=torch.float32) + 2
-    initial_state[::2] = float('-inf')
-    initial_state.requires_grad_()
-    reference_x = x.detach().clone().requires_grad_()
-    reference_state = initial_state.detach().clone().requires_grad_()
-    cu_seqlens = torch.tensor((0, *lengths), device=device, dtype=torch.int32).cumsum(0, dtype=torch.int32)
-
-    actual = fused_lightnet_gate(x=x, initial_state=initial_state, cu_seqlens=cu_seqlens)
-    expected = naive_lightnet_gate(x=reference_x, initial_state=reference_state, lengths=lengths, layout="packed")
-    gradient = torch.randn_like(actual[output])
-    dx, dstate = torch.autograd.grad(actual[output], (x, initial_state), grad_outputs=gradient)
-    reference_dx, reference_dstate = torch.autograd.grad(
-        outputs=expected[output],
-        inputs=(reference_x, reference_state),
-        grad_outputs=gradient,
+    ref_keys, ref_gates, ref_zt = naive_lightnet_gate(x=ref_k, initial_state=ref_z0, lengths=lengths, layout=layout)
+    ref_outputs, ref_states = [], []
+    start = 0
+    for i, length in enumerate(lengths):
+        index = (slice(i, i + 1), slice(None)) if layout == "dense" else (slice(None), slice(start, start + length))
+        state = ref_h0[i:i + 1] if ref_h0 is not None else None
+        if state_v_first:
+            state = state.transpose(-1, -2)
+        ref_o, ref_ht = naive_recurrent_gla(
+            q=ref_q[index],
+            k=ref_keys[index],
+            v=ref_v[index],
+            gk=ref_gates[index],
+            initial_state=state,
+            output_final_state=output_final_state,
+        )
+        ref_outputs.append(ref_o)
+        if output_final_state:
+            ref_states.append(ref_ht.transpose(-1, -2) if state_v_first else ref_ht)
+        start += length
+    ref_o = torch.cat(ref_outputs, dim=0 if layout == "dense" else 1)
+    ref_ht = torch.cat(ref_states, dim=0) if output_final_state else None
+    o, (ht, zt) = impl(
+        q=q,
+        k=k,
+        v=v,
+        initial_state=(h0, z0) if use_initial_state else None,
+        output_final_state=output_final_state,
+        state_v_first=state_v_first,
+        cu_seqlens=cu_seqlens,
     )
-    assert torch.isfinite(dx).all()
-    assert torch.isfinite(dstate).all()
-    assert_close("dx", reference_dx, dx, 1e-3)
-    assert_close("dinitial_state", reference_dstate, dstate, 1e-3)
+
+    tol = {torch.float16: 5e-3, torch.bfloat16: 2e-2}[dtype]
+    assert_close("o", ref_o, o, tol)
+    assert torch.equal(torch.isneginf(ref_zt), torch.isneginf(zt))
+    finite = torch.isfinite(ref_zt)
+    assert_close("zt", ref_zt[finite], zt[finite], tol)
+    ref_outputs, outputs = [ref_o, ref_zt], [o, zt]
+    if output_final_state:
+        assert_close("ht", ref_ht, ht, tol)
+        ref_outputs.append(ref_ht)
+        outputs.append(ht)
+    else:
+        assert ht is None
+    gradients = [torch.randn_like(output) for output in outputs]
+    torch.autograd.backward(ref_outputs, gradients)
+    torch.autograd.backward(outputs, gradients)
+    for name, ref, actual in zip(("dq", "dk", "dv"), (ref_q, ref_k, ref_v), (q, k, v)):
+        assert_close(name, ref.grad, actual.grad, tol)
+    if use_initial_state:
+        assert_close("dh0", ref_h0.grad, h0.grad, tol)
+        assert_close("dz0", ref_z0.grad, z0.grad, tol)

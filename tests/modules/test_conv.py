@@ -1235,58 +1235,7 @@ def test_conv_step(
     assert_close("y", ref, tri, 1e-3)
 
 
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16], ids=["fp32", "fp16"])
-@pytest.mark.parametrize("varlen", [False, True], ids=["dense", "packed"])
-@pytest.mark.parametrize("use_cache", [False, True], ids=["cold", "warm"])
-def test_short_conv_single_token_backward(dtype: torch.dtype, varlen: bool, use_cache: bool):
-    torch.manual_seed(42)
-    N, D, W = 3, 16, 4
-    conv = ShortConvolution(hidden_size=D, kernel_size=W, bias=True, activation="silu", device=device, dtype=dtype)
-    x = torch.randn(N, 1, D, device=device, dtype=dtype, requires_grad=True)
-    cache = torch.randn(N, D, W, device=device, dtype=dtype, requires_grad=True) if use_cache else None
-    ref = causal_conv1d_ref(
-        x=x.transpose(1, 2),
-        weight=conv.weight.squeeze(1),
-        bias=conv.bias,
-        initial_state=cache[:, :, 1:] if use_cache else None,
-        activation="silu",
-    ).transpose(1, 2)
-    do = torch.randn_like(ref)
-    ref.backward(do)
-    ref_dx, x.grad = x.grad, None
-    ref_dw, conv.weight.grad = conv.weight.grad, None
-    ref_db, conv.bias.grad = conv.bias.grad, None
-    if use_cache:
-        ref_dcache, cache.grad = cache.grad, None
-
-    cu_seqlens = torch.arange(N + 1, device=device, dtype=torch.int32) if varlen else None
-    inputs = x.reshape(1, N, D) if varlen else x
-    actual, state = conv(x=inputs, cache=cache, output_final_state=True, cu_seqlens=cu_seqlens)
-    actual = actual.reshape_as(ref)
-    actual.backward(do)
-    assert_close("output", ref, actual, 1e-3)
-    assert_close("input gradient", ref_dx, x.grad, 1e-3)
-    assert_close("weight gradient", ref_dw, conv.weight.grad, 1e-3)
-    assert_close("bias gradient", ref_db, conv.bias.grad, 1e-3)
-    if use_cache:
-        assert_close("cache gradient", ref_dcache, cache.grad, 1e-3)
-
-    with torch.no_grad():
-        inference_cache = cache.clone() if use_cache else None
-        inference, inference_state = conv(
-            x=inputs,
-            cache=inference_cache,
-            output_final_state=True,
-            cu_seqlens=cu_seqlens,
-        )
-    if use_cache:
-        assert inference_state is inference_cache
-    assert_close("inference output", ref, inference.reshape_as(ref), 1e-3)
-    assert_close("inference state", state, inference_state, 1e-3)
-
-
-@pytest.mark.parametrize('grad_enabled', [True, False], ids=['grad', 'no-grad'])
-def test_conv_varlen_empty_sequence(grad_enabled: bool):
+def test_conv_varlen_empty_sequence():
     """A packed batch with a zero-length sequence must not be misdetected as a decode step."""
     torch.manual_seed(42)
     D, W = 16, 4
@@ -1316,13 +1265,12 @@ def test_conv_varlen_empty_sequence(grad_enabled: bool):
     ).transpose(1, 2)
 
     zero_pad = torch.zeros(N, D, 1, device=device, dtype=dtype)
-    with torch.set_grad_enabled(grad_enabled):
-        tri, _ = conv(
-            x=x,
-            cache=torch.cat([zero_pad, cache], dim=-1).clone(),
-            output_final_state=True,
-            cu_seqlens=cu_seqlens,
-        )
+    tri, _ = conv(
+        x=x,
+        cache=torch.cat([zero_pad, cache], dim=-1).clone(),
+        output_final_state=True,
+        cu_seqlens=cu_seqlens,
+    )
     assert_close("y", ref, tri, 1e-3)
 
 

@@ -19,8 +19,7 @@ from einops import rearrange
 from fla.layers.utils import get_layer_cache, repad_hidden_states, unpad_hidden_states, update_layer_cache
 from fla.modules import FusedRMSNormGated, ShortConvolution
 from fla.modules.fused_norm_gate import rms_norm_swish_gate_linear
-from fla.ops.gla import chunk_gla, fused_recurrent_gla
-from fla.ops.lightnet.gate import fused_lightnet_gate
+from fla.ops.lightnet import chunk_lightnet, fused_recurrent_lightnet
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
@@ -167,34 +166,22 @@ class LightNetAttention(nn.Module):
         q = F.silu(q)
         q, k = map(lambda x: rearrange(x, '... (h d) -> ... h d', d=self.head_f_dim), (q, k))
         v = rearrange(v, '... (h d) -> ... h d', d=self.head_i_dim)
-        last_z = last_state['ffn_state'] if last_state is not None and last_state.get('ffn_state') is not None else None
-        k, g, last_z = fused_lightnet_gate(x=k, initial_state=last_z, cu_seqlens=cu_seqlens)
-
-        recurrent_state = last_state['recurrent_state'] if last_state is not None else None
         if mode == 'fused_recurrent':
-            o, recurrent_state = fused_recurrent_gla(
-                q=q,
-                k=k,
-                v=v,
-                gk=g,
-                initial_state=recurrent_state,
-                output_final_state=use_cache,
-                state_v_first=True,
-                cu_seqlens=cu_seqlens,
-            )
+            attention_fn = fused_recurrent_lightnet
         elif mode == 'chunk':
-            o, recurrent_state = chunk_gla(
-                q=q,
-                k=k,
-                v=v,
-                g=g,
-                initial_state=recurrent_state,
-                output_final_state=use_cache,
-                state_v_first=True,
-                cu_seqlens=cu_seqlens,
-            )
+            attention_fn = chunk_lightnet
         else:
             raise NotImplementedError(f"Not supported mode `{mode}`.")
+        initial_state = (last_state['recurrent_state'], last_state.get('ffn_state')) if last_state is not None else None
+        o, (recurrent_state, last_z) = attention_fn(
+            q=q,
+            k=k,
+            v=v,
+            initial_state=initial_state,
+            output_final_state=use_cache,
+            state_v_first=True,
+            cu_seqlens=cu_seqlens,
+        )
 
         update_layer_cache(
             self,
