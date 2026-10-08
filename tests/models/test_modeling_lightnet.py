@@ -21,6 +21,7 @@ from .test_modeling_base import run_test_generation, run_test_model_forward_back
     [
         pytest.param(*test, id="L{}-B{}-T{}-H{}-D{}-l2{}-bs{}-{}".format(*test))
         for test in [
+            (2, 2, 79,   2, 32,  False, None, torch.bfloat16),
             (4, 4, 1024, 4, 64,  True,  None, torch.bfloat16),
             (4, 4, 1024, 4, 64,  False, None, torch.bfloat16),
             (4, 4, 1024, 4, 128, False, None, torch.bfloat16),
