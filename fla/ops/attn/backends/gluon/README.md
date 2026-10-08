@@ -30,7 +30,7 @@ The implementation follows the synchronization and layout APIs in the public Tri
 Run correctness checks before collecting timings:
 
 ```bash
-FLA_CI_ENV=0 FLA_TILELANG=0 FLA_ATTN_GLUON=1 FLA_USE_TMA=1 python -m pytest tests/ops/test_attn.py tests/ops/test_attn_gluon.py
+FLA_CI_ENV=0 FLA_TILELANG=0 FLA_ATTN_GLUON=1 FLA_USE_TMA=1 python -m pytest tests/ops/test_attn.py tests/ops/test_backends.py
 FLA_CI_ENV=0 FLA_TILELANG=0 FLA_ATTN_GLUON=1 FLA_USE_TMA=1 python -m benchmarks.ops.verify --op parallel_attn
 ```
 

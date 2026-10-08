@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from fla.ops.attn.backends.gluon import AttnGluonBackend
 from fla.ops.backends import BaseBackend
 from fla.ops.common.backends import tilelang as common_tilelang_backend
 from fla.ops.generalized_delta_rule.dplr.backends import tilelang as dplr_tilelang_backend
@@ -211,3 +212,47 @@ def test_rwkv6_tilelang_backend_verifier_rejects_unsupported_dimension():
 
     assert accepted is False
     assert reason == "TileLang RWKV6 intra backend currently supports the D=64 benchmark bucket only, got K=128"
+
+
+def test_attn_gluon_backend_requires_opt_in(monkeypatch):
+    monkeypatch.delenv('FLA_GLUON', raising=False)
+    monkeypatch.delenv('FLA_ATTN_GLUON', raising=False)
+    assert not AttnGluonBackend.is_enabled()
+    monkeypatch.setenv('FLA_ATTN_GLUON', '1')
+    assert AttnGluonBackend.is_enabled()
+    monkeypatch.setenv('FLA_ATTN_GLUON', '0')
+    monkeypatch.setenv('FLA_GLUON', '1')
+    assert AttnGluonBackend.is_enabled()
+
+
+@pytest.mark.parametrize('method', ['parallel_attn_fwd', 'parallel_attn_bwd', 'attn_decoding_fwd'])
+@pytest.mark.parametrize(
+    ('device_type', 'capability', 'dtype', 'K', 'V', 'reason'),
+    [
+        pytest.param('cpu', 10, torch.float16, 64, 64, 'compute capability', id='cpu'),
+        pytest.param('cuda', 8, torch.float16, 64, 64, 'compute capability', id='unsupported-device'),
+        pytest.param('cuda', 10, torch.float32, 64, 64, 'matching fp16 or bf16', id='fp32'),
+        pytest.param('cuda', 10, torch.float64, 64, 64, 'matching fp16 or bf16', id='fp64'),
+        pytest.param('cuda', 10, torch.float16, 0, 64, 'dimensions', id='empty-key'),
+        pytest.param('cuda', 10, torch.float16, 64, 0, 'dimensions', id='empty-value'),
+        pytest.param('cuda', 10, torch.float16, 513, 64, 'dimensions', id='wide-key'),
+        pytest.param('cuda', 10, torch.float16, 64, 513, 'dimensions', id='wide-value'),
+        pytest.param('cuda', 9, torch.float16, 256, 512, None, id='fp16'),
+        pytest.param('cuda', 10, torch.bfloat16, 512, 256, None, id='bf16'),
+    ],
+)
+def test_attn_gluon_backend_verifier(monkeypatch, method, device_type, capability, dtype, K, V, reason):
+    monkeypatch.setattr('fla.ops.attn.backends.gluon.get_device_capability', lambda *args: (capability, 0))
+    q = SimpleNamespace(device=SimpleNamespace(type=device_type, index=0), dtype=dtype, shape=(1, 1, 1, K))
+    v = SimpleNamespace(dtype=dtype, shape=(1, 1, 1, V))
+    kwargs = dict(q=q, k=q, v=v, g_cumsum=None, sink_bias=None, scale=0.125)
+    if method == 'parallel_attn_bwd':
+        kwargs.update(o=None, lse=None, do=None)
+    elif method == 'attn_decoding_fwd':
+        kwargs['cu_seqlens'] = None
+    accepted, actual_reason = getattr(AttnGluonBackend(), method + '_verifier')(**kwargs)
+    assert accepted is (reason is None)
+    if reason is None:
+        assert actual_reason is None
+    else:
+        assert reason in actual_reason
