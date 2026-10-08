@@ -5,12 +5,12 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-import warnings
-
-from fla.modules.norm.l2norm import (
+from fla.modules.norm.l2norm.module import (
+    L2Norm,
+)
+from fla.modules.norm.l2norm.ops import (
     BT_LIST,
     NUM_WARPS_AUTOTUNE,
-    L2Norm,
     L2NormFunction,
     l2_norm,
     l2norm,
@@ -36,10 +36,3 @@ __all__ = [
     'l2norm_fwd_kernel',
     'l2norm_fwd_kernel_row',
 ]
-
-warnings.warn(
-    'fla.modules.l2norm is deprecated; import from fla.modules.norm.l2norm instead. '
-    'This compatibility path will be removed in the next release after 0.6.0.',
-    FutureWarning,
-    stacklevel=2,
-)

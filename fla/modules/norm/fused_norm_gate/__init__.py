@@ -5,9 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-import warnings
-
-from fla.modules.norm.fused_norm_gate import (
+from fla.modules.norm.fused_norm_gate.module import (
     FusedLayerNormGated,
     FusedLayerNormGatedLinear,
     FusedLayerNormSwishGate,
@@ -16,6 +14,8 @@ from fla.modules.norm.fused_norm_gate import (
     FusedRMSNormGatedLinear,
     FusedRMSNormSwishGate,
     FusedRMSNormSwishGateLinear,
+)
+from fla.modules.norm.fused_norm_gate.ops import (
     LayerNormGatedFunction,
     LayerNormGatedLinearFunction,
     layer_norm_gated,
@@ -52,10 +52,3 @@ __all__ = [
     'rms_norm_gated',
     'rms_norm_swish_gate_linear',
 ]
-
-warnings.warn(
-    'fla.modules.fused_norm_gate is deprecated; import from fla.modules.norm.fused_norm_gate instead. '
-    'This compatibility path will be removed in the next release after 0.6.0.',
-    FutureWarning,
-    stacklevel=2,
-)

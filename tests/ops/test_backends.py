@@ -6,6 +6,7 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import importlib.metadata
+import inspect
 import logging
 from pathlib import Path
 from types import SimpleNamespace
@@ -223,6 +224,61 @@ def test_resolver_preserves_backend_dependency_errors(monkeypatch, dependency, a
     assert caught.value is error
 
 
+@pytest.mark.parametrize(
+    ('owner', 'name', 'tensor_args', 'options'),
+    [
+        ('norm.layernorm', 'layer_norm_fwd', ('weight', 'bias'), {'is_rms_norm': True, 'num_groups': 2}),
+        ('norm.layernorm', 'layer_norm_bwd', ('x', 'weight', 'bias'), {'recompute_output': True, 'num_groups': 2}),
+        ('norm.l2norm', 'l2norm_fwd', (), {'eps': 1e-4, 'output_dtype': torch.float32}),
+        ('norm.l2norm', 'l2norm_bwd', ('rstd', 'dy'), {'eps': 1e-4}),
+        ('norm.fused_norm_gate', 'layer_norm_gated_fwd', ('g', 'weight', 'bias'), {'activation': 'sigmoid'}),
+        ('norm.fused_norm_gate', 'layer_norm_gated_bwd', ('x', 'g', 'weight', 'bias'), {'activation': 'sigmoid'}),
+    ],
+    ids=[
+        'layernorm-forward',
+        'layernorm-backward',
+        'l2norm-forward',
+        'l2norm-backward',
+        'norm-gate-forward',
+        'norm-gate-backward',
+    ],
+)
+@pytest.mark.skipif(registry_module._DISPATCH_DISABLED, reason='dispatch was disabled before the entry points were imported')
+def test_module_dispatch_preserves_arguments_and_result(monkeypatch, owner, name, tensor_args, options):
+    entry = getattr(importlib.import_module(f'fla.modules.{owner}.ops'), name)
+    backend = importlib.import_module(f'fla.modules.{owner}.backends.triton_ascend').TritonAscendBackend
+    calls = []
+    expected = object()
+
+    def implementation(self, value, **kwargs):
+        assert torch.is_grad_enabled()
+        calls.append((value, kwargs))
+        return expected
+
+    monkeypatch.setattr(backend, 'is_available', classmethod(lambda cls: True))
+    monkeypatch.setattr(backend, 'verify', lambda self, *args, **kwargs: (True, None))
+    monkeypatch.setattr(backend, name, implementation)
+    if owner == 'conv':
+        gluon = importlib.import_module('fla.modules.conv.backends.gluon').GluonBackend
+        monkeypatch.setattr(gluon, 'is_available', classmethod(lambda cls: False))
+
+    x = torch.tensor([-2.0, 0.5, 3.0], requires_grad=True)
+    kwargs = {argument: torch.ones_like(x) for argument in tensor_args}
+    kwargs.update(options)
+    inspect.signature(entry).bind(x, **kwargs)
+    result = entry(x, **kwargs)
+
+    assert len(calls) == 1
+    assert calls[0][0] is x
+    assert calls[0][1].keys() == kwargs.keys()
+    for argument, value in kwargs.items():
+        if isinstance(value, torch.Tensor):
+            assert calls[0][1][argument] is value
+        else:
+            assert calls[0][1][argument] == value
+    assert result is expected
+
+
 @pytest.mark.skipif(registry_module._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
 @pytest.mark.parametrize('direction', ['fwd', 'bwd'], ids=['forward', 'backward'])
 def test_aggregate_module_dispatch_preserves_arguments_and_result(monkeypatch, direction):
@@ -334,6 +390,7 @@ def test_legacy_dispatch_uses_shared_registry(run_python, first_import):
         assert legacy.BaseBackend is BaseBackend
         assert legacy.BackendRegistry._registries is registry_module._registries
         assert legacy.BackendRegistry('kda') is kda_registry
+        assert legacy.BackendRegistry('modules.norm.l2norm') is dispatch('modules.norm.l2norm').__self__
         legacy.BackendRegistry.ensure_initialized('kda')
         assert legacy.BackendRegistry._registries['kda'] is kda_registry
         assert dispatch('kda').__self__ is kda_registry
@@ -389,6 +446,9 @@ def test_dispatch_policy_and_optional_dependencies(run_python, disabled):
             'rwkv6',
             'utils',
             'modules',
+            'modules.norm.layernorm',
+            'modules.norm.l2norm',
+            'modules.norm.fused_norm_gate',
         ]:
             with warnings.catch_warnings():
                 warnings.simplefilter('error', DeprecationWarning)

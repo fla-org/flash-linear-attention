@@ -5,19 +5,19 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-import warnings
-
-from fla.modules.norm.layernorm import (
+from fla.modules.norm.layernorm.module import (
     GroupNorm,
     GroupNormLinear,
     GroupNormRef,
     LayerNorm,
-    LayerNormFunction,
     LayerNormLinear,
-    LayerNormLinearFunction,
     NormParallel,
     RMSNorm,
     RMSNormLinear,
+)
+from fla.modules.norm.layernorm.ops import (
+    LayerNormFunction,
+    LayerNormLinearFunction,
     group_norm,
     group_norm_linear,
     group_norm_ref,
@@ -62,10 +62,3 @@ __all__ = [
     'rms_norm_linear',
     'rms_norm_ref',
 ]
-
-warnings.warn(
-    'fla.modules.layernorm is deprecated; import from fla.modules.norm.layernorm instead. '
-    'This compatibility path will be removed in the next release after 0.6.0.',
-    FutureWarning,
-    stacklevel=2,
-)
