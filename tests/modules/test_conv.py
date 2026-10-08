@@ -5,8 +5,6 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-import warnings
-
 import pytest
 import torch
 import torch.nn.functional as F
@@ -15,11 +13,8 @@ from einops import rearrange
 from fla.modules.convolution import (
     ShortConvolution,
     causal_conv1d,
-    causal_conv1d_bwd,
-    causal_conv1d_fwd,
     causal_conv1d_update,
 )
-from fla.ops.utils import prepare_chunk_indices
 from fla.utils import IS_NVIDIA, assert_close, device
 
 try:
@@ -1362,45 +1357,3 @@ def test_conv_backend_dispatch(
     y, _ = causal_conv1d(x=x, weight=weight, activation='silu')
     y.sum().backward()
     assert not conv_backend_calls
-
-
-@pytest.mark.parametrize('chunk_size', [32, 64], ids=['BT32', 'BT64'])
-def test_conv_deprecated_bt(
-    monkeypatch: pytest.MonkeyPatch,
-    conv_backend_calls: list[str] | None,
-    chunk_size: int,
-):
-    from fla.ops.backends import _DISPATCH_DISABLED
-
-    monkeypatch.setenv('FLA_GLUON', '1')
-    monkeypatch.setenv('FLA_CONV_GLUON', '0')
-    enabled = conv_backend_calls is not None and chunk_size == 64 and not _DISPATCH_DISABLED
-    calls = conv_backend_calls if conv_backend_calls is not None else []
-    torch.manual_seed(42)
-    x = torch.randn(1, 129, 64, device=device)
-    weight = torch.randn(64, 4, device=device)
-    bias = torch.randn(64, device=device)
-    dy = torch.randn_like(x)
-    cu_seqlens = torch.tensor([0, 1, 34, 129], device=device)
-    kwargs = dict(
-        weight=weight,
-        bias=bias,
-        residual=None,
-        cu_seqlens=cu_seqlens,
-        chunk_indices=prepare_chunk_indices(cu_seqlens, chunk_size),
-    )
-    with warnings.catch_warnings(record=True) as records:
-        warnings.simplefilter('always', FutureWarning)
-        y, _ = causal_conv1d_fwd(x=x, **kwargs, chunk_size=chunk_size)
-        grads = causal_conv1d_bwd(x=x, dy=dy, dht=None, **kwargs, chunk_size=chunk_size)
-    assert not any(issubclass(record.category, FutureWarning) for record in records)
-    assert calls == (['fwd', 'bwd'] if enabled else [])
-    calls.clear()
-    with pytest.warns(FutureWarning, match='`BT` is deprecated.*Use `chunk_size` instead'):
-        y_old, _ = causal_conv1d_fwd(x=x, **kwargs, BT=chunk_size)
-    with pytest.warns(FutureWarning, match='`BT` is deprecated.*Use `chunk_size` instead'):
-        grads_old = causal_conv1d_bwd(x=x, dy=dy, dht=None, **kwargs, BT=chunk_size)
-    assert calls == (['fwd', 'bwd'] if enabled else [])
-    assert_close('y', y, y_old, 1e-3)
-    for name, expected, actual in zip(('dx', 'dw', 'db'), grads, grads_old):
-        assert_close(name, expected, actual, 1e-3)
