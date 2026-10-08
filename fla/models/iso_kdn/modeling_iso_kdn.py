@@ -19,7 +19,7 @@ from transformers.utils import logging
 from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.attn import Attention
-from fla.layers.iso_kdn import IsoKDN
+from fla.layers.iso_kdn import IsotropicKalmanDeltaNetwork
 from fla.models.hybrid import get_hybrid_attention_spec
 from fla.models.iso_kdn.configuration_iso_kdn import IsoKDNConfig
 from fla.models.utils import Cache, FLAUnsupportedCacheGenerationMixin
@@ -61,7 +61,7 @@ class IsoKDNBlock(GradientCheckpointingLayer):
                 layer_idx=layer_idx,
             )
         else:
-            self.attn = IsoKDN(
+            self.attn = IsotropicKalmanDeltaNetwork(
                 mode=config.attn_mode,
                 hidden_size=config.hidden_size,
                 expand_v=config.expand_v,
@@ -201,7 +201,7 @@ class IsoKDNPreTrainedModel(PreTrainedModel):
         prenorm_residual_strategy: str | None = None,
         num_residuals_per_layer: int = 2,
     ):
-        if isinstance(module, IsoKDN) and next(module.parameters()).device.type != "meta":
+        if isinstance(module, IsotropicKalmanDeltaNetwork) and next(module.parameters()).device.type != "meta":
             with torch.no_grad():
                 if not getattr(module.A_log, '_is_hf_initialized', False):
                     module.A_log.copy_(nn.init.uniform_(module.A_log, a=1, b=16).log())

@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from fla.models.utils import Cache
 
 
-class IsoKDN(nn.Module):
+class IsotropicKalmanDeltaNetwork(nn.Module):
     r"""
     Isotropic Kalman Delta Network (IsoKDN) layer implementation.
 
@@ -94,7 +94,7 @@ class IsoKDN(nn.Module):
         layer_idx: int = None,
         norm_eps: float = 1e-5,
         **kwargs,
-    ) -> IsoKDN:
+    ) -> IsotropicKalmanDeltaNetwork:
         super().__init__()
 
         self.mode = mode

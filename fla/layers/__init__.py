@@ -21,7 +21,7 @@ from .gla import GatedLinearAttention
 from .gsa import GatedSlotAttention
 from .hgrn import HGRNAttention
 from .hgrn2 import HGRN2Attention
-from .iso_kdn import IsoKDN
+from .iso_kdn import IsotropicKalmanDeltaNetwork
 from .kda import KimiDeltaAttention
 from .lightnet import LightNetAttention
 from .linear_attn import LinearAttention
@@ -66,7 +66,7 @@ __all__ = [
     'GatedSlotAttention',
     'HGRN2Attention',
     'HGRNAttention',
-    'IsoKDN',
+    'IsotropicKalmanDeltaNetwork',
     'KimiDeltaAttention',
     'LightNetAttention',
     'LinearAttention',
