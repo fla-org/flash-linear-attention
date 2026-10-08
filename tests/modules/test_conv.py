@@ -1623,29 +1623,31 @@ def test_conv_backend_override(monkeypatch):
 @pytest.mark.skipif(not IS_NVIDIA, reason='Gluon convolution requires NVIDIA')
 @pytest.mark.parametrize(
     ('dtype', 'weight_dtype'),
-    [(torch.float32, torch.float32), (torch.float16, torch.float32), (torch.bfloat16, torch.float32),
-     (torch.float16, torch.float16), (torch.bfloat16, torch.bfloat16)],
+    [
+        pytest.param(torch.float32, torch.float32, id='fp32-fp32'),
+        pytest.param(torch.float16, torch.float32, id='fp16-fp32'),
+        pytest.param(torch.bfloat16, torch.float32, id='bf16-fp32'),
+        pytest.param(torch.float16, torch.float16, id='fp16-fp16'),
+        pytest.param(torch.bfloat16, torch.bfloat16, id='bf16-bf16'),
+    ],
 )
-@pytest.mark.parametrize('activation', [None, 'silu'])
+@pytest.mark.parametrize('activation', [None, 'silu'], ids=['linear', 'silu'])
 @pytest.mark.parametrize(
     ('B', 'T', 'D', 'W', 'packed', 'state', 'strided'),
     [
-        (2, 1, 33, 4, False, False, False),
-        (2, 63, 65, 3, False, False, True),
-        (1, 129, 127, 2, False, False, False),
-        (1, 257, 256, 4, True, False, True),
-        (1, 129, 65, 4, True, True, False),
-        (2, 3, 65, 4, False, True, True),
-        (2, 32, 65, 4, False, True, True),
-        (2, 33, 65, 4, False, True, True),
-        (1, 1024, 1024, 4, False, False, False),
-        (1, 1025, 1024, 4, False, False, False),
-        (1, 8193, 65, 3, False, False, True),
-        (1, 8193, 65, 4, True, False, True),
+        pytest.param(2, 1, 33, 4, False, False, False, id='one-token'),
+        pytest.param(2, 63, 65, 3, False, False, True, id='channel-tail'),
+        pytest.param(1, 129, 127, 2, False, False, False, id='time-tail'),
+        pytest.param(1, 257, 256, 4, True, False, True, id='packed-qkv'),
+        pytest.param(1, 129, 65, 4, True, True, False, id='packed-state'),
+        pytest.param(2, 3, 65, 4, False, True, True, id='short-state'),
+        pytest.param(2, 32, 65, 4, False, True, True, id='split-boundary'),
+        pytest.param(2, 33, 65, 4, False, True, True, id='split-tail'),
+        pytest.param(1, 1024, 1024, 4, False, False, False, id='small-tile-boundary'),
+        pytest.param(1, 1025, 1024, 4, False, False, False, id='large-tile-boundary'),
+        pytest.param(1, 8193, 65, 3, False, False, True, id='reduction-tail'),
+        pytest.param(1, 8193, 65, 4, True, False, True, id='packed-reduction-tail'),
     ],
-    ids=['one-token', 'channel-tail', 'time-tail', 'packed-qkv', 'packed-state', 'short-state',
-         'split-boundary', 'split-tail', 'small-tile-boundary', 'large-tile-boundary',
-         'reduction-tail', 'packed-reduction-tail'],
 )
 def test_conv_backend_parity(monkeypatch, B, T, D, W, packed, state, strided, activation, dtype, weight_dtype):
     pytest.importorskip('fla.modules.backends.gluon.causal_conv1d')
@@ -1726,13 +1728,9 @@ def test_conv_backend_verifier(monkeypatch, case):
     assert not accepted and reason
 
 
-@pytest.mark.skipif(not IS_NVIDIA, reason='Gluon convolution requires NVIDIA')
-@pytest.mark.parametrize('keyword', [None, 'chunk_size', 'BT'])
-def test_conv_backend_dispatch(monkeypatch, keyword):
-    from fla.ops.backends import _DISPATCH_DISABLED
-
+@pytest.fixture
+def conv_backend_calls(monkeypatch):
     conv_gluon = pytest.importorskip('fla.modules.backends.gluon.causal_conv1d')
-    torch.manual_seed(42)
     calls = []
     fwd, bwd = conv_gluon.causal_conv1d_fwd, conv_gluon.causal_conv1d_bwd
 
@@ -1746,32 +1744,61 @@ def test_conv_backend_dispatch(monkeypatch, keyword):
 
     monkeypatch.setattr(conv_gluon, 'causal_conv1d_fwd', forward)
     monkeypatch.setattr(conv_gluon, 'causal_conv1d_bwd', backward)
+    return calls
+
+
+@pytest.mark.skipif(not IS_NVIDIA, reason='Gluon convolution requires NVIDIA')
+@pytest.mark.parametrize(('shared', 'local'), [('0', '0'), ('0', '1'), ('1', '0')], ids=['disabled', 'local', 'global'])
+@pytest.mark.parametrize('W', [4, 5], ids=['W4', 'W5'])
+def test_conv_backend_dispatch(monkeypatch, conv_backend_calls, shared, local, W):
+    from fla.ops.backends import _DISPATCH_DISABLED
+
+    torch.manual_seed(42)
+    monkeypatch.setenv('FLA_GLUON', shared)
+    monkeypatch.setenv('FLA_CONV_GLUON', local)
     x = torch.randn(1, 65, 64, device=device, requires_grad=True)
-    for shared, local, enabled in [('0', '0', False), ('0', '1', True), ('1', '0', True), ('0', '0', False)]:
-        monkeypatch.setenv('FLA_GLUON', shared)
-        monkeypatch.setenv('FLA_CONV_GLUON', local)
-        calls.clear()
-        for W in [4, 5]:
-            weight = torch.randn(64, W, device=device, requires_grad=True)
-            if keyword is None:
-                y, _ = causal_conv1d(x=x, weight=weight, activation='silu')
-                y.sum().backward()
-            else:
-                kwargs = dict(x=x, weight=weight, bias=None, residual=None, activation='silu', **{keyword: 64})
-                with warnings.catch_warnings(record=True) as records:
-                    warnings.simplefilter('always', FutureWarning)
-                    y, _ = causal_conv1d_fwd(**kwargs)
-                    causal_conv1d_bwd(dy=torch.ones_like(y), dht=None, **kwargs)
-                messages = [str(record.message) for record in records if issubclass(record.category, FutureWarning)]
-                if keyword == 'BT':
-                    assert len(messages) == 2
-                    assert all('`BT` is deprecated' in message and 'Use `chunk_size` instead' in message for message in messages)
-                else:
-                    assert not messages
-        assert calls == (['fwd', 'bwd'] if enabled and not _DISPATCH_DISABLED else [])
+    weight = torch.randn(64, W, device=device, requires_grad=True)
+    y, _ = causal_conv1d(x=x, weight=weight, activation='silu')
+    y.sum().backward()
+    enabled = (shared == '1' or local == '1') and W == 4 and not _DISPATCH_DISABLED
+    assert conv_backend_calls == (['fwd', 'bwd'] if enabled else [])
+
+    monkeypatch.setenv('FLA_GLUON', '0')
+    monkeypatch.setenv('FLA_CONV_GLUON', '0')
+    conv_backend_calls.clear()
+    y, _ = causal_conv1d(x=x, weight=weight, activation='silu')
+    y.sum().backward()
+    assert not conv_backend_calls
 
 
-@pytest.mark.parametrize('chunk_size', [32, 64])
+@pytest.mark.skipif(not IS_NVIDIA, reason='Gluon convolution requires NVIDIA')
+@pytest.mark.parametrize(('shared', 'local'), [('0', '0'), ('0', '1'), ('1', '0')], ids=['disabled', 'local', 'global'])
+@pytest.mark.parametrize('W', [4, 5], ids=['W4', 'W5'])
+@pytest.mark.parametrize('keyword', ['chunk_size', 'BT'], ids=['chunk_size', 'deprecated-BT'])
+def test_conv_backend_dispatch_keyword(monkeypatch, conv_backend_calls, shared, local, W, keyword):
+    from fla.ops.backends import _DISPATCH_DISABLED
+
+    torch.manual_seed(42)
+    monkeypatch.setenv('FLA_GLUON', shared)
+    monkeypatch.setenv('FLA_CONV_GLUON', local)
+    x = torch.randn(1, 65, 64, device=device, requires_grad=True)
+    weight = torch.randn(64, W, device=device, requires_grad=True)
+    kwargs = {keyword: 64}
+    with warnings.catch_warnings(record=True) as records:
+        warnings.simplefilter('always', FutureWarning)
+        y, _ = causal_conv1d_fwd(x=x, weight=weight, bias=None, residual=None, activation='silu', **kwargs)
+        causal_conv1d_bwd(x=x, dy=torch.ones_like(y), dht=None, weight=weight, activation='silu', **kwargs)
+    messages = [str(record.message) for record in records if issubclass(record.category, FutureWarning)]
+    if keyword == 'BT':
+        assert len(messages) == 2
+        assert all('`BT` is deprecated' in message and 'Use `chunk_size` instead' in message for message in messages)
+    else:
+        assert not messages
+    enabled = (shared == '1' or local == '1') and W == 4 and not _DISPATCH_DISABLED
+    assert conv_backend_calls == (['fwd', 'bwd'] if enabled else [])
+
+
+@pytest.mark.parametrize('chunk_size', [32, 64], ids=['BT32', 'BT64'])
 def test_conv_deprecated_chunk_size(chunk_size):
     torch.manual_seed(42)
     x = torch.randn(1, 129, 64, device=device)

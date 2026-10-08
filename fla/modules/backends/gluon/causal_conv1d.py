@@ -264,10 +264,11 @@ def causal_conv1d_fwd(
     chunk_indices: torch.LongTensor | None = None,
     chunk_size: int = 64,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
+    BT = chunk_size
     B, T, D = x.shape
     if cu_seqlens is not None and chunk_indices is None:
-        chunk_indices = prepare_chunk_indices(cu_seqlens=cu_seqlens, chunk_size=chunk_size, cu_seqlens_cpu=cu_seqlens_cpu)
-    NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, chunk_size)
+        chunk_indices = prepare_chunk_indices(cu_seqlens=cu_seqlens, chunk_size=BT, cu_seqlens_cpu=cu_seqlens_cpu)
+    NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
     y = torch.empty_like(x, memory_format=torch.contiguous_format)
     use_small_tile = B * T * D <= 1048576
     BD, num_splits = (32, 2) if use_small_tile else (64, 1)
@@ -286,7 +287,7 @@ def causal_conv1d_fwd(
         stride_x_t=x.stride(1),
         D=D,
         W=weight.shape[1],
-        BT=chunk_size // num_splits,
+        BT=BT // num_splits,
         BD=BD,
         BT_UNROLL=8,
         NUM_WARPS=num_warps,
@@ -320,12 +321,13 @@ def causal_conv1d_bwd(
     chunk_indices: torch.LongTensor | None = None,
     chunk_size: int = 64,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None, None]:
+    BT = chunk_size
     B, T, D = x.shape
     W = weight.shape[1]
     BD, num_warps = 32, 4
     if cu_seqlens is not None and chunk_indices is None:
-        chunk_indices = prepare_chunk_indices(cu_seqlens=cu_seqlens, chunk_size=chunk_size, cu_seqlens_cpu=cu_seqlens_cpu)
-    NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, chunk_size)
+        chunk_indices = prepare_chunk_indices(cu_seqlens=cu_seqlens, chunk_size=BT, cu_seqlens_cpu=cu_seqlens_cpu)
+    NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
     dx = torch.empty_like(x, memory_format=torch.contiguous_format)
     dw_partial = weight.new_empty((B * NT, D, W), dtype=torch.float32)
     db_partial = bias.new_empty((B * NT, D), dtype=torch.float32) if bias is not None else None
@@ -347,7 +349,7 @@ def causal_conv1d_bwd(
         stride_dy_d=dy.stride(2),
         D=D,
         W=W,
-        BT=chunk_size,
+        BT=BT,
         BD=BD,
         BT_UNROLL=16,
         NUM_WARPS=num_warps,

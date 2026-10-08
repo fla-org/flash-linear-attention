@@ -29,17 +29,13 @@ from triton.experimental.gluon.language.nvidia.ampere import async_copy as cp
 
 from fla.ops.backends import BaseBackend
 from fla.ops.utils.cache import fla_cache_autotune
+from fla.ops.utils.op import barrier
 from fla.utils import (
     autocast_custom_bwd,
     autocast_custom_fwd,
     autotune_cache_kwargs,
     input_guard,
 )
-
-try:
-    from triton.experimental.gluon.language import barrier
-except ImportError:
-    from triton.experimental.gluon.language import thread_barrier as barrier
 
 # tokens per bwd program (BT * KT); each program spills one fp32 dqw/dow partial row
 GROUP = 32

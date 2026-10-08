@@ -49,6 +49,7 @@ def causal_conv1d_fwd(
     chunk_size: int = 64,
     layout_fallback: bool = False,
 ) -> torch.Tensor:
+    BT = chunk_size
     shape = x.shape
     if x.shape[-1] != weight.shape[0]:
         x = rearrange(x, 'b t ... -> b t (...)')
@@ -58,8 +59,8 @@ def causal_conv1d_fwd(
 
     BW = triton.next_power_of_2(W)
     if cu_seqlens is not None and chunk_indices is None:
-        chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size, cu_seqlens_cpu=cu_seqlens_cpu)
-    NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, chunk_size)
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT, cu_seqlens_cpu=cu_seqlens_cpu)
+    NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
     NB = triton.cdiv(B*T, 1024)
 
     y = torch.empty_like(x, memory_format=torch.contiguous_format)
@@ -78,7 +79,7 @@ def causal_conv1d_fwd(
         T=T,
         D=D,
         W=W,
-        BT=chunk_size,
+        BT=BT,
         BW=BW,
         NB=NB,
         stride_x_n=stride_x_n,
@@ -161,6 +162,7 @@ def causal_conv1d_bwd(
     chunk_size: int = 64,
     layout_fallback: bool = False,
 ):
+    BT = chunk_size
     shape = x.shape
     if x.shape[-1] != weight.shape[0]:
         x = rearrange(x, 'b t ... -> b t (...)')
@@ -172,8 +174,8 @@ def causal_conv1d_bwd(
 
     BW = triton.next_power_of_2(W)
     if cu_seqlens is not None and chunk_indices is None:
-        chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size, cu_seqlens_cpu=cu_seqlens_cpu)
-    NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, chunk_size)
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT, cu_seqlens_cpu=cu_seqlens_cpu)
+    NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
     NB = triton.cdiv(B*T, 1024)
 
     y = None
@@ -214,7 +216,7 @@ def causal_conv1d_bwd(
         T=T,
         D=D,
         W=W,
-        BT=chunk_size,
+        BT=BT,
         BW=BW,
         NB=NB,
         stride_x_n=stride_x_n,
