@@ -302,6 +302,9 @@ def benchmark_op(
     call_kwargs = dict(config.extra_kwargs)
     op_label = op_name
     backend_env = config.backend_env or {}
+    if backend is not None:
+        # explicit benchmark selection must not inherit a global Gluon opt-in.
+        os.environ['FLA_GLUON'] = '0'
     if backend and backend != 'triton':
         env = backend_env.get(backend)
         if env is not None:
