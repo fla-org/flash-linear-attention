@@ -11,7 +11,7 @@ from einops import rearrange
 
 from fla.modules.backends import dispatch
 from fla.ops.utils import prepare_chunk_indices
-from fla.utils import input_guard
+from fla.utils import deprecate_kwarg, input_guard
 
 from .kernels import (
     causal_conv1d_bwd_kernel,
@@ -32,6 +32,7 @@ def _has_non_standard_layout(x: torch.Tensor) -> bool:
     return stride_d == 1 and stride_t != x.shape[-1]
 
 
+@deprecate_kwarg('BT', version='0.7.0', new_name='chunk_size')
 @dispatch('modules')
 @input_guard(no_guard_contiguous=["x"])
 def causal_conv1d_fwd(
@@ -45,9 +46,10 @@ def causal_conv1d_fwd(
     cu_seqlens: torch.LongTensor | None = None,
     cu_seqlens_cpu: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
-    BT: int = 64,
+    chunk_size: int = 64,
     layout_fallback: bool = False,
 ) -> torch.Tensor:
+    BT = chunk_size
     shape = x.shape
     if x.shape[-1] != weight.shape[0]:
         x = rearrange(x, 'b t ... -> b t (...)')
@@ -143,6 +145,7 @@ def compute_dh0_triton(
     return dh0
 
 
+@deprecate_kwarg('BT', version='0.7.0', new_name='chunk_size')
 @dispatch('modules')
 def causal_conv1d_bwd(
     x: torch.Tensor,
@@ -156,9 +159,10 @@ def causal_conv1d_bwd(
     cu_seqlens: torch.Tensor | None = None,
     cu_seqlens_cpu: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
-    BT: int = 64,
+    chunk_size: int = 64,
     layout_fallback: bool = False,
 ):
+    BT = chunk_size
     shape = x.shape
     if x.shape[-1] != weight.shape[0]:
         x = rearrange(x, 'b t ... -> b t (...)')
@@ -381,9 +385,8 @@ class CausalConv1dFunction(torch.autograd.Function):
         chunk_indices: torch.LongTensor | None = None,
         chunk_size: int = 64,
     ):
-        BT = chunk_size
         if cu_seqlens is not None and chunk_indices is None:
-            chunk_indices = prepare_chunk_indices(cu_seqlens, BT, cu_seqlens_cpu=cu_seqlens_cpu)
+            chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size, cu_seqlens_cpu=cu_seqlens_cpu)
         ctx.activation = activation
         ctx.cu_seqlens = cu_seqlens
         ctx.cu_seqlens_cpu = cu_seqlens_cpu
@@ -401,7 +404,7 @@ class CausalConv1dFunction(torch.autograd.Function):
             cu_seqlens=cu_seqlens,
             cu_seqlens_cpu=cu_seqlens_cpu,
             chunk_indices=chunk_indices,
-            BT=BT,
+            chunk_size=chunk_size,
             layout_fallback=ctx.layout_fallback,
         )
         return y, final_state
