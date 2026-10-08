@@ -202,19 +202,19 @@ class LightNetAttention(nn.Module):
         )
 
         o = rearrange(o, 'b t h d -> b t (h d)')
-        # repad before normalization so an all-padding batch has a nonempty backward grid.
+        # the fused norm backward requires a nonempty input.
+        if o.shape[1] == 0:
+            o = self.o_proj(o)
+        else:
+            o = rms_norm_swish_gate_linear(
+                o,
+                self.g_proj(hidden_states),
+                self.g_norm.weight,
+                self.g_norm.bias,
+                self.o_proj.weight,
+                self.o_proj.bias,
+            )
         o = repad_hidden_states(o, indices, batch_size, q_len)
-        if q_len == 0:
-            return self.o_proj(o), None, past_key_values
-        output_gate = repad_hidden_states(self.g_proj(hidden_states), indices, batch_size, q_len)
-        o = rms_norm_swish_gate_linear(
-            o,
-            output_gate,
-            self.g_norm.weight,
-            self.g_norm.bias,
-            self.o_proj.weight,
-            self.o_proj.bias,
-        )
         return o, None, past_key_values
 
     def state_size(self, **kwargs) -> int:
