@@ -5,8 +5,6 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-# keep documented public exports compatible across implementation refactors.
-
 from .chunk import chunk_kda
 from .fused_recurrent import fused_recurrent_kda
 
