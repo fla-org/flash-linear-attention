@@ -31,7 +31,8 @@ class GatedDeltaProduct(nn.Module):
     """
     Generalized version of GatedDoubleDeltaNet that supports arbitrary number of householder transformations.
 
-    Set `fuse_conv_l2=True` to fuse Q/K convolution and L2 normalization in chunk mode. Default: `False`.
+    Set `fuse_conv_l2=True` to fuse Q/K convolution and L2 normalization in chunk mode with gradients disabled.
+    Default: `False`.
     """
 
     def __init__(
@@ -198,7 +199,7 @@ class GatedDeltaProduct(nn.Module):
         cu_seqlens = kwargs.get('cu_seqlens')
         hidden_states, indices, cu_seqlens = unpad_hidden_states(hidden_states, cu_seqlens, attention_mask, q_len)
 
-        use_conv_l2 = self.fuse_conv_l2 and mode == 'chunk'
+        use_conv_l2 = self.fuse_conv_l2 and mode == 'chunk' and not torch.is_grad_enabled()
         if self.use_short_conv:
             conv_state_q, conv_state_k, conv_state_v = None, None, None
             if last_state is not None:

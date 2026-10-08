@@ -46,8 +46,6 @@ class MesaNet(nn.Module):
             The kernel size of the short convolution. Default: 4.
         layer_idx (int, Optional):
             The index of the layer. Default: None.
-        fuse_conv_l2 (bool, Optional):
-            Whether to fuse Q/K short convolution and L2 normalization in chunk mode. Default: `False`.
         norm_eps (float, Optional):
             The epsilon value for the normalization layer. Default: 1e-5.
         lambda_lower_bound (float):
@@ -73,7 +71,6 @@ class MesaNet(nn.Module):
         lambda_lower_bound: float = 0.25,
         max_cg_step_training: int = 30,
         max_cg_step_decoding: int = 30,
-        fuse_conv_l2: bool = False,
         **kwargs,
     ) -> MesaNet:
         super().__init__()
@@ -82,7 +79,6 @@ class MesaNet(nn.Module):
         self.hidden_size = hidden_size
         self.use_output_gate = use_output_gate
         self.use_short_conv = use_short_conv
-        self.fuse_conv_l2 = fuse_conv_l2 and use_short_conv
         self.conv_size = conv_size
         self.conv_bias = conv_bias
         self.num_heads = num_heads
@@ -115,14 +111,12 @@ class MesaNet(nn.Module):
             kernel_size=conv_size,
             bias=self.conv_bias,
             activation='silu',
-            norm='l2' if self.fuse_conv_l2 else None,
         )
         self.k_conv1d = ShortConvolution(
             hidden_size=self.key_dim,
             kernel_size=conv_size,
             bias=self.conv_bias,
             activation='silu',
-            norm='l2' if self.fuse_conv_l2 else None,
         )
         if use_output_gate:
             self.g_proj = nn.Linear(hidden_size, self.value_dim, bias=False)
@@ -156,22 +150,17 @@ class MesaNet(nn.Module):
         conv_state_q, conv_state_k = None, None
         if last_state is not None:
             conv_state_q, conv_state_k = last_state['conv_state']
-        use_conv_l2 = self.fuse_conv_l2 and last_state is None
         q, conv_state_q = self.q_conv1d(
             x=self.q_proj(hidden_states),
             cache=conv_state_q,
             output_final_state=use_cache,
             cu_seqlens=cu_seqlens,
-            head_dim=self.head_k_dim,
-            use_norm=use_conv_l2,
         )
         k, conv_state_k = self.k_conv1d(
             x=self.k_proj(hidden_states),
             cache=conv_state_k,
             output_final_state=use_cache,
             cu_seqlens=cu_seqlens,
-            head_dim=self.head_k_dim,
-            use_norm=use_conv_l2,
         )
         v = self.v_proj(hidden_states)
 
@@ -185,6 +174,7 @@ class MesaNet(nn.Module):
         last_h_kk, last_h_kv = last_state['recurrent_state'] if last_state is not None else (None, None)
 
         # prefilling or training
+        # Note that QK will be normalized inside the kernel to avoid saving the activations, thereby reducing the memory usage.
         if last_state is None:
             o, h_kk, h_kv = chunk_mesa_net(
                 q=q,
@@ -195,7 +185,7 @@ class MesaNet(nn.Module):
                 lamb=lamb,
                 output_final_state=use_cache,
                 max_CG_iteration=self.max_cg_step_training,
-                use_qk_l2norm_in_kernel=not use_conv_l2,
+                use_qk_l2norm_in_kernel=True,
                 cu_seqlens=cu_seqlens,
             )
         # decoding

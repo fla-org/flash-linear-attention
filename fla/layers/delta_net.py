@@ -65,7 +65,7 @@ class DeltaNet(nn.Module):
         layer_idx (int, Optional):
             The index of the layer. Default: None.
         fuse_conv_l2 (bool, Optional):
-            Whether to fuse Q/K short convolution and L2 normalization in chunk mode. Default: `False`.
+            Whether to fuse Q/K convolution and L2 normalization in chunk mode with gradients disabled. Default: `False`.
         norm_eps (float, Optional):
             The epsilon value for the layernorm/rmsnorm layer. Default: 1e-5.
         qk_activation (str, Optional):
@@ -198,7 +198,7 @@ class DeltaNet(nn.Module):
         cu_seqlens = kwargs.get('cu_seqlens')
         hidden_states, indices, cu_seqlens = unpad_hidden_states(hidden_states, cu_seqlens, attention_mask, q_len)
 
-        use_conv_l2 = self.fuse_conv_l2 and mode == 'chunk'
+        use_conv_l2 = self.fuse_conv_l2 and mode == 'chunk' and not torch.is_grad_enabled()
         if self.use_short_conv:
             conv_state_q, conv_state_k, conv_state_v = None, None, None
             if last_state is not None:

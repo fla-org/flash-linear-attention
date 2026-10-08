@@ -82,7 +82,7 @@ class GatedDeltaNet(nn.Module):
         layer_idx (int, Optional):
             The index of the layer. Default: None.
         fuse_conv_l2 (bool, Optional):
-            Whether to fuse Q/K short convolution and L2 normalization in chunk mode. Default: `False`.
+            Whether to fuse Q/K convolution and L2 normalization in chunk mode with gradients disabled. Default: `False`.
         norm_eps (float, Optional):
             The epsilon value for the normalization layer. Default: 1e-5.
     """
@@ -254,7 +254,7 @@ class GatedDeltaNet(nn.Module):
         hidden_states, indices, cu_seqlens = unpad_hidden_states(hidden_states, cu_seqlens, attention_mask, q_len)
 
         conv_state_q, conv_state_k, conv_state_v = None, None, None
-        use_conv_l2 = self.fuse_conv_l2 and mode == 'chunk'
+        use_conv_l2 = self.fuse_conv_l2 and mode == 'chunk' and not torch.is_grad_enabled()
         if self._use_fused_qkv_conv(last_state, use_cache, cu_seqlens):
             use_conv_l2 = False
             qkv = torch.cat(

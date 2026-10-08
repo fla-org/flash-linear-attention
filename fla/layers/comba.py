@@ -75,8 +75,6 @@ class Comba(nn.Module):
             Whether to use bias in the short convolution, only used when `use_short_conv` is `True`. Default: `False`.
         layer_idx (int, Optional):
             The index of the layer. Default: None.
-        fuse_conv_l2 (bool, Optional):
-            Whether to fuse Q/K short convolution and L2 normalization in chunk mode. Default: `False`.
         norm_eps (float, Optional):
             The epsilon value for the normalization layer. Default: 1e-5.
     """
@@ -98,7 +96,6 @@ class Comba(nn.Module):
         conv_bias: bool = False,
         layer_idx: int = None,
         norm_eps: float = 1e-5,
-        fuse_conv_l2: bool = False,
         **kwargs,
     ) -> Comba:
         super().__init__()
@@ -109,7 +106,6 @@ class Comba(nn.Module):
         self.expand_v = expand_v
 
         self.use_short_conv = use_short_conv
-        self.fuse_conv_l2 = fuse_conv_l2 and use_short_conv
         self.use_output_gate = use_output_gate
         self.use_output_correction = use_output_correction
         self.use_inner_decay = use_inner_decay
@@ -188,14 +184,12 @@ class Comba(nn.Module):
                 kernel_size=conv_size,
                 bias=conv_bias,
                 activation='silu',
-                norm='l2' if self.fuse_conv_l2 else None,
             )
             self.k_conv1d = ShortConvolution(
                 hidden_size=self.key_dim,
                 kernel_size=conv_size,
                 bias=conv_bias,
                 activation='silu',
-                norm='l2' if self.fuse_conv_l2 else None,
             )
             self.v_conv1d = ShortConvolution(
                 hidden_size=self.value_dim,
@@ -245,7 +239,6 @@ class Comba(nn.Module):
         cu_seqlens = kwargs.get('cu_seqlens')
         hidden_states, indices, cu_seqlens = unpad_hidden_states(hidden_states, cu_seqlens, attention_mask, q_len)
 
-        use_conv_l2 = self.fuse_conv_l2 and mode == 'chunk'
         if self.use_short_conv:
             conv_state_q, conv_state_k, conv_state_v = None, None, None
             if last_state is not None:
@@ -255,16 +248,12 @@ class Comba(nn.Module):
                 cache=conv_state_q,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
-                head_dim=self.head_k_dim,
-                use_norm=use_conv_l2,
             )
             k, conv_state_k = self.k_conv1d(
                 x=self.k_proj(hidden_states),
                 cache=conv_state_k,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
-                head_dim=self.head_k_dim,
-                use_norm=use_conv_l2,
             )
             v, conv_state_v = self.v_conv1d(
                 x=self.v_proj(hidden_states),
@@ -304,7 +293,7 @@ class Comba(nn.Module):
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
-                use_qk_l2norm_in_kernel=not use_conv_l2,
+                use_qk_l2norm_in_kernel=True,
             )
         elif mode == 'fused_recurrent':
             o, recurrent_state = fused_recurrent_comba(

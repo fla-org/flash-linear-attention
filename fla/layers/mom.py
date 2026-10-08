@@ -291,7 +291,8 @@ class MomAttention(nn.Module):
     """
     The layer implementation for [MoM: Linear Sequence Modeling with Mixture-of-Memories](https://arxiv.org/abs/2502.13685).
 
-    Set `fuse_conv_l2=True` to fuse Q/K convolution and L2 normalization in chunk mode. Default: `False`.
+    Set `fuse_conv_l2=True` to fuse Q/K convolution and L2 normalization in chunk mode with gradients disabled.
+    Default: `False`.
     """
 
     def __init__(
@@ -515,7 +516,7 @@ class MomAttention(nn.Module):
         cu_seqlens, reverse_indices = cu_seqlen_all[0].to(torch.long).unique(return_inverse=True)
         cu_q, cu_k, cu_v, cu_g, cu_beta = (x.unsqueeze(0).contiguous() for x in (cu_q, cu_k, cu_v, cu_g, cu_beta))
 
-        use_conv_l2 = self.fuse_conv_l2 and mode == 'chunk'
+        use_conv_l2 = self.fuse_conv_l2 and mode == 'chunk' and not torch.is_grad_enabled()
         if self.use_short_conv:
             conv_state_q, conv_state_k, conv_state_v = [None, None], [None, None], [None, None]
             if last_state is not None:
@@ -715,7 +716,7 @@ class MomAttention(nn.Module):
         batch_size, q_len = hidden_states.shape[0], hidden_states.shape[1]
         hidden_states, indices, cu_seqlens = unpad_hidden_states(hidden_states, cu_seqlens, attention_mask, q_len)
 
-        use_conv_l2 = self.fuse_conv_l2 and mode == 'chunk'
+        use_conv_l2 = self.fuse_conv_l2 and mode == 'chunk' and not torch.is_grad_enabled()
         if self.use_short_conv:
             q, conv_state_q[1] = self.q_conv1d(
                 x=self.q_proj(hidden_states),

@@ -69,7 +69,6 @@ class MesaNetBlock(GradientCheckpointingLayer):
                 head_dim=config.head_dim,
                 use_output_gate=config.use_output_gate,
                 use_short_conv=config.use_short_conv,
-                fuse_conv_l2=config.fuse_conv_l2,
                 conv_size=config.conv_size,
                 norm_eps=config.norm_eps,
                 lambda_lower_bound=config.lambda_lower_bound,

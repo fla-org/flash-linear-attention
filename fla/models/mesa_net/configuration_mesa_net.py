@@ -48,14 +48,12 @@ class MesaNetConfig(_HybridAttentionConfigMixin, PretrainedConfig):
         max_cg_step_training: int = 30,
         max_cg_step_decoding: int = 30,
         attnres_block_size: int | None = None,
-        fuse_conv_l2: bool = False,
         **kwargs,
     ):
         self.attn_mode = attn_mode
         self.hidden_size = hidden_size
         self.use_output_gate = use_output_gate
         self.use_short_conv = use_short_conv
-        self.fuse_conv_l2 = fuse_conv_l2
         self.conv_size = conv_size
         self.num_heads = num_heads
         self.head_dim = head_dim

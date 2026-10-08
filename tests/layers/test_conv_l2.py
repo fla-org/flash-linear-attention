@@ -11,19 +11,17 @@ import pytest
 import torch
 
 from fla.layers import comba, delta_net, gated_deltanet, gated_deltaproduct, kda, mesa_net, mom
-from fla.models.comba.configuration_comba import CombaConfig
 from fla.models.delta_net.configuration_delta_net import DeltaNetConfig
 from fla.models.gated_deltanet.configuration_gated_deltanet import GatedDeltaNetConfig
 from fla.models.gated_deltaproduct.configuration_gated_deltaproduct import GatedDeltaProductConfig
 from fla.models.kda.configuration_kda import KDAConfig
-from fla.models.mesa_net.configuration_mesa_net import MesaNetConfig
 from fla.models.mom.configuration_mom import MomConfig
 from fla.utils import assert_close, device
 
 
 def _make_layer(kind, fuse_conv_l2):
     kwargs = dict(hidden_size=128, head_dim=64, num_heads=2, conv_bias=True)
-    if fuse_conv_l2 is not None:
+    if fuse_conv_l2 is not None and kind not in ('comba', 'mesa'):
         kwargs['fuse_conv_l2'] = fuse_conv_l2
     if kind == 'gdn':
         return gated_deltanet.GatedDeltaNet(**kwargs)
@@ -77,8 +75,8 @@ def test_conv_l2_chunk(kind, varlen):
     with mock.patch.object(module, kernel_name, wraps=getattr(module, kernel_name)) as kernel:
         actual_y = actual(hidden_states=actual_x, **kwargs)[0]
     kernel.assert_called_once()
-    uses_conv_l2 = kind != 'gdn' or varlen
-    assert kernel.call_args.kwargs['use_qk_l2norm_in_kernel'] == (not uses_conv_l2)
+    # preserve FP32 attention gradients before the normalization backward
+    assert kernel.call_args.kwargs['use_qk_l2norm_in_kernel']
     _check_layer_gradients(reference, actual, ref_x, actual_x, ref_y, actual_y)
 
 
@@ -101,7 +99,8 @@ def test_conv_l2_other_layers(kind, module, kernel_name):
     torch.manual_seed(42)
     reference = _make_layer(kind=kind, fuse_conv_l2=None).to(device, torch.bfloat16).train()
     actual = _make_layer(kind=kind, fuse_conv_l2=True).to(device, torch.bfloat16).train()
-    assert reference.fuse_conv_l2 is False
+    if kind not in ('comba', 'mesa'):
+        assert reference.fuse_conv_l2 is False
     actual.load_state_dict(reference.state_dict(), strict=True)
     x = torch.randn(1, 65, 128, device=device, dtype=torch.bfloat16)
     ref_x = x.detach().clone().requires_grad_()
@@ -110,10 +109,48 @@ def test_conv_l2_other_layers(kind, module, kernel_name):
     with mock.patch.object(module, kernel_name, wraps=getattr(module, kernel_name)) as kernel:
         actual_y = actual(hidden_states=actual_x)[0]
     assert kernel.call_count == (2 if kind == 'mom_shared' else 1)
-    uses_conv_l2 = kind not in ('delta_relu', 'delta_elu')
+    for call in kernel.call_args_list:
+        assert call.kwargs['use_qk_l2norm_in_kernel']
+    _check_layer_gradients(reference, actual, ref_x, actual_x, ref_y, actual_y)
+
+
+@pytest.mark.parametrize(
+    ('kind', 'module', 'kernel_name', 'varlen'),
+    [
+        ('kda', kda, 'chunk_kda', False),
+        ('kda', kda, 'chunk_kda', True),
+        ('kda_safe', kda, 'chunk_kda', False),
+        ('gdn', gated_deltanet, 'chunk_gated_delta_rule', False),
+        ('gdn', gated_deltanet, 'chunk_gated_delta_rule', True),
+        ('delta_silu', delta_net, 'chunk_delta_rule', False),
+        ('delta_identity', delta_net, 'chunk_delta_rule', False),
+        ('delta_relu', delta_net, 'chunk_delta_rule', False),
+        ('delta_elu', delta_net, 'chunk_delta_rule', False),
+        ('gdp', gated_deltaproduct, 'chunk_gated_delta_product', False),
+        ('mom', mom, 'chunk_gated_delta_rule', False),
+        ('mom_shared', mom, 'chunk_gated_delta_rule', False),
+    ],
+    ids=['kda', 'kda-varlen', 'kda-safe', 'gdn-packed', 'gdn-varlen', 'delta-silu', 'delta-identity',
+         'delta-relu', 'delta-elu', 'gdp', 'mom', 'mom-shared'],
+)
+@torch.no_grad()
+def test_conv_l2_chunk_inference(kind, module, kernel_name, varlen):
+    torch.manual_seed(42)
+    reference = _make_layer(kind=kind, fuse_conv_l2=False).to(device, torch.bfloat16).eval()
+    actual = _make_layer(kind=kind, fuse_conv_l2=True).to(device, torch.bfloat16).eval()
+    actual.load_state_dict(reference.state_dict(), strict=True)
+    B, T = (1, 128) if varlen else (2, 65)
+    x = torch.randn(B, T, 128, device=device, dtype=torch.bfloat16)
+    kwargs = {'cu_seqlens': torch.tensor([0, 63, 128], device=device)} if varlen else {}
+    ref_y = reference(hidden_states=x, **kwargs)[0]
+    with mock.patch.object(module, kernel_name, wraps=getattr(module, kernel_name)) as kernel:
+        actual_y = actual(hidden_states=x, **kwargs)[0]
+    assert kernel.call_count == (2 if kind == 'mom_shared' else 1)
+    uses_conv_l2 = kind not in ('delta_relu', 'delta_elu') and (kind != 'gdn' or varlen)
     for call in kernel.call_args_list:
         assert call.kwargs['use_qk_l2norm_in_kernel'] == (not uses_conv_l2)
-    _check_layer_gradients(reference, actual, ref_x, actual_x, ref_y, actual_y)
+    assert torch.isfinite(actual_y).all()
+    assert_close('y', ref_y, actual_y, 1e-3)
 
 
 @pytest.mark.parametrize('kind', ['kda', 'gdn'])
@@ -137,7 +174,7 @@ def test_conv_l2_recurrent_fallback(kind):
 
 @pytest.mark.parametrize(
     'config_type',
-    [CombaConfig, DeltaNetConfig, GatedDeltaNetConfig, GatedDeltaProductConfig, KDAConfig, MesaNetConfig, MomConfig],
+    [DeltaNetConfig, GatedDeltaNetConfig, GatedDeltaProductConfig, KDAConfig, MomConfig],
 )
 def test_conv_l2_config_roundtrip(config_type):
     assert config_type().fuse_conv_l2 is False
