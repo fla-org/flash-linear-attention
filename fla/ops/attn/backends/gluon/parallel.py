@@ -842,9 +842,12 @@ def parallel_attn_bwd_kernel_gluon(
     VARLEN: gl.constexpr,
     USE_GATE: gl.constexpr,
     USE_SINK: gl.constexpr,
-    MODE: gl.constexpr,
+    GRAD: gl.constexpr,
     NW: gl.constexpr,
 ):
+    IS_DQ: gl.constexpr = GRAD == 'dq'
+    HAS_DS: gl.constexpr = GRAD != 'dv'
+    HAS_DV: gl.constexpr = GRAD == 'dkv' or GRAD == 'dv'
     it, bh = unflatten_program_id(X=NT)
     hq = bh % HQ
     hk = hq // (HQ // H)
@@ -867,7 +870,7 @@ def parallel_attn_bwd_kernel_gluon(
     dl: gl.constexpr = gl.NVMMASharedLayout.get_default_for([1, BN, BV], dtype)
     pl: gl.constexpr = gl.NVMMASharedLayout.get_default_for([BM, BN], dtype)
     resident_a = gl.allocate_shared_memory(dtype, [1, BM, BK], ql)
-    if MODE != 3:
+    if HAS_DS:
         resident_b = gl.allocate_shared_memory(dtype, [1, BM, BV], vl)
     stream_a = gl.allocate_shared_memory(dtype, [BUFFERS, 1, BN, BK], kl)
     stream_b = gl.allocate_shared_memory(dtype, [BUFFERS, 1, BN, BV], dl)
@@ -876,80 +879,69 @@ def parallel_attn_bwd_kernel_gluon(
     bars = gl.allocate_shared_memory(gl.int64, [4, 1], mbarrier.MBarrierLayout())
     for i in gl.static_range(4):
         mbarrier.init(bars.index(i), count=1)
-    if MODE == 0:
-        _load_pair(
-            A=Q,
-            AD=Q_DESC,
-            AS=resident_a,
-            B=DO,
-            BD=DO_DESC,
-            BS=resident_b,
-            bar=bars.index(2),
-            head=hq,
-            row=start,
-            end=end,
-            H=HQ,
-            DA=DK,
-            DB=DV,
-            TMA_A=TMA_QK,
-            TMA_B=TMA_V,
-            NW=NW,
-        )
-    elif MODE == 3:
-        if TMA_QK:
-            mbarrier.expect(bars.index(2), BM * BK * 2)
-        _load_tile(
-            ptr=K,
-            desc=K_DESC,
-            smem=resident_a,
-            bar=bars.index(2),
-            head=hk,
-            row=start,
-            end=end,
-            H=H,
-            D=DK,
-            TMA=TMA_QK,
-            NW=NW,
-        )
+    if IS_DQ:
+        resident_qk, resident_value = Q, DO
+        stream_qk, stream_value = K, V
+        resident_qk_desc, resident_value_desc = Q_DESC, DO_DESC
+        stream_qk_desc, stream_value_desc = K_DESC, V_DESC
+        resident_head, resident_heads = hq, HQ
+        stream_head, stream_heads = hk, H
     else:
-        _load_pair(
-            A=K,
-            AD=K_DESC,
-            AS=resident_a,
-            B=V,
-            BD=V_DESC,
-            BS=resident_b,
+        resident_qk, resident_value = K, V
+        stream_qk, stream_value = Q, DO
+        resident_qk_desc, resident_value_desc = K_DESC, V_DESC
+        stream_qk_desc, stream_value_desc = Q_DESC, DO_DESC
+        resident_head, resident_heads = hk, H
+        stream_head, stream_heads = hq, HQ
+    if TMA_QK or (HAS_DS and TMA_V):
+        mbarrier.expect(bars.index(2), BM * BK * 2 * TMA_QK + BM * BV * 2 * (HAS_DS and TMA_V))
+    _load_tile(
+        ptr=resident_qk,
+        desc=resident_qk_desc,
+        smem=resident_a,
+        bar=bars.index(2),
+        head=resident_head,
+        row=start,
+        end=end,
+        H=resident_heads,
+        D=DK,
+        TMA=TMA_QK,
+        NW=NW,
+    )
+    if HAS_DS:
+        _load_tile(
+            ptr=resident_value,
+            desc=resident_value_desc,
+            smem=resident_b,
             bar=bars.index(2),
-            head=hk,
+            head=resident_head,
             row=start,
             end=end,
-            H=H,
-            DA=DK,
-            DB=DV,
-            TMA_A=TMA_QK,
-            TMA_B=TMA_V,
+            H=resident_heads,
+            D=DV,
+            TMA=TMA_V,
             NW=NW,
         )
-    if TMA_QK or (MODE != 3 and TMA_V):
+    if TMA_QK or (HAS_DS and TMA_V):
         mbarrier.wait(bars.index(2), 0)
-    if not TMA_QK or (MODE != 3 and not TMA_V):
+    if not TMA_QK or (HAS_DS and not TMA_V):
         fence_async_shared()
 
     sl: gl.constexpr = _acc_layout(M=BM, N=BN, TCGEN=TCGEN, NW=NW)
     rows = start + gl.arange(0, BM, gl.SliceLayout(1, sl)).to(gl.int64)
     cols_local = gl.arange(0, BN, gl.SliceLayout(0, sl)).to(gl.int64)
     score_acc = _acc_alloc(M=BM, N=BN, TCGEN=TCGEN, NW=NW)
-    if MODE != 3:
+    if HAS_DS:
         dp_acc = _acc_alloc(M=BM, N=BN, TCGEN=TCGEN, NW=NW)
         grad_acc = _acc_alloc(M=BM, N=BK, TCGEN=TCGEN, NW=NW)
-    if MODE == 1 or MODE == 3:
+    if HAS_DV:
         dv_acc = _acc_alloc(M=BM, N=BV, TCGEN=TCGEN, NW=NW)
     if USE_GATE:
         gate_row = gl.load(GATE + rows * HQ + hq, rows < end, other=0)
         dg = gl.full([BM], 0, gl.float32, gl.SliceLayout(1, sl))
-    if USE_SINK and MODE == 0:
+    if USE_SINK and IS_DQ:
         sink_expectation = gl.full([BM], 0., gl.float32, gl.SliceLayout(1, sl))
-    if MODE == 0:
+    if IS_DQ:
         lse = gl.load(LSE + rows * HQ + hq, rows < end, other=0)
         delta = gl.load(DELTA + rows * HQ + hq, rows < end, other=0)
         first = bos
@@ -966,89 +958,49 @@ def parallel_attn_bwd_kernel_gluon(
         slot = (step % BUFFERS).to(gl.int32)
         stream_start = first + step * BN
         if step == 0 or BUFFERS == 1:
-            if MODE == 0:
-                _load_pair(
-                    A=K,
-                    AD=K_DESC,
-                    AS=stream_a.index(slot),
-                    B=V,
-                    BD=V_DESC,
-                    BS=stream_b.index(slot),
-                    bar=bars.index(slot),
-                    head=hk,
-                    row=stream_start,
-                    end=end,
-                    H=H,
-                    DA=DK,
-                    DB=DV,
-                    TMA_A=TMA_QK,
-                    TMA_B=TMA_V,
-                    NW=NW,
-                )
-            else:
-                _load_pair(
-                    A=Q,
-                    AD=Q_DESC,
-                    AS=stream_a.index(slot),
-                    B=DO,
-                    BD=DO_DESC,
-                    BS=stream_b.index(slot),
-                    bar=bars.index(slot),
-                    head=hq,
-                    row=stream_start,
-                    end=end,
-                    H=HQ,
-                    DA=DK,
-                    DB=DV,
-                    TMA_A=TMA_QK,
-                    TMA_B=TMA_V,
-                    NW=NW,
-                )
+            _load_pair(
+                A=stream_qk,
+                AD=stream_qk_desc,
+                AS=stream_a.index(slot),
+                B=stream_value,
+                BD=stream_value_desc,
+                BS=stream_b.index(slot),
+                bar=bars.index(slot),
+                head=stream_head,
+                row=stream_start,
+                end=end,
+                H=stream_heads,
+                DA=DK,
+                DB=DV,
+                TMA_A=TMA_QK,
+                TMA_B=TMA_V,
+                NW=NW,
+            )
         if TMA_QK or TMA_V:
             mbarrier.wait(bars.index(slot), ((step // BUFFERS) % 2).to(gl.int32))
         if not TMA_QK or not TMA_V:
             fence_async_shared()
         if BUFFERS > 1 and stream_start + BN < last:
             nxt = ((step + 1) % BUFFERS).to(gl.int32)
-            if MODE == 0:
-                _load_pair(
-                    A=K,
-                    AD=K_DESC,
-                    AS=stream_a.index(nxt),
-                    B=V,
-                    BD=V_DESC,
-                    BS=stream_b.index(nxt),
-                    bar=bars.index(nxt),
-                    head=hk,
-                    row=stream_start + BN,
-                    end=end,
-                    H=H,
-                    DA=DK,
-                    DB=DV,
-                    TMA_A=TMA_QK,
-                    TMA_B=TMA_V,
-                    NW=NW,
-                )
-            else:
-                _load_pair(
-                    A=Q,
-                    AD=Q_DESC,
-                    AS=stream_a.index(nxt),
-                    B=DO,
-                    BD=DO_DESC,
-                    BS=stream_b.index(nxt),
-                    bar=bars.index(nxt),
-                    head=hq,
-                    row=stream_start + BN,
-                    end=end,
-                    H=HQ,
-                    DA=DK,
-                    DB=DV,
-                    TMA_A=TMA_QK,
-                    TMA_B=TMA_V,
-                    NW=NW,
-                )
-        if MODE != 3:
+            _load_pair(
+                A=stream_qk,
+                AD=stream_qk_desc,
+                AS=stream_a.index(nxt),
+                B=stream_value,
+                BD=stream_value_desc,
+                BS=stream_b.index(nxt),
+                bar=bars.index(nxt),
+                head=stream_head,
+                row=stream_start + BN,
+                end=end,
+                H=stream_heads,
+                DA=DK,
+                DB=DV,
+                TMA_A=TMA_QK,
+                TMA_B=TMA_V,
+                NW=NW,
+            )
+        if HAS_DS:
             score_acc, dp_acc, phase = _mma_pair(
                 a=resident_a.reshape([BM, BK]),
                 b=stream_a.index(slot).reshape([BN, BK]).permute((1, 0)),
@@ -1072,7 +1024,7 @@ def parallel_attn_bwd_kernel_gluon(
             )
         scores = _acc_read(acc=score_acc, M=BM, N=BN, TCGEN=TCGEN, NW=NW) * (SCALE * 1.4426950216)
         cols = stream_start + cols_local
-        if MODE == 0:
+        if IS_DQ:
             needs_mask = (stream_start + BN > start) | (start + BM > end)
             norm = lse[:, None]
             delta_b = delta[:, None]
@@ -1084,13 +1036,13 @@ def parallel_attn_bwd_kernel_gluon(
             delta_b = delta_col[None, :]
         if USE_GATE:
             gate_col = gl.load(GATE + cols * HQ + hq, cols < end, other=0)
-            if MODE == 0:
+            if IS_DQ:
                 scores += gate_row[:, None] - gate_col[None, :]
             else:
                 scores += gate_col[None, :] - gate_row[:, None]
         prob = gl.exp2(scores - norm)
         if W is not None or needs_mask:
-            if MODE == 0:
+            if IS_DQ:
                 distance = rows[:, None] - cols[None, :]
             else:
                 distance = cols[None, :] - rows[:, None]
@@ -1098,24 +1050,24 @@ def parallel_attn_bwd_kernel_gluon(
             if W is not None:
                 mask &= distance < W
             prob = gl.where(mask, prob, 0.)
-        if MODE != 3:
+        if HAS_DS:
             dp = _acc_read(acc=dp_acc, M=BM, N=BN, TCGEN=TCGEN, NW=NW)
-            if USE_SINK and MODE == 0:
+            if USE_SINK and IS_DQ:
                 sink_expectation += gl.sum(prob * dp, 1)
             ds = prob * (dp - delta_b)
             if not USE_SINK:
                 # a single-key softmax has zero score gradient, independent of reduction roundoff.
-                single_key = rows[:, None] == bos if MODE == 0 else cols[None, :] == bos
+                single_key = rows[:, None] == bos if IS_DQ else cols[None, :] == bos
                 if W == 1:
                     single_key = gl.full([BM, BN], True, gl.int1, sl)
                 ds = gl.where(single_key, 0., ds)
             if USE_GATE:
-                dg += gl.sum(ds, 1) * (1 if MODE == 0 else -1)
+                dg += gl.sum(ds, 1) * (1 if IS_DQ else -1)
             ds_shared.store(ds.to(dtype))
-        if MODE == 1 or MODE == 3:
+        if HAS_DV:
             p_shared.store(prob.to(dtype))
         fence_async_shared()
-        if MODE == 1:
+        if GRAD == 'dkv':
             grad_acc, dv_acc, phase = _mma_pair(
                 a=ds_shared,
                 b=stream_a.index(slot).reshape([BN, BK]),
@@ -1128,7 +1080,7 @@ def parallel_attn_bwd_kernel_gluon(
                 TCGEN=TCGEN,
                 USE_ACC=True,
             )
-        elif MODE != 3:
+        elif HAS_DS:
             grad_acc, phase = _mma(
                 a=ds_shared,
                 b=stream_a.index(slot).reshape([BN, BK]),
@@ -1147,19 +1099,19 @@ def parallel_attn_bwd_kernel_gluon(
                 TCGEN=TCGEN,
             )
 
-    if USE_SINK and MODE == 0:
+    if USE_SINK and IS_DQ:
         sink_grad = -gl.exp2(gl.load(SINK + hq) - lse) * sink_expectation
         gl.store(DSINK + rows * HQ + hq, sink_grad, rows < end)
-    if MODE != 3:
+    if HAS_DS:
         grad = _acc_read(acc=grad_acc, M=BM, N=BK, TCGEN=TCGEN, NW=NW) * SCALE
         grad_layout: gl.constexpr = _acc_layout(M=BM, N=BK, TCGEN=TCGEN, NW=NW)
         gr = start + gl.arange(0, BM, gl.SliceLayout(1, grad_layout)).to(gl.int64)
         gc = gl.arange(0, BK, gl.SliceLayout(0, grad_layout)).to(gl.int64)
-        target = DQ if MODE == 0 else DK_OUT
+        target = DQ if IS_DQ else DK_OUT
         gl.store(target + (gr[:, None] * HQ + hq) * DK + gc[None, :], grad, (gr[:, None] < end) & (gc[None, :] < DK))
         if USE_GATE:
             gl.store(DG + rows * HQ + hq, dg, rows < end)
-    if MODE == 1 or MODE == 3:
+    if HAS_DV:
         grad_v = _acc_read(acc=dv_acc, M=BM, N=BV, TCGEN=TCGEN, NW=NW)
         v_layout: gl.constexpr = _acc_layout(M=BM, N=BV, TCGEN=TCGEN, NW=NW)
         vr = start + gl.arange(0, BM, gl.SliceLayout(1, v_layout)).to(gl.int64)
@@ -1211,11 +1163,16 @@ def parallel_attn_bwd_gluon(
     tma_qk = IS_TMA_SUPPORTED and dk % 8 == 0 and q.data_ptr() % 16 == 0 and k.data_ptr() % 16 == 0
     tma_v = IS_TMA_SUPPORTED and dv % 8 == 0 and v.data_ptr() % 16 == 0
     tma_v = tma_v and do.data_ptr() % 16 == 0
-    modes = [0, 1] if bk + bv <= 512 else [0, 2, 3]
-    for mode in modes:
-        q_rows, k_rows = (bm, bn) if mode == 0 else (bn, bm)
-        q_desc, k_desc = (_descriptor(x=q, rows=q_rows, dim=bk), _descriptor(x=k, rows=k_rows, dim=bk)) if tma_qk else (q, k)
-        v_desc, do_desc = (_descriptor(x=v, rows=k_rows, dim=bv), _descriptor(x=do, rows=q_rows, dim=bv)) if tma_v else (v, do)
+    gradients = ('dq', 'dkv') if bk + bv <= 512 else ('dq', 'dk', 'dv')
+    q_desc, k_desc = (_descriptor(x=q, rows=bm, dim=bk), _descriptor(x=k, rows=bn, dim=bk)) if tma_qk else (q, k)
+    v_desc, do_desc = (_descriptor(x=v, rows=bn, dim=bv), _descriptor(x=do, rows=bm, dim=bv)) if tma_v else (v, do)
+    dq_descriptors = q_desc, k_desc, v_desc, do_desc
+    if bm != bn:
+        q_desc, k_desc = (_descriptor(x=q, rows=bn, dim=bk), _descriptor(x=k, rows=bm, dim=bk)) if tma_qk else (q, k)
+        v_desc, do_desc = (_descriptor(x=v, rows=bm, dim=bv), _descriptor(x=do, rows=bn, dim=bv)) if tma_v else (v, do)
+    dkv_descriptors = q_desc, k_desc, v_desc, do_desc
+    for grad in gradients:
+        q_desc, k_desc, v_desc, do_desc = dq_descriptors if grad == 'dq' else dkv_descriptors
         parallel_attn_bwd_kernel_gluon[(nt * b * hq,)](
             Q=q,
             K=k,
@@ -1227,7 +1184,7 @@ def parallel_attn_bwd_gluon(
             DK_OUT=dk_out,
             DV_OUT=dv_out,
             GATE=g_cumsum,
-            DG=dg_q if mode == 0 else dg_k,
+            DG=dg_q if grad == 'dq' else dg_k,
             SINK=sink_bias,
             DSINK=dsink_rows,
             CU=cu_seqlens,
@@ -1256,7 +1213,7 @@ def parallel_attn_bwd_gluon(
             VARLEN=cu_seqlens is not None,
             USE_GATE=g_cumsum is not None,
             USE_SINK=sink_bias is not None,
-            MODE=mode,
+            GRAD=grad,
             NW=nw,
             num_warps=nw,
         )
