@@ -12,7 +12,7 @@ import torch
 
 from fla.layers import CyclicFlowAttention
 from fla.models.utils import Cache
-from fla.utils import IS_NVIDIA, device
+from fla.utils import IS_NVIDIA, assert_close, device
 
 pytestmark = pytest.mark.skipif(not IS_NVIDIA, reason='CyFA kernels currently require NVIDIA GPUs')
 
@@ -61,3 +61,23 @@ def test_cache_layer_idx():
     layer = CyclicFlowAttention(hidden_size=64, num_heads=1, head_dim=64, num_slots=32).to(device).eval()
     with pytest.raises(ValueError, match='layer_idx'):
         layer(torch.randn(1, 1, 64, device=device), past_key_values=Cache(), use_cache=True)
+
+
+@torch.no_grad()
+def test_cached_multi_token_attention_mask():
+    torch.manual_seed(42)
+    layer = CyclicFlowAttention(
+        hidden_size=64, num_heads=1, head_dim=64, num_slots=32, use_short_conv=False, layer_idx=0,
+    ).to(device=device, dtype=torch.bfloat16).eval()
+    prefix = torch.randn(2, 3, 64, device=device, dtype=torch.bfloat16)
+    caches = [Cache(), Cache()]
+    for cache in caches:
+        layer(prefix, past_key_values=cache, use_cache=True)
+
+    x = torch.randn(2, 2, 64, device=device, dtype=torch.bfloat16)
+    attention_mask = torch.tensor([[0, 1], [1, 1]], device=device)
+    actual = layer(x, attention_mask=attention_mask, past_key_values=caches[0], use_cache=True)[0]
+    packed = torch.cat((x[0, 1:], x[1]), dim=0).unsqueeze(0)
+    cu_seqlens = torch.tensor([0, 1, 3], dtype=torch.int32, device=device)
+    expected = layer(packed, past_key_values=caches[1], use_cache=True, cu_seqlens=cu_seqlens)[0]
+    assert_close('o', expected.squeeze(0).float(), actual[attention_mask.bool()].float(), 1e-6)

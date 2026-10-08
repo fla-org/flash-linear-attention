@@ -216,7 +216,7 @@ class CyclicFlowAttention(nn.Module):
 
         indices = None
         cu_seqlens = kwargs.get("cu_seqlens")
-        if last_state is None and cu_seqlens is None and attention_mask is not None and q_len > 1:
+        if cu_seqlens is None and attention_mask is not None and q_len > 1:
             indices, cu_seqlens, _ = get_unpad_data(attention_mask[:, -q_len:])
             hidden_states = index_first_axis(rearrange(hidden_states, "b s ... -> (b s) ..."), indices).unsqueeze(0)
 
