@@ -52,6 +52,7 @@ def _build_parallel_attn_bwd_kernel(
     kv_s = (_B, T_d, _H, _K_orig)
     vv_s = (_B, T_d, _H, _V_orig)
     lse_s = (_B, T_d, _HQ)
+    do_s = (_B, T_d, _HQ, _V_orig)
     dq_s = (_B, T_d, _HQ, _K_orig)
     dkv_s = (_B, T_d, _H, _K_orig)
     dvv_s = (_B, T_d, _H, _V_orig)
@@ -202,7 +203,7 @@ def _build_parallel_attn_bwd_kernel(
             q: T.Tensor(q_s, _dtype), k: T.Tensor(kv_s, _dtype),
             v: T.Tensor(vv_s, _dtype), g: T.Tensor(lse_s, accum_dtype),
             lse: T.Tensor(lse_s, accum_dtype), delta: T.Tensor(lse_s, accum_dtype),
-            do: T.Tensor(q_s, _dtype), dq_out: T.Tensor(dq_s, accum_dtype),
+            do: T.Tensor(do_s, _dtype), dq_out: T.Tensor(dq_s, accum_dtype),
             dk_out: T.Tensor(dkv_s, accum_dtype), dv_out: T.Tensor(dvv_s, accum_dtype),
             dg: T.Tensor(lse_s, accum_dtype),
             cu_seqlens: T.Tensor((Ncu_d,), T.int32),
@@ -222,7 +223,7 @@ def _build_parallel_attn_bwd_kernel(
             q: T.Tensor(q_s, _dtype), k: T.Tensor(kv_s, _dtype),
             v: T.Tensor(vv_s, _dtype), g: T.Tensor(lse_s, accum_dtype),
             lse: T.Tensor(lse_s, accum_dtype), delta: T.Tensor(lse_s, accum_dtype),
-            do: T.Tensor(q_s, _dtype), dq_out: T.Tensor(dq_s, accum_dtype),
+            do: T.Tensor(do_s, _dtype), dq_out: T.Tensor(dq_s, accum_dtype),
             dk_out: T.Tensor(dkv_s, accum_dtype), dv_out: T.Tensor(dvv_s, accum_dtype),
             dg: T.Tensor(lse_s, accum_dtype),
         ):
