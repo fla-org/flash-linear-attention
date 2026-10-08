@@ -27,22 +27,20 @@ def causal_conv1d_fwd_kernel(
     initial_state,
     chunk_indices,
     T,
-    stride_x_n: gl.constexpr,
-    stride_x_t: gl.constexpr,
+    SXN: gl.constexpr,
+    SXT: gl.constexpr,
     D: gl.constexpr,
     W: gl.constexpr,
     BT: gl.constexpr,
     BD: gl.constexpr,
-    BT_UNROLL: gl.constexpr,
-    NUM_WARPS: gl.constexpr,
+    BC: gl.constexpr,
     ACTIVATION: gl.constexpr,
     NUM_SPLITS: gl.constexpr = 1,
 ):
-    # reusing overlapping input windows avoids reloading W inputs for every output.
     layout: gl.constexpr = gl.BlockedLayout(
         size_per_thread=[1, BD // 32],
         threads_per_warp=[1, 32],
-        warps_per_cta=[NUM_WARPS, 1],
+        warps_per_cta=[4, 1],
         order=[1, 0],
     )
     i_d = gl.program_id(0).to(gl.int64)
@@ -55,22 +53,26 @@ def causal_conv1d_fwd_kernel(
         i_t = gl.load(chunk_indices + 2 * i_t + 1).to(gl.int64)
         bos = gl.load(cu_seqlens + i_n).to(gl.int64)
         T = gl.load(cu_seqlens + i_n + 1).to(gl.int64) - bos
-        p_x = x + bos * stride_x_t
+        p_x = x + bos * SXT
     else:
         i_n = i_b
         bos = i_b * T
-        p_x = x + i_b * stride_x_n
+        p_x = x + i_b * SXN
     o_d = i_d * BD + gl.arange(0, BD, layout=gl.SliceLayout(0, layout)).to(gl.int64)
     o_t = (i_t * NUM_SPLITS + i_split) * BT
-    o_t += gl.arange(0, BT // BT_UNROLL, layout=gl.SliceLayout(1, layout)).to(gl.int64) * BT_UNROLL
+    o_t += gl.arange(0, BT // BC, layout=gl.SliceLayout(1, layout)).to(gl.int64) * BC
     b_x = ()
     b_w = ()
     for i_w in gl.static_range(W):
         b_w += (gl.load(weight + o_d * W + i_w, mask=o_d < D, other=0).to(gl.float32),)
-    for i_x in gl.static_range(BT_UNROLL + W - 1):
+    # each row unrolls BC outputs from one register window; adjacent outputs reuse inputs.
+    # with W=4:
+    # y[t]   <- x[t-3] x[t-2] x[t-1] x[t]
+    # y[t+1] <-        x[t-2] x[t-1] x[t] x[t+1]
+    for i_x in gl.static_range(BC + W - 1):
         o_x = o_t + i_x - W + 1
         b_xi = gl.load(
-            pointer=p_x + o_x[:, None] * stride_x_t + o_d[None, :],
+            pointer=p_x + o_x[:, None] * SXT + o_d[None, :],
             mask=(o_x[:, None] >= 0) & (o_x[:, None] < T) & (o_d[None, :] < D),
             other=0,
         ).to(gl.float32)
@@ -83,8 +85,8 @@ def causal_conv1d_fwd_kernel(
         b_x += (b_xi,)
     if bias is not None:
         b_bias = gl.load(bias + o_d, mask=o_d < D, other=0).to(gl.float32)
-    for i_r in gl.static_range(BT_UNROLL):
-        b_y = gl.full((BT // BT_UNROLL, BD), 0, gl.float32, layout)
+    for i_r in gl.static_range(BC):
+        b_y = gl.full((BT // BC, BD), 0, gl.float32, layout)
         for i_w in gl.static_range(W):
             b_y += b_x[i_r + i_w] * b_w[i_w][None, :]
         if bias is not None:
@@ -110,23 +112,22 @@ def causal_conv1d_bwd_kernel(
     cu_seqlens,
     chunk_indices,
     T,
-    stride_x_n: gl.constexpr,
-    stride_x_t: gl.constexpr,
-    stride_dy_n: gl.constexpr,
-    stride_dy_t: gl.constexpr,
-    stride_dy_d: gl.constexpr,
+    SXN: gl.constexpr,
+    SXT: gl.constexpr,
+    SYN: gl.constexpr,
+    SYT: gl.constexpr,
+    SYD: gl.constexpr,
     D: gl.constexpr,
     W: gl.constexpr,
     BT: gl.constexpr,
     BD: gl.constexpr,
-    BT_UNROLL: gl.constexpr,
-    NUM_WARPS: gl.constexpr,
+    BC: gl.constexpr,
     ACTIVATION: gl.constexpr,
 ):
     layout: gl.constexpr = gl.BlockedLayout(
         size_per_thread=[1, BD // 32],
         threads_per_warp=[1, 32],
-        warps_per_cta=[NUM_WARPS, 1],
+        warps_per_cta=[4, 1],
         order=[1, 0],
     )
     i_d = gl.program_id(0).to(gl.int64)
@@ -138,39 +139,41 @@ def causal_conv1d_bwd_kernel(
         i_t = gl.load(chunk_indices + 2 * i_t + 1).to(gl.int64)
         bos = gl.load(cu_seqlens + i_n).to(gl.int64)
         T = gl.load(cu_seqlens + i_n + 1).to(gl.int64) - bos
-        p_x = x + bos * stride_x_t
-        p_dy = dy + bos * stride_dy_t
+        p_x = x + bos * SXT
+        p_dy = dy + bos * SYT
     else:
         bos = i_b * T
-        p_x = x + i_b * stride_x_n
-        p_dy = dy + i_b * stride_dy_n
+        p_x = x + i_b * SXN
+        p_dy = dy + i_b * SYN
     o_d = i_d * BD + gl.arange(0, BD, layout=gl.SliceLayout(0, layout)).to(gl.int64)
-    o_t = i_t * BT + gl.arange(0, BT // BT_UNROLL, layout=gl.SliceLayout(1, layout)).to(gl.int64) * BT_UNROLL
+    # each row unrolls BC consecutive tokens within the BT-token tile.
+    # rows (BT=64, BC=16): [0..15] [16..31] [32..47] [48..63]
+    o_t = i_t * BT + gl.arange(0, BT // BC, layout=gl.SliceLayout(1, layout)).to(gl.int64) * BC
     b_w = ()
     b_x = ()
     b_dy = ()
     b_dw = ()
     for i_w in gl.static_range(W):
         b_w += (gl.load(weight + o_d * W + i_w, mask=o_d < D, other=0).to(gl.float32),)
-        b_dw += (gl.full((BT // BT_UNROLL, BD), 0, gl.float32, layout),)
+        b_dw += (gl.full((BT // BC, BD), 0, gl.float32, layout),)
     if bias is not None:
         b_bias = gl.load(bias + o_d, mask=o_d < D, other=0).to(gl.float32)
-    for i_x in gl.static_range(BT_UNROLL + 2 * W - 2):
+    for i_x in gl.static_range(BC + 2 * W - 2):
         o_x = o_t + i_x - W + 1
         b_xi = gl.load(
-            pointer=p_x + o_x[:, None] * stride_x_t + o_d[None, :],
+            pointer=p_x + o_x[:, None] * SXT + o_d[None, :],
             mask=(o_x[:, None] >= 0) & (o_x[:, None] < T) & (o_d[None, :] < D),
             other=0,
         ).to(gl.float32)
         b_x += (b_xi,)
-    for i_r in gl.static_range(BT_UNROLL + W - 1):
+    for i_r in gl.static_range(BC + W - 1):
         b_dyi = gl.load(
-            pointer=p_dy + (o_t[:, None] + i_r) * stride_dy_t + o_d[None, :] * stride_dy_d,
+            pointer=p_dy + (o_t[:, None] + i_r) * SYT + o_d[None, :] * SYD,
             mask=(o_t[:, None] + i_r < T) & (o_d[None, :] < D),
             other=0,
         ).to(gl.float32)
         if ACTIVATION == 'silu' or ACTIVATION == 'swish':
-            b_y = gl.full((BT // BT_UNROLL, BD), 0, gl.float32, layout)
+            b_y = gl.full((BT // BC, BD), 0, gl.float32, layout)
             for i_w in gl.static_range(W):
                 b_y += b_x[i_r + i_w] * b_w[i_w][None, :]
             if bias is not None:
@@ -180,9 +183,9 @@ def causal_conv1d_bwd_kernel(
             b_ys = 1. / (1. + gl.exp(-b_y))
             b_dyi = b_dyi * b_ys * (1 + b_y * (1 - b_ys))
         b_dy += (b_dyi,)
-    b_db = gl.full((BT // BT_UNROLL, BD), 0, gl.float32, layout)
-    for i_r in gl.static_range(BT_UNROLL):
-        b_dx = gl.full((BT // BT_UNROLL, BD), 0, gl.float32, layout)
+    b_db = gl.full((BT // BC, BD), 0, gl.float32, layout)
+    for i_r in gl.static_range(BC):
+        b_dx = gl.full((BT // BC, BD), 0, gl.float32, layout)
         b_dw_new = ()
         for i_w in gl.static_range(W):
             b_dyi = b_dy[i_r + i_w]
@@ -214,14 +217,13 @@ def causal_conv1d_bwd_kernel_dwdb(
     NP,
     D: gl.constexpr,
     W: gl.constexpr,
-    BN: gl.constexpr,
     BD: gl.constexpr,
-    NUM_WARPS: gl.constexpr,
 ):
+    BN: gl.constexpr = 128
     layout: gl.constexpr = gl.BlockedLayout(
         size_per_thread=[1, BD // 32],
         threads_per_warp=[1, 32],
-        warps_per_cta=[NUM_WARPS, 1],
+        warps_per_cta=[4, 1],
         order=[1, 0],
     )
     i_d = gl.program_id(0).to(gl.int64)
@@ -272,7 +274,6 @@ def causal_conv1d_fwd(
     y = torch.empty_like(x, memory_format=torch.contiguous_format)
     use_small_tile = B * T * D <= 1048576
     BD, num_splits = (32, 2) if use_small_tile else (64, 1)
-    num_warps = 4
     causal_conv1d_fwd_kernel[(triton.cdiv(D, BD), NT * num_splits, B)](
         x=x,
         y=y,
@@ -283,17 +284,16 @@ def causal_conv1d_fwd(
         initial_state=initial_state,
         chunk_indices=chunk_indices,
         T=T,
-        stride_x_n=x.stride(0),
-        stride_x_t=x.stride(1),
+        SXN=x.stride(0),
+        SXT=x.stride(1),
         D=D,
         W=weight.shape[1],
         BT=BT // num_splits,
         BD=BD,
-        BT_UNROLL=8,
-        NUM_WARPS=num_warps,
+        BC=8,
         ACTIVATION=activation,
         NUM_SPLITS=num_splits,
-        num_warps=num_warps,
+        num_warps=4,
     )
     final_state = None
     if output_final_state:
@@ -324,7 +324,7 @@ def causal_conv1d_bwd(
     BT = chunk_size
     B, T, D = x.shape
     W = weight.shape[1]
-    BD, num_warps = 32, 4
+    BD = 32
     if cu_seqlens is not None and chunk_indices is None:
         chunk_indices = prepare_chunk_indices(cu_seqlens=cu_seqlens, chunk_size=BT, cu_seqlens_cpu=cu_seqlens_cpu)
     NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
@@ -342,19 +342,18 @@ def causal_conv1d_bwd(
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         T=T,
-        stride_x_n=x.stride(0),
-        stride_x_t=x.stride(1),
-        stride_dy_n=dy.stride(0),
-        stride_dy_t=dy.stride(1),
-        stride_dy_d=dy.stride(2),
+        SXN=x.stride(0),
+        SXT=x.stride(1),
+        SYN=dy.stride(0),
+        SYT=dy.stride(1),
+        SYD=dy.stride(2),
         D=D,
         W=W,
         BT=BT,
         BD=BD,
-        BT_UNROLL=16,
-        NUM_WARPS=num_warps,
+        BC=16,
         ACTIVATION=activation,
-        num_warps=num_warps,
+        num_warps=4,
     )
     dw = weight.new_empty((D, W))
     db = bias.new_empty((D,)) if bias is not None else None
@@ -366,10 +365,8 @@ def causal_conv1d_bwd(
         NP=B * NT,
         D=D,
         W=W,
-        BN=128,
         BD=BD,
-        NUM_WARPS=num_warps,
-        num_warps=num_warps,
+        num_warps=4,
     )
     dr = dy if residual is not None else None
     return dx, dw, db, dr, None
