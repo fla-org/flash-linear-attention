@@ -13,7 +13,7 @@ import torch
 import triton
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
-from triton.experimental.gluon.language.nvidia import blackwell as bw
+from triton.experimental.gluon.language.nvidia import blackwell
 from triton.experimental.gluon.language.nvidia.hopper import (
     fence_async_shared,
     mbarrier,
@@ -32,10 +32,10 @@ from fla.utils import IS_TMA_SUPPORTED, get_device_capability
 def _acc_layout(M, N, TCGEN, NW):
     if TCGEN:
         # dependency hashing inspects inactive branches, so both API names need guarded lookup.
-        legacy = getattr(bw, 'get_tmem_32x32b_reg_layout', None)
+        legacy = getattr(blackwell, 'get_tmem_32x32b_reg_layout', None)
         if legacy is not None:
             return legacy(M, min(N, 256), [M, N], NW)
-        current = getattr(bw, 'get_tmem_reg_layout', None)
+        current = getattr(blackwell, 'get_tmem_reg_layout', None)
         return current(gl.float32, [M, N], _tmem_layout(M=M, N=N), NW)
     return gl.NVMMADistributedLayout(
         version=[3, 0],
@@ -46,16 +46,16 @@ def _acc_layout(M, N, TCGEN, NW):
 
 @gluon.constexpr_function
 def _tmem_layout(M, N):
-    if hasattr(bw, 'get_tmem_32x32b_reg_layout'):
-        return bw.TensorMemoryLayout((M, min(N, 256)), unpacked=True)
-    return bw.TensorMemoryLayout((M, min(N, 256)), col_stride=1)
+    if hasattr(blackwell, 'get_tmem_32x32b_reg_layout'):
+        return blackwell.TensorMemoryLayout((M, min(N, 256)), unpacked=True)
+    return blackwell.TensorMemoryLayout((M, min(N, 256)), col_stride=1)
 
 
 @gluon.constexpr_function
 def _packed_layout(M, N):
-    if hasattr(bw, 'get_tmem_32x32b_reg_layout'):
-        return bw.TensorMemoryLayout((M, N), unpacked=False)
-    return bw.TensorMemoryLayout((M, N), col_stride=1)
+    if hasattr(blackwell, 'get_tmem_32x32b_reg_layout'):
+        return blackwell.TensorMemoryLayout((M, N), unpacked=False)
+    return blackwell.TensorMemoryLayout((M, N), col_stride=1)
 
 
 @gluon.jit
@@ -63,7 +63,7 @@ def _packed_operand(score, dtype: gl.constexpr, BM: gl.constexpr, BN: gl.constex
     # packed operands reuse accumulators after their fp32 values have been consumed.
     ref = score.slice(0, BN // 2)
     layout: gl.constexpr = _packed_layout(BM, BN)
-    if gl.constexpr(hasattr(bw.tensor_memory_descriptor, '_reinterpret')):
+    if gl.constexpr(hasattr(blackwell.tensor_memory_descriptor, '_reinterpret')):
         return ref._reinterpret(dtype, [BM, BN], layout)
     else:
         return ref.reinterpret(dtype, [BM, BN], layout)
@@ -75,7 +75,7 @@ def _acc_alloc(M: gl.constexpr, N: gl.constexpr, TCGEN: gl.constexpr, NW: gl.con
     acc = gl.zeros([M, N], gl.float32, layout)
     if TCGEN:
         tmem_layout: gl.constexpr = _tmem_layout(M=M, N=N)
-        result = bw.allocate_tensor_memory(gl.float32, [M, N], tmem_layout)
+        result = blackwell.allocate_tensor_memory(gl.float32, [M, N], tmem_layout)
         result.store(acc)
     else:
         result = acc
@@ -94,8 +94,8 @@ def _acc_read(acc, M: gl.constexpr, N: gl.constexpr, TCGEN: gl.constexpr, NW: gl
 @gluon.jit
 def _mma(a, b, acc, bar, phase, TCGEN: gl.constexpr, USE_ACC: gl.constexpr = True):
     if TCGEN:
-        bw.tcgen05_mma(a, b, acc, use_acc=USE_ACC)
-        bw.tcgen05_commit(bar)
+        blackwell.tcgen05_mma(a, b, acc, use_acc=USE_ACC)
+        blackwell.tcgen05_commit(bar)
         mbarrier.wait(bar, phase)
         phase ^= 1
     else:
@@ -481,9 +481,9 @@ def _load_pair(A, AD, AS, B, BD, BS, bar, head, row, end,
 @gluon.jit
 def _mma_pair(a, b, c, d, acc_a, acc_b, bar, phase, TCGEN: gl.constexpr, USE_ACC: gl.constexpr = False):
     if TCGEN:
-        bw.tcgen05_mma(a, b, acc_a, use_acc=USE_ACC)
-        bw.tcgen05_mma(c, d, acc_b, use_acc=USE_ACC)
-        bw.tcgen05_commit(bar)
+        blackwell.tcgen05_mma(a, b, acc_a, use_acc=USE_ACC)
+        blackwell.tcgen05_mma(c, d, acc_b, use_acc=USE_ACC)
+        blackwell.tcgen05_commit(bar)
         mbarrier.wait(bar, phase)
         phase ^= 1
     else:

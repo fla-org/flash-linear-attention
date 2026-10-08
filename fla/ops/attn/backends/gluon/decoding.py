@@ -9,7 +9,7 @@ import torch
 import triton
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
-from triton.experimental.gluon.language.nvidia.ampere import async_copy as cp
+from triton.experimental.gluon.language.nvidia.ampere import async_copy
 
 _thread_barrier = getattr(gl, 'thread_barrier', None) or getattr(gl, 'barrier', None)
 
@@ -17,7 +17,7 @@ _thread_barrier = getattr(gl, 'thread_barrier', None) or getattr(gl, 'barrier', 
 @gluon.jit
 def _copy_decode_tile(smem, ptr, mask, ASYNC: gl.constexpr):
     if ASYNC:
-        cp.async_copy_global_to_shared(smem, ptr, mask)
+        async_copy.async_copy_global_to_shared(smem, ptr, mask)
     else:
         smem.store(gl.load(ptr, mask, other=0.))
 
@@ -59,7 +59,7 @@ def attn_decoding_fwd_kernel_split(
     if first < last:
         _copy_decode_tile(smem=ks.index(0), ptr=kp, mask=(first + rows[:, None] < last) & (kd[None, :] < DK), ASYNC=ASYNC)
         _copy_decode_tile(smem=vs.index(0), ptr=vp, mask=(first + rows[:, None] < last) & (vd[None, :] < DV), ASYNC=ASYNC)
-        cp.commit_group()
+        async_copy.commit_group()
     maximum = float('-inf')
     denom = 0.
     output = gl.full([BV], 0., gl.float32, gl.SliceLayout(0, layout))
@@ -68,7 +68,7 @@ def attn_decoding_fwd_kernel_split(
     for step in range(gl.cdiv(gl.maximum(last - first, 0), BN)):
         slot = (step % 2).to(gl.int32)
         start = first + step * BN
-        cp.wait_group(0)
+        async_copy.wait_group(0)
         _thread_barrier()
         if start + BN < last:
             nxt = ((step + 1) % 2).to(gl.int32)
@@ -85,7 +85,7 @@ def attn_decoding_fwd_kernel_split(
                 mask=(kr < last) & (vd[None, :] < DV),
                 ASYNC=ASYNC,
             )
-            cp.commit_group()
+            async_copy.commit_group()
         keys = ks.index(slot).load(layout)
         values = vs.index(slot).load(layout)
         scores = gl.sum(q[None, :] * keys, 1)
@@ -99,7 +99,7 @@ def attn_decoding_fwd_kernel_split(
         output = output * alpha + gl.sum(p[:, None] * values, 0)
         denom = denom * alpha + gl.sum(p, 0)
         maximum = new_max
-    cp.wait_group(0)
+    async_copy.wait_group(0)
     if SPLITS == 1:
         if USE_SINK:
             maximum = gl.where(maximum == float('-inf'), 0., maximum)

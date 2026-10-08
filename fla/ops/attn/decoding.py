@@ -136,7 +136,8 @@ def attn_decoding_fwd(
     window_size: int | None = None,
     sink_bias: torch.Tensor | None = None,
 ):
-    B, T, H, K, V = *k.shape, v.shape[-1]
+    B, T, H, K = k.shape
+    V = v.shape[-1]
     N, HQ = len(cu_seqlens) - 1, q.shape[2]
     G = HQ // H
     BK = max(triton.next_power_of_2(K), 16)

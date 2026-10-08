@@ -2,7 +2,7 @@
 
 Set `FLA_ATTN_GLUON=1` and `FLA_USE_TMA=1` to opt in to the Gluon implementations of `parallel_attn` and `attn_decoding_one_step`. The default backend is unchanged. This backend requires Triton >= 3.5.1, NVIDIA compute capability 9.x or 10.x, and matching fp16 or bf16 Q/K/V. Other inputs use the existing dispatch fallback. The assembler must support the target architecture; use `TRITON_PTXAS_PATH` to select a compatible CUDA toolkit assembler when needed.
 
-Both query/key and value dimensions can independently range from 1 through 512. The backend supports causal attention, GQA/MQA, dense and packed variable-length input, optional chunk indices, sliding windows, forgetting gates, attention sinks, and their gradients. The public wrappers still handle contiguity, gate preprocessing, and argument validation. Decoding preserves empty-sequence and zero-window behavior.
+Both query/key and value dimensions can independently range from 1 through 512. Parallel attention supports causal attention, GQA/MQA, dense and packed variable-length input, optional chunk indices, sliding windows, forgetting gates, attention sinks, and their gradients. The public wrappers still handle contiguity, gate preprocessing, and argument validation. Single-step decoding is an inference-only API without backward support; it preserves empty-sequence and zero-window behavior.
 
 ```python
 import os
@@ -30,8 +30,8 @@ The implementation follows the synchronization and layout APIs in the public Tri
 Run correctness checks before collecting timings:
 
 ```bash
-FLA_TILELANG=0 FLA_ATTN_GLUON=1 FLA_USE_TMA=1 python -m pytest tests/ops/test_attn.py tests/ops/test_attn_gluon.py
-FLA_TILELANG=0 FLA_ATTN_GLUON=1 FLA_USE_TMA=1 python -m benchmarks.ops.verify --op parallel_attn
+FLA_CI_ENV=0 FLA_TILELANG=0 FLA_ATTN_GLUON=1 FLA_USE_TMA=1 python -m pytest tests/ops/test_attn.py tests/ops/test_attn_gluon.py
+FLA_CI_ENV=0 FLA_TILELANG=0 FLA_ATTN_GLUON=1 FLA_USE_TMA=1 python -m benchmarks.ops.verify --op parallel_attn
 ```
 
 Use the unified runner to measure attention forward and forward plus backward. Run both backends on the same device and software, with backend dispatch enabled:
@@ -43,7 +43,7 @@ FLA_DISABLE_BACKEND_DISPATCH=0 FLA_TILELANG=0 FLA_USE_TMA=1 python -m benchmarks
     --op parallel_attn --backend gluon --no-base --json attn-gluon.json
 ```
 
-Use `--custom-shapes '{"large": {"B": 1, "T": 4096, "H": 8, "D": 512}}'` to measure a large head dimension. The original parallel-attention implementation does not support K > 256; unsupported or resource-limited baseline cases have no speedup ratio. The backend remains experimental: current measurements show forward-only regressions, and long-sequence dense training gains are limited.
+Use `--custom-shapes '{"large": {"B": 1, "T": 4096, "H": 8, "D": 512}}'` to measure a large head dimension. The original parallel-attention implementation does not support K > 256; unsupported or resource-limited baseline cases have no speedup ratio. Performance depends on the workload and architecture: long-sequence dense and packed attention improve in the measured configurations, while some short or feature-enabled cases still regress. Operator forward-plus-backward timings do not establish model training throughput.
 
 The same registry accepts `HQ`, `V`, `input_dtype`, `cu_seqlens`, `use_gate`, `use_sink`, and `window_size`. For example, append this shape configuration to either command above to compare packed fp16 GQA with unequal query/key and value dimensions:
 

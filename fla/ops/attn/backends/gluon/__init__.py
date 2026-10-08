@@ -10,8 +10,7 @@ from __future__ import annotations
 import torch
 
 from fla.ops.backends import BaseBackend
-from fla.utils import IS_NVIDIA, find_spec_cached, get_device_capability
-from fla.utils._compat import TRITON_ABOVE_3_5_1
+from fla.utils import IS_NVIDIA, TRITON_ABOVE_3_5_1, find_spec_cached, get_device_capability
 
 
 class AttnGluonBackend(BaseBackend):
@@ -41,7 +40,7 @@ class AttnGluonBackend(BaseBackend):
         self, q, k, v, g_cumsum, sink_bias, scale,
         window_size=None, cu_seqlens=None, chunk_indices=None,
     ):
-        from .parallel import parallel_attn_fwd_gluon
+        from fla.ops.attn.backends.gluon.parallel import parallel_attn_fwd_gluon
         return parallel_attn_fwd_gluon(
             q=q,
             k=k,
@@ -74,7 +73,7 @@ class AttnGluonBackend(BaseBackend):
         self, q, k, v, o, g_cumsum, lse, do, sink_bias=None, scale=None,
         window_size=None, chunk_size=128, cu_seqlens=None, chunk_indices=None,
     ):
-        from .parallel import parallel_attn_bwd_gluon
+        from fla.ops.attn.backends.gluon.parallel import parallel_attn_bwd_gluon
         return parallel_attn_bwd_gluon(
             q=q,
             k=k,
@@ -108,7 +107,7 @@ class AttnGluonBackend(BaseBackend):
     def attn_decoding_fwd(
         self, q, k, v, g_cumsum, scale, cu_seqlens, window_size=None, sink_bias=None,
     ):
-        from .decoding import attn_decoding_gluon
+        from fla.ops.attn.backends.gluon.decoding import attn_decoding_gluon
         return attn_decoding_gluon(
             q=q,
             k=k,

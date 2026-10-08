@@ -9,7 +9,7 @@ import inspect
 
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
-from triton.experimental.gluon.language.nvidia import blackwell as bw
+from triton.experimental.gluon.language.nvidia import blackwell
 from triton.experimental.gluon.language.nvidia.hopper import mbarrier, tma
 
 from fla.ops.attn.backends.gluon.parallel import _acc_layout, _packed_operand, _tmem_layout
@@ -47,14 +47,14 @@ def _qk(qs, ks, scores, kr, kf, sr, sf, i, BM: gl.constexpr, BN: gl.constexpr, B
     phase = (i // 2) % 2
     mbarrier.wait(kr.index(slot), phase)
     mbarrier.wait(sf.index(slot), phase)
-    bw.tcgen05_mma(
+    blackwell.tcgen05_mma(
         a=qs.reshape([BM, BK]),
         b=ks.index(slot).reshape([BN, BK]).permute((1, 0)),
         acc=scores.index(slot),
         use_acc=False,
     )
-    bw.tcgen05_commit(sr.index(slot))
-    bw.tcgen05_commit(kf.index(slot))
+    blackwell.tcgen05_commit(sr.index(slot))
+    blackwell.tcgen05_commit(kf.index(slot))
 
 
 @gluon.jit
@@ -79,10 +79,10 @@ def _mma(args, descs, cfg: gl.constexpr):
         mbarrier.wait(ore, i % 2)
         mbarrier.wait(vr.index(slot), phase)
         prob = _packed_operand(score=scores.index(slot), dtype=qs.dtype, BM=BM, BN=BN)
-        bw.tcgen05_mma(a=prob, b=vs.index(slot).reshape([BN, BV]), acc=output, use_acc=i > 0)
-        bw.tcgen05_commit(ordy)
-        bw.tcgen05_commit(sf.index(slot))
-        bw.tcgen05_commit(vf.index(slot))
+        blackwell.tcgen05_mma(a=prob, b=vs.index(slot).reshape([BN, BV]), acc=output, use_acc=i > 0)
+        blackwell.tcgen05_commit(ordy)
+        blackwell.tcgen05_commit(sf.index(slot))
+        blackwell.tcgen05_commit(vf.index(slot))
 
 
 @gluon.jit
@@ -189,8 +189,8 @@ def parallel_attn_fwd_kernel_pipeline(
     qs = gl.allocate_shared_memory(dtype, [1, BM, BK], Q_DESC.layout)
     ks = gl.allocate_shared_memory(dtype, [2, 1, BN, BK], K_DESC.layout)
     vs = gl.allocate_shared_memory(dtype, [2, 1, BN, BV], V_DESC.layout)
-    scores = bw.allocate_tensor_memory(gl.float32, [2, BM, BN], _tmem_layout(M=BM, N=BN))
-    output = bw.allocate_tensor_memory(gl.float32, [BM, BV], _tmem_layout(M=BM, N=BV))
+    scores = blackwell.allocate_tensor_memory(gl.float32, [2, BM, BN], _tmem_layout(M=BM, N=BN))
+    output = blackwell.allocate_tensor_memory(gl.float32, [BM, BV], _tmem_layout(M=BM, N=BV))
     output.store(gl.zeros([BM, BV], gl.float32, _acc_layout(M=BM, N=BV, TCGEN=True, NW=4)))
     qb = gl.allocate_shared_memory(gl.int64, [1], mbarrier.MBarrierLayout())
     kr = gl.allocate_shared_memory(gl.int64, [2, 1], mbarrier.MBarrierLayout())

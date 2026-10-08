@@ -134,9 +134,9 @@ def test_parallel(gluon_route, dtype, varlen, use_g, use_sink, window, HQ):
 @pytest.mark.parametrize('varlen', [False, True], ids=['dense', 'varlen'])
 @pytest.mark.parametrize('dim', [128, 512])
 def test_parallel_copy_path(gluon_route, monkeypatch, use_tma, varlen, dim):
-    from fla.ops.attn.backends.gluon import parallel as implementation
+    from fla.ops.attn.backends.gluon import parallel
 
-    monkeypatch.setattr(implementation, 'IS_TMA_SUPPORTED', use_tma)
+    monkeypatch.setattr(parallel, 'IS_TMA_SUPPORTED', use_tma)
     _compare(
         B=1,
         T=257,
