@@ -25,8 +25,16 @@ class AttnGluonBackend(BaseBackend):
         return IS_NVIDIA and TRITON_ABOVE_3_5_1 and find_spec_cached(cls.package_name) is not None
 
     def parallel_attn_fwd_verifier(
-        self, q, k, v, g_cumsum, sink_bias, scale,
-        window_size=None, cu_seqlens=None, chunk_indices=None,
+        self,
+        q,
+        k,
+        v,
+        g_cumsum,
+        sink_bias,
+        scale,
+        window_size=None,
+        cu_seqlens=None,
+        chunk_indices=None,
     ) -> tuple[bool, str | None]:
         if q.device.type != "cuda" or get_device_capability(q.device.index)[0] not in (9, 10):
             return False, "Gluon attention requires NVIDIA compute capability 9.x or 10.x"
@@ -36,10 +44,7 @@ class AttnGluonBackend(BaseBackend):
             return False, "Gluon attention supports query/key and value dimensions from 1 through 512"
         return True, None
 
-    def parallel_attn_fwd(
-        self, q, k, v, g_cumsum, sink_bias, scale,
-        window_size=None, cu_seqlens=None, chunk_indices=None,
-    ):
+    def parallel_attn_fwd(self, q, k, v, g_cumsum, sink_bias, scale, window_size=None, cu_seqlens=None, chunk_indices=None):
         from fla.ops.attn.backends.gluon.parallel import parallel_attn_fwd_gluon
         return parallel_attn_fwd_gluon(
             q=q,
@@ -54,8 +59,20 @@ class AttnGluonBackend(BaseBackend):
         )
 
     def parallel_attn_bwd_verifier(
-        self, q, k, v, o, g_cumsum, lse, do, sink_bias=None, scale=None,
-        window_size=None, chunk_size=128, cu_seqlens=None, chunk_indices=None,
+        self,
+        q,
+        k,
+        v,
+        o,
+        g_cumsum,
+        lse,
+        do,
+        sink_bias=None,
+        scale=None,
+        window_size=None,
+        chunk_size=128,
+        cu_seqlens=None,
+        chunk_indices=None,
     ) -> tuple[bool, str | None]:
         return self.parallel_attn_fwd_verifier(
             q=q,
@@ -70,8 +87,20 @@ class AttnGluonBackend(BaseBackend):
         )
 
     def parallel_attn_bwd(
-        self, q, k, v, o, g_cumsum, lse, do, sink_bias=None, scale=None,
-        window_size=None, chunk_size=128, cu_seqlens=None, chunk_indices=None,
+        self,
+        q,
+        k,
+        v,
+        o,
+        g_cumsum,
+        lse,
+        do,
+        sink_bias=None,
+        scale=None,
+        window_size=None,
+        chunk_size=128,
+        cu_seqlens=None,
+        chunk_indices=None,
     ):
         from fla.ops.attn.backends.gluon.parallel import parallel_attn_bwd_gluon
         return parallel_attn_bwd_gluon(
@@ -91,7 +120,15 @@ class AttnGluonBackend(BaseBackend):
         )
 
     def attn_decoding_fwd_verifier(
-        self, q, k, v, g_cumsum, scale, cu_seqlens, window_size=None, sink_bias=None,
+        self,
+        q,
+        k,
+        v,
+        g_cumsum,
+        scale,
+        cu_seqlens,
+        window_size=None,
+        sink_bias=None,
     ) -> tuple[bool, str | None]:
         return self.parallel_attn_fwd_verifier(
             q=q,
@@ -104,9 +141,7 @@ class AttnGluonBackend(BaseBackend):
             cu_seqlens=cu_seqlens,
         )
 
-    def attn_decoding_fwd(
-        self, q, k, v, g_cumsum, scale, cu_seqlens, window_size=None, sink_bias=None,
-    ):
+    def attn_decoding_fwd(self, q, k, v, g_cumsum, scale, cu_seqlens, window_size=None, sink_bias=None):
         from fla.ops.attn.backends.gluon.decoding import attn_decoding_gluon
         return attn_decoding_gluon(
             q=q,

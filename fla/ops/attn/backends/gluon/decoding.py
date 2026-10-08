@@ -11,7 +11,7 @@ from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
 from triton.experimental.gluon.language.nvidia.ampere import async_copy
 
-_thread_barrier = getattr(gl, 'thread_barrier', None) or getattr(gl, 'barrier', None)
+from fla.ops.utils.op import barrier, unflatten_program_id
 
 
 @gluon.jit
@@ -24,15 +24,31 @@ def _copy_decode_tile(smem, ptr, mask, ASYNC: gl.constexpr):
 
 @gluon.jit
 def attn_decoding_fwd_kernel_split(
-    Q, K, V, G, SINK, CU, PARTIAL, STATS, O,
-    H: gl.constexpr, HQ: gl.constexpr, DK: gl.constexpr, DV: gl.constexpr,
-    SCALE: gl.constexpr, W: gl.constexpr, SPLITS: gl.constexpr,
-    BN: gl.constexpr, BK: gl.constexpr, BV: gl.constexpr, NW: gl.constexpr,
-    USE_G: gl.constexpr, USE_SINK: gl.constexpr, ASYNC: gl.constexpr,
+    Q,
+    K,
+    V,
+    G,
+    SINK,
+    CU,
+    PARTIAL,
+    STATS,
+    O,
+    H: gl.constexpr,
+    HQ: gl.constexpr,
+    DK: gl.constexpr,
+    DV: gl.constexpr,
+    SCALE: gl.constexpr,
+    W: gl.constexpr,
+    SPLITS: gl.constexpr,
+    BN: gl.constexpr,
+    BK: gl.constexpr,
+    BV: gl.constexpr,
+    NW: gl.constexpr,
+    USE_G: gl.constexpr,
+    USE_SINK: gl.constexpr,
+    ASYNC: gl.constexpr,
 ):
-    split = gl.program_id(0).to(gl.int64)
-    bh = gl.program_id(1).to(gl.int64)
-    iv = gl.program_id(2).to(gl.int64)
+    split, iv, bh = unflatten_program_id(X=SPLITS, Y=gl.cdiv(DV, BV))
     seq, hq = bh // HQ, bh % HQ
     hk = hq // (HQ // H)
     bos = gl.load(CU + seq).to(gl.int64)
@@ -69,7 +85,7 @@ def attn_decoding_fwd_kernel_split(
         slot = (step % 2).to(gl.int32)
         start = first + step * BN
         async_copy.wait_group(0)
-        _thread_barrier()
+        barrier()
         if start + BN < last:
             nxt = ((step + 1) % 2).to(gl.int32)
             kr = start + BN + rows[:, None]
@@ -115,8 +131,16 @@ def attn_decoding_fwd_kernel_split(
 
 @gluon.jit
 def attn_decoding_fwd_kernel_reduce(
-    PARTIAL, STATS, SINK, O, HQ: gl.constexpr, DV: gl.constexpr,
-    SPLITS: gl.constexpr, BS: gl.constexpr, BV: gl.constexpr, USE_SINK: gl.constexpr,
+    PARTIAL,
+    STATS,
+    SINK,
+    O,
+    HQ: gl.constexpr,
+    DV: gl.constexpr,
+    SPLITS: gl.constexpr,
+    BS: gl.constexpr,
+    BV: gl.constexpr,
+    USE_SINK: gl.constexpr,
 ):
     bh = gl.program_id(0).to(gl.int64)
     iv = gl.program_id(1).to(gl.int64)
@@ -140,9 +164,7 @@ def attn_decoding_fwd_kernel_reduce(
     gl.store(O + bh * DV + dims, output, dims < DV)
 
 
-def attn_decoding_gluon(
-    q, k, v, g_cumsum, scale, cu_seqlens, window_size=None, sink_bias=None,
-):
+def attn_decoding_gluon(q, k, v, g_cumsum, scale, cu_seqlens, window_size=None, sink_bias=None):
     _, t, h, dk = k.shape
     hq, dv = q.shape[2], v.shape[-1]
     n = len(cu_seqlens) - 1
@@ -153,7 +175,7 @@ def attn_decoding_gluon(
     out = torch.empty(*q.shape[:-1], dv, dtype=v.dtype, device=q.device)
     partial = torch.empty(n * hq, splits, dv, dtype=torch.float32, device=q.device) if splits > 1 else out
     stats = torch.empty(n * hq, splits, 2, dtype=torch.float32, device=q.device) if splits > 1 else out
-    attn_decoding_fwd_kernel_split[(splits, n * hq, triton.cdiv(dv, bv))](
+    attn_decoding_fwd_kernel_split[(splits * n * hq * triton.cdiv(dv, bv),)](
         Q=q,
         K=k,
         V=v,
@@ -176,7 +198,7 @@ def attn_decoding_gluon(
         NW=nw,
         USE_G=g_cumsum is not None,
         USE_SINK=sink_bias is not None,
-        ASYNC=dk % 2 == 0 and dv % 2 == 0 and (k.data_ptr() % 4 == 0) and (v.data_ptr() % 4 == 0),
+        ASYNC=dk % 2 == 0 and dv % 2 == 0 and k.data_ptr() % 16 == 0 and v.data_ptr() % 16 == 0,
         num_warps=nw,
     )
     if splits > 1:

@@ -26,6 +26,7 @@ from triton.experimental.gluon.language.nvidia.hopper import (
 from triton.experimental.gluon.nvidia.hopper import TensorDescriptor
 
 from fla.ops.utils import prepare_chunk_indices
+from fla.ops.utils.op import unflatten_program_id
 from fla.utils import IS_TMA_SUPPORTED, get_device_capability
 
 WARP_SPECIALIZE_V2 = 'functions_and_args' in inspect.signature(gl.warp_specialize).parameters
@@ -109,7 +110,17 @@ def _mma(a, b, acc, bar, phase, TCGEN: gl.constexpr, USE_ACC: gl.constexpr = Tru
 
 @gluon.jit
 def _load_tile(
-    ptr, desc, smem, bar, head, row, end, H: gl.constexpr, D: gl.constexpr, TMA: gl.constexpr, NW: gl.constexpr = 4,
+    ptr,
+    desc,
+    smem,
+    bar,
+    head,
+    row,
+    end,
+    H: gl.constexpr,
+    D: gl.constexpr,
+    TMA: gl.constexpr,
+    NW: gl.constexpr = 4,
 ):
     if TMA:
         tma.async_copy_global_to_shared(desc, [head.to(gl.int32), row.to(gl.int32), 0], bar, smem)
@@ -129,16 +140,40 @@ def _load_tile(
 
 @gluon.jit(do_not_specialize=['T'])
 def parallel_attn_fwd_kernel_gluon(
-    Q, K, V, O, LSE, GATE, SINK, CU, INDICES, Q_DESC, K_DESC, V_DESC,
-    T, H: gl.constexpr, HQ: gl.constexpr, DK: gl.constexpr, DV: gl.constexpr,
-    SCALE: gl.constexpr, W: gl.constexpr, BM: gl.constexpr, BN: gl.constexpr,
-    BK: gl.constexpr, BV: gl.constexpr, CHUNK: gl.constexpr, TCGEN: gl.constexpr,
-    TMA_QK: gl.constexpr, TMA_V: gl.constexpr, VARLEN: gl.constexpr,
-    USE_GATE: gl.constexpr, USE_SINK: gl.constexpr, NW: gl.constexpr,
+    Q,
+    K,
+    V,
+    O,
+    LSE,
+    GATE,
+    SINK,
+    CU,
+    INDICES,
+    Q_DESC,
+    K_DESC,
+    V_DESC,
+    T,
+    NT: gl.constexpr,
+    H: gl.constexpr,
+    HQ: gl.constexpr,
+    DK: gl.constexpr,
+    DV: gl.constexpr,
+    SCALE: gl.constexpr,
+    W: gl.constexpr,
+    BM: gl.constexpr,
+    BN: gl.constexpr,
+    BK: gl.constexpr,
+    BV: gl.constexpr,
+    CHUNK: gl.constexpr,
+    TCGEN: gl.constexpr,
+    TMA_QK: gl.constexpr,
+    TMA_V: gl.constexpr,
+    VARLEN: gl.constexpr,
+    USE_GATE: gl.constexpr,
+    USE_SINK: gl.constexpr,
+    NW: gl.constexpr,
 ):
-    iv = gl.program_id(0).to(gl.int64)
-    it = gl.program_id(1).to(gl.int64)
-    bh = gl.program_id(2).to(gl.int64)
+    iv, it, bh = unflatten_program_id(X=gl.cdiv(DV, BV), Y=NT)
     hq = bh % HQ
     hk = hq // (HQ // H)
     if VARLEN:
@@ -151,6 +186,8 @@ def parallel_attn_fwd_kernel_gluon(
         bos = (bh // HQ) * T
         end = bos + T
         start = bos + it * BM
+    if start >= end:
+        return
 
     dtype: gl.constexpr = Q.dtype.element_ty
     # three buffers keep the next prefetch disjoint from the previous in-flight PV.
@@ -359,8 +396,11 @@ def parallel_attn_fwd_kernel_gluon(
         output /= gl.convert_layout(denom, gl.SliceLayout(1, cl))[:, None]
         orows = start + gl.arange(0, BM, gl.SliceLayout(1, cl)).to(gl.int64)
         ocols = iv * BV + part * BC + gl.arange(0, BC, gl.SliceLayout(0, cl)).to(gl.int64)
-        gl.store(O + (orows[:, None] * HQ + hq) * DV + ocols[None, :], output,
-                 (orows[:, None] < end) & (ocols[None, :] < DV))
+        gl.store(
+            pointer=O + (orows[:, None] * HQ + hq) * DV + ocols[None, :],
+            value=output,
+            mask=(orows[:, None] < end) & (ocols[None, :] < DV),
+        )
     if iv == 0:
         gl.store(LSE + rows * HQ + hq, maximum + gl.log2(denom), rows < end)
     for i in gl.static_range(BUFFERS + 2):
@@ -510,15 +550,32 @@ def _pipeline_compute(args, descs, cfg: gl.constexpr):
 
 @gluon.jit(do_not_specialize=['T'])
 def parallel_attn_fwd_kernel_pipeline(
-    Q_DESC, K_DESC, V_DESC, O, LSE, GATE, SINK, CU, INDICES,
-    T, H: gl.constexpr, HQ: gl.constexpr, DV: gl.constexpr,
-    SCALE: gl.constexpr, W: gl.constexpr, BM: gl.constexpr, BN: gl.constexpr,
-    BK: gl.constexpr, BV: gl.constexpr, VARLEN: gl.constexpr,
-    USE_GATE: gl.constexpr, USE_SINK: gl.constexpr, WS_V2: gl.constexpr,
+    Q_DESC,
+    K_DESC,
+    V_DESC,
+    O,
+    LSE,
+    GATE,
+    SINK,
+    CU,
+    INDICES,
+    T,
+    NT: gl.constexpr,
+    H: gl.constexpr,
+    HQ: gl.constexpr,
+    DV: gl.constexpr,
+    SCALE: gl.constexpr,
+    W: gl.constexpr,
+    BM: gl.constexpr,
+    BN: gl.constexpr,
+    BK: gl.constexpr,
+    BV: gl.constexpr,
+    VARLEN: gl.constexpr,
+    USE_GATE: gl.constexpr,
+    USE_SINK: gl.constexpr,
+    WS_V2: gl.constexpr,
 ):
-    iv = gl.program_id(0).to(gl.int64)
-    it = gl.program_id(1).to(gl.int64)
-    bh = gl.program_id(2).to(gl.int64)
+    iv, it, bh = unflatten_program_id(X=gl.cdiv(DV, BV), Y=NT)
     hq = bh % HQ
     hk = hq // (HQ // H)
     if VARLEN:
@@ -531,6 +588,8 @@ def parallel_attn_fwd_kernel_pipeline(
         bos = (bh // HQ) * T
         end = bos + T
         start = bos + it * BM
+    if start >= end:
+        return
     first = bos
     if W is not None:
         first = bos + gl.maximum((start - bos - W + 1) // BN, 0) * BN
@@ -569,8 +628,11 @@ def parallel_attn_fwd_kernel_pipeline(
     cfg: gl.constexpr = (BM, BN, BK, BV, HQ, DV, SCALE, W, USE_GATE, USE_SINK)
     if WS_V2:
         gl.warp_specialize(
-            functions_and_args=[(_pipeline_compute, (args, descs, cfg)), (_pipeline_mma,
-                                                                          (args, descs, cfg)), (_pipeline_load, (args, descs, cfg))],
+            functions_and_args=[
+                (_pipeline_compute, (args, descs, cfg)),
+                (_pipeline_mma, (args, descs, cfg)),
+                (_pipeline_load, (args, descs, cfg)),
+            ],
             worker_num_warps=[1, 1],
             worker_num_regs=[24, 24],
         )
@@ -625,14 +687,14 @@ def parallel_attn_fwd_gluon(q, k, v, g_cumsum, sink_bias, scale, window_size=Non
     blackwell_pipeline = tcgen and tma_qk and tma_v and bk <= 128 and bv <= 128
     chunk = 128 if chunk_indices is not None else bm
     if cu_seqlens is not None and chunk_indices is None:
-        chunk_indices = prepare_chunk_indices(cu_seqlens, chunk)
+        chunk_indices = prepare_chunk_indices(cu_seqlens=cu_seqlens, chunk_size=chunk)
     nt = triton.cdiv(t, bm) if cu_seqlens is None else len(chunk_indices) * (chunk // bm)
     q_desc, k_desc = (_descriptor(x=q, rows=bm, dim=bk), _descriptor(x=k, rows=bn, dim=bk)) if tma_qk else (q, k)
     v_desc = _descriptor(x=v, rows=bn, dim=bv) if tma_v else v
     o = torch.empty(b, t, hq, dv, device=q.device, dtype=q.dtype)
     lse = torch.empty(b, t, hq, device=q.device, dtype=torch.float32)
     if blackwell_pipeline:
-        parallel_attn_fwd_kernel_pipeline[(triton.cdiv(dv, bv), nt, b * hq)](
+        parallel_attn_fwd_kernel_pipeline[(triton.cdiv(dv, bv) * nt * b * hq,)](
             Q_DESC=q_desc,
             K_DESC=k_desc,
             V_DESC=v_desc,
@@ -643,6 +705,7 @@ def parallel_attn_fwd_gluon(q, k, v, g_cumsum, sink_bias, scale, window_size=Non
             CU=cu_seqlens,
             INDICES=chunk_indices,
             T=t,
+            NT=nt,
             H=h,
             HQ=hq,
             DV=dv,
@@ -660,7 +723,7 @@ def parallel_attn_fwd_gluon(q, k, v, g_cumsum, sink_bias, scale, window_size=Non
             maxnreg=128,
         )
         return o, lse
-    parallel_attn_fwd_kernel_gluon[(triton.cdiv(dv, bv), nt, b * hq)](
+    parallel_attn_fwd_kernel_gluon[(triton.cdiv(dv, bv) * nt * b * hq,)](
         Q=q,
         K=k,
         V=v,
@@ -674,6 +737,7 @@ def parallel_attn_fwd_gluon(q, k, v, g_cumsum, sink_bias, scale, window_size=Non
         K_DESC=k_desc,
         V_DESC=v_desc,
         T=t,
+        NT=nt,
         H=h,
         HQ=hq,
         DK=dk,
@@ -698,9 +762,24 @@ def parallel_attn_fwd_gluon(q, k, v, g_cumsum, sink_bias, scale, window_size=Non
 
 
 @gluon.jit
-def _load_pair(A, AD, AS, B, BD, BS, bar, head, row, end,
-               H: gl.constexpr, DA: gl.constexpr, DB: gl.constexpr, TMA_A: gl.constexpr, TMA_B: gl.constexpr,
-               NW: gl.constexpr = 4):
+def _load_pair(
+    A,
+    AD,
+    AS,
+    B,
+    BD,
+    BS,
+    bar,
+    head,
+    row,
+    end,
+    H: gl.constexpr,
+    DA: gl.constexpr,
+    DB: gl.constexpr,
+    TMA_A: gl.constexpr,
+    TMA_B: gl.constexpr,
+    NW: gl.constexpr = 4,
+):
     if TMA_A or TMA_B:
         mbarrier.expect(bar, (AS.shape[1] * AS.shape[2] * 2 if TMA_A else 0) + (BS.shape[1] * BS.shape[2] * 2 if TMA_B else 0))
     _load_tile(ptr=A, desc=AD, smem=AS, bar=bar, head=head, row=row, end=end, H=H, D=DA, TMA=TMA_A, NW=NW)
@@ -724,16 +803,49 @@ def _mma_pair(a, b, c, d, acc_a, acc_b, bar, phase, TCGEN: gl.constexpr, USE_ACC
 
 @gluon.jit(do_not_specialize=['T'])
 def parallel_attn_bwd_kernel_gluon(
-    Q, K, V, DO, LSE, DELTA, DQ, DK_OUT, DV_OUT, GATE, DG, SINK, DSINK,
-    CU, INDICES, Q_DESC, K_DESC, V_DESC, DO_DESC,
-    T, H: gl.constexpr, HQ: gl.constexpr, DK: gl.constexpr, DV: gl.constexpr,
-    SCALE: gl.constexpr, W: gl.constexpr, BM: gl.constexpr, BN: gl.constexpr,
-    BK: gl.constexpr, BV: gl.constexpr, CHUNK: gl.constexpr, BUFFERS: gl.constexpr,
-    TCGEN: gl.constexpr, TMA_QK: gl.constexpr, TMA_V: gl.constexpr,
-    VARLEN: gl.constexpr, USE_GATE: gl.constexpr, USE_SINK: gl.constexpr, MODE: gl.constexpr, NW: gl.constexpr,
+    Q,
+    K,
+    V,
+    DO,
+    LSE,
+    DELTA,
+    DQ,
+    DK_OUT,
+    DV_OUT,
+    GATE,
+    DG,
+    SINK,
+    DSINK,
+    CU,
+    INDICES,
+    Q_DESC,
+    K_DESC,
+    V_DESC,
+    DO_DESC,
+    T,
+    NT: gl.constexpr,
+    H: gl.constexpr,
+    HQ: gl.constexpr,
+    DK: gl.constexpr,
+    DV: gl.constexpr,
+    SCALE: gl.constexpr,
+    W: gl.constexpr,
+    BM: gl.constexpr,
+    BN: gl.constexpr,
+    BK: gl.constexpr,
+    BV: gl.constexpr,
+    CHUNK: gl.constexpr,
+    BUFFERS: gl.constexpr,
+    TCGEN: gl.constexpr,
+    TMA_QK: gl.constexpr,
+    TMA_V: gl.constexpr,
+    VARLEN: gl.constexpr,
+    USE_GATE: gl.constexpr,
+    USE_SINK: gl.constexpr,
+    MODE: gl.constexpr,
+    NW: gl.constexpr,
 ):
-    it = gl.program_id(0).to(gl.int64)
-    bh = gl.program_id(1).to(gl.int64)
+    it, bh = unflatten_program_id(X=NT)
     hq = bh % HQ
     hk = hq // (HQ // H)
     if VARLEN:
@@ -746,6 +858,8 @@ def parallel_attn_bwd_kernel_gluon(
         bos = (bh // HQ) * T
         end = bos + T
         start = bos + it * BM
+    if start >= end:
+        return
     dtype: gl.constexpr = Q.dtype.element_ty
     ql: gl.constexpr = gl.NVMMASharedLayout.get_default_for([1, BM, BK], dtype)
     vl: gl.constexpr = gl.NVMMASharedLayout.get_default_for([1, BM, BV], dtype)
@@ -753,7 +867,8 @@ def parallel_attn_bwd_kernel_gluon(
     dl: gl.constexpr = gl.NVMMASharedLayout.get_default_for([1, BN, BV], dtype)
     pl: gl.constexpr = gl.NVMMASharedLayout.get_default_for([BM, BN], dtype)
     resident_a = gl.allocate_shared_memory(dtype, [1, BM, BK], ql)
-    resident_b = gl.allocate_shared_memory(dtype, [1, BM, BV], vl)
+    if MODE != 3:
+        resident_b = gl.allocate_shared_memory(dtype, [1, BM, BV], vl)
     stream_a = gl.allocate_shared_memory(dtype, [BUFFERS, 1, BN, BK], kl)
     stream_b = gl.allocate_shared_memory(dtype, [BUFFERS, 1, BN, BV], dl)
     ds_shared = gl.allocate_shared_memory(dtype, [BM, BN], pl)
@@ -780,6 +895,22 @@ def parallel_attn_bwd_kernel_gluon(
             TMA_B=TMA_V,
             NW=NW,
         )
+    elif MODE == 3:
+        if TMA_QK:
+            mbarrier.expect(bars.index(2), BM * BK * 2)
+        _load_tile(
+            ptr=K,
+            desc=K_DESC,
+            smem=resident_a,
+            bar=bars.index(2),
+            head=hk,
+            row=start,
+            end=end,
+            H=H,
+            D=DK,
+            TMA=TMA_QK,
+            NW=NW,
+        )
     else:
         _load_pair(
             A=K,
@@ -799,9 +930,9 @@ def parallel_attn_bwd_kernel_gluon(
             TMA_B=TMA_V,
             NW=NW,
         )
-    if TMA_QK or TMA_V:
+    if TMA_QK or (MODE != 3 and TMA_V):
         mbarrier.wait(bars.index(2), 0)
-    if not TMA_QK or not TMA_V:
+    if not TMA_QK or (MODE != 3 and not TMA_V):
         fence_async_shared()
 
     sl: gl.constexpr = _acc_layout(M=BM, N=BN, TCGEN=TCGEN, NW=NW)
@@ -1033,8 +1164,19 @@ def parallel_attn_bwd_kernel_gluon(
 
 
 def parallel_attn_bwd_gluon(
-    q, k, v, o, g_cumsum, lse, do, sink_bias=None, scale=None,
-    window_size=None, chunk_size=128, cu_seqlens=None, chunk_indices=None,
+    q,
+    k,
+    v,
+    o,
+    g_cumsum,
+    lse,
+    do,
+    sink_bias=None,
+    scale=None,
+    window_size=None,
+    chunk_size=128,
+    cu_seqlens=None,
+    chunk_indices=None,
 ):
     from einops import reduce
 
@@ -1050,9 +1192,9 @@ def parallel_attn_bwd_gluon(
     bm, bn, buffers = (64, 32, 1) if max(dk, dv) > 256 else (64, 64, 2)
     chunk = 128 if chunk_indices is not None else bm
     if cu_seqlens is not None and chunk_indices is None:
-        chunk_indices = prepare_chunk_indices(cu_seqlens, chunk)
+        chunk_indices = prepare_chunk_indices(cu_seqlens=cu_seqlens, chunk_size=chunk)
     nt = triton.cdiv(t, bm) if cu_seqlens is None else len(chunk_indices) * (chunk // bm)
-    delta = parallel_attn_bwd_preprocess(o, do)
+    delta = parallel_attn_bwd_preprocess(o=o, do=do)
     temp_dtype = q.dtype if h == hq else torch.float32
     dq = torch.empty_like(q)
     dk_out = torch.empty(b, t, hq, dk, device=q.device, dtype=temp_dtype)
@@ -1068,7 +1210,7 @@ def parallel_attn_bwd_gluon(
         q_rows, k_rows = (bm, bn) if mode == 0 else (bn, bm)
         q_desc, k_desc = (_descriptor(x=q, rows=q_rows, dim=bk), _descriptor(x=k, rows=k_rows, dim=bk)) if tma_qk else (q, k)
         v_desc, do_desc = (_descriptor(x=v, rows=k_rows, dim=bv), _descriptor(x=do, rows=q_rows, dim=bv)) if tma_v else (v, do)
-        parallel_attn_bwd_kernel_gluon[(nt, b * hq)](
+        parallel_attn_bwd_kernel_gluon[(nt * b * hq,)](
             Q=q,
             K=k,
             V=v,
@@ -1089,6 +1231,7 @@ def parallel_attn_bwd_gluon(
             V_DESC=v_desc,
             DO_DESC=do_desc,
             T=t,
+            NT=nt,
             H=h,
             HQ=hq,
             DK=dk,

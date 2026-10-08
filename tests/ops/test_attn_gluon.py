@@ -25,6 +25,7 @@ requires_gluon = pytest.mark.skipif(
 
 @pytest.fixture
 def gluon_route(monkeypatch):
+    monkeypatch.setenv('FLA_GLUON', '0')
     monkeypatch.setenv('FLA_ATTN_GLUON', '1')
     monkeypatch.setenv('FLA_TILELANG', '0')
     monkeypatch.setenv('TRITON_F32_DEFAULT', 'ieee')
@@ -349,9 +350,13 @@ def test_parallel_route_parity(gluon_route, monkeypatch, varlen):
 
 
 def test_backend_opt_in(monkeypatch):
+    monkeypatch.delenv('FLA_GLUON', raising=False)
     monkeypatch.delenv('FLA_ATTN_GLUON', raising=False)
     assert not AttnGluonBackend.is_enabled()
     monkeypatch.setenv('FLA_ATTN_GLUON', '1')
+    assert AttnGluonBackend.is_enabled()
+    monkeypatch.setenv('FLA_ATTN_GLUON', '0')
+    monkeypatch.setenv('FLA_GLUON', '1')
     assert AttnGluonBackend.is_enabled()
 
 
@@ -383,9 +388,13 @@ def test_backend_rejects_dimension(K, V):
 
 @requires_gluon
 @pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize(('K', 'V'), [(1, 3), (65, 127), (64, 64), (100, 60), (256, 512), (512, 256), (512, 512)])
+@pytest.mark.parametrize(
+    ('K', 'V', 'offset'),
+    [(1, 3, 0), (65, 127, 0), (64, 64, 0), (100, 60, 0), (256, 512, 0), (512, 256, 0), (512, 512, 0),
+     (64, 64, 1), (64, 64, 2), (64, 64, 4), (64, 64, 8), (100, 60, 2)],
+)
 @pytest.mark.parametrize('window', [None, 0, 65])
-def test_decoding_split(monkeypatch, dtype, K, V, window):
+def test_decoding_split(monkeypatch, dtype, K, V, offset, window):
     from fla.ops.attn.decoding import attn_decoding_one_step
     from fla.ops.attn.naive import naive_attn_decoding
 
@@ -401,8 +410,8 @@ def test_decoding_split(monkeypatch, dtype, K, V, window):
     monkeypatch.setattr(AttnGluonBackend, 'attn_decoding_fwd', wrapped)
     torch.manual_seed(42)
     q = torch.randn(1, 4, 4, K, device=device, dtype=dtype)
-    k = torch.randn(1, 2311, 1, K, device=device, dtype=dtype)
-    v = torch.randn(1, 2311, 1, V, device=device, dtype=dtype)
+    k = torch.randn(2311 * K + offset, device=device, dtype=dtype)[offset:].view(1, 2311, 1, K)
+    v = torch.randn(2311 * V + offset, device=device, dtype=dtype)[offset:].view(1, 2311, 1, V)
     g = torch.empty(1, 2311, 4, device=device, dtype=dtype).uniform_(-0.1, -0.01)
     sink = torch.randn(4, device=device)
     cu = torch.tensor([0, 0, 257, 258, 2311], device=device, dtype=torch.int32)
@@ -414,6 +423,57 @@ def test_decoding_split(monkeypatch, dtype, K, V, window):
     explicit = attn_decoding_one_step(q=q, k=k, v=v, g=g, scale=K ** -0.5, **kwargs)
     torch.testing.assert_close(actual, explicit, rtol=0, atol=0)
     assert len(calls) == 2
+
+
+@requires_gluon
+def test_decoding_large_grid(monkeypatch):
+    from fla.ops.attn.backends.gluon import decoding
+    from fla.ops.attn.decoding import attn_decoding_one_step
+
+    monkeypatch.setenv('FLA_ATTN_GLUON', '1')
+    calls = []
+    original = decoding.attn_decoding_fwd_kernel_split.run
+
+    def wrapped(*args, **kwargs):
+        calls.append(True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(decoding.attn_decoding_fwd_kernel_split, 'run', wrapped)
+    torch.manual_seed(42)
+    q = torch.randn(1, 8192, 8, 16, device=device, dtype=torch.float16)
+    k = torch.randn(1, 8192, 1, 16, device=device, dtype=torch.float16)
+    v = torch.randn_like(k)
+    cu = torch.arange(8193, device=device, dtype=torch.int32)
+    actual = attn_decoding_one_step(q=q, k=k, v=v, cu_seqlens=cu)
+    assert_close('o', v.expand_as(q), actual, 0.01)
+    assert len(calls) == 1
+
+
+@requires_gluon
+@pytest.mark.parametrize('varlen', [False, True])
+@pytest.mark.parametrize('use_tma', [False, True])
+def test_parallel_large_grid(gluon_route, monkeypatch, varlen, use_tma):
+    from fla.ops.attn.backends.gluon import parallel
+
+    monkeypatch.setattr(parallel, 'IS_TMA_SUPPORTED', use_tma)
+    torch.manual_seed(42)
+    n, hq = (65536, 1) if varlen else (8192, 8)
+    q = torch.randn(n, 1, hq, 64, device=device, dtype=torch.bfloat16)
+    k = torch.randn(n, 1, 1, 64, device=device, dtype=torch.bfloat16)
+    v = torch.randn_like(k)
+    refs = [x.float().requires_grad_() for x in (q, k, v)]
+    tensors = [x.reshape(1, n, *x.shape[2:]) if varlen else x for x in (q, k, v)]
+    tensors = [x.requires_grad_() for x in tensors]
+    cu = torch.arange(n + 1, device=device, dtype=torch.int32) if varlen else None
+    actual = parallel_attn(q=tensors[0], k=tensors[1], v=tensors[2], cu_seqlens=cu)
+    ref, _ = naive_parallel_attn(q=refs[0], k=refs[1], v=refs[2])
+    do = torch.randn_like(actual)
+    actual.backward(do)
+    ref.backward(do.reshape_as(ref).float())
+    assert_close('o', ref.reshape_as(actual), actual, 0.005)
+    for name, tensor, reference in zip(('dq', 'dk', 'dv'), tensors, refs):
+        assert_close(name, reference.grad.reshape_as(tensor), tensor.grad, 0.005)
+    assert gluon_route == {'fwd': 1, 'bwd': 1}
 
 
 @requires_gluon

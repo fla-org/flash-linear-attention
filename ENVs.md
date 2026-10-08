@@ -22,10 +22,10 @@ These switches control registered implementations. Unavailable backends and unsu
 
 ### Gluon
 
-| Variable            | Default | Options   | Description                                                                     |
-| ------------------- | ------- | --------- | ------------------------------------------------------------------------------- |
-| `FLA_GLUON`         | `0`     | `0` / `1` | Enable all available Gluon backends, overriding individual switches set to `0`. |
-| `FLA_ATTNRES_GLUON` | `0`     | `0` / `1` | Enable Gluon AttnRes independently.                                             |
+| Variable            | Default | Options   | Description                                                                                                                                        |
+| ------------------- | ------- | --------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `FLA_GLUON`         | `0`     | `0` / `1` | Enable all available Gluon backends, overriding individual switches set to `0`.                                                                    |
+| `FLA_ATTNRES_GLUON` | `0`     | `0` / `1` | Enable Gluon AttnRes independently.                                                                                                                |
 | `FLA_ATTN_GLUON`    | `0`     | `0` / `1` | Enable experimental Gluon attention prefill, backward, and decoding independently. See [attention backend](fla/ops/attn/backends/gluon/README.md). |
 
 When `FLA_GLUON` is unset or `0`, the individual switches apply. `FLA_DISABLE_BACKEND_DISPATCH=1` overrides all of them.
