@@ -5,27 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-import sys
-
-from ._compat import (  # noqa: F401
-    SUPPORTS_AUTOTUNE_CACHE,
-    TRITON_ABOVE_3_4_0,
-    TRITON_ABOVE_3_5_1,
-    TRITON_ABOVE_3_6_0,
-    TRITON_ABOVE_3_7_1,
-    TRITON_ABOVE_3_8_0,
-    ascend_compile_kwargs,
-    autotune_cache_kwargs,
-    find_spec_cached,
-    has_usable_nvcc,
-)
-from ._config import (  # noqa: F401
-    FLA_CACHE_RESULTS,
-    FLA_CI_ENV,
-    FLA_DISABLE_TENSOR_CACHE,
-    FLA_TENSOR_CACHE_SIZE,
-)
-from ._decorators import (  # noqa: F401
+from fla.utils.decorators import (
     Action,
     checkpoint,
     contiguous,
@@ -34,7 +14,24 @@ from ._decorators import (  # noqa: F401
     require_version,
     tensor_cache,
 )
-from ._device import (  # noqa: F401
+from fla.utils.env import (
+    FLA_CACHE_RESULTS,
+    FLA_CI_ENV,
+    FLA_DISABLE_TENSOR_CACHE,
+    FLA_TENSOR_CACHE_SIZE,
+    SUPPORTS_AUTOTUNE_CACHE,
+    TRITON_ABOVE_3_4_0,
+    TRITON_ABOVE_3_5_1,
+    TRITON_ABOVE_3_6_0,
+    TRITON_ABOVE_3_7_1,
+    TRITON_ABOVE_3_8_0,
+    autotune_cache_kwargs,
+    check_environments,
+    check_pytorch_version,
+    find_spec_cached,
+    has_usable_nvcc,
+)
+from fla.utils.hardware import (
     IS_AMD,
     IS_AMD_TMA_ARCH,
     IS_ARM,
@@ -50,10 +47,9 @@ from ._device import (  # noqa: F401
     IS_TF32_SUPPORTED,
     IS_TMA_SUPPORTED,
     Backend,
+    ascend_compile_kwargs,
     autocast_custom_bwd,
     autocast_custom_fwd,
-    check_environments,
-    check_pytorch_version,
     check_shared_mem,
     custom_device_ctx,
     device,
@@ -68,31 +64,19 @@ from ._device import (  # noqa: F401
     get_multiprocessor_count,
     map_triton_backend_to_torch_device,
 )
-from ._testing import assert_close, get_abs_err, get_err_ratio  # noqa: F401
+from fla.utils.testing import assert_close, get_abs_err, get_err_ratio
 
-
-def _register_aliases():
-    current_module = sys.modules[__name__]
-    for key in (
-        'IS_AMD',
-        'IS_AMD_TMA_ARCH',
-        'IS_ARM',
-        'IS_INTEL',
-        'IS_INTEL_ALCHEMIST',
-        'IS_NVIDIA',
-        'IS_NPU',
-        'IS_NVIDIA_BLACKWELL',
-        'IS_NVIDIA_HOPPER',
-        'IS_NVIDIA_SM100',
-        'IS_NVIDIA_SM120',
-        'IS_TF32_SUPPORTED',
-        'IS_GATHER_SUPPORTED',
-        'IS_TMA_SUPPORTED',
-    ):
-        if hasattr(current_module, key):
-            setattr(current_module, key.lower(), getattr(current_module, key))
-
-
-_register_aliases()
-
-del _register_aliases
+is_amd = IS_AMD
+is_amd_tma_arch = IS_AMD_TMA_ARCH
+is_arm = IS_ARM
+is_intel = IS_INTEL
+is_intel_alchemist = IS_INTEL_ALCHEMIST
+is_nvidia = IS_NVIDIA
+is_npu = IS_NPU
+is_nvidia_blackwell = IS_NVIDIA_BLACKWELL
+is_nvidia_hopper = IS_NVIDIA_HOPPER
+is_nvidia_sm100 = IS_NVIDIA_SM100
+is_nvidia_sm120 = IS_NVIDIA_SM120
+is_tf32_supported = IS_TF32_SUPPORTED
+is_gather_supported = IS_GATHER_SUPPORTED
+is_tma_supported = IS_TMA_SUPPORTED

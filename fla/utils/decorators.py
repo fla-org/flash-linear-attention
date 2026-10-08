@@ -18,9 +18,9 @@ from typing import Any
 import torch
 from packaging import version as package_version
 
-from .. import __version__
-from ._config import FLA_DISABLE_TENSOR_CACHE, FLA_TENSOR_CACHE_SIZE
-from ._device import custom_device_ctx
+from fla import __version__
+from fla.utils.env import FLA_DISABLE_TENSOR_CACHE, FLA_TENSOR_CACHE_SIZE
+from fla.utils.hardware import custom_device_ctx
 
 
 class Action(Enum):
