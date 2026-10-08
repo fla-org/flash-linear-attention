@@ -22,7 +22,8 @@ layer by layer driven by profiling, keeping numerical parity after every step.
 Related skills:
 
 - **`fla-optimization-loop`** — the iteration discipline around this port (frozen test contract, recording, when to stop).
-- **`fla-nvidia-performance`** — profiling workflow, hardware baselines, MR-ready perf evidence.
+- **`fla-design-coverage`** — supported routes, numerical budgets, and production workloads before implementation.
+- **`fla-nvidia-performance`** — profiling workflow, hardware baselines, PR-ready perf evidence.
 - **`fla-correctness-coverage`** — test coverage matrix for the op being ported.
 
 ## When a port is worth it
@@ -83,6 +84,7 @@ from triton.tools.tensor_descriptor import TensorDescriptor  # TMA, host side
 Keep the Triton kernel and the op's `tests/ops/test_<op>.py` untouched (they are the frozen contract per
 `fla-optimization-loop`). The Gluon kernel is added alongside and must pass the same parity tests
 (forward **and** backward, via `fla.utils.assert_close`) before any optimization.
+Record the baseline commit SHA and freeze the validated tests and numerical reference before iterating. `benchmarks.ops.verify` executes the current test file; it does not preserve an immutable copy for you.
 
 ### 2. Literal translation (`gl.load`/`gl.store`, correctness first)
 
@@ -221,19 +223,17 @@ Three interacting constraints that only show up at scale:
 Run on a GPU worker per `fla-nvidia-performance` hardware baselines (sm_90+; prefer sm_100/sm_103):
 
 ```bash
-python -m pytest tests/ops/test_<op>.py -q                 # frozen parity gate, fwd + bwd
-python benchmarks/ops/run.py --op <op> --base main         # before/after vs the Triton baseline
+python -m benchmarks.ops.verify --op <op> --base <baseline-sha>
 ```
 
 Record every iteration per the `fla-optimization-loop` protocol; dense workloads for quick iteration,
-varlen checked before the MR.
+varlen checked before the PR.
 
 Iteration-speed hygiene (Gluon compiles are expensive):
 
 - Keep one warm worker per optimization loop and a persistent `TRITON_CACHE_DIR` — a fresh
   machine per run recompiles every kernel × config from scratch and dominates wall-clock.
-- Order each round for fast signal: cheapest bench first, full frozen pytest after; split
-  slow-compiling parameterizations (huge unroll factors) into their own pytest invocation.
+- Run the correctness gate before benchmarking each candidate. Use `--gate-k <subset>` for a quick iteration signal when needed, and run the full frozen gate without a subset before promotion; split slow-compiling parameterizations into separate pytest invocations without dropping cases.
 - If the backend is selected via a cached dispatch env var (`FLA_<OP>_<BACKEND>`), benchmark each
   backend in its own process with the env var set at launch.
 

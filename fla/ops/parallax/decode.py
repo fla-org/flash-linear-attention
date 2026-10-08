@@ -42,7 +42,7 @@ def parallax_decode_kernel(
     sliding window and to ``[cache_start, Skv)`` when set. One program owns a
     ``BT``-row query block; see ``naive_parallax`` for the output formula.
     """
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     NT = tl.cdiv(Sq, BT)
     i_t, i_bh = (pid % NT).to(tl.int64), (pid // NT).to(tl.int64)
     i_b, i_hq = i_bh // HQ, i_bh % HQ

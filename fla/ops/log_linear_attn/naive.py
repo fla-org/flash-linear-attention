@@ -51,7 +51,16 @@ def construct_H_matrix(a, L):
     return H
 
 
-def naive_log_linear_attn(q, k, v, g, level_scales):
+def naive_log_linear_attn(q, k, v, g, level_scales, scale: float | None = 1.0):
+    """Compute grouped log-linear attention with the same scaling as the chunk operator."""
+    if scale is None:
+        scale = q.shape[-1] ** -0.5
+    num_groups, num_heads = k.shape[2], v.shape[2]
+    if num_heads % num_groups != 0:
+        raise ValueError("The number of value heads must be divisible by the number of query/key heads.")
+    if num_groups != num_heads:
+        q = q.repeat_interleave(num_heads // num_groups, dim=2)
+        k = k.repeat_interleave(num_heads // num_groups, dim=2)
     H = construct_H_matrix(g.permute(0, 2, 1), level_scales.permute(0, 2, 3, 1))
     M = torch.einsum("bhlc,blhn,bchn->bhlc", H, q, k)
-    return torch.einsum("bhlc,bchp->blhp", M, v)
+    return torch.einsum("bhlc,bchp->blhp", M, v) * scale

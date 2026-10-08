@@ -63,7 +63,7 @@ def parallel_wall_attn_decode_kernel(
     USE_SINK_BIAS: tl.constexpr,
     USE_SCALAR_G: tl.constexpr,
 ):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     NV, NT = tl.cdiv(V, BV), tl.cdiv(T_q, BT)
     i_v, i_t, i_bh = pid % NV, ((pid // NV) % NT).to(tl.int64), (pid // (NV * NT)).to(tl.int64)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
