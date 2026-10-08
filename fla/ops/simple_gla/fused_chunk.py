@@ -7,9 +7,11 @@
 
 import torch
 
+from fla.backends import dispatch
 from fla.ops.common.fused_chunk import fused_chunk
 
 
+@dispatch('simple_gla')
 def fused_chunk_simple_gla(
     q: torch.Tensor,
     k: torch.Tensor,

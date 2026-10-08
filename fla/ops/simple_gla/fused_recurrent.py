@@ -9,9 +9,11 @@ import warnings
 
 import torch
 
+from fla.backends import dispatch
 from fla.ops.common.fused_recurrent import fused_recurrent
 
 
+@dispatch('simple_gla')
 def fused_recurrent_simple_gla(
     q: torch.Tensor,
     k: torch.Tensor,
