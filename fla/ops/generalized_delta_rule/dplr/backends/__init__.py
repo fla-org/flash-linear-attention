@@ -7,10 +7,6 @@
 
 """DPLR backends."""
 
-from fla.backends import _registry_for
 from fla.ops.generalized_delta_rule.dplr.backends.tilelang import DPLRTileLangBackend
 
-dplr_registry = _registry_for('generalized_delta_rule.dplr')
-dispatch = dplr_registry.dispatch
-
-__all__ = ['DPLRTileLangBackend', 'dispatch', 'dplr_registry']
+__all__ = ['DPLRTileLangBackend']

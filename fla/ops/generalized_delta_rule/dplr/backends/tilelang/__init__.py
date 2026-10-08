@@ -15,7 +15,6 @@ import torch
 
 from fla.backends import BaseBackend, register_backend
 from fla.utils import (
-    find_spec_cached,
     get_device_capability,
     get_device_smem_optin,
     get_multiprocessor_count,
@@ -25,8 +24,6 @@ from fla.utils import (
 from .schedules import chunk64_schedule_or_none, stream_bwd_schedule_or_none
 
 logger = logging.getLogger(__name__)
-
-_TILELANG_AVAILABLE = find_spec_cached("tilelang") is not None
 
 _FALLBACK_LOGGED: set[str] = set()
 
@@ -40,7 +37,7 @@ class DPLRTileLangBackend(BaseBackend):
 
     @classmethod
     def is_available(cls) -> bool:
-        return _TILELANG_AVAILABLE and has_usable_nvcc()
+        return super().is_available() and has_usable_nvcc()
 
     def chunk_dplr_delta_rule_verifier(
         self,

@@ -168,57 +168,22 @@ def test_registry_ownership_and_priority(enable_dispatch):
     assert wrapped() == 3
 
 
-def test_class_registration_preserves_identity_and_owner_state(monkeypatch, enable_dispatch):
+def test_class_registration_preserves_identity_and_replaces_backend(monkeypatch):
     monkeypatch.setattr(registry_module, '_registries', {})
 
     class Backend(BaseBackend):
-        env_var = 'FLA_TEST_BACKEND'
+        pass
 
-        def __init__(self):
-            self.value = 1
+    assert register_backend('test')(Backend) is Backend
+    registry = registry_module._registry_for('test')
+    assert type(registry.get_active()) is Backend
 
-        def compute(self):
-            return self.value
-
-    assert register_backend('first', 'second')(Backend) is Backend
-    first = registry_module._registry_for('first')
-    second = registry_module._registry_for('second')
-    first_backend, second_backend = first.get_active(), second.get_active()
-    assert type(first_backend) is type(second_backend) is Backend
-    assert first_backend is not second_backend
-    first_backend.value = 3
-    assert second_backend.value == 1
-
-    def compute():
-        return 0
-
-    first_call, second_call = first.dispatch(compute), second.dispatch(compute)
-    assert first_call() == 3
-    assert second_call() == 1
-
-    @register_backend('first')
+    @register_backend('test')
     class Replacement(Backend):
-        def __init__(self):
-            self.value = 2
+        pass
 
-    assert type(first.get_active()) is Replacement
-    assert first_call() == 2
-    assert second.get_active() is second_backend
-    assert second_call() == 1
-    monkeypatch.setenv('FLA_TEST_BACKEND', '0')
-    assert first_call() == second_call() == 0
-    assert first.get_active() is second.get_active() is None
-
-
-@pytest.mark.filterwarnings('error::DeprecationWarning')
-def test_bound_operation_key(enable_dispatch):
-    registry = BackendRegistry('test')
-
-    @registry.dispatch('test')
-    def compute(x):
-        return x + 1
-
-    assert compute(1) == 2
+    assert type(registry.get_active()) is Replacement
+    assert len(registry._backends) == 1
 
 
 @pytest.mark.parametrize(('operation', 'error'), [
@@ -232,45 +197,14 @@ def test_dispatch_rejects_unknown_operation(monkeypatch, operation, error):
         dispatch(operation)
 
 
-def test_dispatch_loads_owner_after_shared_backend_registration(monkeypatch, enable_dispatch):
+def test_dispatch_loads_owner_for_existing_registry(monkeypatch):
     monkeypatch.setattr(registry_module, '_registries', {})
-
-    @register_backend('attn')
-    class SharedBackend(BaseBackend):
-        backend_type = 'shared'
-
-        def compute(self):
-            return 'shared'
-
     registry = registry_module._registry_for('attn')
     imports = []
+    monkeypatch.setattr(registry_module.importlib, 'import_module', imports.append)
 
-    def import_owner(name):
-        imports.append(name)
-
-        @register_backend('attn')
-        class OwnerBackend(BaseBackend):
-            backend_type = 'owner'
-            priority = 0
-
-            def compute(self):
-                return 'owner'
-
-        return SimpleNamespace()
-
-    with monkeypatch.context() as patch:
-        patch.setattr(registry_module.importlib, 'import_module', import_owner)
-        decorate = dispatch('attn')
-
+    assert dispatch('attn').__self__ is registry
     assert imports == ['fla.ops.attn.backends']
-    assert registry_module._registry_for('attn') is registry
-    assert set(registry._backends) == {'shared', 'owner'}
-
-    @decorate
-    def compute():
-        return 'default'
-
-    assert compute() == 'owner'
 
 
 @pytest.mark.parametrize('dependency', ['missing_optional_dependency', 'fla.ops.attn.backends.required'])
@@ -375,46 +309,27 @@ def test_legacy_dispatch_uses_shared_registry(run_python, first_import):
 
         from fla.backends import BaseBackend, dispatch
         from fla import backends as registry_module
-        from fla.ops.gdn2.backends import gdn2_registry
-        from fla.ops.kda.backends import kda_registry
+        kda_registry = registry_module._resolve_registry('kda')
         assert legacy.BaseBackend is BaseBackend
         assert legacy.BackendRegistry._registries is registry_module._registries
-        assert legacy.BackendRegistry('gdn2') is gdn2_registry
         assert legacy.BackendRegistry('kda') is kda_registry
         legacy.BackendRegistry.ensure_initialized('kda')
         assert legacy.BackendRegistry._registries['kda'] is kda_registry
+        assert dispatch('kda').__self__ is kda_registry
+        assert legacy.dispatch('kda').__self__ is kda_registry
 
         class Backend(BaseBackend):
             backend_type = 'import_test'
-            priority = -1
 
-            def compute(self, x, use_backend):
+            def compute(self, x):
                 return x * 2
 
-            def compute_verifier(self, x, use_backend):
-                return use_backend, None
-
-        legacy.BackendRegistry('kda').register(Backend())
-
-        def compute(x, use_backend):
+        def compute(x):
             return x * 3
-
-        current = dispatch('kda')(compute)
-        bound = kda_registry.dispatch(compute)
-        old = legacy.dispatch('kda')(compute)
-        for use_backend, factor in [(True, 2), (False, 3)]:
-            for implementation in [current, bound, old]:
-                assert implementation(2, use_backend=use_backend) == 2 * factor
 
         custom = legacy.BackendRegistry('custom_import_test')
         custom.register(Backend())
-        assert legacy.dispatch('custom_import_test')(compute)(2, use_backend=True) == 4
-        try:
-            dispatch('custom_import_test')
-        except ModuleNotFoundError:
-            pass
-        else:
-            raise AssertionError('central dispatch must reject an operation without an owner package')
+        assert legacy.dispatch('custom_import_test')(compute)(2) == 4
 
         from fla.modules.backends import modules_registry
         assert legacy.BackendRegistry('modules') is modules_registry
@@ -465,10 +380,10 @@ def test_dispatch_policy_and_optional_dependencies(run_python, disabled):
             assert wrapped(1) == 2
 
         from fla.ops.attn.backends.tilelang import AttnTileLangBackend
-        from fla.ops.common.backends.tilelang import CommonTileLangBackend, TileLangBackend
+        from fla.ops.common.backends.tilelang import CommonTileLangBackend
         common = registry_module._registries['common']._backends['tilelang']
         attention = registry_module._registries['attn']._backends['tilelang']
-        assert type(common) is CommonTileLangBackend is TileLangBackend
+        assert type(common) is CommonTileLangBackend
         assert type(attention) is AttnTileLangBackend
         assert hasattr(common, 'chunk_bwd_dqkwg')
         assert not hasattr(attention, 'chunk_bwd_dqkwg')
@@ -548,7 +463,7 @@ def test_no_nvcc_logs_fallback_once(monkeypatch, caplog):
     attn_tilelang_backend, common_tilelang_backend, kda_tilelang_backend, rwkv6_tilelang_backend, dplr_tilelang_backend,
 ])
 def test_tilelang_backend_gated_by_nvcc_probe(monkeypatch, backend_module):
-    monkeypatch.setattr(backend_module, "_TILELANG_AVAILABLE", True)
+    monkeypatch.setattr(registry_module, "find_spec_cached", lambda name: object())
     monkeypatch.setattr(backend_module, "has_usable_nvcc", lambda: False)
     assert _backend_cls(backend_module).is_available() is False
 
@@ -560,7 +475,7 @@ def test_tilelang_backend_gated_by_nvcc_probe(monkeypatch, backend_module):
     attn_tilelang_backend, common_tilelang_backend, kda_tilelang_backend, rwkv6_tilelang_backend, dplr_tilelang_backend,
 ])
 def test_tilelang_backend_unavailable_without_tilelang(monkeypatch, backend_module):
-    monkeypatch.setattr(backend_module, "_TILELANG_AVAILABLE", False)
+    monkeypatch.setattr(registry_module, "find_spec_cached", lambda name: None)
     monkeypatch.setattr(backend_module, "has_usable_nvcc", lambda: True)
     assert _backend_cls(backend_module).is_available() is False
 

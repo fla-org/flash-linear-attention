@@ -7,10 +7,6 @@
 
 """Utils op backends."""
 
-from fla.backends import _registry_for
 from fla.ops.utils.backends.triton_ascend import TritonAscendUtilsBackend
 
-utils_registry = _registry_for('utils')
-dispatch = utils_registry.dispatch
-
-__all__ = ['TritonAscendUtilsBackend', 'dispatch', 'utils_registry']
+__all__ = ['TritonAscendUtilsBackend']

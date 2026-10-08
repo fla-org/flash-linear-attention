@@ -12,9 +12,7 @@ from __future__ import annotations
 import torch
 
 from fla.backends import BaseBackend, register_backend
-from fla.utils import find_spec_cached, has_usable_nvcc
-
-_TILELANG_AVAILABLE = find_spec_cached("tilelang") is not None
+from fla.utils import has_usable_nvcc
 
 
 @register_backend('rwkv6')
@@ -28,7 +26,7 @@ class RWKV6TileLangBackend(BaseBackend):
 
     @classmethod
     def is_available(cls) -> bool:
-        return _TILELANG_AVAILABLE and has_usable_nvcc()
+        return super().is_available() and has_usable_nvcc()
 
     def chunk_rwkv6_fwd_intra_verifier(
         self,

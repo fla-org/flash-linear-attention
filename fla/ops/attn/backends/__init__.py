@@ -7,6 +7,4 @@
 
 from fla.ops.attn.backends.tilelang import AttnTileLangBackend
 
-TileLangBackend = AttnTileLangBackend
-
-__all__ = ['AttnTileLangBackend', 'TileLangBackend']
+__all__ = ['AttnTileLangBackend']

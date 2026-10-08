@@ -118,9 +118,9 @@ _TRITON_ASCEND_ATTNRES_OPS = ('fused_attnres',)
 
 def _spy_on_triton_ascend_attnres_backend():
     """Patch every op of the Triton-Ascend AttnRes backend to record dispatched calls."""
-    from fla.ops.attnres.backends import attnres_registry
+    from fla import backends
 
-    backend = attnres_registry._backends.get('triton_ascend')
+    backend = backends._resolve_registry('attnres')._backends.get('triton_ascend')
     assert backend is not None, 'Triton-Ascend AttnRes backend is not registered'
 
     calls = []

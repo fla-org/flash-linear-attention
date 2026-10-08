@@ -10,9 +10,7 @@ from __future__ import annotations
 import torch
 
 from fla.backends import BaseBackend, register_backend
-from fla.utils import IS_NVIDIA_HOPPER, TRITON_ABOVE_3_4_0, find_spec_cached, has_usable_nvcc
-
-_TILELANG_AVAILABLE = find_spec_cached("tilelang") is not None
+from fla.utils import IS_NVIDIA_HOPPER, TRITON_ABOVE_3_4_0, has_usable_nvcc
 
 
 @register_backend('common')
@@ -25,7 +23,7 @@ class CommonTileLangBackend(BaseBackend):
 
     @classmethod
     def is_available(cls) -> bool:
-        return _TILELANG_AVAILABLE and has_usable_nvcc()
+        return super().is_available() and has_usable_nvcc()
 
     def chunk_bwd_dqkwg_verifier(
         self,
@@ -99,6 +97,4 @@ class CommonTileLangBackend(BaseBackend):
         )
 
 
-TileLangBackend = CommonTileLangBackend
-
-__all__ = ['CommonTileLangBackend', 'TileLangBackend']
+__all__ = ['CommonTileLangBackend']

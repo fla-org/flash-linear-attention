@@ -12,9 +12,7 @@ from __future__ import annotations
 import torch
 
 from fla.backends import BaseBackend, register_backend
-from fla.utils import find_spec_cached, has_usable_nvcc
-
-_TILELANG_AVAILABLE = find_spec_cached("tilelang") is not None
+from fla.utils import has_usable_nvcc
 
 
 @register_backend('kda')
@@ -26,7 +24,7 @@ class KDATileLangBackend(BaseBackend):
 
     @classmethod
     def is_available(cls) -> bool:
-        return _TILELANG_AVAILABLE and has_usable_nvcc()
+        return super().is_available() and has_usable_nvcc()
 
     def chunk_kda_bwd_wy_dqkg_fused_verifier(
         self,

@@ -31,7 +31,7 @@ def get_definitions_from_tree(tree) -> set:
         return set()
     definitions = set()
     for node in tree.body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
             definitions.add(node.name)
     return definitions
 
@@ -86,37 +86,29 @@ def get_reexports_from_tree(tree, module: str, package: str) -> dict:
     return reexports
 
 
-def get_backend_imports_from_tree(tree) -> set:
-    """Resolve central dispatch calls to their owning backend packages."""
-    imports = get_imports_from_tree(tree)
+def _get_dispatch_owners(tree) -> set[str]:
+    """Read operation keys from the supported dispatch imports."""
     if not tree:
-        return imports
-    central_modules = {'fla.backends', 'fla.ops.backends'}
+        return set()
+    dispatch_modules = {'fla.backends', 'fla.ops.backends', 'fla.modules.backends'}
     dispatch_names = set()
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module in central_modules:
+        if isinstance(node, ast.ImportFrom) and node.module in dispatch_modules:
             dispatch_names.update(alias.asname or alias.name for alias in node.names if alias.name == 'dispatch')
-    if not dispatch_names:
-        return imports
-    imports.difference_update((module, 'dispatch') for module in central_modules)
+    owners = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name) or node.func.id not in dispatch_names:
             continue
         if not node.args or not isinstance(node.args[0], ast.Constant) or not isinstance(node.args[0].value, str):
             continue
         operation = node.args[0].value
-        if operation == 'modules':
-            owner = 'fla.modules.backends'
-        elif operation.startswith('modules.'):
-            owner = f'fla.{operation}.backends'
-        else:
-            owner = f'fla.ops.{operation}.backends'
-        imports.add((owner, 'dispatch'))
-    return imports
+        prefix = 'fla' if operation == 'modules' or operation.startswith('modules.') else 'fla.ops'
+        owners.add(f'{prefix}.{operation}.backends')
+    return owners
 
 
 def find_backend_op_files(changed_files: list[str], project_root: Path) -> list[str]:
-    """Map backend changes through shared adapters to their dispatch consumers."""
+    """Map backend changes and shared kernel imports to dispatch consumers."""
     shared = any(file == 'fla/backends.py' or file.startswith('fla/ops/backends/') for file in changed_files)
     owners = set()
     for file in changed_files:
@@ -126,21 +118,21 @@ def find_backend_op_files(changed_files: list[str], project_root: Path) -> list[
     if not shared and not owners:
         return []
 
-    op_imports = {}
+    dispatch_owners = {}
     backend_dependents = defaultdict(set)
     for path in (project_root / 'fla').rglob('*.py'):
         relative_path = path.relative_to(project_root)
         parts = relative_path.parts
-        imports = get_backend_imports_from_tree(parse_file(path))
+        tree = parse_file(path)
         if 'backends' in parts:
             owner = '.'.join(parts[:parts.index('backends') + 1])
-            for module, _ in imports:
+            for module, _ in get_imports_from_tree(tree):
                 module_parts = module.split('.')
                 if 'backends' in module_parts:
                     dependency = '.'.join(module_parts[:module_parts.index('backends') + 1])
                     backend_dependents[dependency].add(owner)
-            continue
-        op_imports[str(relative_path)] = imports
+        else:
+            dispatch_owners[str(relative_path)] = _get_dispatch_owners(tree)
 
     pending = list(owners)
     while pending:
@@ -148,16 +140,7 @@ def find_backend_op_files(changed_files: list[str], project_root: Path) -> list[
             owners.add(dependent)
             pending.append(dependent)
 
-    op_files = []
-    for path, imports in op_imports.items():
-        if any(
-            (symbol == 'dispatch' or symbol.endswith('_registry'))
-            and module.startswith('fla.') and module.endswith('.backends')
-            and (shared or module in owners)
-            for module, symbol in imports
-        ):
-            op_files.append(path)
-    return op_files
+    return [path for path, targets in dispatch_owners.items() if targets and (shared or owners & targets)]
 
 
 def file_to_module_path(file_path: Path, project_root: Path) -> str:

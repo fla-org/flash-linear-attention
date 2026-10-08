@@ -1405,9 +1405,9 @@ _TRITON_ASCEND_KDA_OPS = (
 
 def _spy_on_triton_ascend_kda_backend():
     """Patch every op of the Triton-Ascend KDA backend to record dispatched calls."""
-    from fla.ops.kda.backends import kda_registry
+    from fla import backends
 
-    backend = kda_registry._backends.get('triton_ascend')
+    backend = backends._resolve_registry('kda')._backends.get('triton_ascend')
     assert backend is not None, 'Triton-Ascend KDA backend is not registered'
 
     calls = []

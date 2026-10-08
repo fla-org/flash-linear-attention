@@ -10,9 +10,7 @@ from __future__ import annotations
 import torch
 
 from fla.backends import BaseBackend, register_backend
-from fla.utils import IS_NVIDIA_HOPPER, TRITON_ABOVE_3_4_0, find_spec_cached, has_usable_nvcc
-
-_TILELANG_AVAILABLE = find_spec_cached("tilelang") is not None
+from fla.utils import IS_NVIDIA_HOPPER, TRITON_ABOVE_3_4_0, has_usable_nvcc
 
 
 @register_backend('attn')
@@ -25,7 +23,7 @@ class AttnTileLangBackend(BaseBackend):
 
     @classmethod
     def is_available(cls) -> bool:
-        return _TILELANG_AVAILABLE and has_usable_nvcc()
+        return super().is_available() and has_usable_nvcc()
 
     def parallel_attn_fwd_verifier(
         self,
@@ -55,7 +53,7 @@ class AttnTileLangBackend(BaseBackend):
         cu_seqlens: torch.LongTensor | None = None,
         chunk_indices: torch.LongTensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        from fla.ops.attn.backends.tilelang.parallel_attn_fwd import parallel_attn_fwd_tilelang
+        from fla.ops.attn.backends.tilelang.parallel import parallel_attn_fwd_tilelang
         return parallel_attn_fwd_tilelang(
             q=q,
             k=k,
@@ -104,7 +102,7 @@ class AttnTileLangBackend(BaseBackend):
         cu_seqlens: torch.LongTensor | None = None,
         chunk_indices: torch.LongTensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
-        from fla.ops.attn.backends.tilelang.parallel_attn_bwd import parallel_attn_bwd_tilelang
+        from fla.ops.attn.backends.tilelang.parallel import parallel_attn_bwd_tilelang
         return parallel_attn_bwd_tilelang(
             q=q,
             k=k,

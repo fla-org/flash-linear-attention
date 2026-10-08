@@ -7,13 +7,9 @@
 
 """AttnRes backends."""
 
-from fla.backends import _registry_for
 from fla.ops.attnres.backends.triton_ascend import TritonAscendAttnResBackend
 
-attnres_registry = _registry_for('attnres')
-dispatch = attnres_registry.dispatch
-
-__all__ = ['TritonAscendAttnResBackend', 'attnres_registry', 'dispatch']
+__all__ = ['TritonAscendAttnResBackend']
 
 # gluon.py imports triton.experimental at module load; keep the Ascend backend usable when Gluon is unavailable.
 try:

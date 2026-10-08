@@ -112,12 +112,8 @@ class BackendRegistry:
                 return backend
         return None
 
-    def dispatch(self, func: F | str) -> F | Callable[[F], F]:
+    def dispatch(self, func: F) -> F:
         """Select the first eligible backend, falling back to the decorated function."""
-        if isinstance(func, str):
-            if func != self.operation_name:
-                raise ValueError(f'This dispatcher belongs to {self.operation_name!r}, not {func!r}.')
-            return self.dispatch
         if _DISPATCH_DISABLED:
             return func
         func_name = func.__name__
@@ -172,11 +168,10 @@ def _registry_for(operation: str) -> BackendRegistry:
     return _registries[operation]
 
 
-def register_backend(*operations: str) -> Callable[[type[B]], type[B]]:
-    """Register a separate backend instance for each operation and return its class."""
+def register_backend(operation: str) -> Callable[[type[B]], type[B]]:
+    """Register a backend instance for an operation and return its class."""
     def decorator(backend_class: type[B]) -> type[B]:
-        for operation in operations:
-            _registry_for(operation).register(backend_class())
+        _registry_for(operation).register(backend_class())
         return backend_class
 
     return decorator
@@ -189,7 +184,7 @@ def _resolve_registry(operation: str, *, allow_unknown: bool = False) -> Backend
         module_path = f'fla.{operation}.backends'
     else:
         module_path = f'fla.ops.{operation}.backends'
-    # a shared backend may have registered this operation before its package was loaded.
+    # an existing registry does not guarantee that all of the owner's backends are loaded.
     try:
         importlib.import_module(module_path)
     except ModuleNotFoundError as error:
