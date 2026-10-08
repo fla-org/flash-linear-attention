@@ -111,6 +111,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7.0.0
+        with:
+          fetch-depth: 0
 
       - name: Check NPU and CANN info
         run: |
@@ -161,7 +163,122 @@ jobs:
           print("matplotlib savefig smoke test: ok")
           PY
 
+      - name: Compare PR 1347 refs on the same NPU
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          BASE_REF: 07ca1e49ef6ca76a7f0dbc8d5ad040ab59434c38
+          HEAD_REF: 92c06df0c5136572b7c8e5c1f8cb2296c68fb3fa
+          ASCEND_RT_VISIBLE_DEVICES: "0"
+          FLA_CI_ENV: "0"
+          FLA_DISABLE_BACKEND_DISPATCH: "0"
+          FLA_BENCH_WARMUP_MS: "40"
+          FLA_BENCH_REP_MS: "200"
+          FLA_BENCH_OP_WARMUP_ITERS: "6"
+        run: |
+          source /usr/local/Ascend/ascend-toolkit/set_env.sh
+          set -euo pipefail
+          result_root="$GITHUB_WORKSPACE/benchmark_comparison"
+          mkdir -p "$result_root/base" "$result_root/head"
+          npu-smi info > "$result_root/npu-smi.txt"
+          git worktree add --detach "$RUNNER_TEMP/fla-pr1347-base" "$BASE_REF"
+          git worktree add --detach "$RUNNER_TEMP/fla-pr1347-head" "$HEAD_REF"
+
+          for label in base head; do
+            repo_root="$RUNNER_TEMP/fla-pr1347-$label"
+            output_dir="$result_root/$label"
+            (
+              cd "$repo_root"
+              export PYTHONPATH="$repo_root"
+              git rev-parse HEAD > "$output_dir/commit.txt"
+              python - <<'PY' > "$output_dir/import.txt"
+          from pathlib import Path
+          import fla
+          print(fla.__file__)
+          assert Path(fla.__file__).resolve().parent.parent == Path.cwd()
+          PY
+              python -m benchmarks.ops.run --op chunk_gdn chunk_kda --no-base \
+                --custom-shapes '{"small": {"B": 1, "T": 128, "H": 2, "D": 64}, "dense": {"B": 4, "T": 2048, "H": 16, "D": 128}}' \
+                --modes fwd fwdbwd --json "$output_dir/dense.json" \
+                > "$output_dir/dense.log" 2>&1
+              python -m benchmarks.ops.run --graph --op chunk_kda --no-base \
+                --custom-shapes '{"varlen": {"B": 1, "T": 128, "H": 2, "D": 64, "N": 2}}' \
+                --engines eager graph --modes fwdbwd --warmup 6 --iterations 30 \
+                --json "$output_dir/varlen.json" > "$output_dir/varlen.log" 2>&1
+            )
+          done
+
+          # alternate order to expose drift in the previously slower packed-convolution cases
+          for round in 1 2 3; do
+            labels=(base head)
+            if [[ "$round" == 2 ]]; then
+              labels=(head base)
+            fi
+            for label in "${labels[@]}"; do
+              repo_root="$RUNNER_TEMP/fla-pr1347-$label"
+              output_dir="$result_root/$label/conv-$round"
+              mkdir -p "$output_dir"
+              (
+                cd "$repo_root"
+                export PYTHONPATH="$repo_root"
+                export CONV_OUTPUT_DIR="$output_dir"
+                python - <<'PY' > "$output_dir/benchmark.log" 2>&1
+          import os
+          from pathlib import Path
+          import fla
+          from benchmarks.modules.benchmark_conv import benchmark
+          from benchmarks.modules.runner import run_module_benchmark
+
+          assert Path(fla.__file__).resolve().parent.parent == Path.cwd()
+          benchmark.benchmarks.x_vals = [
+              (256, 256), (512, 256), (1024, 256), (2048, 256),
+              (4096, 256), (8192, 256), (16384, 256), (256, 512),
+              (8192, 2048), (16384, 2048),
+          ]
+          run_module_benchmark(benchmark, save_dir=os.environ['CONV_OUTPUT_DIR'], visualize=False)
+          PY
+              )
+            done
+          done
+
+          python - <<'PY'
+          import csv
+          import json
+          import math
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ['GITHUB_WORKSPACE']) / 'benchmark_comparison'
+          for label in ('base', 'head'):
+              path = root / label
+              dense = json.loads((path / 'dense.json').read_text())['results']
+              expected = {
+                  (op, mode, *shape)
+                  for op in ('chunk_gdn', 'chunk_kda')
+                  for mode in ('fwd', 'fwdbwd')
+                  for shape in ((1, 128, 2, 64), (4, 2048, 16, 128))
+              }
+              actual = {(r['op'], r['mode'], r['B'], r['T'], r['H'], r['D']) for r in dense}
+              assert len(dense) == len(expected) and actual == expected, (label, actual)
+              assert all(math.isfinite(r['median_ms']) and r['median_ms'] > 0 for r in dense)
+              varlen = json.loads((path / 'varlen.json').read_text())['current']['results']
+              assert len(varlen) == 1 and varlen[0]['N'] == 2 and varlen[0]['validation'] == 'passed'
+              assert math.isfinite(varlen[0]['eager']['p50_ms']) and varlen[0]['eager']['p50_ms'] > 0
+              assert math.isfinite(varlen[0]['graph']['p50_ms']) and varlen[0]['graph']['p50_ms'] > 0
+              for round in (1, 2, 3):
+                  with (path / f'conv-{round}' / 'Performance.csv').open() as file:
+                      rows = list(csv.DictReader(file))
+                  assert len(rows) == 10, (label, round, rows)
+                  assert all(
+                      math.isfinite(float(row[mode])) and float(row[mode]) > 0
+                      for row in rows
+                      for mode in ('causal_conv1d_fwd', 'causal_conv1d_fwdbwd')
+                  )
+          print('Both refs completed all dense, varlen, and repeated convolution cases.')
+          PY
+
       - name: Benchmark chunk_gdn, fused_recurrent_gdn2, chunk_gdn2, chunk_kda, KDA graph, fused_attnres, and conv1d
+        if: github.event_name != 'workflow_dispatch'
         shell: bash
         env:
           FLA_BENCH_WARMUP_MS: "25"
@@ -259,6 +376,7 @@ jobs:
           exit "$status"
 
       - name: Check fused-recurrent GDN2 benchmark results
+        if: github.event_name != 'workflow_dispatch'
         shell: bash
         run: |
           source /usr/local/Ascend/ascend-toolkit/set_env.sh
@@ -293,5 +411,6 @@ jobs:
             benchmark_fused_attnres.json
             benchmark_kda_graph.json
             conv_benchmark/
+            benchmark_comparison/
           if-no-files-found: ignore
           retention-days: 10

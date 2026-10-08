@@ -116,6 +116,53 @@ jobs:
             test ${PIPESTATUS[0]} -eq 0 || exit 1
           done
 
+      - name: Benchmark PR 1347 TileLang base and head
+        if: steps.dispatch-coverage.outcome == 'success' && inputs.gpu_type == 'nvidia'
+        id: tilelang-benchmark
+        shell: bash
+        env:
+          FLA_CI_ENV: "0"
+          FLA_DISABLE_BACKEND_DISPATCH: "0"
+          FLA_TILELANG: "1"
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          BENCHMARK_SCRIPT="$GITHUB_WORKSPACE/scripts/benchmark_pr1347_tilelang.py"
+          BENCHMARK_RESULTS="$GITHUB_WORKSPACE/pr1347-tilelang-benchmark"
+          BENCHMARK_WORKTREES=$(mktemp -d "$RUNNER_TEMP/fla-pr1347-benchmark.XXXXXX")
+          BASE_SHA=07ca1e49ef6ca76a7f0dbc8d5ad040ab59434c38
+          HEAD_SHA=92c06df0c5136572b7c8e5c1f8cb2296c68fb3fa
+          mkdir -p "$BENCHMARK_RESULTS"
+          cleanup() {
+            git worktree remove --force "$BENCHMARK_WORKTREES/base" 2>/dev/null || true
+            git worktree remove --force "$BENCHMARK_WORKTREES/head" 2>/dev/null || true
+            rmdir "$BENCHMARK_WORKTREES"
+          }
+          trap cleanup EXIT
+          git fetch --no-tags --depth=1 origin "$BASE_SHA" "$HEAD_SHA"
+          for label in base head; do
+            if [ "$label" = base ]; then sha="$BASE_SHA"; else sha="$HEAD_SHA"; fi
+            git worktree add --detach "$BENCHMARK_WORKTREES/$label" "$sha"
+            (
+              cd "$BENCHMARK_WORKTREES/$label"
+              export PYTHONPATH="$PWD"
+              export FLA_BENCH_RESULT="$BENCHMARK_RESULTS/$label.json"
+              "$CONDA_BIN_PATH/python" "$BENCHMARK_SCRIPT" 2>&1 | tee "$BENCHMARK_RESULTS/$label.log"
+              test ${PIPESTATUS[0]} -eq 0
+            )
+            grep -Eq '\[FLA Backend\] attn\.parallel_attn_fwd -> tilelang$' "$BENCHMARK_RESULTS/$label.log"
+            grep -Eq '\[FLA Backend\] attn\.parallel_attn_bwd -> tilelang$' "$BENCHMARK_RESULTS/$label.log"
+            grep -Eq '\[FLA Backend\] common\.chunk_bwd_dqkwg -> tilelang$' "$BENCHMARK_RESULTS/$label.log"
+          done
+
+      - name: Upload PR 1347 TileLang benchmark results
+        if: always() && steps.tilelang-benchmark.outcome != 'skipped'
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: pr1347-tilelang-benchmark-${{ inputs.conda_env_name }}
+          path: pr1347-tilelang-benchmark/
+          if-no-files-found: warn
+          retention-days: 30
+
       - name: Comment on PR when dispatch coverage fails
         if: steps.dispatch-coverage.outcome == 'failure' && github.event_name == 'pull_request'
         continue-on-error: true
