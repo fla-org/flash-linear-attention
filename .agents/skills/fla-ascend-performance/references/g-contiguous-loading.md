@@ -2,7 +2,7 @@
 
 Apply when a Triton-Ascend bwd/fwd kernel loads gate `g` along the **time axis** but `g` is laid out as `[B, T, HV]`. Strided loads with inner stride `HV` (e.g. `block_ptr(..., stride=(HV,))`) are often **orders of magnitude slower** on Ascend than stride-1 contiguous loads — even when Cube utilization looks high.
 
-Reference implementation: `fla/ops/common/backends/triton_ascend/chunk_o.py` (`chunk_fwd_kernel_o_npu`, `chunk_bwd_kernel_dv_local_npu`, `chunk_bwd_kernel_dqkwg_npu`, `chunk_bwd_kernel_dg_npu`).
+Reference implementation: `fla/ops/common/backends/triton_ascend/chunk_o.py` (`chunk_o_fwd_kernel`, `chunk_dv_local_bwd_kernel`, `chunk_dqkwg_bwd_kernel`, `chunk_dg_bwd_kernel`).
 
 ## Symptom
 
@@ -39,7 +39,7 @@ if IS_VARLEN:
     T = eos - bos   # local sequence length for block_ptr bounds
 ```
 
-**Pointer** (must match `chunk_fwd_kernel_o_npu` — do not reuse `g += bos * HV + i_h` with transposed storage):
+**Pointer** (must match `chunk_o_fwd_kernel` — do not reuse `g += bos * HV + i_h` with transposed storage):
 
 | Mode | `g_ptr` |
 |------|---------|
@@ -72,11 +72,11 @@ Only offset `g` once in the non-contiguous branch; all loads in that branch use 
 
 ## Measured wins (chunk_o.py, B=2, T=2048, H=4, HV=8, K=V=64)
 
-| Kernel / entry | Before (stride HV) | After (G_T_CONTIG) |
-|----------------|-------------------|---------------------|
-| `chunk_bwd_kernel_dv_local_npu` (kernel only) | ~6.5 ms | ~0.18 ms |
-| `chunk_bwd_dqkwg_npu` (kernel only) | ~10.8 ms | ~0.91 ms |
-| `chunk_bwd_dqkwg_npu` (e2e incl. dg + transpose) | — | ~1.5 ms |
+| Kernel / entry                                   | Before (stride HV) | After (G_T_CONTIG) |
+| ------------------------------------------------ | ------------------ | ------------------ |
+| `chunk_dv_local_bwd_kernel` (kernel only)        | ~6.5 ms            | ~0.18 ms           |
+| `chunk_bwd_dqkwg_npu` (kernel only)              | ~10.8 ms           | ~0.91 ms           |
+| `chunk_bwd_dqkwg_npu` (e2e incl. dg + transpose) | —                  | ~1.5 ms            |
 
 MTE2 (aiv) on dv_local dropped from ~31% to ~12% after fix.
 

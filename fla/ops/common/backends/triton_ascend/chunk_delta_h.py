@@ -5,46 +5,43 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""chunk_gated_delta_rule_fwd_h adapted for triton-ascend on Ascend NPU."""
+"""Gated delta rule state updates for Ascend."""
 
 from __future__ import annotations
 
 import torch
 import triton
 import triton.language as tl
-import triton.runtime.driver as driver
 
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 from fla.ops.utils.op import exp2
 from fla.utils import input_guard
 from fla.utils.ascend_ub_manager import (
     compute_row_tile_block_size,
+    get_npu_properties,
     get_ub_manager,
 )
 
-# b_h[BK,BV] fp32 × n_slabs stay live; w/k are sequential one-slab tiles.
-# ``enable_ubuf_saving`` on the fwd launch packs that live set under 192KiB
-# (without it, BK=256/BV=128 reports 256KiB and fails to compile).
-# ``unit_flag`` overlaps Cube/Fixpipe waits (``--enable-hivm-unit-flag-sync``).
+# all fp32 state slabs stay live; w/k use one slab at a time.
 _FWD_H_MEM_MULT = 8.0
 _SAFETY_MARGIN = 0.80
 _FALLBACK_BV = 16
 _MAX_BV = 64
 _FWD_H_BT = 64
-# Soft over-admit: D256 BK=256/BV=128 live-range peak is 1.18× 192KiB (cost 14 vs 22 for BK=128/BV=128).
+# live-range packing fits BK=256/BV=128 despite a peak estimate of 1.18 times physical UB capacity.
 _FWD_UB_SOFT = 1.20
 _DHU_BT = 64
-# Soft UB over-admit for host-precomputed gates (live-range can beat peak estimate).
+# host-precomputed gates allow live-range packing to reduce the estimated peak.
 _DHU_UB_SOFT = 1.15
-# Tighter fraction when in-kernel exp2(g) inflates live UB (~1.7× analytical).
+# in-kernel exp2(g) raises live UB usage to roughly 1.7 times the analytical estimate.
 _DHU_UB_GATE_INLINE = 0.60
 
 
 def _get_bv(K: int, V: int) -> int:
     return compute_row_tile_block_size(
-        min(K, 64),
-        V,
-        _FWD_H_MEM_MULT,
+        row_dim=min(K, 64),
+        fixed_dim=V,
+        memory_multiplier=_FWD_H_MEM_MULT,
         tiling_row=False,
         safety_margin=_SAFETY_MARGIN,
         fallback=_FALLBACK_BV,
@@ -54,12 +51,7 @@ def _get_bv(K: int, V: int) -> int:
 
 
 def _fwd_h_peak_bytes(BK: int, BV: int, n_slabs: int, BT: int = _FWD_H_BT) -> int:
-    """b_h all slabs stay live (fp32); w and k are sequential one-slab tiles.
-
-    Recurrence is store-h → load-w/dot → load-v → load-k/dot. Coupled with
-    ``enable_ubuf_saving`` on the fwd launch so D256 BK=256/BV=128 compiles
-    (256KiB naive live set packed into 192KiB UB).
-    """
+    """Estimate forward UB usage with all state slabs live and one w/k slab at a time."""
     return n_slabs * BK * BV * 4 + BK * BT * 4 + BT * BV * 4 + BK * 4 + 12 * BT
 
 
@@ -69,13 +61,9 @@ def _fwd_h_tile_cost(K: int, V: int, BK: int, BV: int) -> int:
 
 
 def _select_fwd_h_tiles(K: int, V: int, state_v_first: bool) -> tuple[int, int]:
-    """Pick (BK, BV) minimizing ptr/scalar cost under a UB cap.
-
-    ``STATE_V_FIRST`` keeps BK=64 because ``tl.trans(b_h)`` copies inflate live UB.
-    At most four K-slabs (kernel unroll); BK starts at 64.
-    """
+    """Choose forward tiles under the UB budget, keeping BK=64 when state transposition needs extra storage."""
     if state_v_first:
-        return 64, _get_bv(K, V)
+        return 64, _get_bv(K=K, V=V)
 
     soft_cap = int(get_ub_manager().ub_capacity_bytes * _FWD_UB_SOFT)
     max_bk = min(256, triton.next_power_of_2(max(K, 64)))
@@ -88,8 +76,8 @@ def _select_fwd_h_tiles(K: int, V: int, state_v_first: bool) -> tuple[int, int]:
         if n_slabs <= 4:
             bv = 16
             while bv <= min(desired_v, 256):
-                if _fwd_h_peak_bytes(bk, bv, n_slabs) <= soft_cap:
-                    cost = _fwd_h_tile_cost(K, V, bk, bv)
+                if _fwd_h_peak_bytes(BK=bk, BV=bv, n_slabs=n_slabs) <= soft_cap:
+                    cost = _fwd_h_tile_cost(K=K, V=V, BK=bk, BV=bv)
                     if (
                         best is None
                         or cost < best[0]
@@ -100,12 +88,12 @@ def _select_fwd_h_tiles(K: int, V: int, state_v_first: bool) -> tuple[int, int]:
         bk *= 2
 
     if best is None:
-        return 64, _get_bv(K, V)
+        return 64, _get_bv(K=K, V=V)
     return best[1], best[2]
 
 
 def _dhu_peak_bytes(BK: int, BV: int, n_slabs: int, BT: int = _DHU_BT) -> int:
-    # All K-slabs of dh stay live; q/w are one-slab at a time.
+    # all state-gradient slabs stay live; q/w use one slab at a time.
     return n_slabs * BK * BV * 4 + 2 * BK * BT * 2 + BT * BV * 2 + BT * BV * 4 + 12 * BT
 
 
@@ -114,22 +102,13 @@ def _dhu_tile_cost(K: int, V: int, BK: int, BV: int) -> int:
     return triton.cdiv(V, BV) * (3 + 4 * triton.cdiv(K, BK))
 
 
-def _select_bwd_dhu_tiles(
-    K: int,
-    V: int,
-    state_v_first: bool,
-    *,
-    gate_inline: bool = False,
-) -> tuple[int, int]:
-    """Pick (BK, BV) minimizing launch×ptr cost under a soft UB cap.
-
-    ``gate_inline`` covers USE_G without host-precomputed exp2 (unaligned T / varlen).
-    """
+def _select_bwd_dhu_tiles(K: int, V: int, state_v_first: bool, *, gate_inline: bool = False) -> tuple[int, int]:
+    """Choose backward tiles, reserving extra UB when tails or varlen require in-kernel gate evaluation."""
     if state_v_first:
-        return 64, _get_bv(K, V)
+        return 64, _get_bv(K=K, V=V)
 
     soft_cap = int(get_ub_manager().ub_capacity_bytes * (_DHU_UB_GATE_INLINE if gate_inline else _DHU_UB_SOFT))
-    # bwd kernel is blockdim64: K is covered by up to four BK=64 slabs only.
+    # the backward kernel covers K with up to four fixed 64-column slabs.
     max_bk = 64
     desired_v = triton.next_power_of_2(V)
     # partial K/V slabs plus tail-token masking can exceed UB with BV > 64 (e.g. D=100).
@@ -142,21 +121,16 @@ def _select_bwd_dhu_tiles(
         n_slabs = triton.cdiv(K, bk)
         bv = 16
         while bv <= min(desired_v, 256):
-            if _dhu_peak_bytes(bk, bv, n_slabs) <= soft_cap:
-                cost = _dhu_tile_cost(K, V, bk, bv)
+            if _dhu_peak_bytes(BK=bk, BV=bv, n_slabs=n_slabs) <= soft_cap:
+                cost = _dhu_tile_cost(K=K, V=V, BK=bk, BV=bv)
                 if best is None or cost < best[0] or (cost == best[0] and bk > best[1]):
                     best = (cost, bk, bv)
             bv *= 2
         bk *= 2
 
     if best is None:
-        return 64, _get_bv(K, V)
+        return 64, _get_bv(K=K, V=V)
     return best[1], best[2]
-
-
-def get_npu_properties():
-    device = torch.npu.current_device()
-    return driver.active.utils.get_device_properties(device)
 
 
 def _launch_core_grid(kernel, *, task_num: int, kernel_kwargs: dict, **compile_opts) -> None:
@@ -164,6 +138,7 @@ def _launch_core_grid(kernel, *, task_num: int, kernel_kwargs: dict, **compile_o
     kernel[(num_core,)](task_num=task_num, num_core=num_core, **compile_opts, **kernel_kwargs)
 
 
+# enable_ubuf_saving packs BK=256/BV=128 into 192 KiB; unit_flag overlaps Cube/Fixpipe waits.
 _FWD_H_COMPILE = dict(enable_ubuf_saving=True, unit_flag=True)
 
 _FWD_H_HEURISTICS = {
@@ -180,7 +155,7 @@ _FWD_H_HEURISTICS = {
 
 @triton.heuristics(_FWD_H_HEURISTICS)
 @triton.jit(do_not_specialize=["T", "task_num", "num_core"])
-def chunk_gated_delta_rule_fwd_kernel_h_blockdim64_npu(
+def chunk_gated_delta_rule_h_fwd_kernel(
     k,
     v,
     w,
@@ -223,7 +198,6 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64_npu(
     stride_w: tl.constexpr = HV * K
     T_max = T
     for task_id in tl.range(core_id, task_num, num_core):
-        # One V-tile per task, matching CUDA grid NV * N * HV.
         i_v, i_nh = task_id % NV, (task_id // NV).to(tl.int64)
         i_n, i_h = i_nh // HV, i_nh % HV
         if IS_VARLEN:
@@ -240,8 +214,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64_npu(
             boh = tl.cast(i_n, tl.int64) * NT
 
         v_start = i_v * BV
-        # Rebind GM bases each task; do not in-place ``ptr +=`` across ``i_t``
-        # (Ascend MTE OOB). ``h`` rebases each chunk via ``i_t * DH_CS``.
+        # rebind GM bases per task to avoid Ascend MTE faults from accumulated pointer offsets.
         w_base = w + (bos * HV + i_h) * K
         k_base = k + (bos * H + i_h // (HV // H)) * K
         v_base = v + (bos * HV + i_h) * V
@@ -257,7 +230,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64_npu(
             if USE_GK_PRECOMP:
                 gk_last_exp_nh = gk_last_exp + (tl.cast(i_n, tl.int64) * HV + i_h) * NT * K
 
-        # b_h shape: [BK, BV] (default) or [BV, BK] (STATE_V_FIRST)
+        # state tiles are [BK, BV], or [BV, BK] with STATE_V_FIRST.
         if STATE_V_FIRST:
             b_h1 = tl.zeros([BV, BK], dtype=tl.float32)
             if K > BK:
@@ -275,7 +248,6 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64_npu(
             if K > BK * 3:
                 b_h4 = tl.zeros([BK, BV], dtype=tl.float32)
 
-        # load initial state for this V segment (K-segmented)
         if USE_INITIAL_STATE:
             h0_ptr = h0 + i_nh * K * V
             if STATE_V_FIRST:
@@ -305,11 +277,9 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64_npu(
                     p_h0_4 = tl.make_block_ptr(h0_ptr, (K, V), (V, 1), (BK * 3, v_start), (BK, BV), (1, 0))
                     b_h4 += tl.load(p_h0_4, boundary_check=(0, 1)).to(tl.float32)
 
-        # main recurrence
         for i_t in range(NT):
             h_base = h_nh + tl.cast(i_t, tl.int64) * DH_CS
 
-            # store h for this V segment (K-segmented)
             if STATE_V_FIRST:
                 p_h1 = tl.make_block_ptr(h_base, (V, K), (K, 1), (v_start, 0), (BV, BK), (1, 0))
                 tl.store(p_h1, b_h1.to(p_h1.dtype.element_ty), boundary_check=(0, 1))
@@ -335,7 +305,6 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64_npu(
                     p_h4 = tl.make_block_ptr(h_base, (K, V), (V, 1), (BK * 3, v_start), (BK, BV), (1, 0))
                     tl.store(p_h4, b_h4.to(p_h4.dtype.element_ty), boundary_check=(0, 1))
 
-            # load w (K-segmented), accumulate b_v = sum_k dot(b_w_k, b_h_k)
             p_w1 = tl.make_block_ptr(w_base, (T, K), (stride_w, 1), (i_t * BT, 0), (BT, BK), (1, 0))
             b_w = tl.load(p_w1, boundary_check=(0, 1)).to(tl.float32)
             if STATE_V_FIRST:
@@ -381,7 +350,6 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64_npu(
                     b_g = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
                     m_t = (i_t * BT + tl.arange(0, BT)) < T
 
-            # load v and compute v_new = v - b_v
             p_v = tl.make_block_ptr(v_base, (T, V), (stride_v, 1), (i_t * BT, v_start), (BT, BV), (1, 0))
             b_v = tl.load(p_v, boundary_check=(0, 1)).to(tl.float32) - b_v
 
@@ -448,7 +416,6 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64_npu(
                     else:
                         b_h4 *= b_gk_last4[:, None]
 
-            # load k (K-segmented), update b_h += dot(b_k_seg, b_v)
             p_k1 = tl.make_block_ptr(k_base, (K, T), (1, stride_k), (0, i_t * BT), (BK, BT), (0, 1))
             b_k = tl.load(p_k1, boundary_check=(0, 1)).to(tl.float32)
             if STATE_V_FIRST:
@@ -477,7 +444,6 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64_npu(
                 else:
                     b_h4 = tl.dot(b_k, b_v, b_h4)
 
-        # epilogue: store final state for this V segment (K-segmented)
         if STORE_FINAL_STATE:
             ht_ptr = ht + i_nh * K * V
 
@@ -517,7 +483,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64_npu(
     }
 )
 @triton.jit(do_not_specialize=["T", "task_num", "num_core"])
-def chunk_gated_delta_rule_fwd_kernel_h_oneslab_npu(
+def chunk_gated_delta_rule_h_fwd_kernel_single_slab(
     k,
     v,
     w,
@@ -544,11 +510,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_oneslab_npu(
     STORE_FINAL_STATE: tl.constexpr,
     SAVE_NEW_VALUE: tl.constexpr,
 ):
-    """Aligned oneslab path: NT computed at runtime (T // BT), no K-slab/varlen/STATE_V_FIRST.
-
-    Oneslab is only launched when ``T % BT == 0`` and not varlen, so gates are
-    always host-precomputed (``g``/``gk`` are never passed).
-    """
+    """Update K-first states for aligned dense sequences with one K slab and host-precomputed gates."""
     core_id = tl.program_id(0)
     DH_CS: tl.constexpr = HV * K * V
     stride_v: tl.constexpr = HV * V
@@ -632,11 +594,7 @@ def _prepare_fwd_g_gates(
     BT: int,
     cu_seqlens: torch.LongTensor | None,
 ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
-    """Transpose g to [B, HV, T]; if T%BT==0, precompute fp32 exp2 scales.
-
-    Returns ``(g_log, g_ratio, g_last_exp)``. Aligned non-varlen paths pass
-    ``g_log=None`` so the kernel loads only the precomputed tensors.
-    """
+    """Prepare contiguous scalar gates, precomputing fp32 scales for aligned dense chunks."""
     if g is None:
         return None, None, None
     g_log = g.transpose(1, 2).contiguous()
@@ -662,10 +620,7 @@ def _prepare_fwd_gk_last_exp(
     BT: int,
     cu_seqlens: torch.LongTensor | None,
 ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-    """If T%BT==0, precompute ``exp2(gk)`` at each chunk's last token.
-
-    Returns ``(gk, gk_last_exp)`` with layout ``[B, HV, NT, K]`` fp32.
-    """
+    """Precompute fp32 key-gate scales at chunk ends for aligned dense sequences."""
     if gk is None:
         return None, None
     if cu_seqlens is None and (T % BT == 0):
@@ -695,15 +650,14 @@ def chunk_gated_delta_rule_fwd_h_npu(
     B, T, H, K, V, HV = *k.shape, u.shape[-1], u.shape[2]
     BT = chunk_size
 
-    # N: the actual number of sequences in the batch with either equal or variable lengths
     if chunk_indices is None and cu_seqlens is not None:
-        chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
+        chunk_indices = prepare_chunk_indices(cu_seqlens=cu_seqlens, chunk_size=chunk_size)
     if cu_seqlens is None:
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
     else:
         N, NT = len(cu_seqlens) - 1, len(chunk_indices)
         if chunk_offsets is None:
-            chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT)
+            chunk_offsets = prepare_chunk_offsets(cu_seqlens=cu_seqlens, chunk_size=BT)
     assert K <= 256, "current kernel does not support head dimension larger than 256."
 
     if state_v_first:
@@ -714,14 +668,10 @@ def chunk_gated_delta_rule_fwd_h_npu(
         final_state = k.new_zeros(N, HV, K, V, dtype=torch.float32) if output_final_state else None
 
     v_new = torch.empty_like(u) if save_new_value else None
-    g, g_ratio, g_last_exp = _prepare_fwd_g_gates(
-        g, B=B, T=T, HV=HV, BT=BT, cu_seqlens=cu_seqlens,
-    )
-    gk, gk_last_exp = _prepare_fwd_gk_last_exp(
-        gk, B=B, T=T, HV=HV, K=K, BT=BT, cu_seqlens=cu_seqlens,
-    )
+    g, g_ratio, g_last_exp = _prepare_fwd_g_gates(g=g, B=B, T=T, HV=HV, BT=BT, cu_seqlens=cu_seqlens)
+    gk, gk_last_exp = _prepare_fwd_gk_last_exp(gk=gk, B=B, T=T, HV=HV, K=K, BT=BT, cu_seqlens=cu_seqlens)
 
-    BK, BV = _select_fwd_h_tiles(K, V, state_v_first)
+    BK, BV = _select_fwd_h_tiles(K=K, V=V, state_v_first=state_v_first)
     oneslab = (
         cu_seqlens is None
         and not state_v_first
@@ -751,14 +701,14 @@ def chunk_gated_delta_rule_fwd_h_npu(
     )
     if oneslab:
         _launch_core_grid(
-            chunk_gated_delta_rule_fwd_kernel_h_oneslab_npu,
+            kernel=chunk_gated_delta_rule_h_fwd_kernel_single_slab,
             task_num=N * HV * triton.cdiv(V, BV),
             kernel_kwargs={**kwargs},
             **_FWD_H_COMPILE,
         )
     else:
         _launch_core_grid(
-            chunk_gated_delta_rule_fwd_kernel_h_blockdim64_npu,
+            kernel=chunk_gated_delta_rule_h_fwd_kernel,
             task_num=N * HV * triton.cdiv(V, BV),
             kernel_kwargs={
                 **kwargs,
@@ -774,7 +724,7 @@ def chunk_gated_delta_rule_fwd_h_npu(
 
 
 @triton.jit(do_not_specialize=["T", "task_num", "num_core"])
-def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64_npu(
+def chunk_gated_delta_rule_h_bwd_kernel(
     q,
     k,
     w,
@@ -1054,8 +1004,9 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64_npu(
                     b_dv_i = b_dv_pristine + 0.0
                     b_dh1 -= tl.dot(tl.trans(b_dv_i.to(b_w.dtype)), tl.trans(b_w), allow_tf32=False)
                 else:
-                    b_dh1 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype), allow_tf32=False) - tl.dot(
-                        b_w, b_dv.to(b_w.dtype), allow_tf32=False
+                    b_dh1 += (
+                        tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype), allow_tf32=False)
+                        - tl.dot(b_w, b_dv.to(b_w.dtype), allow_tf32=False)
                     )
 
                 if K > 64:
@@ -1073,8 +1024,9 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64_npu(
                         b_dv_i = b_dv_pristine + 0.0
                         b_dh2 -= tl.dot(tl.trans(b_dv_i.to(b_w.dtype)), tl.trans(b_w), allow_tf32=False)
                     else:
-                        b_dh2 += tl.dot(b_q.to(b_q.dtype), b_do_c.to(b_q.dtype), allow_tf32=False) - tl.dot(
-                            b_w, b_dv.to(b_w.dtype), allow_tf32=False
+                        b_dh2 += (
+                            tl.dot(b_q.to(b_q.dtype), b_do_c.to(b_q.dtype), allow_tf32=False)
+                            - tl.dot(b_w, b_dv.to(b_w.dtype), allow_tf32=False)
                         )
 
                 if K > 128:
@@ -1092,8 +1044,9 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64_npu(
                         b_dv_i = b_dv_pristine + 0.0
                         b_dh3 -= tl.dot(tl.trans(b_dv_i.to(b_w.dtype)), tl.trans(b_w), allow_tf32=False)
                     else:
-                        b_dh3 += tl.dot(b_q.to(b_q.dtype), b_do_c2.to(b_q.dtype), allow_tf32=False) - tl.dot(
-                            b_w, b_dv.to(b_w.dtype), allow_tf32=False
+                        b_dh3 += (
+                            tl.dot(b_q.to(b_q.dtype), b_do_c2.to(b_q.dtype), allow_tf32=False)
+                            - tl.dot(b_w, b_dv.to(b_w.dtype), allow_tf32=False)
                         )
 
                 if K > 192:
@@ -1111,8 +1064,9 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64_npu(
                         b_dv_i = b_dv_pristine + 0.0
                         b_dh4 -= tl.dot(tl.trans(b_dv_i.to(b_w.dtype)), tl.trans(b_w), allow_tf32=False)
                     else:
-                        b_dh4 += tl.dot(b_q.to(b_q.dtype), b_do_c3.to(b_q.dtype), allow_tf32=False) - tl.dot(
-                            b_w, b_dv.to(b_w.dtype), allow_tf32=False
+                        b_dh4 += (
+                            tl.dot(b_q.to(b_q.dtype), b_do_c3.to(b_q.dtype), allow_tf32=False)
+                            - tl.dot(b_w, b_dv.to(b_w.dtype), allow_tf32=False)
                         )
 
                 dh_chunk -= DH_CS
@@ -1153,7 +1107,7 @@ def _prepare_dhu_gate_tensors(
     BT: int,
     cu_seqlens: torch.LongTensor | None,
 ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None, bool]:
-    """Transpose g to [B, HV, T]; if T%BT==0, also precompute fp32 exp2 scales."""
+    """Prepare contiguous backward gates, precomputing fp32 scales for aligned dense chunks."""
     if g is None:
         return None, None, None, None, False
     g_log = g.transpose(1, 2).contiguous()
@@ -1193,24 +1147,23 @@ def chunk_gated_delta_rule_bwd_dhu_npu(
     assert K <= 256, "current kernel does not support head dimension being larger than 256."
 
     if chunk_indices is None and cu_seqlens is not None:
-        chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
+        chunk_indices = prepare_chunk_indices(cu_seqlens=cu_seqlens, chunk_size=chunk_size)
     if cu_seqlens is None:
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
     else:
         N, NT = len(cu_seqlens) - 1, len(chunk_indices)
         if chunk_offsets is None:
-            chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT)
+            chunk_offsets = prepare_chunk_offsets(cu_seqlens=cu_seqlens, chunk_size=BT)
 
     if state_v_first:
         dh = q.new_empty(B, NT, HV, V, K)
     else:
         dh = q.new_empty(B, NT, HV, K, V)
     dh0 = torch.empty_like(h0, dtype=torch.float32) if h0 is not None else None
-    # Separate output, matching the CUDA kernel: callers must not observe a
-    # mutated `dv`. Distinct from the #1113 in-register `+ 0.0` lhs copies.
+    # keep the caller's dv unchanged while updating the value gradient.
     dv2 = torch.empty_like(dv)
     g_log, g_exp, g_ratio, g_last_exp, use_g_precomp = _prepare_dhu_gate_tensors(
-        g,
+        g=g,
         B=B,
         T=T,
         HV=HV,
@@ -1218,9 +1171,9 @@ def chunk_gated_delta_rule_bwd_dhu_npu(
         cu_seqlens=cu_seqlens,
     )
     gate_inline = g is not None and not use_g_precomp
-    BK, BV = _select_bwd_dhu_tiles(K, V, state_v_first, gate_inline=gate_inline)
+    BK, BV = _select_bwd_dhu_tiles(K=K, V=V, state_v_first=state_v_first, gate_inline=gate_inline)
     _launch_core_grid(
-        chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64_npu,
+        kernel=chunk_gated_delta_rule_h_bwd_kernel,
         task_num=N * HV,
         kernel_kwargs={
             "q": q,
