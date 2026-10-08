@@ -19,6 +19,7 @@ import torch
 import triton
 from triton.testing import do_bench_cudagraph
 
+from fla.modules.conv.triton.kernels import causal_conv1d_fwd_kernel
 from fla.modules.convolution import causal_conv1d
 from fla.modules.l2norm import l2_norm
 from fla.ops.convolution import fused_short_conv
@@ -45,6 +46,7 @@ def benchmark(B, T, H, head_dim, packed, modes, repeats, rep_ms):
     functions = {'separate': separate, 'fused': fused}
     inputs = (x, weight, bias)
     ref = separate()
+    separate_conv_config = str(causal_conv1d_fwd_kernel.fn.best_config)
     ref_grads = torch.autograd.grad(outputs=ref, inputs=inputs, grad_outputs=dy)
     out = fused()
     grads = torch.autograd.grad(outputs=out, inputs=inputs, grad_outputs=dy)
@@ -74,6 +76,7 @@ def benchmark(B, T, H, head_dim, packed, modes, repeats, rep_ms):
             B=B, T=T, H=H, head_dim=head_dim, packed=packed, mode=mode,
             separate_ms=medians['separate'], fused_ms=medians['fused'],
             speedup=medians['separate'] / medians['fused'], samples_ms=samples,
+            separate_conv_config=separate_conv_config,
         )
         results.append(result)
         print(json.dumps(result), flush=True)

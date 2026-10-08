@@ -42,6 +42,7 @@ def fused_short_conv_fwd_kernel(
     W: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     BT: tl.constexpr,
+    NS: tl.constexpr,
     BD: tl.constexpr,
     BW: tl.constexpr,
     EPS: tl.constexpr,
@@ -53,8 +54,9 @@ def fused_short_conv_fwd_kernel(
 ):
     i_h, i_t, i_b = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     if IS_VARLEN:
-        i_n = tl.load(chunk_indices + i_t * 2).to(tl.int64)
-        i_t = tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        i_c, i_s = i_t // NS, i_t % NS
+        i_n = tl.load(chunk_indices + i_c * 2).to(tl.int64)
+        i_t = tl.load(chunk_indices + i_c * 2 + 1).to(tl.int64) * NS + i_s
         bos = tl.load(cu_seqlens + i_n).to(tl.int64)
         T = tl.load(cu_seqlens + i_n + 1).to(tl.int64) - bos
         p_x = x + bos * stride_x_t
@@ -120,10 +122,12 @@ class FusedShortConvFunction(torch.autograd.Function):
     ):
         B, T, D = x.shape
         W = weight.shape[1]
-        BT = 64
+        BT = 16 if W <= 16 else 64
+        NS = 64 // BT
+        # retain 64-token chunk metadata for callers and the existing backward kernels.
         if cu_seqlens is not None and chunk_indices is None:
-            chunk_indices = prepare_chunk_indices(cu_seqlens, BT, cu_seqlens_cpu=cu_seqlens_cpu)
-        NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
+            chunk_indices = prepare_chunk_indices(cu_seqlens, 64, cu_seqlens_cpu=cu_seqlens_cpu)
+        NT = len(chunk_indices) * NS if cu_seqlens is not None else triton.cdiv(T, BT)
         y = torch.empty_like(x, memory_format=torch.contiguous_format)
         rstd = torch.empty((B, T, D // head_dim), device=x.device, dtype=torch.float32)
         if B * NT:
@@ -145,6 +149,7 @@ class FusedShortConvFunction(torch.autograd.Function):
                 W=W,
                 HEAD_DIM=head_dim,
                 BT=BT,
+                NS=NS,
                 BD=triton.next_power_of_2(head_dim),
                 BW=triton.next_power_of_2(W),
                 EPS=norm_eps,
