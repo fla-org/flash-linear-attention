@@ -5,12 +5,21 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import warnings
+
 import pytest
 import torch
 import torch.nn.functional as F
 from einops import rearrange
 
-from fla.modules.convolution import ShortConvolution, causal_conv1d, causal_conv1d_update
+from fla.modules.convolution import (
+    ShortConvolution,
+    causal_conv1d,
+    causal_conv1d_bwd,
+    causal_conv1d_fwd,
+    causal_conv1d_update,
+)
+from fla.ops.utils import prepare_chunk_indices
 from fla.utils import IS_NVIDIA, assert_close, device
 
 try:
@@ -1703,7 +1712,7 @@ def test_conv_backend_verifier(monkeypatch, case):
     elif case == 'packed-batch':
         kwargs['cu_seqlens'] = torch.tensor([0, 128])
     elif case == 'chunk':
-        kwargs['BT'] = 32
+        kwargs['chunk_size'] = 32
     if case == 'state':
         accepted, reason = backend.causal_conv1d_bwd_verifier(
             x=x,
@@ -1718,7 +1727,8 @@ def test_conv_backend_verifier(monkeypatch, case):
 
 
 @pytest.mark.skipif(not IS_NVIDIA, reason='Gluon convolution requires NVIDIA')
-def test_conv_backend_dispatch(monkeypatch):
+@pytest.mark.parametrize('keyword', [None, 'chunk_size', 'BT'])
+def test_conv_backend_dispatch(monkeypatch, keyword):
     from fla.ops.backends import _DISPATCH_DISABLED
 
     conv_gluon = pytest.importorskip('fla.modules.backends.gluon.causal_conv1d')
@@ -1743,6 +1753,46 @@ def test_conv_backend_dispatch(monkeypatch):
         calls.clear()
         for W in [4, 5]:
             weight = torch.randn(64, W, device=device, requires_grad=True)
-            y, _ = causal_conv1d(x=x, weight=weight, activation='silu')
-            y.sum().backward()
+            if keyword is None:
+                y, _ = causal_conv1d(x=x, weight=weight, activation='silu')
+                y.sum().backward()
+            else:
+                kwargs = dict(x=x, weight=weight, bias=None, residual=None, activation='silu', **{keyword: 64})
+                with warnings.catch_warnings(record=True) as records:
+                    warnings.simplefilter('always', FutureWarning)
+                    y, _ = causal_conv1d_fwd(**kwargs)
+                    causal_conv1d_bwd(dy=torch.ones_like(y), dht=None, **kwargs)
+                messages = [str(record.message) for record in records if issubclass(record.category, FutureWarning)]
+                if keyword == 'BT':
+                    assert len(messages) == 2
+                    assert all('`BT` is deprecated' in message and 'Use `chunk_size` instead' in message for message in messages)
+                else:
+                    assert not messages
         assert calls == (['fwd', 'bwd'] if enabled and not _DISPATCH_DISABLED else [])
+
+
+@pytest.mark.parametrize('chunk_size', [32, 64])
+def test_conv_deprecated_chunk_size(chunk_size):
+    torch.manual_seed(42)
+    x = torch.randn(1, 129, 64, device=device)
+    weight = torch.randn(64, 4, device=device)
+    bias = torch.randn(64, device=device)
+    dy = torch.randn_like(x)
+    cu_seqlens = torch.tensor([0, 1, 34, 129], device=device)
+    kwargs = dict(
+        x=x,
+        weight=weight,
+        bias=bias,
+        residual=None,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=prepare_chunk_indices(cu_seqlens, chunk_size),
+    )
+    y, _ = causal_conv1d_fwd(**kwargs, chunk_size=chunk_size)
+    grads = causal_conv1d_bwd(dy=dy, dht=None, **kwargs, chunk_size=chunk_size)
+    with pytest.warns(FutureWarning, match='`BT` is deprecated.*Use `chunk_size` instead'):
+        y_old, _ = causal_conv1d_fwd(**kwargs, BT=chunk_size)
+    with pytest.warns(FutureWarning, match='`BT` is deprecated.*Use `chunk_size` instead'):
+        grads_old = causal_conv1d_bwd(dy=dy, dht=None, **kwargs, BT=chunk_size)
+    assert_close('y', y, y_old, 1e-3)
+    for name, expected, actual in zip(('dx', 'dw', 'db'), grads, grads_old):
+        assert_close(name, expected, actual, 1e-3)

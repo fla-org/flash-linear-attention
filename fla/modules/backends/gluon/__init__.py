@@ -38,7 +38,7 @@ class GluonBackend(BaseBackend):
         cu_seqlens: torch.LongTensor | None = None,
         cu_seqlens_cpu: torch.LongTensor | None = None,
         chunk_indices: torch.LongTensor | None = None,
-        BT: int = 64,
+        chunk_size: int = 64,
         layout_fallback: bool = False,
     ) -> tuple[bool, str | None]:
         if torch.distributed.is_initialized():
@@ -51,7 +51,7 @@ class GluonBackend(BaseBackend):
             return False, "Gluon convolution requires a width of 2, 3, or 4"
         if cu_seqlens is not None and x.shape[0] != 1:
             return False, "Gluon packed convolution requires batch size 1"
-        if BT != 64:
+        if chunk_size != 64:
             return False, "Gluon convolution requires 64-token chunk indices"
         return True, None
 
@@ -67,7 +67,7 @@ class GluonBackend(BaseBackend):
         cu_seqlens: torch.LongTensor | None = None,
         cu_seqlens_cpu: torch.LongTensor | None = None,
         chunk_indices: torch.LongTensor | None = None,
-        BT: int = 64,
+        chunk_size: int = 64,
         layout_fallback: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         from fla.modules.backends.gluon.causal_conv1d import causal_conv1d_fwd
@@ -82,8 +82,7 @@ class GluonBackend(BaseBackend):
             cu_seqlens=cu_seqlens,
             cu_seqlens_cpu=cu_seqlens_cpu,
             chunk_indices=chunk_indices,
-            BT=BT,
-            layout_fallback=layout_fallback,
+            chunk_size=chunk_size,
         )
 
     def causal_conv1d_bwd_verifier(
@@ -99,12 +98,12 @@ class GluonBackend(BaseBackend):
         cu_seqlens: torch.LongTensor | None = None,
         cu_seqlens_cpu: torch.LongTensor | None = None,
         chunk_indices: torch.LongTensor | None = None,
-        BT: int = 64,
+        chunk_size: int = 64,
         layout_fallback: bool = False,
     ) -> tuple[bool, str | None]:
         if initial_state is not None or dht is not None:
             return False, "Gluon convolution does not support state gradients"
-        return self.causal_conv1d_fwd_verifier(x=x, weight=weight, cu_seqlens=cu_seqlens, BT=BT)
+        return self.causal_conv1d_fwd_verifier(x=x, weight=weight, cu_seqlens=cu_seqlens, chunk_size=chunk_size)
 
     def causal_conv1d_bwd(
         self,
@@ -119,7 +118,7 @@ class GluonBackend(BaseBackend):
         cu_seqlens: torch.LongTensor | None = None,
         cu_seqlens_cpu: torch.LongTensor | None = None,
         chunk_indices: torch.LongTensor | None = None,
-        BT: int = 64,
+        chunk_size: int = 64,
         layout_fallback: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None, None]:
         from fla.modules.backends.gluon.causal_conv1d import causal_conv1d_bwd
@@ -135,6 +134,5 @@ class GluonBackend(BaseBackend):
             cu_seqlens=cu_seqlens,
             cu_seqlens_cpu=cu_seqlens_cpu,
             chunk_indices=chunk_indices,
-            BT=BT,
-            layout_fallback=layout_fallback,
+            chunk_size=chunk_size,
         )
