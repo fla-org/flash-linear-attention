@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import torch
 
-from fla.ops.backends import BaseBackend
+from fla.backends import BaseBackend
 from fla.utils import IS_NPU
 
 # NPU inductor mis-compiles grpo_loss_with_old_logps; keep eager fn from fla.modules.grpo.

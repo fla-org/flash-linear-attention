@@ -287,6 +287,27 @@ def test_gdn2_dispatch_uses_local_registry(monkeypatch, module_name, func_name):
     assert entry(q=torch.tensor([1.0, 2.0], requires_grad=True)) is result
 
 
+@pytest.mark.parametrize('disabled', ['0', '1'], ids=['dispatch-enabled', 'dispatch-disabled'])
+def test_public_imports_do_not_load_legacy_dispatch(run_python, disabled):
+    run_python(
+        """
+        import sys
+        import warnings
+
+        warnings.filterwarnings('error', message='fla.ops.backends is deprecated', category=DeprecationWarning)
+        from fla.ops.kda import chunk_kda
+        from fla.backends import dispatch
+        from fla.modules import ShortConvolution
+
+        assert callable(chunk_kda)
+        assert callable(dispatch)
+        assert callable(ShortConvolution)
+        assert 'fla.ops.backends' not in sys.modules
+        """,
+        FLA_DISABLE_BACKEND_DISPATCH=disabled,
+    )
+
+
 @pytest.mark.parametrize('first_import', ['fla.backends', 'fla.ops.backends'])
 def test_legacy_dispatch_uses_shared_registry(run_python, first_import):
     run_python(
