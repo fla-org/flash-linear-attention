@@ -15,6 +15,11 @@ from fla.utils import IS_GATHER_SUPPORTED, IS_NVIDIA_BLACKWELL
 
 
 @triton.jit
+def barrier():
+    tl.debug_barrier()
+
+
+@triton.jit
 def unflatten_program_id(X: tl.constexpr, Y: tl.constexpr = None):
     """Recover int64 x-fastest 2D/3D indices without using CUDA's limited y/z grid dimensions."""
     pid = tl.program_id(0).to(tl.int64)
