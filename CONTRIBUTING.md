@@ -17,9 +17,9 @@ Contributions to Flash Linear Attention are welcome. This guide defines the deve
   * [Copyright Header](#copyright-header)
   * [Formatting and Linting](#formatting-and-linting)
   * [Imports](#imports)
+  * [Naming Conventions](#naming-conventions)
   * [Docstrings and Comments](#docstrings-and-comments)
   * [Prose and Markdown](#prose-and-markdown)
-  * [Naming Conventions](#naming-conventions)
   * [Triton Kernels](#triton-kernels)
   * [PyTorch Operators](#pytorch-operators)
 * [Adding a New Operator](#adding-a-new-operator)
@@ -187,6 +187,15 @@ Avoid unnecessary aliases and ad hoc abbreviations. Keep established conventions
 
 For tests that monkeypatch module globals, retain the module object and patch the namespace where the code under test looks up the value. Module access is also appropriate when values may be rebound at runtime. Keep the module's original name unless an alias helps distinguish it from another object in the same scope.
 
+### Naming Conventions
+
+| Entity          | Convention         | Example                                   |
+| --------------- | ------------------ | ----------------------------------------- |
+| Classes         | PascalCase         | `GatedDeltaNet`, `LinearAttention`        |
+| Functions       | snake_case         | `chunk_delta_rule`, `fused_recurrent_gla` |
+| Constants       | UPPER_SNAKE_CASE   | `FLA_CI_ENV`, `SUPPORTS_AUTOTUNE_CACHE`   |
+| Private helpers | Leading underscore | `_guarded_empty`, `_is_called_from_fla`   |
+
 ### Docstrings and Comments
 
 Comments and docstrings are hints for other readers, not a chain of thought. Give the reader what the code cannot say for itself, in as few words as possible — correct, simple, and with no narration of your reasoning.
@@ -223,15 +232,6 @@ Never treated as excess comments: the license header required by `scripts/check_
 ### Prose and Markdown
 
 Don't hard-wrap prose at an arbitrary short column — this covers Markdown files, Python docstrings (including `Args:` / `Returns:` descriptions), and comment paragraphs. Either keep a paragraph on a single line, or break **only at sentence or clause boundaries** (after a `.`, `,`, `;`, or `—`), never mid-clause. In Python files the 127-character limit still applies, so wrap a docstring or comment at a clause boundary before it reaches the limit. Format Markdown tables with aligned columns so the `|` separators line up; table rows are exempt from the line limit.
-
-### Naming Conventions
-
-| Entity          | Convention         | Example                                   |
-| --------------- | ------------------ | ----------------------------------------- |
-| Classes         | PascalCase         | `GatedDeltaNet`, `LinearAttention`        |
-| Functions       | snake_case         | `chunk_delta_rule`, `fused_recurrent_gla` |
-| Constants       | UPPER_SNAKE_CASE   | `FLA_CI_ENV`, `SUPPORTS_AUTOTUNE_CACHE`   |
-| Private helpers | Leading underscore | `_guarded_empty`, `_is_called_from_fla`   |
 
 ### Triton Kernels
 
@@ -479,7 +479,7 @@ For example, these short openings are adapted from FLA PRs [#1299](https://githu
 
 **Test plan.** State which regression or new behavior the tests protect, the commands actually run, and their results. For accelerator tests, include the hardware, relevant software versions, and backend or environment flags. Separate passed, failed, skipped, and unrun checks; a test count alone does not show that the modified path ran. Reproduce suspected pre-existing failures on the baseline and link the evidence. Do not describe an incomplete run or a smoke subset as a full pass.
 
-Identify dependent tests with `python scripts/find_dependent_tests.py <changed_file_or_dir>`, then run the returned tests and any focused regression needed to exercise the changed path. Audit shared callers in layers and models as well as the operator. State the relevant coverage: forward/backward, dense/varlen, boundary shapes, dtypes, states, dispatch fallbacks, or context parallelism, as applicable. Explain any coverage gap; do not weaken tolerances to obtain a pass.
+Identify dependent tests with `python scripts/find_dependent_tests.py <changed_file.py> [more_files.py ...]`, then run the returned tests and any focused regression needed to exercise the changed path. Audit shared callers in layers and models as well as the operator. State the relevant coverage: forward/backward, dense/varlen, boundary shapes, dtypes, states, dispatch fallbacks, or context parallelism, as applicable. Explain any coverage gap; do not weaken tolerances to obtain a pass.
 
 **Benchmark / NCU.** Follow [Benchmarking](#benchmarking): correctness must pass before reporting a performance gain. Record the baseline and candidate commits, hardware, software, shapes, dtypes, backend flags, and exact command or timing method. Use a compact table with units, for example:
 

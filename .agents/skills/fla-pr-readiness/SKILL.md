@@ -18,7 +18,7 @@ Use this skill before opening a PR or updating its scope and evidence during rev
 
 ## Collect evidence
 
-1. Discover affected tests with `python scripts/find_dependent_tests.py <changed_file_or_dir>`. Add or update the matching test for kernel/module changes, and check that a regression test actually exercises the modified path.
+1. Discover affected tests with `python scripts/find_dependent_tests.py <changed_file.py> [more_files.py ...]`. Add or update the matching test for kernel/module changes, and check that a regression test actually exercises the modified path.
 2. Run applicable tests and record the command, tested commit, environment, and results. Use strict local numerical validation (`FLA_CI_ENV=0`), retaining reference outputs, supported gradients, and existing tolerances. Separate failed, skipped, and unrun checks from passes; investigate failures and reproduce them on the baseline before calling them pre-existing.
 3. For kernel or performance-relevant changes, collect same-hardware before/after results following `CONTRIBUTING.md#benchmarking`. Select the relevant hardware skill for profiling and workload coverage. A measured neutral result still needs numbers; use `N/A` only with an applicable reason.
 4. Run pre-commit on changed files and inspect the final diff. Audit affected comments, public callers, checkpoint compatibility, and the supported shapes, dtypes, and backends. Keep scratch logs and raw profiles outside the PR.

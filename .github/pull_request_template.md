@@ -7,7 +7,7 @@
 
 <!-- Describe the regression/new behavior covered, commands run, and results. Identify failed, skipped, and unrun checks. -->
 <!-- For GPU/NPU tests include hardware, relevant software versions, and backend flags. Kernel/module changes need added/updated tests and passing reference comparisons for outputs, states, and supported gradients. -->
-<!-- Find dependent tests first: `python scripts/find_dependent_tests.py <changed_file_or_dir>`. -->
+<!-- Find dependent tests first: `python scripts/find_dependent_tests.py <changed_file.py> [more_files.py ...]`. -->
 
 ## Benchmark / NCU
 
