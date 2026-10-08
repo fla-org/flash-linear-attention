@@ -17,23 +17,23 @@ import fla.ops.common.backends.tilelang as common_tilelang_backend
 import fla.ops.generalized_delta_rule.dplr.backends.tilelang as dplr_tilelang_backend
 import fla.ops.kda.backends.tilelang as kda_tilelang_backend
 import fla.ops.rwkv6.backends.tilelang as rwkv6_tilelang_backend
-from fla.utils import _compat
+import fla.utils.env as env
 
 _REAL_PATH_EXISTS = Path.exists
 
 
 @pytest.fixture(autouse=True)
 def clear_nvcc_probe_cache():
-    _compat.has_usable_nvcc.cache_clear()
+    env.has_usable_nvcc.cache_clear()
     yield
-    _compat.has_usable_nvcc.cache_clear()
+    env.has_usable_nvcc.cache_clear()
 
 
 def _configure_no_nvcc(monkeypatch):
     """Hide every nvcc source probed by has_usable_nvcc (CI runners have a real toolkit)."""
     monkeypatch.delenv("CUDA_HOME", raising=False)
     monkeypatch.delenv("CUDA_PATH", raising=False)
-    monkeypatch.setattr(_compat.shutil, "which", lambda name: None)
+    monkeypatch.setattr(env.shutil, "which", lambda name: None)
 
     def no_such_dist(name):
         raise importlib.metadata.PackageNotFoundError(name)
@@ -45,7 +45,7 @@ def _configure_no_nvcc(monkeypatch):
             return False
         return _REAL_PATH_EXISTS(self)
 
-    monkeypatch.setattr(_compat.Path, "exists", fake_exists)
+    monkeypatch.setattr(env.Path, "exists", fake_exists)
 
 
 def test_nvcc_from_cuda_home_env(monkeypatch, tmp_path):
@@ -55,14 +55,14 @@ def test_nvcc_from_cuda_home_env(monkeypatch, tmp_path):
     nvcc.touch()
     monkeypatch.setenv("CUDA_HOME", str(tmp_path / "cuda"))
 
-    assert _compat.has_usable_nvcc() is True
+    assert env.has_usable_nvcc() is True
 
 
 def test_nvcc_from_path(monkeypatch):
     _configure_no_nvcc(monkeypatch)
-    monkeypatch.setattr(_compat.shutil, "which", lambda name: "/usr/local/cuda/bin/nvcc")
+    monkeypatch.setattr(env.shutil, "which", lambda name: "/usr/local/cuda/bin/nvcc")
 
-    assert _compat.has_usable_nvcc() is True
+    assert env.has_usable_nvcc() is True
 
 
 def test_nvcc_from_pip_wheel(monkeypatch):
@@ -73,7 +73,7 @@ def test_nvcc_from_pip_wheel(monkeypatch):
         lambda dist: [SimpleNamespace(name="ptxas"), SimpleNamespace(name="nvcc")],
     )
 
-    assert _compat.has_usable_nvcc() is True
+    assert env.has_usable_nvcc() is True
 
 
 def test_nvcc_pip_wheel_without_nvcc_binary(monkeypatch):
@@ -81,15 +81,15 @@ def test_nvcc_pip_wheel_without_nvcc_binary(monkeypatch):
     _configure_no_nvcc(monkeypatch)
     monkeypatch.setattr(importlib.metadata, "files", lambda dist: [SimpleNamespace(name="ptxas")])
 
-    assert _compat.has_usable_nvcc() is False
+    assert env.has_usable_nvcc() is False
 
 
 def test_no_nvcc_logs_fallback_once(monkeypatch, caplog):
     _configure_no_nvcc(monkeypatch)
 
-    with caplog.at_level(logging.INFO, logger=_compat.__name__):
-        assert _compat.has_usable_nvcc() is False
-        assert _compat.has_usable_nvcc() is False
+    with caplog.at_level(logging.INFO, logger=env.__name__):
+        assert env.has_usable_nvcc() is False
+        assert env.has_usable_nvcc() is False
 
     fallback_messages = [record.message for record in caplog.records if "falling back to Triton" in record.message]
     assert len(fallback_messages) == 1
