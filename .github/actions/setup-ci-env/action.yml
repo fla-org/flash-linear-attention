@@ -195,3 +195,5 @@ runs:
       if: steps.check_skip.outputs.skip_tests == 'false'
       id: changed-files
       uses: tj-actions/changed-files@v47.0.6
+      with:
+        base_sha: 07ca1e49ef6ca76a7f0dbc8d5ad040ab59434c38
