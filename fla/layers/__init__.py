@@ -5,6 +5,8 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+# keep documented public exports compatible across implementation refactors.
+
 from .abc import ABCAttention
 from .attn import Attention
 from .based import BasedLinearAttention
