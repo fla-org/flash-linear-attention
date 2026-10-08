@@ -137,7 +137,8 @@ class ShortConvolution(nn.Conv1d):
                 Attention mask dealing with padded positions.
             cache (`Optional[torch.Tensor]`):
                 Previous cache tensor of shape `[N, D, W]`, where `W` is the kernel size.
-                If provided, the cache is updated **inplace**.
+                Single-token calls without autograd update it **inplace**.
+                Other calls return the updated state when `output_final_state=True`.
             output_final_state (Optional[bool]):
                 Whether to output the final state of shape `[N, D, W]`. Default: `False`.
             cu_seqlens (Optional[torch.LongTensor]):
@@ -159,10 +160,10 @@ class ShortConvolution(nn.Conv1d):
                 raise ValueError("`mask` and `cu_seqlens` cannot be provided at the same time")
             x = x.mul_(mask.unsqueeze(-1))
 
-        # in decoding phase, the cache (if provided) is updated inplace
+        # the in-place decode kernel does not support autograd.
         # For packed varlen inputs, decode only when every sequence has exactly one token:
         # a zero-length or multi-token sequence makes the shape check misfire.
-        if B * T == N and (cu_seqlens is None or bool((cu_seqlens.diff() == 1).all())):
+        if not torch.is_grad_enabled() and B * T == N and (cu_seqlens is None or bool((cu_seqlens.diff() == 1).all())):
             y, cache = self.step(
                 x=x,
                 residual=residual,
