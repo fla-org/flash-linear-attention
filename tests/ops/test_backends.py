@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from fla.modules.backends.gluon import GluonBackend
+from fla.ops.backends import BaseBackend
 from fla.ops.common.backends import tilelang as common_tilelang_backend
 from fla.ops.generalized_delta_rule.dplr.backends import tilelang as dplr_tilelang_backend
 from fla.ops.kda.backends import tilelang as kda_tilelang_backend
@@ -97,6 +97,45 @@ def test_no_nvcc_logs_fallback_once(monkeypatch, caplog):
     assert "FLA_TILELANG=0" in fallback_messages[0]
 
 
+@pytest.mark.parametrize("default_enable", [False, True], ids=["default-off", "default-on"])
+@pytest.mark.parametrize(("global_enable", "local_enable", "expected"), [
+    pytest.param(None, None, None, id="global-unset-local-unset"),
+    pytest.param(None, "0", False, id="global-unset-local-off"),
+    pytest.param(None, "1", True, id="global-unset-local-on"),
+    pytest.param("0", None, None, id="global-off-local-unset"),
+    pytest.param("0", "0", False, id="global-off-local-off"),
+    pytest.param("0", "1", True, id="global-off-local-on"),
+    pytest.param("1", None, True, id="global-on-local-unset"),
+    pytest.param("1", "0", True, id="global-on-local-off"),
+    pytest.param("1", "1", True, id="global-on-local-on"),
+])
+def test_base_backend_is_enabled(monkeypatch, global_enable, local_enable, expected, default_enable):
+    monkeypatch.setattr(BaseBackend, "backend_type", "gluon")
+    monkeypatch.setattr(BaseBackend, "env_var", "FLA_TEST_GLUON")
+    monkeypatch.setattr(BaseBackend, "default_enable", default_enable)
+    for name, value in (("FLA_GLUON", global_enable), ("FLA_TEST_GLUON", local_enable)):
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+
+    assert BaseBackend.is_enabled() is (default_enable if expected is None else expected)
+
+
+@pytest.mark.parametrize("default_enable", [False, True], ids=["default-off", "default-on"])
+@pytest.mark.parametrize("global_enable", [None, "0", "1"], ids=["global-unset", "global-off", "global-on"])
+def test_base_backend_is_enabled_without_env_var(monkeypatch, global_enable, default_enable):
+    monkeypatch.setattr(BaseBackend, "backend_type", "gluon")
+    monkeypatch.setattr(BaseBackend, "env_var", None)
+    monkeypatch.setattr(BaseBackend, "default_enable", default_enable)
+    if global_enable is None:
+        monkeypatch.delenv("FLA_GLUON", raising=False)
+    else:
+        monkeypatch.setenv("FLA_GLUON", global_enable)
+
+    assert BaseBackend.is_enabled() is True
+
+
 def _backend_cls(backend_module):
     if backend_module is common_tilelang_backend:
         return backend_module.TileLangBackend
@@ -126,31 +165,12 @@ def test_tilelang_backend_unavailable_without_tilelang(monkeypatch, backend_modu
     assert _backend_cls(backend_module).is_available() is False
 
 
-@pytest.mark.parametrize(
-    'backend',
-    [rwkv6_tilelang_backend.RWKV6TileLangBackend, GluonBackend],
-    ids=['tilelang', 'gluon'],
-)
-def test_backend_requires_opt_in(monkeypatch, backend):
-    env_var = f'FLA_{backend.backend_type.upper()}'
-    monkeypatch.delenv(env_var, raising=False)
-    monkeypatch.delenv(backend.env_var, raising=False)
-    assert backend.is_enabled() is False
+def test_rwkv6_tilelang_backend_requires_opt_in(monkeypatch):
+    monkeypatch.delenv("FLA_TILELANG", raising=False)
+    assert rwkv6_tilelang_backend.RWKV6TileLangBackend.is_enabled() is False
 
-    monkeypatch.setenv(backend.env_var, '1')
-    assert backend.is_enabled() is True
-
-    monkeypatch.setenv(backend.env_var, '0')
-    assert backend.is_enabled() is False
-
-    monkeypatch.setenv(env_var, '1')
-    assert backend.is_enabled() is True
-
-    monkeypatch.setenv(env_var, '0')
-    assert backend.is_enabled() is False
-
-    monkeypatch.setenv(backend.env_var, '1')
-    assert backend.is_enabled() is True
+    monkeypatch.setenv("FLA_TILELANG", "1")
+    assert rwkv6_tilelang_backend.RWKV6TileLangBackend.is_enabled() is True
 
 
 def test_rwkv6_tilelang_backend_verifier_accepts_supported_shape():
