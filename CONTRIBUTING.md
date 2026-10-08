@@ -16,9 +16,10 @@ Contributions to Flash Linear Attention are welcome. This guide defines the deve
 * [Code Style](#code-style)
   * [Copyright Header](#copyright-header)
   * [Formatting and Linting](#formatting-and-linting)
+  * [Imports](#imports)
+  * [Naming Conventions](#naming-conventions)
   * [Docstrings and Comments](#docstrings-and-comments)
   * [Prose and Markdown](#prose-and-markdown)
-  * [Naming Conventions](#naming-conventions)
   * [Triton Kernels](#triton-kernels)
   * [PyTorch Operators](#pytorch-operators)
 * [Adding a New Operator](#adding-a-new-operator)
@@ -110,7 +111,7 @@ pre-commit run --all-files
 ### Test Locally
 
 ```bash
-pytest tests/
+FLA_CI_ENV=0 pytest tests/
 ```
 
 ## Project Structure
@@ -163,6 +164,7 @@ A CI workflow (`check-header.yml`) enforces this for Python files, with exclusio
 We use [Ruff](https://docs.astral.sh/ruff/) for linting and [autopep8](https://github.com/hhatto/autopep8) for formatting. Pre-commit hooks run both automatically.
 
 Key rules:
+
 - **Max line length**: 127 characters
 - **Target Python version**: 3.10+
 - **Import sorting**: `isort`-compatible via Ruff (`fla` as first-party)
@@ -171,6 +173,28 @@ Key rules:
 - **Line width**: use the full 127 characters before reaching for a line break — a statement that fits on one line stays on one line.
 - **Calls**: prefer keyword arguments over positional ones. A call that fits within the limit stays on one line; a call that overflows breaks with a hanging indent, **one keyword argument per line** — never several.
 - **Parameter order**: keep related parameters adjacent, and pass keyword arguments at call sites in the same order they appear in the signature.
+
+### Imports
+
+Prefer absolute `from ... import ...` imports for project code. Import the symbols you need directly; when you need a module object, import it from its parent package.
+
+```python
+from fla.ops.kda.backends.tilelang import KDATileLangBackend
+from fla.utils import env
+```
+
+Avoid unnecessary aliases and ad hoc abbreviations. Keep established conventions such as `torch.nn.functional as F` and `triton.language as tl`, and use descriptive aliases when they clarify real name collisions. A long package path alone is not a reason to rename the imported object.
+
+For tests that monkeypatch module globals, retain the module object and patch the namespace where the code under test looks up the value. Module access is also appropriate when values may be rebound at runtime. Keep the module's original name unless an alias helps distinguish it from another object in the same scope.
+
+### Naming Conventions
+
+| Entity          | Convention         | Example                                   |
+| --------------- | ------------------ | ----------------------------------------- |
+| Classes         | PascalCase         | `GatedDeltaNet`, `LinearAttention`        |
+| Functions       | snake_case         | `chunk_delta_rule`, `fused_recurrent_gla` |
+| Constants       | UPPER_SNAKE_CASE   | `FLA_CI_ENV`, `SUPPORTS_AUTOTUNE_CACHE`   |
+| Private helpers | Leading underscore | `_guarded_empty`, `_is_called_from_fla`   |
 
 ### Docstrings and Comments
 
@@ -209,15 +233,6 @@ Never treated as excess comments: the license header required by `scripts/check_
 
 Don't hard-wrap prose at an arbitrary short column — this covers Markdown files, Python docstrings (including `Args:` / `Returns:` descriptions), and comment paragraphs. Either keep a paragraph on a single line, or break **only at sentence or clause boundaries** (after a `.`, `,`, `;`, or `—`), never mid-clause. In Python files the 127-character limit still applies, so wrap a docstring or comment at a clause boundary before it reaches the limit. Format Markdown tables with aligned columns so the `|` separators line up; table rows are exempt from the line limit.
 
-### Naming Conventions
-
-| Entity          | Convention         | Example                                   |
-| --------------- | ------------------ | ----------------------------------------- |
-| Classes         | PascalCase         | `GatedDeltaNet`, `LinearAttention`        |
-| Functions       | snake_case         | `chunk_delta_rule`, `fused_recurrent_gla` |
-| Constants       | UPPER_SNAKE_CASE   | `FLA_CI_ENV`, `SUPPORTS_AUTOTUNE_CACHE`   |
-| Private helpers | Leading underscore | `_guarded_empty`, `_is_called_from_fla`   |
-
 ### Triton Kernels
 
 - Kernel functions use `@triton.jit` with `do_not_specialize=['T']` for the sequence-length argument.
@@ -228,7 +243,7 @@ Don't hard-wrap prose at an arbitrary short column — this covers Markdown file
   any divisibility you rely on. Do not use `tl.make_block_ptr` / `tl.advance`:
   deprecated upstream and removed in triton main. (`backends/triton_ascend/` is
   exempt — triton-ascend still requires block pointers.)
-- `tl.make_tensor_descriptor` (TMA) is an opt-in optimization for hot-path tiles, not a default substitute for block access. Availability is `IS_TMA_SUPPORTED` in `fla/utils/_device.py`, which covers Nvidia Hopper and newer plus AMD gfx1250, and is gated behind `FLA_USE_TMA=1` on every backend. The AMD side is an arch allowlist rather than a version floor — gfx942 and gfx950 have no such lowering — so extend `IS_AMD_TMA_ARCH` explicitly when another arch gains it, and don't assume a higher `gfx` number implies support. Note that no CI runner currently has a TMA-capable AMD arch, so that path is only exercised by local runs.
+- `tl.make_tensor_descriptor` (TMA) is an opt-in optimization for hot-path tiles, not a default substitute for block access. Availability is `IS_TMA_SUPPORTED` in `fla/utils/hardware.py`, which covers Nvidia Hopper and newer plus AMD gfx1250, and is gated behind `FLA_USE_TMA=1` on every backend. The AMD side is an arch allowlist rather than a version floor — gfx942 and gfx950 have no such lowering — so extend `IS_AMD_TMA_ARCH` explicitly when another arch gains it, and don't assume a higher `gfx` number implies support. Note that no CI runner currently has a TMA-capable AMD arch, so that path is only exercised by local runs.
 - Descriptors require 16-byte-aligned bases and stride multiples, a stride-1 innermost dim, no transposed blocks, and a registered allocator for device-side descriptors. Nothing verifies the alignment for you and a violation faults at launch rather than failing to compile, so derive a guard on the host from the dtype and the shapes the op is actually tested at, and fall back to the plain-pointer path when it fails — a head dim of `K=60` in fp16, as KDA is tested at, is 120 bytes per row and cannot back a descriptor. Descriptor stores are also asynchronous, so a kernel must never read back a location it just stored through a descriptor.
 - Use TMA when a per-kernel benchmark in the PR shows it pays off, behind a `USE_TMA: tl.constexpr` flag that keeps the plain-pointer path intact, as in `fla/ops/utils/solve_tril.py`. A benchmark on one vendor does not carry over to the other: the descriptor path in `solve_tril` was tuned on Hopper and has not been measured on gfx1250.
 - Treat program IDs and grid-derived indices as potentially narrow integers.
@@ -339,7 +354,7 @@ Key guidelines:
 - **Use `assert_close`** from `fla.utils` with the existing per-test error thresholds.
 - **Use `device` and platform helpers from `fla.utils`** for device-agnostic tests. Reuse helpers such as `device_platform`, `IS_NVIDIA`, `IS_AMD`, and `IS_INTEL` instead of adding direct `torch.cuda` platform checks; keep vendor-specific profiling in benchmark scripts.
 - **Parametrize** with diverse shapes including non-power-of-2 sequence lengths (e.g., 63, 100, 2000).
-- **Skip unsupported platforms** with `@pytest.mark.skipif(device_platform == 'intel', ...)` when needed.
+- **Skip unsupported platforms** with helpers such as `IS_INTEL` imported from `fla.utils`, e.g. `@pytest.mark.skipif(IS_INTEL, reason="unsupported on Intel")`.
 - **Include test IDs** in parametrize for readable output.
 
 **Naming and structure.** Name the file `tests/ops/test_<op>.py`, and name each test after the implementation entry point it exercises — `test_chunk`, `test_fused_recurrent`, `test_parallel` — mirroring the functions in `fla/ops/<op>/`. Distinguish a genuinely different code path with a short suffix (`test_chunk_varlen`, `test_fused_recurrent_state_v_first`). Prefer adding a new shape, dtype, or flag as a `@parametrize` case on an existing test rather than writing a new function; only add a new function when the path or purpose is clearly different — varlen vs. dense, a specific feature flag, or a separate entry point. See `tests/ops/test_gla.py` and `tests/ops/test_gdn.py` for the pattern.
@@ -370,9 +385,13 @@ Resolve the baseline to a commit SHA: a checked-out branch cannot be reused by t
 FLA_CI_ENV=0 python -m benchmarks.ops.verify --op chunk_gla --base "$FLA_BENCH_BASE"
 ```
 
-**Model-level throughput and generation:**
+**Model-level throughput and generation (CUDA):**
+
+These scripts require additional dependencies: `accelerate` for training throughput and `datasets` for generation. Install them alongside the benchmark extra before running the examples:
 
 ```bash
+pip install -e '.[cuda,benchmark]' accelerate
+
 python benchmarks/benchmark_training_throughput.py --name kda --batch_size 2 --seq_len 8192
 python benchmarks/benchmark_training_throughput.py --name kda --batch_size 2 --seq_len 8192 --varlen
 python benchmarks/benchmark_generation.py --path fla-hub/gla-1.3B-100B
@@ -440,7 +459,7 @@ Use the same convention for the PR title: `[Tag] <specific outcome>`. CI checks 
 
 Use the [PR template](.github/pull_request_template.md). The description should let a reviewer identify the problem, outcome, affected users, and evidence before opening the diff. Keep it accurate as the implementation changes.
 
-**Summary.** Start with `**TL;DR:**` and one or two sentences stating the concrete outcome: what now works, what becomes faster, or what capability is added. For a bug, name the triggering condition and resulting behavior. Link the issue or design discussion. A routine fix usually needs only one short paragraph; a complex change may need a short explanation of the approach and its trade-offs.
+**Summary.** Start with one or two sentences stating the concrete outcome: what now works, what becomes faster, or what capability is added. For a bug, name the triggering condition and resulting behavior. Link the issue or design discussion. A routine fix usually needs only one short paragraph; a complex change may need a short explanation of the approach and its trade-offs.
 
 Keep the description focused on observable behavior and review decisions. Include an implementation detail only when it explains correctness, the choice of algorithm, compatibility, or a material risk. Public API names can identify the contract being changed. Leave variable inventories, file-by-file summaries, line-by-line mechanics, and the history of attempted approaches to the diff or linked investigation. Avoid unsupported claims such as "more robust", "cleaner", or "bit-identical"; describe the behavior or equivalence actually verified. Do not repeat the same point in the title, summary, and a separate list of changes.
 
@@ -449,18 +468,18 @@ For example, these short openings are adapted from FLA PRs [#1299](https://githu
 ```markdown
 ## Summary
 
-**TL;DR:** KDA calls with negative eigenvalues or missing optional gate parameters now use the Triton implementation, preventing incorrect results or failures when FlashKDA is installed.
+KDA calls with negative eigenvalues or missing optional gate parameters now use the Triton implementation, preventing incorrect results or failures when FlashKDA is installed.
 ```
 
 ```markdown
 ## Summary
 
-**TL;DR:** Adds optional sliding-window attention to single-step decoding. Existing calls keep full-context attention by default.
+Adds optional sliding-window attention to single-step decoding. Existing calls keep full-context attention by default.
 ```
 
 **Test plan.** State which regression or new behavior the tests protect, the commands actually run, and their results. For accelerator tests, include the hardware, relevant software versions, and backend or environment flags. Separate passed, failed, skipped, and unrun checks; a test count alone does not show that the modified path ran. Reproduce suspected pre-existing failures on the baseline and link the evidence. Do not describe an incomplete run or a smoke subset as a full pass.
 
-Identify dependent tests with `python scripts/find_dependent_tests.py <changed_file_or_dir>`, then run the returned tests and any focused regression needed to exercise the changed path. Audit shared callers in layers and models as well as the operator. State the relevant coverage: forward/backward, dense/varlen, boundary shapes, dtypes, states, dispatch fallbacks, or context parallelism, as applicable. Explain any coverage gap; do not weaken tolerances to obtain a pass.
+Identify dependent tests with `python scripts/find_dependent_tests.py <changed_file.py> [more_files.py ...]`, then run the returned tests and any focused regression needed to exercise the changed path. Audit shared callers in layers and models as well as the operator. State the relevant coverage: forward/backward, dense/varlen, boundary shapes, dtypes, states, dispatch fallbacks, or context parallelism, as applicable. Explain any coverage gap; do not weaken tolerances to obtain a pass.
 
 **Benchmark / NCU.** Follow [Benchmarking](#benchmarking): correctness must pass before reporting a performance gain. Record the baseline and candidate commits, hardware, software, shapes, dtypes, backend flags, and exact command or timing method. Use a compact table with units, for example:
 
@@ -512,13 +531,13 @@ Reply to each actionable comment with the change made or a concrete reason for k
 
 Before submitting, please go through the following checklist:
 
-- The title and opening TL;DR identify one concrete outcome.
+- The title and summary identify one concrete outcome.
 - The diff is within 500 changed lines, or the large-PR acknowledgement and justification are filled in.
 - The description records actual validation and affected users, with no unrelated changes or implementation inventory.
 - Code follows the project's style conventions.
 - Copyright header is present on new project Python source files.
 - Changes to `fla/ops/` or `fla/modules/` add or update the matching test in `tests/`.
-- Tests pass locally (`pytest tests/ops/test_<your_op>.py`).
+- Tests pass locally (`FLA_CI_ENV=0 pytest tests/ops/test_<your_op>.py`).
 - New operators include a naive reference implementation.
 - Outputs and final states are checked against a reference; training APIs also check backward gradients.
 - Pre-commit hooks pass (`pre-commit run --files <your_files>`).

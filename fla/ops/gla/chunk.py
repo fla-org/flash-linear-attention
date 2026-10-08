@@ -16,7 +16,14 @@ from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.cumsum import chunk_local_cumsum
 from fla.ops.utils.op import exp2, unflatten_program_id
-from fla.utils import autotune_cache_kwargs, check_shared_mem, input_guard
+from fla.utils import (
+    IS_NVIDIA_HOPPER,
+    TRITON_ABOVE_3_6_0,
+    TRITON_ABOVE_3_8_0,
+    autotune_cache_kwargs,
+    check_shared_mem,
+    input_guard,
+)
 
 BK_LIST = [32, 64] if check_shared_mem() else [16, 32]
 BV_LIST = [64, 128] if check_shared_mem('ampere') else [16, 32]
@@ -35,6 +42,15 @@ def _prune_gla_bwd_configs(configs, nargs, **kwargs):
         if (c.kwargs['BK'] < K or c.kwargs['BK'] == min_bk)
         and (c.kwargs['BV'] < V or c.kwargs['BV'] == min_bv)
     ]
+
+
+def _prune_gla_bwd_inter_configs(configs, nargs, **kwargs):
+    configs = _prune_gla_bwd_configs(configs, nargs, **kwargs)
+    args = {**(nargs or {}), **kwargs}
+    if IS_NVIDIA_HOPPER and TRITON_ABOVE_3_6_0 and not TRITON_ABOVE_3_8_0 and args['STATE_V_FIRST']:
+        # avoid a Hopper ptxas WGMMA miscompile: https://github.com/triton-lang/triton/issues/11366
+        configs = [c for c in configs if c.kwargs['BK'] != 32 or c.num_warps != 4]
+    return configs
 
 
 @triton.heuristics({
@@ -749,7 +765,7 @@ def chunk_gla_bwd_kernel_dv(
         for num_stages in [2, 3, 4]
     ],
     key=['BT', 'STATE_V_FIRST', 'K', 'V'],
-    prune_configs_by={'early_config_prune': _prune_gla_bwd_configs},
+    prune_configs_by={'early_config_prune': _prune_gla_bwd_inter_configs},
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])

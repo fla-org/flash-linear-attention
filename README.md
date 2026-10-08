@@ -30,6 +30,7 @@
 ## News
 
 - [2026-10] 🌊 Add [CyFA](https://arxiv.org/abs/2609.36259) (Cyclic Flow Attention) implementation to `fla` - a Linear RNN that partitions memory by relative time through learned cyclic transport.
+- [2026-10] 🎉 Add Stick-Breaking Attention kernels and models to `fla` ([paper](https://arxiv.org/abs/2410.17980)).
 - [2026-07] 🐈 Add CAT (Compress and Attend Transformer) implementation to `fla` ([paper](https://arxiv.org/abs/2511.05313)) - a _meta_-sequence mixer that unlocks test-time control of inference costs.
 - [2026-07] 🧱 Add a [Gluon](https://triton-lang.org/main/getting-started/tutorials/gluon/) backend for [AttnRes](fla/ops/attnres).
 - [2026-07] 🚀 Add [FlashQLA](https://github.com/QwenLM/FlashQLA) backend for [Gated DeltaNet](fla/ops/gated_delta_rule).
@@ -45,13 +46,13 @@
 - [2026-04] 🧱 Add [TileLang](https://github.com/tile-ai/tilelang) backend support for selected kernels.
 - [2026-04] 🎯 Add [GPT-OSS](https://openai.com/index/introducing-gpt-oss/)-style attention sink support to `fla`'s attention kernels.
 - [2026-03] 🚀 Add [Context Parallel](fla/ops/cp/README.md) support for KDA and GDN, enabling efficient distributed training across sequence dimension.
-- [2025-10] 🌘 Add Kimi Delta Attention (KDA) implementation to `fla` ([paper](https://arxiv.org/abs/2510.26692)).
-- [2025-09] 🌲 Add DeltaFormer implementation to `fla` ([paper](https://arxiv.org/abs/2505.19488v1)).
-- [2025-09] 🐻 Thrilled to announce that [GDN](fla/ops/gated_delta_rule) has been integrated into Qwen3-Next. Check out their [blog post](https://qwen.ai/blog?id=4074cca80393150c248e508aa62983f9cb7d27cd&from=research.latest-advancements-list) for more info!
 
 <details>
 <summary>Older news</summary>
 
+- [2025-10] 🌘 Add Kimi Delta Attention (KDA) implementation to `fla` ([paper](https://arxiv.org/abs/2510.26692)).
+- [2025-09] 🌲 Add DeltaFormer implementation to `fla` ([paper](https://arxiv.org/abs/2505.19488v1)).
+- [2025-09] 🐻 Thrilled to announce that [GDN](fla/ops/gated_delta_rule) has been integrated into Qwen3-Next. Check out their [blog post](https://qwen.ai/blog?id=4074cca80393150c248e508aa62983f9cb7d27cd&from=research.latest-advancements-list) for more info!
 - [2025-08] 🌲 Add Log-Linear Attention implementation to `fla` ([paper](https://arxiv.org/abs/2506.04761)).
 - [2025-08] 🎓 Add MoM implementation to `fla` ([paper](https://arxiv.org/abs/2502.13685)).
 - [2025-07] 🐳 Add MLA implementation to `fla` ([paper](https://arxiv.org/abs/2405.04434)).
@@ -97,6 +98,7 @@
 | 2024 | Mamba2                        | [Transformers are SSMs: Generalized Models and Efficient Algorithms Through Structured State Space Duality](https://arxiv.org/abs/2405.21060) | [code](https://github.com/fla-org/flash-linear-attention/blob/main/fla/models/mamba2)                  |
 | 2024 | GSA                           | [Gated Slot Attention for Efficient Linear-Time Sequence Modeling](https://arxiv.org/abs/2409.07146)                                          | [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/models/gsa)                     |
 | 2024 | MLA                           | [DeepSeek-V2: A Strong, Economical, and Efficient Mixture-of-Experts Language Model](https://arxiv.org/abs/2405.04434)                        | [code](https://github.com/fla-org/flash-linear-attention/blob/main/fla/layers/mla.py)                  |
+| 2024 |    Stick-Breaking Attention   | [Scaling Stick-Breaking Attention: An Efficient Implementation and In-depth Study](https://arxiv.org/abs/2410.17980)                          | [code](https://github.com/fla-org/flash-linear-attention/blob/main/fla/layers/stickbreaking_attn.py)   |
 | 2025 | Samba                         | [Samba: Simple Hybrid State Space Models for Efficient Unlimited Context Language Modeling](https://arxiv.org/abs/2406.07522)                 | [code](https://github.com/fla-org/flash-linear-attention/blob/main/fla/models/samba)                   |
 | 2025 | Gated DeltaNet                | [Gated Delta Networks: Improving Mamba2 with Delta Rule](https://arxiv.org/abs/2412.06464)                                                    | [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/ops/gated_delta_rule)           |
 | 2025 | RWKV7                         | [RWKV-7 "Goose" with Expressive Dynamic State Evolution](https://arxiv.org/abs/2503.14456)                                                    | [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/ops/rwkv7)                      |
