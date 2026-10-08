@@ -26,7 +26,7 @@ from triton.experimental.gluon.language.nvidia.hopper import (
 from triton.experimental.gluon.nvidia.hopper import TensorDescriptor
 
 from fla.ops.utils import prepare_chunk_indices
-from fla.ops.utils.op import unflatten_program_id
+from fla.ops.utils.op import barrier, unflatten_program_id
 from fla.utils import IS_TMA_SUPPORTED, get_device_capability
 
 WARP_SPECIALIZE_V2 = 'functions_and_args' in inspect.signature(gl.warp_specialize).parameters
@@ -1010,6 +1010,8 @@ def parallel_attn_bwd_kernel_gluon(
             )
         if REUSE_GRAD:
             saved_grad = scratch.slice(0, 2 * BN).load(_acc_layout(M=BM, N=2 * BN, TCGEN=TCGEN, NW=NW))
+            # the MMA warp must not overwrite a slice while another warp is still saving it.
+            barrier()
         if HAS_DS:
             score_acc, dp_acc, phase = _mma_pair(
                 a=resident_a.reshape([BM, BK]),
@@ -1079,6 +1081,8 @@ def parallel_attn_bwd_kernel_gluon(
         fence_async_shared()
         if REUSE_GRAD:
             scratch.slice(0, 2 * BN).store(saved_grad)
+            # all warps must finish restoring the accumulator before the MMA warp reads it.
+            barrier()
         if GRAD == 'dkv':
             grad_acc, dv_acc, phase = _mma_pair(
                 a=ds_shared,
