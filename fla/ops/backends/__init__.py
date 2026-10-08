@@ -36,6 +36,7 @@ class BaseBackend:
     Attributes:
         backend_type (str, Optional):
             Identifier for the backend type, used to distinguish different backend implementations.
+            `FLA_<BACKEND_TYPE>` enables all backends of this type, overriding individual switches set to `0`.
             Default: `"base"`.
         package_name (str, Optional):
             Name of the external package required by the backend.
@@ -66,6 +67,8 @@ class BaseBackend:
     @classmethod
     def is_enabled(cls) -> bool:
         if cls.env_var is None:
+            return True
+        if os.environ.get(f"FLA_{cls.backend_type.upper()}", "0") != "0":
             return True
         default_value = "1" if cls.default_enable else "0"
         return os.environ.get(cls.env_var, default_value) != "0"

@@ -15,7 +15,7 @@ from fla.ops.kda.wy_fast import recompute_w_u_fwd
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.graph import get_static_buffer
-from fla.ops.utils.op import exp2, gather
+from fla.ops.utils.op import exp2, gather, unflatten_program_id
 from fla.utils import IS_GATHER_SUPPORTED, IS_TF32_SUPPORTED, autotune_cache_kwargs
 
 if IS_TF32_SUPPORTED:
@@ -427,7 +427,8 @@ def chunk_kda_bwd_kernel_intra(
     USE_GATHER: tl.constexpr,
     USE_GRAPH: tl.constexpr = False,
 ):
-    i_kc, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_kc, i_t = unflatten_program_id(tl.cdiv(K, BK) * NC)
+    i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_hv = i_bh // HV, i_bh % HV
     i_h = i_hv // (HV // H)
     i_k, i_i = i_kc // NC, i_kc % NC
@@ -710,7 +711,7 @@ def chunk_kda_fwd_kernel_intra_sub_chunk(
     USE_GATHER: tl.constexpr,
     USE_GRAPH: tl.constexpr = False,
 ):
-    i_t, i_i, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    i_t, i_i, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_b, i_hv = i_bh // HV, i_bh % HV
     i_h = i_hv // (HV // H)
 
@@ -950,7 +951,7 @@ def chunk_kda_bwd_intra(
         dk2 = torch.empty_like(dk)
         db2 = beta.new_empty(NK, *beta.shape, dtype=torch.float)
         dg2 = torch.empty_like(dg, dtype=torch.float)
-    grid = (NK * NC, NT, B * HV)
+    grid = (NK * NC * NT, B * HV)
     chunk_kda_bwd_kernel_intra[grid](
         q=q,
         k=k,

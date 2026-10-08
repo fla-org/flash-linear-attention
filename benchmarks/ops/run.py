@@ -302,6 +302,9 @@ def benchmark_op(
     call_kwargs = dict(config.extra_kwargs)
     op_label = op_name
     backend_env = config.backend_env or {}
+    if backend is not None:
+        # explicit benchmark selection must not inherit a global Gluon opt-in.
+        os.environ['FLA_GLUON'] = '0'
     if backend and backend != 'triton':
         env = backend_env.get(backend)
         if env is not None:
@@ -357,8 +360,9 @@ def benchmark_op(
 
             def _fwdbwd_fn(inputs=inputs, do=do):
                 result = op_fn(**inputs, **call_kwargs)
-                t = result[0] if config.output_is_tuple else result
-                t.backward(do)
+                if not config.skip_backward:
+                    t = result[0] if config.output_is_tuple else result
+                    t.backward(do)
 
             _warmup_autotune(_fwdbwd_fn, device=device_name)
         except Exception as e:

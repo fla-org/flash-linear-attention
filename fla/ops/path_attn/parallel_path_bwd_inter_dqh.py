@@ -50,7 +50,7 @@ def parallel_path_bwd_dq_kernel(
     IS_VARLEN: tl.constexpr,
     USE_GATE: tl.constexpr,
 ):
-    i_t, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1)
+    i_t, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_n, i_hq = i_nh // HQ, i_nh % HQ
     i_h = i_hq // G
 

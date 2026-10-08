@@ -17,7 +17,7 @@ description: >
 
 Use this skill for Ascend operator performance work on all files under any `triton_ascend` directory (`**/triton_ascend/**`).
 
-Multi-round iteration discipline (frozen tests, task contract, when to stop): **`fla-optimization-loop`**. MR packaging: **`fla-mr-readiness`**.
+Multi-round iteration discipline (frozen tests, task contract, when to stop): **`fla-optimization-loop`**. PR packaging: **`fla-pr-readiness`**.
 
 Collection **must** use this skill's **generic scripts** — do not copy `torch_npu.profiler` boilerplate per op.
 
@@ -48,19 +48,18 @@ Make the target backend semantically correct before optimizing; never hide missi
 
 ## 2. Generic collection (required)
 
-Scripts live under `.agents/skills/fla-ascend-performance/scripts/` (run from that directory or set `PYTHONPATH`).
+Scripts live under `.agents/skills/fla-ascend-performance/scripts/`. Run the commands below from the repository root; keep raw traces under the ignored `profile/` directory.
 
-| Script | Role |
-|--------|------|
-| `scripts/profile_npu.py` | Trace any `workload()` |
+| Script                       | Role                                    |
+| ---------------------------- | --------------------------------------- |
+| `scripts/profile_npu.py`     | Trace any `workload()`                  |
 | `scripts/analyze_profile.py` | Parse `op_statistic` / `kernel_details` |
 
 ```bash
 SKILL_DIR=.agents/skills/fla-ascend-performance
-cd "$SKILL_DIR"
 
-python scripts/profile_npu.py \
-  --name my_op --out-dir npu_prof \
+python "$SKILL_DIR/scripts/profile_npu.py" \
+  --name my_op --out-dir profile/my_op-npu \
   --metrics PipeUtilization --analyze \
   --kernel-filter my_kernel_substr \
   --exec-file path/to/workload_only.py
@@ -74,7 +73,13 @@ def workload():
     y.backward(grad)
 ```
 
-Library usage (when not using `--exec-file`):
+For library usage, add the scripts directory to `PYTHONPATH` in the same environment:
+
+```bash
+export PYTHONPATH="$PWD/.agents/skills/fla-ascend-performance/scripts${PYTHONPATH:+:$PYTHONPATH}"
+```
+
+Then import the collector without duplicating profiler setup:
 
 ```python
 from profile_npu import profile_callable
@@ -86,7 +91,7 @@ def workload():
 trace_dir = profile_callable(
     workload,
     name="my_op",
-    out_dir="npu_prof",
+    out_dir="profile/my_op-npu",
     aic_metrics="PipeUtilization",  # or MemoryUB / L2Cache / ...
 )
 ```
@@ -96,24 +101,24 @@ Default schedule: `wait=0, warmup=1, active=1, repeat=1`. One `aic_metrics` per 
 ## 3. Diagnose bottlenecks
 
 ```bash
-cd .agents/skills/fla-ascend-performance
-python scripts/analyze_profile.py path/to/*_profiling_* --kernel-filter <substr>
+python .agents/skills/fla-ascend-performance/scripts/analyze_profile.py \
+  profile/my_op-npu --kernel-filter <substr>
 ```
 
 1. **`op_statistic`**: who owns Total Time; is the target kernel the real hotspot?
 2. **`kernel_details`** (by Duration): read pipe / UB columns.
 
-| Signal | Bottleneck | Prefer |
-|--------|------------|--------|
-| High `aiv_vec_ratio`, Cube≈0 | Vector-bound | Larger row tile, less scalar, fuse load/store |
-| High `aic_mac_ratio` / `cube_utilization` | Cube-bound | Better matmul tiles/alignment, less non-Cube prelude |
-| High `mte2/mte3_ratio`, low compute | Memory-move-bound | More reuse, fewer writebacks; check strides — **gate `g` stride-HV gather** often 10×+ slower ([g-contiguous-loading.md](references/g-contiguous-loading.md)) |
-| High `scalar_ratio` | Scalar-bound | Vectorize, kill branches, heuristics |
-| High UB bw under MemoryUB, low vec/mac | UB bandwidth saturated | Larger tiles / more fusion |
-| Low target Ratio, many tiny ops | Unfused / fallback | Fix dispatch and fusion first |
-| Two kernels share `o` + high MTE | Intermediate writeback | Fuse producer/consumer if UB fits; else keep split |
-| Frequent host grid chunking | Launch / grid-product overhead | Prefer 1D core-grid (`num_aicore` Cube / `num_vectorcore` Vector) + flat `task_id` |
-| Low `aiv_vec_ratio` (~0.75) while MemoryUB is *not* saturated; larger tiles UB-overflow | Dual DMA paths live in UB | Runtime `block_ptr` vs masked load: host-split with `tl.constexpr` so each launch DCE's the other ([cases.md § causal_conv1d](references/cases.md#causal_conv1dpy--1d-core-grid--constexpr-dma-split)) |
+| Signal                                                                                  | Bottleneck                     | Prefer                                                                                                                                                                                                 |
+| --------------------------------------------------------------------------------------- | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| High `aiv_vec_ratio`, Cube≈0                                                            | Vector-bound                   | Larger row tile, less scalar, fuse load/store                                                                                                                                                          |
+| High `aic_mac_ratio` / `cube_utilization`                                               | Cube-bound                     | Better matmul tiles/alignment, less non-Cube prelude                                                                                                                                                   |
+| High `mte2/mte3_ratio`, low compute                                                     | Memory-move-bound              | More reuse, fewer writebacks; check strides — **gate `g` stride-HV gather** often 10×+ slower ([g-contiguous-loading.md](references/g-contiguous-loading.md))                                          |
+| High `scalar_ratio`                                                                     | Scalar-bound                   | Vectorize, kill branches, heuristics                                                                                                                                                                   |
+| High UB bw under MemoryUB, low vec/mac                                                  | UB bandwidth saturated         | Larger tiles / more fusion                                                                                                                                                                             |
+| Low target Ratio, many tiny ops                                                         | Unfused / fallback             | Fix dispatch and fusion first                                                                                                                                                                          |
+| Two kernels share `o` + high MTE                                                        | Intermediate writeback         | Fuse producer/consumer if UB fits; else keep split                                                                                                                                                     |
+| Frequent host grid chunking                                                             | Launch / grid-product overhead | Prefer 1D core-grid (`num_aicore` Cube / `num_vectorcore` Vector) + flat `task_id`                                                                                                                     |
+| Low `aiv_vec_ratio` (~0.75) while MemoryUB is *not* saturated; larger tiles UB-overflow | Dual DMA paths live in UB      | Runtime `block_ptr` vs masked load: host-split with `tl.constexpr` so each launch DCE's the other ([cases.md § causal_conv1d](references/cases.md#causal_conv1dpy--1d-core-grid--constexpr-dma-split)) |
 
 Colloquial “CUDA utilization” → read **Cube/MAC** (`aic_mac_ratio`). Host UB model complements the profiler — see [reference.md](references/reference.md).
 
@@ -146,7 +151,7 @@ Change only levers that match the bottleneck; one hypothesis per round. Before t
 - **Varlen `cu_seqlens` → int64 for pointer math**: host dtype is often `torch.long`, but tests also pass `int32`; load as `tl.int64` either way. Loading `.to(tl.int32)` then `(bos * HV + i_hv) * V` overflows well before `bos` hits 2³¹ (HV=32, V=4096 → safe `bos` ≈ 16K). Pattern: `bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64); T_cur = (eos - bos).to(tl.int32)`. Non-varlen: `bos = tl.cast(i_b, tl.int64) * T` (CUDA/repo often writes `(i_b * T).to(tl.int64)`, which still wraps if `i_b * T` exceeds 2³¹). Alternative when `T_cur` only needs int32: load `bos` as int32 but cast **the index** before the large stride — `tl.cast(bos, tl.int64) * HV + i_h` then `* K`. `(bos * HV + i_h).to(tl.int64) * K` only fixes `* K`/`* V` (HV is small); `bos * HV` itself can still wrap.
 - Reductions / recurrence / grads use fp32 accum, cast on store; sensitive solves: `input_precision='ieee'` / `allow_tf32=False`; mask before exp on gated paths; keep a consistent `exp`/`exp2` base.
 - **Ascend `tl.dot` clobbers the left operand**: on NPU, `tl.dot(lhs, rhs, …)` may overwrite `lhs` in UB (CUDA Triton does not). Any later read of that tile (second lhs, rhs, store) sees corrupted data unless you reload from GM or copy with `tile + 0.0` **before** the first lhs dot. Full per-kernel catalog: [cases.md § tl.dot lhs clobber](references/cases.md#tldot-lhs-clobber--repo-wide-case-catalog). Symptom: silent numeric drift vs Torch oracle with no compile error.
-- **Audit checklist for new/changed kernels**: (1) `rg 'tl\.dot\(' fla/ops/**/triton_ascend/**` — only 8 op files use `tl.dot`; (2) for each lhs tile, flag lhs→lhs, lhs→rhs/store, or post-dot copy; (3) prefer GM reload for one reuse between stages, `+ 0.0` for tight multi-dot sequences; (4) re-run `tests/ops/test_gdn_kernels.py` + op-specific kernel tests.
+- **Audit checklist for new/changed kernels**: (1) enumerate current callsites with `rg 'tl\.dot\(' fla/ops fla/modules --glob '**/triton_ascend/**'`; (2) for each lhs tile, flag lhs→lhs, lhs→rhs/store, or post-dot copy; (3) prefer GM reload for one reuse between stages, `+ 0.0` for tight multi-dot sequences; (4) re-run `tests/ops/test_gdn_kernels.py` + op-specific kernel tests.
 - **Upstream**: lhs clobber is a Triton-Ascend backend limitation (UB capacity / in-place matmul), not intentional API. Durable fix belongs in the compiler (preserve lhs or emit a diagnostic on post-dot read). Track via the Triton-Ascend / Ascend backend issue tracker.
 - For separable gate differences, compute `exp2(gs)[:, None] / exp2(gc)[None, :]` instead of `exp2(gs[:, None] - gc[None, :])` to replace a matrix of exponentials with two vectors. Verify numerics on the target compiler; multiplying by `exp2(-gc)` can produce materially different Ascend results.
 - **Constexpr-split mutually exclusive DMA paths** (critical on Ascend): a runtime `if is_tail_chunk` that chooses `make_block_ptr` vs masked `tl.load` keeps **both** paths live in UB. Peak UB ≈ sum of both; Vector cannot saturate even when MemoryUB bandwidth is free; larger tiles then fail compile. Host-split the last tile into a second launch with `tl.constexpr TAIL_MODE` (`0` = never tail / block_ptr only, `1` = always masked, `2` = runtime for varlen / `NT==1`) so each compile DCE's the unused path. Case: [causal_conv1d](references/cases.md#causal_conv1dpy--1d-core-grid--constexpr-dma-split).
@@ -236,4 +241,4 @@ Generalizable fixes discovered during optimization belong in this skill (`SKILL.
 - **Gate `g` stride-1 loading (G_T_CONTIG)**: [g-contiguous-loading.md](references/g-contiguous-loading.md)
 - **causal_conv1d 1D core-grid + constexpr DMA split**: [cases.md § causal_conv1d](references/cases.md#causal_conv1dpy--1d-core-grid--constexpr-dma-split)
 - Ascend-specific traps (DMA dual-path UB, None-ptr compile, `constexpr` `.to`, int64 `block_ptr` offsets): [TRAPS.md](references/TRAPS.md)
-- Ad-hoc workload output dir: `npu_prof/` (new collection must use the generic scripts)
+- Ad-hoc workload output dir: `profile/<run_name>/` (new collection must use the generic scripts)

@@ -409,7 +409,7 @@ class TritonAscendBackend(BaseBackend):
         cu_seqlens=None,
         cu_seqlens_cpu=None,
         chunk_indices=None,
-        BT=64,
+        chunk_size=64,
         layout_fallback=False,
     ):
         from fla.modules.backends.triton_ascend.causal_conv1d import causal_conv1d_fwd_npu
@@ -424,7 +424,7 @@ class TritonAscendBackend(BaseBackend):
             cu_seqlens,
             cu_seqlens_cpu,
             chunk_indices,
-            BT,
+            chunk_size,
             layout_fallback,
         )
 
@@ -441,7 +441,7 @@ class TritonAscendBackend(BaseBackend):
         cu_seqlens=None,
         cu_seqlens_cpu=None,
         chunk_indices=None,
-        BT=64,
+        chunk_size=64,
         layout_fallback=False,
     ):
         from fla.modules.backends.triton_ascend.causal_conv1d import causal_conv1d_bwd_npu
@@ -457,7 +457,7 @@ class TritonAscendBackend(BaseBackend):
             cu_seqlens,
             cu_seqlens_cpu,
             chunk_indices,
-            BT,
+            chunk_size,
             layout_fallback,
         )
 
