@@ -1365,7 +1365,7 @@ def test_conv_backend_dispatch(
 
 
 @pytest.mark.parametrize('chunk_size', [32, 64], ids=['BT32', 'BT64'])
-def test_conv_deprecated_chunk_size(
+def test_conv_deprecated_bt(
     monkeypatch: pytest.MonkeyPatch,
     conv_backend_calls: list[str] | None,
     chunk_size: int,
