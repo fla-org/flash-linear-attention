@@ -290,6 +290,9 @@ def reconstruct(
 class MomAttention(nn.Module):
     """
     The layer implementation for [MoM: Linear Sequence Modeling with Mixture-of-Memories](https://arxiv.org/abs/2502.13685).
+
+    Set `fuse_conv_l2=True` to fuse Q/K convolution and L2 normalization in chunk mode with gradients disabled.
+    Default: `False`.
     """
 
     def __init__(
@@ -310,6 +313,7 @@ class MomAttention(nn.Module):
         capacity: float = 1.0,
         shared_mem: bool = False,
         single_kv_proj: bool = False,
+        fuse_conv_l2: bool = False,
         **kwargs,
     ) -> MomAttention:
         super().__init__()
@@ -326,6 +330,7 @@ class MomAttention(nn.Module):
 
         self.use_output_gate = use_output_gate
         self.use_short_conv = use_short_conv
+        self.fuse_conv_l2 = fuse_conv_l2 and use_short_conv
         self.conv_size = conv_size
         self.conv_bias = conv_bias
 
@@ -399,12 +404,14 @@ class MomAttention(nn.Module):
                 kernel_size=conv_size,
                 bias=conv_bias,
                 activation='silu',
+                norm='l2' if self.fuse_conv_l2 else None,
             )
             self.k_conv1d = ShortConvolution(
                 hidden_size=self.key_dim,
                 kernel_size=conv_size,
                 bias=conv_bias,
                 activation='silu',
+                norm='l2' if self.fuse_conv_l2 else None,
             )
             self.v_conv1d = ShortConvolution(
                 hidden_size=self.value_dim,
@@ -509,6 +516,7 @@ class MomAttention(nn.Module):
         cu_seqlens, reverse_indices = cu_seqlen_all[0].to(torch.long).unique(return_inverse=True)
         cu_q, cu_k, cu_v, cu_g, cu_beta = (x.unsqueeze(0).contiguous() for x in (cu_q, cu_k, cu_v, cu_g, cu_beta))
 
+        use_conv_l2 = self.fuse_conv_l2 and mode == 'chunk' and not torch.is_grad_enabled()
         if self.use_short_conv:
             conv_state_q, conv_state_k, conv_state_v = [None, None], [None, None], [None, None]
             if last_state is not None:
@@ -534,6 +542,8 @@ class MomAttention(nn.Module):
                 cache=conv_q,
                 output_final_state=use_cache,
                 cu_seqlens=conv_cu_seqlens,
+                head_dim=self.head_qk_dim,
+                use_norm=use_conv_l2,
             )
             conv_state_q[0] = self.handle_recurrent_state(
                 conv_state_q[0],
@@ -554,6 +564,8 @@ class MomAttention(nn.Module):
                 cache=conv_k,
                 output_final_state=use_cache,
                 cu_seqlens=conv_cu_seqlens,
+                head_dim=self.head_qk_dim,
+                use_norm=use_conv_l2,
             )
             conv_state_k[0] = self.handle_recurrent_state(
                 conv_state_k[0],
@@ -601,7 +613,7 @@ class MomAttention(nn.Module):
                 beta=cu_beta,
                 initial_state=recurrent_state[0],
                 output_final_state=use_cache,
-                use_qk_l2norm_in_kernel=True,
+                use_qk_l2norm_in_kernel=not use_conv_l2,
                 state_v_first=True,
                 cu_seqlens=cu_seqlens,
             )
@@ -704,18 +716,23 @@ class MomAttention(nn.Module):
         batch_size, q_len = hidden_states.shape[0], hidden_states.shape[1]
         hidden_states, indices, cu_seqlens = unpad_hidden_states(hidden_states, cu_seqlens, attention_mask, q_len)
 
+        use_conv_l2 = self.fuse_conv_l2 and mode == 'chunk' and not torch.is_grad_enabled()
         if self.use_short_conv:
             q, conv_state_q[1] = self.q_conv1d(
                 x=self.q_proj(hidden_states),
                 cache=conv_state_q[1],
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
+                head_dim=self.head_qk_dim,
+                use_norm=use_conv_l2,
             )
             k, conv_state_k[1] = self.k_conv1d(
                 x=self.shared_k(hidden_states),
                 cache=conv_state_k[1],
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
+                head_dim=self.head_qk_dim,
+                use_norm=use_conv_l2,
             )
             v, conv_state_v[1] = self.v_conv1d(
                 x=self.shared_v(hidden_states),
@@ -741,7 +758,7 @@ class MomAttention(nn.Module):
                 beta=beta,
                 initial_state=recurrent_state[-1],
                 output_final_state=use_cache,
-                use_qk_l2norm_in_kernel=True,
+                use_qk_l2norm_in_kernel=not use_conv_l2,
                 state_v_first=True,
                 cu_seqlens=cu_seqlens,
             )

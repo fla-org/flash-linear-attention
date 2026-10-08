@@ -46,12 +46,14 @@ class KDAConfig(_HybridAttentionConfigMixin, PretrainedConfig):
         use_l2warp: bool = False,
         vocab_size: int = 32000,
         attnres_block_size: int | None = None,
+        fuse_conv_l2: bool = False,
         **kwargs,
     ):
         self.attn_mode = attn_mode
         self.hidden_size = hidden_size
         self.expand_v = expand_v
         self.use_short_conv = use_short_conv
+        self.fuse_conv_l2 = fuse_conv_l2
         self.conv_size = conv_size
         self.head_dim = head_dim
         self.num_heads = num_heads

@@ -64,6 +64,8 @@ class DeltaNet(nn.Module):
             See reference: [Unlocking State-Tracking in Linear RNNs Through Negative Eigenvalues](https://arxiv.org/abs/2411.12537)
         layer_idx (int, Optional):
             The index of the layer. Default: None.
+        fuse_conv_l2 (bool, Optional):
+            Whether to fuse Q/K convolution and L2 normalization in chunk mode with gradients disabled. Default: `False`.
         norm_eps (float, Optional):
             The epsilon value for the layernorm/rmsnorm layer. Default: 1e-5.
         qk_activation (str, Optional):
@@ -90,6 +92,7 @@ class DeltaNet(nn.Module):
         qk_activation: str = 'silu',
         qk_norm: str = 'l2',
         norm_eps: float = 1e-5,
+        fuse_conv_l2: bool = False,
         **kwargs,
     ) -> DeltaNet:
         super().__init__()
@@ -109,6 +112,7 @@ class DeltaNet(nn.Module):
         self.num_heads = num_heads
         self.use_gate = use_gate
         self.use_short_conv = use_short_conv
+        self.fuse_conv_l2 = fuse_conv_l2 and use_short_conv and qk_norm == 'l2' and qk_activation in ('silu', 'identity')
         self.conv_size = conv_size
         self.conv_bias = conv_bias
         self.allow_neg_eigval = allow_neg_eigval
@@ -141,12 +145,14 @@ class DeltaNet(nn.Module):
                 kernel_size=conv_size,
                 bias=conv_bias,
                 activation='silu' if qk_activation == 'silu' else None,
+                norm='l2' if self.fuse_conv_l2 else None,
             )
             self.k_conv1d = ShortConvolution(
                 hidden_size=self.key_dim,
                 kernel_size=conv_size,
                 bias=conv_bias,
                 activation='silu' if qk_activation == 'silu' else None,
+                norm='l2' if self.fuse_conv_l2 else None,
             )
             self.v_conv1d = ShortConvolution(
                 hidden_size=self.value_dim,
@@ -192,6 +198,7 @@ class DeltaNet(nn.Module):
         cu_seqlens = kwargs.get('cu_seqlens')
         hidden_states, indices, cu_seqlens = unpad_hidden_states(hidden_states, cu_seqlens, attention_mask, q_len)
 
+        use_conv_l2 = self.fuse_conv_l2 and mode == 'chunk' and not torch.is_grad_enabled()
         if self.use_short_conv:
             conv_state_q, conv_state_k, conv_state_v = None, None, None
             if last_state is not None:
@@ -201,12 +208,16 @@ class DeltaNet(nn.Module):
                 cache=conv_state_q,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
+                head_dim=self.head_k_dim,
+                use_norm=use_conv_l2,
             )
             k, conv_state_k = self.k_conv1d(
                 x=self.k_proj(hidden_states),
                 cache=conv_state_k,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
+                head_dim=self.head_k_dim,
+                use_norm=use_conv_l2,
             )
             v, conv_state_v = self.v_conv1d(
                 x=self.v_proj(hidden_states),
@@ -264,7 +275,7 @@ class DeltaNet(nn.Module):
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
-                use_qk_l2norm_in_kernel=(self.qk_norm == 'l2'),
+                use_qk_l2norm_in_kernel=(self.qk_norm == 'l2' and not use_conv_l2),
             )
         else:
             raise NotImplementedError(f"Not supported mode `{mode}`.")

@@ -71,6 +71,7 @@ class GatedDeltaNetBlock(GradientCheckpointingLayer):
                 num_v_heads=config.num_v_heads,
                 use_gate=config.use_gate,
                 use_short_conv=config.use_short_conv,
+                fuse_conv_l2=config.fuse_conv_l2,
                 allow_neg_eigval=config.allow_neg_eigval,
                 conv_size=config.conv_size,
                 norm_eps=config.norm_eps,

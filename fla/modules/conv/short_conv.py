@@ -13,6 +13,9 @@ import torch
 import torch.nn as nn
 from einops import rearrange
 
+from fla.modules.l2norm import l2norm
+from fla.utils import IS_NVIDIA
+
 try:
     from causal_conv1d import causal_conv1d_fn as causal_conv1d_fn_cuda
     from causal_conv1d import causal_conv1d_update as causal_conv1d_update_cuda
@@ -36,6 +39,11 @@ class ShortConvolution(nn.Conv1d):
         backend (Optional[str], optional): Backend implementation ('triton' or 'cuda'). Defaults to 'triton'.
         device (Optional[torch.device], optional): Device to place the layer on. Defaults to None.
         dtype (Optional[torch.dtype], optional): Data type for layer parameters. Defaults to None.
+        norm (str, Optional):
+            Head-wise normalization applied after convolution, activation, and residual. Default: `None`.
+            Supports `'l2'`.
+        norm_eps (float, Optional):
+            Epsilon added to the squared L2 norm. Default: 1e-6.
         **kwargs: Additional keyword arguments (deprecated 'use_fast_conv1d' supported for compatibility)
 
     Attributes:
@@ -58,6 +66,8 @@ class ShortConvolution(nn.Conv1d):
         backend: str | None = 'triton',
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
+        norm: str | None = None,
+        norm_eps: float = 1e-6,
         **kwargs,
     ):
         super().__init__(
@@ -73,6 +83,12 @@ class ShortConvolution(nn.Conv1d):
 
         self.hidden_size = hidden_size
         self.activation = None
+        if norm not in (None, 'l2'):
+            raise ValueError(f"Unsupported normalization: {norm}")
+        if norm is not None and not norm_eps > 0:
+            raise ValueError("`norm_eps` must be positive when normalization is enabled.")
+        self.norm = norm
+        self.norm_eps = norm_eps
 
         if activation is not None:
             assert activation in ['silu', 'swish'], f"Activation `{activation}` not supported yet."
@@ -113,6 +129,8 @@ class ShortConvolution(nn.Conv1d):
             s += ', padding_mode={padding_mode}'
         if self.activation is not None:
             s += ', activation={activation}'
+        if self.norm is not None:
+            s += ', norm={norm}'
         s += f', backend={self.backend}'
         return s.format(**self.__dict__)
 
@@ -125,6 +143,8 @@ class ShortConvolution(nn.Conv1d):
         output_final_state: bool = False,
         cu_seqlens: torch.LongTensor | None = None,
         chunk_indices: torch.LongTensor | None = None,
+        head_dim: int | None = None,
+        use_norm: bool = True,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """
@@ -145,12 +165,20 @@ class ShortConvolution(nn.Conv1d):
                 Shape: [B+1]
             chunk_indices (Optional[torch.LongTensor]):
                 Chunk indices for variable-length sequences. Default: `None`.
+            head_dim (int, Optional):
+                Channels per head, required when normalization is enabled. Default: `None`.
+            use_norm (bool, Optional):
+                Whether to apply the configured normalization for this call. Default: `True`.
 
         Returns:
             Tensor of shape `[B, T, D]`.
         """
         # Import here to avoid circular dependency
         from fla.modules.conv.causal_conv1d import causal_conv1d
+
+        use_norm = self.norm is not None and use_norm
+        if use_norm and (isinstance(head_dim, bool) or not isinstance(head_dim, int) or head_dim <= 0 or x.shape[-1] % head_dim):
+            raise ValueError("`head_dim` must be a positive divisor of the channel dimension when normalization is enabled.")
 
         B, T, *_ = x.shape
         N = B if cu_seqlens is None else len(cu_seqlens) - 1
@@ -162,13 +190,19 @@ class ShortConvolution(nn.Conv1d):
         # in decoding phase, the cache (if provided) is updated inplace
         # For packed varlen inputs, decode only when every sequence has exactly one token:
         # a zero-length or multi-token sequence makes the shape check misfire.
-        if B * T == N and (cu_seqlens is None or bool((cu_seqlens.diff() == 1).all())):
+        if (
+            B * T == N and
+            (cu_seqlens is None or bool((cu_seqlens.diff() == 1).all())) and
+            not (use_norm and kwargs.get('cp_context') is not None)
+        ):
             y, cache = self.step(
                 x=x,
                 residual=residual,
                 cache=cache,
                 output_final_state=output_final_state,
                 cu_seqlens=cu_seqlens,
+                head_dim=head_dim,
+                use_norm=use_norm,
             )
             return y, cache
 
@@ -186,7 +220,26 @@ class ShortConvolution(nn.Conv1d):
             )
             self.backend = 'triton'
 
-        return causal_conv1d(
+        if use_norm and self.backend == 'triton' and IS_NVIDIA and kwargs.get('cp_context') is None:
+            from fla.ops.convolution import fused_short_conv
+
+            return fused_short_conv(
+                x=x,
+                weight=rearrange(self.weight, "d 1 w -> d w"),
+                bias=self.bias,
+                residual=residual,
+                initial_state=cache,
+                output_final_state=output_final_state,
+                activation=self.activation,
+                cu_seqlens=cu_seqlens,
+                chunk_indices=chunk_indices,
+                use_norm=True,
+                norm_eps=self.norm_eps,
+                head_dim=head_dim,
+                cu_seqlens_cpu=kwargs.get('cu_seqlens_cpu'),
+            )
+
+        y, final_state = causal_conv1d(
             x=x,
             weight=rearrange(self.weight, "d 1 w -> d w"),
             bias=self.bias,
@@ -199,6 +252,9 @@ class ShortConvolution(nn.Conv1d):
             chunk_indices=chunk_indices,
             **kwargs,
         )
+        if use_norm:
+            y = l2norm(x=y.reshape(*y.shape[:-1], y.shape[-1] // head_dim, head_dim), eps=self.norm_eps).reshape_as(y)
+        return y, final_state
 
     def step(
         self,
@@ -207,8 +263,14 @@ class ShortConvolution(nn.Conv1d):
         cache: torch.Tensor | None,
         output_final_state: bool = False,
         cu_seqlens: torch.LongTensor | None = None,
+        head_dim: int | None = None,
+        use_norm: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         from fla.modules.conv.triton.ops import causal_conv1d_update
+
+        use_norm = self.norm is not None and use_norm
+        if use_norm and (isinstance(head_dim, bool) or not isinstance(head_dim, int) or head_dim <= 0 or x.shape[-1] % head_dim):
+            raise ValueError("`head_dim` must be a positive divisor of the channel dimension when normalization is enabled.")
 
         B, _, D, W = *x.shape, self.kernel_size[0]
         N = B if cu_seqlens is None else len(cu_seqlens) - 1
@@ -227,6 +289,8 @@ class ShortConvolution(nn.Conv1d):
                 bias=self.bias,
                 activation=self.activation,
             )
+            if use_norm:
+                y = l2norm(x=y.reshape(*y.shape[:-1], y.shape[-1] // head_dim, head_dim), eps=self.norm_eps).reshape_as(y)
             return y, (cache if output_final_state else None)
 
         shape = x.shape
@@ -245,6 +309,8 @@ class ShortConvolution(nn.Conv1d):
         y = y.view(shape)
         if residual is not None:
             y.add_(residual)
+        if use_norm:
+            y = l2norm(x=y.reshape(*y.shape[:-1], y.shape[-1] // head_dim, head_dim), eps=self.norm_eps).reshape_as(y)
         return y, (cache if output_final_state else None)
 
     @property

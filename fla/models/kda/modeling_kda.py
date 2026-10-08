@@ -69,6 +69,7 @@ class KDABlock(GradientCheckpointingLayer):
                 num_heads=config.num_heads,
                 num_v_heads=config.num_v_heads,
                 use_short_conv=config.use_short_conv,
+                fuse_conv_l2=config.fuse_conv_l2,
                 allow_neg_eigval=config.allow_neg_eigval,
                 safe_gate=config.safe_gate,
                 lower_bound=config.lower_bound,

@@ -17,35 +17,20 @@ NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if IS_AMD else [4, 8, 16, 32]
 STATIC_WARPS = 32 if not IS_AMD else 16
 
 
-@triton.heuristics({
-    'HAS_WEIGHT': lambda args: args['weight'] is not None,
-    'HAS_BIAS': lambda args: args['bias'] is not None,
-    'HAS_RESIDUAL': lambda args: args['residual'] is not None,
-    'USE_INITIAL_STATE': lambda args: args['initial_state'] is not None,
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
-})
-@fla_cache_autotune(
-    configs=[
-        triton.Config({'BD': BD}, num_warps=num_warps)
-        for BD in [16, 32, 64, 128]
-        for num_warps in NUM_WARPS_AUTOTUNE
-    ],
-    key=['D', 'W'],
-    **autotune_cache_kwargs,
-)
 @triton.jit
-def causal_conv1d_fwd_kernel(
-    x,
-    y,
+def causal_conv1d_fwd_tile(
+    p_x,
     weight,
     bias,
     residual,
-    cu_seqlens,
     initial_state,
-    chunk_indices,
-    B,
+    bos,
+    i_n,
+    i_t,
+    o_t,
+    o_d,
+    m_d,
     T,
-    stride_x_n,
     stride_x_t,
     stride_x_d,
     D: tl.constexpr,
@@ -53,30 +38,13 @@ def causal_conv1d_fwd_kernel(
     BT: tl.constexpr,
     BW: tl.constexpr,
     BD: tl.constexpr,
-    NB: tl.constexpr,
     ACTIVATION: tl.constexpr,
     HAS_WEIGHT: tl.constexpr,
     HAS_BIAS: tl.constexpr,
     HAS_RESIDUAL: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
-    IS_VARLEN: tl.constexpr,
 ):
-    i_d, i_t, i_b = tl.program_id(0), tl.program_id(1), tl.program_id(2)
-
-    if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
-        T = eos - bos
-        p_x = x + bos * stride_x_t
-    else:
-        i_n = i_b
-        bos, eos = (i_b * T).to(tl.int64), (i_b * T + T).to(tl.int64)
-        p_x = x + tl.cast(i_b, tl.int64) * stride_x_n
-
-    o_d = i_d * BD + tl.arange(0, BD)
-    o_t = i_t.to(tl.int64) * BT + tl.arange(0, BT)
     o_w = tl.arange(0, BW) + W - BW
-    m_d = o_d < D
     m_w = o_w >= 0
     m_y = (o_t < T)[:, None] & m_d[None, :]
 
@@ -133,6 +101,95 @@ def causal_conv1d_fwd_kernel(
         p_residual = residual + bos * D + o_t[:, None] * D + o_d[None, :]
         b_residual = tl.load(p_residual, mask=m_y, other=0.0)
         b_y += b_residual
+
+    return b_y
+
+
+@triton.heuristics({
+    'HAS_WEIGHT': lambda args: args['weight'] is not None,
+    'HAS_BIAS': lambda args: args['bias'] is not None,
+    'HAS_RESIDUAL': lambda args: args['residual'] is not None,
+    'USE_INITIAL_STATE': lambda args: args['initial_state'] is not None,
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
+})
+@fla_cache_autotune(
+    configs=[
+        triton.Config({'BD': BD}, num_warps=num_warps)
+        for BD in [16, 32, 64, 128]
+        for num_warps in NUM_WARPS_AUTOTUNE
+    ],
+    key=['D', 'W'],
+    **autotune_cache_kwargs,
+)
+@triton.jit(do_not_specialize=['T'])
+def causal_conv1d_fwd_kernel(
+    x,
+    y,
+    weight,
+    bias,
+    residual,
+    cu_seqlens,
+    initial_state,
+    chunk_indices,
+    B,
+    T,
+    stride_x_n,
+    stride_x_t,
+    stride_x_d,
+    D: tl.constexpr,
+    W: tl.constexpr,
+    BT: tl.constexpr,
+    BW: tl.constexpr,
+    BD: tl.constexpr,
+    NB: tl.constexpr,
+    ACTIVATION: tl.constexpr,
+    HAS_WEIGHT: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
+    HAS_RESIDUAL: tl.constexpr,
+    USE_INITIAL_STATE: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+):
+    i_d, i_t, i_b = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+
+    if IS_VARLEN:
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = eos - bos
+        p_x = x + bos * stride_x_t
+    else:
+        i_n = i_b
+        bos, eos = (i_b * T).to(tl.int64), (i_b * T + T).to(tl.int64)
+        p_x = x + tl.cast(i_b, tl.int64) * stride_x_n
+
+    o_d = i_d * BD + tl.arange(0, BD)
+    o_t = i_t.to(tl.int64) * BT + tl.arange(0, BT)
+    b_y = causal_conv1d_fwd_tile(
+        p_x=p_x,
+        weight=weight,
+        bias=bias,
+        residual=residual,
+        initial_state=initial_state,
+        bos=bos,
+        i_n=i_n,
+        i_t=i_t,
+        o_t=o_t,
+        o_d=o_d,
+        m_d=o_d < D,
+        T=T,
+        stride_x_t=stride_x_t,
+        stride_x_d=stride_x_d,
+        D=D,
+        W=W,
+        BT=BT,
+        BW=BW,
+        BD=BD,
+        ACTIVATION=ACTIVATION,
+        HAS_WEIGHT=HAS_WEIGHT,
+        HAS_BIAS=HAS_BIAS,
+        HAS_RESIDUAL=HAS_RESIDUAL,
+        USE_INITIAL_STATE=USE_INITIAL_STATE,
+    )
+    m_y = (o_t < T)[:, None] & (o_d < D)[None, :]
 
     p_y = y + bos * D + o_t[:, None] * D + o_d[None, :]
     tl.store(p_y, tl.cast(b_y, dtype=p_y.dtype.element_ty, fp_downcast_rounding='rtne'), mask=m_y)
@@ -469,6 +526,13 @@ def compute_dh0_kernel(
 
     o_d = i_d * BD + tl.arange(0, BD)
     m_d = o_d < D
+
+    if USE_FINAL_STATE:
+        if seq_len == 0:
+            # Empty sequences preserve the oldest cache slot as well.
+            p_state = i_n * D * W + o_d * W
+            b_dht = tl.load(dht + p_state, mask=m_d, other=0)
+            tl.store(dh0 + p_state, b_dht.to(dh0.dtype.element_ty), mask=m_d)
 
     # For each i_w in [1, W), compute dh0[i_n, :, i_w]
     for i_w in tl.static_range(1, W):

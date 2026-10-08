@@ -81,6 +81,8 @@ class GatedDeltaNet(nn.Module):
             Whether to use bias in the short convolution, only used when `use_short_conv` is `True`. Default: `False`.
         layer_idx (int, Optional):
             The index of the layer. Default: None.
+        fuse_conv_l2 (bool, Optional):
+            Whether to fuse Q/K convolution and L2 normalization in chunk mode with gradients disabled. Default: `False`.
         norm_eps (float, Optional):
             The epsilon value for the normalization layer. Default: 1e-5.
     """
@@ -100,6 +102,7 @@ class GatedDeltaNet(nn.Module):
         conv_bias: bool = False,
         layer_idx: int = None,
         norm_eps: float = 1e-5,
+        fuse_conv_l2: bool = False,
         **kwargs,
     ) -> GatedDeltaNet:
         super().__init__()
@@ -111,6 +114,7 @@ class GatedDeltaNet(nn.Module):
 
         self.use_gate = use_gate
         self.use_short_conv = use_short_conv
+        self.fuse_conv_l2 = fuse_conv_l2 and use_short_conv
         self.conv_size = conv_size
         self.conv_bias = conv_bias
 
@@ -174,12 +178,14 @@ class GatedDeltaNet(nn.Module):
                 kernel_size=conv_size,
                 bias=conv_bias,
                 activation='silu',
+                norm='l2' if self.fuse_conv_l2 else None,
             )
             self.k_conv1d = ShortConvolution(
                 hidden_size=self.key_dim,
                 kernel_size=conv_size,
                 bias=conv_bias,
                 activation='silu',
+                norm='l2' if self.fuse_conv_l2 else None,
             )
             self.v_conv1d = ShortConvolution(
                 hidden_size=self.value_dim,
@@ -248,7 +254,9 @@ class GatedDeltaNet(nn.Module):
         hidden_states, indices, cu_seqlens = unpad_hidden_states(hidden_states, cu_seqlens, attention_mask, q_len)
 
         conv_state_q, conv_state_k, conv_state_v = None, None, None
+        use_conv_l2 = self.fuse_conv_l2 and mode == 'chunk' and not torch.is_grad_enabled()
         if self._use_fused_qkv_conv(last_state, use_cache, cu_seqlens):
+            use_conv_l2 = False
             qkv = torch.cat(
                 [
                     self.q_proj(hidden_states),
@@ -285,12 +293,16 @@ class GatedDeltaNet(nn.Module):
                 cache=conv_state_q,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
+                head_dim=self.head_k_dim,
+                use_norm=use_conv_l2,
             )
             k, conv_state_k = self.k_conv1d(
                 x=self.k_proj(hidden_states),
                 cache=conv_state_k,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
+                head_dim=self.head_k_dim,
+                use_norm=use_conv_l2,
             )
             v, conv_state_v = self.v_conv1d(
                 x=self.v_proj(hidden_states),
@@ -320,7 +332,7 @@ class GatedDeltaNet(nn.Module):
                 dt_bias=self.dt_bias,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
-                use_qk_l2norm_in_kernel=True,
+                use_qk_l2norm_in_kernel=not use_conv_l2,
                 use_gate_in_kernel=True,
                 use_beta_sigmoid_in_kernel=True,
                 allow_neg_eigval=self.allow_neg_eigval,

@@ -52,6 +52,7 @@ class DeltaNetConfig(_HybridAttentionConfigMixin, PretrainedConfig):
         use_l2warp: bool = False,
         vocab_size: int = 32000,
         attnres_block_size: int | None = None,
+        fuse_conv_l2: bool = False,
         **kwargs,
     ):
         self.attn_mode = attn_mode
@@ -60,6 +61,7 @@ class DeltaNetConfig(_HybridAttentionConfigMixin, PretrainedConfig):
         self.expand_v = expand_v
         self.use_gate = use_gate
         self.use_short_conv = use_short_conv
+        self.fuse_conv_l2 = fuse_conv_l2
         self.conv_size = conv_size
         self.use_beta = use_beta
         self.use_output_norm = use_output_norm

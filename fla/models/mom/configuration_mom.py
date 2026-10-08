@@ -50,6 +50,7 @@ class MomConfig(_HybridAttentionConfigMixin, PretrainedConfig):
         fuse_cross_entropy: bool = True,
         vocab_size: int = 32000,
         attnres_block_size: int | None = None,
+        fuse_conv_l2: bool = False,
         **kwargs,
     ):
         self.attn_mode = attn_mode
@@ -60,6 +61,7 @@ class MomConfig(_HybridAttentionConfigMixin, PretrainedConfig):
         self.conv_size = conv_size
         self.use_output_gate = use_output_gate
         self.use_short_conv = use_short_conv
+        self.fuse_conv_l2 = fuse_conv_l2
         self.max_position_embeddings = max_position_embeddings
 
         self.hidden_ratio = hidden_ratio
