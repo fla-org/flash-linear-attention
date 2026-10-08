@@ -179,8 +179,8 @@ def register_backend(operation: str) -> Callable[[type[B]], type[B]]:
 
 def _resolve_registry(operation: str, *, allow_unknown: bool = False) -> BackendRegistry:
     if operation == 'modules':
-        module_path = 'fla.modules.backends'
-    elif operation.startswith('modules.'):
+        raise ValueError("Use an operation-specific key, such as 'modules.conv' or 'modules.norm.l2norm'.")
+    if operation.startswith('modules.'):
         module_path = f'fla.{operation}.backends'
     else:
         module_path = f'fla.ops.{operation}.backends'

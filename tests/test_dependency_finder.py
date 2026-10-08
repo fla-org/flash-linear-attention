@@ -23,7 +23,7 @@ def backend_project(tmp_path):
             "from fla.backends import dispatch\n"
             "@dispatch('generalized_delta_rule.dplr')\ndef compute(x): return x\n"
         ),
-        'modules': "from fla.modules.backends import dispatch\n@dispatch('modules')\ndef compute(x): return x\n",
+        'modules': "from fla.backends import dispatch\n@dispatch('modules.activations')\ndef compute(x): return x\n",
         'unrelated': (
             'from other.backends import dispatch\n'
             'from fla.ops.kda.backends import helper\n'
@@ -42,7 +42,7 @@ def backend_project(tmp_path):
     ('fla/ops/kda/backends/triton_ascend/chunk.py', {'kda'}),
     ('fla/ops/gdn2/backends/triton_ascend/__init__.py', {'gdn2'}),
     ('fla/ops/generalized_delta_rule/dplr/backends/__init__.py', {'dplr'}),
-    ('fla/modules/backends/triton_ascend/activations.py', {'modules'}),
+    ('fla/modules/activations/backends/triton_ascend/ops.py', {'modules'}),
     ('fla/utils/_compat.py', set()),
 ])
 def test_backend_changes_follow_dispatch_ownership(backend_project, changed, expected):
@@ -117,9 +117,12 @@ def test_backend_changes_follow_repository_ownership(changed, expected, unrelate
         ('fla/modules/norm/fused_norm_gate/backends/triton_ascend/ops.py', {'tests/modules/test_layernorm_gated.py'}),
         ('fla/modules/conv/backends/gluon/__init__.py', {'tests/modules/test_conv.py'}),
         ('fla/modules/conv/backends/gluon/ops.py', {'tests/modules/test_conv.py'}),
+        ('fla/modules/fused_cross_entropy/ops.py', {
+            'tests/modules/test_cross_entropy.py', 'tests/modules/test_l2warp.py',
+        }),
         ('fla/ops/attn/backends/tilelang/parallel.py', {'tests/ops/test_attn.py'}),
         ('fla/ops/kda/backends/triton_ascend/chunk_bwd.py', {'tests/ops/test_kda.py', 'tests/ops/test_gdn2.py'}),
-        ('fla/modules/backends/triton_ascend/activations.py', {'tests/modules/test_activation.py'}),
+        ('fla/modules/activations/backends/triton_ascend/ops.py', {'tests/modules/test_activation.py'}),
     ],
 )
 def test_backend_changes_select_original_test_files(repository_finder, changed, expected):

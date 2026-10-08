@@ -90,7 +90,7 @@ def _get_dispatch_owners(tree) -> set[str]:
     """Read operation keys from the supported dispatch imports."""
     if not tree:
         return set()
-    dispatch_modules = {'fla.backends', 'fla.ops.backends', 'fla.modules.backends'}
+    dispatch_modules = {'fla.backends', 'fla.ops.backends'}
     dispatch_names = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module in dispatch_modules:
@@ -102,7 +102,7 @@ def _get_dispatch_owners(tree) -> set[str]:
         if not node.args or not isinstance(node.args[0], ast.Constant) or not isinstance(node.args[0].value, str):
             continue
         operation = node.args[0].value
-        prefix = 'fla' if operation == 'modules' or operation.startswith('modules.') else 'fla.ops'
+        prefix = 'fla' if operation.startswith('modules.') else 'fla.ops'
         owners.add(f'{prefix}.{operation}.backends')
     return owners
 

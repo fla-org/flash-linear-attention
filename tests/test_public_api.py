@@ -14,7 +14,7 @@ import torch
 
 import fla
 from fla import layers, models, modules
-from fla.modules import l2norm
+from fla.modules import activations, fused_linear_cross_entropy, l2norm
 
 
 def test_top_level_exports_layers_and_non_config_models():
@@ -37,16 +37,20 @@ def test_top_level_exports_layers_and_non_config_models():
 @pytest.mark.parametrize(
     ('owner', 'name', 'defaults'),
     [
+        ('activations', 'powglu', {'power': 3.0}),
+        ('rotary', 'rotary_embedding', {'seqlen_offsets': 0, 'interleaved': False, 'inplace': False}),
         ('conv.ops', 'causal_conv1d_fwd', {'chunk_size': 64, 'layout_fallback': False, 'output_final_state': False}),
+        ('grpo', 'fused_grpo_loss', {'beta': 0.1, 'save_kl': False, 'inplace': False}),
+        ('fused_cross_entropy', 'cross_entropy_loss', {'ignore_index': -100, 'process_group': None}),
+        ('fused_linear_cross_entropy', 'fused_linear_cross_entropy_loss', {'num_chunks': 8, 'reduction': 'mean'}),
+        ('fused_kl_div', 'fused_kl_div_loss', {'reduction': 'batchmean', 'accumulate_grad_in_fp32': True}),
         ('layernorm', 'layer_norm', {'eps': 1e-5, 'prenorm': False}),
         ('l2norm', 'l2norm', {'eps': 1e-6, 'output_dtype': None}),
         ('fused_norm_gate', 'layer_norm_gated', {'activation': 'swish', 'eps': 1e-6}),
     ],
     ids=[
-        'conv',
-        'layernorm',
-        'l2norm',
-        'norm-gate',
+        'activations', 'rotary', 'conv', 'grpo', 'cross-entropy', 'linear-cross-entropy',
+        'kl-div', 'layernorm', 'l2norm', 'norm-gate',
     ],
 )
 def test_public_call_defaults(owner, name, defaults):
@@ -72,7 +76,14 @@ def test_legacy_imports_preserve_symbol_identity(legacy, current, names):
 
 
 def test_public_function_aliases():
+    for name in ('sigmoid', 'logsigmoid', 'swish', 'sqrelu'):
+        assert activations.ACT2FN[name] is getattr(activations, name)
+    assert activations.ACT2FN['silu'] is activations.swish
+    assert activations.ACT2FN['gelu'] is activations.fast_gelu_impl
+    assert activations.ACT2FN['bias_gelu'] is activations.bias_gelu_impl
     assert l2norm.l2_norm is l2norm.l2norm
+    assert fused_linear_cross_entropy.fused_linear_cross_entropy_forward is fused_linear_cross_entropy.fused_linear_cross_entropy_fwd
+    assert fused_linear_cross_entropy.fused_linear_cross_entropy_backward is fused_linear_cross_entropy.fused_linear_cross_entropy_bwd
 
 
 @pytest.mark.parametrize(
@@ -85,17 +96,15 @@ def test_public_function_aliases():
         ('fused_norm_gate', 'FusedLayerNormGated', {'hidden_size': 4, 'bias': True}, ('weight', 'bias')),
         ('fused_norm_gate', 'FusedRMSNormGated', {'hidden_size': 4}, ('weight',)),
         ('l2norm', 'L2Norm', {}, ()),
+        ('rotary', 'RotaryEmbedding', {'dim': 4}, ()),
         ('convolution', 'ShortConvolution', {'hidden_size': 4, 'kernel_size': 3, 'bias': True}, ('weight', 'bias')),
+        ('fused_cross_entropy', 'FusedCrossEntropyLoss', {}, ()),
+        ('fused_linear_cross_entropy', 'FusedLinearCrossEntropyLoss', {}, ()),
+        ('fused_kl_div', 'FusedKLDivLoss', {}, ()),
     ],
     ids=[
-        'layernorm',
-        'rmsnorm',
-        'layernorm-gated',
-        'rmsnorm-gated',
-        'fused-layernorm-gated',
-        'fused-rmsnorm-gated',
-        'l2norm',
-        'convolution',
+        'layernorm', 'rmsnorm', 'layernorm-gated', 'rmsnorm-gated', 'fused-layernorm-gated', 'fused-rmsnorm-gated',
+        'l2norm', 'rotary', 'convolution', 'cross-entropy', 'linear-cross-entropy', 'kl-div',
     ],
 )
 def test_legacy_module_pickle_and_state_dict(monkeypatch, legacy, name, kwargs, state_keys):

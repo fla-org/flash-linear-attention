@@ -232,8 +232,8 @@ class GrpoLossNPU(torch.autograd.Function):
                 B=B,
                 N=N,
                 L=L,
-                BLOCK_SIZE=block_size,
                 start_idx=input_ids_start_index,
+                BLOCK_SIZE=block_size,
                 ROW_OFFSET=row_off,
                 num_warps=STATIC_WARPS,
             )

@@ -332,7 +332,7 @@ def test_fused_linear_cross_entropy_parallel(world_size, tmp_path):
 def test_fused_linear_cross_entropy_backend_dispatch(monkeypatch, name, legacy_name):
     from fla.backends import _DISPATCH_DISABLED
     from fla.modules import fused_linear_cross_entropy
-    from fla.modules.backends.triton_ascend import TritonAscendBackend
+    from fla.modules.fused_linear_cross_entropy.backends.triton_ascend import TritonAscendBackend
 
     if _DISPATCH_DISABLED:
         pytest.skip("Backend dispatch was disabled before import")
@@ -349,7 +349,7 @@ def test_fused_linear_cross_entropy_backend_dispatch(monkeypatch, name, legacy_n
 
 
 def test_fused_linear_cross_entropy_parallel_ascend_rejection(monkeypatch):
-    from fla.modules.backends.triton_ascend import TritonAscendBackend
+    from fla.modules.fused_linear_cross_entropy.backends.triton_ascend import TritonAscendBackend
 
     monkeypatch.setattr(dist, 'get_world_size', lambda group: 2)
     with pytest.raises(NotImplementedError, match="Vocabulary-parallel"):

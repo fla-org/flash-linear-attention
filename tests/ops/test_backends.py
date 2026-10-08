@@ -190,6 +190,7 @@ def test_class_registration_preserves_identity_and_replaces_backend(monkeypatch)
 @pytest.mark.parametrize(('operation', 'error'), [
     ('unknown_dispatch_test', ModuleNotFoundError),
     ('modules.unknown_dispatch_test', ModuleNotFoundError),
+    ('modules', ValueError),
 ])
 def test_dispatch_rejects_unknown_operation(monkeypatch, operation, error):
     monkeypatch.setattr(registry_module, '_registries', {})
@@ -227,8 +228,18 @@ def test_resolver_preserves_backend_dependency_errors(monkeypatch, dependency, a
 @pytest.mark.parametrize(
     ('owner', 'name', 'tensor_args', 'options'),
     [
+        ('activations', 'logsigmoid_fwd', (), {'temperature': 0.5, 'output_contiguous': True}),
+        ('activations', 'logsigmoid_bwd', ('dy',), {'temperature': 0.5, 'output_contiguous': True}),
+        ('rotary', 'rotary_embedding_fwdbwd', ('cos', 'sin'), {'interleaved': True, 'conjugate': False}),
+        ('rotary', 'rotary_embedding_fwdbwd', ('cos', 'sin'), {'interleaved': True, 'conjugate': True}),
         ('conv', 'causal_conv1d_fwd', ('weight', 'bias', 'residual'), {'chunk_size': 32, 'output_final_state': True}),
         ('conv', 'causal_conv1d_bwd', ('dy', 'dht'), {'chunk_size': 32, 'layout_fallback': True}),
+        ('grpo', 'fused_grpo_loss', ('ref_logp', 'input_ids', 'advantages'), {'beta': 0.2, 'save_kl': True}),
+        ('fused_cross_entropy', 'cross_entropy_loss', ('target',), {'ignore_index': -1, 'label_smoothing': 0.1}),
+        ('fused_linear_cross_entropy', 'fused_linear_cross_entropy_fwd', ('target', 'weight'), {'reduction': 'sum'}),
+        ('fused_linear_cross_entropy', 'fused_linear_cross_entropy_bwd', ('dx', 'dw', 'db'), {}),
+        ('fused_kl_div', 'fused_kl_div_fwd', ('target_x', 'weight', 'target_weight'), {'use_dw': False}),
+        ('fused_kl_div', 'fused_kl_div_bwd', ('dx', 'dw'), {}),
         ('norm.layernorm', 'layer_norm_fwd', ('weight', 'bias'), {'is_rms_norm': True, 'num_groups': 2}),
         ('norm.layernorm', 'layer_norm_bwd', ('x', 'weight', 'bias'), {'recompute_output': True, 'num_groups': 2}),
         ('norm.l2norm', 'l2norm_fwd', (), {'eps': 1e-4, 'output_dtype': torch.float32}),
@@ -237,14 +248,11 @@ def test_resolver_preserves_backend_dependency_errors(monkeypatch, dependency, a
         ('norm.fused_norm_gate', 'layer_norm_gated_bwd', ('x', 'g', 'weight', 'bias'), {'activation': 'sigmoid'}),
     ],
     ids=[
-        'conv-forward',
-        'conv-backward',
-        'layernorm-forward',
-        'layernorm-backward',
-        'l2norm-forward',
-        'l2norm-backward',
-        'norm-gate-forward',
-        'norm-gate-backward',
+        'activations-forward', 'activations-backward', 'rotary-forward', 'rotary-backward',
+        'conv-forward', 'conv-backward', 'grpo', 'cross-entropy',
+        'linear-cross-entropy-forward', 'linear-cross-entropy-backward', 'kl-div-forward', 'kl-div-backward',
+        'layernorm-forward', 'layernorm-backward', 'l2norm-forward', 'l2norm-backward',
+        'norm-gate-forward', 'norm-gate-backward',
     ],
 )
 @pytest.mark.skipif(registry_module._DISPATCH_DISABLED, reason='dispatch was disabled before the entry points were imported')
@@ -281,41 +289,6 @@ def test_module_dispatch_preserves_arguments_and_result(monkeypatch, owner, name
         else:
             assert calls[0][1][argument] == value
     assert result is expected
-
-
-@pytest.mark.skipif(registry_module._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
-@pytest.mark.parametrize('direction', ['fwd', 'bwd'], ids=['forward', 'backward'])
-def test_aggregate_module_dispatch_preserves_arguments_and_result(monkeypatch, direction):
-    from fla.modules import activations
-    from fla.modules.backends import modules_registry
-    from fla.modules.backends.triton_ascend import TritonAscendBackend
-
-    assert dispatch('modules').__self__ is modules_registry
-    name = f'logsigmoid_{direction}'
-    monkeypatch.setattr(TritonAscendBackend, 'is_available', classmethod(lambda cls: True))
-    monkeypatch.setattr(TritonAscendBackend, 'verify', lambda self, *args, **kwargs: (True, None))
-    result = object()
-    calls = []
-
-    def implementation(self, x, **kwargs):
-        assert torch.is_grad_enabled()
-        calls.append((x, kwargs))
-        return result
-
-    monkeypatch.setattr(TritonAscendBackend, name, implementation)
-    x = torch.tensor([1.0, 2.0], requires_grad=True)
-    kwargs = {'temperature': 0.5, 'output_contiguous': True}
-    if direction == 'bwd':
-        kwargs['dy'] = torch.ones_like(x)
-    assert getattr(activations, name)(x, **kwargs) is result
-    assert len(calls) == 1
-    assert calls[0][0] is x
-    assert calls[0][1].keys() == kwargs.keys()
-    for argument, value in kwargs.items():
-        if isinstance(value, torch.Tensor):
-            assert calls[0][1][argument] is value
-        else:
-            assert calls[0][1][argument] == value
 
 
 @pytest.mark.parametrize(
@@ -477,10 +450,11 @@ def test_legacy_dispatch_uses_shared_registry(run_python, first_import):
         custom.register(Backend())
         assert legacy.dispatch('custom_import_test')(compute)(2) == 4
 
-        from fla.modules.backends import modules_registry
-        assert legacy.BackendRegistry('modules') is modules_registry
-        assert dispatch('modules').__self__ is modules_registry
-        assert legacy.dispatch('modules').__self__ is modules_registry
+        import pytest
+
+        for resolve in [dispatch, legacy.dispatch, legacy.BackendRegistry]:
+            with pytest.raises(ValueError, match='operation-specific key'):
+                resolve('modules')
         """,
         FIRST_IMPORT=first_import,
         FLA_DISABLE_BACKEND_DISPATCH='0',
@@ -497,28 +471,18 @@ def test_dispatch_policy_and_optional_dependencies(run_python, disabled):
 
         from fla.backends import dispatch
         from fla import backends as registry_module
+        assert 'fla.ops.backends' not in sys.modules
+        assert 'fla.modules.backends' not in sys.modules
         enabled = os.environ['FLA_DISABLE_BACKEND_DISPATCH'] != '1'
 
         def compute(x):
             return x + 1
 
-        for operation in [
-            'attn',
-            'attnres',
-            'common',
-            'gated_delta_rule',
-            'gdn2',
-            'generalized_delta_rule.dplr',
-            'gla',
-            'kda',
-            'rwkv6',
-            'utils',
-            'modules',
-            'modules.norm.layernorm',
-            'modules.norm.l2norm',
-            'modules.norm.fused_norm_gate',
-            'modules.conv',
-        ]:
+        for operation in ['attn', 'attnres', 'common', 'gated_delta_rule', 'gdn2', 'generalized_delta_rule.dplr',
+                          'gla', 'kda', 'rwkv6', 'utils', 'modules.activations', 'modules.rotary', 'modules.conv',
+                          'modules.grpo', 'modules.fused_cross_entropy', 'modules.fused_linear_cross_entropy',
+                          'modules.fused_kl_div', 'modules.norm.layernorm', 'modules.norm.l2norm',
+                          'modules.norm.fused_norm_gate']:
             with warnings.catch_warnings():
                 warnings.simplefilter('error', DeprecationWarning)
                 decorate = dispatch(operation)
@@ -547,8 +511,6 @@ def test_dispatch_policy_and_optional_dependencies(run_python, disabled):
             name.startswith('fla.modules.') and '.backends.triton_ascend.ops' in name
             for name in sys.modules
         )
-        assert not any(name.startswith('fla.modules.backends.triton_ascend.') for name in sys.modules)
-        assert 'fla.modules.backends.gluon.causal_conv1d' not in sys.modules
         assert 'fla.modules.conv.backends.gluon.ops' not in sys.modules
         with warnings.catch_warnings():
             warnings.simplefilter('ignore', DeprecationWarning)

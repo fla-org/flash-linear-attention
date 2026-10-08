@@ -60,13 +60,11 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.modules.backends import dispatch
+from fla.backends import dispatch
 from fla.ops.utils.op import exp, log
-from fla.utils import IS_AMD, IS_INTEL, autotune_cache_kwargs, input_guard
+from fla.utils import IS_AMD, IS_INTEL, IS_NPU, autotune_cache_kwargs, input_guard
 
 NUM_WARPS_AUTOTUNE = [4, 8, 16] if IS_AMD else [4, 8, 16, 32]
-# Intel/XPU Triton backend has correctness issues with multi-stage pipelining
-# when memory is cold (e.g. after empty_cache), so limit to single stage.
 NUM_STAGES_AUTOTUNE = [1] if IS_INTEL else [1, 2, 4]
 
 
@@ -289,9 +287,11 @@ class GrpoLoss(torch.autograd.Function):
             completion_mask_ptr=completion_mask,
             lse_ptr=lse,
             beta=ctx.beta,
-            B=B, N=N, L=L,
-            BLOCK_SIZE=BN,
+            B=B,
+            N=N,
+            L=L,
             start_idx=input_ids_start_index,
+            BLOCK_SIZE=BN,
         )
         # The last token in the completion is not used in the loss computation
         # and therefore its gradient should be set to 0
@@ -299,7 +299,7 @@ class GrpoLoss(torch.autograd.Function):
         return dlogits.view(*ctx.input_shape), None, None, None, None, None, None, None
 
 
-@dispatch('modules')
+@dispatch('modules.grpo')
 def fused_grpo_loss(logits, ref_logp, input_ids, advantages,
                     beta=0.1, completion_mask=None, save_kl=False, inplace=False) -> torch.Tensor:
     '''
@@ -359,7 +359,8 @@ def grpo_loss_torch(logits, ref_logp, input_ids, advantages, beta=0.1, completio
     return per_token_loss if not save_kl else (per_token_loss, per_token_kl)
 
 
-@torch.compile(fullgraph=True)
+# NPU inductor miscompiles this function; keep its existing eager path.
+@torch.compile(fullgraph=True, disable=IS_NPU)
 def grpo_loss_with_old_logps(
     logps: torch.Tensor,
     ref_logps: torch.Tensor,

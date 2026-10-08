@@ -12,6 +12,27 @@ from fla.modules.grpo import fused_grpo_loss, grpo_loss_torch, grpo_loss_with_ol
 from fla.utils import IS_NVIDIA_HOPPER, assert_close, device, device_torch_lib
 
 
+@pytest.mark.parametrize('is_npu', ['0', '1'], ids=['cpu-compile', 'npu-eager'])
+def test_grpo_compile_policy_is_local_to_its_function(run_python, is_npu):
+    run_python(
+        """
+        import os
+        import sys
+        import torch
+        from fla import utils
+
+        assert 'fla.modules.grpo.ops' not in sys.modules
+        original_compile = torch.compile
+        utils.IS_NPU = os.environ['TEST_IS_NPU'] == '1'
+        from fla.modules import grpo
+
+        assert torch.compile is original_compile
+        assert hasattr(grpo.grpo_loss_with_old_logps, '_torchdynamo_orig_callable') == (not utils.IS_NPU)
+        """,
+        TEST_IS_NPU=is_npu,
+    )
+
+
 def grpo_loss_with_old_logps_torch(
     logps: torch.Tensor,
     ref_logps: torch.Tensor,
