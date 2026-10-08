@@ -13,11 +13,11 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-import fla.ops.common.backends.tilelang as common_tilelang_backend
-import fla.ops.generalized_delta_rule.dplr.backends.tilelang as dplr_tilelang_backend
-import fla.ops.kda.backends.tilelang as kda_tilelang_backend
-import fla.ops.rwkv6.backends.tilelang as rwkv6_tilelang_backend
-import fla.utils.env as env
+from fla.ops.common.backends import tilelang as common_tilelang_backend
+from fla.ops.generalized_delta_rule.dplr.backends import tilelang as dplr_tilelang_backend
+from fla.ops.kda.backends import tilelang as kda_tilelang_backend
+from fla.ops.rwkv6.backends import tilelang as rwkv6_tilelang_backend
+from fla.utils import env
 
 _REAL_PATH_EXISTS = Path.exists
 

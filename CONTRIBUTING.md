@@ -16,6 +16,7 @@ Contributions to Flash Linear Attention are welcome. This guide defines the deve
 * [Code Style](#code-style)
   * [Copyright Header](#copyright-header)
   * [Formatting and Linting](#formatting-and-linting)
+  * [Imports](#imports)
   * [Docstrings and Comments](#docstrings-and-comments)
   * [Prose and Markdown](#prose-and-markdown)
   * [Naming Conventions](#naming-conventions)
@@ -110,7 +111,7 @@ pre-commit run --all-files
 ### Test Locally
 
 ```bash
-pytest tests/
+FLA_CI_ENV=0 pytest tests/
 ```
 
 ## Project Structure
@@ -163,6 +164,7 @@ A CI workflow (`check-header.yml`) enforces this for Python files, with exclusio
 We use [Ruff](https://docs.astral.sh/ruff/) for linting and [autopep8](https://github.com/hhatto/autopep8) for formatting. Pre-commit hooks run both automatically.
 
 Key rules:
+
 - **Max line length**: 127 characters
 - **Target Python version**: 3.10+
 - **Import sorting**: `isort`-compatible via Ruff (`fla` as first-party)
@@ -171,6 +173,19 @@ Key rules:
 - **Line width**: use the full 127 characters before reaching for a line break — a statement that fits on one line stays on one line.
 - **Calls**: prefer keyword arguments over positional ones. A call that fits within the limit stays on one line; a call that overflows breaks with a hanging indent, **one keyword argument per line** — never several.
 - **Parameter order**: keep related parameters adjacent, and pass keyword arguments at call sites in the same order they appear in the signature.
+
+### Imports
+
+Prefer absolute `from ... import ...` imports for project code. Import the symbols you need directly; when you need a module object, import it from its parent package.
+
+```python
+from fla.ops.kda.backends.tilelang import KDATileLangBackend
+from fla.utils import env
+```
+
+Avoid unnecessary aliases and ad hoc abbreviations. Keep established conventions such as `torch.nn.functional as F` and `triton.language as tl`, and use descriptive aliases when they clarify real name collisions. A long package path alone is not a reason to rename the imported object.
+
+For tests that monkeypatch module globals, retain the module object and patch the namespace where the code under test looks up the value. Module access is also appropriate when values may be rebound at runtime. Keep the module's original name unless an alias helps distinguish it from another object in the same scope.
 
 ### Docstrings and Comments
 
@@ -339,7 +354,7 @@ Key guidelines:
 - **Use `assert_close`** from `fla.utils` with the existing per-test error thresholds.
 - **Use `device` and platform helpers from `fla.utils`** for device-agnostic tests. Reuse helpers such as `device_platform`, `IS_NVIDIA`, `IS_AMD`, and `IS_INTEL` instead of adding direct `torch.cuda` platform checks; keep vendor-specific profiling in benchmark scripts.
 - **Parametrize** with diverse shapes including non-power-of-2 sequence lengths (e.g., 63, 100, 2000).
-- **Skip unsupported platforms** with `@pytest.mark.skipif(device_platform == 'intel', ...)` when needed.
+- **Skip unsupported platforms** with helpers such as `IS_INTEL` imported from `fla.utils`, e.g. `@pytest.mark.skipif(IS_INTEL, reason="unsupported on Intel")`.
 - **Include test IDs** in parametrize for readable output.
 
 **Naming and structure.** Name the file `tests/ops/test_<op>.py`, and name each test after the implementation entry point it exercises — `test_chunk`, `test_fused_recurrent`, `test_parallel` — mirroring the functions in `fla/ops/<op>/`. Distinguish a genuinely different code path with a short suffix (`test_chunk_varlen`, `test_fused_recurrent_state_v_first`). Prefer adding a new shape, dtype, or flag as a `@parametrize` case on an existing test rather than writing a new function; only add a new function when the path or purpose is clearly different — varlen vs. dense, a specific feature flag, or a separate entry point. See `tests/ops/test_gla.py` and `tests/ops/test_gdn.py` for the pattern.
@@ -370,9 +385,13 @@ Resolve the baseline to a commit SHA: a checked-out branch cannot be reused by t
 FLA_CI_ENV=0 python -m benchmarks.ops.verify --op chunk_gla --base "$FLA_BENCH_BASE"
 ```
 
-**Model-level throughput and generation:**
+**Model-level throughput and generation (CUDA):**
+
+These scripts require additional dependencies: `accelerate` for training throughput and `datasets` for generation. Install them alongside the benchmark extra before running the examples:
 
 ```bash
+pip install -e '.[cuda,benchmark]' accelerate
+
 python benchmarks/benchmark_training_throughput.py --name kda --batch_size 2 --seq_len 8192
 python benchmarks/benchmark_training_throughput.py --name kda --batch_size 2 --seq_len 8192 --varlen
 python benchmarks/benchmark_generation.py --path fla-hub/gla-1.3B-100B
@@ -518,7 +537,7 @@ Before submitting, please go through the following checklist:
 - Code follows the project's style conventions.
 - Copyright header is present on new project Python source files.
 - Changes to `fla/ops/` or `fla/modules/` add or update the matching test in `tests/`.
-- Tests pass locally (`pytest tests/ops/test_<your_op>.py`).
+- Tests pass locally (`FLA_CI_ENV=0 pytest tests/ops/test_<your_op>.py`).
 - New operators include a naive reference implementation.
 - Outputs and final states are checked against a reference; training APIs also check backward gradients.
 - Pre-commit hooks pass (`pre-commit run --files <your_files>`).
