@@ -7,6 +7,7 @@
 
 import importlib.metadata
 import logging
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,6 +15,7 @@ import pytest
 import torch
 
 from fla.ops.attn.backends.gluon import AttnGluonBackend
+from fla.ops.attn.decoding import attn_decoding_one_step
 from fla.ops.backends import BaseBackend
 from fla.ops.common.backends import tilelang as common_tilelang_backend
 from fla.ops.generalized_delta_rule.dplr.backends import tilelang as dplr_tilelang_backend
@@ -225,7 +227,7 @@ def test_attn_gluon_backend_requires_opt_in(monkeypatch):
     assert AttnGluonBackend.is_enabled()
 
 
-@pytest.mark.parametrize('method', ['parallel_attn_fwd', 'parallel_attn_bwd', 'attn_decoding_fwd'])
+@pytest.mark.parametrize('method', ['parallel_attn_fwd', 'parallel_attn_bwd', 'attn_decoding_one_step'])
 @pytest.mark.parametrize(
     ('device_type', 'capability', 'dtype', 'K', 'V', 'reason'),
     [
@@ -248,11 +250,59 @@ def test_attn_gluon_backend_verifier(monkeypatch, method, device_type, capabilit
     kwargs = dict(q=q, k=q, v=v, g_cumsum=None, sink_bias=None, scale=0.125)
     if method == 'parallel_attn_bwd':
         kwargs.update(o=None, lse=None, do=None)
-    elif method == 'attn_decoding_fwd':
-        kwargs['cu_seqlens'] = None
+    elif method == 'attn_decoding_one_step':
+        del kwargs['g_cumsum']
+        kwargs.update(g=None, cu_seqlens=torch.tensor([0, 1], dtype=torch.int32))
     accepted, actual_reason = getattr(AttnGluonBackend(), method + '_verifier')(**kwargs)
     assert accepted is (reason is None)
     if reason is None:
         assert actual_reason is None
     else:
         assert reason in actual_reason
+
+
+@pytest.mark.skipif(os.environ.get('FLA_DISABLE_BACKEND_DISPATCH') == '1', reason='Backend dispatch disabled')
+@pytest.mark.parametrize(
+    ('cu_seqlens', 'window_size', 'sink_shape', 'error', 'message'),
+    [
+        pytest.param(None, None, None, AssertionError, 'cu_seqlens must be provided', id='missing-cu-seqlens'),
+        pytest.param([0, 1], -1, None, ValueError, 'window_size must be nonnegative', id='negative-window'),
+        pytest.param([0, 1], None, (2,), AssertionError, 'sink_bias must have shape', id='invalid-sink-shape'),
+    ],
+)
+def test_attn_gluon_decoding_invalid_inputs(cu_seqlens, window_size, sink_shape, error, message, monkeypatch):
+    monkeypatch.setenv('FLA_ATTN_GLUON', '1')
+    monkeypatch.setattr(AttnGluonBackend, 'is_available', classmethod(lambda cls: True))
+    monkeypatch.setattr(AttnGluonBackend, 'parallel_attn_fwd_verifier', lambda *args, **kwargs: (True, None))
+    q = torch.empty(1, 1, 1, 64, dtype=torch.float16)
+    cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32) if cu_seqlens is not None else None
+    sink_bias = torch.empty(sink_shape) if sink_shape is not None else None
+
+    def unexpected(*args, **kwargs):
+        pytest.fail('Invalid decoding inputs must reach the original argument validation')
+
+    monkeypatch.setattr(AttnGluonBackend, 'attn_decoding_one_step', unexpected)
+    with pytest.raises(error, match=message):
+        attn_decoding_one_step(q=q, k=q, v=q, cu_seqlens=cu_seqlens, window_size=window_size, sink_bias=sink_bias)
+
+
+@pytest.mark.skipif(os.environ.get('FLA_DISABLE_BACKEND_DISPATCH') == '1', reason='Backend dispatch disabled')
+def test_attn_gluon_backend_hardware_fallback(monkeypatch):
+    from fla.ops.backends import dispatch
+
+    monkeypatch.setenv('FLA_ATTN_GLUON', '1')
+    monkeypatch.setattr(AttnGluonBackend, 'is_available', classmethod(lambda cls: True))
+    monkeypatch.setattr('fla.ops.attn.backends.gluon.get_device_capability', lambda *args: (8, 0))
+    q = SimpleNamespace(device=SimpleNamespace(type='cuda', index=0), dtype=torch.float16, shape=(1, 127, 1, 64))
+    expected = object()
+
+    def unexpected(*args, **kwargs):
+        pytest.fail('Unsupported hardware must use the fallback')
+
+    monkeypatch.setattr(AttnGluonBackend, 'parallel_attn_fwd', unexpected)
+
+    @dispatch('attn')
+    def parallel_attn_fwd(q, k, v, g_cumsum, sink_bias, scale):
+        return expected
+
+    assert parallel_attn_fwd(q=q, k=q, v=q, g_cumsum=None, sink_bias=None, scale=0.125) is expected

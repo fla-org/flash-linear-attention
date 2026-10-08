@@ -125,60 +125,8 @@ def naive_attn_decoding_kernel(
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=o_v < V)
 
 
-@dispatch('attn')
-def attn_decoding_fwd(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    g_cumsum: torch.Tensor | None,
-    scale: float,
-    cu_seqlens: torch.LongTensor,
-    window_size: int | None = None,
-    sink_bias: torch.Tensor | None = None,
-):
-    B, T, H, K = k.shape
-    V = v.shape[-1]
-    N, HQ = len(cu_seqlens) - 1, q.shape[2]
-    G = HQ // H
-    BK = max(triton.next_power_of_2(K), 16)
-    if check_shared_mem('hopper', q.device.index):
-        BS = min(64, max(16, triton.next_power_of_2(T)))
-        BV = min(256, max(16, triton.next_power_of_2(V)))
-    elif check_shared_mem('ampere', q.device.index):
-        BS = min(32, max(16, triton.next_power_of_2(T)))
-        BV = min(128, max(16, triton.next_power_of_2(V)))
-    else:
-        BS = min(32, max(16, triton.next_power_of_2(T)))
-        BV = min(64, max(16, triton.next_power_of_2(V)))
-    NV = triton.cdiv(V, BV)
-    o = torch.empty(*q.shape[:-1], V, dtype=v.dtype, device=q.device)
-
-    grid = (NV * N * HQ,)
-    naive_attn_decoding_kernel[grid](
-        q=q,
-        k=k,
-        v=v,
-        o=o,
-        g_cumsum=g_cumsum,
-        sink_bias=sink_bias,
-        scale=scale,
-        cu_seqlens=cu_seqlens,
-        B=B,
-        T=T,
-        H=H,
-        HQ=HQ,
-        G=G,
-        K=K,
-        V=V,
-        W=window_size,
-        BS=BS,
-        BK=BK,
-        BV=BV,
-    )
-    return o
-
-
 @input_guard
+@dispatch('attn')
 def attn_decoding_one_step(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -225,28 +173,56 @@ def attn_decoding_one_step(
     assert cu_seqlens is not None, "The cu_seqlens must be provided for varlen decoding"
     if window_size is not None and window_size < 0:
         raise ValueError("window_size must be nonnegative")
-    H, K = k.shape[2:]
+    B, T, H, K, V = *k.shape, v.shape[-1]
+    N = len(cu_seqlens) - 1
     HQ = q.shape[2]
     if H == 0 or HQ % H != 0:
         raise ValueError(f"The number of query heads ({HQ}) must be divisible by the number of key/value heads ({H}).")
+    G = HQ // H
     if scale is None:
         scale = K ** -0.5
     if sink_bias is not None:
         assert sink_bias.shape == (HQ,), "sink_bias must have shape [HQ]"
 
+    BK = max(triton.next_power_of_2(K), 16)
+    if check_shared_mem('hopper', q.device.index):
+        BS = min(64, max(16, triton.next_power_of_2(T)))
+        BV = min(256, max(16, triton.next_power_of_2(V)))
+    elif check_shared_mem('ampere', q.device.index):
+        BS = min(32, max(16, triton.next_power_of_2(T)))
+        BV = min(128, max(16, triton.next_power_of_2(V)))
+    else:
+        BS = min(32, max(16, triton.next_power_of_2(T)))
+        BV = min(64, max(16, triton.next_power_of_2(V)))
     g_cumsum = chunk_global_cumsum(
         g,
         cu_seqlens=cu_seqlens,
         scale=scale if do_gate_scale else None,
         output_dtype=torch.float32,
     ) if g is not None else None
-    return attn_decoding_fwd(
+    NV = triton.cdiv(V, BV)
+    o = torch.empty(*q.shape[:-1], V, dtype=v.dtype, device=q.device)
+
+    grid = (NV * N * HQ,)
+    naive_attn_decoding_kernel[grid](
         q=q,
         k=k,
         v=v,
+        o=o,
         g_cumsum=g_cumsum,
+        sink_bias=sink_bias,
         scale=scale,
         cu_seqlens=cu_seqlens,
-        window_size=window_size,
-        sink_bias=sink_bias,
+        B=B,
+        T=T,
+        H=H,
+        HQ=HQ,
+        G=G,
+        K=K,
+        V=V,
+        W=window_size,
+        BS=BS,
+        BK=BK,
+        BV=BV,
     )
+    return o

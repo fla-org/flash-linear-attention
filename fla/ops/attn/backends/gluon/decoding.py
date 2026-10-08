@@ -11,6 +11,7 @@ from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
 from triton.experimental.gluon.language.nvidia.ampere import async_copy
 
+from fla.ops.utils.cumsum import chunk_global_cumsum
 from fla.ops.utils.op import barrier, unflatten_program_id
 
 
@@ -178,9 +179,28 @@ def attn_decoding_fwd_kernel_reduce(
     gl.store(o + i_bh * V + o_v, b_o, o_v < V)
 
 
-def attn_decoding_fwd_gluon(q, k, v, g_cumsum, scale, cu_seqlens, window_size=None, sink_bias=None):
+def attn_decoding_one_step(
+    q,
+    k,
+    v,
+    g=None,
+    scale=None,
+    cu_seqlens=None,
+    do_gate_scale=False,
+    *,
+    window_size=None,
+    sink_bias=None,
+):
     _, T, H, K = k.shape
     HQ, V = q.shape[2], v.shape[-1]
+    if scale is None:
+        scale = K ** -0.5
+    g_cumsum = chunk_global_cumsum(
+        g,
+        cu_seqlens=cu_seqlens,
+        scale=scale if do_gate_scale else None,
+        output_dtype=torch.float32,
+    ) if g is not None else None
     N = len(cu_seqlens) - 1
     average = triton.cdiv(T, max(N, 1)) if window_size is None else min(window_size, triton.cdiv(T, max(N, 1)))
     splits = min(64, max(1, triton.cdiv(average, 256)))

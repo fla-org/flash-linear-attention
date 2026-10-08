@@ -119,37 +119,62 @@ class AttnGluonBackend(BaseBackend):
             chunk_indices=chunk_indices,
         )
 
-    def attn_decoding_fwd_verifier(
+    def attn_decoding_one_step_verifier(
         self,
         q,
         k,
         v,
-        g_cumsum,
-        scale,
-        cu_seqlens,
+        g=None,
+        scale=None,
+        cu_seqlens=None,
+        do_gate_scale=False,
+        *,
         window_size=None,
         sink_bias=None,
     ) -> tuple[bool, str | None]:
-        return self.parallel_attn_fwd_verifier(
+        supported, reason = self.parallel_attn_fwd_verifier(
             q=q,
             k=k,
             v=v,
-            g_cumsum=g_cumsum,
+            g_cumsum=None,
             sink_bias=sink_bias,
             scale=scale,
-            window_size=window_size,
-            cu_seqlens=cu_seqlens,
         )
+        if not supported:
+            return supported, reason
+        if cu_seqlens is None:
+            return False, "The cu_seqlens must be provided for varlen decoding"
+        if window_size is not None and window_size < 0:
+            return False, "window_size must be nonnegative"
+        H, HQ = k.shape[2], q.shape[2]
+        if H == 0 or HQ % H != 0:
+            return False, "The number of query heads must be divisible by the number of key/value heads"
+        if sink_bias is not None and sink_bias.shape != (HQ,):
+            return False, "sink_bias must have shape [HQ]"
+        return True, None
 
-    def attn_decoding_fwd(self, q, k, v, g_cumsum, scale, cu_seqlens, window_size=None, sink_bias=None):
-        from fla.ops.attn.backends.gluon.decoding import attn_decoding_fwd_gluon
-        return attn_decoding_fwd_gluon(
+    def attn_decoding_one_step(
+        self,
+        q,
+        k,
+        v,
+        g=None,
+        scale=None,
+        cu_seqlens=None,
+        do_gate_scale=False,
+        *,
+        window_size=None,
+        sink_bias=None,
+    ):
+        from fla.ops.attn.backends.gluon.decoding import attn_decoding_one_step
+        return attn_decoding_one_step(
             q=q,
             k=k,
             v=v,
-            g_cumsum=g_cumsum,
+            g=g,
             scale=scale,
             cu_seqlens=cu_seqlens,
+            do_gate_scale=do_gate_scale,
             window_size=window_size,
             sink_bias=sink_bias,
         )
