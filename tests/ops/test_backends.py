@@ -227,6 +227,8 @@ def test_resolver_preserves_backend_dependency_errors(monkeypatch, dependency, a
 @pytest.mark.parametrize(
     ('owner', 'name', 'tensor_args', 'options'),
     [
+        ('conv', 'causal_conv1d_fwd', ('weight', 'bias', 'residual'), {'chunk_size': 32, 'output_final_state': True}),
+        ('conv', 'causal_conv1d_bwd', ('dy', 'dht'), {'chunk_size': 32, 'layout_fallback': True}),
         ('norm.layernorm', 'layer_norm_fwd', ('weight', 'bias'), {'is_rms_norm': True, 'num_groups': 2}),
         ('norm.layernorm', 'layer_norm_bwd', ('x', 'weight', 'bias'), {'recompute_output': True, 'num_groups': 2}),
         ('norm.l2norm', 'l2norm_fwd', (), {'eps': 1e-4, 'output_dtype': torch.float32}),
@@ -235,6 +237,8 @@ def test_resolver_preserves_backend_dependency_errors(monkeypatch, dependency, a
         ('norm.fused_norm_gate', 'layer_norm_gated_bwd', ('x', 'g', 'weight', 'bias'), {'activation': 'sigmoid'}),
     ],
     ids=[
+        'conv-forward',
+        'conv-backward',
         'layernorm-forward',
         'layernorm-backward',
         'l2norm-forward',
@@ -364,6 +368,68 @@ def test_public_imports_do_not_load_legacy_dispatch(run_python, disabled):
     )
 
 
+@pytest.mark.skipif(registry_module._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
+@pytest.mark.parametrize('direction', ['fwd', 'bwd'], ids=['forward', 'backward'])
+def test_conv_dispatch_uses_global_gluon_policy(monkeypatch, direction):
+    from fla.modules.conv import ops
+    from fla.modules.conv.backends.gluon import GluonBackend
+    from fla.modules.conv.backends.triton_ascend import TritonAscendBackend
+
+    func_name = f'causal_conv1d_{direction}'
+    monkeypatch.setenv('FLA_GLUON', '1')
+    monkeypatch.setenv('FLA_CONV_GLUON', '0')
+    monkeypatch.setattr(GluonBackend, 'is_available', classmethod(lambda cls: True))
+    monkeypatch.setattr(TritonAscendBackend, 'is_available', classmethod(lambda cls: False))
+    monkeypatch.setattr(GluonBackend, f'{func_name}_verifier', lambda self, x: (True, None))
+    result = object()
+
+    def implementation(self, x):
+        assert torch.is_grad_enabled()
+        assert x.requires_grad
+        return result
+
+    monkeypatch.setattr(GluonBackend, func_name, implementation)
+    assert getattr(ops, func_name)(x=torch.tensor([1.0, 2.0], requires_grad=True)) is result
+
+
+@pytest.mark.skipif(registry_module._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
+@pytest.mark.parametrize('name', ['causal_conv1d_update', 'causal_conv1d_update_states'])
+def test_conv_legacy_kernel_helpers_bypass_dispatch(monkeypatch, name):
+    from fla.modules.conv import ops
+    from fla.modules.conv.backends.triton_ascend import TritonAscendBackend
+    from fla.modules.conv.triton import kernels
+
+    result = object()
+    monkeypatch.setattr(TritonAscendBackend, 'is_available', classmethod(lambda cls: True))
+    monkeypatch.setattr(TritonAscendBackend, 'is_enabled', classmethod(lambda cls: True))
+    monkeypatch.setattr(TritonAscendBackend, name, lambda self, **kwargs: result)
+    calls = []
+
+    class Kernel:
+        def __getitem__(self, grid):
+            def launch(**kwargs):
+                calls.append(kwargs)
+                kwargs[output].fill_(7)
+            return launch
+
+    if name == 'causal_conv1d_update':
+        kernel_name, output = 'causal_conv1d_update_kernel', 'y'
+        args = dict(x=torch.ones(2, 3), cache=torch.zeros(2, 3, 2), weight=torch.ones(3, 2))
+    else:
+        kernel_name, output = 'causal_conv1d_states_fwd_kernel', 'final_state'
+        args = dict(x=torch.ones(1, 2, 3), state_len=2)
+    monkeypatch.setattr(ops, kernel_name, Kernel())
+
+    assert getattr(ops, name)(**args) is result
+    assert calls == []
+    default = getattr(kernels, name)(**args)
+    if name == 'causal_conv1d_update':
+        assert default[1] is args['cache']
+        default = default[0]
+    assert len(calls) == 1
+    torch.testing.assert_close(default, torch.full_like(default, 7))
+
+
 @pytest.mark.parametrize('first_import', ['fla.backends', 'fla.ops.backends'])
 def test_legacy_dispatch_uses_shared_registry(run_python, first_import):
     run_python(
@@ -386,8 +452,10 @@ def test_legacy_dispatch_uses_shared_registry(run_python, first_import):
 
         from fla.backends import BaseBackend, dispatch
         from fla import backends as registry_module
+        from fla.modules.conv.backends.gluon import ConvGluonBackend, GluonBackend
         kda_registry = registry_module._resolve_registry('kda')
         assert legacy.BaseBackend is BaseBackend
+        assert GluonBackend is ConvGluonBackend
         assert legacy.BackendRegistry._registries is registry_module._registries
         assert legacy.BackendRegistry('kda') is kda_registry
         assert legacy.BackendRegistry('modules.norm.l2norm') is dispatch('modules.norm.l2norm').__self__
@@ -449,6 +517,7 @@ def test_dispatch_policy_and_optional_dependencies(run_python, disabled):
             'modules.norm.layernorm',
             'modules.norm.l2norm',
             'modules.norm.fused_norm_gate',
+            'modules.conv',
         ]:
             with warnings.catch_warnings():
                 warnings.simplefilter('error', DeprecationWarning)
