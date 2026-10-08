@@ -212,7 +212,7 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
             cu_seqlens=cu_seqlens,
             cu_seqlens_cpu=cu_seqlens_cpu,
             chunk_indices=chunk_indices,
-            BT=chunk_size,
+            chunk_size=chunk_size,
         )
 
         return y
@@ -239,7 +239,7 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
             cu_seqlens=ctx.cu_seqlens,
             cu_seqlens_cpu=ctx.cu_seqlens_cpu,
             chunk_indices=ctx.chunk_indices,
-            BT=ctx.chunk_size,
+            chunk_size=ctx.chunk_size,
         )
 
         # Correct dx gradients for CP

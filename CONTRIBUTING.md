@@ -13,6 +13,7 @@ Contributions to Flash Linear Attention are welcome. This guide defines the deve
   * [Lint Check](#lint-check)
   * [Test Locally](#test-locally)
 * [Project Structure](#project-structure)
+  * [Public API compatibility](#public-api-compatibility)
 * [Code Style](#code-style)
   * [Copyright Header](#copyright-header)
   * [Formatting and Linting](#formatting-and-linting)
@@ -141,6 +142,12 @@ tests/
 ├── utils/              # Tests for fla.utils
 └── conftest.py         # Pytest config with NaN memory poisoning
 ```
+
+### Public API compatibility
+
+Implementation refactors preserve documented operator entry points exported from `fla.ops.<operator>` (for example, `fla.ops.kda.chunk_kda`), public imports from `fla.modules` and `fla.layers`, and documented model/configuration APIs in `fla.models`. This includes signatures, argument defaults, return structures, supported gradients, numerical tolerances, and checkpoint/state-dict compatibility. An intentional incompatible change needs prior agreement, a documented migration path, and compatibility aliases or a deprecation period where practical.
+
+Backend adapters, kernel files, private helpers, and their implementation paths are internal. Moving them does not change the public contract. Keep public re-exports stable, audit callers, and test old imports when reorganizing packages; compatibility shims do not make every internal symbol a permanent public API.
 
 ## Code Style
 
