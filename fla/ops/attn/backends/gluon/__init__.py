@@ -142,8 +142,8 @@ class AttnGluonBackend(BaseBackend):
         )
 
     def attn_decoding_fwd(self, q, k, v, g_cumsum, scale, cu_seqlens, window_size=None, sink_bias=None):
-        from fla.ops.attn.backends.gluon.decoding import attn_decoding_gluon
-        return attn_decoding_gluon(
+        from fla.ops.attn.backends.gluon.decoding import attn_decoding_fwd_gluon
+        return attn_decoding_fwd_gluon(
             q=q,
             k=k,
             v=v,

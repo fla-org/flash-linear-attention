@@ -15,204 +15,218 @@ from fla.ops.utils.op import barrier, unflatten_program_id
 
 
 @gluon.jit
-def _copy_decode_tile(smem, ptr, mask, ASYNC: gl.constexpr):
-    if ASYNC:
-        async_copy.async_copy_global_to_shared(smem, ptr, mask)
+def _copy_decode_tile(b_x_smem, p_x, m_x, USE_ASYNC_COPY: gl.constexpr):
+    if USE_ASYNC_COPY:
+        async_copy.async_copy_global_to_shared(b_x_smem, p_x, m_x)
     else:
-        smem.store(gl.load(ptr, mask, other=0.))
+        b_x_smem.store(gl.load(p_x, m_x, other=0.))
 
 
 @gluon.jit
 def attn_decoding_fwd_kernel_split(
-    Q,
-    K,
-    V,
-    G,
-    SINK,
-    CU,
-    PARTIAL,
-    STATS,
-    O,
+    q,
+    k,
+    v,
+    g_cumsum,
+    sink_bias,
+    cu_seqlens,
+    o_partial,
+    stats,
+    o,
     H: gl.constexpr,
     HQ: gl.constexpr,
-    DK: gl.constexpr,
-    DV: gl.constexpr,
-    SCALE: gl.constexpr,
+    K: gl.constexpr,
+    V: gl.constexpr,
+    scale: gl.constexpr,
     W: gl.constexpr,
     SPLITS: gl.constexpr,
-    BN: gl.constexpr,
+    BS: gl.constexpr,
     BK: gl.constexpr,
     BV: gl.constexpr,
     NW: gl.constexpr,
     USE_G: gl.constexpr,
-    USE_SINK: gl.constexpr,
-    ASYNC: gl.constexpr,
+    USE_SINK_BIAS: gl.constexpr,
+    USE_ASYNC_COPY: gl.constexpr,
 ):
-    split, iv, bh = unflatten_program_id(X=SPLITS, Y=gl.cdiv(DV, BV))
-    seq, hq = bh // HQ, bh % HQ
-    hk = hq // (HQ // H)
-    bos = gl.load(CU + seq).to(gl.int64)
-    eos = gl.load(CU + seq + 1).to(gl.int64)
+    i_split, i_v, i_bh = unflatten_program_id(X=SPLITS, Y=gl.cdiv(V, BV))
+    i_n, i_hq = i_bh // HQ, i_bh % HQ
+    i_h = i_hq // (HQ // H)
+    bos = gl.load(cu_seqlens + i_n).to(gl.int64)
+    eos = gl.load(cu_seqlens + i_n + 1).to(gl.int64)
     if W is not None:
         bos = gl.maximum(bos, eos - W)
-    blocks = gl.cdiv(eos - bos, BN * SPLITS)
-    first = bos + split * blocks * BN
-    last = gl.minimum(first + blocks * BN, eos)
+    blocks = gl.cdiv(eos - bos, BS * SPLITS)
+    i_first = bos + i_split * blocks * BS
+    i_last = gl.minimum(i_first + blocks * BS, eos)
     # column-distributed warps keep the wide value reduction inside each warp.
-    warps: gl.constexpr = [1, NW] if BK >= 256 or BV >= 256 else [NW, 1]
-    layout: gl.constexpr = gl.BlockedLayout([1, 4], [4, 8], warps, [1, 0])
-    rows = gl.arange(0, BN, gl.SliceLayout(1, layout)).to(gl.int64)
-    kd = gl.arange(0, BK, gl.SliceLayout(0, layout)).to(gl.int64)
-    vd = iv * BV + gl.arange(0, BV, gl.SliceLayout(0, layout)).to(gl.int64)
-    q = gl.load(Q + bh * DK + kd, kd < DK, other=0)
-    q = (q * SCALE).to(q.dtype)
-    kl: gl.constexpr = gl.SwizzledSharedLayout(32, 1, 4, [1, 0]) if BK >= 128 else gl.SwizzledSharedLayout(4, 1, 8, [1, 0])
-    vl: gl.constexpr = gl.SwizzledSharedLayout(32, 1, 4, [1, 0]) if BV >= 128 else gl.SwizzledSharedLayout(4, 1, 8, [1, 0])
-    ks = gl.allocate_shared_memory(q.dtype, [2, BN, BK], kl)
-    vs = gl.allocate_shared_memory(q.dtype, [2, BN, BV], vl)
-    kp = K + ((first + rows[:, None]) * H + hk) * DK + kd[None, :]
-    vp = V + ((first + rows[:, None]) * H + hk) * DV + vd[None, :]
-    if first < last:
-        _copy_decode_tile(smem=ks.index(0), ptr=kp, mask=(first + rows[:, None] < last) & (kd[None, :] < DK), ASYNC=ASYNC)
-        _copy_decode_tile(smem=vs.index(0), ptr=vp, mask=(first + rows[:, None] < last) & (vd[None, :] < DV), ASYNC=ASYNC)
+    warps_per_cta: gl.constexpr = [1, NW] if BK >= 256 or BV >= 256 else [NW, 1]
+    layout: gl.constexpr = gl.BlockedLayout([1, 4], [4, 8], warps_per_cta, [1, 0])
+    o_t = gl.arange(0, BS, gl.SliceLayout(1, layout)).to(gl.int64)
+    o_k = gl.arange(0, BK, gl.SliceLayout(0, layout)).to(gl.int64)
+    o_v = i_v * BV + gl.arange(0, BV, gl.SliceLayout(0, layout)).to(gl.int64)
+    b_q = gl.load(q + i_bh * K + o_k, o_k < K, other=0)
+    b_q = (b_q * scale).to(b_q.dtype)
+    layout_k: gl.constexpr = (
+        gl.SwizzledSharedLayout(32, 1, 4, [1, 0]) if BK >= 128 else gl.SwizzledSharedLayout(4, 1, 8, [1, 0])
+    )
+    layout_v: gl.constexpr = (
+        gl.SwizzledSharedLayout(32, 1, 4, [1, 0]) if BV >= 128 else gl.SwizzledSharedLayout(4, 1, 8, [1, 0])
+    )
+    b_k_smem = gl.allocate_shared_memory(b_q.dtype, [2, BS, BK], layout_k)
+    b_v_smem = gl.allocate_shared_memory(b_q.dtype, [2, BS, BV], layout_v)
+    p_k = k + ((i_first + o_t[:, None]) * H + i_h) * K + o_k[None, :]
+    p_v = v + ((i_first + o_t[:, None]) * H + i_h) * V + o_v[None, :]
+    if i_first < i_last:
+        _copy_decode_tile(
+            b_x_smem=b_k_smem.index(0),
+            p_x=p_k,
+            m_x=(i_first + o_t[:, None] < i_last) & (o_k[None, :] < K),
+            USE_ASYNC_COPY=USE_ASYNC_COPY,
+        )
+        _copy_decode_tile(
+            b_x_smem=b_v_smem.index(0),
+            p_x=p_v,
+            m_x=(i_first + o_t[:, None] < i_last) & (o_v[None, :] < V),
+            USE_ASYNC_COPY=USE_ASYNC_COPY,
+        )
         async_copy.commit_group()
-    maximum = float('-inf')
-    denom = 0.
-    output = gl.full([BV], 0., gl.float32, gl.SliceLayout(0, layout))
+    b_m = float('-inf')
+    b_acc = 0.
+    b_o = gl.full([BV], 0., gl.float32, gl.SliceLayout(0, layout))
     if USE_G:
-        gq = gl.load(G + (eos - 1) * HQ + hq, eos > bos, other=0).to(gl.float32)
-    for step in range(gl.cdiv(gl.maximum(last - first, 0), BN)):
-        slot = (step % 2).to(gl.int32)
-        start = first + step * BN
+        b_gq = gl.load(g_cumsum + (eos - 1) * HQ + i_hq, eos > bos, other=0).to(gl.float32)
+    for i_s in range(gl.cdiv(gl.maximum(i_last - i_first, 0), BS)):
+        i_slot = (i_s % 2).to(gl.int32)
+        i_start = i_first + i_s * BS
         async_copy.wait_group(0)
         barrier()
-        if start + BN < last:
-            nxt = ((step + 1) % 2).to(gl.int32)
-            kr = start + BN + rows[:, None]
+        if i_start + BS < i_last:
+            i_next = ((i_s + 1) % 2).to(gl.int32)
+            o_t_next = i_start + BS + o_t[:, None]
             _copy_decode_tile(
-                smem=ks.index(nxt),
-                ptr=K + (kr * H + hk) * DK + kd[None, :],
-                mask=(kr < last) & (kd[None, :] < DK),
-                ASYNC=ASYNC,
+                b_x_smem=b_k_smem.index(i_next),
+                p_x=k + (o_t_next * H + i_h) * K + o_k[None, :],
+                m_x=(o_t_next < i_last) & (o_k[None, :] < K),
+                USE_ASYNC_COPY=USE_ASYNC_COPY,
             )
             _copy_decode_tile(
-                smem=vs.index(nxt),
-                ptr=V + (kr * H + hk) * DV + vd[None, :],
-                mask=(kr < last) & (vd[None, :] < DV),
-                ASYNC=ASYNC,
+                b_x_smem=b_v_smem.index(i_next),
+                p_x=v + (o_t_next * H + i_h) * V + o_v[None, :],
+                m_x=(o_t_next < i_last) & (o_v[None, :] < V),
+                USE_ASYNC_COPY=USE_ASYNC_COPY,
             )
             async_copy.commit_group()
-        keys = ks.index(slot).load(layout)
-        values = vs.index(slot).load(layout)
-        scores = gl.sum(q[None, :] * keys, 1).to(gl.float32)
+        b_k = b_k_smem.index(i_slot).load(layout)
+        b_v = b_v_smem.index(i_slot).load(layout)
+        b_s = gl.sum(b_q[None, :] * b_k, 1).to(gl.float32)
         if USE_G:
-            gk = gl.load(G + (start + rows) * HQ + hq, start + rows < last, other=0).to(gl.float32)
-            scores += gq - gk
-        scores = gl.where(start + rows < last, scores, float('-inf')) * 1.4426950216
-        new_max = gl.maximum(maximum, gl.max(scores, 0))
-        alpha = gl.exp2(maximum - new_max)
-        p = gl.exp2(scores - new_max)
-        output = output * alpha + gl.sum(p[:, None] * values, 0)
-        denom = denom * alpha + gl.sum(p, 0)
-        maximum = new_max
+            b_gk = gl.load(g_cumsum + (i_start + o_t) * HQ + i_hq, i_start + o_t < i_last, other=0).to(gl.float32)
+            b_s += b_gq - b_gk
+        b_s = gl.where(i_start + o_t < i_last, b_s, float('-inf')) * 1.4426950216
+        b_m_new = gl.maximum(b_m, gl.max(b_s, 0))
+        b_alpha = gl.exp2(b_m - b_m_new)
+        b_p = gl.exp2(b_s - b_m_new)
+        b_o = b_o * b_alpha + gl.sum(b_p[:, None] * b_v, 0)
+        b_acc = b_acc * b_alpha + gl.sum(b_p, 0)
+        b_m = b_m_new
     async_copy.wait_group(0)
     if SPLITS == 1:
-        if USE_SINK:
-            maximum = gl.where(maximum == float('-inf'), 0., maximum)
-            denom += gl.exp2(gl.load(SINK + hq).to(gl.float32) * 1.4426950216 - maximum)
-        output /= gl.where(eos > bos, denom, 1.)
-        gl.store(O + bh * DV + vd, output, vd < DV)
+        if USE_SINK_BIAS:
+            b_m = gl.where(b_m == float('-inf'), 0., b_m)
+            b_acc += gl.exp2(gl.load(sink_bias + i_hq).to(gl.float32) * 1.4426950216 - b_m)
+        b_o /= gl.where(eos > bos, b_acc, 1.)
+        gl.store(o + i_bh * V + o_v, b_o, o_v < V)
     else:
-        gl.store(PARTIAL + (bh * SPLITS + split) * DV + vd, output, vd < DV)
-        if iv == 0:
-            gl.store(STATS + (bh * SPLITS + split) * 2, maximum)
-            gl.store(STATS + (bh * SPLITS + split) * 2 + 1, denom)
+        gl.store(o_partial + (i_bh * SPLITS + i_split) * V + o_v, b_o, o_v < V)
+        if i_v == 0:
+            gl.store(stats + (i_bh * SPLITS + i_split) * 2, b_m)
+            gl.store(stats + (i_bh * SPLITS + i_split) * 2 + 1, b_acc)
 
 
 @gluon.jit
 def attn_decoding_fwd_kernel_reduce(
-    PARTIAL,
-    STATS,
-    SINK,
-    O,
+    o_partial,
+    stats,
+    sink_bias,
+    o,
     HQ: gl.constexpr,
-    DV: gl.constexpr,
+    V: gl.constexpr,
     SPLITS: gl.constexpr,
-    BS: gl.constexpr,
+    NS: gl.constexpr,
     BV: gl.constexpr,
-    USE_SINK: gl.constexpr,
+    USE_SINK_BIAS: gl.constexpr,
 ):
-    bh = gl.program_id(0).to(gl.int64)
-    iv = gl.program_id(1).to(gl.int64)
+    i_bh = gl.program_id(0).to(gl.int64)
+    i_v = gl.program_id(1).to(gl.int64)
     layout: gl.constexpr = gl.BlockedLayout([1, 4], [4, 8], [4, 1], [1, 0])
-    splits = gl.arange(0, BS, gl.SliceLayout(1, layout)).to(gl.int64)
-    dims = iv * BV + gl.arange(0, BV, gl.SliceLayout(0, layout)).to(gl.int64)
-    maxima = gl.load(STATS + (bh * SPLITS + splits) * 2, splits < SPLITS, other=float('-inf'))
-    sums = gl.load(STATS + (bh * SPLITS + splits) * 2 + 1, splits < SPLITS, other=0.)
-    maximum = gl.max(maxima, 0)
-    maximum = gl.where(maximum == float('-inf'), 0., maximum)
-    alpha = gl.exp2(maxima - maximum)
-    denom = gl.sum(sums * alpha, 0)
-    if USE_SINK:
-        denom += gl.exp2(gl.load(SINK + bh % HQ).to(gl.float32) * 1.4426950216 - maximum)
-    partial = gl.load(
-        PARTIAL + (bh * SPLITS + splits[:, None]) * DV + dims[None, :],
-        (splits[:, None] < SPLITS) & (dims[None, :] < DV),
+    o_split = gl.arange(0, NS, gl.SliceLayout(1, layout)).to(gl.int64)
+    o_v = i_v * BV + gl.arange(0, BV, gl.SliceLayout(0, layout)).to(gl.int64)
+    b_m_partial = gl.load(stats + (i_bh * SPLITS + o_split) * 2, o_split < SPLITS, other=float('-inf'))
+    b_acc_partial = gl.load(stats + (i_bh * SPLITS + o_split) * 2 + 1, o_split < SPLITS, other=0.)
+    b_m = gl.max(b_m_partial, 0)
+    b_m = gl.where(b_m == float('-inf'), 0., b_m)
+    b_alpha = gl.exp2(b_m_partial - b_m)
+    b_acc = gl.sum(b_acc_partial * b_alpha, 0)
+    if USE_SINK_BIAS:
+        b_acc += gl.exp2(gl.load(sink_bias + i_bh % HQ).to(gl.float32) * 1.4426950216 - b_m)
+    b_o_partial = gl.load(
+        o_partial + (i_bh * SPLITS + o_split[:, None]) * V + o_v[None, :],
+        (o_split[:, None] < SPLITS) & (o_v[None, :] < V),
         other=0.0,
     )
-    output = gl.sum(partial * alpha[:, None], 0) / gl.where(denom > 0., denom, 1.)
-    gl.store(O + bh * DV + dims, output, dims < DV)
+    b_o = gl.sum(b_o_partial * b_alpha[:, None], 0) / gl.where(b_acc > 0., b_acc, 1.)
+    gl.store(o + i_bh * V + o_v, b_o, o_v < V)
 
 
-def attn_decoding_gluon(q, k, v, g_cumsum, scale, cu_seqlens, window_size=None, sink_bias=None):
-    _, t, h, dk = k.shape
-    hq, dv = q.shape[2], v.shape[-1]
-    n = len(cu_seqlens) - 1
-    average = triton.cdiv(t, max(n, 1)) if window_size is None else min(window_size, triton.cdiv(t, max(n, 1)))
+def attn_decoding_fwd_gluon(q, k, v, g_cumsum, scale, cu_seqlens, window_size=None, sink_bias=None):
+    _, T, H, K = k.shape
+    HQ, V = q.shape[2], v.shape[-1]
+    N = len(cu_seqlens) - 1
+    average = triton.cdiv(T, max(N, 1)) if window_size is None else min(window_size, triton.cdiv(T, max(N, 1)))
     splits = min(64, max(1, triton.cdiv(average, 256)))
-    bk, bv = max(16, triton.next_power_of_2(dk)), min(256, max(16, triton.next_power_of_2(dv)))
-    nw = 8 if max(dk, dv) >= 256 else 4
-    out = torch.empty(*q.shape[:-1], dv, dtype=v.dtype, device=q.device)
-    partial = torch.empty(n * hq, splits, dv, dtype=torch.float32, device=q.device) if splits > 1 else out
-    stats = torch.empty(n * hq, splits, 2, dtype=torch.float32, device=q.device) if splits > 1 else out
-    attn_decoding_fwd_kernel_split[(splits * n * hq * triton.cdiv(dv, bv),)](
-        Q=q,
-        K=k,
-        V=v,
-        G=g_cumsum,
-        SINK=sink_bias,
-        CU=cu_seqlens,
-        PARTIAL=partial,
-        STATS=stats,
-        O=out,
-        H=h,
-        HQ=hq,
-        DK=dk,
-        DV=dv,
-        SCALE=scale,
+    BK, BV = max(16, triton.next_power_of_2(K)), min(256, max(16, triton.next_power_of_2(V)))
+    num_warps = 8 if max(K, V) >= 256 else 4
+    o = torch.empty(*q.shape[:-1], V, dtype=v.dtype, device=q.device)
+    o_partial = torch.empty(N * HQ, splits, V, dtype=torch.float32, device=q.device) if splits > 1 else o
+    stats = torch.empty(N * HQ, splits, 2, dtype=torch.float32, device=q.device) if splits > 1 else o
+    attn_decoding_fwd_kernel_split[(splits * N * HQ * triton.cdiv(V, BV),)](
+        q=q,
+        k=k,
+        v=v,
+        g_cumsum=g_cumsum,
+        sink_bias=sink_bias,
+        cu_seqlens=cu_seqlens,
+        o_partial=o_partial,
+        stats=stats,
+        o=o,
+        H=H,
+        HQ=HQ,
+        K=K,
+        V=V,
+        scale=scale,
         W=window_size,
         SPLITS=splits,
-        BN=64 if max(dk, dv) <= 128 else 32,
-        BK=bk,
-        BV=bv,
-        NW=nw,
+        BS=64 if max(K, V) <= 128 else 32,
+        BK=BK,
+        BV=BV,
+        NW=num_warps,
         USE_G=g_cumsum is not None,
-        USE_SINK=sink_bias is not None,
-        ASYNC=dk % 2 == 0 and dv % 2 == 0 and k.data_ptr() % 16 == 0 and v.data_ptr() % 16 == 0,
-        num_warps=nw,
+        USE_SINK_BIAS=sink_bias is not None,
+        USE_ASYNC_COPY=K % 2 == 0 and V % 2 == 0 and k.data_ptr() % 16 == 0 and v.data_ptr() % 16 == 0,
+        num_warps=num_warps,
     )
     if splits > 1:
-        attn_decoding_fwd_kernel_reduce[(n * hq, triton.cdiv(dv, bv))](
-            PARTIAL=partial,
-            STATS=stats,
-            SINK=sink_bias,
-            O=out,
-            HQ=hq,
-            DV=dv,
+        attn_decoding_fwd_kernel_reduce[(N * HQ, triton.cdiv(V, BV))](
+            o_partial=o_partial,
+            stats=stats,
+            sink_bias=sink_bias,
+            o=o,
+            HQ=HQ,
+            V=V,
             SPLITS=splits,
-            BS=triton.next_power_of_2(splits),
-            BV=bv,
-            USE_SINK=sink_bias is not None,
+            NS=triton.next_power_of_2(splits),
+            BV=BV,
+            USE_SINK_BIAS=sink_bias is not None,
             num_warps=4,
         )
-    return out
+    return o

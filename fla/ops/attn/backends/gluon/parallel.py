@@ -5,7 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-# async MMA staging follows https://triton-lang.org/main/getting-started/tutorials/gluon/06-tcgen05.html
+# async MMA staging follows https://triton-lang.org/main/getting-started/tutorials/gluon/tcgen05.html
 
 import functools
 import inspect
@@ -33,8 +33,8 @@ WARP_SPECIALIZE_V2 = 'functions_and_args' in inspect.signature(gl.warp_specializ
 
 
 @gluon.constexpr_function
-def _acc_layout(M, N, TCGEN, NW):
-    if TCGEN:
+def _acc_layout(M, N, USE_TCGEN05, NW):
+    if USE_TCGEN05:
         # dependency hashing inspects inactive branches, so both API names need guarded lookup.
         legacy = getattr(blackwell, 'get_tmem_32x32b_reg_layout', None)
         if legacy is not None:
@@ -63,41 +63,41 @@ def _packed_layout(M, N):
 
 
 @gluon.jit
-def _packed_operand(score, dtype: gl.constexpr, BM: gl.constexpr, BN: gl.constexpr):
+def _packed_operand(acc_s, dtype: gl.constexpr, BT: gl.constexpr, BS: gl.constexpr):
     # packed operands reuse accumulators after their fp32 values have been consumed.
-    ref = score.slice(0, BN // 2)
-    layout: gl.constexpr = _packed_layout(BM, BN)
+    desc_p = acc_s.slice(0, BS // 2)
+    layout: gl.constexpr = _packed_layout(BT, BS)
     if gl.constexpr(hasattr(blackwell.tensor_memory_descriptor, '_reinterpret')):
-        return ref._reinterpret(dtype, [BM, BN], layout)
+        return desc_p._reinterpret(dtype, [BT, BS], layout)
     else:
-        return ref.reinterpret(dtype, [BM, BN], layout)
+        return desc_p.reinterpret(dtype, [BT, BS], layout)
 
 
 @gluon.jit
-def _acc_alloc(M: gl.constexpr, N: gl.constexpr, TCGEN: gl.constexpr, NW: gl.constexpr):
-    layout: gl.constexpr = _acc_layout(M=M, N=N, TCGEN=TCGEN, NW=NW)
-    acc = gl.zeros([M, N], gl.float32, layout)
-    if TCGEN:
+def _acc_alloc(M: gl.constexpr, N: gl.constexpr, USE_TCGEN05: gl.constexpr, NW: gl.constexpr):
+    layout: gl.constexpr = _acc_layout(M=M, N=N, USE_TCGEN05=USE_TCGEN05, NW=NW)
+    b_acc = gl.zeros([M, N], gl.float32, layout)
+    if USE_TCGEN05:
         tmem_layout: gl.constexpr = _tmem_layout(M=M, N=N)
-        result = blackwell.allocate_tensor_memory(gl.float32, [M, N], tmem_layout)
-        result.store(acc)
+        acc = blackwell.allocate_tensor_memory(gl.float32, [M, N], tmem_layout)
+        acc.store(b_acc)
     else:
-        result = acc
-    return result
+        acc = b_acc
+    return acc
 
 
 @gluon.jit
-def _acc_read(acc, M: gl.constexpr, N: gl.constexpr, TCGEN: gl.constexpr, NW: gl.constexpr):
-    if TCGEN:
-        value = acc.load(_acc_layout(M=M, N=N, TCGEN=TCGEN, NW=NW))
+def _acc_read(acc, M: gl.constexpr, N: gl.constexpr, USE_TCGEN05: gl.constexpr, NW: gl.constexpr):
+    if USE_TCGEN05:
+        b_acc = acc.load(_acc_layout(M=M, N=N, USE_TCGEN05=USE_TCGEN05, NW=NW))
     else:
-        value = acc
-    return value
+        b_acc = acc
+    return b_acc
 
 
 @gluon.jit
-def _mma(a, b, acc, bar, phase, TCGEN: gl.constexpr, USE_ACC: gl.constexpr = True):
-    if TCGEN:
+def _mma(a, b, acc, bar, phase, USE_TCGEN05: gl.constexpr, USE_ACC: gl.constexpr = True):
+    if USE_TCGEN05:
         blackwell.tcgen05_mma(a, b, acc, use_acc=USE_ACC)
         blackwell.tcgen05_commit(bar)
         mbarrier.wait(bar, phase)
@@ -110,522 +110,581 @@ def _mma(a, b, acc, bar, phase, TCGEN: gl.constexpr, USE_ACC: gl.constexpr = Tru
 
 @gluon.jit
 def _load_tile(
-    ptr,
-    desc,
-    smem,
+    x,
+    desc_x,
+    b_x_smem,
     bar,
-    head,
-    row,
-    end,
+    i_h,
+    i_t,
+    eos,
     H: gl.constexpr,
     D: gl.constexpr,
-    TMA: gl.constexpr,
+    USE_TMA: gl.constexpr,
     NW: gl.constexpr = 4,
 ):
-    if TMA:
-        tma.async_copy_global_to_shared(desc, [head.to(gl.int32), row.to(gl.int32), 0], bar, smem)
+    if USE_TMA:
+        tma.async_copy_global_to_shared(desc_x, [i_h.to(gl.int32), i_t.to(gl.int32), 0], bar, b_x_smem)
     else:
-        BM: gl.constexpr = smem.shape[1]
-        BD: gl.constexpr = smem.shape[2]
+        BT: gl.constexpr = b_x_smem.shape[1]
+        BD: gl.constexpr = b_x_smem.shape[2]
         layout: gl.constexpr = gl.BlockedLayout([1, 4], [4, 8], [NW, 1], [1, 0])
-        rows = row + gl.arange(0, BM, gl.SliceLayout(1, layout)).to(gl.int64)
-        cols = gl.arange(0, BD, gl.SliceLayout(0, layout)).to(gl.int64)
-        values = gl.load(
-            ptr + (rows[:, None] * H + head) * D + cols[None, :],
-            (rows[:, None] < end) & (cols[None, :] < D),
+        o_t = i_t + gl.arange(0, BT, gl.SliceLayout(1, layout)).to(gl.int64)
+        o_d = gl.arange(0, BD, gl.SliceLayout(0, layout)).to(gl.int64)
+        b_x = gl.load(
+            x + (o_t[:, None] * H + i_h) * D + o_d[None, :],
+            (o_t[:, None] < eos) & (o_d[None, :] < D),
             other=0,
         )
-        smem.reshape([BM, BD]).store(values)
+        b_x_smem.reshape([BT, BD]).store(b_x)
 
 
 @gluon.jit(do_not_specialize=['T'])
 def parallel_attn_fwd_kernel_gluon(
-    Q,
-    K,
-    V,
-    O,
-    LSE,
-    GATE,
-    SINK,
-    CU,
-    INDICES,
-    Q_DESC,
-    K_DESC,
-    V_DESC,
+    q,
+    k,
+    v,
+    o,
+    lse,
+    g_cumsum,
+    sink_bias,
+    cu_seqlens,
+    chunk_indices,
+    desc_q,
+    desc_k,
+    desc_v,
     T,
     NT: gl.constexpr,
     H: gl.constexpr,
     HQ: gl.constexpr,
-    DK: gl.constexpr,
-    DV: gl.constexpr,
-    SCALE: gl.constexpr,
+    K: gl.constexpr,
+    V: gl.constexpr,
+    scale: gl.constexpr,
     W: gl.constexpr,
-    BM: gl.constexpr,
-    BN: gl.constexpr,
+    BT: gl.constexpr,
+    BS: gl.constexpr,
     BK: gl.constexpr,
     BV: gl.constexpr,
-    CHUNK: gl.constexpr,
-    TCGEN: gl.constexpr,
-    TMA_QK: gl.constexpr,
-    TMA_V: gl.constexpr,
-    VARLEN: gl.constexpr,
-    USE_GATE: gl.constexpr,
-    USE_SINK: gl.constexpr,
+    BT_INDEX: gl.constexpr,
+    USE_TCGEN05: gl.constexpr,
+    USE_TMA_QK: gl.constexpr,
+    USE_TMA_V: gl.constexpr,
+    IS_VARLEN: gl.constexpr,
+    USE_G: gl.constexpr,
+    USE_SINK_BIAS: gl.constexpr,
     NW: gl.constexpr,
 ):
-    iv, it, bh = unflatten_program_id(X=gl.cdiv(DV, BV), Y=NT)
-    hq = bh % HQ
-    hk = hq // (HQ // H)
-    if VARLEN:
-        seq = gl.load(INDICES + (it // (CHUNK // BM)) * 2).to(gl.int64)
-        block = gl.load(INDICES + (it // (CHUNK // BM)) * 2 + 1).to(gl.int64)
-        bos = gl.load(CU + seq).to(gl.int64)
-        end = gl.load(CU + seq + 1).to(gl.int64)
-        start = bos + block * CHUNK + (it % (CHUNK // BM)) * BM
+    i_v, i_t, i_bh = unflatten_program_id(X=gl.cdiv(V, BV), Y=NT)
+    i_hq = i_bh % HQ
+    i_h = i_hq // (HQ // H)
+    if IS_VARLEN:
+        i_n = gl.load(chunk_indices + (i_t // (BT_INDEX // BT)) * 2).to(gl.int64)
+        i_block = gl.load(chunk_indices + (i_t // (BT_INDEX // BT)) * 2 + 1).to(gl.int64)
+        bos = gl.load(cu_seqlens + i_n).to(gl.int64)
+        eos = gl.load(cu_seqlens + i_n + 1).to(gl.int64)
+        i_start = bos + i_block * BT_INDEX + (i_t % (BT_INDEX // BT)) * BT
     else:
-        bos = (bh // HQ) * T
-        end = bos + T
-        start = bos + it * BM
-    if start >= end:
+        bos = (i_bh // HQ) * T
+        eos = bos + T
+        i_start = bos + i_t * BT
+    if i_start >= eos:
         return
 
-    dtype: gl.constexpr = Q.dtype.element_ty
+    dtype: gl.constexpr = q.dtype.element_ty
     # three buffers keep the next prefetch disjoint from the previous in-flight PV.
-    PIPELINED: gl.constexpr = not TCGEN and BK <= 128 and BV <= 128
-    BUFFERS: gl.constexpr = 3 if PIPELINED else 2
-    q_layout: gl.constexpr = gl.NVMMASharedLayout.get_default_for([1, BM, BK], dtype)
-    k_layout: gl.constexpr = gl.NVMMASharedLayout.get_default_for([1, BN, BK], dtype)
-    v_layout: gl.constexpr = gl.NVMMASharedLayout.get_default_for([1, BN, BV], dtype)
-    p_layout: gl.constexpr = gl.NVMMASharedLayout.get_default_for([BM, BN], dtype)
-    qs = gl.allocate_shared_memory(dtype, [1, BM, BK], q_layout)
-    ks = gl.allocate_shared_memory(dtype, [BUFFERS, 1, BN, BK], k_layout)
-    vs = gl.allocate_shared_memory(dtype, [BUFFERS, 1, BN, BV], v_layout)
+    PIPELINED: gl.constexpr = not USE_TCGEN05 and BK <= 128 and BV <= 128
+    NUM_BUFFERS: gl.constexpr = 3 if PIPELINED else 2
+    layout_q_smem: gl.constexpr = gl.NVMMASharedLayout.get_default_for([1, BT, BK], dtype)
+    layout_k_smem: gl.constexpr = gl.NVMMASharedLayout.get_default_for([1, BS, BK], dtype)
+    layout_v_smem: gl.constexpr = gl.NVMMASharedLayout.get_default_for([1, BS, BV], dtype)
+    layout_p_smem: gl.constexpr = gl.NVMMASharedLayout.get_default_for([BT, BS], dtype)
+    b_q_smem = gl.allocate_shared_memory(dtype, [1, BT, BK], layout_q_smem)
+    b_k_smem = gl.allocate_shared_memory(dtype, [NUM_BUFFERS, 1, BS, BK], layout_k_smem)
+    b_v_smem = gl.allocate_shared_memory(dtype, [NUM_BUFFERS, 1, BS, BV], layout_v_smem)
     if not PIPELINED:
-        ps = gl.allocate_shared_memory(dtype, [BM, BN], p_layout)
-    bars = gl.allocate_shared_memory(gl.int64, [BUFFERS + 2, 1], mbarrier.MBarrierLayout())
-    for i in gl.static_range(BUFFERS + 2):
-        mbarrier.init(bars.index(i), count=1)
-    if TMA_QK:
-        mbarrier.expect(bars.index(BUFFERS), BM * BK * 2)
+        b_p_smem = gl.allocate_shared_memory(dtype, [BT, BS], layout_p_smem)
+    bars = gl.allocate_shared_memory(gl.int64, [NUM_BUFFERS + 2, 1], mbarrier.MBarrierLayout())
+    for i_bar in gl.static_range(NUM_BUFFERS + 2):
+        mbarrier.init(bars.index(i_bar), count=1)
+    if USE_TMA_QK:
+        mbarrier.expect(bars.index(NUM_BUFFERS), BT * BK * 2)
     _load_tile(
-        ptr=Q,
-        desc=Q_DESC,
-        smem=qs,
-        bar=bars.index(BUFFERS),
-        head=hq,
-        row=start,
-        end=end,
+        x=q,
+        desc_x=desc_q,
+        b_x_smem=b_q_smem,
+        bar=bars.index(NUM_BUFFERS),
+        i_h=i_hq,
+        i_t=i_start,
+        eos=eos,
         H=HQ,
-        D=DK,
-        TMA=TMA_QK,
+        D=K,
+        USE_TMA=USE_TMA_QK,
         NW=NW,
     )
-    if TMA_QK:
-        mbarrier.wait(bars.index(BUFFERS), 0)
+    if USE_TMA_QK:
+        mbarrier.wait(bars.index(NUM_BUFFERS), 0)
     else:
         fence_async_shared()
 
-    score_acc = _acc_alloc(M=BM, N=BN, TCGEN=TCGEN, NW=NW)
-    out_acc = _acc_alloc(M=BM, N=BV, TCGEN=TCGEN, NW=NW)
+    acc_s = _acc_alloc(M=BT, N=BS, USE_TCGEN05=USE_TCGEN05, NW=NW)
+    acc_o = _acc_alloc(M=BT, N=BV, USE_TCGEN05=USE_TCGEN05, NW=NW)
     if PIPELINED:
-        out_acc = warpgroup_mma_init(out_acc)
-    sl: gl.constexpr = _acc_layout(M=BM, N=BN, TCGEN=TCGEN, NW=NW)
-    ol: gl.constexpr = _acc_layout(M=BM, N=BV, TCGEN=TCGEN, NW=NW)
-    rows = start + gl.arange(0, BM, gl.SliceLayout(1, sl)).to(gl.int64)
-    key_cols = gl.arange(0, BN, gl.SliceLayout(0, sl)).to(gl.int64)
-    maximum = gl.full([BM], float('-inf'), gl.float32, gl.SliceLayout(1, sl))
-    denom = gl.full([BM], 0, gl.float32, gl.SliceLayout(1, sl))
-    if USE_GATE:
-        gate_q = gl.load(GATE + rows * HQ + hq, rows < end, other=0)
-    first = bos
+        acc_o = warpgroup_mma_init(acc_o)
+    layout_s: gl.constexpr = _acc_layout(M=BT, N=BS, USE_TCGEN05=USE_TCGEN05, NW=NW)
+    layout_o: gl.constexpr = _acc_layout(M=BT, N=BV, USE_TCGEN05=USE_TCGEN05, NW=NW)
+    o_t = i_start + gl.arange(0, BT, gl.SliceLayout(1, layout_s)).to(gl.int64)
+    o_k = gl.arange(0, BS, gl.SliceLayout(0, layout_s)).to(gl.int64)
+    b_m = gl.full([BT], float('-inf'), gl.float32, gl.SliceLayout(1, layout_s))
+    b_acc = gl.full([BT], 0, gl.float32, gl.SliceLayout(1, layout_s))
+    if USE_G:
+        b_gq = gl.load(g_cumsum + o_t * HQ + i_hq, o_t < eos, other=0)
+    i_first = bos
     if W is not None:
-        first = bos + gl.maximum((start - bos - W + 1) // BN, 0) * BN
-    last = gl.minimum(start + BM, end)
+        i_first = bos + gl.maximum((i_start - bos - W + 1) // BS, 0) * BS
+    i_last = gl.minimum(i_start + BT, eos)
     phase = 0
-    for step in range(gl.cdiv(gl.maximum(last - first, 0), BN)):
-        slot = (step % BUFFERS).to(gl.int32)
-        key_start = first + step * BN
-        if step == 0:
-            if TMA_QK or TMA_V:
-                mbarrier.expect(bars.index(slot), (BN * BK * 2 if TMA_QK else 0) + (BN * BV * 2 if TMA_V else 0))
+    for i_s in range(gl.cdiv(gl.maximum(i_last - i_first, 0), BS)):
+        i_slot = (i_s % NUM_BUFFERS).to(gl.int32)
+        i_key = i_first + i_s * BS
+        if i_s == 0:
+            if USE_TMA_QK or USE_TMA_V:
+                mbarrier.expect(bars.index(i_slot), (BS * BK * 2 if USE_TMA_QK else 0) + (BS * BV * 2 if USE_TMA_V else 0))
             _load_tile(
-                ptr=K,
-                desc=K_DESC,
-                smem=ks.index(slot),
-                bar=bars.index(slot),
-                head=hk,
-                row=key_start,
-                end=end,
+                x=k,
+                desc_x=desc_k,
+                b_x_smem=b_k_smem.index(i_slot),
+                bar=bars.index(i_slot),
+                i_h=i_h,
+                i_t=i_key,
+                eos=eos,
                 H=H,
-                D=DK,
-                TMA=TMA_QK,
+                D=K,
+                USE_TMA=USE_TMA_QK,
                 NW=NW,
             )
-            if TMA_V:
+            if USE_TMA_V:
                 tma.async_copy_global_to_shared(
-                    V_DESC,
-                    [hk.to(gl.int32), key_start.to(gl.int32), (iv * BV).to(gl.int32)],
-                    bars.index(slot),
-                    vs.index(slot),
+                    desc_v,
+                    [i_h.to(gl.int32), i_key.to(gl.int32), (i_v * BV).to(gl.int32)],
+                    bars.index(i_slot),
+                    b_v_smem.index(i_slot),
                 )
             else:
-                vl: gl.constexpr = gl.BlockedLayout([1, 4], [4, 8], [NW, 1], [1, 0])
-                vr = key_start + gl.arange(0, BN, gl.SliceLayout(1, vl)).to(gl.int64)
-                vc = iv * BV + gl.arange(0, BV, gl.SliceLayout(0, vl)).to(gl.int64)
-                vv = gl.load(V + (vr[:, None] * H + hk) * DV + vc[None, :], (vr[:, None] < end) & (vc[None, :] < DV), other=0)
-                vs.index(slot).reshape([BN, BV]).store(vv)
-        if TMA_QK or TMA_V:
-            mbarrier.wait(bars.index(slot), ((step // BUFFERS) % 2).to(gl.int32))
-        if not TMA_QK or not TMA_V:
+                layout_v: gl.constexpr = gl.BlockedLayout([1, 4], [4, 8], [NW, 1], [1, 0])
+                o_vt = i_key + gl.arange(0, BS, gl.SliceLayout(1, layout_v)).to(gl.int64)
+                o_vd = i_v * BV + gl.arange(0, BV, gl.SliceLayout(0, layout_v)).to(gl.int64)
+                b_v = gl.load(
+                    v + (o_vt[:, None] * H + i_h) * V + o_vd[None, :],
+                    (o_vt[:, None] < eos) & (o_vd[None, :] < V),
+                    other=0,
+                )
+                b_v_smem.index(i_slot).reshape([BS, BV]).store(b_v)
+        if USE_TMA_QK or USE_TMA_V:
+            mbarrier.wait(bars.index(i_slot), ((i_s // NUM_BUFFERS) % 2).to(gl.int32))
+        if not USE_TMA_QK or not USE_TMA_V:
             fence_async_shared()
-        if key_start + BN < last:
-            nxt = ((step + 1) % BUFFERS).to(gl.int32)
-            if TMA_QK or TMA_V:
-                mbarrier.expect(bars.index(nxt), (BN * BK * 2 if TMA_QK else 0) + (BN * BV * 2 if TMA_V else 0))
+        if i_key + BS < i_last:
+            i_next = ((i_s + 1) % NUM_BUFFERS).to(gl.int32)
+            if USE_TMA_QK or USE_TMA_V:
+                mbarrier.expect(bars.index(i_next), (BS * BK * 2 if USE_TMA_QK else 0) + (BS * BV * 2 if USE_TMA_V else 0))
             _load_tile(
-                ptr=K,
-                desc=K_DESC,
-                smem=ks.index(nxt),
-                bar=bars.index(nxt),
-                head=hk,
-                row=key_start + BN,
-                end=end,
+                x=k,
+                desc_x=desc_k,
+                b_x_smem=b_k_smem.index(i_next),
+                bar=bars.index(i_next),
+                i_h=i_h,
+                i_t=i_key + BS,
+                eos=eos,
                 H=H,
-                D=DK,
-                TMA=TMA_QK,
+                D=K,
+                USE_TMA=USE_TMA_QK,
                 NW=NW,
             )
-            if TMA_V:
+            if USE_TMA_V:
                 tma.async_copy_global_to_shared(
-                    V_DESC,
-                    [hk.to(gl.int32), (key_start + BN).to(gl.int32), (iv * BV).to(gl.int32)],
-                    bars.index(nxt),
-                    vs.index(nxt),
+                    desc_v,
+                    [i_h.to(gl.int32), (i_key + BS).to(gl.int32), (i_v * BV).to(gl.int32)],
+                    bars.index(i_next),
+                    b_v_smem.index(i_next),
                 )
             else:
-                vl: gl.constexpr = gl.BlockedLayout([1, 4], [4, 8], [NW, 1], [1, 0])
-                vr = key_start + BN + gl.arange(0, BN, gl.SliceLayout(1, vl)).to(gl.int64)
-                vc = iv * BV + gl.arange(0, BV, gl.SliceLayout(0, vl)).to(gl.int64)
-                vv = gl.load(V + (vr[:, None] * H + hk) * DV + vc[None, :], (vr[:, None] < end) & (vc[None, :] < DV), other=0)
-                vs.index(nxt).reshape([BN, BV]).store(vv)
+                layout_v: gl.constexpr = gl.BlockedLayout([1, 4], [4, 8], [NW, 1], [1, 0])
+                o_vt = i_key + BS + gl.arange(0, BS, gl.SliceLayout(1, layout_v)).to(gl.int64)
+                o_vd = i_v * BV + gl.arange(0, BV, gl.SliceLayout(0, layout_v)).to(gl.int64)
+                b_v = gl.load(
+                    v + (o_vt[:, None] * H + i_h) * V + o_vd[None, :],
+                    (o_vt[:, None] < eos) & (o_vd[None, :] < V),
+                    other=0,
+                )
+                b_v_smem.index(i_next).reshape([BS, BV]).store(b_v)
 
         if PIPELINED:
-            score_acc = warpgroup_mma(
-                qs.reshape([BM, BK]),
-                ks.index(slot).reshape([BN, BK]).permute((1, 0)),
-                score_acc,
+            acc_s = warpgroup_mma(
+                b_q_smem.reshape([BT, BK]),
+                b_k_smem.index(i_slot).reshape([BS, BK]).permute((1, 0)),
+                acc_s,
                 use_acc=False,
                 is_async=True,
             )
-            score_acc, out_acc = warpgroup_mma_wait(0, deps=(score_acc, out_acc))
+            acc_s, acc_o = warpgroup_mma_wait(0, deps=(acc_s, acc_o))
         else:
-            score_acc, phase = _mma(
-                a=qs.reshape([BM, BK]),
-                b=ks.index(slot).reshape([BN, BK]).permute((1, 0)),
-                acc=score_acc,
-                bar=bars.index(BUFFERS + 1),
+            acc_s, phase = _mma(
+                a=b_q_smem.reshape([BT, BK]),
+                b=b_k_smem.index(i_slot).reshape([BS, BK]).permute((1, 0)),
+                acc=acc_s,
+                bar=bars.index(NUM_BUFFERS + 1),
                 phase=phase,
-                TCGEN=TCGEN,
+                USE_TCGEN05=USE_TCGEN05,
                 USE_ACC=False,
             )
-        scores = _acc_read(acc=score_acc, M=BM, N=BN, TCGEN=TCGEN, NW=NW) * (SCALE * 1.4426950216)
-        cols = key_start + key_cols
-        if USE_GATE:
-            gate_k = gl.load(GATE + cols * HQ + hq, cols < end, other=0)
-            scores += gate_q[:, None] - gate_k[None, :]
+        b_s = _acc_read(acc=acc_s, M=BT, N=BS, USE_TCGEN05=USE_TCGEN05, NW=NW) * (scale * 1.4426950216)
+        o_s = i_key + o_k
+        if USE_G:
+            b_gk = gl.load(g_cumsum + o_s * HQ + i_hq, o_s < eos, other=0)
+            b_s += b_gq[:, None] - b_gk[None, :]
         if W is not None:
-            mask = (rows[:, None] >= cols[None, :]) & (cols[None, :] < end)
-            mask &= rows[:, None] - cols[None, :] < W
-            scores = gl.where(mask, scores, float('-inf'))
-        elif TCGEN or key_start + BN > start:
-            mask = (rows[:, None] >= cols[None, :]) & (cols[None, :] < end)
-            scores = gl.where(mask, scores, float('-inf'))
-        new_max = gl.maximum(maximum, gl.max(scores, 1))
-        finite_max = gl.where(new_max == float('-inf'), 0., new_max)
-        alpha = gl.exp2(maximum - finite_max)
-        prob = gl.exp2(scores - finite_max[:, None])
-        denom = denom * alpha + gl.sum(prob, 1)
-        maximum = new_max
-        if TCGEN and BM == 128 and BV == 256:
+            m_s = (o_t[:, None] >= o_s[None, :]) & (o_s[None, :] < eos)
+            m_s &= o_t[:, None] - o_s[None, :] < W
+            b_s = gl.where(m_s, b_s, float('-inf'))
+        elif USE_TCGEN05 or i_key + BS > i_start:
+            m_s = (o_t[:, None] >= o_s[None, :]) & (o_s[None, :] < eos)
+            b_s = gl.where(m_s, b_s, float('-inf'))
+        b_m_new = gl.maximum(b_m, gl.max(b_s, 1))
+        b_m_safe = gl.where(b_m_new == float('-inf'), 0., b_m_new)
+        b_alpha = gl.exp2(b_m - b_m_safe)
+        b_p = gl.exp2(b_s - b_m_safe[:, None])
+        b_acc = b_acc * b_alpha + gl.sum(b_p, 1)
+        b_m = b_m_new
+        if USE_TCGEN05 and BT == 128 and BV == 256:
             # slicing keeps the wide output from occupying registers alongside the probability tile.
-            ps.store(prob.to(dtype))
+            b_p_smem.store(b_p.to(dtype))
             fence_async_shared()
-            cl: gl.constexpr = _acc_layout(M=BM, N=64, TCGEN=TCGEN, NW=NW)
-            for part in gl.static_range(BV // 64):
-                tile = out_acc.slice(part * 64, 64)
-                value = tile.load(cl)
-                value *= gl.convert_layout(alpha, gl.SliceLayout(1, cl))[:, None]
-                tile.store(value)
+            layout_c: gl.constexpr = _acc_layout(M=BT, N=64, USE_TCGEN05=USE_TCGEN05, NW=NW)
+            for i_part in gl.static_range(BV // 64):
+                acc_o_slice = acc_o.slice(i_part * 64, 64)
+                b_value = acc_o_slice.load(layout_c)
+                b_value *= gl.convert_layout(b_alpha, gl.SliceLayout(1, layout_c))[:, None]
+                acc_o_slice.store(b_value)
         else:
-            old_out = _acc_read(acc=out_acc, M=BM, N=BV, TCGEN=TCGEN, NW=NW)
-            old_out *= gl.convert_layout(alpha, gl.SliceLayout(1, ol))[:, None]
-            if TCGEN:
-                out_acc.store(old_out)
+            b_o_prev = _acc_read(acc=acc_o, M=BT, N=BV, USE_TCGEN05=USE_TCGEN05, NW=NW)
+            b_o_prev *= gl.convert_layout(b_alpha, gl.SliceLayout(1, layout_o))[:, None]
+            if USE_TCGEN05:
+                acc_o.store(b_o_prev)
             else:
-                out_acc = old_out
+                acc_o = b_o_prev
             if PIPELINED:
-                p_reg = gl.convert_layout(prob.to(dtype), gl.DotOperandLayout(0, ol, 2))
+                b_p_reg = gl.convert_layout(b_p.to(dtype), gl.DotOperandLayout(0, layout_o, 2))
             else:
-                ps.store(prob.to(dtype))
+                b_p_smem.store(b_p.to(dtype))
                 fence_async_shared()
         if PIPELINED:
-            out_acc = warpgroup_mma(p_reg, vs.index(slot).reshape([BN, BV]), out_acc, is_async=True)
+            acc_o = warpgroup_mma(b_p_reg, b_v_smem.index(i_slot).reshape([BS, BV]), acc_o, is_async=True)
         else:
-            out_acc, phase = _mma(
-                a=ps,
-                b=vs.index(slot).reshape([BN, BV]),
-                acc=out_acc,
-                bar=bars.index(BUFFERS + 1),
+            acc_o, phase = _mma(
+                a=b_p_smem,
+                b=b_v_smem.index(i_slot).reshape([BS, BV]),
+                acc=acc_o,
+                bar=bars.index(NUM_BUFFERS + 1),
                 phase=phase,
-                TCGEN=TCGEN,
+                USE_TCGEN05=USE_TCGEN05,
             )
 
     if PIPELINED:
-        out_acc = warpgroup_mma_wait(0, deps=(out_acc,))
-    if USE_SINK:
-        sink = gl.load(SINK + hq)
-        maximum = gl.where(maximum == float('-inf'), 0., maximum)
-        denom += gl.exp2(sink - maximum)
-    BC: gl.constexpr = 64 if TCGEN and BM == 128 and BV == 256 else BV
-    cl: gl.constexpr = _acc_layout(M=BM, N=BC, TCGEN=TCGEN, NW=NW)
-    for part in gl.static_range(BV // BC):
-        if TCGEN:
-            output = out_acc.slice(part * BC, BC).load(cl)
+        acc_o = warpgroup_mma_wait(0, deps=(acc_o,))
+    if USE_SINK_BIAS:
+        b_sink = gl.load(sink_bias + i_hq)
+        b_m = gl.where(b_m == float('-inf'), 0., b_m)
+        b_acc += gl.exp2(b_sink - b_m)
+    BC: gl.constexpr = 64 if USE_TCGEN05 and BT == 128 and BV == 256 else BV
+    layout_c: gl.constexpr = _acc_layout(M=BT, N=BC, USE_TCGEN05=USE_TCGEN05, NW=NW)
+    for i_part in gl.static_range(BV // BC):
+        if USE_TCGEN05:
+            b_o = acc_o.slice(i_part * BC, BC).load(layout_c)
         else:
-            output = out_acc
-        output /= gl.convert_layout(denom, gl.SliceLayout(1, cl))[:, None]
-        orows = start + gl.arange(0, BM, gl.SliceLayout(1, cl)).to(gl.int64)
-        ocols = iv * BV + part * BC + gl.arange(0, BC, gl.SliceLayout(0, cl)).to(gl.int64)
+            b_o = acc_o
+        b_o /= gl.convert_layout(b_acc, gl.SliceLayout(1, layout_c))[:, None]
+        o_ot = i_start + gl.arange(0, BT, gl.SliceLayout(1, layout_c)).to(gl.int64)
+        o_ov = i_v * BV + i_part * BC + gl.arange(0, BC, gl.SliceLayout(0, layout_c)).to(gl.int64)
         gl.store(
-            pointer=O + (orows[:, None] * HQ + hq) * DV + ocols[None, :],
-            value=output,
-            mask=(orows[:, None] < end) & (ocols[None, :] < DV),
+            pointer=o + (o_ot[:, None] * HQ + i_hq) * V + o_ov[None, :],
+            value=b_o,
+            mask=(o_ot[:, None] < eos) & (o_ov[None, :] < V),
         )
-    if iv == 0:
-        gl.store(LSE + rows * HQ + hq, maximum + gl.log2(denom), rows < end)
-    for i in gl.static_range(BUFFERS + 2):
-        mbarrier.invalidate(bars.index(i))
+    if i_v == 0:
+        gl.store(lse + o_t * HQ + i_hq, b_m + gl.log2(b_acc), o_t < eos)
+    for i_bar in gl.static_range(NUM_BUFFERS + 2):
+        mbarrier.invalidate(bars.index(i_bar))
 
 
 @gluon.jit
 def _pipeline_load(args, descs, cfg: gl.constexpr):
-    qs, ks, vs, scores, output, bars, positions, pointers = args
-    qb, kr, kf, vr, vf, sr, sf, pr, ore, ordy = bars
-    hq, hk, start, end, first, steps, iv = positions
-    q_desc, k_desc, v_desc = descs
-    BM: gl.constexpr = cfg[0]
-    BN: gl.constexpr = cfg[1]
+    b_q_smem, b_k_smem, b_v_smem, acc_s, acc_o, bars, positions, pointers = args
+    (
+        bar_q_ready, bar_k_ready, bar_k_free, bar_v_ready, bar_v_free,
+        bar_s_ready, bar_s_free, bar_p_ready, bar_o_free, bar_o_ready,
+    ) = bars
+    i_hq, i_h, i_start, eos, i_first, steps, i_v = positions
+    desc_q, desc_k, desc_v = descs
+    BT: gl.constexpr = cfg[0]
+    BS: gl.constexpr = cfg[1]
     BK: gl.constexpr = cfg[2]
     BV: gl.constexpr = cfg[3]
-    mbarrier.expect(qb, BM * BK * 2)
-    tma.async_copy_global_to_shared(q_desc, [hq.to(gl.int32), start.to(gl.int32), 0], qb, qs)
-    for i in range(steps):
-        slot = i % 2
-        phase = (i // 2) % 2
-        row = (first + i * BN).to(gl.int32)
-        mbarrier.wait(kf.index(slot), phase)
-        mbarrier.expect(kr.index(slot), BN * BK * 2)
-        tma.async_copy_global_to_shared(k_desc, [hk.to(gl.int32), row, 0], kr.index(slot), ks.index(slot))
-        mbarrier.wait(vf.index(slot), phase)
-        mbarrier.expect(vr.index(slot), BN * BV * 2)
-        tma.async_copy_global_to_shared(v_desc, [hk.to(gl.int32), row, (iv * BV).to(gl.int32)], vr.index(slot), vs.index(slot))
+    mbarrier.expect(bar_q_ready, BT * BK * 2)
+    tma.async_copy_global_to_shared(desc_q, [i_hq.to(gl.int32), i_start.to(gl.int32), 0], bar_q_ready, b_q_smem)
+    for i_s in range(steps):
+        i_slot = i_s % 2
+        phase = (i_s // 2) % 2
+        i_t = (i_first + i_s * BS).to(gl.int32)
+        mbarrier.wait(bar_k_free.index(i_slot), phase)
+        mbarrier.expect(bar_k_ready.index(i_slot), BS * BK * 2)
+        tma.async_copy_global_to_shared(desc_k, [i_h.to(gl.int32), i_t, 0], bar_k_ready.index(i_slot), b_k_smem.index(i_slot))
+        mbarrier.wait(bar_v_free.index(i_slot), phase)
+        mbarrier.expect(bar_v_ready.index(i_slot), BS * BV * 2)
+        tma.async_copy_global_to_shared(
+            desc_v,
+            [i_h.to(gl.int32), i_t, (i_v * BV).to(gl.int32)],
+            bar_v_ready.index(i_slot),
+            b_v_smem.index(i_slot),
+        )
 
 
 @gluon.jit
-def _pipeline_qk(qs, ks, scores, kr, kf, sr, sf, i, BM: gl.constexpr, BN: gl.constexpr, BK: gl.constexpr):
-    slot = i % 2
-    phase = (i // 2) % 2
-    mbarrier.wait(kr.index(slot), phase)
-    mbarrier.wait(sf.index(slot), phase)
+def _pipeline_qk(
+    b_q_smem,
+    b_k_smem,
+    acc_s,
+    bar_k_ready,
+    bar_k_free,
+    bar_s_ready,
+    bar_s_free,
+    i_s,
+    BT: gl.constexpr,
+    BS: gl.constexpr,
+    BK: gl.constexpr,
+):
+    i_slot = i_s % 2
+    phase = (i_s // 2) % 2
+    mbarrier.wait(bar_k_ready.index(i_slot), phase)
+    mbarrier.wait(bar_s_free.index(i_slot), phase)
     blackwell.tcgen05_mma(
-        a=qs.reshape([BM, BK]),
-        b=ks.index(slot).reshape([BN, BK]).permute((1, 0)),
-        acc=scores.index(slot),
+        a=b_q_smem.reshape([BT, BK]),
+        b=b_k_smem.index(i_slot).reshape([BS, BK]).permute((1, 0)),
+        acc=acc_s.index(i_slot),
         use_acc=False,
     )
-    blackwell.tcgen05_commit(sr.index(slot))
-    blackwell.tcgen05_commit(kf.index(slot))
+    blackwell.tcgen05_commit(bar_s_ready.index(i_slot))
+    blackwell.tcgen05_commit(bar_k_free.index(i_slot))
 
 
 @gluon.jit
 def _pipeline_mma(args, descs, cfg: gl.constexpr):
-    qs, ks, vs, scores, output, bars, positions, pointers = args
-    qb, kr, kf, vr, vf, sr, sf, pr, ore, ordy = bars
-    hq, hk, start, end, first, steps, iv = positions
-    BM: gl.constexpr = cfg[0]
-    BN: gl.constexpr = cfg[1]
+    b_q_smem, b_k_smem, b_v_smem, acc_s, acc_o, bars, positions, pointers = args
+    (
+        bar_q_ready, bar_k_ready, bar_k_free, bar_v_ready, bar_v_free,
+        bar_s_ready, bar_s_free, bar_p_ready, bar_o_free, bar_o_ready,
+    ) = bars
+    i_hq, i_h, i_start, eos, i_first, steps, i_v = positions
+    BT: gl.constexpr = cfg[0]
+    BS: gl.constexpr = cfg[1]
     BK: gl.constexpr = cfg[2]
     BV: gl.constexpr = cfg[3]
-    mbarrier.wait(qb, 0)
+    mbarrier.wait(bar_q_ready, 0)
     if steps > 0:
-        _pipeline_qk(qs=qs, ks=ks, scores=scores, kr=kr, kf=kf, sr=sr, sf=sf, i=0, BM=BM, BN=BN, BK=BK)
-    for i in range(steps):
+        _pipeline_qk(
+            b_q_smem=b_q_smem,
+            b_k_smem=b_k_smem,
+            acc_s=acc_s,
+            bar_k_ready=bar_k_ready,
+            bar_k_free=bar_k_free,
+            bar_s_ready=bar_s_ready,
+            bar_s_free=bar_s_free,
+            i_s=0,
+            BT=BT,
+            BS=BS,
+            BK=BK,
+        )
+    for i_s in range(steps):
         # the next QK runs while the compute partition normalizes the current scores.
-        if i + 1 < steps:
-            _pipeline_qk(qs=qs, ks=ks, scores=scores, kr=kr, kf=kf, sr=sr, sf=sf, i=i + 1, BM=BM, BN=BN, BK=BK)
-        slot = i % 2
-        phase = (i // 2) % 2
-        mbarrier.wait(pr.index(slot), phase)
-        mbarrier.wait(ore, i % 2)
-        mbarrier.wait(vr.index(slot), phase)
-        prob = _packed_operand(score=scores.index(slot), dtype=qs.dtype, BM=BM, BN=BN)
-        blackwell.tcgen05_mma(a=prob, b=vs.index(slot).reshape([BN, BV]), acc=output, use_acc=i > 0)
-        blackwell.tcgen05_commit(ordy)
-        blackwell.tcgen05_commit(sf.index(slot))
-        blackwell.tcgen05_commit(vf.index(slot))
+        if i_s + 1 < steps:
+            _pipeline_qk(
+                b_q_smem=b_q_smem,
+                b_k_smem=b_k_smem,
+                acc_s=acc_s,
+                bar_k_ready=bar_k_ready,
+                bar_k_free=bar_k_free,
+                bar_s_ready=bar_s_ready,
+                bar_s_free=bar_s_free,
+                i_s=i_s + 1,
+                BT=BT,
+                BS=BS,
+                BK=BK,
+            )
+        i_slot = i_s % 2
+        phase = (i_s // 2) % 2
+        mbarrier.wait(bar_p_ready.index(i_slot), phase)
+        mbarrier.wait(bar_o_free, i_s % 2)
+        mbarrier.wait(bar_v_ready.index(i_slot), phase)
+        b_p = _packed_operand(acc_s=acc_s.index(i_slot), dtype=b_q_smem.dtype, BT=BT, BS=BS)
+        blackwell.tcgen05_mma(a=b_p, b=b_v_smem.index(i_slot).reshape([BS, BV]), acc=acc_o, use_acc=i_s > 0)
+        blackwell.tcgen05_commit(bar_o_ready)
+        blackwell.tcgen05_commit(bar_s_free.index(i_slot))
+        blackwell.tcgen05_commit(bar_v_free.index(i_slot))
 
 
 @gluon.jit
 def _pipeline_compute(args, descs, cfg: gl.constexpr):
-    qs, ks, vs, scores, output, bars, positions, pointers = args
-    qb, kr, kf, vr, vf, sr, sf, pr, ore, ordy = bars
-    hq, hk, start, end, first, steps, iv = positions
-    O, LSE, GATE, SINK = pointers
-    BM: gl.constexpr = cfg[0]
-    BN: gl.constexpr = cfg[1]
+    b_q_smem, b_k_smem, b_v_smem, acc_s, acc_o, bars, positions, pointers = args
+    (
+        bar_q_ready, bar_k_ready, bar_k_free, bar_v_ready, bar_v_free,
+        bar_s_ready, bar_s_free, bar_p_ready, bar_o_free, bar_o_ready,
+    ) = bars
+    i_hq, i_h, i_start, eos, i_first, steps, i_v = positions
+    o, lse, g_cumsum, sink_bias = pointers
+    BT: gl.constexpr = cfg[0]
+    BS: gl.constexpr = cfg[1]
     BV: gl.constexpr = cfg[3]
     HQ: gl.constexpr = cfg[4]
-    DV: gl.constexpr = cfg[5]
-    SCALE: gl.constexpr = cfg[6]
+    V: gl.constexpr = cfg[5]
+    scale: gl.constexpr = cfg[6]
     W: gl.constexpr = cfg[7]
-    USE_GATE: gl.constexpr = cfg[8]
-    USE_SINK: gl.constexpr = cfg[9]
-    dtype: gl.constexpr = qs.dtype
-    sl: gl.constexpr = _acc_layout(M=BM, N=BN, TCGEN=True, NW=4)
+    USE_G: gl.constexpr = cfg[8]
+    USE_SINK_BIAS: gl.constexpr = cfg[9]
+    dtype: gl.constexpr = b_q_smem.dtype
+    layout_s: gl.constexpr = _acc_layout(M=BT, N=BS, USE_TCGEN05=True, NW=4)
     BC: gl.constexpr = 64 if BV >= 64 else BV
-    ol: gl.constexpr = _acc_layout(M=BM, N=BC, TCGEN=True, NW=4)
-    rows = start + gl.arange(0, BM, gl.SliceLayout(1, sl)).to(gl.int64)
-    columns = gl.arange(0, BN, gl.SliceLayout(0, sl)).to(gl.int64)
-    maximum = gl.full([BM], float('-inf'), gl.float32, gl.SliceLayout(1, sl))
-    denom = gl.full([BM], 0., gl.float32, gl.SliceLayout(1, sl))
-    if USE_GATE:
-        gate_q = gl.load(GATE + rows * HQ + hq, rows < end, other=0)
-    for i in range(steps):
-        slot = i % 2
-        phase = (i // 2) % 2
-        mbarrier.wait(sr.index(slot), phase)
-        score = scores.index(slot).load(sl) * (SCALE * 1.4426950216)
-        cols = first + i * BN + columns
-        if USE_GATE:
-            gate_k = gl.load(GATE + cols * HQ + hq, cols < end, other=0)
-            score += gate_q[:, None] - gate_k[None, :]
+    layout_o: gl.constexpr = _acc_layout(M=BT, N=BC, USE_TCGEN05=True, NW=4)
+    o_t = i_start + gl.arange(0, BT, gl.SliceLayout(1, layout_s)).to(gl.int64)
+    o_s_local = gl.arange(0, BS, gl.SliceLayout(0, layout_s)).to(gl.int64)
+    b_m = gl.full([BT], float('-inf'), gl.float32, gl.SliceLayout(1, layout_s))
+    b_acc = gl.full([BT], 0., gl.float32, gl.SliceLayout(1, layout_s))
+    if USE_G:
+        b_gq = gl.load(g_cumsum + o_t * HQ + i_hq, o_t < eos, other=0)
+    for i_s in range(steps):
+        i_slot = i_s % 2
+        phase = (i_s // 2) % 2
+        mbarrier.wait(bar_s_ready.index(i_slot), phase)
+        b_s = acc_s.index(i_slot).load(layout_s) * (scale * 1.4426950216)
+        o_s = i_first + i_s * BS + o_s_local
+        if USE_G:
+            b_gk = gl.load(g_cumsum + o_s * HQ + i_hq, o_s < eos, other=0)
+            b_s += b_gq[:, None] - b_gk[None, :]
         if W is not None:
-            mask = (rows[:, None] >= cols[None, :]) & (cols[None, :] < end)
-            mask &= rows[:, None] - cols[None, :] < W
-            score = gl.where(mask, score, float('-inf'))
-        elif first + (i + 1) * BN > start:
-            mask = (rows[:, None] >= cols[None, :]) & (cols[None, :] < end)
-            score = gl.where(mask, score, float('-inf'))
-        new_max = gl.maximum(maximum, gl.max(score, 1))
-        finite_max = gl.where(new_max == float('-inf'), 0., new_max)
-        alpha = gl.exp2(maximum - finite_max)
-        prob = gl.exp2(score - finite_max[:, None])
-        maximum = new_max
-        denom = denom * alpha + gl.sum(prob, 1)
-        _packed_operand(score=scores.index(slot), dtype=dtype, BM=BM, BN=BN).store(prob.to(dtype))
-        mbarrier.arrive(pr.index(slot), count=1)
-        if i > 0:
-            mbarrier.wait(ordy, (i - 1) % 2)
-            for part in gl.static_range(BV // BC):
-                ref = output.slice(part * BC, BC)
-                value = ref.load(ol)
-                value *= gl.convert_layout(alpha, gl.SliceLayout(1, ol))[:, None]
-                ref.store(value)
-        mbarrier.arrive(ore, count=1)
+            m_s = (o_t[:, None] >= o_s[None, :]) & (o_s[None, :] < eos)
+            m_s &= o_t[:, None] - o_s[None, :] < W
+            b_s = gl.where(m_s, b_s, float('-inf'))
+        elif i_first + (i_s + 1) * BS > i_start:
+            m_s = (o_t[:, None] >= o_s[None, :]) & (o_s[None, :] < eos)
+            b_s = gl.where(m_s, b_s, float('-inf'))
+        b_m_new = gl.maximum(b_m, gl.max(b_s, 1))
+        b_m_safe = gl.where(b_m_new == float('-inf'), 0., b_m_new)
+        b_alpha = gl.exp2(b_m - b_m_safe)
+        b_p = gl.exp2(b_s - b_m_safe[:, None])
+        b_m = b_m_new
+        b_acc = b_acc * b_alpha + gl.sum(b_p, 1)
+        _packed_operand(acc_s=acc_s.index(i_slot), dtype=dtype, BT=BT, BS=BS).store(b_p.to(dtype))
+        mbarrier.arrive(bar_p_ready.index(i_slot), count=1)
+        if i_s > 0:
+            mbarrier.wait(bar_o_ready, (i_s - 1) % 2)
+            for i_part in gl.static_range(BV // BC):
+                acc_o_slice = acc_o.slice(i_part * BC, BC)
+                b_o = acc_o_slice.load(layout_o)
+                b_o *= gl.convert_layout(b_alpha, gl.SliceLayout(1, layout_o))[:, None]
+                acc_o_slice.store(b_o)
+        mbarrier.arrive(bar_o_free, count=1)
     if steps > 0:
-        mbarrier.wait(ordy, (steps - 1) % 2)
-    if USE_SINK:
-        sink = gl.load(SINK + hq)
-        maximum = gl.where(maximum == float('-inf'), 0., maximum)
-        denom += gl.exp2(sink - maximum)
-    for part in gl.static_range(BV // BC):
-        value = output.slice(part * BC, BC).load(ol)
-        value /= gl.convert_layout(denom, gl.SliceLayout(1, ol))[:, None]
-        rr = start + gl.arange(0, BM, gl.SliceLayout(1, ol)).to(gl.int64)
-        cc = iv * BV + part * BC + gl.arange(0, BC, gl.SliceLayout(0, ol)).to(gl.int64)
-        gl.store(O + (rr[:, None] * HQ + hq) * DV + cc[None, :], value, (rr[:, None] < end) & (cc[None, :] < DV))
-    if iv == 0:
-        gl.store(LSE + rows * HQ + hq, maximum + gl.log2(denom), rows < end)
+        mbarrier.wait(bar_o_ready, (steps - 1) % 2)
+    if USE_SINK_BIAS:
+        b_sink = gl.load(sink_bias + i_hq)
+        b_m = gl.where(b_m == float('-inf'), 0., b_m)
+        b_acc += gl.exp2(b_sink - b_m)
+    for i_part in gl.static_range(BV // BC):
+        b_o = acc_o.slice(i_part * BC, BC).load(layout_o)
+        b_o /= gl.convert_layout(b_acc, gl.SliceLayout(1, layout_o))[:, None]
+        o_ot = i_start + gl.arange(0, BT, gl.SliceLayout(1, layout_o)).to(gl.int64)
+        o_ov = i_v * BV + i_part * BC + gl.arange(0, BC, gl.SliceLayout(0, layout_o)).to(gl.int64)
+        gl.store(o + (o_ot[:, None] * HQ + i_hq) * V + o_ov[None, :], b_o, (o_ot[:, None] < eos) & (o_ov[None, :] < V))
+    if i_v == 0:
+        gl.store(lse + o_t * HQ + i_hq, b_m + gl.log2(b_acc), o_t < eos)
 
 
 @gluon.jit(do_not_specialize=['T'])
 def parallel_attn_fwd_kernel_pipeline(
-    Q_DESC,
-    K_DESC,
-    V_DESC,
-    O,
-    LSE,
-    GATE,
-    SINK,
-    CU,
-    INDICES,
+    desc_q,
+    desc_k,
+    desc_v,
+    o,
+    lse,
+    g_cumsum,
+    sink_bias,
+    cu_seqlens,
+    chunk_indices,
     T,
     NT: gl.constexpr,
     H: gl.constexpr,
     HQ: gl.constexpr,
-    DV: gl.constexpr,
-    SCALE: gl.constexpr,
+    V: gl.constexpr,
+    scale: gl.constexpr,
     W: gl.constexpr,
-    BM: gl.constexpr,
-    BN: gl.constexpr,
+    BT: gl.constexpr,
+    BS: gl.constexpr,
     BK: gl.constexpr,
     BV: gl.constexpr,
-    VARLEN: gl.constexpr,
-    USE_GATE: gl.constexpr,
-    USE_SINK: gl.constexpr,
+    IS_VARLEN: gl.constexpr,
+    USE_G: gl.constexpr,
+    USE_SINK_BIAS: gl.constexpr,
     WS_V2: gl.constexpr,
 ):
-    iv, it, bh = unflatten_program_id(X=gl.cdiv(DV, BV), Y=NT)
-    hq = bh % HQ
-    hk = hq // (HQ // H)
-    if VARLEN:
-        seq = gl.load(INDICES + it * 2).to(gl.int64)
-        block = gl.load(INDICES + it * 2 + 1).to(gl.int64)
-        bos = gl.load(CU + seq).to(gl.int64)
-        end = gl.load(CU + seq + 1).to(gl.int64)
-        start = bos + block * BM
+    i_v, i_t, i_bh = unflatten_program_id(X=gl.cdiv(V, BV), Y=NT)
+    i_hq = i_bh % HQ
+    i_h = i_hq // (HQ // H)
+    if IS_VARLEN:
+        i_n = gl.load(chunk_indices + i_t * 2).to(gl.int64)
+        i_block = gl.load(chunk_indices + i_t * 2 + 1).to(gl.int64)
+        bos = gl.load(cu_seqlens + i_n).to(gl.int64)
+        eos = gl.load(cu_seqlens + i_n + 1).to(gl.int64)
+        i_start = bos + i_block * BT
     else:
-        bos = (bh // HQ) * T
-        end = bos + T
-        start = bos + it * BM
-    if start >= end:
+        bos = (i_bh // HQ) * T
+        eos = bos + T
+        i_start = bos + i_t * BT
+    if i_start >= eos:
         return
-    first = bos
+    i_first = bos
     if W is not None:
-        first = bos + gl.maximum((start - bos - W + 1) // BN, 0) * BN
-    steps = gl.cdiv(gl.maximum(gl.minimum(start + BM, end) - first, 0), BN).to(gl.int32)
-    dtype: gl.constexpr = O.dtype.element_ty
-    qs = gl.allocate_shared_memory(dtype, [1, BM, BK], Q_DESC.layout)
-    ks = gl.allocate_shared_memory(dtype, [2, 1, BN, BK], K_DESC.layout)
-    vs = gl.allocate_shared_memory(dtype, [2, 1, BN, BV], V_DESC.layout)
-    scores = blackwell.allocate_tensor_memory(gl.float32, [2, BM, BN], _tmem_layout(M=BM, N=BN))
-    output = blackwell.allocate_tensor_memory(gl.float32, [BM, BV], _tmem_layout(M=BM, N=BV))
-    output.store(gl.zeros([BM, BV], gl.float32, _acc_layout(M=BM, N=BV, TCGEN=True, NW=4)))
-    qb = gl.allocate_shared_memory(gl.int64, [1], mbarrier.MBarrierLayout())
-    kr = gl.allocate_shared_memory(gl.int64, [2, 1], mbarrier.MBarrierLayout())
-    kf = gl.allocate_shared_memory(gl.int64, [2, 1], mbarrier.MBarrierLayout())
-    vr = gl.allocate_shared_memory(gl.int64, [2, 1], mbarrier.MBarrierLayout())
-    vf = gl.allocate_shared_memory(gl.int64, [2, 1], mbarrier.MBarrierLayout())
-    sr = gl.allocate_shared_memory(gl.int64, [2, 1], mbarrier.MBarrierLayout())
-    sf = gl.allocate_shared_memory(gl.int64, [2, 1], mbarrier.MBarrierLayout())
-    pr = gl.allocate_shared_memory(gl.int64, [2, 1], mbarrier.MBarrierLayout())
-    ore = gl.allocate_shared_memory(gl.int64, [1], mbarrier.MBarrierLayout())
-    ordy = gl.allocate_shared_memory(gl.int64, [1], mbarrier.MBarrierLayout())
-    mbarrier.init(qb, count=1)
-    mbarrier.init(ore, count=1)
-    mbarrier.init(ordy, count=1)
+        i_first = bos + gl.maximum((i_start - bos - W + 1) // BS, 0) * BS
+    steps = gl.cdiv(gl.maximum(gl.minimum(i_start + BT, eos) - i_first, 0), BS).to(gl.int32)
+    dtype: gl.constexpr = o.dtype.element_ty
+    b_q_smem = gl.allocate_shared_memory(dtype, [1, BT, BK], desc_q.layout)
+    b_k_smem = gl.allocate_shared_memory(dtype, [2, 1, BS, BK], desc_k.layout)
+    b_v_smem = gl.allocate_shared_memory(dtype, [2, 1, BS, BV], desc_v.layout)
+    acc_s = blackwell.allocate_tensor_memory(gl.float32, [2, BT, BS], _tmem_layout(M=BT, N=BS))
+    acc_o = blackwell.allocate_tensor_memory(gl.float32, [BT, BV], _tmem_layout(M=BT, N=BV))
+    acc_o.store(gl.zeros([BT, BV], gl.float32, _acc_layout(M=BT, N=BV, USE_TCGEN05=True, NW=4)))
+    bar_q_ready = gl.allocate_shared_memory(gl.int64, [1], mbarrier.MBarrierLayout())
+    bar_k_ready = gl.allocate_shared_memory(gl.int64, [2, 1], mbarrier.MBarrierLayout())
+    bar_k_free = gl.allocate_shared_memory(gl.int64, [2, 1], mbarrier.MBarrierLayout())
+    bar_v_ready = gl.allocate_shared_memory(gl.int64, [2, 1], mbarrier.MBarrierLayout())
+    bar_v_free = gl.allocate_shared_memory(gl.int64, [2, 1], mbarrier.MBarrierLayout())
+    bar_s_ready = gl.allocate_shared_memory(gl.int64, [2, 1], mbarrier.MBarrierLayout())
+    bar_s_free = gl.allocate_shared_memory(gl.int64, [2, 1], mbarrier.MBarrierLayout())
+    bar_p_ready = gl.allocate_shared_memory(gl.int64, [2, 1], mbarrier.MBarrierLayout())
+    bar_o_free = gl.allocate_shared_memory(gl.int64, [1], mbarrier.MBarrierLayout())
+    bar_o_ready = gl.allocate_shared_memory(gl.int64, [1], mbarrier.MBarrierLayout())
+    mbarrier.init(bar_q_ready, count=1)
+    mbarrier.init(bar_o_free, count=1)
+    mbarrier.init(bar_o_ready, count=1)
     for j in gl.static_range(2):
         for bar in gl.static_range(7):
-            bars = (kr, kf, vr, vf, sr, sf, pr)
+            bars = (bar_k_ready, bar_k_free, bar_v_ready, bar_v_free, bar_s_ready, bar_s_free, bar_p_ready)
             mbarrier.init(bars[bar].index(j), count=1)
             if bar % 2 == 1:
                 mbarrier.arrive(bars[bar].index(j), count=1)
-    bars = (qb, kr, kf, vr, vf, sr, sf, pr, ore, ordy)
-    positions = (hq, hk, start, end, first, steps, iv)
-    pointers = (O, LSE, GATE, SINK)
-    args = (qs, ks, vs, scores, output, bars, positions, pointers)
-    descs = (Q_DESC, K_DESC, V_DESC)
-    cfg: gl.constexpr = (BM, BN, BK, BV, HQ, DV, SCALE, W, USE_GATE, USE_SINK)
+    bars = (bar_q_ready, bar_k_ready, bar_k_free, bar_v_ready, bar_v_free,
+            bar_s_ready, bar_s_free, bar_p_ready, bar_o_free, bar_o_ready)
+    positions = (i_hq, i_h, i_start, eos, i_first, steps, i_v)
+    pointers = (o, lse, g_cumsum, sink_bias)
+    args = (b_q_smem, b_k_smem, b_v_smem, acc_s, acc_o, bars, positions, pointers)
+    descs = (desc_q, desc_k, desc_v)
+    cfg: gl.constexpr = (BT, BS, BK, BV, HQ, V, scale, W, USE_G, USE_SINK_BIAS)
     if WS_V2:
         gl.warp_specialize(
             functions_and_args=[
@@ -645,150 +704,154 @@ def parallel_attn_fwd_kernel_pipeline(
             worker_num_warps=[1, 1],
             worker_num_regs=[24, 24],
         )
-    qs._keep_alive()
-    ks._keep_alive()
-    vs._keep_alive()
+    b_q_smem._keep_alive()
+    b_k_smem._keep_alive()
+    b_v_smem._keep_alive()
     for j in gl.static_range(2):
         for bar in gl.static_range(7):
-            arrays = (kr, kf, vr, vf, sr, sf, pr)
+            arrays = (bar_k_ready, bar_k_free, bar_v_ready, bar_v_free, bar_s_ready, bar_s_free, bar_p_ready)
             mbarrier.invalidate(arrays[bar].index(j))
-    mbarrier.invalidate(qb)
-    mbarrier.invalidate(ore)
-    mbarrier.invalidate(ordy)
+    mbarrier.invalidate(bar_q_ready)
+    mbarrier.invalidate(bar_o_free)
+    mbarrier.invalidate(bar_o_ready)
 
 
 @functools.lru_cache(maxsize=32)
-def _descriptor_layout(rows, dim, dtype):
-    return gl.NVMMASharedLayout.get_default_for([1, rows, dim], getattr(gl, str(dtype).split('.')[-1]))
+def _descriptor_layout(BT, BD, dtype):
+    return gl.NVMMASharedLayout.get_default_for([1, BT, BD], getattr(gl, str(dtype).split('.')[-1]))
 
 
-def _descriptor(x, rows, dim):
-    b, t, h, d = x.shape
+def _descriptor(x, BT, BD):
+    B, T, H, D = x.shape
     return TensorDescriptor(
         x,
-        shape=[h, b * t, d],
-        strides=[d, h * d, 1],
-        block_shape=[1, rows, dim],
-        layout=_descriptor_layout(rows=rows, dim=dim, dtype=x.dtype),
+        shape=[H, B * T, D],
+        strides=[D, H * D, 1],
+        block_shape=[1, BT, BD],
+        layout=_descriptor_layout(BT=BT, BD=BD, dtype=x.dtype),
     )
 
 
 def parallel_attn_fwd_gluon(q, k, v, g_cumsum, sink_bias, scale, window_size=None, cu_seqlens=None, chunk_indices=None):
-    b, t, hq, dk = q.shape
-    h, dv = k.shape[2], v.shape[-1]
-    bk, bv = max(64, triton.next_power_of_2(dk)), min(256, max(32, triton.next_power_of_2(dv)))
-    tcgen = get_device_capability(q.device.index)[0] == 10
-    nw = 4 if tcgen else 8
-    bm, bn = (64, 32) if max(dk, dv) > 256 else (128, 64)
-    if not tcgen and max(dk, dv) <= 128:
-        bm, nw = 64, 4
-    tma_qk = IS_TMA_SUPPORTED and dk % 8 == 0 and q.data_ptr() % 16 == 0 and k.data_ptr() % 16 == 0
-    tma_v = IS_TMA_SUPPORTED and dv % 8 == 0 and v.data_ptr() % 16 == 0
-    blackwell_pipeline = tcgen and tma_qk and tma_v and bk <= 128 and bv <= 128
-    chunk = 128 if chunk_indices is not None else bm
+    B, T, HQ, K = q.shape
+    H, V = k.shape[2], v.shape[-1]
+    BK, BV = max(64, triton.next_power_of_2(K)), min(256, max(32, triton.next_power_of_2(V)))
+    use_tcgen05 = get_device_capability(q.device.index)[0] == 10
+    num_warps = 4 if use_tcgen05 else 8
+    BT, BS = (64, 32) if max(K, V) > 256 else (128, 64)
+    if not use_tcgen05 and max(K, V) <= 128:
+        BT, num_warps = 64, 4
+    use_tma_qk = IS_TMA_SUPPORTED and K % 8 == 0 and q.data_ptr() % 16 == 0 and k.data_ptr() % 16 == 0
+    use_tma_v = IS_TMA_SUPPORTED and V % 8 == 0 and v.data_ptr() % 16 == 0
+    use_warp_specialization = use_tcgen05 and use_tma_qk and use_tma_v and BK <= 128 and BV <= 128
+    BT_INDEX = 128 if chunk_indices is not None else BT
     if cu_seqlens is not None and chunk_indices is None:
-        chunk_indices = prepare_chunk_indices(cu_seqlens=cu_seqlens, chunk_size=chunk)
-    nt = triton.cdiv(t, bm) if cu_seqlens is None else len(chunk_indices) * (chunk // bm)
-    q_desc, k_desc = (_descriptor(x=q, rows=bm, dim=bk), _descriptor(x=k, rows=bn, dim=bk)) if tma_qk else (q, k)
-    v_desc = _descriptor(x=v, rows=bn, dim=bv) if tma_v else v
-    o = torch.empty(b, t, hq, dv, device=q.device, dtype=q.dtype)
-    lse = torch.empty(b, t, hq, device=q.device, dtype=torch.float32)
-    if blackwell_pipeline:
-        parallel_attn_fwd_kernel_pipeline[(triton.cdiv(dv, bv) * nt * b * hq,)](
-            Q_DESC=q_desc,
-            K_DESC=k_desc,
-            V_DESC=v_desc,
-            O=o,
-            LSE=lse,
-            GATE=g_cumsum,
-            SINK=sink_bias,
-            CU=cu_seqlens,
-            INDICES=chunk_indices,
-            T=t,
-            NT=nt,
-            H=h,
-            HQ=hq,
-            DV=dv,
-            SCALE=scale,
+        chunk_indices = prepare_chunk_indices(cu_seqlens=cu_seqlens, chunk_size=BT_INDEX)
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices) * (BT_INDEX // BT)
+    desc_q, desc_k = (_descriptor(x=q, BT=BT, BD=BK), _descriptor(x=k, BT=BS, BD=BK)) if use_tma_qk else (q, k)
+    desc_v = _descriptor(x=v, BT=BS, BD=BV) if use_tma_v else v
+    o = torch.empty(B, T, HQ, V, device=q.device, dtype=q.dtype)
+    lse = torch.empty(B, T, HQ, device=q.device, dtype=torch.float32)
+    if use_warp_specialization:
+        parallel_attn_fwd_kernel_pipeline[(triton.cdiv(V, BV) * NT * B * HQ,)](
+            desc_q=desc_q,
+            desc_k=desc_k,
+            desc_v=desc_v,
+            o=o,
+            lse=lse,
+            g_cumsum=g_cumsum,
+            sink_bias=sink_bias,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+            T=T,
+            NT=NT,
+            H=H,
+            HQ=HQ,
+            V=V,
+            scale=scale,
             W=window_size,
-            BM=bm,
-            BN=bn,
-            BK=bk,
-            BV=bv,
-            VARLEN=cu_seqlens is not None,
-            USE_GATE=g_cumsum is not None,
-            USE_SINK=sink_bias is not None,
+            BT=BT,
+            BS=BS,
+            BK=BK,
+            BV=BV,
+            IS_VARLEN=cu_seqlens is not None,
+            USE_G=g_cumsum is not None,
+            USE_SINK_BIAS=sink_bias is not None,
             WS_V2=WARP_SPECIALIZE_V2,
             num_warps=4,
             maxnreg=128,
         )
         return o, lse
-    parallel_attn_fwd_kernel_gluon[(triton.cdiv(dv, bv) * nt * b * hq,)](
-        Q=q,
-        K=k,
-        V=v,
-        O=o,
-        LSE=lse,
-        GATE=g_cumsum,
-        SINK=sink_bias,
-        CU=cu_seqlens,
-        INDICES=chunk_indices,
-        Q_DESC=q_desc,
-        K_DESC=k_desc,
-        V_DESC=v_desc,
-        T=t,
-        NT=nt,
-        H=h,
-        HQ=hq,
-        DK=dk,
-        DV=dv,
-        SCALE=scale,
+    parallel_attn_fwd_kernel_gluon[(triton.cdiv(V, BV) * NT * B * HQ,)](
+        q=q,
+        k=k,
+        v=v,
+        o=o,
+        lse=lse,
+        g_cumsum=g_cumsum,
+        sink_bias=sink_bias,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        desc_q=desc_q,
+        desc_k=desc_k,
+        desc_v=desc_v,
+        T=T,
+        NT=NT,
+        H=H,
+        HQ=HQ,
+        K=K,
+        V=V,
+        scale=scale,
         W=window_size,
-        BM=bm,
-        BN=bn,
-        BK=bk,
-        BV=bv,
-        CHUNK=chunk,
-        TCGEN=tcgen,
-        TMA_QK=tma_qk,
-        TMA_V=tma_v,
-        VARLEN=cu_seqlens is not None,
-        USE_GATE=g_cumsum is not None,
-        USE_SINK=sink_bias is not None,
-        NW=nw,
-        num_warps=nw,
+        BT=BT,
+        BS=BS,
+        BK=BK,
+        BV=BV,
+        BT_INDEX=BT_INDEX,
+        USE_TCGEN05=use_tcgen05,
+        USE_TMA_QK=use_tma_qk,
+        USE_TMA_V=use_tma_v,
+        IS_VARLEN=cu_seqlens is not None,
+        USE_G=g_cumsum is not None,
+        USE_SINK_BIAS=sink_bias is not None,
+        NW=num_warps,
+        num_warps=num_warps,
     )
     return o, lse
 
 
 @gluon.jit
 def _load_pair(
-    A,
-    AD,
-    AS,
-    B,
-    BD,
-    BS,
+    a,
+    desc_a,
+    b_a_smem,
+    b,
+    desc_b,
+    b_b_smem,
     bar,
-    head,
-    row,
-    end,
+    i_h,
+    i_t,
+    eos,
     H: gl.constexpr,
-    DA: gl.constexpr,
-    DB: gl.constexpr,
-    TMA_A: gl.constexpr,
-    TMA_B: gl.constexpr,
+    D_A: gl.constexpr,
+    D_B: gl.constexpr,
+    USE_TMA_A: gl.constexpr,
+    USE_TMA_B: gl.constexpr,
     NW: gl.constexpr = 4,
 ):
-    if TMA_A or TMA_B:
-        mbarrier.expect(bar, (AS.shape[1] * AS.shape[2] * 2 if TMA_A else 0) + (BS.shape[1] * BS.shape[2] * 2 if TMA_B else 0))
-    _load_tile(ptr=A, desc=AD, smem=AS, bar=bar, head=head, row=row, end=end, H=H, D=DA, TMA=TMA_A, NW=NW)
-    _load_tile(ptr=B, desc=BD, smem=BS, bar=bar, head=head, row=row, end=end, H=H, D=DB, TMA=TMA_B, NW=NW)
+    if USE_TMA_A or USE_TMA_B:
+        mbarrier.expect(
+            bar,
+            (b_a_smem.shape[1] * b_a_smem.shape[2] * 2 if USE_TMA_A else 0) +
+            (b_b_smem.shape[1] * b_b_smem.shape[2] * 2 if USE_TMA_B else 0),
+        )
+    _load_tile(x=a, desc_x=desc_a, b_x_smem=b_a_smem, bar=bar, i_h=i_h, i_t=i_t, eos=eos, H=H, D=D_A, USE_TMA=USE_TMA_A, NW=NW)
+    _load_tile(x=b, desc_x=desc_b, b_x_smem=b_b_smem, bar=bar, i_h=i_h, i_t=i_t, eos=eos, H=H, D=D_B, USE_TMA=USE_TMA_B, NW=NW)
 
 
 @gluon.jit
-def _mma_pair(a, b, c, d, acc_a, acc_b, bar, phase, TCGEN: gl.constexpr, USE_ACC: gl.constexpr = False):
-    if TCGEN:
+def _mma_pair(a, b, c, d, acc_a, acc_b, bar, phase, USE_TCGEN05: gl.constexpr, USE_ACC: gl.constexpr = False):
+    if USE_TCGEN05:
         blackwell.tcgen05_mma(a, b, acc_a, use_acc=USE_ACC)
         blackwell.tcgen05_mma(c, d, acc_b, use_acc=USE_ACC)
         blackwell.tcgen05_commit(bar)
@@ -803,338 +866,342 @@ def _mma_pair(a, b, c, d, acc_a, acc_b, bar, phase, TCGEN: gl.constexpr, USE_ACC
 
 @gluon.jit(do_not_specialize=['T'])
 def parallel_attn_bwd_kernel_gluon(
-    Q,
-    K,
-    V,
-    DO,
-    LSE,
-    DELTA,
-    DQ,
-    DK_OUT,
-    DV_OUT,
-    GATE,
-    DG,
-    SINK,
-    DSINK,
-    CU,
-    INDICES,
-    Q_DESC,
-    K_DESC,
-    V_DESC,
-    DO_DESC,
+    q,
+    k,
+    v,
+    do,
+    lse,
+    delta,
+    dq,
+    dk,
+    dv,
+    g_cumsum,
+    dg_cumsum,
+    sink_bias,
+    dsink_bias,
+    cu_seqlens,
+    chunk_indices,
+    desc_q,
+    desc_k,
+    desc_v,
+    desc_do,
     T,
     NT: gl.constexpr,
     H: gl.constexpr,
     HQ: gl.constexpr,
-    DK: gl.constexpr,
-    DV: gl.constexpr,
-    SCALE: gl.constexpr,
+    K: gl.constexpr,
+    V: gl.constexpr,
+    scale: gl.constexpr,
     W: gl.constexpr,
-    BM: gl.constexpr,
-    BN: gl.constexpr,
+    BT: gl.constexpr,
+    BS: gl.constexpr,
     BK: gl.constexpr,
     BV: gl.constexpr,
-    CHUNK: gl.constexpr,
-    BUFFERS: gl.constexpr,
-    TCGEN: gl.constexpr,
-    TMA_QK: gl.constexpr,
-    TMA_V: gl.constexpr,
-    VARLEN: gl.constexpr,
-    USE_GATE: gl.constexpr,
-    USE_SINK: gl.constexpr,
+    BT_INDEX: gl.constexpr,
+    NUM_BUFFERS: gl.constexpr,
+    USE_TCGEN05: gl.constexpr,
+    USE_TMA_QK: gl.constexpr,
+    USE_TMA_V: gl.constexpr,
+    IS_VARLEN: gl.constexpr,
+    USE_G: gl.constexpr,
+    USE_SINK_BIAS: gl.constexpr,
     GRAD: gl.constexpr,
     NW: gl.constexpr,
 ):
     IS_DQ: gl.constexpr = GRAD == 'dq'
     HAS_DS: gl.constexpr = GRAD != 'dv'
     HAS_DV: gl.constexpr = GRAD == 'dkv' or GRAD == 'dv'
-    it, bh = unflatten_program_id(X=NT)
-    hq = bh % HQ
-    hk = hq // (HQ // H)
-    if VARLEN:
-        seq = gl.load(INDICES + (it // (CHUNK // BM)) * 2).to(gl.int64)
-        block = gl.load(INDICES + (it // (CHUNK // BM)) * 2 + 1).to(gl.int64)
-        bos = gl.load(CU + seq).to(gl.int64)
-        end = gl.load(CU + seq + 1).to(gl.int64)
-        start = bos + block * CHUNK + (it % (CHUNK // BM)) * BM
+    i_t, i_bh = unflatten_program_id(X=NT)
+    i_hq = i_bh % HQ
+    i_h = i_hq // (HQ // H)
+    if IS_VARLEN:
+        i_n = gl.load(chunk_indices + (i_t // (BT_INDEX // BT)) * 2).to(gl.int64)
+        i_block = gl.load(chunk_indices + (i_t // (BT_INDEX // BT)) * 2 + 1).to(gl.int64)
+        bos = gl.load(cu_seqlens + i_n).to(gl.int64)
+        eos = gl.load(cu_seqlens + i_n + 1).to(gl.int64)
+        i_start = bos + i_block * BT_INDEX + (i_t % (BT_INDEX // BT)) * BT
     else:
-        bos = (bh // HQ) * T
-        end = bos + T
-        start = bos + it * BM
-    if start >= end:
+        bos = (i_bh // HQ) * T
+        eos = bos + T
+        i_start = bos + i_t * BT
+    if i_start >= eos:
         return
-    dtype: gl.constexpr = Q.dtype.element_ty
-    ql: gl.constexpr = gl.NVMMASharedLayout.get_default_for([1, BM, BK], dtype)
-    vl: gl.constexpr = gl.NVMMASharedLayout.get_default_for([1, BM, BV], dtype)
-    kl: gl.constexpr = gl.NVMMASharedLayout.get_default_for([1, BN, BK], dtype)
-    dl: gl.constexpr = gl.NVMMASharedLayout.get_default_for([1, BN, BV], dtype)
-    pl: gl.constexpr = gl.NVMMASharedLayout.get_default_for([BM, BN], dtype)
-    resident_a = gl.allocate_shared_memory(dtype, [1, BM, BK], ql)
+    dtype: gl.constexpr = q.dtype.element_ty
+    layout_q_smem: gl.constexpr = gl.NVMMASharedLayout.get_default_for([1, BT, BK], dtype)
+    layout_v_smem_resident: gl.constexpr = gl.NVMMASharedLayout.get_default_for([1, BT, BV], dtype)
+    layout_k_smem: gl.constexpr = gl.NVMMASharedLayout.get_default_for([1, BS, BK], dtype)
+    layout_do_smem: gl.constexpr = gl.NVMMASharedLayout.get_default_for([1, BS, BV], dtype)
+    layout_p_smem: gl.constexpr = gl.NVMMASharedLayout.get_default_for([BT, BS], dtype)
+    b_qk_smem = gl.allocate_shared_memory(dtype, [1, BT, BK], layout_q_smem)
     if HAS_DS:
-        resident_b = gl.allocate_shared_memory(dtype, [1, BM, BV], vl)
-    stream_a = gl.allocate_shared_memory(dtype, [BUFFERS, 1, BN, BK], kl)
-    stream_b = gl.allocate_shared_memory(dtype, [BUFFERS, 1, BN, BV], dl)
-    ds_shared = gl.allocate_shared_memory(dtype, [BM, BN], pl)
-    p_shared = gl.allocate_shared_memory(dtype, [BM, BN], pl)
+        b_vo_smem = gl.allocate_shared_memory(dtype, [1, BT, BV], layout_v_smem_resident)
+    b_qk_stream = gl.allocate_shared_memory(dtype, [NUM_BUFFERS, 1, BS, BK], layout_k_smem)
+    b_vo_stream = gl.allocate_shared_memory(dtype, [NUM_BUFFERS, 1, BS, BV], layout_do_smem)
+    b_ds_smem = gl.allocate_shared_memory(dtype, [BT, BS], layout_p_smem)
+    b_p_smem = gl.allocate_shared_memory(dtype, [BT, BS], layout_p_smem)
     bars = gl.allocate_shared_memory(gl.int64, [4, 1], mbarrier.MBarrierLayout())
-    for i in gl.static_range(4):
-        mbarrier.init(bars.index(i), count=1)
+    for i_bar in gl.static_range(4):
+        mbarrier.init(bars.index(i_bar), count=1)
     if IS_DQ:
-        resident_qk, resident_value = Q, DO
-        stream_qk, stream_value = K, V
-        resident_qk_desc, resident_value_desc = Q_DESC, DO_DESC
-        stream_qk_desc, stream_value_desc = K_DESC, V_DESC
-        resident_head, resident_heads = hq, HQ
-        stream_head, stream_heads = hk, H
+        qk, vo = q, do
+        qk_stream, vo_stream = k, v
+        desc_qk, desc_vo = desc_q, desc_do
+        desc_qk_stream, desc_vo_stream = desc_k, desc_v
+        i_h_resident, H_RESIDENT = i_hq, HQ
+        i_h_stream, H_STREAM = i_h, H
     else:
-        resident_qk, resident_value = K, V
-        stream_qk, stream_value = Q, DO
-        resident_qk_desc, resident_value_desc = K_DESC, V_DESC
-        stream_qk_desc, stream_value_desc = Q_DESC, DO_DESC
-        resident_head, resident_heads = hk, H
-        stream_head, stream_heads = hq, HQ
-    if TMA_QK or (HAS_DS and TMA_V):
-        mbarrier.expect(bars.index(2), BM * BK * 2 * TMA_QK + BM * BV * 2 * (HAS_DS and TMA_V))
+        qk, vo = k, v
+        qk_stream, vo_stream = q, do
+        desc_qk, desc_vo = desc_k, desc_v
+        desc_qk_stream, desc_vo_stream = desc_q, desc_do
+        i_h_resident, H_RESIDENT = i_h, H
+        i_h_stream, H_STREAM = i_hq, HQ
+    if USE_TMA_QK or (HAS_DS and USE_TMA_V):
+        mbarrier.expect(bars.index(2), BT * BK * 2 * USE_TMA_QK + BT * BV * 2 * (HAS_DS and USE_TMA_V))
     _load_tile(
-        ptr=resident_qk,
-        desc=resident_qk_desc,
-        smem=resident_a,
+        x=qk,
+        desc_x=desc_qk,
+        b_x_smem=b_qk_smem,
         bar=bars.index(2),
-        head=resident_head,
-        row=start,
-        end=end,
-        H=resident_heads,
-        D=DK,
-        TMA=TMA_QK,
+        i_h=i_h_resident,
+        i_t=i_start,
+        eos=eos,
+        H=H_RESIDENT,
+        D=K,
+        USE_TMA=USE_TMA_QK,
         NW=NW,
     )
     if HAS_DS:
         _load_tile(
-            ptr=resident_value,
-            desc=resident_value_desc,
-            smem=resident_b,
+            x=vo,
+            desc_x=desc_vo,
+            b_x_smem=b_vo_smem,
             bar=bars.index(2),
-            head=resident_head,
-            row=start,
-            end=end,
-            H=resident_heads,
-            D=DV,
-            TMA=TMA_V,
+            i_h=i_h_resident,
+            i_t=i_start,
+            eos=eos,
+            H=H_RESIDENT,
+            D=V,
+            USE_TMA=USE_TMA_V,
             NW=NW,
         )
-    if TMA_QK or (HAS_DS and TMA_V):
+    if USE_TMA_QK or (HAS_DS and USE_TMA_V):
         mbarrier.wait(bars.index(2), 0)
-    if not TMA_QK or (HAS_DS and not TMA_V):
+    if not USE_TMA_QK or (HAS_DS and not USE_TMA_V):
         fence_async_shared()
 
-    sl: gl.constexpr = _acc_layout(M=BM, N=BN, TCGEN=TCGEN, NW=NW)
-    rows = start + gl.arange(0, BM, gl.SliceLayout(1, sl)).to(gl.int64)
-    cols_local = gl.arange(0, BN, gl.SliceLayout(0, sl)).to(gl.int64)
-    REUSE_GRAD: gl.constexpr = TCGEN and GRAD == 'dkv' and BK + BV > 512
+    layout_s: gl.constexpr = _acc_layout(M=BT, N=BS, USE_TCGEN05=USE_TCGEN05, NW=NW)
+    o_t = i_start + gl.arange(0, BT, gl.SliceLayout(1, layout_s)).to(gl.int64)
+    o_s_local = gl.arange(0, BS, gl.SliceLayout(0, layout_s)).to(gl.int64)
+    REUSE_GRAD: gl.constexpr = USE_TCGEN05 and GRAD == 'dkv' and BK + BV > 512
     if HAS_DS:
-        grad_acc = _acc_alloc(M=BM, N=BK, TCGEN=TCGEN, NW=NW)
+        acc_dqk = _acc_alloc(M=BT, N=BK, USE_TCGEN05=USE_TCGEN05, NW=NW)
     if HAS_DV:
-        dv_acc = _acc_alloc(M=BM, N=BV, TCGEN=TCGEN, NW=NW)
+        acc_dv = _acc_alloc(M=BT, N=BV, USE_TCGEN05=USE_TCGEN05, NW=NW)
     if REUSE_GRAD:
         # preserve a small gradient slice while its TMEM holds the score and probability gradient.
-        scratch = grad_acc if BK >= BV else dv_acc
-        score_acc = scratch.slice(0, BN)
-        dp_acc = scratch.slice(BN, BN)
+        acc_scratch = acc_dqk if BK >= BV else acc_dv
+        acc_s = acc_scratch.slice(0, BS)
+        acc_dp = acc_scratch.slice(BS, BS)
     else:
-        score_acc = _acc_alloc(M=BM, N=BN, TCGEN=TCGEN, NW=NW)
+        acc_s = _acc_alloc(M=BT, N=BS, USE_TCGEN05=USE_TCGEN05, NW=NW)
         if HAS_DS:
-            dp_acc = _acc_alloc(M=BM, N=BN, TCGEN=TCGEN, NW=NW)
-    if USE_GATE:
-        gate_row = gl.load(GATE + rows * HQ + hq, rows < end, other=0)
-        dg = gl.full([BM], 0, gl.float32, gl.SliceLayout(1, sl))
-    if USE_SINK and IS_DQ:
-        sink_expectation = gl.full([BM], 0., gl.float32, gl.SliceLayout(1, sl))
+            acc_dp = _acc_alloc(M=BT, N=BS, USE_TCGEN05=USE_TCGEN05, NW=NW)
+    if USE_G:
+        b_gt = gl.load(g_cumsum + o_t * HQ + i_hq, o_t < eos, other=0)
+        b_dg = gl.full([BT], 0, gl.float32, gl.SliceLayout(1, layout_s))
+    if USE_SINK_BIAS and IS_DQ:
+        b_sink_expectation = gl.full([BT], 0., gl.float32, gl.SliceLayout(1, layout_s))
     if IS_DQ:
-        lse = gl.load(LSE + rows * HQ + hq, rows < end, other=0)
-        delta = gl.load(DELTA + rows * HQ + hq, rows < end, other=0)
-        first = bos
+        b_lse = gl.load(lse + o_t * HQ + i_hq, o_t < eos, other=0)
+        b_delta = gl.load(delta + o_t * HQ + i_hq, o_t < eos, other=0)
+        i_first = bos
         if W is not None:
-            first = bos + gl.maximum((start - bos - W + 1) // BN, 0) * BN
-        last = gl.minimum(start + BM, end)
+            i_first = bos + gl.maximum((i_start - bos - W + 1) // BS, 0) * BS
+        i_last = gl.minimum(i_start + BT, eos)
     else:
-        first = start
-        last = end
+        i_first = i_start
+        i_last = eos
         if W is not None:
-            last = gl.minimum(last, start + BM + W - 1)
+            i_last = gl.minimum(i_last, i_start + BT + W - 1)
     phase = 0
-    for step in range(gl.cdiv(gl.maximum(last - first, 0), BN)):
-        slot = (step % BUFFERS).to(gl.int32)
-        stream_start = first + step * BN
-        if step == 0 or BUFFERS == 1:
+    for i_s in range(gl.cdiv(gl.maximum(i_last - i_first, 0), BS)):
+        i_slot = (i_s % NUM_BUFFERS).to(gl.int32)
+        i_stream = i_first + i_s * BS
+        if i_s == 0 or NUM_BUFFERS == 1:
             _load_pair(
-                A=stream_qk,
-                AD=stream_qk_desc,
-                AS=stream_a.index(slot),
-                B=stream_value,
-                BD=stream_value_desc,
-                BS=stream_b.index(slot),
-                bar=bars.index(slot),
-                head=stream_head,
-                row=stream_start,
-                end=end,
-                H=stream_heads,
-                DA=DK,
-                DB=DV,
-                TMA_A=TMA_QK,
-                TMA_B=TMA_V,
+                a=qk_stream,
+                desc_a=desc_qk_stream,
+                b_a_smem=b_qk_stream.index(i_slot),
+                b=vo_stream,
+                desc_b=desc_vo_stream,
+                b_b_smem=b_vo_stream.index(i_slot),
+                bar=bars.index(i_slot),
+                i_h=i_h_stream,
+                i_t=i_stream,
+                eos=eos,
+                H=H_STREAM,
+                D_A=K,
+                D_B=V,
+                USE_TMA_A=USE_TMA_QK,
+                USE_TMA_B=USE_TMA_V,
                 NW=NW,
             )
-        if TMA_QK or TMA_V:
-            mbarrier.wait(bars.index(slot), ((step // BUFFERS) % 2).to(gl.int32))
-        if not TMA_QK or not TMA_V:
+        if USE_TMA_QK or USE_TMA_V:
+            mbarrier.wait(bars.index(i_slot), ((i_s // NUM_BUFFERS) % 2).to(gl.int32))
+        if not USE_TMA_QK or not USE_TMA_V:
             fence_async_shared()
-        if BUFFERS > 1 and stream_start + BN < last:
-            nxt = ((step + 1) % BUFFERS).to(gl.int32)
+        if NUM_BUFFERS > 1 and i_stream + BS < i_last:
+            i_next = ((i_s + 1) % NUM_BUFFERS).to(gl.int32)
             _load_pair(
-                A=stream_qk,
-                AD=stream_qk_desc,
-                AS=stream_a.index(nxt),
-                B=stream_value,
-                BD=stream_value_desc,
-                BS=stream_b.index(nxt),
-                bar=bars.index(nxt),
-                head=stream_head,
-                row=stream_start + BN,
-                end=end,
-                H=stream_heads,
-                DA=DK,
-                DB=DV,
-                TMA_A=TMA_QK,
-                TMA_B=TMA_V,
+                a=qk_stream,
+                desc_a=desc_qk_stream,
+                b_a_smem=b_qk_stream.index(i_next),
+                b=vo_stream,
+                desc_b=desc_vo_stream,
+                b_b_smem=b_vo_stream.index(i_next),
+                bar=bars.index(i_next),
+                i_h=i_h_stream,
+                i_t=i_stream + BS,
+                eos=eos,
+                H=H_STREAM,
+                D_A=K,
+                D_B=V,
+                USE_TMA_A=USE_TMA_QK,
+                USE_TMA_B=USE_TMA_V,
                 NW=NW,
             )
         if REUSE_GRAD:
-            saved_grad = scratch.slice(0, 2 * BN).load(_acc_layout(M=BM, N=2 * BN, TCGEN=TCGEN, NW=NW))
+            b_saved_grad = acc_scratch.slice(0, 2 * BS).load(_acc_layout(M=BT, N=2 * BS, USE_TCGEN05=USE_TCGEN05, NW=NW))
             # the MMA warp must not overwrite a slice while another warp is still saving it.
             barrier()
         if HAS_DS:
-            score_acc, dp_acc, phase = _mma_pair(
-                a=resident_a.reshape([BM, BK]),
-                b=stream_a.index(slot).reshape([BN, BK]).permute((1, 0)),
-                c=resident_b.reshape([BM, BV]),
-                d=stream_b.index(slot).reshape([BN, BV]).permute((1, 0)),
-                acc_a=score_acc,
-                acc_b=dp_acc,
+            acc_s, acc_dp, phase = _mma_pair(
+                a=b_qk_smem.reshape([BT, BK]),
+                b=b_qk_stream.index(i_slot).reshape([BS, BK]).permute((1, 0)),
+                c=b_vo_smem.reshape([BT, BV]),
+                d=b_vo_stream.index(i_slot).reshape([BS, BV]).permute((1, 0)),
+                acc_a=acc_s,
+                acc_b=acc_dp,
                 bar=bars.index(3),
                 phase=phase,
-                TCGEN=TCGEN,
+                USE_TCGEN05=USE_TCGEN05,
             )
         else:
-            score_acc, phase = _mma(
-                a=resident_a.reshape([BM, BK]),
-                b=stream_a.index(slot).reshape([BN, BK]).permute((1, 0)),
-                acc=score_acc,
+            acc_s, phase = _mma(
+                a=b_qk_smem.reshape([BT, BK]),
+                b=b_qk_stream.index(i_slot).reshape([BS, BK]).permute((1, 0)),
+                acc=acc_s,
                 bar=bars.index(3),
                 phase=phase,
-                TCGEN=TCGEN,
+                USE_TCGEN05=USE_TCGEN05,
                 USE_ACC=False,
             )
-        scores = _acc_read(acc=score_acc, M=BM, N=BN, TCGEN=TCGEN, NW=NW) * (SCALE * 1.4426950216)
-        cols = stream_start + cols_local
+        b_s = _acc_read(acc=acc_s, M=BT, N=BS, USE_TCGEN05=USE_TCGEN05, NW=NW) * (scale * 1.4426950216)
+        o_s = i_stream + o_s_local
         if IS_DQ:
-            needs_mask = (stream_start + BN > start) | (start + BM > end)
-            norm = lse[:, None]
-            delta_b = delta[:, None]
+            use_mask = (i_stream + BS > i_start) | (i_start + BT > eos)
+            b_norm = b_lse[:, None]
+            b_delta_b = b_delta[:, None]
         else:
-            needs_mask = (start + BM > stream_start) | (stream_start + BN > end)
-            lse_col = gl.load(LSE + cols * HQ + hq, cols < end, other=0)
-            delta_col = gl.load(DELTA + cols * HQ + hq, cols < end, other=0)
-            norm = lse_col[None, :]
-            delta_b = delta_col[None, :]
-        if USE_GATE:
-            gate_col = gl.load(GATE + cols * HQ + hq, cols < end, other=0)
+            use_mask = (i_start + BT > i_stream) | (i_stream + BS > eos)
+            b_lse_col = gl.load(lse + o_s * HQ + i_hq, o_s < eos, other=0)
+            b_delta_col = gl.load(delta + o_s * HQ + i_hq, o_s < eos, other=0)
+            b_norm = b_lse_col[None, :]
+            b_delta_b = b_delta_col[None, :]
+        if USE_G:
+            b_gs = gl.load(g_cumsum + o_s * HQ + i_hq, o_s < eos, other=0)
             if IS_DQ:
-                scores += gate_row[:, None] - gate_col[None, :]
+                b_s += b_gt[:, None] - b_gs[None, :]
             else:
-                scores += gate_col[None, :] - gate_row[:, None]
-        prob = gl.exp2(scores - norm)
-        if W is not None or needs_mask:
+                b_s += b_gs[None, :] - b_gt[:, None]
+        b_p = gl.exp2(b_s - b_norm)
+        if W is not None or use_mask:
             if IS_DQ:
-                distance = rows[:, None] - cols[None, :]
+                o_dist = o_t[:, None] - o_s[None, :]
             else:
-                distance = cols[None, :] - rows[:, None]
-            mask = (distance >= 0) & (cols[None, :] < end) & (rows[:, None] < end)
+                o_dist = o_s[None, :] - o_t[:, None]
+            m_s = (o_dist >= 0) & (o_s[None, :] < eos) & (o_t[:, None] < eos)
             if W is not None:
-                mask &= distance < W
-            prob = gl.where(mask, prob, 0.)
+                m_s &= o_dist < W
+            b_p = gl.where(m_s, b_p, 0.)
         if HAS_DS:
-            dp = _acc_read(acc=dp_acc, M=BM, N=BN, TCGEN=TCGEN, NW=NW)
-            if USE_SINK and IS_DQ:
-                sink_expectation += gl.sum(prob * dp, 1)
-            ds = prob * (dp - delta_b)
-            if not USE_SINK:
+            b_dp = _acc_read(acc=acc_dp, M=BT, N=BS, USE_TCGEN05=USE_TCGEN05, NW=NW)
+            if USE_SINK_BIAS and IS_DQ:
+                b_sink_expectation += gl.sum(b_p * b_dp, 1)
+            b_ds = b_p * (b_dp - b_delta_b)
+            if not USE_SINK_BIAS:
                 # a single-key softmax has zero score gradient, independent of reduction roundoff.
-                single_key = rows[:, None] == bos if IS_DQ else cols[None, :] == bos
+                m_single = o_t[:, None] == bos if IS_DQ else o_s[None, :] == bos
                 if W == 1:
-                    single_key = gl.full([BM, BN], True, gl.int1, sl)
-                ds = gl.where(single_key, 0., ds)
-            if USE_GATE:
-                dg += gl.sum(ds, 1) * (1 if IS_DQ else -1)
-            ds_shared.store(ds.to(dtype))
+                    m_single = gl.full([BT, BS], True, gl.int1, layout_s)
+                b_ds = gl.where(m_single, 0., b_ds)
+            if USE_G:
+                b_dg += gl.sum(b_ds, 1) * (1 if IS_DQ else -1)
+            b_ds_smem.store(b_ds.to(dtype))
         if HAS_DV:
-            p_shared.store(prob.to(dtype))
+            b_p_smem.store(b_p.to(dtype))
         fence_async_shared()
         if REUSE_GRAD:
-            scratch.slice(0, 2 * BN).store(saved_grad)
+            acc_scratch.slice(0, 2 * BS).store(b_saved_grad)
             # all warps must finish restoring the accumulator before the MMA warp reads it.
             barrier()
         if GRAD == 'dkv':
-            grad_acc, dv_acc, phase = _mma_pair(
-                a=ds_shared,
-                b=stream_a.index(slot).reshape([BN, BK]),
-                c=p_shared,
-                d=stream_b.index(slot).reshape([BN, BV]),
-                acc_a=grad_acc,
-                acc_b=dv_acc,
+            acc_dqk, acc_dv, phase = _mma_pair(
+                a=b_ds_smem,
+                b=b_qk_stream.index(i_slot).reshape([BS, BK]),
+                c=b_p_smem,
+                d=b_vo_stream.index(i_slot).reshape([BS, BV]),
+                acc_a=acc_dqk,
+                acc_b=acc_dv,
                 bar=bars.index(3),
                 phase=phase,
-                TCGEN=TCGEN,
+                USE_TCGEN05=USE_TCGEN05,
                 USE_ACC=True,
             )
         elif HAS_DS:
-            grad_acc, phase = _mma(
-                a=ds_shared,
-                b=stream_a.index(slot).reshape([BN, BK]),
-                acc=grad_acc,
+            acc_dqk, phase = _mma(
+                a=b_ds_smem,
+                b=b_qk_stream.index(i_slot).reshape([BS, BK]),
+                acc=acc_dqk,
                 bar=bars.index(3),
                 phase=phase,
-                TCGEN=TCGEN,
+                USE_TCGEN05=USE_TCGEN05,
             )
         else:
-            dv_acc, phase = _mma(
-                a=p_shared,
-                b=stream_b.index(slot).reshape([BN, BV]),
-                acc=dv_acc,
+            acc_dv, phase = _mma(
+                a=b_p_smem,
+                b=b_vo_stream.index(i_slot).reshape([BS, BV]),
+                acc=acc_dv,
                 bar=bars.index(3),
                 phase=phase,
-                TCGEN=TCGEN,
+                USE_TCGEN05=USE_TCGEN05,
             )
 
-    if USE_SINK and IS_DQ:
-        sink_grad = -gl.exp2(gl.load(SINK + hq) - lse) * sink_expectation
-        gl.store(DSINK + rows * HQ + hq, sink_grad, rows < end)
+    if USE_SINK_BIAS and IS_DQ:
+        b_dsink = -gl.exp2(gl.load(sink_bias + i_hq) - b_lse) * b_sink_expectation
+        gl.store(dsink_bias + o_t * HQ + i_hq, b_dsink, o_t < eos)
     if HAS_DS:
-        grad = _acc_read(acc=grad_acc, M=BM, N=BK, TCGEN=TCGEN, NW=NW) * SCALE
-        grad_layout: gl.constexpr = _acc_layout(M=BM, N=BK, TCGEN=TCGEN, NW=NW)
-        gr = start + gl.arange(0, BM, gl.SliceLayout(1, grad_layout)).to(gl.int64)
-        gc = gl.arange(0, BK, gl.SliceLayout(0, grad_layout)).to(gl.int64)
-        target = DQ if IS_DQ else DK_OUT
-        gl.store(target + (gr[:, None] * HQ + hq) * DK + gc[None, :], grad, (gr[:, None] < end) & (gc[None, :] < DK))
-        if USE_GATE:
-            gl.store(DG + rows * HQ + hq, dg, rows < end)
+        b_dqk = _acc_read(acc=acc_dqk, M=BT, N=BK, USE_TCGEN05=USE_TCGEN05, NW=NW) * scale
+        layout_dqk: gl.constexpr = _acc_layout(M=BT, N=BK, USE_TCGEN05=USE_TCGEN05, NW=NW)
+        o_dqk_t = i_start + gl.arange(0, BT, gl.SliceLayout(1, layout_dqk)).to(gl.int64)
+        o_dqk_d = gl.arange(0, BK, gl.SliceLayout(0, layout_dqk)).to(gl.int64)
+        dqk = dq if IS_DQ else dk
+        gl.store(
+            dqk + (o_dqk_t[:, None] * HQ + i_hq) * K + o_dqk_d[None, :],
+            b_dqk,
+            (o_dqk_t[:, None] < eos) & (o_dqk_d[None, :] < K),
+        )
+        if USE_G:
+            gl.store(dg_cumsum + o_t * HQ + i_hq, b_dg, o_t < eos)
     if HAS_DV:
-        grad_v = _acc_read(acc=dv_acc, M=BM, N=BV, TCGEN=TCGEN, NW=NW)
-        v_layout: gl.constexpr = _acc_layout(M=BM, N=BV, TCGEN=TCGEN, NW=NW)
-        vr = start + gl.arange(0, BM, gl.SliceLayout(1, v_layout)).to(gl.int64)
-        vc = gl.arange(0, BV, gl.SliceLayout(0, v_layout)).to(gl.int64)
-        gl.store(DV_OUT + (vr[:, None] * HQ + hq) * DV + vc[None, :], grad_v, (vr[:, None] < end) & (vc[None, :] < DV))
-    for i in gl.static_range(4):
-        mbarrier.invalidate(bars.index(i))
+        b_dv = _acc_read(acc=acc_dv, M=BT, N=BV, USE_TCGEN05=USE_TCGEN05, NW=NW)
+        layout_dv: gl.constexpr = _acc_layout(M=BT, N=BV, USE_TCGEN05=USE_TCGEN05, NW=NW)
+        o_vt = i_start + gl.arange(0, BT, gl.SliceLayout(1, layout_dv)).to(gl.int64)
+        o_vd = gl.arange(0, BV, gl.SliceLayout(0, layout_dv)).to(gl.int64)
+        gl.store(dv + (o_vt[:, None] * HQ + i_hq) * V + o_vd[None, :], b_dv, (o_vt[:, None] < eos) & (o_vd[None, :] < V))
+    for i_bar in gl.static_range(4):
+        mbarrier.invalidate(bars.index(i_bar))
 
 
 def parallel_attn_bwd_gluon(
@@ -1156,86 +1223,86 @@ def parallel_attn_bwd_gluon(
 
     from fla.ops.attn.parallel import parallel_attn_bwd_preprocess
 
-    b, t, hq, dk = q.shape
-    h, dv = k.shape[2], v.shape[-1]
-    bk, bv = max(64, triton.next_power_of_2(dk)), max(32, triton.next_power_of_2(dv))
-    tcgen = get_device_capability(q.device.index)[0] == 10
-    nw = 4 if tcgen else 8
-    if not tcgen and 64 < max(dk, dv) <= 128:
-        nw = 4
-    bm, bn, buffers = (64, 32, 1) if max(dk, dv) > 256 else (64, 64, 2)
-    chunk = 128 if chunk_indices is not None else bm
+    B, T, HQ, K = q.shape
+    H, V = k.shape[2], v.shape[-1]
+    BK, BV = max(64, triton.next_power_of_2(K)), max(32, triton.next_power_of_2(V))
+    use_tcgen05 = get_device_capability(q.device.index)[0] == 10
+    num_warps = 4 if use_tcgen05 else 8
+    if not use_tcgen05 and 64 < max(K, V) <= 128:
+        num_warps = 4
+    BT, BS, num_buffers = (64, 32, 1) if max(K, V) > 256 else (64, 64, 2)
+    BT_INDEX = 128 if chunk_indices is not None else BT
     if cu_seqlens is not None and chunk_indices is None:
-        chunk_indices = prepare_chunk_indices(cu_seqlens=cu_seqlens, chunk_size=chunk)
-    nt = triton.cdiv(t, bm) if cu_seqlens is None else len(chunk_indices) * (chunk // bm)
+        chunk_indices = prepare_chunk_indices(cu_seqlens=cu_seqlens, chunk_size=BT_INDEX)
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices) * (BT_INDEX // BT)
     delta = parallel_attn_bwd_preprocess(o=o, do=do)
-    temp_dtype = q.dtype if h == hq else torch.float32
+    temp_dtype = q.dtype if H == HQ else torch.float32
     dq = torch.empty_like(q)
-    dk_out = torch.empty(b, t, hq, dk, device=q.device, dtype=temp_dtype)
-    dv_out = torch.empty(b, t, hq, dv, device=q.device, dtype=temp_dtype)
+    dk_out = torch.empty(B, T, HQ, K, device=q.device, dtype=temp_dtype)
+    dv_out = torch.empty(B, T, HQ, V, device=q.device, dtype=temp_dtype)
     dg_q = torch.empty_like(lse) if g_cumsum is not None else None
     dg_k = torch.empty_like(lse) if g_cumsum is not None else None
     dsink_rows = torch.empty_like(lse) if sink_bias is not None else None
-    tma_qk = IS_TMA_SUPPORTED and dk % 8 == 0 and q.data_ptr() % 16 == 0 and k.data_ptr() % 16 == 0
-    tma_v = IS_TMA_SUPPORTED and dv % 8 == 0 and v.data_ptr() % 16 == 0
-    tma_v = tma_v and do.data_ptr() % 16 == 0
-    gradients = ('dq', 'dkv') if tcgen or bk + bv <= 512 else ('dq', 'dk', 'dv')
-    q_desc, k_desc = (_descriptor(x=q, rows=bm, dim=bk), _descriptor(x=k, rows=bn, dim=bk)) if tma_qk else (q, k)
-    v_desc, do_desc = (_descriptor(x=v, rows=bn, dim=bv), _descriptor(x=do, rows=bm, dim=bv)) if tma_v else (v, do)
-    dq_descriptors = q_desc, k_desc, v_desc, do_desc
-    if bm != bn:
-        q_desc, k_desc = (_descriptor(x=q, rows=bn, dim=bk), _descriptor(x=k, rows=bm, dim=bk)) if tma_qk else (q, k)
-        v_desc, do_desc = (_descriptor(x=v, rows=bm, dim=bv), _descriptor(x=do, rows=bn, dim=bv)) if tma_v else (v, do)
-    dkv_descriptors = q_desc, k_desc, v_desc, do_desc
+    use_tma_qk = IS_TMA_SUPPORTED and K % 8 == 0 and q.data_ptr() % 16 == 0 and k.data_ptr() % 16 == 0
+    use_tma_v = IS_TMA_SUPPORTED and V % 8 == 0 and v.data_ptr() % 16 == 0
+    use_tma_v = use_tma_v and do.data_ptr() % 16 == 0
+    gradients = ('dq', 'dkv') if use_tcgen05 or BK + BV <= 512 else ('dq', 'dk', 'dv')
+    desc_q, desc_k = (_descriptor(x=q, BT=BT, BD=BK), _descriptor(x=k, BT=BS, BD=BK)) if use_tma_qk else (q, k)
+    desc_v, desc_do = (_descriptor(x=v, BT=BS, BD=BV), _descriptor(x=do, BT=BT, BD=BV)) if use_tma_v else (v, do)
+    dq_descriptors = desc_q, desc_k, desc_v, desc_do
+    if BT != BS:
+        desc_q, desc_k = (_descriptor(x=q, BT=BS, BD=BK), _descriptor(x=k, BT=BT, BD=BK)) if use_tma_qk else (q, k)
+        desc_v, desc_do = (_descriptor(x=v, BT=BT, BD=BV), _descriptor(x=do, BT=BS, BD=BV)) if use_tma_v else (v, do)
+    dkv_descriptors = desc_q, desc_k, desc_v, desc_do
     for grad in gradients:
-        q_desc, k_desc, v_desc, do_desc = dq_descriptors if grad == 'dq' else dkv_descriptors
-        parallel_attn_bwd_kernel_gluon[(nt * b * hq,)](
-            Q=q,
-            K=k,
-            V=v,
-            DO=do,
-            LSE=lse,
-            DELTA=delta,
-            DQ=dq,
-            DK_OUT=dk_out,
-            DV_OUT=dv_out,
-            GATE=g_cumsum,
-            DG=dg_q if grad == 'dq' else dg_k,
-            SINK=sink_bias,
-            DSINK=dsink_rows,
-            CU=cu_seqlens,
-            INDICES=chunk_indices,
-            Q_DESC=q_desc,
-            K_DESC=k_desc,
-            V_DESC=v_desc,
-            DO_DESC=do_desc,
-            T=t,
-            NT=nt,
-            H=h,
-            HQ=hq,
-            DK=dk,
-            DV=dv,
-            SCALE=scale,
+        desc_q, desc_k, desc_v, desc_do = dq_descriptors if grad == 'dq' else dkv_descriptors
+        parallel_attn_bwd_kernel_gluon[(NT * B * HQ,)](
+            q=q,
+            k=k,
+            v=v,
+            do=do,
+            lse=lse,
+            delta=delta,
+            dq=dq,
+            dk=dk_out,
+            dv=dv_out,
+            g_cumsum=g_cumsum,
+            dg_cumsum=dg_q if grad == 'dq' else dg_k,
+            sink_bias=sink_bias,
+            dsink_bias=dsink_rows,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+            desc_q=desc_q,
+            desc_k=desc_k,
+            desc_v=desc_v,
+            desc_do=desc_do,
+            T=T,
+            NT=NT,
+            H=H,
+            HQ=HQ,
+            K=K,
+            V=V,
+            scale=scale,
             W=window_size,
-            BM=bm,
-            BN=bn,
-            BK=bk,
-            BV=bv,
-            CHUNK=chunk,
-            BUFFERS=buffers,
-            TCGEN=tcgen,
-            TMA_QK=tma_qk,
-            TMA_V=tma_v,
-            VARLEN=cu_seqlens is not None,
-            USE_GATE=g_cumsum is not None,
-            USE_SINK=sink_bias is not None,
+            BT=BT,
+            BS=BS,
+            BK=BK,
+            BV=BV,
+            BT_INDEX=BT_INDEX,
+            NUM_BUFFERS=num_buffers,
+            USE_TCGEN05=use_tcgen05,
+            USE_TMA_QK=use_tma_qk,
+            USE_TMA_V=use_tma_v,
+            IS_VARLEN=cu_seqlens is not None,
+            USE_G=g_cumsum is not None,
+            USE_SINK_BIAS=sink_bias is not None,
             GRAD=grad,
-            NW=nw,
-            num_warps=nw,
+            NW=num_warps,
+            num_warps=num_warps,
         )
-    if hq != h:
-        dk_out = reduce(dk_out, 'b t (h g) k -> b t h k', g=hq // h, reduction='sum')
-        dv_out = reduce(dv_out, 'b t (h g) v -> b t h v', g=hq // h, reduction='sum')
+    if HQ != H:
+        dk_out = reduce(dk_out, 'b t (h g) k -> b t h k', g=HQ // H, reduction='sum')
+        dv_out = reduce(dv_out, 'b t (h g) v -> b t h v', g=HQ // H, reduction='sum')
     if g_cumsum is not None:
         dg_q.add_(dg_k)
     dsink = None if dsink_rows is None else dsink_rows.sum((0, 1))
