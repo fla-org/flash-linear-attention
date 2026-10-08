@@ -12,8 +12,8 @@ port makes them explicit: residual sources are indexed statically (``L`` is a co
 pointer-table gather), V tiles are staged through shared memory with ``cp.async``, and the backward
 keeps all ``L`` tiles resident when they fit and streams a 2-deep ring otherwise.
 
-Opt-in and auto-dispatched like the other FLA backends: enable with ``FLA_ATTNRES_GLUON=1`` (off by
-default); the verifier then selects it for suitable CUDA calls and falls back to Triton elsewhere.
+Opt-in and auto-dispatched like the other FLA backends: enable with ``FLA_GLUON=1`` or ``FLA_ATTNRES_GLUON=1``;
+both are off by default. The verifier selects it for suitable CUDA calls and falls back to Triton elsewhere.
 Numerical parity with Triton is the frozen ``tests/ops/test_attnres.py``.
 """
 
@@ -29,6 +29,7 @@ from triton.experimental.gluon.language.nvidia.ampere import async_copy as cp
 
 from fla.ops.backends import BaseBackend
 from fla.ops.utils.cache import fla_cache_autotune
+from fla.ops.utils.op import barrier
 from fla.utils import (
     autocast_custom_bwd,
     autocast_custom_fwd,
@@ -219,7 +220,7 @@ def attnres_fwd_kernel_gluon(
         gl.store(rstd + i_l * N + o_t, b_rstd.to(rstd.dtype.element_ty), mask=m_t)
         gl.store(logit + i_l * N + o_t, b_logit.to(logit.dtype.element_ty), mask=m_t)
         # cp.async is same-lane staging, but the CTA must sync before the next issue reuses slot i_l % 2
-        gl.thread_barrier()
+        barrier()
 
     gl.store(lse + o_t, b_m + gl.log(b_acc), mask=m_t)
 
@@ -375,7 +376,7 @@ def attnres_bwd_kernel_dv_gluon(
                 b_opre += b_p[:, None] * b_v
                 if not RESIDENT:
                     # the slot just read is the next issue target
-                    gl.thread_barrier()
+                    barrier()
 
         # output RMSNorm bwd: turn b_do into the gradient w.r.t. the pre-norm output
         if HAS_ONORM:
@@ -430,9 +431,9 @@ def attnres_bwd_kernel_dv_gluon(
             gl.store(dres[i_l] + o_v, b_dv.to(dres[0].dtype.element_ty), mask=m_t[:, None] & m_d[None, :])
             b_dqw += b_inc
             if not RESIDENT:
-                gl.thread_barrier()
+                barrier()
         # tiles of iteration t are fully consumed before iteration t+1 refills the buffers
-        gl.thread_barrier()
+        barrier()
 
     i_p = gl.program_id(0).to(gl.int64)
     gl.store(dqw + i_p * D + o_d, b_dqw, mask=m_d)
@@ -464,7 +465,7 @@ def attnres_bwd_kernel_dqdw_gluon(
     NW: gl.constexpr,
     HAS_ONORM: gl.constexpr,
 ):
-    i_d = gl.program_id(0).to(gl.int32)
+    i_d = gl.program_id(0).to(gl.int64)
 
     # [BN, BD] fp32 rows; 4-wide lane segments along D, warps along the partial rows
     T: gl.constexpr = _lane_split(BD)
@@ -732,8 +733,8 @@ def _run(
 class AttnResGluonBackend(BaseBackend):
     """Dispatch entry for the Gluon AttnRes kernels (see the module docstring for the design).
 
-    Off by default; enable with ``FLA_ATTNRES_GLUON=1``. The verifier then accepts any CUDA call
-    on SM80+ with ``D * itemsize >= 128`` bytes and otherwise defers to the Triton path.
+    Off by default; enable with ``FLA_GLUON=1`` or ``FLA_ATTNRES_GLUON=1``.
+    The verifier accepts CUDA calls on SM80+ with ``D * itemsize >= 128`` bytes and otherwise defers to Triton.
     """
 
     backend_type = "gluon"
