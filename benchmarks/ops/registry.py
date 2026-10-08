@@ -512,6 +512,13 @@ register_op(OpConfig(
     category='attn',
 ))
 
+register_op(OpConfig(
+    name='parallel_stickbreaking_attn',
+    import_path='fla.ops.stickbreaking_attn',
+    inputs={**_simple_qkv},
+    category='attn',
+))
+
 
 register_op(OpConfig(
     name='flash_attn',
