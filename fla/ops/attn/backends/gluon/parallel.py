@@ -930,12 +930,20 @@ def parallel_attn_bwd_kernel_gluon(
     sl: gl.constexpr = _acc_layout(M=BM, N=BN, TCGEN=TCGEN, NW=NW)
     rows = start + gl.arange(0, BM, gl.SliceLayout(1, sl)).to(gl.int64)
     cols_local = gl.arange(0, BN, gl.SliceLayout(0, sl)).to(gl.int64)
-    score_acc = _acc_alloc(M=BM, N=BN, TCGEN=TCGEN, NW=NW)
+    REUSE_GRAD: gl.constexpr = TCGEN and GRAD == 'dkv' and BK + BV > 512
     if HAS_DS:
-        dp_acc = _acc_alloc(M=BM, N=BN, TCGEN=TCGEN, NW=NW)
         grad_acc = _acc_alloc(M=BM, N=BK, TCGEN=TCGEN, NW=NW)
     if HAS_DV:
         dv_acc = _acc_alloc(M=BM, N=BV, TCGEN=TCGEN, NW=NW)
+    if REUSE_GRAD:
+        # preserve a small gradient slice while its TMEM holds the score and probability gradient.
+        scratch = grad_acc if BK >= BV else dv_acc
+        score_acc = scratch.slice(0, BN)
+        dp_acc = scratch.slice(BN, BN)
+    else:
+        score_acc = _acc_alloc(M=BM, N=BN, TCGEN=TCGEN, NW=NW)
+        if HAS_DS:
+            dp_acc = _acc_alloc(M=BM, N=BN, TCGEN=TCGEN, NW=NW)
     if USE_GATE:
         gate_row = gl.load(GATE + rows * HQ + hq, rows < end, other=0)
         dg = gl.full([BM], 0, gl.float32, gl.SliceLayout(1, sl))
@@ -1000,6 +1008,8 @@ def parallel_attn_bwd_kernel_gluon(
                 TMA_B=TMA_V,
                 NW=NW,
             )
+        if REUSE_GRAD:
+            saved_grad = scratch.slice(0, 2 * BN).load(_acc_layout(M=BM, N=2 * BN, TCGEN=TCGEN, NW=NW))
         if HAS_DS:
             score_acc, dp_acc, phase = _mma_pair(
                 a=resident_a.reshape([BM, BK]),
@@ -1067,6 +1077,8 @@ def parallel_attn_bwd_kernel_gluon(
         if HAS_DV:
             p_shared.store(prob.to(dtype))
         fence_async_shared()
+        if REUSE_GRAD:
+            scratch.slice(0, 2 * BN).store(saved_grad)
         if GRAD == 'dkv':
             grad_acc, dv_acc, phase = _mma_pair(
                 a=ds_shared,
@@ -1163,7 +1175,7 @@ def parallel_attn_bwd_gluon(
     tma_qk = IS_TMA_SUPPORTED and dk % 8 == 0 and q.data_ptr() % 16 == 0 and k.data_ptr() % 16 == 0
     tma_v = IS_TMA_SUPPORTED and dv % 8 == 0 and v.data_ptr() % 16 == 0
     tma_v = tma_v and do.data_ptr() % 16 == 0
-    gradients = ('dq', 'dkv') if bk + bv <= 512 else ('dq', 'dk', 'dv')
+    gradients = ('dq', 'dkv') if tcgen or bk + bv <= 512 else ('dq', 'dk', 'dv')
     q_desc, k_desc = (_descriptor(x=q, rows=bm, dim=bk), _descriptor(x=k, rows=bn, dim=bk)) if tma_qk else (q, k)
     v_desc, do_desc = (_descriptor(x=v, rows=bn, dim=bv), _descriptor(x=do, rows=bm, dim=bv)) if tma_v else (v, do)
     dq_descriptors = q_desc, k_desc, v_desc, do_desc
