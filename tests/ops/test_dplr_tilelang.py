@@ -12,8 +12,8 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-import fla.ops.generalized_delta_rule.dplr.backends.tilelang as dplr_tilelang_backend
 from fla.ops.generalized_delta_rule.dplr import chunk_dplr_delta_rule
+from fla.ops.generalized_delta_rule.dplr.backends import tilelang
 from fla.ops.generalized_delta_rule.dplr.backends.tilelang import DPLRTileLangBackend
 from fla.ops.generalized_delta_rule.dplr.backends.tilelang.schedules import chunk64_schedule_or_none
 from fla.ops.generalized_delta_rule.dplr.chunk import gate_bound_is_safe
@@ -107,8 +107,8 @@ def test_chunk_verifier_rejects_chunk64_on_cc90(monkeypatch, K: int):
     # every BT=64 schedule launches on sm_90's 232448B optin, but cs64 measured
     # 0.68-1.05x vs Triton on H800 (rect and varlen, both head dims), so the
     # route is accepted only on cc12x
-    monkeypatch.setattr(dplr_tilelang_backend, 'get_device_smem_optin', lambda idx: 232448)
-    monkeypatch.setattr(dplr_tilelang_backend, 'get_device_capability', lambda idx: (9, 0))
+    monkeypatch.setattr(tilelang, 'get_device_smem_optin', lambda idx: 232448)
+    monkeypatch.setattr(tilelang, 'get_device_capability', lambda idx: (9, 0))
     ok, reason = DPLRTileLangBackend().chunk_dplr_delta_rule_verifier(
         *_verifier_inputs(K=K), safe_gate=True, lower_bound=-0.61, chunk_size=64,
     )
@@ -120,8 +120,8 @@ def test_chunk_verifier_rejects_safe_gate_chunk64(monkeypatch):
     # safe_gate's documented [-5, 0) range overflows the centered scheme at
     # chunk_size 64 (half-range 231 log2), so the route is rejected even where
     # every K=64 BT=64 stage fits (cc120's 101376B optin)
-    monkeypatch.setattr(dplr_tilelang_backend, 'get_device_smem_optin', lambda idx: 101376)
-    monkeypatch.setattr(dplr_tilelang_backend, 'get_device_capability', lambda idx: (12, 0))
+    monkeypatch.setattr(tilelang, 'get_device_smem_optin', lambda idx: 101376)
+    monkeypatch.setattr(tilelang, 'get_device_capability', lambda idx: (12, 0))
     ok, reason = DPLRTileLangBackend().chunk_dplr_delta_rule_verifier(
         *_verifier_inputs(K=64), safe_gate=True, chunk_size=64,
     )
@@ -133,8 +133,8 @@ def test_chunk_verifier_rejects_safe_gate_chunk64(monkeypatch):
 def test_chunk_verifier_varlen_cs16_gate(monkeypatch, cc, accepted):
     # varlen cs16 measured 0.83-1.02x vs Triton on sm_90 (no win at any size),
     # while cc12x keeps it (1.08-1.23x at h2560/h4096) — rejected below cc12
-    monkeypatch.setattr(dplr_tilelang_backend, 'get_device_smem_optin', lambda idx: 232448)
-    monkeypatch.setattr(dplr_tilelang_backend, 'get_device_capability', lambda idx: cc)
+    monkeypatch.setattr(tilelang, 'get_device_smem_optin', lambda idx: 232448)
+    monkeypatch.setattr(tilelang, 'get_device_capability', lambda idx: cc)
     cu = torch.tensor([0, 256, 500, 760, 1000], dtype=torch.int32, device=device)
     ok, reason = DPLRTileLangBackend().chunk_dplr_delta_rule_verifier(
         *_verifier_inputs(K=64), safe_gate=True, chunk_size=16, cu_seqlens=cu,
@@ -159,8 +159,8 @@ def test_chunk_verifier_accepts_lower_bound():
 def test_chunk_verifier_accepts_lower_bound_chunk64(monkeypatch):
     # RWKV7's w is architecturally clamped to (-0.61, 0), which keeps the cs64
     # half-range at 28 log2
-    monkeypatch.setattr(dplr_tilelang_backend, 'get_device_smem_optin', lambda idx: 101376)
-    monkeypatch.setattr(dplr_tilelang_backend, 'get_device_capability', lambda idx: (12, 0))
+    monkeypatch.setattr(tilelang, 'get_device_smem_optin', lambda idx: 101376)
+    monkeypatch.setattr(tilelang, 'get_device_capability', lambda idx: (12, 0))
     ok, reason = DPLRTileLangBackend().chunk_dplr_delta_rule_verifier(
         *_verifier_inputs(K=64), safe_gate=False, lower_bound=-0.61, chunk_size=64,
     )
@@ -230,8 +230,8 @@ def test_chunk_verifier_rejects(monkeypatch, case: str, reason: str):
         kwargs['lower_bound'] = 0.5
     elif case == 'chunk64_a100_k128':
         # high=297472B, mid=215552B and low=167936B all exceed A100's 166912B optin
-        monkeypatch.setattr(dplr_tilelang_backend, 'get_device_smem_optin', lambda idx: 166912)
-        monkeypatch.setattr(dplr_tilelang_backend, 'get_device_capability', lambda idx: (8, 0))
+        monkeypatch.setattr(tilelang, 'get_device_smem_optin', lambda idx: 166912)
+        monkeypatch.setattr(tilelang, 'get_device_capability', lambda idx: (8, 0))
         args = _verifier_inputs(K=128)
         kwargs['lower_bound'] = -0.61
         kwargs['chunk_size'] = 64
@@ -239,8 +239,8 @@ def test_chunk_verifier_rejects(monkeypatch, case: str, reason: str):
         # every K=128 stream schedule (mid=215552B, low=167936B) exceeds the
         # 99KB cap; the fused A-backward (98432B off cc90) is not the binding
         # stage here
-        monkeypatch.setattr(dplr_tilelang_backend, 'get_device_smem_optin', lambda idx: 101376)
-        monkeypatch.setattr(dplr_tilelang_backend, 'get_device_capability', lambda idx: (12, 0))
+        monkeypatch.setattr(tilelang, 'get_device_smem_optin', lambda idx: 101376)
+        monkeypatch.setattr(tilelang, 'get_device_capability', lambda idx: (12, 0))
         args = _verifier_inputs(K=128)
         kwargs['lower_bound'] = -0.61
         kwargs['chunk_size'] = 64
@@ -252,9 +252,9 @@ def test_chunk_verifier_rejects(monkeypatch, case: str, reason: str):
     elif case == 'low_small_grid':
         # cc120-class 99KB cap forces the low stream schedule at K=128;
         # N*H=64 below half the (pinned) SM count must fall back
-        monkeypatch.setattr(dplr_tilelang_backend, 'get_device_smem_optin', lambda idx: 101376)
-        monkeypatch.setattr(dplr_tilelang_backend, 'get_device_capability', lambda idx: (12, 0))
-        monkeypatch.setattr(dplr_tilelang_backend, 'get_multiprocessor_count', lambda idx: 188)
+        monkeypatch.setattr(tilelang, 'get_device_smem_optin', lambda idx: 101376)
+        monkeypatch.setattr(tilelang, 'get_device_capability', lambda idx: (12, 0))
+        monkeypatch.setattr(tilelang, 'get_multiprocessor_count', lambda idx: 188)
         args = _verifier_inputs(B=2, H=32, K=128)
     elif case == 'cp_initial_state':
         args = _verifier_inputs()

@@ -50,7 +50,7 @@ def fused_recurrent_rwkv6_fwd_kernel(
     STORE_FINAL_STATE: tl.constexpr,  # whether to store final state
     IS_VARLEN: tl.constexpr,
 ):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     NK, NV = tl.cdiv(K, BK), tl.cdiv(V, BV)
     i_v, i_k, i_nh = (pid % NV).to(tl.int64), ((pid // NV) % NK).to(tl.int64), (pid // (NV * NK)).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
@@ -138,7 +138,7 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
     USE_INITIAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     NK, NV = tl.cdiv(K, BK), tl.cdiv(V, BV)
     i_v, i_k, i_nh = (pid % NV).to(tl.int64), ((pid // NV) % NK).to(tl.int64), (pid // (NV * NK)).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
@@ -232,7 +232,7 @@ def fused_recurrent_rwkv6_bwd_kernel_dkv(
     USE_INITIAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     NK, NV = tl.cdiv(K, BK), tl.cdiv(V, BV)
     i_v, i_k, i_nh = (pid % NV).to(tl.int64), ((pid // NV) % NK).to(tl.int64), (pid // (NV * NK)).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
@@ -324,7 +324,7 @@ def fused_recurrent_rwkv6_bwd_kernel_dw(
     REVERSE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     NK = tl.cdiv(K, BK)
     i_k, i_nh = pid % NK, (pid // NK).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
@@ -583,7 +583,6 @@ def fused_recurrent_rwkv6(
     output_final_state: bool = False,
     reverse: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
-    **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
@@ -650,10 +649,6 @@ def fused_recurrent_rwkv6(
         >>> assert o.allclose(o_var.view(o.shape))
         >>> assert ht.allclose(ht_var)
     """
-    if 'head_first' in kwargs:
-        raise DeprecationWarning(
-            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
-        )
     if cu_seqlens is not None:
         if r.shape[0] != 1:
             raise ValueError(

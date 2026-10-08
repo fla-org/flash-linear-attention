@@ -45,7 +45,7 @@ def get_imports_from_tree(tree) -> set:
     if not tree:
         return set()
     imports = set()
-    for node in tree.body:
+    for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
             module = node.module or ""
             for alias in node.names:

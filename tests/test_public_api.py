@@ -6,8 +6,7 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import fla
-import fla.layers as layers
-import fla.models as models
+from fla import layers, models
 
 
 def test_top_level_exports_layers_and_non_config_models():

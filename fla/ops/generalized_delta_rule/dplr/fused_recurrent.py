@@ -53,7 +53,7 @@ def fused_recurrent_dplr_delta_rule_fwd_kernel(
     STORE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     NV = tl.cdiv(V, BV)
     i_v, i_nh = (pid % NV).to(tl.int64), (pid // NV).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H

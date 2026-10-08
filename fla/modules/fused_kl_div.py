@@ -123,13 +123,15 @@ def elementwise_mul_kernel(
 
 
 @dispatch('modules')
-def fused_kl_div_forward(
+def fused_kl_div_fwd(
     x: torch.Tensor,
     target_x: torch.Tensor,
     weight: torch.Tensor,
     target_weight: torch.Tensor,
     reduction: str = 'batchmean',
     accumulate_grad_in_fp32: bool = True,
+    use_dx: bool = True,
+    use_dw: bool = True,
 ):
     device = x.device
 
@@ -148,8 +150,8 @@ def fused_kl_div_forward(
 
     grad_dtype = torch.float32 if accumulate_grad_in_fp32 else weight.dtype
 
-    dx = torch.zeros_like(x, device=device)
-    dw = torch.zeros_like(weight, device=device, dtype=grad_dtype) if weight is not None else None
+    dx = torch.zeros_like(x, device=device) if use_dx else None
+    dw = torch.zeros_like(weight, device=device, dtype=grad_dtype) if use_dw else None
     # we use fp32 for loss accumulator
     loss = torch.zeros(N, dtype=torch.float32, device=device)
 
@@ -162,7 +164,7 @@ def fused_kl_div_forward(
         # [C, V]
         c_sl = F.linear(c_sx, weight)
         c_tl = F.linear(c_tx, target_weight)
-        if weight is not None and c_sx.dtype != grad_dtype:
+        if dw is not None and c_sx.dtype != grad_dtype:
             c_sx = c_sx.to(dtype=grad_dtype)
 
         # unreduced loss
@@ -189,9 +191,10 @@ def fused_kl_div_forward(
         # Thus, we need an additional scaling factor of (n_non_ignore/total) to scale the gradients.
         # [C, H]
 
-        dx[start:end] = torch.mm(c_sl, weight)
+        if dx is not None:
+            dx[start:end] = torch.mm(c_sl, weight)
 
-        if weight is not None:
+        if dw is not None:
             torch.addmm(
                 input=dw,
                 mat1=c_sl.t().to(dtype=grad_dtype),
@@ -206,31 +209,22 @@ def fused_kl_div_forward(
 
 
 @dispatch('modules')
-def fused_kl_div_backward(
+def fused_kl_div_bwd(
     do: torch.Tensor,
-    dx: torch.Tensor,
-    dw: torch.Tensor,
+    dx: torch.Tensor | None,
+    dw: torch.Tensor | None,
 ):
     # We use a Triton kernel instead of a PyTorch operation because modifying inputs in-place
     # for gradient storage and backward multiple times causes anomalies with PyTorch but not with Triton.
-    N, H = dx.shape
-    B = min(MAX_FUSED_SIZE, triton.next_power_of_2(H))
-
-    elementwise_mul_kernel[(triton.cdiv(N * H, B),)](
-        x=dx,
-        g=do,
-        N=N*H,
-        B=B,
-        num_warps=STATIC_WARPS,
-    )
-
-    # handle dw
-    if dw is not None:
-        V, H = dw.shape
-        elementwise_mul_kernel[(triton.cdiv(V * H, B),)](
-            x=dw,
+    for grad in (dx, dw):
+        if grad is None:
+            continue
+        N, H = grad.shape
+        B = min(MAX_FUSED_SIZE, triton.next_power_of_2(H))
+        elementwise_mul_kernel[(triton.cdiv(N * H, B),)](
+            x=grad,
             g=do,
-            N=V*H,
+            N=N*H,
             B=B,
             num_warps=STATIC_WARPS,
         )
@@ -250,14 +244,17 @@ class FusedKLDivLossFunction(torch.autograd.Function):
         target_weight: torch.Tensor,
         reduction: str,
         accumulate_grad_in_fp32: bool,
+        grad_enabled: bool,
     ):
-        loss, dx, dw = fused_kl_div_forward(
+        loss, dx, dw = fused_kl_div_fwd(
             x=x,
             target_x=target_x,
             weight=weight,
             target_weight=target_weight,
             reduction=reduction,
             accumulate_grad_in_fp32=accumulate_grad_in_fp32,
+            use_dx=grad_enabled and ctx.needs_input_grad[0],
+            use_dw=grad_enabled and ctx.needs_input_grad[2],
         )
         ctx.save_for_backward(dx, dw)
         return loss
@@ -266,8 +263,8 @@ class FusedKLDivLossFunction(torch.autograd.Function):
     @input_guard
     def backward(ctx, do):
         dx, dw = ctx.saved_tensors
-        dx, dw = fused_kl_div_backward(do=do, dx=dx, dw=dw)
-        return dx, None, dw, None, None, None
+        dx, dw = fused_kl_div_bwd(do=do, dx=dx, dw=dw)
+        return dx, None, dw, None, None, None, None
 
 
 def fused_kl_div_loss(
@@ -311,6 +308,7 @@ def fused_kl_div_loss(
         target_weight,
         reduction,
         accumulate_grad_in_fp32,
+        torch.is_grad_enabled(),
     )
 
 

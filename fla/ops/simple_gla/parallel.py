@@ -12,7 +12,7 @@ import triton.language as tl
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.cumsum import chunk_global_cumsum, chunk_local_cumsum
-from fla.ops.utils.op import exp2
+from fla.ops.utils.op import exp2, unflatten_program_id
 from fla.utils import (
     IS_INTEL_ALCHEMIST,
     IS_NVIDIA_HOPPER,
@@ -68,7 +68,8 @@ def parallel_simple_gla_fwd_kernel(
     IS_VARLEN: tl.constexpr,
     USE_G: tl.constexpr,
 ):
-    i_kv, i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_kv, i_t = unflatten_program_id(tl.cdiv(K, BK) * NV)
+    i_bh = tl.program_id(1).to(tl.int64)
     i_k, i_v = i_kv // NV, i_kv % NV
     i_b, i_h = i_bh // H, i_bh % H
 
@@ -422,7 +423,8 @@ def parallel_simple_gla_bwd_kernel(
     IS_VARLEN: tl.constexpr,
     USE_G: tl.constexpr,
 ):
-    i_kv, i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_kv, i_t = unflatten_program_id(tl.cdiv(K, BK) * NV)
+    i_bh = tl.program_id(1).to(tl.int64)
     i_k, i_v = i_kv // NV, i_kv % NV
     i_b, i_h = i_bh // H, i_bh % H
     dq += i_v * B * H * T * K
@@ -537,7 +539,7 @@ def parallel_simple_gla_fwd(
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
         )
-    grid = (NK * NV, NT, B * H)
+    grid = (NK * NV * NT, B * H)
     o = torch.empty(NK, *v.shape, dtype=v.dtype if NK == 1 else torch.float, device=q.device)
     attn = q.new_zeros(NK, B, H, T, T) if output_attentions else None
 
@@ -607,7 +609,7 @@ def parallel_simple_gla_bwd(
         chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
-    grid = (NK * NV, NT, B * H)
+    grid = (NK * NV * NT, B * H)
     parallel_simple_gla_bwd_kernel[grid](
         q=q,
         k=k,
@@ -694,7 +696,6 @@ def parallel_simple_gla(
     output_attentions: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     cu_seqlens_cpu: torch.LongTensor | None = None,
-    **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
@@ -724,10 +725,6 @@ def parallel_simple_gla(
         attn (torch.Tensor):
             Attention scores of shape `[B, H, T, T]` if `output_attentions=True` else `None`.
     """
-    if 'head_first' in kwargs:
-        raise DeprecationWarning(
-            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
-        )
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(

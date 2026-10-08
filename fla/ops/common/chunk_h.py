@@ -11,8 +11,8 @@ import triton.language as tl
 
 from fla.ops.backends import dispatch
 from fla.ops.utils import prepare_chunk_offsets
-from fla.ops.utils.op import exp2
-from fla.utils import autotune_cache_kwargs, check_shared_mem
+from fla.ops.utils.op import exp2, unflatten_program_id
+from fla.utils import IS_NVIDIA_HOPPER, autotune_cache_kwargs, check_shared_mem
 
 BKV_LIST = [32, 64] if check_shared_mem() else [16, 32]
 
@@ -63,7 +63,7 @@ def chunk_fwd_kernel_h(
     IS_VARLEN: tl.constexpr,
     STATE_V_FIRST: tl.constexpr,
 ):
-    i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    i_k, i_v, i_nh = unflatten_program_id(tl.cdiv(K, BK), tl.cdiv(V, BV))
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
@@ -177,7 +177,8 @@ def chunk_fwd_kernel_h(
     key=['BT', 'USE_G', 'USE_GK', 'USE_GV', 'STATE_V_FIRST', 'K', 'V'],
     **autotune_cache_kwargs,
 )
-@triton.jit(do_not_specialize=['T'])
+# keep scale=1 dynamic to avoid a Hopper masked-load shared-memory miscompile.
+@triton.jit(do_not_specialize=['T', 'scale'] if IS_NVIDIA_HOPPER else ['T'])
 def chunk_bwd_kernel_dh(
     q,
     g,
@@ -210,7 +211,7 @@ def chunk_bwd_kernel_dh(
     IS_VARLEN: tl.constexpr,
     STATE_V_FIRST: tl.constexpr,
 ):
-    i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    i_k, i_v, i_nh = unflatten_program_id(tl.cdiv(K, BK), tl.cdiv(V, BV))
     i_n, i_hq = i_nh // HQ, i_nh % HQ
     i_h = i_hq // NG
     if IS_VARLEN:
@@ -337,7 +338,7 @@ def chunk_fwd_h(
     state_shape = (V, K) if state_v_first else (K, V)
     h = k.new_empty(B, NS, H, *state_shape, dtype=k.dtype if not states_in_fp32 else torch.float)
     ht = k.new_empty(N, H, *state_shape, dtype=torch.float) if output_final_state else None
-    def grid(meta): return (triton.cdiv(K, meta['BK']), triton.cdiv(V, meta['BV']), N * H)
+    def grid(meta): return (triton.cdiv(K, meta['BK']) * triton.cdiv(V, meta['BV']) * N * H,)
     chunk_fwd_kernel_h[grid](
         k=k,
         v=v,
@@ -403,7 +404,7 @@ def chunk_bwd_dh(
     dh = k.new_empty(B, NS, HQ, *state_shape, dtype=k.dtype if not states_in_fp32 else torch.float)
     dh0 = torch.empty_like(h0, dtype=torch.float) if h0 is not None else None
 
-    def grid(meta): return (triton.cdiv(K, meta['BK']), triton.cdiv(V, meta['BV']), N * H)
+    def grid(meta): return (triton.cdiv(K, meta['BK']) * triton.cdiv(V, meta['BV']) * N * H,)
     chunk_bwd_kernel_dh[grid](
         q=q,
         g=g,

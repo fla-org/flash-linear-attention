@@ -48,7 +48,7 @@ def parallel_path_bwd_dkv_kernel(
     USE_GATE: tl.constexpr,
     NUM_BLOCKS: tl.constexpr,
 ):
-    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1)
+    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
     i_h = i_hq // G
 
