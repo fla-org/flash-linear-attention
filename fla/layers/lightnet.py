@@ -133,6 +133,10 @@ class LightNetAttention(nn.Module):
 
         cu_seqlens = kwargs.get('cu_seqlens')
         hidden_states, indices, cu_seqlens = unpad_hidden_states(hidden_states, cu_seqlens, attention_mask, q_len)
+        # with one query per row, B retained tokens imply no padding.
+        if indices is not None and q_len == 1 and hidden_states.shape[1] == batch_size:
+            hidden_states = hidden_states.reshape(batch_size, 1, self.hidden_size)
+            indices, cu_seqlens = None, None
         if self.use_short_conv:
             conv_state_q, conv_state_k, conv_state_v = None, None, None
             if last_state is not None:

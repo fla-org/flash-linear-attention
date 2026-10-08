@@ -265,4 +265,9 @@ def logcumsumexp_normalize(
     """Return cumulative normalized keys, log-decay gates, and FP32 final normalizers per sequence."""
     if cu_seqlens is not None and x.shape[0] != 1:
         raise ValueError("Packed inputs with cu_seqlens must have batch size 1.")
+    if initial_state is not None:
+        N = x.shape[0] if cu_seqlens is None else cu_seqlens.numel() - 1
+        expected_shape = (N, 1, *x.shape[2:])
+        if initial_state.shape != expected_shape:
+            raise ValueError(f"initial_state must have shape {expected_shape}, got {tuple(initial_state.shape)}.")
     return LogcumsumexpNormalizeFunction.apply(x, initial_state, cu_seqlens)
