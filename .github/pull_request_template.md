@@ -1,6 +1,6 @@
 ## Summary
 
-<!-- Start with **TL;DR:** and 1–2 sentences describing one concrete outcome and who it affects. Link the issue or design discussion. -->
+<!-- Start with 1–2 sentences describing one concrete outcome and who it affects. Link the issue or design discussion. -->
 <!-- Add only rationale, trade-offs, or limitations needed for review; leave variable/file inventories and implementation narration to the diff. See CONTRIBUTING.md#pr-description. -->
 
 ## Test plan

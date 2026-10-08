@@ -459,7 +459,7 @@ Use the same convention for the PR title: `[Tag] <specific outcome>`. CI checks 
 
 Use the [PR template](.github/pull_request_template.md). The description should let a reviewer identify the problem, outcome, affected users, and evidence before opening the diff. Keep it accurate as the implementation changes.
 
-**Summary.** Start with `**TL;DR:**` and one or two sentences stating the concrete outcome: what now works, what becomes faster, or what capability is added. For a bug, name the triggering condition and resulting behavior. Link the issue or design discussion. A routine fix usually needs only one short paragraph; a complex change may need a short explanation of the approach and its trade-offs.
+**Summary.** Start with one or two sentences stating the concrete outcome: what now works, what becomes faster, or what capability is added. For a bug, name the triggering condition and resulting behavior. Link the issue or design discussion. A routine fix usually needs only one short paragraph; a complex change may need a short explanation of the approach and its trade-offs.
 
 Keep the description focused on observable behavior and review decisions. Include an implementation detail only when it explains correctness, the choice of algorithm, compatibility, or a material risk. Public API names can identify the contract being changed. Leave variable inventories, file-by-file summaries, line-by-line mechanics, and the history of attempted approaches to the diff or linked investigation. Avoid unsupported claims such as "more robust", "cleaner", or "bit-identical"; describe the behavior or equivalence actually verified. Do not repeat the same point in the title, summary, and a separate list of changes.
 
@@ -468,13 +468,13 @@ For example, these short openings are adapted from FLA PRs [#1299](https://githu
 ```markdown
 ## Summary
 
-**TL;DR:** KDA calls with negative eigenvalues or missing optional gate parameters now use the Triton implementation, preventing incorrect results or failures when FlashKDA is installed.
+KDA calls with negative eigenvalues or missing optional gate parameters now use the Triton implementation, preventing incorrect results or failures when FlashKDA is installed.
 ```
 
 ```markdown
 ## Summary
 
-**TL;DR:** Adds optional sliding-window attention to single-step decoding. Existing calls keep full-context attention by default.
+Adds optional sliding-window attention to single-step decoding. Existing calls keep full-context attention by default.
 ```
 
 **Test plan.** State which regression or new behavior the tests protect, the commands actually run, and their results. For accelerator tests, include the hardware, relevant software versions, and backend or environment flags. Separate passed, failed, skipped, and unrun checks; a test count alone does not show that the modified path ran. Reproduce suspected pre-existing failures on the baseline and link the evidence. Do not describe an incomplete run or a smoke subset as a full pass.
@@ -531,7 +531,7 @@ Reply to each actionable comment with the change made or a concrete reason for k
 
 Before submitting, please go through the following checklist:
 
-- The title and opening TL;DR identify one concrete outcome.
+- The title and summary identify one concrete outcome.
 - The diff is within 500 changed lines, or the large-PR acknowledgement and justification are filled in.
 - The description records actual validation and affected users, with no unrelated changes or implementation inventory.
 - Code follows the project's style conventions.

@@ -27,7 +27,7 @@ Use this skill before opening a PR or updating its scope and evidence during rev
 
 Follow [PR Description](../../../CONTRIBUTING.md#pr-description) and [Evidence by Change Type](../../../CONTRIBUTING.md#evidence-by-change-type):
 
-- Open `Summary` with a one- or two-sentence TL;DR naming the problem or capability and the observable result. Include only the rationale, compatibility effects, or limitations needed to evaluate it.
+- Open `Summary` with one or two sentences naming the problem or capability and the observable result. Include only the rationale, compatibility effects, or limitations needed to evaluate it.
 - Remove variable inventories, file-by-file narration, repeated claims, and the history of attempted approaches. Keep reproducible commands and compact evidence tables; link or collapse long logs.
 - Make every correctness or performance claim traceable to evidence for the relevant path. Describe the final implementation and re-run affected validation when review changes invalidate earlier results.
 - Preserve the template checklist wording. Tick the first four items only when complete or inapplicable, recording the reason in the relevant section. The minor/cosmetic box and large-PR box are conditional; do not tick every box automatically.
