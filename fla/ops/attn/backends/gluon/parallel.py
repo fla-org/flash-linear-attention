@@ -1103,6 +1103,12 @@ def parallel_attn_bwd_kernel_gluon(
             if USE_SINK and MODE == 0:
                 sink_expectation += gl.sum(prob * dp, 1)
             ds = prob * (dp - delta_b)
+            if not USE_SINK:
+                # a single-key softmax has zero score gradient, independent of reduction roundoff.
+                single_key = rows[:, None] == bos if MODE == 0 else cols[None, :] == bos
+                if W == 1:
+                    single_key = gl.full([BM, BN], True, gl.int1, sl)
+                ds = gl.where(single_key, 0., ds)
             if USE_GATE:
                 dg += gl.sum(ds, 1) * (1 if MODE == 0 else -1)
             ds_shared.store(ds.to(dtype))
