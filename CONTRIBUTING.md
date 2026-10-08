@@ -117,6 +117,8 @@ FLA_CI_ENV=0 pytest tests/
 
 ## Project Structure
 
+Organize code by responsibility. Use one file for a self-contained component and a package when it needs multiple cohesive implementation files. Keep each backend with its owning operation; add shared code only for behavior that is actually shared. Avoid wrapper-only layers and directories reserved for hypothetical extensions.
+
 ```
 fla/
 ├── layers/          # PyTorch attention layer implementations
@@ -179,7 +181,7 @@ Key rules:
 - Use `TYPE_CHECKING` for imports only needed at type-check time
 - **Line width**: use the full 127 characters before reaching for a line break — a statement that fits on one line stays on one line.
 - **Calls**: prefer keyword arguments over positional ones. A call that fits within the limit stays on one line; a call that overflows breaks with a hanging indent, **one keyword argument per line** — never several.
-- **Parameter order**: keep related parameters adjacent, and pass keyword arguments at call sites in the same order they appear in the signature.
+- **Parameter order**: group related parameters in function and constructor signatures, and keep corresponding interfaces consistent. Pass keyword arguments in signature order. Preserve established positional APIs when refactoring.
 
 ### Imports
 
@@ -237,6 +239,8 @@ Beyond narration that restates the next line, these comment patterns are banned:
 Never treated as excess comments: the license header required by `scripts/check_header.py`, a one-line attribution with a URL for adapted code, shape/dtype annotations, and `NOTE:` / `WARNING:` prefixes on a genuine "why" comment.
 
 ### Prose and Markdown
+
+Document the current design, supported usage, and constraints the reader needs. Do not turn READMEs or workflow guides into development retrospectives, migration diaries, or inventories of compatibility patches. Put temporary migration details in the PR or release notes. Keep shared rules in one authoritative document and link to them; omit implementation details that do not help readers use or change the code.
 
 Don't hard-wrap prose at an arbitrary short column — this covers Markdown files, Python docstrings (including `Args:` / `Returns:` descriptions), and comment paragraphs. Either keep a paragraph on a single line, or break **only at sentence or clause boundaries** (after a `.`, `,`, `;`, or `—`), never mid-clause. In Python files the 127-character limit still applies, so wrap a docstring or comment at a clause boundary before it reaches the limit. Format Markdown tables with aligned columns so the `|` separators line up; table rows are exempt from the line limit.
 

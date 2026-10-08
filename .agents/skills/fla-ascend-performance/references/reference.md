@@ -1,111 +1,85 @@
-# Ascend Profiling + Optimization Reference
+# Ascend profiling reference
 
-Diagnosis table (profiler signal → bottleneck → fix): see [SKILL.md §3](../SKILL.md#3-diagnose-bottlenecks).
+Use this reference for collection options, CSV interpretation, and choosing the next optimization. Kernel correctness hazards are in [TRAPS.md](TRAPS.md); implementation examples are in [cases.md](cases.md).
 
-## Choosing AiCMetrics
+## Collection and analysis
 
-Each profiling run supports **exactly one** `aic_metrics`. Collect multiple times when you need different evidence.
+Run the scripts from the active NPU environment. `profile_npu.py` accepts a workload file or inline source defining `workload()`. It executes that callable repeatedly, so initialize reusable inputs outside the callable and make repeated forward/backward calls valid.
 
-| metrics | Key CSV columns | Question answered |
-|---------|-----------------|-------------------|
-| `PipeUtilization` (default first pass) | `aic_mac_ratio`, `aiv_vec_ratio`, `*_mte1/2/3_ratio`, `*_scalar_ratio`, `cube_utilization(%)` | Compute vs move vs scalar dominance |
-| `MemoryUB` | `aiv_ub_read/write_bw_*`, `aic_ub_*` | UB bandwidth saturation / R/W imbalance |
-| `Memory` / `MemoryAccess` / `MemoryL0` | matching memory columns | Finer memory paths |
-| `L2Cache` | L2 / icache related | Cache hit / reuse |
-| `ArithmeticUtilization` | arithmetic pipes | Arithmetic unit busy time |
-| `ResourceConflictRatio` | conflict related | Whether resource conflicts stall |
-
-Colloquial “CUDA utilization” → Ascend **Cube / MAC** (`aic_mac_ratio` / `cube_utilization(%)`).
-
-## Output layout
-
-```
-{name}_profiling_{timestamp}/
-  localhost..._ascend_pt/
-    ASCEND_PROFILER_OUTPUT/
-      kernel_details.csv
-      op_statistic.csv
-      operator_details.csv
-      api_statistic.csv
-      step_trace_time.csv
-      trace_view.json
+```bash
+python .agents/skills/fla-ascend-performance/scripts/profile_npu.py \
+  --name my_op --out-dir profile/my_op-npu \
+  --metrics PipeUtilization --analyze --exec-file path/to/workload.py
 ```
 
-## Host UB model
+For library use, add the scripts directory to `PYTHONPATH` and call `profile_callable`:
+
+```bash
+export PYTHONPATH="$PWD/.agents/skills/fla-ascend-performance/scripts${PYTHONPATH:+:$PYTHONPATH}"
+```
+
+```python
+from profile_npu import profile_callable
+
+trace_dir = profile_callable(fn=workload, name="my_op", out_dir="profile/my_op-npu", aic_metrics="PipeUtilization")
+```
+
+The returned directory contains the profiler output:
 
 ```text
-peak ≈ memory_multiplier * BT * BD * dtype_size
-util = peak / ub_capacity
-safe_util = peak / (ub_capacity * safety_margin)
+my_op_profiling_TIMESTAMP/
+└── localhost..._ascend_pt/
+    └── ASCEND_PROFILER_OUTPUT/
+        ├── op_statistic.csv
+        └── kernel_details.csv
 ```
 
-| Host signal | Next step |
-|-------------|-----------|
-| `safe_util` underused | Calibrate `mem_mult`, non-PoT tiles; measure compile-safe UB limit |
-| `safe_util` ≈ 100% still slow | Not a capacity issue — revisit pipe/bandwidth (SKILL §3) |
+Pass that exact run directory when analyzing an existing trace. The analyzer takes the first matching CSV under the supplied directory, so a parent containing several runs can select an older result.
 
-After changing `mem_mult`/tiles, always re-check compile + numeric correctness.
+```bash
+python .agents/skills/fla-ascend-performance/scripts/analyze_profile.py \
+  profile/my_op-npu/my_op_profiling_TIMESTAMP --kernel-filter my_kernel --top-k 20
+```
 
-## Common failures and fixes
+`--kernel-filter` applies to kernel details. If no name matches, the analyzer displays the top kernels instead; confirm the printed names before attributing metrics to the target.
 
-- **UB overflow**: fewer concurrent fp32 tiles; smaller BK/BV; split kernels; avoid accidental large broadcasts. Also check for a **runtime** `block_ptr` vs masked-DMA branch — both paths stay live; constexpr-split (see [cases.md § causal_conv1d](cases.md#causal_conv1dpy--1d-core-grid--constexpr-dma-split)).
-- **Grid limit**: host-split axes + offsets, **or** switch to 1D core-grid; Cube-bound → `num_aicore`, Vector-bound → `num_vectorcore` / `get_multiprocessor_count`. Do not only grow tiles.
-- **MTE `DDR address out of range`**: `make_block_ptr` block end past packed `B*T` rows (or `BT+W-1` halo). Masked tail DMA, or constexpr-split so bulk never overshoots.
-- **Compile of `None` pointer arithmetic**: `if CONSTEXPR_FLAG or runtime:` still lowers the else. Nest the constexpr flag in its own `if`/`elif`.
-- **Varlen wrong only on long seqs**: after slicing `chunk_indices`, check for a second global `NT_OFFSET`; on core-grid paths, verify `chunk_offsets` → `(i_n, i_t)` against `cu_seqlens`.
-- **Wrong results only in multi-task core-grid loops**: rebind local base pointers each `task_id`; avoid in-place `ptr +=` across iterations.
-- **Occasional bf16 NaN**: mask before exp, fp32 accum, exp/exp2 scale, solve precision.
-- **`tl.dot` left operand clobbered (Ascend only)**: `tl.dot(lhs, rhs, …)` may mutate `lhs` in UB (CUDA does not). Any later read of that tile — second lhs, rhs, store, or arithmetic — can see corrupted data. Two fixes: **GM reload** between stages (e.g. `wy_fast` u→w on `b_A`) or **`tile + 0.0` before the first lhs dot** when multiple disposable copies are needed in tight sequence. Post-dot `+ 0.0` is invalid. Full per-kernel catalog: [cases.md § tl.dot lhs clobber](cases.md#tldot-lhs-clobber--repo-wide-case-catalog). Symptom: numeric mismatch vs Torch, no compile error. Tests: `test_gdn_kernels.py`, `test_solve_tril.py`.
-- **Correct but slower**: launch count (split inter/intra + host grid chunks), tiny tiles, full-size fp32 scratch, extra layout converts, unsynced fake baselines.
-- **Local pass, full gate NaN**: tail writeback, boundary masks, invalid exp regions, scratch init before read.
-- **Compile-variant explosion**: do not specialize on T; move feature flags to heuristics/constexpr.
-- **`num_warps` / `num_stages` on NPU**: unsupported by Ascend Triton — remove from launches/autotune; never use as an optimization knob.
-- **int32 chunk-address overflow**: `NT = cdiv(T, BT)` under `do_not_specialize` is int32; `(NT-1)*HV*K*V` wraps before `.to(tl.int64)` on long context (K=V=128, HV=64, BT=64 → T>131K). Same class without `do_not_specialize`: packed conv `i_t * BT` then `offset * D` (D=4096 → T>524K). Fix: `tl.cast(i_t, tl.int64)*BT`, `tl.cast(i_b, tl.int64)*T`, `tl.cast(NT-1, tl.int64)*DH_CS` — never post-multiply `.to(tl.int64)`, never `B.to(tl.int64)` on specialized args.
-- **`constexpr` has no `.to()` / int64 `make_block_ptr` offsets**: specialized `B`/`T` (and folded `i_t` when NT=1) fail `x.to(tl.int64)` at compile. Use `tl.cast(x, tl.int64)`. Block-pointer `offsets/block_shape` must stay int32 — keep `t0` for flattened `* D` only.
-- **Ungated path untested**: kernel tests that always pass `g` miss `g=None` regressions (in-place `dv`, scale folds, tiling). Parametrize `use_g` on the existing test + `g=None` reference branch — no new CI file required.
-- **Unsupported triton-ascend ops**: work around in-kernel; list every unsupported op in the round summary so follow-ups can track compiler gaps.
+## Choosing metrics
 
-## Repo code index
+Each profiling run collects one `aic_metrics` set. Use separate runs for complementary metrics and keep the workload unchanged.
 
-Paths relative to the `flash-linear-attention` repo root. Detailed case notes: [cases.md](cases.md).
+| Metric set                                       | Use                                                                     |
+| ------------------------------------------------ | ----------------------------------------------------------------------- |
+| `PipeUtilization`                                | First pass: compare Cube, Vector, scalar, and memory-transfer activity. |
+| `MemoryUB`                                       | Check UB read/write bandwidth when memory traffic may limit the kernel. |
+| `Memory`, `MemoryAccess`, `MemoryL0`             | Inspect other memory paths.                                             |
+| `L2Cache`                                        | Investigate cache reuse.                                                |
+| `ArithmeticUtilization`, `ResourceConflictRatio` | Investigate arithmetic occupancy or resource conflicts.                 |
 
-### Backend wiring
+Available metric names depend on the installed `torch_npu`; the collector reports available names when an option is unknown.
 
-- `fla/backends.py` — backend registration, selection, and fallback
-- `fla/modules/norm/l2norm/backends/__init__.py` — module backend discovery
-- `fla/ops/common/backends/triton_ascend/__init__.py` — `IS_NPU` + lazy import
-- `fla/ops/gated_delta_rule/backends/triton_ascend/__init__.py` — multi-function backend example
+## Diagnosis
 
-### UB / tile / grid
+Start with total duration in `op_statistic.csv`, then inspect the dominant kernel in `kernel_details.csv`. Pipe activity alone does not establish the bottleneck.
 
-- `fla/utils/ascend_ub_manager.py` — `compute_row_tile_block_size`, `iter_axis_launch_chunks`
-- `fla/ops/common/backends/triton_ascend/chunk_scaled_dot_kkt.py` — peak tile, BC, UB-safe BK
-- `fla/ops/common/backends/triton_ascend/chunk_delta_h.py` — fwd recurrence, V tiling, bwd `dhu` (see [cases.md](cases.md))
-- `fla/ops/common/backends/triton_ascend/chunk_o.py` — fwd fuse + bwd G_T_CONTIG (see [cases.md](cases.md))
-- `fla/ops/gated_delta_rule/backends/triton_ascend/wy_fast.py` — multi-stage bwd; **`tl.dot` lhs clobber** (GM reload + copy) — [cases.md](cases.md)
-- `fla/ops/kda/backends/triton_ascend/wy_fast.py` — KDA variant of wy_fast; same clobber patterns
-- `fla/ops/kda/backends/triton_ascend/chunk_intra.py` — inter solve fused; multi-copy block merge — [cases.md](cases.md)
-- `fla/ops/kda/backends/triton_ascend/chunk_bwd.py` — KDA bwd (`dAv`, wy dw/dqkg); `b_do_c` pattern — [cases.md](cases.md)
-- `fla/ops/utils/backends/triton_ascend/solve_tril.py` — blocked triangular solve; 32×32/64×64 merge clobber guards — [cases.md](cases.md)
-- `fla/ops/utils/backends/triton_ascend/cumsum.py` — scalar/vector split and leftover UB budget
-- `fla/modules/conv/backends/triton_ascend/ops.py` — 1D core-grid conv; Vector `num_vectorcore`; constexpr `TAIL_MODE` DMA split; `extract_slice` — [cases.md](cases.md)
+| Evidence                                               | Check next                                                                                                   |
+| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
+| Target kernel absent or many small fallback operations | Backend selection and fusion.                                                                                |
+| High Vector or Cube activity                           | Tile shape, useful work per tile, and scalar overhead around compute.                                        |
+| High MTE activity                                      | Reuse, intermediate writebacks, and strided loads; inspect [gate loading](g-contiguous-loading.md).          |
+| High scalar activity                                   | Address generation, branches, and repeated per-tile setup.                                                   |
+| High UB bandwidth with low compute activity            | Live buffers, layout conversions, and repeated UB reads/writes.                                              |
+| Low activity despite UB overflow at larger tiles       | Mutually exclusive DMA paths may remain live; see [DMA splitting](TRAPS.md#dma-paths-and-optional-pointers). |
+| Many host launches for grid chunks                     | Consider a 1D task loop with the appropriate Cube or Vector core count.                                      |
 
-### Split / numerics / varlen
+## UB planning
 
-- `fla/ops/gated_delta_rule/backends/triton_ascend/chunk_fwd.py` — stage split for UB
-- `fla/ops/utils/backends/triton_ascend/solve_tril.py` — blocked triangular solve, ieee/RTNE
-- `fla/ops/gated_delta_rule/backends/triton_ascend/gate.py` — heuristics, `do_not_specialize=['T']`
+Estimate peak live storage from simultaneous buffers, their dtype, and any compiler-created copies. Use `fla.utils.ascend_ub_manager` for device capacity and tiling rather than hard-coding the UB size. The helper's safety margin reserves capacity; it is separate from the multiplier that estimates live buffers.
 
-### Tests and benchmarks
+If more capacity is available, test a larger tile and verify compilation and numerics. If the live set already fills the budget, improve reuse or split stages. Model forward and backward separately; inline gate computation can need more UB than a precomputed-gate path.
 
-- `tests/ops/test_gdn_kernels.py` — per-kernel oracle
-- `tests/modules/test_conv.py` — causal_conv1d (NPU: `-k "not cuda"`)
-- `tests/utils/test_ascend_ub_manager.py` — tiling/grid boundaries
-- `tests/conftest.py` — NaN memory poisoning
-- `benchmarks/ops/verify.py` — correctness-gated benchmark (do not claim wins with `--no-gate`)
-- `benchmarks/ops/run.py` / `registry.py` — unified timing entrypoints
-- `.github/workflows/ascend-a2-ci.yml` — A2 CI; new ops need their own test entrypoints
+Useful code locations:
 
-## Environment
-
-Use the Python/NPU environment already active in the current terminal (including any activated conda/venv). Run collection, analysis, and benchmarks in the same shell; do not spawn a new shell or switch environments mid-workflow. If the terminal has no NPU stack loaded yet, activate the project's Ascend environment first, then continue in that same session.
+- `fla/utils/ascend_ub_manager.py`: tiling and grid helpers.
+- `fla/utils/hardware.py`: `get_multiprocessor_count`, including `use_aicore=True` for Cube work.
+- `fla/modules/norm/l2norm/backends/triton_ascend/__init__.py`: class registration, availability, and lazy kernel imports.
+- `tests/ops/test_gdn_kernels.py`, `tests/ops/test_solve_tril.py`, and `tests/modules/test_conv.py`: relevant kernel comparisons.

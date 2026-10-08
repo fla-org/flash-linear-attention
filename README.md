@@ -98,7 +98,7 @@
 | 2024 | Mamba2                        | [Transformers are SSMs: Generalized Models and Efficient Algorithms Through Structured State Space Duality](https://arxiv.org/abs/2405.21060) | [code](https://github.com/fla-org/flash-linear-attention/blob/main/fla/models/mamba2)                  |
 | 2024 | GSA                           | [Gated Slot Attention for Efficient Linear-Time Sequence Modeling](https://arxiv.org/abs/2409.07146)                                          | [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/models/gsa)                     |
 | 2024 | MLA                           | [DeepSeek-V2: A Strong, Economical, and Efficient Mixture-of-Experts Language Model](https://arxiv.org/abs/2405.04434)                        | [code](https://github.com/fla-org/flash-linear-attention/blob/main/fla/layers/mla.py)                  |
-| 2024 |    Stick-Breaking Attention   | [Scaling Stick-Breaking Attention: An Efficient Implementation and In-depth Study](https://arxiv.org/abs/2410.17980)                          | [code](https://github.com/fla-org/flash-linear-attention/blob/main/fla/layers/stickbreaking_attn.py)   |
+| 2024 | Stick-Breaking Attention      | [Scaling Stick-Breaking Attention: An Efficient Implementation and In-depth Study](https://arxiv.org/abs/2410.17980)                          | [code](https://github.com/fla-org/flash-linear-attention/blob/main/fla/layers/stickbreaking_attn.py)   |
 | 2025 | Samba                         | [Samba: Simple Hybrid State Space Models for Efficient Unlimited Context Language Modeling](https://arxiv.org/abs/2406.07522)                 | [code](https://github.com/fla-org/flash-linear-attention/blob/main/fla/models/samba)                   |
 | 2025 | Gated DeltaNet                | [Gated Delta Networks: Improving Mamba2 with Delta Rule](https://arxiv.org/abs/2412.06464)                                                    | [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/ops/gated_delta_rule)           |
 | 2025 | RWKV7                         | [RWKV-7 "Goose" with Expressive Dynamic State Evolution](https://arxiv.org/abs/2503.14456)                                                    | [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/ops/rwkv7)                      |
@@ -142,7 +142,7 @@ pip install flash-linear-attention[rocm]
 See [INSTALL.md](INSTALL.md) for the full backend table, XPU / NPU (Ascend) / CPU flows, source installs, and the `--no-deps` path for `torch` pre-release / `triton-nightly`.
 
 > [!NOTE]
-> Behavior change vs. pre-v0.5: bare `pip install flash-linear-attention` no longer pulls `torch` / `triton`. Pick a backend extra. This fixes ROCm / XPU / NPU users silently getting CUDA wheels.
+> Choose a backend extra to install the appropriate `torch` and `triton` dependencies. Bare `pip install flash-linear-attention` does not install them.
 
 ## Usage
 
