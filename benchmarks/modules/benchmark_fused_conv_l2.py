@@ -125,16 +125,18 @@ def main():
     results = []
     for layout in args.layouts:
         for length in args.lengths:
-            results.extend(benchmark(
-                B=args.batch_size,
-                T=length,
-                H=args.num_heads,
-                head_dim=args.head_dim,
-                packed=layout == 'varlen',
-                modes=args.modes,
-                repeats=args.repeats,
-                rep_ms=args.rep_ms,
-            ))
+            # Backward graph capture must not depend on inputs created on the legacy stream.
+            with torch.cuda.stream(torch.cuda.Stream()):
+                results.extend(benchmark(
+                    B=args.batch_size,
+                    T=length,
+                    H=args.num_heads,
+                    head_dim=args.head_dim,
+                    packed=layout == 'varlen',
+                    modes=args.modes,
+                    repeats=args.repeats,
+                    rep_ms=args.rep_ms,
+                ))
             if args.json:
                 args.json.parent.mkdir(parents=True, exist_ok=True)
                 args.json.write_text(json.dumps(dict(metadata=metadata, results=results), indent=2) + '\n')

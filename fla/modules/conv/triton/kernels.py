@@ -44,7 +44,7 @@ def causal_conv1d_fwd_tile(
     HAS_RESIDUAL: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
 ):
-    o_w = tl.arange(0, BW).to(tl.int64) + W - BW
+    o_w = tl.arange(0, BW) + W - BW
     m_w = o_w >= 0
     m_y = (o_t < T)[:, None] & m_d[None, :]
 
@@ -149,10 +149,10 @@ def causal_conv1d_fwd_kernel(
     USE_INITIAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_d, i_t, i_b = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_d, i_t, i_b = tl.program_id(0), tl.program_id(1), tl.program_id(2)
 
     if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int64), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
         p_x = x + bos * stride_x_t
@@ -161,8 +161,8 @@ def causal_conv1d_fwd_kernel(
         bos, eos = (i_b * T).to(tl.int64), (i_b * T + T).to(tl.int64)
         p_x = x + tl.cast(i_b, tl.int64) * stride_x_n
 
-    o_d = i_d * BD + tl.arange(0, BD).to(tl.int64)
-    o_t = i_t.to(tl.int64) * BT + tl.arange(0, BT).to(tl.int64)
+    o_d = i_d * BD + tl.arange(0, BD)
+    o_t = i_t.to(tl.int64) * BT + tl.arange(0, BT)
     b_y = causal_conv1d_fwd_tile(
         p_x=p_x,
         weight=weight,
