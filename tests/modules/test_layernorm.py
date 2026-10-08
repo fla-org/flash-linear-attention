@@ -55,7 +55,7 @@ def test_layernorm(B: int, H: int, T: int, D: int, elementwise_affine: bool, bia
 
 @pytest.mark.parametrize("B", [2])
 @pytest.mark.parametrize("T", [512])
-@pytest.mark.parametrize("D", [64, 128, 512, 1024, 2048])
+@pytest.mark.parametrize("D", [64, 128, 512, 1024, 2048, 2052])
 @pytest.mark.parametrize("G", [1, 4])
 @pytest.mark.parametrize("is_rms_norm", [True, False])
 def test_groupnorm(B: int, T: int, D: int, G: int, is_rms_norm: bool):

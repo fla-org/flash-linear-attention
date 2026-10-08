@@ -24,11 +24,12 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.backends import dispatch
 from fla.ops.gdn2.chunk_intra_token_parallel import chunk_gdn2_fwd_intra_token_parallel
 from fla.ops.gdn2.wy_fast import recompute_w_u_fwd_gdn2
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.cache import fla_cache_autotune
-from fla.ops.utils.op import exp2, gather
+from fla.ops.utils.op import exp2, gather, unflatten_program_id
 from fla.utils import IS_GATHER_SUPPORTED, IS_TF32_SUPPORTED, autotune_cache_kwargs
 
 if IS_TF32_SUPPORTED:
@@ -69,7 +70,7 @@ def chunk_gdn2_fwd_kernel_intra_sub_chunk(
     IS_VARLEN: tl.constexpr,
     USE_GATHER: tl.constexpr,
 ):
-    i_t, i_i, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    i_t, i_i, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
 
     if IS_VARLEN:
@@ -458,7 +459,8 @@ def chunk_gdn2_bwd_kernel_intra(
     SAFE_GATE: tl.constexpr,
     USE_GATHER: tl.constexpr,
 ):
-    i_kc, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_kc, i_t = unflatten_program_id(tl.cdiv(K, BK) * NC)
+    i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     i_k, i_i = i_kc // NC, i_kc % NC
 
@@ -690,6 +692,7 @@ def chunk_gdn2_bwd_kernel_intra(
     tl.store(p_dg2, b_dg2.to(p_dg2.dtype.element_ty), mask=m_kc)
 
 
+@dispatch('gdn2')
 def chunk_gdn2_fwd_intra(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -824,7 +827,7 @@ def chunk_gdn2_bwd_intra(
     db2 = q.new_empty(NK, B, T, H, BK, dtype=torch.float32)
     dg2 = torch.empty_like(dg, dtype=torch.float32)
 
-    grid = (NK * NC, NT, B * H)
+    grid = (NK * NC * NT, B * H)
     chunk_gdn2_bwd_kernel_intra[grid](
         q=q,
         k=k,

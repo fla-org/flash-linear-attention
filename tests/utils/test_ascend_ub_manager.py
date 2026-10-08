@@ -11,8 +11,7 @@ import pytest
 import torch
 import triton
 
-import fla.utils.ascend_ub_manager as ub_mod
-from fla.utils import IS_NPU
+from fla.utils import IS_NPU, ascend_ub_manager
 from fla.utils.ascend_ub_manager import (
     _FALLBACK_UB_CAPACITY_BITS,
     ASCEND_MAX_GRID_DIM,
@@ -39,9 +38,9 @@ requires_npu = pytest.mark.skipif(
 
 @pytest.fixture(autouse=True)
 def reset_ub_manager_singleton():
-    ub_mod._ub_manager = None
+    ascend_ub_manager._ub_manager = None
     yield
-    ub_mod._ub_manager = None
+    ascend_ub_manager._ub_manager = None
 
 
 @pytest.fixture
@@ -51,10 +50,10 @@ def ub_capacity_bits():
 
 class TestNormalizeAndDefaultStrategy:
     def test_normalize_tiling_dims_int_and_tuple(self):
-        assert ub_mod._normalize_tiling_dims(0) == {0}
-        assert ub_mod._normalize_tiling_dims((0, 1)) == {0, 1}
-        assert ub_mod._normalize_tiling_dims(()) == set()
-        assert ub_mod._normalize_tiling_dims('bad') == set()
+        assert ascend_ub_manager._normalize_tiling_dims(0) == {0}
+        assert ascend_ub_manager._normalize_tiling_dims((0, 1)) == {0, 1}
+        assert ascend_ub_manager._normalize_tiling_dims(()) == set()
+        assert ascend_ub_manager._normalize_tiling_dims('bad') == set()
 
     def test_default_strategy_empty_inputs(self):
         assert _default_strategy(
@@ -102,7 +101,7 @@ class TestUBManager:
 
     def test_invalid_env_var_falls_back(self, monkeypatch):
         monkeypatch.setenv('ASCEND_UB_CAPACITY_BITS', 'not-a-number')
-        monkeypatch.setattr(ub_mod, 'is_npu_available', lambda: False)
+        monkeypatch.setattr(ascend_ub_manager, 'is_npu_available', lambda: False)
         with warnings.catch_warnings(record=True) as records:
             warnings.simplefilter('always')
             manager = UBManager()
@@ -111,7 +110,7 @@ class TestUBManager:
 
     def test_npu_unavailable_fallback(self, monkeypatch):
         monkeypatch.delenv('ASCEND_UB_CAPACITY_BITS', raising=False)
-        monkeypatch.setattr(ub_mod, 'is_npu_available', lambda: False)
+        monkeypatch.setattr(ascend_ub_manager, 'is_npu_available', lambda: False)
         with warnings.catch_warnings(record=True) as records:
             warnings.simplefilter('always')
             manager = UBManager()

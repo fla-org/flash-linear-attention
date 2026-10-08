@@ -271,7 +271,7 @@ def attnres_bwd_kernel_dqdw(
     BD: tl.constexpr,
     HAS_ONORM: tl.constexpr,
 ):
-    i_d = tl.program_id(0).to(tl.int32)
+    i_d = tl.program_id(0).to(tl.int64)
 
     # [BD]
     o_d = i_d * BD + tl.arange(0, BD)

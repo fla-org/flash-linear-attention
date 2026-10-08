@@ -1,109 +1,97 @@
 # FLA Environment Variables
 
-This page documents the environment variables that influence FLA's behavior at
-runtime. Variables are grouped by what they control:
+Set environment variables before starting Python. Boolean flags accept `0` / `1` unless noted otherwise.
 
+- [Operator backend dispatch](#operator-backend-dispatch)
 - [Convolution backend](#convolution-backend)
 - [Numerical precision](#numerical-precision)
 - [Hardware acceleration](#hardware-acceleration)
-- [Operator backend dispatch](#operator-backend-dispatch)
 - [Autotune & config cache](#autotune--config-cache)
 - [Benchmarking](#benchmarking)
 - [Testing & CI](#testing--ci)
 
-> **Boolean convention.** Unless noted otherwise, boolean flags accept `0` / `1`.
-> A few flags also accept `true` / `yes` (case-insensitive); this is called out
-> in the relevant rows.
+## Operator backend dispatch
 
----
+These switches control registered implementations. Unavailable backends and unsupported calls use the default implementation.
+
+| Variable                       | Default           | Options   | Description                                                                                         |
+| ------------------------------ | ----------------- | --------- | --------------------------------------------------------------------------------------------------- |
+| `FLA_DISABLE_BACKEND_DISPATCH` | `0`               | `0` / `1` | Bypass all backend dispatch. Takes precedence over every backend switch below.                      |
+| `FLA_TILELANG`                 | Backend-dependent | `0` / `1` | Enable TileLang implementations when installed. Default enablement depends on the operator and GPU. |
+| `FLA_FLASH_KDA`                | `1`               | `0` / `1` | Enable [FlashKDA](https://github.com/MoonshotAI/FlashKDA) for KDA inference when installed.         |
+
+### Gluon
+
+| Variable            | Default | Options   | Description                                                                     |
+| ------------------- | ------- | --------- | ------------------------------------------------------------------------------- |
+| `FLA_GLUON`         | `0`     | `0` / `1` | Enable all available Gluon backends, overriding individual switches set to `0`. |
+| `FLA_ATTNRES_GLUON` | `0`     | `0` / `1` | Enable Gluon AttnRes independently.                                             |
+
+When `FLA_GLUON` is unset or `0`, the individual switches apply. `FLA_DISABLE_BACKEND_DISPATCH=1` overrides all of them.
+
+### Intra-card context parallelism
+
+| Variable                   | Default | Options     | Description                                                                                          |
+| -------------------------- | ------- | ----------- | ---------------------------------------------------------------------------------------------------- |
+| `FLA_INTRACARD_CP`         | `0`     | `0` / `1`   | Enable intra-card CP for shared delta-rule operations; inference and variable-length sequences only. |
+| `FLA_INTRACARD_MAX_SPLITS` | `32`    | Integer ≥ 1 | Maximum sub-sequences per original sequence.                                                         |
+| `FLA_INTRACARD_TF32X3`     | `0`     | `0` / `1`   | Use TF32x3 for affine-chain dot products on NVIDIA GPUs.                                             |
 
 ## Convolution backend
 
-| Variable           | Default | Options            | Description                                                                           |
-| ------------------ | ------- | ------------------ | ------------------------------------------------------------------------------------- |
-| `FLA_CONV_BACKEND` | `cuda`  | `cuda` / `triton`  | Convolution backend used by `ShortConvolution`, Mamba, Mamba2 and log-linear Mamba2.  |
-
----
+| Variable           | Default | Options           | Description                                                                                                                    |
+| ------------------ | ------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `FLA_CONV_BACKEND` | Unset   | `cuda` / `triton` | Override the `backend` argument of `ShortConvolution`, whose default is `triton`. CUDA requires the `causal-conv1d` extension. |
 
 ## Numerical precision
 
-| Variable             | Default | Options                  | Description                                                                                                |
-| -------------------- | ------- | ------------------------ | ---------------------------------------------------------------------------------------------------------- |
-| `FLA_TRIL_PRECISION` | `ieee`  | `ieee` / `tf32` / `tf32x3` | Precision used by `solve_tril`. `tf32x3` is NVIDIA-only and gives the best performance / accuracy trade-off on Ampere+. |
-| `FLA_USE_FAST_OPS`   | `0`     | `0` / `1`                | Enable faster but less accurate Triton math intrinsics in shared op helpers.                               |
-
----
+| Variable             | Default | Options                    | Description                                                                    |
+| -------------------- | ------- | -------------------------- | ------------------------------------------------------------------------------ |
+| `FLA_TRIL_PRECISION` | `ieee`  | `ieee` / `tf32` / `tf32x3` | FP32 dot-product precision in `solve_tril`. TF32 modes require NVIDIA support. |
+| `FLA_USE_FAST_OPS`   | `0`     | `0` / `1`                  | Enable faster, less accurate math intrinsics in shared operator helpers.       |
 
 ## Hardware acceleration
 
-| Variable             | Default | Options    | Description                                                                                                  |
-| -------------------- | ------- | ---------- | ------------------------------------------------------------------------------------------------------------ |
-| `FLA_USE_TMA`        | `0`     | `0` / `1`  | Enable the Tensor Memory Accelerator (TMA) on Hopper / Blackwell GPUs. Requires Triton with TMA support.     |
-| `FLA_USE_COMPILE`    | `1`     | `1` / `0`, `true` / `false`, `yes` / `no` | Use `torch.compile` for the RWKV7 fused addcmul path. Auto-disabled on Python < 3.11. |
-
----
-
-## Operator backend dispatch
-
-FLA can dispatch certain ops to specialized backends (TileLang, FlashKDA, intra-card CP).
-Each backend is gated by a single env var below.
-
-| Variable                       | Default     | Options    | Description                                                                                                                              |
-| ------------------------------ | ----------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `FLA_DISABLE_BACKEND_DISPATCH` | unset (`0`) | `0` / `1`  | Master switch. Set to `1` to bypass *all* backend dispatch and always use the default Triton implementation. Useful for debugging.       |
-| `FLA_TILELANG`                 | unset (`1`) | `0` / `1`  | Enable the TileLang backend when the `tilelang` package is installed. Set to `0` to force the Triton path (e.g. to work around #640).    |
-| `FLA_FLASH_KDA`                | unset (`1`) | `0` / `1`  | Enable the [FlashKDA](https://github.com/MoonshotAI/FlashKDA) CUTLASS forward for `chunk_kda` (inference only). Requires `flash_kda`.    |
-| `FLA_INTRACARD_CP`             | unset (`0`) | `0` / `1`  | Opt in to the intra-card context-parallel backend for shared delta-rule ops (`chunk_gated_delta_rule_fwd_h`). Inference + varlen only.  |
-| `FLA_INTRACARD_MAX_SPLITS`     | `32`        | int ≥ 1    | Max number of sub-sequences per original sequence used by the intra-card CP backend. Caps merge-chain depth to control precision loss.  |
-| `FLA_INTRACARD_TF32X3`         | `0`         | `0` / `1`  | Use tf32x3 for the affine-chain dots in the pre-scan/merge kernels of the intra-card CP backend. NVIDIA only.                            |
-
----
+| Variable          | Default | Options                                   | Description                                                                                                    |
+| ----------------- | ------- | ----------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `FLA_USE_TMA`     | `0`     | `0` / `1`                                 | Allow TMA kernels on NVIDIA Hopper/Blackwell and AMD gfx1250, subject to Triton support and input constraints. |
+| `FLA_USE_COMPILE` | `1`     | `0` / `1`, `true` / `false`, `yes` / `no` | Enable `torch.compile` for RWKV7 fused addcmul. Case-insensitive; disabled on Python < 3.11.                   |
 
 ## Autotune & config cache
 
-FLA ships pre-tuned Triton configs under `fla/configs/{GPU}/`. The variables
-below control how those configs are loaded and where Triton's autotune cache
-lives.
-
-| Variable                   | Default      | Options                                                            | Description                                                                                                              |
-| -------------------------- | ------------ | ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------ |
-| `FLA_CACHE_MODE`           | `disabled`   | `disabled` / `strict` / `fuzzy` / `full` / `default` / `always`    | How kernel configs are looked up in FLA's config cache. See [Cache modes](#cache-modes) below.                          |
-| `FLA_CACHE_RESULTS`        | `1`          | `0` / `1`                                                          | Cache Triton autotune timings to disk (passed through to `triton.autotune(cache_results=...)` when supported).            |
-| `FLA_CONFIG_DIR`           | unset        | any path                                                           | Override the directory FLA reads kernel configs from. When set, configs are loaded from `$FLA_CONFIG_DIR/` directly instead of `fla/configs/{GPU}/`. |
-| `FLA_GPU_NAME`             | unset        | any string                                                         | Override the auto-detected GPU name used to pick the config sub-directory. Useful for unsupported / custom devices.       |
-| `FLA_DISABLE_TENSOR_CACHE` | `0`          | `0` / `1`                                                          | Disable the in-process `tensor_cache` decorator (which memoizes the latest result of helpers with tensor inputs).         |
+| Variable                   | Default       | Options                         | Description                                                       |
+| -------------------------- | ------------- | ------------------------------- | ----------------------------------------------------------------- |
+| `FLA_CACHE_MODE`           | `disabled`    | See [Cache modes](#cache-modes) | Select how FLA reads pre-tuned kernel configs.                    |
+| `FLA_CACHE_RESULTS`        | `1`           | `0` / `1`                       | Persist Triton autotune results when supported.                   |
+| `FLA_CONFIG_DIR`           | Unset         | Directory path                  | Read configs from this directory instead of `fla/configs/{GPU}/`. |
+| `FLA_GPU_NAME`             | Auto-detected | GPU name                        | Select the GPU config sub-directory.                              |
+| `FLA_DISABLE_TENSOR_CACHE` | `0`           | `0` / `1`                       | Disable memoization of helpers with tensor inputs.                |
+| `FLA_TENSOR_CACHE_SIZE`    | `4`           | Integer ≥ 0                     | Maximum cached results per tensor-cache helper.                   |
 
 ### Cache modes
 
-`FLA_CACHE_MODE` controls how aggressively FLA reuses pre-tuned kernel configs:
-
-| Mode       | Behavior                                                                                                                         |
-| ---------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| `disabled` | Skip the FLA cache entirely; always run Triton autotune. (Default.)                                                              |
-| `strict`   | Exact-key lookup only; fall back to Triton autotune if no match.                                                                 |
-| `fuzzy`    | Exact-key → fuzzy-key lookup; fall back to Triton autotune if no match.                                                          |
-| `full`     | Exact-key → fuzzy-key → top-level `default_config` fallback.                                                                     |
-| `default`  | Use only the top-level `default_config`; skip key-based lookup.                                                                  |
-| `always`   | Like `default`, but re-reads the JSON file on every kernel call. Useful for editing `default_config` without restarting Python.   |
-
----
+| Mode       | Behavior                                                 |
+| ---------- | -------------------------------------------------------- |
+| `disabled` | Skip FLA config lookup and run Triton autotune.          |
+| `strict`   | Use an exact-key match; otherwise run autotune.          |
+| `fuzzy`    | Try exact and fuzzy matches; otherwise run autotune.     |
+| `full`     | Try exact, fuzzy and top-level `default_config` matches. |
+| `default`  | Use only the top-level `default_config`.                 |
+| `always`   | Use `default_config`, re-reading the JSON on every call. |
 
 ## Benchmarking
 
-These variables only affect the scripts under `benchmarks/` and `scripts/`;
-they have no effect on the library at runtime.
+These variables affect benchmark scripts only.
 
-| Variable                    | Default | Description                                                                                                  |
-| --------------------------- | ------- | ------------------------------------------------------------------------------------------------------------ |
-| `FLA_BENCH_OP_WARMUP_ITERS` | `5`     | Extra forward+backward warmup iterations per shape, on top of Triton's `do_bench` warmup.                    |
-| `FLA_BENCH_WARMUP_MS`       | `25`    | Triton `do_bench` warmup time, in **milliseconds**.                                                          |
-| `FLA_BENCH_REP_MS`          | `100`   | Triton `do_bench` measurement window, in **milliseconds**.                                                   |
-| `FLA_BENCH_COOLDOWN_SEC`    | `0`     | Sleep (seconds) between HEAD and BASE runs in `scripts/run_benchmark_compare.py`. Reduces thermal bias.      |
-
----
+| Variable                    | Default | Description                                                               |
+| --------------------------- | ------- | ------------------------------------------------------------------------- |
+| `FLA_BENCH_OP_WARMUP_ITERS` | `5`     | Extra forward/backward warmup iterations per shape.                       |
+| `FLA_BENCH_WARMUP_MS`       | `25`    | Triton benchmark warmup duration in milliseconds.                         |
+| `FLA_BENCH_REP_MS`          | `100`   | Triton benchmark measurement duration in milliseconds.                    |
+| `FLA_BENCH_COOLDOWN_SEC`    | `0`     | Seconds between HEAD and BASE runs in `scripts/run_benchmark_compare.py`. |
 
 ## Testing & CI
 
-| Variable     | Default | Options    | Description                                                                                                  |
-| ------------ | ------- | ---------- | ------------------------------------------------------------------------------------------------------------ |
-| `FLA_CI_ENV` | `0`     | `0` / `1`  | Mark the process as running in CI. Loosens numeric assertions in `assert_close` so flaky GPU runs warn instead of failing. |
+| Variable     | Default | Options   | Description                                                                |
+| ------------ | ------- | --------- | -------------------------------------------------------------------------- |
+| `FLA_CI_ENV` | `0`     | `0` / `1` | Allow warnings for small numerical mismatches in `assert_close` during CI. |

@@ -85,9 +85,9 @@ class ShortConvolution(nn.Conv1d):
             )
         import os
         self.backend = os.environ.get('FLA_CONV_BACKEND', backend)
-        if backend not in ['cuda', 'triton']:
-            raise ValueError(f"Invalid backend: {backend}, must be one of ['cuda', 'triton']")
-        if backend == 'cuda':
+        if self.backend not in ['cuda', 'triton']:
+            raise ValueError(f"Invalid backend: {self.backend}, must be one of ['cuda', 'triton']")
+        if self.backend == 'cuda':
             if causal_conv1d_fn_cuda is None:
                 warnings.warn(
                     "The `backend` parameter is set to `cuda`, but `causal_conv1d_fn` is not available. "

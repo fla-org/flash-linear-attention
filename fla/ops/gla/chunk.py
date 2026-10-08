@@ -15,8 +15,15 @@ from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.cumsum import chunk_local_cumsum
-from fla.ops.utils.op import exp2
-from fla.utils import autotune_cache_kwargs, check_shared_mem, input_guard
+from fla.ops.utils.op import exp2, unflatten_program_id
+from fla.utils import (
+    IS_NVIDIA_HOPPER,
+    TRITON_ABOVE_3_6_0,
+    TRITON_ABOVE_3_8_0,
+    autotune_cache_kwargs,
+    check_shared_mem,
+    input_guard,
+)
 
 BK_LIST = [32, 64] if check_shared_mem() else [16, 32]
 BV_LIST = [64, 128] if check_shared_mem('ampere') else [16, 32]
@@ -35,6 +42,15 @@ def _prune_gla_bwd_configs(configs, nargs, **kwargs):
         if (c.kwargs['BK'] < K or c.kwargs['BK'] == min_bk)
         and (c.kwargs['BV'] < V or c.kwargs['BV'] == min_bv)
     ]
+
+
+def _prune_gla_bwd_inter_configs(configs, nargs, **kwargs):
+    configs = _prune_gla_bwd_configs(configs, nargs, **kwargs)
+    args = {**(nargs or {}), **kwargs}
+    if IS_NVIDIA_HOPPER and TRITON_ABOVE_3_6_0 and not TRITON_ABOVE_3_8_0 and args['STATE_V_FIRST']:
+        # avoid a Hopper ptxas WGMMA miscompile: https://github.com/triton-lang/triton/issues/11366
+        configs = [c for c in configs if c.kwargs['BK'] != 32 or c.num_warps != 4]
+    return configs
 
 
 @triton.heuristics({
@@ -68,7 +84,7 @@ def chunk_gla_fwd_A_kernel_intra_sub_inter(
     NC: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_c, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    i_t, i_c, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     i_i, i_j = i_c // NC, i_c % NC
     if IS_VARLEN:
@@ -148,7 +164,7 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra(
     BK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_i, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    i_t, i_i, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     i_j = i_i
     if IS_VARLEN:
@@ -225,7 +241,8 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra_split(
     NC: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_tc, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    i_k, i_tc = unflatten_program_id(tl.cdiv(K, BK))
+    i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     i_t, i_i = (i_tc // NC).to(tl.int64), i_tc % NC
     i_j = i_i
@@ -301,7 +318,7 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra_merge(
     NK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_c, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    i_t, i_c, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
@@ -365,7 +382,8 @@ def chunk_gla_fwd_kernel_o(
     IS_VARLEN: tl.constexpr,
     USE_GRAPH: tl.constexpr = False,
 ):
-    i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2)
+    i_v, i_t = unflatten_program_id(tl.cdiv(V, BV))
+    i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_hv = i_bh // HV, i_bh % HV
     i_h = i_hv // (HV // H)
     if IS_VARLEN:
@@ -468,7 +486,8 @@ def chunk_gla_bwd_kernel_intra(
     NC: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_kc, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_kc, i_t = unflatten_program_id(tl.cdiv(K, BK) * NC)
+    i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     i_k, i_i = i_kc // NC, i_kc % NC
     if IS_VARLEN:
@@ -675,7 +694,8 @@ def chunk_gla_bwd_kernel_dv(
     IS_VARLEN: tl.constexpr,
     STATE_V_FIRST: tl.constexpr,
 ):
-    i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_v, i_t = unflatten_program_id(tl.cdiv(V, BV))
+    i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_tg = i_t
@@ -745,7 +765,7 @@ def chunk_gla_bwd_kernel_dv(
         for num_stages in [2, 3, 4]
     ],
     key=['BT', 'STATE_V_FIRST', 'K', 'V'],
-    prune_configs_by={'early_config_prune': _prune_gla_bwd_configs},
+    prune_configs_by={'early_config_prune': _prune_gla_bwd_inter_configs},
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -775,7 +795,8 @@ def chunk_gla_bwd_kernel_inter(
     IS_VARLEN: tl.constexpr,
     STATE_V_FIRST: tl.constexpr,
 ):
-    i_k, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_k, i_t = unflatten_program_id(tl.cdiv(K, BK))
+    i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_tg = i_t
@@ -930,7 +951,7 @@ def chunk_gla_fwd_intra_gk(
         NK = triton.cdiv(K, BK)
         A_intra = q.new_empty(NK, B, T, H, BC, dtype=torch.float)
 
-        grid = (NK, NT * NC, B * H)
+        grid = (NK * NT * NC, B * H)
         chunk_gla_fwd_A_kernel_intra_sub_intra_split[grid](
             q=q,
             k=k,
@@ -988,7 +1009,7 @@ def chunk_gla_fwd_o_gk(
 
     # Please ensure zeros, since vllm will use padding v
     o = torch.zeros_like(v)
-    def grid(meta): return (triton.cdiv(V, meta['BV']), NT, B * HV)
+    def grid(meta): return (triton.cdiv(V, meta['BV']) * NT, B * HV)
     chunk_gla_fwd_kernel_o[grid](
         q=q,
         v=v,
@@ -1066,7 +1087,7 @@ def chunk_gla_bwd_dv(
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     dv = torch.empty_like(do)
-    def grid(meta): return (triton.cdiv(V, meta['BV']), NT, B * H)
+    def grid(meta): return (triton.cdiv(V, meta['BV']) * NT, B * H)
     chunk_gla_bwd_kernel_dv[grid](
         k=k,
         g=g,
@@ -1109,7 +1130,7 @@ def chunk_gla_bwd_dqk_intra(
 
     dq = torch.empty_like(q, dtype=torch.float)
     dk = torch.empty_like(k, dtype=torch.float)
-    grid = (NK * NC, NT, B * H)
+    grid = (NK * NC * NT, B * H)
     chunk_gla_bwd_kernel_intra[grid](
         q=q,
         k=k,
@@ -1157,7 +1178,7 @@ def chunk_gla_bwd_dqkg(
     dg = torch.empty_like(g)
     dq2 = torch.empty_like(dq)
     dk2 = torch.empty_like(dk)
-    def grid(meta): return (triton.cdiv(K, meta['BK']), NT, B * H)
+    def grid(meta): return (triton.cdiv(K, meta['BK']) * NT, B * H)
     chunk_gla_bwd_kernel_inter[grid](
         q=q,
         k=k,
