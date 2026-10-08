@@ -1633,7 +1633,7 @@ def test_conv_backend_override(monkeypatch):
 )
 @pytest.mark.parametrize('activation', [None, 'silu'], ids=['linear', 'silu'])
 @pytest.mark.parametrize(
-    ('B', 'T', 'D', 'W', 'packed', 'state', 'strided'),
+    ('B', 'T', 'D', 'W', 'is_varlen', 'has_initial_state', 'non_contiguous'),
     [
         pytest.param(2, 1, 33, 4, False, False, False, id='one-token'),
         pytest.param(2, 63, 65, 3, False, False, True, id='channel-tail'),
@@ -1649,22 +1649,34 @@ def test_conv_backend_override(monkeypatch):
         pytest.param(1, 8193, 65, 4, True, False, True, id='packed-reduction-tail'),
     ],
 )
-def test_conv_backend_parity(monkeypatch, B, T, D, W, packed, state, strided, activation, dtype, weight_dtype):
+def test_conv_backend_parity(
+    monkeypatch: pytest.MonkeyPatch,
+    B: int,
+    T: int,
+    D: int,
+    W: int,
+    is_varlen: bool,
+    has_initial_state: bool,
+    non_contiguous: bool,
+    activation: str | None,
+    dtype: torch.dtype,
+    weight_dtype: torch.dtype,
+):
     pytest.importorskip('fla.modules.backends.gluon.causal_conv1d')
     monkeypatch.setenv('FLA_CONV_GLUON', '0')
     torch.manual_seed(42)
-    x = torch.randn(B, T, D * (3 if strided else 1), device=device, dtype=dtype)
-    x = x[..., D:2 * D] if strided else x
+    x = torch.randn(B, T, D * (3 if non_contiguous else 1), device=device, dtype=dtype)
+    x = x[..., D:2 * D] if non_contiguous else x
     x.requires_grad_(True)
     weight = torch.randn(D, W, device=device, dtype=weight_dtype, requires_grad=True)
     bias = torch.randn(D, device=device, dtype=weight_dtype, requires_grad=True)
     residual = torch.randn(B, T, D, device=device, dtype=dtype, requires_grad=True)
-    cu = torch.tensor([0, 0, 1, 3, T], device=device) if packed else None
-    N = 4 if packed else B
-    h0 = torch.randn(N, D, W, device=device, dtype=dtype, requires_grad=True) if state else None
-    inputs = (x, weight, bias, residual) + ((h0,) if state else ())
+    cu = torch.tensor([0, 0, 1, 3, T], device=device) if is_varlen else None
+    N = 4 if is_varlen else B
+    h0 = torch.randn(N, D, W, device=device, dtype=dtype, requires_grad=True) if has_initial_state else None
+    inputs = (x, weight, bias, residual) + ((h0,) if has_initial_state else ())
     dy = torch.randn(B, T, D * 2, device=device, dtype=dtype)[..., ::2]
-    dht = torch.randn_like(h0) if state else None
+    dht = torch.randn_like(h0) if has_initial_state else None
     results = []
     for enabled in ['0', '1']:
         monkeypatch.setenv('FLA_GLUON', enabled)
@@ -1674,15 +1686,15 @@ def test_conv_backend_parity(monkeypatch, B, T, D, W, packed, state, strided, ac
             bias=bias,
             residual=residual,
             initial_state=h0,
-            output_final_state=state,
+            output_final_state=has_initial_state,
             activation=activation,
             cu_seqlens=cu,
         )
-        grads = torch.autograd.grad((y, ht) if state else y, inputs, (dy, dht) if state else dy)
+        grads = torch.autograd.grad((y, ht) if has_initial_state else y, inputs, (dy, dht) if has_initial_state else dy)
         results.append((y, ht, grads))
     ref, out = results
     assert_close('y', ref[0], out[0], 1e-3)
-    if state:
+    if has_initial_state:
         assert_close('ht', ref[1], out[1], 1e-3)
     for name, expected, actual in zip(('dx', 'dw', 'db', 'dr', 'dh0'), ref[2], out[2]):
         assert_close(name, expected, actual, 1e-3)
@@ -1692,7 +1704,7 @@ def test_conv_backend_parity(monkeypatch, B, T, D, W, packed, state, strided, ac
     'case',
     ['rank', 'channels', 'width', 'weight', 'packed-batch', 'chunk', 'state', 'dtype', 'distributed'],
 )
-def test_conv_backend_verifier(monkeypatch, case):
+def test_conv_backend_verifier(monkeypatch: pytest.MonkeyPatch, case: str):
     from fla.modules.backends.gluon import GluonBackend
 
     backend = GluonBackend()
@@ -1729,10 +1741,15 @@ def test_conv_backend_verifier(monkeypatch, case):
 
 
 @pytest.fixture
-def conv_backend_calls(monkeypatch):
-    conv_gluon = pytest.importorskip('fla.modules.backends.gluon.causal_conv1d')
+def conv_backend_calls(monkeypatch: pytest.MonkeyPatch) -> list[str] | None:
+    from fla.modules.backends.gluon import GluonBackend
+
+    if not GluonBackend.is_available():
+        return None
+    from fla.modules.backends.gluon import causal_conv1d
+
     calls = []
-    fwd, bwd = conv_gluon.causal_conv1d_fwd, conv_gluon.causal_conv1d_bwd
+    fwd, bwd = causal_conv1d.causal_conv1d_fwd, causal_conv1d.causal_conv1d_bwd
 
     def forward(*args, **kwargs):
         calls.append('fwd')
@@ -1742,17 +1759,25 @@ def conv_backend_calls(monkeypatch):
         calls.append('bwd')
         return bwd(*args, **kwargs)
 
-    monkeypatch.setattr(conv_gluon, 'causal_conv1d_fwd', forward)
-    monkeypatch.setattr(conv_gluon, 'causal_conv1d_bwd', backward)
+    monkeypatch.setattr(causal_conv1d, 'causal_conv1d_fwd', forward)
+    monkeypatch.setattr(causal_conv1d, 'causal_conv1d_bwd', backward)
     return calls
 
 
 @pytest.mark.skipif(not IS_NVIDIA, reason='Gluon convolution requires NVIDIA')
 @pytest.mark.parametrize(('shared', 'local'), [('0', '0'), ('0', '1'), ('1', '0')], ids=['disabled', 'local', 'global'])
 @pytest.mark.parametrize('W', [4, 5], ids=['W4', 'W5'])
-def test_conv_backend_dispatch(monkeypatch, conv_backend_calls, shared, local, W):
+def test_conv_backend_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+    conv_backend_calls: list[str] | None,
+    shared: str,
+    local: str,
+    W: int,
+):
     from fla.ops.backends import _DISPATCH_DISABLED
 
+    if conv_backend_calls is None:
+        pytest.skip('Gluon convolution is unavailable')
     torch.manual_seed(42)
     monkeypatch.setenv('FLA_GLUON', shared)
     monkeypatch.setenv('FLA_CONV_GLUON', local)
@@ -1771,35 +1796,18 @@ def test_conv_backend_dispatch(monkeypatch, conv_backend_calls, shared, local, W
     assert not conv_backend_calls
 
 
-@pytest.mark.skipif(not IS_NVIDIA, reason='Gluon convolution requires NVIDIA')
-@pytest.mark.parametrize(('shared', 'local'), [('0', '0'), ('0', '1'), ('1', '0')], ids=['disabled', 'local', 'global'])
-@pytest.mark.parametrize('W', [4, 5], ids=['W4', 'W5'])
-@pytest.mark.parametrize('keyword', ['chunk_size', 'BT'], ids=['chunk_size', 'deprecated-BT'])
-def test_conv_backend_dispatch_keyword(monkeypatch, conv_backend_calls, shared, local, W, keyword):
+@pytest.mark.parametrize('chunk_size', [32, 64], ids=['BT32', 'BT64'])
+def test_conv_deprecated_chunk_size(
+    monkeypatch: pytest.MonkeyPatch,
+    conv_backend_calls: list[str] | None,
+    chunk_size: int,
+):
     from fla.ops.backends import _DISPATCH_DISABLED
 
-    torch.manual_seed(42)
-    monkeypatch.setenv('FLA_GLUON', shared)
-    monkeypatch.setenv('FLA_CONV_GLUON', local)
-    x = torch.randn(1, 65, 64, device=device, requires_grad=True)
-    weight = torch.randn(64, W, device=device, requires_grad=True)
-    kwargs = {keyword: 64}
-    with warnings.catch_warnings(record=True) as records:
-        warnings.simplefilter('always', FutureWarning)
-        y, _ = causal_conv1d_fwd(x=x, weight=weight, bias=None, residual=None, activation='silu', **kwargs)
-        causal_conv1d_bwd(x=x, dy=torch.ones_like(y), dht=None, weight=weight, activation='silu', **kwargs)
-    messages = [str(record.message) for record in records if issubclass(record.category, FutureWarning)]
-    if keyword == 'BT':
-        assert len(messages) == 2
-        assert all('`BT` is deprecated' in message and 'Use `chunk_size` instead' in message for message in messages)
-    else:
-        assert not messages
-    enabled = (shared == '1' or local == '1') and W == 4 and not _DISPATCH_DISABLED
-    assert conv_backend_calls == (['fwd', 'bwd'] if enabled else [])
-
-
-@pytest.mark.parametrize('chunk_size', [32, 64], ids=['BT32', 'BT64'])
-def test_conv_deprecated_chunk_size(chunk_size):
+    monkeypatch.setenv('FLA_GLUON', '1')
+    monkeypatch.setenv('FLA_CONV_GLUON', '0')
+    enabled = conv_backend_calls is not None and chunk_size == 64 and not _DISPATCH_DISABLED
+    calls = conv_backend_calls if conv_backend_calls is not None else []
     torch.manual_seed(42)
     x = torch.randn(1, 129, 64, device=device)
     weight = torch.randn(64, 4, device=device)
@@ -1807,19 +1815,24 @@ def test_conv_deprecated_chunk_size(chunk_size):
     dy = torch.randn_like(x)
     cu_seqlens = torch.tensor([0, 1, 34, 129], device=device)
     kwargs = dict(
-        x=x,
         weight=weight,
         bias=bias,
         residual=None,
         cu_seqlens=cu_seqlens,
         chunk_indices=prepare_chunk_indices(cu_seqlens, chunk_size),
     )
-    y, _ = causal_conv1d_fwd(**kwargs, chunk_size=chunk_size)
-    grads = causal_conv1d_bwd(dy=dy, dht=None, **kwargs, chunk_size=chunk_size)
+    with warnings.catch_warnings(record=True) as records:
+        warnings.simplefilter('always', FutureWarning)
+        y, _ = causal_conv1d_fwd(x=x, **kwargs, chunk_size=chunk_size)
+        grads = causal_conv1d_bwd(x=x, dy=dy, dht=None, **kwargs, chunk_size=chunk_size)
+    assert not any(issubclass(record.category, FutureWarning) for record in records)
+    assert calls == (['fwd', 'bwd'] if enabled else [])
+    calls.clear()
     with pytest.warns(FutureWarning, match='`BT` is deprecated.*Use `chunk_size` instead'):
-        y_old, _ = causal_conv1d_fwd(**kwargs, BT=chunk_size)
+        y_old, _ = causal_conv1d_fwd(x=x, **kwargs, BT=chunk_size)
     with pytest.warns(FutureWarning, match='`BT` is deprecated.*Use `chunk_size` instead'):
-        grads_old = causal_conv1d_bwd(dy=dy, dht=None, **kwargs, BT=chunk_size)
+        grads_old = causal_conv1d_bwd(x=x, dy=dy, dht=None, **kwargs, BT=chunk_size)
+    assert calls == (['fwd', 'bwd'] if enabled else [])
     assert_close('y', y, y_old, 1e-3)
     for name, expected, actual in zip(('dx', 'dw', 'db'), grads, grads_old):
         assert_close(name, expected, actual, 1e-3)
