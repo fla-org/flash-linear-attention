@@ -30,6 +30,7 @@ from .mamba2 import Mamba2
 from .mamba3 import Mamba3
 from .mesa_net import MesaNet
 from .mla import MultiheadLatentAttention
+from .mlstm import MLSTM
 from .moba import MoBA
 from .mom import MomAttention
 from .momentum_deltanet import MomentumDeltaNet
@@ -49,6 +50,7 @@ from .wall_attn import WallAttention
 from .yoco import YOCOCrossAttention, YOCOGatedRetention, YOCOSharedKVBuilder
 
 __all__ = [
+    'MLSTM',
     'ABCAttention',
     'Attention',
     'BasedLinearAttention',
