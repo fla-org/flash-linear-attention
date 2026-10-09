@@ -278,7 +278,7 @@ def parallel_attn_fwd_tilelang(
         USE_SINK=USE_SINK,
         IS_VARLEN=IS_VARLEN,
         num_warps=num_warps,
-        num_stages=1 if USE_WINDOW else 2,
+        num_stages=0 if USE_WINDOW else 1,
     )
 
     if IS_VARLEN:
@@ -325,6 +325,7 @@ def _build_parallel_attn_bwd_kernel(
     kv_s = (B, T_d, H, K)
     vv_s = (B, T_d, H, V)
     lse_s = (B, T_d, HQ)
+    do_s = (B, T_d, HQ, V)
     dq_s = (B, T_d, HQ, K)
     dkv_s = (B, T_d, H, K)
     dvv_s = (B, T_d, H, V)
@@ -462,7 +463,7 @@ def _build_parallel_attn_bwd_kernel(
             g: T.Tensor(lse_s, accum_dtype),
             lse: T.Tensor(lse_s, accum_dtype),
             delta: T.Tensor(lse_s, accum_dtype),
-            do: T.Tensor(q_s, dtype),
+            do: T.Tensor(do_s, dtype),
             dq_out: T.Tensor(dq_s, accum_dtype),
             dk_out: T.Tensor(dkv_s, accum_dtype),
             dv_out: T.Tensor(dvv_s, accum_dtype),
@@ -486,7 +487,7 @@ def _build_parallel_attn_bwd_kernel(
             g: T.Tensor(lse_s, accum_dtype),
             lse: T.Tensor(lse_s, accum_dtype),
             delta: T.Tensor(lse_s, accum_dtype),
-            do: T.Tensor(q_s, dtype),
+            do: T.Tensor(do_s, dtype),
             dq_out: T.Tensor(dq_s, accum_dtype),
             dk_out: T.Tensor(dkv_s, accum_dtype),
             dv_out: T.Tensor(dvv_s, accum_dtype),
