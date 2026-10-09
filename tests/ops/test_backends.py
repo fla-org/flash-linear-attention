@@ -558,13 +558,10 @@ def test_dispatch_policy_and_optional_dependencies(run_python, disabled):
         assert 'tilelang' not in sys.modules
         assert 'flash_kda' not in sys.modules
         assert 'fla.ops.kda.backends.triton_ascend.chunk_intra' not in sys.modules
-        assert not any(
-            name.startswith('fla.modules.') and '.backends.triton_ascend.ops' in name
-            for name in sys.modules
-        )
+        assert 'fla.modules.causal_conv1d.backends.triton_ascend' not in sys.modules
         assert not any(name.startswith('fla.modules.backends.triton_ascend.') for name in sys.modules)
         assert 'fla.modules.backends.gluon.causal_conv1d' not in sys.modules
-        assert 'fla.modules.causal_conv1d.gluon' not in sys.modules
+        assert 'fla.modules.causal_conv1d.backends.gluon' not in sys.modules
         with warnings.catch_warnings():
             warnings.simplefilter('ignore', DeprecationWarning)
             from fla.ops.backends import dispatch

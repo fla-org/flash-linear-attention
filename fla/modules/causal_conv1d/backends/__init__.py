@@ -71,7 +71,7 @@ class CausalConv1dGluonBackend(BaseBackend):
         chunk_size: int = 64,
         layout_fallback: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        from fla.modules.causal_conv1d.gluon import causal_conv1d_fwd
+        from fla.modules.causal_conv1d.backends.gluon import causal_conv1d_fwd
 
         return causal_conv1d_fwd(
             x=x,
@@ -123,7 +123,7 @@ class CausalConv1dGluonBackend(BaseBackend):
         chunk_size: int = 64,
         layout_fallback: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None, None]:
-        from fla.modules.causal_conv1d.gluon import causal_conv1d_bwd
+        from fla.modules.causal_conv1d.backends.gluon import causal_conv1d_bwd
 
         return causal_conv1d_bwd(
             x=x,
@@ -171,7 +171,7 @@ class CausalConv1dTritonAscendBackend(BaseBackend):
         chunk_size: int = 64,
         layout_fallback: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        from fla.modules.causal_conv1d.triton_ascend import causal_conv1d_fwd_npu
+        from fla.modules.causal_conv1d.backends.triton_ascend import causal_conv1d_fwd_npu
 
         return causal_conv1d_fwd_npu(
             x=x,
@@ -204,7 +204,7 @@ class CausalConv1dTritonAscendBackend(BaseBackend):
         chunk_size: int = 64,
         layout_fallback: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
-        from fla.modules.causal_conv1d.triton_ascend import causal_conv1d_bwd_npu
+        from fla.modules.causal_conv1d.backends.triton_ascend import causal_conv1d_bwd_npu
 
         return causal_conv1d_bwd_npu(
             x=x,
@@ -232,7 +232,7 @@ class CausalConv1dTritonAscendBackend(BaseBackend):
         cu_seqlens: torch.Tensor | None,
         dht: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        from fla.modules.causal_conv1d.triton_ascend import compute_dh0_npu
+        from fla.modules.causal_conv1d.backends.triton_ascend import compute_dh0_npu
 
         return compute_dh0_npu(
             dy=dy,
@@ -251,7 +251,7 @@ class CausalConv1dTritonAscendBackend(BaseBackend):
         initial_state: torch.Tensor | None = None,
         cu_seqlens: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        from fla.modules.causal_conv1d.triton_ascend import causal_conv1d_update_states_npu
+        from fla.modules.causal_conv1d.backends.triton_ascend import causal_conv1d_update_states_npu
 
         return causal_conv1d_update_states_npu(x=x, state_len=state_len, initial_state=initial_state, cu_seqlens=cu_seqlens)
 
@@ -264,7 +264,7 @@ class CausalConv1dTritonAscendBackend(BaseBackend):
         bias: torch.Tensor | None = None,
         activation: str | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        from fla.modules.causal_conv1d.triton_ascend import causal_conv1d_update_npu
+        from fla.modules.causal_conv1d.backends.triton_ascend import causal_conv1d_update_npu
 
         return causal_conv1d_update_npu(x=x, cache=cache, residual=residual, weight=weight, bias=bias, activation=activation)
 

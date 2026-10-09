@@ -99,7 +99,7 @@ def conv_backend_calls(monkeypatch: pytest.MonkeyPatch) -> list[str] | None:
 
     if not CausalConv1dGluonBackend.is_available():
         return None
-    from fla.modules.causal_conv1d import gluon
+    from fla.modules.causal_conv1d.backends import gluon
 
     calls = []
     fwd, bwd = gluon.causal_conv1d_fwd, gluon.causal_conv1d_bwd
@@ -720,7 +720,7 @@ def test_conv_backend_parity(
     dtype: torch.dtype,
     weight_dtype: torch.dtype,
 ):
-    pytest.importorskip('fla.modules.causal_conv1d.gluon')
+    pytest.importorskip('fla.modules.causal_conv1d.backends.gluon')
     torch.manual_seed(42)
     x = torch.randn(B, T, D * (3 if non_contiguous else 1), device=device, dtype=dtype)
     x = x[..., D:2 * D] if non_contiguous else x

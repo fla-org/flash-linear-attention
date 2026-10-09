@@ -14,8 +14,8 @@ from fla.modules.causal_conv1d import (
     causal_conv1d_update,
     causal_conv1d_update_states,
 )
+from fla.modules.causal_conv1d.backends.cuda import FastCausalConv1dFn, fast_causal_conv1d_fn
 from fla.modules.causal_conv1d.cp import CausalConv1dFunctionCP, causal_conv1d_cp
-from fla.modules.causal_conv1d.cuda import FastCausalConv1dFn, fast_causal_conv1d_fn
 from fla.modules.long_conv import ImplicitLongConvolution, LongConvolution, PositionalEmbedding, fft_conv
 
 __all__ = [
