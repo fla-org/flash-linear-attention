@@ -27,7 +27,7 @@ from fla.layers.utils import (
     update_layer_cache,
 )
 from fla.modules import RMSNorm, RotaryEmbedding, ShortConvolution
-from fla.modules.norm.layernorm_gated import RMSNormGated
+from fla.modules.layernorm_gated import RMSNormGated
 from fla.ops.gla import chunk_gla, fused_recurrent_gla
 
 if TYPE_CHECKING:
