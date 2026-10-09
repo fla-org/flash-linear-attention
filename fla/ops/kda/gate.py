@@ -26,20 +26,21 @@ NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if IS_AMD else [4, 8, 16, 32]
 
 def naive_kda_gate(
     g: torch.Tensor,
-    A_log: torch.Tensor,
+    A_log: torch.Tensor | None = None,
     dt_bias: torch.Tensor | None = None,
     output_dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     """
     Torch reference implementation for KDA gate computation.
 
-    Computes: g = -A_log.exp().unsqueeze(-1) * softplus(g + dt_bias.view(g.shape[-2:]))
+    Computes: g = -A_log.exp().unsqueeze(-1) * softplus(g + dt_bias.view(g.shape[-2:])).
+    When ``A_log`` is ``None``: ``g = -softplus(g + dt_bias)``.
 
     Args:
         g (torch.Tensor):
             Input tensor of shape `[..., H, K]`.
-        A_log (torch.Tensor):
-            Parameter tensor with `H` elements.
+        A_log (torch.Tensor | None):
+            Optional parameter tensor with `H` elements. When ``None``, uses a unit decay scale.
         dt_bias (torch.Tensor | None):
             Optional bias tensor added to `g` before activation, shape `[H * K]`.
 
@@ -51,7 +52,10 @@ def naive_kda_gate(
     if dt_bias is not None:
         g = g + dt_bias.view(H, -1)
 
-    g = (-A_log.view(H, 1).float().exp() * F.softplus(g.float())).to(output_dtype)
+    g = F.softplus(g.float())
+    if A_log is not None:
+        g = A_log.view(H, 1).float().exp() * g
+    g = -g.to(output_dtype)
     return g
 
 
@@ -144,7 +148,7 @@ def kda_gate_fwd_kernel(
         o_b = i_h * D + tl.arange(0, BD)
         b_g = b_g + tl.load(dt_bias + o_b, mask=o_b < H * D, other=0.0).to(tl.float32)
     if not USE_LOWER_BOUND:
-        b_yg = -exp(b_A) * softplus(b_g)
+        b_yg = -(exp(b_A) if HAS_A else b_A) * softplus(b_g)
     else:
         b_yg = lower_bound * tl.sigmoid((exp(b_A) if HAS_A else b_A) * b_g)
     tl.store(p_yg, b_yg.to(p_yg.dtype.element_ty), mask=m_g)
@@ -215,7 +219,7 @@ def kda_gate_bwd_kernel(
 
     # [BT, BD]
     if not USE_LOWER_BOUND:
-        b_A = -exp(b_A)
+        b_A = -(exp(b_A) if HAS_A else b_A)
         b_yg = b_A * softplus(b_g)
         b_dg = b_A * (b_dyg * tl.sigmoid(b_g))
         b_dA = tl.sum(tl.sum(b_dyg * b_yg, 1), 0)
@@ -370,14 +374,14 @@ def fused_kda_gate(
 
     Computes: g = -A_log.exp().unsqueeze(-1) * softplus(g + dt_bias.view(g.shape[-2:]))
     When ``lower_bound`` is set: g = lower_bound * sigmoid(exp(A_log) * (g + dt_bias)).
-    When ``A_log`` is ``None`` (requires ``lower_bound``): g = lower_bound * sigmoid(g + dt_bias).
+    When ``A_log`` is ``None``, the decay scale is 1, equivalent to ``A_log=0``.
 
     Args:
         g (torch.Tensor):
             Input tensor of shape `[..., H, K]`.
         A_log (torch.Tensor | None):
             Optional parameter tensor with `H` elements.
-            When ``None``, the gate reduces to ``lower_bound * sigmoid(g + dt_bias)`` (requires ``lower_bound``).
+            When ``None``, uses a unit decay scale.
         dt_bias (torch.Tensor | None):
             Optional bias tensor added to `g` before activation, shape `[H * K]`.
 
@@ -455,7 +459,7 @@ def kda_gate_chunk_cumsum_vector_kernel(
     b_A = tl.load(A_log + i_h).to(tl.float32) if HAS_A else 1.0
     if not USE_LOWER_BOUND:
         # Apply gate: -exp(A_log) * softplus(g + bias)
-        b_gate = -exp(b_A) * softplus(b_s)
+        b_gate = -(exp(b_A) if HAS_A else b_A) * softplus(b_s)
     else:
         b_gate = lower_bound * tl.sigmoid((exp(b_A) if HAS_A else b_A) * b_s)
 

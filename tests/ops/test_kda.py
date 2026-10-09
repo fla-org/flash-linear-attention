@@ -316,6 +316,9 @@ def test_fused_recurrent_state_v_first(
             (4, 1024, 4, 4, 128, 0.1, True, True, True, torch.float16),
             (1, 64, 1, 1, 64, 1, False, False, True, torch.float),
             (2, 256, 2, 4, 64, 1, False, True, True, torch.float),
+            (1, 1, 1, 1, 64, 1, False, False, False, torch.float),
+            (2, 63, 2, 4, 64, 1, False, True, False, torch.bfloat16),
+            (1, 129, 2, 2, 64, 1, False, False, False, torch.float16),
         ]
     ],
 )
@@ -661,6 +664,63 @@ def test_chunk(
         assert_close("dA", ref_dA, tri_dA, 0.003, warning=True)
         assert_close("dbias", ref_dbias, tri_dbias, 0.008)
     assert_close("dh0", ref_dh0, tri_dh0, 0.008)
+
+
+@pytest.mark.parametrize(
+    ("cu_seqlens", "disable_recompute"),
+    [
+        pytest.param(None, False, id="dense-recompute"),
+        pytest.param([0, 3, 65], True, id="varlen-saved-intermediates"),
+    ],
+)
+def test_chunk_default_gate_scale(cu_seqlens: list[int] | None, disable_recompute: bool):
+    """Omitting A_log is equivalent to an explicit zero A_log in chunk KDA."""
+    torch.manual_seed(42)
+    B, T, H, HV, K, V = (2 if cu_seqlens is None else 1), 65, 2, 4, 32, 24
+    dtype = torch.bfloat16
+    num_states = B if cu_seqlens is None else len(cu_seqlens) - 1
+
+    q = torch.randn(B, T, H, K, dtype=dtype, device=device)
+    k = torch.randn(B, T, H, K, dtype=dtype, device=device)
+    v = torch.randn(B, T, HV, V, dtype=dtype, device=device)
+    g = torch.randn(B, T, HV, K, dtype=dtype, device=device)
+    beta = torch.randn(B, T, HV, dtype=dtype, device=device).sigmoid()
+    dt_bias = torch.randn(HV * K, dtype=torch.float32, device=device)
+    h0 = torch.randn(num_states, HV, K, V, dtype=torch.float32, device=device)
+    do = torch.randn_like(v)
+    dht = torch.randn_like(h0)
+    cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.long, device=device) if cu_seqlens is not None else None
+
+    def run(A_log: torch.Tensor | None):
+        inputs = [x.detach().clone().requires_grad_() for x in (q, k, v, g, beta, dt_bias, h0)]
+        q_i, k_i, v_i, g_i, beta_i, dt_bias_i, h0_i = inputs
+        o, ht = chunk_kda(
+            q=q_i,
+            k=k_i,
+            v=v_i,
+            g=g_i,
+            beta=beta_i,
+            A_log=A_log,
+            dt_bias=dt_bias_i,
+            initial_state=h0_i,
+            output_final_state=True,
+            use_qk_l2norm_in_kernel=True,
+            use_gate_in_kernel=True,
+            cu_seqlens=cu_seqlens,
+            cu_seqlens_cpu=cu_seqlens.cpu() if cu_seqlens is not None else None,
+            disable_recompute=disable_recompute,
+            chunk_size=32,
+        )
+        grads = torch.autograd.grad((o * do).sum() + (ht * dht).sum(), inputs)
+        return o, ht, grads
+
+    ref_o, ref_ht, ref_grads = run(torch.zeros(HV, dtype=torch.float32, device=device))
+    tri_o, tri_ht, tri_grads = run(None)
+
+    assert_close("o", ref_o, tri_o, 1e-4)
+    assert_close("ht", ref_ht, tri_ht, 1e-4)
+    for name, ref_grad, tri_grad in zip(("dq", "dk", "dv", "dg", "db", "dbias", "dh0"), ref_grads, tri_grads):
+        assert_close(name, ref_grad, tri_grad, 1e-4)
 
 
 @pytest.mark.parametrize(
@@ -1073,6 +1133,7 @@ def test_chunk_varlen_prefill(
             (2, 64, 4, 32, False, False, -5.0),
             (4, 128, 8, 64, False, True, -5.0),
             (4, 128, 8, 128, False, True, -5.0),
+            (1, 32, 2, 16, False, True, None),
         ]
     ],
 )
@@ -1106,7 +1167,7 @@ def test_gate(
     else:
         ref = naive_kda_gate(
             g=g.clone(),
-            A_log=A_log.clone(),
+            A_log=A_log.clone() if A_log is not None else None,
             dt_bias=dt_bias.clone() if dt_bias is not None else None,
         )
     tri = fused_kda_gate(

@@ -170,7 +170,7 @@ def fused_recurrent_kda_fwd_kernel(
             if USE_LOWER_BOUND:
                 b_gk = lower_bound * tl.sigmoid((exp(b_A) if HAS_A else b_A) * b_g)
             else:
-                b_gk = -exp(b_A) * softplus(b_g)
+                b_gk = -(exp(b_A) if HAS_A else b_A) * softplus(b_g)
         else:
             b_gk = b_g
 
@@ -371,8 +371,7 @@ def fused_recurrent_kda(
             betas of shape `[B, T, HV]`.
         A_log (Optional[torch.Tensor]):
             Decay parameter of shape `[HV]`.
-            When `use_gate_in_kernel=True` together with `lower_bound`,
-            may be `None` to use `lower_bound * sigmoid(g + dt_bias)`.
+            When `None`, uses a unit decay scale, equivalent to `A_log=0`.
         dt_bias (Optional[torch.Tensor]):
             Bias added to `g` before activation, of shape `[HV]`. Only used when `use_gate_in_kernel=True`.
         scale (Optional[float]):
