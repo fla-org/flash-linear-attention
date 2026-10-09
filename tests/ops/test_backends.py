@@ -303,8 +303,9 @@ def test_resolver_preserves_backend_dependency_errors(monkeypatch, dependency, a
 )
 @pytest.mark.skipif(registry_module._DISPATCH_DISABLED, reason='dispatch was disabled before the entry points were imported')
 def test_module_dispatch_preserves_arguments_and_result(monkeypatch, owner, name, tensor_args, options):
-    entry = getattr(importlib.import_module(f'fla.modules.{owner}.ops'), name)
-    backend = importlib.import_module(f'fla.modules.{owner}.backends.triton_ascend').TritonAscendBackend
+    module = f'fla.modules.{owner}' if owner.startswith('norm.') else f'fla.modules.{owner}.ops'
+    entry = getattr(importlib.import_module(module), name)
+    backend = type(dispatch(f'modules.{owner}').__self__._backends['triton_ascend'])
     calls = []
     expected = object()
 

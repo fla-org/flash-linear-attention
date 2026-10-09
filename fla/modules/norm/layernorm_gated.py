@@ -13,6 +13,7 @@
 import math
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import triton
 import triton.language as tl
@@ -21,10 +22,7 @@ from einops import rearrange
 from fla.utils import get_multiprocessor_count, input_guard
 
 
-@triton.heuristics({
-    "HAS_BIAS": lambda args: args["b"] is not None,
-    "HAS_GATE": lambda args: args["g"] is not None,
-})
+@triton.heuristics({"HAS_BIAS": lambda args: args["b"] is not None, "HAS_GATE": lambda args: args["g"] is not None})
 @triton.jit(do_not_specialize=['T'])
 def layer_norm_fwd_kernel_group(
     x,
@@ -239,8 +237,8 @@ def layer_norm_fwd(
     else:
         out = torch.empty_like(x)
     assert out.stride(-1) == 1
-    mean = torch.empty((G * T, ), dtype=torch.float32, device=x.device) if not is_rms_norm else None
-    rstd = torch.empty((G * T, ), dtype=torch.float32, device=x.device)
+    mean = torch.empty((G * T,), dtype=torch.float32, device=x.device) if not is_rms_norm else None
+    rstd = torch.empty((G * T,), dtype=torch.float32, device=x.device)
 
     MAX_FUSED_SIZE = 65536 // x.element_size()
     BD = min(MAX_FUSED_SIZE, triton.next_power_of_2(group_size))
@@ -482,3 +480,94 @@ def rms_norm_ref(x, weight, bias, z=None, eps=1e-6, group_size=None, norm_before
     if z is not None and norm_before_gate:
         out *= F.silu(z)
     return out.to(dtype)
+
+
+class LayerNormGated(nn.Module):
+
+    def __init__(
+        self,
+        hidden_size: int,
+        eps: float = 1e-5,
+        group_size: int | None = None,
+        norm_before_gate: bool = True,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ):
+        """If group_size is not None, we do GroupNorm with each group having group_size elements.
+        group_size=None is equivalent to group_size=hidden_size (i.e. there's only 1 group).
+        """
+
+        factory_kwargs = {"device": device, "dtype": dtype}
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.empty(hidden_size, **factory_kwargs))
+        self.bias = nn.Parameter(torch.empty(hidden_size, **factory_kwargs))
+        self.group_size = group_size
+        self.norm_before_gate = norm_before_gate
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        torch.nn.init.ones_(self.weight)
+        torch.nn.init.zeros_(self.bias)
+
+    def forward(self, x: torch.Tensor, z: torch.Tensor | None = None) -> torch.Tensor:
+        """Apply normalization before or after the optional SiLU gate."""
+        return layernorm_fn(
+            x=x,
+            weight=self.weight,
+            bias=self.bias,
+            z=z,
+            eps=self.eps,
+            group_size=self.group_size,
+            norm_before_gate=self.norm_before_gate,
+        )
+
+
+class RMSNormGated(nn.Module):
+
+    def __init__(
+        self,
+        hidden_size: int,
+        eps: float = 1e-5,
+        group_size: int | None = None,
+        norm_before_gate: bool = False,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ):
+        """If group_size is not None, we do GroupNorm with each group having group_size elements.
+        group_size=None is equivalent to group_size=hidden_size (i.e. there's only 1 group).
+        """
+        factory_kwargs = {"device": device, "dtype": dtype}
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.empty(hidden_size, **factory_kwargs))
+        self.register_parameter("bias", None)
+        self.group_size = group_size
+        self.norm_before_gate = norm_before_gate
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        torch.nn.init.ones_(self.weight)
+
+    def forward(self, x: torch.Tensor, z: torch.Tensor | None = None) -> torch.Tensor:
+        """Apply normalization before or after the optional SiLU gate."""
+        return rmsnorm_fn(
+            x=x,
+            weight=self.weight,
+            bias=self.bias,
+            z=z,
+            eps=self.eps,
+            group_size=self.group_size,
+            norm_before_gate=self.norm_before_gate,
+        )
+
+
+__all__ = [
+    'LayerNormGated',
+    'RMSNormGated',
+    'layer_norm_bwd',
+    'layer_norm_fwd',
+    'layernorm_fn',
+    'rms_norm_ref',
+    'rmsnorm_fn',
+]

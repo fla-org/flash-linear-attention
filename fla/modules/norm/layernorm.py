@@ -14,14 +14,25 @@
 
 from __future__ import annotations
 
+from functools import partial
+
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import triton
 import triton.language as tl
 from einops import rearrange
+from torch.distributed import DeviceMesh
+from torch.distributed.tensor import Replicate, Shard, distribute_module
+from torch.distributed.tensor.parallel import ParallelStyle
 
 from fla.backends import dispatch
 from fla.utils import IS_INTEL, autotune_cache_kwargs, get_multiprocessor_count, input_guard
+
+try:
+    from torch.distributed.tensor import DTensor
+except (ImportError, AttributeError):
+    DTensor = None
 
 
 @triton.autotune(
@@ -168,9 +179,7 @@ def layer_norm_fwd_kernel_row(
     tl.store(y + o_d, b_y, mask=m_d)
 
 
-@triton.heuristics({
-    'RECOMPUTE_OUTPUT': lambda args: args['y'] is not None,
-})
+@triton.heuristics({'RECOMPUTE_OUTPUT': lambda args: args['y'] is not None})
 @triton.autotune(
     configs=[
         triton.Config({'BT': BT}, num_warps=num_warps)
@@ -283,9 +292,7 @@ def layer_norm_bwd_kernel(
         tl.store(db + i_s * D + o_d, tl.sum(b_db, axis=0), mask=m_d)
 
 
-@triton.heuristics({
-    'RECOMPUTE_OUTPUT': lambda args: args['y'] is not None,
-})
+@triton.heuristics({'RECOMPUTE_OUTPUT': lambda args: args['y'] is not None})
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps)
@@ -589,15 +596,11 @@ class LayerNormFunction(torch.autograd.Function):
         if x.shape[-1] % num_groups != 0:
             raise ValueError('num_channels must be divisible by num_groups')
 
-        x = x.reshape(-1, (x.shape[-1] // num_groups))
+        x = x.reshape(-1, x.shape[-1] // num_groups)
         if residual is not None:
             assert residual.shape == x_shape_og
             residual = residual.reshape_as(x)
-        residual_dtype = (
-            residual.dtype
-            if residual is not None
-            else (torch.float32 if residual_in_fp32 else None)
-        )
+        residual_dtype = residual.dtype if residual is not None else (torch.float32 if residual_in_fp32 else None)
         y, mean, rstd, res_out = layer_norm_fwd(
             x=x,
             weight=weight,
@@ -623,7 +626,7 @@ class LayerNormFunction(torch.autograd.Function):
     @input_guard
     def backward(ctx, dy, *args):
         x, weight, bias, mean, rstd = ctx.saved_tensors
-        dy = dy.reshape(-1, (dy.shape[-1] // ctx.num_groups))
+        dy = dy.reshape(-1, dy.shape[-1] // ctx.num_groups)
         assert dy.shape == x.shape
         if ctx.prenorm:
             dresidual = args[0]
@@ -667,16 +670,7 @@ def layer_norm(
     residual_in_fp32: bool = False,
     is_rms_norm: bool = False,
 ):
-    return LayerNormFunction.apply(
-        x,
-        weight,
-        bias,
-        residual,
-        eps,
-        prenorm,
-        residual_in_fp32,
-        is_rms_norm,
-    )
+    return LayerNormFunction.apply(x, weight, bias, residual, eps, prenorm, residual_in_fp32, is_rms_norm)
 
 
 def group_norm(
@@ -690,17 +684,7 @@ def group_norm(
     is_rms_norm: bool = False,
     num_groups: int = 1,
 ):
-    return LayerNormFunction.apply(
-        x,
-        weight,
-        bias,
-        residual,
-        eps,
-        prenorm,
-        residual_in_fp32,
-        is_rms_norm,
-        num_groups,
-    )
+    return LayerNormFunction.apply(x, weight, bias, residual, eps, prenorm, residual_in_fp32, is_rms_norm, num_groups)
 
 
 def rms_norm(
@@ -712,16 +696,7 @@ def rms_norm(
     prenorm: bool = False,
     residual_in_fp32: bool = False,
 ):
-    return LayerNormFunction.apply(
-        x,
-        weight,
-        bias,
-        residual,
-        eps,
-        prenorm,
-        residual_in_fp32,
-        True,
-    )
+    return LayerNormFunction.apply(x, weight, bias, residual, eps, prenorm, residual_in_fp32, True)
 
 
 def layer_norm_linear(
@@ -828,15 +803,11 @@ class LayerNormLinearFunction(torch.autograd.Function):
         if x.shape[-1] % num_groups != 0:
             raise ValueError('num_channels must be divisible by num_groups')
 
-        x = x.reshape(-1, (x.shape[-1] // num_groups))
+        x = x.reshape(-1, x.shape[-1] // num_groups)
         if residual is not None:
             assert residual.shape == x_shape_og
             residual = residual.reshape_as(x)
-        residual_dtype = (
-            residual.dtype
-            if residual is not None
-            else (torch.float32 if residual_in_fp32 else None)
-        )
+        residual_dtype = residual.dtype if residual is not None else (torch.float32 if residual_in_fp32 else None)
         y, mean, rstd, res_out = layer_norm_fwd(
             x=x,
             weight=norm_weight,
@@ -871,7 +842,7 @@ class LayerNormLinearFunction(torch.autograd.Function):
         x, norm_weight, norm_bias, linear_weight, mean, rstd = ctx.saved_tensors
         dout = dout.reshape(-1, dout.shape[-1])
         dy = F.linear(dout, linear_weight.t())
-        dy = dy.reshape(-1, (dy.shape[-1] // ctx.num_groups))
+        dy = dy.reshape(-1, dy.shape[-1] // ctx.num_groups)
         dlinear_bias = None if ctx.linear_bias_is_none else dout.sum(0)
         assert dy.shape == x.shape
         if ctx.prenorm:
@@ -928,9 +899,7 @@ def layer_norm_ref(
         residual = residual.float() if residual is not None else residual
     if residual is not None:
         x = (x + residual).to(x.dtype)
-    out = F.layer_norm(x.to(weight.dtype), x.shape[-1:], weight=weight, bias=bias, eps=eps).to(
-        dtype,
-    )
+    out = F.layer_norm(x.to(weight.dtype), x.shape[-1:], weight=weight, bias=bias, eps=eps).to(dtype)
     return out if not prenorm else (out, x)
 
 
@@ -979,9 +948,7 @@ def group_norm_ref(
     if residual is not None:
         x = (x + residual).to(x.dtype)
     residual = x
-    x, weight = [
-        rearrange(data, "... (g d) -> ... g d", g=num_groups) for data in (x, weight)
-    ]
+    x, weight = [rearrange(data, "... (g d) -> ... g d", g=num_groups) for data in (x, weight)]
     if bias is not None:
         bias = rearrange(bias, '... (g d) -> ... g d', g=num_groups)
     if not is_rms_norm:
@@ -992,3 +959,477 @@ def group_norm_ref(
     out = rearrange(out, "... g d -> ... (g d)")
     out = out.to(dtype)
     return out if not prenorm else (out, residual)
+
+
+class LayerNorm(nn.Module):
+
+    def __init__(
+        self,
+        hidden_size: int,
+        elementwise_affine: bool = True,
+        bias: bool = False,
+        eps: float = 1e-5,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> None:
+        factory_kwargs = {"device": device, "dtype": dtype}
+        super().__init__()
+
+        self.hidden_size = hidden_size
+        self.elementwise_affine = elementwise_affine
+        self.eps = eps
+
+        self.register_parameter("weight", None)
+        self.register_parameter("bias", None)
+        if elementwise_affine:
+            self.weight = nn.Parameter(torch.empty(hidden_size, **factory_kwargs))
+            if bias:
+                self.bias = nn.Parameter(torch.empty(hidden_size, **factory_kwargs))
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        if self.elementwise_affine:
+            nn.init.ones_(self.weight)
+            if self.bias is not None:
+                nn.init.zeros_(self.bias)
+
+    def __repr__(self) -> str:
+        s = f"{self.__class__.__name__}({self.hidden_size}"
+        if not self.elementwise_affine:
+            s += f", elementwise_affine={self.elementwise_affine}"
+        s += f", eps={self.eps}"
+        s += ")"
+        return s
+
+    def forward(self, x, residual=None, prenorm=False, residual_in_fp32=False):
+        return layer_norm(
+            x=x,
+            weight=self.weight,
+            bias=self.bias,
+            residual=residual,
+            eps=self.eps,
+            prenorm=prenorm,
+            residual_in_fp32=residual_in_fp32,
+        )
+
+
+class GroupNorm(nn.Module):
+
+    def __init__(
+        self,
+        num_groups: int,
+        hidden_size: int,
+        elementwise_affine: bool = True,
+        bias: bool = False,
+        eps: float = 1e-5,
+        is_rms_norm: bool = False,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> None:
+        factory_kwargs = {"device": device, "dtype": dtype}
+        super().__init__()
+
+        if hidden_size % num_groups != 0:
+            raise ValueError('num_channels must be divisible by num_groups')
+
+        self.num_groups = num_groups
+        self.hidden_size = hidden_size
+        self.elementwise_affine = elementwise_affine
+        self.eps = eps
+        self.is_rms_norm = is_rms_norm
+
+        self.register_parameter("weight", None)
+        self.register_parameter("bias", None)
+        if elementwise_affine:
+            self.weight = nn.Parameter(torch.empty(hidden_size, **factory_kwargs))
+            if bias:
+                self.bias = nn.Parameter(torch.empty(hidden_size, **factory_kwargs))
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        if self.elementwise_affine:
+            nn.init.ones_(self.weight)
+            if self.bias is not None:
+                nn.init.zeros_(self.bias)
+
+    def __repr__(self) -> str:
+        s = f"{self.__class__.__name__}({self.num_groups}, {self.hidden_size}"
+        if not self.elementwise_affine:
+            s += f", elementwise_affine={self.elementwise_affine}"
+        if self.is_rms_norm:
+            s += f", is_rms_norm={self.is_rms_norm}"
+        s += f", eps={self.eps}"
+        s += ")"
+        return s
+
+    def forward(self, x, residual=None, prenorm=False, residual_in_fp32=False):
+        return group_norm(
+            x=x,
+            weight=self.weight,
+            bias=self.bias,
+            residual=residual,
+            eps=self.eps,
+            prenorm=prenorm,
+            residual_in_fp32=residual_in_fp32,
+            is_rms_norm=self.is_rms_norm,
+            num_groups=self.num_groups,
+        )
+
+
+class RMSNorm(nn.Module):
+
+    def __init__(
+        self,
+        hidden_size: int,
+        elementwise_affine: bool = True,
+        bias: bool = False,
+        eps: float = 1e-5,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> None:
+        factory_kwargs = {"device": device, "dtype": dtype}
+        super().__init__()
+
+        self.hidden_size = hidden_size
+        self.elementwise_affine = elementwise_affine
+        self.eps = eps
+
+        self.register_parameter("weight", None)
+        self.register_parameter("bias", None)
+        if elementwise_affine:
+            self.weight = nn.Parameter(torch.empty(hidden_size, **factory_kwargs))
+            if bias:
+                self.bias = nn.Parameter(torch.empty(hidden_size, **factory_kwargs))
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        if self.elementwise_affine:
+            nn.init.ones_(self.weight)
+            if self.bias is not None:
+                nn.init.zeros_(self.bias)
+
+    def __repr__(self) -> str:
+        s = f"{self.__class__.__name__}({self.hidden_size}"
+        if not self.elementwise_affine:
+            s += f", elementwise_affine={self.elementwise_affine}"
+        s += f", eps={self.eps}"
+        s += ")"
+        return s
+
+    def forward(self, x, residual=None, prenorm=False, residual_in_fp32=False):
+        return rms_norm(
+            x=x,
+            weight=self.weight,
+            bias=self.bias,
+            residual=residual,
+            eps=self.eps,
+            prenorm=prenorm,
+            residual_in_fp32=residual_in_fp32,
+        )
+
+
+class LayerNormLinear(nn.Module):
+
+    def __init__(
+        self,
+        hidden_size: int,
+        elementwise_affine: bool = True,
+        bias: bool = False,
+        eps: float = 1e-5,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> None:
+        factory_kwargs = {"device": device, "dtype": dtype}
+        super().__init__()
+
+        self.hidden_size = hidden_size
+        self.elementwise_affine = elementwise_affine
+        self.eps = eps
+
+        self.register_parameter("weight", None)
+        self.register_parameter("bias", None)
+        if elementwise_affine:
+            self.weight = nn.Parameter(torch.empty(hidden_size, **factory_kwargs))
+            if bias:
+                self.bias = nn.Parameter(torch.empty(hidden_size, **factory_kwargs))
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        if self.elementwise_affine:
+            nn.init.ones_(self.weight)
+            if self.bias is not None:
+                nn.init.zeros_(self.bias)
+
+    def __repr__(self) -> str:
+        s = f"{self.__class__.__name__}({self.hidden_size}"
+        if not self.elementwise_affine:
+            s += f", elementwise_affine={self.elementwise_affine}"
+        s += f", eps={self.eps}"
+        s += ")"
+        return s
+
+    def forward(self, x, weight, bias, residual=None, prenorm=False, residual_in_fp32=False):
+        return layer_norm_linear(
+            x=x,
+            norm_weight=self.weight,
+            norm_bias=self.bias,
+            linear_weight=weight,
+            linear_bias=bias,
+            residual=residual,
+            eps=self.eps,
+            prenorm=prenorm,
+            residual_in_fp32=residual_in_fp32,
+            is_rms_norm=False,
+        )
+
+
+class GroupNormLinear(nn.Module):
+
+    def __init__(
+        self,
+        num_groups: int,
+        hidden_size: int,
+        elementwise_affine: bool = True,
+        bias: bool = False,
+        eps: float = 1e-5,
+        is_rms_norm: bool = False,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> None:
+        factory_kwargs = {"device": device, "dtype": dtype}
+        super().__init__()
+
+        if hidden_size % num_groups != 0:
+            raise ValueError('num_channels must be divisible by num_groups')
+
+        self.num_groups = num_groups
+        self.hidden_size = hidden_size
+        self.elementwise_affine = elementwise_affine
+        self.eps = eps
+        self.is_rms_norm = is_rms_norm
+
+        self.register_parameter("weight", None)
+        self.register_parameter("bias", None)
+        if elementwise_affine:
+            self.weight = nn.Parameter(torch.empty(hidden_size, **factory_kwargs))
+            if bias:
+                self.bias = nn.Parameter(torch.empty(hidden_size, **factory_kwargs))
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        if self.elementwise_affine:
+            nn.init.ones_(self.weight)
+            if self.bias is not None:
+                nn.init.zeros_(self.bias)
+
+    def __repr__(self) -> str:
+        s = f"{self.__class__.__name__}({self.num_groups}, {self.hidden_size}"
+        if not self.elementwise_affine:
+            s += f", elementwise_affine={self.elementwise_affine}"
+        if self.is_rms_norm:
+            s += f", is_rms_norm={self.is_rms_norm}"
+        s += f", eps={self.eps}"
+        s += ")"
+        return s
+
+    def forward(self, x, weight, bias, residual=None, prenorm=False, residual_in_fp32=False):
+        return layer_norm_linear(
+            x=x,
+            norm_weight=self.weight,
+            norm_bias=self.bias,
+            linear_weight=weight,
+            linear_bias=bias,
+            residual=residual,
+            eps=self.eps,
+            prenorm=prenorm,
+            residual_in_fp32=residual_in_fp32,
+            is_rms_norm=self.is_rms_norm,
+            num_groups=self.num_groups,
+        )
+
+
+class RMSNormLinear(nn.Module):
+
+    def __init__(
+        self,
+        hidden_size: int,
+        elementwise_affine: bool = True,
+        bias: bool = False,
+        eps: float = 1e-5,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> None:
+        factory_kwargs = {"device": device, "dtype": dtype}
+        super().__init__()
+
+        self.hidden_size = hidden_size
+        self.elementwise_affine = elementwise_affine
+        self.eps = eps
+
+        self.register_parameter("weight", None)
+        self.register_parameter("bias", None)
+        if elementwise_affine:
+            self.weight = nn.Parameter(torch.empty(hidden_size, **factory_kwargs))
+            if bias:
+                self.bias = nn.Parameter(torch.empty(hidden_size, **factory_kwargs))
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        if self.elementwise_affine:
+            nn.init.ones_(self.weight)
+            if self.bias is not None:
+                nn.init.zeros_(self.bias)
+
+    def __repr__(self) -> str:
+        s = f"{self.__class__.__name__}({self.hidden_size}"
+        if not self.elementwise_affine:
+            s += f", elementwise_affine={self.elementwise_affine}"
+        s += f", eps={self.eps}"
+        s += ")"
+        return s
+
+    def forward(self, x, weight, bias, residual=None, prenorm=False, residual_in_fp32=False):
+        return layer_norm_linear(
+            x=x,
+            norm_weight=self.weight,
+            norm_bias=self.bias,
+            linear_weight=weight,
+            linear_bias=bias,
+            residual=residual,
+            eps=self.eps,
+            prenorm=prenorm,
+            residual_in_fp32=residual_in_fp32,
+            is_rms_norm=True,
+        )
+
+
+class NormParallel(ParallelStyle):
+
+    def __init__(self, *, sequence_dim: int = 1, use_local_output: bool = False):
+        super().__init__()
+        self.sequence_sharding = (Shard(sequence_dim),)
+        self.use_local_output = use_local_output
+
+    def _replicate_module_fn(self, name: str, module: nn.Module, device_mesh: DeviceMesh):
+        for p_name, param in module.named_parameters():
+            # simple replication with fixed ones_ init from LayerNorm/RMSNorm, which allow
+            # us to simply just use from_local
+            replicated_param = torch.nn.Parameter(DTensor.from_local(param, device_mesh, [Replicate()], run_check=False))
+            module.register_parameter(p_name, replicated_param)
+
+    @staticmethod
+    def _prepare_input_fn(sequence_sharding, mod, inputs, device_mesh):
+        input_tensor = inputs[0]
+        if isinstance(input_tensor, DTensor):
+            # if the passed in input DTensor is not sharded on the sequence dim, we need to redistribute it
+            if input_tensor.placements != sequence_sharding:
+                input_tensor = input_tensor.redistribute(placements=sequence_sharding, async_op=True)
+            return input_tensor
+        elif isinstance(input_tensor, torch.Tensor):
+            # assume the input passed in already sharded on the sequence dim and create the DTensor
+            return DTensor.from_local(input_tensor, device_mesh, sequence_sharding, run_check=False)
+        else:
+            raise ValueError(f"expecting input of {mod} to be a torch.Tensor or DTensor, but got {input_tensor}")
+
+    @staticmethod
+    def _prepare_output_fn(use_local_output, mod, outputs, device_mesh):
+        return outputs.to_local() if use_local_output else outputs
+
+    def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
+        return distribute_module(
+            module,
+            device_mesh,
+            self._replicate_module_fn,
+            partial(self._prepare_input_fn, self.sequence_sharding),
+            partial(self._prepare_output_fn, self.use_local_output),
+        )
+
+
+class GroupNormRef(nn.Module):
+
+    def __init__(
+        self,
+        num_groups: int,
+        hidden_size: int,
+        elementwise_affine: bool = True,
+        bias: bool = False,
+        eps: float = 1e-5,
+        is_rms_norm: bool = False,
+    ) -> None:
+        super().__init__()
+
+        if hidden_size % num_groups != 0:
+            raise ValueError('num_channels must be divisible by num_groups')
+
+        self.num_groups = num_groups
+        self.hidden_size = hidden_size
+        self.elementwise_affine = elementwise_affine
+        self.eps = eps
+        self.is_rms_norm = is_rms_norm
+
+        self.register_parameter("weight", None)
+        self.register_parameter("bias", None)
+        if elementwise_affine:
+            self.weight = nn.Parameter(torch.empty(hidden_size))
+            if bias:
+                self.bias = nn.Parameter(torch.empty(hidden_size))
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        if self.elementwise_affine:
+            nn.init.ones_(self.weight)
+            if self.bias is not None:
+                nn.init.zeros_(self.bias)
+
+    def __repr__(self) -> str:
+        s = f"{self.__class__.__name__}({self.num_groups}, {self.hidden_size}"
+        if not self.elementwise_affine:
+            s += f", elementwise_affine={self.elementwise_affine}"
+        if self.is_rms_norm:
+            s += f", is_rms_norm={self.is_rms_norm}"
+        s += f", eps={self.eps}"
+        s += ")"
+        return s
+
+    def forward(self, x, residual=None, prenorm=False):
+        return group_norm_ref(
+            x=x,
+            weight=self.weight,
+            bias=self.bias,
+            num_groups=self.num_groups,
+            residual=residual,
+            eps=self.eps,
+            is_rms_norm=self.is_rms_norm,
+            prenorm=prenorm,
+            upcast=True,
+        )
+
+
+__all__ = [
+    'GroupNorm',
+    'GroupNormLinear',
+    'GroupNormRef',
+    'LayerNorm',
+    'LayerNormLinear',
+    'NormParallel',
+    'RMSNorm',
+    'RMSNormLinear',
+    'group_norm',
+    'group_norm_linear',
+    'group_norm_ref',
+    'layer_norm',
+    'layer_norm_bwd',
+    'layer_norm_fwd',
+    'layer_norm_linear',
+    'layer_norm_ref',
+    'rms_norm',
+    'rms_norm_linear',
+    'rms_norm_ref',
+]

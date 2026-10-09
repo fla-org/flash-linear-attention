@@ -35,8 +35,8 @@ def _get_l2norm_tiles(D: int, is_forward: bool) -> tuple[int, int]:
     """Return (BD, BT) under UB constraints. BT may be 1 for large D."""
     memory_multiplier = _FWD_MEM_MULT if is_forward else _BWD_MEM_MULT
     BD = compute_ub_block_size(
-        D,
-        memory_multiplier,
+        dim_size=D,
+        memory_multiplier=memory_multiplier,
         safety_margin=_UB_SAFETY_MARGIN,
         fallback=_FALLBACK_MAX_BD,
         desired=triton.next_power_of_2(D),
@@ -48,9 +48,9 @@ def _get_l2norm_tiles(D: int, is_forward: bool) -> tuple[int, int]:
         )
     # Large synthetic row dim so BT is limited by UB, not by a host-side T guess.
     BT = compute_row_tile_block_size(
-        1 << 20,
-        BD,
-        memory_multiplier,
+        row_dim=1 << 20,
+        fixed_dim=BD,
+        memory_multiplier=memory_multiplier,
         tiling_row=True,
         safety_margin=_UB_SAFETY_MARGIN,
         fallback=16,
@@ -61,17 +61,7 @@ def _get_l2norm_tiles(D: int, is_forward: bool) -> tuple[int, int]:
 
 
 @triton.jit(do_not_specialize=['T'])
-def l2norm_fwd_kernel(
-    x,
-    y,
-    rstd,
-    eps,
-    T,
-    T_OFFSET,
-    D: tl.constexpr,
-    BD: tl.constexpr,
-    BT: tl.constexpr,
-):
+def l2norm_fwd_kernel(x, y, rstd, eps, T, T_OFFSET, D: tl.constexpr, BD: tl.constexpr, BT: tl.constexpr):
     i_t = tl.program_id(0) + T_OFFSET
     rows = tl.cast(i_t, tl.int64) * BT + tl.arange(0, BT)
     cols = tl.arange(0, BD)
@@ -86,17 +76,7 @@ def l2norm_fwd_kernel(
 
 
 @triton.jit(do_not_specialize=['T'])
-def l2norm_bwd_kernel(
-    y,
-    rstd,
-    dy,
-    dx,
-    T,
-    T_OFFSET,
-    D: tl.constexpr,
-    BD: tl.constexpr,
-    BT: tl.constexpr,
-):
+def l2norm_bwd_kernel(y, rstd, dy, dx, T, T_OFFSET, D: tl.constexpr, BD: tl.constexpr, BT: tl.constexpr):
     i_t = tl.program_id(0) + T_OFFSET
     rows = tl.cast(i_t, tl.int64) * BT + tl.arange(0, BT)
     cols = tl.arange(0, BD)
@@ -120,18 +100,8 @@ def _launch_l2norm_fwd_kernel(
     BT: int,
 ):
     NT = triton.cdiv(T, BT)
-    for nt_off, nt_len in iter_axis_launch_chunks(NT, 1, max_grid=ASCEND_MAX_GRID_DIM):
-        l2norm_fwd_kernel[(nt_len,)](
-            x=x,
-            y=y,
-            rstd=rstd,
-            eps=eps,
-            T=T,
-            T_OFFSET=nt_off,
-            D=D,
-            BD=BD,
-            BT=BT,
-        )
+    for nt_off, nt_len in iter_axis_launch_chunks(axis_size=NT, other_grid_product=1, max_grid=ASCEND_MAX_GRID_DIM):
+        l2norm_fwd_kernel[(nt_len,)](x=x, y=y, rstd=rstd, eps=eps, T=T, T_OFFSET=nt_off, D=D, BD=BD, BT=BT)
 
 
 def _launch_l2norm_bwd_kernel(
@@ -145,25 +115,11 @@ def _launch_l2norm_bwd_kernel(
     BT: int,
 ):
     NT = triton.cdiv(T, BT)
-    for nt_off, nt_len in iter_axis_launch_chunks(NT, 1, max_grid=ASCEND_MAX_GRID_DIM):
-        l2norm_bwd_kernel[(nt_len,)](
-            y=y,
-            rstd=rstd,
-            dy=dy,
-            dx=dx,
-            T=T,
-            T_OFFSET=nt_off,
-            D=D,
-            BD=BD,
-            BT=BT,
-        )
+    for nt_off, nt_len in iter_axis_launch_chunks(axis_size=NT, other_grid_product=1, max_grid=ASCEND_MAX_GRID_DIM):
+        l2norm_bwd_kernel[(nt_len,)](y=y, rstd=rstd, dy=dy, dx=dx, T=T, T_OFFSET=nt_off, D=D, BD=BD, BT=BT)
 
 
-def l2norm_fwd_npu(
-    x: torch.Tensor,
-    eps: float = 1e-6,
-    output_dtype: torch.dtype | None = None,
-):
+def l2norm_fwd_npu(x: torch.Tensor, eps: float = 1e-6, output_dtype: torch.dtype | None = None):
     x_shape_og = x.shape
     x = x.view(-1, x.shape[-1])
     if output_dtype is None:
@@ -173,17 +129,13 @@ def l2norm_fwd_npu(
     assert y.stride(-1) == 1
     T, D = x.shape[0], x.shape[-1]
 
-    BD, BT = _get_l2norm_tiles(D, is_forward=True)
+    BD, BT = _get_l2norm_tiles(D=D, is_forward=True)
     rstd = torch.empty((T,), dtype=torch.float32, device=x.device)
-    _launch_l2norm_fwd_kernel(x, y, rstd, eps, T, D, BD, BT)
+    _launch_l2norm_fwd_kernel(x=x, y=y, rstd=rstd, eps=eps, T=T, D=D, BD=BD, BT=BT)
     return y.view(x_shape_og), rstd.view(x_shape_og[:-1])
 
 
-def l2norm_bwd_npu(
-    y: torch.Tensor,
-    rstd: torch.Tensor,
-    dy: torch.Tensor,
-):
+def l2norm_bwd_npu(y: torch.Tensor, rstd: torch.Tensor, dy: torch.Tensor):
     y_shape_og = y.shape
     y = y.view(-1, dy.shape[-1])
     dy = dy.view(-1, dy.shape[-1])
@@ -193,6 +145,6 @@ def l2norm_bwd_npu(
     T, D = y.shape[0], y.shape[-1]
     assert rstd.numel() == T
 
-    BD, BT = _get_l2norm_tiles(D, is_forward=False)
-    _launch_l2norm_bwd_kernel(y, rstd, dy, dx, T, D, BD, BT)
+    BD, BT = _get_l2norm_tiles(D=D, is_forward=False)
+    _launch_l2norm_bwd_kernel(y=y, rstd=rstd, dy=dy, dx=dx, T=T, D=D, BD=BD, BT=BT)
     return dx.view(y_shape_og)

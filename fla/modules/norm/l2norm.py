@@ -6,6 +6,7 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
+import torch.nn as nn
 import triton
 import triton.language as tl
 
@@ -14,8 +15,6 @@ from fla.ops.utils.cache import fla_cache_autotune
 from fla.utils import IS_AMD, autotune_cache_kwargs, input_guard
 
 BT_LIST = [8, 16, 32, 64, 128]
-
-
 NUM_WARPS_AUTOTUNE = [1, 2, 4, 8, 16] if IS_AMD else [1, 2, 4, 8, 16, 32]
 
 
@@ -25,14 +24,7 @@ NUM_WARPS_AUTOTUNE = [1, 2, 4, 8, 16] if IS_AMD else [1, 2, 4, 8, 16, 32]
     **autotune_cache_kwargs,
 )
 @triton.jit
-def l2norm_fwd_kernel_row(
-    x,
-    y,
-    rstd,
-    eps,
-    D,
-    BD: tl.constexpr,
-):
+def l2norm_fwd_kernel_row(x, y, rstd, eps, D, BD: tl.constexpr):
     i_t = tl.program_id(0).to(tl.int64)
     x += i_t * D
     y += i_t * D
@@ -53,15 +45,7 @@ def l2norm_fwd_kernel_row(
     **autotune_cache_kwargs,
 )
 @triton.jit
-def l2norm_bwd_kernel_row(
-    y,
-    rstd,
-    dy,
-    dx,
-    eps,
-    D,
-    BD: tl.constexpr,
-):
+def l2norm_bwd_kernel_row(y, rstd, dy, dx, eps, D, BD: tl.constexpr):
     i_t = tl.program_id(0).to(tl.int64)
     y += i_t * D
     dx += i_t * D
@@ -82,17 +66,7 @@ def l2norm_bwd_kernel_row(
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=["T"])
-def l2norm_fwd_kernel(
-    x,
-    y,
-    rstd,
-    eps,
-    T,
-    D: tl.constexpr,
-    BD: tl.constexpr,
-    NB: tl.constexpr,
-    BT: tl.constexpr,
-):
+def l2norm_fwd_kernel(x, y, rstd, eps, T, D: tl.constexpr, BD: tl.constexpr, NB: tl.constexpr, BT: tl.constexpr):
     i_t = tl.program_id(0).to(tl.int64)
     o_t = i_t * BT + tl.arange(0, BT)
     o_d = tl.arange(0, BD)
@@ -116,18 +90,7 @@ def l2norm_fwd_kernel(
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=["T"])
-def l2norm_bwd_kernel(
-    y,
-    rstd,
-    dy,
-    dx,
-    eps,
-    T,
-    D: tl.constexpr,
-    BD: tl.constexpr,
-    NB: tl.constexpr,
-    BT: tl.constexpr,
-):
+def l2norm_bwd_kernel(y, rstd, dy, dx, eps, T, D: tl.constexpr, BD: tl.constexpr, NB: tl.constexpr, BT: tl.constexpr):
     i_t = tl.program_id(0).to(tl.int64)
     o_t = i_t * BT + tl.arange(0, BT)
     o_d = tl.arange(0, BD)
@@ -146,11 +109,7 @@ def l2norm_bwd_kernel(
 
 
 @dispatch('modules.norm.l2norm')
-def l2norm_fwd(
-    x: torch.Tensor,
-    eps: float = 1e-6,
-    output_dtype: torch.dtype | None = None,
-):
+def l2norm_fwd(x: torch.Tensor, eps: float = 1e-6, output_dtype: torch.dtype | None = None):
     x_shape_og = x.shape
     x = x.view(-1, x.shape[-1])
 
@@ -181,12 +140,7 @@ def l2norm_fwd(
 
 
 @dispatch('modules.norm.l2norm')
-def l2norm_bwd(
-    y: torch.Tensor,
-    rstd: torch.Tensor,
-    dy: torch.Tensor,
-    eps: float = 1e-6,
-):
+def l2norm_bwd(y: torch.Tensor, rstd: torch.Tensor, dy: torch.Tensor, eps: float = 1e-6):
     y_shape_og = y.shape
     y = y.view(-1, dy.shape[-1])
     dy = dy.view(-1, dy.shape[-1])
@@ -217,12 +171,7 @@ def l2norm_bwd(
 class L2NormFunction(torch.autograd.Function):
     @staticmethod
     @input_guard
-    def forward(
-        ctx,
-        x,
-        eps=1e-6,
-        output_dtype=None,
-    ):
+    def forward(ctx, x, eps=1e-6, output_dtype=None):
         y, rstd = l2norm_fwd(x=x, eps=eps, output_dtype=output_dtype)
         ctx.eps = eps
         ctx.x_dtype = x.dtype
@@ -237,12 +186,27 @@ class L2NormFunction(torch.autograd.Function):
         return dx, None, None
 
 
-def l2norm(
-    x: torch.Tensor,
-    eps: float = 1e-6,
-    output_dtype: torch.dtype | None = None,
-) -> torch.Tensor:
+def l2norm(x: torch.Tensor, eps: float = 1e-6, output_dtype: torch.dtype | None = None) -> torch.Tensor:
     return L2NormFunction.apply(x, eps, output_dtype)
 
 
 l2_norm = l2norm
+
+
+class L2Norm(nn.Module):
+    def __init__(self, eps: float = 1e-6, output_dtype: torch.dtype | None = None):
+        super().__init__()
+        self.eps = eps
+        self.output_dtype = output_dtype
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return l2norm(x=x, eps=self.eps, output_dtype=self.output_dtype)
+
+
+__all__ = [
+    'L2Norm',
+    'l2_norm',
+    'l2norm',
+    'l2norm_bwd',
+    'l2norm_fwd',
+]
