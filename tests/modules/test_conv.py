@@ -1328,7 +1328,11 @@ def test_conv_backend_verifier(monkeypatch: pytest.MonkeyPatch, case: str):
 
 
 @pytest.mark.skipif(not IS_NVIDIA, reason='Gluon convolution requires NVIDIA')
-@pytest.mark.parametrize(('global_enable', 'local_enable'), [('0', '0'), ('0', '1'), ('1', '0')], ids=['disabled', 'local', 'global'])
+@pytest.mark.parametrize(
+    ('global_enable', 'local_enable'),
+    [('0', '0'), ('0', '1'), ('1', '0')],
+    ids=['disabled', 'local', 'global'],
+)
 @pytest.mark.parametrize('W', [4, 5], ids=['W4', 'W5'])
 def test_conv_backend_dispatch(
     monkeypatch: pytest.MonkeyPatch,
