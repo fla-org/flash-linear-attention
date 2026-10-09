@@ -6,6 +6,7 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
+import torch.nn as nn
 import triton
 import triton.language as tl
 
@@ -246,3 +247,26 @@ def l2norm(
 
 
 l2_norm = l2norm
+
+
+class L2Norm(nn.Module):
+    def __init__(
+        self,
+        eps: float = 1e-6,
+        output_dtype: torch.dtype | None = None,
+    ):
+        super().__init__()
+        self.eps = eps
+        self.output_dtype = output_dtype
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return l2norm(x=x, eps=self.eps, output_dtype=self.output_dtype)
+
+
+__all__ = [
+    'L2Norm',
+    'l2_norm',
+    'l2norm',
+    'l2norm_bwd',
+    'l2norm_fwd',
+]

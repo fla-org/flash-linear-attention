@@ -180,6 +180,8 @@ def register_backend(operation: str) -> Callable[[type[B]], type[B]]:
 def _resolve_registry(operation: str, *, allow_unknown: bool = False) -> BackendRegistry:
     if operation == 'modules':
         module_path = 'fla.modules.backends'
+    elif operation.startswith('modules.norm.'):
+        module_path = 'fla.modules.norm.triton_ascend'
     elif operation.startswith('modules.'):
         module_path = f'fla.{operation}.backends'
     else:

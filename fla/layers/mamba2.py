@@ -18,7 +18,7 @@ from transformers.utils import logging
 
 from fla.layers.utils import get_layer_cache, update_layer_cache
 from fla.modules.activations import ACT2FN
-from fla.modules.layernorm_gated import RMSNormGated
+from fla.modules.norm.layernorm_gated import RMSNormGated
 
 with warnings.catch_warnings():
     warnings.simplefilter('ignore')

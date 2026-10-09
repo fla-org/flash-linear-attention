@@ -102,6 +102,9 @@ def _get_dispatch_owners(tree) -> set[str]:
         if not node.args or not isinstance(node.args[0], ast.Constant) or not isinstance(node.args[0].value, str):
             continue
         operation = node.args[0].value
+        if operation.startswith('modules.norm.'):
+            owners.add('fla.modules.norm.triton_ascend')
+            continue
         prefix = 'fla' if operation == 'modules' or operation.startswith('modules.') else 'fla.ops'
         owners.add(f'{prefix}.{operation}.backends')
     return owners
@@ -115,6 +118,8 @@ def find_backend_op_files(changed_files: list[str], project_root: Path) -> list[
         parts = Path(file).parts
         if 'backends' in parts:
             owners.add('.'.join(parts[:parts.index('backends') + 1]))
+        elif file.startswith('fla/modules/norm/triton_ascend/'):
+            owners.add('fla.modules.norm.triton_ascend')
     if not shared and not owners:
         return []
 

@@ -111,10 +111,10 @@ def test_backend_changes_follow_repository_ownership(changed, expected, unrelate
 @pytest.mark.parametrize(
     ('changed', 'expected'),
     [
-        ('fla/modules/norm/layernorm/backends/triton_ascend/ops.py', {'tests/modules/test_layernorm.py'}),
-        ('fla/modules/norm/l2norm/backends/triton_ascend/__init__.py', {'tests/modules/test_l2norm.py'}),
-        ('fla/modules/norm/l2norm/backends/triton_ascend/ops.py', {'tests/modules/test_l2norm.py'}),
-        ('fla/modules/norm/fused_norm_gate/backends/triton_ascend/ops.py', {'tests/modules/test_layernorm_gated.py'}),
+        ('fla/modules/norm/triton_ascend/layernorm.py', {'tests/modules/test_layernorm.py'}),
+        ('fla/modules/norm/triton_ascend/__init__.py', {'tests/modules/test_l2norm.py'}),
+        ('fla/modules/norm/triton_ascend/l2norm.py', {'tests/modules/test_l2norm.py'}),
+        ('fla/modules/norm/triton_ascend/fused_norm_gate.py', {'tests/modules/test_layernorm_gated.py'}),
         ('fla/modules/conv/backends/gluon/__init__.py', {'tests/modules/test_conv.py'}),
         ('fla/modules/conv/backends/gluon/ops.py', {'tests/modules/test_conv.py'}),
         ('fla/ops/attn/backends/tilelang/parallel.py', {'tests/ops/test_attn.py'}),

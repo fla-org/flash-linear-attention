@@ -107,16 +107,20 @@ def test_legacy_module_pickle_and_state_dict(monkeypatch, legacy, name, kwargs, 
     if hasattr(modules, name):
         assert getattr(modules, name) is module_class
 
-    with monkeypatch.context() as patch:
-        patch.setattr(module_class, '__module__', f'fla.modules.{legacy}')
-        checkpoint = pickle.dumps(module)
-    restored = pickle.loads(checkpoint)
+    paths = [f'fla.modules.{legacy}']
+    if legacy != 'convolution':
+        paths.extend([f'fla.modules.norm.{legacy}', f'fla.modules.norm.{legacy}.module'])
+    for path in paths:
+        with monkeypatch.context() as patch:
+            patch.setattr(module_class, '__module__', path)
+            checkpoint = pickle.dumps(module)
+        restored = pickle.loads(checkpoint)
 
-    assert type(restored) is module_class
-    assert repr(restored) == repr(module)
-    assert set(restored.state_dict()) == set(state_keys)
-    for key in state:
-        torch.testing.assert_close(restored.state_dict()[key], state[key])
+        assert type(restored) is module_class
+        assert repr(restored) == repr(module)
+        assert set(restored.state_dict()) == set(state_keys)
+        for key in state:
+            torch.testing.assert_close(restored.state_dict()[key], state[key])
     module_class(**kwargs).load_state_dict(state, strict=True)
 
 
@@ -175,6 +179,8 @@ def test_normalization_imports_preserve_public_exports(run_python, disabled):
 
         for name, canonical_path in zip(expected_symbols, canonical_paths):
             canonical = importlib.import_module(canonical_path)
+            for suffix in ('module', 'ops'):
+                assert importlib.import_module(canonical_path + '.' + suffix) is canonical
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter('always', FutureWarning)
                 legacy = importlib.import_module('fla.modules.' + name)
