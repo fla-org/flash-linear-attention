@@ -2,7 +2,7 @@
 
 Experience notes from past kernel work. Read the current code before applying — numbers are not immutable hardware constants. Paths are relative to the `flash-linear-attention` repo root.
 
-## `causal_conv1d.py` — 1D core-grid + constexpr DMA split
+## `causal_conv1d` — 1D core-grid + constexpr DMA split
 
 File: `fla/modules/causal_conv1d/triton_ascend.py`
 

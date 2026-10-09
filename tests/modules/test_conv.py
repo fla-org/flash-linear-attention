@@ -1275,13 +1275,15 @@ def test_conv_varlen_empty_sequence():
 
 
 def test_conv_backend_override(monkeypatch: pytest.MonkeyPatch):
+    from fla.modules.causal_conv1d import ops
+
     torch.manual_seed(42)
     monkeypatch.setenv('FLA_CONV_BACKEND', 'bogus')
     with pytest.raises(ValueError, match='Invalid backend'):
         ShortConvolution(hidden_size=8, kernel_size=3)
 
     monkeypatch.setenv('FLA_CONV_BACKEND', 'cuda')
-    monkeypatch.setattr('fla.modules.causal_conv1d.gluon.causal_conv1d_fn_cuda', None)
+    monkeypatch.setattr(ops, 'causal_conv1d_fn_cuda', None)
     with pytest.warns(UserWarning, match='Switching to the Triton implementation'):
         conv = ShortConvolution(hidden_size=8, kernel_size=3, backend='triton')
     assert conv.backend == 'triton'
