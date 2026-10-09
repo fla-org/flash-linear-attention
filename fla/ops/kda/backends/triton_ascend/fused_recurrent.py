@@ -97,9 +97,6 @@ def fused_recurrent_kda_fwd_kernel_npu(
     if T > 0 or not IS_CONTINUOUS_BATCHING:
         o_k = tl.arange(0, BK).to(tl.int64)
         o_v = i_v * BV + tl.arange(0, BV)
-        # block-pointer metadata requires int32 tile offsets on Ascend
-        o_v_start = tl.cast(i_v * BV, tl.int32)
-
         o_qk = (bos * H + i_h) * K
         o_hv = bos * HV + i_hv
 
@@ -198,10 +195,10 @@ def fused_recurrent_kda_fwd_kernel_npu(
                 else:
                     p_ht = ht + (bos + i_t) * stride_final_state_token + i_hv * K * V
                 if STATE_V_FIRST:
-                    p_ht = tl.make_block_ptr(p_ht, (V, K), (K, 1), (o_v_start, 0), (BV, BK), (1, 0))
+                    p_ht = p_ht + o_v[:, None] * K + o_k[None, :]
                 else:
-                    p_ht = tl.make_block_ptr(p_ht, (K, V), (V, 1), (0, o_v_start), (BK, BV), (1, 0))
-                tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), boundary_check=(0, 1))
+                    p_ht = p_ht + o_k[:, None] * V + o_v[None, :]
+                tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=m_h)
 
             p_q += H * K
             p_k += H * K
@@ -213,10 +210,10 @@ def fused_recurrent_kda_fwd_kernel_npu(
         if STORE_FINAL_STATE and not IS_CONTINUOUS_BATCHING:
             p_ht = ht + i_nh * K * V
             if STATE_V_FIRST:
-                p_ht = tl.make_block_ptr(p_ht, (V, K), (K, 1), (o_v_start, 0), (BV, BK), (1, 0))
+                p_ht = p_ht + o_v[:, None] * K + o_k[None, :]
             else:
-                p_ht = tl.make_block_ptr(p_ht, (K, V), (V, 1), (0, o_v_start), (BK, BV), (1, 0))
-            tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), boundary_check=(0, 1))
+                p_ht = p_ht + o_k[:, None] * V + o_v[None, :]
+            tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=m_h)
 
 
 @register(fused_recurrent_kda_fwd, backend=TritonAscendBackend)
