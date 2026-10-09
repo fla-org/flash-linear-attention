@@ -13,9 +13,10 @@ from collections.abc import Sequence
 
 import torch
 
-from fla.ops.backends import BaseBackend
+from fla.backends import BaseBackend, register_backend
 
 
+@register_backend('attnres')
 class TritonAscendAttnResBackend(BaseBackend):
     """Ascend NPU backend for fused AttnRes."""
 

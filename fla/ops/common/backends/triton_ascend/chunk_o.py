@@ -5,14 +5,13 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""chunk_fwd_o, chunk_bwd_dv_local, and chunk_bwd_dqkwg adapted for triton-ascend on Ascend NPU."""
+"""Ascend kernels for chunk outputs and their gradients."""
 
 from __future__ import annotations
 
 import torch
 import triton
 import triton.language as tl
-import triton.runtime.driver as driver
 
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 from fla.ops.utils.op import exp2
@@ -20,6 +19,7 @@ from fla.utils import input_guard
 from fla.utils.ascend_ub_manager import (
     ASCEND_MAX_GRID_DIM,
     compute_row_tile_block_size,
+    get_npu_properties,
     max_grid_axis_chunks,
 )
 
@@ -34,15 +34,15 @@ _FULL_BT_BK_CANDIDATES = (64, 32, 16)
 _FULL_BT_BV_CANDIDATES = (64, 32, 16)
 _DV_FULL_BK_CANDIDATES = (128, 64, 32, 16)
 _DV_FULL_BV_CANDIDATES = (128, 64, 32, 16)
-# Peak UB estimate for bwd_dv_local n_sub==2 path (192 KiB on typical Ascend cores).
+# peak UB estimate for bwd_dv_local n_sub==2 path (192 KiB on typical Ascend cores).
 _UB_BYTES = 196608
 
 
 def _get_bk(K: int, BC: int) -> int:
     return compute_row_tile_block_size(
-        BC,
-        K,
-        _O_MEM_MULT,
+        row_dim=BC,
+        fixed_dim=K,
+        memory_multiplier=_O_MEM_MULT,
         tiling_row=False,
         safety_margin=_SAFETY_MARGIN,
         fallback=_FALLBACK_BK,
@@ -53,9 +53,9 @@ def _get_bk(K: int, BC: int) -> int:
 
 def _get_bv(V: int, BC: int) -> int:
     return compute_row_tile_block_size(
-        BC,
-        V,
-        _O_MEM_MULT,
+        row_dim=BC,
+        fixed_dim=V,
+        memory_multiplier=_O_MEM_MULT,
         tiling_row=False,
         safety_margin=_SAFETY_MARGIN,
         fallback=_FALLBACK_BV,
@@ -70,8 +70,8 @@ def _get_bc(BT: int, K: int, V: int) -> int:
     for BC in _BC_CANDIDATES:
         if BT % BC != 0:
             continue
-        BK = _get_bk(K, BC)
-        BV = _get_bv(V, BC)
+        BK = _get_bk(K=K, BC=BC)
+        BV = _get_bv(V=V, BC=BC)
         n_sub = BT // BC
         peak_bytes = n_sub * BC * BC * 4 + 2 * BC * BV * 2 + 2 * BC * BK * 2 + 2 * BC * 4
         if peak_bytes <= ub_budget:
@@ -80,11 +80,7 @@ def _get_bc(BT: int, K: int, V: int) -> int:
 
 
 def _dv_full_peak_bytes(BT: int, BK: int, BV: int) -> int:
-    """Phased peak UB for CUDA-style full-BT dv_local (A once, then V-loop).
-
-    K-loop: A[BT,BT] fp32 + k/q bf16 + one tl.dot workspace.
-    V-loop: A_pristine + lhs copy (tl.dot clobbers) + do bf16 + dv fp32.
-    """
+    """Peak UB across key/value passes, including copies for tl.dot's destructive inputs."""
     kloop = BT * BT * 4 + BT * BK * 2 * 2 + BT * max(BT, BK) * 4
     vloop = BT * BT * 4 * 2 + BT * BV * 2 + BT * BV * 4
     return max(kloop, vloop)
@@ -101,25 +97,14 @@ def _get_dv_full_tiles(BT: int, K: int, V: int) -> tuple[int, int] | None:
         for BV in _DV_FULL_BV_CANDIDATES:
             if v_cap < BV:
                 continue
-            if _dv_full_peak_bytes(BT, BK, BV) <= ub_budget:
+            if _dv_full_peak_bytes(BT=BT, BK=BK, BV=BV) <= ub_budget:
                 return BK, BV
     return None
 
 
 def _dqkwg_full_peak_bytes(BT: int, BK: int, BV: int, use_dw: bool) -> int:
-    """Phased peak UB for full-BT dqkwg with ds hoisted out of the K loop.
-
-    ds-pass: ds fp32 + do/v + trans(v) + one tl.dot workspace.
-    per-K V-loop: ds_keep bf16 + dq/dk[/dw] fp32 + do/v[/dv]/h/dh + workspace.
-    Frobenius <h,dh> is a separate Vector kernel (see dg_hdh).
-    Epilogue: ds_keep + lhs copy, q, k, dq, dk.
-    """
-    ds_pass = (
-        BT * BT * 4
-        + BT * BV * 2 * 2
-        + BT * BV * 2
-        + BT * max(BT, BV) * 4
-    )
+    """Peak UB across score, key/value, and epilogue passes, excluding the separate h/dh reduction."""
+    ds_pass = BT * BT * 4 + BT * BV * 2 * 2 + BT * BV * 2 + BT * max(BT, BV) * 4
     k_vloop = (
         BT * BT * 2
         + BT * BK * 4 * (3 if use_dw else 2)
@@ -127,12 +112,7 @@ def _dqkwg_full_peak_bytes(BT: int, BK: int, BV: int, use_dw: bool) -> int:
         + BV * BK * 2 * 2
         + BT * max(BK, BV) * 4
     )
-    epilogue = (
-        BT * BT * 2 * 2
-        + BT * BK * 4 * 2
-        + BT * BK * 2 * 2
-        + BT * 4
-    )
+    epilogue = BT * BT * 2 * 2 + BT * BK * 4 * 2 + BT * BK * 2 * 2 + BT * 4
     return max(ds_pass, k_vloop, epilogue)
 
 
@@ -147,7 +127,7 @@ def _get_dqkwg_full_tiles(BT: int, K: int, V: int, use_dw: bool) -> tuple[int, i
         for BV in _FULL_BT_BV_CANDIDATES:
             if v_cap < BV:
                 continue
-            if _dqkwg_full_peak_bytes(BT, BK, BV, use_dw) <= ub_budget:
+            if _dqkwg_full_peak_bytes(BT=BT, BK=BK, BV=BV, use_dw=use_dw) <= ub_budget:
                 return BK, BV
     return None
 
@@ -194,18 +174,11 @@ def _g_block_ptr(g_base, T, offset, BC, G_T_CONTIG: tl.constexpr, HV: tl.constex
     return tl.make_block_ptr(g_base, (T,), (HV,), (offset,), (BC,), (0,))
 
 
-def get_npu_properties():
-    device = torch.npu.current_device()
-    return driver.active.utils.get_device_properties(device)
-
-
-@triton.heuristics(
-    {
-        "USE_G": lambda args: args["g"] is not None,
-        "USE_G_GAMMA": lambda args: args["g_gamma"] is not None,
-        "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-    }
-)
+@triton.heuristics({
+    "USE_G": lambda args: args["g"] is not None,
+    "USE_G_GAMMA": lambda args: args["g_gamma"] is not None,
+    "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
+})
 @triton.autotune(
     configs=[
         triton.Config({'BK': 128}),
@@ -215,7 +188,7 @@ def get_npu_properties():
     key=['H', 'HV', 'K', 'V', 'BT', 'STATE_V_FIRST'],
 )
 @triton.jit(do_not_specialize=["T", "total_chunks", "task_num", "num_core", "H", "HV", "K", "V", "N"])
-def chunk_fwd_kernel_o_npu(
+def chunk_o_fwd_kernel(
     q,
     k,
     v,
@@ -246,7 +219,6 @@ def chunk_fwd_kernel_o_npu(
     core_id = tl.program_id(0)
     h_t_step = HV * total_chunks
     for task_id in tl.range(core_id, task_num, num_core):
-        # Flatten (i_v, i_h, global_t) into task_id
         i_v = task_id // h_t_step
         remainder = task_id % h_t_step
         i_h = remainder // total_chunks
@@ -254,7 +226,7 @@ def chunk_fwd_kernel_o_npu(
         T_cur = T
 
         if IS_VARLEN:
-            # Find i_n via chunk_offsets: largest i_n with chunk_offsets[i_n] <= global_t
+            # find the sequence whose chunk offsets contain global_t.
             i_n = 0
             for n in tl.range(0, N, 1):
                 i_n = tl.where(tl.load(chunk_offsets + n + 1) <= global_t, n + 1, i_n)
@@ -269,7 +241,7 @@ def chunk_fwd_kernel_o_npu(
             bos = tl.cast(i_n, tl.int64) * T
             i_tg = global_t
 
-        # offset calculation (use local pointers to avoid in-place += accumulation across iterations)
+        # local pointers avoid accumulating offsets across tasks.
         q_ptr = q + (bos * H + i_h // (HV // H)) * K
         k_ptr = k + (bos * H + i_h // (HV // H)) * K
         v_ptr = v + (bos * HV + i_h) * V
@@ -293,7 +265,7 @@ def chunk_fwd_kernel_o_npu(
             # [BK, BV]
             b_h = tl.load(p_h, boundary_check=(0, 1))
 
-            # Ascend tl.dot clobbers lhs; copy before the first dot on b_q.
+            # ascend tl.dot clobbers lhs; copy before the first dot on b_q.
             b_q_c = b_q + 0.0
             # [BT, BK] @ [BK, BV] -> [BT, BV]
             if STATE_V_FIRST:
@@ -304,9 +276,7 @@ def chunk_fwd_kernel_o_npu(
             b_A = tl.dot(b_q_c, b_k, b_A)
 
         if USE_G:
-            # g is transposed to [B, HV, T] in wrapper for contiguous T-load.
-            # Non-varlen: g_ptr = g + tl.cast(i_n, tl.int64) * HV * T + i_h * T (i_n is batch index)
-            # Varlen (B=1): g_ptr = g + bos + i_h * T (bos is absolute token offset)
+            # g is transposed to [B, HV, T] for contiguous token loads.
             if IS_VARLEN:
                 g_ptr = g + bos + i_h * T
             else:
@@ -331,8 +301,6 @@ def chunk_fwd_kernel_o_npu(
         p_o = tl.make_block_ptr(o_ptr, (T_cur, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
 
         b_v = tl.load(p_v, boundary_check=(0, 1))
-        # to fix mma -> mma layout conversion
-        # already solved by triton v3.2 or higher
         b_o = b_o * scale + tl.dot(b_A.to(b_v.dtype), b_v) * scale
         tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
 
@@ -362,10 +330,7 @@ def chunk_fwd_o_npu(
         NT = triton.cdiv(T, BT)
         total_chunks = N * NT
     else:
-        N, chunk_offsets = (
-            len(cu_seqlens) - 1,
-            prepare_chunk_offsets(cu_seqlens, BT),
-        )
+        N, chunk_offsets = len(cu_seqlens) - 1, prepare_chunk_offsets(cu_seqlens=cu_seqlens, chunk_size=BT)
         # chunk_offsets[-1] stores the cumulative total chunks across all batches
         total_chunks = chunk_offsets[-1].item()
 
@@ -376,7 +341,7 @@ def chunk_fwd_o_npu(
 
     if g is not None:
         g = g.transpose(1, 2).contiguous()
-    chunk_fwd_kernel_o_npu[(num_core,)](
+    chunk_o_fwd_kernel[(num_core,)](
         q=q,
         k=k,
         v=v,
@@ -403,10 +368,8 @@ def chunk_fwd_o_npu(
     return o
 
 
-def _launch_bwd_2d_kernel(
-    kernel, *, nt: int, bh_total: int, kernel_kwargs: dict,
-) -> None:
-    max_nt = max_grid_axis_chunks(nt, bh_total, max_grid=ASCEND_MAX_GRID_DIM)
+def _launch_bwd_2d_kernel(kernel, *, nt: int, bh_total: int, kernel_kwargs: dict) -> None:
+    max_nt = max_grid_axis_chunks(axis_size=nt, other_grid_product=bh_total, max_grid=ASCEND_MAX_GRID_DIM)
     for nt_off in range(0, nt, max_nt):
         nt_len = min(max_nt, nt - nt_off)
         chunk_indices = kernel_kwargs.get('chunk_indices')
@@ -416,22 +379,15 @@ def _launch_bwd_2d_kernel(
             kernel_kwargs['NT_OFFSET'] = 0
         else:
             kernel_kwargs['NT_OFFSET'] = nt_off
-        max_bh = max_grid_axis_chunks(bh_total, nt_len, max_grid=ASCEND_MAX_GRID_DIM)
+        max_bh = max_grid_axis_chunks(axis_size=bh_total, other_grid_product=nt_len, max_grid=ASCEND_MAX_GRID_DIM)
         for bh_off in range(0, bh_total, max_bh):
             bh_len = min(max_bh, bh_total - bh_off)
             kernel_kwargs['BH_OFFSET'] = bh_off
             kernel[(nt_len, bh_len)](**kernel_kwargs)
 
 
-def _launch_bwd_3d_kernel(
-    kernel,
-    *,
-    nk: int,
-    nt: int,
-    bh_total: int,
-    kernel_kwargs: dict,
-) -> None:
-    max_nt = max_grid_axis_chunks(nt, bh_total, max_grid=ASCEND_MAX_GRID_DIM)
+def _launch_bwd_3d_kernel(kernel, *, nk: int, nt: int, bh_total: int, kernel_kwargs: dict) -> None:
+    max_nt = max_grid_axis_chunks(axis_size=nt, other_grid_product=bh_total, max_grid=ASCEND_MAX_GRID_DIM)
     for k_idx in range(nk):
         kernel_kwargs['K_OFFSET'] = k_idx
         for nt_off in range(0, nt, max_nt):
@@ -443,7 +399,7 @@ def _launch_bwd_3d_kernel(
                 kernel_kwargs['NT_OFFSET'] = 0
             else:
                 kernel_kwargs['NT_OFFSET'] = nt_off
-            max_bh = max_grid_axis_chunks(bh_total, nt_len, max_grid=ASCEND_MAX_GRID_DIM)
+            max_bh = max_grid_axis_chunks(axis_size=bh_total, other_grid_product=nt_len, max_grid=ASCEND_MAX_GRID_DIM)
             for bh_off in range(0, bh_total, max_bh):
                 bh_len = min(max_bh, bh_total - bh_off)
                 kernel_kwargs['BH_OFFSET'] = bh_off
@@ -451,7 +407,7 @@ def _launch_bwd_3d_kernel(
 
 
 @triton.jit(do_not_specialize=['T', 'task_num', 'num_core'])
-def chunk_bwd_kernel_dv_local_full_npu(
+def chunk_dv_local_bwd_kernel_full(
     q,
     k,
     g,
@@ -477,11 +433,10 @@ def chunk_bwd_kernel_dv_local_full_npu(
     G_T_CONTIG: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    """CUDA-style full-BT dv_local on a 1D Cube core-grid.
+    """Compute full-chunk value gradients on a persistent Cube grid.
 
-    A[BT,BT] once per (chunk, head), then V-loop A @ do. Flatten tasks so
-    large NT·B·HV does not host-split at ASCEND_MAX_GRID_DIM. Rebind local
-    pointers every task — do not in-place += kernel args.
+    A fixed grid avoids host splits at ASCEND_MAX_GRID_DIM.
+    Local pointers must be reset for each task.
     """
     core_id = tl.program_id(0)
     bh = B * HV
@@ -541,7 +496,7 @@ def chunk_bwd_kernel_dv_local_full_npu(
 
 
 @triton.jit(do_not_specialize=['T'])
-def chunk_bwd_kernel_dv_local_npu(
+def chunk_dv_local_bwd_kernel(
     q,
     k,
     g,
@@ -699,7 +654,7 @@ def chunk_bwd_kernel_dv_local_npu(
 
 
 @triton.jit(do_not_specialize=['T'])
-def chunk_bwd_kernel_dqkwg_npu(
+def chunk_dqkwg_bwd_kernel(
     q,
     k,
     v,
@@ -805,13 +760,13 @@ def chunk_bwd_kernel_dqkwg_npu(
 
     tl.debug_barrier()
 
-    # Zero dk scratch; fused intra path accumulates ds.T@q into it.
+    # zero dk scratch because the fused intra path accumulates ds.T@q into it.
     for c0 in range(n_sub):
         i_tc = i_t * BT + c0 * BC
         p_zk = tl.make_block_ptr(dk_f32, (T, K), (HV * K, 1), (i_tc, i_k * BK), (BC, BK), (1, 0))
         tl.store(p_zk, tl.zeros([BC, BK], dtype=tl.float32), boundary_check=(0, 1))
 
-    # Fused dq path + ds contribution to dk (ds computed once per (r,c)).
+    # share ds between dq and dk for each (r, c) block.
     for r in range(n_sub):
         i_tc_r = i_t * BT + r * BC
         m_r = (i_tc_r + o_i) < T
@@ -882,7 +837,7 @@ def chunk_bwd_kernel_dqkwg_npu(
         tl.store(p_dq_r, b_dq_r.to(p_dq_r.dtype.element_ty), boundary_check=(0, 1))
         tl.store(p_dq_f32_r, b_dq_r, boundary_check=(0, 1))
 
-    # Finalize dk: gated inter (v@dh) + fused intra from scratch.
+    # combine gated inter (v@dh) and fused intra contributions to dk.
     for c in range(n_sub):
         i_tc_c = i_t * BT + c * BC
         m_c = (i_tc_c + o_i) < T
@@ -913,7 +868,7 @@ def chunk_bwd_kernel_dqkwg_npu(
 
 
 @triton.jit(do_not_specialize=['T', 'task_num', 'num_core'])
-def chunk_bwd_kernel_dqkwg_full_npu(
+def chunk_dqkwg_bwd_kernel_full(
     q,
     k,
     v,
@@ -948,12 +903,11 @@ def chunk_bwd_kernel_dqkwg_full_npu(
     STATE_V_FIRST: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    """CUDA-style full-BT dq/dk/dw[/dg row-sums], 1D Cube core-grid.
+    """Compute full-chunk gradients on a persistent Cube grid.
 
-    Flatten (chunk, head) into task_id; each Cube core walks the list.
-    Avoids 2D grid mapping onto 24 AIC and host-splits at 65535.
-    Rebind local pointers every task — do not in-place += kernel args.
-    Frobenius <h, dh> for last-token dg is `chunk_bwd_kernel_dg_hdh_npu`.
+    A fixed grid avoids multidimensional mapping and host splits at ASCEND_MAX_GRID_DIM.
+    Local pointers must be reset for each task.
+    The final-token gate contribution from h and dh runs in `chunk_dg_bwd_kernel_hdh`.
     """
     core_id = tl.program_id(0)
     bh = B * HV
@@ -1081,7 +1035,7 @@ def chunk_bwd_kernel_dqkwg_full_npu(
 
 
 @triton.jit(do_not_specialize=['T', 'task_num', 'num_core'])
-def chunk_bwd_kernel_dg_hdh_npu(
+def chunk_dg_bwd_kernel_hdh(
     h,
     dh,
     g,
@@ -1102,10 +1056,9 @@ def chunk_bwd_kernel_dg_hdh_npu(
     STATE_V_FIRST: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    """Vector-core Frobenius <h, dh> * exp2(g_last) added to the last token of dg.
+    """Compute the final-token gate contribution from h and dh on vector cores.
 
-    MIX Cube cannot vectorize the 64x64 fp32 mul-sum (~22 ms). This kernel has
-    no Cube tiles so the same reduction can run on all vector cores.
+    A separate vector kernel avoids the scalarized fp32 reduction in mixed Cube kernels.
     """
     core_id = tl.program_id(0)
     bh = B * HV
@@ -1155,7 +1108,7 @@ def chunk_bwd_kernel_dg_hdh_npu(
 
 
 @triton.jit(do_not_specialize=['T'])
-def chunk_bwd_kernel_dg_npu(
+def chunk_dg_bwd_kernel(
     q,
     k,
     v,
@@ -1293,29 +1246,29 @@ def chunk_bwd_dv_local_npu(
     B, T, H, K, V, HV = *k.shape, do.shape[-1], do.shape[2]
     BT = chunk_size
     if chunk_indices is None and cu_seqlens is not None:
-        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
+        chunk_indices = prepare_chunk_indices(cu_seqlens=cu_seqlens, chunk_size=BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     if scale is None:
         scale = k.shape[-1] ** -0.5
 
     use_g = g is not None
     use_g_gamma = g_gamma is not None
-    full_tiles = _get_dv_full_tiles(BT, K, V)
+    full_tiles = _get_dv_full_tiles(BT=BT, K=K, V=V)
     use_full = full_tiles is not None
     if use_full:
         BK, BV = full_tiles
-        bwd_kernel = chunk_bwd_kernel_dv_local_full_npu
+        bwd_kernel = chunk_dv_local_bwd_kernel_full
     else:
-        BC = _get_bc(BT, K, V)
-        BK = _get_bk(K, BC)
-        BV = _get_bv(V, BC)
-        bwd_kernel = chunk_bwd_kernel_dv_local_npu
+        BC = _get_bc(BT=BT, K=K, V=V)
+        BK = _get_bk(K=K, BC=BC)
+        BV = _get_bv(V=V, BC=BC)
+        bwd_kernel = chunk_dv_local_bwd_kernel
     if not use_g and not use_g_gamma and not use_full:
         g_arg = torch.zeros(B, T, HV, dtype=torch.float32, device=q.device)
         use_g = True
         g_t_contig = False
     elif use_g:
-        g_arg, g_t_contig = _g_npu_arg(g, HV)
+        g_arg, g_t_contig = _g_npu_arg(g=g, HV=HV)
     else:
         g_arg = q
         g_t_contig = False
@@ -1354,12 +1307,7 @@ def chunk_bwd_dv_local_npu(
         kernel_kwargs['BC'] = BC
         kernel_kwargs['NT_OFFSET'] = 0
         kernel_kwargs['BH_OFFSET'] = 0
-        _launch_bwd_2d_kernel(
-            bwd_kernel,
-            nt=NT,
-            bh_total=B * HV,
-            kernel_kwargs=kernel_kwargs,
-        )
+        _launch_bwd_2d_kernel(kernel=bwd_kernel, nt=NT, bh_total=B * HV, kernel_kwargs=kernel_kwargs)
     return dv
 
 
@@ -1384,29 +1332,29 @@ def chunk_bwd_dqkwg_npu(
     B, T, H, K, V, HV = *k.shape, v.shape[-1], v.shape[2]
     BT = chunk_size
     if chunk_indices is None and cu_seqlens is not None:
-        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
+        chunk_indices = prepare_chunk_indices(cu_seqlens=cu_seqlens, chunk_size=BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     if scale is None:
         scale = K ** -0.5
+    scale = float(scale)
 
     use_dw = w is not None
-    # Ungated full-BT hits Triton-Ascend `tl.trans` cc→cc copy on Cube-resident
-    # ds[BT,BT]. Gated paths flush ds via exp2 (vector) and compile cleanly.
-    full_tiles = _get_dqkwg_full_tiles(BT, K, V, use_dw)
+    # ungated full-BT fails on a Cube-to-Cube tl.trans copy; gated paths flush ds through vector exp2.
+    full_tiles = _get_dqkwg_full_tiles(BT=BT, K=K, V=V, use_dw=use_dw)
     use_full = full_tiles is not None and (g is not None or g_gamma is not None)
     if use_full:
         BK, BV = full_tiles
-        dqkwg_kernel = chunk_bwd_kernel_dqkwg_full_npu
+        dqkwg_kernel = chunk_dqkwg_bwd_kernel_full
     else:
-        BC = _get_bc(BT, K, V)
-        BK = _get_bk(K, BC)
-        BV = _get_bv(V, BC)
-        dqkwg_kernel = chunk_bwd_kernel_dqkwg_npu
+        BC = _get_bc(BT=BT, K=K, V=V)
+        BK = _get_bk(K=K, BC=BC)
+        BV = _get_bv(V=V, BC=BC)
+        dqkwg_kernel = chunk_dqkwg_bwd_kernel
         dq_f32 = torch.empty(B, T, HV, K, dtype=torch.float32, device=q.device)
         dk_f32 = torch.empty(B, T, HV, K, dtype=torch.float32, device=q.device)
     NK = triton.cdiv(K, BK)
     if g is not None:
-        g_arg, g_t_contig = _g_npu_arg(g, HV)
+        g_arg, g_t_contig = _g_npu_arg(g=g, HV=HV)
     else:
         g_arg = q
         g_t_contig = False
@@ -1424,9 +1372,9 @@ def chunk_bwd_dqkwg_npu(
         'h': h,
         'do': do,
         'dh': dh,
-        'dw': dw,
         'dq': dq,
         'dk': dk,
+        'dw': dw,
         'dv': dv,
         'cu_seqlens': cu_seqlens,
         'chunk_indices': chunk_indices,
@@ -1460,17 +1408,11 @@ def chunk_bwd_dqkwg_npu(
         dqkwg_kwargs['K_OFFSET'] = 0
         dqkwg_kwargs['NT_OFFSET'] = 0
         dqkwg_kwargs['BH_OFFSET'] = 0
-        _launch_bwd_3d_kernel(
-            dqkwg_kernel,
-            nk=NK,
-            nt=NT,
-            bh_total=B * HV,
-            kernel_kwargs=dqkwg_kwargs,
-        )
+        _launch_bwd_3d_kernel(kernel=dqkwg_kernel, nk=NK, nt=NT, bh_total=B * HV, kernel_kwargs=dqkwg_kwargs)
 
     if dg is not None and not use_full:
         _launch_bwd_3d_kernel(
-            chunk_bwd_kernel_dg_npu,
+            kernel=chunk_dg_bwd_kernel,
             nk=NK,
             nt=NT,
             bh_total=B * HV,
@@ -1511,9 +1453,9 @@ def chunk_bwd_dqkwg_npu(
     if dg is not None:
         dg = dg.sum(0)
         if use_full:
-            hdh_bk, hdh_bv = _get_hdh_tiles(K, V)
+            hdh_bk, hdh_bv = _get_hdh_tiles(K=K, V=V)
             num_vec = get_npu_properties()["num_vectorcore"]
-            chunk_bwd_kernel_dg_hdh_npu[(num_vec,)](
+            chunk_dg_bwd_kernel_hdh[(num_vec,)](
                 h=h,
                 dh=dh,
                 g=g_arg,

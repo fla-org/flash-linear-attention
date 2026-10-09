@@ -157,7 +157,7 @@ jobs:
 
   check_h100_pytorch_2_7:
     name: Check H100 PyTorch 2.7 Eligibility
-    needs: [changes, gate]
+    needs: [changes, gate, test-h100-pytorch-2-12]
     if: >
       needs.changes.outputs.npu_only != 'true' &&
       needs.gate.outputs.run_full == 'true' &&
