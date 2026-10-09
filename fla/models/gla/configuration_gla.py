@@ -52,7 +52,8 @@ class GLAConfig(_HybridAttentionConfigMixin, PretrainedConfig):
         fuse_linear_cross_entropy: bool = False,
         use_l2warp: bool = False,
         vocab_size: int = 32000,
-        attnres_block_size: int | None = None,
+        residual_mode: str = 'standard',
+        residual_kwargs: dict | None = None,
         **kwargs,
     ):
         self.hidden_size = hidden_size
@@ -85,7 +86,17 @@ class GLAConfig(_HybridAttentionConfigMixin, PretrainedConfig):
         self.fuse_linear_cross_entropy = fuse_linear_cross_entropy
         self.use_l2warp = use_l2warp
         self.vocab_size = vocab_size
-        self.attnres_block_size = attnres_block_size
+
+        if residual_kwargs is not None and not isinstance(residual_kwargs, dict):
+            raise TypeError('residual_kwargs must be a dict or None')
+        self.residual_kwargs = dict(residual_kwargs or {})
+        reserved = {'hidden_size', 'sub_layer_idx', 'num_sublayers'} & self.residual_kwargs.keys()
+        if reserved:
+            raise ValueError(f'{sorted(reserved)} are supplied by the model, not residual_kwargs')
+
+        self.residual_mode = residual_mode
+        if num_hidden_layers < 1:
+            raise ValueError('num_hidden_layers must be positive')
 
         if fuse_cross_entropy and fuse_linear_cross_entropy:
             raise ValueError(
@@ -98,17 +109,21 @@ class GLAConfig(_HybridAttentionConfigMixin, PretrainedConfig):
                 "If you observe issues like loss divergence, consider disabling this setting.",
             )
 
-        if attnres_block_size is not None and attnres_block_size != 1:
-            if attnres_block_size < 2 or attnres_block_size % 2 != 0:
-                raise ValueError(
-                    "`attnres_block_size` must be `None`, `1` (full mode), or an even integer (one block "
-                    f"contains `attnres_block_size // 2` transformer layers); got {attnres_block_size}."
-                )
-
         super().__init__(
             pad_token_id=pad_token_id,
             bos_token_id=bos_token_id,
             eos_token_id=eos_token_id,
             tie_word_embeddings=tie_word_embeddings,
             **kwargs,
+        )
+
+    def get_residual_kwargs(self, sub_layer_idx: int) -> dict:
+        """Build constructor arguments for the selected residual and sublayer."""
+        return dict(
+            norm_eps=self.norm_eps,
+            fuse_norm=self.fuse_norm,
+        ) | self.residual_kwargs | dict(
+            hidden_size=self.hidden_size,
+            sub_layer_idx=sub_layer_idx,
+            num_sublayers=2 * self.num_hidden_layers,
         )
