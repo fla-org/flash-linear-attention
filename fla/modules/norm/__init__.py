@@ -5,8 +5,6 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-import sys
-
 from fla.modules.norm.fused_norm_gate import (
     FusedLayerNormGated,
     FusedLayerNormGatedLinear,
@@ -49,8 +47,3 @@ __all__ = [
     'RMSNormGated',
     'RMSNormLinear',
 ]
-
-# preserve pickle references written before the normalization packages were flattened.
-for _name in ('fused_norm_gate', 'l2norm', 'layernorm', 'layernorm_gated'):
-    for _suffix in ('module', 'ops'):
-        sys.modules[f'{__name__}.{_name}.{_suffix}'] = sys.modules[f'{__name__}.{_name}']

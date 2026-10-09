@@ -109,7 +109,7 @@ def test_legacy_module_pickle_and_state_dict(monkeypatch, legacy, name, kwargs, 
 
     paths = [f'fla.modules.{legacy}']
     if legacy != 'convolution':
-        paths.extend([f'fla.modules.norm.{legacy}', f'fla.modules.norm.{legacy}.module'])
+        paths.append(f'fla.modules.norm.{legacy}')
     for path in paths:
         with monkeypatch.context() as patch:
             patch.setattr(module_class, '__module__', path)
@@ -179,8 +179,6 @@ def test_normalization_imports_preserve_public_exports(run_python, disabled):
 
         for name, canonical_path in zip(expected_symbols, canonical_paths):
             canonical = importlib.import_module(canonical_path)
-            for suffix in ('module', 'ops'):
-                assert importlib.import_module(canonical_path + '.' + suffix) is canonical
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter('always', FutureWarning)
                 legacy = importlib.import_module('fla.modules.' + name)
