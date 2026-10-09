@@ -43,15 +43,15 @@ class LayerNormBackend(BaseBackend):
     ):
         from fla.modules.norm.triton_ascend.layernorm import layer_norm_fwd_npu
         return layer_norm_fwd_npu(
-            x,
-            weight,
-            bias,
-            eps,
-            residual,
-            out_dtype,
-            residual_dtype,
-            is_rms_norm,
-            num_groups,
+            x=x,
+            weight=weight,
+            bias=bias,
+            eps=eps,
+            residual=residual,
+            out_dtype=out_dtype,
+            residual_dtype=residual_dtype,
+            is_rms_norm=is_rms_norm,
+            num_groups=num_groups,
         )
 
     def layer_norm_bwd(
@@ -71,18 +71,18 @@ class LayerNormBackend(BaseBackend):
     ):
         from fla.modules.norm.triton_ascend.layernorm import layer_norm_bwd_npu
         return layer_norm_bwd_npu(
-            dy,
-            x,
-            weight,
-            bias,
-            mean,
-            rstd,
-            dres,
-            has_residual,
-            is_rms_norm,
-            x_dtype,
-            recompute_output,
-            num_groups,
+            dy=dy,
+            x=x,
+            weight=weight,
+            bias=bias,
+            mean=mean,
+            rstd=rstd,
+            dres=dres,
+            has_residual=has_residual,
+            is_rms_norm=is_rms_norm,
+            x_dtype=x_dtype,
+            recompute_output=recompute_output,
+            num_groups=num_groups,
         )
 
 
@@ -141,16 +141,16 @@ class FusedNormGateBackend(BaseBackend):
     ):
         from fla.modules.norm.triton_ascend.fused_norm_gate import layer_norm_gated_fwd_npu
         return layer_norm_gated_fwd_npu(
-            x,
-            g,
-            weight,
-            bias,
-            activation,
-            eps,
-            residual,
-            out_dtype,
-            residual_dtype,
-            is_rms_norm,
+            x=x,
+            g=g,
+            weight=weight,
+            bias=bias,
+            activation=activation,
+            eps=eps,
+            residual=residual,
+            out_dtype=out_dtype,
+            residual_dtype=residual_dtype,
+            is_rms_norm=is_rms_norm,
         )
 
     def layer_norm_gated_bwd(
@@ -172,18 +172,18 @@ class FusedNormGateBackend(BaseBackend):
     ):
         from fla.modules.norm.triton_ascend.fused_norm_gate import layer_norm_gated_bwd_npu
         return layer_norm_gated_bwd_npu(
-            dy,
-            x,
-            g,
-            weight,
-            bias,
-            activation,
-            eps,
-            mean,
-            rstd,
-            dresidual,
-            has_residual,
-            is_rms_norm,
-            x_dtype,
-            recompute_output,
+            dy=dy,
+            x=x,
+            g=g,
+            weight=weight,
+            bias=bias,
+            activation=activation,
+            eps=eps,
+            mean=mean,
+            rstd=rstd,
+            dresidual=dresidual,
+            has_residual=has_residual,
+            is_rms_norm=is_rms_norm,
+            x_dtype=x_dtype,
+            recompute_output=recompute_output,
         )

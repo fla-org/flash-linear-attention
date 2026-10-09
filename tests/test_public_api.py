@@ -108,7 +108,7 @@ def test_legacy_module_pickle_and_state_dict(monkeypatch, legacy, name, kwargs, 
         assert getattr(modules, name) is module_class
 
     paths = [f'fla.modules.{legacy}']
-    if legacy != 'convolution':
+    if legacy in {'fused_norm_gate', 'l2norm', 'layernorm', 'layernorm_gated'}:
         paths.append(f'fla.modules.norm.{legacy}')
     for path in paths:
         with monkeypatch.context() as patch:

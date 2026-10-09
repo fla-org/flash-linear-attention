@@ -828,18 +828,7 @@ def layer_norm_gated(
     residual_in_fp32: bool = False,
     eps: float = 1e-6,
 ):
-    return LayerNormGatedFunction.apply(
-        x,
-        g,
-        weight,
-        bias,
-        activation,
-        residual,
-        eps,
-        prenorm,
-        residual_in_fp32,
-        False,
-    )
+    return LayerNormGatedFunction.apply(x, g, weight, bias, activation, residual, eps, prenorm, residual_in_fp32, False)
 
 
 def rms_norm_gated(
@@ -853,18 +842,7 @@ def rms_norm_gated(
     residual_in_fp32: bool = False,
     eps: float = 1e-6,
 ):
-    return LayerNormGatedFunction.apply(
-        x,
-        g,
-        weight,
-        bias,
-        activation,
-        residual,
-        eps,
-        prenorm,
-        residual_in_fp32,
-        True,
-    )
+    return LayerNormGatedFunction.apply(x, g, weight, bias, activation, residual, eps, prenorm, residual_in_fp32, True)
 
 
 def layer_norm_swish_gate_linear(
@@ -1080,13 +1058,7 @@ class FusedRMSNormSwishGate(FusedRMSNormGated):
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
     ) -> None:
-        super().__init__(
-            hidden_size=hidden_size,
-            elementwise_affine=elementwise_affine,
-            eps=eps,
-            device=device,
-            dtype=dtype,
-        )
+        super().__init__(hidden_size=hidden_size, elementwise_affine=elementwise_affine, eps=eps, device=device, dtype=dtype)
 
 
 class FusedLayerNormGatedLinear(nn.Module):
@@ -1158,13 +1130,7 @@ class FusedLayerNormSwishGateLinear(FusedLayerNormGatedLinear):
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
     ) -> None:
-        super().__init__(
-            hidden_size=hidden_size,
-            elementwise_affine=elementwise_affine,
-            eps=eps,
-            device=device,
-            dtype=dtype,
-        )
+        super().__init__(hidden_size=hidden_size, elementwise_affine=elementwise_affine, eps=eps, device=device, dtype=dtype)
 
 
 class FusedRMSNormGatedLinear(nn.Module):
@@ -1235,13 +1201,7 @@ class FusedRMSNormSwishGateLinear(FusedRMSNormGatedLinear):
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
     ) -> None:
-        super().__init__(
-            hidden_size=hidden_size,
-            elementwise_affine=elementwise_affine,
-            eps=eps,
-            device=device,
-            dtype=dtype,
-        )
+        super().__init__(hidden_size=hidden_size, elementwise_affine=elementwise_affine, eps=eps, device=device, dtype=dtype)
 
 
 __all__ = [

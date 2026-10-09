@@ -61,17 +61,7 @@ def _get_l2norm_tiles(D: int, is_forward: bool) -> tuple[int, int]:
 
 
 @triton.jit(do_not_specialize=['T'])
-def l2norm_fwd_kernel(
-    x,
-    y,
-    rstd,
-    eps,
-    T,
-    T_OFFSET,
-    D: tl.constexpr,
-    BD: tl.constexpr,
-    BT: tl.constexpr,
-):
+def l2norm_fwd_kernel(x, y, rstd, eps, T, T_OFFSET, D: tl.constexpr, BD: tl.constexpr, BT: tl.constexpr):
     i_t = tl.program_id(0) + T_OFFSET
     rows = tl.cast(i_t, tl.int64) * BT + tl.arange(0, BT)
     cols = tl.arange(0, BD)
@@ -86,17 +76,7 @@ def l2norm_fwd_kernel(
 
 
 @triton.jit(do_not_specialize=['T'])
-def l2norm_bwd_kernel(
-    y,
-    rstd,
-    dy,
-    dx,
-    T,
-    T_OFFSET,
-    D: tl.constexpr,
-    BD: tl.constexpr,
-    BT: tl.constexpr,
-):
+def l2norm_bwd_kernel(y, rstd, dy, dx, T, T_OFFSET, D: tl.constexpr, BD: tl.constexpr, BT: tl.constexpr):
     i_t = tl.program_id(0) + T_OFFSET
     rows = tl.cast(i_t, tl.int64) * BT + tl.arange(0, BT)
     cols = tl.arange(0, BD)
@@ -159,11 +139,7 @@ def _launch_l2norm_bwd_kernel(
         )
 
 
-def l2norm_fwd_npu(
-    x: torch.Tensor,
-    eps: float = 1e-6,
-    output_dtype: torch.dtype | None = None,
-):
+def l2norm_fwd_npu(x: torch.Tensor, eps: float = 1e-6, output_dtype: torch.dtype | None = None):
     x_shape_og = x.shape
     x = x.view(-1, x.shape[-1])
     if output_dtype is None:
@@ -179,11 +155,7 @@ def l2norm_fwd_npu(
     return y.view(x_shape_og), rstd.view(x_shape_og[:-1])
 
 
-def l2norm_bwd_npu(
-    y: torch.Tensor,
-    rstd: torch.Tensor,
-    dy: torch.Tensor,
-):
+def l2norm_bwd_npu(y: torch.Tensor, rstd: torch.Tensor, dy: torch.Tensor):
     y_shape_og = y.shape
     y = y.view(-1, dy.shape[-1])
     dy = dy.view(-1, dy.shape[-1])

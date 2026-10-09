@@ -17,11 +17,7 @@ import triton
 import triton.language as tl
 
 from fla.utils import get_multiprocessor_count
-from fla.utils.ascend_ub_manager import (
-    ASCEND_MAX_GRID_DIM,
-    compute_row_tile_block_size,
-    compute_ub_block_size,
-)
+from fla.utils.ascend_ub_manager import ASCEND_MAX_GRID_DIM, compute_row_tile_block_size, compute_ub_block_size
 
 # Peak live fp32 tiles relative to [BT, BD].
 # BD uses a single-row budget so large D is not rejected when BT can still be 1.
@@ -70,12 +66,7 @@ def _fwd_memory_multiplier(BD: int) -> float:
     return _tile_memory_multiplier(_FWD_MEM_MULT, _LARGE_BD_FWD_MEM_MULT, BD)
 
 
-def _bwd_memory_multiplier(
-    is_rms_norm: bool,
-    BD: int,
-    *,
-    recompute_output: bool = False,
-) -> float:
+def _bwd_memory_multiplier(is_rms_norm: bool, BD: int, *, recompute_output: bool = False) -> float:
     """Return bwd tile multiplier; larger BD needs a higher mult (smaller BT).
 
     ``is_rms_norm`` is accepted for callers/host UB scripts; LN and RMS currently
@@ -84,9 +75,7 @@ def _bwd_memory_multiplier(
     """
     del is_rms_norm  # reserved if LN/RMS budgets diverge
     if recompute_output:
-        return _tile_memory_multiplier(
-            _BWD_RECOMPUTE_MEM_MULT, _LARGE_BD_BWD_RECOMPUTE_MEM_MULT, BD,
-        )
+        return _tile_memory_multiplier(_BWD_RECOMPUTE_MEM_MULT, _LARGE_BD_BWD_RECOMPUTE_MEM_MULT, BD)
     return _tile_memory_multiplier(_BWD_MEM_MULT, _LARGE_BD_BWD_MEM_MULT, BD)
 
 
@@ -114,9 +103,7 @@ def _get_layer_norm_gated_tiles(
     if is_forward:
         memory_multiplier = _fwd_memory_multiplier(BD)
     else:
-        memory_multiplier = _bwd_memory_multiplier(
-            is_rms_norm, BD, recompute_output=recompute_output,
-        )
+        memory_multiplier = _bwd_memory_multiplier(is_rms_norm, BD, recompute_output=recompute_output)
     # Large synthetic row dim so BT is limited by UB, not by a host-side T guess.
     BT = compute_row_tile_block_size(
         1 << 20,
@@ -141,10 +128,7 @@ def _launch_config(
     recompute_output: bool = False,
 ) -> tuple[int, int, int]:
     """Return (BD, BT, NS) for a grid-stride launch over T rows."""
-    BD, BT = _get_layer_norm_gated_tiles(
-        D, is_forward=is_forward, is_rms_norm=is_rms_norm,
-        recompute_output=recompute_output,
-    )
+    BD, BT = _get_layer_norm_gated_tiles(D, is_forward=is_forward, is_rms_norm=is_rms_norm, recompute_output=recompute_output)
     NT = triton.cdiv(T, BT)
     NS = max(1, min(get_multiprocessor_count(device_index), NT, ASCEND_MAX_GRID_DIM))
     return BD, BT, NS
@@ -295,11 +279,7 @@ def layer_norm_gated_bwd_kernel(
             tl.store(dg + row_off, (b_dy * b_y * b_dsilu).to(dg.dtype.element_ty), mask=mask)
         else:
             b_gate = b_sigmoid_g
-            tl.store(
-                dg + row_off,
-                (b_dy * b_y * b_sigmoid_g * (1 - b_sigmoid_g)).to(dg.dtype.element_ty),
-                mask=mask,
-            )
+            tl.store(dg + row_off, (b_dy * b_y * b_sigmoid_g * (1 - b_sigmoid_g)).to(dg.dtype.element_ty), mask=mask)
         # dg needs the pre-gate b_y, but the recomputed output must match what the
         # forward stored, i.e. the gated value the caller fed to its linear layer.
         if RECOMPUTE_OUTPUT:
@@ -364,9 +344,7 @@ def layer_norm_gated_fwd_npu(
     mean = torch.empty((T,), dtype=torch.float, device=x.device) if not is_rms_norm else None
     rstd = torch.empty((T,), dtype=torch.float, device=x.device)
 
-    BD, BT, NS = _launch_config(
-        T, D, x.device.index, is_forward=True, is_rms_norm=is_rms_norm,
-    )
+    BD, BT, NS = _launch_config(T, D, x.device.index, is_forward=True, is_rms_norm=is_rms_norm)
     act_id = _activation_id(activation)
     layer_norm_gated_fwd_kernel[(NS,)](
         x=x,
@@ -425,7 +403,12 @@ def layer_norm_gated_bwd_npu(
     y = torch.empty(T, D, dtype=dy.dtype, device=dy.device) if recompute_output else None
 
     BD, BT, NS = _launch_config(
-        T, D, x.device.index, is_forward=False, is_rms_norm=is_rms_norm, recompute_output=recompute_output,
+        T,
+        D,
+        x.device.index,
+        is_forward=False,
+        is_rms_norm=is_rms_norm,
+        recompute_output=recompute_output,
     )
 
     dw = torch.empty((NS, D), dtype=torch.float, device=weight.device) if weight is not None else None

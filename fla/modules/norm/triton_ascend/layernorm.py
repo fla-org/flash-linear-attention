@@ -103,9 +103,7 @@ def layer_norm_fwd_kernel1(
     tl.store(y + o_d, b_y, mask=m_d)
 
 
-@triton.heuristics({
-    'RECOMPUTE_OUTPUT': lambda args: args['y'] is not None,
-})
+@triton.heuristics({'RECOMPUTE_OUTPUT': lambda args: args['y'] is not None})
 @triton.jit
 def layer_norm_bwd_kernel1(
     x,

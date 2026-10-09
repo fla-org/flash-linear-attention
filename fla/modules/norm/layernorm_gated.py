@@ -22,10 +22,7 @@ from einops import rearrange
 from fla.utils import get_multiprocessor_count, input_guard
 
 
-@triton.heuristics({
-    "HAS_BIAS": lambda args: args["b"] is not None,
-    "HAS_GATE": lambda args: args["g"] is not None,
-})
+@triton.heuristics({"HAS_BIAS": lambda args: args["b"] is not None, "HAS_GATE": lambda args: args["g"] is not None})
 @triton.jit(do_not_specialize=['T'])
 def layer_norm_fwd_kernel_group(
     x,

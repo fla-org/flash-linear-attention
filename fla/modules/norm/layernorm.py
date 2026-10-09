@@ -179,9 +179,7 @@ def layer_norm_fwd_kernel_row(
     tl.store(y + o_d, b_y, mask=m_d)
 
 
-@triton.heuristics({
-    'RECOMPUTE_OUTPUT': lambda args: args['y'] is not None,
-})
+@triton.heuristics({'RECOMPUTE_OUTPUT': lambda args: args['y'] is not None})
 @triton.autotune(
     configs=[
         triton.Config({'BT': BT}, num_warps=num_warps)
@@ -294,9 +292,7 @@ def layer_norm_bwd_kernel(
         tl.store(db + i_s * D + o_d, tl.sum(b_db, axis=0), mask=m_d)
 
 
-@triton.heuristics({
-    'RECOMPUTE_OUTPUT': lambda args: args['y'] is not None,
-})
+@triton.heuristics({'RECOMPUTE_OUTPUT': lambda args: args['y'] is not None})
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps)
@@ -678,16 +674,7 @@ def layer_norm(
     residual_in_fp32: bool = False,
     is_rms_norm: bool = False,
 ):
-    return LayerNormFunction.apply(
-        x,
-        weight,
-        bias,
-        residual,
-        eps,
-        prenorm,
-        residual_in_fp32,
-        is_rms_norm,
-    )
+    return LayerNormFunction.apply(x, weight, bias, residual, eps, prenorm, residual_in_fp32, is_rms_norm)
 
 
 def group_norm(
@@ -701,17 +688,7 @@ def group_norm(
     is_rms_norm: bool = False,
     num_groups: int = 1,
 ):
-    return LayerNormFunction.apply(
-        x,
-        weight,
-        bias,
-        residual,
-        eps,
-        prenorm,
-        residual_in_fp32,
-        is_rms_norm,
-        num_groups,
-    )
+    return LayerNormFunction.apply(x, weight, bias, residual, eps, prenorm, residual_in_fp32, is_rms_norm, num_groups)
 
 
 def rms_norm(
@@ -723,16 +700,7 @@ def rms_norm(
     prenorm: bool = False,
     residual_in_fp32: bool = False,
 ):
-    return LayerNormFunction.apply(
-        x,
-        weight,
-        bias,
-        residual,
-        eps,
-        prenorm,
-        residual_in_fp32,
-        True,
-    )
+    return LayerNormFunction.apply(x, weight, bias, residual, eps, prenorm, residual_in_fp32, True)
 
 
 def layer_norm_linear(
@@ -939,9 +907,7 @@ def layer_norm_ref(
         residual = residual.float() if residual is not None else residual
     if residual is not None:
         x = (x + residual).to(x.dtype)
-    out = F.layer_norm(x.to(weight.dtype), x.shape[-1:], weight=weight, bias=bias, eps=eps).to(
-        dtype,
-    )
+    out = F.layer_norm(x.to(weight.dtype), x.shape[-1:], weight=weight, bias=bias, eps=eps).to(dtype)
     return out if not prenorm else (out, x)
 
 
@@ -1360,15 +1326,11 @@ class NormParallel(ParallelStyle):
         self.sequence_sharding = (Shard(sequence_dim),)
         self.use_local_output = use_local_output
 
-    def _replicate_module_fn(
-        self, name: str, module: nn.Module, device_mesh: DeviceMesh,
-    ):
+    def _replicate_module_fn(self, name: str, module: nn.Module, device_mesh: DeviceMesh):
         for p_name, param in module.named_parameters():
             # simple replication with fixed ones_ init from LayerNorm/RMSNorm, which allow
             # us to simply just use from_local
-            replicated_param = torch.nn.Parameter(
-                DTensor.from_local(param, device_mesh, [Replicate()], run_check=False),
-            )
+            replicated_param = torch.nn.Parameter(DTensor.from_local(param, device_mesh, [Replicate()], run_check=False))
             module.register_parameter(p_name, replicated_param)
 
     @staticmethod
@@ -1377,19 +1339,13 @@ class NormParallel(ParallelStyle):
         if isinstance(input_tensor, DTensor):
             # if the passed in input DTensor is not sharded on the sequence dim, we need to redistribute it
             if input_tensor.placements != sequence_sharding:
-                input_tensor = input_tensor.redistribute(
-                    placements=sequence_sharding, async_op=True,
-                )
+                input_tensor = input_tensor.redistribute(placements=sequence_sharding, async_op=True)
             return input_tensor
         elif isinstance(input_tensor, torch.Tensor):
             # assume the input passed in already sharded on the sequence dim and create the DTensor
-            return DTensor.from_local(
-                input_tensor, device_mesh, sequence_sharding, run_check=False,
-            )
+            return DTensor.from_local(input_tensor, device_mesh, sequence_sharding, run_check=False)
         else:
-            raise ValueError(
-                f"expecting input of {mod} to be a torch.Tensor or DTensor, but got {input_tensor}",
-            )
+            raise ValueError(f"expecting input of {mod} to be a torch.Tensor or DTensor, but got {input_tensor}")
 
     @staticmethod
     def _prepare_output_fn(use_local_output, mod, outputs, device_mesh):
