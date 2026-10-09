@@ -1489,11 +1489,7 @@ def chunk_bwd_dqkwg_npu(
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @fla_cache_autotune(
-    configs=[
-        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in (2, 4, 8)
-        for num_stages in (2, 3, 4)
-    ],
+    configs=[triton.Config({})],
     key=['H', 'HV', 'K', 'V', 'BT', 'BK', 'BV', 'USE_G', 'USE_G_GAMMA', 'STATE_V_FIRST'],
     **autotune_cache_kwargs,
 )
@@ -1560,6 +1556,8 @@ def chunk_bwd_kernel_dv_npu(
         p_q = q + o_k[:, None] + o_t[None, :] * (H*K)
         b_q = tl.load(p_q, mask=m_k[:, None] & m_t[None, :], other=0.0)
         b_k = tl.load(p_k, mask=m_t[:, None] & m_k[None, :], other=0.0)
+        # ascend tl.dot clobbers lhs; copy before the first dot on b_k.
+        b_k_c = b_k + 0.0
         b_A = tl.dot(b_k, b_q, b_A)
         if STATE_V_FIRST:
             p_dh = dh + o_v[:, None] * K + o_k[None, :]
@@ -1567,7 +1565,7 @@ def chunk_bwd_kernel_dv_npu(
         else:
             p_dh = dh + o_k[:, None] * V + o_v[None, :]
             b_dh = tl.load(p_dh, mask=m_k[:, None] & (o_v[None, :] < V), other=0.0)
-        b_dv = tl.dot(b_k, b_dh.to(b_k.dtype), b_dv)
+        b_dv = tl.dot(b_k_c, b_dh.to(b_k_c.dtype), b_dv)
 
     if USE_G:
         g += bos * HV + i_h

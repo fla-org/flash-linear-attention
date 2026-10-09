@@ -7,10 +7,8 @@
 
 """Ascend NPU copy of the shared fused-recurrent kernels.
 
-This copy keeps the shared kernels untouched while giving the NPU path the
-launch parameters it needs: a pinned per-kernel `num_warps` (the NPU schedule
-depends on it, and an autotune grid costs a benchmark pass per shape) and a grid
-offset so the host can split launches above the Ascend per-launch block budget.
+This copy adds a grid offset so the host can split launches above the Ascend
+per-launch block budget.
 """
 
 import warnings
@@ -30,7 +28,7 @@ from fla.utils.ascend_ub_manager import ASCEND_LAUNCH_BLOCK_BUDGET, launch_grid_
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
-    configs=[triton.Config({}, num_warps=8)],
+    configs=[triton.Config({})],
     key=['BK', 'BV', 'USE_G', 'USE_G_GAMMA', 'USE_GK', 'USE_GV', 'STATE_V_FIRST'],
     **autotune_cache_kwargs,
 )
@@ -163,7 +161,7 @@ def fused_recurrent_fwd_kernel(
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
-    configs=[triton.Config({}, num_warps=4)],
+    configs=[triton.Config({})],
     key=['BK', 'BV', 'USE_G', 'USE_G_GAMMA', 'USE_GK', 'USE_GV', 'STATE_V_FIRST'],
     **autotune_cache_kwargs,
 )
