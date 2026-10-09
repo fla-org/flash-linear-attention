@@ -121,10 +121,11 @@ def find_backend_op_files(changed_files: list[str], project_root: Path) -> list[
         parts = Path(file).parts
         if 'backends' in parts:
             owners.add('.'.join(parts[:parts.index('backends') + 1]))
-        elif (
-            file.startswith(('fla/modules/causal_conv1d/gluon/', 'fla/modules/causal_conv1d/triton_ascend/'))
-            or file == 'fla/modules/causal_conv1d/backends.py'
-        ):
+        elif file in {
+            'fla/modules/causal_conv1d/backends.py',
+            'fla/modules/causal_conv1d/gluon.py',
+            'fla/modules/causal_conv1d/triton_ascend.py',
+        }:
             owners.add('fla.modules.causal_conv1d.backends')
         elif file.startswith('fla/modules/norm/triton_ascend/'):
             owners.add('fla.modules.norm.triton_ascend')

@@ -4,7 +4,7 @@ Experience notes from past kernel work. Read the current code before applying â€
 
 ## `causal_conv1d.py` â€” 1D core-grid + constexpr DMA split
 
-File: `fla/modules/causal_conv1d/triton_ascend/ops.py`
+File: `fla/modules/causal_conv1d/triton_ascend.py`
 
 Packed training path (contiguous `[B,T,D]`, no `initial_state` / `dht`, `D` divisible by a `BD>=16` tile) uses 1D core-grid kernels. Odd `D` (e.g. 200), strided layout, and cache-state paths stay on the legacy multi-axis kernels.
 

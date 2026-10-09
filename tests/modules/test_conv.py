@@ -95,14 +95,14 @@ def causal_conv1d_update_ref(
 
 @pytest.fixture
 def conv_backend_calls(monkeypatch: pytest.MonkeyPatch) -> list[str] | None:
-    from fla.modules.causal_conv1d.gluon import GluonBackend
+    from fla.modules.causal_conv1d.backends import CausalConv1dGluonBackend
 
-    if not GluonBackend.is_available():
+    if not CausalConv1dGluonBackend.is_available():
         return None
-    from fla.modules.causal_conv1d.gluon import ops
+    from fla.modules.causal_conv1d import gluon
 
     calls = []
-    fwd, bwd = ops.causal_conv1d_fwd, ops.causal_conv1d_bwd
+    fwd, bwd = gluon.causal_conv1d_fwd, gluon.causal_conv1d_bwd
 
     def forward(*args, **kwargs):
         calls.append('fwd')
@@ -112,8 +112,8 @@ def conv_backend_calls(monkeypatch: pytest.MonkeyPatch) -> list[str] | None:
         calls.append('bwd')
         return bwd(*args, **kwargs)
 
-    monkeypatch.setattr(ops, 'causal_conv1d_fwd', forward)
-    monkeypatch.setattr(ops, 'causal_conv1d_bwd', backward)
+    monkeypatch.setattr(gluon, 'causal_conv1d_fwd', forward)
+    monkeypatch.setattr(gluon, 'causal_conv1d_bwd', backward)
     return calls
 
 
@@ -720,7 +720,7 @@ def test_conv_backend_parity(
     dtype: torch.dtype,
     weight_dtype: torch.dtype,
 ):
-    pytest.importorskip('fla.modules.causal_conv1d.gluon.ops')
+    pytest.importorskip('fla.modules.causal_conv1d.gluon')
     torch.manual_seed(42)
     x = torch.randn(B, T, D * (3 if non_contiguous else 1), device=device, dtype=dtype)
     x = x[..., D:2 * D] if non_contiguous else x
@@ -1281,7 +1281,7 @@ def test_conv_backend_override(monkeypatch: pytest.MonkeyPatch):
         ShortConvolution(hidden_size=8, kernel_size=3)
 
     monkeypatch.setenv('FLA_CONV_BACKEND', 'cuda')
-    monkeypatch.setattr('fla.modules.causal_conv1d.ops.causal_conv1d_fn_cuda', None)
+    monkeypatch.setattr('fla.modules.causal_conv1d.gluon.causal_conv1d_fn_cuda', None)
     with pytest.warns(UserWarning, match='Switching to the Triton implementation'):
         conv = ShortConvolution(hidden_size=8, kernel_size=3, backend='triton')
     assert conv.backend == 'triton'
@@ -1292,9 +1292,9 @@ def test_conv_backend_override(monkeypatch: pytest.MonkeyPatch):
     ['rank', 'channels', 'width', 'weight', 'packed-batch', 'chunk', 'state', 'dtype', 'distributed'],
 )
 def test_conv_backend_verifier(monkeypatch: pytest.MonkeyPatch, case: str):
-    from fla.modules.causal_conv1d.gluon import GluonBackend
+    from fla.modules.causal_conv1d.backends import CausalConv1dGluonBackend
 
-    backend = GluonBackend()
+    backend = CausalConv1dGluonBackend()
     x = torch.empty(2, 64, 32)
     weight = torch.empty(32, 4)
     kwargs = {}
