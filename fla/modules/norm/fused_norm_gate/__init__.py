@@ -5,7 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from fla.modules.norm.fused_norm_gate import (
+from fla.modules.norm.fused_norm_gate.module import (
     FusedLayerNormGated,
     FusedLayerNormGatedLinear,
     FusedLayerNormSwishGate,
@@ -14,6 +14,8 @@ from fla.modules.norm.fused_norm_gate import (
     FusedRMSNormGatedLinear,
     FusedRMSNormSwishGate,
     FusedRMSNormSwishGateLinear,
+)
+from fla.modules.norm.fused_norm_gate.ops import (
     layer_norm_gated,
     layer_norm_gated_bwd,
     layer_norm_gated_fwd,

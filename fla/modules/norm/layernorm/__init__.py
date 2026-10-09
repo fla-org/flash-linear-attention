@@ -5,7 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from fla.modules.norm.layernorm import (
+from fla.modules.norm.layernorm.module import (
     GroupNorm,
     GroupNormLinear,
     GroupNormRef,
@@ -14,6 +14,8 @@ from fla.modules.norm.layernorm import (
     NormParallel,
     RMSNorm,
     RMSNormLinear,
+)
+from fla.modules.norm.layernorm.ops import (
     group_norm,
     group_norm_linear,
     group_norm_ref,

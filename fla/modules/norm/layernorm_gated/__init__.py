@@ -5,9 +5,11 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from fla.modules.norm.layernorm_gated import (
+from fla.modules.norm.layernorm_gated.module import (
     LayerNormGated,
     RMSNormGated,
+)
+from fla.modules.norm.layernorm_gated.ops import (
     layer_norm_bwd,
     layer_norm_fwd,
     layernorm_fn,

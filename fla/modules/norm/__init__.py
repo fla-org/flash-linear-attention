@@ -5,7 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from fla.modules.norm.fused_norm_gate import (
+from fla.modules.norm.fused_norm_gate.module import (
     FusedLayerNormGated,
     FusedLayerNormGatedLinear,
     FusedLayerNormSwishGate,
@@ -14,12 +14,22 @@ from fla.modules.norm.fused_norm_gate import (
     FusedRMSNormGatedLinear,
     FusedRMSNormSwishGate,
     FusedRMSNormSwishGateLinear,
-    layer_norm_gated,
-    layer_norm_gated_bwd,
-    layer_norm_gated_fwd,
-    layer_norm_swish_gate_linear,
-    rms_norm_gated,
-    rms_norm_swish_gate_linear,
+)
+from fla.modules.norm.l2norm.module import (
+    L2Norm,
+)
+from fla.modules.norm.layernorm.module import (
+    GroupNorm,
+    GroupNormLinear,
+    LayerNorm,
+    LayerNormLinear,
+    NormParallel,
+    RMSNorm,
+    RMSNormLinear,
+)
+from fla.modules.norm.layernorm_gated.module import (
+    LayerNormGated,
+    RMSNormGated,
 )
 
 __all__ = [
@@ -31,10 +41,14 @@ __all__ = [
     'FusedRMSNormGatedLinear',
     'FusedRMSNormSwishGate',
     'FusedRMSNormSwishGateLinear',
-    'layer_norm_gated',
-    'layer_norm_gated_bwd',
-    'layer_norm_gated_fwd',
-    'layer_norm_swish_gate_linear',
-    'rms_norm_gated',
-    'rms_norm_swish_gate_linear',
+    'GroupNorm',
+    'GroupNormLinear',
+    'L2Norm',
+    'LayerNorm',
+    'LayerNormGated',
+    'LayerNormLinear',
+    'NormParallel',
+    'RMSNorm',
+    'RMSNormGated',
+    'RMSNormLinear',
 ]

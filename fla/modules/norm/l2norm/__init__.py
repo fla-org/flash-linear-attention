@@ -5,8 +5,10 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from fla.modules.norm.l2norm import (
+from fla.modules.norm.l2norm.module import (
     L2Norm,
+)
+from fla.modules.norm.l2norm.ops import (
     l2_norm,
     l2norm,
     l2norm_bwd,

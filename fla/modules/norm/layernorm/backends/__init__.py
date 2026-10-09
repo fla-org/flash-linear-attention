@@ -5,18 +5,6 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from fla.modules.norm.l2norm import (
-    L2Norm,
-    l2_norm,
-    l2norm,
-    l2norm_bwd,
-    l2norm_fwd,
-)
+from fla.modules.norm.layernorm.backends.triton_ascend import TritonAscendBackend
 
-__all__ = [
-    'L2Norm',
-    'l2_norm',
-    'l2norm',
-    'l2norm_bwd',
-    'l2norm_fwd',
-]
+__all__ = ['TritonAscendBackend']
