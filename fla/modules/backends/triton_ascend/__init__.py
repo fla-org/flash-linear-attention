@@ -123,6 +123,9 @@ class TritonAscendBackend(BaseBackend):
         l2_penalty_factor=1e-4,
         accumulate_grad_in_fp32=True,
         process_group=None,
+        need_dx=True,
+        need_dw=True,
+        need_db=True,
     ):
         if process_group is not None and torch.distributed.get_world_size(process_group) > 1:
             raise NotImplementedError("Vocabulary-parallel fused linear cross entropy is not supported by the Ascend backend")
@@ -143,6 +146,9 @@ class TritonAscendBackend(BaseBackend):
             use_l2warp=use_l2warp,
             l2_penalty_factor=l2_penalty_factor,
             accumulate_grad_in_fp32=accumulate_grad_in_fp32,
+            need_dx=need_dx,
+            need_dw=need_dw,
+            need_db=need_db,
         )
 
     def fused_linear_cross_entropy_bwd(
