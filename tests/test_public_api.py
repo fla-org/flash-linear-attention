@@ -63,11 +63,10 @@ def test_public_call_defaults(owner, name, defaults):
 @pytest.mark.parametrize(
     ('legacy', 'current', 'names'),
     [
-        ('convolution', 'conv', ('ShortConvolution', 'LongConvolution', 'ImplicitLongConvolution')),
         ('convolution', 'causal_conv', ('ShortConvolution', 'causal_conv1d')),
         ('convolution', 'long_conv', ('LongConvolution', 'ImplicitLongConvolution', 'PositionalEmbedding', 'fft_conv')),
     ],
-    ids=['convolution', 'causal-conv', 'long-conv'],
+    ids=['causal-conv', 'long-conv'],
 )
 def test_legacy_imports_preserve_symbol_identity(legacy, current, names):
     old_package = importlib.import_module(f'fla.modules.{legacy}')
@@ -91,7 +90,7 @@ def test_public_function_aliases():
         ('fused_norm_gate', 'FusedRMSNormGated', {'hidden_size': 4}, ('weight',)),
         ('l2norm', 'L2Norm', {}, ()),
         ('convolution', 'ShortConvolution', {'hidden_size': 4, 'kernel_size': 3, 'bias': True}, ('weight', 'bias')),
-        ('conv.long_conv', 'LongConvolution', {'hidden_size': 4, 'max_len': 8}, ('filter',)),
+        ('convolution', 'LongConvolution', {'hidden_size': 4, 'max_len': 8}, ('filter',)),
     ],
     ids=[
         'layernorm',
@@ -117,8 +116,6 @@ def test_legacy_module_pickle_and_state_dict(monkeypatch, legacy, name, kwargs, 
     paths = [f'fla.modules.{legacy}']
     if legacy in {'fused_norm_gate', 'l2norm', 'layernorm', 'layernorm_gated'}:
         paths.append(f'fla.modules.norm.{legacy}')
-    if name == 'ShortConvolution':
-        paths.extend(['fla.modules.conv', 'fla.modules.conv.module', 'fla.modules.conv.short_conv'])
     for path in paths:
         with monkeypatch.context() as patch:
             patch.setattr(module_class, '__module__', path)
@@ -201,9 +198,9 @@ def test_normalization_imports_preserve_public_exports(run_python, disabled):
             for symbol in expected_symbols[name]:
                 assert getattr(legacy, symbol) is getattr(canonical, symbol), (name, symbol)
 
-        from fla.modules.conv import causal_conv1d
-        importlib.import_module('fla.modules.conv.causal_conv1d')
-        from fla.modules.conv import causal_conv1d as after_legacy_import
+        from fla.modules.causal_conv import causal_conv1d
+        importlib.import_module('fla.modules.causal_conv.causal_conv')
+        from fla.modules.causal_conv import causal_conv1d as after_legacy_import
         assert callable(causal_conv1d)
         assert after_legacy_import is causal_conv1d
         """,
