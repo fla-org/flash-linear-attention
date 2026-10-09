@@ -63,6 +63,7 @@ from fla.utils.hardware import (
     get_device_smem_optin,
     get_multiprocessor_count,
     map_triton_backend_to_torch_device,
+    pytorch_matmul_config,
 )
 from fla.utils.testing import assert_close, get_abs_err, get_err_ratio
 

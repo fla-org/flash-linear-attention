@@ -21,7 +21,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from fla.utils import device_torch_lib
+from fla.utils import IS_NVIDIA, device_torch_lib
 
 try:
     from torch.compiler import is_compiling
@@ -166,3 +166,15 @@ def poison_torch_memory(request):
         yield
         if hasattr(device_torch_lib, 'synchronize') and device_torch_lib.is_available():
             device_torch_lib.synchronize()
+
+
+@pytest.fixture
+def fp16_accumulation():
+    if not IS_NVIDIA or not hasattr(torch.backends.cuda.matmul, 'allow_fp16_accumulation'):
+        pytest.skip('FP16 accumulation requires CUDA and PyTorch >= 2.7')
+    previous = torch.backends.cuda.matmul.allow_fp16_accumulation
+    try:
+        torch.backends.cuda.matmul.allow_fp16_accumulation = True
+        yield
+    finally:
+        torch.backends.cuda.matmul.allow_fp16_accumulation = previous

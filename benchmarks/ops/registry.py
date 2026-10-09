@@ -456,6 +456,32 @@ register_op(OpConfig(
     category='head_gate',
 ))
 
+# --- mLSTM ---
+
+register_op(OpConfig(
+    name='chunk_mlstm',
+    import_path='fla.ops.mlstm',
+    inputs={
+        **_simple_qkv,
+        'i': TensorSpec(shape_BTH),
+        'f': TensorSpec(shape_BTH)
+    },
+    category='mlstm',
+    test_file='tests/ops/test_mlstm.py',
+))
+
+register_op(OpConfig(
+    name='fused_recurrent_mlstm',
+    import_path='fla.ops.mlstm',
+    inputs={
+        **_simple_qkv,
+        'i': TensorSpec(shape_BTH),
+        'f': TensorSpec(shape_BTH)
+    },
+    category='mlstm',
+    test_file='tests/ops/test_mlstm.py',
+))
+
 # --- RWKV ---
 
 

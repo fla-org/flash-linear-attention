@@ -182,6 +182,29 @@ def check_shared_mem(arch: str = "none", tensor_idx: int = 0) -> bool:
         return False
 
 
+def pytorch_matmul_config() -> tuple[str, bool]:
+    """
+    Retrieve relevant matmul precision config information from PyTorch
+
+    Returns
+    -------
+    fp32_precision : ("tf32" or "ieee")
+        The minimum allowed precision for FP32 matrix multiplications.
+    fp16_acc : bool
+        Whether or not to allow full FP16 accumulation in matrix multiplications.
+    """
+    mm_config = torch.backends.cuda.matmul
+    fp16_acc = getattr(mm_config, "allow_fp16_accumulation", False)  # PyTorch >= 2.7
+
+    fp32_precision = getattr(mm_config, "fp32_precision", "none")
+    if fp32_precision == "none":
+        # fallback to generic interface
+        fp32_map = {"medium": "tf32", "high": "tf32", "highest": "ieee"}
+        fp32_precision = fp32_map[torch.get_float32_matmul_precision()]
+
+    return fp32_precision, fp16_acc
+
+
 if check_pytorch_version('2.4'):
     if device == 'cpu':
         device = 'cuda'
