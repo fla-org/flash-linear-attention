@@ -224,25 +224,50 @@ def test_swiglu(B: int, T: int, D: int, noncontiguous: bool, compile: bool):
         (3, 2048, 1200, 600, True, False),
     ],
 )
-def test_swiglu_linear(B: int, T: int, D: int, O: int, noncontiguous: bool, compile: bool):  # noqa: E741
+@pytest.mark.parametrize(
+    ('requires_grad', 'use_bias'),
+    [
+        pytest.param((True, True, True, True), True, id='all'),
+        pytest.param((True, True, False, False), True, id='inputs'),
+        pytest.param((True, False, False, False), True, id='x'),
+        pytest.param((False, True, False, False), True, id='y'),
+        pytest.param((False, False, True, False), True, id='weight'),
+        pytest.param((False, False, False, True), True, id='bias'),
+        pytest.param((False, False, True, True), True, id='weight-bias'),
+        pytest.param((True, True, False, False), False, id='inputs-no-bias'),
+    ],
+)
+def test_swiglu_linear(
+    B: int,
+    T: int,
+    D: int,
+    O: int,  # noqa: E741
+    noncontiguous: bool,
+    compile: bool,
+    requires_grad: tuple[bool, bool, bool, bool],
+    use_bias: bool,
+):
     torch.manual_seed(42)
     x, y = make_inputs(B, T, D, 2, noncontiguous)
     w = torch.randn(O, D, device=device, requires_grad=True)
-    b = torch.randn(O, device=device, requires_grad=True)
+    b = torch.randn(O, device=device, requires_grad=True) if use_bias else None
+    inputs = (x, y, w, b)
+    for tensor, needs_grad in zip(inputs, requires_grad):
+        if tensor is not None:
+            tensor.requires_grad_(needs_grad)
+    grad_inputs = [tensor for tensor in inputs if tensor is not None and tensor.requires_grad]
 
     z_ref = F.silu(x) * y
     out_ref = F.linear(z_ref, w, b)
     out_tri = swiglu_linear(x, y, w, b) if not compile else torch.compile(swiglu_linear)(x, y, w, b)
 
     g = torch.randn_like(out_ref)
-    dx_ref, dy_ref, dw_ref, db_ref = torch.autograd.grad(out_ref, (x, y, w, b), g)
-    dx_tri, dy_tri, dw_tri, db_tri = torch.autograd.grad(out_tri, (x, y, w, b), g)
+    grads_ref = torch.autograd.grad(out_ref, grad_inputs, g)
+    grads_tri = torch.autograd.grad(out_tri, grad_inputs, g)
 
     assert_close('swiglu_linear out', out_ref, out_tri, 1e-3)
-    assert_close('swiglu_linear dx ',  dx_ref,  dx_tri,  1e-3)
-    assert_close('swiglu_linear dy ',  dy_ref,  dy_tri,  1e-3)
-    assert_close('swiglu_linear dw ',  dw_ref,  dw_tri,  1e-3)
-    assert_close('swiglu_linear db ',  db_ref,  db_tri,  1e-3)
+    for grad_ref, grad_tri in zip(grads_ref, grads_tri):
+        assert_close('swiglu_linear grad', grad_ref, grad_tri, 1e-3)
 
 
 @pytest.mark.parametrize(
