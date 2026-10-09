@@ -286,7 +286,7 @@ def parallel_attn_fwd_tilelang(
         B, HQ, H, K, V, BT, BS, sm_scale, log2e_scale, dtype_str,
         USE_G=USE_G, USE_WINDOW=USE_WINDOW, WINDOW_SIZE=window_size or 0,
         USE_SINK=USE_SINK, IS_VARLEN=IS_VARLEN, num_warps=num_warps,
-        num_stages=1 if USE_WINDOW else 2,
+        num_stages=0 if USE_WINDOW else 1,
     )
 
     if IS_VARLEN:
