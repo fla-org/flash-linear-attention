@@ -121,7 +121,7 @@ def test_legacy_module_pickle_and_state_dict(monkeypatch, legacy, name, kwargs, 
 
 
 @pytest.mark.parametrize('disabled', ['0', '1'], ids=['dispatch-enabled', 'dispatch-disabled'])
-def test_legacy_imports_warn_once_and_preserve_public_exports(run_python, disabled):
+def test_normalization_imports_preserve_public_exports(run_python, disabled):
     run_python(
         """
         import importlib
@@ -129,16 +129,22 @@ def test_legacy_imports_warn_once_and_preserve_public_exports(run_python, disabl
 
         expected_symbols = {
             'layernorm': (
-                'LayerNorm', 'RMSNorm', 'GroupNorm', 'LayerNormLinear', 'rms_norm', 'layer_norm',
-                'layer_norm_fwd', 'layer_norm_bwd',
+                'GroupNorm', 'GroupNormLinear', 'GroupNormRef', 'LayerNorm', 'LayerNormLinear',
+                'NormParallel', 'RMSNorm', 'RMSNormLinear', 'group_norm', 'group_norm_linear',
+                'group_norm_ref', 'layer_norm', 'layer_norm_bwd', 'layer_norm_fwd', 'layer_norm_linear',
+                'layer_norm_ref', 'rms_norm', 'rms_norm_linear', 'rms_norm_ref',
             ),
-            'l2norm': ('L2Norm', 'l2norm', 'l2_norm', 'L2NormFunction', 'l2norm_fwd', 'l2norm_bwd'),
+            'l2norm': ('L2Norm', 'l2norm', 'l2_norm', 'l2norm_fwd', 'l2norm_bwd'),
             'fused_norm_gate': (
-                'FusedLayerNormGated', 'FusedRMSNormGated', 'layer_norm_gated',
-                'layer_norm_gated_fwd', 'layer_norm_gated_bwd',
+                'FusedLayerNormGated', 'FusedLayerNormGatedLinear', 'FusedLayerNormSwishGate',
+                'FusedLayerNormSwishGateLinear', 'FusedRMSNormGated', 'FusedRMSNormGatedLinear',
+                'FusedRMSNormSwishGate', 'FusedRMSNormSwishGateLinear', 'layer_norm_gated',
+                'layer_norm_gated_bwd', 'layer_norm_gated_fwd', 'layer_norm_swish_gate_linear',
+                'rms_norm_gated', 'rms_norm_swish_gate_linear',
             ),
             'layernorm_gated': (
-                'LayerNormGated', 'RMSNormGated', 'layernorm_fn', 'rmsnorm_fn', 'layer_norm_fwd', 'layer_norm_bwd',
+                'LayerNormGated', 'RMSNormGated', 'layernorm_fn', 'rmsnorm_fn', 'rms_norm_ref',
+                'layer_norm_fwd', 'layer_norm_bwd',
             ),
         }
         canonical_paths = tuple('fla.modules.norm.' + name for name in expected_symbols)
@@ -157,20 +163,15 @@ def test_legacy_imports_warn_once_and_preserve_public_exports(run_python, disabl
             from fla.layers.mamba2 import Mamba2
             from fla.modules import L2Norm, RMSNorm, RotaryEmbedding
             from fla.modules import norm, rotary
+            for canonical_path in canonical_paths:
+                importlib.import_module(canonical_path)
 
         assert layers.GatedLinearAttention is GatedLinearAttention
         assert layers.Mamba2 is Mamba2
         assert modules.L2Norm is L2Norm is norm.L2Norm
         assert modules.RMSNorm is RMSNorm is norm.RMSNorm
         assert modules.RotaryEmbedding is RotaryEmbedding is rotary.RotaryEmbedding
-        emitted = norm_warnings(caught)
-        assert len(emitted) == len(expected_symbols), [str(w.message) for w in caught]
-        for name, canonical_path in zip(expected_symbols, canonical_paths):
-            matching = [w for w in emitted if str(w.message).startswith('fla.modules.' + name + ' ')]
-            assert len(matching) == 1, (name, [str(w.message) for w in emitted])
-            assert matching[0].category is FutureWarning
-            assert canonical_path in str(matching[0].message)
-            assert 'next release after 0.6.0' in str(matching[0].message)
+        assert not norm_warnings(caught), [str(w.message) for w in caught]
 
         for name, canonical_path in zip(expected_symbols, canonical_paths):
             canonical = importlib.import_module(canonical_path)
@@ -183,7 +184,8 @@ def test_legacy_imports_warn_once_and_preserve_public_exports(run_python, disabl
                     assert l2norm_fwd is canonical.l2norm_fwd
                     assert l2norm_bwd is canonical.l2norm_bwd
             assert not norm_warnings(caught), (name, [str(w.message) for w in caught])
-            for symbol in set(legacy.__all__) | set(expected_symbols[name]):
+            assert set(legacy.__all__) == set(canonical.__all__) == set(expected_symbols[name])
+            for symbol in expected_symbols[name]:
                 assert getattr(legacy, symbol) is getattr(canonical, symbol), (name, symbol)
 
         from fla.modules.conv import causal_conv1d

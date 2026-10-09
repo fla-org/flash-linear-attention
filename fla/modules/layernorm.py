@@ -5,16 +5,12 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-import warnings
-
 from fla.modules.norm.layernorm import (
     GroupNorm,
     GroupNormLinear,
     GroupNormRef,
     LayerNorm,
-    LayerNormFunction,
     LayerNormLinear,
-    LayerNormLinearFunction,
     NormParallel,
     RMSNorm,
     RMSNormLinear,
@@ -23,11 +19,7 @@ from fla.modules.norm.layernorm import (
     group_norm_ref,
     layer_norm,
     layer_norm_bwd,
-    layer_norm_bwd_kernel,
-    layer_norm_bwd_kernel_row,
     layer_norm_fwd,
-    layer_norm_fwd_kernel,
-    layer_norm_fwd_kernel_row,
     layer_norm_linear,
     layer_norm_ref,
     rms_norm,
@@ -40,9 +32,7 @@ __all__ = [
     'GroupNormLinear',
     'GroupNormRef',
     'LayerNorm',
-    'LayerNormFunction',
     'LayerNormLinear',
-    'LayerNormLinearFunction',
     'NormParallel',
     'RMSNorm',
     'RMSNormLinear',
@@ -51,21 +41,10 @@ __all__ = [
     'group_norm_ref',
     'layer_norm',
     'layer_norm_bwd',
-    'layer_norm_bwd_kernel',
-    'layer_norm_bwd_kernel_row',
     'layer_norm_fwd',
-    'layer_norm_fwd_kernel',
-    'layer_norm_fwd_kernel_row',
     'layer_norm_linear',
     'layer_norm_ref',
     'rms_norm',
     'rms_norm_linear',
     'rms_norm_ref',
 ]
-
-warnings.warn(
-    'fla.modules.layernorm is deprecated; import from fla.modules.norm.layernorm instead. '
-    'This compatibility path will be removed in the next release after 0.6.0.',
-    FutureWarning,
-    stacklevel=2,
-)
