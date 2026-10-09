@@ -37,7 +37,11 @@ def test_top_level_exports_layers_and_non_config_models():
 @pytest.mark.parametrize(
     ('owner', 'name', 'defaults'),
     [
-        ('conv.ops', 'causal_conv1d_fwd', {'chunk_size': 64, 'layout_fallback': False, 'output_final_state': False}),
+        (
+            'causal_conv.causal_conv',
+            'causal_conv1d_fwd',
+            {'chunk_size': 64, 'layout_fallback': False, 'output_final_state': False},
+        ),
         ('layernorm', 'layer_norm', {'eps': 1e-5, 'prenorm': False}),
         ('l2norm', 'l2norm', {'eps': 1e-6, 'output_dtype': None}),
         ('fused_norm_gate', 'layer_norm_gated', {'activation': 'swish', 'eps': 1e-6}),
@@ -60,9 +64,10 @@ def test_public_call_defaults(owner, name, defaults):
     ('legacy', 'current', 'names'),
     [
         ('convolution', 'conv', ('ShortConvolution', 'LongConvolution', 'ImplicitLongConvolution')),
-        ('conv.triton.ops', 'conv.ops', ('causal_conv1d_fwd', 'causal_conv1d_bwd', 'CausalConv1dFunction')),
+        ('convolution', 'causal_conv', ('ShortConvolution', 'causal_conv1d')),
+        ('convolution', 'long_conv', ('LongConvolution', 'ImplicitLongConvolution', 'PositionalEmbedding', 'fft_conv')),
     ],
-    ids=['convolution', 'conv-functions'],
+    ids=['convolution', 'causal-conv', 'long-conv'],
 )
 def test_legacy_imports_preserve_symbol_identity(legacy, current, names):
     old_package = importlib.import_module(f'fla.modules.{legacy}')
@@ -86,6 +91,7 @@ def test_public_function_aliases():
         ('fused_norm_gate', 'FusedRMSNormGated', {'hidden_size': 4}, ('weight',)),
         ('l2norm', 'L2Norm', {}, ()),
         ('convolution', 'ShortConvolution', {'hidden_size': 4, 'kernel_size': 3, 'bias': True}, ('weight', 'bias')),
+        ('conv.long_conv', 'LongConvolution', {'hidden_size': 4, 'max_len': 8}, ('filter',)),
     ],
     ids=[
         'layernorm',
@@ -96,6 +102,7 @@ def test_public_function_aliases():
         'fused-rmsnorm-gated',
         'l2norm',
         'convolution',
+        'long-convolution',
     ],
 )
 def test_legacy_module_pickle_and_state_dict(monkeypatch, legacy, name, kwargs, state_keys):
@@ -110,6 +117,8 @@ def test_legacy_module_pickle_and_state_dict(monkeypatch, legacy, name, kwargs, 
     paths = [f'fla.modules.{legacy}']
     if legacy in {'fused_norm_gate', 'l2norm', 'layernorm', 'layernorm_gated'}:
         paths.append(f'fla.modules.norm.{legacy}')
+    if name == 'ShortConvolution':
+        paths.extend(['fla.modules.conv', 'fla.modules.conv.module', 'fla.modules.conv.short_conv'])
     for path in paths:
         with monkeypatch.context() as patch:
             patch.setattr(module_class, '__module__', path)

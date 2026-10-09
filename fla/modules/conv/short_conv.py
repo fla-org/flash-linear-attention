@@ -5,14 +5,6 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from fla.modules.conv.module import (
-    ShortConvolution,
-    causal_conv1d_fn_cuda,
-    causal_conv1d_update_cuda,
-)
+from fla.modules.causal_conv.causal_conv import ShortConvolution, causal_conv1d_fn_cuda, causal_conv1d_update_cuda
 
-__all__ = [
-    'ShortConvolution',
-    'causal_conv1d_fn_cuda',
-    'causal_conv1d_update_cuda',
-]
+__all__ = ['ShortConvolution', 'causal_conv1d_fn_cuda', 'causal_conv1d_update_cuda', ]

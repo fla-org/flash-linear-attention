@@ -5,9 +5,9 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+from fla.modules.causal_conv import ShortConvolution
 from fla.modules.conv.causal_conv1d import causal_conv1d
-from fla.modules.conv.long_conv import ImplicitLongConvolution, LongConvolution, PositionalEmbedding, fft_conv
-from fla.modules.conv.module import ShortConvolution
+from fla.modules.long_conv import ImplicitLongConvolution, LongConvolution, PositionalEmbedding, fft_conv
 
 __all__ = [
     'ImplicitLongConvolution',

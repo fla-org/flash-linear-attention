@@ -7,6 +7,8 @@
 
 """Causal 1D convolution kernels adapted for triton-ascend on Huawei NPU."""
 
+from collections.abc import Iterator
+
 import torch
 import triton
 import triton.language as tl
@@ -31,7 +33,7 @@ def _select_coregrid_bd(D: int, preferred: int) -> int | None:
     """Largest power-of-2 BD <= preferred that exactly divides D.
 
     Core-grid kernels need channel tiles on exact D boundaries;
-    odd widths (e.g. D=200) fall back to the legacy path.
+    widths requiring tiles smaller than 16 channels (e.g. D=200) fall back to the legacy path.
     """
     bd = min(preferred, triton.next_power_of_2(max(D, 1)))
     while bd > 8 and (bd > D or D % bd != 0):
@@ -167,14 +169,8 @@ def causal_conv1d_fwd_coregrid_kernel(
                     mask=m_t_yl[:, None] & m_d[None, :],
                 )
             else:
-                p_yl = tl.make_block_ptr(
-                    y_linear + bos * D, (T_len, D), (D, 1), (i_t * BT, i_d * BD), (BT, BD), (1, 0),
-                )
-                tl.store(
-                    p_yl,
-                    tl.cast(b_y, dtype=p_yl.dtype.element_ty, fp_downcast_rounding='rtne'),
-                    boundary_check=(0, 1),
-                )
+                p_yl = tl.make_block_ptr(y_linear + bos * D, (T_len, D), (D, 1), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
+                tl.store(p_yl, tl.cast(b_y, dtype=p_yl.dtype.element_ty, fp_downcast_rounding='rtne'), boundary_check=(0, 1))
 
         if ACTIVATION == 'swish' or ACTIVATION == 'silu':
             b_y = b_y * tl.sigmoid(b_y)
@@ -189,9 +185,7 @@ def causal_conv1d_fwd_coregrid_kernel(
                     other=0.,
                 )
             else:
-                p_residual = tl.make_block_ptr(
-                    residual + bos * D, (T_len, D), (D, 1), (i_t * BT, i_d * BD), (BT, BD), (1, 0),
-                )
+                p_residual = tl.make_block_ptr(residual + bos * D, (T_len, D), (D, 1), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
                 b_residual = tl.load(p_residual, boundary_check=(0, 1))
             b_y += b_residual
 
@@ -199,18 +193,10 @@ def causal_conv1d_fwd_coregrid_kernel(
             o_t_y = t0 + tl.arange(0, BT)
             m_t_y = (o_t_y >= 0) & (o_t_y < T_len)
             b_y_cast = tl.cast(b_y, dtype=y.dtype.element_ty, fp_downcast_rounding='rtne')
-            tl.store(
-                y + bos * D + o_t_y[:, None] * D + o_d[None, :],
-                b_y_cast,
-                mask=m_t_y[:, None] & m_d[None, :],
-            )
+            tl.store(y + bos * D + o_t_y[:, None] * D + o_d[None, :], b_y_cast, mask=m_t_y[:, None] & m_d[None, :])
         else:
             p_y = tl.make_block_ptr(y + bos * D, (T_len, D), (D, 1), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
-            tl.store(
-                p_y,
-                tl.cast(b_y, dtype=p_y.dtype.element_ty, fp_downcast_rounding='rtne'),
-                boundary_check=(0, 1),
-            )
+            tl.store(p_y, tl.cast(b_y, dtype=p_y.dtype.element_ty, fp_downcast_rounding='rtne'), boundary_check=(0, 1))
 
 
 @triton.heuristics({
@@ -295,11 +281,7 @@ def causal_conv1d_bwd_coregrid_kernel(
             if is_tail_chunk:
                 o_t_x = t0 + tl.arange(0, BT)
                 m_t_x = (o_t_x >= 0) & (o_t_x < T_len)
-                b_x = tl.load(
-                    x + bos * D + o_t_x[:, None] * D + o_d[None, :],
-                    mask=m_t_x[:, None] & m_d[None, :],
-                    other=0,
-                )
+                b_x = tl.load(x + bos * D + o_t_x[:, None] * D + o_d[None, :], mask=m_t_x[:, None] & m_d[None, :], other=0)
             else:
                 p_x = tl.make_block_ptr(x + bos * D, (T_len, D), (D, 1), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
                 b_x = tl.load(p_x, boundary_check=(0, 1))
@@ -329,14 +311,10 @@ def causal_conv1d_bwd_coregrid_kernel(
                         other=0.,
                     ).to(tl.float32)
             else:
-                p_dy = tl.make_block_ptr(
-                    dy + bos * D, (T_len, D), (D, 1), (i_t * BT, i_d * BD), (BT + W - 1, BD), (1, 0),
-                )
+                p_dy = tl.make_block_ptr(dy + bos * D, (T_len, D), (D, 1), (i_t * BT, i_d * BD), (BT + W - 1, BD), (1, 0))
                 b_dy = tl.load(p_dy, boundary_check=(0, 1)).to(tl.float32)
                 if ACTIVATION == 'swish' or ACTIVATION == 'silu':
-                    p_y = tl.make_block_ptr(
-                        y + bos * D, (T_len, D), (D, 1), (i_t * BT, i_d * BD), (BT + W - 1, BD), (1, 0),
-                    )
+                    p_y = tl.make_block_ptr(y + bos * D, (T_len, D), (D, 1), (i_t * BT, i_d * BD), (BT + W - 1, BD), (1, 0))
                     b_y = tl.load(p_y, boundary_check=(0, 1)).to(tl.float32)
 
             if ACTIVATION == 'swish' or ACTIVATION == 'silu':
@@ -375,14 +353,10 @@ def causal_conv1d_bwd_coregrid_kernel(
                         b_ys = tl.sigmoid(b_y)
                         b_dy = b_dy * b_ys * (1 + b_y * (1 - b_ys))
                 else:
-                    p_dy = tl.make_block_ptr(
-                        dy + bos * D, (T_len, D), (D, 1), (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0),
-                    )
+                    p_dy = tl.make_block_ptr(dy + bos * D, (T_len, D), (D, 1), (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
                     b_dy = tl.load(p_dy, boundary_check=(0, 1)).to(tl.float32)
                     if ACTIVATION == 'swish' or ACTIVATION == 'silu':
-                        p_y = tl.make_block_ptr(
-                            y + bos * D, (T_len, D), (D, 1), (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0),
-                        )
+                        p_y = tl.make_block_ptr(y + bos * D, (T_len, D), (D, 1), (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
                         b_y = tl.load(p_y, boundary_check=(0, 1)).to(tl.float32)
                         b_ys = tl.sigmoid(b_y)
                         b_dy = b_dy * b_ys * (1 + b_y * (1 - b_ys))
@@ -414,14 +388,10 @@ def causal_conv1d_bwd_coregrid_kernel(
                         b_ys = tl.sigmoid(b_y)
                         b_dy_shift = b_dy_shift * b_ys * (1 + b_y * (1 - b_ys))
                 else:
-                    p_dy = tl.make_block_ptr(
-                        dy + bos * D, (T_len, D), (D, 1), (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0),
-                    )
+                    p_dy = tl.make_block_ptr(dy + bos * D, (T_len, D), (D, 1), (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
                     b_dy_shift = tl.load(p_dy, boundary_check=(0, 1)).to(tl.float32)
                     if ACTIVATION == 'swish' or ACTIVATION == 'silu':
-                        p_y = tl.make_block_ptr(
-                            y + bos * D, (T_len, D), (D, 1), (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0),
-                        )
+                        p_y = tl.make_block_ptr(y + bos * D, (T_len, D), (D, 1), (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
                         b_y = tl.load(p_y, boundary_check=(0, 1)).to(tl.float32)
                         b_ys = tl.sigmoid(b_y)
                         b_dy_shift = b_dy_shift * b_ys * (1 + b_y * (1 - b_ys))
@@ -431,13 +401,13 @@ def causal_conv1d_bwd_coregrid_kernel(
                         mask_head_rows = o_t < i_w
                         b_dy_head = tl.load(
                             dy + bos * D + o_t[:, None] * D + o_d,
-                            mask=(mask_head_rows[:, None] & m_d[None, :]),
+                            mask=mask_head_rows[:, None] & m_d[None, :],
                             other=0.,
                         ).to(tl.float32)
                         if ACTIVATION == 'swish' or ACTIVATION == 'silu':
                             b_y_head = tl.load(
                                 y + bos * D + o_t[:, None] * D + o_d,
-                                mask=(mask_head_rows[:, None] & m_d[None, :]),
+                                mask=mask_head_rows[:, None] & m_d[None, :],
                                 other=0.,
                             ).to(tl.float32)
                             b_ys_head = tl.sigmoid(b_y_head)
@@ -446,7 +416,7 @@ def causal_conv1d_bwd_coregrid_kernel(
                         mask_c = mask_head_rows & (o_c >= 1) & (o_c < W)
                         b_xc = tl.load(
                             initial_state + tl.cast(i_n, tl.int64) * D * W + o_d[None, :] * W + o_c[:, None],
-                            mask=(mask_c[:, None] & m_d[None, :]),
+                            mask=mask_c[:, None] & m_d[None, :],
                             other=0.,
                         ).to(tl.float32)
                         b_dw += tl.sum(b_dy_head * b_xc, 0)
@@ -467,13 +437,9 @@ def causal_conv1d_bwd_coregrid_kernel(
                     b_dh0_s = tl.zeros((BD,), dtype=tl.float32)
                     for i_t2 in tl.static_range(0, W - 1):
                         if i_t2 < i_w:
-                            dy0_row = tl.load(
-                                dy + bos * D + (t0 + i_t2) * D + o_d, mask=m_d, other=0.,
-                            ).to(tl.float32)
+                            dy0_row = tl.load(dy + bos * D + (t0 + i_t2) * D + o_d, mask=m_d, other=0.).to(tl.float32)
                             if ACTIVATION == 'swish' or ACTIVATION == 'silu':
-                                y0_row = tl.load(
-                                    y + bos * D + (t0 + i_t2) * D + o_d, mask=m_d, other=0.,
-                                ).to(tl.float32)
+                                y0_row = tl.load(y + bos * D + (t0 + i_t2) * D + o_d, mask=m_d, other=0.).to(tl.float32)
                                 y0_s = tl.sigmoid(y0_row)
                                 dy0_row = dy0_row * y0_s * (1 + y0_row * (1 - y0_s))
                             if HAS_WEIGHT:
@@ -501,8 +467,11 @@ def causal_conv1d_bwd_coregrid_kernel(
                     target_row = T_len - W + i_w
                     local_row = target_row - t0
                     in_chunk = (local_row >= 0) & (local_row < BT) & (target_row >= 0) & (target_row < T_len)
-                    b_dht_row = tl.load(dht + tl.cast(i_n, tl.int64) * D * W + o_d *
-                                        W + i_w, mask=m_d, other=0.).to(tl.float32)
+                    b_dht_row = tl.load(
+                        dht + tl.cast(i_n, tl.int64) * D * W + o_d * W + i_w,
+                        mask=m_d,
+                        other=0.,
+                    ).to(tl.float32)
                     row_match = (row_arange == local_row) & in_chunk
                     b_dx += tl.where(row_match[:, None] & m_d[None, :], b_dht_row[None, :], 0.)
 
@@ -510,18 +479,10 @@ def causal_conv1d_bwd_coregrid_kernel(
             o_t_dx = t0 + tl.arange(0, BT)
             m_t_dx = (o_t_dx >= 0) & (o_t_dx < T_len)
             b_dx_cast = tl.cast(b_dx, dtype=dx.dtype.element_ty, fp_downcast_rounding='rtne')
-            tl.store(
-                dx + bos * D + o_t_dx[:, None] * D + o_d[None, :],
-                b_dx_cast,
-                mask=m_t_dx[:, None] & m_d[None, :],
-            )
+            tl.store(dx + bos * D + o_t_dx[:, None] * D + o_d[None, :], b_dx_cast, mask=m_t_dx[:, None] & m_d[None, :])
         else:
             p_dx = tl.make_block_ptr(dx + bos * D, (T_len, D), (D, 1), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
-            tl.store(
-                p_dx,
-                tl.cast(b_dx, dtype=p_dx.dtype.element_ty, fp_downcast_rounding='rtne'),
-                boundary_check=(0, 1),
-            )
+            tl.store(p_dx, tl.cast(b_dx, dtype=p_dx.dtype.element_ty, fp_downcast_rounding='rtne'), boundary_check=(0, 1))
 
 
 # Ascend Triton rejects grids whose product exceeds 65535 (see fla/modules/token_shift.py).
@@ -529,7 +490,7 @@ _NPU_MAX_TRITON_GRID = 65535
 _ELEM_BLOCK = 2048
 
 
-def _elementwise_launch_iters(numel: int):
+def _elementwise_launch_iters(numel: int) -> Iterator[tuple[int, int]]:
     n_blocks = triton.cdiv(numel, _ELEM_BLOCK)
     for block_off in range(0, n_blocks, _NPU_MAX_TRITON_GRID):
         yield min(_NPU_MAX_TRITON_GRID, n_blocks - block_off), block_off * _ELEM_BLOCK
@@ -556,9 +517,7 @@ def _clamp_bd_for_grid(B: int, NT: int, D: int, BD: int) -> int:
 def _npu_max_axis_chunks(grid_dim0: int, batch: int = 1) -> int:
     denom = grid_dim0 * batch
     if denom > _NPU_MAX_TRITON_GRID:
-        raise RuntimeError(
-            f'Ascend Triton grid dim0*batch={denom} exceeds {_NPU_MAX_TRITON_GRID}',
-        )
+        raise RuntimeError(f'Ascend Triton grid dim0*batch={denom} exceeds {_NPU_MAX_TRITON_GRID}')
     return max(1, _NPU_MAX_TRITON_GRID // max(denom, 1))
 
 
@@ -568,15 +527,9 @@ _NPU_FWD_TILE_BUDGET = 16384
 _NPU_FWD_MAX_BT = 512
 
 
-def _npu_tile_config(
-    T: int,
-    BT: int,
-    D: int,
-    dtype: torch.dtype,
-    initial_state: torch.Tensor | None,
-) -> tuple[int, int]:
+def _npu_tile_config(T: int, BT: int, D: int, dtype: torch.dtype, initial_state: torch.Tensor | None) -> tuple[int, int]:
     if dtype not in (torch.bfloat16, torch.float16):
-        BT = _npu_chunk_size(T, BT)
+        BT = _npu_chunk_size(T=T, BT=BT)
         BD = 16
         if D >= 8192:
             BD = 8
@@ -594,7 +547,8 @@ def _npu_tile_config(
         return BD, BT
 
     pow2_t = triton.next_power_of_2(T)
-    floor_t = pow2_t if pow2_t == T else pow2_t // 2      # largest power-of-2 <= T
+    # largest power-of-2 <= T
+    floor_t = pow2_t if pow2_t == T else pow2_t // 2
     BT = min(_NPU_FWD_MAX_BT, floor_t)
     budget = _NPU_FWD_TILE_BUDGET
     if D >= 8192:
@@ -608,14 +562,8 @@ def _npu_tile_config(
     return BD, BT
 
 
-def _npu_bwd_tile_config(
-    T: int,
-    BT: int,
-    D: int,
-    dtype: torch.dtype,
-    initial_state: torch.Tensor | None,
-) -> tuple[int, int]:
-    BT = _npu_chunk_size(T, BT)
+def _npu_bwd_tile_config(T: int, BT: int, D: int, dtype: torch.dtype, initial_state: torch.Tensor | None) -> tuple[int, int]:
+    BT = _npu_chunk_size(T=T, BT=BT)
     BD = 16
     if initial_state is not None:
         BD = min(BD, 8)
@@ -673,7 +621,7 @@ def causal_conv1d_fwd_kernel(
     USE_INITIAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    # Ported from ant_AReaL: block_ptr (coalesced loads) + fused bias/silu/residual,
+    # ported from ant_AReaL: block_ptr (coalesced loads) + fused bias/silu/residual,
     # with MAX_NT_PER_BLOCK T-chunks per program to shrink the grid. The host launches the
     # NT_GRID axis in chunks (NT_GRID_OFFSET) so the grid product stays under the 65535
     # Ascend cap. Masked scalar loads are kept only for the initial_state head edge.
@@ -715,8 +663,14 @@ def causal_conv1d_fwd_kernel(
             b_y = tl.zeros((BT, BD), dtype=tl.float32)
             if not USE_INITIAL_STATE or t0 >= W:
                 for i_w in tl.static_range(W):
-                    p_yi = tl.make_block_ptr(p_x, (T_local, D), (stride_x_t, stride_x_d),
-                                             (i_t * BT + i_w - W + 1, i_d * BD), (BT, BD), (1, 0))
+                    p_yi = tl.make_block_ptr(
+                        p_x,
+                        (T_local, D),
+                        (stride_x_t, stride_x_d),
+                        (i_t * BT + i_w - W + 1, i_d * BD),
+                        (BT, BD),
+                        (1, 0),
+                    )
                     b_yi = tl.load(p_yi, boundary_check=(0, 1)).to(tl.float32)
                     if HAS_WEIGHT:
                         b_yi *= tl.sum(b_w * (o_w == i_w), 1)
@@ -725,7 +679,7 @@ def causal_conv1d_fwd_kernel(
                 o_t = t0 + tl.arange(0, BT)
                 for i_w in tl.static_range(W):
                     o_x = o_t + i_w - W + 1
-                    # Explicit 2D ([None, :]) indexing throughout: triton-ascend miscompiles
+                    # explicit 2D ([None, :]) indexing throughout: triton-ascend miscompiles
                     # the implicit 1D-vs-2D broadcast (o_d / m_d against o_x[:, None]) in
                     # these scalar pointer loads, faulting the vector core at runtime.
                     m_x = ((o_x >= 0) & (o_x < T_local))[:, None] & m_d[None, :]
@@ -735,13 +689,14 @@ def causal_conv1d_fwd_kernel(
                         mask=m_x,
                         other=0,
                     ).to(tl.float32)
-                    # Guard with a pure-constexpr check: triton-ascend does not fold the
+                    # guard with a pure-constexpr check: triton-ascend does not fold the
                     # outer `not USE_INITIAL_STATE or <runtime>`, so this else branch is
                     # lowered even when initial_state is None -- without the guard it would
                     # dereference None at compile time (AttributeError on None.type).
                     if USE_INITIAL_STATE:
                         b_yi += tl.load(initial_state + tl.cast(i_n, tl.int64) * D * W + o_d[None, :] * W + (o_x + W)
-                                        [:, None], mask=m_c, other=0).to(tl.float32)
+                                        [:, None], mask=m_c,
+                                        other=0).to(tl.float32)
                     if HAS_WEIGHT:
                         b_yi *= tl.sum(b_w * (o_w == i_w), 1)[None, :]
                     b_y += b_yi
@@ -751,8 +706,14 @@ def causal_conv1d_fwd_kernel(
             if ACTIVATION == 'swish' or ACTIVATION == 'silu':
                 b_y = b_y * tl.sigmoid(b_y)
             if HAS_RESIDUAL:
-                p_residual = tl.make_block_ptr(residual + bos * D, (T_local, D), (D, 1),
-                                               (i_t * BT, i_d * BD), (BT, BD), (1, 0))
+                p_residual = tl.make_block_ptr(
+                    residual + bos * D,
+                    (T_local, D),
+                    (D, 1),
+                    (i_t * BT, i_d * BD),
+                    (BT, BD),
+                    (1, 0),
+                )
                 b_y += tl.load(p_residual, boundary_check=(0, 1))
 
             p_y = tl.make_block_ptr(y + bos * D, (T_local, D), (D, 1), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
@@ -760,13 +721,7 @@ def causal_conv1d_fwd_kernel(
 
 
 @triton.jit
-def _silu_kernel(
-    x_ptr,
-    y_ptr,
-    n_elements,
-    ELEM_OFFSET: tl.constexpr,
-    BLOCK: tl.constexpr,
-):
+def _silu_kernel(x_ptr, y_ptr, n_elements, ELEM_OFFSET: tl.constexpr, BLOCK: tl.constexpr):
     pid = tl.program_id(0)
     offs = pid * BLOCK + tl.arange(0, BLOCK) + ELEM_OFFSET
     mask = offs < n_elements
@@ -776,14 +731,7 @@ def _silu_kernel(
 
 
 @triton.jit
-def _add_kernel(
-    a_ptr,
-    b_ptr,
-    out_ptr,
-    n_elements,
-    ELEM_OFFSET: tl.constexpr,
-    BLOCK: tl.constexpr,
-):
+def _add_kernel(a_ptr, b_ptr, out_ptr, n_elements, ELEM_OFFSET: tl.constexpr, BLOCK: tl.constexpr):
     pid = tl.program_id(0)
     offs = pid * BLOCK + tl.arange(0, BLOCK) + ELEM_OFFSET
     mask = offs < n_elements
@@ -796,12 +744,8 @@ def _launch_silu(y: torch.Tensor) -> torch.Tensor:
     y = y.contiguous()
     out = torch.zeros_like(y)
     n = y.numel()
-    for grid, elem_off in _elementwise_launch_iters(n):
-        _silu_kernel[(grid,)](
-            y, out, n,
-            ELEM_OFFSET=elem_off,
-            BLOCK=_ELEM_BLOCK,
-        )
+    for grid, elem_off in _elementwise_launch_iters(numel=n):
+        _silu_kernel[(grid,)](x_ptr=y, y_ptr=out, n_elements=n, ELEM_OFFSET=elem_off, BLOCK=_ELEM_BLOCK)
     return out
 
 
@@ -810,12 +754,8 @@ def _launch_add(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     b = b.contiguous()
     out = torch.zeros_like(a)
     n = a.numel()
-    for grid, elem_off in _elementwise_launch_iters(n):
-        _add_kernel[(grid,)](
-            a, b, out, n,
-            ELEM_OFFSET=elem_off,
-            BLOCK=_ELEM_BLOCK,
-        )
+    for grid, elem_off in _elementwise_launch_iters(numel=n):
+        _add_kernel[(grid,)](a_ptr=a, b_ptr=b, out_ptr=out, n_elements=n, ELEM_OFFSET=elem_off, BLOCK=_ELEM_BLOCK)
     return out
 
 
@@ -828,7 +768,7 @@ def _silu_bwd_kernel(
     ELEM_OFFSET: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
-    # Flat contiguous elementwise silu/sigmoid backward. Inputs are [B,T,D] contiguous, so
+    # flat contiguous elementwise silu/sigmoid backward. Inputs are [B,T,D] contiguous, so
     # the element offset IS the tensor offset -- no per-element modulo / strided gather
     # (the old form was the #1 hotspot: 71% of fwd+bwd on PipeUtilization, dominated by
     # 4 integer divisions per element on the vector pipe).
@@ -843,7 +783,7 @@ def _silu_bwd_kernel(
 
 
 def _launch_silu_bwd(y_pre: torch.Tensor, dy: torch.Tensor) -> torch.Tensor:
-    # Flat indexing requires contiguous inputs; conv output (y_pre) is contiguous, dy may
+    # flat indexing requires contiguous inputs; conv output (y_pre) is contiguous, dy may
     # arrive non-contiguous from upstream -- make it contiguous (no-op copy if already so).
     if not y_pre.is_contiguous():
         y_pre = y_pre.contiguous()
@@ -851,26 +791,18 @@ def _launch_silu_bwd(y_pre: torch.Tensor, dy: torch.Tensor) -> torch.Tensor:
         dy = dy.contiguous()
     out = torch.zeros_like(dy, memory_format=torch.contiguous_format)
     n = dy.numel()
-    for grid, elem_off in _elementwise_launch_iters(n):
-        _silu_bwd_kernel[(grid,)](
-            y_pre, dy, out, n,
-            ELEM_OFFSET=elem_off,
-            BLOCK=_ELEM_BLOCK,
-        )
+    for grid, elem_off in _elementwise_launch_iters(numel=n):
+        _silu_bwd_kernel[(grid,)](y_ptr=y_pre, dy_ptr=dy, out_ptr=out, n_elements=n, ELEM_OFFSET=elem_off, BLOCK=_ELEM_BLOCK)
     return out
 
 
-def _postprocess_fwd(
-    y: torch.Tensor,
-    residual: torch.Tensor | None,
-    activation: str | None,
-) -> torch.Tensor:
+def _postprocess_fwd(y: torch.Tensor, residual: torch.Tensor | None, activation: str | None) -> torch.Tensor:
     if activation in ('swish', 'silu'):
-        y = _launch_silu(y)
+        y = _launch_silu(y=y)
     if residual is not None:
         if residual.stride() != y.stride():
             residual = residual.contiguous()
-        y = _launch_add(y, residual)
+        y = _launch_add(a=y, b=residual)
     return y
 
 
@@ -890,10 +822,7 @@ def _use_seq_bwd(
     )
 
 
-@triton.heuristics({
-    'HAS_WEIGHT': lambda args: args['dw'] is not None,
-    'HAS_BIAS': lambda args: args['db'] is not None,
-})
+@triton.heuristics({'HAS_WEIGHT': lambda args: args['dw'] is not None, 'HAS_BIAS': lambda args: args['db'] is not None, })
 @triton.jit
 def causal_conv1d_bwd_seq_kernel(
     x,
@@ -952,11 +881,7 @@ def causal_conv1d_bwd_seq_kernel(
             dy_off = b * stride_dy_n + t_dy * stride_dy_t + d * stride_dy_d
             b_dy = tl.load(dy + dy_off, mask=mask & (t_dy < TC), other=0.).to(tl.float32)
             w_idx = W - i_w - 1
-            tl.store(
-                dw + (i_tg * D + d) * W + w_idx,
-                (b_dy * b_x).to(dw.dtype.element_ty),
-                mask=mask,
-            )
+            tl.store(dw + (i_tg * D + d) * W + w_idx, (b_dy * b_x).to(dw.dtype.element_ty), mask=mask)
 
     if HAS_BIAS:
         i_tg = b * TC + t
@@ -1024,11 +949,7 @@ def causal_conv1d_bwd_dx_kernel(
     for i_w in tl.static_range(0, W):
         o_dy = o_t + i_w
         m_dy = ((o_dy >= 0) & (o_dy < T))[:, None] & m_d[None, :]
-        b_dy = tl.load(
-            p_dy + o_dy[:, None] * stride_dy_t + o_d[None, :] * stride_dy_d,
-            mask=m_dy,
-            other=0,
-        ).to(tl.float32)
+        b_dy = tl.load(p_dy + o_dy[:, None] * stride_dy_t + o_d[None, :] * stride_dy_d, mask=m_dy, other=0).to(tl.float32)
         if HAS_WEIGHT:
             b_dx += b_dy * tl.sum(b_w * (o_w == (W - i_w - 1)), 1)[None, :]
         else:
@@ -1064,9 +985,8 @@ def _launch_bwd_dx_core(
     W,
     BT,
     BD=None,
-):
-    # dx-only kernel: fwd big tiles, except dht (USE_FINAL_STATE) falls back to small
-    # tiles (the extra branch overflows Ascend UB at big tiles).
+) -> torch.Tensor:
+    # dht needs smaller tiles because its extra branch overflows Ascend UB at the forward tile size.
     if BD is None:
         if dht is not None:
             pow2_t = triton.next_power_of_2(T)
@@ -1074,14 +994,14 @@ def _launch_bwd_dx_core(
             BT = min(64, floor_t)
             BD = min(16, max(8, triton.next_power_of_2(D)))
         else:
-            BD, BT = _npu_tile_config(T, BT, D, dy.dtype, None)
+            BD, BT = _npu_tile_config(T=T, BT=BT, D=D, dtype=dy.dtype, initial_state=None)
     if cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT, cu_seqlens_cpu=cu_seqlens_cpu)
         NT = len(chunk_indices)
     else:
         chunk_indices = None
         NT = triton.cdiv(T, BT)
-    BD = _clamp_bd_for_grid(B, NT, D, BD)
+    BD = _clamp_bd_for_grid(B=B, NT=NT, D=D, BD=BD)
     BW = triton.next_power_of_2(W)
 
     stride_dy_n, stride_dy_t, stride_dy_d = dy.stride()
@@ -1191,11 +1111,7 @@ def causal_conv1d_bwd_dwdb_kernel(
     for i_w in tl.static_range(0, W):
         o_dy = o_t + i_w
         m_dy = ((o_dy >= 0) & (o_dy < T))[:, None] & m_d[None, :]
-        b_dy = tl.load(
-            p_dy + o_dy[:, None] * stride_dy_t + o_d[None, :] * stride_dy_d,
-            mask=m_dy,
-            other=0,
-        ).to(tl.float32)
+        b_dy = tl.load(p_dy + o_dy[:, None] * stride_dy_t + o_d[None, :] * stride_dy_d, mask=m_dy, other=0).to(tl.float32)
 
         if HAS_WEIGHT:
             b_dw = tl.sum(b_dy * b_x, 0)
@@ -1203,14 +1119,14 @@ def causal_conv1d_bwd_dwdb_kernel(
                 mask_head_rows = (o_t < i_w) & (o_t < T)
                 b_dy_head = tl.load(
                     p_dy + o_t[:, None] * stride_dy_t + o_d[None, :] * stride_dy_d,
-                    mask=(mask_head_rows[:, None] & m_d[None, :]),
+                    mask=mask_head_rows[:, None] & m_d[None, :],
                     other=0.0,
                 ).to(tl.float32)
                 o_c = W - i_w + o_t
                 mask_c = (mask_head_rows & (o_c >= 1) & (o_c < W))
                 b_xc = tl.load(
                     initial_state + tl.cast(i_n, tl.int64) * D * W + o_d[None, :] * W + o_c[:, None],
-                    mask=(mask_c[:, None] & m_d[None, :]),
+                    mask=mask_c[:, None] & m_d[None, :],
                     other=0.0,
                 ).to(tl.float32)
                 b_dw += tl.sum(b_dy_head * b_xc, 0)
@@ -1238,13 +1154,8 @@ def _launch_bwd_dwdb_core(
     BD: int | None = None,
     weight: torch.Tensor | None = None,
     bias: torch.Tensor | None = None,
-):
-    # dw/db-only kernel (reads x AND dy, so it hits the MLIR/multi-buffer UB cliff before
-    # dx-only). Empirically the tile is capped at BT*BD<=1024 (BT=64, BD<=16): profiling
-    # showed it Vector-bound (aiv_vec_ratio ~0.91), but BOTH raising BT->128 and BD->32
-    # overflow Ascend UB at compile time (the static_range(W) loop + multi-buffer keep a
-    # large fp32 live set). So tile tuning is a dead end here; the launch loop handles
-    # large grids. Don't _clamp_bd_for_grid (raising BD crashes it).
+) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+    # x/dy buffers and the unrolled W loop cap BT*BD at 1024; split large grids without raising BD to avoid UB overflow.
     if BD is None:
         pow2_t = triton.next_power_of_2(T)
         floor_t = pow2_t if pow2_t == T else pow2_t // 2
@@ -1497,17 +1408,13 @@ def causal_conv1d_update_kernel(
     )
 
 
-def _postprocess_update(
-    y: torch.Tensor,
-    residual: torch.Tensor | None,
-    activation: str | None,
-) -> torch.Tensor:
+def _postprocess_update(y: torch.Tensor, residual: torch.Tensor | None, activation: str | None) -> torch.Tensor:
     if activation in ('swish', 'silu'):
-        y = _launch_silu(y)
+        y = _launch_silu(y=y)
     if residual is not None:
         if residual.stride() != y.stride():
             residual = residual.contiguous()
-        y = _launch_add(y, residual)
+        y = _launch_add(a=y, b=residual)
     return y
 
 
@@ -1545,7 +1452,7 @@ def causal_conv1d_fwd_kernel_scalar(
     IS_VARLEN: tl.constexpr,
     CHUNK_OFFSET: tl.constexpr,
 ):
-    # Scalar (masked-load) forward -- the proven triton-ascend path. Used when
+    # scalar (masked-load) forward -- the proven triton-ascend path. Used when
     # initial_state is present: the ant_AReaL block_ptr kernel's initial_state head-edge
     # branch faults the Ascend vector core on this triton-ascend version, so we fall back
     # to this simpler control flow which compiles+runs cleanly.
@@ -1579,11 +1486,7 @@ def causal_conv1d_fwd_kernel_scalar(
     for i_w in tl.static_range(-W + 1, 1):
         o_x = o_t + i_w
         m_x = ((o_x >= 0) & (o_x < T))[:, None] & m_d[None, :]
-        b_yi = tl.load(
-            p_x + o_x[:, None] * stride_x_t + o_d[None, :] * stride_x_d,
-            mask=m_x,
-            other=0,
-        ).to(tl.float32)
+        b_yi = tl.load(p_x + o_x[:, None] * stride_x_t + o_d[None, :] * stride_x_d, mask=m_x, other=0).to(tl.float32)
 
         if USE_INITIAL_STATE:
             m_c = ((o_x + W >= 0) & (o_x < 0))[:, None] & m_d[None, :]
@@ -1622,19 +1525,19 @@ def _launch_fwd_core_scalar(
 ) -> torch.Tensor:
     # Scalar-kernel forward (conv only -- no fused activation/residual). Caller applies
     # activation/residual via _postprocess_fwd. Used for the initial_state path.
-    # Force conservative (small) tiles regardless of dtype: this is the correctness
+    # force conservative (small) tiles regardless of dtype: this is the correctness
     # fallback, and the bf16 big tiles from _npu_tile_config overflow Ascend UB under the
     # scalar masked-load + multi-buffer pattern. Small tiles always fit; perf is secondary
     # here (initial_state is the uncommon path; the fast ant_AReaL kernel handles the rest).
-    BD, BT = _npu_tile_config(T, BT, D, torch.float32, initial_state)
-    # Rebuild chunk_indices for the (possibly reduced) BT: the caller built them for a
+    BD, BT = _npu_tile_config(T=T, BT=BT, D=D, dtype=torch.float32, initial_state=initial_state)
+    # rebuild chunk_indices for the (possibly reduced) BT: the caller built them for a
     # different BT, and a BT/chunk_indices mismatch corrupts the varlen (n, t) lookup.
     if cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT, cu_seqlens_cpu=cu_seqlens_cpu)
     else:
         chunk_indices = None
     NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
-    BD = _clamp_bd_for_grid(B, NT, D, BD)
+    BD = _clamp_bd_for_grid(B=B, NT=NT, D=D, BD=BD)
     BW = triton.next_power_of_2(W)
 
     stride_x_n, stride_x_t, stride_x_d = x.stride()
@@ -1691,7 +1594,7 @@ def _launch_fwd_core(
     BT: int,
     activation: str | None = None,
 ) -> torch.Tensor:
-    # Ported from ant_AReaL: BD=128 block_ptr + fused bias/silu/residual kernel, with
+    # ported from ant_AReaL: BD=128 block_ptr + fused bias/silu/residual kernel, with
     # MAX_NT_PER_BLOCK T-chunks per program to shrink the grid (bf16/fp16). float32 falls
     # back to a small tile so the fused kernel still fits the 192KB Ascend UB. The NT_GRID
     # axis is launched in chunks (NT_GRID_OFFSET) so the grid product cdiv(D,BD) x
@@ -1711,7 +1614,7 @@ def _launch_fwd_core(
     y = torch.empty_like(x, memory_format=torch.contiguous_format)
 
     grid_dim0 = triton.cdiv(D, BD)
-    max_nt_grid = _npu_max_axis_chunks(grid_dim0, B)
+    max_nt_grid = _npu_max_axis_chunks(grid_dim0=grid_dim0, batch=B)
     for nt_grid_off in range(0, NT_GRID, max_nt_grid):
         nt_grid_len = min(max_nt_grid, NT_GRID - nt_grid_off)
         grid = (grid_dim0, nt_grid_len, B)
@@ -1761,7 +1664,7 @@ def _launch_fwd_coregrid(
     W = weight.shape[1]
     weight_wd = weight.transpose(0, 1).contiguous()
     NUM_CORES = get_multiprocessor_count(x.device.index)
-    BD = _select_coregrid_bd(D, 256)
+    BD = _select_coregrid_bd(D=D, preferred=256)
     if BD is None:
         raise RuntimeError(f'coregrid fwd: no aligned BD for D={D}')
     BT = min(32, triton.next_power_of_2(triton.cdiv(max(16, B * T), NUM_CORES)))
@@ -1827,14 +1730,17 @@ def _launch_bwd_coregrid(
         NUM_CHKS = NT * B
     has_parallelism = triton.cdiv(D, 64) * NUM_CHKS > NUM_CORES // 2
     preferred = 64 if has_parallelism else 32
-    BD = _select_coregrid_bd(D, preferred)
+    BD = _select_coregrid_bd(D=D, preferred=preferred)
     if BD is None:
         raise RuntimeError(f'coregrid bwd: no aligned BD for D={D}')
     NUM_BLKS_D = triton.cdiv(D, BD)
 
     if y_linear is None and activation is not None:
         y_linear, _ = _launch_fwd_coregrid(
-            x, weight, bias, None,
+            x=x,
+            weight=weight,
+            bias=bias,
+            residual=None,
             activation=None,
             cu_seqlens=cu_seqlens,
             cu_seqlens_cpu=cu_seqlens_cpu,
@@ -1900,8 +1806,8 @@ def _can_use_coregrid(
     if residual is not None and (not residual.is_contiguous() or residual.stride(-1) != 1):
         return False
     D = x.shape[-1]
-    # need a usable channel tile (legacy path covers odd D like 200).
-    bd = _select_coregrid_bd(D, 64)
+    # need a usable channel tile (legacy path covers widths like D=200).
+    bd = _select_coregrid_bd(D=D, preferred=64)
     return bd is not None and bd >= 16
 
 
@@ -1919,17 +1825,23 @@ def causal_conv1d_fwd_npu(
     chunk_indices: torch.LongTensor | None = None,
     BT: int = 64,
     layout_fallback: bool = False,
-):
+) -> tuple[torch.Tensor, torch.Tensor | None]:
     shape = x.shape
     # bwd reads the stashed y_linear from the pre-rearrange tensor.
     x_saved = x
     if x.shape[-1] != weight.shape[0]:
         x = rearrange(x, 'b t ... -> b t (...)')
     # 1D core-grid fast path (large BD + extract_slice).
-    if _can_use_coregrid(x, residual, initial_state, layout_fallback=layout_fallback):
+    if _can_use_coregrid(x=x, residual=residual, initial_state=initial_state, layout_fallback=layout_fallback):
         save_linear = activation in ('swish', 'silu')
         y, y_linear = _launch_fwd_coregrid(
-            x, weight, bias, residual, activation, cu_seqlens, cu_seqlens_cpu,
+            x=x,
+            weight=weight,
+            bias=bias,
+            residual=residual,
+            activation=activation,
+            cu_seqlens=cu_seqlens,
+            cu_seqlens_cpu=cu_seqlens_cpu,
             save_linear=save_linear,
         )
         if y_linear is not None:
@@ -1954,26 +1866,42 @@ def causal_conv1d_fwd_npu(
     if initial_state is None:
         # ant_AReaL fused block_ptr kernel (fast): bias/silu/residual fused in.
         y = _launch_fwd_core(
-            x, weight, bias, residual, initial_state, cu_seqlens, chunk_indices,
-            B, T, D, W, BT, activation,
+            x=x,
+            weight=weight,
+            bias=bias,
+            residual=residual,
+            initial_state=initial_state,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+            B=B,
+            T=T,
+            D=D,
+            W=W,
+            BT=BT,
+            activation=activation,
         )
     else:
         # initial_state present: the ant_AReaL kernel's head-edge branch faults the Ascend
         # vector core on this triton-ascend version, so use the scalar kernel (conv only)
         # and apply activation/residual afterwards.
         y = _launch_fwd_core_scalar(
-            x, weight, bias, initial_state, cu_seqlens, cu_seqlens_cpu, B, T, D, W, BT,
+            x=x,
+            weight=weight,
+            bias=bias,
+            initial_state=initial_state,
+            cu_seqlens=cu_seqlens,
+            cu_seqlens_cpu=cu_seqlens_cpu,
+            B=B,
+            T=T,
+            D=D,
+            W=W,
+            BT=BT,
         )
-        y = _postprocess_fwd(y, residual, activation)
+        y = _postprocess_fwd(y=y, residual=residual, activation=activation)
 
     final_state = None
     if output_final_state:
-        final_state = causal_conv1d_update_states_npu(
-            x=x,
-            state_len=W,
-            initial_state=initial_state,
-            cu_seqlens=cu_seqlens,
-        )
+        final_state = causal_conv1d_update_states_npu(x=x, state_len=W, initial_state=initial_state, cu_seqlens=cu_seqlens)
     return y.view(shape), final_state
 
 
@@ -1991,7 +1919,7 @@ def causal_conv1d_bwd_npu(
     chunk_indices: torch.LongTensor | None = None,
     BT: int = 64,
     layout_fallback: bool = False,
-):
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
     shape = x.shape
     y_linear = getattr(x, '_fla_causal_conv_y_linear', None)
     if y_linear is not None:
@@ -2000,12 +1928,19 @@ def causal_conv1d_bwd_npu(
         x = rearrange(x, 'b t ... -> b t (...)')
         if y_linear is not None and y_linear.shape != x.shape:
             y_linear = rearrange(y_linear, 'b t ... -> b t (...)')
-    if _can_use_coregrid(x, residual, initial_state, dht=dht, layout_fallback=layout_fallback):
+    if _can_use_coregrid(x=x, residual=residual, initial_state=initial_state, dht=dht, layout_fallback=layout_fallback):
         # core-grid assumes packed BTD; cheap-copy strided dy from cat/split views.
         if dy is not None and not dy.is_contiguous():
             dy = dy.contiguous()
         dx, dw, db, dr = _launch_bwd_coregrid(
-            x, dy, weight, bias, residual, activation, cu_seqlens, cu_seqlens_cpu,
+            x=x,
+            dy=dy,
+            weight=weight,
+            bias=bias,
+            residual=residual,
+            activation=activation,
+            cu_seqlens=cu_seqlens,
+            cu_seqlens_cpu=cu_seqlens_cpu,
             y_linear=y_linear,
         )
         return dx.view(shape), dw, db, dr, None
@@ -2028,16 +1963,37 @@ def causal_conv1d_bwd_npu(
             if cu_seqlens is not None:
                 chunk_indices_f = prepare_chunk_indices(cu_seqlens, BT, cu_seqlens_cpu=cu_seqlens_cpu)
             y_pre = _launch_fwd_core(
-                x, weight, bias, None, initial_state, cu_seqlens, chunk_indices_f,
-                B, T, D, W, BT, activation=None,
+                x=x,
+                weight=weight,
+                bias=bias,
+                residual=None,
+                initial_state=initial_state,
+                cu_seqlens=cu_seqlens,
+                chunk_indices=chunk_indices_f,
+                B=B,
+                T=T,
+                D=D,
+                W=W,
+                BT=BT,
+                activation=None,
             )
         else:
             y_pre = _launch_fwd_core_scalar(
-                x, weight, bias, initial_state, cu_seqlens, cu_seqlens_cpu, B, T, D, W, BT,
+                x=x,
+                weight=weight,
+                bias=bias,
+                initial_state=initial_state,
+                cu_seqlens=cu_seqlens,
+                cu_seqlens_cpu=cu_seqlens_cpu,
+                B=B,
+                T=T,
+                D=D,
+                W=W,
+                BT=BT,
             )
-        dy_conv = _launch_silu_bwd(y_pre, dy)
+        dy_conv = _launch_silu_bwd(y_pre=y_pre, dy=dy)
 
-    use_seq = _use_seq_bwd(T, x.dtype, initial_state, dht, cu_seqlens)
+    use_seq = _use_seq_bwd(T=T, dtype=x.dtype, initial_state=initial_state, dht=dht, cu_seqlens=cu_seqlens)
 
     if use_seq:
         # tiny-T path (T <= 16): the combined seq kernel is cheap enough; keep it.
@@ -2074,18 +2030,36 @@ def causal_conv1d_bwd_npu(
             BLOCK=block,
         )
     else:
-        # Split backward: dx (big tile, ~fwd speed) + dw/db (small tile). The old combined
+        # split backward: dx (big tile, ~fwd speed) + dw/db (small tile). The old combined
         # kernel was pinned to tiny tiles by the MLIR/multi-buffer UB cliff.
         if not dy_conv.is_contiguous():
             dy_conv = dy_conv.contiguous()
         dx = _launch_bwd_dx_core(
-            dy_conv, weight, dht, cu_seqlens, cu_seqlens_cpu,
-            B, T, D, W, BT,
+            dy=dy_conv,
+            weight=weight,
+            dht=dht,
+            cu_seqlens=cu_seqlens,
+            cu_seqlens_cpu=cu_seqlens_cpu,
+            B=B,
+            T=T,
+            D=D,
+            W=W,
+            BT=BT,
         )
         if weight is not None or bias is not None:
             dw, db = _launch_bwd_dwdb_core(
-                x, dy_conv, initial_state, cu_seqlens, cu_seqlens_cpu,
-                B, T, D, W, BT, weight=weight, bias=bias,
+                x=x,
+                dy=dy_conv,
+                initial_state=initial_state,
+                cu_seqlens=cu_seqlens,
+                cu_seqlens_cpu=cu_seqlens_cpu,
+                B=B,
+                T=T,
+                D=D,
+                W=W,
+                BT=BT,
+                weight=weight,
+                bias=bias,
             )
         else:
             dw, db = None, None
@@ -2190,7 +2164,7 @@ def causal_conv1d_update_states_npu(
     BD = min(triton.next_power_of_2(D), 16)
     BW = triton.next_power_of_2(W)
     grid_dim0 = triton.cdiv(D, BD)
-    max_n = _npu_max_axis_chunks(grid_dim0)
+    max_n = _npu_max_axis_chunks(grid_dim0=grid_dim0)
     kernel_kwargs = dict(
         x=x,
         initial_state=initial_state,
@@ -2252,7 +2226,7 @@ def causal_conv1d_update_npu(
         stride_y_n, stride_y_d = y.stride(0), y.stride(2)
 
     grid_dim0 = triton.cdiv(D, BD)
-    max_n = _npu_max_axis_chunks(grid_dim0)
+    max_n = _npu_max_axis_chunks(grid_dim0=grid_dim0)
     kernel_kwargs = dict(
         x=x,
         cache=cache,
@@ -2271,5 +2245,5 @@ def causal_conv1d_update_npu(
         n_len = min(max_n, N - n_off)
         kernel_kwargs['CHUNK_OFFSET'] = n_off
         causal_conv1d_update_kernel[(grid_dim0, n_len)](**kernel_kwargs)
-    y = _postprocess_update(y, residual, activation)
+    y = _postprocess_update(y=y, residual=residual, activation=activation)
     return y.view(shape), cache

@@ -9,8 +9,9 @@
 
 import torch
 from einops import rearrange
+from torch.autograd.function import FunctionCtx
 
-from fla.modules.conv.ops import causal_conv1d_update_states
+from fla.modules.causal_conv.causal_conv import causal_conv1d_update_states
 from fla.ops.utils import prepare_sequence_ids
 from fla.utils import input_guard
 
@@ -52,19 +53,19 @@ class FastCausalConv1dFn(torch.autograd.Function):
     @staticmethod
     @input_guard(no_guard_contiguous=["x"])
     def forward(
-        ctx,
-        x,
-        weight,
-        bias=None,
+        ctx: FunctionCtx,
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor | None = None,
         residual: torch.Tensor | None = None,
-        initial_states=None,
-        output_final_state=False,
-        activation=None,
+        initial_states: torch.Tensor | None = None,
+        output_final_state: bool = False,
+        activation: str | None = None,
         cu_seqlens: torch.LongTensor | None = None,
         cu_seqlens_cpu: torch.LongTensor | None = None,
         chunk_indices: torch.LongTensor | None = None,
         seq_idx: torch.LongTensor | None = None,
-    ):
+    ) -> tuple[torch.Tensor, None]:
         if activation not in [None, "silu", "swish"]:
             raise NotImplementedError("activation must be None, silu, or swish")
         assert output_final_state is False, "output_final_state must be False for FastCausalConv1dFn"
@@ -73,12 +74,11 @@ class FastCausalConv1dFn(torch.autograd.Function):
 
         bias = bias.contiguous() if bias is not None else None
         if cu_seqlens is not None and seq_idx is None:
-            seq_idx = prepare_sequence_ids(cu_seqlens, cu_seqlens_cpu=cu_seqlens_cpu).to(
-                torch.int32).unsqueeze(0)
+            seq_idx = prepare_sequence_ids(cu_seqlens, cu_seqlens_cpu=cu_seqlens_cpu).to(torch.int32).unsqueeze(0)
         seq_idx = seq_idx.contiguous() if seq_idx is not None else None
 
-        # Import here to avoid circular dependency
-        from fla.modules.conv.ops import causal_conv1d_fwd
+        # import here to avoid circular dependency.
+        from fla.modules.causal_conv.causal_conv import causal_conv1d_fwd
 
         ctx.activation = activation in ["silu", "swish"]
         out, _ = causal_conv1d_fwd(
@@ -96,14 +96,12 @@ class FastCausalConv1dFn(torch.autograd.Function):
 
         ctx.save_for_backward(x, weight, bias, seq_idx, initial_states)
         ctx.return_final_states = output_final_state
-        ctx.return_dinitial_states = (
-            initial_states is not None and initial_states.requires_grad
-        )
+        ctx.return_dinitial_states = (initial_states is not None and initial_states.requires_grad)
         return out, None
 
     @staticmethod
     @input_guard
-    def backward(ctx, dout, *args):
+    def backward(ctx: FunctionCtx, dout: torch.Tensor, *args) -> tuple[torch.Tensor | None, ...]:
         x, weight, bias, seq_idx, initial_states = ctx.saved_tensors
         dx = torch.empty_like(x, memory_format=torch.contiguous_format)
         x = rearrange(x, 'b t d -> b d t')
@@ -113,9 +111,6 @@ class FastCausalConv1dFn(torch.autograd.Function):
 
         if dout.stride(2) != 1 and dout.stride(1) != 1:
             dout = dout.contiguous()
-        # The kernel supports passing in a pre-allocated dx (e.g., in case we want to fuse the
-        # backward of conv1d with the backward of chunk).
-        # Here we just pass in None and dx will be allocated in the C++ code.
         dx, dweight, dbias, dinitial_states = causal_conv1d_bwd_function(
             x,
             weight,
@@ -156,7 +151,7 @@ def fast_causal_conv1d_fn(
     cu_seqlens_cpu: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
     seq_idx: torch.LongTensor | None = None,
-):
+) -> tuple[torch.Tensor, torch.Tensor | None]:
     """
     x: (batch, seqlen, dim)
     weight: (dim, width)
@@ -195,7 +190,7 @@ def causal_conv1d_cuda(
     cu_seqlens: torch.Tensor | None = None,
     cu_seqlens_cpu: torch.LongTensor | None = None,
     **kwargs,
-):
+) -> tuple[torch.Tensor, torch.Tensor | None]:
     assert causal_conv1d_fn_cuda is not None, "causal_conv1d_fn_cuda is not available"
     seq_idx = kwargs.get('seq_idx')
     if cu_seqlens is not None or seq_idx is not None:
@@ -219,12 +214,7 @@ def causal_conv1d_cuda(
 
     y = rearrange(y, 'b d t -> b t d')
     if output_final_state:
-        final_state = causal_conv1d_update_states(
-            x=x,
-            state_len=W,
-            initial_state=initial_state,
-            cu_seqlens=cu_seqlens,
-        )
+        final_state = causal_conv1d_update_states(x=x, state_len=W, initial_state=initial_state, cu_seqlens=cu_seqlens)
     else:
         final_state = None
     if residual is not None:

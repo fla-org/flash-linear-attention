@@ -303,7 +303,7 @@ def test_resolver_preserves_backend_dependency_errors(monkeypatch, dependency, a
 )
 @pytest.mark.skipif(registry_module._DISPATCH_DISABLED, reason='dispatch was disabled before the entry points were imported')
 def test_module_dispatch_preserves_arguments_and_result(monkeypatch, owner, name, tensor_args, options):
-    module = f'fla.modules.{owner}' if owner.startswith('norm.') else f'fla.modules.{owner}.ops'
+    module = f'fla.modules.{owner}' if owner.startswith('norm.') else 'fla.modules.causal_conv.causal_conv'
     entry = getattr(importlib.import_module(module), name)
     backend = type(dispatch(f'modules.{owner}').__self__._backends['triton_ascend'])
     calls = []
@@ -318,7 +318,7 @@ def test_module_dispatch_preserves_arguments_and_result(monkeypatch, owner, name
     monkeypatch.setattr(backend, 'verify', lambda self, *args, **kwargs: (True, None))
     monkeypatch.setattr(backend, name, implementation)
     if owner == 'conv':
-        gluon = importlib.import_module('fla.modules.conv.backends.gluon').GluonBackend
+        gluon = importlib.import_module('fla.modules.causal_conv.gluon').GluonBackend
         monkeypatch.setattr(gluon, 'is_available', classmethod(lambda cls: False))
 
     x = torch.tensor([-2.0, 0.5, 3.0], requires_grad=True)
@@ -427,9 +427,9 @@ def test_public_imports_do_not_load_legacy_dispatch(run_python, disabled):
 @pytest.mark.skipif(registry_module._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
 @pytest.mark.parametrize('direction', ['fwd', 'bwd'], ids=['forward', 'backward'])
 def test_conv_dispatch_uses_global_gluon_policy(monkeypatch, direction):
-    from fla.modules.conv import ops
-    from fla.modules.conv.backends.gluon import GluonBackend
-    from fla.modules.conv.backends.triton_ascend import TritonAscendBackend
+    from fla.modules.causal_conv import causal_conv
+    from fla.modules.causal_conv.gluon import GluonBackend
+    from fla.modules.causal_conv.triton_ascend import TritonAscendBackend
 
     func_name = f'causal_conv1d_{direction}'
     monkeypatch.setenv('FLA_GLUON', '1')
@@ -445,7 +445,7 @@ def test_conv_dispatch_uses_global_gluon_policy(monkeypatch, direction):
         return result
 
     monkeypatch.setattr(GluonBackend, func_name, implementation)
-    assert getattr(ops, func_name)(x=torch.tensor([1.0, 2.0], requires_grad=True)) is result
+    assert getattr(causal_conv, func_name)(x=torch.tensor([1.0, 2.0], requires_grad=True)) is result
 
 
 @pytest.mark.parametrize('first_import', ['fla.backends', 'fla.ops.backends'])
@@ -470,7 +470,7 @@ def test_legacy_dispatch_uses_shared_registry(run_python, first_import):
 
         from fla.backends import BaseBackend, dispatch
         from fla import backends as registry_module
-        from fla.modules.conv.backends.gluon import ConvGluonBackend, GluonBackend
+        from fla.modules.causal_conv.gluon import ConvGluonBackend, GluonBackend
         kda_registry = registry_module._resolve_registry('kda')
         assert legacy.BaseBackend is BaseBackend
         assert GluonBackend is ConvGluonBackend
@@ -567,7 +567,7 @@ def test_dispatch_policy_and_optional_dependencies(run_python, disabled):
         )
         assert not any(name.startswith('fla.modules.backends.triton_ascend.') for name in sys.modules)
         assert 'fla.modules.backends.gluon.causal_conv1d' not in sys.modules
-        assert 'fla.modules.conv.backends.gluon.ops' not in sys.modules
+        assert 'fla.modules.causal_conv.gluon.causal_conv' not in sys.modules
         with warnings.catch_warnings():
             warnings.simplefilter('ignore', DeprecationWarning)
             from fla.ops.backends import dispatch

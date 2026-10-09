@@ -71,7 +71,8 @@ class ConvGluonBackend(BaseBackend):
         chunk_size: int = 64,
         layout_fallback: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        from fla.modules.conv.backends.gluon.ops import causal_conv1d_fwd
+        from fla.modules.causal_conv.gluon.causal_conv import causal_conv1d_fwd
+
         return causal_conv1d_fwd(
             x=x,
             weight=weight,
@@ -122,7 +123,8 @@ class ConvGluonBackend(BaseBackend):
         chunk_size: int = 64,
         layout_fallback: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None, None]:
-        from fla.modules.conv.backends.gluon.ops import causal_conv1d_bwd
+        from fla.modules.causal_conv.gluon.causal_conv import causal_conv1d_bwd
+
         return causal_conv1d_bwd(
             x=x,
             dy=dy,

@@ -5,10 +5,6 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from fla.modules.conv.ops import (
-    causal_conv1d,
-)
+from fla.modules.causal_conv.causal_conv import causal_conv1d
 
-__all__ = [
-    'causal_conv1d',
-]
+__all__ = ['causal_conv1d', ]
