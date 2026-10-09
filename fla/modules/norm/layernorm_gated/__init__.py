@@ -10,24 +10,18 @@ from fla.modules.norm.layernorm_gated.module import (
     RMSNormGated,
 )
 from fla.modules.norm.layernorm_gated.ops import (
-    LayerNormFn,
     layer_norm_bwd,
-    layer_norm_bwd_kernel_group,
     layer_norm_fwd,
-    layer_norm_fwd_kernel_group,
     layernorm_fn,
     rms_norm_ref,
     rmsnorm_fn,
 )
 
 __all__ = [
-    'LayerNormFn',
     'LayerNormGated',
     'RMSNormGated',
     'layer_norm_bwd',
-    'layer_norm_bwd_kernel_group',
     'layer_norm_fwd',
-    'layer_norm_fwd_kernel_group',
     'layernorm_fn',
     'rms_norm_ref',
     'rmsnorm_fn',

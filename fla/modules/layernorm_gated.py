@@ -5,37 +5,22 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-import warnings
-
 from fla.modules.norm.layernorm_gated import (
-    LayerNormFn,
     LayerNormGated,
     RMSNormGated,
     layer_norm_bwd,
-    layer_norm_bwd_kernel_group,
     layer_norm_fwd,
-    layer_norm_fwd_kernel_group,
     layernorm_fn,
     rms_norm_ref,
     rmsnorm_fn,
 )
 
 __all__ = [
-    'LayerNormFn',
     'LayerNormGated',
     'RMSNormGated',
     'layer_norm_bwd',
-    'layer_norm_bwd_kernel_group',
     'layer_norm_fwd',
-    'layer_norm_fwd_kernel_group',
     'layernorm_fn',
     'rms_norm_ref',
     'rmsnorm_fn',
 ]
-
-warnings.warn(
-    'fla.modules.layernorm_gated is deprecated; import from fla.modules.norm.layernorm_gated instead. '
-    'This compatibility path will be removed in the next release after 0.6.0.',
-    FutureWarning,
-    stacklevel=2,
-)

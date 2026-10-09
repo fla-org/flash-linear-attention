@@ -18,7 +18,7 @@ from einops import rearrange
 
 from fla.layers.utils import get_layer_cache, repad_hidden_states, unpad_hidden_states, update_layer_cache
 from fla.modules import FusedRMSNormGated, ShortConvolution
-from fla.modules.norm.fused_norm_gate import rms_norm_swish_gate_linear
+from fla.modules.fused_norm_gate import rms_norm_swish_gate_linear
 from fla.ops.lightnet import chunk_lightnet, fused_recurrent_lightnet
 
 if TYPE_CHECKING:
