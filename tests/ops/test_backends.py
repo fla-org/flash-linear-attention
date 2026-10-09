@@ -277,6 +277,8 @@ def test_resolver_preserves_backend_dependency_errors(monkeypatch, dependency, a
     [
         ('conv', 'causal_conv1d_fwd', ('weight', 'bias', 'residual'), {'chunk_size': 32, 'output_final_state': True}),
         ('conv', 'causal_conv1d_bwd', ('dy', 'dht'), {'chunk_size': 32, 'layout_fallback': True}),
+        ('conv', 'causal_conv1d_update', ('cache', 'weight', 'bias', 'residual'), {'activation': 'silu'}),
+        ('conv', 'causal_conv1d_update_states', ('initial_state',), {'state_len': 4}),
         ('norm.layernorm', 'layer_norm_fwd', ('weight', 'bias'), {'is_rms_norm': True, 'num_groups': 2}),
         ('norm.layernorm', 'layer_norm_bwd', ('x', 'weight', 'bias'), {'recompute_output': True, 'num_groups': 2}),
         ('norm.l2norm', 'l2norm_fwd', (), {'eps': 1e-4, 'output_dtype': torch.float32}),
@@ -287,6 +289,8 @@ def test_resolver_preserves_backend_dependency_errors(monkeypatch, dependency, a
     ids=[
         'conv-forward',
         'conv-backward',
+        'conv-update',
+        'conv-update-states',
         'layernorm-forward',
         'layernorm-backward',
         'l2norm-forward',
@@ -439,44 +443,6 @@ def test_conv_dispatch_uses_global_gluon_policy(monkeypatch, direction):
 
     monkeypatch.setattr(GluonBackend, func_name, implementation)
     assert getattr(ops, func_name)(x=torch.tensor([1.0, 2.0], requires_grad=True)) is result
-
-
-@pytest.mark.skipif(registry_module._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
-@pytest.mark.parametrize('name', ['causal_conv1d_update', 'causal_conv1d_update_states'])
-def test_conv_legacy_kernel_helpers_bypass_dispatch(monkeypatch, name):
-    from fla.modules.conv import ops
-    from fla.modules.conv.backends.triton_ascend import TritonAscendBackend
-    from fla.modules.conv.triton import kernels
-
-    result = object()
-    monkeypatch.setattr(TritonAscendBackend, 'is_available', classmethod(lambda cls: True))
-    monkeypatch.setattr(TritonAscendBackend, 'is_enabled', classmethod(lambda cls: True))
-    monkeypatch.setattr(TritonAscendBackend, name, lambda self, **kwargs: result)
-    calls = []
-
-    class Kernel:
-        def __getitem__(self, grid):
-            def launch(**kwargs):
-                calls.append(kwargs)
-                kwargs[output].fill_(7)
-            return launch
-
-    if name == 'causal_conv1d_update':
-        kernel_name, output = 'causal_conv1d_update_kernel', 'y'
-        args = dict(x=torch.ones(2, 3), cache=torch.zeros(2, 3, 2), weight=torch.ones(3, 2))
-    else:
-        kernel_name, output = 'causal_conv1d_states_fwd_kernel', 'final_state'
-        args = dict(x=torch.ones(1, 2, 3), state_len=2)
-    monkeypatch.setattr(ops, kernel_name, Kernel())
-
-    assert getattr(ops, name)(**args) is result
-    assert calls == []
-    default = getattr(kernels, name)(**args)
-    if name == 'causal_conv1d_update':
-        assert default[1] is args['cache']
-        default = default[0]
-    assert len(calls) == 1
-    torch.testing.assert_close(default, torch.full_like(default, 7))
 
 
 @pytest.mark.parametrize('first_import', ['fla.backends', 'fla.ops.backends'])

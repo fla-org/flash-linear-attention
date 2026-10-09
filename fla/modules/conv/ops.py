@@ -816,6 +816,7 @@ def causal_conv1d_bwd(
     return dx.view(shape), dw, db, dr, dh0
 
 
+@dispatch('modules.conv')
 @input_guard(no_guard_contiguous=["x"])
 def causal_conv1d_update_states(
     x: torch.Tensor,
@@ -864,10 +865,7 @@ def causal_conv1d_update_states(
     return final_state
 
 
-_causal_conv1d_update_states_default = causal_conv1d_update_states
-causal_conv1d_update_states = dispatch('modules.conv')(causal_conv1d_update_states)
-
-
+@dispatch('modules.conv')
 @input_guard(no_guard_contiguous=["x"])
 def causal_conv1d_update(
     x: torch.Tensor,
@@ -932,10 +930,6 @@ def causal_conv1d_update(
         ACTIVATION=activation,
     )
     return y.view(shape), cache
-
-
-_causal_conv1d_update_default = causal_conv1d_update
-causal_conv1d_update = dispatch('modules.conv')(causal_conv1d_update)
 
 
 class CausalConv1dFunction(torch.autograd.Function):
