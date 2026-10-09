@@ -26,20 +26,21 @@ NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if IS_AMD else [4, 8, 16, 32]
 
 def naive_kda_gate(
     g: torch.Tensor,
-    A_log: torch.Tensor,
+    A_log: torch.Tensor | None = None,
     dt_bias: torch.Tensor | None = None,
     output_dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     """
     Torch reference implementation for KDA gate computation.
 
-    Computes: g = -A_log.exp().unsqueeze(-1) * softplus(g + dt_bias.view(g.shape[-2:]))
+    Computes: g = -A_log.exp().unsqueeze(-1) * softplus(g + dt_bias.view(g.shape[-2:])).
+    When ``A_log`` is ``None``: ``g = -softplus(g + dt_bias)``.
 
     Args:
         g (torch.Tensor):
             Input tensor of shape `[..., H, K]`.
-        A_log (torch.Tensor):
-            Parameter tensor with `H` elements.
+        A_log (torch.Tensor | None):
+            Optional parameter tensor with `H` elements. When ``None``, uses a unit decay scale.
         dt_bias (torch.Tensor | None):
             Optional bias tensor added to `g` before activation, shape `[H * K]`.
 
@@ -51,7 +52,10 @@ def naive_kda_gate(
     if dt_bias is not None:
         g = g + dt_bias.view(H, -1)
 
-    g = (-A_log.view(H, 1).float().exp() * F.softplus(g.float())).to(output_dtype)
+    g = F.softplus(g.float())
+    if A_log is not None:
+        g = A_log.view(H, 1).float().exp() * g
+    g = -g.to(output_dtype)
     return g
 
 
