@@ -15,16 +15,18 @@ Use this when you are making an existing `fla/ops/**` kernel faster — or bring
 across more than one iteration, in any FLA backend language (Triton, Gluon, TileLang, CuTe DSL).
 This skill is the **search discipline** that ties the other skills together; it does not replace them:
 
-- **`fla-nvidia-performance`** — how to profile (NCU), hardware baselines, MR-ready perf evidence.
+- **`fla-design-coverage`** — define reachable contracts, numerical budgets, and production workloads before the loop.
+- **`fla-nvidia-performance`** — how to profile (NCU), hardware baselines, PR-ready perf evidence.
 - **`fla-ascend-performance`** — how to profile (torch_npu), diagnose Cube/Vector/MTE/UB bottlenecks, and optimize Triton-Ascend kernels.
 - **`fla-correctness-coverage`** — how to design the test coverage matrix for an op.
-- **`fla-mr-readiness`** — how to package the promoted change into a PR.
+- **`fla-pr-readiness`** — how to package the promoted change into a PR.
 
 This skill covers the loop *around* those: what to lock, how to iterate, what to record, and when to stop.
 
 ## 0. The inviolable rule: the test file is a frozen contract
 
 The op's `tests/ops/test_<op>.py` and its `fla/ops/<op>/naive.py` reference are **frozen** for the entire optimization loop.
+Add any missing regression or new-path coverage before freezing the gate; those additions belong in the final PR. Freezing the gate during optimization does not waive the contribution requirement to add or update matching tests.
 The whole point of "faster" only means something if correctness — forward **and** backward,
 under the conftest NaN-memory poisoning — is held fixed.
 During a perf loop you may **not**:
@@ -41,18 +43,18 @@ Run the gate with the unmodified test, every iteration:
 python -m benchmarks.ops.verify --op <op> [--gate-k <subset>]
 ```
 
-`verify.py` runs the pytest file as a black box and **refuses to report a speedup on a red gate**.
+`verify.py` runs the current pytest file as a black box and **stops before benchmarking on a red gate by default**. It does not freeze files or reject an all-skipped run. Keep the gate unchanged yourself, use strict local validation (`FLA_CI_ENV=0`), and check that the expected tests actually ran.
 `--gate-k` only *selects* a shape subset for a fast signal — it never edits the test;
 promote only on a full (no `-k`) green gate.
 
 **Banned vs. allowed implementation (anti-reward-hacking):**
 
-| Banned | Allowed |
-|--------|---------|
-| Making the op a thin wrapper that delegates the whole compute to a vendor lib (a plain `torch.matmul` / `F.scaled_dot_product_attention` standing in *as* the operator) just to win latency | Hand-written Triton / Gluon / TileLang / CuTe kernels; `torch` ops used as *glue* around a kernel you wrote |
-| Returning uninitialized / partially-written outputs that happen to pass | Fully initialized outputs (NaN poisoning will catch partial writes) |
-| Stream tricks / monkey-patching the bench to dodge timing | Genuine latency reduction measured by `verify.py` / `run.py` |
-| One-sided numeric relaxation the baseline doesn't get — flipping `allow_tf32` on, dropping the fp32 accumulator to bf16/tf32, a config that quietly changes the numeric path | Same accumulation precision and numeric flags on both sides; speed comes from the kernel, not from computing something less accurate |
+| Banned                                                                                                                                                                                      | Allowed                                                                                                                              |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| Making the op a thin wrapper that delegates the whole compute to a vendor lib (a plain `torch.matmul` / `F.scaled_dot_product_attention` standing in *as* the operator) just to win latency | Hand-written Triton / Gluon / TileLang / CuTe kernels; `torch` ops used as *glue* around a kernel you wrote                          |
+| Returning uninitialized / partially-written outputs that happen to pass                                                                                                                     | Fully initialized outputs (NaN poisoning will catch partial writes)                                                                  |
+| Stream tricks / monkey-patching the bench to dodge timing                                                                                                                                   | Genuine latency reduction measured by `verify.py` / `run.py`                                                                         |
+| One-sided numeric relaxation the baseline doesn't get — flipping `allow_tf32` on, dropping the fp32 accumulator to bf16/tf32, a config that quietly changes the numeric path                | Same accumulation precision and numeric flags on both sides; speed comes from the kernel, not from computing something less accurate |
 
 If you genuinely believe a test is **wrong**, that is a **separate PR** with its own justification —
 never bundled into a perf change. Stop and ask the user.
@@ -62,10 +64,10 @@ never bundled into a perf change. Stop and ask the user.
 Put a short `docs/draft.md` in your scratch workspace (see §6) stating:
 
 - **Op + entry point** — e.g. `chunk_gla` in `fla.ops.gla`.
-- **Target** — which shapes (from `benchmarks/ops/registry.py` `SHAPE_CONFIGS`), and a target speedup vs. `main`.
+- **Target** — production workloads derived from layer/model callers, plus applicable shapes from `benchmarks/ops/registry.py`, and a target speedup against a recorded baseline SHA.
 - **Allowed languages** — Triton / Gluon / TileLang / CuTe (state any constraint).
 - **Validation command** — `python -m benchmarks.ops.verify --op <op>` (the frozen gate).
-- **Benchmark command** — `python -m benchmarks.ops.verify --op <op> --base main`.
+- **Benchmark command** — `python -m benchmarks.ops.verify --op <op> --base "$FLA_BENCH_BASE"`, where `FLA_BENCH_BASE=$(git rev-parse origin/main)` is recorded before the loop. Pass a SHA to avoid checked-out-branch and slash-containing-ref worktree failures.
 - **Promotion criteria** — full green gate, a measured repeatable win, and a profiler reading that explains it (§7).
 - **Frozen scope** — the test file, `naive.py`, and the public op signature.
 
@@ -76,7 +78,7 @@ Do not start editing kernels until the draft exists. (Borrowed from KDA: plan, t
 Run these in order; repeat 2 and 3 with progressively higher targets.
 
 - **Phase 1 — correct baseline.** Confirm the current kernel passes the full gate, and record baseline numbers:
-  `python -m benchmarks.ops.verify --op <op> --base main`.
+  `python -m benchmarks.ops.verify --op <op> --base "$FLA_BENCH_BASE"`.
   For a brand-new kernel, get the gate green first; performance is secondary here.
 - **Phase 2 — profile-guided optimization.** Use `fla-nvidia-performance` for NCU evidence on NVIDIA backends, or `fla-ascend-performance` for Ascend NPU / Triton-Ascend backends.
   Enumerate candidate directions, rank them by expected benefit vs. implementation risk,
@@ -93,9 +95,9 @@ Every iteration is exactly three steps, in order, with no telescoping into the n
 
 1. Make **one** change to the kernel.
 2. Run `verify.py` — gate must stay green; record the bench number.
-3. Append one row to `OPT_LOG.md` (see `references/opt-log-template.md`) and `git commit`.
+3. Append one row to `OPT_LOG.md` (see `references/opt-log-template.md`) and checkpoint the code on the task's feature branch, following `AGENTS.md` and the user's git authorization.
 
-A failed or no-change iteration is still an iteration: log it and commit before debugging the next direction.
+A failed or no-change iteration still needs a log entry before exploring the next direction. Do not create empty commits for unchanged code or commit ignored scratch records.
 (Borrowed from AKO4ALL: bench → log → commit, the most-skipped step in practice.)
 
 **Stall handling.** After 3 consecutive iterations with no improvement (≥ a few % over current best, above noise),
@@ -120,7 +122,7 @@ blocker (name which roofline/launch/timer limit, with the number). Without those
   paste that line into `OPT_LOG.md` so a number is interpretable later.
 - **Full-shape verdict before promotion** — a `--gate-k` subset is a signal only.
 - **Rank by the solution's own runtime** for fast iteration signal;
-  pay for the full `--base main` comparison only at the verdict.
+  pay for the full `--base "$FLA_BENCH_BASE"` comparison only at the verdict.
   Clock noise on unlocked GPUs can swing absolute speedup — see `references/TRAPS.md`.
 
 ## 5. Silent-bug & measurement traps
@@ -145,10 +147,9 @@ profile/<op>-opt/
   trace/              # torch.profiler / NCU artifacts (kept out of git)
 ```
 
-Each kept candidate's `kernel` gets a short header (Identity / Delta / Lessons / Dead-ends / Open-directions)
-per `references/opt-log-template.md`, so a later session can see what was tried and why.
+Record each kept candidate's Identity / Delta / Lessons / Dead-ends / Open-directions in the scratch log per `references/opt-log-template.md`. This history stays out of committed kernel comments and PR summaries.
 
-## 7. Promotion → MR
+## 7. Promotion → PR
 
 A candidate is promotable only on a **full green gate** plus a measured, repeatable win on the target shapes,
 **and** a profiler/roofline reading that *explains* the win (or, for a no-go, the blocker) —
@@ -160,6 +161,6 @@ a speedup you can't account for is a silent-skip suspect, not a result (see §5)
   and a full final-claim stats block (median/mean/std/min/p10/p90 per shape, equal-weight geomean speedup,
   exact commands, baseline commit + candidate SHA, GPU id/model with idle-clock evidence —
   the last guards the clock-drift trap in §5).
-- Package the PR per `fla-mr-readiness`.
+- Package the PR per `fla-pr-readiness`.
 
 The scratch workspace under `profile/<op>-opt/` stays local; it is not part of the PR.

@@ -46,13 +46,14 @@ jobs:
             // NPU-related set: triton-ascend backend files, Ascend workflow
             // definitions, and the files that define the NPU CI stack itself:
             //   pyproject.toml    - pins the [npu] extra (torch_npu / triton-ascend)
+            //   fla/backends.py   - shared dispatch machinery
             //   fla/utils/        - IS_NPU / device_platform detection, ascend_ub_manager
             //   fla/modules/      - pure-torch modules run on NPU in the A2 test suite
             //   tests/conftest.py - FLA_NPU_XDIST xdist worker -> device mapping
             // Unlike the H100 'npu_only' detection, __init__.py is NOT excluded
             // here: a change to it affects the NPU backend too, so it should
             // trigger this CI.
-            const npuPattern = /^fla\/(.+\/)?backends\/triton_ascend\/|^\.github\/workflows\/ascend-|^pyproject\.toml$|^fla\/utils\/|^fla\/modules\/|^tests\/conftest\.py$/;
+            const npuPattern = /^fla\/(.+\/)?backends\/triton_ascend\/|^\.github\/workflows\/ascend-|^pyproject\.toml$|^fla\/backends\.py$|^fla\/utils\/|^fla\/modules\/|^tests\/conftest\.py$/;
             const graphPaths = new Set([
               'tests/ops/test_kda_graph.py',
               'tests/benchmarks/test_graph_benchmark.py',
@@ -158,6 +159,9 @@ jobs:
           pytest -s -v --exitfirst -n 8 --dist load \
             tests/benchmarks \
             tests/modules \
+            tests/ops/test_backends.py \
+            tests/test_public_api.py \
+            tests/test_dependency_finder.py \
             tests/ops/utils \
             tests/ops/test_gdn_kernels.py \
             tests/ops/test_gdn.py \

@@ -330,9 +330,9 @@ def test_fused_linear_cross_entropy_parallel(world_size, tmp_path):
 
 @pytest.mark.parametrize(('name', 'legacy_name'), [('fwd', 'forward'), ('bwd', 'backward')])
 def test_fused_linear_cross_entropy_backend_dispatch(monkeypatch, name, legacy_name):
-    import fla.modules.fused_linear_cross_entropy as linear_ce
+    from fla.backends import _DISPATCH_DISABLED
+    from fla.modules import fused_linear_cross_entropy
     from fla.modules.backends.triton_ascend import TritonAscendBackend
-    from fla.ops.backends import _DISPATCH_DISABLED
 
     if _DISPATCH_DISABLED:
         pytest.skip("Backend dispatch was disabled before import")
@@ -344,8 +344,8 @@ def test_fused_linear_cross_entropy_backend_dispatch(monkeypatch, name, legacy_n
     monkeypatch.setattr(TritonAscendBackend, method, lambda self, **kwargs: result)
     args = dict(x=None, target=None, weight=None) if name == 'fwd' else dict(do=None, dx=None, dw=None, db=None)
 
-    assert getattr(linear_ce, method)(**args) is result
-    assert getattr(linear_ce, f'fused_linear_cross_entropy_{legacy_name}')(**args) is result
+    assert getattr(fused_linear_cross_entropy, method)(**args) is result
+    assert getattr(fused_linear_cross_entropy, f'fused_linear_cross_entropy_{legacy_name}')(**args) is result
 
 
 def test_fused_linear_cross_entropy_parallel_ascend_rejection(monkeypatch):

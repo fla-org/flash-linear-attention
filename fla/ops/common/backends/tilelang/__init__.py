@@ -5,43 +5,25 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""TileLang backend for common chunk operations.
-
-Enabled by default on Hopper (sm90+) with Triton >= 3.4.0 to work around
-hardware-specific regressions (see #640). Can also be forced via FLA_TILELANG=1.
-"""
-
 from __future__ import annotations
-
-import os
 
 import torch
 
-from fla.ops.backends import BaseBackend
-from fla.utils import IS_NVIDIA_HOPPER, TRITON_ABOVE_3_4_0, find_spec_cached, has_usable_nvcc
-
-_TILELANG_AVAILABLE = find_spec_cached("tilelang") is not None
+from fla.backends import BaseBackend, register_backend
+from fla.utils import IS_NVIDIA_HOPPER, TRITON_ABOVE_3_4_0, has_usable_nvcc
 
 
-class TileLangBackend(BaseBackend):
+@register_backend('common')
+class CommonTileLangBackend(BaseBackend):
     backend_type = "tilelang"
     package_name = "tilelang"
     env_var = "FLA_TILELANG"
+    # work around Hopper regressions with Triton 3.4+ (see #640).
+    default_enable = IS_NVIDIA_HOPPER and TRITON_ABOVE_3_4_0
 
     @classmethod
     def is_available(cls) -> bool:
-        return _TILELANG_AVAILABLE and has_usable_nvcc()
-
-    @classmethod
-    def is_enabled(cls) -> bool:
-        # Explicit opt-in / opt-out always wins.
-        val = os.environ.get(cls.env_var)
-        if val is not None:
-            return val != "0"
-        # Default on only where the Triton path is known to be broken:
-        # Hopper (sm90) with Triton >= 3.4.0 (see #640). Everywhere else the
-        # Triton backend stays the default unless the user forces FLA_TILELANG=1.
-        return IS_NVIDIA_HOPPER and TRITON_ABOVE_3_4_0
+        return super().is_available() and has_usable_nvcc()
 
     def chunk_bwd_dqkwg_verifier(
         self,
@@ -95,9 +77,7 @@ class TileLangBackend(BaseBackend):
         chunk_size: int = 64,
         chunk_indices: torch.LongTensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
-        from fla.ops.common.backends.tilelang.chunk_bwd import (
-            chunk_bwd_dqkwg_tilelang,
-        )
+        from fla.ops.common.backends.tilelang.chunk_bwd import chunk_bwd_dqkwg_tilelang
         return chunk_bwd_dqkwg_tilelang(
             q=q,
             k=k,
@@ -110,91 +90,11 @@ class TileLangBackend(BaseBackend):
             g_gamma=g_gamma,
             dv=dv,
             scale=scale,
+            state_v_first=state_v_first,
             cu_seqlens=cu_seqlens,
             chunk_size=chunk_size,
             chunk_indices=chunk_indices,
-            state_v_first=state_v_first,
         )
 
-    def parallel_attn_fwd_verifier(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        g_cumsum: torch.Tensor | None,
-        sink_bias: torch.Tensor | None,
-        scale: float,
-        window_size: int | None = None,
-        cu_seqlens: torch.LongTensor | None = None,
-        chunk_indices: torch.LongTensor | None = None,
-    ) -> tuple[bool, str | None]:
-        if q.dtype not in (torch.float16, torch.bfloat16, torch.float32):
-            return False, f"TileLang backend does not support dtype {q.dtype}; fall back to Triton"
-        return True, None
 
-    def parallel_attn_fwd(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        g_cumsum: torch.Tensor | None,
-        sink_bias: torch.Tensor | None,
-        scale: float,
-        window_size: int | None = None,
-        cu_seqlens: torch.LongTensor | None = None,
-        chunk_indices: torch.LongTensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        from fla.ops.common.backends.tilelang.parallel_attn_fwd import (
-            parallel_attn_fwd_tilelang,
-        )
-        return parallel_attn_fwd_tilelang(
-            q=q, k=k, v=v, g_cumsum=g_cumsum, sink_bias=sink_bias,
-            scale=scale, window_size=window_size, cu_seqlens=cu_seqlens,
-            chunk_indices=chunk_indices,
-        )
-
-    def parallel_attn_bwd_verifier(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        o: torch.Tensor,
-        g_cumsum: torch.Tensor | None,
-        lse: torch.Tensor,
-        do: torch.Tensor,
-        sink_bias: torch.Tensor | None = None,
-        scale: float | None = None,
-        window_size: int | None = None,
-        chunk_size: int = 128,
-        cu_seqlens: torch.LongTensor | None = None,
-        chunk_indices: torch.LongTensor | None = None,
-    ) -> tuple[bool, str | None]:
-        if q.dtype not in (torch.float16, torch.bfloat16, torch.float32):
-            return False, f"TileLang backend does not support dtype {q.dtype}; fall back to Triton"
-        return True, None
-
-    def parallel_attn_bwd(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        o: torch.Tensor,
-        g_cumsum: torch.Tensor | None,
-        lse: torch.Tensor,
-        do: torch.Tensor,
-        sink_bias: torch.Tensor | None = None,
-        scale: float | None = None,
-        window_size: int | None = None,
-        chunk_size: int = 128,
-        cu_seqlens: torch.LongTensor | None = None,
-        chunk_indices: torch.LongTensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
-        from fla.ops.common.backends.tilelang.parallel_attn_bwd import (
-            parallel_attn_bwd_tilelang,
-        )
-        return parallel_attn_bwd_tilelang(
-            q=q, k=k, v=v, o=o, g_cumsum=g_cumsum, lse=lse, do=do,
-            sink_bias=sink_bias, scale=scale, window_size=window_size,
-            chunk_size=chunk_size, cu_seqlens=cu_seqlens,
-            chunk_indices=chunk_indices,
-        )
+__all__ = ['CommonTileLangBackend']

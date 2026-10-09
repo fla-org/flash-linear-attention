@@ -76,8 +76,7 @@ def chunkwise_fwd_kernel(
     p_llut = llut + o_i[:, None] * BT + o_i[None, :]
     b_llut = tl.load(p_llut, mask=(o_i[:, None] < BT) & (o_i[None, :] < BT), other=0.0)
     # parallel over sequences and heads
-    i_k, i_nh = unflatten_program_id(X=tl.cdiv(K, BK))
-    i_k = i_k.to(tl.int64)
+    i_k, i_nh = unflatten_program_id(tl.cdiv(K, BK))
     i_n, i_h = i_nh // H, i_nh % H
     i_g = i_h // (H // G)
 
@@ -651,8 +650,7 @@ def chunkwise_bwd_kernel_dhg(
     SCALE: tl.constexpr,
 ):
     # parallel over batches and heads
-    i_k, i_nh = unflatten_program_id(X=tl.cdiv(K, BK))
-    i_k = i_k.to(tl.int64)
+    i_k, i_nh = unflatten_program_id(tl.cdiv(K, BK))
     i_n, i_h = i_nh // H, i_nh % H
     i_g = i_h // (H // G)
 
@@ -854,8 +852,7 @@ def chunkwise_bwd_kernel_dkg(
     NT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_nh = unflatten_program_id(X=NT)
-    i_t = i_t.to(tl.int64)
+    i_t, i_nh = unflatten_program_id(NT)
     i_n, i_h = i_nh // H, i_nh % H
     i_g = i_h // (H // G)
 
@@ -935,8 +932,7 @@ def chunkwise_bwd_kernel_dv(
     NT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_nh = unflatten_program_id(X=NT)
-    i_t = i_t.to(tl.int64)
+    i_t, i_nh = unflatten_program_id(NT)
     i_n, i_h = i_nh // H, i_nh % H
     i_g = i_h // (H // G)
 
@@ -1013,8 +1009,7 @@ def chunkwise_bwd_kernel_diag(
     o_i = tl.arange(0, BT)
     p_llut = llut + o_i[:, None] * BT + o_i[None, :]
     b_llut = tl.load(p_llut, mask=(o_i[:, None] < BT) & (o_i[None, :] < BT), other=0.0)
-    i_t, i_nh = unflatten_program_id(X=NT)
-    i_t = i_t.to(tl.int64)
+    i_t, i_nh = unflatten_program_id(NT)
     i_n, i_h = i_nh // H, i_nh % H
     i_g = i_h // (H // G)
 

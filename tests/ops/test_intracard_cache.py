@@ -12,7 +12,7 @@ import os
 import pytest
 import torch
 
-import fla.ops.common.intracard_cp as intracard_cp_mod
+from fla.ops.common import intracard_cp
 from fla.ops.common.intracard_cp import _intracard_cache
 from fla.ops.kda import chunk_kda
 from fla.utils import device
@@ -58,14 +58,14 @@ def test_chunk_kda_intracard_cache_hit_same_cu_seqlens_object(monkeypatch):
     cu_seqlens_cpu = cu_seqlens.cpu()
 
     call_count = 0
-    original_precompute = intracard_cp_mod._precompute_intracard_indices
+    original_precompute = intracard_cp._precompute_intracard_indices
 
     def counted_precompute(*args, **kwargs):
         nonlocal call_count
         call_count += 1
         return original_precompute(*args, **kwargs)
 
-    monkeypatch.setattr(intracard_cp_mod, "_precompute_intracard_indices", counted_precompute)
+    monkeypatch.setattr(intracard_cp, "_precompute_intracard_indices", counted_precompute)
 
     with torch.inference_mode():
         o1, _ = chunk_kda(
@@ -163,7 +163,9 @@ def test_chunk_gdn_intracard_gqa(monkeypatch):
         )
 
     # Run without intracard: disable the backend temporarily
-    from fla.ops.common.backends import common_registry
+    from fla import backends
+
+    common_registry = backends._resolve_registry('common')
     saved_backends = common_registry._backends.copy()
     common_registry._backends.clear()
     try:

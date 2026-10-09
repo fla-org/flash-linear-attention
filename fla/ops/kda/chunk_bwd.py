@@ -9,7 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.backends import dispatch
+from fla.backends import dispatch
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_gated_delta_rule_fwd_h
 from fla.ops.cp import FLACPContext
 from fla.ops.cp.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu_pre_process, expand_h0
@@ -169,7 +169,7 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
     IS_VARLEN: tl.constexpr,
     USE_GRAPH: tl.constexpr = False,
 ):
-    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1)
+    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_hv = i_bh // HV, i_bh % HV
     i_h = i_hv // (HV // H)
 

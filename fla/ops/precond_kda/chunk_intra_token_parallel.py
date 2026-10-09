@@ -50,7 +50,7 @@ def chunk_precond_kda_fwd_kernel_intra_token_parallel(
     - Aqk = q @ k_precond^T (column uses k_precond)
     - Akk = k @ k_precond^T (row uses original k, column uses k_precond)
     """
-    i_tg, i_hg = tl.program_id(0).to(tl.int64), tl.program_id(1)
+    i_tg, i_hg = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
 
     if IS_VARLEN:
         i_n = 0

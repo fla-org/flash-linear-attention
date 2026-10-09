@@ -55,16 +55,16 @@ Resolve user-visible defaults and normalization in one shared helper. The public
 
 A leaf-stage budget records the contract below for one leaf stage. A cell's numerical budget is the ordered set of its leaf-stage budgets plus the end-to-end acceptance rule. Record budgets in both directions: outputs and gradients each pass their committed `assert_close` tolerances, and passing the forward comparison does not cover backward stages such as inverse recomputation, gradient combination, and state backpropagation.
 
-| Field      | Required decision                                                   |
-| ---------- | ------------------------------------------------------------------- |
-| Source     | Input numerical domain and upstream range assumptions               |
-| Load       | Dtype and any conversion applied at ingress                         |
-| Operand    | Dtype presented to each numerical operation                         |
-| Accumulate | Accumulation dtype and reduction behavior                           |
-| Store      | Output dtype and conversion at egress                               |
-| Range      | Exponent headroom and overflow/underflow limits                     |
-| Error      | Rounding allowance and how it propagates downstream                 |
-| Acceptance | Oracle, output and per-gradient tolerances, and test IDs            |
+| Field      | Required decision                                        |
+| ---------- | -------------------------------------------------------- |
+| Source     | Input numerical domain and upstream range assumptions    |
+| Load       | Dtype and any conversion applied at ingress              |
+| Operand    | Dtype presented to each numerical operation              |
+| Accumulate | Accumulation dtype and reduction behavior                |
+| Store      | Output dtype and conversion at egress                    |
+| Range      | Exponent headroom and overflow/underflow limits          |
+| Error      | Rounding allowance and how it propagates downstream      |
+| Acceptance | Oracle, output and per-gradient tolerances, and test IDs |
 
 End-to-end error is the propagation of these stage budgets: algebraically equivalent expressions are not numerically equivalent when staging, reduction order, or range changes. Changing the compute or accumulation precision of a validated path, relaxing a committed tolerance, or replacing its validated numerical algorithm requires the RFC process under "Scope and direction" in `AGENTS.md`; ordinary reorderings within the same precision are exempt there.
 
@@ -80,11 +80,11 @@ abs(lower_bound) * (chunk_size // 2 + 1) * log2(e) <= 124
 
 Keep these layers separate:
 
-| Layer | Question | Required evidence and home |
-| ----- | -------- | -------------------------- |
-| Production-representative hard gate | Do the cells FLA layers and models actually dispatch stay correct and fast? | Pin effective arguments, shapes, dtypes, bound regimes, input distributions, and routes from checked-in layer/model callsites, reproduced in `tests/models/test_modeling_*.py` or an exact op-level equivalent; global `SHAPE_CONFIGS` alone do not establish production use. Run `python -m benchmarks.ops.verify --op <op>` (see `fla-optimization-loop`). |
-| Public-contract boundary hard gate | Does the full documented and previously supported domain remain valid? | Parameterized matrices in `tests/ops/test_<op>.py`; backend verifier accept/reject cases; parity tests asserting an omitted argument matches its documented explicit default. |
-| Beyond-contract adversarial coverage | Does out-of-contract input fail safely? | Each case requires one of two outcomes: rejection before kernel execution with the documented error, or completion with finite outputs and gradients via explicit `torch.isfinite` assertions. NaN memory poisoning covers only `tests/ops/` and `tests/modules/`; layer and CP tests add their own finite checks. |
+| Layer                                | Question                                                                    | Required evidence and home                                                                                                                                                                                                                                                                                                                                   |
+| ------------------------------------ | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Production-representative hard gate  | Do the cells FLA layers and models actually dispatch stay correct and fast? | Pin effective arguments, shapes, dtypes, bound regimes, input distributions, and routes from checked-in layer/model callsites, reproduced in `tests/models/test_modeling_*.py` or an exact op-level equivalent; global `SHAPE_CONFIGS` alone do not establish production use. Run `python -m benchmarks.ops.verify --op <op>` (see `fla-optimization-loop`). |
+| Public-contract boundary hard gate   | Does the full documented and previously supported domain remain valid?      | Parameterized matrices in `tests/ops/test_<op>.py`; backend verifier accept/reject cases; parity tests asserting an omitted argument matches its documented explicit default.                                                                                                                                                                                |
+| Beyond-contract adversarial coverage | Does out-of-contract input fail safely?                                     | Each case requires one of two outcomes: rejection before kernel execution with the documented error, or completion with finite outputs and gradients via explicit `torch.isfinite` assertions. NaN memory poisoning covers only `tests/ops/` and `tests/modules/`; layer and CP tests add their own finite checks.                                           |
 
 No layer substitutes for another: production evidence does not prove compatibility, boundary evidence does not represent production numerics, and adversarial robustness does not expand the public contract.
 
@@ -98,7 +98,7 @@ Preserve every cell supported at the PR's merge-base — documented by the publi
 
 Autotune configs and caches must not define separate numerical contracts: every config selectable for a cell stays within its budget, even though config keys do not encode the input numerical domain. Record compute-precision environment state (`TRITON_F32_DEFAULT`, matmul precision settings) in the budget context, set the same explicit values for baseline, candidate, and every test of the operator, and restore global state after the test.
 
-If a proposal changes a public argument default or the route a default call selects, add explicit `Default before` and `Default after` entries to every affected contract-table row and obtain the breaking-change approval in `AGENTS.md`. For any interface, docstring, or behavior change, audit every caller, backend, test, and document in one repository-wide pass, and record when a category has no affected sites.
+If a proposal changes a public argument default or the route a default call selects, add explicit `Default before` and `Default after` entries to every affected contract-table row. Changes to public defaults or observable semantics need the breaking-change approval in `AGENTS.md`; selecting a faster route with the same public contract needs route-parity tests and benchmark evidence. For any interface, docstring, or behavior change, audit every caller, backend, test, and document in one repository-wide pass, and record when a category has no affected sites.
 
 ## Production-first benchmarking
 

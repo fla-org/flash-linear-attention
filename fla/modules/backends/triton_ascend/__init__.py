@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import torch
 
-from fla.ops.backends import BaseBackend
+from fla.backends import BaseBackend
 from fla.utils import IS_NPU
 
 # NPU inductor mis-compiles grpo_loss_with_old_logps; keep eager fn from fla.modules.grpo.
@@ -237,143 +237,6 @@ class TritonAscendBackend(BaseBackend):
         from fla.modules.backends.triton_ascend.fused_kl_div import fused_kl_div_bwd_npu
         return fused_kl_div_bwd_npu(do=do, dx=dx, dw=dw)
 
-    def l2norm_fwd(
-        self,
-        x,
-        eps=1e-6,
-        output_dtype=None,
-    ):
-        from fla.modules.backends.triton_ascend.l2norm import l2norm_fwd_npu
-        return l2norm_fwd_npu(x, eps, output_dtype)
-
-    def l2norm_bwd(
-        self,
-        y,
-        rstd,
-        dy,
-        eps=1e-6,
-    ):
-        from fla.modules.backends.triton_ascend.l2norm import l2norm_bwd_npu
-        return l2norm_bwd_npu(y, rstd, dy)
-
-    def layer_norm_gated_fwd(
-        self,
-        x,
-        g,
-        weight,
-        bias,
-        activation="swish",
-        eps=1e-5,
-        residual=None,
-        out_dtype=None,
-        residual_dtype=None,
-        is_rms_norm=False,
-    ):
-        from fla.modules.backends.triton_ascend.fused_norm_gate import layer_norm_gated_fwd_npu
-        return layer_norm_gated_fwd_npu(
-            x,
-            g,
-            weight,
-            bias,
-            activation,
-            eps,
-            residual,
-            out_dtype,
-            residual_dtype,
-            is_rms_norm,
-        )
-
-    def layer_norm_gated_bwd(
-        self,
-        dy,
-        x,
-        g,
-        weight,
-        bias,
-        activation="swish",
-        eps=1e-5,
-        mean=None,
-        rstd=None,
-        dresidual=None,
-        has_residual=False,
-        is_rms_norm=False,
-        x_dtype=None,
-        recompute_output=False,
-    ):
-        from fla.modules.backends.triton_ascend.fused_norm_gate import layer_norm_gated_bwd_npu
-        return layer_norm_gated_bwd_npu(
-            dy,
-            x,
-            g,
-            weight,
-            bias,
-            activation,
-            eps,
-            mean,
-            rstd,
-            dresidual,
-            has_residual,
-            is_rms_norm,
-            x_dtype,
-            recompute_output,
-        )
-
-    def layer_norm_fwd(
-        self,
-        x,
-        weight,
-        bias,
-        eps=1e-5,
-        residual=None,
-        out_dtype=None,
-        residual_dtype=None,
-        is_rms_norm=False,
-        num_groups=1,
-    ):
-        from fla.modules.backends.triton_ascend.layernorm import layer_norm_fwd_npu
-        return layer_norm_fwd_npu(
-            x,
-            weight,
-            bias,
-            eps,
-            residual,
-            out_dtype,
-            residual_dtype,
-            is_rms_norm,
-            num_groups,
-        )
-
-    def layer_norm_bwd(
-        self,
-        dy,
-        x,
-        weight,
-        bias,
-        mean=None,
-        rstd=None,
-        dres=None,
-        has_residual=False,
-        is_rms_norm=False,
-        x_dtype=None,
-        recompute_output=False,
-        num_groups=1,
-    ):
-        from fla.modules.backends.triton_ascend.layernorm import layer_norm_bwd_npu
-        return layer_norm_bwd_npu(
-            dy,
-            x,
-            weight,
-            bias,
-            mean,
-            rstd,
-            dres,
-            has_residual,
-            is_rms_norm,
-            x_dtype,
-            recompute_output,
-            num_groups,
-        )
-
     def fused_grpo_loss(
         self,
         logits,
@@ -409,7 +272,7 @@ class TritonAscendBackend(BaseBackend):
         cu_seqlens=None,
         cu_seqlens_cpu=None,
         chunk_indices=None,
-        BT=64,
+        chunk_size=64,
         layout_fallback=False,
     ):
         from fla.modules.backends.triton_ascend.causal_conv1d import causal_conv1d_fwd_npu
@@ -424,7 +287,7 @@ class TritonAscendBackend(BaseBackend):
             cu_seqlens,
             cu_seqlens_cpu,
             chunk_indices,
-            BT,
+            chunk_size,
             layout_fallback,
         )
 
@@ -441,7 +304,7 @@ class TritonAscendBackend(BaseBackend):
         cu_seqlens=None,
         cu_seqlens_cpu=None,
         chunk_indices=None,
-        BT=64,
+        chunk_size=64,
         layout_fallback=False,
     ):
         from fla.modules.backends.triton_ascend.causal_conv1d import causal_conv1d_bwd_npu
@@ -457,7 +320,7 @@ class TritonAscendBackend(BaseBackend):
             cu_seqlens,
             cu_seqlens_cpu,
             chunk_indices,
-            BT,
+            chunk_size,
             layout_fallback,
         )
 

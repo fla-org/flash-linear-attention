@@ -5,13 +5,15 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import os
+
 import torch
 import triton
 from einops import rearrange
 
 from fla.modules.convolution import causal_conv1d
 from fla.ops.utils.index import prepare_sequence_ids
-from fla.utils import IS_NPU
+from fla.utils import IS_NPU, IS_NVIDIA, find_spec_cached
 
 try:
     from causal_conv1d import causal_conv1d_fn
@@ -23,6 +25,8 @@ def _conv_benchmark_providers():
     providers = ['causal_conv1d_fwd', 'causal_conv1d_fwdbwd']
     if not IS_NPU and causal_conv1d_fn is not None:
         providers.extend(['causal_conv1d_cuda_fwd', 'causal_conv1d_cuda_fwdbwd'])
+    if IS_NVIDIA and find_spec_cached('triton.experimental.gluon') is not None:
+        providers.extend(['causal_conv1d_gluon_fwd', 'causal_conv1d_gluon_fwdbwd'])
     return providers
 
 
@@ -33,8 +37,12 @@ _STYLES = [
 ]
 
 
-def benchmark(T, D, provider):
+def benchmark(T, D, provider, packed=True):
     from fla.utils import device
+    torch.manual_seed(42)
+    # select each provider independently of inherited Gluon switches.
+    os.environ['FLA_GLUON'] = '0'
+    os.environ['FLA_CONV_GLUON'] = '1' if '_gluon_' in provider else '0'
     dtype = torch.bfloat16
     requires_grad = True
     B, N, W = 1, 16, 4
@@ -52,8 +60,8 @@ def benchmark(T, D, provider):
         torch.tensor([0], dtype=torch.long),
         torch.arange(16, T)[torch.randperm(T - 16)[:N-1]],
         torch.tensor([T], dtype=torch.long),
-    ], 0).to(device).sort()[0]
-    if provider.startswith('causal_conv1d_fwdbwd'):
+    ], 0).to(device).sort()[0] if packed else None
+    if provider in ('causal_conv1d_fwdbwd', 'causal_conv1d_gluon_fwdbwd'):
         results = triton.testing.do_bench(
             lambda: causal_conv1d(x, weight, bias, activation='swish', cu_seqlens=cu_seqlens)[0].backward(x),
             quantiles=quantiles,
@@ -66,13 +74,13 @@ def benchmark(T, D, provider):
                     weight=weight,
                     bias=bias,
                     activation='swish',
-                    seq_idx=prepare_sequence_ids(cu_seqlens).to(torch.int32).unsqueeze(0),
+                    seq_idx=prepare_sequence_ids(cu_seqlens).to(torch.int32).unsqueeze(0) if packed else None,
                 ),
                 'b d t -> b t d',
             ).backward(x),
             quantiles=quantiles,
         )
-    elif provider.startswith('causal_conv1d_fwd'):
+    elif provider in ('causal_conv1d_fwd', 'causal_conv1d_gluon_fwd'):
         results = triton.testing.do_bench(
             lambda: causal_conv1d(x, weight, bias, activation='swish', cu_seqlens=cu_seqlens),
             quantiles=quantiles,
@@ -85,7 +93,7 @@ def benchmark(T, D, provider):
                     weight=weight,
                     bias=bias,
                     activation='swish',
-                    seq_idx=prepare_sequence_ids(cu_seqlens).to(torch.int32).unsqueeze(0),
+                    seq_idx=prepare_sequence_ids(cu_seqlens).to(torch.int32).unsqueeze(0) if packed else None,
                 ),
                 'b d t -> b t d',
             ),
