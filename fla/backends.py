@@ -181,7 +181,7 @@ def _resolve_registry(operation: str, *, allow_unknown: bool = False) -> Backend
     if operation == 'modules':
         module_path = 'fla.modules.backends'
     elif operation == 'modules.conv':
-        module_path = 'fla.modules.causal_conv.backends'
+        module_path = 'fla.modules.causal_conv1d.backends'
     elif operation.startswith('modules.norm.'):
         module_path = 'fla.modules.norm.triton_ascend'
     elif operation.startswith('modules.'):

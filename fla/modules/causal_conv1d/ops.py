@@ -1083,8 +1083,8 @@ def causal_conv1d(
         If `output_final_state` is `False`, the final state is `None`.
     """
     # import here to avoid circular dependencies
-    from fla.modules.causal_conv.context_parallel import causal_conv1d_cp
-    from fla.modules.causal_conv.cuda import causal_conv1d_cuda, fast_causal_conv1d_fn
+    from fla.modules.causal_conv1d.context_parallel import causal_conv1d_cp
+    from fla.modules.causal_conv1d.cuda import causal_conv1d_cuda, fast_causal_conv1d_fn
 
     if cp_context is not None:
         assert initial_state is None, "Initial state is not supported for CP"

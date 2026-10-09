@@ -38,7 +38,7 @@ def test_top_level_exports_layers_and_non_config_models():
     ('owner', 'name', 'defaults'),
     [
         (
-            'causal_conv.causal_conv',
+            'causal_conv1d.ops',
             'causal_conv1d_fwd',
             {'chunk_size': 64, 'layout_fallback': False, 'output_final_state': False},
         ),
@@ -63,7 +63,7 @@ def test_public_call_defaults(owner, name, defaults):
 @pytest.mark.parametrize(
     ('legacy', 'current', 'names'),
     [
-        ('convolution', 'causal_conv', ('ShortConvolution', 'causal_conv1d')),
+        ('convolution', 'causal_conv1d', ('ShortConvolution', 'causal_conv1d')),
         ('convolution', 'long_conv', ('LongConvolution', 'ImplicitLongConvolution', 'PositionalEmbedding', 'fft_conv')),
     ],
     ids=['causal-conv', 'long-conv'],
@@ -198,9 +198,9 @@ def test_normalization_imports_preserve_public_exports(run_python, disabled):
             for symbol in expected_symbols[name]:
                 assert getattr(legacy, symbol) is getattr(canonical, symbol), (name, symbol)
 
-        from fla.modules.causal_conv import causal_conv1d
-        importlib.import_module('fla.modules.causal_conv.causal_conv')
-        from fla.modules.causal_conv import causal_conv1d as after_legacy_import
+        from fla.modules.causal_conv1d import causal_conv1d
+        importlib.import_module('fla.modules.causal_conv1d.ops')
+        from fla.modules.causal_conv1d import causal_conv1d as after_legacy_import
         assert callable(causal_conv1d)
         assert after_legacy_import is causal_conv1d
         """,

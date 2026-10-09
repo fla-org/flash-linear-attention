@@ -45,7 +45,7 @@ class TritonAscendBackend(BaseBackend):
         chunk_size: int = 64,
         layout_fallback: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        from fla.modules.causal_conv.triton_ascend.causal_conv import causal_conv1d_fwd_npu
+        from fla.modules.causal_conv1d.triton_ascend.ops import causal_conv1d_fwd_npu
 
         return causal_conv1d_fwd_npu(
             x=x,
@@ -78,7 +78,7 @@ class TritonAscendBackend(BaseBackend):
         chunk_size: int = 64,
         layout_fallback: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
-        from fla.modules.causal_conv.triton_ascend.causal_conv import causal_conv1d_bwd_npu
+        from fla.modules.causal_conv1d.triton_ascend.ops import causal_conv1d_bwd_npu
 
         return causal_conv1d_bwd_npu(
             x=x,
@@ -106,7 +106,7 @@ class TritonAscendBackend(BaseBackend):
         cu_seqlens: torch.Tensor | None,
         dht: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        from fla.modules.causal_conv.triton_ascend.causal_conv import compute_dh0_npu
+        from fla.modules.causal_conv1d.triton_ascend.ops import compute_dh0_npu
 
         return compute_dh0_npu(
             dy=dy,
@@ -125,7 +125,7 @@ class TritonAscendBackend(BaseBackend):
         initial_state: torch.Tensor | None = None,
         cu_seqlens: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        from fla.modules.causal_conv.triton_ascend.causal_conv import causal_conv1d_update_states_npu
+        from fla.modules.causal_conv1d.triton_ascend.ops import causal_conv1d_update_states_npu
 
         return causal_conv1d_update_states_npu(x=x, state_len=state_len, initial_state=initial_state, cu_seqlens=cu_seqlens)
 
@@ -138,7 +138,7 @@ class TritonAscendBackend(BaseBackend):
         bias: torch.Tensor | None = None,
         activation: str | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        from fla.modules.causal_conv.triton_ascend.causal_conv import causal_conv1d_update_npu
+        from fla.modules.causal_conv1d.triton_ascend.ops import causal_conv1d_update_npu
 
         return causal_conv1d_update_npu(x=x, cache=cache, residual=residual, weight=weight, bias=bias, activation=activation)
 

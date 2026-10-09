@@ -5,6 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from fla.modules.causal_conv.causal_conv import ShortConvolution, causal_conv1d
+from fla.modules.causal_conv1d.gluon import ConvGluonBackend
+from fla.modules.causal_conv1d.triton_ascend import TritonAscendBackend
 
-__all__ = ['ShortConvolution', 'causal_conv1d']
+__all__ = ['ConvGluonBackend', 'TritonAscendBackend']

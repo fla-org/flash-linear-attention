@@ -10,7 +10,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.modules.causal_conv.causal_conv import causal_conv1d_bwd_kernel, causal_conv1d_fwd_kernel
+from fla.modules.causal_conv1d.ops import causal_conv1d_bwd_kernel, causal_conv1d_fwd_kernel
 from fla.ops.gla.chunk import chunk_gla_bwd_kernel_inter
 from fla.ops.utils.cache import AutotuneKey, fla_cache_autotune
 from fla.utils import device

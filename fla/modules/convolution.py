@@ -5,16 +5,16 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from fla.modules.causal_conv import ShortConvolution, causal_conv1d
-from fla.modules.causal_conv.causal_conv import (
+from fla.modules.causal_conv1d import ShortConvolution, causal_conv1d
+from fla.modules.causal_conv1d.ops import (
     CausalConv1dFunction,
     causal_conv1d_bwd,
     causal_conv1d_fwd,
     causal_conv1d_update,
     causal_conv1d_update_states,
 )
-from fla.modules.causal_conv.context_parallel import CausalConv1dFunctionCP, causal_conv1d_cp
-from fla.modules.causal_conv.cuda import FastCausalConv1dFn, fast_causal_conv1d_fn
+from fla.modules.causal_conv1d.context_parallel import CausalConv1dFunctionCP, causal_conv1d_cp
+from fla.modules.causal_conv1d.cuda import FastCausalConv1dFn, fast_causal_conv1d_fn
 from fla.modules.long_conv import ImplicitLongConvolution, LongConvolution, PositionalEmbedding, fft_conv
 
 __all__ = [
