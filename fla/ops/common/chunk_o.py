@@ -597,6 +597,7 @@ def chunk_fwd_o(
     return o
 
 
+@dispatch('common')
 def chunk_bwd_dv(
     q: torch.Tensor,
     k: torch.Tensor,

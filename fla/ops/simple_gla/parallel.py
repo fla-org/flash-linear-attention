@@ -9,6 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.backends import dispatch
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.cumsum import chunk_global_cumsum, chunk_local_cumsum
@@ -687,6 +688,7 @@ class ParallelSimpleGLAFunction(torch.autograd.Function):
         return dq.to(q), dk.to(k), dv.to(v), dg.to(ctx.dtype) if dg is not None else None, None, None, None, None
 
 
+@dispatch('simple_gla')
 def parallel_simple_gla(
     q: torch.Tensor,
     k: torch.Tensor,

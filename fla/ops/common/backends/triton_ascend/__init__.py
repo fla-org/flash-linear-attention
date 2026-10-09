@@ -84,6 +84,13 @@ class TritonAscendCommonBackend(BaseBackend):
         from fla.ops.common.backends.triton_ascend.chunk_o import chunk_fwd_o_npu
         return chunk_fwd_o_npu(*args, **kwargs)
 
+    def chunk_bwd_dv_verifier(self, *args, **kwargs):
+        return True, None
+
+    def chunk_bwd_dv(self, *args, **kwargs):
+        from fla.ops.common.backends.triton_ascend.chunk_o import chunk_bwd_dv_npu
+        return chunk_bwd_dv_npu(*args, **kwargs)
+
     def chunk_bwd_dv_local_verifier(self, *args, **kwargs):
         return True, None
 

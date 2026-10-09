@@ -15,12 +15,14 @@ import pytest
 import torch
 
 from fla import backends as registry_module
+from fla import utils as fla_utils
 from fla.backends import BackendRegistry, BaseBackend, dispatch, register_backend
 from fla.ops.attn.backends import tilelang as attn_tilelang_backend
 from fla.ops.common.backends import tilelang as common_tilelang_backend
 from fla.ops.generalized_delta_rule.dplr.backends import tilelang as dplr_tilelang_backend
 from fla.ops.kda.backends import tilelang as kda_tilelang_backend
 from fla.ops.rwkv6.backends import tilelang as rwkv6_tilelang_backend
+from fla.ops.simple_gla.backends.triton_ascend import TritonAscendSimpleGLABackend
 from fla.utils import env
 
 _REAL_PATH_EXISTS = Path.exists
@@ -703,3 +705,38 @@ def test_rwkv6_tilelang_backend_verifier_rejects_unsupported_dimension():
 
     assert accepted is False
     assert reason == "TileLang RWKV6 intra backend currently supports the D=64 benchmark bucket only, got K=128"
+
+
+def test_simple_gla_ascend_backend_is_available_follows_is_npu(monkeypatch):
+    monkeypatch.setattr(fla_utils, "IS_NPU", True)
+    assert TritonAscendSimpleGLABackend.is_available() is True
+
+    monkeypatch.setattr(fla_utils, "IS_NPU", False)
+    assert TritonAscendSimpleGLABackend.is_available() is False
+
+
+_SIMPLE_GLA_ENTRY_POINTS = ['fused_chunk_simple_gla', 'parallel_simple_gla', 'fused_recurrent_simple_gla']
+
+
+@pytest.mark.parametrize("func_name", _SIMPLE_GLA_ENTRY_POINTS)
+def test_simple_gla_ascend_backend_verifier_rejects_off_npu(monkeypatch, func_name):
+    monkeypatch.setattr(fla_utils, "IS_NPU", False)
+    q = SimpleNamespace(device=torch.device("cpu"))
+    verifier = getattr(TritonAscendSimpleGLABackend(), f"{func_name}_verifier")
+
+    accepted, reason = verifier(q=q, k=q, v=q)
+
+    assert accepted is False
+    assert reason == "not running on NPU"
+
+
+@pytest.mark.parametrize("func_name", _SIMPLE_GLA_ENTRY_POINTS)
+def test_simple_gla_ascend_backend_verifier_rejects_cpu_input(monkeypatch, func_name):
+    monkeypatch.setattr(fla_utils, "IS_NPU", True)
+    q = SimpleNamespace(device=torch.device("cpu"))
+    verifier = getattr(TritonAscendSimpleGLABackend(), f"{func_name}_verifier")
+
+    accepted, reason = verifier(q=q, k=q, v=q)
+
+    assert accepted is False
+    assert reason == "input device is not NPU"
