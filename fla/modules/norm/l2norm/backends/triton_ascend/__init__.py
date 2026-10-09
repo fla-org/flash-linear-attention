@@ -22,21 +22,10 @@ class TritonAscendBackend(BaseBackend):
         from fla.utils import IS_NPU
         return IS_NPU
 
-    def l2norm_fwd(
-        self,
-        x,
-        eps=1e-6,
-        output_dtype=None,
-    ):
+    def l2norm_fwd(self, x, eps=1e-6, output_dtype=None):
         from fla.modules.norm.l2norm.backends.triton_ascend.ops import l2norm_fwd_npu
-        return l2norm_fwd_npu(x, eps, output_dtype)
+        return l2norm_fwd_npu(x=x, eps=eps, output_dtype=output_dtype)
 
-    def l2norm_bwd(
-        self,
-        y,
-        rstd,
-        dy,
-        eps=1e-6,
-    ):
+    def l2norm_bwd(self, y, rstd, dy, eps=1e-6):
         from fla.modules.norm.l2norm.backends.triton_ascend.ops import l2norm_bwd_npu
-        return l2norm_bwd_npu(y, rstd, dy)
+        return l2norm_bwd_npu(y=y, rstd=rstd, dy=dy)
