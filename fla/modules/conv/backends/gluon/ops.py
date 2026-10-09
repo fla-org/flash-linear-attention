@@ -297,7 +297,7 @@ def causal_conv1d_fwd(
     )
     final_state = None
     if output_final_state:
-        from fla.modules.conv.triton.ops import causal_conv1d_update_states
+        from fla.modules.conv.ops import causal_conv1d_update_states
         final_state = causal_conv1d_update_states(
             x=x,
             state_len=weight.shape[1],

@@ -115,6 +115,8 @@ def test_backend_changes_follow_repository_ownership(changed, expected, unrelate
         ('fla/modules/norm/l2norm/backends/triton_ascend/__init__.py', {'tests/modules/test_l2norm.py'}),
         ('fla/modules/norm/l2norm/backends/triton_ascend/ops.py', {'tests/modules/test_l2norm.py'}),
         ('fla/modules/norm/fused_norm_gate/backends/triton_ascend/ops.py', {'tests/modules/test_layernorm_gated.py'}),
+        ('fla/modules/conv/backends/gluon/__init__.py', {'tests/modules/test_conv.py'}),
+        ('fla/modules/conv/backends/gluon/ops.py', {'tests/modules/test_conv.py'}),
         ('fla/ops/attn/backends/tilelang/parallel.py', {'tests/ops/test_attn.py'}),
         ('fla/ops/kda/backends/triton_ascend/chunk_bwd.py', {'tests/ops/test_kda.py', 'tests/ops/test_gdn2.py'}),
         ('fla/modules/backends/triton_ascend/activations.py', {'tests/modules/test_activation.py'}),

@@ -275,6 +275,10 @@ def test_resolver_preserves_backend_dependency_errors(monkeypatch, dependency, a
 @pytest.mark.parametrize(
     ('owner', 'name', 'tensor_args', 'options'),
     [
+        ('conv', 'causal_conv1d_fwd', ('weight', 'bias', 'residual'), {'chunk_size': 32, 'output_final_state': True}),
+        ('conv', 'causal_conv1d_bwd', ('dy', 'dht'), {'chunk_size': 32, 'layout_fallback': True}),
+        ('conv', 'causal_conv1d_update', ('cache', 'weight', 'bias', 'residual'), {'activation': 'silu'}),
+        ('conv', 'causal_conv1d_update_states', ('initial_state',), {'state_len': 4}),
         ('norm.layernorm', 'layer_norm_fwd', ('weight', 'bias'), {'is_rms_norm': True, 'num_groups': 2}),
         ('norm.layernorm', 'layer_norm_bwd', ('x', 'weight', 'bias'), {'recompute_output': True, 'num_groups': 2}),
         ('norm.l2norm', 'l2norm_fwd', (), {'eps': 1e-4, 'output_dtype': torch.float32}),
@@ -283,6 +287,10 @@ def test_resolver_preserves_backend_dependency_errors(monkeypatch, dependency, a
         ('norm.fused_norm_gate', 'layer_norm_gated_bwd', ('x', 'g', 'weight', 'bias'), {'activation': 'sigmoid'}),
     ],
     ids=[
+        'conv-forward',
+        'conv-backward',
+        'conv-update',
+        'conv-update-states',
         'layernorm-forward',
         'layernorm-backward',
         'l2norm-forward',
@@ -306,6 +314,9 @@ def test_module_dispatch_preserves_arguments_and_result(monkeypatch, owner, name
     monkeypatch.setattr(backend, 'is_available', classmethod(lambda cls: True))
     monkeypatch.setattr(backend, 'verify', lambda self, *args, **kwargs: (True, None))
     monkeypatch.setattr(backend, name, implementation)
+    if owner == 'conv':
+        gluon = importlib.import_module('fla.modules.conv.backends.gluon').GluonBackend
+        monkeypatch.setattr(gluon, 'is_available', classmethod(lambda cls: False))
 
     x = torch.tensor([-2.0, 0.5, 3.0], requires_grad=True)
     kwargs = {argument: torch.ones_like(x) for argument in tensor_args}
@@ -410,6 +421,30 @@ def test_public_imports_do_not_load_legacy_dispatch(run_python, disabled):
     )
 
 
+@pytest.mark.skipif(registry_module._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
+@pytest.mark.parametrize('direction', ['fwd', 'bwd'], ids=['forward', 'backward'])
+def test_conv_dispatch_uses_global_gluon_policy(monkeypatch, direction):
+    from fla.modules.conv import ops
+    from fla.modules.conv.backends.gluon import GluonBackend
+    from fla.modules.conv.backends.triton_ascend import TritonAscendBackend
+
+    func_name = f'causal_conv1d_{direction}'
+    monkeypatch.setenv('FLA_GLUON', '1')
+    monkeypatch.setenv('FLA_CONV_GLUON', '0')
+    monkeypatch.setattr(GluonBackend, 'is_available', classmethod(lambda cls: True))
+    monkeypatch.setattr(TritonAscendBackend, 'is_available', classmethod(lambda cls: False))
+    monkeypatch.setattr(GluonBackend, f'{func_name}_verifier', lambda self, x: (True, None))
+    result = object()
+
+    def implementation(self, x):
+        assert torch.is_grad_enabled()
+        assert x.requires_grad
+        return result
+
+    monkeypatch.setattr(GluonBackend, func_name, implementation)
+    assert getattr(ops, func_name)(x=torch.tensor([1.0, 2.0], requires_grad=True)) is result
+
+
 @pytest.mark.parametrize('first_import', ['fla.backends', 'fla.ops.backends'])
 def test_legacy_dispatch_uses_shared_registry(run_python, first_import):
     run_python(
@@ -432,8 +467,10 @@ def test_legacy_dispatch_uses_shared_registry(run_python, first_import):
 
         from fla.backends import BaseBackend, dispatch
         from fla import backends as registry_module
+        from fla.modules.conv.backends.gluon import ConvGluonBackend, GluonBackend
         kda_registry = registry_module._resolve_registry('kda')
         assert legacy.BaseBackend is BaseBackend
+        assert GluonBackend is ConvGluonBackend
         assert legacy.BackendRegistry._registries is registry_module._registries
         assert legacy.BackendRegistry('kda') is kda_registry
         assert legacy.BackendRegistry('modules.norm.l2norm') is dispatch('modules.norm.l2norm').__self__
@@ -495,6 +532,7 @@ def test_dispatch_policy_and_optional_dependencies(run_python, disabled):
             'modules.norm.layernorm',
             'modules.norm.l2norm',
             'modules.norm.fused_norm_gate',
+            'modules.conv',
         ]:
             with warnings.catch_warnings():
                 warnings.simplefilter('error', DeprecationWarning)

@@ -37,11 +37,13 @@ def test_top_level_exports_layers_and_non_config_models():
 @pytest.mark.parametrize(
     ('owner', 'name', 'defaults'),
     [
+        ('conv.ops', 'causal_conv1d_fwd', {'chunk_size': 64, 'layout_fallback': False, 'output_final_state': False}),
         ('layernorm', 'layer_norm', {'eps': 1e-5, 'prenorm': False}),
         ('l2norm', 'l2norm', {'eps': 1e-6, 'output_dtype': None}),
         ('fused_norm_gate', 'layer_norm_gated', {'activation': 'swish', 'eps': 1e-6}),
     ],
     ids=[
+        'conv',
         'layernorm',
         'l2norm',
         'norm-gate',
@@ -52,6 +54,21 @@ def test_public_call_defaults(owner, name, defaults):
     signature = inspect.signature(function)
     for parameter, expected in defaults.items():
         assert signature.parameters[parameter].default == expected
+
+
+@pytest.mark.parametrize(
+    ('legacy', 'current', 'names'),
+    [
+        ('convolution', 'conv', ('ShortConvolution', 'LongConvolution', 'ImplicitLongConvolution')),
+        ('conv.triton.ops', 'conv.ops', ('causal_conv1d_fwd', 'causal_conv1d_bwd', 'CausalConv1dFunction')),
+    ],
+    ids=['convolution', 'conv-functions'],
+)
+def test_legacy_imports_preserve_symbol_identity(legacy, current, names):
+    old_package = importlib.import_module(f'fla.modules.{legacy}')
+    new_package = importlib.import_module(f'fla.modules.{current}')
+    for name in names:
+        assert getattr(old_package, name) is getattr(new_package, name)
 
 
 def test_public_function_aliases():
@@ -68,6 +85,7 @@ def test_public_function_aliases():
         ('fused_norm_gate', 'FusedLayerNormGated', {'hidden_size': 4, 'bias': True}, ('weight', 'bias')),
         ('fused_norm_gate', 'FusedRMSNormGated', {'hidden_size': 4}, ('weight',)),
         ('l2norm', 'L2Norm', {}, ()),
+        ('convolution', 'ShortConvolution', {'hidden_size': 4, 'kernel_size': 3, 'bias': True}, ('weight', 'bias')),
     ],
     ids=[
         'layernorm',
@@ -77,6 +95,7 @@ def test_public_function_aliases():
         'fused-layernorm-gated',
         'fused-rmsnorm-gated',
         'l2norm',
+        'convolution',
     ],
 )
 def test_legacy_module_pickle_and_state_dict(monkeypatch, legacy, name, kwargs, state_keys):
@@ -169,6 +188,11 @@ def test_normalization_imports_preserve_public_exports(run_python, disabled):
             for symbol in expected_symbols[name]:
                 assert getattr(legacy, symbol) is getattr(canonical, symbol), (name, symbol)
 
+        from fla.modules.conv import causal_conv1d
+        importlib.import_module('fla.modules.conv.causal_conv1d')
+        from fla.modules.conv import causal_conv1d as after_legacy_import
+        assert callable(causal_conv1d)
+        assert after_legacy_import is causal_conv1d
         """,
         FLA_DISABLE_BACKEND_DISPATCH=disabled,
     )

@@ -10,10 +10,15 @@ import triton
 import triton.language as tl
 from einops import rearrange
 
+from fla.backends import dispatch
+from fla.ops.cp import FLACPContext
+from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.cache import fla_cache_autotune
-from fla.utils import IS_AMD, autotune_cache_kwargs, input_guard
+from fla.utils import IS_AMD, autotune_cache_kwargs, deprecate_kwarg, input_guard
 
 NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if IS_AMD else [4, 8, 16, 32]
+
+
 STATIC_WARPS = 32 if not IS_AMD else 16
 
 
@@ -582,6 +587,236 @@ def causal_conv1d_states_fwd_kernel(
     tl.store(p_final, tl.trans(b_x).to(final_state.dtype.element_ty), mask=m_final)
 
 
+def _has_non_standard_layout(x: torch.Tensor) -> bool:
+    """QKV-style views (stride_t != D) break triton-ascend masked kernels."""
+    if x.dtype not in (torch.float16, torch.bfloat16):
+        return False
+    if x.dim() != 3:
+        return not x.is_contiguous()
+    _, stride_t, stride_d = x.stride()
+    return stride_d == 1 and stride_t != x.shape[-1]
+
+
+@deprecate_kwarg('BT', version='0.7.0', new_name='chunk_size')
+@dispatch('modules.conv')
+@input_guard(no_guard_contiguous=["x"])
+def causal_conv1d_fwd(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    residual: torch.Tensor,
+    initial_state: torch.Tensor | None = None,
+    output_final_state: bool = False,
+    activation: str | None = None,
+    cu_seqlens: torch.LongTensor | None = None,
+    cu_seqlens_cpu: torch.LongTensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
+    chunk_size: int = 64,
+    layout_fallback: bool = False,
+) -> torch.Tensor:
+    BT = chunk_size
+    shape = x.shape
+    if x.shape[-1] != weight.shape[0]:
+        x = rearrange(x, 'b t ... -> b t (...)')
+    B, T, D = x.shape[0], x.shape[1], weight.shape[0]
+    W = weight.shape[1]
+    stride_x_n, stride_x_t, stride_x_d = x.stride()
+
+    BW = triton.next_power_of_2(W)
+    if cu_seqlens is not None and chunk_indices is None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT, cu_seqlens_cpu=cu_seqlens_cpu)
+    NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
+    NB = triton.cdiv(B*T, 1024)
+
+    y = torch.empty_like(x, memory_format=torch.contiguous_format)
+
+    def grid(meta): return (triton.cdiv(D, meta['BD']), NT, B)
+    causal_conv1d_fwd_kernel[grid](
+        x=x,
+        y=y,
+        weight=weight,
+        bias=bias,
+        residual=residual,
+        cu_seqlens=cu_seqlens,
+        initial_state=initial_state,
+        chunk_indices=chunk_indices,
+        B=B,
+        T=T,
+        stride_x_n=stride_x_n,
+        stride_x_t=stride_x_t,
+        stride_x_d=stride_x_d,
+        D=D,
+        W=W,
+        BT=BT,
+        BW=BW,
+        NB=NB,
+        ACTIVATION=activation,
+    )
+    final_state = None
+    if output_final_state:
+        final_state = causal_conv1d_update_states(
+            x=x,
+            state_len=W,
+            initial_state=initial_state,
+            cu_seqlens=cu_seqlens,
+        )
+    return y.view(shape), final_state
+
+
+@dispatch('modules.conv')
+def compute_dh0_triton(
+    dy: torch.Tensor,
+    y: torch.Tensor | None,
+    weight: torch.Tensor,
+    initial_state: torch.Tensor,
+    activation: str | None,
+    cu_seqlens: torch.Tensor | None,
+    dht: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """
+    Compute dh0 (gradient w.r.t. initial_state) using a separate Triton kernel.
+    This is a workaround for Triton compiler bugs on some architectures (e.g., GB200).
+    """
+    D, W = weight.shape
+    N = initial_state.shape[0]
+    T = dy.shape[1]
+
+    # Initialize dh0
+    dh0 = torch.zeros_like(initial_state)
+
+    BD = 32
+    grid = (triton.cdiv(D, BD) * N,)
+
+    y_to_pass = y if activation in ('swish', 'silu') else None
+    # dy is [B, T, D] but may be a strided view; `y` is always contiguous
+    stride_dy_n, stride_dy_t, stride_dy_d = dy.stride()
+
+    compute_dh0_kernel[grid](
+        dy=dy,
+        y=y_to_pass,
+        weight=weight,
+        dh0=dh0,
+        dht=dht,
+        cu_seqlens=cu_seqlens,
+        stride_dy_n=stride_dy_n,
+        stride_dy_t=stride_dy_t,
+        stride_dy_d=stride_dy_d,
+        T=T,
+        D=D,
+        W=W,
+        BD=BD,
+    )
+
+    return dh0
+
+
+@deprecate_kwarg('BT', version='0.7.0', new_name='chunk_size')
+@dispatch('modules.conv')
+def causal_conv1d_bwd(
+    x: torch.Tensor,
+    dy: torch.Tensor,
+    dht: torch.Tensor,
+    weight: torch.Tensor | None = None,
+    bias: torch.Tensor | None = None,
+    residual: torch.Tensor | None = None,
+    initial_state: torch.Tensor | None = None,
+    activation: str | None = None,
+    cu_seqlens: torch.Tensor | None = None,
+    cu_seqlens_cpu: torch.LongTensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
+    chunk_size: int = 64,
+    layout_fallback: bool = False,
+):
+    BT = chunk_size
+    shape = x.shape
+    if x.shape[-1] != weight.shape[0]:
+        x = rearrange(x, 'b t ... -> b t (...)')
+    B, T, D = x.shape
+    W = weight.shape[1] if weight is not None else None
+
+    stride_x_n, stride_x_t, stride_x_d = x.stride()
+    stride_dy_n, stride_dy_t, stride_dy_d = dy.stride()
+
+    BW = triton.next_power_of_2(W)
+    if cu_seqlens is not None and chunk_indices is None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT, cu_seqlens_cpu=cu_seqlens_cpu)
+    NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
+    NB = triton.cdiv(B*T, 1024)
+
+    y = None
+    if activation is not None:
+        y, _ = causal_conv1d_fwd(
+            x=x,
+            weight=weight,
+            bias=bias,
+            residual=None,
+            initial_state=initial_state,
+            output_final_state=False,
+            activation=None,
+            cu_seqlens=cu_seqlens,
+            cu_seqlens_cpu=cu_seqlens_cpu,
+            chunk_indices=chunk_indices,
+        )
+    dx = torch.empty_like(x)
+    dw = weight.new_empty(B*NT, *weight.shape, dtype=torch.float) if weight is not None else None
+    db = bias.new_empty(B*NT, *bias.shape, dtype=torch.float) if bias is not None else None
+    dr = dy if residual is not None else None
+
+    stride_dx_n, stride_dx_t, stride_dx_d = dx.stride()
+
+    def grid(meta): return (triton.cdiv(D, meta['BD']), NT, B)
+    causal_conv1d_bwd_kernel[grid](
+        x=x,
+        y=y,
+        weight=weight,
+        initial_state=initial_state,
+        dht=dht,
+        dy=dy,
+        dx=dx,
+        dw=dw,
+        db=db,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        B=B,
+        T=T,
+        stride_x_n=stride_x_n,
+        stride_x_t=stride_x_t,
+        stride_x_d=stride_x_d,
+        stride_dx_n=stride_dx_n,
+        stride_dx_t=stride_dx_t,
+        stride_dx_d=stride_dx_d,
+        stride_dy_n=stride_dy_n,
+        stride_dy_t=stride_dy_t,
+        stride_dy_d=stride_dy_d,
+        D=D,
+        W=W,
+        BT=BT,
+        BW=BW,
+        NB=NB,
+        ACTIVATION=activation,
+    )
+    if weight is not None:
+        dw = dw.sum(0).to(weight)
+    if bias is not None:
+        db = db.sum(0).to(bias)
+
+    # Compute dh0 using separate Triton kernel to avoid compiler bugs on some architectures (e.g., GB200)
+    dh0 = None
+    if initial_state is not None:
+        dh0 = compute_dh0_triton(
+            dy=dy,
+            y=y,
+            weight=weight,
+            initial_state=initial_state,
+            activation=activation,
+            cu_seqlens=cu_seqlens,
+            dht=dht,
+        )
+
+    return dx.view(shape), dw, db, dr, dh0
+
+
+@dispatch('modules.conv')
 @input_guard(no_guard_contiguous=["x"])
 def causal_conv1d_update_states(
     x: torch.Tensor,
@@ -624,12 +859,13 @@ def causal_conv1d_update_states(
         stride_x_n=stride_x_n,
         stride_x_t=stride_x_t,
         stride_x_d=stride_x_d,
-        BW=BW,
         BD=BD,
+        BW=BW,
     )
     return final_state
 
 
+@dispatch('modules.conv')
 @input_guard(no_guard_contiguous=["x"])
 def causal_conv1d_update(
     x: torch.Tensor,
@@ -694,3 +930,182 @@ def causal_conv1d_update(
         ACTIVATION=activation,
     )
     return y.view(shape), cache
+
+
+class CausalConv1dFunction(torch.autograd.Function):
+
+    @staticmethod
+    @input_guard(no_guard_contiguous=["x"])
+    def forward(
+        ctx,
+        x: torch.Tensor,
+        weight: torch.Tensor | None = None,
+        bias: torch.Tensor | None = None,
+        residual: torch.Tensor | None = None,
+        initial_state: torch.Tensor | None = None,
+        output_final_state: bool | None = False,
+        activation: str | None = None,
+        cu_seqlens: torch.Tensor | None = None,
+        cu_seqlens_cpu: torch.LongTensor | None = None,
+        chunk_indices: torch.LongTensor | None = None,
+        chunk_size: int = 64,
+    ):
+        if cu_seqlens is not None and chunk_indices is None:
+            chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size, cu_seqlens_cpu=cu_seqlens_cpu)
+        ctx.activation = activation
+        ctx.cu_seqlens = cu_seqlens
+        ctx.cu_seqlens_cpu = cu_seqlens_cpu
+        ctx.chunk_indices = chunk_indices
+        ctx.layout_fallback = _has_non_standard_layout(x)
+        ctx.save_for_backward(x, weight, bias, residual, initial_state)
+        y, final_state = causal_conv1d_fwd(
+            x=x,
+            weight=weight,
+            bias=bias,
+            residual=residual,
+            initial_state=initial_state,
+            output_final_state=output_final_state,
+            activation=activation,
+            cu_seqlens=cu_seqlens,
+            cu_seqlens_cpu=cu_seqlens_cpu,
+            chunk_indices=chunk_indices,
+            chunk_size=chunk_size,
+            layout_fallback=ctx.layout_fallback,
+        )
+        return y, final_state
+
+    @staticmethod
+    @input_guard(no_guard_contiguous=["dy"])
+    def backward(ctx, dy: torch.Tensor, dht: torch.Tensor | None = None):
+        x, weight, bias, residual, initial_state = ctx.saved_tensors
+        dx, dw, db, dr, dh0 = causal_conv1d_bwd(
+            x=x,
+            dy=dy,
+            dht=dht,
+            weight=weight,
+            bias=bias,
+            residual=residual,
+            initial_state=initial_state,
+            activation=ctx.activation,
+            cu_seqlens=ctx.cu_seqlens,
+            cu_seqlens_cpu=ctx.cu_seqlens_cpu,
+            chunk_indices=ctx.chunk_indices,
+            layout_fallback=ctx.layout_fallback,
+        )
+        return dx, dw, db, dr, dh0, None, None, None, None, None, None
+
+
+@input_guard(no_guard_contiguous=["x"])
+def causal_conv1d(
+    x: torch.Tensor,
+    weight: torch.Tensor | None = None,
+    bias: torch.Tensor | None = None,
+    residual: torch.Tensor | None = None,
+    initial_state: torch.Tensor | None = None,
+    output_final_state: bool | None = False,
+    activation: str | None = None,
+    backend: str | None = 'triton',
+    cu_seqlens: torch.Tensor | None = None,
+    cu_seqlens_cpu: torch.LongTensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
+    cp_context: FLACPContext | None = None,
+    **kwargs,
+):
+    """
+    A causal 1D convolution implementation that powers Mamba/Mamba2 and DeltaNet architectures.
+
+    When a residual connection is provided, this implements the Canon operation
+    described in the paper at https://papers.ssrn.com/sol3/papers.cfm?abstract_id=5240330.
+
+    Args:
+        x (torch.Tensor):
+            Input tensor of shape [B, T, D].
+        weight (Optional[torch.Tensor]):
+            Weight tensor of shape [D, W]. Default: `None`.
+        bias (Optional[torch.Tensor]):
+            Bias tensor of shape [D]. Default: `None`.
+        residual (Optional[torch.Tensor]):
+            Residual tensor of shape [B, T, D]. Default: `None`.
+        initial_state (Optional[torch.Tensor]):
+            Initial state tensor of shape [N, D, W],
+            where `N` is the number of sequences in the batch and `W` is the kernel size.
+            If provided, the initial state is used to initialize the cache. Default: `None`.
+        output_final_state (Optional[bool]):
+            Whether to output the final state of shape [N, D, W]. Default: `False`.
+        activation (Optional[str]):
+            Activations applied to output, only `swish`/`silu` or `None` (i.e., no activation) are supported.
+            Default: `None`.
+        backend (Optional[str]):
+            Specifies the backend to use for the convolution operation. Supported values are `'cuda'` 、 `'triton'` and `'mix'`.
+            Default: `'triton'`.
+        cu_seqlens (Optional[torch.Tensor]):
+            Cumulative sequence lengths (optional)
+        chunk_indices (Optional[torch.LongTensor]):
+            Chunk indices for variable-length sequences (optional)
+
+    Returns:
+        Tuple of (output, final_state).
+        If `output_final_state` is `False`, the final state is `None`.
+    """
+    # Import here to avoid circular dependencies
+    from fla.modules.conv.backends.cuda import causal_conv1d_cuda, fast_causal_conv1d_fn
+    from fla.modules.conv.cp import causal_conv1d_cp
+
+    if cp_context is not None:
+        assert initial_state is None, "Initial state is not supported for CP"
+        assert output_final_state is False, "Output final state is not supported for CP"
+        output = causal_conv1d_cp(
+            x=x,
+            weight=weight,
+            bias=bias,
+            activation=activation,
+            chunk_indices=chunk_indices,
+            cp_context=cp_context,
+            residual=residual,
+        )
+        return output, None
+
+    if backend == 'triton':
+        y, final_state = CausalConv1dFunction.apply(
+            x,
+            weight,
+            bias,
+            residual,
+            initial_state,
+            output_final_state,
+            activation,
+            cu_seqlens,
+            cu_seqlens_cpu,
+            chunk_indices,
+        )
+        return y, final_state
+    elif backend == 'mix':
+        seq_idx = kwargs.get('seq_idx')
+        return fast_causal_conv1d_fn(
+            x,
+            weight,
+            bias,
+            residual,
+            initial_state,
+            output_final_state,
+            activation,
+            cu_seqlens,
+            cu_seqlens_cpu=cu_seqlens_cpu,
+            chunk_indices=chunk_indices,
+            seq_idx=seq_idx,
+        )
+    elif backend == 'cuda':
+        return causal_conv1d_cuda(
+            x,
+            weight,
+            bias,
+            residual,
+            initial_state,
+            output_final_state,
+            activation,
+            cu_seqlens,
+            cu_seqlens_cpu=cu_seqlens_cpu,
+            **kwargs,
+        )
+    else:
+        raise ValueError(f"Unsupported backend: {backend}")

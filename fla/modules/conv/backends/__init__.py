@@ -5,14 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from fla.modules.conv.backends.cuda.ops import (
-    FastCausalConv1dFn,
-    causal_conv1d_cuda,
-    fast_causal_conv1d_fn,
-)
+from fla.modules.conv.backends.gluon import ConvGluonBackend
+from fla.modules.conv.backends.triton_ascend import TritonAscendBackend
 
-__all__ = [
-    'FastCausalConv1dFn',
-    'causal_conv1d_cuda',
-    'fast_causal_conv1d_fn',
-]
+__all__ = ['ConvGluonBackend', 'TritonAscendBackend']
