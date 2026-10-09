@@ -36,14 +36,20 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
         """Prepare initial_state for CP forward pass by communicating with previous rank.
 
         Args:
-            x: Input tensor of shape [1, T, D]
-            weight: Weight tensor of shape [D, W]
-            cu_seqlens: Cumulative sequence lengths
-            context: CP context
-            group: Process group for communication
+            x (torch.Tensor):
+                Input tensor of shape [1, T, D]
+            weight (torch.Tensor):
+                Weight tensor of shape [D, W]
+            cu_seqlens (torch.Tensor | None):
+                Cumulative sequence lengths
+            context (FLACPContext):
+                CP context
+            group (dist.ProcessGroup | None):
+                Process group for communication
 
         Returns:
-            initial_state: Initial state tensor of shape [N, D, W] or None
+            initial_state (torch.Tensor | None):
+                Initial state tensor of shape [N, D, W] or None
         """
         W = weight.shape[-1]  # weight: [D, W]
         if group is None or W == 1:
@@ -76,12 +82,12 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
                         initial_state[row, :, -valid_len:] = slots[chain_pos - 1][-valid_len:].T
             return initial_state
         if not context.is_first_rank:
-            # Non-first rank needs initial_state
+            # non-first rank needs initial_state
             assert x.dim() == 3 and x.shape[0] == 1, f"CP requires [1, T, D], got {x.shape}"
             x_2d = x.squeeze(0)  # [T, D]
             tails = x_2d[-(W-1):].contiguous()  # [W-1, D]
             heads = conv_cp_send_recv_fwd(tails, group)  # [W-1, D]
-            # Construct initial_state: [N, D, W]
+            # construct initial_state: [N, D, W]
             N = len(cu_seqlens) - 1
             initial_state = torch.zeros(N, D, W, device=x.device, dtype=x.dtype)
             valid_len = min(W - 1, context.pre_num_conv_tokens)
@@ -89,10 +95,11 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
                 # heads[-valid_len:]: [valid_len, D] -> [D, valid_len]
                 initial_state[0, :, -valid_len:] = heads[-valid_len:].T
         else:
-            # First rank also needs to participate in communication (send tails)
+            # first rank also needs to participate in communication (send tails)
             x_2d = x.squeeze(0)
             tails = x_2d[-(W-1):].contiguous()
-            _ = conv_cp_send_recv_fwd(tails, group)  # Send but don't use
+            # send but don't use
+            _ = conv_cp_send_recv_fwd(tails, group)
 
         return initial_state
 
@@ -107,11 +114,16 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
         """Correct dx gradients for CP backward pass by communicating with next rank.
 
         Args:
-            dx: Gradient tensor to be corrected, shape [1, T, D]
-            dh0: Gradient w.r.t. initial_state, shape [N, D, W] or None
-            W: Kernel size
-            group: Process group for communication
-            cp_context: CP context
+            dx (torch.Tensor):
+                Gradient tensor to be corrected, shape [1, T, D]
+            dh0 (torch.Tensor | None):
+                Gradient w.r.t. initial_state, shape [N, D, W] or None
+            W (int):
+                Kernel size
+            group (dist.ProcessGroup | None):
+                Process group for communication
+            cp_context (FLACPContext):
+                CP context
         """
         if group is None or W == 1:
             return
@@ -169,9 +181,9 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
         chunk_size: int | None,
         backend: str = 'triton',
         residual: torch.Tensor | None = None,
-    ):
-        # Import here to avoid circular dependency
-        from fla.modules.conv.triton.ops import causal_conv1d_fwd
+    ) -> torch.Tensor:
+        # import here to avoid circular dependency
+        from fla.modules.causal_conv1d import causal_conv1d_fwd
 
         if cp_context is None:
             raise ValueError("cp_context must be provided for CausalConv1dFunctionCP")
@@ -179,9 +191,9 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
         cu_seqlens_cpu = cp_context.cu_seqlens_cpu
         group = cp_context.group
 
-        # Get kernel_size
+        # get kernel_size
         W = weight.shape[-1]  # weight: [D, W]
-        # Prepare initial_state for CP
+        # prepare initial_state for CP
         initial_state = CausalConv1dFunctionCP._prepare_initial_state_for_cp(
             x=x,
             weight=weight,
@@ -200,7 +212,7 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
         ctx.W = W
         ctx.cp_context = cp_context
 
-        # Call original forward
+        # call original forward
         y, _ = causal_conv1d_fwd(
             x=x,
             weight=weight,
@@ -218,15 +230,15 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
         return y
 
     @staticmethod
-    def backward(ctx, dy: torch.Tensor):
-        # Import here to avoid circular dependency
-        from fla.modules.conv.triton.ops import causal_conv1d_bwd
+    def backward(ctx, dy: torch.Tensor) -> tuple[torch.Tensor | None, ...]:
+        # import here to avoid circular dependency
+        from fla.modules.causal_conv1d import causal_conv1d_bwd
 
         x, weight, bias, residual, initial_state = ctx.saved_tensors
         group = ctx.group
         W = ctx.W
 
-        # Call original backward
+        # call original backward
         dx, dw, db, dr, dh0 = causal_conv1d_bwd(
             x=x,
             dy=dy,
@@ -242,14 +254,8 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
             chunk_size=ctx.chunk_size,
         )
 
-        # Correct dx gradients for CP
-        CausalConv1dFunctionCP._correct_dx_for_cp(
-            dx=dx,
-            dh0=dh0,
-            W=W,
-            group=group,
-            cp_context=ctx.cp_context,
-        )
+        # correct dx gradients for CP
+        CausalConv1dFunctionCP._correct_dx_for_cp(dx=dx, dh0=dh0, W=W, group=group, cp_context=ctx.cp_context)
 
         return dx, dw, db, None, None, None, None, None, dr
 
@@ -264,7 +270,7 @@ def causal_conv1d_cp(
     chunk_size: int | None = None,
     backend: str = 'triton',
     residual: torch.Tensor | None = None,
-):
+) -> torch.Tensor:
     """
     Context Parallel version of causal_conv1d.
 
@@ -273,13 +279,20 @@ def causal_conv1d_cp(
     - Backward: correct dx gradients
 
     Args:
-        x: Input tensor of shape [1, T, D]
-        weight: Weight tensor of shape [D, W]
-        bias: Bias tensor of shape [D] or None
-        activation: Activation function name or None
-        chunk_indices: Chunk indices for variable-length sequences
-        cp_context: CP context (required for CP mode)
-        residual: Residual tensor of shape [1, T, D] or None
+        x (torch.Tensor):
+            Input tensor of shape [1, T, D]
+        weight (torch.Tensor):
+            Weight tensor of shape [D, W]
+        bias (torch.Tensor | None):
+            Bias tensor of shape [D] or None
+        activation (str | None):
+            Activation function name or None
+        chunk_indices (torch.Tensor | None):
+            Chunk indices for variable-length sequences
+        cp_context (FLACPContext):
+            CP context (required for CP mode)
+        residual (torch.Tensor | None):
+            Residual tensor of shape [1, T, D] or None
     """
     if cp_context is None:
         raise ValueError("cp_context must be provided for causal_conv1d_cp")

@@ -199,26 +199,13 @@ def causal_conv1d_bwd_kernel(
             mask=(o_t[:, None] + i_r < T) & (o_d[None, :] < D),
         )
     for i_w in gl.static_range(W):
-        gl.store(
-            pointer=dw_partial + i_tg * D * W + o_d * W + W - i_w - 1,
-            value=gl.sum(b_dw[i_w], axis=0),
-            mask=o_d < D,
-        )
+        gl.store(pointer=dw_partial + i_tg * D * W + o_d * W + W - i_w - 1, value=gl.sum(b_dw[i_w], axis=0), mask=o_d < D)
     if db_partial is not None:
         gl.store(db_partial + i_tg * D + o_d, gl.sum(b_db, axis=0), mask=o_d < D)
 
 
 @gluon.jit(do_not_specialize=['NP'])
-def causal_conv1d_bwd_kernel_dwdb(
-    dw_partial,
-    db_partial,
-    dw,
-    db,
-    NP,
-    D: gl.constexpr,
-    W: gl.constexpr,
-    BD: gl.constexpr,
-):
+def causal_conv1d_bwd_kernel_dwdb(dw_partial, db_partial, dw, db, NP, D: gl.constexpr, W: gl.constexpr, BD: gl.constexpr):
     BN: gl.constexpr = 128
     layout: gl.constexpr = gl.BlockedLayout(
         size_per_thread=[1, BD // 32],
@@ -297,7 +284,8 @@ def causal_conv1d_fwd(
     )
     final_state = None
     if output_final_state:
-        from fla.modules.conv.ops import causal_conv1d_update_states
+        from fla.modules.causal_conv1d import causal_conv1d_update_states
+
         final_state = causal_conv1d_update_states(
             x=x,
             state_len=weight.shape[1],

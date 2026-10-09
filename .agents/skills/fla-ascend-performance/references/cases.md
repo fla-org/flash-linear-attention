@@ -2,9 +2,9 @@
 
 Experience notes from past kernel work. Read the current code before applying — numbers are not immutable hardware constants. Paths are relative to the `flash-linear-attention` repo root.
 
-## `causal_conv1d.py` — 1D core-grid + constexpr DMA split
+## `causal_conv1d` — 1D core-grid + constexpr DMA split
 
-File: `fla/modules/conv/backends/triton_ascend/ops.py`
+File: `fla/modules/causal_conv1d/backends/triton_ascend.py`
 
 Packed training path (contiguous `[B,T,D]`, no `initial_state` / `dht`, `D` divisible by a `BD>=16` tile) uses 1D core-grid kernels. Odd `D` (e.g. 200), strided layout, and cache-state paths stay on the legacy multi-axis kernels.
 

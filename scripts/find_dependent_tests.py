@@ -102,6 +102,9 @@ def _get_dispatch_owners(tree) -> set[str]:
         if not node.args or not isinstance(node.args[0], ast.Constant) or not isinstance(node.args[0].value, str):
             continue
         operation = node.args[0].value
+        if operation == 'modules.conv':
+            owners.add('fla.modules.causal_conv1d.backends')
+            continue
         if operation.startswith('modules.norm.'):
             owners.add('fla.modules.norm.triton_ascend')
             continue
