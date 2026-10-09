@@ -13,6 +13,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.common.backends.triton_ascend.chunk_delta_h import need_dma_mask
 from fla.ops.gated_delta_rule.backends.triton_ascend.wy_fast import (
     _MAX_TILE_BWD,
     _MAX_TILE_BWD_KV,
@@ -200,7 +201,7 @@ def prepare_precond_wy_repr_bwd_npu(
     BK_FIN = _bwd_col_tile(BT, K, _PRECOND_BWD_K_MEM_MULT, _MAX_TILE_BWD)
     use_g = g is not None
     is_varlen = cu_seqlens is not None
-    # Shared WY kernels still store with boundary_check, so partial chunks stay zero-filled.
+    # Shared WY kernels mask partial chunks, so the unwritten tail stays zero-filled.
     zero_ws = is_varlen or T % BT != 0
     KP = K
     dk = k.new_zeros(B, T, HV, K) if zero_ws else k.new_empty(B, T, HV, K)
@@ -224,6 +225,8 @@ def prepare_precond_wy_repr_bwd_npu(
     dA_mid = torch.empty_like(A, dtype=torch.float32)
     dA_out = torch.empty_like(A)
 
+    mask_dma = need_dma_mask(T, BT, K, BK, V, BV, is_varlen)
+    mask_time = is_varlen or T % BT != 0
     base = dict(
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
@@ -237,12 +240,13 @@ def prepare_precond_wy_repr_bwd_npu(
         prepare_wy_repr_bwd_kv_npu,
         task_num=task_num,
         kernel_kwargs=dict(
-            k=k, v=v, beta=beta_arg, g=g_k_arg, A=A, dw=dw, du=du,
-            dk=dk, dv=dv, dA_scr=dA_scr, db=db, dg=dg_arg,
+            k=k, v=v, beta=beta_arg, g=g_k_arg, A=A, dw=dw, du=du, dA=dA_scr,
+            dk=dk, dv=dv, db=db, dg=dg_arg,
             H=H, HV=HV, K=K, V=V, BK=BK, BV=BV, USE_G=use_g,
             G_T_CONTIG=g_t_contig, BETA_T_CONTIG=beta_t_contig,
             DG_T_CONTIG=dg_t_contig, DB_T_CONTIG=db_t_contig,
             G_EXP_PRECOMP=g_exp_precomp,
+            MASK_DMA=mask_dma,
             **core_base,
         ),
     )
@@ -252,7 +256,7 @@ def prepare_precond_wy_repr_bwd_npu(
         bh_total=B * HV,
         kernel_kwargs=dict(
             A=A, dA_scr=dA_scr, dA_mid=dA_mid,
-            HV=HV,
+            HV=HV, MASK_DMA=mask_time,
             **base,
         ),
     )
@@ -262,7 +266,7 @@ def prepare_precond_wy_repr_bwd_npu(
         bh_total=B * HV,
         kernel_kwargs=dict(
             A=A, dA_mid=dA_mid, dA_out=dA_out,
-            HV=HV,
+            HV=HV, MASK_DMA=mask_time,
             **base,
         ),
     )
@@ -274,6 +278,7 @@ def prepare_precond_wy_repr_bwd_npu(
             kernel_kwargs=dict(
                 g=g_gate, dA_out=dA_out,
                 HV=HV, G_T_CONTIG=g_t_contig,
+                MASK_DMA=mask_time,
                 **base,
             ),
         )

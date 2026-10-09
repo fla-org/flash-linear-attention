@@ -32,7 +32,7 @@ The style rules for comments and docstrings live in `CONTRIBUTING.md` ("Docstrin
 - **Minimal diff**: every changed line serves the PR's stated purpose. Drop drive-by reformats, unrelated cleanups, and speculative generality before pushing, not after a reviewer asks (see CONTRIBUTING "Core Principles" 5).
 - **Blast radius**: for every shared symbol you touched, all callsites still hold (Core Principle 4 — audit them in one pass, don't assume). For any behavior or numerics change, the PR description must state who is affected — which shapes, dtypes, backends, checkpoints, or downstream users — or state explicitly why no one is. "Tests pass" is not an impact analysis.
 - Before opening a PR, re-read your own diff once with fresh eyes: check every comment it adds against the anti-pattern list, and every comment it invalidates against [Comment discipline](#comment-discipline).
-- Check the diff for `tl.make_block_ptr` / `tl.advance`; these are banned from mainline Triton code. Follow the Ascend backend exemption in CONTRIBUTING "Triton Kernels".
+- Check the diff for `tl.make_block_ptr` / `tl.advance`. They are banned in every Triton backend, including Ascend. See CONTRIBUTING "Triton Kernels".
 - `gh pr edit` fails on this repo (classic-Projects GraphQL error). Edit a PR title/body via the REST API instead: `gh api -X PATCH repos/fla-org/flash-linear-attention/pulls/<N> -f title='...' -F body=@file`.
 - Keep review/PR comments concise and natural — skip heavy `**1.** **2.**` scaffolding, write like a person.
 
