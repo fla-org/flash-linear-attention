@@ -27,21 +27,23 @@ class LayerNormBackend(BaseBackend):
     @classmethod
     def is_available(cls) -> bool:
         from fla.utils import IS_NPU
+
         return IS_NPU
 
     def layer_norm_fwd(
         self,
-        x,
-        weight,
-        bias,
-        eps=1e-5,
-        residual=None,
-        out_dtype=None,
-        residual_dtype=None,
-        is_rms_norm=False,
-        num_groups=1,
-    ):
+        x: torch.Tensor,
+        weight: torch.Tensor | None,
+        bias: torch.Tensor | None,
+        eps: float = 1e-5,
+        residual: torch.Tensor | None = None,
+        out_dtype: torch.dtype | None = None,
+        residual_dtype: torch.dtype | None = None,
+        is_rms_norm: bool = False,
+        num_groups: int = 1,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor]:
         from fla.modules.norm.triton_ascend.layernorm import layer_norm_fwd_npu
+
         return layer_norm_fwd_npu(
             x=x,
             weight=weight,
@@ -56,20 +58,21 @@ class LayerNormBackend(BaseBackend):
 
     def layer_norm_bwd(
         self,
-        dy,
-        x,
-        weight,
-        bias,
-        mean=None,
-        rstd=None,
-        dres=None,
-        has_residual=False,
-        is_rms_norm=False,
-        x_dtype=None,
-        recompute_output=False,
-        num_groups=1,
-    ):
+        dy: torch.Tensor,
+        x: torch.Tensor,
+        weight: torch.Tensor | None,
+        bias: torch.Tensor | None,
+        mean: torch.Tensor | None = None,
+        rstd: torch.Tensor | None = None,
+        dres: torch.Tensor | None = None,
+        has_residual: bool = False,
+        is_rms_norm: bool = False,
+        x_dtype: torch.dtype | None = None,
+        recompute_output: bool = False,
+        num_groups: int = 1,
+    ) -> tuple[torch.Tensor | None, ...]:
         from fla.modules.norm.triton_ascend.layernorm import layer_norm_bwd_npu
+
         return layer_norm_bwd_npu(
             dy=dy,
             x=x,
@@ -96,6 +99,7 @@ class L2NormBackend(BaseBackend):
     @classmethod
     def is_available(cls) -> bool:
         from fla.utils import IS_NPU
+
         return IS_NPU
 
     def l2norm_fwd(
@@ -105,10 +109,12 @@ class L2NormBackend(BaseBackend):
         output_dtype: torch.dtype | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         from fla.modules.norm.triton_ascend.l2norm import l2norm_fwd_npu
+
         return l2norm_fwd_npu(x=x, eps=eps, output_dtype=output_dtype)
 
     def l2norm_bwd(self, y: torch.Tensor, rstd: torch.Tensor, dy: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
         from fla.modules.norm.triton_ascend.l2norm import l2norm_bwd_npu
+
         return l2norm_bwd_npu(y=y, rstd=rstd, dy=dy)
 
 
@@ -124,22 +130,24 @@ class FusedNormGateBackend(BaseBackend):
     @classmethod
     def is_available(cls) -> bool:
         from fla.utils import IS_NPU
+
         return IS_NPU
 
     def layer_norm_gated_fwd(
         self,
-        x,
-        g,
-        weight,
-        bias,
-        activation="swish",
-        eps=1e-5,
-        residual=None,
-        out_dtype=None,
-        residual_dtype=None,
-        is_rms_norm=False,
-    ):
+        x: torch.Tensor,
+        g: torch.Tensor,
+        weight: torch.Tensor | None,
+        bias: torch.Tensor | None,
+        activation: str = "swish",
+        eps: float = 1e-5,
+        residual: torch.Tensor | None = None,
+        out_dtype: torch.dtype | None = None,
+        residual_dtype: torch.dtype | None = None,
+        is_rms_norm: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor]:
         from fla.modules.norm.triton_ascend.fused_norm_gate import layer_norm_gated_fwd_npu
+
         return layer_norm_gated_fwd_npu(
             x=x,
             g=g,
@@ -155,22 +163,23 @@ class FusedNormGateBackend(BaseBackend):
 
     def layer_norm_gated_bwd(
         self,
-        dy,
-        x,
-        g,
-        weight,
-        bias,
-        activation="swish",
-        eps=1e-5,
-        mean=None,
-        rstd=None,
-        dresidual=None,
-        has_residual=False,
-        is_rms_norm=False,
-        x_dtype=None,
-        recompute_output=False,
-    ):
+        dy: torch.Tensor,
+        x: torch.Tensor,
+        g: torch.Tensor,
+        weight: torch.Tensor | None,
+        bias: torch.Tensor | None,
+        activation: str = "swish",
+        eps: float = 1e-5,
+        mean: torch.Tensor | None = None,
+        rstd: torch.Tensor | None = None,
+        dresidual: torch.Tensor | None = None,
+        has_residual: bool = False,
+        is_rms_norm: bool = False,
+        x_dtype: torch.dtype | None = None,
+        recompute_output: bool = False,
+    ) -> tuple[torch.Tensor | None, ...]:
         from fla.modules.norm.triton_ascend.fused_norm_gate import layer_norm_gated_bwd_npu
+
         return layer_norm_gated_bwd_npu(
             dy=dy,
             x=x,
