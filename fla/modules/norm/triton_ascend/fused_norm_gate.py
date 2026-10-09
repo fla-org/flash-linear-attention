@@ -63,7 +63,7 @@ def _tile_memory_multiplier(base: float, large_bd_mult: float, BD: int) -> float
 
 def _fwd_memory_multiplier(BD: int) -> float:
     """Return fwd tile multiplier; grid-stride + large BD needs more headroom."""
-    return _tile_memory_multiplier(_FWD_MEM_MULT, _LARGE_BD_FWD_MEM_MULT, BD)
+    return _tile_memory_multiplier(base=_FWD_MEM_MULT, large_bd_mult=_LARGE_BD_FWD_MEM_MULT, BD=BD)
 
 
 def _bwd_memory_multiplier(is_rms_norm: bool, BD: int, *, recompute_output: bool = False) -> float:
@@ -73,10 +73,11 @@ def _bwd_memory_multiplier(is_rms_norm: bool, BD: int, *, recompute_output: bool
     share the same calibrated budget. ``recompute_output`` needs extra headroom
     because the kernel keeps pre-gate ``b_y`` live for the ``y`` store.
     """
-    del is_rms_norm  # reserved if LN/RMS budgets diverge
+    # reserved if LN/RMS budgets diverge
+    del is_rms_norm
     if recompute_output:
-        return _tile_memory_multiplier(_BWD_RECOMPUTE_MEM_MULT, _LARGE_BD_BWD_RECOMPUTE_MEM_MULT, BD)
-    return _tile_memory_multiplier(_BWD_MEM_MULT, _LARGE_BD_BWD_MEM_MULT, BD)
+        return _tile_memory_multiplier(base=_BWD_RECOMPUTE_MEM_MULT, large_bd_mult=_LARGE_BD_BWD_RECOMPUTE_MEM_MULT, BD=BD)
+    return _tile_memory_multiplier(base=_BWD_MEM_MULT, large_bd_mult=_LARGE_BD_BWD_MEM_MULT, BD=BD)
 
 
 def _get_layer_norm_gated_tiles(
@@ -89,8 +90,8 @@ def _get_layer_norm_gated_tiles(
     """Return (BD, BT) for row-tiled kernels under UB constraints."""
     # BD: fit feature dim with BT=1 using a single-row budget.
     BD = compute_ub_block_size(
-        D,
-        _BD_MEM_MULT,
+        dim_size=D,
+        memory_multiplier=_BD_MEM_MULT,
         safety_margin=_UB_SAFETY_MARGIN,
         fallback=_FALLBACK_MAX_BD,
         desired=triton.next_power_of_2(D),
@@ -101,14 +102,14 @@ def _get_layer_norm_gated_tiles(
             "Column-tiled kernels are not yet implemented for this size."
         )
     if is_forward:
-        memory_multiplier = _fwd_memory_multiplier(BD)
+        memory_multiplier = _fwd_memory_multiplier(BD=BD)
     else:
-        memory_multiplier = _bwd_memory_multiplier(is_rms_norm, BD, recompute_output=recompute_output)
+        memory_multiplier = _bwd_memory_multiplier(is_rms_norm=is_rms_norm, BD=BD, recompute_output=recompute_output)
     # Large synthetic row dim so BT is limited by UB, not by a host-side T guess.
     BT = compute_row_tile_block_size(
-        1 << 20,
-        BD,
-        memory_multiplier,
+        row_dim=1 << 20,
+        fixed_dim=BD,
+        memory_multiplier=memory_multiplier,
         tiling_row=True,
         safety_margin=_UB_SAFETY_MARGIN,
         fallback=16,
@@ -128,7 +129,12 @@ def _launch_config(
     recompute_output: bool = False,
 ) -> tuple[int, int, int]:
     """Return (BD, BT, NS) for a grid-stride launch over T rows."""
-    BD, BT = _get_layer_norm_gated_tiles(D, is_forward=is_forward, is_rms_norm=is_rms_norm, recompute_output=recompute_output)
+    BD, BT = _get_layer_norm_gated_tiles(
+        D=D,
+        is_forward=is_forward,
+        is_rms_norm=is_rms_norm,
+        recompute_output=recompute_output,
+    )
     NT = triton.cdiv(T, BT)
     NS = max(1, min(get_multiprocessor_count(device_index), NT, ASCEND_MAX_GRID_DIM))
     return BD, BT, NS
@@ -344,8 +350,8 @@ def layer_norm_gated_fwd_npu(
     mean = torch.empty((T,), dtype=torch.float, device=x.device) if not is_rms_norm else None
     rstd = torch.empty((T,), dtype=torch.float, device=x.device)
 
-    BD, BT, NS = _launch_config(T, D, x.device.index, is_forward=True, is_rms_norm=is_rms_norm)
-    act_id = _activation_id(activation)
+    BD, BT, NS = _launch_config(T=T, D=D, device_index=x.device.index, is_forward=True, is_rms_norm=is_rms_norm)
+    act_id = _activation_id(activation=activation)
     layer_norm_gated_fwd_kernel[(NS,)](
         x=x,
         g=g,
@@ -403,9 +409,9 @@ def layer_norm_gated_bwd_npu(
     y = torch.empty(T, D, dtype=dy.dtype, device=dy.device) if recompute_output else None
 
     BD, BT, NS = _launch_config(
-        T,
-        D,
-        x.device.index,
+        T=T,
+        D=D,
+        device_index=x.device.index,
         is_forward=False,
         is_rms_norm=is_rms_norm,
         recompute_output=recompute_output,
@@ -414,7 +420,7 @@ def layer_norm_gated_bwd_npu(
     dw = torch.empty((NS, D), dtype=torch.float, device=weight.device) if weight is not None else None
     db = torch.empty((NS, D), dtype=torch.float, device=bias.device) if bias is not None else None
 
-    act_id = _activation_id(activation)
+    act_id = _activation_id(activation=activation)
     layer_norm_gated_bwd_kernel[(NS,)](
         x=x,
         g=g,

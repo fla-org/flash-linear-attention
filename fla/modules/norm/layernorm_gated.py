@@ -237,8 +237,8 @@ def layer_norm_fwd(
     else:
         out = torch.empty_like(x)
     assert out.stride(-1) == 1
-    mean = torch.empty((G * T, ), dtype=torch.float32, device=x.device) if not is_rms_norm else None
-    rstd = torch.empty((G * T, ), dtype=torch.float32, device=x.device)
+    mean = torch.empty((G * T,), dtype=torch.float32, device=x.device) if not is_rms_norm else None
+    rstd = torch.empty((G * T,), dtype=torch.float32, device=x.device)
 
     MAX_FUSED_SIZE = 65536 // x.element_size()
     BD = min(MAX_FUSED_SIZE, triton.next_power_of_2(group_size))

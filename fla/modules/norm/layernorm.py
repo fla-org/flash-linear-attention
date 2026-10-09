@@ -596,15 +596,11 @@ class LayerNormFunction(torch.autograd.Function):
         if x.shape[-1] % num_groups != 0:
             raise ValueError('num_channels must be divisible by num_groups')
 
-        x = x.reshape(-1, (x.shape[-1] // num_groups))
+        x = x.reshape(-1, x.shape[-1] // num_groups)
         if residual is not None:
             assert residual.shape == x_shape_og
             residual = residual.reshape_as(x)
-        residual_dtype = (
-            residual.dtype
-            if residual is not None
-            else (torch.float32 if residual_in_fp32 else None)
-        )
+        residual_dtype = residual.dtype if residual is not None else (torch.float32 if residual_in_fp32 else None)
         y, mean, rstd, res_out = layer_norm_fwd(
             x=x,
             weight=weight,
@@ -630,7 +626,7 @@ class LayerNormFunction(torch.autograd.Function):
     @input_guard
     def backward(ctx, dy, *args):
         x, weight, bias, mean, rstd = ctx.saved_tensors
-        dy = dy.reshape(-1, (dy.shape[-1] // ctx.num_groups))
+        dy = dy.reshape(-1, dy.shape[-1] // ctx.num_groups)
         assert dy.shape == x.shape
         if ctx.prenorm:
             dresidual = args[0]
@@ -807,15 +803,11 @@ class LayerNormLinearFunction(torch.autograd.Function):
         if x.shape[-1] % num_groups != 0:
             raise ValueError('num_channels must be divisible by num_groups')
 
-        x = x.reshape(-1, (x.shape[-1] // num_groups))
+        x = x.reshape(-1, x.shape[-1] // num_groups)
         if residual is not None:
             assert residual.shape == x_shape_og
             residual = residual.reshape_as(x)
-        residual_dtype = (
-            residual.dtype
-            if residual is not None
-            else (torch.float32 if residual_in_fp32 else None)
-        )
+        residual_dtype = residual.dtype if residual is not None else (torch.float32 if residual_in_fp32 else None)
         y, mean, rstd, res_out = layer_norm_fwd(
             x=x,
             weight=norm_weight,
@@ -850,7 +842,7 @@ class LayerNormLinearFunction(torch.autograd.Function):
         x, norm_weight, norm_bias, linear_weight, mean, rstd = ctx.saved_tensors
         dout = dout.reshape(-1, dout.shape[-1])
         dy = F.linear(dout, linear_weight.t())
-        dy = dy.reshape(-1, (dy.shape[-1] // ctx.num_groups))
+        dy = dy.reshape(-1, dy.shape[-1] // ctx.num_groups)
         dlinear_bias = None if ctx.linear_bias_is_none else dout.sum(0)
         assert dy.shape == x.shape
         if ctx.prenorm:
@@ -956,9 +948,7 @@ def group_norm_ref(
     if residual is not None:
         x = (x + residual).to(x.dtype)
     residual = x
-    x, weight = [
-        rearrange(data, "... (g d) -> ... g d", g=num_groups) for data in (x, weight)
-    ]
+    x, weight = [rearrange(data, "... (g d) -> ... g d", g=num_groups) for data in (x, weight)]
     if bias is not None:
         bias = rearrange(bias, '... (g d) -> ... g d', g=num_groups)
     if not is_rms_norm:

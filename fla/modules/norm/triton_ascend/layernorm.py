@@ -26,8 +26,8 @@ def _get_layer_norm_bd(D: int, is_forward: bool) -> int:
     """Return power-of-2 block size for feature dim D under UB constraints."""
     memory_multiplier = _FWD_MEM_MULT if is_forward else _BWD_MEM_MULT
     return compute_ub_block_size(
-        D,
-        memory_multiplier,
+        dim_size=D,
+        memory_multiplier=memory_multiplier,
         safety_margin=_UB_SAFETY_MARGIN,
         fallback=_FALLBACK_MAX_BD,
         desired=triton.next_power_of_2(D),
@@ -203,15 +203,15 @@ def _launch_layer_norm_fwd_kernel1(
 ):
     chunk_T = x.shape[0]
     layer_norm_fwd_kernel1[(chunk_T,)](
-        x,
-        y,
-        weight,
-        bias,
-        residual,
-        res_out,
-        mean,
-        rstd,
-        eps,
+        x=x,
+        y=y,
+        w=weight,
+        b=bias,
+        res=residual,
+        res_out=res_out,
+        mean=mean,
+        rstd=rstd,
+        eps=eps,
         G=G,
         D=D,
         BD=BD,
@@ -252,7 +252,7 @@ def layer_norm_fwd_npu(
     mean = torch.empty((T,), dtype=torch.float, device=x.device) if not is_rms_norm else None
     rstd = torch.empty((T,), dtype=torch.float, device=x.device)
 
-    BD = _get_layer_norm_bd(D, is_forward=True)
+    BD = _get_layer_norm_bd(D=D, is_forward=True)
     if D > BD:
         raise RuntimeError(
             f"LayerNorm feature dim {D} exceeds UB-safe block size {BD}. "
@@ -261,22 +261,22 @@ def layer_norm_fwd_npu(
 
     # Ascend: use row-wise kernel1 (no make_block_ptr) for all feature dims.
     # Split along rows when T exceeds the Ascend grid limit.
-    for row_start, row_len in iter_axis_launch_chunks(T, 1, max_grid=ASCEND_MAX_GRID_DIM):
+    for row_start, row_len in iter_axis_launch_chunks(axis_size=T, other_grid_product=1, max_grid=ASCEND_MAX_GRID_DIM):
         row_end = row_start + row_len
         _launch_layer_norm_fwd_kernel1(
-            x[row_start:row_end],
-            y[row_start:row_end],
-            weight,
-            bias,
-            None if residual is None else residual[row_start:row_end],
-            None if res_out is None else res_out[row_start:row_end],
-            None if mean is None else mean[row_start:row_end],
-            rstd[row_start:row_end],
-            eps,
-            G,
-            D,
-            BD,
-            is_rms_norm,
+            x=x[row_start:row_end],
+            y=y[row_start:row_end],
+            weight=weight,
+            bias=bias,
+            residual=None if residual is None else residual[row_start:row_end],
+            res_out=None if res_out is None else res_out[row_start:row_end],
+            mean=None if mean is None else mean[row_start:row_end],
+            rstd=rstd[row_start:row_end],
+            eps=eps,
+            G=G,
+            D=D,
+            BD=BD,
+            is_rms_norm=is_rms_norm,
         )
     return y, mean, rstd, res_out if res_out is not None else x
 
@@ -308,32 +308,32 @@ def layer_norm_bwd_npu(
     dres_in = torch.empty_like(x) if has_residual and dx.dtype != x.dtype else None
     y = torch.empty(T, D, dtype=dy.dtype, device=dy.device) if recompute_output else None
 
-    BD = _get_layer_norm_bd(D, is_forward=False)
+    BD = _get_layer_norm_bd(D=D, is_forward=False)
     if D > BD:
         raise RuntimeError(
             f"LayerNorm feature dim {D} exceeds UB-safe block size {BD}. "
             "Column-tiled kernels are not yet implemented for this size."
         )
 
-    NS, BS, GS = _layer_norm_bwd_launch_config(T, G, x.device.index)
+    NS, BS, GS = _layer_norm_bwd_launch_config(T=T, G=G, device_index=x.device.index)
 
     dw = torch.empty((NS, D), dtype=torch.float, device=weight.device) if weight is not None else None
     db = torch.empty((NS, D), dtype=torch.float, device=bias.device) if bias is not None else None
     grid = (NS,)
 
     layer_norm_bwd_kernel1[grid](
-        x,
-        weight,
-        bias,
-        y,
-        dy,
-        dx,
-        dw,
-        db,
-        dres,
-        dres_in,
-        mean,
-        rstd,
+        x=x,
+        w=weight,
+        b=bias,
+        y=y,
+        dy=dy,
+        dx=dx,
+        dw=dw,
+        db=db,
+        dres=dres,
+        dres_in=dres_in,
+        mean=mean,
+        rstd=rstd,
         T=T,
         G=G,
         D=D,

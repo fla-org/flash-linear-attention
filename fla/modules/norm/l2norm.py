@@ -15,8 +15,6 @@ from fla.ops.utils.cache import fla_cache_autotune
 from fla.utils import IS_AMD, autotune_cache_kwargs, input_guard
 
 BT_LIST = [8, 16, 32, 64, 128]
-
-
 NUM_WARPS_AUTOTUNE = [1, 2, 4, 8, 16] if IS_AMD else [1, 2, 4, 8, 16, 32]
 
 
