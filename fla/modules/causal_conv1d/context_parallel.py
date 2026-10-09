@@ -7,7 +7,6 @@
 
 import torch
 import torch.distributed as dist
-from torch.autograd.function import FunctionCtx
 
 from fla.ops.cp import FLACPContext, all_gather_into_tensor, conv_cp_send_recv_bwd, conv_cp_send_recv_fwd
 from fla.ops.utils import prepare_chunk_indices
@@ -172,7 +171,7 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
 
     @staticmethod
     def forward(
-        ctx: FunctionCtx,
+        ctx,
         x: torch.Tensor,
         weight: torch.Tensor,
         bias: torch.Tensor | None,
@@ -231,7 +230,7 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
         return y
 
     @staticmethod
-    def backward(ctx: FunctionCtx, dy: torch.Tensor) -> tuple[torch.Tensor | None, ...]:
+    def backward(ctx, dy: torch.Tensor) -> tuple[torch.Tensor | None, ...]:
         # import here to avoid circular dependency
         from fla.modules.causal_conv1d import causal_conv1d_bwd
 

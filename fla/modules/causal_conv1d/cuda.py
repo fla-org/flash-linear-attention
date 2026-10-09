@@ -9,7 +9,6 @@
 
 import torch
 from einops import rearrange
-from torch.autograd.function import FunctionCtx
 
 from fla.modules.causal_conv1d import causal_conv1d_update_states
 from fla.ops.utils import prepare_sequence_ids
@@ -53,7 +52,7 @@ class FastCausalConv1dFn(torch.autograd.Function):
     @staticmethod
     @input_guard(no_guard_contiguous=["x"])
     def forward(
-        ctx: FunctionCtx,
+        ctx,
         x: torch.Tensor,
         weight: torch.Tensor,
         bias: torch.Tensor | None = None,
@@ -101,7 +100,7 @@ class FastCausalConv1dFn(torch.autograd.Function):
 
     @staticmethod
     @input_guard
-    def backward(ctx: FunctionCtx, dout: torch.Tensor, *args) -> tuple[torch.Tensor | None, ...]:
+    def backward(ctx, dout: torch.Tensor, *args) -> tuple[torch.Tensor | None, ...]:
         x, weight, bias, seq_idx, initial_states = ctx.saved_tensors
         dx = torch.empty_like(x, memory_format=torch.contiguous_format)
         x = rearrange(x, 'b t d -> b d t')

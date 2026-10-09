@@ -13,7 +13,6 @@ import torch.nn as nn
 import triton
 import triton.language as tl
 from einops import rearrange
-from torch.autograd.function import FunctionCtx
 
 from fla.backends import dispatch
 from fla.ops.cp import FLACPContext
@@ -972,7 +971,7 @@ class CausalConv1dFunction(torch.autograd.Function):
     @staticmethod
     @input_guard(no_guard_contiguous=["x"])
     def forward(
-        ctx: FunctionCtx,
+        ctx,
         x: torch.Tensor,
         weight: torch.Tensor | None = None,
         bias: torch.Tensor | None = None,
@@ -1011,7 +1010,7 @@ class CausalConv1dFunction(torch.autograd.Function):
 
     @staticmethod
     @input_guard(no_guard_contiguous=["dy"])
-    def backward(ctx: FunctionCtx, dy: torch.Tensor, dht: torch.Tensor | None = None) -> tuple[torch.Tensor | None, ...]:
+    def backward(ctx, dy: torch.Tensor, dht: torch.Tensor | None = None) -> tuple[torch.Tensor | None, ...]:
         x, weight, bias, residual, initial_state = ctx.saved_tensors
         dx, dw, db, dr, dh0 = causal_conv1d_bwd(
             x=x,
