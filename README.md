@@ -29,6 +29,7 @@
 
 ## News
 
+- [2026-10] 🛰️ Add Gated KalmaNet (GKA) implementation to `fla` ([paper](https://arxiv.org/abs/2511.21016)) - a fading-memory layer that solves a test-time ridge regression at every token.
 - [2026-10] 🌊 Add [CyFA](https://arxiv.org/abs/2609.36259) (Cyclic Flow Attention) implementation to `fla` - a Linear RNN that partitions memory by relative time through learned cyclic transport.
 - [2026-10] 🎉 Add Stick-Breaking Attention kernels and models to `fla` ([paper](https://arxiv.org/abs/2410.17980)).
 - [2026-07] 🐈 Add CAT (Compress and Attend Transformer) implementation to `fla` ([paper](https://arxiv.org/abs/2511.05313)) - a _meta_-sequence mixer that unlocks test-time control of inference costs.
@@ -114,6 +115,7 @@
 | 2025 | DeltaFormer                   | [Understanding Transformer from the Perspective of Associative Memory](https://arxiv.org/abs/2505.19488v1)                                    | [code](https://github.com/fla-org/flash-linear-attention/blob/main/fla/layers/deltaformer.py)          |
 | 2025 | KDA                           | [Kimi Linear: An Expressive, Efficient Attention Architecture](https://arxiv.org/abs/2510.26692)                                              | [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/ops/kda)                        |
 | 2025 | MoBA                          | [MoBA: Mixture of Block Attention for Long-Context LLMs](https://arxiv.org/abs/2502.13189)                                                    | [code](https://github.com/fla-org/flash-linear-attention/blob/main/fla/layers/moba.py)                 |
+| 2025 | Gated KalmaNet                | [Gated KalmaNet: A Fading Memory Layer Through Test-Time Ridge Regression](https://arxiv.org/abs/2511.21016)                                  | [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/ops/gka)                        |
 | 2026 | Mamba3                        | [Mamba-3: Improved Sequence Modeling using State Space Principles](https://arxiv.org/abs/2603.15569)                                          | [code](https://github.com/fla-org/flash-linear-attention/blob/main/fla/models/mamba3)                  |
 | 2026 | Raven                         | [Raven: High-Recall Sequence Modeling with Sparse Memory Routing](https://github.com/goombalab/raven/blob/main/raven.pdf)                     | [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/models/raven)                   |
 | 2026 | Gated DeltaNet 2              | [Gated DeltaNet-2: Decoupling Erase and Write in Linear Attention](https://arxiv.org/abs/2605.22791)                                          | [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/ops/gdn2)                       |
