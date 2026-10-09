@@ -456,6 +456,19 @@ register_op(OpConfig(
     category='head_gate',
 ))
 
+register_op(OpConfig(
+    name='chunk_gka',
+    import_path='fla.ops.gka',
+    inputs={
+        **_simple_qkv,
+        'g': TensorSpec(shape_BTH, transform=logsigmoid),
+        'gk': TensorSpec(shape_BTH, transform=logsigmoid),
+        'alpha': TensorSpec(shape_BTH, transform=sigmoid_transform),
+    },
+    category='head_gate',
+    dim_constraints={'D': [64, 128]},
+))
+
 # --- RWKV ---
 
 
