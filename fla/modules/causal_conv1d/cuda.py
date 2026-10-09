@@ -11,7 +11,7 @@ import torch
 from einops import rearrange
 from torch.autograd.function import FunctionCtx
 
-from fla.modules.causal_conv1d.ops import causal_conv1d_update_states
+from fla.modules.causal_conv1d import causal_conv1d_update_states
 from fla.ops.utils import prepare_sequence_ids
 from fla.utils import input_guard
 
@@ -78,7 +78,7 @@ class FastCausalConv1dFn(torch.autograd.Function):
         seq_idx = seq_idx.contiguous() if seq_idx is not None else None
 
         # import here to avoid circular dependency.
-        from fla.modules.causal_conv1d.ops import causal_conv1d_fwd
+        from fla.modules.causal_conv1d import causal_conv1d_fwd
 
         ctx.activation = activation in ["silu", "swish"]
         out, _ = causal_conv1d_fwd(

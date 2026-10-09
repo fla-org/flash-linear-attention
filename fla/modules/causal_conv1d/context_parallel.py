@@ -184,7 +184,7 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # import here to avoid circular dependency
-        from fla.modules.causal_conv1d.ops import causal_conv1d_fwd
+        from fla.modules.causal_conv1d import causal_conv1d_fwd
 
         if cp_context is None:
             raise ValueError("cp_context must be provided for CausalConv1dFunctionCP")
@@ -233,7 +233,7 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
     @staticmethod
     def backward(ctx: FunctionCtx, dy: torch.Tensor) -> tuple[torch.Tensor | None, ...]:
         # import here to avoid circular dependency
-        from fla.modules.causal_conv1d.ops import causal_conv1d_bwd
+        from fla.modules.causal_conv1d import causal_conv1d_bwd
 
         x, weight, bias, residual, initial_state = ctx.saved_tensors
         group = ctx.group

@@ -5,9 +5,10 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from fla.modules.causal_conv1d import ShortConvolution, causal_conv1d
-from fla.modules.causal_conv1d.ops import (
+from fla.modules.causal_conv1d import (
     CausalConv1dFunction,
+    ShortConvolution,
+    causal_conv1d,
     causal_conv1d_bwd,
     causal_conv1d_fwd,
     causal_conv1d_update,
