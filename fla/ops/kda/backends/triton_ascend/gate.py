@@ -102,17 +102,24 @@ def kda_gate_fwd_kernel_npu(
 
     b_A = tl.load(A_log + i_h).to(tl.float32) if HAS_A else 1.0
 
-    p_g = tl.make_block_ptr(g + i_h * D, (T, D), (H * D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
-    p_yg = tl.make_block_ptr(yg + i_h * D, (T, D), (H * D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
-    b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
+    o_t = tl.cast(i_t, tl.int64) * BT + tl.arange(0, BT)
+    m_t = (o_t >= 0) & (o_t < T)
+    o_i = tl.arange(0, BD)
+    m_i = (o_i >= 0) & (o_i < D)
+    m_p_g = m_t[:, None] & m_i[None, :]
+    p_g = g + i_h * D + o_t[:, None] * (H * D) + o_i[None, :]
+    p_yg = yg + i_h * D + o_t[:, None] * (H * D) + o_i[None, :]
+    b_g = tl.load(p_g, mask=m_p_g, other=0).to(tl.float32)
     if HAS_BIAS:
-        p_b = tl.make_block_ptr(dt_bias, (H * D,), (1,), (i_h * D,), (BD,), (0,))
-        b_g = b_g + tl.load(p_b, boundary_check=(0,)).to(tl.float32)
+        o_d = i_h * D + tl.arange(0, BD)
+        m_d = (o_d >= 0) & (o_d < (H * D))
+        p_b = dt_bias + o_d
+        b_g = b_g + tl.load(p_b, mask=m_d, other=0).to(tl.float32)
     if not USE_LOWER_BOUND:
         b_yg = -exp(b_A) * softplus(b_g)
     else:
         b_yg = lower_bound * tl.sigmoid((exp(b_A) if HAS_A else b_A) * b_g)
-    tl.store(p_yg, b_yg.to(p_yg.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_yg, b_yg.to(p_yg.dtype.element_ty), mask=m_p_g)
 
 
 def _launch_gate_fwd(
@@ -181,26 +188,29 @@ def kda_gate_bwd_kernel_npu(
     NT_OFFSET: tl.constexpr,
     H_OFFSET: tl.constexpr,
 ):
-    i_t, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
+    i_t, i_h = tl.cast(tl.program_id(0), tl.int64), tl.cast(tl.program_id(1), tl.int64)
     i_t += NT_OFFSET
     i_h += H_OFFSET
 
     b_A = tl.load(A_log + i_h).to(tl.float32) if HAS_A else 1.0
 
-    o_t = i_t * BT + tl.arange(0, BT)
-    o_d = tl.arange(0, BD)
-    m_t = o_t < T
-    m_g = m_t[:, None] & (o_d[None, :] < D)
-    p_g = g + i_h * D + o_t[:, None] * (H * D) + o_d[None, :]
-    p_dg = dg + i_h * D + o_t[:, None] * (H * D) + o_d[None, :]
-    p_dyg = dyg + i_h * D + o_t[:, None] * (H * D) + o_d[None, :]
+    o_t = tl.cast(i_t, tl.int64) * BT + tl.arange(0, BT)
+    m_t = (o_t >= 0) & (o_t < T)
+    o_i = tl.arange(0, BD)
+    m_i = (o_i >= 0) & (o_i < D)
+    m_p_g = m_t[:, None] & m_i[None, :]
+    p_g = g + i_h * D + o_t[:, None] * (H * D) + o_i[None, :]
+    p_dg = dg + i_h * D + o_t[:, None] * (H * D) + o_i[None, :]
+    p_dyg = dyg + i_h * D + o_t[:, None] * (H * D) + o_i[None, :]
 
-    b_g = tl.load(p_g, mask=m_g, other=0.0).to(tl.float32)
-    b_dyg = tl.load(p_dyg, mask=m_g, other=0.0).to(tl.float32)
+    b_g = tl.load(p_g, mask=m_p_g, other=0).to(tl.float32)
+    b_dyg = tl.load(p_dyg, mask=m_p_g, other=0).to(tl.float32)
 
     if HAS_BIAS:
-        o_b = i_h * D + o_d
-        b_g = b_g + tl.load(dt_bias + o_b, mask=o_d < D, other=0.0).to(tl.float32)
+        o_d = i_h * D + tl.arange(0, BD)
+        m_d = (o_d >= 0) & (o_d < (H * D))
+        p_b = dt_bias + o_d
+        b_g = b_g + tl.load(p_b, mask=m_d, other=0).to(tl.float32)
 
     if not USE_LOWER_BOUND:
         b_A = -exp(b_A)
@@ -216,12 +226,12 @@ def kda_gate_bwd_kernel_npu(
         b_dg = b_d_inner_term * b_A
         b_dA = tl.sum(tl.sum(b_dg * b_g, 1), 0) if HAS_A else 0.0
 
-    tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), mask=m_g)
+    tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), mask=m_p_g)
     if HAS_A:
         tl.store(dA + i_t * H + i_h, b_dA)
     if HAS_BIAS:
         b_dbias = tl.sum(b_dg, 0)
-        tl.store(dbias + (i_t * H + i_h) * D + o_d, b_dbias, mask=o_d < D)
+        tl.store(dbias + (i_t * H + i_h) * D + o_i, b_dbias, mask=o_i < D)
 
 
 def _launch_gate_bwd(
@@ -317,13 +327,18 @@ def kda_gate_chunk_cumsum_vector_kernel_npu(
         bos = tl.cast(i_b, tl.int64) * T
         eos = bos + T
 
-    p_s = tl.make_block_ptr(s + (bos * H + i_h) * S, (T, S), (H * S, 1), (i_t * BT, i_s * BS), (BT, BS), (1, 0))
-    p_o = tl.make_block_ptr(o + (bos * H + i_h) * S, (T, S), (H * S, 1), (i_t * BT, i_s * BS), (BT, BS), (1, 0))
-    b_s = tl.load(p_s, boundary_check=(0, 1)).to(tl.float32)
+    o_t = tl.cast(i_t, tl.int64) * BT + tl.arange(0, BT)
+    m_t = (o_t >= 0) & (o_t < T)
+    o_s = i_s * BS + tl.arange(0, BS)
+    m_s = (o_s >= 0) & (o_s < S)
+    m_p_s = m_t[:, None] & m_s[None, :]
+    p_s = s + (bos * H + i_h) * S + o_t[:, None] * (H * S) + o_s[None, :]
+    p_o = o + (bos * H + i_h) * S + o_t[:, None] * (H * S) + o_s[None, :]
+    b_s = tl.load(p_s, mask=m_p_s, other=0).to(tl.float32)
 
     if HAS_BIAS:
-        p_b = tl.make_block_ptr(dt_bias + i_h * S, (S,), (1,), (i_s * BS,), (BS,), (0,))
-        b_bias = tl.load(p_b, boundary_check=(0,)).to(tl.float32)
+        p_b = dt_bias + i_h * S + o_s
+        b_bias = tl.load(p_b, mask=m_s, other=0).to(tl.float32)
         b_s = b_s + b_bias[None, :]
 
     b_A = tl.load(A_log + i_h).to(tl.float32) if HAS_A else 1.0
@@ -339,7 +354,7 @@ def kda_gate_chunk_cumsum_vector_kernel_npu(
 
     if HAS_SCALE:
         b_o *= scale
-    tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=m_p_s)
 
 
 def _launch_gate_chunk_cumsum(

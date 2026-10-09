@@ -61,6 +61,7 @@ def solve_tril_16x16_kernel_npu(
     else:
         bos = tl.cast(i_b, tl.int64) * T
         eos = bos + T
+    i_t = tl.cast(i_t, tl.int64)
 
     o_i = tl.arange(0, 16)
     m_A = o_i[:, None] > o_i[None, :]
@@ -70,8 +71,13 @@ def solve_tril_16x16_kernel_npu(
     Ai = Ai + (bos * H + i_h) * 16
 
     offset = (i_t * 16) % BT
-    p_A = tl.make_block_ptr(A, (T, BT), (H * BT, 1), (i_t * 16, offset), (16, 16), (1, 0))
-    b_A = tl.load(p_A, boundary_check=(0, 1)).to(tl.float32)
+    o_i_2 = i_t * 16 + tl.arange(0, 16)
+    m_i_2 = (o_i_2 >= 0) & (o_i_2 < T)
+    o_i_3 = offset + tl.arange(0, 16)
+    m_i_3 = (o_i_3 >= 0) & (o_i_3 < BT)
+    m_p_A = m_i_2[:, None] & m_i_3[None, :]
+    p_A = A + o_i_2[:, None] * (H * BT) + o_i_3[None, :]
+    b_A = tl.load(p_A, mask=m_p_A, other=0).to(tl.float32)
     b_A = tl.where(m_A, b_A, 0)
     b_A = -b_A
 
@@ -82,8 +88,11 @@ def solve_tril_16x16_kernel_npu(
         b_A = tl.where((o_i == i)[:, None], b_a, b_A)
     b_A += m_I
 
-    p_Ai = tl.make_block_ptr(Ai, (T, 16), (H * 16, 1), (i_t * 16, 0), (16, 16), (1, 0))
-    tl.store(p_Ai, b_A.to(p_Ai.dtype.element_ty, fp_downcast_rounding='rtne'), boundary_check=(0, 1))
+    o_i_4 = tl.arange(0, 16)
+    m_i_4 = (o_i_4 >= 0) & (o_i_4 < 16)
+    m_p_Ai = m_i_2[:, None] & m_i_4[None, :]
+    p_Ai = Ai + o_i_2[:, None] * (H * 16) + o_i_4[None, :]
+    tl.store(p_Ai, b_A.to(p_Ai.dtype.element_ty, fp_downcast_rounding='rtne'), mask=m_p_Ai)
 
 
 @triton.jit(do_not_specialize=['T', 'NT_OFFSET', 'BH_OFFSET'])
@@ -116,28 +125,39 @@ def merge_16x16_to_32x32_inverse_kernel_npu(
     A += (bos * H + i_h) * BT
     Ai += (bos * H + i_h) * BT
 
-    p_A_11 = tl.make_block_ptr(A, (T, BT), (H * BT, 1), (i_t * BT, 0), (16, 16), (1, 0))
-    p_A_22 = tl.make_block_ptr(A, (T, BT), (H * BT, 1), (i_t * BT + 16, 16), (16, 16), (1, 0))
-    b_Ai_11 = tl.load(p_A_11, boundary_check=(0, 1)).to(tl.float32)
-    b_Ai_22 = tl.load(p_A_22, boundary_check=(0, 1)).to(tl.float32)
+    o_i_2 = tl.cast(i_t, tl.int64) * BT + tl.arange(0, 16)
+    m_i_2 = (o_i_2 >= 0) & (o_i_2 < T)
+    o_i_3 = tl.arange(0, 16)
+    m_i_3 = (o_i_3 >= 0) & (o_i_3 < BT)
+    m_p_A_11 = m_i_2[:, None] & m_i_3[None, :]
+    p_A_11 = A + o_i_2[:, None] * (H * BT) + o_i_3[None, :]
+    o_i_4 = tl.cast(i_t, tl.int64) * BT + 16 + tl.arange(0, 16)
+    m_i_4 = (o_i_4 >= 0) & (o_i_4 < T)
+    o_i_5 = 16 + tl.arange(0, 16)
+    m_i_5 = (o_i_5 >= 0) & (o_i_5 < BT)
+    m_p_A_22 = m_i_4[:, None] & m_i_5[None, :]
+    p_A_22 = A + o_i_4[:, None] * (H * BT) + o_i_5[None, :]
+    b_Ai_11 = tl.load(p_A_11, mask=m_p_A_11, other=0).to(tl.float32)
+    b_Ai_22 = tl.load(p_A_22, mask=m_p_A_22, other=0).to(tl.float32)
 
     b_Ai_11 = -tl.where(m_A, b_Ai_11, 0)
     b_Ai_22 = -tl.where(m_A, b_Ai_22, 0)
 
-    for i in range(2, min(16, T - i_t * BT)):
-        b_a_11 = -tl.load(A + (i_t * BT + i) * H * BT + o_i)
+    for i in range(2, min(16, T - tl.cast(i_t, tl.int64) * BT)):
+        b_a_11 = -tl.load(A + (tl.cast(i_t, tl.int64) * BT + i) * H * BT + o_i)
         b_a_11 += tl.sum(b_a_11[:, None] * b_Ai_11, 0)
         b_Ai_11 = tl.where((o_i == i)[:, None], b_a_11, b_Ai_11)
-    for i in range(16 + 2, min(32, T - i_t * BT)):
-        b_a_22 = -tl.load(A + (i_t * BT + i) * H * BT + o_i + 16)
+    for i in range(16 + 2, min(32, T - tl.cast(i_t, tl.int64) * BT)):
+        b_a_22 = -tl.load(A + (tl.cast(i_t, tl.int64) * BT + i) * H * BT + o_i + 16)
         b_a_22 += tl.sum(b_a_22[:, None] * b_Ai_22, 0)
         b_Ai_22 = tl.where((o_i == i - 16)[:, None], b_a_22, b_Ai_22)
 
     b_Ai_11 += m_I
     b_Ai_22 += m_I
 
-    p_A_21 = tl.make_block_ptr(A, (T, BT), (H * BT, 1), (i_t * BT + 16, 0), (16, 16), (1, 0))
-    b_A_21 = tl.load(p_A_21, boundary_check=(0, 1)).to(tl.float32)
+    m_p_A_21 = m_i_4[:, None] & m_i_3[None, :]
+    p_A_21 = A + o_i_4[:, None] * (H * BT) + o_i_3[None, :]
+    b_A_21 = tl.load(p_A_21, mask=m_p_A_21, other=0).to(tl.float32)
     b_Ai_22_c = b_Ai_22 + 0.0
     b_Ai_21 = -tl.dot(
         tl.dot(b_Ai_22, b_A_21, input_precision='ieee'),
@@ -145,12 +165,12 @@ def merge_16x16_to_32x32_inverse_kernel_npu(
         input_precision='ieee',
     )
 
-    p_Ai_11 = tl.make_block_ptr(Ai, (T, BT), (H * BT, 1), (i_t * BT, 0), (16, 16), (1, 0))
-    p_Ai_21 = tl.make_block_ptr(Ai, (T, BT), (H * BT, 1), (i_t * BT + 16, 0), (16, 16), (1, 0))
-    p_Ai_22 = tl.make_block_ptr(Ai, (T, BT), (H * BT, 1), (i_t * BT + 16, 16), (16, 16), (1, 0))
-    tl.store(p_Ai_11, b_Ai_11.to(p_Ai_11.dtype.element_ty, fp_downcast_rounding='rtne'), boundary_check=(0, 1))
-    tl.store(p_Ai_22, b_Ai_22_c.to(p_Ai_22.dtype.element_ty, fp_downcast_rounding='rtne'), boundary_check=(0, 1))
-    tl.store(p_Ai_21, b_Ai_21.to(p_Ai_21.dtype.element_ty, fp_downcast_rounding='rtne'), boundary_check=(0, 1))
+    p_Ai_11 = Ai + o_i_2[:, None] * (H * BT) + o_i_3[None, :]
+    p_Ai_21 = Ai + o_i_4[:, None] * (H * BT) + o_i_3[None, :]
+    p_Ai_22 = Ai + o_i_4[:, None] * (H * BT) + o_i_5[None, :]
+    tl.store(p_Ai_11, b_Ai_11.to(p_Ai_11.dtype.element_ty, fp_downcast_rounding='rtne'), mask=m_p_A_11)
+    tl.store(p_Ai_22, b_Ai_22_c.to(p_Ai_22.dtype.element_ty, fp_downcast_rounding='rtne'), mask=m_p_A_22)
+    tl.store(p_Ai_21, b_Ai_21.to(p_Ai_21.dtype.element_ty, fp_downcast_rounding='rtne'), mask=m_p_A_21)
 
 
 @triton.jit(do_not_specialize=['T', 'NT_OFFSET', 'BH_OFFSET'])
@@ -183,37 +203,57 @@ def merge_16x16_to_64x64_inverse_kernel_npu(
     A += (bos * H + i_h) * BT
     Ai += (bos * H + i_h) * BT
 
-    p_A_11 = tl.make_block_ptr(A, (T, BT), (H * BT, 1), (i_t * BT, 0), (16, 16), (1, 0))
-    p_A_22 = tl.make_block_ptr(A, (T, BT), (H * BT, 1), (i_t * BT + 16, 16), (16, 16), (1, 0))
-    p_A_33 = tl.make_block_ptr(A, (T, BT), (H * BT, 1), (i_t * BT + 32, 32), (16, 16), (1, 0))
-    p_A_44 = tl.make_block_ptr(A, (T, BT), (H * BT, 1), (i_t * BT + 48, 48), (16, 16), (1, 0))
-    b_Ai_11 = tl.load(p_A_11, boundary_check=(0, 1)).to(tl.float32)
-    b_Ai_22 = tl.load(p_A_22, boundary_check=(0, 1)).to(tl.float32)
-    b_Ai_33 = tl.load(p_A_33, boundary_check=(0, 1)).to(tl.float32)
-    b_Ai_44 = tl.load(p_A_44, boundary_check=(0, 1)).to(tl.float32)
+    o_i_2 = tl.cast(i_t, tl.int64) * BT + tl.arange(0, 16)
+    m_i_2 = (o_i_2 >= 0) & (o_i_2 < T)
+    o_i_3 = tl.arange(0, 16)
+    m_i_3 = (o_i_3 >= 0) & (o_i_3 < BT)
+    m_p_A_11 = m_i_2[:, None] & m_i_3[None, :]
+    p_A_11 = A + o_i_2[:, None] * (H * BT) + o_i_3[None, :]
+    o_i_4 = tl.cast(i_t, tl.int64) * BT + 16 + tl.arange(0, 16)
+    m_i_4 = (o_i_4 >= 0) & (o_i_4 < T)
+    o_i_5 = 16 + tl.arange(0, 16)
+    m_i_5 = (o_i_5 >= 0) & (o_i_5 < BT)
+    m_p_A_22 = m_i_4[:, None] & m_i_5[None, :]
+    p_A_22 = A + o_i_4[:, None] * (H * BT) + o_i_5[None, :]
+    o_i_6 = tl.cast(i_t, tl.int64) * BT + 32 + tl.arange(0, 16)
+    m_i_6 = (o_i_6 >= 0) & (o_i_6 < T)
+    o_i_7 = 32 + tl.arange(0, 16)
+    m_i_7 = (o_i_7 >= 0) & (o_i_7 < BT)
+    m_p_A_33 = m_i_6[:, None] & m_i_7[None, :]
+    p_A_33 = A + o_i_6[:, None] * (H * BT) + o_i_7[None, :]
+    o_i_8 = tl.cast(i_t, tl.int64) * BT + 48 + tl.arange(0, 16)
+    m_i_8 = (o_i_8 >= 0) & (o_i_8 < T)
+    o_i_9 = 48 + tl.arange(0, 16)
+    m_i_9 = (o_i_9 >= 0) & (o_i_9 < BT)
+    m_p_A_44 = m_i_8[:, None] & m_i_9[None, :]
+    p_A_44 = A + o_i_8[:, None] * (H * BT) + o_i_9[None, :]
+    b_Ai_11 = tl.load(p_A_11, mask=m_p_A_11, other=0).to(tl.float32)
+    b_Ai_22 = tl.load(p_A_22, mask=m_p_A_22, other=0).to(tl.float32)
+    b_Ai_33 = tl.load(p_A_33, mask=m_p_A_33, other=0).to(tl.float32)
+    b_Ai_44 = tl.load(p_A_44, mask=m_p_A_44, other=0).to(tl.float32)
 
     b_Ai_11 = -tl.where(m_A, b_Ai_11, 0)
     b_Ai_22 = -tl.where(m_A, b_Ai_22, 0)
     b_Ai_33 = -tl.where(m_A, b_Ai_33, 0)
     b_Ai_44 = -tl.where(m_A, b_Ai_44, 0)
 
-    for i in range(2, min(16, T - i_t * BT)):
-        b_a_11 = -tl.load(A + (i_t * BT + i) * H * BT + o_i)
+    for i in range(2, min(16, T - tl.cast(i_t, tl.int64) * BT)):
+        b_a_11 = -tl.load(A + (tl.cast(i_t, tl.int64) * BT + i) * H * BT + o_i)
         b_a_11 = tl.where(o_i < i, b_a_11, 0.)
         b_a_11 += tl.sum(b_a_11[:, None] * b_Ai_11, 0)
         b_Ai_11 = tl.where((o_i == i)[:, None], b_a_11, b_Ai_11)
-    for i in range(16 + 2, min(32, T - i_t * BT)):
-        b_a_22 = -tl.load(A + (i_t * BT + i) * H * BT + o_i + 16)
+    for i in range(16 + 2, min(32, T - tl.cast(i_t, tl.int64) * BT)):
+        b_a_22 = -tl.load(A + (tl.cast(i_t, tl.int64) * BT + i) * H * BT + o_i + 16)
         b_a_22 = tl.where(o_i < i - 16, b_a_22, 0.)
         b_a_22 += tl.sum(b_a_22[:, None] * b_Ai_22, 0)
         b_Ai_22 = tl.where((o_i == i - 16)[:, None], b_a_22, b_Ai_22)
-    for i in range(32 + 2, min(48, T - i_t * BT)):
-        b_a_33 = -tl.load(A + (i_t * BT + i) * H * BT + o_i + 32)
+    for i in range(32 + 2, min(48, T - tl.cast(i_t, tl.int64) * BT)):
+        b_a_33 = -tl.load(A + (tl.cast(i_t, tl.int64) * BT + i) * H * BT + o_i + 32)
         b_a_33 = tl.where(o_i < i - 32, b_a_33, 0.)
         b_a_33 += tl.sum(b_a_33[:, None] * b_Ai_33, 0)
         b_Ai_33 = tl.where((o_i == i - 32)[:, None], b_a_33, b_Ai_33)
-    for i in range(48 + 2, min(64, T - i_t * BT)):
-        b_a_44 = -tl.load(A + (i_t * BT + i) * H * BT + o_i + 48)
+    for i in range(48 + 2, min(64, T - tl.cast(i_t, tl.int64) * BT)):
+        b_a_44 = -tl.load(A + (tl.cast(i_t, tl.int64) * BT + i) * H * BT + o_i + 48)
         b_a_44 = tl.where(o_i < i - 48, b_a_44, 0.)
         b_a_44 += tl.sum(b_a_44[:, None] * b_Ai_44, 0)
         b_Ai_44 = tl.where((o_i == i - 48)[:, None], b_a_44, b_Ai_44)
@@ -222,18 +262,24 @@ def merge_16x16_to_64x64_inverse_kernel_npu(
     b_Ai_33 += m_I
     b_Ai_44 += m_I
 
-    p_A_21 = tl.make_block_ptr(A, (T, BT), (H * BT, 1), (i_t * BT + 16, 0), (16, 16), (1, 0))
-    p_A_31 = tl.make_block_ptr(A, (T, BT), (H * BT, 1), (i_t * BT + 32, 0), (16, 16), (1, 0))
-    p_A_32 = tl.make_block_ptr(A, (T, BT), (H * BT, 1), (i_t * BT + 32, 16), (16, 16), (1, 0))
-    p_A_41 = tl.make_block_ptr(A, (T, BT), (H * BT, 1), (i_t * BT + 48, 0), (16, 16), (1, 0))
-    p_A_42 = tl.make_block_ptr(A, (T, BT), (H * BT, 1), (i_t * BT + 48, 16), (16, 16), (1, 0))
-    p_A_43 = tl.make_block_ptr(A, (T, BT), (H * BT, 1), (i_t * BT + 48, 32), (16, 16), (1, 0))
-    b_A_21 = tl.load(p_A_21, boundary_check=(0, 1)).to(tl.float32)
-    b_A_31 = tl.load(p_A_31, boundary_check=(0, 1)).to(tl.float32)
-    b_A_32 = tl.load(p_A_32, boundary_check=(0, 1)).to(tl.float32)
-    b_A_41 = tl.load(p_A_41, boundary_check=(0, 1)).to(tl.float32)
-    b_A_42 = tl.load(p_A_42, boundary_check=(0, 1)).to(tl.float32)
-    b_A_43 = tl.load(p_A_43, boundary_check=(0, 1)).to(tl.float32)
+    m_p_A_21 = m_i_4[:, None] & m_i_3[None, :]
+    p_A_21 = A + o_i_4[:, None] * (H * BT) + o_i_3[None, :]
+    m_p_A_31 = m_i_6[:, None] & m_i_3[None, :]
+    p_A_31 = A + o_i_6[:, None] * (H * BT) + o_i_3[None, :]
+    m_p_A_32 = m_i_6[:, None] & m_i_5[None, :]
+    p_A_32 = A + o_i_6[:, None] * (H * BT) + o_i_5[None, :]
+    m_p_A_41 = m_i_8[:, None] & m_i_3[None, :]
+    p_A_41 = A + o_i_8[:, None] * (H * BT) + o_i_3[None, :]
+    m_p_A_42 = m_i_8[:, None] & m_i_5[None, :]
+    p_A_42 = A + o_i_8[:, None] * (H * BT) + o_i_5[None, :]
+    m_p_A_43 = m_i_8[:, None] & m_i_7[None, :]
+    p_A_43 = A + o_i_8[:, None] * (H * BT) + o_i_7[None, :]
+    b_A_21 = tl.load(p_A_21, mask=m_p_A_21, other=0).to(tl.float32)
+    b_A_31 = tl.load(p_A_31, mask=m_p_A_31, other=0).to(tl.float32)
+    b_A_32 = tl.load(p_A_32, mask=m_p_A_32, other=0).to(tl.float32)
+    b_A_41 = tl.load(p_A_41, mask=m_p_A_41, other=0).to(tl.float32)
+    b_A_42 = tl.load(p_A_42, mask=m_p_A_42, other=0).to(tl.float32)
+    b_A_43 = tl.load(p_A_43, mask=m_p_A_43, other=0).to(tl.float32)
 
     b_Ai_22_c = b_Ai_22 + 0.0
     b_Ai_33_c = b_Ai_33 + 0.0
@@ -279,26 +325,26 @@ def merge_16x16_to_64x64_inverse_kernel_npu(
         input_precision='ieee',
     )
 
-    p_Ai_11 = tl.make_block_ptr(Ai, (T, BT), (H * BT, 1), (i_t * BT, 0), (16, 16), (1, 0))
-    p_Ai_22 = tl.make_block_ptr(Ai, (T, BT), (H * BT, 1), (i_t * BT + 16, 16), (16, 16), (1, 0))
-    p_Ai_33 = tl.make_block_ptr(Ai, (T, BT), (H * BT, 1), (i_t * BT + 32, 32), (16, 16), (1, 0))
-    p_Ai_44 = tl.make_block_ptr(Ai, (T, BT), (H * BT, 1), (i_t * BT + 48, 48), (16, 16), (1, 0))
-    p_Ai_21 = tl.make_block_ptr(Ai, (T, BT), (H * BT, 1), (i_t * BT + 16, 0), (16, 16), (1, 0))
-    p_Ai_31 = tl.make_block_ptr(Ai, (T, BT), (H * BT, 1), (i_t * BT + 32, 0), (16, 16), (1, 0))
-    p_Ai_32 = tl.make_block_ptr(Ai, (T, BT), (H * BT, 1), (i_t * BT + 32, 16), (16, 16), (1, 0))
-    p_Ai_41 = tl.make_block_ptr(Ai, (T, BT), (H * BT, 1), (i_t * BT + 48, 0), (16, 16), (1, 0))
-    p_Ai_42 = tl.make_block_ptr(Ai, (T, BT), (H * BT, 1), (i_t * BT + 48, 16), (16, 16), (1, 0))
-    p_Ai_43 = tl.make_block_ptr(Ai, (T, BT), (H * BT, 1), (i_t * BT + 48, 32), (16, 16), (1, 0))
-    tl.store(p_Ai_11, b_Ai_11.to(p_Ai_11.dtype.element_ty, fp_downcast_rounding='rtne'), boundary_check=(0, 1))
-    tl.store(p_Ai_22, b_Ai_22_c.to(p_Ai_22.dtype.element_ty, fp_downcast_rounding='rtne'), boundary_check=(0, 1))
-    tl.store(p_Ai_33, b_Ai_33_c.to(p_Ai_33.dtype.element_ty, fp_downcast_rounding='rtne'), boundary_check=(0, 1))
-    tl.store(p_Ai_44, b_Ai_44_store.to(p_Ai_44.dtype.element_ty, fp_downcast_rounding='rtne'), boundary_check=(0, 1))
-    tl.store(p_Ai_21, b_Ai_21.to(p_Ai_21.dtype.element_ty, fp_downcast_rounding='rtne'), boundary_check=(0, 1))
-    tl.store(p_Ai_31, b_Ai_31.to(p_Ai_31.dtype.element_ty, fp_downcast_rounding='rtne'), boundary_check=(0, 1))
-    tl.store(p_Ai_32, b_Ai_32.to(p_Ai_32.dtype.element_ty, fp_downcast_rounding='rtne'), boundary_check=(0, 1))
-    tl.store(p_Ai_41, b_Ai_41.to(p_Ai_41.dtype.element_ty, fp_downcast_rounding='rtne'), boundary_check=(0, 1))
-    tl.store(p_Ai_42, b_Ai_42.to(p_Ai_42.dtype.element_ty, fp_downcast_rounding='rtne'), boundary_check=(0, 1))
-    tl.store(p_Ai_43, b_Ai_43.to(p_Ai_43.dtype.element_ty, fp_downcast_rounding='rtne'), boundary_check=(0, 1))
+    p_Ai_11 = Ai + o_i_2[:, None] * (H * BT) + o_i_3[None, :]
+    p_Ai_22 = Ai + o_i_4[:, None] * (H * BT) + o_i_5[None, :]
+    p_Ai_33 = Ai + o_i_6[:, None] * (H * BT) + o_i_7[None, :]
+    p_Ai_44 = Ai + o_i_8[:, None] * (H * BT) + o_i_9[None, :]
+    p_Ai_21 = Ai + o_i_4[:, None] * (H * BT) + o_i_3[None, :]
+    p_Ai_31 = Ai + o_i_6[:, None] * (H * BT) + o_i_3[None, :]
+    p_Ai_32 = Ai + o_i_6[:, None] * (H * BT) + o_i_5[None, :]
+    p_Ai_41 = Ai + o_i_8[:, None] * (H * BT) + o_i_3[None, :]
+    p_Ai_42 = Ai + o_i_8[:, None] * (H * BT) + o_i_5[None, :]
+    p_Ai_43 = Ai + o_i_8[:, None] * (H * BT) + o_i_7[None, :]
+    tl.store(p_Ai_11, b_Ai_11.to(p_Ai_11.dtype.element_ty, fp_downcast_rounding='rtne'), mask=m_p_A_11)
+    tl.store(p_Ai_22, b_Ai_22_c.to(p_Ai_22.dtype.element_ty, fp_downcast_rounding='rtne'), mask=m_p_A_22)
+    tl.store(p_Ai_33, b_Ai_33_c.to(p_Ai_33.dtype.element_ty, fp_downcast_rounding='rtne'), mask=m_p_A_33)
+    tl.store(p_Ai_44, b_Ai_44_store.to(p_Ai_44.dtype.element_ty, fp_downcast_rounding='rtne'), mask=m_p_A_44)
+    tl.store(p_Ai_21, b_Ai_21.to(p_Ai_21.dtype.element_ty, fp_downcast_rounding='rtne'), mask=m_p_A_21)
+    tl.store(p_Ai_31, b_Ai_31.to(p_Ai_31.dtype.element_ty, fp_downcast_rounding='rtne'), mask=m_p_A_31)
+    tl.store(p_Ai_32, b_Ai_32.to(p_Ai_32.dtype.element_ty, fp_downcast_rounding='rtne'), mask=m_p_A_32)
+    tl.store(p_Ai_41, b_Ai_41.to(p_Ai_41.dtype.element_ty, fp_downcast_rounding='rtne'), mask=m_p_A_41)
+    tl.store(p_Ai_42, b_Ai_42.to(p_Ai_42.dtype.element_ty, fp_downcast_rounding='rtne'), mask=m_p_A_42)
+    tl.store(p_Ai_43, b_Ai_43.to(p_Ai_43.dtype.element_ty, fp_downcast_rounding='rtne'), mask=m_p_A_43)
 
 
 @input_guard

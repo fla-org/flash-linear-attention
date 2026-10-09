@@ -4,7 +4,7 @@ Read the relevant section before changing DMA, launch indexing, or reused matrix
 
 ## DMA paths and optional pointers
 
-A runtime branch between block-pointer DMA and masked loads can keep both paths live in UB. Larger tiles may then overflow even when measured UB bandwidth is low. Where the workload permits, split bulk and tail launches with a constexpr mode so each compilation removes the unused path. Include convolution halos when deciding whether a bulk load fits inside the packed allocation.
+A runtime branch between an in-bounds bulk load and a masked tail load can keep both paths live in UB. Larger tiles may then overflow even when measured UB bandwidth is low. Where the workload permits, split bulk and tail launches with a constexpr mode so each compilation removes the unused path. Include convolution halos when deciding whether a bulk load fits inside the packed allocation.
 
 An optional pointer needs a compile-time guard before any runtime condition. `if USE_INITIAL_STATE or runtime_condition:` can still compile pointer arithmetic in the other branch when the pointer is `None`; nest the constexpr condition separately.
 
@@ -20,7 +20,7 @@ bos = tl.load(cu_seqlens + i_n).to(tl.int64)
 
 Load packed sequence offsets as int64 even when the input `cu_seqlens` uses int32. A small token index can overflow after multiplication by head count and feature size.
 
-`make_block_ptr` metadata has a separate constraint: its `offsets` and `block_shape` must remain int32. Keep large flattened base-address calculations in int64, then supply valid local block offsets. The Ascend backend is exempt from the mainline ban on block pointers.
+`tl.make_block_ptr` and `tl.advance` are deprecated on triton-ascend. Follow the [Triton kernel rule](../../../../CONTRIBUTING.md#triton-kernels): address tiles with `offset + tl.arange` and plain `tl.load` / `tl.store`, and keep that arithmetic in `tl.int64`.
 
 ## Grid and task loops
 

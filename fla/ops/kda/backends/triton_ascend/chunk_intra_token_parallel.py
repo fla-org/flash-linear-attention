@@ -13,6 +13,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.common.backends.triton_ascend.chunk_delta_h import mload, mstore
 from fla.ops.utils.op import exp2
 from fla.utils import input_guard
 from fla.utils.ascend_ub_manager import (
@@ -65,6 +66,7 @@ def chunk_kda_fwd_kernel_intra_token_parallel_npu(
     BC: tl.constexpr,
     BH: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    MASK_DMA: tl.constexpr,
     TG_OFFSET: tl.constexpr,
     HG_OFFSET: tl.constexpr,
 ):
@@ -95,6 +97,7 @@ def chunk_kda_fwd_kernel_intra_token_parallel_npu(
     else:
         bos = tl.cast(i_tg // T, tl.int64) * T
         i_t = i_tg % T
+    i_t = tl.cast(i_t, tl.int64)
 
     if i_t >= T:
         return
@@ -122,25 +125,31 @@ def chunk_kda_fwd_kernel_intra_token_parallel_npu(
     m_hk = m_hv[:, None] & m_k[None, :]
 
     p_qk = o_h[:, None] * K + o_k[None, :]
-    b_q = tl.load(q + i_t * H * K + p_qk, mask=m_hk, other=0).to(tl.float32)
-    b_k = tl.load(k + i_t * H * K + p_qk, mask=m_hk, other=0).to(tl.float32)
+    b_q = mload(q + i_t * H * K + p_qk, m_hk, MASK_DMA).to(tl.float32)
+    b_k = mload(k + i_t * H * K + p_qk, m_hk, MASK_DMA).to(tl.float32)
 
-    p_g = tl.make_block_ptr(g + i_t * HV * K, (HV, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0))
-    p_beta = tl.make_block_ptr(beta + i_t * HV, (HV,), (1,), (i_hg * BH,), (BH,), (0,))
-    b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
-    b_k = b_k * tl.load(p_beta, boundary_check=(0,)).to(tl.float32)[:, None]
+    o_h_2 = i_hg * BH + tl.arange(0, BH)
+    m_h_2 = (o_h_2 >= 0) & (o_h_2 < HV)
+    o_i = tl.arange(0, BK)
+    m_i = (o_i >= 0) & (o_i < K)
+    m_p_g = m_h_2[:, None] & m_i[None, :]
+    p_g = g + i_t * HV * K + o_h_2[:, None] * K + o_i[None, :]
+    p_beta = beta + i_t * HV + o_h_2
+    b_g = mload(p_g, m_p_g, MASK_DMA).to(tl.float32)
+    b_k = b_k * mload(p_beta, m_h_2, MASK_DMA).to(tl.float32)[:, None]
 
     for j in range(i_ts, min(i_t + 1, min(T, i_ts + BC))):
-        b_kj = tl.load(k + j * H * K + p_qk, mask=m_hk, other=0).to(tl.float32)
-        p_gj = tl.make_block_ptr(g + j * HV * K, (HV, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0))
-        b_gj = tl.load(p_gj, boundary_check=(0, 1)).to(tl.float32)
+        j64 = tl.cast(j, tl.int64)
+        b_kj = mload(k + j64 * H * K + p_qk, m_hk, MASK_DMA).to(tl.float32)
+        p_gj = g + j64 * HV * K + o_h_2[:, None] * K + o_i[None, :]
+        b_gj = mload(p_gj, m_p_g, MASK_DMA).to(tl.float32)
 
         b_kgj = tl.where(m_k[None, :], b_kj * exp2(b_g - b_gj), 0.0)
         b_Aqk = tl.sum(b_q * b_kgj, axis=1) * scale
         b_Akk = tl.sum(b_k * b_kgj, axis=1) * tl.where(j < i_t, 1.0, 0.0)
 
-        tl.store(Aqk + i_t * HV * BT + o_hv * BT + j % BT, b_Aqk.to(Aqk.dtype.element_ty), mask=m_hv)
-        tl.store(Akk + i_t * HV * BC + o_hv * BC + j - i_ts, b_Akk.to(Akk.dtype.element_ty), mask=m_hv)
+        mstore(Aqk + i_t * HV * BT + o_hv * BT + j % BT, b_Aqk.to(Aqk.dtype.element_ty), m_hv, MASK_DMA)
+        mstore(Akk + i_t * HV * BC + o_hv * BC + j - i_ts, b_Akk.to(Akk.dtype.element_ty), m_hv, MASK_DMA)
 
 
 @input_guard
@@ -190,6 +199,7 @@ def chunk_kda_fwd_intra_token_parallel_npu(
             BT=BT,
             BC=BC,
             BH=_BH,
+            MASK_DMA=not (HV % _BH == 0 and triton.next_power_of_2(K) == K),
             TG_OFFSET=0,
             HG_OFFSET=0,
         ),
