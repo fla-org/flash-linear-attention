@@ -306,6 +306,7 @@ class FusedRecurrentFunction(torch.autograd.Function):
         )
 
 
+@torch.compiler.disable
 def fused_recurrent_gated_delta_rule(
     q: torch.Tensor,
     k: torch.Tensor,
