@@ -10,7 +10,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.modules.causal_conv1d import causal_conv1d_bwd_kernel, causal_conv1d_fwd_kernel
+from fla.modules.causal_conv1d import ops
 from fla.ops.gla.chunk import chunk_gla_bwd_kernel_inter
 from fla.ops.utils.cache import AutotuneKey, fla_cache_autotune
 from fla.utils import device
@@ -62,7 +62,7 @@ def test_fla_cache_autotune_handles_none_restore_value():
     assert torch.equal(y2, torch.zeros(M, dtype=torch.int32, device=device))
 
 
-@pytest.mark.parametrize("kernel", [causal_conv1d_fwd_kernel, causal_conv1d_bwd_kernel])
+@pytest.mark.parametrize("kernel", [ops.causal_conv1d_fwd_kernel, ops.causal_conv1d_bwd_kernel])
 def test_causal_conv1d_autotune_key_excludes_unused_nb(kernel):
     """NB (ceil(B*T / 1024)) is never read inside either kernel body, so it must not sit in the
     autotune key: leaving it in forces a redundant re-tune on every distinct B*T even though D
