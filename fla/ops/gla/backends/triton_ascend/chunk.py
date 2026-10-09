@@ -46,9 +46,9 @@ def chunk_gla_fwd_A_kernel_intra_sub_inter_npu(
     H: tl.constexpr, K: tl.constexpr, BT: tl.constexpr, BC: tl.constexpr, BK: tl.constexpr, NC: tl.constexpr,
     IS_VARLEN: tl.constexpr, NT_OFFSET, NC_OFFSET, BH_OFFSET,
 ):
-    i_t = tl.program_id(0).to(tl.int64) + NT_OFFSET
+    i_t = tl.cast(tl.program_id(0), tl.int64) + NT_OFFSET
     i_c = tl.program_id(1) + NC_OFFSET
-    i_bh = tl.program_id(2).to(tl.int64) + BH_OFFSET
+    i_bh = tl.cast(tl.program_id(2), tl.int64) + BH_OFFSET
     i_b, i_h = i_bh // H, i_bh % H
     i_i, i_j = i_c // NC, i_c % NC
     if IS_VARLEN:
@@ -59,14 +59,14 @@ def chunk_gla_fwd_A_kernel_intra_sub_inter_npu(
         bos = tl.cast(i_b, tl.int64) * T
         eos = bos + T
 
-    if i_t * BT + i_i * BC >= T:
+    if tl.cast(i_t, tl.int64) * BT + i_i * BC >= T:
         return
     if i_i <= i_j:
         return
 
     b_A = tl.zeros([BC, BC], dtype=tl.float32)
-    o_i = i_t * BT + i_i * BC + tl.arange(0, BC)
-    o_j = i_t * BT + i_j * BC + tl.arange(0, BC)
+    o_i = tl.cast(i_t, tl.int64) * BT + i_i * BC + tl.arange(0, BC)
+    o_j = tl.cast(i_t, tl.int64) * BT + i_j * BC + tl.arange(0, BC)
     m_i = o_i < T
     m_j = o_j < T
     for i_k in range(tl.cdiv(K, BK)):
@@ -79,7 +79,7 @@ def chunk_gla_fwd_A_kernel_intra_sub_inter_npu(
         p_g = g + (bos * H + i_h) * K + o_i[:, None] * (H * K) + o_k[None, :]
         p_k = k + (bos * H + i_h) * K + o_k[:, None] + o_j[None, :] * (H * K)
         p_gk = g + (bos * H + i_h) * K + o_k[:, None] + o_j[None, :] * (H * K)
-        p_gn = g + (bos + i_t * BT + i_i * BC) * H * K + i_h * K + o_k
+        p_gn = g + (bos + tl.cast(i_t, tl.int64) * BT + i_i * BC) * H * K + i_h * K + o_k
 
         b_gn = tl.load(p_gn, mask=m_k, other=0).to(tl.float32)
         b_q = tl.load(p_q, mask=m_qk, other=0.0).to(tl.float32)
@@ -103,9 +103,9 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra_npu(
     H: tl.constexpr, K: tl.constexpr, BT: tl.constexpr, BC: tl.constexpr, BK: tl.constexpr,
     IS_VARLEN: tl.constexpr, NT_OFFSET, NC_OFFSET, BH_OFFSET,
 ):
-    i_t = tl.program_id(0).to(tl.int64) + NT_OFFSET
+    i_t = tl.cast(tl.program_id(0), tl.int64) + NT_OFFSET
     i_i = tl.program_id(1) + NC_OFFSET
-    i_bh = tl.program_id(2).to(tl.int64) + BH_OFFSET
+    i_bh = tl.cast(tl.program_id(2), tl.int64) + BH_OFFSET
     i_b, i_h = i_bh // H, i_bh % H
     i_j = i_i
     if IS_VARLEN:
@@ -116,35 +116,35 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra_npu(
         bos = tl.cast(i_b, tl.int64) * T
         eos = bos + T
 
-    if i_t * BT + i_i * BC >= T:
+    if tl.cast(i_t, tl.int64) * BT + i_i * BC >= T:
         return
 
     o_i = tl.arange(0, BC)
     o_k = tl.arange(0, BK)
-    o_A = (i_t * BT + i_i * BC + tl.arange(0, BC)) * H * BT + i_j * BC
+    o_A = (tl.cast(i_t, tl.int64) * BT + i_i * BC + tl.arange(0, BC)) * H * BT + i_j * BC
     m_k = o_k < K
-    m_A = (i_t * BT + i_i * BC + tl.arange(0, BC)) < T
+    m_A = (tl.cast(i_t, tl.int64) * BT + i_i * BC + tl.arange(0, BC)) < T
 
     q_ptr = q + (bos * H + i_h) * K
     k_ptr = k + (bos * H + i_h) * K
     g_ptr = g + (bos * H + i_h) * K
     A_ptr = A + (bos * H + i_h) * BT
 
-    o_c = i_t * BT + i_i * BC + tl.arange(0, BC)
+    o_c = tl.cast(i_t, tl.int64) * BT + i_i * BC + tl.arange(0, BC)
     m_qk = m_A[:, None] & m_k[None, :]
     b_q = tl.load(q_ptr + o_c[:, None] * (H * K) + o_k[None, :], mask=m_qk, other=0.0).to(tl.float32)
     b_g = tl.load(g_ptr + o_c[:, None] * (H * K) + o_k[None, :], mask=m_qk, other=0.0).to(tl.float32)
 
     # intra diagonal: fixed tl.static_range(BC) with a per-j active mask
-    max_j = min(BC, T - i_t * BT - i_i * BC)
+    max_j = min(BC, T - tl.cast(i_t, tl.int64) * BT - i_i * BC)
     for j in tl.static_range(BC):
         active = j < max_j
         b_k = tl.load(
-            k_ptr + (i_t * BT + i_j * BC + j) * H * K + o_k,
+            k_ptr + (tl.cast(i_t, tl.int64) * BT + i_j * BC + j) * H * K + o_k,
             mask=m_k & active, other=0,
         ).to(tl.float32)
         b_gk = tl.load(
-            g_ptr + (i_t * BT + i_j * BC + j) * H * K + o_k,
+            g_ptr + (tl.cast(i_t, tl.int64) * BT + i_j * BC + j) * H * K + o_k,
             mask=m_k & active, other=0,
         ).to(tl.float32)
         b_Aj = tl.sum(b_q * b_k[None, :] * exp2(b_g - b_gk[None, :]), 1) * scale
@@ -170,7 +170,7 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra_split_npu(
 ):
     i_k = tl.program_id(0) + NK_OFFSET
     i_tc = tl.program_id(1) + NTNC_OFFSET
-    i_bh = tl.program_id(2).to(tl.int64) + BH_OFFSET
+    i_bh = tl.cast(tl.program_id(2), tl.int64) + BH_OFFSET
     i_b, i_h = i_bh // H, i_bh % H
     i_t, i_i = (i_tc // NC).to(tl.int64), i_tc % NC
     i_j = i_i
@@ -184,34 +184,34 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra_split_npu(
         eos = bos + T
         all = B * T
 
-    if i_t * BT + i_i * BC >= T:
+    if tl.cast(i_t, tl.int64) * BT + i_i * BC >= T:
         return
 
     o_i = tl.arange(0, BC)
     o_k = i_k * BK + tl.arange(0, BK)
-    o_A = (i_t * BT + i_i * BC + tl.arange(0, BC)) * H * BC
+    o_A = (tl.cast(i_t, tl.int64) * BT + i_i * BC + tl.arange(0, BC)) * H * BC
     m_k = o_k < K
-    m_A = (i_t * BT + i_i * BC + tl.arange(0, BC)) < T
+    m_A = (tl.cast(i_t, tl.int64) * BT + i_i * BC + tl.arange(0, BC)) < T
 
     q_ptr = q + (bos * H + i_h) * K
     k_ptr = k + (bos * H + i_h) * K
     g_ptr = g + (bos * H + i_h) * K
     A_ptr = A + ((i_k * all + bos) * H + i_h) * BC
 
-    o_c = i_t * BT + i_i * BC + tl.arange(0, BC)
+    o_c = tl.cast(i_t, tl.int64) * BT + i_i * BC + tl.arange(0, BC)
     m_qk = m_A[:, None] & m_k[None, :]
     b_q = tl.load(q_ptr + o_c[:, None] * (H * K) + o_k[None, :], mask=m_qk, other=0.0).to(tl.float32)
     b_g = tl.load(g_ptr + o_c[:, None] * (H * K) + o_k[None, :], mask=m_qk, other=0.0).to(tl.float32)
 
-    max_j = min(BC, T - i_t * BT - i_i * BC)
+    max_j = min(BC, T - tl.cast(i_t, tl.int64) * BT - i_i * BC)
     for j in tl.static_range(BC):
         active = j < max_j
         b_k = tl.load(
-            k_ptr + (i_t * BT + i_j * BC + j) * H * K + o_k,
+            k_ptr + (tl.cast(i_t, tl.int64) * BT + i_j * BC + j) * H * K + o_k,
             mask=m_k & active, other=0,
         ).to(tl.float32)
         b_gk = tl.load(
-            g_ptr + (i_t * BT + i_j * BC + j) * H * K + o_k,
+            g_ptr + (tl.cast(i_t, tl.int64) * BT + i_j * BC + j) * H * K + o_k,
             mask=m_k & active, other=0,
         ).to(tl.float32)
         b_Aj = tl.sum(b_q * b_k[None, :] * exp2(b_g - b_gk[None, :]), 1) * scale
@@ -233,9 +233,9 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra_merge_npu(
     B: tl.constexpr, H: tl.constexpr, BT: tl.constexpr, BC: tl.constexpr, NK: tl.constexpr,
     IS_VARLEN: tl.constexpr, NT_OFFSET, NC_OFFSET, BH_OFFSET,
 ):
-    i_t = tl.program_id(0).to(tl.int64) + NT_OFFSET
+    i_t = tl.cast(tl.program_id(0), tl.int64) + NT_OFFSET
     i_c = tl.program_id(1) + NC_OFFSET
-    i_bh = tl.program_id(2).to(tl.int64) + BH_OFFSET
+    i_bh = tl.cast(tl.program_id(2), tl.int64) + BH_OFFSET
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
@@ -247,11 +247,11 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra_merge_npu(
         eos = bos + T
         all = B * T
 
-    if i_t * BT + i_c * BC >= T:
+    if tl.cast(i_t, tl.int64) * BT + i_c * BC >= T:
         return
 
     b_A = tl.zeros([BC, BC], dtype=tl.float32)
-    o_c = i_t * BT + i_c * BC + tl.arange(0, BC)
+    o_c = tl.cast(i_t, tl.int64) * BT + i_c * BC + tl.arange(0, BC)
     o_i = tl.arange(0, BC)
     m_c = o_c < T
     m_A = m_c[:, None] & (o_i[None, :] < BC)
@@ -395,34 +395,53 @@ def chunk_gla_fwd_kernel_o_npu(
 
             b_o = tl.zeros([BT, BV], dtype=tl.float32)
             for i_k in range(tl.cdiv(K, BK)):
-                p_q = tl.make_block_ptr(q_ptr, (T_cur, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-                p_g = tl.make_block_ptr(g_ptr, (T_cur, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+                o_t_2 = tl.cast(i_t, tl.int64) * BT + tl.arange(0, BT)
+                m_t_2 = (o_t_2 >= 0) & (o_t_2 < T_cur)
+                o_k = i_k * BK + tl.arange(0, BK)
+                m_k = (o_k >= 0) & (o_k < K)
+                m_p_q = m_t_2[:, None] & m_k[None, :]
+                p_q = q_ptr + o_t_2[:, None] * (H * K) + o_k[None, :]
+                p_g = g_ptr + o_t_2[:, None] * (HV * K) + o_k[None, :]
                 if STATE_V_FIRST:
-                    p_h = tl.make_block_ptr(h_base, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
+                    o_v = i_v * BV + tl.arange(0, BV)
+                    m_v = (o_v >= 0) & (o_v < V)
+                    m_p_h = m_v[:, None] & m_k[None, :]
+                    p_h = h_base + o_v[:, None] * K + o_k[None, :]
                 else:
-                    p_h = tl.make_block_ptr(h_base, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
-                b_q = tl.load(p_q, boundary_check=(0, 1))
-                b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
+                    o_v = i_v * BV + tl.arange(0, BV)
+                    m_v = (o_v >= 0) & (o_v < V)
+                    m_p_h = m_k[:, None] & m_v[None, :]
+                    p_h = h_base + o_k[:, None] * V + o_v[None, :]
+                b_q = tl.load(p_q, mask=m_p_q, other=0)
+                b_g = tl.load(p_g, mask=m_p_q, other=0).to(tl.float32)
                 # fold scale into the operand: an elementwise op on the accumulator
                 # between the two dots forces a fixpipe round-trip through UB
                 b_qg = (b_q * exp2(b_g) * scale).to(b_q.dtype)
-                b_h = tl.load(p_h, boundary_check=(0, 1))
+                b_h = tl.load(p_h, mask=m_p_h, other=0)
                 if STATE_V_FIRST:
                     b_o = tl.dot(b_qg, tl.trans(b_h).to(b_qg.dtype), b_o)
                 else:
                     b_o = tl.dot(b_qg, b_h.to(b_qg.dtype), b_o)
 
-            o_t = i_t * BT + tl.arange(0, BT)
+            o_t = tl.cast(i_t, tl.int64) * BT + tl.arange(0, BT)
             m_t = o_t < T_cur
-            p_a = tl.make_block_ptr(a_ptr, (T_cur, BT), (HV * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
-            p_v = tl.make_block_ptr(v_ptr, (T_cur, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-            p_o = tl.make_block_ptr(o_ptr, (T_cur, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-            b_A = tl.load(p_a, boundary_check=(0, 1))
+            o_t_2 = tl.cast(i_t, tl.int64) * BT + tl.arange(0, BT)
+            m_t_2 = (o_t_2 >= 0) & (o_t_2 < T_cur)
+            o_i = tl.arange(0, BT)
+            m_i = (o_i >= 0) & (o_i < BT)
+            m_p_a = m_t_2[:, None] & m_i[None, :]
+            p_a = a_ptr + o_t_2[:, None] * (HV * BT) + o_i[None, :]
+            o_v = i_v * BV + tl.arange(0, BV)
+            m_v = (o_v >= 0) & (o_v < V)
+            m_p_v = m_t_2[:, None] & m_v[None, :]
+            p_v = v_ptr + o_t_2[:, None] * (HV * V) + o_v[None, :]
+            p_o = o_ptr + o_t_2[:, None] * (HV * V) + o_v[None, :]
+            b_A = tl.load(p_a, mask=m_p_a, other=0)
             m_s = tl.arange(0, BT)[:, None] >= tl.arange(0, BT)[None, :]
             b_A = tl.where(m_s & (m_t[:, None] & m_t[None, :]), b_A, 0.0)
-            b_v = tl.load(p_v, boundary_check=(0, 1))
+            b_v = tl.load(p_v, mask=m_p_v, other=0)
             b_o = tl.dot(b_A.to(b_v.dtype), b_v, b_o)
-            tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
+            tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=m_p_v)
 
 
 @input_guard
@@ -504,8 +523,8 @@ def chunk_gla_bwd_kernel_dA_npu(
     H: tl.constexpr, V: tl.constexpr, BT: tl.constexpr, BV: tl.constexpr,
     IS_VARLEN: tl.constexpr, NT_OFFSET, BH_OFFSET,
 ):
-    i_t = tl.program_id(0).to(tl.int64) + NT_OFFSET
-    i_bh = tl.program_id(1).to(tl.int64) + BH_OFFSET
+    i_t = tl.cast(tl.program_id(0), tl.int64) + NT_OFFSET
+    i_bh = tl.cast(tl.program_id(1), tl.int64) + BH_OFFSET
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
@@ -515,11 +534,11 @@ def chunk_gla_bwd_kernel_dA_npu(
         eos = bos + T
     T = eos - bos
 
-    if i_t * BT >= T:
+    if tl.cast(i_t, tl.int64) * BT >= T:
         return
 
     b_dA = tl.zeros([BT, BT], dtype=tl.float32)
-    o_t = i_t * BT + tl.arange(0, BT)
+    o_t = tl.cast(i_t, tl.int64) * BT + tl.arange(0, BT)
     o_i = tl.arange(0, BT)
     m_t = o_t < T
     m_A = m_t[:, None] & (o_i[None, :] < BT)
@@ -583,8 +602,8 @@ def chunk_gla_bwd_kernel_dv_npu(
     A_OFFSET, NT_OFFSET, BH_OFFSET,
 ):
     i_v = tl.program_id(0) + A_OFFSET
-    i_t = tl.program_id(1).to(tl.int64) + NT_OFFSET
-    i_bh = tl.program_id(2).to(tl.int64) + BH_OFFSET
+    i_t = tl.cast(tl.program_id(1), tl.int64) + NT_OFFSET
+    i_bh = tl.cast(tl.program_id(2), tl.int64) + BH_OFFSET
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_tg = i_t
@@ -598,10 +617,10 @@ def chunk_gla_bwd_kernel_dv_npu(
         bos = tl.cast(i_b, tl.int64) * T
         eos = bos + T
 
-    if i_t * BT >= T:
+    if tl.cast(i_t, tl.int64) * BT >= T:
         return
 
-    o_t = i_t * BT + tl.arange(0, BT)
+    o_t = tl.cast(i_t, tl.int64) * BT + tl.arange(0, BT)
     o_v = i_v * BV + tl.arange(0, BV)
     o_i = tl.arange(0, BT)
     m_t = o_t < T
@@ -633,7 +652,7 @@ def chunk_gla_bwd_kernel_dv_npu(
             mask=m_tk, other=0.0,
         ).to(tl.float32)
         b_gn = tl.load(
-            g + (bos + min(i_t * BT + BT, T) - 1) * H * K + i_h * K + o_k,
+            g + (bos + min(tl.cast(i_t, tl.int64) * BT + BT, T) - 1) * H * K + i_h * K + o_k,
             mask=m_k, other=0,
         ).to(tl.float32)
         if STATE_V_FIRST:
@@ -696,8 +715,8 @@ def chunk_gla_bwd_kernel_intra_npu(
     IS_VARLEN: tl.constexpr, A_OFFSET, NT_OFFSET, BH_OFFSET,
 ):
     i_kc = tl.program_id(0) + A_OFFSET
-    i_t = tl.program_id(1).to(tl.int64) + NT_OFFSET
-    i_bh = tl.program_id(2).to(tl.int64) + BH_OFFSET
+    i_t = tl.cast(tl.program_id(1), tl.int64) + NT_OFFSET
+    i_bh = tl.cast(tl.program_id(2), tl.int64) + BH_OFFSET
     i_b, i_h = i_bh // H, i_bh % H
     i_k, i_i = i_kc // NC, i_kc % NC
     if IS_VARLEN:
@@ -707,12 +726,12 @@ def chunk_gla_bwd_kernel_intra_npu(
         bos = tl.cast(i_b, tl.int64) * T
         eos = bos + T
     T = eos - bos
-    if i_t * BT + i_i * BC >= T:
+    if tl.cast(i_t, tl.int64) * BT + i_i * BC >= T:
         return
 
     o_k = i_k * BK + tl.arange(0, BK)
     m_k = o_k < K
-    o_c = i_t * BT + i_i * BC + tl.arange(0, BC)
+    o_c = tl.cast(i_t, tl.int64) * BT + i_i * BC + tl.arange(0, BC)
     m_c = o_c < T
     m_ck = m_c[:, None] & m_k[None, :]
     b_g = tl.load(
@@ -722,10 +741,10 @@ def chunk_gla_bwd_kernel_intra_npu(
 
     b_dq = tl.zeros([BC, BK], dtype=tl.float32)
     if i_i > 0:
-        p_gn = g + (bos + i_t * BT + i_i * BC) * H * K + i_h * K + o_k
+        p_gn = g + (bos + tl.cast(i_t, tl.int64) * BT + i_i * BC) * H * K + i_h * K + o_k
         b_gn = tl.load(p_gn, mask=m_k, other=0).to(tl.float32)
         for i_j in range(0, i_i):
-            o_j = i_t * BT + i_j * BC + tl.arange(0, BC)
+            o_j = tl.cast(i_t, tl.int64) * BT + i_j * BC + tl.arange(0, BC)
             o_jA = i_j * BC + tl.arange(0, BC)
             m_jk = (o_j[:, None] < T) & m_k[None, :]
             m_da = m_c[:, None] & (o_jA[None, :] < BT)
@@ -746,18 +765,18 @@ def chunk_gla_bwd_kernel_intra_npu(
         b_dq *= exp2(b_g - b_gn[None, :])
 
     o_i = tl.arange(0, BC)
-    m_dA = (i_t * BT + i_i * BC + tl.arange(0, BC)) < T
-    o_dA = bos * H * BT + (i_t * BT + i_i * BC + tl.arange(0, BC)) * H * BT + i_h * BT + i_i * BC
-    max_j = min(BC, T - i_t * BT - i_i * BC)
+    m_dA = (tl.cast(i_t, tl.int64) * BT + i_i * BC + tl.arange(0, BC)) < T
+    o_dA = bos * H * BT + (tl.cast(i_t, tl.int64) * BT + i_i * BC + tl.arange(0, BC)) * H * BT + i_h * BT + i_i * BC
+    max_j = min(BC, T - tl.cast(i_t, tl.int64) * BT - i_i * BC)
     for j in tl.static_range(BC):
         active = j < max_j
         b_dAj = tl.load(dA + o_dA + j, mask=m_dA & active, other=0).to(tl.float32)
         b_kj = tl.load(
-            k + (bos + i_t * BT + i_i * BC + j) * H * K + i_h * K + o_k,
+            k + (bos + tl.cast(i_t, tl.int64) * BT + i_i * BC + j) * H * K + i_h * K + o_k,
             mask=m_k & active, other=0,
         ).to(tl.float32)
         b_gkj = tl.load(
-            g + (bos + i_t * BT + i_i * BC + j) * H * K + i_h * K + o_k,
+            g + (bos + tl.cast(i_t, tl.int64) * BT + i_i * BC + j) * H * K + i_h * K + o_k,
             mask=m_k & active, other=0,
         ).to(tl.float32)
         m_i = o_i[:, None] >= j
@@ -770,12 +789,12 @@ def chunk_gla_bwd_kernel_intra_npu(
 
     tl.debug_barrier()
     b_dk = tl.zeros([BC, BK], dtype=tl.float32)
-    NC_eff = min(NC, tl.cdiv(T - i_t * BT, BC))
+    NC_eff = min(NC, tl.cdiv(T - tl.cast(i_t, tl.int64) * BT, BC))
     if i_i < NC_eff - 1:
-        p_gn2 = g + (bos + min(i_t * BT + i_i * BC + BC, T) - 1) * H * K + i_h * K + o_k
+        p_gn2 = g + (bos + min(tl.cast(i_t, tl.int64) * BT + i_i * BC + BC, T) - 1) * H * K + i_h * K + o_k
         b_gn2 = tl.load(p_gn2, mask=m_k, other=0).to(tl.float32)
         for i_j in range(i_i + 1, NC_eff):
-            o_j = i_t * BT + i_j * BC + o_i
+            o_j = tl.cast(i_t, tl.int64) * BT + i_j * BC + o_i
             o_iA = i_i * BC + tl.arange(0, BC)
             m_j = o_j < T
             m_jk = m_j[:, None] & m_k[None, :]
@@ -796,16 +815,16 @@ def chunk_gla_bwd_kernel_intra_npu(
             b_dk = tl.dot(b_dA, b_qg, b_dk, allow_tf32=False)
         b_dk *= exp2(b_gn2[None, :] - b_g)
 
-    o_dA2 = bos * H * BT + (i_t * BT + i_i * BC) * H * BT + i_h * BT + i_i * BC + tl.arange(0, BC)
+    o_dA2 = bos * H * BT + (tl.cast(i_t, tl.int64) * BT + i_i * BC) * H * BT + i_h * BT + i_i * BC + tl.arange(0, BC)
     for j in tl.static_range(BC):
         active = j < max_j
         b_dAj = tl.load(dA + o_dA2 + j * H * BT, mask=active, other=0).to(tl.float32)
         b_qj = tl.load(
-            q + (bos + i_t * BT + i_i * BC + j) * H * K + i_h * K + o_k,
+            q + (bos + tl.cast(i_t, tl.int64) * BT + i_i * BC + j) * H * K + i_h * K + o_k,
             mask=m_k & active, other=0,
         ).to(tl.float32)
         b_gqj = tl.load(
-            g + (bos + i_t * BT + i_i * BC + j) * H * K + i_h * K + o_k,
+            g + (bos + tl.cast(i_t, tl.int64) * BT + i_i * BC + j) * H * K + i_h * K + o_k,
             mask=m_k & active, other=0,
         ).to(tl.float32)
         m_i = o_i[:, None] <= j
@@ -863,8 +882,8 @@ def chunk_gla_bwd_kernel_inter_npu(
     A_OFFSET, NT_OFFSET, BH_OFFSET,
 ):
     i_k = tl.program_id(0) + A_OFFSET
-    i_t = tl.program_id(1).to(tl.int64) + NT_OFFSET
-    i_bh = tl.program_id(2).to(tl.int64) + BH_OFFSET
+    i_t = tl.cast(tl.program_id(1), tl.int64) + NT_OFFSET
+    i_bh = tl.cast(tl.program_id(2), tl.int64) + BH_OFFSET
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_tg = i_t
@@ -878,12 +897,12 @@ def chunk_gla_bwd_kernel_inter_npu(
         bos = tl.cast(i_b, tl.int64) * T
         eos = bos + T
 
-    if i_t * BT >= T:
+    if tl.cast(i_t, tl.int64) * BT >= T:
         return
 
     o_k = i_k * BK + tl.arange(0, BK)
     m_k = o_k < K
-    o_t = i_t * BT + tl.arange(0, BT)
+    o_t = tl.cast(i_t, tl.int64) * BT + tl.arange(0, BT)
     m_t = o_t < T
     m_tk = m_t[:, None] & m_k[None, :]
 
@@ -901,7 +920,11 @@ def chunk_gla_bwd_kernel_inter_npu(
     dg_base = dg + (bos * H + i_h) * K
 
     b_gk = tl.load(g_base + o_t[:, None] * (H * K) + o_k[None, :], mask=m_tk, other=0.0).to(tl.float32)
-    b_gn = tl.load(g_base + (min(T, i_t * BT + BT) - 1) * H * K + o_k, mask=m_k, other=0).to(tl.float32)
+    b_gn = tl.load(
+        g_base + tl.cast(min(T, tl.cast(i_t, tl.int64) * BT + BT) - 1, tl.int64) * H * K + o_k,
+        mask=m_k,
+        other=0,
+    ).to(tl.float32)
     b_dq = tl.zeros([BT, BK], dtype=tl.float32)
     b_dk = tl.zeros([BT, BK], dtype=tl.float32)
     b_dgk = tl.zeros([BK], dtype=tl.float32)

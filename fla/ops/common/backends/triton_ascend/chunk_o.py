@@ -14,11 +14,17 @@ import triton
 import triton.language as tl
 
 from fla.backends import TritonAscendBackend, register
+from fla.ops.common.backends.triton_ascend.chunk_delta_h import (
+    mask_dma_heuristic,
+    mload,
+    mstore,
+    need_dma_mask,
+)
 from fla.ops.common.chunk_o import chunk_bwd_dv
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.op import exp2
-from fla.utils import ascend_compile_kwargs, autotune_cache_kwargs, input_guard
+from fla.utils import autotune_cache_kwargs, input_guard
 from fla.utils.ascend_ub_manager import (
     ASCEND_LAUNCH_BLOCK_BUDGET,
     ASCEND_MAX_GRID_DIM,
@@ -142,10 +148,16 @@ _HDH_BV_CANDIDATES = (256, 128, 64, 32, 16)
 
 
 def _get_hdh_tiles(K: int, V: int) -> tuple[int, int]:
-    """Tiles for the Vector-only Frobenius <h, dh> kernel."""
+    """Tiles for the Vector-only Frobenius <h, dh> kernel.
+
+    A 64-wide tile compiles for head dims <= 64. Wider heads lower the
+    fp32 reduction through a cube workspace and overflow UB unless both
+    tiles stay at 32.
+    """
     ub_budget = int(_UB_BYTES * _SAFETY_MARGIN)
-    k_cap = min(256, triton.next_power_of_2(K))
-    v_cap = min(256, triton.next_power_of_2(V))
+    dim_cap = 32 if max(K, V) > 64 else 64
+    k_cap = min(dim_cap, triton.next_power_of_2(K))
+    v_cap = min(dim_cap, triton.next_power_of_2(V))
     for BK in _HDH_BK_CANDIDATES:
         if k_cap < BK:
             continue
@@ -173,21 +185,38 @@ def _g_contig_base(g, bos, i_b, i_h, T_seq, HV, IS_VARLEN: tl.constexpr):
 
 
 @triton.jit
-def _g_block_ptr(g_base, T, offset, BC, G_T_CONTIG: tl.constexpr, HV: tl.constexpr):
+def _g_row_ptr(g_base, T, offset, BC, G_T_CONTIG: tl.constexpr, HV: tl.constexpr):
+    # ``offset`` stays int32. Adding it to ``arange`` as int64 scalarizes the vector.
     if G_T_CONTIG:
-        return tl.make_block_ptr(g_base, (T,), (1,), (offset,), (BC,), (0,))
-    return tl.make_block_ptr(g_base, (T,), (HV,), (offset,), (BC,), (0,))
+        o_t = offset + tl.arange(0, BC)
+        return g_base + o_t
+    o_t = offset + tl.arange(0, BC)
+    return g_base + o_t * HV
 
 
-@triton.heuristics({
-    "USE_G": lambda args: args["g"] is not None,
-    "USE_G_GAMMA": lambda args: args["g_gamma"] is not None,
-    "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-})
+@triton.jit
+def _chunk_rows(i_t, T_cur, BT: tl.constexpr):
+    """In-chunk token offsets as int32.
+
+    A 64x64 int64 compare lowers to a scalar loop on Ascend. The chunk base
+    used in addresses is a separate int64 scalar.
+    """
+    rows = tl.arange(0, BT)
+    return rows, rows < (T_cur - i_t * BT)
+
+
+@triton.heuristics(
+    {
+        "USE_G": lambda args: args["g"] is not None,
+        "USE_G_GAMMA": lambda args: args["g_gamma"] is not None,
+        "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
+    }
+)
 @triton.autotune(
     configs=[triton.Config({'BK': 128}), triton.Config({'BK': 64}), triton.Config({'BK': 32})],
     key=['H', 'HV', 'K', 'V', 'BT', 'STATE_V_FIRST'],
 )
+@triton.heuristics({"MASK_DMA": mask_dma_heuristic})
 @triton.jit(do_not_specialize=["T", "total_chunks", "task_num", "num_core", "H", "HV", "K", "V", "N"])
 def chunk_o_fwd_kernel(
     q,
@@ -216,6 +245,7 @@ def chunk_o_fwd_kernel(
     USE_G_GAMMA: tl.constexpr,
     STATE_V_FIRST: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    MASK_DMA: tl.constexpr,
 ):
     core_id = tl.program_id(0)
     h_t_step = HV * total_chunks
@@ -251,20 +281,34 @@ def chunk_o_fwd_kernel(
 
         b_o = tl.zeros([BT, BV], dtype=tl.float32)
         b_A = tl.zeros([BT, BT], dtype=tl.float32)
+        rows, m_rows = _chunk_rows(i_t, T_cur, BT)
+        row_base = tl.cast(i_t, tl.int64) * BT
+        stride_qk = H * K
+        stride_v = HV * V
 
         for i_k in range(tl.cdiv(K, BK)):
-            p_q = tl.make_block_ptr(q_ptr, (T_cur, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-            p_k = tl.make_block_ptr(k_ptr, (K, T_cur), (1, H * K), (i_k * BK, i_t * BT), (BK, BT), (0, 1))
+            o_k = i_k * BK + tl.arange(0, BK)
+            m_k = (o_k >= 0) & (o_k < K)
+            m_p_q = m_rows[:, None] & m_k[None, :]
+            p_q = q_ptr + row_base * stride_qk + rows[:, None] * stride_qk + o_k[None, :]
+            m_p_k = m_k[:, None] & m_rows[None, :]
+            p_k = k_ptr + row_base * stride_qk + o_k[:, None] + rows[None, :] * stride_qk
             if STATE_V_FIRST:
-                p_h = tl.make_block_ptr(h_base, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
+                o_v = i_v * BV + tl.arange(0, BV)
+                m_v = (o_v >= 0) & (o_v < V)
+                m_p_h = m_v[:, None] & m_k[None, :]
+                p_h = h_base + o_v[:, None] * K + o_k[None, :]
             else:
-                p_h = tl.make_block_ptr(h_base, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
+                o_v = i_v * BV + tl.arange(0, BV)
+                m_v = (o_v >= 0) & (o_v < V)
+                m_p_h = m_k[:, None] & m_v[None, :]
+                p_h = h_base + o_k[:, None] * V + o_v[None, :]
             # [BT, BK]
-            b_q = tl.load(p_q, boundary_check=(0, 1))
+            b_q = mload(p_q, m_p_q, MASK_DMA)
             # [BK, BT]
-            b_k = tl.load(p_k, boundary_check=(0, 1))
+            b_k = mload(p_k, m_p_k, MASK_DMA)
             # [BK, BV]
-            b_h = tl.load(p_h, boundary_check=(0, 1))
+            b_h = mload(p_h, m_p_h, MASK_DMA)
 
             # ascend tl.dot clobbers lhs; copy before the first dot on b_q.
             b_q_c = b_q + 0.0
@@ -282,8 +326,8 @@ def chunk_o_fwd_kernel(
                 g_ptr = g + bos + i_h * T
             else:
                 g_ptr = g + tl.cast(i_n, tl.int64) * HV * T + i_h * T
-            p_g = tl.make_block_ptr(g_ptr, (T_cur,), (1,), (i_t * BT,), (BT,), (0,))
-            b_g = tl.load(p_g, boundary_check=(0,))
+            p_g = g_ptr + row_base + rows
+            b_g = mload(p_g, m_rows, MASK_DMA)
 
             b_o = b_o * exp2(b_g)[:, None]
             b_A = b_A * exp2(b_g[:, None] - b_g[None, :])
@@ -293,17 +337,20 @@ def chunk_o_fwd_kernel(
             b_o = b_o * exp2(b_g)[:, None]
             b_A = b_A * exp2(b_g[:, None] - b_g[None, :])
 
-        o_t = i_t * BT + tl.arange(0, BT)
-        m_t = o_t < T_cur
-        m_A = (o_t[:, None] >= o_t[None, :]) & (m_t[:, None] & m_t)
+        m_A = (rows[:, None] >= rows[None, :]) & (m_rows[:, None] & m_rows)
         b_A = tl.where(m_A, b_A, 0)
 
-        p_v = tl.make_block_ptr(v_ptr, (T_cur, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-        p_o = tl.make_block_ptr(o_ptr, (T_cur, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+        o_v = i_v * BV + tl.arange(0, BV)
+        m_v = (o_v >= 0) & (o_v < V)
+        m_p_v = m_rows[:, None] & m_v[None, :]
+        p_v = v_ptr + row_base * stride_v + rows[:, None] * stride_v + o_v[None, :]
+        p_o = o_ptr + row_base * stride_v + rows[:, None] * stride_v + o_v[None, :]
 
-        b_v = tl.load(p_v, boundary_check=(0, 1))
+        b_v = mload(p_v, m_p_v, MASK_DMA)
+        # to fix mma -> mma layout conversion
+        # already solved by triton v3.2 or higher
         b_o = b_o * scale + tl.dot(b_A.to(b_v.dtype), b_v) * scale
-        tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
+        mstore(p_o, b_o.to(p_o.dtype.element_ty), m_p_v, MASK_DMA)
 
 
 @input_guard
@@ -335,7 +382,10 @@ def chunk_fwd_o_npu(
         # chunk_offsets[-1] stores the cumulative total chunks across all batches
         total_chunks = chunk_offsets[-1].item()
 
-    BV = 128
+    # Prefer a V tile that divides V so aligned launches can drop the DMA mask.
+    BV = 128 if V % 128 == 0 else min(128, triton.next_power_of_2(V))
+    while BV > 16 and V % BV != 0:
+        BV //= 2
     NV = triton.cdiv(V, BV)
     num_core = get_npu_properties()["num_aicore"]
     task_num = NV * HV * total_chunks
@@ -433,6 +483,7 @@ def chunk_dv_local_bwd_kernel_full(
     USE_G_GAMMA: tl.constexpr,
     G_T_CONTIG: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    MASK_DMA: tl.constexpr,
 ):
     """Compute full-chunk value gradients on a persistent Cube grid.
 
@@ -460,40 +511,56 @@ def chunk_dv_local_bwd_kernel_full(
         do_ptr = do + (bos * HV + i_h) * V
         dv_ptr = dv + (bos * HV + i_h) * V
 
+        # Masked tiles keep one int64 offset. The int32 64x64 mask does not
+        # fit in UB next to the DMA predicates. Aligned tiles stay int32.
+        if not MASK_DMA:
+            rows, m_rows = _chunk_rows(i_t, T_cur, BT)
+            row_base = tl.cast(i_t, tl.int64) * BT
+        else:
+            rows = tl.cast(i_t, tl.int64) * BT + tl.arange(0, BT)
+            m_rows = (rows >= 0) & (rows < T_cur)
+            row_base = 0
+        stride_qk = H * K
+        stride_v = HV * V
         if USE_G:
             if G_T_CONTIG:
                 g_base = _g_contig_base(g=g, bos=bos, i_b=i_b, i_h=i_h, T_seq=T_seq, HV=HV, IS_VARLEN=IS_VARLEN)
             else:
                 g_base = g + bos * HV + i_h
-            p_g = _g_block_ptr(g_base=g_base, T=T_cur, offset=i_t * BT, BC=BT, G_T_CONTIG=G_T_CONTIG, HV=HV)
-            b_g = tl.load(p_g, boundary_check=(0,))
+            p_g = _g_row_ptr(g_base, T_cur, i_t * BT, BT, G_T_CONTIG, HV)
+            b_g = mload(p_g, m_rows, MASK_DMA)
         if USE_G_GAMMA:
             b_gamma = tl.load(g_gamma + i_h)
             b_g = b_gamma * (tl.arange(0, BT) + 1)
 
         b_A = tl.zeros([BT, BT], dtype=tl.float32)
         for i_k in range(tl.cdiv(K, BK)):
-            p_k = tl.make_block_ptr(k_ptr, (T_cur, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-            p_q = tl.make_block_ptr(q_ptr, (K, T_cur), (1, H * K), (i_k * BK, i_t * BT), (BK, BT), (0, 1))
-            b_k = tl.load(p_k, boundary_check=(0, 1))
-            b_q = tl.load(p_q, boundary_check=(0, 1))
+            o_k = i_k * BK + tl.arange(0, BK)
+            m_k = (o_k >= 0) & (o_k < K)
+            m_p_k = m_rows[:, None] & m_k[None, :]
+            p_k = k_ptr + row_base * stride_qk + rows[:, None] * stride_qk + o_k[None, :]
+            m_p_q = m_k[:, None] & m_rows[None, :]
+            p_q = q_ptr + row_base * stride_qk + o_k[:, None] + rows[None, :] * stride_qk
+            b_k = mload(p_k, m_p_k, MASK_DMA)
+            b_q = mload(p_q, m_p_q, MASK_DMA)
             b_A += tl.dot(b_k, b_q, allow_tf32=False) * scale
         if USE_G or USE_G_GAMMA:
             b_A *= exp2(b_g[None, :] - b_g[:, None])
 
-        o_t = i_t * BT + tl.arange(0, BT)
-        m_t = o_t < T_cur
-        m_A = (o_t[:, None] <= o_t[None, :]) & (m_t[:, None] & m_t)
+        m_A = (rows[:, None] <= rows[None, :]) & (m_rows[:, None] & m_rows)
         b_A = tl.where(m_A, b_A, 0)
         b_A_pristine = b_A + 0.0
 
         for i_v in range(tl.cdiv(V, BV)):
-            p_do = tl.make_block_ptr(do_ptr, (T_cur, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-            p_dv = tl.make_block_ptr(dv_ptr, (T_cur, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-            b_do = tl.load(p_do, boundary_check=(0, 1))
+            o_v = i_v * BV + tl.arange(0, BV)
+            m_v = (o_v >= 0) & (o_v < V)
+            m_p_do = m_rows[:, None] & m_v[None, :]
+            p_do = do_ptr + row_base * stride_v + rows[:, None] * stride_v + o_v[None, :]
+            p_dv = dv_ptr + row_base * stride_v + rows[:, None] * stride_v + o_v[None, :]
+            b_do = mload(p_do, m_p_do, MASK_DMA)
             b_A_i = b_A_pristine + 0.0
             b_dv = tl.dot(b_A_i.to(b_do.dtype), b_do, allow_tf32=False)
-            tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
+            mstore(p_dv, b_dv.to(p_dv.dtype.element_ty), m_p_do, MASK_DMA)
 
 
 @triton.jit(do_not_specialize=['T'])
@@ -553,18 +620,22 @@ def chunk_dv_local_bwd_kernel(
 
     for i_v in range(tl.cdiv(V, BV)):
         if n_sub == 2:
-            i_tc0 = i_t * BT
-            i_tc1 = i_t * BT + BC
+            i_tc0 = tl.cast(i_t, tl.int64) * BT
+            i_tc1 = tl.cast(i_t, tl.int64) * BT + BC
             m0 = (i_tc0 + o_i) < T
             m1 = (i_tc1 + o_i) < T
             b_dv0 = tl.zeros([BC, BV], dtype=tl.float32)
             b_dv1 = tl.zeros([BC, BV], dtype=tl.float32)
 
             if USE_G:
-                p_g0 = _g_block_ptr(g_base=g_base, T=T, offset=i_tc0, BC=BC, G_T_CONTIG=G_T_CONTIG, HV=HV)
-                p_g1 = _g_block_ptr(g_base=g_base, T=T, offset=i_tc1, BC=BC, G_T_CONTIG=G_T_CONTIG, HV=HV)
-                b_g0 = tl.load(p_g0, boundary_check=(0,))
-                b_g1 = tl.load(p_g1, boundary_check=(0,))
+                o_t = i_tc0 + tl.arange(0, BC)
+                m_t = (o_t >= 0) & (o_t < T)
+                p_g0 = _g_row_ptr(g_base, T, i_tc0, BC, G_T_CONTIG, HV)
+                o_t_2 = i_tc1 + tl.arange(0, BC)
+                m_t_2 = (o_t_2 >= 0) & (o_t_2 < T)
+                p_g1 = _g_row_ptr(g_base, T, i_tc1, BC, G_T_CONTIG, HV)
+                b_g0 = tl.load(p_g0, mask=m_t, other=0)
+                b_g1 = tl.load(p_g1, mask=m_t_2, other=0)
             if USE_G_GAMMA:
                 b_g0 = b_gamma * (o_i + 1).to(tl.float32)
                 b_g1 = b_gamma * (BC + o_i + 1).to(tl.float32)
@@ -573,14 +644,24 @@ def chunk_dv_local_bwd_kernel(
             b_A01 = tl.zeros([BC, BC], dtype=tl.float32)
             b_A11 = tl.zeros([BC, BC], dtype=tl.float32)
             for i_k in range(tl.cdiv(K, BK)):
-                p_k0 = tl.make_block_ptr(k, (T, K), (H * K, 1), (i_tc0, i_k * BK), (BC, BK), (1, 0))
-                p_k1 = tl.make_block_ptr(k, (T, K), (H * K, 1), (i_tc1, i_k * BK), (BC, BK), (1, 0))
-                b_k0 = tl.load(p_k0, boundary_check=(0, 1))
-                b_k1 = tl.load(p_k1, boundary_check=(0, 1))
-                p_q0 = tl.make_block_ptr(q, (K, T), (1, H * K), (i_k * BK, i_tc0), (BK, BC), (0, 1))
-                p_q1 = tl.make_block_ptr(q, (K, T), (1, H * K), (i_k * BK, i_tc1), (BK, BC), (0, 1))
-                b_q0 = tl.load(p_q0, boundary_check=(0, 1))
-                b_q1 = tl.load(p_q1, boundary_check=(0, 1))
+                o_t = i_tc0 + tl.arange(0, BC)
+                m_t = (o_t >= 0) & (o_t < T)
+                o_k = i_k * BK + tl.arange(0, BK)
+                m_k = (o_k >= 0) & (o_k < K)
+                m_p_k0 = m_t[:, None] & m_k[None, :]
+                p_k0 = k + o_t[:, None] * (H * K) + o_k[None, :]
+                o_t_2 = i_tc1 + tl.arange(0, BC)
+                m_t_2 = (o_t_2 >= 0) & (o_t_2 < T)
+                m_p_k1 = m_t_2[:, None] & m_k[None, :]
+                p_k1 = k + o_t_2[:, None] * (H * K) + o_k[None, :]
+                b_k0 = tl.load(p_k0, mask=m_p_k0, other=0)
+                b_k1 = tl.load(p_k1, mask=m_p_k1, other=0)
+                m_p_q0 = m_k[:, None] & m_t[None, :]
+                p_q0 = q + o_k[:, None] + o_t[None, :] * (H * K)
+                m_p_q1 = m_k[:, None] & m_t_2[None, :]
+                p_q1 = q + o_k[:, None] + o_t_2[None, :] * (H * K)
+                b_q0 = tl.load(p_q0, mask=m_p_q0, other=0)
+                b_q1 = tl.load(p_q1, mask=m_p_q1, other=0)
                 b_k0_c = b_k0 + 0.0
                 b_A00 += tl.dot(b_k0, b_q0, allow_tf32=False) * scale
                 b_A01 += tl.dot(b_k0_c, b_q1, allow_tf32=False) * scale
@@ -597,44 +678,64 @@ def chunk_dv_local_bwd_kernel(
             b_A01 = tl.where(m01, b_A01, 0)
             b_A11 = tl.where(m11, b_A11, 0)
 
-            p_do0 = tl.make_block_ptr(do, (T, V), (HV * V, 1), (i_tc0, i_v * BV), (BC, BV), (1, 0))
-            p_do1 = tl.make_block_ptr(do, (T, V), (HV * V, 1), (i_tc1, i_v * BV), (BC, BV), (1, 0))
-            b_do0 = tl.load(p_do0, boundary_check=(0, 1))
-            b_do1 = tl.load(p_do1, boundary_check=(0, 1))
+            o_t = i_tc0 + tl.arange(0, BC)
+            m_t = (o_t >= 0) & (o_t < T)
+            o_v = i_v * BV + tl.arange(0, BV)
+            m_v = (o_v >= 0) & (o_v < V)
+            m_p_do0 = m_t[:, None] & m_v[None, :]
+            p_do0 = do + o_t[:, None] * (HV * V) + o_v[None, :]
+            o_t_2 = i_tc1 + tl.arange(0, BC)
+            m_t_2 = (o_t_2 >= 0) & (o_t_2 < T)
+            m_p_do1 = m_t_2[:, None] & m_v[None, :]
+            p_do1 = do + o_t_2[:, None] * (HV * V) + o_v[None, :]
+            b_do0 = tl.load(p_do0, mask=m_p_do0, other=0)
+            b_do1 = tl.load(p_do1, mask=m_p_do1, other=0)
             b_dv0 = tl.dot(b_A00.to(b_do0.dtype), b_do0, b_dv0, allow_tf32=False)
             b_dv0 = tl.dot(b_A01.to(b_do1.dtype), b_do1, b_dv0, allow_tf32=False)
             b_dv1 = tl.dot(b_A11.to(b_do1.dtype), b_do1, b_dv1, allow_tf32=False)
 
-            p_dv0 = tl.make_block_ptr(dv, (T, V), (HV * V, 1), (i_tc0, i_v * BV), (BC, BV), (1, 0))
-            p_dv1 = tl.make_block_ptr(dv, (T, V), (HV * V, 1), (i_tc1, i_v * BV), (BC, BV), (1, 0))
-            tl.store(p_dv0, b_dv0.to(p_dv0.dtype.element_ty), boundary_check=(0, 1))
-            tl.store(p_dv1, b_dv1.to(p_dv1.dtype.element_ty), boundary_check=(0, 1))
+            p_dv0 = dv + o_t[:, None] * (HV * V) + o_v[None, :]
+            p_dv1 = dv + o_t_2[:, None] * (HV * V) + o_v[None, :]
+            tl.store(p_dv0, b_dv0.to(p_dv0.dtype.element_ty), mask=m_p_do0)
+            tl.store(p_dv1, b_dv1.to(p_dv1.dtype.element_ty), mask=m_p_do1)
         else:
             for r in range(n_sub):
-                i_tc_r = i_t * BT + r * BC
+                i_tc_r = tl.cast(i_t, tl.int64) * BT + r * BC
                 m_r = (i_tc_r + o_i) < T
                 b_dv = tl.zeros([BC, BV], dtype=tl.float32)
 
                 if USE_G:
-                    p_gr = _g_block_ptr(g_base=g_base, T=T, offset=i_tc_r, BC=BC, G_T_CONTIG=G_T_CONTIG, HV=HV)
-                    b_g_r = tl.load(p_gr, boundary_check=(0,))
+                    o_t = i_tc_r + tl.arange(0, BC)
+                    m_t = (o_t >= 0) & (o_t < T)
+                    p_gr = _g_row_ptr(g_base, T, i_tc_r, BC, G_T_CONTIG, HV)
+                    b_g_r = tl.load(p_gr, mask=m_t, other=0)
                 if USE_G_GAMMA:
                     b_g_r = b_gamma * (r * BC + o_i + 1).to(tl.float32)
 
                 for c in range(r, n_sub):
-                    i_tc_c = i_t * BT + c * BC
+                    i_tc_c = tl.cast(i_t, tl.int64) * BT + c * BC
                     m_c = (i_tc_c + o_i) < T
                     b_A = tl.zeros([BC, BC], dtype=tl.float32)
                     for i_k in range(tl.cdiv(K, BK)):
-                        p_k = tl.make_block_ptr(k, (T, K), (H * K, 1), (i_tc_r, i_k * BK), (BC, BK), (1, 0))
-                        p_q = tl.make_block_ptr(q, (K, T), (1, H * K), (i_k * BK, i_tc_c), (BK, BC), (0, 1))
-                        b_k = tl.load(p_k, boundary_check=(0, 1))
-                        b_q = tl.load(p_q, boundary_check=(0, 1))
+                        o_t = i_tc_r + tl.arange(0, BC)
+                        m_t = (o_t >= 0) & (o_t < T)
+                        o_k = i_k * BK + tl.arange(0, BK)
+                        m_k = (o_k >= 0) & (o_k < K)
+                        m_p_k = m_t[:, None] & m_k[None, :]
+                        p_k = k + o_t[:, None] * (H * K) + o_k[None, :]
+                        o_t_2 = i_tc_c + tl.arange(0, BC)
+                        m_t_2 = (o_t_2 >= 0) & (o_t_2 < T)
+                        m_p_q = m_k[:, None] & m_t_2[None, :]
+                        p_q = q + o_k[:, None] + o_t_2[None, :] * (H * K)
+                        b_k = tl.load(p_k, mask=m_p_k, other=0)
+                        b_q = tl.load(p_q, mask=m_p_q, other=0)
                         b_A += tl.dot(b_k, b_q, allow_tf32=False) * scale
 
                     if USE_G:
-                        p_gc = _g_block_ptr(g_base=g_base, T=T, offset=i_tc_c, BC=BC, G_T_CONTIG=G_T_CONTIG, HV=HV)
-                        b_g_c = tl.load(p_gc, boundary_check=(0,))
+                        o_t = i_tc_c + tl.arange(0, BC)
+                        m_t = (o_t >= 0) & (o_t < T)
+                        p_gc = _g_row_ptr(g_base, T, i_tc_c, BC, G_T_CONTIG, HV)
+                        b_g_c = tl.load(p_gc, mask=m_t, other=0)
                         b_A = b_A * exp2(b_g_c[None, :] - b_g_r[:, None])
                     if USE_G_GAMMA:
                         b_g_c = b_gamma * (c * BC + o_i + 1).to(tl.float32)
@@ -646,12 +747,22 @@ def chunk_dv_local_bwd_kernel(
                         m_blk = m_r[:, None] & m_c
                     b_A = tl.where(m_blk, b_A, 0)
 
-                    p_doc = tl.make_block_ptr(do, (T, V), (HV * V, 1), (i_tc_c, i_v * BV), (BC, BV), (1, 0))
-                    b_doc = tl.load(p_doc, boundary_check=(0, 1))
+                    o_t = i_tc_c + tl.arange(0, BC)
+                    m_t = (o_t >= 0) & (o_t < T)
+                    o_v = i_v * BV + tl.arange(0, BV)
+                    m_v = (o_v >= 0) & (o_v < V)
+                    m_p_doc = m_t[:, None] & m_v[None, :]
+                    p_doc = do + o_t[:, None] * (HV * V) + o_v[None, :]
+                    b_doc = tl.load(p_doc, mask=m_p_doc, other=0)
                     b_dv = tl.dot(b_A.to(b_doc.dtype), b_doc, b_dv, allow_tf32=False)
 
-                p_dv = tl.make_block_ptr(dv, (T, V), (HV * V, 1), (i_tc_r, i_v * BV), (BC, BV), (1, 0))
-                tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
+                o_t = i_tc_r + tl.arange(0, BC)
+                m_t = (o_t >= 0) & (o_t < T)
+                o_v = i_v * BV + tl.arange(0, BV)
+                m_v = (o_v >= 0) & (o_v < V)
+                m_p_dv = m_t[:, None] & m_v[None, :]
+                p_dv = dv + o_t[:, None] * (HV * V) + o_v[None, :]
+                tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), mask=m_p_dv)
 
 
 @triton.jit(do_not_specialize=['T'])
@@ -735,78 +846,130 @@ def chunk_dqkwg_bwd_kernel(
     n_sub = BT // BC
 
     if USE_G:
-        last_idx = min(i_t * BT + BT, T) - 1
+        last_idx = min(tl.cast(i_t, tl.int64) * BT + BT, T) - 1
         if G_T_CONTIG:
             b_g_last = tl.load(g_base + last_idx).to(tl.float32)
         else:
-            b_g_last = tl.load(g + last_idx * HV).to(tl.float32)
+            b_g_last = tl.load(g + tl.cast(last_idx, tl.int64) * HV).to(tl.float32)
     if USE_G_GAMMA:
         b_gamma = tl.load(g_gamma + i_h)
-        b_g_last = b_gamma * min(BT, T - i_t * BT)
+        b_g_last = b_gamma * min(BT, T - tl.cast(i_t, tl.int64) * BT)
 
     # dw = -dv @ h  (independent of ds)
     if USE_DW:
         b_dw = tl.zeros([BT, BK], dtype=tl.float32)
         for i_v in range(tl.cdiv(V, BV)):
             if STATE_V_FIRST:
-                p_h = tl.make_block_ptr(h, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
+                o_v = i_v * BV + tl.arange(0, BV)
+                m_v = (o_v >= 0) & (o_v < V)
+                o_k = i_k * BK + tl.arange(0, BK)
+                m_k = (o_k >= 0) & (o_k < K)
+                m_p_h = m_v[:, None] & m_k[None, :]
+                p_h = h + o_v[:, None] * K + o_k[None, :]
             else:
-                p_h = tl.make_block_ptr(h, (V, K), (1, V), (i_v * BV, i_k * BK), (BV, BK), (0, 1))
-            p_dv = tl.make_block_ptr(dv, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-            b_h = tl.load(p_h, boundary_check=(0, 1))
-            b_dv = tl.load(p_dv, boundary_check=(0, 1))
+                o_v = i_v * BV + tl.arange(0, BV)
+                m_v = (o_v >= 0) & (o_v < V)
+                o_k = i_k * BK + tl.arange(0, BK)
+                m_k = (o_k >= 0) & (o_k < K)
+                m_p_h = m_v[:, None] & m_k[None, :]
+                p_h = h + o_v[:, None] + o_k[None, :] * V
+            # Distinct names: BT-wide offsets must not become the [BC] loop-carried o_t below.
+            o_t_dw = tl.cast(i_t, tl.int64) * BT + tl.arange(0, BT)
+            m_t_dw = (o_t_dw >= 0) & (o_t_dw < T)
+            o_v = i_v * BV + tl.arange(0, BV)
+            m_v = (o_v >= 0) & (o_v < V)
+            m_p_dv = m_t_dw[:, None] & m_v[None, :]
+            p_dv = dv + o_t_dw[:, None] * (HV * V) + o_v[None, :]
+            b_h = tl.load(p_h, mask=m_p_h, other=0)
+            b_dv = tl.load(p_dv, mask=m_p_dv, other=0)
             b_dw = tl.dot(b_dv.to(b_h.dtype), b_h.to(b_h.dtype), b_dw, allow_tf32=False)
-        p_dw = tl.make_block_ptr(dw, (T, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-        tl.store(p_dw, -b_dw.to(p_dw.dtype.element_ty), boundary_check=(0, 1))
+        o_t_dw = tl.cast(i_t, tl.int64) * BT + tl.arange(0, BT)
+        m_t_dw = (o_t_dw >= 0) & (o_t_dw < T)
+        o_k = i_k * BK + tl.arange(0, BK)
+        m_k = (o_k >= 0) & (o_k < K)
+        m_p_dw = m_t_dw[:, None] & m_k[None, :]
+        p_dw = dw + o_t_dw[:, None] * (HV * K) + o_k[None, :]
+        tl.store(p_dw, -b_dw.to(p_dw.dtype.element_ty), mask=m_p_dw)
 
     tl.debug_barrier()
 
     # zero dk scratch because the fused intra path accumulates ds.T@q into it.
     for c0 in range(n_sub):
-        i_tc = i_t * BT + c0 * BC
-        p_zk = tl.make_block_ptr(dk_f32, (T, K), (HV * K, 1), (i_tc, i_k * BK), (BC, BK), (1, 0))
-        tl.store(p_zk, tl.zeros([BC, BK], dtype=tl.float32), boundary_check=(0, 1))
+        i_tc = tl.cast(i_t, tl.int64) * BT + c0 * BC
+        o_t = i_tc + tl.arange(0, BC)
+        m_t = (o_t >= 0) & (o_t < T)
+        o_k = i_k * BK + tl.arange(0, BK)
+        m_k = (o_k >= 0) & (o_k < K)
+        m_p_zk = m_t[:, None] & m_k[None, :]
+        p_zk = dk_f32 + o_t[:, None] * (HV * K) + o_k[None, :]
+        tl.store(p_zk, tl.zeros([BC, BK], dtype=tl.float32), mask=m_p_zk)
 
     # share ds between dq and dk for each (r, c) block.
     for r in range(n_sub):
-        i_tc_r = i_t * BT + r * BC
+        i_tc_r = tl.cast(i_t, tl.int64) * BT + r * BC
         m_r = (i_tc_r + o_i) < T
         b_dq_r = tl.zeros([BC, BK], dtype=tl.float32)
         for i_v in range(tl.cdiv(V, BV)):
-            p_do_r = tl.make_block_ptr(do, (T, V), (HV * V, 1), (i_tc_r, i_v * BV), (BC, BV), (1, 0))
+            o_t = i_tc_r + tl.arange(0, BC)
+            m_t = (o_t >= 0) & (o_t < T)
+            o_v = i_v * BV + tl.arange(0, BV)
+            m_v = (o_v >= 0) & (o_v < V)
+            m_p_do_r = m_t[:, None] & m_v[None, :]
+            p_do_r = do + o_t[:, None] * (HV * V) + o_v[None, :]
             if STATE_V_FIRST:
-                p_h = tl.make_block_ptr(h, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
+                o_k = i_k * BK + tl.arange(0, BK)
+                m_k = (o_k >= 0) & (o_k < K)
+                m_p_h = m_v[:, None] & m_k[None, :]
+                p_h = h + o_v[:, None] * K + o_k[None, :]
             else:
-                p_h = tl.make_block_ptr(h, (V, K), (1, V), (i_v * BV, i_k * BK), (BV, BK), (0, 1))
-            b_do_r = tl.load(p_do_r, boundary_check=(0, 1))
-            b_h = tl.load(p_h, boundary_check=(0, 1))
+                o_k = i_k * BK + tl.arange(0, BK)
+                m_k = (o_k >= 0) & (o_k < K)
+                m_p_h = m_v[:, None] & m_k[None, :]
+                p_h = h + o_v[:, None] + o_k[None, :] * V
+            b_do_r = tl.load(p_do_r, mask=m_p_do_r, other=0)
+            b_h = tl.load(p_h, mask=m_p_h, other=0)
             b_dq_r = tl.dot(b_do_r, b_h.to(b_do_r.dtype), b_dq_r, allow_tf32=False)
 
         if USE_G:
-            p_gr = _g_block_ptr(g_base=g_base, T=T, offset=i_tc_r, BC=BC, G_T_CONTIG=G_T_CONTIG, HV=HV)
-            b_gr = tl.load(p_gr, boundary_check=(0,)).to(tl.float32)
+            o_t = i_tc_r + tl.arange(0, BC)
+            m_t = (o_t >= 0) & (o_t < T)
+            p_gr = _g_row_ptr(g_base, T, i_tc_r, BC, G_T_CONTIG, HV)
+            b_gr = tl.load(p_gr, mask=m_t, other=0).to(tl.float32)
             b_dq_r = b_dq_r * exp2(b_gr)[:, None] * scale
         elif USE_G_GAMMA:
             b_gr = b_gamma * (r * BC + o_i + 1).to(tl.float32)
             b_dq_r = b_dq_r * exp2(b_gr)[:, None] * scale
 
-        p_q_r = tl.make_block_ptr(q, (T, K), (H * K, 1), (i_tc_r, i_k * BK), (BC, BK), (1, 0))
-        b_q_r = tl.load(p_q_r, boundary_check=(0, 1))
+        o_t = i_tc_r + tl.arange(0, BC)
+        m_t = (o_t >= 0) & (o_t < T)
+        o_k = i_k * BK + tl.arange(0, BK)
+        m_k = (o_k >= 0) & (o_k < K)
+        m_p_q_r = m_t[:, None] & m_k[None, :]
+        p_q_r = q + o_t[:, None] * (H * K) + o_k[None, :]
+        b_q_r = tl.load(p_q_r, mask=m_p_q_r, other=0)
 
         for c in range(r + 1):
-            i_tc_c = i_t * BT + c * BC
+            i_tc_c = tl.cast(i_t, tl.int64) * BT + c * BC
             m_c = (i_tc_c + o_i) < T
             b_ds = tl.zeros([BC, BC], dtype=tl.float32)
             for i_v in range(tl.cdiv(V, BV)):
-                p_do_r2 = tl.make_block_ptr(do, (T, V), (HV * V, 1), (i_tc_r, i_v * BV), (BC, BV), (1, 0))
-                p_v_c = tl.make_block_ptr(v, (T, V), (HV * V, 1), (i_tc_c, i_v * BV), (BC, BV), (1, 0))
-                b_do_r2 = tl.load(p_do_r2, boundary_check=(0, 1))
-                b_v_c = tl.load(p_v_c, boundary_check=(0, 1))
+                o_v = i_v * BV + tl.arange(0, BV)
+                m_v = (o_v >= 0) & (o_v < V)
+                m_p_do_r2 = m_t[:, None] & m_v[None, :]
+                p_do_r2 = do + o_t[:, None] * (HV * V) + o_v[None, :]
+                o_t_2 = i_tc_c + tl.arange(0, BC)
+                m_t_2 = (o_t_2 >= 0) & (o_t_2 < T)
+                m_p_v_c = m_t_2[:, None] & m_v[None, :]
+                p_v_c = v + o_t_2[:, None] * (HV * V) + o_v[None, :]
+                b_do_r2 = tl.load(p_do_r2, mask=m_p_do_r2, other=0)
+                b_v_c = tl.load(p_v_c, mask=m_p_v_c, other=0)
                 b_ds = tl.dot(b_do_r2, tl.trans(b_v_c), b_ds, allow_tf32=False)
 
             if USE_G:
-                p_gc = _g_block_ptr(g_base=g_base, T=T, offset=i_tc_c, BC=BC, G_T_CONTIG=G_T_CONTIG, HV=HV)
-                b_gc = tl.load(p_gc, boundary_check=(0,)).to(tl.float32)
+                o_t_2 = i_tc_c + tl.arange(0, BC)
+                m_t_2 = (o_t_2 >= 0) & (o_t_2 < T)
+                p_gc = _g_row_ptr(g_base, T, i_tc_c, BC, G_T_CONTIG, HV)
+                b_gc = tl.load(p_gc, mask=m_t_2, other=0).to(tl.float32)
                 b_ds = b_ds * exp2(b_gr[:, None] - b_gc[None, :]) * scale
             elif USE_G_GAMMA:
                 b_gc = b_gamma * (c * BC + o_i + 1).to(tl.float32)
@@ -816,56 +979,77 @@ def chunk_dqkwg_bwd_kernel(
                 m_blk = (o_i[:, None] >= o_i[None, :]) & (m_r[:, None] & m_c)
             else:
                 m_blk = m_r[:, None] & m_c
-            p_k_c = tl.make_block_ptr(k, (T, K), (H * K, 1), (i_tc_c, i_k * BK), (BC, BK), (1, 0))
-            b_k_c = tl.load(p_k_c, boundary_check=(0, 1))
+            o_t_2 = i_tc_c + tl.arange(0, BC)
+            m_t_2 = (o_t_2 >= 0) & (o_t_2 < T)
+            m_p_k_c = m_t_2[:, None] & m_k[None, :]
+            p_k_c = k + o_t_2[:, None] * (H * K) + o_k[None, :]
+            b_k_c = tl.load(p_k_c, mask=m_p_k_c, other=0)
             b_ds = tl.where(m_blk, b_ds, 0).to(b_k_c.dtype)
             b_ds_c = b_ds + 0.0
             b_dq_r = tl.dot(b_ds, b_k_c, b_dq_r, allow_tf32=False)
 
-            p_dk_acc = tl.make_block_ptr(dk_f32, (T, K), (HV * K, 1), (i_tc_c, i_k * BK), (BC, BK), (1, 0))
-            b_dk_acc = tl.load(p_dk_acc, boundary_check=(0, 1))
+            p_dk_acc = dk_f32 + o_t_2[:, None] * (HV * K) + o_k[None, :]
+            b_dk_acc = tl.load(p_dk_acc, mask=m_p_k_c, other=0)
             b_ds_dk = tl.dot(tl.trans(b_ds_c), b_q_r, allow_tf32=False)
             if not USE_G and not USE_G_GAMMA:
                 b_ds_dk = b_ds_dk * scale
             b_dk_acc += b_ds_dk
-            tl.store(p_dk_acc, b_dk_acc, boundary_check=(0, 1))
+            tl.store(p_dk_acc, b_dk_acc, mask=m_p_k_c)
 
         if not USE_G and not USE_G_GAMMA:
             b_dq_r *= scale
 
-        p_dq_r = tl.make_block_ptr(dq, (T, K), (HV * K, 1), (i_tc_r, i_k * BK), (BC, BK), (1, 0))
-        p_dq_f32_r = tl.make_block_ptr(dq_f32, (T, K), (HV * K, 1), (i_tc_r, i_k * BK), (BC, BK), (1, 0))
-        tl.store(p_dq_r, b_dq_r.to(p_dq_r.dtype.element_ty), boundary_check=(0, 1))
-        tl.store(p_dq_f32_r, b_dq_r, boundary_check=(0, 1))
+        p_dq_r = dq + o_t[:, None] * (HV * K) + o_k[None, :]
+        p_dq_f32_r = dq_f32 + o_t[:, None] * (HV * K) + o_k[None, :]
+        tl.store(p_dq_r, b_dq_r.to(p_dq_r.dtype.element_ty), mask=m_p_q_r)
+        tl.store(p_dq_f32_r, b_dq_r, mask=m_p_q_r)
 
     # combine gated inter (v@dh) and fused intra contributions to dk.
     for c in range(n_sub):
-        i_tc_c = i_t * BT + c * BC
+        i_tc_c = tl.cast(i_t, tl.int64) * BT + c * BC
         m_c = (i_tc_c + o_i) < T
         b_dk_c = tl.zeros([BC, BK], dtype=tl.float32)
         for i_v in range(tl.cdiv(V, BV)):
-            p_v = tl.make_block_ptr(v, (T, V), (HV * V, 1), (i_tc_c, i_v * BV), (BC, BV), (1, 0))
+            o_t = i_tc_c + tl.arange(0, BC)
+            m_t = (o_t >= 0) & (o_t < T)
+            o_v = i_v * BV + tl.arange(0, BV)
+            m_v = (o_v >= 0) & (o_v < V)
+            m_p_v = m_t[:, None] & m_v[None, :]
+            p_v = v + o_t[:, None] * (HV * V) + o_v[None, :]
             if STATE_V_FIRST:
-                p_dh = tl.make_block_ptr(dh, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
+                o_k = i_k * BK + tl.arange(0, BK)
+                m_k = (o_k >= 0) & (o_k < K)
+                m_p_dh = m_v[:, None] & m_k[None, :]
+                p_dh = dh + o_v[:, None] * K + o_k[None, :]
             else:
-                p_dh = tl.make_block_ptr(dh, (V, K), (1, V), (i_v * BV, i_k * BK), (BV, BK), (0, 1))
-            b_v = tl.load(p_v, boundary_check=(0, 1))
-            b_dh = tl.load(p_dh, boundary_check=(0, 1))
+                o_k = i_k * BK + tl.arange(0, BK)
+                m_k = (o_k >= 0) & (o_k < K)
+                m_p_dh = m_v[:, None] & m_k[None, :]
+                p_dh = dh + o_v[:, None] + o_k[None, :] * V
+            b_v = tl.load(p_v, mask=m_p_v, other=0)
+            b_dh = tl.load(p_dh, mask=m_p_dh, other=0)
             b_dk_c = tl.dot(b_v.to(tl.float32), b_dh.to(tl.float32), b_dk_c, allow_tf32=False)
 
         if USE_G:
-            p_gc = _g_block_ptr(g_base=g_base, T=T, offset=i_tc_c, BC=BC, G_T_CONTIG=G_T_CONTIG, HV=HV)
-            b_gc = tl.load(p_gc, boundary_check=(0,)).to(tl.float32)
+            o_t = i_tc_c + tl.arange(0, BC)
+            m_t = (o_t >= 0) & (o_t < T)
+            p_gc = _g_row_ptr(g_base, T, i_tc_c, BC, G_T_CONTIG, HV)
+            b_gc = tl.load(p_gc, mask=m_t, other=0).to(tl.float32)
             b_dk_c = b_dk_c * tl.where(m_c, exp2(-b_gc + b_g_last), 0)[:, None]
         elif USE_G_GAMMA:
             b_gc = b_gamma * (c * BC + o_i + 1).to(tl.float32)
             b_dk_c = b_dk_c * tl.where(m_c, exp2(-b_gc + b_g_last), 0)[:, None]
 
-        p_dk_acc = tl.make_block_ptr(dk_f32, (T, K), (HV * K, 1), (i_tc_c, i_k * BK), (BC, BK), (1, 0))
-        b_dk_c += tl.load(p_dk_acc, boundary_check=(0, 1))
-        p_dk_c = tl.make_block_ptr(dk, (T, K), (HV * K, 1), (i_tc_c, i_k * BK), (BC, BK), (1, 0))
-        tl.store(p_dk_c, b_dk_c.to(p_dk_c.dtype.element_ty), boundary_check=(0, 1))
-        tl.store(p_dk_acc, b_dk_c, boundary_check=(0, 1))
+        o_t = i_tc_c + tl.arange(0, BC)
+        m_t = (o_t >= 0) & (o_t < T)
+        o_k = i_k * BK + tl.arange(0, BK)
+        m_k = (o_k >= 0) & (o_k < K)
+        m_p_dk_acc = m_t[:, None] & m_k[None, :]
+        p_dk_acc = dk_f32 + o_t[:, None] * (HV * K) + o_k[None, :]
+        b_dk_c += tl.load(p_dk_acc, mask=m_p_dk_acc, other=0)
+        p_dk_c = dk + o_t[:, None] * (HV * K) + o_k[None, :]
+        tl.store(p_dk_c, b_dk_c.to(p_dk_c.dtype.element_ty), mask=m_p_dk_acc)
+        tl.store(p_dk_acc, b_dk_c, mask=m_p_dk_acc)
 
 
 @triton.jit(do_not_specialize=['T', 'task_num', 'num_core'])
@@ -903,12 +1087,14 @@ def chunk_dqkwg_bwd_kernel_full(
     G_T_CONTIG: tl.constexpr,
     STATE_V_FIRST: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    MASK_DMA: tl.constexpr,
 ):
-    """Compute full-chunk gradients on a persistent Cube grid.
+    """CUDA-style full-BT dq/dk/dw[/dg row-sums], 1D Cube core-grid.
 
-    A fixed grid avoids multidimensional mapping and host splits at ASCEND_MAX_GRID_DIM.
-    Local pointers must be reset for each task.
-    The final-token gate contribution from h and dh runs in `chunk_dg_bwd_kernel_hdh`.
+    Flatten (chunk, head) into task_id; each Cube core walks the list.
+    Avoids 2D grid mapping onto 24 AIC and host-splits at 65535.
+    Rebind local pointers every task — do not in-place += kernel args.
+    Frobenius <h, dh> for last-token dg is `chunk_bwd_kernel_dg_hdh_npu`.
     """
     core_id = tl.program_id(0)
     bh = B * HV
@@ -941,32 +1127,38 @@ def chunk_dqkwg_bwd_kernel_full(
             dw_ptr = dw + (bos * HV + i_h) * K
             dv_ptr = dv + (bos * HV + i_h) * V
 
+        rows, m_rows = _chunk_rows(i_t, T_cur, BT)
+        row_base = tl.cast(i_t, tl.int64) * BT
+        stride_qk = H * K
+        stride_v = HV * V
+        stride_hk = HV * K
         if USE_G:
             dg_head = dg + bos * HV + i_h
-            last_idx = min(i_t * BT + BT, T_cur) - 1
+            last_idx = min(row_base + BT, T_cur) - 1
             if G_T_CONTIG:
                 g_base = _g_contig_base(g=g, bos=bos, i_b=i_b, i_h=i_h, T_seq=T_seq, HV=HV, IS_VARLEN=IS_VARLEN)
                 b_g_last = tl.load(g_base + last_idx).to(tl.float32)
             else:
                 g_base = g + bos * HV + i_h
                 b_g_last = tl.load(g_base + last_idx * HV).to(tl.float32)
-            p_g = _g_block_ptr(g_base=g_base, T=T_cur, offset=i_t * BT, BC=BT, G_T_CONTIG=G_T_CONTIG, HV=HV)
-            b_g = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
+            p_g = _g_row_ptr(g_base, T_cur, i_t * BT, BT, G_T_CONTIG, HV)
+            b_g = mload(p_g, m_rows, MASK_DMA).to(tl.float32)
         if USE_G_GAMMA:
             b_gamma = tl.load(g_gamma + i_h)
             b_g = b_gamma * (tl.arange(0, BT) + 1).to(tl.float32)
             b_g_last = b_gamma * min(BT, T_cur - i_t * BT)
 
-        o_t = i_t * BT + tl.arange(0, BT)
-        m_t = o_t < T_cur
-        m_A = (o_t[:, None] >= o_t[None, :]) & (m_t[:, None] & m_t)
+        m_A = (rows[:, None] >= rows[None, :]) & (m_rows[:, None] & m_rows)
 
         b_ds = tl.zeros([BT, BT], dtype=tl.float32)
         for i_v in range(tl.cdiv(V, BV)):
-            p_v = tl.make_block_ptr(v_ptr, (T_cur, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-            p_do = tl.make_block_ptr(do_ptr, (T_cur, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-            b_v = tl.load(p_v, boundary_check=(0, 1))
-            b_do = tl.load(p_do, boundary_check=(0, 1))
+            o_v = i_v * BV + tl.arange(0, BV)
+            m_v = (o_v >= 0) & (o_v < V)
+            m_p_v = m_rows[:, None] & m_v[None, :]
+            p_v = v_ptr + row_base * stride_v + rows[:, None] * stride_v + o_v[None, :]
+            p_do = do_ptr + row_base * stride_v + rows[:, None] * stride_v + o_v[None, :]
+            b_v = mload(p_v, m_p_v, MASK_DMA)
+            b_do = mload(p_do, m_p_v, MASK_DMA)
             b_ds = tl.dot(b_do, tl.trans(b_v), b_ds, allow_tf32=False)
 
         if USE_G or USE_G_GAMMA:
@@ -982,57 +1174,79 @@ def chunk_dqkwg_bwd_kernel_full(
                 b_dw = tl.zeros([BT, BK], dtype=tl.float32)
 
             for i_v in range(tl.cdiv(V, BV)):
-                p_v = tl.make_block_ptr(v_ptr, (T_cur, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-                p_do = tl.make_block_ptr(do_ptr, (T_cur, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+                o_v = i_v * BV + tl.arange(0, BV)
+                m_v = (o_v >= 0) & (o_v < V)
+                m_p_v = m_rows[:, None] & m_v[None, :]
+                p_v = v_ptr + row_base * stride_v + rows[:, None] * stride_v + o_v[None, :]
+                p_do = do_ptr + row_base * stride_v + rows[:, None] * stride_v + o_v[None, :]
                 if STATE_V_FIRST:
-                    p_h = tl.make_block_ptr(h_ptr, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
-                    p_dh = tl.make_block_ptr(dh_ptr, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
+                    o_k = i_k * BK + tl.arange(0, BK)
+                    m_k = (o_k >= 0) & (o_k < K)
+                    m_p_h = m_v[:, None] & m_k[None, :]
+                    p_h = h_ptr + o_v[:, None] * K + o_k[None, :]
+                    p_dh = dh_ptr + o_v[:, None] * K + o_k[None, :]
                 else:
-                    p_h = tl.make_block_ptr(h_ptr, (V, K), (1, V), (i_v * BV, i_k * BK), (BV, BK), (0, 1))
-                    p_dh = tl.make_block_ptr(dh_ptr, (V, K), (1, V), (i_v * BV, i_k * BK), (BV, BK), (0, 1))
-                b_v = tl.load(p_v, boundary_check=(0, 1))
-                b_do = tl.load(p_do, boundary_check=(0, 1))
-                b_h = tl.load(p_h, boundary_check=(0, 1))
-                b_dh = tl.load(p_dh, boundary_check=(0, 1))
+                    o_k = i_k * BK + tl.arange(0, BK)
+                    m_k = (o_k >= 0) & (o_k < K)
+                    m_p_h = m_v[:, None] & m_k[None, :]
+                    p_h = h_ptr + o_v[:, None] + o_k[None, :] * V
+                    p_dh = dh_ptr + o_v[:, None] + o_k[None, :] * V
+                b_v = mload(p_v, m_p_v, MASK_DMA)
+                b_do = mload(p_do, m_p_v, MASK_DMA)
+                b_h = mload(p_h, m_p_h, MASK_DMA)
+                b_dh = mload(p_dh, m_p_h, MASK_DMA)
                 b_dq = tl.dot(b_do, b_h.to(b_do.dtype), b_dq, allow_tf32=False)
                 b_dk = tl.dot(b_v, b_dh.to(b_v.dtype), b_dk, allow_tf32=False)
                 if USE_DW:
-                    p_dv = tl.make_block_ptr(dv_ptr, (T_cur, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-                    b_dv = tl.load(p_dv, boundary_check=(0, 1))
+                    p_dv = dv_ptr + row_base * stride_v + rows[:, None] * stride_v + o_v[None, :]
+                    b_dv = mload(p_dv, m_p_v, MASK_DMA)
                     b_dw = tl.dot(b_dv.to(b_h.dtype), b_h.to(b_h.dtype), b_dw, allow_tf32=False)
 
             if USE_DW:
-                p_dw = tl.make_block_ptr(dw_ptr, (T_cur, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-                tl.store(p_dw, -b_dw.to(p_dw.dtype.element_ty), boundary_check=(0, 1))
+                o_k = i_k * BK + tl.arange(0, BK)
+                m_k = (o_k >= 0) & (o_k < K)
+                m_p_dw = m_rows[:, None] & m_k[None, :]
+                p_dw = dw_ptr + row_base * stride_hk + rows[:, None] * stride_hk + o_k[None, :]
+                mstore(p_dw, -b_dw.to(p_dw.dtype.element_ty), m_p_dw, MASK_DMA)
 
-            p_q = tl.make_block_ptr(q_ptr, (T_cur, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-            p_k = tl.make_block_ptr(k_ptr, (T_cur, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-            b_q = tl.load(p_q, boundary_check=(0, 1))
-            b_k = tl.load(p_k, boundary_check=(0, 1))
+            o_k = i_k * BK + tl.arange(0, BK)
+            m_k = (o_k >= 0) & (o_k < K)
+            m_p_q = m_rows[:, None] & m_k[None, :]
+            p_q = q_ptr + row_base * stride_qk + rows[:, None] * stride_qk + o_k[None, :]
+            p_k = k_ptr + row_base * stride_qk + rows[:, None] * stride_qk + o_k[None, :]
+            b_q = mload(p_q, m_p_q, MASK_DMA)
+            b_k = mload(p_k, m_p_q, MASK_DMA)
 
             b_ds_lhs = b_ds_keep + 0.0
             b_ds_rhs = b_ds_keep + 0.0
             if USE_G or USE_G_GAMMA:
                 b_dq = b_dq * exp2(b_g)[:, None] * scale
-                b_dk = b_dk * tl.where(m_t, exp2(-b_g + b_g_last), 0)[:, None]
+                b_dk = b_dk * tl.where(m_rows, exp2(-b_g + b_g_last), 0)[:, None]
                 if USE_G:
-                    b_dg_last = tl.sum(b_dk * b_k.to(tl.float32))
+                    # Padding lanes of the [BT, BK] tile are outside K and can be NaN.
+                    # They are masked out of dk, but a raw sum would still poison dg.
+                    b_dk_m = tl.where(m_p_q, b_dk, 0)
+                    b_k_m = tl.where(m_p_q, b_k.to(tl.float32), 0)
+                    b_dg_last = tl.sum(b_dk_m * b_k_m)
                 b_dq = tl.dot(b_ds_lhs, b_k, b_dq, allow_tf32=False)
                 b_dk = tl.dot(tl.trans(b_ds_rhs), b_q, b_dk, allow_tf32=False)
             else:
                 b_dq = b_dq * scale + tl.dot(b_ds_lhs, b_k, allow_tf32=False)
                 b_dk = tl.dot(tl.trans(b_ds_rhs), b_q, b_dk, allow_tf32=False)
 
-            p_dq = tl.make_block_ptr(dq_ptr, (T_cur, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-            p_dk = tl.make_block_ptr(dk_ptr, (T_cur, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-            tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), boundary_check=(0, 1))
-            tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
+            p_dq = dq_ptr + row_base * stride_hk + rows[:, None] * stride_hk + o_k[None, :]
+            p_dk = dk_ptr + row_base * stride_hk + rows[:, None] * stride_hk + o_k[None, :]
+            mstore(p_dq, b_dq.to(p_dq.dtype.element_ty), m_p_q, MASK_DMA)
+            mstore(p_dk, b_dk.to(p_dk.dtype.element_ty), m_p_q, MASK_DMA)
             if USE_G:
-                b_dg = tl.sum(b_dq * b_q.to(tl.float32), axis=1) - tl.sum(b_dk * b_k.to(tl.float32), axis=1)
-                b_dg = tl.where(o_t < last_idx, b_dg, b_dg + b_dg_last)
+                b_q_f = tl.where(m_p_q, b_q.to(tl.float32), 0)
+                b_k_f = tl.where(m_p_q, b_k.to(tl.float32), 0)
+                b_dg = tl.sum(tl.where(m_p_q, b_dq, 0) * b_q_f, axis=1) - tl.sum(tl.where(m_p_q, b_dk, 0) * b_k_f, axis=1)
+                m_before_last = rows < (min(BT, T_cur - i_t * BT) - 1)
+                b_dg = tl.where(m_before_last, b_dg, b_dg + b_dg_last)
                 dg_k = dg_head + tl.cast(i_k, tl.int64) * tl.cast(B, tl.int64) * tl.cast(T_seq, tl.int64) * HV
-                p_dg = tl.make_block_ptr(dg_k, (T_cur,), (HV,), (i_t * BT,), (BT,), (0,))
-                tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), boundary_check=(0,))
+                p_dg = (dg_k + row_base * HV) + rows * HV
+                mstore(p_dg, b_dg.to(p_dg.dtype.element_ty), m_rows, MASK_DMA)
 
 
 @triton.jit(do_not_specialize=['T', 'task_num', 'num_core'])
@@ -1056,6 +1270,7 @@ def chunk_dg_bwd_kernel_hdh(
     G_T_CONTIG: tl.constexpr,
     STATE_V_FIRST: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    MASK_DMA: tl.constexpr,
 ):
     """Compute the final-token gate contribution from h and dh on vector cores.
 
@@ -1082,26 +1297,40 @@ def chunk_dg_bwd_kernel_hdh(
 
         h_ptr = h + (tl.cast(i_tg, tl.int64) * HV + i_h) * K * V
         dh_ptr = dh + (tl.cast(i_tg, tl.int64) * HV + i_h) * K * V
-        last_idx = min(i_t * BT + BT, T_cur) - 1
+        last_idx = min(tl.cast(i_t, tl.int64) * BT + BT, T_cur) - 1
         if G_T_CONTIG:
             g_base = _g_contig_base(g=g, bos=bos, i_b=i_b, i_h=i_h, T_seq=T_seq, HV=HV, IS_VARLEN=IS_VARLEN)
             b_g_last = tl.load(g_base + last_idx).to(tl.float32)
         else:
             g_base = g + bos * HV + i_h
-            b_g_last = tl.load(g_base + last_idx * HV).to(tl.float32)
+            b_g_last = tl.load(g_base + tl.cast(last_idx, tl.int64) * HV).to(tl.float32)
 
         acc = 0.0
         for i_k in range(tl.cdiv(K, BK)):
             for i_v in range(tl.cdiv(V, BV)):
                 if STATE_V_FIRST:
-                    p_h = tl.make_block_ptr(h_ptr, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
-                    p_dh = tl.make_block_ptr(dh_ptr, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
+                    o_v = i_v * BV + tl.arange(0, BV)
+                    m_v = (o_v >= 0) & (o_v < V)
+                    o_k = i_k * BK + tl.arange(0, BK)
+                    m_k = (o_k >= 0) & (o_k < K)
+                    m_p_h = m_v[:, None] & m_k[None, :]
+                    p_h = h_ptr + o_v[:, None] * K + o_k[None, :]
+                    p_dh = dh_ptr + o_v[:, None] * K + o_k[None, :]
                 else:
-                    p_h = tl.make_block_ptr(h_ptr, (V, K), (1, V), (i_v * BV, i_k * BK), (BV, BK), (0, 1))
-                    p_dh = tl.make_block_ptr(dh_ptr, (V, K), (1, V), (i_v * BV, i_k * BK), (BV, BK), (0, 1))
-                b_h = tl.load(p_h, boundary_check=(0, 1)).to(tl.float32)
-                b_dh = tl.load(p_dh, boundary_check=(0, 1)).to(tl.float32)
-                acc += tl.sum(tl.sum(b_h * b_dh, axis=1))
+                    o_v = i_v * BV + tl.arange(0, BV)
+                    m_v = (o_v >= 0) & (o_v < V)
+                    o_k = i_k * BK + tl.arange(0, BK)
+                    m_k = (o_k >= 0) & (o_k < K)
+                    # Sum is layout-invariant; load the V-contiguous [BK, BV] tile.
+                    m_p_h = m_k[:, None] & m_v[None, :]
+                    p_h = h_ptr + o_k[:, None] * V + o_v[None, :]
+                    p_dh = dh_ptr + o_k[:, None] * V + o_v[None, :]
+                b_h = mload(p_h, m_p_h, MASK_DMA).to(tl.float32)
+                b_dh = mload(p_dh, m_p_h, MASK_DMA).to(tl.float32)
+                if MASK_DMA:
+                    b_h = tl.where(m_p_h, b_h, 0)
+                    b_dh = tl.where(m_p_h, b_dh, 0)
+                acc += tl.sum(b_h * b_dh)
 
         dg_ptr = dg + bos * HV + i_h
         p_last = dg_ptr + tl.cast(last_idx, tl.int64) * HV
@@ -1173,62 +1402,93 @@ def chunk_dg_bwd_kernel(
 
     o_i = tl.arange(0, BC)
     n_sub = BT // BC
-    last_idx = min(i_t * BT + BT, T) - 1
+    last_idx = min(tl.cast(i_t, tl.int64) * BT + BT, T) - 1
     if G_T_CONTIG:
         b_g_last = tl.load(g_base + last_idx).to(tl.float32)
     else:
-        b_g_last = tl.load(g + last_idx * HV).to(tl.float32)
+        b_g_last = tl.load(g + tl.cast(last_idx, tl.int64) * HV).to(tl.float32)
 
     b_dg_last = 0.0
     for i_v in range(tl.cdiv(V, BV)):
         if STATE_V_FIRST:
-            p_h = tl.make_block_ptr(h, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
-            p_dh = tl.make_block_ptr(dh, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
+            o_v = i_v * BV + tl.arange(0, BV)
+            m_v = (o_v >= 0) & (o_v < V)
+            o_k = i_k * BK + tl.arange(0, BK)
+            m_k = (o_k >= 0) & (o_k < K)
+            m_p_h = m_v[:, None] & m_k[None, :]
+            p_h = h + o_v[:, None] * K + o_k[None, :]
+            p_dh = dh + o_v[:, None] * K + o_k[None, :]
         else:
-            p_h = tl.make_block_ptr(h, (V, K), (1, V), (i_v * BV, i_k * BK), (BV, BK), (0, 1))
-            p_dh = tl.make_block_ptr(dh, (V, K), (1, V), (i_v * BV, i_k * BK), (BV, BK), (0, 1))
-        b_h = tl.load(p_h, boundary_check=(0, 1))
-        b_dh = tl.load(p_dh, boundary_check=(0, 1))
+            o_v = i_v * BV + tl.arange(0, BV)
+            m_v = (o_v >= 0) & (o_v < V)
+            o_k = i_k * BK + tl.arange(0, BK)
+            m_k = (o_k >= 0) & (o_k < K)
+            m_p_h = m_v[:, None] & m_k[None, :]
+            p_h = h + o_v[:, None] + o_k[None, :] * V
+            p_dh = dh + o_v[:, None] + o_k[None, :] * V
+        b_h = tl.load(p_h, mask=m_p_h, other=0)
+        b_dh = tl.load(p_dh, mask=m_p_h, other=0)
         b_dg_last += tl.sum(b_h.to(tl.float32) * b_dh.to(tl.float32))
 
     b_dg_last *= exp2(b_g_last)
 
     for c in range(n_sub):
-        i_tc_c = i_t * BT + c * BC
+        i_tc_c = tl.cast(i_t, tl.int64) * BT + c * BC
         m_c = (i_tc_c + o_i) < T
         b_dk_pre = tl.zeros([BC, BK], dtype=tl.float32)
         for i_v in range(tl.cdiv(V, BV)):
-            p_v = tl.make_block_ptr(v, (T, V), (HV * V, 1), (i_tc_c, i_v * BV), (BC, BV), (1, 0))
+            o_t = i_tc_c + tl.arange(0, BC)
+            m_t = (o_t >= 0) & (o_t < T)
+            o_v = i_v * BV + tl.arange(0, BV)
+            m_v = (o_v >= 0) & (o_v < V)
+            m_p_v = m_t[:, None] & m_v[None, :]
+            p_v = v + o_t[:, None] * (HV * V) + o_v[None, :]
             if STATE_V_FIRST:
-                p_dh = tl.make_block_ptr(dh, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
+                o_k = i_k * BK + tl.arange(0, BK)
+                m_k = (o_k >= 0) & (o_k < K)
+                m_p_dh = m_v[:, None] & m_k[None, :]
+                p_dh = dh + o_v[:, None] * K + o_k[None, :]
             else:
-                p_dh = tl.make_block_ptr(dh, (V, K), (1, V), (i_v * BV, i_k * BK), (BV, BK), (0, 1))
-            b_v = tl.load(p_v, boundary_check=(0, 1))
-            b_dh = tl.load(p_dh, boundary_check=(0, 1))
+                o_k = i_k * BK + tl.arange(0, BK)
+                m_k = (o_k >= 0) & (o_k < K)
+                m_p_dh = m_v[:, None] & m_k[None, :]
+                p_dh = dh + o_v[:, None] + o_k[None, :] * V
+            b_v = tl.load(p_v, mask=m_p_v, other=0)
+            b_dh = tl.load(p_dh, mask=m_p_dh, other=0)
             b_dk_pre = tl.dot(b_v.to(tl.float32), b_dh.to(tl.float32), b_dk_pre, allow_tf32=False)
 
-        p_k_c = tl.make_block_ptr(k, (T, K), (H * K, 1), (i_tc_c, i_k * BK), (BC, BK), (1, 0))
-        b_k_c = tl.load(p_k_c, boundary_check=(0, 1))
-        p_gc = _g_block_ptr(g_base=g_base, T=T, offset=i_tc_c, BC=BC, G_T_CONTIG=G_T_CONTIG, HV=HV)
-        b_gc = tl.load(p_gc, boundary_check=(0,)).to(tl.float32)
+        o_t = i_tc_c + tl.arange(0, BC)
+        m_t = (o_t >= 0) & (o_t < T)
+        o_k = i_k * BK + tl.arange(0, BK)
+        m_k = (o_k >= 0) & (o_k < K)
+        m_p_k_c = m_t[:, None] & m_k[None, :]
+        p_k_c = k + o_t[:, None] * (H * K) + o_k[None, :]
+        b_k_c = tl.load(p_k_c, mask=m_p_k_c, other=0)
+        p_gc = _g_row_ptr(g_base, T, i_tc_c, BC, G_T_CONTIG, HV)
+        b_gc = tl.load(p_gc, mask=m_t, other=0).to(tl.float32)
         b_dk_pre = b_dk_pre * tl.where(m_c, exp2(-b_gc + b_g_last), 0)[:, None]
         b_dg_last += tl.sum(b_dk_pre * b_k_c.to(tl.float32))
 
     for r in range(n_sub):
-        i_tc_r = i_t * BT + r * BC
-        p_dq_r = tl.make_block_ptr(dq_f32, (T, K), (HV * K, 1), (i_tc_r, i_k * BK), (BC, BK), (1, 0))
-        p_dk_r = tl.make_block_ptr(dk_f32, (T, K), (HV * K, 1), (i_tc_r, i_k * BK), (BC, BK), (1, 0))
-        p_q_r = tl.make_block_ptr(q, (T, K), (H * K, 1), (i_tc_r, i_k * BK), (BC, BK), (1, 0))
-        p_k_r = tl.make_block_ptr(k, (T, K), (H * K, 1), (i_tc_r, i_k * BK), (BC, BK), (1, 0))
-        b_dq_r = tl.load(p_dq_r, boundary_check=(0, 1))
-        b_dk_r = tl.load(p_dk_r, boundary_check=(0, 1))
-        b_q_r = tl.load(p_q_r, boundary_check=(0, 1)).to(tl.float32)
-        b_k_r = tl.load(p_k_r, boundary_check=(0, 1)).to(tl.float32)
+        i_tc_r = tl.cast(i_t, tl.int64) * BT + r * BC
+        o_t = i_tc_r + tl.arange(0, BC)
+        m_t = (o_t >= 0) & (o_t < T)
+        o_k = i_k * BK + tl.arange(0, BK)
+        m_k = (o_k >= 0) & (o_k < K)
+        m_p_dq_r = m_t[:, None] & m_k[None, :]
+        p_dq_r = dq_f32 + o_t[:, None] * (HV * K) + o_k[None, :]
+        p_dk_r = dk_f32 + o_t[:, None] * (HV * K) + o_k[None, :]
+        p_q_r = q + o_t[:, None] * (H * K) + o_k[None, :]
+        p_k_r = k + o_t[:, None] * (H * K) + o_k[None, :]
+        b_dq_r = tl.load(p_dq_r, mask=m_p_dq_r, other=0)
+        b_dk_r = tl.load(p_dk_r, mask=m_p_dq_r, other=0)
+        b_q_r = tl.load(p_q_r, mask=m_p_dq_r, other=0).to(tl.float32)
+        b_k_r = tl.load(p_k_r, mask=m_p_dq_r, other=0).to(tl.float32)
         b_dg_r = tl.sum(b_dq_r * b_q_r, axis=1) - tl.sum(b_dk_r * b_k_r, axis=1)
         o_row = i_tc_r + o_i
         b_dg_r = tl.where(o_row < last_idx, b_dg_r, b_dg_r + b_dg_last)
-        p_dg_r = tl.make_block_ptr(dg, (T,), (HV,), (i_tc_r,), (BC,), (0,))
-        tl.store(p_dg_r, b_dg_r.to(p_dg_r.dtype.element_ty), boundary_check=(0,))
+        p_dg_r = dg + o_t * HV
+        tl.store(p_dg_r, b_dg_r.to(p_dg_r.dtype.element_ty), mask=m_t)
 
 
 @input_guard
@@ -1299,6 +1559,7 @@ def chunk_bwd_dv_local_npu(
         'IS_VARLEN': cu_seqlens is not None,
     }
     if use_full:
+        kernel_kwargs['MASK_DMA'] = need_dma_mask(T, BT, K, BK, V, BV, cu_seqlens is not None)
         kernel_kwargs['B'] = B
         num_core = get_npu_properties()["num_aicore"]
         kernel_kwargs['task_num'] = NT * B * HV
@@ -1396,6 +1657,7 @@ def chunk_bwd_dqkwg_npu(
         'IS_VARLEN': cu_seqlens is not None,
     }
     if use_full:
+        dqkwg_kwargs['MASK_DMA'] = need_dma_mask(T, BT, K, BK, V, BV, cu_seqlens is not None)
         dqkwg_kwargs['dg'] = dg if dg is not None else dq
         dqkwg_kwargs['B'] = B
         num_core = get_npu_properties()["num_aicore"]
@@ -1476,7 +1738,7 @@ def chunk_bwd_dqkwg_npu(
                 G_T_CONTIG=g_t_contig,
                 STATE_V_FIRST=state_v_first,
                 IS_VARLEN=cu_seqlens is not None,
-                **ascend_compile_kwargs(),
+                MASK_DMA=need_dma_mask(T, BT, K, hdh_bk, V, hdh_bv, cu_seqlens is not None),
             )
     return dq, dk, dw, dg
 
@@ -1518,10 +1780,10 @@ def chunk_bwd_kernel_dv_npu(
     PID_OFFSET,
     BH_OFFSET,
 ):
-    pid = tl.program_id(0).to(tl.int64) + PID_OFFSET
+    pid = tl.cast(tl.program_id(0), tl.int64) + PID_OFFSET
     NV = tl.cdiv(V, BV)
     i_v, i_t = pid % NV, pid // NV
-    i_bh = tl.program_id(1).to(tl.int64) + BH_OFFSET
+    i_bh = tl.cast(tl.program_id(1), tl.int64) + BH_OFFSET
     i_b, i_h = i_bh // HV, i_bh % HV
     if IS_VARLEN:
         i_tg = i_t
@@ -1542,7 +1804,7 @@ def chunk_bwd_kernel_dv_npu(
     dv += (bos * HV + i_h) * V
     dh += (i_tg * HV + i_h).to(tl.int64) * K*V
 
-    o_t = i_t * BT + tl.arange(0, BT)
+    o_t = tl.cast(i_t, tl.int64) * BT + tl.arange(0, BT)
     m_t = o_t < T
     o_v = i_v * BV + tl.arange(0, BV)
     b_A = tl.zeros([BT, BT], dtype=tl.float32)
@@ -1568,11 +1830,11 @@ def chunk_bwd_kernel_dv_npu(
         g += bos * HV + i_h
         p_g = g + o_t * HV
         b_g = tl.load(p_g, mask=m_t, other=0.0)
-        b_g_last = tl.load(g + (min(i_t * BT + BT, T) - 1) * HV)
+        b_g_last = tl.load(g + tl.cast(min(tl.cast(i_t, tl.int64) * BT + BT, T) - 1, tl.int64) * HV)
     if USE_G_GAMMA:
         b_gamma = tl.load(g_gamma + i_h)
         b_g = b_gamma * (tl.arange(0, BT) + 1)
-        b_g_last = b_gamma * min(BT, T - i_t * BT)
+        b_g_last = b_gamma * min(BT, T - tl.cast(i_t, tl.int64) * BT)
 
     m_A = (o_t[:, None] <= o_t[None, :]) & (m_t[:, None] & m_t)
     if USE_G or USE_G_GAMMA:

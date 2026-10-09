@@ -14,6 +14,7 @@ import triton
 import triton.language as tl
 import triton.runtime.driver as driver
 
+from fla.ops.common.backends.triton_ascend.chunk_delta_h import mload, mstore, need_dma_mask
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp2
 from fla.utils import input_guard
@@ -90,17 +91,23 @@ def _hv_t_npu_arg(x: torch.Tensor, HV: int) -> tuple[torch.Tensor, bool]:
 
 
 @triton.jit
-def _beta_block_ptr(beta_ptr, T, i_t, BT, BETA_T_CONTIG: tl.constexpr, HV: tl.constexpr):
+def _beta_row_ptr(beta_ptr, T, i_t, BT, BETA_T_CONTIG: tl.constexpr, HV: tl.constexpr):
     if BETA_T_CONTIG:
-        return tl.make_block_ptr(beta_ptr, (T,), (1,), (i_t * BT,), (BT,), (0,))
-    return tl.make_block_ptr(beta_ptr, (T,), (HV,), (i_t * BT,), (BT,), (0,))
+        o_t = tl.cast(i_t, tl.int64) * BT + tl.arange(0, BT)
+        return beta_ptr + o_t
+    o_t = tl.cast(i_t, tl.int64) * BT + tl.arange(0, BT)
+    return beta_ptr + o_t * HV
 
 
 @triton.jit
-def _gk_block_ptr(gk_ptr, T, K, i_t, i_k, BT, BK, GK_T_CONTIG: tl.constexpr, HV: tl.constexpr):
+def _gk_tile_ptr(gk_ptr, T, K, i_t, i_k, BT, BK, GK_T_CONTIG: tl.constexpr, HV: tl.constexpr):
     if GK_T_CONTIG:
-        return tl.make_block_ptr(gk_ptr, (T, K), (K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-    return tl.make_block_ptr(gk_ptr, (T, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+        o_t = tl.cast(i_t, tl.int64) * BT + tl.arange(0, BT)
+        o_k = i_k * BK + tl.arange(0, BK)
+        return gk_ptr + o_t[:, None] * K + o_k[None, :]
+    o_t = tl.cast(i_t, tl.int64) * BT + tl.arange(0, BT)
+    o_k = i_k * BK + tl.arange(0, BK)
+    return gk_ptr + o_t[:, None] * (HV * K) + o_k[None, :]
 
 
 @triton.heuristics({
@@ -138,6 +145,7 @@ def recompute_w_u_fwd_kda_kernel_npu(
     IS_VARLEN: tl.constexpr,
     BETA_T_CONTIG: tl.constexpr,
     GK_T_CONTIG: tl.constexpr,
+    MASK_DMA: tl.constexpr,
     USE_GRAPH: tl.constexpr = False,
 ):
     T_max = T
@@ -191,55 +199,66 @@ def recompute_w_u_fwd_kda_kernel_npu(
                 q_ptr = q + (bos * H + i_h) * K
                 qg_ptr = qg + (bos * HV + i_hv) * K
 
-            p_b = _beta_block_ptr(beta_ptr, T, i_t, BT, BETA_T_CONTIG, HV)
-            b_b = tl.load(p_b, boundary_check=(0,))
+            o_t = tl.cast(i_t, tl.int64) * BT + tl.arange(0, BT)
+            m_t = (o_t >= 0) & (o_t < T)
+            p_b = _beta_row_ptr(beta_ptr, T, i_t, BT, BETA_T_CONTIG, HV)
+            b_b = mload(p_b, m_t, MASK_DMA)
 
-            p_A = tl.make_block_ptr(A_ptr, (T, BT), (HV * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
+            o_i = tl.arange(0, BT)
+            m_i = (o_i >= 0) & (o_i < BT)
+            m_p_A = m_t[:, None] & m_i[None, :]
+            p_A = A_ptr + o_t[:, None] * (HV * BT) + o_i[None, :]
 
-            last_idx = min(i_t * BT + BT, T) - 1
+            last_idx = min(tl.cast(i_t, tl.int64) * BT + BT, T) - 1
 
             for i_v in range(tl.cdiv(V, BV)):
-                p_v = tl.make_block_ptr(v_ptr, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-                p_u = tl.make_block_ptr(u_ptr, (T, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-                b_v = tl.load(p_v, boundary_check=(0, 1))
+                o_v = i_v * BV + tl.arange(0, BV)
+                m_v = (o_v >= 0) & (o_v < V)
+                m_p_v = m_t[:, None] & m_v[None, :]
+                p_v = v_ptr + o_t[:, None] * (HV * V) + o_v[None, :]
+                p_u = u_ptr + o_t[:, None] * (HV * V) + o_v[None, :]
+                b_v = mload(p_v, m_p_v, MASK_DMA)
                 b_vb = (b_v * b_b[:, None]).to(b_v.dtype)
                 # Ascend tl.dot may clobber the left operand; reload A each V tile.
-                b_A = tl.load(p_A, boundary_check=(0, 1))
+                b_A = mload(p_A, m_p_A, MASK_DMA)
                 b_u = tl.dot(b_A, b_vb, allow_tf32=False)
-                tl.store(p_u, b_u.to(p_u.dtype.element_ty), boundary_check=(0, 1))
+                mstore(p_u, b_u.to(p_u.dtype.element_ty), m_p_v, MASK_DMA)
 
             for i_k in range(tl.cdiv(K, BK)):
-                p_k = tl.make_block_ptr(k_ptr, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-                b_k = tl.load(p_k, boundary_check=(0, 1))
+                o_k_2 = i_k * BK + tl.arange(0, BK)
+                m_k_2 = (o_k_2 >= 0) & (o_k_2 < K)
+                m_p_k = m_t[:, None] & m_k_2[None, :]
+                p_k = k_ptr + o_t[:, None] * (H * K) + o_k_2[None, :]
+                b_k = mload(p_k, m_p_k, MASK_DMA)
                 b_kb = b_k * b_b[:, None]
 
-                p_gk = _gk_block_ptr(gk_ptr, T, K, i_t, i_k, BT, BK, GK_T_CONTIG, HV)
-                b_gk = tl.load(p_gk, boundary_check=(0, 1)).to(tl.float32)
+                p_gk = _gk_tile_ptr(gk_ptr, T, K, i_t, i_k, BT, BK, GK_T_CONTIG, HV)
+                b_gk = mload(p_gk, m_p_k, MASK_DMA).to(tl.float32)
                 b_gk_exp = exp2(b_gk)
                 b_kb = b_kb * b_gk_exp
 
                 if STORE_QG:
-                    p_q = tl.make_block_ptr(q_ptr, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-                    p_qg = tl.make_block_ptr(qg_ptr, (T, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-                    b_q = tl.load(p_q, boundary_check=(0, 1))
-                    tl.store(p_qg, (b_q * b_gk_exp).to(p_qg.dtype.element_ty), boundary_check=(0, 1))
+                    p_q = q_ptr + o_t[:, None] * (H * K) + o_k_2[None, :]
+                    p_qg = qg_ptr + o_t[:, None] * (HV * K) + o_k_2[None, :]
+                    b_q = mload(p_q, m_p_k, MASK_DMA)
+                    mstore(p_qg, (b_q * b_gk_exp).to(p_qg.dtype.element_ty), m_p_k, MASK_DMA)
 
                 if STORE_KG:
                     o_k = i_k * BK + tl.arange(0, BK)
                     m_k = o_k < K
                     if GK_T_CONTIG:
-                        b_gn = tl.load(gk_ptr + last_idx * K + o_k, mask=m_k, other=0.0).to(tl.float32)
+                        b_gn = mload(gk_ptr + tl.cast(last_idx, tl.int64) * K + o_k, m_k, MASK_DMA).to(tl.float32)
                     else:
-                        b_gn = tl.load(gk_ptr + last_idx * HV * K + o_k, mask=m_k, other=0.0).to(tl.float32)
+                        b_gn = mload(gk_ptr + tl.cast(last_idx, tl.int64) * HV * K + o_k, m_k, MASK_DMA).to(tl.float32)
                     b_kg = b_k * exp2(b_gn[None, :] - b_gk)
-                    p_kg = tl.make_block_ptr(kg_ptr, (T, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-                    tl.store(p_kg, b_kg.to(p_kg.dtype.element_ty), boundary_check=(0, 1))
+                    p_kg = kg_ptr + o_t[:, None] * (HV * K) + o_k_2[None, :]
+                    mstore(p_kg, b_kg.to(p_kg.dtype.element_ty), m_p_k, MASK_DMA)
 
                 # Ascend tl.dot may clobber the left operand; reload A each K tile.
-                b_A = tl.load(p_A, boundary_check=(0, 1))
+                b_A = mload(p_A, m_p_A, MASK_DMA)
                 b_w = tl.dot(b_A, b_kb.to(b_k.dtype), allow_tf32=False)
-                p_w = tl.make_block_ptr(w_ptr, (T, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-                tl.store(p_w, b_w.to(p_w.dtype.element_ty), boundary_check=(0, 1))
+                p_w = w_ptr + o_t[:, None] * (HV * K) + o_k_2[None, :]
+                mstore(p_w, b_w.to(p_w.dtype.element_ty), m_p_k, MASK_DMA)
 
 
 @input_guard
@@ -299,6 +318,7 @@ def recompute_w_u_fwd_kda_npu(
             BV=BV,
             BETA_T_CONTIG=beta_t_contig,
             GK_T_CONTIG=gk_t_contig,
+            MASK_DMA=need_dma_mask(T, BT, K, BK, V, BV, cu_seqlens is not None),
             USE_GRAPH=use_graph,
         ),
     )
