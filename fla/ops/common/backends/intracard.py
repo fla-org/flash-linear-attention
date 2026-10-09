@@ -20,7 +20,7 @@ import warnings
 
 import torch
 
-from fla.ops.backends import BaseBackend
+from fla.backends import BaseBackend, register_backend
 from fla.utils import IS_TF32_SUPPORTED
 
 # Maximum number of sub-sequences per original sequence
@@ -37,6 +37,7 @@ if USE_TF32X3_AFFINE_CHAIN and not IS_TF32_SUPPORTED:
     )
 
 
+@register_backend('common')
 class IntraCardCPBackend(BaseBackend):
     """Intra-card context parallel backend for chunk_gated_delta_rule_fwd_h."""
 

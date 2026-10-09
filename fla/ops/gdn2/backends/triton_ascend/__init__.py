@@ -12,12 +12,13 @@ from __future__ import annotations
 import torch
 import triton
 
-from fla.ops.backends import BaseBackend
+from fla.backends import BaseBackend, register_backend
 
 # The grouped diagonal kernel keeps the padded K dimension in one UB slab.
 _MAX_FWD_INTRA_BK = 256
 
 
+@register_backend('gdn2')
 class TritonAscendGDN2Backend(BaseBackend):
     """Ascend NPU backend for GDN-2 kernels."""
 

@@ -9,7 +9,7 @@
 
 import torch
 
-from fla.ops.backends import BaseBackend
+from fla.backends import BaseBackend
 from fla.utils import IS_NVIDIA
 
 
