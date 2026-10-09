@@ -330,9 +330,9 @@ def test_fused_linear_cross_entropy_parallel(world_size, tmp_path):
 
 @pytest.mark.parametrize(('name', 'legacy_name'), [('fwd', 'forward'), ('bwd', 'backward')])
 def test_fused_linear_cross_entropy_backend_dispatch(monkeypatch, name, legacy_name):
+    from fla.backends import _DISPATCH_DISABLED
     from fla.modules import fused_linear_cross_entropy
     from fla.modules.backends.triton_ascend import TritonAscendBackend
-    from fla.ops.backends import _DISPATCH_DISABLED
 
     if _DISPATCH_DISABLED:
         pytest.skip("Backend dispatch was disabled before import")

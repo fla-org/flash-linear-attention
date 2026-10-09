@@ -9,7 +9,7 @@
 
 from __future__ import annotations
 
-from fla.ops.backends import BaseBackend
+from fla.backends import BaseBackend, register_backend
 
 _MAX_KV = 512
 
@@ -22,6 +22,7 @@ def _verify_kv(K: int, V: int | None = None) -> tuple[bool, str | None]:
     return True, None
 
 
+@register_backend('gla')
 class TritonAscendGLABackend(BaseBackend):
     backend_type = 'triton_ascend'
     package_name = None

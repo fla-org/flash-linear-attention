@@ -1726,6 +1726,9 @@ def _launch_fwd_core(
             chunk_indices=chunk_indices,
             B=B,
             T=T,
+            stride_x_n=stride_x_n,
+            stride_x_t=stride_x_t,
+            stride_x_d=stride_x_d,
             D=D,
             W=W,
             BT=BT,
@@ -1736,9 +1739,6 @@ def _launch_fwd_core(
             MAX_NT_PER_BLOCK=MAX_NT_PER_BLOCK,
             NT_GRID_OFFSET=nt_grid_off,
             ACTIVATION=activation,
-            stride_x_n=stride_x_n,
-            stride_x_t=stride_x_t,
-            stride_x_d=stride_x_d,
         )
     return y
 

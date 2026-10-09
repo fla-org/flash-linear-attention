@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import torch
 
-from fla.ops.backends import BaseBackend
+from fla.backends import BaseBackend, register_backend
 from fla.utils import IS_NVIDIA, TRITON_ABOVE_3_5_1, find_spec_cached, get_device_capability
 
 
+@register_backend('attn')
 class AttnGluonBackend(BaseBackend):
     backend_type = "gluon"
     package_name = "triton.experimental.gluon"
@@ -178,3 +179,6 @@ class AttnGluonBackend(BaseBackend):
             window_size=window_size,
             sink_bias=sink_bias,
         )
+
+
+__all__ = ['AttnGluonBackend']

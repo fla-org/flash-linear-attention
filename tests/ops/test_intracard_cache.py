@@ -163,7 +163,9 @@ def test_chunk_gdn_intracard_gqa(monkeypatch):
         )
 
     # Run without intracard: disable the backend temporarily
-    from fla.ops.common.backends import common_registry
+    from fla import backends
+
+    common_registry = backends._resolve_registry('common')
     saved_backends = common_registry._backends.copy()
     common_registry._backends.clear()
     try:

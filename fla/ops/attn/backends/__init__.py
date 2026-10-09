@@ -6,9 +6,6 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 from fla.ops.attn.backends.gluon import AttnGluonBackend
-from fla.ops.backends import BackendRegistry
-from fla.ops.common.backends.tilelang import TileLangBackend
+from fla.ops.attn.backends.tilelang import AttnTileLangBackend
 
-registry = BackendRegistry("attn")
-registry.register(AttnGluonBackend())
-registry.register(TileLangBackend())
+__all__ = ['AttnGluonBackend', 'AttnTileLangBackend']

@@ -95,11 +95,11 @@ def causal_conv1d_update_ref(
 
 @pytest.fixture
 def conv_backend_calls(monkeypatch: pytest.MonkeyPatch) -> list[str] | None:
-    from fla.modules.backends.gluon import GluonBackend
+    from fla.modules.conv.backends.gluon import GluonBackend
 
     if not GluonBackend.is_available():
         return None
-    from fla.modules.backends.gluon import causal_conv1d
+    from fla.modules.conv.backends.gluon import ops as causal_conv1d
 
     calls = []
     fwd, bwd = causal_conv1d.causal_conv1d_fwd, causal_conv1d.causal_conv1d_bwd
@@ -720,7 +720,7 @@ def test_conv_backend_parity(
     dtype: torch.dtype,
     weight_dtype: torch.dtype,
 ):
-    pytest.importorskip('fla.modules.backends.gluon.causal_conv1d')
+    pytest.importorskip('fla.modules.conv.backends.gluon.ops')
     torch.manual_seed(42)
     x = torch.randn(B, T, D * (3 if non_contiguous else 1), device=device, dtype=dtype)
     x = x[..., D:2 * D] if non_contiguous else x
@@ -1281,7 +1281,7 @@ def test_conv_backend_override(monkeypatch: pytest.MonkeyPatch):
         ShortConvolution(hidden_size=8, kernel_size=3)
 
     monkeypatch.setenv('FLA_CONV_BACKEND', 'cuda')
-    monkeypatch.setattr('fla.modules.conv.short_conv.causal_conv1d_fn_cuda', None)
+    monkeypatch.setattr('fla.modules.conv.module.causal_conv1d_fn_cuda', None)
     with pytest.warns(UserWarning, match='Switching to the Triton implementation'):
         conv = ShortConvolution(hidden_size=8, kernel_size=3, backend='triton')
     assert conv.backend == 'triton'
@@ -1292,7 +1292,7 @@ def test_conv_backend_override(monkeypatch: pytest.MonkeyPatch):
     ['rank', 'channels', 'width', 'weight', 'packed-batch', 'chunk', 'state', 'dtype', 'distributed'],
 )
 def test_conv_backend_verifier(monkeypatch: pytest.MonkeyPatch, case: str):
-    from fla.modules.backends.gluon import GluonBackend
+    from fla.modules.conv.backends.gluon import GluonBackend
 
     backend = GluonBackend()
     x = torch.empty(2, 64, 32)
@@ -1337,7 +1337,7 @@ def test_conv_backend_dispatch(
     local_enable: str,
     W: int,
 ):
-    from fla.ops.backends import _DISPATCH_DISABLED
+    from fla.backends import _DISPATCH_DISABLED
 
     if conv_backend_calls is None:
         pytest.skip('Gluon convolution is unavailable')

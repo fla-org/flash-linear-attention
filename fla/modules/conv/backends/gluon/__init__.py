@@ -9,11 +9,12 @@
 
 import torch
 
-from fla.ops.backends import BaseBackend
+from fla.backends import BaseBackend, register_backend
 from fla.utils import IS_NVIDIA
 
 
-class GluonBackend(BaseBackend):
+@register_backend('modules.conv')
+class ConvGluonBackend(BaseBackend):
     """NVIDIA GPU backend using Gluon kernels."""
 
     backend_type = "gluon"
@@ -70,7 +71,7 @@ class GluonBackend(BaseBackend):
         chunk_size: int = 64,
         layout_fallback: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        from fla.modules.backends.gluon.causal_conv1d import causal_conv1d_fwd
+        from fla.modules.conv.backends.gluon.ops import causal_conv1d_fwd
         return causal_conv1d_fwd(
             x=x,
             weight=weight,
@@ -121,7 +122,7 @@ class GluonBackend(BaseBackend):
         chunk_size: int = 64,
         layout_fallback: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None, None]:
-        from fla.modules.backends.gluon.causal_conv1d import causal_conv1d_bwd
+        from fla.modules.conv.backends.gluon.ops import causal_conv1d_bwd
         return causal_conv1d_bwd(
             x=x,
             dy=dy,
@@ -136,3 +137,8 @@ class GluonBackend(BaseBackend):
             chunk_indices=chunk_indices,
             chunk_size=chunk_size,
         )
+
+
+GluonBackend = ConvGluonBackend
+
+__all__ = ['ConvGluonBackend', 'GluonBackend']

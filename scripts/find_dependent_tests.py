@@ -7,10 +7,10 @@
 
 import ast
 import os
-import re
 import sys
 from collections import defaultdict
 from functools import cache
+from importlib.util import resolve_name
 from pathlib import Path
 
 DEBUG_MODE = os.environ.get("DEBUG_MODE", "False").lower() in ("true", "1", "yes")
@@ -31,7 +31,7 @@ def get_definitions_from_tree(tree) -> set:
         return set()
     definitions = set()
     for node in tree.body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
             definitions.add(node.name)
     return definitions
 
@@ -49,8 +49,7 @@ def get_imports_from_tree(tree) -> set:
         if isinstance(node, ast.ImportFrom):
             module = node.module or ""
             for alias in node.names:
-                name = alias.asname or alias.name
-                imports.add((module, name))
+                imports.add((module, alias.name))
         elif isinstance(node, ast.Import):
             for alias in node.names:
                 # import x.y.z -> module="x.y", name="z"
@@ -61,70 +60,87 @@ def get_imports_from_tree(tree) -> set:
                 else:
                     module = ""
                     name = parts[0]
-                asname = alias.asname
-                imports.add((module, asname or name))
+                imports.add((module, name))
     return imports
 
 
-def is_backend_class(node) -> bool:
-    """Check if an AST node is a class inheriting from BaseBackend."""
-    if not isinstance(node, ast.ClassDef):
-        return False
-    for base in node.bases:
-        if isinstance(base, ast.Name) and base.id == 'BaseBackend':
-            return True
-        if isinstance(base, ast.Attribute) and base.attr == 'BaseBackend':
-            return True
-    return False
+def get_reexports_from_tree(tree, module: str, package: str) -> dict:
+    """Resolve explicit symbol re-exports without importing implementation modules."""
+    reexports = {}
+    if not tree:
+        return reexports
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom):
+            source = node.module or ''
+            if node.level:
+                source = resolve_name('.' * node.level + source, package)
+            for alias in node.names:
+                if alias.name != '*':
+                    reexports[(module, alias.asname or alias.name)] = (source, alias.name)
+        elif isinstance(node, ast.Assign) and isinstance(node.value, ast.Name):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    reexports[(module, target.id)] = (module, node.value.id)
+        elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            reexports.pop((module, node.name), None)
+    return reexports
 
 
-def get_backend_methods_from_dir(backend_dir: Path) -> set:
-    """Scan all .py files in a backend directory to find dispatch method names."""
-    methods = set()
-    for py_file in backend_dir.rglob('*.py'):
-        tree = parse_file(py_file)
-        if not tree:
+def _get_dispatch_owners(tree) -> set[str]:
+    """Read operation keys from the supported dispatch imports."""
+    if not tree:
+        return set()
+    dispatch_modules = {'fla.backends', 'fla.ops.backends', 'fla.modules.backends'}
+    dispatch_names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module in dispatch_modules:
+            dispatch_names.update(alias.asname or alias.name for alias in node.names if alias.name == 'dispatch')
+    owners = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name) or node.func.id not in dispatch_names:
             continue
-        for node in ast.walk(tree):
-            if is_backend_class(node):
-                for item in node.body:
-                    if isinstance(item, ast.FunctionDef):
-                        name = item.name
-                        if name.endswith('_verifier'):
-                            methods.add(name[:-9])
-                        elif not name.startswith('_') and name not in (
-                            'is_available', 'is_enabled', 'can_use', 'verify'
-                        ):
-                            methods.add(name)
-    return methods
+        if not node.args or not isinstance(node.args[0], ast.Constant) or not isinstance(node.args[0].value, str):
+            continue
+        operation = node.args[0].value
+        prefix = 'fla' if operation == 'modules' or operation.startswith('modules.') else 'fla.ops'
+        owners.add(f'{prefix}.{operation}.backends')
+    return owners
 
 
-def find_dispatch_op_files(methods: set, project_root: Path) -> list:
-    """Find all files in fla/ that define a function with @dispatch and name in methods."""
-    op_files = []
-    fla_dir = project_root / 'fla'
-    if not fla_dir.exists():
-        return op_files
-    for py_file in fla_dir.rglob('*.py'):
-        if 'backends' in py_file.parts:
-            continue
-        tree = parse_file(py_file)
-        if not tree:
-            continue
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                if node.name in methods:
-                    has_dispatch = False
-                    for dec in node.decorator_list:
-                        if isinstance(dec, ast.Call):
-                            if isinstance(dec.func, ast.Name) and dec.func.id == 'dispatch':
-                                has_dispatch = True
-                        elif isinstance(dec, ast.Name) and dec.id == 'dispatch':
-                            has_dispatch = True
-                    if has_dispatch:
-                        op_files.append(str(py_file.relative_to(project_root)))
-                        break
-    return op_files
+def find_backend_op_files(changed_files: list[str], project_root: Path) -> list[str]:
+    """Map backend changes and shared kernel imports to dispatch consumers."""
+    shared = any(file == 'fla/backends.py' or file.startswith('fla/ops/backends/') for file in changed_files)
+    owners = set()
+    for file in changed_files:
+        parts = Path(file).parts
+        if 'backends' in parts:
+            owners.add('.'.join(parts[:parts.index('backends') + 1]))
+    if not shared and not owners:
+        return []
+
+    dispatch_owners = {}
+    backend_dependents = defaultdict(set)
+    for path in (project_root / 'fla').rglob('*.py'):
+        relative_path = path.relative_to(project_root)
+        parts = relative_path.parts
+        tree = parse_file(path)
+        if 'backends' in parts:
+            owner = '.'.join(parts[:parts.index('backends') + 1])
+            for module, _ in get_imports_from_tree(tree):
+                module_parts = module.split('.')
+                if 'backends' in module_parts:
+                    dependency = '.'.join(module_parts[:module_parts.index('backends') + 1])
+                    backend_dependents[dependency].add(owner)
+        else:
+            dispatch_owners[str(relative_path)] = _get_dispatch_owners(tree)
+
+    pending = list(owners)
+    while pending:
+        for dependent in backend_dependents[pending.pop()] - owners:
+            owners.add(dependent)
+            pending.append(dependent)
+
+    return [path for path, targets in dispatch_owners.items() if targets and (shared or owners & targets)]
 
 
 def file_to_module_path(file_path: Path, project_root: Path) -> str:
@@ -133,6 +149,8 @@ def file_to_module_path(file_path: Path, project_root: Path) -> str:
         rel_path = file_path.relative_to(project_root)
         # Remove .py extension and convert to module notation
         parts = list(rel_path.with_suffix('').parts)
+        if parts[-1] == '__init__':
+            parts.pop()
         return '.'.join(parts)
     except ValueError:
         return ""
@@ -144,7 +162,13 @@ class DependencyFinder:
         self.project_root = Path(project_root).resolve() if project_root else self.test_dir.parent
         models_test_dir = self.test_dir / "models"
 
-        source_files = [p for s_dir in search_dirs for p in Path(s_dir).resolve().rglob("*.py") if p.name != '__init__.py']
+        all_source_files = [p for s_dir in search_dirs for p in Path(s_dir).resolve().rglob("*.py")]
+        source_files = [p for p in all_source_files if p.name != '__init__.py']
+        reexports = {}
+        for file_path in all_source_files:
+            module = file_to_module_path(file_path, self.project_root)
+            package = module if file_path.name == '__init__.py' else module.rpartition('.')[0]
+            reexports.update(get_reexports_from_tree(parse_file(file_path), module, package))
         test_scope = os.environ.get("TEST_SCOPE", "ALL").upper()
         if test_scope == "MODELS_ONLY":
             test_files = [p for p in models_test_dir.rglob("*.py") if p.name != '__init__.py']
@@ -170,6 +194,12 @@ class DependencyFinder:
             tree = parse_file(file_path)
             definitions = get_definitions_from_tree(tree)
             imports = get_imports_from_tree(tree)
+            for imported in list(imports):
+                visited = set()
+                while imported in reexports and imported not in visited:
+                    visited.add(imported)
+                    imported = reexports[imported]
+                    imports.add(imported)
             self.file_to_definitions[file_path] = definitions
             self.file_to_imports[file_path] = imports
             for defn in definitions:
@@ -351,20 +381,7 @@ if __name__ == "__main__":
     search_dir = current_dir.parent / "fla"
     project_root = current_dir.parent
 
-    # If a backend file is changed, map it to the dispatched op files so that
-    # regression tests for the original operation are also triggered.
-    backend_pattern = re.compile(r'^fla/ops/([^/]+)/backends/')
-    additional_files = []
-    for file in changed_files:
-        match = backend_pattern.match(file)
-        if match:
-            operation = match.group(1)
-            backend_dir = project_root / "fla" / "ops" / operation / "backends"
-            if backend_dir.exists():
-                methods = get_backend_methods_from_dir(backend_dir)
-                if methods:
-                    op_files = find_dispatch_op_files(methods, project_root)
-                    additional_files.extend(op_files)
+    additional_files = find_backend_op_files(changed_files, project_root)
     if additional_files:
         changed_files = list(dict.fromkeys(changed_files + additional_files))
 
