@@ -77,7 +77,7 @@ def l2norm_bwd_kernel_row(
 
 @fla_cache_autotune(
     configs=[triton.Config({"BT": BT}, num_warps=num_warps) for num_warps in [1, 2, 4, 8, 16] for BT in BT_LIST],
-    key=["D", "NB"],
+    key=["D"],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=["T"])
@@ -89,7 +89,6 @@ def l2norm_fwd_kernel(
     T,
     D: tl.constexpr,
     BD: tl.constexpr,
-    NB: tl.constexpr,
     BT: tl.constexpr,
 ):
     i_t = tl.program_id(0).to(tl.int64)
@@ -111,7 +110,7 @@ def l2norm_fwd_kernel(
 
 @fla_cache_autotune(
     configs=[triton.Config({"BT": BT}, num_warps=num_warps) for num_warps in [1, 2, 4, 8, 16] for BT in BT_LIST],
-    key=["D", "NB"],
+    key=["D"],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=["T"])
@@ -124,7 +123,6 @@ def l2norm_bwd_kernel(
     T,
     D: tl.constexpr,
     BD: tl.constexpr,
-    NB: tl.constexpr,
     BT: tl.constexpr,
 ):
     i_t = tl.program_id(0).to(tl.int64)
@@ -167,13 +165,10 @@ def l2norm_fwd(
 
     rstd = torch.empty((T,), dtype=torch.float32, device=x.device)
     if D <= 512:
-        # bucket token counts to limit autotuning across sequence lengths.
-        NB = triton.cdiv(T, 2048 * 32)
-
         def grid(meta):
             return (triton.cdiv(T, meta["BT"]),)
 
-        l2norm_fwd_kernel[grid](x=x, y=y, rstd=rstd, eps=eps, T=T, D=D, BD=BD, NB=NB)
+        l2norm_fwd_kernel[grid](x=x, y=y, rstd=rstd, eps=eps, T=T, D=D, BD=BD)
     else:
         l2norm_fwd_kernel_row[(T,)](x=x, y=y, rstd=rstd, eps=eps, D=D, BD=BD)
     return y.view(x_shape_og), rstd.view(x_shape_og[:-1])
@@ -200,13 +195,10 @@ def l2norm_bwd(
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
 
     if D <= 512:
-        # bucket token counts to limit autotuning across sequence lengths.
-        NB = triton.cdiv(T, 2048 * 32)
-
         def grid(meta):
             return (triton.cdiv(T, meta["BT"]),)
 
-        l2norm_bwd_kernel[grid](y=y, rstd=rstd, dy=dy, dx=dx, eps=eps, T=T, D=D, BD=BD, NB=NB)
+        l2norm_bwd_kernel[grid](y=y, rstd=rstd, dy=dy, dx=dx, eps=eps, T=T, D=D, BD=BD)
     else:
         l2norm_bwd_kernel_row[(T,)](y=y, rstd=rstd, dy=dy, dx=dx, eps=eps, D=D, BD=BD)
 
