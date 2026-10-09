@@ -21,7 +21,7 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
-from fla.modules.layernorm import RMSNorm
+from fla.modules.norm.layernorm import RMSNorm
 from fla.utils import IS_AMD, autotune_cache_kwargs, get_multiprocessor_count, input_guard, require_version
 
 NUM_WARPS_AUTOTUNE = [1, 2, 4, 8, 16] if IS_AMD else [1, 2, 4, 8, 16, 32]

@@ -7,7 +7,7 @@
 
 import torch
 
-from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
+from fla.modules.norm.l2norm import l2norm_bwd, l2norm_fwd
 from fla.ops.gated_oja_rule.chunk_h import chunk_oja_bwd_dhu, chunk_oja_bwd_dvwg_h, chunk_oja_fwd_h
 from fla.ops.gated_oja_rule.chunk_kkt import chunk_scaled_dot_kkt_bwd_gk, chunk_scaled_dot_kkt_fwd
 from fla.ops.gated_oja_rule.chunk_o import (

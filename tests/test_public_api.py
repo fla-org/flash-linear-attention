@@ -106,6 +106,7 @@ def test_legacy_imports_warn_once_and_preserve_public_exports(run_python, disabl
     run_python(
         """
         import importlib
+        import sys
         import warnings
 
         expected_symbols = {
@@ -138,26 +139,31 @@ def test_legacy_imports_warn_once_and_preserve_public_exports(run_python, disabl
             from fla.layers.mamba2 import Mamba2
             from fla.modules import L2Norm, RMSNorm, RotaryEmbedding
             from fla.modules import norm, rotary
+            for canonical_path in canonical_paths:
+                importlib.import_module(canonical_path)
 
         assert layers.GatedLinearAttention is GatedLinearAttention
         assert layers.Mamba2 is Mamba2
         assert modules.L2Norm is L2Norm is norm.L2Norm
         assert modules.RMSNorm is RMSNorm is norm.RMSNorm
         assert modules.RotaryEmbedding is RotaryEmbedding is rotary.RotaryEmbedding
-        emitted = norm_warnings(caught)
-        assert len(emitted) == len(expected_symbols), [str(w.message) for w in caught]
-        for name, canonical_path in zip(expected_symbols, canonical_paths):
-            matching = [w for w in emitted if str(w.message).startswith('fla.modules.' + name + ' ')]
-            assert len(matching) == 1, (name, [str(w.message) for w in emitted])
-            assert matching[0].category is FutureWarning
-            assert canonical_path in str(matching[0].message)
-            assert 'next release after 0.6.0' in str(matching[0].message)
+        assert not norm_warnings(caught), [str(w.message) for w in caught]
+        assert all('fla.modules.' + name not in sys.modules for name in expected_symbols)
 
         for name, canonical_path in zip(expected_symbols, canonical_paths):
             canonical = importlib.import_module(canonical_path)
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter('always', FutureWarning)
                 legacy = importlib.import_module('fla.modules.' + name)
+            emitted = norm_warnings(caught)
+            assert len(emitted) == 1, (name, [str(w.message) for w in caught])
+            assert emitted[0].category is FutureWarning
+            assert str(emitted[0].message).startswith('fla.modules.' + name + ' ')
+            assert canonical_path in str(emitted[0].message)
+            assert 'next release after 0.6.0' in str(emitted[0].message)
+
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter('always', FutureWarning)
                 assert importlib.import_module('fla.modules.' + name) is legacy
                 if name == 'l2norm':
                     from fla.modules.l2norm import l2norm_bwd, l2norm_fwd

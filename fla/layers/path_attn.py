@@ -17,7 +17,7 @@ from transformers.utils import logging
 
 from fla.layers.utils import pad_input, unpad_input
 from fla.modules import RMSNorm, ShortConvolution
-from fla.modules.l2norm import l2_norm
+from fla.modules.norm.l2norm import l2_norm
 from fla.ops.attn.decoding import attn_decoding_one_step
 from fla.ops.path_attn.parallel import parallel_path_attn
 
