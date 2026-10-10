@@ -161,7 +161,7 @@ jobs:
           print("matplotlib savefig smoke test: ok")
           PY
 
-      - name: Benchmark chunk_gdn, fused_recurrent_gdn2, chunk_gdn2, chunk_kda, KDA graph, fused_attnres, and conv1d
+      - name: Benchmark chunk_gdn, fused_recurrent_gdn2, fused_recurrent_oja, chunk_gdn2, chunk_kda, KDA graph, fused_attnres, and conv1d
         shell: bash
         env:
           FLA_BENCH_WARMUP_MS: "25"
@@ -187,6 +187,8 @@ jobs:
               --op chunk_gdn --base '' --json benchmark_chunk_gdn.json || status=1
             run_benchmark fused_recurrent_gdn2 0 python -m benchmarks.ops.run \
               --op fused_recurrent_gdn2 --base '' --json benchmark_fused_recurrent_gdn2.json || status=1
+            run_benchmark fused_recurrent_oja 0 python -m benchmarks.ops.run \
+              --op fused_recurrent_oja --base '' --json benchmark_fused_recurrent_oja.json || status=1
             exit "$status"
           ) &
           pid_gdn=$!
@@ -246,6 +248,8 @@ jobs:
           cat chunk_gdn.log
           echo "========== fused_recurrent_gdn2 =========="
           cat fused_recurrent_gdn2.log
+          echo "========== fused_recurrent_oja =========="
+          cat fused_recurrent_oja.log
           echo "========== chunk_gdn2 (default shape matrix, including 32K) =========="
           cat chunk_gdn2.log
           echo "========== chunk_kda =========="
@@ -288,6 +292,7 @@ jobs:
           path: |
             benchmark_chunk_gdn.json
             benchmark_fused_recurrent_gdn2.json
+            benchmark_fused_recurrent_oja.json
             benchmark_chunk_gdn2.json
             benchmark_chunk_kda.json
             benchmark_fused_attnres.json
