@@ -45,7 +45,6 @@ def chunkwise_fwd_kernel(
     v,
     g,
     level_scales,
-    llut,
     o,
     h0,
     ht,
@@ -63,6 +62,7 @@ def chunkwise_fwd_kernel(
     L: tl.constexpr,
     BT: tl.constexpr,
     BK: tl.constexpr,
+    BV: tl.constexpr,
     L_IN: tl.constexpr,
     L_OUT: tl.constexpr,
     MIN_LEVEL: tl.constexpr,
@@ -73,10 +73,15 @@ def chunkwise_fwd_kernel(
     SCALE: tl.constexpr,
 ):
     o_i = tl.arange(0, BT)
-    p_llut = llut + o_i[:, None] * BT + o_i[None, :]
-    b_llut = tl.load(p_llut, mask=(o_i[:, None] < BT) & (o_i[None, :] < BT), other=0.0)
-    # parallel over sequences and heads
-    i_k, i_nh = unflatten_program_id(tl.cdiv(K, BK))
+    # the highest differing bit identifies the common binary interval.
+    b_xor = o_i[:, None] ^ o_i[None, :]
+    b_level = tl.full((BT, BT), 0, tl.int32)
+    n_bits: tl.constexpr = tl.standard._log2(BT)
+    for bit in tl.static_range(n_bits):
+        b_level += (b_xor >= (1 << bit)).to(tl.int32)
+    b_level = tl.where(o_i[:, None] >= o_i[None, :], b_level, 0)
+    # parallel over sequences, heads, and key/value tiles
+    i_k, i_v, i_nh = unflatten_program_id(tl.cdiv(K, BK), tl.cdiv(V, BV))
     i_n, i_h = i_nh // H, i_nh % H
     i_g = i_h // (H // G)
 
@@ -90,7 +95,7 @@ def chunkwise_fwd_kernel(
         bos, eos = (i_n * T).to(tl.int64), (i_n * T + T).to(tl.int64)
 
     o_kk = i_k * BK + tl.arange(0, BK)
-    o_v = tl.arange(0, V)
+    o_v = i_v * BV + tl.arange(0, BV)
     m_kv = (o_kk[:, None] < K) & (o_v[None, :] < V)
 
     # For hierarchical masking
@@ -113,18 +118,18 @@ def chunkwise_fwd_kernel(
     KV_10_CREATED = MIN_LEVEL <= 11 and MAX_LEVEL >= 9
     KV_11_CREATED = MIN_LEVEL <= 12 and MAX_LEVEL >= 10
 
-    kv_0 = tl.zeros([BK, V], dtype=tl.float32)
-    kv_1 = tl.zeros([BK, V], dtype=tl.float32)
-    kv_2 = tl.zeros([BK, V], dtype=tl.float32)
-    kv_3 = tl.zeros([BK, V], dtype=tl.float32)
-    kv_4 = tl.zeros([BK, V], dtype=tl.float32)
-    kv_5 = tl.zeros([BK, V], dtype=tl.float32)
-    kv_6 = tl.zeros([BK, V], dtype=tl.float32)
-    kv_7 = tl.zeros([BK, V], dtype=tl.float32)
-    kv_8 = tl.zeros([BK, V], dtype=tl.float32)
-    kv_9 = tl.zeros([BK, V], dtype=tl.float32)
-    kv_10 = tl.zeros([BK, V], dtype=tl.float32)
-    kv_11 = tl.zeros([BK, V], dtype=tl.float32)
+    kv_0 = tl.zeros([BK, BV], dtype=tl.float32)
+    kv_1 = tl.zeros([BK, BV], dtype=tl.float32)
+    kv_2 = tl.zeros([BK, BV], dtype=tl.float32)
+    kv_3 = tl.zeros([BK, BV], dtype=tl.float32)
+    kv_4 = tl.zeros([BK, BV], dtype=tl.float32)
+    kv_5 = tl.zeros([BK, BV], dtype=tl.float32)
+    kv_6 = tl.zeros([BK, BV], dtype=tl.float32)
+    kv_7 = tl.zeros([BK, BV], dtype=tl.float32)
+    kv_8 = tl.zeros([BK, BV], dtype=tl.float32)
+    kv_9 = tl.zeros([BK, BV], dtype=tl.float32)
+    kv_10 = tl.zeros([BK, BV], dtype=tl.float32)
+    kv_11 = tl.zeros([BK, BV], dtype=tl.float32)
 
     offset = 0  # total number to cached tokens
     first_chunk_index = 0  # next chunk index to compute
@@ -180,7 +185,7 @@ def chunkwise_fwd_kernel(
     NT = tl.cdiv(T, BT)
     output_offset = -1 * (offset % BT)
     for i_t in range(NT):
-        b_h_ptrs = level_scales + ((bos + tl.minimum(i_t * BT + i_idx, T - 1)) * H + i_h) * L + b_llut
+        b_h_ptrs = level_scales + ((bos + tl.minimum(i_t * BT + i_idx, T - 1)) * H + i_h) * L + b_level
         b_h = tl.load(b_h_ptrs, mask=i_idx >= j_idx)
 
         o_t = (i_t * BT).to(tl.int64) + o_i
@@ -213,7 +218,7 @@ def chunkwise_fwd_kernel(
         b_s = (tl.dot(b_q, b_k) * b_s).to(b_q.dtype) * b_h
 
         b_v = tl.load(p_v, mask=m_tv, other=0.0)
-        b_o = tl.zeros((BT, V), dtype=tl.float32)
+        b_o = tl.zeros((BT, BV), dtype=tl.float32)
         if MIN_LEVEL == 0:
             b_o = tl.dot(b_s, b_v, b_o)
 
@@ -345,47 +350,47 @@ def chunkwise_fwd_kernel(
             if MIN_LEVEL <= 1 and MAX_LEVEL >= 0:
                 if check_value & 1:
                     kv_1 += kv_0
-                    kv_0 = tl.zeros([BK, V], dtype=tl.float32)
+                    kv_0 = tl.zeros([BK, BV], dtype=tl.float32)
             if MIN_LEVEL <= 2 and MAX_LEVEL >= 1:
                 if check_value & 2:
                     kv_2 += kv_1
-                    kv_1 = tl.zeros([BK, V], dtype=tl.float32)
+                    kv_1 = tl.zeros([BK, BV], dtype=tl.float32)
             if MIN_LEVEL <= 3 and MAX_LEVEL >= 2:
                 if check_value & 4:
                     kv_3 += kv_2
-                    kv_2 = tl.zeros([BK, V], dtype=tl.float32)
+                    kv_2 = tl.zeros([BK, BV], dtype=tl.float32)
             if MIN_LEVEL <= 4 and MAX_LEVEL >= 3:
                 if check_value & 8:
                     kv_4 += kv_3
-                    kv_3 = tl.zeros([BK, V], dtype=tl.float32)
+                    kv_3 = tl.zeros([BK, BV], dtype=tl.float32)
             if MIN_LEVEL <= 5 and MAX_LEVEL >= 4:
                 if check_value & 16:
                     kv_5 += kv_4
-                    kv_4 = tl.zeros([BK, V], dtype=tl.float32)
+                    kv_4 = tl.zeros([BK, BV], dtype=tl.float32)
             if MIN_LEVEL <= 6 and MAX_LEVEL >= 5:
                 if check_value & 32:
                     kv_6 += kv_5
-                    kv_5 = tl.zeros([BK, V], dtype=tl.float32)
+                    kv_5 = tl.zeros([BK, BV], dtype=tl.float32)
             if MIN_LEVEL <= 7 and MAX_LEVEL >= 6:
                 if check_value & 64:
                     kv_7 += kv_6
-                    kv_6 = tl.zeros([BK, V], dtype=tl.float32)
+                    kv_6 = tl.zeros([BK, BV], dtype=tl.float32)
             if MIN_LEVEL <= 8 and MAX_LEVEL >= 7:
                 if check_value & 128:
                     kv_8 += kv_7
-                    kv_7 = tl.zeros([BK, V], dtype=tl.float32)
+                    kv_7 = tl.zeros([BK, BV], dtype=tl.float32)
             if MIN_LEVEL <= 9 and MAX_LEVEL >= 8:
                 if check_value & 256:
                     kv_9 += kv_8
-                    kv_8 = tl.zeros([BK, V], dtype=tl.float32)
+                    kv_8 = tl.zeros([BK, BV], dtype=tl.float32)
             if MIN_LEVEL <= 10 and MAX_LEVEL >= 9:
                 if check_value & 512:
                     kv_10 += kv_9
-                    kv_9 = tl.zeros([BK, V], dtype=tl.float32)
+                    kv_9 = tl.zeros([BK, BV], dtype=tl.float32)
             if MIN_LEVEL <= 11 and MAX_LEVEL >= 10:
                 if check_value & 1024:
                     kv_11 += kv_10
-                    kv_10 = tl.zeros([BK, V], dtype=tl.float32)
+                    kv_10 = tl.zeros([BK, BV], dtype=tl.float32)
 
     chunk_index = offset // BT + T // BT
 
@@ -427,7 +432,8 @@ def chunkwise_fwd_kernel(
             p_kv = ht + ((i_n * L_OUT + 11) * H + i_h) * K * V + o_kk[:, None] * V + o_v[None, :]
             tl.store(p_kv, kv_11, mask=m_kv)
 
-        tl.store(new_offsets + i_n, (offset // BT) * BT + T)
+        if (i_k == 0 and i_v == 0) and i_h == 0:
+            tl.store(new_offsets + i_n, (offset // BT) * BT + T)
 
 
 @triton.heuristics({
@@ -743,11 +749,11 @@ def chunkwise_bwd_kernel_hdqgl(
     L: tl.constexpr,
     BT: tl.constexpr,
     NT: tl.constexpr,
+    NUM_INTERVALS: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     SCALE: tl.constexpr,
 ):
-    # parallel over batches and heads
-    i_nh = tl.program_id(0).to(tl.int64)
+    i_interval, i_nh = unflatten_program_id(NUM_INTERVALS)
     i_n, i_h = i_nh // H, i_nh % H
     i_g = i_h // (H // G)
 
@@ -761,6 +767,12 @@ def chunkwise_bwd_kernel_hdqgl(
         bos, eos = (i_n * T).to(tl.int64), (i_n * T + T).to(tl.int64)
 
     b_h = tl.zeros([V, K], dtype=tl.float32)
+    chunk_start = i_interval * (2 << ell)
+    chunk_end = tl.minimum(chunk_start + (2 << ell), tl.cdiv(T, BT))
+    # each interval inherits only the preceding reset-and-decay boundary.
+    if chunk_start > 0 and chunk_start < tl.cdiv(T, BT):
+        previous_last = (chunk_start * BT - 1).to(tl.int64)
+        b_h *= tl.exp(tl.load(g + bos * H + previous_last * H + i_h))
 
     num_intra_levels = (tl.log2(float(BT))).to(tl.int32) + 1
 
@@ -768,7 +780,7 @@ def chunkwise_bwd_kernel_hdqgl(
     o_v = tl.arange(0, V)
     o_i = tl.arange(0, BT)
     m_vk = (o_v[:, None] < V) & (o_k[None, :] < K)
-    for i_t in range(tl.cdiv(T, BT)):
+    for i_t in range(chunk_start, chunk_end):
         o_t = (i_t * BT).to(tl.int64) + o_i
         m_t = o_t < T
         m_tk = m_t[:, None] & (o_k[None, :] < K)
@@ -968,14 +980,22 @@ def chunkwise_bwd_kernel_dv(
     tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), mask=m_tv)
 
 
+def _prune_diag_configs(configs, named_args, **kwargs):
+    args = {**named_args, **kwargs}
+    # preserve four-warp 16-bit MMA layouts supported by older Triton compilers.
+    num_warps = 8 if args["q"].dtype == torch.float32 else 4
+    return [config for config in configs if config.num_warps == num_warps]
+
+
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [4]
+        for num_warps in [4, 8]
         for num_stages in [2, 3, 4]
     ],
     key=["G", "H", "K", "V"],
+    prune_configs_by={"early_config_prune": _prune_diag_configs},
     restore_value=["dl", "dq", "dk", "dv", "dg"],
     **autotune_cache_kwargs,
 )
@@ -987,8 +1007,6 @@ def chunkwise_bwd_kernel_diag(
     v,
     g,
     l,
-    llut,
-    mask,
     dq,
     dk,
     dv,
@@ -1007,8 +1025,13 @@ def chunkwise_bwd_kernel_diag(
     SCALE: tl.constexpr,
 ):
     o_i = tl.arange(0, BT)
-    p_llut = llut + o_i[:, None] * BT + o_i[None, :]
-    b_llut = tl.load(p_llut, mask=(o_i[:, None] < BT) & (o_i[None, :] < BT), other=0.0)
+    # the highest differing bit identifies the common binary interval.
+    b_xor = o_i[:, None] ^ o_i[None, :]
+    b_level = tl.full((BT, BT), 0, tl.int32)
+    n_bits: tl.constexpr = tl.standard._log2(BT)
+    for bit in tl.static_range(n_bits):
+        b_level += (b_xor >= (1 << bit)).to(tl.int32)
+    b_level = tl.where(o_i[:, None] >= o_i[None, :], b_level, 0)
     i_t, i_nh = unflatten_program_id(NT)
     i_n, i_h = i_nh // H, i_nh % H
     i_g = i_h // (H // G)
@@ -1033,7 +1056,7 @@ def chunkwise_bwd_kernel_diag(
     i_idx = o_i[:, None]  # BT x 1
     j_idx = o_i[None, :]  # 1 x BT
 
-    b_h_ptrs = l + ((bos + tl.minimum(i_t * BT + i_idx, T - 1)) * H + i_h) * L + b_llut
+    b_h_ptrs = l + ((bos + tl.minimum(i_t * BT + i_idx, T - 1)) * H + i_h) * L + b_level
     b_h = tl.load(b_h_ptrs, mask=i_idx >= j_idx)
 
     p_g = g + bos * H + i_h + o_t * H
@@ -1077,49 +1100,12 @@ def chunkwise_bwd_kernel_diag(
     num_intra_levels = (tl.log2(float(BT))).to(tl.int32) + 1
 
     for i in range(num_intra_levels):
-        p_mask = mask + i * (BT * BT) + o_i[:, None] * BT + o_i[None, :]
-        b_mask = tl.load(p_mask, mask=(o_i[:, None] < BT) & (o_i[None, :] < BT), other=0.0)
-        dl_i = tl.sum(tl.where(b_mask == 1, b_dl, 0), axis=1)
+        b_xor = i_idx ^ j_idx
+        upper = 1 << i
+        b_mask = (i_idx >= j_idx) & (b_xor >= (upper >> 1)) & (b_xor < upper)
+        dl_i = tl.sum(tl.where(b_mask, b_dl, 0), axis=1)
         p_dl_i = dl + (bos * H + i_h) * L + i + o_t * (H * L)
         tl.store(p_dl_i, dl_i, mask=m_t)
-
-
-def construct_binary_level_mask(level, T):
-    if level == 0:
-        return torch.diag(torch.ones(T, dtype=torch.bool))
-
-    indices = torch.cartesian_prod(torch.arange(T), torch.arange(T))
-
-    mask = torch.where(
-        torch.logical_and(
-            torch.logical_and(
-                indices[:, 0] % (1 << level) >= (1 << (level - 1)),
-                indices[:, 1] + (1 << (level - 1))
-                >= indices[:, 0] - (indices[:, 0] % (1 << (level - 1))),
-            ),
-            indices[:, 1] < indices[:, 0] - (indices[:, 0] % (1 << (level - 1))),
-        ).view(T, T),
-        1,
-        0,
-    )
-
-    return mask
-
-
-def level_lut(BT, device):
-    lut = torch.zeros((BT, BT), dtype=torch.int32, device=device)
-    for level in range(1, ceil_log(BT, 2) + 1):
-        mask = construct_binary_level_mask(level, BT).to(device)
-        lut = torch.where(mask.to(torch.bool), level, lut)
-    return lut
-
-
-def masks(BT, device):
-    masks = []
-    for level in range(0, ceil_log(BT, 2) + 1):
-        mask = construct_binary_level_mask(level, BT).to(device).to(torch.int32)
-        masks.append(mask)
-    return torch.stack(masks)
 
 
 def ceil_div(x: int, y: int) -> int:
@@ -1185,32 +1171,20 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
         original_T = T
 
         if cu_seqlens is None:
-            NT = ceil_div(T + (torch.max(offsets) if offsets is not None else 0), BT)
-            MAX_LEVEL = ceil_log(NT, 2) - 1
+            max_sequence_length = T + (offsets.max().item() if offsets is not None else 0)
         else:
-            NT = max(
-                [
-                    ceil_div(
-                        cu_seqlens[i + 1]
-                        - cu_seqlens[i]
-                        + (offsets[i] if offsets is not None else 0),
-                        BT,
-                    )
-                    for i in range(len(cu_seqlens) - 1)
-                ],
-            )
-            MAX_LEVEL = ceil_log(NT, 2) - 1
+            if len(cu_seqlens) <= 1:
+                raise ValueError("cu_seqlens must contain at least two entries")
+            sequence_lengths = torch.diff(cu_seqlens)
+            if offsets is not None:
+                sequence_lengths = sequence_lengths + offsets
+            max_sequence_length = sequence_lengths.max().item()
             B = len(cu_seqlens) - 1
+        NT = ceil_div(max_sequence_length, BT)
+        MAX_LEVEL = ceil_log(NT, 2) - 1
 
         # Exact powers of two need one more level in the serialized state than in the current outputs.
         if output_final_state:
-            if cu_seqlens is None:
-                max_sequence_length = T + (offsets.max().item() if offsets is not None else 0)
-            else:
-                sequence_lengths = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
-                if offsets is not None:
-                    sequence_lengths = [length + offset for length, offset in zip(sequence_lengths, offsets.tolist())]
-                max_sequence_length = max(sequence_lengths)
             completed_chunks = max_sequence_length // BT
             if completed_chunks > 0:
                 MAX_LEVEL = max(MAX_LEVEL, math.floor(math.log2(completed_chunks)))
@@ -1285,12 +1259,10 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
         g = chunk_local_cumsum(g, chunk_size=BT, cu_seqlens=cu_seqlens)
 
         def grid(meta):
-            return (triton.cdiv(K, meta["BK"]) * B * H,)
+            return (triton.cdiv(K, meta["BK"]) * triton.cdiv(V, meta["BV"]) * B * H,)
 
         l_in = h0.shape[1] if initial_state is not None else None
         l_out = ht.shape[1] if output_final_state else None
-
-        ctx.llut = level_lut(BT, v.device)
 
         chunkwise_fwd_kernel[grid](
             q=q,
@@ -1298,7 +1270,6 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
             v=v,
             g=g,
             level_scales=level_scales,
-            llut=ctx.llut,
             o=o,
             h0=h0,
             ht=ht,
@@ -1315,6 +1286,7 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
             V=V,
             L=L,
             BT=BT,
+            BV=V if MAX_LEVEL < 0 else min(V, 32),
             L_IN=l_in,
             L_OUT=l_out,
             MIN_LEVEL=0,
@@ -1324,6 +1296,7 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
 
         ctx.save_for_backward(q, k, v, g, level_scales, initial_state, cu_seqlens)
         ctx.chunk_size = BT
+        ctx.max_num_chunks = NT
         ctx.scale = scale
 
         if output_final_state:
@@ -1378,8 +1351,6 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
         q, k, v, g, level_scales, initial_state, cu_seqlens = ctx.saved_tensors
         chunk_size = ctx.chunk_size
         scale = ctx.scale
-        llut = ctx.llut
-        mask = masks(chunk_size, v.device)
 
         if initial_state is not None:
             raise NotImplementedError(
@@ -1390,15 +1361,7 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
         _, _, H, V = v.shape
         _, _, _, L = level_scales.shape
         BT = chunk_size
-        if cu_seqlens is not None:
-            NT = max(
-                [
-                    ceil_div(cu_seqlens[i + 1] - cu_seqlens[i], BT)
-                    for i in range(len(cu_seqlens) - 1)
-                ],
-            )
-        else:
-            NT = ceil_div(T, BT)
+        NT = ctx.max_num_chunks
 
         if cu_seqlens is not None:
             B = len(cu_seqlens) - 1
@@ -1413,8 +1376,6 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
         dg_last = torch.zeros((B, NT, H), dtype=torch.float, device=v.device)
         do = do.to(v.dtype)
 
-        grid = (B * H,)
-
         def grid_f(meta):
             return (triton.cdiv(K, meta["BK"]) * B * H,)
 
@@ -1422,7 +1383,8 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
 
         num_inter_chunk_levels = ceil_log(NT, 2)
         for ell in range(num_inter_chunk_levels - 1, -1, -1):
-            chunkwise_bwd_kernel_hdqgl[grid](
+            num_intervals = triton.cdiv(NT, 2 << ell)
+            chunkwise_bwd_kernel_hdqgl[(num_intervals * B * H,)](
                 do=do,
                 q=q,
                 k=k,
@@ -1443,6 +1405,7 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
                 L=L,
                 BT=BT,
                 NT=NT,
+                NUM_INTERVALS=num_intervals,
                 SCALE=scale,
             )
             chunkwise_bwd_kernel_dhg[grid_f](
@@ -1508,8 +1471,6 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
             v=v,
             g=g,
             l=level_scales,
-            llut=llut,
-            mask=mask,
             dq=dq,
             dk=dk,
             dv=dv,
