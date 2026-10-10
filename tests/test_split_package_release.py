@@ -282,6 +282,26 @@ def test_full_split_import_contract_when_runtime_dependencies_available(tmp_path
     python = _create_venv(tmp_path, system_site_packages=True)
 
     _run([str(python), "-m", "pip", "install", "--no-index", "--no-deps", str(core_wheel)], cwd=tmp_path)
+    site_packages = subprocess.check_output(
+        [str(python), '-c', 'import site; print(site.getsitepackages())'], cwd=tmp_path, text=True,
+    ).strip()
+    core_check = textwrap.dedent(
+        f"""
+        import sys
+
+        # use runtime dependencies without activating editable extension installs.
+        sys.path[:0] = {site_packages}
+        import fla
+        from fla.modules import BitLinear, RMSNorm, ShortConvolution
+        from fla.modules.convolution import causal_conv1d
+        from fla.modules.l2norm import l2norm_fwd
+
+        assert not fla.__all__
+        assert all(callable(symbol) for symbol in (RMSNorm, ShortConvolution, causal_conv1d, l2norm_fwd))
+        assert isinstance(BitLinear(4, 4).norm, RMSNorm)
+        """
+    )
+    _run([str(python), '-S', '-c', core_check], cwd=tmp_path)
     _run([str(python), "-m", "pip", "install", "--no-index", "--no-deps", str(ext_wheel)], cwd=tmp_path)
     full_check = textwrap.dedent(
         f"""
