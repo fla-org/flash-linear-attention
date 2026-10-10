@@ -1,69 +1,51 @@
 ---
 name: fla-ascend-performance
-description: >
-  Profile and optimize FLA Triton-Ascend kernels. Use for NPU performance work,
-  UB or grid limits, and Ascend compiler failures in triton_ascend.py or triton_ascend/.
+description: Profile and optimize FLA Triton-Ascend kernels using NPU traces, with guidance for UB capacity, memory movement, launch limits, and numerical correctness.
 ---
 
 # Ascend kernel performance
 
-Use this workflow for Ascend implementations in `triton_ascend.py` and `triton_ascend/`. Follow [CONTRIBUTING.md](../../../CONTRIBUTING.md) for repository policy and [fla-optimization-loop](../fla-optimization-loop/SKILL.md) for the frozen correctness gate and iteration stop criteria.
+Use this skill for operator performance work in `triton_ascend.py` and `triton_ascend/` backend implementations. Follow [fla-optimization-loop](../fla-optimization-loop/SKILL.md) for sustained optimization and [CONTRIBUTING](../../../CONTRIBUTING.md#benchmarking) for validation and reporting.
 
-## 1. Establish the workload
+Keep collection, analysis, and benchmarks in the active Python/NPU environment. If it is not configured, activate the project's Ascend environment first.
 
-Trace the public entry point through dispatch to the Ascend implementation. Record the supported layouts, dtypes, head mappings, fixed/variable lengths, states, and gradients. Confirm that the target NPU kernel runs; a fallback can hide both a missing implementation and its performance cost.
+## 1. Establish the baseline
 
-Freeze the reference, test cases, tolerances, and benchmark shapes before tuning. Measure a synchronized baseline with warmup and repeated timings. Keep the public API and supported calls intact.
+Locate the public entry, dispatch route, and Ascend kernel. Record the supported inputs and production workloads, baseline commit, and synchronized latency. Preserve the public API, validated algorithm, reference, and tolerances. Confirm the intended NPU kernel runs; a Torch fallback must not hide an unsupported path or kernel bug.
 
-Use the active Python/NPU environment for profiling, analysis, and benchmarks. If it is not configured, activate the project's Ascend environment first and retain that environment throughout the comparison.
+## 2. Collect a trace
 
-## 2. Collect a profile
-
-Use the bundled collector instead of copying profiler setup into each workload. Run from the repository root and keep traces under the ignored `profile/` directory:
+Use the existing collector instead of duplicating profiler setup. Run from the repository root; the workload file initializes its inputs and defines a repeatable `workload()` callable.
 
 ```bash
 python .agents/skills/fla-ascend-performance/scripts/profile_npu.py \
-  --name my_op \
-  --out-dir profile/my_op-npu \
-  --metrics PipeUtilization \
-  --analyze \
-  --kernel-filter my_kernel_substr \
-  --exec-file path/to/workload_only.py
+  --name my_op --out-dir profile/my_op-npu \
+  --metrics PipeUtilization --analyze \
+  --kernel-filter my_kernel --exec-file path/to/workload.py
 ```
 
-The workload file defines `workload()` with the operator call and backward pass when relevant. Collect one `aic_metrics` per run: start with `PipeUtilization`, then use `MemoryUB` if UB bandwidth needs investigation. See [profiling options and outputs](references/reference.md#profiling).
+One run collects one `aic_metrics` set. Start with `PipeUtilization`; collect `MemoryUB` separately when UB bandwidth is relevant. The default schedule is one warmup step and one active step. Warm the workload enough to exclude compilation from the measurement.
 
-## 3. Identify the limiting resource
+The collector prints the exact trace directory. To revisit it, pass that directory to [the analyzer](scripts/analyze_profile.py); see [collection and metrics](references/reference.md#collection-and-analysis) for the library interface and output layout.
 
-Use `op_statistic.csv` to find the operator's share of total time, then sort `kernel_details.csv` by duration. Check the dominant kernel's Cube, Vector, scalar, MTE, and UB metrics against the [diagnosis table](references/reference.md#diagnose-the-bottleneck).
+## 3. Diagnose bottlenecks
 
-Classify compile failures, UB overflow, grid limits, and numerical errors separately from performance bottlenecks. Fix those failures before interpreting latency. Choose one measurable hypothesis for the next round.
+Use `op_statistic.csv` to find the dominant operation, then `kernel_details.csv` to inspect its duration and pipe activity. Confirm the dispatch route before tuning a small or missing target kernel. Distinguish compilation failure, UB overflow, grid limits, numerical errors, and measured performance limits; they need different fixes.
 
-## 4. Make a targeted change
+Use the [diagnosis table](references/reference.md#diagnosis) to choose the next experiment. Change one relevant factor, then measure whether the expected duration and pipe metrics moved.
 
-- **UB capacity:** estimate peak live tiles and use `fla.utils.ascend_ub_manager` for the tile budget. Model forward and backward separately; split stages when fusion cannot fit.
-- **Memory traffic:** check contiguous loads, reuse, and intermediate writebacks. For token-axis gate gathers, use the [gate layout guide](references/g-contiguous-loading.md).
-- **Grid overhead:** choose host chunking or a one-dimensional core grid. Match the core count to the limiting pipe and preserve variable-length offsets.
-- **Compute or scalar work:** adjust tiles, layout, specialization, or fusion according to the measured bottleneck.
+## 4. Optimize within the kernel contract
 
-Ascend launch tuning does not use `num_warps` or `num_stages`; omit them from launches, wrappers, and autotune configurations. Preserve the established precision and numerical algorithm. Shape-specific tile sizes and memory multipliers from earlier experiments are starting points, not general rules.
+- Estimate the peak live UB footprint and use `fla.utils.ascend_ub_manager` for device capacity and tiling. Model forward and backward separately; fuse only when the live set fits.
+- Match the launch to the work: Cube kernels use Cube cores, Vector kernels use Vector cores. Handle the grid limit through the existing helpers or a 1D task loop.
+- Preserve numerical precision, optional inputs, and fixed/variable-length behavior. Verify tail handling and pointer arithmetic before increasing tiles or fusing stages.
+- Omit `num_warps` and `num_stages` from Ascend launches and autotune settings; these are unsupported on this backend.
+- Check [compiler and memory traps](references/TRAPS.md) when changing DMA paths, pointer arithmetic, or reused `tl.dot` operands. Use [contiguous gate loading](references/g-contiguous-loading.md) when gate loads along time are strided.
 
-Before changing address math, DMA paths, or reused `tl.dot` inputs, read the relevant [correctness hazards](references/reference.md#correctness-and-compiler-hazards). Detailed tuning choices are in [the reference](references/reference.md#choose-a-tuning-change).
+[Kernel cases](references/cases.md) explain existing convolution, recurrence, and solve implementations. Their tile choices are workload-specific examples.
 
-## 5. Validate and decide
+## 5. Validate and measure
 
-1. Compare the changed kernel with its reference, including outputs, states, and supported gradients.
-2. Cover small and large sequences, tile boundaries, head sharing, optional gates/states, and fixed/variable lengths. Confirm dispatch reaches Ascend.
-3. Run the frozen full correctness gate with NaN poisoning before accepting a candidate. A filtered test run or `--no-gate` benchmark does not establish correctness.
-4. Repeat the synchronized benchmark and profile with the same workload and metrics. If the expected metric does not improve, revisit the diagnosis before making another change.
+Run kernel comparisons and the affected operator/layer tests, including supported gradients, variable lengths, optional inputs, and boundary shapes. Keep NaN poisoning enabled and confirm that dispatch exercises the changed path. Run the full relevant correctness gate before reporting a speedup; a `--gate-k` subset is an iteration check.
 
-Report before/after latency, the target kernel's duration share, relevant pipe or UB metrics, and any compiler workaround. Use [fla-pr-readiness](../fla-pr-readiness/SKILL.md) to package the evidence.
-
-## References by task
-
-| Task                              | Reference                                                          |
-| --------------------------------- | ------------------------------------------------------------------ |
-| Collect and interpret a profile   | [Profiling and tuning reference](references/reference.md)          |
-| Fix compiler or addressing errors | [Compiler traps](references/TRAPS.md)                              |
-| Change token-axis gate loads      | [Contiguous gate loading](references/g-contiguous-loading.md)      |
-| Compare with a previous kernel    | [Kernel case notes](references/cases.md)                           |
+Compare synchronized forward and forward/backward latency on the same NPU, then repeat the relevant profiler collection. Report the timing change, the metrics that explain it, any compiler limitation encountered, and untested cases. If the expected metrics do not change, revisit the diagnosis before adding another optimization.

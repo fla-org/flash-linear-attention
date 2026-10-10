@@ -117,6 +117,8 @@ FLA_CI_ENV=0 pytest tests/
 
 ## Project Structure
 
+Organize code by responsibility. Use one file for a self-contained component and a package when it needs multiple cohesive implementation files. Keep each backend with its owning operation; add shared code only for behavior that is actually shared. Avoid wrapper-only layers and directories reserved for hypothetical extensions.
+
 ```
 fla/
 ├── layers/          # PyTorch attention layer implementations
@@ -179,7 +181,7 @@ Key rules:
 - Use `TYPE_CHECKING` for imports only needed at type-check time
 - **Line width**: use the full 127 characters before reaching for a line break — a statement that fits on one line stays on one line.
 - **Calls**: prefer keyword arguments over positional ones. A call that fits within the limit stays on one line; a call that overflows breaks with a hanging indent, **one keyword argument per line** — never several.
-- **Parameter order**: keep related parameters adjacent, and pass keyword arguments at call sites in the same order they appear in the signature.
+- **Parameter order**: group related parameters in function and constructor signatures, and keep corresponding interfaces consistent. Pass keyword arguments in signature order. Preserve established positional APIs when refactoring.
 
 ### Imports
 
@@ -237,6 +239,12 @@ Beyond narration that restates the next line, these comment patterns are banned:
 Never treated as excess comments: the license header required by `scripts/check_header.py`, a one-line attribution with a URL for adapted code, shape/dtype annotations, and `NOTE:` / `WARNING:` prefixes on a genuine "why" comment.
 
 ### Prose and Markdown
+
+Write documentation and skills with a clear purpose, logical order, and concise language. State the scope first, group related guidance under descriptive headings, and present steps in the order readers need them. Use lists for steps or parallel points and tables for comparisons; avoid deep nesting and fragmented sections. Keep terminology and formatting consistent with the surrounding documentation. Include examples only when they clarify a decision or show supported usage.
+
+Document the current design, supported usage, and constraints the reader needs. Do not turn READMEs or workflow guides into development retrospectives, migration diaries, or inventories of compatibility patches. Put temporary migration details in the PR or release notes. Keep shared rules in one authoritative document and link to them; omit implementation details that do not help readers use or change the code.
+
+A skill should make its scope, workflow, and essential constraints easy to find. Keep the entry point focused on decisions needed for the task; link substantial task-specific details from supporting references where they become relevant. Skills supplement this guide and `AGENTS.md`; they should not duplicate shared policies or introduce competing conventions. See the [skill index](.agents/skills/README.md) for the directory layout.
 
 Don't hard-wrap prose at an arbitrary short column — this covers Markdown files, Python docstrings (including `Args:` / `Returns:` descriptions), and comment paragraphs. Either keep a paragraph on a single line, or break **only at sentence or clause boundaries** (after a `.`, `,`, `;`, or `—`), never mid-clause. In Python files the 127-character limit still applies, so wrap a docstring or comment at a clause boundary before it reaches the limit. Format Markdown tables with aligned columns so the `|` separators line up; table rows are exempt from the line limit.
 
@@ -312,6 +320,8 @@ FLA_CI_ENV=0 pytest tests/ops/test_delta.py::test_chunk -v
 
 ### Writing Tests
 
+Read the existing tests for the affected operator, module, layer, or model before adding coverage. Follow their naming, setup, fixtures, parameterization, reference comparisons, and assertion style, together with this guide. Extend the established FLA pattern instead of introducing a separate style for the change.
+
 Tests compare optimized implementations against differentiable naive or recurrent references. The simplified pattern below assumes a tensor-only return; adapt it to the actual return tuple, gates, and initial/final states. See `test_chunk` in [tests/ops/test_delta.py](tests/ops/test_delta.py) for a complete output, state, and gradient comparison. Reuse the operator's existing tolerances rather than treating the example threshold as a universal budget.
 
 ```python
@@ -364,7 +374,15 @@ Key guidelines:
 - **Skip unsupported platforms** with helpers such as `IS_INTEL` imported from `fla.utils`, e.g. `@pytest.mark.skipif(IS_INTEL, reason="unsupported on Intel")`.
 - **Include test IDs** in parametrize for readable output.
 
-**Naming and structure.** Name the file `tests/ops/test_<op>.py`, and name each test after the implementation entry point it exercises — `test_chunk`, `test_fused_recurrent`, `test_parallel` — mirroring the functions in `fla/ops/<op>/`. Distinguish a genuinely different code path with a short suffix (`test_chunk_varlen`, `test_fused_recurrent_state_v_first`). Prefer adding a new shape, dtype, or flag as a `@parametrize` case on an existing test rather than writing a new function; only add a new function when the path or purpose is clearly different — varlen vs. dense, a specific feature flag, or a separate entry point. See `tests/ops/test_gla.py` and `tests/ops/test_gdn.py` for the pattern.
+#### Test organization and naming
+
+Add coverage at the smallest suitable level:
+
+1. **Extend an existing test first.** Check whether the change can be covered by another case in its parameter matrix. Reuse the existing setup, reference, and assertions for new shapes, dtypes, flags, and boundary inputs; add only the combinations needed to cover the behavior.
+2. **Add a function only when needed.** A separate test is appropriate when the behavior needs different setup, execution, or assertions that would make the existing test difficult to follow. A new shape, flag, or regression alone does not justify a new function. Do not force unrelated behaviors into one test through complex branching.
+3. **Add a file only for a distinct scope.** Keep coverage in the existing component's test file whenever it fits. A new component or a separate test setup, such as distributed execution, can warrant a new file. Avoid creating a file for each bug, PR, shape, or backend case.
+
+Follow the existing file names in the relevant test directory. Operator tests normally live in `tests/ops/test_<op>.py`; test names follow the implementation entry point, such as `test_chunk`, `test_fused_recurrent`, or `test_parallel`. Use a short behavior suffix only to distinguish a separate test, such as `test_chunk_varlen`; identify parameter values through case IDs. Match nearby FLA tests rather than inventing new naming schemes, prefixes, or helper conventions. See [tests/ops/test_gla.py](tests/ops/test_gla.py) and [tests/ops/test_gdn.py](tests/ops/test_gdn.py) for examples.
 
 ### NaN Memory Poisoning
 

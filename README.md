@@ -142,7 +142,7 @@ pip install flash-linear-attention[rocm]
 See [INSTALL.md](INSTALL.md) for the full backend table, XPU / NPU (Ascend) / CPU flows, source installs, and the `--no-deps` path for `torch` pre-release / `triton-nightly`.
 
 > [!NOTE]
-> Behavior change vs. pre-v0.5: bare `pip install flash-linear-attention` no longer pulls `torch` / `triton`. Pick a backend extra. This fixes ROCm / XPU / NPU users silently getting CUDA wheels.
+> Choose a backend extra to install the appropriate `torch` and `triton` dependencies. Bare `pip install flash-linear-attention` does not install them.
 
 ## Usage
 
