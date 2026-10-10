@@ -164,7 +164,6 @@ def test_normalization_imports_preserve_public_exports(run_python, disabled):
     run_python(
         """
         import importlib
-        import warnings
 
         expected_symbols = {
             'layernorm': (
@@ -188,42 +187,28 @@ def test_normalization_imports_preserve_public_exports(run_python, disabled):
         }
         canonical_paths = tuple('fla.modules.norm.' + name for name in expected_symbols)
 
-        def norm_warnings(records):
-            return [
-                warning for warning in records
-                if issubclass(warning.category, FutureWarning)
-                and str(warning.message).startswith('Legacy fla.modules imports')
-            ]
-
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter('always', FutureWarning)
-            from fla import layers, modules
-            from fla.layers.gla import GatedLinearAttention
-            from fla.layers.mamba2 import Mamba2
-            from fla.modules import L2Norm, RMSNorm, RotaryEmbedding
-            from fla.modules import norm, rotary
-            for canonical_path in canonical_paths:
-                importlib.import_module(canonical_path)
+        from fla import layers, modules
+        from fla.layers.gla import GatedLinearAttention
+        from fla.layers.mamba2 import Mamba2
+        from fla.modules import L2Norm, RMSNorm, RotaryEmbedding
+        from fla.modules import norm, rotary
+        for canonical_path in canonical_paths:
+            importlib.import_module(canonical_path)
 
         assert layers.GatedLinearAttention is GatedLinearAttention
         assert layers.Mamba2 is Mamba2
         assert modules.L2Norm is L2Norm is norm.L2Norm
         assert modules.RMSNorm is RMSNorm is norm.RMSNorm
         assert modules.RotaryEmbedding is RotaryEmbedding is rotary.RotaryEmbedding
-        assert len(norm_warnings(caught)) == 1, [str(w.message) for w in caught]
-        assert all('0.6.1' in str(w.message) for w in norm_warnings(caught))
 
         for name, canonical_path in zip(expected_symbols, canonical_paths):
             canonical = importlib.import_module(canonical_path)
-            with warnings.catch_warnings(record=True) as caught:
-                warnings.simplefilter('always', FutureWarning)
-                legacy = importlib.import_module('fla.modules.' + name)
-                assert importlib.import_module('fla.modules.' + name) is legacy
-                if name == 'l2norm':
-                    from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
-                    assert l2norm_fwd is canonical.l2norm_fwd
-                    assert l2norm_bwd is canonical.l2norm_bwd
-            assert not norm_warnings(caught), (name, [str(w.message) for w in caught])
+            legacy = importlib.import_module('fla.modules.' + name)
+            assert importlib.import_module('fla.modules.' + name) is legacy
+            if name == 'l2norm':
+                from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
+                assert l2norm_fwd is canonical.l2norm_fwd
+                assert l2norm_bwd is canonical.l2norm_bwd
             assert set(legacy.__all__) == set(canonical.__all__) == set(expected_symbols[name])
             for symbol in expected_symbols[name]:
                 assert getattr(legacy, symbol) is getattr(canonical, symbol), (name, symbol)

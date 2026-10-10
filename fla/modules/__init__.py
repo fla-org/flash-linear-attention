@@ -6,7 +6,6 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import sys
-import warnings
 from importlib import import_module
 from importlib.machinery import ModuleSpec
 from types import ModuleType
@@ -75,7 +74,8 @@ for _old, _targets in _MODULE_ALIASES.items():
         _parent, _, _child = _fullname.rpartition('.')
         setattr(sys.modules[_parent], _child, _module)
 
-for _name in ('activations', 'rotary', 'grpo', 'fused_cross_entropy', 'fused_kl_div', 'fused_linear_cross_entropy'):
+# defer GRPO's compile policy until it is explicitly imported
+for _name in ('activations', 'rotary', 'fused_cross_entropy', 'fused_kl_div', 'fused_linear_cross_entropy'):
     _module = import_module(f'{__name__}.{_name}')
     for _symbol, _value in vars(import_module(f'{__name__}.{_name}.ops')).items():
         if not _symbol.startswith('_'):
@@ -104,14 +104,6 @@ for _name, _aliases in _SYMBOL_ALIASES.items():
         _target, _, _symbol = _new.rpartition('.')
         _source = import_module(f'{__name__}.{_target}') if _target else _module
         setattr(_module, _old, getattr(_source, _symbol))
-
-warnings.warn(
-    'Legacy fla.modules imports will be deprecated in FLA 0.6.1. '
-    'Use fla.modules.norm, fla.modules.causal_conv1d, fla.modules.long_conv '
-    'or the owning package.ops for moved symbols.',
-    FutureWarning,
-    stacklevel=2,
-)
 
 __all__ = [
     'BitLinear',
