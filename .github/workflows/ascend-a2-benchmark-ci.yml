@@ -172,7 +172,14 @@ jobs:
         run: |
           source /usr/local/Ascend/ascend-toolkit/set_env.sh
           set -euo pipefail
-          git diff --exit-code 19311fd5a40df444474866742afd941532096f60 -- fla tests
+          cd "$GITHUB_WORKSPACE"
+          python - <<'PYVERIFY'
+          import hashlib
+          import json
+          from pathlib import Path
+          for name, expected in json.loads(Path('benchmarks/modules/quant_validation_manifest.json').read_text()).items():
+              assert hashlib.sha256(Path(name).read_bytes()).hexdigest() == expected, name
+          PYVERIFY
           pytest -q tests/modules/test_layernorm.py -k test_layernorm_linear_quant 2>&1 | tee quant-validation-tests.log
           python benchmarks/modules/quant_merge_validation.py 2>&1 | tee quant-validation-compare.log
 

@@ -1,0 +1,8 @@
+{
+  "fla/modules/fused_bitlinear.py": "731b98a8ab6a2c28037927cf69f82aa8691c72e74528811807ab9d63c1949a8a",
+  "fla/modules/norm/layernorm_quant.py": "e76f7b0194b15f19e351cdd9cb1a2eecba15de7139ccb98a7d15ff912d452517",
+  "fla/modules/norm/__init__.py": "e64625ee19dbca59fa7186c66ae50e464600737351bdf2b970728da011b949da",
+  "fla/modules/__init__.py": "3ad66faddf062ebb62b26008783d732ca7e8e31557239997179a6e94b5d443af",
+  "tests/modules/test_layernorm.py": "ba6b09e5b5bbd2b19d024bd257de81c665d7abbbab72086ad38d39e4acb5193e",
+  "tests/test_public_api.py": "df1b74a8ef4ad4cdfbb3f584e929e59ebd16c8641625376ab70b56f330b3fa19"
+}

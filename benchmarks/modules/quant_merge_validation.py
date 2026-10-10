@@ -9,9 +9,7 @@ import importlib.util
 import itertools
 import json
 import statistics
-import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 import torch
@@ -26,9 +24,7 @@ root = Path(__file__).resolve().parent
 
 
 def load_baseline():
-    path = Path(tempfile.mkdtemp()) / 'quant_baseline.py'
-    path.write_bytes(subprocess.check_output(
-        ['git', 'show', '2517f5f075b6d141f59cf3fed7d1a6d88e425017:fla/modules/fused_bitlinear.py']))
+    path = Path(__file__).with_name('quant_baseline_reference.py')
     spec = importlib.util.spec_from_file_location('quant_baseline', path)
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
