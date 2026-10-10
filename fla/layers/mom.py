@@ -656,7 +656,7 @@ class MomAttention(nn.Module):
             past_key_values,
             recurrent_state=recurrent_state,
             conv_state=(conv_state_q, conv_state_k, conv_state_v) if self.use_short_conv else None,
-            offset=q.shape[2],
+            offset=seq_len,
         )
 
         if self.use_output_gate:
