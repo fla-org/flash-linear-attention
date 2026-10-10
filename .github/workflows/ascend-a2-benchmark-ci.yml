@@ -162,7 +162,7 @@ jobs:
           print("matplotlib savefig smoke test: ok")
           PY
 
-      - name: Benchmark chunk_gdn, fused_recurrent_gdn2, chunk_gdn2, chunk_kda, KDA graph, fused_attnres, and conv1d
+      - name: Benchmark chunk_gdn, fused_recurrent_gdn2, chunk_gdn2, chunk_kda, KDA graph, fused_attnres, conv1d, and chunk_momentum_delta
         shell: bash
         env:
           FLA_BENCH_WARMUP_MS: "25"
@@ -229,10 +229,15 @@ jobs:
           run_benchmark conv1d 3 python benchmarks/modules/benchmark_conv.py &
           pid_conv1d=$!
           status=0
+          wait "$pid_conv1d" || status=1
+          run_benchmark chunk_momentum_delta 3 python -m benchmarks.ops.run \
+            --op chunk_momentum_delta --base '' --json benchmark_chunk_momentum_delta.json &
+          pid_momentum=$!
+
           wait "$pid_gdn" || status=1
           wait "$pid_kda" || status=1
           wait "$pid_attnres" || status=1
-          wait "$pid_conv1d" || status=1
+          wait "$pid_momentum" || status=1
 
           # The runner exposes devices 0-3. Reuse device 0 only after the
           # parallel benchmarks finish so graph latency is not affected by
@@ -257,6 +262,8 @@ jobs:
           cat chunk_kda_graph.log
           echo "========== conv1d =========="
           cat conv1d.log
+          echo "========== chunk_momentum_delta =========="
+          cat chunk_momentum_delta.log
           exit "$status"
 
       - name: Check fused-recurrent GDN2 benchmark results
@@ -293,6 +300,7 @@ jobs:
             benchmark_chunk_kda.json
             benchmark_fused_attnres.json
             benchmark_kda_graph.json
+            benchmark_chunk_momentum_delta.json
             conv_benchmark/
           if-no-files-found: ignore
           retention-days: 10
