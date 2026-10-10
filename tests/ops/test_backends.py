@@ -15,6 +15,9 @@ import torch
 
 from fla import backends, utils
 from fla.ops.attn.backends import tilelang as attn_tilelang_backend
+from fla.ops.attn.backends.gluon import AttnGluonBackend
+from fla.ops.attn.decoding import attn_decoding_one_step
+from fla.ops.attn.parallel import parallel_attn_bwd, parallel_attn_fwd
 from fla.ops.common.backends import tilelang as common_tilelang_backend
 from fla.ops.generalized_delta_rule.dplr.backends import tilelang as dplr_tilelang_backend
 from fla.ops.kda.backends import tilelang as kda_tilelang_backend
@@ -132,6 +135,7 @@ def test_flash_kda_registered_dispatch(monkeypatch, route):
 
 
 def test_attention_and_common_backends_have_separate_implementations():
+    assert type(backends._load_operation_registry('attn')._backends['gluon']) is AttnGluonBackend
     common = backends._load_operation_registry('common')._backends['tilelang']
     attention = backends._load_operation_registry('attn')._backends['tilelang']
     assert type(common) is common_tilelang_backend.CommonTileLangBackend
@@ -274,6 +278,127 @@ def test_rwkv6_tilelang_backend_verifier_rejects_unsupported_dimension():
 
     assert accepted is False
     assert reason == "TileLang RWKV6 intra backend currently supports the D=64 benchmark bucket only, got K=128"
+
+
+def test_attn_gluon_backend_requires_opt_in(monkeypatch):
+    backend = AttnGluonBackend()
+    monkeypatch.delenv('FLA_GLUON', raising=False)
+    monkeypatch.delenv('FLA_ATTN_GLUON', raising=False)
+    assert not backend.is_enabled()
+    monkeypatch.setenv('FLA_ATTN_GLUON', '1')
+    assert backend.is_enabled()
+    monkeypatch.setenv('FLA_ATTN_GLUON', '0')
+    monkeypatch.setenv('FLA_GLUON', '1')
+    assert backend.is_enabled()
+
+
+@pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
+@pytest.mark.parametrize(
+    'entry',
+    [parallel_attn_fwd, parallel_attn_bwd, attn_decoding_one_step],
+    ids=['forward', 'backward', 'decoding'],
+)
+def test_attn_gluon_backend_dispatch(monkeypatch, entry):
+    monkeypatch.setenv('FLA_GLUON', '0')
+    monkeypatch.setenv('FLA_ATTN_GLUON', '1')
+    monkeypatch.setenv('FLA_TILELANG', '0')
+    monkeypatch.setattr(AttnGluonBackend, 'is_available', classmethod(lambda cls: True))
+    monkeypatch.setattr(AttnGluonBackend, 'parallel_attn_fwd_verifier', lambda *args, **kwargs: (True, None))
+    q = torch.empty(1, 1, 1, 64, dtype=torch.float16)
+    kwargs = dict(q=q, k=q, v=q, scale=0.125, window_size=17)
+    if entry is attn_decoding_one_step:
+        kwargs.update(g=None, cu_seqlens=torch.tensor([0, 1], dtype=torch.int32), do_gate_scale=True)
+    else:
+        kwargs.update(g_cumsum=None, sink_bias=None)
+        if entry is parallel_attn_bwd:
+            kwargs.update(o=q, lse=None, do=q, chunk_size=64)
+    expected = object()
+
+    def implementation(self, **received):
+        assert received == kwargs
+        return expected
+
+    monkeypatch.setattr(AttnGluonBackend, entry.__name__, implementation)
+    assert entry(**kwargs) is expected
+
+
+@pytest.mark.parametrize('method', ['parallel_attn_fwd', 'parallel_attn_bwd', 'attn_decoding_one_step'])
+@pytest.mark.parametrize(
+    ('device_type', 'capability', 'dtype', 'K', 'V', 'reason'),
+    [
+        pytest.param('cpu', 10, torch.float16, 64, 64, 'compute capability', id='cpu'),
+        pytest.param('cuda', 8, torch.float16, 64, 64, 'compute capability', id='unsupported-device'),
+        pytest.param('cuda', 10, torch.float32, 64, 64, 'matching fp16 or bf16', id='fp32'),
+        pytest.param('cuda', 10, torch.float64, 64, 64, 'matching fp16 or bf16', id='fp64'),
+        pytest.param('cuda', 10, torch.float16, 0, 64, 'dimensions', id='empty-key'),
+        pytest.param('cuda', 10, torch.float16, 64, 0, 'dimensions', id='empty-value'),
+        pytest.param('cuda', 10, torch.float16, 513, 64, 'dimensions', id='wide-key'),
+        pytest.param('cuda', 10, torch.float16, 64, 513, 'dimensions', id='wide-value'),
+        pytest.param('cuda', 9, torch.float16, 256, 512, None, id='fp16'),
+        pytest.param('cuda', 10, torch.bfloat16, 512, 256, None, id='bf16'),
+    ],
+)
+def test_attn_gluon_backend_verifier(monkeypatch, method, device_type, capability, dtype, K, V, reason):
+    monkeypatch.setattr('fla.ops.attn.backends.gluon.get_device_capability', lambda *args: (capability, 0))
+    q = SimpleNamespace(device=SimpleNamespace(type=device_type, index=0), dtype=dtype, shape=(1, 1, 1, K))
+    v = SimpleNamespace(dtype=dtype, shape=(1, 1, 1, V))
+    kwargs = dict(q=q, k=q, v=v, g_cumsum=None, sink_bias=None, scale=0.125)
+    if method == 'parallel_attn_bwd':
+        kwargs.update(o=None, lse=None, do=None)
+    elif method == 'attn_decoding_one_step':
+        del kwargs['g_cumsum']
+        kwargs.update(g=None, cu_seqlens=torch.tensor([0, 1], dtype=torch.int32))
+    accepted, actual_reason = getattr(AttnGluonBackend(), method + '_verifier')(**kwargs)
+    assert accepted is (reason is None)
+    if reason is None:
+        assert actual_reason is None
+    else:
+        assert reason in actual_reason
+
+
+@pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
+@pytest.mark.parametrize(
+    ('cu_seqlens', 'window_size', 'sink_shape', 'error', 'message'),
+    [
+        pytest.param(None, None, None, AssertionError, 'cu_seqlens must be provided', id='missing-cu-seqlens'),
+        pytest.param([0, 1], -1, None, ValueError, 'window_size must be nonnegative', id='negative-window'),
+        pytest.param([0, 1], None, (2,), AssertionError, 'sink_bias must have shape', id='invalid-sink-shape'),
+    ],
+)
+def test_attn_gluon_decoding_invalid_inputs(cu_seqlens, window_size, sink_shape, error, message, monkeypatch):
+    monkeypatch.setenv('FLA_ATTN_GLUON', '1')
+    monkeypatch.setattr(AttnGluonBackend, 'is_available', classmethod(lambda cls: True))
+    monkeypatch.setattr(AttnGluonBackend, 'parallel_attn_fwd_verifier', lambda *args, **kwargs: (True, None))
+    q = torch.empty(1, 1, 1, 64, dtype=torch.float16)
+    cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32) if cu_seqlens is not None else None
+    sink_bias = torch.empty(sink_shape) if sink_shape is not None else None
+
+    def unexpected(*args, **kwargs):
+        pytest.fail('Invalid decoding inputs must reach the original argument validation')
+
+    monkeypatch.setattr(AttnGluonBackend, 'attn_decoding_one_step', unexpected)
+    with pytest.raises(error, match=message):
+        attn_decoding_one_step(q=q, k=q, v=q, cu_seqlens=cu_seqlens, window_size=window_size, sink_bias=sink_bias)
+
+
+@pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
+def test_attn_gluon_backend_hardware_fallback(monkeypatch):
+    monkeypatch.setenv('FLA_ATTN_GLUON', '1')
+    monkeypatch.setattr(AttnGluonBackend, 'is_available', classmethod(lambda cls: True))
+    monkeypatch.setattr('fla.ops.attn.backends.gluon.get_device_capability', lambda *args: (8, 0))
+    q = SimpleNamespace(device=SimpleNamespace(type='cuda', index=0), dtype=torch.float16, shape=(1, 127, 1, 64))
+    expected = object()
+
+    def unexpected(*args, **kwargs):
+        pytest.fail('Unsupported hardware must use the fallback')
+
+    monkeypatch.setattr(AttnGluonBackend, 'parallel_attn_fwd', unexpected)
+
+    @backends.dispatch('attn')
+    def parallel_attn_fwd(q, k, v, g_cumsum, sink_bias, scale):
+        return expected
+
+    assert parallel_attn_fwd(q=q, k=q, v=q, g_cumsum=None, sink_bias=None, scale=0.125) is expected
 
 
 @pytest.mark.parametrize(

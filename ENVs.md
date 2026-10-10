@@ -22,11 +22,12 @@ These switches control registered implementations. Unavailable backends and unsu
 
 ### Gluon
 
-| Variable            | Default | Options   | Description                                                                     |
-| ------------------- | ------- | --------- | ------------------------------------------------------------------------------- |
-| `FLA_GLUON`         | `0`     | `0` / `1` | Enable all available Gluon backends, overriding individual switches set to `0`. |
-| `FLA_CONV_GLUON`    | `0`     | `0` / `1` | Enable Gluon causal convolution independently.                                  |
-| `FLA_ATTNRES_GLUON` | `0`     | `0` / `1` | Enable Gluon AttnRes independently.                                             |
+| Variable            | Default | Options   | Description                                                                                                     |
+| ------------------- | ------- | --------- | --------------------------------------------------------------------------------------------------------------- |
+| `FLA_GLUON`         | `0`     | `0` / `1` | Enable all available Gluon backends, overriding individual switches set to `0`.                                 |
+| `FLA_CONV_GLUON`    | `0`     | `0` / `1` | Enable Gluon causal convolution independently.                                                                  |
+| `FLA_ATTNRES_GLUON` | `0`     | `0` / `1` | Enable Gluon AttnRes independently.                                                                             |
+| `FLA_ATTN_GLUON`    | `0`     | `0` / `1` | Enable Gluon attention prefill, backward, and decoding (fp16/bf16, head dimensions up to 512, Triton >= 3.5.1). |
 
 When `FLA_GLUON` is unset or `0`, the individual switches apply. `FLA_DISABLE_BACKEND_DISPATCH=1` overrides all of them.
 
