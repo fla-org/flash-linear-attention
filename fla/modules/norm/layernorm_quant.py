@@ -38,7 +38,7 @@ def weight_quant(w: torch.Tensor) -> torch.Tensor:
 
 
 @triton.jit
-def _activation_quant_fwd(b_x):
+def activation_quant_fwd_kernel(b_x):
     b_scale = 127.0 / tl.maximum(tl.max(tl.abs(b_x), 0), 1e-5)
     b_scaled = b_x * b_scale
     # triton-ascend does not implement libdevice.round; use round-half-away-from-zero.
@@ -109,7 +109,7 @@ def layer_norm_quant_fwd_kernel(
     if HAS_BIAS:
         b_y = b_y + b_b
 
-    b_y = _activation_quant_fwd(b_y)
+    b_y = activation_quant_fwd_kernel(b_y)
 
     p_y = y + i_t * D + o_d
     tl.store(p_y, b_y.to(p_y.dtype.element_ty), mask=m_d)
@@ -180,7 +180,7 @@ def layer_norm_quant_bwd_kernel(
             if HAS_BIAS:
                 b_y = b_y + b_b
 
-            b_y = _activation_quant_fwd(b_y)
+            b_y = activation_quant_fwd_kernel(b_y)
 
             p_y = y + i_t * D + o_d
             tl.store(p_y, b_y.to(p_y.dtype.element_ty), mask=m_d)
