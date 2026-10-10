@@ -83,8 +83,8 @@ for _name in ('activations', 'rotary', 'grpo', 'fused_cross_entropy', 'fused_kl_
 
 _SYMBOL_ALIASES = {
     'fused_bitlinear': {
-        'layer_norm_fwd_quant': 'layer_norm_quant_fwd',
-        'layer_norm_bwd': 'layer_norm_quant_bwd',
+        'layer_norm_fwd_quant': 'norm.layernorm_quant.layer_norm_quant_fwd',
+        'layer_norm_bwd': 'norm.layernorm_quant.layer_norm_quant_bwd',
         'LayerNormLinearQuantFn': 'LayerNormLinearQuantFunction',
         'layer_norm_linear_quant_fn': 'layer_norm_linear_quant',
     },
@@ -101,7 +101,9 @@ _SYMBOL_ALIASES = {
 for _name, _aliases in _SYMBOL_ALIASES.items():
     _module = sys.modules[f'{__name__}.{_name}']
     for _old, _new in _aliases.items():
-        setattr(_module, _old, getattr(_module, _new))
+        _target, _, _symbol = _new.rpartition('.')
+        _source = import_module(f'{__name__}.{_target}') if _target else _module
+        setattr(_module, _old, getattr(_source, _symbol))
 
 warnings.warn(
     'Legacy fla.modules imports will be deprecated in FLA 0.6.1. '
