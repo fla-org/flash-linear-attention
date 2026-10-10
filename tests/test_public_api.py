@@ -95,11 +95,11 @@ def test_public_function_aliases():
     assert activations.ACT2FN['silu'] is activations.swish
     assert activations.ACT2FN['gelu'] is activations.fast_gelu_impl
     assert l2norm.l2_norm is l2norm.l2norm
-    norm = importlib.import_module('fla.modules.norm')
-    quant = importlib.import_module('fla.modules.norm.layernorm_quant')
-    for name in ('activation_quant', 'weight_quant', 'bit_linear', 'layer_norm_linear_quant', 'rms_norm_linear_quant'):
-        assert name in norm.__all__
-        assert getattr(norm, name) is getattr(quant, name)
+    bitlinear = importlib.import_module('fla.modules.fused_bitlinear')
+    assert bitlinear.layer_norm_fwd_quant is bitlinear.layer_norm_quant_fwd
+    assert bitlinear.layer_norm_bwd is bitlinear.layer_norm_quant_bwd
+    assert bitlinear.LayerNormLinearQuantFn is bitlinear.LayerNormLinearQuantFunction
+    assert bitlinear.layer_norm_linear_quant_fn is bitlinear.layer_norm_linear_quant
 
 
 @pytest.mark.parametrize(

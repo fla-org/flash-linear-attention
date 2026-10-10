@@ -82,6 +82,12 @@ for _name in ('activations', 'rotary', 'grpo', 'fused_cross_entropy', 'fused_kl_
             vars(_module).setdefault(_symbol, _value)
 
 _SYMBOL_ALIASES = {
+    'fused_bitlinear': {
+        'layer_norm_fwd_quant': 'layer_norm_quant_fwd',
+        'layer_norm_bwd': 'layer_norm_quant_bwd',
+        'LayerNormLinearQuantFn': 'LayerNormLinearQuantFunction',
+        'layer_norm_linear_quant_fn': 'layer_norm_linear_quant',
+    },
     'fused_cross_entropy': {
         'fused_cross_entropy_forward': 'cross_entropy_fwd',
         'CrossEntropyLossFunction': 'FusedCrossEntropyFunction',
