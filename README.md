@@ -29,6 +29,7 @@
 
 ## News
 
+- [2026-10] 🧠 Add Gated Slot Attention 2 (GSA2) implementation to `fla` ([paper](https://arxiv.org/abs/2610.02816)).
 - [2026-10] 🌊 Add [CyFA](https://arxiv.org/abs/2609.36259) (Cyclic Flow Attention) implementation to `fla` - a Linear RNN that partitions memory by relative time through learned cyclic transport.
 - [2026-10] 🎉 Add Stick-Breaking Attention kernels and models to `fla` ([paper](https://arxiv.org/abs/2410.17980)).
 - [2026-07] 🐈 Add CAT (Compress and Attend Transformer) implementation to `fla` ([paper](https://arxiv.org/abs/2511.05313)) - a _meta_-sequence mixer that unlocks test-time control of inference costs.
@@ -123,6 +124,7 @@
 | 2026 | Preconditioned KDA            | [Preconditioned DeltaNet: Curvature-aware Sequence Modeling for Linear Recurrences](https://arxiv.org/abs/2604.21100)                         | [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/ops/precond_kda)                |
 | 2026 | CAT                           | [Controllably Efficient Language Models](https://arxiv.org/abs/2511.05313)                                                                    | [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/models/cat)                     |
 | 2026 | CyFA                          | [CyFA: Linear Sequence Modeling with Relative-Time-Partitioned Memory](https://arxiv.org/abs/2609.36259)                                      | [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/models/cyfa)                    |
+| 2026 | Gated Slot Attention 2        | [Gated Slot Attention-2: Two-Sided Associative Memory Correction in Linear Attention](https://arxiv.org/abs/2610.02816)                       | [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/models/gsa2)                    |
 
 ## Installation
 
