@@ -19,8 +19,9 @@ from fla.utils import assert_close, device, get_device_capability
 
 requires_gluon = pytest.mark.skipif(
     os.environ.get('FLA_DISABLE_BACKEND_DISPATCH') == '1'
+    or not AttnGluonBackend().is_enabled()
     or not AttnGluonBackend.is_available() or get_device_capability()[0] not in (9, 10),
-    reason='Gluon attention requires backend dispatch, Triton >= 3.5.1, and compute capability 9.x or 10.x',
+    reason='Enable Gluon attention on supported hardware with FLA_ATTN_GLUON=1',
 )
 
 
@@ -34,10 +35,7 @@ def attention_precision(monkeypatch):
 
 
 @pytest.fixture
-def gluon_route(request, monkeypatch):
-    if not getattr(request, 'param', True):
-        yield
-        return
+def gluon_route(monkeypatch):
     monkeypatch.setenv('FLA_GLUON', '0')
     monkeypatch.setenv('FLA_ATTN_GLUON', '1')
     monkeypatch.setenv('FLA_TILELANG', '0')
@@ -69,60 +67,6 @@ def gluon_decoding_route(monkeypatch):
     return calls
 
 
-def _assert_parallel_close(
-    q,
-    k,
-    v,
-    g=None,
-    sink_bias=None,
-    scale=None,
-    window_size=None,
-    cu_seqlens=None,
-    chunk_indices=None,
-    tol=(0.005, 0.005),
-):
-    inputs = [x.detach().requires_grad_() if x is not None else None for x in (q, k, v, g, sink_bias)]
-    refs = [x.detach().float().requires_grad_() if x is not None else None for x in inputs]
-    rq, rk, rv, rg, rs = refs
-    offsets = [0, q.shape[1]] if cu_seqlens is None else cu_seqlens.tolist()
-    outputs = []
-    for bos, eos in zip(offsets[:-1], offsets[1:]):
-        if bos == eos:
-            continue
-        o, _ = naive_parallel_attn(
-            q=rq[:, bos:eos],
-            k=rk[:, bos:eos],
-            v=rv[:, bos:eos],
-            g=rg[:, bos:eos] if rg is not None else None,
-            scale=scale,
-            window_size=window_size,
-            sink_bias=rs,
-        )
-        outputs.append(o)
-    ref = torch.cat(outputs, dim=1)
-    q, k, v, g, sink_bias = inputs
-    actual = parallel_attn(
-        q=q,
-        k=k,
-        v=v,
-        g=g,
-        scale=scale,
-        window_size=window_size,
-        cu_seqlens=cu_seqlens,
-        chunk_indices=chunk_indices,
-        sink_bias=sink_bias,
-    )
-    do = torch.randn_like(actual)
-    actual.backward(do)
-    ref.backward(do.float())
-    assert torch.isfinite(actual).all()
-    assert_close('o', ref, actual, tol[0])
-    for name, x, r in zip(('dq', 'dk', 'dv', 'dg', 'dsink'), inputs, refs):
-        if x is not None:
-            assert torch.isfinite(x.grad).all(), name
-            assert_close(name, r.grad, x.grad, tol[1])
-
-
 @pytest.mark.parametrize(
     "op",
     [naive_parallel_attn, parallel_attn, naive_attn_decoding, attn_decoding_one_step],
@@ -130,7 +74,7 @@ def _assert_parallel_close(
 )
 @pytest.mark.parametrize(("HQ", "H"), [(3, 2), (1, 2), (2, 0)], ids=["remainder", "fewer-query-heads", "zero-kv-heads"])
 @pytest.mark.parametrize('use_device', [False, True], ids=['cpu', 'device'])
-def test_rejects_invalid_gqa_head_counts(op, HQ, H, use_device):
+def test_rejects_invalid_gqa_head_counts(op, HQ: int, H: int, use_device: bool):
     q = torch.empty(1, 1, HQ, 16, dtype=torch.float16, device=device if use_device else 'cpu')
     k = torch.empty(1, 1, H, 16, dtype=torch.float16, device=device if use_device else 'cpu')
     v = torch.empty_like(k)
@@ -146,7 +90,7 @@ def test_rejects_invalid_gqa_head_counts(op, HQ, H, use_device):
     ('T', 'window_size'),
     [pytest.param(96, None, id='full'), pytest.param(96, 64, id='swa'), pytest.param(48, 0, id='empty-row')],
 )
-def test_naive_parallel_sink(T, window_size):
+def test_naive_parallel_sink(T: int, window_size: int | None):
     """Check the reference against GPT-OSS's explicit sink-logit softmax, including gradients."""
     torch.manual_seed(42)
     B, H, HQ, D, scale = 2, 2, 8, 64, 0.1
@@ -181,9 +125,9 @@ def test_naive_parallel_sink(T, window_size):
 
 
 @pytest.mark.parametrize(
-    ('gluon_route', 'B', 'T', 'H', 'HQ', 'K', 'V', 'scale', 'dtype'),
+    ('B', 'T', 'H', 'HQ', 'K', 'V', 'scale', 'dtype'),
     [
-        pytest.param(False, *test, id="B{}-T{}-H{}-HQ{}-K{}-V{}-scale{}-{}".format(*test))
+        pytest.param(*test, id="B{}-T{}-H{}-HQ{}-K{}-V{}-scale{}-{}".format(*test))
         for test in [
             (1, 63, 1, 1, 64, 64, 1.0, torch.float16),
             (3, 111, 2, 2, 100, 100, 1.0, torch.float16),
@@ -194,65 +138,169 @@ def test_naive_parallel_sink(T, window_size):
             (1, 63, 2, 2, 100, 64, 0.1, torch.float16),
         ]
     ] + [
-        pytest.param(True, 1, 2048, 1, 2, D, D, None, dtype, id=f"T2048-D{D}-{dtype}", marks=requires_gluon)
+        pytest.param(1, 2048, 1, 2, D, D, None, dtype, id=f"T2048-D{D}-{dtype}", marks=requires_gluon)
         for dtype in (torch.float16, torch.bfloat16)
         for D in (256, 512)
     ] + [
-        pytest.param(True, 2, 257, 2, HQ, 64, 64, None, dtype, id=f"T257-HQ{HQ}-{dtype}", marks=requires_gluon)
+        pytest.param(2, 257, 2, HQ, 64, 64, None, dtype, id=f"T257-HQ{HQ}-{dtype}", marks=requires_gluon)
         for dtype in (torch.float16, torch.bfloat16)
         for HQ in (2, 8)
     ],
-    indirect=['gluon_route'],
 )
-def test_parallel(gluon_route, B, T, H, HQ, K, V, scale, dtype):
+def test_parallel(B: int, T: int, H: int, HQ: int, K: int, V: int, scale: float | None, dtype: torch.dtype):
     torch.manual_seed(42)
-    q = torch.randn(B, T, HQ, K, device=device, dtype=dtype)
-    k = torch.randn(B, T, H, K, device=device, dtype=dtype)
-    v = torch.randn(B, T, H, V, device=device, dtype=dtype)
-    _assert_parallel_close(q=q, k=k, v=v, scale=scale)
+    q = torch.randn(B, T, HQ, K, device=device, dtype=dtype).requires_grad_()
+    k = torch.randn(B, T, H, K, device=device, dtype=dtype).requires_grad_()
+    v = torch.randn(B, T, H, V, device=device, dtype=dtype).requires_grad_()
+    q_ref = q.detach().float().requires_grad_()
+    k_ref = k.detach().float().requires_grad_()
+    v_ref = v.detach().float().requires_grad_()
+
+    ref, _ = naive_parallel_attn(q=q_ref, k=k_ref, v=v_ref, scale=scale)
+
+    tri = parallel_attn(q=q, k=k, v=v, scale=scale)
+    do = torch.randn_like(tri)
+    tri.backward(do)
+    ref.backward(do.float())
+
+    assert torch.isfinite(tri).all()
+    assert_close('o', ref, tri, 0.005)
+    assert torch.isfinite(q.grad).all()
+    assert_close('dq', q_ref.grad, q.grad, 0.005)
+    assert torch.isfinite(k.grad).all()
+    assert_close('dk', k_ref.grad, k.grad, 0.005)
+    assert torch.isfinite(v.grad).all()
+    assert_close('dv', v_ref.grad, v.grad, 0.005)
 
 
 @pytest.mark.parametrize(
-    ('gluon_route', 'B', 'T', 'H', 'HQ', 'D', 'scale', 'dtype', 'g_dtype', 'g_range', 'window_size', 'cu_seqlens'),
+    ('B', 'T', 'H', 'HQ', 'D', 'scale', 'dtype', 'g_dtype', 'g_range', 'window_size'),
     [
-        pytest.param(False, *test, torch.float16, torch.float16, None, None, None,
-                     id="B{}-T{}-H{}-HQ{}-D{}-scale{}".format(*test))
-        for test in [
-            (1, 63, 1, 1, 64, 1.0),
-            (3, 111, 2, 2, 100, 1.0),
-            (3, 1024, 2, 8, 60, 0.1),
-        ]
+        pytest.param(*test, torch.float16, torch.float16, None, None, id="B{}-T{}-H{}-HQ{}-D{}-scale{}".format(*test))
+        for test in [(1, 63, 1, 1, 64, 1.0), (3, 111, 2, 2, 100, 1.0), (3, 1024, 2, 8, 60, 0.1)]
     ] + [
         pytest.param(
-            True, 1 if cu_seqlens is not None else 2, 257, 2, HQ, 64, None, dtype, torch.float32,
-            (-0.1, -0.01), window_size, cu_seqlens,
-            id=f"HQ{HQ}-W{window_size}-varlen{cu_seqlens is not None}-{dtype}",
+            2, 257, 2, HQ, 64, None, dtype, torch.float32, (-0.1, -0.01), window_size,
+            id=f"HQ{HQ}-W{window_size}-{dtype}",
             marks=requires_gluon,
         )
         for dtype in (torch.float16, torch.bfloat16)
-        for cu_seqlens in (None, [0, 15, 79, 79, 257])
         for window_size in (None, 17)
         for HQ in (2, 8)
     ],
-    indirect=['gluon_route'],
 )
-def test_parallel_with_g(gluon_route, B, T, H, HQ, D, scale, dtype, g_dtype, g_range, window_size, cu_seqlens):
+def test_parallel_with_g(
+    B: int,
+    T: int,
+    H: int,
+    HQ: int,
+    D: int,
+    scale: float | None,
+    dtype: torch.dtype,
+    g_dtype: torch.dtype | None,
+    g_range: tuple[float, float] | None,
+    window_size: int | None,
+):
     torch.manual_seed(42)
-    q = torch.randn(B, T, HQ, D, device=device, dtype=dtype)
-    k = torch.randn(B, T, H, D, device=device, dtype=dtype)
-    v = torch.randn_like(k)
+    q = torch.randn(B, T, HQ, D, device=device, dtype=dtype).requires_grad_()
+    k = torch.randn(B, T, H, D, device=device, dtype=dtype).requires_grad_()
+    v = torch.randn_like(k).requires_grad_()
     if g_range is None:
         g = torch.randn(B, T, HQ, device=device, dtype=g_dtype)
     else:
         g = torch.empty(B, T, HQ, device=device, dtype=g_dtype).uniform_(*g_range)
-    cu_seqlens = torch.tensor(cu_seqlens, device=device, dtype=torch.int32) if cu_seqlens is not None else None
-    _assert_parallel_close(q=q, k=k, v=v, g=g, scale=scale, window_size=window_size, cu_seqlens=cu_seqlens)
+    q_ref = q.detach().float().requires_grad_()
+    k_ref = k.detach().float().requires_grad_()
+    v_ref = v.detach().float().requires_grad_()
+    g = g.detach().requires_grad_()
+    g_ref = g.detach().float().requires_grad_()
+
+    ref, _ = naive_parallel_attn(q=q_ref, k=k_ref, v=v_ref, g=g_ref, scale=scale, window_size=window_size)
+
+    tri = parallel_attn(q=q, k=k, v=v, g=g, scale=scale, window_size=window_size)
+    do = torch.randn_like(tri)
+    tri.backward(do)
+    ref.backward(do.float())
+
+    assert torch.isfinite(tri).all()
+    assert_close('o', ref, tri, 0.005)
+    assert torch.isfinite(q.grad).all()
+    assert_close('dq', q_ref.grad, q.grad, 0.005)
+    assert torch.isfinite(k.grad).all()
+    assert_close('dk', k_ref.grad, k.grad, 0.005)
+    assert torch.isfinite(v.grad).all()
+    assert_close('dv', v_ref.grad, v.grad, 0.005)
+    assert torch.isfinite(g.grad).all()
+    assert_close('dg', g_ref.grad, g.grad, 0.005)
 
 
 @pytest.mark.parametrize(
-    ('gluon_route', 'H', 'HQ', 'K', 'V', 'cu_seqlens', 'dtype'),
+    ('H', 'HQ', 'D', 'window_size', 'cu_seqlens', 'dtype'),
     [
-        pytest.param(False, *test, id="H{}-HQ{}-K{}-V{}-cu_seqlens{}-{}".format(*test), marks=pytest.mark.smoke)
+        pytest.param(2, HQ, 64, window_size, [0, 15, 79, 79, 257], dtype,
+                     id=f"HQ{HQ}-W{window_size}-{dtype}", marks=requires_gluon)
+        for dtype in (torch.float16, torch.bfloat16)
+        for window_size in (None, 17)
+        for HQ in (2, 8)
+    ],
+)
+def test_parallel_with_g_varlen(
+    H: int,
+    HQ: int,
+    D: int,
+    window_size: int | None,
+    cu_seqlens: list[int],
+    dtype: torch.dtype,
+):
+    torch.manual_seed(42)
+    B, T = 1, cu_seqlens[-1]
+    q = torch.randn(B, T, HQ, D, device=device, dtype=dtype).requires_grad_()
+    k = torch.randn(B, T, H, D, device=device, dtype=dtype).requires_grad_()
+    v = torch.randn_like(k).requires_grad_()
+    g = torch.empty(B, T, HQ, device=device, dtype=torch.float32).uniform_(-0.1, -0.01)
+    cu_seqlens = torch.tensor(cu_seqlens, device=device, dtype=torch.int32)
+    q_ref = q.detach().float().requires_grad_()
+    k_ref = k.detach().float().requires_grad_()
+    v_ref = v.detach().float().requires_grad_()
+    g = g.detach().requires_grad_()
+    g_ref = g.detach().float().requires_grad_()
+
+    boundaries = cu_seqlens.tolist()
+    outputs = []
+    for bos, eos in zip(boundaries[:-1], boundaries[1:]):
+        if bos == eos:
+            continue
+        o, _ = naive_parallel_attn(
+            q=q_ref[:, bos:eos],
+            k=k_ref[:, bos:eos],
+            v=v_ref[:, bos:eos],
+            g=g_ref[:, bos:eos],
+            window_size=window_size,
+        )
+        outputs.append(o)
+    ref = torch.cat(outputs, dim=1)
+
+    tri = parallel_attn(q=q, k=k, v=v, g=g, window_size=window_size, cu_seqlens=cu_seqlens)
+    do = torch.randn_like(tri)
+    tri.backward(do)
+    ref.backward(do.float())
+
+    assert torch.isfinite(tri).all()
+    assert_close('o', ref, tri, 0.005)
+    assert torch.isfinite(q.grad).all()
+    assert_close('dq', q_ref.grad, q.grad, 0.005)
+    assert torch.isfinite(k.grad).all()
+    assert_close('dk', k_ref.grad, k.grad, 0.005)
+    assert torch.isfinite(v.grad).all()
+    assert_close('dv', v_ref.grad, v.grad, 0.005)
+    assert torch.isfinite(g.grad).all()
+    assert_close('dg', g_ref.grad, g.grad, 0.005)
+
+
+@pytest.mark.parametrize(
+    ('H', 'HQ', 'K', 'V', 'cu_seqlens', 'dtype'),
+    [
+        pytest.param(*test, id="H{}-HQ{}-K{}-V{}-cu_seqlens{}-{}".format(*test), marks=pytest.mark.smoke)
         for test in [
             (2, 2, 64, 64, [0, 15], torch.float16),
             (2, 8, 64, 64, [0, 256, 500, 1000], torch.float16),
@@ -267,106 +315,153 @@ def test_parallel_with_g(gluon_route, B, T, H, HQ, D, scale, dtype, g_dtype, g_r
             (2, 2, 128, 128, [0, 200, 400], torch.float16),
         ]
     ] + [
-        pytest.param(True, 1, 2, D, D, [0, 15, 79, 79, 2048], dtype, id=f"T2048-D{D}-{dtype}", marks=requires_gluon)
+        pytest.param(1, 2, D, D, [0, 15, 79, 79, 2048], dtype, id=f"T2048-D{D}-{dtype}", marks=requires_gluon)
         for dtype in (torch.float16, torch.bfloat16)
         for D in (256, 512)
     ] + [
         pytest.param(
-            True, 2, HQ, 64, 64, [0, 15, 79, 79, 257], dtype,
+            2, HQ, 64, 64, [0, 15, 79, 79, 257], dtype,
             id=f"T257-HQ{HQ}-{dtype}",
             marks=requires_gluon,
         )
         for dtype in (torch.float16, torch.bfloat16)
         for HQ in (2, 8)
     ],
-    indirect=['gluon_route'],
 )
-def test_parallel_varlen(gluon_route, H, HQ, K, V, cu_seqlens, dtype):
+def test_parallel_varlen(H: int, HQ: int, K: int, V: int, cu_seqlens: list[int], dtype: torch.dtype):
     torch.manual_seed(42)
     T = cu_seqlens[-1]
-    q = torch.randn(1, T, HQ, K, device=device, dtype=dtype)
-    k = torch.randn(1, T, H, K, device=device, dtype=dtype)
-    v = torch.randn(1, T, H, V, device=device, dtype=dtype)
+    q = torch.randn(1, T, HQ, K, device=device, dtype=dtype).requires_grad_()
+    k = torch.randn(1, T, H, K, device=device, dtype=dtype).requires_grad_()
+    v = torch.randn(1, T, H, V, device=device, dtype=dtype).requires_grad_()
     cu_seqlens = torch.tensor(cu_seqlens, device=device, dtype=torch.int32)
-    _assert_parallel_close(q=q, k=k, v=v, cu_seqlens=cu_seqlens)
+    q_ref = q.detach().float().requires_grad_()
+    k_ref = k.detach().float().requires_grad_()
+    v_ref = v.detach().float().requires_grad_()
 
+    boundaries = cu_seqlens.tolist()
+    outputs = []
+    for bos, eos in zip(boundaries[:-1], boundaries[1:]):
+        if bos == eos:
+            continue
+        o, _ = naive_parallel_attn(q=q_ref[:, bos:eos], k=k_ref[:, bos:eos], v=v_ref[:, bos:eos])
+        outputs.append(o)
+    ref = torch.cat(outputs, dim=1)
 
-@requires_gluon
-@pytest.mark.parametrize('layout', ['strided', 'unaligned'])
-def test_parallel_layout(gluon_route, layout):
-    torch.manual_seed(42)
-    if layout == 'strided':
-        q = torch.randn(1, 257, 4, 100, device=device, dtype=torch.float16)
-        k = torch.randn(1, 257, 1, 100, device=device, dtype=torch.float16)
-        v = torch.randn(1, 257, 1, 64, device=device, dtype=torch.float16)
-        g = torch.empty(1, 257, 4, device=device).uniform_(-0.1, -0.01)
-        sink_bias = torch.randn(4, device=device)
-        q, k, v, g, sink_bias = [torch.stack((x, x), dim=-1)[..., 0] for x in (q, k, v, g, sink_bias)]
-        cu_seqlens = torch.tensor([0, 15, 79, 79, 257], device=device, dtype=torch.int32)
-    else:
-        q, k, v = [torch.randn(1 + 127 * 64, device=device, dtype=torch.float16)[1:].view(1, 127, 1, 64) for _ in range(3)]
-        g = sink_bias = cu_seqlens = None
-    _assert_parallel_close(q=q, k=k, v=v, g=g, sink_bias=sink_bias, cu_seqlens=cu_seqlens)
+    tri = parallel_attn(q=q, k=k, v=v, cu_seqlens=cu_seqlens)
+    do = torch.randn_like(tri)
+    tri.backward(do)
+    ref.backward(do.float())
+
+    assert torch.isfinite(tri).all()
+    assert_close('o', ref, tri, 0.005)
+    assert torch.isfinite(q.grad).all()
+    assert_close('dq', q_ref.grad, q.grad, 0.005)
+    assert torch.isfinite(k.grad).all()
+    assert_close('dk', k_ref.grad, k.grad, 0.005)
+    assert torch.isfinite(v.grad).all()
+    assert_close('dv', v_ref.grad, v.grad, 0.005)
 
 
 @pytest.mark.parametrize(
-    ('gluon_route', 'B', 'T', 'H', 'HQ', 'D', 'W', 'dtype'),
+    ('B', 'T', 'H', 'HQ', 'D', 'W', 'dtype'),
     [
-        pytest.param(False, *test, id="B{}-T{}-H{}-HQ{}-D{}-W{}-{}".format(*test))
+        pytest.param(*test, id="B{}-T{}-H{}-HQ{}-D{}-W{}-{}".format(*test))
         for test in [
             (1, 63, 1, 1, 64, 16, torch.float16),
             (3, 111, 2, 2, 100, 32, torch.float16),
             (3, 1024, 2, 8, 128, 64, torch.float16),
         ]
     ] + [
-        pytest.param(True, 2, 257, 2, HQ, 64, 17, dtype, id=f"T257-HQ{HQ}-{dtype}", marks=requires_gluon)
+        pytest.param(2, 257, 2, HQ, 64, 17, dtype, id=f"T257-HQ{HQ}-{dtype}", marks=requires_gluon)
         for dtype in (torch.float16, torch.bfloat16)
         for HQ in (2, 8)
     ],
-    indirect=['gluon_route'],
 )
-def test_parallel_swa(gluon_route, B, T, H, HQ, D, W, dtype):
+def test_parallel_swa(B: int, T: int, H: int, HQ: int, D: int, W: int | None, dtype: torch.dtype):
     torch.manual_seed(42)
-    q = torch.randn(B, T, HQ, D, device=device, dtype=dtype)
-    k = torch.randn(B, T, H, D, device=device, dtype=dtype)
-    v = torch.randn_like(k)
-    _assert_parallel_close(q=q, k=k, v=v, window_size=W)
+    q = torch.randn(B, T, HQ, D, device=device, dtype=dtype).requires_grad_()
+    k = torch.randn(B, T, H, D, device=device, dtype=dtype).requires_grad_()
+    v = torch.randn_like(k).requires_grad_()
+    q_ref = q.detach().float().requires_grad_()
+    k_ref = k.detach().float().requires_grad_()
+    v_ref = v.detach().float().requires_grad_()
+
+    ref, _ = naive_parallel_attn(q=q_ref, k=k_ref, v=v_ref, window_size=W)
+
+    tri = parallel_attn(q=q, k=k, v=v, window_size=W)
+    do = torch.randn_like(tri)
+    tri.backward(do)
+    ref.backward(do.float())
+
+    assert torch.isfinite(tri).all()
+    assert_close('o', ref, tri, 0.005)
+    assert torch.isfinite(q.grad).all()
+    assert_close('dq', q_ref.grad, q.grad, 0.005)
+    assert torch.isfinite(k.grad).all()
+    assert_close('dk', k_ref.grad, k.grad, 0.005)
+    assert torch.isfinite(v.grad).all()
+    assert_close('dv', v_ref.grad, v.grad, 0.005)
 
 
 @pytest.mark.parametrize(
-    ('gluon_route', 'H', 'HQ', 'D', 'W', 'cu_seqlens', 'dtype'),
+    ('H', 'HQ', 'D', 'W', 'cu_seqlens', 'dtype'),
     [
-        pytest.param(False, *test, id="H{}-HQ{}-D{}-W{}-cu_seqlens{}-{}".format(*test))
+        pytest.param(*test, id="H{}-HQ{}-D{}-W{}-cu_seqlens{}-{}".format(*test))
         for test in [
             (2, 2, 64, 16, [0, 111], torch.float16),
             (2, 8, 100, 32, [0, 256, 500, 1000], torch.float16),
         ]
     ] + [
         pytest.param(
-            True, 2, HQ, 64, 17, [0, 15, 79, 79, 257], dtype,
+            2, HQ, 64, 17, [0, 15, 79, 79, 257], dtype,
             id=f"T257-HQ{HQ}-{dtype}",
             marks=requires_gluon,
         )
         for dtype in (torch.float16, torch.bfloat16)
         for HQ in (2, 8)
     ],
-    indirect=['gluon_route'],
 )
-def test_parallel_swa_varlen(gluon_route, H, HQ, D, W, cu_seqlens, dtype):
+def test_parallel_swa_varlen(H: int, HQ: int, D: int, W: int | None, cu_seqlens: list[int], dtype: torch.dtype):
     torch.manual_seed(42)
     T = cu_seqlens[-1]
-    q = torch.randn(1, T, HQ, D, device=device, dtype=dtype)
-    k = torch.randn(1, T, H, D, device=device, dtype=dtype)
-    v = torch.randn_like(k)
+    q = torch.randn(1, T, HQ, D, device=device, dtype=dtype).requires_grad_()
+    k = torch.randn(1, T, H, D, device=device, dtype=dtype).requires_grad_()
+    v = torch.randn_like(k).requires_grad_()
     cu_seqlens = torch.tensor(cu_seqlens, device=device, dtype=torch.int32)
-    _assert_parallel_close(q=q, k=k, v=v, window_size=W, cu_seqlens=cu_seqlens)
+    q_ref = q.detach().float().requires_grad_()
+    k_ref = k.detach().float().requires_grad_()
+    v_ref = v.detach().float().requires_grad_()
+
+    boundaries = cu_seqlens.tolist()
+    outputs = []
+    for bos, eos in zip(boundaries[:-1], boundaries[1:]):
+        if bos == eos:
+            continue
+        o, _ = naive_parallel_attn(q=q_ref[:, bos:eos], k=k_ref[:, bos:eos], v=v_ref[:, bos:eos], window_size=W)
+        outputs.append(o)
+    ref = torch.cat(outputs, dim=1)
+
+    tri = parallel_attn(q=q, k=k, v=v, window_size=W, cu_seqlens=cu_seqlens)
+    do = torch.randn_like(tri)
+    tri.backward(do)
+    ref.backward(do.float())
+
+    assert torch.isfinite(tri).all()
+    assert_close('o', ref, tri, 0.005)
+    assert torch.isfinite(q.grad).all()
+    assert_close('dq', q_ref.grad, q.grad, 0.005)
+    assert torch.isfinite(k.grad).all()
+    assert_close('dk', k_ref.grad, k.grad, 0.005)
+    assert torch.isfinite(v.grad).all()
+    assert_close('dv', v_ref.grad, v.grad, 0.005)
 
 
 @pytest.mark.parametrize(
-    ('gluon_route', 'B', 'T', 'H', 'HQ', 'K', 'V', 'scale', 'window_size',
+    ('B', 'T', 'H', 'HQ', 'K', 'V', 'scale', 'window_size',
      'cu_seqlens', 'g_dtype', 'tol', 'dtype', 'supplied_indices'),
     [
-        pytest.param(False, *test, id=name, marks=pytest.mark.smoke if name in ('full', 'swa', 'varlen-swa') else ())
+        pytest.param(*test, id=name, marks=pytest.mark.smoke if name in ('full', 'swa', 'varlen-swa') else ())
         for name, *test in [
             ('mha', 1, 63, 1, 1, 64, 64, None, None, None, None, (0.005, 0.005), torch.float16, False),
             ('mha-K100', 3, 111, 2, 2, 100, 100, None, None, None, None, (0.005, 0.005), torch.float16, False),
@@ -384,7 +479,7 @@ def test_parallel_swa_varlen(gluon_route, H, HQ, D, W, cu_seqlens, dtype):
         ]
     ] + [
         pytest.param(
-            True, 1, T, 1, 4, K, V, None, 65, cu_seqlens, torch.float32, (0.005, 0.005), dtype, supplied_indices,
+            1, T, 1, 4, K, V, None, 65, cu_seqlens, torch.float32, (0.005, 0.005), dtype, supplied_indices,
             id=f"T{T}-K{K}-V{V}-varlen{cu_seqlens is not None}-indices{supplied_indices}-{dtype}",
             marks=requires_gluon,
         )
@@ -408,7 +503,7 @@ def test_parallel_swa_varlen(gluon_route, H, HQ, D, W, cu_seqlens, dtype):
         ]
     ] + [
         pytest.param(
-            True, 1, 257, 1, 4, 128, 128, None, window_size, cu_seqlens, torch.float32,
+            1, 257, 1, 4, 128, 128, None, window_size, cu_seqlens, torch.float32,
             (0.005, 0.005), torch.float16, False,
             id=f"W{window_size}-varlen{cu_seqlens is not None}",
             marks=requires_gluon,
@@ -417,7 +512,7 @@ def test_parallel_swa_varlen(gluon_route, H, HQ, D, W, cu_seqlens, dtype):
         for cu_seqlens in (None, [0, 15, 79, 79, 257])
     ] + [
         pytest.param(
-            True, 1 if cu_seqlens is not None else 2, 257, 2, HQ, 64, 64, None, window_size, cu_seqlens,
+            1 if cu_seqlens is not None else 2, 257, 2, HQ, 64, 64, None, window_size, cu_seqlens,
             torch.float32 if use_g else None, (0.005, 0.005), dtype, False,
             id=f"HQ{HQ}-gate{use_g}-W{window_size}-varlen{cu_seqlens is not None}-{dtype}",
             marks=requires_gluon,
@@ -428,29 +523,154 @@ def test_parallel_swa_varlen(gluon_route, H, HQ, D, W, cu_seqlens, dtype):
         for window_size in (None, 17)
         for HQ in (2, 8)
     ],
-    indirect=['gluon_route'],
 )
-def test_parallel_sink(gluon_route, B, T, H, HQ, K, V, scale, window_size, cu_seqlens, g_dtype, tol, dtype, supplied_indices):
+def test_parallel_sink(
+    B: int,
+    T: int,
+    H: int,
+    HQ: int,
+    K: int,
+    V: int,
+    scale: float | None,
+    window_size: int | None,
+    cu_seqlens: list[int] | None,
+    g_dtype: torch.dtype | None,
+    tol: tuple[float, float],
+    dtype: torch.dtype,
+    supplied_indices: bool,
+):
     torch.manual_seed(42)
-    q = torch.randn(B, T, HQ, K, device=device, dtype=dtype)
-    k = torch.randn(B, T, H, K, device=device, dtype=dtype)
-    v = torch.randn(B, T, H, V, device=device, dtype=dtype)
+    q = torch.randn(B, T, HQ, K, device=device, dtype=dtype).requires_grad_()
+    k = torch.randn(B, T, H, K, device=device, dtype=dtype).requires_grad_()
+    v = torch.randn(B, T, H, V, device=device, dtype=dtype).requires_grad_()
     g = torch.empty(B, T, HQ, device=device, dtype=g_dtype).uniform_(-0.1, -0.01) if g_dtype is not None else None
     sink_bias = torch.randn(HQ, device=device, dtype=torch.float32)
     cu_seqlens = torch.tensor(cu_seqlens, device=device, dtype=torch.int32) if cu_seqlens is not None else None
     chunk_indices = prepare_chunk_indices(cu_seqlens, 128) if supplied_indices else None
-    _assert_parallel_close(
+    q_ref = q.detach().float().requires_grad_()
+    k_ref = k.detach().float().requires_grad_()
+    v_ref = v.detach().float().requires_grad_()
+    g = g.detach().requires_grad_() if g is not None else None
+    g_ref = g.detach().float().requires_grad_() if g is not None else None
+    sink_bias = sink_bias.detach().requires_grad_()
+    sink_bias_ref = sink_bias.detach().float().requires_grad_()
+
+    boundaries = [0, q.shape[1]] if cu_seqlens is None else cu_seqlens.tolist()
+    outputs = []
+    for bos, eos in zip(boundaries[:-1], boundaries[1:]):
+        if bos == eos:
+            continue
+        o, _ = naive_parallel_attn(
+            q=q_ref[:, bos:eos],
+            k=k_ref[:, bos:eos],
+            v=v_ref[:, bos:eos],
+            g=g_ref[:, bos:eos] if g_ref is not None else None,
+            scale=scale,
+            window_size=window_size,
+            sink_bias=sink_bias_ref,
+        )
+        outputs.append(o)
+    ref = torch.cat(outputs, dim=1)
+
+    tri = parallel_attn(
         q=q,
         k=k,
         v=v,
         g=g,
-        sink_bias=sink_bias,
         scale=scale,
         window_size=window_size,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
-        tol=tol,
+        sink_bias=sink_bias,
     )
+    do = torch.randn_like(tri)
+    tri.backward(do)
+    ref.backward(do.float())
+
+    assert torch.isfinite(tri).all()
+    assert_close('o', ref, tri, tol[0])
+    assert torch.isfinite(q.grad).all()
+    assert_close('dq', q_ref.grad, q.grad, tol[1])
+    assert torch.isfinite(k.grad).all()
+    assert_close('dk', k_ref.grad, k.grad, tol[1])
+    assert torch.isfinite(v.grad).all()
+    assert_close('dv', v_ref.grad, v.grad, tol[1])
+    if g is not None:
+        assert torch.isfinite(g.grad).all()
+        assert_close('dg', g_ref.grad, g.grad, tol[1])
+    assert torch.isfinite(sink_bias.grad).all()
+    assert_close('dsink', sink_bias_ref.grad, sink_bias.grad, tol[1])
+
+
+@requires_gluon
+def test_parallel_varlen_strided(gluon_route):
+    torch.manual_seed(42)
+    q = torch.randn(1, 257, 4, 100, device=device, dtype=torch.float16)
+    k = torch.randn(1, 257, 1, 100, device=device, dtype=torch.float16)
+    v = torch.randn(1, 257, 1, 64, device=device, dtype=torch.float16)
+    g = torch.empty(1, 257, 4, device=device).uniform_(-0.1, -0.01)
+    sink_bias = torch.randn(4, device=device)
+    q, k, v, g, sink_bias = [torch.stack((x, x), dim=-1)[..., 0] for x in (q, k, v, g, sink_bias)]
+    cu_seqlens = torch.tensor([0, 15, 79, 79, 257], device=device, dtype=torch.int32)
+    q = q.detach().requires_grad_()
+    q_ref = q.detach().float().requires_grad_()
+    k = k.detach().requires_grad_()
+    k_ref = k.detach().float().requires_grad_()
+    v = v.detach().requires_grad_()
+    v_ref = v.detach().float().requires_grad_()
+    g = g.detach().requires_grad_()
+    g_ref = g.detach().float().requires_grad_()
+    sink_bias = sink_bias.detach().requires_grad_()
+    sink_bias_ref = sink_bias.detach().float().requires_grad_()
+
+    boundaries = [0, q.shape[1]] if cu_seqlens is None else cu_seqlens.tolist()
+    outputs = []
+    for bos, eos in zip(boundaries[:-1], boundaries[1:]):
+        if bos == eos:
+            continue
+        o, _ = naive_parallel_attn(
+            q=q_ref[:, bos:eos],
+            k=k_ref[:, bos:eos],
+            v=v_ref[:, bos:eos],
+            g=g_ref[:, bos:eos] if g_ref is not None else None,
+            sink_bias=sink_bias_ref,
+        )
+        outputs.append(o)
+    ref = torch.cat(outputs, dim=1)
+
+    tri = parallel_attn(q=q, k=k, v=v, g=g, cu_seqlens=cu_seqlens, sink_bias=sink_bias)
+    do = torch.randn_like(tri)
+    tri.backward(do)
+    ref.backward(do.float())
+
+    assert torch.isfinite(tri).all()
+    assert_close('o', ref, tri, 0.005)
+    assert torch.isfinite(q.grad).all()
+    assert_close('dq', q_ref.grad, q.grad, 0.005)
+    assert torch.isfinite(k.grad).all()
+    assert_close('dk', k_ref.grad, k.grad, 0.005)
+    assert torch.isfinite(v.grad).all()
+    assert_close('dv', v_ref.grad, v.grad, 0.005)
+    assert torch.isfinite(g.grad).all()
+    assert_close('dg', g_ref.grad, g.grad, 0.005)
+    assert torch.isfinite(sink_bias.grad).all()
+    assert_close('dsink', sink_bias_ref.grad, sink_bias.grad, 0.005)
+
+
+@requires_gluon
+def test_parallel_unaligned_storage(gluon_route):
+    torch.manual_seed(42)
+    tensors = [torch.randn(1 + 127 * 64, device=device, dtype=torch.float16)[1:] for _ in range(3)]
+    tensors = [x.view(1, 127, 1, 64).requires_grad_() for x in tensors]
+    refs = [x.detach().float().requires_grad_() for x in tensors]
+    actual = parallel_attn(q=tensors[0], k=tensors[1], v=tensors[2])
+    ref, _ = naive_parallel_attn(q=refs[0], k=refs[1], v=refs[2])
+    do = torch.randn_like(actual)
+    actual.backward(do)
+    ref.backward(do.float())
+    assert_close('o', ref, actual, 0.005)
+    for name, x, r in zip(('dq', 'dk', 'dv'), tensors, refs):
+        assert_close(name, r.grad, x.grad, 0.005)
 
 
 def test_parallel_bwd_full_value_reduction(monkeypatch):
@@ -495,7 +715,7 @@ def test_parallel_bwd_full_value_reduction(monkeypatch):
 
 @requires_gluon
 @pytest.mark.parametrize('chunk_size', [32, 64], ids=['chunk32', 'chunk64'])
-def test_parallel_bwd_chunk_indices(gluon_route, chunk_size):
+def test_parallel_bwd_chunk_indices(gluon_route, chunk_size: int):
     from fla.ops.attn.parallel import parallel_attn_bwd, parallel_attn_fwd
 
     torch.manual_seed(42)
@@ -548,7 +768,7 @@ def test_parallel_bwd_chunk_indices(gluon_route, chunk_size):
 @pytest.mark.parametrize('use_tma', [False, True], ids=['pointer', 'tma'])
 @pytest.mark.parametrize('varlen', [False, True], ids=['dense', 'varlen'])
 @pytest.mark.parametrize('D', [128, 512], ids=['D128', 'D512'])
-def test_parallel_copy_path(gluon_route, monkeypatch, use_tma, varlen, D):
+def test_parallel_copy_path(gluon_route, monkeypatch, use_tma: bool, varlen: bool, D: int):
     from fla.ops.attn.backends.gluon import parallel
 
     calls = {'generic': 0, 'pipeline': 0}
@@ -572,23 +792,66 @@ def test_parallel_copy_path(gluon_route, monkeypatch, use_tma, varlen, D):
     sink_bias = torch.randn(4, device=device)
     cu_seqlens = torch.tensor([0, 15, 79, 79, 257], device=device, dtype=torch.int32) if varlen else None
     chunk_indices = prepare_chunk_indices(cu_seqlens, 128) if varlen else None
-    _assert_parallel_close(
+    q = q.detach().requires_grad_()
+    q_ref = q.detach().float().requires_grad_()
+    k = k.detach().requires_grad_()
+    k_ref = k.detach().float().requires_grad_()
+    v = v.detach().requires_grad_()
+    v_ref = v.detach().float().requires_grad_()
+    g = g.detach().requires_grad_()
+    g_ref = g.detach().float().requires_grad_()
+    sink_bias = sink_bias.detach().requires_grad_()
+    sink_bias_ref = sink_bias.detach().float().requires_grad_()
+
+    boundaries = [0, q.shape[1]] if cu_seqlens is None else cu_seqlens.tolist()
+    outputs = []
+    for bos, eos in zip(boundaries[:-1], boundaries[1:]):
+        if bos == eos:
+            continue
+        o, _ = naive_parallel_attn(
+            q=q_ref[:, bos:eos],
+            k=k_ref[:, bos:eos],
+            v=v_ref[:, bos:eos],
+            g=g_ref[:, bos:eos] if g_ref is not None else None,
+            window_size=127,
+            sink_bias=sink_bias_ref,
+        )
+        outputs.append(o)
+    ref = torch.cat(outputs, dim=1)
+
+    tri = parallel_attn(
         q=q,
         k=k,
         v=v,
         g=g,
-        sink_bias=sink_bias,
         window_size=127,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
+        sink_bias=sink_bias,
     )
+    do = torch.randn_like(tri)
+    tri.backward(do)
+    ref.backward(do.float())
+
+    assert torch.isfinite(tri).all()
+    assert_close('o', ref, tri, 0.005)
+    assert torch.isfinite(q.grad).all()
+    assert_close('dq', q_ref.grad, q.grad, 0.005)
+    assert torch.isfinite(k.grad).all()
+    assert_close('dk', k_ref.grad, k.grad, 0.005)
+    assert torch.isfinite(v.grad).all()
+    assert_close('dv', v_ref.grad, v.grad, 0.005)
+    assert torch.isfinite(g.grad).all()
+    assert_close('dg', g_ref.grad, g.grad, 0.005)
+    assert torch.isfinite(sink_bias.grad).all()
+    assert_close('dsink', sink_bias_ref.grad, sink_bias.grad, 0.005)
     pipeline = use_tma and D <= 128 and get_device_capability()[0] == 10
     assert calls == {'generic': int(not pipeline), 'pipeline': int(pipeline)}
 
 
 @requires_gluon
 @pytest.mark.parametrize('use_tma', [False, True], ids=['pointer', 'tma'])
-def test_parallel_varlen_compilation(gluon_route, monkeypatch, use_tma):
+def test_parallel_varlen_compilation(gluon_route, monkeypatch, use_tma: bool):
     from fla.ops.attn.backends.gluon import parallel
 
     monkeypatch.setattr(parallel, 'IS_TMA_SUPPORTED', use_tma)
@@ -626,7 +889,7 @@ def test_parallel_varlen_compilation(gluon_route, monkeypatch, use_tma):
 
 @requires_gluon
 @pytest.mark.parametrize('varlen', [False, True], ids=['dense', 'varlen'])
-def test_parallel_route_parity(gluon_route, monkeypatch, varlen):
+def test_parallel_route_parity(gluon_route, monkeypatch, varlen: bool):
     torch.manual_seed(42)
     q = torch.randn(1, 257, 4, 128, device=device, dtype=torch.float16, requires_grad=True)
     k = torch.randn(1, 257, 1, 128, device=device, dtype=torch.float16, requires_grad=True)
@@ -652,7 +915,7 @@ def test_parallel_route_parity(gluon_route, monkeypatch, varlen):
 @requires_gluon
 @pytest.mark.parametrize('varlen', [False, True], ids=['dense', 'varlen'])
 @pytest.mark.parametrize('use_tma', [False, True], ids=['pointer', 'tma'])
-def test_parallel_large_grid(gluon_route, monkeypatch, varlen, use_tma):
+def test_parallel_large_grid(gluon_route, monkeypatch, varlen: bool, use_tma: bool):
     from fla.ops.attn.backends.gluon import parallel
 
     monkeypatch.setattr(parallel, 'IS_TMA_SUPPORTED', use_tma)
@@ -711,7 +974,21 @@ def test_decoding_invalid_window(op):
     ],
 )
 @pytest.mark.parametrize('strided', [False, True], ids=['contiguous', 'strided'])
-def test_decoding(H, HQ, K, V, W, use_g, do_gate_scale, use_sink, dtype, lengths, scale, sink_scale, strided):
+def test_decoding(
+    H: int,
+    HQ: int,
+    K: int,
+    V: int,
+    W: int | None,
+    use_g: bool,
+    do_gate_scale: bool,
+    use_sink: bool,
+    dtype: torch.dtype,
+    lengths: list[int],
+    scale: float | None,
+    sink_scale: float,
+    strided: bool,
+):
     torch.manual_seed(42)
     B, T = len(lengths), sum(lengths)
     q = torch.randn(1, B, HQ, K, dtype=dtype, device=device)
@@ -743,38 +1020,47 @@ def test_decoding(H, HQ, K, V, W, use_g, do_gate_scale, use_sink, dtype, lengths
 @requires_gluon
 @pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16], ids=['fp16', 'bf16'])
 @pytest.mark.parametrize(
-    ('T', 'H', 'HQ', 'K', 'V', 'offset', 'window_size', 'use_g', 'use_sink', 'cu_seqlens'),
+    ('K', 'V', 'offset'),
     [
-        pytest.param(
-            2311, 1, 4, K, V, offset, window_size, True, True, [0, 0, 257, 258, 2311],
-            id=f'K{K}-V{V}-offset{offset}-W{window_size}',
-        )
+        pytest.param(K, V, offset, id=f'K{K}-V{V}-offset{offset}')
         for K, V, offset in [
             (1, 3, 0), (65, 127, 0), (64, 64, 0), (100, 60, 0), (256, 512, 0), (512, 256, 0), (512, 512, 0),
             (64, 64, 1), (64, 64, 2), (64, 64, 4), (64, 64, 8), (100, 60, 2),
         ]
-        for window_size in (None, 0, 65)
-    ] + [
-        pytest.param(T, 2, 8, K, K, 0, None, False, False, [0, T], id=f'T{T}-K{K}')
-        for T, K in [(256, 128), (8192, 512)]
     ],
 )
-def test_decoding_split(gluon_decoding_route, dtype, T, H, HQ, K, V, offset, window_size, use_g, use_sink, cu_seqlens):
+@pytest.mark.parametrize('window', [None, 0, 65], ids=['full', 'empty-window', 'window65'])
+def test_decoding_split(gluon_decoding_route, dtype: torch.dtype, K: int, V: int, offset: int, window: int | None):
     torch.manual_seed(42)
-    q = torch.randn(1, len(cu_seqlens) - 1, HQ, K, device=device, dtype=dtype)
-    k = torch.randn(T * H * K + offset, device=device, dtype=dtype)[offset:].view(1, T, H, K)
-    v = torch.randn(T * H * V + offset, device=device, dtype=dtype)[offset:].view(1, T, H, V)
-    g = torch.empty(1, T, HQ, device=device, dtype=dtype).uniform_(-0.1, -0.01) if use_g else None
-    sink_bias = torch.randn(HQ, device=device) if use_sink else None
-    cu_seqlens = torch.tensor(cu_seqlens, device=device, dtype=torch.int32)
-    kwargs = dict(cu_seqlens=cu_seqlens, do_gate_scale=use_g, window_size=window_size, sink_bias=sink_bias)
-    tri = attn_decoding_one_step(q=q, k=k, v=v, g=g, **kwargs)
-    ref = naive_attn_decoding(q=q.float(), k=k.float(), v=v.float(), g=g.float() if use_g else None, **kwargs)
-    assert torch.isfinite(tri).all()
-    assert_close('o', ref, tri, 0.01)
+    q = torch.randn(1, 4, 4, K, device=device, dtype=dtype)
+    k = torch.randn(2311 * K + offset, device=device, dtype=dtype)[offset:].view(1, 2311, 1, K)
+    v = torch.randn(2311 * V + offset, device=device, dtype=dtype)[offset:].view(1, 2311, 1, V)
+    g = torch.empty(1, 2311, 4, device=device, dtype=dtype).uniform_(-0.1, -0.01)
+    sink_bias = torch.randn(4, device=device)
+    cu_seqlens = torch.tensor([0, 0, 257, 258, 2311], device=device, dtype=torch.int32)
+    kwargs = dict(cu_seqlens=cu_seqlens, do_gate_scale=True, window_size=window, sink_bias=sink_bias)
+    actual = attn_decoding_one_step(q=q, k=k, v=v, g=g, **kwargs)
+    ref = naive_attn_decoding(q=q.float(), k=k.float(), v=v.float(), g=g.float(), **kwargs)
+    assert torch.isfinite(actual).all()
+    assert_close('o', ref, actual, 0.01)
     explicit = attn_decoding_one_step(q=q, k=k, v=v, g=g, scale=K ** -0.5, **kwargs)
-    torch.testing.assert_close(tri, explicit, rtol=0, atol=0)
+    torch.testing.assert_close(actual, explicit, rtol=0, atol=0)
     assert len(gluon_decoding_route) == 2
+
+
+@requires_gluon
+@pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16], ids=['fp16', 'bf16'])
+@pytest.mark.parametrize(('T', 'K'), [(256, 128), (8192, 512)], ids=['T256-K128', 'T8192-K512'])
+def test_decoding_score_precision(gluon_decoding_route, dtype: torch.dtype, T: int, K: int):
+    torch.manual_seed(42)
+    q = torch.randn(1, 1, 8, K, device=device, dtype=dtype)
+    k = torch.randn(1, T, 2, K, device=device, dtype=dtype)
+    v = torch.randn_like(k)
+    cu_seqlens = torch.tensor([0, T], device=device, dtype=torch.int32)
+    actual = attn_decoding_one_step(q=q, k=k, v=v, cu_seqlens=cu_seqlens)
+    ref = naive_attn_decoding(q=q.float(), k=k.float(), v=v.float(), cu_seqlens=cu_seqlens)
+    assert_close('o', ref, actual, 0.01)
+    assert len(gluon_decoding_route) == 1
 
 
 @requires_gluon
