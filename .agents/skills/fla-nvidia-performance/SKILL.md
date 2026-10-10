@@ -2,7 +2,7 @@
 name: fla-nvidia-performance
 description: >
   Guidelines for NVIDIA GPU kernel / Triton / Gluon / TileLang / CUDA backend performance work in the FLA repo.
-  Covers profiling workflow, hardware baselines, and MR-ready performance evidence requirements.
+  Covers profiling workflow, hardware baselines, and PR-ready performance evidence requirements.
   Uses an installed ncu-report-skill when a task needs detailed Nsight Compute collection and diagnosis.
 ---
 
@@ -16,7 +16,7 @@ backend tuning, or any change that could affect throughput or latency in `fla/op
 - **Minimum effective baseline**: datacenter NVIDIA GPUs with sm_90 or newer; H100 / H20 are accepted.
 - **Preferred targets**: datacenter NVIDIA GPUs with sm_100 or sm_103.
 - **Reference only**: A100 (sm_80), pre-sm_80 GPUs, and all consumer cards (including sm_86, sm_89, and sm_120).
-  Do not use these numbers as the only MR performance conclusion.
+  Do not use these numbers as the only PR performance conclusion.
 
 ## Detailed NCU workflow
 
@@ -29,8 +29,7 @@ If a user-level `ncu-report-skill` is available, use it for:
 - report parsing helpers and diagnosis playbooks;
 - the final profiling report structure.
 
-If it is not available, use the minimal NCU commands in this skill and state in the MR notes
-that the external helper skill was unavailable.
+If it is not available, use the minimal NCU commands in this skill. Report any missing profiling evidence and its technical limitation; the availability of a helper skill does not belong in the PR description.
 Do not create untracked external clones inside this repo unless the user explicitly asks.
 
 ## Day-to-day development
@@ -38,21 +37,21 @@ Do not create untracked external clones inside this repo unless the user explici
 - You are **not** required to run NCU for every incremental change.
 - Quick sanity checks with `benchmark_training_throughput.py` or `benchmark_generation.py`
   are enough to catch large regressions during development.
-- Prefer dense workloads for quick iteration; varlen workloads are checked before MR.
+- Prefer dense workloads for quick iteration; varlen workloads are checked before PR.
 
-## Before opening an MR (performance evidence)
+## Before opening a PR (performance evidence)
 
-An agent-authored MR that touches kernel code must include **complete performance evidence**:
+For NVIDIA performance-optimization PRs, collect the evidence below. Correctness-only kernel changes still need the tests and same-hardware benchmarks required by `CONTRIBUTING.md`; detailed profiling is needed when it explains a performance claim or unresolved regression.
 
 1. **Before / after benchmark**
    - Run the same benchmark script with the same workload on the same hardware.
    - Report throughput (tokens/s or iters/s) and, if relevant, peak memory.
 
-2. **NCU profile**
-   - Run `ncu` with both `--set full` and `--set source` for a representative changed kernel
-     when Nsight Compute is available.
+2. **Profiling when needed**
+   - Use NCU when explaining a bottleneck, performance claim, or unresolved regression needs hardware metrics. It is not a mandatory check for every PR.
+   - When collecting NCU evidence, run `ncu` with `--set full` and `--set source` for a representative changed kernel when Nsight Compute is available.
    - Capture the `.ncu-rep` locally; do **not** commit it to the repo.
-   - In the MR description, paste a short summary of key metrics
+   - In the PR description, paste a short summary of key metrics
      (e.g., memory throughput %, SOL, occupancy, top hot instructions).
 
 3. **Workload coverage**

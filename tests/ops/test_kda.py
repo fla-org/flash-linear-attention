@@ -6,6 +6,8 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import importlib.util
+import inspect
+import os
 
 import pytest
 import torch
@@ -1217,8 +1219,8 @@ def test_chunk_return_intermediate_states(dtype):
 
 _FLASH_KDA_AVAILABLE = importlib.util.find_spec("flash_kda") is not None
 _SKIP_FLASH_KDA = pytest.mark.skipif(
-    device == "cpu" or not _FLASH_KDA_AVAILABLE,
-    reason="FlashKDA backend requires GPU and the flash_kda package",
+    device == "cpu" or not _FLASH_KDA_AVAILABLE or os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") == "1",
+    reason="FlashKDA tests require GPU, the flash_kda package, and backend dispatch",
 )
 
 _FLASH_KDA_REQUIRED_KWARGS = dict(
@@ -1239,14 +1241,37 @@ def _flash_kda_make_gate_params(H, D):
     return A_log, dt_bias
 
 
-def _flash_kda_run(monkeypatch, **kwargs):
+def _flash_kda_run(monkeypatch, positional=False, **kwargs):
+    import flash_kda
+
     monkeypatch.setenv("FLA_FLASH_KDA", "1")
-    with torch.inference_mode():
-        return chunk_kda(**kwargs, **_FLASH_KDA_REQUIRED_KWARGS)
+    calls = []
+    fwd = flash_kda.fwd
+
+    def tracked_fwd(*args, **kwargs):
+        calls.append(True)
+        return fwd(*args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(flash_kda, "fwd", tracked_fwd)
+        with torch.inference_mode():
+            if positional:
+                bound = inspect.signature(chunk_kda).bind(**kwargs, **_FLASH_KDA_REQUIRED_KWARGS)
+                bound.apply_defaults()
+                result = chunk_kda(*bound.args, **bound.kwargs)
+            else:
+                result = chunk_kda(**kwargs, **_FLASH_KDA_REQUIRED_KWARGS)
+    expected_flash_kda = (
+        not kwargs.get('allow_neg_eigval', False)
+        and kwargs.get('A_log') is not None
+        and kwargs.get('dt_bias') is not None
+    )
+    assert bool(calls) == expected_flash_kda
+    return result
 
 
 def _flash_kda_gold(q, k, v, g, beta_raw, A_log, dt_bias, scale, initial_state,
-                    lower_bound=-5.0, cu_seqlens=None):
+                    lower_bound=-5.0, cu_seqlens=None, allow_neg_eigval=False):
     kwargs = {}
     if cu_seqlens is not None:
         kwargs["cu_seqlens"] = cu_seqlens
@@ -1255,9 +1280,9 @@ def _flash_kda_gold(q, k, v, g, beta_raw, A_log, dt_bias, scale, initial_state,
         k=k.to(torch.float64),
         v=v.to(torch.float64),
         g=g.to(torch.float64),
-        beta=torch.sigmoid(beta_raw.to(torch.float64)),
-        A_log=A_log.to(torch.float64),
-        dt_bias=dt_bias.to(torch.float64),
+        beta=torch.sigmoid(beta_raw.to(torch.float64)) * (2 if allow_neg_eigval else 1),
+        A_log=A_log.to(torch.float64) if A_log is not None else None,
+        dt_bias=dt_bias.to(torch.float64) if dt_bias is not None else None,
         scale=scale,
         initial_state=initial_state.to(torch.float64),
         output_final_state=True,
@@ -1271,17 +1296,19 @@ def _flash_kda_gold(q, k, v, g, beta_raw, A_log, dt_bias, scale, initial_state,
 
 @_SKIP_FLASH_KDA
 @pytest.mark.parametrize(
-    ("B", "T", "H", "D"),
+    ("B", "T", "H", "D", "allow_neg_eigval", "has_A", "has_bias", "positional"),
     [
-        pytest.param(*test, id="B{}-T{}-H{}-D{}".format(*test))
-        for test in [
-            (1, 1024, 4, 128),
-            (2, 2048, 8, 128),
-            (1, 4096, 16, 128),
-        ]
+        pytest.param(1, 1024, 4, 128, False, True, True, False, id="dense"),
+        pytest.param(2, 2048, 8, 128, False, True, True, False, id="batched"),
+        pytest.param(1, 4096, 16, 128, False, True, True, False, id="long"),
+        pytest.param(1, 1024, 4, 128, True, True, True, False, id="negative-eigenvalues"),
+        pytest.param(1, 1024, 4, 128, False, False, True, False, id="no-A"),
+        pytest.param(1, 1024, 4, 128, False, True, False, False, id="no-bias"),
+        pytest.param(1, 1024, 4, 128, False, True, True, True, id="positional"),
+        pytest.param(1, 1024, 4, 128, True, True, True, True, id="positional-negative-eigenvalues"),
     ],
 )
-def test_flash_kda_chunk(B, T, H, D, monkeypatch):
+def test_flash_kda_chunk(B, T, H, D, allow_neg_eigval, has_A, has_bias, positional, monkeypatch):
     torch.manual_seed(42)
     dtype = torch.bfloat16
     q = torch.rand(B, T, H, D, dtype=dtype, device=device)
@@ -1290,19 +1317,23 @@ def test_flash_kda_chunk(B, T, H, D, monkeypatch):
     g = torch.randn(B, T, H, D, dtype=dtype, device=device)
     beta = torch.randn(B, T, H, dtype=dtype, device=device)
     A_log, dt_bias = _flash_kda_make_gate_params(H, D)
+    A_log = A_log if has_A else None
+    dt_bias = dt_bias if has_bias else None
     h0 = torch.randn(B, H, D, D, dtype=torch.float32, device=device)
     scale = D ** -0.5
 
     ref_o, ref_ht = _flash_kda_gold(
-        q, k, v, g, beta, A_log, dt_bias, scale, h0.clone())
+        q, k, v, g, beta, A_log, dt_bias, scale, h0.clone(), allow_neg_eigval=allow_neg_eigval)
 
     tri_o, tri_ht = _flash_kda_run(
         monkeypatch,
+        positional=positional,
         q=q, k=k, v=v, g=g, beta=beta,
         A_log=A_log, dt_bias=dt_bias,
         scale=scale,
         initial_state=h0.clone(),
         output_final_state=True,
+        allow_neg_eigval=allow_neg_eigval,
     )
     assert_close("o", ref_o, tri_o, _FLASH_KDA_RTOL)
     assert_close("ht", ref_ht, tri_ht.to(ref_ht.dtype), _FLASH_KDA_RTOL)
@@ -1310,17 +1341,17 @@ def test_flash_kda_chunk(B, T, H, D, monkeypatch):
 
 @_SKIP_FLASH_KDA
 @pytest.mark.parametrize(
-    ("H", "D", "cu_seqlens"),
+    ("H", "D", "cu_seqlens", "allow_neg_eigval", "has_A", "has_bias"),
     [
-        pytest.param(H, D, cu, id=f"H{H}-D{D}-cu{cu}")
-        for (H, D, cu) in [
-            (4, 128, [0, 256, 500, 1000]),
-            (8, 128, [0, 100, 300, 1200, 2000]),
-            (16, 128, [0, 101, 303, 1205, 3007, 4096]),
-        ]
+        pytest.param(4, 128, [0, 256, 500, 1000], False, True, True, id="varlen"),
+        pytest.param(8, 128, [0, 100, 300, 1200, 2000], False, True, True, id="multi-sequence"),
+        pytest.param(16, 128, [0, 101, 303, 1205, 3007, 4096], False, True, True, id="unaligned"),
+        pytest.param(4, 128, [0, 256, 500, 1000], True, True, True, id="negative-eigenvalues"),
+        pytest.param(4, 128, [0, 256, 500, 1000], False, False, True, id="no-A"),
+        pytest.param(4, 128, [0, 256, 500, 1000], False, True, False, id="no-bias"),
     ],
 )
-def test_flash_kda_chunk_varlen(H, D, cu_seqlens, monkeypatch):
+def test_flash_kda_chunk_varlen(H, D, cu_seqlens, allow_neg_eigval, has_A, has_bias, monkeypatch):
     torch.manual_seed(42)
     dtype = torch.bfloat16
     cu_seqlens_t = torch.LongTensor(cu_seqlens).to(device)
@@ -1333,12 +1364,15 @@ def test_flash_kda_chunk_varlen(H, D, cu_seqlens, monkeypatch):
     g = torch.randn(1, T, H, D, dtype=dtype, device=device)
     beta = torch.randn(1, T, H, dtype=dtype, device=device)
     A_log, dt_bias = _flash_kda_make_gate_params(H, D)
+    A_log = A_log if has_A else None
+    dt_bias = dt_bias if has_bias else None
     h0 = torch.randn(N, H, D, D, dtype=torch.float32, device=device)
     scale = D ** -0.5
 
     ref_o, ref_ht = _flash_kda_gold(
         q, k, v, g, beta, A_log, dt_bias, scale, h0.clone(),
         cu_seqlens=cu_seqlens_t,
+        allow_neg_eigval=allow_neg_eigval,
     )
     tri_o, tri_ht = _flash_kda_run(
         monkeypatch,
@@ -1348,6 +1382,7 @@ def test_flash_kda_chunk_varlen(H, D, cu_seqlens, monkeypatch):
         initial_state=h0.clone(),
         output_final_state=True,
         cu_seqlens=cu_seqlens_t,
+        allow_neg_eigval=allow_neg_eigval,
     )
     assert_close("o", ref_o, tri_o, _FLASH_KDA_RTOL)
     assert_close("ht", ref_ht, tri_ht.to(ref_ht.dtype), _FLASH_KDA_RTOL)
@@ -1370,10 +1405,9 @@ _TRITON_ASCEND_KDA_OPS = (
 
 def _spy_on_triton_ascend_kda_backend():
     """Patch every op of the Triton-Ascend KDA backend to record dispatched calls."""
-    from fla.ops.backends import BackendRegistry
+    from fla import backends
 
-    BackendRegistry.ensure_initialized('kda')
-    backend = BackendRegistry._registries['kda']._backends.get('triton_ascend')
+    backend = backends._resolve_registry('kda')._backends.get('triton_ascend')
     assert backend is not None, 'Triton-Ascend KDA backend is not registered'
 
     calls = []

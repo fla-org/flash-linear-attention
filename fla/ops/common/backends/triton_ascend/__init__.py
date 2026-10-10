@@ -5,15 +5,16 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""Triton-Ascend Ascend NPU backend for common chunk ops."""
+"""Triton-Ascend backend for shared chunk operations."""
 
 from __future__ import annotations
 
 import torch
 
-from fla.ops.backends import BaseBackend
+from fla.backends import BaseBackend, register_backend
 
 
+@register_backend('common')
 class TritonAscendCommonBackend(BaseBackend):
     backend_type = 'triton_ascend'
     package_name = None
@@ -83,6 +84,13 @@ class TritonAscendCommonBackend(BaseBackend):
         from fla.ops.common.backends.triton_ascend.chunk_o import chunk_fwd_o_npu
         return chunk_fwd_o_npu(*args, **kwargs)
 
+    def chunk_bwd_dv_verifier(self, *args, **kwargs):
+        return True, None
+
+    def chunk_bwd_dv(self, *args, **kwargs):
+        from fla.ops.common.backends.triton_ascend.chunk_o import chunk_bwd_dv_npu
+        return chunk_bwd_dv_npu(*args, **kwargs)
+
     def chunk_bwd_dv_local_verifier(self, *args, **kwargs):
         return True, None
 
@@ -109,11 +117,11 @@ class TritonAscendCommonBackend(BaseBackend):
 
     def fused_beta_sigmoid_fwd(self, x, scale=1.0):
         from fla.ops.common.backends.triton_ascend.gate import fused_beta_sigmoid_fwd_npu
-        return fused_beta_sigmoid_fwd_npu(x, scale)
+        return fused_beta_sigmoid_fwd_npu(x=x, scale=scale)
 
     def fused_beta_sigmoid_bwd_verifier(self, *args, **kwargs):
         return True, None
 
     def fused_beta_sigmoid_bwd(self, x, dy, scale=1.0):
         from fla.ops.common.backends.triton_ascend.gate import fused_beta_sigmoid_bwd_npu
-        return fused_beta_sigmoid_bwd_npu(x, dy, scale)
+        return fused_beta_sigmoid_bwd_npu(x=x, dy=dy, scale=scale)

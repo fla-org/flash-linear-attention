@@ -2,9 +2,9 @@
 
 Experience notes from past kernel work. Read the current code before applying — numbers are not immutable hardware constants. Paths are relative to the `flash-linear-attention` repo root.
 
-## `causal_conv1d.py` — 1D core-grid + constexpr DMA split
+## `causal_conv1d` — 1D core-grid + constexpr DMA split
 
-File: `fla/modules/backends/triton_ascend/causal_conv1d.py`
+File: `fla/modules/causal_conv1d/backends/triton_ascend.py`
 
 Packed training path (contiguous `[B,T,D]`, no `initial_state` / `dht`, `D` divisible by a `BD>=16` tile) uses 1D core-grid kernels. Odd `D` (e.g. 200), strided layout, and cache-state paths stay on the legacy multi-axis kernels.
 
@@ -65,7 +65,7 @@ File: `fla/ops/common/backends/triton_ascend/chunk_delta_h.py`
 File: `fla/ops/common/backends/triton_ascend/chunk_o.py`
 
 - Fwd: fuse inter+intra, 1D core-grid, host `g.transpose(1,2).contiguous()`.
-- Bwd `G_T_CONTIG`: `chunk_bwd_dv_local_npu`, `chunk_bwd_dqkwg_npu`, `chunk_bwd_kernel_dg_npu` — stride-1 `g_ptr` (`i_b*HV*T+i_h*T` / varlen `bos+i_h*T`), `T_seq` before varlen.
+- Bwd `G_T_CONTIG`: `chunk_bwd_dv_local_npu`, `chunk_bwd_dqkwg_npu`, `chunk_dg_bwd_kernel` — stride-1 `g_ptr` (`i_b*HV*T+i_h*T` / varlen `bos+i_h*T`), `T_seq` before varlen.
 - dv_local kernel ~6.5→0.18ms, dqkwg ~10.8→0.91ms (B2 T2048 HV8). Fix `BV`, autotune `BK`. Details: [g-contiguous-loading.md](g-contiguous-loading.md).
 - **`tl.dot` lhs clobber**: fwd `b_q`/`b_q_c`; bwd `b_k0_c`, `b_ds_c`, `b_A_pristine`. See [§ tl.dot catalog](cases.md#chunk_opy).
 
@@ -134,22 +134,22 @@ See also the full catalog in [§ `tl.dot` lhs clobber — repo-wide case catalog
 
 File: `fla/ops/common/backends/triton_ascend/chunk_o.py`
 
-| Kernel / site | Pattern | Fix |
-|---------------|---------|-----|
-| `chunk_fwd_kernel_o_npu` | `b_q` lhs for `b_o` dot, then needed for `b_A` dot | `b_q_c = b_q + 0.0` **before** first dot; `b_o` uses `b_q`, `b_A` uses `b_q_c` |
-| `chunk_bwd_kernel_dv_npu` | `b_A` reused across V tiles as lhs | `b_A_pristine = b_A + 0.0`; per V tile: `b_A_i = b_A_pristine + 0.0` |
-| `chunk_bwd_kernel_dv_local_npu` | `b_k0` lhs in `b_A00` and `b_A01` | `b_k0_c = b_k0 + 0.0` before dots; second dot uses `b_k0_c` |
-| `chunk_bwd_dqkwg_npu` | `b_ds` lhs in `b_dq_r += tl.dot(b_ds, b_k_c)`, then lhs of `tl.dot(tl.trans(b_ds_c), b_q_r)` | `b_ds_c = b_ds + 0.0` **before** first `b_ds` dot |
+| Kernel / site               | Pattern                                                                                      | Fix                                                                            |
+| --------------------------- | -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `chunk_o_fwd_kernel`        | `b_q` lhs for `b_o` dot, then needed for `b_A` dot                                           | `b_q_c = b_q + 0.0` **before** first dot; `b_o` uses `b_q`, `b_A` uses `b_q_c` |
+| `chunk_bwd_kernel_dv_npu`   | `b_A` reused across V tiles as lhs                                                           | `b_A_pristine = b_A + 0.0`; per V tile: `b_A_i = b_A_pristine + 0.0`           |
+| `chunk_dv_local_bwd_kernel` | `b_k0` lhs in `b_A00` and `b_A01`                                                            | `b_k0_c = b_k0 + 0.0` before dots; second dot uses `b_k0_c`                    |
+| `chunk_bwd_dqkwg_npu`       | `b_ds` lhs in `b_dq_r += tl.dot(b_ds, b_k_c)`, then lhs of `tl.dot(tl.trans(b_ds_c), b_q_r)` | `b_ds_c = b_ds + 0.0` **before** first `b_ds` dot                              |
 
 ### `chunk_delta_h.py`
 
 File: `fla/ops/common/backends/triton_ascend/chunk_delta_h.py`
 
-| Kernel / site | Pattern | Fix |
-|---------------|---------|-----|
-| `chunk_gated_delta_rule_fwd_kernel_h_blockdim64_npu` | `b_w`/`b_k` across K segments | **Safe** — each segment `tl.load`s a new tile from GM |
-| `chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64_npu` | `b_do` lhs across K-slabs (`STATE_V_FIRST` and else) | After gate×scale fold: `b_do_c/b_do_c2/b_do_c3 = b_do + 0.0` before any slab dot; slab1=`b_do`, slab2=`b_do_c`, slab3=`b_do_c2`, slab4=`b_do_c3` |
-| same | `b_dv` updated in-place then subtracted in dh update | `b_dv_pristine = b_dv + 0.0` after dv correction; each slab: `b_dv_i = b_dv_pristine + 0.0` for the subtract dot |
+| Kernel / site                         | Pattern                                              | Fix                                                                                                                                              |
+| ------------------------------------- | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `chunk_gated_delta_rule_h_fwd_kernel` | `b_w`/`b_k` across K segments                        | **Safe** — each segment `tl.load`s a new tile from GM                                                                                            |
+| `chunk_gated_delta_rule_h_bwd_kernel` | `b_do` lhs across K-slabs (`STATE_V_FIRST` and else) | After gate×scale fold: `b_do_c/b_do_c2/b_do_c3 = b_do + 0.0` before any slab dot; slab1=`b_do`, slab2=`b_do_c`, slab3=`b_do_c2`, slab4=`b_do_c3` |
+| same                                  | `b_dv` updated in-place then subtracted in dh update | `b_dv_pristine = b_dv + 0.0` after dv correction; each slab: `b_dv_i = b_dv_pristine + 0.0` for the subtract dot                                 |
 
 ### `chunk_intra.py`
 

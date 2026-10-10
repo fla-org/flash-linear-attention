@@ -7,11 +7,6 @@
 
 """GDN-2 backends."""
 
-from fla.ops.backends import BackendRegistry, dispatch
 from fla.ops.gdn2.backends.triton_ascend import TritonAscendGDN2Backend
 
-gdn2_registry = BackendRegistry("gdn2")
-gdn2_registry.register(TritonAscendGDN2Backend())
-
-
-__all__ = ['dispatch', 'gdn2_registry']
+__all__ = ['TritonAscendGDN2Backend']

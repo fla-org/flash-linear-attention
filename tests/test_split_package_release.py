@@ -116,10 +116,17 @@ def test_split_wheels_match_release_contract(tmp_path: Path) -> None:
     ext_names = _wheel_names(ext_wheel)
 
     assert "fla/__init__.py" in core_names
+    assert "fla/ops/backends/__init__.py" in core_names
     assert "fla/ops/__init__.py" in core_names
     assert "fla/modules/__init__.py" in core_names
+    assert "fla/backends.py" in core_names
+    expected_sources = {path.relative_to(ROOT).as_posix() for path in (ROOT / "fla/modules").rglob("*.py")}
+    assert expected_sources <= core_names
     assert "fla/utils/__init__.py" in core_names
-    assert "fla/utils/_device.py" in core_names
+    for module in ("env", "hardware", "decorators", "testing", "ascend_ub_manager"):
+        assert f"fla/utils/{module}.py" in core_names
+    for module in ("_compat", "_config", "_decorators", "_device", "_testing"):
+        assert f"fla/utils/{module}.py" not in core_names
     assert "fla/utils.py" not in core_names
     assert not any(name.startswith("fla/layers/") for name in core_names)
     assert not any(name.startswith("fla/models/") for name in core_names)
@@ -127,6 +134,7 @@ def test_split_wheels_match_release_contract(tmp_path: Path) -> None:
     assert "fla/__init__.py" not in ext_names
     assert "fla/layers/__init__.py" in ext_names
     assert "fla/models/__init__.py" in ext_names
+    assert "fla/backends.py" not in ext_names
     assert not any(name.startswith("fla/ops/") for name in ext_names)
     assert not any(name.startswith("fla/modules/") for name in ext_names)
     assert not any(name.startswith("fla/utils/") for name in ext_names)
@@ -289,10 +297,15 @@ def test_full_split_import_contract_when_runtime_dependencies_available(tmp_path
         import fla.layers
         import fla.models
         from fla import GLAModel, GatedLinearAttention
+        from fla.backends import BackendRegistry, BaseBackend, dispatch, register_backend
         from fla.models import GLAConfig, GLAForCausalLM, GLAModel as ModelsGLAModel
+        from fla.modules.grpo import fused_grpo_loss
+        from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
         from transformers import AutoConfig, AutoModel, AutoModelForCausalLM
 
         assert fla.__version__ == {version!r}
+        assert callable(dispatch('kda'))
+        assert callable(register_backend('kda'))
         assert "GLAModel" in fla.__all__
         assert "GatedLinearAttention" in fla.__all__
         assert "GLAConfig" not in fla.__all__

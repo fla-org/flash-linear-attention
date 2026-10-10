@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import triton
 
-from fla.ops.backends import BaseBackend
+from fla.backends import BaseBackend, register_backend
 
 _SUPPORTED_INTRA_CHUNK_SIZES = (32, 64)
 _SUB_CHUNK = 16
@@ -48,6 +48,7 @@ def _verify_bwd_intra_k(args, kwargs):
     return True, None
 
 
+@register_backend('kda')
 class TritonAscendKDABackend(BaseBackend):
     """Ascend NPU backend for KDA gate, intra, WY, and backward kernels."""
 
