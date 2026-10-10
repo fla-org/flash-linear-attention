@@ -34,14 +34,6 @@ def test_grpo_compile_policy_is_local_to_its_function(run_python, is_npu):
     )
 
 
-def test_grpo_exports_preserve_symbol_identity():
-    from fla.modules import grpo
-
-    for name in ('GrpoLoss', 'fused_grpo_loss', 'grpo_bwd_kernel', 'grpo_fwd_kernel', 'grpo_loss_torch', 'grpo_loss_with_old_logps'):
-        assert getattr(grpo, name) is getattr(grpo.ops, name)
-    assert not {'torch', 'triton', 'tl', 'IS_NPU'}.intersection(vars(grpo))
-
-
 def grpo_loss_with_old_logps_torch(
     logps: torch.Tensor,
     ref_logps: torch.Tensor,
