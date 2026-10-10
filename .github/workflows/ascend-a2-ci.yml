@@ -169,6 +169,7 @@ jobs:
             tests/ops/test_gdn2.py \
             tests/ops/test_kda.py \
             tests/ops/test_gla.py \
+            tests/ops/test_oja.py \
             tests/ops/test_attnres.py \
             tests/ops/test_solve_tril.py \
             tests/ops/test_delta.py \
