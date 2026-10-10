@@ -13,19 +13,12 @@ See ``benchmarks/ops/run.py`` docstring for full usage and how to register new o
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 import torch
 import torch.nn.functional as F
-
-logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Shape helpers: reusable callables  (B, T, H, D, **kw) -> tuple
-# ---------------------------------------------------------------------------
 
 
 def shape_BTHD(B, T, H, D, **kw):
@@ -66,10 +59,6 @@ def shape_q_hq(B, T, H, D, HQ=None, **kw):
     return (B, T, HQ, D)
 
 
-# ---------------------------------------------------------------------------
-# Transform helpers
-# ---------------------------------------------------------------------------
-
 logsigmoid = F.logsigmoid
 
 
@@ -89,11 +78,6 @@ def rwkv7_w_transform(t):
     return w.clamp(min=RWKV7_W_MIN, max=-1e-6)
 
 
-# ---------------------------------------------------------------------------
-# TensorSpec: describes how to create one input tensor
-# ---------------------------------------------------------------------------
-
-
 @dataclass
 class TensorSpec:
     """Specification for generating a single benchmark input tensor.
@@ -108,11 +92,6 @@ class TensorSpec:
     requires_grad: bool = True
     dtype: str = 'default'
     transform: Callable | None = None
-
-
-# ---------------------------------------------------------------------------
-# OpConfig: registry entry for one op
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -171,10 +150,6 @@ class OpConfig:
     backend_env: dict[str, str] | None = None
 
 
-# ---------------------------------------------------------------------------
-# Global registry
-# ---------------------------------------------------------------------------
-
 _REGISTRY: dict[str, OpConfig] = {}
 
 
@@ -189,12 +164,8 @@ def get_op(name: str) -> OpConfig:
 
 
 def list_ops() -> list[str]:
-    return sorted(_REGISTRY.keys())
+    return sorted(_REGISTRY)
 
-
-# ---------------------------------------------------------------------------
-# Shape configs
-# ---------------------------------------------------------------------------
 
 SHAPE_CONFIGS = {
     'B1_T8192_H96_D128':  {'B': 1,  'T': 8192,  'H': 96, 'D': 128},
@@ -206,24 +177,18 @@ SHAPE_CONFIGS = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Input factory
-# ---------------------------------------------------------------------------
-
-
 def generate_inputs(
     config: OpConfig,
     B: int, T: int, H: int, D: int,
     dtype: torch.dtype = torch.bfloat16,
     device: str | torch.device = 'cuda',
     **extra_shape_kw,
-) -> dict[str, torch.Tensor]:
+) -> dict[str, Any]:
     """Create input tensors for *config* at the given shape.
 
-    Returns a dict mapping parameter names to tensors.
+    Returns keyword arguments, including any tensor lists or scalars added by post_init.
     Raises ValueError if dim_constraints are not satisfied (caller should skip).
     """
-    # Check dim constraints
     if config.dim_constraints:
         shape_vals = {'B': B, 'T': T, 'H': H, 'D': D, **extra_shape_kw}
         for dim_name, allowed in config.dim_constraints.items():
@@ -237,15 +202,7 @@ def generate_inputs(
     for param_name, spec in config.inputs.items():
         shape = spec.shape_fn(B, T, H, D, **extra_shape_kw)
 
-        # Determine dtype
-        if spec.dtype == 'default':
-            tensor_dtype = dtype
-        elif spec.dtype == 'float32':
-            tensor_dtype = torch.float32
-        elif spec.dtype == 'long':
-            tensor_dtype = torch.long
-        else:
-            tensor_dtype = dtype
+        tensor_dtype = {'float32': torch.float32, 'long': torch.long}.get(spec.dtype, dtype)
 
         if tensor_dtype == torch.long:
             tensor = torch.randint(0, 10, shape, dtype=tensor_dtype, device=device)
@@ -260,16 +217,10 @@ def generate_inputs(
 
         inputs[param_name] = tensor
 
-    # Custom post-init mutation
     if config.post_init is not None:
         config.post_init(inputs, B=B, T=T, H=H, D=D, **extra_shape_kw)
 
     return inputs
-
-
-# ===========================================================================
-# Op registrations
-# ===========================================================================
 
 
 def shape_cyfa_readout(B, T, H, D, M=128, **kw):
@@ -302,7 +253,6 @@ register_op(OpConfig(
     post_init=init_cyfa_inputs,
 ))
 
-# --- Simple qkv (no extra inputs) ---
 
 _simple_qkv = {
     'q': TensorSpec(shape_BTHD),
@@ -324,7 +274,6 @@ register_op(OpConfig(
     category='simple_qkv',
 ))
 
-# --- +elem gate (g=[B,T,H,D] with logsigmoid_clamp) ---
 
 register_op(OpConfig(
     name='chunk_gla',
@@ -336,7 +285,6 @@ register_op(OpConfig(
     category='elem_gate',
 ))
 
-# --- +beta (beta=[B,T,H] with sigmoid) ---
 
 register_op(OpConfig(
     name='chunk_delta_rule',
@@ -349,7 +297,6 @@ register_op(OpConfig(
     test_file='tests/ops/test_delta.py',
 ))
 
-# --- Delta-rule variants with decay and update gates ---
 
 register_op(OpConfig(
     name='chunk_gdn',
@@ -444,7 +391,6 @@ register_op(OpConfig(
     test_file='tests/ops/test_precond_kda.py',
 ))
 
-# --- +head gate (g=[B,T,H] with logsigmoid) ---
 
 register_op(OpConfig(
     name='chunk_simple_gla',
@@ -456,11 +402,9 @@ register_op(OpConfig(
     category='head_gate',
 ))
 
-# --- RWKV ---
-
 
 def _rwkv7_post_init(inputs, B, T, H, D, **kw):
-    """RWKV7 needs a/b to be initialized as small positive values."""
+    """Initialize RWKV7 a/b from a zero-mean normal distribution with standard deviation 0.1."""
     with torch.no_grad():
         inputs['a'] = (torch.randn_like(inputs['a']) * 0.1).requires_grad_(True)
         inputs['b'] = (torch.randn_like(inputs['b']) * 0.1).requires_grad_(True)
@@ -495,7 +439,6 @@ register_op(OpConfig(
     category='rwkv',
 ))
 
-# --- Comba ---
 
 register_op(OpConfig(
     name='chunk_comba',
@@ -510,7 +453,6 @@ register_op(OpConfig(
     category='comba',
 ))
 
-# --- HGRN (x, g only, no qkv) ---
 
 register_op(OpConfig(
     name='fused_recurrent_hgrn',
@@ -522,7 +464,6 @@ register_op(OpConfig(
     category='hgrn',
 ))
 
-# --- Generalized delta rule (DPLR) ---
 
 register_op(OpConfig(
     name='chunk_dplr_delta_rule',
@@ -537,7 +478,6 @@ register_op(OpConfig(
     test_file='tests/ops/test_dplr_delta.py',
 ))
 
-# --- Lightning attention (needs layer_idx, num_layers) ---
 
 register_op(OpConfig(
     name='chunk_lightning_attn',
@@ -547,7 +487,6 @@ register_op(OpConfig(
     category='lightning',
 ))
 
-# --- Attention baselines ---
 
 register_op(OpConfig(
     name='parallel_attn',
@@ -575,7 +514,6 @@ register_op(OpConfig(
     category='flash_attn',
 ))
 
-# --- layer-axis residual aggregation (AttnRes, mHC, ...) ---
 # These ops attend / aggregate over an `L` axis of stacked residual sources.
 # Inputs and shape sweeps are shared so future ops (mHC etc.) can reuse them.
 
@@ -625,7 +563,6 @@ register_op(OpConfig(
     category='naive_attnres',
 ))
 
-# --- NSA (native sparse attention) — GQA + structured block selection ---
 # q carries HQ query heads while k/v carry H kv heads (GQA; HQ/H a power of two
 # and >= 16). block_indices is a causal random selection that must be built
 # explicitly — the generic randn/randint input factory cannot produce a valid one.
