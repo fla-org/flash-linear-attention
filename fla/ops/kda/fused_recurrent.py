@@ -268,7 +268,7 @@ def fused_recurrent_kda_fwd(
     BV = 32
 
     if out is None:
-        out = torch.zeros_like(v)
+        out = torch.empty_like(v) if cu_seqlens is None else torch.zeros_like(v)
     else:
         assert out.shape == v.shape
     if inplace_final_state:
