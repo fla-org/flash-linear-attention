@@ -1214,6 +1214,8 @@ class ShortConvolution(nn.Conv1d):
         output_final_state: bool = False,
         cu_seqlens: torch.LongTensor | None = None,
         chunk_indices: torch.LongTensor | None = None,
+        *,
+        update_cache: bool = True,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """
@@ -1226,7 +1228,7 @@ class ShortConvolution(nn.Conv1d):
                 Attention mask for padded positions. Default: `None`.
             cache (torch.Tensor, Optional):
                 Previous cache of shape `[N, D, W]`, where `W` is the kernel size. Default: `None`.
-                Single-token calls without autograd update it **inplace**.
+                Single-token calls without autograd update it in place when `update_cache=True`.
                 Other calls return the updated state when `output_final_state=True`.
             output_final_state (bool, Optional):
                 Whether to output the final state of shape `[N, D, W]`. Default: `False`.
@@ -1234,6 +1236,8 @@ class ShortConvolution(nn.Conv1d):
                 Cumulative sequence lengths of shape `[N+1]`. Default: `None`.
             chunk_indices (torch.Tensor, Optional):
                 Chunk indices for variable-length sequences. Default: `None`.
+            update_cache (bool, Optional):
+                Whether single-token decoding may update the supplied cache in place. Default: `True`.
 
         Returns:
             y (torch.Tensor):
@@ -1256,6 +1260,7 @@ class ShortConvolution(nn.Conv1d):
                 cache=cache,
                 output_final_state=output_final_state,
                 cu_seqlens=cu_seqlens,
+                update_cache=update_cache,
             )
             return y, cache
 
@@ -1290,12 +1295,16 @@ class ShortConvolution(nn.Conv1d):
         cache: torch.Tensor | None,
         output_final_state: bool = False,
         cu_seqlens: torch.LongTensor | None = None,
+        *,
+        update_cache: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         B, _, D, W = *x.shape, self.kernel_size[0]
         N = B if cu_seqlens is None else len(cu_seqlens) - 1
         # the update kernel requires a cache even when the final state is not requested.
         if cache is None:
             cache = x.new_zeros(N, D, W)
+        elif not update_cache:
+            cache = cache.clone()
         if self.backend == 'triton':
             y, cache = causal_conv1d_update(
                 x=x,

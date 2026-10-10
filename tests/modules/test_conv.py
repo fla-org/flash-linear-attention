@@ -1036,6 +1036,11 @@ def test_conv_prefill(
     tri, cache_out = conv(x=x, residual=residual, cache=tri_cache.clone(), output_final_state=True)
 
     assert_close("y", ref, tri, 1e-3)
+    saved_cache = tri_cache.clone()
+    replay, replay_cache = conv(x=x, residual=residual, cache=tri_cache, update_cache=False)
+    assert_close("replay", ref, replay, 1e-3)
+    assert torch.equal(tri_cache, saved_cache)
+    assert replay_cache is None
     for p in range(1, W):
         if p <= T:
             expected = x[:, -p, :]
@@ -1177,9 +1182,10 @@ def test_conv_step(
 
     cache = torch.randn(B, D, W).to(device, dtype)
 
+    ref_cache = cache.clone()
     ref = causal_conv1d_update_ref(
         x=x.squeeze(1),
-        cache=cache.clone(),
+        cache=ref_cache,
         weight=rearrange(conv.weight, "d 1 w -> d w"),
         bias=conv.bias,
         activation=activation,
@@ -1187,9 +1193,26 @@ def test_conv_step(
     if has_residual:
         ref += residual
 
-    tri, _ = conv.step(x=x, residual=residual, cache=cache.clone())
+    saved_cache = cache.clone()
+    for output_final_state in (False, True):
+        y, cache_out = conv(
+            x=x,
+            residual=residual,
+            cache=cache,
+            output_final_state=output_final_state,
+            update_cache=False,
+        )
+        assert_close("replay", ref, y, 1e-3)
+        assert torch.equal(cache, saved_cache)
+        if output_final_state:
+            assert_close("replay cache", ref_cache, cache_out, 1e-3)
+        else:
+            assert cache_out is None
 
-    assert_close("y", ref, tri, 1e-3)
+    y, cache_out = conv.step(x=x, residual=residual, cache=cache, output_final_state=True)
+    assert_close("y", ref, y, 1e-3)
+    assert cache_out is cache
+    assert_close("cache", ref_cache, cache, 1e-3)
 
 
 def test_conv_varlen_empty_sequence():
