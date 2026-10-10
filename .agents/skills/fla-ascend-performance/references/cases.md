@@ -2,7 +2,7 @@
 
 Use these examples to understand existing design choices. Read the current implementation before changing a path; tile settings depend on the workload and compiler. Paths are relative to the repository root.
 
-## `causal_conv1d.py` — 1D core-grid + constexpr DMA split
+## Causal convolution: core grid and DMA paths
 
 Implementation: `fla/modules/causal_conv1d/backends/triton_ascend.py`.
 

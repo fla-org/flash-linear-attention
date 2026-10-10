@@ -21,7 +21,7 @@ pre-commit run --files fla/ops/kda/chunk.py tests/ops/test_kda.py
 
 For documentation-only changes, validate links, examples, and formatting as described in [Evidence by Change Type](../../../CONTRIBUTING.md#evidence-by-change-type).
 
-The dependency helper only lists tests. Check that regression coverage exercises the changed path and that required numerical comparisons passed, including supported gradients. Record commands, tested revision, environment, and results; distinguish failures, skips, and unrun checks. Reproduce a failure on the baseline before calling it pre-existing.
+The dependency helper only lists tests. Check that regression coverage exercises the changed path and that required numerical comparisons passed, including supported gradients. Review new test functions and files against [test organization and naming](../../../CONTRIBUTING.md#test-organization-and-naming); use an existing test case where it fits. Record commands, tested revision, environment, and results; distinguish failures, skips, and unrun checks. Reproduce a failure on the baseline before calling it pre-existing.
 
 For performance-relevant changes, collect same-hardware before/after measurements under [Benchmarking](../../../CONTRIBUTING.md#benchmarking) and the relevant hardware skill. A neutral result needs numbers; explain inapplicable checks. Inspect the final diff for stale comments and unrelated changes, leaving scratch logs and raw profiles outside it.
 

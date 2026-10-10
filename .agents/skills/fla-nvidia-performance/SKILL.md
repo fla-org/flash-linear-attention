@@ -35,7 +35,7 @@ The verification command runs the current tests; retain the validated baseline a
 
 ## Nsight Compute
 
-If `ncu-report-skill` is installed, use it for detailed collection and interpretation. Otherwise, collect a representative changed kernel with the installed `ncu`. Check which sections and metrics that version supports.
+Collect a representative changed kernel with the installed `ncu`. Check which sections and metrics that version supports.
 
 The benchmark runner launches a child process, so use `--target-processes all`. Replace the kernel filter with the changed kernel's name. `--no-base` profiles the current implementation; collect the baseline separately with the same command and workload.
 

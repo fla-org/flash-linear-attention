@@ -16,7 +16,7 @@ Use this skill for `fla/ops/kda/` and its tests. Public entry points are `chunk_
 
 ## Gate contracts
 
-For `chunk_kda`, with `use_gate_in_kernel=False`, the caller supplies log-space decay. With it enabled, the caller supplies raw gates and optional bias:
+`chunk_kda` takes log-space decay when `use_gate_in_kernel=False`. With it enabled, the caller supplies raw gates and optional bias:
 
 - Without a lower bound, activation is `-exp(A_log) * softplus(g + dt_bias)` and `A_log` is required.
 - With a lower bound, activation is `lower_bound * sigmoid(exp(A_log) * (g + dt_bias))`. Omitting `A_log` uses a multiplier of one.
