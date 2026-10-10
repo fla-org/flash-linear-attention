@@ -88,6 +88,7 @@ class WallAttention(nn.Module):
         else:
             self.num_kv_heads = num_kv_heads
         assert self.num_heads % self.num_kv_heads == 0, "num_heads must be divisible by num_kv_heads"
+        assert hidden_size % num_heads == 0, f"`hidden_size` must be divisible by `num_heads`, got {hidden_size} and {num_heads}."
         self.num_kv_groups = num_heads // self.num_kv_heads
         self.head_dim = self.hidden_size // self.num_heads
         self.kv_dim = self.num_kv_heads * self.head_dim

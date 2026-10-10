@@ -47,6 +47,9 @@ class ReBasedLinearAttention(nn.Module):
         self.feature_dim = feature_dim
         self.num_key_value_heads = num_key_value_heads
         self.num_heads = num_heads
+        assert self.hidden_size % num_key_value_heads == 0, (
+            f"`hidden_size` must be divisible by `num_key_value_heads`, got {self.hidden_size} and {num_key_value_heads}."
+        )
         self.head_dim = self.hidden_size // self.num_key_value_heads
         self.use_gamma = use_gamma
         self.use_beta = use_beta
