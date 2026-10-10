@@ -98,7 +98,7 @@
 | 2024 | Mamba2                        | [Transformers are SSMs: Generalized Models and Efficient Algorithms Through Structured State Space Duality](https://arxiv.org/abs/2405.21060) | [code](https://github.com/fla-org/flash-linear-attention/blob/main/fla/models/mamba2)                  |
 | 2024 | GSA                           | [Gated Slot Attention for Efficient Linear-Time Sequence Modeling](https://arxiv.org/abs/2409.07146)                                          | [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/models/gsa)                     |
 | 2024 | MLA                           | [DeepSeek-V2: A Strong, Economical, and Efficient Mixture-of-Experts Language Model](https://arxiv.org/abs/2405.04434)                        | [code](https://github.com/fla-org/flash-linear-attention/blob/main/fla/layers/mla.py)                  |
-| 2024 |    Stick-Breaking Attention   | [Scaling Stick-Breaking Attention: An Efficient Implementation and In-depth Study](https://arxiv.org/abs/2410.17980)                          | [code](https://github.com/fla-org/flash-linear-attention/blob/main/fla/layers/stickbreaking_attn.py)   |
+| 2024 | Stick-Breaking Attention      | [Scaling Stick-Breaking Attention: An Efficient Implementation and In-depth Study](https://arxiv.org/abs/2410.17980)                          | [code](https://github.com/fla-org/flash-linear-attention/blob/main/fla/layers/stickbreaking_attn.py)   |
 | 2025 | Samba                         | [Samba: Simple Hybrid State Space Models for Efficient Unlimited Context Language Modeling](https://arxiv.org/abs/2406.07522)                 | [code](https://github.com/fla-org/flash-linear-attention/blob/main/fla/models/samba)                   |
 | 2025 | Gated DeltaNet                | [Gated Delta Networks: Improving Mamba2 with Delta Rule](https://arxiv.org/abs/2412.06464)                                                    | [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/ops/gated_delta_rule)           |
 | 2025 | RWKV7                         | [RWKV-7 "Goose" with Expressive Dynamic State Evolution](https://arxiv.org/abs/2503.14456)                                                    | [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/ops/rwkv7)                      |
@@ -254,14 +254,14 @@ GLAForCausalLM(
 
 We offer a collection of fused modules in `fla.modules` to facilitate faster training:
 
-* [`Rotary Embedding`](fla/modules/rotary.py): rotary positional embeddings as adopted by the Llama architecture, a.k.a., Transformer++.
+* [`Rotary Embedding`](fla/modules/rotary): rotary positional embeddings as adopted by the Llama architecture, a.k.a., Transformer++.
 * [`Norm Layers`](fla/modules/norm/layernorm.py):
   * `RMSNorm`, `LayerNorm` and `GroupNorm`
   * `RMSNormLinear`, `LayerNormLinear` and `GroupNormLinear` to reduce memory usage of intermediate tensors for improved memory efficiency.
 * [`Norm Layers with Gating`](fla/modules/norm/fused_norm_gate.py): combine norm layers with element-wise sigmoid or swish gating, as used by RetNet/GLA.
-* [`Cross Entropy`](fla/modules/fused_cross_entropy.py): faster Triton implementation of cross entropy loss.
-* [`Linear Cross Entropy`](fla/modules/fused_linear_cross_entropy.py): fused linear layer and cross entropy loss to avoid the materialization of large logits tensors. Also refer to implementations by [mgmalek](https://github.com/mgmalek/efficient_cross_entropy) and [Liger-Kernel](https://github.com/linkedin/Liger-Kernel/blob/main/src/liger_kernel/ops/fused_linear_cross_entropy.py).
-* [`Linear KL Divergence`](fla/modules/fused_kl_div.py): fused linear layer and KL divergence loss in a similar vein as CE loss.
+* [`Cross Entropy`](fla/modules/fused_cross_entropy): faster Triton implementation of cross entropy loss.
+* [`Linear Cross Entropy`](fla/modules/fused_linear_cross_entropy): fused linear layer and cross entropy loss to avoid the materialization of large logits tensors. Also refer to implementations by [mgmalek](https://github.com/mgmalek/efficient_cross_entropy) and [Liger-Kernel](https://github.com/linkedin/Liger-Kernel/blob/main/src/liger_kernel/ops/fused_linear_cross_entropy.py).
+* [`Linear KL Divergence`](fla/modules/fused_kl_div): fused linear layer and KL divergence loss in a similar vein as CE loss.
 
 > [!IMPORTANT]
 > You can set `fuse_linear_cross_entropy` in the model configuration to enable or disable the fused linear cross entropy loss.

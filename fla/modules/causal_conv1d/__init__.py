@@ -5,6 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+from fla.backends import GluonBackend, TritonAscendBackend
 from fla.modules.causal_conv1d.ops import (
     CausalConv1dFunction,
     ShortConvolution,
@@ -24,3 +25,10 @@ __all__ = [
     'causal_conv1d_update',
     'causal_conv1d_update_states',
 ]
+
+
+if TritonAscendBackend.is_available():
+    from fla.modules.causal_conv1d.backends import triton_ascend  # noqa: F401
+
+if GluonBackend.is_available():
+    from fla.modules.causal_conv1d.backends import gluon  # noqa: F401

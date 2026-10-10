@@ -6,6 +6,10 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 from fla.backends import TritonAscendBackend
+from fla.modules.fused_kl_div.ops import FusedKLDivLoss, fused_kl_div_loss
+
+__all__ = ['FusedKLDivLoss', 'fused_kl_div_loss']
+
 
 if TritonAscendBackend.is_available():
-    from fla.ops.common.backends.triton_ascend import chunk_o  # noqa: F401
+    from fla.modules.fused_kl_div import triton_ascend  # noqa: F401

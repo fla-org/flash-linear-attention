@@ -11,17 +11,19 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.backends import TritonAscendBackend, register
+from fla.modules.grpo.ops import fused_grpo_loss
 from fla.ops.utils.op import exp, log
 from fla.utils import input_guard
 from fla.utils.ascend_ub_manager import ASCEND_MAX_GRID_DIM, compute_vocab_block_size, iter_axis_launch_chunks
 
-# GRPO: use conservative multiplier covering both fwd softmax and bwd grad paths.
+# conservative multiplier covers both GRPO forward softmax and backward gradients.
 _GRPO_MEM_MULT = 8.0
 STATIC_WARPS = 2
 
 
 def _npu_vocab_block_size(vocab_size: int, num_rows: int) -> int:
-    return compute_vocab_block_size(vocab_size, num_rows, _GRPO_MEM_MULT)
+    return compute_vocab_block_size(vocab_size=vocab_size, num_rows=num_rows, memory_multiplier=_GRPO_MEM_MULT)
 
 
 @triton.jit
@@ -163,7 +165,7 @@ class GrpoLossNPU(torch.autograd.Function):
         L = L_ADD_1 - 1
         M = B * L
         input_ids_start_index = input_ids.size(1) - L
-        block_size = _npu_vocab_block_size(N, M)
+        block_size = _npu_vocab_block_size(vocab_size=N, num_rows=M)
 
         if not save_kl:
             loss = torch.empty(B, L, device=logits.device, dtype=torch.float32)
@@ -177,7 +179,7 @@ class GrpoLossNPU(torch.autograd.Function):
         else:
             loss[:B].masked_fill_(completion_mask.logical_not(), 0.0)
 
-        for row_off, row_len in iter_axis_launch_chunks(M, 1, max_grid=ASCEND_MAX_GRID_DIM):
+        for row_off, row_len in iter_axis_launch_chunks(axis_size=M, other_grid_product=1, max_grid=ASCEND_MAX_GRID_DIM):
             grpo_fwd_kernel[(row_len,)](
                 logits_ptr=logits,
                 ref_logp_ptr=ref_logp,
@@ -218,7 +220,7 @@ class GrpoLossNPU(torch.autograd.Function):
 
         dlogits = logits if inplace else torch.empty_like(logits)
 
-        for row_off, row_len in iter_axis_launch_chunks(M, 1, max_grid=ASCEND_MAX_GRID_DIM):
+        for row_off, row_len in iter_axis_launch_chunks(axis_size=M, other_grid_product=1, max_grid=ASCEND_MAX_GRID_DIM):
             grpo_bwd_kernel[(row_len,)](
                 dloss_ptr=dloss,
                 dlogits_ptr=dlogits,
@@ -232,8 +234,8 @@ class GrpoLossNPU(torch.autograd.Function):
                 B=B,
                 N=N,
                 L=L,
-                BLOCK_SIZE=block_size,
                 start_idx=input_ids_start_index,
+                BLOCK_SIZE=block_size,
                 ROW_OFFSET=row_off,
                 num_warps=STATIC_WARPS,
             )
@@ -241,6 +243,7 @@ class GrpoLossNPU(torch.autograd.Function):
         return dlogits.view(*ctx.input_shape), None, None, None, None, None, None, None
 
 
+@register(fused_grpo_loss, backend=TritonAscendBackend)
 def fused_grpo_loss_npu(
     logits,
     ref_logp,
@@ -250,17 +253,8 @@ def fused_grpo_loss_npu(
     completion_mask=None,
     save_kl=False,
     inplace=False,
-) -> torch.Tensor:
-    out = GrpoLossNPU.apply(
-        logits,
-        ref_logp,
-        input_ids,
-        advantages,
-        beta,
-        completion_mask,
-        save_kl,
-        inplace,
-    )
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    out = GrpoLossNPU.apply(logits, ref_logp, input_ids, advantages, beta, completion_mask, save_kl, inplace)
     if not save_kl:
         return out
     return out.chunk(2, axis=0)

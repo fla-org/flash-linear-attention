@@ -24,6 +24,7 @@ on:
 jobs:
   changes:
     name: Detect NPU-related changes
+    if: github.event.action != 'edited' || github.event.changes.title != null
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -160,6 +161,7 @@ jobs:
             tests/benchmarks \
             tests/modules \
             tests/ops/test_backends.py \
+            tests/test_dispatch.py \
             tests/test_public_api.py \
             tests/test_dependency_finder.py \
             tests/ops/utils \

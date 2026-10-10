@@ -11,14 +11,14 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
-from fla.modules.backends import dispatch
+from fla.backends import dispatch
 from fla.ops.utils.op import exp, log
 from fla.utils import IS_AMD, input_guard
 
-# The hard limit of TRITON_MAX_TENSOR_NUMEL is 1048576
+# the hard limit of TRITON_MAX_TENSOR_NUMEL is 1048576
 # https://github.com/triton-lang/triton/blob/ba42a5c68fd0505f8c42f4202d53be0f8d9a5fe0/python/triton/language/core.py#L19
-# However, setting limit as 65536 as in LayerNorm tutorial is faster because of less register spilling
-# The optimal maximum block size depends on your hardware, your kernel, and your dtype
+# however, setting limit as 65536 as in LayerNorm tutorial is faster because of less register spilling
+# the optimal maximum block size depends on your hardware, your kernel, and your dtype
 MAX_FUSED_SIZE = 65536 // 2
 STATIC_WARPS = 32 if not IS_AMD else 16
 
@@ -42,22 +42,19 @@ def kl_div_kernel(
     logits += i_n * s_logits
     target_logits += i_n * s_logits
 
-    # m is the max value. use the notation from the paper
+    # running maxima and exponential sums for student and teacher logits.
     sm = float('-inf')
     tm = float('-inf')
-    # d is the sum. use the notation from the paper
     sd, td = 0.0, 0.0
 
     NV = tl.cdiv(V, BV)
     for iv in range(0, NV):
         o_x = iv * BV + tl.arange(0, BV)
-        # for student
         b_sl = tl.load(logits + o_x, mask=o_x < V, other=float('-inf'))
         b_sm = tl.max(b_sl)
         m_new = tl.maximum(sm, b_sm)
         sd = sd * exp(sm - m_new) + tl.sum(exp(b_sl - m_new))
         sm = m_new
-        # for teacher
         b_tl = tl.load(target_logits + o_x, mask=o_x < V, other=float('-inf'))
         b_tm = tl.max(b_tl)
         m_new = tl.maximum(tm, b_tm)
@@ -89,32 +86,11 @@ def kl_div_kernel(
 
 
 @triton.jit
-def elementwise_mul_kernel(
-    x,
-    g,
-    N: tl.constexpr,
-    B: tl.constexpr,
-):
-    """
-    This function multiplies each element of the tensor pointed by x with the value pointed by g.
-    The multiplication is performed in-place on the tensor pointed by x.
+def elementwise_mul_kernel(x, g, N: tl.constexpr, B: tl.constexpr):
 
-    Parameters:
-    x:
-        Pointer to the input tensor.
-    g:
-        Pointer to the gradient output value.
-    N (int):
-        The number of columns in the input tensor.
-    B (int):
-        The block size for Triton operations.
-    """
-
-    # Get the program ID and convert it to int64 to avoid overflow
     i_x = tl.program_id(0).to(tl.int64)
     o_x = i_x * B + tl.arange(0, B)
 
-    # Load the gradient output value
     b_g = tl.load(g)
     if b_g == 1.0:
         return
@@ -122,7 +98,7 @@ def elementwise_mul_kernel(
     tl.store(x + o_x, b_x * b_g, mask=o_x < N)
 
 
-@dispatch('modules')
+@dispatch
 def fused_kl_div_fwd(
     x: torch.Tensor,
     target_x: torch.Tensor,
@@ -152,7 +128,6 @@ def fused_kl_div_fwd(
 
     dx = torch.zeros_like(x, device=device) if use_dx else None
     dw = torch.zeros_like(weight, device=device, dtype=grad_dtype) if use_dw else None
-    # we use fp32 for loss accumulator
     loss = torch.zeros(N, dtype=torch.float32, device=device)
 
     for ic in range(NC):
@@ -160,14 +135,12 @@ def fused_kl_div_fwd(
         # [C, N]
         c_sx = x[start:end]
         c_tx = target_x[start:end]
-        # when doing matmul, use the original precision
         # [C, V]
         c_sl = F.linear(c_sx, weight)
         c_tl = F.linear(c_tx, target_weight)
         if dw is not None and c_sx.dtype != grad_dtype:
             c_sx = c_sx.to(dtype=grad_dtype)
 
-        # unreduced loss
         c_loss = loss[start:end]
 
         # Here we calculate the gradient of c_sx in place so we can save memory.
@@ -195,12 +168,7 @@ def fused_kl_div_fwd(
             dx[start:end] = torch.mm(c_sl, weight)
 
         if dw is not None:
-            torch.addmm(
-                input=dw,
-                mat1=c_sl.t().to(dtype=grad_dtype),
-                mat2=c_sx,
-                out=dw,
-            )
+            torch.addmm(input=dw, mat1=c_sl.t().to(dtype=grad_dtype), mat2=c_sx, out=dw)
 
     loss = loss.sum()
     if dw is not None:
@@ -208,26 +176,15 @@ def fused_kl_div_fwd(
     return loss, dx, dw
 
 
-@dispatch('modules')
-def fused_kl_div_bwd(
-    do: torch.Tensor,
-    dx: torch.Tensor | None,
-    dw: torch.Tensor | None,
-):
-    # We use a Triton kernel instead of a PyTorch operation because modifying inputs in-place
-    # for gradient storage and backward multiple times causes anomalies with PyTorch but not with Triton.
+@dispatch
+def fused_kl_div_bwd(do: torch.Tensor, dx: torch.Tensor | None, dw: torch.Tensor | None):
+    # in-place gradient storage across repeated backward calls causes PyTorch anomalies; use Triton.
     for grad in (dx, dw):
         if grad is None:
             continue
         N, H = grad.shape
         B = min(MAX_FUSED_SIZE, triton.next_power_of_2(H))
-        elementwise_mul_kernel[(triton.cdiv(N * H, B),)](
-            x=grad,
-            g=do,
-            N=N*H,
-            B=B,
-            num_warps=STATIC_WARPS,
-        )
+        elementwise_mul_kernel[(triton.cdiv(N * H, B),)](x=grad, g=do, N=N*H, B=B, num_warps=STATIC_WARPS,)
 
     return dx, dw
 
@@ -277,23 +234,25 @@ def fused_kl_div_loss(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Args:
-        x (`torch.Tensor`):
+        x (torch.Tensor):
             Tensor of shape `[batch_size * seq_len, hidden_size]`.
-        target_x (`torch.Tensor`):
+        target_x (torch.Tensor):
             Frozen teacher input tensor of shape `[batch_size * seq_len, hidden_size]`.
             Must not require gradients.
-        weight (`torch.Tensor`):
+        weight (torch.Tensor):
             Tensor of shape `[vocab_size, hidden_size]`.
-        target_weight (`torch.Tensor`):
+        target_weight (torch.Tensor):
             Frozen teacher weight tensor of shape `[vocab_size, hidden_size]`.
             Must not require gradients.
-        reduction (`str`):
+        reduction (str, Optional):
             Specifies the reduction to apply to the output: 'batchmean'. Default: 'batchmean'.
-        accumulate_grad_in_fp32 (`bool`):
-            Whether to accumulate the student weight gradient in fp32 before casting it back
-            to `weight.dtype`. Default: `True`.
+        accumulate_grad_in_fp32 (bool, Optional):
+            Whether to accumulate the student weight gradient in fp32 before casting it back to `weight.dtype`.
+            Default: `True`.
+
     Returns:
-        loss
+        loss (torch.Tensor):
+            Scalar KL divergence loss.
     """
     if target_x.requires_grad or target_weight.requires_grad:
         raise RuntimeError(
@@ -314,21 +273,18 @@ def fused_kl_div_loss(
 
 class FusedKLDivLoss(nn.Module):
 
-    def __init__(
-        self,
-        reduction: str = 'batchmean',
-        accumulate_grad_in_fp32: bool = True,
-    ):
+    def __init__(self, reduction: str = 'batchmean', accumulate_grad_in_fp32: bool = True):
         """
         Args:
-            reduction (`str`):
+            reduction (str, Optional):
                 Specifies the reduction to apply to the output: 'batchmean'. Default: 'batchmean'.
-            accumulate_grad_in_fp32 (`bool`):
-                Whether to accumulate the student weight gradient in fp32 before casting it back
-                to `weight.dtype`. Default: `True`.
+            accumulate_grad_in_fp32 (bool, Optional):
+                Whether to accumulate the student weight gradient in fp32 before casting it back to `weight.dtype`.
+                Default: `True`.
+
         Note:
-            FusedKLDivLoss only computes gradients for `x` and `weight`; `target_x` and
-            `target_weight` are treated as frozen teacher tensors and must not require gradients.
+            FusedKLDivLoss only computes gradients for `x` and `weight`;
+            `target_x` and `target_weight` are treated as frozen teacher tensors and must not require gradients.
         """
         super().__init__()
 
@@ -337,27 +293,23 @@ class FusedKLDivLoss(nn.Module):
         self.reduction = reduction
         self.accumulate_grad_in_fp32 = accumulate_grad_in_fp32
 
-    def forward(
-        self,
-        x: torch.Tensor,
-        target_x: torch.Tensor,
-        weight: torch.Tensor,
-        target_weight: torch.Tensor,
-    ):
+    def forward(self, x: torch.Tensor, target_x: torch.Tensor, weight: torch.Tensor, target_weight: torch.Tensor):
         """
         Args:
-            x (`torch.Tensor`):
+            x (torch.Tensor):
                 Tensor of shape `[batch_size * seq_len, hidden_size]`.
-            target_x (`torch.Tensor`):
+            target_x (torch.Tensor):
                 Frozen teacher input tensor of shape `[batch_size * seq_len, hidden_size]`.
                 Must not require gradients.
-            weight (`torch.Tensor`):
+            weight (torch.Tensor):
                 Tensor of shape `[vocab_size, hidden_size]`.
-            target_weight (`torch.Tensor`):
+            target_weight (torch.Tensor):
                 Frozen teacher weight tensor of shape `[vocab_size, hidden_size]`.
                 Must not require gradients.
+
         Returns:
-            loss
+            loss (torch.Tensor):
+                Scalar KL divergence loss.
         """
         loss = fused_kl_div_loss(
             x=x,

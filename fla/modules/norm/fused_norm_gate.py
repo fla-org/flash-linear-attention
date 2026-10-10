@@ -274,8 +274,7 @@ def layer_norm_gated_bwd_kernel(
         elif ACTIVATION == "sigmoid":
             b_gate = b_sigmoid_g
             b_dg = b_dy * b_y * b_sigmoid_g * (1 - b_sigmoid_g)
-        # b_dg needs the pre-gate b_y, but the recomputed output must match what the
-        # forward stored, i.e. the gated value the caller fed to its linear layer.
+        # b_dg needs pre-gate b_y; the recomputed output must include the gate to match the caller's linear input.
         if RECOMPUTE_OUTPUT:
             p_y = y + o_t[:, None] * D + o_d[None, :]
             tl.store(p_y, (b_y * b_gate).to(p_y.dtype.element_ty), mask=m_x)
@@ -402,8 +401,7 @@ def layer_norm_gated_bwd_kernel_row(
         elif ACTIVATION == "sigmoid":
             b_gate = b_sigmoid_g
             b_dg = b_dy * b_y * b_sigmoid_g * (1 - b_sigmoid_g)
-        # b_dg needs the pre-gate b_y, but the recomputed output must match what the
-        # forward stored, i.e. the gated value the caller fed to its linear layer.
+        # b_dg needs pre-gate b_y; the recomputed output must include the gate to match the caller's linear input.
         if RECOMPUTE_OUTPUT:
             tl.store(y + o_d, b_y * b_gate, mask=mask)
         b_dy = b_dy * b_gate
@@ -446,7 +444,7 @@ def layer_norm_gated_bwd_kernel_row(
         tl.store(db + i_s * D + o_d, b_db, mask=mask)
 
 
-@dispatch('modules.norm.fused_norm_gate')
+@dispatch
 def layer_norm_gated_fwd(
     x: torch.Tensor,
     g: torch.Tensor,
@@ -527,7 +525,7 @@ def layer_norm_gated_fwd(
     return y, mean, rstd, residual_out if residual_out is not None else x
 
 
-@dispatch('modules.norm.fused_norm_gate')
+@dispatch
 def layer_norm_gated_bwd(
     dy: torch.Tensor,
     x: torch.Tensor,

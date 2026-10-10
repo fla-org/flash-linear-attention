@@ -11,6 +11,8 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.backends import TritonAscendBackend, register
+from fla.modules.norm.l2norm import l2norm_bwd, l2norm_fwd
 from fla.utils.ascend_ub_manager import (
     ASCEND_MAX_GRID_DIM,
     compute_row_tile_block_size,
@@ -18,16 +20,16 @@ from fla.utils.ascend_ub_manager import (
     iter_axis_launch_chunks,
 )
 
-# Peak live fp32 tiles relative to [BT, BD].
-# Forward keeps ~b_x/b_y; backward keeps b_y/b_dy/b_dx plus reduction temps.
-# Multipliers are calibrated so small-D shapes can use large BT without UB overflow
-# under Ascend multi-buffering (bwd BT=128 @ BD=128 overflows; BT=64 is safe).
+# peak live fp32 tiles relative to [BT, BD].
+# forward keeps ~b_x/b_y; backward keeps b_y/b_dy/b_dx plus reduction temps.
+# calibrated multipliers avoid UB overflow under Ascend multi-buffering;
+# backward overflows at BT=128, BD=128, while BT=64 is safe.
 _FWD_MEM_MULT = 2.0
 _BWD_MEM_MULT = 4.0
 _UB_SAFETY_MARGIN = 0.85
-# Legacy byte cap when UB capacity cannot be detected (65536 // fp32).
+# legacy byte cap when UB capacity cannot be detected (65536 // fp32).
 _FALLBACK_MAX_BD = 65536 // 4
-# Cap row tile to keep compile variants small and match the CUDA BT list.
+# cap row tile to keep compile variants small and match the CUDA BT list.
 _MAX_BT = 128
 
 
@@ -46,7 +48,7 @@ def _get_l2norm_tiles(D: int, is_forward: bool) -> tuple[int, int]:
             f"L2Norm feature dim {D} exceeds UB-safe block size {BD}. "
             "Column-tiled kernels are not yet implemented for this size."
         )
-    # Large synthetic row dim so BT is limited by UB, not by a host-side T guess.
+    # large synthetic row dim so BT is limited by UB, not by a host-side T guess.
     BT = compute_row_tile_block_size(
         row_dim=1 << 20,
         fixed_dim=BD,
@@ -119,6 +121,7 @@ def _launch_l2norm_bwd_kernel(
         l2norm_bwd_kernel[(nt_len,)](y=y, rstd=rstd, dy=dy, dx=dx, T=T, T_OFFSET=nt_off, D=D, BD=BD, BT=BT)
 
 
+@register(l2norm_fwd, backend=TritonAscendBackend)
 def l2norm_fwd_npu(x: torch.Tensor, eps: float = 1e-6, output_dtype: torch.dtype | None = None):
     x_shape_og = x.shape
     x = x.view(-1, x.shape[-1])
@@ -135,7 +138,10 @@ def l2norm_fwd_npu(x: torch.Tensor, eps: float = 1e-6, output_dtype: torch.dtype
     return y.view(x_shape_og), rstd.view(x_shape_og[:-1])
 
 
-def l2norm_bwd_npu(y: torch.Tensor, rstd: torch.Tensor, dy: torch.Tensor):
+@register(l2norm_bwd, backend=TritonAscendBackend)
+def l2norm_bwd_npu(y: torch.Tensor, rstd: torch.Tensor, dy: torch.Tensor, eps: float = 1e-6):
+    # epsilon is already included in the saved inverse norms.
+    del eps
     y_shape_og = y.shape
     y = y.view(-1, dy.shape[-1])
     dy = dy.view(-1, dy.shape[-1])

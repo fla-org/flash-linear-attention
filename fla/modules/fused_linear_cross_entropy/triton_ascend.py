@@ -11,8 +11,15 @@ import torch
 import torch.nn.functional as F
 import triton
 import triton.language as tl
+from torch.distributed import ProcessGroup
 from triton.language.math import tanh
 
+from fla.backends import TritonAscendBackend, register
+from fla.modules.fused_linear_cross_entropy.ops import (
+    fused_linear_cross_entropy_bwd,
+    fused_linear_cross_entropy_fwd,
+    logsumexp_fwd,
+)
 from fla.ops.utils.op import exp, log
 from fla.utils.ascend_ub_manager import (
     ASCEND_MAX_GRID_DIM,
@@ -21,16 +28,14 @@ from fla.utils.ascend_ub_manager import (
     iter_axis_launch_chunks,
 )
 
-# Fused linear CE: logsumexp forward vs gradient kernels along vocab.
+# fused linear CE: logsumexp forward vs gradient kernels along vocab.
 _LCE_FWD_MEM_MULT = 8.0
 _LCE_BWD_MEM_MULT = 12.0
 _ELEMENTWISE_MEM_MULT = 2.5
 STATIC_WARPS = 2
 
 
-@triton.heuristics({
-    'HAS_SCALE': lambda args: args['scale'] is not None,
-})
+@triton.heuristics({'HAS_SCALE': lambda args: args['scale'] is not None})
 @triton.jit
 def logsumexp_fwd_kernel(
     x,
@@ -155,12 +160,7 @@ def cross_entropy_kernel(
 
 
 @triton.jit
-def elementwise_mul_kernel(
-    x,
-    g,
-    N: tl.constexpr,
-    B: tl.constexpr,
-):
+def elementwise_mul_kernel(x, g, N: tl.constexpr, B: tl.constexpr):
     i_x = tl.program_id(0).to(tl.int64)
     o_x = i_x * B + tl.arange(0, B)
 
@@ -176,12 +176,8 @@ def _npu_vocab_block_size(vocab_size: int, num_rows: int, is_backward: bool = Tr
     return compute_vocab_block_size(vocab_size=vocab_size, num_rows=num_rows, memory_multiplier=memory_multiplier)
 
 
-def logsumexp_fwd_npu(
-    x,
-    scale: float | None = None,
-    softcapping: float | None = None,
-    dtype: torch.dtype | None = None,
-):
+@register(logsumexp_fwd, backend=TritonAscendBackend)
+def logsumexp_fwd_npu(x, scale: float | None = None, softcapping: float | None = None, dtype: torch.dtype | None = None):
     shape = x.shape
     x = x.view(-1, shape[-1])
     N, D = x.shape
@@ -207,21 +203,25 @@ def logsumexp_fwd_npu(
     return z
 
 
-def fused_linear_cross_entropy_forward_npu(
+@register(fused_linear_cross_entropy_fwd, backend=TritonAscendBackend)
+def fused_linear_cross_entropy_fwd_npu(
     x: torch.Tensor,
     target: torch.LongTensor,
     weight: torch.Tensor,
-    bias: torch.Tensor = None,
+    bias: torch.Tensor | None = None,
     ignore_index: int = -100,
     label_smoothing: float = 0.0,
     logit_scale: float = 1.0,
-    logit_softcapping: float = None,
+    logit_softcapping: float | None = None,
     num_chunks: int = 8,
     reduction: str = "mean",
     use_l2warp: bool = False,
     l2_penalty_factor: float = 1e-4,
     accumulate_grad_in_fp32: bool = True,
-):
+    process_group: ProcessGroup | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    if process_group is not None and torch.distributed.get_world_size(process_group) > 1:
+        raise NotImplementedError("Vocabulary-parallel fused linear cross entropy is not supported by the Ascend backend")
     device = x.device
     N, H, V = *x.shape, weight.shape[0]
     BV = _npu_vocab_block_size(vocab_size=V, num_rows=N)
@@ -279,12 +279,7 @@ def fused_linear_cross_entropy_forward_npu(
             g_logits_l2.scatter_(-1, c_ids, penalty_grad)
 
             if weight is not None:
-                torch.addmm(
-                    input=dw,
-                    mat1=g_logits_l2.t().to(dtype=grad_dtype),
-                    mat2=c_x,
-                    out=dw,
-                )
+                torch.addmm(input=dw, mat1=g_logits_l2.t().to(dtype=grad_dtype), mat2=c_x, out=dw)
             if bias is not None:
                 torch.add(input=db, other=g_logits_l2.sum(0, dtype=bias_grad_dtype), out=db)
             dx_l2_contribution = torch.mm(g_logits_l2, weight)
@@ -310,42 +305,25 @@ def fused_linear_cross_entropy_forward_npu(
     return loss, dx, dw, db
 
 
-def fused_linear_cross_entropy_backward_npu(
+@register(fused_linear_cross_entropy_bwd, backend=TritonAscendBackend)
+def fused_linear_cross_entropy_bwd_npu(
     do: torch.Tensor,
     dx: torch.Tensor,
     dw: torch.Tensor,
-    db: torch.Tensor,
-):
+    db: torch.Tensor | None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     N, H = dx.shape
     B = compute_elementwise_block_size(n_elements=N * H, memory_multiplier=_ELEMENTWISE_MEM_MULT)
 
-    elementwise_mul_kernel[(triton.cdiv(N * H, B),)](
-        x=dx,
-        g=do,
-        N=N*H,
-        B=B,
-        num_warps=STATIC_WARPS,
-    )
+    elementwise_mul_kernel[(triton.cdiv(N * H, B),)](x=dx, g=do, N=N*H, B=B, num_warps=STATIC_WARPS)
 
     if dw is not None:
         V, H = dw.shape
         B = compute_elementwise_block_size(n_elements=V * H, memory_multiplier=_ELEMENTWISE_MEM_MULT)
-        elementwise_mul_kernel[(triton.cdiv(V * H, B),)](
-            x=dw,
-            g=do,
-            N=V*H,
-            B=B,
-            num_warps=STATIC_WARPS,
-        )
+        elementwise_mul_kernel[(triton.cdiv(V * H, B),)](x=dw, g=do, N=V*H, B=B, num_warps=STATIC_WARPS)
 
     if db is not None:
         V = db.shape[0]
         B = compute_elementwise_block_size(n_elements=V, memory_multiplier=_ELEMENTWISE_MEM_MULT)
-        elementwise_mul_kernel[(triton.cdiv(V, B),)](
-            x=db,
-            g=do,
-            N=V,
-            B=B,
-            num_warps=STATIC_WARPS,
-        )
+        elementwise_mul_kernel[(triton.cdiv(V, B),)](x=db, g=do, N=V, B=B, num_warps=STATIC_WARPS)
     return dx, dw, db
