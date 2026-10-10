@@ -11,28 +11,11 @@ import triton
 import triton.language as tl
 from einops import rearrange, repeat
 
-from fla.modules.backends import dispatch
+from fla.backends import dispatch
 from fla.ops.utils import prepare_chunk_indices
 from fla.utils import IS_AMD, autotune_cache_kwargs, get_multiprocessor_count, input_guard
 
 NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if IS_AMD else [2, 4, 8, 16, 32]
-
-
-def rotate_half(x, interleaved=False):
-    if not interleaved:
-        x1, x2 = x.chunk(2, dim=-1)
-        return torch.cat((-x2, x1), dim=-1)
-    else:
-        x1, x2 = x[..., ::2], x[..., 1::2]
-        return rearrange(torch.stack((-x2, x1), dim=-1), '... d two -> ... (d two)', two=2)
-
-
-def rotary_embedding_ref(x, cos, sin, interleaved=False):
-    ro_dim = cos.shape[-1] * 2
-    assert ro_dim <= x.shape[-1]
-    cos = repeat(cos, '... d -> ... 1 (2 d)' if not interleaved else '... d -> ... 1 (d 2)')
-    sin = repeat(sin, '... d -> ... 1 (2 d)' if not interleaved else '... d -> ... 1 (d 2)')
-    return torch.cat([x[..., :ro_dim] * cos + rotate_half(x[..., :ro_dim], interleaved) * sin, x[..., ro_dim:]], -1)
 
 
 @triton.autotune(
@@ -105,7 +88,6 @@ def rotary_embedding_kernel(
             b_sin = -b_sin
         b_o0 = b_x0 * b_cos - b_x1 * b_sin
         b_o1 = b_x0 * b_sin + b_x1 * b_cos
-        # write back result
         p_y = y + (o_t[:, None] * H*D + o_r[None, :])
         tl.store(p_y, b_o0, mask=mask)
         tl.store(p_y + R, b_o1, mask=mask)
@@ -117,7 +99,8 @@ def rotary_embedding_kernel(
         # Then we do the calculation and use tl.where to pick put the right outputs for the even
         # and for the odd indices.
         o_d = tl.arange(0, BD)
-        o_d_swap = o_d + ((o_d + 1) % 2) * 2 - 1  # 1, 0, 3, 2, 5, 4, ...
+        # pair adjacent channels: 1, 0, 3, 2, 5, 4, ...
+        o_d_swap = o_d + ((o_d + 1) % 2) * 2 - 1
         o_d_repeat = tl.arange(0, BD) // 2
         p_x0 = x + o_t[:, None] * H*D + o_d[None, :]
         p_x1 = x + o_t[:, None] * H*D + o_d_swap[None, :]
@@ -138,7 +121,27 @@ def rotary_embedding_kernel(
         tl.store(p_y, b_y, mask=mask)
 
 
-@dispatch('modules')
+def rotate_half(x, interleaved=False):
+    if not interleaved:
+        x1, x2 = x.chunk(2, dim=-1)
+        return torch.cat((-x2, x1), dim=-1)
+    else:
+        x1, x2 = x[..., ::2], x[..., 1::2]
+        return rearrange(torch.stack((-x2, x1), dim=-1), '... d two -> ... (d two)', two=2)
+
+
+def rotary_embedding_ref(x, cos, sin, interleaved=False):
+    ro_dim = cos.shape[-1] * 2
+    assert ro_dim <= x.shape[-1]
+    cos = repeat(cos, '... d -> ... 1 (2 d)' if not interleaved else '... d -> ... 1 (d 2)')
+    sin = repeat(sin, '... d -> ... 1 (2 d)' if not interleaved else '... d -> ... 1 (d 2)')
+    return torch.cat(
+        [x[..., :ro_dim] * cos + rotate_half(x=x[..., :ro_dim], interleaved=interleaved) * sin, x[..., ro_dim:]],
+        -1,
+    )
+
+
+@dispatch
 def rotary_embedding_fwdbwd(
     x: torch.Tensor,
     cos: torch.Tensor,
@@ -150,16 +153,31 @@ def rotary_embedding_fwdbwd(
     conjugate: bool = False,
     chunk_indices: torch.LongTensor | None = None,
 ) -> torch.Tensor:
-    """
+    """Apply rotary embeddings or their conjugate for the backward pass.
+
     Args:
-        x: [B, T, H, D].
-        cos: [TR, R / 2]
-        sin: [TR, R / 2]
-        seqlen_offsets: integer or integer tensor of size [N]
-        cu_seqlens: [N + 1,] or None
+        x (torch.Tensor):
+            Input of shape `[B, T, H, D]`.
+        cos (torch.Tensor):
+            Cosine cache of shape `[TR, R // 2]`.
+        sin (torch.Tensor):
+            Sine cache with the same shape and dtype as `cos`.
+        seqlen_offsets (int | torch.Tensor, Optional):
+            Shared position offset or per-sequence offsets of shape `[N]`. Default: 0.
+        cu_seqlens (torch.Tensor, Optional):
+            Cumulative sequence lengths of shape `[N + 1]` for packed inputs. Default: `None`.
+        interleaved (bool, Optional):
+            Whether to rotate adjacent pairs instead of matching the two halves of each head. Default: `False`.
+        inplace (bool, Optional):
+            Whether to overwrite the input. Default: `False`.
+        conjugate (bool, Optional):
+            Whether to negate the sine cache for the backward pass. Default: `False`.
+        chunk_indices (torch.LongTensor, Optional):
+            Precomputed sequence chunk indices. Default: `None`.
 
     Returns:
-        y: [B, T, H, D]
+        y (torch.Tensor):
+            Rotated input of shape `[B, T, H, D]`.
     """
     is_varlen = cu_seqlens is not None
 
@@ -200,15 +218,15 @@ def rotary_embedding_fwdbwd(
 
     grid = (NT, B, H)
     rotary_embedding_kernel[grid](
-        x,
-        cos,
-        sin,
-        y,
-        cu_seqlens,
-        chunk_indices,
-        seqlen_offsets,
-        B=B,
+        x=x,
+        cos=cos,
+        sin=sin,
+        y=y,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        seq_offsets=seqlen_offsets,
         T=T,
+        B=B,
         H=H,
         D=D,
         R=R,
@@ -239,9 +257,9 @@ class RotaryEmbeddingFunction(torch.autograd.Function):
         chunk_indices: torch.LongTensor | None = None,
     ):
         y = rotary_embedding_fwdbwd(
-            x,
-            cos,
-            sin,
+            x=x,
+            cos=cos,
+            sin=sin,
             seqlen_offsets=seqlen_offsets,
             cu_seqlens=cu_seqlens,
             interleaved=interleaved,
@@ -249,7 +267,7 @@ class RotaryEmbeddingFunction(torch.autograd.Function):
             chunk_indices=chunk_indices,
         )
         if isinstance(seqlen_offsets, int):
-            # Can't save int with save_for_backward
+            # can't save int with save_for_backward
             ctx.save_for_backward(cos, sin, cu_seqlens)
             ctx.seqlen_offsets = seqlen_offsets
         else:
@@ -268,14 +286,13 @@ class RotaryEmbeddingFunction(torch.autograd.Function):
             cos, sin, cu_seqlens, seqlen_offsets = ctx.saved_tensors
         else:
             cos, sin, cu_seqlens = ctx.saved_tensors
-        # TD [2023-09-02]: For some reason Triton (2.0.0.post1) errors with
-        # "[CUDA]: invalid device context", and cloning makes it work. Idk why. Triton 2.1.0 works.
+        # cloning avoids an invalid-device-context error in Triton 2.0.0.post1.
         if not ctx.interleaved and not ctx.inplace:
             do = do.clone()
         dx = rotary_embedding_fwdbwd(
-            do,
-            cos,
-            sin,
+            x=do,
+            cos=cos,
+            sin=sin,
             seqlen_offsets=seqlen_offsets,
             cu_seqlens=cu_seqlens,
             interleaved=ctx.interleaved,
@@ -296,49 +313,46 @@ def rotary_embedding(
     cu_seqlens: torch.Tensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
 ):
-    """
+    """Apply rotary embeddings, optionally using a different position offset for each sequence.
+
     Args:
-        x: [B, T, H, D]
-        cos, sin: [TR, R//2]
-        interleaved:
-            If True, rotate pairs of even and odd dimensions (GPT-J style) instead of 1st half and 2nd half (GPT-NeoX style).
-        inplace:
-            If True, apply rotary embedding in-place.
-        seqlen_offsets: [N,] or int.
-            Each sequence in x is shifted by this amount.
-            Most commonly used in inference when we have KV cache.
-        cu_seqlens: [N + 1,] or None
+        x (torch.Tensor):
+            Input of shape `[B, T, H, D]`.
+        cos (torch.Tensor):
+            Cosine cache of shape `[TR, R // 2]`.
+        sin (torch.Tensor):
+            Sine cache with the same shape and dtype as `cos`.
+        interleaved (bool, Optional):
+            Whether to rotate adjacent pairs instead of matching the two halves of each head. Default: `False`.
+        inplace (bool, Optional):
+            Whether to overwrite the input. Default: `False`.
+        seqlen_offsets (int | torch.Tensor, Optional):
+            Shared position offset or per-sequence offsets of shape `[N]`. Default: 0.
+        cu_seqlens (torch.Tensor, Optional):
+            Cumulative sequence lengths of shape `[N + 1]` for packed inputs. Default: `None`.
+        chunk_indices (torch.LongTensor, Optional):
+            Precomputed sequence chunk indices. Default: `None`.
 
     Returns:
-        out: [B, T, H, D]
+        torch.Tensor:
+            Rotated input with the same shape and dtype as `x`.
     """
-    return RotaryEmbeddingFunction.apply(
-        x,
-        cos,
-        sin,
-        interleaved,
-        inplace,
-        seqlen_offsets,
-        cu_seqlens,
-        chunk_indices,
-    )
+    return RotaryEmbeddingFunction.apply(x, cos, sin, interleaved, inplace, seqlen_offsets, cu_seqlens, chunk_indices)
 
 
 class RotaryEmbedding(nn.Module):
     """
     The rotary position embeddings from RoFormer_ (Su et. al).
-    A crucial insight from the method is that the query and keys are
-    transformed by rotation matrices which depend on the relative positions.
+    Queries and keys are transformed by rotation matrices that depend on their relative positions.
 
-    Other implementations are available in the Rotary Transformer repo_ and in
-    GPT-NeoX_, GPT-NeoX was an inspiration
+    Other implementations are available in the Rotary Transformer repo_ and in GPT-NeoX_, which inspired this implementation.
 
     .. _RoFormer: https://arxiv.org/abs/2104.09864
     .. _repo: https://github.com/ZhuiyiTechnology/roformer
     .. _GPT-NeoX: https://github.com/EleutherAI/gpt-neox
 
     If scale_base is not None, this implements XPos (Sun et al., https://arxiv.org/abs/2212.10554).
-    A recommended value for scale_base is 512: https://github.com/HazyResearch/flash-attention/issues/96
+    A recommended value for scale_base is 512: https://github.com/HazyResearch/flash-attention/issues/96.
     Reference: https://github.com/sunyt32/torchscale/blob/main/torchscale/component/xpos_relative_position.py
     """
 
@@ -351,18 +365,23 @@ class RotaryEmbedding(nn.Module):
         pos_idx_in_fp32: bool = True,
         device: torch.device | None = None,
     ):
-        """
-        interleaved:
-            If True, rotate pairs of even and odd dimensions (GPT-J style) instead of 1st half and 2nd half (GPT-NeoX style).
-        pos_idx_in_fp32:
-            If True, the position indices [0.0, ..., seqlen - 1] are in fp32, otherwise they might be in lower precision.
-            This option was added because previously (before 2023-07-02), when we construct
-            the position indices, we use the dtype of self.inv_freq.
-            In most cases this would be fp32, but if the model is trained in pure bf16 (not mixed precision), then
-            self.inv_freq would be bf16, and the position indices are also in bf16.
-            Because of the limited precision of bf16 (e.g. 1995.0 is rounded to 2000.0), the
-            embeddings for some positions will coincide.
-            To maintain compatibility with models previously trained in pure bf16, we add this option.
+        """Initialize rotary position tables.
+
+        Args:
+            dim (int):
+                Number of dimensions to rotate in each head.
+            base (float, Optional):
+                Base for the inverse frequencies. Default: 10000.0.
+            interleaved (bool, Optional):
+                Whether to rotate adjacent pairs (GPT-J) instead of matching the two halves (GPT-NeoX). Default: `False`.
+            scale_base (float, Optional):
+                Base for XPos scaling. Default: `None`.
+            pos_idx_in_fp32 (bool, Optional):
+                Whether to create position indices in fp32. Default: `True`.
+                Pure bf16 indices can round distinct positions to the same value (for example, 1995.0 to 2000.0).
+                Set to `False` for compatibility with models trained with bf16 position indices.
+            device (torch.device, Optional):
+                Device for the frequency buffers. Default: `None`.
         """
         super().__init__()
 
@@ -408,10 +427,7 @@ class RotaryEmbedding(nn.Module):
         return s
 
     def _compute_inv_freq(self, device=None):
-        return 1.0 / (
-            self.base
-            ** (torch.arange(0, self.dim, 2, device=device, dtype=torch.float32) / self.dim)
-        )
+        return 1.0 / (self.base ** (torch.arange(0, self.dim, 2, device=device, dtype=torch.float32) / self.dim))
 
     def _compute_scale(self, device=None):
         return (torch.arange(0, self.dim, 2, device=device, dtype=torch.float32) + 0.4 * self.dim) / (1.4 * self.dim)
@@ -471,38 +487,49 @@ class RotaryEmbedding(nn.Module):
         max_seqlen: int | None = None,
         chunk_indices: torch.LongTensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        """
-        q: [B, T, H, D]
-        k: [B, T, H, D]
-        seqlen_offset:
-            [N] or int.
-            Each sequence in x is shifted by this amount.
-            Most commonly used in inference when we have KV cache.
-        cu_seqlens: [N + 1] or None
-        max_seqlen:
-            Cache length used to initialize the rotary tables. Tensor offsets require this on the first call so cache sizing does not
-            synchronize the device.
+        """Rotate query and key tensors using cached position tables.
+
+        Args:
+            q (torch.Tensor):
+                Query tensor of shape `[B, T, H, D]`.
+            k (torch.Tensor):
+                Key tensor of shape `[B, T, H_k, D]`.
+            seqlen_offset (int | torch.Tensor, Optional):
+                Shared position offset or per-sequence offsets of shape `[N]`. Default: 0.
+            cu_seqlens (torch.Tensor, Optional):
+                Cumulative sequence lengths of shape `[N + 1]` for packed inputs. Default: `None`.
+            max_seqlen (int, Optional):
+                Cache length used to initialize the rotary tables. Default: `None`.
+                Tensor offsets require this on the first call so cache sizing does not synchronize the device.
+            chunk_indices (torch.LongTensor, Optional):
+                Precomputed sequence chunk indices. Default: `None`.
+
+        Returns:
+            tuple[torch.Tensor, torch.Tensor]:
+                Rotated query and key tensors.
         """
         if max_seqlen is not None:
             self._update_cos_sin_cache(max_seqlen, device=q.device, dtype=q.dtype)
         elif isinstance(seqlen_offset, int):
             self._update_cos_sin_cache(q.shape[1] + seqlen_offset, device=q.device, dtype=q.dtype)
         else:
-            assert self._cos_cached is not None, "Tensor offsets require an initialized cache; pass max_seqlen on the first call"
+            assert self._cos_cached is not None, (
+                "Tensor offsets require an initialized cache; pass max_seqlen on the first call"
+            )
         if self.scale is None:
             q = rotary_embedding(
-                q,
-                self._cos_cached,
-                self._sin_cached,
+                x=q,
+                cos=self._cos_cached,
+                sin=self._sin_cached,
                 interleaved=self.interleaved,
                 seqlen_offsets=seqlen_offset,
                 cu_seqlens=cu_seqlens,
                 chunk_indices=chunk_indices,
             )
             k = rotary_embedding(
-                k,
-                self._cos_cached,
-                self._sin_cached,
+                x=k,
+                cos=self._cos_cached,
+                sin=self._sin_cached,
                 interleaved=self.interleaved,
                 seqlen_offsets=seqlen_offset,
                 cu_seqlens=cu_seqlens,
@@ -511,18 +538,18 @@ class RotaryEmbedding(nn.Module):
 
         else:
             q = rotary_embedding(
-                q,
-                self._cos_cached,
-                self._sin_cached,
+                x=q,
+                cos=self._cos_cached,
+                sin=self._sin_cached,
                 interleaved=self.interleaved,
                 seqlen_offsets=seqlen_offset,
                 cu_seqlens=cu_seqlens,
                 chunk_indices=chunk_indices,
             )
             k = rotary_embedding(
-                k,
-                self._cos_k_cached,
-                self._sin_k_cached,
+                x=k,
+                cos=self._cos_k_cached,
+                sin=self._sin_k_cached,
                 interleaved=self.interleaved,
                 seqlen_offsets=seqlen_offset,
                 cu_seqlens=cu_seqlens,

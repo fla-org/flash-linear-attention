@@ -7,7 +7,7 @@
 #
 # Copyright (c) 2024, Tri Dao.
 #
-# Based on the Triton LayerNorm tutorial: https://triton-lang.org/main/getting-started/tutorials/05-layer-norm.html
+# based on the Triton LayerNorm tutorial: https://triton-lang.org/main/getting-started/tutorials/05-layer-norm.html
 # accumulate affine gradients in registers; wide dimensions can cause register spilling.
 
 import math
@@ -562,12 +562,4 @@ class RMSNormGated(nn.Module):
         )
 
 
-__all__ = [
-    'LayerNormGated',
-    'RMSNormGated',
-    'layer_norm_bwd',
-    'layer_norm_fwd',
-    'layernorm_fn',
-    'rms_norm_ref',
-    'rmsnorm_fn',
-]
+__all__ = ['LayerNormGated', 'RMSNormGated', 'layer_norm_bwd', 'layer_norm_fwd', 'layernorm_fn', 'rms_norm_ref', 'rmsnorm_fn']

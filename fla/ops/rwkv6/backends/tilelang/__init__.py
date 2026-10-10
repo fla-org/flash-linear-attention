@@ -11,22 +11,13 @@ from __future__ import annotations
 
 import torch
 
-from fla.backends import BaseBackend, register_backend
-from fla.utils import has_usable_nvcc
+from fla.backends import TileLangBackend, register
 
 
-@register_backend('rwkv6')
-class RWKV6TileLangBackend(BaseBackend):
+@register('rwkv6')
+class RWKV6TileLangBackend(TileLangBackend):
 
-    backend_type = "tilelang"
-    package_name = "tilelang"
-    env_var = "FLA_TILELANG"
     default_enable = False
-    priority = 5
-
-    @classmethod
-    def is_available(cls) -> bool:
-        return super().is_available() and has_usable_nvcc()
 
     def chunk_rwkv6_fwd_intra_verifier(
         self,

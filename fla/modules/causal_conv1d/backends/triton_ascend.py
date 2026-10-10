@@ -14,6 +14,14 @@ import triton
 import triton.language as tl
 from einops import rearrange
 
+from fla.backends import TritonAscendBackend, register
+from fla.modules.causal_conv1d.ops import (
+    causal_conv1d_bwd,
+    causal_conv1d_fwd,
+    causal_conv1d_update,
+    causal_conv1d_update_states,
+    compute_dh0_triton,
+)
 from fla.ops.utils import prepare_chunk_indices
 from fla.utils import get_multiprocessor_count, input_guard
 
@@ -119,8 +127,8 @@ def causal_conv1d_fwd_coregrid_kernel(
         yi_offset_1 = o_d[None, :]
 
         # split the constexpr flag from the runtime `i_t * BT >= W` check.
-        # triton-ascend still lowers the else if they are or-ed, and would compile
-        # `initial_state + ...` when the pointer is None.
+        # triton-ascend still lowers the else if they are or-ed,
+        # and would compile `initial_state + ...` when the pointer is None.
         if not USE_INITIAL_STATE:
             for i_w in tl.static_range(-W + 1, 1):
                 yi_offset_0 = t0 + i_w + tl.arange(0, BT)[:, None]
@@ -621,10 +629,9 @@ def causal_conv1d_fwd_kernel(
     USE_INITIAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    # ported from ant_AReaL: block_ptr (coalesced loads) + fused bias/silu/residual,
-    # with MAX_NT_PER_BLOCK T-chunks per program to shrink the grid. The host launches the
-    # NT_GRID axis in chunks (NT_GRID_OFFSET) so the grid product stays under the 65535
-    # Ascend cap. Masked scalar loads are kept only for the initial_state head edge.
+    # ported from ant_AReaL.
+    # MAX_NT_PER_BLOCK and host-side NT_GRID_OFFSET chunks keep the grid product under the 65535 Ascend cap.
+    # initial_state head edges use masked scalar loads.
     i_d, i_t_base, i_b = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_t_base = i_t_base + NT_GRID_OFFSET
 
@@ -647,8 +654,10 @@ def causal_conv1d_fwd_kernel(
         i_t_global = i_t_base * MAX_NT_PER_BLOCK + i_t_iter
         if i_t_global < NT:
             if IS_VARLEN:
-                i_n, i_t = tl.load(chunk_indices + i_t_global * 2).to(tl.int32), tl.load(chunk_indices +
-                                                                                         i_t_global * 2 + 1).to(tl.int32)
+                i_n, i_t = (
+                    tl.load(chunk_indices + i_t_global * 2).to(tl.int32),
+                    tl.load(chunk_indices + i_t_global * 2 + 1).to(tl.int32),
+                )
                 bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
                 T_local = (eos - bos).to(tl.int32)
                 p_x = x + bos * stride_x_t
@@ -679,9 +688,7 @@ def causal_conv1d_fwd_kernel(
                 o_t = t0 + tl.arange(0, BT)
                 for i_w in tl.static_range(W):
                     o_x = o_t + i_w - W + 1
-                    # explicit 2D ([None, :]) indexing throughout: triton-ascend miscompiles
-                    # the implicit 1D-vs-2D broadcast (o_d / m_d against o_x[:, None]) in
-                    # these scalar pointer loads, faulting the vector core at runtime.
+                    # explicit 2D indexing avoids a triton-ascend miscompile of implicit 1D-to-2D broadcasts in scalar loads.
                     m_x = ((o_x >= 0) & (o_x < T_local))[:, None] & m_d[None, :]
                     m_c = ((o_x + W >= 0) & (o_x < 0))[:, None] & m_d[None, :]
                     b_yi = tl.load(
@@ -689,14 +696,13 @@ def causal_conv1d_fwd_kernel(
                         mask=m_x,
                         other=0,
                     ).to(tl.float32)
-                    # guard with a pure-constexpr check: triton-ascend does not fold the
-                    # outer `not USE_INITIAL_STATE or <runtime>`, so this else branch is
-                    # lowered even when initial_state is None -- without the guard it would
-                    # dereference None at compile time (AttributeError on None.type).
+                    # a constexpr guard avoids dereferencing None when the outer mixed runtime/constexpr check is lowered.
                     if USE_INITIAL_STATE:
-                        b_yi += tl.load(initial_state + tl.cast(i_n, tl.int64) * D * W + o_d[None, :] * W + (o_x + W)
-                                        [:, None], mask=m_c,
-                                        other=0).to(tl.float32)
+                        b_yi += tl.load(
+                            initial_state + tl.cast(i_n, tl.int64) * D * W + o_d[None, :] * W + (o_x + W)[:, None],
+                            mask=m_c,
+                            other=0,
+                        ).to(tl.float32)
                     if HAS_WEIGHT:
                         b_yi *= tl.sum(b_w * (o_w == i_w), 1)[None, :]
                     b_y += b_yi
@@ -760,18 +766,8 @@ def _launch_add(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 
 
 @triton.jit
-def _silu_bwd_kernel(
-    y_ptr,
-    dy_ptr,
-    out_ptr,
-    n_elements,
-    ELEM_OFFSET: tl.constexpr,
-    BLOCK: tl.constexpr,
-):
-    # flat contiguous elementwise silu/sigmoid backward. Inputs are [B,T,D] contiguous, so
-    # the element offset IS the tensor offset -- no per-element modulo / strided gather
-    # (the old form was the #1 hotspot: 71% of fwd+bwd on PipeUtilization, dominated by
-    # 4 integer divisions per element on the vector pipe).
+def _silu_bwd_kernel(y_ptr, dy_ptr, out_ptr, n_elements, ELEM_OFFSET: tl.constexpr, BLOCK: tl.constexpr):
+    # contiguous [B, T, D] inputs let flat indexing avoid per-element divisions on the vector pipe.
     pid = tl.program_id(0)
     offs = pid * BLOCK + tl.arange(0, BLOCK) + ELEM_OFFSET
     mask = offs < n_elements
@@ -783,8 +779,7 @@ def _silu_bwd_kernel(
 
 
 def _launch_silu_bwd(y_pre: torch.Tensor, dy: torch.Tensor) -> torch.Tensor:
-    # flat indexing requires contiguous inputs; conv output (y_pre) is contiguous, dy may
-    # arrive non-contiguous from upstream -- make it contiguous (no-op copy if already so).
+    # flat indexing requires contiguous inputs; y_pre is contiguous, but upstream dy may be strided.
     if not y_pre.is_contiguous():
         y_pre = y_pre.contiguous()
     if not dy.is_contiguous():
@@ -813,16 +808,10 @@ def _use_seq_bwd(
     dht: torch.Tensor | None,
     cu_seqlens: torch.Tensor | None,
 ) -> bool:
-    return (
-        cu_seqlens is None
-        and initial_state is None
-        and dht is None
-        and dtype == torch.bfloat16
-        and T <= 16
-    )
+    return (cu_seqlens is None and initial_state is None and dht is None and dtype == torch.bfloat16 and T <= 16)
 
 
-@triton.heuristics({'HAS_WEIGHT': lambda args: args['dw'] is not None, 'HAS_BIAS': lambda args: args['db'] is not None, })
+@triton.heuristics({'HAS_WEIGHT': lambda args: args['dw'] is not None, 'HAS_BIAS': lambda args: args['db'] is not None})
 @triton.jit
 def causal_conv1d_bwd_seq_kernel(
     x,
@@ -973,19 +962,7 @@ def causal_conv1d_bwd_dx_kernel(
     )
 
 
-def _launch_bwd_dx_core(
-    dy,
-    weight,
-    dht,
-    cu_seqlens,
-    cu_seqlens_cpu,
-    B,
-    T,
-    D,
-    W,
-    BT,
-    BD=None,
-) -> torch.Tensor:
+def _launch_bwd_dx_core(dy, weight, dht, cu_seqlens, cu_seqlens_cpu, B, T, D, W, BT, BD=None) -> torch.Tensor:
     # dht needs smaller tiles because its extra branch overflows Ascend UB at the forward tile size.
     if BD is None:
         if dht is not None:
@@ -1262,8 +1239,8 @@ def compute_dh0_kernel(
         b_dh0 = tl.zeros([BD], dtype=tl.float32)
 
         if USE_FINAL_STATE:
-            # a sequence shorter than the state leaves initial_state[:, i_w] still sitting in
-            # final_state[:, i_w - seq_len], so that slot's gradient passes straight through
+            # short sequences retain initial_state[:, i_w] in final_state[:, i_w - seq_len],
+            # so that slot's gradient passes straight through.
             if i_w >= seq_len:
                 p_dht = dht + i_n * D * W + o_d * W + (i_w - seq_len)
                 b_dh0 += tl.load(p_dht, mask=m_d, other=0).to(tl.float32)
@@ -1353,10 +1330,7 @@ def causal_conv1d_states_fwd_kernel(
     tl.store(p_final, tl.trans(b_x).to(final_state.dtype.element_ty), mask=m_d[:, None] & m_w[None, :])
 
 
-@triton.heuristics({
-    'HAS_WEIGHT': lambda args: args['weight'] is not None,
-    'HAS_BIAS': lambda args: args['bias'] is not None,
-})
+@triton.heuristics({'HAS_WEIGHT': lambda args: args['weight'] is not None, 'HAS_BIAS': lambda args: args['bias'] is not None})
 @triton.jit
 def causal_conv1d_update_kernel(
     x,
@@ -1452,10 +1426,7 @@ def causal_conv1d_fwd_kernel_scalar(
     IS_VARLEN: tl.constexpr,
     CHUNK_OFFSET: tl.constexpr,
 ):
-    # scalar (masked-load) forward -- the proven triton-ascend path. Used when
-    # initial_state is present: the ant_AReaL block_ptr kernel's initial_state head-edge
-    # branch faults the Ascend vector core on this triton-ascend version, so we fall back
-    # to this simpler control flow which compiles+runs cleanly.
+    # scalar loads avoid the Ascend vector-core fault in the block-pointer kernel's initial_state head-edge branch.
     i_d, i_t, i_b = tl.program_id(0), tl.program_id(1), tl.program_id(2)
 
     if IS_VARLEN:
@@ -1523,15 +1494,10 @@ def _launch_fwd_core_scalar(
     W: int,
     BT: int,
 ) -> torch.Tensor:
-    # Scalar-kernel forward (conv only -- no fused activation/residual). Caller applies
-    # activation/residual via _postprocess_fwd. Used for the initial_state path.
-    # force conservative (small) tiles regardless of dtype: this is the correctness
-    # fallback, and the bf16 big tiles from _npu_tile_config overflow Ascend UB under the
-    # scalar masked-load + multi-buffer pattern. Small tiles always fit; perf is secondary
-    # here (initial_state is the uncommon path; the fast ant_AReaL kernel handles the rest).
+    # small tiles keep the scalar masked-load path within Ascend UB, including bf16 multi-buffering.
+    # the caller applies activation and residual via _postprocess_fwd.
     BD, BT = _npu_tile_config(T=T, BT=BT, D=D, dtype=torch.float32, initial_state=initial_state)
-    # rebuild chunk_indices for the (possibly reduced) BT: the caller built them for a
-    # different BT, and a BT/chunk_indices mismatch corrupts the varlen (n, t) lookup.
+    # rebuild chunk_indices for the reduced BT; a BT mismatch corrupts the varlen (n, t) lookup.
     if cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT, cu_seqlens_cpu=cu_seqlens_cpu)
     else:
@@ -1594,11 +1560,7 @@ def _launch_fwd_core(
     BT: int,
     activation: str | None = None,
 ) -> torch.Tensor:
-    # ported from ant_AReaL: BD=128 block_ptr + fused bias/silu/residual kernel, with
-    # MAX_NT_PER_BLOCK T-chunks per program to shrink the grid (bf16/fp16). float32 falls
-    # back to a small tile so the fused kernel still fits the 192KB Ascend UB. The NT_GRID
-    # axis is launched in chunks (NT_GRID_OFFSET) so the grid product cdiv(D,BD) x
-    # nt_grid_len x B stays under the 65535 Ascend cap.
+    # fp32 needs smaller tiles to fit Ascend UB; host-side NT_GRID_OFFSET chunks keep the grid product below 65535.
     NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
     BW = triton.next_power_of_2(W)
     if x.dtype in (torch.bfloat16, torch.float16):
@@ -1811,6 +1773,7 @@ def _can_use_coregrid(
     return bd is not None and bd >= 16
 
 
+@register(causal_conv1d_fwd, backend=TritonAscendBackend)
 @input_guard(no_guard_contiguous=['x'])
 def causal_conv1d_fwd_npu(
     x: torch.Tensor,
@@ -1823,9 +1786,10 @@ def causal_conv1d_fwd_npu(
     cu_seqlens: torch.LongTensor | None = None,
     cu_seqlens_cpu: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
-    BT: int = 64,
+    chunk_size: int = 64,
     layout_fallback: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
+    BT = chunk_size
     shape = x.shape
     # bwd reads the stashed y_linear from the pre-rearrange tensor.
     x_saved = x
@@ -1881,9 +1845,8 @@ def causal_conv1d_fwd_npu(
             activation=activation,
         )
     else:
-        # initial_state present: the ant_AReaL kernel's head-edge branch faults the Ascend
-        # vector core on this triton-ascend version, so use the scalar kernel (conv only)
-        # and apply activation/residual afterwards.
+        # the block-pointer initial_state head-edge branch faults the Ascend vector core;
+        # use scalar convolution and apply activation/residual afterwards.
         y = _launch_fwd_core_scalar(
             x=x,
             weight=weight,
@@ -1905,6 +1868,7 @@ def causal_conv1d_fwd_npu(
     return y.view(shape), final_state
 
 
+@register(causal_conv1d_bwd, backend=TritonAscendBackend)
 def causal_conv1d_bwd_npu(
     x: torch.Tensor,
     dy: torch.Tensor,
@@ -1917,9 +1881,10 @@ def causal_conv1d_bwd_npu(
     cu_seqlens: torch.Tensor | None = None,
     cu_seqlens_cpu: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
-    BT: int = 64,
+    chunk_size: int = 64,
     layout_fallback: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
+    BT = chunk_size
     shape = x.shape
     y_linear = getattr(x, '_fla_causal_conv_y_linear', None)
     if y_linear is not None:
@@ -2030,8 +1995,7 @@ def causal_conv1d_bwd_npu(
             BLOCK=block,
         )
     else:
-        # split backward: dx (big tile, ~fwd speed) + dw/db (small tile). The old combined
-        # kernel was pinned to tiny tiles by the MLIR/multi-buffer UB cliff.
+        # splitting dx from dw/db allows larger dx tiles without overflowing multi-buffer UB.
         if not dy_conv.is_contiguous():
             dy_conv = dy_conv.contiguous()
         dx = _launch_bwd_dx_core(
@@ -2083,6 +2047,7 @@ def causal_conv1d_bwd_npu(
     return dx.view(shape), dw, db, dr, dh0
 
 
+@register(compute_dh0_triton, backend=TritonAscendBackend)
 def compute_dh0_npu(
     dy: torch.Tensor,
     y: torch.Tensor | None,
@@ -2134,15 +2099,14 @@ def compute_dh0_npu(
     return dh0
 
 
+@register(causal_conv1d_update_states, backend=TritonAscendBackend)
 @input_guard(no_guard_contiguous=['x'])
 def causal_conv1d_update_states_npu(
     x: torch.Tensor,
     state_len: int,
     initial_state: torch.Tensor | None = None,
     cu_seqlens: torch.Tensor | None = None,
-    layout_fallback: bool = False,
 ) -> torch.Tensor:
-    del layout_fallback
     if cu_seqlens is not None:
         N = len(cu_seqlens) - 1
         if x.dim() == 2:
@@ -2186,6 +2150,7 @@ def causal_conv1d_update_states_npu(
     return final_state
 
 
+@register(causal_conv1d_update, backend=TritonAscendBackend)
 @input_guard(no_guard_contiguous=['x'])
 def causal_conv1d_update_npu(
     x: torch.Tensor,

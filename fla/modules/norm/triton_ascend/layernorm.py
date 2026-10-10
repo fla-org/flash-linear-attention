@@ -11,14 +11,16 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.backends import TritonAscendBackend, register
+from fla.modules.norm.layernorm import layer_norm_bwd, layer_norm_fwd
 from fla.utils import get_multiprocessor_count
 from fla.utils.ascend_ub_manager import ASCEND_MAX_GRID_DIM, compute_ub_block_size, iter_axis_launch_chunks
 
-# Peak live fp32 vectors in row-wise kernel1 (see Liger Ascend layer_norm).
+# peak live fp32 vectors in row-wise kernel1 (see Liger Ascend layer_norm).
 _FWD_MEM_MULT = 6.0
 _BWD_MEM_MULT = 8.0
 _UB_SAFETY_MARGIN = 0.85
-# Legacy byte cap when UB capacity cannot be detected (65536 // fp32).
+# legacy byte cap when UB capacity cannot be detected (65536 // fp32).
 _FALLBACK_MAX_BD = 65536 // 4
 
 
@@ -223,14 +225,15 @@ def _launch_layer_norm_fwd_kernel1(
     )
 
 
+@register(layer_norm_fwd, backend=TritonAscendBackend)
 def layer_norm_fwd_npu(
     x: torch.Tensor,
     weight: torch.Tensor,
     bias: torch.Tensor,
     eps: float = 1e-5,
-    residual: torch.Tensor = None,
-    out_dtype: torch.dtype = None,
-    residual_dtype: torch.dtype = None,
+    residual: torch.Tensor | None = None,
+    out_dtype: torch.dtype | None = None,
+    residual_dtype: torch.dtype | None = None,
     is_rms_norm: bool = False,
     num_groups: int = 1,
 ):
@@ -260,7 +263,7 @@ def layer_norm_fwd_npu(
         )
 
     # Ascend: use row-wise kernel1 (no make_block_ptr) for all feature dims.
-    # Split along rows when T exceeds the Ascend grid limit.
+    # split along rows when T exceeds the Ascend grid limit.
     for row_start, row_len in iter_axis_launch_chunks(axis_size=T, other_grid_product=1, max_grid=ASCEND_MAX_GRID_DIM):
         row_end = row_start + row_len
         _launch_layer_norm_fwd_kernel1(
@@ -281,17 +284,18 @@ def layer_norm_fwd_npu(
     return y, mean, rstd, res_out if res_out is not None else x
 
 
+@register(layer_norm_bwd, backend=TritonAscendBackend)
 def layer_norm_bwd_npu(
     dy: torch.Tensor,
     x: torch.Tensor,
     weight: torch.Tensor,
     bias: torch.Tensor,
-    mean: torch.Tensor = None,
-    rstd: torch.Tensor = None,
-    dres: torch.Tensor = None,
+    mean: torch.Tensor | None = None,
+    rstd: torch.Tensor | None = None,
+    dres: torch.Tensor | None = None,
     has_residual: bool = False,
     is_rms_norm: bool = False,
-    x_dtype: torch.dtype = None,
+    x_dtype: torch.dtype | None = None,
     recompute_output: bool = False,
     num_groups: int = 1,
 ):

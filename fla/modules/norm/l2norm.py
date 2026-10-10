@@ -108,7 +108,7 @@ def l2norm_bwd_kernel(y, rstd, dy, dx, eps, T, D: tl.constexpr, BD: tl.constexpr
     tl.store(p_dx, b_dx.to(p_dx.dtype.element_ty), mask=m_x)
 
 
-@dispatch('modules.norm.l2norm')
+@dispatch
 def l2norm_fwd(x: torch.Tensor, eps: float = 1e-6, output_dtype: torch.dtype | None = None):
     x_shape_og = x.shape
     x = x.view(-1, x.shape[-1])
@@ -139,7 +139,7 @@ def l2norm_fwd(x: torch.Tensor, eps: float = 1e-6, output_dtype: torch.dtype | N
     return y.view(x_shape_og), rstd.view(x_shape_og[:-1])
 
 
-@dispatch('modules.norm.l2norm')
+@dispatch
 def l2norm_bwd(y: torch.Tensor, rstd: torch.Tensor, dy: torch.Tensor, eps: float = 1e-6):
     y_shape_og = y.shape
     y = y.view(-1, dy.shape[-1])
@@ -203,10 +203,4 @@ class L2Norm(nn.Module):
         return l2norm(x=x, eps=self.eps, output_dtype=self.output_dtype)
 
 
-__all__ = [
-    'L2Norm',
-    'l2_norm',
-    'l2norm',
-    'l2norm_bwd',
-    'l2norm_fwd',
-]
+__all__ = ['L2Norm', 'l2_norm', 'l2norm', 'l2norm_bwd', 'l2norm_fwd']

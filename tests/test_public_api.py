@@ -14,14 +14,11 @@ import torch
 
 import fla
 from fla import layers, models, modules
-from fla.modules import l2norm
+from fla.modules import activations, l2norm
 
 
 def test_top_level_exports_layers_and_non_config_models():
-    expected_exports = [
-        *layers.__all__,
-        *[name for name in models.__all__ if not name.endswith("Config")],
-    ]
+    expected_exports = [*layers.__all__, *[name for name in models.__all__ if not name.endswith("Config")]]
 
     assert fla.__all__ == expected_exports
 
@@ -34,23 +31,40 @@ def test_top_level_exports_layers_and_non_config_models():
     assert not any(name in fla.__dict__ for name in config_exports)
 
 
+@pytest.mark.parametrize('disabled', ['0', '1'], ids=['dispatch-enabled', 'dispatch-disabled'])
+def test_public_imports_preserve_callables(run_python, disabled):
+    run_python(
+        """
+        from fla.ops.kda import chunk_kda
+        from fla.backends import dispatch
+        from fla.modules import ShortConvolution
+
+        assert callable(chunk_kda)
+        assert callable(dispatch)
+        assert callable(ShortConvolution)
+        """,
+        FLA_DISABLE_BACKEND_DISPATCH=disabled,
+    )
+
+
 @pytest.mark.parametrize(
     ('owner', 'name', 'defaults'),
     [
-        (
-            'causal_conv1d.ops',
-            'causal_conv1d_fwd',
-            {'chunk_size': 64, 'layout_fallback': False, 'output_final_state': False},
-        ),
+        ('activations', 'powglu', {'power': 3.0}),
+        ('rotary', 'rotary_embedding', {'seqlen_offsets': 0, 'interleaved': False, 'inplace': False}),
+        ('causal_conv1d', 'causal_conv1d_fwd', {'chunk_size': 64, 'layout_fallback': False, 'output_final_state': False}),
+        ('causal_conv1d.backends.cuda', 'causal_conv1d_cuda', {'activation': None, 'output_final_state': False}),
+        ('grpo', 'fused_grpo_loss', {'beta': 0.1, 'save_kl': False, 'inplace': False}),
+        ('fused_cross_entropy', 'cross_entropy_loss', {'ignore_index': -100, 'process_group': None}),
+        ('fused_linear_cross_entropy', 'fused_linear_cross_entropy_loss', {'num_chunks': 8, 'reduction': 'mean'}),
+        ('fused_kl_div', 'fused_kl_div_loss', {'reduction': 'batchmean', 'accumulate_grad_in_fp32': True}),
         ('layernorm', 'layer_norm', {'eps': 1e-5, 'prenorm': False}),
         ('l2norm', 'l2norm', {'eps': 1e-6, 'output_dtype': None}),
         ('fused_norm_gate', 'layer_norm_gated', {'activation': 'swish', 'eps': 1e-6}),
     ],
     ids=[
-        'conv',
-        'layernorm',
-        'l2norm',
-        'norm-gate',
+        'activations', 'rotary', 'conv', 'conv-cuda', 'grpo', 'cross-entropy', 'linear-cross-entropy',
+        'kl-div', 'layernorm', 'l2norm', 'norm-gate',
     ],
 )
 def test_public_call_defaults(owner, name, defaults):
@@ -76,7 +90,16 @@ def test_legacy_imports_preserve_symbol_identity(legacy, current, names):
 
 
 def test_public_function_aliases():
+    for name in ('sigmoid', 'logsigmoid', 'swish', 'sqrelu'):
+        assert activations.ACT2FN[name] is getattr(activations, name)
+    assert activations.ACT2FN['silu'] is activations.swish
+    assert activations.ACT2FN['gelu'] is activations.fast_gelu_impl
     assert l2norm.l2_norm is l2norm.l2norm
+    bitlinear = importlib.import_module('fla.modules.fused_bitlinear')
+    assert bitlinear.layer_norm_fwd_quant is bitlinear.layer_norm_quant_fwd
+    assert bitlinear.layer_norm_bwd is bitlinear.layer_norm_quant_bwd
+    assert bitlinear.LayerNormLinearQuantFn is bitlinear.LayerNormLinearQuantFunction
+    assert bitlinear.layer_norm_linear_quant_fn is bitlinear.layer_norm_linear_quant
 
 
 @pytest.mark.parametrize(
@@ -91,6 +114,8 @@ def test_public_function_aliases():
         ('l2norm', 'L2Norm', {}, ()),
         ('convolution', 'ShortConvolution', {'hidden_size': 4, 'kernel_size': 3, 'bias': True}, ('weight', 'bias')),
         ('convolution', 'LongConvolution', {'hidden_size': 4, 'max_len': 8}, ('filter',)),
+        ('fused_bitlinear', 'BitLinear', {'in_features': 4, 'out_features': 4}, ('weight', 'norm.weight')),
+        ('fused_bitlinear', 'FusedBitLinear', {'in_features': 4, 'out_features': 4}, ('weight', 'norm.weight')),
     ],
     ids=[
         'layernorm',
@@ -102,6 +127,8 @@ def test_public_function_aliases():
         'l2norm',
         'convolution',
         'long-convolution',
+        'bitlinear',
+        'fused-bitlinear',
     ],
 )
 def test_legacy_module_pickle_and_state_dict(monkeypatch, legacy, name, kwargs, state_keys):
@@ -163,7 +190,7 @@ def test_normalization_imports_preserve_public_exports(run_python, disabled):
             return [
                 warning for warning in records
                 if issubclass(warning.category, FutureWarning)
-                and any(path in str(warning.message) for path in canonical_paths)
+                and str(warning.message).startswith('Legacy fla.modules imports')
             ]
 
         with warnings.catch_warnings(record=True) as caught:
@@ -181,7 +208,8 @@ def test_normalization_imports_preserve_public_exports(run_python, disabled):
         assert modules.L2Norm is L2Norm is norm.L2Norm
         assert modules.RMSNorm is RMSNorm is norm.RMSNorm
         assert modules.RotaryEmbedding is RotaryEmbedding is rotary.RotaryEmbedding
-        assert not norm_warnings(caught), [str(w.message) for w in caught]
+        assert len(norm_warnings(caught)) == 1, [str(w.message) for w in caught]
+        assert all('0.6.1' in str(w.message) for w in norm_warnings(caught))
 
         for name, canonical_path in zip(expected_symbols, canonical_paths):
             canonical = importlib.import_module(canonical_path)
@@ -200,9 +228,11 @@ def test_normalization_imports_preserve_public_exports(run_python, disabled):
 
         from fla.modules.causal_conv1d import causal_conv1d
         importlib.import_module('fla.modules.causal_conv1d.ops')
-        from fla.modules.causal_conv1d import causal_conv1d as after_legacy_import
+        from fla.modules.causal_conv1d import causal_conv1d as after_implementation_import
+        from fla.modules.convolution import causal_conv1d as legacy
         assert callable(causal_conv1d)
-        assert after_legacy_import is causal_conv1d
+        assert after_implementation_import is causal_conv1d
+        assert causal_conv1d is legacy
         """,
         FLA_DISABLE_BACKEND_DISPATCH=disabled,
     )

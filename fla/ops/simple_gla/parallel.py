@@ -106,8 +106,7 @@ def parallel_simple_gla_fwd_kernel(
     b_q = (b_q * scale).to(b_q.dtype)
     b_o = tl.zeros([BT, BV], dtype=tl.float32)
 
-    # Q block and K block have overlap.
-    # masks required
+    # overlapping Q and K blocks require causal masks.
     if USE_G:
         # [BT,]
         b_gq = tl.load(g + o_q * H, mask=m_q, other=float('-inf')).to(tl.float32)
@@ -157,7 +156,7 @@ def parallel_simple_gla_fwd_kernel(
             b_g = tl.load(g + o_k * H, mask=m_k, other=0)
             b_gn = tl.load(g + (min(i_s + BS, T) - 1) * H)
             b_gp = tl.load(g + (i_s-1) * H) if i_s % BT > 0 else 0.
-            # No concrete meaning. Just to avoid some layout bugs.
+            # this factorization avoids Triton layout bugs.
             b_s *= exp2(b_gq[:, None] + (b_gn - b_g)[None, :])
             b_gq += b_gn - b_gp
         b_s = tl.where(m_s, b_s, 0)
@@ -234,7 +233,7 @@ def parallel_simple_gla_bwd_kernel_dq(
         b_gq = tl.load(g + o_q * H, mask=m_q, other=float('-inf'))
         # [BT, BK]
         b_dq *= exp2(b_gq)[:, None]
-    # Q block and K block have overlap. masks required
+    # overlapping Q and K blocks require causal masks.
     for i_s in range(i_t * BT, min((i_t + 1) * BT, T), BS):
         o_k = i_s + tl.arange(0, BS)
         m_k = o_k < T
@@ -533,13 +532,7 @@ def parallel_simple_gla_fwd(
 
     # local cumulative decay in log space
     if g is not None:
-        g = chunk_local_cumsum(
-            g,
-            chunk_size,
-            scale=RCP_LN2,
-            cu_seqlens=cu_seqlens,
-            chunk_indices=chunk_indices,
-        )
+        g = chunk_local_cumsum(g=g, chunk_size=chunk_size, scale=RCP_LN2, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
     grid = (NK * NV * NT, B * H)
     o = torch.empty(NK, *v.shape, dtype=v.dtype if NK == 1 else torch.float, device=q.device)
     attn = q.new_zeros(NK, B, H, T, T) if output_attentions else None
@@ -554,9 +547,9 @@ def parallel_simple_gla_fwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
+        T=T,
         B=B,
         H=H,
-        T=T,
         K=K,
         V=V,
         BT=BT,
@@ -621,9 +614,9 @@ def parallel_simple_gla_bwd(
         dk=dk,
         dv=dv,
         dg=dg,
+        scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
-        scale=scale,
         T=T,
         B=B,
         H=H,
@@ -651,7 +644,10 @@ class ParallelSimpleGLAFunction(torch.autograd.Function):
         ctx.dtype = q.dtype
 
         chunk_indices = prepare_chunk_indices(
-            cu_seqlens, chunk_size, cu_seqlens_cpu=cu_seqlens_cpu) if cu_seqlens is not None else None
+            cu_seqlens,
+            chunk_size,
+            cu_seqlens_cpu=cu_seqlens_cpu,
+        ) if cu_seqlens is not None else None
 
         o, g, attn = parallel_simple_gla_fwd(
             q=q,
@@ -688,7 +684,7 @@ class ParallelSimpleGLAFunction(torch.autograd.Function):
         return dq.to(q), dk.to(k), dv.to(v), dg.to(ctx.dtype) if dg is not None else None, None, None, None, None
 
 
-@dispatch('simple_gla')
+@dispatch
 def parallel_simple_gla(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -707,18 +703,18 @@ def parallel_simple_gla(
             keys of shape `[B, T, H, K]`.
         v (torch.Tensor):
             values of shape `[B, T, H, V]`.
-        g (Optional[torch.Tensor]):
+        g (torch.Tensor, Optional):
             Forget gates of shape `[B, T, H]`.
             Compared to GLA, the gating is head-wise instead of elementwise. Default: `None`.
-        scale (Optional[float]):
+        scale (float, Optional):
             Scale factor for attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
-        output_attentions (bool):
+        output_attentions (bool, Optional):
             Whether to output the materialized attention scores of shape `[B, H, T, T]`. Default: `False`.
-        cu_seqlens (torch.LongTensor):
+        cu_seqlens (torch.LongTensor, Optional):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
-            consistent with the FlashAttention API.
-        cu_seqlens_cpu (torch.LongTensor):
+            consistent with the FlashAttention API. Default: `None`.
+        cu_seqlens_cpu (torch.LongTensor, Optional):
             CPU copy of `cu_seqlens` to avoid unnecessary device synchronization. Default: `None`.
 
     Returns:
@@ -738,14 +734,5 @@ def parallel_simple_gla(
 
     if scale is None:
         scale = k.shape[-1] ** -0.5
-    o, attn = ParallelSimpleGLAFunction.apply(
-        q,
-        k,
-        v,
-        g,
-        scale,
-        output_attentions,
-        cu_seqlens,
-        cu_seqlens_cpu,
-    )
+    o, attn = ParallelSimpleGLAFunction.apply(q, k, v, g, scale, output_attentions, cu_seqlens, cu_seqlens_cpu)
     return o, attn

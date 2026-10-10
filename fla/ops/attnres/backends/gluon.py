@@ -27,7 +27,7 @@ from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
 from triton.experimental.gluon.language.nvidia.ampere import async_copy as cp
 
-from fla.backends import BaseBackend, register_backend
+from fla.backends import BaseBackend, register
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.op import barrier
 from fla.utils import (
@@ -730,7 +730,7 @@ def _run(
     return o
 
 
-@register_backend('attnres')
+@register('attnres')
 class AttnResGluonBackend(BaseBackend):
     """Dispatch entry for the Gluon AttnRes kernels (see the module docstring for the design).
 

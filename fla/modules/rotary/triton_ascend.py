@@ -11,6 +11,8 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.backends import TritonAscendBackend, register
+from fla.modules.rotary.ops import rotary_embedding_fwdbwd
 from fla.ops.utils import prepare_chunk_indices
 from fla.utils import autotune_cache_kwargs, get_multiprocessor_count
 from fla.utils.ascend_ub_manager import (
@@ -20,11 +22,11 @@ from fla.utils.ascend_ub_manager import (
     max_grid_axis_chunks,
 )
 
-# Peak live fp32 tiles in rotary kernel: cos, sin, x0, x1, o0, o1.
+# peak live fp32 tiles in rotary kernel: cos, sin, x0, x1, o0, o1.
 _ROTARY_MEM_MULT = 6.0
 _ROTARY_SAFETY_MARGIN = 0.90
 
-# Ascend vector UB is small; large num_warps / stages explodes compile-time UB (see bishengir ub overflow).
+# ascend vector UB is small; large num_warps / stages explodes compile-time UB (see bishengir ub overflow).
 NUM_WARPS_AUTOTUNE = [2, 4]
 NUM_STAGES_AUTOTUNE = [1, 2]
 
@@ -126,6 +128,7 @@ def rotary_embedding_kernel(
         tl.store(p_y, b_y, mask=mask)
 
 
+@register(rotary_embedding_fwdbwd, backend=TritonAscendBackend)
 def rotary_embedding_fwdbwd_npu(
     x: torch.Tensor,
     cos: torch.Tensor,
@@ -170,16 +173,16 @@ def rotary_embedding_fwdbwd_npu(
     BD = triton.next_power_of_2(R2)
     desired_bt = triton.next_power_of_2(triton.cdiv(T, get_multiprocessor_count(x.device.index)))
     bt_cap = compute_row_tile_block_size(
-        desired_bt,
-        R2,
-        _ROTARY_MEM_MULT,
+        row_dim=desired_bt,
+        fixed_dim=R2,
+        memory_multiplier=_ROTARY_MEM_MULT,
         safety_margin=_ROTARY_SAFETY_MARGIN,
         dtype_size=x.element_size(),
         fallback=16 if R >= 128 else (32 if R >= 64 else 64),
         min_block=1,
     )
     BT = min(bt_cap, desired_bt)
-    BT = compute_grid_limited_tile_size(T, B * H, BT, max_grid=ASCEND_MAX_GRID_DIM)
+    BT = compute_grid_limited_tile_size(axis_size=T, other_grid_product=B * H, ub_safe_block=BT, max_grid=ASCEND_MAX_GRID_DIM)
     if chunk_indices is None and is_varlen:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = len(chunk_indices) if is_varlen else triton.cdiv(T, BT)
@@ -205,7 +208,7 @@ def rotary_embedding_fwdbwd_npu(
         INTERLEAVED=interleaved,
         CONJUGATE=conjugate,
     )
-    max_nt = max_grid_axis_chunks(NT, B * H, max_grid=ASCEND_MAX_GRID_DIM)
+    max_nt = max_grid_axis_chunks(axis_size=NT, other_grid_product=B * H, max_grid=ASCEND_MAX_GRID_DIM)
     for nt_off in range(0, NT, max_nt):
         nt_len = min(max_nt, NT - nt_off)
         if is_varlen:

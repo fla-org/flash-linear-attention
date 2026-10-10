@@ -26,28 +26,10 @@ except ImportError:
 
 
 class FastCausalConv1dFn(torch.autograd.Function):
-    """
-    Mixed-mode (Mix) Causal Convolution Implementation - Combining Triton Forward and CUDA Backward Propagation
+    """Causal convolution with Triton forward and CUDA backward on `[B, T, D]` inputs.
 
-    This class implements forward propagation using FLA's Triton kernel, while using the optimized
-    implementation from TriDao's causal_conv1d CUDA package for backward propagation.
-    This hybrid strategy combines the advantages of both technologies:
-
-    - Forward: Uses FLA's Triton implementation, optimized for the FLA framework
-    - Backward: Uses TriDao's causal_conv1d_bwd_function CUDA implementation for faster speed
-
-    Performance Benefits:
-    - CUDA backward implementation is typically faster than the Triton version, reducing training time
-    - Maintains the flexibility and compatibility of forward propagation
-
-    Note:
-    - Input/Output format is (batch, seqlen, dim)
-    - Backward propagation requires causal_conv1d package: pip install causal-conv1d
-    - Supports SILU/Swish activation functions
-    - Current limitations (not yet supported):
-        * output_final_state must be False
-        * initial_states must be None
-        * residual must be None
+    Backward requires the `causal-conv1d` package. Activation may be `None`, `silu`, or `swish`.
+    Residuals and initial/final states are unsupported.
     """
     @staticmethod
     @input_guard(no_guard_contiguous=["x"])
@@ -123,19 +105,7 @@ class FastCausalConv1dFn(torch.autograd.Function):
             ctx.activation,
         )
         dx = rearrange(dx, 'b d t -> b t d')
-        return (
-            dx,
-            dweight,
-            dbias if bias is not None else None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+        return (dx, dweight, dbias if bias is not None else None, None, None, None, None, None, None, None, None)
 
 
 def fast_causal_conv1d_fn(
@@ -151,16 +121,35 @@ def fast_causal_conv1d_fn(
     chunk_indices: torch.LongTensor | None = None,
     seq_idx: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
-    """
-    x: (batch, seqlen, dim)
-    weight: (dim, width)
-    bias: (dim,)
-    seq_idx: (batch, seqlen)
-    initial_states: (batch, dim, width - 1)
-    final_states_out: (batch, dim, width - 1), to be written to
-    activation: either None or "silu" or "swish"
+    """Apply mixed Triton/CUDA causal convolution to `[B, T, D]` inputs.
 
-    out: (batch, seqlen, dim)
+    Args:
+        x (torch.Tensor):
+            Input of shape `[B, T, D]`.
+        weight (torch.Tensor, Optional):
+            Convolution weights of shape `[D, W]`. Default: `None`.
+        bias (torch.Tensor, Optional):
+            Bias of shape `[D]`. Default: `None`.
+        residual (torch.Tensor, Optional):
+            Unsupported by this backend; must be `None`. Default: `None`.
+        initial_state (torch.Tensor, Optional):
+            Unsupported by this backend; must be `None`. Default: `None`.
+        output_final_state (bool, Optional):
+            Unsupported by this backend; must be `False`. Default: `False`.
+        activation (str, Optional):
+            Activation applied to the output: `None`, `silu`, or `swish`. Default: `None`.
+        cu_seqlens (torch.Tensor, Optional):
+            Cumulative sequence lengths for packed inputs. Default: `None`.
+        cu_seqlens_cpu (torch.LongTensor, Optional):
+            CPU copy of `cu_seqlens`. Default: `None`.
+        chunk_indices (torch.LongTensor, Optional):
+            Precomputed sequence chunk indices. Default: `None`.
+        seq_idx (torch.LongTensor, Optional):
+            Sequence IDs of shape `[B, T]`. Derived from `cu_seqlens` when omitted. Default: `None`.
+
+    Returns:
+        tuple[torch.Tensor, None]:
+            Output of shape `[B, T, D]` and no final state.
     """
     assert causal_conv1d_bwd_function is not None, "causal_conv1d_bwd_function is not available"
     return FastCausalConv1dFn.apply(
@@ -220,3 +209,6 @@ def causal_conv1d_cuda(
         y.add_(residual)
 
     return y, final_state
+
+
+__all__ = ['FastCausalConv1dFn', 'causal_conv1d_cuda', 'fast_causal_conv1d_fn']

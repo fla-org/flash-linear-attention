@@ -107,9 +107,20 @@ def softplus2_triton(x):
     return tl.where(x < 15.0, tl.math.log2(1 + tl.math.exp2(x)), x)
 
 
+# named wrappers preserve the symbols referenced by kernels in Inductor's generated source
 if IS_NVIDIA:
-    softplus = softplus_nv
-    softplus2 = softplus2_nv
+    @triton.jit
+    def softplus(x):
+        return softplus_nv(x)
+
+    @triton.jit
+    def softplus2(x):
+        return softplus2_nv(x)
 else:
-    softplus = softplus_triton
-    softplus2 = softplus2_triton
+    @triton.jit
+    def softplus(x):
+        return softplus_triton(x)
+
+    @triton.jit
+    def softplus2(x):
+        return softplus2_triton(x)

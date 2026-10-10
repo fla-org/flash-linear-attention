@@ -5,18 +5,11 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from fla.modules.norm.l2norm import (
-    L2Norm,
-    l2_norm,
-    l2norm,
-    l2norm_bwd,
-    l2norm_fwd,
-)
+from fla.backends import TritonAscendBackend
+from fla.modules.grpo.ops import fused_grpo_loss, grpo_loss_with_old_logps
 
-__all__ = [
-    'L2Norm',
-    'l2_norm',
-    'l2norm',
-    'l2norm_bwd',
-    'l2norm_fwd',
-]
+__all__ = ['fused_grpo_loss', 'grpo_loss_with_old_logps']
+
+
+if TritonAscendBackend.is_available():
+    from fla.modules.grpo import triton_ascend  # noqa: F401
