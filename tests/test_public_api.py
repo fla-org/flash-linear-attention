@@ -32,12 +32,9 @@ def test_top_level_exports_layers_and_non_config_models():
 
 
 @pytest.mark.parametrize('disabled', ['0', '1'], ids=['dispatch-enabled', 'dispatch-disabled'])
-def test_public_imports_do_not_warn(run_python, disabled):
+def test_public_imports_preserve_callables(run_python, disabled):
     run_python(
         """
-        import warnings
-
-        warnings.filterwarnings('error', message='fla.*deprecated', category=DeprecationWarning)
         from fla.ops.kda import chunk_kda
         from fla.backends import dispatch
         from fla.modules import ShortConvolution
@@ -98,6 +95,11 @@ def test_public_function_aliases():
     assert activations.ACT2FN['silu'] is activations.swish
     assert activations.ACT2FN['gelu'] is activations.fast_gelu_impl
     assert l2norm.l2_norm is l2norm.l2norm
+    bitlinear = importlib.import_module('fla.modules.fused_bitlinear')
+    assert bitlinear.layer_norm_fwd_quant is bitlinear.layer_norm_quant_fwd
+    assert bitlinear.layer_norm_bwd is bitlinear.layer_norm_quant_bwd
+    assert bitlinear.LayerNormLinearQuantFn is bitlinear.LayerNormLinearQuantFunction
+    assert bitlinear.layer_norm_linear_quant_fn is bitlinear.layer_norm_linear_quant
 
 
 @pytest.mark.parametrize(
@@ -112,6 +114,8 @@ def test_public_function_aliases():
         ('l2norm', 'L2Norm', {}, ()),
         ('convolution', 'ShortConvolution', {'hidden_size': 4, 'kernel_size': 3, 'bias': True}, ('weight', 'bias')),
         ('convolution', 'LongConvolution', {'hidden_size': 4, 'max_len': 8}, ('filter',)),
+        ('fused_bitlinear', 'BitLinear', {'in_features': 4, 'out_features': 4}, ('weight', 'norm.weight')),
+        ('fused_bitlinear', 'FusedBitLinear', {'in_features': 4, 'out_features': 4}, ('weight', 'norm.weight')),
     ],
     ids=[
         'layernorm',
@@ -123,6 +127,8 @@ def test_public_function_aliases():
         'l2norm',
         'convolution',
         'long-convolution',
+        'bitlinear',
+        'fused-bitlinear',
     ],
 )
 def test_legacy_module_pickle_and_state_dict(monkeypatch, legacy, name, kwargs, state_keys):
@@ -184,7 +190,7 @@ def test_normalization_imports_preserve_public_exports(run_python, disabled):
             return [
                 warning for warning in records
                 if issubclass(warning.category, FutureWarning)
-                and any(path in str(warning.message) for path in canonical_paths)
+                and str(warning.message).startswith('Legacy fla.modules imports')
             ]
 
         with warnings.catch_warnings(record=True) as caught:
@@ -202,7 +208,8 @@ def test_normalization_imports_preserve_public_exports(run_python, disabled):
         assert modules.L2Norm is L2Norm is norm.L2Norm
         assert modules.RMSNorm is RMSNorm is norm.RMSNorm
         assert modules.RotaryEmbedding is RotaryEmbedding is rotary.RotaryEmbedding
-        assert not norm_warnings(caught), [str(w.message) for w in caught]
+        assert len(norm_warnings(caught)) == 1, [str(w.message) for w in caught]
+        assert all('0.6.1' in str(w.message) for w in norm_warnings(caught))
 
         for name, canonical_path in zip(expected_symbols, canonical_paths):
             canonical = importlib.import_module(canonical_path)

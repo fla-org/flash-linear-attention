@@ -8,10 +8,12 @@
 import pytest
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from einops import rearrange
 from transformers.models.llama.modeling_llama import LlamaRMSNorm
 
 from fla.modules import GroupNorm, GroupNormLinear, LayerNorm, LayerNormLinear, RMSNorm, RMSNormLinear
+from fla.modules.fused_bitlinear import activation_quant, layer_norm_linear_quant, weight_quant
 from fla.modules.layernorm import GroupNormRef
 from fla.utils import assert_close, device
 
@@ -146,6 +148,89 @@ def test_layernorm_linear(N: int, D: int):
     assert_close(' db', ref_db, tri_db, 1e-3)
     assert_close('dlw', ref_dlw, tri_dlw, 1e-3)
     assert_close('dlb', ref_dlb, tri_dlb, 1e-3)
+
+
+@pytest.mark.parametrize(
+    ('T', 'D', 'is_rms_norm', 'affine', 'has_residual', 'prenorm', 'residual_in_fp32'),
+    [
+        (1, 64, False, True, False, False, False),
+        (7, 50, True, True, False, False, False),
+        (33, 128, False, True, True, True, False),
+        (257, 128, True, True, True, True, True),
+        (17, 64, False, False, True, False, True),
+        (32, 128, True, False, False, True, True),
+    ],
+    ids=['single-row', 'partial-row', 'residual', 'fp32-residual', 'no-affine', 'prenorm'],
+)
+@pytest.mark.parametrize(
+    ('dtype', 'amp_dtype'),
+    [(torch.float32, None), (torch.float16, None), (torch.bfloat16, None),
+     (torch.float32, torch.float16), (torch.float32, torch.bfloat16)],
+    ids=['fp32', 'fp16', 'bf16', 'amp-fp16', 'amp-bf16'],
+)
+def test_layernorm_linear_quant(
+    T: int,
+    D: int,
+    is_rms_norm: bool,
+    affine: bool,
+    has_residual: bool,
+    prenorm: bool,
+    residual_in_fp32: bool,
+    dtype: torch.dtype,
+    amp_dtype: torch.dtype | None,
+):
+    torch.manual_seed(42)
+    x = torch.randn(T, D, device=device, dtype=dtype).requires_grad_()
+    w = torch.randn(D, device=device, dtype=dtype).requires_grad_() if affine else None
+    b = torch.randn(D, device=device, dtype=dtype).requires_grad_() if affine else None
+    linear_weight = torch.randn(32, D, device=device, dtype=dtype).requires_grad_()
+    linear_bias = torch.randn(32, device=device, dtype=dtype).requires_grad_()
+    residual = torch.randn_like(x, dtype=torch.float32 if residual_in_fp32 else dtype) if has_residual else None
+    if residual is not None:
+        residual.requires_grad_()
+    inputs = {
+        name: tensor
+        for name, tensor in zip(('dx', 'dw', 'db', 'dlw', 'dlb', 'dresidual'), (x, w, b, linear_weight, linear_bias, residual))
+        if tensor is not None
+    }
+    eps = 1e-6
+    out_dtype = amp_dtype or dtype
+
+    ref_residual = x.float() + residual.float() if has_residual else x.float()
+    ref_norm = ref_residual if is_rms_norm else ref_residual - ref_residual.mean(-1, keepdim=True)
+    ref_norm = ref_norm * torch.rsqrt(ref_norm.square().mean(-1, keepdim=True) + eps)
+    if affine:
+        ref_norm = ref_norm * w.float() + b.float()
+    ref_quant = ref_norm + (activation_quant(ref_norm) - ref_norm).detach()
+    ref_weight = linear_weight + (weight_quant(linear_weight) - linear_weight).detach()
+    ref = F.linear(input=ref_quant.to(out_dtype), weight=ref_weight.to(out_dtype), bias=linear_bias.to(out_dtype))
+    if prenorm:
+        ref_residual = ref_residual.to(residual.dtype if has_residual else torch.float32 if residual_in_fp32 else dtype)
+        ref = (ref, ref_residual)
+
+    with torch.autocast(device_type=device, dtype=amp_dtype, enabled=amp_dtype is not None):
+        tri = layer_norm_linear_quant(
+            x=x,
+            norm_weight=w,
+            norm_bias=b,
+            linear_weight=linear_weight,
+            linear_bias=linear_bias,
+            residual=residual,
+            eps=eps,
+            prenorm=prenorm,
+            residual_in_fp32=residual_in_fp32,
+            is_rms_norm=is_rms_norm,
+        )
+    ref, tri = (ref, tri) if prenorm else ((ref,), (tri,))
+    do = tuple(torch.randn_like(output) for output in ref)
+    ref_grads = torch.autograd.grad(ref, tuple(inputs.values()), do)
+    tri_grads = torch.autograd.grad(tri, tuple(inputs.values()), do)
+    for name, expected, actual in zip(('o', 'residual'), ref, tri, strict=False):
+        assert torch.isfinite(actual).all()
+        assert_close(name, expected, actual, 0.01)
+    for name, expected, actual in zip(inputs, ref_grads, tri_grads, strict=True):
+        assert torch.isfinite(actual).all()
+        assert_close(name, expected, actual, 0.01)
 
 
 @pytest.mark.parametrize("N", [1, 16, 128])
