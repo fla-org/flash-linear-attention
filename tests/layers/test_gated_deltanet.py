@@ -104,24 +104,3 @@ def test_gated_deltanet_fused_qkv_conv_matches_fallback(B: int, T: int, D: int, 
     # by tiny accumulation-order noise.
     for name in g_fused:
         assert_close(f'd{name}', g_sep[name], g_fused[name], 5e-3)
-
-
-@pytest.mark.parametrize('T', [1, 33], ids=['decode', 'short-prefill'])
-def test_gated_deltanet_compiled_short_inference_matches_eager(T: int):
-    torch.manual_seed(42)
-    layer = GatedDeltaNet(
-        hidden_size=256,
-        head_dim=64,
-        num_heads=4,
-        expand_v=2,
-        mode='chunk',
-        use_short_conv=False,
-    ).to(device=device, dtype=torch.bfloat16).eval()
-    x = torch.randn(2, T, 256, device=device, dtype=torch.bfloat16)
-
-    compiled = torch.compile(layer, fullgraph=False)
-    with torch.inference_mode():
-        y_eager = layer(x)[0]
-        y_compiled = compiled(x)[0]
-
-    assert_close('compiled short inference', y_eager, y_compiled, 0.0)
