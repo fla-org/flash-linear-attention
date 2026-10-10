@@ -56,6 +56,12 @@ _PARTIAL_CONFIGS = [
 _OUT_NAMES = ["o", "ht", "dq", "dk", "dv", "dg", "db", "dh0", "dA", "dbias"]
 
 
+@pytest.fixture(autouse=True)
+def triton_eager_reference(monkeypatch):
+    # graph capture always runs the Triton backward, so the eager reference must not route to TileLang
+    monkeypatch.setenv("FLA_TILELANG", "0")
+
+
 def _rand_inputs(seed, gate, safe_gate, hv=H):
     # q/k carry H heads; v/g/beta/state carry HV heads (HV>H exercises GVA).
     g = torch.Generator(device).manual_seed(seed)
