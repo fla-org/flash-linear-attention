@@ -522,7 +522,7 @@ class LinearLossParallel(ParallelStyle):
 
     @staticmethod
     def _prepare_output_fn(use_local_output, mod, outputs, device_mesh):
-        return outputs.to_local() if use_local_output else outputs
+        return outputs.to_local() if use_local_output and isinstance(outputs, DTensor) else outputs
 
     def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
         return distribute_module(
