@@ -13,6 +13,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.backends import dispatch
 from fla.ops.utils.op import exp
 from fla.ops.utils.softplus import softplus
 from fla.utils import input_guard
@@ -415,6 +416,7 @@ def fused_recurrent_precond_kda_fwd(
 
 
 @input_guard
+@dispatch('precond_kda')
 def fused_recurrent_precond_kda(
     q: torch.Tensor,
     k: torch.Tensor,

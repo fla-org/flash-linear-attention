@@ -5,39 +5,26 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+"""Precond-KDA backward kernels adapted for triton-ascend on Ascend NPU."""
+
+from __future__ import annotations
+
 import torch
 import triton
 import triton.language as tl
 
-from fla.ops.backends import dispatch
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp2
-from fla.utils import IS_NVIDIA_HOPPER, autotune_cache_kwargs, check_shared_mem
+from fla.utils import check_shared_mem
 
-BK_LIST = [32, 64] if check_shared_mem() else [16, 32]
-BV_LIST = [64, 128] if check_shared_mem('ampere') else [16, 32]
-NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8]
+_NUM_WARPS = 4
 
-
-# ==============================================================================
-# dAv kernel: compute dA and dv from inter-chunk backward
-# Matches KDA's chunk_kda_bwd_kernel_dAv
-# ==============================================================================
 
 @triton.heuristics({
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
-@triton.autotune(
-    configs=[
-        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in NUM_WARPS
-        for num_stages in [2, 3, 4]
-    ],
-    key=['H', 'K', 'V', 'BT', 'BK', 'BV'],
-    **autotune_cache_kwargs,
-)
 @triton.jit(do_not_specialize=['T'])
-def chunk_precond_kda_bwd_kernel_dAv(
+def chunk_precond_kda_bwd_kernel_dAv_npu(
     q,
     k,
     v,
@@ -78,10 +65,10 @@ def chunk_precond_kda_bwd_kernel_dAv(
     m_t = o_t < T
     o_r = tl.arange(0, BT)
     p_A = A + (bos * H + i_h) * BT + o_r[:, None] + o_t[None, :] * (H*BT)
-    b_A = tl.load(p_A, mask=(o_r[:, None] < BT) & m_t[None, :], other=0.0)
-
-    m_A = (o_t[:, None] <= o_t[None, :]) & (m_t[:, None] & m_t)
-    b_A = tl.where(m_A, b_A, 0).to(do.dtype.element_ty)
+    # NPU delta: fold the triangular + token mask into the load - the
+    # tl.where form miscompiles. Both axes shift by o_t, so compare with o_r.
+    m_A = (o_r[:, None] <= o_r[None, :]) & (m_t[:, None] & m_t[None, :])
+    b_A = tl.load(p_A, mask=m_A, other=0.0).to(do.dtype.element_ty)
 
     b_dA = tl.zeros([BT, BT], dtype=tl.float32)
     for i_v in range(tl.cdiv(V, BV)):
@@ -96,7 +83,7 @@ def chunk_precond_kda_bwd_kernel_dAv(
         # [BT, BV]
         b_do = tl.load(p_do, mask=m_tv, other=0.0)
         # [BT, BT]
-        b_dA = tl.dot(b_do, b_v, b_dA)
+        b_dA += tl.dot(b_do, b_v)
         # [BT, BV]
         b_dv = tl.dot(b_A.to(b_do.dtype), b_do)
         tl.store(p_dv, b_dv.to(dv.dtype.element_ty), mask=m_tv)
@@ -107,8 +94,7 @@ def chunk_precond_kda_bwd_kernel_dAv(
     tl.store(p_dA, b_dA.to(dA.dtype.element_ty), mask=m_t[:, None] & (o_A[None, :] < BT))
 
 
-@dispatch('precond_kda')
-def chunk_precond_kda_bwd_dAv(
+def chunk_precond_kda_bwd_dAv_npu(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -133,11 +119,14 @@ def chunk_precond_kda_bwd_dAv(
     BK = min(max(triton.next_power_of_2(K), 16), CONST_TILING)
     BV = min(max(triton.next_power_of_2(V), 16), CONST_TILING)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
+    # float(scale): a unit int constant miscompiles under the CANN-bundled hivmc (#1298).
+    if scale is not None:
+        scale = float(scale)
 
     dA = v.new_empty(B, T, H, BT, dtype=torch.float)
     dv = torch.empty_like(do)
     grid = (NT, B * H)
-    chunk_precond_kda_bwd_kernel_dAv[grid](
+    chunk_precond_kda_bwd_kernel_dAv_npu[grid](
         q=q,
         k=k,
         v=v,
@@ -155,32 +144,17 @@ def chunk_precond_kda_bwd_dAv(
         BT=BT,
         BK=BK,
         BV=BV,
+        num_warps=_NUM_WARPS,
+        num_stages=2,
     )
     return dA, dv
 
 
-# ==============================================================================
-# WY + inter-chunk backward kernel: compute dq, dk, dkg, dv, db, dg, dA
-# Matches KDA's chunk_kda_bwd_kernel_wy_dqkg_fused with k/k_precond asymmetry
-# ==============================================================================
-
 @triton.heuristics({
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
-@triton.autotune(
-    configs=[
-        triton.Config({'BK': BK, 'BV': BV}, num_warps=num_warps, num_stages=num_stages)
-        for BK in BK_LIST
-        for BV in BV_LIST
-        for num_warps in NUM_WARPS
-        for num_stages in [2, 3, 4]
-        if not (IS_NVIDIA_HOPPER and BK == 32 and num_warps == 4)
-    ],
-    key=['BT', 'TRANSPOSE_STATE', 'K', 'V'],
-    **autotune_cache_kwargs,
-)
 @triton.jit(do_not_specialize=['T'])
-def chunk_precond_kda_bwd_kernel_wy_dqkg(
+def chunk_precond_kda_bwd_kernel_wy_dqkg_npu(
     q,
     k,           # original k (for WY backward)
     k_precond,   # preconditioned k (for inter backward)
@@ -304,9 +278,9 @@ def chunk_precond_kda_bwd_kernel_wy_dqkg(
             b_dv = tl.load(p_dv, mask=m_tv, other=0.0)
 
             b_dgk += tl.sum(b_h * b_dh, axis=0)
-            b_dq = tl.dot(b_do, b_h.to(b_do.dtype), b_dq)
-            b_dkg_raw = tl.dot(b_v_new, b_dh.to(b_v_new.dtype), b_dkg_raw)
-            b_dw = tl.dot(b_dv.to(b_v_new.dtype), b_h.to(b_v_new.dtype), b_dw)
+            b_dq += tl.dot(b_do, b_h.to(b_do.dtype))
+            b_dkg_raw += tl.dot(b_v_new, b_dh.to(b_v_new.dtype))
+            b_dw += tl.dot(b_dv.to(b_v_new.dtype), b_h.to(b_v_new.dtype))
             tl.debug_barrier()  # DO NOT REMOVE THIS LINE!
             if i_k == 0:
                 p_v = v + o_t[:, None] * (H*V) + o_v[None, :]
@@ -314,7 +288,7 @@ def chunk_precond_kda_bwd_kernel_wy_dqkg(
 
                 b_v = tl.load(p_v, mask=m_tv, other=0.0)
 
-                b_dA = tl.dot(b_dv, tl.trans(b_v), b_dA)
+                b_dA += tl.dot(b_dv, tl.trans(b_v))
 
                 b_dvb = tl.dot(b_A, b_dv)
                 b_dv2 = b_dvb * b_beta[:, None]
@@ -331,7 +305,7 @@ def chunk_precond_kda_bwd_kernel_wy_dqkg(
         b_kg_orig = b_k * b_gk_exp
 
         b_dw = -b_dw.to(b_A.dtype)
-        b_dA = tl.dot(b_dw, tl.trans(b_kg_orig.to(b_A.dtype)), b_dA)
+        b_dA += tl.dot(b_dw, tl.trans(b_kg_orig.to(b_A.dtype)))
 
         b_dkgb = tl.dot(b_A, b_dw)
         b_db += tl.sum(b_dkgb * b_kg_orig, 1)
@@ -340,7 +314,9 @@ def chunk_precond_kda_bwd_kernel_wy_dqkg(
         b_dk = b_dkgb * b_gb
 
         # Inter backward: uses k_precond
-        b_gn_g = tl.where(m_t[:, None], exp2(b_gn[None, :] - b_g), 0)
+        f_t = m_t[:, None].to(tl.float32)
+        # Mask folded into the exponent: inf * 0 would be NaN.
+        b_gn_g = exp2((b_gn[None, :] - b_g) * f_t - 127.0 * (1.0 - f_t)) * f_t
         b_dkg = b_dkg_raw * b_gn_g
 
         b_kg_precond = b_kp * b_gn_g
@@ -365,10 +341,11 @@ def chunk_precond_kda_bwd_kernel_wy_dqkg(
         tl.store(p_dg, b_dg.to(dg.dtype.element_ty), mask=m_tk)
 
     m_A = (o_t[:, None] > o_t[None, :]) & (m_t[:, None] & m_t)
-    b_dA = tl.where(m_A, b_dA * b_beta[None, :], 0)
+    f_A = m_A.to(tl.float32)
+    b_dA = (b_dA * b_beta[None, :]) * f_A
     b_dA = tl.dot(b_dA.to(b_A.dtype), b_A)
     b_dA = tl.dot(b_A, b_dA.to(b_A.dtype))
-    b_dA = tl.where(m_A, -b_dA, 0)
+    b_dA = -b_dA * f_A
 
     o_A = tl.arange(0, BT)
     p_dA = dA + o_t[:, None] * (H * BT) + o_A[None, :]
@@ -376,8 +353,136 @@ def chunk_precond_kda_bwd_kernel_wy_dqkg(
     tl.store(db + o_t*H, b_db.to(db.dtype.element_ty), mask=m_t)
 
 
-@dispatch('precond_kda')
-def chunk_precond_kda_bwd_wy_dqkg(
+def _chunk_precond_kda_bwd_wy_dqkg_torch(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    k_precond: torch.Tensor,
+    v: torch.Tensor,
+    v_new: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    A: torch.Tensor,
+    h: torch.Tensor,
+    do: torch.Tensor,
+    dh: torch.Tensor,
+    dv: torch.Tensor,
+    scale: float,
+    cu_seqlens: torch.LongTensor | None,
+    chunk_indices: torch.LongTensor | None,
+    BT: int,
+    transpose_state_layout: bool,
+):
+    """Torch mirror of chunk_precond_kda_bwd_kernel_wy_dqkg_npu, full K/V width.
+
+    b_A[r, c] reads A[token(o_t[c]), r] and b_h is [V, K], matching the
+    kernel's transposed views. One (sequence, chunk) per iteration, batched
+    over heads.
+    """
+    B, T, H, K, V = *k.shape, v.shape[-1]
+    dev = k.device
+    varlen = cu_seqlens is not None
+
+    dq = torch.zeros(B, T, H, K, dtype=torch.float, device=dev)
+    dk = torch.zeros(B, T, H, K, dtype=torch.float, device=dev)
+    dkg = torch.zeros(B, T, H, K, dtype=torch.float, device=dev)
+    dv2 = torch.zeros(B, T, H, V, dtype=v.dtype, device=dev)
+    dg = torch.zeros(B, T, H, K, dtype=torch.float, device=dev)
+    db = torch.zeros(B, T, H, dtype=torch.float, device=dev)
+    dA = torch.zeros(B, T, H, BT, dtype=torch.float, device=dev)
+
+    o = torch.arange(BT, device=dev)
+
+    def state_view(s):
+        # s: [H, K, V] or [H, V, K] -> [H, V, K] view matching b_h/b_dh
+        return s if transpose_state_layout else s.transpose(-1, -2)
+
+    if varlen:
+        bos_all = cu_seqlens[:-1].to(torch.long)
+        eos_all = cu_seqlens[1:].to(torch.long)
+        seqs = chunk_indices.tolist()
+    else:
+        bos_all = torch.zeros(B, dtype=torch.long, device=dev)
+        eos_all = torch.full((B,), T, dtype=torch.long, device=dev)
+        seqs = [(b, i_t) for b in range(B) for i_t in range(triton.cdiv(T, BT))]
+
+    for row, (i_n, i_t) in enumerate(seqs):
+        bos, eos = int(bos_all[i_n]), int(eos_all[i_n])
+        seq_t = eos - bos
+        i_tg = row if varlen else i_n * triton.cdiv(T, BT) + i_t
+
+        o_t = i_t * BT + o
+        valid = o_t < seq_t                                  # [BT]
+        idx = torch.clamp(bos + o_t, max=eos - 1)             # global tokens, clamped
+        m_last = (o_t == min(seq_t, i_t * BT + BT) - 1).to(torch.float)
+
+        def gather(x):
+            # rows of this chunk -> [BT, H, *] -> [H, BT, *]
+            g_ = x[0, idx] if varlen else x[i_n, idx]
+            return g_.transpose(0, 1).float()
+
+        q_r, k_r, kp_r, g_r = gather(q), gather(k), gather(k_precond), gather(g)
+        v_r, vn_r, do_r, dv_r = gather(v), gather(v_new), gather(do), gather(dv)
+        vld = valid.view(1, BT, 1)
+        v_r, vn_r, do_r, dv_r = v_r * vld, vn_r * vld, do_r * vld, dv_r * vld
+
+        beta_r = (beta[0, idx] if varlen else beta[i_n, idx]).transpose(0, 1).float() * valid  # [H, BT]
+
+        # b_A[r, c] = A[token(o_t[c]), r] - transposed like the kernel load
+        b_A = (A[0, idx] if varlen else A[i_n, idx]).permute(1, 2, 0).float()  # [H, BT, BT]
+
+        # h/dh are [B, NT, H, K, V]; the kernel indexes them flat, so flatten.
+        h_flat = h.reshape(-1, H, h.shape[-2], h.shape[-1])
+        dh_flat = dh.reshape(-1, H, dh.shape[-2], dh.shape[-1])
+        b_h = state_view(h_flat[i_tg].float())              # [H, V, K]
+        b_dh = state_view(dh_flat[i_tg].float())
+
+        b_dgk = (b_h * b_dh).sum(1)                           # [H, K]
+        b_dq = torch.matmul(do_r, b_h)                        # [H, BT, K]
+        b_dkg_raw = torch.matmul(vn_r, b_dh)
+        b_dw = torch.matmul(dv_r, b_h)
+
+        b_dA = torch.matmul(dv_r, v_r.transpose(1, 2))        # [H, BT, BT]
+        b_dvb = torch.matmul(b_A, dv_r)                       # [H, BT, V]
+        b_dv2 = b_dvb * beta_r.unsqueeze(-1)
+        b_db = (b_dvb * v_r).sum(-1)                          # [H, BT]
+        # only valid rows: clamped invalid rows would clobber real tokens
+        sel = (0, idx[valid]) if varlen else (i_n, idx[valid])
+        dv2[sel] = b_dv2.transpose(0, 1)[valid].to(dv2.dtype)
+
+        gk_exp = torch.exp2(torch.clamp(g_r, max=88.0))
+        b_dq = b_dq * gk_exp * scale
+        kg_orig = k_r * gk_exp
+        b_dw = -b_dw
+        b_dA = b_dA + torch.matmul(b_dw, kg_orig.transpose(1, 2))
+        b_dkgb = torch.matmul(b_A, b_dw)                      # [H, BT, K]
+        b_db = b_db + (b_dkgb * kg_orig).sum(-1)
+        b_dk = b_dkgb * (gk_exp * beta_r.unsqueeze(-1))
+
+        gn_tok = min(bos + min(seq_t, i_t * BT + BT) - 1, eos - 1)
+        gn = (g[0, gn_tok] if varlen else g[i_n, gn_tok]).float()   # [H, K]
+        gn_g = torch.exp2(torch.clamp(gn.unsqueeze(1) - g_r, max=88.0)) * vld
+        b_dkg = b_dkg_raw * gn_g
+        kp_dkg = kp_r * gn_g * b_dkg_raw
+        b_dgk = b_dgk * torch.exp2(torch.clamp(gn, max=88.0)) + kp_dkg.sum(1)
+
+        b_dg = (q_r * b_dq - kp_dkg
+                + m_last.view(1, BT, 1) * b_dgk.unsqueeze(1)
+                + kg_orig * b_dkgb * beta_r.unsqueeze(-1))
+
+        for out, src in ((dq, b_dq), (dk, b_dk), (dkg, b_dkg), (dg, b_dg)):
+            out[sel] = src.transpose(0, 1)[valid]
+
+        m_A = ((o.view(-1, 1) > o.view(1, -1)) & valid.view(-1, 1) & valid.view(1, -1)).float()
+        fin = (b_dA * beta_r.unsqueeze(1)) * m_A
+        fin = torch.matmul(torch.matmul(b_A, fin), b_A)
+        fin = -fin * m_A
+        dA[sel] = fin.transpose(0, 1)[valid]
+        db[sel] = b_db.transpose(0, 1)[valid]
+
+    return dq, dk, dkg, dv2, db, dg, dA
+
+
+def chunk_precond_kda_bwd_wy_dqkg_npu(
     q: torch.Tensor,
     k: torch.Tensor,
     k_precond: torch.Tensor,
@@ -425,6 +530,18 @@ def chunk_precond_kda_bwd_wy_dqkg(
 
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
+    # float(scale): a unit int constant miscompiles under the CANN-bundled hivmc (#1298).
+    if scale is not None:
+        scale = float(scale)
+
+    # The CANN-bundled hivmc cannot build the triton kernel for half
+    # dtypes with K > 64; fall back to torch (as the intra backward does).
+    if k.dtype in (torch.float16, torch.bfloat16) and K > 64:
+        return _chunk_precond_kda_bwd_wy_dqkg_torch(
+            q, k, k_precond, v, v_new, g, beta, A, h, do, dh, dv, scale,
+            cu_seqlens, chunk_indices, BT, transpose_state_layout,
+        )
+
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     dq = torch.empty_like(q, dtype=torch.float)
@@ -436,7 +553,7 @@ def chunk_precond_kda_bwd_wy_dqkg(
     dA = torch.empty_like(A, dtype=torch.float)
 
     grid = (NT, B * H)
-    chunk_precond_kda_bwd_kernel_wy_dqkg[grid](
+    chunk_precond_kda_bwd_kernel_wy_dqkg_npu[grid](
         q=q,
         k=k,
         k_precond=k_precond,
@@ -464,7 +581,15 @@ def chunk_precond_kda_bwd_wy_dqkg(
         K=K,
         V=V,
         BT=BT,
+        # BV=128 crashes the CANN-bundled hivmc; BK=32/BV=64 is verified working.
+        BK=32,
+        BV=64,
         TRANSPOSE_STATE=transpose_state_layout,
+        num_warps=_NUM_WARPS,
+        num_stages=2,
+        # multibuffer=False: multi-buffering deadlocks the aicore on fp16
+        # inputs under the CANN-bundled hivmc.
+        multibuffer=False,
     )
     dv = dv2
     return dq, dk, dkg, dv, db, dg, dA

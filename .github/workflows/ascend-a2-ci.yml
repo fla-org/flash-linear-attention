@@ -170,7 +170,8 @@ jobs:
             tests/ops/test_gla.py \
             tests/ops/test_attnres.py \
             tests/ops/test_solve_tril.py \
-            tests/ops/test_delta.py
+            tests/ops/test_delta.py \
+            tests/ops/test_precond_kda.py
 
       - name: Run NPU graph tests serially
         shell: bash
