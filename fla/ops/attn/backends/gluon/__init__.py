@@ -24,15 +24,15 @@ class AttnGluonBackend(GluonBackend):
 
     def parallel_attn_fwd_verifier(
         self,
-        q,
-        k,
-        v,
-        g_cumsum,
-        sink_bias,
-        scale,
-        window_size=None,
-        cu_seqlens=None,
-        chunk_indices=None,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g_cumsum: torch.Tensor | None,
+        sink_bias: torch.Tensor | None,
+        scale: float,
+        window_size: int | None = None,
+        cu_seqlens: torch.LongTensor | None = None,
+        chunk_indices: torch.LongTensor | None = None,
     ) -> tuple[bool, str | None]:
         if q.device.type != "cuda" or get_device_capability(q.device.index)[0] not in (9, 10):
             return False, "Gluon attention requires NVIDIA compute capability 9.x or 10.x"
@@ -42,7 +42,18 @@ class AttnGluonBackend(GluonBackend):
             return False, "Gluon attention supports query/key and value dimensions from 1 through 512"
         return True, None
 
-    def parallel_attn_fwd(self, q, k, v, g_cumsum, sink_bias, scale, window_size=None, cu_seqlens=None, chunk_indices=None):
+    def parallel_attn_fwd(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g_cumsum: torch.Tensor | None,
+        sink_bias: torch.Tensor | None,
+        scale: float,
+        window_size: int | None = None,
+        cu_seqlens: torch.LongTensor | None = None,
+        chunk_indices: torch.LongTensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         from fla.ops.attn.backends.gluon.parallel import parallel_attn_fwd_gluon
         return parallel_attn_fwd_gluon(
             q=q,
@@ -58,19 +69,19 @@ class AttnGluonBackend(GluonBackend):
 
     def parallel_attn_bwd_verifier(
         self,
-        q,
-        k,
-        v,
-        o,
-        g_cumsum,
-        lse,
-        do,
-        sink_bias=None,
-        scale=None,
-        window_size=None,
-        chunk_size=128,
-        cu_seqlens=None,
-        chunk_indices=None,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        o: torch.Tensor,
+        g_cumsum: torch.Tensor | None,
+        lse: torch.Tensor,
+        do: torch.Tensor,
+        sink_bias: torch.Tensor | None = None,
+        scale: float | None = None,
+        window_size: int | None = None,
+        chunk_size: int = 128,
+        cu_seqlens: torch.LongTensor | None = None,
+        chunk_indices: torch.LongTensor | None = None,
     ) -> tuple[bool, str | None]:
         return self.parallel_attn_fwd_verifier(
             q=q,
@@ -86,20 +97,20 @@ class AttnGluonBackend(GluonBackend):
 
     def parallel_attn_bwd(
         self,
-        q,
-        k,
-        v,
-        o,
-        g_cumsum,
-        lse,
-        do,
-        sink_bias=None,
-        scale=None,
-        window_size=None,
-        chunk_size=128,
-        cu_seqlens=None,
-        chunk_indices=None,
-    ):
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        o: torch.Tensor,
+        g_cumsum: torch.Tensor | None,
+        lse: torch.Tensor,
+        do: torch.Tensor,
+        sink_bias: torch.Tensor | None = None,
+        scale: float | None = None,
+        window_size: int | None = None,
+        chunk_size: int = 128,
+        cu_seqlens: torch.LongTensor | None = None,
+        chunk_indices: torch.LongTensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         from fla.ops.attn.backends.gluon.parallel import parallel_attn_bwd_gluon
         return parallel_attn_bwd_gluon(
             q=q,
@@ -119,16 +130,16 @@ class AttnGluonBackend(GluonBackend):
 
     def attn_decoding_one_step_verifier(
         self,
-        q,
-        k,
-        v,
-        g=None,
-        scale=None,
-        cu_seqlens=None,
-        do_gate_scale=False,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g: torch.Tensor | None = None,
+        scale: float | None = None,
+        cu_seqlens: torch.LongTensor | None = None,
+        do_gate_scale: bool = False,
         *,
-        window_size=None,
-        sink_bias=None,
+        window_size: int | None = None,
+        sink_bias: torch.Tensor | None = None,
     ) -> tuple[bool, str | None]:
         supported, reason = self.parallel_attn_fwd_verifier(
             q=q,
@@ -153,17 +164,17 @@ class AttnGluonBackend(GluonBackend):
 
     def attn_decoding_one_step(
         self,
-        q,
-        k,
-        v,
-        g=None,
-        scale=None,
-        cu_seqlens=None,
-        do_gate_scale=False,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g: torch.Tensor | None = None,
+        scale: float | None = None,
+        cu_seqlens: torch.LongTensor | None = None,
+        do_gate_scale: bool = False,
         *,
-        window_size=None,
-        sink_bias=None,
-    ):
+        window_size: int | None = None,
+        sink_bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         from fla.ops.attn.backends.gluon.decoding import attn_decoding_one_step
         return attn_decoding_one_step(
             q=q,

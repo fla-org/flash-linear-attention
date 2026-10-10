@@ -732,7 +732,17 @@ def _descriptor(x, BT, BD):
     )
 
 
-def parallel_attn_fwd_gluon(q, k, v, g_cumsum, sink_bias, scale, window_size=None, cu_seqlens=None, chunk_indices=None):
+def parallel_attn_fwd_gluon(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g_cumsum: torch.Tensor | None,
+    sink_bias: torch.Tensor | None,
+    scale: float,
+    window_size: int | None = None,
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, HQ, K = q.shape
     H, V = k.shape[2], v.shape[-1]
     BK, BV = max(64, triton.next_power_of_2(K)), min(256, max(32, triton.next_power_of_2(V)))
@@ -1205,20 +1215,20 @@ def parallel_attn_bwd_kernel_gluon(
 
 
 def parallel_attn_bwd_gluon(
-    q,
-    k,
-    v,
-    o,
-    g_cumsum,
-    lse,
-    do,
-    sink_bias=None,
-    scale=None,
-    window_size=None,
-    chunk_size=128,
-    cu_seqlens=None,
-    chunk_indices=None,
-):
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    o: torch.Tensor,
+    g_cumsum: torch.Tensor | None,
+    lse: torch.Tensor,
+    do: torch.Tensor,
+    sink_bias: torch.Tensor | None = None,
+    scale: float | None = None,
+    window_size: int | None = None,
+    chunk_size: int = 128,
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
     from einops import reduce
 
     from fla.ops.attn.parallel import parallel_attn_bwd_preprocess

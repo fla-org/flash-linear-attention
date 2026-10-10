@@ -180,17 +180,17 @@ def attn_decoding_fwd_kernel_reduce(
 
 
 def attn_decoding_one_step(
-    q,
-    k,
-    v,
-    g=None,
-    scale=None,
-    cu_seqlens=None,
-    do_gate_scale=False,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor | None = None,
+    scale: float | None = None,
+    cu_seqlens: torch.LongTensor | None = None,
+    do_gate_scale: bool = False,
     *,
-    window_size=None,
-    sink_bias=None,
-):
+    window_size: int | None = None,
+    sink_bias: torch.Tensor | None = None,
+) -> torch.Tensor:
     _, T, H, K = k.shape
     HQ, V = q.shape[2], v.shape[-1]
     if scale is None:
