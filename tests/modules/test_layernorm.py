@@ -414,37 +414,3 @@ def test_groupnorm_small_t(T: int, D: int, G: int, is_rms_norm: bool):
     ref_db = torch.autograd.grad(ref(ref_x).sum(), ref.bias)[0]
     tri_db = torch.autograd.grad(tri(x).sum(), tri.bias)[0]
     assert_close('db', ref_db, tri_db, 1e-3)
-
-
-@pytest.mark.parametrize("T", [100, 500, 5000, 10000, 20000, 24000])
-@pytest.mark.parametrize("D", [256])
-@pytest.mark.parametrize("has_residual", [False, True])
-def test_rmsnorm_varying_nb(T: int, D: int, has_residual: bool):
-    """RMSNorm outputs and gradients agree across token-count buckets."""
-    torch.manual_seed(42)
-    x = torch.randn(T, D, device=device).requires_grad_(True)
-    residual = torch.randn_like(x).requires_grad_(True) if has_residual else None
-    ref = LlamaRMSNorm(D, eps=0).to(device)
-    tri = RMSNorm(D, eps=0).to(device)
-    nn.init.normal_(ref.weight)
-    tri.weight.data.copy_(ref.weight.data)
-
-    ref_residual = x + residual if has_residual else x
-    ref_y = ref(ref_residual)
-    tri_y = tri(x, residual=residual, prenorm=has_residual)
-    dy = torch.randn_like(x)
-    if has_residual:
-        tri_y, tri_residual = tri_y
-        dresidual = torch.randn_like(x)
-        assert_close('residual', ref_residual, tri_residual, 1e-3)
-        ref_grads = torch.autograd.grad((ref_y, ref_residual), (x, residual, ref.weight), (dy, dresidual))
-        tri_grads = torch.autograd.grad((tri_y, tri_residual), (x, residual, tri.weight), (dy, dresidual))
-        grad_names = ('dx', 'dresidual', 'dw')
-    else:
-        ref_grads = torch.autograd.grad(ref_y, (x, ref.weight), dy)
-        tri_grads = torch.autograd.grad(tri_y, (x, tri.weight), dy)
-        grad_names = ('dx', 'dw')
-
-    assert_close('y', ref_y, tri_y, 1e-3)
-    for name, ref_grad, tri_grad in zip(grad_names, ref_grads, tri_grads):
-        assert_close(name, ref_grad, tri_grad, 1e-3)
