@@ -23,7 +23,7 @@ from fla.layers.utils import (
     unpad_hidden_states,
     update_layer_cache,
 )
-from fla.modules.norm.layernorm_gated import RMSNormGated
+from fla.modules.layernorm_gated import RMSNormGated
 
 with warnings.catch_warnings():
     warnings.simplefilter('ignore')

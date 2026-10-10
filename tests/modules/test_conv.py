@@ -13,7 +13,7 @@ import torch.nn.functional as F
 from einops import rearrange
 
 from fla import backends
-from fla.modules.causal_conv1d import ShortConvolution, causal_conv1d, causal_conv1d_update
+from fla.modules.convolution import ShortConvolution, causal_conv1d, causal_conv1d_update
 from fla.utils import IS_NVIDIA, assert_close, device
 
 try:
@@ -303,7 +303,7 @@ def test_fast_conv_varlen(N: int, T: int, D: int, W: int, activation: str | None
         pytest.skip("causal_conv1d is not installed for CUDA backend")
     if not IS_NVIDIA:
         pytest.skip("fast_causal_conv1d requires an NVIDIA GPU")
-    from fla.modules.causal_conv1d.backends.cuda import fast_causal_conv1d_fn
+    from fla.modules.convolution import fast_causal_conv1d_fn
 
     cu_seqlens = torch.cat([
         torch.tensor([0], dtype=torch.long),

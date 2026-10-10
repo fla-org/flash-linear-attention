@@ -7,9 +7,7 @@
 
 import importlib
 import inspect
-import json
 import pickle
-from pathlib import Path
 
 import pytest
 import torch
@@ -17,20 +15,6 @@ import torch
 import fla
 from fla import layers, models, modules
 from fla.modules import activations, l2norm
-
-_RELEASE_MODULES = json.loads((Path(__file__).parent / 'fixtures/modules_0_5_2.json').read_text())['modules']
-
-
-@pytest.mark.parametrize('module_name', _RELEASE_MODULES, ids=lambda name: name.removeprefix('fla.'))
-def test_0_5_2_module_exports(module_name):
-    """Preserve the release exports and class lookup paths used by historical pickles."""
-    module = importlib.import_module(module_name)
-    for name in _RELEASE_MODULES[module_name].split():
-        value = getattr(module, name)
-        assert value is getattr(importlib.import_module(module_name), name)
-        if inspect.isclass(value):
-            checkpoint = f'c{module_name}\n{name}\n.'.encode()
-            assert pickle.loads(checkpoint) is value
 
 
 def test_top_level_exports_layers_and_non_config_models():
@@ -48,12 +32,9 @@ def test_top_level_exports_layers_and_non_config_models():
 
 
 @pytest.mark.parametrize('disabled', ['0', '1'], ids=['dispatch-enabled', 'dispatch-disabled'])
-def test_public_imports_do_not_warn(run_python, disabled):
+def test_public_imports_preserve_callables(run_python, disabled):
     run_python(
         """
-        import warnings
-
-        warnings.filterwarnings('error', message='fla.*deprecated')
         from fla.ops.kda import chunk_kda
         from fla.backends import dispatch
         from fla.modules import ShortConvolution
@@ -128,12 +109,6 @@ def test_public_function_aliases():
         ('l2norm', 'L2Norm', {}, ()),
         ('convolution', 'ShortConvolution', {'hidden_size': 4, 'kernel_size': 3, 'bias': True}, ('weight', 'bias')),
         ('convolution', 'LongConvolution', {'hidden_size': 4, 'max_len': 8}, ('filter',)),
-        ('conv.short_conv', 'ShortConvolution', {'hidden_size': 4, 'kernel_size': 3, 'bias': True}, ('weight', 'bias')),
-        ('conv.long_conv', 'LongConvolution', {'hidden_size': 4, 'max_len': 8}, ('filter',)),
-        ('rotary', 'RotaryEmbedding', {'dim': 4}, ()),
-        ('fused_cross_entropy', 'FusedCrossEntropyLoss', {}, ()),
-        ('fused_linear_cross_entropy', 'FusedLinearCrossEntropyLoss', {}, ()),
-        ('fused_kl_div', 'FusedKLDivLoss', {}, ()),
     ],
     ids=[
         'layernorm',
@@ -145,12 +120,6 @@ def test_public_function_aliases():
         'l2norm',
         'convolution',
         'long-convolution',
-        'conv-short-convolution',
-        'conv-long-convolution',
-        'rotary',
-        'cross-entropy',
-        'linear-cross-entropy',
-        'kl-div',
     ],
 )
 def test_legacy_module_pickle_and_state_dict(monkeypatch, legacy, name, kwargs, state_keys):
@@ -230,7 +199,8 @@ def test_normalization_imports_preserve_public_exports(run_python, disabled):
         assert modules.L2Norm is L2Norm is norm.L2Norm
         assert modules.RMSNorm is RMSNorm is norm.RMSNorm
         assert modules.RotaryEmbedding is RotaryEmbedding is rotary.RotaryEmbedding
-        assert not norm_warnings(caught), [str(w.message) for w in caught]
+        assert norm_warnings(caught), [str(w.message) for w in caught]
+        assert all('0.6.1' in str(w.message) for w in norm_warnings(caught))
 
         for name, canonical_path in zip(expected_symbols, canonical_paths):
             canonical = importlib.import_module(canonical_path)
@@ -238,15 +208,14 @@ def test_normalization_imports_preserve_public_exports(run_python, disabled):
                 warnings.simplefilter('always', FutureWarning)
                 legacy = importlib.import_module('fla.modules.' + name)
                 assert importlib.import_module('fla.modules.' + name) is legacy
-                assert set(legacy.__all__) == set(canonical.__all__) == set(expected_symbols[name])
-                for symbol in expected_symbols[name]:
-                    assert getattr(legacy, symbol) is getattr(canonical, symbol), (name, symbol)
                 if name == 'l2norm':
                     from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
                     assert l2norm_fwd is canonical.l2norm_fwd
                     assert l2norm_bwd is canonical.l2norm_bwd
-            assert len(norm_warnings(caught)) == 1, (name, [str(w.message) for w in caught])
-            assert '0.6.1' in str(norm_warnings(caught)[0].message)
+            assert not norm_warnings(caught), (name, [str(w.message) for w in caught])
+            assert set(legacy.__all__) == set(canonical.__all__) == set(expected_symbols[name])
+            for symbol in expected_symbols[name]:
+                assert getattr(legacy, symbol) is getattr(canonical, symbol), (name, symbol)
 
         from fla.modules.causal_conv1d import causal_conv1d
         importlib.import_module('fla.modules.causal_conv1d.ops')
@@ -258,69 +227,3 @@ def test_normalization_imports_preserve_public_exports(run_python, disabled):
         """,
         FLA_DISABLE_BACKEND_DISPATCH=disabled,
     )
-
-
-def test_legacy_imports_are_lazy_and_warn_once(run_python):
-    run_python(
-        """
-        import importlib
-        import sys
-        import warnings
-
-        import fla.modules
-
-        assert 'fla.modules.grpo' not in sys.modules
-        assert 'fla.modules.causal_conv1d.cp' not in sys.modules
-        assert 'fla.modules.causal_conv1d.backends.cuda' not in sys.modules
-
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter('always', FutureWarning)
-            import fla.modules.conv.cuda.ops as legacy
-            from fla.modules import layernorm
-            assert not caught
-            assert importlib.util.find_spec('fla.modules.conv.cuda.ops') is not None
-            assert importlib.import_module('fla.modules.conv.cuda.ops') is legacy
-            assert not hasattr(legacy, 'missing_symbol')
-            assert not caught
-
-            from fla.modules.conv.cuda.ops import FastCausalConv1dFn, fast_causal_conv1d_fn
-            from fla.modules.causal_conv1d.backends import cuda
-            assert FastCausalConv1dFn is cuda.FastCausalConv1dFn
-            assert fast_causal_conv1d_fn is cuda.fast_causal_conv1d_fn
-            assert len(caught) == 1
-            assert caught[0].category is FutureWarning
-            assert '0.6.1' in str(caught[0].message)
-            assert 'fla.modules.causal_conv1d.backends.cuda' in str(caught[0].message)
-            assert caught[0].filename == '<string>'
-            assert legacy.FastCausalConv1dFn is FastCausalConv1dFn
-            assert len(caught) == 1
-
-        from fla.modules import conv
-        from fla.modules.causal_conv1d import causal_conv1d
-        assert conv.causal_conv1d is causal_conv1d
-        importlib.import_module('fla.modules.conv.causal_conv1d')
-        assert conv.causal_conv1d is causal_conv1d
-        exports = {}
-        exec('from fla.modules.conv import *', exports)
-        assert exports['causal_conv1d'] is causal_conv1d
-        assert 'fla.modules.grpo' not in sys.modules
-        """
-    )
-
-
-@pytest.mark.parametrize(
-    ('package', 'aliases'),
-    [
-        ('fused_cross_entropy', {'fused_cross_entropy_forward': 'cross_entropy_fwd',
-                                 'CrossEntropyLossFunction': 'FusedCrossEntropyFunction'}),
-        ('fused_kl_div', {'fused_kl_div_forward': 'fused_kl_div_fwd', 'fused_kl_div_backward': 'fused_kl_div_bwd'}),
-        ('fused_linear_cross_entropy', {'fused_linear_cross_entropy_forward': 'fused_linear_cross_entropy_fwd',
-                                        'fused_linear_cross_entropy_backward': 'fused_linear_cross_entropy_bwd'}),
-    ],
-    ids=['cross-entropy', 'kl-div', 'linear-cross-entropy'],
-)
-def test_legacy_loss_aliases(package, aliases):
-    legacy = importlib.import_module('fla.modules.' + package)
-    current = importlib.import_module('fla.modules.' + package + '.ops')
-    for old_name, new_name in aliases.items():
-        assert getattr(legacy, old_name) is getattr(current, new_name)

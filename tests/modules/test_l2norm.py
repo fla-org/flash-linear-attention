@@ -9,7 +9,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from fla.modules.norm.l2norm import l2_norm
+from fla.modules.l2norm import l2_norm
 from fla.utils import assert_close, device
 
 

@@ -18,7 +18,7 @@ from transformers.utils import logging
 
 from fla.layers.utils import get_layer_cache, update_layer_cache
 from fla.modules.activations import ACT2FN
-from fla.modules.norm.layernorm_gated import RMSNormGated
+from fla.modules.layernorm_gated import RMSNormGated
 
 with warnings.catch_warnings():
     warnings.simplefilter('ignore')
@@ -257,8 +257,8 @@ class Mamba2(nn.Module):
             )
             backend = 'triton'
         if backend == 'triton':
-            from fla.modules.causal_conv1d import causal_conv1d as causal_conv1d_triton
-            from fla.modules.causal_conv1d import causal_conv1d_update as causal_conv1d_update_triton
+            from fla.modules.convolution import causal_conv1d as causal_conv1d_triton
+            from fla.modules.convolution import causal_conv1d_update as causal_conv1d_update_triton
             self.causal_conv1d_fn = causal_conv1d_triton
             self.causal_conv1d_update = causal_conv1d_update_triton
             logger.warning(

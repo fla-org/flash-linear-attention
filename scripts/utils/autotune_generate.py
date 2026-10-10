@@ -118,7 +118,7 @@ class FLACacheGenerator:
         weight = torch.randn(H * D, W).to(self.device, dtype).requires_grad_(True)
         dy = torch.randn(B, T, H * D).to(self.device, dtype)
 
-        from fla.modules.causal_conv1d import causal_conv1d
+        from fla.modules.convolution import causal_conv1d
         tri, _ = causal_conv1d(x, weight, None, residual=None, activation="silu")
         tri.backward(dy)
 

@@ -11,7 +11,7 @@ import torch
 import triton
 from einops import rearrange
 
-from fla.modules.causal_conv1d import causal_conv1d
+from fla.modules.convolution import causal_conv1d
 from fla.ops.utils.index import prepare_sequence_ids
 from fla.utils import IS_NPU, IS_NVIDIA, find_spec_cached
 

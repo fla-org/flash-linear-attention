@@ -19,7 +19,7 @@ from einops import rearrange
 from fla.layers.utils import get_layer_cache, repad_hidden_states, unpad_hidden_states, update_layer_cache
 from fla.modules import RMSNorm, ShortConvolution
 from fla.modules.activations import swish
-from fla.modules.norm.layernorm import rms_norm_linear
+from fla.modules.layernorm import rms_norm_linear
 from fla.ops.gla import chunk_gla, fused_chunk_gla, fused_recurrent_gla
 
 if TYPE_CHECKING:

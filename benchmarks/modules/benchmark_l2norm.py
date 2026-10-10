@@ -11,7 +11,7 @@ import torch
 import torch.nn.functional as F
 import triton
 
-from fla.modules.norm.l2norm import l2norm
+from fla.modules.l2norm import l2norm
 
 
 @triton.testing.perf_report(

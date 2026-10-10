@@ -6,7 +6,7 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 from fla.backends import TritonAscendBackend
-from fla.modules._compat import _deprecated_getattr
+from fla.modules import _deprecated_getattr
 from fla.modules.fused_linear_cross_entropy.ops import (
     FusedLinearCrossEntropyLoss,
     LinearLossParallel,

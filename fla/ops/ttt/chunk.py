@@ -10,7 +10,7 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
-from fla.modules.norm.layernorm import group_norm
+from fla.modules.layernorm import group_norm
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 from fla.ops.utils.op import unflatten_program_id
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, input_guard
