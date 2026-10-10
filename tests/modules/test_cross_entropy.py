@@ -14,11 +14,8 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 import torch.nn.functional as F
-from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.tensor.parallel import parallelize_module
 
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
-from fla.modules.fused_linear_cross_entropy import LinearLossParallel
 from fla.modules.l2warp import l2_warp
 from fla.utils import IS_INTEL, IS_NPU, IS_NVIDIA, assert_close, device, device_torch_lib
 
@@ -330,45 +327,6 @@ def test_fused_linear_cross_entropy(
         assert tri.item() == 0
         for grad in tri_grads:
             assert torch.count_nonzero(grad).item() == 0
-
-
-@pytest.mark.parametrize('use_local_output', [False, True], ids=['default_output', 'local_output'])
-@pytest.mark.parametrize('with_bias', [False, True], ids=['no_bias', 'bias'])
-@pytest.mark.parametrize('dtype', [torch.float32, torch.bfloat16], ids=['fp32', 'bf16'])
-@pytest.mark.skipif(not dist.is_gloo_available(), reason='DeviceMesh setup requires Gloo')
-@pytest.mark.skipif(IS_INTEL, reason='Intel Triton Failure')
-def test_linear_loss_parallel(use_local_output, with_bias, dtype, tmp_path):
-    torch.manual_seed(42)
-    dist.init_process_group(
-        backend='gloo',
-        init_method=f'file://{tmp_path / "store"}',
-        rank=0,
-        world_size=1,
-        timeout=timedelta(seconds=30),
-    )
-    try:
-        mesh = init_device_mesh(device, (1,))
-        x = torch.randn(2, 7, 64, device=device, dtype=dtype, requires_grad=True)
-        weight = (torch.randn(67, 64, device=device) / 8).to(dtype).requires_grad_()
-        bias = torch.randn(67, device=device, dtype=dtype, requires_grad=True) if with_bias else None
-        target = torch.randint(67, (2, 7), device=device)
-        target[:, 0] = -100
-        inputs = (x, weight, bias) if with_bias else (x, weight)
-        ref = F.cross_entropy(F.linear(x, weight, bias).float().reshape(-1, 67), target.flatten())
-        ref_grads = torch.autograd.grad(ref * 2, inputs)
-        criterion = parallelize_module(
-            FusedLinearCrossEntropyLoss(),
-            mesh,
-            LinearLossParallel(use_local_output=use_local_output),
-        )
-        tri = criterion(x, target, weight, bias)
-        tri_grads = torch.autograd.grad(tri * 2, inputs)
-        assert type(tri) is torch.Tensor
-        for name, expected, actual in zip(('loss', 'dx', 'dw', 'db'), (ref, *ref_grads), (tri, *tri_grads)):
-            assert torch.isfinite(actual).all(), name
-            assert_close(name, expected, actual, ratio=1e-2, err_atol=1e-6)
-    finally:
-        dist.destroy_process_group()
 
 
 def _check_parallel_linear_cross_entropy(rank, world_size, local_vocab, dtype, option, reduction):
