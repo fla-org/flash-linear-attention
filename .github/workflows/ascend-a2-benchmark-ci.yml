@@ -112,6 +112,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7.0.0
+        with:
+          fetch-depth: 0
 
       - name: Check NPU and CANN info
         run: |
@@ -162,137 +164,22 @@ jobs:
           print("matplotlib savefig smoke test: ok")
           PY
 
-      - name: Benchmark chunk_gdn, fused_recurrent_gdn2, chunk_gdn2, chunk_kda, KDA graph, fused_attnres, and conv1d
+      - name: Quantized normalization correctness and baseline comparison
         shell: bash
         env:
-          FLA_BENCH_WARMUP_MS: "25"
-          FLA_BENCH_REP_MS: "100"
-          FLA_BENCH_OP_WARMUP_ITERS: "3"
+          ASCEND_RT_VISIBLE_DEVICES: "0"
+          FLA_NPU_XDIST: "0"
         run: |
           source /usr/local/Ascend/ascend-toolkit/set_env.sh
-          set -uo pipefail
+          set -euo pipefail
+          git diff --exit-code 19311fd5a40df444474866742afd941532096f60 -- fla tests
+          pytest -q tests/modules/test_layernorm.py -k test_layernorm_linear_quant 2>&1 | tee quant-validation-tests.log
+          python benchmarks/modules/quant_merge_validation.py 2>&1 | tee quant-validation-compare.log
 
-          run_benchmark() {
-            local name=$1 device=$2
-            shift 2
-            local started=$SECONDS rc=0
-            echo "Benchmark $name: device=$device started=$(date -u +%FT%TZ)"
-            ASCEND_RT_VISIBLE_DEVICES="$device" "$@" > "$name.log" 2>&1 || rc=$?
-            echo "Benchmark $name: device=$device elapsed=$((SECONDS - started))s exit=$rc"
-            return "$rc"
-          }
-
-          (
-            status=0
-            run_benchmark chunk_gdn 0 python -m benchmarks.ops.run \
-              --op chunk_gdn --base '' --json benchmark_chunk_gdn.json || status=1
-            run_benchmark fused_recurrent_gdn2 0 python -m benchmarks.ops.run \
-              --op fused_recurrent_gdn2 --base '' --json benchmark_fused_recurrent_gdn2.json || status=1
-            exit "$status"
-          ) &
-          pid_gdn=$!
-          run_benchmark chunk_kda 1 python -m benchmarks.ops.run \
-            --op chunk_kda --base '' --json benchmark_chunk_kda.json &
-          pid_kda=$!
-          # fused_attnres finishes first in the four-card baseline; reuse its card for GDN2.
-          (
-            set -e
-            run_benchmark fused_attnres 2 python -m benchmarks.ops.run \
-              --op fused_attnres --base '' --json benchmark_fused_attnres.json
-            run_benchmark chunk_gdn2 2 python -m benchmarks.ops.run \
-              --op chunk_gdn2 --base '' \
-              --json benchmark_chunk_gdn2.json
-          python - <<'PY'
-          import json
-
-          from benchmarks.ops.registry import SHAPE_CONFIGS, get_op
-
-          def verify(path, shapes):
-              with open(path) as f:
-                  results = [r for r in json.load(f)['results'] if r['op'] == 'chunk_gdn2']
-              actual = {(r['mode'], r['B'], r['T'], r['H'], r['D']) for r in results}
-              expected = {
-                  (mode, shape['B'], shape['T'], shape['H'], shape['D'])
-                  for shape in shapes.values()
-                  for mode in ('fwd', 'fwdbwd')
-              }
-              assert len(results) == len(expected) and actual == expected, {
-                  'missing': sorted(expected - actual),
-                  'unexpected': sorted(actual - expected),
-              }
-
-          shapes = get_op('chunk_gdn2').default_shapes or SHAPE_CONFIGS
-          verify('benchmark_chunk_gdn2.json', shapes)
-          PY
-          ) &
-          pid_attnres=$!
-          run_benchmark conv1d 3 python benchmarks/modules/benchmark_conv.py &
-          pid_conv1d=$!
-          status=0
-          wait "$pid_gdn" || status=1
-          wait "$pid_kda" || status=1
-          wait "$pid_attnres" || status=1
-          wait "$pid_conv1d" || status=1
-
-          # The runner exposes devices 0-3. Reuse device 0 only after the
-          # parallel benchmarks finish so graph latency is not affected by
-          # another workload sharing the same NPU.
-          ASCEND_RT_VISIBLE_DEVICES=0 python -m benchmarks.ops.run --graph \
-            --op chunk_kda --no-base --modes fwdbwd \
-            --custom-shapes '{"smoke": {"B": 1, "T": 128, "H": 2, "D": 64, "N": 2}}' \
-            --warmup 3 --iterations 10 --json benchmark_kda_graph.json \
-            > chunk_kda_graph.log 2>&1 || status=1
-
-          echo "========== chunk_gdn =========="
-          cat chunk_gdn.log
-          echo "========== fused_recurrent_gdn2 =========="
-          cat fused_recurrent_gdn2.log
-          echo "========== chunk_gdn2 (default shape matrix, including 32K) =========="
-          cat chunk_gdn2.log
-          echo "========== chunk_kda =========="
-          cat chunk_kda.log
-          echo "========== fused_attnres =========="
-          cat fused_attnres.log
-          echo "========== chunk_kda graph =========="
-          cat chunk_kda_graph.log
-          echo "========== conv1d =========="
-          cat conv1d.log
-          exit "$status"
-
-      - name: Check fused-recurrent GDN2 benchmark results
-        shell: bash
-        run: |
-          source /usr/local/Ascend/ascend-toolkit/set_env.sh
-          python - <<'PY'
-          import json
-          import math
-
-          from benchmarks.ops.registry import SHAPE_CONFIGS, get_op
-
-          with open("benchmark_fused_recurrent_gdn2.json") as f:
-              results = json.load(f)["results"]
-          config = get_op("fused_recurrent_gdn2")
-          shapes = config.default_shapes or SHAPE_CONFIGS
-          expected = {tuple(shape[key] for key in ("B", "T", "H", "D")) for shape in shapes.values()}
-          actual = {tuple(row[key] for key in ("B", "T", "H", "D")) for row in results}
-          assert actual == expected and len(results) == len(expected), f"Incomplete GDN2 benchmark: {actual} != {expected}"
-          for row in results:
-              assert row["op"] == "fused_recurrent_gdn2" and row["mode"] == "fwd", row
-              assert all(math.isfinite(row[key]) and row[key] > 0 for key in ("median_ms", "p20_ms", "p80_ms")), row
-          PY
-
-      - name: Upload benchmark results
+      - name: Upload quantization validation
         if: always()
         uses: actions/upload-artifact@v7.0.1
         with:
-          name: ascend-a2-benchmark-results
-          path: |
-            benchmark_chunk_gdn.json
-            benchmark_fused_recurrent_gdn2.json
-            benchmark_chunk_gdn2.json
-            benchmark_chunk_kda.json
-            benchmark_fused_attnres.json
-            benchmark_kda_graph.json
-            conv_benchmark/
-          if-no-files-found: ignore
+          name: quant-normalization-validation
+          path: quant-validation-*
           retention-days: 10
