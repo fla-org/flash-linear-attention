@@ -40,8 +40,8 @@ def activation_quant(x: torch.Tensor) -> torch.Tensor:
 def weight_quant(w: torch.Tensor) -> torch.Tensor:
     """Quantize weights to 1.58 bits per tensor and return dequantized values."""
     scale = 1.0 / w.abs().mean().clamp_(min=1e-5)
-    u = (w * scale).round().clamp_(-1, 1) / scale
-    return u
+    y = (w * scale).round().clamp_(-1, 1) / scale
+    return y
 
 
 @triton.jit
@@ -54,7 +54,10 @@ def _activation_quant_fwd(b_x):
 
 
 @triton.autotune(
-    configs=[triton.Config({}, num_warps=num_warps) for num_warps in NUM_WARPS_AUTOTUNE],
+    configs=[
+        triton.Config({}, num_warps=num_warps)
+        for num_warps in NUM_WARPS_AUTOTUNE
+    ],
     key=['D', 'HAS_RESIDUAL', 'STORE_RESIDUAL_OUT', 'IS_RMS_NORM', 'HAS_BIAS'],
     **autotune_cache_kwargs,
 )
@@ -69,10 +72,6 @@ def layer_norm_quant_fwd_kernel(
     mean,
     rstd,
     eps,
-    stride_x,
-    stride_y,
-    stride_res,
-    stride_res_out,
     D: tl.constexpr,
     BD: tl.constexpr,
     IS_RMS_NORM: tl.constexpr,
@@ -86,18 +85,18 @@ def layer_norm_quant_fwd_kernel(
     o_d = tl.arange(0, BD).to(tl.int64)
     m_d = o_d < D
 
-    p_x = x + i_t * stride_x + o_d
+    p_x = x + i_t * D + o_d
     b_x = tl.load(p_x, mask=m_d, other=0.0).to(tl.float32)
     if HAS_RESIDUAL:
-        p_res = res + i_t * stride_res + o_d
+        p_res = res + i_t * D + o_d
         b_x += tl.load(p_res, mask=m_d, other=0.0).to(tl.float32)
     if STORE_RESIDUAL_OUT:
-        p_res_out = res_out + i_t * stride_res_out + o_d
-        tl.store(p_res_out, b_x, mask=m_d)
+        p_res_out = res_out + i_t * D + o_d
+        tl.store(p_res_out, b_x.to(p_res_out.dtype.element_ty), mask=m_d)
     if not IS_RMS_NORM:
         b_mean = tl.sum(b_x, axis=0) / D
         p_mean = mean + i_t
-        tl.store(p_mean, b_mean)
+        tl.store(p_mean, b_mean.to(p_mean.dtype.element_ty))
         b_xbar = tl.where(m_d, b_x - b_mean, 0.0)
         b_var = tl.sum(b_xbar * b_xbar, axis=0) / D
     else:
@@ -106,7 +105,7 @@ def layer_norm_quant_fwd_kernel(
     b_rstd = 1 / tl.sqrt(b_var + eps)
 
     p_rstd = rstd + i_t
-    tl.store(p_rstd, b_rstd)
+    tl.store(p_rstd, b_rstd.to(p_rstd.dtype.element_ty))
 
     if HAS_WEIGHT:
         b_w = tl.load(w + o_d, mask=m_d, other=0.0).to(tl.float32)
@@ -119,13 +118,16 @@ def layer_norm_quant_fwd_kernel(
 
     b_y = _activation_quant_fwd(b_y)
 
-    p_y = y + i_t * stride_y + o_d
-    tl.store(p_y, b_y, mask=m_d)
+    p_y = y + i_t * D + o_d
+    tl.store(p_y, b_y.to(p_y.dtype.element_ty), mask=m_d)
 
 
 @triton.heuristics({'RECOMPUTE_OUTPUT': lambda args: args['y'] is not None})
 @triton.autotune(
-    configs=[triton.Config({}, num_warps=num_warps) for num_warps in NUM_WARPS_AUTOTUNE],
+    configs=[
+        triton.Config({}, num_warps=num_warps)
+        for num_warps in NUM_WARPS_AUTOTUNE
+    ],
     key=['D', 'HAS_DRESIDUAL', 'STORE_DRESIDUAL', 'IS_RMS_NORM', 'HAS_BIAS'],
     **autotune_cache_kwargs,
 )
@@ -143,12 +145,6 @@ def layer_norm_quant_bwd_kernel(
     dres_in,
     mean,
     rstd,
-    stride_x,
-    stride_y,
-    stride_dy,
-    stride_dx,
-    stride_dres,
-    stride_dres_in,
     T,
     D: tl.constexpr,
     BS: tl.constexpr,
@@ -172,9 +168,10 @@ def layer_norm_quant_bwd_kernel(
         b_b = tl.load(b + o_d, mask=m_d, other=0.0).to(tl.float32)
     if HAS_BIAS:
         b_db = tl.zeros((BD,), dtype=tl.float32)
+
     for i_t in range(i_s * BS, min((i_s + 1) * BS, T)):
-        p_x = x + i_t * stride_x + o_d
-        p_dy = dy + i_t * stride_dy + o_d
+        p_x = x + i_t * D + o_d
+        p_dy = dy + i_t * D + o_d
         b_x = tl.load(p_x, mask=m_d, other=0.0).to(tl.float32)
         b_dy = tl.load(p_dy, mask=m_d, other=0.0).to(tl.float32)
         if not IS_RMS_NORM:
@@ -192,8 +189,8 @@ def layer_norm_quant_bwd_kernel(
 
             b_y = _activation_quant_fwd(b_y)
 
-            p_y = y + i_t * stride_y + o_d
-            tl.store(p_y, b_y, mask=m_d)
+            p_y = y + i_t * D + o_d
+            tl.store(p_y, b_y.to(p_y.dtype.element_ty), mask=m_d)
         b_wdy = b_dy
         if HAS_WEIGHT:
             b_wdy = b_dy * b_w
@@ -208,20 +205,22 @@ def layer_norm_quant_bwd_kernel(
             b_c1 = tl.sum(b_x_hat * b_wdy, axis=0) / D
             b_dx = (b_wdy - b_x_hat * b_c1) * b_rstd
         if HAS_DRESIDUAL:
-            p_dres = dres + i_t * stride_dres + o_d
+            p_dres = dres + i_t * D + o_d
             b_dx += tl.load(p_dres, mask=m_d, other=0.0).to(tl.float32)
+
         if STORE_DRESIDUAL:
-            p_dres_in = dres_in + i_t * stride_dres_in + o_d
-            tl.store(p_dres_in, b_dx, mask=m_d)
-        p_dx = dx + i_t * stride_dx + o_d
-        tl.store(p_dx, b_dx, mask=m_d)
+            p_dres_in = dres_in + i_t * D + o_d
+            tl.store(p_dres_in, b_dx.to(p_dres_in.dtype.element_ty), mask=m_d)
+
+        p_dx = dx + i_t * D + o_d
+        tl.store(p_dx, b_dx.to(p_dx.dtype.element_ty), mask=m_d)
 
     if HAS_WEIGHT:
         p_dw = dw + i_s * D + o_d
-        tl.store(p_dw, b_dw, mask=m_d)
+        tl.store(p_dw, b_dw.to(p_dw.dtype.element_ty), mask=m_d)
     if HAS_BIAS:
         p_db = db + i_s * D + o_d
-        tl.store(p_db, b_db, mask=m_d)
+        tl.store(p_db, b_db.to(p_db.dtype.element_ty), mask=m_d)
 
 
 def layer_norm_quant_fwd(
@@ -237,13 +236,21 @@ def layer_norm_quant_fwd(
     if residual is not None:
         residual_dtype = residual.dtype
     T, D = x.shape
+    if residual is not None:
+        assert residual.shape == (T, D)
+    if weight is not None:
+        assert weight.shape == (D,)
+    if bias is not None:
+        assert bias.shape == (D,)
+
     y = torch.empty_like(x, dtype=x.dtype if out_dtype is None else out_dtype)
     if residual is not None or (residual_dtype is not None and residual_dtype != x.dtype):
-        residual_out = torch.empty(T, D, device=x.device, dtype=residual_dtype)
+        res_out = torch.empty(T, D, device=x.device, dtype=residual_dtype)
     else:
-        residual_out = None
+        res_out = None
     mean = torch.empty((T,), dtype=torch.float32, device=x.device) if not is_rms_norm else None
     rstd = torch.empty((T,), dtype=torch.float32, device=x.device)
+
     MAX_FUSED_SIZE = 65536 // x.element_size()
     BD = min(MAX_FUSED_SIZE, triton.next_power_of_2(D))
     if D > BD:
@@ -254,23 +261,19 @@ def layer_norm_quant_fwd(
         w=weight,
         b=bias,
         res=residual,
-        res_out=residual_out,
+        res_out=res_out,
         mean=mean,
         rstd=rstd,
         eps=eps,
-        stride_x=x.stride(0),
-        stride_y=y.stride(0),
-        stride_res=residual.stride(0) if residual is not None else 0,
-        stride_res_out=residual_out.stride(0) if residual_out is not None else 0,
         D=D,
         BD=BD,
         IS_RMS_NORM=is_rms_norm,
         HAS_RESIDUAL=residual is not None,
-        STORE_RESIDUAL_OUT=residual_out is not None,
+        STORE_RESIDUAL_OUT=res_out is not None,
         HAS_WEIGHT=weight is not None,
         HAS_BIAS=bias is not None,
     )
-    return y, mean, rstd, residual_out if residual_out is not None else x
+    return y, mean, rstd, res_out if res_out is not None else x
 
 
 def layer_norm_quant_bwd(
@@ -278,18 +281,25 @@ def layer_norm_quant_bwd(
     x: torch.Tensor,
     weight: torch.Tensor | None,
     bias: torch.Tensor | None,
-    eps: float,
     mean: torch.Tensor | None,
     rstd: torch.Tensor,
-    dresidual: torch.Tensor | None = None,
+    dres: torch.Tensor | None = None,
     has_residual: bool = False,
     is_rms_norm: bool = False,
     x_dtype: torch.dtype | None = None,
     recompute_output: bool = False,
 ):
     T, D = x.shape
+    assert dy.shape == (T, D)
+    if dres is not None:
+        assert dres.shape == (T, D)
+    if weight is not None:
+        assert weight.shape == (D,)
+    if bias is not None:
+        assert bias.shape == (D,)
+
     dx = torch.empty_like(x) if x_dtype is None else torch.empty(T, D, dtype=x_dtype, device=x.device)
-    dresidual_in = torch.empty_like(x) if has_residual and dx.dtype != x.dtype else None
+    dres_in = torch.empty_like(x) if has_residual and dx.dtype != x.dtype else None
     y = torch.empty(T, D, dtype=dy.dtype, device=dy.device) if recompute_output else None
 
     MAX_FUSED_SIZE = 65536 // x.element_size()
@@ -297,9 +307,10 @@ def layer_norm_quant_bwd(
     if D > BD:
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
     NS = get_multiprocessor_count(x.device.index)
+    BS = triton.cdiv(T, NS)
+
     dw = torch.empty((NS, D), dtype=torch.float32, device=weight.device) if weight is not None else None
     db = torch.empty((NS, D), dtype=torch.float32, device=bias.device) if bias is not None else None
-    BS = triton.cdiv(T, NS)
     grid = (NS,)
     layer_norm_quant_bwd_kernel[grid](
         x=x,
@@ -310,23 +321,17 @@ def layer_norm_quant_bwd(
         dx=dx,
         dw=dw,
         db=db,
-        dres=dresidual,
-        dres_in=dresidual_in,
+        dres=dres,
+        dres_in=dres_in,
         mean=mean,
         rstd=rstd,
-        stride_x=x.stride(0),
-        stride_y=0 if not recompute_output else y.stride(0),
-        stride_dy=dy.stride(0),
-        stride_dx=dx.stride(0),
-        stride_dres=dresidual.stride(0) if dresidual is not None else 0,
-        stride_dres_in=dresidual_in.stride(0) if dresidual_in is not None else 0,
         T=T,
         D=D,
         BS=BS,
         BD=BD,
         IS_RMS_NORM=is_rms_norm,
-        HAS_DRESIDUAL=dresidual is not None,
-        STORE_DRESIDUAL=dresidual_in is not None,
+        HAS_DRESIDUAL=dres is not None,
+        STORE_DRESIDUAL=dres_in is not None,
         HAS_WEIGHT=weight is not None,
         HAS_BIAS=bias is not None,
     )
@@ -334,8 +339,8 @@ def layer_norm_quant_bwd(
     db = db.sum(0).to(bias.dtype) if bias is not None else None
     # the residual shares the input gradient when their dtypes match
     if has_residual and dx.dtype == x.dtype:
-        dresidual_in = dx
-    return (dx, dw, db, dresidual_in) if not recompute_output else (dx, dw, db, dresidual_in, y)
+        dres_in = dx
+    return (dx, dw, db, dres_in) if not recompute_output else (dx, dw, db, dres_in, y)
 
 
 class LayerNormLinearQuantFunction(torch.autograd.Function):
@@ -362,7 +367,7 @@ class LayerNormLinearQuantFunction(torch.autograd.Function):
             assert residual.shape == x_shape_og
             residual = residual.reshape(-1, residual.shape[-1])
         residual_dtype = residual.dtype if residual is not None else (torch.float32 if residual_in_fp32 else None)
-        y, mean, rstd, residual_out = layer_norm_quant_fwd(
+        y, mean, rstd, res_out = layer_norm_quant_fwd(
             x=x,
             weight=norm_weight,
             bias=norm_bias,
@@ -378,15 +383,14 @@ class LayerNormLinearQuantFunction(torch.autograd.Function):
         linear_bias = linear_bias.to(dtype) if linear_bias is not None else None
         out = F.linear(input=y.to(linear_weight.dtype), weight=linear_weight, bias=linear_bias)
         # recompute y in backward to save memory
-        ctx.save_for_backward(residual_out, norm_weight, norm_bias, linear_weight, mean, rstd)
+        ctx.save_for_backward(res_out, norm_weight, norm_bias, linear_weight, mean, rstd)
         ctx.x_shape_og = x_shape_og
-        ctx.eps = eps
         ctx.is_rms_norm = is_rms_norm
         ctx.has_residual = residual is not None
         ctx.prenorm = prenorm
         ctx.x_dtype = x.dtype
         ctx.linear_bias_is_none = linear_bias is None
-        return out if not prenorm else (out, residual_out.reshape(x_shape_og))
+        return out if not prenorm else (out, res_out.reshape(x_shape_og))
 
     @staticmethod
     @input_guard
@@ -398,20 +402,19 @@ class LayerNormLinearQuantFunction(torch.autograd.Function):
         dlinear_bias = None if ctx.linear_bias_is_none else dout.sum(0)
         assert dy.shape == x.shape
         if ctx.prenorm:
-            dresidual = args[0]
-            dresidual = dresidual.reshape(-1, dresidual.shape[-1])
-            assert dresidual.shape == x.shape
+            dres = args[0]
+            dres = dres.reshape(-1, dres.shape[-1])
+            assert dres.shape == x.shape
         else:
-            dresidual = None
-        dx, dnorm_weight, dnorm_bias, dresidual_in, y = layer_norm_quant_bwd(
+            dres = None
+        dx, dnorm_weight, dnorm_bias, dres_in, y = layer_norm_quant_bwd(
             dy=dy,
             x=x,
             weight=norm_weight,
             bias=norm_bias,
-            eps=ctx.eps,
             mean=mean,
             rstd=rstd,
-            dresidual=dresidual,
+            dres=dres,
             has_residual=ctx.has_residual,
             is_rms_norm=ctx.is_rms_norm,
             x_dtype=ctx.x_dtype,
@@ -424,7 +427,7 @@ class LayerNormLinearQuantFunction(torch.autograd.Function):
             dnorm_bias,
             dlinear_weight,
             dlinear_bias,
-            dresidual_in.reshape(ctx.x_shape_og) if ctx.has_residual else None,
+            dres_in.reshape(ctx.x_shape_og) if ctx.has_residual else None,
             None,
             None,
             None,

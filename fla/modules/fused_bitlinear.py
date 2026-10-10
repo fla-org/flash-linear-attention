@@ -17,18 +17,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from fla.modules.norm.layernorm_quant import (  # noqa: F401
-    LayerNormLinearQuantFunction,
-    activation_quant,
-    bit_linear,
-    layer_norm_linear_quant,
-    layer_norm_quant_bwd,
-    layer_norm_quant_bwd_kernel,
-    layer_norm_quant_fwd,
-    layer_norm_quant_fwd_kernel,
-    rms_norm_linear_quant,
-    weight_quant,
-)
+from fla.modules.norm import RMSNorm, activation_quant, layer_norm_linear_quant, weight_quant
 
 
 class BitLinear(nn.Linear):
@@ -50,8 +39,6 @@ class BitLinear(nn.Linear):
     """
 
     def __init__(self, in_features: int, out_features: int, bias: bool = False, norm_eps: float = 1e-8) -> None:
-        from fla.modules import RMSNorm
-
         super().__init__(in_features=in_features, out_features=out_features, bias=bias)
 
         self.norm = RMSNorm(hidden_size=in_features, eps=norm_eps, dtype=torch.float32)

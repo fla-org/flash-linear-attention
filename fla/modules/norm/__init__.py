@@ -27,6 +27,13 @@ from fla.modules.norm.layernorm import (
     RMSNormLinear,
 )
 from fla.modules.norm.layernorm_gated import LayerNormGated, RMSNormGated
+from fla.modules.norm.layernorm_quant import (
+    activation_quant,
+    bit_linear,
+    layer_norm_linear_quant,
+    rms_norm_linear_quant,
+    weight_quant,
+)
 
 __all__ = [
     'FusedLayerNormGated',
@@ -47,6 +54,11 @@ __all__ = [
     'RMSNorm',
     'RMSNormGated',
     'RMSNormLinear',
+    'activation_quant',
+    'bit_linear',
+    'layer_norm_linear_quant',
+    'rms_norm_linear_quant',
+    'weight_quant',
 ]
 
 

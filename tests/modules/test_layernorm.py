@@ -14,7 +14,7 @@ from transformers.models.llama.modeling_llama import LlamaRMSNorm
 
 from fla.modules import GroupNorm, GroupNormLinear, LayerNorm, LayerNormLinear, RMSNorm, RMSNormLinear
 from fla.modules.layernorm import GroupNormRef
-from fla.modules.norm.layernorm_quant import activation_quant, layer_norm_linear_quant, weight_quant
+from fla.modules.norm import activation_quant, layer_norm_linear_quant, weight_quant
 from fla.utils import assert_close, device
 
 
@@ -151,18 +151,22 @@ def test_layernorm_linear(N: int, D: int):
 
 
 @pytest.mark.parametrize(
-    ('T', 'D', 'is_rms_norm', 'affine', 'has_residual', 'prenorm', 'residual_in_fp32', 'has_linear_bias'),
+    ('T', 'D', 'is_rms_norm', 'affine', 'has_residual', 'prenorm', 'residual_in_fp32', 'has_linear_bias', 'contiguous'),
     [
-        (1, 64, False, True, False, False, False, True),
-        (7, 50, True, True, False, False, False, True),
-        (33, 128, False, True, True, True, False, True),
-        (257, 128, True, True, True, True, True, True),
-        (17, 64, False, False, True, False, True, True),
-        (32, 128, True, False, False, True, True, True),
-        (65, 257, False, True, True, True, True, False),
-        (129, 2048, True, True, False, False, False, False),
+        (1, 64, False, True, False, False, False, True, True),
+        (7, 50, True, True, False, False, False, True, True),
+        (33, 128, False, True, True, True, False, True, True),
+        (257, 128, True, True, True, True, True, True, True),
+        (17, 64, False, False, True, False, True, True, True),
+        (32, 128, True, False, False, True, True, True, True),
+        (65, 257, False, True, True, True, True, False, True),
+        (129, 2048, True, True, False, False, False, False, True),
+        (35, 63, False, True, True, True, True, False, False),
     ],
-    ids=['single-row', 'partial-row', 'residual', 'fp32-residual', 'no-affine', 'prenorm', 'partial-residual', 'bitlinear'],
+    ids=[
+        'single-row', 'partial-row', 'residual', 'fp32-residual', 'no-affine', 'prenorm',
+        'partial-residual', 'bitlinear', 'non-contiguous',
+    ],
 )
 @pytest.mark.parametrize(
     ('dtype', 'amp_dtype'),
@@ -179,11 +183,15 @@ def test_layernorm_linear_quant(
     prenorm: bool,
     residual_in_fp32: bool,
     has_linear_bias: bool,
+    contiguous: bool,
     dtype: torch.dtype,
     amp_dtype: torch.dtype | None,
 ):
     torch.manual_seed(42)
-    x = torch.randn(T, D, device=device, dtype=dtype).requires_grad_()
+    x = torch.randn(T, D, device=device, dtype=dtype)
+    if not contiguous:
+        x = x.t().contiguous().t()
+    x.requires_grad_()
     w = torch.randn(D, device=device, dtype=dtype).requires_grad_() if affine else None
     b = torch.randn(D, device=device, dtype=dtype).requires_grad_() if affine else None
     linear_weight = torch.randn(32, D, device=device, dtype=dtype).requires_grad_()
