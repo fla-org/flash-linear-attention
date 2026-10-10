@@ -412,6 +412,19 @@ register_op(OpConfig(
 ))
 
 register_op(OpConfig(
+    name='chunk_iso_kdn',
+    import_path='fla.ops.iso_kdn',
+    inputs={
+        **_simple_qkv,
+        'g': TensorSpec(shape_BTHD, transform=logsigmoid),
+        'omega': TensorSpec(shape_BTH, dtype='float32', transform=F.softplus),
+        'r': TensorSpec(shape_BTH, dtype='float32', transform=F.softplus),
+    },
+    extra_kwargs={'use_qk_l2norm_in_kernel': True},
+    category='gate_beta',
+))
+
+register_op(OpConfig(
     name='chunk_precond_gdn',
     import_path='fla.ops.precond_gated_delta_rule',
     inputs={
