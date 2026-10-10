@@ -14,6 +14,7 @@ See ``benchmarks/ops/run.py`` docstring for full usage and how to register new o
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -34,6 +35,10 @@ def shape_BTHD(B, T, H, D, **kw):
 
 def shape_BTH(B, T, H, D, **kw):
     return (B, T, H)
+
+
+def shape_BHDD(B, T, H, D, **kw):
+    return (B, H, D, D)
 
 
 def shape_BTD(B, T, H, D, **kw):
@@ -396,6 +401,54 @@ register_op(OpConfig(
     extra_kwargs={'use_qk_l2norm_in_kernel': True, 'safe_gate': True, 'lower_bound': -5},
     category='gate_beta',
 ))
+
+
+def _recurrent_kda_post_init(inputs, B, T, H, D, packed=False, **kw):
+    inputs['A_log'].uniform_(1, 16).log_()
+    dt = inputs['dt_bias'].uniform_(math.log(1e-3), math.log(1e-1)).exp_()
+    inputs['dt_bias'] = (dt + torch.log(-torch.expm1(-dt))).reshape(-1)
+    if packed:
+        for name in ('q', 'k', 'v', 'g', 'beta'):
+            tensor = inputs[name]
+            inputs[name] = tensor.reshape(1, B * T, *tensor.shape[2:])
+        offsets = torch.arange(B + 1, dtype=torch.long, device=inputs['q'].device) * T
+        offsets[1:-1] -= torch.arange(1, B, device=offsets.device) % 2 * (T // 2)
+        inputs['cu_seqlens'] = offsets
+
+
+_recurrent_kda_shapes = {
+    'B1_T1_H16_D128': {'B': 1, 'T': 1, 'H': 16, 'D': 128},
+    'B8_T1_H16_D128': {'B': 8, 'T': 1, 'H': 16, 'D': 128},
+    'B32_T1_H32_D128': {'B': 32, 'T': 1, 'H': 32, 'D': 128},
+    'B8_T4_H16_D128': {'B': 8, 'T': 4, 'H': 16, 'D': 128},
+    'B2_T16_H4_D64': {'B': 2, 'T': 16, 'H': 4, 'D': 64},
+}
+
+for _name, _packed in (('fused_recurrent_kda', False), ('fused_recurrent_kda_varlen', True)):
+    register_op(OpConfig(
+        name=_name,
+        import_path='fla.ops.kda',
+        func_name='fused_recurrent_kda',
+        inputs={
+            **{name: TensorSpec(shape_BTHD, requires_grad=False) for name in ('q', 'k', 'v', 'g')},
+            'beta': TensorSpec(shape_BTH, requires_grad=False),
+            'A_log': TensorSpec(shape_H, requires_grad=False, dtype='float32'),
+            'dt_bias': TensorSpec(shape_HD, requires_grad=False, dtype='float32'),
+            'initial_state': TensorSpec(shape_BHDD, requires_grad=False, dtype='float32'),
+        },
+        extra_kwargs={
+            'use_qk_l2norm_in_kernel': True,
+            'use_gate_in_kernel': True,
+            'use_beta_sigmoid_in_kernel': True,
+            'output_final_state': True,
+            'state_v_first': True,
+        },
+        skip_backward=True,
+        post_init=_recurrent_kda_post_init,
+        default_shapes={name: {**shape, 'packed': _packed} for name, shape in _recurrent_kda_shapes.items()},
+        category='gate_beta',
+    ))
+
 
 register_op(OpConfig(
     name='fused_recurrent_gdn2',
