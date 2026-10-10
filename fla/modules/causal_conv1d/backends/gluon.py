@@ -12,6 +12,8 @@ import triton
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
 
+from fla.backends import GluonBackend, register
+from fla.modules.causal_conv1d import causal_conv1d_bwd, causal_conv1d_fwd
 from fla.ops.utils import prepare_chunk_indices
 from fla.utils import input_guard
 
@@ -239,8 +241,38 @@ def causal_conv1d_bwd_kernel_dwdb(dw_partial, db_partial, dw, db, NP, D: gl.cons
             gl.store(db + o_d, b_db.to(db.dtype.element_ty), mask=o_d < D)
 
 
+def causal_conv1d_fwd_verifier(
+    x: torch.Tensor,
+    weight: torch.Tensor | None,
+    bias: torch.Tensor | None = None,
+    residual: torch.Tensor | None = None,
+    initial_state: torch.Tensor | None = None,
+    output_final_state: bool = False,
+    activation: str | None = None,
+    cu_seqlens: torch.LongTensor | None = None,
+    cu_seqlens_cpu: torch.LongTensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
+    chunk_size: int = 64,
+    layout_fallback: bool = False,
+) -> tuple[bool, str | None]:
+    if torch.distributed.is_initialized():
+        return False, "Gluon convolution does not support distributed execution"
+    if x.dtype not in (torch.float16, torch.bfloat16, torch.float32):
+        return False, "Gluon convolution supports float16, bfloat16, and float32"
+    if x.ndim != 3 or x.stride(-1) != 1:
+        return False, "Gluon convolution requires [B, T, D] with contiguous channels"
+    if weight is None or weight.shape[0] != x.shape[-1] or weight.shape[1] not in (2, 3, 4):
+        return False, "Gluon convolution requires a width of 2, 3, or 4"
+    if cu_seqlens is not None and x.shape[0] != 1:
+        return False, "Gluon packed convolution requires batch size 1"
+    if chunk_size != 64:
+        return False, "Gluon convolution requires 64-token chunk indices"
+    return True, None
+
+
+@register(causal_conv1d_fwd, backend=GluonBackend, verifier=causal_conv1d_fwd_verifier, env_var='FLA_CONV_GLUON')
 @input_guard(no_guard_contiguous=['x'])
-def causal_conv1d_fwd(
+def causal_conv1d_fwd_gluon(
     x: torch.Tensor,
     weight: torch.Tensor,
     bias: torch.Tensor | None = None,
@@ -252,7 +284,9 @@ def causal_conv1d_fwd(
     cu_seqlens_cpu: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
     chunk_size: int = 64,
+    layout_fallback: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
+    del layout_fallback
     BT = chunk_size
     B, T, D = x.shape
     if cu_seqlens is not None and chunk_indices is None:
@@ -295,7 +329,7 @@ def causal_conv1d_fwd(
     return y, final_state
 
 
-def causal_conv1d_bwd(
+def causal_conv1d_bwd_verifier(
     x: torch.Tensor,
     dy: torch.Tensor,
     dht: torch.Tensor | None,
@@ -308,7 +342,30 @@ def causal_conv1d_bwd(
     cu_seqlens_cpu: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
     chunk_size: int = 64,
+    layout_fallback: bool = False,
+) -> tuple[bool, str | None]:
+    if initial_state is not None or dht is not None:
+        return False, "Gluon convolution does not support state gradients"
+    return causal_conv1d_fwd_verifier(x=x, weight=weight, cu_seqlens=cu_seqlens, chunk_size=chunk_size)
+
+
+@register(causal_conv1d_bwd, backend=GluonBackend, verifier=causal_conv1d_bwd_verifier, env_var='FLA_CONV_GLUON')
+def causal_conv1d_bwd_gluon(
+    x: torch.Tensor,
+    dy: torch.Tensor,
+    dht: torch.Tensor | None,
+    weight: torch.Tensor | None = None,
+    bias: torch.Tensor | None = None,
+    residual: torch.Tensor | None = None,
+    initial_state: torch.Tensor | None = None,
+    activation: str | None = None,
+    cu_seqlens: torch.LongTensor | None = None,
+    cu_seqlens_cpu: torch.LongTensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
+    chunk_size: int = 64,
+    layout_fallback: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None, None]:
+    del layout_fallback
     BT = chunk_size
     B, T, D = x.shape
     W = weight.shape[1]

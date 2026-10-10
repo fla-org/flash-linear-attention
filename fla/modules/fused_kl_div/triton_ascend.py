@@ -12,6 +12,8 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
+from fla.backends import TritonAscendBackend, register
+from fla.modules.fused_kl_div.ops import fused_kl_div_bwd, fused_kl_div_fwd
 from fla.ops.utils.op import exp, log
 from fla.utils.ascend_ub_manager import ASCEND_MAX_GRID_DIM, compute_elementwise_block_size, compute_vocab_block_size
 
@@ -79,12 +81,7 @@ def kl_div_kernel(
 
 
 @triton.jit
-def elementwise_mul_kernel(
-    x,
-    g,
-    N: tl.constexpr,
-    B: tl.constexpr,
-):
+def elementwise_mul_kernel(x, g, N: tl.constexpr, B: tl.constexpr):
     i_x = tl.program_id(0).to(tl.int64)
     o_x = i_x * B + tl.arange(0, B)
 
@@ -99,6 +96,7 @@ def _npu_vocab_block_size(vocab_size: int, num_rows: int) -> int:
     return compute_vocab_block_size(vocab_size=vocab_size, num_rows=num_rows, memory_multiplier=_KLD_FWD_MEM_MULT)
 
 
+@register(fused_kl_div_fwd, backend=TritonAscendBackend)
 def fused_kl_div_fwd_npu(
     x: torch.Tensor,
     target_x: torch.Tensor,
@@ -162,22 +160,13 @@ def fused_kl_div_fwd_npu(
     return loss, dx, dw
 
 
-def fused_kl_div_bwd_npu(
-    do: torch.Tensor,
-    dx: torch.Tensor | None,
-    dw: torch.Tensor | None,
-):
+@register(fused_kl_div_bwd, backend=TritonAscendBackend)
+def fused_kl_div_bwd_npu(do: torch.Tensor, dx: torch.Tensor | None, dw: torch.Tensor | None):
     for grad in (dx, dw):
         if grad is None:
             continue
         N, H = grad.shape
         B = compute_elementwise_block_size(n_elements=N * H, memory_multiplier=_ELEMENTWISE_MEM_MULT)
-        elementwise_mul_kernel[(triton.cdiv(N * H, B),)](
-            x=grad,
-            g=do,
-            N=N*H,
-            B=B,
-            num_warps=STATIC_WARPS,
-        )
+        elementwise_mul_kernel[(triton.cdiv(N * H, B),)](x=grad, g=do, N=N*H, B=B, num_warps=STATIC_WARPS,)
 
     return dx, dw

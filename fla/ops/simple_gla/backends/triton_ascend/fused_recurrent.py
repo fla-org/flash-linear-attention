@@ -7,8 +7,7 @@
 
 """Ascend NPU copy of the shared fused-recurrent kernels.
 
-This copy adds a grid offset so the host can split launches above the Ascend
-per-launch block budget.
+This copy adds a grid offset so the host can split launches above the Ascend per-launch block budget.
 """
 
 import warnings
@@ -17,6 +16,9 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.backends import TritonAscendBackend, register
+from fla.ops.simple_gla.backends.triton_ascend.utils import simple_gla_verifier
+from fla.ops.simple_gla.fused_recurrent import fused_recurrent_simple_gla
 from fla.ops.utils.op import exp
 from fla.utils import ascend_compile_kwargs, autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, input_guard
 from fla.utils.ascend_ub_manager import ASCEND_LAUNCH_BLOCK_BUDGET, launch_grid_chunked
@@ -292,7 +294,6 @@ def fused_recurrent_bwd_kernel(
         if USE_GV:
             p_gv += (-1 if REVERSE else 1) * H*V
 
-    # sync threads
     tl.debug_barrier()
 
     p_q = q + (bos + ((T - 1) if not REVERSE else 0)) * H*K + i_h * K + o_k
@@ -472,8 +473,8 @@ def fused_recurrent_fwd(
     )
     if grid[0] > ASCEND_LAUNCH_BLOCK_BUDGET:
         launch_grid_chunked(
-            fused_recurrent_fwd_kernel,
-            grid,
+            kernel=fused_recurrent_fwd_kernel,
+            grid=grid,
             offset_keys=('PID_OFFSET',),
             kernel_kwargs=fwd_kwargs,
         )
@@ -560,8 +561,8 @@ def fused_recurrent_bwd(
     )
     if grid[0] > ASCEND_LAUNCH_BLOCK_BUDGET:
         launch_grid_chunked(
-            fused_recurrent_bwd_kernel,
-            grid,
+            kernel=fused_recurrent_bwd_kernel,
+            grid=grid,
             offset_keys=('PID_OFFSET',),
             kernel_kwargs=bwd_kwargs,
             compile_kwargs=ascend_compile_kwargs(),
@@ -614,8 +615,8 @@ class FusedRecurrentFunction(torch.autograd.Function):
             initial_state=initial_state,
             output_final_state=output_final_state,
             reverse=reverse,
-            cu_seqlens=cu_seqlens,
             state_v_first=state_v_first,
+            cu_seqlens=cu_seqlens,
         )
         ctx.save_for_backward(q, k, v, g, g_gamma, gk, gv, initial_state, o)
         ctx.scale = scale
@@ -643,8 +644,8 @@ class FusedRecurrentFunction(torch.autograd.Function):
             scale=ctx.scale,
             initial_state=initial_state,
             reverse=ctx.reverse,
-            cu_seqlens=ctx.cu_seqlens,
             state_v_first=ctx.state_v_first,
+            cu_seqlens=ctx.cu_seqlens,
         )
         return dq.to(q.dtype), dk.to(k.dtype), dv.to(v.dtype), dg, None, dgk, dgv, None, dh0, None, None, None, None
 
@@ -683,12 +684,13 @@ def fused_recurrent(
     )
 
 
+@register(fused_recurrent_simple_gla, backend=TritonAscendBackend, verifier=simple_gla_verifier)
 def fused_recurrent_simple_gla_npu(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    g: torch.Tensor = None,
-    g_gamma: torch.Tensor = None,
+    g: torch.Tensor | None = None,
+    g_gamma: torch.Tensor | None = None,
     scale: float | None = None,
     initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,

@@ -7,32 +7,33 @@
 
 """Fused LayerNorm/RMSNorm + gate kernels adapted for triton-ascend on Huawei NPU.
 
-Grid-stride BT-tiled kernels keep weight/bias resident and vectorize a small
-row tile under UB. Ascend910 @ D=1024 (multi-buffer compile-validated):
-fwd BT=8 / bwd BT=4.
+Grid-stride BT-tiled kernels keep weight/bias resident and vectorize a small row tile under UB.
+Ascend910 @ D=1024 (multi-buffer compile-validated): fwd BT=8 / bwd BT=4.
 """
 
 import torch
 import triton
 import triton.language as tl
 
+from fla.backends import TritonAscendBackend, register
+from fla.modules.norm.fused_norm_gate import layer_norm_gated_bwd, layer_norm_gated_fwd
 from fla.utils import get_multiprocessor_count
 from fla.utils.ascend_ub_manager import ASCEND_MAX_GRID_DIM, compute_row_tile_block_size, compute_ub_block_size
 
-# Peak live fp32 tiles relative to [BT, BD].
+# peak live fp32 tiles relative to [BT, BD].
 # BD uses a single-row budget so large D is not rejected when BT can still be 1.
-# Fwd grid-stride keeps w/b resident (needs higher mult than one-tile launch).
-# Bwd stores dg early before the dx path. Calibrated on Ascend910 (192 KiB UB,
-# 0.85 margin): fwd BT=8 @ D=1024 (mult=3); bwd BT=4 @ D=1024 (mult=8).
-# Do not lower bwd mult below ~6 without re-validating (BT=8 bwd overflows).
-# Recompute-output (norm+linear bwd) keeps b_y live for tl.store(y);
+# fwd grid-stride keeps w/b resident (needs higher mult than one-tile launch).
+# bwd stores dg before the dx path. Calibration uses Ascend910 with 192 KiB UB and a 0.85 margin:
+# fwd BT=8 @ D=1024 (mult=3); bwd BT=4 @ D=1024 (mult=8).
+# do not lower bwd mult below ~6 without re-validating (BT=8 bwd overflows).
+# recompute-output (norm+linear bwd) keeps b_y live for tl.store(y);
 # bwd BT=2 @ D=1024 (mult=11). Do not lower without re-validating.
 _BD_MEM_MULT = 6.0
 _FWD_MEM_MULT = 3.0
 _BWD_MEM_MULT = 8.0
 _BWD_RECOMPUTE_MEM_MULT = 11.0
 _UB_SAFETY_MARGIN = 0.85
-# Legacy byte cap when UB capacity cannot be detected (65536 // fp32).
+# legacy byte cap when UB capacity cannot be detected (65536 // fp32).
 _FALLBACK_MAX_BD = 65536 // 4
 _MAX_BT = 128
 # PoT-padded BD>=2048 needs extra headroom under multi-buffering.
@@ -69,9 +70,8 @@ def _fwd_memory_multiplier(BD: int) -> float:
 def _bwd_memory_multiplier(is_rms_norm: bool, BD: int, *, recompute_output: bool = False) -> float:
     """Return bwd tile multiplier; larger BD needs a higher mult (smaller BT).
 
-    ``is_rms_norm`` is accepted for callers/host UB scripts; LN and RMS currently
-    share the same calibrated budget. ``recompute_output`` needs extra headroom
-    because the kernel keeps pre-gate ``b_y`` live for the ``y`` store.
+    ``is_rms_norm`` is accepted for callers/host UB scripts; LN and RMS currently share the same calibrated budget.
+    ``recompute_output`` needs extra headroom because the kernel keeps pre-gate ``b_y`` live for the ``y`` store.
     """
     # reserved if LN/RMS budgets diverge
     del is_rms_norm
@@ -105,7 +105,7 @@ def _get_layer_norm_gated_tiles(
         memory_multiplier = _fwd_memory_multiplier(BD=BD)
     else:
         memory_multiplier = _bwd_memory_multiplier(is_rms_norm=is_rms_norm, BD=BD, recompute_output=recompute_output)
-    # Large synthetic row dim so BT is limited by UB, not by a host-side T guess.
+    # large synthetic row dim so BT is limited by UB, not by a host-side T guess.
     BT = compute_row_tile_block_size(
         row_dim=1 << 20,
         fixed_dim=BD,
@@ -243,8 +243,7 @@ def layer_norm_gated_bwd_kernel(
 ):
     """Grid-stride backward: each program owns a BT-row tile stream.
 
-    Gate grads are stored before the LayerNorm/RMSNorm dx path so Ascend can
-    release those temporaries and keep BT within the UB budget.
+    Gate gradients are stored before the dx path, so Ascend can release their temporaries and keep BT within the UB budget.
     """
     i_s = tl.program_id(0)
     cols = tl.arange(0, BD)
@@ -286,8 +285,7 @@ def layer_norm_gated_bwd_kernel(
         else:
             b_gate = b_sigmoid_g
             tl.store(dg + row_off, (b_dy * b_y * b_sigmoid_g * (1 - b_sigmoid_g)).to(dg.dtype.element_ty), mask=mask)
-        # dg needs the pre-gate b_y, but the recomputed output must match what the
-        # forward stored, i.e. the gated value the caller fed to its linear layer.
+        # dg needs pre-gate b_y; the recomputed output must include the gate to match the caller's linear input.
         if RECOMPUTE_OUTPUT:
             tl.store(y + row_off, (b_y * b_gate).to(y.dtype.element_ty), mask=mask)
         b_dy = b_dy * b_gate
@@ -320,6 +318,7 @@ def layer_norm_gated_bwd_kernel(
         tl.store(db + i_s * D + cols, b_db, mask=col_mask)
 
 
+@register(layer_norm_gated_fwd, backend=TritonAscendBackend)
 def layer_norm_gated_fwd_npu(
     x: torch.Tensor,
     g: torch.Tensor,
@@ -327,9 +326,9 @@ def layer_norm_gated_fwd_npu(
     bias: torch.Tensor,
     activation: str = "swish",
     eps: float = 1e-5,
-    residual: torch.Tensor = None,
-    out_dtype: torch.dtype = None,
-    residual_dtype: torch.dtype = None,
+    residual: torch.Tensor | None = None,
+    out_dtype: torch.dtype | None = None,
+    residual_dtype: torch.dtype | None = None,
     is_rms_norm: bool = False,
 ):
     if residual is not None:
@@ -378,6 +377,7 @@ def layer_norm_gated_fwd_npu(
     return y, mean, rstd, residual_out if residual_out is not None else x
 
 
+@register(layer_norm_gated_bwd, backend=TritonAscendBackend)
 def layer_norm_gated_bwd_npu(
     dy: torch.Tensor,
     x: torch.Tensor,
@@ -386,12 +386,12 @@ def layer_norm_gated_bwd_npu(
     bias: torch.Tensor,
     activation: str = "swish",
     eps: float = 1e-5,
-    mean: torch.Tensor = None,
-    rstd: torch.Tensor = None,
-    dresidual: torch.Tensor = None,
+    mean: torch.Tensor | None = None,
+    rstd: torch.Tensor | None = None,
+    dresidual: torch.Tensor | None = None,
     has_residual: bool = False,
     is_rms_norm: bool = False,
-    x_dtype: torch.dtype = None,
+    x_dtype: torch.dtype | None = None,
     recompute_output: bool = False,
 ):
     T, D = x.shape

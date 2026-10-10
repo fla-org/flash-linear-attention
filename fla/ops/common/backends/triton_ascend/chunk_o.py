@@ -13,6 +13,8 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.backends import TritonAscendBackend, register
+from fla.ops.common.chunk_o import chunk_bwd_dv
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.op import exp2
@@ -183,11 +185,7 @@ def _g_block_ptr(g_base, T, offset, BC, G_T_CONTIG: tl.constexpr, HV: tl.constex
     "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
 })
 @triton.autotune(
-    configs=[
-        triton.Config({'BK': 128}),
-        triton.Config({'BK': 64}),
-        triton.Config({'BK': 32}),
-    ],
+    configs=[triton.Config({'BK': 128}), triton.Config({'BK': 64}), triton.Config({'BK': 32})],
     key=['H', 'HV', 'K', 'V', 'BT', 'STATE_V_FIRST'],
 )
 @triton.jit(do_not_specialize=["T", "total_chunks", "task_num", "num_core", "H", "HV", "K", "V", "N"])
@@ -464,10 +462,10 @@ def chunk_dv_local_bwd_kernel_full(
 
         if USE_G:
             if G_T_CONTIG:
-                g_base = _g_contig_base(g, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
+                g_base = _g_contig_base(g=g, bos=bos, i_b=i_b, i_h=i_h, T_seq=T_seq, HV=HV, IS_VARLEN=IS_VARLEN)
             else:
                 g_base = g + bos * HV + i_h
-            p_g = _g_block_ptr(g_base, T_cur, i_t * BT, BT, G_T_CONTIG, HV)
+            p_g = _g_block_ptr(g_base=g_base, T=T_cur, offset=i_t * BT, BC=BT, G_T_CONTIG=G_T_CONTIG, HV=HV)
             b_g = tl.load(p_g, boundary_check=(0,))
         if USE_G_GAMMA:
             b_gamma = tl.load(g_gamma + i_h)
@@ -543,7 +541,7 @@ def chunk_dv_local_bwd_kernel(
     dv += (bos * HV + i_h) * V
 
     if G_T_CONTIG:
-        g_base = _g_contig_base(g, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
+        g_base = _g_contig_base(g=g, bos=bos, i_b=i_b, i_h=i_h, T_seq=T_seq, HV=HV, IS_VARLEN=IS_VARLEN)
     else:
         g += bos * HV + i_h
         g_base = g
@@ -563,8 +561,8 @@ def chunk_dv_local_bwd_kernel(
             b_dv1 = tl.zeros([BC, BV], dtype=tl.float32)
 
             if USE_G:
-                p_g0 = _g_block_ptr(g_base, T, i_tc0, BC, G_T_CONTIG, HV)
-                p_g1 = _g_block_ptr(g_base, T, i_tc1, BC, G_T_CONTIG, HV)
+                p_g0 = _g_block_ptr(g_base=g_base, T=T, offset=i_tc0, BC=BC, G_T_CONTIG=G_T_CONTIG, HV=HV)
+                p_g1 = _g_block_ptr(g_base=g_base, T=T, offset=i_tc1, BC=BC, G_T_CONTIG=G_T_CONTIG, HV=HV)
                 b_g0 = tl.load(p_g0, boundary_check=(0,))
                 b_g1 = tl.load(p_g1, boundary_check=(0,))
             if USE_G_GAMMA:
@@ -618,7 +616,7 @@ def chunk_dv_local_bwd_kernel(
                 b_dv = tl.zeros([BC, BV], dtype=tl.float32)
 
                 if USE_G:
-                    p_gr = _g_block_ptr(g_base, T, i_tc_r, BC, G_T_CONTIG, HV)
+                    p_gr = _g_block_ptr(g_base=g_base, T=T, offset=i_tc_r, BC=BC, G_T_CONTIG=G_T_CONTIG, HV=HV)
                     b_g_r = tl.load(p_gr, boundary_check=(0,))
                 if USE_G_GAMMA:
                     b_g_r = b_gamma * (r * BC + o_i + 1).to(tl.float32)
@@ -635,7 +633,7 @@ def chunk_dv_local_bwd_kernel(
                         b_A += tl.dot(b_k, b_q, allow_tf32=False) * scale
 
                     if USE_G:
-                        p_gc = _g_block_ptr(g_base, T, i_tc_c, BC, G_T_CONTIG, HV)
+                        p_gc = _g_block_ptr(g_base=g_base, T=T, offset=i_tc_c, BC=BC, G_T_CONTIG=G_T_CONTIG, HV=HV)
                         b_g_c = tl.load(p_gc, boundary_check=(0,))
                         b_A = b_A * exp2(b_g_c[None, :] - b_g_r[:, None])
                     if USE_G_GAMMA:
@@ -728,7 +726,7 @@ def chunk_dqkwg_bwd_kernel(
 
     if USE_G:
         if G_T_CONTIG:
-            g_base = _g_contig_base(g, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
+            g_base = _g_contig_base(g=g, bos=bos, i_b=i_b, i_h=i_h, T_seq=T_seq, HV=HV, IS_VARLEN=IS_VARLEN)
         else:
             g += bos * HV + i_h
             g_base = g
@@ -785,7 +783,7 @@ def chunk_dqkwg_bwd_kernel(
             b_dq_r = tl.dot(b_do_r, b_h.to(b_do_r.dtype), b_dq_r, allow_tf32=False)
 
         if USE_G:
-            p_gr = _g_block_ptr(g_base, T, i_tc_r, BC, G_T_CONTIG, HV)
+            p_gr = _g_block_ptr(g_base=g_base, T=T, offset=i_tc_r, BC=BC, G_T_CONTIG=G_T_CONTIG, HV=HV)
             b_gr = tl.load(p_gr, boundary_check=(0,)).to(tl.float32)
             b_dq_r = b_dq_r * exp2(b_gr)[:, None] * scale
         elif USE_G_GAMMA:
@@ -807,7 +805,7 @@ def chunk_dqkwg_bwd_kernel(
                 b_ds = tl.dot(b_do_r2, tl.trans(b_v_c), b_ds, allow_tf32=False)
 
             if USE_G:
-                p_gc = _g_block_ptr(g_base, T, i_tc_c, BC, G_T_CONTIG, HV)
+                p_gc = _g_block_ptr(g_base=g_base, T=T, offset=i_tc_c, BC=BC, G_T_CONTIG=G_T_CONTIG, HV=HV)
                 b_gc = tl.load(p_gc, boundary_check=(0,)).to(tl.float32)
                 b_ds = b_ds * exp2(b_gr[:, None] - b_gc[None, :]) * scale
             elif USE_G_GAMMA:
@@ -856,7 +854,7 @@ def chunk_dqkwg_bwd_kernel(
             b_dk_c = tl.dot(b_v.to(tl.float32), b_dh.to(tl.float32), b_dk_c, allow_tf32=False)
 
         if USE_G:
-            p_gc = _g_block_ptr(g_base, T, i_tc_c, BC, G_T_CONTIG, HV)
+            p_gc = _g_block_ptr(g_base=g_base, T=T, offset=i_tc_c, BC=BC, G_T_CONTIG=G_T_CONTIG, HV=HV)
             b_gc = tl.load(p_gc, boundary_check=(0,)).to(tl.float32)
             b_dk_c = b_dk_c * tl.where(m_c, exp2(-b_gc + b_g_last), 0)[:, None]
         elif USE_G_GAMMA:
@@ -947,12 +945,12 @@ def chunk_dqkwg_bwd_kernel_full(
             dg_head = dg + bos * HV + i_h
             last_idx = min(i_t * BT + BT, T_cur) - 1
             if G_T_CONTIG:
-                g_base = _g_contig_base(g, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
+                g_base = _g_contig_base(g=g, bos=bos, i_b=i_b, i_h=i_h, T_seq=T_seq, HV=HV, IS_VARLEN=IS_VARLEN)
                 b_g_last = tl.load(g_base + last_idx).to(tl.float32)
             else:
                 g_base = g + bos * HV + i_h
                 b_g_last = tl.load(g_base + last_idx * HV).to(tl.float32)
-            p_g = _g_block_ptr(g_base, T_cur, i_t * BT, BT, G_T_CONTIG, HV)
+            p_g = _g_block_ptr(g_base=g_base, T=T_cur, offset=i_t * BT, BC=BT, G_T_CONTIG=G_T_CONTIG, HV=HV)
             b_g = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
         if USE_G_GAMMA:
             b_gamma = tl.load(g_gamma + i_h)
@@ -1086,7 +1084,7 @@ def chunk_dg_bwd_kernel_hdh(
         dh_ptr = dh + (tl.cast(i_tg, tl.int64) * HV + i_h) * K * V
         last_idx = min(i_t * BT + BT, T_cur) - 1
         if G_T_CONTIG:
-            g_base = _g_contig_base(g, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
+            g_base = _g_contig_base(g=g, bos=bos, i_b=i_b, i_h=i_h, T_seq=T_seq, HV=HV, IS_VARLEN=IS_VARLEN)
             b_g_last = tl.load(g_base + last_idx).to(tl.float32)
         else:
             g_base = g + bos * HV + i_h
@@ -1168,7 +1166,7 @@ def chunk_dg_bwd_kernel(
     dg += i_k * n_tokens * HV
     dg += bos * HV + i_h
     if G_T_CONTIG:
-        g_base = _g_contig_base(g, bos, i_b, i_h, T_seq, HV, IS_VARLEN)
+        g_base = _g_contig_base(g=g, bos=bos, i_b=i_b, i_h=i_h, T_seq=T_seq, HV=HV, IS_VARLEN=IS_VARLEN)
     else:
         g += bos * HV + i_h
         g_base = g
@@ -1211,7 +1209,7 @@ def chunk_dg_bwd_kernel(
 
         p_k_c = tl.make_block_ptr(k, (T, K), (H * K, 1), (i_tc_c, i_k * BK), (BC, BK), (1, 0))
         b_k_c = tl.load(p_k_c, boundary_check=(0, 1))
-        p_gc = _g_block_ptr(g_base, T, i_tc_c, BC, G_T_CONTIG, HV)
+        p_gc = _g_block_ptr(g_base=g_base, T=T, offset=i_tc_c, BC=BC, G_T_CONTIG=G_T_CONTIG, HV=HV)
         b_gc = tl.load(p_gc, boundary_check=(0,)).to(tl.float32)
         b_dk_pre = b_dk_pre * tl.where(m_c, exp2(-b_gc + b_g_last), 0)[:, None]
         b_dg_last += tl.sum(b_dk_pre * b_k_c.to(tl.float32))
@@ -1538,7 +1536,6 @@ def chunk_bwd_kernel_dv_npu(
 
     b_dv = tl.zeros([BT, BV], dtype=tl.float32)
 
-    # offset calculation
     q += (bos * H + i_h // (HV // H)) * K
     k += (bos * H + i_h // (HV // H)) * K
     do += (bos * HV + i_h) * V
@@ -1590,6 +1587,7 @@ def chunk_bwd_kernel_dv_npu(
     tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), mask=m_t[:, None] & (o_v < V)[None, :])
 
 
+@register(chunk_bwd_dv, backend=TritonAscendBackend)
 def chunk_bwd_dv_npu(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -1606,8 +1604,7 @@ def chunk_bwd_dv_npu(
     B, T, H, K, V, HV = *k.shape, do.shape[-1], do.shape[2]
     if q.dtype in (torch.float16, torch.bfloat16):
         # Triton miscompiles masked K-tail iterations into OOB shared-memory access for 16-bit odd K/V (IMA)
-        assert K % 2 == 0 and V % 2 == 0, \
-            f"chunk_bwd_dv requires even K and V for {q.dtype}, got K={K}, V={V}"
+        assert K % 2 == 0 and V % 2 == 0, f"chunk_bwd_dv requires even K and V for {q.dtype}, got K={K}, V={V}"
     BT = chunk_size
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
@@ -1645,8 +1642,8 @@ def chunk_bwd_dv_npu(
     )
     if grid[0] * grid[1] > ASCEND_LAUNCH_BLOCK_BUDGET:
         launch_grid_chunked(
-            chunk_bwd_kernel_dv_npu,
-            grid,
+            kernel=chunk_bwd_kernel_dv_npu,
+            grid=grid,
             offset_keys=('PID_OFFSET', 'BH_OFFSET'),
             kernel_kwargs=dv_kwargs,
         )

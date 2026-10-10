@@ -109,7 +109,7 @@ def causal_conv1d_fwd_kernel(
                 b_yi *= tl.sum(b_w * (o_w == (i_w + W - 1)), 1)
             b_y += b_yi
     elif i_t * BT >= W:
-        # to make Triton compiler happy, we need to copy codes
+        # separate branches avoid a Triton compiler issue.
         for i_w in tl.static_range(-W + 1, 1):
             o_x = o_t + i_w
             p_yi = p_x + o_x[:, None] * stride_x_t + o_d[None, :] * stride_x_d
@@ -179,23 +179,14 @@ def causal_conv1d_bwd_kernel(
     chunk_indices,
     B,
     T,
-    # x batch stride
     stride_x_n,
-    # x time stride
     stride_x_t,
-    # x dim stride
     stride_x_d,
-    # dx batch stride
     stride_dx_n,
-    # dx time stride
     stride_dx_t,
-    # dx dim stride
     stride_dx_d,
-    # dy batch stride
     stride_dy_n,
-    # dy time stride
     stride_dy_t,
-    # dy dim stride
     stride_dy_d,
     D: tl.constexpr,
     W: tl.constexpr,
@@ -267,7 +258,7 @@ def causal_conv1d_bwd_kernel(
                 b_db += tl.sum(b_dy, 0)
             b_dx += b_wdy
     elif i_t * BT >= W:
-        # to make Triton compiler happy, we need to copy codes
+        # separate branches avoid a Triton compiler issue.
         for i_w in tl.static_range(0, W):
             o_dy = o_t + i_w
             p_dy_blk = p_dy + o_dy[:, None] * stride_dy_t + o_d[None, :] * stride_dy_d
@@ -289,7 +280,6 @@ def causal_conv1d_bwd_kernel(
                 b_db += tl.sum(b_dy, 0)
             b_dx += b_wdy
     else:
-        # which may use initial state
         o_t = i_t.to(tl.int64) * BT + tl.arange(0, BT)
         for i_w in tl.static_range(0, W):
             o_dy = o_t + i_w
@@ -301,19 +291,16 @@ def causal_conv1d_bwd_kernel(
                 b_ys = tl.sigmoid(b_y_shift)
                 b_dy_shift = b_dy_shift * b_ys * (1 + b_y_shift * (1 - b_ys))
             if HAS_WEIGHT:
-                # gradient comes from x：sum_t dy[t+i_w] * x[t]
                 b_dw = tl.sum(b_dy_shift * b_x, 0)
-                # index of cache：c = W - i_w + t
                 if USE_INITIAL_STATE:
                     mask_head_rows = (o_t < i_w) & (o_t < T)
-                    # dy_head = dy[t]
                     b_dy_head = tl.load(
                         p_dy + o_t[:, None] * stride_dy_t + o_d * stride_dy_d,
                         mask=mask_head_rows[:, None] & m_d[None, :],
                         other=0.0,
                     ).to(tl.float32)
                     if ACTIVATION == 'swish' or ACTIVATION == 'silu':
-                        # use y[t] （not y[t+i_w]）
+                        # cache gradients use the unshifted preactivation y[t].
                         b_y_head = tl.load(
                             y + bos * D + o_t[:, None] * D + o_d,
                             mask=mask_head_rows[:, None] & m_d[None, :],
@@ -329,7 +316,6 @@ def causal_conv1d_bwd_kernel(
                         mask=mask_c[:, None] & m_d[None, :],
                         other=0.0,
                     ).to(tl.float32)
-                    # add the gradient comes from initial_state
                     b_dw += tl.sum(b_dy_head * b_xc, 0)
                 tl.store(dw + i_tg * D * W + o_d * W + W - i_w - 1, b_dw.to(dw.dtype.element_ty), mask=m_d)
 
@@ -388,13 +374,9 @@ def causal_conv1d_update_kernel(
     y,
     weight,
     bias,
-    # batch stride
     stride_x_n,
-    # dim stride
     stride_x_d,
-    # batch stride
     stride_y_n,
-    # dim stride
     stride_y_d,
     D: tl.constexpr,
     W: tl.constexpr,
@@ -421,11 +403,9 @@ def causal_conv1d_update_kernel(
     b_cache = tl.zeros((BD, BW), dtype=tl.float32)
 
     if USE_INITIAL_STATE:
-        # 2. Shift Cache (Read [1:])
         p_cache_read = cache + i_n * D*W + o_d[:, None] * W + (o_w + 1)[None, :]
         b_cache = tl.load(p_cache_read, mask=m_d[:, None] & ((o_w + 1) < W)[None, :], other=0.0).to(tl.float32)
 
-        # 3. Fill x to the last position
         m_update = o_w == (W - 1)
         b_cache = tl.where(m_update[None, :], b_x[:, None], b_cache)
 
@@ -444,19 +424,19 @@ def causal_conv1d_update_kernel(
     if HAS_RESIDUAL:
         b_y += tl.load(residual + i_n * D + o_d, mask=m_d, other=0)
 
-    tl.store(y + i_n * stride_y_n + o_d * stride_y_d, tl.cast(
-        b_y,
-        dtype=y.dtype.element_ty,
-        fp_downcast_rounding='rtne',
-    ), mask=m_d)
+    tl.store(
+        y + i_n * stride_y_n + o_d * stride_y_d,
+        tl.cast(b_y, dtype=y.dtype.element_ty, fp_downcast_rounding='rtne'),
+        mask=m_d,
+    )
 
     if USE_INITIAL_STATE:
         p_cache_write = cache + i_n * D*W + o_d[:, None] * W + o_w[None, :]
-        tl.store(p_cache_write, tl.cast(
-            b_cache,
-            dtype=cache.dtype.element_ty,
-            fp_downcast_rounding='rtne',
-        ), mask=m_d[:, None] & m_w[None, :])
+        tl.store(
+            p_cache_write,
+            tl.cast(b_cache, dtype=cache.dtype.element_ty, fp_downcast_rounding='rtne'),
+            mask=m_d[:, None] & m_w[None, :],
+        )
 
 
 @triton.heuristics({
@@ -493,7 +473,6 @@ def compute_dh0_kernel(
     ND = tl.cdiv(D, BD)
     i_d, i_n = pid % ND, (pid // ND).to(tl.int64)
 
-    # get sequence boundaries
     if IS_VARLEN:
         bos = tl.load(cu_seqlens + i_n).to(tl.int64)
         eos = tl.load(cu_seqlens + i_n + 1).to(tl.int64)
@@ -508,23 +487,20 @@ def compute_dh0_kernel(
     o_d = i_d * BD + tl.arange(0, BD)
     m_d = o_d < D
 
-    # for each i_w in [1, W), compute dh0[i_n, :, i_w]
     for i_w in tl.static_range(1, W):
         b_dh0 = tl.zeros([BD], dtype=tl.float32)
 
         if USE_FINAL_STATE:
-            # a sequence shorter than the state leaves initial_state[:, i_w] still sitting in
-            # final_state[:, i_w - seq_len], so that slot's gradient passes straight through
+            # short sequences retain initial_state[:, i_w] in final_state[:, i_w - seq_len],
+            # so that slot's gradient passes straight through.
             if i_w >= seq_len:
                 p_dht = dht + i_n * D * W + o_d * W + (i_w - seq_len)
                 b_dh0 += tl.load(p_dht, mask=m_d, other=0).to(tl.float32)
 
-        # accumulate contributions from t = 0 to min(i_w, seq_len) - 1
         for t in tl.static_range(0, W - 1):
             if t < i_w:
                 w_idx = i_w - 1 - t
 
-                # load dy[t, :] relative to dy_base
                 p_dy = dy_base + t * stride_dy_t + o_d * stride_dy_d
                 m_t = (t < seq_len) & m_d
                 b_dy = tl.load(p_dy, mask=m_t, other=0).to(tl.float32)
@@ -539,13 +515,10 @@ def compute_dh0_kernel(
                     b_ys = tl.sigmoid(b_y)
                     b_dy = b_dy * b_ys * (1 + b_y * (1 - b_ys))
 
-                # get weight[:, w_idx]
                 b_w_col = tl.load(weight + o_d * W + w_idx, mask=m_d, other=0).to(tl.float32)
 
-                # accumulate
                 b_dh0 += tl.where(m_t, b_dy * b_w_col, 0)
 
-        # store dh0[i_n, :, i_w]
         p_dh0 = dh0 + i_n * D * W + o_d * W + i_w
         tl.store(p_dh0, b_dh0.to(dh0.dtype.element_ty), mask=m_d)
 
@@ -575,7 +548,7 @@ def causal_conv1d_states_fwd_kernel(
     ND = tl.cdiv(D, BD)
     i_d, i_n = pid % ND, (pid // ND).to(tl.int64)
 
-    # o_d Shape: [BD]
+    # [BD]
     o_d = i_d * BD + tl.arange(0, BD)
     m_d = o_d < D
 
@@ -591,7 +564,7 @@ def causal_conv1d_states_fwd_kernel(
     o_x = tl.cast(seq_len, tl.int64) - BW + tl.arange(0, BW)
     p_x = p_x + o_x[:, None] * stride_x_t + o_d[None, :] * stride_x_d
 
-    # b_x Shape: [BW, BD]
+    # [BW, BD]
     b_x = tl.load(p_x, mask=((o_x >= 0) & (o_x < seq_len))[:, None] & m_d[None, :], other=0.0).to(tl.float32)
 
     if USE_INITIAL_STATE:
@@ -605,16 +578,16 @@ def causal_conv1d_states_fwd_kernel(
             b_cache = tl.load(p_init, mask=mask_init, other=0)
             b_x += b_cache
 
-    # final_state: [N, D, W] (Channel Major inside sample)
-    # o_w Shape: [BW]
+    # final_state: [N, D, W]
+    # [BW]
     o_w = W - BW + tl.arange(0, BW)
 
     # o_d[:, None] -> [BD, 1]
     # o_w[None, :] -> [1, BW]
-    # p_final Shape -> [BD, BW]
+    # [BD, BW]
     p_final = final_state + tl.cast(i_n, tl.int64) * D*W + o_d[:, None] * W + o_w[None, :]
 
-    # m_final Shape -> [BD, BW]
+    # [BD, BW]
     m_final = m_d[:, None] & (o_w[None, :] >= 0)
 
     tl.store(p_final, tl.trans(b_x).to(final_state.dtype.element_ty), mask=m_final)
@@ -631,7 +604,7 @@ def _has_non_standard_layout(x: torch.Tensor) -> bool:
 
 
 @deprecate_kwarg('BT', version='0.7.0', new_name='chunk_size')
-@dispatch('modules.conv')
+@dispatch
 @input_guard(no_guard_contiguous=["x"])
 def causal_conv1d_fwd(
     x: torch.Tensor,
@@ -693,7 +666,7 @@ def causal_conv1d_fwd(
     return y.view(shape), final_state
 
 
-@dispatch('modules.conv')
+@dispatch
 def compute_dh0_triton(
     dy: torch.Tensor,
     y: torch.Tensor | None,
@@ -711,7 +684,6 @@ def compute_dh0_triton(
     N = initial_state.shape[0]
     T = dy.shape[1]
 
-    # initialize dh0
     dh0 = torch.zeros_like(initial_state)
 
     BD = 32
@@ -741,7 +713,7 @@ def compute_dh0_triton(
 
 
 @deprecate_kwarg('BT', version='0.7.0', new_name='chunk_size')
-@dispatch('modules.conv')
+@dispatch
 def causal_conv1d_bwd(
     x: torch.Tensor,
     dy: torch.Tensor,
@@ -848,7 +820,7 @@ def causal_conv1d_bwd(
     return dx.view(shape), dw, db, dr, dh0
 
 
-@dispatch('modules.conv')
+@dispatch
 @input_guard(no_guard_contiguous=["x"])
 def causal_conv1d_update_states(
     x: torch.Tensor,
@@ -897,7 +869,7 @@ def causal_conv1d_update_states(
     return final_state
 
 
-@dispatch('modules.conv')
+@dispatch
 @input_guard(no_guard_contiguous=["x"])
 def causal_conv1d_update(
     x: torch.Tensor,
@@ -917,21 +889,18 @@ def causal_conv1d_update(
     BW = triton.next_power_of_2(W)
 
     if x.dim() == 2:
-        # Case: (N, D)
+        # case: (N, D)
         stride_x_n = x.stride(0)
         stride_x_d = x.stride(1)
     elif x.dim() == 3 and x.shape[0] == 1:
-        # Case: (1, N, D) -> Time=1, Batch=N, Dim=D
-        # batch dimension is axis 1
+        # [1, N, D]: one token per sequence
         stride_x_n = x.stride(1)
         stride_x_d = x.stride(2)
     elif x.dim() == 3:
-        # Case: (N, 1, D) -> Batch=N, Time=1, Dim=D
-        # batch dimension is axis 0
+        # [N, 1, D]: one token per sequence
         stride_x_n = x.stride(0)
         stride_x_d = x.stride(2)
     else:
-        # fallback / Error case
         raise ValueError(f"Unsupported input shape: {x.shape}")
 
     y = torch.empty_like(x, memory_format=torch.contiguous_format)
@@ -1048,7 +1017,7 @@ def causal_conv1d(
     """
     A causal 1D convolution implementation that powers Mamba/Mamba2 and DeltaNet architectures.
 
-    With a residual connection, this implements the Canon operation described in
+    With a residual connection, this implements the Canon operation:
     https://papers.ssrn.com/sol3/papers.cfm?abstract_id=5240330.
 
     Args:
@@ -1073,13 +1042,17 @@ def causal_conv1d(
             Specifies the backend to use for the convolution operation. Supported values are `'cuda'`, `'triton'`, and `'mix'`.
             Default: `'triton'`.
         cu_seqlens (torch.Tensor, Optional):
-            Cumulative sequence lengths (optional)
+            Cumulative sequence lengths. Default: `None`.
+        cu_seqlens_cpu (torch.LongTensor, Optional):
+            CPU copy of the cumulative sequence lengths. Default: `None`.
         chunk_indices (torch.Tensor, Optional):
-            Chunk indices for variable-length sequences (optional)
+            Chunk indices for variable-length sequences. Default: `None`.
+        cp_context (FLACPContext, Optional):
+            Context-parallel sequence metadata. Default: `None`.
 
     Returns:
-        Tuple of (output, final_state).
-        If `output_final_state` is `False`, the final state is `None`.
+        tuple[torch.Tensor, torch.Tensor | None]:
+            Output and final state. If `output_final_state` is `False`, the final state is `None`.
     """
     # import here to avoid circular dependencies
     from fla.modules.causal_conv1d.backends.cuda import causal_conv1d_cuda, fast_causal_conv1d_fn

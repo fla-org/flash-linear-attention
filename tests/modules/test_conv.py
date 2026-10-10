@@ -5,16 +5,15 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import inspect
+
 import pytest
 import torch
 import torch.nn.functional as F
 from einops import rearrange
 
-from fla.modules.convolution import (
-    ShortConvolution,
-    causal_conv1d,
-    causal_conv1d_update,
-)
+from fla import backends
+from fla.modules.convolution import ShortConvolution, causal_conv1d, causal_conv1d_update
 from fla.utils import IS_NVIDIA, assert_close, device
 
 try:
@@ -95,14 +94,15 @@ def causal_conv1d_update_ref(
 
 @pytest.fixture
 def conv_backend_calls(monkeypatch: pytest.MonkeyPatch) -> list[str] | None:
-    from fla.modules.causal_conv1d.backends import CausalConv1dGluonBackend
+    from fla.backends import GluonBackend
 
-    if not CausalConv1dGluonBackend.is_available():
+    if not GluonBackend.is_available():
         return None
-    from fla.modules.causal_conv1d.backends import gluon
+    from fla.modules.causal_conv1d import ops
+    from fla.modules.causal_conv1d.backends.gluon import causal_conv1d_bwd_gluon, causal_conv1d_fwd_gluon
 
     calls = []
-    fwd, bwd = gluon.causal_conv1d_fwd, gluon.causal_conv1d_bwd
+    fwd, bwd = causal_conv1d_fwd_gluon, causal_conv1d_bwd_gluon
 
     def forward(*args, **kwargs):
         calls.append('fwd')
@@ -112,8 +112,11 @@ def conv_backend_calls(monkeypatch: pytest.MonkeyPatch) -> list[str] | None:
         calls.append('bwd')
         return bwd(*args, **kwargs)
 
-    monkeypatch.setattr(gluon, 'causal_conv1d_fwd', forward)
-    monkeypatch.setattr(gluon, 'causal_conv1d_bwd', backward)
+    if not backends._DISPATCH_DISABLED:
+        forward_registry = backends._function_registries[inspect.unwrap(ops.causal_conv1d_fwd)]
+        backward_registry = backends._function_registries[inspect.unwrap(ops.causal_conv1d_bwd)]
+        monkeypatch.setattr(forward_registry._backends['gluon'], 'implementation', forward)
+        monkeypatch.setattr(backward_registry._backends['gluon'], 'implementation', backward)
     return calls
 
 
@@ -161,12 +164,7 @@ def test_conv(
     residual = x.detach().clone().requires_grad_(True) if has_residual else None
     dy = torch.randn(B, T, D).to(device, dtype)
 
-    ref = causal_conv1d_ref(
-        x=rearrange(x, "b t d -> b d t"),
-        weight=weight,
-        bias=bias,
-        activation=activation,
-    )
+    ref = causal_conv1d_ref(x=rearrange(x, "b t d -> b d t"), weight=weight, bias=bias, activation=activation)
     ref = rearrange(ref, "b d t -> b t d")
     if has_residual:
         ref += residual
@@ -299,15 +297,7 @@ def test_conv_varlen(
         ]
     ],
 )
-def test_fast_conv_varlen(
-    N: int,
-    T: int,
-    D: int,
-    W: int,
-    activation: str | None,
-    has_bias: bool,
-    dtype: torch.dtype,
-):
+def test_fast_conv_varlen(N: int, T: int, D: int, W: int, activation: str | None, has_bias: bool, dtype: torch.dtype):
     torch.manual_seed(42)
     if causal_conv1d_fn is None:
         pytest.skip("causal_conv1d is not installed for CUDA backend")
@@ -640,15 +630,7 @@ def test_conv_non_contiguous_qkv(
     ],
 )
 @pytest.mark.parametrize('layout', ['strided', 'broadcast'])
-def test_conv_non_contiguous_dy(
-    B: int,
-    T: int,
-    D: int,
-    W: int,
-    activation: str | None,
-    dtype: torch.dtype,
-    layout: str,
-):
+def test_conv_non_contiguous_dy(B: int, T: int, D: int, W: int, activation: str | None, dtype: torch.dtype, layout: str):
     torch.manual_seed(42)
     weight = torch.randn(D, W, device=device, dtype=dtype).requires_grad_(True)
     h0 = torch.randn(B, D, W, device=device, dtype=dtype).requires_grad_(True)
@@ -823,12 +805,7 @@ def test_conv_update(
     bias = torch.randn(D).to(device, dtype) if has_bias else None
     residual = x.clone() if has_residual else None
 
-    ref = causal_conv1d_ref(
-        x=rearrange(x, "b t d -> b d t"),
-        weight=weight,
-        bias=bias,
-        activation=activation,
-    )
+    ref = causal_conv1d_ref(x=rearrange(x, "b t d -> b d t"), weight=weight, bias=bias, activation=activation)
     ref = rearrange(ref, "b d t -> b t d")
     if has_residual:
         ref += residual
@@ -988,8 +965,7 @@ def test_conv_update_non_contiguous(
 @pytest.mark.parametrize(
     ('B', 'T', 'D', 'W', 'activation', 'has_bias', 'has_residual', 'dtype', 'backend'),
     [
-        pytest.param(
-            *test, id="B{0}_T{1}_D{2}_W{3}_activation{4}_has_bias{5}_has_residual{6}_{7}_{8}".format(*test))
+        pytest.param(*test, id="B{0}_T{1}_D{2}_W{3}_activation{4}_has_bias{5}_has_residual{6}_{7}_{8}".format(*test))
         for test in [
             (2, 64, 128, 3, "swish", True, True, torch.float32, 'triton'),
             (2, 128, 128, 4, "swish", False, True, torch.float32, 'triton'),
@@ -1065,21 +1041,13 @@ def test_conv_prefill(
             expected = x[:, -p, :]
         else:
             expected = tri_cache[:, :, -(p - T)]
-        torch.testing.assert_close(
-            cache_out[:, :, -p],
-            expected,
-            atol=1e-3,
-            rtol=1e-3,
-        )
+        torch.testing.assert_close(cache_out[:, :, -p], expected, atol=1e-3, rtol=1e-3)
 
 
 @pytest.mark.parametrize(
     ('N', 'T', 'D', 'W', 'activation', 'has_bias', 'has_residual', 'dtype', 'backend'),
     [
-        pytest.param(
-            *test,
-            id="N{0}_T{1}_D{2}_W{3}_activation{4}_has_bias{5}_has_residual{6}_{7}_{8}".format(*test),
-        )
+        pytest.param(*test, id="N{0}_T{1}_D{2}_W{3}_activation{4}_has_bias{5}_has_residual{6}_{7}_{8}".format(*test))
         for test in [
             (3, 128, 64, 4, "swish", True, True, torch.float32, 'triton'),
             (4, 256, 128, 3, None,  False, True, torch.float32, 'triton'),
@@ -1144,13 +1112,7 @@ def test_conv_varlen_prefill(
 
     zero_pad = torch.zeros(N, D, 1, device=device, dtype=dtype)
     tri_cache = torch.cat([zero_pad, cache], dim=-1)
-    tri, cache_out = conv(
-        x=x,
-        residual=residual,
-        cache=tri_cache.clone(),
-        output_final_state=True,
-        cu_seqlens=cu_seqlens,
-    )
+    tri, cache_out = conv(x=x, residual=residual, cache=tri_cache.clone(), output_final_state=True, cu_seqlens=cu_seqlens)
 
     assert_close("varlen y", ref, tri, 1e-3)
 
@@ -1161,12 +1123,7 @@ def test_conv_varlen_prefill(
                 expected = x[0, eos - p, :]
             else:
                 expected = tri_cache[i, :, -(p - length)]
-            torch.testing.assert_close(
-                cache_out[i, :, -p],
-                expected,
-                atol=1e-3,
-                rtol=1e-3,
-            )
+            torch.testing.assert_close(cache_out[i, :, -p], expected, atol=1e-3, rtol=1e-3)
 
 
 @pytest.mark.parametrize(
@@ -1245,14 +1202,7 @@ def test_conv_varlen_empty_sequence():
     N, T = 2, 2
     x = torch.randn(1, T, D).to(device, dtype)
 
-    conv = ShortConvolution(
-        hidden_size=D,
-        kernel_size=W,
-        bias=False,
-        activation='silu',
-        device=device,
-        dtype=dtype,
-    )
+    conv = ShortConvolution(hidden_size=D, kernel_size=W, bias=False, activation='silu', device=device, dtype=dtype)
 
     cache = torch.randn(N, D, W - 1).to(device, dtype)
     # reference: only the real sequence (index 1) is processed
@@ -1265,12 +1215,7 @@ def test_conv_varlen_empty_sequence():
     ).transpose(1, 2)
 
     zero_pad = torch.zeros(N, D, 1, device=device, dtype=dtype)
-    tri, _ = conv(
-        x=x,
-        cache=torch.cat([zero_pad, cache], dim=-1).clone(),
-        output_final_state=True,
-        cu_seqlens=cu_seqlens,
-    )
+    tri, _ = conv(x=x, cache=torch.cat([zero_pad, cache], dim=-1).clone(), output_final_state=True, cu_seqlens=cu_seqlens)
     assert_close("y", ref, tri, 1e-3)
 
 
@@ -1294,9 +1239,9 @@ def test_conv_backend_override(monkeypatch: pytest.MonkeyPatch):
     ['rank', 'channels', 'width', 'weight', 'packed-batch', 'chunk', 'state', 'dtype', 'distributed'],
 )
 def test_conv_backend_verifier(monkeypatch: pytest.MonkeyPatch, case: str):
-    from fla.modules.causal_conv1d.backends import CausalConv1dGluonBackend
+    pytest.importorskip('triton.experimental.gluon')
+    from fla.modules.causal_conv1d.backends.gluon import causal_conv1d_bwd_verifier, causal_conv1d_fwd_verifier
 
-    backend = CausalConv1dGluonBackend()
     x = torch.empty(2, 64, 32)
     weight = torch.empty(32, 4)
     kwargs = {}
@@ -1317,15 +1262,9 @@ def test_conv_backend_verifier(monkeypatch: pytest.MonkeyPatch, case: str):
     elif case == 'chunk':
         kwargs['chunk_size'] = 32
     if case == 'state':
-        accepted, reason = backend.causal_conv1d_bwd_verifier(
-            x=x,
-            dy=x,
-            dht=None,
-            weight=weight,
-            initial_state=torch.empty(2, 32, 4),
-        )
+        accepted, reason = causal_conv1d_bwd_verifier(x=x, dy=x, dht=None, weight=weight, initial_state=torch.empty(2, 32, 4))
     else:
-        accepted, reason = backend.causal_conv1d_fwd_verifier(x=x, weight=weight, **kwargs)
+        accepted, reason = causal_conv1d_fwd_verifier(x=x, weight=weight, **kwargs)
     assert not accepted and reason
 
 

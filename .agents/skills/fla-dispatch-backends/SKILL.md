@@ -5,26 +5,46 @@ description: Change FLA backend registration, dispatch, or verifiers while prese
 
 # Backend dispatch
 
-Use this skill when changing `fla/backends.py` or an operation's backend. The [backend module](../../../fla/backends.py) defines registration and selection; [CONTRIBUTING.md](../../../CONTRIBUTING.md) defines style and public compatibility.
+Use this skill for registration, selection, or verifier changes in `fla/backends.py` and operation backends. [CONTRIBUTING.md](../../../CONTRIBUTING.md) defines style and public compatibility; [fla/backends.py](../../../fla/backends.py) defines the routing behavior.
 
-## Add or change a backend
+## 1. Define the supported calls
 
-1. Define the supported calls: inputs, layouts, dtypes, gradient modes, and required dependencies.
-2. Put a `BaseBackend` subclass in the operation's `backends/` package and apply `@register_backend('<operation>')`. Set availability, enablement, and priority for that implementation; import optional kernels inside its methods.
-3. Match the dispatched function's signature, parameter order, defaults, return structure, and gradients. A verifier accepts or rejects the same call without changing its inputs or global state.
-4. Import the class in the operation's `backends/__init__.py`. Decorate the default entry point with `@dispatch('<operation>')` from `fla.backends`.
-5. Test through the decorated entry point and use `scripts/find_dependent_tests.py` to identify affected consumers.
+Identify the default entry point and the calls the backend can handle: inputs, layouts, dtypes, gradient modes, and optional dependencies. Match the entry point's signature, parameter order, defaults, return structure, and supported gradients.
 
-## Routing contract
+A verifier returns `(True, None)` or `(False, reason)`. It checks support without changing inputs or global state. Keep it beside the implementation; put helpers shared by several implementations in a utility module.
 
-Backends run in ascending priority order, with registration order breaking ties. Selection checks availability and enablement on each call. A verifier returns `(True, None)` or `(False, reason)`; rejection tries the next candidate. If none accepts, the default implementation runs. Exceptions from the selected implementation propagate.
+## 2. Register the implementation
 
-Register each backend under its owning operation and keep its methods specific to that operation. Registration replaces an existing instance with the same backend type. Load the owning backend package before resolving its registry.
+Keep the default entry point backend-independent with bare `@dispatch`. Choose the registration form that matches the implementation:
 
-Keep selection outside `torch.compile` graphs and avoid cached availability or enablement checks in the dispatch wrapper. Optional dependencies must remain lazy so an unused backend cannot prevent package import.
+| Implementation               | Registration                                                         |
+| ---------------------------- | -------------------------------------------------------------------- |
+| Function with the same API   | `@register(entry, backend=TritonAscendBackend, verifier=...)`        |
+| Adapter with backend policy  | `@register(entry)` on a `BaseBackend` subclass                       |
 
-## Validation
+An adapter defines methods named after the entry point, such as `chunk_kda` and `chunk_kda_verifier`. Register it where it is defined and import optional kernels only when selected.
 
-Cover accepted dispatch, rejection, unavailable and disabled backends, and default fallback. Exercise changed verifier boundaries and compare outputs and supported gradients with the default implementation. Include calls with omitted optional arguments to check defaults.
+Import the owning package's backends after its default entry points are defined. For implementations with platform-specific dependencies, guard the import with the shared backend's `is_available()`. Do not gate registration on enable switches; dispatch reads those at call time. Keep per-operation switches on `@register(..., env_var=...)` and implementation paths out of the shared dispatcher.
 
-Set `FLA_DISABLE_BACKEND_DISPATCH=1` before importing FLA for the default path. Use explicit backend flags for routing tests, and fresh processes for import behavior. When changing registration, check shared backend ownership, import order, and existing public imports.
+Existing owners using `@dispatch('<operation>')` use `@register('<operation>')` on adapter classes and load implementations through the owner's backend package. Both forms use the same registration and selection logic.
+
+## 3. Preserve routing behavior
+
+For each call, try backends in ascending priority order; ties retain registration order:
+
+1. Check availability and enablement.
+2. Run the verifier; rejection proceeds to the next candidate.
+3. Call the selected implementation. Its exceptions propagate.
+4. If no candidate accepts, call the default implementation.
+
+Registration replaces an existing backend of the same type. Function registration keys the registry by the unwrapped entry point, so compiler decorators and public aliases share that registry. Legacy owner registries must load their backend package before lookup.
+
+Keep selection outside `torch.compile` graphs. Do not cache availability or enablement in the dispatch wrapper: registered backends must remain eligible when their switches change. Python's import cache handles modules already loaded, and unused optional dependencies must not prevent package import.
+
+## 4. Verify through the entry point
+
+Run the decorated entry point for accepted calls, verifier rejection, disabled/unavailable backends, and fallback. Check optional arguments omitted as well as supplied, changed support boundaries, outputs, and supported gradients.
+
+Use explicit backend flags in routing tests. For the default path, set `FLA_DISABLE_BACKEND_DISPATCH=1` before importing FLA. Use fresh processes for import-order checks, and verify public aliases and shared backend ownership after registration changes.
+
+Find affected consumers with `scripts/find_dependent_tests.py` and run the relevant operator, layer, and model tests. Host routing tests establish dispatch behavior; accelerator reference tests establish numerical correctness.

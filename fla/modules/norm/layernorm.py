@@ -7,9 +7,9 @@
 #
 # Copyright (c) 2023, Tri Dao
 # https://github.com/state-spaces/mamba/blob/fb7b5310fa865dbd62aa059b1e26f2b431363e2a/mamba_ssm/ops/triton/layernorm.py
-# Implement residual + layer_norm / rms_norm.
+# implement residual + layer_norm / rms_norm.
 
-# Based on the Triton LayerNorm tutorial: https://triton-lang.org/main/getting-started/tutorials/05-layer-norm.html
+# based on the Triton LayerNorm tutorial: https://triton-lang.org/main/getting-started/tutorials/05-layer-norm.html
 # accumulate affine gradients in registers; wide dimensions can cause register spilling.
 
 from __future__ import annotations
@@ -385,7 +385,7 @@ def layer_norm_bwd_kernel_row(
         tl.store(db + i_s * D + o_d, b_db, mask=mask)
 
 
-@dispatch('modules.norm.layernorm')
+@dispatch
 def layer_norm_fwd(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -471,7 +471,7 @@ def layer_norm_fwd(
     return y, mean, rstd, res_out if res_out is not None else x
 
 
-@dispatch('modules.norm.layernorm')
+@dispatch
 def layer_norm_bwd(
     dy: torch.Tensor,
     x: torch.Tensor,

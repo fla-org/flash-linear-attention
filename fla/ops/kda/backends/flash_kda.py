@@ -15,22 +15,23 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from fla.backends import BaseBackend, register_backend
+from fla.backends import BaseBackend, register
+from fla.ops.kda.chunk import chunk_kda
 
 if TYPE_CHECKING:
     from fla.ops.cp import FLACPContext
 
 
-@register_backend('kda')
+@register(chunk_kda)
 class FlashKDABackend(BaseBackend):
     """Copyright (c) 2026 Moonshot AI
 
     Fused CUTLASS forward (replaces the multi-kernel Triton path).
     https://github.com/MoonshotAI/FlashKDA
 
-    Enabled only under ``torch.inference_mode()``; disable with ``FLA_FLASH_KDA=0``.
-    The kernel fuses q/k L2 norm, beta sigmoid, and the KDA gate, so callers must pass
-    raw tensors and set all three ``*_in_kernel`` flags.
+    Enabled only when gradient tracking is disabled; disable with ``FLA_FLASH_KDA=0``.
+    The kernel fuses q/k L2 norm, beta sigmoid, and the KDA gate,
+    so callers must pass raw tensors and set all three ``*_in_kernel`` flags.
     """
 
     backend_type = "flash_kda"
@@ -152,7 +153,11 @@ class FlashKDABackend(BaseBackend):
             cu_seqlens = cu_seqlens.to(torch.long)
 
         flash_kda.fwd(
-            q, k, v, g, beta,
+            q,
+            k,
+            v,
+            g,
+            beta,
             scale,
             out_buf,
             A_log=A_log,

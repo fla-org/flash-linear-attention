@@ -5,6 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+from fla.backends import TritonAscendBackend
 from fla.modules.norm.fused_norm_gate import (
     FusedLayerNormGated,
     FusedLayerNormGatedLinear,
@@ -47,3 +48,7 @@ __all__ = [
     'RMSNormGated',
     'RMSNormLinear',
 ]
+
+
+if TritonAscendBackend.is_available():
+    from fla.modules.norm.triton_ascend import fused_norm_gate, l2norm, layernorm  # noqa: F401
