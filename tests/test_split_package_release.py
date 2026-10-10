@@ -73,10 +73,7 @@ def _wheel_names(wheel: Path) -> set[str]:
 
 
 def _requires_by_name(wheel: Path) -> dict[str, Requirement]:
-    return {
-        requirement.name: requirement
-        for requirement in _requires_dist_entries(wheel)
-    }
+    return {requirement.name: requirement for requirement in _requires_dist_entries(wheel)}
 
 
 def _requires_dist_entries(wheel: Path) -> list[Requirement]:
@@ -116,7 +113,6 @@ def test_split_wheels_match_release_contract(tmp_path: Path) -> None:
     ext_names = _wheel_names(ext_wheel)
 
     assert "fla/__init__.py" in core_names
-    assert "fla/ops/backends/__init__.py" in core_names
     assert "fla/ops/__init__.py" in core_names
     assert "fla/modules/__init__.py" in core_names
     assert "fla/backends.py" in core_names
@@ -211,19 +207,15 @@ def test_core_then_extension_install_sequence_without_runtime_deps(tmp_path: Pat
 def test_core_only_import_with_repo_root_on_path(tmp_path: Path) -> None:
     """fla-core installed alone should still be importable from the repo root.
 
-    This guards against the case where the source tree (containing fla/layers/ and
-    fla/models/) is on sys.path but the extension package is not installed and the
-    runtime deps (torch/triton/transformers) are absent. The top-level fla package
-    must gracefully skip the optional extension rather than surfacing an import
-    error from inside fla.layers.
+    When the source tree is on sys.path without the extension package or its runtime dependencies,
+    importing fla must skip the optional extension without surfacing an import error from fla.layers.
     """
     core_wheel, _, version = _build_split_wheels(tmp_path)
     python = _create_venv(tmp_path)
 
     _run([str(python), "-m", "pip", "install", "--no-index", "--no-deps", str(core_wheel)], cwd=tmp_path)
 
-    # Put the repo root on PYTHONPATH (simulates running from the project directory
-    # or using an editable-src checkout) and try to import fla with no torch/triton.
+    # putting the repo root on PYTHONPATH simulates an editable checkout without torch/triton.
     core_check = textwrap.dedent(
         f"""
         import importlib.util
@@ -259,11 +251,11 @@ def test_split_namespace_across_sys_path_entries_without_runtime_deps(tmp_path: 
     ext_target = tmp_path / "ext-target"
 
     _run(
-        [str(python), "-m", "pip", "install", "--no-index", "--no-deps", "--target", str(core_target), str(core_wheel)],
+        cmd=[str(python), "-m", "pip", "install", "--no-index", "--no-deps", "--target", str(core_target), str(core_wheel)],
         cwd=tmp_path,
     )
     _run(
-        [str(python), "-m", "pip", "install", "--no-index", "--no-deps", "--target", str(ext_target), str(ext_wheel)],
+        cmd=[str(python), "-m", "pip", "install", "--no-index", "--no-deps", "--target", str(ext_target), str(ext_wheel)],
         cwd=tmp_path,
     )
 
@@ -297,7 +289,7 @@ def test_full_split_import_contract_when_runtime_dependencies_available(tmp_path
         import fla.layers
         import fla.models
         from fla import GLAModel, GatedLinearAttention
-        from fla.backends import BackendRegistry, BaseBackend, dispatch, register_backend
+        from fla.backends import BackendRegistry, BaseBackend, dispatch, register
         from fla.models import GLAConfig, GLAForCausalLM, GLAModel as ModelsGLAModel
         from fla.modules.grpo import fused_grpo_loss
         from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
@@ -305,7 +297,7 @@ def test_full_split_import_contract_when_runtime_dependencies_available(tmp_path
 
         assert fla.__version__ == {version!r}
         assert callable(dispatch('kda'))
-        assert callable(register_backend('kda'))
+        assert callable(register('kda'))
         assert "GLAModel" in fla.__all__
         assert "GatedLinearAttention" in fla.__all__
         assert "GLAConfig" not in fla.__all__

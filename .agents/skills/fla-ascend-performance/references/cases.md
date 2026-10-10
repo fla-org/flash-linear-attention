@@ -4,7 +4,7 @@ Use these examples to understand existing design choices. Read the current imple
 
 ## `causal_conv1d.py` — 1D core-grid + constexpr DMA split
 
-Implementation: `fla/modules/conv/backends/triton_ascend/ops.py`.
+Implementation: `fla/modules/causal_conv1d/backends/triton_ascend.py`.
 
 The contiguous packed training path uses a 1D Vector-core task loop when channel tiling and state requirements permit. Other layouts, channel dimensions, and cache-state calls retain separate paths.
 

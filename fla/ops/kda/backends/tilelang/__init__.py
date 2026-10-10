@@ -11,20 +11,11 @@ from __future__ import annotations
 
 import torch
 
-from fla.backends import BaseBackend, register_backend
-from fla.utils import has_usable_nvcc
+from fla.backends import TileLangBackend, register
 
 
-@register_backend('kda')
-class KDATileLangBackend(BaseBackend):
-
-    backend_type = "tilelang"
-    package_name = "tilelang"
-    env_var = "FLA_TILELANG"
-
-    @classmethod
-    def is_available(cls) -> bool:
-        return super().is_available() and has_usable_nvcc()
+@register('kda')
+class KDATileLangBackend(TileLangBackend):
 
     def chunk_kda_bwd_wy_dqkg_fused_verifier(
         self,

@@ -14,14 +14,11 @@ import torch
 
 import fla
 from fla import layers, models, modules
-from fla.modules import activations, fused_linear_cross_entropy, l2norm
+from fla.modules import activations, l2norm
 
 
 def test_top_level_exports_layers_and_non_config_models():
-    expected_exports = [
-        *layers.__all__,
-        *[name for name in models.__all__ if not name.endswith("Config")],
-    ]
+    expected_exports = [*layers.__all__, *[name for name in models.__all__ if not name.endswith("Config")]]
 
     assert fla.__all__ == expected_exports
 
@@ -34,12 +31,32 @@ def test_top_level_exports_layers_and_non_config_models():
     assert not any(name in fla.__dict__ for name in config_exports)
 
 
+@pytest.mark.parametrize('disabled', ['0', '1'], ids=['dispatch-enabled', 'dispatch-disabled'])
+def test_public_imports_do_not_warn(run_python, disabled):
+    run_python(
+        """
+        import warnings
+
+        warnings.filterwarnings('error', message='fla.*deprecated', category=DeprecationWarning)
+        from fla.ops.kda import chunk_kda
+        from fla.backends import dispatch
+        from fla.modules import ShortConvolution
+
+        assert callable(chunk_kda)
+        assert callable(dispatch)
+        assert callable(ShortConvolution)
+        """,
+        FLA_DISABLE_BACKEND_DISPATCH=disabled,
+    )
+
+
 @pytest.mark.parametrize(
     ('owner', 'name', 'defaults'),
     [
         ('activations', 'powglu', {'power': 3.0}),
         ('rotary', 'rotary_embedding', {'seqlen_offsets': 0, 'interleaved': False, 'inplace': False}),
-        ('conv.ops', 'causal_conv1d_fwd', {'chunk_size': 64, 'layout_fallback': False, 'output_final_state': False}),
+        ('causal_conv1d', 'causal_conv1d_fwd', {'chunk_size': 64, 'layout_fallback': False, 'output_final_state': False}),
+        ('causal_conv1d.backends.cuda', 'causal_conv1d_cuda', {'activation': None, 'output_final_state': False}),
         ('grpo', 'fused_grpo_loss', {'beta': 0.1, 'save_kl': False, 'inplace': False}),
         ('fused_cross_entropy', 'cross_entropy_loss', {'ignore_index': -100, 'process_group': None}),
         ('fused_linear_cross_entropy', 'fused_linear_cross_entropy_loss', {'num_chunks': 8, 'reduction': 'mean'}),
@@ -49,7 +66,7 @@ def test_top_level_exports_layers_and_non_config_models():
         ('fused_norm_gate', 'layer_norm_gated', {'activation': 'swish', 'eps': 1e-6}),
     ],
     ids=[
-        'activations', 'rotary', 'conv', 'grpo', 'cross-entropy', 'linear-cross-entropy',
+        'activations', 'rotary', 'conv', 'conv-cuda', 'grpo', 'cross-entropy', 'linear-cross-entropy',
         'kl-div', 'layernorm', 'l2norm', 'norm-gate',
     ],
 )
@@ -63,10 +80,10 @@ def test_public_call_defaults(owner, name, defaults):
 @pytest.mark.parametrize(
     ('legacy', 'current', 'names'),
     [
-        ('convolution', 'conv', ('ShortConvolution', 'LongConvolution', 'ImplicitLongConvolution')),
-        ('conv.triton.ops', 'conv.ops', ('causal_conv1d_fwd', 'causal_conv1d_bwd', 'CausalConv1dFunction')),
+        ('convolution', 'causal_conv1d', ('ShortConvolution', 'causal_conv1d')),
+        ('convolution', 'long_conv', ('LongConvolution', 'ImplicitLongConvolution', 'PositionalEmbedding', 'fft_conv')),
     ],
-    ids=['convolution', 'conv-functions'],
+    ids=['causal-conv', 'long-conv'],
 )
 def test_legacy_imports_preserve_symbol_identity(legacy, current, names):
     old_package = importlib.import_module(f'fla.modules.{legacy}')
@@ -80,10 +97,7 @@ def test_public_function_aliases():
         assert activations.ACT2FN[name] is getattr(activations, name)
     assert activations.ACT2FN['silu'] is activations.swish
     assert activations.ACT2FN['gelu'] is activations.fast_gelu_impl
-    assert activations.ACT2FN['bias_gelu'] is activations.bias_gelu_impl
     assert l2norm.l2_norm is l2norm.l2norm
-    assert fused_linear_cross_entropy.fused_linear_cross_entropy_forward is fused_linear_cross_entropy.fused_linear_cross_entropy_fwd
-    assert fused_linear_cross_entropy.fused_linear_cross_entropy_backward is fused_linear_cross_entropy.fused_linear_cross_entropy_bwd
 
 
 @pytest.mark.parametrize(
@@ -96,15 +110,19 @@ def test_public_function_aliases():
         ('fused_norm_gate', 'FusedLayerNormGated', {'hidden_size': 4, 'bias': True}, ('weight', 'bias')),
         ('fused_norm_gate', 'FusedRMSNormGated', {'hidden_size': 4}, ('weight',)),
         ('l2norm', 'L2Norm', {}, ()),
-        ('rotary', 'RotaryEmbedding', {'dim': 4}, ()),
         ('convolution', 'ShortConvolution', {'hidden_size': 4, 'kernel_size': 3, 'bias': True}, ('weight', 'bias')),
-        ('fused_cross_entropy', 'FusedCrossEntropyLoss', {}, ()),
-        ('fused_linear_cross_entropy', 'FusedLinearCrossEntropyLoss', {}, ()),
-        ('fused_kl_div', 'FusedKLDivLoss', {}, ()),
+        ('convolution', 'LongConvolution', {'hidden_size': 4, 'max_len': 8}, ('filter',)),
     ],
     ids=[
-        'layernorm', 'rmsnorm', 'layernorm-gated', 'rmsnorm-gated', 'fused-layernorm-gated', 'fused-rmsnorm-gated',
-        'l2norm', 'rotary', 'convolution', 'cross-entropy', 'linear-cross-entropy', 'kl-div',
+        'layernorm',
+        'rmsnorm',
+        'layernorm-gated',
+        'rmsnorm-gated',
+        'fused-layernorm-gated',
+        'fused-rmsnorm-gated',
+        'l2norm',
+        'convolution',
+        'long-convolution',
     ],
 )
 def test_legacy_module_pickle_and_state_dict(monkeypatch, legacy, name, kwargs, state_keys):
@@ -116,21 +134,25 @@ def test_legacy_module_pickle_and_state_dict(monkeypatch, legacy, name, kwargs, 
     if hasattr(modules, name):
         assert getattr(modules, name) is module_class
 
-    with monkeypatch.context() as patch:
-        patch.setattr(module_class, '__module__', f'fla.modules.{legacy}')
-        checkpoint = pickle.dumps(module)
-    restored = pickle.loads(checkpoint)
+    paths = [f'fla.modules.{legacy}']
+    if legacy in {'fused_norm_gate', 'l2norm', 'layernorm', 'layernorm_gated'}:
+        paths.append(f'fla.modules.norm.{legacy}')
+    for path in paths:
+        with monkeypatch.context() as patch:
+            patch.setattr(module_class, '__module__', path)
+            checkpoint = pickle.dumps(module)
+        restored = pickle.loads(checkpoint)
 
-    assert type(restored) is module_class
-    assert repr(restored) == repr(module)
-    assert set(restored.state_dict()) == set(state_keys)
-    for key in state:
-        torch.testing.assert_close(restored.state_dict()[key], state[key])
+        assert type(restored) is module_class
+        assert repr(restored) == repr(module)
+        assert set(restored.state_dict()) == set(state_keys)
+        for key in state:
+            torch.testing.assert_close(restored.state_dict()[key], state[key])
     module_class(**kwargs).load_state_dict(state, strict=True)
 
 
 @pytest.mark.parametrize('disabled', ['0', '1'], ids=['dispatch-enabled', 'dispatch-disabled'])
-def test_legacy_imports_warn_once_and_preserve_public_exports(run_python, disabled):
+def test_normalization_imports_preserve_public_exports(run_python, disabled):
     run_python(
         """
         import importlib
@@ -138,16 +160,22 @@ def test_legacy_imports_warn_once_and_preserve_public_exports(run_python, disabl
 
         expected_symbols = {
             'layernorm': (
-                'LayerNorm', 'RMSNorm', 'GroupNorm', 'LayerNormLinear', 'rms_norm', 'layer_norm',
-                'layer_norm_fwd', 'layer_norm_bwd',
+                'GroupNorm', 'GroupNormLinear', 'GroupNormRef', 'LayerNorm', 'LayerNormLinear',
+                'NormParallel', 'RMSNorm', 'RMSNormLinear', 'group_norm', 'group_norm_linear',
+                'group_norm_ref', 'layer_norm', 'layer_norm_bwd', 'layer_norm_fwd', 'layer_norm_linear',
+                'layer_norm_ref', 'rms_norm', 'rms_norm_linear', 'rms_norm_ref',
             ),
-            'l2norm': ('L2Norm', 'l2norm', 'l2_norm', 'L2NormFunction', 'l2norm_fwd', 'l2norm_bwd'),
+            'l2norm': ('L2Norm', 'l2norm', 'l2_norm', 'l2norm_fwd', 'l2norm_bwd'),
             'fused_norm_gate': (
-                'FusedLayerNormGated', 'FusedRMSNormGated', 'layer_norm_gated',
-                'layer_norm_gated_fwd', 'layer_norm_gated_bwd',
+                'FusedLayerNormGated', 'FusedLayerNormGatedLinear', 'FusedLayerNormSwishGate',
+                'FusedLayerNormSwishGateLinear', 'FusedRMSNormGated', 'FusedRMSNormGatedLinear',
+                'FusedRMSNormSwishGate', 'FusedRMSNormSwishGateLinear', 'layer_norm_gated',
+                'layer_norm_gated_bwd', 'layer_norm_gated_fwd', 'layer_norm_swish_gate_linear',
+                'rms_norm_gated', 'rms_norm_swish_gate_linear',
             ),
             'layernorm_gated': (
-                'LayerNormGated', 'RMSNormGated', 'layernorm_fn', 'rmsnorm_fn', 'layer_norm_fwd', 'layer_norm_bwd',
+                'LayerNormGated', 'RMSNormGated', 'layernorm_fn', 'rmsnorm_fn', 'rms_norm_ref',
+                'layer_norm_fwd', 'layer_norm_bwd',
             ),
         }
         canonical_paths = tuple('fla.modules.norm.' + name for name in expected_symbols)
@@ -166,20 +194,15 @@ def test_legacy_imports_warn_once_and_preserve_public_exports(run_python, disabl
             from fla.layers.mamba2 import Mamba2
             from fla.modules import L2Norm, RMSNorm, RotaryEmbedding
             from fla.modules import norm, rotary
+            for canonical_path in canonical_paths:
+                importlib.import_module(canonical_path)
 
         assert layers.GatedLinearAttention is GatedLinearAttention
         assert layers.Mamba2 is Mamba2
         assert modules.L2Norm is L2Norm is norm.L2Norm
         assert modules.RMSNorm is RMSNorm is norm.RMSNorm
         assert modules.RotaryEmbedding is RotaryEmbedding is rotary.RotaryEmbedding
-        emitted = norm_warnings(caught)
-        assert len(emitted) == len(expected_symbols), [str(w.message) for w in caught]
-        for name, canonical_path in zip(expected_symbols, canonical_paths):
-            matching = [w for w in emitted if str(w.message).startswith('fla.modules.' + name + ' ')]
-            assert len(matching) == 1, (name, [str(w.message) for w in emitted])
-            assert matching[0].category is FutureWarning
-            assert canonical_path in str(matching[0].message)
-            assert 'next release after 0.6.0' in str(matching[0].message)
+        assert not norm_warnings(caught), [str(w.message) for w in caught]
 
         for name, canonical_path in zip(expected_symbols, canonical_paths):
             canonical = importlib.import_module(canonical_path)
@@ -192,14 +215,17 @@ def test_legacy_imports_warn_once_and_preserve_public_exports(run_python, disabl
                     assert l2norm_fwd is canonical.l2norm_fwd
                     assert l2norm_bwd is canonical.l2norm_bwd
             assert not norm_warnings(caught), (name, [str(w.message) for w in caught])
-            for symbol in set(legacy.__all__) | set(expected_symbols[name]):
+            assert set(legacy.__all__) == set(canonical.__all__) == set(expected_symbols[name])
+            for symbol in expected_symbols[name]:
                 assert getattr(legacy, symbol) is getattr(canonical, symbol), (name, symbol)
 
-        from fla.modules.conv import causal_conv1d
-        importlib.import_module('fla.modules.conv.causal_conv1d')
-        from fla.modules.conv import causal_conv1d as after_legacy_import
+        from fla.modules.causal_conv1d import causal_conv1d
+        importlib.import_module('fla.modules.causal_conv1d.ops')
+        from fla.modules.causal_conv1d import causal_conv1d as after_implementation_import
+        from fla.modules.convolution import causal_conv1d as legacy
         assert callable(causal_conv1d)
-        assert after_legacy_import is causal_conv1d
+        assert after_implementation_import is causal_conv1d
+        assert causal_conv1d is legacy
         """,
         FLA_DISABLE_BACKEND_DISPATCH=disabled,
     )

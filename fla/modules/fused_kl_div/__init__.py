@@ -5,28 +5,11 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from fla.modules.fused_kl_div.module import (
-    FusedKLDivLoss,
-)
-from fla.modules.fused_kl_div.ops import (
-    MAX_FUSED_SIZE,
-    STATIC_WARPS,
-    FusedKLDivLossFunction,
-    elementwise_mul_kernel,
-    fused_kl_div_bwd,
-    fused_kl_div_fwd,
-    fused_kl_div_loss,
-    kl_div_kernel,
-)
+from fla.backends import TritonAscendBackend
+from fla.modules.fused_kl_div.ops import FusedKLDivLoss, fused_kl_div_loss
 
-__all__ = [
-    'MAX_FUSED_SIZE',
-    'STATIC_WARPS',
-    'FusedKLDivLoss',
-    'FusedKLDivLossFunction',
-    'elementwise_mul_kernel',
-    'fused_kl_div_bwd',
-    'fused_kl_div_fwd',
-    'fused_kl_div_loss',
-    'kl_div_kernel',
-]
+__all__ = ['FusedKLDivLoss', 'fused_kl_div_loss']
+
+
+if TritonAscendBackend.is_available():
+    from fla.modules.fused_kl_div import triton_ascend  # noqa: F401

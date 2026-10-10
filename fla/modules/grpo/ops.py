@@ -6,54 +6,7 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 # modified from https://github.com/mdy666/mdy_triton/blob/e0a856347bd988e05e0152332bba35f1d33c5b1f/others/grpo/grpo_loss.ipynb
-# XHS ID: blueeeee
-
-# https://github.com/huggingface/trl/blob/main/trl/trainer/grpo_trainer.py
-"""
-# Get the per-token log probabilities for the completions for the model and the reference model
-    def _get_per_token_logps(self, model, input_ids, attention_mask, logits_to_keep):
-        # We add 1 to `logits_to_keep` because the last logits of the sequence is later excluded
-        logits = model(input_ids=input_ids, attention_mask=attention_mask, logits_to_keep=logits_to_keep + 1).logits
-        logits = logits[:, :-1, :]  # (B, L-1, V), exclude the last logit: it corresponds to the next token pred
-
-        input_ids = input_ids[:, -logits_to_keep:]
-        # For transformers<=4.48, logits_to_keep argument isn't supported, so here we drop logits ourselves.
-        # See https://github.com/huggingface/trl/issues/2770
-        logits = logits[:, -logits_to_keep:]
-        return selective_log_softmax(logits, input_ids)  #  compute logprobs for the input tokens
-
-    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
-        if return_outputs:
-            raise ValueError("The GRPOTrainer does not support returning outputs")
-        # Compute the per-token log probabilities for the model
-
-        prompt_ids, prompt_mask = inputs["prompt_ids"], inputs["prompt_mask"]
-        completion_ids, completion_mask = inputs["completion_ids"], inputs["completion_mask"]
-        input_ids = torch.cat([prompt_ids, completion_ids], dim=1)
-        attention_mask = torch.cat([prompt_mask, completion_mask], dim=1)
-        logits_to_keep = completion_ids.size(1)  # we only need to compute the logits for the completion tokens
-
-        per_token_logps = self._get_per_token_logps(model, input_ids, attention_mask, logits_to_keep)
-
-        # Compute the KL divergence between the model and the reference model
-        ref_per_token_logps = inputs["ref_per_token_logps"]
-        per_token_kl = torch.exp(ref_per_token_logps - per_token_logps) - (ref_per_token_logps - per_token_logps) - 1
-
-        # x - x.detach() allows for preserving gradients from x
-        advantages = inputs["advantages"]
-        per_token_loss = torch.exp(per_token_logps - per_token_logps.detach()) * advantages.unsqueeze(1)
-        per_token_loss = -(per_token_loss - self.beta * per_token_kl)
-        loss = ((per_token_loss * completion_mask).sum(dim=1) / completion_mask.sum(dim=1)).mean()
-
-        # Log the metrics
-        completion_length = self.accelerator.gather_for_metrics(completion_mask.sum(1)).float().mean().item()
-        self._metrics["completion_length"].append(completion_length)
-
-        mean_kl = ((per_token_kl * completion_mask).sum(dim=1) / completion_mask.sum(dim=1)).mean()
-        self._metrics["kl"].append(self.accelerator.gather_for_metrics(mean_kl).mean().item())
-
-        return loss
-"""
+# loss reference: https://github.com/huggingface/trl/blob/main/trl/trainer/grpo_trainer.py
 
 
 import torch
@@ -65,6 +18,7 @@ from fla.ops.utils.op import exp, log
 from fla.utils import IS_AMD, IS_INTEL, IS_NPU, autotune_cache_kwargs, input_guard
 
 NUM_WARPS_AUTOTUNE = [4, 8, 16] if IS_AMD else [4, 8, 16, 32]
+# single-stage pipelining avoids Intel/XPU correctness failures with cold memory.
 NUM_STAGES_AUTOTUNE = [1] if IS_INTEL else [1, 2, 4]
 
 
@@ -199,8 +153,7 @@ def grpo_bwd_kernel(
         tl.debug_barrier()
         logp = x - lse
 
-        dlogp = (beta * (-1.0 * exp(ref_logp - logp) + 1)
-                 - advantage) * dloss
+        dlogp = (beta * (-1.0 * exp(ref_logp - logp) + 1) - advantage) * dloss
 
         for start_n in tl.range(0, N, BLOCK_SIZE):
             cols = start_n + base_cols
@@ -252,7 +205,10 @@ class GrpoLoss(torch.autograd.Function):
             lse_ptr=lse,
             beta=beta,
             save_kl=save_kl,
-            B=B, M=M, N=N, L=L,
+            B=B,
+            M=M,
+            N=N,
+            L=L,
             start_idx=input_ids_start_index,
         )
         ctx.beta = beta
@@ -264,7 +220,6 @@ class GrpoLoss(torch.autograd.Function):
     @input_guard
     @staticmethod
     def backward(ctx, dloss):
-        # The grad of logits comes from two parts, the reward part and the kl part
         lse, logits, input_ids, advantages, completion_mask = ctx.saved_tensors
         inplace = ctx.inplace
         B, L_ADD_1, N = ctx.input_shape
@@ -293,42 +248,46 @@ class GrpoLoss(torch.autograd.Function):
             start_idx=input_ids_start_index,
             BLOCK_SIZE=BN,
         )
-        # The last token in the completion is not used in the loss computation
-        # and therefore its gradient should be set to 0
+        # the final token has no loss contribution, so its gradient is zero.
         dlogits[:, -1, :].fill_(0.0)
         return dlogits.view(*ctx.input_shape), None, None, None, None, None, None, None
 
 
-@dispatch('modules.grpo')
-def fused_grpo_loss(logits, ref_logp, input_ids, advantages,
-                    beta=0.1, completion_mask=None, save_kl=False, inplace=False) -> torch.Tensor:
-    '''
-    compute grpo loss, save memory(no addition usage) and fast speed(6X for A800)
+@dispatch
+def fused_grpo_loss(
+    logits,
+    ref_logp,
+    input_ids,
+    advantages,
+    beta=0.1,
+    completion_mask=None,
+    save_kl=False,
+    inplace=False,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    """Compute per-token GRPO loss from completion logits.
 
     Args:
-        logits: Tensor, [B, L+1, vocab_size], the original output of model, it's not logits[:, :-1]
-        ref_logp: Tensor, [B, L], the original output of model, it's not ref_logits[:, :-1]
-        input_ids: Tensor, [B, K+L], it's prompt_completion_id, it contains the prompt ids and output ids
-        advantages: Tensor, [B], the advantages of each prompt
-        beta: float, the weight of kl loss
-        completion_mask: Tensor, loss mask
-        save_kl: bool, if true will save kl
+        logits (torch.Tensor):
+            Model logits of shape `[B, L + 1, V]`; the final token is excluded from the loss.
+        ref_logp (torch.Tensor):
+            Reference model log probabilities of shape `[B, L]` for the sampled completion tokens.
+        input_ids (torch.Tensor):
+            Prompt and completion token IDs of shape `[B, K + L]`.
+        advantages (torch.Tensor):
+            Per-sequence advantages of shape `[B]`.
+        beta (float, Optional):
+            KL penalty coefficient. Default: 0.1.
+        completion_mask (torch.Tensor, Optional):
+            Mask of shape `[B, L]`; masked tokens have zero loss and gradient. Default: `None`.
+        save_kl (bool, Optional):
+            Whether to also return the per-token KL penalty. Default: `False`.
+        inplace (bool, Optional):
+            Whether backward may overwrite logits with gradients. Default: `False`.
 
     Returns:
-        loss: Tensor, [B, L], the loss of grpo, it contains the advantage part and kl part
-
-    NOTE: logits(ref_logits) is computed by these steps
-        logits_to_keep = completion_ids.size(1)
-
-        def get_per_token_logits(model, input_ids, attention_mask, logits_to_keep):
-            # We add 1 to `logits_to_keep` because the last logits of the sequence is later excluded
-            logits = model(
-                input_ids=input_ids, attention_mask=attention_mask, logits_to_keep=logits_to_keep + 1
-            ).logits
-            return logits
-
-        logits = get_per_token_logits(model, prompt_completion_ids, attention_mask, logits_to_keep)
-    '''
+        torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+            Per-token loss of shape `[B, L]`, with a separate KL tensor when `save_kl=True`.
+    """
     out = GrpoLoss.apply(logits, ref_logp, input_ids, advantages, beta, completion_mask, save_kl, inplace)
     if not save_kl:
         return out
@@ -359,7 +318,7 @@ def grpo_loss_torch(logits, ref_logp, input_ids, advantages, beta=0.1, completio
     return per_token_loss if not save_kl else (per_token_loss, per_token_kl)
 
 
-# NPU inductor miscompiles this function; keep its existing eager path.
+# keep this path eager on NPU to avoid an Inductor miscompile.
 @torch.compile(fullgraph=True, disable=IS_NPU)
 def grpo_loss_with_old_logps(
     logps: torch.Tensor,
@@ -371,55 +330,52 @@ def grpo_loss_with_old_logps(
     beta: float = 0.2,
     epsilon: float = 0.2,
 ):
-    """
-    Compute the GRPO (Group Relative Policy Optimization) loss.
+    """Compute clipped GRPO loss using current, reference and old-policy log probabilities.
 
     Args:
-        logps (torch.Tensor): [Batch, Token_length] Log probabilities of the current policy.
-        ref_logps (torch.Tensor):[Batch, Token_length]  Log probabilities of the reference policy.
-        old_logps (torch.Tensor): [Batch, Token_length] Log probabilities of the old policy.
-        completion_ids (torch.Tensor): [Batch, Token_length] Completion token IDs (bool).
-        pad_token_id: Pad token ID.
-        logits_to_keep (int): Number of logits to keep for masking.
-        rewards (torch.Tensor): [Batch] Rewards for each generation.
-        beta (float) = 0.2: A hyperparameter for weighting the KL divergence term.
-        epsilon (float) = 0.2: An float hyperparameter for clipping the importance weights.
+        logps (torch.Tensor):
+            Current policy log probabilities of shape `[B, T]`.
+        ref_logps (torch.Tensor):
+            Reference policy log probabilities of shape `[B, T]`.
+        old_logps (torch.Tensor):
+            Old policy log probabilities of shape `[B, T]`.
+        pad_mask (torch.Tensor):
+            Boolean mask selecting completion tokens of shape `[B, T]`.
+        logits_to_keep (int):
+            Number of completion tokens, equal to `T`.
+        rewards (torch.Tensor):
+            Per-sequence rewards used to normalize advantages.
+        beta (float, Optional):
+            KL penalty coefficient. Default: 0.2.
+        epsilon (float, Optional):
+            Clipping range around an importance weight of one. Default: 0.2.
 
     Returns:
-        torch.Tensor: The computed GRPO loss.
+        torch.Tensor:
+            Scalar loss averaged over valid completion tokens.
     """
     B = logps.shape[0]
     assert B > 1, "Batch * Num generations should be greater than 1"
 
     rewards_shaped = rewards.view(-1, B)  # B,num_generations
-    advantages = (rewards_shaped - rewards_shaped.mean(dim=1, keepdim=True)) / \
-        (rewards_shaped.std(dim=1, keepdim=True) + 1e-8)
+    advantages = (rewards_shaped - rewards_shaped.mean(dim=1, keepdim=True)) / (rewards_shaped.std(dim=1, keepdim=True) + 1e-8)
     advantages = advantages.view(-1)  # B*num_generations
-    # Calculate the per - token KL divergence
     per_token_kl = torch.exp(ref_logps - logps) - (ref_logps - logps) - 1
 
-    # Calculate the ratio of probabilities (importance weights)
-    # Importance weights are calculated as exp(log_pi_theta - log_pi_theta_old)
     importance_weights = torch.exp(logps - old_logps)
 
-    # Clip the importance weights to the range [1 - epsilon, 1 + epsilon]
     importance_weights_clipped = torch.clamp(importance_weights, 1 - epsilon, 1 + epsilon)
 
-    # Create a completion mask. It checks which positions are valid based on logits_to_keep
     completion_mask = torch.arange(logits_to_keep, device=logps.device)[None, :] >= 0
 
-    # Combine the completion mask and padding mask
-    completion_mask = completion_mask & pad_mask  # Ensure matching shape
+    completion_mask = completion_mask & pad_mask
 
-    # Add an extra dimension to advantages to match the shape for element - wise multiplication
     advantages = advantages.unsqueeze(1)
 
-    # Calculate the per - token loss. It takes the minimum of the unclipped and clipped importance weights
-    # and subtracts the KL divergence term weighted by beta, then multiplies by the completion mask
-    token_loss = -(torch.min(advantages * importance_weights, advantages *
-                   importance_weights_clipped) - beta * per_token_kl) * completion_mask
+    token_loss = -(
+        torch.min(advantages * importance_weights, advantages * importance_weights_clipped) - beta * per_token_kl
+    ) * completion_mask
 
-    # Calculate the final loss by summing the token losses and normalizing by the number of valid tokens
     loss = token_loss.sum() / completion_mask.sum()
 
     return loss

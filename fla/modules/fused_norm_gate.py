@@ -5,8 +5,6 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-import warnings
-
 from fla.modules.norm.fused_norm_gate import (
     FusedLayerNormGated,
     FusedLayerNormGatedLinear,
@@ -16,15 +14,9 @@ from fla.modules.norm.fused_norm_gate import (
     FusedRMSNormGatedLinear,
     FusedRMSNormSwishGate,
     FusedRMSNormSwishGateLinear,
-    LayerNormGatedFunction,
-    LayerNormGatedLinearFunction,
     layer_norm_gated,
     layer_norm_gated_bwd,
-    layer_norm_gated_bwd_kernel,
-    layer_norm_gated_bwd_kernel_row,
     layer_norm_gated_fwd,
-    layer_norm_gated_fwd_kernel,
-    layer_norm_gated_fwd_kernel_row,
     layer_norm_swish_gate_linear,
     rms_norm_gated,
     rms_norm_swish_gate_linear,
@@ -39,23 +31,10 @@ __all__ = [
     'FusedRMSNormGatedLinear',
     'FusedRMSNormSwishGate',
     'FusedRMSNormSwishGateLinear',
-    'LayerNormGatedFunction',
-    'LayerNormGatedLinearFunction',
     'layer_norm_gated',
     'layer_norm_gated_bwd',
-    'layer_norm_gated_bwd_kernel',
-    'layer_norm_gated_bwd_kernel_row',
     'layer_norm_gated_fwd',
-    'layer_norm_gated_fwd_kernel',
-    'layer_norm_gated_fwd_kernel_row',
     'layer_norm_swish_gate_linear',
     'rms_norm_gated',
     'rms_norm_swish_gate_linear',
 ]
-
-warnings.warn(
-    'fla.modules.fused_norm_gate is deprecated; import from fla.modules.norm.fused_norm_gate instead. '
-    'This compatibility path will be removed in the next release after 0.6.0.',
-    FutureWarning,
-    stacklevel=2,
-)

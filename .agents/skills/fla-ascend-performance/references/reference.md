@@ -81,5 +81,5 @@ Useful code locations:
 
 - `fla/utils/ascend_ub_manager.py`: tiling and grid helpers.
 - `fla/utils/hardware.py`: `get_multiprocessor_count`, including `use_aicore=True` for Cube work.
-- `fla/modules/norm/l2norm/backends/triton_ascend/__init__.py`: class registration, availability, and lazy kernel imports.
+- `fla/modules/norm/triton_ascend/l2norm.py`: entry-point registration and the Ascend implementation.
 - `tests/ops/test_gdn_kernels.py`, `tests/ops/test_solve_tril.py`, and `tests/modules/test_conv.py`: relevant kernel comparisons.

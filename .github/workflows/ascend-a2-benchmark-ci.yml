@@ -25,6 +25,7 @@ on:
 jobs:
   changes:
     name: Detect NPU-related changes
+    if: github.event.action != 'edited' || github.event.changes.title != null
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:

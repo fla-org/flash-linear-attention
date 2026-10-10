@@ -14,15 +14,15 @@ import logging
 import os
 from collections.abc import Callable
 from functools import cache, wraps
+from inspect import unwrap
 from typing import Any, ClassVar, TypeVar
 
 import torch
 
-from fla.utils import find_spec_cached
+from fla.utils import find_spec_cached, has_usable_nvcc
 
 logger = logging.getLogger(__name__)
 F = TypeVar('F', bound=Callable)
-B = TypeVar('B', bound='BaseBackend')
 
 _DISPATCH_DISABLED = os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") == "1"
 if _DISPATCH_DISABLED:
@@ -52,9 +52,20 @@ class BaseBackend:
 
     backend_type: ClassVar[str] = "base"
     package_name: ClassVar[str | None] = None
-    env_var: ClassVar[str | None] = None
+    env_var: str | None = None
     default_enable: ClassVar[bool] = True
     priority: ClassVar[int] = 5
+    implementation: Callable | None = None
+    verifier: Callable | None = None
+
+    def __init__(self, *, env_var: str | None = None):
+        if env_var is not None:
+            self.env_var = env_var
+
+    def get_implementation(self, function_name: str) -> Callable | None:
+        if self.implementation is not None:
+            return self.implementation
+        return getattr(self, function_name, None)
 
     @classmethod
     def is_available(cls) -> bool:
@@ -62,35 +73,72 @@ class BaseBackend:
             return True
         return find_spec_cached(cls.package_name) is not None
 
-    @classmethod
-    def is_enabled(cls) -> bool:
-        if cls.env_var is None:
+    def is_enabled(self) -> bool:
+        if self.env_var is None:
             return True
-        if os.environ.get(f"FLA_{cls.backend_type.upper()}", "0") != "0":
+        if os.environ.get(f"FLA_{self.backend_type.upper()}", "0") != "0":
             return True
-        default_value = "1" if cls.default_enable else "0"
-        return os.environ.get(cls.env_var, default_value) != "0"
+        default_value = "1" if self.default_enable else "0"
+        return os.environ.get(self.env_var, default_value) != "0"
 
     @classmethod
     @cache
     def can_use(cls) -> bool:
-        return cls.is_available() and cls.is_enabled()
+        return cls.is_available() and cls().is_enabled()
 
-    def verify(self, func_name: str, *args, **kwargs) -> tuple[bool, str | None]:
+    def verify(self, function_name: str, *args, **kwargs) -> tuple[bool, str | None]:
         """Check if backend can handle the function call."""
-        verifier_name = f"{func_name}_verifier"
-        verifier = getattr(self, verifier_name, None)
+        verifier_name = f"{function_name}_verifier"
+        verifier = self.verifier or getattr(self, verifier_name, None)
         if verifier is None:
             return True, None
 
         try:
             return verifier(*args, **kwargs)
-        except Exception as e:
-            return False, str(e)
+        except Exception as error:
+            return False, str(error)
+
+
+class TritonAscendBackend(BaseBackend):
+    """Shared availability and selection policy for Ascend implementations."""
+
+    backend_type = 'triton_ascend'
+    priority = 0
+
+    @classmethod
+    def is_available(cls) -> bool:
+        from fla.utils import IS_NPU
+        return IS_NPU
+
+
+class TileLangBackend(BaseBackend):
+    """Shared availability and selection policy for TileLang implementations."""
+
+    backend_type = 'tilelang'
+    package_name = 'tilelang'
+    env_var = 'FLA_TILELANG'
+
+    @classmethod
+    def is_available(cls) -> bool:
+        return super().is_available() and has_usable_nvcc()
+
+
+class GluonBackend(BaseBackend):
+    """NVIDIA GPU backend using Gluon kernels."""
+
+    backend_type = 'gluon'
+    package_name = 'triton.experimental.gluon'
+    env_var = 'FLA_GLUON'
+    default_enable = False
+
+    @classmethod
+    def is_available(cls) -> bool:
+        from fla.utils import IS_NVIDIA
+        return IS_NVIDIA and super().is_available()
 
 
 class BackendRegistry:
-    """Backends owned by one operation directory."""
+    """Ordered backend candidates for an operation or entry point."""
 
     def __init__(self, operation_name: str):
         self.operation_name = operation_name
@@ -112,90 +160,107 @@ class BackendRegistry:
                 return backend
         return None
 
-    def dispatch(self, func: F) -> F:
+    def dispatch(self, default_function: F) -> F:
         """Select the first eligible backend, falling back to the decorated function."""
         if _DISPATCH_DISABLED:
-            return func
-        func_name = func.__name__
+            return default_function
+        function_name = default_function.__name__
 
-        @wraps(func)
+        @wraps(default_function)
         def wrapper(*args, **kwargs) -> Any:
-            backends_list = self._get_sorted_backends()
-
-            for be in backends_list:
-                # avoid be.can_use(): its @cache wrapper breaks torch.compile tracing.
-                if not (be.is_available() and be.is_enabled()):
+            for backend in self._get_sorted_backends():
+                # avoid backend.can_use(): its @cache wrapper breaks torch.compile tracing.
+                if not (backend.is_available() and backend.is_enabled()):
                     continue
 
-                can_use, reason = be.verify(func_name, *args, **kwargs)
-                if not can_use:
-                    fail_key = f"{self.operation_name}:{func_name}:{be.backend_type}:fail"
-                    if fail_key not in self._logged:
-                        self._logged.add(fail_key)
+                accepted, reason = backend.verify(function_name, *args, **kwargs)
+                if not accepted:
+                    rejection_key = f"{self.operation_name}:{function_name}:{backend.backend_type}:fail"
+                    if rejection_key not in self._logged:
+                        self._logged.add(rejection_key)
                         logger.info(
-                            f"[FLA Backend] {self.operation_name}.{func_name} -> {be.backend_type} "
+                            f"[FLA Backend] {self.operation_name}.{function_name} -> {backend.backend_type} "
                             f"rejected: {reason}"
                         )
                     continue
 
-                impl = getattr(be, func_name, None)
-                if impl is None:
+                implementation = backend.get_implementation(function_name)
+                if implementation is None:
                     continue
 
-                result = impl(*args, **kwargs)
+                result = implementation(*args, **kwargs)
 
-                log_key = f"{self.operation_name}:{func_name}:{be.backend_type}"
+                log_key = f"{self.operation_name}:{function_name}:{backend.backend_type}"
                 if log_key not in self._logged:
                     self._logged.add(log_key)
-                    logger.info(f"[FLA Backend] {self.operation_name}.{func_name} -> {be.backend_type}")
+                    logger.info(f"[FLA Backend] {self.operation_name}.{function_name} -> {backend.backend_type}")
 
                 return result
 
-            return func(*args, **kwargs)
+            return default_function(*args, **kwargs)
 
         # runtime backend selection must stay outside torch.compile graphs.
-        wrapper = torch.compiler.disable(wrapper)
-
-        return wrapper
+        return torch.compiler.disable(wrapper)
 
 
-_registries: dict[str, BackendRegistry] = {}
+_operation_registries: dict[str, BackendRegistry] = {}
+_function_registries: dict[Callable, BackendRegistry] = {}
 
 
-def _registry_for(operation: str) -> BackendRegistry:
-    if operation not in _registries:
-        _registries[operation] = BackendRegistry(operation)
-    return _registries[operation]
+def _get_operation_registry(operation: str) -> BackendRegistry:
+    if operation not in _operation_registries:
+        _operation_registries[operation] = BackendRegistry(operation)
+    return _operation_registries[operation]
 
 
-def register_backend(operation: str) -> Callable[[type[B]], type[B]]:
-    """Register a backend instance for an operation and return its class."""
-    def decorator(backend_class: type[B]) -> type[B]:
-        _registry_for(operation).register(backend_class())
-        return backend_class
+def _load_operation_registry(operation: str) -> BackendRegistry:
+    module_path = f'fla.ops.{operation}.backends'
+    # an existing registry does not guarantee that all of the owner's backends are loaded.
+    importlib.import_module(module_path)
+    return _get_operation_registry(operation=operation)
+
+
+def register(
+    entry_point: Callable | str,
+    *,
+    backend: type[BaseBackend] | None = None,
+    verifier: Callable | None = None,
+    env_var: str | None = None,
+) -> Callable[[F], F]:
+    """Register an implementation or adapter for a dispatched function or operation name."""
+    def decorator(implementation: F) -> F:
+        if _DISPATCH_DISABLED and not isinstance(entry_point, str):
+            return implementation
+        if isinstance(implementation, type):
+            registered_backend = implementation()
+            if backend is not None and backend.backend_type != registered_backend.backend_type:
+                raise ValueError('The registration backend must match the adapter backend_type')
+        else:
+            registered_backend = backend() if backend is not None else BaseBackend()
+            registered_backend.implementation = implementation
+        registered_backend.verifier = verifier
+        if env_var is not None:
+            registered_backend.env_var = env_var
+        if isinstance(entry_point, str):
+            registry = _get_operation_registry(operation=entry_point)
+        else:
+            registry = _function_registries[unwrap(entry_point)]
+        registry.register(registered_backend)
+        return implementation
 
     return decorator
 
 
-def _resolve_registry(operation: str, *, allow_unknown: bool = False) -> BackendRegistry:
-    if operation == 'modules':
-        raise ValueError("Use an operation-specific key, such as 'modules.conv' or 'modules.norm.l2norm'.")
-    if operation.startswith('modules.'):
-        module_path = f'fla.{operation}.backends'
-    else:
-        module_path = f'fla.ops.{operation}.backends'
-    # an existing registry does not guarantee that all of the owner's backends are loaded.
-    try:
-        importlib.import_module(module_path)
-    except ModuleNotFoundError as error:
-        if not allow_unknown or (error.name != module_path and not module_path.startswith(f'{error.name}.')):
-            raise
-    return _registry_for(operation)
+def dispatch(entry_point: F | str) -> F | Callable[[F], F]:
+    """Allow backends to register replacements while retaining the original fallback."""
+    if isinstance(entry_point, str):
+        return _load_operation_registry(operation=entry_point).dispatch
+    if _DISPATCH_DISABLED:
+        return entry_point
+    registry = BackendRegistry(entry_point.__module__)
+    _function_registries[unwrap(entry_point)] = registry
+
+    return registry.dispatch(entry_point)
 
 
-def dispatch(operation: str) -> Callable[[F], F]:
-    """Load an operation's backends and select from the shared registry."""
-    return _resolve_registry(operation).dispatch
-
-
-__all__ = ['BackendRegistry', 'BaseBackend', 'dispatch', 'register_backend']
+__all__ = ['BackendRegistry', 'BaseBackend', 'dispatch', 'register']

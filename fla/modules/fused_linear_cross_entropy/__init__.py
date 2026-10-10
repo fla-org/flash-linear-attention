@@ -5,36 +5,15 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from fla.modules.fused_linear_cross_entropy.module import (
+from fla.backends import TritonAscendBackend
+from fla.modules.fused_linear_cross_entropy.ops import (
     FusedLinearCrossEntropyLoss,
     LinearLossParallel,
-)
-from fla.modules.fused_linear_cross_entropy.ops import (
-    MAX_FUSED_SIZE,
-    STATIC_WARPS,
-    FusedLinearCrossEntropyFunction,
-    elementwise_mul_kernel,
-    fused_linear_cross_entropy_backward,
-    fused_linear_cross_entropy_bwd,
-    fused_linear_cross_entropy_forward,
-    fused_linear_cross_entropy_fwd,
     fused_linear_cross_entropy_loss,
-    logsumexp_fwd,
-    logsumexp_fwd_kernel,
 )
 
-__all__ = [
-    'MAX_FUSED_SIZE',
-    'STATIC_WARPS',
-    'FusedLinearCrossEntropyFunction',
-    'FusedLinearCrossEntropyLoss',
-    'LinearLossParallel',
-    'elementwise_mul_kernel',
-    'fused_linear_cross_entropy_backward',
-    'fused_linear_cross_entropy_bwd',
-    'fused_linear_cross_entropy_forward',
-    'fused_linear_cross_entropy_fwd',
-    'fused_linear_cross_entropy_loss',
-    'logsumexp_fwd',
-    'logsumexp_fwd_kernel',
-]
+__all__ = ['FusedLinearCrossEntropyLoss', 'LinearLossParallel', 'fused_linear_cross_entropy_loss']
+
+
+if TritonAscendBackend.is_available():
+    from fla.modules.fused_linear_cross_entropy import triton_ascend  # noqa: F401

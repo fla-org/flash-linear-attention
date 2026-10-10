@@ -5,7 +5,7 @@ description: Profile and optimize FLA Triton-Ascend kernels using NPU traces, wi
 
 # Ascend kernel performance
 
-Use this skill for operator performance work under `triton_ascend` backend directories. Follow [fla-optimization-loop](../fla-optimization-loop/SKILL.md) for sustained optimization and [CONTRIBUTING](../../../CONTRIBUTING.md#benchmarking) for validation and reporting.
+Use this skill for operator performance work in `triton_ascend.py` and `triton_ascend/` backend implementations. Follow [fla-optimization-loop](../fla-optimization-loop/SKILL.md) for sustained optimization and [CONTRIBUTING](../../../CONTRIBUTING.md#benchmarking) for validation and reporting.
 
 Keep collection, analysis, and benchmarks in the active Python/NPU environment. If it is not configured, activate the project's Ascend environment first.
 
@@ -26,7 +26,7 @@ python .agents/skills/fla-ascend-performance/scripts/profile_npu.py \
 
 One run collects one `aic_metrics` set. Start with `PipeUtilization`; collect `MemoryUB` separately when UB bandwidth is relevant. The default schedule is one warmup step and one active step. Warm the workload enough to exclude compilation from the measurement.
 
-The collector prints the exact trace directory. To revisit it, pass that directory to `scripts/analyze_profile.py`; see [collection and metrics](references/reference.md#collection-and-analysis) for the library interface and output layout.
+The collector prints the exact trace directory. To revisit it, pass that directory to [the analyzer](scripts/analyze_profile.py); see [collection and metrics](references/reference.md#collection-and-analysis) for the library interface and output layout.
 
 ## 3. Diagnose bottlenecks
 
