@@ -116,6 +116,7 @@ def chunk_fwd_mesa_net_bwd(
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         scale=1,
+        chunk_indices=chunk_indices,
     )
     dq, dk_beta, dv, dg = chunk_mesa_net_h_kv_bwd_intra_fn(
         q_star=q_star,
@@ -157,6 +158,7 @@ def chunk_fwd_mesa_net_bwd(
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         scale=1,
+        chunk_indices=chunk_indices,
     )
     dk, dg2, dlamb, dbeta = chunk_mesa_net_h_kk_bwd_intra_fn(
         k=k,
