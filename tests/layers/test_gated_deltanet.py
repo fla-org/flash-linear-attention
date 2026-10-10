@@ -106,7 +106,8 @@ def test_gated_deltanet_fused_qkv_conv_matches_fallback(B: int, T: int, D: int, 
         assert_close(f'd{name}', g_sep[name], g_fused[name], 5e-3)
 
 
-def test_gated_deltanet_compiled_short_inference_matches_eager():
+@pytest.mark.parametrize('T', [1, 33], ids=['decode', 'short-prefill'])
+def test_gated_deltanet_compiled_short_inference_matches_eager(T: int):
     torch.manual_seed(42)
     layer = GatedDeltaNet(
         hidden_size=256,
@@ -116,7 +117,7 @@ def test_gated_deltanet_compiled_short_inference_matches_eager():
         mode='chunk',
         use_short_conv=False,
     ).to(device=device, dtype=torch.bfloat16).eval()
-    x = torch.randn(2, 33, 256, device=device, dtype=torch.bfloat16)
+    x = torch.randn(2, T, 256, device=device, dtype=torch.bfloat16)
 
     compiled = torch.compile(layer, fullgraph=False)
     with torch.inference_mode():
