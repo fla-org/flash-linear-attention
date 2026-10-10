@@ -79,8 +79,14 @@ def test_public_call_defaults(owner, name, defaults):
     [
         ('convolution', 'causal_conv1d', ('ShortConvolution', 'causal_conv1d')),
         ('convolution', 'long_conv', ('LongConvolution', 'ImplicitLongConvolution', 'PositionalEmbedding', 'fft_conv')),
+        ('fused_bitlinear', 'norm.layernorm_quant', (
+            'activation_quant', 'weight_quant', 'bit_linear',
+            'layer_norm_quant_fwd', 'layer_norm_quant_bwd',
+            'layer_norm_quant_fwd_kernel', 'layer_norm_quant_bwd_kernel',
+            'LayerNormLinearQuantFunction', 'layer_norm_linear_quant', 'rms_norm_linear_quant',
+        )),
     ],
-    ids=['causal-conv', 'long-conv'],
+    ids=['causal-conv', 'long-conv', 'quantized-norm'],
 )
 def test_legacy_imports_preserve_symbol_identity(legacy, current, names):
     old_package = importlib.import_module(f'fla.modules.{legacy}')
