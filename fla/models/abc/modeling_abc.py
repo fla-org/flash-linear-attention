@@ -21,7 +21,8 @@ from transformers.utils.deprecation import deprecate_kwarg
 from fla.layers.abc import ABCAttention
 from fla.layers.attn import Attention
 from fla.models.abc.configuration_abc import ABCConfig
-from fla.models.utils import Cache, FLAGenerationMixin
+from fla.models.hybrid import get_hybrid_attention_spec
+from fla.models.utils import Cache, FLAUnsupportedCacheGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
 from fla.modules import GatedMLP as ABCMLP
 from fla.modules.l2warp import l2_warp
@@ -47,14 +48,15 @@ class ABCBlock(GradientCheckpointingLayer):
         self.layer_idx = layer_idx
 
         self.attn_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
-        if config.attn is not None and layer_idx in config.attn['layers']:
+        attn_spec = get_hybrid_attention_spec(config.attn, layer_idx=layer_idx)
+        if attn_spec is not None:
             self.attn = Attention(
                 hidden_size=config.hidden_size,
-                num_heads=config.attn['num_heads'],
-                num_kv_heads=config.attn['num_kv_heads'],
-                qkv_bias=config.attn['qkv_bias'],
-                window_size=config.attn['window_size'],
-                rope_theta=config.attn['rope_theta'],
+                num_heads=attn_spec['num_heads'],
+                num_kv_heads=attn_spec['num_kv_heads'],
+                qkv_bias=attn_spec['qkv_bias'],
+                window_size=attn_spec['window_size'],
+                rope_theta=attn_spec['rope_theta'],
                 max_position_embeddings=config.max_position_embeddings,
                 layer_idx=layer_idx,
             )
@@ -209,7 +211,7 @@ class ABCPreTrainedModel(PreTrainedModel):
             #   > the weights of residual layers at initialization by a factor of 1/√N where N is the # of residual layers.
             #   >   -- GPT-2 :: https://openai.com/blog/better-language-models/
             #
-            # Reference (Megatron-LM): https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/model/gpt_model.py
+            # Reference (Megatron-LM): https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/models/gpt/gpt_model.py
             p = None
             if hasattr(module, 'o_proj'):
                 p = module.o_proj.weight
@@ -339,7 +341,7 @@ class ABCModel(ABCPreTrainedModel):
         )
 
 
-class ABCForCausalLM(ABCPreTrainedModel, FLAGenerationMixin):
+class ABCForCausalLM(ABCPreTrainedModel, FLAUnsupportedCacheGenerationMixin):
 
     _tied_weights_keys = ["lm_head.weight"]
 
@@ -370,21 +372,6 @@ class ABCForCausalLM(ABCPreTrainedModel, FLAGenerationMixin):
 
     def get_decoder(self):
         return self.model
-
-    def generate(self, *args, **kwargs):
-        try:
-            return super().generate(*args, **kwargs)
-        except AttributeError as exception:
-            if 'past_key_values' in str(exception):
-                raise AttributeError(
-                    f"You tried to call `generate` with a decoding strategy that manipulates `past_key_values`, "
-                    f"which is not supported for {self.__class__.__name__}. "
-                    f"Try another generation strategy instead. "
-                    f"For the available generation strategies, check this doc: "
-                    f"https://huggingface.co/docs/transformers/en/generation_strategies#decoding-strategies",
-                )
-            else:
-                raise exception
 
     @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
     def forward(
@@ -423,7 +410,11 @@ class ABCForCausalLM(ABCPreTrainedModel, FLAGenerationMixin):
 
         loss, logits = None, None
         if not self.config.fuse_linear_cross_entropy or labels is None:
-            logits = self.lm_head(hidden_states if logits_to_keep is None else hidden_states[:, -logits_to_keep:])
+            logits = self.lm_head(
+                hidden_states
+                if labels is not None or logits_to_keep is None
+                else hidden_states[:, -logits_to_keep:]
+            )
         if labels is not None:
             if getattr(self, 'criterion', None) is None:
                 if self.config.fuse_linear_cross_entropy:

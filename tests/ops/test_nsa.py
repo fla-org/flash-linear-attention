@@ -23,6 +23,40 @@ from fla.ops.utils.pooling import mean_pooling  # noqa: E402
 from fla.utils import assert_close, device  # noqa: E402
 
 
+@pytest.mark.parametrize(
+    ('op', 'HQ', 'H', 'varlen'),
+    [
+        pytest.param(op, HQ, H, False, id=f"{op.__name__}-HQ{HQ}-H{H}")
+        for op in (naive_nsa, naive_nsa_selection, parallel_nsa)
+        for HQ, H in ((33, 2), (1, 2), (32, 0))
+    ] + [
+        pytest.param(op, 33, 2, varlen, id=f"{op.__name__}-{'varlen' if varlen else 'dense'}")
+        for op in (naive_nsa_compression, parallel_nsa_compression, naive_nsa_topk, parallel_nsa_topk)
+        for varlen in (False, True)
+    ],
+)
+def test_rejects_invalid_gqa_head_counts(op, HQ, H, varlen):
+    q = torch.empty(1, 1, HQ, 16, dtype=torch.float16)
+    k = torch.empty(1, 1, H, 16, dtype=torch.float16)
+    v = torch.empty_like(k)
+    cu_seqlens = torch.tensor([0, 1], dtype=torch.int32) if varlen else None
+    if op in (naive_nsa, naive_nsa_selection, parallel_nsa):
+        kwargs = dict(k=k, v=v, block_indices=torch.zeros(1, 1, H, 1, dtype=torch.long))
+        if op is not naive_nsa_selection:
+            kwargs['block_counts'] = 1
+    elif op is naive_nsa_compression:
+        kwargs = dict(k_cmp=k, v_cmp=v)
+    elif op is parallel_nsa_compression:
+        kwargs = dict(k=k, v=v, TK=1)
+    elif op is naive_nsa_topk:
+        kwargs = dict(k_cmp=k, block_counts=1)
+    else:
+        kwargs = dict(k=k, TK=1, lse=None, block_counts=1)
+
+    with pytest.raises(ValueError, match="must be divisible"):
+        op(q=q, block_size=16, scale=1.0, cu_seqlens=cu_seqlens, **kwargs)
+
+
 def build_block_indices(B, T, H, S, block_size, seq_indices=None):
     block_indices = torch.full((B, T, H, S), -1, dtype=torch.long, device=device)
     for b in range(B):
@@ -41,6 +75,21 @@ def build_block_indices(B, T, H, S, block_size, seq_indices=None):
 def build_partial_varlen(x, cu_seqlens, q_lens):
     partial_x = torch.cat([x[:, cu_seqlens[i + 1] - q_lens[i]: cu_seqlens[i + 1]] for i in range(len(q_lens))], dim=1)
     return partial_x
+
+
+def test_parallel_value_split_matches_single_tile():
+    torch.manual_seed(42)
+    B, T, H, HQ, K, V, S, block_size = 1, 63, 1, 16, 64, 320, 16, 32
+    q = torch.randn(B, T, HQ, K, dtype=torch.float16, device=device)
+    k = torch.randn(B, T, H, K, dtype=torch.float16, device=device)
+    v = torch.randn(B, T, H, V, dtype=torch.float16, device=device)
+    block_indices = build_block_indices(B, T, H, S, block_size)
+
+    o_split, lse_split = parallel_nsa_fwd(q, k, v, block_indices, S, block_size, K**-0.5)
+    o_single, lse_single = parallel_nsa_fwd(q, k, v[..., :128], block_indices, S, block_size, K**-0.5)
+
+    assert_close("  o", o_single, o_split[..., :128], 0.005)
+    assert_close("lse", lse_single, lse_split, 0.005)
 
 
 # Tests on individual ops are skipped as tests on the whole NSA function are added;
@@ -112,6 +161,7 @@ def test_parallel(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
     reason='Skipping test because SKIP_TEST_CHUNK_VARLEN is set',
 )
+@pytest.mark.smoke
 def test_parallel_varlen(
     H: int,
     HQ: int,
@@ -900,3 +950,91 @@ def test_parallel_varlen_decode(
         scale=scale, window_size=window_size, cu_seqlens=(cu_seqlens_q, cu_seqlens), )
 
     assert_close(' o', o_dec, o_dec_ref, 0.005)
+
+
+@pytest.mark.parametrize(
+    ('T', 'cu_seqlens', 'H', 'HQ', 'K', 'V', 'block_size', 'dtype'),
+    [
+        pytest.param(8192, None, 4, 64, 32, 32, 64, torch.bfloat16, id='dense-T8K-G16-K32-V32-bf16'),
+        pytest.param(16384, None, 4, 64, 32, 32, 64, torch.bfloat16, id='dense-T16K-G16-K32-V32-bf16'),
+        pytest.param(32768, None, 4, 64, 32, 32, 64, torch.bfloat16, id='dense-T32K-G16-K32-V32-bf16'),
+        pytest.param(16384, None, 4, 64, 64, 128, 64, torch.bfloat16, id='dense-T16K-G16-K64-V128-bf16'),
+        pytest.param(
+            16384,
+            [0, 4097, 9220, 16384],
+            1,
+            32,
+            128,
+            64,
+            64,
+            torch.bfloat16,
+            id='varlen-4097-5123-7164-G32-K128-V64-bf16',
+        ),
+        pytest.param(131, None, 4, 64, 32, 32, 64, torch.float16, id='tail-T131-G16-K32-V32-fp16'),
+        pytest.param(131, None, 4, 64, 32, 32, 64, torch.bfloat16, id='tail-T131-G16-K32-V32-bf16'),
+    ],
+)
+def test_parallel_compressive_bq_fixture(
+    T: int,
+    cu_seqlens,
+    H: int,
+    HQ: int,
+    K: int,
+    V: int,
+    block_size: int,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(42)
+    cu_seqlens = (
+        torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+        if cu_seqlens is not None
+        else None
+    )
+    TC = (
+        triton.cdiv(T, block_size)
+        if cu_seqlens is None
+        else int(prepare_chunk_offsets(cu_seqlens, block_size)[-1])
+    )
+    q = torch.randn((1, T, HQ, K), dtype=dtype, device=device).requires_grad_(True)
+    k = torch.randn((1, TC, H, K), dtype=dtype, device=device).requires_grad_(True)
+    v = torch.randn((1, TC, H, V), dtype=dtype, device=device).requires_grad_(True)
+    do = torch.randn((1, T, HQ, V), dtype=dtype, device=device)
+    scale = K**-0.5
+
+    def run(fn):
+        q.grad = k.grad = v.grad = None
+        o, lse = fn(
+            q=q,
+            k=k,
+            v=v,
+            TK=T,
+            block_size=block_size,
+            scale=scale,
+            cu_seqlens=cu_seqlens,
+        ) if fn is parallel_nsa_compression else fn(
+            q=q,
+            k_cmp=k,
+            v_cmp=v,
+            block_size=block_size,
+            scale=scale,
+            cu_seqlens=cu_seqlens,
+        )
+        o.backward(do)
+        return o.detach(), lse.detach(), q.grad.detach().clone(), k.grad.detach().clone(), v.grad.detach().clone()
+
+    tri = run(parallel_nsa_compression)
+    ref = run(naive_nsa_compression)
+    assert_close('  o', tri[0], ref[0], 0.005)
+    assert_close('lse', tri[1], torch.where(ref[1] == float('-inf'), 0, ref[1]), 0.005)
+    assert_close(' dq', tri[2], ref[2], 0.005)
+    assert_close(' dk', tri[3], ref[3], 0.005)
+    assert_close(' dv', tri[4], ref[4], 0.005)
+    for name, tensor in zip(('o', 'lse', 'dq', 'dk', 'dv'), tri):
+        assert torch.isfinite(tensor).all(), f'{name} contains non-finite values'
+
+    if T == 131:
+        repeat = run(parallel_nsa_compression)
+        for name, actual, expected in zip(('o', 'lse', 'dq', 'dk', 'dv'), repeat, tri):
+            assert torch.equal(actual, expected), f'{name} is not deterministic'
+        assert torch.count_nonzero(tri[3][:, -1]) == 0
+        assert torch.count_nonzero(tri[4][:, -1]) == 0

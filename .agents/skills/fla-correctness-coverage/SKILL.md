@@ -1,111 +1,39 @@
 ---
 name: fla-correctness-coverage
-description: >
-  Guidelines for kernel correctness testing and coverage in fla/ops/** and related
-  modules, including common Triton grid/addressing pitfalls. Helps decide what
-  tests to add or run before an MR.
+description: Select and run correctness coverage for FLA kernels and modules, including gradients, dispatch boundaries, and Triton addressing changes.
 ---
 
-# FLA Correctness & Coverage Skill
+# FLA Correctness Coverage
 
-Use this skill when adding or modifying a kernel in `fla/ops/` (e.g., KDA, GDN,
-GLA, DeltaNet, NSA, etc.) and you need to verify correctness or close a coverage
-gap.
+Use [fla-design-coverage](../fla-design-coverage/SKILL.md) when the change needs a new numerical or routing contract. This skill turns that contract into tests; [CONTRIBUTING.md](../../../CONTRIBUTING.md#testing) defines references, tolerances, test structure, and platform conventions.
 
-## Workflow
+## Select coverage
 
-1. **List the current coverage matrix** for the op you are touching.
-2. **Compare** against the axes below.
-3. **Add tests** for missing combinations that are reachable by user code.
-4. **Run** the relevant tests and make sure they pass.
+Read the affected tests and callers before adding cases. Follow [test organization and naming](../../../CONTRIBUTING.md#test-organization-and-naming): try the existing parameter matrix first, and add a function or file only when its setup or scope requires one. Cover reachable gaps across the applicable dimensions together, rather than testing each flag only in isolation:
 
-## Public reference docs
+| Dimension   | Cases that can expose different behavior                                         |
+| ----------- | -------------------------------------------------------------------------------- |
+| Layout      | Dense and varlen, partial chunks, long sequences, asymmetric QK/value dimensions |
+| Features    | Gate bounds, raw/post-sigmoid beta, QK normalization, grouped value attention    |
+| State       | Initial state, final state, and state gradients where supported                  |
+| Numerics    | Supported dtypes, affected conversion/reduction paths, numerical boundaries      |
+| Routing     | Default and selected backends, verifier acceptance, rejection, and fallback      |
 
-When a task needs operator math or protocol details, read only the relevant
-reference file:
+Compare outputs and final states against the existing reference. Training APIs also need every supported gradient; forward-only APIs must state that backward is unsupported. Use `torch.autograd.gradcheck` where the implementation supports its required precision. Routing tests verify selection and argument forwarding; they do not replace numerical comparisons on the actual backend.
 
-- `references/cp.md` — context parallelism for linear attention, including KDA/GDN CP formulation.
-- `references/delta-rule.md` — Delta Rule operator background.
-- `references/generalized-delta-rule.md` — Generalized Delta Rule operator background.
-- `references/simple-gla.md` — Simple GLA operator background.
+For addressing changes, inspect casts before multiplication and test shapes that expose large offsets, partial tiles, and varlen boundaries. Follow the `tl.int64` and platform requirements in [Triton Kernels](../../../CONTRIBUTING.md#triton-kernels). Exercise changed grid/address paths on affected supported platforms. Distinguish unsupported cases from tests skipped for unavailable hardware or dependencies; record the latter as validation gaps.
 
-Do not load every reference by default; use these only when the touched code or
-test depends on that operator's math or distributed protocol.
+The NaN allocation guard covers eligible FLA allocations in operator/module tests, not layer/model/CP tests or every allocation. Add explicit finite-output and finite-gradient checks to adversarial cases, and investigate a poisoned-run failure even when an ad hoc run passes.
 
-## Coverage axes
+## Run the affected paths
 
-For each kernel, check coverage across these dimensions:
-
-| Axis | Values to cover |
-|------|-----------------|
-| **Sequence layout** | dense, variable-length (`varlen`) |
-| **Direction** | forward, backward |
-| **Gate mode** | safe gate, non-safe gate (if applicable) |
-| **Beta mode** | raw beta, post-sigmoid beta (if applicable) |
-| **QK normalization** | with L2 norm, without L2 norm |
-| **State** | initial state, final state (if the op supports state passing) |
-| **GVA** | grouped value attention (GVA) enabled vs disabled |
-| **Head dimensions** | `D != Dv` (different qk and v head dims) |
-| **Backend verifier** | reference implementation, `torch.autograd.gradcheck`, and backend-specific sanity checks |
-
-## Kernel implementation safety checks
-
-Before adding or changing a Triton kernel, check these implementation details in
-addition to numerical tests:
-
-- Treat program IDs and grid-derived values as potentially narrow. On NVIDIA,
-  non-first grid dimensions may be narrow; on AMD, Ascend, or other non-NVIDIA
-  backends, every grid dimension may be narrow. Cast to `tl.int64` before using
-  them in address arithmetic.
-- Keep tensor address arithmetic in `tl.int64`, including block bases, strides,
-  varlen sequence offsets, head offsets, and element offsets. Do not rely on
-  `int16` or `int32` overflow behavior.
-- Do not introduce new `tl.make_block_ptr` use. Triton marks it deprecated; use
-  `TensorDescriptor` / `tl.make_tensor_descriptor` when descriptor semantics are
-  needed, or explicit `tl.load` / `tl.store` pointer arithmetic following an
-  existing validated kernel pattern.
-- If a change touches grid shape, program-id mapping, varlen offsets, or pointer
-  math, run a shape that exercises the changed path on NVIDIA and any supported
-  non-NVIDIA backend, or add a precise verifier/skip for unsupported platforms.
-
-## Code style constraints
-
-- Use `fla.utils.device` and `fla.utils.device_platform` in tests instead of
-  adding new hard-coded device strings.
-- Use `IS_NVIDIA`, `IS_NVIDIA_HOPPER`, `IS_NVIDIA_BLACKWELL`, `IS_AMD`, and
-  `IS_INTEL` from `fla.utils` for platform-specific skips or branches.
-- Do not add new direct `torch.cuda` platform checks in correctness tests. If no
-  existing helper covers the condition, add a small helper in `fla.utils` first.
-
-## Default open-source test paths
-
-Use these paths when looking for existing tests or deciding where to add new ones:
-
-- `tests/ops/test_kda.py` — KDA kernel tests
-- `tests/context_parallel/` — context-parallel variants (e.g., `test_cp_kda.py`, `test_cp_gdn.py`)
-- `tests/models/test_modeling_kda.py` — end-to-end model tests for KDA
-
-Adapt the path to the specific op you are working on (replace `kda` with `gdn`,
-`gla`, `nsa`, `delta`, etc.).
-
-## What NOT to put in this skill
-
-- Internal-only test paths, local machine paths, private model names, and
-  private workload identifiers.
-- The open-source skill only points to public tests and public operator docs.
-
-## Running tests
+Discover dependent tests from the repository root:
 
 ```bash
-# Single op test
-pytest tests/ops/test_kda.py -v
-
-# Context parallel tests for the same op
-pytest tests/context_parallel/test_cp_kda.py -v
-
-# Model-level test
-pytest tests/models/test_modeling_kda.py -v
-
-# All dependent tests (see fla-mr-readiness skill)
-python scripts/find_dependent_tests.py <changed_files>
+python scripts/find_dependent_tests.py fla/ops/kda/chunk.py
+FLA_CI_ENV=0 pytest tests/ops/test_kda.py -v
 ```
+
+The helper lists files; it does not run them. Include reported callers and relevant `tests/modules/`, `tests/layers/`, `tests/models/`, or `tests/context_parallel/` coverage when the change reaches those paths. Inspect skips and warning-only comparisons before calling the run a pass. Record commands, backend flags, environment, and results; reproduce failures on the unchanged baseline before labeling them pre-existing.
+
+Read operator math only when needed: [Delta Rule](../../../fla/ops/delta_rule/README.md), [Generalized Delta Rule](../../../fla/ops/generalized_delta_rule/README.md), [Simple GLA](../../../fla/ops/simple_gla/README.md), or [context parallelism](../../../fla/ops/cp/README.md).

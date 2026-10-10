@@ -12,6 +12,10 @@ if os.environ.get("FLA_NPU_XDIST") == "1" and _worker and _worker.startswith("gw
     os.environ["ASCEND_RT_VISIBLE_DEVICES"] = _worker[2:]
 
 import inspect
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -33,6 +37,22 @@ except ImportError:
 _ORIGINAL_EMPTY = torch.empty
 _ORIGINAL_EMPTY_LIKE = torch.empty_like
 _ORIGINAL_NEW_EMPTY = torch.Tensor.new_empty
+
+
+@pytest.fixture
+def run_python():
+    def run(source, **env):
+        result = subprocess.run(
+            [sys.executable, '-c', textwrap.dedent(source)],
+            cwd=Path(__file__).resolve().parents[1],
+            env={**os.environ, **env},
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    return run
 
 
 def _is_called_from_fla():
@@ -73,7 +93,9 @@ def _guarded_empty(*args, **kwargs):
     if not (dtype.is_floating_point or dtype.is_complex):
         return _ORIGINAL_EMPTY(*args, **kwargs)
 
-    if is_compiling() or not _is_called_from_fla():
+    # fill_ raises on leaf tensors that require grad; such allocations (e.g. inductor's
+    # pattern-matcher example inputs) are never kernel scratch buffers, so leave them unpoisoned
+    if is_compiling() or kwargs.get('requires_grad', False) or not _is_called_from_fla():
         return _ORIGINAL_EMPTY(*args, **kwargs)
 
     result = _ORIGINAL_EMPTY(*args, **kwargs)
@@ -88,7 +110,7 @@ def _guarded_empty(*args, **kwargs):
 
 def _guarded_empty_like(input, **kwargs):
     """Create a tensor filled with NaN instead of uninitialized values."""
-    if is_compiling() or not _is_called_from_fla():
+    if is_compiling() or kwargs.get('requires_grad', False) or not _is_called_from_fla():
         return _ORIGINAL_EMPTY_LIKE(input, **kwargs)
 
     if kwargs.get('dtype') is None:
@@ -110,7 +132,7 @@ def _guarded_empty_like(input, **kwargs):
 
 def _guarded_new_empty(self, *args, **kwargs):
     """Create a tensor filled with NaN instead of uninitialized values."""
-    if is_compiling() or not _is_called_from_fla():
+    if is_compiling() or kwargs.get('requires_grad', False) or not _is_called_from_fla():
         return _ORIGINAL_NEW_EMPTY(self, *args, **kwargs)
 
     if kwargs.get('dtype') is None:
@@ -142,5 +164,5 @@ def poison_torch_memory(request):
             patch('torch.empty_like', new=_guarded_empty_like), \
             patch('torch.Tensor.new_empty', new=_guarded_new_empty):
         yield
-        if hasattr(device_torch_lib, 'synchronize'):
+        if hasattr(device_torch_lib, 'synchronize') and device_torch_lib.is_available():
             device_torch_lib.synchronize()

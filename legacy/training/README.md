@@ -144,7 +144,7 @@ You can also use `wandb` to monitor your training process effectively.
 Below, we provide an example of how to finetune Mistral-7B to GLA.
 You can follow similar steps to reproduce the results in the [GSA paper](https://arxiv.org/abs/2409.07146):
 
-1. Initialize a brand-new GLA-7B model from the config and copy the mathced pretrained weights from Mistral-7B:
+1. Initialize a brand-new GLA-7B model from the config and copy the matched pretrained weights from Mistral-7B:
 ```bash
 cd ../utils
 python convert_from_llama.py \

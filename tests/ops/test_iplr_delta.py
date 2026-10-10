@@ -199,6 +199,7 @@ def test_fused_recurrent(
         ]
     ],
 )
+@pytest.mark.smoke
 def test_chunk(
     B: int,
     T: int,

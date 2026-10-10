@@ -44,6 +44,7 @@ import torch.nn.functional as F
 
 from fla.ops.cp import build_cp_context
 from fla.ops.generalized_delta_rule.dplr import chunk_dplr_delta_rule
+from fla.ops.generalized_delta_rule.dplr.backends import DPLRTileLangBackend
 from fla.ops.generalized_delta_rule.dplr.naive import dplr_recurrence
 from fla.utils import assert_close
 
@@ -82,6 +83,8 @@ def run_cp_dplr_test_worker(
     dtype,
     safe_gate: bool = False,
     op=chunk_dplr_delta_rule,
+    op_chunk_size: int = 64,
+    assert_tilelang: bool = False,
 ):
     """
     Worker function for CP DPLR test.
@@ -242,21 +245,40 @@ def run_cp_dplr_test_worker(
               f"pre_num_ranks: {context.pre_num_ranks}")
         dist.barrier()
 
-        # CP Forward
-        o_local, _ = op(
-            q=q_local,
-            k=k_local,
-            v=v_local,
-            a=a_local,
-            b=b_local,
-            gk=gk_local,
-            cp_context=context,
-            safe_gate=True,
-            chunk_size=64,
-        )
+        route_spy = None
+        if assert_tilelang:
+            from fla.ops.generalized_delta_rule.dplr.backends.tilelang import DPLRTileLangBackend
+            route_spy = []
+            _orig = DPLRTileLangBackend.chunk_dplr_delta_rule
 
-        # CP Backward
-        o_local.backward(do_local)
+            def _spy(self, *args, **kwargs):
+                route_spy.append(1)
+                return _orig(self, *args, **kwargs)
+
+            DPLRTileLangBackend.chunk_dplr_delta_rule = _spy
+
+        try:
+            # CP Forward
+            o_local, _ = op(
+                q=q_local,
+                k=k_local,
+                v=v_local,
+                a=a_local,
+                b=b_local,
+                gk=gk_local,
+                cp_context=context,
+                safe_gate=True,
+                chunk_size=op_chunk_size,
+            )
+
+            # CP Backward
+            o_local.backward(do_local)
+
+            if assert_tilelang:
+                assert route_spy, "TileLang backend route was not taken"
+        finally:
+            if assert_tilelang:
+                DPLRTileLangBackend.chunk_dplr_delta_rule = _orig
 
         # Step 4: Result Aggregation and Verification
         o_gathered = [torch.zeros_like(o_local) for _ in range(world_size)]
@@ -338,6 +360,8 @@ def run_cp_test_with_spawn(
     dtype=torch.bfloat16,
     safe_gate: bool = False,
     op=chunk_dplr_delta_rule,
+    op_chunk_size: int = 64,
+    assert_tilelang: bool = False,
 ):
     """
     Run CP test using torch.multiprocessing.spawn.
@@ -345,7 +369,7 @@ def run_cp_test_with_spawn(
     """
     mp.start_processes(
         run_cp_dplr_test_worker,
-        args=(world_size, test_name, T, H, D, lengths, dtype, safe_gate, op),
+        args=(world_size, test_name, T, H, D, lengths, dtype, safe_gate, op, op_chunk_size, assert_tilelang),
         nprocs=world_size,
         join=True,
         start_method='spawn',
@@ -439,6 +463,32 @@ def test_cp2_safe_gate():
         dtype=torch.bfloat16,
         safe_gate=True,
     )
+
+
+def test_cp2_tilelang_route():
+    """CP2 through the TileLang DPLR backend (FLA_TILELANG=1), with route assertion."""
+    if torch.cuda.device_count() < 2:
+        pytest.skip("At least 2 GPUs required")
+    if not DPLRTileLangBackend.is_available():
+        pytest.skip("TileLang backend not available")
+
+    prev = os.environ.get('FLA_TILELANG')
+    os.environ['FLA_TILELANG'] = '1'
+    try:
+        run_cp_test_with_spawn(
+            world_size=2,
+            test_name="CP2_TileLang",
+            T=1024, H=128, D=64,
+            lengths=[400, 624],
+            dtype=torch.bfloat16,
+            op_chunk_size=32,
+            assert_tilelang=True,
+        )
+    finally:
+        if prev is None:
+            del os.environ['FLA_TILELANG']
+        else:
+            os.environ['FLA_TILELANG'] = prev
 
 
 # ============================================================

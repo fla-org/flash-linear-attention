@@ -12,7 +12,7 @@ import os
 import pytest
 import torch
 
-import fla.ops.common.intracard_cp as intracard_cp_mod
+from fla.ops.common import intracard_cp
 from fla.ops.common.intracard_cp import _intracard_cache
 from fla.ops.kda import chunk_kda
 from fla.utils import device
@@ -28,22 +28,14 @@ def clear_intracard_cache():
 @pytest.mark.skipif(os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") == "1", reason="backend dispatch disabled")
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_chunk_kda_intracard_cache_hit_same_cu_seqlens_object(monkeypatch):
-    """E2E: chunk_kda should reuse intracard precompute cache on second call.
-
-    This test intentionally uses a very long varlen sequence so that:
-    1) intracard path is selected in inference mode, and
-    2) early_return is bypassed and split path is exercised.
-    """
-    # Enable intracard CP backend explicitly as it's disabled by default
+    """Reuse the intracard precompute cache for repeated calls with the same cu_seqlens object."""
+    # intracard CP is disabled by default.
     monkeypatch.setenv("FLA_INTRACARD_CP", "1")
     torch.manual_seed(0)
     dtype = torch.bfloat16
 
-    # T must be large enough to bypass early_return in intracard_fwd_h.
-    # With chunk_size=64 and MIN_SUBSEQ_CHUNKS=128, subseq_len floor is 8192.
-    # We choose T=32768 to satisfy both:
-    #   - early_return check: seq_len >= 2 * subseq_len
-    #   - split threshold: seq_len >= 3 * subseq_len
+    # with chunk_size=64 and MIN_SUBSEQ_CHUNKS=128, subseq_len is at least 8192.
+    # T=32768 bypasses early_return (2 * subseq_len) and exercises splitting (3 * subseq_len).
     B, T, H, D = 1, 32768, 1, 32
 
     q = torch.randn(B, T, H, D, device=device, dtype=dtype)
@@ -58,14 +50,14 @@ def test_chunk_kda_intracard_cache_hit_same_cu_seqlens_object(monkeypatch):
     cu_seqlens_cpu = cu_seqlens.cpu()
 
     call_count = 0
-    original_precompute = intracard_cp_mod._precompute_intracard_indices
+    original_precompute = intracard_cp._precompute_intracard_indices
 
     def counted_precompute(*args, **kwargs):
         nonlocal call_count
         call_count += 1
         return original_precompute(*args, **kwargs)
 
-    monkeypatch.setattr(intracard_cp_mod, "_precompute_intracard_indices", counted_precompute)
+    monkeypatch.setattr(intracard_cp, "_precompute_intracard_indices", counted_precompute)
 
     with torch.inference_mode():
         o1, _ = chunk_kda(
@@ -106,7 +98,6 @@ def test_intracard_backend_disabled_by_default():
     """Verify that IntraCardCPBackend is disabled by default."""
     from fla.ops.common.backends.intracard import IntraCardCPBackend
 
-    # When env var is not set, backend should be disabled (default_enable=False)
     assert IntraCardCPBackend.default_enable is False
 
 
@@ -115,7 +106,7 @@ def test_intracard_backend_disabled_when_env_var_is_zero(monkeypatch):
     from fla.ops.common.backends.intracard import IntraCardCPBackend
 
     monkeypatch.setenv("FLA_INTRACARD_CP", "0")
-    assert IntraCardCPBackend.is_enabled() is False
+    assert IntraCardCPBackend().is_enabled() is False
 
 
 def test_intracard_backend_enabled_when_env_var_is_one(monkeypatch):
@@ -123,7 +114,7 @@ def test_intracard_backend_enabled_when_env_var_is_one(monkeypatch):
     from fla.ops.common.backends.intracard import IntraCardCPBackend
 
     monkeypatch.setenv("FLA_INTRACARD_CP", "1")
-    assert IntraCardCPBackend.is_enabled() is True
+    assert IntraCardCPBackend().is_enabled() is True
 
 
 @pytest.mark.skipif(os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") == "1", reason="backend dispatch disabled")
@@ -141,7 +132,7 @@ def test_chunk_gdn_intracard_gqa(monkeypatch):
     torch.manual_seed(0)
     dtype = torch.bfloat16
 
-    # T must be large enough to bypass early_return in intracard_fwd_h.
+    # the sequence must be long enough to bypass early_return in intracard_fwd_h.
     B, T, Hq, H, D = 1, 32768, 2, 4, 64
 
     q = F.normalize(torch.randn(B, T, Hq, D, device=device, dtype=torch.float32), p=2, dim=-1).to(dtype)
@@ -153,23 +144,32 @@ def test_chunk_gdn_intracard_gqa(monkeypatch):
     cu_seqlens = torch.tensor([0, T], device=device, dtype=torch.int32)
     cu_seqlens_cpu = cu_seqlens.cpu()
 
-    # Run with intracard path (inference_mode triggers it)
+    # inference mode enables the intracard path.
     with torch.inference_mode():
         o_intra, ht_intra = chunk_gated_delta_rule(
-            q=q, k=k, v=v, g=g, beta=beta,
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
             cu_seqlens=cu_seqlens,
             cu_seqlens_cpu=cu_seqlens_cpu,
             output_final_state=True,
         )
 
-    # Run without intracard: disable the backend temporarily
-    from fla.ops.common.backends import common_registry
+    from fla import backends
+
+    common_registry = backends._load_operation_registry('common')
     saved_backends = common_registry._backends.copy()
     common_registry._backends.clear()
     try:
         with torch.inference_mode():
             o_ref, ht_ref = chunk_gated_delta_rule(
-                q=q, k=k, v=v, g=g, beta=beta,
+                q=q,
+                k=k,
+                v=v,
+                g=g,
+                beta=beta,
                 cu_seqlens=cu_seqlens,
                 cu_seqlens_cpu=cu_seqlens_cpu,
                 output_final_state=True,

@@ -9,10 +9,11 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.backends import dispatch
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.cumsum import chunk_global_cumsum, chunk_local_cumsum
-from fla.ops.utils.op import exp2
+from fla.ops.utils.op import exp2, unflatten_program_id
 from fla.utils import (
     IS_INTEL_ALCHEMIST,
     IS_NVIDIA_HOPPER,
@@ -68,14 +69,15 @@ def parallel_simple_gla_fwd_kernel(
     IS_VARLEN: tl.constexpr,
     USE_G: tl.constexpr,
 ):
-    i_kv, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_kv, i_t = unflatten_program_id(tl.cdiv(K, BK) * NV)
+    i_bh = tl.program_id(1).to(tl.int64)
     i_k, i_v = i_kv // NV, i_kv % NV
     i_b, i_h = i_bh // H, i_bh % H
 
     all = B * T
     if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
@@ -89,19 +91,22 @@ def parallel_simple_gla_fwd_kernel(
     if OUTPUT_ATTENTIONS:
         attn += i_k * B * H * T * T + (bos * H + i_h * T) * T
 
-    p_q = tl.make_block_ptr(q, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+    # [BT]
+    o_q = i_t * BT + tl.arange(0, BT)
+    o_kk = i_k * BK + tl.arange(0, BK)
+    o_vv = i_v * BV + tl.arange(0, BV)
+    m_q = o_q < T
+    m_qk = m_q[:, None] & (o_kk[None, :] < K)
+    m_qv = m_q[:, None] & (o_vv[None, :] < V)
+    p_q = q + o_q[:, None] * (H*K) + o_kk[None, :]
 
     # the Q block is kept in the shared memory throughout the whole kernel
     # [BT, BK]
-    b_q = tl.load(p_q, boundary_check=(0, 1))
+    b_q = tl.load(p_q, mask=m_qk, other=0.0)
     b_q = (b_q * scale).to(b_q.dtype)
     b_o = tl.zeros([BT, BV], dtype=tl.float32)
 
-    # [BT]
-    o_q = i_t * BT + tl.arange(0, BT)
-    m_q = o_q < T
-    # Q block and K block have overlap.
-    # masks required
+    # overlapping Q and K blocks require causal masks.
     if USE_G:
         # [BT,]
         b_gq = tl.load(g + o_q * H, mask=m_q, other=float('-inf')).to(tl.float32)
@@ -110,15 +115,16 @@ def parallel_simple_gla_fwd_kernel(
         b_gq = None
 
     for i_s in range(i_t * BT, min((i_t + 1) * BT, T), BS):
-        p_k = tl.make_block_ptr(k, (K, T), (1, H*K), (i_k * BK, i_s), (BK, BS), (0, 1))
-        p_v = tl.make_block_ptr(v, (T, V), (H*V, 1), (i_s, i_v * BV), (BS, BV), (1, 0))
-
         o_k = i_s + tl.arange(0, BS)
         m_k = o_k < T
+        m_kk = (o_kk[:, None] < K) & m_k[None, :]
+        m_kv = m_k[:, None] & (o_vv[None, :] < V)
+        p_k = k + o_kk[:, None] + o_k[None, :] * (H*K)
+        p_v = v + o_k[:, None] * (H*V) + o_vv[None, :]
         # [BK, BS]
-        b_k = tl.load(p_k, boundary_check=(0, 1))
+        b_k = tl.load(p_k, mask=m_kk, other=0.0)
         # [BS, BV]
-        b_v = tl.load(p_v, boundary_check=(0, 1))
+        b_v = tl.load(p_v, mask=m_kv, other=0.0)
         # [BT, BS]
         m_s = (o_q[:, None] >= o_k[None, :]) & (m_q[:, None] & m_k[None, :])
         b_s = tl.dot(b_q, b_k)
@@ -128,20 +134,21 @@ def parallel_simple_gla_fwd_kernel(
         b_s = tl.where(m_s, b_s, 0)
         # [BT, BV]
         if i_s >= 0:
-            b_o += tl.dot(b_s.to(b_q.dtype), b_v)
+            b_o = tl.dot(b_s.to(b_q.dtype), b_v, b_o)
         if OUTPUT_ATTENTIONS:
-            p_a = tl.make_block_ptr(attn, (T, T), (T, 1), (i_t * BT, i_s), (BT, BS), (1, 0))
-            tl.store(p_a, b_s.to(p_a.dtype.element_ty), boundary_check=(0, 1))
+            p_a = attn + o_q[:, None] * T + o_k[None, :]
+            tl.store(p_a, b_s.to(p_a.dtype.element_ty), mask=m_q[:, None] & m_k[None, :])
     for i_s in range(i_t * BT - BS, -BS, -BS):
-        p_k = tl.make_block_ptr(k, (K, T), (1, H*K), (i_k * BK, i_s), (BK, BS), (0, 1))
-        p_v = tl.make_block_ptr(v, (T, V), (H*V, 1), (i_s, i_v * BV), (BS, BV), (1, 0))
-
         o_k = i_s + tl.arange(0, BS)
         m_k = o_k < T
+        m_kk = (o_kk[:, None] < K) & m_k[None, :]
+        m_kv = m_k[:, None] & (o_vv[None, :] < V)
+        p_k = k + o_kk[:, None] + o_k[None, :] * (H*K)
+        p_v = v + o_k[:, None] * (H*V) + o_vv[None, :]
         # [BK, BS]
-        b_k = tl.load(p_k, boundary_check=(0, 1))
+        b_k = tl.load(p_k, mask=m_kk, other=0.0)
         # [BS, BV]
-        b_v = tl.load(p_v, boundary_check=(0, 1))
+        b_v = tl.load(p_v, mask=m_kv, other=0.0)
         # [BT, BS]
         m_s = m_q[:, None] & m_k[None, :]
         b_s = tl.dot(b_q, b_k)
@@ -149,17 +156,17 @@ def parallel_simple_gla_fwd_kernel(
             b_g = tl.load(g + o_k * H, mask=m_k, other=0)
             b_gn = tl.load(g + (min(i_s + BS, T) - 1) * H)
             b_gp = tl.load(g + (i_s-1) * H) if i_s % BT > 0 else 0.
-            # No concrete meaning. Just to avoid some layout bugs.
+            # this factorization avoids Triton layout bugs.
             b_s *= exp2(b_gq[:, None] + (b_gn - b_g)[None, :])
             b_gq += b_gn - b_gp
         b_s = tl.where(m_s, b_s, 0)
         if OUTPUT_ATTENTIONS:
-            p_a = tl.make_block_ptr(attn, (T, T), (T, 1), (i_t * BT, i_s), (BT, BS), (1, 0))
-            tl.store(p_a, b_s.to(p_a.dtype.element_ty), boundary_check=(0, 1))
+            p_a = attn + o_q[:, None] * T + o_k[None, :]
+            tl.store(p_a, b_s.to(p_a.dtype.element_ty), mask=m_q[:, None] & m_k[None, :])
         if i_s >= 0:
-            b_o += tl.dot(b_s.to(b_v.dtype), b_v)
-    p_o = tl.make_block_ptr(o, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-    tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
+            b_o = tl.dot(b_s.to(b_v.dtype), b_v, b_o)
+    p_o = o + o_q[:, None] * (H*V) + o_vv[None, :]
+    tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=m_qv)
 
 
 @triton.jit(do_not_specialize=['T'])
@@ -185,25 +192,30 @@ def parallel_simple_gla_bwd_kernel_dq(
     BV: tl.constexpr,
     USE_G: tl.constexpr,
 ):
-    p_do = tl.make_block_ptr(do, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+    # [BT]
+    o_q = i_t * BT + tl.arange(0, BT)
+    o_kk = i_k * BK + tl.arange(0, BK)
+    o_vv = i_v * BV + tl.arange(0, BV)
+    m_q = o_q < T
+    m_qk = m_q[:, None] & (o_kk[None, :] < K)
+    m_qv = m_q[:, None] & (o_vv[None, :] < V)
+    p_do = do + o_q[:, None] * (H*V) + o_vv[None, :]
     # [BT, BV]
-    b_do = tl.load(p_do, boundary_check=(0, 1))
+    b_do = tl.load(p_do, mask=m_qv, other=0.0)
     # [BT, BK]
     b_dq = tl.zeros([BT, BK], dtype=tl.float32)
 
-    # [BT]
-    o_q = i_t * BT + tl.arange(0, BT)
-    m_q = o_q < T
     for i_s in range(0, i_t * BT, BS):
-        p_k = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_s, i_k * BK), (BS, BK), (1, 0))
-        p_v = tl.make_block_ptr(v, (V, T), (1, H*V), (i_v * BV, i_s), (BV, BS), (0, 1))
-
         o_k = i_s + tl.arange(0, BS)
         m_k = o_k < T
+        m_kk = m_k[:, None] & (o_kk[None, :] < K)
+        m_vk = (o_vv[:, None] < V) & m_k[None, :]
+        p_k = k + o_k[:, None] * (H*K) + o_kk[None, :]
+        p_v = v + o_vv[:, None] + o_k[None, :] * (H*V)
         # [BS, BK]
-        b_k = tl.load(p_k, boundary_check=(0, 1))
+        b_k = tl.load(p_k, mask=m_kk, other=0.0)
         # [BV, BS]
-        b_v = tl.load(p_v, boundary_check=(0, 1))
+        b_v = tl.load(p_v, mask=m_vk, other=0.0)
         # [BT, BV] @ [BV, BS] = [BT, BS]
         b_ds = tl.dot(b_do, b_v)
         if USE_G:
@@ -214,24 +226,25 @@ def parallel_simple_gla_bwd_kernel_dq(
             if i_s > 0:
                 b_dq *= exp2(b_gn - b_gp)
         # [BT, BS] @ [BS, BK] = [BT, BK]
-        b_dq += tl.dot(b_ds.to(b_v.dtype), b_k)
+        b_dq = tl.dot(b_ds.to(b_v.dtype), b_k, b_dq)
 
     if USE_G:
         # [BT,]
         b_gq = tl.load(g + o_q * H, mask=m_q, other=float('-inf'))
         # [BT, BK]
         b_dq *= exp2(b_gq)[:, None]
-    # Q block and K block have overlap. masks required
+    # overlapping Q and K blocks require causal masks.
     for i_s in range(i_t * BT, min((i_t + 1) * BT, T), BS):
-        p_k = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_s, i_k * BK), (BS, BK), (1, 0))
-        p_v = tl.make_block_ptr(v, (V, T), (1, H*V), (i_v * BV, i_s), (BV, BS), (0, 1))
-
         o_k = i_s + tl.arange(0, BS)
         m_k = o_k < T
+        m_kk = m_k[:, None] & (o_kk[None, :] < K)
+        m_vk = (o_vv[:, None] < V) & m_k[None, :]
+        p_k = k + o_k[:, None] * (H*K) + o_kk[None, :]
+        p_v = v + o_vv[:, None] + o_k[None, :] * (H*V)
         # [BS, BK]
-        b_k = tl.load(p_k, boundary_check=(0, 1))
+        b_k = tl.load(p_k, mask=m_kk, other=0.0)
         # [BV, BS]
-        b_v = tl.load(p_v, boundary_check=(0, 1))
+        b_v = tl.load(p_v, mask=m_vk, other=0.0)
         # [BT, BV] @ [BV, BS] = [BT, BS]
         b_ds = tl.dot(b_do, b_v)
         if USE_G:
@@ -240,17 +253,17 @@ def parallel_simple_gla_bwd_kernel_dq(
         m_s = (o_q[:, None] >= o_k[None, :]) & (m_q[:, None] & m_k[None, :])
         b_ds = tl.where(m_s, b_ds, 0)
         # [BT, BK]
-        b_dq += tl.dot(b_ds.to(b_k.dtype), b_k)
+        b_dq = tl.dot(b_ds.to(b_k.dtype), b_k, b_dq)
 
     b_dq *= scale
-    p_dq = tl.make_block_ptr(dq, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-    tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), boundary_check=(0, 1))
+    p_dq = dq + o_q[:, None] * (H*K) + o_kk[None, :]
+    tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), mask=m_qk)
     if USE_G:
-        p_q = tl.make_block_ptr(q, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-        b_q = tl.load(p_q, boundary_check=(0, 1))
+        p_q = q + o_q[:, None] * (H*K) + o_kk[None, :]
+        b_q = tl.load(p_q, mask=m_qk, other=0.0)
         b_dg = tl.sum(b_dq * b_q, 1)
-        p_dg = tl.make_block_ptr(dg, (T,), (H,), (i_t * BT,), (BT,), (0,))
-        tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), boundary_check=(0,))
+        p_dg = dg + o_q * H
+        tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), mask=m_q)
 
 
 @triton.jit(do_not_specialize=['T'])
@@ -278,29 +291,34 @@ def parallel_simple_gla_bwd_kernel_dkv(
     USE_G: tl.constexpr,
 ):
     o_k = i_t * BT + tl.arange(0, BT)
+    o_kk = i_k * BK + tl.arange(0, BK)
+    o_vv = i_v * BV + tl.arange(0, BV)
     m_k = o_k < T
+    m_kk = m_k[:, None] & (o_kk[None, :] < K)
+    m_kv = m_k[:, None] & (o_vv[None, :] < V)
     # [BT, BK]
-    p_k = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-    b_k = tl.load(p_k, boundary_check=(0, 1))
+    p_k = k + o_k[:, None] * (H*K) + o_kk[None, :]
+    b_k = tl.load(p_k, mask=m_kk, other=0.0)
     b_dk = tl.zeros([BT, BK], dtype=tl.float32)
     # [BT, BV]
-    p_v = tl.make_block_ptr(v, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-    b_v = tl.load(p_v, boundary_check=(0, 1))
+    p_v = v + o_k[:, None] * (H*V) + o_vv[None, :]
+    b_v = tl.load(p_v, mask=m_kv, other=0.0)
     b_dv = tl.zeros([BT, BV], dtype=tl.float32)
     if USE_G:
         b_gk = tl.load(g + o_k * H, mask=m_k, other=0)
     NTS = tl.cdiv(T, BS)
     # [BT, BK]
     for i_s in range(NTS * BS - BS, (i_t + 1) * BT - BS, -BS):
-        p_q = tl.make_block_ptr(q, (T, K), (H*K, 1), (i_s, i_k * BK), (BS, BK), (1, 0))
-        p_do = tl.make_block_ptr(do, (T, V), (H*V, 1), (i_s, i_v * BV), (BS, BV), (1, 0))
-
         o_q = i_s + tl.arange(0, BS)
         m_q = o_q < T
+        m_qk = m_q[:, None] & (o_kk[None, :] < K)
+        m_qv = m_q[:, None] & (o_vv[None, :] < V)
+        p_q = q + o_q[:, None] * (H*K) + o_kk[None, :]
+        p_do = do + o_q[:, None] * (H*V) + o_vv[None, :]
         # [BS, BK]
-        b_q = tl.load(p_q, boundary_check=(0, 1))
+        b_q = tl.load(p_q, mask=m_qk, other=0.0)
         # [BS, BV]
-        b_do = tl.load(p_do, boundary_check=(0, 1))
+        b_do = tl.load(p_do, mask=m_qv, other=0.0)
         # [BT, BS]
         b_ds = tl.dot(b_v, tl.trans(b_do))
         b_s = tl.dot(b_k, tl.trans(b_q))
@@ -316,9 +334,9 @@ def parallel_simple_gla_bwd_kernel_dkv(
                 b_ds *= b_gqn[None, :]
                 b_s *= b_gqn[None, :]
         # [BT, BK]
-        b_dk += tl.dot(b_ds.to(b_q.dtype), b_q)
+        b_dk = tl.dot(b_ds.to(b_q.dtype), b_q, b_dk)
         # [BT, BV]
-        b_dv += tl.dot(b_s.to(b_do.dtype), b_do)
+        b_dv = tl.dot(b_s.to(b_do.dtype), b_do, b_dv)
 
     if USE_G:
         b_gn = tl.load(g + (min(i_t * BT + BT, T) - 1) * H)
@@ -328,15 +346,16 @@ def parallel_simple_gla_bwd_kernel_dkv(
             b_dv *= b_gpn
 
     for i_s in range(i_t * BT, min((i_t + 1) * BT, T), BS):
-        p_q = tl.make_block_ptr(q, (T, K), (H*K, 1), (i_s, i_k * BK), (BS, BK), (1, 0))
-        p_do = tl.make_block_ptr(do, (T, V), (H*V, 1), (i_s, i_v * BV), (BS, BV), (1, 0))
-
         o_q = i_s + tl.arange(0, BS)
         m_q = o_q < T
+        m_qk = m_q[:, None] & (o_kk[None, :] < K)
+        m_qv = m_q[:, None] & (o_vv[None, :] < V)
+        p_q = q + o_q[:, None] * (H*K) + o_kk[None, :]
+        p_do = do + o_q[:, None] * (H*V) + o_vv[None, :]
         # [BS, BK]
-        b_q = tl.load(p_q, boundary_check=(0, 1))
+        b_q = tl.load(p_q, mask=m_qk, other=0.0)
         # [BS, BV]
-        b_do = tl.load(p_do, boundary_check=(0, 1))
+        b_do = tl.load(p_do, mask=m_qv, other=0.0)
         # [BS]
         b_s = tl.dot(b_k, tl.trans(b_q))
         b_ds = tl.dot(b_v, tl.trans(b_do))
@@ -350,14 +369,14 @@ def parallel_simple_gla_bwd_kernel_dkv(
         b_s = tl.where(m_s, b_s, 0)
         b_ds = tl.where(m_s, b_ds, 0)
         # [BT, BK]
-        b_dk += tl.dot(b_ds.to(b_q.dtype), b_q)
-        b_dv += tl.dot(b_s.to(b_do.dtype), b_do)
+        b_dk = tl.dot(b_ds.to(b_q.dtype), b_q, b_dk)
+        b_dv = tl.dot(b_s.to(b_do.dtype), b_do, b_dv)
     b_dk *= scale
     b_dv *= scale
-    p_dk = tl.make_block_ptr(dk, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-    p_dv = tl.make_block_ptr(dv, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-    tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
+    p_dk = dk + o_k[:, None] * (H*K) + o_kk[None, :]
+    p_dv = dv + o_k[:, None] * (H*V) + o_vv[None, :]
+    tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), mask=m_kk)
+    tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), mask=m_kv)
     if USE_G:
         b_dg = tl.load(dg + o_k * H, mask=m_k, other=0)
         b_dg -= tl.sum(b_dk * b_k, 1)
@@ -404,7 +423,8 @@ def parallel_simple_gla_bwd_kernel(
     IS_VARLEN: tl.constexpr,
     USE_G: tl.constexpr,
 ):
-    i_kv, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_kv, i_t = unflatten_program_id(tl.cdiv(K, BK) * NV)
+    i_bh = tl.program_id(1).to(tl.int64)
     i_k, i_v = i_kv // NV, i_kv % NV
     i_b, i_h = i_bh // H, i_bh % H
     dq += i_v * B * H * T * K
@@ -414,8 +434,8 @@ def parallel_simple_gla_bwd_kernel(
         dg += i_kv * B * H * T
 
     if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
@@ -512,14 +532,8 @@ def parallel_simple_gla_fwd(
 
     # local cumulative decay in log space
     if g is not None:
-        g = chunk_local_cumsum(
-            g,
-            chunk_size,
-            scale=RCP_LN2,
-            cu_seqlens=cu_seqlens,
-            chunk_indices=chunk_indices,
-        )
-    grid = (NK * NV, NT, B * H)
+        g = chunk_local_cumsum(g=g, chunk_size=chunk_size, scale=RCP_LN2, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
+    grid = (NK * NV * NT, B * H)
     o = torch.empty(NK, *v.shape, dtype=v.dtype if NK == 1 else torch.float, device=q.device)
     attn = q.new_zeros(NK, B, H, T, T) if output_attentions else None
 
@@ -533,9 +547,9 @@ def parallel_simple_gla_fwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
+        T=T,
         B=B,
         H=H,
-        T=T,
         K=K,
         V=V,
         BT=BT,
@@ -589,7 +603,7 @@ def parallel_simple_gla_bwd(
         chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
-    grid = (NK * NV, NT, B * H)
+    grid = (NK * NV * NT, B * H)
     parallel_simple_gla_bwd_kernel[grid](
         q=q,
         k=k,
@@ -600,9 +614,9 @@ def parallel_simple_gla_bwd(
         dk=dk,
         dv=dv,
         dg=dg,
+        scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
-        scale=scale,
         T=T,
         B=B,
         H=H,
@@ -630,7 +644,10 @@ class ParallelSimpleGLAFunction(torch.autograd.Function):
         ctx.dtype = q.dtype
 
         chunk_indices = prepare_chunk_indices(
-            cu_seqlens, chunk_size, cu_seqlens_cpu=cu_seqlens_cpu) if cu_seqlens is not None else None
+            cu_seqlens,
+            chunk_size,
+            cu_seqlens_cpu=cu_seqlens_cpu,
+        ) if cu_seqlens is not None else None
 
         o, g, attn = parallel_simple_gla_fwd(
             q=q,
@@ -667,6 +684,7 @@ class ParallelSimpleGLAFunction(torch.autograd.Function):
         return dq.to(q), dk.to(k), dv.to(v), dg.to(ctx.dtype) if dg is not None else None, None, None, None, None
 
 
+@dispatch
 def parallel_simple_gla(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -676,7 +694,6 @@ def parallel_simple_gla(
     output_attentions: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     cu_seqlens_cpu: torch.LongTensor | None = None,
-    **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
@@ -686,18 +703,18 @@ def parallel_simple_gla(
             keys of shape `[B, T, H, K]`.
         v (torch.Tensor):
             values of shape `[B, T, H, V]`.
-        g (Optional[torch.Tensor]):
+        g (torch.Tensor, Optional):
             Forget gates of shape `[B, T, H]`.
             Compared to GLA, the gating is head-wise instead of elementwise. Default: `None`.
-        scale (Optional[float]):
+        scale (float, Optional):
             Scale factor for attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
-        output_attentions (bool):
+        output_attentions (bool, Optional):
             Whether to output the materialized attention scores of shape `[B, H, T, T]`. Default: `False`.
-        cu_seqlens (torch.LongTensor):
+        cu_seqlens (torch.LongTensor, Optional):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
-            consistent with the FlashAttention API.
-        cu_seqlens_cpu (torch.LongTensor):
+            consistent with the FlashAttention API. Default: `None`.
+        cu_seqlens_cpu (torch.LongTensor, Optional):
             CPU copy of `cu_seqlens` to avoid unnecessary device synchronization. Default: `None`.
 
     Returns:
@@ -706,10 +723,6 @@ def parallel_simple_gla(
         attn (torch.Tensor):
             Attention scores of shape `[B, H, T, T]` if `output_attentions=True` else `None`.
     """
-    if 'head_first' in kwargs:
-        raise DeprecationWarning(
-            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
-        )
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(
@@ -721,14 +734,5 @@ def parallel_simple_gla(
 
     if scale is None:
         scale = k.shape[-1] ** -0.5
-    o, attn = ParallelSimpleGLAFunction.apply(
-        q,
-        k,
-        v,
-        g,
-        scale,
-        output_attentions,
-        cu_seqlens,
-        cu_seqlens_cpu,
-    )
+    o, attn = ParallelSimpleGLAFunction.apply(q, k, v, g, scale, output_attentions, cu_seqlens, cu_seqlens_cpu)
     return o, attn

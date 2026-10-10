@@ -65,8 +65,8 @@ def fused_recurrent_rwkv4_forward_kernel(
     BLOCK_SIZE_C: tl.constexpr,
 ):
     # Parallelize over the batch dimension.
-    b_idx = tl.program_id(0)
-    c_idx = tl.program_id(1)
+    b_idx = tl.program_id(0).to(tl.int64)
+    c_idx = tl.program_id(1).to(tl.int64)
 
     cs = (c_idx * BLOCK_SIZE_C) + tl.arange(0, BLOCK_SIZE_C)
     cmask = cs < chans
@@ -239,8 +239,8 @@ def fused_recurrent_rwkv4_backward_kernel(
     BLOCK_SIZE_C: tl.constexpr,
 ):
     # Parallelize over the batch dimension.
-    b_idx = tl.program_id(0)
-    c_idx = tl.program_id(1)
+    b_idx = tl.program_id(0).to(tl.int64)
+    c_idx = tl.program_id(1).to(tl.int64)
 
     cs = (c_idx * BLOCK_SIZE_C) + tl.arange(0, BLOCK_SIZE_C)
     cmask = cs < chans

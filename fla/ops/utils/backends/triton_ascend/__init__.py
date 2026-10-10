@@ -9,9 +9,10 @@
 
 from __future__ import annotations
 
-from fla.ops.backends import BaseBackend
+from fla.backends import BaseBackend, register
 
 
+@register('utils')
 class TritonAscendUtilsBackend(BaseBackend):
     backend_type = 'triton_ascend'
     package_name = None
@@ -22,6 +23,13 @@ class TritonAscendUtilsBackend(BaseBackend):
     def is_available(cls) -> bool:
         from fla.utils import IS_NPU
         return IS_NPU
+
+    def solve_tril_verifier(self, *args, **kwargs):
+        return True, None
+
+    def solve_tril(self, *args, **kwargs):
+        from fla.ops.utils.backends.triton_ascend.solve_tril import solve_tril_npu
+        return solve_tril_npu(*args, **kwargs)
 
     def chunk_global_cumsum_verifier(self, *args, **kwargs):
         return True, None

@@ -55,7 +55,9 @@ def fused_recurrent_rwkv7_fwd_kernel(
     IS_VARLEN: tl.constexpr,
     IS_DECODE: tl.constexpr,
 ):
-    i_v, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
+    pid = tl.program_id(0).to(tl.int64)
+    NV = tl.cdiv(V, BV)
+    i_v, i_nh = (pid % NV).to(tl.int64), (pid // NV).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
 
     if IS_VARLEN:
@@ -145,7 +147,9 @@ def fused_recurrent_rwkv7_fwd(
     B, T, H, K, V = *k.shape, v.shape[-1]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
     BK = triton.next_power_of_2(K)
-    IS_DECODE = (T == 1)
+    # For packed varlen inputs, decode only when every sequence has exactly one token:
+    # a zero-length sequence would otherwise read/write out of bounds in the decode branch.
+    IS_DECODE = (T == 1) and (cu_seqlens is None or bool((cu_seqlens.diff() == 1).all()))
 
     h0 = initial_state
     if not output_final_state:
@@ -154,7 +158,7 @@ def fused_recurrent_rwkv7_fwd(
         ht = r.new_empty(N, H, K, V, dtype=torch.float32)
     o = torch.empty_like(v)
 
-    def grid(meta): return (triton.cdiv(V, meta['BV']), N * H)
+    def grid(meta): return (triton.cdiv(V, meta['BV']) * N * H,)
     fused_recurrent_rwkv7_fwd_kernel[grid](
         r,
         w,
@@ -190,7 +194,6 @@ def fused_recurrent_rwkv7(
     initial_state: torch.Tensor | None = None,
     output_final_state: bool = True,
     cu_seqlens: torch.LongTensor | None = None,
-    **kwargs,
 ):
     """
     Args:
@@ -218,10 +221,6 @@ def fused_recurrent_rwkv7(
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
     """
-    if 'head_first' in kwargs:
-        raise DeprecationWarning(
-            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
-        )
     return fused_recurrent_dplr_delta_rule(
         q=r,
         k=k,
@@ -248,7 +247,6 @@ def fused_mul_recurrent_rwkv7(
     output_final_state: bool = False,
     reverse: bool = False,
     cu_seqlens: torch.Tensor | None = None,
-    **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     This function computes the recurrence S_t = S_t @ (I + a_t b_t^T) + v_t k_t^T in a recurrent manner.
@@ -280,10 +278,6 @@ def fused_mul_recurrent_rwkv7(
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
     """
-    if 'head_first' in kwargs:
-        raise DeprecationWarning(
-            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
-        )
     if cu_seqlens is not None:
         if r.shape[0] != 1:
             raise ValueError(

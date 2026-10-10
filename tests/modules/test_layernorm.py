@@ -8,10 +8,12 @@
 import pytest
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from einops import rearrange
 from transformers.models.llama.modeling_llama import LlamaRMSNorm
 
 from fla.modules import GroupNorm, GroupNormLinear, LayerNorm, LayerNormLinear, RMSNorm, RMSNormLinear
+from fla.modules.fused_bitlinear import activation_quant, layer_norm_linear_quant, weight_quant
 from fla.modules.layernorm import GroupNormRef
 from fla.utils import assert_close, device
 
@@ -55,7 +57,7 @@ def test_layernorm(B: int, H: int, T: int, D: int, elementwise_affine: bool, bia
 
 @pytest.mark.parametrize("B", [2])
 @pytest.mark.parametrize("T", [512])
-@pytest.mark.parametrize("D", [64, 128, 512, 1024, 2048])
+@pytest.mark.parametrize("D", [64, 128, 512, 1024, 2048, 2052])
 @pytest.mark.parametrize("G", [1, 4])
 @pytest.mark.parametrize("is_rms_norm", [True, False])
 def test_groupnorm(B: int, T: int, D: int, G: int, is_rms_norm: bool):
@@ -148,6 +150,89 @@ def test_layernorm_linear(N: int, D: int):
     assert_close('dlb', ref_dlb, tri_dlb, 1e-3)
 
 
+@pytest.mark.parametrize(
+    ('T', 'D', 'is_rms_norm', 'affine', 'has_residual', 'prenorm', 'residual_in_fp32'),
+    [
+        (1, 64, False, True, False, False, False),
+        (7, 50, True, True, False, False, False),
+        (33, 128, False, True, True, True, False),
+        (257, 128, True, True, True, True, True),
+        (17, 64, False, False, True, False, True),
+        (32, 128, True, False, False, True, True),
+    ],
+    ids=['single-row', 'partial-row', 'residual', 'fp32-residual', 'no-affine', 'prenorm'],
+)
+@pytest.mark.parametrize(
+    ('dtype', 'amp_dtype'),
+    [(torch.float32, None), (torch.float16, None), (torch.bfloat16, None),
+     (torch.float32, torch.float16), (torch.float32, torch.bfloat16)],
+    ids=['fp32', 'fp16', 'bf16', 'amp-fp16', 'amp-bf16'],
+)
+def test_layernorm_linear_quant(
+    T: int,
+    D: int,
+    is_rms_norm: bool,
+    affine: bool,
+    has_residual: bool,
+    prenorm: bool,
+    residual_in_fp32: bool,
+    dtype: torch.dtype,
+    amp_dtype: torch.dtype | None,
+):
+    torch.manual_seed(42)
+    x = torch.randn(T, D, device=device, dtype=dtype).requires_grad_()
+    w = torch.randn(D, device=device, dtype=dtype).requires_grad_() if affine else None
+    b = torch.randn(D, device=device, dtype=dtype).requires_grad_() if affine else None
+    linear_weight = torch.randn(32, D, device=device, dtype=dtype).requires_grad_()
+    linear_bias = torch.randn(32, device=device, dtype=dtype).requires_grad_()
+    residual = torch.randn_like(x, dtype=torch.float32 if residual_in_fp32 else dtype) if has_residual else None
+    if residual is not None:
+        residual.requires_grad_()
+    inputs = {
+        name: tensor
+        for name, tensor in zip(('dx', 'dw', 'db', 'dlw', 'dlb', 'dresidual'), (x, w, b, linear_weight, linear_bias, residual))
+        if tensor is not None
+    }
+    eps = 1e-6
+    out_dtype = amp_dtype or dtype
+
+    ref_residual = x.float() + residual.float() if has_residual else x.float()
+    ref_norm = ref_residual if is_rms_norm else ref_residual - ref_residual.mean(-1, keepdim=True)
+    ref_norm = ref_norm * torch.rsqrt(ref_norm.square().mean(-1, keepdim=True) + eps)
+    if affine:
+        ref_norm = ref_norm * w.float() + b.float()
+    ref_quant = ref_norm + (activation_quant(ref_norm) - ref_norm).detach()
+    ref_weight = linear_weight + (weight_quant(linear_weight) - linear_weight).detach()
+    ref = F.linear(input=ref_quant.to(out_dtype), weight=ref_weight.to(out_dtype), bias=linear_bias.to(out_dtype))
+    if prenorm:
+        ref_residual = ref_residual.to(residual.dtype if has_residual else torch.float32 if residual_in_fp32 else dtype)
+        ref = (ref, ref_residual)
+
+    with torch.autocast(device_type=device, dtype=amp_dtype, enabled=amp_dtype is not None):
+        tri = layer_norm_linear_quant(
+            x=x,
+            norm_weight=w,
+            norm_bias=b,
+            linear_weight=linear_weight,
+            linear_bias=linear_bias,
+            residual=residual,
+            eps=eps,
+            prenorm=prenorm,
+            residual_in_fp32=residual_in_fp32,
+            is_rms_norm=is_rms_norm,
+        )
+    ref, tri = (ref, tri) if prenorm else ((ref,), (tri,))
+    do = tuple(torch.randn_like(output) for output in ref)
+    ref_grads = torch.autograd.grad(ref, tuple(inputs.values()), do)
+    tri_grads = torch.autograd.grad(tri, tuple(inputs.values()), do)
+    for name, expected, actual in zip(('o', 'residual'), ref, tri, strict=False):
+        assert torch.isfinite(actual).all()
+        assert_close(name, expected, actual, 0.01)
+    for name, expected, actual in zip(inputs, ref_grads, tri_grads, strict=True):
+        assert torch.isfinite(actual).all()
+        assert_close(name, expected, actual, 0.01)
+
+
 @pytest.mark.parametrize("N", [1, 16, 128])
 @pytest.mark.parametrize("D", [64, 128, 512])
 @pytest.mark.parametrize("G", [1, 4])
@@ -231,7 +316,7 @@ def test_rmsnorm_linear(N: int, D: int):
 # when T (total tokens) is small relative to the SM count,
 # some Triton programs in layer_norm_bwd_kernel have no work
 # (i_sg * BS >= T // G). Without an early-exit guard, these
-# idle programs access invalid memory via make_block_ptr,
+# idle programs access invalid memory via out-of-bounds tile loads,
 # causing "CUDA error: illegal memory access."
 #
 # The bug triggers when:
@@ -331,68 +416,35 @@ def test_groupnorm_small_t(T: int, D: int, G: int, is_rms_norm: bool):
     assert_close('db', ref_db, tri_db, 1e-3)
 
 
-# ============================================================
-# Regression tests: autotuner crash with varying NB on high-SM GPUs
-# ============================================================
-#
-# On Blackwell sm_120 (188 SMs), the Triton autotuner crashes with
-# "illegal memory access" when benchmarking the HAS_DRESIDUAL=False
-# kernel variant at large grid sizes. The crash happens because NB
-# (= cdiv(T, 2048)) was included in the autotuner key, forcing
-# re-autotuning for each new T range. Certain NB values produce
-# kernel compilations that crash during autotuner benchmarking.
-#
-# Fix: remove NB from the autotuner key so the kernel is autotuned
-# once per (D, HAS_DRESIDUAL, STORE_DRESIDUAL, IS_RMS_NORM) and
-# reused for all T values.
-#
-# These tests exercise multiple T values with different NB values
-# in sequence, both with and without residual (HAS_DRESIDUAL), to
-# catch regressions where re-autotuning at a new NB crashes.
-
-
 @pytest.mark.parametrize("T", [100, 500, 5000, 10000, 20000, 24000])
 @pytest.mark.parametrize("D", [256])
-def test_rmsnorm_varying_nb_no_residual(T: int, D: int):
-    """RMSNorm backward without residual must work across different NB values.
-
-    Catches the autotuner crash where NB in the key triggers re-autotuning
-    at large grid sizes on high-SM GPUs (Blackwell 188 SMs).
-    """
-    x = torch.randn(T, D).to(device).requires_grad_(True)
+@pytest.mark.parametrize("has_residual", [False, True])
+def test_rmsnorm_varying_nb(T: int, D: int, has_residual: bool):
+    """RMSNorm outputs and gradients agree across token-count buckets."""
+    torch.manual_seed(42)
+    x = torch.randn(T, D, device=device).requires_grad_(True)
+    residual = torch.randn_like(x).requires_grad_(True) if has_residual else None
     ref = LlamaRMSNorm(D, eps=0).to(device)
     tri = RMSNorm(D, eps=0).to(device)
     nn.init.normal_(ref.weight)
     tri.weight.data.copy_(ref.weight.data)
 
-    ref_y = ref(x)
-    tri_y = tri(x)
-    assert_close(' y', ref_y, tri_y, 1e-3)
+    ref_residual = x + residual if has_residual else x
+    ref_y = ref(ref_residual)
+    tri_y = tri(x, residual=residual, prenorm=has_residual)
+    dy = torch.randn_like(x)
+    if has_residual:
+        tri_y, tri_residual = tri_y
+        dresidual = torch.randn_like(x)
+        assert_close('residual', ref_residual, tri_residual, 1e-3)
+        ref_grads = torch.autograd.grad((ref_y, ref_residual), (x, residual, ref.weight), (dy, dresidual))
+        tri_grads = torch.autograd.grad((tri_y, tri_residual), (x, residual, tri.weight), (dy, dresidual))
+        grad_names = ('dx', 'dresidual', 'dw')
+    else:
+        ref_grads = torch.autograd.grad(ref_y, (x, ref.weight), dy)
+        tri_grads = torch.autograd.grad(tri_y, (x, tri.weight), dy)
+        grad_names = ('dx', 'dw')
 
-    ref_dx = torch.autograd.grad(ref(x).sum(), x)[0]
-    tri_dx = torch.autograd.grad(tri(x).sum(), x)[0]
-    assert_close('dx', ref_dx, tri_dx, 1e-3)
-
-    ref_dw = torch.autograd.grad(ref(x).sum(), ref.weight)[0]
-    tri_dw = torch.autograd.grad(tri(x).sum(), tri.weight)[0]
-    assert_close('dw', ref_dw, tri_dw, 1e-3)
-
-
-@pytest.mark.parametrize("T", [100, 500, 5000, 10000, 20000, 24000])
-@pytest.mark.parametrize("D", [256])
-def test_rmsnorm_varying_nb_with_residual(T: int, D: int):
-    """RMSNorm backward with residual must work across different NB values.
-
-    Tests HAS_DRESIDUAL=True path with the same T range to ensure both
-    kernel variants are exercised.
-    """
-    x = torch.randn(T, D).to(device).requires_grad_(True)
-    residual = torch.randn(T, D).to(device)
-    tri = RMSNorm(D, eps=0).to(device)
-    nn.init.normal_(tri.weight)
-
-    y, _ = tri(x, residual=residual, prenorm=True)
-    y.sum().backward()
-    assert x.grad is not None
-    assert x.grad.abs().sum() > 0
-    assert tri.weight.grad is not None
+    assert_close('y', ref_y, tri_y, 1e-3)
+    for name, ref_grad, tri_grad in zip(grad_names, ref_grads, tri_grads):
+        assert_close(name, ref_grad, tri_grad, 1e-3)

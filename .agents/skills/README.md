@@ -1,26 +1,23 @@
-# Skills
+# Repository skills
 
-Add reusable workflows as:
+[CONTRIBUTING.md](../../CONTRIBUTING.md) defines contribution rules; [AGENTS.md](../../AGENTS.md) defines agent operations. Skills add task-specific guidance. Choose those relevant to the change.
 
-```text
-.agents/skills/<skill-name>/SKILL.md
-```
+For kernel work, define the contract and establish baseline coverage before optimization. Use the operator, dispatch, and hardware guides as needed, then prepare the PR with the collected evidence.
 
-Each skill should be self-contained and task-specific.
-Include YAML frontmatter with `name` and `description`.
-If a skill needs reference files, place them in a `references/` subdirectory inside the skill folder.
-Symlinks to public repo docs are allowed when the referenced file is already tracked in this repository.
+| Skill                                                     | Use for                                                    |
+| --------------------------------------------------------- | ---------------------------------------------------------- |
+| [Design coverage](fla-design-coverage/SKILL.md)           | Supported inputs, numerical budgets, and routing contracts |
+| [Correctness coverage](fla-correctness-coverage/SKILL.md) | References, regression cases, and affected test selection  |
+| [KDA](fla-kda/SKILL.md)                                   | KDA gate modes and kernel invariants                       |
+| [Backend dispatch](fla-dispatch-backends/SKILL.md)        | Registration, verifiers, and fallback behavior             |
+| [Optimization loop](fla-optimization-loop/SKILL.md)       | A fixed correctness gate and measured candidate iterations |
+| [NVIDIA performance](fla-nvidia-performance/SKILL.md)     | GPU profiling and bottleneck diagnosis                     |
+| [Ascend performance](fla-ascend-performance/SKILL.md)     | NPU profiling and compiler constraints                     |
+| [Triton to Gluon](fla-triton-to-gluon/SKILL.md)           | Layouts, synchronization, and incremental kernel ports     |
+| [PR readiness](fla-pr-readiness/SKILL.md)                 | Scope, validation evidence, and submission                 |
 
-Do not add a `README.md` inside individual skill directories; the canonical entry point is `SKILL.md`.
+## Maintaining skills
 
-## Current skills
+Put each workflow in `.agents/skills/<skill-name>/SKILL.md` with YAML `name` and `description` fields. Follow [documentation and skill style](../../CONTRIBUTING.md#prose-and-markdown) for scope, organization, wording, and shared policy.
 
-| Skill                      | Purpose                                                                                                                                                           |
-| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `fla-optimization-loop`    | Disciplined, reproducible kernel optimization loop (task contract, three phases, iteration protocol, trap catalog) anchored on the frozen pytest correctness gate |
-| `fla-nvidia-performance`   | NVIDIA GPU kernel performance workflow for Triton, Gluon, TileLang, CUDA backends, hardware baselines, and MR-ready profiling evidence                            |
-| `fla-kda`                  | KDA-specific gate, intra/inter, backend, and test workflow                                                                                                        |
-| `fla-dispatch-backends`    | `@dispatch` decorator and backend registry workflow                                                                                                               |
-| `fla-correctness-coverage` | Coverage matrix and test guidance for `fla/ops/**` kernels                                                                                                        |
-| `fla-mr-readiness`         | MR/PR preparation checklist, test plan, and PR body structure                                                                                                     |
-| `fla-triton-to-gluon`      | Incremental workflow for porting a Triton kernel to Gluon (layouts, cp.async/TMA, WGMMA/tcgen05, scheduling), with API mapping and pitfall checklist              |
+Use an existing `references/` directory for substantial task-specific detail. Add supporting files only when they make the workflow easier to use; `SKILL.md` is the entry point, so individual skill directories do not need a README. Symlinks may point to public documentation tracked in this repository.

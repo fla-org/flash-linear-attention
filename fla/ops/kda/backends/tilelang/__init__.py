@@ -11,21 +11,11 @@ from __future__ import annotations
 
 import torch
 
-from fla.ops.backends import BaseBackend
-from fla.utils import find_spec_cached
-
-_TILELANG_AVAILABLE = find_spec_cached("tilelang") is not None
+from fla.backends import TileLangBackend, register
 
 
-class KDATileLangBackend(BaseBackend):
-
-    backend_type = "tilelang"
-    package_name = "tilelang"
-    env_var = "FLA_TILELANG"
-
-    @classmethod
-    def is_available(cls) -> bool:
-        return _TILELANG_AVAILABLE
+@register('kda')
+class KDATileLangBackend(TileLangBackend):
 
     def chunk_kda_bwd_wy_dqkg_fused_verifier(
         self,

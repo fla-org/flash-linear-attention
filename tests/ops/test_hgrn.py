@@ -139,6 +139,7 @@ def test_fused_recurrent_varlen(
         ]
     ],
 )
+@pytest.mark.smoke
 def test_chunk(
     B: int,
     T: int,

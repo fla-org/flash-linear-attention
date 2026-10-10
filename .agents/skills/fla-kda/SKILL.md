@@ -1,118 +1,43 @@
 ---
 name: fla-kda
-description: >
-  FLA KDA kernel workflow and public technical notes. Use when modifying
-  or reviewing fla/ops/kda/**, KDA gate modes, chunk intra/inter kernels,
-  safe_gate behavior, KDA backends, or KDA-specific tests and benchmarks.
+description: Modify or review KDA gates, chunk and recurrent kernels, backend routes, and their correctness coverage.
 ---
 
-# FLA KDA Skill
+# KDA
 
-Use this skill for KDA-specific work under `fla/ops/kda/**` and tests that
-exercise KDA behavior.
+Use this skill for `fla/ops/kda/` and its tests. Public entry points are `chunk_kda` and `fused_recurrent_kda`; inspect the affected entry point's signature before changing its implementation.
 
-## Public code map
+## Code map
 
-- Public API: `fla.ops.kda.chunk_kda`, `fla.ops.kda.fused_recurrent_kda`.
-- Gate helpers: `naive_kda_gate`, `naive_kda_lowerbound_gate`,
-  `kda_gate_fwd`, `kda_gate_bwd`, `fused_kda_gate`,
-  `kda_gate_chunk_cumsum` in `fla/ops/kda/gate.py`.
-- Chunk forward: `chunk_kda_fwd` in `chunk_fwd.py`.
-- Intra/inter forward: `chunk_kda_fwd_intra`,
-  `chunk_kda_fwd_kernel_intra_sub_chunk`,
-  `chunk_kda_fwd_kernel_inter_solve_fused` in `chunk_intra.py`.
-- Token-parallel non-safe path: `chunk_kda_fwd_intra_token_parallel` in
-  `chunk_intra_token_parallel.py`.
-- WY recompute: `recompute_w_u_fwd` and `recompute_w_u_fwd_kda_kernel` in
-  `wy_fast.py`.
-- Backward: `chunk_kda_bwd`, `chunk_kda_bwd_intra`,
-  `chunk_kda_bwd_wy_dqkg_fused`.
-- Backends: `FlashKDABackend`, `KDATileLangBackend`.
+- `gate.py` defines gate activations and cumulative decay.
+- `chunk_fwd.py` and `chunk_bwd.py` coordinate training; `chunk_intra.py`, `chunk_intra_token_parallel.py`, and `wy_fast.py` implement the main stages.
+- `backends/` contains alternative implementations and verifiers. Follow [backend dispatch](../fla-dispatch-backends/SKILL.md) when changing routing.
+- `tests/ops/test_kda.py` contains the reference comparisons and supported gate-mode cases.
 
-## Gate modes
+## Gate contracts
 
-`chunk_kda` has two gate input contracts:
+`chunk_kda` takes log-space decay when `use_gate_in_kernel=False`. With it enabled, the caller supplies raw gates and optional bias:
 
-1. Pre-gated mode: `use_gate_in_kernel=False`.
-   - `g` is already the log-space decay tensor.
-   - `A_log`, `dt_bias`, and `lower_bound` are not part of the gate activation.
-2. In-kernel mode: `use_gate_in_kernel=True`.
-   - `g` is raw gate input.
-   - `A_log` is required and `dt_bias` is optional.
-   - Without `safe_gate`, activation is `-exp(A_log) * softplus(g + dt_bias)`.
-   - With `safe_gate`, activation is
-     `lower_bound * sigmoid(exp(A_log) * (g + dt_bias))`.
+- Without a lower bound, activation is `-exp(A_log) * softplus(g + dt_bias)` and `A_log` is required.
+- With a lower bound, activation is `lower_bound * sigmoid(exp(A_log) * (g + dt_bias))`. Omitting `A_log` uses a multiplier of one.
 
-`safe_gate=True` requires `use_gate_in_kernel=True`, `lower_bound is not None`,
-and `-5 <= lower_bound < 0`.
+`safe_gate` selects the intra-chunk implementation independently of gate activation. Safe in-kernel activation requires `-5 <= lower_bound < 0`. Pre-gated safe mode requires bounded log-space gates supplied by the caller; tests cover `[-5, 0]`, but the wrapper does not validate tensor values.
 
-## Safe gate numerical note
+## Numerical invariants
 
-With `lower_bound=-5`, every per-token gate value is in `[-5, 0)` before the
-`RCP_LN2` conversion used by `chunk_kda_fwd`. A 16-token sub-chunk can therefore
-accumulate `-80` in natural-log units. Directly feeding the full span to `exp2`
-would be larger in base-2 units, so the safe intra path relies on offsetting.
+The safe intra path uses 16-token diagonal blocks and midpoint offsets before exponentiation. At a lower bound of `-5`, a block can accumulate `-80` in natural-log units; local offsets limit each exponent's span to about half that range. Preserve these offsets rather than exponentiating the full cumulative gate. Inter-block decay uses paired differences whose exponents remain non-positive for monotonic decay.
 
-`chunk_kda_fwd_kernel_intra_sub_chunk` uses a midpoint offset before
-exponentiation:
+The non-safe path uses token-parallel diagonal computation. Both paths share inter-block and triangular-solve work, so changes there require coverage of both modes. Keep precision and tolerance changes within the design process in [AGENTS.md](../../../AGENTS.md#scope-and-direction).
 
-- `b_gm = b_g - b_gn`;
-- `exp2(b_gm)` and `exp2(-b_gm)`.
+## Validation
 
-With the midpoint offset, each exponent operand covers at most about half of the
-16-token sub-chunk. Under `lower_bound=-5`, this is about `40 / ln(2)`, which is
-below the kernel's `exp2` safety comment threshold. The important invariant is
-not the raw cumulative value alone; it is that each exponentiation uses a local
-offset rather than the full chunk cumsum directly.
+Use [correctness coverage](../fla-correctness-coverage/SKILL.md) for the test strategy. Select the KDA cases affected by the change:
 
-For inter-subchunk work, `chunk_kda_fwd_kernel_inter_solve_fused` computes decay
-ratios with paired offsets such as:
+- Dense and variable-length sequences; forward, final state, and supported gradients.
+- Pre-gated and in-kernel gates, safe and non-safe paths, and omitted optional arguments.
+- Beta activation and query/key normalization modes when touched.
+- Grouped value heads and differing key/value dimensions when indexing or shapes change.
+- Initial states, intermediate states, and context parallelism when their paths are touched.
+- Accepted and rejected backend routes when changing verifiers.
 
-- `exp2(b_g1 - b_gn1)` and `exp2(b_gn1 - b_g0)`;
-- `exp2(b_g2 - b_gn2)` and `exp2(b_gn2 - b_g1)`.
-
-Both terms are non-positive under monotonic accumulated decay, so the off-diagonal
-inter path avoids positive exponent growth. The triangular solve operates on
-masked lower-triangular blocks, so it does not introduce an unbounded exponent
-path.
-
-## Safe vs non-safe intra path
-
-- Safe path: `chunk_kda_fwd_intra(..., safe_gate=True)` calls
-  `chunk_kda_fwd_kernel_intra_sub_chunk` for 16-token diagonal blocks, then
-  calls `chunk_kda_fwd_kernel_inter_solve_fused` with `USE_SAFE_GATE=True`.
-- Non-safe path: `safe_gate=False` calls `chunk_kda_fwd_intra_token_parallel`
-  for diagonal blocks, then calls the same inter/solve kernel with
-  `USE_SAFE_GATE=False`.
-- Do not change one path without checking the other path unless the contract is
-  explicitly safe-only or non-safe-only.
-
-## Correctness checklist
-
-Before finishing a KDA behavior change, use `fla-correctness-coverage` and cover
-only axes affected by the change:
-
-- dense and varlen sequence layout;
-- forward and backward if training path is touched;
-- pre-gated, non-safe in-kernel, and safe in-kernel gate modes where supported;
-- raw beta logits and post-sigmoid beta where supported;
-- `use_qk_l2norm_in_kernel=True/False` where relevant;
-- MHA and GVA (`HV > H`);
-- `D != Dv` when value dimension is involved;
-- initial/final state, `return_intermediate_states`, and CP paths when touched;
-- backend verifier behavior for FlashKDA / TileLang changes.
-- gate numerical extremes when gate math or intra/inter decay is touched:
-  `lower_bound=-5`, a lower bound close to `0`, large positive and negative
-  `g + dt_bias`, extreme `A_log`, long-sequence cumulative decay, chunk
-  boundaries, and ragged varlen boundaries.
-
-## Style constraints
-
-- Use platform helpers from `fla.utils` (`device`, `device_platform`, `IS_NVIDIA`,
-  `IS_NVIDIA_HOPPER`, `IS_NVIDIA_BLACKWELL`, `IS_AMD`, `IS_INTEL`) instead of
-  adding new direct `torch.cuda` platform checks in tests or public code. If no
-  helper covers the condition, add one in `fla.utils` first.
-- Keep math derivations in operator docs or PR text; in Triton kernels, prefer
-  compact shape comments and one-line rationale comments.
-- Do not include internal-only paths, private model names, local machine paths,
-  or private workload identifiers in public tests or skills.
+For gate or decay changes, include the lower-bound limits, saturated gate inputs, extreme gate scales, long cumulative decay, and chunk or ragged-sequence boundaries. Test through the public entry point so the selected route and effective arguments are exercised.

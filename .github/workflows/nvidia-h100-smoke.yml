@@ -1,0 +1,106 @@
+name: nvidia-h100-smoke
+
+# Fast feedback tier: on every PR/main push, run the PR's dependent test files,
+# but only smoke-marked tests under tests/ops (small non-ops suites run in full,
+# tests/models excluded). The approval-gated full pipeline lives in nvidia-h100.yml.
+
+concurrency:
+  group: smoke-ci-${{ github.event.pull_request.number || github.ref }}
+  # New pushes cancel only smoke; never the approval-triggered full pipeline.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+on:
+  pull_request:
+    branches: [ '*' ]
+    types: [opened, synchronize, reopened]
+  push:
+    branches:
+      - main
+
+jobs:
+  smoke:
+    name: Smoke (PyTorch 2.12)
+    runs-on: nvidia-h100-1
+    # Cold triton cache makes the first run much slower; warm runs are ~20 min.
+    timeout-minutes: 120
+    env:
+      FLA_CI_ENV: 1
+      # Triton baseline only; dispatch/tilelang coverage stays in the full pipeline.
+      FLA_DISABLE_BACKEND_DISPATCH: "1"
+    steps:
+      # NPU-only PRs have nothing for the GPU smoke to cover.
+      - name: Skip NPU-only PRs
+        id: detect
+        uses: actions/github-script@v9.0.0
+        with:
+          script: |
+            let skip = false;
+            if (context.eventName === 'pull_request') {
+              const { owner, repo } = context.repo;
+              const files = await github.paginate(github.rest.pulls.listFiles, {
+                owner, repo, pull_number: context.payload.pull_request.number, per_page: 100,
+              });
+              const npuSafe = /^fla\/(.+\/)?backends\/triton_ascend\/(?!.*__init__\.py$)|^\.github\/workflows\/ascend-|^\.agents\/skills\/fla-ascend-performance\//;
+              const names = files.map(f => f.filename);
+              skip = names.length > 0 && names.every(n => npuSafe.test(n));
+            }
+            core.setOutput('skip', skip ? 'true' : 'false');
+
+      - name: Check out repo
+        if: steps.detect.outputs.skip != 'true'
+        uses: actions/checkout@v7.0.0
+
+      - name: Setup CI Environment
+        id: setup
+        if: steps.detect.outputs.skip != 'true'
+        uses: ./.github/actions/setup-ci-env
+        with:
+          runner_name: ${{ runner.name }}
+          conda_env_name: 'pytorch_2_12'
+          gpu_type: 'nvidia'
+          install_tilelang: "true"
+          skip_gpu_check: true
+
+      - name: Find dependent test files (excluding models)
+        if: steps.detect.outputs.skip != 'true' && steps.setup.outputs.skip_tests == 'false'
+        id: find-tests
+        shell: bash
+        run: |
+          export TEST_SCOPE="EXCLUDE_MODELS"
+          TEST_FILES=$($CONDA_BIN_PATH/python scripts/find_dependent_tests.py "${{ steps.setup.outputs.all_changed_files }}")
+          echo "Found dependent test files: $TEST_FILES"
+          echo "test_files=$TEST_FILES" >> $GITHUB_OUTPUT
+
+      - name: Run tests (smoke-marked ops subset, full other suites)
+        if: steps.find-tests.outputs.test_files
+        shell: bash
+        run: |
+          # Per-file processes, same as the full suite (avoids runner OOM).
+          # find_dependent_tests.py prints absolute paths; match */tests/ops/*.
+          # pytest exit 5 = no smoke-marked tests collected in this file, skip.
+          rc=0
+          for f in ${{ steps.find-tests.outputs.test_files }}; do
+            case "$f" in
+              */tests/ops/*)
+                $CONDA_BIN_PATH/pytest -s -v --exitfirst -m smoke "$f" || rc=$?
+                if [ "$rc" -ne 0 ] && [ "$rc" -ne 5 ]; then exit 1; fi
+                rc=0 ;;
+              *) $CONDA_BIN_PATH/pytest -s -v --exitfirst "$f" || exit 1 ;;
+            esac
+          done
+
+      # Shared self-hosted disk: trim caches only under pressure, keep them warm otherwise.
+      - name: Trim caches under disk pressure
+        if: always()
+        shell: bash
+        run: |
+          used=$(df --output=pcent "$HOME" | tail -1 | tr -dc '0-9')
+          echo "disk usage: ${used}%"
+          if [ "${used:-0}" -lt 80 ]; then exit 0; fi
+          du -sh ~/.triton ~/.tilelang/cache ~/.cache/pip 2>/dev/null || true
+          rm -rf ~/.triton ~/.tilelang/cache ~/.cache/pip || true
+          ${CONDA:-$HOME/miniconda3}/bin/conda clean --all -y || true
+          df -h "$HOME"

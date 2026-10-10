@@ -9,8 +9,10 @@ import warnings
 
 from transformers.configuration_utils import PretrainedConfig
 
+from fla.models.hybrid import HybridAttentionConfig, _HybridAttentionConfigMixin
 
-class GatedDeltaProductConfig(PretrainedConfig):
+
+class GatedDeltaProductConfig(_HybridAttentionConfigMixin, PretrainedConfig):
     model_type = 'gated_deltaproduct'
     keys_to_ignore_at_inference = ['past_key_values']
 
@@ -30,7 +32,7 @@ class GatedDeltaProductConfig(PretrainedConfig):
         hidden_act: str = "swish",
         num_hidden_layers: int = 21,
         norm_eps: float = 1e-6,
-        attn: dict | None = None,
+        attn: HybridAttentionConfig = None,
         use_cache: bool = True,
         pad_token_id: int = None,
         bos_token_id: int = 1,
@@ -91,18 +93,6 @@ class GatedDeltaProductConfig(PretrainedConfig):
         self.num_householder = num_householder
         self.use_forget_gate = use_forget_gate
         self.attnres_block_size = attnres_block_size
-
-        if attn is not None:
-            if not isinstance(attn, dict):
-                raise ValueError("attn must be a dictionary")
-            if 'layers' not in attn:
-                raise ValueError("Layer indices must be provided to initialize hybrid attention layers")
-            if 'num_heads' not in attn:
-                raise ValueError("Number of heads must be provided to initialize hybrid attention layers")
-            attn['num_kv_heads'] = attn.get('num_kv_heads', attn['num_heads'])
-            attn['qkv_bias'] = attn.get('qkv_bias', False)
-            attn['window_size'] = attn.get('window_size', None)
-            attn['rope_theta'] = attn.get('rope_theta', 10000.)
 
         if attnres_block_size is not None and attnres_block_size != 1:
             if attnres_block_size < 2 or attnres_block_size % 2 != 0:
