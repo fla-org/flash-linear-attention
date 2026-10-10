@@ -12,39 +12,11 @@ from importlib import import_module
 from importlib.machinery import ModuleSpec
 from types import ModuleType
 
-
-def _deprecated_getattr(module_name, targets, aliases=None):
-    warned = False
-
-    def resolve(name):
-        nonlocal warned
-        if name == '__all__':
-            return sorted({
-                key for target in targets
-                for key in getattr(import_module(target), '__all__', vars(import_module(target)))
-                if not key.startswith('_')
-            })
-        if not name.startswith('__'):
-            new_name = (aliases or {}).get(name, name)
-            for target in targets:
-                source = import_module(target)
-                if hasattr(source, new_name):
-                    if not warned:
-                        warnings.warn(
-                            f'{module_name}.{name} will be deprecated in FLA 0.6.1; use {target}.{new_name} instead.',
-                            FutureWarning,
-                            stacklevel=2,
-                        )
-                        warned = True
-                    value = getattr(source, new_name)
-                    setattr(sys.modules[module_name], name, value)
-                    return value
-        raise AttributeError(f'module {module_name!r} has no attribute {name!r}')
-
-    return resolve
-
-
-_DEPRECATED_MODULES = {
+_MODULE_ALIASES = {
+    'fused_norm_gate': ('norm.fused_norm_gate',),
+    'l2norm': ('norm.l2norm',),
+    'layernorm': ('norm.layernorm',),
+    'layernorm_gated': ('norm.layernorm_gated',),
     'convolution': ('causal_conv1d', 'long_conv', 'causal_conv1d.cp', 'causal_conv1d.backends.cuda'),
     'conv': ('causal_conv1d', 'long_conv'),
     'conv.causal_conv1d': ('causal_conv1d.ops',),
@@ -57,27 +29,27 @@ _DEPRECATED_MODULES = {
     'conv.triton': ('causal_conv1d.ops',),
     'conv.triton.ops': ('causal_conv1d.ops',),
     'conv.triton.kernels': ('causal_conv1d.ops',),
-    'fused_norm_gate': ('norm.fused_norm_gate',),
-    'l2norm': ('norm.l2norm',),
-    'layernorm': ('norm.layernorm',),
-    'layernorm_gated': ('norm.layernorm_gated',),
 }
 
-for _name, _targets in _DEPRECATED_MODULES.items():
-    _fullname = f'{__name__}.{_name}'
-    _module = ModuleType(_fullname)
-    _is_package = _name in {'conv', 'conv.cp', 'conv.cuda', 'conv.triton'}
-    _module.__spec__ = ModuleSpec(_fullname, loader=None, is_package=_is_package)
-    _module.__package__ = _fullname if _is_package else _fullname.rpartition('.')[0]
-    if _is_package:
+for _old, _targets in _MODULE_ALIASES.items():
+    _fullname = f'{__name__}.{_old}'
+    if len(_targets) == 1:
+        _module = import_module(f'{__name__}.{_targets[0]}')
+    else:
+        _module = ModuleType(_fullname)
+        _module.__spec__ = ModuleSpec(_fullname, loader=None, is_package=True)
         _module.__path__ = []
-    _module.__getattr__ = _deprecated_getattr(_fullname, tuple(f'{__name__}.{target}' for target in _targets))
+        for _target in _targets:
+            _source = import_module(f'{__name__}.{_target}')
+            for _symbol in getattr(_source, '__all__', vars(_source)):
+                if not _symbol.startswith('_'):
+                    vars(_module).setdefault(_symbol, getattr(_source, _symbol))
+        _module.__all__ = [name for name in vars(_module) if not name.startswith('_')]
     sys.modules[_fullname] = _module
     # conv.causal_conv1d is a function on the old package.
-    if _name != 'conv.causal_conv1d':
+    if _old != 'conv.causal_conv1d':
         _parent, _, _child = _fullname.rpartition('.')
         setattr(sys.modules[_parent], _child, _module)
-
 
 # legacy aliases must exist before these imports resolve their dependencies.
 # autopep8: off
@@ -107,6 +79,36 @@ from fla.modules.rotary import RotaryEmbedding
 from fla.modules.token_shift import TokenShift
 
 # autopep8: on
+
+for _name in ('activations', 'rotary', 'grpo', 'fused_cross_entropy', 'fused_kl_div', 'fused_linear_cross_entropy'):
+    _module = import_module(f'{__name__}.{_name}')
+    for _symbol, _value in vars(import_module(f'{__name__}.{_name}.ops')).items():
+        if not _symbol.startswith('_'):
+            vars(_module).setdefault(_symbol, _value)
+
+_SYMBOL_ALIASES = {
+    'fused_cross_entropy': {
+        'fused_cross_entropy_forward': 'cross_entropy_fwd',
+        'CrossEntropyLossFunction': 'FusedCrossEntropyFunction',
+    },
+    'fused_kl_div': {'fused_kl_div_forward': 'fused_kl_div_fwd', 'fused_kl_div_backward': 'fused_kl_div_bwd'},
+    'fused_linear_cross_entropy': {
+        'fused_linear_cross_entropy_forward': 'fused_linear_cross_entropy_fwd',
+        'fused_linear_cross_entropy_backward': 'fused_linear_cross_entropy_bwd',
+    },
+}
+for _name, _aliases in _SYMBOL_ALIASES.items():
+    _module = sys.modules[f'{__name__}.{_name}']
+    for _old, _new in _aliases.items():
+        setattr(_module, _old, getattr(_module, _new))
+
+warnings.warn(
+    'Legacy fla.modules imports will be deprecated in FLA 0.6.1. '
+    'Use fla.modules.norm, fla.modules.causal_conv1d, fla.modules.long_conv '
+    'or the owning package.ops for moved symbols.',
+    FutureWarning,
+    stacklevel=2,
+)
 
 __all__ = [
     'BitLinear',

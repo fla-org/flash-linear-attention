@@ -6,7 +6,6 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 from fla.backends import TritonAscendBackend
-from fla.modules import _deprecated_getattr
 from fla.modules.rotary.ops import RotaryEmbedding, rotary_embedding
 
 __all__ = ['RotaryEmbedding', 'rotary_embedding']
@@ -14,6 +13,3 @@ __all__ = ['RotaryEmbedding', 'rotary_embedding']
 
 if TritonAscendBackend.is_available():
     from fla.modules.rotary import triton_ascend  # noqa: F401
-
-
-__getattr__ = _deprecated_getattr(module_name=__name__, targets=('fla.modules.rotary.ops',))

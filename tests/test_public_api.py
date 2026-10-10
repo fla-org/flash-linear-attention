@@ -181,7 +181,7 @@ def test_normalization_imports_preserve_public_exports(run_python, disabled):
             return [
                 warning for warning in records
                 if issubclass(warning.category, FutureWarning)
-                and any(path in str(warning.message) for path in canonical_paths)
+                and str(warning.message).startswith('Legacy fla.modules imports')
             ]
 
         with warnings.catch_warnings(record=True) as caught:
@@ -199,7 +199,7 @@ def test_normalization_imports_preserve_public_exports(run_python, disabled):
         assert modules.L2Norm is L2Norm is norm.L2Norm
         assert modules.RMSNorm is RMSNorm is norm.RMSNorm
         assert modules.RotaryEmbedding is RotaryEmbedding is rotary.RotaryEmbedding
-        assert norm_warnings(caught), [str(w.message) for w in caught]
+        assert len(norm_warnings(caught)) == 1, [str(w.message) for w in caught]
         assert all('0.6.1' in str(w.message) for w in norm_warnings(caught))
 
         for name, canonical_path in zip(expected_symbols, canonical_paths):
