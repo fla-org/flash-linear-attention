@@ -9,7 +9,7 @@
 
 import torch
 
-from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
+from fla.modules.norm.l2norm import l2norm_bwd, l2norm_fwd
 from fla.ops.atk.chunk_atk_bwd import chunk_atk_bwd
 from fla.ops.atk.chunk_atk_fwd import chunk_atk_fwd, recompute_atk_fwd
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_gated_delta_rule_fwd_h

@@ -9,21 +9,14 @@ from __future__ import annotations
 
 import torch
 
-from fla.backends import BaseBackend, register_backend
-from fla.utils import IS_NVIDIA_HOPPER, TRITON_ABOVE_3_4_0, has_usable_nvcc
+from fla.backends import TileLangBackend, register
+from fla.utils import IS_NVIDIA_HOPPER, TRITON_ABOVE_3_4_0
 
 
-@register_backend('attn')
-class AttnTileLangBackend(BaseBackend):
-    backend_type = "tilelang"
-    package_name = "tilelang"
-    env_var = "FLA_TILELANG"
+@register('attn')
+class AttnTileLangBackend(TileLangBackend):
     # work around Hopper regressions with Triton 3.4+ (see #640).
     default_enable = IS_NVIDIA_HOPPER and TRITON_ABOVE_3_4_0
-
-    @classmethod
-    def is_available(cls) -> bool:
-        return super().is_available() and has_usable_nvcc()
 
     def parallel_attn_fwd_verifier(
         self,

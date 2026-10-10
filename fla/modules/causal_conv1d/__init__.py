@@ -1,0 +1,34 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
+from fla.backends import GluonBackend, TritonAscendBackend
+from fla.modules.causal_conv1d.ops import (
+    CausalConv1dFunction,
+    ShortConvolution,
+    causal_conv1d,
+    causal_conv1d_bwd,
+    causal_conv1d_fwd,
+    causal_conv1d_update,
+    causal_conv1d_update_states,
+)
+
+__all__ = [
+    'CausalConv1dFunction',
+    'ShortConvolution',
+    'causal_conv1d',
+    'causal_conv1d_bwd',
+    'causal_conv1d_fwd',
+    'causal_conv1d_update',
+    'causal_conv1d_update_states',
+]
+
+
+if TritonAscendBackend.is_available():
+    from fla.modules.causal_conv1d.backends import triton_ascend  # noqa: F401
+
+if GluonBackend.is_available():
+    from fla.modules.causal_conv1d.backends import gluon  # noqa: F401
