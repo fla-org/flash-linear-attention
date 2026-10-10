@@ -6,6 +6,7 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import importlib.metadata
+import inspect
 import logging
 from pathlib import Path
 from types import SimpleNamespace
@@ -274,6 +275,46 @@ def test_rwkv6_tilelang_backend_verifier_rejects_unsupported_dimension():
 
     assert accepted is False
     assert reason == "TileLang RWKV6 intra backend currently supports the D=64 benchmark bucket only, got K=128"
+
+
+@pytest.mark.parametrize('method', ['chunk_kda_bwd_wy_dqkg_fused', 'chunk_kda_bwd_wy_dqkg_fused_verifier'])
+def test_kda_tilelang_backend_accepts_dispatcher_arguments(method):
+    from fla.ops.kda.chunk_bwd import chunk_kda_bwd_wy_dqkg_fused
+
+    dispatched = set(inspect.signature(chunk_kda_bwd_wy_dqkg_fused).parameters)
+    accepted = set(inspect.signature(getattr(kda_tilelang_backend.KDATileLangBackend, method)).parameters)
+
+    assert dispatched <= accepted, f'{method} lacks {sorted(dispatched - accepted)}'
+
+
+def _kda_bwd_wy_dqkg_inputs(use_graph):
+    x = SimpleNamespace(shape=(1, 64, 2, 64))
+    tensors = dict.fromkeys(('q', 'k', 'v', 'v_new', 'g', 'beta', 'A', 'h', 'do', 'dh', 'dv'), x)
+    return dict(tensors, chunk_offsets=None, use_graph=use_graph)
+
+
+@pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
+def test_kda_tilelang_backend_receives_eager_dispatch(monkeypatch):
+    from fla.ops.kda.backends.triton_ascend import TritonAscendKDABackend
+    from fla.ops.kda.chunk_bwd import chunk_kda_bwd_wy_dqkg_fused
+
+    monkeypatch.setattr(TritonAscendKDABackend, 'is_available', classmethod(lambda cls: False))
+    backend = kda_tilelang_backend.KDATileLangBackend
+    monkeypatch.setattr(backend, 'is_available', classmethod(lambda cls: True))
+    monkeypatch.setattr(backend, 'is_enabled', classmethod(lambda cls: True))
+    result = object()
+    monkeypatch.setattr(backend, 'chunk_kda_bwd_wy_dqkg_fused', lambda self, **kwargs: result)
+
+    assert chunk_kda_bwd_wy_dqkg_fused(**_kda_bwd_wy_dqkg_inputs(use_graph=False)) is result
+
+
+def test_kda_tilelang_backend_verifier_declines_graph_capture():
+    backend = kda_tilelang_backend.KDATileLangBackend()
+
+    accepted, reason = backend.chunk_kda_bwd_wy_dqkg_fused_verifier(**_kda_bwd_wy_dqkg_inputs(use_graph=True))
+
+    assert accepted is False
+    assert reason == 'TileLang backend does not support graph capture (use_graph=True); fall back to Triton'
 
 
 @pytest.mark.parametrize(
