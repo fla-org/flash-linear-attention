@@ -17,6 +17,7 @@ from fla import backends, utils
 from fla.ops.attn.backends import tilelang as attn_tilelang_backend
 from fla.ops.attn.backends.gluon import AttnGluonBackend
 from fla.ops.attn.decoding import attn_decoding_one_step
+from fla.ops.attn.parallel import parallel_attn_bwd, parallel_attn_fwd
 from fla.ops.common.backends import tilelang as common_tilelang_backend
 from fla.ops.generalized_delta_rule.dplr.backends import tilelang as dplr_tilelang_backend
 from fla.ops.kda.backends import tilelang as kda_tilelang_backend
@@ -289,6 +290,36 @@ def test_attn_gluon_backend_requires_opt_in(monkeypatch):
     monkeypatch.setenv('FLA_ATTN_GLUON', '0')
     monkeypatch.setenv('FLA_GLUON', '1')
     assert backend.is_enabled()
+
+
+@pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
+@pytest.mark.parametrize(
+    'entry',
+    [parallel_attn_fwd, parallel_attn_bwd, attn_decoding_one_step],
+    ids=['forward', 'backward', 'decoding'],
+)
+def test_attn_gluon_backend_dispatch(monkeypatch, entry):
+    monkeypatch.setenv('FLA_GLUON', '0')
+    monkeypatch.setenv('FLA_ATTN_GLUON', '1')
+    monkeypatch.setenv('FLA_TILELANG', '0')
+    monkeypatch.setattr(AttnGluonBackend, 'is_available', classmethod(lambda cls: True))
+    monkeypatch.setattr(AttnGluonBackend, 'parallel_attn_fwd_verifier', lambda *args, **kwargs: (True, None))
+    q = torch.empty(1, 1, 1, 64, dtype=torch.float16)
+    kwargs = dict(q=q, k=q, v=q, scale=0.125, window_size=17)
+    if entry is attn_decoding_one_step:
+        kwargs.update(g=None, cu_seqlens=torch.tensor([0, 1], dtype=torch.int32), do_gate_scale=True)
+    else:
+        kwargs.update(g_cumsum=None, sink_bias=None)
+        if entry is parallel_attn_bwd:
+            kwargs.update(o=q, lse=None, do=q, chunk_size=64)
+    expected = object()
+
+    def implementation(self, **received):
+        assert received == kwargs
+        return expected
+
+    monkeypatch.setattr(AttnGluonBackend, entry.__name__, implementation)
+    assert entry(**kwargs) is expected
 
 
 @pytest.mark.parametrize('method', ['parallel_attn_fwd', 'parallel_attn_bwd', 'attn_decoding_one_step'])
