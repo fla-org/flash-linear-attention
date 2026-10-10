@@ -1,35 +1,43 @@
-# Ascend Triton traps
+# Ascend compiler and memory traps
 
-Silent-bug and compile/UB traps specific to Triton-Ascend. General FLA measurement traps stay in `fla-optimization-loop/references/TRAPS.md`. Case notes: [cases.md](cases.md).
+Read the relevant section before changing DMA, launch indexing, or reused matrix operands. [Kernel cases](cases.md) show these constraints in existing implementations.
 
-Each entry: **Fact / Why / How to apply**.
+## DMA paths and optional pointers
 
----
+A runtime branch between block-pointer DMA and masked loads can keep both paths live in UB. Larger tiles may then overflow even when measured UB bandwidth is low. Where the workload permits, split bulk and tail launches with a constexpr mode so each compilation removes the unused path. Include convolution halos when deciding whether a bulk load fits inside the packed allocation.
 
-## Runtime DMA-path `if` keeps both sides in UB
+An optional pointer needs a compile-time guard before any runtime condition. `if USE_INITIAL_STATE or runtime_condition:` can still compile pointer arithmetic in the other branch when the pointer is `None`; nest the constexpr condition separately.
 
-**Fact:** A runtime `if is_tail_chunk:` that chooses `make_block_ptr` vs masked `tl.load` does **not** DCE the unused path on Triton-Ascend. Peak UB is the sum of both; Vector stays ~0.75 occupied; larger tiles fail compile even when MemoryUB bandwidth is free.
+## Address arithmetic
 
-**Why:** The compiler treats the predicate as data-dependent, so both DMA sequences stay in the live set. Halo windows (`BT+W-1`) make the tail path even larger. The same class of bug: `if CONSTEXPR_FLAG or runtime:` around an optional pointer still compiles `ptr + …` when `ptr is None`.
+Cast indices to `tl.int64` before multiplying by strides or dimensions. Casting the product cannot repair overflow. On Ascend, specialized arguments and folded program IDs may be constexpr values without a `.to()` method; `tl.cast` works for both runtime and constexpr integers.
 
-**How to apply:** Host-split the last tile into a second launch with a `tl.constexpr` mode (never / always / runtime-for-varlen). Nest constexpr optional-pointer flags; do not OR them with runtime checks. See [cases.md § causal_conv1d](cases.md#causal_conv1dpy--1d-core-grid--constexpr-dma-split).
+```python
+token_offset = tl.cast(i_t, tl.int64) * BT
+batch_offset = tl.cast(i_b, tl.int64) * T
+bos = tl.load(cu_seqlens + i_n).to(tl.int64)
+```
 
----
+Load packed sequence offsets as int64 even when the input `cu_seqlens` uses int32. A small token index can overflow after multiplication by head count and feature size.
 
-## `constexpr` has no `.to()` — use `tl.cast` for address math
+`make_block_ptr` metadata has a separate constraint: its `offsets` and `block_shape` must remain int32. Keep large flattened base-address calculations in int64, then supply valid local block offsets. The Ascend backend is exempt from the mainline ban on block pointers.
 
-**Fact:** Specialized kernel args (`B`, `T`) and program IDs that fold (e.g. `i_t` when `NT==1`) are `constexpr`. `x.to(tl.int64)` is `AttributeError("'constexpr' object has no attribute 'to'")` at compile. CUDA kernels often write `i_t.to(tl.int64)` because those indices stay runtime there.
+## Grid and task loops
 
-**Why:** Ascend specializes more integers than CUDA. `tl.cast(x, tl.int64)` works on constexpr and runtime ints; `.to()` only exists on tensor / load results.
+The existing Ascend grid helpers enforce a grid-product limit of 65535. Use their host splitting or flatten independent tiles into a 1D loop over available cores. `get_multiprocessor_count()` selects Vector cores on NPU; `use_aicore=True` selects Cube cores.
 
-**How to apply:** `t0 = tl.cast(i_t, tl.int64) * BT`, `bos = tl.cast(i_b, tl.int64) * T`, `tl.cast(B, tl.int64) * T`. Keep `tl.load(cu_seqlens + i_n).to(tl.int64)`. Never `(i_b * T).to(tl.int64)`.
+After slicing variable-length chunk metadata, apply the corresponding global offset only once. In a task loop, derive local pointers from the original base on each iteration; accumulating pointer updates across tasks can miscompile on Ascend.
 
----
+## Reused `tl.dot` operands
 
-## Int64 `make_block_ptr` offsets fail compile
+Triton-Ascend can reuse the left operand's UB storage during `tl.dot`. A later read of that tile can therefore be wrong even without a compiler error. Audit all later uses, including another left operand, a right operand, arithmetic, and stores.
 
-**Fact:** `make_block_ptr` rejects int64 `offsets` / `block_shape` (`Block pointers only support 32 bit offsets/block_shape`). Feeding `t0 = tl.cast(i_t, tl.int64) * BT` as the row offset breaks compile after the overflow fix.
+Reload the pristine tile from global memory when reuse is separated by stages. For tight reuse, create the needed `tile + 0.0` copies before the first dot that consumes the original as a left operand. Copying afterwards preserves the corrupted value. Account for the extra live copies in the UB budget and validate against the numerical reference.
 
-**Why:** Block-pointer metadata is int32 by design. Flattened `ptr + offset * stride` is the path that needs int64.
+[The case index](cases.md#tldot-lhs-clobber--repo-wide-case-catalog) identifies the affected kernel patterns. A fresh load on each loop iteration or a tile used as a left operand only once needs no extra copy for this issue.
 
-**How to apply:** Keep `t0` (int64) for `x + bos * D + t0 * D`. Pass `i_t * BT` (int32) to `make_block_ptr`. See [cases.md § causal_conv1d](cases.md#causal_conv1dpy--1d-core-grid--constexpr-dma-split).
+## Numerical and tail behavior
+
+Preserve the validated accumulation precision and exponential base. Mask invalid values before exponentials and initialize every region consumed later. Factoring a gate difference into a ratio or reciprocal changes rounding and range behavior; check the existing reference and tolerances before using it.
+
+Exercise gated and ungated paths when both are supported. A suite that always supplies a gate cannot catch `None` pointer handling or incorrect ungated residual updates.

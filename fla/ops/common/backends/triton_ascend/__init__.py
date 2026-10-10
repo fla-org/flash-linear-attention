@@ -11,10 +11,10 @@ from __future__ import annotations
 
 import torch
 
-from fla.backends import BaseBackend, register_backend
+from fla.backends import BaseBackend, register
 
 
-@register_backend('common')
+@register('common')
 class TritonAscendCommonBackend(BaseBackend):
     backend_type = 'triton_ascend'
     package_name = None
@@ -83,13 +83,6 @@ class TritonAscendCommonBackend(BaseBackend):
     def chunk_fwd_o(self, *args, **kwargs):
         from fla.ops.common.backends.triton_ascend.chunk_o import chunk_fwd_o_npu
         return chunk_fwd_o_npu(*args, **kwargs)
-
-    def chunk_bwd_dv_verifier(self, *args, **kwargs):
-        return True, None
-
-    def chunk_bwd_dv(self, *args, **kwargs):
-        from fla.ops.common.backends.triton_ascend.chunk_o import chunk_bwd_dv_npu
-        return chunk_bwd_dv_npu(*args, **kwargs)
 
     def chunk_bwd_dv_local_verifier(self, *args, **kwargs):
         return True, None

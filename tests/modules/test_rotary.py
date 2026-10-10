@@ -10,7 +10,8 @@ from itertools import product
 import pytest
 import torch
 
-from fla.modules.rotary import RotaryEmbedding, rotary_embedding_ref
+from fla.modules.rotary import RotaryEmbedding
+from fla.modules.rotary.ops import rotary_embedding_ref
 from fla.utils import assert_close, device, device_torch_lib
 
 
@@ -46,20 +47,9 @@ def test_rotary(B: int, T: int, H: int, G: int, D: int, dtype: torch.dtype):
     [
         (*case, 0)
         for case in product([2], [2048, 4096], [4], [1, 4], [128, 256], [torch.float32, torch.bfloat16])
-    ] + [
-        (2, 8, 1, 1, 8, torch.float32, -1),
-        (2, 8, 1, 1, 8, torch.float32, None),
-    ],
+    ] + [(2, 8, 1, 1, 8, torch.float32, -1), (2, 8, 1, 1, 8, torch.float32, None)],
 )
-def test_rotary_with_offsets(
-    B: int,
-    T: int,
-    H: int,
-    G: int,
-    D: int,
-    dtype: torch.dtype,
-    max_seqlen_delta: int | None,
-):
+def test_rotary_with_offsets(B: int, T: int, H: int, G: int, D: int, dtype: torch.dtype, max_seqlen_delta: int | None):
     torch.manual_seed(42)
     test_device = "cpu" if max_seqlen_delta != 0 else device
     q = torch.randn(B, T, H, D).to(test_device).to(dtype=dtype).requires_grad_()
@@ -83,19 +73,11 @@ def test_rotary_with_offsets(
     tri_dk = torch.autograd.grad(tri_k.sum(), k, retain_graph=True)[0]
 
     ref_q = torch.cat([
-        rotary_embedding_ref(
-            q[i:i+1].float(),
-            rotary._cos_cached[offset:offset+T],
-            rotary._sin_cached[offset:offset+T],
-        )
+        rotary_embedding_ref(q[i:i+1].float(), rotary._cos_cached[offset:offset+T], rotary._sin_cached[offset:offset+T])
         for i, offset in enumerate(seqlen_offset.tolist())
     ]).to(dtype=dtype)
     ref_k = torch.cat([
-        rotary_embedding_ref(
-            k[i:i+1].float(),
-            rotary._cos_cached[offset:offset+T],
-            rotary._sin_cached[offset:offset+T],
-        )
+        rotary_embedding_ref(k[i:i+1].float(), rotary._cos_cached[offset:offset+T], rotary._sin_cached[offset:offset+T])
         for i, offset in enumerate(seqlen_offset.tolist())
     ]).to(dtype=dtype)
     ref_dq = torch.autograd.grad(ref_q.sum(), q, retain_graph=True)[0]
@@ -117,11 +99,14 @@ def test_rotary_varlen(N: int, T: int, H: int, G: int, D: int, dtype: torch.dtyp
     torch.manual_seed(42)
     q = torch.randn(1, T, H, D).to(device).to(dtype=dtype).requires_grad_()
     k = torch.randn(1, T, H//G, D).to(device).to(dtype=dtype).requires_grad_()
-    cu_seqlens = torch.cat([
-        torch.tensor([0], dtype=torch.long),
-        torch.arange(1, T)[torch.randperm(T - 1)[:N-1]],
-        torch.tensor([T], dtype=torch.long),
-    ], 0).to(device).sort()[0]
+    cu_seqlens = torch.cat(
+        [
+            torch.tensor([0], dtype=torch.long),
+            torch.arange(1, T)[torch.randperm(T - 1)[:N-1]],
+            torch.tensor([T], dtype=torch.long),
+        ],
+        0,
+    ).to(device).sort()[0]
     rotary = RotaryEmbedding(D).to(device)
 
     tri_q, tri_k = rotary(q, k, cu_seqlens=cu_seqlens)
@@ -129,19 +114,11 @@ def test_rotary_varlen(N: int, T: int, H: int, G: int, D: int, dtype: torch.dtyp
     tri_dk = torch.autograd.grad(tri_k.sum(), k, retain_graph=True)[0]
 
     ref_q = torch.cat([
-        rotary_embedding_ref(
-            q[0, start:end].float(),
-            rotary._cos_cached[:end-start],
-            rotary._sin_cached[:end-start],
-        )
+        rotary_embedding_ref(q[0, start:end].float(), rotary._cos_cached[:end-start], rotary._sin_cached[:end-start])
         for start, end in zip(cu_seqlens.tolist(), cu_seqlens[1:].tolist(), strict=False)
     ]).to(dtype=dtype).unsqueeze(0)
     ref_k = torch.cat([
-        rotary_embedding_ref(
-            k[0, start:end].float(),
-            rotary._cos_cached[:end-start],
-            rotary._sin_cached[:end-start],
-        )
+        rotary_embedding_ref(k[0, start:end].float(), rotary._cos_cached[:end-start], rotary._sin_cached[:end-start])
         for start, end in zip(cu_seqlens.tolist(), cu_seqlens[1:].tolist(), strict=False)
     ]).to(dtype=dtype).unsqueeze(0)
     ref_dq = torch.autograd.grad(ref_q.sum(), q, retain_graph=True)[0]
@@ -159,12 +136,11 @@ def test_rotary_varlen(N: int, T: int, H: int, G: int, D: int, dtype: torch.dtyp
 @pytest.mark.parametrize("D", [128, 256])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
 def test_rotary_left_padding(B: int, T: int, H: int, D: int, dtype: torch.dtype):
-    # Left-padding gives a NEGATIVE per-sequence seqlen_offset (real_len - T), as the
-    # attention layer builds it for a padded batch. Existing tests cover only positive
-    # offsets; this checks the real (in-range) tokens are rotated correctly under it.
+    # negative offsets align valid tokens after each sequence's left padding.
     torch.manual_seed(42)
-    pads = torch.arange(B, device=device) * (T // (2 * B))   # 0, p, 2p, ... left-pad per sequence
-    seqlen_offset = -pads                                     # negative offset == left padding
+    pads = torch.arange(B, device=device) * (T // (2 * B))
+    # negative offsets represent left padding.
+    seqlen_offset = -pads
     q = torch.randn(B, T, H, D).to(device).to(dtype=dtype)
     k = torch.randn(B, T, H, D).to(device).to(dtype=dtype)
     rotary = RotaryEmbedding(D).to(device)
@@ -172,10 +148,16 @@ def test_rotary_left_padding(B: int, T: int, H: int, D: int, dtype: torch.dtype)
     tri_q, tri_k = rotary(q, k, seqlen_offset=seqlen_offset, max_seqlen=T)
 
     for i, pad in enumerate(pads.tolist()):
-        ref_q = rotary_embedding_ref(q[i:i+1, pad:].float(), rotary._cos_cached[:T-pad],
-                                     rotary._sin_cached[:T-pad]).to(dtype=dtype)
-        ref_k = rotary_embedding_ref(k[i:i+1, pad:].float(), rotary._cos_cached[:T-pad],
-                                     rotary._sin_cached[:T-pad]).to(dtype=dtype)
+        ref_q = rotary_embedding_ref(
+            x=q[i:i+1, pad:].float(),
+            cos=rotary._cos_cached[:T-pad],
+            sin=rotary._sin_cached[:T-pad],
+        ).to(dtype=dtype)
+        ref_k = rotary_embedding_ref(
+            x=k[i:i+1, pad:].float(),
+            cos=rotary._cos_cached[:T-pad],
+            sin=rotary._sin_cached[:T-pad],
+        ).to(dtype=dtype)
         assert_close(f" q[{i}]", ref_q, tri_q[i:i+1, pad:], ratio=1e-5)
         assert_close(f" k[{i}]", ref_k, tri_k[i:i+1, pad:], ratio=1e-5)
 
@@ -185,14 +167,10 @@ def test_rotary_left_padding(B: int, T: int, H: int, D: int, dtype: torch.dtype)
     [
         (B, T, H, D, 64, dtype)
         for B, T, H, D, dtype in product([2], [256, 2048], [4], [128, 256], [torch.float32, torch.float16])
-    ] + [
-        (2, 8, 1, 128, 63, torch.float32),
-        (2, 8, 1, 32, 64, torch.float32),
-    ],
+    ] + [(2, 8, 1, 128, 63, torch.float32), (2, 8, 1, 32, 64, torch.float32)],
 )
 def test_rotary_partial(B: int, T: int, H: int, D: int, rotary_dim: int, dtype: torch.dtype):
-    # Partial rotary (rotary_dim < head_dim): only [:rotary_dim] is rotated and the
-    # non-rotated tail [rotary_dim:] is carried over from the input. Previously untested.
+    # partial rotary must preserve the unrotated tail of each head.
     if rotary_dim % 2:
         with pytest.raises(AssertionError, match="Rotary dimension must be even"):
             RotaryEmbedding(rotary_dim)
@@ -223,22 +201,20 @@ def test_rotary_partial(B: int, T: int, H: int, D: int, rotary_dim: int, dtype: 
 @pytest.mark.parametrize("D", [128])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
 def test_rotary_left_padding_no_uninit_leak(B: int, T: int, H: int, D: int, dtype: torch.dtype):
-    # Regression guard for the uninitialized-output bug. Under left-padding the kernel
-    # skips out-of-range rows, so an uninitialized output buffer leaks whatever was in
-    # the reused allocation. We force the worst case by seeding the caching allocator's
-    # free list with NaN-filled, output-shaped blocks (after a warm-up so the next
-    # same-size allocation is the output buffer), then require the result to be finite.
-    # Fails on `torch.empty_like`; passes once the buffer is initialized.
+    # padded output rows must remain finite when the allocator reuses NaN-filled memory.
     torch.manual_seed(0)
     pads = torch.arange(B, device=device) * (T // (2 * B))
-    seqlen_offset = -pads                                     # negative offset == left padding
+    # negative offsets represent left padding.
+    seqlen_offset = -pads
     q = torch.randn(B, T, H, D, device=device, dtype=dtype)
     k = torch.randn(B, T, H, D, device=device, dtype=dtype)
     rotary = RotaryEmbedding(D).to(device)
 
-    rotary(q, k, seqlen_offset=seqlen_offset, max_seqlen=T)   # warm up cos/sin cache + kernel
+    # warm up cos/sin cache + kernel
+    rotary(q, k, seqlen_offset=seqlen_offset, max_seqlen=T)
     device_torch_lib.synchronize()
-    junk = [torch.full_like(q, float("nan")) for _ in range(32)]   # poison the free list
+    # poison the free list
+    junk = [torch.full_like(q, float("nan")) for _ in range(32)]
     del junk
 
     tri_q, tri_k = rotary(q, k, seqlen_offset=seqlen_offset, max_seqlen=T)

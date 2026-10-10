@@ -9,21 +9,18 @@ from __future__ import annotations
 
 import torch
 
-from fla.backends import BaseBackend, register_backend
-from fla.utils import IS_NVIDIA, TRITON_ABOVE_3_5_1, find_spec_cached, get_device_capability
+from fla.backends import GluonBackend, register
+from fla.utils import TRITON_ABOVE_3_5_1, get_device_capability
 
 
-@register_backend('attn')
-class AttnGluonBackend(BaseBackend):
-    backend_type = "gluon"
-    package_name = "triton.experimental.gluon"
+@register('attn')
+class AttnGluonBackend(GluonBackend):
     env_var = "FLA_ATTN_GLUON"
-    default_enable = False
     priority = 0
 
     @classmethod
     def is_available(cls) -> bool:
-        return IS_NVIDIA and TRITON_ABOVE_3_5_1 and find_spec_cached(cls.package_name) is not None
+        return TRITON_ABOVE_3_5_1 and super().is_available()
 
     def parallel_attn_fwd_verifier(
         self,

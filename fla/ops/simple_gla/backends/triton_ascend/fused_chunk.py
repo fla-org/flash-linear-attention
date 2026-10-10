@@ -7,23 +7,27 @@
 
 """Ascend NPU realization of `fused_chunk_simple_gla`.
 
-`fused_chunk_bwd_kernel` cannot be lowered correctly by Triton-Ascend: `BT=64`
-faults with an unaligned vector UB access (AICore 507015) and `BT=32`
-miscompiles `dk`. The NPU path realizes the same semantics with the chunk
-decomposition.
+Triton-Ascend lowers `fused_chunk_bwd_kernel` incorrectly:
+`BT=64` faults with an unaligned vector UB access (AICore 507015), and `BT=32` miscompiles `dk`.
+The NPU path realizes the same semantics with the chunk decomposition.
 """
 
 from __future__ import annotations
 
 import torch
 
+from fla.backends import TritonAscendBackend, register
+from fla.ops.simple_gla.backends.triton_ascend.utils import simple_gla_verifier
+from fla.ops.simple_gla.fused_chunk import fused_chunk_simple_gla
 
+
+@register(fused_chunk_simple_gla, backend=TritonAscendBackend, verifier=simple_gla_verifier)
 def fused_chunk_simple_gla_npu(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    g: torch.Tensor = None,
-    g_gamma: torch.Tensor = None,
+    g: torch.Tensor | None = None,
+    g_gamma: torch.Tensor | None = None,
     scale: float | None = None,
     initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
