@@ -151,6 +151,31 @@ def test_token_shift_varlen_cache_mixed_lengths():
     assert_close("cache", cache_out, torch.tensor([[2.], [3.]], device=device), 1e-3)
 
 
+def test_token_shift_cache_written_on_first_single_token_call():
+    # The first call for a cache slot may process exactly one token with no
+    # prior cache (e.g. BOS-seeded decoding); cache_out must still be written.
+    torch.manual_seed(42)
+    x1 = torch.randn(2, 1, 64, device=device)
+    y1, cache_out1 = token_shift(x1, output_cache=True, cache=None)
+
+    assert_close(" y1", y1, -x1, 1e-3)
+    assert_close("cache", cache_out1, x1[:, 0], 1e-3)
+
+    x2 = torch.randn(2, 1, 64, device=device)
+    y2, _ = token_shift(x2, cache=cache_out1, output_cache=True)
+    assert_close(" y2", y2, x1 - x2, 1e-3)
+
+
+def test_token_shift_varlen_cache_first_call_all_singletons():
+    x = torch.tensor([[[1.], [2.], [3.]]], device=device)
+    cu_seqlens = torch.tensor([0, 1, 2, 3], dtype=torch.int32, device=device)
+
+    output, cache_out = token_shift(x, cu_seqlens, output_cache=True)
+
+    assert_close("output", output, torch.tensor([[[-1.], [-2.], [-3.]]], device=device), 1e-3)
+    assert_close("cache", cache_out, torch.tensor([[1.], [2.], [3.]], device=device), 1e-3)
+
+
 def _packed_cu_seqlens(total_tokens: int, doc_len: int) -> torch.Tensor:
     n_docs = (total_tokens + doc_len - 1) // doc_len
     lens = torch.full((n_docs,), doc_len, device=device, dtype=torch.long)
