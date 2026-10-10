@@ -18,14 +18,18 @@ def test_grpo_compile_policy_is_local_to_its_function(run_python, is_npu):
     run_python(
         """
         import os
-        import sys
+        from importlib import reload
+
         import torch
+
+        original_compile = torch.compile
         from fla import utils
 
-        assert 'fla.modules.grpo.ops' not in sys.modules
-        original_compile = torch.compile
         utils.IS_NPU = os.environ['TEST_IS_NPU'] == '1'
         from fla.modules import grpo
+
+        reload(grpo.ops)
+        reload(grpo)
 
         assert torch.compile is original_compile
         assert hasattr(grpo.grpo_loss_with_old_logps, '_torchdynamo_orig_callable') == (not utils.IS_NPU)
