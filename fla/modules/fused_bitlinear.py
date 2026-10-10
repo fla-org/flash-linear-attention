@@ -48,7 +48,9 @@ def weight_quant(w: torch.Tensor) -> torch.Tensor:
 @triton.jit
 def _activation_quant_fwd(b_x):
     b_scale = 127.0 / tl.maximum(tl.max(tl.abs(b_x), 0), 1e-5)
-    b_y = tl.extra.libdevice.round(b_x * b_scale)
+    b_scaled = b_x * b_scale
+    # triton-ascend does not implement libdevice.round; use round-half-away-from-zero.
+    b_y = tl.where(b_scaled >= 0, tl.floor(b_scaled + 0.5), tl.ceil(b_scaled - 0.5))
     return tl.maximum(tl.minimum(b_y, 127), -128) / b_scale
 
 
