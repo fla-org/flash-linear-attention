@@ -18,7 +18,7 @@ from torch.nn import functional as F
 from fla.layers.rwkv6 import LoRA
 from fla.layers.utils import get_layer_cache, update_layer_cache
 from fla.modules import GroupNorm
-from fla.modules.l2norm import l2_norm
+from fla.modules.norm.l2norm import l2_norm
 from fla.modules.token_shift import token_shift
 from fla.ops.rwkv7 import chunk_rwkv7, fused_mul_recurrent_rwkv7
 from fla.ops.rwkv7.fused_addcmul import fused_addcmul_rwkv7

@@ -151,8 +151,8 @@ class Mamba(nn.Module):
             )
             backend = 'triton'
         if backend == 'triton':
-            from fla.modules.convolution import causal_conv1d as causal_conv1d_triton
-            from fla.modules.convolution import causal_conv1d_update as causal_conv1d_update_triton
+            from fla.modules.causal_conv1d import causal_conv1d as causal_conv1d_triton
+            from fla.modules.causal_conv1d import causal_conv1d_update as causal_conv1d_update_triton
             self.causal_conv1d_fn = causal_conv1d_triton
             self.causal_conv1d_update = causal_conv1d_update_triton
         else:

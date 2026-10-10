@@ -18,7 +18,7 @@ from transformers.utils import logging
 
 from fla.layers.mamba2 import apply_mask_to_padding_states, causal_conv1d_fn, causal_conv1d_update, is_fast_path_available
 from fla.layers.utils import get_layer_cache, update_layer_cache
-from fla.modules.layernorm_gated import RMSNormGated, rmsnorm_fn
+from fla.modules.norm.layernorm_gated import RMSNormGated, rmsnorm_fn
 from fla.ops.log_linear_attn.chunk import LogLinearAttentionState, chunk_log_linear_attn
 
 if TYPE_CHECKING:
@@ -432,8 +432,8 @@ class LogLinearMamba2(nn.Module):
             )
             backend = 'triton'
         if backend == 'triton':
-            from fla.modules.convolution import causal_conv1d as causal_conv1d_triton
-            from fla.modules.convolution import causal_conv1d_update as causal_conv1d_update_triton
+            from fla.modules.causal_conv1d import causal_conv1d as causal_conv1d_triton
+            from fla.modules.causal_conv1d import causal_conv1d_update as causal_conv1d_update_triton
             self.causal_conv1d_fn = causal_conv1d_triton
             self.causal_conv1d_update = causal_conv1d_update_triton
             logger.warning(

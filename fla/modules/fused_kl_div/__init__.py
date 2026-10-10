@@ -6,6 +6,7 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 from fla.backends import TritonAscendBackend
+from fla.modules._compat import _deprecated_getattr
 from fla.modules.fused_kl_div.ops import FusedKLDivLoss, fused_kl_div_loss
 
 __all__ = ['FusedKLDivLoss', 'fused_kl_div_loss']
@@ -13,3 +14,13 @@ __all__ = ['FusedKLDivLoss', 'fused_kl_div_loss']
 
 if TritonAscendBackend.is_available():
     from fla.modules.fused_kl_div import triton_ascend  # noqa: F401
+
+
+__getattr__ = _deprecated_getattr(
+    module_name=__name__,
+    targets=('fla.modules.fused_kl_div.ops',),
+    aliases={
+        'fused_kl_div_forward': 'fused_kl_div_fwd',
+        'fused_kl_div_backward': 'fused_kl_div_bwd',
+    },
+)

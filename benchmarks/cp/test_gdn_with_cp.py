@@ -35,7 +35,7 @@ import torch.nn.functional as F
 from einops import rearrange, repeat
 
 from fla.models.utils import Cache
-from fla.modules.convolution import causal_conv1d
+from fla.modules.causal_conv1d import causal_conv1d
 from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
 from fla.ops.kda import chunk_kda, fused_recurrent_kda
 

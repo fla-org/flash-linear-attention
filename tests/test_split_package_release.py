@@ -5,6 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import json
 import os
 import subprocess
 import sys
@@ -115,6 +116,9 @@ def test_split_wheels_match_release_contract(tmp_path: Path) -> None:
     assert "fla/__init__.py" in core_names
     assert "fla/ops/__init__.py" in core_names
     assert "fla/modules/__init__.py" in core_names
+    assert "fla/modules/_compat.py" in core_names
+    for module in ('convolution', 'fused_norm_gate', 'l2norm', 'layernorm', 'layernorm_gated'):
+        assert f'fla/modules/{module}.py' not in core_names
     assert "fla/backends.py" in core_names
     expected_sources = {path.relative_to(ROOT).as_posix() for path in (ROOT / "fla/modules").rglob("*.py")}
     assert expected_sources <= core_names
@@ -282,6 +286,37 @@ def test_full_split_import_contract_when_runtime_dependencies_available(tmp_path
     python = _create_venv(tmp_path, system_site_packages=True)
 
     _run([str(python), "-m", "pip", "install", "--no-index", "--no-deps", str(core_wheel)], cwd=tmp_path)
+    release_modules = json.loads((ROOT / 'tests/fixtures/modules_0_5_2.json').read_text())['modules']
+    site_packages = json.loads(subprocess.check_output(
+        [str(python), '-c', 'import json, site; print(json.dumps(site.getsitepackages()))'],
+        cwd=tmp_path,
+        text=True,
+    ))
+    release_check = textwrap.dedent(
+        f"""
+        import sys
+
+        # use installed dependencies without loading editable-checkout .pth files.
+        sys.path[:0] = {site_packages!r}
+
+        import importlib
+        import pickle
+        import warnings
+
+        warnings.filterwarnings('error', message='fla.*deprecated', category=FutureWarning)
+        from fla.modules import RMSNorm, ShortConvolution
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always', FutureWarning)
+            for module_name, names in {release_modules!r}.items():
+                module = importlib.import_module(module_name)
+                for name in names.split():
+                    value = getattr(module, name)
+                    if isinstance(value, type):
+                        assert pickle.loads(('c' + module_name + '\\n' + name + '\\n.').encode()) is value
+        assert any('0.6.1' in str(w.message) for w in caught)
+        """
+    )
+    _run([str(python), '-S', '-c', release_check], cwd=tmp_path)
     _run([str(python), "-m", "pip", "install", "--no-index", "--no-deps", str(ext_wheel)], cwd=tmp_path)
     full_check = textwrap.dedent(
         f"""
@@ -311,3 +346,4 @@ def test_full_split_import_contract_when_runtime_dependencies_available(tmp_path
         """
     )
     _run([str(python), "-c", full_check], cwd=tmp_path)
+    _run([str(python), '-S', '-c', release_check], cwd=tmp_path)

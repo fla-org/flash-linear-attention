@@ -5,6 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+from fla.modules._compat import _install_legacy_modules
 from fla.modules.causal_conv1d import ShortConvolution
 from fla.modules.fused_bitlinear import BitLinear, FusedBitLinear
 from fla.modules.fused_cross_entropy import FusedCrossEntropyLoss
@@ -29,6 +30,8 @@ from fla.modules.norm import (
 )
 from fla.modules.rotary import RotaryEmbedding
 from fla.modules.token_shift import TokenShift
+
+_install_legacy_modules()
 
 __all__ = [
     'BitLinear',
