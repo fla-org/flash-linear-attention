@@ -66,7 +66,8 @@ class LightNetAttention(nn.Module):
         self.gate_low_rank_dim = gate_low_rank_dim
         self.layer_idx = layer_idx
 
-        assert mode in ['chunk', 'fused_chunk'], f"Not supported mode `{mode}`."
+        # `fused_chunk` was dropped when `fused_chunk_gla` was deprecated in favour of `chunk_gla`
+        assert mode in ['chunk', 'fused_recurrent'], f"Not supported mode `{mode}`."
         assert self.key_dim % num_heads == 0, f"key dim must be divisible by num_heads of {num_heads}"
         assert self.value_dim % num_heads == 0, f"value dim must be divisible by num_heads of {num_heads}"
 
