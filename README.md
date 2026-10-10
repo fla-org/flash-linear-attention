@@ -29,6 +29,7 @@
 
 ## News
 
+- [2026-10] 🛰️ Add Diagonal Kalman Delta Network (DiagKDN) to `fla` ([paper](https://arxiv.org/abs/2609.07816)) — KDA's gated delta-rule memory written along a per-channel Kalman gain.
 - [2026-10] 🌊 Add [CyFA](https://arxiv.org/abs/2609.36259) (Cyclic Flow Attention) implementation to `fla` - a Linear RNN that partitions memory by relative time through learned cyclic transport.
 - [2026-10] 🎉 Add Stick-Breaking Attention kernels and models to `fla` ([paper](https://arxiv.org/abs/2410.17980)).
 - [2026-07] 🐈 Add CAT (Compress and Attend Transformer) implementation to `fla` ([paper](https://arxiv.org/abs/2511.05313)) - a _meta_-sequence mixer that unlocks test-time control of inference costs.
@@ -123,6 +124,7 @@
 | 2026 | Preconditioned KDA            | [Preconditioned DeltaNet: Curvature-aware Sequence Modeling for Linear Recurrences](https://arxiv.org/abs/2604.21100)                         | [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/ops/precond_kda)                |
 | 2026 | CAT                           | [Controllably Efficient Language Models](https://arxiv.org/abs/2511.05313)                                                                    | [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/models/cat)                     |
 | 2026 | CyFA                          | [CyFA: Linear Sequence Modeling with Relative-Time-Partitioned Memory](https://arxiv.org/abs/2609.36259)                                      | [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/models/cyfa)                    |
+| 2026 | DiagKDN                       | [Kalman Delta Networks: Uncertainty-aware Associative Memory](https://arxiv.org/abs/2609.07816)                                               | [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/ops/diag_kdn)                   |
 
 ## Installation
 
