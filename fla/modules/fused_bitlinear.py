@@ -21,7 +21,6 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
-from fla.modules.layernorm import RMSNorm
 from fla.utils import IS_AMD, autotune_cache_kwargs, get_multiprocessor_count, input_guard, require_version
 
 NUM_WARPS_AUTOTUNE = [1, 2, 4, 8, 16] if IS_AMD else [1, 2, 4, 8, 16, 32]
@@ -575,6 +574,8 @@ class BitLinear(nn.Linear):
             out_features: Size of each output sample.
             bias: If set to False, the layer will not learn an additive bias. Default: True.
         """
+        from fla.modules import RMSNorm
+
         # Initialize the superclass nn.Linear with the given parameters
         super().__init__(in_features, out_features, bias=bias)
 

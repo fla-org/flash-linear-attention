@@ -109,6 +109,8 @@ def test_public_function_aliases():
         ('l2norm', 'L2Norm', {}, ()),
         ('convolution', 'ShortConvolution', {'hidden_size': 4, 'kernel_size': 3, 'bias': True}, ('weight', 'bias')),
         ('convolution', 'LongConvolution', {'hidden_size': 4, 'max_len': 8}, ('filter',)),
+        ('fused_bitlinear', 'BitLinear', {'in_features': 4, 'out_features': 4}, ('weight', 'norm.weight')),
+        ('fused_bitlinear', 'FusedBitLinear', {'in_features': 4, 'out_features': 4}, ('weight', 'norm.weight')),
     ],
     ids=[
         'layernorm',
@@ -120,6 +122,8 @@ def test_public_function_aliases():
         'l2norm',
         'convolution',
         'long-convolution',
+        'bitlinear',
+        'fused-bitlinear',
     ],
 )
 def test_legacy_module_pickle_and_state_dict(monkeypatch, legacy, name, kwargs, state_keys):

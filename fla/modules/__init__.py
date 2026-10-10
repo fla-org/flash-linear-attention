@@ -5,12 +5,36 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-# ruff: noqa: E402
 import sys
 import warnings
 from importlib import import_module
 from importlib.machinery import ModuleSpec
 from types import ModuleType
+
+from fla.modules.causal_conv1d import ShortConvolution
+from fla.modules.fused_bitlinear import BitLinear, FusedBitLinear
+from fla.modules.fused_cross_entropy import FusedCrossEntropyLoss
+from fla.modules.fused_kl_div import FusedKLDivLoss
+from fla.modules.fused_linear_cross_entropy import FusedLinearCrossEntropyLoss
+from fla.modules.long_conv import ImplicitLongConvolution, LongConvolution
+from fla.modules.mlp import GatedMLP
+from fla.modules.norm import (
+    FusedLayerNormGated,
+    FusedLayerNormSwishGate,
+    FusedLayerNormSwishGateLinear,
+    FusedRMSNormGated,
+    FusedRMSNormSwishGate,
+    FusedRMSNormSwishGateLinear,
+    GroupNorm,
+    GroupNormLinear,
+    L2Norm,
+    LayerNorm,
+    LayerNormLinear,
+    RMSNorm,
+    RMSNormLinear,
+)
+from fla.modules.rotary import RotaryEmbedding
+from fla.modules.token_shift import TokenShift
 
 _MODULE_ALIASES = {
     'fused_norm_gate': ('norm.fused_norm_gate',),
@@ -50,35 +74,6 @@ for _old, _targets in _MODULE_ALIASES.items():
     if _old != 'conv.causal_conv1d':
         _parent, _, _child = _fullname.rpartition('.')
         setattr(sys.modules[_parent], _child, _module)
-
-# legacy aliases must exist before these imports resolve their dependencies.
-# autopep8: off
-from fla.modules.causal_conv1d import ShortConvolution
-from fla.modules.fused_bitlinear import BitLinear, FusedBitLinear
-from fla.modules.fused_cross_entropy import FusedCrossEntropyLoss
-from fla.modules.fused_kl_div import FusedKLDivLoss
-from fla.modules.fused_linear_cross_entropy import FusedLinearCrossEntropyLoss
-from fla.modules.long_conv import ImplicitLongConvolution, LongConvolution
-from fla.modules.mlp import GatedMLP
-from fla.modules.norm import (
-    FusedLayerNormGated,
-    FusedLayerNormSwishGate,
-    FusedLayerNormSwishGateLinear,
-    FusedRMSNormGated,
-    FusedRMSNormSwishGate,
-    FusedRMSNormSwishGateLinear,
-    GroupNorm,
-    GroupNormLinear,
-    L2Norm,
-    LayerNorm,
-    LayerNormLinear,
-    RMSNorm,
-    RMSNormLinear,
-)
-from fla.modules.rotary import RotaryEmbedding
-from fla.modules.token_shift import TokenShift
-
-# autopep8: on
 
 for _name in ('activations', 'rotary', 'grpo', 'fused_cross_entropy', 'fused_kl_div', 'fused_linear_cross_entropy'):
     _module = import_module(f'{__name__}.{_name}')
