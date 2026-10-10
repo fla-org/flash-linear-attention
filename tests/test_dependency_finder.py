@@ -75,11 +75,10 @@ def test_backend_changes_follow_shared_kernel_imports(backend_project, backend_f
 
 def test_dependencies_follow_reexports_and_aliases(tmp_path):
     sources = {
-        'fla/modules/__init__.py': "_MODULE_ALIASES = {'l2norm': ('norm.ops',)}\n",
         'fla/modules/norm/ops.py': 'def l2norm(x): return x\nl2_norm = l2norm\n',
         'fla/modules/norm/unrelated.py': 'def unrelated(x): return x\n',
         'fla/modules/norm/__init__.py': 'from .ops import l2_norm as normalized\nfrom .unrelated import unrelated\n',
-        'tests/test_alias.py': 'from fla.modules.l2norm import l2norm\n',
+        'fla/modules/l2norm.py': 'from fla.modules.norm import normalized as l2_norm\n',
         'tests/test_norm.py': 'from fla.modules.l2norm import l2_norm as normalize\n',
         'tests/test_unrelated.py': 'from fla.modules.norm import unrelated\n',
     }
@@ -90,7 +89,7 @@ def test_dependencies_follow_reexports_and_aliases(tmp_path):
 
     finder = DependencyFinder(search_dirs=[tmp_path / 'fla'], test_dir=tmp_path / 'tests', project_root=tmp_path)
     tests = finder.find_dependent_tests([tmp_path / 'fla/modules/norm/ops.py'])
-    assert tests == {str(tmp_path / 'tests/test_norm.py'), str(tmp_path / 'tests/test_alias.py')}
+    assert tests == {str(tmp_path / 'tests/test_norm.py')}
 
 
 @pytest.mark.parametrize('backend_file', ['triton_ascend.py', 'triton_ascend/ops.py', 'triton_ascend/__init__.py'])

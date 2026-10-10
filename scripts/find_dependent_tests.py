@@ -197,20 +197,11 @@ class DependencyFinder:
 
         all_source_files = [p for s_dir in search_dirs for p in Path(s_dir).resolve().rglob("*.py")]
         source_files = [p for p in all_source_files if p.name != '__init__.py']
-        module_aliases = {}
         reexports = {}
         for file_path in all_source_files:
             module = file_to_module_path(file_path, self.project_root)
             package = module if file_path.name == '__init__.py' else module.rpartition('.')[0]
-            tree = parse_file(file_path)
-            reexports.update(get_reexports_from_tree(tree, module, package))
-            if not tree:
-                continue
-            for node in tree.body:
-                if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == '_MODULE_ALIASES' for target in node.targets):
-                    aliases = ast.literal_eval(node.value)
-                    module_aliases.update({f'{module}.{alias}': tuple(f'{module}.{target}' for target in targets)
-                                          for alias, targets in aliases.items()})
+            reexports.update(get_reexports_from_tree(parse_file(file_path), module, package))
         test_scope = os.environ.get("TEST_SCOPE", "ALL").upper()
         if test_scope == "MODELS_ONLY":
             test_files = [p for p in models_test_dir.rglob("*.py") if p.name != '__init__.py']
@@ -236,14 +227,11 @@ class DependencyFinder:
             definitions = get_definitions_from_tree(tree)
             imports = get_imports_from_tree(tree)
             for imported in list(imports):
-                expanded_imports = [(target, imported[1]) for target in module_aliases.get(imported[0], (imported[0],))]
-                for expanded in expanded_imports:
-                    imports.add(expanded)
-                    visited = set()
-                    while expanded in reexports and expanded not in visited:
-                        visited.add(expanded)
-                        expanded = reexports[expanded]
-                        imports.add(expanded)
+                visited = set()
+                while imported in reexports and imported not in visited:
+                    visited.add(imported)
+                    imported = reexports[imported]
+                    imports.add(imported)
             self.file_to_definitions[file_path] = definitions
             self.file_to_imports[file_path] = imports
             for defn in definitions:
