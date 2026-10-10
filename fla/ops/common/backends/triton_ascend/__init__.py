@@ -112,6 +112,46 @@ class TritonAscendCommonBackend(BaseBackend):
         from fla.ops.common.backends.triton_ascend.gate import fused_beta_sigmoid_fwd_npu
         return fused_beta_sigmoid_fwd_npu(x=x, scale=scale)
 
+    def chunk_momentum_delta_kkt_fwd_verifier(self, p_eff, k_eta, cfac, lct1, b_tm1, chunk_size):
+        from fla.utils import IS_NPU
+        if not IS_NPU or p_eff.device.type != "npu":
+            return False, "momentum kkt not running on NPU"
+        return True, None
+
+    def chunk_momentum_delta_kkt_fwd(self, *args, **kwargs):
+        from fla.ops.common.backends.triton_ascend.chunk_momentum_delta import chunk_momentum_delta_kkt_fwd_npu
+        return chunk_momentum_delta_kkt_fwd_npu(*args, **kwargs)
+
+    def chunk_momentum_delta_wy_fwd_verifier(self, A, v, p_eff, bar_a_tm1, b_tm1, chunk_size):
+        from fla.utils import IS_NPU
+        if not IS_NPU or A.device.type != "npu":
+            return False, "momentum wy not running on NPU"
+        return True, None
+
+    def chunk_momentum_delta_wy_fwd(self, *args, **kwargs):
+        from fla.ops.common.backends.triton_ascend.chunk_momentum_delta import chunk_momentum_delta_wy_fwd_npu
+        return chunk_momentum_delta_wy_fwd_npu(*args, **kwargs)
+
+    def chunk_momentum_delta_fwd_h_verifier(self, k_eta, u_c, y_c, z_c, cfac, lct1, lm_cum, a_last, b_last, ct_last, lm_last, initial_S, initial_M, output_final_state, chunk_size):
+        from fla.utils import IS_NPU
+        if not IS_NPU or k_eta.device.type != "npu":
+            return False, "momentum fwd_h not running on NPU"
+        return True, None
+
+    def chunk_momentum_delta_fwd_h(self, *args, **kwargs):
+        from fla.ops.common.backends.triton_ascend.chunk_momentum_delta import chunk_momentum_delta_fwd_h_npu
+        return chunk_momentum_delta_fwd_h_npu(*args, **kwargs)
+
+    def chunk_momentum_delta_fwd_o_verifier(self, q, k_eta, v_i, h_s, h_m, a_cum, b_t, cfac, lct, lct1, scale, chunk_size):
+        from fla.utils import IS_NPU
+        if not IS_NPU or q.device.type != "npu":
+            return False, "momentum fwd_o not running on NPU"
+        return True, None
+
+    def chunk_momentum_delta_fwd_o(self, *args, **kwargs):
+        from fla.ops.common.backends.triton_ascend.chunk_momentum_delta import chunk_momentum_delta_fwd_o_npu
+        return chunk_momentum_delta_fwd_o_npu(*args, **kwargs)
+
     def fused_beta_sigmoid_bwd_verifier(self, *args, **kwargs):
         return True, None
 

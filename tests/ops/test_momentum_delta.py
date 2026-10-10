@@ -167,6 +167,10 @@ def test_chunk_varlen(
     device_platform == 'intel',
     reason='Intel Triton Failure',
 )
+@pytest.mark.skipif(
+    device_platform == 'npu',
+    reason='crash under triton-ascend 3.2.2; fixed in triton-ascend 3.6, re-enable after the package upgrade',
+)
 def test_chunk_initial_state_grad_count():
     """Backward must return dh0 in the initial_state slot, not in output_final_state."""
     torch.manual_seed(0)
@@ -281,6 +285,10 @@ def test_full_momentum_chunk_ref_decaying_gates(mu):
 @pytest.mark.skipif(
     device_platform == 'intel',
     reason='Intel Triton Failure',
+)
+@pytest.mark.skipif(
+    device_platform == 'npu',
+    reason='crash under triton-ascend 3.2.2; fixed in triton-ascend 3.6, re-enable after the package upgrade',
 )
 def test_qk_l2norm_wiring():
     """Default qk_norm='l2' must normalize; kernel l2 should match eager parity."""
