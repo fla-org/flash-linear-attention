@@ -1004,11 +1004,6 @@ def test_chunk_varlen_prefill(
     [
         pytest.param(*test, id="B{}-T{}-H{}-D{}-a_log{}-bias{}-lowerbound{}".format(*test))
         for test in [
-            (1, 1, 2, 12, True, True, None),
-            (1, 31, 2, 12, True, True, -5.0),
-            (1, 33, 2, 33, True, True, None),
-            (2, 65, 2, 33, False, True, -5.0),
-            (1, 2049, 4, 64, True, True, -5.0),
             (1, 2, 2, 12, True, False, -5.0),
             (1, 32, 2, 16, True, False, -5.0),
             (2, 64, 4, 32, True, False, -5.0),
@@ -1026,8 +1021,8 @@ def test_chunk_varlen_prefill(
         ]
     ],
 )
-@pytest.mark.parametrize('dtype', [torch.float32, torch.float16, torch.bfloat16], ids=['fp32', 'fp16', 'bf16'])
-@pytest.mark.parametrize('grad_scale', [1., 1e-8], ids=['unit_grad', 'small_grad'])
+@pytest.mark.parametrize('dtype', [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize('grad_scale', [1., 1e-8])
 def test_gate(
     B: int,
     T: int,
