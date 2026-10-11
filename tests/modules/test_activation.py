@@ -288,8 +288,12 @@ def test_swiglu_linear(
     y.requires_grad_(requires_grad[1])
     w = torch.randn(O, D, device=device, requires_grad=requires_grad[2])
     b = torch.randn(O, device=device, requires_grad=requires_grad[3]) if use_bias else None
-    inputs = {'x': x, 'y': y, 'w': w, 'b': b}
-    grad_inputs = {name: tensor for name, tensor in inputs.items() if tensor is not None and tensor.requires_grad}
+    inputs = (x, y, w, b)
+    grad_inputs = [tensor for tensor in inputs if tensor is not None and tensor.requires_grad]
+    grad_names = [
+        name for name, tensor in zip(('dx', 'dy', 'dw', 'db'), inputs)
+        if tensor is not None and tensor.requires_grad
+    ]
 
     z_ref = F.silu(x) * y
     out_ref = F.linear(input=z_ref, weight=w, bias=b)
@@ -297,12 +301,12 @@ def test_swiglu_linear(
     out_tri = fn(x=x, y=y, weight=w, bias=b)
 
     g = torch.randn_like(out_ref)
-    grads_ref = torch.autograd.grad(outputs=out_ref, inputs=tuple(grad_inputs.values()), grad_outputs=g)
-    grads_tri = torch.autograd.grad(outputs=out_tri, inputs=tuple(grad_inputs.values()), grad_outputs=g)
+    grads_ref = torch.autograd.grad(outputs=out_ref, inputs=grad_inputs, grad_outputs=g)
+    grads_tri = torch.autograd.grad(outputs=out_tri, inputs=grad_inputs, grad_outputs=g)
 
     assert_close('swiglu_linear out', out_ref, out_tri, 1e-3)
-    for name, grad_ref, grad_tri in zip(grad_inputs, grads_ref, grads_tri):
-        assert_close(f'swiglu_linear d{name}', grad_ref, grad_tri, 1e-3)
+    for name, grad_ref, grad_tri in zip(grad_names, grads_ref, grads_tri):
+        assert_close(f'swiglu_linear {name}', grad_ref, grad_tri, 1e-3)
 
 
 @pytest.mark.parametrize(
