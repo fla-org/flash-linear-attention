@@ -235,7 +235,8 @@ def kda_gate_bwd_kernel(
     if HAS_A:
         tl.store(dA + i_t * H + i_h, b_dA)
     if HAS_BIAS:
-        tl.store(dbias + (i_t * H + i_h) * D + o_d, tl.sum(b_dg, 0), mask=o_d < D)
+        b_dbias = tl.sum(b_dg, 0)
+        tl.store(dbias + (i_t * H + i_h) * D + o_d, b_dbias, mask=o_d < D)
 
     if HAS_BETA:
         p_b = beta + i_h + o_t * H
@@ -296,8 +297,7 @@ def kda_gate_bwd(
     dA = g.new_empty(NT, H, dtype=torch.float32) if A_log is not None else None
     dbias = g.new_empty(NT, H * K, dtype=torch.float32) if dt_bias is not None else None
 
-    grid = (triton.cdiv(T, BT), H)
-    kda_gate_bwd_kernel[grid](
+    kda_gate_bwd_kernel[(NT, H)](
         g=g,
         A_log=A_log,
         dt_bias=dt_bias,

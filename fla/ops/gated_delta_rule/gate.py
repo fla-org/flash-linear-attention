@@ -158,7 +158,8 @@ def gdn_gate_bwd_kernel(
     tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), mask=m_t)
     tl.store(dA + i_t * H + i_h, b_dA)
     if HAS_BIAS:
-        tl.store(dbias + i_t * H + i_h, tl.sum(b_dg, 0))
+        b_dbias = tl.sum(b_dg, 0)
+        tl.store(dbias + i_t * H + i_h, b_dbias)
 
 
 @input_guard
