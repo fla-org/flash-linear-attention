@@ -59,7 +59,7 @@ def _is_inner_contiguous(x: torch.Tensor) -> bool:
     """
     ndim = x.ndim
     if ndim < 2:
-        return True
+        return x.is_contiguous()
     if x.stride(-1) != 1:
         return False
     if ndim == 2:
