@@ -13,7 +13,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.backends import dispatch
+from fla.backends import dispatch
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.op import exp
 from fla.utils import (
@@ -271,7 +271,7 @@ def attnres_bwd_kernel_dqdw(
     BD: tl.constexpr,
     HAS_ONORM: tl.constexpr,
 ):
-    i_d = tl.program_id(0).to(tl.int32)
+    i_d = tl.program_id(0).to(tl.int64)
 
     # [BD]
     o_d = i_d * BD + tl.arange(0, BD)
@@ -503,7 +503,7 @@ class FusedAttnresFunction(torch.autograd.Function):
         return (dq, dw, dow, None, None, None, None, *dvs)
 
 
-@dispatch("attnres")
+@dispatch('attnres')
 def fused_attnres(
     query: torch.Tensor,
     residuals: Sequence[torch.Tensor],

@@ -15,13 +15,18 @@ from fla.utils import IS_GATHER_SUPPORTED, IS_NVIDIA_BLACKWELL
 
 
 @triton.jit
+def barrier():
+    tl.debug_barrier()
+
+
+@triton.jit
 def unflatten_program_id(X: tl.constexpr, Y: tl.constexpr = None):
-    """Recover x-fastest 2D/3D indices from a 1D launch that avoids CUDA's y/z grid limits."""
-    pid = tl.program_id(0)
+    """Recover int64 x-fastest 2D/3D indices without using CUDA's limited y/z grid dimensions."""
+    pid = tl.program_id(0).to(tl.int64)
     if Y is None:
-        return pid % X, (pid // X).to(tl.int64)
+        return pid % X, pid // X
     else:
-        return pid % X, (pid // X) % Y, (pid // (X * Y)).to(tl.int64)
+        return pid % X, (pid // X) % Y, pid // (X * Y)
 
 
 if os.environ.get('FLA_USE_FAST_OPS', '0') == '1':
@@ -46,6 +51,13 @@ else:
     def log2(x): return tl.log2(x.to(tl.float32))
     @triton.jit
     def tanh(x): return tldevice.tanh(x.to(tl.float32))
+
+
+@triton.jit
+def logaddexp(a, b):
+    maximum = tl.maximum(a, b)
+    difference = tl.where(maximum == float('-inf'), 0., -tl.abs(a - b))
+    return maximum + tldevice.log1p(exp(difference))
 
 
 if IS_NVIDIA_BLACKWELL:
