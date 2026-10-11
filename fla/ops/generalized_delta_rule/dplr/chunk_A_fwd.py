@@ -56,7 +56,7 @@ def chunk_dplr_fwd_A_kernel_intra_sub_intra(
     IS_VARLEN: tl.constexpr,
     GATHER_SUPPORTED: tl.constexpr,
 ):
-    i_t, i_b, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2)
+    i_t, i_b, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
 
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
@@ -184,7 +184,7 @@ def chunk_dplr_fwd_A_kernel_intra_tensorcore(
     IS_VARLEN: tl.constexpr,
     GATHER_SUPPORTED: tl.constexpr,
 ):
-    i_t, i_b, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2)
+    i_t, i_b, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
 
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)

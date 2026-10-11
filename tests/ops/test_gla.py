@@ -321,12 +321,16 @@ def test_chunk(
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'D', 'dtype'),
+    ('B', 'T', 'H', 'K', 'V', 'dtype'),
     [
-        pytest.param(*test, id="B{}-T{}-H{}-D{}-{}".format(*test))
+        pytest.param(*test, id="B{}-T{}-H{}-K{}-V{}-{}".format(*test))
         for test in [
-            (2, 256, 4, 64, torch.float),
-            (2, 1024, 4, 128, torch.float16),
+            (2, 256, 4, 64, 64, torch.float),
+            (2, 1024, 4, 128, 128, torch.float16),
+            (2, 256, 4, 32, 64, torch.float),
+            (4, 1024, 4, 32, 64, torch.float16),
+            (4, 1024, 4, 32, 64, torch.bfloat16),
+            (2, 256, 4, 128, 256, torch.bfloat16),
         ]
     ],
 )
@@ -338,17 +342,18 @@ def test_chunk_state_v_first(
     B: int,
     T: int,
     H: int,
-    D: int,
+    K: int,
+    V: int,
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
 
-    q = torch.rand((B, T, H, D), dtype=dtype, device=device)
-    k = torch.rand((B, T, H, D), dtype=dtype, device=device)
-    v = torch.rand((B, T, H, D), dtype=dtype, device=device)
-    g = F.logsigmoid(torch.rand((B, T, H, D), dtype=dtype, device=device))
-    h0 = torch.rand(B, H, D, D, dtype=torch.float32, device=device)
+    q = torch.rand((B, T, H, K), dtype=dtype, device=device)
+    k = torch.rand((B, T, H, K), dtype=dtype, device=device)
+    v = torch.rand((B, T, H, V), dtype=dtype, device=device)
+    g = F.logsigmoid(torch.rand((B, T, H, K), dtype=dtype, device=device))
+    h0 = torch.rand(B, H, K, V, dtype=torch.float32, device=device)
     do = torch.randn_like(v)
     dht = torch.randn_like(h0)
 
@@ -380,14 +385,16 @@ def test_chunk_state_v_first(
 
 
 @pytest.mark.parametrize(
-    ('H', 'D', 'cu_seqlens', 'dtype'),
+    ('H', 'K', 'V', 'cu_seqlens', 'dtype', 'state_v_first'),
     [
-        pytest.param(*test, id="H{}-D{}-cu_seqlens{}-{}".format(*test))
+        pytest.param(*test, id="H{}-K{}-V{}-cu_seqlens{}-{}-state_v_first{}".format(*test))
         for test in [
-            (4, 64, [0, 15], torch.float16),
-            (4, 64, [0, 0, 16], torch.float16),
-            (4, 64, [0, 256, 500, 1000], torch.float16),
-            (4, 100, [0, 15, 100, 300, 1200, 2000], torch.float16),
+            (4, 64, 64, [0, 15], torch.float16, False),
+            (4, 64, 64, [0, 0, 16], torch.float16, False),
+            (4, 64, 64, [0, 256, 500, 1000], torch.float16, False),
+            (4, 100, 100, [0, 15, 100, 300, 1200, 2000], torch.float16, False),
+            (4, 32, 64, [0, 1024, 2048, 3072, 4096], torch.bfloat16, True),
+            (4, 32, 64, [0, 1, 63, 128, 257], torch.float16, True),
         ]
     ],
 )
@@ -398,9 +405,11 @@ def test_chunk_state_v_first(
 @pytest.mark.smoke
 def test_chunk_varlen(
     H: int,
-    D: int,
+    K: int,
+    V: int,
     cu_seqlens: list[int],
     dtype: torch.dtype,
+    state_v_first: bool,
 ):
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
@@ -409,13 +418,14 @@ def test_chunk_varlen(
     T = cu_seqlens[-1]
     cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
 
-    q = torch.rand((1, T, H, D), dtype=dtype, device=device).requires_grad_()
-    k = torch.rand((1, T, H, D), dtype=dtype, device=device).requires_grad_()
-    v = torch.rand((1, T, H, D), dtype=dtype, device=device).requires_grad_()
-    g = F.logsigmoid(torch.rand((1, T, H, D), dtype=dtype, device=device)).requires_grad_()
-    h0 = torch.rand((N, H, D, D), dtype=torch.float32, device=device).requires_grad_()
+    q = torch.rand((1, T, H, K), dtype=dtype, device=device).requires_grad_()
+    k = torch.rand((1, T, H, K), dtype=dtype, device=device).requires_grad_()
+    v = torch.rand((1, T, H, V), dtype=dtype, device=device).requires_grad_()
+    g = F.logsigmoid(torch.rand((1, T, H, K), dtype=dtype, device=device)).requires_grad_()
+    state_shape = (N, H, V, K) if state_v_first else (N, H, K, V)
+    h0 = torch.rand(state_shape, dtype=torch.float32, device=device).requires_grad_()
     do = torch.randn_like(v)
-    dht = torch.rand((N, H, D, D), dtype=torch.float32, device=device)
+    dht = torch.rand(state_shape, dtype=torch.float32, device=device)
 
     ref, ref_ht = fused_recurrent_gla(
         q=q,
@@ -424,6 +434,7 @@ def test_chunk_varlen(
         gk=g,
         initial_state=h0,
         output_final_state=True,
+        state_v_first=state_v_first,
         cu_seqlens=cu_seqlens,
     )
 
@@ -441,6 +452,7 @@ def test_chunk_varlen(
         g=g,
         initial_state=h0,
         output_final_state=True,
+        state_v_first=state_v_first,
         cu_seqlens=cu_seqlens,
     )
     ((tri * do).sum() + (tri_ht * dht).sum()).backward()

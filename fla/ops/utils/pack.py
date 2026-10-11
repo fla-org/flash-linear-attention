@@ -13,6 +13,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.index import prepare_lens
+from fla.ops.utils.op import unflatten_program_id
 from fla.utils import autotune_cache_kwargs, input_guard
 
 
@@ -35,7 +36,7 @@ def packunpack_sequence_kernel(
     PADDING_SIDE: tl.constexpr,
     PACK: tl.constexpr,
 ):
-    i_d, i_s, i_b = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    i_d, i_s, i_b = unflatten_program_id(tl.cdiv(D, BD), S)
     bos, eos = tl.load(cu_seqlens + i_b).to(tl.int64), tl.load(cu_seqlens + i_b + 1).to(tl.int64)
 
     T = eos - bos
@@ -71,7 +72,7 @@ def pack_sequence_fwdbwd(
     ND = triton.cdiv(D, BD)
 
     y = torch.empty(cu_seqlens[-1].item(), *x.shape[2:], device=x.device, dtype=x.dtype)
-    packunpack_sequence_kernel[ND, S, B](
+    packunpack_sequence_kernel[(ND * S * B,)](
         x=x,
         y=y,
         cu_seqlens=cu_seqlens,
@@ -98,7 +99,7 @@ def unpack_sequence_fwdbwd(
     BD = min(triton.next_power_of_2(D), 4096)
     ND = triton.cdiv(D, BD)
 
-    packunpack_sequence_kernel[ND, S, B](
+    packunpack_sequence_kernel[(ND * S * B,)](
         x=x,
         y=y,
         cu_seqlens=cu_seqlens,

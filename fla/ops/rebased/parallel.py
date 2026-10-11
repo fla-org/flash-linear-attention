@@ -9,6 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.utils.op import unflatten_program_id
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 # Rebased: Linear Transformers with Learnable Kernel Functions are Better In-Context Models
@@ -34,7 +35,8 @@ def parallel_rebased_fwd_kernel(
     BV: tl.constexpr,
 ):
     # i_c: chunk index. used for sequence parallelism
-    i_kv, i_c, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_kv, i_c = unflatten_program_id(tl.cdiv(K, BK) * tl.cdiv(V, BV))
+    i_bh = tl.program_id(1).to(tl.int64)
     NV = tl.cdiv(V, BV)
     i_k = i_kv // (NV)
     i_v = i_kv % (NV)
@@ -319,7 +321,8 @@ def parallel_rebased_bwd_kernel(
     BK: tl.constexpr,
     BV: tl.constexpr,
 ):
-    i_kv, i_c, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_kv, i_c = unflatten_program_id(tl.cdiv(K, BK) * tl.cdiv(V, BV))
+    i_bh = tl.program_id(1).to(tl.int64)
     NV = tl.cdiv(V, BV)
     i_k = i_kv // (NV)
     i_v = i_kv % (NV)
@@ -390,7 +393,7 @@ class ParallelBasedFunction(torch.autograd.Function):
         num_warps = 4
         NK = triton.cdiv(K, BK)
         NV = triton.cdiv(V, BV)
-        grid = (NK * NV, triton.cdiv(T, BTL), B * H)
+        grid = (NK * NV * triton.cdiv(T, BTL), B * H)
 
         assert NK == 1, "will encounter some synchronization issue if not."
 
@@ -434,7 +437,7 @@ class ParallelBasedFunction(torch.autograd.Function):
         num_warps = 4
         NK = triton.cdiv(K, BK)
         NV = triton.cdiv(V, BV)
-        grid = (NK * NV, triton.cdiv(T, BTL), B * H)
+        grid = (NK * NV * triton.cdiv(T, BTL), B * H)
 
         assert NK == 1, "will encounter some synchronization issue if not"
 

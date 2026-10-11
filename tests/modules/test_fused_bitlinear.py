@@ -5,53 +5,53 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from unittest.mock import patch
-
 import pytest
 import torch
+import torch.nn.functional as F
 
-from fla.modules import fused_bitlinear
-from fla.modules.fused_bitlinear import FusedBitLinear
-from fla.utils import device
-
-
-def _record_eps(recorded: dict):
-    def spy(*args, **kwargs):
-        recorded.update(kwargs)
-        return torch.zeros(1, device=device)
-    return spy
+from fla.modules.fused_bitlinear import FusedBitLinear, activation_quant, bit_linear, weight_quant
+from fla.utils import assert_close, device
 
 
-@pytest.mark.parametrize("eps", [1e-8, 1e-5], ids=["eps=1e-8", "eps=1e-5"])
-def test_bit_linear_forwards_eps(eps: float):
-    # a dropped eps leaves the norm on the callee default, so the layer would quietly
-    # normalize with an epsilon the caller never asked for
+@pytest.mark.parametrize(
+    ('B', 'T', 'D', 'O'),
+    [
+        pytest.param(*test, id="B{}-T{}-D{}-O{}".format(*test))
+        for test in [(1, 1, 64, 32), (2, 33, 63, 16)]
+    ],
+)
+@pytest.mark.parametrize('dtype', [torch.float32, torch.float16, torch.bfloat16], ids=['fp32', 'fp16', 'bf16'])
+@pytest.mark.parametrize('eps', [None, 1e-6, 1e-4], ids=['default-eps', 'eps1e-6', 'eps1e-4'])
+@pytest.mark.parametrize('bias', [False, True], ids=['no-bias', 'bias'])
+@pytest.mark.parametrize('fused_module', [False, True], ids=['function', 'module'])
+def test_bit_linear(B: int, T: int, D: int, O: int, dtype: torch.dtype, eps: float | None, bias: bool, fused_module: bool):
     torch.manual_seed(42)
+    layer = FusedBitLinear(in_features=D, out_features=O, bias=bias).to(device=device, dtype=dtype)
+    if eps is not None:
+        layer.norm.eps = eps
+    # small inputs make the normalization sensitive to epsilon
+    x = (torch.randn(B, T, D, device=device, dtype=dtype) * 1e-3).requires_grad_()
+    w = layer.norm.weight
+    linear_weight, linear_bias = layer.weight, layer.bias
+    inputs = (x, w, linear_weight) + ((linear_bias,) if bias else ())
 
-    recorded = {}
-    x = torch.randn(4, 16, device=device)
-    weight = torch.randn(16, 16, device=device)
-    norm_weight = torch.randn(16, device=device)
+    ref_norm = x.float() * torch.rsqrt(x.float().square().mean(-1, keepdim=True) + (1e-8 if eps is None else eps))
+    ref_norm = ref_norm * w.float()
+    ref_quant = ref_norm + (activation_quant(ref_norm) - ref_norm).detach()
+    ref_weight = linear_weight + (weight_quant(linear_weight) - linear_weight).detach()
+    ref = F.linear(input=ref_quant.to(dtype), weight=ref_weight, bias=linear_bias)
 
-    with patch.object(fused_bitlinear, "layer_norm_linear_quant_fn", _record_eps(recorded)):
-        fused_bitlinear.bit_linear(x, weight, None, norm_weight, None, eps=eps)
+    if fused_module:
+        tri = layer(x)
+    else:
+        kwargs = {} if eps is None else {'eps': eps}
+        tri = bit_linear(x=x, weight=linear_weight, bias=linear_bias, norm_weight=w, **kwargs)
+    do = torch.randn_like(ref)
+    ref_grads = torch.autograd.grad(outputs=ref, inputs=inputs, grad_outputs=do)
+    tri_grads = torch.autograd.grad(outputs=tri, inputs=inputs, grad_outputs=do)
 
-    # exact equality, not assert_close: a missing eps records 0.0, and assert_close's
-    # default err_atol=1e-6 would pass that
-    assert "eps" in recorded, "bit_linear dropped its eps argument"
-    assert recorded["eps"] == eps
-
-
-def test_fused_bitlinear_forwards_norm_eps():
-    # FusedBitLinear advertises its epsilon through __repr__, so the kernel must see it too
-    torch.manual_seed(42)
-
-    recorded = {}
-    layer = FusedBitLinear(16, 16)
-    layer.norm.eps = 1e-4
-
-    with patch.object(fused_bitlinear, "layer_norm_linear_quant_fn", _record_eps(recorded)):
-        layer(torch.randn(4, 16, device=device))
-
-    assert "eps" in recorded, "FusedBitLinear.forward dropped the configured norm_eps"
-    assert recorded["eps"] == 1e-4
+    assert torch.isfinite(tri).all()
+    assert_close('o', ref, tri, 0.01)
+    for name, ref_grad, tri_grad in zip(('dx', 'dw', 'dlw', 'dlb'), ref_grads, tri_grads):
+        assert torch.isfinite(tri_grad).all()
+        assert_close(name, ref_grad, tri_grad, 0.01)

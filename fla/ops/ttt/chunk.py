@@ -12,6 +12,7 @@ import triton.language as tl
 
 from fla.modules.layernorm import group_norm
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
+from fla.ops.utils.op import unflatten_program_id
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, input_guard
 
 
@@ -58,7 +59,7 @@ def chunk_ttt_linear_fwd_kernel_h(
     STORE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    i_k, i_v, i_nh = unflatten_program_id(tl.cdiv(K, BK), tl.cdiv(V, BV))
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
@@ -162,7 +163,8 @@ def chunk_ttt_linear_fwd_kernel_o(
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_v, i_t = unflatten_program_id(tl.cdiv(V, BV))
+    i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
 
     if IS_VARLEN:
@@ -271,7 +273,7 @@ def chunk_ttt_linear_bwd_kernel_h(
     USE_INITIAL_STATE_B: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    i_k, i_v, i_nh = unflatten_program_id(tl.cdiv(K, BK), tl.cdiv(V, BV))
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
@@ -474,7 +476,7 @@ def chunk_ttt_linear_bwd_kernel_norm(
     USE_INITIAL_STATE_B: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    i_k, i_v, i_nh = unflatten_program_id(tl.cdiv(K, BK), tl.cdiv(V, BV))
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
@@ -627,7 +629,8 @@ def chunk_bwd_kernel_dqke(
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_k, i_t = unflatten_program_id(tl.cdiv(K, BK))
+    i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_tg = i_t
@@ -758,7 +761,7 @@ def chunk_ttt_linear_fwd_h(
     final_state_bias = k.new_empty(N, H, 1, V, dtype=torch.float32) if output_final_state else None
 
     v_new = torch.empty_like(v)
-    grid = (NK, NV, N * H)
+    grid = (NK * NV * N * H,)
 
     chunk_ttt_linear_fwd_kernel_h[grid](
         k=k,
@@ -816,7 +819,7 @@ def chunk_ttt_linear_fwd_o(
 
     o = torch.empty_like(v)
 
-    grid = (NV, NT, B * H)
+    grid = (NV * NT, B * H)
     chunk_ttt_linear_fwd_kernel_o[grid](
         q,
         k,
@@ -876,7 +879,7 @@ def chunk_ttt_linear_bwd_h(
     y = torch.empty_like(v)
 
     v_new = torch.empty_like(v)
-    grid = (NK, NV, N * H)
+    grid = (NK * NV * N * H,)
 
     chunk_ttt_linear_bwd_kernel_h[grid](
         k=k,
@@ -998,7 +1001,7 @@ def chunk_ttt_linear_bwd_norm(
     dw = w.new_empty(B, H, V)
     db = b.new_empty(B, H, V)
 
-    grid = (NK, NV, N * H)
+    grid = (NK * NV * N * H,)
     chunk_ttt_linear_bwd_kernel_norm[grid](
         q=q,
         k=k,
@@ -1173,7 +1176,7 @@ def chunk_ttt_linear_bwd_dqke(
     dq = torch.empty_like(q)
     dk = torch.empty_like(k)
     de = torch.empty_like(eta)
-    grid = (NK, NT, B * H)
+    grid = (NK * NT, B * H)
 
     chunk_bwd_kernel_dqke[grid](
         q=q,

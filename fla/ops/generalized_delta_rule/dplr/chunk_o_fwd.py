@@ -10,6 +10,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
+from fla.ops.utils.op import unflatten_program_id
 from fla.utils import IS_AMD, autotune_cache_kwargs, check_shared_mem
 
 NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if IS_AMD else [2, 4, 8, 16, 32]
@@ -51,7 +52,8 @@ def chunk_dplr_fwd_kernel_o(
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_v, i_t = unflatten_program_id(tl.cdiv(V, BV))
+    i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
 
     if IS_VARLEN:
@@ -118,7 +120,7 @@ def chunk_dplr_fwd_o(
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     o = torch.empty_like(v)
-    def grid(meta): return (triton.cdiv(V, meta['BV']), NT, B * H)
+    def grid(meta): return (triton.cdiv(V, meta['BV']) * NT, B * H)
     chunk_dplr_fwd_kernel_o[grid](
         qg=qg,
         v=v,
