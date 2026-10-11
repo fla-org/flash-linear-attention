@@ -125,6 +125,7 @@ def gdn_gate_bwd_kernel(
     dyg,
     dg,
     dA,
+    dbias,
     T,
     H: tl.constexpr,
     BT: tl.constexpr,
@@ -156,6 +157,8 @@ def gdn_gate_bwd_kernel(
 
     tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), mask=m_t)
     tl.store(dA + i_t * H + i_h, b_dA)
+    if HAS_BIAS:
+        tl.store(dbias + i_t * H + i_h, tl.sum(b_dg, 0))
 
 
 @input_guard
@@ -205,8 +208,9 @@ def gdn_gate_bwd(
     BT = 32
     NT = triton.cdiv(T, BT)
 
-    dg = torch.empty_like(g, dtype=torch.float32)
+    dg = torch.empty_like(g)
     dA = A_log.new_empty(NT, H, dtype=torch.float32)
+    dbias = g.new_empty(NT, H, dtype=torch.float32) if dt_bias is not None else None
 
     gdn_gate_bwd_kernel[(NT, H)](
         g=g,
@@ -215,14 +219,14 @@ def gdn_gate_bwd(
         dyg=dyg,
         dg=dg,
         dA=dA,
+        dbias=dbias,
         T=T,
         H=H,
         BT=BT,
     )
 
     dA = dA.sum(0).view_as(A_log).type_as(A_log)
-    dbias = dg.view(-1, H).sum(0).to(dt_bias) if dt_bias is not None else None
-    dg = dg.view_as(g).type_as(g)
+    dbias = dbias.sum(0).to(dt_bias) if dt_bias is not None else None
 
     return dg, dA, dbias
 

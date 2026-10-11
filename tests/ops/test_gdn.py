@@ -1229,6 +1229,11 @@ def test_chunk_gate_in_kernel_varlen(
     [
         pytest.param(*test, id="B{}-T{}-HV{}-bias{}".format(*test))
         for test in [
+            (1, 1, 2, True),
+            (1, 31, 3, True),
+            (1, 33, 3, False),
+            (2, 65, 4, True),
+            (1, 2049, 16, True),
             (1, 32, 2, False),
             (2, 64, 4, True),
             (4, 128, 8, True),
@@ -1236,8 +1241,8 @@ def test_chunk_gate_in_kernel_varlen(
         ]
     ],
 )
-@pytest.mark.parametrize('dtype', [torch.float32, torch.float16, torch.bfloat16])
-@pytest.mark.parametrize('grad_scale', [1., 1e-8])
+@pytest.mark.parametrize('dtype', [torch.float32, torch.float16, torch.bfloat16], ids=['fp32', 'fp16', 'bf16'])
+@pytest.mark.parametrize('grad_scale', [1., 1e-8], ids=['unit_grad', 'small_grad'])
 def test_gate(
     B: int,
     T: int,

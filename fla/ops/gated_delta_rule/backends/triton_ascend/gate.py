@@ -227,6 +227,7 @@ def gdn_gate_bwd_kernel_npu(
     dyg,
     dg,
     dA,
+    dbias,
     T,
     H: tl.constexpr,
     BT: tl.constexpr,
@@ -235,7 +236,7 @@ def gdn_gate_bwd_kernel_npu(
     H_OFFSET: tl.constexpr,
 ):
     i_t = tl.program_id(0) + NT_OFFSET
-    i_h = tl.program_id(1) + H_OFFSET
+    i_h = tl.program_id(1).to(tl.int64) + H_OFFSET
 
     b_A = tl.load(A_log + i_h).to(tl.float32)
 
@@ -243,8 +244,8 @@ def gdn_gate_bwd_kernel_npu(
     p_dg = tl.make_block_ptr(dg + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
     p_dyg = tl.make_block_ptr(dyg + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
 
-    b_g = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
-    b_dyg = tl.load(p_dyg, boundary_check=(0,)).to(tl.float32)
+    b_g = tl.load(p_g, boundary_check=(0,), padding_option="zero").to(tl.float32)
+    b_dyg = tl.load(p_dyg, boundary_check=(0,), padding_option="zero").to(tl.float32)
 
     if HAS_BIAS:
         b_g = b_g + tl.load(dt_bias + i_h).to(tl.float32)
@@ -255,7 +256,9 @@ def gdn_gate_bwd_kernel_npu(
     b_dA = tl.sum(b_dyg * b_yg, 0)
 
     tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), boundary_check=(0,))
-    tl.store(dA + i_t * H + i_h, b_dA)
+    tl.store(dA + i_t.to(tl.int64) * H + i_h, b_dA)
+    if HAS_BIAS:
+        tl.store(dbias + i_t.to(tl.int64) * H + i_h, tl.sum(b_dg, 0))
 
 
 def _launch_gate_bwd(
@@ -266,6 +269,7 @@ def _launch_gate_bwd(
     dyg: torch.Tensor,
     dg: torch.Tensor,
     dA: torch.Tensor,
+    dbias: torch.Tensor | None,
     T: int,
     H: int,
     BT: int,
@@ -278,6 +282,7 @@ def _launch_gate_bwd(
         dyg=dyg,
         dg=dg,
         dA=dA,
+        dbias=dbias,
         T=T,
         H=H,
         BT=BT,
@@ -356,9 +361,10 @@ def gdn_gate_bwd_npu(
     H = g.shape[-1]
     T = g.numel() // H
     BT = _get_gate_bwd_bt(T)
-    dg = torch.empty_like(g, dtype=torch.float32)
+    dg = torch.empty_like(g)
     NT = triton.cdiv(T, BT)
     dA = A_log.new_empty(NT, H, dtype=torch.float32)
+    dbias = g.new_empty(NT, H, dtype=torch.float32) if dt_bias is not None else None
     _launch_gate_bwd(
         g=g,
         A_log=A_log,
@@ -366,11 +372,11 @@ def gdn_gate_bwd_npu(
         dyg=dyg,
         dg=dg,
         dA=dA,
+        dbias=dbias,
         T=T,
         H=H,
         BT=BT,
     )
     dA = dA.sum(0).view_as(A_log).type_as(A_log)
-    dbias = dg.view(-1, H).sum(0).to(dt_bias) if dt_bias is not None else None
-    dg = dg.view_as(g).type_as(g)
+    dbias = dbias.sum(0).to(dt_bias) if dt_bias is not None else None
     return dg, dA, dbias
