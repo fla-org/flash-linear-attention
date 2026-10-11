@@ -374,10 +374,10 @@ class CachedAutotuner(Autotuner):
     def run(self, *args, **kwargs):
         key = AutotuneKey.build(self.arg_names, self.keys, args, kwargs)
         if self.should_check_fla_cache(key):
-            self.maybe_load_cached_config(key)
+            self.maybe_load_cached_config(key=key, nargs=dict(zip(self.arg_names, args)), runtime_kwargs=kwargs)
         return super().run(*args, **kwargs)
 
-    def maybe_load_cached_config(self, key: AutotuneKey):
+    def maybe_load_cached_config(self, key: AutotuneKey, nargs: dict[str, Any], runtime_kwargs: dict[str, Any]):
         best_config = load_cached_config(self.kernel_name, key)
 
         if best_config is not None:
@@ -393,6 +393,16 @@ class CachedAutotuner(Autotuner):
             } if TRITON_ABOVE_3_5_1 else {}
             cfg = triton.Config(kw, num_warps=num_warps, num_stages=num_stages, **extra)
 
+            if self.early_config_prune is not None:
+                configs = self.early_config_prune([*self.configs, cfg], nargs, **runtime_kwargs)
+                if cfg not in configs:
+                    self.cache.pop(key.autotune_key, None)
+                    logger.debug(
+                        "Cached config rejected for kernel %s and key %s; falling back to Triton autotune",
+                        self.kernel_name,
+                        list(key.autotune_key),
+                    )
+                    return
             self.cache[key.autotune_key] = cfg
         else:
             logger.debug(
@@ -411,7 +421,7 @@ def fla_cache_autotune(configs, key=None, prune_configs_by=None, reset_to_zero=N
     Extends Triton's autotune to load best configurations from FLA's config directory
     (default: fla/configs/{GPU}/, or FLA_CONFIG_DIR/ when overridden), keyed by kernel
     name from {kernel_name}.json. Lookup behaviour is controlled by FLA_CACHE_MODE.
-    Falls back to normal Triton autotuning when no cached config is found.
+    Falls back to normal Triton autotuning when a cached config is absent or rejected by early pruning.
     """
     # key can be None when we want to use cache only (no fallback autotune)
     if key is None:

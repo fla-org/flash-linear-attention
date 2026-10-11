@@ -10,11 +10,11 @@ import triton
 import triton.language as tl
 from einops import reduce
 
-from fla.ops.backends import dispatch
+from fla.backends import dispatch
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.cumsum import chunk_global_cumsum
-from fla.ops.utils.op import exp2, log2
+from fla.ops.utils.op import exp2, log2, unflatten_program_id
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, check_shared_mem, contiguous
 
 
@@ -53,7 +53,8 @@ def parallel_attn_fwd_kernel(
     USE_WINDOW: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_v, i_t = unflatten_program_id(tl.cdiv(V, BV))
+    i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
     i_h = i_hq // G
 
@@ -237,7 +238,8 @@ def parallel_attn_bwd_kernel_dq(
     USE_WINDOW: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_v, i_t = unflatten_program_id(tl.cdiv(V, BV))
+    i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
     i_h = i_hq // G
 
@@ -385,7 +387,8 @@ def parallel_attn_bwd_kernel_dkv(
     USE_WINDOW: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_v, i_t = unflatten_program_id(tl.cdiv(V, BV))
+    i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
     i_h = i_hq // G
 
@@ -553,7 +556,7 @@ def parallel_attn_fwd(
 
     o = torch.empty(B, T, HQ, V, dtype=v.dtype, device=q.device)
     lse = torch.empty(B, T, HQ, dtype=torch.float, device=q.device)
-    grid = (NV, NT, B * HQ)
+    grid = (NV * NT, B * HQ)
     parallel_attn_fwd_kernel[grid](
         q=q,
         k=k,
@@ -648,7 +651,7 @@ def parallel_attn_bwd(
     dq = torch.empty(B, T, HQ, K, dtype=k.dtype if H == HQ else torch.float, device=q.device)
     dk = torch.empty(B, T, HQ, K, dtype=k.dtype if H == HQ else torch.float, device=q.device)
     dv = torch.empty(B, T, HQ, V, dtype=v.dtype if H == HQ else torch.float, device=q.device)
-    grid = (NV, NT, B * HQ)
+    grid = (NV * NT, B * HQ)
 
     dg_cumsum, dg_cumsum_k = None, None
     if g_cumsum is not None:

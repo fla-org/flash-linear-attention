@@ -12,11 +12,11 @@ from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from einops import rearrange, repeat
 
 from fla.layers.utils import get_layer_cache, repad_hidden_states, unpad_hidden_states, update_layer_cache
 from fla.modules import RMSNorm
+from fla.modules.activations import elu_p1
 from fla.modules.feature_map import DPFPFeatureMap, HadamardFeatureMap, HedgehogFeatureMap, T2RFeatureMap
 from fla.ops.linear_attn import chunk_linear_attn, fused_chunk_linear_attn, fused_recurrent_linear_attn
 
@@ -95,10 +95,8 @@ class LinearAttention(nn.Module):
             self.feature_map_k = DPFPFeatureMap(head_dim=self.head_k_dim)
 
         elif feature_map == 'elu':
-            def elu(x):
-                return F.elu(x) + 1
-            self.feature_map_q = elu
-            self.feature_map_k = elu
+            self.feature_map_q = elu_p1
+            self.feature_map_k = elu_p1
 
         elif feature_map == 'relu':
             self.feature_map_q = nn.ReLU()

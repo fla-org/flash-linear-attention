@@ -27,7 +27,7 @@ def prepare_position_ids_kernel(
     cu_seqlens,
     B: tl.constexpr,
 ):
-    i_n = tl.program_id(0)
+    i_n = tl.program_id(0).to(tl.int64)
     bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
     T = eos - bos
 
