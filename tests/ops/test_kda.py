@@ -1224,9 +1224,9 @@ def test_tilelang_kda_fwd_intra_direct_wrapper_rejects_unsupported(case, expecte
             beta=beta,
             scale=D ** -0.5,
             chunk_size=call_chunk_size,
-            use_graph=case == "graph",
             safe_gate=safe_gate,
             disable_recompute=disable_recompute,
+            use_graph=case == "graph",
         )
 
 

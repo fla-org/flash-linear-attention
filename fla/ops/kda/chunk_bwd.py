@@ -495,21 +495,21 @@ def chunk_kda_bwd(
             g = kda_gate_chunk_cumsum(
                 g=g_org,
                 A_log=A_log,
-                dt_bias=dt_bias,
-                scale=RCP_LN2,
                 chunk_size=chunk_size,
+                scale=RCP_LN2,
+                dt_bias=dt_bias,
                 cu_seqlens=cu_seqlens,
                 chunk_indices=chunk_indices,
                 lower_bound=lower_bound,
                 use_graph=use_graph,
             )
         w, u, qg, kg = recompute_w_u_fwd(
-            q=q,
             k=k,
             v=v,
             beta=beta,
             A=Akk,
             gk=g,
+            q=q,
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
             use_graph=use_graph,
@@ -525,11 +525,11 @@ def chunk_kda_bwd(
             gk=g,
             initial_state=initial_state,
             output_final_state=False,
+            chunk_size=chunk_size,
+            state_v_first=state_v_first,
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
             chunk_offsets=chunk_offsets,
-            chunk_size=chunk_size,
-            state_v_first=state_v_first,
         )
     else:
         w, u, qg, kg, v_new, h = kwargs["w"], kwargs["u"], kwargs["qg"], kwargs["kg"], kwargs["v_new"], kwargs["h"]
@@ -575,12 +575,12 @@ def chunk_kda_bwd(
             dv=dv,
             gk=g,
             scale=scale,
+            state_v_first=state_v_first,
             cu_seqlens=cu_seqlens,
             dht=dht,
             initial_state=initial_state,
             context=cp_context,
             chunk_size=chunk_size,
-            state_v_first=state_v_first,
             use_graph=use_graph,
         )
 
@@ -588,17 +588,17 @@ def chunk_kda_bwd(
         q=qg,
         k=kg,
         w=w,
+        do=do,
+        dv=dv,
         gk=g,
         h0=initial_state,
         dht=dht,
-        do=do,
-        dv=dv,
         scale=scale,
+        state_v_first=state_v_first,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
         chunk_offsets=chunk_offsets,
-        state_v_first=state_v_first,
     )
 
     dq, dk, dv, db, dg, dAkk = bwd_dqkg(
@@ -614,11 +614,11 @@ def chunk_kda_bwd(
         dh=dh,
         dv=dv,
         scale=scale,
+        state_v_first=state_v_first,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
         chunk_offsets=chunk_offsets,
-        state_v_first=state_v_first,
         use_graph=use_graph,
     )
 
@@ -634,8 +634,8 @@ def chunk_kda_bwd(
         db=db,
         dg=dg,
         cu_seqlens=cu_seqlens,
-        chunk_size=chunk_size,
         chunk_indices=chunk_indices,
+        chunk_size=chunk_size,
         safe_gate=safe_gate,
         use_graph=use_graph,
     )

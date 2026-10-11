@@ -50,9 +50,9 @@ def chunk_kda_fwd(
         g = kda_gate_chunk_cumsum(
             g=g_org,
             A_log=A_log,
-            dt_bias=dt_bias,
-            scale=RCP_LN2,
             chunk_size=chunk_size,
+            scale=RCP_LN2,
+            dt_bias=dt_bias,
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
             lower_bound=lower_bound,
@@ -95,11 +95,11 @@ def chunk_kda_fwd(
             w=w,
             u=u,
             gk=g,
+            chunk_size=chunk_size,
+            state_v_first=state_v_first,
             cu_seqlens=cu_seqlens,
             initial_state=initial_state,
             context=cp_context,
-            chunk_size=chunk_size,
-            state_v_first=state_v_first,
             use_graph=use_graph,
         )
 
@@ -110,12 +110,12 @@ def chunk_kda_fwd(
         gk=g,
         initial_state=initial_state,
         output_final_state=output_final_state,
+        chunk_size=chunk_size,
+        state_v_first=state_v_first,
         cu_seqlens=cu_seqlens,
         cu_seqlens_cpu=cu_seqlens_cpu,
         chunk_indices=chunk_indices,
         chunk_offsets=chunk_offsets,
-        chunk_size=chunk_size,
-        state_v_first=state_v_first,
     )
 
     if cp_context is not None:
@@ -132,10 +132,10 @@ def chunk_kda_fwd(
         A=Aqk,
         h=h,
         scale=scale,
+        state_v_first=state_v_first,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
-        state_v_first=state_v_first,
         use_graph=use_graph,
     )
     if disable_recompute is False:

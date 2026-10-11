@@ -257,8 +257,8 @@ def chunk_kda_fwd_intra_tilelang(
         v=v,
         beta=beta,
         A=Akk,
-        q=None,
         gk=gk,
+        q=None,
         cu_seqlens=None,
         chunk_indices=None,
     )

@@ -194,15 +194,15 @@ class ChunkKDAFunction(torch.autograd.Function):
             dt_bias=dt_bias,
             disable_recompute=ctx.disable_recompute,
             cp_context=ctx.cp_context,
+            use_graph=ctx.use_graph,
+            chunk_offsets=chunk_offsets,
+            use_tilelang_helpers=ctx.use_tilelang_helpers,
             w=w,
             u=u,
             qg=qg,
             kg=kg,
             v_new=v_new,
             h=h,
-            use_graph=ctx.use_graph,
-            chunk_offsets=chunk_offsets,
-            use_tilelang_helpers=ctx.use_tilelang_helpers,
         )
         if ctx.use_qk_l2norm_in_kernel:
             dq = l2norm_bwd(q, q_rstd, dq)
