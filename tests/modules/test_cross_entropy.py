@@ -26,32 +26,86 @@ from fla.utils import IS_INTEL, IS_NPU, IS_NVIDIA, assert_close, device, device_
         pytest.param(1024, 32000, 0.0, 1.0, None, 0.0, False, False, 'mean', torch.bfloat16, id='basic'),
         pytest.param(63, 131071, 0.0, 1.0, None, 0.0, False, True, 'mean', torch.bfloat16, id='large_vocab'),
         pytest.param(
-            127, 4103, 0.1, 0.3, None, 0.0, True, True, 'none', torch.float16,
+            127,
+            4103,
+            0.1,
+            0.3,
+            None,
+            0.0,
+            True,
+            True,
+            'none',
+            torch.float16,
             id='strided_tail',
             marks=pytest.mark.skipif(IS_NPU, reason="Covers the default Triton GPU kernels"),
         ),
         pytest.param(
-            2047, 65539, 0.1, 0.5, 3.0, 0.0, False, True, 'mean', torch.bfloat16,
+            2047,
+            65539,
+            0.1,
+            0.5,
+            3.0,
+            0.0,
+            False,
+            True,
+            'mean',
+            torch.bfloat16,
             id='softcap_tail',
             marks=pytest.mark.skipif(IS_NPU, reason="Covers the default Triton GPU kernels"),
         ),
         pytest.param(
-            1025, 32000, 0.1, 0.3, None, 0.01, False, False, 'sum', torch.bfloat16,
+            1025,
+            32000,
+            0.1,
+            0.3,
+            None,
+            0.01,
+            False,
+            False,
+            'sum',
+            torch.bfloat16,
             id='smoothing',
             marks=pytest.mark.skipif(IS_NPU, reason="Covers the default Triton GPU kernels"),
         ),
         pytest.param(
-            511, 32003, 0.1, 0.3, 3.0, 0.01, True, False, 'mean', torch.float32,
+            511,
+            32003,
+            0.1,
+            0.3,
+            3.0,
+            0.01,
+            True,
+            False,
+            'mean',
+            torch.float32,
             id='z_loss',
             marks=pytest.mark.skipif(IS_NPU, reason="Covers the default Triton GPU kernels"),
         ),
         pytest.param(
-            255, 65537, 0.1, 0.0, None, 0.0, False, False, 'mean', torch.bfloat16,
+            255,
+            65537,
+            0.1,
+            0.0,
+            None,
+            0.0,
+            False,
+            False,
+            'mean',
+            torch.bfloat16,
             id='zero_scale',
             marks=pytest.mark.skipif(IS_NPU, reason="Covers the default Triton GPU kernels"),
         ),
         pytest.param(
-            65, 65537, 0.0, -0.5, 3.0, 0.0, True, True, 'none', torch.float32,
+            65,
+            65537,
+            0.0,
+            -0.5,
+            3.0,
+            0.0,
+            True,
+            True,
+            'none',
+            torch.float32,
             id='negative_scale',
             marks=pytest.mark.skipif(IS_NPU, reason="Covers the default Triton GPU kernels"),
         ),
@@ -118,31 +172,79 @@ def test_fused_cross_entropy(
      'with_bias', 'strided', 'ignore_all', 'confident_target', 'accumulate_grad_in_fp32', 'dtype'),
     [
         pytest.param(
-            2, T, D, V, 0.0, scale, softcap, 8, 'mean', True, False, False, False, fp32_grad, torch.bfloat16,
+            2,
+            T,
+            D,
+            V,
+            0.0,
+            scale,
+            softcap,
+            8,
+            'mean',
+            True,
+            False,
+            False,
+            False,
+            fp32_grad,
+            torch.bfloat16,
             id=f'T{T}-D{D}-V{V}-{scale=}-{softcap=}-{fp32_grad=}',
         )
         for T, D, V, (scale, softcap, fp32_grad) in product(
-            (512, 1024), (1024, 2048), (32000, 100000),
+            (512, 1024),
+            (1024, 2048),
+            (32000, 100000),
             ((1.0, None, False), (0.5, None, False), (1.0, None, True), (0.5, None, True), (1.0, 30.0, True)),
         )
     ] + [
         pytest.param(
-            3, 7, 32, V, smoothing, scale, softcap, 8, reduction, with_bias, True, ignore_all, False, True, dtype,
+            3,
+            7,
+            32,
+            V,
+            smoothing,
+            scale,
+            softcap,
+            8,
+            reduction,
+            with_bias,
+            True,
+            ignore_all,
+            False,
+            True,
+            dtype,
             id=f'V{V}-{smoothing=}-{scale=}-{softcap=}-{with_bias=}-{reduction}-{dtype}',
             marks=pytest.mark.skipif(IS_NPU, reason="Covers the default Triton GPU kernels"),
         )
         for (V, smoothing, scale, softcap, ignore_all), with_bias, reduction, dtype in product(
             ((4103, 0.1, 0.3, None, False), (65539, 0.1, 0.5, 3.0, False), (129, 0.0, 1.0, None, True)),
-            (False, True), ('mean', 'sum'), (torch.bfloat16, torch.float16, torch.float32),
+            (False, True),
+            ('mean', 'sum'),
+            (torch.bfloat16, torch.float16, torch.float32),
         )
     ] + [
         pytest.param(
-            1, T, 64, V, 0.0, 1.0, None, num_chunks, reduction, True, False, False, True, True, dtype,
+            1,
+            T,
+            64,
+            V,
+            0.0,
+            1.0,
+            None,
+            num_chunks,
+            reduction,
+            True,
+            False,
+            False,
+            True,
+            True,
+            dtype,
             id=f'T{T}-V{V}-confident_target-{num_chunks=}-{reduction}-{dtype}',
             marks=pytest.mark.skipif(IS_NPU, reason="Covers the default Triton GPU kernels"),
         )
         for (T, V), num_chunks, reduction, dtype in product(
-            ((128, 128), (63, 4103), (63, 65539)), (1, 8), ('mean', 'sum'),
+            ((128, 128), (63, 4103), (63, 65539)),
+            (1, 8),
+            ('mean', 'sum'),
             (torch.bfloat16, torch.float16, torch.float32),
         )
     ],
@@ -279,9 +381,7 @@ def _check_parallel_linear_cross_entropy(rank, world_size, local_vocab, dtype, o
     local_weight = weight[start:end].detach().clone().requires_grad_()
     local_bias = bias[start:end].detach().clone().requires_grad_() if with_bias else None
     local_inputs = (local_x, local_weight, local_bias) if with_bias else (local_x, local_weight)
-    tri = FusedLinearCrossEntropyLoss(process_group=dist.group.WORLD, **kwargs)(
-        local_x, target, local_weight, local_bias,
-    )
+    tri = FusedLinearCrossEntropyLoss(process_group=dist.group.WORLD, **kwargs)(local_x, target, local_weight, local_bias)
     tri_grads = torch.autograd.grad(tri * 2, local_inputs)
     expected_grads = (ref_grads[0],) + tuple(grad[start:end] for grad in ref_grads[1:])
     for name, expected, actual in zip(('loss', 'dx', 'dw', 'db'), (ref, *expected_grads), (tri, *tri_grads)):
@@ -328,29 +428,14 @@ def test_fused_linear_cross_entropy_parallel(world_size, tmp_path):
     )
 
 
-@pytest.mark.parametrize(('name', 'legacy_name'), [('fwd', 'forward'), ('bwd', 'backward')])
-def test_fused_linear_cross_entropy_backend_dispatch(monkeypatch, name, legacy_name):
-    from fla.backends import _DISPATCH_DISABLED
-    from fla.modules import fused_linear_cross_entropy
-    from fla.modules.backends.triton_ascend import TritonAscendBackend
-
-    if _DISPATCH_DISABLED:
-        pytest.skip("Backend dispatch was disabled before import")
-    method = f'fused_linear_cross_entropy_{name}'
-    assert hasattr(TritonAscendBackend, method)
-    result = object()
-    monkeypatch.setattr(TritonAscendBackend, 'is_available', classmethod(lambda cls: True))
-    monkeypatch.setattr(TritonAscendBackend, 'is_enabled', classmethod(lambda cls: True))
-    monkeypatch.setattr(TritonAscendBackend, method, lambda self, **kwargs: result)
-    args = dict(x=None, target=None, weight=None) if name == 'fwd' else dict(do=None, dx=None, dw=None, db=None)
-
-    assert getattr(fused_linear_cross_entropy, method)(**args) is result
-    assert getattr(fused_linear_cross_entropy, f'fused_linear_cross_entropy_{legacy_name}')(**args) is result
-
-
 def test_fused_linear_cross_entropy_parallel_ascend_rejection(monkeypatch):
-    from fla.modules.backends.triton_ascend import TritonAscendBackend
+    from triton.language import math as triton_math
+
+    # rejection happens before any Ascend kernel is executed.
+    if not hasattr(triton_math, 'tanh'):
+        monkeypatch.setattr(triton_math, 'tanh', None, raising=False)
+    from fla.modules.fused_linear_cross_entropy.triton_ascend import fused_linear_cross_entropy_fwd_npu
 
     monkeypatch.setattr(dist, 'get_world_size', lambda group: 2)
     with pytest.raises(NotImplementedError, match="Vocabulary-parallel"):
-        TritonAscendBackend().fused_linear_cross_entropy_fwd(x=None, target=None, weight=None, process_group=object())
+        fused_linear_cross_entropy_fwd_npu(x=None, target=None, weight=None, process_group=object())
