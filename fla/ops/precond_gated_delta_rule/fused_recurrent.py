@@ -9,7 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.utils.op import exp
+from fla.ops.utils.op import exp, unflatten_program_id
 from fla.utils import input_guard
 
 
@@ -63,7 +63,7 @@ def fused_recurrent_precond_gated_delta_rule_fwd_kernel(
     TRANSPOSE_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_nh = tl.program_id(0), tl.program_id(1).to(tl.int64)
+    i_v, i_nh = unflatten_program_id(tl.cdiv(V, BV))
     i_n, i_hv = i_nh // HV, i_nh % HV
     i_h = i_hv // (HV // H)
 
@@ -248,7 +248,7 @@ def fused_recurrent_precond_gated_delta_rule_fwd(
         final_state = None
         final_A_state = None
 
-    grid = (NV, N * HV)
+    grid = (NV * N * HV,)
     fused_recurrent_precond_gated_delta_rule_fwd_kernel[grid](
         q=q,
         k=k,

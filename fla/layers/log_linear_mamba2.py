@@ -113,6 +113,7 @@ def hmamba_chunk_scan_combined(
         initial_state=initial_states,
         output_final_state=return_final_states,
         cu_seqlens=cu_seqlens,
+        scale=1.0,
     )
 
     if D is not None:

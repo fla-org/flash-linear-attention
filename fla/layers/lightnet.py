@@ -16,10 +16,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 
-from fla.layers.utils import get_layer_cache, update_layer_cache
+from fla.layers.utils import get_layer_cache, repad_hidden_states, unpad_hidden_states, update_layer_cache
 from fla.modules import FusedRMSNormGated, ShortConvolution
 from fla.modules.fused_norm_gate import rms_norm_swish_gate_linear
-from fla.ops.gla import chunk_gla, fused_recurrent_gla
+from fla.ops.lightnet import chunk_lightnet, fused_recurrent_lightnet
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
@@ -125,34 +125,35 @@ class LightNetAttention(nn.Module):
                 "Arbitrary attention masks of shape [batch_size, seq_len, seq_len] are not allowed."
             )
 
-        # launching the triton kernel for just one token will actually be slower
-        mode = 'fused_recurrent' if hidden_states.shape[1] <= 64 else self.mode
+        batch_size, q_len, _ = hidden_states.shape
+        mode = 'fused_recurrent' if q_len <= 64 else self.mode
 
         last_state = get_layer_cache(self, past_key_values)
 
         cu_seqlens = kwargs.get('cu_seqlens')
+        hidden_states, indices, cu_seqlens = unpad_hidden_states(hidden_states, cu_seqlens, attention_mask, q_len)
+        # with one query per row, B retained tokens imply no padding.
+        if indices is not None and q_len == 1 and hidden_states.shape[1] == batch_size:
+            hidden_states = hidden_states.reshape(batch_size, 1, self.hidden_size)
+            indices, cu_seqlens = None, None
         if self.use_short_conv:
             conv_state_q, conv_state_k, conv_state_v = None, None, None
             if last_state is not None:
                 conv_state_q, conv_state_k, conv_state_v = last_state['conv_state']
-            conv_mask = attention_mask[:, -hidden_states.shape[1]:] if attention_mask is not None else None
             q, conv_state_q = self.q_conv1d(
                 x=self.q_proj(hidden_states),
-                mask=conv_mask,
                 cache=conv_state_q,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
             )
             k, conv_state_k = self.k_conv1d(
                 x=self.k_proj(hidden_states),
-                mask=conv_mask,
                 cache=conv_state_k,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
             )
             v, conv_state_v = self.v_conv1d(
                 x=self.v_proj(hidden_states),
-                mask=conv_mask,
                 cache=conv_state_v,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
@@ -162,84 +163,54 @@ class LightNetAttention(nn.Module):
             k = self.k_proj(hidden_states)
             v = self.v_proj(hidden_states)
 
-        # dealing with left-padding
-        if attention_mask is not None:
-            v = v.mul(attention_mask[:, -v.shape[-2]:, None])
-
         q = F.silu(q)
         q, k = map(lambda x: rearrange(x, '... (h d) -> ... h d', d=self.head_f_dim), (q, k))
         v = rearrange(v, '... (h d) -> ... h d', d=self.head_i_dim)
-        # TODO: this 2 steps took huge amount of time, which should be optimized
-        last_z = last_state['ffn_state'] if last_state is not None and last_state.get('ffn_state') is not None else None
-        if last_z is not None:
-            # Decode path: continue logcumsumexp from cached state
-            z = torch.logaddexp(last_z, k.float().logcumsumexp(1))
-            k, g = torch.exp(k - z).to(k.dtype), (torch.cat((last_z, z[:, :-1]), 1) - z).to(k.dtype)
-        else:
-            # Prefill path: mask padding positions to -inf so they don't affect logcumsumexp
-            if cu_seqlens is not None:
-                raise NotImplementedError("LightNet does not support variable-length sequences for now.")
-            k_float = k.float()
-            if attention_mask is not None:
-                pad_mask = attention_mask[:, -k.shape[1]:, None, None]  # (B, T, 1, 1)
-                k_for_z = k_float.masked_fill(pad_mask == 0, float('-inf'))
-            else:
-                k_for_z = k_float
-            z = k_for_z.logcumsumexp(1)
-            k_new = torch.exp(k_float - z)
-            g_new = torch.cat((z[:, :1], z[:, :-1]), 1) - z
-            # NaN/inf arise at fully-masked positions (-inf - (-inf)), zero them out
-            k = torch.nan_to_num(k_new, nan=0.0, posinf=0.0).to(k.dtype)
-            g = torch.nan_to_num(g_new, nan=0.0, posinf=0.0, neginf=0.0).to(k.dtype)
-
-        recurrent_state = last_state['recurrent_state'] if last_state is not None else None
         if mode == 'fused_recurrent':
-            o, recurrent_state = fused_recurrent_gla(
-                q=q,
-                k=k,
-                v=v,
-                gk=g,
-                initial_state=recurrent_state,
-                output_final_state=use_cache,
-                state_v_first=True,
-                cu_seqlens=cu_seqlens,
-            )
+            attention_fn = fused_recurrent_lightnet
         elif mode == 'chunk':
-            o, recurrent_state = chunk_gla(
-                q=q,
-                k=k,
-                v=v,
-                g=g,
-                initial_state=recurrent_state,
-                output_final_state=use_cache,
-                state_v_first=True,
-                cu_seqlens=cu_seqlens,
-            )
+            attention_fn = chunk_lightnet
         else:
             raise NotImplementedError(f"Not supported mode `{mode}`.")
+        initial_state = (last_state['recurrent_state'], last_state.get('ffn_state')) if last_state is not None else None
+        o, (recurrent_state, last_z) = attention_fn(
+            q=q,
+            k=k,
+            v=v,
+            initial_state=initial_state,
+            output_final_state=use_cache,
+            state_v_first=True,
+            cu_seqlens=cu_seqlens,
+        )
 
         update_layer_cache(
             self,
             past_key_values,
             recurrent_state=recurrent_state,
             conv_state=(conv_state_q, conv_state_k, conv_state_v) if self.use_short_conv else None,
-            ffn_state=z[:, -1:],
-            offset=q.shape[1],
+            ffn_state=last_z,
+            offset=q_len,
         )
 
-        o = rms_norm_swish_gate_linear(
-            rearrange(o, 'b t h d -> b t (h d)'),
-            self.g_proj(hidden_states),
-            self.g_norm.weight,
-            self.g_norm.bias,
-            self.o_proj.weight,
-            self.o_proj.bias,
-        )
+        o = rearrange(o, 'b t h d -> b t (h d)')
+        # the fused norm backward requires a nonempty input.
+        if o.shape[1] == 0:
+            o = self.o_proj(o)
+        else:
+            o = rms_norm_swish_gate_linear(
+                o,
+                self.g_proj(hidden_states),
+                self.g_norm.weight,
+                self.g_norm.bias,
+                self.o_proj.weight,
+                self.o_proj.bias,
+            )
+        o = repad_hidden_states(o, indices, batch_size, q_len)
         return o, None, past_key_values
 
     def state_size(self, **kwargs) -> int:
         # recurrent_state: [num_heads, head_i_dim, head_f_dim]
-        # ffn_state (`z[:, -1:]`): [1, num_heads, head_f_dim]
+        # ffn_state per sequence: [1, num_heads, head_f_dim]
         # num_heads * head_f_dim equals key_dim, so ffn_state contributes self.key_dim elements
         state_size = self.key_dim * self.head_i_dim + self.key_dim
         for module in self.children():

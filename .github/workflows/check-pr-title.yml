@@ -8,6 +8,9 @@ on:
 jobs:
   check-pr-title:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - name: Check PR title prefix
         env:
@@ -53,3 +56,23 @@ jobs:
           fi
 
           echo "PR checklist complete."
+
+      - uses: actions/checkout@v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Test PR size validation
+        run: node --test scripts/test_check_pr_size.cjs
+
+      - name: Check PR size
+        uses: actions/github-script@v9.0.0
+        with:
+          script: |
+            const { data: pr } = await github.rest.pulls.get({
+              ...context.repo,
+              pull_number: context.issue.number,
+            });
+            core.info(`PR size: ${pr.additions} additions + ${pr.deletions} deletions`);
+            const check_pr_size = require('./scripts/check_pr_size.cjs');
+            const error = check_pr_size(pr);
+            if (error) core.setFailed(error);
