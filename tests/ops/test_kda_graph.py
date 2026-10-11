@@ -58,7 +58,7 @@ _OUT_NAMES = ["o", "ht", "dq", "dk", "dv", "dg", "db", "dh0", "dA", "dbias"]
 
 @pytest.fixture(autouse=True)
 def triton_eager_reference(monkeypatch):
-    # graph capture always runs the Triton backward, so the eager reference must not route to TileLang
+    # compare graph replay and eager execution with the same backward backend
     monkeypatch.setenv("FLA_TILELANG", "0")
 
 

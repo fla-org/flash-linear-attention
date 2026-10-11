@@ -6,10 +6,10 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import importlib.metadata
-import inspect
 import logging
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import create_autospec
 
 import pytest
 import torch
@@ -277,44 +277,44 @@ def test_rwkv6_tilelang_backend_verifier_rejects_unsupported_dimension():
     assert reason == "TileLang RWKV6 intra backend currently supports the D=64 benchmark bucket only, got K=128"
 
 
-@pytest.mark.parametrize('method', ['chunk_kda_bwd_wy_dqkg_fused', 'chunk_kda_bwd_wy_dqkg_fused_verifier'])
-def test_kda_tilelang_backend_accepts_dispatcher_arguments(method):
-    from fla.ops.kda.chunk_bwd import chunk_kda_bwd_wy_dqkg_fused
-
-    dispatched = set(inspect.signature(chunk_kda_bwd_wy_dqkg_fused).parameters)
-    accepted = set(inspect.signature(getattr(kda_tilelang_backend.KDATileLangBackend, method)).parameters)
-
-    assert dispatched <= accepted, f'{method} lacks {sorted(dispatched - accepted)}'
-
-
-def _kda_bwd_wy_dqkg_inputs(use_graph):
+@pytest.fixture
+def kda_bwd_inputs():
     x = SimpleNamespace(shape=(1, 64, 2, 64))
-    tensors = dict.fromkeys(('q', 'k', 'v', 'v_new', 'g', 'beta', 'A', 'h', 'do', 'dh', 'dv'), x)
-    return dict(tensors, chunk_offsets=None, use_graph=use_graph)
+    return dict(q=x, k=x, v=x, v_new=x, g=x, beta=x, A=x, h=x, do=x, dh=x, dv=x, chunk_offsets=None)
 
 
 @pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
-def test_kda_tilelang_backend_receives_eager_dispatch(monkeypatch):
+def test_kda_tilelang_backend_dispatch(monkeypatch, kda_bwd_inputs):
     from fla.ops.kda.backends.triton_ascend import TritonAscendKDABackend
     from fla.ops.kda.chunk_bwd import chunk_kda_bwd_wy_dqkg_fused
 
     monkeypatch.setattr(TritonAscendKDABackend, 'is_available', classmethod(lambda cls: False))
     backend = kda_tilelang_backend.KDATileLangBackend
     monkeypatch.setattr(backend, 'is_available', classmethod(lambda cls: True))
-    monkeypatch.setattr(backend, 'is_enabled', classmethod(lambda cls: True))
+    monkeypatch.setenv('FLA_TILELANG', '1')
     result = object()
-    monkeypatch.setattr(backend, 'chunk_kda_bwd_wy_dqkg_fused', lambda self, **kwargs: result)
+    implementation = create_autospec(backend.chunk_kda_bwd_wy_dqkg_fused, return_value=result)
+    monkeypatch.setattr(backend, 'chunk_kda_bwd_wy_dqkg_fused', implementation)
 
-    assert chunk_kda_bwd_wy_dqkg_fused(**_kda_bwd_wy_dqkg_inputs(use_graph=False)) is result
+    assert chunk_kda_bwd_wy_dqkg_fused(**kda_bwd_inputs, use_graph=False) is result
+    implementation.assert_called_once()
 
 
-def test_kda_tilelang_backend_verifier_declines_graph_capture():
+@pytest.mark.parametrize(
+    ('use_graph', 'accepted', 'reason'),
+    [
+        pytest.param(False, True, None, id='eager'),
+        pytest.param(
+            True,
+            False,
+            'TileLang backend does not support graph capture (use_graph=True); fall back to Triton',
+            id='graph',
+        ),
+    ],
+)
+def test_kda_tilelang_backend_verifier(kda_bwd_inputs, use_graph, accepted, reason):
     backend = kda_tilelang_backend.KDATileLangBackend()
-
-    accepted, reason = backend.chunk_kda_bwd_wy_dqkg_fused_verifier(**_kda_bwd_wy_dqkg_inputs(use_graph=True))
-
-    assert accepted is False
-    assert reason == 'TileLang backend does not support graph capture (use_graph=True); fall back to Triton'
+    assert backend.chunk_kda_bwd_wy_dqkg_fused_verifier(**kda_bwd_inputs, use_graph=use_graph) == (accepted, reason)
 
 
 @pytest.mark.parametrize(
