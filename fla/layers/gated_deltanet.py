@@ -84,8 +84,7 @@ class GatedDeltaNet(nn.Module):
         norm_eps (float, Optional):
             The epsilon value for the normalization layer. Default: 1e-5.
         output_gate_activation (str, Optional):
-            Activation applied by the output gate when `use_gate=True`.
-            Supported values are `swish`, `silu`, and `sigmoid`.
+            Activation applied by the output gate when `use_gate=True`. Supported values: `swish`, `silu`, or `sigmoid`.
             `swish` and `silu` are equivalent aliases. Default: `swish`.
     """
 
@@ -144,9 +143,7 @@ class GatedDeltaNet(nn.Module):
             )
         assert mode in ['chunk', 'fused_recurrent'], f"Not supported mode `{mode}`."
         if output_gate_activation not in ('swish', 'silu', 'sigmoid'):
-            raise ValueError(
-                f"output_gate_activation must be one of 'swish', 'silu', 'sigmoid', got {output_gate_activation!r}.",
-            )
+            raise ValueError(f"output_gate_activation must be 'swish', 'silu', or 'sigmoid', got {output_gate_activation!r}.")
 
         self.q_proj = nn.Linear(in_features=hidden_size, out_features=self.key_dim, bias=False)
         self.k_proj = nn.Linear(in_features=hidden_size, out_features=self.key_dim, bias=False)

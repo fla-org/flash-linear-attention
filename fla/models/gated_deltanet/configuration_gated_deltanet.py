@@ -82,9 +82,7 @@ class GatedDeltaNetConfig(_HybridAttentionConfigMixin, PretrainedConfig):
         self.attnres_block_size = attnres_block_size
 
         if output_gate_activation not in ("swish", "silu", "sigmoid"):
-            raise ValueError(
-                f"output_gate_activation must be one of 'swish', 'silu', 'sigmoid', got {output_gate_activation!r}.",
-            )
+            raise ValueError(f"output_gate_activation must be 'swish', 'silu', or 'sigmoid', got {output_gate_activation!r}.")
 
         if fuse_cross_entropy and fuse_linear_cross_entropy:
             raise ValueError("`fuse_cross_entropy` and `fuse_linear_cross_entropy` cannot be True at the same time.")
