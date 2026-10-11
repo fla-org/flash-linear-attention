@@ -367,11 +367,43 @@ def test_powglu_linear(B: int, T: int, D: int, O: int, power: float, noncontiguo
     assert_close('powglu_linear db ', db_ref, db_tri, 1e-3)
 
 
+@pytest.mark.parametrize(
+    ('activation', 'reference', 'arity'),
+    [
+        pytest.param(sigmoid, torch.sigmoid, 1, id='sigmoid'),
+        pytest.param(logsigmoid, F.logsigmoid, 1, id='logsigmoid'),
+        pytest.param(swish, F.silu, 1, id='swish'),
+        pytest.param(swiglu, lambda x, y: F.silu(x) * y, 2, id='swiglu'),
+        pytest.param(sigmoidglu, lambda x, y: torch.sigmoid(x) * y, 2, id='sigmoidglu'),
+        pytest.param(powglu, powglu_ref, 2, id='powglu'),
+    ],
+)
+@pytest.mark.parametrize('input_stride', [1, 3])
+@pytest.mark.parametrize('grad_stride', [1, 3])
+def test_activation_vector(activation, reference, arity: int, input_stride: int, grad_stride: int):
+    torch.manual_seed(42)
+    xs = tuple(
+        torch.randn(63 * input_stride, device=device)[::input_stride].requires_grad_()
+        for _ in range(arity)
+    )
+    g = torch.randn(63 * grad_stride, device=device)[::grad_stride]
+    y_ref = reference(*xs)
+    y_tri = activation(*xs)
+    grads_ref = torch.autograd.grad(y_ref, xs, g)
+    grads_tri = torch.autograd.grad(y_tri, xs, g)
+
+    assert torch.isfinite(y_tri).all()
+    assert_close('vector fwd', y_ref, y_tri, 1e-3)
+    for index, (dx_ref, dx_tri) in enumerate(zip(grads_ref, grads_tri)):
+        assert torch.isfinite(dx_tri).all()
+        assert_close(f'vector dx{index}', dx_ref, dx_tri, 1e-3)
+
+
 def test_is_inner_contiguous():
     """Test _is_inner_contiguous correctly classifies tensor layouts."""
-    # 0D and 1D should always be True (no inner dimensions to check)
     assert _is_inner_contiguous(torch.randn(())) is True
     assert _is_inner_contiguous(torch.randn(10)) is True
+    assert _is_inner_contiguous(torch.randn(30)[::3]) is False
 
     x2d = torch.randn(10, 20)
     assert _is_inner_contiguous(x2d) is True
