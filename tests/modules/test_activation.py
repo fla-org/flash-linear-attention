@@ -245,13 +245,16 @@ def test_swiglu(shape: tuple[int, ...], noncontiguous: bool, grad_stride: int, c
 @pytest.mark.parametrize(
     ('B', 'T', 'D', 'O', 'noncontiguous', 'compile'),
     [
-        (2, 512, 128, 256, False, True),
-        (1, 1, 64, 32, False, False),
-        (2, 500, 128, 64, False, True),
-        (3, 2048, 1200, 600, False, False),
-        (2, 500, 128, 64, True, False),
-        (2, 512, 128, 256, True, True),
-        (3, 2048, 1200, 600, True, False),
+        pytest.param(*test, id="B{}-T{}-D{}-O{}-noncontiguous{}-compile{}".format(*test))
+        for test in [
+            (2, 512, 128, 256, False, True),
+            (1, 1, 64, 32, False, False),
+            (2, 500, 128, 64, False, True),
+            (3, 2048, 1200, 600, False, False),
+            (2, 500, 128, 64, True, False),
+            (2, 512, 128, 256, True, True),
+            (3, 2048, 1200, 600, True, False),
+        ]
     ],
 )
 @pytest.mark.parametrize(
@@ -264,14 +267,16 @@ def test_swiglu(shape: tuple[int, ...], noncontiguous: bool, grad_stride: int, c
         pytest.param((False, False, True, False), True, id='weight'),
         pytest.param((False, False, False, True), True, id='bias'),
         pytest.param((False, False, True, True), True, id='weight-bias'),
+        pytest.param((True, True, True, False), False, id='all-no-bias'),
         pytest.param((True, True, False, False), False, id='inputs-no-bias'),
+        pytest.param((False, False, True, False), False, id='weight-no-bias'),
     ],
 )
 def test_swiglu_linear(
     B: int,
     T: int,
     D: int,
-    O: int,  # noqa: E741
+    O: int,
     noncontiguous: bool,
     compile: bool,
     requires_grad: tuple[bool, bool, bool, bool],
@@ -279,25 +284,25 @@ def test_swiglu_linear(
 ):
     torch.manual_seed(42)
     x, y = make_inputs(shape=(B, T, D), n=2, noncontiguous=noncontiguous)
-    w = torch.randn(O, D, device=device, requires_grad=True)
-    b = torch.randn(O, device=device, requires_grad=True) if use_bias else None
-    inputs = (x, y, w, b)
-    for tensor, needs_grad in zip(inputs, requires_grad):
-        if tensor is not None:
-            tensor.requires_grad_(needs_grad)
-    grad_inputs = [tensor for tensor in inputs if tensor is not None and tensor.requires_grad]
+    x.requires_grad_(requires_grad[0])
+    y.requires_grad_(requires_grad[1])
+    w = torch.randn(O, D, device=device, requires_grad=requires_grad[2])
+    b = torch.randn(O, device=device, requires_grad=requires_grad[3]) if use_bias else None
+    inputs = {'x': x, 'y': y, 'w': w, 'b': b}
+    grad_inputs = {name: tensor for name, tensor in inputs.items() if tensor is not None and tensor.requires_grad}
 
     z_ref = F.silu(x) * y
-    out_ref = F.linear(z_ref, w, b)
-    out_tri = swiglu_linear(x, y, w, b) if not compile else torch.compile(swiglu_linear)(x, y, w, b)
+    out_ref = F.linear(input=z_ref, weight=w, bias=b)
+    fn = torch.compile(swiglu_linear) if compile else swiglu_linear
+    out_tri = fn(x=x, y=y, weight=w, bias=b)
 
     g = torch.randn_like(out_ref)
-    grads_ref = torch.autograd.grad(out_ref, grad_inputs, g)
-    grads_tri = torch.autograd.grad(out_tri, grad_inputs, g)
+    grads_ref = torch.autograd.grad(outputs=out_ref, inputs=tuple(grad_inputs.values()), grad_outputs=g)
+    grads_tri = torch.autograd.grad(outputs=out_tri, inputs=tuple(grad_inputs.values()), grad_outputs=g)
 
     assert_close('swiglu_linear out', out_ref, out_tri, 1e-3)
-    for grad_ref, grad_tri in zip(grads_ref, grads_tri):
-        assert_close('swiglu_linear grad', grad_ref, grad_tri, 1e-3)
+    for name, grad_ref, grad_tri in zip(grad_inputs, grads_ref, grads_tri):
+        assert_close(f'swiglu_linear d{name}', grad_ref, grad_tri, 1e-3)
 
 
 @pytest.mark.parametrize(
