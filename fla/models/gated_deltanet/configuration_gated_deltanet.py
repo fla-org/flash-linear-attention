@@ -87,9 +87,7 @@ class GatedDeltaNetConfig(_HybridAttentionConfigMixin, PretrainedConfig):
             )
 
         if fuse_cross_entropy and fuse_linear_cross_entropy:
-            raise ValueError(
-                "`fuse_cross_entropy` and `fuse_linear_cross_entropy` cannot be True at the same time.",
-            )
+            raise ValueError("`fuse_cross_entropy` and `fuse_linear_cross_entropy` cannot be True at the same time.")
         if fuse_linear_cross_entropy:
             warnings.warn(
                 "`fuse_linear_cross_entropy` is enabled, which can improves memory efficiency "

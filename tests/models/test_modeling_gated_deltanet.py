@@ -11,18 +11,14 @@ import torch
 from fla.models import GatedDeltaNetConfig, GatedDeltaNetForCausalLM
 from fla.models.gated_deltanet.modeling_gated_deltanet import GatedDeltaNetBlock
 from fla.utils import assert_close, device
-
-from .test_modeling_base import (
+from tests.models.test_modeling_base import (
     run_test_generate_matches_forward,
     run_test_generation,
     run_test_model_forward_backward,
 )
-from .test_modeling_utils import create_model_and_config
+from tests.models.test_modeling_utils import create_model_and_config
 
 
-# ===================================================================================
-# Test for Modeling (Forward/Backward Pass)
-# ===================================================================================
 @pytest.mark.parametrize(
     ['L', 'B', 'T', 'H', 'D', 'use_l2warp', 'attnres_block_size', 'output_gate_activation', 'dtype'],
     [
@@ -62,9 +58,6 @@ def test_modeling(
     )
 
 
-# ===================================================================================
-# Test for Generation
-# ===================================================================================
 @pytest.mark.parametrize(
     ['L', 'B', 'T', 'H', 'D', 'output_gate_activation', 'dtype'],
     [
@@ -75,15 +68,7 @@ def test_modeling(
         ]
     ],
 )
-def test_generation(
-    L: int,
-    B: int,
-    T: int,
-    H: int,
-    D: int,
-    output_gate_activation: str,
-    dtype: torch.dtype,
-):
+def test_generation(L: int, B: int, T: int, H: int, D: int, output_gate_activation: str, dtype: torch.dtype):
     torch.manual_seed(42)
     model, config = create_model_and_config(
         config_class=GatedDeltaNetConfig,
@@ -105,15 +90,8 @@ def test_generation(
         ]
     ],
 )
-def test_generate_prefill(
-    L: int,
-    B: int,
-    T: int,
-    H: int,
-    D: int,
-    dtype: torch.dtype,
-):
-    run_test_generate_matches_forward(L, B, T, H, D, GatedDeltaNetConfig, dtype)
+def test_generate_prefill(L: int, B: int, T: int, H: int, D: int, dtype: torch.dtype):
+    run_test_generate_matches_forward(L=L, B=B, T=T, H=H, D=D, config_class=GatedDeltaNetConfig, dtype=dtype)
 
 
 @torch.no_grad()
@@ -121,19 +99,19 @@ def test_logits_to_keep_with_labels():
     B, T, H, D, V = 2, 8, 2, 8, 32
     config = GatedDeltaNetConfig(
         hidden_size=H * D,
-        num_hidden_layers=1,
-        num_heads=H,
-        head_dim=D,
         expand_v=1,
-        vocab_size=V,
+        head_dim=D,
+        num_heads=H,
+        num_hidden_layers=1,
         fuse_cross_entropy=False,
+        vocab_size=V,
     )
-    model = GatedDeltaNetForCausalLM(config).eval().to(device)
+    model = GatedDeltaNetForCausalLM(config=config).eval().to(device)
     input_ids = torch.randint(V, (B, T), device=device)
 
-    expected = model(input_ids, labels=input_ids)
-    actual = model(input_ids, labels=input_ids, logits_to_keep=1)
-    inference = model(input_ids, logits_to_keep=1)
+    expected = model(input_ids=input_ids, labels=input_ids)
+    actual = model(input_ids=input_ids, labels=input_ids, logits_to_keep=1)
+    inference = model(input_ids=input_ids, logits_to_keep=1)
 
     assert actual.logits.shape == expected.logits.shape == (B, T, V)
     assert inference.logits.shape == (B, 1, V)
@@ -185,6 +163,7 @@ def test_output_gate_config_validation(use_gate: bool):
 
 def test_config_positional_compatibility():
     attn_spec = {"layers": [0], "num_heads": 2}
+    # positional arguments exercise the constructor's established argument order.
     config = GatedDeltaNetConfig(
         "chunk",
         128,
