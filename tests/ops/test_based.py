@@ -26,6 +26,7 @@ from fla.utils import device
         ]
     ],
 )
+@pytest.mark.smoke
 def test_based(
     B: int,
     T: int,

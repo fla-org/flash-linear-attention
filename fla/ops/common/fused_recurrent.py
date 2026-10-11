@@ -10,7 +10,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.op import exp
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, input_guard
+from fla.utils import ascend_compile_kwargs, autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, input_guard
 
 
 @triton.heuristics({
@@ -57,7 +57,7 @@ def fused_recurrent_fwd_kernel(
     IS_VARLEN: tl.constexpr,
     STATE_V_FIRST: tl.constexpr = False,
 ):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     NV, NK = tl.cdiv(V, BV), tl.cdiv(K, BK)
     i_v, i_k, i_nh = (pid % NV).to(tl.int64), ((pid // NV) % NK).to(tl.int64), (pid // (NV * NK)).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
@@ -201,7 +201,7 @@ def fused_recurrent_bwd_kernel(
     IS_VARLEN: tl.constexpr,
     STATE_V_FIRST: tl.constexpr = False,
 ):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     NV, NK = tl.cdiv(V, BV), tl.cdiv(K, BK)
     i_v, i_k, i_nh = (pid % NV).to(tl.int64), ((pid // NV) % NK).to(tl.int64), (pid // (NV * NK)).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
@@ -506,6 +506,7 @@ def fused_recurrent_bwd(
         dgv = gv.new_empty(NK, *gv.shape, dtype=torch.float32)
 
     grid = (NV * NK * N * H,)
+    # disable auto-multi-buffer on the gate-gradient accumulate
     fused_recurrent_bwd_kernel[grid](
         q=q,
         k=k,
@@ -540,6 +541,7 @@ def fused_recurrent_bwd(
         USE_GV=gv is not None,
         REVERSE=reverse,
         STATE_V_FIRST=state_v_first,
+        **ascend_compile_kwargs(),
     )
     dq = dq.sum(0)
     dk = dk.sum(0)

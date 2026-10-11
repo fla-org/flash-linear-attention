@@ -12,6 +12,7 @@ import triton.language as tl
 
 from fla.modules.layernorm import group_norm
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
+from fla.ops.utils.op import unflatten_program_id
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, input_guard
 
 
@@ -58,7 +59,7 @@ def chunk_ttt_linear_fwd_kernel_h(
     STORE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    i_k, i_v, i_nh = unflatten_program_id(tl.cdiv(K, BK), tl.cdiv(V, BV))
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
@@ -89,17 +90,18 @@ def chunk_ttt_linear_fwd_kernel_h(
     b_b = tl.load(b + i_h * V + offs, mask=offs < V, other=0.)
 
     for i_t in range(NT):
-        o_t = i_t * BT + tl.arange(0, BT)
+        i_t_int64 = i_t.to(tl.int64)
+        o_t = i_t_int64 * BT + tl.arange(0, BT)
         m_v = (o_t[:, None] < T) & (o_v[None, :] < V)
         m_k = (o_k[:, None] < K) & (o_t[None, :] < T)
-        p_h = h + ((boh + i_t) * H + i_h) * K*V + o_k[:, None] * V + o_v[None, :]
-        p_hb = hb + ((boh + i_t) * H + i_h) * V + o_v
+        p_h = h + ((boh + i_t_int64) * H + i_h) * K*V + o_k[:, None] * V + o_v[None, :]
+        p_hb = hb + ((boh + i_t_int64) * H + i_h) * V + o_v
         tl.store(p_h, b_h.to(p_h.dtype.element_ty), mask=m_h)
         tl.store(p_hb, b_hb.to(p_hb.dtype.element_ty), mask=o_v < V)
         p_k = k+(bos*H+i_h)*K + o_k[:, None] + o_t[None, :] * (H*K)
         p_v = v+(bos*H+i_h)*V + o_t[:, None] * (H*V) + o_v[None, :]
         p_v_new = v_new+(bos*H+i_h)*V + o_t[:, None] * (H*V) + o_v[None, :]
-        p_eta_last = eta+bos*H+i_h + (T-1)*H if i_t == NT-1 else eta+bos*H+i_h + (i_t*BT+BT-1)*H
+        p_eta_last = eta+bos*H+i_h + (T-1)*H if i_t_int64 == NT-1 else eta+bos*H+i_h + (i_t_int64*BT+BT-1)*H
         b_k = tl.load(p_k, mask=m_k, other=0.0)
         b_v = tl.load(p_v, mask=m_v, other=0.0)
 
@@ -161,7 +163,8 @@ def chunk_ttt_linear_fwd_kernel_o(
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_v, i_t = unflatten_program_id(tl.cdiv(V, BV))
+    i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
 
     if IS_VARLEN:
@@ -270,7 +273,7 @@ def chunk_ttt_linear_bwd_kernel_h(
     USE_INITIAL_STATE_B: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    i_k, i_v, i_nh = unflatten_program_id(tl.cdiv(K, BK), tl.cdiv(V, BV))
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
@@ -301,10 +304,11 @@ def chunk_ttt_linear_bwd_kernel_h(
     b_b = tl.load(b + i_h * V + offs, mask=offs < V, other=0.)
 
     for i_t in range(NT):
-        o_t = i_t * BT + tl.arange(0, BT)
+        i_t_int64 = i_t.to(tl.int64)
+        o_t = i_t_int64 * BT + tl.arange(0, BT)
         m_v = (o_t[:, None] < T) & (o_v[None, :] < V)
         m_k = (o_k[:, None] < K) & (o_t[None, :] < T)
-        p_h = h + ((boh + i_t) * H + i_h) * K*V + o_k[:, None] * V + o_v[None, :]
+        p_h = h + ((boh + i_t_int64) * H + i_h) * K*V + o_k[:, None] * V + o_v[None, :]
         tl.store(p_h, b_h.to(p_h.dtype.element_ty), mask=m_h)
         p_k = k+(bos*H+i_h)*K + o_k[:, None] + o_t[None, :] * (H*K)
         p_v = v+(bos*H+i_h)*V + o_t[:, None] * (H*V) + o_v[None, :]
@@ -312,7 +316,7 @@ def chunk_ttt_linear_bwd_kernel_h(
         p_x = x+(bos*H+i_h)*V + o_t[:, None] * (H*V) + o_v[None, :]
         p_y = y+(bos*H+i_h)*V + o_t[:, None] * (H*V) + o_v[None, :]
         p_r = r+bos*H+i_h + o_t[:, None] * H
-        p_eta_last = eta+bos*H+i_h + (T-1)*H if i_t == NT-1 else eta+bos*H+i_h + (i_t*BT+BT-1)*H
+        p_eta_last = eta+bos*H+i_h + (T-1)*H if i_t_int64 == NT-1 else eta+bos*H+i_h + (i_t_int64*BT+BT-1)*H
         b_k = tl.load(p_k, mask=m_k, other=0.0)
         b_v = tl.load(p_v, mask=m_v, other=0.0)
 
@@ -398,7 +402,7 @@ def chunk_ttt_linear_bwd_kernel_dv_local(
         p_q = q + o_k[:, None] + o_t[None, :] * stride_qk
         b_q = tl.load(p_q, mask=m_q, other=0.0)
         b_k = tl.load(p_k, mask=m_k, other=0.0)
-        b_A += tl.dot(b_k, b_q)
+        b_A = tl.dot(b_k, b_q, b_A)
 
     p_eta = eta + o_t * stride_eta
     b_eta = tl.load(p_eta, mask=m_t, other=0.0)
@@ -472,7 +476,7 @@ def chunk_ttt_linear_bwd_kernel_norm(
     USE_INITIAL_STATE_B: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    i_k, i_v, i_nh = unflatten_program_id(tl.cdiv(K, BK), tl.cdiv(V, BV))
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
@@ -509,15 +513,16 @@ def chunk_ttt_linear_bwd_kernel_norm(
     p_db = db + i_nh * V + o_v
 
     for i_t in range(NT - 1, -1, -1):
-        o_t = i_t * BT + tl.arange(0, BT)
+        i_t_int64 = i_t.to(tl.int64)
+        o_t = i_t_int64 * BT + tl.arange(0, BT)
         m_t = o_t < T
         m_k = m_t[:, None] & (o_k[None, :] < K)
         m_q = (o_k[:, None] < K) & m_t[None, :]
         m_v = m_t[:, None] & (o_v[None, :] < V)
         m_hv = (o_v[:, None] < V) & (o_k[None, :] < K)
-        p_h = h + ((boh+i_t) * H + i_h) * K*V + o_v[:, None] + o_k[None, :] * V
-        p_dh = dh + ((boh+i_t) * H + i_h) * K*V + o_k[:, None] * V + o_v[None, :]
-        p_dhb = dhb + ((boh+i_t) * H + i_h) * V + o_v
+        p_h = h + ((boh+i_t_int64) * H + i_h) * K*V + o_v[:, None] + o_k[None, :] * V
+        p_dh = dh + ((boh+i_t_int64) * H + i_h) * K*V + o_k[:, None] * V + o_v[None, :]
+        p_dhb = dhb + ((boh+i_t_int64) * H + i_h) * V + o_v
         tl.store(p_dh, b_dh.to(p_dh.dtype.element_ty), mask=m_h)
         tl.store(p_dhb, b_dhb.to(p_dhb.dtype.element_ty), mask=o_v < V)
         p_q = q+(bos*H+i_h)*K + o_k[:, None] + o_t[None, :] * (H*K)
@@ -531,7 +536,7 @@ def chunk_ttt_linear_bwd_kernel_norm(
         p_dk = dk+(bos*H+i_h)*K + o_t[:, None] * (H*K) + o_k[None, :]
         p_do = do+(bos*H+i_h)*V + o_t[:, None] * (H*V) + o_v[None, :]
         p_r = r+bos*H+i_h + o_t[:, None] * H
-        p_eta_last = eta+bos*H+i_h + (T-1)*H if i_t == NT-1 else eta+bos*H+i_h + (i_t*BT+BT-1)*H
+        p_eta_last = eta+bos*H+i_h + (T-1)*H if i_t_int64 == NT-1 else eta+bos*H+i_h + (i_t_int64*BT+BT-1)*H
         b_k = tl.load(p_k, mask=m_k, other=0.0)
         b_dv_new = tl.load(p_dv_new, mask=m_v, other=0.0).to(b_k.dtype)
         b_eta_last = tl.load(p_eta_last)
@@ -566,7 +571,7 @@ def chunk_ttt_linear_bwd_kernel_norm(
         b_dkh = b_rstd * (V * b_dx - tl.sum(b_dx, axis=1, keep_dims=True) -
                           b_x * tl.sum(b_x * b_dx, axis=1, keep_dims=True)) / V
         b_dkh -= b_rstd * b_rstd * b_drstd * b_x / V
-        b_dkh = tl.where((offs_v < V)[None, :] * (offs_t < T-i_t*BT)[:, None], b_dkh, 0.)
+        b_dkh = tl.where((offs_v < V)[None, :] * (offs_t < T-i_t_int64*BT)[:, None], b_dkh, 0.)
         b_dk += tl.dot(b_dkh, b_h.to(b_dkh.dtype)).to(b_k.dtype)
         b_dh += tl.dot(b_q, b_do.to(b_q.dtype)) + tl.dot(tl.trans(b_k).to(b_dkh.dtype), b_dkh)
         b_dhb += tl.sum(b_do + b_dkh, axis=0)
@@ -624,7 +629,8 @@ def chunk_bwd_kernel_dqke(
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_k, i_t = unflatten_program_id(tl.cdiv(K, BK))
+    i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_tg = i_t
@@ -687,9 +693,9 @@ def chunk_bwd_kernel_dqke(
         # [BV]
         b_dhb = tl.load(p_dhb, mask=o_v < V, other=0.0)
         # [BT, BV] @ [BV, BT] -> [BT, BT]
-        b_ds += tl.dot(b_do, tl.trans(b_v))
+        b_ds = tl.dot(b_do, tl.trans(b_v), b_ds)
         # [BT, BV] @ [BV, BK] -> [BT, BK]
-        b_dq += tl.dot(b_do, b_h.to(b_do.dtype))
+        b_dq = tl.dot(b_do, b_h.to(b_do.dtype), b_dq)
         # [BT, BV] @ [BV, BK] -> [BT, BK]
         b_dk -= b_e_last * tl.dot(b_v, b_dh.to(b_v.dtype))
         b_de -= mask * tl.sum(tl.trans(b_dh) * tl.dot(tl.trans(b_k), b_v.to(b_k.dtype)))
@@ -755,7 +761,7 @@ def chunk_ttt_linear_fwd_h(
     final_state_bias = k.new_empty(N, H, 1, V, dtype=torch.float32) if output_final_state else None
 
     v_new = torch.empty_like(v)
-    grid = (NK, NV, N * H)
+    grid = (NK * NV * N * H,)
 
     chunk_ttt_linear_fwd_kernel_h[grid](
         k=k,
@@ -813,7 +819,7 @@ def chunk_ttt_linear_fwd_o(
 
     o = torch.empty_like(v)
 
-    grid = (NV, NT, B * H)
+    grid = (NV * NT, B * H)
     chunk_ttt_linear_fwd_kernel_o[grid](
         q,
         k,
@@ -873,7 +879,7 @@ def chunk_ttt_linear_bwd_h(
     y = torch.empty_like(v)
 
     v_new = torch.empty_like(v)
-    grid = (NK, NV, N * H)
+    grid = (NK * NV * N * H,)
 
     chunk_ttt_linear_bwd_kernel_h[grid](
         k=k,
@@ -986,8 +992,8 @@ def chunk_ttt_linear_bwd_norm(
     assert NK == 1, 'NK > 1 is not supported by TTT.'
     assert NV == 1, 'NV > 1 is not supported by TTT.'
 
-    dh = q.new_empty(B, NT, H, K, V)
-    dhb = q.new_empty(B, NT, H, 1, V)
+    dh = q.new_empty(B, NT, H, K, V, dtype=torch.float32)
+    dhb = q.new_empty(B, NT, H, 1, V, dtype=torch.float32)
     dh0 = torch.empty_like(h0, dtype=torch.float32) if h0 is not None else None
     dhb0 = torch.empty_like(hb0, dtype=torch.float32) if hb0 is not None else None
     dv = torch.empty_like(v)
@@ -995,7 +1001,7 @@ def chunk_ttt_linear_bwd_norm(
     dw = w.new_empty(B, H, V)
     db = b.new_empty(B, H, V)
 
-    grid = (NK, NV, N * H)
+    grid = (NK * NV * N * H,)
     chunk_ttt_linear_bwd_kernel_norm[grid](
         q=q,
         k=k,
@@ -1170,7 +1176,7 @@ def chunk_ttt_linear_bwd_dqke(
     dq = torch.empty_like(q)
     dk = torch.empty_like(k)
     de = torch.empty_like(eta)
-    grid = (NK, NT, B * H)
+    grid = (NK * NT, B * H)
 
     chunk_bwd_kernel_dqke[grid](
         q=q,
@@ -1432,7 +1438,6 @@ def chunk_ttt_linear(
     output_final_state: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     cu_seqlens_cpu: torch.LongTensor | None = None,
-    **kwargs,
 ):
     r"""
     Args:
@@ -1477,10 +1482,6 @@ def chunk_ttt_linear(
     assert k.shape[-1] == v.shape[-1], "DK must equal to DV."
     if isinstance(eta, float):
         eta = torch.full_like(q[:, :, :, :1], eta)
-    if 'head_first' in kwargs:
-        raise DeprecationWarning(
-            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
-        )
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(

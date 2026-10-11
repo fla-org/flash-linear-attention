@@ -75,6 +75,7 @@ def _get_chunk_cumsum_bs(BT: int, S: int) -> int:
 
 
 @triton.heuristics({
+    'HAS_A': lambda args: args['A_log'] is not None,
     'HAS_BIAS': lambda args: args['dt_bias'] is not None,
     'USE_LOWER_BOUND': lambda args: args['lower_bound'] is not None,
 })
@@ -90,6 +91,7 @@ def kda_gate_fwd_kernel_npu(
     D: tl.constexpr,
     BT: tl.constexpr,
     BD: tl.constexpr,
+    HAS_A: tl.constexpr,
     HAS_BIAS: tl.constexpr,
     USE_LOWER_BOUND: tl.constexpr,
     NT_OFFSET: tl.constexpr,
@@ -98,7 +100,7 @@ def kda_gate_fwd_kernel_npu(
     i_t = tl.program_id(0) + NT_OFFSET
     i_h = tl.program_id(1) + H_OFFSET
 
-    b_A = tl.load(A_log + i_h).to(tl.float32)
+    b_A = tl.load(A_log + i_h).to(tl.float32) if HAS_A else 1.0
 
     p_g = tl.make_block_ptr(g + i_h * D, (T, D), (H * D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
     p_yg = tl.make_block_ptr(yg + i_h * D, (T, D), (H * D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
@@ -109,14 +111,14 @@ def kda_gate_fwd_kernel_npu(
     if not USE_LOWER_BOUND:
         b_yg = -exp(b_A) * softplus(b_g)
     else:
-        b_yg = lower_bound * tl.sigmoid(exp(b_A) * b_g)
+        b_yg = lower_bound * tl.sigmoid((exp(b_A) if HAS_A else b_A) * b_g)
     tl.store(p_yg, b_yg.to(p_yg.dtype.element_ty), boundary_check=(0, 1))
 
 
 def _launch_gate_fwd(
     *,
     g: torch.Tensor,
-    A_log: torch.Tensor,
+    A_log: torch.Tensor | None,
     dt_bias: torch.Tensor | None,
     yg: torch.Tensor,
     lower_bound: float | None,
@@ -154,6 +156,7 @@ def _launch_gate_fwd(
 
 
 @triton.heuristics({
+    'HAS_A': lambda args: args['A_log'] is not None,
     'HAS_BIAS': lambda args: args['dt_bias'] is not None,
     'USE_LOWER_BOUND': lambda args: args['lower_bound'] is not None,
 })
@@ -165,32 +168,39 @@ def kda_gate_bwd_kernel_npu(
     dyg,
     dg,
     dA,
+    dbias,
     lower_bound,
     T,
     H: tl.constexpr,
     D: tl.constexpr,
     BT: tl.constexpr,
     BD: tl.constexpr,
+    HAS_A: tl.constexpr,
     HAS_BIAS: tl.constexpr,
     USE_LOWER_BOUND: tl.constexpr,
     NT_OFFSET: tl.constexpr,
     H_OFFSET: tl.constexpr,
 ):
-    i_t = tl.program_id(0) + NT_OFFSET
-    i_h = tl.program_id(1) + H_OFFSET
+    i_t, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
+    i_t += NT_OFFSET
+    i_h += H_OFFSET
 
-    b_A = tl.load(A_log + i_h).to(tl.float32)
+    b_A = tl.load(A_log + i_h).to(tl.float32) if HAS_A else 1.0
 
-    p_g = tl.make_block_ptr(g + i_h * D, (T, D), (H * D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
-    p_dg = tl.make_block_ptr(dg + i_h * D, (T, D), (H * D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
-    p_dyg = tl.make_block_ptr(dyg + i_h * D, (T, D), (H * D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
+    o_t = i_t * BT + tl.arange(0, BT)
+    o_d = tl.arange(0, BD)
+    m_t = o_t < T
+    m_g = m_t[:, None] & (o_d[None, :] < D)
+    p_g = g + i_h * D + o_t[:, None] * (H * D) + o_d[None, :]
+    p_dg = dg + i_h * D + o_t[:, None] * (H * D) + o_d[None, :]
+    p_dyg = dyg + i_h * D + o_t[:, None] * (H * D) + o_d[None, :]
 
-    b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
-    b_dyg = tl.load(p_dyg, boundary_check=(0, 1)).to(tl.float32)
+    b_g = tl.load(p_g, mask=m_g, other=0.0).to(tl.float32)
+    b_dyg = tl.load(p_dyg, mask=m_g, other=0.0).to(tl.float32)
 
     if HAS_BIAS:
-        p_b = tl.make_block_ptr(dt_bias, (H * D,), (1,), (i_h * D,), (BD,), (0,))
-        b_g = b_g + tl.load(p_b, boundary_check=(0,)).to(tl.float32)
+        o_b = i_h * D + o_d
+        b_g = b_g + tl.load(dt_bias + o_b, mask=o_d < D, other=0.0).to(tl.float32)
 
     if not USE_LOWER_BOUND:
         b_A = -exp(b_A)
@@ -198,26 +208,31 @@ def kda_gate_bwd_kernel_npu(
         b_dg = b_A * (b_dyg * tl.sigmoid(b_g))
         b_dA = tl.sum(tl.sum(b_dyg * b_yg, 1), 0)
     else:
-        b_A = exp(b_A)
+        b_A = exp(b_A) if HAS_A else b_A
         b_inner = b_A * b_g
         b_sig = tl.sigmoid(b_inner)
         b_dsig = b_sig * (1.0 - b_sig)
         b_d_inner_term = b_dyg * (lower_bound * b_dsig)
         b_dg = b_d_inner_term * b_A
-        b_dA = tl.sum(tl.sum(b_dg * b_g, 1), 0)
+        b_dA = tl.sum(tl.sum(b_dg * b_g, 1), 0) if HAS_A else 0.0
 
-    tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(dA + i_t * H + i_h, b_dA)
+    tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), mask=m_g)
+    if HAS_A:
+        tl.store(dA + i_t * H + i_h, b_dA)
+    if HAS_BIAS:
+        b_dbias = tl.sum(b_dg, 0)
+        tl.store(dbias + (i_t * H + i_h) * D + o_d, b_dbias, mask=o_d < D)
 
 
 def _launch_gate_bwd(
     *,
     g: torch.Tensor,
-    A_log: torch.Tensor,
+    A_log: torch.Tensor | None,
     dt_bias: torch.Tensor | None,
     dyg: torch.Tensor,
     dg: torch.Tensor,
-    dA: torch.Tensor,
+    dA: torch.Tensor | None,
+    dbias: torch.Tensor | None,
     lower_bound: float | None,
     T: int,
     H: int,
@@ -233,6 +248,7 @@ def _launch_gate_bwd(
         dyg=dyg,
         dg=dg,
         dA=dA,
+        dbias=dbias,
         lower_bound=lower_bound,
         T=T,
         H=H,
@@ -255,6 +271,7 @@ def _launch_gate_bwd(
 
 
 @triton.heuristics({
+    'HAS_A': lambda args: args['A_log'] is not None,
     'HAS_BIAS': lambda args: args['dt_bias'] is not None,
     'HAS_SCALE': lambda args: args['scale'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
@@ -276,12 +293,14 @@ def kda_gate_chunk_cumsum_vector_kernel_npu(
     BT: tl.constexpr,
     BS: tl.constexpr,
     REVERSE: tl.constexpr,
+    HAS_A: tl.constexpr,
     HAS_BIAS: tl.constexpr,
     HAS_SCALE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     USE_LOWER_BOUND: tl.constexpr,
     NT_OFFSET: tl.constexpr,
     BH_OFFSET: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
 ):
     i_s, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_t += NT_OFFSET
@@ -290,10 +309,13 @@ def kda_gate_chunk_cumsum_vector_kernel_npu(
 
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        if USE_GRAPH and i_n < 0:
+            return
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
     else:
-        bos, eos = i_b * T, i_b * T + T
+        bos = tl.cast(i_b, tl.int64) * T
+        eos = bos + T
 
     p_s = tl.make_block_ptr(s + (bos * H + i_h) * S, (T, S), (H * S, 1), (i_t * BT, i_s * BS), (BT, BS), (1, 0))
     p_o = tl.make_block_ptr(o + (bos * H + i_h) * S, (T, S), (H * S, 1), (i_t * BT, i_s * BS), (BT, BS), (1, 0))
@@ -304,11 +326,11 @@ def kda_gate_chunk_cumsum_vector_kernel_npu(
         b_bias = tl.load(p_b, boundary_check=(0,)).to(tl.float32)
         b_s = b_s + b_bias[None, :]
 
-    b_A = tl.load(A_log + i_h).to(tl.float32)
+    b_A = tl.load(A_log + i_h).to(tl.float32) if HAS_A else 1.0
     if not USE_LOWER_BOUND:
         b_gate = -exp(b_A) * softplus(b_s)
     else:
-        b_gate = lower_bound * tl.sigmoid(exp(b_A) * b_s)
+        b_gate = lower_bound * tl.sigmoid((exp(b_A) if HAS_A else b_A) * b_s)
 
     if REVERSE:
         b_o = tl.cumsum(b_gate, axis=0, reverse=True)
@@ -323,7 +345,7 @@ def kda_gate_chunk_cumsum_vector_kernel_npu(
 def _launch_gate_chunk_cumsum(
     *,
     s: torch.Tensor,
-    A_log: torch.Tensor,
+    A_log: torch.Tensor | None,
     dt_bias: torch.Tensor | None,
     o: torch.Tensor,
     scale: float | None,
@@ -338,6 +360,7 @@ def _launch_gate_chunk_cumsum(
     BS: int,
     NT: int,
     reverse: bool,
+    use_graph: bool,
 ) -> None:
     bh_total = B * H
     ns = triton.cdiv(S, BS)
@@ -356,6 +379,7 @@ def _launch_gate_chunk_cumsum(
         BT=BT,
         BS=BS,
         REVERSE=reverse,
+        USE_GRAPH=use_graph,
         num_warps=_NUM_WARPS,
     )
     max_nt = max_grid_axis_chunks(NT, ns * bh_total, max_grid=ASCEND_MAX_GRID_DIM)
@@ -377,7 +401,7 @@ def _launch_gate_chunk_cumsum(
 @input_guard
 def kda_gate_fwd_npu(
     g: torch.Tensor,
-    A_log: torch.Tensor,
+    A_log: torch.Tensor | None = None,
     dt_bias: torch.Tensor | None = None,
     lower_bound: float | None = None,
     output_dtype: torch.dtype = torch.float32,
@@ -403,17 +427,20 @@ def kda_gate_fwd_npu(
 @input_guard
 def kda_gate_bwd_npu(
     g: torch.Tensor,
-    A_log: torch.Tensor,
+    A_log: torch.Tensor | None = None,
     dt_bias: torch.Tensor | None = None,
     dyg: torch.Tensor | None = None,
     lower_bound: float | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
     H, K = g.shape[-2:]
     T = g.numel() // (H * K)
     BT = _get_gate_bwd_bt(T, K)
-    dg = torch.empty_like(g, dtype=torch.float32)
     NT = triton.cdiv(T, BT)
-    dA = A_log.new_empty(NT, H, dtype=torch.float32)
+
+    dg = torch.empty_like(g)
+    dA = g.new_empty(NT, H, dtype=torch.float32) if A_log is not None else None
+    dbias = g.new_empty(NT, H * K, dtype=torch.float32) if dt_bias is not None else None
+
     _launch_gate_bwd(
         g=g,
         A_log=A_log,
@@ -421,22 +448,24 @@ def kda_gate_bwd_npu(
         dyg=dyg,
         dg=dg,
         dA=dA,
+        dbias=dbias,
         lower_bound=lower_bound,
         T=T,
         H=H,
         K=K,
         BT=BT,
     )
-    dg = dg.view_as(g).type_as(g)
-    dA = dA.sum(0).view_as(A_log).type_as(A_log)
-    dbias = dg.view(-1, H * K).sum(0).to(dt_bias) if dt_bias is not None else None
+
+    dA = dA.sum(0).view_as(A_log).type_as(A_log) if A_log is not None else None
+    dbias = dbias.sum(0).to(dt_bias) if dt_bias is not None else None
+
     return dg, dA, dbias
 
 
 @input_guard
 def kda_gate_chunk_cumsum_npu(
     g: torch.Tensor,
-    A_log: torch.Tensor,
+    A_log: torch.Tensor | None,
     chunk_size: int,
     scale: float = None,
     dt_bias: torch.Tensor | None = None,
@@ -444,7 +473,7 @@ def kda_gate_chunk_cumsum_npu(
     output_dtype: torch.dtype | None = torch.float,
     chunk_indices: torch.LongTensor | None = None,
     lower_bound: float | None = None,
-    **kwargs,
+    use_graph: bool = False,
 ) -> torch.Tensor:
     if cu_seqlens is not None:
         assert g.shape[0] == 1, "Only batch size 1 is supported when cu_seqlens are provided"
@@ -457,7 +486,7 @@ def kda_gate_chunk_cumsum_npu(
     assert chunk_size == 2 ** (chunk_size.bit_length() - 1), "chunk_size must be a power of 2"
 
     BS = _get_chunk_cumsum_bs(BT, S)
-    g_org, o = g, torch.empty_like(g, dtype=output_dtype or g.dtype)
+    g_org, o = g, (torch.zeros_like if use_graph else torch.empty_like)(g, dtype=output_dtype or g.dtype)
     _launch_gate_chunk_cumsum(
         s=g_org,
         A_log=A_log,
@@ -475,6 +504,7 @@ def kda_gate_chunk_cumsum_npu(
         BS=BS,
         NT=NT,
         reverse=False,
+        use_graph=use_graph,
     )
     return o
 
@@ -486,7 +516,7 @@ class KDAGateFunctionNPU(torch.autograd.Function):
     def forward(
         ctx,
         g: torch.Tensor,
-        A_log: torch.Tensor,
+        A_log: torch.Tensor | None = None,
         dt_bias: torch.Tensor | None = None,
         lower_bound: float | None = None,
         output_dtype: torch.dtype = torch.float32,
@@ -519,7 +549,7 @@ class KDAGateFunctionNPU(torch.autograd.Function):
 
 def fused_kda_gate_npu(
     g: torch.Tensor,
-    A_log: torch.Tensor,
+    A_log: torch.Tensor | None = None,
     dt_bias: torch.Tensor | None = None,
     lower_bound: float | None = None,
     output_dtype: torch.dtype = torch.float32,

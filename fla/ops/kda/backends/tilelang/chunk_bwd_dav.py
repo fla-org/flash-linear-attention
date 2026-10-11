@@ -110,11 +110,14 @@ def chunk_kda_bwd_dAv_tilelang(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
+    use_graph: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if A is None:
         raise ValueError("KDA TileLang dAv backend requires A")
     if cu_seqlens is not None or chunk_indices is not None:
         raise ValueError("KDA TileLang dAv backend currently supports dense fixed-length sequences only")
+    if use_graph:
+        raise ValueError("KDA TileLang backend does not support graph capture (use_graph=True)")
     if chunk_size not in (32, 64):
         raise ValueError(f"KDA TileLang dAv backend supports chunk_size 32 or 64, got {chunk_size}")
     for name, tensor in {"q": q, "k": k, "v": v, "do": do, "A": A}.items():

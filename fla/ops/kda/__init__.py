@@ -12,3 +12,9 @@ __all__ = [
     "chunk_kda",
     "fused_recurrent_kda",
 ]
+
+
+from fla.backends import register
+from fla.ops.kda.backends import KDATileLangBackend, flash_kda  # noqa: F401
+
+register(chunk_kda)(KDATileLangBackend)

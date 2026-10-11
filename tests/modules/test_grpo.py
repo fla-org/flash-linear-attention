@@ -8,8 +8,30 @@
 import pytest
 import torch
 
-from fla.modules.grpo import fused_grpo_loss, grpo_loss_torch, grpo_loss_with_old_logps
+from fla.modules.grpo import fused_grpo_loss, grpo_loss_with_old_logps
+from fla.modules.grpo.ops import grpo_loss_torch
 from fla.utils import IS_NVIDIA_HOPPER, assert_close, device, device_torch_lib
+
+
+@pytest.mark.parametrize('is_npu', ['0', '1'], ids=['cpu-compile', 'npu-eager'])
+def test_grpo_compile_policy_is_local_to_its_function(run_python, is_npu):
+    run_python(
+        """
+        import os
+        import sys
+        import torch
+        from fla import utils
+
+        assert 'fla.modules.grpo.ops' not in sys.modules
+        original_compile = torch.compile
+        utils.IS_NPU = os.environ['TEST_IS_NPU'] == '1'
+        from fla.modules import grpo
+
+        assert torch.compile is original_compile
+        assert hasattr(grpo.grpo_loss_with_old_logps, '_torchdynamo_orig_callable') == (not utils.IS_NPU)
+        """,
+        TEST_IS_NPU=is_npu,
+    )
 
 
 def grpo_loss_with_old_logps_torch(
@@ -24,9 +46,7 @@ def grpo_loss_with_old_logps_torch(
 ) -> torch.Tensor:
     batch_size = logps.shape[0]
     rewards_shaped = rewards.view(-1, batch_size)
-    advantages = (rewards_shaped - rewards_shaped.mean(dim=1, keepdim=True)) / (
-        rewards_shaped.std(dim=1, keepdim=True) + 1e-8
-    )
+    advantages = (rewards_shaped - rewards_shaped.mean(dim=1, keepdim=True)) / (rewards_shaped.std(dim=1, keepdim=True) + 1e-8)
     advantages = advantages.view(-1, 1)
 
     log_ratio = logps - old_logps
@@ -55,11 +75,7 @@ def test_grpo_loss_with_old_logps(dtype: torch.dtype, case: str):
     epsilon = 0.2
 
     if case == "clipped":
-        old_logps = old_logps + torch.tensor(
-            [[-0.5], [0.5], [-0.5], [0.5]],
-            device=device,
-            dtype=dtype,
-        )
+        old_logps = old_logps + torch.tensor([[-0.5], [0.5], [-0.5], [0.5]], device=device, dtype=dtype)
     elif case == "kl":
         ref_logps = ref_logps + 0.3
         beta = 0.2
@@ -135,7 +151,8 @@ def test_fused_grpos(B: int, T: int, V: int, dtype: torch.dtype, inplace: bool, 
                     log_probs = torch.randn_like(logits_row).log_softmax(dim=-1)
                     token_log_prob = torch.gather(log_probs, dim=1, index=input_ids_row.unsqueeze(1)).squeeze(1)
                     per_token_logps.append(token_log_prob)
-                device_torch_lib.empty_cache()
+                if hasattr(device_torch_lib, 'empty_cache'):
+                    device_torch_lib.empty_cache()
                 return torch.stack(per_token_logps)
 
         logits = torch.randn(B, T + 1, V, device=device, dtype=dtype)
@@ -151,7 +168,8 @@ def test_fused_grpos(B: int, T: int, V: int, dtype: torch.dtype, inplace: bool, 
         gold_logits = logits.detach().clone().float()
         gold_logits.requires_grad_(True)
         gold_ref_logp = ref_logp.clone().float()
-        device_torch_lib.empty_cache()
+        if hasattr(device_torch_lib, 'empty_cache'):
+            device_torch_lib.empty_cache()
         y1 = fused_grpo_loss(logits, ref_logp, input_ids, advantages, beta, completion_mask, save_kl=save_kl, inplace=inplace)
         y2 = grpo_loss_torch(gold_logits, gold_ref_logp, input_ids, advantages, beta, completion_mask, save_kl)
         if save_kl:

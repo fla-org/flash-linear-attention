@@ -58,6 +58,7 @@ def initialize_chunked_param(B, H, T, BT, dtype=torch.float32):
 @pytest.mark.skipif(
     True, reason='FIXME',
 )
+@pytest.mark.smoke
 def test_naive_chunk(
     B: int,
     T: int,

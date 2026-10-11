@@ -81,6 +81,7 @@ class Parallax(nn.Module):
             self.num_kv_heads = self.num_heads
         else:
             self.num_kv_heads = num_kv_heads
+        assert self.num_heads % self.num_kv_heads == 0, "num_heads must be divisible by num_kv_heads"
         self.num_kv_groups = num_heads // self.num_kv_heads
         self.head_dim = self.hidden_size // self.num_heads
         self.kv_dim = self.num_kv_heads * self.head_dim
@@ -150,16 +151,16 @@ class Parallax(nn.Module):
         r, _ = self.rotary(r, r, seqlen_offset=seqlen_offset, max_seqlen=max_seqlen, cu_seqlens=cu_seqlens)
 
         if past_key_values is not None:
-            # Decode / cached prefill. `r` is regenerated each step (like `q`), so only
-            # `(k, v)` are cached; the new queries attend to the full cached KV.
+            cache_has_content = past_key_values.get_seq_length(self.layer_idx) > 0
             k_cached, v_cached = past_key_values.update(
                 attn_state=(k.flatten(-2, -1), v.flatten(-2, -1)),
                 layer_idx=self.layer_idx,
                 offset=q_len,
                 cache_kwargs=dict(window_size=self.window_size),
             )['attn_state']
-            k = rearrange(k_cached, '... (h d) -> ... h d', d=self.head_dim)
-            v = rearrange(v_cached, '... (h d) -> ... h d', d=self.head_dim)
+            if cache_has_content:
+                k = rearrange(k_cached, '... (h d) -> ... h d', d=self.head_dim)
+                v = rearrange(v_cached, '... (h d) -> ... h d', d=self.head_dim)
             # left-padding: the first `kv_len - valid_len` cached keys are padding.
             cache_start = None
             if attention_mask is not None:

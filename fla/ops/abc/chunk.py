@@ -11,7 +11,7 @@ import triton.language as tl
 
 from fla.ops.utils import softmax_bwd, softmax_fwd
 from fla.ops.utils.logcumsumexp import logcumsumexp_fwd_kernel
-from fla.ops.utils.op import exp
+from fla.ops.utils.op import exp, unflatten_program_id
 from fla.utils import input_guard
 
 
@@ -34,7 +34,7 @@ def chunk_abc_fwd_kernel_h(
     USE_INITIAL_STATE: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
 ):
-    i_v, i_k, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    i_v, i_k, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
 
     o_k = i_k * BK + tl.arange(0, BK)
     o_v = i_v * BV + tl.arange(0, BV)
@@ -80,7 +80,7 @@ def chunk_abc_fwd_kernel_h(
             b_h = b_h * b_r[None, :]
             b_v = exp(b_v - b_zc[None, :]).to(b_v.dtype)
         # [BK, BV]
-        b_h += tl.dot(b_k, b_v, allow_tf32=False)
+        b_h = tl.dot(b_k, b_v, b_h, allow_tf32=False)
 
     if STORE_FINAL_STATE:
         p_ht = ht + i_bh * K * V + o_k[:, None] * V + o_v[None, :]
@@ -100,7 +100,8 @@ def chunk_abc_fwd_kernel_intra_K(
     BV: tl.constexpr,
     NC: tl.constexpr,
 ):
-    i_v, i_c, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    NV = tl.cdiv(V, BV)
+    i_v, i_c, i_bh = tl.program_id(0).to(tl.int64) % NV, tl.program_id(0).to(tl.int64) // NV, tl.program_id(1).to(tl.int64)
     i_t, i_i = i_c // NC, i_c % NC
 
     o_r = i_t * BT + i_i * BC + tl.arange(0, BC)
@@ -124,7 +125,7 @@ def chunk_abc_fwd_kernel_intra_K(
         b_v = tl.load(p_v, mask=m_vr, other=0.0)
         # [BC, BC]
         b_A = tl.load(p_A, mask=m_A, other=0.0)
-        b_o += tl.dot(b_A, exp(b_v - b_zn[None, :]).to(b_v.dtype), allow_tf32=False)
+        b_o = tl.dot(b_A, exp(b_v - b_zn[None, :]).to(b_v.dtype), b_o, allow_tf32=False)
     b_z = tl.load(p_z, mask=m_rv, other=0.0)
     b_o *= exp(b_zn[None, :] - b_z)
 
@@ -163,7 +164,8 @@ def chunk_abc_fwd_kernel_K(
     BV: tl.constexpr,
     NT: tl.constexpr,
 ):
-    i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_v, i_t = unflatten_program_id(tl.cdiv(V, BV))
+    i_bh = tl.program_id(1).to(tl.int64)
     i_p = tl.maximum(i_t * BT - 1, 0)
 
     o_i = tl.arange(0, BT)
@@ -192,9 +194,9 @@ def chunk_abc_fwd_kernel_K(
         # [BK, BV]
         b_h = tl.load(p_h, mask=m_kv, other=0.0)
         # [BT, BV]
-        b_o += tl.dot(b_q, b_h, allow_tf32=False)
+        b_o = tl.dot(b_q, b_h, b_o, allow_tf32=False)
         # [BT, BT]
-        b_A += tl.dot(b_q, b_k, allow_tf32=False)
+        b_A = tl.dot(b_q, b_k, b_A, allow_tf32=False)
     p_z = z + i_bh * T*V + o_t[:, None] * V + o_v[None, :]
     p_o = o + i_bh * T*V + o_t[:, None] * V + o_v[None, :]
     # [BT, BV]
@@ -229,9 +231,10 @@ def chunk_abc_fwd_kernel_intra_V(
     BK: tl.constexpr,
     NC: tl.constexpr,
 ):
-    i_k, i_c, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    NK = tl.cdiv(K, BK)
+    i_k, i_c, i_bh = tl.program_id(0).to(tl.int64) % NK, tl.program_id(0).to(tl.int64) // NK, tl.program_id(1).to(tl.int64)
     i_t, i_i, i_j = i_c // (NC * NC), (i_c % (NC * NC)) // NC, (i_c % (NC * NC)) % NC
-    n_bh = tl.num_programs(2)
+    n_bh = tl.num_programs(1).to(tl.int64)
 
     o_q = i_t * BT + i_i * BC + tl.arange(0, BC)
     o_k = i_k * BK + tl.arange(0, BK)
@@ -295,7 +298,8 @@ def chunk_abc_fwd_kernel_V(
     BV: tl.constexpr,
     NT: tl.constexpr,
 ):
-    i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_v, i_t = unflatten_program_id(tl.cdiv(V, BV))
+    i_bh = tl.program_id(1).to(tl.int64)
     i_p = tl.maximum(i_t * BT - 1, 0)
 
     o_t = i_t * BT + tl.arange(0, BT)
@@ -326,7 +330,7 @@ def chunk_abc_fwd_kernel_V(
         # works but dkw, owing to divine benevolence
         # [BT, BV]
         if i_k >= 0:
-            b_o += tl.dot(b_q, b_h, allow_tf32=False)
+            b_o = tl.dot(b_q, b_h, b_o, allow_tf32=False)
     p_v = v + i_bh * T*V + o_t[:, None] * V + o_v[None, :]
     p_o = o + i_bh * T*V + o_t[:, None] * V + o_v[None, :]
     o_A = tl.arange(0, BT)
@@ -336,7 +340,7 @@ def chunk_abc_fwd_kernel_V(
     b_v = tl.load(p_v, mask=m_tv, other=0.0)
     # [BT, BT]
     b_A = tl.load(p_A, mask=m_AT, other=0.0)
-    b_o += tl.dot(b_A.to(b_v.dtype), b_v, allow_tf32=False)
+    b_o = tl.dot(b_A.to(b_v.dtype), b_v, b_o, allow_tf32=False)
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=m_tv)
 
 
@@ -356,7 +360,7 @@ def chunk_abc_bwd_kernel_dh(
     NT: tl.constexpr,
     NORMK: tl.constexpr,
 ):
-    i_k, i_v, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    i_k, i_v, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
 
     o_k = i_k * BK + tl.arange(0, BK)
     o_v = i_v * BV + tl.arange(0, BV)
@@ -405,7 +409,7 @@ def chunk_abc_bwd_kernel_dh(
             # [BK, BV]
             b_dh = b_dh * b_r[None, :]
         # [BK, BV]
-        b_dh += tl.dot(b_q, b_do, allow_tf32=False)
+        b_dh = tl.dot(b_q, b_do, b_dh, allow_tf32=False)
 
 
 @triton.jit(do_not_specialize=['T'])
@@ -430,9 +434,10 @@ def chunk_abc_bwd_kernel_V(
     BV: tl.constexpr,
     NT: tl.constexpr,
 ):
-    i_k, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_k, i_t = unflatten_program_id(tl.cdiv(K, BK))
+    i_bh = tl.program_id(1).to(tl.int64)
     i_p = tl.maximum(i_t * BT - 1, 0)
-    n_bh = tl.num_programs(2)
+    n_bh = tl.num_programs(1).to(tl.int64)
 
     o_t = i_t * BT + tl.arange(0, BT)
     o_k = i_k * BK + tl.arange(0, BK)
@@ -479,15 +484,15 @@ def chunk_abc_bwd_kernel_V(
         # [BT, BV]
         b_dv = tl.dot(b_k, b_dh, allow_tf32=False)
         if i_k == 0:
-            b_dv += tl.dot(b_A.to(b_do.dtype), b_do, allow_tf32=False)
+            b_dv = tl.dot(b_A.to(b_do.dtype), b_do, b_dv, allow_tf32=False)
         b_do = (b_do * scale).to(b_do.dtype)
         tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), mask=m_tv)
         # [BT, BT]
-        b_dA += tl.dot(b_do, tl.trans(b_v), allow_tf32=False)
+        b_dA = tl.dot(b_do, tl.trans(b_v), b_dA, allow_tf32=False)
         # [BT, BK]
-        b_dq += tl.dot(b_do, b_h, allow_tf32=False)
+        b_dq = tl.dot(b_do, b_h, b_dq, allow_tf32=False)
         # [BT, BK]
-        b_dk += tl.dot(b_v, tl.trans(b_dh), allow_tf32=False)
+        b_dk = tl.dot(b_v, tl.trans(b_dh), b_dk, allow_tf32=False)
     o_zp = i_p * K + o_k
     p_z = z + i_bh * T*K + o_t[:, None] * K + o_k[None, :]
     p_zp = z + i_bh * T*K + o_zp
@@ -529,7 +534,8 @@ def chunk_abc_bwd_kernel_intra_V(
     BK: tl.constexpr,
     NC: tl.constexpr,
 ):
-    i_k, i_c, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    NK = tl.cdiv(K, BK)
+    i_k, i_c, i_bh = tl.program_id(0).to(tl.int64) % NK, tl.program_id(0).to(tl.int64) // NK, tl.program_id(1).to(tl.int64)
     i_t, i_i = i_c // NC, i_c % NC
 
     o_r = i_t * BT + i_i * BC + tl.arange(0, BC)
@@ -557,7 +563,7 @@ def chunk_abc_bwd_kernel_intra_V(
         # [BC, BC]
         b_dA = tl.load(p_dA, mask=m_dA, other=0.0)
         # [BC, BK]
-        b_dq += tl.dot(b_dA, b_kz, allow_tf32=False)
+        b_dq = tl.dot(b_dA, b_kz, b_dq, allow_tf32=False)
     b_dq *= b_zq
 
     o_i = tl.arange(0, BC)
@@ -602,7 +608,7 @@ def chunk_abc_bwd_kernel_intra_V(
         # [BC, BC]
         b_dA = tl.load(p_dA, mask=m_dA2, other=0.0)
         # [BC, BK]
-        b_dk += tl.dot(tl.trans(b_dA), b_qz, allow_tf32=False)
+        b_dk = tl.dot(tl.trans(b_dA), b_qz, b_dk, allow_tf32=False)
     b_dk *= b_kz
 
     o_dA = i_bh * T * BT + (i_t * BT + i_i * BC) * BT + i_i * BC + tl.arange(0, BC)
@@ -636,9 +642,10 @@ def chunk_abc_bwd_kernel_intra_K(
     BV: tl.constexpr,
     NC: tl.constexpr,
 ):
-    i_v, i_c, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    NV = tl.cdiv(V, BV)
+    i_v, i_c, i_bh = tl.program_id(0).to(tl.int64) % NV, tl.program_id(0).to(tl.int64) // NV, tl.program_id(1).to(tl.int64)
     i_t, i_i, i_j = i_c // (NC * NC), (i_c % (NC * NC)) // NC, (i_c % (NC * NC)) % NC
-    n_bh = tl.num_programs(2)
+    n_bh = tl.num_programs(1).to(tl.int64)
 
     o_r = i_t * BT + i_i * BC + tl.arange(0, BC)
     o_v = i_v * BV + tl.arange(0, BV)
@@ -708,9 +715,10 @@ def chunk_abc_bwd_kernel_K(
     BV: tl.constexpr,
     NT: tl.constexpr,
 ):
-    i_k, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_k, i_t = unflatten_program_id(tl.cdiv(K, BK))
+    i_bh = tl.program_id(1).to(tl.int64)
     i_p = tl.maximum(i_t * BT - 1, 0)
-    n_bh = tl.num_programs(2)
+    n_bh = tl.num_programs(1).to(tl.int64)
 
     o_i = tl.arange(0, BT)
     m_s = o_i[:, None] >= o_i[None, :]
@@ -769,8 +777,8 @@ def chunk_abc_bwd_kernel_K(
         b_dh = tl.load(p_dh, mask=m_kv, other=0.0)
 
         # [BT, BK]
-        b_dq += tl.dot(b_do, b_h, allow_tf32=False)
-        b_dk += tl.dot(b_v, tl.trans(b_dh), allow_tf32=False)
+        b_dq = tl.dot(b_do, b_h, b_dq, allow_tf32=False)
+        b_dk = tl.dot(b_v, tl.trans(b_dh), b_dk, allow_tf32=False)
         # [BT, BV]
         b_dv = b_v * tl.dot(b_k, b_dh, allow_tf32=False)
         tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), mask=m_tv)
@@ -778,8 +786,8 @@ def chunk_abc_bwd_kernel_K(
     # [BT, BT]
     b_dA = tl.load(p_dA, mask=m_AT, other=0.0)
     # [BT, BK]
-    b_dq += tl.dot(b_dA, b_k, allow_tf32=False)
-    b_dk += tl.dot(tl.trans(b_dA).to(b_k.dtype), b_q, allow_tf32=False)
+    b_dq = tl.dot(b_dA, b_k, b_dq, allow_tf32=False)
+    b_dk = tl.dot(tl.trans(b_dA).to(b_k.dtype), b_q, b_dk, allow_tf32=False)
 
     p_dq = dq + i_bh * T*K + o_t[:, None] * K + o_k[None, :]
     p_dk = dk + i_bh * T*K + o_t[:, None] * K + o_k[None, :]
@@ -801,7 +809,8 @@ def chunk_abc_bwd_kernel_intra_KV(
     BV: tl.constexpr,
     NC: tl.constexpr,
 ):
-    i_v, i_c, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    NV = tl.cdiv(V, BV)
+    i_v, i_c, i_bh = tl.program_id(0).to(tl.int64) % NV, tl.program_id(0).to(tl.int64) // NV, tl.program_id(1).to(tl.int64)
     i_t, i_i = i_c // NC, i_c % NC
 
     o_r = i_t * BT + i_i * BC + tl.arange(0, BC)
@@ -829,7 +838,7 @@ def chunk_abc_bwd_kernel_intra_KV(
         b_do = (b_do * exp(b_zn[None, :] - b_z)).to(b_do.dtype)
         # [BC, BC]
         b_A = tl.load(p_A, mask=m_A, other=0.0)
-        b_dv += tl.dot(b_A, b_do, allow_tf32=False)
+        b_dv = tl.dot(b_A, b_do, b_dv, allow_tf32=False)
     b_dv *= exp(b_v - b_zn[None, :])
 
     o_i = tl.arange(0, BC)
@@ -863,7 +872,7 @@ def chunk_abc_bwd_kernel_rcum_inter(
     BS: tl.constexpr,
     NT: tl.constexpr,
 ):
-    i_m, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64)
+    i_m, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
 
     o_s = i_m * BS + tl.arange(0, BS)
     b_sp = tl.zeros([BS], dtype=tl.float32)
@@ -904,7 +913,8 @@ def chunk_abc_bwd_kernel_rcum_intra(
     BS: tl.constexpr,
     NC: tl.constexpr,
 ):
-    i_s, i_c, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    NS = tl.cdiv(S, BS)
+    i_s, i_c, i_bh = tl.program_id(0).to(tl.int64) % NS, tl.program_id(0).to(tl.int64) // NS, tl.program_id(1).to(tl.int64)
     i_t, i_i = i_c // NC, i_c % NC
 
     o_i = tl.arange(0, BC)
@@ -965,7 +975,7 @@ class ChunkABCFunction(torch.autograd.Function):
         num_stages = 1
 
         def fwd_pre(s, B, H, T, S):
-            # keep cummulative normalizer in fp32
+            # keep cumulative normalizer in fp32
             z = torch.empty_like(s, dtype=torch.float)
             grid = (B * H,)
             logcumsumexp_fwd_kernel[grid](
@@ -1005,7 +1015,7 @@ class ChunkABCFunction(torch.autograd.Function):
         )
         ok1 = torch.empty_like(s)
         Ak = q.new_empty(B, H, T, BT)
-        grid = (NM, NT, B * H)
+        grid = (NM * NT, B * H)
         chunk_abc_fwd_kernel_K[grid](
             q, k, z, hk, ok1, Ak,
             scale=scale,
@@ -1014,7 +1024,7 @@ class ChunkABCFunction(torch.autograd.Function):
             num_stages=num_stages,
         )
         ok0 = torch.empty_like(s)
-        grid = (NM, NT * NC, B * H)
+        grid = (NM * NT * NC, B * H)
         chunk_abc_fwd_kernel_intra_K[grid](
             s, z, ok0, Ak,
             T=T, V=M, BT=BT, BC=BC, BV=BM, NC=NC,
@@ -1037,7 +1047,7 @@ class ChunkABCFunction(torch.autograd.Function):
             ht=final_state[1] if final_state is not None else None,
         )
         Av = q.new_zeros(NM, B, H, T, BT)
-        grid = (NM, NT * NC * NC, B * H)
+        grid = (NM * NT * NC * NC, B * H)
         chunk_abc_fwd_kernel_intra_V[grid](
             qv, s, z, Av,
             scale=scale,
@@ -1047,7 +1057,7 @@ class ChunkABCFunction(torch.autograd.Function):
         )
         Av = Av.sum(0)
         ov = torch.empty_like(v)
-        grid = (NV, NT, B * H)
+        grid = (NV * NT, B * H)
         chunk_abc_fwd_kernel_V[grid](
             qv, v, z, hv, ov, Av,
             scale=scale,
@@ -1102,7 +1112,7 @@ class ChunkABCFunction(torch.autograd.Function):
                 num_warps=num_warps,
                 num_stages=num_stages,
             )
-            grid = (NS, NT * NC, B * H)
+            grid = (NS * NT * NC, B * H)
             chunk_abc_bwd_kernel_rcum_intra[grid](
                 s, z, ss, doo,
                 T=T, S=S, BT=BT, BC=BC, BS=BS, NC=NC,
@@ -1123,7 +1133,7 @@ class ChunkABCFunction(torch.autograd.Function):
         dsv1 = torch.empty_like(s, dtype=torch.float)
         dv = v.new_empty(NM, *v.shape)
         dAv = q.new_zeros(B, H, T, BT)
-        grid = (NM, NT, B * H)
+        grid = (NM * NT, B * H)
         chunk_abc_bwd_kernel_V[grid](
             s, v, z, hv, Av, dov, dhv, dp1, dsv1, dv, dAv,
             scale=scale,
@@ -1134,7 +1144,7 @@ class ChunkABCFunction(torch.autograd.Function):
         dv = dv.sum(0)
         dp0 = torch.empty_like(p)
         dsv0 = s.new_zeros(s.shape, dtype=torch.float)
-        grid = (NM, NT * NC, B * H)
+        grid = (NM * NT * NC, B * H)
         chunk_abc_bwd_kernel_intra_V[grid](
             qv, s, z, dAv, dp0, dsv0,
             T=T, K=M, BT=BT, BC=BC, BK=BM, NC=NC,
@@ -1156,7 +1166,7 @@ class ChunkABCFunction(torch.autograd.Function):
             normk=False,
         )
         dAk = q.new_zeros(NM, B, H, T, BT)
-        grid = (NM, NT * NC * NC, B * H)
+        grid = (NM * NT * NC * NC, B * H)
         chunk_abc_bwd_kernel_intra_K[grid](
             s, z, dok, dAk,
             scale=scale,
@@ -1170,7 +1180,7 @@ class ChunkABCFunction(torch.autograd.Function):
         dq = torch.empty_like(q)
         dk = torch.empty_like(k)
         dsk1 = s.new_empty(NK, *s.shape, dtype=torch.float)
-        grid = (NK, NT, B * H)
+        grid = (NK * NT, B * H)
         chunk_abc_bwd_kernel_K[grid](
             q, k, s, z, hk, Ak, dok, dhk, dq, dk, dsk1, dAk,
             scale=scale,
@@ -1181,7 +1191,7 @@ class ChunkABCFunction(torch.autograd.Function):
         Ak = Ak.sum(0)
         dsk1 = dsk1.sum(0)
         dsk0 = torch.empty_like(s, dtype=torch.float)
-        grid = (NM, NT * NC, B * H)
+        grid = (NM * NT * NC, B * H)
         chunk_abc_bwd_kernel_intra_KV[grid](
             s, z, Ak, dok, dsk0,
             T=T, V=M, BT=BT, BC=BC, BV=BM, NC=NC,
@@ -1202,7 +1212,6 @@ def chunk_abc(
     s: torch.Tensor,
     initial_state: tuple[torch.Tensor] | None = None,
     output_final_state: bool = False,
-    head_first: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
@@ -1218,9 +1227,6 @@ def chunk_abc(
             Initial states of shape `[B, H, K, M]` and `[B, H, M, V]`. Default: `None`.
         output_final_state (Optional[bool]):
             Whether to output the final state of shape `[B, H, K, M]` and `[B, H, M, V]`. Default: `False`.
-        head_first (Optional[bool]):
-            Whether the inputs are in the head-first format. Default: `False`.
-            This argument has been deprecated.
 
     Returns:
         o (torch.Tensor):
@@ -1228,9 +1234,7 @@ def chunk_abc(
         final_state (torch.Tensor):
             Final state of shape `[B, H, K, M]` and `[B, H, M, V]` if `output_final_state=True` else `None`.
     """
-    if not head_first:
-        q, k, v, s = map(lambda x: x.transpose(1, 2), (q, k, v, s))
+    q, k, v, s = map(lambda x: x.transpose(1, 2), (q, k, v, s))
     o, final_state = ChunkABCFunction.apply(q, k, v, s, initial_state, output_final_state)
-    if not head_first:
-        o = o.transpose(1, 2)
+    o = o.transpose(1, 2)
     return o, final_state

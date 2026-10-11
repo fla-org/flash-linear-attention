@@ -7,7 +7,9 @@
 
 from fla.models.abc import ABCConfig, ABCForCausalLM, ABCModel
 from fla.models.bitnet import BitNetConfig, BitNetForCausalLM, BitNetModel
+from fla.models.cat import CATConfig, CATForCausalLM, CATModel
 from fla.models.comba import CombaConfig, CombaForCausalLM, CombaModel
+from fla.models.cyfa import CyclicFlowAttentionConfig, CyclicFlowAttentionForCausalLM, CyclicFlowAttentionModel
 from fla.models.delta_net import DeltaNetConfig, DeltaNetForCausalLM, DeltaNetModel
 from fla.models.deltaformer import DeltaFormerConfig, DeltaFormerForCausalLM, DeltaFormerModel
 from fla.models.forgetting_transformer import (
@@ -35,12 +37,27 @@ from fla.models.mom import MomConfig, MomForCausalLM, MomModel
 from fla.models.nsa import NSAConfig, NSAForCausalLM, NSAModel
 from fla.models.parallax import ParallaxConfig, ParallaxForCausalLM, ParallaxModel
 from fla.models.path_attn import PaTHAttentionConfig, PaTHAttentionForCausalLM, PaTHAttentionModel
+from fla.models.precond_gated_deltanet import (
+    PrecondGatedDeltaNetConfig,
+    PrecondGatedDeltaNetForCausalLM,
+    PrecondGatedDeltaNetModel,
+)
+from fla.models.precond_kda import (
+    PrecondKDAConfig,
+    PrecondKDAForCausalLM,
+    PrecondKDAModel,
+)
 from fla.models.raven import RavenConfig, RavenForCausalLM, RavenModel
 from fla.models.retnet import RetNetConfig, RetNetForCausalLM, RetNetModel
 from fla.models.rodimus import RodimusConfig, RodimusForCausalLM, RodimusModel
 from fla.models.rwkv6 import RWKV6Config, RWKV6ForCausalLM, RWKV6Model
 from fla.models.rwkv7 import RWKV7Config, RWKV7ForCausalLM, RWKV7Model
 from fla.models.samba import SambaConfig, SambaForCausalLM, SambaModel
+from fla.models.stickbreaking_attn import (
+    StickBreakingAttentionConfig,
+    StickBreakingAttentionForCausalLM,
+    StickBreakingAttentionModel,
+)
 from fla.models.transformer import TransformerConfig, TransformerForCausalLM, TransformerModel
 from fla.models.wall_transformer import WallTransformerConfig, WallTransformerForCausalLM, WallTransformerModel
 from fla.models.yoco import YOCOConfig, YOCOForCausalLM, YOCOModel
@@ -52,9 +69,15 @@ __all__ = [
     'BitNetConfig',
     'BitNetForCausalLM',
     'BitNetModel',
+    'CATConfig',
+    'CATForCausalLM',
+    'CATModel',
     'CombaConfig',
     'CombaForCausalLM',
     'CombaModel',
+    'CyclicFlowAttentionConfig',
+    'CyclicFlowAttentionForCausalLM',
+    'CyclicFlowAttentionModel',
     'DeltaFormerConfig',
     'DeltaFormerForCausalLM',
     'DeltaFormerModel',
@@ -124,6 +147,12 @@ __all__ = [
     'ParallaxConfig',
     'ParallaxForCausalLM',
     'ParallaxModel',
+    'PrecondGatedDeltaNetConfig',
+    'PrecondGatedDeltaNetForCausalLM',
+    'PrecondGatedDeltaNetModel',
+    'PrecondKDAConfig',
+    'PrecondKDAForCausalLM',
+    'PrecondKDAModel',
     'RWKV6Config',
     'RWKV6ForCausalLM',
     'RWKV6Model',
@@ -142,6 +171,9 @@ __all__ = [
     'SambaConfig',
     'SambaForCausalLM',
     'SambaModel',
+    'StickBreakingAttentionConfig',
+    'StickBreakingAttentionForCausalLM',
+    'StickBreakingAttentionModel',
     'TransformerConfig',
     'TransformerForCausalLM',
     'TransformerModel',

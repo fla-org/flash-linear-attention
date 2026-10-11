@@ -9,9 +9,10 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.backends import dispatch
 from fla.ops.utils import prepare_chunk_offsets
-from fla.ops.utils.op import exp2
-from fla.utils import autotune_cache_kwargs, check_shared_mem
+from fla.ops.utils.op import exp2, unflatten_program_id
+from fla.utils import IS_NVIDIA_HOPPER, autotune_cache_kwargs, check_shared_mem
 
 BKV_LIST = [32, 64] if check_shared_mem() else [16, 32]
 
@@ -29,7 +30,7 @@ BKV_LIST = [32, 64] if check_shared_mem() else [16, 32]
         for num_warps in [1, 2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
-    key=['BT', 'USE_G', 'USE_GK', 'USE_GV', 'STATE_V_FIRST'],
+    key=['BT', 'USE_G', 'USE_GK', 'USE_GV', 'STATE_V_FIRST', 'K', 'V'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -62,7 +63,7 @@ def chunk_fwd_kernel_h(
     IS_VARLEN: tl.constexpr,
     STATE_V_FIRST: tl.constexpr,
 ):
-    i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    i_k, i_v, i_nh = unflatten_program_id(tl.cdiv(K, BK), tl.cdiv(V, BV))
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
@@ -93,8 +94,9 @@ def chunk_fwd_kernel_h(
             b_h = tl.load(p_h0, mask=(o_k[:, None] < K) & (o_v[None, :] < V), other=0.0).to(tl.float32)
 
     for i_t in range(NT):
-        i_s = i_t // NTS
-        o_t = i_t * BT + tl.arange(0, BT)
+        i_t_int64 = i_t.to(tl.int64)
+        i_s = i_t_int64 // NTS
+        o_t = i_t_int64 * BT + tl.arange(0, BT)
         m_t = o_t < T
         p_k = k + (bos*H + i_h) * K + o_k[:, None] + o_t[None, :] * (H*K)
         p_v = v + (bos*H + i_h) * V + o_t[:, None] * (H*V) + o_v[None, :]
@@ -107,24 +109,24 @@ def chunk_fwd_kernel_h(
             p_h = h + o_h + o_k[:, None] * V + o_v[None, :]
             m_h = (o_k[:, None] < K) & (o_v[None, :] < V)
 
-        if i_t % NTS == 0:
+        if i_t_int64 % NTS == 0:
             tl.store(p_h, (tl.trans(b_h) if STATE_V_FIRST else b_h).to(p_h.dtype.element_ty), mask=m_h)
         # [BK, BT]
         b_k = tl.load(p_k, mask=(o_k[:, None] < K) & m_t[None, :], other=0.0)
         # [BT, BV]
         b_v = tl.load(p_v, mask=m_t[:, None] & (o_v < V)[None, :], other=0.0)
-        last_idx = min((i_t + 1) * BT, T) - 1
+        last_idx = min((i_t_int64 + 1) * BT, T) - 1
 
         # scalar decay
         if USE_G:
             b_g_last = tl.load(g + bos * H + last_idx * H + i_h)
-            p_g = g + bos*H + (i_t * BT + tl.arange(0, BT)) * H + i_h
-            b_g = tl.load(p_g, mask=(i_t * BT + tl.arange(0, BT) < T), other=0.)
+            p_g = g + bos*H + (i_t_int64 * BT + tl.arange(0, BT)) * H + i_h
+            b_g = tl.load(p_g, mask=(i_t_int64 * BT + tl.arange(0, BT) < T), other=0.)
             b_h *= exp2(b_g_last)
             b_v = (b_v * exp2(b_g_last - b_g)[:, None]).to(b_v.dtype)
 
         if USE_G_GAMMA:
-            b_g_last = b_gamma * min(BT, T - i_t * BT)
+            b_g_last = b_gamma * min(BT, T - i_t_int64 * BT)
             b_h *= exp2(b_g_last)
             b_v = (b_v * exp2(b_g_last - b_g)[:, None]).to(b_v.dtype)
 
@@ -148,7 +150,7 @@ def chunk_fwd_kernel_h(
             b_h *= exp2(b_gv_last)[None, :]
             b_v = (b_v * exp2(b_gv_last[None, :] - b_gv)).to(b_v.dtype)
 
-        b_h += tl.dot(b_k, b_v)
+        b_h = tl.dot(b_k, b_v, b_h)
 
     if STORE_FINAL_STATE:
         if STATE_V_FIRST:
@@ -172,10 +174,11 @@ def chunk_fwd_kernel_h(
         for num_warps in [1, 2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
-    key=['BT', 'USE_G', 'USE_GK', 'USE_GV', 'STATE_V_FIRST'],
+    key=['BT', 'USE_G', 'USE_GK', 'USE_GV', 'STATE_V_FIRST', 'K', 'V'],
     **autotune_cache_kwargs,
 )
-@triton.jit(do_not_specialize=['T'])
+# keep scale=1 dynamic to avoid a Hopper masked-load shared-memory miscompile.
+@triton.jit(do_not_specialize=['T', 'scale'] if IS_NVIDIA_HOPPER else ['T'])
 def chunk_bwd_kernel_dh(
     q,
     g,
@@ -208,7 +211,7 @@ def chunk_bwd_kernel_dh(
     IS_VARLEN: tl.constexpr,
     STATE_V_FIRST: tl.constexpr,
 ):
-    i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    i_k, i_v, i_nh = unflatten_program_id(tl.cdiv(K, BK), tl.cdiv(V, BV))
     i_n, i_hq = i_nh // HQ, i_nh % HQ
     i_h = i_hq // NG
     if IS_VARLEN:
@@ -240,7 +243,8 @@ def chunk_bwd_kernel_dh(
             b_dh += tl.load(p_dht, mask=(o_k[:, None] < K) & (o_v[None, :] < V), other=0.0).to(tl.float32)
 
     for i_t in range(NT - 1, -1, -1):
-        i_s = i_t // (BS // BT)
+        i_t_int64 = i_t.to(tl.int64)
+        i_s = i_t_int64 // (BS // BT)
         o_dh = ((boh + i_s) * H + i_h).to(tl.int64) * K*V
         if STATE_V_FIRST:
             p_dh = dh + o_dh + o_v[:, None] * K + o_k[None, :]
@@ -249,10 +253,10 @@ def chunk_bwd_kernel_dh(
             p_dh = dh + o_dh + o_k[:, None] * V + o_v[None, :]
             m_dh = (o_k[:, None] < K) & (o_v[None, :] < V)
 
-        if i_t % (BS // BT) == 0:
+        if i_t_int64 % (BS // BT) == 0:
             tl.store(p_dh, (tl.trans(b_dh) if STATE_V_FIRST else b_dh).to(p_dh.dtype.element_ty), mask=m_dh)
-        last_idx = min(i_t * BT + BT, T) - 1
-        o_t = i_t * BT + tl.arange(0, BT)
+        last_idx = min(i_t_int64 * BT + BT, T) - 1
+        o_t = i_t_int64 * BT + tl.arange(0, BT)
         m_t = o_t < T
         # [BK, BT]
         p_q = q + (bos*HQ + i_hq) * K + o_k[:, None] + o_t[None, :] * (HQ*K)
@@ -263,14 +267,14 @@ def chunk_bwd_kernel_dh(
         b_do = tl.load(p_do, mask=m_t[:, None] & (o_v < V)[None, :], other=0.0)
 
         if USE_G:
-            p_g = g + (bos + i_t * BT + tl.arange(0, BT)) * H + i_h
+            p_g = g + (bos + i_t_int64 * BT + tl.arange(0, BT)) * H + i_h
             b_g_last = tl.load(g + (bos + last_idx) * H + i_h)
-            b_g = tl.load(p_g, mask=(i_t * BT + tl.arange(0, BT) < T), other=0.)
+            b_g = tl.load(p_g, mask=(i_t_int64 * BT + tl.arange(0, BT) < T), other=0.)
             b_q = (b_q * exp2(b_g)[None, :]).to(b_q.dtype)
             b_dh *= exp2(b_g_last)
 
         if USE_G_GAMMA:
-            b_g_last = b_gamma * min(BT, T - i_t * BT)
+            b_g_last = b_gamma * min(BT, T - i_t_int64 * BT)
             b_q = (b_q * exp2(b_g)[None, :]).to(b_q.dtype)
             b_dh *= exp2(b_g_last)
 
@@ -292,7 +296,7 @@ def chunk_bwd_kernel_dh(
             b_do = (b_do * exp2(b_gv))
             b_dh *= exp2(b_gv_last)[None, :]
 
-        b_dh += tl.dot(b_q, b_do.to(b_q.dtype))
+        b_dh = tl.dot(b_q, b_do.to(b_q.dtype), b_dh)
 
     if STORE_INITIAL_STATE_GRADIENT:
         if STATE_V_FIRST:
@@ -303,6 +307,7 @@ def chunk_bwd_kernel_dh(
             tl.store(p_dh0, b_dh.to(p_dh0.dtype.element_ty), mask=(o_k[:, None] < K) & (o_v[None, :] < V))
 
 
+@dispatch('common')
 def chunk_fwd_h(
     k: torch.Tensor,
     v: torch.Tensor,
@@ -333,7 +338,7 @@ def chunk_fwd_h(
     state_shape = (V, K) if state_v_first else (K, V)
     h = k.new_empty(B, NS, H, *state_shape, dtype=k.dtype if not states_in_fp32 else torch.float)
     ht = k.new_empty(N, H, *state_shape, dtype=torch.float) if output_final_state else None
-    def grid(meta): return (triton.cdiv(K, meta['BK']), triton.cdiv(V, meta['BV']), N * H)
+    def grid(meta): return (triton.cdiv(K, meta['BK']) * triton.cdiv(V, meta['BV']) * N * H,)
     chunk_fwd_kernel_h[grid](
         k=k,
         v=v,
@@ -361,6 +366,7 @@ def chunk_fwd_h(
     return h, ht
 
 
+@dispatch('common')
 def chunk_bwd_dh(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -398,7 +404,7 @@ def chunk_bwd_dh(
     dh = k.new_empty(B, NS, HQ, *state_shape, dtype=k.dtype if not states_in_fp32 else torch.float)
     dh0 = torch.empty_like(h0, dtype=torch.float) if h0 is not None else None
 
-    def grid(meta): return (triton.cdiv(K, meta['BK']), triton.cdiv(V, meta['BV']), N * H)
+    def grid(meta): return (triton.cdiv(K, meta['BK']) * triton.cdiv(V, meta['BV']) * N * H,)
     chunk_bwd_kernel_dh[grid](
         q=q,
         g=g,

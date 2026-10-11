@@ -45,6 +45,19 @@ def test_chunk_gated_delta_rule_fwd_h_blackwell_triton_guard():
     assert {config.num_warps for config in tuner.configs} == {2}
 
 
+def test_chunk_fwd_o_blackwell_triton_guard():
+    if not IS_NVIDIA_BLACKWELL:
+        pytest.skip(reason='Blackwell guard is only active on Blackwell GPUs')
+
+    from fla.ops.common.chunk_o import chunk_fwd_kernel_o
+
+    tuner = _unwrap_autotuner(chunk_fwd_kernel_o)
+    # The 8-warp (BK=BV=128) config yields distinct outputs for identical
+    # inputs on Blackwell / Triton<3.8 (tl.dot recurrence race). The guard
+    # drops it, so no offered config may run more than 4 warps.
+    assert all(config.num_warps <= 4 for config in tuner.configs)
+
+
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'HV', 'D', 'scale', 'gate_logit_normalizer', 'dtype'),
     [
@@ -103,6 +116,26 @@ def test_fused_recurrent(
     )
     assert_close('o', ref, tri, 0.002)
     assert_close('ht', ref_ht, tri_ht, 0.002)
+
+    if D & (D - 1):
+        numel = B * T * HV * D
+        for name in ('gk', 'gv'):
+            storage = torch.full((numel + 64,), float("nan"), device=device)
+            gg = storage[:numel].view(B, T, HV, D)
+            gg.copy_(g.detach()[..., None].expand(B, T, HV, D))
+            tri2, tri2_ht = fused_recurrent_gated_delta_rule(
+                q=q.clone(),
+                k=k.clone(),
+                v=v.clone(),
+                beta=beta.clone(),
+                **{name: gg},
+                scale=scale,
+                initial_state=h0.clone(),
+                use_qk_l2norm_in_kernel=True,
+                output_final_state=True,
+            )
+            assert_close(name, ref, tri2, 0.002)
+            assert_close(f'{name}_ht', ref_ht, tri2_ht, 0.002)
 
 
 @pytest.mark.parametrize(
@@ -727,6 +760,7 @@ def test_fused_recurrent_gate_in_kernel_varlen(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
     reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set',
 )
+@pytest.mark.smoke
 def test_chunk_varlen(
     H: int,
     HV: int,
@@ -1202,20 +1236,24 @@ def test_chunk_gate_in_kernel_varlen(
         ]
     ],
 )
+@pytest.mark.parametrize('dtype', [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize('grad_scale', [1., 1e-8])
 def test_gate(
     B: int,
     T: int,
     HV: int,
     HAS_BIAS: bool,
+    dtype: torch.dtype,
+    grad_scale: float,
 ):
     torch.manual_seed(42)
-    g = torch.randn(B, T, HV, dtype=torch.float32)
+    g = torch.randn(B, T, HV, dtype=dtype)
     A_log = torch.log(torch.randn(HV, dtype=torch.float32).uniform_(1, 16))
     dt_bias = torch.randn(HV, dtype=torch.float32) if HAS_BIAS else None
     g, A_log = map(lambda x: x.to(device).requires_grad_(True), (g, A_log))
     if dt_bias is not None:
         dt_bias = dt_bias.to(device).requires_grad_(True)
-    do = torch.randn_like(g)
+    do = torch.randn_like(g, dtype=torch.float32) * grad_scale
 
     ref = naive_gdn_gate(
         g.clone(), A_log.clone(), dt_bias.clone() if dt_bias is not None else None,
@@ -1239,7 +1277,7 @@ def test_gate(
     assert_close("dg", ref_dg, tri_dg, 1e-4)
     assert_close("dA", ref_dA, tri_dA, 1e-4)
     if HAS_BIAS:
-        assert_close("dbias", ref_dbias, tri_dbias, 1e-4)
+        assert_close("dbias", ref_dbias / grad_scale, tri_dbias / grad_scale, 1e-4)
 
 
 @pytest.mark.parametrize(

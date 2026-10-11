@@ -10,7 +10,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_offsets
-from fla.ops.utils.op import exp2, safe_dot
+from fla.ops.utils.op import exp2, safe_dot, unflatten_program_id
 from fla.utils import autotune_cache_kwargs
 
 
@@ -54,7 +54,7 @@ def chunk_mesa_net_fwd_kernel_h(
     STORE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    i_k, i_v, i_nh = unflatten_program_id(tl.cdiv(K, 64), tl.cdiv(V, 64))
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
@@ -115,7 +115,7 @@ def chunk_mesa_net_fwd_kernel_h(
         b_g = tl.load(p_g, mask=(i_t * BT + tl.arange(0, BT) < T), other=0.)
         b_k_decay = ((b_k * exp2(b_g_last - b_g)[:, None]) * b_beta[:, None]).to(b_k2.dtype)
         b_h += safe_dot(tl.trans(b_k_decay), b_k2)
-        b_h_kv += safe_dot(tl.trans(b_k_decay), b_v.to(b_k2.dtype))
+        b_h_kv += safe_dot(tl.trans(b_k_decay).to(b_v.dtype), b_v)
 
     if STORE_FINAL_STATE:
         p_ht = h_final + i_nh * K*V + o_k[:, None] * V + o_v[None, :]
@@ -149,12 +149,13 @@ def chunk_mesa_fwd_h(
         split_offsets = prepare_chunk_offsets(cu_seqlens, BS)
         N, NS = len(cu_seqlens) - 1, split_offsets[-1].item()
 
-    h = k.new_empty(B, NS, H, K, V, dtype=k.dtype if not states_in_fp32 else torch.float)
-    h_kv = k.new_empty(B, NS, H, K, V, dtype=k.dtype if not states_in_fp32 else torch.float)
+    # h_kk is stored in fp32 to ensure positive definite in CG solver
+    h = k.new_empty(B, NS, H, K, V, dtype=torch.float)
+    h_kv = k.new_empty(B, NS, H, K, V, dtype=torch.bfloat16 if not states_in_fp32 else torch.float)
     h_final = k.new_empty(N, H, K, V, dtype=torch.float) if output_final_state else None
     h_kv_final = k.new_empty(N, H, K, V, dtype=torch.float)
 
-    def grid(meta): return (triton.cdiv(K, 64), triton.cdiv(V, 64), N * H)
+    def grid(meta): return (triton.cdiv(K, 64) * triton.cdiv(V, 64) * N * H,)
 
     chunk_mesa_net_fwd_kernel_h[grid](
         k=k,

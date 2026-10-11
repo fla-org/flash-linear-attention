@@ -449,6 +449,8 @@ def test_chunk_state_v_first(
             (4, 64, [0, 15], torch.float16),
             (4, 64, [0, 256, 500, 1000], torch.float16),
             (4, 100, [0, 15, 100, 300, 1200, 2000], torch.float16),
+            # exceed the 65535-block limit on grid axes 1 and 2
+            (32, 32, range(0, 32801, 16), torch.float16),
         ]
     ],
 )
@@ -456,10 +458,11 @@ def test_chunk_state_v_first(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
     reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set',
 )
+@pytest.mark.smoke
 def test_chunk_varlen(
     H: int,
     D: int,
-    cu_seqlens: list[int],
+    cu_seqlens: list[int] | range,
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
@@ -843,7 +846,6 @@ def test_simple_gla_to_mamba2(vary_A, dtype):
         assert final_ssd.allclose(final_fuse, 0, atol), f'final diff: {torch.abs(final_ssd - final_fuse).max()}'
 
     # mapping inputs Mamba2 -> FLA
-    # FLA Now use head_first = False, therefore there is no need to transpose inputs
     q = C
     k = B
     v = x

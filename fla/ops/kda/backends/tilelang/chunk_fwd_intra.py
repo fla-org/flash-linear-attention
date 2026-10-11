@@ -159,7 +159,10 @@ def chunk_kda_fwd_intra_tilelang(
     chunk_indices: torch.LongTensor | None = None,
     safe_gate: bool = False,
     disable_recompute: bool = False,
+    use_graph: bool = False,
 ):
+    if use_graph:
+        raise ValueError("KDA TileLang backend does not support graph capture (use_graph=True)")
     if gk is None or beta is None:
         raise ValueError("KDA TileLang fwd_intra backend requires gk and beta")
     if safe_gate:

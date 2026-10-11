@@ -411,8 +411,12 @@ def _build_kda_bwd_kernel(
 def chunk_kda_bwd_wy_dqkg_fused_tilelang(
     q, k, v, v_new, g, beta, A, h, do, dh, dv,
     scale=None, cu_seqlens=None, chunk_size=64,
-    chunk_indices=None, state_v_first=False,
+    chunk_indices=None, state_v_first=False, chunk_offsets=None, use_graph=False,
 ):
+    if use_graph:
+        raise ValueError("KDA TileLang backend does not support graph capture (use_graph=True)")
+    if chunk_offsets is not None:
+        raise ValueError("KDA TileLang backend currently supports dense fixed-length sequences only")
     data_tensors = {
         "q": q,
         "k": k,

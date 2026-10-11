@@ -130,6 +130,9 @@ def token_shift_fwd_kernel_short(
             tl.store(y + base_offset, delta, mask=m_d)
         else:
             tl.store(y + base_offset, -b_x, mask=m_d)
+        if STORE_FINAL_STATE:
+            if is_last_pos:
+                tl.store(cache_out + cache_offset, b_x, mask=m_d)
         return
 
     # Other positions: delta = prev - curr
@@ -409,7 +412,7 @@ def token_shift_fwd(
             N = B
         BD = triton.next_power_of_2(D)
         grid = (N, T)
-        IS_DECODE = T == 1 or (B == 1 and T == N)
+        IS_DECODE = T == 1
         token_shift_fwd_kernel_short[grid](
             x=x,
             y=y,

@@ -109,6 +109,7 @@ def test_parallel(
     IS_INTEL_ALCHEMIST,
     reason="Intel Triton Failure",
 )
+@pytest.mark.smoke
 def test_parallel_varlen(
     H: int,
     HQ: int,

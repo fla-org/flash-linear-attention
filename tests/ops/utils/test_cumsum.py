@@ -6,20 +6,60 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import os
+from importlib import import_module
 
 import pytest
 import torch
 
 from fla.ops.utils import chunk_global_cumsum, chunk_local_cumsum
-from fla.utils import assert_close, device
+from fla.utils import IS_NPU, assert_close, device
+
+
+@pytest.mark.skipif(not IS_NPU, reason="Ascend task-loop sentinel handling")
+@pytest.mark.parametrize("vector", [False, True])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_local_cumsum_graph_sentinels(monkeypatch, vector, reverse):
+    """Sentinels between valid tasks must not read state or terminate the task loop."""
+    module = import_module("fla.ops.utils.backends.triton_ascend.cumsum")
+    monkeypatch.setattr(module, "get_multiprocessor_count", lambda: 1)
+    torch.manual_seed(42)
+    shape = (1, 128, 2, 32) if vector else (1, 128, 2)
+    s = torch.randn(shape, device=device)
+    cu_seqlens = torch.tensor([0, 64, 128], dtype=torch.int32, device=device)
+    indices = torch.tensor([[-1, 0], [0, 0], [-1, 0], [1, 0], [-1, 0]], dtype=torch.int32, device=device)
+    ref = torch.cat([
+        reversed_cumsum(part, dim=1) if reverse else part.cumsum(1)
+        for part in s.split(64, dim=1)
+    ], dim=1)
+    actual = chunk_local_cumsum(
+        s,
+        chunk_size=64,
+        reverse=reverse,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=indices,
+        use_graph=True,
+    )
+    assert_close("local_cumsum_sentinels", ref, actual, 1e-3)
 
 
 def reversed_cumsum(x, dim=-1):
     dtype = x.dtype
     x = x.float()
-    c = x.cumsum(dim)
-    y = x + c.index_select(dim, x.new_tensor([c.shape[dim]-1], dtype=torch.long)) - c
-    return y.to(dtype)
+    return x.flip(dim).cumsum(dim).flip(dim).to(dtype)
+
+
+@pytest.mark.parametrize(('B', 'H'), [(1, 1), (2050, 32)], ids=['B1-H1', 'B2050-H32'])
+def test_scalar_reversed_cumsum_preserves_small_suffix(B: int, H: int):
+    prefix = torch.full((32,), 1e8, dtype=torch.float, device=device)
+    suffix = torch.ones(32, dtype=torch.float, device=device)
+    s = torch.cat((prefix, suffix)).reshape(1, 64, 1).expand(B, 64, H).contiguous()
+    expected_suffix = torch.arange(32, 0, -1, dtype=torch.float, device=device).view(1, 32, 1).expand(B, 32, H)
+
+    local = chunk_local_cumsum(s, chunk_size=64, reverse=True)
+    global_ = chunk_global_cumsum(s, reverse=True)
+
+    torch.testing.assert_close(local[:, 32:], expected_suffix, rtol=0, atol=0)
+    torch.testing.assert_close(global_[:, 32:], expected_suffix, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize(
@@ -64,6 +104,8 @@ def test_global_cumsum(
             (4, 256, [0, 15, 100, 300, 1200, 2000], torch.float),
             (4, 500, [0, 1, 100, 300, 1200, 2048], torch.float16),
             (2, 1024, [0, 200, 512, 1200, 2048], torch.float16),
+            # exceed the y-axis grid limit with multiple feature tiles
+            (32, 33, range(0, 32801, 16), torch.float),
         ]
     ],
 )
@@ -74,7 +116,7 @@ def test_global_cumsum(
 def test_global_cumsum_varlen(
     H: int,
     D: int,
-    cu_seqlens: list[int],
+    cu_seqlens: list[int] | range,
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)

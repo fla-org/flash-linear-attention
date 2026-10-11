@@ -157,7 +157,7 @@ def prepare_wy_repr_bwd_kernel(
         b_v = tl.load(p_v, mask=m_v, other=0.0)
         b_v_beta = (b_v * b_beta[:, None]).to(b_v.dtype)
         b_du = tl.load(p_du, mask=m_v, other=0.0)
-        b_dA += tl.dot(b_du, tl.trans(b_v_beta), allow_tf32=False)
+        b_dA = tl.dot(b_du, tl.trans(b_v_beta), b_dA, allow_tf32=False)
         b_dv_beta = tl.dot(b_A, b_du, allow_tf32=False)
         b_dv = b_dv_beta * b_beta[:, None]
         b_dbeta += tl.sum(b_dv_beta * b_v, 1)
@@ -173,7 +173,7 @@ def prepare_wy_repr_bwd_kernel(
         b_k = tl.load(p_k, mask=m_k, other=0.0)
         b_k_beta = (b_k * b_beta[:, None]).to(b_k.dtype)
         b_dw = tl.load(p_dw, mask=m_k, other=0.0)
-        b_dA += tl.dot(b_dw, tl.trans(b_k_beta), allow_tf32=False)
+        b_dA = tl.dot(b_dw, tl.trans(b_k_beta), b_dA, allow_tf32=False)
         b_dk_beta = tl.dot(b_A, b_dw, allow_tf32=False)
         b_dk = b_dk_beta * b_beta[:, None]
         b_dbeta += tl.sum(b_dk_beta * b_k, 1)

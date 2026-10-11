@@ -221,7 +221,10 @@ def chunk_kda_bwd_intra_tilelang(
     chunk_indices: torch.LongTensor | None = None,
     chunk_size: int = 64,
     safe_gate: bool = False,
+    use_graph: bool = False,
 ):
+    if use_graph:
+        raise ValueError("KDA TileLang backend does not support graph capture (use_graph=True)")
     if safe_gate:
         raise ValueError("KDA TileLang bwd_intra currently supports safe_gate=False only")
     if cu_seqlens is not None or chunk_indices is not None:

@@ -17,6 +17,7 @@ from .cumsum import (
 from .index import (
     get_max_num_splits,
     prepare_chunk_indices,
+    prepare_chunk_indices_static,
     prepare_chunk_offsets,
     prepare_cu_seqlens_from_lens,
     prepare_cu_seqlens_from_mask,
@@ -49,6 +50,7 @@ __all__ = [
     "pack_sequence",
     "prepare_block_csr",
     "prepare_chunk_indices",
+    "prepare_chunk_indices_static",
     "prepare_chunk_offsets",
     "prepare_cu_seqlens_from_lens",
     "prepare_cu_seqlens_from_mask",

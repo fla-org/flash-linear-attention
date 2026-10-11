@@ -9,9 +9,8 @@
 """
 Unified Buffer (UB) Manager for Ascend NPU.
 
-This module provides UB capacity detection and tiling strategy computation
-for running Triton kernels on Ascend NPU. It automatically calculates
-optimal block sizes based on UB capacity constraints to prevent UB overflow.
+This module provides UB capacity detection and tiling strategy computation for running Triton kernels on Ascend NPU.
+It automatically calculates optimal block sizes based on UB capacity constraints to prevent UB overflow.
 """
 
 import os
@@ -19,12 +18,15 @@ import warnings
 
 import torch
 import triton
+from triton.runtime import driver
 
-# Ascend Triton launch limits (see triton_ascend/activations.py).
+# Ascend Triton launch limits (see fla/modules/activations/triton_ascend.py).
 ASCEND_MAX_GRID_DIM = 65535
-# Legacy fused kernel byte cap (65536 // fp16 element size).
+# per-launch block-count budget for host-chunked grid launches.
+ASCEND_LAUNCH_BLOCK_BUDGET = 4096
+# legacy fused kernel byte cap (65536 // fp16 element size).
 _FALLBACK_MAX_FUSED_BLOCK = 65536 // 2
-# Conservative UB fallback when runtime detection is unavailable (64 KiB).
+# conservative UB fallback when runtime detection is unavailable (64 KiB).
 _FALLBACK_UB_CAPACITY_BITS = 65536 * 8
 
 
@@ -44,22 +46,20 @@ def is_npu_available() -> bool:
 
 
 def _fallback_ub_capacity(reason: str) -> int:
-    warnings.warn(
-        f"Using fallback UB capacity ({_FALLBACK_UB_CAPACITY_BITS // 8} bytes): {reason}",
-        stacklevel=3,
-    )
+    warnings.warn(f"Using fallback UB capacity ({_FALLBACK_UB_CAPACITY_BITS // 8} bytes): {reason}", stacklevel=3)
     return _FALLBACK_UB_CAPACITY_BITS
 
 
 def _normalize_tiling_dims(tiling_dim: int | tuple[int, ...]) -> set:
-    """
-    Normalize tiling dimension specification to a set of dimension indices.
+    """Normalize tiling dimensions to a set of indices.
 
     Args:
-        tiling_dim: Either an int (single dimension) or tuple of ints (multiple dimensions).
+        tiling_dim (int | tuple[int, ...]):
+            A single dimension index or a tuple of dimension indices.
 
     Returns:
-        Set of dimension indices that can be tiled.
+        set:
+            Dimension indices that can be tiled.
     """
     if isinstance(tiling_dim, int):
         return {tiling_dim}
@@ -77,83 +77,66 @@ def _default_strategy(
     shapes: tuple[tuple[int, ...], ...],
     tiling_dims: tuple[int | tuple[int, ...], ...],
 ) -> tuple[int, ...]:
-    """
-    Default tiling strategy: calculate maximum safe block size based on UB capacity.
-
-    This is a unified strategy function that works for all kernels by abstracting
-    the memory calculation as: memory_multiplier * BLOCK_SIZE * unit_param * dtype_size * 8 bits
+    """Calculate the maximum safe block size for each shape under the UB budget.
 
     Args:
-        ub_capacity_bits: UB capacity in bits
-        safety_margin: Safety margin as a float (e.g., 0.80 for 80%)
-        dtype_size: Size of data type in bytes (e.g., 2 for float16, 4 for float32)
-        memory_multiplier: Memory multiplier for estimating peak memory usage
-        shapes: Tuple of full shapes. Each shape is a tuple of dimension sizes.
-            - For ROPE: ((n_q_head, hd), (n_kv_head, hd))
-            - For GEGLU: ((n_cols,),)
-        tiling_dims: Tuple specifying which dimensions can be tiled for each shape.
-            Each element can be:
-            - int: single dimension index (e.g., 0 for first dimension)
-            - tuple of ints: multiple dimensions that can be tiled together
-            - For ROPE: (0, 0) means first dimension of each shape can be tiled
-            - For GEGLU: (0,) means first dimension of the shape can be tiled
-            Length must match len(shapes).
+        ub_capacity_bits (int):
+            UB capacity in bits.
+        safety_margin (float):
+            Fraction of UB capacity available to the kernel, such as 0.80 for 80%.
+        dtype_size (int):
+            Element size in bytes, such as 2 for float16 or 4 for float32.
+        memory_multiplier (float):
+            Multiplier for estimating peak memory usage.
+        shapes (tuple[tuple[int, ...], ...]):
+            Full shapes, such as `((n_q_head, hd), (n_kv_head, hd))` for RoPE or `((n_cols,),)` for GEGLU.
+        tiling_dims (tuple[int | tuple[int, ...], ...]):
+            Tiling dimension indices for each shape. Length must match `shapes`.
+            Each entry is an index or a tuple of indices that can be tiled together.
+            For example, `(0, 0)` tiles the first dimension of each RoPE shape, and `(0,)` tiles the GEGLU shape.
 
     Returns:
-        Tuple of maximum safe block sizes, one for each shape.
-        Each element is a power of 2.
+        tuple[int, ...]:
+            Maximum safe power-of-two block size for each shape.
 
     Note:
-        For each shape, fixed dimensions (non-tiling) are multiplied together to get unit_param.
-        The final block size is computed in compute_default_tiling_strategy by taking
-        min(desired_block_size, max_safe_block_size) where desired_block_size = triton.next_power_of_2(original_dim).
+        Fixed dimensions are multiplied into `unit_param` to estimate memory usage:
+        `memory_multiplier * BLOCK_SIZE * unit_param * dtype_size * 8` bits.
+        `compute_default_tiling_strategy` caps each padded requested block size at this maximum.
     """
     if not shapes or not tiling_dims:
         return ()
 
-    # Calculate max_safe_block_size for each tiling dimension
     max_safe_sizes = []
 
     for shape, tiling_dim in zip(shapes, tiling_dims):
-        # Normalize tiling_dim to a set of dimension indices
         tiling_dim_set = _normalize_tiling_dims(tiling_dim)
 
-        # Validate tiling dimensions are within shape bounds
         if not tiling_dim_set:
-            raise ValueError(
-                f"Invalid tiling_dim: {tiling_dim}. tiling_dim must be an int or a non-empty tuple of ints."
-            )
+            raise ValueError(f"Invalid tiling_dim: {tiling_dim}. tiling_dim must be an int or a non-empty tuple of ints.")
         if any(dim_idx < 0 or dim_idx >= len(shape) for dim_idx in tiling_dim_set):
             raise ValueError(
                 f"Invalid tiling_dim: {tiling_dim} for shape {shape}. "
                 f"All dimension indices must be in range [0, {len(shape)})."
             )
 
-        # Calculate unit_param: product of fixed (non-tiling) dimensions
         unit_param = 1.0
         for dim_idx, dim_size in enumerate(shape):
             if dim_idx not in tiling_dim_set:
                 if dim_size <= 0:
-                    # Invalid dimension size, use conservative default
+                    # invalid dimension size, use conservative default
                     unit_param = 1.0
                     break
                 unit_param *= float(dim_size)
 
-        # Ensure unit_param is at least 1.0
         if unit_param <= 0:
             unit_param = 1.0
 
-        # Calculate maximum safe block size based on UB capacity
-        # Memory: memory_multiplier * BLOCK_SIZE * unit_param * dtype_size * 8 bits
         SAFE_UB_CAPACITY_BITS = int(ub_capacity_bits * safety_margin)
 
-        # Solve: memory_multiplier * BLOCK_SIZE * unit_param * dtype_size * 8 <= SAFE_UB_CAPACITY_BITS
-        # BLOCK_SIZE <= SAFE_UB_CAPACITY_BITS / (memory_multiplier * unit_param * dtype_size * 8)
         max_block_size = int(SAFE_UB_CAPACITY_BITS // (memory_multiplier * unit_param * dtype_size * 8))
         max_block_size = max(1, max_block_size)
 
-        # Find largest power of 2 <= max_block_size
-        # Use triton.next_power_of_2(max_block_size + 1) // 2 to get the largest power of 2 <= max_block_size
         safe_block_size = triton.next_power_of_2(max_block_size + 1) // 2
         max_safe_sizes.append(safe_block_size)
 
@@ -169,11 +152,11 @@ class UBManager:
     """
 
     def __init__(self, ub_capacity_bits: int | None = None):
-        """
-        Initialize UB Manager.
+        """Initialize the Ascend UB capacity.
 
         Args:
-            ub_capacity_bits: UB capacity in bits. If None, will be detected automatically.
+            ub_capacity_bits (int, Optional):
+                UB capacity in bits. Detected automatically when omitted. Default: `None`.
         """
         self._npu_model = self._detect_npu_model()
         self._ub_capacity_bits = ub_capacity_bits or self._detect_ub_capacity()
@@ -200,7 +183,6 @@ class UBManager:
 
         try:
             dev_props = torch.npu.get_device_properties(0)
-            # Try to get model name from device properties
             return dev_props.name
         except Exception:
             pass
@@ -212,10 +194,9 @@ class UBManager:
         Detect UB capacity from environment variable or get_soc_spec.
 
         Returns:
-            UB capacity in bits. Falls back to a conservative default with a warning
-            when detection fails.
+            int:
+                UB capacity in bits. Falls back to a conservative default with a warning when detection fails.
         """
-        # Check environment variable first (in bits)
         env_capacity = os.getenv("ASCEND_UB_CAPACITY_BITS")
         if env_capacity is not None:
             try:
@@ -225,23 +206,20 @@ class UBManager:
             except ValueError:
                 pass
 
-        # Try to get from get_soc_spec (returns bytes, convert to bits)
         if is_npu_available():
             try:
                 from tbe.common.platform import get_soc_spec, set_current_compile_soc_info
 
-                # Set current SOC info for get_soc_spec to work correctly
+                # set current SOC info for get_soc_spec to work correctly
                 device = torch.npu
                 soc_info = device.get_device_name(device.current_device())
                 set_current_compile_soc_info(soc_info)
 
-                # Query UB size (get_soc_spec returns size in bytes)
                 ub_size_bytes = get_soc_spec("UB_SIZE")
 
                 if ub_size_bytes is None or ub_size_bytes <= 0:
                     raise ValueError(f"Invalid UB_SIZE from get_soc_spec: {ub_size_bytes}")
 
-                # Convert bytes to bits
                 ub_capacity_bits = ub_size_bytes * 8
                 return ub_capacity_bits
 
@@ -256,12 +234,9 @@ class UBManager:
                     "Set ASCEND_UB_CAPACITY_BITS to override."
                 )
 
-        return _fallback_ub_capacity(
-            "NPU is not available. Set ASCEND_UB_CAPACITY_BITS to override."
-        )
+        return _fallback_ub_capacity("NPU is not available. Set ASCEND_UB_CAPACITY_BITS to override.")
 
 
-# Global singleton instance
 _ub_manager: UBManager | None = None
 
 
@@ -280,40 +255,30 @@ def compute_default_tiling_strategy(
     shapes: tuple[tuple[int, ...], ...] | None = None,
     tiling_dims: tuple[int | tuple[int, ...], ...] | None = None,
 ) -> tuple[tuple[int, ...], ...] | None:
-    """
-    Compute tiling strategy using the default strategy function.
-
-    This function directly calls the default strategy and computes the final
-    tiling result. All kernels use the same unified strategy function, so
-    there's no need for kernel_name-based lookup.
+    """Compute UB-safe tiled shapes, padding non-tiling dimensions to powers of two.
 
     Args:
-        safety_margin: Safety margin as a float (e.g., 0.80 for 80%). Default is 0.80.
-        dtype_size: Size of data type in bytes (e.g., 2 for float16, 4 for float32).
-            Must be provided. If None or <= 0, defaults to 4 (float32).
-        memory_multiplier: Memory multiplier for estimating peak memory usage.
-            - For GEGLU: typically 10.0 for backward, 4.0 for forward
-            - For ROPE: typically 3.0
-            If None, defaults to 10.0 (conservative estimate).
-        shapes: Tuple of full shapes. Each shape is a tuple of dimension sizes.
-            - For ROPE: ((n_q_head, hd), (n_kv_head, hd))
-            - For GEGLU: ((n_cols,),)
-            Can pass original shapes (will handle padding internally) or padded shapes.
-        tiling_dims: Tuple specifying which dimensions can be tiled for each shape.
-            Each element can be:
-            - int: single dimension index (e.g., 0 for first dimension)
-            - tuple of ints: multiple dimensions that can be tiled together
-            - For ROPE: (0, 0) means first dimension of each shape can be tiled
-            - For GEGLU: (0,) means first dimension of the shape can be tiled
-            Length must match len(shapes). Cannot be empty.
+        safety_margin (float, Optional):
+            Fraction of UB capacity available to the kernel. Default: 0.80.
+        dtype_size (int, Optional):
+            Element size in bytes. `None` or non-positive values use 4 bytes (float32). Default: `None`.
+        memory_multiplier (float, Optional):
+            Peak-memory multiplier. `None` uses the conservative value 10.0. Default: `None`.
+            Typical values are 10.0 for GEGLU backward, 4.0 for GEGLU forward, and 3.0 for RoPE.
+        shapes (tuple[tuple[int, ...], ...], Optional):
+            Original or padded shapes. Default: `None`.
+            Examples: `((n_q_head, hd), (n_kv_head, hd))` for RoPE and `((n_cols,),)` for GEGLU.
+        tiling_dims (tuple[int | tuple[int, ...], ...], Optional):
+            Tiling dimension indices for each shape. Default: `None`.
+            Each entry is an index or a tuple of indices that can be tiled together.
+            For example, `(0, 0)` tiles the first dimension of each RoPE shape, and `(0,)` tiles the GEGLU shape.
+            A non-empty value must have the same length as `shapes`.
 
     Returns:
-        Tuple of tiled shapes with same structure as input shapes.
-        Tiling dimensions are replaced with computed block sizes (power of 2),
-        while non-tiling dimensions are padded to next power of 2.
-        - For ROPE: ((block_size_q, pad_hd), (block_size_kv, pad_hd))
-        - For GEGLU: ((block_size,),)
-        Returns None if shapes or tiling_dims is None or empty.
+        tuple[tuple[int, ...], ...] | None:
+            Shapes with UB-safe power-of-two tiles and padded non-tiling dimensions.
+            Returns `None` when `shapes` or `tiling_dims` is `None` or empty.
+            Examples: `((block_size_q, pad_hd), (block_size_kv, pad_hd))` for RoPE and `((block_size,),)` for GEGLU.
 
     Examples:
         >>> # ROPE forward
@@ -344,53 +309,46 @@ def compute_default_tiling_strategy(
         return None
 
     if dtype_size is None or dtype_size <= 0:
-        dtype_size = 4  # Default to float32
+        # default to float32
+        dtype_size = 4
 
     if memory_multiplier is None or memory_multiplier <= 0:
-        memory_multiplier = 10.0  # Default conservative estimate
+        # use a conservative estimate
+        memory_multiplier = 10.0
 
-    # Call strategy to get max_safe_block_size for each shape
     max_supported = _default_strategy(
-        ub_manager.ub_capacity_bits,
-        safety_margin,
-        dtype_size,
-        memory_multiplier,
-        shapes,
-        tiling_dims,
+        ub_capacity_bits=ub_manager.ub_capacity_bits,
+        safety_margin=safety_margin,
+        dtype_size=dtype_size,
+        memory_multiplier=memory_multiplier,
+        shapes=shapes,
+        tiling_dims=tiling_dims,
     )
 
     if not max_supported or len(max_supported) != len(shapes):
         return None
 
-    # Build result: same structure as shapes, with tiling dims replaced by computed block sizes
     result = []
     for shape, tiling_dim, max_safe in zip(shapes, tiling_dims, max_supported):
         result_shape = list(shape)
 
-        # Normalize tiling_dim to a set of dimension indices
         tiling_dim_set = _normalize_tiling_dims(tiling_dim)
 
-        # Validate tiling dimensions are within shape bounds
         if not tiling_dim_set:
-            raise ValueError(
-                f"Invalid tiling_dim: {tiling_dim}. tiling_dim must be an int or a non-empty tuple of ints."
-            )
+            raise ValueError(f"Invalid tiling_dim: {tiling_dim}. tiling_dim must be an int or a non-empty tuple of ints.")
         if any(dim_idx < 0 or dim_idx >= len(result_shape) for dim_idx in tiling_dim_set):
             raise ValueError(
                 f"Invalid tiling_dim: {tiling_dim} for shape {shape}. "
                 f"All dimension indices must be in range [0, {len(result_shape)})."
             )
 
-        # Replace tiling dimensions with computed block sizes
-        # For each tiling dimension, compute: min(desired, max_safe)
         for dim_idx in tiling_dim_set:
             original_dim = result_shape[dim_idx]
             desired = triton.next_power_of_2(original_dim)
             final_val = min(desired, max_safe)
-            final_val = max(1, final_val)  # Ensure at least 1
+            final_val = max(1, final_val)
             result_shape[dim_idx] = final_val
 
-        # Pad non-tiling dimensions to next power of 2
         for dim_idx, dim_size in enumerate(result_shape):
             if dim_idx not in tiling_dim_set:
                 result_shape[dim_idx] = triton.next_power_of_2(dim_size)
@@ -440,8 +398,8 @@ def compute_vocab_block_size(
 ) -> int:
     """UB-safe vocab tile size respecting Ascend grid dim0 limit."""
     ub_block = compute_ub_block_size(
-        vocab_size,
-        memory_multiplier,
+        dim_size=vocab_size,
+        memory_multiplier=memory_multiplier,
         safety_margin=safety_margin,
         fallback=fallback,
     )
@@ -462,15 +420,12 @@ def compute_elementwise_block_size(
     if fallback is None:
         fallback = _FALLBACK_MAX_FUSED_BLOCK
     ub_block = compute_ub_block_size(
-        n_elements,
-        memory_multiplier,
+        dim_size=n_elements,
+        memory_multiplier=memory_multiplier,
         safety_margin=safety_margin,
         fallback=fallback,
     )
-    grid_min = max(
-        min_block,
-        triton.next_power_of_2((n_elements + ASCEND_MAX_GRID_DIM - 1) // ASCEND_MAX_GRID_DIM),
-    )
+    grid_min = max(min_block, triton.next_power_of_2((n_elements + ASCEND_MAX_GRID_DIM - 1) // ASCEND_MAX_GRID_DIM))
     return min(ub_block, grid_min)
 
 
@@ -488,8 +443,8 @@ def compute_activation_block_size(
     if memory_multiplier is None:
         memory_multiplier = 6.0 if is_backward else 3.0
     block = compute_ub_block_size(
-        total_elements,
-        memory_multiplier,
+        dim_size=total_elements,
+        memory_multiplier=memory_multiplier,
         safety_margin=safety_margin,
         fallback=2048,
         min_block=256,
@@ -542,12 +497,7 @@ def compute_row_tile_block_size(
     return block
 
 
-def max_grid_axis_chunks(
-    axis_size: int,
-    other_grid_product: int,
-    *,
-    max_grid: int = ASCEND_MAX_GRID_DIM,
-) -> int:
+def max_grid_axis_chunks(axis_size: int, other_grid_product: int, *, max_grid: int = ASCEND_MAX_GRID_DIM) -> int:
     """Max launch chunks along one grid axis while keeping the product <= max_grid."""
     return max(1, max_grid // max(other_grid_product, 1))
 
@@ -564,13 +514,94 @@ def compute_grid_limited_tile_size(
     return max(min_block, min(ub_safe_block, axis_size))
 
 
-def iter_axis_launch_chunks(
-    axis_size: int,
-    other_grid_product: int,
-    *,
-    max_grid: int = ASCEND_MAX_GRID_DIM,
-):
+def iter_axis_launch_chunks(axis_size: int, other_grid_product: int, *, max_grid: int = ASCEND_MAX_GRID_DIM):
     """Yield ``(offset, chunk_len)`` for host-side grid-axis tiling."""
-    max_chunks = max_grid_axis_chunks(axis_size, other_grid_product, max_grid=max_grid)
+    max_chunks = max_grid_axis_chunks(axis_size=axis_size, other_grid_product=other_grid_product, max_grid=max_grid)
     for offset in range(0, axis_size, max_chunks):
         yield offset, min(max_chunks, axis_size - offset)
+
+
+def get_npu_properties() -> dict:
+    """Return the triton NPU device properties dict for the current device."""
+    return driver.active.utils.get_device_properties(torch.npu.current_device())
+
+
+def _launch_grid_chunked_recursive(
+    kernel,
+    grid: tuple[int, ...],
+    offset_keys: tuple[str, ...],
+    kernel_kwargs: dict,
+    quanta: tuple[int, ...],
+    budget: int,
+    extra: dict,
+    lens: list[int],
+    ax: int,
+    prod_so_far: int,
+) -> None:
+    quantum = quanta[ax]
+    rest = prod_so_far * quantum
+    for size in grid[ax + 1:]:
+        rest *= size
+    for off_q, len_q in iter_axis_launch_chunks(
+        axis_size=triton.cdiv(grid[ax], quantum),
+        other_grid_product=rest,
+        max_grid=budget,
+    ):
+        offset = off_q * quantum
+        lens[ax] = min(len_q * quantum, grid[ax] - offset)
+        kernel_kwargs[offset_keys[ax]] = offset
+        if ax == len(grid) - 1:
+            kernel[tuple(lens)](**kernel_kwargs, **extra)
+        else:
+            _launch_grid_chunked_recursive(
+                kernel=kernel,
+                grid=grid,
+                offset_keys=offset_keys,
+                kernel_kwargs=kernel_kwargs,
+                quanta=quanta,
+                budget=budget,
+                extra=extra,
+                lens=lens,
+                ax=ax + 1,
+                prod_so_far=prod_so_far * len_q * quantum,
+            )
+
+
+def launch_grid_chunked(
+    kernel,
+    grid: tuple[int, ...],
+    *,
+    offset_keys: tuple[str, ...],
+    kernel_kwargs: dict,
+    quanta: tuple[int, ...] | None = None,
+    budget: int = ASCEND_LAUNCH_BLOCK_BUDGET,
+    compile_kwargs: dict | None = None,
+) -> None:
+    """Launch a triton kernel over `grid` in host-side chunks.
+
+    Ascend caps the number of blocks per launch,
+    so axes are chunked such that the per-launch block product stays within `budget`.
+    The global offset of each chunk is forwarded via `kernel_kwargs[offset_keys[ax]]`;
+    declare these args `do_not_specialize` in the kernel to avoid recompiles.
+    `quanta[ax]` snaps chunk boundaries of axis `ax` to multiples of that many blocks,
+    for grids packing several logical indices into one axis (e.g. ``nt * nc``).
+    Keeping the product within `budget` (<= `ASCEND_MAX_GRID_DIM`) also keeps every axis within the per-axis limit.
+    `compile_kwargs` is forwarded unchanged to each ``kernel[grid](...)`` launch.
+    """
+    dims = len(grid)
+    quanta = quanta or (1,) * dims
+    extra = compile_kwargs or {}
+    lens = [0] * dims
+
+    _launch_grid_chunked_recursive(
+        kernel=kernel,
+        grid=grid,
+        offset_keys=offset_keys,
+        kernel_kwargs=kernel_kwargs,
+        quanta=quanta,
+        budget=budget,
+        extra=extra,
+        lens=lens,
+        ax=0,
+        prod_so_far=1,
+    )

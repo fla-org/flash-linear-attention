@@ -12,10 +12,10 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
-from fla.ops.backends import dispatch
+from fla.backends import dispatch
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.index import prepare_chunk_indices
-from fla.ops.utils.op import exp
+from fla.ops.utils.op import exp, unflatten_program_id
 from fla.ops.utils.softplus import softplus
 from fla.utils import IS_AMD, autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, check_shared_mem, input_guard
 
@@ -57,20 +57,44 @@ def naive_kda_gate(
 
 def naive_kda_lowerbound_gate(
     g: torch.Tensor,
-    A_log: torch.Tensor,
+    A_log: torch.Tensor | None = None,
     dt_bias: torch.Tensor | None = None,
     lower_bound: float = -5.0,
     output_dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
+    """
+    Torch reference implementation for KDA lowerbound gate computation.
+
+    Computes: ``g = lower_bound * sigmoid(exp(A_log) * (g + dt_bias))``.
+    When ``A_log`` is ``None``: ``g = lower_bound * sigmoid(g + dt_bias)``.
+
+    Args:
+        g (torch.Tensor):
+            Input tensor of shape `[..., H, K]`.
+        A_log (torch.Tensor | None):
+            Optional parameter tensor with `H` elements.
+        dt_bias (torch.Tensor | None):
+            Optional bias tensor added to `g` before activation, shape `[H * K]`.
+        lower_bound (float):
+            Lower bound for the gate output. Default: `-5.0`.
+        output_dtype (torch.dtype):
+            The dtype of the output tensor. Default: `torch.float32`.
+
+    Returns:
+        Output tensor of shape `[..., H, K]`.
+    """
     H, _ = g.shape[-2:]
     g = g.float()
     if dt_bias is not None:
         g = g + dt_bias.view(H, -1)
-    g = lower_bound * F.sigmoid(A_log.view(H, 1).exp() * g)
+    if A_log is not None:
+        g = A_log.view(H, 1).float().exp() * g
+    g = lower_bound * F.sigmoid(g)
     return g.to(output_dtype)
 
 
 @triton.heuristics({
+    "HAS_A": lambda args: args["A_log"] is not None,
     "HAS_BIAS": lambda args: args["dt_bias"] is not None,
     "HAS_BETA": lambda args: args["beta"] is not None,
     'USE_LOWER_BOUND': lambda args: args['lower_bound'] is not None,
@@ -99,13 +123,14 @@ def kda_gate_fwd_kernel(
     D: tl.constexpr,
     BT: tl.constexpr,
     BD: tl.constexpr,
+    HAS_A: tl.constexpr,
     HAS_BIAS: tl.constexpr,
     HAS_BETA: tl.constexpr,
     USE_LOWER_BOUND: tl.constexpr,
 ):
-    i_t, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1)
+    i_t, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
 
-    b_A = tl.load(A_log + i_h).to(tl.float32)
+    b_A = tl.load(A_log + i_h).to(tl.float32) if HAS_A else 1.0
 
     o_t = i_t * BT + tl.arange(0, BT)
     o_d = tl.arange(0, BD)
@@ -121,7 +146,7 @@ def kda_gate_fwd_kernel(
     if not USE_LOWER_BOUND:
         b_yg = -exp(b_A) * softplus(b_g)
     else:
-        b_yg = lower_bound * tl.sigmoid(exp(b_A) * b_g)
+        b_yg = lower_bound * tl.sigmoid((exp(b_A) if HAS_A else b_A) * b_g)
     tl.store(p_yg, b_yg.to(p_yg.dtype.element_ty), mask=m_g)
 
     if HAS_BETA:
@@ -132,6 +157,7 @@ def kda_gate_fwd_kernel(
 
 
 @triton.heuristics({
+    "HAS_A": lambda args: args["A_log"] is not None,
     "HAS_BIAS": lambda args: args["dt_bias"] is not None,
     "HAS_BETA": lambda args: args["beta"] is not None,
     'USE_LOWER_BOUND': lambda args: args['lower_bound'] is not None,
@@ -155,6 +181,7 @@ def kda_gate_bwd_kernel(
     dyb,
     dg,
     dA,
+    dbias,
     dbeta,
     lower_bound,
     T,
@@ -162,13 +189,14 @@ def kda_gate_bwd_kernel(
     D: tl.constexpr,
     BT: tl.constexpr,
     BD: tl.constexpr,
+    HAS_A: tl.constexpr,
     HAS_BIAS: tl.constexpr,
     HAS_BETA: tl.constexpr,
     USE_LOWER_BOUND: tl.constexpr,
 ):
-    i_t, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1)
+    i_t, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
 
-    b_A = tl.load(A_log + i_h).to(tl.float32)
+    b_A = tl.load(A_log + i_h).to(tl.float32) if HAS_A else 1.0
 
     o_t = i_t * BT + tl.arange(0, BT)
     o_d = tl.arange(0, BD)
@@ -193,7 +221,7 @@ def kda_gate_bwd_kernel(
         b_dg = b_A * (b_dyg * tl.sigmoid(b_g))
         b_dA = tl.sum(tl.sum(b_dyg * b_yg, 1), 0)
     else:
-        b_A = exp(b_A)
+        b_A = exp(b_A) if HAS_A else b_A
         b_inner = b_A * b_g
         b_sig = tl.sigmoid(b_inner)
         b_dsig = b_sig * (1.0 - b_sig)
@@ -201,10 +229,14 @@ def kda_gate_bwd_kernel(
         b_d_inner_term = b_dyg * (lower_bound * b_dsig)
         # dg = d_inner_term * A
         b_dg = b_d_inner_term * b_A
-        b_dA = tl.sum(tl.sum(b_dg * b_g, 1), 0)
+        b_dA = tl.sum(tl.sum(b_dg * b_g, 1), 0) if HAS_A else 0.0
 
     tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), mask=m_g)
-    tl.store(dA + i_t * H + i_h, b_dA)
+    if HAS_A:
+        tl.store(dA + i_t * H + i_h, b_dA)
+    if HAS_BIAS:
+        b_dbias = tl.sum(b_dg, 0)
+        tl.store(dbias + (i_t * H + i_h) * D + o_d, b_dbias, mask=o_d < D)
 
     if HAS_BETA:
         p_b = beta + i_h + o_t * H
@@ -219,7 +251,7 @@ def kda_gate_bwd_kernel(
 @dispatch('kda')
 def kda_gate_fwd(
     g: torch.Tensor,
-    A_log: torch.Tensor,
+    A_log: torch.Tensor | None = None,
     dt_bias: torch.Tensor | None = None,
     lower_bound: float | None = None,
     output_dtype: torch.dtype = torch.float32,
@@ -251,21 +283,21 @@ def kda_gate_fwd(
 @dispatch('kda')
 def kda_gate_bwd(
     g: torch.Tensor,
-    A_log: torch.Tensor,
+    A_log: torch.Tensor | None = None,
     dt_bias: torch.Tensor | None = None,
     dyg: torch.Tensor | None = None,
     lower_bound: float | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
     H, K = g.shape[-2:]
     T = g.numel() // (H * K)
     BT = 32
     NT = triton.cdiv(T, BT)
 
-    dg = torch.empty_like(g, dtype=torch.float32)
-    dA = A_log.new_empty(NT, H, dtype=torch.float32)
+    dg = torch.empty_like(g)
+    dA = g.new_empty(NT, H, dtype=torch.float32) if A_log is not None else None
+    dbias = g.new_empty(NT, H * K, dtype=torch.float32) if dt_bias is not None else None
 
-    grid = (triton.cdiv(T, BT), H)
-    kda_gate_bwd_kernel[grid](
+    kda_gate_bwd_kernel[(NT, H)](
         g=g,
         A_log=A_log,
         dt_bias=dt_bias,
@@ -274,6 +306,7 @@ def kda_gate_bwd(
         dyb=None,
         dg=dg,
         dA=dA,
+        dbias=dbias,
         dbeta=None,
         T=T,
         H=H,
@@ -283,9 +316,8 @@ def kda_gate_bwd(
         lower_bound=lower_bound,
     )
 
-    dg = dg.view_as(g).type_as(g)
-    dA = dA.sum(0).view_as(A_log).type_as(A_log)
-    dbias = dg.view(-1, H * K).sum(0).to(dt_bias) if dt_bias is not None else None
+    dA = dA.sum(0).view_as(A_log).type_as(A_log) if A_log is not None else None
+    dbias = dbias.sum(0).to(dt_bias) if dt_bias is not None else None
 
     return dg, dA, dbias
 
@@ -297,7 +329,7 @@ class KDAGateFunction(torch.autograd.Function):
     def forward(
         ctx,
         g: torch.Tensor,
-        A_log: torch.Tensor,
+        A_log: torch.Tensor | None = None,
         dt_bias: torch.Tensor | None = None,
         lower_bound: float | None = None,
         output_dtype: torch.dtype = torch.float32,
@@ -328,11 +360,11 @@ class KDAGateFunction(torch.autograd.Function):
         return dg, dA, dbias, None, None
 
 
-@dispatch('kda')
 @torch.compiler.disable
+@dispatch('kda')
 def fused_kda_gate(
     g: torch.Tensor,
-    A_log: torch.Tensor,
+    A_log: torch.Tensor | None = None,
     dt_bias: torch.Tensor | None = None,
     lower_bound: float | None = None,
     output_dtype: torch.dtype = torch.float32,
@@ -341,12 +373,15 @@ def fused_kda_gate(
     Fused KDA gate computation with autograd support.
 
     Computes: g = -A_log.exp().unsqueeze(-1) * softplus(g + dt_bias.view(g.shape[-2:]))
+    When ``lower_bound`` is set: g = lower_bound * sigmoid(exp(A_log) * (g + dt_bias)).
+    When ``A_log`` is ``None`` (requires ``lower_bound``): g = lower_bound * sigmoid(g + dt_bias).
 
     Args:
         g (torch.Tensor):
             Input tensor of shape `[..., H, K]`.
-        A_log (torch.Tensor):
-            Parameter tensor with `H` elements.
+        A_log (torch.Tensor | None):
+            Optional parameter tensor with `H` elements.
+            When ``None``, the gate reduces to ``lower_bound * sigmoid(g + dt_bias)`` (requires ``lower_bound``).
         dt_bias (torch.Tensor | None):
             Optional bias tensor added to `g` before activation, shape `[H * K]`.
 
@@ -357,6 +392,7 @@ def fused_kda_gate(
 
 
 @triton.heuristics({
+    "HAS_A": lambda args: args["A_log"] is not None,
     "HAS_BIAS": lambda args: args["dt_bias"] is not None,
     'HAS_SCALE': lambda args: args['scale'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
@@ -387,15 +423,21 @@ def kda_gate_chunk_cumsum_vector_kernel(
     BT: tl.constexpr,
     BS: tl.constexpr,
     REVERSE: tl.constexpr,
+    HAS_A: tl.constexpr,
     HAS_BIAS: tl.constexpr,
     HAS_SCALE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     USE_LOWER_BOUND: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
 ):
-    i_s, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_s, i_t = unflatten_program_id(tl.cdiv(S, BS))
+    i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        i_n = tl.load(chunk_indices + i_t * 2).to(tl.int32)
+        if USE_GRAPH and i_n < 0:
+            return
+        i_t = tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
@@ -414,12 +456,12 @@ def kda_gate_chunk_cumsum_vector_kernel(
         b_bias = tl.load(dt_bias + i_h * S + o_s, mask=o_s < S, other=0.0).to(tl.float32)
         b_s = b_s + b_bias[None, :]
 
-    b_A = tl.load(A_log + i_h).to(tl.float32)
+    b_A = tl.load(A_log + i_h).to(tl.float32) if HAS_A else 1.0
     if not USE_LOWER_BOUND:
         # Apply gate: -exp(A_log) * softplus(g + bias)
         b_gate = -exp(b_A) * softplus(b_s)
     else:
-        b_gate = lower_bound * tl.sigmoid(exp(b_A) * b_s)
+        b_gate = lower_bound * tl.sigmoid((exp(b_A) if HAS_A else b_A) * b_s)
 
     # Apply chunk local cumsum
     if REVERSE:
@@ -436,7 +478,7 @@ def kda_gate_chunk_cumsum_vector_kernel(
 @dispatch('kda')
 def kda_gate_chunk_cumsum(
     g: torch.Tensor,
-    A_log: torch.Tensor,
+    A_log: torch.Tensor | None,
     chunk_size: int,
     scale: float = None,
     dt_bias: torch.Tensor | None = None,
@@ -444,6 +486,7 @@ def kda_gate_chunk_cumsum(
     output_dtype: torch.dtype | None = torch.float,
     chunk_indices: torch.LongTensor | None = None,
     lower_bound: float | None = None,
+    use_graph: bool = False,
     **kwargs,
 ) -> torch.Tensor:
     if cu_seqlens is not None:
@@ -456,13 +499,16 @@ def kda_gate_chunk_cumsum(
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     assert chunk_size == 2**(chunk_size.bit_length()-1), "chunk_size must be a power of 2"
 
-    g_org, g = g, torch.empty_like(g, dtype=output_dtype or g.dtype)
-    def grid(meta): return (triton.cdiv(meta['S'], meta['BS']), NT, B * H)
+    o = torch.empty_like(g, dtype=output_dtype or g.dtype)
+
+    def grid(meta):
+        return (triton.cdiv(meta['S'], meta['BS']) * NT, B * H)
+
     kda_gate_chunk_cumsum_vector_kernel[grid](
-        s=g_org,
+        s=g,
         A_log=A_log,
         dt_bias=dt_bias,
-        o=g,
+        o=o,
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
@@ -472,5 +518,6 @@ def kda_gate_chunk_cumsum(
         S=S,
         BT=BT,
         REVERSE=False,
+        USE_GRAPH=use_graph,
     )
-    return g
+    return o

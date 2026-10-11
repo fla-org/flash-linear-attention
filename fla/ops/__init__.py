@@ -10,6 +10,7 @@ from .attn import parallel_attn
 from .attnres import fused_attnres
 from .based import fused_chunk_based, parallel_based
 from .comba import chunk_comba, fused_recurrent_comba
+from .cyfa import chunk_cyfa, fused_recurrent_cyfa
 from .delta_rule import chunk_delta_rule, fused_chunk_delta_rule, fused_recurrent_delta_rule
 from .forgetting_attn import parallel_forgetting_attn
 from .gated_delta_rule import chunk_gated_delta_rule, chunk_gdn, fused_recurrent_gated_delta_rule, fused_recurrent_gdn
@@ -27,18 +28,26 @@ from .lightning_attn import chunk_lightning_attn, fused_recurrent_lightning_attn
 from .linear_attn import chunk_linear_attn, fused_chunk_linear_attn, fused_recurrent_linear_attn
 from .log_linear_attn import chunk_log_linear_attn
 from .mesa_net import chunk_mesa_net
+from .momentum_delta_rule import (
+    chunk_momentum_delta_rule,
+    fused_recurrent_momentum_delta_rule,
+)
 from .nsa import parallel_nsa
 from .parallax import parallel_parallax
 from .path_attn import parallel_path_attn
+from .precond_gated_delta_rule import chunk_precond_gated_delta_rule, fused_recurrent_precond_gated_delta_rule
+from .precond_kda import chunk_precond_kda, fused_recurrent_precond_kda
 from .retention import chunk_retention, fused_chunk_retention, fused_recurrent_retention, parallel_retention
 from .rwkv6 import chunk_rwkv6, fused_recurrent_rwkv6
 from .rwkv7 import chunk_rwkv7, fused_recurrent_rwkv7
 from .simple_gla import chunk_simple_gla, fused_chunk_simple_gla, fused_recurrent_simple_gla, parallel_simple_gla
+from .stickbreaking_attn import parallel_stickbreaking_attn
 from .wall_attn import parallel_wall_attn, parallel_wall_attn_decode
 
 __all__ = [
     'chunk_abc',
     'chunk_comba',
+    'chunk_cyfa',
     'chunk_delta_rule',
     'chunk_dplr_delta_rule',
     'chunk_gated_delta_rule',
@@ -51,6 +60,9 @@ __all__ = [
     'chunk_linear_attn',
     'chunk_log_linear_attn',
     'chunk_mesa_net',
+    'chunk_momentum_delta_rule',
+    'chunk_precond_gated_delta_rule',
+    'chunk_precond_kda',
     'chunk_retention',
     'chunk_rwkv6',
     'chunk_rwkv7',
@@ -63,6 +75,7 @@ __all__ = [
     'fused_chunk_retention',
     'fused_chunk_simple_gla',
     'fused_recurrent_comba',
+    'fused_recurrent_cyfa',
     'fused_recurrent_delta_rule',
     'fused_recurrent_dplr_delta_rule',
     'fused_recurrent_gated_delta_rule',
@@ -74,6 +87,9 @@ __all__ = [
     'fused_recurrent_kda',
     'fused_recurrent_lightning_attn',
     'fused_recurrent_linear_attn',
+    'fused_recurrent_momentum_delta_rule',
+    'fused_recurrent_precond_gated_delta_rule',
+    'fused_recurrent_precond_kda',
     'fused_recurrent_retention',
     'fused_recurrent_rwkv6',
     'fused_recurrent_rwkv7',
@@ -86,6 +102,7 @@ __all__ = [
     'parallel_path_attn',
     'parallel_retention',
     'parallel_simple_gla',
+    'parallel_stickbreaking_attn',
     'parallel_wall_attn',
     'parallel_wall_attn_decode',
 ]

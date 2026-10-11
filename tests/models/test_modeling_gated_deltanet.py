@@ -8,9 +8,14 @@
 import pytest
 import torch
 
-from fla.models import GatedDeltaNetConfig
+from fla.models import GatedDeltaNetConfig, GatedDeltaNetForCausalLM
+from fla.utils import assert_close, device
 
-from .test_modeling_base import run_test_generation, run_test_model_forward_backward
+from .test_modeling_base import (
+    run_test_generate_matches_forward,
+    run_test_generation,
+    run_test_model_forward_backward,
+)
 
 
 # ===================================================================================
@@ -72,3 +77,48 @@ def test_generation(
     dtype: torch.dtype,
 ):
     run_test_generation(L, B, T, H, D, GatedDeltaNetConfig, dtype)
+
+
+@pytest.mark.parametrize(
+    ['L', 'B', 'T', 'H', 'D', 'dtype'],
+    [
+        pytest.param(*test, id="L{}-B{}-T{}-H{}-D{}-{}".format(*test))
+        for test in [
+            (2, 2, 64, 8, 64, torch.float32),
+        ]
+    ],
+)
+def test_generate_prefill(
+    L: int,
+    B: int,
+    T: int,
+    H: int,
+    D: int,
+    dtype: torch.dtype,
+):
+    run_test_generate_matches_forward(L, B, T, H, D, GatedDeltaNetConfig, dtype)
+
+
+@torch.no_grad()
+def test_logits_to_keep_with_labels():
+    B, T, H, D, V = 2, 8, 2, 8, 32
+    config = GatedDeltaNetConfig(
+        hidden_size=H * D,
+        num_hidden_layers=1,
+        num_heads=H,
+        head_dim=D,
+        expand_v=1,
+        vocab_size=V,
+        fuse_cross_entropy=False,
+    )
+    model = GatedDeltaNetForCausalLM(config).eval().to(device)
+    input_ids = torch.randint(V, (B, T), device=device)
+
+    expected = model(input_ids, labels=input_ids)
+    actual = model(input_ids, labels=input_ids, logits_to_keep=1)
+    inference = model(input_ids, logits_to_keep=1)
+
+    assert actual.logits.shape == expected.logits.shape == (B, T, V)
+    assert inference.logits.shape == (B, 1, V)
+    assert torch.isfinite(actual.loss)
+    assert_close('loss', expected.loss, actual.loss, 1e-6)

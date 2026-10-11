@@ -87,6 +87,7 @@ class WallAttention(nn.Module):
             self.num_kv_heads = self.num_heads
         else:
             self.num_kv_heads = num_kv_heads
+        assert self.num_heads % self.num_kv_heads == 0, "num_heads must be divisible by num_kv_heads"
         self.num_kv_groups = num_heads // self.num_kv_heads
         self.head_dim = self.hidden_size // self.num_heads
         self.kv_dim = self.num_kv_heads * self.head_dim
@@ -163,6 +164,9 @@ class WallAttention(nn.Module):
 
         if past_key_values is not None:
             assert cu_seqlens is None, "cu_seqlens should not be provided when past_key_values is not None"
+            cache_has_content = past_key_values.get_seq_length(self.layer_idx) > 0
+            assert attention_mask is None or not cache_has_content, \
+                "attention_mask should not be provided when past_key_values has content"
             if self.window_size is None:
                 # Non-windowed: cache the *pre-rescaled* decode state and extend it one
                 # column per step, so prep is O(q_len) instead of rebuilding k_tilde/P
@@ -178,10 +182,11 @@ class WallAttention(nn.Module):
                     offset=q_len,
                     cache_kwargs=dict(window_size=self.window_size),
                 )['attn_state']
-                if self.use_scalar_gate:
-                    k, v, g, gs = state
-                else:
-                    k, v, g = state
+                if cache_has_content:
+                    if self.use_scalar_gate:
+                        k, v, g, gs = state
+                    else:
+                        k, v, g = state
                 kv_len = k.shape[1]
                 if q_len < kv_len:
                     o = self._decode_rebuild(q, k, v, g, gs)
@@ -237,7 +242,7 @@ class WallAttention(nn.Module):
 
         if prior is None:
             # Prefill: lean on the tested builder for the full pass.
-            k_tilde_new, _ = build_wall_kv_cache(k, p_new, C)
+            k_tilde_new, _ = build_wall_kv_cache(k, p_new, C, out_dtype=torch.bfloat16)
         else:
             prior_len = prior[2].shape[1]
             k_tilde_new = self._rescale_new_keys(k, p_new, prior[2], prior_len, C, G)
@@ -290,14 +295,14 @@ class WallAttention(nn.Module):
         r_new = p_new.index_select(1, idx_new).float()
         r = torch.where(in_prior[None, :, None, None], r_prior, r_new)  # [B, q_len, HQ, K]
         k_q = k.repeat_interleave(G, dim=2).float()
-        return (k_q * torch.exp2(r - p_new)).to(k.dtype)
+        return (k_q * torch.exp2(r - p_new)).to(torch.bfloat16)
 
     def _decode_rebuild(self, q, k, v, g, gs):
         """Windowed decode: rebuild the rescale from the cached raw suffix each step."""
         scale = self.head_dim ** -0.5
         # P carries the base-2 conversion (RCP_LN2), matching the training forward.
         p = chunk_global_cumsum(g, scale=RCP_LN2)
-        k_tilde, r_cache = build_wall_kv_cache(k, p, WALL_DECODE_CHUNK)
+        k_tilde, r_cache = build_wall_kv_cache(k, p, WALL_DECODE_CHUNK, out_dtype=torch.bfloat16)
         p_curr = p[:, -q.shape[1]:].contiguous()
         gs_cumsum = chunk_global_cumsum(gs, scale=RCP_LN2) if gs is not None else None
         o, _ = parallel_wall_attn_decode(

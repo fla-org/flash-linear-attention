@@ -229,7 +229,7 @@ class SambaPreTrainedModel(PreTrainedModel):
             #   > the weights of residual layers at initialization by a factor of 1/√N where N is the # of residual layers.
             #   >   -- GPT-2 :: https://openai.com/blog/better-language-models/
             #
-            # Reference (Megatron-LM): https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/model/gpt_model.py
+            # Reference (Megatron-LM): https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/models/gpt/gpt_model.py
             for name, p in module.named_parameters():
                 if name in ["out_proj.weight"]:
                     # Special Scaled Initialization --> There are 2 Layer Norms per Transformer Block
@@ -411,7 +411,11 @@ class SambaForCausalLM(SambaPreTrainedModel, FLAGenerationMixin):
 
         loss, logits = None, None
         if not self.config.fuse_linear_cross_entropy or labels is None:
-            logits = self.lm_head(hidden_states if logits_to_keep is None else hidden_states[:, -logits_to_keep:])
+            logits = self.lm_head(
+                hidden_states
+                if labels is not None or logits_to_keep is None
+                else hidden_states[:, -logits_to_keep:]
+            )
         if labels is not None:
             if getattr(self, 'criterion', None) is None:
                 if self.config.fuse_linear_cross_entropy:

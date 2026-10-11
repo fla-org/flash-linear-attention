@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import math
 import warnings
 from typing import TYPE_CHECKING
 
@@ -17,6 +18,7 @@ from torch.nn import functional as F
 
 from fla.layers.utils import get_layer_cache, repad_hidden_states, unpad_hidden_states, update_layer_cache
 from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
+from fla.modules.activations import elu_p1
 from fla.ops.delta_rule import chunk_delta_rule, fused_recurrent_delta_rule
 
 if TYPE_CHECKING:
@@ -25,17 +27,13 @@ if TYPE_CHECKING:
     from fla.models.utils import Cache
 
 
-def elu_p1(x):
-    return (F.elu(x, 1., False) + 1.).to(x)
-
-
 def sum_norm(x):
-    return (x / x.sum(-1, keepdim=True)).to(x)
+    return F.normalize(x, p=1, dim=-1, eps=1e-6).to(x)
 
 
 class DeltaNet(nn.Module):
     r"""
-    The layer implementaion for [Parallelizing Linear Transformers with the Delta Rule over Sequence Length](https://arxiv.org/abs/2406.06484).  # noqa:
+    The layer implementation for [Parallelizing Linear Transformers with the Delta Rule over Sequence Length](https://arxiv.org/abs/2406.06484).  # noqa:
     DeltaNet was originally proposed in [Linear Transformers Are Secretly Fast Weight Programmers](https://arxiv.org/abs/2102.11174). # noqa
 
     Args:
@@ -115,8 +113,10 @@ class DeltaNet(nn.Module):
         self.conv_bias = conv_bias
         self.allow_neg_eigval = allow_neg_eigval
 
-        self.key_dim = int(hidden_size * expand_k)
-        self.value_dim = int(hidden_size * expand_v)
+        key_dim, value_dim = hidden_size * expand_k, hidden_size * expand_v
+        self.key_dim, self.value_dim = round(key_dim), round(value_dim)
+        assert math.isclose(key_dim, self.key_dim), f"`hidden_size * expand_k` must be an integer, got {key_dim}."
+        assert math.isclose(value_dim, self.value_dim), f"`hidden_size * expand_v` must be an integer, got {value_dim}."
         self.head_k_dim = self.key_dim // num_heads
         self.head_v_dim = self.value_dim // num_heads
         self.layer_idx = layer_idx

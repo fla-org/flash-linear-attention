@@ -9,12 +9,12 @@
 
 from __future__ import annotations
 
+from inspect import unwrap
+
 import torch
 
-from fla.ops.backends import BaseBackend
-from fla.utils import check_shared_mem, find_spec_cached, has_usable_nvcc
-
-_TILELANG_AVAILABLE = find_spec_cached("tilelang") is not None
+from fla.backends import TileLangBackend, register
+from fla.utils import check_shared_mem
 
 
 def _next_power_of_2(x: int) -> int:
@@ -25,15 +25,8 @@ def _tile_extent(dim: int, const_tiling: int) -> int:
     return min(max(_next_power_of_2(dim), 16), const_tiling)
 
 
-class KDATileLangBackend(BaseBackend):
-
-    backend_type = "tilelang"
-    package_name = "tilelang"
-    env_var = "FLA_TILELANG"
-
-    @classmethod
-    def is_available(cls) -> bool:
-        return _TILELANG_AVAILABLE and has_usable_nvcc()
+@register('kda')
+class KDATileLangBackend(TileLangBackend):
 
     def chunk_kda_verifier(
         self,
@@ -57,8 +50,12 @@ class KDATileLangBackend(BaseBackend):
         cu_seqlens: torch.LongTensor | None = None,
         cu_seqlens_cpu: torch.LongTensor | None = None,
         cp_context=None,
+        use_graph: bool = False,
+        max_num_seqs: int | None = None,
         **kwargs,
     ) -> tuple[bool, str | None]:
+        if use_graph:
+            return False, "TileLang KDA public backend does not support graph capture (use_graph=True)"
         if not torch.is_grad_enabled():
             return False, "TileLang KDA public backend currently targets autograd training only"
         if kwargs.keys() - {"chunk_size"}:
@@ -162,10 +159,12 @@ class KDATileLangBackend(BaseBackend):
         cu_seqlens: torch.LongTensor | None = None,
         cu_seqlens_cpu: torch.LongTensor | None = None,
         cp_context=None,
+        use_graph: bool = False,
+        max_num_seqs: int | None = None,
         **kwargs,
     ):
         from fla.ops.kda.chunk import chunk_kda
-        return chunk_kda.__wrapped__.__wrapped__(
+        return unwrap(chunk_kda)(
             q=q,
             k=k,
             v=v,
@@ -186,6 +185,8 @@ class KDATileLangBackend(BaseBackend):
             cu_seqlens=cu_seqlens,
             cu_seqlens_cpu=cu_seqlens_cpu,
             cp_context=cp_context,
+            use_graph=use_graph,
+            max_num_seqs=max_num_seqs,
             _tilelang_helpers=True,
             **kwargs,
         )
@@ -208,6 +209,8 @@ class KDATileLangBackend(BaseBackend):
         cu_seqlens: torch.LongTensor | None = None,
         chunk_size: int = 64,
         chunk_indices: torch.LongTensor | None = None,
+        chunk_offsets: torch.LongTensor | None = None,
+        use_graph: bool = False,
     ) -> tuple[bool, str | None]:
         if any(getattr(tensor, "requires_grad", False) for tensor in (q, k, v, v_new, g, beta, A, h, do, dh, dv)):
             return False, (
@@ -288,6 +291,8 @@ class KDATileLangBackend(BaseBackend):
                 f"TileLang KDA backend requires h/dh shape {expected_state_shape}, "
                 f"got h={h.shape}, dh={dh.shape}"
             )
+        if use_graph:
+            return False, "TileLang backend does not support graph capture (use_graph=True); fall back to Triton"
         return True, None
 
     def chunk_kda_bwd_wy_dqkg_fused(
@@ -308,6 +313,8 @@ class KDATileLangBackend(BaseBackend):
         cu_seqlens: torch.LongTensor | None = None,
         chunk_size: int = 64,
         chunk_indices: torch.LongTensor | None = None,
+        chunk_offsets: torch.LongTensor | None = None,
+        use_graph: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         from fla.ops.kda.backends.tilelang.chunk_bwd_dqkg import (
             chunk_kda_bwd_wy_dqkg_fused_tilelang,

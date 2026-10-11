@@ -11,7 +11,7 @@ import triton.language as tl
 
 from fla.ops.utils import chunk_local_cumsum
 from fla.ops.utils.constant import RCP_LN2
-from fla.ops.utils.op import exp2
+from fla.ops.utils.op import exp2, unflatten_program_id
 from fla.utils import (
     IS_NVIDIA_HOPPER,
     autocast_custom_bwd,
@@ -68,7 +68,7 @@ def fused_chunk_fwd_kernel(
     STORE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_k, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    i_v, i_k, i_nh = unflatten_program_id(tl.cdiv(V, BV), tl.cdiv(K, BK))
     i_n, i_h = i_nh // H, i_nh % H
 
     all = B * T
@@ -107,7 +107,8 @@ def fused_chunk_fwd_kernel(
         b_h = tl.load(p_h, mask=(o_k[:, None] < K) & (o_v[None, :] < V), other=0.0).to(tl.float32)
 
     for i_t in range(0, NT):
-        o_t = i_t * BT + tl.arange(0, BT)
+        i_t_int64 = i_t.to(tl.int64)
+        o_t = i_t_int64 * BT + tl.arange(0, BT)
         m_t = o_t < T
         o_k = i_k * BK + tl.arange(0, BK)
         o_v = i_v * BV + tl.arange(0, BV)
@@ -123,7 +124,7 @@ def fused_chunk_fwd_kernel(
         b_k = tl.load(p_k, mask=(o_k[:, None] < K) & m_t[None, :], other=0.0)
         # [BT, BV]
         b_v = tl.load(p_v, mask=m_t[:, None] & (o_v < V)[None, :], other=0.0)
-        last_idx = min(i_t * BT + BT, T) - 1
+        last_idx = min(i_t_int64 * BT + BT, T) - 1
 
         # [BT, BT]
         b_s = tl.dot(b_q, b_k)
@@ -138,7 +139,7 @@ def fused_chunk_fwd_kernel(
             b_gk = exp2(b_g_last - b_g)
             b_gn = exp2(b_g_last)
         if USE_G_GAMMA:
-            b_g_last = b_gamma * min(BT, T - i_t * BT)
+            b_g_last = b_gamma * min(BT, T - i_t_int64 * BT)
             b_gk = exp2(b_g_last - b_g)
             b_gn = exp2(b_g_last)
         if USE_G or USE_G_GAMMA:
@@ -155,7 +156,7 @@ def fused_chunk_fwd_kernel(
             # [BT, BV]
             b_o = tl.dot(b_s.to(b_q.dtype), b_v) + tl.dot(b_q, b_h.to(b_q.dtype))
 
-        b_h += tl.dot(b_k, b_v)
+        b_h = tl.dot(b_k, b_v, b_h)
 
         tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=m_t[:, None] & (o_v < V)[None, :])
 
@@ -213,7 +214,7 @@ def fused_chunk_bwd_kernel(
     USE_INITIAL_STATE: tl.constexpr,
     USE_FINAL_STATE: tl.constexpr,
 ):
-    i_v, i_k, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    i_v, i_k, i_nh = unflatten_program_id(tl.cdiv(V, BV), tl.cdiv(K, BK))
     i_n, i_h = i_nh // H, i_nh % H
 
     all = B * T
@@ -253,7 +254,8 @@ def fused_chunk_bwd_kernel(
         b_h = tl.load(p_h, mask=(o_v[:, None] < V) & (o_k[None, :] < K), other=0.0).to(tl.float32)
 
     for i_t in range(0, NT):
-        o_t = i_t * BT + tl.arange(0, BT)
+        i_t_int64 = i_t.to(tl.int64)
+        o_t = i_t_int64 * BT + tl.arange(0, BT)
         m_t = o_t < T
         o_k = i_k * BK + tl.arange(0, BK)
         o_v = i_v * BV + tl.arange(0, BV)
@@ -269,7 +271,7 @@ def fused_chunk_bwd_kernel(
         b_v = tl.load(p_v, mask=(o_v[:, None] < V) & m_t[None, :], other=0.0)
         # [BT, BV]
         b_do = tl.load(p_do, mask=m_t[:, None] & (o_v < V)[None, :], other=0.0)
-        last_idx = min(i_t * BT + BT, T) - 1
+        last_idx = min(i_t_int64 * BT + BT, T) - 1
 
         # [BT, BT]
         b_ds = tl.dot(b_do, b_v) * scale
@@ -298,7 +300,7 @@ def fused_chunk_bwd_kernel(
             b_h = b_h * b_gn + tl.dot(b_v, (b_k * b_gk[:, None]).to(b_k.dtype))
 
         elif USE_G_GAMMA:
-            b_g_last = b_gamma * min(BT, T - i_t * BT)
+            b_g_last = b_gamma * min(BT, T - i_t_int64 * BT)
             b_gk = exp2(b_g_last - b_g)
             b_gn = exp2(b_g_last)
 
@@ -317,7 +319,7 @@ def fused_chunk_bwd_kernel(
             # [BT, BK]
             b_dq = tl.dot(b_ds.to(b_k.dtype), b_k) + tl.dot((b_do * scale).to(b_k.dtype), b_h.to(b_k.dtype))
             # [BV, BK]
-            b_h += tl.dot(b_v, b_k)
+            b_h = tl.dot(b_v, b_k, b_h)
 
         tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), mask=m_t[:, None] & (o_k < K)[None, :])
 
@@ -338,7 +340,8 @@ def fused_chunk_bwd_kernel(
     tl.debug_barrier()
 
     for i_t in range(NT - 1, -1, -1):
-        o_t = i_t * BT + tl.arange(0, BT)
+        i_t_int64 = i_t.to(tl.int64)
+        o_t = i_t_int64 * BT + tl.arange(0, BT)
         m_t = o_t < T
         o_k = i_k * BK + tl.arange(0, BK)
         o_v = i_v * BV + tl.arange(0, BV)
@@ -355,7 +358,7 @@ def fused_chunk_bwd_kernel(
         # [BT, BV]
         b_v = tl.load(p_v, mask=m_t[:, None] & (o_v < V)[None, :], other=0.0)
         b_do = tl.load(p_do, mask=m_t[:, None] & (o_v < V)[None, :], other=0.0)
-        last_idx = min(i_t * BT + BT, T) - 1
+        last_idx = min(i_t_int64 * BT + BT, T) - 1
 
         # [BT, BT]
         b_s = tl.dot(b_k, b_q)
@@ -391,7 +394,7 @@ def fused_chunk_bwd_kernel(
             tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), mask=m_t)
 
         elif USE_G_GAMMA:
-            b_g_last = b_gamma * min(BT, T - i_t * BT)
+            b_g_last = b_gamma * min(BT, T - i_t_int64 * BT)
             b_gk = exp2(b_g_last - b_g)
             b_gn = exp2(b_g_last)
             b_gs = tl.trans(tl.where(m_s & (m_t[:, None] & m_t), exp2(b_g[:, None] - b_g[None, :]), 0)) * scale
@@ -414,7 +417,7 @@ def fused_chunk_bwd_kernel(
             # [BT, BV]
             b_dv = tl.dot(b_s.to(b_do.dtype), b_do) + tl.dot(b_k, b_dh.to(b_k.dtype))
             # [BK, BV]
-            b_dh += tl.dot(b_q, (b_do * scale).to(b_do.dtype))
+            b_dh = tl.dot(b_q, (b_do * scale).to(b_do.dtype), b_dh)
 
         tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), mask=m_t[:, None] & (o_k < K)[None, :])
         tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), mask=m_t[:, None] & (o_v < V)[None, :])
@@ -446,7 +449,7 @@ def fused_chunk_fwd(
 
     o = v.new_empty(NK, *v.shape, dtype=torch.float) if NK > 1 else torch.empty_like(v)
     ht = k.new_empty(N, H, K, V, dtype=torch.float) if output_final_state else None
-    def grid(meta): return (triton.cdiv(V, meta['BV']), NK, N * H)
+    def grid(meta): return (triton.cdiv(V, meta['BV']) * NK * N * H,)
     fused_chunk_fwd_kernel[grid](
         q=q,
         k=k,
@@ -497,7 +500,7 @@ def fused_chunk_bwd(
     dg = g.new_empty(NK*NV, *g.shape, dtype=torch.float) if g is not None else None
     dh0 = torch.empty_like(initial_state) if initial_state is not None else None
 
-    grid = (NV, NK, N * H)
+    grid = (NV * NK * N * H,)
     fused_chunk_bwd_kernel[grid](
         q=q,
         k=k,

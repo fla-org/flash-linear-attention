@@ -34,6 +34,22 @@ def _ref_varlen(q, r, k, v, cu_seqlens, window_size=None):
 TOL = {torch.float16: 0.005, torch.bfloat16: 0.02}
 
 
+@pytest.mark.parametrize(
+    "op",
+    [naive_parallax, parallel_parallax, parallax_decode, parallax_decode_one_step],
+    ids=["naive", "parallel", "decode", "decode_one_step"],
+)
+@pytest.mark.parametrize(("HQ", "H"), [(3, 2), (1, 2), (2, 0)], ids=["remainder", "fewer-query-heads", "zero-kv-heads"])
+def test_rejects_invalid_gqa_head_counts(op, HQ, H):
+    q = torch.empty(1, 1, HQ, 16, dtype=torch.float16)
+    r = torch.empty_like(q)
+    k = torch.empty(1, 1, H, 16, dtype=torch.float16)
+    v = torch.empty_like(k)
+
+    with pytest.raises(ValueError, match="must be divisible"):
+        op(q=q, r=r, k=k, v=v)
+
+
 @pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'HQ', 'D', 'scale'),
@@ -158,6 +174,7 @@ def test_parallel_swa(
         ]
     ],
 )
+@pytest.mark.smoke
 def test_parallel_varlen(H: int, HQ: int, D: int, cu_seqlens: list[int], dtype: torch.dtype):
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
@@ -279,6 +296,7 @@ def _decode_ref(q, r, k, v, scale, window_size=None):
             (2, 1, 300, 2, 2, 100, 64),      # windowed decode, non-pow2 D
             (2, 64, 64, 2, 2, 64, None),     # full prefill == training causal
             (3, 200, 200, 2, 8, 64, 32),     # windowed prefill (GQA)
+            (2, 64, 32, 2, 2, 64, 16),       # cached KV shorter than query
         ]
     ],
 )
@@ -292,6 +310,11 @@ def test_decode(B: int, Sq: int, Skv: int, H: int, HQ: int, D: int, W, dtype: to
     r = torch.randn((B, Sq, HQ, D), dtype=dtype, device=device)
     k = torch.randn((B, Skv, H, D), dtype=dtype, device=device)
     v = torch.randn((B, Skv, H, D), dtype=dtype, device=device)
+
+    if Skv < Sq:
+        with pytest.raises(AssertionError, match="Cached KV length must cover query length"):
+            parallax_decode(q, r, k, v, window_size=W)
+        return
 
     ref = _decode_ref(q, r, k, v, scale=D ** -0.5, window_size=W)
     tri = parallax_decode(q, r, k, v, window_size=W)

@@ -10,6 +10,8 @@ from einops import rearrange
 
 from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
 from fla.ops.common.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
+from fla.ops.cp import FLACPContext
+from fla.ops.cp.chunk_delta_h import chunk_gated_delta_rule_fwd_h_pre_process, compress_h0
 from fla.ops.delta_rule.chunk import chunk_delta_rule_bwd
 from fla.ops.delta_rule.wy_fast import recompute_w_u_fwd as dn_recompute_w_u_fwd
 from fla.ops.gated_delta_product.chunk_deltaproduct_h import chunk_gated_delta_product_fwd_h
@@ -35,6 +37,7 @@ def chunk_gated_delta_product_fwd(
     num_householder: int = 1,
     chunk_indices: torch.LongTensor | None = None,
     chunk_indices_dp: torch.LongTensor | None = None,
+    cp_context: FLACPContext | None = None,
 ):
     cu_seqlens_dp = cu_seqlens * num_householder if cu_seqlens is not None else None
     if g is not None:
@@ -94,6 +97,17 @@ def chunk_gated_delta_product_fwd(
             cu_seqlens=cu_seqlens_dp,
             chunk_indices=chunk_indices_dp,
         )
+    if cp_context is not None:
+        initial_state = chunk_gated_delta_rule_fwd_h_pre_process(
+            k=k,
+            w=w,
+            u=u,
+            g=g_interleaved,
+            cu_seqlens=cu_seqlens_dp,
+            initial_state=initial_state,
+            context=cp_context,
+        )
+
     h, v_new, final_state = chunk_gated_delta_product_fwd_h(
         k=k,
         w=w,
@@ -105,6 +119,9 @@ def chunk_gated_delta_product_fwd(
         num_householder=num_householder,
         chunk_indices=chunk_indices,
     )
+    if cp_context is not None:
+        initial_state = compress_h0(initial_state, context=cp_context)
+
     o = chunk_gated_delta_product_fwd_o(
         q=q,
         k=k,
@@ -116,7 +133,7 @@ def chunk_gated_delta_product_fwd(
         num_householder=num_householder,
         chunk_indices=chunk_indices,
     )
-    return g, g_interleaved, o, A, final_state
+    return g, g_interleaved, o, A, final_state, initial_state
 
 
 class ChunkGatedDeltaProductFunction(torch.autograd.Function):
@@ -138,6 +155,7 @@ class ChunkGatedDeltaProductFunction(torch.autograd.Function):
         use_qk_l2norm_in_kernel: bool = False,
         cu_seqlens: torch.LongTensor | None = None,
         cu_seqlens_cpu: torch.LongTensor | None = None,
+        cp_context: FLACPContext | None = None,
     ):
         if use_qk_l2norm_in_kernel:
             q, q_rstd = l2norm_fwd(q)
@@ -156,7 +174,7 @@ class ChunkGatedDeltaProductFunction(torch.autograd.Function):
                 cu_seqlens * num_householder, 64, cu_seqlens_cpu=cu_seqlens_cpu_dp
             )
 
-        g, g_interleaved, o, A, final_state = chunk_gated_delta_product_fwd(
+        g, g_interleaved, o, A, final_state, initial_state = chunk_gated_delta_product_fwd(
             q=q,
             k=k,
             v=v,
@@ -169,6 +187,7 @@ class ChunkGatedDeltaProductFunction(torch.autograd.Function):
             num_householder=num_householder,
             chunk_indices=chunk_indices,
             chunk_indices_dp=chunk_indices_dp,
+            cp_context=cp_context,
         )
         ctx.save_for_backward(
             q,
@@ -186,6 +205,7 @@ class ChunkGatedDeltaProductFunction(torch.autograd.Function):
         ctx.scale = scale
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
         ctx.num_householder = num_householder
+        ctx.cp_context = cp_context
         return o.to(q.dtype), final_state
 
     @staticmethod
@@ -230,6 +250,7 @@ class ChunkGatedDeltaProductFunction(torch.autograd.Function):
                 do=do,
                 dht=dht,
                 cu_seqlens=cu_seqlens * ctx.num_householder if cu_seqlens is not None else None,
+                cp_context=ctx.cp_context,
                 chunk_indices=chunk_indices_dp,
             )
             dg = rearrange(dg, 'b (l n) h  -> b l n h ', n=ctx.num_householder)[:, :, 0].contiguous().to(g)
@@ -252,7 +273,7 @@ class ChunkGatedDeltaProductFunction(torch.autograd.Function):
         if ctx.use_qk_l2norm_in_kernel:
             dq = l2norm_bwd(q_org, q_rstd, dq)
             dk = l2norm_bwd(k, k_rstd, dk)
-        return dq.to(q), dk.to(k), dv.to(v), dg, db.to(beta), None, None, dh0, None, None, None, None
+        return dq.to(q), dk.to(k), dv.to(v), dg, db.to(beta), None, None, dh0, None, None, None, None, None
 
 
 @torch.compiler.disable
@@ -269,6 +290,7 @@ def chunk_gated_delta_product(
     use_qk_l2norm_in_kernel: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     cu_seqlens_cpu: torch.LongTensor | None = None,
+    cp_context: FLACPContext | None = None,
 ):
     r"""
     Args:
@@ -299,6 +321,11 @@ def chunk_gated_delta_product(
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
+        cp_context (FLACPContext, Optional):
+            Context parallel context for distributed training across multiple devices.
+            When provided, `g` is required, `initial_state` and `output_final_state`
+            are not supported, and `cu_seqlens` will be overridden by the context.
+            Default: `None`.
 
     Returns:
         o (torch.Tensor):
@@ -343,6 +370,15 @@ def chunk_gated_delta_product(
     if g is not None:
         assert g.shape == (B, T, H)
 
+    if cp_context is not None:
+        assert g is not None, "Non-gated GDP is not supported for CP"
+        assert initial_state is None, "Initial state is not supported for CP"
+        assert output_final_state is False, "Output final state is not supported for CP"
+        assert cp_context.cu_seqlens is not None, "cu_seqlens is required for CP"
+        cu_seqlens = cp_context.cu_seqlens
+        if cp_context.cu_seqlens_cpu is not None:
+            cu_seqlens_cpu = cp_context.cu_seqlens_cpu
+
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(
@@ -369,5 +405,6 @@ def chunk_gated_delta_product(
         use_qk_l2norm_in_kernel,
         cu_seqlens,
         cu_seqlens_cpu,
+        cp_context,
     )
     return o, final_state

@@ -87,7 +87,6 @@ def chunk_ttt_linear_ref(
     initial_state: torch.Tensor = None,
     initial_state_bias: torch.Tensor = None,
     output_final_state: bool = False,
-    head_first: bool = False,
 ):
     assert q.dtype == k.dtype == v.dtype
     assert k.shape[-1] == v.shape[-1], "The key and value dimension must be the same."
@@ -95,11 +94,10 @@ def chunk_ttt_linear_ref(
         eta = torch.full_like(q[:, :, :, :1], eta)
     if scale is None:
         scale = k.shape[-1] ** -0.5
-    if not head_first:
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
-        eta = eta.transpose(1, 2)
+    q = q.transpose(1, 2)
+    k = k.transpose(1, 2)
+    v = v.transpose(1, 2)
+    eta = eta.transpose(1, 2)
     T = q.shape[-2]
     padded = (mini_batch_size - (T % mini_batch_size)) % mini_batch_size
     if padded > 0:
@@ -125,6 +123,5 @@ def chunk_ttt_linear_ref(
         output_final_state,
     )
     o = o[:, :, :T, :].contiguous()
-    if not head_first:
-        o = o.transpose(1, 2)
+    o = o.transpose(1, 2)
     return o, final_state, final_state_bias
