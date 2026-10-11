@@ -10,7 +10,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
-from fla.ops.utils.op import exp
+from fla.ops.utils.op import exp, unflatten_program_id
 from fla.utils import check_shared_mem, is_nvidia_hopper
 
 BKV_LIST = [64, 128] if check_shared_mem() else [32, 64]
@@ -57,8 +57,8 @@ def chunk_oja_fwd_kernel_h_blockdim64(
     SAVE_NEW_KEY: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    # (triton.cdiv(K, meta['BK']), N*H)
-    i_k, i_nh = tl.program_id(0), tl.program_id(1).to(tl.int64)
+    # (triton.cdiv(K, meta['BK']) * N * H,)
+    i_k, i_nh = unflatten_program_id(tl.cdiv(K, BK))
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
@@ -134,15 +134,15 @@ def chunk_oja_fwd_kernel_h_blockdim64(
         if V > 64:
             p_w = w + o_t[:, None] * stride_v + (64 + o_v1)[None, :]
             b_w = tl.load(p_w, mask=m_t[:, None] & ((64 + o_v1)[None, :] < V), other=0.0)
-            b_k += tl.dot(b_w, tl.trans(b_h2).to(b_w.dtype))
+            b_k = tl.dot(b_w, tl.trans(b_h2).to(b_w.dtype), b_k)
         if V > 128:
             p_w = w + o_t[:, None] * stride_v + (128 + o_v1)[None, :]
             b_w = tl.load(p_w, mask=m_t[:, None] & ((128 + o_v1)[None, :] < V), other=0.0)
-            b_k += tl.dot(b_w, tl.trans(b_h3).to(b_w.dtype))
+            b_k = tl.dot(b_w, tl.trans(b_h3).to(b_w.dtype), b_k)
         if V > 192:
             p_w = w + o_t[:, None] * stride_v + (192 + o_v1)[None, :]
             b_w = tl.load(p_w, mask=m_t[:, None] & ((192 + o_v1)[None, :] < V), other=0.0)
-            b_k += tl.dot(b_w, tl.trans(b_h4).to(b_w.dtype))
+            b_k = tl.dot(b_w, tl.trans(b_h4).to(b_w.dtype), b_k)
 
         p_u = u + o_t[:, None] * stride_k + o_k[None, :]
         b_k = tl.load(p_u, mask=m_tk, other=0.0) - b_k
@@ -173,19 +173,19 @@ def chunk_oja_fwd_kernel_h_blockdim64(
 
         p_v = v + o_t[:, None] * stride_v + o_v1[None, :]
         b_v = tl.load(p_v, mask=m_t[:, None] & (o_v1[None, :] < V), other=0.0)  # BT BV
-        b_h1 += tl.dot(tl.trans(b_k), b_v)
+        b_h1 = tl.dot(tl.trans(b_k), b_v, b_h1)
         if V > 64:
             p_v = v + o_t[:, None] * stride_v + (64 + o_v1)[None, :]
             b_v = tl.load(p_v, mask=m_t[:, None] & ((64 + o_v1)[None, :] < V), other=0.0)
-            b_h2 += tl.dot(tl.trans(b_k), b_v)
+            b_h2 = tl.dot(tl.trans(b_k), b_v, b_h2)
         if V > 128:
             p_v = v + o_t[:, None] * stride_v + (128 + o_v1)[None, :]
             b_v = tl.load(p_v, mask=m_t[:, None] & ((128 + o_v1)[None, :] < V), other=0.0)
-            b_h3 += tl.dot(tl.trans(b_k), b_v)
+            b_h3 = tl.dot(tl.trans(b_k), b_v, b_h3)
         if V > 192:
             p_v = v + o_t[:, None] * stride_v + (192 + o_v1)[None, :]
             b_v = tl.load(p_v, mask=m_t[:, None] & ((192 + o_v1)[None, :] < V), other=0.0)
-            b_h4 += tl.dot(tl.trans(b_k), b_v)
+            b_h4 = tl.dot(tl.trans(b_k), b_v, b_h4)
     # epilogue
     if STORE_FINAL_STATE:
         p_ht = ht + o_k[:, None] * V + o_v1[None, :]
@@ -228,7 +228,7 @@ def chunk_oja_fwd_h(
     final_state = v.new_empty(N, H, K, V, dtype=torch.float32) if output_final_state else None
 
     k_new = torch.empty_like(u) if save_new_key else None
-    def grid(meta): return (triton.cdiv(K, meta['BK']), N*H)
+    def grid(meta): return (triton.cdiv(K, meta['BK']) * N * H,)
     chunk_oja_fwd_kernel_h_blockdim64[grid](
         v=v,
         u=u,
@@ -290,7 +290,7 @@ def chunk_oja_bwd_kernel_dhu_blockdim64(
     USE_FINAL_STATE_GRADIENT: tl.constexpr,
     IS_VARLEN: tl.constexpr
 ):
-    i_k, i_nh = tl.program_id(0), tl.program_id(1).to(tl.int64)
+    i_k, i_nh = unflatten_program_id(tl.cdiv(K, BK))
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
@@ -366,7 +366,7 @@ def chunk_oja_bwd_kernel_dhu_blockdim64(
 
         last_idx = min((i_t + 1) * BT, T) - 1
 
-        # Update dk_new, 按K切分
+        # update dk_new in K tiles
         p_dk = dk + o_t[:, None] * stride_k + o_k[None, :]  # [BT, BK]
         p_dk2 = dk2 + o_t[:, None] * stride_k + o_k[None, :]  # [BT, BK]
 
@@ -378,23 +378,23 @@ def chunk_oja_bwd_kernel_dhu_blockdim64(
         if V > 64:
             p_v = vg + o_t[:, None] * stride_v + (64 + o_v1)[None, :]
             b_v = tl.load(p_v, mask=m_t[:, None] & ((64 + o_v1)[None, :] < V), other=0.0)
-            b_dk += tl.dot(b_v, tl.trans(b_dh2).to(b_v.dtype))
+            b_dk = tl.dot(b_v, tl.trans(b_dh2).to(b_v.dtype), b_dk)
 
         if V > 128:
             p_v = vg + o_t[:, None] * stride_v + (128 + o_v1)[None, :]
             b_v = tl.load(p_v, mask=m_t[:, None] & ((128 + o_v1)[None, :] < V), other=0.0)
-            b_dk += tl.dot(b_v, tl.trans(b_dh3).to(b_v.dtype))
+            b_dk = tl.dot(b_v, tl.trans(b_dh3).to(b_v.dtype), b_dk)
 
         if V > 192:
             p_v = vg + o_t[:, None] * stride_v + (192 + o_v1)[None, :]
             b_v = tl.load(p_v, mask=m_t[:, None] & ((192 + o_v1)[None, :] < V), other=0.0)
-            b_dk += tl.dot(b_v, tl.trans(b_dh4).to(b_v.dtype))
+            b_dk = tl.dot(b_v, tl.trans(b_dh4).to(b_v.dtype), b_dk)
 
         b_dk += tl.load(p_dk, mask=m_tk, other=0.0)
 
         tl.store(p_dk2, b_dk.to(p_dk.dtype.element_ty), mask=m_tk)
 
-        # Update dh, 按照K切分，收集所有V维度，q一次就好，wdo要收集所有
+        # update dh in K tiles across all V tiles; load q once and w/do for each V tile
 
         p_q = q + o_k[:, None] + o_t[None, :] * stride_k  # [BK, BT]
         b_q = tl.load(p_q, mask=(o_k[:, None] < K) & m_t[None, :], other=0.0)
@@ -499,7 +499,7 @@ def chunk_oja_bwd_dhu(
     dh0 = torch.empty_like(h0, dtype=torch.float32) if h0 is not None else None
     dk2 = torch.empty_like(dk)
 
-    def grid(meta): return (triton.cdiv(K, meta['BK']), N*H)
+    def grid(meta): return (triton.cdiv(K, meta['BK']) * N * H,)
     chunk_oja_bwd_kernel_dhu_blockdim64[grid](
         q=q,
         vg=vg,
@@ -565,7 +565,7 @@ def chunk_gsa_bwd_k_kernel_dqkvg(
     NG: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_k, i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
     i_h = i_hq // NG
     if IS_VARLEN:
@@ -639,8 +639,8 @@ def chunk_gsa_bwd_k_kernel_dqkvg(
 
         b_dh = b_dh.to(b_k.dtype)
         # [BT, BK]
-        b_dq += tl.dot(b_do, b_h.to(b_k.dtype))
-        b_dk += tl.dot((b_v * b_gv).to(b_v.dtype), tl.trans(b_dh))
+        b_dq = tl.dot(b_do, b_h.to(b_k.dtype), b_dq)
+        b_dk = tl.dot((b_v * b_gv).to(b_v.dtype), tl.trans(b_dh), b_dk)
         # [BT, BV]
         b_dv = tl.dot(b_k, b_dh) * b_gv
         # [BV]
@@ -659,8 +659,8 @@ def chunk_gsa_bwd_k_kernel_dqkvg(
     # [BT, BT]
     b_dA = tl.load(p_dA, mask=m_AT, other=0.0)
     # [BT, BK]
-    b_dq += tl.dot(b_dA, b_k)
-    b_dk += tl.dot(tl.trans(b_dA).to(b_k.dtype), b_q)
+    b_dq = tl.dot(b_dA, b_k, b_dq)
+    b_dk = tl.dot(tl.trans(b_dA).to(b_k.dtype), b_q, b_dk)
 
     tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), mask=m_tk)
     tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), mask=m_tk)
@@ -704,7 +704,8 @@ def chunk_oja_bwd_kernel_dvwg_h(
     HAVE_GK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_v, i_t = unflatten_program_id(tl.cdiv(V, BV))
+    i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
 
     if IS_VARLEN:
@@ -756,8 +757,8 @@ def chunk_oja_bwd_kernel_dvwg_h(
         b_h = tl.load(p_h, mask=m_kv, other=0.0)  # BK BV
         b_dh = tl.load(p_dh, mask=m_kv, other=0.0)  # BK BV
 
-        b_dvg += tl.dot(b_k, b_dh.to(b_k.dtype))  # BT BK @ BK BV -> BT BV
-        b_dw += tl.dot(b_dk.to(b_k.dtype), b_h.to(b_k.dtype))  # BT BK @ BK BV -> BT BV
+        b_dvg = tl.dot(b_k, b_dh.to(b_k.dtype), b_dvg)  # BT BK @ BK BV -> BT BV
+        b_dw = tl.dot(b_dk.to(b_k.dtype), b_h.to(b_k.dtype), b_dw)  # BT BK @ BK BV -> BT BV
         b_dgv_last += tl.sum((b_h * b_dh) * exp(b_gn), axis=0)
 
     if USE_GV:
@@ -771,7 +772,7 @@ def chunk_oja_bwd_kernel_dvwg_h(
 
     b_dgv_last += tl.sum(b_dv * b_v, axis=0)
 
-    # 留给GSA2的接口
+    # reserved for GSA2
     if HAVE_GK:
         dgk += (bos * H + i_h) * V
         p_dgk = dgk + o_t[:, None] * (H*V) + o_v[None, :]
@@ -812,7 +813,7 @@ def chunk_oja_bwd_dvwg_h(
     dw = torch.empty_like(v)
     dgv_last = torch.empty_like(gv)
 
-    grid = (NV, NT, B * H)
+    grid = (NV * NT, B * H)
     chunk_oja_bwd_kernel_dvwg_h[grid](
         k=k,
         v=v,

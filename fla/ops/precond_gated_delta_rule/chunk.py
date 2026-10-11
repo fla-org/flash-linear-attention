@@ -7,7 +7,7 @@
 
 import torch
 
-from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
+from fla.modules.norm.l2norm import l2norm_bwd, l2norm_fwd
 from fla.ops.atk.chunk_atk_bwd import chunk_atk_bwd
 from fla.ops.atk.chunk_atk_fwd import chunk_atk_fwd, recompute_atk_fwd
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_gated_delta_rule_fwd_h
@@ -426,7 +426,6 @@ def chunk_precond_gated_delta_rule(
     x: float = 1.5,
     eps: float = 1e-6,
     log_atk_scale: torch.Tensor = None,
-    **kwargs,
 ):
     r"""
     Args:
@@ -524,11 +523,6 @@ def chunk_precond_gated_delta_rule(
         raise ValueError(
             f"For GVA, num_v_heads (HV={HV}) must be evenly divisible by "
             f"num_heads (H={H}), but got HV % H = {HV % H}"
-        )
-
-    if 'head_first' in kwargs:
-        raise DeprecationWarning(
-            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
         )
 
     if cp_context is not None:

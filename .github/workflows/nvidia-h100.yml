@@ -96,8 +96,13 @@ jobs:
                 core.setOutput('run_full', 'false');
                 return;
               }
-              const maintainers = ['OWNER', 'MEMBER'];
-              core.setOutput('run_full', maintainers.includes(pr.author_association) ? 'true' : 'false');
+              // author_association hides private org members, so check the
+              // collaborator permission instead (admin/write -> maintainer).
+              const { owner, repo } = context.repo;
+              const perm = (await github.rest.repos.getCollaboratorPermissionLevel({
+                owner, repo, username: pr.user.login,
+              })).data;
+              core.setOutput('run_full', ['admin', 'write'].includes(perm.permission) ? 'true' : 'false');
               return;
             }
             if (eventName === 'pull_request_review') {
@@ -152,7 +157,7 @@ jobs:
 
   check_h100_pytorch_2_7:
     name: Check H100 PyTorch 2.7 Eligibility
-    needs: [changes, gate]
+    needs: [changes, gate, test-h100-pytorch-2-12]
     if: >
       needs.changes.outputs.npu_only != 'true' &&
       needs.gate.outputs.run_full == 'true' &&

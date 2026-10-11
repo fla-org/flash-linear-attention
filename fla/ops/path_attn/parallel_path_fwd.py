@@ -45,7 +45,7 @@ def parallel_path_fwd_kernel(
     USE_GATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1)
+    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
     i_h = i_hq // G
 
@@ -111,7 +111,7 @@ def parallel_path_fwd_kernel(
         b_o *= alpha[:, None]
         b_l = b_l * alpha + tl.sum(b_s, 1)
         b_m = b_m_new
-        b_o += tl.dot(b_s.to(b_v.dtype), b_v)
+        b_o = tl.dot(b_s.to(b_v.dtype), b_v, b_o)
         b_s2 = tl.dot(b_q.to(b_w1.dtype), b_w1)
         b_s2 = tl.where(m_s[:, None], b_s2, 0)
         b_q -= tl.dot(b_s2.to(b_w2.dtype), b_w2)
@@ -144,7 +144,7 @@ def parallel_path_fwd_kernel(
         b_o *= alpha[:, None]
         b_l = b_l * alpha + tl.sum(b_s, 1)
         b_m = b_m_new
-        b_o += tl.dot(b_s.to(b_v.dtype), b_v)
+        b_o = tl.dot(b_s.to(b_v.dtype), b_v, b_o)
         b_s2 = tl.dot(b_q.to(b_w1.dtype), b_w1)
         b_q -= tl.dot(b_s2.to(b_w2.dtype), b_w2)
 

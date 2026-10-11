@@ -10,7 +10,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
-from fla.ops.utils.op import exp2
+from fla.ops.utils.op import exp2, unflatten_program_id
 from fla.utils import IS_AMD, autotune_cache_kwargs, check_shared_mem
 
 NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if IS_AMD else [2, 4, 8, 16, 32]
@@ -82,8 +82,8 @@ def chunk_dplr_bwd_kernel_dAu(
         b_v = tl.load(p_v, mask=m_vt, other=0.0)
         b_do = tl.load(p_do, mask=m_v, other=0.0)
         b_v_new = tl.load(p_v_new, mask=m_vt, other=0.0)
-        b_dA_qk += tl.dot(b_do, b_v)
-        b_dA_qb += tl.dot(b_do, b_v_new)
+        b_dA_qk = tl.dot(b_do, b_v, b_dA_qk)
+        b_dA_qb = tl.dot(b_do, b_v_new, b_dA_qb)
         b_dv_new = tl.dot(tl.trans(b_A_qb), b_do)
         # for recurrent
         tl.store(p_dv_new, b_dv_new.to(p_dv_new.dtype.element_ty), mask=m_v)
@@ -137,7 +137,8 @@ def chunk_dplr_bwd_o_kernel(
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_k, i_t = unflatten_program_id(tl.cdiv(K, BK))
+    i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
 
     if IS_VARLEN:
@@ -200,13 +201,13 @@ def chunk_dplr_bwd_o_kernel(
         b_dgk_last += tl.sum((b_h * b_dh).to(tl.float32), axis=0)
 
         # [BT, BV] @ [BV, BK] -> [BT, BK]
-        b_dq += tl.dot(b_do, b_h.to(b_do.dtype))
+        b_dq = tl.dot(b_do, b_h.to(b_do.dtype), b_dq)
         # [BT, BV] @ [BV, BK] -> [BT, BK]
-        b_dk += tl.dot(b_v, b_dh.to(b_v.dtype))
-        b_db += tl.dot(b_v_new, b_dh.to(b_v_new.dtype))
+        b_dk = tl.dot(b_v, b_dh.to(b_v.dtype), b_dk)
+        b_db = tl.dot(b_v_new, b_dh.to(b_v_new.dtype), b_db)
         p_dv = dv + o_t[:, None] * stride_vo + o_v[None, :]
         b_dv = tl.load(p_dv, mask=m_v, other=0.0)
-        b_dw += tl.dot(b_dv.to(b_v.dtype), b_h.to(b_v.dtype))
+        b_dw = tl.dot(b_dv.to(b_v.dtype), b_h.to(b_v.dtype), b_dw)
 
     m_k = (i_k*BK+tl.arange(0, BK)) < K
     last_idx = min(i_t * BT + BT, T) - 1
@@ -263,7 +264,8 @@ def chunk_dplr_bwd_kernel_dv(
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_v, i_t = unflatten_program_id(tl.cdiv(V, BV))
+    i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_tg = i_t
@@ -300,7 +302,7 @@ def chunk_dplr_bwd_kernel_dv(
         p_kg = kg + o_t[:, None] * stride_qk + o_k[None, :]
         b_dh = tl.load(p_dh, mask=m_dh, other=0.0)
         b_kg = tl.load(p_kg, mask=m_kg, other=0.0)
-        b_dv += tl.dot(b_kg, b_dh.to(b_kg.dtype))
+        b_dv = tl.dot(b_kg, b_dh.to(b_kg.dtype), b_dv)
 
     o_A = tl.arange(0, BT)
     m_A = (o_A[:, None] < BT) & m_t[None, :]
@@ -310,7 +312,7 @@ def chunk_dplr_bwd_kernel_dv(
     p_do = do + o_t[:, None] * stride_vo + o_v[None, :]
     p_dv = dv + o_t[:, None] * stride_vo + o_v[None, :]
     b_do = tl.load(p_do, mask=m_v, other=0.0)
-    b_dv += tl.dot(b_A.to(b_do.dtype), b_do)
+    b_dv = tl.dot(b_A.to(b_do.dtype), b_do, b_dv)
     tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), mask=m_v)
 
 
@@ -332,7 +334,7 @@ def chunk_dplr_bwd_dv(
 
     dv = torch.empty_like(do)
 
-    def grid(meta): return (triton.cdiv(V, meta['BV']), NT, B * H)
+    def grid(meta): return (triton.cdiv(V, meta['BV']) * NT, B * H)
     chunk_dplr_bwd_kernel_dv[grid](
         A_qk=A_qk,
         kg=kg,
@@ -381,7 +383,7 @@ def chunk_dplr_bwd_o(
     dk = torch.empty_like(k)
     dw = torch.empty_like(w)
     db = torch.empty_like(b)
-    grid = (NK, NT, B * H)
+    grid = (NK * NT, B * H)
 
     dgk_last = torch.empty(B, NT, H, K, dtype=torch.float, device=w.device)
 

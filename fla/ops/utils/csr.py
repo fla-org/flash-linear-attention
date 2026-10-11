@@ -36,7 +36,7 @@ def prepare_block_csr_kernel(
     USE_BLOCK_COUNTS: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_bh = tl.program_id(0), tl.program_id(1)
+    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     o_t = i_t * BT + tl.arange(0, BT)
     o_s = tl.arange(0, S)

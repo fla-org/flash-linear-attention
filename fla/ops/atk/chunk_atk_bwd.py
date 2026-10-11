@@ -59,8 +59,8 @@ def _atk_backward_chunk_out(
     """
     Per-chunk backward kernel for ATK. K-tiled variant.
     """
-    i_t = tl.program_id(0)
-    h = tl.program_id(1)
+    i_t = tl.program_id(0).to(tl.int64)
+    h = tl.program_id(1).to(tl.int64)
     chunk_id = tl.program_id(2).to(tl.int64)
 
     if IS_VARLEN:
@@ -178,7 +178,7 @@ def _atk_backward_chunk_out(
             tl.store(dh0 + (i_n * H + h) * D + D_range, gac_tile, mask=mask_D)
 
         gbase_decays += tl.sum(graw_state * ac_val[None, :], 1)
-        gM += tl.dot(graw_state, tl.trans(U))
+        gM = tl.dot(graw_state, tl.trans(U), gM)
 
         if IS_VARLEN:
             gk_ptr = gk_out + (bos + T_range)[:, None] * gk_stride_t + h * gk_stride_h + D_range[None, :] * gk_stride_d
@@ -331,8 +331,8 @@ def _atk_backward_chunk_summary(
     BK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t = tl.program_id(0)
-    h = tl.program_id(1)
+    i_t = tl.program_id(0).to(tl.int64)
+    h = tl.program_id(1).to(tl.int64)
     chunk_id = tl.program_id(2).to(tl.int64)
 
     if IS_VARLEN:

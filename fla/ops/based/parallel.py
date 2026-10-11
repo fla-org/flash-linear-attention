@@ -9,6 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.utils.op import unflatten_program_id
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 # Based: An Educational and Effective Sequence Mixer
@@ -34,7 +35,8 @@ def parallel_based_fwd_kernel(
     BV: tl.constexpr,
 ):
     # i_c: chunk index. used for sequence parallelism
-    i_kv, i_c, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_kv, i_c = unflatten_program_id(tl.cdiv(K, BK) * tl.cdiv(V, BV))
+    i_bh = tl.program_id(1).to(tl.int64)
     NV = tl.cdiv(V, BV)
     i_k = i_kv // (NV)
     i_v = i_kv % (NV)
@@ -72,7 +74,7 @@ def parallel_based_fwd_kernel(
         b_z += tl.sum(b_s, axis=1)
 
         # [BQ, BD]
-        b_o = b_o + tl.dot(b_s.to(b_v.dtype), b_v, allow_tf32=False)
+        b_o = tl.dot(b_s.to(b_v.dtype), b_v, b_o, allow_tf32=False)
 
     # # rescale interchunk output
     tl.debug_barrier()
@@ -99,7 +101,7 @@ def parallel_based_fwd_kernel(
         b_s = tl.where(m_s, b_s, 0)
         b_z += tl.sum(b_s, axis=1)
         # [BTL, BV]
-        b_o += tl.dot(b_s.to(b_q.dtype), b_v, allow_tf32=False)
+        b_o = tl.dot(b_s.to(b_q.dtype), b_v, b_o, allow_tf32=False)
 
         o_k += BTS
 
@@ -166,7 +168,7 @@ def _parallel_based_bwd_dq(
             b_ds = b_ds
         b_s = tl.dot(b_q, tl.trans(b_k), allow_tf32=False)
         # [BQ, BD]
-        b_dq += tl.dot((b_ds * (1 + b_s)).to(b_v.dtype), b_k, allow_tf32=False)
+        b_dq = tl.dot((b_ds * (1 + b_s)).to(b_v.dtype), b_k, b_dq, allow_tf32=False)
 
     b_dq *= scale
     o_q = tl.arange(0, BTL)
@@ -193,7 +195,7 @@ def _parallel_based_bwd_dq(
         b_s = tl.dot(b_q, tl.trans(b_k), allow_tf32=False)
         b_s = tl.where(m_s, b_s, 0)
         # [BTL, BK]
-        b_dq += tl.dot((b_ds + b_ds * b_s).to(b_k.dtype), b_k, allow_tf32=False)
+        b_dq = tl.dot((b_ds + b_ds * b_s).to(b_k.dtype), b_k, b_dq, allow_tf32=False)
         o_k += BTS
     p_dq = dq + (i_bh + B * H * i_v) * T*K + o_t[:, None] * K + o_kk[None, :]
     tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), mask=m_q)
@@ -248,13 +250,13 @@ def _parallel_based_bwd_dkv(
         b_dz = tl.load(p_dz, mask=(i + tl.arange(0, BTS)) < T)
         b_s = tl.dot(b_k.to(b_q.dtype), b_q, allow_tf32=False) * scale  # [BTL, BTS]
         b_s2 = 1 + b_s + 0.5 * b_s * b_s
-        b_dv += tl.dot(b_s2.to(b_q.dtype), tl.trans(b_do), allow_tf32=False)
+        b_dv = tl.dot(b_s2.to(b_q.dtype), tl.trans(b_do), b_dv, allow_tf32=False)
         b_ds = tl.dot(b_v, b_do, allow_tf32=False) * scale
         if i_v == 0:
             b_ds += b_dz[None, :] * scale
         else:
             b_ds = b_ds
-        b_dk += tl.dot((b_ds + b_ds * b_s).to(b_q.dtype), tl.trans(b_q), allow_tf32=False)
+        b_dk = tl.dot((b_ds + b_ds * b_s).to(b_q.dtype), tl.trans(b_q), b_dk, allow_tf32=False)
 
     tl.debug_barrier()
     o_q, o_k = tl.arange(0, BTS), tl.arange(0, BTL)
@@ -282,8 +284,8 @@ def _parallel_based_bwd_dkv(
             b_ds = b_ds
         b_ds = tl.where(m_s, b_ds, 0) * scale
         # [BK, BD]
-        b_dv += tl.dot(b_s2.to(b_q.dtype), tl.trans(b_do), allow_tf32=False)
-        b_dk += tl.dot((b_ds + b_ds * b_s).to(b_q.dtype), tl.trans(b_q), allow_tf32=False)
+        b_dv = tl.dot(b_s2.to(b_q.dtype), tl.trans(b_do), b_dv, allow_tf32=False)
+        b_dk = tl.dot((b_ds + b_ds * b_s).to(b_q.dtype), tl.trans(b_q), b_dk, allow_tf32=False)
         o_q += BTS
 
     p_dk = dk + (i_bh + B * H * i_v) * T*K + o_t[:, None] * K + o_kk[None, :]
@@ -314,7 +316,8 @@ def parallel_based_bwd_kernel(
     BK: tl.constexpr,
     BV: tl.constexpr,
 ):
-    i_kv, i_c, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_kv, i_c = unflatten_program_id(tl.cdiv(K, BK) * tl.cdiv(V, BV))
+    i_bh = tl.program_id(1).to(tl.int64)
     NV = tl.cdiv(V, BV)
     i_k = i_kv // (NV)
     i_v = i_kv % NV
@@ -347,7 +350,7 @@ class ParallelBasedFunction(torch.autograd.Function):
         num_warps = 4
         NK = triton.cdiv(K, BK)
         NV = triton.cdiv(V, BV)
-        grid = (NK * NV, triton.cdiv(T, BTL), B * H)
+        grid = (NK * NV * triton.cdiv(T, BTL), B * H)
 
         assert NK == 1, "will encounter some synchronization issue if not."
 
@@ -387,7 +390,7 @@ class ParallelBasedFunction(torch.autograd.Function):
         num_warps = 4
         NK = triton.cdiv(K, BK)
         NV = triton.cdiv(V, BV)
-        grid = (NK * NV, triton.cdiv(T, BTL), B * H)
+        grid = (NK * NV * triton.cdiv(T, BTL), B * H)
 
         assert NK == 1, "will encounter some synchronization issue if not"
 
@@ -423,12 +426,7 @@ def parallel_based(
     v: torch.Tensor,
     scale: float | None = None,
     use_norm: bool = True,
-    **kwargs,
 ):
-    if 'head_first' in kwargs:
-        raise DeprecationWarning(
-            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
-        )
     assert q.shape[-1] <= 128, "only support feature dim up to 128"
     if scale is None:
         scale = q.shape[-1] ** -0.5

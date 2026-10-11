@@ -9,13 +9,13 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.backends import dispatch
+from fla.backends import dispatch
 from fla.ops.kda.chunk_intra_token_parallel import chunk_kda_fwd_intra_token_parallel
 from fla.ops.kda.wy_fast import recompute_w_u_fwd
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.graph import get_static_buffer
-from fla.ops.utils.op import exp2, gather
+from fla.ops.utils.op import exp2, gather, unflatten_program_id
 from fla.utils import IS_GATHER_SUPPORTED, IS_TF32_SUPPORTED, autotune_cache_kwargs
 
 if IS_TF32_SUPPORTED:
@@ -163,8 +163,8 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
             # [BK, BC]
             b_kgt = tl.trans(b_k0 * exp2(b_gn1[None, :] - b_g0))
             # [BC, BC]
-            b_Aqk10 += tl.dot(b_q1 * b_gqn, b_kgt)
-            b_Akk10 += tl.dot(b_k1 * b_gqn, b_kgt)
+            b_Aqk10 = tl.dot(b_q1 * b_gqn, b_kgt, b_Aqk10)
+            b_Akk10 = tl.dot(b_k1 * b_gqn, b_kgt, b_Akk10)
 
             if NC >= 3 and i_tc2 < T:
                 m_ck2 = m_tc2[:, None] & m_k[None, :]
@@ -183,13 +183,13 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
                 b_kg2 = b_k2 * b_gqn2
                 # [BK, BC]
                 b_kgt = tl.trans(b_k0 * exp2(b_gn2[None, :] - b_g0))
-                b_Aqk20 += tl.dot(b_qg2, b_kgt)
-                b_Akk20 += tl.dot(b_kg2, b_kgt)
+                b_Aqk20 = tl.dot(b_qg2, b_kgt, b_Aqk20)
+                b_Akk20 = tl.dot(b_kg2, b_kgt, b_Akk20)
                 # [BC, BC]
                 b_kgt = tl.trans(b_k1 * exp2(b_gn2[None, :] - b_g1))
                 # [BC, BC]
-                b_Aqk21 += tl.dot(b_qg2, b_kgt)
-                b_Akk21 += tl.dot(b_kg2, b_kgt)
+                b_Aqk21 = tl.dot(b_qg2, b_kgt, b_Aqk21)
+                b_Akk21 = tl.dot(b_kg2, b_kgt, b_Akk21)
 
                 if NC >= 4 and i_tc3 < T:
                     m_ck3 = m_tc3[:, None] & m_k[None, :]
@@ -209,18 +209,18 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
                     # [BK, BC]
                     b_kgt = tl.trans(b_k0 * exp2(b_gn3[None, :] - b_g0))
                     # [BC, BC]
-                    b_Aqk30 += tl.dot(b_qg3, b_kgt)
-                    b_Akk30 += tl.dot(b_kg3, b_kgt)
+                    b_Aqk30 = tl.dot(b_qg3, b_kgt, b_Aqk30)
+                    b_Akk30 = tl.dot(b_kg3, b_kgt, b_Akk30)
                     # [BK, BC]
                     b_kgt = tl.trans(b_k1 * exp2(b_gn3[None, :] - b_g1))
                     # [BC, BC]
-                    b_Aqk31 += tl.dot(b_qg3, b_kgt)
-                    b_Akk31 += tl.dot(b_kg3, b_kgt)
+                    b_Aqk31 = tl.dot(b_qg3, b_kgt, b_Aqk31)
+                    b_Akk31 = tl.dot(b_kg3, b_kgt, b_Akk31)
                     # [BK, BC]
                     b_kgt = tl.trans(b_k2 * exp2(b_gn3[None, :] - b_g2))
                     # [BC, BC]
-                    b_Aqk32 += tl.dot(b_qg3, b_kgt)
-                    b_Akk32 += tl.dot(b_kg3, b_kgt)
+                    b_Aqk32 = tl.dot(b_qg3, b_kgt, b_Aqk32)
+                    b_Akk32 = tl.dot(b_kg3, b_kgt, b_Akk32)
 
     ################################################################################
     # save off-diagonal Aqk blocks and prepare Akk
@@ -427,7 +427,8 @@ def chunk_kda_bwd_kernel_intra(
     USE_GATHER: tl.constexpr,
     USE_GRAPH: tl.constexpr = False,
 ):
-    i_kc, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_kc, i_t = unflatten_program_id(tl.cdiv(K, BK) * NC)
+    i_bh = tl.program_id(1).to(tl.int64)
     i_b, i_hv = i_bh // HV, i_bh % HV
     i_h = i_hv // (HV // H)
     i_k, i_i = i_kc // NC, i_kc % NC
@@ -498,8 +499,8 @@ def chunk_kda_bwd_kernel_intra(
             b_dAqk = tl.load(p_dAqk, mask=m_dAf, other=0.0)
             b_dAkk = tl.load(p_dAkk, mask=m_dAf, other=0.0)
             # [BC, BK]
-            b_dq2 += tl.dot(b_dAqk, b_kg)
-            b_dk2 += tl.dot(b_dAkk, b_kg)
+            b_dq2 = tl.dot(b_dAqk, b_kg, b_dq2)
+            b_dk2 = tl.dot(b_dAkk, b_kg, b_dk2)
         b_gqn = exp2(b_g - b_gn)
         b_dq2 *= b_gqn
         b_dk2 *= b_gqn
@@ -604,8 +605,8 @@ def chunk_kda_bwd_kernel_intra(
             b_kbg = b_kb * tl.where(m_j[:, None], b_gkn, 0)
             # [BC, BK]
             # (SY 09/17) important to not use bf16 here to have a good precision.
-            b_dkt += tl.dot(b_dAqk, b_qg)
-            b_dkt += tl.dot(b_dAkk, b_kbg)
+            b_dkt = tl.dot(b_dAqk, b_qg, b_dkt)
+            b_dkt = tl.dot(b_dAkk, b_kbg, b_dkt)
         b_dkt *= exp2(b_gn - b_g)
     o_dA = i_ti * HV*BT + i_i * BC + o_i
     p_qj = q + i_ti * H*K + o_k
@@ -710,7 +711,7 @@ def chunk_kda_fwd_kernel_intra_sub_chunk(
     USE_GATHER: tl.constexpr,
     USE_GRAPH: tl.constexpr = False,
 ):
-    i_t, i_i, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    i_t, i_i, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_b, i_hv = i_bh // HV, i_bh % HV
     i_h = i_hv // (HV // H)
 
@@ -950,7 +951,7 @@ def chunk_kda_bwd_intra(
         dk2 = torch.empty_like(dk)
         db2 = beta.new_empty(NK, *beta.shape, dtype=torch.float)
         dg2 = torch.empty_like(dg, dtype=torch.float)
-    grid = (NK * NC, NT, B * HV)
+    grid = (NK * NC * NT, B * HV)
     chunk_kda_bwd_kernel_intra[grid](
         q=q,
         k=k,

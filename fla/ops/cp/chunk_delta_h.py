@@ -64,7 +64,7 @@ def pre_process_fwd_kernel_merged(
     MULTI_SEQS: tl.constexpr,
     AFFINE_CHAIN_PRECISION: tl.constexpr = None,
 ):
-    i_col, i_h = tl.program_id(0), tl.program_id(1)
+    i_col, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     if MULTI_SEQS:
         i_n = tl.program_id(2).to(tl.int64)
         # Offset hm for this subseq: hm[i_n, h, k, v+k]
@@ -140,15 +140,15 @@ def pre_process_fwd_kernel_merged(
             if K > 64:
                 p_w = w + o_t[:, None] * stride_w + o_k2[None, :]
                 b_w = tl.load(p_w, mask=m_t[:, None] & m_k2[None, :], other=0.0)
-                b_v_decay += tl.dot(b_w, b_h2.to(b_w.dtype))
+                b_v_decay = tl.dot(b_w, b_h2.to(b_w.dtype), b_v_decay)
             if K > 128:
                 p_w = w + o_t[:, None] * stride_w + o_k3[None, :]
                 b_w = tl.load(p_w, mask=m_t[:, None] & m_k3[None, :], other=0.0)
-                b_v_decay += tl.dot(b_w, b_h3.to(b_w.dtype))
+                b_v_decay = tl.dot(b_w, b_h3.to(b_w.dtype), b_v_decay)
             if K > 192:
                 p_w = w + o_t[:, None] * stride_w + o_k4[None, :]
                 b_w = tl.load(p_w, mask=m_t[:, None] & m_k4[None, :], other=0.0)
-                b_v_decay += tl.dot(b_w, b_h4.to(b_w.dtype))
+                b_v_decay = tl.dot(b_w, b_h4.to(b_w.dtype), b_v_decay)
 
             p_v = v + o_t[:, None] * stride_v + o_vb[None, :]
             if USE_BG:
@@ -225,19 +225,19 @@ def pre_process_fwd_kernel_merged(
                     b_h4 += tl.dot(b_k, b_v_orig.to(b_k.dtype)) + tl.dot(b_bg, b_v)
             else:
                 # GDN/KDA mode: h += k^T @ v_new
-                b_h1 += tl.dot(b_k, b_v)
+                b_h1 = tl.dot(b_k, b_v, b_h1)
                 if K > 64:
                     p_k = k + o_k2[:, None] + o_t[None, :] * stride_k
                     b_k = tl.load(p_k, mask=m_k2[:, None] & m_t[None, :], other=0.0)
-                    b_h2 += tl.dot(b_k, b_v)
+                    b_h2 = tl.dot(b_k, b_v, b_h2)
                 if K > 128:
                     p_k = k + o_k3[:, None] + o_t[None, :] * stride_k
                     b_k = tl.load(p_k, mask=m_k3[:, None] & m_t[None, :], other=0.0)
-                    b_h3 += tl.dot(b_k, b_v)
+                    b_h3 = tl.dot(b_k, b_v, b_h3)
                 if K > 192:
                     p_k = k + o_k4[:, None] + o_t[None, :] * stride_k
                     b_k = tl.load(p_k, mask=m_k4[:, None] & m_t[None, :], other=0.0)
-                    b_h4 += tl.dot(b_k, b_v)
+                    b_h4 = tl.dot(b_k, b_v, b_h4)
 
         # Store h results
         stride_hm_kv = K + V
@@ -328,7 +328,7 @@ def pre_process_fwd_kernel_merged(
         for num_stages in [2, 3, 4]
         for BV in [32, 64]
     ],
-    key=['HV', 'K', 'V', 'BT'],
+    key=['HV', 'K', 'V'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['pre_or_post_num_ranks', 'rank', 'NUM_SEQ_ENTRIES'])
@@ -371,14 +371,14 @@ def merge_fwd_bwd_kernel(
     ag_hm always uses [K, V+K] layout (from pre_scan).
     The recurrence h' = M @ h + he becomes h_T' = h_T @ M^T + he^T.
     """
-    i_v = tl.program_id(0)
+    i_v = tl.program_id(0).to(tl.int64)
     o_k = tl.arange(0, BK)
     m_k = o_k < K
     o_v = i_v * BV + tl.arange(0, BV)
     m_v = o_v < V
     if INTRACARD_MODE:
-        i_seq = tl.program_id(1)
-        i_h = tl.program_id(2)
+        i_seq = tl.program_id(1).to(tl.int64)
+        i_h = tl.program_id(2).to(tl.int64)
 
         if i_seq >= NUM_SEQ_ENTRIES:
             return
@@ -437,7 +437,7 @@ def merge_fwd_bwd_kernel(
                 tl.store(p_out, b_h.to(p_out.dtype.element_ty), mask=m_out)
     else:
         # CP mode
-        i_h = tl.program_id(1)
+        i_h = tl.program_id(1).to(tl.int64)
         if HAS_H_SEQ_IDX:
             h += tl.load(h_seq_idx).to(tl.int64) * HV * K * V
         if NUM_RANKS_ON_DEVICE:
@@ -522,7 +522,7 @@ def pre_process_bwd_kernel_merged(
     - Columns [0, V) are for computing dh (stage 1)
     - Columns [V, V+K) are for computing dm (stage 2)
     """
-    i_col, i_h = tl.program_id(0), tl.program_id(1)
+    i_col, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_n = 0
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
@@ -609,21 +609,21 @@ def pre_process_bwd_kernel_merged(
                 b_k = tl.load(p_k, mask=m_t[:, None] & m_k2[None, :], other=0.0)
                 if USE_GK:
                     b_gk_last2 = tl.load(p_gk_last + o_k2, mask=(o_k2 < K), other=0.).to(tl.float32)
-                b_dv += tl.dot(b_k, b_dh2.to(b_k.dtype))
+                b_dv = tl.dot(b_k, b_dh2.to(b_k.dtype), b_dv)
 
             if K > 128:
                 p_k = k + o_t[:, None] * stride_qk + o_k3[None, :]
                 b_k = tl.load(p_k, mask=m_t[:, None] & m_k3[None, :], other=0.0)
                 if USE_GK:
                     b_gk_last3 = tl.load(p_gk_last + o_k3, mask=(o_k3 < K), other=0.).to(tl.float32)
-                b_dv += tl.dot(b_k, b_dh3.to(b_k.dtype))
+                b_dv = tl.dot(b_k, b_dh3.to(b_k.dtype), b_dv)
 
             if K > 192:
                 p_k = k + o_t[:, None] * stride_qk + o_k4[None, :]
                 b_k = tl.load(p_k, mask=m_t[:, None] & m_k4[None, :], other=0.0)
                 if USE_GK:
                     b_gk_last4 = tl.load(p_gk_last + o_k4, mask=(o_k4 < K), other=0.).to(tl.float32)
-                b_dv += tl.dot(b_k, b_dh4.to(b_k.dtype))
+                b_dv = tl.dot(b_k, b_dh4.to(b_k.dtype), b_dv)
 
             if USE_G:
                 b_dv *= tl.where(m_t, exp2(bg_last - b_g), 0)[:, None]

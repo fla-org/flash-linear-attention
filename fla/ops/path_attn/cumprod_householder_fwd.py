@@ -36,7 +36,7 @@ def chunk_cumprod_householder_fwd_kernel(
     S: tl.constexpr,  # split size, aka large chunk size
     IS_VARLEN: tl.constexpr,
 ):
-    i_ss, i_h = tl.program_id(0), tl.program_id(1)
+    i_ss, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
 
     if IS_VARLEN:
         i_n, i_s = tl.load(split_indices + i_ss * 2).to(tl.int32), tl.load(split_indices + i_ss * 2 + 1).to(tl.int32)
@@ -82,7 +82,7 @@ def chunk_cumprod_householder_fwd_kernel(
         b_w1 = tl.load(p_w1, mask=m_d[:, None] & m_k[None, :], other=0.0)
         b_w2 = tl.load(p_w2, mask=m_k[:, None] & m_d[None, :], other=0.0)
         b_v_new = (b_w1 - tl.dot(b_h.to(b_w1.dtype), b_w1)).to(b_w2.dtype)
-        b_h += tl.dot(b_v_new, b_w2)
+        b_h = tl.dot(b_v_new, b_w2, b_h)
         p_k_new = k_new + o_k[:, None] * (H*K) + o_d[None, :]
         tl.store(p_k_new, b_k.to(k_new.dtype.element_ty), mask=m_k[:, None] & m_d[None, :])
 

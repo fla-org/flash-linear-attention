@@ -9,7 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.utils.op import exp
+from fla.ops.utils.op import exp, unflatten_program_id
 from fla.utils import autotune_cache_kwargs
 
 
@@ -61,7 +61,7 @@ def chunk_fwd_kernel_h_split(
     # i_h: head index
     # i_n: sequence index
     # i_s: local split index inside a sequence
-    i_k, i_v, i_sh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    i_k, i_v, i_sh = unflatten_program_id(tl.cdiv(K, BK), tl.cdiv(V, BV))
     i_ss, i_h = i_sh // H, i_sh % H
     if IS_VARLEN:
         i_n, i_s = tl.load(split_indices + i_ss * 2).to(tl.int32), tl.load(split_indices + i_ss * 2 + 1).to(tl.int32)
@@ -128,7 +128,7 @@ def chunk_fwd_kernel_h_split(
             b_gv = tl.load(p_gv, mask=m_t[:, None] & (o_v < V)[None, :], other=0.0)
             b_v = (b_v * exp(b_gv_last[None, :] - b_gv)).to(b_v.dtype)
 
-        b_h += tl.dot(b_k, b_v)
+        b_h = tl.dot(b_k, b_v, b_h)
 
     # if there are more than one splits, we store the result to (unreduced) hs
     # otherwise, we store the result to ht as the final state
@@ -179,7 +179,7 @@ def chunk_fwd_kernel_h_reduction(
     STORE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    i_k, i_v, i_nh = unflatten_program_id(tl.cdiv(K, BK), tl.cdiv(V, BV))
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
@@ -280,7 +280,7 @@ def chunk_bwd_kernel_dh_split(
     # i_h: head index
     # i_n: sequence index
     # i_s: local split index inside a sequence
-    i_k, i_v, i_sh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    i_k, i_v, i_sh = unflatten_program_id(tl.cdiv(K, BK), tl.cdiv(V, BV))
     i_ss, i_hq = i_sh // HQ, i_sh % HQ
     if IS_VARLEN:
         i_n, i_s = tl.load(split_indices + i_ss * 2).to(tl.int32), tl.load(split_indices + i_ss * 2 + 1).to(tl.int32)
@@ -345,7 +345,7 @@ def chunk_bwd_kernel_dh_split(
             b_gv_last = tl.load(p_gv_last, mask=(i_v * BV + tl.arange(0, BV) < V), other=0.)
             b_dh *= exp(b_gv_last)[None, :]
 
-        b_dh += tl.dot(b_q, b_do)
+        b_dh = tl.dot(b_q, b_do, b_dh)
 
     if NS > 1:
         p_dhs = dhs + i_sh * K*V + o_k[:, None] * V + o_v[None, :]
@@ -396,7 +396,7 @@ def chunk_bwd_kernel_dh_reduction(
     STORE_INITIAL_STATE_GRADIENT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    i_k, i_v, i_nh = unflatten_program_id(tl.cdiv(K, BK), tl.cdiv(V, BV))
     i_n, i_hq = i_nh // HQ, i_nh % HQ
     i_h = i_hq // NG
     if IS_VARLEN:
@@ -481,7 +481,7 @@ def chunk_fwd_h(
     hr = k.new_empty(NS, H, K, V, dtype=torch.float if states_in_fp32 else k.dtype)
     ht = k.new_empty(N, H, K, V, dtype=torch.float) if output_final_state else None
     # parallelized over splits
-    def grid(meta): return (triton.cdiv(K, meta['BK']), triton.cdiv(V, meta['BV']), NS * H)
+    def grid(meta): return (triton.cdiv(K, meta['BK']) * triton.cdiv(V, meta['BV']) * NS * H,)
     chunk_fwd_kernel_h_split[grid](
         k=k,
         v=v,
@@ -504,7 +504,7 @@ def chunk_fwd_h(
         USE_GK=gk is not None,
         USE_GV=gv is not None,
     )
-    def grid(meta): return (triton.cdiv(K, meta['BK']), triton.cdiv(V, meta['BV']), N * H)
+    def grid(meta): return (triton.cdiv(K, meta['BK']) * triton.cdiv(V, meta['BV']) * N * H,)
     chunk_fwd_kernel_h_reduction[grid](
         g=g,
         gk=gk,
@@ -569,7 +569,7 @@ def chunk_bwd_dh(
     dh0 = torch.empty_like(h0, dtype=torch.float) if h0 is not None else None
 
     # parallelized over splits
-    def grid(meta): return (triton.cdiv(K, meta['BK']), triton.cdiv(V, meta['BV']), NS * HQ)
+    def grid(meta): return (triton.cdiv(K, meta['BK']) * triton.cdiv(V, meta['BV']) * NS * HQ,)
     chunk_bwd_kernel_dh_split[grid](
         q=q,
         g=g,
@@ -596,7 +596,7 @@ def chunk_bwd_dh(
         USE_GV=gv is not None,
     )
 
-    def grid(meta): return (triton.cdiv(K, meta['BK']), triton.cdiv(V, meta['BV']), N * HQ)
+    def grid(meta): return (triton.cdiv(K, meta['BK']) * triton.cdiv(V, meta['BV']) * N * HQ,)
     chunk_bwd_kernel_dh_reduction[grid](
         g=g,
         gk=gk,

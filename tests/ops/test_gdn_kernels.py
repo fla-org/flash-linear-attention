@@ -1323,6 +1323,8 @@ def chunk_gated_delta_rule_bwd_dhu_ref(
             (2, 128, 2, 4, 64, False, True, torch.bfloat16),
             (1, 256, 4, 4, 32, True, True, torch.float16),
             (2, 128, 2, 2, 64, True, False, torch.bfloat16),
+            (1, 128, 2, 2, 96, True, True, torch.bfloat16),
+            (1, 128, 2, 2, 100, True, False, torch.float16),
         ]
     ],
 )

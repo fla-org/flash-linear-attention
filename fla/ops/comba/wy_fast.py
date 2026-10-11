@@ -70,7 +70,7 @@ def chunk_scaled_dot_comba_pkt_fwd_kernel(
         b_k = tl.load(p_k, mask=m_k, other=0.0)
         b_p = tl.load(p_p, mask=m_k, other=0.0)
         b_pb = b_p * b_beta[:, None]
-        b_A += tl.dot(b_pb.to(b_k.dtype), tl.trans(b_k))
+        b_A = tl.dot(b_pb.to(b_k.dtype), tl.trans(b_k), b_A)
 
     if USE_G:
         p_g0 = g0 + bos*HV + i_h + o_t * HV
@@ -226,7 +226,7 @@ def prepare_wy_repr_bwd_kernel(
         b_p = tl.load(p_p, mask=m_k, other=0.0)
         b_p_beta_g0 = (b_p * b_beta[:, None] * b_g0_exp[:, None]).to(b_p.dtype)
         b_dw = tl.load(p_dw, mask=m_k, other=0.0)
-        b_dA += tl.dot(b_dw, tl.trans(b_p_beta_g0))
+        b_dA = tl.dot(b_dw, tl.trans(b_p_beta_g0), b_dA)
         b_dp_beta_g0 = tl.dot(b_A, b_dw)
         b_dp = b_dp_beta_g0 * b_beta[:, None] * b_g0_exp[:, None]
         b_dbeta += tl.sum(b_dp_beta_g0 * b_p * b_g0_exp[:, None], 1)
@@ -242,7 +242,7 @@ def prepare_wy_repr_bwd_kernel(
         b_v = tl.load(p_v, mask=m_v, other=0.0)
         b_v_beta = (b_v * b_beta[:, None]).to(b_v.dtype)
         b_du = tl.load(p_du, mask=m_v, other=0.0)
-        b_dA += tl.dot(b_du, tl.trans(b_v_beta))
+        b_dA = tl.dot(b_du, tl.trans(b_v_beta), b_dA)
         b_dv_beta = tl.dot(b_A, b_du)
         b_dv = b_dv_beta * b_beta[:, None]
         b_dbeta += tl.sum(b_dv_beta * b_v, 1)
@@ -267,7 +267,7 @@ def prepare_wy_repr_bwd_kernel(
         b_p = tl.load(p_p, mask=m_k, other=0.0)
         b_dp = tl.load(p_dp, mask=m_k, other=0.0)
         b_p_beta = (b_p * b_beta[:, None]).to(b_p.dtype)
-        b_A += tl.dot(b_p_beta, tl.trans(b_k))
+        b_A = tl.dot(b_p_beta, tl.trans(b_k), b_A)
         b_dp_beta = tl.dot(b_dA, b_k)
         b_dbeta += tl.sum(b_dp_beta * b_p, 1)
         b_dk = tl.dot(tl.trans(b_dA), b_p_beta)
