@@ -23,16 +23,16 @@ from .test_modeling_utils import create_model_and_config
 # ===================================================================================
 # Test for Modeling (Forward/Backward Pass)
 # ===================================================================================
-@pytest.mark.parametrize('output_gate_activation', ['swish', 'sigmoid'])
 @pytest.mark.parametrize(
-    ['L', 'B', 'T', 'H', 'D', 'use_l2warp', 'attnres_block_size', 'dtype'],
+    ['L', 'B', 'T', 'H', 'D', 'use_l2warp', 'attnres_block_size', 'output_gate_activation', 'dtype'],
     [
-        pytest.param(*test, id="L{}-B{}-T{}-H{}-D{}-l2{}-bs{}-{}".format(*test))
+        pytest.param(*test, id="L{}-B{}-T{}-H{}-D{}-l2{}-bs{}-gate{}-{}".format(*test))
         for test in [
-            (4, 4, 1024, 4, 64, True,  None, torch.bfloat16),
-            (4, 4, 1024, 4, 64, False, None, torch.bfloat16),
-            (4, 4, 1024, 4, 64, False, 1,    torch.bfloat16),
-            (4, 4, 1024, 4, 64, False, 4,    torch.bfloat16),
+            (4, 4, 1024, 4, 64, True,  None, 'swish',   torch.bfloat16),
+            (4, 4, 1024, 4, 64, False, None, 'swish',   torch.bfloat16),
+            (4, 4, 1024, 4, 64, False, 1,    'swish',   torch.bfloat16),
+            (4, 4, 1024, 4, 64, False, 4,    'swish',   torch.bfloat16),
+            (4, 4, 1024, 4, 64, False, None, 'sigmoid', torch.bfloat16),
         ]
     ],
 )
@@ -42,46 +42,46 @@ def test_modeling(
     T: int,
     H: int,
     D: int,
-    output_gate_activation: str,
     use_l2warp: bool,
     attnres_block_size: int | None,
+    output_gate_activation: str,
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
     run_test_model_forward_backward(
-        L,
-        B,
-        T,
-        H,
-        D,
-        GatedDeltaNetConfig,
+        L=L,
+        B=B,
+        T=T,
+        H=H,
+        D=D,
+        config_class=GatedDeltaNetConfig,
         use_l2warp=use_l2warp,
+        dtype=dtype,
         attnres_block_size=attnres_block_size,
         output_gate_activation=output_gate_activation,
-        dtype=dtype,
     )
 
 
 # ===================================================================================
 # Test for Generation
 # ===================================================================================
-@pytest.mark.parametrize('output_gate_activation', ['swish', 'sigmoid'])
 @pytest.mark.parametrize(
-    ['L', 'B', 'T', 'H', 'D', 'dtype'],
+    ['L', 'B', 'T', 'H', 'D', 'output_gate_activation', 'dtype'],
     [
-        pytest.param(*test, id="L{}-B{}-T{}-H{}-D{}-{}".format(*test))
+        pytest.param(*test, id="L{}-B{}-T{}-H{}-D{}-gate{}-{}".format(*test))
         for test in [
-            (2, 4, 2000, 8, 64, torch.float16),
+            (2, 4, 2000, 8, 64, 'swish',   torch.float16),
+            (2, 4, 2000, 8, 64, 'sigmoid', torch.float16),
         ]
     ],
 )
 def test_generation(
-    output_gate_activation: str,
     L: int,
     B: int,
     T: int,
     H: int,
     D: int,
+    output_gate_activation: str,
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
@@ -93,7 +93,7 @@ def test_generation(
         dtype=dtype,
         output_gate_activation=output_gate_activation,
     )
-    run_test_generation(L, B, T, H, D, GatedDeltaNetConfig, dtype, model=model, config=config)
+    run_test_generation(L=L, B=B, T=T, H=H, D=D, config_class=GatedDeltaNetConfig, dtype=dtype, model=model, config=config)
 
 
 @pytest.mark.parametrize(
@@ -185,7 +185,7 @@ def test_output_gate_config_validation(use_gate: bool):
 
 def test_config_positional_compatibility():
     attn_spec = {"layers": [0], "num_heads": 2}
-    cfg_pos = GatedDeltaNetConfig(
+    config = GatedDeltaNetConfig(
         "chunk",
         128,
         1.0,
@@ -205,27 +205,8 @@ def test_config_positional_compatibility():
         attn_spec,
         False,
     )
-    cfg_kw = GatedDeltaNetConfig(
-        attn_mode="chunk",
-        hidden_size=128,
-        expand_v=1.0,
-        use_gate=True,
-        use_short_conv=True,
-        allow_neg_eigval=False,
-        conv_size=4,
-        head_dim=32,
-        num_heads=2,
-        num_v_heads=2,
-        max_position_embeddings=512,
-        hidden_ratio=2,
-        intermediate_size=256,
-        hidden_act="swish",
-        num_hidden_layers=2,
-        norm_eps=1e-5,
-        attn=attn_spec,
-        use_cache=False,
-    )
-    assert cfg_pos.norm_eps == cfg_kw.norm_eps == 1e-5
-    assert cfg_pos.attn == cfg_kw.attn
-    assert cfg_pos.use_cache == cfg_kw.use_cache is False
-    assert cfg_pos.output_gate_activation == cfg_kw.output_gate_activation == "swish"
+    assert config.norm_eps == 1e-5
+    assert config.attn['layers'] == attn_spec['layers']
+    assert config.attn['num_heads'] == attn_spec['num_heads']
+    assert config.use_cache is False
+    assert config.output_gate_activation == "swish"

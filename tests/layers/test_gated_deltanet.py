@@ -138,7 +138,12 @@ def test_gated_deltanet_output_gate(activation: str | None, use_gate: bool, T: i
     layer.zero_grad(set_to_none=True)
 
     def reference_norm(x, g=None):
-        output = F.rms_norm(x.float(), (layer.head_v_dim,), layer.o_norm.weight.float(), layer.o_norm.eps)
+        output = F.rms_norm(
+            input=x.float(),
+            normalized_shape=(layer.head_v_dim,),
+            weight=layer.o_norm.weight.float(),
+            eps=layer.o_norm.eps,
+        )
         if use_gate:
             gate = g.float().sigmoid() if activation == 'sigmoid' else F.silu(g.float())
             output = output * gate

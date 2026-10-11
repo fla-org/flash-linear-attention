@@ -63,12 +63,12 @@ class GatedDeltaNetBlock(GradientCheckpointingLayer):
             )
         else:
             self.attn = GatedDeltaNet(
-                mode=config.attn_mode,
                 hidden_size=config.hidden_size,
                 expand_v=config.expand_v,
                 head_dim=config.head_dim,
                 num_heads=config.num_heads,
                 num_v_heads=config.num_v_heads,
+                mode=config.attn_mode,
                 use_gate=config.use_gate,
                 use_short_conv=config.use_short_conv,
                 allow_neg_eigval=config.allow_neg_eigval,

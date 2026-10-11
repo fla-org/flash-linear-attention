@@ -80,6 +80,7 @@ class GatedDeltaNetConfig(_HybridAttentionConfigMixin, PretrainedConfig):
         self.vocab_size = vocab_size
         self.allow_neg_eigval = allow_neg_eigval
         self.attnres_block_size = attnres_block_size
+
         if output_gate_activation not in ("swish", "silu", "sigmoid"):
             raise ValueError(
                 f"output_gate_activation must be one of 'swish', 'silu', 'sigmoid', got {output_gate_activation!r}.",
