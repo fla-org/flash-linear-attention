@@ -9,6 +9,7 @@ from unittest import mock
 
 import pytest
 import torch
+import torch.nn.functional as F
 
 from fla.layers.gated_deltanet import GatedDeltaNet
 from fla.utils import assert_close, device
@@ -104,3 +105,59 @@ def test_gated_deltanet_fused_qkv_conv_matches_fallback(B: int, T: int, D: int, 
     # by tiny accumulation-order noise.
     for name in g_fused:
         assert_close(f'd{name}', g_sep[name], g_fused[name], 5e-3)
+
+
+@pytest.mark.parametrize('activation', [None, 'swish', 'silu', 'sigmoid'], ids=['default', 'swish', 'silu', 'sigmoid'])
+@pytest.mark.parametrize('use_gate', [False, True], ids=['ungated', 'gated'])
+@pytest.mark.parametrize(
+    ('T', 'dtype'),
+    [
+        pytest.param(1, torch.float32, id='T1-float32'),
+        pytest.param(63, torch.bfloat16, id='T63-bfloat16'),
+        pytest.param(128, torch.float16, id='T128-float16'),
+    ],
+)
+def test_gated_deltanet_output_gate(activation: str | None, use_gate: bool, T: int, dtype: torch.dtype):
+    torch.manual_seed(42)
+    kwargs = {} if activation is None else {'output_gate_activation': activation}
+    layer = GatedDeltaNet(
+        hidden_size=128,
+        expand_v=1,
+        head_dim=32,
+        num_heads=2,
+        use_gate=use_gate,
+        **kwargs,
+    ).to(device=device, dtype=dtype).train()
+    x = torch.randn(2, T, 128, device=device, dtype=dtype, requires_grad=True)
+    do = torch.randn_like(x)
+    tri = layer(x)[0]
+    tri.backward(do)
+    tri_dx = x.grad.clone()
+    tri_grads = {name: parameter.grad.clone() for name, parameter in layer.named_parameters()}
+    x.grad = None
+    layer.zero_grad(set_to_none=True)
+
+    def reference_norm(x, g=None):
+        output = F.rms_norm(x.float(), (layer.head_v_dim,), layer.o_norm.weight.float(), layer.o_norm.eps)
+        if use_gate:
+            gate = g.float().sigmoid() if activation == 'sigmoid' else F.silu(g.float())
+            output = output * gate
+        return output.to(x.dtype)
+
+    with mock.patch.object(layer.o_norm, 'forward', side_effect=reference_norm):
+        ref = layer(x)[0]
+        ref.backward(do)
+
+    assert torch.isfinite(tri).all()
+    assert torch.isfinite(tri_dx).all()
+    assert_close('o', ref, tri, 5e-3)
+    assert_close('dx', x.grad, tri_dx, 5e-3)
+    for name, parameter in layer.named_parameters():
+        assert torch.isfinite(tri_grads[name]).all()
+        assert_close(f'd{name}', parameter.grad, tri_grads[name], 5e-3)
+
+
+@pytest.mark.parametrize('use_gate', [False, True], ids=['ungated', 'gated'])
+def test_gated_deltanet_output_gate_validation(use_gate: bool):
+    with pytest.raises(ValueError, match='output_gate_activation'):
+        GatedDeltaNet(hidden_size=128, expand_v=1, head_dim=32, num_heads=2, use_gate=use_gate, output_gate_activation='relu')

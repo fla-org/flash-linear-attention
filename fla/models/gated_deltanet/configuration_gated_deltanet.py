@@ -55,6 +55,7 @@ class GatedDeltaNetConfig(_HybridAttentionConfigMixin, PretrainedConfig):
         self.hidden_size = hidden_size
         self.expand_v = expand_v
         self.use_gate = use_gate
+        self.output_gate_activation = output_gate_activation
         self.use_short_conv = use_short_conv
         self.conv_size = conv_size
         self.head_dim = head_dim
@@ -79,10 +80,10 @@ class GatedDeltaNetConfig(_HybridAttentionConfigMixin, PretrainedConfig):
         self.vocab_size = vocab_size
         self.allow_neg_eigval = allow_neg_eigval
         self.attnres_block_size = attnres_block_size
-        self.output_gate_activation = output_gate_activation
-        if self.output_gate_activation not in ("swish", "silu", "sigmoid"):
+        if output_gate_activation not in ("swish", "silu", "sigmoid"):
             raise ValueError(
-                f"output_gate_activation must be one of 'swish', 'silu', 'sigmoid', got {self.output_gate_activation!r}")
+                f"output_gate_activation must be one of 'swish', 'silu', 'sigmoid', got {output_gate_activation!r}.",
+            )
 
         if fuse_cross_entropy and fuse_linear_cross_entropy:
             raise ValueError(

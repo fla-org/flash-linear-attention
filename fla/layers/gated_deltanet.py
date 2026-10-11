@@ -115,6 +115,7 @@ class GatedDeltaNet(nn.Module):
         self.expand_v = expand_v
 
         self.use_gate = use_gate
+        self.output_gate_activation = output_gate_activation
         self.use_short_conv = use_short_conv
         self.conv_size = conv_size
         self.conv_bias = conv_bias
@@ -148,8 +149,8 @@ class GatedDeltaNet(nn.Module):
         assert mode in ['chunk', 'fused_recurrent'], f"Not supported mode `{mode}`."
         if output_gate_activation not in ('swish', 'silu', 'sigmoid'):
             raise ValueError(
-                f"output_gate_activation must be one of 'swish', 'silu', 'sigmoid', got {output_gate_activation!r}")
-        self.output_gate_activation = output_gate_activation
+                f"output_gate_activation must be one of 'swish', 'silu', 'sigmoid', got {output_gate_activation!r}.",
+            )
 
         self.q_proj = nn.Linear(hidden_size, self.key_dim, bias=False)
         self.k_proj = nn.Linear(hidden_size, self.key_dim, bias=False)
