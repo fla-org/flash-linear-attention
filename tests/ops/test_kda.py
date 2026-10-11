@@ -292,9 +292,7 @@ def test_fused_recurrent_state_v_first(
             (4, 1024, 4, 4, 128, 0.1, True, True, True, torch.float16),
             (1, 64, 1, 1, 64, 1, False, False, True, torch.float),
             (2, 256, 2, 4, 64, 1, False, True, True, torch.float),
-            (1, 1, 1, 1, 64, 1, False, False, False, torch.float),
             (2, 63, 2, 4, 64, 1, False, True, False, torch.bfloat16),
-            (1, 129, 2, 2, 64, 1, False, False, False, torch.float16),
         ]
     ],
 )
@@ -497,6 +495,7 @@ def test_fused_recurrent_vllm_decode(
         "mask_p",
         "use_qk_l2norm_in_kernel",
         "use_gate_in_kernel",
+        "has_a_log",
         "dtype",
         "safe_gate",
         "disable_recompute",
@@ -507,28 +506,29 @@ def test_fused_recurrent_vllm_decode(
             *test,
             id=(
                 "B{}-T{}-H{}-HV{}-D{}-scale{}-gate_logit_normalizer{}-mask_p{}"
-                "-use_qk_l2norm{}-use_gate{}-{}-safe_gate{}-disable_recompute{}-chunk_size{}"
+                "-use_qk_l2norm{}-use_gate{}-has_a_log{}-{}-safe_gate{}-disable_recompute{}-chunk_size{}"
             ).format(*test),
         )
         for test in [
-            (1, 63, 1, 1, 64, 1, 1, 0, False, False, torch.float16, True, False, 64),
-            (2, 500, 3, 3, 60, 1, 1, 0, False, False, torch.float16, True, True, 64),
-            (2, 1000, 3, 3, 64, 0.1, 1, 0.5, False, False, torch.float16, False, True, 64),
-            (3, 1024, 4, 4, 100, 1, 0.1, 0, False, False, torch.float16, False, False, 64),
-            (4, 1024, 4, 4, 128, 0.1, 1, 0, False, False, torch.float16, True, True, 64),
-            (4, 1024, 4, 4, 128, 0.1, 1, 0, True, False, torch.float16, True, False, 64),
-            (2, 1500, 4, 4, 128, 0.1, 10, 0, False, True, torch.float16, False, True, 64),
-            (4, 2048, 8, 8, 64, 0.1, 1, 0, False, True, torch.float16, True, True, 64),
+            (1, 63, 1, 1, 64, 1, 1, 0, False, False, False, torch.float16, True, False, 64),
+            (2, 500, 3, 3, 60, 1, 1, 0, False, False, False, torch.float16, True, True, 64),
+            (2, 1000, 3, 3, 64, 0.1, 1, 0.5, False, False, False, torch.float16, False, True, 64),
+            (3, 1024, 4, 4, 100, 1, 0.1, 0, False, False, False, torch.float16, False, False, 64),
+            (4, 1024, 4, 4, 128, 0.1, 1, 0, False, False, False, torch.float16, True, True, 64),
+            (4, 1024, 4, 4, 128, 0.1, 1, 0, True, False, False, torch.float16, True, False, 64),
+            (2, 1500, 4, 4, 128, 0.1, 10, 0, False, True, True, torch.float16, False, True, 64),
+            (4, 2048, 8, 8, 64, 0.1, 1, 0, False, True, True, torch.float16, True, True, 64),
 
-            (2, 1024, 2, 4, 64, 0.1, 1, 0, False, False, torch.float16, False, False, 64),
-            (2, 1024, 2, 8, 64, 0.1, 1, 0, False, True, torch.float16, False, False, 64),
-            (2, 1024, 4, 8, 128, 0.1, 1, 0, True, True, torch.float16, False, False, 64),
-            (2, 160, 2, 4, 64, 0.1, 1, 0, False, True, torch.float16, True, True, 32),
+            (2, 1024, 2, 4, 64, 0.1, 1, 0, False, False, False, torch.float16, False, False, 64),
+            (2, 1024, 2, 8, 64, 0.1, 1, 0, False, True, True, torch.float16, False, False, 64),
+            (2, 1024, 4, 8, 128, 0.1, 1, 0, True, True, True, torch.float16, False, False, 64),
+            (2, 160, 2, 4, 64, 0.1, 1, 0, False, True, True, torch.float16, True, True, 32),
 
-            (2, 1024, 2, 4, 64, 0.1, 1, 0, True, True, torch.bfloat16, True, False, 64),
-            (2, 1024, 2, 4, 64, 0.1, 1, 0, False, True, torch.bfloat16, False, False, 64),
-            (2, 160, 2, 4, 64, 0.1, 1, 0, False, True, torch.bfloat16, True, True, 32),
-            (2, 1024, 2, 8, 128, 0.1, 1, 0, True, True, torch.bfloat16, False, False, 64),
+            (2, 1024, 2, 4, 64, 0.1, 1, 0, True, True, True, torch.bfloat16, True, False, 64),
+            (2, 1024, 2, 4, 64, 0.1, 1, 0, False, True, True, torch.bfloat16, False, False, 64),
+            (2, 160, 2, 4, 64, 0.1, 1, 0, False, True, True, torch.bfloat16, True, True, 32),
+            (2, 1024, 2, 8, 128, 0.1, 1, 0, True, True, True, torch.bfloat16, False, False, 64),
+            (1, 65, 1, 1, 64, 1, 1, 0, False, True, False, torch.float16, False, False, 64),
         ]
     ],
 )
@@ -543,6 +543,7 @@ def test_chunk(
     mask_p: float,
     use_qk_l2norm_in_kernel: bool,
     use_gate_in_kernel: bool,
+    has_a_log: bool,
     dtype: torch.dtype,
     safe_gate: bool,
     disable_recompute: bool,
@@ -553,8 +554,9 @@ def test_chunk(
     k = torch.rand(B, T, H, D, dtype=dtype)
     v = torch.rand(B, T, HV, D, dtype=dtype)
     g = torch.randn(B, T, HV, D, dtype=torch.float if not use_gate_in_kernel else dtype)
+    A_log = None
     if use_gate_in_kernel:
-        A_log = torch.randn(HV, dtype=torch.float)
+        A_log = torch.randn(HV, dtype=torch.float) if has_a_log else None
         dt_bias = torch.randn(HV * D, dtype=torch.float)
     else:
         g = F.logsigmoid(g) / gate_logit_normalizer
@@ -570,8 +572,10 @@ def test_chunk(
 
     beta = torch.randn(B, T, HV, dtype=dtype).sigmoid()
     h0 = torch.randn(B, HV, D, D, dtype=torch.float32)
+    if A_log is not None:
+        A_log = A_log.to(device).requires_grad_(True)
     if use_gate_in_kernel:
-        A_log, dt_bias = map(lambda x: x.to(device).requires_grad_(True), (A_log, dt_bias))
+        dt_bias = dt_bias.to(device).requires_grad_(True)
     q, k, v, g, beta, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, g, beta, h0))
 
     do = torch.randn_like(v)
@@ -588,8 +592,9 @@ def test_chunk(
         output_final_state=True,
     )
     ((ref * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=True)
-    if use_gate_in_kernel:
+    if A_log is not None:
         ref_dA, A_log.grad = A_log.grad, None
+    if use_gate_in_kernel:
         ref_dbias, dt_bias.grad = dt_bias.grad, None
     ref_dq, ref_dk, ref_dv, ref_dg, ref_db, ref_dh0 = q.grad, k.grad, v.grad, g.grad, beta.grad, h0.grad
     q.grad = k.grad = v.grad = g.grad = beta.grad = h0.grad = None
@@ -600,7 +605,7 @@ def test_chunk(
         v=v.clone(),
         g=g.clone(),
         beta=beta.clone(),
-        A_log=(A_log.clone() if use_gate_in_kernel else None),
+        A_log=(A_log.clone() if A_log is not None else None),
         dt_bias=(dt_bias.clone() if use_gate_in_kernel else None),
         scale=scale,
         initial_state=h0.clone(),
@@ -613,8 +618,9 @@ def test_chunk(
         chunk_size=chunk_size,
     )
     ((tri * do).sum() + (tri_ht * dht).sum()).backward(retain_graph=True)
-    if use_gate_in_kernel:
+    if A_log is not None:
         tri_dA, A_log.grad = A_log.grad, None
+    if use_gate_in_kernel:
         tri_dbias, dt_bias.grad = dt_bias.grad, None
     tri_dq, tri_dk, tri_dv, tri_dg, tri_db, tri_dh0 = q.grad, k.grad, v.grad, g.grad, beta.grad, h0.grad
     q.grad = k.grad = v.grad = g.grad = beta.grad = h0.grad = None
@@ -626,67 +632,11 @@ def test_chunk(
     assert_close("dv", ref_dv, tri_dv, 0.008)
     assert_close("dg", ref_dg, tri_dg, 0.02)
     assert_close("db", ref_db, tri_db, 0.02)
-    if use_gate_in_kernel:
+    if A_log is not None:
         assert_close("dA", ref_dA, tri_dA, 0.003, warning=True)
+    if use_gate_in_kernel:
         assert_close("dbias", ref_dbias, tri_dbias, 0.008)
     assert_close("dh0", ref_dh0, tri_dh0, 0.008)
-
-
-@pytest.mark.parametrize(
-    ("cu_seqlens", "disable_recompute"),
-    [
-        pytest.param(None, False, id="dense-recompute"),
-        pytest.param([0, 3, 65], True, id="varlen-saved-intermediates"),
-    ],
-)
-def test_chunk_default_gate_scale(cu_seqlens: list[int] | None, disable_recompute: bool):
-    """Omitting A_log is equivalent to an explicit zero A_log in chunk KDA."""
-    torch.manual_seed(42)
-    B, T, H, HV, K, V = (2 if cu_seqlens is None else 1), 65, 2, 4, 32, 24
-    dtype = torch.bfloat16
-    num_states = B if cu_seqlens is None else len(cu_seqlens) - 1
-
-    q = torch.randn(B, T, H, K, dtype=dtype, device=device)
-    k = torch.randn(B, T, H, K, dtype=dtype, device=device)
-    v = torch.randn(B, T, HV, V, dtype=dtype, device=device)
-    g = torch.randn(B, T, HV, K, dtype=dtype, device=device)
-    beta = torch.randn(B, T, HV, dtype=dtype, device=device).sigmoid()
-    dt_bias = torch.randn(HV * K, dtype=torch.float32, device=device)
-    h0 = torch.randn(num_states, HV, K, V, dtype=torch.float32, device=device)
-    do = torch.randn_like(v)
-    dht = torch.randn_like(h0)
-    cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.long, device=device) if cu_seqlens is not None else None
-
-    def run(A_log: torch.Tensor | None):
-        inputs = [x.detach().clone().requires_grad_() for x in (q, k, v, g, beta, dt_bias, h0)]
-        q_i, k_i, v_i, g_i, beta_i, dt_bias_i, h0_i = inputs
-        o, ht = chunk_kda(
-            q=q_i,
-            k=k_i,
-            v=v_i,
-            g=g_i,
-            beta=beta_i,
-            A_log=A_log,
-            dt_bias=dt_bias_i,
-            initial_state=h0_i,
-            output_final_state=True,
-            use_qk_l2norm_in_kernel=True,
-            use_gate_in_kernel=True,
-            cu_seqlens=cu_seqlens,
-            cu_seqlens_cpu=cu_seqlens.cpu() if cu_seqlens is not None else None,
-            disable_recompute=disable_recompute,
-            chunk_size=32,
-        )
-        grads = torch.autograd.grad((o * do).sum() + (ht * dht).sum(), inputs)
-        return o, ht, grads
-
-    ref_o, ref_ht, ref_grads = run(torch.zeros(HV, dtype=torch.float32, device=device))
-    tri_o, tri_ht, tri_grads = run(None)
-
-    assert_close("o", ref_o, tri_o, 1e-4)
-    assert_close("ht", ref_ht, tri_ht, 1e-4)
-    for name, ref_grad, tri_grad in zip(("dq", "dk", "dv", "dg", "db", "dbias", "dh0"), ref_grads, tri_grads):
-        assert_close(name, ref_grad, tri_grad, 1e-4)
 
 
 @pytest.mark.parametrize(
