@@ -295,18 +295,18 @@ def test_swiglu_linear(
         if tensor is not None and tensor.requires_grad
     ]
 
-    z_ref = F.silu(x) * y
-    out_ref = F.linear(input=z_ref, weight=w, bias=b)
+    ref_z = F.silu(x) * y
+    ref = F.linear(input=ref_z, weight=w, bias=b)
     fn = torch.compile(swiglu_linear) if compile else swiglu_linear
-    out_tri = fn(x=x, y=y, weight=w, bias=b)
+    tri = fn(x=x, y=y, weight=w, bias=b)
 
-    g = torch.randn_like(out_ref)
-    grads_ref = torch.autograd.grad(outputs=out_ref, inputs=grad_inputs, grad_outputs=g)
-    grads_tri = torch.autograd.grad(outputs=out_tri, inputs=grad_inputs, grad_outputs=g)
+    do = torch.randn_like(ref)
+    ref_grads = torch.autograd.grad(outputs=ref, inputs=grad_inputs, grad_outputs=do)
+    tri_grads = torch.autograd.grad(outputs=tri, inputs=grad_inputs, grad_outputs=do)
 
-    assert_close('swiglu_linear out', out_ref, out_tri, 1e-3)
-    for name, grad_ref, grad_tri in zip(grad_names, grads_ref, grads_tri):
-        assert_close(f'swiglu_linear {name}', grad_ref, grad_tri, 1e-3)
+    assert_close('swiglu_linear out', ref, tri, 1e-3)
+    for name, ref_grad, tri_grad in zip(grad_names, ref_grads, tri_grads):
+        assert_close(f'swiglu_linear {name}', ref_grad, tri_grad, 1e-3)
 
 
 @pytest.mark.parametrize(
