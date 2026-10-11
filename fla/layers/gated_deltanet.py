@@ -115,7 +115,6 @@ class GatedDeltaNet(nn.Module):
         self.expand_v = expand_v
 
         self.use_gate = use_gate
-        self.output_gate_activation = output_gate_activation
         self.use_short_conv = use_short_conv
         self.conv_size = conv_size
         self.conv_bias = conv_bias
@@ -196,7 +195,7 @@ class GatedDeltaNet(nn.Module):
             )
         if use_gate:
             self.g_proj = nn.Linear(in_features=hidden_size, out_features=self.value_dim, bias=False)
-            self.o_norm = FusedRMSNormGated(hidden_size=self.head_v_dim, eps=norm_eps, activation=self.output_gate_activation)
+            self.o_norm = FusedRMSNormGated(hidden_size=self.head_v_dim, eps=norm_eps, activation=output_gate_activation)
         else:
             self.o_norm = RMSNorm(hidden_size=self.head_v_dim, eps=norm_eps, dtype=torch.float32)
         self.o_proj = nn.Linear(in_features=self.value_dim, out_features=hidden_size, bias=False)

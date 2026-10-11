@@ -146,7 +146,6 @@ def test_output_gate_config(activation: str | None, use_gate: bool, tmp_path):
     assert restored.output_gate_activation == expected
     assert restored.to_dict()['output_gate_activation'] == expected
     block = GatedDeltaNetBlock(config=restored, layer_idx=0)
-    assert block.attn.output_gate_activation == expected
     if use_gate:
         assert block.attn.o_norm.activation == expected
     else:
