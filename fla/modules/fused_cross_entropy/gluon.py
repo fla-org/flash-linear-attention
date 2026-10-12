@@ -53,7 +53,7 @@ def cross_entropy_fwd_kernel_gluon(
     BV: gl.constexpr,
     SPLIT: gl.constexpr,
 ):
-    NW: gl.constexpr = 4 if BV < 2048 else (8 if BV < 8192 else 16)
+    NW: gl.constexpr = 4
     R: gl.constexpr = min(128 // logits.dtype.element_ty.primitive_bitwidth, V & -V)
     layout: gl.constexpr = gl.BlockedLayout([R], [32], [NW], [0])
     i_n = gl.program_id(0).to(gl.int64)
@@ -116,7 +116,7 @@ def cross_entropy_bwd_kernel_gluon(
     V_START: gl.constexpr,
     BV: gl.constexpr,
 ):
-    NW: gl.constexpr = 4 if BV < 2048 else (8 if BV < 8192 else 16)
+    NW: gl.constexpr = 4
     R: gl.constexpr = min(128 // logits.dtype.element_ty.primitive_bitwidth, V & -V)
     layout: gl.constexpr = gl.BlockedLayout([R], [32], [NW], [0])
     i_n = gl.program_id(0).to(gl.int64)
@@ -149,6 +149,41 @@ def cross_entropy_bwd_kernel_gluon(
     gl.store(p_dlogits, b_dlogits, mask=m_v)
 
 
+@gluon.jit(do_not_specialize=['N'])
+def cross_entropy_reduce_kernel_gluon(
+    partial_loss,
+    partial_lse,
+    target,
+    loss,
+    lse,
+    z_loss,
+    N,
+    NV: gl.constexpr,
+    BN: gl.constexpr,
+    BS: gl.constexpr,
+    z_scale: gl.constexpr,
+    ignore_index: gl.constexpr,
+    SPLIT: gl.constexpr,
+):
+    # each lane owns a row, so the partition reduction stays in registers
+    layout: gl.constexpr = gl.BlockedLayout([1, 1], [1, 32], [1, 4], [1, 0])
+    o_n = gl.program_id(0).to(gl.int64) * BN + gl.arange(0, BN, layout=gl.SliceLayout(0, layout))
+    o_s = gl.arange(0, BS, layout=gl.SliceLayout(1, layout)).to(gl.int64)
+    offsets = o_s[:, None] * N + o_n[None, :]
+    mask = (o_s[:, None] < NV) & (o_n[None, :] < N)
+    b_lse = gl.load(partial_lse + offsets, mask=mask, other=-float('inf'))
+    b_max = gl.max(b_lse, 0)
+    b_lse = b_max + log(gl.sum(exp(b_lse - b_max[None, :]), 0))
+    b_loss = gl.sum(gl.load(partial_loss + offsets, mask=mask, other=0), 0)
+    if not SPLIT:
+        valid = gl.load(target + o_n, mask=o_n < N, other=ignore_index) != ignore_index
+        b_z_loss = gl.where(valid, z_scale * b_lse * b_lse, 0.)
+        b_loss = gl.where(valid, b_loss + b_lse + b_z_loss, 0.)
+        gl.store(z_loss + o_n, b_z_loss, mask=o_n < N)
+    gl.store(loss + o_n, b_loss, mask=o_n < N)
+    gl.store(lse + o_n, b_lse, mask=o_n < N)
+
+
 class GluonCrossEntropyFunction(torch.autograd.Function):
 
     @staticmethod
@@ -175,6 +210,9 @@ class GluonCrossEntropyFunction(torch.autograd.Function):
             ignore_index=ignore_index,
             process_group=process_group,
             kernel=cross_entropy_fwd_kernel_gluon,
+            block_size=8192,
+            num_warps=4,
+            reduction_kernel=cross_entropy_reduce_kernel_gluon,
         )
         ctx.save_for_backward(logits, target, lse)
         ctx.mark_non_differentiable(z_loss)
@@ -210,6 +248,7 @@ class GluonCrossEntropyFunction(torch.autograd.Function):
             class_start_idx=ctx.class_start_idx,
             inplace_backward=ctx.inplace_backward,
             kernel=cross_entropy_bwd_kernel_gluon,
+            num_warps=4,
         )
         return dlogits, None, None, None, None, None, None, None, None
 

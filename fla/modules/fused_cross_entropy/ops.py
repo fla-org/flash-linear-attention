@@ -143,6 +143,9 @@ def cross_entropy_fwd(
     process_group: ProcessGroup | None = None,
     *,
     kernel=cross_entropy_fwd_kernel,
+    block_size: int | None = None,
+    num_warps: int | None = None,
+    reduction_kernel=None,
 ):
     N, V = logits.shape
     assert target.shape == (N,)
@@ -153,11 +156,12 @@ def cross_entropy_fwd(
 
     if logits.stride(-1) != 1:
         logits = logits.contiguous()
-    BV = min(triton.next_power_of_2(V), 64 * 1024)
+    BV = min(triton.next_power_of_2(V), block_size or 64 * 1024)
     # reduce softcap register pressure without introducing an additional split reduction
-    if logit_softcapping is not None and V > BV:
+    if block_size is None and logit_softcapping is not None and V > BV:
         BV = 8 * 1024
-    num_warps = 4 if BV < 2048 else (8 if BV < 8192 else 16)
+    if num_warps is None:
+        num_warps = 4 if BV < 2048 else (8 if BV < 8192 else 16)
     # vocab partitions contribute partial loss until the global LSE is available
     NV = triton.cdiv(V, BV)
     split = world_size > 1 or NV > 1
@@ -187,8 +191,31 @@ def cross_entropy_fwd(
         num_warps=num_warps,
     )
 
+    if NV > 1 and reduction_kernel is not None:
+        reduced_loss = logits.new_empty(N, dtype=torch.float)
+        reduced_lse = torch.empty_like(reduced_loss)
+        reduction_kernel[(triton.cdiv(N, 128),)](
+            partial_loss=loss,
+            partial_lse=lse,
+            target=target,
+            loss=reduced_loss,
+            lse=reduced_lse,
+            z_loss=z_loss,
+            N=N,
+            NV=NV,
+            BN=128,
+            BS=triton.next_power_of_2(NV),
+            z_scale=lse_square_scale,
+            ignore_index=ignore_index,
+            SPLIT=world_size > 1,
+            num_warps=4,
+        )
+        loss, lse = reduced_loss, reduced_lse
+        if world_size == 1:
+            return loss, z_loss, lse, total_classes, class_start_idx
+
     if split:
-        if NV > 1:
+        if NV > 1 and reduction_kernel is None:
             lse = torch.logsumexp(lse, dim=0)
             loss = loss.sum(dim=0)
         if world_size > 1:
@@ -224,6 +251,7 @@ def cross_entropy_bwd(
     inplace_backward: bool = False,
     *,
     kernel=cross_entropy_bwd_kernel,
+    num_warps: int | None = None,
 ):
     N, V = logits.shape
     BV = min(triton.next_power_of_2(V), 4 * 1024)
@@ -246,7 +274,7 @@ def cross_entropy_bwd(
         V_TOTAL=V if total_classes is None else total_classes,
         V_START=class_start_idx,
         BV=BV,
-        num_warps=4 if BV < 2048 else 8,
+        num_warps=num_warps or (4 if BV < 2048 else 8),
     )
     return dlogits
 
