@@ -111,7 +111,11 @@ from fla.utils import IS_INTEL, IS_NPU, IS_NVIDIA, assert_close, device, device_
             marks=pytest.mark.skipif(IS_NPU, reason="Covers the default Triton GPU kernels"),
         ),
         pytest.param(2, 1, 0.0, 1.0, None, 0.0, False, False, 'sum', torch.float32, id='single_class'),
-        pytest.param(7, 129, 0.1, 0.5, 3.0, 0.01, False, True, 'none', torch.float16, id='small'),
+        pytest.param(
+            7, 129, 0.1, 0.5, 3.0, 0.01, False, True, 'none', torch.float16,
+            id='small',
+            marks=pytest.mark.skipif(IS_NPU, reason="Covers the default Triton GPU kernels"),
+        ),
         pytest.param(7, 65536, 0.0, 1.0, None, 0.0, False, False, 'sum', torch.bfloat16, id='split_boundary'),
     ],
 )

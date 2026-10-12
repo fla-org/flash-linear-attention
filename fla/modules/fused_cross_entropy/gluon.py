@@ -54,7 +54,7 @@ def cross_entropy_fwd_kernel_gluon(
     SPLIT: gl.constexpr,
 ):
     NW: gl.constexpr = 4 if BV < 2048 else (8 if BV < 8192 else 16)
-    layout: gl.constexpr = gl.BlockedLayout([1], [32], [NW], [0])
+    layout: gl.constexpr = gl.BlockedLayout([128 // logits.dtype.element_ty.primitive_bitwidth], [32], [NW], [0])
     i_n = gl.program_id(0).to(gl.int64)
     i_v = gl.program_id(1).to(gl.int64)
     o_v = i_v * BV + gl.arange(0, BV, layout=layout).to(gl.int64)
@@ -116,7 +116,7 @@ def cross_entropy_bwd_kernel_gluon(
     BV: gl.constexpr,
 ):
     NW: gl.constexpr = 4 if BV < 2048 else (8 if BV < 8192 else 16)
-    layout: gl.constexpr = gl.BlockedLayout([1], [32], [NW], [0])
+    layout: gl.constexpr = gl.BlockedLayout([128 // logits.dtype.element_ty.primitive_bitwidth], [32], [NW], [0])
     i_n = gl.program_id(0).to(gl.int64)
     i_v = gl.program_id(1).to(gl.int64)
     o_v = i_v * BV + gl.arange(0, BV, layout=layout).to(gl.int64)
@@ -213,16 +213,16 @@ class GluonCrossEntropyFunction(torch.autograd.Function):
 
 
 def cross_entropy_loss_verifier(
-    logits,
-    target,
-    label_smoothing=0.0,
-    logit_scale=1.0,
-    lse_square_scale=0.0,
-    logit_softcapping=None,
-    ignore_index=-100,
-    inplace_backward=False,
-    process_group=None,
-):
+    logits: torch.Tensor,
+    target: torch.Tensor,
+    label_smoothing: float = 0.0,
+    logit_scale: float = 1.0,
+    lse_square_scale: float = 0.0,
+    logit_softcapping: float | None = None,
+    ignore_index: int = -100,
+    inplace_backward: bool = False,
+    process_group: ProcessGroup | None = None,
+) -> tuple[bool, str | None]:
     if logits.device.type != 'cuda' or target.device != logits.device:
         return False, "Logits and targets must be on the same CUDA device"
     if logits.dtype not in (torch.float16, torch.bfloat16, torch.float32):
