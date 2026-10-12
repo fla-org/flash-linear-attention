@@ -141,6 +141,8 @@ def cross_entropy_fwd(
     logit_softcapping: float | None = None,
     ignore_index: int = -100,
     process_group: ProcessGroup | None = None,
+    *,
+    kernel=cross_entropy_fwd_kernel,
 ):
     N, V = logits.shape
     assert target.shape == (N,)
@@ -164,7 +166,7 @@ def cross_entropy_fwd(
     lse = torch.empty_like(loss)
     z_loss = logits.new_empty(N, dtype=torch.float)
 
-    cross_entropy_fwd_kernel[(N, NV)](
+    kernel[(N, NV)](
         logits=logits,
         target=target,
         loss=loss,
@@ -220,11 +222,13 @@ def cross_entropy_bwd(
     total_classes: int | None = None,
     class_start_idx: int = 0,
     inplace_backward: bool = False,
+    *,
+    kernel=cross_entropy_bwd_kernel,
 ):
     N, V = logits.shape
     BV = min(triton.next_power_of_2(V), 4 * 1024)
     dlogits = logits if inplace_backward else torch.empty_like(logits)
-    cross_entropy_bwd_kernel[(N, triton.cdiv(V, BV))](
+    kernel[(N, triton.cdiv(V, BV))](
         logits=logits,
         target=target,
         lse=lse,

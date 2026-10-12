@@ -5,6 +5,10 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import argparse
+import os
+import statistics
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -68,10 +72,61 @@ def benchmark(T, provider):
     return results
 
 
+@triton.testing.perf_report(
+    triton.testing.Benchmark(
+        x_names=['N', 'V', 'softcap'],
+        x_vals=[(1024, 32000, None), (2048, 128256, None), (63, 131071, None),
+                (1024, 32000, 3.0), (2047, 65539, 3.0), (7, 129, None)],
+        line_arg='provider',
+        line_vals=['triton', 'gluon', 'triton_bwd', 'gluon_bwd'],
+        line_names=['Triton forward', 'Gluon forward', 'Triton forward+backward', 'Gluon forward+backward'],
+        styles=[('blue', '-'), ('red', '-'), ('blue', '--'), ('red', '--')],
+        ylabel='Execution time (us)',
+        plot_name='CrossEntropyLogits',
+        args={},
+    ),
+)
+def benchmark_logits(N, V, softcap, provider):
+    from fla.backends import _DISPATCH_DISABLED, GluonBackend
+    from fla.utils import device
+
+    if _DISPATCH_DISABLED or not GluonBackend.is_available():
+        raise RuntimeError('This comparison requires NVIDIA Gluon and enabled backend dispatch')
+    torch.manual_seed(42)
+    logits = torch.randn(N, V, device=device, dtype=torch.bfloat16, requires_grad=True)
+    target = torch.randint(V, (N,), device=device)
+    target[::7] = -100
+    criterion = FusedCrossEntropyLoss(logit_softcapping=softcap)
+    saved = {key: os.environ.get(key) for key in ('FLA_GLUON', 'FLA_CE_GLUON')}
+    try:
+        os.environ['FLA_GLUON'] = '0'
+        os.environ['FLA_CE_GLUON'] = '1' if provider.startswith('gluon') else '0'
+
+        def run():
+            loss = criterion(logits, target)
+            if provider.endswith('_bwd'):
+                torch.autograd.grad(loss, logits)
+
+        for _ in range(5):
+            run()
+        times = [triton.testing.do_bench_cudagraph(run, rep=100) * 1000 for _ in range(5)]
+        return statistics.median(times), min(times), max(times)
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--logits-only', action='store_true', help='Compare Triton and Gluon CE without the linear projection')
+    args = parser.parse_args()
+
     try:
         from runner import run_module_benchmark
     except ModuleNotFoundError:
         from benchmarks.modules.runner import run_module_benchmark
 
-    run_module_benchmark(benchmark, script_file=__file__)
+    run_module_benchmark(benchmark_logits if args.logits_only else benchmark, script_file=__file__)
