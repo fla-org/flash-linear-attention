@@ -210,7 +210,7 @@ class GluonCrossEntropyFunction(torch.autograd.Function):
             ignore_index=ignore_index,
             process_group=process_group,
             kernel=cross_entropy_fwd_kernel_gluon,
-            block_size=8192,
+            block_size=4096 if logit_softcapping is not None else 8192,
             num_warps=4,
             reduction_kernel=cross_entropy_reduce_kernel_gluon,
         )
@@ -248,6 +248,7 @@ class GluonCrossEntropyFunction(torch.autograd.Function):
             class_start_idx=ctx.class_start_idx,
             inplace_backward=ctx.inplace_backward,
             kernel=cross_entropy_bwd_kernel_gluon,
+            block_size=1024 if ctx.logit_softcapping is not None else 4096,
             num_warps=4,
         )
         return dlogits, None, None, None, None, None, None, None, None

@@ -251,10 +251,11 @@ def cross_entropy_bwd(
     inplace_backward: bool = False,
     *,
     kernel=cross_entropy_bwd_kernel,
+    block_size: int | None = None,
     num_warps: int | None = None,
 ):
     N, V = logits.shape
-    BV = min(triton.next_power_of_2(V), 4 * 1024)
+    BV = min(triton.next_power_of_2(V), block_size or 4 * 1024)
     dlogits = logits if inplace_backward else torch.empty_like(logits)
     kernel[(N, triton.cdiv(V, BV))](
         logits=logits,
