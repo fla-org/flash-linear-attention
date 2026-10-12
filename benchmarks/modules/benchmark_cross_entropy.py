@@ -129,4 +129,8 @@ if __name__ == '__main__':
     except ModuleNotFoundError:
         from benchmarks.modules.runner import run_module_benchmark
 
-    run_module_benchmark(benchmark_logits if args.logits_only else benchmark, script_file=__file__)
+    run_module_benchmark(
+        benchmark_logits if args.logits_only else benchmark,
+        script_file=__file__,
+        visualize=not args.logits_only,
+    )
