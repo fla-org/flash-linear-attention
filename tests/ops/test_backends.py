@@ -317,6 +317,29 @@ def test_kda_tilelang_backend_verifier(kda_bwd_inputs, use_graph, accepted, reas
     assert backend.chunk_kda_bwd_wy_dqkg_fused_verifier(**kda_bwd_inputs, use_graph=use_graph) == (accepted, reason)
 
 
+@pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
+@pytest.mark.parametrize('pass_chunk_offsets', [False, True], ids=['chunk_offsets_omitted', 'chunk_offsets_passed'])
+def test_intracard_backend_dispatch(monkeypatch, pass_chunk_offsets):
+    """KDA's forward passes chunk_offsets; the opt-in intra-card backend must still be selected."""
+    from fla.ops.common.backends.intracard import IntraCardCPBackend
+    from fla.ops.common.backends.triton_ascend import TritonAscendCommonBackend
+    from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_fwd_h
+
+    monkeypatch.setattr(TritonAscendCommonBackend, 'is_available', classmethod(lambda cls: False))
+    monkeypatch.setenv('FLA_INTRACARD_CP', '1')
+    result = object()
+    implementation = create_autospec(IntraCardCPBackend.chunk_gated_delta_rule_fwd_h, return_value=result)
+    monkeypatch.setattr(IntraCardCPBackend, 'chunk_gated_delta_rule_fwd_h', implementation)
+
+    x = SimpleNamespace(shape=(1, 64, 2, 64))
+    inputs = dict(k=x, w=x, u=x, cu_seqlens=torch.tensor([0, 64]))
+    if pass_chunk_offsets:
+        inputs['chunk_offsets'] = torch.tensor([0, 1])
+    with torch.inference_mode():
+        assert chunk_gated_delta_rule_fwd_h(**inputs) is result
+    implementation.assert_called_once()
+
+
 @pytest.mark.parametrize(
     ('is_npu', 'device', 'accepted', 'reason'),
     [
