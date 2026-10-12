@@ -92,18 +92,20 @@ def _shared_dense_varlen_autotune():
             tuner.cache = saved[id(tuner)]
 
 
-@pytest.mark.parametrize(
-    ['L', 'B', 'T', 'H', 'D', 'use_l2warp', 'num_slots', 'level2_axis', 'oja_out_act', 'attnres_block_size', 'dtype'],
-    [
-        pytest.param(*test, id="L{}-B{}-T{}-H{}-D{}-l2{}-M{}-{}-{}-bs{}-{}".format(*test))
-        for test in [
-            (4, 4, 1024, 4, 64, True,  128, 'head', 'silu',    None, torch.bfloat16),
-            (4, 4, 1024, 4, 64, False, 128, 'head', 'softmax', None, torch.bfloat16),
-            (4, 4, 1024, 4, 64, False, 64,  'head', 'silu',    1,    torch.bfloat16),
-            (4, 4, 1024, 4, 64, False, 256, 'slot', 'silu',    4,    torch.bfloat16),
-        ]
-    ],
-)
+_MODELING_CASES = [
+    pytest.param(*test, id="L{}-B{}-T{}-H{}-D{}-l2{}-M{}-{}-{}-bs{}-{}".format(*test))
+    for test in [
+        (4, 4, 1024, 4, 64, True,  128, 'head', 'silu',    None, torch.bfloat16),
+        (4, 4, 1024, 4, 64, False, 128, 'head', 'softmax', None, torch.bfloat16),
+        (4, 4, 1024, 4, 64, False, 64,  'head', 'silu',    1,    torch.bfloat16),
+        (4, 4, 1024, 4, 64, False, 256, 'slot', 'silu',    4,    torch.bfloat16),
+    ]
+]
+_MODELING_ARGS = ['L', 'B', 'T', 'H', 'D', 'use_l2warp', 'num_slots',
+                  'level2_axis', 'oja_out_act', 'attnres_block_size', 'dtype']
+
+
+@pytest.mark.parametrize(_MODELING_ARGS, _MODELING_CASES)
 def test_modeling(
     L: int,
     B: int,
@@ -117,10 +119,39 @@ def test_modeling(
     attnres_block_size: int | None,
     dtype: torch.dtype,
 ):
-    # cu_seqlens changes the dtype part of Triton's autotune key, so the dense and the varlen pass autotune on their own and
-    # may settle on different configs. In bf16 the reordered reductions alone move the output of the two stacked recurrences
-    # past the 1e-3 this comparison allows (KDA shows the same on H20), so both passes share one autotune result here,
-    # while tests/ops/test_gated_oja_rule2.py covers the varlen-specific configs against the naive reference.
+    # the dense and the varlen pass autotune independently, as in production
+    run_test_model_forward_backward(
+        L,
+        B,
+        T,
+        H,
+        D,
+        GSA2Config,
+        use_l2warp=use_l2warp,
+        num_slots=num_slots,
+        level2_axis=level2_axis,
+        oja_out_act=oja_out_act,
+        attnres_block_size=attnres_block_size,
+        dtype=dtype,
+    )
+
+
+@pytest.mark.parametrize(_MODELING_ARGS, _MODELING_CASES)
+def test_modeling_shared_autotune(
+    L: int,
+    B: int,
+    T: int,
+    H: int,
+    D: int,
+    use_l2warp: bool,
+    num_slots: int,
+    level2_axis: str,
+    oja_out_act: str,
+    attnres_block_size: int | None,
+    dtype: torch.dtype,
+):
+    # diagnostic: with one autotune result shared by the dense and the varlen pass, any remaining difference comes from
+    # the varlen code paths themselves rather than from the reduction order of a different config
     with _shared_dense_varlen_autotune():
         run_test_model_forward_backward(
             L,
