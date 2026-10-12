@@ -183,7 +183,7 @@ def fused_recurrent_oja2_fwd(
         USE_Q_L2NORM=use_q_l2norm,
         USE_K_L2NORM=use_k_l2norm,
     )
-    o = o.sum(0).to(v.dtype)
+    o = o.sum(0).to(q.dtype)
     return o, final_state
 
 

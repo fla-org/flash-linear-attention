@@ -11,6 +11,7 @@ import pytest
 import torch
 
 from fla.layers.gsa2 import GatedSlotAttention2
+from fla.models.utils import Cache
 from fla.utils import IS_AMD, IS_NPU, IS_NVIDIA, device
 
 # the layer runs the GDN-2 kernels, which tests/ops/test_gdn2.py guards the same way
@@ -81,3 +82,32 @@ def test_gsa2_eval_with_grad_uses_chunk(mode: str):
     gdn2.assert_not_called()
     assert x.grad is not None
     assert torch.isfinite(x.grad).all()
+
+
+@torch.no_grad()
+def test_gsa2_read_only_call_keeps_cache():
+    """A call with an existing cache and `use_cache=False` leaves every cached state and the token count unchanged."""
+    torch.manual_seed(42)
+    layer = GatedSlotAttention2(
+        hidden_size=128,
+        head_dim=32,
+        num_heads=2,
+        num_slots=64,
+        use_short_conv=True,
+        use_w_conv=True,
+        layer_idx=0,
+    ).to(device=device, dtype=torch.float32).eval()
+    cache = Cache()
+    layer(torch.randn(1, 8, 128, device=device), past_key_values=cache, use_cache=True)
+
+    state = cache[0]
+    states = [s.clone() for s in (*state['recurrent_state'], *state['conv_state'])]
+    seen = cache.get_seq_length()
+
+    # a single token takes the in-place convolution step and the fused recurrent kernels
+    layer(torch.randn(1, 1, 128, device=device), past_key_values=cache, use_cache=False)
+
+    state = cache[0]
+    assert cache.get_seq_length() == seen
+    for expected, actual in zip(states, (*state['recurrent_state'], *state['conv_state'])):
+        assert torch.equal(expected, actual)

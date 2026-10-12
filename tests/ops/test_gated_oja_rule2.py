@@ -80,6 +80,8 @@ def test_fused_recurrent(
         use_q_l2norm=True,
         use_k_l2norm=True,
     )
+    # the output follows q like the chunk path, even though the slot code v is fp32
+    assert tri.dtype == q.dtype
     assert_close('o', ref, tri, 0.002)
     assert_close('ht', ref_ht, tri_ht, 0.002)
 

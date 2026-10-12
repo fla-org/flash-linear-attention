@@ -20,6 +20,7 @@ from .test_modeling_base import (
     run_test_generation,
     run_test_model_forward_backward,
 )
+from .test_modeling_utils import create_model_and_config
 
 # GSA2 runs the GDN-2 kernels, which tests/ops/test_gdn2.py guards the same way
 pytestmark = pytest.mark.skipif(not (IS_NVIDIA or IS_AMD or IS_NPU), reason="CUDA/ROCm or Ascend NPU required")
@@ -154,10 +155,22 @@ def test_generation(
     D: int,
     dtype: torch.dtype,
 ):
-    # chunked prefill and token-by-token decode round differently in fp16, and GSA2 stacks two recurrences per layer where
-    # GDN and KDA have one. On H20 the single-recurrence models measure 1.6e-3 to 1.7e-3 against the default 2e-3 and GSA2
-    # measures 2.9e-3, so the budget is twice the default. In fp32 the same comparison gives 2e-6.
+    # chunked prefill and token-by-token decode round differently, and GSA2 stacks two recurrences per layer where GDN and
+    # KDA have one. On H20 the single-recurrence models measure 1.6e-3 to 1.7e-3 against the default 2e-3 and GSA2 measures
+    # 3.3e-3 in fp16, so the budget is twice the default
     run_test_generation(L, B, T, H, D, GSA2Config, dtype, tol=4e-3)
+
+
+def test_generation_with_slot_projections():
+    # num_slots != head_dim on the head axis puts gdn_q_proj between the two levels, so token-by-token decode feeds the
+    # fused recurrent Oja2 output straight into a low-precision linear layer. Same shape, dtype and budget as
+    # test_generation (3.1e-3 on H20); the bf16 output dtype is checked by test_fused_recurrent
+    L, B, T, H, D, dtype = 2, 4, 2000, 8, 64, torch.float16
+    model, config = create_model_and_config(
+        GSA2Config, L, H, D, dtype, head_dim=D, num_slots=128, level2_axis='head',
+    )
+    assert model.model.layers[0].attn.gdn_q_proj is not None
+    run_test_generation(L, B, T, H, D, GSA2Config, dtype, model=model, config=config, tol=4e-3)
 
 
 @pytest.mark.parametrize(
@@ -178,6 +191,54 @@ def test_generate_prefill(
     dtype: torch.dtype,
 ):
     run_test_generate_matches_forward(L, B, T, H, D, GSA2Config, dtype)
+
+
+@pytest.mark.parametrize(
+    ('fuse_cross_entropy', 'fuse_linear_cross_entropy'),
+    [(False, False), (True, False), (False, True)],
+    ids=['ce', 'fused-ce', 'fused-linear-ce'],
+)
+def test_packed_loss(fuse_cross_entropy: bool, fuse_linear_cross_entropy: bool):
+    """Packing two sequences with cu_seqlens gives the loss and gradients of running them as a batch: no target crosses
+    the boundary. GSA2 takes cu_seqlens only with a batch size of 1, so the packed layout is the flattened one. fp32
+    keeps the comparison about the labels rather than the reduction order of dense and varlen kernels."""
+    torch.manual_seed(42)
+    config = GSA2Config(
+        hidden_size=64,
+        num_hidden_layers=1,
+        num_heads=1,
+        head_dim=64,
+        num_slots=64,
+        vocab_size=64,
+        use_cache=False,
+        fuse_cross_entropy=fuse_cross_entropy,
+        fuse_linear_cross_entropy=fuse_linear_cross_entropy,
+    )
+    model = GSA2ForCausalLM(config).to(device=device, dtype=torch.float32).train()
+    input_ids = torch.randint(low=0, high=config.vocab_size, size=(2, 7), device=device)
+    labels = input_ids.clone()
+    labels[:, 2] = -100
+
+    expected = model(input_ids=input_ids, labels=labels).loss
+    expected.backward()
+    expected_grads = {name: param.grad.clone() for name, param in model.named_parameters()}
+    model.zero_grad(set_to_none=True)
+
+    output = model(
+        input_ids=input_ids.view(1, -1),
+        labels=labels.view(1, -1),
+        output_hidden_states=True,
+        cu_seqlens=torch.tensor([0, 7, 14], dtype=torch.int32, device=device),
+    )
+    output.hidden_states[-1].retain_grad()
+    actual = output.loss
+    actual.backward()
+    has_gradient = output.hidden_states[-1].grad.reshape(2, 7, -1).ne(0).any(dim=-1)
+    assert torch.equal(has_gradient[:, :-1], labels[:, 1:].ne(-100))
+    assert not has_gradient[:, -1].any()
+    assert_close('loss', expected, actual, 1e-4)
+    for name, param in model.named_parameters():
+        assert_close(name, expected_grads[name], param.grad, 1e-4)
 
 
 @torch.no_grad()

@@ -324,6 +324,12 @@ class GatedSlotAttention2(nn.Module):
         conv_state_q, conv_state_k, conv_state_v, conv_state_w = None, None, None, None
         if last_state is not None and last_state["conv_state"] is not None:
             conv_state_q, conv_state_k, conv_state_v, conv_state_w = last_state["conv_state"]
+            if not use_cache:
+                # the single-token convolution step updates its cache in place, so read-only calls work on copies
+                conv_state_q, conv_state_k, conv_state_v, conv_state_w = (
+                    None if state is None else state.clone()
+                    for state in (conv_state_q, conv_state_k, conv_state_v, conv_state_w)
+                )
 
         if self.use_short_conv:
             q, conv_state_q = self.q_conv1d(
@@ -463,13 +469,14 @@ class GatedSlotAttention2(nn.Module):
                 dt_bias=self.dt2_bias,
             )
 
-        update_layer_cache(
-            self,
-            past_key_values,
-            recurrent_state=(state_oja, state_gdn) if use_cache else None,
-            conv_state=(conv_state_q, conv_state_k, conv_state_v, conv_state_w) if use_cache else None,
-            offset=q_len,
-        )
+        if use_cache:
+            update_layer_cache(
+                self,
+                past_key_values,
+                recurrent_state=(state_oja, state_gdn),
+                conv_state=(conv_state_q, conv_state_k, conv_state_v, conv_state_w),
+                offset=q_len,
+            )
 
         o = self.o_norm(o, rearrange(self.g_proj(hidden_states), "... (h d) -> ... h d", d=self.head_v_dim))
         o = rearrange(o, "b t h d -> b t (h d)")
