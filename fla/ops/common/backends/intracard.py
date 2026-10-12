@@ -76,6 +76,11 @@ class IntraCardCPBackend(BaseBackend):
         if cu_seqlens is None:
             return False, "cu_seqlens is None"
 
+        # Only graph-mode callers pass chunk_offsets. Splitting reads cu_seqlens on the host,
+        # which CUDA Graph capture cannot record.
+        if chunk_offsets is not None:
+            return False, "chunk_offsets is given (CUDA Graph mode)"
+
         return True, None
 
     def chunk_gated_delta_rule_fwd_h(
@@ -96,7 +101,7 @@ class IntraCardCPBackend(BaseBackend):
         chunk_offsets: torch.LongTensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """Intra-card CP implementation of chunk_gated_delta_rule_fwd_h."""
-        # chunk_offsets describes the unsplit batch; intracard_fwd_h derives the offsets it launches with.
+        # The verifier only accepts chunk_offsets=None; intracard_fwd_h derives the offsets it launches with.
         from fla.ops.common.intracard_cp import intracard_fwd_h
 
         return intracard_fwd_h(

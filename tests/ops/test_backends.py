@@ -318,9 +318,9 @@ def test_kda_tilelang_backend_verifier(kda_bwd_inputs, use_graph, accepted, reas
 
 
 @pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
-@pytest.mark.parametrize('pass_chunk_offsets', [False, True], ids=['chunk_offsets_omitted', 'chunk_offsets_passed'])
-def test_intracard_backend_dispatch(monkeypatch, pass_chunk_offsets):
-    """KDA's forward passes chunk_offsets; the opt-in intra-card backend must still be selected."""
+@pytest.mark.parametrize('extra', [{}, {'chunk_offsets': None}], ids=['chunk_offsets_omitted', 'chunk_offsets_none'])
+def test_intracard_backend_dispatch(monkeypatch, extra):
+    """KDA's eager forward passes chunk_offsets=None; the opt-in intra-card backend must still be selected."""
     from fla.ops.common.backends.intracard import IntraCardCPBackend
     from fla.ops.common.backends.triton_ascend import TritonAscendCommonBackend
     from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_fwd_h
@@ -332,12 +332,21 @@ def test_intracard_backend_dispatch(monkeypatch, pass_chunk_offsets):
     monkeypatch.setattr(IntraCardCPBackend, 'chunk_gated_delta_rule_fwd_h', implementation)
 
     x = SimpleNamespace(shape=(1, 64, 2, 64))
-    inputs = dict(k=x, w=x, u=x, cu_seqlens=torch.tensor([0, 64]))
-    if pass_chunk_offsets:
-        inputs['chunk_offsets'] = torch.tensor([0, 1])
     with torch.inference_mode():
-        assert chunk_gated_delta_rule_fwd_h(**inputs) is result
+        assert chunk_gated_delta_rule_fwd_h(k=x, w=x, u=x, cu_seqlens=torch.tensor([0, 64]), **extra) is result
     implementation.assert_called_once()
+
+
+def test_intracard_backend_verifier_rejects_graph_mode():
+    """Graph-mode callers pass fixed-shape chunk_offsets; intra-card CP cannot be captured."""
+    from fla.ops.common.backends.intracard import IntraCardCPBackend
+
+    x = SimpleNamespace(shape=(1, 64, 2, 64))
+    with torch.inference_mode():
+        verdict = IntraCardCPBackend().chunk_gated_delta_rule_fwd_h_verifier(
+            k=x, w=x, u=x, cu_seqlens=torch.tensor([0, 64]), chunk_offsets=torch.tensor([0, 1]),
+        )
+    assert verdict == (False, 'chunk_offsets is given (CUDA Graph mode)')
 
 
 @pytest.mark.parametrize(
