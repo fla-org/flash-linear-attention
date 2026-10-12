@@ -575,6 +575,44 @@ register_op(OpConfig(
     category='flash_attn',
 ))
 
+# --- Parallax (parameterized local linear attention) ---
+
+
+def shape_B1HD(B, T, H, D, **kw):
+    """Single decode query against the full-length cached KV."""
+    return (B, 1, H, D)
+
+
+register_op(OpConfig(
+    name='parallel_parallax',
+    import_path='fla.ops.parallax',
+    inputs={
+        'q': TensorSpec(shape_BTHD),
+        'r': TensorSpec(shape_BTHD),
+        'k': TensorSpec(shape_BTHD),
+        'v': TensorSpec(shape_BTHD),
+    },
+    output_is_tuple=False,
+    category='parallax',
+    # the D > 128 training kernel overflows the 192KiB UB on Ascend NPU
+    dim_constraints={'D': [64, 128]},
+))
+
+register_op(OpConfig(
+    name='parallax_decode_one_step',
+    import_path='fla.ops.parallax.decode',
+    inputs={
+        'q': TensorSpec(shape_B1HD),
+        'r': TensorSpec(shape_B1HD),
+        'k': TensorSpec(shape_BTHD),
+        'v': TensorSpec(shape_BTHD),
+    },
+    skip_backward=True,
+    output_is_tuple=False,
+    category='parallax',
+    test_file='tests/ops/test_parallax.py',
+))
+
 # --- layer-axis residual aggregation (AttnRes, mHC, ...) ---
 # These ops attend / aggregate over an `L` axis of stacked residual sources.
 # Inputs and shape sweeps are shared so future ops (mHC etc.) can reuse them.
