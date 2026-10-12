@@ -179,14 +179,16 @@ class WallAttention(nn.Module):
                 # window before them, so attend over the old cache plus the new tokens.
                 prior = self._get_cached_state(past_key_values)
                 cached = (k, v, g, gs) if self.use_scalar_gate else (k, v, g)
-                past_key_values.update(
+                state = past_key_values.update(
                     attn_state=cached,
                     layer_idx=self.layer_idx,
                     offset=q_len,
                     cache_kwargs=dict(window_size=self.window_size),
-                )
+                )['attn_state']
                 if prior is not None:
-                    k, v, g, *rest = (torch.cat((x, y), dim=1) for x, y in zip(prior, cached))
+                    if q_len > 1:
+                        state = tuple(torch.cat((x, y), dim=1) for x, y in zip(prior, cached))
+                    k, v, g, *rest = state
                     gs = rest[0] if self.use_scalar_gate else None
                     o = self._decode_rebuild(q, k, v, g, gs)
                 else:

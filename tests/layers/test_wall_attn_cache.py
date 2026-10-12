@@ -75,15 +75,20 @@ def test_cache_with_attention_mask_guard(window_size: int | None):
             )
 
 
-@pytest.mark.parametrize("q_len", [4, 20])
+@pytest.mark.parametrize(
+    ("T", "q_len", "use_scalar_gate"),
+    [(24, 4, False), (24, 20, False), (60, 10, True)],
+    ids=["T24-q4", "T24-q20", "T60-q10-gs"],
+)
 @pytest.mark.parametrize("window_size", [None, 16], ids=["full", "windowed"])
-def test_cached_multi_token_continuation(window_size: int | None, q_len: int):
-    B, T, H, D = 2, 24, 2, 64
+def test_cached_multi_token_continuation(window_size: int | None, T: int, q_len: int, use_scalar_gate: bool):
+    B, H, D = 2, 2, 64
     torch.manual_seed(42)
     layer = WallAttention(
         hidden_size=H * D,
         num_heads=H,
         window_size=window_size,
+        use_scalar_gate=use_scalar_gate,
         layer_idx=0,
     ).to(device=device, dtype=torch.float16).eval()
     prefix = torch.randn(B, T, H * D, device=device, dtype=torch.float16)
