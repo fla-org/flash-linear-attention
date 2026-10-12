@@ -174,21 +174,20 @@ class WallAttention(nn.Module):
                 o = self._decode_incremental(q, k, v, g, gs, past_key_values, q_len)
             else:
                 # Windowed: a rolling raw (k, v, g) cache; chunk anchors must track the
-                # window, so rebuild the rescale each step from the cached suffix.
+                # window, so rebuild the rescale each step from the cached suffix. The
+                # cache keeps only the last window, but earlier new tokens need the
+                # window before them, so attend over the old cache plus the new tokens.
+                prior = self._get_cached_state(past_key_values)
                 cached = (k, v, g, gs) if self.use_scalar_gate else (k, v, g)
-                state = past_key_values.update(
+                past_key_values.update(
                     attn_state=cached,
                     layer_idx=self.layer_idx,
                     offset=q_len,
                     cache_kwargs=dict(window_size=self.window_size),
-                )['attn_state']
-                if cache_has_content:
-                    if self.use_scalar_gate:
-                        k, v, g, gs = state
-                    else:
-                        k, v, g = state
-                kv_len = k.shape[1]
-                if q_len < kv_len:
+                )
+                if prior is not None:
+                    k, v, g, *rest = (torch.cat((x, y), dim=1) for x, y in zip(prior, cached))
+                    gs = rest[0] if self.use_scalar_gate else None
                     o = self._decode_rebuild(q, k, v, g, gs)
                 else:
                     o = parallel_wall_attn(q, k, v, g, g_scalar=gs, window_size=self.window_size)
@@ -311,5 +310,6 @@ class WallAttention(nn.Module):
             scale=scale,
             cache_chunk_size=WALL_DECODE_CHUNK,
             g_scalar_cumsum=gs_cumsum,
+            window_size=self.window_size,
         )
         return o

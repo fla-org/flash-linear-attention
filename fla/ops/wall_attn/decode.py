@@ -32,6 +32,7 @@ WALL_DECODE_AUTOTUNE_CONFIGS = [
 @triton.heuristics({
     'USE_SINK_BIAS': lambda args: args['sink_bias'] is not None,
     'USE_SCALAR_G': lambda args: args['g_scalar_cumsum'] is not None,
+    'USE_WINDOW': lambda args: args['W'] is not None,
 })
 @triton.jit(do_not_specialize=['T_kv', 'NC', 'KV_CHUNKS_BUCKET'])
 def parallel_wall_attn_decode_kernel(
@@ -49,6 +50,7 @@ def parallel_wall_attn_decode_kernel(
     T_kv,
     NC,
     KV_CHUNKS_BUCKET,
+    W: tl.constexpr,
     B: tl.constexpr,
     H: tl.constexpr,
     HQ: tl.constexpr,
@@ -62,6 +64,7 @@ def parallel_wall_attn_decode_kernel(
     C: tl.constexpr,
     USE_SINK_BIAS: tl.constexpr,
     USE_SCALAR_G: tl.constexpr,
+    USE_WINDOW: tl.constexpr,
 ):
     pid = tl.program_id(0).to(tl.int64)
     NV, NT = tl.cdiv(V, BV), tl.cdiv(T_q, BT)
@@ -101,8 +104,13 @@ def parallel_wall_attn_decode_kernel(
     b_m = tl.full([BT], float('-inf'), dtype=tl.float32)
     b_acc = tl.zeros([BT], dtype=tl.float32)
 
+    # The queries are the last T_q tokens of the cache.
+    o_q_abs = (T_kv - T_q) + o_q
+    i_end = tl.minimum(T_kv, T_kv - T_q + (i_t + 1) * BT)
+    i_start = tl.maximum((T_kv - T_q + i_t * BT - W + 1) // BS * BS, 0) if USE_WINDOW else 0
+
     # Iterate over the KV cache one chunk at a time: BS == C
-    for i_s in range(0, T_kv, BS):
+    for i_s in range(i_start, i_end, BS):
         i_c = i_s // C
         o_k = (i_s + tl.arange(0, BS)).to(tl.int64)
         m_k = o_k < T_kv
@@ -128,7 +136,10 @@ def parallel_wall_attn_decode_kernel(
             ).to(tl.float32)
             b_s += b_cq[:, None] - b_ck[None, :]
 
-        b_s = tl.where(m_k[None, :], b_s, float('-inf'))
+        m_s = m_k[None, :] & (o_k[None, :] <= o_q_abs[:, None])
+        if USE_WINDOW:
+            m_s = m_s & (o_q_abs[:, None] - o_k[None, :] < W)
+        b_s = tl.where(m_s, b_s, float('-inf'))
 
         b_m, b_mp = tl.maximum(b_m, tl.max(b_s, 1)), b_m
         b_mw = tl.where(b_m == float('-inf'), 0., b_m)
@@ -158,6 +169,7 @@ def parallel_wall_attn_decode(
     scale: float,
     cache_chunk_size: int,
     g_scalar_cumsum: torch.Tensor | None = None,
+    window_size: int | None = None,
 ):
     r"""Wall decode with a pre-rescaled KV cache.
 
@@ -172,6 +184,9 @@ def parallel_wall_attn_decode(
         k_tilde  : ``[B, T_kv, HQ, K]``  pre-rescaled keys (see `build_wall_kv_cache`)
         r_cache  : ``[B, NC,   HQ, K]``  per-chunk anchors, ``NC = ceil(T_kv / C)``
         g_scalar_cumsum : ``[B, T_kv, HQ]`` or ``None``  optional FoX-style scalar gate
+
+    The queries are the last ``T_q`` tokens of the cache: query ``i`` attends to cache
+    positions up to ``T_kv - T_q + i``, and to the last ``window_size`` of them if given.
 
     Returns ``(o, lse)`` with ``o.shape == [B, T_q, HQ, V]``.
     """
@@ -232,6 +247,7 @@ def parallel_wall_attn_decode(
         T_kv=T_kv,
         NC=NC,
         KV_CHUNKS_BUCKET=KV_CHUNKS_BUCKET,
+        W=window_size,
         B=B,
         H=H,
         HQ=HQ,
