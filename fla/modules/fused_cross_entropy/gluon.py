@@ -54,7 +54,8 @@ def cross_entropy_fwd_kernel_gluon(
     SPLIT: gl.constexpr,
 ):
     NW: gl.constexpr = 4 if BV < 2048 else (8 if BV < 8192 else 16)
-    layout: gl.constexpr = gl.BlockedLayout([128 // logits.dtype.element_ty.primitive_bitwidth], [32], [NW], [0])
+    R: gl.constexpr = min(128 // logits.dtype.element_ty.primitive_bitwidth, V & -V)
+    layout: gl.constexpr = gl.BlockedLayout([R], [32], [NW], [0])
     i_n = gl.program_id(0).to(gl.int64)
     i_v = gl.program_id(1).to(gl.int64)
     o_v = i_v * BV + gl.arange(0, BV, layout=layout).to(gl.int64)
@@ -116,7 +117,8 @@ def cross_entropy_bwd_kernel_gluon(
     BV: gl.constexpr,
 ):
     NW: gl.constexpr = 4 if BV < 2048 else (8 if BV < 8192 else 16)
-    layout: gl.constexpr = gl.BlockedLayout([128 // logits.dtype.element_ty.primitive_bitwidth], [32], [NW], [0])
+    R: gl.constexpr = min(128 // logits.dtype.element_ty.primitive_bitwidth, V & -V)
+    layout: gl.constexpr = gl.BlockedLayout([R], [32], [NW], [0])
     i_n = gl.program_id(0).to(gl.int64)
     i_v = gl.program_id(1).to(gl.int64)
     o_v = i_v * BV + gl.arange(0, BV, layout=layout).to(gl.int64)
