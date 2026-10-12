@@ -14,6 +14,7 @@ from fla.ops.cp import FLACPContext
 from fla.ops.cp.chunk_delta_h import chunk_gated_delta_rule_fwd_h_pre_process, compress_h0
 from fla.ops.delta_rule.chunk import chunk_delta_rule_bwd
 from fla.ops.delta_rule.wy_fast import recompute_w_u_fwd as dn_recompute_w_u_fwd
+from fla.ops.gated_delta_product.chunk_compact import chunk_gated_delta_product_fwd_compact, is_compact_fwd_supported
 from fla.ops.gated_delta_product.chunk_deltaproduct_h import chunk_gated_delta_product_fwd_h
 from fla.ops.gated_delta_product.chunk_deltaproduct_o import chunk_gated_delta_product_fwd_o
 from fla.ops.gated_delta_rule.chunk import chunk_gated_delta_rule_bwd
@@ -392,6 +393,24 @@ def chunk_gated_delta_product(
             )
     if scale is None:
         scale = k.shape[-1] ** -0.5
+    if cp_context is None and is_compact_fwd_supported(num_householder, K, V, q, k, v, g, beta, initial_state):
+        if use_qk_l2norm_in_kernel:
+            q, _ = l2norm_fwd(q)
+            k, _ = l2norm_fwd(k)
+        o, final_state = chunk_gated_delta_product_fwd_compact(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            scale=scale,
+            num_householder=num_householder,
+            initial_state=initial_state,
+            output_final_state=output_final_state,
+            cu_seqlens=cu_seqlens,
+            cu_seqlens_cpu=cu_seqlens_cpu,
+        )
+        return o.to(q.dtype), final_state
     o, final_state = ChunkGatedDeltaProductFunction.apply(
         q,
         k,
