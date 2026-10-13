@@ -128,6 +128,8 @@ from fla.utils import IS_INTEL, IS_NPU, IS_NVIDIA, assert_close, device, device_
             marks=pytest.mark.skipif(IS_NPU, reason="Covers the default Triton GPU kernels"),
         ),
         pytest.param(65, 2049, 0.0, 1.0, None, 0.0, False, False, 'mean', torch.bfloat16, id='warp_boundary'),
+        pytest.param(7, 32768, 0.1, 0.5, None, 0.01, True, True, 'none', torch.bfloat16, id='gluon_full_row'),
+        pytest.param(7, 32769, 0.1, 0.5, None, 0.01, True, True, 'none', torch.float32, id='gluon_split_row'),
         pytest.param(7, 65536, 0.0, 1.0, None, 0.0, False, False, 'sum', torch.bfloat16, id='split_boundary'),
         pytest.param(3, 1025, 0.1, 0.5, 3.0, 0.01, False, True, 'none', torch.float16, id='row_tail_softcap'),
         pytest.param(5, 8193, 0.1, 1.0, None, 0.01, False, False, 'sum', torch.float32, id='row_tail_split'),
@@ -311,8 +313,12 @@ def test_fused_linear_cross_entropy(
     confident_target: bool,
     accumulate_grad_in_fp32: bool,
     dtype: torch.dtype,
+    monkeypatch,
 ):
     """Match linear CE loss and input/parameter gradients against the reference implementations."""
+    if IS_NVIDIA:
+        # reduced-precision GEMM accumulation depends on the row chunk size
+        monkeypatch.setattr(torch.backends.cuda.matmul, 'allow_bf16_reduced_precision_reduction', False)
     torch.manual_seed(42)
     if confident_target:
         x = torch.zeros(B * T, D, device=device, dtype=dtype)
@@ -437,6 +443,7 @@ def _check_parallel_linear_cross_entropy(rank, world_size, local_vocab, dtype, o
 def _run_parallel_linear_cross_entropy_worker(rank, world_size, init_file):
     device_torch_lib.set_device(rank)
     torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
     dist.init_process_group(
         backend='nccl',
         init_method=f'file://{init_file}',
