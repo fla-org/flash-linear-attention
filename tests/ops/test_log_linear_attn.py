@@ -156,7 +156,7 @@ def test_chunk_bwd(
     tri_dq, tri_dk, tri_dv, tri_dg, tri_dl = q.grad, k.grad, v.grad, g.grad, level_scales.grad
     q.grad = k.grad = v.grad = g.grad = level_scales.grad = None
 
-    ref = naive_log_linear_attn(q, k, v, g, level_scales, scale=scale)
+    ref = naive_log_linear_attn(q.float(), k.float(), v.float(), g, level_scales.float(), scale=scale)
     (ref * do).sum().backward()
     ref_dq, ref_dk, ref_dv, ref_dg, ref_dl = q.grad, k.grad, v.grad, g.grad, level_scales.grad
 
