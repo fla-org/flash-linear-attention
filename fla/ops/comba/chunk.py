@@ -7,7 +7,7 @@
 
 import torch
 
-from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
+from fla.modules.norm.l2norm import l2norm_bwd, l2norm_fwd
 from fla.ops.comba.utils import chunk_comba_cumsum_scalar_bwd, chunk_comba_cumsum_scalar_fwd
 from fla.ops.comba.wy_fast import chunk_scaled_dot_comba_pkt_fwd, prepare_wy_repr_bwd, recompute_w_u_fwd
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_gated_delta_rule_fwd_h

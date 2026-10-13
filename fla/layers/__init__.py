@@ -10,6 +10,7 @@ from .attn import Attention
 from .based import BasedLinearAttention
 from .bitattn import BitAttention
 from .comba import Comba
+from .cyfa import CyclicFlowAttention
 from .delta_net import DeltaNet
 from .deltaformer import DeltaFormerAttention
 from .forgetting_attn import ForgettingAttention
@@ -53,6 +54,7 @@ __all__ = [
     'BasedLinearAttention',
     'BitAttention',
     'Comba',
+    'CyclicFlowAttention',
     'DeltaFormerAttention',
     'DeltaNet',
     'ForgettingAttention',
