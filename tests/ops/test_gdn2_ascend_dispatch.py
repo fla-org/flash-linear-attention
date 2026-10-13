@@ -7,9 +7,12 @@
 
 """Ascend dispatch and leaf-kernel coverage for GDN-2."""
 
+from unittest.mock import Mock
+
 import pytest
 import torch
 
+from fla.ops.gdn2.wy_fast import recompute_w_u_fwd_gdn2
 from fla.utils import IS_NPU, assert_close, device
 
 pytestmark = pytest.mark.skipif(not IS_NPU, reason="Ascend NPU required")
@@ -112,9 +115,12 @@ def _wy_reference(
         pytest.param("varlen", torch.float16, 32, 48, True, id="varlen-fp16-k32-v48-q"),
     ],
 )
-def test_recompute_w_u_fwd_gdn2_npu_leaf(layout, dtype, K, V, has_q):
+def test_recompute_w_u_fwd_gdn2_npu_leaf(layout, dtype, K, V, has_q, monkeypatch):
     """The Ascend WY leaf must match its channel-wise Torch definition."""
-    from fla.ops.gdn2.backends.triton_ascend.wy_fast import recompute_w_u_fwd_gdn2_npu
+    from fla.ops.gdn2.backends.triton_ascend import wy_fast
+
+    spy = Mock(wraps=wy_fast.recompute_w_u_fwd_gdn2_npu)
+    monkeypatch.setattr(wy_fast, "recompute_w_u_fwd_gdn2_npu", spy)
 
     lengths = None if layout == "dense" else (15, 65, 65)
     B = 2 if layout == "dense" and K < 256 else 1
@@ -136,7 +142,7 @@ def test_recompute_w_u_fwd_gdn2_npu_leaf(layout, dtype, K, V, has_q):
         cu_seqlens = torch.tensor((0, *torch.tensor(lengths).cumsum(0).tolist()), device=device)
 
     expected = _wy_reference(q=q, k=k, v=v, b=b, w_gate=w_gate, A=A, gk=gk, spans=spans)
-    actual = recompute_w_u_fwd_gdn2_npu(
+    actual = recompute_w_u_fwd_gdn2(
         k=k,
         v=v,
         b=b,
@@ -147,6 +153,7 @@ def test_recompute_w_u_fwd_gdn2_npu_leaf(layout, dtype, K, V, has_q):
         cu_seqlens=cu_seqlens,
     )
 
+    spy.assert_called_once()
     for name, ref, tri in zip(("w", "u", "qg", "kg"), expected, actual):
         if ref is None:
             assert tri is None
