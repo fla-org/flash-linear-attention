@@ -13,6 +13,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.backends import dispatch
 from fla.ops.utils.op import exp2, log2
 from fla.utils import autotune_cache_kwargs, check_shared_mem
 
@@ -148,6 +149,7 @@ def parallel_wall_attn_decode_kernel(
         tl.store(p_lse, b_m.to(p_lse.dtype.element_ty), mask=m_q)
 
 
+@dispatch('wall_attn')
 def parallel_wall_attn_decode(
     q: torch.Tensor,
     v: torch.Tensor,
