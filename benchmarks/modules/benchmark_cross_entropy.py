@@ -7,14 +7,18 @@
 
 import argparse
 import os
-import statistics
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import triton
 
+from fla.backends import GluonBackend
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
+
+LOGITS_PROVIDERS = ['triton', 'triton_bwd']
+if GluonBackend.is_available() and os.environ.get('FLA_DISABLE_BACKEND_DISPATCH') != '1':
+    LOGITS_PROVIDERS.extend(['gluon', 'gluon_bwd'])
 
 
 @triton.testing.perf_report(
@@ -86,58 +90,32 @@ def benchmark(T, provider):
             (511, 32003, 3.0, 0.1, torch.float32),
         ],
         line_arg='provider',
-        line_vals=['triton', 'gluon', 'triton_bwd', 'gluon_bwd'],
-        line_names=['Triton forward', 'Gluon forward', 'Triton forward+backward', 'Gluon forward+backward'],
-        styles=[('blue', '-'), ('red', '-'), ('blue', '--'), ('red', '--')],
-        ylabel='Execution time (us)',
+        line_vals=LOGITS_PROVIDERS,
+        line_names=LOGITS_PROVIDERS,
+        styles=[('blue', '-'), ('blue', '--'), ('red', '-'), ('red', '--')][:len(LOGITS_PROVIDERS)],
+        ylabel='Execution Time (ms)',
         plot_name='CrossEntropyLogits',
         args={},
     ),
 )
 def benchmark_logits(N: int, V: int, softcap: float | None, smoothing: float, dtype: torch.dtype, provider: str):
-    from fla.backends import _DISPATCH_DISABLED, GluonBackend
     from fla.utils import device
 
-    if _DISPATCH_DISABLED or not GluonBackend.is_available():
-        raise RuntimeError('This comparison requires NVIDIA Gluon and enabled backend dispatch')
-    from fla.modules.fused_cross_entropy import gluon, ops
-
     torch.manual_seed(42)
+    os.environ['FLA_GLUON'] = '0'
+    os.environ['FLA_CE_GLUON'] = '1' if provider.startswith('gluon') else '0'
     logits = torch.randn(N, V, device=device, dtype=dtype, requires_grad=True)
     target = torch.randint(V, (N,), device=device)
     target[::7] = -100
     criterion = FusedCrossEntropyLoss(label_smoothing=smoothing, logit_softcapping=softcap)
-    saved = {key: os.environ.get(key) for key in ('FLA_GLUON', 'FLA_CE_GLUON')}
-    try:
-        os.environ['FLA_GLUON'] = '0'
-        os.environ['FLA_CE_GLUON'] = '1' if provider.startswith('gluon') else '0'
-
-        probe_loss, _ = ops.cross_entropy_loss(
-            logits=logits,
-            target=target,
-            label_smoothing=smoothing,
-            logit_softcapping=softcap,
+    quantiles = [0.5, 0.2, 0.8]
+    if provider.endswith('_bwd'):
+        return triton.testing.do_bench(
+            lambda: criterion(input=logits, target=target).backward(),
+            grad_to_none=[logits],
+            quantiles=quantiles,
         )
-        backward = gluon.cross_entropy_bwd_gluon if provider.startswith('gluon') else ops.cross_entropy_bwd
-        assert probe_loss.grad_fn.bwd is backward
-        # release the default-stream graph before CUDA-graph warmup switches streams
-        del probe_loss
-
-        def run():
-            loss = criterion(input=logits, target=target)
-            if provider.endswith('_bwd'):
-                torch.autograd.grad(outputs=loss, inputs=logits)
-
-        for _ in range(5):
-            run()
-        times = [triton.testing.do_bench_cudagraph(run, rep=100) * 1000 for _ in range(5)]
-        return statistics.median(times), min(times), max(times)
-    finally:
-        for key, value in saved.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
+    return triton.testing.do_bench(lambda: criterion(input=logits, target=target), quantiles=quantiles)
 
 
 if __name__ == '__main__':

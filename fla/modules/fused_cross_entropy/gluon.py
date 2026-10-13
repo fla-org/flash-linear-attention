@@ -17,12 +17,8 @@ from triton.experimental.gluon import language as gl
 from triton.experimental.gluon.language import extra
 
 from fla.backends import GluonBackend, register
-from fla.modules.fused_cross_entropy.ops import (
-    FusedCrossEntropyFunction,
-    cross_entropy_bwd,
-    cross_entropy_fwd,
-    cross_entropy_loss,
-)
+from fla.modules.fused_cross_entropy.ops import cross_entropy_loss
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 if TYPE_CHECKING:
     from torch.distributed import ProcessGroup
@@ -210,6 +206,63 @@ def cross_entropy_fwd_kernel_reduce_gluon(
     gl.store(lse + o_n, b_lse, mask=o_n < N)
 
 
+def cross_entropy_reduce_gluon(
+    loss: torch.Tensor,
+    lse: torch.Tensor,
+    z_loss: torch.Tensor,
+    target: torch.Tensor,
+    lse_square_scale: float,
+    ignore_index: int,
+    world_size: int,
+    process_group: ProcessGroup | None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    N = target.shape[0]
+    if lse.ndim == 2:
+        NV = lse.shape[0]
+        reduced_loss = loss.new_empty(N)
+        reduced_lse = torch.empty_like(reduced_loss)
+        cross_entropy_fwd_kernel_reduce_gluon[lambda meta: (triton.cdiv(N, meta['BN']),)](
+            partial_loss=loss,
+            partial_lse=lse,
+            target=target,
+            loss=reduced_loss,
+            lse=reduced_lse,
+            z_loss=z_loss,
+            N=N,
+            NV=NV,
+            BN=128,
+            BS=triton.next_power_of_2(NV),
+            z_scale=lse_square_scale,
+            ignore_index=ignore_index,
+            SPLIT=world_size > 1,
+            REDUCE_LOSS=True,
+            num_warps=4,
+        )
+        loss, lse = reduced_loss, reduced_lse
+    if world_size > 1:
+        gathered_lse = lse.new_empty(world_size, N)
+        torch.distributed.all_gather_into_tensor(gathered_lse, lse, group=process_group)
+        torch.distributed.all_reduce(loss, group=process_group)
+        cross_entropy_fwd_kernel_reduce_gluon[lambda meta: (triton.cdiv(N, meta['BN']),)](
+            partial_loss=loss,
+            partial_lse=gathered_lse,
+            target=target,
+            loss=loss,
+            lse=lse,
+            z_loss=z_loss,
+            N=N,
+            NV=world_size,
+            BN=128,
+            BS=triton.next_power_of_2(world_size),
+            z_scale=lse_square_scale,
+            ignore_index=ignore_index,
+            SPLIT=False,
+            REDUCE_LOSS=False,
+            num_warps=4,
+        )
+    return loss, z_loss, lse
+
+
 def cross_entropy_fwd_gluon(
     logits: torch.Tensor,
     target: torch.Tensor,
@@ -220,20 +273,58 @@ def cross_entropy_fwd_gluon(
     ignore_index: int = -100,
     process_group: ProcessGroup | None = None,
 ):
-    return cross_entropy_fwd(
+    N, V = logits.shape
+    assert target.shape == (N,)
+    world_size = 1 if process_group is None else torch.distributed.get_world_size(process_group)
+    total_classes = world_size * V
+    rank = 0 if process_group is None else torch.distributed.get_rank(process_group)
+    class_start_idx = rank * V
+
+    if logits.stride(-1) != 1:
+        logits = logits.contiguous()
+    BV = min(triton.next_power_of_2(V), 2048 if logit_softcapping is not None else 8192)
+    # vocab partitions contribute partial loss until the global LSE is available
+    NV = triton.cdiv(V, BV)
+    split = world_size > 1 or NV > 1
+    shape = (NV, N) if NV > 1 else (N,)
+    loss = logits.new_empty(shape, dtype=torch.float)
+    lse = torch.empty_like(loss)
+    z_loss = logits.new_empty(N, dtype=torch.float)
+
+    cross_entropy_fwd_kernel_gluon[(N, NV)](
         logits=logits,
         target=target,
-        label_smoothing=label_smoothing,
-        logit_scale=logit_scale,
-        lse_square_scale=lse_square_scale,
-        logit_softcapping=logit_softcapping,
+        loss=loss,
+        lse=lse,
+        z_loss=z_loss,
+        s_logits=logits.stride(0),
+        scale=logit_scale,
+        softcap=logit_softcapping,
+        smoothing=label_smoothing,
+        z_scale=lse_square_scale,
         ignore_index=ignore_index,
-        process_group=process_group,
-        kernel=cross_entropy_fwd_kernel_gluon,
-        reduce_kernel=cross_entropy_fwd_kernel_reduce_gluon,
-        block_size=2048 if logit_softcapping is not None else 8192,
+        N=N,
+        V=V,
+        V_TOTAL=total_classes,
+        V_START=class_start_idx,
+        BV=BV,
+        SPLIT=split,
         num_warps=4,
     )
+
+    if split:
+        loss, z_loss, lse = cross_entropy_reduce_gluon(
+            loss=loss,
+            lse=lse,
+            z_loss=z_loss,
+            target=target,
+            lse_square_scale=lse_square_scale,
+            ignore_index=ignore_index,
+            world_size=world_size,
+            process_group=process_group,
+        )
+
+    return loss, z_loss, lse, total_classes, class_start_idx
 
 
 def cross_entropy_bwd_gluon(
@@ -250,23 +341,95 @@ def cross_entropy_bwd_gluon(
     class_start_idx: int = 0,
     inplace_backward: bool = False,
 ) -> torch.Tensor:
-    return cross_entropy_bwd(
+    N, V = logits.shape
+    BV = min(triton.next_power_of_2(V), 1024 if logit_softcapping is not None else 4096)
+    dlogits = logits if inplace_backward else torch.empty_like(logits)
+    cross_entropy_bwd_kernel_gluon[(N, triton.cdiv(V, BV))](
         logits=logits,
         target=target,
         lse=lse,
         dloss=dloss,
-        label_smoothing=label_smoothing,
-        logit_scale=logit_scale,
-        lse_square_scale=lse_square_scale,
-        logit_softcapping=logit_softcapping,
+        dlogits=dlogits,
+        s_logits=logits.stride(0),
+        s_dloss=dloss.stride(0),
+        s_dlogits=dlogits.stride(0),
+        scale=logit_scale,
+        softcap=logit_softcapping,
+        smoothing=label_smoothing,
+        z_scale=lse_square_scale,
         ignore_index=ignore_index,
-        total_classes=total_classes,
-        class_start_idx=class_start_idx,
-        inplace_backward=inplace_backward,
-        kernel=cross_entropy_bwd_kernel_gluon,
-        block_size=1024 if logit_softcapping is not None else 4096,
+        V=V,
+        V_TOTAL=V if total_classes is None else total_classes,
+        V_START=class_start_idx,
+        BV=BV,
         num_warps=4,
     )
+    return dlogits
+
+
+class FusedCrossEntropyGluonFunction(torch.autograd.Function):
+
+    @staticmethod
+    @input_guard
+    @autocast_custom_fwd
+    def forward(
+        ctx,
+        logits,
+        target,
+        label_smoothing=0.0,
+        logit_scale=1.0,
+        lse_square_scale=0.0,
+        logit_softcapping=None,
+        ignore_index=-100,
+        inplace_backward=False,
+        process_group: ProcessGroup | None = None,
+    ):
+        loss, z_loss, lse, total_classes, class_start_idx = cross_entropy_fwd_gluon(
+            logits=logits,
+            target=target,
+            label_smoothing=label_smoothing,
+            logit_scale=logit_scale,
+            lse_square_scale=lse_square_scale,
+            logit_softcapping=logit_softcapping,
+            ignore_index=ignore_index,
+            process_group=process_group,
+        )
+        ctx.save_for_backward(logits, target, lse)
+        ctx.mark_non_differentiable(z_loss)
+        ctx.label_smoothing = label_smoothing
+        ctx.logit_scale = logit_scale
+        ctx.lse_square_scale = lse_square_scale
+        ctx.logit_softcapping = logit_softcapping
+        ctx.ignore_index = ignore_index
+        ctx.total_classes = total_classes
+        ctx.class_start_idx = class_start_idx
+        ctx.inplace_backward = inplace_backward
+
+        return loss, z_loss
+
+    @staticmethod
+    @input_guard
+    @autocast_custom_bwd
+    def backward(ctx, dloss, dz_loss):
+        # z-loss is returned for logging and is already included in the differentiable loss
+        del dz_loss
+
+        logits, target, lse = ctx.saved_tensors
+        dlogits = cross_entropy_bwd_gluon(
+            logits=logits,
+            target=target,
+            lse=lse,
+            dloss=dloss,
+            label_smoothing=ctx.label_smoothing,
+            logit_scale=ctx.logit_scale,
+            lse_square_scale=ctx.lse_square_scale,
+            logit_softcapping=ctx.logit_softcapping,
+            ignore_index=ctx.ignore_index,
+            total_classes=ctx.total_classes,
+            class_start_idx=ctx.class_start_idx,
+            inplace_backward=ctx.inplace_backward,
+        )
+        return dlogits, None, None, None, None, None, None, None, None
 
 
 def cross_entropy_loss_verifier(
@@ -299,7 +462,7 @@ def cross_entropy_loss_gluon(
     inplace_backward: bool = False,
     process_group: ProcessGroup | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    return FusedCrossEntropyFunction.apply(
+    return FusedCrossEntropyGluonFunction.apply(
         logits,
         target,
         label_smoothing,
@@ -309,5 +472,4 @@ def cross_entropy_loss_gluon(
         ignore_index,
         inplace_backward,
         process_group,
-        (cross_entropy_fwd_gluon, cross_entropy_bwd_gluon),
     )

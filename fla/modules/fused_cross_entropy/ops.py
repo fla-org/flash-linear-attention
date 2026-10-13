@@ -19,8 +19,6 @@ from fla.ops.utils.op import exp, log, tanh
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
     from torch.distributed import ProcessGroup
 
 
@@ -180,15 +178,13 @@ def cross_entropy_reduce(
     ignore_index: int,
     world_size: int,
     process_group: ProcessGroup | None,
-    *,
-    kernel=cross_entropy_fwd_kernel_reduce,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     N = target.shape[0]
     if lse.ndim == 2:
         NV = lse.shape[0]
         reduced_loss = loss.new_empty(N)
         reduced_lse = torch.empty_like(reduced_loss)
-        kernel[lambda meta: (triton.cdiv(N, meta['BN']),)](
+        cross_entropy_fwd_kernel_reduce[(triton.cdiv(N, 128),)](
             partial_loss=loss,
             partial_lse=lse,
             target=target,
@@ -210,7 +206,7 @@ def cross_entropy_reduce(
         gathered_lse = lse.new_empty(world_size, N)
         torch.distributed.all_gather_into_tensor(gathered_lse, lse, group=process_group)
         torch.distributed.all_reduce(loss, group=process_group)
-        kernel[lambda meta: (triton.cdiv(N, meta['BN']),)](
+        cross_entropy_fwd_kernel_reduce[(triton.cdiv(N, 128),)](
             partial_loss=loss,
             partial_lse=gathered_lse,
             target=target,
@@ -239,11 +235,6 @@ def cross_entropy_fwd(
     logit_softcapping: float | None = None,
     ignore_index: int = -100,
     process_group: ProcessGroup | None = None,
-    *,
-    kernel=cross_entropy_fwd_kernel,
-    reduce_kernel=cross_entropy_fwd_kernel_reduce,
-    block_size: int | None = None,
-    num_warps: int | None = None,
 ):
     N, V = logits.shape
     assert target.shape == (N,)
@@ -254,12 +245,11 @@ def cross_entropy_fwd(
 
     if logits.stride(-1) != 1:
         logits = logits.contiguous()
-    BV = min(triton.next_power_of_2(V), 64 * 1024 if block_size is None else block_size)
+    BV = min(triton.next_power_of_2(V), 64 * 1024)
     # reduce softcap register pressure without introducing an additional split reduction
-    if block_size is None and logit_softcapping is not None and V > BV:
+    if logit_softcapping is not None and V > BV:
         BV = 8 * 1024
-    if num_warps is None:
-        num_warps = 4 if BV < 2048 else (8 if BV < 8192 else 16)
+    num_warps = 4 if BV < 2048 else (8 if BV < 8192 else 16)
     # vocab partitions contribute partial loss until the global LSE is available
     NV = triton.cdiv(V, BV)
     split = world_size > 1 or NV > 1
@@ -268,7 +258,7 @@ def cross_entropy_fwd(
     lse = torch.empty_like(loss)
     z_loss = logits.new_empty(N, dtype=torch.float)
 
-    kernel[(N, NV)](
+    cross_entropy_fwd_kernel[(N, NV)](
         logits=logits,
         target=target,
         loss=loss,
@@ -299,7 +289,6 @@ def cross_entropy_fwd(
             ignore_index=ignore_index,
             world_size=world_size,
             process_group=process_group,
-            kernel=reduce_kernel,
         )
 
     return loss, z_loss, lse, total_classes, class_start_idx
@@ -318,17 +307,11 @@ def cross_entropy_bwd(
     total_classes: int | None = None,
     class_start_idx: int = 0,
     inplace_backward: bool = False,
-    *,
-    kernel=cross_entropy_bwd_kernel,
-    block_size: int = 4 * 1024,
-    num_warps: int | None = None,
 ):
     N, V = logits.shape
-    BV = min(triton.next_power_of_2(V), block_size)
-    if num_warps is None:
-        num_warps = 4 if BV < 2048 else 8
+    BV = min(triton.next_power_of_2(V), 4 * 1024)
     dlogits = logits if inplace_backward else torch.empty_like(logits)
-    kernel[(N, triton.cdiv(V, BV))](
+    cross_entropy_bwd_kernel[(N, triton.cdiv(V, BV))](
         logits=logits,
         target=target,
         lse=lse,
@@ -346,7 +329,7 @@ def cross_entropy_bwd(
         V_TOTAL=V if total_classes is None else total_classes,
         V_START=class_start_idx,
         BV=BV,
-        num_warps=num_warps,
+        num_warps=4 if BV < 2048 else 8,
     )
     return dlogits
 
@@ -367,10 +350,8 @@ class FusedCrossEntropyFunction(torch.autograd.Function):
         ignore_index=-100,
         inplace_backward=False,
         process_group: ProcessGroup | None = None,
-        backend: tuple[Callable, Callable] | None = None,
     ):
-        fwd, ctx.bwd = (cross_entropy_fwd, cross_entropy_bwd) if backend is None else backend
-        loss, z_loss, lse, total_classes, class_start_idx = fwd(
+        loss, z_loss, lse, total_classes, class_start_idx = cross_entropy_fwd(
             logits=logits,
             target=target,
             label_smoothing=label_smoothing,
@@ -401,7 +382,7 @@ class FusedCrossEntropyFunction(torch.autograd.Function):
         del dz_loss
 
         logits, target, lse = ctx.saved_tensors
-        dlogits = ctx.bwd(
+        dlogits = cross_entropy_bwd(
             logits=logits,
             target=target,
             lse=lse,
@@ -415,7 +396,7 @@ class FusedCrossEntropyFunction(torch.autograd.Function):
             class_start_idx=ctx.class_start_idx,
             inplace_backward=ctx.inplace_backward,
         )
-        return (dlogits,) + (None,) * (len(ctx.needs_input_grad) - 1)
+        return dlogits, None, None, None, None, None, None, None, None
 
 
 fused_cross_entropy_forward = cross_entropy_fwd
