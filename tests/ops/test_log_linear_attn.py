@@ -115,6 +115,8 @@ def test_chunk_initial_state(varlen: bool, G: int, H: int):
             (2, 512, 1, 8, 64, torch.float32, 1.0),
             (2, 1024, 1, 8, 128, torch.float32, 1.0),
             (2050, 1, 2, 32, 64, torch.float32, 1.0),
+            (1, 64, 2, 4, 64, torch.bfloat16, 1.0),
+            (1, 65, 2, 4, 64, torch.float16, 1.0),
             (2, 70, 2, 4, 64, torch.float32, None),
             (1, 130, 4, 4, 128, torch.float32, 0.37),
             (1, 63, 2, 4, 64, torch.float32, 1.0),
