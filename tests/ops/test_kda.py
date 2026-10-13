@@ -26,10 +26,7 @@ from fla.utils import IS_INTEL_ALCHEMIST, IS_NPU, IS_NVIDIA, assert_close, devic
 @pytest.mark.parametrize(
     ("B", "T", "H", "HV", "D", "scale", "gate_logit_normalizer", "dtype"),
     [
-        pytest.param(
-            *test,
-            id="B{}-T{}-H{}-HV{}-D{}-scale{}-gate_logit_normalizer{}-{}".format(*test),
-        )
+        pytest.param(*test, id="B{}-T{}-H{}-HV{}-D{}-scale{}-gate_logit_normalizer{}-{}".format(*test))
         for test in [
             (1, 64, 1, 1, 64, 1, 1, torch.float),
             (2, 512, 3, 3, 60, 1, 1, torch.float),
@@ -41,16 +38,7 @@ from fla.utils import IS_INTEL_ALCHEMIST, IS_NPU, IS_NVIDIA, assert_close, devic
         ]
     ],
 )
-def test_naive_chunk(
-    B: int,
-    T: int,
-    H: int,
-    HV: int,
-    D: int,
-    scale: float,
-    gate_logit_normalizer: float,
-    dtype: torch.dtype,
-):
+def test_naive_chunk(B: int, T: int, H: int, HV: int, D: int, scale: float, gate_logit_normalizer: float, dtype: torch.dtype):
     torch.manual_seed(42)
     if IS_INTEL_ALCHEMIST and D > 128:
         pytest.skip(reason="chunk_gated_delta_rule is not supported on alchemist for D>128")
@@ -103,10 +91,7 @@ def test_chunk_invalid_chunk_size():
 @pytest.mark.parametrize(
     ("B", "T", "H", "HV", "D", "scale", "gate_logit_normalizer", "use_qk_l2norm_in_kernel", "dtype"),
     [
-        pytest.param(
-            *test,
-            id="B{}-T{}-H{}-HV{}-D{}-scale{}-gate_logit_normalizer{}-use_qk_l2norm{}-{}".format(*test),
-        )
+        pytest.param(*test, id="B{}-T{}-H{}-HV{}-D{}-scale{}-gate_logit_normalizer{}-use_qk_l2norm{}-{}".format(*test))
         for test in [
             (1, 64, 1, 1, 64, 1, 1, False, torch.float),
             (2, 512, 3, 3, 60, 1, 1, False, torch.float),
@@ -200,10 +185,7 @@ def test_fused_recurrent_use_beta_sigmoid_in_kernel(
     beta_post = torch.randn(B, T, H, dtype=dtype).sigmoid()
     beta_raw = torch.logit(beta_post.float().clamp_(1e-4, 1 - 1e-4)).to(dtype)
     h0 = torch.randn(B, H, D, D, dtype=torch.float32)
-    q, k, v, g, beta_post, beta_raw, h0 = map(
-        lambda x: x.to(device),
-        (q, k, v, g, beta_post, beta_raw, h0),
-    )
+    q, k, v, g, beta_post, beta_raw, h0 = map(lambda x: x.to(device), (q, k, v, g, beta_post, beta_raw, h0))
 
     ref, ref_ht = fused_recurrent_kda(
         q=F.normalize(q.clone(), p=2, dim=-1),
@@ -236,10 +218,7 @@ def test_fused_recurrent_use_beta_sigmoid_in_kernel(
 @pytest.mark.parametrize(
     ("B", "T", "H", "D", "scale", "gate_logit_normalizer", "dtype"),
     [
-        pytest.param(
-            *test,
-            id="B{}-T{}-H{}-D{}-scale{}-gate_logit_normalizer{}-{}".format(*test),
-        )
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-scale{}-gate_logit_normalizer{}-{}".format(*test))
         for test in [
             (1, 64, 1, 64, 1, 1, torch.float),
             (2, 512, 3, 60, 1, 1, torch.float),
@@ -305,10 +284,7 @@ def test_fused_recurrent_state_v_first(
 @pytest.mark.parametrize(
     ("B", "T", "H", "HV", "D", "scale", "has_a_log", "has_dt_bias", "safe_gate", "dtype"),
     [
-        pytest.param(
-            *test,
-            id="B{}-T{}-H{}-HV{}-D{}-scale{}-has_a_log{}-has_dt_bias{}-safe_gate{}-{}".format(*test),
-        )
+        pytest.param(*test, id="B{}-T{}-H{}-HV{}-D{}-scale{}-has_a_log{}-has_dt_bias{}-safe_gate{}-{}".format(*test))
         for test in [
             (1, 64, 1, 1, 64, 1, True, False, False, torch.float),
             (2, 256, 2, 2, 64, 1, True, True, False, torch.float),
@@ -383,24 +359,18 @@ def test_fused_recurrent_gate_in_kernel(
 @pytest.mark.parametrize(
     ("B", "H", "D", "scale", "gate_logit_normalizer", "use_qk_l2norm_in_kernel", "use_gate_in_kernel", "safe_gate", "dtype"),
     [
-        pytest.param(
-            *test,
-            id="B{}-H{}-D{}-scale{}-norm{}-qk_l2{}-gate{}-safe_gate{}-dtype{}".format(*test),
-        )
+        pytest.param(*test, id="B{}-H{}-D{}-scale{}-norm{}-qk_l2{}-gate{}-safe_gate{}-dtype{}".format(*test))
         for test in [
             (16, 16, 128, 0.1, 1.0, True, False, False, torch.bfloat16),
             (32, 8, 64, 1.0, 1.0, False, False, False, torch.float16),
-            (7, 32, 128, 0.5, 0.5, True, False, False, torch.bfloat16),  # Odd batch size
+            (7, 32, 128, 0.5, 0.5, True, False, False, torch.bfloat16),
             (16, 16, 128, 0.1, 1.0, True, True, False, torch.bfloat16),
             (32, 8, 64, 1.0, 1.0, False, True, False, torch.float16),
-            (7, 32, 128, 0.5, 0.5, True, True, True, torch.bfloat16),  # Odd batch size
+            (7, 32, 128, 0.5, 0.5, True, True, True, torch.bfloat16),
         ]
     ],
 )
-@pytest.mark.skipif(
-    not (IS_NVIDIA or IS_NPU),
-    reason='test_fused_recurrent_vllm_decode requires CUDA or NPU',
-)
+@pytest.mark.skipif(not (IS_NVIDIA or IS_NPU), reason='test_fused_recurrent_vllm_decode requires CUDA or NPU')
 def test_fused_recurrent_vllm_decode(
     B: int,
     H: int,
@@ -416,12 +386,11 @@ def test_fused_recurrent_vllm_decode(
     torch.manual_seed(42)
     device = torch.device("npu" if IS_NPU else "cuda")
 
-    # Setup cache pool and inputs
     max_cache_slots = B * 3
     state_pool = torch.randn(max_cache_slots, H, D, D, dtype=torch.float32, device=device)
     state_indices = torch.randperm(max_cache_slots, device=device)[:B].int()
 
-    # Fill unaccessed slots with a huge value to detect out-of-bound access
+    # fill unaccessed slots with a huge value to detect out-of-bounds access.
     HUGE_VALUE = 1e30
     mask = torch.ones(max_cache_slots, dtype=torch.bool, device=device)
     mask[state_indices.long()] = False
@@ -453,7 +422,6 @@ def test_fused_recurrent_vllm_decode(
     ref_state_pool = state_pool.clone()
     tri_state_pool = state_pool.clone()
 
-    # Reference implementation (loop over batch)
     ref_outputs = []
     for i in range(B):
         start, end = i, i + 1
@@ -481,7 +449,6 @@ def test_fused_recurrent_vllm_decode(
 
     ref_out = torch.cat(ref_outputs, dim=1)
 
-    # Triton kernel
     q_in = q.clone()
     k_in = k.clone()
     if not use_qk_l2norm_in_kernel:
@@ -508,7 +475,6 @@ def test_fused_recurrent_vllm_decode(
         lower_bound=lower_bound,
     )
 
-    # Verify results
     assert_close("o", ref_out, tri_out, 0.005)
     assert_close("ht", ref_state_pool[state_indices.long()], tri_state_pool[state_indices.long()], 0.005)
 
@@ -785,10 +751,7 @@ def test_chunk(
 @pytest.mark.parametrize(
     ("B", "T", "H", "D", "scale", "gate_logit_normalizer", "dtype"),
     [
-        pytest.param(
-            *test,
-            id="B{}-T{}-H{}-D{}-scale{}-gate_logit_normalizer{}-{}".format(*test),
-        )
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-scale{}-gate_logit_normalizer{}-{}".format(*test))
         for test in [
             (1, 63, 1, 64, 1, 1, torch.float16),
             (2, 500, 3, 60, 1, 1, torch.float16),
@@ -797,15 +760,7 @@ def test_chunk(
         ]
     ],
 )
-def test_chunk_state_v_first(
-    B: int,
-    T: int,
-    H: int,
-    D: int,
-    scale: float,
-    gate_logit_normalizer: float,
-    dtype: torch.dtype,
-):
+def test_chunk_state_v_first(B: int, T: int, H: int, D: int, scale: float, gate_logit_normalizer: float, dtype: torch.dtype):
     torch.manual_seed(42)
     q = torch.rand(B, T, H, D, dtype=dtype)
     k = torch.rand(B, T, H, D, dtype=dtype)
@@ -872,14 +827,7 @@ def test_chunk_state_v_first(
         ]
     ],
 )
-def test_chunk_use_beta_sigmoid_in_kernel(
-    B: int,
-    T: int,
-    H: int,
-    D: int,
-    allow_neg_eigval: bool,
-    dtype: torch.dtype,
-):
+def test_chunk_use_beta_sigmoid_in_kernel(B: int, T: int, H: int, D: int, allow_neg_eigval: bool, dtype: torch.dtype):
     torch.manual_seed(42)
     q = torch.rand(B, T, H, D, dtype=dtype)
     k = torch.rand(B, T, H, D, dtype=dtype)
@@ -908,9 +856,7 @@ def test_chunk_use_beta_sigmoid_in_kernel(
         output_final_state=True,
     )
     ((ref * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=True)
-    ref_dq, ref_dk, ref_dv, ref_dg, ref_db, ref_dh0 = (
-        q.grad, k.grad, v.grad, g.grad, beta_post.grad, h0.grad
-    )
+    ref_dq, ref_dk, ref_dv, ref_dg, ref_db, ref_dh0 = (q.grad, k.grad, v.grad, g.grad, beta_post.grad, h0.grad)
     q.grad = k.grad = v.grad = g.grad = beta_post.grad = h0.grad = None
 
     tri, tri_ht = chunk_kda(
@@ -926,9 +872,7 @@ def test_chunk_use_beta_sigmoid_in_kernel(
         allow_neg_eigval=allow_neg_eigval,
     )
     ((tri * do).sum() + (tri_ht * dht).sum()).backward(retain_graph=True)
-    tri_dq, tri_dk, tri_dv, tri_dg, tri_db_raw, tri_dh0 = (
-        q.grad, k.grad, v.grad, g.grad, beta_raw.grad, h0.grad
-    )
+    tri_dq, tri_dk, tri_dv, tri_dg, tri_db_raw, tri_dh0 = (q.grad, k.grad, v.grad, g.grad, beta_raw.grad, h0.grad)
 
     ref_db_raw = ref_db * beta_post.detach().float() * (1 - beta_post.detach().float())
     ref_db_raw = ref_db_raw.to(tri_db_raw.dtype)
@@ -945,24 +889,11 @@ def test_chunk_use_beta_sigmoid_in_kernel(
 
 
 @pytest.mark.parametrize(
-    (
-        "H",
-        "D",
-        "mask_p",
-        "cu_seqlens",
-        "dtype",
-        "use_gate_in_kernel",
-        "safe_gate",
-        "disable_recompute",
-        "chunk_size",
-    ),
+    ("H", "D", "mask_p", "cu_seqlens", "dtype", "use_gate_in_kernel", "safe_gate", "disable_recompute", "chunk_size"),
     [
         pytest.param(
             *test,
-            id=(
-                "H{}-D{}-mask_p{}-cu_seqlens{}-{}-gate{}"
-                "-safe_gate{}-disable_recompute{}-chunk_size{}"
-            ).format(*test),
+            id=("H{}-D{}-mask_p{}-cu_seqlens{}-{}-gate{}" "-safe_gate{}-disable_recompute{}-chunk_size{}").format(*test),
         )
         for test in [
             (4, 60, 0.1, [0, 15], torch.float16, True, False, False, 64),
@@ -989,7 +920,6 @@ def test_chunk_varlen(
     if FLA_CACHE_MODE.uses_default_config() and D in (64, 256):
         pytest.skip(reason="Skipping D=64/256 varlen KDA case with default_config")
     torch.manual_seed(42)
-    # randomly split the sequence into N segments
     cu_seqlens = torch.LongTensor(cu_seqlens).to(device)
     cu_seqlens_cpu = cu_seqlens.cpu()
     T = cu_seqlens[-1]
@@ -1023,7 +953,8 @@ def test_chunk_varlen(
 
     tri, tri_ht = chunk_kda(
         q=F.normalize(q.clone(), p=2, dim=-1),
-        k=k.clone(),  # k is already normalized
+        # k is already normalized.
+        k=k.clone(),
         v=v.clone(),
         g=g.clone(),
         beta=beta.clone(),
@@ -1050,11 +981,18 @@ def test_chunk_varlen(
     for i in range(N):
         ref_i, ref_ht_i = naive_recurrent_kda(
             q=F.normalize(q[:, cu_seqlens[i]: cu_seqlens[i + 1]], p=2, dim=-1),
-            k=k[:, cu_seqlens[i]: cu_seqlens[i + 1]],  # k is already normalized
+            # k is already normalized.
+            k=k[:, cu_seqlens[i]: cu_seqlens[i + 1]],
             v=v[:, cu_seqlens[i]: cu_seqlens[i + 1]],
+            g=(
+                naive_kda_gate(
+                    g=g[:, cu_seqlens[i]: cu_seqlens[i + 1]].to(torch.float),
+                    A_log=A_log.to(torch.float),
+                    dt_bias=dt_bias.to(torch.float),
+                )
+                if use_gate_in_kernel else g[:, cu_seqlens[i]: cu_seqlens[i + 1]]
+            ),
             beta=beta[:, cu_seqlens[i]: cu_seqlens[i + 1]],
-            g=(naive_kda_gate(g[:, cu_seqlens[i]: cu_seqlens[i + 1]].to(torch.float), A_log.to(torch.float),
-               dt_bias.to(torch.float)) if use_gate_in_kernel else g[:, cu_seqlens[i]: cu_seqlens[i + 1]]),
             initial_state=h0[i],
             output_final_state=True,
         )
@@ -1108,7 +1046,6 @@ def test_chunk_varlen_prefill(
     if FLA_CACHE_MODE.uses_default_config() and D == 256:
         pytest.skip(reason="Skipping D=256 varlen KDA prefill case with default_config")
     torch.manual_seed(42)
-    # randomly split the sequence into N segments
     cu_seqlens = torch.LongTensor(cu_seqlens).to(device)
     cu_seqlens_cpu = cu_seqlens.cpu()
     T = cu_seqlens[-1]
@@ -1136,7 +1073,8 @@ def test_chunk_varlen_prefill(
 
     tri, tri_ht = chunk_kda(
         q=F.normalize(q.clone(), p=2, dim=-1),
-        k=k.clone(),  # k is already normalized
+        # k is already normalized.
+        k=k.clone(),
         v=v.clone(),
         g=g.clone(),
         beta=beta.clone(),
@@ -1156,11 +1094,18 @@ def test_chunk_varlen_prefill(
     for i in range(N):
         ref_i, ref_ht_i = naive_recurrent_kda(
             q=F.normalize(q[:, cu_seqlens[i]: cu_seqlens[i + 1]], p=2, dim=-1),
-            k=k[:, cu_seqlens[i]: cu_seqlens[i + 1]],  # k is already normalized
+            # k is already normalized.
+            k=k[:, cu_seqlens[i]: cu_seqlens[i + 1]],
             v=v[:, cu_seqlens[i]: cu_seqlens[i + 1]],
+            g=(
+                naive_kda_gate(
+                    g=g[:, cu_seqlens[i]: cu_seqlens[i + 1]].to(torch.float),
+                    A_log=A_log.to(torch.float),
+                    dt_bias=dt_bias.to(torch.float),
+                )
+                if use_gate_in_kernel else g[:, cu_seqlens[i]: cu_seqlens[i + 1]]
+            ),
             beta=beta[:, cu_seqlens[i]: cu_seqlens[i + 1]],
-            g=(naive_kda_gate(g[:, cu_seqlens[i]: cu_seqlens[i + 1]].to(torch.float), A_log.to(torch.float),
-               dt_bias.to(torch.float)) if use_gate_in_kernel else g[:, cu_seqlens[i]: cu_seqlens[i + 1]]),
             initial_state=h0[i],
             output_final_state=True,
         )
@@ -1195,6 +1140,8 @@ def test_chunk_varlen_prefill(
         ]
     ],
 )
+@pytest.mark.parametrize('dtype', [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize('grad_scale', [1., 1e-8])
 def test_gate(
     B: int,
     T: int,
@@ -1203,9 +1150,11 @@ def test_gate(
     HAS_A_LOG: bool,
     HAS_BIAS: bool,
     LOWER_BOUND: float | None,
+    dtype: torch.dtype,
+    grad_scale: float,
 ):
     torch.manual_seed(42)
-    g = torch.randn(B, T, H, D, dtype=torch.float32) * 10
+    g = torch.randn(B, T, H, D, dtype=dtype) * 10
     A_log = torch.log(torch.randn(1, 1, H, 1, dtype=torch.float32).uniform_(1, 16)) if HAS_A_LOG else None
     dt_bias = torch.randn(H * D, dtype=torch.float32) if HAS_BIAS else None
     g = g.to(device).requires_grad_(True)
@@ -1213,7 +1162,7 @@ def test_gate(
         A_log = A_log.to(device).requires_grad_(True)
     if dt_bias is not None:
         dt_bias = dt_bias.to(device).requires_grad_(True)
-    do = torch.randn_like(g).view(B, T, H, D)
+    do = torch.randn_like(g, dtype=torch.float32).view(B, T, H, D) * grad_scale
 
     if LOWER_BOUND is not None:
         ref = naive_kda_lowerbound_gate(
@@ -1223,11 +1172,7 @@ def test_gate(
             lower_bound=LOWER_BOUND,
         )
     else:
-        ref = naive_kda_gate(
-            g=g.clone(),
-            A_log=A_log.clone(),
-            dt_bias=dt_bias.clone() if dt_bias is not None else None,
-        )
+        ref = naive_kda_gate(g=g.clone(), A_log=A_log.clone(), dt_bias=dt_bias.clone() if dt_bias is not None else None)
     tri = fused_kda_gate(
         g=g.clone(),
         A_log=A_log.clone() if A_log is not None else None,
@@ -1255,7 +1200,7 @@ def test_gate(
     if HAS_A_LOG:
         assert_close("dA", ref_dA, tri_dA, 1e-4)
     if HAS_BIAS:
-        assert_close("dbias", ref_dbias, tri_dbias, 1e-4)
+        assert_close("dbias", ref_dbias / grad_scale, tri_dbias / grad_scale, 1e-4)
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
@@ -1272,7 +1217,6 @@ def test_chunk_return_intermediate_states(dtype):
     beta = torch.rand(B, T, H, dtype=dtype, device=device)
 
     with torch.inference_mode():
-        # Test equal-length sequences
         o, final_state, h = chunk_kda(
             q=q,
             k=k,
@@ -1282,27 +1226,21 @@ def test_chunk_return_intermediate_states(dtype):
             initial_state=None,
             output_final_state=True,
             return_intermediate_states=True,
-            disable_recompute=False  # Should not cause issues in inference mode
+            disable_recompute=False,
         )
 
-        # Verify shapes
         assert o.shape == (B, T, H, D), f"Output shape mismatch: {o.shape}"
         assert final_state.shape == (B, H, D, D), f"Final state shape mismatch: {final_state.shape}"
 
-        # Calculate expected NT (number of chunks)
         expected_nt = (T + chunk_size - 1) // chunk_size
         assert h.shape == (B, expected_nt, H, D, D), f"h shape mismatch: {h.shape}, expected: {(B, expected_nt, H, D, D)}"
         assert h.dtype == dtype, f"h dtype should be bfloat16, got: {h.dtype}"
 
-        # Test variable-length sequences with proper flattened inputs
         total_tokens = 1024
-        N = 2  # Number of sequences
-        # Create cu_seqlens for varlen: [0, len1, len1+len2, ..., total_tokens]
-        # Simple case: two sequences of equal length
+        N = 2
         seq_len = total_tokens // N
         cu_seqlens = torch.tensor([0, seq_len, total_tokens], dtype=torch.long, device=device)
 
-        # Generate new tensors for varlen test (flattened batch size = 1)
         q_varlen = torch.randn(1, total_tokens, H, D, dtype=dtype, device=device)
         k_varlen = torch.randn(1, total_tokens, H, D, dtype=dtype, device=device)
         v_varlen = torch.randn(1, total_tokens, H, D, dtype=dtype, device=device)
@@ -1319,22 +1257,16 @@ def test_chunk_return_intermediate_states(dtype):
             output_final_state=True,
             cu_seqlens=cu_seqlens,
             return_intermediate_states=True,
-            disable_recompute=False
+            disable_recompute=False,
         )
 
-        # Verify varlen shapes - B should be 1 (flattened), sequence length is total_tokens
         assert o_varlen.shape == (1, total_tokens, H, D), f"Varlen output shape mismatch: {o_varlen.shape}"
         assert final_state_varlen.shape == (N, H, D, D), f"Varlen final state shape mismatch: {final_state_varlen.shape}"
 
-        # NT for varlen is total number of chunks across all sequences
         assert h_varlen.shape[0] == 1, f"Varlen h batch dim should be 1, got: {h_varlen.shape[0]}"
         assert h_varlen.shape[2:] == (H, D, D), f"Varlen h dims mismatch: {h_varlen.shape[2:]}"
         assert h_varlen.dtype == dtype, f"Varlen h dtype should be {dtype}, got: {h_varlen.dtype}"
 
-
-# ---------------------------------------------------------------------------
-# FlashKDA CUTLASS backend (inference-only)
-# ---------------------------------------------------------------------------
 
 _FLASH_KDA_AVAILABLE = importlib.util.find_spec("flash_kda") is not None
 _SKIP_FLASH_KDA = pytest.mark.skipif(
@@ -1389,8 +1321,20 @@ def _flash_kda_run(monkeypatch, positional=False, **kwargs):
     return result
 
 
-def _flash_kda_gold(q, k, v, g, beta_raw, A_log, dt_bias, scale, initial_state,
-                    lower_bound=-5.0, cu_seqlens=None, allow_neg_eigval=False):
+def _flash_kda_gold(
+    q,
+    k,
+    v,
+    g,
+    beta_raw,
+    A_log,
+    dt_bias,
+    scale,
+    initial_state,
+    lower_bound=-5.0,
+    cu_seqlens=None,
+    allow_neg_eigval=False,
+):
     kwargs = {}
     if cu_seqlens is not None:
         kwargs["cu_seqlens"] = cu_seqlens
@@ -1441,14 +1385,18 @@ def test_flash_kda_chunk(B, T, H, D, allow_neg_eigval, has_A, has_bias, position
     h0 = torch.randn(B, H, D, D, dtype=torch.float32, device=device)
     scale = D ** -0.5
 
-    ref_o, ref_ht = _flash_kda_gold(
-        q, k, v, g, beta, A_log, dt_bias, scale, h0.clone(), allow_neg_eigval=allow_neg_eigval)
+    ref_o, ref_ht = _flash_kda_gold(q, k, v, g, beta, A_log, dt_bias, scale, h0.clone(), allow_neg_eigval=allow_neg_eigval)
 
     tri_o, tri_ht = _flash_kda_run(
         monkeypatch,
         positional=positional,
-        q=q, k=k, v=v, g=g, beta=beta,
-        A_log=A_log, dt_bias=dt_bias,
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        beta=beta,
+        A_log=A_log,
+        dt_bias=dt_bias,
         scale=scale,
         initial_state=h0.clone(),
         output_final_state=True,
@@ -1489,14 +1437,27 @@ def test_flash_kda_chunk_varlen(H, D, cu_seqlens, allow_neg_eigval, has_A, has_b
     scale = D ** -0.5
 
     ref_o, ref_ht = _flash_kda_gold(
-        q, k, v, g, beta, A_log, dt_bias, scale, h0.clone(),
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        beta_raw=beta,
+        A_log=A_log,
+        dt_bias=dt_bias,
+        scale=scale,
+        initial_state=h0.clone(),
         cu_seqlens=cu_seqlens_t,
         allow_neg_eigval=allow_neg_eigval,
     )
     tri_o, tri_ht = _flash_kda_run(
         monkeypatch,
-        q=q, k=k, v=v, g=g, beta=beta,
-        A_log=A_log, dt_bias=dt_bias,
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        beta=beta,
+        A_log=A_log,
+        dt_bias=dt_bias,
         scale=scale,
         initial_state=h0.clone(),
         output_final_state=True,
@@ -1524,10 +1485,9 @@ _TRITON_ASCEND_KDA_OPS = (
 
 def _spy_on_triton_ascend_kda_backend():
     """Patch every op of the Triton-Ascend KDA backend to record dispatched calls."""
-    from fla.ops.backends import BackendRegistry
+    from fla import backends
 
-    BackendRegistry.ensure_initialized('kda')
-    backend = BackendRegistry._registries['kda']._backends.get('triton_ascend')
+    backend = backends._load_operation_registry('kda')._backends.get('triton_ascend')
     assert backend is not None, 'Triton-Ascend KDA backend is not registered'
 
     calls = []
@@ -1564,8 +1524,13 @@ def _run_chunk_kda(safe_gate: bool, chunk_size: int = 64, use_gate_in_kernel: bo
         x.requires_grad_(True)
 
     o, ht = chunk_kda(
-        q=q, k=k, v=v, g=g, beta=beta,
-        A_log=A_log, dt_bias=dt_bias,
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        beta=beta,
+        A_log=A_log,
+        dt_bias=dt_bias,
         scale=1.,
         initial_state=h0,
         output_final_state=True,
@@ -1604,11 +1569,9 @@ def _run_fused_recurrent_kda_fwd():
 
 @pytest.mark.skipif(not IS_NPU, reason='Triton-Ascend KDA backend routing is only exercised on NPU')
 def test_triton_ascend_backend_routing():
-    """KDA ops must actually dispatch to the Triton-Ascend backend on NPU.
+    """Verify KDA operations dispatch to Triton-Ascend on NPU.
 
-    Numerical parity tests alone cannot catch silently-failing verifiers: if
-    every verifier rejected, all ops would fall back to the default Triton
-    kernels and parity tests would still pass, leaving the NPU kernels dead.
+    Numerical parity can pass through the fallback, so record which implementations actually run.
     """
     backend, calls = _spy_on_triton_ascend_kda_backend()
     try:
@@ -1635,8 +1598,7 @@ def test_triton_ascend_backend_routing():
             f'(dispatched: {calls})'
         )
 
-        # chunk_size=16 is rejected by the verifiers and must fall back to the
-        # default implementation (which raises), never touching the NPU kernels
+        # chunk_size=16 must fall back to the default implementation and raise before any NPU kernel runs.
         calls.clear()
         with pytest.raises(ValueError, match=r"`chunk_size` must be either 32 or 64"):
             _run_chunk_kda(safe_gate=False, chunk_size=16, use_gate_in_kernel=False)
