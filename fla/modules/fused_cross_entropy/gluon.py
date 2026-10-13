@@ -11,6 +11,7 @@ import os
 from typing import TYPE_CHECKING
 
 import torch
+import triton
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
 from triton.experimental.gluon.language import extra
@@ -163,6 +164,12 @@ def cross_entropy_bwd_kernel_gluon(
     gl.store(p_dlogits, b_dlogits, mask=m_v)
 
 
+@triton.heuristics({
+    'BN': lambda args: 128 // max(
+        1,
+        min(8, triton.next_power_of_2(args['NV']) // 4, 16384 // triton.next_power_of_2(args['N'])),
+    ),
+})
 @gluon.jit(do_not_specialize=['N'])
 def cross_entropy_fwd_kernel_reduce_gluon(
     partial_loss,
@@ -180,8 +187,9 @@ def cross_entropy_fwd_kernel_reduce_gluon(
     SPLIT: gl.constexpr,
     REDUCE_LOSS: gl.constexpr,
 ):
-    # each lane owns a row, so the partition reduction stays in registers
-    layout: gl.constexpr = gl.BlockedLayout([1, 1], [1, 32], [1, 4], [1, 0])
+    # keep partition reductions within a warp to avoid shared memory
+    P: gl.constexpr = 128 // BN
+    layout: gl.constexpr = gl.BlockedLayout([1, 1], [P, 32 // P], [1, 4], [1, 0])
     o_n = gl.program_id(0).to(gl.int64) * BN + gl.arange(0, BN, layout=gl.SliceLayout(0, layout))
     o_s = gl.arange(0, BS, layout=gl.SliceLayout(1, layout)).to(gl.int64)
     offsets = o_s[:, None] * N + o_n[None, :]

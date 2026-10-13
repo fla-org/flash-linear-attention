@@ -188,7 +188,7 @@ def cross_entropy_reduce(
         NV = lse.shape[0]
         reduced_loss = loss.new_empty(N)
         reduced_lse = torch.empty_like(reduced_loss)
-        kernel[(triton.cdiv(N, 128),)](
+        kernel[lambda meta: (triton.cdiv(N, meta['BN']),)](
             partial_loss=loss,
             partial_lse=lse,
             target=target,
@@ -210,7 +210,7 @@ def cross_entropy_reduce(
         gathered_lse = lse.new_empty(world_size, N)
         torch.distributed.all_gather_into_tensor(gathered_lse, lse, group=process_group)
         torch.distributed.all_reduce(loss, group=process_group)
-        kernel[(triton.cdiv(N, 128),)](
+        kernel[lambda meta: (triton.cdiv(N, meta['BN']),)](
             partial_loss=loss,
             partial_lse=gathered_lse,
             target=target,
