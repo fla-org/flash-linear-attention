@@ -17,8 +17,13 @@ from triton.experimental.gluon import language as gl
 from triton.experimental.gluon.language import extra
 
 from fla.backends import GluonBackend, register
-from fla.modules.fused_cross_entropy.common import _cross_entropy_bwd, _cross_entropy_fwd, _cross_entropy_reduce
-from fla.modules.fused_cross_entropy.ops import FusedCrossEntropyFunction, cross_entropy_loss
+from fla.modules.fused_cross_entropy.ops import (
+    FusedCrossEntropyFunction,
+    _cross_entropy_reduce,
+    cross_entropy_bwd,
+    cross_entropy_fwd,
+    cross_entropy_loss,
+)
 
 if TYPE_CHECKING:
     from torch.distributed import ProcessGroup
@@ -249,7 +254,7 @@ def _cross_entropy_fwd_gluon(
     ignore_index: int = -100,
     process_group: ProcessGroup | None = None,
 ):
-    return _cross_entropy_fwd(
+    return cross_entropy_fwd(
         logits=logits,
         target=target,
         label_smoothing=label_smoothing,
@@ -279,7 +284,7 @@ def _cross_entropy_bwd_gluon(
     class_start_idx: int = 0,
     inplace_backward: bool = False,
 ) -> torch.Tensor:
-    return _cross_entropy_bwd(
+    return cross_entropy_bwd(
         logits=logits,
         target=target,
         lse=lse,
@@ -296,13 +301,6 @@ def _cross_entropy_bwd_gluon(
         block_size=1024 if logit_softcapping is not None else 4096,
         num_warps=4,
     )
-
-
-class GluonCrossEntropyFunction(FusedCrossEntropyFunction):
-
-    @staticmethod
-    def forward(ctx, *args):
-        return FusedCrossEntropyFunction.forward(ctx, *args, fwd_fn=_cross_entropy_fwd_gluon, bwd_fn=_cross_entropy_bwd_gluon)
 
 
 def cross_entropy_loss_verifier(
@@ -335,7 +333,7 @@ def cross_entropy_loss_gluon(
     inplace_backward: bool = False,
     process_group: ProcessGroup | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    return GluonCrossEntropyFunction.apply(
+    return FusedCrossEntropyFunction.apply(
         logits,
         target,
         label_smoothing,
@@ -345,4 +343,5 @@ def cross_entropy_loss_gluon(
         ignore_index,
         inplace_backward,
         process_group,
+        (_cross_entropy_fwd_gluon, _cross_entropy_bwd_gluon),
     )

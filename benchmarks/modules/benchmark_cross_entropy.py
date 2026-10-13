@@ -100,6 +100,8 @@ def benchmark_logits(N, V, softcap, provider, smoothing=0.0, dtype=torch.bfloat1
 
     if _DISPATCH_DISABLED or not GluonBackend.is_available():
         raise RuntimeError('This comparison requires NVIDIA Gluon and enabled backend dispatch')
+    from fla.modules.fused_cross_entropy import gluon, ops
+
     torch.manual_seed(42)
     logits = torch.randn(N, V, device=device, dtype=dtype, requires_grad=True)
     target = torch.randint(V, (N,), device=device)
@@ -109,6 +111,17 @@ def benchmark_logits(N, V, softcap, provider, smoothing=0.0, dtype=torch.bfloat1
     try:
         os.environ['FLA_GLUON'] = '0'
         os.environ['FLA_CE_GLUON'] = '1' if provider.startswith('gluon') else '0'
+
+        probe_loss, _ = ops.cross_entropy_loss(
+            logits=logits,
+            target=target,
+            label_smoothing=smoothing,
+            logit_softcapping=softcap,
+        )
+        backward = gluon._cross_entropy_bwd_gluon if provider.startswith('gluon') else ops.cross_entropy_bwd
+        assert probe_loss.grad_fn.bwd is backward
+        # release the default-stream graph before CUDA-graph warmup switches streams
+        del probe_loss
 
         def run():
             loss = criterion(logits, target)

@@ -91,14 +91,14 @@ def test_legacy_imports_preserve_symbol_identity(legacy, current, names):
 
 def test_public_function_aliases():
     from fla.modules import fused_cross_entropy
-    from fla.modules.fused_cross_entropy import ops, triton
+    from fla.modules.fused_cross_entropy import ops
 
     for name in ('sigmoid', 'logsigmoid', 'swish', 'sqrelu'):
         assert activations.ACT2FN[name] is getattr(activations, name)
     assert activations.ACT2FN['silu'] is activations.swish
     assert activations.ACT2FN['gelu'] is activations.fast_gelu_impl
     assert l2norm.l2_norm is l2norm.l2norm
-    assert fused_cross_entropy.fused_cross_entropy_forward is ops.cross_entropy_fwd is triton.cross_entropy_fwd
+    assert fused_cross_entropy.fused_cross_entropy_forward is ops.cross_entropy_fwd
     assert fused_cross_entropy.CrossEntropyLossFunction is ops.FusedCrossEntropyFunction
     bitlinear = importlib.import_module('fla.modules.fused_bitlinear')
     layernorm_quant = importlib.import_module('fla.modules.norm.layernorm_quant')
