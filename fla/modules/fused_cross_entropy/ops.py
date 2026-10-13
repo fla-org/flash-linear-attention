@@ -134,7 +134,44 @@ def cross_entropy_bwd_kernel(
     tl.store(p_dlogits, b_dlogits, mask=m_v)
 
 
-def _cross_entropy_reduce(
+@triton.jit(do_not_specialize=['N'])
+def cross_entropy_fwd_kernel_reduce(
+    partial_loss,
+    partial_lse,
+    target,
+    loss,
+    lse,
+    z_loss,
+    N,
+    NV: tl.constexpr,
+    BN: tl.constexpr,
+    BS: tl.constexpr,
+    z_scale: tl.constexpr,
+    ignore_index: tl.constexpr,
+    SPLIT: tl.constexpr,
+    REDUCE_LOSS: tl.constexpr,
+):
+    o_n = tl.program_id(0).to(tl.int64) * BN + tl.arange(0, BN)
+    o_s = tl.arange(0, BS).to(tl.int64)
+    offsets = o_s[:, None] * N + o_n[None, :]
+    mask = (o_s[:, None] < NV) & (o_n[None, :] < N)
+    b_lse = tl.load(partial_lse + offsets, mask=mask, other=-float('inf')).to(tl.float32)
+    b_max = tl.max(b_lse, 0)
+    b_lse = b_max + log(tl.sum(exp(b_lse - b_max[None, :]), 0))
+    if REDUCE_LOSS:
+        b_loss = tl.sum(tl.load(partial_loss + offsets, mask=mask, other=0).to(tl.float32), 0)
+    else:
+        b_loss = tl.load(partial_loss + o_n, mask=o_n < N, other=0).to(tl.float32)
+    if not SPLIT:
+        valid = tl.load(target + o_n, mask=o_n < N, other=ignore_index) != ignore_index
+        b_z_loss = tl.where(valid, z_scale * b_lse * b_lse, 0.)
+        b_loss = tl.where(valid, b_loss + b_lse + b_z_loss, 0.)
+        tl.store(z_loss + o_n, b_z_loss, mask=o_n < N)
+    tl.store(loss + o_n, b_loss, mask=o_n < N)
+    tl.store(lse + o_n, b_lse, mask=o_n < N)
+
+
+def cross_entropy_reduce(
     loss: torch.Tensor,
     lse: torch.Tensor,
     target: torch.Tensor,
@@ -142,24 +179,54 @@ def _cross_entropy_reduce(
     ignore_index: int,
     world_size: int,
     process_group: ProcessGroup | None,
+    *,
+    kernel=cross_entropy_fwd_kernel_reduce,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    N = target.shape[0]
+    z_loss = loss.new_empty(N)
     if lse.ndim == 2:
-        lse = torch.logsumexp(lse, dim=0)
-        loss = loss.sum(dim=0)
+        NV = lse.shape[0]
+        reduced_loss = loss.new_empty(N)
+        reduced_lse = torch.empty_like(reduced_loss)
+        kernel[(triton.cdiv(N, 128),)](
+            partial_loss=loss,
+            partial_lse=lse,
+            target=target,
+            loss=reduced_loss,
+            lse=reduced_lse,
+            z_loss=z_loss,
+            N=N,
+            NV=NV,
+            BN=128,
+            BS=triton.next_power_of_2(NV),
+            z_scale=lse_square_scale,
+            ignore_index=ignore_index,
+            SPLIT=world_size > 1,
+            REDUCE_LOSS=True,
+            num_warps=4,
+        )
+        loss, lse = reduced_loss, reduced_lse
     if world_size > 1:
-        gathered_lse = lse.new_empty(world_size, lse.shape[0])
+        gathered_lse = lse.new_empty(world_size, N)
         torch.distributed.all_gather_into_tensor(gathered_lse, lse, group=process_group)
-        work = torch.distributed.all_reduce(loss, group=process_group, async_op=True)
-        lse = torch.logsumexp(gathered_lse, dim=0)
-        work.wait()
-    loss += lse
-    if lse_square_scale != 0:
-        z_loss = lse_square_scale * lse.square()
-        z_loss.masked_fill_(target == ignore_index, 0.0)
-        loss += z_loss
-    else:
-        z_loss = torch.zeros_like(loss)
-    loss.masked_fill_(target == ignore_index, 0.0)
+        torch.distributed.all_reduce(loss, group=process_group)
+        kernel[(triton.cdiv(N, 128),)](
+            partial_loss=loss,
+            partial_lse=gathered_lse,
+            target=target,
+            loss=loss,
+            lse=lse,
+            z_loss=z_loss,
+            N=N,
+            NV=world_size,
+            BN=128,
+            BS=triton.next_power_of_2(world_size),
+            z_scale=lse_square_scale,
+            ignore_index=ignore_index,
+            SPLIT=False,
+            REDUCE_LOSS=False,
+            num_warps=4,
+        )
     return loss, z_loss, lse
 
 
@@ -176,7 +243,7 @@ def cross_entropy_fwd(
     kernel=cross_entropy_fwd_kernel,
     block_size: int | None = None,
     num_warps: int | None = None,
-    reduce_fn=_cross_entropy_reduce,
+    reduce_kernel=cross_entropy_fwd_kernel_reduce,
 ):
     N, V = logits.shape
     assert target.shape == (N,)
@@ -223,7 +290,7 @@ def cross_entropy_fwd(
     )
 
     if split:
-        loss, z_loss, lse = reduce_fn(
+        loss, z_loss, lse = cross_entropy_reduce(
             loss=loss,
             lse=lse,
             target=target,
@@ -231,6 +298,7 @@ def cross_entropy_fwd(
             ignore_index=ignore_index,
             world_size=world_size,
             process_group=process_group,
+            kernel=reduce_kernel,
         )
 
     return loss, z_loss, lse, total_classes, class_start_idx

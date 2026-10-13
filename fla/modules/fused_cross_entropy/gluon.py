@@ -11,7 +11,6 @@ import os
 from typing import TYPE_CHECKING
 
 import torch
-import triton
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
 from triton.experimental.gluon.language import extra
@@ -19,7 +18,6 @@ from triton.experimental.gluon.language import extra
 from fla.backends import GluonBackend, register
 from fla.modules.fused_cross_entropy.ops import (
     FusedCrossEntropyFunction,
-    _cross_entropy_reduce,
     cross_entropy_bwd,
     cross_entropy_fwd,
     cross_entropy_loss,
@@ -180,6 +178,7 @@ def cross_entropy_fwd_kernel_reduce_gluon(
     z_scale: gl.constexpr,
     ignore_index: gl.constexpr,
     SPLIT: gl.constexpr,
+    REDUCE_LOSS: gl.constexpr,
 ):
     # each lane owns a row, so the partition reduction stays in registers
     layout: gl.constexpr = gl.BlockedLayout([1, 1], [1, 32], [1, 4], [1, 0])
@@ -187,10 +186,13 @@ def cross_entropy_fwd_kernel_reduce_gluon(
     o_s = gl.arange(0, BS, layout=gl.SliceLayout(1, layout)).to(gl.int64)
     offsets = o_s[:, None] * N + o_n[None, :]
     mask = (o_s[:, None] < NV) & (o_n[None, :] < N)
-    b_lse = gl.load(partial_lse + offsets, mask=mask, other=-float('inf'))
+    b_lse = gl.load(partial_lse + offsets, mask=mask, other=-float('inf')).to(gl.float32)
     b_max = gl.max(b_lse, 0)
     b_lse = b_max + log(gl.sum(exp(b_lse - b_max[None, :]), 0))
-    b_loss = gl.sum(gl.load(partial_loss + offsets, mask=mask, other=0), 0)
+    if REDUCE_LOSS:
+        b_loss = gl.sum(gl.load(partial_loss + offsets, mask=mask, other=0).to(gl.float32), 0)
+    else:
+        b_loss = gl.load(partial_loss + o_n, mask=o_n < N, other=0).to(gl.float32)
     if not SPLIT:
         valid = gl.load(target + o_n, mask=o_n < N, other=ignore_index) != ignore_index
         b_z_loss = gl.where(valid, z_scale * b_lse * b_lse, 0.)
@@ -198,50 +200,6 @@ def cross_entropy_fwd_kernel_reduce_gluon(
         gl.store(z_loss + o_n, b_z_loss, mask=o_n < N)
     gl.store(loss + o_n, b_loss, mask=o_n < N)
     gl.store(lse + o_n, b_lse, mask=o_n < N)
-
-
-def _cross_entropy_reduce_gluon(
-    loss: torch.Tensor,
-    lse: torch.Tensor,
-    target: torch.Tensor,
-    lse_square_scale: float,
-    ignore_index: int,
-    world_size: int,
-    process_group: ProcessGroup | None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    if lse.ndim == 2:
-        NV, N = lse.shape
-        reduced_loss = loss.new_empty(N)
-        reduced_lse = torch.empty_like(reduced_loss)
-        z_loss = torch.empty_like(reduced_loss)
-        cross_entropy_fwd_kernel_reduce_gluon[(triton.cdiv(N, 128),)](
-            partial_loss=loss,
-            partial_lse=lse,
-            target=target,
-            loss=reduced_loss,
-            lse=reduced_lse,
-            z_loss=z_loss,
-            N=N,
-            NV=NV,
-            BN=128,
-            BS=triton.next_power_of_2(NV),
-            z_scale=lse_square_scale,
-            ignore_index=ignore_index,
-            SPLIT=world_size > 1,
-            num_warps=4,
-        )
-        loss, lse = reduced_loss, reduced_lse
-        if world_size == 1:
-            return loss, z_loss, lse
-    return _cross_entropy_reduce(
-        loss=loss,
-        lse=lse,
-        target=target,
-        lse_square_scale=lse_square_scale,
-        ignore_index=ignore_index,
-        world_size=world_size,
-        process_group=process_group,
-    )
 
 
 def _cross_entropy_fwd_gluon(
@@ -266,7 +224,7 @@ def _cross_entropy_fwd_gluon(
         kernel=cross_entropy_fwd_kernel_gluon,
         block_size=2048 if logit_softcapping is not None else 8192,
         num_warps=4,
-        reduce_fn=_cross_entropy_reduce_gluon,
+        reduce_kernel=cross_entropy_fwd_kernel_reduce_gluon,
     )
 
 
