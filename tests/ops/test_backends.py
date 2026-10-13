@@ -9,18 +9,28 @@ import importlib.metadata
 import logging
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import create_autospec
 
 import pytest
 import torch
 
-from fla.ops.backends import BaseBackend
+from fla import backends, utils
+from fla.ops.attn.backends import tilelang as attn_tilelang_backend
 from fla.ops.common.backends import tilelang as common_tilelang_backend
 from fla.ops.generalized_delta_rule.dplr.backends import tilelang as dplr_tilelang_backend
 from fla.ops.kda.backends import tilelang as kda_tilelang_backend
 from fla.ops.rwkv6.backends import tilelang as rwkv6_tilelang_backend
+from fla.ops.simple_gla.backends.triton_ascend.utils import simple_gla_verifier
 from fla.utils import env
 
 _REAL_PATH_EXISTS = Path.exists
+_TILELANG_BACKENDS = [
+    pytest.param(attn_tilelang_backend.AttnTileLangBackend, id='attn'),
+    pytest.param(common_tilelang_backend.CommonTileLangBackend, id='common'),
+    pytest.param(kda_tilelang_backend.KDATileLangBackend, id='kda'),
+    pytest.param(rwkv6_tilelang_backend.RWKV6TileLangBackend, id='rwkv6'),
+    pytest.param(dplr_tilelang_backend.DPLRTileLangBackend, id='dplr'),
+]
 
 
 @pytest.fixture(autouse=True)
@@ -47,6 +57,91 @@ def _configure_no_nvcc(monkeypatch):
         return _REAL_PATH_EXISTS(self)
 
     monkeypatch.setattr(env.Path, "exists", fake_exists)
+
+
+@pytest.mark.parametrize(
+    ('module_name', 'func_name'),
+    [
+        ('chunk_intra', 'chunk_gdn2_fwd_intra'),
+        ('chunk_bwd', 'chunk_gdn2_bwd_wy_dqkg_fused'),
+        ('fused_recurrent', 'fused_recurrent_gdn2_fwd'),
+    ],
+    ids=['forward', 'backward', 'fused-recurrent-forward'],
+)
+def test_gdn2_dispatch_uses_local_registry(monkeypatch, module_name, func_name):
+    from fla.ops.gdn2.backends.triton_ascend import TritonAscendGDN2Backend
+
+    entry = getattr(importlib.import_module(f'fla.ops.gdn2.{module_name}'), func_name)
+    if backends._DISPATCH_DISABLED:
+        pytest.skip('Backend dispatch was disabled before import')
+    assert hasattr(entry, '__wrapped__')
+    monkeypatch.setattr(TritonAscendGDN2Backend, 'is_available', classmethod(lambda cls: True))
+    monkeypatch.setattr(TritonAscendGDN2Backend, 'is_enabled', lambda self: True)
+    monkeypatch.setattr(TritonAscendGDN2Backend, f'{func_name}_verifier', lambda self, q: (True, None))
+    result = object()
+
+    def implementation(self, q):
+        assert torch.is_grad_enabled()
+        assert q.requires_grad
+        return result
+
+    monkeypatch.setattr(TritonAscendGDN2Backend, func_name, implementation)
+    assert entry(q=torch.tensor([1.0, 2.0], requires_grad=True)) is result
+
+
+@pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
+@pytest.mark.parametrize('route', ['accepted', 'disabled', 'unavailable', 'training', 'gate-not-fused'])
+def test_flash_kda_registered_dispatch(monkeypatch, route):
+    from fla.ops.kda.backends.flash_kda import FlashKDABackend
+    from fla.ops.kda.chunk import ChunkKDAFunction, chunk_kda
+
+    monkeypatch.setenv('FLA_FLASH_KDA', '0' if route == 'disabled' else '1')
+    monkeypatch.setattr(FlashKDABackend, 'is_available', classmethod(lambda cls: route != 'unavailable'))
+    calls = []
+
+    def flash_forward(self, *args, **kwargs):
+        calls.append('flash_kda')
+        return args[2], None
+
+    def triton_forward(*args):
+        calls.append('triton')
+        return args[2], None
+
+    monkeypatch.setattr(FlashKDABackend, 'chunk_kda', flash_forward)
+    monkeypatch.setattr(ChunkKDAFunction, 'apply', triton_forward)
+    q = torch.ones(1, 2, 1, 128, dtype=torch.bfloat16)
+    beta = torch.ones(1, 2, 1, dtype=torch.bfloat16)
+    with torch.set_grad_enabled(route == 'training'):
+        result = chunk_kda(
+            q,
+            q,
+            q,
+            q,
+            beta,
+            use_qk_l2norm_in_kernel=True,
+            use_gate_in_kernel=route != 'gate-not-fused',
+            use_beta_sigmoid_in_kernel=True,
+            safe_gate=True,
+            lower_bound=-5,
+            state_v_first=True,
+            A_log=torch.ones(1),
+            dt_bias=torch.ones(128),
+        )
+    assert result[0] is q
+    assert result[1] is None
+    assert calls == ['flash_kda' if route == 'accepted' else 'triton']
+
+
+def test_attention_and_common_backends_have_separate_implementations():
+    common = backends._load_operation_registry('common')._backends['tilelang']
+    attention = backends._load_operation_registry('attn')._backends['tilelang']
+    assert type(common) is common_tilelang_backend.CommonTileLangBackend
+    assert type(attention) is attn_tilelang_backend.AttnTileLangBackend
+    assert hasattr(common, 'chunk_bwd_dqkwg')
+    assert not hasattr(attention, 'chunk_bwd_dqkwg')
+    for name in ('parallel_attn_fwd', 'parallel_attn_bwd'):
+        assert hasattr(attention, name)
+        assert not hasattr(common, name)
 
 
 def test_nvcc_from_cuda_home_env(monkeypatch, tmp_path):
@@ -97,80 +192,49 @@ def test_no_nvcc_logs_fallback_once(monkeypatch, caplog):
     assert "FLA_TILELANG=0" in fallback_messages[0]
 
 
-@pytest.mark.parametrize("default_enable", [False, True], ids=["default-off", "default-on"])
-@pytest.mark.parametrize(("global_enable", "local_enable", "expected"), [
-    pytest.param(None, None, None, id="global-unset-local-unset"),
-    pytest.param(None, "0", False, id="global-unset-local-off"),
-    pytest.param(None, "1", True, id="global-unset-local-on"),
-    pytest.param("0", None, None, id="global-off-local-unset"),
-    pytest.param("0", "0", False, id="global-off-local-off"),
-    pytest.param("0", "1", True, id="global-off-local-on"),
-    pytest.param("1", None, True, id="global-on-local-unset"),
-    pytest.param("1", "0", True, id="global-on-local-off"),
-    pytest.param("1", "1", True, id="global-on-local-on"),
-])
-def test_base_backend_is_enabled(monkeypatch, global_enable, local_enable, expected, default_enable):
-    monkeypatch.setattr(BaseBackend, "backend_type", "gluon")
-    monkeypatch.setattr(BaseBackend, "env_var", "FLA_TEST_GLUON")
-    monkeypatch.setattr(BaseBackend, "default_enable", default_enable)
-    for name, value in (("FLA_GLUON", global_enable), ("FLA_TEST_GLUON", local_enable)):
-        if value is None:
-            monkeypatch.delenv(name, raising=False)
-        else:
-            monkeypatch.setenv(name, value)
+@pytest.mark.parametrize('backend_class', _TILELANG_BACKENDS)
+def test_tilelang_backend_gated_by_nvcc_probe(monkeypatch, backend_class):
+    monkeypatch.setattr(backends, "find_spec_cached", lambda name: object())
+    monkeypatch.setattr(backends, "has_usable_nvcc", lambda: False)
+    assert backend_class.is_available() is False
 
-    assert BaseBackend.is_enabled() is (default_enable if expected is None else expected)
+    monkeypatch.setattr(backends, "has_usable_nvcc", lambda: True)
+    assert backend_class.is_available() is True
 
 
-@pytest.mark.parametrize("default_enable", [False, True], ids=["default-off", "default-on"])
-@pytest.mark.parametrize("global_enable", [None, "0", "1"], ids=["global-unset", "global-off", "global-on"])
-def test_base_backend_is_enabled_without_env_var(monkeypatch, global_enable, default_enable):
-    monkeypatch.setattr(BaseBackend, "backend_type", "gluon")
-    monkeypatch.setattr(BaseBackend, "env_var", None)
-    monkeypatch.setattr(BaseBackend, "default_enable", default_enable)
-    if global_enable is None:
-        monkeypatch.delenv("FLA_GLUON", raising=False)
+@pytest.mark.parametrize('backend_class', _TILELANG_BACKENDS)
+def test_tilelang_backend_unavailable_without_tilelang(monkeypatch, backend_class):
+    monkeypatch.setattr(backends, "find_spec_cached", lambda name: None)
+    monkeypatch.setattr(backends, "has_usable_nvcc", lambda: True)
+    assert backend_class.is_available() is False
+
+
+@pytest.mark.parametrize(
+    ('backend_class', 'default_enabled'),
+    [
+        pytest.param(
+            attn_tilelang_backend.AttnTileLangBackend,
+            utils.IS_NVIDIA_HOPPER and utils.TRITON_ABOVE_3_4_0,
+            id='attn',
+        ),
+        pytest.param(
+            common_tilelang_backend.CommonTileLangBackend,
+            utils.IS_NVIDIA_HOPPER and utils.TRITON_ABOVE_3_4_0,
+            id='common',
+        ),
+        pytest.param(kda_tilelang_backend.KDATileLangBackend, True, id='kda'),
+        pytest.param(rwkv6_tilelang_backend.RWKV6TileLangBackend, False, id='rwkv6'),
+        pytest.param(dplr_tilelang_backend.DPLRTileLangBackend, True, id='dplr'),
+    ],
+)
+@pytest.mark.parametrize('setting', [None, '0', '1'], ids=['default', 'disabled', 'enabled'])
+def test_tilelang_backend_default_and_override(monkeypatch, backend_class, default_enabled, setting):
+    if setting is None:
+        monkeypatch.delenv('FLA_TILELANG', raising=False)
     else:
-        monkeypatch.setenv("FLA_GLUON", global_enable)
-
-    assert BaseBackend.is_enabled() is True
-
-
-def _backend_cls(backend_module):
-    if backend_module is common_tilelang_backend:
-        return backend_module.TileLangBackend
-    if backend_module is rwkv6_tilelang_backend:
-        return backend_module.RWKV6TileLangBackend
-    if backend_module is kda_tilelang_backend:
-        return backend_module.KDATileLangBackend
-    if backend_module is dplr_tilelang_backend:
-        return backend_module.DPLRTileLangBackend
-    raise ValueError(f"unrecognized TileLang backend module: {backend_module}")
-
-
-@pytest.mark.parametrize("backend_module", [common_tilelang_backend, kda_tilelang_backend, rwkv6_tilelang_backend, dplr_tilelang_backend])
-def test_tilelang_backend_gated_by_nvcc_probe(monkeypatch, backend_module):
-    monkeypatch.setattr(backend_module, "_TILELANG_AVAILABLE", True)
-    monkeypatch.setattr(backend_module, "has_usable_nvcc", lambda: False)
-    assert _backend_cls(backend_module).is_available() is False
-
-    monkeypatch.setattr(backend_module, "has_usable_nvcc", lambda: True)
-    assert _backend_cls(backend_module).is_available() is True
-
-
-@pytest.mark.parametrize("backend_module", [common_tilelang_backend, kda_tilelang_backend, rwkv6_tilelang_backend, dplr_tilelang_backend])
-def test_tilelang_backend_unavailable_without_tilelang(monkeypatch, backend_module):
-    monkeypatch.setattr(backend_module, "_TILELANG_AVAILABLE", False)
-    monkeypatch.setattr(backend_module, "has_usable_nvcc", lambda: True)
-    assert _backend_cls(backend_module).is_available() is False
-
-
-def test_rwkv6_tilelang_backend_requires_opt_in(monkeypatch):
-    monkeypatch.delenv("FLA_TILELANG", raising=False)
-    assert rwkv6_tilelang_backend.RWKV6TileLangBackend.is_enabled() is False
-
-    monkeypatch.setenv("FLA_TILELANG", "1")
-    assert rwkv6_tilelang_backend.RWKV6TileLangBackend.is_enabled() is True
+        monkeypatch.setenv('FLA_TILELANG', setting)
+    expected = default_enabled if setting is None else setting != '0'
+    assert backend_class().is_enabled() is expected
 
 
 def test_rwkv6_tilelang_backend_verifier_accepts_supported_shape():
@@ -211,3 +275,99 @@ def test_rwkv6_tilelang_backend_verifier_rejects_unsupported_dimension():
 
     assert accepted is False
     assert reason == "TileLang RWKV6 intra backend currently supports the D=64 benchmark bucket only, got K=128"
+
+
+@pytest.fixture
+def kda_bwd_inputs():
+    x = SimpleNamespace(shape=(1, 64, 2, 64))
+    return dict(q=x, k=x, v=x, v_new=x, g=x, beta=x, A=x, h=x, do=x, dh=x, dv=x, chunk_offsets=None)
+
+
+@pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
+def test_kda_tilelang_backend_dispatch(monkeypatch, kda_bwd_inputs):
+    from fla.ops.kda.backends.triton_ascend import TritonAscendKDABackend
+    from fla.ops.kda.chunk_bwd import chunk_kda_bwd_wy_dqkg_fused
+
+    monkeypatch.setattr(TritonAscendKDABackend, 'is_available', classmethod(lambda cls: False))
+    backend = kda_tilelang_backend.KDATileLangBackend
+    monkeypatch.setattr(backend, 'is_available', classmethod(lambda cls: True))
+    monkeypatch.setenv('FLA_TILELANG', '1')
+    result = object()
+    implementation = create_autospec(backend.chunk_kda_bwd_wy_dqkg_fused, return_value=result)
+    monkeypatch.setattr(backend, 'chunk_kda_bwd_wy_dqkg_fused', implementation)
+
+    assert chunk_kda_bwd_wy_dqkg_fused(**kda_bwd_inputs, use_graph=False) is result
+    implementation.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    ('use_graph', 'accepted', 'reason'),
+    [
+        pytest.param(False, True, None, id='eager'),
+        pytest.param(
+            True,
+            False,
+            'TileLang backend does not support graph capture (use_graph=True); fall back to Triton',
+            id='graph',
+        ),
+    ],
+)
+def test_kda_tilelang_backend_verifier(kda_bwd_inputs, use_graph, accepted, reason):
+    backend = kda_tilelang_backend.KDATileLangBackend()
+    assert backend.chunk_kda_bwd_wy_dqkg_fused_verifier(**kda_bwd_inputs, use_graph=use_graph) == (accepted, reason)
+
+
+@pytest.mark.parametrize(
+    ('is_npu', 'device', 'accepted', 'reason'),
+    [
+        (False, 'cpu', False, 'not running on NPU'),
+        (True, 'cpu', False, 'input device is not NPU'),
+        (True, None, False, 'input device is not NPU'),
+        (True, 'npu', True, None),
+    ],
+    ids=['off-npu', 'cpu-input', 'missing-input', 'npu-input'],
+)
+def test_simple_gla_ascend_verifier(monkeypatch, is_npu, device, accepted, reason):
+    monkeypatch.setattr(utils, 'IS_NPU', is_npu)
+    q = SimpleNamespace(device=SimpleNamespace(type=device)) if device is not None else None
+    assert simple_gla_verifier(q=q, k=q, v=q) == (accepted, reason)
+
+
+def test_retention_ascend_registration_import_order(run_python):
+    run_python(
+        """
+        import importlib
+        import inspect
+        import sys
+
+        from fla import backends
+        from fla.ops.simple_gla.backends.triton_ascend.utils import simple_gla_verifier
+
+        backends.TritonAscendBackend.is_available = classmethod(lambda cls: True)
+        for operation, name in [
+            ('common.chunk_o', 'chunk_bwd_dv'),
+            ('simple_gla.fused_chunk', 'fused_chunk_simple_gla'),
+            ('simple_gla.parallel', 'parallel_simple_gla'),
+            ('simple_gla.fused_recurrent', 'fused_recurrent_simple_gla'),
+        ]:
+            module = 'fla.ops.' + operation
+            owner, file = operation.split('.')
+            backend_module = f'fla.ops.{owner}.backends.triton_ascend.{file}'
+            importlib.reload(importlib.import_module(f'fla.ops.{owner}'))
+            entry = getattr(importlib.import_module(module), name)
+            implementation = sys.modules[backend_module]
+            registry = backends._function_registries[inspect.unwrap(entry)]
+            assert len(registry._backends) == 1
+            candidate = registry._backends['triton_ascend']
+            assert candidate.implementation is getattr(implementation, name + '_npu')
+            assert candidate.verifier is (simple_gla_verifier if owner == 'simple_gla' else None)
+            expected = inspect.signature(entry).parameters
+            actual = inspect.signature(candidate.implementation).parameters
+            assert expected.keys() == actual.keys()
+            for parameter in expected:
+                assert expected[parameter].kind == actual[parameter].kind
+                assert expected[parameter].default == actual[parameter].default
+        assert 'simple_gla' not in backends._operation_registries
+        """,
+        FLA_DISABLE_BACKEND_DISPATCH='0',
+    )

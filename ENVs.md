@@ -12,7 +12,7 @@ Set environment variables before starting Python. Boolean flags accept `0` / `1`
 
 ## Operator backend dispatch
 
-These switches control registered implementations. Unavailable backends and unsupported calls use the default implementation.
+These switches control registered implementations. Unavailable backends and unsupported calls use the default implementation. Set `FLA_DISABLE_BACKEND_DISPATCH` before importing FLA; changing it after import has no effect. See [backend API](fla/backends.py) to add an implementation.
 
 | Variable                       | Default           | Options   | Description                                                                                         |
 | ------------------------------ | ----------------- | --------- | --------------------------------------------------------------------------------------------------- |
