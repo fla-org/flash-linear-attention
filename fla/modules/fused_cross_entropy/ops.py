@@ -11,279 +11,20 @@ from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
-import triton
-import triton.language as tl
 
 from fla.backends import dispatch
-from fla.ops.utils.op import exp, log, tanh
-from fla.utils import input_guard
+from fla.modules.fused_cross_entropy.triton import cross_entropy_bwd, cross_entropy_fwd
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 if TYPE_CHECKING:
     from torch.distributed import ProcessGroup
-
-
-@triton.jit(do_not_specialize=['N'])
-def cross_entropy_fwd_kernel(
-    logits,  # [N, V]
-    target,  # [N]
-    loss,  # [NV, N] or [N] when NV == 1
-    lse,  # [NV, N] or [N] when NV == 1
-    z_loss,  # [N]
-    s_logits,
-    scale: tl.constexpr,
-    softcap: tl.constexpr,
-    smoothing: tl.constexpr,
-    z_scale: tl.constexpr,
-    ignore_index: tl.constexpr,
-    N,
-    V: tl.constexpr,
-    V_TOTAL: tl.constexpr,
-    V_START: tl.constexpr,
-    BV: tl.constexpr,
-    SPLIT: tl.constexpr,
-):
-    i_n = tl.program_id(0).to(tl.int64)
-    i_v = tl.program_id(1)
-    o_v = i_v * BV + tl.arange(0, BV)
-    m_v = o_v < V
-    p_logits = logits + i_n * s_logits
-
-    # [BV]
-    b_logits = tl.load(p_logits + o_v, mask=m_v, other=-float('inf')).to(tl.float32) * scale
-    if softcap is not None:
-        b_logits = softcap * tanh(b_logits / softcap)
-    # these transforms do not preserve -inf in padded lanes
-    if softcap is not None or scale <= 0:
-        b_logits = tl.where(m_v, b_logits, -float('inf'))
-    if smoothing > 0:
-        b_sum = tl.sum(tl.where(m_v, b_logits, 0.0), 0)
-    b_max = tl.max(b_logits, 0)
-    b_lse = log(tl.sum(exp(b_logits - b_max), 0)) + b_max
-
-    b_target = tl.load(target + i_n).to(tl.int64)
-    b_loss = 0.0
-    b_z_loss = 0.0
-    if b_target != ignore_index:
-        b_target -= V_START
-        m_target = (b_target >= i_v * BV) & (b_target < tl.minimum(V, (i_v + 1) * BV))
-        b_target_logit = tl.load(p_logits + b_target, mask=m_target, other=0).to(tl.float32) * scale
-        if softcap is not None:
-            b_target_logit = softcap * tanh(b_target_logit / softcap)
-        b_loss = -b_target_logit
-        if smoothing > 0:
-            b_loss = (1 - smoothing) * b_loss - smoothing * b_sum / V_TOTAL
-        if not SPLIT:
-            b_z_loss = z_scale * b_lse * b_lse
-            b_loss += b_lse + b_z_loss
-
-    tl.store(loss + i_v * N + i_n, b_loss)
-    tl.store(lse + i_v * N + i_n, b_lse)
-    if not SPLIT:
-        tl.store(z_loss + i_n, b_z_loss)
-
-
-@triton.jit
-def cross_entropy_bwd_kernel(
-    logits,  # [N, V]
-    target,  # [N]
-    lse,  # [N]
-    dloss,  # [N]
-    dlogits,  # [N, V]
-    s_logits,
-    s_dloss,
-    s_dlogits,
-    scale: tl.constexpr,
-    softcap: tl.constexpr,
-    smoothing: tl.constexpr,
-    z_scale: tl.constexpr,
-    ignore_index: tl.constexpr,
-    V: tl.constexpr,
-    V_TOTAL: tl.constexpr,
-    V_START: tl.constexpr,
-    BV: tl.constexpr,
-):
-    i_n = tl.program_id(0).to(tl.int64)
-    i_v = tl.program_id(1).to(tl.int64)
-    o_v = i_v * BV + tl.arange(0, BV).to(tl.int64)
-    m_v = o_v < V
-    p_logits = logits + i_n * s_logits + o_v
-    p_dlogits = dlogits + i_n * s_dlogits + o_v
-
-    b_target = tl.load(target + i_n).to(tl.int64)
-    b_dloss = tl.load(dloss + i_n * s_dloss, mask=b_target != ignore_index, other=0).to(tl.float32)
-    # [BV]
-    b_logits = tl.load(p_logits, mask=m_v, other=0).to(tl.float32) * scale
-    if softcap is not None:
-        b_tanh = tanh(b_logits / softcap)
-        b_logits = softcap * b_tanh
-    b_lse = tl.load(lse + i_n)
-    # [BV]
-    b_probs = exp(b_logits - b_lse)
-    b_dlogits = b_probs + 2.0 * z_scale * b_lse * b_probs
-    b_target -= V_START
-    if smoothing > 0:
-        b_dlogits -= tl.where(o_v == b_target, 1 - smoothing, 0.0)
-        b_dlogits -= smoothing / V_TOTAL
-    else:
-        b_dlogits -= tl.where(o_v == b_target, 1.0, 0.0)
-    if softcap is not None:
-        b_dlogits *= 1.0 - b_tanh * b_tanh
-    b_dlogits *= b_dloss * scale
-    tl.store(p_dlogits, b_dlogits, mask=m_v)
-
-
-def cross_entropy_fwd(
-    logits: torch.Tensor,
-    target: torch.Tensor,
-    label_smoothing: float = 0.0,
-    logit_scale: float = 1.0,
-    lse_square_scale: float = 0.0,
-    logit_softcapping: float | None = None,
-    ignore_index: int = -100,
-    process_group: ProcessGroup | None = None,
-    *,
-    kernel=cross_entropy_fwd_kernel,
-    block_size: int | None = None,
-    num_warps: int | None = None,
-    reduction_kernel=None,
-):
-    N, V = logits.shape
-    assert target.shape == (N,)
-    world_size = 1 if process_group is None else torch.distributed.get_world_size(process_group)
-    total_classes = world_size * V
-    rank = 0 if process_group is None else torch.distributed.get_rank(process_group)
-    class_start_idx = rank * V
-
-    if logits.stride(-1) != 1:
-        logits = logits.contiguous()
-    BV = min(triton.next_power_of_2(V), block_size or 64 * 1024)
-    # reduce softcap register pressure without introducing an additional split reduction
-    if block_size is None and logit_softcapping is not None and V > BV:
-        BV = 8 * 1024
-    if num_warps is None:
-        num_warps = 4 if BV < 2048 else (8 if BV < 8192 else 16)
-    # vocab partitions contribute partial loss until the global LSE is available
-    NV = triton.cdiv(V, BV)
-    split = world_size > 1 or NV > 1
-    shape = (NV, N) if NV > 1 else (N,)
-    loss = logits.new_empty(shape, dtype=torch.float)
-    lse = torch.empty_like(loss)
-    z_loss = logits.new_empty(N, dtype=torch.float)
-
-    kernel[(N, NV)](
-        logits=logits,
-        target=target,
-        loss=loss,
-        lse=lse,
-        z_loss=z_loss,
-        s_logits=logits.stride(0),
-        scale=logit_scale,
-        softcap=logit_softcapping,
-        smoothing=label_smoothing,
-        z_scale=lse_square_scale,
-        ignore_index=ignore_index,
-        N=N,
-        V=V,
-        V_TOTAL=total_classes,
-        V_START=class_start_idx,
-        BV=BV,
-        SPLIT=split,
-        num_warps=num_warps,
-    )
-
-    if NV > 1 and reduction_kernel is not None:
-        reduced_loss = logits.new_empty(N, dtype=torch.float)
-        reduced_lse = torch.empty_like(reduced_loss)
-        reduction_kernel[(triton.cdiv(N, 128),)](
-            partial_loss=loss,
-            partial_lse=lse,
-            target=target,
-            loss=reduced_loss,
-            lse=reduced_lse,
-            z_loss=z_loss,
-            N=N,
-            NV=NV,
-            BN=128,
-            BS=triton.next_power_of_2(NV),
-            z_scale=lse_square_scale,
-            ignore_index=ignore_index,
-            SPLIT=world_size > 1,
-            num_warps=4,
-        )
-        loss, lse = reduced_loss, reduced_lse
-        if world_size == 1:
-            return loss, z_loss, lse, total_classes, class_start_idx
-
-    if split:
-        if NV > 1 and reduction_kernel is None:
-            lse = torch.logsumexp(lse, dim=0)
-            loss = loss.sum(dim=0)
-        if world_size > 1:
-            gathered_lse = torch.empty(world_size, N, dtype=lse.dtype, device=lse.device)
-            torch.distributed.all_gather_into_tensor(gathered_lse, lse, group=process_group)
-            work = torch.distributed.all_reduce(loss, group=process_group, async_op=True)
-            lse = torch.logsumexp(gathered_lse, dim=0)
-            work.wait()
-        loss += lse
-        if lse_square_scale != 0:
-            z_loss = lse_square_scale * lse.square()
-            z_loss.masked_fill_(target == ignore_index, 0.0)
-            loss += z_loss
-        else:
-            z_loss = torch.zeros_like(loss)
-        loss.masked_fill_(target == ignore_index, 0.0)
-
-    return loss, z_loss, lse, total_classes, class_start_idx
-
-
-def cross_entropy_bwd(
-    logits: torch.Tensor,
-    target: torch.Tensor,
-    lse: torch.Tensor,
-    dloss: torch.Tensor,
-    label_smoothing: float = 0.0,
-    logit_scale: float = 1.0,
-    lse_square_scale: float = 0.0,
-    logit_softcapping: float | None = None,
-    ignore_index: int = -100,
-    total_classes: int | None = None,
-    class_start_idx: int = 0,
-    inplace_backward: bool = False,
-    *,
-    kernel=cross_entropy_bwd_kernel,
-    block_size: int | None = None,
-    num_warps: int | None = None,
-):
-    N, V = logits.shape
-    BV = min(triton.next_power_of_2(V), block_size or 4 * 1024)
-    dlogits = logits if inplace_backward else torch.empty_like(logits)
-    kernel[(N, triton.cdiv(V, BV))](
-        logits=logits,
-        target=target,
-        lse=lse,
-        dloss=dloss,
-        dlogits=dlogits,
-        s_logits=logits.stride(0),
-        s_dloss=dloss.stride(0),
-        s_dlogits=dlogits.stride(0),
-        scale=logit_scale,
-        softcap=logit_softcapping,
-        smoothing=label_smoothing,
-        z_scale=lse_square_scale,
-        ignore_index=ignore_index,
-        V=V,
-        V_TOTAL=V if total_classes is None else total_classes,
-        V_START=class_start_idx,
-        BV=BV,
-        num_warps=num_warps or (4 if BV < 2048 else 8),
-    )
-    return dlogits
 
 
 class FusedCrossEntropyFunction(torch.autograd.Function):
 
     @staticmethod
     @input_guard
+    @autocast_custom_fwd
     def forward(
         ctx,
         logits,
@@ -295,8 +36,13 @@ class FusedCrossEntropyFunction(torch.autograd.Function):
         ignore_index=-100,
         inplace_backward=False,
         process_group: ProcessGroup | None = None,
+        *,
+        fwd_fn=None,
+        bwd_fn=None,
     ):
-        loss, z_loss, lse, total_classes, class_start_idx = cross_entropy_fwd(
+        fwd_fn = cross_entropy_fwd if fwd_fn is None else fwd_fn
+        ctx.bwd_fn = cross_entropy_bwd if bwd_fn is None else bwd_fn
+        loss, z_loss, lse, total_classes, class_start_idx = fwd_fn(
             logits=logits,
             target=target,
             label_smoothing=label_smoothing,
@@ -321,12 +67,13 @@ class FusedCrossEntropyFunction(torch.autograd.Function):
 
     @staticmethod
     @input_guard
+    @autocast_custom_bwd
     def backward(ctx, dloss, dz_loss):
         # z-loss is returned for logging and is already included in the differentiable loss
         del dz_loss
 
         logits, target, lse = ctx.saved_tensors
-        dlogits = cross_entropy_bwd(
+        dlogits = ctx.bwd_fn(
             logits=logits,
             target=target,
             lse=lse,

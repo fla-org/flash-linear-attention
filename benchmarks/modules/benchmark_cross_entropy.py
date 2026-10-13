@@ -75,8 +75,14 @@ def benchmark(T, provider):
 @triton.testing.perf_report(
     triton.testing.Benchmark(
         x_names=['N', 'V', 'softcap'],
-        x_vals=[(1024, 32000, None), (2048, 128256, None), (63, 131071, None),
-                (1024, 32000, 3.0), (2047, 65539, 3.0), (7, 129, None)],
+        x_vals=[
+            (1024, 32000, None),
+            (2048, 128256, None),
+            (63, 131071, None),
+            (1024, 32000, 3.0),
+            (2047, 65539, 3.0),
+            (7, 129, None),
+        ],
         line_arg='provider',
         line_vals=['triton', 'gluon', 'triton_bwd', 'gluon_bwd'],
         line_names=['Triton forward', 'Gluon forward', 'Triton forward+backward', 'Gluon forward+backward'],

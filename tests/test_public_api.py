@@ -90,11 +90,16 @@ def test_legacy_imports_preserve_symbol_identity(legacy, current, names):
 
 
 def test_public_function_aliases():
+    from fla.modules import fused_cross_entropy
+    from fla.modules.fused_cross_entropy import ops, triton
+
     for name in ('sigmoid', 'logsigmoid', 'swish', 'sqrelu'):
         assert activations.ACT2FN[name] is getattr(activations, name)
     assert activations.ACT2FN['silu'] is activations.swish
     assert activations.ACT2FN['gelu'] is activations.fast_gelu_impl
     assert l2norm.l2_norm is l2norm.l2norm
+    assert fused_cross_entropy.fused_cross_entropy_forward is ops.cross_entropy_fwd is triton.cross_entropy_fwd
+    assert fused_cross_entropy.CrossEntropyLossFunction is ops.FusedCrossEntropyFunction
     bitlinear = importlib.import_module('fla.modules.fused_bitlinear')
     layernorm_quant = importlib.import_module('fla.modules.norm.layernorm_quant')
     assert bitlinear.layer_norm_fwd_quant is layernorm_quant.layer_norm_quant_fwd
@@ -118,6 +123,7 @@ def test_public_function_aliases():
         ('convolution', 'LongConvolution', {'hidden_size': 4, 'max_len': 8}, ('filter',)),
         ('fused_bitlinear', 'BitLinear', {'in_features': 4, 'out_features': 4}, ('weight', 'norm.weight')),
         ('fused_bitlinear', 'FusedBitLinear', {'in_features': 4, 'out_features': 4}, ('weight', 'norm.weight')),
+        ('fused_cross_entropy', 'FusedCrossEntropyLoss', {'label_smoothing': 0.1}, ()),
     ],
     ids=[
         'layernorm',
@@ -131,6 +137,7 @@ def test_public_function_aliases():
         'long-convolution',
         'bitlinear',
         'fused-bitlinear',
+        'cross-entropy',
     ],
 )
 def test_legacy_module_pickle_and_state_dict(monkeypatch, legacy, name, kwargs, state_keys):
