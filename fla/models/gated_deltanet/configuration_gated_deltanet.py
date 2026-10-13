@@ -48,12 +48,14 @@ class GatedDeltaNetConfig(_HybridAttentionConfigMixin, PretrainedConfig):
         use_l2warp: bool = False,
         vocab_size: int = 32000,
         attnres_block_size: int | None = None,
+        output_gate_activation: str = "swish",
         **kwargs,
     ):
         self.attn_mode = attn_mode
         self.hidden_size = hidden_size
         self.expand_v = expand_v
         self.use_gate = use_gate
+        self.output_gate_activation = output_gate_activation
         self.use_short_conv = use_short_conv
         self.conv_size = conv_size
         self.head_dim = head_dim
@@ -79,10 +81,11 @@ class GatedDeltaNetConfig(_HybridAttentionConfigMixin, PretrainedConfig):
         self.allow_neg_eigval = allow_neg_eigval
         self.attnres_block_size = attnres_block_size
 
+        if output_gate_activation not in ("swish", "silu", "sigmoid"):
+            raise ValueError(f"output_gate_activation must be 'swish', 'silu', or 'sigmoid', got {output_gate_activation!r}.")
+
         if fuse_cross_entropy and fuse_linear_cross_entropy:
-            raise ValueError(
-                "`fuse_cross_entropy` and `fuse_linear_cross_entropy` cannot be True at the same time.",
-            )
+            raise ValueError("`fuse_cross_entropy` and `fuse_linear_cross_entropy` cannot be True at the same time.")
         if fuse_linear_cross_entropy:
             warnings.warn(
                 "`fuse_linear_cross_entropy` is enabled, which can improves memory efficiency "
