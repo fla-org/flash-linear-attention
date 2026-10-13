@@ -202,7 +202,7 @@ def cross_entropy_fwd_kernel_reduce_gluon(
     gl.store(lse + o_n, b_lse, mask=o_n < N)
 
 
-def _cross_entropy_fwd_gluon(
+def cross_entropy_fwd_gluon(
     logits: torch.Tensor,
     target: torch.Tensor,
     label_smoothing: float = 0.0,
@@ -222,13 +222,13 @@ def _cross_entropy_fwd_gluon(
         ignore_index=ignore_index,
         process_group=process_group,
         kernel=cross_entropy_fwd_kernel_gluon,
+        reduce_kernel=cross_entropy_fwd_kernel_reduce_gluon,
         block_size=2048 if logit_softcapping is not None else 8192,
         num_warps=4,
-        reduce_kernel=cross_entropy_fwd_kernel_reduce_gluon,
     )
 
 
-def _cross_entropy_bwd_gluon(
+def cross_entropy_bwd_gluon(
     logits: torch.Tensor,
     target: torch.Tensor,
     lse: torch.Tensor,
@@ -301,5 +301,5 @@ def cross_entropy_loss_gluon(
         ignore_index,
         inplace_backward,
         process_group,
-        (_cross_entropy_fwd_gluon, _cross_entropy_bwd_gluon),
+        (cross_entropy_fwd_gluon, cross_entropy_bwd_gluon),
     )

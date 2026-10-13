@@ -174,6 +174,7 @@ def cross_entropy_fwd_kernel_reduce(
 def cross_entropy_reduce(
     loss: torch.Tensor,
     lse: torch.Tensor,
+    z_loss: torch.Tensor,
     target: torch.Tensor,
     lse_square_scale: float,
     ignore_index: int,
@@ -183,7 +184,6 @@ def cross_entropy_reduce(
     kernel=cross_entropy_fwd_kernel_reduce,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     N = target.shape[0]
-    z_loss = loss.new_empty(N)
     if lse.ndim == 2:
         NV = lse.shape[0]
         reduced_loss = loss.new_empty(N)
@@ -241,9 +241,9 @@ def cross_entropy_fwd(
     process_group: ProcessGroup | None = None,
     *,
     kernel=cross_entropy_fwd_kernel,
+    reduce_kernel=cross_entropy_fwd_kernel_reduce,
     block_size: int | None = None,
     num_warps: int | None = None,
-    reduce_kernel=cross_entropy_fwd_kernel_reduce,
 ):
     N, V = logits.shape
     assert target.shape == (N,)
@@ -293,6 +293,7 @@ def cross_entropy_fwd(
         loss, z_loss, lse = cross_entropy_reduce(
             loss=loss,
             lse=lse,
+            z_loss=z_loss,
             target=target,
             lse_square_scale=lse_square_scale,
             ignore_index=ignore_index,

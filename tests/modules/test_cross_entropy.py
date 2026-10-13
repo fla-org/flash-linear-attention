@@ -160,8 +160,8 @@ def test_fused_cross_entropy(
     if backend == 'gluon':
         from fla.modules.fused_cross_entropy import gluon
 
-        forward = Mock(wraps=gluon._cross_entropy_fwd_gluon)
-        monkeypatch.setattr(gluon, '_cross_entropy_fwd_gluon', forward)
+        forward = Mock(wraps=gluon.cross_entropy_fwd_gluon)
+        monkeypatch.setattr(gluon, 'cross_entropy_fwd_gluon', forward)
     torch.manual_seed(42)
     logits = torch.randn(N, 2 * V if strided else V, device=device, dtype=dtype)
     if strided:
@@ -194,7 +194,7 @@ def test_fused_cross_entropy(
         return_z_loss=z_scale > 0,
     )
     with torch.autocast(device_type=device, dtype=torch.bfloat16, enabled=autocast):
-        tri = criterion(logits, target)
+        tri = criterion(input=logits, target=target)
     if z_scale > 0:
         tri, tri_z_loss = tri
     tri_grad, = torch.autograd.grad(tri, logits, grad_outputs=do)
@@ -486,7 +486,7 @@ def test_fused_linear_cross_entropy_parallel_ascend_rejection(monkeypatch):
 
 @pytest.mark.parametrize('route', ['gluon', 'global', 'disabled', 'unavailable', 'parallel', 'device', 'dtype', 'target_device'])
 @pytest.mark.parametrize('defaults', [True, False], ids=['defaults', 'explicit'])
-def test_cross_entropy_loss_gluon_dispatch(route, defaults, monkeypatch):
+def test_cross_entropy_loss_gluon_dispatch(route: str, defaults: bool, monkeypatch):
     from fla.backends import _DISPATCH_DISABLED, GluonBackend, TritonAscendBackend
     from fla.modules.fused_cross_entropy.ops import FusedCrossEntropyFunction, cross_entropy_loss
 
@@ -521,14 +521,14 @@ def test_cross_entropy_loss_gluon_dispatch(route, defaults, monkeypatch):
         logits, target, 0.1, 0.5, 0.01, 3.0, -7, True, group,
     )
     if route in ('gluon', 'global', 'parallel'):
-        args += ((gluon._cross_entropy_fwd_gluon, gluon._cross_entropy_bwd_gluon),)
+        args += ((gluon.cross_entropy_fwd_gluon, gluon.cross_entropy_bwd_gluon),)
     apply.assert_called_once_with(*args)
 
 
 @pytest.mark.parametrize('V', [129, 65539], ids=['single_tile', 'split'])
 @pytest.mark.parametrize('inplace', [False, True], ids=['out_of_place', 'inplace'])
 @pytest.mark.skipif(not IS_NVIDIA, reason="Gluon requires NVIDIA GPUs")
-def test_cross_entropy_loss_gluon_parity(V, inplace, monkeypatch):
+def test_cross_entropy_loss_gluon_parity(V: int, inplace: bool, monkeypatch):
     from fla.backends import _DISPATCH_DISABLED, GluonBackend
     from fla.modules.fused_cross_entropy.ops import cross_entropy_loss
 
@@ -536,8 +536,8 @@ def test_cross_entropy_loss_gluon_parity(V, inplace, monkeypatch):
         pytest.skip("Gluon dispatch is unavailable")
     from fla.modules.fused_cross_entropy import gluon
 
-    backward = Mock(wraps=gluon._cross_entropy_bwd_gluon)
-    monkeypatch.setattr(gluon, '_cross_entropy_bwd_gluon', backward)
+    backward = Mock(wraps=gluon.cross_entropy_bwd_gluon)
+    monkeypatch.setattr(gluon, 'cross_entropy_bwd_gluon', backward)
     torch.manual_seed(42)
     logits = torch.randn(7, V, device=device, dtype=torch.float32)
     target = torch.randint(V, (7,), device=device)
@@ -549,9 +549,9 @@ def test_cross_entropy_loss_gluon_parity(V, inplace, monkeypatch):
     for backend in ('0', '1'):
         monkeypatch.setenv('FLA_CE_GLUON', backend)
         x = logits.clone().requires_grad_()
-        loss, z_loss = cross_entropy_loss(logits=x, target=target, inplace_backward=inplace, **kwargs)
+        loss, z_loss = cross_entropy_loss(logits=x, target=target, **kwargs, inplace_backward=inplace)
         monkeypatch.setenv('FLA_CE_GLUON', '0')
-        grad, = torch.autograd.grad(loss, x, grad_outputs=dloss)
+        grad, = torch.autograd.grad(outputs=loss, inputs=x, grad_outputs=dloss)
         assert backward.call_count == int(backend)
         assert torch.isfinite(loss).all() and torch.isfinite(grad).all()
         assert not z_loss.requires_grad
@@ -567,19 +567,19 @@ def test_cross_entropy_loss_gluon_parity(V, inplace, monkeypatch):
     target.fill_(-7)
     x = logits.clone().requires_grad_()
     loss, z_loss = cross_entropy_loss(logits=x, target=target, **kwargs)
-    grad, = torch.autograd.grad(loss.sum(), x)
+    grad, = torch.autograd.grad(outputs=loss.sum(), inputs=x)
     for value in (loss, z_loss, grad):
         assert torch.count_nonzero(value) == 0
 
 
-def _run_parallel_cross_entropy_worker(rank, world_size, init_file, backend):
+def run_parallel_cross_entropy_worker(rank: int, world_size: int, init_file: str, backend: str):
     from fla.modules.fused_cross_entropy import ops
 
     backward = ops.cross_entropy_bwd
     if backend == 'gluon':
         from fla.modules.fused_cross_entropy import gluon
 
-        backward = gluon._cross_entropy_bwd_gluon
+        backward = gluon.cross_entropy_bwd_gluon
     device_torch_lib.set_device(rank)
     dist.init_process_group(
         backend='nccl',
@@ -598,7 +598,7 @@ def _run_parallel_cross_entropy_worker(rank, world_size, init_file, backend):
             z_loss = (0.01 * transformed.logsumexp(-1).square()).masked_fill(target == -100, 0)
             ref = F.cross_entropy(transformed, target, reduction='none', label_smoothing=0.1) + z_loss
             dloss = torch.randn_like(ref)
-            ref_grad, = torch.autograd.grad(ref, logits, grad_outputs=dloss)
+            ref_grad, = torch.autograd.grad(outputs=ref, inputs=logits, grad_outputs=dloss)
             local = logits[:, rank * V:(rank + 1) * V].detach().clone().requires_grad_()
             loss, actual_z = ops.cross_entropy_loss(
                 logits=local,
@@ -612,7 +612,7 @@ def _run_parallel_cross_entropy_worker(rank, world_size, init_file, backend):
             )
             assert loss.grad_fn.bwd is backward
             assert loss.dtype == actual_z.dtype == torch.float32
-            grad, = torch.autograd.grad(loss, local, grad_outputs=dloss)
+            grad, = torch.autograd.grad(outputs=loss, inputs=local, grad_outputs=dloss)
             assert_close('loss', ref, loss, ratio=1e-2)
             assert_close('z_loss', z_loss, actual_z, ratio=1e-2)
             assert_close('grad', ref_grad[:, rank * V:(rank + 1) * V], grad, ratio=1e-2)
@@ -622,7 +622,7 @@ def _run_parallel_cross_entropy_worker(rank, world_size, init_file, backend):
 
 @pytest.mark.parametrize('backend', ['triton', 'gluon'])
 @pytest.mark.skipif(not IS_NVIDIA, reason="Vocabulary-parallel CE uses NCCL")
-def test_cross_entropy_loss_parallel(backend, tmp_path, monkeypatch):
+def test_cross_entropy_loss_parallel(backend: str, tmp_path, monkeypatch):
     from fla.backends import _DISPATCH_DISABLED, GluonBackend
 
     if backend == 'gluon' and (not GluonBackend.is_available() or _DISPATCH_DISABLED):
@@ -631,4 +631,4 @@ def test_cross_entropy_loss_parallel(backend, tmp_path, monkeypatch):
         pytest.skip("Requires 2 devices")
     monkeypatch.setenv('FLA_GLUON', '0')
     monkeypatch.setenv('FLA_CE_GLUON', '1' if backend == 'gluon' else '0')
-    mp.spawn(fn=_run_parallel_cross_entropy_worker, args=(2, str(tmp_path / 'init'), backend), nprocs=2, join=True)
+    mp.spawn(fn=run_parallel_cross_entropy_worker, args=(2, str(tmp_path / 'init'), backend), nprocs=2, join=True)

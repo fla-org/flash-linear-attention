@@ -94,7 +94,7 @@ def benchmark(T, provider):
         args={},
     ),
 )
-def benchmark_logits(N, V, softcap, provider, smoothing=0.0, dtype=torch.bfloat16):
+def benchmark_logits(N: int, V: int, softcap: float | None, smoothing: float, dtype: torch.dtype, provider: str):
     from fla.backends import _DISPATCH_DISABLED, GluonBackend
     from fla.utils import device
 
@@ -118,15 +118,15 @@ def benchmark_logits(N, V, softcap, provider, smoothing=0.0, dtype=torch.bfloat1
             label_smoothing=smoothing,
             logit_softcapping=softcap,
         )
-        backward = gluon._cross_entropy_bwd_gluon if provider.startswith('gluon') else ops.cross_entropy_bwd
+        backward = gluon.cross_entropy_bwd_gluon if provider.startswith('gluon') else ops.cross_entropy_bwd
         assert probe_loss.grad_fn.bwd is backward
         # release the default-stream graph before CUDA-graph warmup switches streams
         del probe_loss
 
         def run():
-            loss = criterion(logits, target)
+            loss = criterion(input=logits, target=target)
             if provider.endswith('_bwd'):
-                torch.autograd.grad(loss, logits)
+                torch.autograd.grad(outputs=loss, inputs=logits)
 
         for _ in range(5):
             run()
@@ -151,7 +151,7 @@ if __name__ == '__main__':
         from benchmarks.modules.runner import run_module_benchmark
 
     run_module_benchmark(
-        benchmark_logits if args.logits_only else benchmark,
+        mark=benchmark_logits if args.logits_only else benchmark,
         script_file=__file__,
         visualize=not args.logits_only,
     )
