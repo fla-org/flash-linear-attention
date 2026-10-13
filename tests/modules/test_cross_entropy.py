@@ -118,6 +118,8 @@ from fla.utils import IS_INTEL, IS_NPU, IS_NVIDIA, assert_close, device, device_
         ),
         pytest.param(65, 2049, 0.0, 1.0, None, 0.0, False, False, 'mean', torch.bfloat16, id='eight_warps'),
         pytest.param(7, 65536, 0.0, 1.0, None, 0.0, False, False, 'sum', torch.bfloat16, id='split_boundary'),
+        pytest.param(3, 1025, 0.1, 0.5, 3.0, 0.01, False, True, 'none', torch.float16, id='row_tail_softcap'),
+        pytest.param(5, 8193, 0.1, 1.0, None, 0.01, False, False, 'sum', torch.float32, id='row_tail_split'),
     ],
 )
 @pytest.mark.parametrize("backend", ["triton", "gluon"])
@@ -545,7 +547,7 @@ def _run_parallel_cross_entropy_worker(rank, world_size, init_file, backend):
         timeout=timedelta(minutes=5),
     )
     try:
-        for V, dtype in product((129, 65539), (torch.bfloat16, torch.float32)):
+        for V, dtype in product((128, 129, 32000, 65539), (torch.bfloat16, torch.float32)):
             torch.manual_seed(42)
             logits = torch.randn(7, world_size * V, device=device, dtype=dtype).requires_grad_()
             target = torch.randint(world_size * V, (7,), device=device)

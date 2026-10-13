@@ -55,7 +55,8 @@ def cross_entropy_fwd_kernel_gluon(
     SPLIT: gl.constexpr,
 ):
     NW: gl.constexpr = 4
-    R: gl.constexpr = min(128 // logits.dtype.element_ty.primitive_bitwidth, V & -V)
+    R_MAX: gl.constexpr = 128 // logits.dtype.element_ty.primitive_bitwidth
+    R: gl.constexpr = (V & -V) if (V & -V) < R_MAX else R_MAX
     layout: gl.constexpr = gl.BlockedLayout([R], [32], [NW], [0])
     i_n = gl.program_id(0).to(gl.int64)
     i_v = gl.program_id(1).to(gl.int64)
@@ -118,12 +119,17 @@ def cross_entropy_bwd_kernel_gluon(
     BV: gl.constexpr,
 ):
     NW: gl.constexpr = 4
-    R: gl.constexpr = min(128 // logits.dtype.element_ty.primitive_bitwidth, V & -V)
+    R_MAX: gl.constexpr = 128 // logits.dtype.element_ty.primitive_bitwidth
+    R: gl.constexpr = (V & -V) if (V & -V) < R_MAX else R_MAX
     layout: gl.constexpr = gl.BlockedLayout([R], [32], [NW], [0])
     i_n = gl.program_id(0).to(gl.int64)
     i_v = gl.program_id(1).to(gl.int64)
-    o_v = i_v * BV + gl.arange(0, BV, layout=layout).to(gl.int64)
-    m_v = o_v < V
+    o_local = gl.arange(0, BV, layout=layout)
+    o_v = i_v * BV + o_local.to(gl.int64)
+    if R == R_MAX and V > BV:
+        m_v = o_local < gl.minimum(V - i_v * BV, BV).to(gl.int32)
+    else:
+        m_v = o_v < V
     p_logits = logits + i_n * s_logits + o_v
     p_dlogits = dlogits + i_n * s_dlogits + o_v
 
@@ -138,12 +144,16 @@ def cross_entropy_bwd_kernel_gluon(
     # [BV]
     b_probs = exp(b_logits - b_lse)
     b_dlogits = b_probs + 2.0 * z_scale * b_lse * b_probs
+    TARGET_WEIGHT: gl.constexpr = 1 - smoothing if smoothing > 0 else 1.0
     b_target -= V_START
-    if smoothing > 0:
-        b_dlogits -= gl.where(o_v == b_target, 1 - smoothing, 0.0)
-        b_dlogits -= smoothing / V_TOTAL
+    if R == R_MAX and V > BV:
+        b_target -= i_v * BV
+        if (b_target >= 0) & (b_target < BV):
+            b_dlogits -= gl.where(o_local == b_target.to(gl.int32), TARGET_WEIGHT, 0.0)
     else:
-        b_dlogits -= gl.where(o_v == b_target, 1.0, 0.0)
+        b_dlogits -= gl.where(o_v == b_target, TARGET_WEIGHT, 0.0)
+    if smoothing > 0:
+        b_dlogits -= smoothing / V_TOTAL
     if softcap is not None:
         b_dlogits *= 1.0 - b_tanh * b_tanh
     b_dlogits *= b_dloss * scale

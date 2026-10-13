@@ -74,14 +74,16 @@ def benchmark(T, provider):
 
 @triton.testing.perf_report(
     triton.testing.Benchmark(
-        x_names=['N', 'V', 'softcap'],
+        x_names=['N', 'V', 'softcap', 'smoothing', 'dtype'],
         x_vals=[
-            (1024, 32000, None),
-            (2048, 128256, None),
-            (63, 131071, None),
-            (1024, 32000, 3.0),
-            (2047, 65539, 3.0),
-            (7, 129, None),
+            (1024, 32000, None, 0.0, torch.bfloat16),
+            (2048, 128256, None, 0.0, torch.bfloat16),
+            (63, 131071, None, 0.0, torch.bfloat16),
+            (1024, 32000, 3.0, 0.0, torch.bfloat16),
+            (2047, 65539, 3.0, 0.0, torch.bfloat16),
+            (7, 129, None, 0.0, torch.bfloat16),
+            (1025, 32000, None, 0.1, torch.bfloat16),
+            (511, 32003, 3.0, 0.1, torch.float32),
         ],
         line_arg='provider',
         line_vals=['triton', 'gluon', 'triton_bwd', 'gluon_bwd'],
@@ -92,17 +94,17 @@ def benchmark(T, provider):
         args={},
     ),
 )
-def benchmark_logits(N, V, softcap, provider):
+def benchmark_logits(N, V, softcap, provider, smoothing=0.0, dtype=torch.bfloat16):
     from fla.backends import _DISPATCH_DISABLED, GluonBackend
     from fla.utils import device
 
     if _DISPATCH_DISABLED or not GluonBackend.is_available():
         raise RuntimeError('This comparison requires NVIDIA Gluon and enabled backend dispatch')
     torch.manual_seed(42)
-    logits = torch.randn(N, V, device=device, dtype=torch.bfloat16, requires_grad=True)
+    logits = torch.randn(N, V, device=device, dtype=dtype, requires_grad=True)
     target = torch.randint(V, (N,), device=device)
     target[::7] = -100
-    criterion = FusedCrossEntropyLoss(logit_softcapping=softcap)
+    criterion = FusedCrossEntropyLoss(label_smoothing=smoothing, logit_softcapping=softcap)
     saved = {key: os.environ.get(key) for key in ('FLA_GLUON', 'FLA_CE_GLUON')}
     try:
         os.environ['FLA_GLUON'] = '0'
