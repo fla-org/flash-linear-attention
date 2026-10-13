@@ -226,6 +226,7 @@ def cross_entropy_reduce(
     return loss, z_loss, lse
 
 
+@dispatch
 def cross_entropy_fwd(
     logits: torch.Tensor,
     target: torch.Tensor,
@@ -294,6 +295,7 @@ def cross_entropy_fwd(
     return loss, z_loss, lse, total_classes, class_start_idx
 
 
+@dispatch
 def cross_entropy_bwd(
     logits: torch.Tensor,
     target: torch.Tensor,

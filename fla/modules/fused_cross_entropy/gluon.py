@@ -17,8 +17,7 @@ from triton.experimental.gluon import language as gl
 from triton.experimental.gluon.language import extra
 
 from fla.backends import GluonBackend, register
-from fla.modules.fused_cross_entropy.ops import cross_entropy_loss
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
+from fla.modules.fused_cross_entropy.ops import cross_entropy_bwd, cross_entropy_fwd
 
 if TYPE_CHECKING:
     from torch.distributed import ProcessGroup
@@ -263,6 +262,24 @@ def cross_entropy_reduce_gluon(
     return loss, z_loss, lse
 
 
+def cross_entropy_fwd_verifier(
+    logits: torch.Tensor,
+    target: torch.Tensor,
+    label_smoothing: float = 0.0,
+    logit_scale: float = 1.0,
+    lse_square_scale: float = 0.0,
+    logit_softcapping: float | None = None,
+    ignore_index: int = -100,
+    process_group: ProcessGroup | None = None,
+) -> tuple[bool, str | None]:
+    if logits.device.type != 'cuda' or target.device != logits.device:
+        return False, "Logits and targets must be on the same CUDA device"
+    if logits.dtype not in (torch.float16, torch.bfloat16, torch.float32):
+        return False, "Gluon cross entropy supports fp16, bf16, and fp32 logits"
+    return True, None
+
+
+@register(cross_entropy_fwd, backend=GluonBackend, verifier=cross_entropy_fwd_verifier, env_var='FLA_CE_GLUON')
 def cross_entropy_fwd_gluon(
     logits: torch.Tensor,
     target: torch.Tensor,
@@ -327,6 +344,24 @@ def cross_entropy_fwd_gluon(
     return loss, z_loss, lse, total_classes, class_start_idx
 
 
+def cross_entropy_bwd_verifier(
+    logits: torch.Tensor,
+    target: torch.Tensor,
+    lse: torch.Tensor,
+    dloss: torch.Tensor,
+    label_smoothing: float = 0.0,
+    logit_scale: float = 1.0,
+    lse_square_scale: float = 0.0,
+    logit_softcapping: float | None = None,
+    ignore_index: int = -100,
+    total_classes: int | None = None,
+    class_start_idx: int = 0,
+    inplace_backward: bool = False,
+) -> tuple[bool, str | None]:
+    return cross_entropy_fwd_verifier(logits=logits, target=target)
+
+
+@register(cross_entropy_bwd, backend=GluonBackend, verifier=cross_entropy_bwd_verifier, env_var='FLA_CE_GLUON')
 def cross_entropy_bwd_gluon(
     logits: torch.Tensor,
     target: torch.Tensor,
@@ -365,111 +400,3 @@ def cross_entropy_bwd_gluon(
         num_warps=4,
     )
     return dlogits
-
-
-class FusedCrossEntropyGluonFunction(torch.autograd.Function):
-
-    @staticmethod
-    @input_guard
-    @autocast_custom_fwd
-    def forward(
-        ctx,
-        logits,
-        target,
-        label_smoothing=0.0,
-        logit_scale=1.0,
-        lse_square_scale=0.0,
-        logit_softcapping=None,
-        ignore_index=-100,
-        inplace_backward=False,
-        process_group: ProcessGroup | None = None,
-    ):
-        loss, z_loss, lse, total_classes, class_start_idx = cross_entropy_fwd_gluon(
-            logits=logits,
-            target=target,
-            label_smoothing=label_smoothing,
-            logit_scale=logit_scale,
-            lse_square_scale=lse_square_scale,
-            logit_softcapping=logit_softcapping,
-            ignore_index=ignore_index,
-            process_group=process_group,
-        )
-        ctx.save_for_backward(logits, target, lse)
-        ctx.mark_non_differentiable(z_loss)
-        ctx.label_smoothing = label_smoothing
-        ctx.logit_scale = logit_scale
-        ctx.lse_square_scale = lse_square_scale
-        ctx.logit_softcapping = logit_softcapping
-        ctx.ignore_index = ignore_index
-        ctx.total_classes = total_classes
-        ctx.class_start_idx = class_start_idx
-        ctx.inplace_backward = inplace_backward
-
-        return loss, z_loss
-
-    @staticmethod
-    @input_guard
-    @autocast_custom_bwd
-    def backward(ctx, dloss, dz_loss):
-        # z-loss is returned for logging and is already included in the differentiable loss
-        del dz_loss
-
-        logits, target, lse = ctx.saved_tensors
-        dlogits = cross_entropy_bwd_gluon(
-            logits=logits,
-            target=target,
-            lse=lse,
-            dloss=dloss,
-            label_smoothing=ctx.label_smoothing,
-            logit_scale=ctx.logit_scale,
-            lse_square_scale=ctx.lse_square_scale,
-            logit_softcapping=ctx.logit_softcapping,
-            ignore_index=ctx.ignore_index,
-            total_classes=ctx.total_classes,
-            class_start_idx=ctx.class_start_idx,
-            inplace_backward=ctx.inplace_backward,
-        )
-        return dlogits, None, None, None, None, None, None, None, None
-
-
-def cross_entropy_loss_verifier(
-    logits: torch.Tensor,
-    target: torch.Tensor,
-    label_smoothing: float = 0.0,
-    logit_scale: float = 1.0,
-    lse_square_scale: float = 0.0,
-    logit_softcapping: float | None = None,
-    ignore_index: int = -100,
-    inplace_backward: bool = False,
-    process_group: ProcessGroup | None = None,
-) -> tuple[bool, str | None]:
-    if logits.device.type != 'cuda' or target.device != logits.device:
-        return False, "Logits and targets must be on the same CUDA device"
-    if logits.dtype not in (torch.float16, torch.bfloat16, torch.float32):
-        return False, "Gluon cross entropy supports fp16, bf16, and fp32 logits"
-    return True, None
-
-
-@register(cross_entropy_loss, backend=GluonBackend, verifier=cross_entropy_loss_verifier, env_var='FLA_CE_GLUON')
-def cross_entropy_loss_gluon(
-    logits: torch.Tensor,
-    target: torch.Tensor,
-    label_smoothing: float = 0.0,
-    logit_scale: float = 1.0,
-    lse_square_scale: float = 0.0,
-    logit_softcapping: float | None = None,
-    ignore_index: int = -100,
-    inplace_backward: bool = False,
-    process_group: ProcessGroup | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    return FusedCrossEntropyGluonFunction.apply(
-        logits,
-        target,
-        label_smoothing,
-        logit_scale,
-        lse_square_scale,
-        logit_softcapping,
-        ignore_index,
-        inplace_backward,
-        process_group,
-    )

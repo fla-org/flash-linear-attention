@@ -5,11 +5,11 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import inspect
 import math
 from datetime import timedelta
 from itertools import product
-from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock
 
 import pytest
 import torch
@@ -17,6 +17,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 import torch.nn.functional as F
 
+from fla import backends
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
 from fla.modules.l2warp import l2_warp
 from fla.utils import IS_INTEL, IS_NPU, IS_NVIDIA, assert_close, device, device_torch_lib
@@ -158,10 +159,11 @@ def test_fused_cross_entropy(
     if backend == 'gluon' and (not GluonBackend.is_available() or _DISPATCH_DISABLED):
         pytest.skip("Gluon dispatch is unavailable")
     if backend == 'gluon':
-        from fla.modules.fused_cross_entropy import gluon
+        from fla.modules.fused_cross_entropy import gluon, ops
 
         forward = Mock(wraps=gluon.cross_entropy_fwd_gluon)
-        monkeypatch.setattr(gluon, 'cross_entropy_fwd_gluon', forward)
+        registry = backends._function_registries[inspect.unwrap(ops.cross_entropy_fwd)]
+        monkeypatch.setattr(registry._backends['gluon'], 'implementation', forward)
     torch.manual_seed(42)
     logits = torch.randn(N, 2 * V if strided else V, device=device, dtype=dtype)
     if strided:
@@ -486,59 +488,68 @@ def test_fused_linear_cross_entropy_parallel_ascend_rejection(monkeypatch):
 
 @pytest.mark.parametrize('route', ['gluon', 'global', 'disabled', 'unavailable', 'parallel', 'device', 'dtype', 'target_device'])
 @pytest.mark.parametrize('defaults', [True, False], ids=['defaults', 'explicit'])
-def test_cross_entropy_loss_gluon_dispatch(route: str, defaults: bool, monkeypatch):
-    from fla.backends import _DISPATCH_DISABLED, GluonBackend, TritonAscendBackend
-    from fla.modules.fused_cross_entropy.ops import FusedCrossEntropyFunction, cross_entropy_loss
+@pytest.mark.parametrize('direction', ['fwd', 'bwd'])
+@pytest.mark.skipif(not IS_NVIDIA, reason="Gluon requires NVIDIA GPUs")
+def test_cross_entropy_gluon_dispatch(route: str, defaults: bool, direction: str, monkeypatch):
+    from fla.backends import _DISPATCH_DISABLED, GluonBackend
+    from fla.modules.fused_cross_entropy import ops
 
-    pytest.importorskip('triton.experimental.gluon')
-    from fla.modules.fused_cross_entropy import gluon
-
-    if _DISPATCH_DISABLED:
-        pytest.skip("Backend dispatch is disabled")
+    if not GluonBackend.is_available() or _DISPATCH_DISABLED:
+        pytest.skip("Gluon dispatch is unavailable")
     monkeypatch.setenv('FLA_GLUON', '1' if route == 'global' else '0')
     monkeypatch.setenv('FLA_CE_GLUON', '0' if route in ('global', 'disabled') else '1')
     monkeypatch.setattr(GluonBackend, 'is_available', classmethod(lambda cls: route != 'unavailable'))
-    monkeypatch.setattr(TritonAscendBackend, 'is_available', classmethod(lambda cls: False))
-    triton_apply, gluon_apply = Mock(), Mock()
-    monkeypatch.setattr(FusedCrossEntropyFunction, 'apply', triton_apply)
-    monkeypatch.setattr(gluon.FusedCrossEntropyGluonFunction, 'apply', gluon_apply)
-    logits = SimpleNamespace(device=torch.device('cpu' if route == 'device' else 'cuda'), dtype=torch.float32)
-    target = SimpleNamespace(device=torch.device('cpu' if route == 'target_device' else 'cuda'))
-    if route == 'dtype':
-        logits.dtype = torch.float64
-    kwargs = {} if defaults else dict(
-        label_smoothing=0.1,
-        logit_scale=0.5,
-        lse_square_scale=0.01,
-        logit_softcapping=3.0,
-        ignore_index=-7,
-        inplace_backward=True,
+    monkeypatch.setattr(dist, 'get_world_size', lambda group: 2)
+    monkeypatch.setattr(dist, 'get_rank', lambda group: 0)
+    entry = getattr(ops, f'cross_entropy_{direction}')
+    registry = backends._function_registries[inspect.unwrap(entry)]
+    implementation = Mock()
+    monkeypatch.setattr(registry._backends['gluon'], 'implementation', implementation)
+    kernel = MagicMock()
+    kernel.__getitem__.return_value.side_effect = RuntimeError('Triton fallback')
+    monkeypatch.setattr(ops, f'cross_entropy_{direction}_kernel', kernel)
+    logits = torch.empty(
+        7,
+        129,
+        device='cpu' if route == 'device' else device,
+        dtype=torch.float64 if route == 'dtype' else torch.float32,
     )
-    group = object() if route == 'parallel' else None
-    if group is not None:
-        kwargs['process_group'] = group
-    apply, fallback = (gluon_apply, triton_apply) if route in ('gluon', 'global', 'parallel') else (triton_apply, gluon_apply)
-    assert cross_entropy_loss(logits=logits, target=target, **kwargs) is apply.return_value
-    args = (logits, target, 0.0, 1.0, 0.0, None, -100, False, group) if defaults else (
-        logits, target, 0.1, 0.5, 0.01, 3.0, -7, True, group,
-    )
-    apply.assert_called_once_with(*args)
-    fallback.assert_not_called()
+    target = torch.empty(7, device='cpu' if route == 'target_device' else device, dtype=torch.long)
+    kwargs = dict(logits=logits, target=target)
+    if direction == 'bwd':
+        kwargs.update(lse=torch.empty(7, device=device), dloss=torch.empty(7, device=device))
+    if not defaults:
+        kwargs.update(label_smoothing=0.1, logit_scale=0.5, lse_square_scale=0.01, logit_softcapping=3.0, ignore_index=-7)
+        if direction == 'bwd':
+            kwargs.update(total_classes=258, class_start_idx=129, inplace_backward=True)
+    if route == 'parallel' and direction == 'fwd':
+        kwargs['process_group'] = object()
+    if route in ('gluon', 'global', 'parallel'):
+        assert entry(**kwargs) is implementation.return_value
+        implementation.assert_called_once_with(**kwargs)
+        kernel.__getitem__.assert_not_called()
+    else:
+        with pytest.raises(RuntimeError, match='Triton fallback'):
+            entry(**kwargs)
+        kernel.__getitem__.return_value.assert_called_once()
+        implementation.assert_not_called()
 
 
 @pytest.mark.parametrize('V', [129, 65539], ids=['single_tile', 'split'])
 @pytest.mark.parametrize('inplace', [False, True], ids=['out_of_place', 'inplace'])
+@pytest.mark.parametrize('switch_backend', [False, True], ids=['same_backend', 'switch_backend'])
 @pytest.mark.skipif(not IS_NVIDIA, reason="Gluon requires NVIDIA GPUs")
-def test_cross_entropy_loss_gluon_parity(V: int, inplace: bool, monkeypatch):
+def test_cross_entropy_loss_gluon_parity(V: int, inplace: bool, switch_backend: bool, monkeypatch):
     from fla.backends import _DISPATCH_DISABLED, GluonBackend
     from fla.modules.fused_cross_entropy.ops import cross_entropy_loss
 
     if not GluonBackend.is_available() or _DISPATCH_DISABLED:
         pytest.skip("Gluon dispatch is unavailable")
-    from fla.modules.fused_cross_entropy import gluon
+    from fla.modules.fused_cross_entropy import gluon, ops
 
     backward = Mock(wraps=gluon.cross_entropy_bwd_gluon)
-    monkeypatch.setattr(gluon, 'cross_entropy_bwd_gluon', backward)
+    registry = backends._function_registries[inspect.unwrap(ops.cross_entropy_bwd)]
+    monkeypatch.setattr(registry._backends['gluon'], 'implementation', backward)
     torch.manual_seed(42)
     logits = torch.randn(7, V, device=device, dtype=torch.float32)
     target = torch.randint(V, (7,), device=device)
@@ -548,12 +559,14 @@ def test_cross_entropy_loss_gluon_parity(V: int, inplace: bool, monkeypatch):
     monkeypatch.setenv('FLA_GLUON', '0')
     outputs = []
     for backend in ('0', '1'):
+        backward.reset_mock()
         monkeypatch.setenv('FLA_CE_GLUON', backend)
         x = logits.clone().requires_grad_()
         loss, z_loss = cross_entropy_loss(logits=x, target=target, **kwargs, inplace_backward=inplace)
-        monkeypatch.setenv('FLA_CE_GLUON', '0')
+        backward_backend = str(1 - int(backend)) if switch_backend else backend
+        monkeypatch.setenv('FLA_CE_GLUON', backward_backend)
         grad, = torch.autograd.grad(outputs=loss, inputs=x, grad_outputs=dloss)
-        assert backward.call_count == int(backend)
+        assert backward.call_count == int(backward_backend)
         assert torch.isfinite(loss).all() and torch.isfinite(grad).all()
         assert not z_loss.requires_grad
         if inplace:
@@ -576,11 +589,13 @@ def test_cross_entropy_loss_gluon_parity(V: int, inplace: bool, monkeypatch):
 def run_parallel_cross_entropy_worker(rank: int, world_size: int, init_file: str, backend: str):
     from fla.modules.fused_cross_entropy import ops
 
-    function = ops.FusedCrossEntropyFunction
+    calls = []
     if backend == 'gluon':
-        from fla.modules.fused_cross_entropy import gluon
-
-        function = gluon.FusedCrossEntropyGluonFunction
+        for entry in (ops.cross_entropy_fwd, ops.cross_entropy_bwd):
+            registry = backends._function_registries[inspect.unwrap(entry)]
+            candidate = registry._backends['gluon']
+            candidate.implementation = Mock(wraps=candidate.implementation)
+            calls.append(candidate.implementation)
     device_torch_lib.set_device(rank)
     dist.init_process_group(
         backend='nccl',
@@ -591,6 +606,8 @@ def run_parallel_cross_entropy_worker(rank: int, world_size: int, init_file: str
     )
     try:
         for V, dtype in product((128, 129, 32000, 65539), (torch.float16, torch.bfloat16, torch.float32)):
+            for call in calls:
+                call.reset_mock()
             torch.manual_seed(42)
             logits = torch.randn(7, world_size * V, device=device, dtype=dtype).requires_grad_()
             target = torch.randint(world_size * V, (7,), device=device)
@@ -611,9 +628,10 @@ def run_parallel_cross_entropy_worker(rank: int, world_size: int, init_file: str
                 inplace_backward=True,
                 process_group=dist.group.WORLD,
             )
-            assert loss.grad_fn.name() == f'{function.__name__}Backward'
             assert loss.dtype == actual_z.dtype == torch.float32
             grad, = torch.autograd.grad(outputs=loss, inputs=local, grad_outputs=dloss)
+            for call in calls:
+                call.assert_called_once()
             assert_close('loss', ref, loss, ratio=1e-2)
             assert_close('z_loss', z_loss, actual_z, ratio=1e-2)
             assert_close('grad', ref_grad[:, rank * V:(rank + 1) * V], grad, ratio=1e-2)
