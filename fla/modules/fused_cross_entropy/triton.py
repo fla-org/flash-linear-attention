@@ -42,12 +42,13 @@ def cross_entropy_fwd_kernel(
 ):
     i_n = tl.program_id(0).to(tl.int64)
     i_v = tl.program_id(1).to(tl.int64)
-    o_v = i_v * BV + tl.arange(0, BV).to(tl.int64)
-    m_v = o_v < V
+    o_v = tl.arange(0, BV)
+    # a bounded lane count avoids wide comparisons without narrowing global addresses
+    m_v = o_v < tl.minimum(V - i_v * BV, BV).to(tl.int32)
     p_logits = logits + i_n * s_logits
 
     # [BV]
-    b_logits = tl.load(p_logits + o_v, mask=m_v, other=-float('inf')).to(tl.float32) * scale
+    b_logits = tl.load(p_logits + i_v * BV + o_v.to(tl.int64), mask=m_v, other=-float('inf')).to(tl.float32) * scale
     if softcap is not None:
         b_logits = softcap * tanh(b_logits / softcap)
     # these transforms do not preserve -inf in padded lanes
