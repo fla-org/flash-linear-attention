@@ -26,11 +26,10 @@ if TYPE_CHECKING:
 if os.environ.get('FLA_USE_FAST_OPS', '0') == '1':
     exp = extra.libdevice.fast_expf
     log = extra.libdevice.fast_logf
-    tanh = extra.libdevice.fast_tanhf
 else:
     exp = gl.exp
     log = gl.log
-    tanh = extra.libdevice.tanh
+tanh = extra.libdevice.tanh
 
 
 @gluon.jit(do_not_specialize=['N'])

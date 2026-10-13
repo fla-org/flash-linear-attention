@@ -13,9 +13,10 @@ import torch
 import torch.nn as nn
 import triton
 import triton.language as tl
+from triton.language.extra.libdevice import tanh
 
 from fla.backends import dispatch
-from fla.ops.utils.op import exp, log, tanh
+from fla.ops.utils.op import exp, log
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 if TYPE_CHECKING:
