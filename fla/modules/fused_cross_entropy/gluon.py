@@ -158,12 +158,6 @@ def cross_entropy_bwd_kernel_gluon(
     gl.store(p_dlogits, b_dlogits, mask=m_v)
 
 
-@triton.heuristics({
-    'BN': lambda args: 128 // max(
-        1,
-        min(8, triton.next_power_of_2(args['NV']) // 4, 16384 // triton.next_power_of_2(args['N'])),
-    ),
-})
 @gluon.jit(do_not_specialize=['N'])
 def cross_entropy_fwd_kernel_reduce_gluon(
     partial_loss,
@@ -217,9 +211,11 @@ def cross_entropy_reduce_gluon(
     N = target.shape[0]
     if lse.ndim == 2:
         NV = lse.shape[0]
+        BS = triton.next_power_of_2(NV)
+        BN = 128 // max(1, min(8, BS // 4, 16384 // triton.next_power_of_2(N)))
         reduced_loss = loss.new_empty(N)
         reduced_lse = torch.empty_like(reduced_loss)
-        cross_entropy_fwd_kernel_reduce_gluon[lambda meta: (triton.cdiv(N, meta['BN']),)](
+        cross_entropy_fwd_kernel_reduce_gluon[(triton.cdiv(N, BN),)](
             partial_loss=loss,
             partial_lse=lse,
             target=target,
@@ -228,8 +224,8 @@ def cross_entropy_reduce_gluon(
             z_loss=z_loss,
             N=N,
             NV=NV,
-            BN=128,
-            BS=triton.next_power_of_2(NV),
+            BN=BN,
+            BS=BS,
             z_scale=lse_square_scale,
             ignore_index=ignore_index,
             SPLIT=world_size > 1,
@@ -238,10 +234,12 @@ def cross_entropy_reduce_gluon(
         )
         loss, lse = reduced_loss, reduced_lse
     if world_size > 1:
+        BS = triton.next_power_of_2(world_size)
+        BN = 128 // max(1, min(8, BS // 4, 16384 // triton.next_power_of_2(N)))
         gathered_lse = lse.new_empty(world_size, N)
         torch.distributed.all_gather_into_tensor(gathered_lse, lse, group=process_group)
         torch.distributed.all_reduce(loss, group=process_group)
-        cross_entropy_fwd_kernel_reduce_gluon[lambda meta: (triton.cdiv(N, meta['BN']),)](
+        cross_entropy_fwd_kernel_reduce_gluon[(triton.cdiv(N, BN),)](
             partial_loss=loss,
             partial_lse=gathered_lse,
             target=target,
@@ -250,8 +248,8 @@ def cross_entropy_reduce_gluon(
             z_loss=z_loss,
             N=N,
             NV=world_size,
-            BN=128,
-            BS=triton.next_power_of_2(world_size),
+            BN=BN,
+            BS=BS,
             z_scale=lse_square_scale,
             ignore_index=ignore_index,
             SPLIT=False,
@@ -298,7 +296,11 @@ def cross_entropy_fwd_gluon(
 
     if logits.stride(-1) != 1:
         logits = logits.contiguous()
-    BV = min(triton.next_power_of_2(V), 2048 if logit_softcapping is not None else 8192)
+    BV = triton.next_power_of_2(V)
+    if logit_softcapping is not None:
+        BV = min(BV, 2048)
+    elif V > 16384:
+        BV = 8192
     # vocab partitions contribute partial loss until the global LSE is available
     NV = triton.cdiv(V, BV)
     split = world_size > 1 or NV > 1
