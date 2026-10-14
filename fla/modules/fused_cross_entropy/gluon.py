@@ -37,13 +37,13 @@ def cross_entropy_fwd_kernel_gluon(
     logits,  # [N, V]
     target,  # [N]
     loss,  # [NV, N] or [N] when NV == 1
-    lse,  # [NV, N] or [N] when NV == 1
     z_loss,  # [N]
+    lse,  # [NV, N] or [N] when NV == 1
     s_logits,
-    scale: gl.constexpr,
-    softcap: gl.constexpr,
-    smoothing: gl.constexpr,
-    z_scale: gl.constexpr,
+    label_smoothing: gl.constexpr,
+    logit_scale: gl.constexpr,
+    lse_square_scale: gl.constexpr,
+    logit_softcapping: gl.constexpr,
     ignore_index: gl.constexpr,
     N,
     V: gl.constexpr,
@@ -63,13 +63,13 @@ def cross_entropy_fwd_kernel_gluon(
     p_logits = logits + i_n * s_logits
 
     # [BV]
-    b_logits = gl.load(p_logits + o_v, mask=m_v, other=-float('inf')).to(gl.float32) * scale
-    if softcap is not None:
-        b_logits = softcap * tanh(b_logits / softcap)
+    b_logits = gl.load(p_logits + o_v, mask=m_v, other=-float('inf')).to(gl.float32) * logit_scale
+    if logit_softcapping is not None:
+        b_logits = logit_softcapping * tanh(b_logits / logit_softcapping)
     # these transforms do not preserve -inf in padded lanes
-    if softcap is not None or scale <= 0:
+    if logit_softcapping is not None or logit_scale <= 0:
         b_logits = gl.where(m_v, b_logits, -float('inf'))
-    if smoothing > 0:
+    if label_smoothing > 0:
         b_sum = gl.sum(gl.where(m_v, b_logits, 0.0), 0)
     b_max = gl.max(b_logits, 0)
     b_lse = log(gl.sum(exp(b_logits - b_max), 0)) + b_max
@@ -80,14 +80,14 @@ def cross_entropy_fwd_kernel_gluon(
     if b_target != ignore_index:
         b_target -= V_START
         m_target = (b_target >= i_v * BV) & (b_target < gl.minimum(V, (i_v + 1) * BV))
-        b_target_logit = gl.load(p_logits + b_target, mask=m_target, other=0).to(gl.float32) * scale
-        if softcap is not None:
-            b_target_logit = softcap * tanh(b_target_logit / softcap)
+        b_target_logit = gl.load(p_logits + b_target, mask=m_target, other=0).to(gl.float32) * logit_scale
+        if logit_softcapping is not None:
+            b_target_logit = logit_softcapping * tanh(b_target_logit / logit_softcapping)
         b_loss = -b_target_logit
-        if smoothing > 0:
-            b_loss = (1 - smoothing) * b_loss - smoothing * b_sum / V_TOTAL
+        if label_smoothing > 0:
+            b_loss = (1 - label_smoothing) * b_loss - label_smoothing * b_sum / V_TOTAL
         if not SPLIT:
-            b_z_loss = z_scale * b_lse * b_lse
+            b_z_loss = lse_square_scale * b_lse * b_lse
             b_loss += b_lse + b_z_loss
 
     gl.store(loss + i_v * N + i_n, b_loss)
@@ -106,10 +106,10 @@ def cross_entropy_bwd_kernel_gluon(
     s_logits,
     s_dloss,
     s_dlogits,
-    scale: gl.constexpr,
-    softcap: gl.constexpr,
-    smoothing: gl.constexpr,
-    z_scale: gl.constexpr,
+    label_smoothing: gl.constexpr,
+    logit_scale: gl.constexpr,
+    lse_square_scale: gl.constexpr,
+    logit_softcapping: gl.constexpr,
     ignore_index: gl.constexpr,
     V: gl.constexpr,
     V_TOTAL: gl.constexpr,
@@ -134,15 +134,15 @@ def cross_entropy_bwd_kernel_gluon(
     b_target = gl.load(target + i_n).to(gl.int64)
     b_dloss = gl.load(dloss + i_n * s_dloss, mask=b_target != ignore_index, other=0).to(gl.float32)
     # [BV]
-    b_logits = gl.load(p_logits, mask=m_v, other=0).to(gl.float32) * scale
-    if softcap is not None:
-        b_tanh = tanh(b_logits / softcap)
-        b_logits = softcap * b_tanh
+    b_logits = gl.load(p_logits, mask=m_v, other=0).to(gl.float32) * logit_scale
+    if logit_softcapping is not None:
+        b_tanh = tanh(b_logits / logit_softcapping)
+        b_logits = logit_softcapping * b_tanh
     b_lse = gl.load(lse + i_n)
     # [BV]
     b_probs = exp(b_logits - b_lse)
-    b_dlogits = b_probs + 2.0 * z_scale * b_lse * b_probs
-    TARGET_WEIGHT: gl.constexpr = 1 - smoothing if smoothing > 0 else 1.0
+    b_dlogits = b_probs + 2.0 * lse_square_scale * b_lse * b_probs
+    TARGET_WEIGHT: gl.constexpr = 1 - label_smoothing if label_smoothing > 0 else 1.0
     b_target -= V_START
     if R == R_MAX and V > BV:
         b_target -= i_v * BV
@@ -150,11 +150,11 @@ def cross_entropy_bwd_kernel_gluon(
             b_dlogits -= gl.where(o_local == b_target.to(gl.int32), TARGET_WEIGHT, 0.0)
     else:
         b_dlogits -= gl.where(o_v == b_target, TARGET_WEIGHT, 0.0)
-    if smoothing > 0:
-        b_dlogits -= smoothing / V_TOTAL
-    if softcap is not None:
+    if label_smoothing > 0:
+        b_dlogits -= label_smoothing / V_TOTAL
+    if logit_softcapping is not None:
         b_dlogits *= 1.0 - b_tanh * b_tanh
-    b_dlogits *= b_dloss * scale
+    b_dlogits *= b_dloss * logit_scale
     gl.store(p_dlogits, b_dlogits, mask=m_v)
 
 
@@ -164,14 +164,14 @@ def cross_entropy_fwd_kernel_reduce_gluon(
     partial_lse,
     target,
     loss,
-    lse,
     z_loss,
+    lse,
+    lse_square_scale: gl.constexpr,
+    ignore_index: gl.constexpr,
     N,
     NV: gl.constexpr,
     BN: gl.constexpr,
     BS: gl.constexpr,
-    z_scale: gl.constexpr,
-    ignore_index: gl.constexpr,
     SPLIT: gl.constexpr,
     REDUCE_LOSS: gl.constexpr,
 ):
@@ -191,7 +191,7 @@ def cross_entropy_fwd_kernel_reduce_gluon(
         b_loss = gl.load(partial_loss + o_n, mask=o_n < N, other=0).to(gl.float32)
     if not SPLIT:
         valid = gl.load(target + o_n, mask=o_n < N, other=ignore_index) != ignore_index
-        b_z_loss = gl.where(valid, z_scale * b_lse * b_lse, 0.)
+        b_z_loss = gl.where(valid, lse_square_scale * b_lse * b_lse, 0.)
         b_loss = gl.where(valid, b_loss + b_lse + b_z_loss, 0.)
         gl.store(z_loss + o_n, b_z_loss, mask=o_n < N)
     gl.store(loss + o_n, b_loss, mask=o_n < N)
@@ -200,15 +200,15 @@ def cross_entropy_fwd_kernel_reduce_gluon(
 
 def cross_entropy_reduce_gluon(
     loss: torch.Tensor,
-    lse: torch.Tensor,
     z_loss: torch.Tensor,
+    lse: torch.Tensor,
     target: torch.Tensor,
     lse_square_scale: float,
     ignore_index: int,
-    world_size: int,
     process_group: ProcessGroup | None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     N = target.shape[0]
+    world_size = 1 if process_group is None else torch.distributed.get_world_size(group=process_group)
     if lse.ndim == 2:
         NV = lse.shape[0]
         BS = triton.next_power_of_2(NV)
@@ -220,14 +220,14 @@ def cross_entropy_reduce_gluon(
             partial_lse=lse,
             target=target,
             loss=reduced_loss,
-            lse=reduced_lse,
             z_loss=z_loss,
+            lse=reduced_lse,
+            lse_square_scale=lse_square_scale,
+            ignore_index=ignore_index,
             N=N,
             NV=NV,
             BN=BN,
             BS=BS,
-            z_scale=lse_square_scale,
-            ignore_index=ignore_index,
             SPLIT=world_size > 1,
             REDUCE_LOSS=True,
             num_warps=4,
@@ -237,21 +237,21 @@ def cross_entropy_reduce_gluon(
         BS = triton.next_power_of_2(world_size)
         BN = 128 // max(1, min(8, BS // 4, 16384 // triton.next_power_of_2(N)))
         gathered_lse = lse.new_empty(world_size, N)
-        torch.distributed.all_gather_into_tensor(gathered_lse, lse, group=process_group)
-        torch.distributed.all_reduce(loss, group=process_group)
+        torch.distributed.all_gather_into_tensor(output_tensor=gathered_lse, input_tensor=lse, group=process_group)
+        torch.distributed.all_reduce(tensor=loss, group=process_group)
         cross_entropy_fwd_kernel_reduce_gluon[(triton.cdiv(N, BN),)](
             partial_loss=loss,
             partial_lse=gathered_lse,
             target=target,
             loss=loss,
-            lse=lse,
             z_loss=z_loss,
+            lse=lse,
+            lse_square_scale=lse_square_scale,
+            ignore_index=ignore_index,
             N=N,
             NV=world_size,
             BN=BN,
             BS=BS,
-            z_scale=lse_square_scale,
-            ignore_index=ignore_index,
             SPLIT=False,
             REDUCE_LOSS=False,
             num_warps=4,
@@ -289,9 +289,9 @@ def cross_entropy_fwd_gluon(
 ):
     N, V = logits.shape
     assert target.shape == (N,)
-    world_size = 1 if process_group is None else torch.distributed.get_world_size(process_group)
+    world_size = 1 if process_group is None else torch.distributed.get_world_size(group=process_group)
     total_classes = world_size * V
-    rank = 0 if process_group is None else torch.distributed.get_rank(process_group)
+    rank = 0 if process_group is None else torch.distributed.get_rank(group=process_group)
     class_start_idx = rank * V
 
     if logits.stride(-1) != 1:
@@ -313,13 +313,13 @@ def cross_entropy_fwd_gluon(
         logits=logits,
         target=target,
         loss=loss,
-        lse=lse,
         z_loss=z_loss,
+        lse=lse,
         s_logits=logits.stride(0),
-        scale=logit_scale,
-        softcap=logit_softcapping,
-        smoothing=label_smoothing,
-        z_scale=lse_square_scale,
+        label_smoothing=label_smoothing,
+        logit_scale=logit_scale,
+        lse_square_scale=lse_square_scale,
+        logit_softcapping=logit_softcapping,
         ignore_index=ignore_index,
         N=N,
         V=V,
@@ -333,12 +333,11 @@ def cross_entropy_fwd_gluon(
     if split:
         loss, z_loss, lse = cross_entropy_reduce_gluon(
             loss=loss,
-            lse=lse,
             z_loss=z_loss,
+            lse=lse,
             target=target,
             lse_square_scale=lse_square_scale,
             ignore_index=ignore_index,
-            world_size=world_size,
             process_group=process_group,
         )
 
@@ -389,10 +388,10 @@ def cross_entropy_bwd_gluon(
         s_logits=logits.stride(0),
         s_dloss=dloss.stride(0),
         s_dlogits=dlogits.stride(0),
-        scale=logit_scale,
-        softcap=logit_softcapping,
-        smoothing=label_smoothing,
-        z_scale=lse_square_scale,
+        label_smoothing=label_smoothing,
+        logit_scale=logit_scale,
+        lse_square_scale=lse_square_scale,
+        logit_softcapping=logit_softcapping,
         ignore_index=ignore_index,
         V=V,
         V_TOTAL=V if total_classes is None else total_classes,

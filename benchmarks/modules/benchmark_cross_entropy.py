@@ -78,19 +78,19 @@ def benchmark(T, provider):
 
 @triton.testing.perf_report(
     triton.testing.Benchmark(
-        x_names=['N', 'V', 'softcap', 'smoothing', 'dtype'],
+        x_names=['N', 'V', 'label_smoothing', 'logit_softcapping', 'dtype'],
         x_vals=[
-            (1024, 32000, None, 0.0, torch.bfloat16),
-            (2048, 128256, None, 0.0, torch.bfloat16),
-            (63, 131071, None, 0.0, torch.bfloat16),
-            (1024, 32000, 3.0, 0.0, torch.bfloat16),
-            (2047, 65539, 3.0, 0.0, torch.bfloat16),
-            (7, 129, None, 0.0, torch.bfloat16),
-            (7, 8193, None, 0.0, torch.float16),
-            (1024, 16384, None, 0.0, torch.bfloat16),
-            (1024, 16384, None, 0.0, torch.float32),
-            (1025, 32000, None, 0.1, torch.bfloat16),
-            (511, 32003, 3.0, 0.1, torch.float32),
+            (1024, 32000, 0.0, None, torch.bfloat16),
+            (2048, 128256, 0.0, None, torch.bfloat16),
+            (63, 131071, 0.0, None, torch.bfloat16),
+            (1024, 32000, 0.0, 3.0, torch.bfloat16),
+            (2047, 65539, 0.0, 3.0, torch.bfloat16),
+            (7, 129, 0.0, None, torch.bfloat16),
+            (7, 8193, 0.0, None, torch.float16),
+            (1024, 16384, 0.0, None, torch.bfloat16),
+            (1024, 16384, 0.0, None, torch.float32),
+            (1025, 32000, 0.1, None, torch.bfloat16),
+            (511, 32003, 0.1, 3.0, torch.float32),
         ],
         line_arg='provider',
         line_vals=LOGITS_PROVIDERS,
@@ -101,7 +101,14 @@ def benchmark(T, provider):
         args={},
     ),
 )
-def benchmark_logits(N: int, V: int, softcap: float | None, smoothing: float, dtype: torch.dtype, provider: str):
+def benchmark_logits(
+    N: int,
+    V: int,
+    label_smoothing: float,
+    logit_softcapping: float | None,
+    dtype: torch.dtype,
+    provider: str,
+):
     from fla.utils import device
 
     torch.manual_seed(42)
@@ -110,7 +117,7 @@ def benchmark_logits(N: int, V: int, softcap: float | None, smoothing: float, dt
     logits = torch.randn(N, V, device=device, dtype=dtype, requires_grad=True)
     target = torch.randint(V, (N,), device=device)
     target[::7] = -100
-    criterion = FusedCrossEntropyLoss(label_smoothing=smoothing, logit_softcapping=softcap)
+    criterion = FusedCrossEntropyLoss(label_smoothing=label_smoothing, logit_softcapping=logit_softcapping)
     quantiles = [0.5, 0.2, 0.8]
     if provider.endswith('_bwd'):
         return triton.testing.do_bench(
