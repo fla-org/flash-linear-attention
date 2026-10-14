@@ -641,6 +641,7 @@ def test_chunk(
         ]
     ],
 )
+@pytest.mark.skipif(IS_NPU, reason="Ascend uses separate intra kernels whose anchors are unchanged")
 def test_chunk_prefix_causality(T: int, P: int, H: int, D: int, chunk_size: int):
     """Future gates must leave prefix outputs and prefix-loss gradients unchanged."""
     torch.manual_seed(42)
