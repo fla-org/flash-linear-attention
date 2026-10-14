@@ -13,8 +13,9 @@ from fla.layers.bitattn import BitAttention
 from fla.layers.mla import MultiheadLatentAttention
 from fla.layers.moba import MoBA
 from fla.layers.nsa import NativeSparseAttention
+from fla.layers.stickbreaking_attn import StickBreakingAttention
 from fla.models.cache_utils import Cache
-from fla.utils import device
+from fla.utils import IS_AMD, IS_INTEL, IS_NVIDIA, device
 
 try:
     import flash_attn  # noqa: F401
@@ -57,6 +58,13 @@ except ImportError:
             dict(hidden_size=128, num_heads=2, layer_idx=0),
             True,
             id="attn",
+        ),
+        pytest.param(
+            StickBreakingAttention,
+            dict(hidden_size=128, num_heads=2, layer_idx=0),
+            False,
+            id="stickbreaking_attn",
+            marks=pytest.mark.skipif(not (IS_NVIDIA or IS_AMD or IS_INTEL), reason="Requires a supported GPU"),
         ),
     ],
 )
