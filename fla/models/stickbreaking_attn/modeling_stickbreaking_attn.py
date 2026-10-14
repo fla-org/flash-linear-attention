@@ -83,11 +83,10 @@ class StickBreakingAttentionBlock(GradientCheckpointingLayer):
 
 
 class StickBreakingAttentionModel(TransformerModel):
-    """Pre-norm decoder using stick-breaking attention without KV caching."""
+    """Pre-norm decoder using stick-breaking attention."""
 
     config_class = StickBreakingAttentionConfig
     _no_split_modules = ['StickBreakingAttentionBlock']
-    _supports_cache_class = False
 
     def __init__(self, config: StickBreakingAttentionConfig):
         # initialize pretrained-model machinery without constructing softmax attention blocks
@@ -111,28 +110,25 @@ class StickBreakingAttentionModel(TransformerModel):
         output_attentions: bool | None = None,
         **kwargs,
     ):
-        if use_cache or past_key_values is not None or (use_cache is None and self.config.use_cache):
-            raise NotImplementedError("Stick-breaking attention does not support KV-cache decoding. Use use_cache=False.")
         if output_attentions or (output_attentions is None and self.config.output_attentions):
             raise NotImplementedError("Stick-breaking attention does not return attention matrices.")
         return super().forward(
             input_ids=input_ids,
             attention_mask=attention_mask,
-            past_key_values=None,
+            past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
-            use_cache=False,
+            use_cache=use_cache,
             output_attentions=False,
             **kwargs,
         )
 
 
 class StickBreakingAttentionForCausalLM(TransformerForCausalLM):
-    """Causal language model with full-prefix generation and isolated packed-sequence labels."""
+    """Causal language model with cached or full-prefix generation and isolated packed-sequence labels."""
 
     config_class = StickBreakingAttentionConfig
     _tied_weights_keys = {'lm_head.weight': 'model.embeddings.weight'}
     _no_split_modules = ['StickBreakingAttentionBlock']
-    _supports_cache_class = False
 
     def __init__(self, config: StickBreakingAttentionConfig):
         TransformerPreTrainedModel.__init__(self, config)
