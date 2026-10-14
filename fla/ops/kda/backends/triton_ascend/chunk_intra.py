@@ -545,6 +545,7 @@ def chunk_kda_fwd_intra_npu(
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
     safe_gate: bool = False,
+    lower_bound: float | None = None,
     disable_recompute: bool = False,
     use_graph: bool = False,
 ):
@@ -934,6 +935,7 @@ def chunk_kda_bwd_intra_npu(
     chunk_indices: torch.LongTensor | None = None,
     chunk_size: int = 64,
     safe_gate: bool = False,
+    lower_bound: float | None = None,
     use_graph: bool = False,
 ):
     B, T, H, K, HV = *k.shape, g.shape[2]
@@ -946,8 +948,23 @@ def chunk_kda_bwd_intra_npu(
         from fla.ops.kda.chunk_intra import chunk_kda_bwd_intra as _mainline_bwd_intra
         # __wrapped__ skips re-dispatch back into this backend; bare fn when dispatch is disabled
         return getattr(_mainline_bwd_intra, '__wrapped__', _mainline_bwd_intra)(
-            q=q, k=k, g=g, beta=beta, dAqk=dAqk, dAkk=dAkk, dq=dq, dk=dk, db=db, dg=dg,
-            cu_seqlens=cu_seqlens, chunk_indices=chunk_indices, chunk_size=chunk_size, safe_gate=safe_gate)
+            q=q,
+            k=k,
+            g=g,
+            beta=beta,
+            dAqk=dAqk,
+            dAkk=dAkk,
+            dq=dq,
+            dk=dk,
+            db=db,
+            dg=dg,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+            chunk_size=chunk_size,
+            safe_gate=safe_gate,
+            lower_bound=lower_bound,
+            use_graph=use_graph,
+        )
     # The 192KB UB budget caps how many BCxBK fp32 tiles stay live, so BC must
     # follow the padded BK (non-pow2 K like 192 lands in the BK=256 tier).
     # SAFE_GATE dot path uses 32x32 cube tiles; the pairwise per-column diag

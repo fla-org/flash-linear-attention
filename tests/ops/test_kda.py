@@ -631,6 +631,63 @@ def test_chunk(
 
 
 @pytest.mark.parametrize(
+    ("T", "P", "H", "D", "chunk_size"),
+    [
+        pytest.param(*test, id="T{}-P{}-H{}-D{}-chunk_size{}".format(*test))
+        for test in [
+            (22, 21, 4, 128, 64),
+            (40, 33, 2, 64, 32),
+            (70, 65, 2, 64, 64),
+        ]
+    ],
+)
+def test_chunk_prefix_causality(T: int, P: int, H: int, D: int, chunk_size: int):
+    """Future gates must leave prefix outputs and prefix-loss gradients unchanged."""
+    torch.manual_seed(42)
+    shape = (1, T, H, D)
+    q = F.normalize(torch.randn(shape), dim=-1).bfloat16()
+    k = F.normalize(torch.randn(shape), dim=-1).bfloat16()
+    v = (0.5 * torch.randn(shape)).bfloat16()
+    beta = torch.ones(shape[:-1], dtype=torch.bfloat16)
+    g = (-0.7 * (0.75 + 0.25 * torch.rand(shape))).bfloat16().to(device)
+    A_log = torch.log(torch.empty(H).uniform_(1.0, 16.0))
+    dt_bias = 0.1 * torch.rand(H * D) - 0.05
+    q, k, v, beta, A_log, dt_bias = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, beta, A_log, dt_bias))
+    do = torch.randn_like(v[:, :P])
+
+    edited = g.clone()
+    logit = math.log(0.99 / 0.01)
+    edited[:, P:] = (logit / A_log.detach().exp().view(1, 1, H, 1) - dt_bias.detach().view(1, 1, H, D)).to(g.dtype)
+    assert not torch.equal(g[:, P:], edited[:, P:])
+
+    outputs, gradients = [], []
+    for gates in (g, edited):
+        gates = gates.requires_grad_(True)
+        o, _ = chunk_kda(
+            q=q,
+            k=k,
+            v=v,
+            g=gates,
+            beta=beta,
+            use_gate_in_kernel=True,
+            safe_gate=True,
+            lower_bound=-5.0,
+            A_log=A_log,
+            dt_bias=dt_bias,
+            chunk_size=chunk_size,
+        )
+        loss = (o[:, :P].float() * do.float()).sum()
+        outputs.append(o[:, :P].detach())
+        gradients.append(torch.autograd.grad(loss, (q, k, v, gates, beta, A_log, dt_bias)))
+
+    assert torch.isfinite(outputs[0]).all() and torch.isfinite(outputs[1]).all()
+    assert torch.equal(outputs[0], outputs[1]), "future gates changed prefix outputs"
+    for name, ref, tri in zip(("dq", "dk", "dv", "dg", "db", "dA", "dbias"), *gradients):
+        assert torch.isfinite(ref).all() and torch.isfinite(tri).all(), name
+        assert torch.equal(ref, tri), f"future gates changed {name} from a prefix-only loss"
+
+
+@pytest.mark.parametrize(
     ("B", "T", "H", "D", "scale", "gate_logit_normalizer", "dtype"),
     [
         pytest.param(*test, id="B{}-T{}-H{}-D{}-scale{}-gate_logit_normalizer{}-{}".format(*test))
@@ -1503,64 +1560,3 @@ def test_triton_ascend_backend_routing():
     finally:
         for name in _TRITON_ASCEND_KDA_OPS:
             delattr(backend, name)
-
-
-@pytest.mark.parametrize(
-    ("T", "P", "H", "D", "chunk_size"),
-    [
-        (22, 21, 4, 128, 64),
-        (40, 33, 2, 64, 32),
-        (70, 65, 2, 64, 64),
-    ],
-)
-def test_chunk_kda_prefix_causality(T: int, P: int, H: int, D: int, chunk_size: int):
-    """Gates at positions >= P must not change the output at positions < P.
-
-    ``chunk_kda_fwd_kernel_intra_sub_chunk`` anchors the exponentials of a diagonal
-    sub-chunk on one of its own rows. Anchoring on the middle row made that anchor a
-    *future* row for the first half of the sub-chunk, so editing a gate after the prefix
-    moved an anchor shared by every row of the sub-chunk and changed the prefix output
-    (issue #1240). Each case below ends the sequence inside a sub-chunk whose middle row
-    is its last valid token, which is the shape that triggered the leak.
-    """
-    torch.manual_seed(42)
-    generator = torch.Generator().manual_seed(42)
-    shape = (1, T, H, D)
-    q = F.normalize(torch.randn(shape, generator=generator), dim=-1).bfloat16().to(device)
-    k = F.normalize(torch.randn(shape, generator=generator), dim=-1).bfloat16().to(device)
-    v = (0.5 * torch.randn(shape, generator=generator)).bfloat16().to(device)
-    beta = torch.ones(shape[:-1], dtype=torch.bfloat16, device=device)
-    g = (-0.7 * (0.75 + 0.25 * torch.rand(shape, generator=generator))).bfloat16().to(device)
-    a_log = torch.log(torch.empty(H).uniform_(1.0, 16.0, generator=generator)).float().to(device)
-    dt_bias = (0.1 * torch.rand(H * D, generator=generator) - 0.05).float().to(device)
-
-    def run(gates: torch.Tensor) -> torch.Tensor:
-        return chunk_kda(
-            q=q,
-            k=k,
-            v=v,
-            g=gates,
-            beta=beta,
-            A_log=a_log,
-            dt_bias=dt_bias,
-            use_gate_in_kernel=True,
-            safe_gate=True,
-            lower_bound=-5.0,
-            use_qk_l2norm_in_kernel=False,
-            chunk_size=chunk_size,
-        )[0]
-
-    base = run(g)
-
-    # Move every gate at position >= P to the opposite end of the [lower_bound, 0) range,
-    # leaving the prefix bit-identical. Only the anchor for the trailing sub-chunk changes.
-    edited = g.clone()
-    logit = math.log(0.99 / 0.01)
-    edited[:, P:] = (logit / a_log.exp().view(1, 1, H, 1) - dt_bias.view(1, 1, H, D)).to(edited.dtype)
-    assert not torch.equal(g[:, P:], edited[:, P:])
-
-    perturbed = run(edited)
-    assert torch.equal(base[:, :P], perturbed[:, :P]), (
-        f"changing gates at positions >= {P} changed the output at positions < {P}: "
-        f"max abs diff {(base[:, :P].float() - perturbed[:, :P].float()).abs().max().item()}"
-    )
