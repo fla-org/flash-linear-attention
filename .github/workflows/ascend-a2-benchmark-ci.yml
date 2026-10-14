@@ -161,7 +161,7 @@ jobs:
           print("matplotlib savefig smoke test: ok")
           PY
 
-      - name: Benchmark chunk_gdn, fused_recurrent_gdn2, chunk_gdn2, chunk_kda, KDA graph, fused_attnres, and conv1d
+      - name: Benchmark chunk_gdn, fused_recurrent_gdn2, chunk_gdn2, chunk_kda, KDA graph, fused_attnres, conv1d, and parallel_wall_attn
         shell: bash
         env:
           FLA_BENCH_WARMUP_MS: "25"
@@ -225,7 +225,13 @@ jobs:
           PY
           ) &
           pid_attnres=$!
-          run_benchmark conv1d 3 python benchmarks/modules/benchmark_conv.py &
+          (
+            status=0
+            run_benchmark conv1d 3 python benchmarks/modules/benchmark_conv.py || status=1
+            run_benchmark parallel_wall_attn 3 python -m benchmarks.ops.run \
+              --op parallel_wall_attn --base '' --json benchmark_parallel_wall_attn.json || status=1
+            exit "$status"
+          ) &
           pid_conv1d=$!
           status=0
           wait "$pid_gdn" || status=1
@@ -256,6 +262,8 @@ jobs:
           cat chunk_kda_graph.log
           echo "========== conv1d =========="
           cat conv1d.log
+          echo "========== parallel_wall_attn =========="
+          cat parallel_wall_attn.log
           exit "$status"
 
       - name: Check fused-recurrent GDN2 benchmark results
@@ -292,6 +300,7 @@ jobs:
             benchmark_chunk_kda.json
             benchmark_fused_attnres.json
             benchmark_kda_graph.json
+            benchmark_parallel_wall_attn.json
             conv_benchmark/
           if-no-files-found: ignore
           retention-days: 10
