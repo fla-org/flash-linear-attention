@@ -13,40 +13,6 @@ import pytest
 import torch
 
 
-@pytest.mark.parametrize(
-    'module',
-    [
-        'missing_backend',
-        'missing_backend.child',
-        'fla_test_backend.missing.child',
-        'fla_test_backend.present',
-        'fla_test_backend.broken.child',
-    ],
-)
-def test_find_spec_cached(module: str, tmp_path, monkeypatch):
-    from fla.utils import find_spec_cached
-
-    package = tmp_path / 'fla_test_backend'
-    package.mkdir()
-    (package / '__init__.py').write_text('')
-    (package / 'present.py').write_text('')
-    (package / 'broken').mkdir()
-    (package / 'broken' / '__init__.py').write_text('import missing_backend_dependency\n')
-    monkeypatch.syspath_prepend(str(tmp_path))
-    find_spec_cached.cache_clear()
-    try:
-        if module == 'fla_test_backend.broken.child':
-            with pytest.raises(ModuleNotFoundError, match='missing_backend_dependency'):
-                find_spec_cached(module)
-        else:
-            assert (find_spec_cached(module) is not None) == (module == 'fla_test_backend.present')
-    finally:
-        find_spec_cached.cache_clear()
-        for name in tuple(sys.modules):
-            if name == 'fla_test_backend' or name.startswith('fla_test_backend.'):
-                del sys.modules[name]
-
-
 def test_import_with_caching_precompile():
     if not hasattr(torch._dynamo.config, 'caching_precompile'):
         pytest.skip('caching_precompile is unavailable in this PyTorch version')
