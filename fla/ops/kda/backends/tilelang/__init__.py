@@ -11,21 +11,11 @@ from __future__ import annotations
 
 import torch
 
-from fla.ops.backends import BaseBackend
-from fla.utils import find_spec_cached, has_usable_nvcc
-
-_TILELANG_AVAILABLE = find_spec_cached("tilelang") is not None
+from fla.backends import TileLangBackend, register
 
 
-class KDATileLangBackend(BaseBackend):
-
-    backend_type = "tilelang"
-    package_name = "tilelang"
-    env_var = "FLA_TILELANG"
-
-    @classmethod
-    def is_available(cls) -> bool:
-        return _TILELANG_AVAILABLE and has_usable_nvcc()
+@register('kda')
+class KDATileLangBackend(TileLangBackend):
 
     def chunk_kda_bwd_wy_dqkg_fused_verifier(
         self,
@@ -45,12 +35,16 @@ class KDATileLangBackend(BaseBackend):
         cu_seqlens: torch.LongTensor | None = None,
         chunk_size: int = 64,
         chunk_indices: torch.LongTensor | None = None,
+        chunk_offsets: torch.LongTensor | None = None,
+        use_graph: bool = False,
     ) -> tuple[bool, str | None]:
         if v.shape[2] != k.shape[2]:
             return False, (
                 "TileLang backend does not support GQA (v has more heads than k); "
                 "use repeat_interleave on k/q to match v's head count, or fall back to Triton"
             )
+        if use_graph:
+            return False, "TileLang backend does not support graph capture (use_graph=True); fall back to Triton"
         return True, None
 
     def chunk_kda_bwd_wy_dqkg_fused(
@@ -71,6 +65,8 @@ class KDATileLangBackend(BaseBackend):
         cu_seqlens: torch.LongTensor | None = None,
         chunk_size: int = 64,
         chunk_indices: torch.LongTensor | None = None,
+        chunk_offsets: torch.LongTensor | None = None,
+        use_graph: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         from fla.ops.kda.backends.tilelang.chunk_bwd_dqkg import (
             chunk_kda_bwd_wy_dqkg_fused_tilelang,

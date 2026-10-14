@@ -11,7 +11,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.backends import dispatch
+from fla.backends import dispatch
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.op import exp2
 from fla.utils import autotune_cache_kwargs
@@ -51,7 +51,7 @@ def chunk_kda_fwd_kernel_intra_token_parallel(
     IS_VARLEN: tl.constexpr,
     USE_GRAPH: tl.constexpr = False,
 ):
-    i_tg, i_hg = tl.program_id(0).to(tl.int64), tl.program_id(1)
+    i_tg, i_hg = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
 
     if IS_VARLEN:
         # static T may exceed the covered tokens; i_n would converge to N and read OOB

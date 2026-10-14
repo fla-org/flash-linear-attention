@@ -10,7 +10,7 @@ import os
 import pytest
 import torch
 
-import fla.layers.log_linear_mamba2 as log_linear_mamba2
+from fla.layers import log_linear_mamba2
 from fla.models import LogLinearMamba2Config, LogLinearMamba2ForCausalLM
 from fla.utils import device
 

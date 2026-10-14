@@ -11,23 +11,13 @@ from __future__ import annotations
 
 import torch
 
-from fla.ops.backends import BaseBackend
-from fla.utils import find_spec_cached, has_usable_nvcc
-
-_TILELANG_AVAILABLE = find_spec_cached("tilelang") is not None
+from fla.backends import TileLangBackend, register
 
 
-class RWKV6TileLangBackend(BaseBackend):
+@register('rwkv6')
+class RWKV6TileLangBackend(TileLangBackend):
 
-    backend_type = "tilelang"
-    package_name = "tilelang"
-    env_var = "FLA_TILELANG"
     default_enable = False
-    priority = 5
-
-    @classmethod
-    def is_available(cls) -> bool:
-        return _TILELANG_AVAILABLE and has_usable_nvcc()
 
     def chunk_rwkv6_fwd_intra_verifier(
         self,

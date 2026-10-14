@@ -16,7 +16,7 @@ import triton.language as tl
 from einops import reduce
 
 from fla.ops.utils import chunk_local_cumsum
-from fla.ops.utils.op import exp
+from fla.ops.utils.op import exp, unflatten_program_id
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, input_guard
 
 BLOCK_K = 64
@@ -35,7 +35,7 @@ BLOCK_K = 64
         for num_warps in [4]
         for num_stages in [2, 3, 4]
     ],
-    key=["H", "K", "V"],
+    key=["G", "H", "K", "V"],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=["T", "output_T"])
@@ -56,6 +56,7 @@ def chunkwise_fwd_kernel(
     stride_o_n,
     T,
     output_T,
+    G: tl.constexpr,
     H: tl.constexpr,
     K: tl.constexpr,
     V: tl.constexpr,
@@ -69,14 +70,15 @@ def chunkwise_fwd_kernel(
     IS_VARLEN: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
+    SCALE: tl.constexpr,
 ):
     o_i = tl.arange(0, BT)
     p_llut = llut + o_i[:, None] * BT + o_i[None, :]
     b_llut = tl.load(p_llut, mask=(o_i[:, None] < BT) & (o_i[None, :] < BT), other=0.0)
     # parallel over sequences and heads
-    i_k = tl.program_id(0)
-    i_nh = tl.program_id(1).to(tl.int64)
+    i_k, i_nh = unflatten_program_id(tl.cdiv(K, BK))
     i_n, i_h = i_nh // H, i_nh % H
+    i_g = i_h // (H // G)
 
     if IS_VARLEN:
         bos, eos = (
@@ -190,8 +192,8 @@ def chunkwise_fwd_kernel(
         m_tv = m_t[:, None] & (o_v[None, :] < V)
         m_ov = m_to[:, None] & (o_v[None, :] < V)
         p_g = g + bos * H + i_h + o_t * H
-        p_q = q + bos * K + o_t[:, None] * K + o_kk[None, :]
-        p_k = k + bos * K + o_kk[:, None] + o_t[None, :] * K
+        p_q = q + (bos * G + i_g) * K + o_t[:, None] * (G * K) + o_kk[None, :]
+        p_k = k + (bos * G + i_g) * K + o_kk[:, None] + o_t[None, :] * (G * K)
         p_v = v + (bos * H + i_h) * V + o_t[:, None] * (H * V) + o_v[None, :]
         if USE_INITIAL_STATE:
             if IS_VARLEN:
@@ -280,7 +282,7 @@ def chunkwise_fwd_kernel(
                 b_l = tl.load(p_l, mask=m_t[:, None] & ((num_intra_levels + 11) < L), other=0.0)
                 b_o += tl.dot((b_l * b_q), kv_11.to(b_q.dtype)) * tl.exp(b_g)[:, None]
 
-        tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=m_ov)
+        tl.store(p_o, (b_o * SCALE).to(p_o.dtype.element_ty), mask=m_ov)
 
         if i_t < NT - 1 or T % BT == 0:
             # Only apply the state update if the last chunk is a full chunk.
@@ -453,6 +455,7 @@ def copy_input_kernel(
     level_scales_new,
     T,
     input_T,
+    G: tl.constexpr,
     H: tl.constexpr,
     K: tl.constexpr,
     V: tl.constexpr,
@@ -463,6 +466,7 @@ def copy_input_kernel(
     # parallel over sequences and heads
     i_nh = tl.program_id(0).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
+    i_g = i_h // (H // G)
 
     if IS_VARLEN:
         bos, eos = (
@@ -498,12 +502,12 @@ def copy_input_kernel(
         m_tnk = m_tn[:, None] & (o_k[None, :] < K)
         m_tnv = m_tn[:, None] & (o_v[None, :] < V)
         p_g = g + input_bos * H + i_h + o_t * H
-        p_q = q + input_bos * K + o_t[:, None] * K + o_k[None, :]
-        p_k = k + input_bos * K + o_t[:, None] * K + o_k[None, :]
+        p_q = q + (input_bos * G + i_g) * K + o_t[:, None] * (G * K) + o_k[None, :]
+        p_k = k + (input_bos * G + i_g) * K + o_t[:, None] * (G * K) + o_k[None, :]
         p_v = v + (input_bos * H + i_h) * V + o_t[:, None] * (H * V) + o_v[None, :]
         p_g_new = g_new + bos * H + i_h + o_tn * H
-        p_q_new = q_new + bos * K + o_tn[:, None] * K + o_k[None, :]
-        p_k_new = k_new + bos * K + o_tn[:, None] * K + o_k[None, :]
+        p_q_new = q_new + (bos * G + i_g) * K + o_tn[:, None] * (G * K) + o_k[None, :]
+        p_k_new = k_new + (bos * G + i_g) * K + o_tn[:, None] * (G * K) + o_k[None, :]
         p_v_new = v_new + (bos * H + i_h) * V + o_tn[:, None] * (H * V) + o_v[None, :]
 
         b_g = tl.load(p_g, mask=m_t, other=0.0)
@@ -513,8 +517,8 @@ def copy_input_kernel(
 
         if i_t == 0:
             p_g_prev = g_prev + i_n * BT * H + i_h + o_i * H
-            p_q_prev = q_prev + i_n * BT * K + o_i[:, None] * K + o_k[None, :]
-            p_k_prev = k_prev + i_n * BT * K + o_i[:, None] * K + o_k[None, :]
+            p_q_prev = q_prev + (i_n * BT * G + i_g) * K + o_i[:, None] * (G * K) + o_k[None, :]
+            p_k_prev = k_prev + (i_n * BT * G + i_g) * K + o_i[:, None] * (G * K) + o_k[None, :]
             p_v_prev = v_prev + (i_n * BT * H + i_h) * V + o_i[:, None] * (H * V) + o_v[None, :]
 
             b_g += tl.load(p_g_prev, mask=o_i < BT, other=0.0)
@@ -523,8 +527,8 @@ def copy_input_kernel(
             b_v += tl.load(p_v_prev, mask=(o_i[:, None] < BT) & (o_v[None, :] < V), other=0.0)
 
         tl.store(p_g_new, b_g, mask=m_tn)
-        tl.store(p_q_new, b_q, mask=m_tnk)
-        tl.store(p_k_new, b_k, mask=m_tnk)
+        tl.store(p_q_new, b_q, mask=m_tnk & (i_h % (H // G) == 0))
+        tl.store(p_k_new, b_k, mask=m_tnk & (i_h % (H // G) == 0))
         tl.store(p_v_new, b_v, mask=m_tnv)
 
         for i in range(L):
@@ -557,6 +561,7 @@ def copy_last_chunk_kernel(
     level_scales_prev,
     offsets,
     T,
+    G: tl.constexpr,
     H: tl.constexpr,
     K: tl.constexpr,
     V: tl.constexpr,
@@ -567,6 +572,7 @@ def copy_last_chunk_kernel(
     # parallel over sequences and heads
     i_nh = tl.program_id(0).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
+    i_g = i_h // (H // G)
 
     if IS_VARLEN:
         bos, eos = (
@@ -589,17 +595,17 @@ def copy_last_chunk_kernel(
     m_ik = (o_i[:, None] < BT) & (o_k[None, :] < K)
     m_iv = (o_i[:, None] < BT) & (o_v[None, :] < V)
     p_g = g + bos * H + i_h + o_t * H
-    p_q = q + bos * K + o_t[:, None] * K + o_k[None, :]
-    p_k = k + bos * K + o_t[:, None] * K + o_k[None, :]
+    p_q = q + (bos * G + i_g) * K + o_t[:, None] * (G * K) + o_k[None, :]
+    p_k = k + (bos * G + i_g) * K + o_t[:, None] * (G * K) + o_k[None, :]
     p_v = v + (bos * H + i_h) * V + o_t[:, None] * (H * V) + o_v[None, :]
     p_g_prev = g_prev + i_n * BT * H + i_h + o_i * H
-    p_q_prev = q_prev + i_n * BT * K + o_i[:, None] * K + o_k[None, :]
-    p_k_prev = k_prev + i_n * BT * K + o_i[:, None] * K + o_k[None, :]
+    p_q_prev = q_prev + (i_n * BT * G + i_g) * K + o_i[:, None] * (G * K) + o_k[None, :]
+    p_k_prev = k_prev + (i_n * BT * G + i_g) * K + o_i[:, None] * (G * K) + o_k[None, :]
     p_v_prev = v_prev + (i_n * BT * H + i_h) * V + o_i[:, None] * (H * V) + o_v[None, :]
 
     tl.store(p_g_prev, tl.load(p_g, mask=m_t, other=0.0), mask=o_i < BT)
-    tl.store(p_q_prev, tl.load(p_q, mask=m_tk, other=0.0), mask=m_ik)
-    tl.store(p_k_prev, tl.load(p_k, mask=m_tk, other=0.0), mask=m_ik)
+    tl.store(p_q_prev, tl.load(p_q, mask=m_tk, other=0.0), mask=m_ik & (i_h % (H // G) == 0))
+    tl.store(p_k_prev, tl.load(p_k, mask=m_tk, other=0.0), mask=m_ik & (i_h % (H // G) == 0))
     tl.store(p_v_prev, tl.load(p_v, mask=m_tv, other=0.0), mask=m_iv)
 
     for i in range(L):
@@ -616,7 +622,7 @@ def copy_last_chunk_kernel(
         for num_warps in [4]
         for num_stages in [2, 3, 4]
     ],
-    key=["H", "K", "V"],
+    key=["G", "H", "K", "V"],
     restore_value=["dh", "dg_last"],
     **autotune_cache_kwargs,
 )
@@ -632,6 +638,7 @@ def chunkwise_bwd_kernel_dhg(
     ell,
     T,
     cu_seqlens,
+    G: tl.constexpr,
     H: tl.constexpr,
     K: tl.constexpr,
     V: tl.constexpr,
@@ -640,11 +647,12 @@ def chunkwise_bwd_kernel_dhg(
     BK: tl.constexpr,
     NT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    SCALE: tl.constexpr,
 ):
     # parallel over batches and heads
-    i_k = tl.program_id(0)
-    i_nh = tl.program_id(1).to(tl.int64)
+    i_k, i_nh = unflatten_program_id(tl.cdiv(K, BK))
     i_n, i_h = i_nh // H, i_nh % H
+    i_g = i_h // (H // G)
 
     if IS_VARLEN:
         bos, eos = (
@@ -689,14 +697,14 @@ def chunkwise_bwd_kernel_dhg(
         b_dh *= b_g_last
         if i_t & (1 << ell):  # compute this chunk
             p_g = g + bos * H + i_h + o_t * H
-            p_q = q + bos * K + o_kk[:, None] + o_t[None, :] * K
+            p_q = q + (bos * G + i_g) * K + o_kk[:, None] + o_t[None, :] * (G * K)
             p_do = do + (bos * H + i_h) * V + o_t[:, None] * (H * V) + o_v[None, :]
             p_l = l + (bos * H + i_h) * L + num_intra_levels + ell + o_t * (H * L)
             b_l = tl.load(p_l, mask=m_t, other=0.0)
             b_g = tl.load(p_g, mask=m_t, other=0.0)
             b_q = tl.load(p_q, mask=m_kt, other=0.0)
             b_q = (b_q * (tl.exp(b_g) * b_l)[None, :]).to(b_q.dtype)
-            b_do = tl.load(p_do, mask=m_tv, other=0.0)
+            b_do = (tl.load(p_do, mask=m_tv, other=0.0) * SCALE).to(do.dtype.element_ty)
 
             b_s = tl.dot(b_q, b_do).to(b_q.dtype)
             b_dh += b_s
@@ -709,7 +717,7 @@ def chunkwise_bwd_kernel_dhg(
         for num_warps in [4]
         for num_stages in [2, 3, 4]
     ],
-    key=["H", "K", "V"],
+    key=["G", "H", "K", "V"],
     restore_value=["dq", "dg"],
     **autotune_cache_kwargs,
 )
@@ -728,6 +736,7 @@ def chunkwise_bwd_kernel_hdqgl(
     ell,
     T,
     cu_seqlens,
+    G: tl.constexpr,
     H: tl.constexpr,
     K: tl.constexpr,
     V: tl.constexpr,
@@ -735,10 +744,12 @@ def chunkwise_bwd_kernel_hdqgl(
     BT: tl.constexpr,
     NT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    SCALE: tl.constexpr,
 ):
     # parallel over batches and heads
     i_nh = tl.program_id(0).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
+    i_g = i_h // (H // G)
 
     if IS_VARLEN:
         bos, eos = (
@@ -765,14 +776,14 @@ def chunkwise_bwd_kernel_hdqgl(
         p_g = g + bos * H + i_h + o_t * H
         if i_t & (1 << ell):  # compute and store derivatives
             p_do = do + (bos * H + i_h) * V + o_t[:, None] * (H * V) + o_v[None, :]
-            p_q = q + bos * K + o_t[:, None] * K + o_k[None, :]
+            p_q = q + (bos * G + i_g) * K + o_t[:, None] * (G * K) + o_k[None, :]
             p_l = l + (bos * H + i_h) * L + num_intra_levels + ell + o_t * (H * L)
             p_dq = dq + (bos * H + i_h) * K + o_t[:, None] * (H * K) + o_k[None, :]
             p_dg = dg + bos * H + i_h + o_t * H
             p_dl = dl + (bos * H + i_h) * L + num_intra_levels + ell + o_t * (H * L)
             p_h = h_l + ((i_n * NT + i_t) * H + i_h) * K * V + o_v[:, None] + o_k[None, :] * V
 
-            b_do = tl.load(p_do, mask=m_tv, other=0.0)
+            b_do = (tl.load(p_do, mask=m_tv, other=0.0) * SCALE).to(do.dtype.element_ty)
             b_q = tl.load(p_q, mask=m_tk, other=0.0)
             b_g = tl.load(p_g, mask=m_t, other=0.0)
             b_l = tl.load(p_l, mask=m_t, other=0.0)
@@ -801,7 +812,7 @@ def chunkwise_bwd_kernel_hdqgl(
         b_g_last = tl.load(g + bos * H + last_idx * H + i_h)
         b_h *= tl.exp(b_g_last)
         if (i_t & (1 << ell)) == 0:  # update the state
-            p_k = k + bos * K + o_t[:, None] * K + o_k[None, :]
+            p_k = k + (bos * G + i_g) * K + o_t[:, None] * (G * K) + o_k[None, :]
             p_v = v + (bos * H + i_h) * V + o_v[:, None] + o_t[None, :] * (H * V)
             b_g = tl.load(p_g, mask=m_t, other=0.0)
             b_k = tl.load(p_k, mask=m_tk, other=0.0)
@@ -817,7 +828,7 @@ def chunkwise_bwd_kernel_hdqgl(
         for num_warps in [4]
         for num_stages in [2, 3, 4]
     ],
-    key=["H", "K", "V"],
+    key=["G", "H", "K", "V"],
     restore_value=["dk", "dg", "dg_last"],
     **autotune_cache_kwargs,
 )
@@ -832,6 +843,7 @@ def chunkwise_bwd_kernel_dkg(
     dg,
     cu_seqlens,
     T,
+    G: tl.constexpr,
     H: tl.constexpr,
     K: tl.constexpr,
     V: tl.constexpr,
@@ -840,8 +852,9 @@ def chunkwise_bwd_kernel_dkg(
     NT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
+    i_t, i_nh = unflatten_program_id(NT)
     i_n, i_h = i_nh // H, i_nh % H
+    i_g = i_h // (H // G)
 
     if IS_VARLEN:
         bos, eos = (
@@ -863,7 +876,7 @@ def chunkwise_bwd_kernel_dkg(
     m_tv = m_t[:, None] & (o_v[None, :] < V)
     p_dh = dh + ((i_n * NT + i_t) * H + i_h) * K * V + o_v[:, None] + o_k[None, :] * V
     p_g = g + bos * H + i_h + o_t * H
-    p_k = k + bos * K + o_t[:, None] * K + o_k[None, :]
+    p_k = k + (bos * G + i_g) * K + o_t[:, None] * (G * K) + o_k[None, :]
     p_v = v + (bos * H + i_h) * V + o_t[:, None] * (H * V) + o_v[None, :]
     p_dk = dk + (bos * H + i_h) * K + o_t[:, None] * (H * K) + o_k[None, :]
     p_dg = dg + bos * H + i_h + o_t * H
@@ -898,7 +911,7 @@ def chunkwise_bwd_kernel_dkg(
         for num_warps in [4]
         for num_stages in [2, 3, 4]
     ],
-    key=["H", "K", "V"],
+    key=["G", "H", "K", "V"],
     restore_value=["dv"],
     **autotune_cache_kwargs,
 )
@@ -910,6 +923,7 @@ def chunkwise_bwd_kernel_dv(
     dv,
     T,
     cu_seqlens,
+    G: tl.constexpr,
     H: tl.constexpr,
     K: tl.constexpr,
     V: tl.constexpr,
@@ -918,8 +932,9 @@ def chunkwise_bwd_kernel_dv(
     NT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
+    i_t, i_nh = unflatten_program_id(NT)
     i_n, i_h = i_nh // H, i_nh % H
+    i_g = i_h // (H // G)
 
     if IS_VARLEN:
         bos, eos = (
@@ -940,7 +955,7 @@ def chunkwise_bwd_kernel_dv(
     m_tv = m_t[:, None] & (o_v[None, :] < V)
     p_dh = dh + ((i_n * NT + i_t) * H + i_h) * K * V + o_k[:, None] * V + o_v[None, :]
     p_g = g + bos * H + i_h + o_t * H
-    p_k = k + bos * K + o_t[:, None] * K + o_k[None, :]
+    p_k = k + (bos * G + i_g) * K + o_t[:, None] * (G * K) + o_k[None, :]
     p_dv = dv + (bos * H + i_h) * V + o_t[:, None] * (H * V) + o_v[None, :]
 
     last_idx = min((i_t + 1) * BT, T) - 1
@@ -960,7 +975,7 @@ def chunkwise_bwd_kernel_dv(
         for num_warps in [4]
         for num_stages in [2, 3, 4]
     ],
-    key=["H", "K", "V"],
+    key=["G", "H", "K", "V"],
     restore_value=["dl", "dq", "dk", "dv", "dg"],
     **autotune_cache_kwargs,
 )
@@ -981,18 +996,22 @@ def chunkwise_bwd_kernel_diag(
     dl,
     cu_seqlens,
     T,
+    G: tl.constexpr,
     H: tl.constexpr,
     K: tl.constexpr,
     V: tl.constexpr,
     L: tl.constexpr,
     BT: tl.constexpr,
+    NT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    SCALE: tl.constexpr,
 ):
     o_i = tl.arange(0, BT)
     p_llut = llut + o_i[:, None] * BT + o_i[None, :]
     b_llut = tl.load(p_llut, mask=(o_i[:, None] < BT) & (o_i[None, :] < BT), other=0.0)
-    i_t, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
+    i_t, i_nh = unflatten_program_id(NT)
     i_n, i_h = i_nh // H, i_nh % H
+    i_g = i_h // (H // G)
 
     if IS_VARLEN:
         bos, eos = (
@@ -1018,8 +1037,8 @@ def chunkwise_bwd_kernel_diag(
     b_h = tl.load(b_h_ptrs, mask=i_idx >= j_idx)
 
     p_g = g + bos * H + i_h + o_t * H
-    p_q = q + bos * K + o_k[:, None] + o_t[None, :] * K
-    p_k = k + bos * K + o_t[:, None] * K + o_k[None, :]
+    p_q = q + (bos * G + i_g) * K + o_k[:, None] + o_t[None, :] * (G * K)
+    p_k = k + (bos * G + i_g) * K + o_t[:, None] * (G * K) + o_k[None, :]
     p_v = v + (bos * H + i_h) * V + o_v[:, None] + o_t[None, :] * (H * V)
     p_do = do + (bos * H + i_h) * V + o_t[:, None] * (H * V) + o_v[None, :]
     p_dg = dg + bos * H + i_h + o_t * H
@@ -1031,7 +1050,7 @@ def chunkwise_bwd_kernel_diag(
     b_q = tl.load(p_q, mask=m_kt, other=0.0)
     b_k = tl.load(p_k, mask=m_tk, other=0.0)
     b_v = tl.load(p_v, mask=m_vt, other=0.0)
-    b_do = tl.load(p_do, mask=m_tv, other=0.0)
+    b_do = (tl.load(p_do, mask=m_tv, other=0.0) * SCALE).to(do.dtype.element_ty)
     b_dq = tl.load(p_dq, mask=m_tk, other=0.0)
     b_dk = tl.load(p_dk, mask=m_tk, other=0.0)
     b_dv = tl.load(p_dv, mask=m_tv, other=0.0)
@@ -1137,13 +1156,14 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
         initial_state,
         output_final_state,
         cu_seqlens,
+        scale,
     ):
         B, T, G, K = k.shape
         _, _, H, V = v.shape
         _, _, _, L = level_scales.shape
 
-        if G != 1:
-            raise ValueError("Group dimension must be 1.")
+        if H % G != 0:
+            raise ValueError("The number of value heads must be divisible by the number of query/key heads.")
 
         if not math.log2(V).is_integer():
             raise ValueError(
@@ -1239,6 +1259,7 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
                 offsets=offsets,
                 T=T,
                 input_T=original_T,
+                G=G,
                 H=H,
                 K=K,
                 V=V,
@@ -1264,7 +1285,7 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
         g = chunk_local_cumsum(g, chunk_size=BT, cu_seqlens=cu_seqlens)
 
         def grid(meta):
-            return (triton.cdiv(K, meta["BK"]), B * H)
+            return (triton.cdiv(K, meta["BK"]) * B * H,)
 
         l_in = h0.shape[1] if initial_state is not None else None
         l_out = ht.shape[1] if output_final_state else None
@@ -1288,6 +1309,7 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
             stride_o_n=o.stride(0),
             T=T,
             output_T=original_T,
+            G=G,
             H=H,
             K=K,
             V=V,
@@ -1297,10 +1319,12 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
             L_OUT=l_out,
             MIN_LEVEL=0,
             MAX_LEVEL=MAX_LEVEL,
+            SCALE=scale,
         )
 
         ctx.save_for_backward(q, k, v, g, level_scales, initial_state, cu_seqlens)
         ctx.chunk_size = BT
+        ctx.scale = scale
 
         if output_final_state:
             q_prev = torch.zeros((B, BT, G, K), dtype=q.dtype, device=q.device)
@@ -1323,6 +1347,7 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
                 level_scales_prev=level_scales_prev,
                 offsets=new_offsets,
                 T=T,
+                G=G,
                 H=H,
                 K=K,
                 V=V,
@@ -1352,6 +1377,7 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
 
         q, k, v, g, level_scales, initial_state, cu_seqlens = ctx.saved_tensors
         chunk_size = ctx.chunk_size
+        scale = ctx.scale
         llut = ctx.llut
         mask = masks(chunk_size, v.device)
 
@@ -1361,7 +1387,6 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
             )
 
         B, T, G, K = k.shape
-        assert G == 1, "Multi-head attention is not supported"
         _, _, H, V = v.shape
         _, _, _, L = level_scales.shape
         BT = chunk_size
@@ -1391,9 +1416,9 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
         grid = (B * H,)
 
         def grid_f(meta):
-            return (triton.cdiv(K, meta["BK"]), B * H)
+            return (triton.cdiv(K, meta["BK"]) * B * H,)
 
-        grid_t = (NT, B * H)
+        grid_t = (NT * B * H,)
 
         num_inter_chunk_levels = ceil_log(NT, 2)
         for ell in range(num_inter_chunk_levels - 1, -1, -1):
@@ -1411,12 +1436,14 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
                 cu_seqlens=cu_seqlens,
                 ell=ell,
                 T=T,
+                G=G,
                 H=H,
                 K=K,
                 V=V,
                 L=L,
                 BT=BT,
                 NT=NT,
+                SCALE=scale,
             )
             chunkwise_bwd_kernel_dhg[grid_f](
                 do=do,
@@ -1429,12 +1456,14 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
                 cu_seqlens=cu_seqlens,
                 ell=ell,
                 T=T,
+                G=G,
                 H=H,
                 K=K,
                 V=V,
                 L=L,
                 BT=BT,
                 NT=NT,
+                SCALE=scale,
             )
 
         chunkwise_bwd_kernel_dkg[grid_t](
@@ -1447,6 +1476,7 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
             dg=dg,
             cu_seqlens=cu_seqlens,
             T=T,
+            G=G,
             H=H,
             K=K,
             V=V,
@@ -1462,6 +1492,7 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
             dv=dv,
             cu_seqlens=cu_seqlens,
             T=T,
+            G=G,
             H=H,
             K=K,
             V=V,
@@ -1486,18 +1517,21 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
             dl=dl,
             cu_seqlens=cu_seqlens,
             T=T,
+            G=G,
             H=H,
             K=K,
             V=V,
             L=L,
             BT=BT,
+            NT=NT,
+            SCALE=scale,
         )
 
         dg = chunk_local_cumsum(dg, chunk_size=chunk_size, reverse=True, cu_seqlens=cu_seqlens).to(g.dtype)
 
         dq = reduce(dq, "b t (g h) k -> b t g k", "sum", g=G, h=H // G)
         dk = reduce(dk, "b t (g h) k -> b t g k", "sum", g=G, h=H // G)
-        return dq, dk, dv, dg, dl, None, None, None
+        return dq, dk, dv, dg, dl, None, None, None, None
 
 
 @torch.compiler.disable
@@ -1510,13 +1544,14 @@ def chunk_log_linear_attn(
     initial_state: LogLinearAttentionState | None = None,
     output_final_state: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
+    scale: float | None = 1.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
         q (torch.Tensor):
-            queries of shape `[B, T, H, K]`.
+            queries of shape `[B, T, G, K]`. The number of value heads H must be divisible by G.
         k (torch.Tensor):
-            keys of shape `[B, T, H, K]`.
+            keys of shape `[B, T, G, K]`. Each query/key head is shared by H/G consecutive value heads.
         v (torch.Tensor):
             values of shape `[B, T, H, V]`.
         g (torch.Tensor):
@@ -1532,6 +1567,8 @@ def chunk_log_linear_attn(
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
+        scale (float, Optional):
+            Attention score scale. Default: 1.0. Pass `None` to use `K ** -0.5`.
 
     Returns:
         o (torch.Tensor):
@@ -1547,6 +1584,9 @@ def chunk_log_linear_attn(
                 f"Please flatten variable-length inputs before processing.",
             )
 
+    if scale is None:
+        scale = q.shape[-1] ** -0.5
+
     o, final_state = ChunkLogLinearAttentionFunction.apply(
         q,
         k,
@@ -1556,5 +1596,6 @@ def chunk_log_linear_attn(
         initial_state,
         output_final_state,
         cu_seqlens,
+        scale,
     )
     return o, final_state
