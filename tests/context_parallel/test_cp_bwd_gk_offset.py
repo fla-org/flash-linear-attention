@@ -5,31 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""
-Regression test for CP backward gk offset bug in pre_process_bwd_kernel_merged.
-
-Bug Description:
-================
-In fla/ops/cp/chunk_delta_h.py, the backward pre-processing kernel
-pre_process_bwd_kernel_merged (stage 1) loaded gk using:
-    gk + last_idx * H*K + o_k
-instead of the correct:
-    gk + (bos + last_idx) * H*K + i_h * K + o_k
-
-This caused heads with i_h > 0 to incorrectly read head 0's gate values
-during backward dh computation (stage 1).
-
-The fix adds proper bos and i_h offsets to all gk loads in the backward kernels.
-
-Test Strategy:
-==============
-Run the kernel with two gk tensors:
-  A) gk_zero: all heads have gk = 0 (exp2(0) = 1, no decay)
-  B) gk_diff: head 0 = 0, heads 1+ = large negative (exp2(-10) ≈ 0.001, massive decay)
-
-With the bug:  all heads read head 0's gk (=0 in both A and B) → dh identical
-With the fix:  heads 1+ read their own gk → dh very different between A and B
-"""
+"""CP backward affine summaries must use each head's own gate values."""
 
 import logging
 import os
@@ -39,7 +15,7 @@ import pytest
 import torch
 import triton
 
-from fla.ops.cp.chunk_delta_h import pre_process_bwd_kernel_merged
+from fla.ops.cp.chunk_bwd import chunk_cp_bwd_kernel_dh
 from fla.utils import device
 
 logging.basicConfig(level=logging.INFO, format='%(message)s')
@@ -108,7 +84,7 @@ class TestBwdGkOffset:
 
         # Run A: all gk = 0
         dhm_a = torch.zeros(H, K, V + K, dtype=torch.float32, device=device)
-        pre_process_bwd_kernel_merged[grid](
+        chunk_cp_bwd_kernel_dh[grid](
             q=q,
             k=k,
             w=w,
@@ -132,7 +108,7 @@ class TestBwdGkOffset:
 
         # Run B: head 0 = 0, heads 1+ = -10
         dhm_b = torch.zeros(H, K, V + K, dtype=torch.float32, device=device)
-        pre_process_bwd_kernel_merged[grid](
+        chunk_cp_bwd_kernel_dh[grid](
             q=q,
             k=k,
             w=w,

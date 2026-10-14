@@ -8,7 +8,8 @@
 import pytest
 import torch
 
-from fla.ops.cp.context import get_cp_cu_seqlens
+from fla.ops.cp.chunk_delta_h import compress_h0, expand_h0
+from fla.ops.cp.context import FLACPContext, get_cp_cu_seqlens
 
 
 @pytest.mark.parametrize(
@@ -53,3 +54,60 @@ def test_get_cp_cu_seqlens_preserves_divisible_varlen_partition():
     assert not context.is_first_rank
     assert context.post_num_ranks == 1
     assert not context.is_last_rank
+
+
+@pytest.mark.parametrize('layout', ['contiguous', 'zigzag'])
+def test_copy_for_backward(layout: str):
+    context = get_cp_cu_seqlens(
+        cu_seqlens=torch.tensor([0, 3, 9, 13, 16]),
+        world_size=2,
+        rank=0,
+        conv1d_kernel_size=4,
+        use_tf32x3_affine_chain=True,
+        layout=layout,
+    )
+    context.pre_num_ranks_dev = torch.tensor([1], dtype=torch.int32)
+    context.post_num_ranks_dev = torch.tensor([2], dtype=torch.int32)
+    saved = context.copy_for_backward()
+
+    assert saved is not context
+    for name, value in vars(context).items():
+        actual = getattr(saved, name)
+        if name in ('cu_seqlens', 'cu_seqlens_cpu'):
+            assert torch.equal(actual, value)
+            assert actual.data_ptr() != value.data_ptr()
+        elif isinstance(value, torch.Tensor):
+            assert actual is value
+        else:
+            assert actual == value
+
+    expected = saved.cu_seqlens.clone()
+    context.cu_seqlens.zero_()
+    context.cu_seqlens_cpu.zero_()
+    assert torch.equal(saved.cu_seqlens, expected)
+    assert torch.equal(saved.cu_seqlens_cpu, expected)
+
+
+@pytest.mark.parametrize(
+    ('layout', 'cu_seqlens', 'front_num_seqs', 'state_indices'),
+    [
+        pytest.param('contiguous', [0, 8], None, [0], id='contiguous-single'),
+        pytest.param('contiguous', [0, 3, 8], None, [0], id='contiguous-varlen'),
+        pytest.param('zigzag', [0, 4, 8], 1, [0, 1], id='zigzag-single'),
+        pytest.param('zigzag', [0, 3, 4, 5, 8], 2, [0, 2], id='zigzag-varlen'),
+    ],
+)
+@pytest.mark.parametrize('state_v_first', [False, True])
+def test_compress_expand_h0(layout, cu_seqlens, front_num_seqs, state_indices, state_v_first):
+    torch.manual_seed(42)
+    context = FLACPContext(cu_seqlens=torch.tensor(cu_seqlens), layout=layout, front_num_seqs=front_num_seqs)
+    state_shape = (2, 5, 3) if state_v_first else (2, 3, 5)
+    h0 = torch.zeros(context.num_seqs, *state_shape)
+    h0[state_indices] = torch.randn(len(state_indices), *state_shape)
+
+    compressed = compress_h0(h0=h0, context=context)
+    assert torch.equal(compressed, h0[state_indices])
+    assert compressed.untyped_storage().nbytes() == compressed.numel() * compressed.element_size()
+    assert torch.equal(expand_h0(h0=compressed, context=context), h0)
+    assert compress_h0(h0=None, context=context) is None
+    assert expand_h0(h0=None, context=context) is None

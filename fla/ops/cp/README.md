@@ -69,7 +69,7 @@ o_local, _ = chunk_kda(
 
 CP context stores **rank-local** varlen metadata that tracks how sequences are distributed:
 
-- `FLACPContext.cu_seqlens` — rank-local cumulative sequence lengths, on GPU (`int64`)
+- `FLACPContext.cu_seqlens` — rank-local cumulative sequence lengths, on the input device (`int32` when built by `build_cp_context`)
 - `FLACPContext.cu_seqlens_cpu` — same data on CPU for host-side indexing
 
 Variable-length inputs start as global `cu_seqlens` **before** partitioning; `build_cp_context` converts them into rank-local metadata automatically.
@@ -168,6 +168,8 @@ This design means CP pre-processing must use the **same** tensors as the main ke
 ---
 
 ## CP Architecture
+
+The implementation separates rank metadata (`context.py`), collectives (`comm.py`), and state exchange (`chunk_delta_h.py`). Forward and backward affine summaries live in `chunk_fwd.py` and `chunk_bwd.py`; `chunk_merge.py` composes them. The summary and merge kernels are also reused by intra-card CP.
 
 ### Data Flow
 

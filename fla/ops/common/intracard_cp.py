@@ -24,7 +24,8 @@ import torch
 import triton
 
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_fwd_kernel_h_blockdim64
-from fla.ops.cp.chunk_delta_h import pre_process_fwd_kernel_merged
+from fla.ops.cp.chunk_fwd import chunk_cp_fwd_kernel_h
+from fla.ops.cp.chunk_merge import chunk_cp_fwd_bwd_kernel_merge
 from fla.ops.utils.index import prepare_chunk_indices, prepare_chunk_offsets
 from fla.utils import IS_TF32_SUPPORTED, get_multiprocessor_count
 
@@ -268,7 +269,7 @@ def intracard_pre_scan(
     hm = kg.new_empty(S_split, HV, K, V + K, dtype=torch.float32)
 
     grid = (triton.cdiv(V, BLOCK_SIZE) + triton.cdiv(K, BLOCK_SIZE), HV, S_split)
-    pre_process_fwd_kernel_merged[grid](
+    chunk_cp_fwd_kernel_h[grid](
         k=kg,
         v=u,
         w=w,
@@ -313,8 +314,6 @@ def intracard_merge(
     using pure Python loops. This function only creates GPU tensors and
     launches the merge kernel.
     """
-    from fla.ops.cp.chunk_delta_h import merge_fwd_bwd_kernel
-
     if num_non_first == 0:
         return None, 0
 
@@ -343,7 +342,7 @@ def intracard_merge(
     def grid(meta):
         return (triton.cdiv(V, meta['BV']), num_split_seqs, HV)
 
-    merge_fwd_bwd_kernel[grid](
+    chunk_cp_fwd_bwd_kernel_merge[grid](
         h=initial_states_merge,
         ag_hm=hm,
         pre_or_post_num_ranks=num_split_seqs,
