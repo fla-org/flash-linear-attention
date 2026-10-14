@@ -13,9 +13,15 @@ import pytest
 import torch
 
 from fla.ops.common import intracard_cp
-from fla.ops.common.intracard_cp import _intracard_cache
+from fla.ops.common.intracard_cp import (
+    SplitSeqInfo,
+    _intracard_cache,
+    _raw_chunk_gated_delta_rule_fwd_h,
+    intracard_merge,
+    intracard_pre_scan,
+)
 from fla.ops.kda import chunk_kda
-from fla.utils import device
+from fla.utils import assert_close, device
 
 
 @pytest.fixture(autouse=True)
@@ -23,6 +29,56 @@ def clear_intracard_cache():
     _intracard_cache.clear()
     yield
     _intracard_cache.clear()
+
+
+@pytest.mark.parametrize('H', [2, 4], ids=['gva', 'mha'])
+@pytest.mark.parametrize('vector_gate', [False, True], ids=['scalar-gate', 'vector-gate'])
+@pytest.mark.parametrize('state_v_first', [False, True])
+def test_intracard_pre_scan_merge(H: int, vector_gate: bool, state_v_first: bool):
+    torch.manual_seed(42)
+    T, HV, K, V = 319, 4, 64, 96
+    k = torch.randn(1, T, H, K, device=device, dtype=torch.bfloat16) * 0.05
+    w = torch.randn(1, T, HV, K, device=device, dtype=torch.bfloat16) * 0.05
+    u = torch.randn(1, T, HV, V, device=device, dtype=torch.bfloat16)
+    decay = -0.01 * (torch.arange(T, device=device) % 64 + 1)
+    if vector_gate:
+        g, gk = None, decay.view(1, T, 1, 1).expand(1, T, HV, K).contiguous()
+    else:
+        g, gk = decay.view(1, T, 1).expand(1, T, HV).contiguous(), None
+    state_shape = (1, HV, V, K) if state_v_first else (1, HV, K, V)
+    h0 = torch.randn(state_shape, device=device, dtype=torch.float32) * 0.1
+    hm = intracard_pre_scan(
+        kg=k,
+        w=w,
+        u=u,
+        g=g,
+        gk=gk,
+        cu_seqlens_subseq_split=torch.tensor([0, 128, 256, T], device=device, dtype=torch.int32),
+        S_split=3,
+    )
+    states, count = intracard_merge(
+        hm=hm,
+        split_info=SplitSeqInfo(split_seq_ids=[0], start_subseq_idx=[0], num_subseqs=[3]),
+        num_non_first=2,
+        merge_seq_offsets=[0, 3],
+        merge_init_offsets=[0, 2],
+        device=k.device,
+        initial_state=h0,
+        state_v_first=state_v_first,
+    )
+    ref_h, _, _ = _raw_chunk_gated_delta_rule_fwd_h(
+        k=k,
+        w=w,
+        u=u,
+        g=g,
+        gk=gk,
+        initial_state=h0,
+        state_v_first=state_v_first,
+        cu_seqlens=torch.tensor([0, T], device=device, dtype=torch.int32),
+    )
+    assert count == 2
+    assert torch.isfinite(hm).all()
+    assert_close('h', ref_h[0, [2, 4]], states, 0.006)
 
 
 @pytest.mark.skipif(os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") == "1", reason="backend dispatch disabled")
