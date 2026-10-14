@@ -9,6 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.backends import dispatch
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp, unflatten_program_id
 from fla.utils import check_shared_mem, is_nvidia_hopper
@@ -199,6 +200,7 @@ def chunk_oja_fwd_intra(
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=m_rv)
 
 
+@dispatch('gated_oja_rule')
 def chunk_oja_fwd_o(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -518,6 +520,7 @@ def chunk_oja_bwd_kernel_dqk(
     tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), mask=m_tk)
 
 
+@dispatch('gated_oja_rule')
 def chunk_oja_bwd_dqk(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -675,6 +678,7 @@ def chunk_oja_bwd_kernel_dv_o(
     tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), mask=m_rv)
 
 
+@dispatch('gated_oja_rule')
 def chunk_oja_bwd_dv_o(
     v: torch.Tensor,
     gv: torch.Tensor,

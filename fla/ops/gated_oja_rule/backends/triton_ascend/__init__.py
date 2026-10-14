@@ -30,3 +30,24 @@ class TritonAscendGatedOjaRuleBackend(BaseBackend):
     def fused_recurrent_oja_fwd(self, *args, **kwargs):
         from fla.ops.gated_oja_rule.backends.triton_ascend.fused_recurrent import fused_recurrent_oja_fwd_npu
         return fused_recurrent_oja_fwd_npu(*args, **kwargs)
+
+    def chunk_oja_fwd_o_verifier(self, *args, **kwargs):
+        return True, None
+
+    def chunk_oja_fwd_o(self, *args, **kwargs):
+        from fla.ops.gated_oja_rule.backends.triton_ascend.chunk_o import chunk_oja_fwd_o_npu
+        return chunk_oja_fwd_o_npu(*args, **kwargs)
+
+    def chunk_oja_bwd_dqk_verifier(self, *args, **kwargs):
+        return True, None
+
+    def chunk_oja_bwd_dqk(self, *args, **kwargs):
+        from fla.ops.gated_oja_rule.backends.triton_ascend.chunk_o import chunk_oja_bwd_dqk_npu
+        return chunk_oja_bwd_dqk_npu(*args, **kwargs)
+
+    def chunk_oja_bwd_dv_o_verifier(self, *args, **kwargs):
+        return True, None
+
+    def chunk_oja_bwd_dv_o(self, *args, **kwargs):
+        from fla.ops.gated_oja_rule.backends.triton_ascend.chunk_o import chunk_oja_bwd_dv_o_npu
+        return chunk_oja_bwd_dv_o_npu(*args, **kwargs)
