@@ -60,6 +60,7 @@ Test Scenarios:
 4. CP4 with single long sequence
 """
 
+import contextlib
 import logging
 import os
 
@@ -69,10 +70,8 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 import torch.nn.functional as F
 
-try:
+with contextlib.suppress(ImportError):
     import torch_npu  # noqa: F401
-except ImportError:
-    pass
 
 from fla.ops.cp import build_cp_context
 from fla.ops.kda import chunk_kda
