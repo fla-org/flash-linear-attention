@@ -814,61 +814,38 @@ def chunk_kda_fwd_intra(
 ):
     """Compute intra-chunk factors and solve the triangular KDA system.
 
-    The default Triton safe_gate path uses matrix multiplies to process diagonal blocks.
-    It applies part of the gate decay to the queries and the rest to the keys.
-    These intermediate factors can overflow or underflow, so a shared reference balances their magnitudes.
-    With cumulative gates G in natural-log units and reference C, the decay is split as:
+    Bounded log gates in safe_gate keep diagonal-block exponentials within FP32 range, allowing Tensor Core matmuls.
+    A reference C near the middle of the cumulative gates G balances the query/key scaling factors:
 
         exp(G_i - G_j) = exp(G_i - C) * exp(C - G_j)
 
-    Choosing a middle token as the reference reads a future gate for earlier queries.
-    For example, using token 2 as the reference in a four-token block affects the entries marked x:
+    v0.5.2 uses the middle token's gate, which reads future gates for earlier causal scores (x):
 
                                 key token
                                 0  1  2  3
                 query token 0   x  .  .  .
                             1   x  x  .  .
-                            2   o  o  o  .  <- reference token
+                            2   o  o  o  .  <- C = G_2
                             3   o  o  o  o
 
-    Both x and o are allowed by the causal mask; dots are masked out.
-    Even the score between query 1 and key 0 uses token 2 through the reference.
-    The two factors cancel C in exact arithmetic, but their floating-point rounding errors need not cancel.
-    Changing token 2 can therefore change an earlier output. Masking future keys cannot fix this,
-    because the affected scores are already in the allowed triangle. The issue recurs in each diagonal block.
+    Dots are masked; x and o are retained. C cancels in exact arithmetic, but rounding can leak future gates into x.
+    See https://drisspg.github.io/nuggets/KDA-Future-Token-Leakage
 
-    To avoid reading a future gate, the reference starts from the first token in the block.
-    Imagine a cumulative gate that starts there and falls by s at each following token.
-    Its midpoint provides a reference without reading any later gates:
+    Instead, use the first cumulative gate with a fixed shift toward an estimated midpoint (natural-log units):
 
-        first token G_0 ---- reference G_0 - d ---- last token G_0 - 2*d
-        d = (BC - 1) * s / 2
+        s = -lower_bound if lower_bound is supplied to intra, otherwise 2
+        d = (BC - 1) * s / 2; C = G_0 - d
 
-    The assumed drop s defaults to 2. For BC=16, there are 15 steps, so the reference is G_0 - 15.
-    This assumption only chooses the reference; it does not change or constrain the actual gates.
-    Direct callers can set lower_bound to use s = -lower_bound instead.
-    chunk_kda leaves this option unset, so fused and pre-computed gates use the same shift,
-    independently of the lower bound used to generate the gates.
+    For BC=16 and s=2, C = G_0 - 15: query factors gain exp(15), while key factors shrink by exp(15).
+    The default 2 is a heuristic for log gates concentrated near 0, with few near the lower bound;
+    it limits the compensation to avoid over-scaling queries.
+    chunk_kda uses this default for both fused and pre-computed gates. An explicit intra lower_bound sets s instead.
+    Forward/backward keep the same fixed BC even for partial blocks, so appending tokens cannot move C.
 
-    Moving the reference down by d reduces the key factors while increasing the query factors.
-    With C = G_0 - d, the worst-case magnitudes depend on the actual gate range.
-    If the actual log gates lie in [L, 0], with L < 0, the remaining BC - 1 steps span at most -(BC - 1)*L:
+    For actual log gates in [L, 0], the factor bounds are (BC=16, s=2, L=-5):
 
-        max_i exp(G_i - C) <= exp(d)
-        max_i exp(C - G_i) <= exp(-(BC - 1) * L - d)
-
-    For BC=16, s=2 and L=-5, these bounds are exp(15 * 2 / 2) = exp(15) ~= 3.269e6 for queries,
-    and exp(-15 * (-5) - 15) = exp(60) ~= 1.142e26 for keys.
-    The factors are computed in FP32; these bounds alone do not guarantee that scaled inputs or gradients stay finite.
-    When a direct caller supplies the actual lower bound, s=-L balances both bounds at exp(-(BC - 1) * L / 2).
-    For BC=16 and L=-5, that gives exp(-(16 - 1) * (-5) / 2) = exp(37.5) ~= 1.932e16.
-
-    The kernel works in log2 units, so the host passes GATE_SHIFT = s * RCP_LN2.
-    It subtracts (BC - 1) * GATE_SHIFT / 2 from the first cumulative gate to form the reference.
-    Forward and backward use the same reference. Partial blocks keep the configured width BC,
-    so appending tokens cannot move the reference for earlier rows.
-
-    Further explanation: https://drisspg.github.io/nuggets/KDA-Future-Token-Leakage
+        max_i exp(G_i - C) <= exp(d) = exp(15 * 2 / 2) = exp(15) ~= 3.269e6
+        max_i exp(C - G_i) <= exp(-(BC - 1) * L - d) = exp(-15 * (-5) - 15) = exp(60) ~= 1.142e26
     """
     B, T, H, K, HV = *k.shape, gk.shape[2]
     BT = chunk_size
