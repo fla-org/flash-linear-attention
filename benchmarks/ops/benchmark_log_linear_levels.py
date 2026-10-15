@@ -102,6 +102,7 @@ def main():
             outputs.append(naive_log_linear_attn(*(x[:, start:start + count] for x in reference_inputs), scale=1.0))
             start += count
         reference = torch.cat(outputs, dim=1)
+        del outputs
     actual = forward()
     reference_gradients = torch.autograd.grad(reference, reference_inputs, do)
     actual_gradients = torch.autograd.grad(actual, inputs, do)
