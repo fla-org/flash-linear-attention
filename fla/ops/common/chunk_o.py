@@ -26,12 +26,12 @@ from fla.utils import (
 
 BKV_LIST = [64, 128] if check_shared_mem() else ([32, 64] if check_shared_mem('ada') else [32])
 NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8]
-# older Triton compilers race at eight warps on Blackwell: fla-org/flash-linear-attention#1327
-CHUNK_BWD_DV_LOCAL_NUM_WARPS = [2, 4] if IS_NVIDIA_BLACKWELL and not TRITON_ABOVE_3_8_0 else NUM_WARPS
+# Triton<3.8 races at 8 warps on Blackwell: triton-lang/triton#10590, fla-org/flash-linear-attention#1327
+BLACKWELL_8_WARP_RACE = IS_NVIDIA_BLACKWELL and not TRITON_ABOVE_3_8_0
+CHUNK_BWD_DV_LOCAL_NUM_WARPS = [2, 4] if BLACKWELL_8_WARP_RACE else NUM_WARPS
 
 # Intel needs 8 warps for BK=BV=64; the NVIDIA pairing only offers 4 and falls back to slower 32x32 tiles.
-# older Triton compilers race at eight warps on Blackwell: triton-lang/triton#10590
-CHUNK_FWD_O_BLACKWELL_DROPPED_CONFIGS = [] if IS_NVIDIA_BLACKWELL and not TRITON_ABOVE_3_8_0 else [
+CHUNK_FWD_O_BLACKWELL_DROPPED_CONFIGS = [] if BLACKWELL_8_WARP_RACE else [
     triton.Config({'BK': 128, 'BV': 128}, num_warps=8, num_stages=3),
 ]
 
