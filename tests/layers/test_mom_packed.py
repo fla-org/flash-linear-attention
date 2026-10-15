@@ -47,8 +47,9 @@ def test_forward_backward(T, single_kv_proj, shared_mem, dtype):
             assert_close(f'grad_{i}', ref, grad, 0.008)
 
 
+@pytest.mark.parametrize('T', [1, 7, 65])
 @pytest.mark.parametrize('training', [False, True])
-def test_forward_empty_memories(training, monkeypatch):
+def test_forward_empty_memories(T, training, monkeypatch):
     """Unused memories receive no projected tokens even when all tokens choose the same memories."""
     torch.manual_seed(42)
     layer = mom.MomAttention(
@@ -59,7 +60,7 @@ def test_forward_empty_memories(training, monkeypatch):
         num_memories=7,
         topk=2,
     ).to(device=device).train(training)
-    x = torch.randn(2, 65, 64, device=device)
+    x = torch.randn(2, T, 64, device=device)
     gate_forward = layer.gate.forward
     bias = x.new_tensor([100, 99, -100, -100, -100, -100, -100])
     monkeypatch.setattr(layer.gate, 'forward', lambda x: gate_forward(x) + bias)
@@ -70,9 +71,9 @@ def test_forward_empty_memories(training, monkeypatch):
         actual = layer(x)[0]
     for handle in handles:
         handle.remove()
-    assert counts == [130, 130, 0, 0, 0, 0, 0]
+    assert counts == [2 * T, 2 * T, 0, 0, 0, 0, 0]
     with torch.no_grad():
-        expected = layer(x, attention_mask=torch.ones(2, 65, device=device, dtype=torch.long))[0]
+        expected = layer(x, attention_mask=torch.ones(2, T, device=device, dtype=torch.long))[0]
     assert_close('o', expected, actual, 0.005)
 
 
