@@ -435,7 +435,7 @@ def chunk_kda_bwd_kernel_intra(
     i_h = i_hv // (HV // H)
     i_k, i_i = i_kc // NC, i_kc % NC
 
-    all = B * T
+    total_tokens = B * T
     if IS_VARLEN:
         i_n = tl.load(chunk_indices + i_t * 2).to(tl.int32)
         if USE_GRAPH and i_n < 0:
@@ -466,7 +466,7 @@ def chunk_kda_bwd_kernel_intra(
     dk2 += (bos * HV + i_hv) * K
     dg += (bos * HV + i_hv) * K
     dg2 += (bos * HV + i_hv) * K
-    db += (i_k * all + bos) * HV + i_hv
+    db += (i_k * total_tokens + bos) * HV + i_hv
 
     o_i = tl.arange(0, BC)
     o_c = i_ti + o_i
@@ -535,12 +535,12 @@ def chunk_kda_bwd_kernel_intra(
         b_dAqk_diag_qk = tl.where(m_i_diag_qk, b_dAqk_diag_qk, 0.)
         b_dAkk_diag_qk = tl.where(m_i_diag_qk, b_dAkk_diag_qk, 0.)
         b_g_diag_qk = tl.where(m_j_diag_qk, b_g - b_gn, 0.)
-        exp_b_g_diag_qk = tl.where(m_j_diag_qk, exp2(b_g_diag_qk), 0.)
-        exp_neg_b_g_diag_qk = tl.where(m_j_diag_qk, exp2(-b_g_diag_qk), 0.)
+        b_gq_diag_qk = tl.where(m_j_diag_qk, exp2(b_g_diag_qk), 0.)
+        b_gk_diag_qk = tl.where(m_j_diag_qk, exp2(-b_g_diag_qk), 0.)
 
-        b_k_exp_diag_qk = b_k * exp_neg_b_g_diag_qk
-        b_dq2 += tl.dot(b_dAqk_diag_qk, b_k_exp_diag_qk) * exp_b_g_diag_qk
-        b_dk2 += tl.dot(b_dAkk_diag_qk, b_k_exp_diag_qk) * exp_b_g_diag_qk
+        b_k_exp_diag_qk = b_k * b_gk_diag_qk
+        b_dq2 += tl.dot(b_dAqk_diag_qk, b_k_exp_diag_qk) * b_gq_diag_qk
+        b_dk2 += tl.dot(b_dAkk_diag_qk, b_k_exp_diag_qk) * b_gq_diag_qk
     else:
         for j in range(0, min(BC, T - i_t * BT - i_i * BC)):
             # [BC]
@@ -637,14 +637,14 @@ def chunk_kda_bwd_kernel_intra(
         b_dAkk_diag_kk = tl.where(m_i_diag_kk, b_dAkk_diag_kk, 0.)
         # ensure numerical stability
         b_g_diag_kk = tl.where(m_j_diag_kk, b_g - b_gn, 0.)
-        exp_b_g_diag_kk = tl.where(m_j_diag_kk, exp2(b_g_diag_kk), 0.)
-        exp_neg_b_g_diag_kk = tl.where(m_j_diag_kk, exp2(-b_g_diag_kk), 0.)
+        b_gq_diag_kk = tl.where(m_j_diag_kk, exp2(b_g_diag_kk), 0.)
+        b_gk_diag_kk = tl.where(m_j_diag_kk, exp2(-b_g_diag_kk), 0.)
 
-        b_q_exp = b_q * exp_b_g_diag_kk
-        b_kb_exp = b_k * b_b[:, None] * exp_b_g_diag_kk
+        b_q_exp = b_q * b_gq_diag_kk
+        b_kb_exp = b_k * b_b[:, None] * b_gq_diag_kk
 
-        b_dkt += tl.dot(b_dAqk_diag_kk, b_q_exp) * exp_neg_b_g_diag_kk
-        b_dkt += tl.dot(b_dAkk_diag_kk, b_kb_exp) * exp_neg_b_g_diag_kk
+        b_dkt += tl.dot(b_dAqk_diag_kk, b_q_exp) * b_gk_diag_kk
+        b_dkt += tl.dot(b_dAkk_diag_kk, b_kb_exp) * b_gk_diag_kk
     else:
         for j in range(0, min(BC, T - i_t * BT - i_i * BC)):
             # [BC,]
