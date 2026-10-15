@@ -625,7 +625,6 @@ def chunk_kda_bwd(
         chunk_indices=chunk_indices,
         chunk_size=chunk_size,
         safe_gate=safe_gate,
-        lower_bound=lower_bound,
         use_graph=use_graph,
     )
 

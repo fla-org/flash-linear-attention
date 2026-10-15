@@ -702,23 +702,33 @@ def test_chunk_causality(T: int, P: int, H: int, D: int, chunk_size: int, use_ga
 
 
 @pytest.mark.parametrize(
-    ("lower_bound", "dtype", "use_gate_in_kernel", "cu_seqlens"),
+    ("lower_bound", "dtype", "use_gate_in_kernel", "cu_seqlens", "gate_pattern"),
     [
         pytest.param(
             lower_bound,
             dtype,
             use_gate_in_kernel,
             cu_seqlens,
-            id=f"lower_bound{lower_bound}-{dtype}-use_gate{use_gate_in_kernel}-cu_seqlens{cu_seqlens}",
+            gate_pattern,
+            id=f"lower_bound{lower_bound}-{dtype}-use_gate{use_gate_in_kernel}-cu_seqlens{cu_seqlens}-{gate_pattern}",
         )
         for cu_seqlens in [None, [0, 1, 17, 38]]
         for use_gate_in_kernel in [False, True]
         for dtype in [torch.bfloat16, torch.float16]
         for lower_bound in [-5.0, -2.0, -0.01]
+        for gate_pattern in (
+            ["random", "lower_bound", "zero", "mixed"] if not use_gate_in_kernel and lower_bound == -5.0 else ["random"]
+        )
     ],
 )
 @pytest.mark.skipif(IS_NPU, reason="Ascend uses separate intra kernels whose anchors are unchanged")
-def test_chunk_lower_bound(lower_bound: float, dtype: torch.dtype, use_gate_in_kernel: bool, cu_seqlens: list[int] | None):
+def test_chunk_lower_bound(
+    lower_bound: float,
+    dtype: torch.dtype,
+    use_gate_in_kernel: bool,
+    cu_seqlens: list[int] | None,
+    gate_pattern: str,
+):
     torch.manual_seed(42)
     B, T, H, D = 1, 38, 2, 64
     shape = (B, T, H, D)
@@ -727,6 +737,13 @@ def test_chunk_lower_bound(lower_bound: float, dtype: torch.dtype, use_gate_in_k
     g = (10 * torch.randn(shape)).to(dtype)
     if not use_gate_in_kernel:
         g = lower_bound * g.float().sigmoid()
+        if gate_pattern == "lower_bound":
+            g.fill_(lower_bound)
+        elif gate_pattern == "zero":
+            g.zero_()
+        elif gate_pattern == "mixed":
+            g[..., ::2] = lower_bound
+            g[..., 1::2] = 0.
     beta = torch.randn(B, T, H, dtype=dtype).sigmoid()
     A_log = torch.zeros(H)
     dt_bias = 0.1 * torch.randn(H * D)

@@ -522,7 +522,7 @@ def chunk_kda_bwd_kernel_intra(
             b_gn = gather(b_g, tl.zeros([1, BK], dtype=tl.int16), axis=0)
         else:
             b_gn = tl.load(g + i_ti * HV*K + o_k, mask=m_k, other=0)[None, :]
-        b_gn = b_gn + GATE_SHIFT
+        b_gn = b_gn - 0.5 * (BC - 1) * GATE_SHIFT
 
         p_dAqk = dAqk + o_c[:, None] * (HV*BT) + (i_i * BC + o_i)[None, :]
         p_dAkk = dAkk + o_c[:, None] * (HV*BT) + (i_i * BC + o_i)[None, :]
@@ -619,7 +619,7 @@ def chunk_kda_bwd_kernel_intra(
             b_gn = gather(b_g, tl.zeros([1, BK], dtype=tl.int16), axis=0)
         else:
             b_gn = tl.load(g + i_ti * HV*K + o_k, mask=m_k, other=0).to(tl.float32)[None, :]
-        b_gn = b_gn + GATE_SHIFT
+        b_gn = b_gn - 0.5 * (BC - 1) * GATE_SHIFT
         p_q = q + o_c[:, None] * (H*K) + o_k[None, :]
         b_q = tl.load(p_q, mask=m_ck, other=0.0)
         p_b = beta + o_c * HV
@@ -757,7 +757,7 @@ def chunk_kda_fwd_kernel_intra_sub_chunk(
         b_gn = gather(b_g, tl.zeros([1, BK], dtype=tl.int16), axis=0)
     else:
         b_gn = tl.load(g + i_ti * HV*K + o_k, mask=m_k, other=0.0)[None, :]
-    b_gn = b_gn + GATE_SHIFT
+    b_gn = b_gn - 0.5 * (BC - 1) * GATE_SHIFT
 
     b_gm = (b_g - b_gn).to(tl.float32)
 
@@ -838,21 +838,35 @@ def chunk_kda_fwd_intra(
     because the affected scores are already in the allowed triangle. The issue recurs in each diagonal block.
 
     To avoid reading a future gate, the reference starts from the first token in the block.
-    A fixed shift then balances the factors using the configured gate bound, without inspecting later tokens.
-    If each log gate lies in [L, 0], with L < 0, the remaining BC - 1 steps can accumulate between (BC - 1)*L and 0.
-    Placing the reference halfway through this allowed range gives:
+    Imagine a cumulative gate that starts there and falls by s at each following token.
+    Its midpoint provides a reference without reading any later gates:
 
-        C = G_0 + (BC - 1) * L / 2
-        max_i max(exp(G_i - C), exp(C - G_i)) <= exp(-(BC - 1) * L / 2)
+        first token G_0 ---- reference G_0 - d ---- last token G_0 - 2*d
+        d = (BC - 1) * s / 2
 
-    For BC=16 and L=-5, the upper bound is exp(-(16 - 1) * (-5) / 2) = exp(37.5) ~= 1.932e16.
-    The kernel works in log2 units, so the shift passed from the host is:
+    The assumed drop s defaults to 2. For BC=16, there are 15 steps, so the reference is G_0 - 15.
+    This assumption only chooses the reference; it does not change or constrain the actual gates.
+    Direct callers can set lower_bound to use s = -lower_bound instead.
+    chunk_kda leaves this option unset, so fused and pre-computed gates use the same shift,
+    independently of the lower bound used to generate the gates.
 
-        GATE_SHIFT = 0.5 * (BC - 1) * (lower_bound * RCP_LN2)
+    Moving the reference down by d reduces the key factors while increasing the query factors.
+    With C = G_0 - d, the worst-case magnitudes depend on the actual gate range.
+    If the actual log gates lie in [L, 0], with L < 0, the remaining BC - 1 steps span at most -(BC - 1)*L:
 
+        max_i exp(G_i - C) <= exp(d)
+        max_i exp(C - G_i) <= exp(-(BC - 1) * L - d)
+
+    For BC=16, s=2 and L=-5, these bounds are exp(15 * 2 / 2) = exp(15) ~= 3.269e6 for queries,
+    and exp(-15 * (-5) - 15) = exp(60) ~= 1.142e26 for keys.
+    The factors are computed in FP32; these bounds alone do not guarantee that scaled inputs or gradients stay finite.
+    When a direct caller supplies the actual lower bound, s=-L balances both bounds at exp(-(BC - 1) * L / 2).
+    For BC=16 and L=-5, that gives exp(-(16 - 1) * (-5) / 2) = exp(37.5) ~= 1.932e16.
+
+    The kernel works in log2 units, so the host passes GATE_SHIFT = s * RCP_LN2.
+    It subtracts (BC - 1) * GATE_SHIFT / 2 from the first cumulative gate to form the reference.
     Forward and backward use the same reference. Partial blocks keep the configured width BC,
     so appending tokens cannot move the reference for earlier rows.
-    If lower_bound is omitted, the reference is the first token with no shift; the balanced bound above does not apply.
 
     Further explanation: https://drisspg.github.io/nuggets/KDA-Future-Token-Leakage
     """
@@ -892,7 +906,7 @@ def chunk_kda_fwd_intra(
             BT=BT,
             BC=BC,
             BK=BK,
-            GATE_SHIFT=0.5 * (BC - 1) * (lower_bound * RCP_LN2) if lower_bound is not None else 0.,
+            GATE_SHIFT=(-lower_bound if lower_bound is not None else 2.) * RCP_LN2,
             USE_GATHER=IS_GATHER_SUPPORTED,
             USE_GRAPH=use_graph,
         )
@@ -1015,7 +1029,7 @@ def chunk_kda_bwd_intra(
         BK=BK,
         NC=NC,
         SAFE_GATE=safe_gate,
-        GATE_SHIFT=0.5 * (BC - 1) * (lower_bound * RCP_LN2) if lower_bound is not None else 0.,
+        GATE_SHIFT=(-lower_bound if lower_bound is not None else 2.) * RCP_LN2,
         USE_GATHER=IS_GATHER_SUPPORTED,
         USE_GRAPH=use_graph,
     )
