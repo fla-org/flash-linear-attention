@@ -59,7 +59,7 @@ def _is_inner_contiguous(x: torch.Tensor) -> bool:
     """
     ndim = x.ndim
     if ndim < 2:
-        return True
+        return x.is_contiguous()
     if x.stride(-1) != 1:
         return False
     if ndim == 2:
@@ -710,7 +710,6 @@ class SwiGLULinearFunction(torch.autograd.Function):
         z = swiglu_fwd(x=x, y=y, output_contiguous=True)
         out = F.linear(z, weight, bias)
         ctx.save_for_backward(x, y, weight)
-        ctx.linear_bias_is_none = bias is None
         return out
 
     @staticmethod
@@ -719,10 +718,18 @@ class SwiGLULinearFunction(torch.autograd.Function):
     def backward(ctx, dout, *args):
         x, y, weight = ctx.saved_tensors
         dout = dout.reshape(-1, dout.shape[-1])
-        dz = F.linear(dout, weight.t()).view_as(x)
-        dx, dy, z = swiglu_fwdbwd(x=x, y=y, g=dz, use_weight=True, output_contiguous=True)
-        dlinear_weight = torch.einsum("bo,bi->oi", dout, z.reshape(-1, z.shape[-1]))
-        dlinear_bias = None if ctx.linear_bias_is_none else dout.sum(0)
+        dx = dy = dlinear_weight = None
+        if ctx.needs_input_grad[0] or ctx.needs_input_grad[1]:
+            dz = F.linear(dout, weight.t()).view_as(x)
+            if ctx.needs_input_grad[2]:
+                dx, dy, z = swiglu_fwdbwd(x=x, y=y, g=dz, use_weight=True, output_contiguous=True)
+            else:
+                dx, dy = swiglu_fwdbwd(x=x, y=y, g=dz, output_contiguous=True)
+        elif ctx.needs_input_grad[2]:
+            z = swiglu_fwd(x=x, y=y, output_contiguous=True)
+        if ctx.needs_input_grad[2]:
+            dlinear_weight = torch.einsum("bo,bi->oi", dout, z.reshape(-1, z.shape[-1]))
+        dlinear_bias = dout.sum(0) if ctx.needs_input_grad[3] else None
         return dx, dy, dlinear_weight, dlinear_bias
 
 

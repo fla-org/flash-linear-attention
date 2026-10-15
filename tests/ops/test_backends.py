@@ -9,6 +9,7 @@ import importlib.metadata
 import logging
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import create_autospec
 
 import pytest
 import torch
@@ -399,6 +400,46 @@ def test_attn_gluon_backend_hardware_fallback(monkeypatch):
         return expected
 
     assert parallel_attn_fwd(q=q, k=q, v=q, g_cumsum=None, sink_bias=None, scale=0.125) is expected
+
+
+@pytest.fixture
+def kda_bwd_inputs():
+    x = SimpleNamespace(shape=(1, 64, 2, 64))
+    return dict(q=x, k=x, v=x, v_new=x, g=x, beta=x, A=x, h=x, do=x, dh=x, dv=x, chunk_offsets=None)
+
+
+@pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
+def test_kda_tilelang_backend_dispatch(monkeypatch, kda_bwd_inputs):
+    from fla.ops.kda.backends.triton_ascend import TritonAscendKDABackend
+    from fla.ops.kda.chunk_bwd import chunk_kda_bwd_wy_dqkg_fused
+
+    monkeypatch.setattr(TritonAscendKDABackend, 'is_available', classmethod(lambda cls: False))
+    backend = kda_tilelang_backend.KDATileLangBackend
+    monkeypatch.setattr(backend, 'is_available', classmethod(lambda cls: True))
+    monkeypatch.setenv('FLA_TILELANG', '1')
+    result = object()
+    implementation = create_autospec(backend.chunk_kda_bwd_wy_dqkg_fused, return_value=result)
+    monkeypatch.setattr(backend, 'chunk_kda_bwd_wy_dqkg_fused', implementation)
+
+    assert chunk_kda_bwd_wy_dqkg_fused(**kda_bwd_inputs, use_graph=False) is result
+    implementation.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    ('use_graph', 'accepted', 'reason'),
+    [
+        pytest.param(False, True, None, id='eager'),
+        pytest.param(
+            True,
+            False,
+            'TileLang backend does not support graph capture (use_graph=True); fall back to Triton',
+            id='graph',
+        ),
+    ],
+)
+def test_kda_tilelang_backend_verifier(kda_bwd_inputs, use_graph, accepted, reason):
+    backend = kda_tilelang_backend.KDATileLangBackend()
+    assert backend.chunk_kda_bwd_wy_dqkg_fused_verifier(**kda_bwd_inputs, use_graph=use_graph) == (accepted, reason)
 
 
 @pytest.mark.parametrize(

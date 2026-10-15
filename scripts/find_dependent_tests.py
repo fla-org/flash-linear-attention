@@ -86,6 +86,58 @@ def get_reexports_from_tree(tree, module: str, package: str) -> dict:
     return reexports
 
 
+def get_module_aliases_from_tree(tree, package: str) -> dict[str, tuple[str, ...]]:
+    """Map runtime aliases such as fla.modules.l2norm to their canonical modules."""
+    aliases = {}
+    if not tree:
+        return aliases
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(isinstance(target, ast.Name) and target.id == '_MODULE_ALIASES' for target in node.targets):
+            continue
+        if not isinstance(node.value, ast.Dict):
+            continue
+        for key, value in zip(node.value.keys, node.value.values):
+            if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
+                continue
+            if not isinstance(value, ast.Tuple | ast.List):
+                continue
+            targets = [
+                f'{package}.{item.value}'
+                for item in value.elts
+                if isinstance(item, ast.Constant) and isinstance(item.value, str)
+            ]
+            if targets:
+                aliases[f'{package}.{key.value}'] = tuple(targets)
+    return aliases
+
+
+def expand_aliased_imports(imports: set, reexports: dict, module_aliases: dict) -> set:
+    """Follow symbol re-exports and single-target module aliases."""
+    expanded = set(imports)
+    pending = list(imports)
+    visited = set()
+    while pending:
+        imported = pending.pop()
+        if imported in visited:
+            continue
+        visited.add(imported)
+        module, symbol = imported
+        candidates = []
+        reexport = reexports.get(imported)
+        if reexport is not None:
+            candidates.append(reexport)
+        targets = module_aliases.get(module)
+        if targets is not None and len(targets) == 1:
+            candidates.append((targets[0], symbol))
+        for candidate in candidates:
+            if candidate not in expanded:
+                expanded.add(candidate)
+                pending.append(candidate)
+    return expanded
+
+
 def _get_dispatch_owners(tree) -> set[str]:
     """Read operation keys from the supported dispatch imports."""
     if not tree:
@@ -198,10 +250,13 @@ class DependencyFinder:
         all_source_files = [p for s_dir in search_dirs for p in Path(s_dir).resolve().rglob("*.py")]
         source_files = [p for p in all_source_files if p.name != '__init__.py']
         reexports = {}
+        module_aliases = {}
         for file_path in all_source_files:
             module = file_to_module_path(file_path, self.project_root)
             package = module if file_path.name == '__init__.py' else module.rpartition('.')[0]
-            reexports.update(get_reexports_from_tree(parse_file(file_path), module, package))
+            tree = parse_file(file_path)
+            reexports.update(get_reexports_from_tree(tree, module, package))
+            module_aliases.update(get_module_aliases_from_tree(tree, package))
         test_scope = os.environ.get("TEST_SCOPE", "ALL").upper()
         if test_scope == "MODELS_ONLY":
             test_files = [p for p in models_test_dir.rglob("*.py") if p.name != '__init__.py']
@@ -225,13 +280,7 @@ class DependencyFinder:
         for file_path in self.all_project_files:
             tree = parse_file(file_path)
             definitions = get_definitions_from_tree(tree)
-            imports = get_imports_from_tree(tree)
-            for imported in list(imports):
-                visited = set()
-                while imported in reexports and imported not in visited:
-                    visited.add(imported)
-                    imported = reexports[imported]
-                    imports.add(imported)
+            imports = expand_aliased_imports(get_imports_from_tree(tree), reexports, module_aliases)
             self.file_to_definitions[file_path] = definitions
             self.file_to_imports[file_path] = imports
             for defn in definitions:

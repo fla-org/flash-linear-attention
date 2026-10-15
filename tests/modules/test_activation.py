@@ -35,12 +35,14 @@ def powglu_ref(x: torch.Tensor, y: torch.Tensor, power: float = 3.0) -> torch.Te
     return g * y
 
 
-def make_inputs(B: int, T: int, D: int, n: int, noncontiguous: bool) -> tuple[torch.Tensor, ...]:
-    """Return ``n`` grad-requiring (B, T, D) tensors; non-contiguous ones are halves of a chunked buffer."""
-    if noncontiguous:
-        xs = torch.randn(B, T, D * 2, device=device).chunk(2, dim=-1)[:n]
+def make_inputs(shape: tuple[int, ...], n: int, noncontiguous: bool) -> tuple[torch.Tensor, ...]:
+    """Return grad-requiring tensors with contiguous, strided-vector, or chunked-row layouts."""
+    if noncontiguous and len(shape) == 1:
+        xs = tuple(torch.randn(shape[0] * 3, device=device)[::3] for _ in range(n))
+    elif noncontiguous:
+        xs = torch.randn(*shape[:-1], shape[-1] * 2, device=device).chunk(2, dim=-1)[:n]
     else:
-        xs = tuple(torch.randn(B, T, D, device=device) for _ in range(n))
+        xs = tuple(torch.randn(shape, device=device) for _ in range(n))
     return tuple(x.requires_grad_() for x in xs)
 
 
@@ -55,24 +57,31 @@ def test_elu_p1():
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'D', 'noncontiguous', 'compile'),
+    ('shape', 'noncontiguous', 'grad_stride', 'compile'),
     [
-        (1, 1, 64, False, False),
-        (2, 500, 128, False, False),
-        (2, 512, 128, False, True),
-        (3, 2048, 1200, False, True),
-        (2, 500, 128, True, False),
-        (2, 512, 128, True, True),
-        (3, 2048, 1200, True, False),
+        pytest.param(*test, id="shape{}-nc{}-grad_stride{}-compile{}".format("x".join(map(str, test[0])), *test[1:]))
+        for test in [
+            ((1, 1, 64), False, 1, False),
+            ((2, 500, 128), False, 1, False),
+            ((2, 512, 128), False, 1, True),
+            ((3, 2048, 1200), False, 1, True),
+            ((2, 500, 128), True, 1, False),
+            ((2, 512, 128), True, 1, True),
+            ((3, 2048, 1200), True, 1, False),
+            ((63,), False, 1, False),
+            ((63,), False, 3, False),
+            ((63,), True, 1, False),
+            ((63,), True, 3, False),
+        ]
     ],
 )
-def test_sigmoid(B: int, T: int, D: int, noncontiguous: bool, compile: bool):
+def test_sigmoid(shape: tuple[int, ...], noncontiguous: bool, grad_stride: int, compile: bool):
     torch.manual_seed(42)
-    (x,) = make_inputs(B, T, D, 1, noncontiguous)
+    (x,) = make_inputs(shape=shape, n=1, noncontiguous=noncontiguous)
     y_ref = torch.sigmoid(x)
     y_tri = sigmoid(x) if not compile else torch.compile(sigmoid)(x)
 
-    g = torch.randn_like(y_ref)
+    g = torch.randn(*y_ref.shape, grad_stride, device=device)[..., 0]
     dx_ref, = torch.autograd.grad(y_ref, (x,), g)
     dx_tri, = torch.autograd.grad(y_tri, (x,), g)
 
@@ -81,24 +90,31 @@ def test_sigmoid(B: int, T: int, D: int, noncontiguous: bool, compile: bool):
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'D', 'temperature', 'noncontiguous', 'compile'),
+    ('shape', 'temperature', 'noncontiguous', 'grad_stride', 'compile'),
     [
-        (1, 1, 64, 1.0, False, False),
-        (2, 500, 128, 0.5, False, False),
-        (2, 512, 128, 0.5, False, True),
-        (3, 2048, 1200, 2.0, False, True),
-        (2, 500, 128, 0.5, True, False),
-        (2, 512, 128, 1.0, True, True),
-        (3, 2048, 1200, 2.0, True, False),
+        pytest.param(*test, id="shape{}-temp{}-nc{}-grad{}-compile{}".format("x".join(map(str, test[0])), *test[1:]))
+        for test in [
+            ((1, 1, 64), 1.0, False, 1, False),
+            ((2, 500, 128), 0.5, False, 1, False),
+            ((2, 512, 128), 0.5, False, 1, True),
+            ((3, 2048, 1200), 2.0, False, 1, True),
+            ((2, 500, 128), 0.5, True, 1, False),
+            ((2, 512, 128), 1.0, True, 1, True),
+            ((3, 2048, 1200), 2.0, True, 1, False),
+            ((63,), 1.0, False, 1, False),
+            ((63,), 1.0, False, 3, False),
+            ((63,), 1.0, True, 1, False),
+            ((63,), 1.0, True, 3, False),
+        ]
     ],
 )
-def test_logsigmoid(B: int, T: int, D: int, temperature: float, noncontiguous: bool, compile: bool):
+def test_logsigmoid(shape: tuple[int, ...], temperature: float, noncontiguous: bool, grad_stride: int, compile: bool):
     torch.manual_seed(42)
-    (x,) = make_inputs(B, T, D, 1, noncontiguous)
+    (x,) = make_inputs(shape=shape, n=1, noncontiguous=noncontiguous)
     y_ref = F.logsigmoid(x) / temperature
     y_tri = logsigmoid(x, temperature) if not compile else torch.compile(logsigmoid)(x, temperature)
 
-    g = torch.randn_like(y_ref)
+    g = torch.randn(*y_ref.shape, grad_stride, device=device)[..., 0]
     dx_ref, = torch.autograd.grad(y_ref, (x,), g)
     dx_tri, = torch.autograd.grad(y_tri, (x,), g)
 
@@ -107,24 +123,31 @@ def test_logsigmoid(B: int, T: int, D: int, temperature: float, noncontiguous: b
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'D', 'noncontiguous', 'compile'),
+    ('shape', 'noncontiguous', 'grad_stride', 'compile'),
     [
-        (1, 1, 64, False, True),
-        (2, 500, 128, False, True),
-        (2, 512, 128, False, False),
-        (3, 2048, 1200, False, False),
-        (2, 500, 128, True, False),
-        (2, 512, 128, True, True),
-        (3, 2048, 1200, True, False),
+        pytest.param(*test, id="shape{}-nc{}-grad_stride{}-compile{}".format("x".join(map(str, test[0])), *test[1:]))
+        for test in [
+            ((1, 1, 64), False, 1, True),
+            ((2, 500, 128), False, 1, True),
+            ((2, 512, 128), False, 1, False),
+            ((3, 2048, 1200), False, 1, False),
+            ((2, 500, 128), True, 1, False),
+            ((2, 512, 128), True, 1, True),
+            ((3, 2048, 1200), True, 1, False),
+            ((63,), False, 1, False),
+            ((63,), False, 3, False),
+            ((63,), True, 1, False),
+            ((63,), True, 3, False),
+        ]
     ],
 )
-def test_swish(B: int, T: int, D: int, noncontiguous: bool, compile: bool):
+def test_swish(shape: tuple[int, ...], noncontiguous: bool, grad_stride: int, compile: bool):
     torch.manual_seed(42)
-    (x,) = make_inputs(B, T, D, 1, noncontiguous)
+    (x,) = make_inputs(shape=shape, n=1, noncontiguous=noncontiguous)
     y_ref = F.silu(x)
     y_tri = swish(x) if not compile else torch.compile(swish)(x)
 
-    g = torch.randn_like(y_ref)
+    g = torch.randn(*y_ref.shape, grad_stride, device=device)[..., 0]
     dx_ref, = torch.autograd.grad(y_ref, (x,), g)
     dx_tri, = torch.autograd.grad(y_tri, (x,), g)
 
@@ -146,7 +169,7 @@ def test_swish(B: int, T: int, D: int, noncontiguous: bool, compile: bool):
 )
 def test_gelu(B: int, T: int, D: int, noncontiguous: bool, compile: bool):
     torch.manual_seed(42)
-    (x,) = make_inputs(B, T, D, 1, noncontiguous)
+    (x,) = make_inputs(shape=(B, T, D), n=1, noncontiguous=noncontiguous)
     y_ref = F.gelu(x, approximate='tanh')
     y_tri = fast_gelu_impl(x) if not compile else torch.compile(fast_gelu_impl)(x)
 
@@ -172,7 +195,7 @@ def test_gelu(B: int, T: int, D: int, noncontiguous: bool, compile: bool):
 )
 def test_sqrelu(B: int, T: int, D: int, noncontiguous: bool, compile: bool):
     torch.manual_seed(42)
-    (x,) = make_inputs(B, T, D, 1, noncontiguous)
+    (x,) = make_inputs(shape=(B, T, D), n=1, noncontiguous=noncontiguous)
     y_ref = F.relu(x) ** 2
     y_tri = sqrelu(x) if not compile else torch.compile(sqrelu)(x)
 
@@ -185,25 +208,32 @@ def test_sqrelu(B: int, T: int, D: int, noncontiguous: bool, compile: bool):
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'D', 'noncontiguous', 'compile'),
+    ('shape', 'noncontiguous', 'grad_stride', 'compile'),
     [
-        (1, 1, 64, False, True),
-        (2, 500, 128, False, True),
-        (2, 512, 128, False, False),
-        (3, 2048, 1200, False, False),
-        (2, 500, 128, True, True),
-        (2, 512, 128, True, False),
-        (3, 2048, 1200, True, False),
+        pytest.param(*test, id="shape{}-nc{}-grad_stride{}-compile{}".format("x".join(map(str, test[0])), *test[1:]))
+        for test in [
+            ((1, 1, 64), False, 1, True),
+            ((2, 500, 128), False, 1, True),
+            ((2, 512, 128), False, 1, False),
+            ((3, 2048, 1200), False, 1, False),
+            ((2, 500, 128), True, 1, True),
+            ((2, 512, 128), True, 1, False),
+            ((3, 2048, 1200), True, 1, False),
+            ((63,), False, 1, False),
+            ((63,), False, 3, False),
+            ((63,), True, 1, False),
+            ((63,), True, 3, False),
+        ]
     ],
 )
-def test_swiglu(B: int, T: int, D: int, noncontiguous: bool, compile: bool):
+def test_swiglu(shape: tuple[int, ...], noncontiguous: bool, grad_stride: int, compile: bool):
     torch.manual_seed(42)
-    x, y = make_inputs(B, T, D, 2, noncontiguous)
+    x, y = make_inputs(shape=shape, n=2, noncontiguous=noncontiguous)
 
     y_ref = F.silu(x) * y
     y_tri = swiglu(x, y) if not compile else torch.compile(swiglu)(x, y)
 
-    g = torch.randn_like(y_ref)
+    g = torch.randn(*y_ref.shape, grad_stride, device=device)[..., 0]
     dx_ref, dy_ref = torch.autograd.grad(y_ref, (x, y), g)
     dx_tri, dy_tri = torch.autograd.grad(y_tri, (x, y), g)
 
@@ -215,56 +245,97 @@ def test_swiglu(B: int, T: int, D: int, noncontiguous: bool, compile: bool):
 @pytest.mark.parametrize(
     ('B', 'T', 'D', 'O', 'noncontiguous', 'compile'),
     [
-        (2, 512, 128, 256, False, True),
-        (1, 1, 64, 32, False, False),
-        (2, 500, 128, 64, False, True),
-        (3, 2048, 1200, 600, False, False),
-        (2, 500, 128, 64, True, False),
-        (2, 512, 128, 256, True, True),
-        (3, 2048, 1200, 600, True, False),
+        pytest.param(*test, id="B{}-T{}-D{}-O{}-noncontiguous{}-compile{}".format(*test))
+        for test in [
+            (2, 512, 128, 256, False, True),
+            (1, 1, 64, 32, False, False),
+            (2, 500, 128, 64, False, True),
+            (3, 2048, 1200, 600, False, False),
+            (2, 500, 128, 64, True, False),
+            (2, 512, 128, 256, True, True),
+            (3, 2048, 1200, 600, True, False),
+        ]
     ],
 )
-def test_swiglu_linear(B: int, T: int, D: int, O: int, noncontiguous: bool, compile: bool):  # noqa: E741
+@pytest.mark.parametrize(
+    ('requires_grad', 'use_bias'),
+    [
+        pytest.param((True, True, True, True), True, id='all'),
+        pytest.param((True, True, False, False), True, id='inputs'),
+        pytest.param((True, False, False, False), True, id='x'),
+        pytest.param((False, True, False, False), True, id='y'),
+        pytest.param((False, False, True, False), True, id='weight'),
+        pytest.param((False, False, False, True), True, id='bias'),
+        pytest.param((False, False, True, True), True, id='weight-bias'),
+        pytest.param((True, True, True, False), False, id='all-no-bias'),
+        pytest.param((True, True, False, False), False, id='inputs-no-bias'),
+        pytest.param((False, False, True, False), False, id='weight-no-bias'),
+    ],
+)
+def test_swiglu_linear(
+    B: int,
+    T: int,
+    D: int,
+    O: int,
+    noncontiguous: bool,
+    compile: bool,
+    requires_grad: tuple[bool, bool, bool, bool],
+    use_bias: bool,
+):
     torch.manual_seed(42)
-    x, y = make_inputs(B, T, D, 2, noncontiguous)
-    w = torch.randn(O, D, device=device, requires_grad=True)
-    b = torch.randn(O, device=device, requires_grad=True)
+    x, y = make_inputs(shape=(B, T, D), n=2, noncontiguous=noncontiguous)
+    x.requires_grad_(requires_grad[0])
+    y.requires_grad_(requires_grad[1])
+    w = torch.randn(O, D, device=device, requires_grad=requires_grad[2])
+    b = torch.randn(O, device=device, requires_grad=requires_grad[3]) if use_bias else None
+    inputs = (x, y, w, b)
+    grad_inputs = [tensor for tensor in inputs if tensor is not None and tensor.requires_grad]
+    grad_names = [
+        name for name, tensor in zip(('dx', 'dy', 'dw', 'db'), inputs)
+        if tensor is not None and tensor.requires_grad
+    ]
 
-    z_ref = F.silu(x) * y
-    out_ref = F.linear(z_ref, w, b)
-    out_tri = swiglu_linear(x, y, w, b) if not compile else torch.compile(swiglu_linear)(x, y, w, b)
+    ref_z = F.silu(x) * y
+    ref = F.linear(input=ref_z, weight=w, bias=b)
+    fn = torch.compile(swiglu_linear) if compile else swiglu_linear
+    tri = fn(x=x, y=y, weight=w, bias=b)
 
-    g = torch.randn_like(out_ref)
-    dx_ref, dy_ref, dw_ref, db_ref = torch.autograd.grad(out_ref, (x, y, w, b), g)
-    dx_tri, dy_tri, dw_tri, db_tri = torch.autograd.grad(out_tri, (x, y, w, b), g)
+    do = torch.randn_like(ref)
+    ref_grads = torch.autograd.grad(outputs=ref, inputs=grad_inputs, grad_outputs=do)
+    tri_grads = torch.autograd.grad(outputs=tri, inputs=grad_inputs, grad_outputs=do)
 
-    assert_close('swiglu_linear out', out_ref, out_tri, 1e-3)
-    assert_close('swiglu_linear dx ', dx_ref, dx_tri, 1e-3)
-    assert_close('swiglu_linear dy ', dy_ref, dy_tri, 1e-3)
-    assert_close('swiglu_linear dw ', dw_ref, dw_tri, 1e-3)
-    assert_close('swiglu_linear db ', db_ref, db_tri, 1e-3)
+    assert_close('swiglu_linear out', ref, tri, 1e-3)
+    for name, ref_grad, tri_grad in zip(grad_names, ref_grads, tri_grads):
+        assert_close(f'swiglu_linear {name}', ref_grad, tri_grad, 1e-3)
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'D', 'noncontiguous', 'compile'),
+    ('shape', 'noncontiguous', 'grad_stride', 'compile'),
     [
-        (1, 1, 64, False, True),
-        (2, 500, 128, False, True),
-        (2, 512, 128, False, False),
-        (3, 2048, 1200, False, False),
-        (2, 500, 128, True, True),
-        (2, 512, 128, True, False),
-        (3, 2048, 1200, True, False),
+        pytest.param(*test, id="shape{}-nc{}-grad_stride{}-compile{}".format("x".join(map(str, test[0])), *test[1:]))
+        for test in [
+            ((1, 1, 64), False, 1, True),
+            ((2, 500, 128), False, 1, True),
+            ((2, 512, 128), False, 1, False),
+            ((3, 2048, 1200), False, 1, False),
+            ((2, 500, 128), True, 1, True),
+            ((2, 512, 128), True, 1, False),
+            ((3, 2048, 1200), True, 1, False),
+            ((63,), False, 1, False),
+            ((63,), False, 3, False),
+            ((63,), True, 1, False),
+            ((63,), True, 3, False),
+        ]
     ],
 )
-def test_sigmoidglu(B: int, T: int, D: int, noncontiguous: bool, compile: bool):
+def test_sigmoidglu(shape: tuple[int, ...], noncontiguous: bool, grad_stride: int, compile: bool):
     torch.manual_seed(42)
-    x, y = make_inputs(B, T, D, 2, noncontiguous)
+    x, y = make_inputs(shape=shape, n=2, noncontiguous=noncontiguous)
 
     y_ref = torch.sigmoid(x) * y
     y_tri = sigmoidglu(x, y) if not compile else torch.compile(sigmoidglu)(x, y)
 
-    g = torch.randn_like(y_ref)
+    g = torch.randn(*y_ref.shape, grad_stride, device=device)[..., 0]
     dx_ref, dy_ref = torch.autograd.grad(y_ref, (x, y), g)
     dx_tri, dy_tri = torch.autograd.grad(y_tri, (x, y), g)
 
@@ -287,7 +358,7 @@ def test_sigmoidglu(B: int, T: int, D: int, noncontiguous: bool, compile: bool):
 )
 def test_sigmoidglu_linear(B: int, T: int, D: int, O: int, noncontiguous: bool, compile: bool):  # noqa: E741
     torch.manual_seed(42)
-    x, y = make_inputs(B, T, D, 2, noncontiguous)
+    x, y = make_inputs(shape=(B, T, D), n=2, noncontiguous=noncontiguous)
     w = torch.randn(O, D, device=device, requires_grad=True)
     b = torch.randn(O, device=device, requires_grad=True)
 
@@ -307,25 +378,32 @@ def test_sigmoidglu_linear(B: int, T: int, D: int, O: int, noncontiguous: bool, 
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'D', 'power', 'noncontiguous', 'compile'),
+    ('shape', 'power', 'noncontiguous', 'grad_stride', 'compile'),
     [
-        (1, 1, 64, 3.0, False, True),
-        (2, 500, 128, 2.0, False, True),
-        (2, 512, 128, 3.0, False, False),
-        (3, 2048, 1200, 4.0, False, False),
-        (2, 500, 128, 3.0, True, True),
-        (2, 512, 128, 2.0, True, False),
-        (3, 2048, 1200, 3.0, True, False),
+        pytest.param(*test, id="shape{}-power{}-nc{}-grad{}-compile{}".format("x".join(map(str, test[0])), *test[1:]))
+        for test in [
+            ((1, 1, 64), 3.0, False, 1, True),
+            ((2, 500, 128), 2.0, False, 1, True),
+            ((2, 512, 128), 3.0, False, 1, False),
+            ((3, 2048, 1200), 4.0, False, 1, False),
+            ((2, 500, 128), 3.0, True, 1, True),
+            ((2, 512, 128), 2.0, True, 1, False),
+            ((3, 2048, 1200), 3.0, True, 1, False),
+            ((63,), 3.0, False, 1, False),
+            ((63,), 3.0, False, 3, False),
+            ((63,), 3.0, True, 1, False),
+            ((63,), 3.0, True, 3, False),
+        ]
     ],
 )
-def test_powglu(B: int, T: int, D: int, power: float, noncontiguous: bool, compile: bool):
+def test_powglu(shape: tuple[int, ...], power: float, noncontiguous: bool, grad_stride: int, compile: bool):
     torch.manual_seed(42)
-    x, y = make_inputs(B, T, D, 2, noncontiguous)
+    x, y = make_inputs(shape=shape, n=2, noncontiguous=noncontiguous)
 
     y_ref = powglu_ref(x, y, power)
     y_tri = powglu(x, y, power) if not compile else torch.compile(powglu)(x, y, power)
 
-    g = torch.randn_like(y_ref)
+    g = torch.randn(*y_ref.shape, grad_stride, device=device)[..., 0]
     dx_ref, dy_ref = torch.autograd.grad(y_ref, (x, y), g)
     dx_tri, dy_tri = torch.autograd.grad(y_tri, (x, y), g)
 
@@ -348,7 +426,7 @@ def test_powglu(B: int, T: int, D: int, power: float, noncontiguous: bool, compi
 )
 def test_powglu_linear(B: int, T: int, D: int, O: int, power: float, noncontiguous: bool, compile: bool):  # noqa: E741
     torch.manual_seed(42)
-    x, y = make_inputs(B, T, D, 2, noncontiguous)
+    x, y = make_inputs(shape=(B, T, D), n=2, noncontiguous=noncontiguous)
     w = torch.randn(O, D, device=device, requires_grad=True)
     b = torch.randn(O, device=device, requires_grad=True)
 
@@ -369,9 +447,9 @@ def test_powglu_linear(B: int, T: int, D: int, O: int, power: float, noncontiguo
 
 def test_is_inner_contiguous():
     """Test _is_inner_contiguous correctly classifies tensor layouts."""
-    # 0D and 1D should always be True (no inner dimensions to check)
     assert _is_inner_contiguous(torch.randn(())) is True
     assert _is_inner_contiguous(torch.randn(10)) is True
+    assert _is_inner_contiguous(torch.randn(30)[::3]) is False
 
     x2d = torch.randn(10, 20)
     assert _is_inner_contiguous(x2d) is True

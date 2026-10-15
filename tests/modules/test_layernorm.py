@@ -151,16 +151,22 @@ def test_layernorm_linear(N: int, D: int):
 
 
 @pytest.mark.parametrize(
-    ('T', 'D', 'is_rms_norm', 'affine', 'has_residual', 'prenorm', 'residual_in_fp32'),
+    ('T', 'D', 'is_rms_norm', 'affine', 'has_residual', 'prenorm', 'residual_in_fp32', 'has_linear_bias', 'contiguous'),
     [
-        (1, 64, False, True, False, False, False),
-        (7, 50, True, True, False, False, False),
-        (33, 128, False, True, True, True, False),
-        (257, 128, True, True, True, True, True),
-        (17, 64, False, False, True, False, True),
-        (32, 128, True, False, False, True, True),
+        (1, 64, False, True, False, False, False, True, True),
+        (7, 50, True, True, False, False, False, True, True),
+        (33, 128, False, True, True, True, False, True, True),
+        (257, 128, True, True, True, True, True, True, True),
+        (17, 64, False, False, True, False, True, True, True),
+        (32, 128, True, False, False, True, True, True, True),
+        (65, 257, False, True, True, True, True, False, True),
+        (129, 2048, True, True, False, False, False, False, True),
+        (35, 63, False, True, True, True, True, False, False),
     ],
-    ids=['single-row', 'partial-row', 'residual', 'fp32-residual', 'no-affine', 'prenorm'],
+    ids=[
+        'single-row', 'partial-row', 'residual', 'fp32-residual', 'no-affine', 'prenorm',
+        'partial-residual', 'bitlinear', 'non-contiguous',
+    ],
 )
 @pytest.mark.parametrize(
     ('dtype', 'amp_dtype'),
@@ -176,15 +182,20 @@ def test_layernorm_linear_quant(
     has_residual: bool,
     prenorm: bool,
     residual_in_fp32: bool,
+    has_linear_bias: bool,
+    contiguous: bool,
     dtype: torch.dtype,
     amp_dtype: torch.dtype | None,
 ):
     torch.manual_seed(42)
-    x = torch.randn(T, D, device=device, dtype=dtype).requires_grad_()
+    x = torch.randn(T, D, device=device, dtype=dtype)
+    if not contiguous:
+        x = x.t().contiguous().t()
+    x.requires_grad_()
     w = torch.randn(D, device=device, dtype=dtype).requires_grad_() if affine else None
     b = torch.randn(D, device=device, dtype=dtype).requires_grad_() if affine else None
     linear_weight = torch.randn(32, D, device=device, dtype=dtype).requires_grad_()
-    linear_bias = torch.randn(32, device=device, dtype=dtype).requires_grad_()
+    linear_bias = torch.randn(32, device=device, dtype=dtype).requires_grad_() if has_linear_bias else None
     residual = torch.randn_like(x, dtype=torch.float32 if residual_in_fp32 else dtype) if has_residual else None
     if residual is not None:
         residual.requires_grad_()
@@ -203,7 +214,11 @@ def test_layernorm_linear_quant(
         ref_norm = ref_norm * w.float() + b.float()
     ref_quant = ref_norm + (activation_quant(ref_norm) - ref_norm).detach()
     ref_weight = linear_weight + (weight_quant(linear_weight) - linear_weight).detach()
-    ref = F.linear(input=ref_quant.to(out_dtype), weight=ref_weight.to(out_dtype), bias=linear_bias.to(out_dtype))
+    ref = F.linear(
+        input=ref_quant.to(out_dtype),
+        weight=ref_weight.to(out_dtype),
+        bias=linear_bias.to(out_dtype) if linear_bias is not None else None,
+    )
     if prenorm:
         ref_residual = ref_residual.to(residual.dtype if has_residual else torch.float32 if residual_in_fp32 else dtype)
         ref = (ref, ref_residual)
