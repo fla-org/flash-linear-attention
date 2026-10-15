@@ -617,6 +617,7 @@ def _scalar_decay_fwd(
         chunk_size=chunk_size,
         states_in_fp32=False,
         state_v_first=True,
+        chunk_indices=chunk_indices,
     )
     out = chunk_fwd_o(
         q=q,
@@ -658,6 +659,7 @@ def _scalar_decay_bwd(
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         states_in_fp32=False,
+        chunk_indices=chunk_indices,
     )
     dh, dh0 = chunk_bwd_dh(
         q=q,
@@ -671,6 +673,7 @@ def _scalar_decay_bwd(
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         states_in_fp32=False,
+        chunk_indices=chunk_indices,
     )
     if fuse_dv_single_k and q.shape[-1] <= 128:
         dq, dk, dv, dg_force = _scalar_decay_bwd_dqk_dv_single_k(
@@ -1019,6 +1022,7 @@ def _scalar_decay_fused_readout_fwd(
         chunk_size=chunk_size,
         states_in_fp32=False,
         state_v_first=True,
+        chunk_indices=chunk_indices,
     )
     weights = torch.empty_like(write)
     raw_output = torch.empty_like(weights) if save_o_prime else None
