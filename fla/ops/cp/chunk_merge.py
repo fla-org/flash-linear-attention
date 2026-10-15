@@ -52,6 +52,12 @@ def chunk_cp_merge_state(
     return b_h + (tl.trans(b_he) if STATE_V_FIRST else b_he)
 
 
+def _prune_merge_configs(configs, nargs, **kwargs):
+    args = {**nargs, **kwargs}
+    # reserve single-stage candidates for wide states, where shared memory limits pipelining
+    return [config for config in configs if args['BK'] > 128 or config.num_stages > 1]
+
+
 @triton.heuristics({
     'HAS_H0': lambda args: args['h0'] is not None,
     'HAS_H_SEQ_IDX': lambda args: args['h_seq_idx'] is not None,
@@ -64,6 +70,7 @@ def chunk_cp_merge_state(
         for BV in [32, 64]
     ],
     key=['HV', 'K', 'V', 'STATE_V_FIRST', 'INTRACARD_MODE'],
+    prune_configs_by={'early_config_prune': _prune_merge_configs},
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['pre_or_post_num_ranks', 'rank', 'NUM_SEQ_ENTRIES'])
