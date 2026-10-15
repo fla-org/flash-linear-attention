@@ -754,7 +754,8 @@ def chunk_kda_fwd_kernel_intra_sub_chunk(
     b_g = tl.load(p_g, mask=m_ck, other=0.0)
     b_beta = tl.load(p_beta, mask=m_c, other=0.0)
     # center the configured gate range without reading future gates or depending on sequence length
-    # with lower_bound=-5 and BC=16, each rescaling factor is bounded by exp(37.5)
+    # for a supplied lower_bound and gates in [lower_bound, 0], max(b_gq, b_gk) <= exp(-(BC - 1) * lower_bound / 2)
+    # for BC=16, lower_bound=-5: exp(-(16 - 1) * (-5) / 2) = exp(37.5) ~= 1.932e16
     if USE_GATHER:
         b_gn = gather(b_g, tl.zeros([1, BK], dtype=tl.int16), axis=0)
     else:
