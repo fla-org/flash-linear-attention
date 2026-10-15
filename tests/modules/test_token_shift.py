@@ -152,11 +152,11 @@ def test_token_shift_varlen_cache_mixed_lengths():
 
 
 def test_token_shift_cache_written_on_first_single_token_call():
-    # The first call for a cache slot may process exactly one token with no
-    # prior cache (e.g. BOS-seeded decoding); cache_out must still be written.
+    # the first call for a cache slot may process exactly one token with no prior cache (e.g. BOS-seeded decoding);
+    # cache_out must still be written.
     torch.manual_seed(42)
     x1 = torch.randn(2, 1, 64, device=device)
-    y1, cache_out1 = token_shift(x1, output_cache=True, cache=None)
+    y1, cache_out1 = token_shift(x1, cache=None, output_cache=True)
 
     assert_close(" y1", y1, -x1, 1e-3)
     assert_close("cache", cache_out1, x1[:, 0], 1e-3)
