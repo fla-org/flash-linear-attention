@@ -622,8 +622,8 @@ def chunk_kda_bwd(
         db=db,
         dg=dg,
         cu_seqlens=cu_seqlens,
-        chunk_size=chunk_size,
         chunk_indices=chunk_indices,
+        chunk_size=chunk_size,
         safe_gate=safe_gate,
         use_graph=use_graph,
     )
