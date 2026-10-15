@@ -1,0 +1,8 @@
+include NOTICE
+recursive-include LICENSES *.txt
+recursive-include build_helpers *.py
+recursive-include csrc/ascendc *
+recursive-include fla/ops/utils/backends/ascendc *.cpp *.h *.md
+include scripts/check_ascendc_cumsum.py
+prune fla/utils/ascendc/_native
+global-exclude __pycache__ *.pyc

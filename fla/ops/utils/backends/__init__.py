@@ -7,6 +7,7 @@
 
 """Utils op backends."""
 
+from fla.ops.utils.backends.ascendc import AscendCUtilsBackend
 from fla.ops.utils.backends.triton_ascend import TritonAscendUtilsBackend
 
-__all__ = ['TritonAscendUtilsBackend']
+__all__ = ['AscendCUtilsBackend', 'TritonAscendUtilsBackend']

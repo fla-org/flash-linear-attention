@@ -51,3 +51,6 @@ __pycache__
 
 # macOS
 .DS_Store
+
+# optional AscendC build products
+fla/utils/ascendc/_native/

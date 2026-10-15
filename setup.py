@@ -9,8 +9,11 @@ import ast
 import os
 import re
 from pathlib import Path
+from runpy import run_path
 
 from setuptools import find_packages, setup
+
+CMDCLASS = run_path(str(Path(__file__).parent / 'build_helpers/ascendc.py'))['CMDCLASS']
 
 with open('README.md') as f:
     long_description = f.read()
@@ -28,7 +31,10 @@ def get_package_version():
 setup(
     name='flash-linear-attention',
     version=get_package_version(),
-    packages=find_packages(),
+    packages=find_packages(include=['fla', 'fla.*']),
+    cmdclass=CMDCLASS,
+    include_package_data=True,
+    license_files=['LICENSE', 'NOTICE', 'LICENSES/*.txt', 'csrc/ascendc/include/torch_stable_abi/LICENSE'],
     long_description=long_description,
     long_description_content_type='text/markdown',
 )

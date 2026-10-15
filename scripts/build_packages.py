@@ -139,7 +139,7 @@ def build_split_packages(output_dir: str | Path | None = None):
 
     # copy core files
     fla_core = core_dir / 'fla'
-    ignore = shutil.ignore_patterns('__pycache__')
+    ignore = shutil.ignore_patterns('__pycache__', '_native')
     shutil.copytree(root_dir / 'fla' / 'ops', fla_core / 'ops', ignore=ignore)
     shutil.copytree(root_dir / 'fla' / 'modules', fla_core / 'modules', ignore=ignore)
     shutil.copytree(root_dir / 'fla' / 'utils', fla_core / 'utils', ignore=ignore)
@@ -159,6 +159,21 @@ def build_split_packages(output_dir: str | Path | None = None):
 
     # create fla-core configs
     create_pyproject_toml(core_dir, 'fla-core', version, core_deps, core_extras)
+    for dirname in ('build_helpers', 'csrc', 'LICENSES'):
+        shutil.copytree(root_dir / dirname, core_dir / dirname, ignore=ignore)
+    for fname in ('MANIFEST.in', 'NOTICE'):
+        shutil.copy(root_dir / fname, core_dir / fname)
+    (core_dir / 'scripts').mkdir()
+    shutil.copy(root_dir / 'scripts/check_ascendc_cumsum.py', core_dir / 'scripts/check_ascendc_cumsum.py')
+    (core_dir / 'setup.py').write_text(
+        'from setuptools import setup\n'
+        'from pathlib import Path\n'
+        'from runpy import run_path\n'
+        'cmdclass = run_path(str(Path(__file__).parent / "build_helpers/ascendc.py"))["CMDCLASS"]\n'
+        'setup(cmdclass=cmdclass, include_package_data=True, '
+        'license_files=["LICENSE", "NOTICE", "LICENSES/*.txt", '
+        '"csrc/ascendc/include/torch_stable_abi/LICENSE"])\n'
+    )
 
     # create flash-linear-attention package
     ext_dir = output_dir / 'flash-linear-attention'

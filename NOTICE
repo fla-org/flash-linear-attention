@@ -1,0 +1,14 @@
+The AscendC chunk_local_cumsum implementation under
+fla/ops/utils/backends/ascendc/csrc is adapted from
+https://github.com/flashserve/flash-linear-attention-npu at commit
+066f47e4f1c41f8a2227142f3114bc60c4554dee.
+
+The op_host and op_kernel files retain their CANN Open Software License
+Agreement Version 2.0 notices. See LICENSES/CANN-Open-Software-License-Agreement-Version-2.0.txt.
+
+The Stable ABI bridge and supporting headers under csrc/ascendc are adapted
+from that repository under BSD-3-Clause, except where file-level notices
+specify otherwise. See LICENSES/BSD-3-Clause.txt.
+
+csrc/ascendc/include/torch_stable_abi contains the vendored PyTorch 2.9.0
+Stable ABI header closure, with its original LICENSE and MANIFEST.sha256.

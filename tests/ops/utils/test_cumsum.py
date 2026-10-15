@@ -289,3 +289,88 @@ def test_local_cumsum_varlen(
     ], 1)
     tri = chunk_local_cumsum(s, chunk_size=C, cu_seqlens=cu_seqlens)
     assert_close('local_cumsum', ref, tri, 1e-3)
+
+
+@pytest.fixture
+def ascendc_native(monkeypatch):
+    if not IS_NPU or os.getenv('FLA_ASCENDC', '0') == '0':
+        pytest.skip('Requires an Ascend950 native wheel and FLA_ASCENDC=1 at process startup')
+    import fla.utils.ascendc as native
+
+    assert native.is_available(), 'The requested AscendC test must use a native wheel'
+    assert torch.npu.get_device_name().startswith('Ascend950')
+    assert os.getenv('FLA_DISABLE_BACKEND_DISPATCH', '0') != '1'
+    calls = []
+    implementation = native.chunk_local_cumsum
+
+    def record(*args, **kwargs):
+        calls.append(kwargs['g'].shape)
+        return implementation(*args, **kwargs)
+
+    monkeypatch.setattr(native, 'chunk_local_cumsum', record)
+    return calls
+
+
+@pytest.mark.parametrize('shape', [(1, 1, 1), (2, 63, 3), (2, 64, 4), (2, 65, 3),
+                                   (1, 127, 5), (1, 128, 5), (2, 129, 3), (1, 257, 7), (2, 1025, 17)])
+@pytest.mark.parametrize('chunk_size', [64, 128])
+@pytest.mark.parametrize('dtype', [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize('scale', [None, 0.0, -0.5, 1.3])
+@pytest.mark.parametrize('strided', [False, True])
+def test_ascendc_local_cumsum(ascendc_native, shape, chunk_size, dtype, scale, strided):
+    torch.manual_seed(42)
+    B, T, H = shape
+    x = torch.randn(B, T, H * (2 if strided else 1), dtype=dtype, device=device)
+    if strided:
+        x = x[..., ::2]
+    cpu = x.cpu().double()
+    ref = torch.cat([part.cumsum(1) for part in cpu.split(chunk_size, dim=1)], dim=1)
+    ref = (ref * (1.0 if scale is None else scale)).float()
+    actual = chunk_local_cumsum(x, chunk_size=chunk_size, scale=scale)
+    torch.npu.synchronize()
+    assert ascendc_native == [torch.Size((B, H, T))], 'The public entry must execute the native adapter exactly once'
+    assert actual.shape == x.shape and actual.dtype == torch.float32 and actual.device == x.device
+    assert torch.isfinite(actual).all()
+    actual = actual.cpu()
+    assert_close('ascendc_local_cumsum', ref, actual, 1e-3)
+    error_ratio = (ref - actual).square().mean().sqrt() / (ref.square().mean().sqrt() + 1e-8)
+    # enforce the existing budget even when FLA_CI_ENV enables warnings
+    assert error_ratio < 1e-3
+
+
+@pytest.mark.parametrize('case', ['vector', 'reverse', 'varlen', 'output_dtype', 'chunk32'])
+def test_ascendc_local_cumsum_fallback(ascendc_native, case):
+    torch.manual_seed(42)
+    shape = (1, 129, 3, 5) if case == 'vector' else (1, 129, 3)
+    x = torch.randn(shape, device=device)
+    chunk_size = 32 if case == 'chunk32' else 64
+    kwargs = {'reverse': case == 'reverse'}
+    boundaries = [0, 33, 129] if case == 'varlen' else [0, 129]
+    if case == 'varlen':
+        kwargs['cu_seqlens'] = torch.tensor(boundaries, device=device, dtype=torch.int32)
+    if case == 'output_dtype':
+        kwargs['output_dtype'] = torch.float16
+    cpu = x.cpu().double()
+    parts = []
+    for start, end in zip(boundaries[:-1], boundaries[1:]):
+        for part in cpu[:, start:end].split(chunk_size, dim=1):
+            parts.append(part.flip(1).cumsum(1).flip(1) if case == 'reverse' else part.cumsum(1))
+    ref = torch.cat(parts, dim=1).to(kwargs.get('output_dtype', torch.float32))
+    actual = chunk_local_cumsum(x, chunk_size=chunk_size, **kwargs)
+    torch.npu.synchronize()
+    assert ascendc_native == [], 'Unsupported calls must retain the existing backend route'
+    assert torch.isfinite(actual).all()
+    assert_close('ascendc_fallback', ref.float(), actual.cpu().float(), 1e-3)
+
+
+def test_ascendc_local_cumsum_stream(ascendc_native):
+    stream = torch.npu.Stream()
+    with torch.npu.stream(stream):
+        x = torch.arange(129, device=device, dtype=torch.float32).reshape(1, 129, 1)
+        x = x * 0.5 + 1
+        actual = chunk_local_cumsum(x, chunk_size=64)
+        consumed = actual + 2
+    stream.synchronize()
+    ref = torch.cat([part.cumsum(1) for part in x.cpu().split(64, dim=1)], dim=1) + 2
+    assert len(ascendc_native) == 1
+    torch.testing.assert_close(consumed.cpu(), ref, rtol=0, atol=0)
