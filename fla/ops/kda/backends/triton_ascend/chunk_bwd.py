@@ -869,7 +869,8 @@ def chunk_kda_bwd_wy_dqkg_fused_npu(
         K=K,
         V=V,
         BT=BT,
-        BC=32 if BT >= 32 else _BC,
+        # BC=32 exceeds the UB budget sized for _BC and fails to compile.
+        BC=_BC,
         BK=BK,
         BV=BV,
         STATE_V_FIRST=state_v_first,
