@@ -186,6 +186,61 @@ def test_fused_recurrent(
 
 
 @pytest.mark.parametrize(
+    ('lengths', 'D'),
+    [pytest.param((5, 7), 16, id='short-D16'), pytest.param((33, 65), 100, id='partial-D100')],
+)
+@pytest.mark.parametrize('use_initial_state', [False, True])
+def test_fused_recurrent_varlen(lengths, D, use_initial_state):
+    torch.manual_seed(42)
+    N, T, H = len(lengths), sum(lengths), 2
+    cu_seqlens = torch.tensor([0, *torch.tensor(lengths).cumsum(0).tolist()], device=device, dtype=torch.long)
+    q, k, v = [torch.randn(1, T, H, D, dtype=torch.float32, device=device, requires_grad=True) for _ in range(3)]
+    a = F.normalize(torch.rand_like(q), p=2, dim=-1).requires_grad_()
+    b = (-a.detach()).requires_grad_()
+    h0 = torch.randn(N, H, D, D, dtype=torch.float32, device=device, requires_grad=True) if use_initial_state else None
+    inputs = (q, k, v, a, b) + ((h0,) if h0 is not None else ())
+    outputs, states = [], []
+    start = 0
+    for i, length in enumerate(lengths):
+        end = start + length
+        out, state = recurrence_iplr_delta_rule_ref(
+            q=q[:, start:end],
+            k=k[:, start:end],
+            v=v[:, start:end],
+            a=a[:, start:end],
+            b=b[:, start:end],
+            initial_state=h0[i:i+1] if h0 is not None else None,
+        )
+        outputs.append(out)
+        states.append(state)
+        start = end
+    ref, ref_ht = torch.cat(outputs, dim=1), torch.cat(states)
+    do, dht = torch.rand_like(ref), torch.rand_like(ref_ht)
+    ((ref * do).sum() + (ref_ht * dht).sum()).backward()
+    ref_grads = [tensor.grad for tensor in inputs]
+    for tensor in inputs:
+        tensor.grad = None
+    tri, tri_ht = fused_recurrent_iplr_delta_rule(
+        q=q,
+        k=k,
+        v=v,
+        a=a,
+        b=b,
+        initial_state=h0,
+        output_final_state=True,
+        cu_seqlens=cu_seqlens,
+    )
+    assert tri_ht.shape == (N, H, D, D)
+    ((tri * do).sum() + (tri_ht * dht).sum()).backward()
+    assert torch.isfinite(tri).all() and torch.isfinite(tri_ht).all()
+    assert_close('o', ref, tri, 0.003)
+    assert_close('ht', ref_ht, tri_ht, 0.003)
+    for name, expected, tensor in zip(('dq', 'dk', 'dv', 'da', 'db', 'dh0'), ref_grads, inputs):
+        assert torch.isfinite(tensor.grad).all()
+        assert_close(name, expected, tensor.grad, 0.003)
+
+
+@pytest.mark.parametrize(
     ('B', 'T', 'H', 'D', 'scale', 'dtype'),
     [
         pytest.param(*test, id="B{}-T{}-H{}-D{}-scale{}-{}".format(*test))
