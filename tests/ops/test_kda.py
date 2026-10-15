@@ -17,7 +17,7 @@ import triton
 
 from fla.ops.kda import chunk_kda, fused_recurrent_kda
 from fla.ops.kda.fused_recurrent import fused_recurrent_kda_fwd
-from fla.ops.kda.gate import fused_kda_gate, naive_kda_gate, naive_kda_lowerbound_gate
+from fla.ops.kda.gate import fused_kda_gate, kda_gate_chunk_cumsum, naive_kda_gate, naive_kda_lowerbound_gate
 from fla.ops.kda.naive import naive_chunk_kda, naive_recurrent_kda
 from fla.ops.utils.cache import FLA_CACHE_MODE
 from fla.utils import IS_INTEL_ALCHEMIST, IS_NPU, IS_NVIDIA, assert_close, device
@@ -1267,6 +1267,58 @@ def test_gate(
         assert_close("dbias", ref_dbias / grad_scale, tri_dbias / grad_scale, 1e-4)
 
 
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'C', 'D'),
+    [(2, 63, 2, 32, 30), (2, 129, 3, 64, 64), (4, 1024, 4, 64, 128), (2, 257, 2, 128, 256)],
+    ids=['tail-D30', 'tail-D64', 'full-D128', 'tail-D256'],
+)
+@pytest.mark.parametrize('dtype', [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(
+    ('lower_bound', 'has_A', 'has_bias'),
+    [(None, True, True), (-5.0, True, True), (-1.0, False, False)],
+    ids=['softplus', 'bounded', 'bounded-no-params'],
+)
+@pytest.mark.parametrize('scale', [None, 1.4426950408889634])
+@pytest.mark.skipif(IS_NPU, reason='the fixed reduction layout applies to the default Triton backend')
+@pytest.mark.skipif(os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1', reason='varlen tests are disabled')
+def test_gate_chunk_cumsum_dense_varlen(B, T, H, C, D, dtype, lower_bound, has_A, has_bias, scale):
+    torch.manual_seed(42)
+    g = torch.randn(B, T, H, D, dtype=dtype, device=device) * 10
+    A_log = torch.rand(H, dtype=torch.float32, device=device) if has_A else None
+    dt_bias = torch.randn(H * D, dtype=torch.float32, device=device) if has_bias else None
+    cu_seqlens = torch.arange(0, (B + 1) * T, T, dtype=torch.int32, device=device)
+    if lower_bound is None:
+        gate = naive_kda_gate(g=g, A_log=A_log, dt_bias=dt_bias)
+    else:
+        gate = naive_kda_lowerbound_gate(g=g, A_log=A_log, dt_bias=dt_bias, lower_bound=lower_bound)
+    ref = torch.cat([part.cumsum(1) for part in gate.split(C, dim=1)], dim=1)
+    if scale is not None:
+        ref *= scale
+
+    dense = kda_gate_chunk_cumsum(
+        g=g,
+        A_log=A_log,
+        chunk_size=C,
+        scale=scale,
+        dt_bias=dt_bias,
+        lower_bound=lower_bound,
+    )
+    packed = kda_gate_chunk_cumsum(
+        g=g.reshape(1, B * T, H, D),
+        A_log=A_log,
+        chunk_size=C,
+        scale=scale,
+        dt_bias=dt_bias,
+        cu_seqlens=cu_seqlens,
+        lower_bound=lower_bound,
+    ).reshape_as(dense)
+
+    assert torch.isfinite(dense).all() and torch.isfinite(packed).all()
+    assert_close('gate_chunk_cumsum', ref, dense, 1e-4)
+    assert_close('gate_chunk_cumsum_varlen', ref, packed, 1e-4)
+    torch.testing.assert_close(dense.view(torch.int32), packed.view(torch.int32), rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 def test_chunk_return_intermediate_states(dtype):
     """Test that return_intermediate_states=True works in inference mode and returns h with correct shape."""
@@ -1685,3 +1737,4 @@ def test_triton_ascend_backend_routing():
     finally:
         for name in _TRITON_ASCEND_KDA_OPS:
             delattr(backend, name)
+

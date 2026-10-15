@@ -289,3 +289,39 @@ def test_local_cumsum_varlen(
     ], 1)
     tri = chunk_local_cumsum(s, chunk_size=C, cu_seqlens=cu_seqlens)
     assert_close('local_cumsum', ref, tri, 1e-3)
+
+
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'C', 'D'),
+    [(2, 63, 2, 32, 30), (2, 129, 3, 64, 64), (4, 1024, 4, 64, 128), (2, 257, 2, 128, 256)],
+    ids=['tail-D30', 'tail-D64', 'full-D128', 'tail-D256'],
+)
+@pytest.mark.parametrize('dtype', [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize('reverse', [False, True])
+@pytest.mark.parametrize('scale', [None, 1.4426950408889634])
+@pytest.mark.skipif(IS_NPU, reason='the fixed reduction layout applies to the default Triton backend')
+@pytest.mark.skipif(os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1', reason='varlen tests are disabled')
+def test_local_cumsum_dense_varlen(B, T, H, C, D, dtype, reverse, scale):
+    torch.manual_seed(42)
+    s = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    cu_seqlens = torch.arange(0, (B + 1) * T, T, dtype=torch.int32, device=device)
+    ref = torch.cat([
+        reversed_cumsum(part.float(), dim=1) if reverse else part.float().cumsum(1)
+        for part in s.split(C, dim=1)
+    ], dim=1)
+    if scale is not None:
+        ref *= scale
+
+    dense = chunk_local_cumsum(g=s, chunk_size=C, reverse=reverse, scale=scale)
+    packed = chunk_local_cumsum(
+        g=s.reshape(1, B * T, H, D),
+        chunk_size=C,
+        reverse=reverse,
+        scale=scale,
+        cu_seqlens=cu_seqlens,
+    ).reshape_as(dense)
+
+    assert torch.isfinite(dense).all() and torch.isfinite(packed).all()
+    assert_close('local_cumsum', ref, dense, 1e-3)
+    assert_close('local_cumsum_varlen', ref, packed, 1e-3)
+    torch.testing.assert_close(dense.view(torch.int32), packed.view(torch.int32), rtol=0, atol=0)
