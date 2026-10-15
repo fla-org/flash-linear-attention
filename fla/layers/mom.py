@@ -287,6 +287,17 @@ def reconstruct(
     return restored_x
 
 
+def _pack_slots(selected_memories: torch.Tensor, num_memories: int):
+    """Sort token slots by memory, batch row, and position, including empty sequences in the offsets."""
+    batch_size = selected_memories.shape[0]
+    sequence_ids = selected_memories * batch_size + torch.arange(batch_size, device=selected_memories.device)[:, None, None]
+    sequence_ids = sequence_ids.flatten()
+    order = sequence_ids.argsort(stable=True)
+    lengths = torch.bincount(sequence_ids, minlength=num_memories * batch_size)
+    cu_seqlens = F.pad(lengths.cumsum(dim=0, dtype=torch.int32), (1, 0))
+    return order, order.argsort(), cu_seqlens
+
+
 class MomAttention(nn.Module):
     """
     The layer implementation for [MoM: Linear Sequence Modeling with Mixture-of-Memories](https://arxiv.org/abs/2502.13685).
@@ -488,8 +499,16 @@ class MomAttention(nn.Module):
         batch_size, seq_len = hidden_states.shape[0], hidden_states.shape[1]
 
         shared_hidden_states = hidden_states
-        hidden_states, indices, sorted_indices, max_len, mask, mask_2 = transform(
-            hidden_states, routing_mask, self.num_memories, selected_memories, attention_mask)
+        packed = not use_cache and past_key_values is None and attention_mask is None and origin_cu_seqlens is None
+        if packed:
+            order, inverse, packed_cu_seqlens = _pack_slots(selected_memories, self.num_memories)
+            hidden_states = hidden_states.flatten(0, 1)[order // self.topk].unsqueeze(0)
+            memory_lengths = packed_cu_seqlens[batch_size::batch_size] - packed_cu_seqlens[:-1:batch_size]
+            parts = hidden_states.split(memory_lengths.tolist(), dim=1)
+        else:
+            hidden_states, indices, sorted_indices, max_len, mask, mask_2 = transform(
+                hidden_states, routing_mask, self.num_memories, selected_memories, attention_mask)
+            parts = hidden_states
 
         q = self.q_proj(hidden_states)
         if self.single_kv_proj:
@@ -498,16 +517,25 @@ class MomAttention(nn.Module):
             beta = self.shared_b(hidden_states).sigmoid()
             g = -self.A_log.float().exp() * F.softplus(self.shared_a(hidden_states).float() + self.dt_bias)
         else:
-            k = torch.stack([k_expert(hidden_states[i]) for i, k_expert in enumerate(self.k_proj)], dim=0)
-            v = torch.stack([v_expert(hidden_states[i]) for i, v_expert in enumerate(self.v_proj)], dim=0)
-            beta = torch.stack([b_expert(hidden_states[i]).sigmoid() for i, b_expert in enumerate(self.b_proj)], dim=0)
-            g = torch.stack([-self.A_log.float().exp() * F.softplus(a_expert(hidden_states[i]).float() + self.dt_bias)
-                            for i, a_expert in enumerate(self.a_proj)], dim=0)
+            k = [k_expert(x) for x, k_expert in zip(parts, self.k_proj)]
+            v = [v_expert(x) for x, v_expert in zip(parts, self.v_proj)]
+            beta = [b_expert(x).sigmoid() for x, b_expert in zip(parts, self.b_proj)]
+            g = [-self.A_log.float().exp() * F.softplus(a_expert(x).float() + self.dt_bias)
+                 for x, a_expert in zip(parts, self.a_proj)]
+            if packed:
+                k, v, beta, g = (torch.cat(x, dim=1) for x in (k, v, beta, g))
+            else:
+                k, v, beta, g = (torch.stack(x, dim=0) for x in (k, v, beta, g))
 
-        q, k, v, g, beta, mask_2 = (rearrange(x, 'e b l ... ->  (e b) l ...') for x in (q, k, v, g, beta, mask_2))
-        cu_q, cu_k, cu_v, cu_g, cu_beta, indices_q, cu_seqlen_all, max_seq_lens = _upad_input(q, k, v, g, beta, mask_2)
+        if packed:
+            cu_q, cu_k, cu_v, cu_g, cu_beta = q, k, v, g, beta
+            cu_seqlen_all = (packed_cu_seqlens, packed_cu_seqlens)
+        else:
+            q, k, v, g, beta, mask_2 = (rearrange(x, 'e b l ... -> (e b) l ...') for x in (q, k, v, g, beta, mask_2))
+            cu_q, cu_k, cu_v, cu_g, cu_beta, indices_q, cu_seqlen_all, max_seq_lens = _upad_input(
+                q, k, v, g, beta, mask_2)
+            cu_q, cu_k, cu_v, cu_g, cu_beta = (x.unsqueeze(0).contiguous() for x in (cu_q, cu_k, cu_v, cu_g, cu_beta))
         cu_seqlens, reverse_indices = cu_seqlen_all[0].to(torch.long).unique(return_inverse=True)
-        cu_q, cu_k, cu_v, cu_g, cu_beta = (x.unsqueeze(0).contiguous() for x in (cu_q, cu_k, cu_v, cu_g, cu_beta))
 
         if self.use_short_conv:
             conv_state_q, conv_state_k, conv_state_v = [None, None], [None, None], [None, None]
@@ -640,11 +668,15 @@ class MomAttention(nn.Module):
             )
 
         o = o.squeeze(0).contiguous()
-        o = pad_input(o, indices_q, batch_size*self.num_memories, max_len)
-        o = rearrange(o, '(e b) l h d -> e b l (h d)', b=batch_size)
-        o = reconstruct(o, indices=indices, sorted_indices=sorted_indices, batch_size=batch_size,
-                        seq_len=seq_len, topk=self.topk, routing_weights=routing_weights, mask=mask)
-        o = rearrange(o, 'b l (h d) -> b l h d', h=self.num_heads)
+        if packed:
+            o = o[inverse].unflatten(dim=0, sizes=(batch_size, seq_len, self.topk))
+            o = (o * routing_weights[..., None, None]).sum(dim=2)
+        else:
+            o = pad_input(o, indices_q, batch_size*self.num_memories, max_len)
+            o = rearrange(o, '(e b) l h d -> e b l (h d)', b=batch_size)
+            o = reconstruct(o, indices=indices, sorted_indices=sorted_indices, batch_size=batch_size,
+                            seq_len=seq_len, topk=self.topk, routing_weights=routing_weights, mask=mask)
+            o = rearrange(o, 'b l (h d) -> b l h d', h=self.num_heads)
 
         if self.shared_mem:
             shared_o = self.shared_o(shared_hidden_states, attention_mask, recurrent_state,
