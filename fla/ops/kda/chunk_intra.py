@@ -814,39 +814,47 @@ def chunk_kda_fwd_intra(
 ):
     """Compute intra-chunk factors and solve the triangular KDA system.
 
-    The default Triton safe_gate path shares a per-channel anchor C within each diagonal BC x BC tile.
-    With cumulative log2 gates G_i, the dot products use q_i * 2**(G_i - C) and k_j * 2**(C - G_j).
-    C cancels in exact arithmetic, but floating-point rounding can retain a dependence on C.
-    Masking j > i after the dot product does not remove that dependence from causal entries.
+    The default Triton safe_gate path uses matrix multiplies to process diagonal blocks.
+    It applies part of the gate decay to the queries and the rest to the keys.
+    These intermediate factors can overflow or underflow, so a shared reference balances their magnitudes.
+    With cumulative gates G in natural-log units and reference C, the decay is split as:
 
-    Choosing C = G_r with r = min(BC // 2, n - 1), where n is the number of valid rows,
-    reads future gates for rows i < r. For example, BC=4 and C=G_2:
+        exp(G_i - G_j) = exp(G_i - C) * exp(C - G_j)
 
-                    key j   0 1 2 3
-                query i
-                    0       x . . .
-                    1       x x . .
-                    2       o o o .  <- anchor row
-                    3       o o o o
+    Choosing a middle token as the reference reads a future gate for earlier queries.
+    For example, using token 2 as the reference in a four-token block affects the entries marked x:
 
-    Here x marks causal entries whose rescaling reads future gates; o marks the other causal entries.
-    Dots mark masked entries. This dependency repeats within each diagonal tile along the chunk diagonal.
+                                key token
+                                0  1  2  3
+                query token 0   x  .  .  .
+                            1   x  x  .  .
+                            2   o  o  o  .  <- reference token
+                            3   o  o  o  o
 
-    The safe path instead uses C = G_0 + GATE_SHIFT, with a configuration-derived offset in log2 units:
+    Both x and o are allowed by the causal mask; dots are masked out.
+    Even the score between query 1 and key 0 uses token 2 through the reference.
+    The two factors cancel C in exact arithmetic, but their floating-point rounding errors need not cancel.
+    Changing token 2 can therefore change an earlier output. Masking future keys cannot fix this,
+    because the affected scores are already in the allowed triangle. The issue recurs in each diagonal block.
+
+    To avoid reading a future gate, the reference starts from the first token in the block.
+    A fixed shift then balances the factors using the configured gate bound, without inspecting later tokens.
+    If each log gate lies in [L, 0], with L < 0, the remaining BC - 1 steps can accumulate between (BC - 1)*L and 0.
+    Placing the reference halfway through this allowed range gives:
+
+        C = G_0 + (BC - 1) * L / 2
+        max_i max(exp(G_i - C), exp(C - G_i)) <= exp(-(BC - 1) * L / 2)
+
+    For BC=16 and L=-5, the upper bound is exp(-(16 - 1) * (-5) / 2) = exp(37.5) ~= 1.932e16.
+    The kernel works in log2 units, so the shift passed from the host is:
 
         GATE_SHIFT = 0.5 * (BC - 1) * (lower_bound * RCP_LN2)
 
-    The same shift is used in forward and backward. BC stays fixed for partial tiles,
-    so the anchor depends on neither future gates nor sequence length.
-    For a supplied natural-log lower_bound L < 0 and per-step log gates in [L, 0],
-    the rescaling factors satisfy:
+    Forward and backward use the same reference. Partial blocks keep the configured width BC,
+    so appending tokens cannot move the reference for earlier rows.
+    If lower_bound is omitted, the reference is the first token with no shift; the balanced bound above does not apply.
 
-        max_i max(2**(G_i - C), 2**(C - G_i)) <= 2**(-GATE_SHIFT) = exp(-(BC - 1) * L / 2)
-
-    Substituting BC=16 and L=-5 gives exp(-(16 - 1) * (-5) / 2) = exp(37.5) ~= 1.932e16.
-    With lower_bound=None, GATE_SHIFT=0 and C=G_0; the supplied-bound estimate above does not apply.
-
-    Related analysis: https://drisspg.github.io/nuggets/KDA-Future-Token-Leakage
+    Further explanation: https://drisspg.github.io/nuggets/KDA-Future-Token-Leakage
     """
     B, T, H, K, HV = *k.shape, gk.shape[2]
     BT = chunk_size
