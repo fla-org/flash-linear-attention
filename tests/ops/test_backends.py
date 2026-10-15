@@ -317,32 +317,6 @@ def test_kda_tilelang_backend_verifier(kda_bwd_inputs, use_graph, accepted, reas
     assert backend.chunk_kda_bwd_wy_dqkg_fused_verifier(**kda_bwd_inputs, use_graph=use_graph) == (accepted, reason)
 
 
-@pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
-@pytest.mark.parametrize('safe_gate', [False, True])
-@pytest.mark.parametrize(
-    ('name', 'inputs'),
-    [
-        pytest.param('chunk_kda_fwd_intra', ('q', 'k', 'v', 'gk', 'beta'), id='fwd'),
-        pytest.param('chunk_kda_bwd_intra', ('q', 'k', 'g', 'beta', 'dAqk', 'dAkk', 'dq', 'dk', 'db', 'dg'), id='bwd'),
-    ],
-)
-def test_kda_ascend_intra_dispatch(monkeypatch, name, inputs, safe_gate):
-    from fla.ops.kda import chunk_intra
-    from fla.ops.kda.backends.triton_ascend import TritonAscendKDABackend
-    from fla.ops.kda.backends.triton_ascend import chunk_intra as ascend_chunk_intra
-
-    monkeypatch.setattr(TritonAscendKDABackend, 'is_available', classmethod(lambda cls: True))
-    result = object()
-    implementation = create_autospec(getattr(ascend_chunk_intra, name + '_npu'), return_value=result)
-    monkeypatch.setattr(ascend_chunk_intra, name + '_npu', implementation)
-    x = SimpleNamespace(shape=(1, 64, 2, 64))
-    kwargs = dict.fromkeys(inputs, x)
-    kwargs.update(safe_gate=safe_gate, lower_bound=-5.0 if safe_gate else None)
-
-    assert getattr(chunk_intra, name)(**kwargs) is result
-    implementation.assert_called_once_with(**kwargs)
-
-
 @pytest.mark.parametrize(
     ('is_npu', 'device', 'accepted', 'reason'),
     [

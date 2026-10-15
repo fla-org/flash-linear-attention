@@ -545,7 +545,6 @@ def chunk_kda_fwd_intra_npu(
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
     safe_gate: bool = False,
-    lower_bound: float | None = None,
     disable_recompute: bool = False,
     use_graph: bool = False,
 ):
@@ -935,7 +934,6 @@ def chunk_kda_bwd_intra_npu(
     chunk_indices: torch.LongTensor | None = None,
     chunk_size: int = 64,
     safe_gate: bool = False,
-    lower_bound: float | None = None,
     use_graph: bool = False,
 ):
     B, T, H, K, HV = *k.shape, g.shape[2]
@@ -962,7 +960,6 @@ def chunk_kda_bwd_intra_npu(
             chunk_indices=chunk_indices,
             chunk_size=chunk_size,
             safe_gate=safe_gate,
-            lower_bound=lower_bound,
             use_graph=use_graph,
         )
     # The 192KB UB budget caps how many BCxBK fp32 tiles stay live, so BC must

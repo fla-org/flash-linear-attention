@@ -19,6 +19,8 @@ from fla.ops.utils.op import exp, unflatten_program_id
 from fla.ops.utils.softplus import softplus
 from fla.utils import IS_AMD, autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, check_shared_mem, input_guard
 
+_SAFE_GATE_MIN = -5.0
+
 BS_LIST = [32, 64] if check_shared_mem() else [16, 32]
 BT_LIST_AUTOTUNE = [32, 64, 128]
 NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if IS_AMD else [4, 8, 16, 32]
