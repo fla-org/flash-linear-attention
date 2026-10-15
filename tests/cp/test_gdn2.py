@@ -14,7 +14,7 @@ import torch.distributed as dist
 import torch.nn.functional as F
 import triton
 
-from cp.utils import gather_global
+from cp.utils import assert_chunk_matches_cp, gather_global
 from fla.ops.cp import build_cp_context
 from fla.ops.gdn2 import chunk_gdn2
 from fla.ops.gdn2.naive import naive_recurrent_gdn2
@@ -301,3 +301,31 @@ def test_chunk(run_distributed, world_size, T, lengths, disable_recompute, state
         lower_bound=-5.0,
         state_v_first=state_v_first,
     )
+
+
+def _run_chunk_gradients(rank: int, world_size: int, state_v_first: bool):
+    torch.manual_seed(42)
+    device = torch.device(device_type, rank)
+    T, H, K, V = 256, 2, 64, 80
+    q, k = [torch.randn(1, T, H, K, dtype=torch.bfloat16, device=device) for _ in range(2)]
+    v = torch.randn(1, T, H, V, dtype=torch.bfloat16, device=device)
+    g = torch.full_like(k, -0.01)
+    b = torch.randn_like(k).sigmoid()
+    w = torch.randn_like(v).sigmoid()
+    do = torch.randn_like(v)
+    cu_seqlens = torch.tensor([0, 80, 190, T], device=device)
+    assert_chunk_matches_cp(
+        op=chunk_gdn2,
+        inputs=dict(q=q, k=k, v=v, g=g, b=b, w=w),
+        do=do,
+        cu_seqlens=cu_seqlens,
+        rank=rank,
+        world_size=world_size,
+        use_qk_l2norm_in_kernel=True,
+        state_v_first=state_v_first,
+    )
+
+
+@pytest.mark.parametrize('state_v_first', [False, True])
+def test_chunk_gradients(run_distributed, state_v_first: bool):
+    run_distributed(_run_chunk_gradients, world_size=2, state_v_first=state_v_first)

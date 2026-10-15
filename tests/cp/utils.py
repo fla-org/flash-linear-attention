@@ -12,7 +12,8 @@ from datetime import timedelta
 import torch
 import torch.distributed as dist
 
-from fla.utils import device, device_torch_lib
+from fla.ops.cp import build_cp_context
+from fla.utils import assert_close, device, device_torch_lib
 
 
 def distributed_worker(rank, world_size, rendezvous, worker, kwargs, teardown):
@@ -49,3 +50,31 @@ def gather_global(tensor, world_size, layout='contiguous'):
         # fronts follow rank order; backs follow the reverse order
         gathered = [part[:, :part_len] for part in gathered] + [part[:, part_len:] for part in reversed(gathered)]
     return torch.cat(gathered, dim=1)
+
+
+def assert_chunk_matches_cp(op, inputs, do, cu_seqlens, rank, world_size, layout='contiguous', ratio=0.006, **kwargs):
+    def shard(tensor):
+        return slice_local(tensor, rank=rank, world_size=world_size, layout=layout).contiguous()
+
+    expected, actual = [], []
+    for cp in [False, True]:
+        leaves = {
+            name: (shard(tensor) if cp else tensor).detach().clone().requires_grad_()
+            for name, tensor in inputs.items()
+        }
+        context = build_cp_context(cu_seqlens=cu_seqlens, group=dist.group.WORLD, layout=layout) if cp else None
+        out, _ = op(
+            **leaves,
+            cu_seqlens=None if cp else cu_seqlens,
+            cp_context=context,
+            **kwargs,
+        )
+        gradients = torch.autograd.grad(outputs=out, inputs=tuple(leaves.values()), grad_outputs=shard(do) if cp else do)
+        values = [out.detach(), *gradients]
+        if cp:
+            actual = values
+        else:
+            expected = [shard(value) for value in values]
+    for name, ref, result in zip(('o', *('d' + name for name in inputs)), expected, actual):
+        assert torch.isfinite(result).all(), name
+        assert_close(name, ref, result, ratio=ratio)

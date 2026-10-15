@@ -14,7 +14,7 @@ import torch.distributed as dist
 import torch.nn.functional as F
 import triton
 
-from cp.utils import gather_global, slice_local
+from cp.utils import assert_chunk_matches_cp, gather_global, slice_local
 from fla.ops.cp import build_cp_context
 from fla.ops.kda import chunk_kda
 from fla.ops.kda.gate import naive_kda_gate, naive_kda_lowerbound_gate
@@ -318,33 +318,17 @@ def _run_chunk_gradients(rank: int, world_size: int, layout: str, state_v_first:
     do = torch.randn_like(v)
     cu_seqlens = torch.tensor([0, 80, 190, T], device=device)
 
-    def shard(tensor):
-        return slice_local(tensor, rank=rank, world_size=world_size, layout=layout).contiguous()
-
-    expected, actual = [], []
-    for cp in [False, True]:
-        leaves = [(shard(tensor) if cp else tensor).detach().clone().requires_grad_() for tensor in (q, k, v, g, beta)]
-        context = build_cp_context(cu_seqlens=cu_seqlens, group=dist.group.WORLD, layout=layout) if cp else None
-        out, _ = chunk_kda(
-            q=leaves[0],
-            k=leaves[1],
-            v=leaves[2],
-            g=leaves[3],
-            beta=leaves[4],
-            use_qk_l2norm_in_kernel=True,
-            state_v_first=state_v_first,
-            cu_seqlens=None if cp else cu_seqlens,
-            cp_context=context,
-        )
-        gradients = torch.autograd.grad(outputs=out, inputs=leaves, grad_outputs=shard(do) if cp else do)
-        values = [out.detach(), *gradients]
-        if cp:
-            actual = values
-        else:
-            expected = [shard(value) for value in values]
-    for name, ref, result in zip(('o', 'dq', 'dk', 'dv', 'dg', 'db'), expected, actual):
-        assert torch.isfinite(result).all(), name
-        assert_close(name, ref, result, ratio=0.006)
+    assert_chunk_matches_cp(
+        op=chunk_kda,
+        inputs=dict(q=q, k=k, v=v, g=g, beta=beta),
+        do=do,
+        cu_seqlens=cu_seqlens,
+        rank=rank,
+        world_size=world_size,
+        layout=layout,
+        use_qk_l2norm_in_kernel=True,
+        state_v_first=state_v_first,
+    )
 
 
 @pytest.mark.parametrize('layout', ['contiguous', 'zigzag'])
