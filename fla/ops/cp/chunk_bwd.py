@@ -9,6 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.common.chunk_delta_h_state import chunk_delta_rule_bwd_dh_state
 from fla.ops.utils.op import exp2
 from fla.utils import IS_TF32_SUPPORTED, autotune_cache_kwargs, check_shared_mem
 
@@ -83,9 +84,9 @@ def chunk_cp_bwd_kernel_dh(
     if is_dh_part:
         do += ((bos * HV + i_h) * V).to(tl.int64)
         dv += ((bos * HV + i_h) * V).to(tl.int64)
-        stride_v = HV * V
         i_v = i_col
 
+        b_dh2, b_dh3, b_dh4 = tl.full((), 0, tl.float32), tl.full((), 0, tl.float32), tl.full((), 0, tl.float32)
         b_dh1 = tl.zeros([64, BLOCK_SIZE], dtype=tl.float32)
         if K > 64:
             b_dh2 = tl.zeros([64, BLOCK_SIZE], dtype=tl.float32)
@@ -110,108 +111,31 @@ def chunk_cp_bwd_kernel_dh(
             o_t = i_t * BT + tl.arange(0, BT)
             m_t = o_t < T
 
-            if USE_G:
-                bg_last = tl.load(g + last_idx * HV).to(tl.float32)
-                p_g = g + o_t * HV
-                b_g = tl.load(p_g, mask=m_t, other=0.0).to(tl.float32)
-                bg_last_exp = exp2(bg_last)
-                b_g_exp = exp2(b_g)
-
-            p_dv = dv + o_t[:, None] * stride_v + o_vb[None, :]
-            p_do = do + o_t[:, None] * stride_v + o_vb[None, :]
-            b_do = tl.load(p_do, mask=m_t[:, None] & m_vb[None, :], other=0.0)
-
-            p_k = k + o_t[:, None] * stride_qk + o_k1[None, :]
-            b_k = tl.load(p_k, mask=m_t[:, None] & m_k1[None, :], other=0.0)
-            if USE_GK:
-                p_gk_last = gk + last_idx * HV * K
-                b_gk_last1 = tl.load(p_gk_last + o_k1, mask=(o_k1 < K), other=0.).to(tl.float32)
-            b_dv = tl.dot(b_k, b_dh1.to(b_k.dtype))
-
-            if K > 64:
-                p_k = k + o_t[:, None] * stride_qk + o_k2[None, :]
-                b_k = tl.load(p_k, mask=m_t[:, None] & m_k2[None, :], other=0.0)
-                if USE_GK:
-                    b_gk_last2 = tl.load(p_gk_last + o_k2, mask=(o_k2 < K), other=0.).to(tl.float32)
-                b_dv = tl.dot(b_k, b_dh2.to(b_k.dtype), b_dv)
-
-            if K > 128:
-                p_k = k + o_t[:, None] * stride_qk + o_k3[None, :]
-                b_k = tl.load(p_k, mask=m_t[:, None] & m_k3[None, :], other=0.0)
-                if USE_GK:
-                    b_gk_last3 = tl.load(p_gk_last + o_k3, mask=(o_k3 < K), other=0.).to(tl.float32)
-                b_dv = tl.dot(b_k, b_dh3.to(b_k.dtype), b_dv)
-
-            if K > 192:
-                p_k = k + o_t[:, None] * stride_qk + o_k4[None, :]
-                b_k = tl.load(p_k, mask=m_t[:, None] & m_k4[None, :], other=0.0)
-                if USE_GK:
-                    b_gk_last4 = tl.load(p_gk_last + o_k4, mask=(o_k4 < K), other=0.).to(tl.float32)
-                b_dv = tl.dot(b_k, b_dh4.to(b_k.dtype), b_dv)
-
-            if USE_G:
-                b_dv *= tl.where(m_t, exp2(bg_last - b_g), 0)[:, None]
-            b_dv += tl.load(p_dv, mask=m_t[:, None] & m_vb[None, :], other=0.0)
-
-            p_w = w + o_k1[:, None] + o_t[None, :] * stride_w
-            p_q = q + o_k1[:, None] + o_t[None, :] * stride_qk
-            b_w = tl.load(p_w, mask=m_k1[:, None] & m_t[None, :], other=0.0)
-            b_q = tl.load(p_q, mask=m_k1[:, None] & m_t[None, :], other=0.0)
-            if USE_G:
-                b_dh1 *= bg_last_exp
-                b_q = b_q * b_g_exp[None, :]
-            if USE_GK:
-                b_dh1 *= exp2(b_gk_last1[:, None])
-            if USE_BG:
-                # DPLR: dh += q^T @ do + w^T @ dv2 (no scale)
-                b_dh1 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) + tl.dot(b_w, b_dv.to(b_w.dtype))
-            else:
-                b_dh1 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) * scale - tl.dot(b_w, b_dv.to(b_w.dtype))
-
-            if K > 64:
-                p_q = q + o_k2[:, None] + o_t[None, :] * stride_qk
-                p_w = w + o_k2[:, None] + o_t[None, :] * stride_w
-                b_q = tl.load(p_q, mask=m_k2[:, None] & m_t[None, :], other=0.0)
-                b_w = tl.load(p_w, mask=m_k2[:, None] & m_t[None, :], other=0.0)
-                if USE_G:
-                    b_dh2 *= bg_last_exp
-                    b_q = b_q * b_g_exp[None, :]
-                if USE_GK:
-                    b_dh2 *= exp2(b_gk_last2[:, None])
-                if USE_BG:
-                    b_dh2 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) + tl.dot(b_w, b_dv.to(b_w.dtype))
-                else:
-                    b_dh2 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) * scale - tl.dot(b_w, b_dv.to(b_w.dtype))
-
-            if K > 128:
-                p_q = q + o_k3[:, None] + o_t[None, :] * stride_qk
-                p_w = w + o_k3[:, None] + o_t[None, :] * stride_w
-                b_q = tl.load(p_q, mask=m_k3[:, None] & m_t[None, :], other=0.0)
-                b_w = tl.load(p_w, mask=m_k3[:, None] & m_t[None, :], other=0.0)
-                if USE_G:
-                    b_dh3 *= bg_last_exp
-                    b_q = b_q * b_g_exp[None, :]
-                if USE_GK:
-                    b_dh3 *= exp2(b_gk_last3[:, None])
-                if USE_BG:
-                    b_dh3 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) + tl.dot(b_w, b_dv.to(b_w.dtype))
-                else:
-                    b_dh3 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) * scale - tl.dot(b_w, b_dv.to(b_w.dtype))
-
-            if K > 192:
-                p_q = q + o_k4[:, None] + o_t[None, :] * stride_qk
-                p_w = w + o_k4[:, None] + o_t[None, :] * stride_w
-                b_q = tl.load(p_q, mask=m_k4[:, None] & m_t[None, :], other=0.0)
-                b_w = tl.load(p_w, mask=m_k4[:, None] & m_t[None, :], other=0.0)
-                if USE_G:
-                    b_dh4 *= bg_last_exp
-                    b_q = b_q * b_g_exp[None, :]
-                if USE_GK:
-                    b_dh4 *= exp2(b_gk_last4[:, None])
-                if USE_BG:
-                    b_dh4 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) + tl.dot(b_w, b_dv.to(b_w.dtype))
-                else:
-                    b_dh4 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) * scale - tl.dot(b_w, b_dv.to(b_w.dtype))
+            b_dh1, b_dh2, b_dh3, b_dh4 = chunk_delta_rule_bwd_dh_state(
+                q=q,
+                k=k,
+                w=w,
+                g=g,
+                gk=gk,
+                do=do,
+                dv=dv,
+                dv2=None,
+                b_dh=(b_dh1, b_dh2, b_dh3, b_dh4),
+                o_t=o_t,
+                o_v=o_vb,
+                last_idx=last_idx,
+                T=T,
+                scale=scale,
+                H=H,
+                HV=HV,
+                K=K,
+                V=V,
+                USE_G=USE_G,
+                USE_GK=USE_GK,
+                USE_BG=USE_BG,
+                SAVE_NEW_VALUE=False,
+                STATE_V_FIRST=False,
+            )
 
         p_dh1 = dhm + o_k1[:, None] * (V + K) + o_vb[None, :]
         tl.store(p_dh1, b_dh1.to(p_dh1.dtype.element_ty), mask=m_k1[:, None] & m_vb[None, :])

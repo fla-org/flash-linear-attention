@@ -5,36 +5,27 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""
-Test for Context Parallel (CP) KDA with platform graph capture/replay.
 
-Each rank captures a fwd+bwd step (cp_context + use_graph) once, replays it with
-several cu_seqlens layouts (different splits and zero-length tail padding), and
-compares against the eager CP path on the same shard. The recorded region includes
-the cross-rank state all-gathers, so all ranks must capture and replay in lockstep.
-"""
+"""KDA graph replay matches eager CP across changing sequence boundaries and zero padding."""
 
-import logging
-import os
 
-import pytest
 import torch
 import torch.distributed as dist
-import torch.multiprocessing as mp
 import torch.nn.functional as F
 
 from fla.ops.cp import FLACPContext, build_cp_context
 from fla.ops.kda import chunk_kda
 from fla.utils import assert_close
-
-logging.basicConfig(level=logging.INFO, format='%(message)s')
+from fla.utils import device as device_type
 
 T = 1024
+
 H = 4
+
 D = 64
+
 MAX_NUM_SEQS = 4
 
-# (tag, cu_seqlens) -- all cover [0, T]; trailing repeats are zero-length padding sequences
 CONFIGS = [
     ("4seq", [0, 300, 600, 900, 1024]),
     ("2seq_zerotail", [0, 512, 1024, 1024, 1024]),
@@ -43,7 +34,9 @@ CONFIGS = [
 ]
 
 TOK_NAMES = ["q", "k", "v", "g", "beta"]
+
 NAMES = TOK_NAMES + ["A_log", "dt_bias"]
+
 OUT_NAMES = ["o", "dq", "dk", "dv", "dg", "db", "dA", "dbias"]
 
 
@@ -63,16 +56,8 @@ def rand_global(seed, device):
     return dict(q=q, k=k, v=v, g=gg, beta=beta, A_log=A_log, dt_bias=dt_bias, do=do)
 
 
-def init_distributed(rank, world_size):
-    os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '29631'
-    dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
-    torch.cuda.set_device(rank)
-
-
-def run_cp_graph_worker(rank, world_size):
-    init_distributed(rank, world_size)
-    device = torch.device('cuda', rank)
+def _run_graph(rank, world_size):
+    device = torch.device(device_type, rank)
     part = T // world_size
     lo, hi = rank * part, (rank + 1) * part
     group = dist.group.WORLD
@@ -173,7 +158,5 @@ def run_cp_graph_worker(rank, world_size):
     dist.barrier()
 
 
-def test_cp2_graph_replay_matches_eager():
-    if torch.cuda.device_count() < 2:
-        pytest.skip("At least 2 GPUs required")
-    mp.start_processes(run_cp_graph_worker, args=(2,), nprocs=2, join=True, start_method='spawn')
+def test_chunk_kda(run_distributed):
+    run_distributed(_run_graph, world_size=2, teardown=False)

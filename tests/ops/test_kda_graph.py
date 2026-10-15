@@ -322,7 +322,7 @@ def test_chunk_kda_graph_cp_world1():
     A single rank is both first and last (pre/post_num_ranks = 0), so no state crosses
     ranks and the graph-mode CP branch must match the eager CP branch. The context is
     built once around the persistent buffers: rebuilding it per step would D2H-sync,
-    which capture forbids. Multi-rank numerics are covered by tests/context_parallel.
+    which capture forbids. Multi-rank numerics are covered by tests/cp.
     """
     os.environ.setdefault("MASTER_ADDR", "localhost")
     os.environ.setdefault("MASTER_PORT", "29617")

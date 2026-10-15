@@ -1365,10 +1365,12 @@ def test_chunk_gated_delta_rule_bwd_dhu(
         assert_close('dh0', dh0_ref, dh0_tri, 0.006)
 
 
-def test_chunk_gated_delta_rule_bwd_dhu_k256_state_v_first_gk():
-    """K=V=256 + state_v_first + USE_GK so K-slabs 3/4 actually run."""
+@pytest.mark.parametrize('D', [32, 64, 96, 128, 192, 256])
+@pytest.mark.parametrize('state_v_first', [False, True])
+def test_chunk_gated_delta_rule_bwd_dhu_gk(D: int, state_v_first: bool):
+    """Vector-gated backward covers all 64-row state tiles in both storage layouts."""
     torch.manual_seed(42)
-    B, T, H, HV, D, BT = 1, 128, 1, 1, 256, 64
+    B, T, H, HV, BT = 1, 128, 1, 1, 64
     dtype = torch.bfloat16
     scale = D ** -0.5
     q = torch.randn(B, T, H, D, dtype=dtype, device=device)
@@ -1383,11 +1385,11 @@ def test_chunk_gated_delta_rule_bwd_dhu_k256_state_v_first_gk():
     dv_local = torch.randn(B, T, HV, D, dtype=dtype, device=device)
     dh_ref, dh0_ref, dv2_ref = chunk_gated_delta_rule_bwd_dhu_ref(
         q, k, w, u, None, h0, do, dht, dv_local, scale, BT,
-        gk=gk, state_v_first=True,
+        gk=gk, state_v_first=state_v_first,
     )
     dh_tri, dh0_tri, dv2_tri = chunk_gated_delta_rule_bwd_dhu(
         q=q, k=k, w=w, g=None, gk=gk, h0=h0, dht=dht, do=do, dv=dv_local,
-        scale=scale, chunk_size=BT, state_v_first=True,
+        scale=scale, chunk_size=BT, state_v_first=state_v_first,
     )
 
     assert_close('dh', dh_ref.to(dtype), dh_tri, 0.006)

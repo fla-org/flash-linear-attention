@@ -12,6 +12,46 @@ import triton.language as tl
 from fla.utils import IS_TF32_SUPPORTED, autotune_cache_kwargs
 
 
+@triton.jit
+def chunk_cp_merge_state(
+    hm,
+    b_h,
+    o_k,
+    o_v,
+    K: tl.constexpr,
+    V: tl.constexpr,
+    BK: tl.constexpr,
+    BV: tl.constexpr,
+    STATE_V_FIRST: tl.constexpr,
+    AFFINE_CHAIN_PRECISION: tl.constexpr,
+):
+    m_k, m_v = o_k < K, o_v < V
+    p_he = hm + o_k[:, None] * (V + K) + o_v[None, :]
+    b_he = tl.load(p_he, mask=m_k[:, None] & m_v[None, :], other=0.).to(tl.float32)
+    if BK <= 128:
+        p_m = hm + V + o_k[:, None] * (V + K) + o_k[None, :]
+        b_m = tl.load(p_m, mask=m_k[:, None] & m_k[None, :], other=0.).to(tl.float32)
+        if STATE_V_FIRST:
+            b_h = tl.dot(b_h.to(tl.float32), tl.trans(b_m), input_precision=AFFINE_CHAIN_PRECISION)
+        else:
+            b_h = tl.dot(b_m, b_h.to(tl.float32), input_precision=AFFINE_CHAIN_PRECISION)
+    else:
+        # a full 256-by-256 TF32x3 operand exceeds shared memory on supported GPUs
+        b_acc = tl.full(b_h.shape, 0, tl.float32)
+        for i in tl.static_range(BK // 128):
+            o_r = i * 128 + tl.arange(0, 128)
+            p_m = hm + V + o_k[:, None] * (V + K) + o_r[None, :]
+            b_m = tl.load(p_m, mask=m_k[:, None] & (o_r < K)[None, :], other=0.).to(tl.float32)
+            if STATE_V_FIRST:
+                b_hi = tl.gather(b_h, tl.broadcast_to(o_r[None, :], (BV, 128)), axis=1)
+                b_acc = tl.dot(b_hi.to(tl.float32), tl.trans(b_m), b_acc, input_precision=AFFINE_CHAIN_PRECISION)
+            else:
+                b_hi = tl.gather(b_h, tl.broadcast_to(o_r[:, None], (128, BV)), axis=0)
+                b_acc = tl.dot(b_m, b_hi.to(tl.float32), b_acc, input_precision=AFFINE_CHAIN_PRECISION)
+        b_h = b_acc
+    return b_h + (tl.trans(b_he) if STATE_V_FIRST else b_he)
+
+
 @triton.heuristics({
     'HAS_H0': lambda args: args['h0'] is not None,
     'HAS_H_SEQ_IDX': lambda args: args['h_seq_idx'] is not None,
@@ -20,7 +60,7 @@ from fla.utils import IS_TF32_SUPPORTED, autotune_cache_kwargs
     configs=[
         triton.Config({'BV': BV}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [2, 4]
-        for num_stages in [2, 3, 4]
+        for num_stages in [1, 2, 3, 4]
         for BV in [32, 64]
     ],
     key=['HV', 'K', 'V'],
@@ -94,17 +134,18 @@ def chunk_cp_fwd_bwd_kernel_merge(
             i_ss = ss_start + idx
             base = i_ss * stride_hm_s + i_h * stride_hm_h
 
-            # he and m are always in [K, V+K] layout from pre_scan
-            p_he = ag_hm + base + o_k[:, None] * (V + K) + o_v[None, :]
-            b_he = tl.load(p_he, mask=m_k[:, None] & m_v[None, :], other=0.0).to(tl.float32)
-            p_m = ag_hm + base + V + o_k[:, None] * (V + K) + o_k[None, :]
-            b_m = tl.load(p_m, mask=m_k[:, None] & m_k[None, :], other=0.0).to(tl.float32)
-            if STATE_V_FIRST:
-                # h_T' = h_T @ M^T + he^T
-                b_h = tl.dot(b_h.to(tl.float32), tl.trans(b_m), input_precision=AFFINE_CHAIN_PRECISION) + tl.trans(b_he)
-            else:
-                b_h = tl.dot(b_m.to(tl.float32), b_h.to(tl.float32),
-                             input_precision=AFFINE_CHAIN_PRECISION) + b_he.to(tl.float32)
+            b_h = chunk_cp_merge_state(
+                hm=ag_hm + base,
+                b_h=b_h,
+                o_k=o_k,
+                o_v=o_v,
+                K=K,
+                V=V,
+                BK=BK,
+                BV=BV,
+                STATE_V_FIRST=STATE_V_FIRST,
+                AFFINE_CHAIN_PRECISION=AFFINE_CHAIN_PRECISION,
+            )
 
             if idx < num_subseqs - 1:
                 init_idx = init_base + idx
@@ -136,16 +177,19 @@ def chunk_cp_fwd_bwd_kernel_merge(
                 cur_rank = rank - num_ranks + idx
             else:
                 cur_rank = rank + num_ranks - idx
-            p_ag_h = ag_hm + cur_rank * stride + o_k[:, None] * (K + V) + o_v[None, :]
-            b_ag_h = tl.load(p_ag_h, mask=m_k[:, None] & m_v[None, :], other=0.0)
-            p_ag_m = ag_hm + cur_rank * stride + V + o_k[:, None] * (K + V) + o_k[None, :]
-            b_ag_m = tl.load(p_ag_m, mask=m_k[:, None] & m_k[None, :], other=0.0)
-            if STATE_V_FIRST:
-                b_h = tl.dot(b_h.to(tl.float32), tl.trans(b_ag_m).to(tl.float32),
-                             input_precision=AFFINE_CHAIN_PRECISION) + tl.trans(b_ag_h).to(tl.float32)
-            else:
-                b_h = tl.dot(b_ag_m.to(tl.float32), b_h.to(tl.float32),
-                             input_precision=AFFINE_CHAIN_PRECISION) + b_ag_h.to(tl.float32)
+            b_h = chunk_cp_merge_state(
+                hm=ag_hm + cur_rank * stride,
+                b_h=b_h,
+                o_k=o_k,
+                o_v=o_v,
+                K=K,
+                V=V,
+                BK=BK,
+                BV=BV,
+                STATE_V_FIRST=STATE_V_FIRST,
+                AFFINE_CHAIN_PRECISION=AFFINE_CHAIN_PRECISION,
+            )
+
         if STATE_V_FIRST:
             p_h = h + o_v[:, None] * K + o_k[None, :]
             m_h = m_v[:, None] & m_k[None, :]
