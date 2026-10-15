@@ -134,3 +134,28 @@ def test_model_forward_backward():
     assert torch.isfinite(loss)
     loss.backward()
     assert all(p.grad is not None and torch.isfinite(p.grad).all() for p in model.parameters())
+
+
+def test_forward_zero_routing_weights(monkeypatch):
+    """Underflowed routing probabilities retain the padded path's slot masking."""
+    torch.manual_seed(42)
+    layer = mom.MomAttention(
+        hidden_size=64,
+        head_dim=16,
+        num_heads=4,
+        expand_v=1,
+        num_memories=7,
+        topk=3,
+    ).to(device=device).train()
+    x = torch.randn(2, 7, 64, device=device)
+    gate_forward = layer.gate.forward
+    bias = x.new_tensor([100, 99, -100, -100, -100, -100, -100])
+    monkeypatch.setattr(layer.gate, 'forward', lambda x: gate_forward(x) + bias)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail('zero routing weights called the packed path')
+
+    monkeypatch.setattr(mom, '_pack_slots', forbidden)
+    actual = layer(x)[0]
+    expected = layer(x, attention_mask=torch.ones(2, 7, device=device, dtype=torch.long))[0]
+    assert_close('o', expected, actual, 0.005)

@@ -288,11 +288,15 @@ def reconstruct(
 
 
 def _pack_slots(selected_memories: torch.Tensor, num_memories: int):
-    """Sort token slots by memory, batch row, and position, including empty sequences in the offsets."""
+    """Group slots by memory and batch row while preserving the padded implementation's token order."""
     batch_size = selected_memories.shape[0]
-    sequence_ids = selected_memories * batch_size + torch.arange(batch_size, device=selected_memories.device)[:, None, None]
-    sequence_ids = sequence_ids.flatten()
-    order = sequence_ids.argsort(stable=True)
+    batch_indices = torch.arange(batch_size, device=selected_memories.device)[:, None, None].expand_as(selected_memories)
+    memories = selected_memories.flatten()
+    batch_indices = batch_indices.flatten()
+    # the padded path's unstable sort can reorder equal keys on short inputs
+    order = (batch_indices * (memories.max() + 1) + memories).argsort()
+    sequence_ids = memories * batch_size + batch_indices
+    order = order[sequence_ids[order].argsort(stable=True)]
     lengths = torch.bincount(sequence_ids, minlength=num_memories * batch_size)
     cu_seqlens = F.pad(lengths.cumsum(dim=0, dtype=torch.int32), (1, 0))
     return order, order.argsort(), cu_seqlens
@@ -499,7 +503,10 @@ class MomAttention(nn.Module):
         batch_size, seq_len = hidden_states.shape[0], hidden_states.shape[1]
 
         shared_hidden_states = hidden_states
-        packed = not use_cache and past_key_values is None and attention_mask is None and origin_cu_seqlens is None
+        packed = (
+            not use_cache and past_key_values is None and attention_mask is None and origin_cu_seqlens is None
+            and (routing_weights != 0).all().item()
+        )
         if packed:
             order, inverse, packed_cu_seqlens = _pack_slots(selected_memories, self.num_memories)
             hidden_states = hidden_states.flatten(0, 1)[order // self.topk].unsqueeze(0)
