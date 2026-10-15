@@ -425,7 +425,7 @@ def chunk_kda_bwd_kernel_intra(
     NC: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     SAFE_GATE: tl.constexpr,
-    LOWER_BOUND: tl.constexpr,
+    GATE_SHIFT: tl.constexpr,
     USE_GATHER: tl.constexpr,
     USE_GRAPH: tl.constexpr = False,
 ):
@@ -522,7 +522,7 @@ def chunk_kda_bwd_kernel_intra(
             b_gn = gather(b_g, tl.zeros([1, BK], dtype=tl.int16), axis=0)
         else:
             b_gn = tl.load(g + i_ti * HV*K + o_k, mask=m_k, other=0)[None, :]
-        b_gn = b_gn + 0.5 * (BC - 1) * LOWER_BOUND
+        b_gn = b_gn + GATE_SHIFT
 
         p_dAqk = dAqk + o_c[:, None] * (HV*BT) + (i_i * BC + o_i)[None, :]
         p_dAkk = dAkk + o_c[:, None] * (HV*BT) + (i_i * BC + o_i)[None, :]
@@ -619,7 +619,7 @@ def chunk_kda_bwd_kernel_intra(
             b_gn = gather(b_g, tl.zeros([1, BK], dtype=tl.int16), axis=0)
         else:
             b_gn = tl.load(g + i_ti * HV*K + o_k, mask=m_k, other=0).to(tl.float32)[None, :]
-        b_gn = b_gn + 0.5 * (BC - 1) * LOWER_BOUND
+        b_gn = b_gn + GATE_SHIFT
         p_q = q + o_c[:, None] * (H*K) + o_k[None, :]
         b_q = tl.load(p_q, mask=m_ck, other=0.0)
         p_b = beta + o_c * HV
@@ -708,7 +708,7 @@ def chunk_kda_fwd_kernel_intra_sub_chunk(
     BC: tl.constexpr,
     BK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    LOWER_BOUND: tl.constexpr,
+    GATE_SHIFT: tl.constexpr,
     USE_GATHER: tl.constexpr,
     USE_GRAPH: tl.constexpr = False,
 ):
@@ -753,14 +753,11 @@ def chunk_kda_fwd_kernel_intra_sub_chunk(
     b_k = tl.load(p_k, mask=m_ck, other=0.0)
     b_g = tl.load(p_g, mask=m_ck, other=0.0)
     b_beta = tl.load(p_beta, mask=m_c, other=0.0)
-    # center the configured gate range without reading future gates or depending on sequence length
-    # for a supplied lower_bound and gates in [lower_bound, 0], max(b_gq, b_gk) <= exp(-(BC - 1) * lower_bound / 2)
-    # for BC=16, lower_bound=-5: exp(-(16 - 1) * (-5) / 2) = exp(37.5) ~= 1.932e16
     if USE_GATHER:
         b_gn = gather(b_g, tl.zeros([1, BK], dtype=tl.int16), axis=0)
     else:
         b_gn = tl.load(g + i_ti * HV*K + o_k, mask=m_k, other=0.0)[None, :]
-    b_gn = b_gn + 0.5 * (BC - 1) * LOWER_BOUND
+    b_gn = b_gn + GATE_SHIFT
 
     b_gm = (b_g - b_gn).to(tl.float32)
 
@@ -815,6 +812,42 @@ def chunk_kda_fwd_intra(
     disable_recompute: bool = False,
     use_graph: bool = False,
 ):
+    """Compute intra-chunk factors and solve the triangular KDA system.
+
+    The default Triton safe_gate path shares a per-channel anchor C within each diagonal BC x BC tile.
+    With cumulative log2 gates G_i, the dot products use q_i * 2**(G_i - C) and k_j * 2**(C - G_j).
+    C cancels in exact arithmetic, but floating-point rounding can retain a dependence on C.
+    Masking j > i after the dot product does not remove that dependence from causal entries.
+
+    Choosing C = G_r with r = min(BC // 2, n - 1), where n is the number of valid rows,
+    reads future gates for rows i < r. For example, BC=4 and C=G_2:
+
+                    key j   0 1 2 3
+                query i
+                    0       x . . .
+                    1       x x . .
+                    2       o o o .  <- anchor row
+                    3       o o o o
+
+    Here x marks causal entries whose rescaling reads future gates; o marks the other causal entries.
+    Dots mark masked entries. This dependency repeats within each diagonal tile along the chunk diagonal.
+
+    The safe path instead uses C = G_0 + GATE_SHIFT, with a configuration-derived offset in log2 units:
+
+        GATE_SHIFT = 0.5 * (BC - 1) * (lower_bound * RCP_LN2)
+
+    The same shift is used in forward and backward. BC stays fixed for partial tiles,
+    so the anchor depends on neither future gates nor sequence length.
+    For a supplied natural-log lower_bound L < 0 and per-step log gates in [L, 0],
+    the rescaling factors satisfy:
+
+        max_i max(2**(G_i - C), 2**(C - G_i)) <= 2**(-GATE_SHIFT) = exp(-(BC - 1) * L / 2)
+
+    Substituting BC=16 and L=-5 gives exp(-(16 - 1) * (-5) / 2) = exp(37.5) ~= 1.932e16.
+    With lower_bound=None, GATE_SHIFT=0 and C=G_0; the supplied-bound estimate above does not apply.
+
+    Related analysis: https://drisspg.github.io/nuggets/KDA-Future-Token-Leakage
+    """
     B, T, H, K, HV = *k.shape, gk.shape[2]
     BT = chunk_size
     if BT not in (32, 64):
@@ -851,7 +884,7 @@ def chunk_kda_fwd_intra(
             BT=BT,
             BC=BC,
             BK=BK,
-            LOWER_BOUND=lower_bound * RCP_LN2 if lower_bound is not None else 0.,
+            GATE_SHIFT=0.5 * (BC - 1) * (lower_bound * RCP_LN2) if lower_bound is not None else 0.,
             USE_GATHER=IS_GATHER_SUPPORTED,
             USE_GRAPH=use_graph,
         )
@@ -974,7 +1007,7 @@ def chunk_kda_bwd_intra(
         BK=BK,
         NC=NC,
         SAFE_GATE=safe_gate,
-        LOWER_BOUND=lower_bound * RCP_LN2 if lower_bound is not None else 0.,
+        GATE_SHIFT=0.5 * (BC - 1) * (lower_bound * RCP_LN2) if lower_bound is not None else 0.,
         USE_GATHER=IS_GATHER_SUPPORTED,
         USE_GRAPH=use_graph,
     )
