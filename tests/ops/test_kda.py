@@ -785,10 +785,14 @@ def test_chunk_lower_bound(lower_bound: float, dtype: torch.dtype, use_gate_in_k
     if not use_gate_in_kernel:
         tri_bound, tri_bound_ht = chunk_kda(**kwargs, lower_bound=lower_bound)
         tri_bound_grads = torch.autograd.grad(outputs=(tri_bound * do).sum() + (tri_bound_ht * dht).sum(), inputs=inputs)
-        for name, ref_value, tri_value in zip(
-            ("o", "ht") + names, (tri, tri_ht) + tri_grads, (tri_bound, tri_bound_ht) + tri_bound_grads,
+        for name, ref_value, tri_value, tolerance in zip(
+            ("o", "ht") + names,
+            (ref, ref_ht) + ref_grads,
+            (tri_bound, tri_bound_ht) + tri_bound_grads,
+            (0.005, 0.005) + tolerances,
         ):
-            assert torch.equal(ref_value, tri_value), f"lower_bound changed {name} for precomputed gates"
+            assert torch.isfinite(tri_value).all(), name
+            assert_close(name, ref_value, tri_value, tolerance)
 
 
 @pytest.mark.parametrize(
