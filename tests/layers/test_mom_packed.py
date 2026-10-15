@@ -19,7 +19,6 @@ from fla.utils import assert_close, device
 @pytest.mark.parametrize('shared_mem', [False, True])
 @pytest.mark.parametrize('dtype', [torch.float32, torch.bfloat16])
 def test_forward_backward(T, single_kv_proj, shared_mem, dtype):
-    """Packed projection preserves the padded path's output, input gradients, and parameter gradients."""
     torch.manual_seed(42)
     layer = mom.MomAttention(
         hidden_size=64,
@@ -50,7 +49,6 @@ def test_forward_backward(T, single_kv_proj, shared_mem, dtype):
 @pytest.mark.parametrize('T', [1, 7, 65])
 @pytest.mark.parametrize('training', [False, True])
 def test_forward_empty_memories(T, training, monkeypatch):
-    """Unused memories receive no projected tokens even when all tokens choose the same memories."""
     torch.manual_seed(42)
     layer = mom.MomAttention(
         hidden_size=64,
@@ -79,7 +77,6 @@ def test_forward_empty_memories(T, training, monkeypatch):
 
 @pytest.mark.parametrize('layout', ['mask', 'varlen', 'cache'])
 def test_forward_fallback(layout, monkeypatch):
-    """Masked, variable-length, and cached calls retain the padded implementation."""
     torch.manual_seed(42)
     layer = mom.MomAttention(
         hidden_size=64,
@@ -112,7 +109,6 @@ def test_forward_fallback(layout, monkeypatch):
 
 
 def test_model_forward_backward():
-    """The packed path supports a causal LM loss and all model parameter gradients."""
     torch.manual_seed(42)
     config = MomConfig(
         hidden_size=64,
@@ -137,7 +133,6 @@ def test_model_forward_backward():
 
 
 def test_forward_zero_routing_weights(monkeypatch):
-    """Underflowed routing probabilities retain the padded path's slot masking."""
     torch.manual_seed(42)
     layer = mom.MomAttention(
         hidden_size=64,

@@ -480,9 +480,6 @@ class MomAttention(nn.Module):
             assert mode == 'chunk', "Only chunk mode is supported in training."
 
         last_state = get_layer_cache(self, past_key_values)
-        # _, q_len = hidden_states.shape[0], hidden_states.shape[1]
-
-        # 🔍 topk gating
         router_logits = self.gate(hidden_states)  # (bsz, q_len, num_memories)
         scores = F.softmax(router_logits, dim=2, dtype=torch.float)
         routing_weights, selected_memories = torch.topk(scores, self.topk, dim=-1)  # (bsz, seq, topk)
@@ -496,9 +493,6 @@ class MomAttention(nn.Module):
             device=routing_weights.device,
         ).scatter(-1, selected_memories, routing_weights)
         routing_mask = routing_weights_full.bool().int()
-
-        # if self.use_output_gate:
-        #     o_g = self.g_proj(hidden_states)
 
         batch_size, seq_len = hidden_states.shape[0], hidden_states.shape[1]
 
