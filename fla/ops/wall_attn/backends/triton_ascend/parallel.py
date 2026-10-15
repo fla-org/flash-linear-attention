@@ -19,10 +19,12 @@ implementation; the Ascend adaptations are host-side and launch-configuration:
   triton-ascend 3.2.2 ``vector.transfer_write`` permutation defect when
   ``K != BK``. Zero padding does not change the math; the backward slices the
   gradients back to the original dimensions.
-- The autotune spaces are pruned to ``num_warps {2, 4}`` with ``num_stages {2}``
-  (forward) and ``{1}`` (backward) to bound the compile sweep on Ascend.
-- The variable-length backward pins ``BT=64`` with a single-stage pipeline;
-  ``BT=128`` with ``num_stages=2`` overflows UB in the ``bwd_dkv`` kernel.
+- The autotune sweep covers ``BT x BS`` only: ``num_warps`` and ``num_stages``
+  are unsupported on the Ascend backend
+  (``.agents/skills/fla-ascend-performance``) and are omitted.
+- The variable-length backward pins ``BT=64``; ``BT=128`` overflows UB in the
+  ``bwd_dkv`` kernel. The forward keeps upstream's ``BT=128``, so the backward
+  always rebuilds its chunk map instead of trusting a caller-supplied one.
 - Every attention kernel launch passes ``ascend_compile_kwargs()`` (disables
   auto-multi-buffer) to bound UB usage.
 - The backward ``dq`` kernel selects its off-diagonal term by whether the
@@ -47,22 +49,19 @@ from fla.utils import ascend_compile_kwargs, autotune_cache_kwargs
 # of parallel_wall_attn_bwd_kernel_dkv (precision over speed).
 _DKV_DIAG_BF16 = os.environ.get("WALL_ATTN_DKV_DIAG_BF16", "1") == "1"
 
-# Ascend: keep the sweep small (num_warps {2, 4}; single num_stages value per
-# direction) so the autotuner does not pile up multi-minute compiles.
+# Ascend: num_warps/num_stages are unsupported on this backend (see
+# .agents/skills/fla-ascend-performance), and the BT x BS sweep stays small so
+# the autotuner does not pile up multi-minute compiles.
 WALL_FWD_AUTOTUNE_CONFIGS = [
-    triton.Config({'BT': BT, 'BS': BS}, num_warps=nw, num_stages=ns)
+    triton.Config({'BT': BT, 'BS': BS})
     for BT in (64, 128)
     for BS in (32, 64)
-    for nw in (2, 4)
-    for ns in (2,)
 ]
 
 WALL_BWD_AUTOTUNE_CONFIGS = [
-    triton.Config({'BT': BT, 'BS': BS}, num_warps=nw, num_stages=ns)
+    triton.Config({'BT': BT, 'BS': BS})
     for BT in (64, 128)
     for BS in (32, 64)
-    for nw in (2, 4)
-    for ns in (1,)
 ]
 
 
@@ -717,7 +716,7 @@ def parallel_wall_attn_fwd_npu(
         # single BT. Pin BT=128 and bypass the autotuner (calling the heuristics-wrapped
         # jit directly) so the varlen chunk map stays valid.
         BT = 128
-        BS, num_warps, num_stages = min(32, max(16, triton.next_power_of_2(T))), 2, 2
+        BS = min(32, max(16, triton.next_power_of_2(T)))
         if chunk_indices is None:
             chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
         NT = len(chunk_indices)
@@ -728,7 +727,7 @@ def parallel_wall_attn_fwd_npu(
             g_cumsum=g_cumsum, g_scalar_cumsum=g_scalar_cumsum, sink_bias=sink_bias,
             lse=lse, scale=scale, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices,
             B=B, T=T, T_BUCKET=1, W=window_size, H=H, HQ=HQ, G=G, K=K, V=V,
-            BT=BT, BS=BS, BK=BK, BV=BV, num_warps=num_warps, num_stages=num_stages,
+            BT=BT, BS=BS, BK=BK, BV=BV,
             **ascend_compile_kwargs(),
         )
         return (o[..., :V_orig] if pad_v else o), lse
@@ -836,15 +835,16 @@ def parallel_wall_attn_bwd_npu(
     T_BUCKET = 1 if is_varlen else triton.next_power_of_2(T)
     extra = {}
     if is_varlen:
-        # Ascend: BT=64 with a single-stage pipeline; BT=128 with num_stages=2
-        # overflows UB in the bwd_dkv kernel.
+        # Ascend: pin BT=64; BT=128 overflows UB in the bwd_dkv kernel. The
+        # forward pins BT=128, so a caller-supplied `chunk_indices` map (built
+        # for 128) would halve NT here and leave the tail tokens zero; always
+        # rebuild the map at BT=64.
         BT = 64
-        BS, num_warps = min(32, max(16, triton.next_power_of_2(T))), 2
-        if chunk_indices is None:
-            chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
+        BS = min(32, max(16, triton.next_power_of_2(T)))
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
         NT = len(chunk_indices)
         grid = (NV * NT, B * HQ)
-        extra = dict(BT=BT, BS=BS, num_warps=num_warps, num_stages=1)
+        extra = dict(BT=BT, BS=BS)
     else:
         def grid(meta):
             return (NV * triton.cdiv(T, meta['BT']), B * HQ)
