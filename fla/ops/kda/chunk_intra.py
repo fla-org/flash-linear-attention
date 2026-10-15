@@ -836,7 +836,8 @@ def chunk_kda_fwd_intra(
         s = -lower_bound if lower_bound is supplied to intra, otherwise 2
         d = (BC - 1) * s / 2; C = G_0 - d
 
-    For BC=16 and s=2, C = G_0 - 15: query factors gain exp(15), while key factors shrink by exp(15).
+    For BC=16 and s=2, C = G_0 - 15. Including the RCP_LN2 conversion, the kernel's exp2 gives
+    exp(G_i - G_0 + 15) for queries and exp(G_0 - G_i - 15) for keys.
     The default 2 is a heuristic for log gates concentrated near 0, with few near the lower bound;
     it limits the compensation to avoid over-scaling queries.
     chunk_kda uses this default for both fused and pre-computed gates. An explicit intra lower_bound sets s instead.
