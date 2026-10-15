@@ -46,6 +46,7 @@ class TritonAscendGDN2Backend(BaseBackend):
         chunk_indices: torch.LongTensor | None = None,
         safe_gate: bool = False,
         disable_recompute: bool = False,
+        g_raw: torch.Tensor | None = None,
     ) -> tuple[bool, str | None]:
         del scale, safe_gate, disable_recompute
         if chunk_size != 64:
@@ -57,7 +58,7 @@ class TritonAscendGDN2Backend(BaseBackend):
                 f"GDN-2 Ascend intra requires next_power_of_2(K) <= {_MAX_FWD_INTRA_BK} "
                 f"for UB capacity, got K={K} (BK={BK})"
             )
-        float_tensors = (q, k, v, gk, b, w_gate)
+        float_tensors = (q, k, v, gk, b, w_gate) + ((g_raw,) if g_raw is not None else ())
         tensors = (*float_tensors, *(t for t in (cu_seqlens, chunk_indices) if t is not None))
         if any(t.device.type != "npu" for t in tensors):
             return False, "GDN-2 Ascend intra requires NPU tensors"
@@ -89,11 +90,12 @@ class TritonAscendGDN2Backend(BaseBackend):
         chunk_size: int = 64,
         chunk_indices: torch.LongTensor | None = None,
         state_v_first: bool = False,
+        g_raw: torch.Tensor | None = None,
     ) -> tuple[bool, str | None]:
         del scale, state_v_first
         if chunk_size != 64:
             return False, f"GDN-2 Ascend backward requires chunk_size=64, got {chunk_size}"
-        float_tensors = (q, k, v, v_new, g, b, w_gate, A, h, do, dh, dv)
+        float_tensors = (q, k, v, v_new, g, b, w_gate, A, h, do, dh, dv) + ((g_raw,) if g_raw is not None else ())
         tensors = (*float_tensors, *(t for t in (cu_seqlens, chunk_indices) if t is not None))
         if any(t.device.type != "npu" for t in tensors):
             return False, "GDN-2 Ascend backward requires NPU tensors"

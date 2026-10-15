@@ -413,6 +413,123 @@ def test_chunk(B, T, H, K, V, scale, use_qk_l2norm_in_kernel, use_gate_in_kernel
 
 
 @pytest.mark.skipif(not (IS_NVIDIA or IS_AMD or IS_NPU), reason="CUDA/ROCm or Ascend NPU required")
+@pytest.mark.parametrize('spike', [-200., -1e8, -1e30], ids=['200', '1e8', '1e30'])
+@pytest.mark.parametrize('write', [5, 15, 31, 47, 62, 63, 64, 127], ids=lambda x: f'write{x}')
+@pytest.mark.parametrize('disable_recompute', [False, True], ids=['recompute', 'retain'])
+def test_chunk_large_decay(spike, write, disable_recompute):
+    """A large decay must not erase a later log increment or decay the same-token write."""
+    shape = (1, write + 2, 1, 64)
+    q, k, v, b = [torch.zeros(shape, device=device, dtype=torch.bfloat16) for _ in range(4)]
+    w = torch.ones_like(v)
+    g = torch.full(shape, -1., device=device, dtype=torch.float32)
+    g[0, write, 0, 0] = spike
+    q[0, write + 1, 0, 0] = k[0, write, 0, 0] = v[0, write, 0, 0] = 1
+    inputs = (q, k, v, g, b, w)
+    for x in inputs:
+        x.requires_grad_()
+    o, ht = chunk_gdn2(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        b=b,
+        w=w,
+        scale=1.,
+        output_final_state=True,
+        disable_recompute=disable_recompute,
+    )
+    expected = torch.tensor([(-1.)], device=device).exp()
+    assert_close('o', expected, o[0, write + 1, 0, :1].float(), 0.005)
+    assert_close('ht', expected, ht[0, 0, 0, :1], 0.005)
+    for loss_index, loss in enumerate((o[0, write + 1, 0, 0], ht[0, 0, 0, 0])):
+        grads = torch.autograd.grad(loss, inputs, retain_graph=True)
+        for name, grad in zip(('dq', 'dk', 'dv', 'dg', 'db', 'dw'), grads):
+            assert torch.isfinite(grad).all(), name
+        expected_dq = expected if loss_index == 0 else torch.zeros_like(expected)
+        assert_close('dq', expected_dq, grads[0][0, write + 1, 0, :1].float(), 0.01)
+        for index, t in ((1, write), (2, write), (3, write + 1), (5, write)):
+            assert_close(f'grad{index}', expected, grads[index][0, t, 0, :1].float(), 0.01)
+        assert grads[3][0, write, 0, 0] == 0
+    assert torch.isfinite(o).all() and torch.isfinite(ht).all()
+
+
+@pytest.mark.skipif(not (IS_NVIDIA or IS_AMD or IS_NPU), reason="CUDA/ROCm or Ascend NPU required")
+@pytest.mark.parametrize('dtype', [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize('use_gate_in_kernel', [False, True], ids=['log-gates', 'fused-gates'])
+@pytest.mark.parametrize('varlen', [False, True], ids=['dense', 'varlen'])
+def test_chunk_large_decay_recurrence(dtype, use_gate_in_kernel, varlen):
+    """Local decays preserve all gradients across partial chunks and carried states."""
+    B, T, H, K, V = (1, 161, 2, 48, 32) if varlen else (2, 130, 2, 48, 32)
+    q, k, v, g, b, w, A_log, dt_bias = _rand_inputs(B, T, H, H, K, V, dtype, gate_in_kernel=use_gate_in_kernel)
+    q, k = F.normalize(q.float(), dim=-1).to(dtype), F.normalize(k.float(), dim=-1).to(dtype)
+    g = g.float()
+    g[:, [5, 15, 31, 47, 63, 64, 127], :, ::3] = 1e8 if use_gate_in_kernel else -1e8
+    offsets = [0, 17, 82, T] if varlen else [0, T]
+    cu = torch.tensor(offsets, dtype=torch.int32, device=device) if varlen else None
+    h0 = torch.randn(len(offsets) - 1 if varlen else B, H, K, V, device=device)
+    leaves = [q, k, v, g, b, w, h0] + ([A_log, dt_bias] if use_gate_in_kernel else [])
+    for x in leaves:
+        x.requires_grad_()
+    g_ref = _activate_g(g, A_log, dt_bias, False, None) if use_gate_in_kernel else g
+    refs, states = [], []
+    for n, (start, end) in enumerate(zip(offsets, offsets[1:])):
+        ref, state = naive_recurrent_gdn2(
+            q=q[:, start:end],
+            k=k[:, start:end],
+            v=v[:, start:end],
+            g=g_ref[:, start:end],
+            b=b[:, start:end],
+            w=w[:, start:end],
+            initial_state=h0[n:n + 1] if varlen else h0,
+            output_final_state=True,
+        )
+        refs.append(ref)
+        states.append(state)
+    ref, ref_ht = torch.cat(refs, dim=1), torch.cat(states, dim=0)
+    do, dht = torch.randn_like(v), torch.randn_like(h0)
+    ref_grads = torch.autograd.grad((ref * do).sum() + (ref_ht * dht).sum(), leaves)
+    modes = [(False, False, None), (True, True, None)]
+    if not varlen:
+        modes.append((False, False, 65))
+    for retain, v_first, split in modes:
+        tri_ht = h0.transpose(-1, -2).contiguous() if v_first else h0
+        outputs = []
+        start = 0
+        for end in ((split, T) if split is not None else (T,)):
+            output, tri_ht = chunk_gdn2(
+                q=q[:, start:end],
+                k=k[:, start:end],
+                v=v[:, start:end],
+                g=g[:, start:end],
+                b=b[:, start:end],
+                w=w[:, start:end],
+                initial_state=tri_ht,
+                output_final_state=True,
+                cu_seqlens=cu,
+                use_gate_in_kernel=use_gate_in_kernel,
+                A_log=A_log,
+                dt_bias=dt_bias,
+                disable_recompute=retain,
+                state_v_first=v_first,
+            )
+            outputs.append(output)
+            start = end
+        tri = torch.cat(outputs, dim=1)
+        if v_first:
+            tri_ht = tri_ht.transpose(-1, -2)
+        tri_grads = torch.autograd.grad((tri * do).sum() + (tri_ht * dht).sum(), leaves)
+        assert_close('o', ref, tri, 0.005)
+        assert_close('ht', ref_ht, tri_ht, 0.005)
+        for name, expected, actual, tolerance in zip(
+            ('dq', 'dk', 'dv', 'dg', 'db', 'dw', 'dh0', 'dA_log', 'dt_bias'), ref_grads, tri_grads,
+            (0.01, 0.01, 0.01, 0.02, 0.02, 0.02, 0.01, 0.02, 0.02),
+        ):
+            assert torch.isfinite(actual).all(), name
+            assert_close(name, expected.float(), actual.float(), tolerance)
+        assert torch.isfinite(tri).all() and torch.isfinite(tri_ht).all()
+
+
+@pytest.mark.skipif(not (IS_NVIDIA or IS_AMD or IS_NPU), reason="CUDA/ROCm or Ascend NPU required")
 def test_chunk_state_v_first():
     """state_v_first must give the same output and a transposed final state."""
     dtype = torch.float32
