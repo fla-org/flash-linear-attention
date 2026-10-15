@@ -7,6 +7,7 @@
 
 import importlib.util
 import inspect
+import math
 import os
 
 import pytest
@@ -679,6 +680,188 @@ def test_chunk(
         assert_close("dA", ref_dA, tri_dA, 0.003, warning=True)
         assert_close("dbias", ref_dbias, tri_dbias, 0.008)
     assert_close("dh0", ref_dh0, tri_dh0, 0.008)
+
+
+@pytest.mark.parametrize(
+    ("T", "P", "H", "D", "chunk_size", "use_gate_in_kernel"),
+    [
+        pytest.param(
+            *test,
+            use_gate_in_kernel,
+            id="T{}-P{}-H{}-D{}-chunk_size{}-use_gate{}".format(*test, use_gate_in_kernel),
+        )
+        for use_gate_in_kernel in [False, True]
+        for test in [
+            (16, 6, 2, 64, 64),
+            (32, 6, 2, 64, 32),
+            (22, 21, 4, 128, 64),
+            (40, 33, 2, 64, 32),
+            (70, 65, 2, 64, 64),
+        ]
+    ],
+)
+@pytest.mark.skipif(IS_NPU, reason="Ascend uses separate intra kernels whose anchors are unchanged")
+def test_chunk_causality(T: int, P: int, H: int, D: int, chunk_size: int, use_gate_in_kernel: bool):
+    """Future gates must leave prefix outputs and prefix-loss gradients unchanged."""
+    torch.manual_seed(42)
+    shape = (1, T, H, D)
+    q = F.normalize(torch.randn(shape), dim=-1).bfloat16()
+    k = F.normalize(torch.randn(shape), dim=-1).bfloat16()
+    v = (0.5 * torch.randn(shape)).bfloat16()
+    beta = torch.ones(shape[:-1], dtype=torch.bfloat16)
+    g = (-0.7 * (0.75 + 0.25 * torch.rand(shape))).bfloat16().to(device)
+    A_log = torch.log(torch.empty(H).uniform_(1.0, 16.0))
+    dt_bias = 0.1 * torch.rand(H * D) - 0.05
+    q, k, v, beta, A_log, dt_bias = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, beta, A_log, dt_bias))
+    do = torch.randn_like(v[:, :P])
+
+    g_edited = g.clone()
+    if use_gate_in_kernel:
+        logit = math.log(0.99 / 0.01)
+        g_edited[:, P:] = (logit / A_log.detach().exp().view(1, 1, H, 1) - dt_bias.detach().view(1, 1, H, D)).to(g.dtype)
+    else:
+        g_edited[:, P:] = -4.95
+    assert not torch.equal(g[:, P:], g_edited[:, P:])
+
+    outputs, grads = [], []
+    names = ("dq", "dk", "dv", "dg", "db") + (("dA", "dbias") if use_gate_in_kernel else ())
+    for g_i in (g, g_edited):
+        g_i = g_i.requires_grad_(True)
+        o, _ = chunk_kda(
+            q=q,
+            k=k,
+            v=v,
+            g=g_i,
+            beta=beta,
+            use_gate_in_kernel=use_gate_in_kernel,
+            safe_gate=True,
+            lower_bound=-5.0 if use_gate_in_kernel else None,
+            A_log=A_log,
+            dt_bias=dt_bias,
+            chunk_size=chunk_size,
+        )
+        loss = (o[:, :P].float() * do.float()).sum()
+        outputs.append(o[:, :P].detach())
+        inputs = (q, k, v, g_i, beta) + ((A_log, dt_bias) if use_gate_in_kernel else ())
+        grads.append(torch.autograd.grad(outputs=loss, inputs=inputs))
+
+    ref, tri = outputs
+    assert torch.isfinite(ref).all() and torch.isfinite(tri).all()
+    assert torch.equal(ref, tri), "future gates changed prefix outputs"
+    for name, ref, tri in zip(names, *grads):
+        assert torch.isfinite(ref).all() and torch.isfinite(tri).all(), name
+        assert torch.equal(ref, tri), f"future gates changed {name} from a prefix-only loss"
+
+
+@pytest.mark.parametrize(
+    ("lower_bound", "dtype", "use_gate_in_kernel", "cu_seqlens", "gate_pattern"),
+    [
+        pytest.param(
+            lower_bound,
+            dtype,
+            use_gate_in_kernel,
+            cu_seqlens,
+            gate_pattern,
+            id=f"lower_bound{lower_bound}-{dtype}-use_gate{use_gate_in_kernel}-cu_seqlens{cu_seqlens}-{gate_pattern}",
+        )
+        for cu_seqlens in [None, [0, 1, 17, 38]]
+        for use_gate_in_kernel in [False, True]
+        for dtype in [torch.bfloat16, torch.float16]
+        for lower_bound in [-5.0, -2.0, -0.01]
+        for gate_pattern in (
+            ["random", "lower_bound", "zero", "mixed"] if not use_gate_in_kernel and lower_bound == -5.0 else ["random"]
+        )
+    ],
+)
+@pytest.mark.skipif(IS_NPU, reason="Ascend uses separate intra kernels whose anchors are unchanged")
+def test_chunk_lower_bound(
+    lower_bound: float,
+    dtype: torch.dtype,
+    use_gate_in_kernel: bool,
+    cu_seqlens: list[int] | None,
+    gate_pattern: str,
+):
+    torch.manual_seed(42)
+    B, T, H, D = 1, 38, 2, 64
+    shape = (B, T, H, D)
+    q, k = (F.normalize(torch.randn(shape), dim=-1).to(dtype) for _ in range(2))
+    v = torch.randn(shape, dtype=dtype)
+    g = (10 * torch.randn(shape)).to(dtype)
+    if not use_gate_in_kernel:
+        g = lower_bound * g.float().sigmoid()
+        if gate_pattern == "lower_bound":
+            g.fill_(lower_bound)
+        elif gate_pattern == "zero":
+            g.zero_()
+        elif gate_pattern == "mixed":
+            g[..., ::2] = lower_bound
+            g[..., 1::2] = 0.
+    beta = torch.randn(B, T, H, dtype=dtype).sigmoid()
+    A_log = torch.zeros(H)
+    dt_bias = 0.1 * torch.randn(H * D)
+    N = len(cu_seqlens) - 1 if cu_seqlens is not None else B
+    h0 = torch.randn(N, H, D, D)
+    q, k, v, g, beta, h0, A_log, dt_bias = (
+        x.to(device).requires_grad_(True) for x in (q, k, v, g, beta, h0, A_log, dt_bias)
+    )
+    offsets = cu_seqlens if cu_seqlens is not None else [0, T]
+    cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int64, device=device) if cu_seqlens is not None else None
+    inputs = (q, k, v, g, beta, h0)
+    names = ("dq", "dk", "dv", "dg", "db", "dh0")
+    tolerances = (0.008, 0.008, 0.008, 0.02, 0.02, 0.008)
+    if use_gate_in_kernel:
+        inputs += (A_log, dt_bias)
+        names += ("dA", "dbias")
+        tolerances += (0.003, 0.008)
+    do, dht = torch.randn_like(v), torch.randn_like(h0)
+    g_ref = naive_kda_lowerbound_gate(g=g, A_log=A_log, dt_bias=dt_bias, lower_bound=lower_bound) if use_gate_in_kernel else g
+    ref, ref_ht = [], []
+    for i, (bos, eos) in enumerate(zip(offsets[:-1], offsets[1:])):
+        ref_i, ref_ht_i = naive_recurrent_kda(
+            q=q[:, bos:eos],
+            k=k[:, bos:eos],
+            v=v[:, bos:eos],
+            g=g_ref[:, bos:eos],
+            beta=beta[:, bos:eos],
+            initial_state=h0[i:i+1],
+            output_final_state=True,
+        )
+        ref.append(ref_i)
+        ref_ht.append(ref_ht_i)
+    ref, ref_ht = torch.cat(ref, dim=1), torch.cat(ref_ht, dim=0)
+    ref_grads = torch.autograd.grad(outputs=(ref * do).sum() + (ref_ht * dht).sum(), inputs=inputs)
+    kwargs = dict(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        beta=beta,
+        initial_state=h0,
+        output_final_state=True,
+        use_gate_in_kernel=use_gate_in_kernel,
+        safe_gate=True,
+        cu_seqlens=cu_seqlens,
+    )
+    if use_gate_in_kernel:
+        kwargs.update(lower_bound=lower_bound, A_log=A_log, dt_bias=dt_bias)
+    tri, tri_ht = chunk_kda(**kwargs)
+    tri_grads = torch.autograd.grad(outputs=(tri * do).sum() + (tri_ht * dht).sum(), inputs=inputs)
+    for name, ref_value, tri_value, tolerance in zip(
+        ("o", "ht") + names, (ref, ref_ht) + ref_grads, (tri, tri_ht) + tri_grads, (0.005, 0.005) + tolerances,
+    ):
+        assert torch.isfinite(tri_value).all(), name
+        assert_close(name, ref_value, tri_value, tolerance)
+    if not use_gate_in_kernel:
+        tri_bound, tri_bound_ht = chunk_kda(**kwargs, lower_bound=lower_bound)
+        tri_bound_grads = torch.autograd.grad(outputs=(tri_bound * do).sum() + (tri_bound_ht * dht).sum(), inputs=inputs)
+        for name, ref_value, tri_value, tolerance in zip(
+            ("o", "ht") + names,
+            (ref, ref_ht) + ref_grads,
+            (tri_bound, tri_bound_ht) + tri_bound_grads,
+            (0.005, 0.005) + tolerances,
+        ):
+            assert torch.isfinite(tri_value).all(), name
+            assert_close(name, ref_value, tri_value, tolerance)
 
 
 @pytest.mark.parametrize(

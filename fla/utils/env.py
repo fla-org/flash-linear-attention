@@ -96,7 +96,12 @@ autotune_cache_kwargs = {"cache_results": FLA_CACHE_RESULTS} if SUPPORTS_AUTOTUN
 
 @functools.cache
 def find_spec_cached(name):
-    return find_spec(name)
+    try:
+        return find_spec(name)
+    except ModuleNotFoundError as error:
+        if error.name is not None and (name == error.name or name.startswith(f'{error.name}.')):
+            return None
+        raise
 
 
 @functools.cache
