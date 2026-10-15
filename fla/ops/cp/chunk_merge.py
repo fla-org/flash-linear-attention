@@ -63,7 +63,7 @@ def chunk_cp_merge_state(
         for num_stages in [1, 2, 3, 4]
         for BV in [32, 64]
     ],
-    key=['HV', 'K', 'V'],
+    key=['HV', 'K', 'V', 'STATE_V_FIRST', 'INTRACARD_MODE'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['pre_or_post_num_ranks', 'rank', 'NUM_SEQ_ENTRIES'])
