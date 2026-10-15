@@ -1737,4 +1737,3 @@ def test_triton_ascend_backend_routing():
     finally:
         for name in _TRITON_ASCEND_KDA_OPS:
             delattr(backend, name)
-
