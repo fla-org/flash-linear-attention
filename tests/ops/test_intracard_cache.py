@@ -34,7 +34,8 @@ def clear_intracard_cache():
 @pytest.mark.parametrize('H', [2, 4], ids=['gva', 'mha'])
 @pytest.mark.parametrize('vector_gate', [False, True], ids=['scalar-gate', 'vector-gate'])
 @pytest.mark.parametrize('state_v_first', [False, True])
-def test_intracard_pre_scan_merge(H: int, vector_gate: bool, state_v_first: bool):
+@pytest.mark.parametrize('use_tf32x3', [None, False, True], ids=['default', 'disabled', 'enabled'])
+def test_intracard_pre_scan_merge(H: int, vector_gate: bool, state_v_first: bool, use_tf32x3: bool | None):
     torch.manual_seed(42)
     T, HV, K, V = 319, 4, 64, 96
     k = torch.randn(1, T, H, K, device=device, dtype=torch.bfloat16) * 0.05
@@ -47,6 +48,7 @@ def test_intracard_pre_scan_merge(H: int, vector_gate: bool, state_v_first: bool
         g, gk = decay.view(1, T, 1).expand(1, T, HV).contiguous(), None
     state_shape = (1, HV, V, K) if state_v_first else (1, HV, K, V)
     h0 = torch.randn(state_shape, device=device, dtype=torch.float32) * 0.1
+    precision_kwargs = {} if use_tf32x3 is None else {'use_tf32x3_affine_chain': use_tf32x3}
     hm = intracard_pre_scan(
         kg=k,
         w=w,
@@ -55,6 +57,7 @@ def test_intracard_pre_scan_merge(H: int, vector_gate: bool, state_v_first: bool
         gk=gk,
         cu_seqlens_subseq_split=torch.tensor([0, 128, 256, T], device=device, dtype=torch.int32),
         S_split=3,
+        **precision_kwargs,
     )
     states, count = intracard_merge(
         hm=hm,
@@ -65,6 +68,7 @@ def test_intracard_pre_scan_merge(H: int, vector_gate: bool, state_v_first: bool
         device=k.device,
         initial_state=h0,
         state_v_first=state_v_first,
+        **precision_kwargs,
     )
     ref_h, _, _ = _raw_chunk_gated_delta_rule_fwd_h(
         k=k,
@@ -237,3 +241,23 @@ def test_chunk_gdn_intracard_gqa(monkeypatch):
         f"Output mismatch: max diff={(o_intra - o_ref).abs().max().item()}"
     assert torch.allclose(ht_intra, ht_ref, atol=1e-2, rtol=1e-2), \
         f"Final state mismatch: max diff={(ht_intra - ht_ref).abs().max().item()}"
+
+
+@pytest.mark.parametrize('setting', ['', '0', '1'], ids=['default', 'disabled', 'enabled'])
+def test_intracard_precision_setting(run_python, setting):
+    run_python(
+        """
+        import os
+
+        setting = os.environ.pop('TEST_INTRACARD_TF32X3')
+        if setting:
+            os.environ['FLA_INTRACARD_TF32X3'] = setting
+        else:
+            os.environ.pop('FLA_INTRACARD_TF32X3', None)
+
+        from fla.ops.common.backends.intracard import USE_TF32X3_AFFINE_CHAIN
+
+        assert USE_TF32X3_AFFINE_CHAIN is (setting != '0')
+        """,
+        TEST_INTRACARD_TF32X3=setting,
+    )

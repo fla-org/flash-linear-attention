@@ -73,7 +73,7 @@ from fla.ops.cp import build_cp_context
 from fla.ops.kda import chunk_kda
 from fla.ops.kda.gate import naive_kda_lowerbound_gate
 from fla.ops.kda.naive import naive_recurrent_kda
-from fla.utils import assert_close
+from fla.utils import IS_NVIDIA, assert_close, device, device_torch_lib
 
 # Configure logging to see assert_close messages
 logging.basicConfig(level=logging.INFO, format='%(message)s')
@@ -114,7 +114,7 @@ def run_cp_kda_test_worker(
     safe_gate: bool = False,
     lower_bound: float | None = None,
     state_v_first: bool = False,
-    use_tf32x3_affine_chain: bool = False,
+    use_tf32x3_affine_chain: bool | None = None,
     layout: str = 'contiguous',
 ):
     """
@@ -309,9 +309,14 @@ def run_cp_kda_test_worker(
         dist.barrier()
 
         # Build CP context
+        precision_kwargs = {} if use_tf32x3_affine_chain is None else {
+            'use_tf32x3_affine_chain': use_tf32x3_affine_chain,
+        }
         context = build_cp_context(
-            cu_seqlens_global, group=dist.group.WORLD, use_tf32x3_affine_chain=use_tf32x3_affine_chain,
+            cu_seqlens=cu_seqlens_global,
+            group=dist.group.WORLD,
             layout=layout,
+            **precision_kwargs,
         )
 
         if layout == 'zigzag':
@@ -430,7 +435,7 @@ def run_cp_test_with_spawn(
     safe_gate: bool = False,
     lower_bound: float | None = None,
     state_v_first: bool = False,
-    use_tf32x3_affine_chain: bool = False,
+    use_tf32x3_affine_chain: bool | None = None,
     layout: str = 'contiguous',
 ):
     """
@@ -601,8 +606,9 @@ def test_cp4_state_v_first():
 # tf32x3 Affine Chain Tests
 # ============================================================
 
-def test_cp2_sequence_cut_tf32x3():
-    """CP2: sequences cut across rank boundary, tf32x3 affine chain in CP."""
+@pytest.mark.parametrize('use_tf32x3_affine_chain', [False, True], ids=['triton-default', 'tf32x3'])
+def test_cp2_sequence_cut_tf32x3(use_tf32x3_affine_chain: bool):
+    """CP2: sequences cut across rank boundary, explicit affine-chain precision selection."""
     if torch.cuda.device_count() < 2:
         pytest.skip("At least 2 GPUs required")
 
@@ -612,13 +618,14 @@ def test_cp2_sequence_cut_tf32x3():
         T=10240, H=12, D=128,
         lengths=[3000, 4000, 3240],
         dtype=torch.bfloat16,
-        use_tf32x3_affine_chain=True,
+        use_tf32x3_affine_chain=use_tf32x3_affine_chain,
         **GATE_KWARGS,
     )
 
 
-def test_cp4_single_sequence_tf32x3():
-    """CP4: single long sequence spanning all ranks, tf32x3 affine chain in CP."""
+@pytest.mark.parametrize('use_tf32x3_affine_chain', [False, True], ids=['triton-default', 'tf32x3'])
+def test_cp4_single_sequence_tf32x3(use_tf32x3_affine_chain: bool):
+    """CP4: single long sequence spanning all ranks, explicit affine-chain precision selection."""
     if torch.cuda.device_count() < 4:
         pytest.skip("At least 4 GPUs required")
 
@@ -628,13 +635,14 @@ def test_cp4_single_sequence_tf32x3():
         T=10240, H=12, D=128,
         lengths=[10240],
         dtype=torch.bfloat16,
-        use_tf32x3_affine_chain=True,
+        use_tf32x3_affine_chain=use_tf32x3_affine_chain,
         **GATE_KWARGS,
     )
 
 
-def test_cp2_state_v_first_tf32x3():
-    """CP2: state_v_first=True with sequence cut, tf32x3 affine chain in CP."""
+@pytest.mark.parametrize('use_tf32x3_affine_chain', [False, True], ids=['triton-default', 'tf32x3'])
+def test_cp2_state_v_first_tf32x3(use_tf32x3_affine_chain: bool):
+    """CP2: state_v_first=True with sequence cut, explicit affine-chain precision selection."""
     if torch.cuda.device_count() < 2:
         pytest.skip("At least 2 GPUs required")
 
@@ -645,7 +653,7 @@ def test_cp2_state_v_first_tf32x3():
         lengths=[3000, 4000, 3240],
         dtype=torch.bfloat16,
         state_v_first=True,
-        use_tf32x3_affine_chain=True,
+        use_tf32x3_affine_chain=use_tf32x3_affine_chain,
         **GATE_KWARGS,
     )
 
@@ -715,6 +723,68 @@ def test_cp4_zigzag_boundary_aligned():
         dtype=torch.bfloat16,
         layout='zigzag',
         **GATE_KWARGS,
+    )
+
+
+def _run_chunk_kda_default_precision(rank: int, init_method: str, layout: str, state_v_first: bool):
+    device_torch_lib.set_device(rank)
+    dist.init_process_group(backend='nccl', init_method=init_method, world_size=2, rank=rank)
+    try:
+        torch.manual_seed(42)
+        T, H, K, V = 256, 2, 64, 80
+        q, k = [torch.randn(1, T, H, K, dtype=torch.bfloat16, device=device) for _ in range(2)]
+        v = torch.randn(1, T, H, V, dtype=torch.bfloat16, device=device)
+        g = torch.full_like(k, -0.01)
+        beta = torch.randn(1, T, H, dtype=torch.bfloat16, device=device).sigmoid()
+        cu_seqlens = torch.tensor([0, 80, 190, T], device=device)
+        do = torch.randn_like(v)
+
+        def local(tensor):
+            if layout == 'zigzag':
+                parts = tensor.chunk(4, dim=1)
+                return torch.cat([parts[rank], parts[3 - rank]], dim=1)
+            return tensor.chunk(2, dim=1)[rank].contiguous()
+
+        def run(precision_kwargs):
+            leaves = [local(tensor).detach().requires_grad_() for tensor in (q, k, v, g, beta)]
+            cp_context = build_cp_context(
+                cu_seqlens=cu_seqlens,
+                group=dist.group.WORLD,
+                layout=layout,
+                **precision_kwargs,
+            )
+            out, _ = chunk_kda(
+                q=leaves[0],
+                k=leaves[1],
+                v=leaves[2],
+                g=leaves[3],
+                beta=leaves[4],
+                use_qk_l2norm_in_kernel=True,
+                state_v_first=state_v_first,
+                cp_context=cp_context,
+            )
+            grads = torch.autograd.grad(outputs=out, inputs=leaves, grad_outputs=local(do))
+            return (out.detach(), *grads)
+
+        default = run({})
+        explicit = run({'use_tf32x3_affine_chain': True})
+        for name, actual, expected in zip(('o', 'dq', 'dk', 'dv', 'dg', 'db'), default, explicit):
+            assert torch.isfinite(actual).all(), name
+            assert torch.equal(actual, expected), name
+    finally:
+        dist.destroy_process_group()
+
+
+@pytest.mark.skipif(not IS_NVIDIA or device_torch_lib.device_count() < 2, reason='requires two NVIDIA GPUs')
+@pytest.mark.parametrize('layout', ['contiguous', 'zigzag'])
+@pytest.mark.parametrize('state_v_first', [False, True])
+def test_chunk_kda_default_precision(tmp_path, layout: str, state_v_first: bool):
+    """Default and explicit tf32x3 produce identical outputs and all input gradients."""
+    mp.spawn(
+        _run_chunk_kda_default_precision,
+        args=((tmp_path / 'rendezvous').as_uri(), layout, state_v_first),
+        nprocs=2,
+        join=True,
     )
 
 

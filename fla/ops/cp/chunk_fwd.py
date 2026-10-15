@@ -9,6 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.cp.utils import DEFAULT_AFFINE_CHAIN_PRECISION
 from fla.ops.utils.op import exp2
 from fla.utils import autotune_cache_kwargs
 
@@ -52,7 +53,7 @@ def chunk_cp_fwd_kernel_h(
     USE_BG: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     MULTI_SEQS: tl.constexpr,
-    AFFINE_CHAIN_PRECISION: tl.constexpr = None,
+    AFFINE_CHAIN_PRECISION: tl.constexpr = DEFAULT_AFFINE_CHAIN_PRECISION,
 ):
     i_col, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     if MULTI_SEQS:
@@ -292,7 +293,7 @@ def chunk_cp_fwd_h(
     v: torch.Tensor | None = None,
     cu_seqlens: torch.Tensor | None = None,
     chunk_size: int = 64,
-    affine_chain_precision: str | None = None,
+    affine_chain_precision: str | None = DEFAULT_AFFINE_CHAIN_PRECISION,
 ) -> None:
     """Write the forward affine summary of one local sequence into hm."""
     _, T, H, K = k.shape

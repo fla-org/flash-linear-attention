@@ -26,8 +26,9 @@ import triton
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_fwd_kernel_h_blockdim64
 from fla.ops.cp.chunk_fwd import chunk_cp_fwd_kernel_h
 from fla.ops.cp.chunk_merge import chunk_cp_fwd_bwd_kernel_merge
+from fla.ops.cp.utils import get_affine_chain_precision
 from fla.ops.utils.index import prepare_chunk_indices, prepare_chunk_offsets
-from fla.utils import IS_TF32_SUPPORTED, get_multiprocessor_count
+from fla.utils import get_multiprocessor_count
 
 logger = logging.getLogger(__name__)
 
@@ -260,7 +261,7 @@ def intracard_pre_scan(
     cu_seqlens_subseq_split: torch.Tensor,
     S_split: int,
     chunk_size: int = 64,
-    use_tf32x3_affine_chain: bool = False,
+    use_tf32x3_affine_chain: bool = True,
 ):
     H, K, V, HV = kg.shape[2], kg.shape[3], u.shape[3], u.shape[2]
     BK = triton.next_power_of_2(K)
@@ -288,10 +289,7 @@ def intracard_pre_scan(
         BLOCK_SIZE=BLOCK_SIZE,
         BK1=BK,
         MULTI_SEQS=True,
-        AFFINE_CHAIN_PRECISION=(
-            "tf32x3" if use_tf32x3_affine_chain and IS_TF32_SUPPORTED
-            else ("ieee" if not IS_TF32_SUPPORTED else None)
-        ),
+        AFFINE_CHAIN_PRECISION=get_affine_chain_precision(use_tf32x3_affine_chain=use_tf32x3_affine_chain),
     )
 
     return hm
@@ -306,7 +304,7 @@ def intracard_merge(
     device: torch.device,
     initial_state: torch.Tensor | None = None,
     state_v_first: bool = False,
-    use_tf32x3_affine_chain: bool = False,
+    use_tf32x3_affine_chain: bool = True,
 ) -> tuple[torch.Tensor | None, int]:
     """Merge sub-sequence states using pre-computed parameters.
 
@@ -360,10 +358,7 @@ def intracard_merge(
         INTRACARD_MODE=True,
         NUM_SEQ_ENTRIES=num_split_seqs,
         STATE_V_FIRST=state_v_first,
-        AFFINE_CHAIN_PRECISION=(
-            "tf32x3" if use_tf32x3_affine_chain and IS_TF32_SUPPORTED
-            else ("ieee" if not IS_TF32_SUPPORTED else None)
-        ),
+        AFFINE_CHAIN_PRECISION=get_affine_chain_precision(use_tf32x3_affine_chain=use_tf32x3_affine_chain),
     )
 
     return initial_states_merge, num_non_first
@@ -457,7 +452,7 @@ def intracard_fwd_h(
     cu_seqlens_cpu: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
     max_splits: int = 32,
-    use_tf32x3_affine_chain: bool = False,
+    use_tf32x3_affine_chain: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     assert cu_seqlens is not None, "intracard_fwd_h requires cu_seqlens"
 

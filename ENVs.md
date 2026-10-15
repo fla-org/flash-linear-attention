@@ -37,7 +37,7 @@ When `FLA_GLUON` is unset or `0`, the individual switches apply. `FLA_DISABLE_BA
 | -------------------------- | ------- | ----------- | ---------------------------------------------------------------------------------------------------- |
 | `FLA_INTRACARD_CP`         | `0`     | `0` / `1`   | Enable intra-card CP for shared delta-rule operations; inference and variable-length sequences only. |
 | `FLA_INTRACARD_MAX_SPLITS` | `32`    | Integer ≥ 1 | Maximum sub-sequences per original sequence.                                                         |
-| `FLA_INTRACARD_TF32X3`     | `0`     | `0` / `1`   | Use TF32x3 for affine-chain dot products on NVIDIA GPUs.                                             |
+| `FLA_INTRACARD_TF32X3`     | `1`     | `0` / `1`   | Use TF32x3 for affine-chain dot products on supported NVIDIA GPUs; IEEE fallback elsewhere.          |
 
 ## Convolution backend
 

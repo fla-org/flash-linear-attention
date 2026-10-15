@@ -374,6 +374,8 @@ $$\mathbf{S}_r = \mathbf{M}_{r-1} (\mathbf{M}_{r-2} (\cdots \mathbf{S}_{\text{ex
 > [!IMPORTANT]
 > The $\mathbf{M}$ chain multiply must stay in **fp32** to avoid accumulated precision loss. In bf16, repeatedly casting fp32 accumulators back to bf16 between iterations causes significant error growth over many chunks.
 
+Affine-chain products use `tf32x3` by default on NVIDIA GPUs with compute capability ≥ 8.0 and `ieee` on other hardware. This applies to forward/backward summaries and state merging, including intra-card CP. Set `use_tf32x3_affine_chain=False` on the CP context, or `FLA_INTRACARD_TF32X3=0` for intra-card CP, to retain the previous Triton-default precision on supported NVIDIA GPUs. State storage and accumulation remain FP32.
+
 ---
 
 ## Initial State Memory Optimization

@@ -35,7 +35,7 @@ class FLACPContext:
     post_num_ranks: int | None = None
     conv1d_kernel_size: int | None = None
     pre_num_conv_tokens: int | None = None
-    use_tf32x3_affine_chain: bool = False
+    use_tf32x3_affine_chain: bool = True
     pre_num_ranks_dev: torch.Tensor | None = None
     post_num_ranks_dev: torch.Tensor | None = None
     layout: str = 'contiguous'
@@ -111,7 +111,7 @@ def get_cp_cu_seqlens(
     rank: int | None = None,
     group: dist.ProcessGroup | None = None,
     conv1d_kernel_size: int | None = None,
-    use_tf32x3_affine_chain: bool = False,
+    use_tf32x3_affine_chain: bool = True,
     layout: str = 'contiguous',
 ) -> FLACPContext:
     if world_size is None:
@@ -199,7 +199,7 @@ def build_cp_context(
     group: ProcessGroup,
     conv1d_kernel_size: int | None = None,
     cu_seqlens_cpu: torch.Tensor | None = None,
-    use_tf32x3_affine_chain: bool = False,
+    use_tf32x3_affine_chain: bool = True,
     layout: str = 'contiguous',
 ) -> FLACPContext:
     """Build a CP context for the given cu_seqlens and process group.
@@ -214,7 +214,7 @@ def build_cp_context(
         cu_seqlens_cpu (torch.Tensor, Optional):
             CPU copy of global sequence lengths to avoid a device-to-host transfer. Default: `None`.
         use_tf32x3_affine_chain (bool, Optional):
-            Use tf32x3 for affine-chain products on supported NVIDIA GPUs. Default: `False`.
+            Use tf32x3 for affine-chain products on supported NVIDIA GPUs, with IEEE fallback elsewhere. Default: `True`.
         layout (str, Optional):
             Token partition layout. Default: `'contiguous'`. Contiguous assigns rank r the interval
             [r * T/W, (r + 1) * T/W); 'zigzag' assigns rank r two intervals of

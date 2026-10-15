@@ -7,7 +7,6 @@
 
 from __future__ import annotations
 
-import warnings
 from typing import TYPE_CHECKING
 
 import torch
@@ -17,21 +16,10 @@ from fla.ops.cp.chunk_bwd import chunk_cp_bwd_dh
 from fla.ops.cp.chunk_fwd import chunk_cp_fwd_h
 from fla.ops.cp.chunk_merge import chunk_cp_merge
 from fla.ops.cp.comm import all_gather_into_tensor
-from fla.utils import IS_TF32_SUPPORTED
+from fla.ops.cp.utils import get_affine_chain_precision
 
 if TYPE_CHECKING:
     from fla.ops.cp.context import FLACPContext
-
-
-def _get_affine_chain_precision(context: FLACPContext) -> str | None:
-    if context.use_tf32x3_affine_chain and not IS_TF32_SUPPORTED:
-        warnings.warn(
-            "tf32x3 affine chain requires an NVIDIA GPU with compute capability >= 8.0; falling back to ieee precision",
-            stacklevel=3,
-        )
-    if not IS_TF32_SUPPORTED:
-        return "ieee"
-    return "tf32x3" if context.use_tf32x3_affine_chain else None
 
 
 def chunk_gated_delta_rule_fwd_h_pre_process(
@@ -52,7 +40,7 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
     if context is None or context.group is None:
         return initial_state
     assert initial_state is None, "When enable CP, the provided initial_state must be None."
-    affine_chain_precision = _get_affine_chain_precision(context=context)
+    affine_chain_precision = get_affine_chain_precision(use_tf32x3_affine_chain=context.use_tf32x3_affine_chain)
     rank = dist.get_rank(group=context.group)
 
     B, _, _, K = k.shape
@@ -171,7 +159,7 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
     if context is None or context.group is None:
         return dht, initial_state
     assert dht is None, "When enable CP, the provided dht must be None."
-    affine_chain_precision = _get_affine_chain_precision(context=context)
+    affine_chain_precision = get_affine_chain_precision(use_tf32x3_affine_chain=context.use_tf32x3_affine_chain)
     rank = dist.get_rank(group=context.group)
 
     B, _, _, K = q.shape

@@ -9,6 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.cp.utils import DEFAULT_AFFINE_CHAIN_PRECISION
 from fla.utils import autotune_cache_kwargs
 
 
@@ -48,7 +49,7 @@ def chunk_cp_fwd_bwd_kernel_merge(
     HAS_H0: tl.constexpr,
     HAS_H_SEQ_IDX: tl.constexpr,
     STATE_V_FIRST: tl.constexpr = False,
-    AFFINE_CHAIN_PRECISION: tl.constexpr = None,
+    AFFINE_CHAIN_PRECISION: tl.constexpr = DEFAULT_AFFINE_CHAIN_PRECISION,
     NUM_RANKS_ON_DEVICE: tl.constexpr = False,
 ):
     """Compose affine summaries across ranks or local subsequences.
@@ -164,7 +165,7 @@ def chunk_cp_merge(
     forward: bool = True,
     h_seq_idx: torch.Tensor | None = None,
     use_graph: bool = False,
-    affine_chain_precision: str | None = None,
+    affine_chain_precision: str | None = DEFAULT_AFFINE_CHAIN_PRECISION,
 ) -> None:
     """Merge gathered affine summaries into a rank's boundary state."""
     _, HV, K, VK = ag_hm.shape
