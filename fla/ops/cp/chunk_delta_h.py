@@ -16,7 +16,6 @@ from fla.ops.cp.chunk_bwd import chunk_cp_bwd_dh
 from fla.ops.cp.chunk_fwd import chunk_cp_fwd_h
 from fla.ops.cp.chunk_merge import chunk_cp_merge
 from fla.ops.cp.comm import all_gather_into_tensor
-from fla.ops.cp.utils import get_affine_chain_precision
 
 if TYPE_CHECKING:
     from fla.ops.cp.context import FLACPContext
@@ -40,7 +39,6 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
     if context is None or context.group is None:
         return initial_state
     assert initial_state is None, "When enable CP, the provided initial_state must be None."
-    affine_chain_precision = get_affine_chain_precision(use_tf32x3_affine_chain=context.use_tf32x3_affine_chain)
     rank = dist.get_rank(group=context.group)
 
     B, _, _, K = k.shape
@@ -73,7 +71,6 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
                     v=v,
                     cu_seqlens=cu_part,
                     chunk_size=chunk_size,
-                    affine_chain_precision=affine_chain_precision,
                 )
         ag_hm, _ = all_gather_into_tensor(hm, group=context.group)
         # chain order: front parts of ranks 0..W-1, then back parts of ranks W-1..0
@@ -91,7 +88,6 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
                     forward=True,
                     h_seq_idx=None,
                     use_graph=False,
-                    affine_chain_precision=affine_chain_precision,
                 )
         return initial_state
 
@@ -119,7 +115,6 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
             v=v,
             cu_seqlens=cu_last,
             chunk_size=chunk_size,
-            affine_chain_precision=affine_chain_precision,
         )
     ag_hm, _ = all_gather_into_tensor(hm, group=context.group)
     # a zero num_ranks merge just re-stores the zeros initial_state[0] already holds
@@ -133,7 +128,6 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
             forward=True,
             h_seq_idx=None,
             use_graph=use_graph,
-            affine_chain_precision=affine_chain_precision,
         )
     return initial_state
 
@@ -159,7 +153,6 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
     if context is None or context.group is None:
         return dht, initial_state
     assert dht is None, "When enable CP, the provided dht must be None."
-    affine_chain_precision = get_affine_chain_precision(use_tf32x3_affine_chain=context.use_tf32x3_affine_chain)
     rank = dist.get_rank(group=context.group)
 
     B, _, _, K = q.shape
@@ -194,7 +187,6 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
                     scale=scale,
                     cu_seqlens=cu_part,
                     chunk_size=chunk_size,
-                    affine_chain_precision=affine_chain_precision,
                 )
         ag_dhm, _ = all_gather_into_tensor(dhm, group=context.group)
         # chain order: front parts of ranks 0..W-1, then back parts of ranks W-1..0
@@ -212,7 +204,6 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
                     forward=False,
                     h_seq_idx=None,
                     use_graph=False,
-                    affine_chain_precision=affine_chain_precision,
                 )
         return dht, None
 
@@ -237,7 +228,6 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
             scale=scale,
             cu_seqlens=cu_seqlens[:2],
             chunk_size=chunk_size,
-            affine_chain_precision=affine_chain_precision,
         )
 
     ag_dhm, _ = all_gather_into_tensor(dhm, group=context.group)
@@ -261,7 +251,6 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
             forward=False,
             h_seq_idx=h_seq_idx,
             use_graph=use_graph,
-            affine_chain_precision=affine_chain_precision,
         )
 
     return dht, None

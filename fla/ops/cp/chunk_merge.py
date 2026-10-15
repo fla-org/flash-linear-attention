@@ -9,8 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.cp.utils import DEFAULT_AFFINE_CHAIN_PRECISION
-from fla.utils import autotune_cache_kwargs
+from fla.utils import IS_TF32_SUPPORTED, autotune_cache_kwargs
 
 
 @triton.heuristics({
@@ -48,8 +47,8 @@ def chunk_cp_fwd_bwd_kernel_merge(
     NUM_SEQ_ENTRIES,
     HAS_H0: tl.constexpr,
     HAS_H_SEQ_IDX: tl.constexpr,
+    AFFINE_CHAIN_PRECISION: tl.constexpr,
     STATE_V_FIRST: tl.constexpr = False,
-    AFFINE_CHAIN_PRECISION: tl.constexpr = DEFAULT_AFFINE_CHAIN_PRECISION,
     NUM_RANKS_ON_DEVICE: tl.constexpr = False,
 ):
     """Compose affine summaries across ranks or local subsequences.
@@ -165,7 +164,6 @@ def chunk_cp_merge(
     forward: bool = True,
     h_seq_idx: torch.Tensor | None = None,
     use_graph: bool = False,
-    affine_chain_precision: str | None = DEFAULT_AFFINE_CHAIN_PRECISION,
 ) -> None:
     """Merge gathered affine summaries into a rank's boundary state."""
     _, HV, K, VK = ag_hm.shape
@@ -193,6 +191,6 @@ def chunk_cp_merge(
         INTRACARD_MODE=False,
         NUM_SEQ_ENTRIES=0,
         STATE_V_FIRST=state_v_first,
-        AFFINE_CHAIN_PRECISION=affine_chain_precision,
+        AFFINE_CHAIN_PRECISION='tf32x3' if IS_TF32_SUPPORTED else 'ieee',
         NUM_RANKS_ON_DEVICE=use_graph,
     )

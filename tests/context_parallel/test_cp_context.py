@@ -5,12 +5,12 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock
 
 import pytest
 import torch
 
-from fla.ops.cp import chunk_delta_h, context, utils
+from fla.ops.cp import chunk_bwd, chunk_delta_h, chunk_fwd, chunk_merge, context
 from fla.ops.cp.chunk_delta_h import compress_h0, expand_h0
 from fla.ops.cp.context import FLACPContext, get_cp_cu_seqlens
 
@@ -66,7 +66,6 @@ def test_copy_for_backward(layout: str):
         world_size=2,
         rank=0,
         conv1d_kernel_size=4,
-        use_tf32x3_affine_chain=True,
         layout=layout,
     )
     context.pre_num_ranks_dev = torch.tensor([1], dtype=torch.int32)
@@ -118,31 +117,31 @@ def test_compress_expand_h0(layout, cu_seqlens, front_num_seqs, state_indices, s
 
 @pytest.mark.parametrize('constructor', ['context', 'get', 'build'])
 @pytest.mark.parametrize('layout', ['contiguous', 'zigzag'])
-@pytest.mark.parametrize('use_tf32x3', [None, False, True], ids=['default', 'disabled', 'enabled'])
 @pytest.mark.parametrize('supported', [False, True], ids=['ieee-hardware', 'tf32-hardware'])
-def test_affine_chain_precision(monkeypatch, constructor, layout, use_tf32x3, supported):
+def test_affine_chain_precision(monkeypatch, constructor, layout, supported):
     """All context constructors route forward, backward, and merge through the same precision policy."""
     group = object()
     monkeypatch.setattr(context.dist, 'get_rank', Mock(return_value=1))
     monkeypatch.setattr(context.dist, 'get_world_size', Mock(return_value=3))
-    monkeypatch.setattr(utils, 'DEFAULT_AFFINE_CHAIN_PRECISION', 'tf32x3' if supported else 'ieee')
-    precision_kwargs = {} if use_tf32x3 is None else {'use_tf32x3_affine_chain': use_tf32x3}
     cu_seqlens = torch.tensor([0, 12])
     if constructor == 'build':
-        cp_context = context.build_cp_context(cu_seqlens=cu_seqlens, group=group, layout=layout, **precision_kwargs)
+        cp_context = context.build_cp_context(cu_seqlens=cu_seqlens, group=group, layout=layout)
     else:
-        cp_context = context.get_cp_cu_seqlens(cu_seqlens=cu_seqlens, group=group, layout=layout, **precision_kwargs)
+        cp_context = context.get_cp_cu_seqlens(cu_seqlens=cu_seqlens, group=group, layout=layout)
         if constructor == 'context':
-            fields = vars(cp_context).copy()
-            fields.pop('use_tf32x3_affine_chain')
-            cp_context = context.FLACPContext(**fields, **precision_kwargs)
-    assert cp_context.use_tf32x3_affine_chain is (use_tf32x3 is not False)
-    assert cp_context.copy_for_backward().use_tf32x3_affine_chain is cp_context.use_tf32x3_affine_chain
+            cp_context = context.FLACPContext(**vars(cp_context))
 
-    fwd, bwd, merge = Mock(), Mock(), Mock()
-    monkeypatch.setattr(chunk_delta_h, 'chunk_cp_fwd_h', fwd)
-    monkeypatch.setattr(chunk_delta_h, 'chunk_cp_bwd_dh', bwd)
-    monkeypatch.setattr(chunk_delta_h, 'chunk_cp_merge', merge)
+    launches = []
+    for module, name in (
+        (chunk_fwd, 'chunk_cp_fwd_kernel_h'),
+        (chunk_bwd, 'chunk_cp_bwd_kernel_dh'),
+        (chunk_merge, 'chunk_cp_fwd_bwd_kernel_merge'),
+    ):
+        monkeypatch.setattr(module, 'IS_TF32_SUPPORTED', supported)
+        kernel = MagicMock()
+        monkeypatch.setattr(module, name, kernel)
+        launches.append(kernel.__getitem__.return_value)
+    fwd, bwd, merge = launches
     monkeypatch.setattr(
         chunk_delta_h,
         'all_gather_into_tensor',
@@ -166,9 +165,9 @@ def test_affine_chain_precision(monkeypatch, constructor, layout, use_tf32x3, su
         cu_seqlens=cp_context.cu_seqlens,
         context=cp_context,
     )
-    expected = ('tf32x3' if use_tf32x3 is not False else None) if supported else 'ieee'
+    expected = 'tf32x3' if supported else 'ieee'
     num_parts = 2 if layout == 'zigzag' else 1
     assert fwd.call_count == bwd.call_count == num_parts
     assert merge.call_count == 2 * num_parts
     for call in fwd.call_args_list + bwd.call_args_list + merge.call_args_list:
-        assert call.kwargs['affine_chain_precision'] == expected
+        assert call.kwargs['AFFINE_CHAIN_PRECISION'] == expected

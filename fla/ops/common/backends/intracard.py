@@ -25,9 +25,6 @@ from fla.backends import BaseBackend, register
 # Limits merge chain depth to control precision loss
 MAX_SUBSEQS = int(os.environ.get('FLA_INTRACARD_MAX_SPLITS', 32))
 
-# use tf32x3 for the affine-chain dots in the pre-scan/merge kernels (NVIDIA only)
-USE_TF32X3_AFFINE_CHAIN = os.environ.get('FLA_INTRACARD_TF32X3', '1') == '1'
-
 
 @register('common')
 class IntraCardCPBackend(BaseBackend):
@@ -99,5 +96,4 @@ class IntraCardCPBackend(BaseBackend):
             chunk_indices=chunk_indices,
             max_splits=MAX_SUBSEQS,
             state_v_first=state_v_first,
-            use_tf32x3_affine_chain=USE_TF32X3_AFFINE_CHAIN,
         )
