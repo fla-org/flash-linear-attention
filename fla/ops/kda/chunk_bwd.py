@@ -41,7 +41,7 @@ NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8]
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
-def chunk_kda_bwd_kernel_dAv(
+def chunk_kda_bwd_kernel_dav(
     q,
     k,
     v,
@@ -355,7 +355,7 @@ def chunk_kda_bwd_dAv(
         dA = v.new_empty(B, T, HV, BT, dtype=torch.float)
         dv = torch.empty_like(do)
     grid = (NT, B * HV)
-    chunk_kda_bwd_kernel_dAv[grid](
+    chunk_kda_bwd_kernel_dav[grid](
         q=q,
         k=k,
         v=v,

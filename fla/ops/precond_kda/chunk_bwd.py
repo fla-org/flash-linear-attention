@@ -20,7 +20,7 @@ NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8]
 
 # ==============================================================================
 # dAv kernel: compute dA and dv from inter-chunk backward
-# Matches KDA's chunk_kda_bwd_kernel_dAv
+# Matches KDA's chunk_kda_bwd_kernel_dav
 # ==============================================================================
 
 @triton.heuristics({
