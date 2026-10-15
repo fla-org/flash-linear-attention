@@ -15,10 +15,11 @@ unchanged from the default implementation; the Ascend adaptations are host-side:
 head dimensions are zero-padded to ``max(16, next_power_of_2(dim))`` so the
 in-kernel head-dim masks fold (a masked head-dim load trips a triton-ascend
 3.2.2 permutation defect when ``K != BK``) and the output is sliced back to the
-original ``V``; the autotune space is pruned to ``num_warps {2, 4}`` with
-``num_stages {2}``; and the launch passes ``ascend_compile_kwargs()`` (disables
-auto-multi-buffer) to bound UB usage. ``build_wall_kv_cache`` stays on the
-default implementation: it is pure torch and runs on NPU unchanged.
+original ``V``; the autotune configs carry only ``BT`` (``num_warps`` and
+``num_stages`` are unsupported on the Ascend backend); and the launch passes
+``ascend_compile_kwargs()`` (disables auto-multi-buffer) to bound UB usage.
+``build_wall_kv_cache`` stays on the default implementation: it is pure torch
+and runs on NPU unchanged.
 """
 
 import torch
@@ -29,13 +30,12 @@ import triton.language as tl
 from fla.ops.utils.op import exp2, log2
 from fla.utils import ascend_compile_kwargs, autotune_cache_kwargs
 
-# Ascend: keep the sweep small (num_warps {2, 4}, single num_stages value)
+# Ascend: num_warps/num_stages are unsupported on this backend (see
+# .agents/skills/fla-ascend-performance); the sweep is BT only and stays small
 # so the autotuner does not pile up multi-minute compiles.
 WALL_DECODE_AUTOTUNE_CONFIGS = [
-    triton.Config({'BT': BT}, num_warps=nw, num_stages=ns)
+    triton.Config({'BT': BT})
     for BT in (16, 32)
-    for nw in (2, 4)
-    for ns in (2,)
 ]
 
 
