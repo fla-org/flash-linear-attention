@@ -121,7 +121,7 @@ def main():
         if not math.isfinite(error) or error > tolerance:
             raise RuntimeError(f'{name}: RMS error {error} exceeds existing gate {tolerance}')
         errors[name] = error
-    del reference, actual, reference_gradients, actual_gradients, reference_inputs
+    del reference, actual, reference_gradients, actual_gradients, reference_inputs, expected, observed
 
     measurements = {}
     for mode, run in (('fwd', forward), ('fwd_bwd', forward_backward)):
