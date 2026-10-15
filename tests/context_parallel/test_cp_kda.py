@@ -77,7 +77,8 @@ from fla.ops.cp import build_cp_context
 from fla.ops.kda import chunk_kda
 from fla.ops.kda.gate import naive_kda_lowerbound_gate
 from fla.ops.kda.naive import naive_recurrent_kda
-from fla.utils import assert_close, device as fla_device, device_platform, device_torch_lib
+from fla.utils import assert_close, device_platform, device_torch_lib
+from fla.utils import device as fla_device
 
 # Configure logging to see assert_close messages
 logging.basicConfig(level=logging.INFO, format='%(message)s')
