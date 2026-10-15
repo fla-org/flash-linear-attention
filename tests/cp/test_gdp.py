@@ -85,8 +85,7 @@ def _run_chunk(
                 num_householder=num_householder,
             )
             outputs.append(o_ref_i)
-        # The recurrent reference accepts scale but does not apply it.
-        o_ref = torch.cat(outputs, dim=1) * scale
+        o_ref = torch.cat(outputs, dim=1)
         o_ref.backward(do_global)
         ref = {
             "o": o_ref.detach(),
