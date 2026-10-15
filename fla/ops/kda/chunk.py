@@ -17,7 +17,6 @@ from fla.ops.common.gate import fused_beta_sigmoid, fused_beta_sigmoid_bwd
 from fla.ops.cp import FLACPContext
 from fla.ops.kda.chunk_bwd import chunk_kda_bwd
 from fla.ops.kda.chunk_fwd import chunk_kda_fwd
-from fla.ops.kda.gate import _SAFE_GATE_MIN
 from fla.ops.utils.index import prepare_chunk_indices, prepare_chunk_indices_static
 from fla.utils import IS_NPU, autocast_custom_bwd, autocast_custom_fwd, input_guard
 
@@ -479,7 +478,7 @@ def chunk_kda(
     if safe_gate and use_gate_in_kernel:
         if lower_bound is None:
             raise ValueError("`lower_bound` must be specified when `safe_gate=True` and `use_gate_in_kernel=True`.")
-        if not (_SAFE_GATE_MIN <= lower_bound < 0):
+        if not (-5 <= lower_bound < 0):
             raise ValueError(f"`lower_bound` must be in the safe range [-5, 0), got {lower_bound}.")
 
     if allow_neg_eigval and not use_beta_sigmoid_in_kernel:

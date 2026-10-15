@@ -11,7 +11,6 @@ import triton.language as tl
 
 from fla.backends import dispatch
 from fla.ops.kda.chunk_intra_token_parallel import chunk_kda_fwd_intra_token_parallel
-from fla.ops.kda.gate import _SAFE_GATE_MIN
 from fla.ops.kda.wy_fast import recompute_w_u_fwd
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.cache import fla_cache_autotune
@@ -19,8 +18,6 @@ from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.graph import get_static_buffer
 from fla.ops.utils.op import exp2, gather, unflatten_program_id
 from fla.utils import IS_GATHER_SUPPORTED, IS_TF32_SUPPORTED, autotune_cache_kwargs
-
-_SAFE_GATE_MIN_LOG2 = tl.constexpr(_SAFE_GATE_MIN * RCP_LN2)
 
 if IS_TF32_SUPPORTED:
     SOLVE_TRIL_DOT_PRECISION = tl.constexpr('tf32')
@@ -428,6 +425,7 @@ def chunk_kda_bwd_kernel_intra(
     NC: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     SAFE_GATE: tl.constexpr,
+    LOWER_BOUND_LOG2: tl.constexpr,
     USE_GATHER: tl.constexpr,
     USE_GRAPH: tl.constexpr = False,
 ):
@@ -524,7 +522,7 @@ def chunk_kda_bwd_kernel_intra(
             b_gn = gather(b_g, tl.zeros([1, BK], dtype=tl.int16), axis=0)
         else:
             b_gn = tl.load(g + i_ti * HV*K + o_k, mask=m_k, other=0)[None, :]
-        b_gn = b_gn + 0.5 * (BC - 1) * _SAFE_GATE_MIN_LOG2
+        b_gn = b_gn + 0.5 * (BC - 1) * LOWER_BOUND_LOG2
 
         p_dAqk = dAqk + o_c[:, None] * (HV*BT) + (i_i * BC + o_i)[None, :]
         p_dAkk = dAkk + o_c[:, None] * (HV*BT) + (i_i * BC + o_i)[None, :]
@@ -621,7 +619,7 @@ def chunk_kda_bwd_kernel_intra(
             b_gn = gather(b_g, tl.zeros([1, BK], dtype=tl.int16), axis=0)
         else:
             b_gn = tl.load(g + i_ti * HV*K + o_k, mask=m_k, other=0).to(tl.float32)[None, :]
-        b_gn = b_gn + 0.5 * (BC - 1) * _SAFE_GATE_MIN_LOG2
+        b_gn = b_gn + 0.5 * (BC - 1) * LOWER_BOUND_LOG2
         p_q = q + o_c[:, None] * (H*K) + o_k[None, :]
         b_q = tl.load(p_q, mask=m_ck, other=0.0)
         p_b = beta + o_c * HV
@@ -710,6 +708,7 @@ def chunk_kda_fwd_kernel_intra_sub_chunk(
     BC: tl.constexpr,
     BK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    LOWER_BOUND_LOG2: tl.constexpr,
     USE_GATHER: tl.constexpr,
     USE_GRAPH: tl.constexpr = False,
 ):
@@ -754,13 +753,13 @@ def chunk_kda_fwd_kernel_intra_sub_chunk(
     b_k = tl.load(p_k, mask=m_ck, other=0.0)
     b_g = tl.load(p_g, mask=m_ck, other=0.0)
     b_beta = tl.load(p_beta, mask=m_c, other=0.0)
-    # g is a log2 cumsum; relative to the first row it lies in [-5 * (BC - 1) / ln(2), 0]
-    # centering bounds each factor by exp(37.5) for BC=16 without reading future gates
+    # center the configured gate range without reading future gates or depending on sequence length
+    # with lower_bound=-5 and BC=16, each rescaling factor is bounded by exp(37.5)
     if USE_GATHER:
         b_gn = gather(b_g, tl.zeros([1, BK], dtype=tl.int16), axis=0)
     else:
         b_gn = tl.load(g + i_ti * HV*K + o_k, mask=m_k, other=0.0)[None, :]
-    b_gn = b_gn + 0.5 * (BC - 1) * _SAFE_GATE_MIN_LOG2
+    b_gn = b_gn + 0.5 * (BC - 1) * LOWER_BOUND_LOG2
 
     b_gm = (b_g - b_gn).to(tl.float32)
 
@@ -811,6 +810,7 @@ def chunk_kda_fwd_intra(
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
     safe_gate: bool = False,
+    lower_bound: float | None = None,
     disable_recompute: bool = False,
     use_graph: bool = False,
 ):
@@ -850,6 +850,7 @@ def chunk_kda_fwd_intra(
             BT=BT,
             BC=BC,
             BK=BK,
+            LOWER_BOUND_LOG2=lower_bound * RCP_LN2 if lower_bound is not None else 0.,
             USE_GATHER=IS_GATHER_SUPPORTED,
             USE_GRAPH=use_graph,
         )
@@ -921,6 +922,7 @@ def chunk_kda_bwd_intra(
     chunk_indices: torch.LongTensor | None = None,
     chunk_size: int = 64,
     safe_gate: bool = False,
+    lower_bound: float | None = None,
     use_graph: bool = False,
 ):
     B, T, H, K, HV = *k.shape, g.shape[2]
@@ -971,6 +973,7 @@ def chunk_kda_bwd_intra(
         BK=BK,
         NC=NC,
         SAFE_GATE=safe_gate,
+        LOWER_BOUND_LOG2=lower_bound * RCP_LN2 if lower_bound is not None else 0.,
         USE_GATHER=IS_GATHER_SUPPORTED,
         USE_GRAPH=use_graph,
     )
