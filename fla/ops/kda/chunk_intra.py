@@ -425,7 +425,7 @@ def chunk_kda_bwd_kernel_intra(
     NC: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     SAFE_GATE: tl.constexpr,
-    LOWER_BOUND_LOG2: tl.constexpr,
+    LOWER_BOUND: tl.constexpr,
     USE_GATHER: tl.constexpr,
     USE_GRAPH: tl.constexpr = False,
 ):
@@ -522,7 +522,7 @@ def chunk_kda_bwd_kernel_intra(
             b_gn = gather(b_g, tl.zeros([1, BK], dtype=tl.int16), axis=0)
         else:
             b_gn = tl.load(g + i_ti * HV*K + o_k, mask=m_k, other=0)[None, :]
-        b_gn = b_gn + 0.5 * (BC - 1) * LOWER_BOUND_LOG2
+        b_gn = b_gn + 0.5 * (BC - 1) * LOWER_BOUND
 
         p_dAqk = dAqk + o_c[:, None] * (HV*BT) + (i_i * BC + o_i)[None, :]
         p_dAkk = dAkk + o_c[:, None] * (HV*BT) + (i_i * BC + o_i)[None, :]
@@ -619,7 +619,7 @@ def chunk_kda_bwd_kernel_intra(
             b_gn = gather(b_g, tl.zeros([1, BK], dtype=tl.int16), axis=0)
         else:
             b_gn = tl.load(g + i_ti * HV*K + o_k, mask=m_k, other=0).to(tl.float32)[None, :]
-        b_gn = b_gn + 0.5 * (BC - 1) * LOWER_BOUND_LOG2
+        b_gn = b_gn + 0.5 * (BC - 1) * LOWER_BOUND
         p_q = q + o_c[:, None] * (H*K) + o_k[None, :]
         b_q = tl.load(p_q, mask=m_ck, other=0.0)
         p_b = beta + o_c * HV
@@ -708,7 +708,7 @@ def chunk_kda_fwd_kernel_intra_sub_chunk(
     BC: tl.constexpr,
     BK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    LOWER_BOUND_LOG2: tl.constexpr,
+    LOWER_BOUND: tl.constexpr,
     USE_GATHER: tl.constexpr,
     USE_GRAPH: tl.constexpr = False,
 ):
@@ -759,7 +759,7 @@ def chunk_kda_fwd_kernel_intra_sub_chunk(
         b_gn = gather(b_g, tl.zeros([1, BK], dtype=tl.int16), axis=0)
     else:
         b_gn = tl.load(g + i_ti * HV*K + o_k, mask=m_k, other=0.0)[None, :]
-    b_gn = b_gn + 0.5 * (BC - 1) * LOWER_BOUND_LOG2
+    b_gn = b_gn + 0.5 * (BC - 1) * LOWER_BOUND
 
     b_gm = (b_g - b_gn).to(tl.float32)
 
@@ -850,7 +850,7 @@ def chunk_kda_fwd_intra(
             BT=BT,
             BC=BC,
             BK=BK,
-            LOWER_BOUND_LOG2=lower_bound * RCP_LN2 if lower_bound is not None else 0.,
+            LOWER_BOUND=lower_bound * RCP_LN2 if lower_bound is not None else 0.,
             USE_GATHER=IS_GATHER_SUPPORTED,
             USE_GRAPH=use_graph,
         )
@@ -973,7 +973,7 @@ def chunk_kda_bwd_intra(
         BK=BK,
         NC=NC,
         SAFE_GATE=safe_gate,
-        LOWER_BOUND_LOG2=lower_bound * RCP_LN2 if lower_bound is not None else 0.,
+        LOWER_BOUND=lower_bound * RCP_LN2 if lower_bound is not None else 0.,
         USE_GATHER=IS_GATHER_SUPPORTED,
         USE_GRAPH=use_graph,
     )
