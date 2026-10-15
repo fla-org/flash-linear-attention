@@ -394,9 +394,6 @@ def chunk_gated_delta_product(
     if scale is None:
         scale = k.shape[-1] ** -0.5
     if cp_context is None and is_compact_fwd_supported(num_householder, K, V, q, k, v, g, beta, initial_state):
-        if use_qk_l2norm_in_kernel:
-            q, _ = l2norm_fwd(q)
-            k, _ = l2norm_fwd(k)
         o, final_state = chunk_gated_delta_product_fwd_compact(
             q=q,
             k=k,
@@ -407,6 +404,7 @@ def chunk_gated_delta_product(
             num_householder=num_householder,
             initial_state=initial_state,
             output_final_state=output_final_state,
+            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
             cu_seqlens=cu_seqlens,
             cu_seqlens_cpu=cu_seqlens_cpu,
         )

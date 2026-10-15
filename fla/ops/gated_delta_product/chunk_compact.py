@@ -9,6 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.modules.l2norm import l2norm_fwd
 from fla.ops.utils import chunk_local_cumsum, prepare_chunk_indices, prepare_chunk_offsets
 from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.op import exp2, unflatten_program_id
@@ -405,6 +406,7 @@ def chunk_gated_delta_product_fwd_compact(
     num_householder: int,
     initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
+    use_qk_l2norm_in_kernel: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     cu_seqlens_cpu: torch.LongTensor | None = None,
     chunk_size: int = 64,
@@ -415,6 +417,10 @@ def chunk_gated_delta_product_fwd_compact(
     to an affine map `S -> Phi_c S + B_c` of the chunk-start state, so the only sequential kernel applies one
     `[K, K] x [K, V]` product per chunk regardless of `num_householder`.
     """
+    if use_qk_l2norm_in_kernel:
+        q, _ = l2norm_fwd(q)
+        k, _ = l2norm_fwd(k)
+
     B, T, H, K, V = *q.shape, v.shape[-1]
     NH, BT = num_householder, chunk_size
     M = BT * NH

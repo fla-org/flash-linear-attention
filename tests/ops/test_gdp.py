@@ -221,25 +221,27 @@ def test_chunk_varlen(
 
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'K', 'V', 'num_householder', 'gate_logit_normalizer', 'beta_scale', 'use_qk_l2norm_in_kernel',
-     'cu_seqlens', 'dtype'),
+     'cu_seqlens', 'noncontiguous', 'dtype'),
     [
         pytest.param(
             *test,
-            id="B{}-T{}-H{}-K{}-V{}-num_householder{}-gate_logit_normalizer{}-beta_scale{}-l2norm{}-cu_seqlens{}-{}"
+            id="B{}-T{}-H{}-K{}-V{}-num_householder{}-gate_logit_normalizer{}-beta_scale{}-l2norm{}-cu_seqlens{}"
+            "-noncontiguous{}-{}"
             .format(*test),
         )
         for test in [
-            (1, 63, 1, 64, 64, 2, 1, 1, False, None, torch.bfloat16),
-            (2, 200, 3, 60, 100, 2, 1, 2, False, None, torch.float16),
-            (2, 1000, 4, 64, 128, 3, 1, 1, True, None, torch.bfloat16),
-            (2, 1000, 4, 64, 64, 2, 0.1, 2, False, None, torch.bfloat16),
-            (2, 1024, 4, 32, 64, 4, None, 1, False, None, torch.bfloat16),
-            (2, 1024, 4, 32, 64, 4, None, 1, False, None, torch.float16),
-            (1, 1500, 2, 64, 64, 2, 1, 1, False, [0, 63, 100, 100, 1000, 1500], torch.bfloat16),
-            (1, 1000, 2, 64, 128, 3, None, 1, False, [0, 1, 64, 65, 1000], torch.float16),
-            (1, 300, 2, 128, 128, 2, 1, 1, False, None, torch.bfloat16),
-            (1, 300, 2, 64, 256, 2, 1, 1, False, None, torch.bfloat16),
-            (1, 300, 2, 64, 64, 1, 1, 1, False, None, torch.bfloat16),
+            (1, 63, 1, 64, 64, 2, 1, 1, False, None, False, torch.bfloat16),
+            (2, 200, 3, 60, 100, 2, 1, 2, False, None, False, torch.float16),
+            (2, 1000, 4, 64, 128, 3, 1, 1, True, None, False, torch.bfloat16),
+            (2, 1000, 4, 64, 64, 2, 0.1, 2, False, None, False, torch.bfloat16),
+            (2, 1024, 4, 32, 64, 4, None, 1, False, None, False, torch.bfloat16),
+            (2, 1024, 4, 32, 64, 4, None, 1, False, None, False, torch.float16),
+            (1, 1500, 2, 64, 64, 2, 1, 1, False, [0, 63, 100, 100, 1000, 1500], False, torch.bfloat16),
+            (1, 1000, 2, 64, 128, 3, None, 1, False, [0, 1, 64, 65, 1000], False, torch.float16),
+            (1, 300, 2, 128, 128, 2, 1, 1, False, None, False, torch.bfloat16),
+            (1, 300, 2, 64, 256, 2, 1, 1, False, None, False, torch.bfloat16),
+            (1, 300, 2, 64, 64, 1, 1, 1, False, None, False, torch.bfloat16),
+            (1, 500, 2, 64, 64, 2, 1, 1, True, None, True, torch.float16),
         ]
     ],
 )
@@ -254,9 +256,12 @@ def test_chunk_no_grad(
     beta_scale: float,
     use_qk_l2norm_in_kernel: bool,
     cu_seqlens: list[int] | None,
+    noncontiguous: bool,
     dtype: torch.dtype,
     monkeypatch: pytest.MonkeyPatch,
 ):
+    # the varlen tests above leave TRITON_F32_DEFAULT=ieee; compile this path under the production default
+    monkeypatch.delenv('TRITON_F32_DEFAULT', raising=False)
     torch.manual_seed(42)
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
     if cu_seqlens is not None:
@@ -270,6 +275,10 @@ def test_chunk_no_grad(
     h0 = torch.randn(N, H, K, V, dtype=torch.float32)
     if not use_qk_l2norm_in_kernel:
         q, k = F.normalize(q, p=2, dim=-1), F.normalize(k, p=2, dim=-1)
+    if noncontiguous:
+        # strided q/k must reach l2norm only after the route's input guard, like on the grad-enabled path
+        q = q.transpose(1, 2).contiguous().transpose(1, 2)
+        k = k.transpose(1, 2).contiguous().transpose(1, 2)
     q, k, v, beta, h0 = map(lambda x: x.to(device), (q, k, v, beta, h0))
     g = g.to(device) if g is not None else None
     scale = K ** -0.5
