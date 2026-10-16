@@ -622,7 +622,8 @@ def test_dictionary_and_one_item_list_architecture_equivalence(allow_attention_c
     not _has_bf16_flash_attention(),
     reason="numerical hybrid equivalence requires FlashAttention and BF16 on a CUDA or ROCm device",
 )
-def test_dictionary_and_one_item_list_numerical_equivalence():
+@pytest.mark.parametrize('use_reentrant', [None, False, True], ids=['no-checkpoint', 'non-reentrant', 'reentrant'])
+def test_dictionary_and_one_item_list_numerical_equivalence(use_reentrant):
     spec = {
         'layers': [1],
         'num_heads': 4,
@@ -648,6 +649,8 @@ def test_dictionary_and_one_item_list_numerical_equivalence():
     list_model.load_state_dict(dictionary_model.state_dict(), strict=True)
     dictionary_model.train()
     list_model.train()
+    if use_reentrant is not None:
+        list_model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={'use_reentrant': use_reentrant})
 
     input_ids = torch.randint(0, 64, (1, 8), device=device)
     dictionary_logits = dictionary_model(input_ids, use_cache=False).logits

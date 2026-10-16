@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Optional
 
 import torch
 import torch.nn as nn
+from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
@@ -31,11 +32,6 @@ from fla.ops.attnres import fused_attnres
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
-
-try:
-    from transformers.modeling_layers import GradientCheckpointingLayer
-except ImportError:
-    from fla.models.modeling_layers import GradientCheckpointingLayer
 
 logger = logging.get_logger(__name__)
 

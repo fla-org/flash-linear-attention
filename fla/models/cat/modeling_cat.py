@@ -18,6 +18,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, repeat
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask, flex_attention
+from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
@@ -32,10 +33,6 @@ from fla.modules.rotary import rotary_embedding
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
-try:
-    from transformers.modeling_layers import GradientCheckpointingLayer
-except ImportError:
-    from fla.models.modeling_layers import GradientCheckpointingLayer
 
 # Adaptive CAT cycles power-of-two chunk sizes, each with a different FlexAttention
 # sequence length / block mask. Raise Dynamo limits so those shapes stay compiled

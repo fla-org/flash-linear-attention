@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
+from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.stickbreaking_attn import StickBreakingAttention
@@ -20,11 +21,6 @@ from fla.modules import GatedMLP, RMSNorm
 
 if TYPE_CHECKING:
     from fla.models.utils import Cache
-
-try:
-    from transformers.modeling_layers import GradientCheckpointingLayer
-except ImportError:
-    from fla.models.modeling_layers import GradientCheckpointingLayer
 
 
 class StickBreakingAttentionBlock(GradientCheckpointingLayer):

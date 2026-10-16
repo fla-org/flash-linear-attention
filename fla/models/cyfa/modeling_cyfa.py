@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn as nn
 from torch.distributed.tensor import DTensor, distribute_tensor
+from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils.deprecation import deprecate_kwarg
@@ -32,12 +33,6 @@ from .configuration_cyfa import CyclicFlowAttentionConfig
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
-
-
-try:
-    from transformers.modeling_layers import GradientCheckpointingLayer
-except ImportError:
-    from fla.models.modeling_layers import GradientCheckpointingLayer
 
 
 class CyFABlock(GradientCheckpointingLayer):

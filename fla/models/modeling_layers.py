@@ -6,16 +6,11 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import math
-from functools import partial
 
-from torch import nn
 from transformers.configuration_utils import PretrainedConfig
-from transformers.utils import logging
 from typing_extensions import NotRequired, TypedDict
 
 from fla.layers.attn import Attention
-
-logger = logging.get_logger(__name__)
 
 
 class AttentionSpec(TypedDict):
@@ -208,34 +203,3 @@ def get_attention(config: PretrainedConfig, layer_idx: int) -> Attention | None:
         max_position_embeddings=config.max_position_embeddings,
         layer_idx=layer_idx,
     )
-
-
-class GradientCheckpointingLayer(nn.Module):
-    """Disable caching while checkpointing a layer during training.
-
-    The parent model supplies ``_gradient_checkpointing_func`` when checkpointing
-    is enabled. Reentrant checkpointing requires gradient-bearing inputs to be
-    passed positionally.
-    """
-
-    gradient_checkpointing = False
-
-    def __call__(self, *args, **kwargs):
-        if not (self.gradient_checkpointing and self.training):
-            return super().__call__(*args, **kwargs)
-
-        changes = []
-        if kwargs.get('use_cache'):
-            kwargs['use_cache'] = False
-            changes.append('`use_cache=False`')
-        for name in ('past_key_value', 'past_key_values', 'layer_past'):
-            if kwargs.get(name) is not None:
-                kwargs[name] = None
-                changes.append(f'`{name}=None`')
-        if changes:
-            logger.warning_once(
-                f"Caching is incompatible with gradient checkpointing in {self.__class__.__name__}. "
-                f"Setting {', '.join(changes)}.",
-            )
-
-        return self._gradient_checkpointing_func(partial(super().__call__, **kwargs), *args)
