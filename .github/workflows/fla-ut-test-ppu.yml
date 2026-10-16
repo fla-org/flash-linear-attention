@@ -1,0 +1,128 @@
+name: fla ut test
+
+on:
+  workflow_call:
+    inputs:
+      matrix:
+        required: false
+        type: string
+        default: '["ZW-M890P", "OAM-810E"]'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  SAIL_IMAGE: download.t-head.cn/docker_release/pytorch:sdk2.2.0-2.10.0-ubuntu24.04-hggcrt3-py312-20261005
+
+jobs:
+  build-test:
+    name: Build & Test (${{ matrix.runner }})
+    runs-on: k8s-runner-group-cpu-thead
+    container:
+      image: ghcr.io/actions/actions-runner:latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: ${{ fromJson(inputs.matrix || '["ZW-M890P", "OAM-810E"]') }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Build and Test on PPU
+        id: ppu-test
+        uses: t-head/ppu-scheduler-action@main
+        with:
+          image: ${{ env.SAIL_IMAGE }}
+          nnodes: 0
+          nproc_per_node: 1
+          node_selector: "board-type=${{ matrix.runner }}"
+          namespace: ppu-sched
+          timeout_minutes: 300
+          container_options: |
+            cpus: "${{ matrix.runner == 'OAM-810E' && '11' || '31' }}"
+            memory: "${{ matrix.runner == 'OAM-810E' && '112Gi' || '256Gi' }}"
+          command: |
+            set -euo pipefail
+            cd /workspace/source
+
+            # Use public dependency sources without image-baked URL rewrites.
+            unset PIP_INDEX_URL
+            export GIT_CONFIG_GLOBAL=/dev/null
+
+            # PPU SDK and torch are pre-installed in the docker image.
+            source /usr/local/PPU_SDK/envsetup.sh
+            export MAX_JOBS=${{ matrix.runner == 'OAM-810E' && '11' || '31' }}
+            export OMP_NUM_THREADS=1
+            export MKL_NUM_THREADS=1
+
+            pip install setuptools wheel junit-xml rich
+            pip install --upgrade pytest
+
+            echo "=== BUILD ==="
+            pip3 install build
+            python scripts/build_packages.py
+            pip3 install --no-deps dist-packages/*.whl
+            pip3 install 'transformers>=4.45.0' einops
+
+            echo "=== TEST ==="
+            # Archive live to NAS so partial results survive a scheduler kill.
+            NAS_RESULT_DIR="/mnt/wl_nas/devops/fla-ci/${{ github.run_id }}/${{ github.run_attempt }}/${{ matrix.runner }}"
+            mkdir -p "$NAS_RESULT_DIR"
+            set +e
+            python .github/workflows/scripts/pr-fla-ut.py \
+              --caselist .github/workflows/scripts/casecmd.list \
+              --timeout 4200 --deadline 11100 \
+              --output-xml "$NAS_RESULT_DIR/test-results.xml" \
+              2>&1 | tee "$NAS_RESULT_DIR/test-output.log"
+            TEST_EXIT_CODE=${PIPESTATUS[0]}
+            set -euo pipefail
+            test -f "$NAS_RESULT_DIR/test-results.xml"
+            test -s "$NAS_RESULT_DIR/test-output.log"
+            exit "$TEST_EXIT_CODE"
+          cleanup_policy: on_success
+
+      - name: Test summary (${{ matrix.runner }})
+        if: always()
+        shell: bash
+        run: |
+          export NAS_RESULT_DIR="/wl_nas/devops/fla-ci/${{ github.run_id }}/${{ github.run_attempt }}/${{ matrix.runner }}"
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import os
+          import xml.etree.ElementTree as ET
+
+          board = os.environ["NAS_RESULT_DIR"].rstrip("/").split("/")[-1]
+          path = os.path.join(os.environ["NAS_RESULT_DIR"], "test-results.xml")
+          print(f"## Runner: {board}")
+          if not os.path.isfile(path):
+              print(f"JUnit report not found: {path}")
+              raise SystemExit(0)
+
+          tree = ET.parse(path)
+          for tc in tree.getroot().iter("testcase"):
+              name = tc.get("name", "?")
+              secs = float(tc.get("time") or 0)
+              failure = tc.find("failure")
+              error = tc.find("error")
+              if failure is not None:
+                  status, node = "FAIL", failure
+              elif error is not None:
+                  status, node = "ERROR", error
+              else:
+                  status, node = "PASS", None
+              print(f"- {status} `{name}` ({secs:.0f}s)")
+              if node is None:
+                  continue
+              print(f"  - Reason: {node.get('message') or 'unknown'}")
+              tail = (node.text or "").splitlines()[-60:]
+              if tail:
+                  print("  - Last output lines:")
+                  print("")
+                  print("    ```")
+                  for line in tail:
+                      print(f"    {line}")
+                  print("    ```")
+          PY

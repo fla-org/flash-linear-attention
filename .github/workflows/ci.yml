@@ -1,0 +1,65 @@
+name: CI Pipeline
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: ['main']
+    types: [opened, synchronize, reopened, ready_for_review]
+  pull_request_review:
+    types: [submitted, dismissed]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  precheck:
+    name: Pre-check
+    if: github.event_name != 'workflow_dispatch' && github.event.pull_request.base.ref == 'main'
+    uses: t-head/.github/.github/workflows/user-precheck.yml@main
+
+  smoke-test:
+    name: Smoke Test
+    needs: precheck
+    if: ${{ !cancelled() && (github.event_name == 'workflow_dispatch' || needs.precheck.result == 'success') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build and install packages
+        run: |
+          pip3 install build setuptools wheel
+          python scripts/build_packages.py
+          pip3 install --no-deps dist-packages/*.whl
+
+      - name: Runner regression tests
+        run: |
+          pip3 install pytest junit-xml
+          python -m pytest -q --noconftest tests/test_pr_fla_ut.py
+
+  ai-code-review:
+    name: AI Code Review (Copilot Gate)
+    needs: precheck
+    uses: t-head/.github/.github/workflows/ai-code-review.yml@main
+    secrets: inherit
+
+  human-review:
+    name: Human Review Gate
+    needs: [smoke-test, ai-code-review]
+    uses: t-head/.github/.github/workflows/human-review.yml@main
+    secrets: inherit
+
+  fla-ut-tests-ppu:
+    name: FLA UT Tests PPU
+    needs: [smoke-test, human-review]
+    if: ${{ !cancelled() && needs.smoke-test.result == 'success' && (github.event_name == 'workflow_dispatch' || needs.human-review.result == 'success') }}
+    uses: ./.github/workflows/fla-ut-test-ppu.yml

@@ -1,0 +1,14 @@
+# FLA PR GDN quick-test commands
+# Each non-empty, non-comment line is executed as a shell command.
+
+python -m pytest -v tests/ops/test_gdn.py -k "fused_recurrent" --durations=30
+python -m pytest -v tests/ops/test_gdn.py -k "(test_chunk and not varlen and not gate_in_kernel) or blackwell" --durations=30
+python -m pytest -v tests/ops/test_gdn.py -k "(chunk_varlen or chunk_gate_in_kernel) and not flash_qla" --durations=30
+python -m pytest -v tests/ops/test_gdn.py -k "flash_qla or test_gate or prepare_wy_repr" --durations=30
+python -m pytest -v tests/ops/test_solve_tril.py
+python -m pytest -v tests/ops/utils/test_cumsum.py
+python -m pytest -v tests/ops/utils/test_index.py
+python -m pytest -v tests/ops/utils/test_pack.py
+python -m pytest -v tests/ops/utils/test_pooling.py
+python -m pytest -v tests/modules/test_l2norm.py
+python -m pytest -v tests/models/test_modeling_gated_deltanet.py
