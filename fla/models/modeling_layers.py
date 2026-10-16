@@ -5,44 +5,31 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from __future__ import annotations
-
 import math
 from functools import partial
-from typing import TYPE_CHECKING, TypedDict
 
 from torch import nn
+from transformers.configuration_utils import PretrainedConfig
 from transformers.utils import logging
+from typing_extensions import NotRequired, TypedDict
 
 from fla.layers.attn import Attention
-
-if TYPE_CHECKING:
-    from transformers.configuration_utils import PretrainedConfig
 
 logger = logging.get_logger(__name__)
 
 
-class _RequiredHybridAttentionSpec(TypedDict):
-    layers: list[int]
-    num_heads: int
-
-
-class HybridAttentionSpec(_RequiredHybridAttentionSpec, total=False):
+class HybridAttentionSpec(TypedDict):
     """JSON-serializable settings for standard attention at selected model layers."""
 
-    num_kv_heads: int
-    qkv_bias: bool
-    window_size: int | None
-    rope_theta: float
+    layers: list[int]
+    num_heads: int
+    num_kv_heads: NotRequired[int]
+    qkv_bias: NotRequired[bool]
+    window_size: NotRequired[int | None]
+    rope_theta: NotRequired[float]
 
 
 HybridAttentionConfig = HybridAttentionSpec | list[HybridAttentionSpec] | None
-
-
-def _spec_context(spec_index: int | None) -> str:
-    if spec_index is None:
-        return "attn specification"
-    return f"attn specification at index {spec_index}"
 
 
 def _positive_int(value: object, *, field: str, context: str) -> int:
@@ -51,14 +38,13 @@ def _positive_int(value: object, *, field: str, context: str) -> int:
     return value
 
 
-def _normalize_spec(
+def _normalize_hybrid_attention_spec(
     spec: dict,
     *,
     num_hidden_layers: int,
-    spec_index: int | None,
-    assigned_layers: dict[int, int | None],
+    context: str,
+    assigned_layers: dict[int, str],
 ) -> HybridAttentionSpec:
-    context = _spec_context(spec_index)
     normalized = dict(spec)
 
     for field in ('layers', 'num_heads'):
@@ -71,8 +57,6 @@ def _normalize_spec(
             f"{context} field 'layers' must be a list or tuple of integer layer indices; got {layers!r}",
         )
 
-    normalized_layers = []
-    seen_layers = set()
     for layer_idx in layers:
         if isinstance(layer_idx, bool) or not isinstance(layer_idx, int):
             raise ValueError(
@@ -83,19 +67,16 @@ def _normalize_spec(
                 f"{context} field 'layers' contains out-of-range layer {layer_idx!r}; "
                 f"expected a value in [0, {num_hidden_layers})",
             )
-        if layer_idx in seen_layers:
+        if assigned_layers.get(layer_idx) == context:
             raise ValueError(f"{context} field 'layers' contains duplicate layer {layer_idx!r}; got {layers!r}")
         if layer_idx in assigned_layers:
-            previous_index = assigned_layers[layer_idx]
-            previous_context = _spec_context(previous_index)
             raise ValueError(
-                f"{context} assigns conflicting layer {layer_idx!r}, which is already assigned by {previous_context}",
+                f"{context} assigns conflicting layer {layer_idx!r}, "
+                f"which is already assigned by {assigned_layers[layer_idx]}",
             )
-        seen_layers.add(layer_idx)
-        assigned_layers[layer_idx] = spec_index
-        normalized_layers.append(layer_idx)
+        assigned_layers[layer_idx] = context
 
-    normalized['layers'] = normalized_layers
+    normalized['layers'] = list(layers)
     normalized['num_heads'] = _positive_int(normalized['num_heads'], field='num_heads', context=context)
 
     num_kv_heads = normalized.get('num_kv_heads')
@@ -152,19 +133,18 @@ def normalize_hybrid_attention_config(
 
     is_single_spec = isinstance(attn, dict)
     specs = [attn] if is_single_spec else attn
-    assigned_layers: dict[int, int | None] = {}
+    assigned_layers: dict[int, str] = {}
     normalized_specs = []
 
     for spec_index, spec in enumerate(specs):
-        current_index = None if is_single_spec else spec_index
+        context = "attn specification" if is_single_spec else f"attn specification at index {spec_index}"
         if not isinstance(spec, dict):
-            context = _spec_context(current_index)
             raise ValueError(f"{context} must be a dictionary; got {spec!r}")
         normalized_specs.append(
-            _normalize_spec(
+            _normalize_hybrid_attention_spec(
                 spec,
                 num_hidden_layers=num_hidden_layers,
-                spec_index=current_index,
+                context=context,
                 assigned_layers=assigned_layers,
             ),
         )
@@ -213,7 +193,11 @@ def get_hybrid_attention_spec(
     return None
 
 
-def _build_hybrid_attention(config: PretrainedConfig, attn_spec: HybridAttentionSpec, layer_idx: int) -> Attention:
+def get_hybrid_attention(config: PretrainedConfig, layer_idx: int) -> Attention | None:
+    """Create standard attention for a selected layer, or return None for a native mixer."""
+    attn_spec = get_hybrid_attention_spec(config.attn, layer_idx=layer_idx)
+    if attn_spec is None:
+        return None
     return Attention(
         hidden_size=config.hidden_size,
         num_heads=attn_spec['num_heads'],
@@ -227,63 +211,31 @@ def _build_hybrid_attention(config: PretrainedConfig, attn_spec: HybridAttention
 
 
 class GradientCheckpointingLayer(nn.Module):
-    """Base class for layers with gradient checkpointing.
+    """Disable caching while checkpointing a layer during training.
 
-    This class enables gradient checkpointing functionality for a layer.
-    By default, gradient checkpointing is disabled (`gradient_checkpointing = False`).
-    When `model.set_gradient_checkpointing()` is called, gradient checkpointing is enabled
-    by setting `gradient_checkpointing = True` and assigning a checkpointing function to `_gradient_checkpointing_func`.
-
-    Important:
-
-        When using gradient checkpointing with `use_reentrant=True`, inputs that require gradients (e.g. hidden states)
-        must be passed as positional arguments (`*args`) rather than keyword arguments to properly propagate gradients.
-
-        Example:
-
-            ```python
-            >>> # Correct - hidden_states passed as positional arg
-            >>> out = self.layer(hidden_states, attention_mask=attention_mask)
-
-            >>> # Incorrect - hidden_states passed as keyword arg
-            >>> out = self.layer(hidden_states=hidden_states, attention_mask=attention_mask)
-            ```
+    The parent model supplies ``_gradient_checkpointing_func`` when checkpointing
+    is enabled. Reentrant checkpointing requires gradient-bearing inputs to be
+    passed positionally.
     """
 
     gradient_checkpointing = False
 
     def __call__(self, *args, **kwargs):
-        if self.gradient_checkpointing and self.training:
-            do_warn = False
-            layer_name = self.__class__.__name__
-            message = f"Caching is incompatible with gradient checkpointing in {layer_name}. Setting"
+        if not (self.gradient_checkpointing and self.training):
+            return super().__call__(*args, **kwargs)
 
-            if "use_cache" in kwargs and kwargs["use_cache"]:
-                kwargs["use_cache"] = False
-                message += " `use_cache=False`,"
-                do_warn = True
+        changes = []
+        if kwargs.get('use_cache'):
+            kwargs['use_cache'] = False
+            changes.append('`use_cache=False`')
+        for name in ('past_key_value', 'past_key_values', 'layer_past'):
+            if kwargs.get(name) is not None:
+                kwargs[name] = None
+                changes.append(f'`{name}=None`')
+        if changes:
+            logger.warning_once(
+                f"Caching is incompatible with gradient checkpointing in {self.__class__.__name__}. "
+                f"Setting {', '.join(changes)}.",
+            )
 
-            # different names for the same thing in different layers
-            # TODO cyril: this one without `S` can be removed after deprecation cycle
-            if "past_key_value" in kwargs and kwargs["past_key_value"] is not None:
-                kwargs["past_key_value"] = None
-                message += " `past_key_value=None`,"
-                do_warn = True
-
-            if "past_key_values" in kwargs and kwargs["past_key_values"] is not None:
-                kwargs["past_key_values"] = None
-                message += " `past_key_values=None`,"
-                do_warn = True
-
-            if "layer_past" in kwargs and kwargs["layer_past"] is not None:
-                kwargs["layer_past"] = None
-                message += " `layer_past=None`,"
-                do_warn = True
-
-            # warn if anything was changed
-            if do_warn:
-                message = message.rstrip(",") + "."
-                logger.warning_once(message)
-
-            return self._gradient_checkpointing_func(partial(super().__call__, **kwargs), *args)
-        return super().__call__(*args, **kwargs)
+        return self._gradient_checkpointing_func(partial(super().__call__, **kwargs), *args)

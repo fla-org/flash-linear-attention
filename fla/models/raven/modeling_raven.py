@@ -22,7 +22,7 @@ from transformers.utils import logging
 from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.raven import Raven
-from fla.models.modeling_layers import _build_hybrid_attention, get_hybrid_attention_spec
+from fla.models.modeling_layers import get_hybrid_attention
 from fla.models.raven.configuration_raven import RavenConfig
 from fla.models.utils import Cache, FLAUnsupportedCacheGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
@@ -51,10 +51,8 @@ class RavenBlock(GradientCheckpointingLayer):
         self.layer_idx = layer_idx
 
         self.attn_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
-        attn_spec = get_hybrid_attention_spec(config.attn, layer_idx=layer_idx)
-        if attn_spec is not None:
-            self.attn = _build_hybrid_attention(config=config, attn_spec=attn_spec, layer_idx=layer_idx)
-        else:
+        self.attn = get_hybrid_attention(config=config, layer_idx=layer_idx)
+        if self.attn is None:
             self.attn = Raven(
                 hidden_size=config.hidden_size,
                 expand_k=config.expand_k,

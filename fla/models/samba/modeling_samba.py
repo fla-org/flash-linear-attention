@@ -18,7 +18,7 @@ from transformers.utils import logging
 from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.mamba import Mamba
-from fla.models.modeling_layers import _build_hybrid_attention, get_hybrid_attention_spec
+from fla.models.modeling_layers import get_hybrid_attention
 from fla.models.samba.configuration_samba import SambaConfig
 from fla.models.utils import Cache, FLAGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
@@ -47,10 +47,8 @@ class SambaBlock(GradientCheckpointingLayer):
         self.layer_idx = layer_idx
 
         self.mixer_norm = RMSNorm(hidden_size=config.hidden_size, eps=config.norm_eps, dtype=torch.float32)
-        attn_spec = get_hybrid_attention_spec(config.attn, layer_idx=layer_idx)
-        if attn_spec is not None:
-            self.mixer = _build_hybrid_attention(config=config, attn_spec=attn_spec, layer_idx=layer_idx)
-        else:
+        self.mixer = get_hybrid_attention(config=config, layer_idx=layer_idx)
+        if self.mixer is None:
             self.mixer = Mamba(
                 hidden_size=config.hidden_size,
                 state_size=config.state_size,
