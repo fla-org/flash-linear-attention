@@ -454,12 +454,18 @@ def test_chunk_large_decay(spike, write, disable_recompute):
 
 
 @pytest.mark.skipif(not (IS_NVIDIA or IS_AMD or IS_NPU), reason="CUDA/ROCm or Ascend NPU required")
-@pytest.mark.parametrize('dtype', [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(('dtype', 'K', 'V'), [
+    pytest.param(torch.float32, 48, 32, id='fp32-k48-v32'),
+    pytest.param(torch.float16, 48, 32, id='fp16-k48-v32'),
+    pytest.param(torch.bfloat16, 48, 32, id='bf16-k48-v32'),
+    pytest.param(torch.bfloat16, 128, 64, id='bf16-k128-v64'),
+    pytest.param(torch.bfloat16, 256, 128, id='bf16-k256-v128'),
+])
 @pytest.mark.parametrize('use_gate_in_kernel', [False, True], ids=['log-gates', 'fused-gates'])
 @pytest.mark.parametrize('varlen', [False, True], ids=['dense', 'varlen'])
-def test_chunk_large_decay_recurrence(dtype, use_gate_in_kernel, varlen):
+def test_chunk_large_decay_recurrence(dtype, K, V, use_gate_in_kernel, varlen):
     """Local decays preserve all gradients across partial chunks and carried states."""
-    B, T, H, K, V = (1, 161, 2, 48, 32) if varlen else (2, 130, 2, 48, 32)
+    B, T, H = (1, 161, 2) if varlen else (2, 130, 2)
     q, k, v, g, b, w, A_log, dt_bias = _rand_inputs(B, T, H, H, K, V, dtype, gate_in_kernel=use_gate_in_kernel)
     q, k = F.normalize(q.float(), dim=-1).to(dtype), F.normalize(k.float(), dim=-1).to(dtype)
     g = g.float()
