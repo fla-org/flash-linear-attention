@@ -403,6 +403,38 @@ def test_chunk_beta_sigmoid_in_kernel(
     assert_close('dh0', ref_dh0, tri_dh0, 0.008)
 
 
+@pytest.mark.smoke
+@pytest.mark.parametrize('T', [1, 7], ids=lambda T: f'T{T}')
+@pytest.mark.parametrize('state_v_first', [False, True], ids=['kv_state', 'vk_state'])
+@pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16], ids=['fp16', 'bf16'])
+def test_chunk_small_head(T: int, state_v_first: bool, dtype: torch.dtype):
+    torch.manual_seed(42)
+    B, H, K, V = 3, 4, 16, 24
+    q = F.normalize(torch.rand(B, T, H, K, device=device), p=2, dim=-1).to(dtype).requires_grad_()
+    k = F.normalize(torch.rand(B, T, H, K, device=device), p=2, dim=-1).to(dtype).requires_grad_()
+    v = torch.randn(B, T, H, V, device=device, dtype=dtype, requires_grad=True)
+    beta = torch.rand(B, T, H, device=device, requires_grad=True)
+    g = F.logsigmoid(torch.randn(B, T, H, device=device)).requires_grad_()
+    tri, tri_ht = chunk_gated_delta_rule(
+        q=q, k=k, v=v, beta=beta, g=g,
+        output_final_state=True,
+        state_v_first=state_v_first,
+    )
+    if state_v_first:
+        tri_ht = tri_ht.transpose(-1, -2)
+    ref, ref_ht = naive_recurrent_gated_delta_rule(
+        q=q, k=k, v=v, beta=beta, g=g, output_final_state=True,
+    )
+    do = torch.randn_like(v)
+    inputs = (q, k, v, beta, g)
+    tri_grads = torch.autograd.grad(outputs=tri, inputs=inputs, grad_outputs=do)
+    ref_grads = torch.autograd.grad(outputs=ref, inputs=inputs, grad_outputs=do)
+    assert_close('o', ref, tri, 0.005)
+    assert_close('ht', ref_ht, tri_ht, 0.005)
+    for name, ref_grad, tri_grad in zip(('dq', 'dk', 'dv', 'dbeta', 'dg'), ref_grads, tri_grads):
+        assert_close(name, ref_grad, tri_grad, 0.008)
+
+
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'D', 'scale', 'gate_logit_normalizer', 'dtype'),
     [
