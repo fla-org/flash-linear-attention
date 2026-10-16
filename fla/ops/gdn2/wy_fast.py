@@ -27,6 +27,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.backends import dispatch
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.op import exp2
@@ -142,6 +143,7 @@ def recompute_w_u_fwd_gdn2_kernel(
         tl.store(p_w, b_w.to(p_w.dtype.element_ty), mask=m_kk)
 
 
+@dispatch('gdn2')
 def recompute_w_u_fwd_gdn2(
     k: torch.Tensor,
     v: torch.Tensor,
