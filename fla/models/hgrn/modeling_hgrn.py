@@ -228,8 +228,9 @@ class HGRNModel(HGRNPreTrainedModel):
 
         self.embeddings = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
         if config.use_lower_bound:
-            lower_bound_dim = int(config.hidden_size * config.expand_ratio)
-            self.lower_bounds = nn.Parameter(torch.zeros(config.num_hidden_layers, lower_bound_dim))
+            self.lower_bounds = nn.Parameter(
+                torch.zeros(config.num_hidden_layers, int(config.hidden_size * config.expand_ratio)),
+            )
         self.layers = nn.ModuleList([HGRNBlock(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
         self.norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
 
@@ -294,14 +295,13 @@ class HGRNModel(HGRNPreTrainedModel):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
-            lower_bound = lower_bounds[i] if self.config.use_lower_bound else None
             hidden_states, attentions, past_key_values, attnres_states = layer(
                 hidden_states,
                 attention_mask=attention_mask,
                 past_key_values=past_key_values,
                 use_cache=use_cache,
                 output_attentions=output_attentions,
-                lower_bound=lower_bound,
+                lower_bound=lower_bounds[i] if self.config.use_lower_bound else None,
                 attnres_states=attnres_states,
                 **kwargs,
             )
