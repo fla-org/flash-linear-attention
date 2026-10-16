@@ -9,10 +9,10 @@ import warnings
 
 from transformers.configuration_utils import PretrainedConfig
 
-from fla.models.hybrid import HybridAttentionConfig, _HybridAttentionConfigMixin
+from fla.models.modeling_layers import AttentionConfig, AttentionConfigBase
 
 
-class RWKV7Config(_HybridAttentionConfigMixin, PretrainedConfig):
+class RWKV7Config(AttentionConfigBase, PretrainedConfig):
 
     model_type = 'rwkv7'
     keys_to_ignore_at_inference = ['past_key_values']
@@ -35,7 +35,7 @@ class RWKV7Config(_HybridAttentionConfigMixin, PretrainedConfig):
         norm_first: bool = True,
         norm_bias: bool = True,
         norm_eps: float = 1e-5,
-        attn: HybridAttentionConfig = None,
+        attn: AttentionConfig = None,
         use_cache: bool = True,
         pad_token_id: int | None = None,
         bos_token_id: int = 1,

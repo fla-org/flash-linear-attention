@@ -14,13 +14,14 @@ from typing import TYPE_CHECKING, Optional
 
 import torch
 import torch.nn as nn
+from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
 
 from fla.layers import MomAttention
 from fla.layers.attn import Attention
-from fla.models.hybrid import get_hybrid_attention_spec
+from fla.models.modeling_layers import get_attention_spec
 from fla.models.mom.configuration_mom import MomConfig
 from fla.models.utils import Cache, FLAUnsupportedCacheGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
@@ -30,11 +31,6 @@ from fla.ops.attnres import fused_attnres
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
-
-try:
-    from transformers.modeling_layers import GradientCheckpointingLayer
-except ImportError:
-    from fla.models.modeling_layers import GradientCheckpointingLayer
 
 logger = logging.get_logger(__name__)
 
@@ -128,7 +124,7 @@ class MomBlock(GradientCheckpointingLayer):
         self.hidden_size = config.hidden_size
 
         self.attn_norm = RMSNorm(hidden_size=config.hidden_size, eps=config.norm_eps, dtype=torch.float32)
-        attn_spec = get_hybrid_attention_spec(config.attn, layer_idx=layer_idx)
+        attn_spec = get_attention_spec(config.attn, layer_idx=layer_idx)
         if attn_spec is not None:
             self.attn = Attention(
                 hidden_size=config.hidden_size,
