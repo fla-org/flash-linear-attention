@@ -23,7 +23,7 @@ from fla.modules.activations import (
     swiglu_linear,
     swish,
 )
-from fla.modules.activations.ops import _is_inner_contiguous
+from fla.modules.activations.ops import _ensure_inner_contiguous, _is_inner_contiguous
 from fla.utils import assert_close, device
 
 
@@ -445,8 +445,34 @@ def test_powglu_linear(B: int, T: int, D: int, O: int, power: float, noncontiguo
     assert_close('powglu_linear db ', db_ref, db_tri, 1e-3)
 
 
+@pytest.mark.parametrize(
+    ('fn', 'ref', 'n', 'compile'),
+    [
+        pytest.param(powglu, powglu_ref, 2, False, id='powglu'),
+        pytest.param(powglu, powglu_ref, 2, True, id='powglu-compile'),
+    ],
+)
+def test_size_one_stride(fn, ref, n: int, compile: bool):
+    torch.manual_seed(42)
+    xs = tuple(
+        torch.randn(384, device=device).as_strided((3, 1, 128), (128, 1536, 1)).requires_grad_()
+        for _ in range(n)
+    )
+    assert xs[0].contiguous() is xs[0]
+
+    out_ref = ref(*xs)
+    out_tri = torch.compile(fn)(*xs) if compile else fn(*xs)
+    g = torch.randn(384, device=device).as_strided((3, 1, 128), (128, 1536, 1))
+    grads_ref = torch.autograd.grad(out_ref, xs, g)
+    grads_tri = torch.autograd.grad(out_tri, xs, g)
+
+    assert_close('size-one stride fwd', out_ref, out_tri, 1e-3)
+    for i, (grad_ref, grad_tri) in enumerate(zip(grads_ref, grads_tri)):
+        assert_close(f'size-one stride grad{i}', grad_ref, grad_tri, 1e-3)
+
+
 def test_is_inner_contiguous():
-    """Test _is_inner_contiguous correctly classifies tensor layouts."""
+    """Test inner-contiguous layout handling."""
     assert _is_inner_contiguous(torch.randn(())) is True
     assert _is_inner_contiguous(torch.randn(10)) is True
     assert _is_inner_contiguous(torch.randn(30)[::3]) is False
@@ -466,9 +492,17 @@ def test_is_inner_contiguous():
     data3d = torch.randn(5, 10, 40)
     x3d_chunk, _ = data3d.chunk(2, dim=-1)  # shape (5, 10, 20), stride (400, 40, 1)
     assert _is_inner_contiguous(x3d_chunk) is True
+    assert _ensure_inner_contiguous(x3d_chunk) is x3d_chunk
 
     x3d_transposed = x3d.transpose(-1, -2)
     assert _is_inner_contiguous(x3d_transposed) is False
+
+    x3d_size_one = torch.arange(384).as_strided((3, 1, 128), (128, 1536, 1))
+    assert _is_inner_contiguous(x3d_size_one) is False
+    assert x3d_size_one.contiguous() is x3d_size_one
+    x3d_dense = _ensure_inner_contiguous(x3d_size_one)
+    assert x3d_dense.stride() == (128, 128, 1)
+    torch.testing.assert_close(x3d_dense, x3d_size_one)
 
     x4d = torch.randn(3, 5, 10, 20)
     assert _is_inner_contiguous(x4d) is True
