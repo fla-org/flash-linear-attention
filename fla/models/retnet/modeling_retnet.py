@@ -19,7 +19,7 @@ from transformers.utils import logging
 from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.multiscale_retention import MultiScaleRetention
-from fla.models.modeling_layers import get_hybrid_attention
+from fla.models.modeling_layers import get_attention
 from fla.models.retnet.configuration_retnet import RetNetConfig
 from fla.models.utils import Cache, FLAUnsupportedCacheGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
@@ -48,7 +48,7 @@ class RetNetBlock(GradientCheckpointingLayer):
         self.layer_idx = layer_idx
 
         self.attn_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
-        self.attn = get_hybrid_attention(config=config, layer_idx=layer_idx)
+        self.attn = get_attention(config=config, layer_idx=layer_idx)
         if self.attn is None:
             self.attn = MultiScaleRetention(
                 mode=config.attn_mode,

@@ -20,7 +20,7 @@ from transformers.utils import logging
 
 from fla.layers import MomAttention
 from fla.layers.attn import Attention
-from fla.models.modeling_layers import get_hybrid_attention_spec
+from fla.models.modeling_layers import get_attention_spec
 from fla.models.mom.configuration_mom import MomConfig
 from fla.models.utils import Cache, FLAUnsupportedCacheGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
@@ -128,7 +128,7 @@ class MomBlock(GradientCheckpointingLayer):
         self.hidden_size = config.hidden_size
 
         self.attn_norm = RMSNorm(hidden_size=config.hidden_size, eps=config.norm_eps, dtype=torch.float32)
-        attn_spec = get_hybrid_attention_spec(config.attn, layer_idx=layer_idx)
+        attn_spec = get_attention_spec(config.attn, layer_idx=layer_idx)
         if attn_spec is not None:
             self.attn = Attention(
                 hidden_size=config.hidden_size,

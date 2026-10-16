@@ -20,7 +20,7 @@ from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.comba import Comba
 from fla.models.comba.configuration_comba import CombaConfig
-from fla.models.modeling_layers import get_hybrid_attention
+from fla.models.modeling_layers import get_attention
 from fla.models.utils import Cache, FLAUnsupportedCacheGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
 from fla.modules import GatedMLP as CombaMLP
@@ -48,7 +48,7 @@ class CombaBlock(GradientCheckpointingLayer):
         self.layer_idx = layer_idx
 
         self.attn_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
-        self.attn = get_hybrid_attention(config=config, layer_idx=layer_idx)
+        self.attn = get_attention(config=config, layer_idx=layer_idx)
         if self.attn is None:
             self.attn = Comba(
                 mode=config.attn_mode,

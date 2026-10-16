@@ -10,7 +10,7 @@ import warnings
 
 from transformers.configuration_utils import PretrainedConfig
 
-from fla.models.modeling_layers import HybridAttentionConfig, _HybridAttentionConfigMixin
+from fla.models.modeling_layers import AttentionConfig, AttentionConfigBase
 
 _DEFAULT_ATTN = {
     'layers': (1, 3, 5, 7, 9, 11, 13, 15, 17),
@@ -22,7 +22,7 @@ _DEFAULT_ATTN = {
 }
 
 
-def _is_legacy_default_attn(attn: HybridAttentionConfig) -> bool:
+def _is_legacy_default_attn(attn: AttentionConfig) -> bool:
     if not isinstance(attn, dict) or attn.keys() != _DEFAULT_ATTN.keys():
         return False
     layers = attn['layers']
@@ -38,7 +38,7 @@ def _adapt_default_attn(num_hidden_layers: int) -> dict:
     }
 
 
-class SambaConfig(_HybridAttentionConfigMixin, PretrainedConfig):
+class SambaConfig(AttentionConfigBase, PretrainedConfig):
 
     model_type = "samba"
 
@@ -80,7 +80,7 @@ class SambaConfig(_HybridAttentionConfigMixin, PretrainedConfig):
         time_step_init_scheme: str = "random",
         time_step_floor: float = 1e-4,
         max_position_embeddings: int = 2048,
-        attn: HybridAttentionConfig = _DEFAULT_ATTN,
+        attn: AttentionConfig = _DEFAULT_ATTN,
         hidden_ratio: int | None = 4,
         rescale_prenorm_residual: bool = False,
         use_cache: bool = True,

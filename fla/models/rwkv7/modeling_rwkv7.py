@@ -19,7 +19,7 @@ from transformers.utils import logging
 from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.rwkv7 import RWKV7Attention
-from fla.models.modeling_layers import get_hybrid_attention
+from fla.models.modeling_layers import get_attention
 from fla.models.rwkv7.configuration_rwkv7 import RWKV7Config
 from fla.models.utils import Cache, FLAUnsupportedCacheGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, LayerNorm
@@ -138,7 +138,7 @@ class RWKV7Block(GradientCheckpointingLayer):
             bias=config.norm_bias,
             eps=config.norm_eps,
         )
-        self.attn = get_hybrid_attention(config=config, layer_idx=layer_idx)
+        self.attn = get_attention(config=config, layer_idx=layer_idx)
         if self.attn is None:
             self.attn = RWKV7Attention(
                 mode=config.attn_mode,

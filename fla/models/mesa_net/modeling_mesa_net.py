@@ -20,7 +20,7 @@ from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.mesa_net import MesaNet
 from fla.models.mesa_net.configuration_mesa_net import MesaNetConfig
-from fla.models.modeling_layers import get_hybrid_attention
+from fla.models.modeling_layers import get_attention
 from fla.models.utils import Cache, FLAUnsupportedCacheGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
 from fla.modules import GatedMLP as MesaNetMLP
@@ -48,7 +48,7 @@ class MesaNetBlock(GradientCheckpointingLayer):
         self.layer_idx = layer_idx
 
         self.attn_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
-        self.attn = get_hybrid_attention(config=config, layer_idx=layer_idx)
+        self.attn = get_attention(config=config, layer_idx=layer_idx)
         if self.attn is None:
             self.attn = MesaNet(
                 mode=config.attn_mode,

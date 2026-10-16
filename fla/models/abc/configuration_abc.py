@@ -9,10 +9,10 @@ import warnings
 
 from transformers.configuration_utils import PretrainedConfig
 
-from fla.models.modeling_layers import HybridAttentionConfig, _HybridAttentionConfigMixin
+from fla.models.modeling_layers import AttentionConfig, AttentionConfigBase
 
 
-class ABCConfig(_HybridAttentionConfigMixin, PretrainedConfig):
+class ABCConfig(AttentionConfigBase, PretrainedConfig):
 
     model_type = 'abc'
     keys_to_ignore_at_inference = ['past_key_values']
@@ -37,7 +37,7 @@ class ABCConfig(_HybridAttentionConfigMixin, PretrainedConfig):
         elementwise_affine: bool | None = True,
         norm_eps: float = 1e-6,
         use_rope: bool = True,
-        attn: HybridAttentionConfig = None,
+        attn: AttentionConfig = None,
         use_cache: bool = True,
         pad_token_id: int | None = None,
         bos_token_id: int = 1,

@@ -20,7 +20,7 @@ from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.abc import ABCAttention
 from fla.models.abc.configuration_abc import ABCConfig
-from fla.models.modeling_layers import get_hybrid_attention
+from fla.models.modeling_layers import get_attention
 from fla.models.utils import Cache, FLAUnsupportedCacheGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
 from fla.modules import GatedMLP as ABCMLP
@@ -47,7 +47,7 @@ class ABCBlock(GradientCheckpointingLayer):
         self.layer_idx = layer_idx
 
         self.attn_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
-        self.attn = get_hybrid_attention(config=config, layer_idx=layer_idx)
+        self.attn = get_attention(config=config, layer_idx=layer_idx)
         if self.attn is None:
             self.attn = ABCAttention(
                 hidden_size=config.hidden_size,

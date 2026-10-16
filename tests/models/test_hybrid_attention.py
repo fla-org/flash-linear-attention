@@ -43,7 +43,7 @@ from fla.models import (
 from fla.models.gated_deltanet.modeling_gated_deltanet import GatedDeltaNetBlock
 from fla.models.gla.modeling_gla import GLABlock, GLAForCausalLM
 from fla.models.kda.modeling_kda import KDABlock
-from fla.models.modeling_layers import get_hybrid_attention_spec, normalize_hybrid_attention_config
+from fla.models.modeling_layers import get_attention_spec, normalize_attention_config
 from fla.models.samba.modeling_samba import SambaBlock
 from fla.utils import assert_close, device, device_platform, device_torch_lib
 
@@ -82,8 +82,8 @@ SAMBA_CANONICAL_ATTN = {
 
 
 def test_normalize_none():
-    assert normalize_hybrid_attention_config(None, num_hidden_layers=4) is None
-    assert normalize_hybrid_attention_config(None, num_hidden_layers='unused') is None
+    assert normalize_attention_config(None, num_hidden_layers=4) is None
+    assert normalize_attention_config(None, num_hidden_layers='unused') is None
 
 
 def test_normalize_dictionary_defaults_and_unknown_keys():
@@ -94,7 +94,7 @@ def test_normalize_dictionary_defaults_and_unknown_keys():
     }
     original = deepcopy(source)
 
-    normalized = normalize_hybrid_attention_config(source, num_hidden_layers=4)
+    normalized = normalize_attention_config(source, num_hidden_layers=4)
 
     assert isinstance(normalized, dict)
     assert normalized == {
@@ -119,7 +119,7 @@ def test_normalize_list_defaults_each_specification():
     ]
     original = deepcopy(source)
 
-    normalized = normalize_hybrid_attention_config(source, num_hidden_layers=4)
+    normalized = normalize_attention_config(source, num_hidden_layers=4)
 
     assert isinstance(normalized, list)
     assert normalized[0] == {
@@ -157,7 +157,7 @@ def test_normalize_list_defaults_each_specification():
     ],
 )
 def test_normalize_empty_forms(attn, expected):
-    assert normalize_hybrid_attention_config(attn, num_hidden_layers=4) == expected
+    assert normalize_attention_config(attn, num_hidden_layers=4) == expected
 
 
 @pytest.mark.parametrize(
@@ -181,19 +181,19 @@ def test_normalize_empty_forms(attn, expected):
 )
 def test_normalize_invalid_structure(attn, match):
     with pytest.raises(ValueError, match=match):
-        normalize_hybrid_attention_config(attn, num_hidden_layers=4)
+        normalize_attention_config(attn, num_hidden_layers=4)
 
 
 @pytest.mark.parametrize('value', [0, -1, True, 1.5, None, '8'])
 def test_normalize_invalid_num_heads(value):
     with pytest.raises(ValueError, match=rf"num_heads.*{value!r}"):
-        normalize_hybrid_attention_config({'layers': [0], 'num_heads': value}, num_hidden_layers=1)
+        normalize_attention_config({'layers': [0], 'num_heads': value}, num_hidden_layers=1)
 
 
 @pytest.mark.parametrize('value', [0, -1, True, 1.5, '2'])
 def test_normalize_invalid_num_kv_heads(value):
     with pytest.raises(ValueError, match=rf"num_kv_heads.*{value!r}"):
-        normalize_hybrid_attention_config(
+        normalize_attention_config(
             {'layers': [0], 'num_heads': 4, 'num_kv_heads': value},
             num_hidden_layers=1,
         )
@@ -202,13 +202,13 @@ def test_normalize_invalid_num_kv_heads(value):
 @pytest.mark.parametrize('value', [0, 1, None, 'false'])
 def test_normalize_invalid_qkv_bias(value):
     with pytest.raises(ValueError, match=rf"qkv_bias.*{value!r}"):
-        normalize_hybrid_attention_config({'layers': [0], 'num_heads': 2, 'qkv_bias': value}, num_hidden_layers=1)
+        normalize_attention_config({'layers': [0], 'num_heads': 2, 'qkv_bias': value}, num_hidden_layers=1)
 
 
 @pytest.mark.parametrize('value', [0, -1, True, 1.5])
 def test_normalize_invalid_window_size(value):
     with pytest.raises(ValueError, match=rf"window_size.*{value!r}"):
-        normalize_hybrid_attention_config({'layers': [0], 'num_heads': 2, 'window_size': value}, num_hidden_layers=1)
+        normalize_attention_config({'layers': [0], 'num_heads': 2, 'window_size': value}, num_hidden_layers=1)
 
 
 @pytest.mark.parametrize(
@@ -217,12 +217,12 @@ def test_normalize_invalid_window_size(value):
 )
 def test_normalize_invalid_rope_theta(value):
     with pytest.raises(ValueError, match=rf"rope_theta.*{value!r}"):
-        normalize_hybrid_attention_config({'layers': [0], 'num_heads': 2, 'rope_theta': value}, num_hidden_layers=1)
+        normalize_attention_config({'layers': [0], 'num_heads': 2, 'rope_theta': value}, num_hidden_layers=1)
 
 
 def test_list_error_identifies_specification_index_and_value():
     with pytest.raises(ValueError, match=r"index 1.*window_size.*0"):
-        normalize_hybrid_attention_config(
+        normalize_attention_config(
             [
                 {'layers': [0], 'num_heads': 2},
                 {'layers': [1], 'num_heads': 2, 'window_size': 0},
@@ -232,7 +232,7 @@ def test_list_error_identifies_specification_index_and_value():
 
 
 def test_lookup_heterogeneous_plan():
-    normalized = normalize_hybrid_attention_config(
+    normalized = normalize_attention_config(
         [
             {'layers': [4, 1], 'num_heads': 8, 'window_size': 128},
             {'layers': [5], 'num_heads': 4, 'window_size': None},
@@ -240,36 +240,36 @@ def test_lookup_heterogeneous_plan():
         num_hidden_layers=6,
     )
 
-    assert get_hybrid_attention_spec(normalized, layer_idx=1) is normalized[0]
-    assert get_hybrid_attention_spec(normalized, layer_idx=4) is normalized[0]
-    assert get_hybrid_attention_spec(normalized, layer_idx=5) is normalized[1]
-    assert get_hybrid_attention_spec(normalized, layer_idx=0) is None
+    assert get_attention_spec(normalized, layer_idx=1) is normalized[0]
+    assert get_attention_spec(normalized, layer_idx=4) is normalized[0]
+    assert get_attention_spec(normalized, layer_idx=5) is normalized[1]
+    assert get_attention_spec(normalized, layer_idx=0) is None
 
 
 def test_lookup_dictionary_and_one_item_list_are_equivalent():
     spec = {'layers': [1, 3], 'num_heads': 4, 'num_kv_heads': 2}
-    dictionary = normalize_hybrid_attention_config(spec, num_hidden_layers=4)
-    plan = normalize_hybrid_attention_config([spec], num_hidden_layers=4)
+    dictionary = normalize_attention_config(spec, num_hidden_layers=4)
+    plan = normalize_attention_config([spec], num_hidden_layers=4)
 
     for layer_idx in range(4):
-        assert get_hybrid_attention_spec(dictionary, layer_idx=layer_idx) == get_hybrid_attention_spec(
+        assert get_attention_spec(dictionary, layer_idx=layer_idx) == get_attention_spec(
             plan,
             layer_idx=layer_idx,
         )
 
 
 def test_lookup_list_order_does_not_change_disjoint_assignments():
-    first = normalize_hybrid_attention_config(
+    first = normalize_attention_config(
         [{'layers': [0], 'num_heads': 2}, {'layers': [2], 'num_heads': 4}],
         num_hidden_layers=3,
     )
-    second = normalize_hybrid_attention_config(
+    second = normalize_attention_config(
         [{'layers': [2], 'num_heads': 4}, {'layers': [0], 'num_heads': 2}],
         num_hidden_layers=3,
     )
 
     for layer_idx in range(3):
-        assert get_hybrid_attention_spec(first, layer_idx=layer_idx) == get_hybrid_attention_spec(
+        assert get_attention_spec(first, layer_idx=layer_idx) == get_attention_spec(
             second,
             layer_idx=layer_idx,
         )

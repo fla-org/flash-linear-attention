@@ -7,10 +7,10 @@
 
 from transformers.configuration_utils import PretrainedConfig
 
-from fla.models.modeling_layers import HybridAttentionConfig, _HybridAttentionConfigMixin
+from fla.models.modeling_layers import AttentionConfig, AttentionConfigBase
 
 
-class MomConfig(_HybridAttentionConfigMixin, PretrainedConfig):
+class MomConfig(AttentionConfigBase, PretrainedConfig):
     model_type = 'mom'
     keys_to_ignore_at_inference = ['past_key_values']
 
@@ -30,7 +30,7 @@ class MomConfig(_HybridAttentionConfigMixin, PretrainedConfig):
         hidden_act: str = "swish",
         num_hidden_layers: int = 24,
         norm_eps: float = 1e-6,
-        attn: HybridAttentionConfig = None,
+        attn: AttentionConfig = None,
         use_cache: bool = True,
         pad_token_id: int | None = None,
         bos_token_id: int = 1,

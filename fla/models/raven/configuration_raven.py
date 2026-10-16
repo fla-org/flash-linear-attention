@@ -12,10 +12,10 @@ import warnings
 
 from transformers.configuration_utils import PretrainedConfig
 
-from fla.models.modeling_layers import HybridAttentionConfig, _HybridAttentionConfigMixin
+from fla.models.modeling_layers import AttentionConfig, AttentionConfigBase
 
 
-class RavenConfig(_HybridAttentionConfigMixin, PretrainedConfig):
+class RavenConfig(AttentionConfigBase, PretrainedConfig):
 
     model_type = 'raven'
     keys_to_ignore_at_inference = ['past_key_values']
@@ -46,7 +46,7 @@ class RavenConfig(_HybridAttentionConfigMixin, PretrainedConfig):
         rope_theta: float = 10000.,
         elementwise_affine: bool | None = True,
         norm_eps: float = 1e-6,
-        attn: HybridAttentionConfig = None,
+        attn: AttentionConfig = None,
         use_cache: bool = True,
         pad_token_id: int | None = None,
         bos_token_id: int = 1,

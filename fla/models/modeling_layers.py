@@ -18,7 +18,7 @@ from fla.layers.attn import Attention
 logger = logging.get_logger(__name__)
 
 
-class HybridAttentionSpec(TypedDict):
+class AttentionSpec(TypedDict):
     """JSON-serializable settings for standard attention at selected model layers."""
 
     layers: list[int]
@@ -29,7 +29,7 @@ class HybridAttentionSpec(TypedDict):
     rope_theta: NotRequired[float]
 
 
-HybridAttentionConfig = HybridAttentionSpec | list[HybridAttentionSpec] | None
+AttentionConfig = AttentionSpec | list[AttentionSpec] | None
 
 
 def _positive_int(value: object, *, field: str, context: str) -> int:
@@ -38,13 +38,13 @@ def _positive_int(value: object, *, field: str, context: str) -> int:
     return value
 
 
-def _normalize_hybrid_attention_spec(
+def _normalize_attention_spec(
     spec: dict,
     *,
     num_hidden_layers: int,
     context: str,
     assigned_layers: dict[int, str],
-) -> HybridAttentionSpec:
+) -> AttentionSpec:
     normalized = dict(spec)
 
     for field in ('layers', 'num_heads'):
@@ -111,12 +111,12 @@ def _normalize_hybrid_attention_spec(
     return normalized
 
 
-def normalize_hybrid_attention_config(
-    attn: HybridAttentionConfig,
+def normalize_attention_config(
+    attn: AttentionConfig,
     *,
     num_hidden_layers: int,
-) -> HybridAttentionConfig:
-    """Validate and normalize a hybrid-attention configuration.
+) -> AttentionConfig:
+    """Validate and normalize attention settings for selected model layers.
 
     The accepted forms are ``None``, one specification dictionary, or a list of
     specification dictionaries. Defaults are applied independently to copied
@@ -141,7 +141,7 @@ def normalize_hybrid_attention_config(
         if not isinstance(spec, dict):
             raise ValueError(f"{context} must be a dictionary; got {spec!r}")
         normalized_specs.append(
-            _normalize_hybrid_attention_spec(
+            _normalize_attention_spec(
                 spec,
                 num_hidden_layers=num_hidden_layers,
                 context=context,
@@ -154,8 +154,8 @@ def normalize_hybrid_attention_config(
     return normalized_specs
 
 
-class _HybridAttentionConfigMixin:
-    """Apply hybrid-attention validation to constructor and later assignments.
+class AttentionConfigBase:
+    """Validate attention settings on construction and later assignments.
 
     Validation depends on ``self.num_hidden_layers`` for layer range checks,
     so subclasses must assign ``num_hidden_layers`` before ``self.attn`` in
@@ -163,22 +163,22 @@ class _HybridAttentionConfigMixin:
     """
 
     @property
-    def attn(self) -> HybridAttentionConfig:
+    def attn(self) -> AttentionConfig:
         return self.__dict__.get('attn')
 
     @attn.setter
-    def attn(self, value: HybridAttentionConfig) -> None:
-        self.__dict__['attn'] = self._normalize_hybrid_attention_config(value)
+    def attn(self, value: AttentionConfig) -> None:
+        self.__dict__['attn'] = self._normalize_attention_config(value)
 
-    def _normalize_hybrid_attention_config(self, attn: HybridAttentionConfig) -> HybridAttentionConfig:
-        return normalize_hybrid_attention_config(attn, num_hidden_layers=self.num_hidden_layers)
+    def _normalize_attention_config(self, attn: AttentionConfig) -> AttentionConfig:
+        return normalize_attention_config(attn, num_hidden_layers=self.num_hidden_layers)
 
 
-def get_hybrid_attention_spec(
-    attn: HybridAttentionConfig,
+def get_attention_spec(
+    attn: AttentionConfig,
     *,
     layer_idx: int,
-) -> HybridAttentionSpec | None:
+) -> AttentionSpec | None:
     """Return the normalized attention specification assigned to ``layer_idx``.
 
     This lookup is intended for model block construction. Unassigned layers
@@ -193,9 +193,9 @@ def get_hybrid_attention_spec(
     return None
 
 
-def get_hybrid_attention(config: PretrainedConfig, layer_idx: int) -> Attention | None:
+def get_attention(config: PretrainedConfig, layer_idx: int) -> Attention | None:
     """Create standard attention for a selected layer, or return None for a native mixer."""
-    attn_spec = get_hybrid_attention_spec(config.attn, layer_idx=layer_idx)
+    attn_spec = get_attention_spec(config.attn, layer_idx=layer_idx)
     if attn_spec is None:
         return None
     return Attention(
