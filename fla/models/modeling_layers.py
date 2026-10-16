@@ -5,72 +5,156 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from functools import partial
+import math
 
-from torch import nn
-from transformers.utils import logging
+from transformers.configuration_utils import PretrainedConfig
+from typing_extensions import NotRequired, TypedDict
 
-logger = logging.get_logger(__name__)
+from fla.layers.attn import Attention
 
 
-class GradientCheckpointingLayer(nn.Module):
-    """Base class for layers with gradient checkpointing.
+class AttentionSpec(TypedDict):
+    """JSON-serializable settings for standard attention at selected model layers."""
 
-    This class enables gradient checkpointing functionality for a layer.
-    By default, gradient checkpointing is disabled (`gradient_checkpointing = False`).
-    When `model.set_gradient_checkpointing()` is called, gradient checkpointing is enabled
-    by setting `gradient_checkpointing = True` and assigning a checkpointing function to `_gradient_checkpointing_func`.
+    layers: list[int]
+    num_heads: int
+    num_kv_heads: NotRequired[int]
+    qkv_bias: NotRequired[bool]
+    window_size: NotRequired[int | None]
+    rope_theta: NotRequired[float]
 
-    Important:
 
-        When using gradient checkpointing with `use_reentrant=True`, inputs that require gradients (e.g. hidden states)
-        must be passed as positional arguments (`*args`) rather than keyword arguments to properly propagate gradients.
+AttentionConfig = AttentionSpec | list[AttentionSpec] | None
 
-        Example:
 
-            ```python
-            >>> # Correct - hidden_states passed as positional arg
-            >>> out = self.layer(hidden_states, attention_mask=attention_mask)
+def parse_attention_config(attn: AttentionConfig, *, num_hidden_layers: int) -> AttentionConfig:
+    """Validate attention settings and fill defaults without modifying the input.
 
-            >>> # Incorrect - hidden_states passed as keyword arg
-            >>> out = self.layer(hidden_states=hidden_states, attention_mask=attention_mask)
-            ```
+    Preserve dictionary/list form and unknown keys; reject overlapping layer assignments.
+    """
+    if attn is None:
+        return None
+    if isinstance(num_hidden_layers, bool) or not isinstance(num_hidden_layers, int) or num_hidden_layers < 0:
+        raise ValueError(f"field 'num_hidden_layers' must be a non-negative integer; got {num_hidden_layers!r}")
+    if not isinstance(attn, (dict, list)):
+        raise ValueError(f"attn must be None, a dictionary, or a list of dictionaries; got {attn!r}")
+
+    configs = []
+    assigned_layers: dict[int, int] = {}
+    for i, config in enumerate([attn] if isinstance(attn, dict) else attn):
+        context = "attn specification" if isinstance(attn, dict) else f"attn specification at index {i}"
+        if not isinstance(config, dict):
+            raise ValueError(f"{context} must be a dictionary; got {config!r}")
+        config = dict(config)
+        for name in ('layers', 'num_heads'):
+            if name not in config:
+                raise ValueError(f"{context} field {name!r} is required; got <missing>")
+
+        layers = config['layers']
+        if not isinstance(layers, (list, tuple)):
+            raise ValueError(f"{context} field 'layers' must be a list or tuple of integer layer indices; got {layers!r}")
+        for layer_idx in layers:
+            if isinstance(layer_idx, bool) or not isinstance(layer_idx, int):
+                raise ValueError(f"{context} field 'layers' must contain only integer layer indices; got {layer_idx!r}")
+            if layer_idx < 0 or layer_idx >= num_hidden_layers:
+                raise ValueError(
+                    f"{context} field 'layers' contains out-of-range layer {layer_idx!r}; "
+                    f"expected a value in [0, {num_hidden_layers})",
+                )
+            if layer_idx in assigned_layers:
+                if assigned_layers[layer_idx] == i:
+                    raise ValueError(f"{context} field 'layers' contains duplicate layer {layer_idx!r}; got {layers!r}")
+                raise ValueError(
+                    f"{context} assigns conflicting layer {layer_idx!r}, "
+                    f"which is already assigned by attn specification at index {assigned_layers[layer_idx]}",
+                )
+            assigned_layers[layer_idx] = i
+        config['layers'] = list(layers)
+
+        if config.get('num_kv_heads') is None:
+            config['num_kv_heads'] = config['num_heads']
+        for name in ('num_heads', 'num_kv_heads'):
+            value = config[name]
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{context} field {name!r} must be a positive integer; got {value!r}")
+
+        qkv_bias = config.setdefault('qkv_bias', False)
+        if not isinstance(qkv_bias, bool):
+            raise ValueError(f"{context} field 'qkv_bias' must be a Boolean; got {qkv_bias!r}")
+
+        window_size = config.setdefault('window_size', None)
+        if window_size is not None:
+            if isinstance(window_size, bool) or not isinstance(window_size, int) or window_size <= 0:
+                raise ValueError(f"{context} field 'window_size' must be a positive integer; got {window_size!r}")
+
+        rope_theta = config.setdefault('rope_theta', 10000.)
+        try:
+            valid_rope_theta = (
+                not isinstance(rope_theta, bool)
+                and isinstance(rope_theta, (int, float))
+                and math.isfinite(rope_theta)
+                and rope_theta > 0
+            )
+        except OverflowError:
+            valid_rope_theta = False
+        if not valid_rope_theta:
+            raise ValueError(f"{context} field 'rope_theta' must be positive and finite; got {rope_theta!r}")
+        configs.append(config)
+
+    return configs[0] if isinstance(attn, dict) else configs
+
+
+class AttentionConfigBase:
+    """Validate attention settings on construction and later assignments.
+
+    Validation depends on ``self.num_hidden_layers`` for layer range checks,
+    so subclasses must assign ``num_hidden_layers`` before ``self.attn`` in
+    their ``__init__``.
     """
 
-    gradient_checkpointing = False
+    @property
+    def attn(self) -> AttentionConfig:
+        return self.__dict__.get('attn')
 
-    def __call__(self, *args, **kwargs):
-        if self.gradient_checkpointing and self.training:
-            do_warn = False
-            layer_name = self.__class__.__name__
-            message = f"Caching is incompatible with gradient checkpointing in {layer_name}. Setting"
+    @attn.setter
+    def attn(self, value: AttentionConfig) -> None:
+        self.__dict__['attn'] = self._parse_attention_config(value)
 
-            if "use_cache" in kwargs and kwargs["use_cache"]:
-                kwargs["use_cache"] = False
-                message += " `use_cache=False`,"
-                do_warn = True
+    def _parse_attention_config(self, attn: AttentionConfig) -> AttentionConfig:
+        return parse_attention_config(attn, num_hidden_layers=self.num_hidden_layers)
 
-            # different names for the same thing in different layers
-            # TODO cyril: this one without `S` can be removed after deprecation cycle
-            if "past_key_value" in kwargs and kwargs["past_key_value"] is not None:
-                kwargs["past_key_value"] = None
-                message += " `past_key_value=None`,"
-                do_warn = True
 
-            if "past_key_values" in kwargs and kwargs["past_key_values"] is not None:
-                kwargs["past_key_values"] = None
-                message += " `past_key_values=None`,"
-                do_warn = True
+def get_attention_spec(
+    attn: AttentionConfig,
+    *,
+    layer_idx: int,
+) -> AttentionSpec | None:
+    """Return the normalized attention specification assigned to ``layer_idx``.
 
-            if "layer_past" in kwargs and kwargs["layer_past"] is not None:
-                kwargs["layer_past"] = None
-                message += " `layer_past=None`,"
-                do_warn = True
+    This lookup is intended for model block construction. Unassigned layers
+    return ``None`` and retain their model's native mixer.
+    """
+    if attn is None:
+        return None
+    specs = [attn] if isinstance(attn, dict) else attn
+    for spec in specs:
+        if layer_idx in spec['layers']:
+            return spec
+    return None
 
-            # warn if anything was changed
-            if do_warn:
-                message = message.rstrip(",") + "."
-                logger.warning_once(message)
 
-            return self._gradient_checkpointing_func(partial(super().__call__, **kwargs), *args)
-        return super().__call__(*args, **kwargs)
+def get_attention(config: PretrainedConfig, layer_idx: int) -> Attention | None:
+    """Create standard attention for a selected layer, or return None for a native mixer."""
+    attn_spec = get_attention_spec(config.attn, layer_idx=layer_idx)
+    if attn_spec is None:
+        return None
+    return Attention(
+        hidden_size=config.hidden_size,
+        num_heads=attn_spec['num_heads'],
+        num_kv_heads=attn_spec['num_kv_heads'],
+        qkv_bias=attn_spec['qkv_bias'],
+        window_size=attn_spec['window_size'],
+        rope_theta=attn_spec['rope_theta'],
+        max_position_embeddings=config.max_position_embeddings,
+        layer_idx=layer_idx,
+    )

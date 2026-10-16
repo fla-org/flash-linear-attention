@@ -13,15 +13,15 @@ from typing import TYPE_CHECKING, Optional
 
 import torch
 import torch.nn as nn
+from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
 from transformers.utils.deprecation import deprecate_kwarg
 
-from fla.layers.attn import Attention
 from fla.layers.hgrn import HGRNAttention
 from fla.models.hgrn.configuration_hgrn import HGRNConfig
-from fla.models.hybrid import get_hybrid_attention_spec
+from fla.models.modeling_layers import get_attention
 from fla.models.utils import Cache, FLAUnsupportedCacheGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
 from fla.modules import GatedMLP as HGRNMLP
@@ -31,11 +31,6 @@ from fla.ops.attnres import fused_attnres
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
-
-try:
-    from transformers.modeling_layers import GradientCheckpointingLayer
-except ImportError:
-    from fla.models.modeling_layers import GradientCheckpointingLayer
 
 logger = logging.get_logger(__name__)
 
@@ -49,19 +44,8 @@ class HGRNBlock(GradientCheckpointingLayer):
         self.layer_idx = layer_idx
 
         self.attn_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
-        attn_spec = get_hybrid_attention_spec(config.attn, layer_idx=layer_idx)
-        if attn_spec is not None:
-            self.attn = Attention(
-                hidden_size=config.hidden_size,
-                num_heads=attn_spec['num_heads'],
-                num_kv_heads=attn_spec['num_kv_heads'],
-                qkv_bias=attn_spec['qkv_bias'],
-                window_size=attn_spec['window_size'],
-                rope_theta=attn_spec['rope_theta'],
-                max_position_embeddings=config.max_position_embeddings,
-                layer_idx=layer_idx,
-            )
-        else:
+        self.attn = get_attention(config=config, layer_idx=layer_idx)
+        if self.attn is None:
             self.attn = HGRNAttention(
                 mode=config.attn_mode,
                 hidden_size=config.hidden_size,
@@ -237,7 +221,9 @@ class HGRNModel(HGRNPreTrainedModel):
 
         self.embeddings = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
         if config.use_lower_bound:
-            self.lower_bounds = nn.Parameter(torch.zeros(config.num_hidden_layers, config.hidden_size))
+            self.lower_bounds = nn.Parameter(
+                torch.zeros(config.num_hidden_layers, int(config.hidden_size * config.expand_ratio)),
+            )
         self.layers = nn.ModuleList([HGRNBlock(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
         self.norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
 
@@ -302,14 +288,13 @@ class HGRNModel(HGRNPreTrainedModel):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
-            lower_bound = lower_bounds[i] if self.config.use_lower_bound else None
             hidden_states, attentions, past_key_values, attnres_states = layer(
                 hidden_states,
                 attention_mask=attention_mask,
                 past_key_values=past_key_values,
                 use_cache=use_cache,
                 output_attentions=output_attentions,
-                lower_bound=lower_bound,
+                lower_bound=lower_bounds[i] if self.config.use_lower_bound else None,
                 attnres_states=attnres_states,
                 **kwargs,
             )

@@ -61,6 +61,22 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Test PR commit subject validation
+        run: node --test scripts/test_check_pr_commits.cjs
+
+      - name: Check PR commit subjects
+        uses: actions/github-script@v9.0.0
+        with:
+          script: |
+            const commits = await github.paginate(github.rest.pulls.listCommits, {
+              ...context.repo,
+              pull_number: context.issue.number,
+              per_page: 100,
+            });
+            const check_pr_commits = require('./scripts/check_pr_commits.cjs');
+            const error = check_pr_commits(commits);
+            if (error) core.setFailed(error);
+
       - name: Test PR size validation
         run: node --test scripts/test_check_pr_size.cjs
 
