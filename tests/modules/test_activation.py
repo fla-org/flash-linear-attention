@@ -24,7 +24,7 @@ from fla.modules.activations import (
     swish,
 )
 from fla.modules.activations.ops import _ensure_inner_contiguous, _is_inner_contiguous
-from fla.utils import assert_close, device
+from fla.utils import IS_NPU, assert_close, device
 
 
 def powglu_ref(x: torch.Tensor, y: torch.Tensor, power: float = 3.0) -> torch.Tensor:
@@ -44,6 +44,18 @@ def make_inputs(shape: tuple[int, ...], n: int, noncontiguous: bool) -> tuple[to
     else:
         xs = tuple(torch.randn(shape, device=device) for _ in range(n))
     return tuple(x.requires_grad_() for x in xs)
+
+
+def make_singleton_input(shape: tuple[int, ...], strides: tuple[int, ...], dtype: torch.dtype) -> torch.Tensor:
+    x = torch.randn(size=shape, device=device, dtype=dtype).as_strided(size=shape, stride=strides)
+    assert x.is_contiguous() and x.contiguous() is x
+    # fail before kernel dispatch if normalization would leave an unsafe row stride
+    assert _is_inner_contiguous(x=_ensure_inner_contiguous(x=x))
+    if IS_NPU:
+        from fla.modules.activations import triton_ascend
+
+        assert _is_inner_contiguous(x=triton_ascend._ensure_inner_contiguous(x=x))
+    return x
 
 
 def test_elu_p1():
@@ -446,32 +458,6 @@ def test_powglu_linear(B: int, T: int, D: int, O: int, power: float, noncontiguo
 
 
 @pytest.mark.parametrize(
-    ('fn', 'ref', 'n', 'compile'),
-    [
-        pytest.param(powglu, powglu_ref, 2, False, id='powglu'),
-        pytest.param(powglu, powglu_ref, 2, True, id='powglu-compile'),
-    ],
-)
-def test_size_one_stride(fn, ref, n: int, compile: bool):
-    torch.manual_seed(42)
-    xs = tuple(
-        torch.randn(384, device=device).as_strided((3, 1, 128), (128, 1536, 1)).requires_grad_()
-        for _ in range(n)
-    )
-    assert xs[0].contiguous() is xs[0]
-
-    out_ref = ref(*xs)
-    out_tri = torch.compile(fn)(*xs) if compile else fn(*xs)
-    g = torch.randn(384, device=device).as_strided((3, 1, 128), (128, 1536, 1))
-    grads_ref = torch.autograd.grad(out_ref, xs, g)
-    grads_tri = torch.autograd.grad(out_tri, xs, g)
-
-    assert_close('size-one stride fwd', out_ref, out_tri, 1e-3)
-    for i, (grad_ref, grad_tri) in enumerate(zip(grads_ref, grads_tri)):
-        assert_close(f'size-one stride grad{i}', grad_ref, grad_tri, 1e-3)
-
-
-@pytest.mark.parametrize(
     ('fn', 'reference', 'n'),
     [
         pytest.param(sigmoid, torch.sigmoid, 1, id='sigmoid'),
@@ -492,7 +478,8 @@ def test_size_one_stride(fn, ref, n: int, compile: bool):
         pytest.param((3, 1, 1), (1, 12, 7), id='singleton-feature'),
     ],
 )
-@pytest.mark.parametrize('dtype', [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize('dtype', [torch.float32, torch.float16, torch.bfloat16], ids=['fp32', 'fp16', 'bf16'])
+@pytest.mark.parametrize('compile', [False, True], ids=['eager', 'compile'])
 def test_activation_singleton_strides(
     fn,
     reference,
@@ -500,43 +487,16 @@ def test_activation_singleton_strides(
     shape: tuple[int, ...],
     strides: tuple[int, ...],
     dtype: torch.dtype,
-    monkeypatch: pytest.MonkeyPatch,
+    compile: bool,
 ):
     torch.manual_seed(42)
-    rows = torch.Size(shape).numel() // shape[-1]
-    storage_size = (rows - 1) * max(strides) + shape[-1] * strides[-1]
-
-    def make_padded():
-        storage = torch.full((storage_size,), float('nan'), device=device, dtype=dtype)
-        return storage.as_strided(size=shape, stride=strides)
-
-    empty_like = torch.empty_like
-
-    def padded_empty_like(x, **kwargs):
-        # empty_like preserves the rejected singleton strides, so the baseline's output writes also need padding
-        guard_output = not kwargs and x.shape == shape and x.dtype == dtype
-        if guard_output and x.stride() == strides:
-            return make_padded()
-        output = empty_like(x, **kwargs)
-        if guard_output:
-            # the test wrapper changes the allocation's call stack, so retain the fixture's NaN poisoning explicitly
-            output.fill_(float('nan'))
-        return output
-
-    monkeypatch.setattr(torch, 'empty_like', padded_empty_like)
-
-    def make_input():
-        # keep incorrect row reads inside NaN padding so the baseline fails without an illegal device access
-        x = make_padded()
-        x.copy_(torch.randn(shape, device=device, dtype=dtype))
-        assert x.is_contiguous() and x.contiguous() is x
-        return x
-
-    inputs = tuple(make_input().requires_grad_() for _ in range(n))
+    inputs = tuple(make_singleton_input(shape=shape, strides=strides, dtype=dtype).requires_grad_() for _ in range(n))
     ref_inputs = tuple(x.detach().float().requires_grad_() for x in inputs)
     ref = reference(*ref_inputs)
-    tri = fn(*inputs)
-    g = make_input()
+    if compile:
+        torch.compiler.reset()
+    tri = torch.compile(fn)(*inputs) if compile else fn(*inputs)
+    g = make_singleton_input(shape=shape, strides=strides, dtype=dtype)
     ref_grads = torch.autograd.grad(outputs=ref, inputs=ref_inputs, grad_outputs=g.float())
     tri_grads = torch.autograd.grad(outputs=tri, inputs=inputs, grad_outputs=g)
 
@@ -547,8 +507,20 @@ def test_activation_singleton_strides(
         assert_close(f'singleton-stride gradient {i}', ref_grad.to(dtype), tri_grad, 1e-3)
 
 
+def test_ensure_inner_contiguous():
+    x = torch.arange(384).as_strided(size=(3, 1, 128), stride=(128, 1536, 1))
+    assert x.is_contiguous() and x.contiguous() is x
+    assert not _is_inner_contiguous(x=x)
+    dense = _ensure_inner_contiguous(x=x)
+    assert dense.stride() == (128, 128, 1)
+    torch.testing.assert_close(dense, x)
+
+    chunk = torch.arange(2000).reshape(5, 10, 40).chunk(2, dim=-1)[0]
+    assert _ensure_inner_contiguous(x=chunk) is chunk
+
+
 def test_is_inner_contiguous():
-    """Test inner-contiguous layout handling."""
+    """Test _is_inner_contiguous correctly classifies tensor layouts."""
     assert _is_inner_contiguous(torch.randn(())) is True
     assert _is_inner_contiguous(torch.randn(10)) is True
     assert _is_inner_contiguous(torch.randn(30)[::3]) is False
@@ -568,17 +540,9 @@ def test_is_inner_contiguous():
     data3d = torch.randn(5, 10, 40)
     x3d_chunk, _ = data3d.chunk(2, dim=-1)  # shape (5, 10, 20), stride (400, 40, 1)
     assert _is_inner_contiguous(x3d_chunk) is True
-    assert _ensure_inner_contiguous(x3d_chunk) is x3d_chunk
 
     x3d_transposed = x3d.transpose(-1, -2)
     assert _is_inner_contiguous(x3d_transposed) is False
-
-    x3d_size_one = torch.arange(384).as_strided((3, 1, 128), (128, 1536, 1))
-    assert _is_inner_contiguous(x3d_size_one) is False
-    assert x3d_size_one.contiguous() is x3d_size_one
-    x3d_dense = _ensure_inner_contiguous(x3d_size_one)
-    assert x3d_dense.stride() == (128, 128, 1)
-    torch.testing.assert_close(x3d_dense, x3d_size_one)
 
     x4d = torch.randn(3, 5, 10, 20)
     assert _is_inner_contiguous(x4d) is True

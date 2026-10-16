@@ -121,6 +121,7 @@ def _is_inner_contiguous(x: torch.Tensor) -> bool:
 def _ensure_inner_contiguous(x: torch.Tensor) -> torch.Tensor:
     if _is_inner_contiguous(x=x):
         return x
+    # contiguous() can leave arbitrary strides on size-one dimensions unchanged
     return x.clone(memory_format=torch.contiguous_format)
 
 
