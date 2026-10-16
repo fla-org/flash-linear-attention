@@ -445,6 +445,82 @@ def test_powglu_linear(B: int, T: int, D: int, O: int, power: float, noncontiguo
     assert_close('powglu_linear db ', db_ref, db_tri, 1e-3)
 
 
+@pytest.mark.parametrize(
+    ('fn', 'reference', 'n'),
+    [
+        pytest.param(sigmoid, torch.sigmoid, 1, id='sigmoid'),
+        pytest.param(elu_p1, lambda x: F.elu(x) + 1, 1, id='elu_p1'),
+        pytest.param(logsigmoid, F.logsigmoid, 1, id='logsigmoid'),
+        pytest.param(swish, F.silu, 1, id='swish'),
+        pytest.param(swiglu, lambda x, y: F.silu(x) * y, 2, id='swiglu'),
+        pytest.param(sigmoidglu, lambda x, y: torch.sigmoid(x) * y, 2, id='sigmoidglu'),
+        pytest.param(powglu, powglu_ref, 2, id='powglu'),
+    ],
+)
+@pytest.mark.parametrize(
+    ('shape', 'strides'),
+    [
+        pytest.param((3, 1, 128), (128, 1536, 1), id='3d'),
+        pytest.param((2, 1, 1, 63), (63, 999, 756, 1), id='4d'),
+        pytest.param((2, 1, 3, 1, 63), (189, 777, 63, 756, 1), id='5d'),
+        pytest.param((3, 1, 1), (1, 12, 7), id='singleton-feature'),
+    ],
+)
+@pytest.mark.parametrize('dtype', [torch.float32, torch.float16, torch.bfloat16])
+def test_activation_singleton_strides(
+    fn,
+    reference,
+    n: int,
+    shape: tuple[int, ...],
+    strides: tuple[int, ...],
+    dtype: torch.dtype,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    torch.manual_seed(42)
+    rows = torch.Size(shape).numel() // shape[-1]
+    storage_size = (rows - 1) * max(strides) + shape[-1] * strides[-1]
+
+    def make_padded():
+        storage = torch.full((storage_size,), float('nan'), device=device, dtype=dtype)
+        return storage.as_strided(size=shape, stride=strides)
+
+    empty_like = torch.empty_like
+
+    def padded_empty_like(x, **kwargs):
+        # empty_like preserves the rejected singleton strides, so the baseline's output writes also need padding
+        guard_output = not kwargs and x.shape == shape and x.dtype == dtype
+        if guard_output and x.stride() == strides:
+            return make_padded()
+        output = empty_like(x, **kwargs)
+        if guard_output:
+            # the test wrapper changes the allocation's call stack, so retain the fixture's NaN poisoning explicitly
+            output.fill_(float('nan'))
+        return output
+
+    monkeypatch.setattr(torch, 'empty_like', padded_empty_like)
+
+    def make_input():
+        # keep incorrect row reads inside NaN padding so the baseline fails without an illegal device access
+        x = make_padded()
+        x.copy_(torch.randn(shape, device=device, dtype=dtype))
+        assert x.is_contiguous() and x.contiguous() is x
+        return x
+
+    inputs = tuple(make_input().requires_grad_() for _ in range(n))
+    ref_inputs = tuple(x.detach().float().requires_grad_() for x in inputs)
+    ref = reference(*ref_inputs)
+    tri = fn(*inputs)
+    g = make_input()
+    ref_grads = torch.autograd.grad(outputs=ref, inputs=ref_inputs, grad_outputs=g.float())
+    tri_grads = torch.autograd.grad(outputs=tri, inputs=inputs, grad_outputs=g)
+
+    assert torch.isfinite(tri).all()
+    assert_close('singleton-stride output', ref.to(dtype), tri, 1e-3)
+    for i, (ref_grad, tri_grad) in enumerate(zip(ref_grads, tri_grads)):
+        assert torch.isfinite(tri_grad).all()
+        assert_close(f'singleton-stride gradient {i}', ref_grad.to(dtype), tri_grad, 1e-3)
+
+
 def test_is_inner_contiguous():
     """Test _is_inner_contiguous correctly classifies tensor layouts."""
     assert _is_inner_contiguous(torch.randn(())) is True
