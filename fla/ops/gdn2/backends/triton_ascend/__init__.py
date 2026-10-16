@@ -48,7 +48,6 @@ class TritonAscendGDN2Backend(BaseBackend):
         lower_bound: float | None = None,
         disable_recompute: bool = False,
     ) -> tuple[bool, str | None]:
-        del scale, safe_gate, lower_bound, disable_recompute
         if chunk_size != 64:
             return False, f"GDN-2 Ascend intra requires chunk_size=64, got {chunk_size}"
         K = int(k.shape[-1])
