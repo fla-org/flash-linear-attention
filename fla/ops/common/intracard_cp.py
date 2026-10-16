@@ -24,7 +24,8 @@ import torch
 import triton
 
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_fwd_kernel_h_blockdim64
-from fla.ops.cp.chunk_delta_h import pre_process_fwd_kernel_merged
+from fla.ops.cp.chunk_fwd import chunk_cp_fwd_kernel_h
+from fla.ops.cp.chunk_merge import chunk_cp_fwd_bwd_kernel_merge
 from fla.ops.utils.index import prepare_chunk_indices, prepare_chunk_offsets
 from fla.utils import IS_TF32_SUPPORTED, get_multiprocessor_count
 
@@ -259,7 +260,6 @@ def intracard_pre_scan(
     cu_seqlens_subseq_split: torch.Tensor,
     S_split: int,
     chunk_size: int = 64,
-    use_tf32x3_affine_chain: bool = False,
 ):
     H, K, V, HV = kg.shape[2], kg.shape[3], u.shape[3], u.shape[2]
     BK = triton.next_power_of_2(K)
@@ -268,7 +268,7 @@ def intracard_pre_scan(
     hm = kg.new_empty(S_split, HV, K, V + K, dtype=torch.float32)
 
     grid = (triton.cdiv(V, BLOCK_SIZE) + triton.cdiv(K, BLOCK_SIZE), HV, S_split)
-    pre_process_fwd_kernel_merged[grid](
+    chunk_cp_fwd_kernel_h[grid](
         k=kg,
         v=u,
         w=w,
@@ -287,10 +287,7 @@ def intracard_pre_scan(
         BLOCK_SIZE=BLOCK_SIZE,
         BK1=BK,
         MULTI_SEQS=True,
-        AFFINE_CHAIN_PRECISION=(
-            "tf32x3" if use_tf32x3_affine_chain and IS_TF32_SUPPORTED
-            else ("ieee" if not IS_TF32_SUPPORTED else None)
-        ),
+        AFFINE_CHAIN_PRECISION='tf32x3' if IS_TF32_SUPPORTED else 'ieee',
     )
 
     return hm
@@ -305,7 +302,6 @@ def intracard_merge(
     device: torch.device,
     initial_state: torch.Tensor | None = None,
     state_v_first: bool = False,
-    use_tf32x3_affine_chain: bool = False,
 ) -> tuple[torch.Tensor | None, int]:
     """Merge sub-sequence states using pre-computed parameters.
 
@@ -313,8 +309,6 @@ def intracard_merge(
     using pure Python loops. This function only creates GPU tensors and
     launches the merge kernel.
     """
-    from fla.ops.cp.chunk_delta_h import merge_fwd_bwd_kernel
-
     if num_non_first == 0:
         return None, 0
 
@@ -343,7 +337,7 @@ def intracard_merge(
     def grid(meta):
         return (triton.cdiv(V, meta['BV']), num_split_seqs, HV)
 
-    merge_fwd_bwd_kernel[grid](
+    chunk_cp_fwd_bwd_kernel_merge[grid](
         h=initial_states_merge,
         ag_hm=hm,
         pre_or_post_num_ranks=num_split_seqs,
@@ -361,10 +355,7 @@ def intracard_merge(
         INTRACARD_MODE=True,
         NUM_SEQ_ENTRIES=num_split_seqs,
         STATE_V_FIRST=state_v_first,
-        AFFINE_CHAIN_PRECISION=(
-            "tf32x3" if use_tf32x3_affine_chain and IS_TF32_SUPPORTED
-            else ("ieee" if not IS_TF32_SUPPORTED else None)
-        ),
+        AFFINE_CHAIN_PRECISION='tf32x3' if IS_TF32_SUPPORTED else 'ieee',
     )
 
     return initial_states_merge, num_non_first
@@ -458,7 +449,6 @@ def intracard_fwd_h(
     cu_seqlens_cpu: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
     max_splits: int = 32,
-    use_tf32x3_affine_chain: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     assert cu_seqlens is not None, "intracard_fwd_h requires cu_seqlens"
 
@@ -587,7 +577,6 @@ def intracard_fwd_h(
         cu_seqlens_subseq_split=cu_seqlens_split_flat,
         S_split=S_split_total,
         chunk_size=chunk_size,
-        use_tf32x3_affine_chain=use_tf32x3_affine_chain,
     )
 
     initial_states_merge, num_non_first = intracard_merge(
@@ -599,7 +588,6 @@ def intracard_fwd_h(
         device=device,
         initial_state=initial_state,
         state_v_first=state_v_first,
-        use_tf32x3_affine_chain=use_tf32x3_affine_chain,
     )
 
     if state_v_first:

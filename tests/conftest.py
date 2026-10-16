@@ -154,9 +154,9 @@ def _guarded_new_empty(self, *args, **kwargs):
 
 @pytest.fixture(scope="function", autouse=True)
 def poison_torch_memory(request):
-    # Only apply the guard to ops and modules tests
+    # the CP state tests exercise the same allocation paths as operator tests
     path = str(request.node.fspath)
-    if 'tests/ops/' not in path and 'tests/modules/' not in path:
+    if not any(directory in path for directory in ('tests/ops/', 'tests/modules/', 'tests/cp/test_state.py')):
         yield
         return
 

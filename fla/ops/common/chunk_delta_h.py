@@ -10,6 +10,7 @@ import triton
 import triton.language as tl
 
 from fla.backends import dispatch
+from fla.ops.common.chunk_delta_h_state import chunk_delta_rule_bwd_dh_state
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.graph import get_static_buffer
@@ -410,6 +411,7 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
         NT = tl.cdiv(T, BT)
         boh = i_n * NT
 
+    b_dh2, b_dh3, b_dh4 = tl.full((), 0, tl.float32), tl.full((), 0, tl.float32), tl.full((), 0, tl.float32)
     if STATE_V_FIRST:
         b_dh1 = tl.zeros([BV, 64], dtype=tl.float32)
         if K > 64:
@@ -489,7 +491,6 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
     for i_t in range(NT - 1, -1, -1):
         i_t_int64 = i_t.to(tl.int64)
         o_t = i_t_int64 * BT + tl.arange(0, BT)
-        m_t = o_t < T
         if STATE_V_FIRST:
             p_dh1 = dh + i_t_int64*HV*K*V + o_v[:, None] * K + o_k1[None, :]
             m_dh1 = m_v[:, None] & m_k1[None, :]
@@ -523,132 +524,31 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
             tl.store(p_dh4, b_dh4.to(p_dh4.dtype.element_ty), mask=m_dh4)
 
         last_idx = min((i_t_int64 + 1) * BT, T) - 1
-        if USE_G:
-            bg_last = tl.load(g + (bos + last_idx) * HV + i_h).to(tl.float32)
-            p_g = g + bos * HV + i_h + o_t * HV
-            b_g = tl.load(p_g, mask=m_t, other=0.0).to(tl.float32)
-            bg_last_exp = exp2(bg_last)
-            b_g_exp = exp2(b_g)
-        p_dv = dv + o_t[:, None] * (HV*V) + o_v[None, :]
-        p_dv2 = dv2 + o_t[:, None] * (HV*V) + o_v[None, :]
-        p_do = do + o_t[:, None] * (HV*V) + o_v[None, :]
-
-        b_do = tl.load(p_do, mask=m_t[:, None] & m_v[None, :], other=0.0)
-
-        # Update dv
-        p_k = k + o_t[:, None] * (H*K) + o_k1[None, :]
-        b_k = tl.load(p_k, mask=m_t[:, None] & m_k1[None, :], other=0.0)
-        if USE_GK:
-            o_k1 = tl.arange(0, 64)
-            b_gk_last1 = tl.load(gk + last_idx * HV*K + o_k1, mask=(o_k1 < K), other=0.).to(tl.float32)
-        if STATE_V_FIRST:
-            b_dv = tl.dot(b_k, tl.trans(b_dh1).to(b_k.dtype))
-        else:
-            b_dv = tl.dot(b_k, b_dh1.to(b_k.dtype))
-
-        if K > 64:
-            p_k = k + o_t[:, None] * (H*K) + o_k2[None, :]
-            b_k = tl.load(p_k, mask=m_t[:, None] & m_k2[None, :], other=0.0)
-            if USE_GK:
-                b_gk_last2 = tl.load(gk + last_idx * HV*K + o_k2, mask=(o_k2 < K), other=0.).to(tl.float32)
-            if STATE_V_FIRST:
-                b_dv = tl.dot(b_k, tl.trans(b_dh2).to(b_k.dtype), b_dv)
-            else:
-                b_dv = tl.dot(b_k, b_dh2.to(b_k.dtype), b_dv)
-
-        if K > 128:
-            p_k = k + o_t[:, None] * (H*K) + o_k3[None, :]
-            b_k = tl.load(p_k, mask=m_t[:, None] & m_k3[None, :], other=0.0)
-            if USE_GK:
-                b_gk_last3 = tl.load(gk + last_idx * HV*K + o_k3, mask=(o_k3 < K), other=0.).to(tl.float32)
-            if STATE_V_FIRST:
-                b_dv = tl.dot(b_k, tl.trans(b_dh3).to(b_k.dtype), b_dv)
-            else:
-                b_dv = tl.dot(b_k, b_dh3.to(b_k.dtype), b_dv)
-
-        if K > 192:
-            p_k = k + o_t[:, None] * (H*K) + o_k4[None, :]
-            b_k = tl.load(p_k, mask=m_t[:, None] & m_k4[None, :], other=0.0)
-            if USE_GK:
-                b_gk_last4 = tl.load(gk + last_idx * HV*K + o_k4, mask=(o_k4 < K), other=0.).to(tl.float32)
-            if STATE_V_FIRST:
-                b_dv = tl.dot(b_k, tl.trans(b_dh4).to(b_k.dtype), b_dv)
-            else:
-                b_dv = tl.dot(b_k, b_dh4.to(b_k.dtype), b_dv)
-
-        if USE_G:
-            b_dv *= tl.where(m_t, exp2(bg_last - b_g), 0)[:, None]
-        b_dv += tl.load(p_dv, mask=m_t[:, None] & m_v[None, :], other=0.0)
-
-        tl.store(p_dv2, b_dv.to(p_dv.dtype.element_ty), mask=m_t[:, None] & m_v[None, :])
-        # Update dh
-        p_w = w + o_k1[:, None] + o_t[None, :] * (HV*K)
-        p_q = q + o_k1[:, None] + o_t[None, :] * (H*K)
-        b_w = tl.load(p_w, mask=m_k1[:, None] & m_t[None, :], other=0.0)
-        b_q = tl.load(p_q, mask=m_k1[:, None] & m_t[None, :], other=0.0)
-        if USE_G:
-            b_dh1 *= bg_last_exp
-            b_q = b_q * b_g_exp[None, :]
-        if USE_GK:
-            if STATE_V_FIRST:
-                b_dh1 *= exp2(b_gk_last1)[None, :]
-            else:
-                b_dh1 *= exp2(b_gk_last1[:, None])
-        if STATE_V_FIRST:
-            b_dh1 += tl.trans(tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) * scale - tl.dot(b_w, b_dv.to(b_w.dtype)))
-        else:
-            b_dh1 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) * scale - tl.dot(b_w, b_dv.to(b_w.dtype))
-        if K > 64:
-            p_q = q + o_k2[:, None] + o_t[None, :] * (H*K)
-            p_w = w + o_k2[:, None] + o_t[None, :] * (HV*K)
-            b_q = tl.load(p_q, mask=m_k2[:, None] & m_t[None, :], other=0.0)
-            b_w = tl.load(p_w, mask=m_k2[:, None] & m_t[None, :], other=0.0)
-            if USE_G:
-                b_dh2 *= bg_last_exp
-                b_q = b_q * b_g_exp[None, :]
-            if USE_GK:
-                if STATE_V_FIRST:
-                    b_dh2 *= exp2(b_gk_last2)[None, :]
-                else:
-                    b_dh2 *= exp2(b_gk_last2[:, None])
-            if STATE_V_FIRST:
-                b_dh2 += tl.trans(tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) * scale - tl.dot(b_w, b_dv.to(b_w.dtype)))
-            else:
-                b_dh2 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) * scale - tl.dot(b_w, b_dv.to(b_w.dtype))
-        if K > 128:
-            p_q = q + o_k3[:, None] + o_t[None, :] * (H*K)
-            p_w = w + o_k3[:, None] + o_t[None, :] * (HV*K)
-            b_q = tl.load(p_q, mask=m_k3[:, None] & m_t[None, :], other=0.0)
-            b_w = tl.load(p_w, mask=m_k3[:, None] & m_t[None, :], other=0.0)
-            if USE_G:
-                b_dh3 *= bg_last_exp
-                b_q = b_q * b_g_exp[None, :]
-            if USE_GK:
-                if STATE_V_FIRST:
-                    b_dh3 *= exp2(b_gk_last3)[None, :]
-                else:
-                    b_dh3 *= exp2(b_gk_last3[:, None])
-            if STATE_V_FIRST:
-                b_dh3 += tl.trans(tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) * scale - tl.dot(b_w, b_dv.to(b_w.dtype)))
-            else:
-                b_dh3 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) * scale - tl.dot(b_w, b_dv.to(b_w.dtype))
-        if K > 192:
-            p_q = q + o_k4[:, None] + o_t[None, :] * (H*K)
-            p_w = w + o_k4[:, None] + o_t[None, :] * (HV*K)
-            b_q = tl.load(p_q, mask=m_k4[:, None] & m_t[None, :], other=0.0)
-            b_w = tl.load(p_w, mask=m_k4[:, None] & m_t[None, :], other=0.0)
-            if USE_G:
-                b_dh4 *= bg_last_exp
-                b_q = b_q * b_g_exp[None, :]
-            if USE_GK:
-                if STATE_V_FIRST:
-                    b_dh4 *= exp2(b_gk_last4)[None, :]
-                else:
-                    b_dh4 *= exp2(b_gk_last4[:, None])
-            if STATE_V_FIRST:
-                b_dh4 += tl.trans(tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) * scale - tl.dot(b_w, b_dv.to(b_w.dtype)))
-            else:
-                b_dh4 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) * scale - tl.dot(b_w, b_dv.to(b_w.dtype))
+        b_dh1, b_dh2, b_dh3, b_dh4 = chunk_delta_rule_bwd_dh_state(
+            q=q,
+            k=k,
+            w=w,
+            g=g + (bos * HV + i_h).to(tl.int64) if USE_G else g,
+            gk=gk,
+            do=do,
+            dv=dv,
+            dv2=dv2,
+            b_dh=(b_dh1, b_dh2, b_dh3, b_dh4),
+            o_t=o_t,
+            o_v=o_v,
+            last_idx=last_idx,
+            T=T,
+            scale=scale,
+            H=H,
+            HV=HV,
+            K=K,
+            V=V,
+            USE_G=USE_G,
+            USE_GK=USE_GK,
+            USE_BG=False,
+            SAVE_NEW_VALUE=True,
+            STATE_V_FIRST=STATE_V_FIRST,
+        )
 
     if USE_INITIAL_STATE:
         if STATE_V_FIRST:

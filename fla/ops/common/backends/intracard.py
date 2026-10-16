@@ -16,25 +16,14 @@ Only active under torch.inference_mode() with varlen (cu_seqlens != None).
 from __future__ import annotations
 
 import os
-import warnings
 
 import torch
 
 from fla.backends import BaseBackend, register
-from fla.utils import IS_TF32_SUPPORTED
 
 # Maximum number of sub-sequences per original sequence
 # Limits merge chain depth to control precision loss
 MAX_SUBSEQS = int(os.environ.get('FLA_INTRACARD_MAX_SPLITS', 32))
-
-# use tf32x3 for the affine-chain dots in the pre-scan/merge kernels (NVIDIA only)
-USE_TF32X3_AFFINE_CHAIN = os.environ.get('FLA_INTRACARD_TF32X3', '0') == '1'
-
-if USE_TF32X3_AFFINE_CHAIN and not IS_TF32_SUPPORTED:
-    warnings.warn(
-        "tf32x3 affine chain requires an NVIDIA GPU with compute capability >= 8.0; falling back to ieee precision",
-        stacklevel=2,
-    )
 
 
 @register('common')
@@ -107,5 +96,4 @@ class IntraCardCPBackend(BaseBackend):
             chunk_indices=chunk_indices,
             max_splits=MAX_SUBSEQS,
             state_v_first=state_v_first,
-            use_tf32x3_affine_chain=USE_TF32X3_AFFINE_CHAIN,
         )

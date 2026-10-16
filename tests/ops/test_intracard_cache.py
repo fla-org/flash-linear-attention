@@ -13,7 +13,9 @@ import pytest
 import torch
 
 from fla.ops.common import intracard_cp
-from fla.ops.common.intracard_cp import _intracard_cache
+from fla.ops.common.intracard_cp import (
+    _intracard_cache,
+)
 from fla.ops.kda import chunk_kda
 from fla.utils import device
 
