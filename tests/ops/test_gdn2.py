@@ -739,24 +739,27 @@ def test_chunk_bwd_autotune_key():
 
 
 @pytest.mark.skipif(IS_NPU or device_platform == "cpu", reason="Requires the GPU Triton intra kernel")
-@pytest.mark.parametrize('varlen', [False, True], ids=['dense', 'varlen'])
 @pytest.mark.parametrize('use_gate_in_kernel', [False, True], ids=['precomputed', 'fused'])
 @pytest.mark.parametrize(
-    ("T", "P", "H", "K", "V"),
+    ("T", "P", "H", "K", "V", "bos"),
     [
-        pytest.param(*test, id='T{}-P{}-H{}-K{}-V{}'.format(*test))
+        pytest.param(*test, bos, id='T{}-P{}-H{}-K{}-V{}-bos{}'.format(*test, bos))
         for test in [
             (16, 6, 2, 64, 64),
             (22, 21, 2, 64, 64),
             (40, 33, 2, 64, 32),
             (70, 69, 2, 64, 64),
         ]
+        for bos in [0, 17]
+    ] + [
+        pytest.param(40, 33, 2, 64, 64, 0, id='T40-P33-H2-K64-V64-dense'),
+        pytest.param(22, 21, 2, 64, 64, 8, id='T22-P21-H2-K64-V64-bos8'),
+        pytest.param(70, 69, 2, 64, 64, 22, id='T70-P69-H2-K64-V64-bos22'),
     ],
 )
-def test_chunk_causality(T: int, P: int, H: int, K: int, V: int, use_gate_in_kernel: bool, varlen: bool):
+def test_chunk_causality(T: int, P: int, H: int, K: int, V: int, bos: int, use_gate_in_kernel: bool):
     """Future gates must leave prefix outputs and prefix-loss gradients unchanged."""
     torch.manual_seed(42)
-    bos = 17 if varlen else 0
     shape = (1, bos + T, H, K)
     q = F.normalize(torch.randn(shape), dim=-1).bfloat16()
     k = F.normalize(torch.randn(shape), dim=-1).bfloat16()
@@ -769,8 +772,8 @@ def test_chunk_causality(T: int, P: int, H: int, K: int, V: int, use_gate_in_ker
     q, k, v, b, w, A_log, dt_bias = (
         x.to(device).requires_grad_(True) for x in (q, k, v, b, w, A_log, dt_bias)
     )
-    cu_seqlens = torch.tensor([0, bos, bos + T], dtype=torch.int64, device=device) if varlen else None
-    do = torch.randn_like(v[:, bos:bos + P])
+    cu_seqlens = torch.tensor([0, bos, bos + T], dtype=torch.int64, device=device) if bos else None
+    do = torch.randn_like(v[:, :bos + P])
     edited = g.clone()
     if use_gate_in_kernel:
         edited[:, bos + P:] = (
@@ -799,7 +802,7 @@ def test_chunk_causality(T: int, P: int, H: int, K: int, V: int, use_gate_in_ker
             lower_bound=-5.0 if use_gate_in_kernel else None,
             cu_seqlens=cu_seqlens,
         )
-        prefix = o[:, bos:bos + P]
+        prefix = o[:, :bos + P]
         inputs = (q, k, v, gates, b, w) + ((A_log, dt_bias) if use_gate_in_kernel else ())
         outputs.append(prefix.detach())
         grads.append(torch.autograd.grad(outputs=(prefix.float() * do.float()).sum(), inputs=inputs))
