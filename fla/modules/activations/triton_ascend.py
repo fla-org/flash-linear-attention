@@ -121,7 +121,7 @@ def _is_inner_contiguous(x: torch.Tensor) -> bool:
 def _ensure_inner_contiguous(x: torch.Tensor) -> torch.Tensor:
     if _is_inner_contiguous(x=x):
         return x
-    return x.contiguous()
+    return x.clone(memory_format=torch.contiguous_format)
 
 
 def _alloc_output(x: torch.Tensor, contiguous: bool = False) -> torch.Tensor:
