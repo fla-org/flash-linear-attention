@@ -477,10 +477,12 @@ def chunk_gdn2_fwd_intra_npu(
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
     safe_gate: bool = False,
+    lower_bound: float | None = None,
     disable_recompute: bool = False,
 ):
     # gk is already activated and accumulated; pairwise gate differences serve both gate modes.
-    del safe_gate
+    # Each block anchors on its own first row, so the exponent range needs no lower-bound centring.
+    del safe_gate, lower_bound
 
     B, T, H, K = k.shape
     BT = chunk_size
