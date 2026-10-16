@@ -803,6 +803,69 @@ def test_chunk_bwd_autotune_key_covers_head_dims():
     )
 
 
+def _gdn2_prefix_inputs(T: int, H: int, K: int, V: int):
+    """Deterministic inputs for the prefix-causality regressions.
+
+    Raw gate logits for the ``use_gate_in_kernel=True`` + ``safe_gate=True`` path, which is
+    the only one that runs the kernels carrying the anchors under test.
+    """
+    torch.manual_seed(42)
+    generator = torch.Generator().manual_seed(42)
+    shape = (1, T, H, K)
+    q = F.normalize(torch.randn(shape, generator=generator), dim=-1).bfloat16().to(device)
+    k = F.normalize(torch.randn(shape, generator=generator), dim=-1).bfloat16().to(device)
+    v = (0.5 * torch.randn((1, T, H, V), generator=generator)).bfloat16().to(device)
+    b = torch.rand(shape, generator=generator).bfloat16().to(device)
+    w = torch.rand((1, T, H, V), generator=generator).bfloat16().to(device)
+    g = torch.randn(shape, generator=generator).bfloat16().to(device)
+    a_log = torch.log(torch.empty(H).uniform_(1.0, 16.0, generator=generator)).float().to(device)
+    dt_bias = (0.1 * torch.rand(H * K, generator=generator) - 0.05).float().to(device)
+    return q, k, v, b, w, g, a_log, dt_bias
+
+
+def _gdn2_flip_gates(g, a_log, dt_bias, start, H, K):
+    """Move every gate at position >= ``start`` to the opposite end of [lower_bound, 0).
+
+    The prefix stays bit-identical, so only the anchor for the trailing sub-chunk moves.
+    """
+    edited = g.clone()
+    edited[:, start:] = (
+        math.log(0.99 / 0.01) / a_log.exp().view(1, 1, H, 1) - dt_bias.view(1, 1, H, K)
+    ).to(edited.dtype)
+    assert not torch.equal(g[:, start:], edited[:, start:])
+    return edited
+
+
+def _gdn2_prefix_grads(q, k, v, b, w, g, a_log, dt_bias, P, cu_seqlens=None):
+    """Prefix-only loss and the gradients it produces, on fresh leaves on every call.
+
+    The loss covers positions < P only, so a gate at position >= P can reach it solely by
+    leaking through a kernel, never through the loss itself.
+    """
+    g_leaf = g.clone().requires_grad_(True)
+    a_leaf = a_log.clone().requires_grad_(True)
+    dt_leaf = dt_bias.clone().requires_grad_(True)
+    o = chunk_gdn2(
+        q=q,
+        k=k,
+        v=v,
+        g=g_leaf,
+        b=b,
+        w=w,
+        A_log=a_leaf,
+        dt_bias=dt_leaf,
+        scale=1.0,
+        output_final_state=False,
+        cu_seqlens=cu_seqlens,
+        use_gate_in_kernel=True,
+        safe_gate=True,
+        lower_bound=-5.0,
+        use_qk_l2norm_in_kernel=False,
+    )[0]
+    o[:, :P].float().sum().backward()
+    return o.detach(), g_leaf.grad, a_leaf.grad, dt_leaf.grad
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize(
     ("T", "P", "H", "K", "V"),
@@ -821,17 +884,7 @@ def test_chunk_gdn2_prefix_causality(T: int, P: int, H: int, K: int, V: int):
     its gradients. Each case below ends the sequence inside a sub-chunk whose middle row
     is its last valid token, which is the shape that triggered the leak.
     """
-    torch.manual_seed(42)
-    generator = torch.Generator().manual_seed(42)
-    shape = (1, T, H, K)
-    q = F.normalize(torch.randn(shape, generator=generator), dim=-1).bfloat16().to(device)
-    k = F.normalize(torch.randn(shape, generator=generator), dim=-1).bfloat16().to(device)
-    v = (0.5 * torch.randn((1, T, H, V), generator=generator)).bfloat16().to(device)
-    b = torch.rand(shape, generator=generator).bfloat16().to(device)
-    w = torch.rand((1, T, H, V), generator=generator).bfloat16().to(device)
-    g = torch.randn(shape, generator=generator).bfloat16().to(device)
-    a_log = torch.log(torch.empty(H).uniform_(1.0, 16.0, generator=generator)).float().to(device)
-    dt_bias = (0.1 * torch.rand(H * K, generator=generator) - 0.05).float().to(device)
+    q, k, v, b, w, g, a_log, dt_bias = _gdn2_prefix_inputs(T, H, K, V)
 
     def run(gates: torch.Tensor) -> torch.Tensor:
         return chunk_gdn2(
@@ -852,17 +905,96 @@ def test_chunk_gdn2_prefix_causality(T: int, P: int, H: int, K: int, V: int):
         )[0]
 
     base = run(g)
-
-    # Move every gate at position >= P to the opposite end of the [lower_bound, 0) range,
-    # leaving the prefix bit-identical. Only the anchor for the trailing sub-chunk changes.
-    edited = g.clone()
-    edited[:, P:] = (
-        math.log(0.99 / 0.01) / a_log.exp().view(1, 1, H, 1) - dt_bias.view(1, 1, H, K)
-    ).to(edited.dtype)
-    assert not torch.equal(g[:, P:], edited[:, P:])
-
-    perturbed = run(edited)
+    perturbed = run(_gdn2_flip_gates(g, a_log, dt_bias, P, H, K))
     assert torch.equal(base[:, :P], perturbed[:, :P]), (
         f"changing gates at positions >= {P} changed the output at positions < {P}: "
         f"max abs diff {(base[:, :P].float() - perturbed[:, :P].float()).abs().max().item()}"
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize(
+    ("T", "P", "H", "K", "V"),
+    [
+        # (40, 33) is the shape where the leak reached the gradients while the forward
+        # output alone stayed bit-identical, so a forward-only check would have missed it.
+        (22, 21, 2, 64, 64),
+        (40, 33, 2, 64, 64),
+        (70, 69, 2, 64, 64),
+    ],
+)
+def test_chunk_gdn2_prefix_causality_bwd(T: int, P: int, H: int, K: int, V: int):
+    """Gates at positions >= P must not change the prefix gradients.
+
+    Both ``SAFE_GATE`` blocks of ``chunk_gdn2_bwd_kernel_intra`` carried the same
+    middle-row anchor as the forward kernel and were fixed with it, so the backward pass
+    needs a regression of its own rather than riding on the forward one.
+    """
+    q, k, v, b, w, g, a_log, dt_bias = _gdn2_prefix_inputs(T, H, K, V)
+
+    base_o, base_dg, base_da, base_dt = _gdn2_prefix_grads(q, k, v, b, w, g, a_log, dt_bias, P)
+    pert_o, pert_dg, pert_da, pert_dt = _gdn2_prefix_grads(
+        q, k, v, b, w, _gdn2_flip_gates(g, a_log, dt_bias, P, H, K), a_log, dt_bias, P,
+    )
+
+    assert torch.equal(base_o[:, :P], pert_o[:, :P]), (
+        f"changing gates at positions >= {P} changed the output at positions < {P}: "
+        f"max abs diff {(base_o[:, :P].float() - pert_o[:, :P].float()).abs().max().item()}"
+    )
+    assert torch.equal(base_dg[:, :P], pert_dg[:, :P]), (
+        f"changing gates at positions >= {P} changed dg at positions < {P}: "
+        f"max abs diff {(base_dg[:, :P] - pert_dg[:, :P]).abs().max().item()}"
+    )
+    assert torch.equal(base_da, pert_da), (
+        f"changing gates at positions >= {P} changed dA_log: "
+        f"max abs diff {(base_da - pert_da).abs().max().item()}"
+    )
+    assert torch.equal(base_dt, pert_dt), (
+        f"changing gates at positions >= {P} changed ddt_bias: "
+        f"max abs diff {(base_dt - pert_dt).abs().max().item()}"
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize(
+    ("cu_seqlens", "P", "H", "K", "V"),
+    [
+        pytest.param([0, 8, 30], 29, 2, 64, 64, id="seg8+22"),
+        pytest.param([0, 22, 92], 91, 2, 64, 64, id="seg22+70"),
+    ],
+)
+def test_chunk_gdn2_prefix_causality_varlen(cu_seqlens, P, H, K, V):
+    """The same guarantee on the variable-length path.
+
+    The anchor used to be ``T``-relative (``T - i_ti - 1`` with the per-segment length), so
+    a segment boundary moved it; it is now a fixed function of the sub-chunk size. Both
+    cases end a later segment inside a sub-chunk whose middle row is its last valid token,
+    and the prefix spans the earlier segment, so a leak has to cross the boundary to show.
+    """
+    q, k, v, b, w, g, a_log, dt_bias = _gdn2_prefix_inputs(cu_seqlens[-1], H, K, V)
+    cu_seqlens_t = torch.LongTensor(cu_seqlens).to(device)
+
+    base_o, base_dg, base_da, base_dt = _gdn2_prefix_grads(
+        q, k, v, b, w, g, a_log, dt_bias, P, cu_seqlens=cu_seqlens_t,
+    )
+    pert_o, pert_dg, pert_da, pert_dt = _gdn2_prefix_grads(
+        q, k, v, b, w, _gdn2_flip_gates(g, a_log, dt_bias, P, H, K), a_log, dt_bias,
+        P, cu_seqlens=cu_seqlens_t,
+    )
+
+    assert torch.equal(base_o[:, :P], pert_o[:, :P]), (
+        f"changing gates at positions >= {P} changed the output at positions < {P}: "
+        f"max abs diff {(base_o[:, :P].float() - pert_o[:, :P].float()).abs().max().item()}"
+    )
+    assert torch.equal(base_dg[:, :P], pert_dg[:, :P]), (
+        f"changing gates at positions >= {P} changed dg at positions < {P}: "
+        f"max abs diff {(base_dg[:, :P] - pert_dg[:, :P]).abs().max().item()}"
+    )
+    assert torch.equal(base_da, pert_da), (
+        f"changing gates at positions >= {P} changed dA_log: "
+        f"max abs diff {(base_da - pert_da).abs().max().item()}"
+    )
+    assert torch.equal(base_dt, pert_dt), (
+        f"changing gates at positions >= {P} changed ddt_bias: "
+        f"max abs diff {(base_dt - pert_dt).abs().max().item()}"
     )
