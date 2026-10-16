@@ -412,6 +412,22 @@ register_op(OpConfig(
 ))
 
 register_op(OpConfig(
+    name='fused_recurrent_oja',
+    import_path='fla.ops.gated_oja_rule',
+    inputs={
+        **_simple_qkv,
+        'gv': TensorSpec(shape_BTHD, transform=logsigmoid),
+        'beta': TensorSpec(shape_BTH, transform=sigmoid_transform),
+    },
+    func_name='fused_recurrent_gated_oja_rule',
+    extra_kwargs={'output_final_state': True},
+    skip_backward=True,
+    category='gate_beta',
+    dim_constraints={'D': [64, 128]},
+    test_file='tests/ops/test_oja.py',
+))
+
+register_op(OpConfig(
     name='chunk_precond_gdn',
     import_path='fla.ops.precond_gated_delta_rule',
     inputs={
