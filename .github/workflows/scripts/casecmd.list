@@ -1,5 +1,6 @@
 # FLA PR GDN quick-test commands
 # Each non-empty, non-comment line is executed as a shell command.
+# Gate verification no-op: comment lines are skipped by the runner.
 
 python -m pytest -v tests/ops/test_gdn.py -k "fused_recurrent" --durations=30
 python -m pytest -v tests/ops/test_gdn.py -k "(test_chunk and not varlen and not gate_in_kernel) or blackwell" --durations=30
