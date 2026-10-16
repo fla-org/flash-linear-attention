@@ -24,6 +24,7 @@ from fla.utils import (
     IS_NVIDIA_HOPPER,
     IS_NVIDIA_SM100,
     IS_NVIDIA_SM120,
+    TRITON_ABOVE_3_8_0,
     assert_close,
     device,
 )
@@ -52,10 +53,17 @@ def test_chunk_fwd_o_blackwell_triton_guard():
     from fla.ops.common.chunk_o import chunk_fwd_kernel_o
 
     tuner = _unwrap_autotuner(chunk_fwd_kernel_o)
-    # The 8-warp (BK=BV=128) config yields distinct outputs for identical
-    # inputs on Blackwell / Triton<3.8 (tl.dot recurrence race). The guard
-    # drops it, so no offered config may run more than 4 warps.
-    assert all(config.num_warps <= 4 for config in tuner.configs)
+    assert {config.num_warps for config in tuner.configs} == ({2, 4, 8} if TRITON_ABOVE_3_8_0 else {2, 4})
+
+
+def test_chunk_bwd_dv_local_blackwell_triton_guard():
+    if not IS_NVIDIA_BLACKWELL:
+        pytest.skip(reason='Blackwell guard is only active on Blackwell GPUs')
+
+    from fla.ops.common.chunk_o import chunk_bwd_kernel_dv_local
+
+    tuner = _unwrap_autotuner(chunk_bwd_kernel_dv_local)
+    assert {config.num_warps for config in tuner.configs} == ({2, 4, 8} if TRITON_ABOVE_3_8_0 else {2, 4})
 
 
 @pytest.mark.parametrize(
