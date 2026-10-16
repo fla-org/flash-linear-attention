@@ -15,6 +15,7 @@ from fla.layers import attn
 from fla.layers.attn import Attention
 from fla.layers.gated_deltanet import GatedDeltaNet
 from fla.layers.gla import GatedLinearAttention
+from fla.layers.kda import KimiDeltaAttention
 from fla.layers.mamba import Mamba
 from fla.models import (
     ABCConfig,
@@ -42,6 +43,7 @@ from fla.models import (
 from fla.models.gated_deltanet.modeling_gated_deltanet import GatedDeltaNetBlock
 from fla.models.gla.modeling_gla import GLABlock, GLAForCausalLM
 from fla.models.hybrid import get_hybrid_attention_spec, normalize_hybrid_attention_config
+from fla.models.kda.modeling_kda import KDABlock
 from fla.models.samba.modeling_samba import SambaBlock
 from fla.utils import assert_close, device, device_platform, device_torch_lib
 
@@ -433,6 +435,14 @@ REPRESENTATIVE_BLOCKS = [
         GatedDeltaNet,
         {'num_heads': 4, 'head_dim': 8, 'expand_v': 1., 'hidden_ratio': 2},
         id='gated-deltanet',
+    ),
+    pytest.param(
+        KDAConfig,
+        KDABlock,
+        'attn',
+        KimiDeltaAttention,
+        {'num_heads': 4, 'head_dim': 8, 'expand_v': 1., 'hidden_ratio': 2},
+        id='kda',
     ),
     pytest.param(
         SambaConfig,

@@ -5,12 +5,35 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+from __future__ import annotations
+
 from functools import partial
+from typing import TYPE_CHECKING
 
 from torch import nn
 from transformers.utils import logging
 
+from fla.layers.attn import Attention
+
+if TYPE_CHECKING:
+    from transformers.configuration_utils import PretrainedConfig
+
+    from fla.models.hybrid import HybridAttentionSpec
+
 logger = logging.get_logger(__name__)
+
+
+def _build_hybrid_attention(config: PretrainedConfig, attn_spec: HybridAttentionSpec, layer_idx: int) -> Attention:
+    return Attention(
+        hidden_size=config.hidden_size,
+        num_heads=attn_spec['num_heads'],
+        num_kv_heads=attn_spec['num_kv_heads'],
+        qkv_bias=attn_spec['qkv_bias'],
+        window_size=attn_spec['window_size'],
+        rope_theta=attn_spec['rope_theta'],
+        max_position_embeddings=config.max_position_embeddings,
+        layer_idx=layer_idx,
+    )
 
 
 class GradientCheckpointingLayer(nn.Module):

@@ -19,9 +19,9 @@ from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
 from transformers.utils.deprecation import deprecate_kwarg
 
-from fla.layers.attn import Attention
 from fla.layers.rodimus import RodimusAttention, SlidingWindowSharedKeyAttention, align_multiple
 from fla.models.hybrid import get_hybrid_attention_spec
+from fla.models.modeling_layers import _build_hybrid_attention
 from fla.models.rodimus.configuration_rodimus import RodimusConfig
 from fla.models.utils import Cache, FLAUnsupportedCacheGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
@@ -82,16 +82,7 @@ class RodimusBlock(GradientCheckpointingLayer):
         if attn_spec is not None:
             self._is_ori_attn = True
             self.attn_norm = norm_cls()
-            self.attn = Attention(
-                hidden_size=config.hidden_size,
-                num_heads=attn_spec['num_heads'],
-                num_kv_heads=attn_spec['num_kv_heads'],
-                qkv_bias=attn_spec['qkv_bias'],
-                window_size=attn_spec['window_size'],
-                rope_theta=attn_spec['rope_theta'],
-                max_position_embeddings=config.max_position_embeddings,
-                layer_idx=layer_idx,
-            )
+            self.attn = _build_hybrid_attention(config=config, attn_spec=attn_spec, layer_idx=layer_idx)
 
             self.mlp_norm = norm_cls()
             self.mlp = mlp_cls()

@@ -18,9 +18,9 @@ from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
 from transformers.utils.deprecation import deprecate_kwarg
 
-from fla.layers.attn import Attention
 from fla.layers.rwkv7 import RWKV7Attention
 from fla.models.hybrid import get_hybrid_attention_spec
+from fla.models.modeling_layers import _build_hybrid_attention
 from fla.models.rwkv7.configuration_rwkv7 import RWKV7Config
 from fla.models.utils import Cache, FLAUnsupportedCacheGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, LayerNorm
@@ -141,16 +141,7 @@ class RWKV7Block(GradientCheckpointingLayer):
         )
         attn_spec = get_hybrid_attention_spec(config.attn, layer_idx=layer_idx)
         if attn_spec is not None:
-            self.attn = Attention(
-                hidden_size=config.hidden_size,
-                num_heads=attn_spec['num_heads'],
-                num_kv_heads=attn_spec['num_kv_heads'],
-                qkv_bias=attn_spec['qkv_bias'],
-                window_size=attn_spec['window_size'],
-                rope_theta=attn_spec['rope_theta'],
-                max_position_embeddings=config.max_position_embeddings,
-                layer_idx=layer_idx,
-            )
+            self.attn = _build_hybrid_attention(config=config, attn_spec=attn_spec, layer_idx=layer_idx)
         else:
             self.attn = RWKV7Attention(
                 mode=config.attn_mode,
