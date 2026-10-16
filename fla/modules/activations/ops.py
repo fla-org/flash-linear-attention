@@ -88,6 +88,7 @@ def _ensure_inner_contiguous(x: torch.Tensor) -> torch.Tensor:
         return x.contiguous()
     if _is_inner_contiguous(x=x):
         return x
+    # contiguous() can leave arbitrary strides on size-one dimensions unchanged
     return x.clone(memory_format=torch.contiguous_format)
 
 
