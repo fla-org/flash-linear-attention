@@ -17,8 +17,8 @@ class RodimusConfig(AttentionConfigBase, PretrainedConfig):
     model_type = 'rodimus'
     keys_to_ignore_at_inference = ['past_key_values']
 
-    def _normalize_attention_config(self, attn: AttentionConfig) -> AttentionConfig:
-        attn = super()._normalize_attention_config(attn)
+    def _parse_attention_config(self, attn: AttentionConfig) -> AttentionConfig:
+        attn = super()._parse_attention_config(attn)
         specs = [attn] if isinstance(attn, dict) else attn
         if specs is not None:
             for attn_spec in specs:

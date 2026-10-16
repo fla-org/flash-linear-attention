@@ -27,97 +27,10 @@ class AttentionSpec(TypedDict):
 AttentionConfig = AttentionSpec | list[AttentionSpec] | None
 
 
-def _positive_int(value: object, *, field: str, context: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        raise ValueError(f"{context} field {field!r} must be a positive integer; got {value!r}")
-    return value
+def parse_attention_config(attn: AttentionConfig, *, num_hidden_layers: int) -> AttentionConfig:
+    """Validate attention settings and fill defaults without modifying the input.
 
-
-def _normalize_attention_spec(
-    spec: dict,
-    *,
-    num_hidden_layers: int,
-    context: str,
-    assigned_layers: dict[int, str],
-) -> AttentionSpec:
-    normalized = dict(spec)
-
-    for field in ('layers', 'num_heads'):
-        if field not in normalized:
-            raise ValueError(f"{context} field {field!r} is required; got <missing>")
-
-    layers = normalized['layers']
-    if not isinstance(layers, (list, tuple)):
-        raise ValueError(
-            f"{context} field 'layers' must be a list or tuple of integer layer indices; got {layers!r}",
-        )
-
-    for layer_idx in layers:
-        if isinstance(layer_idx, bool) or not isinstance(layer_idx, int):
-            raise ValueError(
-                f"{context} field 'layers' must contain only integer layer indices; got {layer_idx!r}",
-            )
-        if layer_idx < 0 or layer_idx >= num_hidden_layers:
-            raise ValueError(
-                f"{context} field 'layers' contains out-of-range layer {layer_idx!r}; "
-                f"expected a value in [0, {num_hidden_layers})",
-            )
-        if assigned_layers.get(layer_idx) == context:
-            raise ValueError(f"{context} field 'layers' contains duplicate layer {layer_idx!r}; got {layers!r}")
-        if layer_idx in assigned_layers:
-            raise ValueError(
-                f"{context} assigns conflicting layer {layer_idx!r}, "
-                f"which is already assigned by {assigned_layers[layer_idx]}",
-            )
-        assigned_layers[layer_idx] = context
-
-    normalized['layers'] = list(layers)
-    normalized['num_heads'] = _positive_int(normalized['num_heads'], field='num_heads', context=context)
-
-    num_kv_heads = normalized.get('num_kv_heads')
-    if num_kv_heads is None:
-        num_kv_heads = normalized['num_heads']
-    normalized['num_kv_heads'] = _positive_int(num_kv_heads, field='num_kv_heads', context=context)
-
-    qkv_bias = normalized.get('qkv_bias', False)
-    if not isinstance(qkv_bias, bool):
-        raise ValueError(f"{context} field 'qkv_bias' must be a Boolean; got {qkv_bias!r}")
-    normalized['qkv_bias'] = qkv_bias
-
-    window_size = normalized.get('window_size')
-    if window_size is not None:
-        window_size = _positive_int(window_size, field='window_size', context=context)
-    normalized['window_size'] = window_size
-
-    rope_theta = normalized.get('rope_theta', 10000.)
-    try:
-        valid_rope_theta = (
-            not isinstance(rope_theta, bool)
-            and isinstance(rope_theta, (int, float))
-            and math.isfinite(rope_theta)
-            and rope_theta > 0
-        )
-    except OverflowError:
-        valid_rope_theta = False
-    if not valid_rope_theta:
-        raise ValueError(f"{context} field 'rope_theta' must be positive and finite; got {rope_theta!r}")
-    normalized['rope_theta'] = rope_theta
-
-    return normalized
-
-
-def normalize_attention_config(
-    attn: AttentionConfig,
-    *,
-    num_hidden_layers: int,
-) -> AttentionConfig:
-    """Validate and normalize attention settings for selected model layers.
-
-    The accepted forms are ``None``, one specification dictionary, or a list of
-    specification dictionaries. Defaults are applied independently to copied
-    dictionaries, unknown keys are preserved, and the input's outer dictionary
-    or list representation is retained. A layer may appear in only one
-    specification.
+    Preserve dictionary/list form and unknown keys; reject overlapping layer assignments.
     """
     if attn is None:
         return None
@@ -126,27 +39,69 @@ def normalize_attention_config(
     if not isinstance(attn, (dict, list)):
         raise ValueError(f"attn must be None, a dictionary, or a list of dictionaries; got {attn!r}")
 
-    is_single_spec = isinstance(attn, dict)
-    specs = [attn] if is_single_spec else attn
-    assigned_layers: dict[int, str] = {}
-    normalized_specs = []
+    configs = []
+    assigned_layers: dict[int, int] = {}
+    for i, config in enumerate([attn] if isinstance(attn, dict) else attn):
+        context = "attn specification" if isinstance(attn, dict) else f"attn specification at index {i}"
+        if not isinstance(config, dict):
+            raise ValueError(f"{context} must be a dictionary; got {config!r}")
+        config = dict(config)
+        for name in ('layers', 'num_heads'):
+            if name not in config:
+                raise ValueError(f"{context} field {name!r} is required; got <missing>")
 
-    for spec_index, spec in enumerate(specs):
-        context = "attn specification" if is_single_spec else f"attn specification at index {spec_index}"
-        if not isinstance(spec, dict):
-            raise ValueError(f"{context} must be a dictionary; got {spec!r}")
-        normalized_specs.append(
-            _normalize_attention_spec(
-                spec,
-                num_hidden_layers=num_hidden_layers,
-                context=context,
-                assigned_layers=assigned_layers,
-            ),
-        )
+        layers = config['layers']
+        if not isinstance(layers, (list, tuple)):
+            raise ValueError(f"{context} field 'layers' must be a list or tuple of integer layer indices; got {layers!r}")
+        for layer_idx in layers:
+            if isinstance(layer_idx, bool) or not isinstance(layer_idx, int):
+                raise ValueError(f"{context} field 'layers' must contain only integer layer indices; got {layer_idx!r}")
+            if layer_idx < 0 or layer_idx >= num_hidden_layers:
+                raise ValueError(
+                    f"{context} field 'layers' contains out-of-range layer {layer_idx!r}; "
+                    f"expected a value in [0, {num_hidden_layers})",
+                )
+            if layer_idx in assigned_layers:
+                if assigned_layers[layer_idx] == i:
+                    raise ValueError(f"{context} field 'layers' contains duplicate layer {layer_idx!r}; got {layers!r}")
+                raise ValueError(
+                    f"{context} assigns conflicting layer {layer_idx!r}, "
+                    f"which is already assigned by attn specification at index {assigned_layers[layer_idx]}",
+                )
+            assigned_layers[layer_idx] = i
+        config['layers'] = list(layers)
 
-    if is_single_spec:
-        return normalized_specs[0]
-    return normalized_specs
+        if config.get('num_kv_heads') is None:
+            config['num_kv_heads'] = config['num_heads']
+        for name in ('num_heads', 'num_kv_heads'):
+            value = config[name]
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{context} field {name!r} must be a positive integer; got {value!r}")
+
+        qkv_bias = config.setdefault('qkv_bias', False)
+        if not isinstance(qkv_bias, bool):
+            raise ValueError(f"{context} field 'qkv_bias' must be a Boolean; got {qkv_bias!r}")
+
+        window_size = config.setdefault('window_size', None)
+        if window_size is not None:
+            if isinstance(window_size, bool) or not isinstance(window_size, int) or window_size <= 0:
+                raise ValueError(f"{context} field 'window_size' must be a positive integer; got {window_size!r}")
+
+        rope_theta = config.setdefault('rope_theta', 10000.)
+        try:
+            valid_rope_theta = (
+                not isinstance(rope_theta, bool)
+                and isinstance(rope_theta, (int, float))
+                and math.isfinite(rope_theta)
+                and rope_theta > 0
+            )
+        except OverflowError:
+            valid_rope_theta = False
+        if not valid_rope_theta:
+            raise ValueError(f"{context} field 'rope_theta' must be positive and finite; got {rope_theta!r}")
+        configs.append(config)
+
+    return configs[0] if isinstance(attn, dict) else configs
 
 
 class AttentionConfigBase:
@@ -163,10 +118,10 @@ class AttentionConfigBase:
 
     @attn.setter
     def attn(self, value: AttentionConfig) -> None:
-        self.__dict__['attn'] = self._normalize_attention_config(value)
+        self.__dict__['attn'] = self._parse_attention_config(value)
 
-    def _normalize_attention_config(self, attn: AttentionConfig) -> AttentionConfig:
-        return normalize_attention_config(attn, num_hidden_layers=self.num_hidden_layers)
+    def _parse_attention_config(self, attn: AttentionConfig) -> AttentionConfig:
+        return parse_attention_config(attn, num_hidden_layers=self.num_hidden_layers)
 
 
 def get_attention_spec(
