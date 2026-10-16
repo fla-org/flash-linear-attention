@@ -16,7 +16,9 @@
 # GDN-2 reuses KDA's gate activation verbatim, so the gate-in-kernel reference
 # uses ``naive_kda_gate`` / ``naive_kda_lowerbound_gate``.
 
+import inspect
 import math
+from functools import partial
 from unittest.mock import Mock
 
 import pytest
@@ -570,6 +572,8 @@ def test_chunk_npu_verifier(name, tensor_names, case, dtype, reason):
 
     tensor = torch.zeros(1, dtype=dtype, device=device)
     kwargs = dict.fromkeys(tensor_names, tensor)
+    if name == 'chunk_gdn2_fwd_intra':
+        kwargs['lower_bound'] = -2.0
     if case == 'chunk_size':
         kwargs['chunk_size'] = 32
     elif case == 'q_device':
@@ -803,66 +807,229 @@ def test_chunk_bwd_autotune_key_covers_head_dims():
     )
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize('lower_bound', [None, -2.0, -5.0], ids=['default', 'shift2', 'shift5'])
+def test_chunk_npu_fwd_lower_bound(lower_bound):
+    """The Ascend verifier and entry accept the intra anchor override."""
+    from fla.ops.gdn2.backends.triton_ascend import TritonAscendGDN2Backend
+    from fla.ops.gdn2.backends.triton_ascend.chunk_intra import chunk_gdn2_fwd_intra_npu
+
+    tensor = Mock(shape=(1, 22, 2, 64), dtype=torch.bfloat16)
+    tensor.device.type = 'npu'
+    kwargs = dict.fromkeys(('q', 'k', 'v', 'gk', 'b', 'w_gate'), tensor)
+    kwargs.update(scale=1.0, safe_gate=True, lower_bound=lower_bound)
+    assert TritonAscendGDN2Backend().verify('chunk_gdn2_fwd_intra', **kwargs) == (True, None)
+    inspect.signature(chunk_gdn2_fwd_intra_npu).bind(**kwargs)
+
+
+@pytest.mark.skipif(IS_NPU, reason="Ascend uses a separate pairwise-gate forward kernel")
+@pytest.mark.parametrize('varlen', [False, True], ids=['dense', 'varlen'])
+@pytest.mark.parametrize('use_gate_in_kernel', [False, True], ids=['precomputed', 'fused'])
 @pytest.mark.parametrize(
     ("T", "P", "H", "K", "V"),
     [
-        (22, 21, 2, 64, 64),
-        (70, 69, 2, 64, 64),
+        pytest.param(*test, id='T{}-P{}-H{}-K{}-V{}'.format(*test))
+        for test in [
+            (16, 6, 2, 64, 64),
+            (22, 21, 2, 64, 64),
+            (40, 33, 2, 64, 32),
+            (70, 69, 2, 64, 64),
+        ]
     ],
 )
-def test_chunk_gdn2_prefix_causality(T: int, P: int, H: int, K: int, V: int):
-    """Gates at positions >= P must not change the output at positions < P.
-
-    ``chunk_gdn2_fwd_kernel_intra_sub_chunk`` anchors the exponentials of a diagonal
-    sub-chunk on one of its own rows. Anchoring on the middle row made that anchor a
-    *future* row for the first half of the sub-chunk, so editing a gate after the prefix
-    moved an anchor shared by every row of the sub-chunk and changed the prefix output and
-    its gradients. Each case below ends the sequence inside a sub-chunk whose middle row
-    is its last valid token, which is the shape that triggered the leak.
-    """
+def test_chunk_causality(T: int, P: int, H: int, K: int, V: int, use_gate_in_kernel: bool, varlen: bool):
+    """Future gates must leave prefix outputs and prefix-loss gradients unchanged."""
     torch.manual_seed(42)
-    generator = torch.Generator().manual_seed(42)
-    shape = (1, T, H, K)
-    q = F.normalize(torch.randn(shape, generator=generator), dim=-1).bfloat16().to(device)
-    k = F.normalize(torch.randn(shape, generator=generator), dim=-1).bfloat16().to(device)
-    v = (0.5 * torch.randn((1, T, H, V), generator=generator)).bfloat16().to(device)
-    b = torch.rand(shape, generator=generator).bfloat16().to(device)
-    w = torch.rand((1, T, H, V), generator=generator).bfloat16().to(device)
-    g = torch.randn(shape, generator=generator).bfloat16().to(device)
-    a_log = torch.log(torch.empty(H).uniform_(1.0, 16.0, generator=generator)).float().to(device)
-    dt_bias = (0.1 * torch.rand(H * K, generator=generator) - 0.05).float().to(device)
+    bos = 17 if varlen else 0
+    shape = (1, bos + T, H, K)
+    q = F.normalize(torch.randn(shape), dim=-1).bfloat16()
+    k = F.normalize(torch.randn(shape), dim=-1).bfloat16()
+    v = (0.5 * torch.randn(1, bos + T, H, V)).bfloat16()
+    b = torch.rand(shape).bfloat16()
+    w = torch.rand(1, bos + T, H, V).bfloat16()
+    g = (-0.7 * (0.75 + 0.25 * torch.rand(shape))).bfloat16().to(device)
+    A_log = torch.log(torch.empty(H).uniform_(1.0, 16.0))
+    dt_bias = 0.1 * torch.rand(H * K) - 0.05
+    q, k, v, b, w, A_log, dt_bias = (
+        x.to(device).requires_grad_(True) for x in (q, k, v, b, w, A_log, dt_bias)
+    )
+    cu_seqlens = torch.tensor([0, bos, bos + T], dtype=torch.int64, device=device) if varlen else None
+    do = torch.randn_like(v[:, bos:bos + P])
+    edited = g.clone()
+    if use_gate_in_kernel:
+        edited[:, bos + P:] = (
+            math.log(0.99 / 0.01) / A_log.detach().exp().view(1, 1, H, 1) - dt_bias.detach().view(1, 1, H, K)
+        ).to(g.dtype)
+    else:
+        edited[:, bos + P:] = -4.95
+    assert not torch.equal(g[:, bos + P:], edited[:, bos + P:])
 
-    def run(gates: torch.Tensor) -> torch.Tensor:
-        return chunk_gdn2(
+    outputs, grads = [], []
+    names = ('dq', 'dk', 'dv', 'dg', 'db', 'dw') + (('dA', 'dbias') if use_gate_in_kernel else ())
+    for gates in (g, edited):
+        gates = gates.requires_grad_(True)
+        o, _ = chunk_gdn2(
             q=q,
             k=k,
             v=v,
             g=gates,
             b=b,
             w=w,
-            A_log=a_log,
+            A_log=A_log,
             dt_bias=dt_bias,
             scale=1.0,
-            output_final_state=False,
-            use_gate_in_kernel=True,
+            use_gate_in_kernel=use_gate_in_kernel,
             safe_gate=True,
-            lower_bound=-5.0,
-            use_qk_l2norm_in_kernel=False,
-        )[0]
+            lower_bound=-5.0 if use_gate_in_kernel else None,
+            cu_seqlens=cu_seqlens,
+        )
+        prefix = o[:, bos:bos + P]
+        inputs = (q, k, v, gates, b, w) + ((A_log, dt_bias) if use_gate_in_kernel else ())
+        outputs.append(prefix.detach())
+        grads.append(torch.autograd.grad(outputs=(prefix.float() * do.float()).sum(), inputs=inputs))
 
-    base = run(g)
+    for name, ref, tri in zip(('o',) + names, (outputs[0],) + grads[0], (outputs[1],) + grads[1]):
+        assert torch.isfinite(ref).all() and torch.isfinite(tri).all(), name
+        assert torch.equal(ref, tri), f'future gates changed {name} from a prefix-only loss'
 
-    # Move every gate at position >= P to the opposite end of the [lower_bound, 0) range,
-    # leaving the prefix bit-identical. Only the anchor for the trailing sub-chunk changes.
-    edited = g.clone()
-    edited[:, P:] = (
-        math.log(0.99 / 0.01) / a_log.exp().view(1, 1, H, 1) - dt_bias.view(1, 1, H, K)
-    ).to(edited.dtype)
-    assert not torch.equal(g[:, P:], edited[:, P:])
 
-    perturbed = run(edited)
-    assert torch.equal(base[:, :P], perturbed[:, :P]), (
-        f"changing gates at positions >= {P} changed the output at positions < {P}: "
-        f"max abs diff {(base[:, :P].float() - perturbed[:, :P].float()).abs().max().item()}"
+@pytest.mark.skipif(IS_NPU, reason="Ascend uses a separate pairwise-gate forward kernel")
+@pytest.mark.parametrize(
+    ('lower_bound', 'dtype', 'use_gate_in_kernel', 'cu_seqlens', 'gate_pattern'),
+    [
+        pytest.param(
+            lower_bound,
+            dtype,
+            use_gate_in_kernel,
+            cu_seqlens,
+            gate_pattern,
+            id=f'lower_bound{lower_bound}-{dtype}-use_gate{use_gate_in_kernel}-cu_seqlens{cu_seqlens}-{gate_pattern}',
+        )
+        for cu_seqlens in [None, [0, 1, 17, 38]]
+        for use_gate_in_kernel in [False, True]
+        for dtype in [torch.bfloat16, torch.float16]
+        for lower_bound in [-5.0, -2.0, -0.01]
+        for gate_pattern in (
+            ['random', 'lower_bound', 'zero', 'mixed'] if not use_gate_in_kernel and lower_bound == -5.0 else ['random']
+        )
+    ],
+)
+def test_chunk_lower_bound(lower_bound, dtype, use_gate_in_kernel, cu_seqlens, gate_pattern):
+    """Bounded gates preserve reference outputs, states, gradients, and precomputed-gate argument parity."""
+    torch.manual_seed(42)
+    B, T, H, K, V = 1, 38, 2, 64, 32
+    shape = (B, T, H, K)
+    q, k = (F.normalize(torch.randn(shape), dim=-1).to(dtype) for _ in range(2))
+    v = (0.5 * torch.randn(B, T, H, V)).to(dtype)
+    b = torch.rand(shape).to(dtype)
+    w = torch.rand(B, T, H, V).to(dtype)
+    g = (10 * torch.randn(shape)).to(dtype)
+    if not use_gate_in_kernel:
+        g = lower_bound * g.float().sigmoid()
+        if gate_pattern == 'lower_bound':
+            g.fill_(lower_bound)
+        elif gate_pattern == 'zero':
+            g.zero_()
+        elif gate_pattern == 'mixed':
+            g[..., ::2] = lower_bound
+            g[..., 1::2] = 0.
+    A_log = torch.zeros(H)
+    dt_bias = 0.1 * torch.randn(H * K)
+    offsets = cu_seqlens if cu_seqlens is not None else [0, T]
+    h0 = torch.randn(len(offsets) - 1, H, K, V)
+    q, k, v, g, b, w, h0, A_log, dt_bias = (
+        x.to(device).requires_grad_(True) for x in (q, k, v, g, b, w, h0, A_log, dt_bias)
     )
+    cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int64, device=device) if cu_seqlens is not None else None
+    inputs = (q, k, v, g, b, w, h0)
+    names = ('dq', 'dk', 'dv', 'dg', 'db', 'dw', 'dh0')
+    tolerances = (0.01, 0.01, 0.01, 0.02, 0.02, 0.02, 0.01)
+    if use_gate_in_kernel:
+        inputs += (A_log, dt_bias)
+        names += ('dA', 'dbias')
+        tolerances += (0.02, 0.02)
+    do, dht = torch.randn_like(v), torch.randn_like(h0)
+    g_ref = _activate_g(g, A_log, dt_bias, True, lower_bound) if use_gate_in_kernel else g
+    ref, ref_ht = [], []
+    for i, (bos, eos) in enumerate(zip(offsets[:-1], offsets[1:])):
+        o_i, ht_i = naive_recurrent_gdn2(
+            q=q[:, bos:eos],
+            k=k[:, bos:eos],
+            v=v[:, bos:eos],
+            g=g_ref[:, bos:eos],
+            b=b[:, bos:eos],
+            w=w[:, bos:eos],
+            initial_state=h0[i:i + 1],
+            output_final_state=True,
+        )
+        ref.append(o_i)
+        ref_ht.append(ht_i)
+    ref, ref_ht = torch.cat(ref, dim=1), torch.cat(ref_ht, dim=0)
+    ref_grads = torch.autograd.grad(outputs=(ref * do).sum() + (ref_ht * dht).sum(), inputs=inputs)
+    kwargs = dict(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        b=b,
+        w=w,
+        initial_state=h0,
+        output_final_state=True,
+        use_gate_in_kernel=use_gate_in_kernel,
+        safe_gate=True,
+        cu_seqlens=cu_seqlens,
+    )
+    if use_gate_in_kernel:
+        kwargs.update(lower_bound=lower_bound, A_log=A_log, dt_bias=dt_bias)
+    tri, tri_ht = chunk_gdn2(**kwargs)
+    tri_grads = torch.autograd.grad(outputs=(tri * do).sum() + (tri_ht * dht).sum(), inputs=inputs)
+    for name, ref_value, tri_value, tolerance in zip(
+        ('o', 'ht') + names, (ref, ref_ht) + ref_grads, (tri, tri_ht) + tri_grads, (0.005, 0.005) + tolerances,
+    ):
+        assert torch.isfinite(ref_value).all() and torch.isfinite(tri_value).all(), name
+        assert_close(name, ref_value, tri_value, tolerance)
+    if not use_gate_in_kernel:
+        bound_o, bound_ht = chunk_gdn2(**kwargs, lower_bound=lower_bound)
+        bound_grads = torch.autograd.grad(outputs=(bound_o * do).sum() + (bound_ht * dht).sum(), inputs=inputs)
+        for name, default, explicit in zip(
+            ('o', 'ht') + names, (tri, tri_ht) + tri_grads, (bound_o, bound_ht) + bound_grads,
+        ):
+            assert torch.equal(default, explicit), f'precomputed-gate lower_bound changed {name}'
+
+
+@pytest.mark.skipif(IS_NPU, reason="Ascend uses a separate pairwise-gate forward kernel")
+@pytest.mark.parametrize('use_gate_in_kernel', [False, True], ids=['precomputed', 'fused'])
+def test_chunk_intra_default_shift(use_gate_in_kernel, monkeypatch):
+    """Default intra anchors match an explicit shift strength of two in forward and backward."""
+    from fla.ops.gdn2 import chunk_bwd, chunk_fwd
+
+    torch.manual_seed(42)
+    q, k, v, g, b, w, A_log, dt_bias = _rand_inputs(
+        1, 70, 2, 2, 64, 32, torch.bfloat16, gate_in_kernel=use_gate_in_kernel,
+    )
+    q, k = (F.normalize(x.float(), dim=-1).to(x.dtype) for x in (q, k))
+    inputs = (q, k, v, g, b, w) + ((A_log, dt_bias) if use_gate_in_kernel else ())
+    for x in inputs:
+        x.requires_grad_(True)
+    do = torch.randn_like(v)
+    kwargs = dict(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        b=b,
+        w=w,
+        A_log=A_log,
+        dt_bias=dt_bias,
+        use_gate_in_kernel=use_gate_in_kernel,
+        safe_gate=True,
+        lower_bound=-5.0 if use_gate_in_kernel else None,
+    )
+    default, _ = chunk_gdn2(**kwargs)
+    default_grads = torch.autograd.grad(outputs=(default * do).sum(), inputs=inputs)
+    monkeypatch.setattr(chunk_fwd, 'chunk_gdn2_fwd_intra', partial(chunk_fwd.chunk_gdn2_fwd_intra, lower_bound=-2.0))
+    monkeypatch.setattr(chunk_bwd, 'chunk_gdn2_bwd_intra', partial(chunk_bwd.chunk_gdn2_bwd_intra, lower_bound=-2.0))
+    explicit, _ = chunk_gdn2(**kwargs)
+    explicit_grads = torch.autograd.grad(outputs=(explicit * do).sum(), inputs=inputs)
+    for ref, tri in zip((default,) + default_grads, (explicit,) + explicit_grads):
+        assert torch.isfinite(ref).all() and torch.isfinite(tri).all()
+        assert torch.equal(ref, tri)
