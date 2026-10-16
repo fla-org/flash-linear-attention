@@ -41,15 +41,45 @@ def transform(
     selected_memories: torch.Tensor,
     attention_mask: torch.Tensor | None,
 ):
-    """Group routed tokens into padded [memory, batch, length, hidden] tensors.
+    """
+    Reorganize token embeddings into memory-aligned chunks, padded to the largest memory sequence.
 
-    Returns the grouped inputs, gather indices, slot order, padded length, and two validity masks.
-    The masks have [batch * memory, length] and [memory, batch, length] layouts.
+    Padding positions must be excluded using the returned masks; their embeddings are not necessarily zero.
+
+    Args:
+        x (torch.Tensor):
+            Input embeddings. Shape: (batch, seq, hidden).
+        routing_mask (torch.Tensor):
+            Binary routing mask. Shape: (batch, seq, num_memories).
+            Entries for tokens excluded by `attention_mask` are zeroed in place.
+        num_memories (int):
+            Number of routed memories.
+        selected_memories (torch.Tensor):
+            Memory indices per token. Shape: (batch, seq, topk).
+            Shape (batch, seq) is also accepted for top-1 routing without an attention mask.
+        attention_mask (torch.Tensor | None):
+            Boolean valid-token mask. Shape: (batch, seq), or a longer mask whose trailing `seq` entries are used.
+            `None` includes all tokens.
+
+    Returns:
+        transformed_x (torch.Tensor):
+            Grouped token embeddings. Shape: (num_memories, batch, max_len, hidden).
+        indices (torch.Tensor):
+            Gather indices into the sorted token slots. Shape: (batch * num_memories, max_len).
+            Invalid positions have index zero and are identified by `mask`.
+        sorted_indices (torch.Tensor):
+            Permutation from flattened token slots to (batch, memory) order. Shape: (batch * seq * topk,).
+        max_len (torch.Tensor):
+            Scalar maximum number of valid tokens in any (batch, memory) sequence.
+        mask (torch.Tensor):
+            Boolean validity mask in (batch, memory) order. Shape: (batch * num_memories, max_len).
+        memory_mask (torch.Tensor):
+            The same validity mask in output order. Shape: (num_memories, batch, max_len).
     """
     if selected_memories.dim() == 3:
         topk = selected_memories.shape[2]
-        x = x.repeat_interleave(topk, dim=1)
-        selected_memories = selected_memories.reshape(selected_memories.shape[0], -1)
+        x = x.repeat_interleave(topk, dim=1)  # [batch, seq * topk, hidden]
+        selected_memories = selected_memories.reshape(selected_memories.shape[0], -1)  # [batch, seq * topk]
 
     if attention_mask is not None:
         attention_mask = attention_mask[:, -routing_mask.shape[1]:]
@@ -68,7 +98,7 @@ def transform(
 
     x_sorted = x_flat[sorted_indices]
     with torch.no_grad():
-        lengths = routing_mask.sum(dim=1)
+        lengths = routing_mask.sum(dim=1)  # [batch, num_memories]
         offsets = lengths.flatten().cumsum(dim=0)
         max_len = lengths.max()
         indices = (
@@ -94,7 +124,34 @@ def reconstruct(
     routing_weights: torch.Tensor,
     mask: torch.Tensor,
 ) -> torch.Tensor:
-    """Restore padded memory outputs to token order and combine their top-k routing weights."""
+    """
+    Reconstruct and mix memory outputs back into the original input sequence shape.
+
+    The indices and mask must come from the matching `transform` call.
+    Padded outputs are masked before the top-k routing weights are applied.
+
+    Args:
+        transformed_x (torch.Tensor):
+            Outputs of the memory units. Shape: (num_memories, batch_size, max_len, hidden_size).
+        indices (torch.Tensor):
+            Gather indices returned by `transform`. Shape: (batch_size * num_memories, max_len).
+        sorted_indices (torch.Tensor):
+            Slot permutation returned by `transform`. Shape: (batch_size * seq_len * topk,).
+        batch_size (int):
+            Batch size of the original input.
+        seq_len (int):
+            Sequence length of the original input.
+        topk (int):
+            Number of selected memories per token.
+        routing_weights (torch.Tensor):
+            Weights for the selected memories, in the original top-k order. Shape: (batch_size, seq_len, topk).
+        mask (torch.Tensor):
+            Boolean validity mask returned by `transform`. Shape: (batch_size * num_memories, max_len).
+
+    Returns:
+        restored_x (torch.Tensor):
+            Weighted memory outputs in the original token order. Shape: (batch_size, seq_len, hidden_size).
+    """
     hidden_size = transformed_x.shape[-1]
     transformed_x = transformed_x.transpose(0, 1).reshape(-1, transformed_x.shape[2], hidden_size)
     memory_outputs = transformed_x.reshape(-1, hidden_size)
@@ -117,7 +174,25 @@ def _pack_slots(
     selected_memories: torch.Tensor,
     num_memories: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Group slots by memory and batch row while preserving the padded implementation's token order."""
+    """
+    Group slots by memory and batch row while preserving the padded implementation's token order.
+
+    Args:
+        selected_memories (torch.Tensor):
+            Memory indices per token. Shape: (batch, seq, topk).
+        num_memories (int):
+            Number of routed memories, including those that receive no tokens.
+
+    Returns:
+        sorted_indices (torch.Tensor):
+            Indices of flattened token slots in (memory, batch) order. Shape: (batch * seq * topk,).
+            Floor division by `topk` gives the corresponding flattened input token indices.
+        inverse_indices (torch.Tensor):
+            Inverse permutation restoring the original token and top-k order. Shape: (batch * seq * topk,).
+        cu_seqlens (torch.Tensor):
+            Int32 cumulative slot counts in (memory, batch) order. Shape: (num_memories * batch + 1,).
+            Empty memory sequences have repeated boundaries.
+    """
     batch_size = selected_memories.shape[0]
     batch_indices = torch.arange(batch_size, device=selected_memories.device)[:, None, None].expand_as(selected_memories)
     memories = selected_memories.flatten()
@@ -507,7 +582,29 @@ class MomAttention(nn.Module):
         hidden_states: torch.Tensor,
         memory_lengths: list[int] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Project packed memory segments or padded [memory, batch, length, hidden] inputs."""
+        """
+        Project routed inputs while preserving their packed or padded memory layout.
+
+        Args:
+            hidden_states (torch.Tensor):
+                Packed inputs of shape (1, total_slots, hidden_size), ordered by memory then batch,
+                or padded inputs of shape (num_memories, batch, max_len, hidden_size).
+            memory_lengths (list[int], Optional):
+                Slot counts for each memory in packed inputs, summed over batch rows; empty memories have count zero.
+                Counts must sum to `total_slots`. `None` selects the padded layout. Default: `None`.
+
+        Returns:
+            q (torch.Tensor):
+                Queries with the input's leading dimensions and final dimension `key_dim`.
+            k (torch.Tensor):
+                Keys with the input's leading dimensions and final dimension `key_dim`.
+            v (torch.Tensor):
+                Values with the input's leading dimensions and final dimension `value_dim`.
+            g (torch.Tensor):
+                Log-decay gates with the input's leading dimensions and final dimension `num_heads`.
+            beta (torch.Tensor):
+                Sigmoid update weights with the input's leading dimensions and final dimension `num_heads`.
+        """
         q = self.q_proj(hidden_states)
         if self.single_kv_proj:
             k = self.shared_k(hidden_states)

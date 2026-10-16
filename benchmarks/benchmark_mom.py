@@ -5,7 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""Benchmark a complete MoM language model on CUDA; select a revision with PYTHONPATH."""
+"""Benchmark one complete MoM LM configuration per CUDA process; select a revision with PYTHONPATH."""
 
 import argparse
 import json
