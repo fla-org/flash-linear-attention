@@ -5,7 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""Benchmark one complete MoM LM configuration per process; select a revision with PYTHONPATH."""
+"""Benchmark a complete MoM language model on CUDA; select a revision with PYTHONPATH."""
 
 import argparse
 import json
@@ -21,7 +21,7 @@ from fla.models.mom import MomConfig, MomForCausalLM
 from fla.models.utils import Cache
 
 
-def main():
+def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--mode', choices=['train', 'forward', 'prefill', 'decode'], default='train')
     parser.add_argument('--batch', type=int, default=16)
@@ -37,9 +37,10 @@ def main():
     parser.add_argument('--warmup', type=int, default=5)
     parser.add_argument('--samples', type=int, default=10)
     parser.add_argument('--output', type=Path, required=True)
-    args = parser.parse_args()
-    torch.manual_seed(42)
-    torch.set_num_threads(8)
+    return parser.parse_args()
+
+
+def _build_model(args: argparse.Namespace) -> MomForCausalLM:
     config = MomConfig(
         hidden_size=args.hidden,
         head_dim=128,
@@ -54,45 +55,64 @@ def main():
         use_cache=False,
         fuse_cross_entropy=True,
     )
-    model = MomForCausalLM(config).cuda().train(args.mode == 'train')
+    model = MomForCausalLM(config=config).cuda().train(args.mode == 'train')
     if args.gradient_checkpointing:
         model.gradient_checkpointing_enable()
     if args.routing == 'skewed':
+        bias = torch.zeros(args.memories, device='cuda')
+        bias[:args.topk] = 100
+
+        def bias_router_logits(module, inputs, output):
+            return output + bias
+
         for layer in model.model.layers:
-            bias = torch.zeros(args.memories, device='cuda')
-            bias[:args.topk] = 100
-            layer.attn.gate.register_forward_hook(lambda module, inputs, output: output + bias)
-    ids = torch.randint(0, config.vocab_size, (args.batch, args.length), device='cuda')
+            layer.attn.gate.register_forward_hook(bias_router_logits)
+    return model
+
+
+def _prepare_inputs(args: argparse.Namespace, vocab_size: int) -> tuple[torch.Tensor, dict]:
+    input_ids = torch.randint(high=vocab_size, size=(args.batch, args.length), device='cuda')
     kwargs = {}
     if args.layout == 'varlen':
-        ids = ids.flatten().unsqueeze(0)
+        input_ids = input_ids.flatten().unsqueeze(0)
         lengths = [args.length - 7, args.length + 7] * (args.batch // 2)
         if args.batch % 2:
             lengths.append(args.length)
         kwargs['cu_seqlens'] = torch.tensor([0, *lengths], device='cuda', dtype=torch.int32).cumsum(0).int()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), weight_decay=0.1, fused=True)
+    return input_ids, kwargs
+
+
+def _measure(
+    args: argparse.Namespace,
+    model: MomForCausalLM,
+    input_ids: torch.Tensor,
+    model_kwargs: dict,
+) -> tuple[list[float], list[float]]:
+    optimizer = None
+    if args.mode == 'train':
+        optimizer = torch.optim.AdamW(params=model.parameters(), lr=3e-4, betas=(0.9, 0.95), weight_decay=0.1, fused=True)
     context = torch.enable_grad if args.mode == 'train' else torch.no_grad
     cache = None
     if args.mode == 'decode':
-        with torch.no_grad(), torch.autocast('cuda', dtype=torch.bfloat16):
-            cache = model(input_ids=ids, use_cache=True, past_key_values=Cache(), num_logits_to_keep=1).past_key_values
-        ids = ids[:, :1]
+        with torch.no_grad(), torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+            cache = model(input_ids=input_ids, use_cache=True, past_key_values=Cache(), num_logits_to_keep=1).past_key_values
+        input_ids = input_ids[:, :1]
     wall_times, event_times = [], []
     torch.cuda.reset_peak_memory_stats()
     with context():
-        for i in range(args.warmup + args.samples):
+        for step in range(args.warmup + args.samples):
             torch.cuda.synchronize()
             start, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
             wall_start = time.perf_counter()
             start.record()
-            with torch.autocast('cuda', dtype=torch.bfloat16):
+            with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
                 output = model(
-                    input_ids=ids,
-                    labels=ids if args.mode == 'train' else None,
+                    input_ids=input_ids,
+                    labels=input_ids if args.mode == 'train' else None,
                     use_cache=args.mode in ('prefill', 'decode'),
                     past_key_values=Cache() if args.mode == 'prefill' else cache,
                     num_logits_to_keep=0 if args.mode == 'train' else 1,
-                    **kwargs,
+                    **model_kwargs,
                 )
             if args.mode == 'train':
                 output.loss.backward()
@@ -101,10 +121,20 @@ def main():
             end.record()
             torch.cuda.synchronize()
             wall_ms = (time.perf_counter() - wall_start) * 1000
-            if i >= args.warmup:
+            if step >= args.warmup:
                 wall_times.append(wall_ms)
                 event_times.append(start.elapsed_time(end))
             del output
+    return wall_times, event_times
+
+
+def main():
+    args = _parse_args()
+    torch.manual_seed(42)
+    torch.set_num_threads(8)
+    model = _build_model(args=args)
+    input_ids, model_kwargs = _prepare_inputs(args=args, vocab_size=model.config.vocab_size)
+    wall_times, event_times = _measure(args=args, model=model, input_ids=input_ids, model_kwargs=model_kwargs)
     repo = Path(fla.__file__).resolve().parents[1]
     result = dict(
         arguments={k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
