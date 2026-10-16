@@ -37,7 +37,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument('--warmup', type=int, default=5)
     parser.add_argument('--samples', type=int, default=10)
     parser.add_argument('--output', type=Path, required=True)
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.mode == 'decode' and args.layout == 'varlen':
+        parser.error('--mode decode requires --layout dense')
+    return args
 
 
 def _build_model(args: argparse.Namespace) -> MomForCausalLM:
