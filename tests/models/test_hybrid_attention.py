@@ -42,8 +42,8 @@ from fla.models import (
 )
 from fla.models.gated_deltanet.modeling_gated_deltanet import GatedDeltaNetBlock
 from fla.models.gla.modeling_gla import GLABlock, GLAForCausalLM
-from fla.models.hybrid import get_hybrid_attention_spec, normalize_hybrid_attention_config
 from fla.models.kda.modeling_kda import KDABlock
+from fla.models.modeling_layers import get_hybrid_attention_spec, normalize_hybrid_attention_config
 from fla.models.samba.modeling_samba import SambaBlock
 from fla.utils import assert_close, device, device_platform, device_torch_lib
 

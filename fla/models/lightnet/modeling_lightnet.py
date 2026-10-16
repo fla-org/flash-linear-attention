@@ -20,8 +20,8 @@ from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.attn import Attention
 from fla.layers.lightnet import LightNetAttention
-from fla.models.hybrid import get_hybrid_attention_spec
 from fla.models.lightnet.configuration_lightnet import LightNetConfig
+from fla.models.modeling_layers import get_hybrid_attention_spec
 from fla.models.utils import Cache, FLAUnsupportedCacheGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
 from fla.modules import GatedMLP as LightNetMLP

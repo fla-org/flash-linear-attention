@@ -20,8 +20,7 @@ from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.gated_deltaproduct import GatedDeltaProduct
 from fla.models.gated_deltaproduct.configuration_gated_deltaproduct import GatedDeltaProductConfig
-from fla.models.hybrid import get_hybrid_attention_spec
-from fla.models.modeling_layers import _build_hybrid_attention
+from fla.models.modeling_layers import _build_hybrid_attention, get_hybrid_attention_spec
 from fla.models.utils import Cache, FLAUnsupportedCacheGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
 from fla.modules import GatedMLP as GatedDeltaProductMLP

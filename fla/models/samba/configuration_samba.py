@@ -10,7 +10,7 @@ import warnings
 
 from transformers.configuration_utils import PretrainedConfig
 
-from fla.models.hybrid import HybridAttentionConfig, _HybridAttentionConfigMixin
+from fla.models.modeling_layers import HybridAttentionConfig, _HybridAttentionConfigMixin
 
 _DEFAULT_ATTN = {
     'layers': (1, 3, 5, 7, 9, 11, 13, 15, 17),

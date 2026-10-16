@@ -18,8 +18,7 @@ from transformers.utils import logging
 from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.mamba import Mamba
-from fla.models.hybrid import get_hybrid_attention_spec
-from fla.models.modeling_layers import _build_hybrid_attention
+from fla.models.modeling_layers import _build_hybrid_attention, get_hybrid_attention_spec
 from fla.models.samba.configuration_samba import SambaConfig
 from fla.models.utils import Cache, FLAGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm

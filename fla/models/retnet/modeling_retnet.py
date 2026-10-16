@@ -19,8 +19,7 @@ from transformers.utils import logging
 from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.multiscale_retention import MultiScaleRetention
-from fla.models.hybrid import get_hybrid_attention_spec
-from fla.models.modeling_layers import _build_hybrid_attention
+from fla.models.modeling_layers import _build_hybrid_attention, get_hybrid_attention_spec
 from fla.models.retnet.configuration_retnet import RetNetConfig
 from fla.models.utils import Cache, FLAUnsupportedCacheGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm

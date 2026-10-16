@@ -20,8 +20,7 @@ from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.gla import GatedLinearAttention
 from fla.models.gla.configuration_gla import GLAConfig
-from fla.models.hybrid import get_hybrid_attention_spec
-from fla.models.modeling_layers import _build_hybrid_attention
+from fla.models.modeling_layers import _build_hybrid_attention, get_hybrid_attention_spec
 from fla.models.utils import Cache, FLAUnsupportedCacheGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
 from fla.modules import GatedMLP as GLAMLP

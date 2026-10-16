@@ -19,9 +19,8 @@ from transformers.utils import logging
 from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.mesa_net import MesaNet
-from fla.models.hybrid import get_hybrid_attention_spec
 from fla.models.mesa_net.configuration_mesa_net import MesaNetConfig
-from fla.models.modeling_layers import _build_hybrid_attention
+from fla.models.modeling_layers import _build_hybrid_attention, get_hybrid_attention_spec
 from fla.models.utils import Cache, FLAUnsupportedCacheGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
 from fla.modules import GatedMLP as MesaNetMLP

@@ -11,7 +11,7 @@ import warnings
 
 from transformers.configuration_utils import PretrainedConfig
 
-from fla.models.hybrid import HybridAttentionConfig, _HybridAttentionConfigMixin
+from fla.models.modeling_layers import HybridAttentionConfig, _HybridAttentionConfigMixin
 
 
 class RetNetConfig(_HybridAttentionConfigMixin, PretrainedConfig):

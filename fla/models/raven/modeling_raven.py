@@ -22,8 +22,7 @@ from transformers.utils import logging
 from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.raven import Raven
-from fla.models.hybrid import get_hybrid_attention_spec
-from fla.models.modeling_layers import _build_hybrid_attention
+from fla.models.modeling_layers import _build_hybrid_attention, get_hybrid_attention_spec
 from fla.models.raven.configuration_raven import RavenConfig
 from fla.models.utils import Cache, FLAUnsupportedCacheGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
