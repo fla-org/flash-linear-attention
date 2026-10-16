@@ -29,7 +29,7 @@ def fused_chunk_based_fwd_kernel(
     BK: tl.constexpr,
     BV: tl.constexpr,
 ):
-    i_v, i_k, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    i_v, i_k, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
 
     o_i = tl.arange(0, BT)
 
@@ -139,7 +139,7 @@ def fused_chunk_based_bwd_kernel(
     BK: tl.constexpr,
     BV: tl.constexpr,
 ):
-    i_v, i_k, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
+    i_v, i_k, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
 
     o_i = tl.arange(0, BT)
     m_s = o_i[:, None] >= o_i[None, :]
@@ -380,12 +380,7 @@ def fused_chunk_based(
     v: torch.Tensor,
     scale: float | None = None,
     use_norm: bool = True,
-    **kwargs,
 ):
-    if 'head_first' in kwargs:
-        raise DeprecationWarning(
-            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
-        )
     assert q.shape[-1] <= 16, 'only support feature dimension up to 16.'
     if scale is None:
         scale = q.shape[-1] ** -0.5

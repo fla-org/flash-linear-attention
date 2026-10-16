@@ -5,7 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""chunk_scaled_dot_kkt_fwd adapted for triton-ascend on Ascend NPU."""
+"""Scaled key-key products for Ascend NPU."""
 
 from __future__ import annotations
 
@@ -28,9 +28,9 @@ _MAX_BK_FWD = 128
 def _get_fwd_bk(BT: int, K: int) -> int:
     """UB-safe BK tile size for chunk_scaled_dot_kkt_fwd on NPU."""
     return compute_row_tile_block_size(
-        BT,
-        K,
-        _CHUNK_SCALED_DOT_KKT_MEM_MULT,
+        row_dim=BT,
+        fixed_dim=K,
+        memory_multiplier=_CHUNK_SCALED_DOT_KKT_MEM_MULT,
         tiling_row=False,
         safety_margin=_SAFETY_MARGIN,
         dtype_size=4,
@@ -45,7 +45,7 @@ def _get_fwd_bk(BT: int, K: int) -> int:
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.jit(do_not_specialize=['T', 'B', 'task_num', 'num_core'])
-def chunk_scaled_dot_kkt_fwd_kernel_npu(
+def chunk_scaled_dot_kkt_fwd_kernel(
     k,
     g,
     beta,
@@ -98,8 +98,12 @@ def chunk_scaled_dot_kkt_fwd_kernel_npu(
             b_A = tl.zeros([BT, BT], dtype=tl.float32)
             for i_k in range(tl.cdiv(K, BK)):
                 p_k = tl.make_block_ptr(
-                    k + (bos * H + i_h // (HV // H)) * K, (T, K), (H * K, 1),
-                    (t_off, i_k * BK), (BT, BK), (1, 0),
+                    base=k + (bos * H + i_h // (HV // H)) * K,
+                    shape=(T, K),
+                    strides=(H * K, 1),
+                    offsets=(t_off, i_k * BK),
+                    block_shape=(BT, BK),
+                    order=(1, 0),
                 )
                 b_k = tl.load(p_k, boundary_check=(0, 1)).to(tl.float32)
                 # ascend tl.dot may clobber lhs; keep rhs on the original tile.
@@ -133,36 +137,36 @@ def chunk_scaled_dot_kkt_fwd_npu(
     Args:
         k (torch.Tensor):
             The key tensor of shape `[B, T, H, K]` where `H` is the number of query/key heads.
-        g (torch.Tensor):
+        g (torch.Tensor, Optional):
             The cumulative sum of the gate tensor of shape `[B, T, HV]`. Default: `None`.
         beta (torch.Tensor):
             The beta tensor of shape `[B, T, HV]` where `HV` is the number of value/output heads.
-        cu_seqlens (torch.LongTensor):
-            The cumulative sequence lengths of the input tensor.
-            Default: None
-        chunk_size (int):
+        cu_seqlens (torch.LongTensor, Optional):
+            The cumulative sequence lengths of the input tensor. Default: `None`.
+        chunk_size (int, Optional):
             The chunk size. Default: 64.
-        output_dtype (torch.dtype):
-            The dtype of the output tensor. Default: `torch.float32`
-        chunk_indices (torch.LongTensor):
-            The chunk indices of the input tensor. Default: None.
+        output_dtype (torch.dtype, Optional):
+            The dtype of the output tensor. Default: `torch.float32`.
+        chunk_indices (torch.LongTensor, Optional):
+            The chunk indices of the input tensor. Default: `None`.
 
     Returns:
-        beta * K * K^T of shape `[B, T, HV, BT]` where `BT` is the chunk size.
-        For GVA, H < HV and HV % H == 0. For standard attention, H == HV.
+        A (torch.Tensor):
+            beta * K * K^T of shape `[B, T, HV, BT]` where `BT` is the chunk size.
+            For GVA, H < HV and HV % H == 0. For standard attention, H == HV.
     """
     B, T, H, K, HV = *k.shape, beta.shape[2]
     BT = chunk_size
     if chunk_indices is None and cu_seqlens is not None:
-        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
+        chunk_indices = prepare_chunk_indices(cu_seqlens=cu_seqlens, chunk_size=BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     A = torch.zeros(B, T, HV, BT, device=k.device, dtype=output_dtype)
-    BK = _get_fwd_bk(BT, K)
+    BK = _get_fwd_bk(BT=BT, K=K)
 
     num_core = get_npu_properties()['num_aicore']
     g_arg = torch.permute(g, (2, 0, 1)).contiguous() if g is not None else g
     beta_arg = torch.permute(beta, (2, 0, 1)).contiguous()
-    chunk_scaled_dot_kkt_fwd_kernel_npu[(num_core,)](
+    chunk_scaled_dot_kkt_fwd_kernel[(num_core,)](
         k=k,
         g=g_arg,
         beta=beta_arg,

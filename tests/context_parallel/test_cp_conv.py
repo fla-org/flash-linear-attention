@@ -56,7 +56,7 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
-from fla.modules.convolution import causal_conv1d
+from fla.modules.causal_conv1d import causal_conv1d
 from fla.ops.cp import build_cp_context
 from fla.utils import assert_close
 

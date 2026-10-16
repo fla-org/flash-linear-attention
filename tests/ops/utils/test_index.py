@@ -10,7 +10,7 @@ import torch
 import torch._dynamo
 from torch._dynamo.utils import counters
 
-import fla.utils as fu
+from fla import utils
 from fla.ops.utils.index import (
     prepare_chunk_indices,
     prepare_chunk_offsets,
@@ -84,7 +84,7 @@ HELPERS = [
 HELPER_IDS = [h[0] for h in HELPERS]
 
 skip_npu_compile = pytest.mark.skipif(
-    fu.IS_NPU,
+    utils.IS_NPU,
     reason='torch.compile graph-count contract is not supported on NPU yet',
 )
 
@@ -102,9 +102,9 @@ def count_unique_graphs(impl, seqlens_cases):
     memoises by tensor identity, so it is disabled here to force every call back
     into the compiled body. Both globals are restored on exit.
     """
-    cache_disabled = fu.FLA_DISABLE_TENSOR_CACHE
+    cache_disabled = utils.FLA_DISABLE_TENSOR_CACHE
     capture = torch._dynamo.config.capture_dynamic_output_shape_ops
-    fu.FLA_DISABLE_TENSOR_CACHE = True
+    utils.FLA_DISABLE_TENSOR_CACHE = True
     torch._dynamo.config.capture_dynamic_output_shape_ops = True
     try:
         torch._dynamo.reset()
@@ -115,7 +115,7 @@ def count_unique_graphs(impl, seqlens_cases):
             torch.testing.assert_close(compiled(cu_seqlens).long(), impl(cu_seqlens).long())
         return counters["stats"].get("unique_graphs", 0)
     finally:
-        fu.FLA_DISABLE_TENSOR_CACHE = cache_disabled
+        utils.FLA_DISABLE_TENSOR_CACHE = cache_disabled
         torch._dynamo.config.capture_dynamic_output_shape_ops = capture
 
 

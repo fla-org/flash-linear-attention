@@ -13,33 +13,18 @@ import logging
 
 import torch
 
-from fla.ops.backends import BaseBackend
-from fla.utils import (
-    find_spec_cached,
-    get_device_capability,
-    get_device_smem_optin,
-    get_multiprocessor_count,
-    has_usable_nvcc,
-)
+from fla.backends import TileLangBackend, register
+from fla.utils import get_device_capability, get_device_smem_optin, get_multiprocessor_count
 
 from .schedules import chunk64_schedule_or_none, stream_bwd_schedule_or_none
 
 logger = logging.getLogger(__name__)
 
-_TILELANG_AVAILABLE = find_spec_cached("tilelang") is not None
-
 _FALLBACK_LOGGED: set[str] = set()
 
 
-class DPLRTileLangBackend(BaseBackend):
-
-    backend_type = "tilelang"
-    package_name = "tilelang"
-    env_var = "FLA_TILELANG"
-
-    @classmethod
-    def is_available(cls) -> bool:
-        return _TILELANG_AVAILABLE and has_usable_nvcc()
+@register('generalized_delta_rule.dplr')
+class DPLRTileLangBackend(TileLangBackend):
 
     def chunk_dplr_delta_rule_verifier(
         self,

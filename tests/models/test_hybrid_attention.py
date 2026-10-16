@@ -11,7 +11,7 @@ from copy import deepcopy
 import pytest
 import torch
 
-import fla.layers.attn as attn_module
+from fla.layers import attn
 from fla.layers.attn import Attention
 from fla.layers.gated_deltanet import GatedDeltaNet
 from fla.layers.gla import GatedLinearAttention
@@ -414,7 +414,7 @@ def test_rodimus_qk_norm_defaults_each_specification():
 
 @pytest.fixture
 def allow_attention_construction(monkeypatch):
-    monkeypatch.setattr(attn_module, 'flash_attn_func', object())
+    monkeypatch.setattr(attn, 'flash_attn_func', object())
 
 
 REPRESENTATIVE_BLOCKS = [
@@ -566,7 +566,7 @@ def _tiny_gla_config(attn):
 
 def _has_bf16_flash_attention():
     return (
-        attn_module.flash_attn_func is not None
+        attn.flash_attn_func is not None
         and device_platform in ('cuda', 'hip')
         and device_torch_lib.is_bf16_supported()
     )

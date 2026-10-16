@@ -353,6 +353,7 @@ def chunk_gla_fwd_kernel_o_npu(
     BT: tl.constexpr, BK: tl.constexpr, BV: tl.constexpr,
     total_chunks, task_num, num_core,
     STATE_V_FIRST: tl.constexpr, IS_VARLEN: tl.constexpr,
+    USE_GRAPH: tl.constexpr = False,
 ):
     core_id = tl.program_id(0)
     total_chunks_i64 = total_chunks.to(tl.int64)
@@ -365,56 +366,63 @@ def chunk_gla_fwd_kernel_o_npu(
         i_h = i_hv // (HV // H)
         T_cur = T
 
+        is_valid = True
         if IS_VARLEN:
             i_n = tl.load(chunk_indices + global_t * 2).to(tl.int32)
             i_t = tl.load(chunk_indices + global_t * 2 + 1).to(tl.int32)
-            bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
-            T_cur = (eos - bos).to(tl.int32)
-            i_tg = global_t.to(tl.int64)
-        else:
-            NT = tl.cdiv(T, BT)
-            i_b = global_t // NT
-            i_t = (global_t % NT).to(tl.int32)
-            bos = tl.cast(i_b, tl.int64) * T
-            i_tg = global_t.to(tl.int64)
-
-        q_ptr = q + (bos * H + i_h) * K
-        g_ptr = g + (bos * HV + i_hv) * K
-        v_ptr = v + (bos * HV + i_hv) * V
-        o_ptr = o + (bos * HV + i_hv) * V
-        h_base = h + (i_tg * HV + i_hv) * K * V
-        a_ptr = A + (bos * HV + i_hv) * BT
-
-        b_o = tl.zeros([BT, BV], dtype=tl.float32)
-        for i_k in range(tl.cdiv(K, BK)):
-            p_q = tl.make_block_ptr(q_ptr, (T_cur, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-            p_g = tl.make_block_ptr(g_ptr, (T_cur, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-            if STATE_V_FIRST:
-                p_h = tl.make_block_ptr(h_base, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
+            if USE_GRAPH:
+                # graph padding uses [-1, 0]; exclude it before sequence-dependent memory accesses.
+                is_valid = i_n >= 0
+        # skip only this task: returning would drop later valid tasks assigned to this core.
+        if is_valid:
+            if IS_VARLEN:
+                bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+                T_cur = (eos - bos).to(tl.int32)
+                i_tg = global_t.to(tl.int64)
             else:
-                p_h = tl.make_block_ptr(h_base, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
-            b_q = tl.load(p_q, boundary_check=(0, 1))
-            b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
-            # fold scale into the operand: an elementwise op on the accumulator
-            # between the two dots forces a fixpipe round-trip through UB
-            b_qg = (b_q * exp2(b_g) * scale).to(b_q.dtype)
-            b_h = tl.load(p_h, boundary_check=(0, 1))
-            if STATE_V_FIRST:
-                b_o = tl.dot(b_qg, tl.trans(b_h).to(b_qg.dtype), b_o)
-            else:
-                b_o = tl.dot(b_qg, b_h.to(b_qg.dtype), b_o)
+                NT = tl.cdiv(T, BT)
+                i_b = global_t // NT
+                i_t = (global_t % NT).to(tl.int32)
+                bos = tl.cast(i_b, tl.int64) * T
+                i_tg = global_t.to(tl.int64)
 
-        o_t = i_t * BT + tl.arange(0, BT)
-        m_t = o_t < T_cur
-        p_a = tl.make_block_ptr(a_ptr, (T_cur, BT), (HV * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
-        p_v = tl.make_block_ptr(v_ptr, (T_cur, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-        p_o = tl.make_block_ptr(o_ptr, (T_cur, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-        b_A = tl.load(p_a, boundary_check=(0, 1))
-        m_s = tl.arange(0, BT)[:, None] >= tl.arange(0, BT)[None, :]
-        b_A = tl.where(m_s & (m_t[:, None] & m_t[None, :]), b_A, 0.0)
-        b_v = tl.load(p_v, boundary_check=(0, 1))
-        b_o = tl.dot(b_A.to(b_v.dtype), b_v, b_o)
-        tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
+            q_ptr = q + (bos * H + i_h) * K
+            g_ptr = g + (bos * HV + i_hv) * K
+            v_ptr = v + (bos * HV + i_hv) * V
+            o_ptr = o + (bos * HV + i_hv) * V
+            h_base = h + (i_tg * HV + i_hv) * K * V
+            a_ptr = A + (bos * HV + i_hv) * BT
+
+            b_o = tl.zeros([BT, BV], dtype=tl.float32)
+            for i_k in range(tl.cdiv(K, BK)):
+                p_q = tl.make_block_ptr(q_ptr, (T_cur, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+                p_g = tl.make_block_ptr(g_ptr, (T_cur, K), (HV * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+                if STATE_V_FIRST:
+                    p_h = tl.make_block_ptr(h_base, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
+                else:
+                    p_h = tl.make_block_ptr(h_base, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
+                b_q = tl.load(p_q, boundary_check=(0, 1))
+                b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
+                # fold scale into the operand: an elementwise op on the accumulator
+                # between the two dots forces a fixpipe round-trip through UB
+                b_qg = (b_q * exp2(b_g) * scale).to(b_q.dtype)
+                b_h = tl.load(p_h, boundary_check=(0, 1))
+                if STATE_V_FIRST:
+                    b_o = tl.dot(b_qg, tl.trans(b_h).to(b_qg.dtype), b_o)
+                else:
+                    b_o = tl.dot(b_qg, b_h.to(b_qg.dtype), b_o)
+
+            o_t = i_t * BT + tl.arange(0, BT)
+            m_t = o_t < T_cur
+            p_a = tl.make_block_ptr(a_ptr, (T_cur, BT), (HV * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
+            p_v = tl.make_block_ptr(v_ptr, (T_cur, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+            p_o = tl.make_block_ptr(o_ptr, (T_cur, V), (HV * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+            b_A = tl.load(p_a, boundary_check=(0, 1))
+            m_s = tl.arange(0, BT)[:, None] >= tl.arange(0, BT)[None, :]
+            b_A = tl.where(m_s & (m_t[:, None] & m_t[None, :]), b_A, 0.0)
+            b_v = tl.load(p_v, boundary_check=(0, 1))
+            b_o = tl.dot(b_A.to(b_v.dtype), b_v, b_o)
+            tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
 
 
 @input_guard
@@ -431,8 +439,6 @@ def chunk_gla_fwd_o_gk_npu(
     chunk_indices: torch.LongTensor | None = None,
     use_graph: bool = False,
 ):
-    if use_graph:
-        raise NotImplementedError("use_graph is not supported on the Ascend NPU backend")
     B, T, H, K, HV, V = *q.shape, v.shape[2], v.shape[-1]
     BT = chunk_size
 
@@ -470,6 +476,7 @@ def chunk_gla_fwd_o_gk_npu(
         num_core=num_core,
         STATE_V_FIRST=state_v_first,
         IS_VARLEN=cu_seqlens is not None,
+        USE_GRAPH=use_graph,
     )
     return o
 

@@ -12,3 +12,6 @@ __all__ = [
     "chunk_kda",
     "fused_recurrent_kda",
 ]
+
+
+from fla.ops.kda.backends import flash_kda  # noqa: F401
