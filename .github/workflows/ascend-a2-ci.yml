@@ -150,6 +150,12 @@ jobs:
           assert IS_NPU, "Expected NPU backend (IS_NPU=True)"
           PY
 
+      - name: Validate GDN2 WY dispatch and numerics with strict tolerances
+        shell: bash
+        run: |
+          source /usr/local/Ascend/ascend-toolkit/set_env.sh
+          FLA_CI_ENV=0 ASCEND_RT_VISIBLE_DEVICES=0 pytest -s -v --exitfirst tests/ops/test_gdn2_ascend_dispatch.py
+
       - name: Run benchmark unit tests, modules, ops/utils, gdn, gdn2, kda, gla, attnres, solve_tril, delta
         shell: bash
         env:
