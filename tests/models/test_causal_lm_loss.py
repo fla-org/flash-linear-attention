@@ -11,11 +11,19 @@ import pytest
 import torch
 import torch.nn.functional as F
 from torch import nn
-from transformers import AutoModelForCausalLM
 
 from fla import models
 from fla.models import GLAConfig, KDAConfig, MomConfig, TransformerConfig
 from fla.utils import assert_close, device_name
+
+FORWARD_CONFIGS = [
+    models.ABCConfig, models.BitNetConfig, models.CombaConfig, models.DeltaNetConfig,
+    models.ForgettingTransformerConfig, models.GatedDeltaNetConfig, models.GatedDeltaProductConfig,
+    models.GLAConfig, models.GSAConfig, models.HGRNConfig, models.HGRN2Config, models.LightNetConfig,
+    models.MesaNetConfig, models.MLAConfig, models.MoBAConfig, models.NSAConfig, models.ParallaxConfig,
+    models.PaTHAttentionConfig, models.PrecondGatedDeltaNetConfig, models.RavenConfig, models.RetNetConfig,
+    models.RodimusConfig, models.RWKV6Config, models.TransformerConfig, models.WallTransformerConfig,
+]
 
 
 @pytest.fixture
@@ -31,11 +39,9 @@ def full_precision_matmul():
 @pytest.mark.parametrize('config_class', [GLAConfig, KDAConfig, TransformerConfig])
 @pytest.mark.parametrize('num_items', [None, 11, torch.tensor(11)])
 @pytest.mark.parametrize('custom_criterion', [None, 'mean', 'sum'])
-def test_causal_lm_loss_matches_shifted_reference(config_class, num_items, custom_criterion):
+def test_loss(config_class, num_items, custom_criterion, make_model):
     torch.manual_seed(42)
-    model = AutoModelForCausalLM.from_config(config_class(
-        hidden_size=32, num_hidden_layers=0, vocab_size=32, fuse_norm=False, fuse_cross_entropy=False,
-    ))
+    model = make_model(config_class, hidden_size=32, vocab_size=32)
     if custom_criterion:
         model.criterion = nn.CrossEntropyLoss(ignore_index=-7, label_smoothing=0.1, reduction=custom_criterion)
     ignore_index = -7 if custom_criterion else -100
@@ -67,11 +73,9 @@ def test_causal_lm_loss_matches_shifted_reference(config_class, num_items, custo
 )])
 @pytest.mark.parametrize('selection', [None, 0, 2, torch.tensor([0, 2, 5])])
 @pytest.mark.parametrize('return_dict', [False, True])
-def test_causal_lm_logits_selection(config_class, selection, return_dict, full_precision_matmul):
+def test_logits(config_class, selection, return_dict, full_precision_matmul, make_model):
     torch.manual_seed(42)
-    model = AutoModelForCausalLM.from_config(config_class(
-        hidden_size=32, num_hidden_layers=0, vocab_size=32, fuse_norm=False, fuse_cross_entropy=False,
-    )).to(device_name).eval()
+    model = make_model(config_class, hidden_size=32, vocab_size=32).to(device_name).eval()
     input_ids = torch.randint(0, 32, (2, 7), device=device_name)
     with torch.no_grad():
         complete = model(input_ids=input_ids).logits
@@ -98,17 +102,9 @@ def test_causal_lm_logits_selection(config_class, selection, return_dict, full_p
 @pytest.mark.parametrize('linear', [False, True])
 @pytest.mark.parametrize('use_l2warp', [False, True])
 @pytest.mark.parametrize('num_items', [None, 11])
-def test_fused_causal_lm_loss_matches_unfused(linear, use_l2warp, num_items):
+def test_loss_fused(linear, use_l2warp, num_items, make_model):
     torch.manual_seed(42)
-    config = GLAConfig(
-        hidden_size=64,
-        num_hidden_layers=0,
-        vocab_size=128,
-        fuse_norm=False,
-        fuse_cross_entropy=False,
-        use_l2warp=use_l2warp,
-    )
-    reference = AutoModelForCausalLM.from_config(config).to(device_name)
+    reference = make_model(GLAConfig, vocab_size=128, use_l2warp=use_l2warp).to(device_name)
     fused = deepcopy(reference)
     fused.config.fuse_cross_entropy = not linear
     fused.config.fuse_linear_cross_entropy = linear
@@ -125,28 +121,11 @@ def test_fused_causal_lm_loss_matches_unfused(linear, use_l2warp, num_items):
         assert_close(name, parameter.grad, fused_parameter.grad, 1e-3)
 
 
-@pytest.mark.parametrize('config_class', [
-    models.ABCConfig, models.BitNetConfig, models.CombaConfig, models.DeltaNetConfig,
-    models.ForgettingTransformerConfig, models.GatedDeltaNetConfig, models.GatedDeltaProductConfig,
-    models.GLAConfig, models.GSAConfig, models.HGRNConfig, models.HGRN2Config, models.LightNetConfig,
-    models.MesaNetConfig, models.MLAConfig, models.MoBAConfig, models.NSAConfig, models.ParallaxConfig,
-    models.PaTHAttentionConfig, models.PrecondGatedDeltaNetConfig, models.RavenConfig, models.RetNetConfig,
-    models.RodimusConfig, models.RWKV6Config, models.TransformerConfig, models.WallTransformerConfig,
-], ids=lambda cls: cls.model_type)
+@pytest.mark.parametrize('config_class', FORWARD_CONFIGS, ids=lambda cls: cls.model_type)
 @pytest.mark.parametrize('return_dict', [False, True])
-def test_causal_lm_forward_contract(config_class, return_dict):
+def test_forward(config_class, return_dict, make_model):
     torch.manual_seed(42)
-    model = AutoModelForCausalLM.from_config(config_class(
-        hidden_size=64,
-        num_heads=2,
-        num_hidden_layers=0,
-        num_self_decoder_layers=0,
-        intermediate_size=128,
-        vocab_size=64,
-        use_lower_bound=False,
-        fuse_norm=False,
-        fuse_cross_entropy=False,
-    ))
+    model = make_model(config_class, use_lower_bound=False)
     model.eval()
     model.config.return_dict = return_dict
     input_ids = torch.randint(0, 64, (2, 7))
@@ -167,15 +146,25 @@ def test_causal_lm_forward_contract(config_class, return_dict):
     hidden_states = outputs.hidden_states if return_dict else outputs[2]
     for actual, expected in zip(hidden_states, decoder_outputs.hidden_states, strict=True):
         torch.testing.assert_close(actual, expected)
-    embeddings = model.get_input_embeddings()(input_ids)
-    if config_class in (
-        models.BitNetConfig, models.TransformerConfig, models.WallTransformerConfig,
-        models.ForgettingTransformerConfig, models.ParallaxConfig, models.PaTHAttentionConfig,
-    ):
-        positional = model(None, None, None, embeddings, labels, False, False, True, return_dict)
-    else:
-        positional = model(None, None, embeddings, None, labels, False, False, True, return_dict)
-    torch.testing.assert_close(positional.logits if return_dict else positional[1], logits)
+
+
+@pytest.mark.parametrize('config_class', FORWARD_CONFIGS, ids=lambda cls: cls.model_type)
+@pytest.mark.parametrize('return_dict', [False, True])
+def test_forward_args(config_class, return_dict, make_model):
+    torch.manual_seed(42)
+    model = make_model(config_class, use_lower_bound=False).eval()
+    input_ids = torch.randint(0, 64, (2, 7))
+    labels = input_ids.clone()
     with torch.no_grad():
-        selected = model(input_ids=input_ids, num_logits_to_keep=2, use_cache=False)
-    torch.testing.assert_close(selected.logits if return_dict else selected[0], logits[:, -2:])
+        expected = model(input_ids=input_ids, labels=labels, use_cache=False)
+        embeddings = model.get_input_embeddings()(input_ids)
+        if config_class in (
+            models.BitNetConfig, models.TransformerConfig, models.WallTransformerConfig,
+            models.ForgettingTransformerConfig, models.ParallaxConfig, models.PaTHAttentionConfig,
+        ):
+            actual = model(None, None, None, embeddings, labels, False, False, True, return_dict)
+        else:
+            actual = model(None, None, embeddings, None, labels, False, False, True, return_dict)
+        torch.testing.assert_close(actual.logits if return_dict else actual[1], expected.logits)
+        selected = model(input_ids=input_ids, num_logits_to_keep=2, use_cache=False, return_dict=return_dict)
+    torch.testing.assert_close(selected.logits if return_dict else selected[0], expected.logits[:, -2:])
