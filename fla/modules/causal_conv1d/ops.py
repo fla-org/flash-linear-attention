@@ -1062,6 +1062,7 @@ def causal_conv1d(
             activation=activation,
             chunk_indices=chunk_indices,
             cp_context=cp_context,
+            backend=backend,
             residual=residual,
         )
         return output, None
