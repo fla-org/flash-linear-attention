@@ -11,7 +11,6 @@ import torch
 from torch import nn
 from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
-from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
 from transformers.utils.deprecation import deprecate_kwarg
 
@@ -19,6 +18,7 @@ from fla.layers.mamba3 import Mamba3
 from fla.models.cache_utils import Cache
 from fla.models.generation_utils import FLAGenerationMixin
 from fla.models.mamba3.configuration_mamba3 import Mamba3Config
+from fla.models.modeling_utils import FLAPreTrainedModel
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
 from fla.modules.l2warp import l2_warp
 
@@ -81,7 +81,7 @@ class Mamba3Block(GradientCheckpointingLayer):
         return hidden_states, attentions, past_key_values
 
 
-class Mamba3PreTrainedModel(PreTrainedModel):
+class Mamba3PreTrainedModel(FLAPreTrainedModel):
     """Base class handling weight init and downloading/loading."""
 
     config_class = Mamba3Config
@@ -196,7 +196,7 @@ class Mamba3Model(Mamba3PreTrainedModel):
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
         use_cache = use_cache if use_cache is not None else (self.config.use_cache if not self.training else False)
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = return_dict if return_dict is not None else self.config.return_dict
 
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
@@ -243,7 +243,7 @@ class Mamba3Model(Mamba3PreTrainedModel):
 
 
 class Mamba3ForCausalLM(Mamba3PreTrainedModel, FLAGenerationMixin):
-    _tied_weights_keys = []
+    _tied_weights_keys = {"lm_head.weight": "backbone.embeddings.weight"}
 
     def __init__(self, config: Mamba3Config) -> None:
         super().__init__(config)
@@ -280,7 +280,7 @@ class Mamba3ForCausalLM(Mamba3PreTrainedModel, FLAGenerationMixin):
         logits_to_keep: int | None = 0,
         **kwargs,
     ) -> tuple | CausalLMOutputWithPast:
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = return_dict if return_dict is not None else self.config.return_dict
 
         outputs = self.backbone(
             input_ids=input_ids,

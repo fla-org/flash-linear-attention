@@ -15,7 +15,6 @@ import torch
 import torch.nn as nn
 from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
-from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
 from transformers.utils.deprecation import deprecate_kwarg
 
@@ -23,6 +22,7 @@ from fla.layers.multiscale_retention import MultiScaleRetention
 from fla.models.cache_utils import Cache
 from fla.models.generation_utils import FLAUnsupportedCacheGenerationMixin
 from fla.models.modeling_layers import get_attention
+from fla.models.modeling_utils import FLAPreTrainedModel
 from fla.models.retnet.configuration_retnet import RetNetConfig
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
 from fla.modules import GatedMLP as RetNetMLP
@@ -159,7 +159,7 @@ class RetNetBlock(GradientCheckpointingLayer):
         return outputs
 
 
-class RetNetPreTrainedModel(PreTrainedModel):
+class RetNetPreTrainedModel(FLAPreTrainedModel):
 
     config_class = RetNetConfig
     base_model_prefix = 'model'
@@ -268,7 +268,7 @@ class RetNetModel(RetNetPreTrainedModel):
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
         use_cache = use_cache if use_cache is not None else (self.config.use_cache if not self.training else False)
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = return_dict if return_dict is not None else self.config.return_dict
 
         # retrieve input_ids and inputs_embeds
         if input_ids is not None and inputs_embeds is not None:
@@ -332,7 +332,7 @@ class RetNetModel(RetNetPreTrainedModel):
 
 class RetNetForCausalLM(RetNetPreTrainedModel, FLAUnsupportedCacheGenerationMixin):
 
-    _tied_weights_keys = ["lm_head.weight"]
+    _tied_weights_keys = {"lm_head.weight": "model.embeddings.weight"}
 
     def __init__(self, config):
         super().__init__(config)
@@ -381,7 +381,7 @@ class RetNetForCausalLM(RetNetPreTrainedModel, FLAUnsupportedCacheGenerationMixi
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = return_dict if return_dict is not None else self.config.return_dict
 
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs = self.model(

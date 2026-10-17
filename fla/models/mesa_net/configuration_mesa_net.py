@@ -7,12 +7,12 @@
 
 import warnings
 
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
 from fla.models.modeling_layers import AttentionConfig, AttentionConfigBase
 
 
-class MesaNetConfig(AttentionConfigBase, PretrainedConfig):
+class MesaNetConfig(AttentionConfigBase, PreTrainedConfig):
     model_type = 'mesa_net'
     keys_to_ignore_at_inference = ['past_key_values']
 

@@ -5,12 +5,12 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
 from fla.models.modeling_layers import AttentionConfig, AttentionConfigBase
 
 
-class MomConfig(AttentionConfigBase, PretrainedConfig):
+class MomConfig(AttentionConfigBase, PreTrainedConfig):
     model_type = 'mom'
     keys_to_ignore_at_inference = ['past_key_values']
 

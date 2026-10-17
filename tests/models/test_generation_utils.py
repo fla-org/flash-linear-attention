@@ -6,7 +6,10 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import pytest
+import torch
 
+from fla.models import GLAConfig, GLAForCausalLM
+from fla.models.cache_utils import Cache
 from fla.models.utils import FLAGenerationMixin, FLAUnsupportedCacheGenerationMixin
 
 
@@ -60,3 +63,32 @@ def test_generate_preserves_unrelated_attribute_errors():
         _OtherAttributeErrorModel().generate("input")
 
     assert raised.value is _OtherAttributeErrorBackend.exception
+
+
+@pytest.mark.parametrize('first_iteration', [False, True])
+def test_cached_generation_selects_new_prompt_inputs(first_iteration):
+    model = GLAForCausalLM(GLAConfig(hidden_size=32, num_hidden_layers=0, vocab_size=32, fuse_norm=False))
+    cache = Cache()
+    cache.update(recurrent_state=torch.zeros(2, 1, 4, 4), offset=4)
+    input_ids = torch.arange(14).reshape(2, 7)
+    inputs_embeds = model.get_input_embeddings()(input_ids)
+    attention_mask = torch.ones_like(input_ids)
+    cu_seqlens = torch.tensor([0, 3, 6], dtype=torch.int32)
+    prepared = model.prepare_inputs_for_generation(
+        input_ids=input_ids,
+        past_key_values=cache,
+        attention_mask=attention_mask,
+        inputs_embeds=inputs_embeds,
+        next_sequence_length=3,
+        is_first_iteration=first_iteration,
+        cu_seqlens=cu_seqlens,
+    )
+    if first_iteration:
+        assert prepared['input_ids'] is None
+        torch.testing.assert_close(prepared['inputs_embeds'], inputs_embeds[:, -3:])
+    else:
+        torch.testing.assert_close(prepared['input_ids'], input_ids[:, -3:])
+        assert prepared.get('inputs_embeds') is None
+    assert prepared['attention_mask'] is attention_mask
+    assert prepared['past_key_values'] is cache
+    assert prepared['cu_seqlens'] is cu_seqlens

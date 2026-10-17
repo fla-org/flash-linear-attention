@@ -8,7 +8,7 @@
 import math
 import warnings
 
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
 from fla.models.modeling_layers import AttentionConfig, AttentionConfigBase
 
@@ -38,7 +38,7 @@ def _adapt_default_attn(num_hidden_layers: int) -> dict:
     }
 
 
-class SambaConfig(AttentionConfigBase, PretrainedConfig):
+class SambaConfig(AttentionConfigBase, PreTrainedConfig):
 
     model_type = "samba"
 

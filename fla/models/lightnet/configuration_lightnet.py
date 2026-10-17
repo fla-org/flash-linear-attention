@@ -7,12 +7,12 @@
 
 import warnings
 
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
 from fla.models.modeling_layers import AttentionConfig, AttentionConfigBase
 
 
-class LightNetConfig(AttentionConfigBase, PretrainedConfig):
+class LightNetConfig(AttentionConfigBase, PreTrainedConfig):
 
     model_type = 'lightnet'
     keys_to_ignore_at_inference = ['past_key_values']

@@ -7,94 +7,52 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import torch
-import transformers
-from packaging import version
-from transformers.cache_utils import Cache as HFCacheBase
 from transformers.generation import GenerationMixin
 from transformers.utils.deprecation import deprecate_kwarg
 
-_IS_TRANSFORMERS_4_56_PLUS = version.parse(transformers.__version__) >= version.parse("4.56.0")
+if TYPE_CHECKING:
+    from fla.models.cache_utils import Cache
 
 
 class FLAGenerationMixin(GenerationMixin):
-    """
-    Flash Linear Attention Generation Mixin that provides version-compatible generation methods.
-    This mixin handles transformers library version differences, particularly for prepare_inputs_for_generation.
-    """
+    """Use Transformers generation with FLA's recurrent and hybrid cache."""
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    @classmethod
+    def _supports_default_dynamic_cache(cls) -> bool:
+        # FLA layers consume recurrent state dictionaries, including in hybrid models.
+        return False
 
     @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
     def prepare_inputs_for_generation(
         self,
         input_ids: torch.LongTensor = None,
-        past_key_values: HFCacheBase | None = None,
+        past_key_values: Cache | None = None,
         attention_mask: torch.Tensor | None = None,
         inputs_embeds: torch.Tensor | None = None,
         use_cache: bool = True,
-        logits_to_keep: int | None = None,
+        logits_to_keep: int | torch.Tensor | None = None,
         cache_position: torch.LongTensor | None = None,
+        next_sequence_length: int | None = None,
+        is_first_iteration: bool = False,
         **kwargs,
     ):
-        # Use pre-computed version comparison for performance
-        if _IS_TRANSFORMERS_4_56_PLUS:
-            # For transformers 4.56.0+, use cache_position-based logic
-            model_inputs = {}
-
-            # Handle cache-dependent input preparation
-            if past_key_values is not None:
-                model_inputs["past_key_values"] = past_key_values
-
-                # Use the new cache-dependent input preparation method if available
-                if hasattr(self, '_cache_dependant_input_preparation') and cache_position is not None:
-                    inputs_embeds, input_ids = self._cache_dependant_input_preparation(
-                        input_ids, inputs_embeds, cache_position,
-                    )
-                elif cache_position is not None:
-                    # Fallback: manually slice using cache_position
-                    if input_ids is not None and input_ids.shape[1] != cache_position.shape[0]:
-                        input_ids = input_ids[:, cache_position]
-                elif (past_key_values.get_seq_length() if hasattr(past_key_values, 'get_seq_length') else len(past_key_values)) > 0:
-                    # Ultimate fallback to old behavior
-                    input_ids = input_ids[:, -1:]
-
-            # Handle input format (similar to base class logic)
-            if inputs_embeds is not None and (cache_position is None or len(cache_position) == inputs_embeds.shape[1]):
-                model_inputs['inputs_embeds'] = inputs_embeds
-                model_inputs['input_ids'] = None
-            else:
-                model_inputs['input_ids'] = input_ids.contiguous() if input_ids is not None else None
-                model_inputs['inputs_embeds'] = None
-
-            model_inputs['cache_position'] = cache_position
-
-        else:
-            # For older transformers versions, use the original logic
-            model_inputs = {}
-            # only last token for `inputs_ids` if the `past_key_values` is not empty.
-            if past_key_values is not None and (past_key_values.get_seq_length() if hasattr(past_key_values, 'get_seq_length') else len(past_key_values)) > 0:
-                input_ids = input_ids[:, -1:]
-            # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
-            if inputs_embeds is not None and hasattr(past_key_values, '__len__') and len(past_key_values) == 0:
-                model_inputs = {'inputs_embeds': inputs_embeds}
-            else:
-                # The `contiguous()` here is necessary to have a static stride during decoding. torchdynamo otherwise
-                # recompiles graphs as the stride of the inputs is a guard.
-                # Ref: https://github.com/huggingface/transformers/pull/29114
-                # TODO: use `next_tokens` directly instead.
-                model_inputs = {'input_ids': input_ids.contiguous()}
-
+        if cache_position is not None and next_sequence_length is None:
+            next_sequence_length = len(cache_position)
         if logits_to_keep is not None:
-            model_inputs['logits_to_keep'] = logits_to_keep
-
-        model_inputs.update({
-            'past_key_values': past_key_values,
-            'use_cache': use_cache,
-            'attention_mask': attention_mask,
-        })
-        return model_inputs
+            kwargs["logits_to_keep"] = logits_to_keep
+        return super().prepare_inputs_for_generation(
+            input_ids=input_ids,
+            next_sequence_length=next_sequence_length,
+            past_key_values=past_key_values,
+            attention_mask=attention_mask,
+            inputs_embeds=inputs_embeds,
+            is_first_iteration=is_first_iteration,
+            use_cache=use_cache,
+            **kwargs,
+        )
 
 
 class FLAUnsupportedCacheGenerationMixin(FLAGenerationMixin):

@@ -646,3 +646,67 @@ def test_rope_offset_consistency_simulation_regression():
         f"This means the same token gets different position encodings at different layers!"
     )
     assert rope_offsets[0] == prompt_len
+
+
+@pytest.mark.parametrize('operation', ['reorder', 'repeat', 'select'])
+def test_cache_batch_operations_preserve_nested_states(operation):
+    cache = FLACache()
+    state = torch.arange(12).reshape(3, 2, 2)
+    cache.update(recurrent_state=state, conv_state=(state + 20, [state + 40]), offset=5)
+    cache.update(attn_state=(state[:, :, None], state[:, :, None] + 60), layer_idx=1)
+    indices = torch.tensor([2, 0, 2])
+    if operation == 'repeat':
+        cache.batch_repeat_interleave(2)
+        indices = torch.arange(3).repeat_interleave(2)
+    elif operation == 'select':
+        cache.batch_select_indices(indices)
+    else:
+        cache.reorder_cache(indices)
+    torch.testing.assert_close(cache[0]['recurrent_state'], state[indices])
+    torch.testing.assert_close(cache[0]['conv_state'][0], state[indices] + 20)
+    torch.testing.assert_close(cache[0]['conv_state'][1][0], state[indices] + 40)
+    torch.testing.assert_close(cache[1]['attn_state'][0], state[indices, :, None])
+    assert cache.get_seq_length(0) == 5
+    assert cache.get_seq_length(1) == 2
+
+
+def test_cache_rejects_recurrent_rollback_before_changing_other_layers():
+    cache = FLACache()
+    keys = torch.randn(2, 4, 1, 3)
+    recurrent = torch.randn(2, 1, 3, 3)
+    cache.update(attn_state=(keys, keys))
+    cache.update(recurrent_state=recurrent, layer_idx=1, offset=4)
+    with pytest.raises(NotImplementedError, match='rollback'):
+        cache.crop(2)
+    assert cache[0]['attn_state'][0] is keys
+    assert cache[1]['recurrent_state'] is recurrent
+    assert cache.get_seq_length(0) == cache.get_seq_length(1) == 4
+
+
+def test_cache_attention_crop_and_mask_sizes():
+    cache = FLACache()
+    keys = torch.randn(2, 7, 1, 3)
+    cache.update(attn_state=(keys, keys))
+    cache.crop(-2)
+    assert cache.get_mask_sizes(query_length=3, layer_idx=0) == (8, 0)
+    torch.testing.assert_close(cache[0]['attn_state'][0], keys[:, :5])
+
+    sliding = FLACache()
+    sliding.update(attn_state=(keys, keys), cache_kwargs={'window_size': 4})
+    assert sliding.get_mask_sizes(query_length=3, layer_idx=0) == (6, 4)
+    with pytest.raises(NotImplementedError, match='sliding-window'):
+        sliding.crop(5)
+    assert sliding.get_seq_length() == 7
+
+
+@pytest.mark.parametrize('seen_tokens', [0, 5])
+def test_cache_legacy_conversion_keeps_device_for_prefetch(seen_tokens):
+    cache = FLACache()
+    state = torch.randn(2, 3, 4, device=device)
+    cache.update(recurrent_state=state, offset=seen_tokens)
+    restored = FLACache.from_legacy_cache(cache.to_legacy_cache(), seen_tokens=seen_tokens)
+    restored.layers[0].offload()
+    restored.layers[0].prefetch()
+    assert restored[0]['recurrent_state'].device == state.device
+    torch.testing.assert_close(restored[0]['recurrent_state'], state)
+    assert restored.get_seq_length() == seen_tokens

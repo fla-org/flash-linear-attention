@@ -25,7 +25,6 @@ import torch
 from torch import nn
 from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
-from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
 from transformers.utils.deprecation import deprecate_kwarg
 
@@ -33,6 +32,7 @@ from fla.layers.mamba import Mamba
 from fla.models.cache_utils import Cache
 from fla.models.generation_utils import FLAGenerationMixin
 from fla.models.mamba.configuration_mamba import MambaConfig
+from fla.models.modeling_utils import FLAPreTrainedModel
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
 from fla.modules.l2warp import l2_warp
 
@@ -92,7 +92,7 @@ class MambaBlock(GradientCheckpointingLayer):
         return hidden_states, attentions, past_key_values
 
 
-class MambaPreTrainedModel(PreTrainedModel):
+class MambaPreTrainedModel(FLAPreTrainedModel):
     """
     An abstract class to handle weights initialization and a simple interface for downloading and loading pretrained
     models.
@@ -209,7 +209,7 @@ class MambaModel(MambaPreTrainedModel):
             output_attentions if output_attentions is not None else self.config.output_attentions
         )
         use_cache = use_cache if use_cache is not None else (self.config.use_cache if not self.training else False)
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = return_dict if return_dict is not None else self.config.return_dict
 
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError(
@@ -259,7 +259,7 @@ class MambaModel(MambaPreTrainedModel):
 
 class MambaForCausalLM(MambaPreTrainedModel, FLAGenerationMixin):
 
-    _tied_weights_keys = ["lm_head.weight"]
+    _tied_weights_keys = {"lm_head.weight": "backbone.embeddings.weight"}
 
     def __init__(self, config):
         super().__init__(config)
@@ -297,7 +297,7 @@ class MambaForCausalLM(MambaPreTrainedModel, FLAGenerationMixin):
         logits_to_keep: int | None = 0,
         **kwargs,
     ) -> tuple | CausalLMOutputWithPast:
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = return_dict if return_dict is not None else self.config.return_dict
 
         outputs = self.backbone(
             input_ids=input_ids,
