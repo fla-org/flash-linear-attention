@@ -17,9 +17,10 @@ from transformers.cache_utils import Cache as HFCacheBase
 from transformers.generation import GenerationMixin
 from transformers.utils.deprecation import deprecate_kwarg
 
+from fla.utils import check_transformers_version, supports_transformers_next_sequence_length
+
 _TF_VERSION = transformers.__version__
 _NEED_NEW = "4.53.3"
-_IS_TRANSFORMERS_4_56_PLUS = version.parse(_TF_VERSION) >= version.parse("4.56.0")
 
 if version.parse(_TF_VERSION) > version.parse(_NEED_NEW):
     from transformers.cache_utils import CacheLayerMixin
@@ -508,78 +509,44 @@ class FLAGenerationMixin(GenerationMixin):
         is_first_iteration: bool | None = None,
         **kwargs,
     ):
-        has_past = False
-        if past_key_values is not None:
-            if hasattr(past_key_values, 'get_seq_length'):
-                has_past = past_key_values.get_seq_length() > 0
-            else:
-                has_past = len(past_key_values) > 0
-        if next_sequence_length is not None and input_ids is not None:
-            input_ids = input_ids[:, -next_sequence_length:]
-        if is_first_iteration and inputs_embeds is not None and next_sequence_length is not None:
-            inputs_embeds = inputs_embeds[:, -next_sequence_length:]
-
-        # Use pre-computed version comparison for performance
-        if _IS_TRANSFORMERS_4_56_PLUS:
-            # For transformers 4.56.0+, use cache_position-based logic
-            model_inputs = {}
-
-            # Handle cache-dependent input preparation
-            if past_key_values is not None:
-                model_inputs["past_key_values"] = past_key_values
-
-                # Use the new cache-dependent input preparation method if available
-                if hasattr(self, '_cache_dependant_input_preparation') and cache_position is not None:
-                    inputs_embeds, input_ids = self._cache_dependant_input_preparation(
-                        input_ids, inputs_embeds, cache_position,
-                    )
-                elif cache_position is not None and input_ids is not None and input_ids.shape[1] != cache_position.shape[0]:
-                    # Fallback: manually slice using cache_position
-                    input_ids = input_ids[:, cache_position]
-                elif has_past and input_ids is not None and next_sequence_length is None:
-                    # Ultimate fallback to old behavior
-                    input_ids = input_ids[:, -1:]
-
-            use_inputs_embeds = inputs_embeds is not None and (
-                is_first_iteration is True
-                or (
-                    is_first_iteration is None
-                    and not has_past
-                    and (cache_position is None or len(cache_position) == inputs_embeds.shape[1])
-                )
-            )
-            if use_inputs_embeds:
-                model_inputs['inputs_embeds'] = inputs_embeds
-                model_inputs['input_ids'] = None
-            else:
-                model_inputs['input_ids'] = input_ids.contiguous() if input_ids is not None else None
-                model_inputs['inputs_embeds'] = None
-
-            model_inputs['cache_position'] = cache_position
-
+        uses_sequence_length = (
+            supports_transformers_next_sequence_length() or next_sequence_length is not None or is_first_iteration is not None
+        )
+        if uses_sequence_length:
+            use_inputs_embeds = inputs_embeds is not None and is_first_iteration is True
+            if next_sequence_length is not None:
+                if use_inputs_embeds:
+                    inputs_embeds = inputs_embeds[:, -next_sequence_length:]
+                elif input_ids is not None:
+                    input_ids = input_ids[:, -next_sequence_length:]
         else:
-            # For older transformers versions, use the original logic
-            model_inputs = {}
-            if has_past and input_ids is not None and next_sequence_length is None:
-                input_ids = input_ids[:, -1:]
+            has_past = past_key_values is not None and (
+                past_key_values.get_seq_length() if hasattr(past_key_values, 'get_seq_length') else len(past_key_values)
+            ) > 0
+            if past_key_values is not None:
+                if check_transformers_version('4.56') and cache_position is not None and input_ids is not None:
+                    if hasattr(self, '_cache_dependant_input_preparation'):
+                        inputs_embeds, input_ids = self._cache_dependant_input_preparation(
+                            input_ids=input_ids,
+                            inputs_embeds=inputs_embeds,
+                            cache_position=cache_position,
+                        )
+                    elif input_ids.shape[1] != cache_position.shape[0]:
+                        input_ids = input_ids[:, cache_position]
+                elif has_past and input_ids is not None:
+                    input_ids = input_ids[:, -1:]
             use_inputs_embeds = inputs_embeds is not None and (
-                is_first_iteration is True
-                or (is_first_iteration is None and not has_past)
+                (cache_position is None or len(cache_position) == inputs_embeds.shape[1])
+                if check_transformers_version('4.56') else not has_past
             )
-            if use_inputs_embeds:
-                model_inputs = {
-                    'input_ids': None,
-                    'inputs_embeds': inputs_embeds,
-                }
-            else:
-                # The `contiguous()` here is necessary to have a static stride during decoding. torchdynamo otherwise
-                # recompiles graphs as the stride of the inputs is a guard.
-                # Ref: https://github.com/huggingface/transformers/pull/29114
-                # TODO: use `next_tokens` directly instead.
-                model_inputs = {
-                    'input_ids': input_ids.contiguous() if input_ids is not None else None,
-                    'inputs_embeds': None,
-                }
+
+        # contiguous token strides avoid recompilation during decoding: huggingface/transformers#29114.
+        model_inputs = {
+            'input_ids': None if use_inputs_embeds or input_ids is None else input_ids.contiguous(),
+            'inputs_embeds': inputs_embeds if use_inputs_embeds else None,
+        }
+        if check_transformers_version('4.56'):
+            model_inputs['cache_position'] = cache_position
 
         if logits_to_keep is not None:
             model_inputs['logits_to_keep'] = logits_to_keep
