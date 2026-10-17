@@ -75,7 +75,7 @@ def iso_kdn_gain_fwd_kernel_map(
     BT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
+    i_bh, i_t = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_tg = i_t
@@ -178,7 +178,7 @@ def iso_kdn_gain_fwd_kernel_emit(
     STORE_COVARIANCE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
+    i_bh, i_t = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_tg = i_t
@@ -222,7 +222,7 @@ def iso_kdn_gain_bwd_kernel_map(
     BT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
+    i_bh, i_t = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_tg = i_t
@@ -322,7 +322,7 @@ def iso_kdn_gain_bwd_kernel_emit(
     BT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
+    i_bh, i_t = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_tg = i_t
@@ -417,7 +417,7 @@ def iso_kdn_gain_fwd(
     m = a.new_empty(B * NT, H, 4, dtype=torch.float32)
     p0 = a.new_empty(B * NT, H, dtype=torch.float32)
 
-    grid = (NT, B * H)
+    grid = (B * H, NT)
     iso_kdn_gain_fwd_kernel_map[grid](
         a=a,
         omega=omega,
@@ -489,7 +489,7 @@ def iso_kdn_gain_bwd(
     m = a.new_empty(B * NT, H, 2, dtype=torch.float32)
     lam = a.new_empty(B * NT, H, dtype=torch.float32)
 
-    grid = (NT, B * H)
+    grid = (B * H, NT)
     iso_kdn_gain_bwd_kernel_map[grid](
         a=a,
         omega=omega,
