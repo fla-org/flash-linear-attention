@@ -11,9 +11,11 @@ import pytest
 import torch
 from transformers.generation import GenerationMixin
 
+from fla import models
 from fla.models import GLAConfig, GLAForCausalLM
 from fla.models.cache_utils import Cache
 from fla.models.generation_utils import FLAGenerationMixin, FLAUnsupportedCacheGenerationMixin
+from fla.utils import device_name
 
 
 @pytest.fixture
@@ -67,21 +69,21 @@ class _OtherAttributeErrorModel(FLAUnsupportedCacheGenerationMixin, _OtherAttrib
     pass
 
 
-def test_generate_forwards_supported_generation_calls():
+def test_generate():
     args, kwargs = _SuccessfulModel().generate("input", max_new_tokens=1)
 
     assert args == ("input",)
     assert kwargs == {"max_new_tokens": 1}
 
 
-def test_generate_translates_unsupported_cache_strategy_errors():
+def test_generate_cache_error():
     with pytest.raises(AttributeError, match="not supported for _UnsupportedCacheModel") as raised:
         _UnsupportedCacheModel().generate("input")
 
     assert raised.value.__context__ is _PastKeyValuesErrorBackend.exception
 
 
-def test_generate_preserves_unrelated_attribute_errors():
+def test_generate_attribute_error():
     with pytest.raises(AttributeError) as raised:
         _OtherAttributeErrorModel().generate("input")
 
@@ -157,7 +159,7 @@ def test_prepare_inputs_for_generation_decode_without_cache(preparation_model):
 
 
 @pytest.mark.parametrize('first_iteration', [False, True])
-def test_cached_generation_selects_new_prompt_inputs(first_iteration):
+def test_prepare_inputs_cached(first_iteration):
     torch.manual_seed(42)
     model = GLAForCausalLM(GLAConfig(hidden_size=32, num_hidden_layers=0, vocab_size=32, fuse_norm=False))
     cache = Cache()
@@ -184,3 +186,19 @@ def test_cached_generation_selects_new_prompt_inputs(first_iteration):
     assert prepared['attention_mask'] is attention_mask
     assert prepared['past_key_values'] is cache
     assert prepared['cu_seqlens'] is cu_seqlens
+
+
+@pytest.mark.parametrize('config_class', [models.GLAConfig, models.MambaConfig, models.TransformerConfig])
+@pytest.mark.parametrize('use_cache', [False, True])
+def test_generate_inputs_embeds(config_class, use_cache, make_model):
+    torch.manual_seed(42)
+    if config_class is models.MambaConfig and device_name == 'cpu':
+        pytest.skip('Mamba normalization requires an accelerator.')
+    model = make_model(config_class, hidden_size=32, vocab_size=32, pad_token_id=0, eos_token_id=None)
+    model = model.to(device_name).eval()
+    input_ids = torch.tensor([[1, 4, 3], [1, 5, 2]], device=device_name)
+    kwargs = {'max_new_tokens': 3, 'do_sample': False, 'use_cache': use_cache}
+    with torch.no_grad():
+        tokens = model.generate(input_ids=input_ids, **kwargs)
+        embeddings = model.generate(inputs_embeds=model.get_input_embeddings()(input_ids), **kwargs)
+    assert torch.equal(tokens[:, input_ids.shape[1]:], embeddings)

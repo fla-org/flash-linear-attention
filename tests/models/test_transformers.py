@@ -11,7 +11,6 @@ from torch import nn
 from transformers import AutoConfig, AutoModelForCausalLM
 
 from fla import models
-from fla.utils import device_name
 
 CONFIG_CLASSES = [getattr(models, name) for name in models.__all__ if name.endswith('Config')]
 
@@ -68,19 +67,3 @@ def test_checkpoint(config_class, make_model, tmp_path):
     assert restored.state_dict().keys() == model.state_dict().keys()
     for name, tensor in restored.state_dict().items():
         torch.testing.assert_close(tensor, model.state_dict()[name], rtol=0, atol=0)
-
-
-@pytest.mark.parametrize('config_class', [models.GLAConfig, models.MambaConfig, models.TransformerConfig])
-@pytest.mark.parametrize('use_cache', [False, True])
-def test_generate_inputs_embeds(config_class, use_cache, make_model):
-    torch.manual_seed(42)
-    if config_class is models.MambaConfig and device_name == 'cpu':
-        pytest.skip('Mamba normalization requires an accelerator.')
-    model = make_model(config_class, hidden_size=32, vocab_size=32, pad_token_id=0, eos_token_id=None)
-    model = model.to(device_name).eval()
-    input_ids = torch.tensor([[1, 4, 3], [1, 5, 2]], device=device_name)
-    kwargs = {'max_new_tokens': 3, 'do_sample': False, 'use_cache': use_cache}
-    with torch.no_grad():
-        tokens = model.generate(input_ids=input_ids, **kwargs)
-        embeddings = model.generate(inputs_embeds=model.get_input_embeddings()(input_ids), **kwargs)
-    assert torch.equal(tokens[:, input_ids.shape[1]:], embeddings)

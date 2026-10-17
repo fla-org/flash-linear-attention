@@ -16,7 +16,7 @@ from einops import rearrange, repeat
 from fla.models import Mamba2Config, Mamba2ForCausalLM
 from fla.utils import device
 
-from .test_modeling_base import run_test_generation
+from .utils import check_generation
 
 
 @pytest.fixture(autouse=True)
@@ -24,9 +24,6 @@ def set_conv_backend(monkeypatch):
     monkeypatch.setenv('FLA_CONV_BACKEND', 'cuda')
 
 
-# ===================================================================================
-# Test for Modeling (Forward/Backward Pass)
-# ===================================================================================
 @pytest.mark.parametrize(
     ['L', 'B', 'T', 'H', 'D', 'use_l2warp', 'dtype', 'conv_backend'],
     [
@@ -88,9 +85,6 @@ def test_modeling(
     print(f"Test test_modeling passed with H={H}, D={D}, backend={conv_backend}.")
 
 
-# ===================================================================================
-# Test for Generation
-# ===================================================================================
 @pytest.mark.parametrize(
     ['L', 'B', 'T', 'H', 'D', 'dtype', 'conv_backend'],
     [
@@ -123,12 +117,8 @@ def test_generation(
         vocab_size=1000,
     )
     model = Mamba2ForCausalLM(config).to(device=device, dtype=dtype)
-    run_test_generation(L, B, T, H, D, Mamba2Config, dtype, model=model, config=config)
+    check_generation(L, B, T, H, D, Mamba2Config, dtype, model=model, config=config)
 
-
-# ===================================================================================
-# Layer-level: Custom fla.layers.mamba2.Mamba2 vs Official mamba_ssm.Mamba2
-# ===================================================================================
 
 def _copy_params(src, dst):
     """Copy parameters with matching names and shapes from src to dst."""

@@ -11,7 +11,7 @@ import torch
 from fla.models import MoBAConfig
 from fla.utils import find_spec_cached
 
-from .test_modeling_base import run_test_generation, run_test_model_forward_backward
+from .utils import check_forward, check_generation
 
 # Mark (not importorskip): a fully skipped module reports "no tests collected" and exits
 # with code 5, which CI per-file loops treat as a failure.
@@ -19,9 +19,7 @@ pytestmark = pytest.mark.skipif(find_spec_cached("flash_attn") is None,
                                 reason="MoBA attention requires flash-attn (`pip install flash-attn --no-build-isolation`).")
 
 
-# ===================================================================================
-# Test for Modeling (Forward/Backward Pass)
-# ===================================================================================
+@pytest.mark.parametrize('varlen', [False, True], ids=['dense', 'varlen'])
 @pytest.mark.parametrize(
     ['L', 'B', 'T', 'H', 'D', 'use_l2warp', 'qk_norm', 'use_output_gate', 'moba_topk', 'attnres_block_size', 'dtype'],
     [
@@ -53,8 +51,9 @@ def test_modeling(
     moba_topk: int,
     attnres_block_size: int | None,
     dtype: torch.dtype,
+    varlen: bool,
 ):
-    run_test_model_forward_backward(
+    check_forward(
         L, B, T, H, D, MoBAConfig,
         use_l2warp=use_l2warp, dtype=dtype,
         qk_norm=qk_norm,
@@ -62,12 +61,10 @@ def test_modeling(
         moba_chunk_size=128,
         moba_topk=moba_topk,
         attnres_block_size=attnres_block_size,
+        varlen=varlen,
     )
 
 
-# ===================================================================================
-# Test for Generation
-# ===================================================================================
 # NOTE: MoBA is listed in `GENERATION_UNSUPPORTED` and therefore this test is
 # currently a skip. MoBA uses block-sparse attention during prefill but falls
 # back to dense full attention during decoding (per the paper, Sec. 3.3), so
@@ -91,4 +88,4 @@ def test_generation(
     D: int,
     dtype: torch.dtype,
 ):
-    run_test_generation(L, B, T, H, D, MoBAConfig, dtype)
+    check_generation(L, B, T, H, D, MoBAConfig, dtype)
