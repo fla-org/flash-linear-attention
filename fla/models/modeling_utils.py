@@ -23,6 +23,10 @@ class FLAPreTrainedModel(PreTrainedModel):
     _is_stateful = True
     _input_embed_layer = "embeddings"
 
+    def set_output_embeddings(self, new_embeddings):
+        # allow reattaching a head after set_output_embeddings(None)
+        self.lm_head = new_embeddings
+
     def _compute_logits_and_loss(
         self,
         hidden_states: torch.Tensor,
