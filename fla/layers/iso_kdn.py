@@ -22,7 +22,7 @@ from fla.ops.iso_kdn import chunk_iso_kdn, fused_recurrent_iso_kdn
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
-    from fla.models.utils import Cache
+    from fla.models.cache_utils import Cache
 
 
 class IsotropicKalmanDeltaNetwork(nn.Module):
