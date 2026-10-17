@@ -7,7 +7,6 @@
 
 from __future__ import annotations
 
-import math
 import warnings
 from typing import TYPE_CHECKING, Optional
 
@@ -163,55 +162,6 @@ class MesaNetPreTrainedModel(FLAPreTrainedModel):
     supports_gradient_checkpointing = True
     _no_split_modules = ['MesaNetBlock']
     _supports_cache_class = True
-
-    def __init__(self, *inputs, **kwargs):
-        super().__init__(*inputs, **kwargs)
-
-    def _init_weights(
-        self,
-        module: nn.Module,
-        prenorm_residual_strategy: str | None = None,
-        num_residuals_per_layer: int = 2,
-    ):
-        if isinstance(module, (nn.Linear, nn.Conv1d)):
-            if getattr(module, '_is_attnres_proj', False):
-                nn.init.zeros_(module.weight)
-            else:
-                # Slightly different from the TF version which uses truncated_normal for initialization
-                # cf https://github.com/pytorch/pytorch/pull/5617
-                nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
-            if module.bias is not None:
-                nn.init.zeros_(module.bias)
-        elif isinstance(module, nn.Embedding):
-            nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
-        elif hasattr(module, 'reset_parameters'):
-            module.reset_parameters()
-
-        if prenorm_residual_strategy is not None:
-            # Reinitialize selected weights subject to the OpenAI GPT-2 Paper Scheme:
-            #   > A modified initialization which accounts for the accumulation on the residual path with model depth. Scale
-            #   > the weights of residual layers at initialization by a factor of 1/√N where N is the # of residual layers.
-            #   >   -- GPT-2 :: https://openai.com/blog/better-language-models/
-            #
-            # Reference (Megatron-LM): https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/models/gpt/gpt_model.py
-            p = None
-            if hasattr(module, 'o_proj'):
-                p = module.o_proj.weight
-            elif hasattr(module, 'down_proj'):
-                p = module.down_proj.weight
-            if p is not None:
-                # Special Scaled Initialization --> There are 2 Layer Norms per Transformer Block
-                # Following Pytorch init, except scale by 1/sqrt(2 * n_layer)
-                # We need to reinit p since this code could be called multiple times
-                # Having just p *= scale would repeatedly scale it down
-                if prenorm_residual_strategy == 'rescale':
-                    nn.init.kaiming_uniform_(p, a=math.sqrt(5))
-                    with torch.no_grad():
-                        p /= math.sqrt(num_residuals_per_layer * self.config.num_hidden_layers)
-                elif prenorm_residual_strategy == 'zero':
-                    nn.init.zeros_(p)
-                else:
-                    raise ValueError(f"Invalid prenorm_residual_strategy: {prenorm_residual_strategy}")
 
 
 class MesaNetModel(MesaNetPreTrainedModel):
