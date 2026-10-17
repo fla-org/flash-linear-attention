@@ -549,7 +549,10 @@ def test_register_import_order(run_python):
         ('causal_conv1d', 'causal_conv1d_update_states', ('initial_state',), {'state_len': 4}),
         ('grpo', 'fused_grpo_loss', ('ref_logp', 'input_ids', 'advantages'), {'beta': 0.2, 'save_kl': True}),
         ('fused_cross_entropy', 'cross_entropy_loss', ('target',), {'ignore_index': -1, 'label_smoothing': 0.1}),
-        ('fused_linear_cross_entropy', 'fused_linear_cross_entropy_fwd', ('target', 'weight'), {'reduction': 'sum'}),
+        (
+            'fused_linear_cross_entropy', 'fused_linear_cross_entropy_fwd', ('target', 'weight'),
+            {'reduction': 'sum', 'need_dx': False, 'need_dw': False, 'need_db': True},
+        ),
         ('fused_linear_cross_entropy', 'fused_linear_cross_entropy_bwd', ('dx', 'dw', 'db'), {}),
         ('fused_kl_div', 'fused_kl_div_fwd', ('target_x', 'weight', 'target_weight'), {'use_dw': False}),
         ('fused_kl_div', 'fused_kl_div_bwd', ('dx', 'dw'), {}),
