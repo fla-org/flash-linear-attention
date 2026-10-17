@@ -5,9 +5,9 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-import warnings
-
 from transformers.configuration_utils import PreTrainedConfig
+
+from fla.models.configuration_utils import validate_loss_config
 
 
 class Mamba3Config(PreTrainedConfig):
@@ -105,15 +105,7 @@ class Mamba3Config(PreTrainedConfig):
         if is_mimo and mimo_rank <= 0:
             raise ValueError("`mimo_rank` must be > 0 when `is_mimo=True`.")
 
-        if fuse_cross_entropy and fuse_linear_cross_entropy:
-            raise ValueError(
-                "`fuse_cross_entropy` and `fuse_linear_cross_entropy` cannot both be True.",
-            )
-        if fuse_linear_cross_entropy:
-            warnings.warn(
-                "`fuse_linear_cross_entropy` is enabled, which can improve memory efficiency "
-                "at the potential cost of reduced precision.",
-            )
+        validate_loss_config(fuse_cross_entropy=fuse_cross_entropy, fuse_linear_cross_entropy=fuse_linear_cross_entropy)
 
         super().__init__(
             bos_token_id=bos_token_id,

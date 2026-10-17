@@ -40,10 +40,10 @@ from fla.models import (
     RWKV7Config,
     SambaConfig,
 )
+from fla.models.configuration_utils import get_attention_spec, parse_attention_config
 from fla.models.gated_deltanet.modeling_gated_deltanet import GatedDeltaNetBlock
 from fla.models.gla.modeling_gla import GLABlock, GLAForCausalLM
 from fla.models.kda.modeling_kda import KDABlock
-from fla.models.modeling_layers import get_attention_spec, parse_attention_config
 from fla.models.samba.modeling_samba import SambaBlock
 from fla.utils import assert_close, device, device_platform, device_torch_lib
 
