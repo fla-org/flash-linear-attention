@@ -152,7 +152,7 @@ def test_mamba_layer_vs_official_inference(B, T, d_model, d_state, expand, dtype
     ssm_state = torch.zeros(B, d_inner, d_state, device=device, dtype=dtype)
 
     # FLA inference state (using FLACache)
-    from fla.models.utils import Cache
+    from fla.models.cache_utils import Cache
     cache = Cache()
 
     for i in range(T):
