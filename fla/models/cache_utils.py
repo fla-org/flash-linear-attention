@@ -90,8 +90,8 @@ class FLALayer(CacheLayerMixin):
                         if tail.shape[1] >= window_size:
                             updated_attn_state.append(tail.contiguous())
                         else:
-                            cached_state = cached_state[:, -window_size:].contiguous(
-                            ) if cached_state.shape[1] > window_size else cached_state
+                            if cached_state.shape[1] > window_size:
+                                cached_state = cached_state[:, -window_size:].contiguous()
                             rolled = cached_state.roll(-input_length, dims=1)
                             rolled[:, -tail.shape[1]:] = tail
                             updated_attn_state.append(rolled)
