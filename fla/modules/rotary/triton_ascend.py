@@ -163,6 +163,13 @@ def rotary_embedding_fwdbwd_npu(
             torch.all(sequence_lengths + seqlen_offsets <= TR),
             f"Rotary cache is too short for tensor offsets, got {TR} positions",
         )
+    elif is_varlen and seqlen_offsets + T > TR:
+        assert seqlen_offsets <= TR, f"Rotary cache is too short for sequence offsets, got {TR} positions"
+        sequence_lengths = cu_seqlens[1:] - cu_seqlens[:-1]
+        torch._assert_async(
+            torch.all(sequence_lengths <= TR - seqlen_offsets),
+            f"Rotary cache is too short for sequence offsets, got {TR} positions",
+        )
     else:
         assert seqlen_offsets + T <= TR
 
