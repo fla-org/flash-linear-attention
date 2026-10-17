@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from fla.layers.moba import MoBA
-from fla.models.utils import Cache
+from fla.models.cache_utils import Cache
 from fla.utils import device, find_spec_cached
 
 pytestmark = pytest.mark.skipif(find_spec_cached("flash_attn") is None, reason="MoBA parallel path requires flash-attn")

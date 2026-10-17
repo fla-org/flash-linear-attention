@@ -20,8 +20,9 @@ from transformers.utils import logging
 from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.path_attn import PaTHAttention
+from fla.models.cache_utils import Cache
+from fla.models.generation_utils import FLAGenerationMixin
 from fla.models.path_attn.configuration_path_attention import PaTHAttentionConfig
-from fla.models.utils import Cache, FLAGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
 from fla.modules import GatedMLP as PaTHAttentionMLP
 from fla.modules.l2warp import l2_warp

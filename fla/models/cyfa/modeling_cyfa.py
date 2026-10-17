@@ -23,7 +23,8 @@ from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutpu
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils.deprecation import deprecate_kwarg
 
-from fla.models.utils import Cache, FLAGenerationMixin
+from fla.models.cache_utils import Cache
+from fla.models.generation_utils import FLAGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
 from fla.modules import GatedMLP as CyFAMLP
 from fla.modules.l2warp import l2_warp

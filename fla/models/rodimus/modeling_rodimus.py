@@ -21,9 +21,10 @@ from transformers.utils import logging
 from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.rodimus import RodimusAttention, SlidingWindowSharedKeyAttention, align_multiple
+from fla.models.cache_utils import Cache
+from fla.models.generation_utils import FLAUnsupportedCacheGenerationMixin
 from fla.models.modeling_layers import get_attention, get_attention_spec
 from fla.models.rodimus.configuration_rodimus import RodimusConfig
-from fla.models.utils import Cache, FLAUnsupportedCacheGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
 from fla.modules import GatedMLP as RodimusMLP
 from fla.modules.l2warp import l2_warp

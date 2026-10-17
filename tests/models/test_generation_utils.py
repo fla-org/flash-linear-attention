@@ -11,8 +11,8 @@ import pytest
 import torch
 from transformers.generation import GenerationMixin
 
-from fla.models import utils
-from fla.models.utils import FLAGenerationMixin, FLAUnsupportedCacheGenerationMixin
+from fla.models import generation_utils
+from fla.models.generation_utils import FLAGenerationMixin, FLAUnsupportedCacheGenerationMixin
 
 
 class _Cache:
@@ -123,7 +123,7 @@ def test_prepare_inputs_for_generation(
     assert result['logits_to_keep'] == 1
     if expected_key == 'input_ids':
         assert result['input_ids'].is_contiguous()
-    if utils.supports_transformers_next_sequence_length():
+    if generation_utils.supports_transformers_next_sequence_length():
         reference = GenerationMixin.prepare_inputs_for_generation(
             SimpleNamespace(
                 config=SimpleNamespace(is_encoder_decoder=False),
@@ -139,8 +139,8 @@ def test_prepare_inputs_for_generation(
 @pytest.mark.parametrize('past_length', [None, 0, 4], ids=['no-cache', 'empty-cache', 'populated-cache'])
 @pytest.mark.parametrize('with_embeds', [False, True], ids=['ids', 'embeds'])
 def test_prepare_inputs_for_generation_legacy(monkeypatch, cache_positions, past_length, with_embeds):
-    monkeypatch.setattr(utils, 'supports_transformers_next_sequence_length', lambda: False)
-    monkeypatch.setattr(utils, 'check_transformers_version', lambda _: cache_positions)
+    monkeypatch.setattr(generation_utils, 'supports_transformers_next_sequence_length', lambda: False)
+    monkeypatch.setattr(generation_utils, 'check_transformers_version', lambda _: cache_positions)
     input_ids = torch.arange(12).reshape(2, 6)
     inputs_embeds = torch.arange(96, dtype=torch.float32).reshape(2, 6, 8) if with_embeds else None
     cache = _Cache(past_length) if past_length is not None else None
@@ -161,7 +161,7 @@ def test_prepare_inputs_for_generation_legacy(monkeypatch, cache_positions, past
 
 
 @pytest.mark.skipif(
-    not utils.supports_transformers_next_sequence_length(),
+    not generation_utils.supports_transformers_next_sequence_length(),
     reason='Requires the upstream sequence-length generation protocol.',
 )
 def test_prepare_inputs_for_generation_decode_without_cache():
@@ -176,7 +176,7 @@ def test_prepare_inputs_for_generation_decode_without_cache():
 
 
 @pytest.mark.skipif(
-    utils.supports_transformers_next_sequence_length() or not utils.check_transformers_version('4.56'),
+    generation_utils.supports_transformers_next_sequence_length() or not generation_utils.check_transformers_version('4.56'),
     reason='Requires the upstream cache-position generation protocol.',
 )
 @pytest.mark.parametrize(('input_length', 'embed_length'), [(0, 6), (6, 2)], ids=['full-embeds', 'new-embeds'])

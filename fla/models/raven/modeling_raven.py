@@ -23,9 +23,10 @@ from transformers.utils import logging
 from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.raven import Raven
+from fla.models.cache_utils import Cache
+from fla.models.generation_utils import FLAUnsupportedCacheGenerationMixin
 from fla.models.modeling_layers import get_attention
 from fla.models.raven.configuration_raven import RavenConfig
-from fla.models.utils import Cache, FLAUnsupportedCacheGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
 from fla.modules import GatedMLP as RavenMLP
 from fla.modules.l2warp import l2_warp

@@ -33,7 +33,7 @@ from fla.ops.precond_gated_delta_rule import (
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
-    from fla.models.utils import Cache
+    from fla.models.cache_utils import Cache
 
 
 class PrecondGatedDeltaNet(nn.Module):

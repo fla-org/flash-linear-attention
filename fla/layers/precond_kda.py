@@ -29,7 +29,7 @@ from fla.ops.precond_kda import chunk_precond_kda, fused_recurrent_precond_kda
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
-    from fla.models.utils import Cache
+    from fla.models.cache_utils import Cache
 
 
 class PrecondKDA(nn.Module):

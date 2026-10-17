@@ -19,8 +19,9 @@ from transformers.utils import logging
 from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.deltaformer import DeltaFormerAttention
+from fla.models.cache_utils import Cache
 from fla.models.deltaformer.configuration_deltaformer import DeltaFormerConfig
-from fla.models.utils import Cache, FLAUnsupportedCacheGenerationMixin
+from fla.models.generation_utils import FLAUnsupportedCacheGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
 from fla.modules import GatedMLP as DeltaFormerMLP
 from fla.modules.l2warp import l2_warp

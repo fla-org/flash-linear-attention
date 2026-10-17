@@ -21,8 +21,9 @@ from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.attn import Attention
 from fla.layers.precond_kda import PrecondKDA
+from fla.models.cache_utils import Cache
+from fla.models.generation_utils import FLAGenerationMixin
 from fla.models.precond_kda.configuration_precond_kda import PrecondKDAConfig
-from fla.models.utils import Cache, FLAGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
 from fla.modules import GatedMLP as PrecondKDAMLP
 from fla.modules.l2warp import l2_warp
