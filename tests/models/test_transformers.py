@@ -43,6 +43,8 @@ def test_model_embedding_and_decoder_access(config_class, tie_word_embeddings):
     decoder.set_input_embeddings(embeddings)
     assert model.get_input_embeddings() is embeddings
     output_embeddings = nn.Linear(64, 64, bias=False)
+    model.set_output_embeddings(new_embeddings=None)
+    assert model.get_output_embeddings() is None
     model.set_output_embeddings(new_embeddings=output_embeddings)
     assert model.get_output_embeddings() is output_embeddings
     model.tie_weights()
