@@ -5,77 +5,63 @@ description: Split oversized FLA pull requests into focused changes, reuse exist
 
 # FLA PR Stacks
 
-Use this workflow when a change needs decomposition or dependent PRs need a GitHub native stack. Read [CONTRIBUTING.md](../../../CONTRIBUTING.md#pr-scope-and-size) and [AGENTS.md](../../../AGENTS.md) for scope, size, compatibility, and git permissions. Use [PR readiness](../fla-pr-readiness/SKILL.md) for each resulting PR.
+Use for decomposing large changes or managing dependent PRs. Follow [CONTRIBUTING.md](../../../CONTRIBUTING.md#pr-scope-and-size) for scope and size, [AGENTS.md](../../../AGENTS.md) for git permissions, and [PR readiness](../fla-pr-readiness/SKILL.md) for each PR's evidence and description.
 
-## Choose the boundaries
+## 1. Choose the split
 
-Inspect the full diff, commit history, worktree status, and open related issues/PRs before creating branches. Record the original head and preserve uncommitted work in an isolated worktree or recoverable snapshot before reconstructing commits. Compare changes against both their immediate parent and the intended trunk so inherited work is distinguishable from new work.
+Inspect the complete diff, commit history, and related open PRs, including their review discussions. Map each proposed layer to one outcome, its prerequisites, validation, and an existing PR to reuse where appropriate.
 
-For each proposed PR, identify one observable outcome, its prerequisite PRs, the existing PR to reuse if any, and its validation. Prefer boundaries such as a behavior-preserving extraction, a shared API change with its callers, and a feature that consumes that API. Independent changes should target the trunk separately; a dependency graph does not always belong in one linear stack.
+| Relationship                           | Action                                                                   |
+| -------------------------------------- | ------------------------------------------------------------------------ |
+| Overlaps an existing PR's purpose       | Update that PR when ownership permits; preserve attribution and reviews.  |
+| Independent of the other changes        | Submit separately against the trunk.                                     |
+| Depends on another layer               | Stack above that layer; include its own tests and documentation.          |
+| Cohesive but still above the size limit | Use the contribution guide's exception with a concrete justification.     |
 
-Keep implementation, regression tests, and required documentation together. Each layer must work with the layers below it, without depending on a later fix. Do not split by arbitrary line counts, leave callers broken between layers, or move tests out merely to reduce size. Use the contribution guide's size exception when a cohesive change still needs it, including for a mechanical migration.
+Each layer must work with the layers below it. Do not split by arbitrary line counts, leave callers broken, or defer tests to a later PR.
 
-## Reuse existing PRs
+Check head repository identity before arranging existing PRs. [GitHub stacks require all branches in the same repository](https://docs.github.com/en/pull-requests/reference/stacked-pull-requests); cross-fork stacks are unsupported. Keep incompatible PRs as explicit external prerequisites instead of duplicating them under new PR numbers.
 
-Read existing diffs and review discussions, not just titles. Put overlapping changes into an existing PR when its purpose and ownership fit, preserving attribution and useful review history. Check its current remote head before updating it; do not overwrite work that appeared since the initial inspection. A split request does not authorize merging or closing PRs, or incorporating unrelated changes.
+## 2. Build and validate
 
-Inspect repository identity as well as branch names:
+Preserve the original head and uncommitted work before reconstructing commits in isolated branches or worktrees. Reuse suitable commits and preserve authorship. Check current remote heads before updating existing PRs.
 
-```bash
-gh api "repos/fla-org/flash-linear-attention/pulls/$pr_number" \
-  --jq '{number, head_repo: .head.repo.full_name, head: .head.ref, sha: .head.sha, base_repo: .base.repo.full_name, base: .base.ref, stack}'
-```
-
-GitHub requires stack branches to be in the same repository; [cross-fork stacks are unsupported](https://docs.github.com/en/pull-requests/reference/stacked-pull-requests). Keep incompatible existing PRs as separate dependencies instead of recreating them under new PR numbers just to form a stack. Explain which PRs can be stacked and which remain external prerequisites. Resolve those prerequisites before representing dependent layers as ready to merge.
-
-## Build and validate the branches
-
-Reconstruct the series bottom to top in isolated branches or worktrees. Reuse suitable commits; split mixed commits by coherent changes while preserving authorship. Retain the original branch until comparison establishes that the decomposition preserved the intended result.
-
-For a series based on `main`, these checks distinguish each layer's contribution from the aggregate result:
+Review each layer against its parent, then compare the top branch with the preserved original result:
 
 ```bash
-git diff --stat main...refactor/foundation
-git diff --stat refactor/foundation...refactor/consumer
+git diff main...refactor/foundation
+git diff refactor/foundation...refactor/consumer
 git diff original-head refactor/consumer
 ```
 
-Replace the example refs with the recorded trunk, original head, and actual layer names. Inspect the complete diffs, not only their statistics. If the trunk changed, account for those changes explicitly when comparing final trees. Every difference from the original proposal should be intentional; removed overlaps should point to the existing PR that owns them.
+Substitute the recorded trunk and actual refs. Account for trunk changes and intentional omissions, including fixes retained in existing PRs. Run relevant tests at each layer's head and on the combined result; passing only the top branch does not validate intermediate PRs.
 
-Run affected tests at each layer's head, then check the combined result. A passing top branch does not establish that an intermediate PR works. Record tests and remaining gaps per PR, with a short dependency explanation in its description.
+## 3. Register and verify the native stack
 
-## Create the native stack
+Changing PR bases alone does not create a native stack. Use the official [`gh stack` extension](https://docs.github.com/en/pull-requests/how-tos/create-pull-requests/creating-stacked-pull-requests), GitHub UI, or REST Stacks API. Check installed command help and existing publishing authorization first.
 
-Changing PR bases alone does not register a native stack. Use GitHub's stack UI, REST Stacks API, or the official [`gh stack` extension](https://docs.github.com/en/pull-requests/how-tos/create-pull-requests/creating-stacked-pull-requests). Check installed command help before use; publishing remains subject to the existing task authorization.
-
-For existing branches, adopt them in bottom-to-top order and submit:
+For prepared branches, adopt them bottom to top and submit:
 
 ```bash
 gh stack init --base main refactor/foundation refactor/consumer
 gh stack submit --auto --remote origin
 ```
 
-Choose the actual remote containing the stack's branches. `submit` pushes branches, creates or updates PRs, and registers the stack. With `--auto`, new PRs default to draft. Replace generated titles and bodies with reviewed descriptions using the repository's PR readiness workflow.
+Choose the actual remote containing the branches. `submit` pushes, creates or updates PRs, and registers the stack. `--auto` creates new PRs as drafts; replace generated titles and bodies using PR readiness.
 
-Alternatively, link existing PRs without adopting local tracking:
+For existing PRs, use `gh stack link --base main --remote origin 123 124` with their real numbers in dependency order. This reuses PRs without requiring local stack tracking. Branch arguments also push and create missing PRs. After an error, inspect what succeeded before retrying.
 
-```bash
-gh stack link --base main --remote origin 123 124
-```
-
-Use real PR numbers in dependency order. `link` reuses existing PRs and creates the native association; when given branch names, it also pushes branches and creates missing PRs. Inspect the result after an error before retrying, since some pushes or PR creations may already have succeeded. Do not use `--open` until the affected PRs are ready for review.
-
-## Verify and maintain
-
-For every PR, query its [REST stack membership](https://docs.github.com/en/pull-requests/reference/stacked-pull-requests-apis-and-webhooks):
+For every PR, verify [remote stack membership](https://docs.github.com/en/pull-requests/reference/stacked-pull-requests-apis-and-webhooks):
 
 ```bash
 gh api "repos/fla-org/flash-linear-attention/pulls/$pr_number" \
-  --jq '{number, head: .head.ref, base: .base.ref, stack}'
+  --jq '{number, head_repo: .head.repo.full_name, head: .head.ref, base: .base.ref, stack}'
 ```
 
-Check that the non-null `stack` objects describe the same stack, intended order, size, and trunk, and that each PR diff contains only its layer. For locally tracked stacks, `gh stack view --json` also shows local status. Report the verified PR links and dependency order; a local branch chain or successful push alone is insufficient evidence of a native stack.
+Require non-null `stack` objects with the same stack identity, correct order, size, and trunk. Check each PR's incremental diff and report the verified links and remaining external prerequisites. A local branch chain or successful push is insufficient.
 
-After changing a lower layer, inspect every affected upper diff and rerun relevant validation. Follow the repository's rules for rewriting published commits: `gh stack rebase` rewrites history, and `gh stack sync` also pushes with force-with-lease. Use those operations only within the user's authorization, preserving concurrent remote work. Recheck remote membership and test evidence after updating the series.
+## 4. Maintain the series
 
-If a merge is requested, confirm the intended prefix: merging an upper PR also merges the PRs below it. Use a stack-aware merge operation; the legacy synchronous merge API does not support stacks. Do not merge as a side effect of creating or updating a series.
+After changing a lower layer, review affected upper diffs and rerun relevant tests. `gh stack rebase` rewrites history; `gh stack sync` also force-pushes with leases. Apply the repository's rewrite permissions and preserve concurrent remote work, then recheck published membership and evidence.
+
+Creating a series does not authorize merging or closing PRs. If merging is requested, establish the intended prefix: selecting an upper PR also merges those below it. Use a stack-aware merge operation; the legacy synchronous merge API does not support stacks.
