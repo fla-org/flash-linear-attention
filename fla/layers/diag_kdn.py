@@ -22,7 +22,7 @@ from fla.ops.diag_kdn import chunk_diag_kdn, fused_recurrent_diag_kdn
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
-    from fla.models.utils import Cache
+    from fla.models.cache_utils import Cache
 
 
 class DiagonalKalmanDeltaNetwork(nn.Module):
