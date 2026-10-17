@@ -7,12 +7,58 @@
 
 import pytest
 import torch
+from torch import nn
 from transformers import AutoConfig, AutoModelForCausalLM
 
 from fla import models
 from fla.utils import device_name
 
 CONFIG_CLASSES = [getattr(models, name) for name in models.__all__ if name.endswith('Config')]
+
+
+@pytest.mark.parametrize('config_class', CONFIG_CLASSES, ids=lambda cls: cls.model_type)
+@pytest.mark.parametrize('tie_word_embeddings', [False, True])
+def test_model_embedding_and_decoder_access(config_class, tie_word_embeddings):
+    if config_class is models.RWKV7Config and not torch._C.has_lapack:
+        pytest.skip('RWKV7 initialization requires LAPACK.')
+    config = config_class(
+        hidden_size=64,
+        num_heads=2,
+        num_hidden_layers=0,
+        num_self_decoder_layers=0,
+        intermediate_size=128,
+        vocab_size=64,
+        tie_word_embeddings=tie_word_embeddings,
+        fuse_norm=False,
+        fuse_cross_entropy=False,
+    )
+    model = AutoModelForCausalLM.from_config(config)
+    decoder = model.model if hasattr(model, 'model') else model.backbone
+    assert model.get_decoder() is decoder
+    assert model.get_input_embeddings() is decoder.get_input_embeddings()
+    embeddings = nn.Embedding(64, 64)
+    model.set_input_embeddings(embeddings)
+    assert decoder.embeddings is embeddings
+    embeddings = nn.Embedding(64, 64)
+    decoder.set_input_embeddings(embeddings)
+    assert model.get_input_embeddings() is embeddings
+    output_embeddings = nn.Linear(64, 64, bias=False)
+    model.set_output_embeddings(new_embeddings=output_embeddings)
+    assert model.get_output_embeddings() is output_embeddings
+    model.tie_weights()
+    assert (model.get_input_embeddings().weight is model.get_output_embeddings().weight) == tie_word_embeddings
+    original_weights = model.get_input_embeddings().weight.detach().clone()
+    model.resize_token_embeddings(72, mean_resizing=False)
+    assert model.get_input_embeddings().weight.shape == (72, 64)
+    assert model.get_output_embeddings().weight.shape == (72, 64)
+    torch.testing.assert_close(model.get_input_embeddings().weight[:64], original_weights, rtol=0, atol=0)
+    assert (model.get_input_embeddings().weight is model.get_output_embeddings().weight) == tie_word_embeddings
+    if hasattr(model, 'model'):
+        replacement = type(decoder)(config)
+        model.set_decoder(decoder=replacement)
+        assert model.model is replacement
+        assert model.get_decoder() is replacement
+        assert model.get_input_embeddings() is replacement.embeddings
 
 
 @pytest.mark.parametrize('config_class', CONFIG_CLASSES, ids=lambda cls: cls.model_type)

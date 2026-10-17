@@ -21,6 +21,7 @@ class FLAPreTrainedModel(PreTrainedModel):
     """Shared Transformers integration without changing model parameter paths."""
 
     _is_stateful = True
+    _input_embed_layer = "embeddings"
 
     def _compute_logits_and_loss(
         self,
@@ -81,3 +82,12 @@ class FLAPreTrainedModel(PreTrainedModel):
                 num_items_in_batch = num_items_in_batch.to(loss.device)
             loss = loss / num_items_in_batch
         return loss, logits
+
+
+class FLAForCausalLM(FLAPreTrainedModel):
+
+    def get_decoder(self):
+        return self.model
+
+    def set_decoder(self, decoder):
+        self.model = decoder
