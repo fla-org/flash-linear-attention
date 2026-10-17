@@ -11,8 +11,18 @@ import pytest
 import torch
 from transformers.generation import GenerationMixin
 
-from fla.models import generation_utils
+from fla.models import GLAConfig, GLAForCausalLM
+from fla.models.cache_utils import Cache
 from fla.models.generation_utils import FLAGenerationMixin, FLAUnsupportedCacheGenerationMixin
+
+
+@pytest.fixture
+def preparation_model():
+    model = FLAGenerationMixin()
+    model.config = SimpleNamespace(is_encoder_decoder=False)
+    model.device = torch.device('cpu')
+    model.is_remote_code = lambda: False
+    return model
 
 
 class _Cache:
@@ -95,7 +105,8 @@ def test_generate_preserves_unrelated_attribute_errors():
     ],
 )
 def test_prepare_inputs_for_generation(
-    with_cache_position, past_length, input_length, with_embeds, next_length, first_iteration, expected_key, expected_length,
+    preparation_model, with_cache_position, past_length, input_length, with_embeds, next_length,
+    first_iteration, expected_key, expected_length,
 ):
     input_ids = torch.arange(2 * input_length).reshape(2, input_length) if input_length is not None else None
     inputs_embeds = torch.arange(96, dtype=torch.float32).reshape(2, 6, 8) if with_embeds else None
@@ -113,80 +124,63 @@ def test_prepare_inputs_for_generation(
         next_sequence_length=next_length,
         is_first_iteration=first_iteration,
     )
-    result = FLAGenerationMixin().prepare_inputs_for_generation(**arguments)
+    result = preparation_model.prepare_inputs_for_generation(**arguments)
     expected = inputs_embeds if expected_key == 'inputs_embeds' else input_ids
     torch.testing.assert_close(result[expected_key], expected[:, -expected_length:])
-    assert result['input_ids' if expected_key == 'inputs_embeds' else 'inputs_embeds'] is None
-    assert result['past_key_values'] is cache
+    assert result.get('input_ids' if expected_key == 'inputs_embeds' else 'inputs_embeds') is None
+    assert result.get('past_key_values') is cache
     assert result['attention_mask'] is attention_mask
     assert result['use_cache'] == (cache is not None)
     assert result['logits_to_keep'] == 1
     if expected_key == 'input_ids':
         assert result['input_ids'].is_contiguous()
-    if generation_utils.supports_transformers_next_sequence_length():
-        reference = GenerationMixin.prepare_inputs_for_generation(
-            SimpleNamespace(
-                config=SimpleNamespace(is_encoder_decoder=False),
-                device=torch.device('cpu'),
-                is_remote_code=lambda: False,
-            ),
-            **arguments,
-        )
-        torch.testing.assert_close(result[expected_key], reference[expected_key])
-
-
-@pytest.mark.parametrize('cache_positions', [False, True], ids=['legacy', 'cache-positions'])
-@pytest.mark.parametrize('past_length', [None, 0, 4], ids=['no-cache', 'empty-cache', 'populated-cache'])
-@pytest.mark.parametrize('with_embeds', [False, True], ids=['ids', 'embeds'])
-def test_prepare_inputs_for_generation_legacy(monkeypatch, cache_positions, past_length, with_embeds):
-    monkeypatch.setattr(generation_utils, 'supports_transformers_next_sequence_length', lambda: False)
-    monkeypatch.setattr(generation_utils, 'check_transformers_version', lambda _: cache_positions)
-    input_ids = torch.arange(12).reshape(2, 6)
-    inputs_embeds = torch.arange(96, dtype=torch.float32).reshape(2, 6, 8) if with_embeds else None
-    cache = _Cache(past_length) if past_length is not None else None
-    positions = torch.tensor([5]) if past_length else torch.arange(6)
-    result = FLAGenerationMixin().prepare_inputs_for_generation(
-        input_ids=input_ids,
-        past_key_values=cache,
-        inputs_embeds=inputs_embeds,
-        cache_position=positions if cache_positions else None,
+    reference = GenerationMixin.prepare_inputs_for_generation(
+        SimpleNamespace(
+            config=SimpleNamespace(is_encoder_decoder=False),
+            device=torch.device('cpu'),
+            is_remote_code=lambda: False,
+        ),
+        **arguments,
     )
-    if with_embeds and not past_length:
-        assert result['input_ids'] is None
-        torch.testing.assert_close(result['inputs_embeds'], inputs_embeds)
-    else:
-        assert result['inputs_embeds'] is None
-        torch.testing.assert_close(result['input_ids'], input_ids[:, -1:] if past_length else input_ids)
-    assert result.get('cache_position') is (positions if cache_positions else None)
+    torch.testing.assert_close(result[expected_key], reference[expected_key])
 
 
-@pytest.mark.skipif(
-    not generation_utils.supports_transformers_next_sequence_length(),
-    reason='Requires the upstream sequence-length generation protocol.',
-)
-def test_prepare_inputs_for_generation_decode_without_cache():
+def test_prepare_inputs_for_generation_decode_without_cache(preparation_model):
     input_ids = torch.arange(14).reshape(2, 7)
-    result = FLAGenerationMixin().prepare_inputs_for_generation(
+    result = preparation_model.prepare_inputs_for_generation(
         input_ids=input_ids,
         inputs_embeds=torch.arange(96, dtype=torch.float32).reshape(2, 6, 8),
         use_cache=False,
     )
     torch.testing.assert_close(result['input_ids'], input_ids)
-    assert result['inputs_embeds'] is None
+    assert result.get('inputs_embeds') is None
 
 
-@pytest.mark.skipif(
-    generation_utils.supports_transformers_next_sequence_length() or not generation_utils.check_transformers_version('4.56'),
-    reason='Requires the upstream cache-position generation protocol.',
-)
-@pytest.mark.parametrize(('input_length', 'embed_length'), [(0, 6), (6, 2)], ids=['full-embeds', 'new-embeds'])
-def test_prepare_inputs_for_generation_legacy_cached_embeds(input_length, embed_length):
-    inputs_embeds = torch.arange(2 * embed_length * 8, dtype=torch.float32).reshape(2, embed_length, 8)
-    result = FLAGenerationMixin().prepare_inputs_for_generation(
-        input_ids=torch.arange(2 * input_length).reshape(2, input_length),
-        past_key_values=_Cache(4),
+@pytest.mark.parametrize('first_iteration', [False, True])
+def test_cached_generation_selects_new_prompt_inputs(first_iteration):
+    torch.manual_seed(42)
+    model = GLAForCausalLM(GLAConfig(hidden_size=32, num_hidden_layers=0, vocab_size=32, fuse_norm=False))
+    cache = Cache()
+    cache.update(recurrent_state=torch.zeros(2, 1, 4, 4), offset=4)
+    input_ids = torch.arange(14).reshape(2, 7)
+    inputs_embeds = model.get_input_embeddings()(input_ids)
+    attention_mask = torch.ones_like(input_ids)
+    cu_seqlens = torch.tensor([0, 3, 6], dtype=torch.int32)
+    prepared = model.prepare_inputs_for_generation(
+        input_ids=input_ids,
+        past_key_values=cache,
+        attention_mask=attention_mask,
         inputs_embeds=inputs_embeds,
-        cache_position=torch.arange(4, 6),
+        next_sequence_length=3,
+        is_first_iteration=first_iteration,
+        cu_seqlens=cu_seqlens,
     )
-    assert result['input_ids'] is None
-    torch.testing.assert_close(result['inputs_embeds'], inputs_embeds[:, -2:])
+    if first_iteration:
+        assert prepared['input_ids'] is None
+        torch.testing.assert_close(prepared['inputs_embeds'], inputs_embeds[:, -3:])
+    else:
+        torch.testing.assert_close(prepared['input_ids'], input_ids[:, -3:])
+        assert prepared.get('inputs_embeds') is None
+    assert prepared['attention_mask'] is attention_mask
+    assert prepared['past_key_values'] is cache
+    assert prepared['cu_seqlens'] is cu_seqlens

@@ -148,7 +148,7 @@ def test_split_wheels_match_release_contract(tmp_path: Path) -> None:
     assert str(core_requires['einops'].specifier) == ''
     assert _base_requirement_names(ext_wheel) == {'fla-core', 'transformers'}
     assert str(ext_requires['fla-core'].specifier) == f'=={version}'
-    assert str(ext_requires['transformers'].specifier) == '>=4.52.4'
+    assert str(ext_requires['transformers'].specifier) == '<6,>=5.6.2'
 
 
 def test_core_then_extension_install_sequence_without_runtime_deps(tmp_path: Path) -> None:

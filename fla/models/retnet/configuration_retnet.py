@@ -9,12 +9,12 @@ from __future__ import annotations
 
 import warnings
 
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
 from fla.models.modeling_layers import AttentionConfig, AttentionConfigBase
 
 
-class RetNetConfig(AttentionConfigBase, PretrainedConfig):
+class RetNetConfig(AttentionConfigBase, PreTrainedConfig):
 
     model_type = 'retnet'
     keys_to_ignore_at_inference = ['past_key_values']

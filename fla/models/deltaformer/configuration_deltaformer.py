@@ -9,12 +9,12 @@ from __future__ import annotations
 
 import warnings
 
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
 from fla.models.modeling_layers import AttentionConfig, AttentionConfigBase
 
 
-class DeltaFormerConfig(AttentionConfigBase, PretrainedConfig):
+class DeltaFormerConfig(AttentionConfigBase, PreTrainedConfig):
     model_type = 'deltaformer'
     keys_to_ignore_at_inference = ['past_key_values']
 

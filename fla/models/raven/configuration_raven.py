@@ -10,12 +10,12 @@
 
 import warnings
 
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
 from fla.models.modeling_layers import AttentionConfig, AttentionConfigBase
 
 
-class RavenConfig(AttentionConfigBase, PretrainedConfig):
+class RavenConfig(AttentionConfigBase, PreTrainedConfig):
 
     model_type = 'raven'
     keys_to_ignore_at_inference = ['past_key_values']

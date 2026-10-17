@@ -7,36 +7,27 @@
 
 from __future__ import annotations
 
-import inspect
 from typing import Any
 
 import torch
-import transformers
-from packaging import version
 from transformers.cache_utils import Cache as HFCacheBase
-
-_TRANSFORMERS_VERSION = transformers.__version__
-_LEGACY_CACHE_VERSION = "4.53.3"
-
-if version.parse(_TRANSFORMERS_VERSION) > version.parse(_LEGACY_CACHE_VERSION):
-    from transformers.cache_utils import CacheLayerMixin
-else:
-    CacheLayerMixin = object
+from transformers.cache_utils import CacheLayerMixin
 
 
 class FLALayer(CacheLayerMixin):
     """Store recurrent, attention, convolution, and auxiliary state for one layer."""
 
-    is_compileable = True
+    is_compileable = False
     is_sliding = False
 
     def __init__(self):
         super().__init__()
         self.state = None
         self._seen_tokens = 0
+        self.window_size = None
 
-    def lazy_initialization(self, key_states: torch.Tensor):
-        self.state = None
+    def lazy_initialization(self, key_states: torch.Tensor, value_states: torch.Tensor | None = None):
+        self.device = key_states.device
 
     def update(
         self,
@@ -51,7 +42,9 @@ class FLALayer(CacheLayerMixin):
     ) -> dict[str, Any]:
         if cache_kwargs is None:
             cache_kwargs = {}
-        window_size = cache_kwargs.get("window_size")
+        window_size = cache_kwargs.get("window_size", self.window_size)
+        self.window_size = window_size
+        self.is_sliding = window_size is not None
 
         if attn_state is not None and not isinstance(attn_state, (tuple, list)):
             raise ValueError("`attn_state` must be a tuple/list of tensors")
@@ -129,6 +122,7 @@ class FLALayer(CacheLayerMixin):
                 break
 
         self._seen_tokens += input_length if has_attn_state else offset
+        self.is_initialized = True
 
         return self.state
 
@@ -141,36 +135,67 @@ class FLALayer(CacheLayerMixin):
     def get_max_cache_shape(self) -> int:
         return self.get_max_length()
 
-    def get_mask_sizes(self, cache_position: torch.Tensor) -> tuple[int, int]:
-        return 0, 0
+    def get_mask_sizes(self, query_length: int) -> tuple[int, int]:
+        cached_length = self._seen_tokens
+        if self.window_size is not None:
+            cached_length = min(cached_length, self.window_size - 1)
+        return cached_length + query_length, self._seen_tokens - cached_length
+
+    def _map_state(self, function):
+        def apply(value):
+            if isinstance(value, torch.Tensor):
+                return function(value)
+            if isinstance(value, dict):
+                return {key: apply(item) for key, item in value.items()}
+            if isinstance(value, tuple):
+                return tuple(apply(item) for item in value)
+            if isinstance(value, list):
+                return [apply(item) for item in value]
+            if value is None or isinstance(value, (int, float, bool, str)):
+                return value
+            raise NotImplementedError(f"Cache transformations are not supported for {type(value).__name__} states.")
+
+        return apply(self.state)
+
+    def reorder_cache(self, beam_idx: torch.LongTensor) -> None:
+        self.state = self._map_state(lambda value: value.index_select(0, beam_idx.to(value.device)))
+
+    def batch_repeat_interleave(self, repeats: int) -> None:
+        self.state = self._map_state(lambda value: value.repeat_interleave(repeats, dim=0))
+
+    def batch_select_indices(self, indices: torch.Tensor) -> None:
+        self.reorder_cache(indices)
+
+    def _validate_crop(self, max_length: int) -> int:
+        if max_length < 0:
+            max_length = max(0, self._seen_tokens + max_length)
+        if max_length >= self._seen_tokens:
+            return self._seen_tokens
+        if self.state is not None and any(self.state.get(key) is not None for key in (
+            "recurrent_state", "conv_state", "ffn_state",
+        )):
+            raise NotImplementedError("Recurrent cache rollback requires saved intermediate states.")
+        if self.window_size is not None and self._seen_tokens > self.window_size:
+            raise NotImplementedError("Cannot roll back a sliding-window cache after earlier tokens were discarded.")
+        return max_length
+
+    def crop(self, max_length: int) -> None:
+        max_length = self._validate_crop(max_length)
+        if self.state is not None and self.state["attn_state"] is not None:
+            self.state["attn_state"] = tuple(value[:, :max_length] for value in self.state["attn_state"])
+        self._seen_tokens = max_length
 
     def offload(self):
-        self._move_states(device='cpu')
+        self.state = self._map_state(lambda value: value.to("cpu", non_blocking=True))
 
     def prefetch(self):
-        self._move_states(device=None)
-
-    def _move_states(self, device: torch.device | str | None):
-        if self.state is None:
-            return
-
-        def move_tensor(state):
-            if isinstance(state, torch.Tensor):
-                return state.to(device=self.device if device is None else device, non_blocking=True)
-            return state
-
-        for name in ('recurrent_state', 'attn_state', 'conv_state', 'ffn_state'):
-            state = self.state.get(name)
-            if state is None:
-                continue
-            if isinstance(state, (tuple, list)):
-                self.state[name] = tuple(move_tensor(tensor) for tensor in state)
-            else:
-                self.state[name] = move_tensor(state)
+        if self.state is not None:
+            self.state = self._map_state(lambda value: value.to(self.device, non_blocking=True))
 
     def reset(self):
         self.state = None
         self._seen_tokens = 0
+        self.is_initialized = False
 
 
 class LegacyFLACache(HFCacheBase):
@@ -179,10 +204,10 @@ class LegacyFLACache(HFCacheBase):
     Recurrent state shapes follow the owning layer, including V-first layouts.
     """
 
-    is_compileable = True
+    is_compileable = False
 
     def __init__(self, seen_tokens: int = 0) -> None:
-        super().__init__()
+        super().__init__(layers=[])
 
         self.states: list[dict[str, Any]] = []
 
@@ -337,21 +362,12 @@ class FLACache(HFCacheBase):
     Recurrent state shapes follow the owning layer, including V-first layouts.
     """
 
-    is_compileable = True
+    is_compileable = False
 
     def __init__(self, seen_tokens: int = 0, **kwargs):
-        parameters = inspect.signature(super().__init__).parameters
-        if 'layer_class_to_replicate' in parameters:
-            self.use_layer_class_to_replicate = True
-            super().__init__(layer_class_to_replicate=FLALayer, **kwargs)
-        elif 'layer_classes' in parameters:
-            self.use_layer_class_to_replicate = False
-            super().__init__(layer_classes=FLALayer, **kwargs)
-        else:
-            raise TypeError(
-                "FLA cache initialization failed: HFCacheBase.__init__ accepts neither "
-                "'layer_class_to_replicate' nor 'layer_classes'. This Transformers version does not support layer caches.",
-            )
+        if kwargs.get("offloading", False):
+            raise NotImplementedError("Automatic cache offloading is not supported by FLA models.")
+        super().__init__(layer_class_to_replicate=FLALayer, **kwargs)
         self._seen_tokens = int(seen_tokens)
 
     def update(
@@ -364,11 +380,8 @@ class FLACache(HFCacheBase):
         offset: int | None = 1,
         cache_kwargs: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        if not self.use_layer_class_to_replicate:
-            self.append_new_layers(layer_idx)
-        else:
-            while len(self.layers) <= layer_idx:
-                self.layers.append(self.layer_class_to_replicate())
+        while len(self.layers) <= layer_idx:
+            self.layers.append(self.layer_class_to_replicate())
 
         return self.layers[layer_idx].update(
             recurrent_state=recurrent_state,
@@ -402,10 +415,29 @@ class FLACache(HFCacheBase):
     def get_max_cache_shape(self, layer_idx: int = 0) -> int:
         return self.get_max_length(layer_idx)
 
-    def get_mask_sizes(self, cache_position: torch.Tensor, layer_idx: int) -> tuple[int, int]:
-        query_length = int(cache_position.shape[0]) if cache_position is not None else 0
-        kv_length = int(self.get_seq_length(layer_idx)) + query_length
-        return kv_length, 0
+    def get_mask_sizes(self, query_length: int, layer_idx: int) -> tuple[int, int]:
+        if layer_idx >= len(self.layers):
+            return query_length, 0
+        return self.layers[layer_idx].get_mask_sizes(query_length)
+
+    def _transform_states(self, function):
+        states = [layer._map_state(function) for layer in self.layers]
+        for layer, state in zip(self.layers, states, strict=True):
+            layer.state = state
+
+    def reorder_cache(self, beam_idx: torch.LongTensor) -> None:
+        self._transform_states(lambda value: value.index_select(0, beam_idx.to(value.device)))
+
+    def batch_repeat_interleave(self, repeats: int) -> None:
+        self._transform_states(lambda value: value.repeat_interleave(repeats, dim=0))
+
+    def batch_select_indices(self, indices: torch.Tensor) -> None:
+        self.reorder_cache(indices)
+
+    def crop(self, max_length: int) -> None:
+        lengths = [layer._validate_crop(max_length) for layer in self.layers]
+        for layer, length in zip(self.layers, lengths, strict=True):
+            layer.crop(length)
 
     def reset(self):
         # retain layer objects for Transformers cache compatibility
@@ -424,25 +456,23 @@ class FLACache(HFCacheBase):
         seen_tokens: int = 0,
         **kwargs,
     ) -> FLACache:
+        if isinstance(past_key_values, cls):
+            return past_key_values
+        if hasattr(past_key_values, "states"):
+            seen_tokens = past_key_values.get_seq_length()
+            past_key_values = past_key_values.states
+        if past_key_values is not None and not isinstance(past_key_values, (list, tuple)):
+            raise TypeError("Expected an FLA cache or a sequence of FLA state dictionaries.")
         cache = cls(seen_tokens=seen_tokens, **kwargs)
-        if isinstance(past_key_values, (list, tuple)):
-            for layer_idx, state in enumerate(past_key_values):
-                while len(cache.layers) <= layer_idx:
-                    if cache.use_layer_class_to_replicate:
-                        cache.layers.append(cache.layer_class_to_replicate())
-                    else:
-                        cache.append_new_layers(layer_idx)
-                cache.layers[layer_idx].state = dict(state)
-                # legacy cache tracks seen token globally but FLACache stores per layer
-                cache.layers[layer_idx]._seen_tokens = int(seen_tokens)
+        for state in past_key_values or ():
+            layer = FLALayer()
+            if state is not None:
+                layer.update(**state, offset=0)
+                layer.state = dict(state)
+            layer._seen_tokens = int(seen_tokens)
+            cache.layers.append(layer)
         return cache
 
 
-if version.parse(_TRANSFORMERS_VERSION) > version.parse(_LEGACY_CACHE_VERSION):
-    class Cache(FLACache):
-        def __init__(self, seen_tokens: int = 0, **kwargs: Any) -> None:
-            super().__init__(seen_tokens=seen_tokens, **kwargs)
-else:
-    class Cache(LegacyFLACache):
-        def __init__(self, seen_tokens: int = 0, **kwargs: Any) -> None:
-            super().__init__(seen_tokens=seen_tokens)
+class Cache(FLACache):
+    """Cache shared by FLA model and layer APIs."""

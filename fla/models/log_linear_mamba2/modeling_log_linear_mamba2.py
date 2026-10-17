@@ -10,7 +10,6 @@ import math
 import torch
 from torch import nn
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
-from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
 from transformers.utils.deprecation import deprecate_kwarg
 
@@ -18,6 +17,7 @@ from fla.layers.log_linear_mamba2 import LogLinearMamba2
 from fla.models.cache_utils import Cache
 from fla.models.generation_utils import FLAGenerationMixin
 from fla.models.log_linear_mamba2.configuration_log_linear_mamba2 import LogLinearMamba2Config
+from fla.models.modeling_utils import FLAPreTrainedModel
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, GatedMLP, RMSNorm
 from fla.ops.attnres import fused_attnres
 
@@ -148,7 +148,7 @@ class LogLinearMamba2Block(nn.Module):
         return hidden_states, attentions, past_key_values, attnres_states
 
 
-class LogLinearMamba2PreTrainedModel(PreTrainedModel, FLAGenerationMixin):
+class LogLinearMamba2PreTrainedModel(FLAPreTrainedModel, FLAGenerationMixin):
     """
     An abstract class to handle weights initialization and a simple interface for downloading and loading pretrained
     models.
@@ -330,7 +330,7 @@ class LogLinearMamba2Model(LogLinearMamba2PreTrainedModel):
             use_cache = False
             past_key_values = None
         return_dict = (
-            return_dict if return_dict is not None else self.config.use_return_dict
+            return_dict if return_dict is not None else self.config.return_dict
         )
 
         if (input_ids is None) ^ (inputs_embeds is not None):
@@ -407,8 +407,8 @@ class LogLinearMamba2Model(LogLinearMamba2PreTrainedModel):
         )
 
 
-class LogLinearMamba2ForCausalLM(LogLinearMamba2PreTrainedModel):
-    _tied_weights_keys = []
+class LogLinearMamba2ForCausalLM(LogLinearMamba2PreTrainedModel, FLAGenerationMixin):
+    _tied_weights_keys = {"lm_head.weight": "backbone.embeddings.weight"}
 
     def __init__(self, config):
         super().__init__(config)
@@ -447,7 +447,7 @@ class LogLinearMamba2ForCausalLM(LogLinearMamba2PreTrainedModel):
         **kwargs,
     ) -> tuple | CausalLMOutputWithPast:
         return_dict = (
-            return_dict if return_dict is not None else self.config.use_return_dict
+            return_dict if return_dict is not None else self.config.return_dict
         )
 
         outputs = self.backbone(

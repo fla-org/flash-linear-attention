@@ -7,12 +7,12 @@
 
 import warnings
 
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
 from fla.models.modeling_layers import AttentionConfig, AttentionConfigBase
 
 
-class HGRNConfig(AttentionConfigBase, PretrainedConfig):
+class HGRNConfig(AttentionConfigBase, PreTrainedConfig):
 
     model_type = 'hgrn'
     keys_to_ignore_at_inference = ['past_key_values']

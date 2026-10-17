@@ -15,7 +15,6 @@ import torch
 import torch.nn as nn
 from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
-from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
 from transformers.utils.deprecation import deprecate_kwarg
 
@@ -23,6 +22,7 @@ from fla.layers.rwkv6 import LerpLinear, RWKV6Attention
 from fla.models.cache_utils import Cache
 from fla.models.generation_utils import FLAUnsupportedCacheGenerationMixin
 from fla.models.modeling_layers import get_attention
+from fla.models.modeling_utils import FLAPreTrainedModel
 from fla.models.rwkv6.configuration_rwkv6 import RWKV6Config
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, LayerNorm
 from fla.modules.activations import ACT2FN
@@ -179,7 +179,7 @@ class RWKV6Block(GradientCheckpointingLayer):
         return outputs
 
 
-class RWKV6PreTrainedModel(PreTrainedModel):
+class RWKV6PreTrainedModel(FLAPreTrainedModel):
 
     config_class = RWKV6Config
     base_model_prefix = 'model'
@@ -275,7 +275,7 @@ class RWKV6Model(RWKV6PreTrainedModel):
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         use_cache = use_cache if use_cache is not None else (self.config.use_cache if not self.training else False)
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = return_dict if return_dict is not None else self.config.return_dict
 
         # retrieve input_ids and inputs_embeds
         if input_ids is not None and inputs_embeds is not None:
@@ -327,7 +327,7 @@ class RWKV6Model(RWKV6PreTrainedModel):
 
 class RWKV6ForCausalLM(RWKV6PreTrainedModel, FLAUnsupportedCacheGenerationMixin):
 
-    _tied_weights_keys = ["lm_head.weight"]
+    _tied_weights_keys = {"lm_head.weight": "model.embeddings.weight"}
 
     def __init__(self, config):
         super().__init__(config)
@@ -376,7 +376,7 @@ class RWKV6ForCausalLM(RWKV6PreTrainedModel, FLAUnsupportedCacheGenerationMixin)
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = return_dict if return_dict is not None else self.config.return_dict
 
         outputs = self.model(
             input_ids=input_ids,

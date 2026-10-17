@@ -5,17 +5,13 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-import inspect
 import pickle
 
 import pytest
 import torch
-from transformers.cache_utils import Cache as HFCacheBase
 
 from fla.models.cache_utils import Cache, FLACache, FLALayer, LegacyFLACache
 from fla.utils import device_name
-
-_HAS_LAYER_CACHE = bool({'layer_class_to_replicate', 'layer_classes'} & inspect.signature(HFCacheBase).parameters.keys())
 
 
 @pytest.fixture(autouse=True)
@@ -38,12 +34,6 @@ def _assert_attn_state_tokens(attn_state, expected_tokens: torch.Tensor):
 
     torch.testing.assert_close(attn_state[0], expected_key)
     torch.testing.assert_close(attn_state[1], expected_value)
-
-
-def _new_cache(cache_class):
-    if issubclass(cache_class, FLACache) != _HAS_LAYER_CACHE:
-        pytest.skip(f'{cache_class.__name__} requires a different Transformers cache constructor.')
-    return cache_class()
 
 
 def _raw_legacy_cache():
@@ -71,7 +61,7 @@ def test_cache_per_layer_seq_length(
     num_heads: int,
 ):
     """Each layer advances its own token counter: https://github.com/fla-org/flash-linear-attention/issues/747."""
-    cache = _new_cache(FLACache)
+    cache = FLACache()
     head_dim = hidden_size // num_heads
 
     for layer_idx in range(num_layers):
@@ -116,7 +106,7 @@ def test_cache_incremental_update(
     hidden_size: int,
     num_heads: int,
 ):
-    cache = _new_cache(FLACache)
+    cache = FLACache()
     head_dim = hidden_size // num_heads
 
     for chunk_idx in range(num_chunks):
@@ -138,7 +128,7 @@ def test_cache_incremental_update(
 
 def test_cache_get_seq_length_nonexistent_layer():
     """Missing layers report zero; a `None` index addresses the first layer."""
-    cache = _new_cache(FLACache)
+    cache = FLACache()
 
     assert cache.get_seq_length(0) == 0
     assert cache.get_seq_length(5) == 0
@@ -164,7 +154,7 @@ def test_legacy_cache_update_defaults_none_offset():
 
 def test_cache_window_size_does_not_undercount():
     """Window eviction preserves the total processed-token count."""
-    cache = _new_cache(FLACache)
+    cache = FLACache()
     batch_size, seq_len, num_heads, head_dim = 1, 100, 4, 16
     window_size = 10
 
@@ -190,7 +180,7 @@ def test_cache_window_size_does_not_undercount():
     ],
 )
 def test_cache_window_overflow_keeps_tail(cache_class, first_len: int, second_len: int, window_size: int):
-    cache = _new_cache(cache_class)
+    cache = cache_class()
 
     first_state = _make_attn_state(0, first_len)
     second_state = _make_attn_state(first_len, second_len)
@@ -246,7 +236,7 @@ def test_fla_layer_empty_state_offload_and_prefetch(state):
     layer.state = state
     layer.offload()
     layer.prefetch()
-    assert layer.state is state
+    assert layer.state == state
 
 
 @pytest.mark.parametrize(
@@ -292,7 +282,7 @@ def test_fla_layer_reset():
 
 @pytest.mark.parametrize("cache_class", [FLACache, LegacyFLACache])
 def test_cache_reset(cache_class):
-    cache = _new_cache(cache_class)
+    cache = cache_class()
     for layer_idx in range(2):
         cache.update(
             attn_state=_make_attn_state(layer_idx * 10, 3),
@@ -313,7 +303,6 @@ def test_cache_reset(cache_class):
         assert len(cache) == 0
 
 
-@pytest.mark.skipif(not _HAS_LAYER_CACHE, reason='Requires the Transformers cache-layer constructor.')
 def test_cache_from_legacy_preserves_seen_tokens():
     seen_tokens = 17
     legacy_state = {
@@ -332,7 +321,7 @@ def test_cache_from_legacy_preserves_seen_tokens():
 @pytest.mark.parametrize('module_name', ['fla.models.utils', 'fla.models.cache_utils'], ids=['legacy', 'canonical'])
 @pytest.mark.parametrize('cache_class', [Cache, FLACache, LegacyFLACache])
 def test_cache_pickle_preserves_states(monkeypatch, module_name, cache_class):
-    cache = _new_cache(cache_class)
+    cache = cache_class()
     recurrent_state = (torch.arange(24).reshape(1, 2, 3, 4), torch.arange(6).reshape(1, 2, 3))
     cache.update(recurrent_state=recurrent_state, attn_state=_make_attn_state(10, 4), layer_idx=0, offset=4)
 
@@ -393,7 +382,7 @@ def test_cache_decode_all_layers_see_same_past_length(
     num_heads: int,
 ):
     """Each layer sees the same pre-update RoPE offset: https://github.com/fla-org/flash-linear-attention/issues/766."""
-    cache = _new_cache(FLACache)
+    cache = FLACache()
     head_dim = hidden_size // num_heads
 
     initial_seq_len = 5
@@ -452,7 +441,7 @@ def test_legacy_cache_decode_all_layers_see_same_past_length(
     num_heads: int,
 ):
     """The legacy counter advances after the last layer: https://github.com/fla-org/flash-linear-attention/issues/766."""
-    cache = _new_cache(LegacyFLACache)
+    cache = LegacyFLACache()
 
     head_dim = hidden_size // num_heads
 
@@ -497,13 +486,12 @@ def test_legacy_cache_decode_all_layers_see_same_past_length(
 )
 def test_cache_incremental_decode_consistency(num_decode_steps: int, num_layers: int):
     """Every layer starts each decoding step at the same offset."""
-    cache = _new_cache(FLACache)
+    cache = FLACache()
     batch_size, seq_len, num_heads, head_dim = 1, 1, 4, 16
 
     observed_lengths_per_step = []
 
-    for decode_step in range(num_decode_steps):
-        expected_past_len = decode_step
+    for _ in range(num_decode_steps):
         observed_this_step = []
 
         for layer_idx in range(num_layers):
@@ -550,7 +538,7 @@ def test_per_layer_independent_counter_regression():
 
 def test_rope_offset_consistency_simulation_regression():
     """Layers use matching RoPE offsets when processing the same token."""
-    cache = _new_cache(FLACache)
+    cache = FLACache()
     batch_size, num_heads, head_dim = 1, 4, 16
     num_layers = 8
     prompt_len = 10
@@ -582,3 +570,67 @@ def test_rope_offset_consistency_simulation_regression():
         f"This means the same token gets different position encodings at different layers!"
     )
     assert rope_offsets[0] == prompt_len
+
+
+@pytest.mark.parametrize('operation', ['reorder', 'repeat', 'select'])
+def test_cache_batch_operations_preserve_nested_states(operation):
+    cache = FLACache()
+    state = torch.arange(12).reshape(3, 2, 2)
+    cache.update(recurrent_state=state, conv_state=(state + 20, [state + 40]), offset=5)
+    cache.update(attn_state=(state[:, :, None], state[:, :, None] + 60), layer_idx=1)
+    indices = torch.tensor([2, 0, 2])
+    if operation == 'repeat':
+        cache.batch_repeat_interleave(2)
+        indices = torch.arange(3).repeat_interleave(2)
+    elif operation == 'select':
+        cache.batch_select_indices(indices)
+    else:
+        cache.reorder_cache(indices)
+    torch.testing.assert_close(cache[0]['recurrent_state'], state[indices])
+    torch.testing.assert_close(cache[0]['conv_state'][0], state[indices] + 20)
+    torch.testing.assert_close(cache[0]['conv_state'][1][0], state[indices] + 40)
+    torch.testing.assert_close(cache[1]['attn_state'][0], state[indices, :, None])
+    assert cache.get_seq_length(0) == 5
+    assert cache.get_seq_length(1) == 2
+
+
+def test_cache_rejects_recurrent_rollback_before_changing_other_layers():
+    cache = FLACache()
+    keys = torch.randn(2, 4, 1, 3)
+    recurrent = torch.randn(2, 1, 3, 3)
+    cache.update(attn_state=(keys, keys))
+    cache.update(recurrent_state=recurrent, layer_idx=1, offset=4)
+    with pytest.raises(NotImplementedError, match='rollback'):
+        cache.crop(2)
+    assert cache[0]['attn_state'][0] is keys
+    assert cache[1]['recurrent_state'] is recurrent
+    assert cache.get_seq_length(0) == cache.get_seq_length(1) == 4
+
+
+def test_cache_attention_crop_and_mask_sizes():
+    cache = FLACache()
+    keys = torch.randn(2, 7, 1, 3)
+    cache.update(attn_state=(keys, keys))
+    cache.crop(-2)
+    assert cache.get_mask_sizes(query_length=3, layer_idx=0) == (8, 0)
+    torch.testing.assert_close(cache[0]['attn_state'][0], keys[:, :5])
+
+    sliding = FLACache()
+    sliding.update(attn_state=(keys, keys), cache_kwargs={'window_size': 4})
+    assert sliding.get_mask_sizes(query_length=3, layer_idx=0) == (6, 4)
+    with pytest.raises(NotImplementedError, match='sliding-window'):
+        sliding.crop(5)
+    assert sliding.get_seq_length() == 7
+
+
+@pytest.mark.parametrize('seen_tokens', [0, 5])
+def test_cache_legacy_conversion_keeps_device_for_prefetch(seen_tokens):
+    cache = FLACache()
+    state = torch.randn(2, 3, 4, device=device_name)
+    cache.update(recurrent_state=state, offset=seen_tokens)
+    restored = FLACache.from_legacy_cache(cache.to_legacy_cache(), seen_tokens=seen_tokens)
+    restored.layers[0].offload()
+    restored.layers[0].prefetch()
+    assert restored[0]['recurrent_state'].device == state.device
+    torch.testing.assert_close(restored[0]['recurrent_state'], state)
+    assert restored.get_seq_length() == seen_tokens

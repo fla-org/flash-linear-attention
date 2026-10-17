@@ -1,0 +1,33 @@
+name: Model API compatibility
+
+on:
+  pull_request:
+    paths:
+      - 'fla/models/**'
+      - 'fla/layers/**'
+      - 'tests/models/**'
+      - 'pyproject.toml'
+      - '.github/workflows/model-api-compatibility.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  model-api:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        transformers: ['==5.6.2', '>=5.6.2,<6']
+    steps:
+      - uses: actions/checkout@v7.0.0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install CPU test dependencies
+        run: |
+          pip install torch==2.7.0 --index-url https://download.pytorch.org/whl/cpu
+          pip install -e '.[cpu,test]' 'transformers${{ matrix.transformers }}' setuptools wheel
+      - name: Check model registration, checkpoints, caches, and generation
+        run: python -m pytest tests/models/test_transformers.py tests/models/test_cache.py tests/models/test_generation_utils.py tests/test_split_package_release.py -q

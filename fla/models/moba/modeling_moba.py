@@ -15,7 +15,6 @@ import torch
 import torch.nn as nn
 from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
-from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
 from transformers.utils.deprecation import deprecate_kwarg
 
@@ -23,6 +22,7 @@ from fla.layers.moba import MoBA
 from fla.models.cache_utils import Cache
 from fla.models.generation_utils import FLAUnsupportedCacheGenerationMixin
 from fla.models.moba.configuration_moba import MoBAConfig
+from fla.models.modeling_utils import FLAPreTrainedModel
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
 from fla.modules import GatedMLP as MoBAMLP
 from fla.modules.l2warp import l2_warp
@@ -155,7 +155,7 @@ class MoBABlock(GradientCheckpointingLayer):
         return outputs
 
 
-class MoBAPreTrainedModel(PreTrainedModel):
+class MoBAPreTrainedModel(FLAPreTrainedModel):
 
     config_class = MoBAConfig
     base_model_prefix = 'model'
@@ -246,7 +246,7 @@ class MoBAModel(MoBAPreTrainedModel):
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         use_cache = use_cache if use_cache is not None else (self.config.use_cache if not self.training else False)
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = return_dict if return_dict is not None else self.config.return_dict
 
         if input_ids is not None and inputs_embeds is not None:
             raise ValueError("You cannot specify both input_ids and inputs_embeds at the same time")
@@ -308,7 +308,7 @@ class MoBAModel(MoBAPreTrainedModel):
 
 class MoBAForCausalLM(MoBAPreTrainedModel, FLAUnsupportedCacheGenerationMixin):
 
-    _tied_weights_keys = ["lm_head.weight"]
+    _tied_weights_keys = {"lm_head.weight": "model.embeddings.weight"}
 
     def __init__(self, config):
         super().__init__(config)
@@ -356,7 +356,7 @@ class MoBAForCausalLM(MoBAPreTrainedModel, FLAUnsupportedCacheGenerationMixin):
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = return_dict if return_dict is not None else self.config.return_dict
 
         outputs = self.model(
             input_ids=input_ids,

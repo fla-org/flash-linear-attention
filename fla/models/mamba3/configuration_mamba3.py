@@ -7,10 +7,10 @@
 
 import warnings
 
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
 
-class Mamba3Config(PretrainedConfig):
+class Mamba3Config(PreTrainedConfig):
     """
     Configuration for the FLA port of Mamba-3.
 

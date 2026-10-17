@@ -9,10 +9,10 @@
 
 import warnings
 
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
 
-class WallTransformerConfig(PretrainedConfig):
+class WallTransformerConfig(PreTrainedConfig):
 
     model_type = 'wall_transformer'
     keys_to_ignore_at_inference = ['past_key_values']
