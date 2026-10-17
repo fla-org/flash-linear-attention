@@ -14,4 +14,7 @@ __all__ = [
 ]
 
 
-from fla.ops.kda.backends import flash_kda  # noqa: F401
+from fla.backends import register
+from fla.ops.kda.backends import KDATileLangBackend, flash_kda  # noqa: F401
+
+register(chunk_kda)(KDATileLangBackend)
