@@ -6,6 +6,7 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import math
+from contextlib import contextmanager
 
 import pytest
 import torch
@@ -119,7 +120,15 @@ def check_forward(
     output_var.backward(torch.randn_like(output_var))
 
 
+@contextmanager
+def _triton_conv():
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setenv('FLA_CONV_BACKEND', 'triton')
+        yield
+
+
 @torch.no_grad()
+@_triton_conv()
 def check_generation(
     L: int,
     B: int,
@@ -178,6 +187,7 @@ def check_generation(
     assert_close('logits', ref, gen, tol)
 
 
+@_triton_conv()
 def check_generate(
     L: int,
     B: int,

@@ -39,11 +39,6 @@ def make_model():
     return create
 
 
-@pytest.fixture
-def triton_conv(monkeypatch):
-    monkeypatch.setenv('FLA_CONV_BACKEND', 'triton')
-
-
 @pytest.fixture(params=[None, Replicate(), Shard(0)], ids=['tensor', 'replicate', 'shard'])
 def init_layout(request, tmp_path):
     if request.param is None:

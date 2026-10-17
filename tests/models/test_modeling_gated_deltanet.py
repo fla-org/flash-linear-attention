@@ -60,7 +60,6 @@ def test_modeling(
     )
 
 
-@pytest.mark.usefixtures('triton_conv')
 @pytest.mark.parametrize(
     ['L', 'B', 'T', 'H', 'D', 'dtype'],
     [
@@ -81,7 +80,6 @@ def test_generation(
     check_generation(L, B, T, H, D, GatedDeltaNetConfig, dtype)
 
 
-@pytest.mark.usefixtures('triton_conv')
 @pytest.mark.parametrize(
     ['L', 'B', 'T', 'H', 'D', 'dtype'],
     [

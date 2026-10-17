@@ -86,7 +86,6 @@ def test_modeling(
     y.logits.sum().backward()
 
 
-@pytest.mark.usefixtures('triton_conv')
 @pytest.mark.skipif(
     not _mamba3_decode_kernels_available(),
     reason="Mamba-3 decode kernels (cute step_fn / rotary) are not installed.",

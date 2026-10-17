@@ -35,7 +35,6 @@ def test_modeling(
     check_forward(L, B, T, H, D, PrecondKDAConfig, use_l2warp=False, dtype=dtype, varlen=varlen)
 
 
-@pytest.mark.usefixtures('triton_conv')
 @pytest.mark.parametrize(
     ['L', 'B', 'T', 'H', 'D', 'dtype'],
     [

@@ -38,7 +38,6 @@ def test_modeling(checkpoint_level, use_short_conv, varlen):
     )
 
 
-@pytest.mark.usefixtures('triton_conv')
 @pytest.mark.parametrize('use_short_conv', [False, True])
 def test_generation(use_short_conv):
     torch.manual_seed(42)

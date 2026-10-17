@@ -85,7 +85,6 @@ def test_modeling(
     print(f"Test test_modeling passed with H={H}, D={D}, backend={conv_backend}.")
 
 
-@pytest.mark.usefixtures('triton_conv')
 @pytest.mark.parametrize(
     ['L', 'B', 'T', 'H', 'D', 'dtype', 'conv_backend'],
     [

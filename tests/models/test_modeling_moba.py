@@ -71,7 +71,6 @@ def test_modeling(
 # the incremental-decode logits cannot bit-match a reference computed with
 # full-sequence MoBA. Keeping the test wired up so it activates automatically
 # if that constraint ever changes.
-@pytest.mark.usefixtures('triton_conv')
 @pytest.mark.parametrize(
     ['L', 'B', 'T', 'H', 'D', 'dtype'],
     [

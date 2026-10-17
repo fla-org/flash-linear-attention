@@ -54,7 +54,6 @@ def test_modeling(
     )
 
 
-@pytest.mark.usefixtures('triton_conv')
 @pytest.mark.parametrize(
     ['L', 'B', 'T', 'use_forget_gate', 'num_householders', 'dtype'],
     [

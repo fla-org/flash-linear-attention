@@ -78,7 +78,6 @@ def test_forward(config_class, varlen, L, B, T, H, D, use_l2warp, attnres_block_
     )
 
 
-@pytest.mark.usefixtures('triton_conv')
 @pytest.mark.parametrize('config_class', MODEL_CONFIGS, ids=lambda cls: cls.model_type)
 def test_generation(config_class):
     check_generation(L=2, B=4, T=2000, H=8, D=64, config_class=config_class, dtype=torch.float16)
