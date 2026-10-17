@@ -108,6 +108,12 @@ class IsotropicKalmanDeltaNetwork(nn.Module):
         self.omega_min = omega_min
         self.r_min = r_min
         self.info_scale = info_scale
+        if omega_min < 0:
+            raise ValueError(f"`omega_min` must be non-negative, got {omega_min}.")
+        if r_min <= 0:
+            raise ValueError(f"`r_min` must be positive, got {r_min}.")
+        if info_scale is not None and info_scale <= 0:
+            raise ValueError(f"`info_scale` must be positive, got {info_scale}.")
 
         self.head_dim = head_dim
         self.num_heads = num_heads

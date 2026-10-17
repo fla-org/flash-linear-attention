@@ -655,6 +655,10 @@ def iso_kdn_gain(
                 f"The number of initial states is expected to be equal to the number of input sequences, "
                 f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}.",
             )
+    if initial_state is not None:
+        N = B if cu_seqlens is None else len(cu_seqlens) - 1
+        assert initial_state.shape == (N, H), \
+            f"initial_state must have shape [N, H]={[N, H]}, got {list(initial_state.shape)}"
     if info_scale is None:
         info_scale = K
     if not info_scale > 0:

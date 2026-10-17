@@ -125,11 +125,13 @@ def chunk_iso_kdn(
     if kwargs.get('cp_context') is not None:
         raise NotImplementedError("Context parallelism is not supported for IsoKDN yet.")
     for key in ('use_beta_sigmoid_in_kernel', 'allow_neg_eigval', 'safe_gate', 'lower_bound',
-                'return_intermediate_states'):
+                'return_intermediate_states', 'use_graph', 'max_num_seqs'):
         if kwargs.pop(key, False):
             raise ValueError(f"`{key}` is not supported by IsoKDN.")
     if use_gate_in_kernel and A_log is None:
         raise ValueError("`A_log` must be provided when `use_gate_in_kernel=True`.")
+    if initial_state is not None and not (isinstance(initial_state, (tuple, list)) and len(initial_state) == 2):
+        raise TypeError("`initial_state` must be a (memory, precision) pair.")
     h0, c0 = initial_state if initial_state is not None else (None, None)
     if c0 is not None:
         assert c0.dtype == torch.float32, "The initial precision must be in float32."

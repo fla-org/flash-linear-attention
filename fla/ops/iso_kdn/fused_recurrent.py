@@ -29,6 +29,7 @@ def fused_recurrent_iso_kdn(
     dt_bias: torch.Tensor | None = None,
     state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
+    cu_seqlens_cpu: torch.LongTensor | None = None,
     **kwargs,
 ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
     r"""
@@ -72,6 +73,8 @@ def fused_recurrent_iso_kdn(
             Store the memory in V-first ``[V, K]`` layout instead of ``[K, V]``. Default: `False`.
         cu_seqlens (torch.LongTensor, Optional):
             Cumulative sequence lengths of shape ``[N+1]`` used for variable-length inputs. Default: `None`.
+        cu_seqlens_cpu (torch.LongTensor, Optional):
+            CPU copy of ``cu_seqlens`` that avoids a device synchronization. Default: `None`.
 
     Returns:
         o (torch.Tensor):
@@ -80,11 +83,16 @@ def fused_recurrent_iso_kdn(
             Final memory of shape ``[N, HV, K, V]`` and precision of shape ``[N, HV]``
             if ``output_final_state=True`` else `None`.
     """
-    for key in ('use_beta_sigmoid_in_kernel', 'allow_neg_eigval', 'safe_gate', 'lower_bound'):
+    if kwargs.get('cp_context') is not None:
+        raise NotImplementedError("Context parallelism is not supported for IsoKDN yet.")
+    for key in ('use_beta_sigmoid_in_kernel', 'allow_neg_eigval', 'safe_gate', 'lower_bound',
+                'return_intermediate_states', 'use_graph', 'max_num_seqs'):
         if kwargs.pop(key, False):
             raise ValueError(f"`{key}` is not supported by IsoKDN.")
     if use_gate_in_kernel and A_log is None:
         raise ValueError("`A_log` must be provided when `use_gate_in_kernel=True`.")
+    if initial_state is not None and not (isinstance(initial_state, (tuple, list)) and len(initial_state) == 2):
+        raise TypeError("`initial_state` must be a (memory, precision) pair.")
     h0, c0 = initial_state if initial_state is not None else (None, None)
     if c0 is not None:
         assert c0.dtype == torch.float32, "The initial precision must be in float32."
@@ -97,6 +105,7 @@ def fused_recurrent_iso_kdn(
         output_final_state=output_final_state,
         info_scale=info_scale,
         cu_seqlens=cu_seqlens,
+        cu_seqlens_cpu=cu_seqlens_cpu,
     )
     o, ht = fused_recurrent_kda(
         q=q,
