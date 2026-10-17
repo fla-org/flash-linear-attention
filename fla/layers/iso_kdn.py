@@ -261,9 +261,9 @@ class IsotropicKalmanDeltaNetwork(nn.Module):
         omega = self.omega_min + F.softplus(self.omega_proj(hidden_states).float() + self.omega_bias)
         r = self.r_min + F.softplus(self.r_proj(hidden_states).float() + self.r_bias)
 
-        if last_state is not None:
-            recurrent_state = last_state["recurrent_state"]
-        else:
+        # a cache filled with `use_cache=False` holds no recurrent state
+        recurrent_state = last_state["recurrent_state"] if last_state is not None else None
+        if recurrent_state is None:
             # every sequence starts from the learned prior precision
             N = batch_size if cu_seqlens is None else len(cu_seqlens) - 1
             recurrent_state = (None, (0.1 + F.softplus(self.initial_precision_param.float())).expand(N, -1))
