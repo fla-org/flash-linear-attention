@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from torch.distributed import ProcessGroup
 
 
-def _compare_backends(
+def compare_backends(
     forward: Callable[[str], torch.Tensor],
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -58,7 +58,7 @@ def _compare_backends(
             )
 
 
-def _benchmark(
+def benchmark(
     step: Callable[[str], None],
     repeats: int,
     iterations: int,
@@ -91,7 +91,7 @@ def _benchmark(
 
 
 @torch.compiler.disable
-def _benchmark_case(tokens: int, channels: int, packed: bool, repeats: int, iterations: int, cp: bool) -> None:
+def benchmark_case(tokens: int, channels: int, packed: bool, repeats: int, iterations: int, cp: bool) -> None:
     torch.manual_seed(42)
     group = dist.group.WORLD if cp else None
     global_tokens = tokens * dist.get_world_size(group=group) if cp else tokens
@@ -128,7 +128,7 @@ def _benchmark_case(tokens: int, channels: int, packed: bool, repeats: int, iter
 
     if not cp or dist.get_rank(group=group) == 0:
         print(f'\nTokens/rank={tokens}, channels={channels}, packed={packed}', flush=True)
-    _compare_backends(forward=forward, x=x, weight=weight, dy=dy, group=group)
+    compare_backends(forward=forward, x=x, weight=weight, dy=dy, group=group)
 
     for backward in (False, True):
         def step(backend: str) -> None:
@@ -136,7 +136,7 @@ def _benchmark_case(tokens: int, channels: int, packed: bool, repeats: int, iter
             if backward:
                 torch.autograd.grad(outputs=y, inputs=(x, weight), grad_outputs=dy)
 
-        samples = _benchmark(step=step, repeats=repeats, iterations=iterations, group=group)
+        samples = benchmark(step=step, repeats=repeats, iterations=iterations, group=group)
         if not cp or dist.get_rank(group=group) == 0:
             mode = 'forward_backward' if backward else 'forward'
             for label, aggregate in (('avg', statistics.mean), ('median', statistics.median)):
@@ -175,7 +175,7 @@ def main() -> None:
         for tokens in args.tokens:
             for channels in args.channels:
                 for packed in (False, True):
-                    _benchmark_case(
+                    benchmark_case(
                         tokens=tokens,
                         channels=channels,
                         packed=packed,

@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-def _run_cp_conv_worker(
+def run_cp_conv_worker(
     rank: int,
     world_size: int,
     init_method: str,
@@ -155,19 +155,80 @@ def _run_cp_conv_worker(
         dist.destroy_process_group()
 
 
-def _run_cp_conv(
+@pytest.mark.parametrize(
+    ('world_size', 'lengths', 'D', 'W', 'activation', 'has_bias', 'has_residual', 'non_contiguous', 'dtype', 'layout', 'backend'),
+    [
+        pytest.param(
+            world_size,
+            lengths,
+            128,
+            4,
+            'swish',
+            True,
+            False,
+            False,
+            torch.float32,
+            layout,
+            backend,
+            id=f'{name}-{backend}',
+        )
+        for world_size, lengths, layout, backends, name in [
+            (2, [300, 400, 324], 'contiguous', ('triton', 'cuda', 'mix'), 'cp2-sequence-cut'),
+            (2, [512, 512], 'contiguous', ('triton', 'cuda'), 'cp2-boundary-aligned'),
+            (4, [700, 324], 'contiguous', ('triton', 'cuda'), 'cp4-sequence-cut'),
+            (4, [1024], 'contiguous', ('triton', 'cuda'), 'cp4-single-sequence'),
+            (2, [100, 150, 200, 250, 124, 100, 100], 'contiguous', ('triton', 'cuda'), 'cp2-short-sequences'),
+            # short local tails exercise backward masking when a sequence ends within W-1 tokens of a rank boundary
+            (2, [513, 511], 'contiguous', ('triton', 'cuda'), 'cp2-tail-1'),
+            (2, [514, 510], 'contiguous', ('triton', 'cuda'), 'cp2-tail-2'),
+            (4, [257, 255, 257, 255], 'contiguous', ('triton', 'cuda'), 'cp4-alternating-short-tails'),
+            (2, [200, 313, 511], 'contiguous', ('triton', 'cuda'), 'cp2-packed-short-tail'),
+            (2, [512, 1, 511], 'contiguous', ('triton', 'cuda'), 'cp2-single-token-sequence'),
+            (4, [257, 253, 257, 257], 'contiguous', ('triton', 'cuda'), 'cp4-short-tails'),
+            (4, [257, 1, 253, 257, 1, 253, 2], 'contiguous', ('triton', 'cuda'), 'cp4-single-token-sequences'),
+            (2, [1024], 'zigzag', ('triton',), 'cp2-zigzag-single-sequence'),
+            (2, [300, 400, 324], 'zigzag', ('triton', 'mix'), 'cp2-zigzag-sequence-cut'),
+            (4, [150, 260, 300, 314], 'zigzag', ('triton',), 'cp4-zigzag-sequence-cut'),
+            (4, [256, 256, 256, 256], 'zigzag', ('triton',), 'cp4-zigzag-boundary-aligned'),
+        ]
+        for backend in backends
+    ] + [
+        pytest.param(
+            2,
+            lengths,
+            D,
+            W,
+            activation,
+            has_bias,
+            has_residual,
+            non_contiguous,
+            dtype,
+            'contiguous',
+            'cuda',
+            id=f'{name}-{dtype_name}',
+        )
+        for lengths, D, W, activation, has_bias, has_residual, non_contiguous, name in [
+            ([126], 65, 2, None, False, False, False, 'dense-width-2'),
+            ([62, 1, 63], 127, 3, 'silu', True, True, True, 'packed-width-3-strided'),
+            ([65, 61], 33, 4, 'swish', False, True, True, 'packed-width-4-strided'),
+            ([2, 4], 7, 4, None, True, True, False, 'minimum-local-length'),
+        ]
+        for dtype, dtype_name in [(torch.float32, 'fp32'), (torch.float16, 'fp16'), (torch.bfloat16, 'bf16')]
+    ],
+)
+def test_causal_conv1d_cp(
     tmp_path: Path,
     world_size: int,
     lengths: list[int],
-    D: int = 128,
-    W: int = 4,
-    activation: str | None = 'swish',
-    has_bias: bool = True,
-    has_residual: bool = False,
-    non_contiguous: bool = False,
-    dtype: torch.dtype = torch.float32,
-    layout: str = 'contiguous',
-    backend: str = 'triton',
+    D: int,
+    W: int,
+    activation: str | None,
+    has_bias: bool,
+    has_residual: bool,
+    non_contiguous: bool,
+    dtype: torch.dtype,
+    layout: str,
+    backend: str,
 ) -> None:
     if device != 'cuda' or device_torch_lib.device_count() < world_size:
         pytest.skip(f'Requires {world_size} CUDA or ROCm GPUs')
@@ -176,7 +237,7 @@ def _run_cp_conv(
             pytest.skip('CUDA backend requires an NVIDIA GPU')
         pytest.importorskip('causal_conv1d')
     mp.spawn(
-        fn=_run_cp_conv_worker,
+        fn=run_cp_conv_worker,
         args=(
             world_size,
             f'file://{tmp_path / "rendezvous"}',
@@ -196,83 +257,6 @@ def _run_cp_conv(
     )
 
 
-@pytest.mark.parametrize('backend', ['triton', 'cuda'])
-@pytest.mark.parametrize(
-    ('world_size', 'lengths'),
-    [
-        pytest.param(2, [300, 400, 324], id='cp2-sequence-cut'),
-        pytest.param(2, [512, 512], id='cp2-boundary-aligned'),
-        pytest.param(4, [700, 324], id='cp4-sequence-cut'),
-        pytest.param(4, [1024], id='cp4-single-sequence'),
-        pytest.param(2, [100, 150, 200, 250, 124, 100, 100], id='cp2-short-sequences'),
-        # short local tails exercise backward masking when a sequence ends within W-1 tokens of a rank boundary
-        pytest.param(2, [513, 511], id='cp2-tail-1'),
-        pytest.param(2, [514, 510], id='cp2-tail-2'),
-        pytest.param(4, [257, 255, 257, 255], id='cp4-alternating-short-tails'),
-        pytest.param(2, [200, 313, 511], id='cp2-packed-short-tail'),
-        pytest.param(2, [512, 1, 511], id='cp2-single-token-sequence'),
-        pytest.param(4, [257, 253, 257, 257], id='cp4-short-tails'),
-        pytest.param(4, [257, 1, 253, 257, 1, 253, 2], id='cp4-single-token-sequences'),
-    ],
-)
-def test_causal_conv1d_cp(tmp_path: Path, world_size: int, lengths: list[int], backend: str):
-    _run_cp_conv(tmp_path=tmp_path, world_size=world_size, lengths=lengths, backend=backend)
-
-
-@pytest.mark.parametrize(
-    ('world_size', 'lengths'),
-    [
-        pytest.param(2, [1024], id='cp2-single-sequence'),
-        pytest.param(2, [300, 400, 324], id='cp2-sequence-cut'),
-        pytest.param(4, [150, 260, 300, 314], id='cp4-sequence-cut'),
-        pytest.param(4, [256, 256, 256, 256], id='cp4-boundary-aligned'),
-    ],
-)
-def test_causal_conv1d_cp_zigzag(tmp_path: Path, world_size: int, lengths: list[int]):
-    _run_cp_conv(tmp_path=tmp_path, world_size=world_size, lengths=lengths, layout='zigzag')
-
-
-@pytest.mark.parametrize('layout', ['contiguous', 'zigzag'])
-def test_causal_conv1d_cp_mix(tmp_path: Path, layout: str):
-    _run_cp_conv(tmp_path=tmp_path, world_size=2, lengths=[300, 400, 324], layout=layout, backend='mix')
-
-
-@pytest.mark.parametrize('dtype', [torch.float32, torch.float16, torch.bfloat16], ids=['fp32', 'fp16', 'bf16'])
-@pytest.mark.parametrize(
-    ('lengths', 'D', 'W', 'activation', 'has_bias', 'has_residual', 'non_contiguous'),
-    [
-        pytest.param([126], 65, 2, None, False, False, False, id='dense-width-2'),
-        pytest.param([62, 1, 63], 127, 3, 'silu', True, True, True, id='packed-width-3-strided'),
-        pytest.param([65, 61], 33, 4, 'swish', False, True, True, id='packed-width-4-strided'),
-        pytest.param([2, 4], 7, 4, None, True, True, False, id='minimum-local-length'),
-    ],
-)
-def test_causal_conv1d_cp_cuda(
-    tmp_path: Path,
-    lengths: list[int],
-    D: int,
-    W: int,
-    activation: str | None,
-    has_bias: bool,
-    has_residual: bool,
-    non_contiguous: bool,
-    dtype: torch.dtype,
-):
-    _run_cp_conv(
-        tmp_path=tmp_path,
-        world_size=2,
-        lengths=lengths,
-        D=D,
-        W=W,
-        activation=activation,
-        has_bias=has_bias,
-        has_residual=has_residual,
-        non_contiguous=non_contiguous,
-        dtype=dtype,
-        backend='cuda',
-    )
-
-
 @pytest.mark.parametrize(
     ('case', 'error', 'match'),
     [
@@ -285,8 +269,8 @@ def test_causal_conv1d_cp_cuda(
         pytest.param('package', ImportError, 'causal-conv1d', id='missing-package'),
     ],
 )
-def test_causal_conv1d_cp_cuda_invalid(monkeypatch: pytest.MonkeyPatch, case: str, error: type[Exception], match: str):
-    def unexpected_cuda_call(**kwargs):
+def test_causal_conv1d_cp_cuda_invalid(monkeypatch: pytest.MonkeyPatch, case: str, error: type[Exception], match: str) -> None:
+    def unexpected_cuda_call(**kwargs) -> None:
         pytest.fail('Invalid arguments must be rejected before CUDA execution')
 
     monkeypatch.setattr(ops, 'causal_conv1d_fn_cuda', None if case == 'package' else unexpected_cuda_call)

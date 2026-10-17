@@ -321,6 +321,10 @@ def causal_conv1d_cp(
 
     chunk_size = chunk_size or 64
     if chunk_indices is None:
-        chunk_indices = prepare_chunk_indices(cp_context.cu_seqlens, chunk_size, cu_seqlens_cpu=cp_context.cu_seqlens_cpu)
+        chunk_indices = prepare_chunk_indices(
+            cu_seqlens=cp_context.cu_seqlens,
+            chunk_size=chunk_size,
+            cu_seqlens_cpu=cp_context.cu_seqlens_cpu,
+        )
 
     return CausalConv1dFunctionCP.apply(x, weight, bias, activation, chunk_indices, cp_context, chunk_size, backend, residual)

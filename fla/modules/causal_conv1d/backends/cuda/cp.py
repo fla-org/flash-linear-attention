@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from fla.ops.cp import FLACPContext
 
 
-class _ConvBoundaryExchangeFunction(torch.autograd.Function):
+class ConvBoundaryExchangeFunction(torch.autograd.Function):
     """Exchange convolution history and return its gradients to the sending rank."""
 
     @staticmethod
@@ -68,7 +68,7 @@ def causal_conv1d_cuda_cp(
     initial_state = None
     if cp_context.group is not None:
         tails = x[0, -(width - 1):].contiguous()
-        heads = _ConvBoundaryExchangeFunction.apply(tails, cp_context.group)
+        heads = ConvBoundaryExchangeFunction.apply(tails, cp_context.group)
         valid_len = min(width - 1, cp_context.pre_num_conv_tokens or 0)
         # history must not cross the first local document's global start
         mask = torch.arange(width - 1, device=x.device) >= width - 1 - valid_len
