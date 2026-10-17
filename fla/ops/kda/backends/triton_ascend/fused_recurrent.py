@@ -200,7 +200,7 @@ def fused_recurrent_kda_fwd_kernel_npu(
                 if USE_LOWER_BOUND:
                     b_gk = lower_bound * tl.sigmoid((exp(b_A) if HAS_A else b_A) * b_g)
                 else:
-                    b_gk = -exp(b_A) * softplus(b_g)
+                    b_gk = -(exp(b_A) if HAS_A else b_A) * softplus(b_g)
             else:
                 b_gk = b_g
 
