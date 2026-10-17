@@ -627,6 +627,7 @@ def chunk_gsa_fwd_k(
         cu_seqlens=cu_seqlens,
         chunk_size=BT,
         states_in_fp32=False,
+        chunk_indices=chunk_indices,
     )
     o = v.new_empty(B, T, HQ, V)
     A = q.new_empty(B, T, HQ, BT)
@@ -754,6 +755,7 @@ def chunk_gsa_bwd_k(
             cu_seqlens=cu_seqlens,
             chunk_size=BT,
             states_in_fp32=False,
+            chunk_indices=chunk_indices,
         )
     dh, dh0 = chunk_bwd_dh(
         q=q,
@@ -769,6 +771,7 @@ def chunk_gsa_bwd_k(
         cu_seqlens=cu_seqlens,
         chunk_size=BT,
         states_in_fp32=True,
+        chunk_indices=chunk_indices,
     )
     dA = q.new_empty(NV, B, T, HQ, BT)
     grid = (NV * NT * NC * NC, B * HQ)
