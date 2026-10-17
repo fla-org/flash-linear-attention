@@ -18,7 +18,7 @@ from fla.models.cache_utils import Cache
 from fla.models.generation_utils import FLAGenerationMixin
 from fla.models.log_linear_mamba2.configuration_log_linear_mamba2 import LogLinearMamba2Config
 from fla.models.modeling_utils import FLAPreTrainedModel
-from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, GatedMLP, RMSNorm
+from fla.modules import GatedMLP, RMSNorm
 from fla.ops.attnres import fused_attnres
 
 logger = logging.get_logger(__name__)
@@ -443,7 +443,8 @@ class LogLinearMamba2ForCausalLM(LogLinearMamba2PreTrainedModel, FLAGenerationMi
         output_attentions: bool | None = None,
         output_hidden_states: bool | None = None,
         return_dict: bool | None = None,
-        logits_to_keep: int | None = 0,
+        logits_to_keep: int | torch.Tensor | None = 0,
+        num_items_in_batch: int | torch.Tensor | None = None,
         **kwargs,
     ) -> tuple | CausalLMOutputWithPast:
         return_dict = (
@@ -462,39 +463,15 @@ class LogLinearMamba2ForCausalLM(LogLinearMamba2PreTrainedModel, FLAGenerationMi
             **kwargs,
         )
         hidden_states = outputs[0]
-        fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training
 
-        loss, logits = None, None
-        if not fuse_linear_and_cross_entropy or labels is None:
-            logits = self.lm_head(
-                hidden_states
-                if labels is not None or logits_to_keep is None
-                else hidden_states[:, -logits_to_keep:],
-            )
-        if labels is not None:
-            if getattr(self, "criterion", None) is None:
-                if fuse_linear_and_cross_entropy:
-                    criterion = FusedLinearCrossEntropyLoss()
-                elif self.config.fuse_cross_entropy:
-                    criterion = FusedCrossEntropyLoss(inplace_backward=True)
-                else:
-                    criterion = nn.CrossEntropyLoss()
-            else:
-                criterion = self.criterion
-            labels = labels.to(hidden_states.device)
-            labels = torch.cat(
-                (
-                    labels[..., 1:],
-                    torch.full_like(labels[:, :1], criterion.ignore_index),
-                ),
-                1,
-            )
-            if fuse_linear_and_cross_entropy:
-                loss = criterion(
-                    hidden_states, labels, self.lm_head.weight, self.lm_head.bias,
-                )
-            else:
-                loss = criterion(logits.view(labels.numel(), -1), labels.view(-1))
+        loss, logits = self._compute_logits_and_loss(
+            hidden_states=hidden_states,
+            labels=labels,
+            logits_to_keep=logits_to_keep,
+            num_items_in_batch=num_items_in_batch,
+            fuse_linear_cross_entropy=self.config.fuse_cross_entropy and self.training,
+            use_l2warp=False,
+        )
 
         if not return_dict:
             output = (logits,) + outputs[1:]

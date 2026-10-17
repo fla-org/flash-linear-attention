@@ -23,10 +23,9 @@ from fla.models.bitnet.configuration_bitnet import BitNetConfig
 from fla.models.cache_utils import Cache
 from fla.models.generation_utils import FLAGenerationMixin
 from fla.models.modeling_utils import FLAPreTrainedModel
-from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
+from fla.modules import RMSNorm
 from fla.modules.activations import swiglu
 from fla.modules.fused_bitlinear import FusedBitLinear
-from fla.modules.l2warp import l2_warp
 from fla.ops.attnres import fused_attnres
 
 if TYPE_CHECKING:
@@ -428,7 +427,8 @@ class BitNetForCausalLM(BitNetPreTrainedModel, FLAGenerationMixin):
         output_attentions: bool | None = None,
         output_hidden_states: bool | None = None,
         return_dict: bool | None = None,
-        logits_to_keep: int | None = 0,
+        logits_to_keep: int | torch.Tensor | None = 0,
+        num_items_in_batch: int | torch.Tensor | None = None,
         **kwargs: Unpack[Any],
     ) -> tuple | CausalLMOutputWithPast:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
@@ -451,31 +451,12 @@ class BitNetForCausalLM(BitNetPreTrainedModel, FLAGenerationMixin):
 
         hidden_states = outputs[0]
 
-        logits = None if self.config.fuse_linear_cross_entropy and labels is not None else self.lm_head(
-            hidden_states
-            if labels is not None or logits_to_keep is None
-            else hidden_states[:, -logits_to_keep:]
+        loss, logits = self._compute_logits_and_loss(
+            hidden_states=hidden_states,
+            labels=labels,
+            logits_to_keep=logits_to_keep,
+            num_items_in_batch=num_items_in_batch,
         )
-
-        loss = None
-        if labels is not None:
-            if getattr(self, 'criterion', None) is None:
-                if self.config.fuse_linear_cross_entropy:
-                    criterion = FusedLinearCrossEntropyLoss(use_l2warp=self.config.use_l2warp)
-                elif self.config.fuse_cross_entropy:
-                    criterion = FusedCrossEntropyLoss(inplace_backward=True)
-                else:
-                    criterion = nn.CrossEntropyLoss()
-            else:
-                criterion = self.criterion
-
-            labels = labels.to(hidden_states.device)
-            labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], criterion.ignore_index)), 1)
-            if self.config.fuse_linear_cross_entropy:
-                loss = criterion(hidden_states, labels, self.lm_head.weight, self.lm_head.bias)
-            else:
-                loss = criterion(logits.view(labels.numel(), -1), labels.view(-1))
-                loss = l2_warp(loss, logits) if self.config.use_l2warp else loss
 
         if not return_dict:
             output = (logits,) + outputs[1:]
