@@ -79,8 +79,11 @@ def test_public_call_defaults(owner, name, defaults):
     [
         ('convolution', 'causal_conv1d', ('ShortConvolution', 'causal_conv1d')),
         ('convolution', 'long_conv', ('LongConvolution', 'ImplicitLongConvolution', 'PositionalEmbedding', 'fft_conv')),
+        ('convolution', 'causal_conv1d.backends.cuda', ('FastCausalConv1dFn', 'causal_conv1d_cuda', 'fast_causal_conv1d_fn')),
+        ('conv.cuda', 'causal_conv1d.backends.cuda.ops', ('FastCausalConv1dFn', 'causal_conv1d_cuda', 'fast_causal_conv1d_fn')),
+        ('conv.cuda.ops', 'causal_conv1d.backends.cuda.ops', ('FastCausalConv1dFn', 'causal_conv1d_cuda', 'fast_causal_conv1d_fn')),
     ],
-    ids=['causal-conv', 'long-conv'],
+    ids=['causal-conv', 'long-conv', 'conv-cuda-exports', 'conv-cuda-package', 'conv-cuda-ops'],
 )
 def test_legacy_imports_preserve_symbol_identity(legacy, current, names):
     old_package = importlib.import_module(f'fla.modules.{legacy}')

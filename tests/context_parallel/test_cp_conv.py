@@ -19,7 +19,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 
 from fla.modules.causal_conv1d import causal_conv1d
-from fla.modules.causal_conv1d.backends import cuda
+from fla.modules.causal_conv1d.backends.cuda import ops
 from fla.ops.cp import FLACPContext, build_cp_context
 from fla.utils import IS_NVIDIA, assert_close, device, device_torch_lib
 
@@ -289,7 +289,7 @@ def test_causal_conv1d_cp_cuda_invalid(monkeypatch: pytest.MonkeyPatch, case: st
     def unexpected_cuda_call(**kwargs):
         pytest.fail('Invalid arguments must be rejected before CUDA execution')
 
-    monkeypatch.setattr(cuda, 'causal_conv1d_fn_cuda', None if case == 'package' else unexpected_cuda_call)
+    monkeypatch.setattr(ops, 'causal_conv1d_fn_cuda', None if case == 'package' else unexpected_cuda_call)
     x = torch.zeros(2 if case == 'shape' else 1, 2 if case == 'length' else 8, 8)
     weight = torch.zeros(8, 1 if case == 'width' else 4)
     cp_context = FLACPContext(

@@ -47,7 +47,7 @@ def causal_conv1d_cuda_cp(
     Each rank needs at least `W - 1` tokens, with `W` in {2, 3, 4}.
     Packed sequence boundaries mask both history values and their gradients.
     """
-    from fla.modules.causal_conv1d.backends.cuda import causal_conv1d_fn_cuda
+    from fla.modules.causal_conv1d.backends.cuda.ops import causal_conv1d_fn_cuda
 
     if causal_conv1d_fn_cuda is None:
         raise ImportError("CUDA CP requires the causal-conv1d package")

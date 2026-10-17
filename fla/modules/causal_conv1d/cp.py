@@ -308,7 +308,7 @@ def causal_conv1d_cp(
     if backend not in ('triton', 'cuda'):
         raise ValueError(f"Unsupported CP convolution backend: {backend!r}; expected 'triton', 'cuda', or 'mix'")
     if backend == 'cuda':
-        from fla.modules.causal_conv1d.backends.cuda_cp import causal_conv1d_cuda_cp
+        from fla.modules.causal_conv1d.backends.cuda.cp import causal_conv1d_cuda_cp
 
         return causal_conv1d_cuda_cp(
             x=x,
