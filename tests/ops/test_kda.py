@@ -158,6 +158,58 @@ def test_fused_recurrent(
     assert_close("ht", ref_ht, tri_ht, 0.005)
 
 
+@pytest.mark.smoke
+@pytest.mark.parametrize('packed', [False, True])
+@pytest.mark.parametrize('supplied_output', [False, True])
+def test_fused_recurrent_output_buffer(packed, supplied_output):
+    torch.manual_seed(42)
+    H, HV, D = 2, 4, 60
+    lengths = [2, 4] if packed else [3, 3]
+    capacity = 8 if packed else 6
+    q, k = [F.normalize(torch.randn(1, capacity, H, D, device=device), dim=-1).bfloat16() for _ in range(2)]
+    v = torch.randn(1, capacity, HV, D, device=device, dtype=torch.bfloat16)
+    g = F.logsigmoid(torch.randn(1, capacity, HV, D, device=device))
+    beta = torch.rand(1, capacity, HV, device=device, dtype=torch.bfloat16)
+    initial_state = torch.randn(2, HV, D, D, device=device)
+    expected_output = torch.full_like(v, -3 if supplied_output else 0)
+    expected_states = []
+    offset = 0
+    inputs = dict(q=q, k=k, v=v, g=g, beta=beta)
+    for sequence, length in enumerate(lengths):
+        output, state = naive_recurrent_kda(
+            **{name: tensor[:, offset:offset + length] for name, tensor in inputs.items()},
+            initial_state=initial_state[sequence:sequence + 1],
+            output_final_state=True,
+        )
+        expected_output[:, offset:offset + length] = output
+        expected_states.append(state)
+        offset += length
+    if packed:
+        inputs['cu_seqlens'] = torch.tensor([0, lengths[0], sum(lengths)], device=device, dtype=torch.int32)
+    else:
+        inputs = {name: tensor.reshape(2, 3, *tensor.shape[2:]) for name, tensor in inputs.items()}
+    out = torch.full_like(inputs['v'], -3) if supplied_output else None
+    state_pool = initial_state.clone()
+    output, state = fused_recurrent_kda_fwd(
+        **inputs,
+        initial_state=state_pool,
+        output_final_state=True,
+        inplace_final_state=False,
+        out=out,
+    )
+    if supplied_output and output.data_ptr() != out.data_ptr():
+        pytest.fail('The recurrent call replaced the supplied output buffer')
+    output = output.reshape_as(expected_output)
+    if not torch.isfinite(output).all():
+        pytest.fail('The recurrent output contains unwritten or nonfinite values')
+    if packed and not torch.equal(output[:, sum(lengths):], expected_output[:, sum(lengths):]):
+        pytest.fail('Unused packed output capacity changed')
+    if not torch.equal(state_pool, initial_state):
+        pytest.fail('Out-of-place recurrence changed the input state')
+    assert_close('o', expected_output, output, 0.005)
+    assert_close('ht', torch.cat(expected_states), state, 0.005)
+
+
 @pytest.mark.parametrize(
     ("B", "T", "H", "D", "allow_neg_eigval", "dtype"),
     [
