@@ -128,13 +128,21 @@ class Attention(nn.Module):
             cache_has_content = past_key_values.get_seq_length(self.layer_idx) > 0
             assert cu_seqlens is None or not cache_has_content, \
                 "cu_seqlens should not be provided when past_key_values has content"
+            attn_state = (k.flatten(-2, -1), v.flatten(-2, -1))
+            use_window_context = cache_has_content and self.window_size is not None and q_len > 1 and attention_mask is None
+            if use_window_context:
+                # earlier queries in the chunk still need history that the updated cache will evict
+                k_prev, v_prev = past_key_values[self.layer_idx]['attn_state']
+                start = max(0, k_prev.shape[1] - self.window_size + 1)
+                k = torch.cat([rearrange(k_prev[:, start:], '... (h d) -> ... h d', d=self.head_dim), k], dim=1)
+                v = torch.cat([rearrange(v_prev[:, start:], '... (h d) -> ... h d', d=self.head_dim), v], dim=1)
             k_cached, v_cached = past_key_values.update(
-                attn_state=(k.flatten(-2, -1), v.flatten(-2, -1)),
+                attn_state=attn_state,
                 layer_idx=self.layer_idx,
                 offset=q_len,
                 cache_kwargs=dict(window_size=self.window_size),
             )['attn_state']
-            if cache_has_content:
+            if cache_has_content and not use_window_context:
                 k, v = k_cached, v_cached
                 k = rearrange(k, '... (h d) -> ... h d', d=self.head_dim)
                 v = rearrange(v, '... (h d) -> ... h d', d=self.head_dim)
