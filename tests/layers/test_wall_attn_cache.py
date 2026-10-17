@@ -73,3 +73,34 @@ def test_cache_with_attention_mask_guard(window_size: int | None):
                 past_key_values=cache,
                 use_cache=True,
             )
+
+
+@pytest.mark.parametrize(
+    ("T", "q_len", "use_scalar_gate"),
+    [(24, 4, False), (24, 20, False), (60, 10, True)],
+    ids=["T24-q4", "T24-q20", "T60-q10-gs"],
+)
+@pytest.mark.parametrize("window_size", [None, 16], ids=["full", "windowed"])
+def test_cached_multi_token_continuation(window_size: int | None, T: int, q_len: int, use_scalar_gate: bool):
+    B, H, D = 2, 2, 64
+    torch.manual_seed(42)
+    layer = WallAttention(
+        hidden_size=H * D,
+        num_heads=H,
+        window_size=window_size,
+        use_scalar_gate=use_scalar_gate,
+        layer_idx=0,
+    ).to(device=device, dtype=torch.float16).eval()
+    prefix = torch.randn(B, T, H * D, device=device, dtype=torch.float16)
+    suffix = torch.randn(B, q_len, H * D, device=device, dtype=torch.float16)
+
+    with torch.no_grad():
+        expected, _, _ = layer(hidden_states=torch.cat([prefix, suffix], dim=1))
+        cache = Cache()
+        layer(hidden_states=prefix, past_key_values=cache, use_cache=True)
+        actual, _, _ = layer(hidden_states=suffix, past_key_values=cache, use_cache=True)
+
+    assert_close("continuation", expected[:, -q_len:], actual, 0.005)
+    assert cache.get_seq_length(0) == T + q_len
+    if window_size is not None:
+        assert cache[0]['attn_state'][0].shape[1] == window_size

@@ -511,6 +511,37 @@ def test_decode_streaming_matches_full_forward(dtype):
         assert_close("o_stream", o_ref[:, t: t + 1], o_t, RTOL_DECODE)
 
 
+@pytest.mark.parametrize('T_q', [5, 48])
+@pytest.mark.parametrize('window_size', [None, 32], ids=["full", "windowed"])
+def test_decode_multi_query_matches_training_forward(window_size: int | None, T_q: int):
+    """Decode of the last `T_q` cache tokens at once matches the training forward at those rows."""
+    torch.manual_seed(4)
+    dtype = torch.float32
+    B, T, H, HQ, K, V, C = 2, 160, 2, 4, 64, 64, 32
+    scale = K**-0.5
+    q = torch.randn(B, T, HQ, K, device=device, dtype=dtype)
+    k = torch.randn(B, T, H, K, device=device, dtype=dtype)
+    v = torch.randn(B, T, H, V, device=device, dtype=dtype)
+    g = log_decay(B, T, HQ, K, dtype=dtype)
+
+    o_ref = parallel_wall_attn(q, k, v, g, scale=scale, window_size=window_size)
+    P = chunk_global_cumsum(g, scale=RCP_LN2)
+    k_tilde, r_cache = build_wall_kv_cache(k, P, chunk_size=C)
+    window_kwargs = {} if window_size is None else dict(window_size=window_size)
+    o_dec, _ = parallel_wall_attn_decode(
+        q=q[:, -T_q:].contiguous(),
+        v=v,
+        p_curr=P[:, -T_q:].contiguous(),
+        k_tilde=k_tilde,
+        r_cache=r_cache,
+        sink_bias=None,
+        scale=scale,
+        cache_chunk_size=C,
+        **window_kwargs,
+    )
+    assert_close("o_dec_multi", o_ref[:, -T_q:], o_dec, RTOL_DECODE)
+
+
 def test_decode_cache_layout_shapes():
     """Pre-rescaled cache has documented shapes; r_cache size == ceil(T/C)."""
     torch.manual_seed(3)
