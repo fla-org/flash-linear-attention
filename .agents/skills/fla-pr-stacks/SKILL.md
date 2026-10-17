@@ -11,14 +11,14 @@ Use for decomposing large changes or managing dependent PRs. Follow [CONTRIBUTIN
 
 Inspect the complete diff, commit history, and related open PRs, including their review discussions. Map each proposed layer to one outcome, its prerequisites, validation, and an existing PR to reuse where appropriate.
 
-| Relationship                           | Action                                                                   |
-| -------------------------------------- | ------------------------------------------------------------------------ |
-| Overlaps an existing PR's purpose       | Update that PR when ownership permits; preserve attribution and reviews.  |
+| Relationship                            | Action                                                                   |
+| --------------------------------------- | ------------------------------------------------------------------------ |
+| Overlaps an existing PR's purpose       | Update that PR when ownership permits; preserve attribution and reviews. |
 | Independent of the other changes        | Submit separately against the trunk.                                     |
-| Depends on another layer               | Stack above that layer; include its own tests and documentation.          |
-| Cohesive but still above the size limit | Use the contribution guide's exception with a concrete justification.     |
+| Depends on another layer                | Stack above that layer; include its own tests and documentation.         |
+| Cohesive but still above the size limit | Use the contribution guide's exception with a concrete justification.    |
 
-Each layer must work with the layers below it. Do not split by arbitrary line counts, leave callers broken, or defer tests to a later PR.
+Each layer presents an increment over its parent and must work with its prerequisites, without needing later layers to fix it. Separate review does not imply dependency-free code. Do not split by arbitrary line counts, leave callers broken, or defer tests to a later PR.
 
 Check head repository identity before arranging existing PRs. [GitHub stacks require all branches in the same repository](https://docs.github.com/en/pull-requests/reference/stacked-pull-requests); cross-fork stacks are unsupported. Keep incompatible PRs as explicit external prerequisites instead of duplicating them under new PR numbers.
 
