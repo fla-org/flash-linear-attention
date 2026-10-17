@@ -36,7 +36,6 @@ class FLALayer(CacheLayerMixin):
         attn_state: tuple[torch.Tensor, ...] | None = None,
         conv_state: Any | None = None,
         ffn_state: Any | None = None,
-        A_state: torch.Tensor | None = None,
         offset: int = 1,
         cache_kwargs: dict[str, Any] | None = None,
         **_: Any,
@@ -56,7 +55,6 @@ class FLALayer(CacheLayerMixin):
                 "attn_state": None,
                 "conv_state": None,
                 "ffn_state": None,
-                "A_state": None,
             }
 
         if recurrent_state is not None:
@@ -102,12 +100,10 @@ class FLALayer(CacheLayerMixin):
             self.state["conv_state"] = conv_state
         if ffn_state is not None:
             self.state["ffn_state"] = ffn_state
-        if A_state is not None:
-            self.state["A_state"] = A_state
 
         if not hasattr(self, 'device'):
             self.device = 'cpu'
-        for state in (recurrent_state, attn_state, conv_state, ffn_state, A_state):
+        for state in (recurrent_state, attn_state, conv_state, ffn_state):
             if state is not None:
                 if isinstance(state, torch.Tensor):
                     self.device = state.device
@@ -176,7 +172,7 @@ class FLALayer(CacheLayerMixin):
         if max_length >= self._seen_tokens:
             return self._seen_tokens
         if self.state is not None and any(self.state.get(key) is not None for key in (
-            "recurrent_state", "conv_state", "ffn_state", "A_state",
+            "recurrent_state", "conv_state", "ffn_state",
         )):
             raise NotImplementedError("Recurrent cache rollback requires saved intermediate states.")
         if self.window_size is not None and self._seen_tokens > self.window_size:
@@ -237,7 +233,6 @@ class LegacyFLACache(HFCacheBase):
         layer_idx: int = 0,
         offset: int | None = 1,
         cache_kwargs: dict[str, Any] | None = None,
-        A_state: torch.Tensor | None = None,
     ) -> dict[str, Any]:
         """Update one layer while retaining any state omitted from the call.
 
@@ -256,8 +251,6 @@ class LegacyFLACache(HFCacheBase):
                 The number of new tokens; `None` is treated as 1. Default: 1.
             cache_kwargs (dict[str, Any], Optional):
                 Cache options, including the attention `window_size`. Default: `None`.
-            A_state (torch.Tensor, Optional):
-                The new auxiliary preconditioner state. Default: `None`.
 
         Returns:
             dict[str, Any]:
@@ -283,7 +276,6 @@ class LegacyFLACache(HFCacheBase):
                 attn_state=attn_state,
                 conv_state=conv_state,
                 ffn_state=ffn_state,
-                A_state=A_state,
             )
             self.states.append(state)
         else:
@@ -329,8 +321,6 @@ class LegacyFLACache(HFCacheBase):
                 state['conv_state'] = conv_state
             if ffn_state is not None:
                 state['ffn_state'] = ffn_state
-            if A_state is not None:
-                state['A_state'] = A_state
 
         return state
 
@@ -386,7 +376,6 @@ class FLACache(HFCacheBase):
         attn_state: tuple[torch.Tensor, ...] | None = None,
         conv_state: Any | None = None,
         ffn_state: Any | None = None,
-        A_state: torch.Tensor | None = None,
         layer_idx: int = 0,
         offset: int | None = 1,
         cache_kwargs: dict[str, Any] | None = None,
@@ -399,7 +388,6 @@ class FLACache(HFCacheBase):
             attn_state=attn_state,
             conv_state=conv_state,
             ffn_state=ffn_state,
-            A_state=A_state,
             offset=offset if offset is not None else 1,
             cache_kwargs=cache_kwargs,
         )

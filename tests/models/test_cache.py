@@ -241,8 +241,8 @@ def test_fla_layer_empty_state_offload_and_prefetch(state):
 
 @pytest.mark.parametrize(
     ('state_name', 'as_tuple'),
-    [('recurrent_state', False), ('attn_state', True), ('conv_state', True), ('ffn_state', False), ('A_state', False)],
-    ids=['recurrent', 'attention', 'convolution', 'feed-forward', 'preconditioner'],
+    [('recurrent_state', False), ('recurrent_state', True), ('attn_state', True), ('conv_state', True), ('ffn_state', False)],
+    ids=['recurrent', 'composite-recurrent', 'attention', 'convolution', 'feed-forward'],
 )
 def test_fla_layer_offload_and_prefetch(state_name, as_tuple):
     layer = FLALayer()
@@ -322,7 +322,8 @@ def test_cache_from_legacy_preserves_seen_tokens():
 @pytest.mark.parametrize('cache_class', [Cache, FLACache, LegacyFLACache])
 def test_cache_pickle_preserves_states(monkeypatch, module_name, cache_class):
     cache = cache_class()
-    cache.update(attn_state=_make_attn_state(10, 4), layer_idx=0, offset=4)
+    recurrent_state = (torch.arange(24).reshape(1, 2, 3, 4), torch.arange(6).reshape(1, 2, 3))
+    cache.update(recurrent_state=recurrent_state, attn_state=_make_attn_state(10, 4), layer_idx=0, offset=4)
 
     with monkeypatch.context() as patch:
         for cls in (Cache, FLACache, FLALayer, LegacyFLACache):
@@ -331,9 +332,11 @@ def test_cache_pickle_preserves_states(monkeypatch, module_name, cache_class):
     restored = pickle.loads(checkpoint)
 
     assert type(restored) is cache_class
+    torch.testing.assert_close(restored[0]['recurrent_state'], recurrent_state)
     assert restored.get_seq_length(0) == 4
     _assert_attn_state_tokens(restored[0]['attn_state'], torch.arange(10, 14))
     restored.update(attn_state=_make_attn_state(14, 2), layer_idx=0, offset=2)
+    torch.testing.assert_close(restored[0]['recurrent_state'], recurrent_state)
     assert restored.get_seq_length(0) == 6
     _assert_attn_state_tokens(restored[0]['attn_state'], torch.arange(10, 16))
 
