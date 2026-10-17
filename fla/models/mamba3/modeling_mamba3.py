@@ -173,9 +173,6 @@ class Mamba3Model(Mamba3PreTrainedModel):
                 state_dict[k.replace("embedding.", "embeddings.")] = state_dict.pop(k)
                 break
 
-    def get_input_embeddings(self):
-        return self.embeddings
-
     def set_input_embeddings(self, new_embeddings):
         self.embeddings = new_embeddings
 
@@ -251,15 +248,6 @@ class Mamba3ForCausalLM(Mamba3PreTrainedModel, FLAGenerationMixin):
         self.criterion = None
 
         self.post_init()
-
-    def get_output_embeddings(self):
-        return self.lm_head
-
-    def set_output_embeddings(self, new_embeddings):
-        self.lm_head = new_embeddings
-
-    def get_input_embeddings(self):
-        return self.backbone.get_input_embeddings()
 
     def set_input_embeddings(self, new_embeddings):
         return self.backbone.set_input_embeddings(new_embeddings)
