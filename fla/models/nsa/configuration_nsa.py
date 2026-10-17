@@ -7,10 +7,10 @@
 
 import warnings
 
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
 
-class NSAConfig(PretrainedConfig):
+class NSAConfig(PreTrainedConfig):
 
     model_type = 'nsa'
     keys_to_ignore_at_inference = ['past_key_values']

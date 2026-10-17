@@ -9,12 +9,12 @@ from __future__ import annotations
 
 import warnings
 
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
-from fla.models.hybrid import HybridAttentionConfig, _HybridAttentionConfigMixin
+from fla.models.modeling_layers import AttentionConfig, AttentionConfigBase
 
 
-class RetNetConfig(_HybridAttentionConfigMixin, PretrainedConfig):
+class RetNetConfig(AttentionConfigBase, PreTrainedConfig):
 
     model_type = 'retnet'
     keys_to_ignore_at_inference = ['past_key_values']
@@ -38,7 +38,7 @@ class RetNetConfig(_HybridAttentionConfigMixin, PretrainedConfig):
         max_position_embeddings: int = 2048,
         elementwise_affine: bool | None = True,
         norm_eps: float = 1e-6,
-        attn: HybridAttentionConfig = None,
+        attn: AttentionConfig = None,
         use_cache: bool = True,
         pad_token_id: int | None = None,
         bos_token_id: int = 1,

@@ -7,10 +7,10 @@
 
 import warnings
 
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
 
-class PaTHAttentionConfig(PretrainedConfig):
+class PaTHAttentionConfig(PreTrainedConfig):
 
     model_type = 'path_attn'
     keys_to_ignore_at_inference = ['past_key_values']

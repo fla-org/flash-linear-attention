@@ -5,12 +5,12 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
-from fla.models.hybrid import HybridAttentionConfig, _HybridAttentionConfigMixin
+from fla.models.modeling_layers import AttentionConfig, AttentionConfigBase
 
 
-class KDAConfig(_HybridAttentionConfigMixin, PretrainedConfig):
+class KDAConfig(AttentionConfigBase, PreTrainedConfig):
     model_type = 'kda'
     keys_to_ignore_at_inference = ['past_key_values']
 
@@ -33,7 +33,7 @@ class KDAConfig(_HybridAttentionConfigMixin, PretrainedConfig):
         hidden_act: str = "swish",
         num_hidden_layers: int = 24,
         norm_eps: float = 1e-6,
-        attn: HybridAttentionConfig = None,
+        attn: AttentionConfig = None,
         use_cache: bool = True,
         pad_token_id: int | None = None,
         bos_token_id: int = 1,

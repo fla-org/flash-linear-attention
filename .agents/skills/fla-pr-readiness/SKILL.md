@@ -11,6 +11,8 @@ Read [CONTRIBUTING.md](../../../CONTRIBUTING.md) and [AGENTS.md](../../../AGENTS
 
 Read the complete diff against the PR base and audit affected shared callers. State its concrete outcome in one sentence and separate independent work. Check existing issues/PRs and the applicable design discussion. Follow [scope and size](../../../CONTRIBUTING.md#pr-scope-and-size) for a cohesive change above the normal limit, and [public compatibility](../../../CONTRIBUTING.md#public-api-compatibility) when interfaces or defaults are affected.
 
+When a change needs splitting or dependent PRs need a native GitHub stack, use [PR stacks](../fla-pr-stacks/SKILL.md) to choose boundaries, reuse existing PRs, and verify the published stack.
+
 For code changes, discover dependent tests and run the relevant targets. For example:
 
 ```bash

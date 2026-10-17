@@ -7,12 +7,12 @@
 
 import warnings
 
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
-from fla.models.hybrid import HybridAttentionConfig, _HybridAttentionConfigMixin
+from fla.models.modeling_layers import AttentionConfig, AttentionConfigBase
 
 
-class CombaConfig(_HybridAttentionConfigMixin, PretrainedConfig):
+class CombaConfig(AttentionConfigBase, PreTrainedConfig):
     model_type = 'comba'
     keys_to_ignore_at_inference = ['past_key_values']
 
@@ -36,7 +36,7 @@ class CombaConfig(_HybridAttentionConfigMixin, PretrainedConfig):
         hidden_act: str = "swish",
         num_hidden_layers: int = 21,
         norm_eps: float = 1e-6,
-        attn: HybridAttentionConfig = None,
+        attn: AttentionConfig = None,
         use_cache: bool = True,
         pad_token_id: int | None = None,
         bos_token_id: int = 1,
