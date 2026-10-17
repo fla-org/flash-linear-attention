@@ -105,6 +105,14 @@ def test_rotary_with_offsets(B: int, T: int, H: int, G: int, D: int, dtype: torc
         )
     ] + [
         pytest.param(
+            2, 8, 2, 2, D, dtype, (3, 5), 2, True, 0,
+            id=f"small-head-D{D}-offset2-interleavedTrue-{dtype}",
+        )
+        for D, dtype in product([4, 8], [torch.float32, torch.float16, torch.bfloat16])
+    ] + [
+        pytest.param(2, 65536, 2, 2, 4, torch.float16, (32767, 32769), 0, True, 0, id="small-head-long-packed"),
+    ] + [
+        pytest.param(
             2, 8, 2, 2, 16, torch.float32, (3, 5), offset, interleaved, -1,
             id=f"short-cache-offset{offset}-interleaved{interleaved}",
         )

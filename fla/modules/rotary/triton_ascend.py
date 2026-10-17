@@ -178,10 +178,13 @@ def rotary_embedding_fwdbwd_npu(
         y[..., R2:].copy_(x[..., R2:])
 
     BD = triton.next_power_of_2(R2)
+    if interleaved:
+        # keep sub-32-byte interleaved vectors aligned in UB.
+        BD = max(BD, 32 // x.element_size())
     desired_bt = triton.next_power_of_2(triton.cdiv(T, get_multiprocessor_count(x.device.index)))
     bt_cap = compute_row_tile_block_size(
         row_dim=desired_bt,
-        fixed_dim=R2,
+        fixed_dim=BD,
         memory_multiplier=_ROTARY_MEM_MULT,
         safety_margin=_ROTARY_SAFETY_MARGIN,
         dtype_size=x.element_size(),
