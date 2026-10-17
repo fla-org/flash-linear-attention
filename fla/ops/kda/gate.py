@@ -398,15 +398,6 @@ def fused_kda_gate(
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
     'USE_LOWER_BOUND': lambda args: args['lower_bound'] is not None,
 })
-@fla_cache_autotune(
-    configs=[
-        triton.Config({'BS': BS}, num_warps=num_warps)
-        for BS in BS_LIST
-        for num_warps in [2, 4, 8]
-    ],
-    key=['H', 'S', 'BT', 'IS_VARLEN', 'REVERSE'],
-    **autotune_cache_kwargs,
-)
 @triton.jit(do_not_specialize=['T'])
 def kda_gate_chunk_cumsum_vector_kernel(
     s,
@@ -501,8 +492,9 @@ def kda_gate_chunk_cumsum(
 
     o = torch.empty_like(g, dtype=output_dtype or g.dtype)
 
-    def grid(meta):
-        return (triton.cdiv(meta['S'], meta['BS']) * NT, B * H)
+    # as in chunk_local_cumsum_vector, the tiling sets the fp32 summation order of tl.cumsum, so it depends only on S
+    BS = min(BS_LIST[-1], triton.next_power_of_2(S))
+    grid = (triton.cdiv(S, BS) * NT, B * H)
 
     kda_gate_chunk_cumsum_vector_kernel[grid](
         s=g,
@@ -517,7 +509,9 @@ def kda_gate_chunk_cumsum(
         H=H,
         S=S,
         BT=BT,
+        BS=BS,
         REVERSE=False,
         USE_GRAPH=use_graph,
+        num_warps=4,
     )
     return o
