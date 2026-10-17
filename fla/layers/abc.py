@@ -21,7 +21,7 @@ from fla.modules.activations import swiglu, swish
 from fla.ops.abc.chunk import chunk_abc
 
 if TYPE_CHECKING:
-    from fla.models.utils import Cache
+    from fla.models.cache_utils import Cache
 
 
 class ABCAttention(nn.Module):

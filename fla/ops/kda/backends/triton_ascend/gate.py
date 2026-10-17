@@ -168,6 +168,7 @@ def kda_gate_bwd_kernel_npu(
     dyg,
     dg,
     dA,
+    dbias,
     lower_bound,
     T,
     H: tl.constexpr,
@@ -180,21 +181,26 @@ def kda_gate_bwd_kernel_npu(
     NT_OFFSET: tl.constexpr,
     H_OFFSET: tl.constexpr,
 ):
-    i_t = tl.program_id(0) + NT_OFFSET
-    i_h = tl.program_id(1) + H_OFFSET
+    i_t, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
+    i_t += NT_OFFSET
+    i_h += H_OFFSET
 
     b_A = tl.load(A_log + i_h).to(tl.float32) if HAS_A else 1.0
 
-    p_g = tl.make_block_ptr(g + i_h * D, (T, D), (H * D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
-    p_dg = tl.make_block_ptr(dg + i_h * D, (T, D), (H * D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
-    p_dyg = tl.make_block_ptr(dyg + i_h * D, (T, D), (H * D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
+    o_t = i_t * BT + tl.arange(0, BT)
+    o_d = tl.arange(0, BD)
+    m_t = o_t < T
+    m_g = m_t[:, None] & (o_d[None, :] < D)
+    p_g = g + i_h * D + o_t[:, None] * (H * D) + o_d[None, :]
+    p_dg = dg + i_h * D + o_t[:, None] * (H * D) + o_d[None, :]
+    p_dyg = dyg + i_h * D + o_t[:, None] * (H * D) + o_d[None, :]
 
-    b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
-    b_dyg = tl.load(p_dyg, boundary_check=(0, 1)).to(tl.float32)
+    b_g = tl.load(p_g, mask=m_g, other=0.0).to(tl.float32)
+    b_dyg = tl.load(p_dyg, mask=m_g, other=0.0).to(tl.float32)
 
     if HAS_BIAS:
-        p_b = tl.make_block_ptr(dt_bias, (H * D,), (1,), (i_h * D,), (BD,), (0,))
-        b_g = b_g + tl.load(p_b, boundary_check=(0,)).to(tl.float32)
+        o_b = i_h * D + o_d
+        b_g = b_g + tl.load(dt_bias + o_b, mask=o_d < D, other=0.0).to(tl.float32)
 
     if not USE_LOWER_BOUND:
         b_A = -exp(b_A)
@@ -210,9 +216,12 @@ def kda_gate_bwd_kernel_npu(
         b_dg = b_d_inner_term * b_A
         b_dA = tl.sum(tl.sum(b_dg * b_g, 1), 0) if HAS_A else 0.0
 
-    tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), mask=m_g)
     if HAS_A:
         tl.store(dA + i_t * H + i_h, b_dA)
+    if HAS_BIAS:
+        b_dbias = tl.sum(b_dg, 0)
+        tl.store(dbias + (i_t * H + i_h) * D + o_d, b_dbias, mask=o_d < D)
 
 
 def _launch_gate_bwd(
@@ -223,6 +232,7 @@ def _launch_gate_bwd(
     dyg: torch.Tensor,
     dg: torch.Tensor,
     dA: torch.Tensor | None,
+    dbias: torch.Tensor | None,
     lower_bound: float | None,
     T: int,
     H: int,
@@ -238,6 +248,7 @@ def _launch_gate_bwd(
         dyg=dyg,
         dg=dg,
         dA=dA,
+        dbias=dbias,
         lower_bound=lower_bound,
         T=T,
         H=H,
@@ -424,9 +435,12 @@ def kda_gate_bwd_npu(
     H, K = g.shape[-2:]
     T = g.numel() // (H * K)
     BT = _get_gate_bwd_bt(T, K)
-    dg = torch.empty_like(g, dtype=torch.float32)
     NT = triton.cdiv(T, BT)
+
+    dg = torch.empty_like(g)
     dA = g.new_empty(NT, H, dtype=torch.float32) if A_log is not None else None
+    dbias = g.new_empty(NT, H * K, dtype=torch.float32) if dt_bias is not None else None
+
     _launch_gate_bwd(
         g=g,
         A_log=A_log,
@@ -434,15 +448,17 @@ def kda_gate_bwd_npu(
         dyg=dyg,
         dg=dg,
         dA=dA,
+        dbias=dbias,
         lower_bound=lower_bound,
         T=T,
         H=H,
         K=K,
         BT=BT,
     )
-    dg = dg.view_as(g).type_as(g)
+
     dA = dA.sum(0).view_as(A_log).type_as(A_log) if A_log is not None else None
-    dbias = dg.view(-1, H * K).sum(0).to(dt_bias) if dt_bias is not None else None
+    dbias = dbias.sum(0).to(dt_bias) if dt_bias is not None else None
+
     return dg, dA, dbias
 
 

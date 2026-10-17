@@ -5,9 +5,35 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-import pytest
+from types import SimpleNamespace
 
-from fla.models.utils import FLAGenerationMixin, FLAUnsupportedCacheGenerationMixin
+import pytest
+import torch
+from transformers.generation import GenerationMixin
+
+from fla.models import GLAConfig, GLAForCausalLM
+from fla.models.cache_utils import Cache
+from fla.models.generation_utils import FLAGenerationMixin, FLAUnsupportedCacheGenerationMixin
+
+
+@pytest.fixture
+def preparation_model():
+    model = FLAGenerationMixin()
+    model.config = SimpleNamespace(is_encoder_decoder=False)
+    model.device = torch.device('cpu')
+    model.is_remote_code = lambda: False
+    return model
+
+
+class _Cache:
+    def __init__(self, seq_length: int):
+        self.seq_length = seq_length
+
+    def get_seq_length(self) -> int:
+        return self.seq_length
+
+    def __len__(self) -> int:
+        return 1
 
 
 class _GenerationBackend(FLAGenerationMixin):
@@ -60,3 +86,101 @@ def test_generate_preserves_unrelated_attribute_errors():
         _OtherAttributeErrorModel().generate("input")
 
     assert raised.value is _OtherAttributeErrorBackend.exception
+
+
+@pytest.mark.parametrize('with_cache_position', [False, True], ids=['no-position', 'with-position'])
+@pytest.mark.parametrize(
+    ('past_length', 'input_length', 'with_embeds', 'next_length', 'first_iteration', 'expected_key', 'expected_length'),
+    [
+        pytest.param(4, 6, True, 2, True, 'inputs_embeds', 2, id='cached-embeds'),
+        pytest.param(4, 0, True, 2, True, 'inputs_embeds', 2, id='cached-embeds-empty-ids'),
+        pytest.param(4, None, True, 2, True, 'inputs_embeds', 2, id='cached-embeds-no-ids'),
+        pytest.param(4, 6, False, 2, True, 'input_ids', 2, id='cached-ids'),
+        pytest.param(4, 2, False, None, True, 'input_ids', 2, id='already-sliced-prompt'),
+        pytest.param(4, 6, True, None, True, 'inputs_embeds', 6, id='unsliced-embeds'),
+        pytest.param(4, 7, True, 1, False, 'input_ids', 1, id='decode-with-stale-embeds'),
+        pytest.param(0, 7, True, 1, None, 'input_ids', 1, id='decode-with-empty-cache'),
+        pytest.param(None, 7, True, None, False, 'input_ids', 7, id='decode-without-cache'),
+        pytest.param(None, 6, True, None, True, 'inputs_embeds', 6, id='prefill-embeds'),
+    ],
+)
+def test_prepare_inputs_for_generation(
+    preparation_model, with_cache_position, past_length, input_length, with_embeds, next_length,
+    first_iteration, expected_key, expected_length,
+):
+    input_ids = torch.arange(2 * input_length).reshape(2, input_length) if input_length is not None else None
+    inputs_embeds = torch.arange(96, dtype=torch.float32).reshape(2, 6, 8) if with_embeds else None
+    cache = _Cache(past_length) if past_length is not None else None
+    attention_mask = torch.ones(2, 8, dtype=torch.long)
+    cache_position = torch.arange(past_length or 0, (past_length or 0) + expected_length) if with_cache_position else None
+    arguments = dict(
+        input_ids=input_ids,
+        past_key_values=cache,
+        attention_mask=attention_mask,
+        inputs_embeds=inputs_embeds,
+        use_cache=cache is not None,
+        logits_to_keep=1,
+        cache_position=cache_position,
+        next_sequence_length=next_length,
+        is_first_iteration=first_iteration,
+    )
+    result = preparation_model.prepare_inputs_for_generation(**arguments)
+    expected = inputs_embeds if expected_key == 'inputs_embeds' else input_ids
+    torch.testing.assert_close(result[expected_key], expected[:, -expected_length:])
+    assert result.get('input_ids' if expected_key == 'inputs_embeds' else 'inputs_embeds') is None
+    assert result.get('past_key_values') is cache
+    assert result['attention_mask'] is attention_mask
+    assert result['use_cache'] == (cache is not None)
+    assert result['logits_to_keep'] == 1
+    if expected_key == 'input_ids':
+        assert result['input_ids'].is_contiguous()
+    reference = GenerationMixin.prepare_inputs_for_generation(
+        SimpleNamespace(
+            config=SimpleNamespace(is_encoder_decoder=False),
+            device=torch.device('cpu'),
+            is_remote_code=lambda: False,
+        ),
+        **arguments,
+    )
+    torch.testing.assert_close(result[expected_key], reference[expected_key])
+
+
+def test_prepare_inputs_for_generation_decode_without_cache(preparation_model):
+    input_ids = torch.arange(14).reshape(2, 7)
+    result = preparation_model.prepare_inputs_for_generation(
+        input_ids=input_ids,
+        inputs_embeds=torch.arange(96, dtype=torch.float32).reshape(2, 6, 8),
+        use_cache=False,
+    )
+    torch.testing.assert_close(result['input_ids'], input_ids)
+    assert result.get('inputs_embeds') is None
+
+
+@pytest.mark.parametrize('first_iteration', [False, True])
+def test_cached_generation_selects_new_prompt_inputs(first_iteration):
+    torch.manual_seed(42)
+    model = GLAForCausalLM(GLAConfig(hidden_size=32, num_hidden_layers=0, vocab_size=32, fuse_norm=False))
+    cache = Cache()
+    cache.update(recurrent_state=torch.zeros(2, 1, 4, 4), offset=4)
+    input_ids = torch.arange(14).reshape(2, 7)
+    inputs_embeds = model.get_input_embeddings()(input_ids)
+    attention_mask = torch.ones_like(input_ids)
+    cu_seqlens = torch.tensor([0, 3, 6], dtype=torch.int32)
+    prepared = model.prepare_inputs_for_generation(
+        input_ids=input_ids,
+        past_key_values=cache,
+        attention_mask=attention_mask,
+        inputs_embeds=inputs_embeds,
+        next_sequence_length=3,
+        is_first_iteration=first_iteration,
+        cu_seqlens=cu_seqlens,
+    )
+    if first_iteration:
+        assert prepared['input_ids'] is None
+        torch.testing.assert_close(prepared['inputs_embeds'], inputs_embeds[:, -3:])
+    else:
+        torch.testing.assert_close(prepared['input_ids'], input_ids[:, -3:])
+        assert prepared.get('inputs_embeds') is None
+    assert prepared['attention_mask'] is attention_mask
+    assert prepared['past_key_values'] is cache
+    assert prepared['cu_seqlens'] is cu_seqlens

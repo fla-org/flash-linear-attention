@@ -33,7 +33,7 @@ from fla.ops.gla import chunk_gla, fused_recurrent_gla
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
-    from fla.models.utils import Cache
+    from fla.models.cache_utils import Cache
 
 try:
     from flash_attn import flash_attn_func, flash_attn_varlen_func

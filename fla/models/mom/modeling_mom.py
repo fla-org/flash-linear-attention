@@ -14,27 +14,24 @@ from typing import TYPE_CHECKING, Optional
 
 import torch
 import torch.nn as nn
+from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
-from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
 
 from fla.layers import MomAttention
 from fla.layers.attn import Attention
-from fla.models.hybrid import get_hybrid_attention_spec
+from fla.models.cache_utils import Cache
+from fla.models.generation_utils import FLAUnsupportedCacheGenerationMixin
+from fla.models.modeling_layers import get_attention_spec
+from fla.models.modeling_utils import FLAPreTrainedModel
 from fla.models.mom.configuration_mom import MomConfig
-from fla.models.utils import Cache, FLAUnsupportedCacheGenerationMixin
-from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
 from fla.modules import GatedMLP as MomMLP
+from fla.modules import RMSNorm
 from fla.ops.attnres import fused_attnres
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
-
-try:
-    from transformers.modeling_layers import GradientCheckpointingLayer
-except ImportError:
-    from fla.models.modeling_layers import GradientCheckpointingLayer
 
 logger = logging.get_logger(__name__)
 
@@ -128,7 +125,7 @@ class MomBlock(GradientCheckpointingLayer):
         self.hidden_size = config.hidden_size
 
         self.attn_norm = RMSNorm(hidden_size=config.hidden_size, eps=config.norm_eps, dtype=torch.float32)
-        attn_spec = get_hybrid_attention_spec(config.attn, layer_idx=layer_idx)
+        attn_spec = get_attention_spec(config.attn, layer_idx=layer_idx)
         if attn_spec is not None:
             self.attn = Attention(
                 hidden_size=config.hidden_size,
@@ -267,7 +264,7 @@ class MomBlock(GradientCheckpointingLayer):
         return outputs
 
 
-class MomPreTrainedModel(PreTrainedModel):
+class MomPreTrainedModel(FLAPreTrainedModel):
 
     config_class = MomConfig
     supports_gradient_checkpointing = True
@@ -368,7 +365,7 @@ class MomModel(MomPreTrainedModel):
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         use_cache = use_cache if use_cache is not None else (self.config.use_cache if not self.training else False)
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = return_dict if return_dict is not None else self.config.return_dict
 
         # retrieve input_ids and inputs_embeds
         if input_ids is not None and inputs_embeds is not None:
@@ -448,7 +445,7 @@ class MomCausalLMOutputWithPast(CausalLMOutputWithPast):
 
 class MomForCausalLM(MomPreTrainedModel, FLAUnsupportedCacheGenerationMixin):
 
-    _tied_weights_keys = ["lm_head.weight"]
+    _tied_weights_keys = {"lm_head.weight": "model.embeddings.weight"}
 
     def __init__(self, config):
         super().__init__(config)
@@ -491,14 +488,16 @@ class MomForCausalLM(MomPreTrainedModel, FLAUnsupportedCacheGenerationMixin):
         output_attentions: bool | None = None,
         output_hidden_states: bool | None = None,
         return_dict: bool | None = None,
-        num_logits_to_keep: int | None = 0,
+        num_logits_to_keep: int | torch.Tensor | None = 0,
+        num_items_in_batch: int | torch.Tensor | None = None,
+        logits_to_keep: int | torch.Tensor | None = None,
         **kwargs: Unpack[dict],
     ) -> tuple | CausalLMOutputWithPast:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = return_dict if return_dict is not None else self.config.return_dict
 
         outputs = self.model(
             input_ids=input_ids,
@@ -513,44 +512,20 @@ class MomForCausalLM(MomPreTrainedModel, FLAUnsupportedCacheGenerationMixin):
         )
 
         hidden_states = outputs[0]
-        fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training
-        logits = None if fuse_linear_and_cross_entropy else self.lm_head(
-            hidden_states
-            if labels is not None or num_logits_to_keep is None
-            else hidden_states[:, -num_logits_to_keep:]
+
+        loss, logits = self._compute_logits_and_loss(
+            hidden_states=hidden_states,
+            labels=labels,
+            logits_to_keep=num_logits_to_keep if logits_to_keep is None else logits_to_keep,
+            num_items_in_batch=num_items_in_batch,
+            fuse_linear_cross_entropy=self.config.fuse_cross_entropy and self.training,
+            use_l2warp=False,
         )
 
-        loss = None
         aux_loss = None
         if labels is not None:
-            if self.config.fuse_cross_entropy:
-                if fuse_linear_and_cross_entropy:
-                    loss_fct = FusedLinearCrossEntropyLoss()
-                else:
-                    loss_fct = FusedCrossEntropyLoss(inplace_backward=True)
-            else:
-                loss_fct = nn.CrossEntropyLoss()
-            # Enable model parallelism
-            labels = labels.to(hidden_states.device)
-            labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], loss_fct.ignore_index)), 1)
-            if fuse_linear_and_cross_entropy:
-                loss = loss_fct(hidden_states.view(-1, self.config.hidden_size),
-                                labels.view(-1),
-                                self.lm_head.weight,
-                                self.lm_head.bias)
-            else:
-                loss = loss_fct(logits.view(-1, self.config.vocab_size), labels.view(-1))
-
-            aux_loss = load_balancing_loss_func(
-                outputs.router_logits,
-                self.num_memories,
-                self.topk,
-                attention_mask,
-            )
-
-            # print(aux_loss)
-
-            loss += aux_loss.to(loss.device) * self.aux_loss_scale
+            aux_loss = load_balancing_loss_func(outputs.router_logits, self.num_memories, self.topk, attention_mask)
+            loss = loss + aux_loss.to(loss.device) * self.aux_loss_scale
 
         if not return_dict:
             output = (logits,) + outputs[1:]

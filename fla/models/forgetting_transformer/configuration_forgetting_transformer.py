@@ -7,10 +7,10 @@
 
 import warnings
 
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
 
-class ForgettingTransformerConfig(PretrainedConfig):
+class ForgettingTransformerConfig(PreTrainedConfig):
 
     model_type = 'forgetting_transformer'
     keys_to_ignore_at_inference = ['past_key_values']
