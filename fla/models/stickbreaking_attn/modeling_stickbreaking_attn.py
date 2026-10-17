@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
+from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.stickbreaking_attn import StickBreakingAttention
@@ -19,12 +20,7 @@ from fla.models.transformer.modeling_transformer import TransformerForCausalLM, 
 from fla.modules import GatedMLP, RMSNorm
 
 if TYPE_CHECKING:
-    from fla.models.utils import Cache
-
-try:
-    from transformers.modeling_layers import GradientCheckpointingLayer
-except ImportError:
-    from fla.models.modeling_layers import GradientCheckpointingLayer
+    from fla.models.cache_utils import Cache
 
 
 class StickBreakingAttentionBlock(GradientCheckpointingLayer):
@@ -154,7 +150,7 @@ class StickBreakingAttentionForCausalLM(TransformerForCausalLM):
         output_attentions: bool | None = None,
         output_hidden_states: bool | None = None,
         return_dict: bool | None = None,
-        logits_to_keep: int | None = 0,
+        logits_to_keep: int | torch.Tensor | None = 0,
         cu_seqlens: torch.LongTensor | None = None,
         **kwargs,
     ):

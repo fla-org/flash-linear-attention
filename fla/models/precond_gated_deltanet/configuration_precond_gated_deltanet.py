@@ -7,10 +7,10 @@
 
 import warnings
 
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
 
-class PrecondGatedDeltaNetConfig(PretrainedConfig):
+class PrecondGatedDeltaNetConfig(PreTrainedConfig):
     model_type = 'precond_gated_deltanet'
     keys_to_ignore_at_inference = ['past_key_values']
 

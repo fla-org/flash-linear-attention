@@ -48,15 +48,15 @@ def test_fuse_linear_cross_entropy(config_class):
     labels = input_ids.clone()
 
     with torch.no_grad():
-        expected = model(input_ids, labels=labels).loss
+        expected = model(input_ids, labels=labels, use_cache=False).loss
 
         model.config.fuse_linear_cross_entropy = True
-        outputs = model(input_ids, labels=labels)
+        outputs = model(input_ids, labels=labels, use_cache=False)
         assert outputs.logits is None
         assert_close("loss", expected, outputs.loss, 0.02)
 
         # the generate path passes no labels; logits must still be materialized
-        outputs = model(input_ids)
+        outputs = model(input_ids, use_cache=False)
         assert outputs.logits is not None
-        output_ids = model.generate(input_ids[:, :T // 2], max_new_tokens=2)
+        output_ids = model.generate(input_ids[:, :T // 2], max_new_tokens=2, use_cache=config_class is not DeltaFormerConfig)
     assert output_ids.shape[1] == T // 2 + 2

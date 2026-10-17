@@ -11,7 +11,7 @@ import pytest
 import torch
 
 from fla.layers import CyclicFlowAttention
-from fla.models.utils import Cache
+from fla.models.cache_utils import Cache
 from fla.utils import IS_NVIDIA, assert_close, device
 
 pytestmark = pytest.mark.skipif(not IS_NVIDIA, reason='CyFA kernels currently require NVIDIA GPUs')

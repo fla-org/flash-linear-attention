@@ -10,10 +10,10 @@
 
 import warnings
 
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
 
-class ParallaxConfig(PretrainedConfig):
+class ParallaxConfig(PreTrainedConfig):
 
     model_type = 'parallax'
     keys_to_ignore_at_inference = ['past_key_values']

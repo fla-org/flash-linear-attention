@@ -14,6 +14,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.backends import dispatch
 from fla.ops.utils import prepare_chunk_indices
 
 
@@ -425,6 +426,7 @@ def _atk_backward_chunk_summary(
     tl.atomic_add(gbeta_ptr, gbeta_val, mask=mask_T)
 
 
+@dispatch('atk')
 def chunk_atk_bwd(
     k: torch.Tensor,
     g_raw: torch.Tensor,

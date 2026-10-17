@@ -7,12 +7,12 @@
 
 import warnings
 
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
-from fla.models.hybrid import HybridAttentionConfig, _HybridAttentionConfigMixin
+from fla.models.modeling_layers import AttentionConfig, AttentionConfigBase
 
 
-class HGRNConfig(_HybridAttentionConfigMixin, PretrainedConfig):
+class HGRNConfig(AttentionConfigBase, PreTrainedConfig):
 
     model_type = 'hgrn'
     keys_to_ignore_at_inference = ['past_key_values']
@@ -32,7 +32,7 @@ class HGRNConfig(_HybridAttentionConfigMixin, PretrainedConfig):
         hidden_act: str = "swish",
         elementwise_affine: bool | None = True,
         norm_eps: float = 1e-6,
-        attn: HybridAttentionConfig = None,
+        attn: AttentionConfig = None,
         use_cache: bool = True,
         pad_token_id: int | None = None,
         bos_token_id: int = 1,

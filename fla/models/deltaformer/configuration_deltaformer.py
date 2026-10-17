@@ -9,12 +9,12 @@ from __future__ import annotations
 
 import warnings
 
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
-from fla.models.hybrid import HybridAttentionConfig, _HybridAttentionConfigMixin
+from fla.models.modeling_layers import AttentionConfig, AttentionConfigBase
 
 
-class DeltaFormerConfig(_HybridAttentionConfigMixin, PretrainedConfig):
+class DeltaFormerConfig(AttentionConfigBase, PreTrainedConfig):
     model_type = 'deltaformer'
     keys_to_ignore_at_inference = ['past_key_values']
 
@@ -35,7 +35,7 @@ class DeltaFormerConfig(_HybridAttentionConfigMixin, PretrainedConfig):
         qk_norm: bool = False,
         rope_theta: float = 10000.,
         rope_max_position_embeddings: int | None = None,
-        attn: HybridAttentionConfig = None,
+        attn: AttentionConfig = None,
         use_cache: bool = True,
         pad_token_id: int | None = None,
         bos_token_id: int = 1,

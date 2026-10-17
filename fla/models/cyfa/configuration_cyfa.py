@@ -13,10 +13,10 @@ from __future__ import annotations
 
 import warnings
 
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
 
-class CyclicFlowAttentionConfig(PretrainedConfig):
+class CyclicFlowAttentionConfig(PreTrainedConfig):
     model_type = "cyclic_flow_attention"
     keys_to_ignore_at_inference = ["past_key_values"]
 
