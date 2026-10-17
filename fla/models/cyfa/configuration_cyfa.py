@@ -11,9 +11,9 @@
 
 from __future__ import annotations
 
-import warnings
-
 from transformers.configuration_utils import PreTrainedConfig
+
+from fla.models.configuration_utils import validate_loss_config
 
 
 class CyclicFlowAttentionConfig(PreTrainedConfig):
@@ -81,16 +81,7 @@ class CyclicFlowAttentionConfig(PreTrainedConfig):
         self.use_l2warp = use_l2warp
         self.vocab_size = vocab_size
 
-        if fuse_cross_entropy and fuse_linear_cross_entropy:
-            raise ValueError(
-                "`fuse_cross_entropy` and `fuse_linear_cross_entropy` cannot be True at the same time.",
-            )
-        if fuse_linear_cross_entropy:
-            warnings.warn(
-                "`fuse_linear_cross_entropy` is enabled, which can improve memory efficiency "
-                "at the potential cost of reduced precision. "
-                "If you observe issues such as loss divergence, consider disabling this setting.",
-            )
+        validate_loss_config(fuse_cross_entropy=fuse_cross_entropy, fuse_linear_cross_entropy=fuse_linear_cross_entropy)
 
         super().__init__(
             pad_token_id=pad_token_id,

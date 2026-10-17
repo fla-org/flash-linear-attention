@@ -21,8 +21,9 @@ from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.rodimus import RodimusAttention, SlidingWindowSharedKeyAttention, align_multiple
 from fla.models.cache_utils import Cache
+from fla.models.configuration_utils import get_attention_spec
 from fla.models.generation_utils import FLAUnsupportedCacheGenerationMixin
-from fla.models.modeling_layers import get_attention, get_attention_spec
+from fla.models.modeling_layers import get_attention
 from fla.models.modeling_utils import FLAPreTrainedModel
 from fla.models.rodimus.configuration_rodimus import RodimusConfig
 from fla.modules import GatedMLP as RodimusMLP

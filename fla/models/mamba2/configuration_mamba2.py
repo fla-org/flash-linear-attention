@@ -19,9 +19,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import warnings
-
 from transformers.configuration_utils import PreTrainedConfig
+
+from fla.models.configuration_utils import validate_loss_config
 
 
 class Mamba2Config(PreTrainedConfig):
@@ -180,16 +180,7 @@ class Mamba2Config(PreTrainedConfig):
         if dt_init_floor <= 0:
             raise ValueError("`dt_init_floor` must be > 0.")
 
-        if fuse_cross_entropy and fuse_linear_cross_entropy:
-            raise ValueError(
-                "`fuse_cross_entropy` and `fuse_linear_cross_entropy` cannot be True at the same time.",
-            )
-        if fuse_linear_cross_entropy:
-            warnings.warn(
-                "`fuse_linear_cross_entropy` is enabled, which can improves memory efficiency "
-                "at the potential cost of reduced precision. "
-                "If you observe issues like loss divergence, consider disabling this setting.",
-            )
+        validate_loss_config(fuse_cross_entropy=fuse_cross_entropy, fuse_linear_cross_entropy=fuse_linear_cross_entropy)
 
         super().__init__(
             bos_token_id=bos_token_id,
