@@ -13,6 +13,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.gdn2.gate import gdn2_chunk_gate
 from fla.ops.kda.backends.triton_ascend.chunk_bwd import chunk_kda_bwd_kernel_wy_k_part_npu
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 from fla.ops.utils.op import exp2
@@ -359,6 +360,7 @@ def chunk_gdn2_bwd_wy_dqkg_fused_npu(
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
     state_v_first: bool = False,
+    g_raw: torch.Tensor | None = None,
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = chunk_size
@@ -412,11 +414,13 @@ def chunk_gdn2_bwd_wy_dqkg_fused_npu(
         T_CONTIG=t_contig,
     )
 
+    g_suffix = gdn2_chunk_gate(g_raw, cu_seqlens, chunk_indices, BT) if g_raw is not None else None
     k_part_kwargs = dict(
         q=q,
         k=k,
         v_new=v_new,
         g=g,
+        g_suffix=g_suffix,
         h=h,
         do=do,
         dh=dh,
