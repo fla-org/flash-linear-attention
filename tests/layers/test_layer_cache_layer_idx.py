@@ -13,6 +13,7 @@ from fla.layers.comba import Comba
 from fla.layers.delta_net import DeltaNet
 from fla.layers.gated_deltanet import GatedDeltaNet
 from fla.layers.gated_deltaproduct import GatedDeltaProduct
+from fla.layers.gka import GatedKalmaNet
 from fla.layers.gla import GatedLinearAttention
 from fla.layers.gsa import GatedSlotAttention
 from fla.layers.hgrn import HGRNAttention
@@ -126,6 +127,11 @@ CACHE_REQUIRES_LAYER_IDX_CASES = [
         lambda: MesaNet(hidden_size=16, num_heads=4),
         torch.randn(1, 2, 16),
         id="mesa_net",
+    ),
+    pytest.param(
+        lambda: GatedKalmaNet(hidden_size=16, num_heads=4, head_dim=16),
+        torch.randn(1, 2, 16),
+        id="gka",
     ),
     pytest.param(
         lambda: KimiDeltaAttention(hidden_size=16, num_heads=4),
