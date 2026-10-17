@@ -150,7 +150,7 @@ class StickBreakingAttentionForCausalLM(TransformerForCausalLM):
         output_attentions: bool | None = None,
         output_hidden_states: bool | None = None,
         return_dict: bool | None = None,
-        logits_to_keep: int | None = 0,
+        logits_to_keep: int | torch.Tensor | None = 0,
         cu_seqlens: torch.LongTensor | None = None,
         **kwargs,
     ):

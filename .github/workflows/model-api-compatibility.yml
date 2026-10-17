@@ -30,4 +30,4 @@ jobs:
           pip install torch==2.7.0 --index-url https://download.pytorch.org/whl/cpu
           pip install -e '.[cpu,test]' 'transformers${{ matrix.transformers }}' setuptools wheel
       - name: Check model registration, checkpoints, caches, and generation
-        run: python -m pytest tests/models/test_transformers.py tests/models/test_cache.py tests/models/test_generation_utils.py tests/test_split_package_release.py -q
+        run: python -m pytest tests/models/test_transformers.py tests/models/test_causal_lm_loss.py tests/models/test_cache.py tests/models/test_generation_utils.py tests/test_split_package_release.py -q

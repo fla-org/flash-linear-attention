@@ -24,9 +24,8 @@ from fla.models.generation_utils import FLAUnsupportedCacheGenerationMixin
 from fla.models.modeling_layers import get_attention
 from fla.models.modeling_utils import FLAPreTrainedModel
 from fla.models.rwkv7.configuration_rwkv7 import RWKV7Config
-from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, LayerNorm
+from fla.modules import LayerNorm
 from fla.modules.activations import ACT2FN
-from fla.modules.l2warp import l2_warp
 from fla.modules.token_shift import token_shift
 
 if TYPE_CHECKING:
@@ -464,7 +463,8 @@ class RWKV7ForCausalLM(RWKV7PreTrainedModel, FLAUnsupportedCacheGenerationMixin)
         output_attentions: bool | None = None,
         output_hidden_states: bool | None = None,
         return_dict: bool | None = None,
-        logits_to_keep: int | None = 0,
+        logits_to_keep: int | torch.Tensor | None = 0,
+        num_items_in_batch: int | torch.Tensor | None = None,
         **kwargs: Unpack[dict],
     ) -> tuple | CausalLMOutputWithPast:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
@@ -487,35 +487,13 @@ class RWKV7ForCausalLM(RWKV7PreTrainedModel, FLAUnsupportedCacheGenerationMixin)
 
         hidden_states = outputs[0]
 
-        loss, logits = None, None
-        has_labels = (labels is not None) or (shift_labels is not None)
-        if not (self.config.fuse_linear_cross_entropy and has_labels):
-            logits = self.lm_head(
-                hidden_states
-                if has_labels or logits_to_keep is None
-                else hidden_states[:, -logits_to_keep:]
-            )
-        if has_labels:
-            if getattr(self, 'criterion', None) is None:
-                if self.config.fuse_linear_cross_entropy:
-                    criterion = FusedLinearCrossEntropyLoss(use_l2warp=self.config.use_l2warp)
-                elif self.config.fuse_cross_entropy:
-                    criterion = FusedCrossEntropyLoss(inplace_backward=True)
-                else:
-                    criterion = nn.CrossEntropyLoss()
-            else:
-                criterion = self.criterion
-
-            # shift_labels: See https://github.com/huggingface/transformers/pull/36607/files.
-            if shift_labels is None:
-                shift_labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], criterion.ignore_index)), 1)
-            shift_labels = shift_labels.to(hidden_states.device)
-
-            if self.config.fuse_linear_cross_entropy:
-                loss = criterion(hidden_states, shift_labels, self.lm_head.weight, self.lm_head.bias)
-            else:
-                loss = criterion(logits.view(shift_labels.numel(), -1), shift_labels.view(-1))
-                loss = l2_warp(loss, logits) if self.config.use_l2warp else loss
+        loss, logits = self._compute_logits_and_loss(
+            hidden_states=hidden_states,
+            labels=labels,
+            logits_to_keep=logits_to_keep,
+            num_items_in_batch=num_items_in_batch,
+            shift_labels=shift_labels,
+        )
 
         if not return_dict:
             output = (logits,) + outputs[1:]

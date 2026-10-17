@@ -25,8 +25,8 @@ from fla.models.generation_utils import FLAUnsupportedCacheGenerationMixin
 from fla.models.modeling_layers import get_attention_spec
 from fla.models.modeling_utils import FLAPreTrainedModel
 from fla.models.mom.configuration_mom import MomConfig
-from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
 from fla.modules import GatedMLP as MomMLP
+from fla.modules import RMSNorm
 from fla.ops.attnres import fused_attnres
 
 if TYPE_CHECKING:
@@ -488,7 +488,9 @@ class MomForCausalLM(MomPreTrainedModel, FLAUnsupportedCacheGenerationMixin):
         output_attentions: bool | None = None,
         output_hidden_states: bool | None = None,
         return_dict: bool | None = None,
-        num_logits_to_keep: int | None = 0,
+        num_logits_to_keep: int | torch.Tensor | None = 0,
+        num_items_in_batch: int | torch.Tensor | None = None,
+        logits_to_keep: int | torch.Tensor | None = None,
         **kwargs: Unpack[dict],
     ) -> tuple | CausalLMOutputWithPast:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
@@ -510,44 +512,20 @@ class MomForCausalLM(MomPreTrainedModel, FLAUnsupportedCacheGenerationMixin):
         )
 
         hidden_states = outputs[0]
-        fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training
-        logits = None if fuse_linear_and_cross_entropy else self.lm_head(
-            hidden_states
-            if labels is not None or num_logits_to_keep is None
-            else hidden_states[:, -num_logits_to_keep:]
+
+        loss, logits = self._compute_logits_and_loss(
+            hidden_states=hidden_states,
+            labels=labels,
+            logits_to_keep=num_logits_to_keep if logits_to_keep is None else logits_to_keep,
+            num_items_in_batch=num_items_in_batch,
+            fuse_linear_cross_entropy=self.config.fuse_cross_entropy and self.training,
+            use_l2warp=False,
         )
 
-        loss = None
         aux_loss = None
         if labels is not None:
-            if self.config.fuse_cross_entropy:
-                if fuse_linear_and_cross_entropy:
-                    loss_fct = FusedLinearCrossEntropyLoss()
-                else:
-                    loss_fct = FusedCrossEntropyLoss(inplace_backward=True)
-            else:
-                loss_fct = nn.CrossEntropyLoss()
-            # Enable model parallelism
-            labels = labels.to(hidden_states.device)
-            labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], loss_fct.ignore_index)), 1)
-            if fuse_linear_and_cross_entropy:
-                loss = loss_fct(hidden_states.view(-1, self.config.hidden_size),
-                                labels.view(-1),
-                                self.lm_head.weight,
-                                self.lm_head.bias)
-            else:
-                loss = loss_fct(logits.view(-1, self.config.vocab_size), labels.view(-1))
-
-            aux_loss = load_balancing_loss_func(
-                outputs.router_logits,
-                self.num_memories,
-                self.topk,
-                attention_mask,
-            )
-
-            # print(aux_loss)
-
-            loss += aux_loss.to(loss.device) * self.aux_loss_scale
+            aux_loss = load_balancing_loss_func(outputs.router_logits, self.num_memories, self.topk, attention_mask)
+            loss = loss + aux_loss.to(loss.device) * self.aux_loss_scale
 
         if not return_dict:
             output = (logits,) + outputs[1:]
