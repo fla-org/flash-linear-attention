@@ -14,9 +14,8 @@ from typing import TYPE_CHECKING, Optional
 import torch
 import torch.nn as nn
 from transformers.modeling_layers import GradientCheckpointingLayer
-from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
+from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.utils import logging
-from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.rwkv6 import LerpLinear, RWKV6Attention
 from fla.models.cache_utils import Cache
@@ -331,58 +330,3 @@ class RWKV6ForCausalLM(RWKV6PreTrainedModel, FLAForCausalLM, FLAUnsupportedCache
 
         # Initialize weights and apply final processing
         self.post_init()
-
-    @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
-    def forward(
-        self,
-        input_ids: torch.LongTensor = None,
-        attention_mask: torch.Tensor | None = None,
-        inputs_embeds: torch.Tensor | None = None,
-        past_key_values: Cache | None = None,
-        labels: torch.LongTensor | None = None,
-        use_cache: bool | None = None,
-        output_attentions: bool | None = None,
-        output_hidden_states: bool | None = None,
-        return_dict: bool | None = None,
-        logits_to_keep: int | torch.Tensor | None = 0,
-        num_items_in_batch: int | torch.Tensor | None = None,
-        **kwargs: Unpack[dict],
-    ) -> tuple | CausalLMOutputWithPast:
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        return_dict = return_dict if return_dict is not None else self.config.return_dict
-
-        outputs = self.model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            inputs_embeds=inputs_embeds,
-            past_key_values=past_key_values,
-            use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-            **kwargs,
-        )
-
-        hidden_states = outputs[0]
-
-        loss, logits = self._compute_logits_and_loss(
-            hidden_states=hidden_states,
-            labels=labels,
-            logits_to_keep=logits_to_keep,
-            num_items_in_batch=num_items_in_batch,
-        )
-
-        if not return_dict:
-            output = (logits,) + outputs[1:]
-            return (loss,) + output if loss is not None else output
-
-        return CausalLMOutputWithPast(
-            loss=loss,
-            logits=logits,
-            past_key_values=outputs.past_key_values,
-            hidden_states=outputs.hidden_states,
-            attentions=outputs.attentions,
-        )
