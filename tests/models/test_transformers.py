@@ -18,21 +18,9 @@ CONFIG_CLASSES = [getattr(models, name) for name in models.__all__ if name.endsw
 
 @pytest.mark.parametrize('config_class', CONFIG_CLASSES, ids=lambda cls: cls.model_type)
 @pytest.mark.parametrize('tie_word_embeddings', [False, True])
-def test_model_embedding_and_decoder_access(config_class, tie_word_embeddings):
-    if config_class is models.RWKV7Config and not torch._C.has_lapack:
-        pytest.skip('RWKV7 initialization requires LAPACK.')
-    config = config_class(
-        hidden_size=64,
-        num_heads=2,
-        num_hidden_layers=0,
-        num_self_decoder_layers=0,
-        intermediate_size=128,
-        vocab_size=64,
-        tie_word_embeddings=tie_word_embeddings,
-        fuse_norm=False,
-        fuse_cross_entropy=False,
-    )
-    model = AutoModelForCausalLM.from_config(config)
+def test_model_accessors(config_class, tie_word_embeddings, make_model):
+    torch.manual_seed(42)
+    model = make_model(config_class, tie_word_embeddings=tie_word_embeddings)
     decoder = model.model if hasattr(model, 'model') else model.backbone
     assert model.get_decoder() is decoder
     assert model.get_input_embeddings() is decoder.get_input_embeddings()
@@ -56,7 +44,7 @@ def test_model_embedding_and_decoder_access(config_class, tie_word_embeddings):
     torch.testing.assert_close(model.get_input_embeddings().weight[:64], original_weights, rtol=0, atol=0)
     assert (model.get_input_embeddings().weight is model.get_output_embeddings().weight) == tie_word_embeddings
     if hasattr(model, 'model'):
-        replacement = type(decoder)(config)
+        replacement = type(decoder)(model.config)
         model.set_decoder(decoder=replacement)
         assert model.model is replacement
         assert model.get_decoder() is replacement
@@ -64,23 +52,9 @@ def test_model_embedding_and_decoder_access(config_class, tie_word_embeddings):
 
 
 @pytest.mark.parametrize('config_class', CONFIG_CLASSES, ids=lambda cls: cls.model_type)
-def test_auto_model_checkpoint_round_trip(config_class, tmp_path):
+def test_checkpoint(config_class, make_model, tmp_path):
     torch.manual_seed(42)
-    if config_class is models.RWKV7Config and not torch._C.has_lapack:
-        pytest.skip('RWKV7 initialization requires LAPACK.')
-    config = config_class(
-        hidden_size=64,
-        num_heads=2,
-        num_hidden_layers=0,
-        num_self_decoder_layers=0,
-        intermediate_size=128,
-        vocab_size=64,
-        tie_word_embeddings=True,
-        fuse_norm=False,
-        fuse_cross_entropy=False,
-        downstream_config={'enabled': True},
-    )
-    model = AutoModelForCausalLM.from_config(config)
+    model = make_model(config_class, tie_word_embeddings=True, downstream_config={'enabled': True})
     assert model.can_generate()
     assert model.get_input_embeddings().weight is model.get_output_embeddings().weight
 
@@ -98,20 +72,12 @@ def test_auto_model_checkpoint_round_trip(config_class, tmp_path):
 
 @pytest.mark.parametrize('config_class', [models.GLAConfig, models.MambaConfig, models.TransformerConfig])
 @pytest.mark.parametrize('use_cache', [False, True])
-def test_generate_from_embeddings_matches_tokens(config_class, use_cache):
+def test_generate_inputs_embeds(config_class, use_cache, make_model):
     torch.manual_seed(42)
     if config_class is models.MambaConfig and device_name == 'cpu':
         pytest.skip('Mamba normalization requires an accelerator.')
-    config = config_class(
-        hidden_size=32,
-        num_hidden_layers=0,
-        vocab_size=32,
-        fuse_norm=False,
-        fuse_cross_entropy=False,
-        pad_token_id=0,
-        eos_token_id=None,
-    )
-    model = AutoModelForCausalLM.from_config(config).to(device_name).eval()
+    model = make_model(config_class, hidden_size=32, vocab_size=32, pad_token_id=0, eos_token_id=None)
+    model = model.to(device_name).eval()
     input_ids = torch.tensor([[1, 4, 3], [1, 5, 2]], device=device_name)
     kwargs = {'max_new_tokens': 3, 'do_sample': False, 'use_cache': use_cache}
     with torch.no_grad():
