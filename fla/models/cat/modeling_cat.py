@@ -25,13 +25,15 @@ from transformers.utils import logging
 from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.models.cat.configuration_cat import CATConfig
-from fla.models.utils import Cache, FLAGenerationMixin
+from fla.models.generation_utils import FLAGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm, RotaryEmbedding
 from fla.modules import GatedMLP as CATMLP
 from fla.modules.rotary import rotary_embedding
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
+
+    from fla.models.cache_utils import Cache
 
 
 # Adaptive CAT cycles power-of-two chunk sizes, each with a different FlexAttention

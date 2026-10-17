@@ -223,3 +223,17 @@ def test_normalization_imports_preserve_public_exports(run_python, disabled):
         """,
         FLA_DISABLE_BACKEND_DISPATCH=disabled,
     )
+
+
+@pytest.mark.parametrize(
+    ('module_name', 'names'),
+    [
+        ('cache_utils', ('Cache', 'FLACache', 'FLALayer', 'LegacyFLACache')),
+        ('generation_utils', ('FLAGenerationMixin', 'FLAUnsupportedCacheGenerationMixin')),
+    ],
+)
+def test_model_utility_imports(module_name, names):
+    legacy = importlib.import_module('fla.models.utils')
+    current = importlib.import_module(f'fla.models.{module_name}')
+    for name in names:
+        assert getattr(legacy, name) is getattr(current, name)

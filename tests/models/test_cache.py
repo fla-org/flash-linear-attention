@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from fla.models.utils import FLACache, FLALayer, LegacyFLACache
-from fla.utils import device
+from fla.utils import device_name as device
 
 
 # encode token positions into tensor values so window tail assertions are exact

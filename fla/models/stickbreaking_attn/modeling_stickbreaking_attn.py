@@ -20,7 +20,7 @@ from fla.models.transformer.modeling_transformer import TransformerForCausalLM, 
 from fla.modules import GatedMLP, RMSNorm
 
 if TYPE_CHECKING:
-    from fla.models.utils import Cache
+    from fla.models.cache_utils import Cache
 
 
 class StickBreakingAttentionBlock(GradientCheckpointingLayer):

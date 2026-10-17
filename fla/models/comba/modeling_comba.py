@@ -20,9 +20,10 @@ from transformers.utils import logging
 from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.comba import Comba
+from fla.models.cache_utils import Cache
 from fla.models.comba.configuration_comba import CombaConfig
+from fla.models.generation_utils import FLAUnsupportedCacheGenerationMixin
 from fla.models.modeling_layers import get_attention
-from fla.models.utils import Cache, FLAUnsupportedCacheGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
 from fla.modules import GatedMLP as CombaMLP
 from fla.modules.l2warp import l2_warp

@@ -21,7 +21,8 @@ from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.bitattn import BitAttention
 from fla.models.bitnet.configuration_bitnet import BitNetConfig
-from fla.models.utils import Cache, FLAGenerationMixin
+from fla.models.cache_utils import Cache
+from fla.models.generation_utils import FLAGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
 from fla.modules.activations import swiglu
 from fla.modules.fused_bitlinear import FusedBitLinear

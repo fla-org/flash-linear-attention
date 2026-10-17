@@ -22,7 +22,8 @@ from transformers.utils import logging
 from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.wall_attn import WallAttention
-from fla.models.utils import Cache, FLAGenerationMixin
+from fla.models.cache_utils import Cache
+from fla.models.generation_utils import FLAGenerationMixin
 from fla.models.wall_transformer.configuration_wall_transformer import WallTransformerConfig
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
 from fla.modules import GatedMLP as WallTransformerMLP

@@ -21,9 +21,10 @@ from transformers.utils import logging
 
 from fla.layers import MomAttention
 from fla.layers.attn import Attention
+from fla.models.cache_utils import Cache
+from fla.models.generation_utils import FLAUnsupportedCacheGenerationMixin
 from fla.models.modeling_layers import get_attention_spec
 from fla.models.mom.configuration_mom import MomConfig
-from fla.models.utils import Cache, FLAUnsupportedCacheGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
 from fla.modules import GatedMLP as MomMLP
 from fla.ops.attnres import fused_attnres

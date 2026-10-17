@@ -34,7 +34,7 @@ with warnings.catch_warnings():
     is_fast_path_available = selective_state_update is not None
 
 if TYPE_CHECKING:
-    from fla.models.utils import Cache
+    from fla.models.cache_utils import Cache
 
 logger = logging.get_logger(__name__)
 
