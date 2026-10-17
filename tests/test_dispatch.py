@@ -458,6 +458,8 @@ def test_dispatch_disabled(run_python, disabled):
         for owner in ['activations', 'rotary', 'grpo', 'fused_cross_entropy', 'fused_linear_cross_entropy', 'fused_kl_div']:
             assert f'modules.{owner}' not in backends._operation_registries
         assert 'flash_kda' not in backends._operation_registries['kda']._backends
+        assert 'fla.ops.attn.backends.gluon.parallel' not in sys.modules
+        assert 'fla.ops.attn.backends.gluon.decoding' not in sys.modules
         assert 'tilelang' not in sys.modules
         assert 'flash_kda' not in sys.modules
         assert 'fla.ops.kda.backends.triton_ascend.chunk_intra' not in sys.modules
