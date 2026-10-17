@@ -15,14 +15,15 @@ from fla.utils import IS_AMD, IS_NVIDIA, assert_close, device
 
 
 @pytest.mark.skipif(not (IS_NVIDIA or IS_AMD), reason="CUDA graph capture requires a CUDA/HIP device")
+@pytest.mark.parametrize('dtype', [torch.bfloat16, torch.float16], ids=['bf16', 'fp16'])
 @pytest.mark.parametrize('disable_recompute', [False, True], ids=['recompute', 'retain'])
 @pytest.mark.parametrize('use_gate_in_kernel', [False, True], ids=['log-gates', 'fused-gates'])
-def test_chunk_large_decay_graph(disable_recompute, use_gate_in_kernel):
+def test_chunk_large_decay_graph(dtype, disable_recompute, use_gate_in_kernel):
     """Captured forward and backward read changed gates and initial states on every replay."""
     torch.manual_seed(42)
     shape = (1, 65, 2, 64)
-    q, k = [F.normalize(torch.randn(shape, device=device), dim=-1).bfloat16() for _ in range(2)]
-    v = torch.randn(1, 65, 2, 32, dtype=torch.bfloat16, device=device) * 0.5
+    q, k = [F.normalize(torch.randn(shape, device=device), dim=-1).to(dtype) for _ in range(2)]
+    v = torch.randn(1, 65, 2, 32, dtype=dtype, device=device) * 0.5
     b = torch.rand_like(k)
     w = torch.rand_like(v)
     g = torch.full(shape, -1., device=device)

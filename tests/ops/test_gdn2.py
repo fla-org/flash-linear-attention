@@ -454,22 +454,24 @@ def test_chunk_large_decay(spike, write, disable_recompute):
 
 
 @pytest.mark.skipif(not (IS_NVIDIA or IS_AMD or IS_NPU), reason="CUDA/ROCm or Ascend NPU required")
-@pytest.mark.parametrize(('dtype', 'K', 'V'), [
-    pytest.param(torch.float32, 48, 32, id='fp32-k48-v32'),
-    pytest.param(torch.float16, 48, 32, id='fp16-k48-v32'),
-    pytest.param(torch.bfloat16, 48, 32, id='bf16-k48-v32'),
-    pytest.param(torch.bfloat16, 128, 64, id='bf16-k128-v64'),
-    pytest.param(torch.bfloat16, 256, 128, id='bf16-k256-v128'),
+@pytest.mark.parametrize(('dtype', 'K', 'V', 'gate_dtype', 'spike'), [
+    pytest.param(torch.float32, 48, 32, torch.float32, 1e8, id='fp32-k48-v32'),
+    pytest.param(torch.float16, 48, 32, torch.float32, 1e8, id='fp16-k48-v32'),
+    pytest.param(torch.bfloat16, 48, 32, torch.float32, 1e8, id='bf16-k48-v32'),
+    pytest.param(torch.bfloat16, 128, 64, torch.float32, 1e8, id='bf16-k128-v64'),
+    pytest.param(torch.bfloat16, 256, 128, torch.float32, 1e8, id='bf16-k256-v128'),
+    pytest.param(torch.float16, 48, 32, torch.float16, 200., id='fp16-gates-k48-v32'),
+    pytest.param(torch.bfloat16, 128, 64, torch.bfloat16, 1e8, id='bf16-gates-k128-v64'),
 ])
 @pytest.mark.parametrize('use_gate_in_kernel', [False, True], ids=['log-gates', 'fused-gates'])
 @pytest.mark.parametrize('varlen', [False, True], ids=['dense', 'varlen'])
-def test_chunk_large_decay_recurrence(dtype, K, V, use_gate_in_kernel, varlen):
+def test_chunk_large_decay_recurrence(dtype, K, V, gate_dtype, spike, use_gate_in_kernel, varlen):
     """Local decays preserve all gradients across partial chunks and carried states."""
     B, T, H = (1, 161, 2) if varlen else (2, 130, 2)
     q, k, v, g, b, w, A_log, dt_bias = _rand_inputs(B, T, H, H, K, V, dtype, gate_in_kernel=use_gate_in_kernel)
     q, k = F.normalize(q.float(), dim=-1).to(dtype), F.normalize(k.float(), dim=-1).to(dtype)
-    g = g.float()
-    g[:, [5, 15, 31, 47, 63, 64, 127], :, ::3] = 1e8 if use_gate_in_kernel else -1e8
+    g = g.to(gate_dtype)
+    g[:, [5, 15, 31, 47, 63, 64, 127], :, ::3] = spike if use_gate_in_kernel else -spike
     offsets = [0, 17, 82, T] if varlen else [0, T]
     cu = torch.tensor(offsets, dtype=torch.int32, device=device) if varlen else None
     h0 = torch.randn(len(offsets) - 1 if varlen else B, H, K, V, device=device)
