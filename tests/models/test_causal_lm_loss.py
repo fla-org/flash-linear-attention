@@ -17,6 +17,16 @@ from fla.models import GLAConfig, KDAConfig, MomConfig, TransformerConfig
 from fla.utils import assert_close, device_name
 
 
+@pytest.fixture
+def full_precision_matmul():
+    precision = torch.get_float32_matmul_precision()
+    torch.set_float32_matmul_precision('highest')
+    try:
+        yield
+    finally:
+        torch.set_float32_matmul_precision(precision)
+
+
 @pytest.mark.parametrize('config_class', [GLAConfig, KDAConfig, TransformerConfig])
 @pytest.mark.parametrize('num_items', [None, 11, torch.tensor(11)])
 @pytest.mark.parametrize('custom_criterion', [None, 'mean', 'sum'])
@@ -56,7 +66,7 @@ def test_causal_lm_loss_matches_shifted_reference(config_class, num_items, custo
 )])
 @pytest.mark.parametrize('selection', [None, 0, 2, torch.tensor([0, 2, 5])])
 @pytest.mark.parametrize('return_dict', [False, True])
-def test_causal_lm_logits_selection(config_class, selection, return_dict):
+def test_causal_lm_logits_selection(config_class, selection, return_dict, full_precision_matmul):
     torch.manual_seed(42)
     model = AutoModelForCausalLM.from_config(config_class(
         hidden_size=32, num_hidden_layers=0, vocab_size=32, fuse_norm=False, fuse_cross_entropy=False,
