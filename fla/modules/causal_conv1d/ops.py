@@ -1042,7 +1042,9 @@ def causal_conv1d(
         chunk_indices (torch.Tensor, Optional):
             Chunk indices for variable-length sequences. Default: `None`.
         cp_context (FLACPContext, Optional):
-            Context-parallel sequence metadata. Default: `None`.
+            Context-parallel sequence metadata. CP does not support initial or final states.
+            CUDA CP requires contiguous layout, width 2–4, and at least `W - 1` tokens per rank.
+            The `mix` backend uses Triton in CP mode. Default: `None`.
 
     Returns:
         tuple[torch.Tensor, torch.Tensor | None]:
