@@ -13,6 +13,7 @@ from .comba import Comba
 from .cyfa import CyclicFlowAttention
 from .delta_net import DeltaNet
 from .deltaformer import DeltaFormerAttention
+from .diag_kdn import DiagonalKalmanDeltaNetwork
 from .forgetting_attn import ForgettingAttention
 from .gated_deltanet import GatedDeltaNet
 from .gated_deltaproduct import GatedDeltaProduct
@@ -57,6 +58,7 @@ __all__ = [
     'CyclicFlowAttention',
     'DeltaFormerAttention',
     'DeltaNet',
+    'DiagonalKalmanDeltaNetwork',
     'ForgettingAttention',
     'GatedDeltaNet',
     'GatedDeltaNet2',
