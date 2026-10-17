@@ -5,8 +5,13 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+from datetime import timedelta
+
 import pytest
 import torch
+import torch.distributed as dist
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.tensor import Replicate, Shard
 from transformers import AutoModelForCausalLM
 
 from fla.models import RWKV7Config
@@ -32,3 +37,28 @@ def make_model():
         return AutoModelForCausalLM.from_config(config)
 
     return create
+
+
+@pytest.fixture
+def triton_conv(monkeypatch):
+    monkeypatch.setenv('FLA_CONV_BACKEND', 'triton')
+
+
+@pytest.fixture(params=[None, Replicate(), Shard(0)], ids=['tensor', 'replicate', 'shard'])
+def init_layout(request, tmp_path):
+    if request.param is None:
+        yield None
+        return
+    if not dist.is_gloo_available():
+        pytest.skip('CPU DTensor initialization requires Gloo.')
+    dist.init_process_group(
+        backend='gloo',
+        init_method=f'file://{tmp_path / "store"}',
+        rank=0,
+        world_size=1,
+        timeout=timedelta(seconds=30),
+    )
+    try:
+        yield init_device_mesh('cpu', (1,)), (request.param,)
+    finally:
+        dist.destroy_process_group()

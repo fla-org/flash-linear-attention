@@ -10,10 +10,10 @@ import torch
 
 from fla.models import RavenConfig
 
-from .test_modeling_base import run_test_generation, run_test_model_forward_backward
-from .test_modeling_utils import create_model_and_config
+from .utils import check_forward, check_generation, create_model_and_config
 
 
+@pytest.mark.parametrize('varlen', [False, True], ids=['dense', 'varlen'])
 @pytest.mark.parametrize(
     ['L', 'B', 'T', 'H', 'D', 'expand_v', 'use_l2warp', 'decay_type', 'use_output_gate', 'dtype'],
     [
@@ -36,8 +36,9 @@ def test_modeling(
     decay_type: str,
     use_output_gate: bool,
     dtype: torch.dtype,
+    varlen: bool,
 ):
-    run_test_model_forward_backward(
+    check_forward(
         L,
         B,
         T,
@@ -50,9 +51,11 @@ def test_modeling(
         use_output_gate=use_output_gate,
         expand_v=expand_v,
         dtype=dtype,
+        varlen=varlen,
     )
 
 
+@pytest.mark.usefixtures('triton_conv')
 @pytest.mark.parametrize(
     ['L', 'B', 'T', 'H', 'D', 'use_rope', 'dtype'],
     [
@@ -73,9 +76,9 @@ def test_generation(
     dtype: torch.dtype,
 ):
     if not use_rope:
-        run_test_generation(L, B, T, H, D, RavenConfig, dtype)
+        check_generation(L, B, T, H, D, RavenConfig, dtype)
         return
     # `use_rope=True` exercises the RoPE position offset under left-padded prefill,
     # a path the default config (`use_rope=False`) leaves uncovered.
     model, config = create_model_and_config(RavenConfig, L, H, D, dtype=dtype, use_rope=True)
-    run_test_generation(L, B, T, H, D, RavenConfig, dtype, model=model, config=config)
+    check_generation(L, B, T, H, D, RavenConfig, dtype, model=model, config=config)

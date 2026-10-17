@@ -191,3 +191,28 @@ def test_backend_changes_select_original_test_files(repository_finder, changed, 
     changed_files = [changed, *find_backend_op_files([changed], root)]
     tests = repository_finder.find_dependent_tests([root / path for path in changed_files])
     assert {str(root / path) for path in expected} <= tests
+
+
+@pytest.mark.parametrize(
+    ('changed', 'expected'),
+    [
+        ('tests/models/utils.py', {'tests/models/test_modeling.py'}),
+        ('tests/models/conftest.py', {'tests/models/test_modeling.py', 'tests/models/test_cache.py'}),
+        ('fla/models/config.py', {'tests/models/test_modeling.py', 'tests/models/test_cache.py'}),
+    ],
+)
+def test_model_support_dependencies(tmp_path, changed, expected):
+    sources = {
+        'fla/models/config.py': 'class Config: pass\n',
+        'tests/models/conftest.py': 'from fla.models.config import Config\ndef make_model(): return Config()\n',
+        'tests/models/utils.py': 'def check_forward(): pass\n',
+        'tests/models/test_modeling.py': 'from .utils import check_forward\ndef test_forward(make_model): pass\n',
+        'tests/models/test_cache.py': 'def test_cache(): pass\n',
+        'tests/test_other.py': 'def test_other(): pass\n',
+    }
+    for name, source in sources.items():
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source)
+    finder = DependencyFinder(search_dirs=[tmp_path / 'fla'], test_dir=tmp_path / 'tests', project_root=tmp_path)
+    assert finder.find_dependent_tests([tmp_path / changed]) == {str(tmp_path / path) for path in expected}

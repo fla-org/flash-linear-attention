@@ -10,12 +10,10 @@ import torch
 
 from fla.models import PrecondKDAConfig
 
-from .test_modeling_base import run_test_generation, run_test_model_forward_backward
+from .utils import check_forward, check_generation
 
 
-# ===================================================================================
-# Test for Modeling (Forward/Backward Pass)
-# ===================================================================================
+@pytest.mark.parametrize('varlen', [False, True], ids=['dense', 'varlen'])
 @pytest.mark.parametrize(
     ['L', 'B', 'T', 'H', 'D', 'dtype'],
     [
@@ -32,13 +30,12 @@ def test_modeling(
     H: int,
     D: int,
     dtype: torch.dtype,
+    varlen: bool,
 ):
-    run_test_model_forward_backward(L, B, T, H, D, PrecondKDAConfig, use_l2warp=False, dtype=dtype)
+    check_forward(L, B, T, H, D, PrecondKDAConfig, use_l2warp=False, dtype=dtype, varlen=varlen)
 
 
-# ===================================================================================
-# Test for Generation
-# ===================================================================================
+@pytest.mark.usefixtures('triton_conv')
 @pytest.mark.parametrize(
     ['L', 'B', 'T', 'H', 'D', 'dtype'],
     [
@@ -56,4 +53,4 @@ def test_generation(
     D: int,
     dtype: torch.dtype,
 ):
-    run_test_generation(L, B, T, H, D, PrecondKDAConfig, dtype)
+    check_generation(L, B, T, H, D, PrecondKDAConfig, dtype)

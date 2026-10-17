@@ -12,13 +12,10 @@ from transformers import AutoModelForCausalLM
 from fla.models import GatedDeltaProductConfig
 from fla.utils import device
 
-from .test_modeling_base import run_test_generation, run_test_model_forward_backward
-from .test_modeling_utils import init_weights_recursively
+from .utils import _init_weights, check_forward, check_generation
 
 
-# ===================================================================================
-# Test for Modeling (Forward/Backward Pass)
-# ===================================================================================
+@pytest.mark.parametrize('varlen', [False, True], ids=['dense', 'varlen'])
 @pytest.mark.parametrize(
     ['L', 'B', 'T', 'H', 'D', 'use_l2warp', 'attnres_block_size', 'dtype'],
     [
@@ -41,8 +38,9 @@ def test_modeling(
     use_l2warp: bool,
     attnres_block_size: int | None,
     dtype: torch.dtype,
+    varlen: bool,
 ):
-    run_test_model_forward_backward(
+    check_forward(
         L,
         B,
         T,
@@ -52,12 +50,11 @@ def test_modeling(
         use_l2warp=use_l2warp,
         attnres_block_size=attnres_block_size,
         dtype=dtype,
+        varlen=varlen,
     )
 
 
-# ===================================================================================
-# Test for Generation
-# ===================================================================================
+@pytest.mark.usefixtures('triton_conv')
 @pytest.mark.parametrize(
     ['L', 'B', 'T', 'use_forget_gate', 'num_householders', 'dtype'],
     [
@@ -81,6 +78,6 @@ def test_generation(
     config.use_forget_gate = use_forget_gate
     config.num_householders = num_householders
     model = AutoModelForCausalLM.from_config(config)
-    model.apply(init_weights_recursively)
+    model.apply(_init_weights)
     model = model.to(dtype).to(device)
-    run_test_generation(L, B, T, None, None, GatedDeltaProductConfig, dtype, model=model, config=config, tol=3e-3)
+    check_generation(L, B, T, None, None, GatedDeltaProductConfig, dtype, model=model, config=config, tol=3e-3)

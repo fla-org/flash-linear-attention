@@ -5,31 +5,78 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-import os
+import math
 
 import pytest
 import torch
-from transformers.configuration_utils import PretrainedConfig
+from torch import nn
+from transformers import AutoModelForCausalLM, PretrainedConfig
 
 from fla.utils import IS_INTEL_ALCHEMIST, IS_NVIDIA_HOPPER, assert_close, device
 
-from .test_modeling_utils import (
-    GENERATION_UNSUPPORTED,
-    HOPPER_EXCLUSIVE,
-    MODELING_UNSUPPORTED_VARLEN,
-    NOT_READY_FOR_TESTING,
-    create_model_and_config,
-)
+MODELING_UNSUPPORTED_VARLEN = [
+    "ABCConfig", "CATConfig", "ForgettingTransformerConfig", "LinearAttentionConfig",
+    "Mamba2Config", "MambaConfig", "MesaNetConfig", "SambaConfig",
+    "RodimusConfig", "WallTransformerConfig",
+]
+
+NOT_READY_FOR_TESTING = ['RodimusConfig']
+
+HOPPER_EXCLUSIVE = []
+
+GENERATION_UNSUPPORTED = [
+    "ABCConfig",
+    "CATConfig",
+    "DeltaFormerConfig",
+    "MoBAConfig",
+    "WallTransformerConfig",
+]
 
 
-# ===================================================================================
-# BASE TEST FOR MODELING (FORWARD/BACKWARD PASS)
-# ===================================================================================
-@pytest.mark.skipif(
-    IS_INTEL_ALCHEMIST,
-    reason="Skipping test on Intel Alchemist due to known issues with SRAM.",
-)
-def run_test_model_forward_backward(
+def create_model_and_config(config_class, L, H, D, dtype, **kwargs):
+    config_params = {
+        'hidden_size': H * D,
+        'num_hidden_layers': L,
+        **({'num_heads': H} if config_class.__name__ != 'NSAConfig' else {}),
+        **kwargs,
+    }
+    config = config_class(**config_params)
+    model = AutoModelForCausalLM.from_config(config)
+    model.apply(_init_weights)
+    model.to(dtype).to(device)
+    return model, config
+
+
+def _init_weights(module):
+    """Use asymmetric weights to expose numerical-path differences."""
+    if isinstance(module, (nn.Linear, nn.Conv1d)):
+        nn.init.kaiming_normal_(module.weight, a=math.sqrt(5))
+        with torch.no_grad():
+            shape = module.weight.shape
+            if len(shape) > 1:
+                quarter_size = shape[0] // 4
+                module.weight[:quarter_size] *= 1.2
+                module.weight[-quarter_size:] *= 0.8
+                if shape[0] == shape[1]:
+                    idx = torch.arange(min(shape[0], shape[1]))
+                    module.weight[idx, idx] += 0.05
+        if module.bias is not None:
+            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(module.weight)
+            bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
+            nn.init.uniform_(module.bias, -bound, bound)
+            with torch.no_grad():
+                module.bias[::3] *= 1.1
+                module.bias[1::3] *= 0.9
+    elif isinstance(module, nn.Embedding):
+        nn.init.normal_(module.weight, mean=0.0, std=0.02)
+        with torch.no_grad():
+            vocab_size, dim = module.weight.shape
+            pattern = 0.01 * torch.sin(torch.arange(dim) * (6.28 / dim))
+            for i in range(min(100, vocab_size)):
+                module.weight[i] += pattern * (1 + i % 5) * 0.2
+
+
+def check_forward(
     L: int,
     B: int,
     T: int,
@@ -38,11 +85,14 @@ def run_test_model_forward_backward(
     config_class: type,
     use_l2warp: bool,
     dtype: torch.dtype,
+    varlen: bool = True,
     **kwargs,
 ):
-    """
-    A foundational test for the forward and backward passes of a model.
-    """
+    torch.manual_seed(42)
+    if IS_INTEL_ALCHEMIST:
+        pytest.skip('Model tests require more SRAM than Intel Alchemist provides.')
+    if varlen and config_class.__name__ in MODELING_UNSUPPORTED_VARLEN:
+        pytest.skip(f'Variable length not supported for {config_class.__name__}.')
     if not IS_NVIDIA_HOPPER and D == 128:
         pytest.skip("D=128 is only tested on Hopper GPUs to save CI time.")
     if not IS_NVIDIA_HOPPER and config_class.__name__ in HOPPER_EXCLUSIVE:
@@ -52,11 +102,13 @@ def run_test_model_forward_backward(
 
     model, config = create_model_and_config(config_class, L, H, D, use_l2warp=use_l2warp, dtype=dtype, **kwargs)
     input_ids = torch.randint(low=0, high=config.vocab_size, size=(B, T), device=device)
-    output_fixed = model(input_ids, output_hidden_states=True).hidden_states[-1]
+    outputs = model(input_ids, labels=input_ids if not varlen else None, output_hidden_states=True)
+    output_fixed = outputs.hidden_states[-1]
     assert output_fixed.shape == (B, T, config.hidden_size)
-
-    if config_class.__name__ in MODELING_UNSUPPORTED_VARLEN:
-        pytest.skip(f"Variable length not supported for {config_class.__name__}.")
+    if not varlen:
+        assert torch.isfinite(outputs.loss)
+        outputs.loss.backward()
+        return
 
     cu_seqlens = torch.arange(0, B * T + 1, T, dtype=torch.int32, device=device)
     output_var = model(
@@ -67,11 +119,8 @@ def run_test_model_forward_backward(
     output_var.backward(torch.randn_like(output_var))
 
 
-# ===================================================================================
-# BASE TEST FOR GENERATION (K/V CACHE)
-# ===================================================================================
 @torch.no_grad()
-def run_test_generation(
+def check_generation(
     L: int,
     B: int,
     T: int,
@@ -84,11 +133,7 @@ def run_test_generation(
     config: PretrainedConfig | None = None,
     tol: float = 2e-3,
 ):
-    """
-    A foundational test for K/V cache-based generation.
-    """
     torch.manual_seed(42)
-    os.environ['FLA_CONV_BACKEND'] = 'triton'
     if config_class.__name__ in GENERATION_UNSUPPORTED:
         pytest.skip(f"Generation test not supported for {config_class.__name__}.")
     if config_class.__name__ in NOT_READY_FOR_TESTING:
@@ -110,7 +155,6 @@ def run_test_generation(
         for i, start in enumerate(seq_start)
     ], dim=1)
 
-    logits = []
     out = model(
         input_ids=input_ids[:, :chunk_size],
         attention_mask=attention_mask[:, :chunk_size],
@@ -134,10 +178,7 @@ def run_test_generation(
     assert_close('logits', ref, gen, tol)
 
 
-# ===================================================================================
-# REGRESSION TEST FOR FULL-PROMPT PREFILL IN GENERATION
-# ===================================================================================
-def run_test_generate_matches_forward(
+def check_generate(
     L: int,
     B: int,
     T: int,
@@ -147,11 +188,8 @@ def run_test_generate_matches_forward(
     dtype: torch.dtype,
     num_new_tokens: int = 8,
 ):
-    """
-    A regression test that `generate()` conditions on the whole prompt, not just the last token.
-    """
+    """Check that generation prefills the full prompt."""
     torch.manual_seed(42)
-    os.environ['FLA_CONV_BACKEND'] = 'triton'
     if config_class.__name__ in GENERATION_UNSUPPORTED:
         pytest.skip(f"Generation test not supported for {config_class.__name__}.")
     if config_class.__name__ in NOT_READY_FOR_TESTING:

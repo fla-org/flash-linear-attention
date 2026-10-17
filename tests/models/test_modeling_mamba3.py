@@ -18,7 +18,7 @@ pytest.importorskip("mamba_ssm.ops.triton.mamba3.mamba3_siso_combined")
 from fla.models import Mamba3Config, Mamba3ForCausalLM  # noqa: E402
 from fla.utils import device  # noqa: E402
 
-from .test_modeling_base import run_test_generation  # noqa: E402
+from .utils import check_generation  # noqa: E402
 
 
 def _mamba3_decode_kernels_available() -> bool:
@@ -33,9 +33,6 @@ def _mamba3_decode_kernels_available() -> bool:
     return True
 
 
-# ===================================================================================
-# Test for Modeling (Forward/Backward Pass)
-# ===================================================================================
 @pytest.mark.parametrize(
     ['L', 'B', 'T', 'H', 'D', 'use_l2warp', 'is_mimo', 'dtype'],
     [
@@ -89,9 +86,7 @@ def test_modeling(
     y.logits.sum().backward()
 
 
-# ===================================================================================
-# Test for Generation
-# ===================================================================================
+@pytest.mark.usefixtures('triton_conv')
 @pytest.mark.skipif(
     not _mamba3_decode_kernels_available(),
     reason="Mamba-3 decode kernels (cute step_fn / rotary) are not installed.",
@@ -124,4 +119,4 @@ def test_generation(
         vocab_size=1000,
     )
     model = Mamba3ForCausalLM(config).to(device=device, dtype=dtype)
-    run_test_generation(L, B, T, H, D, Mamba3Config, dtype, model=model, config=config)
+    check_generation(L, B, T, H, D, Mamba3Config, dtype, model=model, config=config)

@@ -10,12 +10,10 @@ import torch
 
 from fla.models import GLAConfig
 
-from .test_modeling_base import run_test_generation, run_test_model_forward_backward
+from .utils import check_forward, check_generation
 
 
-# ===================================================================================
-# Test for Modeling (Forward/Backward Pass)
-# ===================================================================================
+@pytest.mark.parametrize('varlen', [False, True], ids=['dense', 'varlen'])
 @pytest.mark.parametrize(
     ['L', 'B', 'T', 'H', 'D', 'use_l2warp', 'attnres_block_size', 'dtype'],
     [
@@ -38,8 +36,9 @@ def test_modeling(
     use_l2warp: bool,
     attnres_block_size: int | None,
     dtype: torch.dtype,
+    varlen: bool,
 ):
-    run_test_model_forward_backward(
+    check_forward(
         L,
         B,
         T,
@@ -49,12 +48,11 @@ def test_modeling(
         use_l2warp=use_l2warp,
         attnres_block_size=attnres_block_size,
         dtype=dtype,
+        varlen=varlen,
     )
 
 
-# ===================================================================================
-# Test for Generation
-# ===================================================================================
+@pytest.mark.usefixtures('triton_conv')
 @pytest.mark.parametrize(
     ['L', 'B', 'T', 'H', 'D', 'dtype'],
     [
@@ -72,4 +70,4 @@ def test_generation(
     D: int,
     dtype: torch.dtype,
 ):
-    run_test_generation(L, B, T, H, D, GLAConfig, dtype)
+    check_generation(L, B, T, H, D, GLAConfig, dtype)
