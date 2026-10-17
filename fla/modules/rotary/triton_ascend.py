@@ -107,10 +107,8 @@ def rotary_embedding_kernel(
         tl.store(p_y + R, b_o1, mask=mask)
     else:
         o_d = tl.arange(0, BD)
-        o_d_swap = o_d + ((o_d + 1) % 2) * 2 - 1
         o_d_repeat = tl.arange(0, BD) // 2
         p_x0 = x + o_t[:, None] * H*D + o_d[None, :]
-        p_x1 = x + o_t[:, None] * H*D + o_d_swap[None, :]
         p_cos = cos + (o_cs[:, None] * R + o_d_repeat[None, :])
         p_sin = sin + (o_cs[:, None] * R + o_d_repeat[None, :])
         mask = m_t[:, None] & (o_d_repeat < R)[None, :]
@@ -118,7 +116,9 @@ def rotary_embedding_kernel(
         b_cos = tl.load(p_cos, mask=mask, other=1.0).to(tl.float32)
         b_sin = tl.load(p_sin, mask=mask, other=0.0).to(tl.float32)
         b_x0 = tl.load(p_x0, mask=mask, other=0.0).to(tl.float32)
-        b_x1 = tl.load(p_x1, mask=mask, other=0.0).to(tl.float32)
+        # swap adjacent values in UB instead of gathering them from GM.
+        b_even, b_odd = tl.split(b_x0.reshape(BT, BD // 2, 2))
+        b_x1 = tl.join(b_odd, b_even).reshape(BT, BD)
         if CONJUGATE:
             b_sin = -b_sin
         b_o0 = b_x0 * b_cos

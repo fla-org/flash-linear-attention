@@ -188,12 +188,13 @@ def test_rotary_varlen(
         assert_close(name, ref, tri, ratio=1e-5)
 
     if lengths is not None:
-        tensor_offsets = torch.full((N,), seqlen_offset, dtype=torch.long, device=test_device)
-        tri_q, tri_k = rotary(q, k, seqlen_offset=tensor_offsets, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
-        tri_dq, tri_dk = torch.autograd.grad((tri_q, tri_k), (q, k), (dq, dk))
-        for name, ref, tri in zip(("q", "k", "dq", "dk"), expected, (tri_q, tri_k, tri_dq, tri_dk), strict=True):
-            assert torch.isfinite(tri).all()
-            assert_close(name, ref, tri, ratio=1e-5)
+        for offset_dtype in (torch.int32, torch.int64):
+            tensor_offsets = torch.full((N,), seqlen_offset, dtype=offset_dtype, device=test_device)
+            tri_q, tri_k = rotary(q, k, seqlen_offset=tensor_offsets, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+            tri_dq, tri_dk = torch.autograd.grad((tri_q, tri_k), (q, k), (dq, dk))
+            for name, ref, tri in zip(("q", "k", "dq", "dk"), expected, (tri_q, tri_k, tri_dq, tri_dk), strict=True):
+                assert torch.isfinite(tri).all()
+                assert_close(name, ref, tri, ratio=1e-5)
 
 
 @pytest.mark.parametrize("B", [4])
