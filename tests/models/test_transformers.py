@@ -70,3 +70,40 @@ def test_generate_from_embeddings_matches_tokens(config_class, use_cache):
         tokens = model.generate(input_ids=input_ids, **kwargs)
         embeddings = model.generate(inputs_embeds=model.get_input_embeddings()(input_ids), **kwargs)
     assert torch.equal(tokens[:, input_ids.shape[1]:], embeddings)
+
+
+@pytest.mark.parametrize('block_size', [None, 2])
+def test_model_initialization(block_size):
+    torch.manual_seed(42)
+    model = AutoModelForCausalLM.from_config(models.GLAConfig(
+        hidden_size=64,
+        num_heads=4,
+        num_hidden_layers=2,
+        intermediate_size=128,
+        vocab_size=64,
+        pad_token_id=0,
+        fuse_norm=False,
+        attnres_block_size=block_size,
+    ))
+    assert model.get_input_embeddings().weight[0].count_nonzero() == 64
+    for module in model.modules():
+        if isinstance(module, torch.nn.Linear):
+            if getattr(module, '_is_attnres_proj', False):
+                assert module.weight.count_nonzero() == 0
+            else:
+                assert module.weight.count_nonzero() > 0
+            if module.bias is not None:
+                assert module.bias.count_nonzero() == 0
+        elif isinstance(module, torch.nn.RMSNorm):
+            torch.testing.assert_close(module.weight, torch.ones_like(module.weight), rtol=0, atol=0)
+    attention = model.model.layers[0].attn
+    for strategy in ['rescale', 'zero']:
+        torch.manual_seed(42)
+        model._init_weights(attention, prenorm_residual_strategy=strategy)
+        expected = attention.o_proj.weight.detach().clone()
+        torch.manual_seed(42)
+        model._init_weights(attention, prenorm_residual_strategy=strategy)
+        torch.testing.assert_close(attention.o_proj.weight, expected, rtol=0, atol=0)
+        assert bool(expected.count_nonzero()) == (strategy == 'rescale')
+    with pytest.raises(ValueError, match='Invalid prenorm_residual_strategy'):
+        model._init_weights(attention, prenorm_residual_strategy='invalid')
