@@ -13,9 +13,16 @@ import torch
 import torch.nn as nn
 from einops import rearrange
 
-from fla.layers.utils import repad_hidden_states, unpad_hidden_states
+from fla.layers.utils import (
+    get_unpad_indices_and_cu,
+    index_first_axis,
+    repad_hidden_states,
+    require_cache_layer_idx,
+    unpad_hidden_states,
+)
 from fla.modules import RMSNorm
 from fla.ops.stickbreaking_attn import parallel_stickbreaking_attn
+from fla.ops.stickbreaking_attn.decoding import stickbreaking_attn_decoding
 
 if TYPE_CHECKING:
     from fla.models.utils import Cache
@@ -90,24 +97,27 @@ class StickBreakingAttention(nn.Module):
         use_cache: bool = False,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None, Cache | None]:
-        if use_cache or past_key_values is not None:
-            raise NotImplementedError("Stick-breaking attention does not support KV-cache decoding. Use use_cache=False.")
         if output_attentions:
             raise NotImplementedError("Stick-breaking attention does not return attention matrices.")
+        require_cache_layer_idx(self, past_key_values)
         if hidden_states.device.type not in ('cuda', 'xpu'):
             raise NotImplementedError("Stick-breaking attention requires a CUDA/HIP or Intel GPU.")
         batch_size, q_len, _ = hidden_states.shape
-        if attention_mask is not None and attention_mask.shape != (batch_size, q_len):
-            raise ValueError("attention_mask must have shape [batch_size, sequence_length].")
+        past_len = 0 if past_key_values is None else past_key_values.get_seq_length(self.layer_idx)
+        if attention_mask is not None and attention_mask.shape != (batch_size, past_len + q_len):
+            raise ValueError("attention_mask must have shape [batch_size, cached_length + sequence_length].")
         cu_seqlens = kwargs.get('cu_seqlens')
         if cu_seqlens is not None and batch_size != 1:
             raise ValueError("Packed inputs with cu_seqlens require batch size 1.")
-        hidden_states, indices, cu_seqlens = unpad_hidden_states(
-            hidden_states=hidden_states,
-            cu_seqlens=cu_seqlens,
-            attention_mask=attention_mask,
-            q_len=q_len,
-        )
+        # reject before updating the cache so that a failed call leaves it unchanged
+        assert cu_seqlens is None or past_len == 0, "cu_seqlens should not be provided when past_key_values has content"
+        if past_key_values is None:
+            hidden_states, indices, cu_seqlens = unpad_hidden_states(
+                hidden_states=hidden_states,
+                cu_seqlens=cu_seqlens,
+                attention_mask=attention_mask,
+                q_len=q_len,
+            )
         q = rearrange(self.q_proj(hidden_states), '... (h d) -> ... h d', d=self.head_dim)
         k = rearrange(self.k_proj(hidden_states), '... (h d) -> ... h d', d=self.head_dim)
         v = rearrange(self.v_proj(hidden_states), '... (h d) -> ... h d', d=self.head_dim)
@@ -116,7 +126,33 @@ class StickBreakingAttention(nn.Module):
                 "Stick-breaking projections require matching fp16/bf16 tensors. Use mixed precision or convert the model.")
         if self.qk_norm:
             q, k = self.q_norm(q), self.k_norm(k)
-        o, _ = parallel_stickbreaking_attn(q=q, k=k, v=v, attend_current=self.attend_current, cu_seqlens=cu_seqlens)
+        if past_key_values is not None:
+            k, v = past_key_values.update(
+                attn_state=(k.flatten(-2), v.flatten(-2)),
+                layer_idx=self.layer_idx,
+                offset=q_len,
+            )['attn_state']
+            indices, cu_seqlens_k = None, cu_seqlens
+            if cu_seqlens is None and attention_mask is not None:
+                # the queries are the unmasked new tokens and the keys every unmasked token so far,
+                # so the rows can differ in both lengths
+                indices, cu_seqlens = get_unpad_indices_and_cu(attention_mask, q_len)
+                indices_k, cu_seqlens_k = get_unpad_indices_and_cu(attention_mask)
+                q = index_first_axis(q.flatten(0, 1), indices).unsqueeze(0)
+                k, v = (index_first_axis(x.flatten(0, 1), indices_k).unsqueeze(0) for x in (k, v))
+            k = rearrange(k, '... (h d) -> ... h d', d=self.head_dim)
+            v = rearrange(v, '... (h d) -> ... h d', d=self.head_dim)
+        if past_len > 0:
+            o, _ = stickbreaking_attn_decoding(
+                q=q,
+                k=k,
+                v=v,
+                attend_current=self.attend_current,
+                cu_seqlens_q=cu_seqlens,
+                cu_seqlens_k=cu_seqlens_k,
+            )
+        else:
+            o, _ = parallel_stickbreaking_attn(q=q, k=k, v=v, attend_current=self.attend_current, cu_seqlens=cu_seqlens)
         o = self.o_proj(o.flatten(-2))
         o = repad_hidden_states(hidden_states=o, indices=indices, batch_size=batch_size, q_len=q_len)
-        return o, None, None
+        return o, None, past_key_values

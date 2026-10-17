@@ -11,6 +11,7 @@ import pytest
 import torch
 
 from fla.layers import StickBreakingAttention, stickbreaking_attn
+from fla.models.utils import Cache
 from fla.ops.stickbreaking_attn import naive_stickbreaking_attn
 from fla.utils import IS_AMD, IS_INTEL, IS_NVIDIA, assert_close, device
 
@@ -80,6 +81,64 @@ def test_forward_backward(dtype, attend_current, layout, qk_norm, monkeypatch):
         assert torch.count_nonzero(actual_x.grad[mask == 0]) == 0
 
 
+@pytest.mark.skipif(not (IS_NVIDIA or IS_AMD or IS_INTEL), reason="Requires a supported GPU")
+@pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16], ids=['fp16', 'bf16'])
+@pytest.mark.parametrize('attend_current', [False, True])
+@pytest.mark.parametrize('layout', ['dense', 'padded'])
+@pytest.mark.parametrize('qk_norm', [False, True])
+def test_cache(dtype, attend_current, layout, qk_norm):
+    torch.manual_seed(42)
+    layer = StickBreakingAttention(
+        hidden_size=128,
+        num_heads=4,
+        num_kv_heads=2,
+        qkv_bias=True,
+        qk_norm=qk_norm,
+        attend_current=attend_current,
+        layer_idx=0,
+    ).to(device=device, dtype=dtype).eval()
+    # a 67-token prompt, then steps of one or more tokens
+    B, bounds = 3, [0, 67, 68, 71, 72, 74]
+    T = bounds[-1]
+    x = torch.randn(B, T, 128, dtype=dtype, device=device)
+    mask = torch.ones(B, T, dtype=torch.long, device=device)
+    # rows start at different positions, so their cached lengths differ, and the second prompt is all padding;
+    # the first row's next token and a token inside the three-token step are padding as well
+    mask[0, :13], mask[1, :67], mask[0, 67], mask[2, 69] = 0, 0, 0, 0
+    mask = mask if layout == 'padded' else None
+
+    with torch.no_grad():
+        expected, _, _ = layer(hidden_states=x, attention_mask=mask)
+        cache, outputs = Cache(), []
+        for bos, eos in zip(bounds[:-1], bounds[1:], strict=True):
+            o, _, returned_cache = layer(
+                hidden_states=x[:, bos:eos],
+                attention_mask=None if mask is None else mask[:, :eos],
+                past_key_values=cache,
+                use_cache=True,
+            )
+            outputs.append(o)
+    assert returned_cache is cache
+    assert cache.get_seq_length(0) == T
+    assert all(state.shape == (B, T, layer.kv_dim) for state in cache[0]['attn_state'])
+    assert_close(prefix='prefill', ref=expected[:, :67], tri=outputs[0], ratio=TOL[dtype])
+    assert_close(prefix='decode', ref=expected[:, 67:], tri=torch.cat(outputs[1:], dim=1), ratio=TOL[dtype])
+
+
+@pytest.mark.skipif(not (IS_NVIDIA or IS_AMD or IS_INTEL), reason="Requires a supported GPU")
+def test_cache_rejects_invalid_mask():
+    layer = StickBreakingAttention(hidden_size=32, num_heads=2, layer_idx=0).to(device=device, dtype=torch.bfloat16)
+    x = torch.randn(2, 5, 32, device=device, dtype=torch.bfloat16)
+    cache = Cache()
+    layer(hidden_states=x, past_key_values=cache, use_cache=True)
+    states = [state.clone() for state in cache[0]['attn_state']]
+    with pytest.raises(ValueError, match='attention_mask must have shape'):
+        layer(hidden_states=x[:, :2], attention_mask=torch.ones(2, 2, device=device), past_key_values=cache, use_cache=True)
+    # a rejected step leaves the cache as it was
+    assert cache.get_seq_length(0) == 5
+    assert all(torch.equal(state, old) for state, old in zip(cache[0]['attn_state'], states, strict=True))
+
+
 @pytest.mark.parametrize(
     ('hidden_size', 'num_heads', 'num_kv_heads'),
     [(33, 2, 1), (32, 0, 1), (32, 2, 0), (32, 2, 3), (514, 2, 1)],
@@ -90,11 +149,7 @@ def test_rejects_invalid_heads(hidden_size, num_heads, num_kv_heads):
         StickBreakingAttention(hidden_size=hidden_size, num_heads=num_heads, num_kv_heads=num_kv_heads)
 
 
-@pytest.mark.parametrize(
-    'kwargs',
-    [{'use_cache': True}, {'past_key_values': ()}, {'output_attentions': True}],
-    ids=['cache', 'past', 'attention-matrix'],
-)
+@pytest.mark.parametrize('kwargs', [{'output_attentions': True}], ids=['attention-matrix'])
 def test_rejects_unsupported_outputs(kwargs):
     layer = StickBreakingAttention(hidden_size=32, num_heads=2)
     with pytest.raises(NotImplementedError):
