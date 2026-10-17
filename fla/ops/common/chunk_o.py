@@ -586,6 +586,21 @@ def chunk_fwd_o(
     return o
 
 
+def get_bwd_tile_size(device_index: int, *tensors: torch.Tensor | None) -> int:
+    """Widest K/V tile of the backward kernels below that fits in shared memory.
+
+    128-wide tiles fit in Hopper-class shared memory, and in A100-class shared memory (164 KB) when every tensor the
+    kernel loads is 16-bit.
+    """
+    if check_shared_mem('hopper', device_index) or (
+        check_shared_mem('ampere', device_index) and all(t.element_size() == 2 for t in tensors if t is not None)
+    ):
+        return 128
+    if check_shared_mem('ada', device_index):
+        return 64
+    return 32
+
+
 @dispatch
 def chunk_bwd_dv(
     q: torch.Tensor,
@@ -607,13 +622,7 @@ def chunk_bwd_dv(
     BT = chunk_size
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
-    # H100 can have larger block size
-    if check_shared_mem('hopper', k.device.index):
-        CONST_TILING = 128
-    elif check_shared_mem('ada', k.device.index):
-        CONST_TILING = 64
-    else:
-        CONST_TILING = 32
+    CONST_TILING = get_bwd_tile_size(k.device.index, q, k, do, dh)
     BK = min(max(triton.next_power_of_2(K), 16), CONST_TILING)
     BV = min(max(triton.next_power_of_2(V), 16), CONST_TILING)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
@@ -664,13 +673,7 @@ def chunk_bwd_dv_local(
     BT = chunk_size
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
-    # H100 can have larger block size
-    if check_shared_mem('hopper', k.device.index):
-        CONST_TILING = 128
-    elif check_shared_mem('ada', k.device.index):
-        CONST_TILING = 64
-    else:
-        CONST_TILING = 32
+    CONST_TILING = get_bwd_tile_size(k.device.index, q, k, do, A)
     BK = min(max(triton.next_power_of_2(K), 16), CONST_TILING)
     BV = min(max(triton.next_power_of_2(V), 16), CONST_TILING)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
@@ -731,12 +734,7 @@ def chunk_bwd_dqkwg(
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
-    if check_shared_mem('hopper', k.device.index):
-        CONST_TILING = 128
-    elif check_shared_mem('ada', k.device.index):
-        CONST_TILING = 64
-    else:
-        CONST_TILING = 32
+    CONST_TILING = get_bwd_tile_size(k.device.index, q, k, v, do, h, dh, w, dv)
     BK = min(max(triton.next_power_of_2(K), 16), CONST_TILING)
     BV = min(max(triton.next_power_of_2(V), 16), CONST_TILING)
     NK = triton.cdiv(K, BK)
