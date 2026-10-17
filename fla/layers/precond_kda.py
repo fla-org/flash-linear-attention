@@ -29,7 +29,7 @@ from fla.ops.precond_kda import chunk_precond_kda, fused_recurrent_precond_kda
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
-    from fla.models.utils import Cache
+    from fla.models.cache_utils import Cache
 
 
 class PrecondKDA(nn.Module):
@@ -308,12 +308,13 @@ class PrecondKDA(nn.Module):
         beta_atk = self.b_atk_proj(hidden_states).sigmoid()
         g_atk = -(self.A_log_atk.float().exp()) * F.softplus(self.a_proj(hidden_states).float() + self.dt_bias_atk)
 
-        recurrent_state = last_state["recurrent_state"] if last_state is not None else None
-        A_state = last_state["A_state"] if last_state is not None else None
+        recurrent_state = preconditioner_state = None
+        if last_state is not None and last_state["recurrent_state"] is not None:
+            recurrent_state, preconditioner_state = last_state["recurrent_state"]
 
         if mode == "chunk":
             g = fused_kda_gate(g=g, A_log=self.A_log, dt_bias=self.dt_bias, lower_bound=self.lower_bound)
-            o, recurrent_state, A_state = chunk_precond_kda(
+            o, recurrent_state, preconditioner_state = chunk_precond_kda(
                 q=q,
                 k=k,
                 v=v,
@@ -322,7 +323,7 @@ class PrecondKDA(nn.Module):
                 g_atk=g_atk,
                 beta_atk=beta_atk,
                 initial_state=recurrent_state,
-                initial_A_state=A_state,
+                initial_A_state=preconditioner_state,
                 output_final_state=use_cache,
                 use_qk_l2norm_in_kernel=True,
                 use_gate_in_kernel=False,
@@ -335,7 +336,7 @@ class PrecondKDA(nn.Module):
             )
         elif mode == "fused_recurrent":
             g = fused_kda_gate(g=g, A_log=self.A_log, dt_bias=self.dt_bias, lower_bound=self.lower_bound)
-            o, recurrent_state, A_state = fused_recurrent_precond_kda(
+            o, recurrent_state, preconditioner_state = fused_recurrent_precond_kda(
                 q=q,
                 k=k,
                 v=v,
@@ -344,7 +345,7 @@ class PrecondKDA(nn.Module):
                 g_atk=g_atk,
                 beta_atk=beta_atk,
                 initial_state=recurrent_state,
-                initial_A_state=A_state,
+                initial_A_state=preconditioner_state,
                 output_final_state=use_cache,
                 use_qk_l2norm_in_kernel=True,
                 cu_seqlens=cu_seqlens,
@@ -358,8 +359,7 @@ class PrecondKDA(nn.Module):
         update_layer_cache(
             self,
             past_key_values,
-            recurrent_state=recurrent_state,
-            A_state=A_state,
+            recurrent_state=(recurrent_state, preconditioner_state) if use_cache else None,
             conv_state=(conv_state_q, conv_state_k, conv_state_v) if self.use_short_conv else None,
             offset=q_len,
         )

@@ -12,10 +12,10 @@ from __future__ import annotations
 
 import warnings
 
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
 
-class CATConfig(PretrainedConfig):
+class CATConfig(PreTrainedConfig):
     """
     Configuration class for CAT (Compress And Attend Transformers).
 

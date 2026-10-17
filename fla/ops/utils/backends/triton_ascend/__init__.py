@@ -9,10 +9,10 @@
 
 from __future__ import annotations
 
-from fla.backends import BaseBackend, register_backend
+from fla.backends import BaseBackend, register
 
 
-@register_backend('utils')
+@register('utils')
 class TritonAscendUtilsBackend(BaseBackend):
     backend_type = 'triton_ascend'
     package_name = None

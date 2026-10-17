@@ -11,6 +11,7 @@ from fla.layers.delta_net import DeltaNet
 from fla.layers.gla import GatedLinearAttention
 from fla.layers.gsa import GatedSlotAttention
 from fla.layers.hgrn2 import HGRN2Attention
+from fla.layers.lightnet import LightNetAttention
 from fla.layers.linear_attn import LinearAttention
 from fla.layers.mamba2 import Mamba2
 from fla.layers.multiscale_retention import MultiScaleRetention
@@ -59,3 +60,17 @@ def test_mamba2_n_groups_divisibility():
 def test_hgrn2_state_size():
     layer = HGRN2Attention(hidden_size=64, expand_ratio=2, use_short_conv=False)
     assert layer.state_size() == 128
+
+
+@pytest.mark.parametrize("mode", ['chunk', 'fused_recurrent'])
+def test_lightnet_supported_modes(mode: str):
+    """Every mode accepted by `__init__` must be dispatchable by `forward`."""
+    layer = LightNetAttention(mode=mode, hidden_size=64, num_heads=2, expand_ratio=8)
+    assert layer.mode == mode
+
+
+def test_lightnet_rejects_undispatchable_mode():
+    # `LightNetAttention.forward` has no `fused_chunk` branch, so accepting it deferred the
+    # failure to a forward that raises `Not supported mode` once the sequence passes 64 tokens
+    with pytest.raises(AssertionError, match="Not supported mode"):
+        LightNetAttention(mode='fused_chunk', hidden_size=64, num_heads=2, expand_ratio=8)

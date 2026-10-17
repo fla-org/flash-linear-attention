@@ -6,10 +6,10 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
 
-class YOCOConfig(PretrainedConfig):
+class YOCOConfig(PreTrainedConfig):
     model_type = 'yoco'
     keys_to_ignore_at_inference = ['past_key_values']
 

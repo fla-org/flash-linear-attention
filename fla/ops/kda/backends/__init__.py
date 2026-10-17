@@ -7,8 +7,7 @@
 
 """KDA backends."""
 
-from fla.ops.kda.backends.flash_kda import FlashKDABackend
 from fla.ops.kda.backends.tilelang import KDATileLangBackend
 from fla.ops.kda.backends.triton_ascend import TritonAscendKDABackend
 
-__all__ = ['FlashKDABackend', 'KDATileLangBackend', 'TritonAscendKDABackend']
+__all__ = ['KDATileLangBackend', 'TritonAscendKDABackend']

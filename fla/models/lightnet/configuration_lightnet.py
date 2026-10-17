@@ -7,12 +7,12 @@
 
 import warnings
 
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
-from fla.models.hybrid import HybridAttentionConfig, _HybridAttentionConfigMixin
+from fla.models.modeling_layers import AttentionConfig, AttentionConfigBase
 
 
-class LightNetConfig(_HybridAttentionConfigMixin, PretrainedConfig):
+class LightNetConfig(AttentionConfigBase, PreTrainedConfig):
 
     model_type = 'lightnet'
     keys_to_ignore_at_inference = ['past_key_values']
@@ -33,7 +33,7 @@ class LightNetConfig(_HybridAttentionConfigMixin, PretrainedConfig):
         gate_low_rank_dim: int = 128,
         elementwise_affine: bool | None = True,
         norm_eps: float = 1e-6,
-        attn: HybridAttentionConfig = None,
+        attn: AttentionConfig = None,
         use_cache: bool = True,
         pad_token_id: int | None = None,
         bos_token_id: int = 1,

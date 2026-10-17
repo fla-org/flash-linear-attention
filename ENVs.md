@@ -25,6 +25,7 @@ These switches control registered implementations. Unavailable backends and unsu
 | Variable            | Default | Options   | Description                                                                     |
 | ------------------- | ------- | --------- | ------------------------------------------------------------------------------- |
 | `FLA_GLUON`         | `0`     | `0` / `1` | Enable all available Gluon backends, overriding individual switches set to `0`. |
+| `FLA_CE_GLUON`      | `0`     | `0` / `1` | Enable Gluon CE kernels, including fused-linear CE (NVIDIA).                    |
 | `FLA_CONV_GLUON`    | `0`     | `0` / `1` | Enable Gluon causal convolution independently.                                  |
 | `FLA_ATTNRES_GLUON` | `0`     | `0` / `1` | Enable Gluon AttnRes independently.                                             |
 

@@ -19,21 +19,19 @@ from fla.utils import (
     IS_NVIDIA_HOPPER,
     TRITON_ABOVE_3_4_0,
     TRITON_ABOVE_3_7_1,
+    TRITON_ABOVE_3_8_0,
     autotune_cache_kwargs,
     check_shared_mem,
 )
 
 BKV_LIST = [64, 128] if check_shared_mem() else ([32, 64] if check_shared_mem('ada') else [32])
 NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8]
+# Triton<3.8 races at 8 warps on Blackwell: triton-lang/triton#10590, fla-org/flash-linear-attention#1327
+BLACKWELL_8_WARP_RACE = IS_NVIDIA_BLACKWELL and not TRITON_ABOVE_3_8_0
+CHUNK_BWD_DV_LOCAL_NUM_WARPS = [2, 4] if BLACKWELL_8_WARP_RACE else NUM_WARPS
 
-# Upstream pairs each tile size with a single warp count, which is tuned for NVIDIA.
-# On Intel that pairing is off by a factor of two: BK=BV=64 is fastest at 8 warps but is
-# only offered at 4, so the autotuner falls back to the 32x32 config and leaves ~2.2x on
-# the table. Widen the space there instead of changing the defaults for other vendors.
-# TODO: Triton mainline fixes a Blackwell tl.dot recurrence race.
-# Keep this kernel off its 8-warp (BK=BV=128) config for Blackwell until Triton 3.8
-# is released and we re-validate the wider config space.
-CHUNK_FWD_O_BLACKWELL_DROPPED_CONFIGS = [] if IS_NVIDIA_BLACKWELL else [
+# Intel needs 8 warps for BK=BV=64; the NVIDIA pairing only offers 4 and falls back to slower 32x32 tiles.
+CHUNK_FWD_O_BLACKWELL_DROPPED_CONFIGS = [] if BLACKWELL_8_WARP_RACE else [
     triton.Config({'BK': 128, 'BV': 128}, num_warps=8, num_stages=3),
 ]
 
@@ -55,11 +53,7 @@ if IS_INTEL:
     'USE_G_GAMMA': lambda args: args['g_gamma'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
-@fla_cache_autotune(
-    configs=_O_CONFIGS,
-    key=['H', 'HV', 'K', 'V', 'BT', 'STATE_V_FIRST'],
-    **autotune_cache_kwargs,
-)
+@fla_cache_autotune(configs=_O_CONFIGS, key=['H', 'HV', 'K', 'V', 'BT', 'STATE_V_FIRST'], **autotune_cache_kwargs)
 @triton.jit(do_not_specialize=['T'])
 def chunk_fwd_kernel_o(
     q,
@@ -100,7 +94,6 @@ def chunk_fwd_kernel_o(
         i_tg = i_b * NT + i_t
         bos, eos = i_b * T, i_b * T + T
 
-    # offset calculation
     q += (bos * H + i_h // (HV // H)) * K
     k += (bos * H + i_h // (HV // H)) * K
     v += (bos * HV + i_h) * V
@@ -226,7 +219,6 @@ def chunk_bwd_kernel_dqkwg(
         i_tg = i_b * NT + i_t
         bos, eos = i_b * T, i_b * T + T
 
-    # offset calculation
     v += (bos * HV + i_h) * V
     do += (bos * HV + i_h) * V
     h += (i_tg * HV + i_h).to(tl.int64) * K*V
@@ -324,8 +316,7 @@ def chunk_bwd_kernel_dqkwg(
         b_dg = tl.sum(b_dq * b_q, axis=1) - tl.sum(b_dk * b_k, axis=1)
 
         p_dg = dg + o_t * HV
-        # (SY 09/21) revcumsum in a separate kernel due to strange triton compiler issue
-        # b_dg = tl.dot(tl.where(o_t[:, None] <= o_t[None, :], 1., 0.), b_dg, allow_tf32=False) + b_dg_last)
+        # reverse cumsum runs in a separate kernel to avoid a Triton compiler issue.
         b_dg = tl.where(o_t < min(i_t * BT + BT, T) - 1, b_dg, b_dg + b_dg_last)
         tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), mask=m_qk)
         tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), mask=m_qk)
@@ -407,7 +398,6 @@ def chunk_bwd_kernel_dv(
 
     b_dv = tl.zeros([BT, BV], dtype=tl.float32)
 
-    # offset calculation
     q += (bos * H + i_h // (HV // H)) * K
     k += (bos * H + i_h // (HV // H)) * K
     do += (bos * HV + i_h) * V
@@ -466,7 +456,7 @@ def chunk_bwd_kernel_dv(
 @fla_cache_autotune(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in NUM_WARPS
+        for num_warps in CHUNK_BWD_DV_LOCAL_NUM_WARPS
         for num_stages in [2, 3, 4]
     ],
     key=['H', 'HV', 'K', 'V', 'BT', 'BK', 'BV', 'USE_G'],
@@ -506,7 +496,6 @@ def chunk_bwd_kernel_dv_local(
     else:
         bos, eos = i_b * T, i_b * T + T
 
-    # offset calculation
     q += (bos * H + i_h // (HV // H)) * K
     k += (bos * H + i_h // (HV // H)) * K
     do += (bos * HV + i_h) * V
@@ -597,6 +586,7 @@ def chunk_fwd_o(
     return o
 
 
+@dispatch
 def chunk_bwd_dv(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -613,8 +603,7 @@ def chunk_bwd_dv(
     B, T, H, K, V, HV = *k.shape, do.shape[-1], do.shape[2]
     if q.dtype in (torch.float16, torch.bfloat16):
         # Triton miscompiles masked K-tail iterations into OOB shared-memory access for 16-bit odd K/V (IMA)
-        assert K % 2 == 0 and V % 2 == 0, \
-            f"chunk_bwd_dv requires even K and V for {q.dtype}, got K={K}, V={V}"
+        assert K % 2 == 0 and V % 2 == 0, f"chunk_bwd_dv requires even K and V for {q.dtype}, got K={K}, V={V}"
     BT = chunk_size
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
@@ -666,7 +655,7 @@ def chunk_bwd_dv_local(
     g: torch.Tensor | None = None,
     g_gamma: torch.Tensor | None = None,
     A: torch.Tensor | None = None,
-    scale: float = None,
+    scale: float | None = None,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
@@ -766,9 +755,9 @@ def chunk_bwd_dqkwg(
         h=h,
         do=do,
         dh=dh,
-        dw=dw,
         dq=dq,
         dk=dk,
+        dw=dw,
         dv=dv,
         dg=dg,
         cu_seqlens=cu_seqlens,

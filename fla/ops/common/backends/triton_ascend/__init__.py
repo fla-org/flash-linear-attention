@@ -11,10 +11,10 @@ from __future__ import annotations
 
 import torch
 
-from fla.backends import BaseBackend, register_backend
+from fla.backends import BaseBackend, register
 
 
-@register_backend('common')
+@register('common')
 class TritonAscendCommonBackend(BaseBackend):
     backend_type = 'triton_ascend'
     package_name = None
