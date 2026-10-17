@@ -65,7 +65,8 @@ def chunk_retention(
                 f"The number of initial states is expected to be equal to the number of input sequences, "
                 f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}.",
             )
-    g_gamma = (1 - q.new_tensor(2., dtype=torch.float).pow(-5. - q.new_tensor(range(q.shape[2]), dtype=torch.float))).log()
+    exponent = -5. - torch.arange(q.shape[2], dtype=torch.float, device=q.device)
+    g_gamma = (1 - q.new_full((), 2., dtype=torch.float).pow(exponent)).log()
     o, final_state = chunk_simple_gla(
         q=q,
         k=k,

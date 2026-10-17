@@ -46,7 +46,8 @@ def parallel_retention(
             f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`. "
             f"Please flatten variable-length inputs before processing.",
         )
-    s = (1 - q.new_tensor(2., dtype=torch.float).pow(-5. - q.new_tensor(range(q.shape[2]), dtype=torch.float))).log()
+    exponent = -5. - torch.arange(q.shape[2], dtype=torch.float, device=q.device)
+    s = (1 - q.new_full((), 2., dtype=torch.float).pow(exponent)).log()
     g = s[None, None, :].expand(q.shape[0], q.shape[1], q.shape[2])
 
     o, attn = parallel_simple_gla(

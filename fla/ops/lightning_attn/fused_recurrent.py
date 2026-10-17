@@ -67,7 +67,7 @@ def fused_recurrent_lightning_attn(
                 f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}.",
             )
     H = q.shape[2]
-    g_gamma = -(8 / H * (1 - layer_idx / num_layers)) * q.new_tensor(range(H), dtype=torch.float)
+    g_gamma = -(8 / H * (1 - layer_idx / num_layers)) * torch.arange(H, dtype=torch.float, device=q.device)
     return fused_recurrent_simple_gla(
         q=q,
         k=k,
