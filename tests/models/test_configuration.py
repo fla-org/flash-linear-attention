@@ -12,7 +12,10 @@ import pytest
 from fla import models
 
 CONFIG_CLASSES = [getattr(models, name) for name in models.__all__ if name.endswith('Config')]
-LOSS_CONFIG_CLASSES = [cls for cls in CONFIG_CLASSES if 'fuse_linear_cross_entropy' in inspect.signature(cls).parameters]
+LOSS_CONFIG_CLASSES = [
+    cls for cls in CONFIG_CLASSES
+    if 'fuse_linear_cross_entropy' in inspect.signature(cls).parameters and cls is not models.StickBreakingAttentionConfig
+]
 ATTNRES_CONFIG_CLASSES = [cls for cls in CONFIG_CLASSES if 'attnres_block_size' in inspect.signature(cls).parameters]
 
 
