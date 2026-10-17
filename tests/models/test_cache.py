@@ -488,8 +488,7 @@ def test_cache_incremental_decode_consistency(num_decode_steps: int, num_layers:
 
     observed_lengths_per_step = []
 
-    for decode_step in range(num_decode_steps):
-        expected_past_len = decode_step
+    for _ in range(num_decode_steps):
         observed_this_step = []
 
         for layer_idx in range(num_layers):

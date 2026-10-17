@@ -17,6 +17,7 @@ CONFIG_CLASSES = [getattr(models, name) for name in models.__all__ if name.endsw
 
 @pytest.mark.parametrize('config_class', CONFIG_CLASSES, ids=lambda cls: cls.model_type)
 def test_auto_model_checkpoint_round_trip(config_class, tmp_path):
+    torch.manual_seed(42)
     if config_class is models.RWKV7Config and not torch._C.has_lapack:
         pytest.skip('RWKV7 initialization requires LAPACK.')
     config = config_class(
@@ -50,6 +51,7 @@ def test_auto_model_checkpoint_round_trip(config_class, tmp_path):
 @pytest.mark.parametrize('config_class', [models.GLAConfig, models.MambaConfig, models.TransformerConfig])
 @pytest.mark.parametrize('use_cache', [False, True])
 def test_generate_from_embeddings_matches_tokens(config_class, use_cache):
+    torch.manual_seed(42)
     if config_class is models.MambaConfig and device_name == 'cpu':
         pytest.skip('Mamba normalization requires an accelerator.')
     config = config_class(
