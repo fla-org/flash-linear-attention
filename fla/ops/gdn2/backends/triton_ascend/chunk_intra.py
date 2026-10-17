@@ -279,10 +279,15 @@ def chunk_gdn2_fwd_kernel_inter_products_npu(
     else:
         bos = tl.cast(i_b, tl.int64) * T
 
-    i_tc_dst = i_t.to(tl.int64) * BT + DST_BLOCK * BC
-    i_tc_src = i_t.to(tl.int64) * BT + SRC_BLOCK * BC
+    i_tc = tl.cast(i_t, tl.int64) * BT
+    i_tc_dst = i_tc + DST_BLOCK * BC
+    i_tc_src = i_tc + SRC_BLOCK * BC
+    T_chunk = T - i_tc
+    if i_tc_dst >= T:
+        return
 
-    base = bos * H + i_h
+    # Block-pointer offsets must be int32; keep the chunk base in int64.
+    base = (bos + i_tc) * H + i_h
     q += base * K
     k += base * K
     g += base * K
@@ -299,28 +304,28 @@ def chunk_gdn2_fwd_kernel_inter_products_npu(
         o_k = i_k * BK + tl.arange(0, BK)
         m_k = o_k < K
 
-        p_k_src = tl.make_block_ptr(k, (T, K), (H * K, 1), (i_tc_src, i_k * BK), (BC, BK), (1, 0))
-        p_g_src = tl.make_block_ptr(g, (T, K), (H * K, 1), (i_tc_src, i_k * BK), (BC, BK), (1, 0))
+        p_k_src = tl.make_block_ptr(k, (T_chunk, K), (H * K, 1), (SRC_BLOCK * BC, i_k * BK), (BC, BK), (1, 0))
+        p_g_src = tl.make_block_ptr(g, (T_chunk, K), (H * K, 1), (SRC_BLOCK * BC, i_k * BK), (BC, BK), (1, 0))
         b_k_src = tl.load(p_k_src, boundary_check=(0, 1)).to(tl.float32)
         b_g_src = tl.load(p_g_src, boundary_check=(0, 1)).to(tl.float32)
 
-        p_q_dst = tl.make_block_ptr(q, (T, K), (H * K, 1), (i_tc_dst, i_k * BK), (BC, BK), (1, 0))
-        p_k_dst = tl.make_block_ptr(k, (T, K), (H * K, 1), (i_tc_dst, i_k * BK), (BC, BK), (1, 0))
-        p_g_dst = tl.make_block_ptr(g, (T, K), (H * K, 1), (i_tc_dst, i_k * BK), (BC, BK), (1, 0))
-        p_b_dst = tl.make_block_ptr(b, (T, K), (H * K, 1), (i_tc_dst, i_k * BK), (BC, BK), (1, 0))
+        p_q_dst = tl.make_block_ptr(q, (T_chunk, K), (H * K, 1), (DST_BLOCK * BC, i_k * BK), (BC, BK), (1, 0))
+        p_k_dst = tl.make_block_ptr(k, (T_chunk, K), (H * K, 1), (DST_BLOCK * BC, i_k * BK), (BC, BK), (1, 0))
+        p_g_dst = tl.make_block_ptr(g, (T_chunk, K), (H * K, 1), (DST_BLOCK * BC, i_k * BK), (BC, BK), (1, 0))
+        p_b_dst = tl.make_block_ptr(b, (T_chunk, K), (H * K, 1), (DST_BLOCK * BC, i_k * BK), (BC, BK), (1, 0))
         b_q_dst = tl.load(p_q_dst, boundary_check=(0, 1)).to(tl.float32)
         b_k_dst = tl.load(p_k_dst, boundary_check=(0, 1)).to(tl.float32)
         b_g_dst = tl.load(p_g_dst, boundary_check=(0, 1)).to(tl.float32)
         b_b_dst = tl.load(p_b_dst, boundary_check=(0, 1)).to(tl.float32)
         b_gn_dst = tl.load(
-            g + tl.cast(i_tc_dst, tl.int64) * H * K + o_k,
+            g + tl.cast(DST_BLOCK * BC, tl.int64) * H * K + o_k,
             mask=m_k & (i_tc_dst < T),
             other=0.0,
         ).to(tl.float32)
         b_gq = tl.where(m_dst[:, None], exp2(b_g_dst - b_gn_dst[None, :]), 0.0)
         b_ks = b_gn_dst[None, :] - b_g_src
         if USE_RAW_G:
-            g_raw_ptr = g_raw + base * K
+            g_raw_ptr = g_raw + (bos * H + i_h) * K
             b_gp = gdn2_local_log_cumsum(g_raw_ptr, i_tc_dst.to(tl.int64), min(i_tc_dst + BC, T), o_k, H, K, BC)
             b_ks = gdn2_local_log_cumsum(g_raw_ptr, i_tc_src.to(tl.int64), i_tc_src + BC, o_k, H, K, BC, True)
             o_gap = i_t.to(tl.int64) * BT + tl.arange(0, BT)
@@ -336,17 +341,17 @@ def chunk_gdn2_fwd_kernel_inter_products_npu(
 
     p_Aqk = tl.make_block_ptr(
         Aqk,
-        (T, BT),
+        (T_chunk, BT),
         (H * BT, 1),
-        (i_tc_dst, SRC_BLOCK * BC),
+        (DST_BLOCK * BC, SRC_BLOCK * BC),
         (BC, BC),
         (1, 0),
     )
     p_Akkx = tl.make_block_ptr(
         Akkx,
-        (T, BT),
+        (T_chunk, BT),
         (H * BT, 1),
-        (i_tc_dst, SRC_BLOCK * BC),
+        (DST_BLOCK * BC, SRC_BLOCK * BC),
         (BC, BC),
         (1, 0),
     )
