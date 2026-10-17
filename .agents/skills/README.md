@@ -15,6 +15,7 @@ For kernel work, define the contract and establish baseline coverage before opti
 | [Ascend performance](fla-ascend-performance/SKILL.md)     | NPU profiling and compiler constraints                     |
 | [Triton to Gluon](fla-triton-to-gluon/SKILL.md)           | Layouts, synchronization, and incremental kernel ports     |
 | [PR readiness](fla-pr-readiness/SKILL.md)                 | Scope, validation evidence, and submission                 |
+| [PR stacks](fla-pr-stacks/SKILL.md)                       | Splitting large changes, reusing PRs, and native stacks    |
 
 ## Maintaining skills
 
