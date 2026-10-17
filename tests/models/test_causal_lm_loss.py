@@ -13,6 +13,7 @@ import torch.nn.functional as F
 from torch import nn
 from transformers import AutoModelForCausalLM
 
+from fla import models
 from fla.models import GLAConfig, KDAConfig, MomConfig, TransformerConfig
 from fla.utils import assert_close, device_name
 
@@ -122,3 +123,59 @@ def test_fused_causal_lm_loss_matches_unfused(linear, use_l2warp, num_items):
     actual.loss.backward()
     for (name, parameter), fused_parameter in zip(reference.named_parameters(), fused.parameters(), strict=True):
         assert_close(name, parameter.grad, fused_parameter.grad, 1e-3)
+
+
+@pytest.mark.parametrize('config_class', [
+    models.ABCConfig, models.BitNetConfig, models.CombaConfig, models.DeltaNetConfig,
+    models.ForgettingTransformerConfig, models.GatedDeltaNetConfig, models.GatedDeltaProductConfig,
+    models.GLAConfig, models.GSAConfig, models.HGRNConfig, models.HGRN2Config, models.LightNetConfig,
+    models.MesaNetConfig, models.MLAConfig, models.MoBAConfig, models.NSAConfig, models.ParallaxConfig,
+    models.PaTHAttentionConfig, models.PrecondGatedDeltaNetConfig, models.RavenConfig, models.RetNetConfig,
+    models.RodimusConfig, models.RWKV6Config, models.TransformerConfig, models.WallTransformerConfig,
+], ids=lambda cls: cls.model_type)
+@pytest.mark.parametrize('return_dict', [False, True])
+def test_causal_lm_forward_contract(config_class, return_dict):
+    torch.manual_seed(42)
+    model = AutoModelForCausalLM.from_config(config_class(
+        hidden_size=64,
+        num_heads=2,
+        num_hidden_layers=0,
+        num_self_decoder_layers=0,
+        intermediate_size=128,
+        vocab_size=64,
+        use_lower_bound=False,
+        fuse_norm=False,
+        fuse_cross_entropy=False,
+    ))
+    model.eval()
+    model.config.return_dict = return_dict
+    input_ids = torch.randint(0, 64, (2, 7))
+    labels = input_ids.clone()
+    labels[0, 3] = -100
+    outputs = model(input_ids=input_ids, labels=labels, use_cache=False, output_hidden_states=True, return_dict=return_dict)
+    decoder_outputs = model.model(input_ids=input_ids, use_cache=False, output_hidden_states=True, return_dict=True)
+    reference_logits = model.lm_head(decoder_outputs.last_hidden_state)
+    reference_loss = F.cross_entropy(reference_logits[:, :-1].reshape(-1, 64), labels[:, 1:].reshape(-1))
+    loss, logits = (outputs.loss, outputs.logits) if return_dict else outputs[:2]
+    torch.testing.assert_close(logits, reference_logits)
+    torch.testing.assert_close(loss, reference_loss)
+    parameters = tuple(model.parameters())
+    actual_gradients = torch.autograd.grad(loss, parameters)
+    reference_gradients = torch.autograd.grad(reference_loss, parameters)
+    for actual, expected in zip(actual_gradients, reference_gradients, strict=True):
+        torch.testing.assert_close(actual, expected)
+    hidden_states = outputs.hidden_states if return_dict else outputs[2]
+    for actual, expected in zip(hidden_states, decoder_outputs.hidden_states, strict=True):
+        torch.testing.assert_close(actual, expected)
+    embeddings = model.get_input_embeddings()(input_ids)
+    if config_class in (
+        models.BitNetConfig, models.TransformerConfig, models.WallTransformerConfig,
+        models.ForgettingTransformerConfig, models.ParallaxConfig, models.PaTHAttentionConfig,
+    ):
+        positional = model(None, None, None, embeddings, labels, False, False, True, return_dict)
+    else:
+        positional = model(None, None, embeddings, None, labels, False, False, True, return_dict)
+    torch.testing.assert_close(positional.logits if return_dict else positional[1], logits)
+    with torch.no_grad():
+        selected = model(input_ids=input_ids, num_logits_to_keep=2, use_cache=False)
+    torch.testing.assert_close(selected.logits if return_dict else selected[0], logits[:, -2:])
