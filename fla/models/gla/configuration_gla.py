@@ -5,14 +5,17 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-import warnings
+from transformers.configuration_utils import PreTrainedConfig
 
-from transformers.configuration_utils import PretrainedConfig
+from fla.models.configuration_utils import (
+    AttentionConfig,
+    AttentionConfigBase,
+    validate_attnres_config,
+    validate_loss_config,
+)
 
-from fla.models.hybrid import HybridAttentionConfig, _HybridAttentionConfigMixin
 
-
-class GLAConfig(_HybridAttentionConfigMixin, PretrainedConfig):
+class GLAConfig(AttentionConfigBase, PreTrainedConfig):
 
     model_type = 'gla'
     keys_to_ignore_at_inference = ['past_key_values']
@@ -39,7 +42,7 @@ class GLAConfig(_HybridAttentionConfigMixin, PretrainedConfig):
         norm_eps: float = 1e-6,
         use_gk: bool = True,
         use_gv: bool = False,
-        attn: HybridAttentionConfig = None,
+        attn: AttentionConfig = None,
         use_cache: bool = True,
         pad_token_id: int | None = None,
         bos_token_id: int = 1,
@@ -52,7 +55,8 @@ class GLAConfig(_HybridAttentionConfigMixin, PretrainedConfig):
         fuse_linear_cross_entropy: bool = False,
         use_l2warp: bool = False,
         vocab_size: int = 32000,
-        residual_mode: str = 'standard',
+        attnres_block_size: int | None = None,
+        residual_mode: str | None = None,
         residual_kwargs: dict | None = None,
         **kwargs,
     ):
@@ -94,20 +98,18 @@ class GLAConfig(_HybridAttentionConfigMixin, PretrainedConfig):
         if reserved:
             raise ValueError(f'{sorted(reserved)} are supplied by the model, not residual_kwargs')
 
+        validate_attnres_config(attnres_block_size=attnres_block_size)
+        if residual_mode is None:
+            residual_mode = 'standard' if attnres_block_size is None else 'attnres'
+        if attnres_block_size is not None:
+            if residual_mode != 'attnres' or self.residual_kwargs.get('block_size', attnres_block_size) != attnres_block_size:
+                raise ValueError('attnres_block_size conflicts with residual_mode or residual_kwargs')
+            self.residual_kwargs['block_size'] = attnres_block_size
         self.residual_mode = residual_mode
-        if num_hidden_layers < 1:
-            raise ValueError('num_hidden_layers must be positive')
+        if num_hidden_layers < 0:
+            raise ValueError('num_hidden_layers must be non-negative')
 
-        if fuse_cross_entropy and fuse_linear_cross_entropy:
-            raise ValueError(
-                "`fuse_cross_entropy` and `fuse_linear_cross_entropy` cannot be True at the same time.",
-            )
-        if fuse_linear_cross_entropy:
-            warnings.warn(
-                "`fuse_linear_cross_entropy` is enabled, which can improves memory efficiency "
-                "at the potential cost of reduced precision. "
-                "If you observe issues like loss divergence, consider disabling this setting.",
-            )
+        validate_loss_config(fuse_cross_entropy=fuse_cross_entropy, fuse_linear_cross_entropy=fuse_linear_cross_entropy)
 
         super().__init__(
             pad_token_id=pad_token_id,
@@ -116,6 +118,21 @@ class GLAConfig(_HybridAttentionConfigMixin, PretrainedConfig):
             tie_word_embeddings=tie_word_embeddings,
             **kwargs,
         )
+
+    @property
+    def attnres_block_size(self) -> int | None:
+        """Expose the legacy option while serializing only the canonical residual fields."""
+        return self.residual_kwargs.get('block_size', 1) if self.residual_mode == 'attnres' else None
+
+    @attnres_block_size.setter
+    def attnres_block_size(self, value: int | None) -> None:
+        validate_attnres_config(attnres_block_size=value)
+        self.residual_mode = 'standard' if value is None else 'attnres'
+        self.residual_kwargs = dict(self.residual_kwargs)
+        if value is None:
+            self.residual_kwargs.pop('block_size', None)
+        else:
+            self.residual_kwargs['block_size'] = value
 
     def get_residual_kwargs(self, sub_layer_idx: int) -> dict:
         """Build constructor arguments for the selected residual and sublayer."""

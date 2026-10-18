@@ -7,38 +7,28 @@
 
 from __future__ import annotations
 
-import math
 import re
 import warnings
 from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 import torch.nn as nn
-from packaging import version
-from transformers import __version__ as transformers_version
-from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
-from transformers.modeling_utils import PreTrainedModel
+from transformers.modeling_layers import GradientCheckpointingLayer
+from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.utils import logging
-from transformers.utils.deprecation import deprecate_kwarg
 
-from fla.layers.attn import Attention
 from fla.layers.gla import GatedLinearAttention
+from fla.models.cache_utils import Cache
+from fla.models.generation_utils import FLAUnsupportedCacheGenerationMixin
 from fla.models.gla.configuration_gla import GLAConfig
-from fla.models.hybrid import get_hybrid_attention_spec
-from fla.models.utils import Cache, FLAUnsupportedCacheGenerationMixin
-from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
+from fla.models.modeling_utils import FLAForCausalLM, FLAPreTrainedModel, get_attention
 from fla.modules import GatedMLP as GLAMLP
-from fla.modules.l2warp import l2_warp
+from fla.modules import RMSNorm
 from fla.modules.residuals import BaseResidual, get_residual_class
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
-
-try:
-    from transformers.modeling_layers import GradientCheckpointingLayer
-except ImportError:
-    from fla.models.modeling_layers import GradientCheckpointingLayer
 
 logger = logging.get_logger(__name__)
 
@@ -46,6 +36,8 @@ logger = logging.get_logger(__name__)
 def _legacy_residual_keys(num_layers: int) -> dict[str, str]:
     """Map official and external-attn-norm checkpoints to residual-owned parameters."""
     keys = {}
+    if num_layers == 0:
+        return keys
     for i in range(num_layers):
         previous = f'layers.{i - 1}.residual_mlp' if i else 'layers.0.residual_attn'
         input_norm = f'{previous}.norm.weight' if i else f'{previous}.input_norm.weight'
@@ -69,19 +61,8 @@ class GLABlock(GradientCheckpointingLayer):
         self.config = config
         self.layer_idx = layer_idx
 
-        attn_spec = get_hybrid_attention_spec(config.attn, layer_idx=layer_idx)
-        if attn_spec is not None:
-            self.attn = Attention(
-                hidden_size=config.hidden_size,
-                num_heads=attn_spec['num_heads'],
-                num_kv_heads=attn_spec['num_kv_heads'],
-                qkv_bias=attn_spec['qkv_bias'],
-                window_size=attn_spec['window_size'],
-                rope_theta=attn_spec['rope_theta'],
-                max_position_embeddings=config.max_position_embeddings,
-                layer_idx=layer_idx,
-            )
-        else:
+        self.attn = get_attention(config=config, layer_idx=layer_idx)
+        if self.attn is None:
             self.attn = GatedLinearAttention(
                 mode=config.attn_mode,
                 hidden_size=config.hidden_size,
@@ -120,11 +101,11 @@ class GLABlock(GradientCheckpointingLayer):
     def forward(
         self,
         hidden_states: torch.Tensor,
+        history: Any = None,
         attention_mask: torch.Tensor | None = None,
         past_key_values: Cache | list[torch.FloatTensor] | None = None,
         use_cache: bool | None = False,
         output_attentions: bool | None = False,
-        history: Any = None,
         **kwargs: Unpack[dict],
     ) -> tuple[torch.Tensor, torch.Tensor | None, Cache | None, Any]:
         if history is None:
@@ -146,7 +127,7 @@ class GLABlock(GradientCheckpointingLayer):
         return outputs
 
 
-class GLAPreTrainedModel(PreTrainedModel):
+class GLAPreTrainedModel(FLAPreTrainedModel):
 
     config_class = GLAConfig
     base_model_prefix = 'model'
@@ -154,31 +135,29 @@ class GLAPreTrainedModel(PreTrainedModel):
     _no_split_modules = ['GLABlock']
     _supports_cache_class = True
 
-    def __init__(self, *inputs, **kwargs):
-        super().__init__(*inputs, **kwargs)
-
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
-        # newer HF loaders bypass module load hooks, including when loading onto the meta device.
-        if version.parse(transformers_version) >= version.parse('4.51.0'):
-            config = kwargs.get('config')
-            if not isinstance(config, GLAConfig):
-                config = cls.config_class.from_pretrained(config or pretrained_model_name_or_path, **{
-                    key: kwargs[key] for key in ('cache_dir', 'revision', 'token', 'local_files_only', 'subfolder')
-                    if key in kwargs
-                })
-            key_mapping = dict(kwargs.pop('key_mapping', None) or {})
-            if config.residual_mode != 'mhc':
-                for old_key, new_key in _legacy_residual_keys(config.num_hidden_layers).items():
-                    key_mapping.setdefault(r'^(model\.|)' + re.escape(old_key) + '$', r'\1' + new_key)
-            kwargs['key_mapping'] = key_mapping
+        # HF loaders bypass module load hooks, including when loading onto the meta device.
+        config = kwargs.get('config')
+        if not isinstance(config, GLAConfig):
+            config = cls.config_class.from_pretrained(config or pretrained_model_name_or_path, **{
+                key: kwargs[key] for key in (
+                    'cache_dir', 'revision', 'token', 'local_files_only', 'subfolder',
+                    'num_hidden_layers', 'residual_mode', 'residual_kwargs', 'attnres_block_size',
+                )
+                if key in kwargs
+            })
+        key_mapping = dict(kwargs.pop('key_mapping', None) or {})
+        if config.residual_mode != 'mhc':
+            for old_key, new_key in _legacy_residual_keys(config.num_hidden_layers).items():
+                key_mapping.setdefault(r'^(model\.|)' + re.escape(old_key) + '$', r'\1' + new_key)
+        kwargs['key_mapping'] = key_mapping
         return super().from_pretrained(pretrained_model_name_or_path, *args, **kwargs)
 
     def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
-        # residual history carries autograd edges independently of the normalized positional input.
         checkpoint_kwargs = {'use_reentrant': False, **(gradient_checkpointing_kwargs or {})}
-        if checkpoint_kwargs['use_reentrant']:
-            raise ValueError('GLA residual history requires gradient checkpointing with use_reentrant=False')
+        if checkpoint_kwargs['use_reentrant'] and self.config.residual_mode != 'standard':
+            raise ValueError('Structured residual history requires gradient checkpointing with use_reentrant=False')
         return super().gradient_checkpointing_enable(gradient_checkpointing_kwargs=checkpoint_kwargs)
 
     def _initialize_weights(self, module: nn.Module, *args, **kwargs):
@@ -202,45 +181,11 @@ class GLAPreTrainedModel(PreTrainedModel):
         if isinstance(module, BaseResidual):
             module.reset_parameters()
             return
-        if isinstance(module, (nn.Linear, nn.Conv1d)):
-            if getattr(module, '_is_attnres_proj', False):
-                nn.init.zeros_(module.weight)
-            else:
-                # Slightly different from the TF version which uses truncated_normal for initialization
-                # cf https://github.com/pytorch/pytorch/pull/5617
-                nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
-            if module.bias is not None:
-                nn.init.zeros_(module.bias)
-        elif isinstance(module, nn.Embedding):
-            nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
-        elif hasattr(module, 'reset_parameters'):
-            module.reset_parameters()
-
-        if prenorm_residual_strategy is not None:
-            # Reinitialize selected weights subject to the OpenAI GPT-2 Paper Scheme:
-            #   > A modified initialization which accounts for the accumulation on the residual path with model depth. Scale
-            #   > the weights of residual layers at initialization by a factor of 1/√N where N is the # of residual layers.
-            #   >   -- GPT-2 :: https://openai.com/blog/better-language-models/
-            #
-            # Reference (Megatron-LM): https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/models/gpt/gpt_model.py
-            p = None
-            if hasattr(module, 'o_proj'):
-                p = module.o_proj.weight
-            elif hasattr(module, 'down_proj'):
-                p = module.down_proj.weight
-            if p is not None:
-                # Special Scaled Initialization --> There are 2 Layer Norms per Transformer Block
-                # Following Pytorch init, except scale by 1/sqrt(2 * n_layer)
-                # We need to reinit p since this code could be called multiple times
-                # Having just p *= scale would repeatedly scale it down
-                if prenorm_residual_strategy == 'rescale':
-                    nn.init.kaiming_uniform_(p, a=math.sqrt(5))
-                    with torch.no_grad():
-                        p /= math.sqrt(num_residuals_per_layer * self.config.num_hidden_layers)
-                elif prenorm_residual_strategy == 'zero':
-                    nn.init.zeros_(p)
-                else:
-                    raise ValueError(f"Invalid prenorm_residual_strategy: {prenorm_residual_strategy}")
+        super()._init_weights(
+            module=module,
+            prenorm_residual_strategy=prenorm_residual_strategy,
+            num_residuals_per_layer=num_residuals_per_layer,
+        )
 
 
 class GLAModel(GLAPreTrainedModel):
@@ -252,6 +197,8 @@ class GLAModel(GLAPreTrainedModel):
 
         self.embeddings = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
         self.layers = nn.ModuleList([GLABlock(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
+        if not self.layers:
+            self.norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
 
         self.gradient_checkpointing = False
 
@@ -264,12 +211,6 @@ class GLAModel(GLAPreTrainedModel):
                 if old_key in state_dict and new_key not in state_dict:
                     state_dict[new_key] = state_dict.pop(old_key)
         super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
-
-    def get_input_embeddings(self):
-        return self.embeddings
-
-    def set_input_embeddings(self, value):
-        self.embeddings = value
 
     def forward(
         self,
@@ -289,7 +230,7 @@ class GLAModel(GLAPreTrainedModel):
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         use_cache = use_cache if use_cache is not None else (self.config.use_cache if not self.training else False)
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = return_dict if return_dict is not None else self.config.return_dict
 
         # retrieve input_ids and inputs_embeds
         if input_ids is not None and inputs_embeds is not None:
@@ -311,11 +252,11 @@ class GLAModel(GLAPreTrainedModel):
         for layer_idx, layer in enumerate(self.layers):
             hidden_states, attentions, past_key_values, history = layer(
                 hidden_states,
+                history,
                 attention_mask=attention_mask,
                 past_key_values=past_key_values,
                 use_cache=use_cache,
                 output_attentions=output_attentions,
-                history=history,
                 **kwargs,
             )
 
@@ -323,10 +264,15 @@ class GLAModel(GLAPreTrainedModel):
                 all_attns += (attentions,)
 
             if output_hidden_states:
-                # Intermediate entries report residual states; the final entry is the normalized model output.
+                # intermediate entries report residual states; the final entry is the normalized model output.
                 all_hidden_states += (
                     hidden_states if layer_idx == len(self.layers) - 1 else layer.residual_mlp.get_hidden_state(history),
                 )
+
+        if not self.layers:
+            hidden_states = self.norm(hidden_states)
+            if output_hidden_states:
+                all_hidden_states = (hidden_states,)
 
         if not return_dict:
             return tuple(i for i in [hidden_states, past_key_values, all_hidden_states, all_attns] if i is not None)
@@ -338,14 +284,9 @@ class GLAModel(GLAPreTrainedModel):
         )
 
 
-class GLAForCausalLM(GLAPreTrainedModel, FLAUnsupportedCacheGenerationMixin):
+class GLAForCausalLM(GLAPreTrainedModel, FLAForCausalLM, FLAUnsupportedCacheGenerationMixin):
 
-    # transformers 5 requires target-to-source mappings, while 4.x uses a list of tied keys.
-    _tied_weights_keys = (
-        {"lm_head.weight": "model.embeddings.weight"}
-        if hasattr(PreTrainedModel, 'get_expanded_tied_weights_keys')
-        else ["lm_head.weight"]
-    )
+    _tied_weights_keys = {"lm_head.weight": "model.embeddings.weight"}
 
     def __init__(self, config):
         super().__init__(config)
@@ -356,93 +297,3 @@ class GLAForCausalLM(GLAPreTrainedModel, FLAUnsupportedCacheGenerationMixin):
 
         # Initialize weights and apply final processing
         self.post_init()
-
-    def get_input_embeddings(self):
-        return self.model.embeddings
-
-    def set_input_embeddings(self, value):
-        self.model.embeddings = value
-
-    def get_output_embeddings(self):
-        return self.lm_head
-
-    def set_output_embeddings(self, new_embeddings):
-        self.lm_head = new_embeddings
-
-    def set_decoder(self, decoder):
-        self.model = decoder
-
-    def get_decoder(self):
-        return self.model
-
-    @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
-    def forward(
-        self,
-        input_ids: torch.LongTensor = None,
-        attention_mask: torch.Tensor | None = None,
-        inputs_embeds: torch.Tensor | None = None,
-        past_key_values: Cache | list[torch.FloatTensor] | None = None,
-        labels: torch.LongTensor | None = None,
-        use_cache: bool | None = None,
-        output_attentions: bool | None = None,
-        output_hidden_states: bool | None = None,
-        return_dict: bool | None = None,
-        logits_to_keep: int | None = 0,
-        **kwargs: Unpack[dict],
-    ) -> tuple | CausalLMOutputWithPast:
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
-        outputs = self.model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            inputs_embeds=inputs_embeds,
-            past_key_values=past_key_values,
-            use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-            **kwargs,
-        )
-
-        hidden_states = outputs[0]
-
-        loss, logits = None, None
-        if not self.config.fuse_linear_cross_entropy or labels is None:
-            logits = self.lm_head(
-                hidden_states
-                if labels is not None or logits_to_keep is None
-                else hidden_states[:, -logits_to_keep:]
-            )
-        if labels is not None:
-            if getattr(self, 'criterion', None) is None:
-                if self.config.fuse_linear_cross_entropy:
-                    criterion = FusedLinearCrossEntropyLoss(use_l2warp=self.config.use_l2warp)
-                elif self.config.fuse_cross_entropy:
-                    criterion = FusedCrossEntropyLoss(inplace_backward=True)
-                else:
-                    criterion = nn.CrossEntropyLoss()
-            else:
-                criterion = self.criterion
-            labels = labels.to(hidden_states.device)
-            labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], criterion.ignore_index)), 1)
-            if self.config.fuse_linear_cross_entropy:
-                loss = criterion(hidden_states, labels, self.lm_head.weight, self.lm_head.bias)
-            else:
-                loss = criterion(logits.view(labels.numel(), -1), labels.view(-1))
-                loss = l2_warp(loss, logits) if self.config.use_l2warp else loss
-
-        if not return_dict:
-            output = (logits,) + outputs[1:]
-            return (loss,) + output if loss is not None else output
-
-        return CausalLMOutputWithPast(
-            loss=loss,
-            logits=logits,
-            past_key_values=outputs.past_key_values,
-            hidden_states=outputs.hidden_states,
-            attentions=outputs.attentions,
-        )

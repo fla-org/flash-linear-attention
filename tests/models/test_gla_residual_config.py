@@ -19,6 +19,18 @@ from fla.modules.residuals import StandardResidual, register_residual, registry
 from .test_gla_external_norm import cpu_ops, make_config  # noqa: F401
 
 
+@pytest.mark.parametrize('block_size', [None, 1, 2, 4])
+def test_legacy_residual_config(block_size, tmp_path):
+    config = GLAConfig(attnres_block_size=block_size)
+    assert config.residual_mode == ('standard' if block_size is None else 'attnres')
+    assert config.residual_kwargs == ({} if block_size is None else {'block_size': block_size})
+    config.save_pretrained(tmp_path)
+    restored = GLAConfig.from_pretrained(tmp_path)
+    assert restored.attnres_block_size == block_size
+    assert restored.residual_mode == config.residual_mode
+    assert restored.residual_kwargs == config.residual_kwargs
+
+
 @pytest.mark.parametrize(('mode', 'options'), [
     ('standard', {}),
     ('attnres', {'block_size': 3}),
@@ -56,7 +68,7 @@ def test_nested_residual_options_roundtrip(mode, options, tmp_path):
 def test_residual_defaults_belong_to_modules(mode):
     model = GLAModel(make_config(mode=mode))
     assert model.config.residual_kwargs == {}
-    assert not any(hasattr(model.config, name) for name in (
+    assert not any(name in model.config.to_dict() for name in (
         'attnres_block_size', 'mhc_num_streams', 'mhc_sinkhorn_iters', 'mhc_init_scale',
     ))
     ids = torch.arange(6).reshape(2, 3)
