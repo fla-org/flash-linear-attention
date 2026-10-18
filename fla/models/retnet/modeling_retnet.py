@@ -19,8 +19,7 @@ from transformers.utils import logging
 from fla.layers.multiscale_retention import MultiScaleRetention
 from fla.models.cache_utils import Cache
 from fla.models.generation_utils import FLAUnsupportedCacheGenerationMixin
-from fla.models.modeling_layers import get_attention
-from fla.models.modeling_utils import FLAForCausalLM, FLAPreTrainedModel
+from fla.models.modeling_utils import FLAForCausalLM, FLAPreTrainedModel, get_attention
 from fla.models.retnet.configuration_retnet import RetNetConfig
 from fla.modules import GatedMLP as RetNetMLP
 from fla.modules import RMSNorm

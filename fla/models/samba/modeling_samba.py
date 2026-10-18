@@ -20,8 +20,7 @@ from transformers.utils.deprecation import deprecate_kwarg
 from fla.layers.mamba import Mamba
 from fla.models.cache_utils import Cache
 from fla.models.generation_utils import FLAGenerationMixin
-from fla.models.modeling_layers import get_attention
-from fla.models.modeling_utils import FLAPreTrainedModel
+from fla.models.modeling_utils import FLAPreTrainedModel, get_attention
 from fla.models.samba.configuration_samba import SambaConfig
 from fla.modules import GatedMLP as SambaMLP
 from fla.modules import RMSNorm

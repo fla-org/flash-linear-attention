@@ -21,8 +21,7 @@ from transformers.utils.deprecation import deprecate_kwarg
 from fla.layers.rwkv7 import RWKV7Attention
 from fla.models.cache_utils import Cache
 from fla.models.generation_utils import FLAUnsupportedCacheGenerationMixin
-from fla.models.modeling_layers import get_attention
-from fla.models.modeling_utils import FLAForCausalLM, FLAPreTrainedModel
+from fla.models.modeling_utils import FLAForCausalLM, FLAPreTrainedModel, get_attention
 from fla.models.rwkv7.configuration_rwkv7 import RWKV7Config
 from fla.modules import LayerNorm
 from fla.modules.activations import ACT2FN

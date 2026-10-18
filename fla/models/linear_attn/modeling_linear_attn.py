@@ -21,8 +21,7 @@ from fla.layers.linear_attn import LinearAttention
 from fla.models.cache_utils import Cache
 from fla.models.generation_utils import FLAUnsupportedCacheGenerationMixin
 from fla.models.linear_attn.configuration_linear_attn import LinearAttentionConfig
-from fla.models.modeling_layers import get_attention
-from fla.models.modeling_utils import FLAForCausalLM, FLAPreTrainedModel
+from fla.models.modeling_utils import FLAForCausalLM, FLAPreTrainedModel, get_attention
 from fla.modules import GatedMLP as LinearAttentionMLP
 from fla.modules import RMSNorm
 from fla.ops.attnres import fused_attnres

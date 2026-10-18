@@ -20,8 +20,7 @@ from fla.layers.hgrn2 import HGRN2Attention
 from fla.models.cache_utils import Cache
 from fla.models.generation_utils import FLAUnsupportedCacheGenerationMixin
 from fla.models.hgrn2.configuration_hgrn2 import HGRN2Config
-from fla.models.modeling_layers import get_attention
-from fla.models.modeling_utils import FLAForCausalLM, FLAPreTrainedModel
+from fla.models.modeling_utils import FLAForCausalLM, FLAPreTrainedModel, get_attention
 from fla.modules import GatedMLP as HGRN2MLP
 from fla.modules import RMSNorm
 from fla.ops.attnres import fused_attnres

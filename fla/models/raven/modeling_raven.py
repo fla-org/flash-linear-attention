@@ -22,8 +22,7 @@ from transformers.utils import logging
 from fla.layers.raven import Raven
 from fla.models.cache_utils import Cache
 from fla.models.generation_utils import FLAUnsupportedCacheGenerationMixin
-from fla.models.modeling_layers import get_attention
-from fla.models.modeling_utils import FLAForCausalLM, FLAPreTrainedModel
+from fla.models.modeling_utils import FLAForCausalLM, FLAPreTrainedModel, get_attention
 from fla.models.raven.configuration_raven import RavenConfig
 from fla.modules import GatedMLP as RavenMLP
 from fla.modules import RMSNorm

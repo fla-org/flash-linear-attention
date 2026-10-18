@@ -21,8 +21,7 @@ from fla.layers.comba import Comba
 from fla.models.cache_utils import Cache
 from fla.models.comba.configuration_comba import CombaConfig
 from fla.models.generation_utils import FLAUnsupportedCacheGenerationMixin
-from fla.models.modeling_layers import get_attention
-from fla.models.modeling_utils import FLAForCausalLM, FLAPreTrainedModel
+from fla.models.modeling_utils import FLAForCausalLM, FLAPreTrainedModel, get_attention
 from fla.modules import GatedMLP as CombaMLP
 from fla.modules import RMSNorm
 from fla.ops.attnres import fused_attnres

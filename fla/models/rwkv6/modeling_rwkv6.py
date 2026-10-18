@@ -20,8 +20,7 @@ from transformers.utils import logging
 from fla.layers.rwkv6 import LerpLinear, RWKV6Attention
 from fla.models.cache_utils import Cache
 from fla.models.generation_utils import FLAUnsupportedCacheGenerationMixin
-from fla.models.modeling_layers import get_attention
-from fla.models.modeling_utils import FLAForCausalLM, FLAPreTrainedModel
+from fla.models.modeling_utils import FLAForCausalLM, FLAPreTrainedModel, get_attention
 from fla.models.rwkv6.configuration_rwkv6 import RWKV6Config
 from fla.modules import LayerNorm
 from fla.modules.activations import ACT2FN
