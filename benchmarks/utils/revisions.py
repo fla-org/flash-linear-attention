@@ -15,6 +15,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from benchmarks.utils.reporting import get_result_path
+
 
 def find_project_root() -> str:
     return subprocess.check_output(['git', 'rev-parse', '--show-toplevel'], text=True).strip()
@@ -65,8 +67,9 @@ def run_benchmark(module: str, arguments: list[str], ref: str | None = None) -> 
                 'runpy.run_module(module, run_name="__main__")'
             )
             command = [sys.executable, '-c', bootstrap, str(harness), source, module, *arguments, '--json', str(output)]
-            environment = {**os.environ, 'FLA_BENCH_WORKER': '1', 'FLA_GRAPH_BENCH_WORKER': '1'}
+            environment = {**os.environ, 'TRITON_CACHE_DIR': str(temporary / 'triton')}
             subprocess.run(command, cwd=source, env=environment, check=True)
+            output = get_result_path(path=output, rank=int(os.environ.get('RANK', '0')))
             with output.open() as file:
                 payload = json.load(file)
             if ref is not None:

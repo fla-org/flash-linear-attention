@@ -8,7 +8,7 @@
 import torch
 import triton
 
-from benchmarks.utils.perf_report import run_module_benchmark
+from benchmarks.utils.perf_report import add_module_arguments, run_module_benchmark
 from fla.modules.activations import elu_p1, logsigmoid, powglu, sigmoid, sqrelu, swiglu, swish
 from fla.modules.activations import fast_gelu_impl as gelu
 from fla.utils import device
@@ -115,9 +115,9 @@ def benchmark(B, T, D, provider):
     return ms, min_ms, max_ms
 
 
-def main():
-    run_module_benchmark(mark=benchmark, save_dir='./activation_benchmark', script_file=__file__)
+def add_arguments(parser):
+    add_module_arguments(parser)
 
 
-if __name__ == '__main__':
-    main()
+def run(args):
+    return run_module_benchmark(mark=benchmark, save_dir=args.save_dir, plot=args.plot)

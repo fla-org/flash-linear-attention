@@ -15,7 +15,7 @@ from typing import Any
 
 from torch.nn.functional import logsigmoid
 
-from benchmarks.ops.utils.inputs import (
+from benchmarks.utils.ops.inputs import (
     TensorSpec,
     init_attnres_inputs,
     init_cyfa_inputs,

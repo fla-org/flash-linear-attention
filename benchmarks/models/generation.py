@@ -5,7 +5,6 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-import argparse
 import time
 
 import torch
@@ -13,6 +12,7 @@ from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import fla  # noqa
+from benchmarks.utils.reporting import BenchmarkResult
 
 
 def sizeof_fmt(num, suffix='B'):
@@ -23,8 +23,7 @@ def sizeof_fmt(num, suffix='B'):
     return f'{num:.1f}Yi{suffix}'
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Generation benchmarking")
+def add_arguments(parser):
     parser.add_argument("--path", type=str, default="fla-hub/transformer-1.3B-100B")
     parser.add_argument("--data", type=str, default="fla-hub/pg19")
     parser.add_argument("--length", type=int, default=128)
@@ -35,8 +34,9 @@ def main():
     parser.add_argument("--repetition_penalty", type=float, default=1.1)
     parser.add_argument("--output-generation", action='store_true')
     parser.add_argument("--compile", action='store_true')
-    args = parser.parse_args()
 
+
+def run(args):
     device = "cuda"
     dtype = torch.bfloat16
     torch.manual_seed(0)
@@ -91,9 +91,14 @@ def main():
         print(f"Prompt:\n{tokenizer.batch_decode(input_ids, skip_special_tokens=True)[0].strip()}\n")
         print(f"Generated:\n{tokenizer.batch_decode(text, skip_special_tokens=True)[0].strip()}\n")
     print(f"Prompt length: {len(input_ids[0])}, generation length: {len(text[0]) - len(input_ids[0])}")
-    print(f"Total prompt processing + decoding time: {elapsed * 1000:.0f}ms")
-    print(f"Max memory used: {sizeof_fmt(torch.cuda.max_memory_allocated())}")
-
-
-if __name__ == "__main__":
-    main()
+    return [BenchmarkResult(
+        name=args.path,
+        parameters={
+            'data': args.data, 'dtype': str(dtype),
+            'prompt_tokens': input_ids.shape[1], 'max_new_tokens': args.maxlen, 'compile': args.compile,
+            'cache': not args.no_cache, 'temperature': args.temperature, 'top_p': args.topp,
+            'repetition_penalty': args.repetition_penalty,
+        },
+        metrics={'elapsed_ms': elapsed * 1000, 'peak_memory_bytes': torch.cuda.max_memory_allocated()},
+        primary_metric='elapsed_ms',
+    )]

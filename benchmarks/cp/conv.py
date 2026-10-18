@@ -9,8 +9,6 @@
 
 from __future__ import annotations
 
-import argparse
-import os
 import statistics
 from typing import TYPE_CHECKING
 
@@ -18,6 +16,8 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
+from benchmarks.utils.distributed import distributed_context
+from benchmarks.utils.reporting import BenchmarkResult
 from fla.modules.causal_conv1d import causal_conv1d
 from fla.ops.cp import build_cp_context
 from fla.utils import assert_close, get_abs_err, get_err_ratio
@@ -91,7 +91,7 @@ def benchmark(
 
 
 @torch.compiler.disable
-def benchmark_case(tokens: int, channels: int, packed: bool, repeats: int, iterations: int, cp: bool) -> None:
+def benchmark_case(tokens: int, channels: int, packed: bool, repeats: int, iterations: int, cp: bool):
     torch.manual_seed(42)
     group = dist.group.WORLD if cp else None
     global_tokens = tokens * dist.get_world_size(group=group) if cp else tokens
@@ -130,6 +130,7 @@ def benchmark_case(tokens: int, channels: int, packed: bool, repeats: int, itera
         print(f'\nTokens/rank={tokens}, channels={channels}, packed={packed}', flush=True)
     compare_backends(forward=forward, x=x, weight=weight, dy=dy, group=group)
 
+    results = []
     for backward in (False, True):
         def step(backend: str) -> None:
             y = forward(backend=backend)
@@ -137,56 +138,47 @@ def benchmark_case(tokens: int, channels: int, packed: bool, repeats: int, itera
                 torch.autograd.grad(outputs=y, inputs=(x, weight), grad_outputs=dy)
 
         samples = benchmark(step=step, repeats=repeats, iterations=iterations, group=group)
-        if not cp or dist.get_rank(group=group) == 0:
-            mode = 'forward_backward' if backward else 'forward'
-            for label, aggregate in (('avg', statistics.mean), ('median', statistics.median)):
-                triton_ms = aggregate(samples['triton'])
-                cuda_ms = aggregate(samples['cuda'])
-                print(
-                    f'  {mode:17s} {label:6s}  Triton {triton_ms:.3f} ms  CUDA {cuda_ms:.3f} ms  '
-                    f'speedup {triton_ms / cuda_ms:.3f}x',
-                    flush=True,
-                )
+        for provider, times in samples.items():
+            results.append(BenchmarkResult(
+                name='conv',
+                parameters={'provider': provider, 'tokens_per_rank': tokens, 'channels': channels,
+                            'packed': packed, 'cp': cp, 'backward': backward},
+                metrics={'mean_ms': statistics.mean(times), 'median_ms': statistics.median(times)},
+            ))
+    return results
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
+def add_arguments(parser):
     parser.add_argument('--cp', action='store_true', help='Run with torchrun across at least two GPUs.')
     parser.add_argument('--tokens', type=int, nargs='+', default=[2048, 8192, 16384, 32768])
     parser.add_argument('--channels', type=int, nargs='+', default=[2048, 4096, 8192])
     parser.add_argument('--repeats', type=int, default=5)
     parser.add_argument('--iterations', type=int, default=10)
-    args = parser.parse_args()
+
+
+def run(args):
     if min(args.tokens) < 256 or min(args.channels + [args.repeats, args.iterations]) < 1:
-        parser.error('tokens must be >= 256; channels, repeats and iterations must be positive')
+        raise ValueError('tokens must be >= 256; channels, repeats and iterations must be positive')
     if not args.cp and any(channels % 8 for channels in args.channels):
-        parser.error('CUDA convolution without CP requires channels divisible by 8')
+        raise ValueError('CUDA convolution without CP requires channels divisible by 8')
 
     torch.set_num_threads(1)
-    if args.cp:
-        torch.cuda.set_device(int(os.environ['LOCAL_RANK']))
-        dist.init_process_group(backend='nccl')
-    try:
+    results = []
+    with distributed_context(enabled=args.cp, backend='nccl'):
         world_size = dist.get_world_size() if args.cp else 1
         if args.cp and world_size < 2:
-            parser.error('CP benchmark requires at least two ranks')
+            raise ValueError('CP benchmark requires at least two ranks')
         if not args.cp or dist.get_rank() == 0:
             print(f'GPU: {torch.cuda.get_device_name()}, CP: {world_size}', flush=True)
         for tokens in args.tokens:
             for channels in args.channels:
                 for packed in (False, True):
-                    benchmark_case(
+                    results.extend(benchmark_case(
                         tokens=tokens,
                         channels=channels,
                         packed=packed,
                         repeats=args.repeats,
                         iterations=args.iterations,
                         cp=args.cp,
-                    )
-    finally:
-        if args.cp:
-            dist.destroy_process_group()
-
-
-if __name__ == '__main__':
-    main()
+                    ))
+    return results

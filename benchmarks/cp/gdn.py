@@ -5,25 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-'''shell
-
-GPUS=4
-ARGS=(
-    --ops
-    # --use-cp2hp
-    # --kda
-    --backward
-    --bench
-    # --profile
-    # --profile-path /home/user/gdn
-    --seqlen 32768
-    --mean 32768
-    --std 0
-)
-torchrun --nproc_per_node $GPUS --module benchmarks.cp.benchmark_gdn ${ARGS[@]} $@
-
-'''
-import argparse
+"""Measure GDN and KDA operators or layers with context-parallel and all-to-all execution."""
 import os
 import random
 from functools import partial
@@ -33,6 +15,8 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from einops import rearrange, repeat
 
+from benchmarks.utils.distributed import all_gather, distributed_context
+from benchmarks.utils.reporting import BenchmarkResult
 from fla.models.cache_utils import Cache
 from fla.modules.convolution import causal_conv1d
 from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
@@ -53,31 +37,11 @@ try:
 except Exception:
     HAVE_APEX = False
 
-os.environ['TRITON_PRINT_AUTOTUNING'] = '1'
-os.environ['FLA_CONV_BACKEND'] = 'cuda'
-
 DTYPE = torch.bfloat16
 B = 1
 H = 64
 K = 128
 V = 128
-
-
-def get_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--ops", action="store_true")
-    parser.add_argument("--kda", action="store_true")
-    parser.add_argument("--backward", action="store_true")
-    parser.add_argument("--bench", action="store_true")
-    parser.add_argument("--profile", action="store_true")
-    parser.add_argument("--profile-path", type=str, default="")
-    parser.add_argument("--seqlen", type=int, default=1024*32)
-    parser.add_argument("--mean", type=int, default=1024*32)
-    parser.add_argument("--std", type=int, default=0)
-    parser.add_argument("--use-cp2hp", action="store_true")
-    return parser.parse_args()
-
-# torchrun --nproc-per-node=4 test_cp.py
 
 
 def a2a(x, stage=1, group=None, async_op=False):
@@ -183,13 +147,6 @@ def broadcast(x, group=None):
     dist.broadcast(x, src=0, group=group)
 
 
-def all_gather(x, group=None) -> torch.Tensor:
-    world_size = dist.get_world_size(group=group)
-    y = torch.empty(world_size * x.size(0), *x.shape[1:], device=x.device, dtype=x.dtype)
-    dist.all_gather_into_tensor(y, x, group=group)
-    return y
-
-
 def generate_cu_seqlens(end=8192, mean=2048, var=512):
     random.seed(42)
     r = [0]
@@ -257,7 +214,6 @@ def patch_fp32_grad_linear_forward(model: torch.nn.Module):
     if HAVE_APEX:
         for name, m in model.named_modules():
             if isinstance(m, torch.nn.Linear):
-                # print(name)
                 m.forward = partial(fp32_grad_linear_forward, self=m)
                 m.weight.main_grad = torch.zeros_like(m.weight, dtype=torch.float32)
 
@@ -374,7 +330,6 @@ def gdn_forward(
         last_state = past_key_values[self.layer_idx]
 
     cu_seqlens = kwargs.get('cu_seqlens')
-    # assert cu_seqlens is not None
 
     async_op = False
     q = self.q_proj(hidden_states)
@@ -579,7 +534,6 @@ def kda_forward(
     A_log = self.A_log.chunk(cp_size, 0)[cp_rank]
     dt_bias = self.dt_bias.chunk(cp_size, 0)[cp_rank]
     maybe_wait(handle_g)
-    # g = fused_kda_gate(g, A_log, self.head_k_dim, g_bias=dt_bias)
     maybe_wait(handle_b)
     beta = b.sigmoid()
 
@@ -646,21 +600,20 @@ def profile_func(fn, path):
     with torch.profiler.profile(
         activities=[
             torch.profiler.ProfilerActivity.CPU,
-            torch.profiler.ProfilerActivity.CUDA,  # 如果是GPU
+            torch.profiler.ProfilerActivity.CUDA,
         ],
             schedule=torch.profiler.schedule(wait=0, warmup=2, active=8),
             with_stack=False,
             record_shapes=True,
             profile_memory=False,
-            # on_trace_ready=hook_fn,
             on_trace_ready=torch.profiler.tensorboard_trace_handler(path)
 
     ) as prof:
-        for step in range(10):  # 总步数需覆盖schedule的wait+warmup+active
+        for step in range(10):
             torch.cuda.synchronize()
             fn()
             torch.cuda.synchronize()
-            prof.step()  # 通知profiler一个步骤完成
+            prof.step()
     return prof
 
 
@@ -669,6 +622,7 @@ def benchmark_ops(args):
     from fla.ops.gated_delta_rule import chunk_gated_delta_rule
     from fla.ops.kda import chunk_kda
 
+    results = []
     device = torch.cuda.current_device()
     group = args.group
     world_size = dist.get_world_size(group)
@@ -740,7 +694,6 @@ def benchmark_ops(args):
         return o
 
     o = gdn_with_custom_cp()
-    # o = gdn_no_cp()
     dq, dk, dv, dg, dbeta = get_ref_grad(q, k, v, g, beta)
     ref_o = gdn_with_a2a()
     ref_dq, ref_dk, ref_dv, ref_dg, ref_dbeta = get_ref_grad(q, k, v, g, beta)
@@ -762,16 +715,20 @@ def benchmark_ops(args):
         compare(dbeta, ref_dbeta, f"rank:{rank}, dbeta:")
         dist.barrier()
 
-    if args.bench:
-        dist.barrier()
-        t1 = bench(gdn_no_cp)
-        dist.barrier()
-        t2 = bench(gdn_with_custom_cp)
-        dist.barrier()
-        t3 = bench(gdn_with_a2a)
-        if rank == world_size - 1:
-            print(f"custom cp, non-cp time: {t1:.3f} ms, cp time: {t2:.3f} ms, rate: {((t1/world_size) / t2 * 100):.2f} %")
-            print(f"all to all, non-cp time: {t1:.3f} ms, cp time: {t3:.3f} ms, rate: {((t1/world_size) / t3 * 100):.2f} %")
+    dist.barrier()
+    t1 = bench(gdn_no_cp)
+    dist.barrier()
+    t2 = bench(gdn_with_custom_cp)
+    dist.barrier()
+    t3 = bench(gdn_with_a2a)
+    for provider, elapsed in (('non_cp', t1), ('custom_cp', t2), ('all_to_all', t3)):
+        results.append(BenchmarkResult(
+            name='kda' if args.kda else 'gdn',
+            parameters={'scope': 'ops', 'provider': provider, 'B': B, 'T': args.seqlen, 'H': H, 'K': K, 'V': V,
+                        'world_size': world_size, 'backward': backward},
+            metrics={'mean_ms': elapsed},
+            primary_metric='mean_ms',
+        ))
 
     if args.profile:
         def fn():
@@ -783,10 +740,14 @@ def benchmark_ops(args):
             dist.barrier()
         profile_func(fn, args.profile_path)
 
+    return results
+
 
 def benchmark_layer(args):
     from fla.layers.gated_deltanet import GatedDeltaNet
     from fla.layers.kda import KimiDeltaAttention
+
+    results = []
 
     device = torch.cuda.current_device()
     group = args.group
@@ -878,14 +839,19 @@ def benchmark_layer(args):
             compare(grad1, grad2, f"rank:{rank}, {name1} grad:")
             dist.barrier()
 
-    if args.bench:
-        dist.barrier()
-        t1 = bench(gdn_no_cp)
-        dist.barrier()
-        t2 = bench(gdn_with_custom_cp)
-        dist.barrier()
-        if rank == world_size - 1:
-            print(f"custom cp, non-cp time: {t1:.3f} ms, cp time: {t2:.3f} ms, rate: {((t1/world_size) / t2 * 100):.2f} %")
+    dist.barrier()
+    t1 = bench(gdn_no_cp)
+    dist.barrier()
+    t2 = bench(gdn_with_custom_cp)
+    dist.barrier()
+    for provider, elapsed in (('non_cp', t1), ('custom_cp', t2)):
+        results.append(BenchmarkResult(
+            name='kda' if args.kda else 'gdn',
+            parameters={'scope': 'layer', 'provider': provider, 'B': B, 'T': args.seqlen,
+                        'hidden_size': hidden_size, 'world_size': world_size, 'backward': backward},
+            metrics={'mean_ms': elapsed},
+            primary_metric='mean_ms',
+        ))
 
     if args.profile:
         def fn():
@@ -894,27 +860,29 @@ def benchmark_layer(args):
             gdn_with_custom_cp()
             dist.barrier()
         profile_func(fn, args.profile_path)
+    return results
 
 
-def main():
-    args = get_args()
-    dist.init_process_group()
-    world_size = dist.get_world_size()
-    rank = dist.get_rank()
-    torch.manual_seed(rank + 42)
-    torch.cuda.manual_seed(rank + 42)
-    random.seed(42)
-    torch.cuda.set_device(rank)
-    group = dist.new_group(list(range(world_size)))
-    args.group = group
-    if args.ops:
-        benchmark_ops(args)
-    else:
-        benchmark_layer(args)
+def add_arguments(parser):
+    parser.add_argument("--ops", action="store_true")
+    parser.add_argument("--kda", action="store_true")
+    parser.add_argument("--backward", action="store_true")
+    parser.add_argument("--profile", action="store_true")
+    parser.add_argument("--profile-path", type=str, default="")
+    parser.add_argument("--seqlen", type=int, default=1024*32)
+    parser.add_argument("--mean", type=int, default=1024*32)
+    parser.add_argument("--std", type=int, default=0)
+    parser.add_argument("--use-cp2hp", action="store_true")
 
 
-if __name__ == '__main__':
-    main()
-'''
-torchrun --nproc-per-node=4 --module benchmarks.cp.benchmark_gdn
-'''
+def run(args):
+    os.environ['TRITON_PRINT_AUTOTUNING'] = '1'
+    os.environ['FLA_CONV_BACKEND'] = 'cuda'
+    with distributed_context():
+        world_size = dist.get_world_size()
+        rank = dist.get_rank()
+        torch.manual_seed(rank + 42)
+        torch.cuda.manual_seed(rank + 42)
+        random.seed(42)
+        args.group = dist.new_group(list(range(world_size)))
+        return benchmark_ops(args) if args.ops else benchmark_layer(args)

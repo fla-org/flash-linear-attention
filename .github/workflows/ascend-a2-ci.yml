@@ -57,11 +57,14 @@ jobs:
             const graphPaths = new Set([
               'tests/ops/test_kda_graph.py',
               'tests/benchmarks/test_graph_benchmark.py',
-              'benchmarks/ops/benchmark_graph.py',
+              'tests/benchmarks/test_run.py',
+              'tests/benchmarks/test_reporting.py',
+              'benchmarks/run.py',
+              'benchmarks/ops/graph.py',
               'benchmarks/utils/revisions.py',
               'benchmarks/utils/environment.py',
               'benchmarks/utils/reporting.py',
-              'benchmarks/ops/utils/graph_registry.py',
+              'benchmarks/utils/ops/graph_registry.py',
             ]);
             const related = files.filter(f => npuPattern.test(f.filename) || graphPaths.has(f.filename)).map(f => f.filename);
             if (related.length > 0) {

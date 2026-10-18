@@ -8,19 +8,26 @@
 import json
 import subprocess
 import sys
+from dataclasses import asdict
+from pathlib import Path
 
 import pytest
 
-from benchmarks import compare
-from benchmarks.ops.utils import discovery
-from benchmarks.ops.utils.registry import list_ops
+from benchmarks import compare, run
 from benchmarks.utils import revisions
+from benchmarks.utils.ops import discovery
+from benchmarks.utils.ops.registry import list_ops
+from benchmarks.utils.reporting import BenchmarkResult
 
 
 @pytest.fixture
 def benchmark_repository(tmp_path, monkeypatch):
     root = tmp_path / 'repository'
     root.mkdir()
+    cache = tmp_path / 'parent-cache'
+    cache.mkdir()
+    (cache / 'sentinel').write_text('keep')
+    monkeypatch.setenv('TRITON_CACHE_DIR', str(cache))
 
     def git(*arguments):
         return subprocess.check_output(['git', *arguments], cwd=root, text=True).strip()
@@ -33,7 +40,7 @@ def benchmark_repository(tmp_path, monkeypatch):
     (root / 'fla/__init__.py').write_text('VALUE = "baseline"\n')
     (root / 'benchmarks').mkdir()
     (root / 'benchmarks/__init__.py').write_text('')
-    (root / 'benchmarks/worker.py').write_text('raise RuntimeError("old benchmark definitions")\n')
+    (root / 'benchmarks/run.py').write_text('raise RuntimeError("old benchmark definitions")\n')
     git('add', '.')
     git('commit', '-m', 'Baseline')
     git('branch', 'baseline')
@@ -45,34 +52,51 @@ def benchmark_repository(tmp_path, monkeypatch):
     harness = tmp_path / 'harness/benchmarks'
     harness.mkdir(parents=True)
     (harness / '__init__.py').write_text('')
-    (harness / 'worker.py').write_text(
-        'import json, sys\n'
+    (harness / 'run.py').write_text(Path(run.__file__).read_text())
+    (harness / 'utils').mkdir()
+    (harness / 'utils/__init__.py').write_text('')
+    (harness / 'utils/reporting.py').write_text((Path(run.__file__).parent / 'utils/reporting.py').read_text())
+    (harness / 'utils/environment.py').write_text('def get_machine_info(): return {}\n')
+    (harness / 'ops').mkdir()
+    (harness / 'ops/__init__.py').write_text('')
+    (harness / 'ops/worker.py').write_text(
+        'import os\n'
         'from pathlib import Path\n'
         'import fla\n'
-        'if "--fail" in sys.argv:\n'
-        '    raise RuntimeError("worker failed")\n'
-        'output = Path(sys.argv[sys.argv.index("--json") + 1])\n'
-        'output.write_text(json.dumps({"results": [{"source": fla.VALUE, "harness": "current"}], "machine_info": {}}))\n'
+        'from benchmarks.utils.reporting import BenchmarkResult\n'
+        'def add_arguments(parser):\n'
+        '    parser.add_argument("--fail", action="store_true")\n'
+        'def run(args):\n'
+        '    cache = Path(os.environ["TRITON_CACHE_DIR"])\n'
+        '    assert cache.name == "triton" and not cache.exists()\n'
+        '    cache.mkdir()\n'
+        '    if args.fail:\n'
+        '        raise RuntimeError("worker failed")\n'
+        '    return [BenchmarkResult(name="source", parameters={"source": fla.VALUE}, metrics={"median_ms": 1.0})]\n'
     )
     monkeypatch.setattr(revisions, '__file__', str(harness / 'utils/revisions.py'))
     monkeypatch.setattr(revisions, 'find_project_root', lambda: str(root))
-    return git
+    yield git
+    assert (cache / 'sentinel').read_text() == 'keep'
 
 
 @pytest.mark.parametrize('ref', ['baseline', 'feature/current', None], ids=['base', 'checked-out-branch', 'working-tree'])
 @pytest.mark.parametrize('fail', [False, True], ids=['success', 'worker-failure'])
-def test_revision_isolation(benchmark_repository, ref, fail):
+@pytest.mark.parametrize('rank', [0, 1])
+def test_revision_isolation(benchmark_repository, monkeypatch, ref, fail, rank):
+    monkeypatch.setenv('RANK', str(rank))
+    monkeypatch.setenv('WORLD_SIZE', '2')
     git = benchmark_repository
     before = git('status', '--porcelain')
     worktrees = git('worktree', 'list', '--porcelain')
-    arguments = ['--fail'] if fail else []
+    arguments = ['ops.worker', '--fail'] if fail else ['ops.worker']
     if fail:
         with pytest.raises(subprocess.CalledProcessError):
-            revisions.run_benchmark(module='benchmarks.worker', arguments=arguments, ref=ref)
+            revisions.run_benchmark(module='benchmarks.run', arguments=arguments, ref=ref)
     else:
-        results, info = revisions.run_benchmark(module='benchmarks.worker', arguments=arguments, ref=ref)
+        results, info = revisions.run_benchmark(module='benchmarks.run', arguments=arguments, ref=ref)
         expected = {'baseline': 'baseline', 'feature/current': 'head', None: 'dirty'}[ref]
-        assert results == [{'source': expected, 'harness': 'current'}]
+        assert results == [asdict(BenchmarkResult(name='source', parameters={'source': expected}, metrics={'median_ms': 1.0}))]
         if ref is not None:
             assert info['git_label'] == f'{ref}[{git("rev-parse", ref)[:7]}]'
     assert git('status', '--porcelain') == before
@@ -88,16 +112,16 @@ def test_compare_artifact(tmp_path, monkeypatch, allow_regression):
         argv.append('--no-fail-on-regression')
     monkeypatch.setattr(sys, 'argv', argv)
     monkeypatch.setattr(compare, 'get_commit_sha', lambda ref: ref)
-    monkeypatch.setattr(compare, 'clear_triton_cache', lambda: None)
     monkeypatch.setenv('FLA_BENCH_COOLDOWN_SEC', '0')
     calls = []
 
     def run_benchmarks(op_names, shapes, modes, backend=None, ref=None):
         calls.append((op_names, shapes, modes, ref))
-        results = [{
-            'op': 'chunk_gla', 'mode': 'fwd', 'B': 1, 'T': 64, 'H': 2, 'D': 16,
-            'median_ms': 2.0 if ref == 'head' else 1.0, 'p20_ms': 1.0, 'p80_ms': 2.0,
-        }]
+        results = [asdict(BenchmarkResult(
+            name='chunk_gla',
+            parameters={'mode': 'fwd', 'B': 1, 'T': 64, 'H': 2, 'D': 16},
+            metrics={'median_ms': 2.0 if ref == 'head' else 1.0, 'p20_ms': 1.0, 'p80_ms': 2.0},
+        ))]
         return results, {'gpu_name': 'test', 'git_label': ref}
 
     monkeypatch.setattr(compare, 'run_benchmarks', run_benchmarks)
@@ -123,7 +147,6 @@ def test_compare_failure_has_no_success_artifact(tmp_path, monkeypatch, failure)
         'compare', '--benchmark-ops', 'chunk_gla', '--output', str(output), '--no-fail-on-regression',
     ])
     monkeypatch.setattr(compare, 'get_commit_sha', lambda ref: ref)
-    monkeypatch.setattr(compare, 'clear_triton_cache', lambda: None)
     monkeypatch.setenv('FLA_BENCH_COOLDOWN_SEC', '0')
 
     def run_benchmarks(**kwargs):
@@ -147,7 +170,7 @@ def test_compare_failure_has_no_success_artifact(tmp_path, monkeypatch, failure)
         ('fla/layers/example.py', ['chunk_kda']),
         ('fla/ops/common/chunk_h.py', list_ops()),
         ('fla/ops/utils/solve_tril.py', list_ops()),
-        ('benchmarks/ops/utils/inputs.py', list_ops()),
+        ('benchmarks/utils/ops/inputs.py', list_ops()),
         ('benchmarks/utils/revisions.py', list_ops()),
         ('README.md', []),
     ],
@@ -159,3 +182,35 @@ def test_affected_ops(tmp_path, monkeypatch, path, expected):
     layer.write_text('from fla.ops.kda import chunk_kda\n')
     monkeypatch.setattr(discovery, 'find_project_root', lambda: str(tmp_path))
     assert discovery.find_affected_op_names(changed_files=[path]) == expected
+
+
+def test_compare_workload_uses_common_runner(tmp_path, monkeypatch):
+    output = tmp_path / 'training.json'
+    monkeypatch.setattr(sys, 'argv', [
+        'compare', '--benchmark', 'models.training', '--base', 'base', '--head', 'head',
+        '--output', str(output), '--', '--name', 'kda',
+    ])
+    monkeypatch.setattr(compare, 'get_commit_sha', lambda ref: ref)
+    monkeypatch.setenv('FLA_BENCH_COOLDOWN_SEC', '0')
+    calls = []
+
+    def run_benchmark(module, arguments, ref=None):
+        calls.append((module, arguments, ref))
+        result = BenchmarkResult(
+            name='kda',
+            parameters={'B': 1, 'T': 128},
+            metrics={'tokens_per_second': 90.0 if ref == 'head' else 100.0},
+            primary_metric='tokens_per_second',
+            higher_is_better=True,
+        )
+        return [asdict(result)], {'git_label': ref}
+
+    monkeypatch.setattr(compare, 'run_benchmark', run_benchmark)
+    assert compare.main() == 1
+    assert calls == [
+        ('benchmarks.run', ['models.training', '--name', 'kda'], 'head'),
+        ('benchmarks.run', ['models.training', '--name', 'kda'], 'base'),
+    ]
+    data = json.loads(output.read_text())
+    assert data['benchmark'] == 'models.training'
+    assert data['regressions'][0]['change_pct'] == pytest.approx(10.0)

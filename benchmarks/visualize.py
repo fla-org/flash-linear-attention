@@ -14,8 +14,8 @@ Supports:
 
 Usage::
 
-    # From a module benchmark script (recommended)
-    python benchmarks/modules/benchmark_activations.py
+    # Run a module sweep and save plots
+    python -m benchmarks.run modules.activations --save-dir activation_benchmark --plot
 
     # After running a module benchmark that writes CSV via save_path
     python -m benchmarks.visualize perf-report activation_benchmark/activation_performance.csv

@@ -12,19 +12,21 @@ import re
 import subprocess
 from pathlib import Path
 
-from benchmarks.ops.utils.registry import get_op, list_ops
+from benchmarks.utils.ops.registry import get_op, list_ops
 from benchmarks.utils.revisions import find_project_root
 
 _OP_DIR_RE = re.compile(r'^fla/ops/([^/]+)/')
 _SHARED_BENCHMARK_FILES = {
     'benchmarks/compare.py',
+    'benchmarks/run.py',
+    'benchmarks/utils/reporting.py',
     'benchmarks/utils/revisions.py',
-    'benchmarks/ops/utils/discovery.py',
+    'benchmarks/utils/ops/discovery.py',
     'benchmarks/utils/environment.py',
-    'benchmarks/ops/utils/inputs.py',
-    'benchmarks/ops/utils/registry.py',
-    'benchmarks/ops/benchmark_ops.py',
-    'benchmarks/ops/utils/runner.py',
+    'benchmarks/utils/ops/inputs.py',
+    'benchmarks/utils/ops/registry.py',
+    'benchmarks/ops/latency.py',
+    'benchmarks/utils/ops/runner.py',
 }
 
 

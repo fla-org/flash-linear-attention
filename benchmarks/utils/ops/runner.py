@@ -16,9 +16,10 @@ import os
 
 import torch
 
-from benchmarks.ops.utils.inputs import generate_inputs
-from benchmarks.ops.utils.registry import OpConfig, get_op
 from benchmarks.utils.environment import synchronize_device
+from benchmarks.utils.ops.inputs import generate_inputs
+from benchmarks.utils.ops.registry import OpConfig, get_op
+from benchmarks.utils.reporting import BenchmarkResult
 from benchmarks.utils.revisions import run_benchmark
 
 logger = logging.getLogger(__name__)
@@ -31,10 +32,10 @@ def run_benchmarks(
     backend: str | None = None,
     ref: str | None = None,
 ) -> tuple[list[dict], dict]:
-    arguments = ['--op', *op_names, '--custom-shapes', json.dumps(shapes), '--modes', *modes, '--no-base']
+    arguments = ['ops.latency', '--op', *op_names, '--custom-shapes', json.dumps(shapes), '--modes', *modes]
     if backend is not None:
         arguments.extend(['--backend', backend])
-    return run_benchmark(module='benchmarks.ops.benchmark_ops', arguments=arguments, ref=ref)
+    return run_benchmark(module='benchmarks.run', arguments=arguments, ref=ref)
 
 
 def _import_op(config: OpConfig):
@@ -76,7 +77,7 @@ def benchmark_op(
     shapes: dict[str, dict[str, int]],
     modes: list[str] | None = None,
     backend: str | None = None,
-) -> list[dict]:
+) -> list[BenchmarkResult]:
     """Return one latency record per supported shape and execution mode."""
     import triton
 
@@ -192,14 +193,10 @@ def benchmark_op(
                 logger.warning(f"Bench failed for {op_name} {mode} @ {shape_name}: {e}")
                 continue
 
-            results.append({
-                'op': op_label,
-                'mode': mode,
-                'B': B, 'T': T, 'H': H, 'D': D,
-                **extra_shape_kw,
-                'median_ms': ms[0],
-                'p20_ms': ms[1],
-                'p80_ms': ms[2],
-            })
+            results.append(BenchmarkResult(
+                name=op_label,
+                parameters={'mode': mode, 'B': B, 'T': T, 'H': H, 'D': D, **extra_shape_kw},
+                metrics={'median_ms': ms[0], 'p20_ms': ms[1], 'p80_ms': ms[2]},
+            ))
 
     return results

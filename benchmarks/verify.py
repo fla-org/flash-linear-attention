@@ -14,10 +14,10 @@ import os
 import subprocess
 import sys
 
-from benchmarks.ops.utils.registry import SHAPE_CONFIGS, get_op, list_ops
-from benchmarks.ops.utils.runner import run_benchmarks
 from benchmarks.utils.environment import synchronize_device
-from benchmarks.utils.reporting import format_machine_info, print_results_table
+from benchmarks.utils.ops.registry import SHAPE_CONFIGS, get_op, list_ops
+from benchmarks.utils.ops.runner import run_benchmarks
+from benchmarks.utils.reporting import compare_results, format_machine_info, print_results
 from benchmarks.utils.revisions import find_project_root
 
 
@@ -70,7 +70,7 @@ def profile_op(op_name: str, modes: list[str]) -> None:
     import torch
     from torch.profiler import ProfilerActivity, profile
 
-    from benchmarks.ops.utils.inputs import generate_inputs
+    from benchmarks.utils.ops.inputs import generate_inputs
     from fla.utils import device_name
 
     config = get_op(op_name)
@@ -199,10 +199,13 @@ def main():
           f"Triton {machine_info.get('triton_version', 'N/A')} | "
           f"{machine_info.get('git_label', 'unknown')}")
 
-    baseline, baseline_info = (None, None)
+    baseline = None
     if args.base:
-        baseline, baseline_info = run_benchmarks(op_names=[args.op], shapes=SHAPE_CONFIGS, modes=args.modes, ref=args.base)
-    print_results_table(results=results, machine_info=machine_info, baseline=baseline, baseline_info=baseline_info)
+        baseline, _ = run_benchmarks(op_names=[args.op], shapes=SHAPE_CONFIGS, modes=args.modes, ref=args.base)
+    if baseline is not None:
+        compare_results(base=baseline, head=results, threshold=5.0)
+    else:
+        print_results(results=results)
 
     if args.profile:
         profile_op(args.op, args.modes)

@@ -286,23 +286,15 @@ In the following, we give a generation example:
 >>> tokenizer.batch_decode(outputs, skip_special_tokens=True)[0]
 ```
 
-We also provide a simple script [here](benchmarks/models/benchmark_generation.py) for benchmarking the generation speed.
+We also provide a simple script [here](benchmarks/models/generation.py) for benchmarking the generation speed.
 Simply run it by:
 
 ```sh
-$ python -m benchmarks.models.benchmark_generation \
+$ python -m benchmarks.run models.generation \
   --path 'fla-hub/gla-1.3B-100B' \
+  --data 'fla-hub/pg19' \
   --repetition_penalty 2. \
-  --prompt="Hello everyone, I'm Songlin Yang"
-
-Prompt:
-Hello everyone, I'm Songlin Yang
-Generated:
-Hello everyone, I'm Songlin Yang.
-I am a 20 year old girl from China who is currently studying in the United States of America for my Master degree and also working as an English teacher at school here on campus since last summer (1st semester). My main goal to be able do well with this course so that we can have
-
-Prompt length: 10, generation length: 64
-Total prompt processing + decoding time: 4593ms
+  --output-generation --json generation.json
 ```
 
 All of the pretrained models currently available can be found in [`fla-hub`](https://huggingface.co/fla-hub).
@@ -484,7 +476,12 @@ These tests were conducted on a single NVIDIA GB200 GPU (CUDA 12.9, PyTorch 2.9.
 
 ```sh
 # you might have to first install `fla` via `pip install -e .` to enable its import
-$ python -m benchmarks.ops.benchmark_ops --op chunk_retention chunk_gla chunk_gdn flash_attn
+$ python -m benchmarks.run ops.latency --op chunk_retention chunk_gla chunk_gdn flash_attn
+```
+
+Recorded measurements from `main[0a484709]`:
+
+```text
 =================================================================================
   Machine: NVIDIA GB200 | CUDA 12.9 | PyTorch 2.9.0+cu129.msh
 =================================================================================

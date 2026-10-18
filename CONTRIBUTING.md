@@ -398,11 +398,11 @@ Benchmark only against a **green test gate**. A kernel that runs faster but fail
 
 ```bash
 FLA_BENCH_BASE=$(git rev-parse origin/main)
-python -m benchmarks.ops.benchmark_ops --op chunk_gla --base "$FLA_BENCH_BASE"
-python -m benchmarks.ops.benchmark_ops --list
+python -m benchmarks.compare --benchmark ops.latency --base "$FLA_BENCH_BASE" -- --op chunk_gla
+python -m benchmarks.run --list
 ```
 
-Record the baseline and candidate commit SHAs with the results. The runner resolves named refs and uses detached worktrees with the current benchmark definitions. The default sweep uses BF16 and per-operator shapes; add relevant dtype and dense/varlen coverage explicitly. New ops are registered in `benchmarks/ops/utils/registry.py`; input builders live in `benchmarks/ops/utils/inputs.py`. See [benchmarks/README.md](benchmarks/README.md) for workload categories, CI comparisons, and local commands.
+Record the baseline and candidate commit SHAs with the results. The runner resolves named refs and uses detached worktrees with the current benchmark definitions. The default sweep uses BF16 and per-operator shapes; add relevant dtype and dense/varlen coverage explicitly. New ops are registered in `benchmarks/utils/ops/registry.py`; input builders live in `benchmarks/utils/ops/inputs.py`. See [benchmarks/README.md](benchmarks/README.md) for workload categories, CI comparisons, and local commands.
 
 **Correctness-gated driver** — runs the op's pytest file before benchmarking and stops on a failing test run by default. Keep references and tolerances fixed and verify that the changed path ran: the driver does not freeze files or reject an all-skipped suite. The `fla-optimization-loop` skill defines that iteration discipline:
 
@@ -417,9 +417,9 @@ These scripts require additional dependencies: `accelerate` for training through
 ```bash
 pip install -e '.[cuda,benchmark]' accelerate
 
-python -m benchmarks.models.benchmark_training --name kda --batch_size 2 --seq_len 8192
-python -m benchmarks.models.benchmark_training --name kda --batch_size 2 --seq_len 8192 --varlen
-python -m benchmarks.models.benchmark_generation --path fla-hub/gla-1.3B-100B
+python -m benchmarks.run models.training --name kda --batch_size 2 --seq_len 8192
+python -m benchmarks.run models.training --name kda --batch_size 2 --seq_len 8192 --varlen
+python -m benchmarks.run models.generation --path fla-hub/gla-1.3B-100B
 ```
 
 The generation benchmark loads a pretrained model or checkpoint via `--path`; it does not accept a model config name via `--name`.
