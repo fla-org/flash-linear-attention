@@ -31,8 +31,12 @@ def hyper_connection_fwd_kernel(X, W, B, M, O, T, N: tl.constexpr, D: tl.constex
         value += w[:, None] * b[None, :]
         tl.store(O + (t * N + n[:, None]) * D + d[None, :], value, mask)
     else:
-        x = tl.load(X + (t * N + n[:, None]) * D + d[None, :], mask, other=0).to(tl.float32)
-        value = tl.sum(x * w[:, None], axis=0)
+        # keep the stream reduction in registers to avoid a shared-memory layout conversion
+        value = tl.full((BD,), 0, tl.float32)
+        for j in tl.static_range(N):
+            x = tl.load(X + (t * N + j) * D + d, d < D, other=0).to(tl.float32)
+            weight = tl.load(W + t * N + j).to(tl.float32)
+            value += weight * x
         tl.store(O + t * D + d, value, d < D)
 
 

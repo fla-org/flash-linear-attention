@@ -14,7 +14,7 @@ def hyper_connection_fwd_kernel(X, W, B, M, O, T, N: gl.constexpr, D: gl.constex
                                 BN: gl.constexpr, BD: gl.constexpr, POST: gl.constexpr, MIX: gl.constexpr):
     t = gl.program_id(0).to(gl.int64)
     c = gl.program_id(1).to(gl.int64)
-    layout: gl.constexpr = gl.BlockedLayout([1, 4], [1, 32], [4, 1], [1, 0])
+    layout: gl.constexpr = gl.BlockedLayout([1, 4], [1, 32], [4, 1] if POST else [1, 4], [1, 0])
     n = gl.arange(0, BN, layout=gl.SliceLayout(1, layout)).to(gl.int64)
     d = c * BD + gl.arange(0, BD, layout=gl.SliceLayout(0, layout)).to(gl.int64)
     mask = (n[:, None] < N) & (d[None, :] < D)
@@ -32,8 +32,12 @@ def hyper_connection_fwd_kernel(X, W, B, M, O, T, N: gl.constexpr, D: gl.constex
         value += w[:, None] * b[None, :]
         gl.store(O + (t * N + n[:, None]) * D + d[None, :], value, mask)
     else:
-        x = gl.load(X + (t * N + n[:, None]) * D + d[None, :], mask, other=0).to(gl.float32)
-        value = gl.sum(x * w[:, None], axis=0)
+        # keep the stream reduction in registers to avoid a shared-memory layout conversion
+        value = gl.full((BD,), 0, gl.float32, layout=gl.SliceLayout(0, layout))
+        for j in gl.static_range(N):
+            x = gl.load(X + (t * N + j) * D + d, d < D, other=0).to(gl.float32)
+            weight = gl.load(W + t * N + j).to(gl.float32)
+            value += weight * x
         gl.store(O + t * D + d, value, d < D)
 
 
