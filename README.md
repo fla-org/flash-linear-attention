@@ -286,11 +286,11 @@ In the following, we give a generation example:
 >>> tokenizer.batch_decode(outputs, skip_special_tokens=True)[0]
 ```
 
-We also provide a simple script [here](benchmarks/benchmark_generation.py) for benchmarking the generation speed.
+We also provide a simple script [here](benchmarks/models/benchmark_generation.py) for benchmarking the generation speed.
 Simply run it by:
 
 ```sh
-$ python -m benchmarks.benchmark_generation \
+$ python -m benchmarks.models.benchmark_generation \
   --path 'fla-hub/gla-1.3B-100B' \
   --repetition_penalty 2. \
   --prompt="Hello everyone, I'm Songlin Yang"

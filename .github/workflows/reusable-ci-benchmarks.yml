@@ -104,7 +104,7 @@ jobs:
         id: benchmark
         shell: bash
         run: |
-          $CONDA_BIN_PATH/python scripts/run_benchmark_compare.py \
+          $CONDA_BIN_PATH/python -m benchmarks.compare \
             --base ${{ inputs.base_ref }} \
             --head HEAD \
             --threshold ${{ inputs.threshold }} \

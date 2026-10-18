@@ -134,9 +134,9 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     try:
-        from runner import run_module_benchmark
-    except ModuleNotFoundError:
         from benchmarks.modules.runner import run_module_benchmark
+    except ModuleNotFoundError:
+        from runner import run_module_benchmark
 
     run_module_benchmark(
         mark=benchmark_logits if args.logits_only else benchmark,

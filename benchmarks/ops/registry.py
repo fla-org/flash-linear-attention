@@ -5,114 +5,41 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""
-Op registry, input factory, and shape configs for the unified benchmark system.
-
-See ``benchmarks/ops/run.py`` docstring for full usage and how to register new ops.
-"""
+"""Registered operators, arguments, and default workloads."""
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-import torch
-import torch.nn.functional as F
+from torch.nn.functional import logsigmoid
 
-logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Shape helpers: reusable callables  (B, T, H, D, **kw) -> tuple
-# ---------------------------------------------------------------------------
-
-
-def shape_BTHD(B, T, H, D, **kw):
-    return (B, T, H, D)
-
-
-def shape_BTH(B, T, H, D, **kw):
-    return (B, T, H)
-
-
-def shape_BTD(B, T, H, D, **kw):
-    return (B, T, H * D)
-
-
-def shape_H(B, T, H, D, **kw):
-    return (H,)
-
-
-def shape_HD(B, T, H, D, **kw):
-    return (H, D)
-
-
-def shape_D(B, T, H, D, **kw):
-    return (D,)
-
-
-def shape_LBTD(B, T, H, D, L=None, **kw):
-    """AttnRes-style residuals stack: [L, B, T, D] where L is the number of residual sources."""
-    if L is None:
-        raise ValueError("shape_LBTD requires the 'L' shape config key")
-    return (L, B, T, D)
-
-
-def shape_q_hq(B, T, H, D, HQ=None, **kw):
-    """q with HQ query heads (GQA); k/v keep H heads. Used by NSA."""
-    if HQ is None:
-        raise ValueError("shape_q_hq requires the 'HQ' (query-head) shape config key")
-    return (B, T, HQ, D)
-
-
-# ---------------------------------------------------------------------------
-# Transform helpers
-# ---------------------------------------------------------------------------
-
-logsigmoid = F.logsigmoid
-
-
-def sigmoid_transform(t):
-    return t.sigmoid()
-
-
-def logsigmoid_clamp(t):
-    return F.logsigmoid(t).clamp_min(-5)
-
-
-RWKV7_W_MIN = -0.6065306597126334
-
-
-def rwkv7_w_transform(t):
-    w = RWKV7_W_MIN * t.sigmoid()
-    return w.clamp(min=RWKV7_W_MIN, max=-1e-6)
-
-
-# ---------------------------------------------------------------------------
-# TensorSpec: describes how to create one input tensor
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class TensorSpec:
-    """Specification for generating a single benchmark input tensor.
-
-    Args:
-        shape_fn:       (B, T, H, D, **kw) -> tuple of ints
-        requires_grad:  whether the tensor needs gradients
-        dtype:          'default' inherits from the benchmark, or 'float32'/'long'
-        transform:      applied after randn, e.g. F.logsigmoid
-    """
-    shape_fn: Callable
-    requires_grad: bool = True
-    dtype: str = 'default'
-    transform: Callable | None = None
-
-
-# ---------------------------------------------------------------------------
-# OpConfig: registry entry for one op
-# ---------------------------------------------------------------------------
+from benchmarks.ops.inputs import (
+    TensorSpec,
+    init_attnres_inputs,
+    init_cyfa_inputs,
+    init_nsa_compression_inputs,
+    init_nsa_inputs,
+    init_nsa_windowed_inputs,
+    init_rwkv7_inputs,
+    logsigmoid_clamp,
+    rwkv7_w_transform,
+    shape_btd,
+    shape_bth,
+    shape_bthd,
+    shape_cyfa_readout,
+    shape_d,
+    shape_h,
+    shape_hd,
+    shape_lbtd,
+    shape_nsa_compressed_k,
+    shape_nsa_compressed_v,
+    shape_nsa_gate,
+    shape_nsa_v,
+    shape_q_hq,
+    sigmoid_transform,
+)
 
 
 @dataclass
@@ -128,7 +55,7 @@ class OpConfig:
             Mapping from function argument names to tensor specs.
         func_name (str, Optional):
             Function attribute name to import when it differs from `name`.
-            Default: None.
+            Default: `None`.
         extra_kwargs (dict[str, Any], Optional):
             Constant keyword arguments passed to the op. Default: `{}`.
         output_is_tuple (bool):
@@ -136,25 +63,25 @@ class OpConfig:
         skip_backward (bool):
             Whether to skip forward-backward benchmark mode. Default: `False`.
         post_init (Callable, Optional):
-            Callback invoked as `post_init(inputs, B=B, T=T, H=H, D=D, **kw)` for custom input mutation. Default: None.
+            Callback invoked as `post_init(inputs, B=B, T=T, H=H, D=D, **kw)` for custom input mutation. Default: `None`.
         category (str):
             Grouping label used in reports. Default: `''`.
         dim_constraints (dict, Optional):
-            Shape constraints, such as `{'D': [64, 128]}`. Shapes that do not match are skipped. Default: None.
+            Shape constraints, such as `{'D': [64, 128]}`. Shapes that do not match are skipped. Default: `None`.
         default_shapes (dict[str, dict[str, int]], Optional):
             Per-op shape configs used instead of the global `SHAPE_CONFIGS`.
             This is useful when the op's shape semantics differ from `B/T/H/D`,
             for example when AttnRes uses an extra `L` residual-source axis.
-            Default: None.
+            Default: `None`.
         test_file (str, Optional):
             Path (relative to repo root) to the op's pytest file,
             used as the frozen correctness gate by `benchmarks/ops/verify.py`.
             When None, the gate is derived from `import_path`'s last segment (e.g. `fla.ops.gla` -> `tests/ops/test_gla.py`).
-            Set this only when the derived path is wrong. Default: None.
+            Set this only when the derived path is wrong. Default: `None`.
         backend_env (dict[str, str], Optional):
             Maps a `--backend <name>` value to the environment variable that enables that backend's
             dispatch (e.g. `{'gluon': 'FLA_ATTNRES_GLUON'}`). The runner sets it before launching the
-            op; ops selected purely by a runtime verifier need no entry. Default: None.
+            op; ops selected purely by a runtime verifier need no entry. Default: `None`.
     """
     name: str
     import_path: str
@@ -170,10 +97,6 @@ class OpConfig:
     test_file: str | None = None
     backend_env: dict[str, str] | None = None
 
-
-# ---------------------------------------------------------------------------
-# Global registry
-# ---------------------------------------------------------------------------
 
 _REGISTRY: dict[str, OpConfig] = {}
 
@@ -192,10 +115,6 @@ def list_ops() -> list[str]:
     return sorted(_REGISTRY.keys())
 
 
-# ---------------------------------------------------------------------------
-# Shape configs
-# ---------------------------------------------------------------------------
-
 SHAPE_CONFIGS = {
     'B1_T8192_H96_D128':  {'B': 1,  'T': 8192,  'H': 96, 'D': 128},
     'B2_T16384_H16_D128': {'B': 2,  'T': 16384, 'H': 16, 'D': 128},
@@ -205,109 +124,28 @@ SHAPE_CONFIGS = {
     'B8_T1024_H8_D64':    {'B': 8,  'T': 1024,  'H': 8,  'D': 64},
 }
 
-
-# ---------------------------------------------------------------------------
-# Input factory
-# ---------------------------------------------------------------------------
-
-
-def generate_inputs(
-    config: OpConfig,
-    B: int, T: int, H: int, D: int,
-    dtype: torch.dtype = torch.bfloat16,
-    device: str | torch.device = 'cuda',
-    **extra_shape_kw,
-) -> dict[str, torch.Tensor]:
-    """Create input tensors for *config* at the given shape.
-
-    Returns a dict mapping parameter names to tensors.
-    Raises ValueError if dim_constraints are not satisfied (caller should skip).
-    """
-    # Check dim constraints
-    if config.dim_constraints:
-        shape_vals = {'B': B, 'T': T, 'H': H, 'D': D, **extra_shape_kw}
-        for dim_name, allowed in config.dim_constraints.items():
-            val = shape_vals.get(dim_name)
-            if val is not None and val not in allowed:
-                raise ValueError(
-                    f"Op '{config.name}' requires {dim_name} in {allowed}, got {val}"
-                )
-
-    inputs = {}
-    for param_name, spec in config.inputs.items():
-        shape = spec.shape_fn(B, T, H, D, **extra_shape_kw)
-
-        # Determine dtype
-        if spec.dtype == 'default':
-            tensor_dtype = dtype
-        elif spec.dtype == 'float32':
-            tensor_dtype = torch.float32
-        elif spec.dtype == 'long':
-            tensor_dtype = torch.long
-        else:
-            tensor_dtype = dtype
-
-        if tensor_dtype == torch.long:
-            tensor = torch.randint(0, 10, shape, dtype=tensor_dtype, device=device)
-        else:
-            tensor = torch.randn(shape, dtype=tensor_dtype, device=device)
-
-        if spec.transform is not None:
-            tensor = spec.transform(tensor)
-
-        if spec.requires_grad and tensor.is_floating_point():
-            tensor = tensor.requires_grad_(True)
-
-        inputs[param_name] = tensor
-
-    # Custom post-init mutation
-    if config.post_init is not None:
-        config.post_init(inputs, B=B, T=T, H=H, D=D, **extra_shape_kw)
-
-    return inputs
-
-
-# ===========================================================================
-# Op registrations
-# ===========================================================================
-
-
-def shape_cyfa_readout(B, T, H, D, M=128, **kw):
-    return (H, M - 1, M - 1)
-
-
-def init_cyfa_inputs(inputs, **kwargs):
-    with torch.no_grad():
-        inputs['q_norm_weight'].fill_(1)
-        inputs['k_norm_weight'].fill_(1)
-        readout = inputs['readout']
-        readout.copy_(torch.eye(readout.shape[-1], dtype=readout.dtype, device=readout.device))
-
-
 register_op(OpConfig(
     name='chunk_cyfa',
     import_path='fla.ops.cyfa',
     inputs={
-        'q': TensorSpec(shape_BTHD),
-        'k': TensorSpec(shape_BTHD),
-        'v': TensorSpec(shape_BTHD),
-        'g': TensorSpec(shape_BTH, dtype='float32', transform=logsigmoid),
-        'delta': TensorSpec(shape_BTH, dtype='float32', transform=sigmoid_transform),
-        'beta': TensorSpec(shape_BTH, dtype='float32', transform=sigmoid_transform),
-        'readout': TensorSpec(shape_cyfa_readout, dtype='float32'),
-        'q_norm_weight': TensorSpec(shape_D, dtype='float32'),
-        'k_norm_weight': TensorSpec(shape_D, dtype='float32'),
+        'q': TensorSpec(shape_fn=shape_bthd),
+        'k': TensorSpec(shape_fn=shape_bthd),
+        'v': TensorSpec(shape_fn=shape_bthd),
+        'g': TensorSpec(shape_fn=shape_bth, dtype='float32', transform=logsigmoid),
+        'delta': TensorSpec(shape_fn=shape_bth, dtype='float32', transform=sigmoid_transform),
+        'beta': TensorSpec(shape_fn=shape_bth, dtype='float32', transform=sigmoid_transform),
+        'readout': TensorSpec(shape_fn=shape_cyfa_readout, dtype='float32'),
+        'q_norm_weight': TensorSpec(shape_fn=shape_d, dtype='float32'),
+        'k_norm_weight': TensorSpec(shape_fn=shape_d, dtype='float32'),
     },
     extra_kwargs={'q_norm_eps': 1e-6, 'k_norm_eps': 1e-6, 'output_final_state': True},
     post_init=init_cyfa_inputs,
 ))
 
-# --- Simple qkv (no extra inputs) ---
-
 _simple_qkv = {
-    'q': TensorSpec(shape_BTHD),
-    'k': TensorSpec(shape_BTHD),
-    'v': TensorSpec(shape_BTHD),
+    'q': TensorSpec(shape_fn=shape_bthd),
+    'k': TensorSpec(shape_fn=shape_bthd),
+    'v': TensorSpec(shape_fn=shape_bthd),
 }
 
 register_op(OpConfig(
@@ -324,40 +162,34 @@ register_op(OpConfig(
     category='simple_qkv',
 ))
 
-# --- +elem gate (g=[B,T,H,D] with logsigmoid_clamp) ---
-
 register_op(OpConfig(
     name='chunk_gla',
     import_path='fla.ops.gla',
     inputs={
         **_simple_qkv,
-        'g': TensorSpec(shape_BTHD, transform=logsigmoid_clamp),
+        'g': TensorSpec(shape_fn=shape_bthd, transform=logsigmoid_clamp),
     },
     category='elem_gate',
 ))
-
-# --- +beta (beta=[B,T,H] with sigmoid) ---
 
 register_op(OpConfig(
     name='chunk_delta_rule',
     import_path='fla.ops.delta_rule',
     inputs={
         **_simple_qkv,
-        'beta': TensorSpec(shape_BTH, transform=sigmoid_transform),
+        'beta': TensorSpec(shape_fn=shape_bth, transform=sigmoid_transform),
     },
     category='beta',
     test_file='tests/ops/test_delta.py',
 ))
-
-# --- Delta-rule variants with decay and update gates ---
 
 register_op(OpConfig(
     name='chunk_gdn',
     import_path='fla.ops.gated_delta_rule',
     inputs={
         **_simple_qkv,
-        'g': TensorSpec(shape_BTH, transform=logsigmoid),
-        'beta': TensorSpec(shape_BTH, transform=sigmoid_transform),
+        'g': TensorSpec(shape_fn=shape_bth, transform=logsigmoid),
+        'beta': TensorSpec(shape_fn=shape_bth, transform=sigmoid_transform),
     },
     func_name='chunk_gated_delta_rule',
     extra_kwargs={'use_qk_l2norm_in_kernel': True},
@@ -375,9 +207,9 @@ register_op(OpConfig(
     import_path='fla.ops.gdn2',
     inputs={
         **_simple_qkv,
-        'g': TensorSpec(shape_BTHD, transform=logsigmoid),
-        'b': TensorSpec(shape_BTHD, transform=sigmoid_transform),
-        'w': TensorSpec(shape_BTHD, transform=sigmoid_transform),
+        'g': TensorSpec(shape_fn=shape_bthd, transform=logsigmoid),
+        'b': TensorSpec(shape_fn=shape_bthd, transform=sigmoid_transform),
+        'w': TensorSpec(shape_fn=shape_bthd, transform=sigmoid_transform),
     },
     extra_kwargs={'use_qk_l2norm_in_kernel': True},
     category='gate_beta',
@@ -390,8 +222,8 @@ register_op(OpConfig(
     import_path='fla.ops.kda',
     inputs={
         **_simple_qkv,
-        'g': TensorSpec(shape_BTHD, transform=logsigmoid),
-        'beta': TensorSpec(shape_BTH, transform=sigmoid_transform),
+        'g': TensorSpec(shape_fn=shape_bthd, transform=logsigmoid),
+        'beta': TensorSpec(shape_fn=shape_bth, transform=sigmoid_transform),
     },
     extra_kwargs={'use_qk_l2norm_in_kernel': True, 'safe_gate': True, 'lower_bound': -5},
     category='gate_beta',
@@ -402,9 +234,9 @@ register_op(OpConfig(
     import_path='fla.ops.gdn2',
     inputs={
         **_simple_qkv,
-        'g': TensorSpec(shape_BTHD, transform=logsigmoid),
-        'b': TensorSpec(shape_BTHD, transform=sigmoid_transform),
-        'w': TensorSpec(shape_BTHD, transform=sigmoid_transform),
+        'g': TensorSpec(shape_fn=shape_bthd, transform=logsigmoid),
+        'b': TensorSpec(shape_fn=shape_bthd, transform=sigmoid_transform),
+        'w': TensorSpec(shape_fn=shape_bthd, transform=sigmoid_transform),
     },
     extra_kwargs={'use_qk_l2norm_in_kernel': True, 'output_final_state': True},
     skip_backward=True,
@@ -416,11 +248,11 @@ register_op(OpConfig(
     import_path='fla.ops.precond_gated_delta_rule',
     inputs={
         **_simple_qkv,
-        'g': TensorSpec(shape_BTH, transform=logsigmoid),
-        'beta': TensorSpec(shape_BTH, transform=sigmoid_transform),
-        'g_atk': TensorSpec(shape_BTH, transform=logsigmoid),
-        'beta_atk': TensorSpec(shape_BTH, transform=sigmoid_transform),
-        'log_atk_scale': TensorSpec(shape_H, dtype='float32'),
+        'g': TensorSpec(shape_fn=shape_bth, transform=logsigmoid),
+        'beta': TensorSpec(shape_fn=shape_bth, transform=sigmoid_transform),
+        'g_atk': TensorSpec(shape_fn=shape_bth, transform=logsigmoid),
+        'beta_atk': TensorSpec(shape_fn=shape_bth, transform=sigmoid_transform),
+        'log_atk_scale': TensorSpec(shape_fn=shape_h, dtype='float32'),
     },
     func_name='chunk_precond_gated_delta_rule',
     extra_kwargs={'use_qk_l2norm_in_kernel': True, 'x': 1.5},
@@ -433,48 +265,36 @@ register_op(OpConfig(
     import_path='fla.ops.precond_kda',
     inputs={
         **_simple_qkv,
-        'g': TensorSpec(shape_BTHD, transform=logsigmoid),
-        'beta': TensorSpec(shape_BTH, transform=sigmoid_transform),
-        'g_atk': TensorSpec(shape_BTH, transform=logsigmoid),
-        'beta_atk': TensorSpec(shape_BTH, transform=sigmoid_transform),
-        'log_atk_scale': TensorSpec(shape_H, dtype='float32'),
+        'g': TensorSpec(shape_fn=shape_bthd, transform=logsigmoid),
+        'beta': TensorSpec(shape_fn=shape_bth, transform=sigmoid_transform),
+        'g_atk': TensorSpec(shape_fn=shape_bth, transform=logsigmoid),
+        'beta_atk': TensorSpec(shape_fn=shape_bth, transform=sigmoid_transform),
+        'log_atk_scale': TensorSpec(shape_fn=shape_h, dtype='float32'),
     },
     extra_kwargs={'x': 1.5},
     category='gate_beta',
     test_file='tests/ops/test_precond_kda.py',
 ))
 
-# --- +head gate (g=[B,T,H] with logsigmoid) ---
-
 register_op(OpConfig(
     name='chunk_simple_gla',
     import_path='fla.ops.simple_gla',
     inputs={
         **_simple_qkv,
-        'g': TensorSpec(shape_BTH, transform=logsigmoid),
+        'g': TensorSpec(shape_fn=shape_bth, transform=logsigmoid),
     },
     category='head_gate',
 ))
-
-# --- RWKV ---
-
-
-def _rwkv7_post_init(inputs, B, T, H, D, **kw):
-    """RWKV7 needs a/b to be initialized as small positive values."""
-    with torch.no_grad():
-        inputs['a'] = (torch.randn_like(inputs['a']) * 0.1).requires_grad_(True)
-        inputs['b'] = (torch.randn_like(inputs['b']) * 0.1).requires_grad_(True)
-
 
 register_op(OpConfig(
     name='chunk_rwkv6',
     import_path='fla.ops.rwkv6',
     inputs={
-        'r': TensorSpec(shape_BTHD),
-        'k': TensorSpec(shape_BTHD),
-        'v': TensorSpec(shape_BTHD),
-        'w': TensorSpec(shape_BTHD, transform=logsigmoid),
-        'u': TensorSpec(shape_HD, requires_grad=False),
+        'r': TensorSpec(shape_fn=shape_bthd),
+        'k': TensorSpec(shape_fn=shape_bthd),
+        'v': TensorSpec(shape_fn=shape_bthd),
+        'w': TensorSpec(shape_fn=shape_bthd, transform=logsigmoid),
+        'u': TensorSpec(shape_fn=shape_hd, requires_grad=False),
     },
     category='rwkv',
 ))
@@ -483,61 +303,53 @@ register_op(OpConfig(
     name='chunk_rwkv7',
     import_path='fla.ops.rwkv7',
     inputs={
-        'r': TensorSpec(shape_BTHD),
-        'w': TensorSpec(shape_BTHD, transform=rwkv7_w_transform),
-        'k': TensorSpec(shape_BTHD),
-        'v': TensorSpec(shape_BTHD),
-        'a': TensorSpec(shape_BTHD),
-        'b': TensorSpec(shape_BTHD),
+        'r': TensorSpec(shape_fn=shape_bthd),
+        'w': TensorSpec(shape_fn=shape_bthd, transform=rwkv7_w_transform),
+        'k': TensorSpec(shape_fn=shape_bthd),
+        'v': TensorSpec(shape_fn=shape_bthd),
+        'a': TensorSpec(shape_fn=shape_bthd),
+        'b': TensorSpec(shape_fn=shape_bthd),
     },
     extra_kwargs={'safe_gate': True, 'chunk_size': 64},
-    post_init=_rwkv7_post_init,
+    post_init=init_rwkv7_inputs,
     category='rwkv',
 ))
-
-# --- Comba ---
 
 register_op(OpConfig(
     name='chunk_comba',
     import_path='fla.ops.comba',
     inputs={
         **_simple_qkv,
-        'p': TensorSpec(shape_BTHD),
-        'g': TensorSpec(shape_BTH, transform=logsigmoid),
-        'beta': TensorSpec(shape_BTH, transform=sigmoid_transform),
+        'p': TensorSpec(shape_fn=shape_bthd),
+        'g': TensorSpec(shape_fn=shape_bth, transform=logsigmoid),
+        'beta': TensorSpec(shape_fn=shape_bth, transform=sigmoid_transform),
     },
     extra_kwargs={'use_qk_l2norm_in_kernel': True},
     category='comba',
 ))
 
-# --- HGRN (x, g only, no qkv) ---
-
 register_op(OpConfig(
     name='fused_recurrent_hgrn',
     import_path='fla.ops.hgrn',
     inputs={
-        'x': TensorSpec(shape_BTD),
-        'g': TensorSpec(shape_BTD, transform=logsigmoid),
+        'x': TensorSpec(shape_fn=shape_btd),
+        'g': TensorSpec(shape_fn=shape_btd, transform=logsigmoid),
     },
     category='hgrn',
 ))
-
-# --- Generalized delta rule (DPLR) ---
 
 register_op(OpConfig(
     name='chunk_dplr_delta_rule',
     import_path='fla.ops.generalized_delta_rule',
     inputs={
         **_simple_qkv,
-        'a': TensorSpec(shape_BTHD),
-        'b': TensorSpec(shape_BTHD),
-        'gk': TensorSpec(shape_BTHD, transform=logsigmoid),
+        'a': TensorSpec(shape_fn=shape_bthd),
+        'b': TensorSpec(shape_fn=shape_bthd),
+        'gk': TensorSpec(shape_fn=shape_bthd, transform=logsigmoid),
     },
     category='gen_delta',
     test_file='tests/ops/test_dplr_delta.py',
 ))
-
-# --- Lightning attention (needs layer_idx, num_layers) ---
 
 register_op(OpConfig(
     name='chunk_lightning_attn',
@@ -546,8 +358,6 @@ register_op(OpConfig(
     extra_kwargs={'layer_idx': 0, 'num_layers': 12},
     category='lightning',
 ))
-
-# --- Attention baselines ---
 
 register_op(OpConfig(
     name='parallel_attn',
@@ -564,7 +374,6 @@ register_op(OpConfig(
     category='attn',
 ))
 
-
 register_op(OpConfig(
     name='flash_attn',
     import_path='flash_attn',
@@ -575,10 +384,6 @@ register_op(OpConfig(
     category='flash_attn',
 ))
 
-# --- layer-axis residual aggregation (AttnRes, mHC, ...) ---
-# These ops attend / aggregate over an `L` axis of stacked residual sources.
-# Inputs and shape sweeps are shared so future ops (mHC etc.) can reuse them.
-
 _layer_default_shapes = {
     'L8_B1_T8K_D2K':   {'L': 8,  'B': 1, 'T': 8192,  'H': 1, 'D': 2048},
     'L8_B1_T32K_D2K':  {'L': 8,  'B': 1, 'T': 32768, 'H': 1, 'D': 2048},
@@ -587,28 +392,17 @@ _layer_default_shapes = {
     'L32_B1_T8K_D2K':  {'L': 64, 'B': 1, 'T': 8192,  'H': 1, 'D': 8192},
 }
 
-
 _attnres_inputs = {
-    'query': TensorSpec(shape_D),
-    'residuals': TensorSpec(shape_LBTD),
-    'rms_weight': TensorSpec(shape_D),
+    'query': TensorSpec(shape_fn=shape_d),
+    'residuals': TensorSpec(shape_fn=shape_lbtd),
+    'rms_weight': TensorSpec(shape_fn=shape_d),
 }
-
-
-def _attnres_post_init(inputs, B, T, H, D, L=None, **kw):
-    # fused_attnres expects a sequence of [B, T, D] tensors, not the stacked [L, B, T, D] buffer.
-    res = inputs['residuals']
-    if isinstance(res, torch.Tensor) and res.ndim == 4:
-        inputs['residuals'] = [
-            res[i].detach().clone().requires_grad_(True) for i in range(res.shape[0])
-        ]
-
 
 register_op(OpConfig(
     name='fused_attnres',
     import_path='fla.ops.attnres',
     inputs=_attnres_inputs,
-    post_init=_attnres_post_init,
+    post_init=init_attnres_inputs,
     output_is_tuple=False,
     default_shapes=_layer_default_shapes,
     category='fused_attnres',
@@ -619,53 +413,13 @@ register_op(OpConfig(
     name='naive_attnres',
     import_path='fla.ops.attnres',
     inputs=_attnres_inputs,
-    post_init=_attnres_post_init,
+    post_init=init_attnres_inputs,
     output_is_tuple=False,
     default_shapes=_layer_default_shapes,
     category='naive_attnres',
 ))
 
-# --- NSA (native sparse attention) — GQA + structured block selection ---
-# q carries HQ query heads while k/v carry H kv heads (GQA; HQ/H a power of two
-# and >= 16). block_indices is a causal random selection that must be built
-# explicitly — the generic randn/randint input factory cannot produce a valid one.
-
-
-def _shape_nsa_gate(B, T, H, D, HQ=None, **kw):
-    if HQ is None:
-        raise ValueError("NSA gate shape requires HQ")
-    return (B, T, HQ)
-
-
-def _shape_nsa_compressed_k(B, T, H, D, block_size=64, **kw):
-    return (B, (T + block_size - 1) // block_size, H, D)
-
-
-def _shape_nsa_compressed_v(B, T, H, D, V=None, block_size=64, **kw):
-    if V is None:
-        raise ValueError("NSA value shape requires V")
-    return (B, (T + block_size - 1) // block_size, H, V)
-
-
-def _shape_nsa_v(B, T, H, D, V=None, **kw):
-    if V is None:
-        raise ValueError("NSA value shape requires V")
-    return (B, T, H, V)
-
-
-def _nsa_compression_post_init(inputs, B, T, H, D, block_size=64, **kw):
-    inputs['TK'] = T
-    inputs['block_size'] = block_size
-    inputs['scale'] = D**-0.5
-
-
-def _nsa_windowed_post_init(inputs, B, T, H, D, S=16, block_size=64, window_size=512, **kw):
-    inputs['block_counts'] = S
-    inputs['block_size'] = block_size
-    inputs['scale'] = D**-0.5
-    inputs['window_size'] = window_size
-
-
+# NSA uses HQ query heads; HQ/H must be a power of two and at least 16.
 _nsa_compression_bq_shapes = {
     'B1_T8K_H4_HQ64_K32_V32': {
         'B': 1, 'T': 8192, 'H': 4, 'HQ': 64, 'D': 32, 'V': 32, 'S': 16, 'block_size': 64,
@@ -681,16 +435,15 @@ _nsa_compression_bq_shapes = {
     },
 }
 
-
 register_op(OpConfig(
     name='parallel_nsa_compression',
     import_path='fla.ops.nsa.compression',
     inputs={
-        'q': TensorSpec(shape_q_hq),
-        'k': TensorSpec(_shape_nsa_compressed_k),
-        'v': TensorSpec(_shape_nsa_compressed_v),
+        'q': TensorSpec(shape_fn=shape_q_hq),
+        'k': TensorSpec(shape_fn=shape_nsa_compressed_k),
+        'v': TensorSpec(shape_fn=shape_nsa_compressed_v),
     },
-    post_init=_nsa_compression_post_init,
+    post_init=init_nsa_compression_inputs,
     output_is_tuple=True,
     default_shapes=_nsa_compression_bq_shapes,
     category='nsa',
@@ -702,36 +455,19 @@ register_op(OpConfig(
     import_path='fla.ops.nsa',
     func_name='parallel_nsa',
     inputs={
-        'q': TensorSpec(shape_q_hq),
-        'k': TensorSpec(shape_BTHD),
-        'v': TensorSpec(_shape_nsa_v),
-        'g_cmp': TensorSpec(_shape_nsa_gate, transform=sigmoid_transform),
-        'g_slc': TensorSpec(_shape_nsa_gate, transform=sigmoid_transform),
-        'g_swa': TensorSpec(_shape_nsa_gate, transform=sigmoid_transform),
+        'q': TensorSpec(shape_fn=shape_q_hq),
+        'k': TensorSpec(shape_fn=shape_bthd),
+        'v': TensorSpec(shape_fn=shape_nsa_v),
+        'g_cmp': TensorSpec(shape_fn=shape_nsa_gate, transform=sigmoid_transform),
+        'g_slc': TensorSpec(shape_fn=shape_nsa_gate, transform=sigmoid_transform),
+        'g_swa': TensorSpec(shape_fn=shape_nsa_gate, transform=sigmoid_transform),
     },
-    post_init=_nsa_windowed_post_init,
+    post_init=init_nsa_windowed_inputs,
     output_is_tuple=False,
     default_shapes=_nsa_compression_bq_shapes,
     category='nsa',
     test_file='tests/ops/test_nsa.py',
 ))
-
-
-def _nsa_post_init(inputs, B, T, H, D, HQ=None, S=16, block_size=64, **kw):
-    # build block_indices [B, T, H, S]: for each query t, pick S of the causal
-    # blocks (block i is selectable iff i <= t // block_size), -1-padded when
-    # fewer than S exist, then sorted — mirroring tests/ops/test_nsa.py.
-    device = inputs['q'].device
-    NS = (T + block_size - 1) // block_size
-    valid = (torch.arange(NS, device=device)[None, None, None, :]
-             <= (torch.arange(T, device=device) // block_size)[None, :, None, None])
-    scores = torch.rand(B, T, H, NS, device=device).masked_fill(~valid, float('-inf'))
-    topv, topi = scores.topk(min(S, NS), dim=-1)
-    block_indices = topi.masked_fill(topv == float('-inf'), -1).sort(-1)[0].to(torch.long)
-    inputs['block_indices'] = block_indices.contiguous()
-    inputs['block_counts'] = S
-    inputs['block_size'] = block_size
-
 
 _nsa_shapes = {
     'B1_T8K_H1_HQ32_D128_S16':  {'B': 1, 'T': 8192,  'H': 1, 'HQ': 32, 'D': 128, 'S': 16, 'block_size': 64},
@@ -745,11 +481,11 @@ register_op(OpConfig(
     name='parallel_nsa',
     import_path='fla.ops.nsa',
     inputs={
-        'q': TensorSpec(shape_q_hq),
-        'k': TensorSpec(shape_BTHD),
-        'v': TensorSpec(shape_BTHD),
+        'q': TensorSpec(shape_fn=shape_q_hq),
+        'k': TensorSpec(shape_fn=shape_bthd),
+        'v': TensorSpec(shape_fn=shape_bthd),
     },
-    post_init=_nsa_post_init,
+    post_init=init_nsa_inputs,
     output_is_tuple=False,
     default_shapes=_nsa_shapes,
     category='nsa',

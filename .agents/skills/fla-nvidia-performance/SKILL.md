@@ -27,8 +27,8 @@ Run from the repository root. Resolve the baseline to a commit SHA before compar
 FLA_BENCH_BASE=$(git rev-parse origin/main)
 FLA_CI_ENV=0 python -m benchmarks.ops.verify --op chunk_kda --base "$FLA_BENCH_BASE"
 
-python benchmarks/benchmark_training_throughput.py --name kda --batch_size 2 --seq_len 8192
-python benchmarks/benchmark_training_throughput.py --name kda --batch_size 2 --seq_len 8192 --varlen
+python -m benchmarks.models.benchmark_training --name kda --batch_size 2 --seq_len 8192
+python -m benchmarks.models.benchmark_training --name kda --batch_size 2 --seq_len 8192 --varlen
 ```
 
 The verification command runs the current tests; retain the validated baseline and tests yourself. A selected subset is useful during iteration but does not replace the full relevant gate before reporting a gain.

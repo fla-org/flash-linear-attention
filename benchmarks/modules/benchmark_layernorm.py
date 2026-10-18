@@ -129,8 +129,8 @@ def benchmark(T, provider):
 
 if __name__ == '__main__':
     try:
-        from runner import run_module_benchmark
-    except ModuleNotFoundError:
         from benchmarks.modules.runner import run_module_benchmark
+    except ModuleNotFoundError:
+        from runner import run_module_benchmark
 
     run_module_benchmark(benchmark, script_file=__file__)

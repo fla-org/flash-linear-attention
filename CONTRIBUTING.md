@@ -402,7 +402,7 @@ python -m benchmarks.ops.run --op chunk_gla --base "$FLA_BENCH_BASE"
 python -m benchmarks.ops.run --list
 ```
 
-Resolve the baseline to a commit SHA: a checked-out branch cannot be reused by the comparison worktree, and slash-containing refs are unsuitable for its temporary directory names. Record that SHA with the results. The default sweep uses BF16 and per-operator shapes; add relevant dtype and dense/varlen coverage explicitly. New ops are registered in `benchmarks/ops/registry.py`.
+Record the baseline and candidate commit SHAs with the results. The runner resolves named refs and uses detached worktrees with the current benchmark definitions. The default sweep uses BF16 and per-operator shapes; add relevant dtype and dense/varlen coverage explicitly. New ops are registered in `benchmarks/ops/registry.py`; input builders live in `benchmarks/ops/inputs.py`. See [benchmarks/README.md](benchmarks/README.md) for workload categories, CI comparisons, and local commands.
 
 **Correctness-gated driver** — runs the op's pytest file before benchmarking and stops on a failing test run by default. Keep references and tolerances fixed and verify that the changed path ran: the driver does not freeze files or reject an all-skipped suite. The `fla-optimization-loop` skill defines that iteration discipline:
 
@@ -417,9 +417,9 @@ These scripts require additional dependencies: `accelerate` for training through
 ```bash
 pip install -e '.[cuda,benchmark]' accelerate
 
-python benchmarks/benchmark_training_throughput.py --name kda --batch_size 2 --seq_len 8192
-python benchmarks/benchmark_training_throughput.py --name kda --batch_size 2 --seq_len 8192 --varlen
-python benchmarks/benchmark_generation.py --path fla-hub/gla-1.3B-100B
+python -m benchmarks.models.benchmark_training --name kda --batch_size 2 --seq_len 8192
+python -m benchmarks.models.benchmark_training --name kda --batch_size 2 --seq_len 8192 --varlen
+python -m benchmarks.models.benchmark_generation --path fla-hub/gla-1.3B-100B
 ```
 
 The generation benchmark loads a pretrained model or checkpoint via `--path`; it does not accept a model config name via `--name`.

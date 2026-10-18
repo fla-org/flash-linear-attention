@@ -10,7 +10,6 @@ import sys
 import pytest
 import torch
 
-from benchmarks.ops.graph_benchmark import benchmark_case, print_results
 from benchmarks.ops.graph_registry import (
     GraphBenchmarkCase,
     get_graph_op,
@@ -18,6 +17,8 @@ from benchmarks.ops.graph_registry import (
     make_cu_seqlens,
     normalize_kda_shape,
 )
+from benchmarks.ops.graph_runner import benchmark_case
+from benchmarks.reporting import print_graph_results
 
 
 def test_kda_graph_registration_and_common_shape_defaults():
@@ -209,7 +210,7 @@ def test_result_table_reports_base_and_graph_speedups(capsys):
     info = {"git_label": "ascend_graph[abc]", "device": "Ascend", "torch": "2.9", "torch_npu": "2.9"}
     base_info = {"git_label": "main[def]"}
 
-    print_results(current, info, baseline, base_info)
+    print_graph_results(current, info, baseline, base_info)
     output = capsys.readouterr().out
     assert "main[def] eager / ascend_graph[abc] eager / ascend_graph[abc] graph" in output
     header = next(line for line in output.splitlines() if line.startswith("mode"))
@@ -243,7 +244,7 @@ def test_result_table_reports_graph_specific_configuration(capsys, extra_dimensi
     }]
     info = {"git_label": "HEAD", "device": "Ascend", "torch": "2.9", "torch_npu": "2.9"}
 
-    print_results(current, info)
+    print_graph_results(current, info)
     output = capsys.readouterr().out
     assert "dtype=bfloat16" in output
     assert "chunk_size=32" in output
