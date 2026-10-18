@@ -5,6 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import os
 from datetime import timedelta
 
 import pytest
@@ -19,7 +20,7 @@ from fla.models import RWKV7Config
 
 @pytest.fixture
 def make_model():
-    """Construct a small zero-layer model for API tests."""
+    """Construct a small model for API tests."""
     def create(config_class, **kwargs):
         if config_class is RWKV7Config and not torch._C.has_lapack:
             pytest.skip('RWKV7 initialization requires LAPACK.')
@@ -39,21 +40,26 @@ def make_model():
     return create
 
 
-@pytest.fixture(params=[None, Replicate(), Shard(0)], ids=['tensor', 'replicate', 'shard'])
-def init_layout(request, tmp_path):
-    if request.param is None:
-        yield None
-        return
+@pytest.fixture(scope='session')
+def cpu_mesh(tmp_path_factory):
     if not dist.is_gloo_available():
         pytest.skip('CPU DTensor initialization requires Gloo.')
+    world_size = int(os.environ.get('WORLD_SIZE', '1'))
     dist.init_process_group(
         backend='gloo',
-        init_method=f'file://{tmp_path / "store"}',
-        rank=0,
-        world_size=1,
+        init_method='env://' if world_size > 1 else f'file://{tmp_path_factory.mktemp("gloo") / "store"}',
+        rank=int(os.environ.get('RANK', '0')),
+        world_size=world_size,
         timeout=timedelta(seconds=30),
     )
     try:
-        yield init_device_mesh('cpu', (1,)), (request.param,)
+        yield init_device_mesh('cpu', (world_size,))
     finally:
         dist.destroy_process_group()
+
+
+@pytest.fixture(params=[None, Replicate(), Shard(0)], ids=['tensor', 'replicate', 'shard'])
+def init_layout(request):
+    if request.param is None:
+        return None
+    return request.getfixturevalue('cpu_mesh'), (request.param,)

@@ -7,7 +7,6 @@
 
 from __future__ import annotations
 
-import math
 import warnings
 from typing import TYPE_CHECKING, Optional
 
@@ -160,43 +159,6 @@ class MoBAPreTrainedModel(FLAPreTrainedModel):
     supports_gradient_checkpointing = True
     _no_split_modules = ['MoBABlock']
     _supports_cache_class = True
-
-    def __init__(self, *inputs, **kwargs):
-        super().__init__(*inputs, **kwargs)
-
-    def _init_weights(
-        self,
-        module: nn.Module,
-        prenorm_residual_strategy: str | None = None,
-        num_residuals_per_layer: int = 2,
-    ):
-        if isinstance(module, (nn.Linear, nn.Conv1d)):
-            if getattr(module, '_is_attnres_proj', False):
-                nn.init.zeros_(module.weight)
-            else:
-                nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
-            if module.bias is not None:
-                nn.init.zeros_(module.bias)
-        elif isinstance(module, nn.Embedding):
-            nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
-        elif hasattr(module, 'reset_parameters'):
-            module.reset_parameters()
-
-        if prenorm_residual_strategy is not None:
-            p = None
-            if hasattr(module, 'o_proj'):
-                p = module.o_proj.weight
-            elif hasattr(module, 'down_proj'):
-                p = module.down_proj.weight
-            if p is not None:
-                if prenorm_residual_strategy == 'rescale':
-                    nn.init.kaiming_uniform_(p, a=math.sqrt(5))
-                    with torch.no_grad():
-                        p /= math.sqrt(num_residuals_per_layer * self.config.num_hidden_layers)
-                elif prenorm_residual_strategy == 'zero':
-                    nn.init.zeros_(p)
-                else:
-                    raise ValueError(f"Invalid prenorm_residual_strategy: {prenorm_residual_strategy}")
 
 
 class MoBAModel(MoBAPreTrainedModel):

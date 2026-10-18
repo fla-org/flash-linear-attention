@@ -11,6 +11,7 @@ from torch import nn
 from transformers import AutoConfig, AutoModelForCausalLM
 
 from fla import models
+from fla.utils import find_spec_cached
 
 CONFIG_CLASSES = [getattr(models, name) for name in models.__all__ if name.endswith('Config')]
 
@@ -67,3 +68,62 @@ def test_checkpoint(config_class, make_model, tmp_path):
     assert restored.state_dict().keys() == model.state_dict().keys()
     for name, tensor in restored.state_dict().items():
         torch.testing.assert_close(tensor, model.state_dict()[name], rtol=0, atol=0)
+
+
+@pytest.mark.parametrize('config_class', [
+    models.ABCConfig,
+    models.DeltaNetConfig,
+    models.GatedDeltaProductConfig,
+    models.GLAConfig,
+    models.GSAConfig,
+    models.HGRNConfig,
+    models.HGRN2Config,
+    models.LightNetConfig,
+    models.LinearAttentionConfig,
+    models.MesaNetConfig,
+    models.MLAConfig,
+    models.MoBAConfig,
+    models.NSAConfig,
+    models.RavenConfig,
+    models.RetNetConfig,
+], ids=lambda cls: cls.model_type)
+@pytest.mark.parametrize('block_size', [None, 2])
+def test_initialization(config_class, block_size, make_model):
+    if config_class is models.MLAConfig and find_spec_cached('flash_attn') is None:
+        pytest.skip('MLA initialization requires flash-attn.')
+    torch.manual_seed(42)
+    kwargs = {'expand_ratio': 16} if config_class is models.HGRN2Config else {}
+    model = make_model(
+        config_class,
+        num_heads=4,
+        head_dim=16,
+        num_hidden_layers=2,
+        pad_token_id=0,
+        fuse_swiglu=False,
+        attnres_block_size=block_size,
+        **kwargs,
+    )
+    assert model.get_input_embeddings().weight[0].count_nonzero() == model.config.hidden_size
+    assert all(torch.isfinite(parameter).all() for parameter in model.parameters())
+    for module in model.modules():
+        if isinstance(module, (nn.Linear, nn.Conv1d)):
+            if getattr(module, '_is_attnres_proj', False):
+                assert module.weight.count_nonzero() == 0
+            else:
+                assert module.weight.count_nonzero() > 0
+            if module.bias is not None:
+                assert module.bias.count_nonzero() == 0
+        elif isinstance(module, nn.RMSNorm):
+            torch.testing.assert_close(module.weight, torch.ones_like(module.weight), rtol=0, atol=0)
+    layer = model.model.layers[0]
+    for module, weight in [(layer.attn, layer.attn.o_proj.weight), (layer.mlp, layer.mlp.down_proj.weight)]:
+        for strategy in ['rescale', 'zero']:
+            torch.manual_seed(42)
+            model._init_weights(module, prenorm_residual_strategy=strategy)
+            expected = weight.detach().clone()
+            torch.manual_seed(42)
+            model._init_weights(module, prenorm_residual_strategy=strategy)
+            torch.testing.assert_close(weight, expected, rtol=0, atol=0)
+            assert bool(expected.count_nonzero()) == (strategy == 'rescale')
+        with pytest.raises(ValueError, match='Invalid prenorm_residual_strategy'):
+            model._init_weights(module, prenorm_residual_strategy='invalid')

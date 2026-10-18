@@ -39,3 +39,8 @@ jobs:
             tests/models/test_modeling_kda.py::test_initialization \
             tests/models/test_modeling_gated_deltanet.py::test_initialization \
             tests/test_split_package_release.py
+      - name: Check sharded model initialization
+        run: |
+          torchrun --standalone --nproc-per-node=2 -m pytest -q \
+            tests/models/test_modeling_kda.py::test_initialization \
+            tests/models/test_modeling_gated_deltanet.py::test_initialization
