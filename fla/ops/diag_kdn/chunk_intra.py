@@ -183,7 +183,7 @@ def chunk_diag_kdn_bwd_kernel_intra(
     NC: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_kc, i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_t, i_kc, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     i_k, i_i = i_kc // NC, i_kc % NC
     if IS_VARLEN:
@@ -406,7 +406,7 @@ def chunk_diag_kdn_bwd_intra(
     dk2 = torch.empty_like(k)
     dkappa2 = torch.empty_like(kappa, dtype=torch.float)
     dg2 = torch.empty_like(g, dtype=torch.float)
-    chunk_diag_kdn_bwd_kernel_intra[(NK * NC, NT, B * H)](
+    chunk_diag_kdn_bwd_kernel_intra[(NT, NK * NC, B * H)](
         q=q,
         k=k,
         kappa=kappa,

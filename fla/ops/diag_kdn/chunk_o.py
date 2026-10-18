@@ -57,7 +57,7 @@ def chunk_diag_kdn_fwd_kernel_o(
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    i_t, i_v, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_tg = i_t.to(tl.int64)
@@ -189,7 +189,7 @@ def chunk_diag_kdn_fwd_o(
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     o = torch.empty_like(v, dtype=torch.float)
-    def grid(meta): return (triton.cdiv(V, meta['BV']), NT, B * H)
+    def grid(meta): return (NT, triton.cdiv(V, meta['BV']), B * H)
     chunk_diag_kdn_fwd_kernel_o[grid](
         q=q,
         v=v,
