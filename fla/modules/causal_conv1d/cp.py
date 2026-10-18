@@ -271,37 +271,60 @@ def causal_conv1d_cp(
     backend: str = 'triton',
     residual: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """
-    Context Parallel version of causal_conv1d.
-
-    Automatically handles communication in CP environment:
-    - Forward: get initial_state from previous rank
-    - Backward: correct dx gradients
+    """Apply causal convolution with cross-rank history and gradient exchange.
 
     Args:
         x (torch.Tensor):
-            Input tensor of shape [1, T, D]
+            Local input of shape `[1, T, D]`.
         weight (torch.Tensor):
-            Weight tensor of shape [D, W]
-        bias (torch.Tensor | None):
-            Bias tensor of shape [D] or None
-        activation (str | None):
-            Activation function name or None
-        chunk_indices (torch.Tensor | None):
-            Chunk indices for variable-length sequences
-        cp_context (FLACPContext):
-            CP context (required for CP mode)
-        residual (torch.Tensor | None):
-            Residual tensor of shape [1, T, D] or None
+            Convolution weights of shape `[D, W]`.
+        bias (torch.Tensor, Optional):
+            Bias of shape `[D]`. Default: `None`.
+        activation (str, Optional):
+            Output activation: `None`, `silu`, or `swish`. Default: `None`.
+        chunk_indices (torch.Tensor, Optional):
+            Precomputed chunk indices for the Triton backend. Default: `None`.
+        cp_context (FLACPContext, Optional):
+            Required CP context with cumulative sequence lengths and convolution width. Default: `None`.
+        chunk_size (int, Optional):
+            Triton chunk size; `None` selects 64. Default: `None`.
+        backend (str, Optional):
+            Convolution backend: `triton`, `cuda`, or `mix`. `mix` retains the Triton CP path.
+            CUDA requires contiguous layout, width 2–4, and at least `W - 1` tokens per rank. Default: `'triton'`.
+        residual (torch.Tensor, Optional):
+            Residual added to the output, of shape `[1, T, D]`. Default: `None`.
+
+    Returns:
+        torch.Tensor:
+            Local output of shape `[1, T, D]`.
     """
     if cp_context is None:
         raise ValueError("cp_context must be provided for causal_conv1d_cp")
 
     assert cp_context.conv1d_kernel_size is not None, "conv1d_kernel_size must be provided for causal_conv1d_cp"
     assert cp_context.cu_seqlens is not None, "cu_seqlens must be provided for causal_conv1d_cp"
-    assert backend in ['triton'], "backend must be 'triton'"
+    if backend == 'mix':
+        backend = 'triton'
+    if backend not in ('triton', 'cuda'):
+        raise ValueError(f"Unsupported CP convolution backend: {backend!r}; expected 'triton', 'cuda', or 'mix'")
+    if backend == 'cuda':
+        from fla.modules.causal_conv1d.backends.cuda.cp import causal_conv1d_cuda_cp
+
+        return causal_conv1d_cuda_cp(
+            x=x,
+            weight=weight,
+            bias=bias,
+            residual=residual,
+            activation=activation,
+            cp_context=cp_context,
+        )
+
     chunk_size = chunk_size or 64
     if chunk_indices is None:
-        chunk_indices = prepare_chunk_indices(cp_context.cu_seqlens, chunk_size, cu_seqlens_cpu=cp_context.cu_seqlens_cpu)
+        chunk_indices = prepare_chunk_indices(
+            cu_seqlens=cp_context.cu_seqlens,
+            chunk_size=chunk_size,
+            cu_seqlens_cpu=cp_context.cu_seqlens_cpu,
+        )
 
     return CausalConv1dFunctionCP.apply(x, weight, bias, activation, chunk_indices, cp_context, chunk_size, backend, residual)

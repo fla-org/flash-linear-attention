@@ -24,3 +24,25 @@ def test_import_with_caching_precompile():
         timeout=120,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_utils_import_without_transformers(run_python):
+    run_python(
+        """
+        import importlib.abc
+        import sys
+
+        class WithoutTransformers(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname == 'transformers' or fullname.startswith('transformers.'):
+                    raise ModuleNotFoundError(f'No module named {fullname!r}', name=fullname)
+
+        sys.meta_path.insert(0, WithoutTransformers())
+
+        from fla.utils import check_transformers_version, supports_transformers_next_sequence_length
+
+        assert 'transformers' not in sys.modules
+        assert isinstance(check_transformers_version('4.56'), bool)
+        assert not supports_transformers_next_sequence_length()
+        """,
+    )

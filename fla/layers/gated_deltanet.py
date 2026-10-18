@@ -24,7 +24,7 @@ from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gat
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
-    from fla.models.utils import Cache
+    from fla.models.cache_utils import Cache
 
 
 class GatedDeltaNet(nn.Module):

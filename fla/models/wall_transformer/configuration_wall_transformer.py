@@ -7,12 +7,12 @@
 #
 # Wall attention, contributed by Tilde Research (Timor Averbuch, Dhruv Pai).
 
-import warnings
+from transformers.configuration_utils import PreTrainedConfig
 
-from transformers.configuration_utils import PretrainedConfig
+from fla.models.configuration_utils import validate_attnres_config, validate_loss_config
 
 
-class WallTransformerConfig(PretrainedConfig):
+class WallTransformerConfig(PreTrainedConfig):
 
     model_type = 'wall_transformer'
     keys_to_ignore_at_inference = ['past_key_values']
@@ -76,23 +76,9 @@ class WallTransformerConfig(PretrainedConfig):
         self.vocab_size = vocab_size
         self.attnres_block_size = attnres_block_size
 
-        if fuse_cross_entropy and fuse_linear_cross_entropy:
-            raise ValueError(
-                "`fuse_cross_entropy` and `fuse_linear_cross_entropy` cannot be True at the same time.",
-            )
-        if fuse_linear_cross_entropy:
-            warnings.warn(
-                "`fuse_linear_cross_entropy` is enabled, which can improves memory efficiency "
-                "at the potential cost of reduced precision. "
-                "If you observe issues like loss divergence, consider disabling this setting.",
-            )
+        validate_loss_config(fuse_cross_entropy=fuse_cross_entropy, fuse_linear_cross_entropy=fuse_linear_cross_entropy)
 
-        if attnres_block_size is not None and attnres_block_size != 1:
-            if attnres_block_size < 2 or attnres_block_size % 2 != 0:
-                raise ValueError(
-                    "`attnres_block_size` must be `None`, `1` (full mode), or an even integer (one block "
-                    f"contains `attnres_block_size // 2` transformer layers); got {attnres_block_size}."
-                )
+        validate_attnres_config(attnres_block_size=attnres_block_size)
 
         super().__init__(
             pad_token_id=pad_token_id,

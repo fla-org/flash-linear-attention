@@ -7,7 +7,11 @@
 
 import pytest
 import torch
+import torch.nn.functional as F
+from torch import nn
+from torch.distributed.tensor import DTensor, distribute_tensor
 
+from fla.layers.gated_deltanet import GatedDeltaNet
 from fla.models import GatedDeltaNetConfig, GatedDeltaNetForCausalLM
 from fla.utils import assert_close, device
 
@@ -122,3 +126,44 @@ def test_logits_to_keep_with_labels():
     assert inference.logits.shape == (B, 1, V)
     assert torch.isfinite(actual.loss)
     assert_close('loss', expected.loss, actual.loss, 1e-6)
+
+
+def test_initialization(init_layout, make_model):
+    torch.manual_seed(42)
+    model = make_model(GatedDeltaNetConfig)
+    with torch.device('meta'):
+        layer = GatedDeltaNet(hidden_size=64, head_dim=16, num_heads=4, use_short_conv=False)
+    model._init_weights(layer)
+    assert all(parameter.is_meta for parameter in layer.parameters())
+    layer.to_empty(device='cpu')
+    for name in ('A_log', 'dt_bias'):
+        value = torch.full_like(getattr(layer, name), float('nan'))
+        if init_layout is not None:
+            mesh, placements = init_layout
+            value = distribute_tensor(value, mesh, placements)
+        setattr(layer, name, nn.Parameter(value))
+    parameters = (layer.A_log, layer.dt_bias)
+    model._init_weights(layer)
+    values = []
+    for parameter, actual in zip(parameters, (layer.A_log, layer.dt_bias), strict=True):
+        assert actual is parameter
+        if init_layout is not None:
+            assert isinstance(actual, DTensor)
+            assert actual.device_mesh == mesh
+            assert actual.placements == placements
+            actual = actual.to_local()
+        assert torch.isfinite(actual).all()
+        values.append(actual)
+    assert ((values[0].exp() > 0) & (values[0].exp() <= 16)).all()
+    assert layer.A_log._no_weight_decay
+    assert layer.dt_bias._no_weight_decay
+    dt = F.softplus(values[1])
+    assert ((dt >= 0.001) & (dt <= 0.1)).all()
+    for parameter in parameters:
+        parameter._is_hf_initialized = True
+    expected = [parameter.detach().clone() for parameter in parameters]
+    model._init_weights(layer)
+    for actual, reference in zip(parameters, expected, strict=True):
+        if init_layout is not None:
+            actual, reference = actual.to_local(), reference.to_local()
+        torch.testing.assert_close(actual, reference, rtol=0, atol=0)
