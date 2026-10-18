@@ -7,11 +7,16 @@
 
 import torch
 
+# pre/post precision follows the DeepSeek reference:
+# https://github.com/deepseek-ai/TileKernels/blob/c1cf914a82e6/tile_kernels/torch/mhc.py
+
 
 def naive_hc_pre(x: torch.Tensor, pre: torch.Tensor) -> torch.Tensor:
-    """Read out residual streams, accumulating in FP32 (FP64 for double inputs)."""
-    dtype = torch.float64 if x.dtype == torch.float64 else torch.float32
-    return (x.to(dtype) * pre.to(dtype).unsqueeze(-1)).sum(-2).to(x.dtype)
+    """Read out residual streams with FP32 accumulation."""
+    dtype = x.dtype
+    x, pre = x.float(), pre.float()
+    o = (x * pre.unsqueeze(-1)).sum(-2)
+    return o.to(dtype)
 
 
 def naive_hc_post(
@@ -21,17 +26,22 @@ def naive_hc_post(
     mixing: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Write a branch into identity (iHC) or mixed (mHC) residual streams."""
-    dtype = torch.float64 if x.dtype == torch.float64 else torch.float32
-    residual = x.to(dtype)
+    dtype = x.dtype
+    x, branch, post = x.float(), branch.float(), post.float()
+
+    residual = x
     if mixing is not None:
-        residual = (mixing.to(dtype).unsqueeze(-1) * residual.unsqueeze(-3)).sum(-2)
-    return (residual + post.to(dtype).unsqueeze(-1) * branch.to(dtype).unsqueeze(-2)).to(x.dtype)
+        mixing = mixing.float()
+        residual = (mixing.unsqueeze(-1) * x.unsqueeze(-3)).sum(-2)
+
+    update = post.unsqueeze(-1) * branch.unsqueeze(-2)
+    return (residual + update).to(dtype)
 
 
 def naive_sinkhorn(logits: torch.Tensor, num_iters: int = 20) -> torch.Tensor:
-    """Alternate column and row log normalizations and return the nonnegative mixing matrix."""
-    value = logits.to(torch.float64 if logits.dtype == torch.float64 else torch.float32)
+    """Apply column and row log normalizations in FP32."""
+    x = logits.float()
     for _ in range(num_iters):
-        value = value - value.logsumexp(dim=-2, keepdim=True)
-        value = value - value.logsumexp(dim=-1, keepdim=True)
-    return value.exp()
+        x = x - x.logsumexp(dim=-2, keepdim=True)
+        x = x - x.logsumexp(dim=-1, keepdim=True)
+    return x.exp()

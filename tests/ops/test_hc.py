@@ -161,16 +161,40 @@ def test_chained(backend, identity):
     assert backend
 
 
-def test_naive_gradcheck():
-    torch.manual_seed(1)
-    x = torch.randn(2, 3, 5, dtype=torch.float64, requires_grad=True)
-    weight = torch.randn(2, 3, dtype=torch.float64, requires_grad=True)
-    branch = torch.randn(2, 5, dtype=torch.float64, requires_grad=True)
-    logits = torch.randn(2, 3, 3, dtype=torch.float64, requires_grad=True)
-    assert torch.autograd.gradcheck(func=naive_hc_pre, inputs=(x, weight))
-    assert torch.autograd.gradcheck(func=naive_hc_post, inputs=(x, branch, weight))
-    assert torch.autograd.gradcheck(func=naive_hc_post, inputs=(x, branch, weight, logits))
-    assert torch.autograd.gradcheck(func=naive_sinkhorn, inputs=(logits,))
+@pytest.mark.parametrize('dtype', [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize('kind', ['pre', 'ihc', 'mhc', 'sinkhorn'])
+def test_naive(dtype, kind):
+    x = torch.tensor([[1, 2], [3, 4]], dtype=dtype, requires_grad=True)
+    weight = torch.tensor([0.25, 0.75], requires_grad=True)
+    branch = torch.tensor([5, 6], dtype=dtype, requires_grad=True)
+    mixing = torch.tensor([[0.25, 0.75], [0.5, 0.5]], requires_grad=True)
+    if kind == 'pre':
+        out = naive_hc_pre(x=x, pre=weight)
+        inputs = (x, weight)
+        expected = [2.5, 3.5]
+        expected_grads = ([[0.25, 0.25], [0.75, 0.75]], [3, 7])
+    elif kind == 'ihc':
+        out = naive_hc_post(x=x, branch=branch, post=weight)
+        inputs = (x, branch, weight)
+        expected = [[2.25, 3.5], [6.75, 8.5]]
+        expected_grads = ([[1, 1], [1, 1]], [1, 1], [11, 11])
+    elif kind == 'mhc':
+        out = naive_hc_post(x=x, branch=branch, post=weight, mixing=mixing)
+        inputs = (x, branch, weight, mixing)
+        expected = [[3.75, 5], [5.75, 7.5]]
+        expected_grads = ([[0.75, 0.75], [1.25, 1.25]], [1, 1], [11, 11], [[3, 7], [3, 7]])
+    else:
+        logits = torch.zeros(2, 2, dtype=dtype, requires_grad=True)
+        out = naive_sinkhorn(logits=logits)
+        inputs = (logits,)
+        expected = [[0.5, 0.5], [0.5, 0.5]]
+        expected_grads = ([[0.125, -0.125], [-0.125, 0.125]],)
+
+    torch.testing.assert_close(out, torch.tensor(expected, dtype=torch.float32 if kind == 'sinkhorn' else dtype))
+    dout = torch.tensor([[1, 2], [3, 5]], dtype=out.dtype) if kind == 'sinkhorn' else torch.ones_like(out)
+    grads = torch.autograd.grad(outputs=out, inputs=inputs, grad_outputs=dout)
+    for grad, expected_grad in zip(grads, expected_grads):
+        torch.testing.assert_close(grad, torch.tensor(expected_grad, dtype=grad.dtype))
 
 
 @pytest.mark.parametrize('backend_type', [GluonBackend, HCTileLangBackend])
