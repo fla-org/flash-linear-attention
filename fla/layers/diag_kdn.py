@@ -250,9 +250,9 @@ class DiagonalKalmanDeltaNetwork(nn.Module):
         omega = self.omega_min + F.softplus(omega.float())
         r = self.r_min + F.softplus(self.r_proj(hidden_states).float())
 
-        if last_state is not None:
-            recurrent_state = last_state["recurrent_state"]
-        else:
+        # a cache filled with `use_cache=False` holds no recurrent state
+        recurrent_state = last_state["recurrent_state"] if last_state is not None else None
+        if recurrent_state is None:
             # every sequence starts from the learned prior precision, shared by the key channels of a head
             N = batch_size if cu_seqlens is None else len(cu_seqlens) - 1
             c0 = 0.1 + F.softplus(self.initial_precision_param.float())
