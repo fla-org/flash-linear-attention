@@ -71,7 +71,7 @@ def prepare_input(x: torch.Tensor) -> tuple[torch.Tensor, int]:
 def alloc_output(x: torch.Tensor, contiguous: bool = False) -> torch.Tensor:
     if contiguous:
         return x.new_empty(x.shape)
-    return torch.empty_like(x)
+    return torch.empty_like(x, memory_format=torch.contiguous_format)
 
 
 @triton.autotune(configs=_activation_autotune_configs(), key=['D'], **autotune_cache_kwargs)
