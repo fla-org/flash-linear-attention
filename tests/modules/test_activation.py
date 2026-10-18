@@ -468,6 +468,8 @@ def test_powglu_singleton_strides(compile: bool, linear: bool):
     if compile:
         torch.compiler.reset()
     tri = torch.compile(fn)(*inputs) if compile else fn(*inputs)
+    # custom autograd outputs must allow in-place use
+    tri.add_(0)
     g = make_singleton_input(shape=ref.shape, strides=(ref.shape[-1], 1536, 1), dtype=torch.float32)
     ref_grads = torch.autograd.grad(outputs=ref, inputs=ref_inputs, grad_outputs=g)
     tri_grads = torch.autograd.grad(outputs=tri, inputs=inputs, grad_outputs=g)
@@ -558,6 +560,7 @@ def test_activation_singleton_strides(
     if compile:
         torch.compiler.reset()
     tri = torch.compile(fn)(*inputs) if compile else fn(*inputs)
+    tri.add_(0)
     g = make_singleton_input(shape=shape, strides=strides, dtype=dtype)
     ref_grads = torch.autograd.grad(outputs=ref, inputs=ref_inputs, grad_outputs=g.float())
     tri_grads = torch.autograd.grad(outputs=tri, inputs=inputs, grad_outputs=g)
