@@ -61,7 +61,7 @@ def chunk_diag_kdn_fwd_kernel_h(
     STORE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     NV = tl.cdiv(V, BV)
     i_v, i_nh = pid % NV, (pid // NV).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
@@ -218,7 +218,7 @@ def chunk_diag_kdn_bwd_kernel_dhu(
     USE_FINAL_STATE_GRADIENT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     NV = tl.cdiv(V, BV)
     i_v, i_nh = pid % NV, (pid // NV).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
