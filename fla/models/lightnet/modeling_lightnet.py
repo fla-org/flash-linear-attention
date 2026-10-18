@@ -19,9 +19,9 @@ from transformers.utils import logging
 from fla.layers.attn import Attention
 from fla.layers.lightnet import LightNetAttention
 from fla.models.cache_utils import Cache
+from fla.models.configuration_utils import get_attention_spec
 from fla.models.generation_utils import FLAUnsupportedCacheGenerationMixin
 from fla.models.lightnet.configuration_lightnet import LightNetConfig
-from fla.models.modeling_layers import get_attention_spec
 from fla.models.modeling_utils import FLAForCausalLM, FLAPreTrainedModel
 from fla.modules import GatedMLP as LightNetMLP
 from fla.modules import RMSNorm
