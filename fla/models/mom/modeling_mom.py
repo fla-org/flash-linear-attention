@@ -21,8 +21,8 @@ from transformers.utils import logging
 from fla.layers import MomAttention
 from fla.layers.attn import Attention
 from fla.models.cache_utils import Cache
+from fla.models.configuration_utils import get_attention_spec
 from fla.models.generation_utils import FLAUnsupportedCacheGenerationMixin
-from fla.models.modeling_layers import get_attention_spec
 from fla.models.modeling_utils import FLAForCausalLM, FLAPreTrainedModel
 from fla.models.mom.configuration_mom import MomConfig
 from fla.modules import GatedMLP as MomMLP

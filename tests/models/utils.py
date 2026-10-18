@@ -43,7 +43,7 @@ def create_model_and_config(config_class, L, H, D, dtype, **kwargs):
     }
     config = config_class(**config_params)
     model = AutoModelForCausalLM.from_config(config)
-    model.apply(_init_weights)
+    model.apply(_init_weights_recursively)
     model.to(dtype).to(device)
     return model, config
 
@@ -75,6 +75,13 @@ def _init_weights(module):
             pattern = 0.01 * torch.sin(torch.arange(dim) * (6.28 / dim))
             for i in range(min(100, vocab_size)):
                 module.weight[i] += pattern * (1 + i % 5) * 0.2
+
+
+def _init_weights_recursively(module):
+    if hasattr(module, 'weight'):
+        _init_weights(module)
+    for submodule in module.children():
+        _init_weights_recursively(submodule)
 
 
 def check_forward(

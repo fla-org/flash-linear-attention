@@ -32,6 +32,8 @@ jobs:
       - name: Check model registration, checkpoints, caches, and generation
         run: |
           python -m pytest -q \
+            tests/models/test_configuration.py \
+            tests/models/test_hybrid_attention.py \
             tests/models/test_transformers.py \
             tests/models/test_modeling_utils.py \
             tests/models/test_cache.py \

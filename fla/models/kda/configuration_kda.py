@@ -7,7 +7,11 @@
 
 from transformers.configuration_utils import PreTrainedConfig
 
-from fla.models.modeling_layers import AttentionConfig, AttentionConfigBase
+from fla.models.configuration_utils import (
+    AttentionConfig,
+    AttentionConfigBase,
+    validate_attnres_config,
+)
 
 
 class KDAConfig(AttentionConfigBase, PreTrainedConfig):
@@ -80,12 +84,7 @@ class KDAConfig(AttentionConfigBase, PreTrainedConfig):
         if safe_gate and lower_bound is None:
             raise ValueError("`lower_bound` must be specified when `safe_gate=True` (recommended: -5).")
 
-        if attnres_block_size is not None and attnres_block_size != 1:
-            if attnres_block_size < 2 or attnres_block_size % 2 != 0:
-                raise ValueError(
-                    "`attnres_block_size` must be `None`, `1` (full mode), or an even integer (one block "
-                    f"contains `attnres_block_size // 2` transformer layers); got {attnres_block_size}."
-                )
+        validate_attnres_config(attnres_block_size=attnres_block_size)
 
         super().__init__(
             pad_token_id=pad_token_id,
