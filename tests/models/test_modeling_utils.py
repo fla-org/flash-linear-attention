@@ -5,88 +5,215 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-import math
+from copy import deepcopy
 
+import pytest
 import torch
-import torch.nn as nn
-from transformers import AutoModelForCausalLM
+import torch.nn.functional as F
+from torch import nn
 
-from fla.utils import device
+from fla import models
+from fla.models import (
+    BitNetConfig,
+    DeltaFormerConfig,
+    ForgettingTransformerConfig,
+    GLAConfig,
+    KDAConfig,
+    MomConfig,
+    PaTHAttentionConfig,
+    TransformerConfig,
+)
+from fla.utils import assert_close, device, device_name, find_spec_cached
 
-# Models that do not yet support variable sequence lengths (for modeling tests)
-MODELING_UNSUPPORTED_VARLEN = [
-    "ABCConfig", "CATConfig", "ForgettingTransformerConfig", "LinearAttentionConfig", "LightNetConfig",
-    "Mamba2Config", "MambaConfig", "MesaNetConfig", "SambaConfig",
-    "RodimusConfig", "WallTransformerConfig",
+from .utils import create_model_and_config
+
+FORWARD_CONFIGS = [
+    models.ABCConfig, models.BitNetConfig, models.CombaConfig, models.DeltaNetConfig,
+    models.ForgettingTransformerConfig, models.GatedDeltaNetConfig, models.GatedDeltaProductConfig,
+    models.GLAConfig, models.GSAConfig, models.HGRNConfig, models.HGRN2Config, models.LightNetConfig,
+    models.MesaNetConfig, models.MLAConfig, models.MoBAConfig, models.NSAConfig, models.ParallaxConfig,
+    models.PaTHAttentionConfig, models.PrecondGatedDeltaNetConfig, models.RavenConfig, models.RetNetConfig,
+    models.RodimusConfig, models.RWKV6Config, models.TransformerConfig, models.WallTransformerConfig,
 ]
 
-# Models not yet ready for basic testing
-NOT_READY_FOR_TESTING = ['RodimusConfig']
 
-# Models requiring specific hardware (e.g., NVIDIA Hopper)
-HOPPER_EXCLUSIVE = []
-
-GENERATION_UNSUPPORTED = [
-    "ABCConfig",
-    "CATConfig",
-    "DeltaFormerConfig",
-    "MoBAConfig",
-    "WallTransformerConfig",
-]
+@pytest.fixture
+def full_precision_matmul():
+    precision = torch.get_float32_matmul_precision()
+    torch.set_float32_matmul_precision('highest')
+    try:
+        yield
+    finally:
+        torch.set_float32_matmul_precision(precision)
 
 
-def create_model_and_config(config_class, L, H, D, dtype, **kwargs):
-    """
-    A helper function to create a model and its configuration.
-    """
-    config_params = {
-        'hidden_size': H * D,
-        'num_hidden_layers': L,
-        **({'num_heads': H} if config_class.__name__ != 'NSAConfig' else {}),
-        **kwargs,
-    }
-    config = config_class(**config_params)
-    model = AutoModelForCausalLM.from_config(config)
-    model.apply(init_weights_recursively)
-    model.to(dtype).to(device)
-    return model, config
+@pytest.mark.parametrize('config_class', [GLAConfig, KDAConfig, TransformerConfig])
+@pytest.mark.parametrize('num_items', [None, 11, torch.tensor(11)])
+@pytest.mark.parametrize('custom_criterion', [None, 'mean', 'sum'])
+def test_loss(config_class, num_items, custom_criterion, make_model):
+    torch.manual_seed(42)
+    model = make_model(config_class, hidden_size=32, vocab_size=32)
+    if custom_criterion:
+        model.criterion = nn.CrossEntropyLoss(ignore_index=-7, label_smoothing=0.1, reduction=custom_criterion)
+    ignore_index = -7 if custom_criterion else -100
+    labels = torch.randint(0, 32, (2, 7))
+    labels[0, 3] = ignore_index
+    output = model(input_ids=torch.randint(0, 32, (2, 7)), labels=labels, num_items_in_batch=num_items)
+    reduction = 'sum' if num_items is not None else custom_criterion or 'mean'
+    reference = F.cross_entropy(
+        input=output.logits[:, :-1].reshape(-1, 32),
+        target=labels[:, 1:].reshape(-1),
+        ignore_index=ignore_index,
+        reduction=reduction,
+        label_smoothing=0.1 if custom_criterion else 0.0,
+    )
+    if num_items is not None:
+        reference = reference / num_items
+    torch.testing.assert_close(output.loss, reference)
+    parameters = tuple(model.parameters())
+    actual_gradients = torch.autograd.grad(output.loss, parameters, retain_graph=True)
+    reference_gradients = torch.autograd.grad(reference, parameters)
+    for actual, expected in zip(actual_gradients, reference_gradients, strict=True):
+        torch.testing.assert_close(actual, expected)
+    if custom_criterion:
+        assert model.criterion.reduction == custom_criterion
 
 
-def init_weights_with_asymmetric_pattern(module):
-    """Initialize weights with asymmetric patterns for debugging.
-
-    Args:
-        module: The module to initialize weights for.
-    """
-    if isinstance(module, (nn.Linear, nn.Conv1d)):
-        nn.init.kaiming_normal_(module.weight, a=math.sqrt(5))
+@pytest.mark.parametrize('config_class', [GLAConfig, pytest.param(
+    MomConfig, marks=pytest.mark.skipif(device_name == 'cpu', reason='MoM normalization requires an accelerator.'),
+)])
+@pytest.mark.parametrize('selection', [None, 0, 2, torch.tensor([0, 2, 5])])
+@pytest.mark.parametrize('return_dict', [False, True])
+def test_logits(config_class, selection, return_dict, full_precision_matmul, make_model):
+    torch.manual_seed(42)
+    model = make_model(config_class, hidden_size=32, vocab_size=32).to(device_name).eval()
+    input_ids = torch.randint(0, 32, (2, 7), device=device_name)
+    with torch.no_grad():
+        complete = model(input_ids=input_ids).logits
+        selected = model(input_ids=input_ids, logits_to_keep=selection, return_dict=return_dict)
+        if config_class is not MomConfig:
+            with_labels = model(input_ids=input_ids, labels=input_ids, logits_to_keep=selection)
+    logits = selected.logits if return_dict else selected[0]
+    if isinstance(selection, torch.Tensor):
+        expected = complete[:, selection]
+    elif selection:
+        expected = complete[:, -selection:]
+    else:
+        expected = complete
+    torch.testing.assert_close(logits, expected)
+    if config_class is not MomConfig:
+        torch.testing.assert_close(with_labels.logits, complete)
+    else:
         with torch.no_grad():
-            shape = module.weight.shape
-            if len(shape) > 1:
-                quarter_size = shape[0] // 4
-                module.weight[:quarter_size] *= 1.2
-                module.weight[-quarter_size:] *= 0.8
-                if shape[0] == shape[1]:
-                    idx = torch.arange(min(shape[0], shape[1]))
-                    module.weight[idx, idx] += 0.05
-        if module.bias is not None:
-            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(module.weight)
-            bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
-            nn.init.uniform_(module.bias, -bound, bound)
-            with torch.no_grad():
-                module.bias[::3] *= 1.1
-                module.bias[1::3] *= 0.9
-    elif isinstance(module, nn.Embedding):
-        nn.init.normal_(module.weight, mean=0.0, std=0.02)
-        with torch.no_grad():
-            vocab_size, dim = module.weight.shape
-            pattern = 0.01 * torch.sin(torch.arange(dim) * (6.28 / dim))
-            for i in range(min(100, vocab_size)):
-                module.weight[i] += pattern * (1 + i % 5) * 0.2
+            legacy = model(input_ids=input_ids, num_logits_to_keep=selection).logits
+        torch.testing.assert_close(legacy, expected)
 
 
-def init_weights_recursively(module):
-    if hasattr(module, 'weight'):
-        init_weights_with_asymmetric_pattern(module)
-    for submodule in module.children():
-        init_weights_recursively(submodule)
+@pytest.mark.skipif(device_name == 'cpu', reason='Fused cross entropy requires an accelerator.')
+@pytest.mark.parametrize('linear', [False, True])
+@pytest.mark.parametrize('use_l2warp', [False, True])
+@pytest.mark.parametrize('num_items', [None, 11])
+def test_loss_fused(linear, use_l2warp, num_items, make_model):
+    torch.manual_seed(42)
+    reference = make_model(GLAConfig, vocab_size=128, use_l2warp=use_l2warp).to(device_name)
+    fused = deepcopy(reference)
+    fused.config.fuse_cross_entropy = not linear
+    fused.config.fuse_linear_cross_entropy = linear
+    input_ids = torch.randint(0, 128, (2, 7), device=device_name)
+    labels = input_ids.clone()
+    labels[0, 3] = -100
+    expected = reference(input_ids=input_ids, labels=labels, num_items_in_batch=num_items)
+    actual = fused(input_ids=input_ids, labels=labels, num_items_in_batch=num_items)
+    assert (actual.logits is None) == linear
+    assert_close('loss', expected.loss, actual.loss, 1e-3)
+    expected.loss.backward()
+    actual.loss.backward()
+    for (name, parameter), fused_parameter in zip(reference.named_parameters(), fused.parameters(), strict=True):
+        assert_close(name, parameter.grad, fused_parameter.grad, 1e-3)
+
+
+@pytest.mark.parametrize('config_class', FORWARD_CONFIGS, ids=lambda cls: cls.model_type)
+@pytest.mark.parametrize('return_dict', [False, True])
+def test_forward(config_class, return_dict, make_model):
+    torch.manual_seed(42)
+    model = make_model(config_class, use_lower_bound=False)
+    model.eval()
+    model.config.return_dict = return_dict
+    input_ids = torch.randint(0, 64, (2, 7))
+    labels = input_ids.clone()
+    labels[0, 3] = -100
+    outputs = model(input_ids=input_ids, labels=labels, use_cache=False, output_hidden_states=True, return_dict=return_dict)
+    decoder_outputs = model.model(input_ids=input_ids, use_cache=False, output_hidden_states=True, return_dict=True)
+    reference_logits = model.lm_head(decoder_outputs.last_hidden_state)
+    reference_loss = F.cross_entropy(reference_logits[:, :-1].reshape(-1, 64), labels[:, 1:].reshape(-1))
+    loss, logits = (outputs.loss, outputs.logits) if return_dict else outputs[:2]
+    torch.testing.assert_close(logits, reference_logits)
+    torch.testing.assert_close(loss, reference_loss)
+    parameters = tuple(model.parameters())
+    actual_gradients = torch.autograd.grad(loss, parameters)
+    reference_gradients = torch.autograd.grad(reference_loss, parameters)
+    for actual, expected in zip(actual_gradients, reference_gradients, strict=True):
+        torch.testing.assert_close(actual, expected)
+    hidden_states = outputs.hidden_states if return_dict else outputs[2]
+    for actual, expected in zip(hidden_states, decoder_outputs.hidden_states, strict=True):
+        torch.testing.assert_close(actual, expected)
+
+
+@pytest.mark.parametrize('config_class', FORWARD_CONFIGS, ids=lambda cls: cls.model_type)
+@pytest.mark.parametrize('return_dict', [False, True])
+def test_forward_args(config_class, return_dict, make_model):
+    torch.manual_seed(42)
+    model = make_model(config_class, use_lower_bound=False).eval()
+    input_ids = torch.randint(0, 64, (2, 7))
+    labels = input_ids.clone()
+    with torch.no_grad():
+        expected = model(input_ids=input_ids, labels=labels, use_cache=False)
+        embeddings = model.get_input_embeddings()(input_ids)
+        if config_class in (
+            models.BitNetConfig, models.TransformerConfig, models.WallTransformerConfig,
+            models.ForgettingTransformerConfig, models.ParallaxConfig, models.PaTHAttentionConfig,
+        ):
+            actual = model(None, None, None, embeddings, labels, False, False, True, return_dict)
+        else:
+            actual = model(None, None, embeddings, None, labels, False, False, True, return_dict)
+        torch.testing.assert_close(actual.logits if return_dict else actual[1], expected.logits)
+        selected = model(input_ids=input_ids, num_logits_to_keep=2, use_cache=False, return_dict=return_dict)
+    torch.testing.assert_close(selected.logits if return_dict else selected[0], expected.logits[:, -2:])
+
+
+@pytest.mark.skipif(device_name == 'cpu', reason='Fused loss and model kernels require an accelerator.')
+@pytest.mark.skipif(find_spec_cached('flash_attn') is None, reason='Fused-loss integration requires flash-attn.')
+@pytest.mark.parametrize(
+    "config_class",
+    [
+        pytest.param(config_class, id=config_class.__name__)
+        for config_class in [
+            BitNetConfig,
+            DeltaFormerConfig,
+            ForgettingTransformerConfig,
+            PaTHAttentionConfig,
+        ]
+    ],
+)
+def test_loss_fused_generation(config_class):
+    torch.manual_seed(42)
+    L, B, T, H, D = 2, 2, 64, 4, 64
+    model, config = create_model_and_config(config_class, L, H, D, dtype=torch.bfloat16)
+    model.eval()
+
+    input_ids = torch.randint(low=0, high=config.vocab_size, size=(B, T), device=device)
+    labels = input_ids.clone()
+
+    with torch.no_grad():
+        expected = model(input_ids, labels=labels, use_cache=False).loss
+
+        model.config.fuse_linear_cross_entropy = True
+        outputs = model(input_ids, labels=labels, use_cache=False)
+        assert outputs.logits is None
+        assert_close("loss", expected, outputs.loss, 0.02)
+
+        # the generate path passes no labels; logits must still be materialized
+        outputs = model(input_ids, use_cache=False)
+        assert outputs.logits is not None
+        output_ids = model.generate(input_ids[:, :T // 2], max_new_tokens=2, use_cache=config_class is not DeltaFormerConfig)
+    assert output_ids.shape[1] == T // 2 + 2

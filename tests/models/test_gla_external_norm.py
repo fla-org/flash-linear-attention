@@ -13,6 +13,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from safetensors.torch import save_file
 
+from fla.models import modeling_utils
 from fla.models.gla import modeling_gla
 from fla.models.gla.configuration_gla import GLAConfig
 from fla.modules import mlp
@@ -40,7 +41,7 @@ class TorchRMSNorm(nn.RMSNorm):
 def cpu_ops(monkeypatch):
     # isolate residual scheduling, ownership and gradients from the GPU kernels.
     monkeypatch.setattr(modeling_gla, 'GatedLinearAttention', TokenMixer)
-    monkeypatch.setattr(modeling_gla, 'Attention', TokenMixer)
+    monkeypatch.setattr(modeling_utils, 'Attention', TokenMixer)
     for module in (standard, attnres, mhc):
         monkeypatch.setattr(module, 'RMSNorm', TorchRMSNorm)
     monkeypatch.setattr(attnres, 'fused_attnres', naive_attnres)

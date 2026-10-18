@@ -8,7 +8,7 @@
 import torch
 from torch import nn
 
-from fla.modules.layernorm import RMSNorm
+from fla.modules.norm import RMSNorm
 from fla.modules.residuals.base import BaseResidual
 from fla.ops.attnres import fused_attnres
 

@@ -30,6 +30,7 @@
 ### Large PR justification
 
 <!-- Required only above 500 additions + deletions in the full PR diff; otherwise delete this section and leave the large-PR box unchecked. -->
+<!-- Consider splitting by outcome before requesting an exception; dependent steps can form a native PR stack. See .agents/skills/fla-pr-stacks/SKILL.md for the workflow. -->
 <!-- Explain the single outcome, why splitting would hinder review/correctness, and a useful review order. See CONTRIBUTING.md#pr-scope-and-size for examples. -->
 
 ### If you ticked the "minor" box above

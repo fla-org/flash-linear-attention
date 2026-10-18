@@ -12,7 +12,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from fla.modules.layernorm import RMSNorm
+from fla.modules.norm import RMSNorm
 from fla.modules.residuals.base import BaseResidual
 
 

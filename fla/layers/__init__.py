@@ -10,6 +10,7 @@ from .attn import Attention
 from .based import BasedLinearAttention
 from .bitattn import BitAttention
 from .comba import Comba
+from .cyfa import CyclicFlowAttention
 from .delta_net import DeltaNet
 from .deltaformer import DeltaFormerAttention
 from .forgetting_attn import ForgettingAttention
@@ -43,6 +44,7 @@ from .rebased import ReBasedLinearAttention
 from .rodimus import RodimusAttention, SlidingWindowSharedKeyAttention
 from .rwkv6 import RWKV6Attention
 from .rwkv7 import RWKV7Attention
+from .stickbreaking_attn import StickBreakingAttention
 from .wall_attn import WallAttention
 from .yoco import YOCOCrossAttention, YOCOGatedRetention, YOCOSharedKVBuilder
 
@@ -52,6 +54,7 @@ __all__ = [
     'BasedLinearAttention',
     'BitAttention',
     'Comba',
+    'CyclicFlowAttention',
     'DeltaFormerAttention',
     'DeltaNet',
     'ForgettingAttention',
@@ -86,6 +89,7 @@ __all__ = [
     'ReBasedLinearAttention',
     'RodimusAttention',
     'SlidingWindowSharedKeyAttention',
+    'StickBreakingAttention',
     'WallAttention',
     'YOCOCrossAttention',
     'YOCOGatedRetention',
