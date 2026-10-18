@@ -6,6 +6,7 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import copy
+import json
 
 import pytest
 import torch
@@ -19,6 +20,7 @@ from fla.models.gla.configuration_gla import GLAConfig
 from fla.modules import mlp
 from fla.modules.residuals import attnres, mhc, standard
 from fla.ops.attnres import naive_attnres
+from fla.utils import assert_close
 
 
 class TokenMixer(nn.Module):
@@ -76,10 +78,12 @@ def legacy_state(model, external=False):
     return state
 
 
-@pytest.mark.parametrize(('mode', 'block_size'), [('standard', None), ('attnres', 1), ('attnres', 4), ('mhc', None)])
+@pytest.mark.parametrize(('mode', 'block_size', 'use_reentrant'), [
+    ('standard', None, False), ('standard', None, True), ('attnres', 1, False), ('attnres', 4, False), ('mhc', None, False),
+])
 @pytest.mark.parametrize('fuse_norm', [False, True])
 @pytest.mark.parametrize('output_hidden_states', [False, True])
-def test_residual_checkpointing(mode, block_size, fuse_norm, output_hidden_states):
+def test_residual_checkpointing(mode, block_size, use_reentrant, fuse_norm, output_hidden_states):
     torch.manual_seed(42)
     model = modeling_gla.GLAModel(make_config(block_size, fuse_norm, mode))
     with torch.no_grad():
@@ -89,7 +93,7 @@ def test_residual_checkpointing(mode, block_size, fuse_norm, output_hidden_state
             if getattr(module, '_is_attnres_proj', False):
                 module.weight.normal_(std=0.1)
     checkpointed = copy.deepcopy(model)
-    checkpointed.gradient_checkpointing_enable()
+    checkpointed.gradient_checkpointing_enable(gradient_checkpointing_kwargs={'use_reentrant': use_reentrant})
     ids = torch.arange(10).reshape(2, 5)
     result = model(ids, output_hidden_states=output_hidden_states)
     checkpointed_result = checkpointed(ids, output_hidden_states=output_hidden_states)
@@ -107,12 +111,15 @@ def test_residual_checkpointing(mode, block_size, fuse_norm, output_hidden_state
     actual_loss.backward()
     expected_loss.backward()
     for (name, parameter), (_, other) in zip(model.named_parameters(), checkpointed.named_parameters()):
-        torch.testing.assert_close(parameter.grad, other.grad, atol=0, rtol=0, msg=name)
+        if use_reentrant:
+            assert_close(name, parameter.grad, other.grad, 1e-5)
+        else:
+            torch.testing.assert_close(parameter.grad, other.grad, atol=0, rtol=0, msg=name)
         if 'input_query' not in name and 'input_key_norm' not in name:
             assert parameter.grad is not None and torch.isfinite(parameter.grad).all(), name
 
 
-@pytest.mark.parametrize('mode', ['standard', 'attnres', 'mhc'])
+@pytest.mark.parametrize('mode', ['attnres', 'mhc'])
 def test_reentrant_checkpointing_rejected(mode):
     model = modeling_gla.GLAModel(make_config(4 if mode == 'attnres' else None, mode=mode))
     with pytest.raises(ValueError, match='use_reentrant=False'):
@@ -130,21 +137,48 @@ def test_residual_checkpoint_load(model_class, layout, block_size, tmp_path):
         for parameter in model.parameters():
             parameter.normal_(std=0.2)
     state = model.state_dict() if layout == 'current' else legacy_state(model, external=layout == 'external')
-    check_checkpoint_load(model, state, tmp_path)
+    check_checkpoint_load(model, state, tmp_path, legacy_config=layout != 'current')
 
 
-def check_checkpoint_load(model, state, tmp_path):
+def check_checkpoint_load(model, state, tmp_path, legacy_config=False):
     model_class, config = type(model), model.config
     restored = model_class(config)
     restored.load_state_dict(state, strict=True)
     for name, value in model.state_dict().items():
         torch.testing.assert_close(value, restored.state_dict()[name], atol=0, rtol=0)
     config.save_pretrained(tmp_path)
+    if legacy_config:
+        config_path = tmp_path / 'config.json'
+        saved = json.loads(config_path.read_text())
+        saved['attnres_block_size'] = saved.pop('residual_kwargs').get('block_size')
+        saved.pop('residual_mode')
+        config_path.write_text(json.dumps(saved))
     save_file(state, tmp_path / 'model.safetensors', metadata={'format': 'pt'})
     loaded, info = model_class.from_pretrained(tmp_path, output_loading_info=True)
     assert not info['missing_keys'] and not info['unexpected_keys'] and not info['mismatched_keys']
     for name, value in model.state_dict().items():
         torch.testing.assert_close(value, loaded.state_dict()[name], atol=0, rtol=0)
+
+
+@pytest.mark.parametrize('model_class', [modeling_gla.GLAModel, modeling_gla.GLAForCausalLM])
+@pytest.mark.parametrize('external', [False, True], ids=['official', 'external'])
+@pytest.mark.parametrize('block_size', [None, 4])
+def test_residual_checkpoint_layer_override(model_class, external, block_size, tmp_path):
+    torch.manual_seed(42)
+    config = make_config(block_size)
+    model = model_class(config)
+    with torch.no_grad():
+        for parameter in model.parameters():
+            parameter.normal_(std=0.2)
+    state = legacy_state(model, external=external)
+    config.save_pretrained(tmp_path)
+    save_file(state, tmp_path / 'model.safetensors', metadata={'format': 'pt'})
+    target_config = modeling_gla.GLAConfig.from_pretrained(tmp_path, num_hidden_layers=2)
+    expected = model_class(target_config)
+    expected.load_state_dict(state, strict=False)
+    loaded = model_class.from_pretrained(tmp_path, num_hidden_layers=2)
+    for name, value in expected.state_dict().items():
+        torch.testing.assert_close(value, loaded.state_dict()[name], atol=0, rtol=0, msg=name)
 
 
 @pytest.mark.parametrize('mode', ['standard', 'attnres', 'mhc'])

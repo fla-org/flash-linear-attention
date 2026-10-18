@@ -10,6 +10,7 @@ from transformers.configuration_utils import PreTrainedConfig
 from fla.models.configuration_utils import (
     AttentionConfig,
     AttentionConfigBase,
+    validate_attnres_config,
     validate_loss_config,
 )
 
@@ -54,7 +55,8 @@ class GLAConfig(AttentionConfigBase, PreTrainedConfig):
         fuse_linear_cross_entropy: bool = False,
         use_l2warp: bool = False,
         vocab_size: int = 32000,
-        residual_mode: str = 'standard',
+        attnres_block_size: int | None = None,
+        residual_mode: str | None = None,
         residual_kwargs: dict | None = None,
         **kwargs,
     ):
@@ -96,9 +98,16 @@ class GLAConfig(AttentionConfigBase, PreTrainedConfig):
         if reserved:
             raise ValueError(f'{sorted(reserved)} are supplied by the model, not residual_kwargs')
 
+        validate_attnres_config(attnres_block_size=attnres_block_size)
+        if residual_mode is None:
+            residual_mode = 'standard' if attnres_block_size is None else 'attnres'
+        if attnres_block_size is not None:
+            if residual_mode != 'attnres' or self.residual_kwargs.get('block_size', attnres_block_size) != attnres_block_size:
+                raise ValueError('attnres_block_size conflicts with residual_mode or residual_kwargs')
+            self.residual_kwargs['block_size'] = attnres_block_size
         self.residual_mode = residual_mode
-        if num_hidden_layers < 1:
-            raise ValueError('num_hidden_layers must be positive')
+        if num_hidden_layers < 0:
+            raise ValueError('num_hidden_layers must be non-negative')
 
         validate_loss_config(fuse_cross_entropy=fuse_cross_entropy, fuse_linear_cross_entropy=fuse_linear_cross_entropy)
 
@@ -109,6 +118,21 @@ class GLAConfig(AttentionConfigBase, PreTrainedConfig):
             tie_word_embeddings=tie_word_embeddings,
             **kwargs,
         )
+
+    @property
+    def attnres_block_size(self) -> int | None:
+        """Expose the legacy option while serializing only the canonical residual fields."""
+        return self.residual_kwargs.get('block_size', 1) if self.residual_mode == 'attnres' else None
+
+    @attnres_block_size.setter
+    def attnres_block_size(self, value: int | None) -> None:
+        validate_attnres_config(attnres_block_size=value)
+        self.residual_mode = 'standard' if value is None else 'attnres'
+        self.residual_kwargs = dict(self.residual_kwargs)
+        if value is None:
+            self.residual_kwargs.pop('block_size', None)
+        else:
+            self.residual_kwargs['block_size'] = value
 
     def get_residual_kwargs(self, sub_layer_idx: int) -> dict:
         """Build constructor arguments for the selected residual and sublayer."""
