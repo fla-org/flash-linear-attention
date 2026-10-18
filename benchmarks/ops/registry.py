@@ -59,6 +59,18 @@ def shape_LBTD(B, T, H, D, L=None, **kw):
     return (L, B, T, D)
 
 
+def shape_BTND(B, T, H, D, N, **kw):
+    return (B, T, N, D)
+
+
+def shape_BTN(B, T, H, D, N, **kw):
+    return (B, T, N)
+
+
+def shape_BTNN(B, T, H, D, N, **kw):
+    return (B, T, N, N)
+
+
 def shape_q_hq(B, T, H, D, HQ=None, **kw):
     """q with HQ query heads (GQA); k/v keep H heads. Used by NSA."""
     if HQ is None:
@@ -626,41 +638,32 @@ register_op(OpConfig(
 ))
 
 _hc_default_shapes = {
-    'B1_T1_H4_D128': {'B': 1, 'T': 1, 'H': 4, 'D': 128},
-    'B1_T63_H4_D1024': {'B': 1, 'T': 63, 'H': 4, 'D': 1024},
-    'B1_T2048_H4_D4096': {'B': 1, 'T': 2048, 'H': 4, 'D': 4096},
-    'B2_T1024_H4_D4096': {'B': 2, 'T': 1024, 'H': 4, 'D': 4096},
-    'B1_T8192_H4_D4096': {'B': 1, 'T': 8192, 'H': 4, 'D': 4096},
-    'B1_T2048_H8_D1025': {'B': 1, 'T': 2048, 'H': 8, 'D': 1025},
+    'N4_B1_T1_D128': {'N': 4, 'B': 1, 'T': 1, 'H': 1, 'D': 128},
+    'N4_B1_T63_D1024': {'N': 4, 'B': 1, 'T': 63, 'H': 1, 'D': 1024},
+    'N4_B1_T2048_D4096': {'N': 4, 'B': 1, 'T': 2048, 'H': 1, 'D': 4096},
+    'N4_B2_T1024_D4096': {'N': 4, 'B': 2, 'T': 1024, 'H': 1, 'D': 4096},
+    'N4_B1_T8192_D4096': {'N': 4, 'B': 1, 'T': 8192, 'H': 1, 'D': 4096},
+    'N8_B1_T2048_D1025': {'N': 8, 'B': 1, 'T': 2048, 'H': 1, 'D': 1025},
 }
 
-
-def _shape_hc_branch(B, T, H, D, **kw):
-    return (B, T, D)
-
-
-def _shape_hc_mixing(B, T, H, D, **kw):
-    return (B, T, H, H)
-
-
 _hc_pre_inputs = {
-    'x': TensorSpec(shape_BTHD),
-    'pre': TensorSpec(shape_BTH, dtype='float32'),
+    'x': TensorSpec(shape_BTND),
+    'pre': TensorSpec(shape_BTN, dtype='float32'),
 }
 
 _hc_post_inputs = {
-    'x': TensorSpec(shape_BTHD),
-    'branch': TensorSpec(_shape_hc_branch),
-    'post': TensorSpec(shape_BTH, dtype='float32'),
+    'x': TensorSpec(shape_BTND),
+    'branch': TensorSpec(shape_BTD),
+    'post': TensorSpec(shape_BTN, dtype='float32'),
 }
 
 _hc_post_mhc_inputs = {
     **_hc_post_inputs,
-    'mixing': TensorSpec(_shape_hc_mixing, dtype='float32'),
+    'mixing': TensorSpec(shape_BTNN, dtype='float32'),
 }
 
 _sinkhorn_inputs = {
-    'logits': TensorSpec(_shape_hc_mixing, dtype='float32'),
+    'logits': TensorSpec(shape_BTNN, dtype='float32'),
 }
 
 register_op(OpConfig(
@@ -670,6 +673,7 @@ register_op(OpConfig(
     output_is_tuple=False,
     default_shapes=_hc_default_shapes,
     category='hc',
+    dim_constraints={'H': [1]},
     backend_env={'gluon': 'FLA_HC_GLUON', 'tilelang': 'FLA_HC_TILELANG'},
 ))
 
@@ -680,6 +684,7 @@ register_op(OpConfig(
     output_is_tuple=False,
     default_shapes=_hc_default_shapes,
     category='hc',
+    dim_constraints={'H': [1]},
 ))
 
 register_op(OpConfig(
@@ -689,6 +694,7 @@ register_op(OpConfig(
     output_is_tuple=False,
     default_shapes=_hc_default_shapes,
     category='hc',
+    dim_constraints={'H': [1]},
     backend_env={'gluon': 'FLA_HC_GLUON', 'tilelang': 'FLA_HC_TILELANG'},
 ))
 
@@ -699,6 +705,7 @@ register_op(OpConfig(
     output_is_tuple=False,
     default_shapes=_hc_default_shapes,
     category='hc',
+    dim_constraints={'H': [1]},
 ))
 
 register_op(OpConfig(
@@ -709,6 +716,7 @@ register_op(OpConfig(
     output_is_tuple=False,
     default_shapes=_hc_default_shapes,
     category='hc',
+    dim_constraints={'H': [1]},
     backend_env={'gluon': 'FLA_HC_GLUON', 'tilelang': 'FLA_HC_TILELANG'},
 ))
 
@@ -720,6 +728,7 @@ register_op(OpConfig(
     output_is_tuple=False,
     default_shapes=_hc_default_shapes,
     category='hc',
+    dim_constraints={'H': [1]},
 ))
 
 register_op(OpConfig(
@@ -729,6 +738,7 @@ register_op(OpConfig(
     output_is_tuple=False,
     default_shapes=_hc_default_shapes,
     category='hc',
+    dim_constraints={'H': [1]},
     backend_env={'gluon': 'FLA_HC_GLUON', 'tilelang': 'FLA_HC_TILELANG'},
 ))
 
@@ -739,6 +749,7 @@ register_op(OpConfig(
     output_is_tuple=False,
     default_shapes=_hc_default_shapes,
     category='hc',
+    dim_constraints={'H': [1]},
 ))
 
 

@@ -32,7 +32,25 @@ The `naive_hc_pre`, `naive_hc_post`, and `naive_sinkhorn` exports provide eager 
 
 The reference and numerical budgets are fixed before tuning: relative RMS error at most `5e-5` for FP32, `2e-3` for FP16, and `6e-3` for BF16 pre/post outputs and gradients, and `1e-4` for FP32 Sinkhorn outputs and gradients. Tests cover all inputs' gradients, mixed coefficient dtypes, noncontiguous inputs, empty and singleton shapes, irregular tails, extreme Sinkhorn logits, autocast, dispatch, and chained iHC/mHC updates. Strict local checks use `FLA_CI_ENV=0` with allocation poisoning enabled.
 
-Benchmarks compare eager naive PyTorch, `torch.compile`, Triton, Gluon, and TileLang on the same GPU after correctness passes, reporting forward and forward-plus-backward latency. Sinkhorn backward stores the probabilities of each normalization step, costing `2 * num_iters * tokens * N * N * 4` bytes; inference does not retain this history.
+Run correctness checks before benchmarking:
+
+```bash
+FLA_CI_ENV=0 pytest tests/ops/test_hc.py -q
+```
+
+Like AttnRes, HC uses explicit registrations in `benchmarks/ops/registry.py` and the unified runner. The optimized and naive entries share inputs and shape sweeps. `N` is the number of residual streams; `H=1` because HC has no attention-head axis. Streams and branch outputs use BF16, and routing weights and Sinkhorn logits use FP32. `hc_post` measures iHC; `hc_post_mhc` supplies the mixing matrix for mHC. Sinkhorn is measured separately.
+
+```bash
+python -m benchmarks.ops.run --op naive_hc_pre naive_hc_post naive_hc_post_mhc naive_sinkhorn --no-base
+python -m benchmarks.ops.run --op naive_hc_pre naive_hc_post naive_hc_post_mhc naive_sinkhorn --compile --no-base
+python -m benchmarks.ops.run --op hc_pre hc_post hc_post_mhc sinkhorn --backend triton --no-base
+python -m benchmarks.ops.run --op hc_pre hc_post hc_post_mhc sinkhorn --backend gluon --no-base
+python -m benchmarks.ops.run --op hc_pre hc_post hc_post_mhc sinkhorn --backend tilelang --no-base
+```
+
+Each command reports forward and forward-plus-backward latency with `triton.testing.do_bench`, after compilation and warmup. Optional backends must be installed. Add `--json results.json` to save measurements or `--custom-shapes '{"test": {"B":1,"T":2048,"H":1,"D":4096,"N":4}}'` to select a workload. `--no-base` skips comparison with branches that do not contain HC.
+
+Sinkhorn backward stores the probabilities of each normalization step, costing `2 * num_iters * tokens * N * N * 4` bytes; inference does not retain this history.
 
 ## References
 
