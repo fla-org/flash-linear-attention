@@ -369,6 +369,16 @@ def chunk_diag_kdn(
     if scale is None:
         scale = k.shape[-1] ** -0.5
     h0, c0 = initial_state if initial_state is not None else (None, None)
+    if h0 is not None:
+        N = q.shape[0] if cu_seqlens is None else len(cu_seqlens) - 1
+        if cu_seqlens is not None and h0.shape[0] != N:
+            raise ValueError(
+                f"The number of initial states is expected to be equal to the number of input sequences, "
+                f"i.e., {N} rather than {h0.shape[0]}.",
+            )
+        H, K, V = *k.shape[2:], v.shape[-1]
+        assert h0.shape == (N, H, K, V), \
+            f"The initial memory must have shape [N, H, K, V]={[N, H, K, V]}, got {list(h0.shape)}."
     if c0 is not None:
         assert c0.dtype == torch.float32, "The initial precision must be in float32."
     if use_qk_l2norm_in_kernel:
