@@ -11,7 +11,7 @@ from torch import nn
 from transformers import AutoConfig, AutoModelForCausalLM
 
 from fla import models
-from fla.utils import device_name
+from fla.utils import device_name, find_spec_cached
 
 CONFIG_CLASSES = [getattr(models, name) for name in models.__all__ if name.endswith('Config')]
 
@@ -105,6 +105,8 @@ def test_generate_inputs_embeds(config_class, use_cache, make_model):
 ], ids=lambda cls: cls.model_type)
 @pytest.mark.parametrize('block_size', [None, 2])
 def test_initialization(config_class, block_size, make_model):
+    if config_class is models.MLAConfig and find_spec_cached('flash_attn') is None:
+        pytest.skip('MLA initialization requires flash-attn.')
     torch.manual_seed(42)
     kwargs = {'expand_ratio': 16} if config_class is models.HGRN2Config else {}
     model = make_model(
