@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 import triton
 
+from benchmarks.utils.perf_report import run_module_benchmark
 from fla.modules.token_shift import token_shift
 
 
@@ -62,10 +63,9 @@ def benchmark(T, provider):
     return results
 
 
-if __name__ == '__main__':
-    try:
-        from benchmarks.modules.runner import run_module_benchmark
-    except ModuleNotFoundError:
-        from runner import run_module_benchmark
+def main():
+    run_module_benchmark(mark=benchmark, script_file=__file__)
 
-    run_module_benchmark(benchmark, script_file=__file__)
+
+if __name__ == '__main__':
+    main()

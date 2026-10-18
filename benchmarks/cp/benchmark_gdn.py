@@ -20,13 +20,12 @@ ARGS=(
     --mean 32768
     --std 0
 )
-torchrun --nproc_per_node $GPUS test_gdn_with_cp.py ${ARGS[@]} $@
+torchrun --nproc_per_node $GPUS --module benchmarks.cp.benchmark_gdn ${ARGS[@]} $@
 
 '''
 import argparse
 import os
 import random
-import sys
 from functools import partial
 
 import torch
@@ -38,9 +37,6 @@ from fla.models.cache_utils import Cache
 from fla.modules.convolution import causal_conv1d
 from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
 from fla.ops.kda import chunk_kda, fused_recurrent_kda
-
-sys.path.append("../../")
-
 
 try:
     import fused_weight_gradient_mlp_cuda
@@ -668,7 +664,7 @@ def profile_func(fn, path):
     return prof
 
 
-def test_ops(args):
+def benchmark_ops(args):
     from fla.ops.cp import build_cp_context
     from fla.ops.gated_delta_rule import chunk_gated_delta_rule
     from fla.ops.kda import chunk_kda
@@ -788,7 +784,7 @@ def test_ops(args):
         profile_func(fn, args.profile_path)
 
 
-def test_layer(args):
+def benchmark_layer(args):
     from fla.layers.gated_deltanet import GatedDeltaNet
     from fla.layers.kda import KimiDeltaAttention
 
@@ -901,6 +897,7 @@ def test_layer(args):
 
 
 def main():
+    args = get_args()
     dist.init_process_group()
     world_size = dist.get_world_size()
     rank = dist.get_rank()
@@ -909,16 +906,15 @@ def main():
     random.seed(42)
     torch.cuda.set_device(rank)
     group = dist.new_group(list(range(world_size)))
-    args = get_args()
     args.group = group
     if args.ops:
-        test_ops(args)
+        benchmark_ops(args)
     else:
-        test_layer(args)
+        benchmark_layer(args)
 
 
 if __name__ == '__main__':
     main()
 '''
-torchrun --nproc-per-node=4 test_gdn_with_cp.py
+torchrun --nproc-per-node=4 --module benchmarks.cp.benchmark_gdn
 '''

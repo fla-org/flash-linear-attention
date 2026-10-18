@@ -484,7 +484,7 @@ These tests were conducted on a single NVIDIA GB200 GPU (CUDA 12.9, PyTorch 2.9.
 
 ```sh
 # you might have to first install `fla` via `pip install -e .` to enable its import
-$ python -m benchmarks.ops.run --op chunk_retention chunk_gla chunk_gdn flash_attn
+$ python -m benchmarks.ops.benchmark_ops --op chunk_retention chunk_gla chunk_gdn flash_attn
 =================================================================================
   Machine: NVIDIA GB200 | CUDA 12.9 | PyTorch 2.9.0+cu129.msh
 =================================================================================

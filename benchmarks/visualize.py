@@ -10,7 +10,7 @@ Visualization helpers for FLA benchmark outputs.
 
 Supports:
   - Triton ``perf_report`` CSV files (module benchmarks)
-  - ``benchmark_results.json`` from ``scripts/run_benchmark_compare.py``
+  - ``benchmark_results.json`` from ``benchmarks/compare.py``
 
 Usage::
 

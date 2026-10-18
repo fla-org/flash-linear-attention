@@ -15,15 +15,6 @@ from pathlib import Path
 from typing import Any
 
 
-def ensure_repo_root_on_path() -> Path:
-    """Make ``benchmarks.*`` importable when scripts are run directly."""
-    root = Path(__file__).resolve().parents[2]
-    root_str = str(root)
-    if root_str not in sys.path:
-        sys.path.insert(0, root_str)
-    return root
-
-
 def default_save_dir(script_file: str) -> str:
     """Derive ``./<module>_benchmark`` from ``benchmark_<module>.py``."""
     stem = Path(script_file).stem
@@ -64,8 +55,6 @@ def run_module_benchmark(
     Returns:
         The output directory path.
     """
-    ensure_repo_root_on_path()
-
     if plot_name is None:
         plot_name = get_plot_name(mark)
     if save_dir is None:

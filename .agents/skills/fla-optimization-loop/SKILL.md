@@ -17,7 +17,7 @@ Record the entry point, target workloads, allowed implementation languages, vali
 
 ```bash
 FLA_BENCH_BASE=$(git rev-parse origin/main)
-FLA_CI_ENV=0 python -m benchmarks.ops.verify --op chunk_gla --base "$FLA_BENCH_BASE"
+FLA_CI_ENV=0 python -m benchmarks.verify --op chunk_gla --base "$FLA_BENCH_BASE"
 ```
 
 Use a recorded SHA: the baseline worktree cannot reuse a checked-out branch, and slash-containing refs break its temporary directory naming. `--base` benchmarks that revision; it does not run its correctness tests. Establish baseline correctness separately if the current tree already differs.

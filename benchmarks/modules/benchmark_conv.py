@@ -11,6 +11,7 @@ import torch
 import triton
 from einops import rearrange
 
+from benchmarks.utils.perf_report import run_module_benchmark
 from fla.modules.convolution import causal_conv1d
 from fla.ops.utils.index import prepare_sequence_ids
 from fla.utils import IS_NPU, IS_NVIDIA, find_spec_cached
@@ -124,10 +125,9 @@ benchmark = triton.testing.perf_report(
 )(benchmark)
 
 
-if __name__ == '__main__':
-    try:
-        from benchmarks.modules.runner import run_module_benchmark
-    except ModuleNotFoundError:
-        from runner import run_module_benchmark
+def main():
+    run_module_benchmark(mark=benchmark, script_file=__file__)
 
-    run_module_benchmark(benchmark, script_file=__file__)
+
+if __name__ == '__main__':
+    main()

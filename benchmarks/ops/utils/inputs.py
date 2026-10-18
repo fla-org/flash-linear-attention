@@ -17,7 +17,7 @@ import torch
 import torch.nn.functional as F
 
 if TYPE_CHECKING:
-    from benchmarks.ops.registry import OpConfig
+    from benchmarks.ops.utils.registry import OpConfig
 
 
 RWKV7_W_MIN = -0.6065306597126334

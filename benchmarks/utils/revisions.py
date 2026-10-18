@@ -40,7 +40,7 @@ def run_benchmark(module: str, arguments: list[str], ref: str | None = None) -> 
         temporary = Path(temporary)
         harness = temporary / 'harness'
         shutil.copytree(
-            src=Path(__file__).parent,
+            src=Path(__file__).resolve().parents[1],
             dst=harness / 'benchmarks',
             ignore=shutil.ignore_patterns('__pycache__', '*.pyc'),
         )

@@ -10,19 +10,19 @@ Benchmark script to compare CP8 and CP2TP configurations for chunk_kda.
 
 Usage:
     # CP8 configuration (8 GPUs, no TP), 128k with backward
-    torchrun --nproc_per_node=8 benchmark_kda_cp8_vs_cp2tp.py --config cp8 --seqlen 131072 --backward
+    torchrun --nproc_per_node=8 --module benchmarks.cp.benchmark_kda --config cp8 --seqlen 131072 --backward
 
     # CP8 configuration, 256k forward only
-    torchrun --nproc_per_node=8 benchmark_kda_cp8_vs_cp2tp.py --config cp8 --seqlen 262144 --forward-only
+    torchrun --nproc_per_node=8 --module benchmarks.cp.benchmark_kda --config cp8 --seqlen 262144 --forward-only
 
     # CP8 with baseline comparison (test local 32k and scale to 128k)
-    torchrun --nproc_per_node=8 benchmark_kda_cp8_vs_cp2tp.py --config cp8 --seqlen 131072 --backward --with-baseline
+    torchrun --nproc_per_node=8 --module benchmarks.cp.benchmark_kda --config cp8 --seqlen 131072 --backward --with-baseline
 
     # CP8 with detailed kernel profiling (rank 0 only)
-    torchrun --nproc_per_node=8 benchmark_kda_cp8_vs_cp2tp.py --config cp8 --seqlen 131072 --forward-only --profile-kernels
+    torchrun --nproc_per_node=8 --module benchmarks.cp.benchmark_kda --config cp8 --seqlen 131072 --forward-only --profile-kernels
 
     # CP2TP configuration
-    torchrun --nproc_per_node=8 benchmark_kda_cp8_vs_cp2tp.py --config cp2tp --seqlen 131072 --backward
+    torchrun --nproc_per_node=8 --module benchmarks.cp.benchmark_kda --config cp2tp --seqlen 131072 --backward
 """
 
 import argparse
@@ -437,6 +437,7 @@ def run_benchmark(args):
 
 
 def main():
+    args = get_args()
     dist.init_process_group()
     world_size = dist.get_world_size()
     rank = dist.get_rank()
@@ -446,8 +447,6 @@ def main():
     torch.cuda.manual_seed(rank + 42)
     random.seed(42)
     torch.cuda.set_device(local_rank)
-
-    args = get_args()
 
     # Print environment info
     if rank == 0:

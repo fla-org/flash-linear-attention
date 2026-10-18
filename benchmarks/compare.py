@@ -15,11 +15,11 @@ import sys
 import time
 from pathlib import Path
 
-from benchmarks.comparison import get_commit_sha
-from benchmarks.discovery import find_affected_op_names, get_changed_files
-from benchmarks.ops.registry import SHAPE_CONFIGS
-from benchmarks.ops.runner import run_benchmarks
-from benchmarks.reporting import print_comparison
+from benchmarks.ops.utils.discovery import find_affected_op_names, get_changed_files
+from benchmarks.ops.utils.registry import SHAPE_CONFIGS
+from benchmarks.ops.utils.runner import run_benchmarks
+from benchmarks.utils.reporting import print_comparison
+from benchmarks.utils.revisions import get_commit_sha
 
 
 def clear_triton_cache():

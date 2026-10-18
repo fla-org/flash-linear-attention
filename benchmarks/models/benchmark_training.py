@@ -49,7 +49,7 @@ def _git_describe() -> str:
 
 
 def _print_run_header(rows: dict) -> None:
-    title = " benchmark_training_throughput "
+    title = " benchmark_training "
     bar = "=" * 78
     print(f"== {title} ".ljust(len(bar), '='))
     key_w = max(len(k) for k in rows)

@@ -66,7 +66,7 @@ Run from the repository root on the target GPU:
 
 ```bash
 FLA_BENCH_BASE=$(git rev-parse origin/main)
-FLA_CI_ENV=0 python -m benchmarks.ops.verify --op chunk_kda --base "$FLA_BENCH_BASE"
+FLA_CI_ENV=0 python -m benchmarks.verify --op chunk_kda --base "$FLA_BENCH_BASE"
 ```
 
 Replace the operation with the one being ported. The command executes the current tests; it does not freeze them. Use `--gate-k` only for quick iteration, then run the full gate. Set backend environment flags before launching a fresh process so import-time choices cannot contaminate the comparison.

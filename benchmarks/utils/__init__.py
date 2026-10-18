@@ -4,16 +4,3 @@
 # LICENSE file in the root directory of this source tree.
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
-
-"""Compatibility entry point for benchmarks.compare."""
-
-import sys
-from pathlib import Path
-
-if __package__ in (None, ""):
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from benchmarks.compare import main
-
-if __name__ == '__main__':
-    raise SystemExit(main())

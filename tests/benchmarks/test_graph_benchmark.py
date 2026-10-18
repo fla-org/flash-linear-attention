@@ -10,15 +10,15 @@ import sys
 import pytest
 import torch
 
-from benchmarks.ops.graph_registry import (
+from benchmarks.ops.benchmark_graph import benchmark_case
+from benchmarks.ops.utils.graph_registry import (
     GraphBenchmarkCase,
     get_graph_op,
     list_graph_ops,
     make_cu_seqlens,
     normalize_kda_shape,
 )
-from benchmarks.ops.graph_runner import benchmark_case
-from benchmarks.reporting import print_graph_results
+from benchmarks.utils.reporting import print_graph_results
 
 
 def test_kda_graph_registration_and_common_shape_defaults():
@@ -131,35 +131,44 @@ def test_benchmark_case_captures_once_validates_and_times_both_engines(mode):
     assert any(kind == "graph-replay" and args == ("live",) for kind, args in calls)
 
 
-@pytest.mark.parametrize("graph_index", [0, 2])
-def test_run_routes_graph_arguments(monkeypatch, graph_index):
-    from benchmarks.ops import graph_benchmark, run
+@pytest.mark.parametrize("graph", [False, True], ids=["operators", "graph"])
+def test_benchmark_help_and_list(monkeypatch, capsys, graph):
+    from benchmarks.ops import benchmark_graph, benchmark_ops
 
-    arguments = ["--op", "chunk_kda", "--no-base", "--modes", "fwd", "fwdbwd", "--iterations", "2"]
-    forwarded = []
-    monkeypatch.setattr(graph_benchmark, "run_graph_benchmark", lambda argv: forwarded.append(argv))
-    argv = arguments.copy()
-    argv.insert(graph_index, "--graph")
-    monkeypatch.setattr(sys, "argv", ["run.py", *argv])
-    run.main()
-    assert forwarded == [arguments]
-
-
-@pytest.mark.parametrize("graph", [False, True])
-def test_run_help_and_list(monkeypatch, capsys, graph):
-    from benchmarks.ops import run
-
-    prefix = ["run.py", "--graph"] if graph else ["run.py"]
-    monkeypatch.setattr(sys, "argv", [*prefix, "--help"])
+    main = benchmark_graph.main if graph else benchmark_ops.main
+    monkeypatch.setattr(sys, "argv", ["benchmark", "--help"])
     with pytest.raises(SystemExit) as error:
-        run.main()
+        main()
     assert error.value.code == 0
     help_text = capsys.readouterr().out
-    assert ("--iterations" if graph else "--graph") in help_text
+    assert ("--iterations" if graph else "--from-diff") in help_text
 
-    monkeypatch.setattr(sys, "argv", [*prefix, "--list"])
-    run.main()
+    monkeypatch.setattr(sys, "argv", ["benchmark", "--list"])
+    main()
     assert "chunk_kda" in capsys.readouterr().out
+
+
+def test_graph_comparison_workers(monkeypatch):
+    from benchmarks.ops import benchmark_graph
+
+    calls = []
+
+    def run_benchmark(module, arguments, ref=None):
+        _, args = benchmark_graph._parse_args(argv=arguments)
+        calls.append((module, args, ref))
+        return [], {"git_label": ref or "head", "device": "test", "torch": "test", "torch_npu": "test"}
+
+    monkeypatch.setattr(benchmark_graph, 'run_benchmark', run_benchmark)
+    assert benchmark_graph.main(argv=['--op', 'chunk_kda', '--base', 'origin/main']) == 0
+    assert len(calls) == 2
+    for module, args, _ in calls:
+        assert module == 'benchmarks.ops.benchmark_graph'
+        assert args.worker
+        assert args.op == ['chunk_kda']
+    assert calls[0][1].engines == ['eager', 'graph']
+    assert calls[1][1].engines == ['eager']
+    assert calls[0][1].custom_shapes == calls[1][1].custom_shapes
+    assert [ref for _, _, ref in calls] == [None, 'origin/main']
 
 
 def test_benchmark_case_rejects_reusing_capture_tensor_as_live_input():

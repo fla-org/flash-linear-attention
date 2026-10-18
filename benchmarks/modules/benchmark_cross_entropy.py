@@ -13,6 +13,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import triton
 
+from benchmarks.utils.perf_report import run_module_benchmark
 from fla.backends import GluonBackend
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
 
@@ -128,18 +129,17 @@ def benchmark_logits(
     return triton.testing.do_bench(lambda: criterion(input=logits, target=target), quantiles=quantiles)
 
 
-if __name__ == '__main__':
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--logits-only', action='store_true', help='Compare Triton and Gluon CE without the linear projection')
     args = parser.parse_args()
-
-    try:
-        from benchmarks.modules.runner import run_module_benchmark
-    except ModuleNotFoundError:
-        from runner import run_module_benchmark
 
     run_module_benchmark(
         mark=benchmark_logits if args.logits_only else benchmark,
         script_file=__file__,
         visualize=not args.logits_only,
     )
+
+
+if __name__ == '__main__':
+    main()

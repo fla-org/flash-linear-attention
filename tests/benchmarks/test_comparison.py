@@ -11,8 +11,10 @@ import sys
 
 import pytest
 
-from benchmarks import compare, comparison, discovery
-from benchmarks.ops.registry import list_ops
+from benchmarks import compare
+from benchmarks.ops.utils import discovery
+from benchmarks.ops.utils.registry import list_ops
+from benchmarks.utils import revisions
 
 
 @pytest.fixture
@@ -52,8 +54,8 @@ def benchmark_repository(tmp_path, monkeypatch):
         'output = Path(sys.argv[sys.argv.index("--json") + 1])\n'
         'output.write_text(json.dumps({"results": [{"source": fla.VALUE, "harness": "current"}], "machine_info": {}}))\n'
     )
-    monkeypatch.setattr(comparison, '__file__', str(harness / 'comparison.py'))
-    monkeypatch.setattr(comparison, 'find_project_root', lambda: str(root))
+    monkeypatch.setattr(revisions, '__file__', str(harness / 'utils/revisions.py'))
+    monkeypatch.setattr(revisions, 'find_project_root', lambda: str(root))
     return git
 
 
@@ -66,9 +68,9 @@ def test_revision_isolation(benchmark_repository, ref, fail):
     arguments = ['--fail'] if fail else []
     if fail:
         with pytest.raises(subprocess.CalledProcessError):
-            comparison.run_benchmark(module='benchmarks.worker', arguments=arguments, ref=ref)
+            revisions.run_benchmark(module='benchmarks.worker', arguments=arguments, ref=ref)
     else:
-        results, info = comparison.run_benchmark(module='benchmarks.worker', arguments=arguments, ref=ref)
+        results, info = revisions.run_benchmark(module='benchmarks.worker', arguments=arguments, ref=ref)
         expected = {'baseline': 'baseline', 'feature/current': 'head', None: 'dirty'}[ref]
         assert results == [{'source': expected, 'harness': 'current'}]
         if ref is not None:
@@ -145,8 +147,8 @@ def test_compare_failure_has_no_success_artifact(tmp_path, monkeypatch, failure)
         ('fla/layers/example.py', ['chunk_kda']),
         ('fla/ops/common/chunk_h.py', list_ops()),
         ('fla/ops/utils/solve_tril.py', list_ops()),
-        ('benchmarks/ops/inputs.py', list_ops()),
-        ('benchmarks/comparison.py', list_ops()),
+        ('benchmarks/ops/utils/inputs.py', list_ops()),
+        ('benchmarks/utils/revisions.py', list_ops()),
         ('README.md', []),
     ],
     ids=['operator', 'layer-import', 'common-kernel', 'kernel-utility', 'input-builder', 'revision-worker', 'documentation'],

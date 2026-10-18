@@ -15,7 +15,7 @@ from typing import Any
 
 from torch.nn.functional import logsigmoid
 
-from benchmarks.ops.inputs import (
+from benchmarks.ops.utils.inputs import (
     TensorSpec,
     init_attnres_inputs,
     init_cyfa_inputs,
@@ -75,7 +75,7 @@ class OpConfig:
             Default: `None`.
         test_file (str, Optional):
             Path (relative to repo root) to the op's pytest file,
-            used as the frozen correctness gate by `benchmarks/ops/verify.py`.
+            used as the frozen correctness gate by `benchmarks/verify.py`.
             When None, the gate is derived from `import_path`'s last segment (e.g. `fla.ops.gla` -> `tests/ops/test_gla.py`).
             Set this only when the derived path is wrong. Default: `None`.
         backend_env (dict[str, str], Optional):

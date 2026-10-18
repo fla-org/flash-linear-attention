@@ -12,31 +12,19 @@ import json
 import logging
 import os
 import sys
-from pathlib import Path
 
-if __package__ in (None, ""):
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-
-from benchmarks.discovery import find_affected_op_names, get_changed_files
-from benchmarks.environment import get_git_label, get_machine_info
-from benchmarks.ops.registry import SHAPE_CONFIGS, get_op, list_ops
-from benchmarks.ops.runner import benchmark_op, run_benchmarks
-from benchmarks.reporting import format_machine_info, print_results_table
+from benchmarks.ops.utils.discovery import find_affected_op_names, get_changed_files
+from benchmarks.ops.utils.registry import SHAPE_CONFIGS, get_op, list_ops
+from benchmarks.ops.utils.runner import benchmark_op, run_benchmarks
+from benchmarks.utils.environment import get_git_label, get_machine_info
+from benchmarks.utils.reporting import format_machine_info, print_results_table
 
 logger = logging.getLogger(__name__)
 
 
 def main():
-    if '--graph' in sys.argv[1:]:
-        from benchmarks.ops.graph_benchmark import run_graph_benchmark
-        return run_graph_benchmark([arg for arg in sys.argv[1:] if arg != '--graph'])
-
     parser = argparse.ArgumentParser(
         description='Unified benchmark runner for flash-linear-attention ops',
-    )
-    parser.add_argument(
-        '--graph', action='store_true',
-        help='Run Ascend eager-vs-graph benchmarks; use --graph --help for graph-specific options',
     )
     parser.add_argument(
         '--op', nargs='+', default=None,

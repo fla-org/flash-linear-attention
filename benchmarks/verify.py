@@ -13,16 +13,12 @@ import argparse
 import os
 import subprocess
 import sys
-from pathlib import Path
 
-if __package__ in (None, ""):
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-
-from benchmarks.comparison import find_project_root
-from benchmarks.environment import synchronize_device
-from benchmarks.ops.registry import SHAPE_CONFIGS, get_op, list_ops
-from benchmarks.ops.runner import run_benchmarks
-from benchmarks.reporting import format_machine_info, print_results_table
+from benchmarks.ops.utils.registry import SHAPE_CONFIGS, get_op, list_ops
+from benchmarks.ops.utils.runner import run_benchmarks
+from benchmarks.utils.environment import synchronize_device
+from benchmarks.utils.reporting import format_machine_info, print_results_table
+from benchmarks.utils.revisions import find_project_root
 
 
 def derive_test_file(op_name: str) -> str:
@@ -74,7 +70,7 @@ def profile_op(op_name: str, modes: list[str]) -> None:
     import torch
     from torch.profiler import ProfilerActivity, profile
 
-    from benchmarks.ops.inputs import generate_inputs
+    from benchmarks.ops.utils.inputs import generate_inputs
     from fla.utils import device_name
 
     config = get_op(op_name)

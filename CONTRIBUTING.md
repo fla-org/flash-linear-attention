@@ -398,16 +398,16 @@ Benchmark only against a **green test gate**. A kernel that runs faster but fail
 
 ```bash
 FLA_BENCH_BASE=$(git rev-parse origin/main)
-python -m benchmarks.ops.run --op chunk_gla --base "$FLA_BENCH_BASE"
-python -m benchmarks.ops.run --list
+python -m benchmarks.ops.benchmark_ops --op chunk_gla --base "$FLA_BENCH_BASE"
+python -m benchmarks.ops.benchmark_ops --list
 ```
 
-Record the baseline and candidate commit SHAs with the results. The runner resolves named refs and uses detached worktrees with the current benchmark definitions. The default sweep uses BF16 and per-operator shapes; add relevant dtype and dense/varlen coverage explicitly. New ops are registered in `benchmarks/ops/registry.py`; input builders live in `benchmarks/ops/inputs.py`. See [benchmarks/README.md](benchmarks/README.md) for workload categories, CI comparisons, and local commands.
+Record the baseline and candidate commit SHAs with the results. The runner resolves named refs and uses detached worktrees with the current benchmark definitions. The default sweep uses BF16 and per-operator shapes; add relevant dtype and dense/varlen coverage explicitly. New ops are registered in `benchmarks/ops/utils/registry.py`; input builders live in `benchmarks/ops/utils/inputs.py`. See [benchmarks/README.md](benchmarks/README.md) for workload categories, CI comparisons, and local commands.
 
 **Correctness-gated driver** — runs the op's pytest file before benchmarking and stops on a failing test run by default. Keep references and tolerances fixed and verify that the changed path ran: the driver does not freeze files or reject an all-skipped suite. The `fla-optimization-loop` skill defines that iteration discipline:
 
 ```bash
-FLA_CI_ENV=0 python -m benchmarks.ops.verify --op chunk_gla --base "$FLA_BENCH_BASE"
+FLA_CI_ENV=0 python -m benchmarks.verify --op chunk_gla --base "$FLA_BENCH_BASE"
 ```
 
 **Model-level throughput and generation (CUDA):**

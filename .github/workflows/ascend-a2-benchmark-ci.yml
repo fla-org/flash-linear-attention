@@ -183,28 +183,28 @@ jobs:
 
           (
             status=0
-            run_benchmark chunk_gdn 0 python -m benchmarks.ops.run \
+            run_benchmark chunk_gdn 0 python -m benchmarks.ops.benchmark_ops \
               --op chunk_gdn --base '' --json benchmark_chunk_gdn.json || status=1
-            run_benchmark fused_recurrent_gdn2 0 python -m benchmarks.ops.run \
+            run_benchmark fused_recurrent_gdn2 0 python -m benchmarks.ops.benchmark_ops \
               --op fused_recurrent_gdn2 --base '' --json benchmark_fused_recurrent_gdn2.json || status=1
             exit "$status"
           ) &
           pid_gdn=$!
-          run_benchmark chunk_kda 1 python -m benchmarks.ops.run \
+          run_benchmark chunk_kda 1 python -m benchmarks.ops.benchmark_ops \
             --op chunk_kda --base '' --json benchmark_chunk_kda.json &
           pid_kda=$!
           # fused_attnres finishes first in the four-card baseline; reuse its card for GDN2.
           (
             set -e
-            run_benchmark fused_attnres 2 python -m benchmarks.ops.run \
+            run_benchmark fused_attnres 2 python -m benchmarks.ops.benchmark_ops \
               --op fused_attnres --base '' --json benchmark_fused_attnres.json
-            run_benchmark chunk_gdn2 2 python -m benchmarks.ops.run \
+            run_benchmark chunk_gdn2 2 python -m benchmarks.ops.benchmark_ops \
               --op chunk_gdn2 --base '' \
               --json benchmark_chunk_gdn2.json
           python - <<'PY'
           import json
 
-          from benchmarks.ops.registry import SHAPE_CONFIGS, get_op
+          from benchmarks.ops.utils.registry import SHAPE_CONFIGS, get_op
 
           def verify(path, shapes):
               with open(path) as f:
@@ -225,11 +225,11 @@ jobs:
           PY
           ) &
           pid_attnres=$!
-          run_benchmark conv1d 3 python benchmarks/modules/benchmark_conv.py &
+          run_benchmark conv1d 3 python -m benchmarks.modules.benchmark_conv &
           pid_conv1d=$!
           status=0
           wait "$pid_conv1d" || status=1
-          ASCEND_RT_VISIBLE_DEVICES=3 python -m benchmarks.ops.run \
+          ASCEND_RT_VISIBLE_DEVICES=3 python -m benchmarks.ops.benchmark_ops \
             --op chunk_precond_gdn --base '' --json benchmark_chunk_precond_gdn.json \
             > chunk_precond_gdn.log 2>&1 &
           pid_precond_gdn=$!
@@ -242,7 +242,7 @@ jobs:
           # The runner exposes devices 0-3. Reuse device 0 only after the
           # parallel benchmarks finish so graph latency is not affected by
           # another workload sharing the same NPU.
-          ASCEND_RT_VISIBLE_DEVICES=0 python -m benchmarks.ops.run --graph \
+          ASCEND_RT_VISIBLE_DEVICES=0 python -m benchmarks.ops.benchmark_graph \
             --op chunk_kda --no-base --modes fwdbwd \
             --custom-shapes '{"smoke": {"B": 1, "T": 128, "H": 2, "D": 64, "N": 2}}' \
             --warmup 3 --iterations 10 --json benchmark_kda_graph.json \
@@ -274,7 +274,7 @@ jobs:
           import json
           import math
 
-          from benchmarks.ops.registry import SHAPE_CONFIGS, get_op
+          from benchmarks.ops.utils.registry import SHAPE_CONFIGS, get_op
 
           with open("benchmark_fused_recurrent_gdn2.json") as f:
               results = json.load(f)["results"]

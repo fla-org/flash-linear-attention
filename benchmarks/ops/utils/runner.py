@@ -16,10 +16,10 @@ import os
 
 import torch
 
-from benchmarks.comparison import run_benchmark
-from benchmarks.environment import synchronize_device
-from benchmarks.ops.inputs import generate_inputs
-from benchmarks.ops.registry import OpConfig, get_op
+from benchmarks.ops.utils.inputs import generate_inputs
+from benchmarks.ops.utils.registry import OpConfig, get_op
+from benchmarks.utils.environment import synchronize_device
+from benchmarks.utils.revisions import run_benchmark
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +34,7 @@ def run_benchmarks(
     arguments = ['--op', *op_names, '--custom-shapes', json.dumps(shapes), '--modes', *modes, '--no-base']
     if backend is not None:
         arguments.extend(['--backend', backend])
-    return run_benchmark(module='benchmarks.ops.run', arguments=arguments, ref=ref)
+    return run_benchmark(module='benchmarks.ops.benchmark_ops', arguments=arguments, ref=ref)
 
 
 def _import_op(config: OpConfig):
