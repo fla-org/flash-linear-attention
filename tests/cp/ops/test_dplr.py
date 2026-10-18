@@ -10,8 +10,11 @@ import pytest
 import torch
 
 from fla.ops.generalized_delta_rule.dplr.backends import DPLRTileLangBackend
+from fla.utils import device
 from tests.cp.ops.dplr import run_cp_dplr_test_worker
 from tests.cp.utils import run_distributed
+
+pytestmark = pytest.mark.skipif(device != "cuda", reason="requires CUDA or ROCm GPUs")
 
 
 @pytest.mark.parametrize(

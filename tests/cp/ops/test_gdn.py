@@ -15,8 +15,10 @@ import torch.nn.functional as F
 
 from fla.ops.cp import build_cp_context
 from fla.ops.gated_delta_rule import chunk_gated_delta_rule
-from fla.utils import assert_close
+from fla.utils import assert_close, device
 from tests.cp.utils import gather_global, run_distributed
+
+pytestmark = pytest.mark.skipif(device != "cuda", reason="requires CUDA or ROCm GPUs")
 
 
 def run_cp_gdn_test_worker(

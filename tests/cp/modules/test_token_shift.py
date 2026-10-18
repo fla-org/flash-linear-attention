@@ -15,8 +15,10 @@ import torch.distributed as dist
 from fla.modules.token_shift import token_shift_ref
 from fla.modules.token_shift_cp import token_shift_cp
 from fla.ops.cp import build_cp_context
-from fla.utils import assert_close
+from fla.utils import assert_close, device
 from tests.cp.utils import gather_global, run_distributed
+
+pytestmark = pytest.mark.skipif(device != "cuda", reason="requires CUDA or ROCm GPUs")
 
 
 def run_cp_token_shift_test_worker(

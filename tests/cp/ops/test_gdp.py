@@ -22,6 +22,9 @@ from tests.cp.utils import gather_global, run_distributed
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 
+pytestmark = pytest.mark.skipif(device != "cuda", reason="requires CUDA or ROCm GPUs")
+
+
 def run_cp_gdp_test_worker(
     rank: int,
     world_size: int,

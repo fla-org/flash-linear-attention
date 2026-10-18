@@ -17,8 +17,10 @@ from fla.ops.cp import build_cp_context
 from fla.ops.gdn2 import chunk_gdn2
 from fla.ops.gdn2.naive import naive_recurrent_gdn2
 from fla.ops.kda.gate import naive_kda_lowerbound_gate
-from fla.utils import assert_close
+from fla.utils import assert_close, device
 from tests.cp.utils import gather_global, run_distributed
+
+pytestmark = pytest.mark.skipif(device != "cuda", reason="requires CUDA or ROCm GPUs")
 
 
 def run_cp_gdn2_test_worker(
