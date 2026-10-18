@@ -508,7 +508,6 @@ def chunk_gsa_bwd_k_kernel_dqkvg_npu(
     tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), mask=m_qk)
 
 
-
 # ---------------------------------------------------------------------------
 # 5) Backward K-half — intra-chunk dv / dg
 # ---------------------------------------------------------------------------
@@ -616,7 +615,6 @@ def chunk_gsa_bwd_k_kernel_intra_dvg_npu(
     b_dg = b_o * b_do_c - b_v * b_dv
     tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), mask=m_cv)
     tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), mask=m_cv)
-
 
 
 # ---------------------------------------------------------------------------

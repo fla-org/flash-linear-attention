@@ -20,6 +20,8 @@ Design notes:
 """
 
 from __future__ import annotations
+from fla.ops.gsa.backends.triton_ascend.fused_recurrent import _MAX_BK, _MAX_BV
+from fla.ops.backends import BaseBackend
 
 import os
 
@@ -34,8 +36,6 @@ import triton
 # so it takes effect before Triton reads the env for kernel compile.
 os.environ.setdefault('TRITON_F32_DEFAULT', 'ieee')
 
-from fla.ops.backends import BaseBackend
-from fla.ops.gsa.backends.triton_ascend.fused_recurrent import _MAX_BK, _MAX_BV
 
 # dtypes the NPU kernels are validated for (fp32 accumulators, fp16/bf16 I/O).
 _SUPPORTED_DTYPES = (torch.float32, torch.float16, torch.bfloat16)
