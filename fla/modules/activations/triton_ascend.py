@@ -14,6 +14,8 @@ import triton.language as tl
 
 from fla.backends import TritonAscendBackend, register
 from fla.modules.activations.ops import (
+    flatten_input,
+    get_row_stride,
     logsigmoid_bwd,
     logsigmoid_fwd,
     powglu_fwd,
@@ -61,12 +63,6 @@ def _flat_offset(offs, D: tl.constexpr, stride, IS_LINEAR: tl.constexpr):
     return row * stride + col
 
 
-def _get_stride(x: torch.Tensor) -> int:
-    if x.ndim < 2:
-        return 0
-    return x.stride(-2)
-
-
 def _is_linear_stride(stride: int, D: int) -> bool:
     return stride == D
 
@@ -93,36 +89,6 @@ _LINEAR_HEURISTICS_FWDBWD = {
     'DX_LINEAR': lambda args: _is_linear_stride(stride=args['stride_dx_row'], D=args['D']),
     'DY_LINEAR': lambda args: _is_linear_stride(stride=args['stride_dy_row'], D=args['D']),
 }
-
-
-def _is_inner_contiguous(x: torch.Tensor) -> bool:
-    ndim = x.ndim
-    if ndim < 2:
-        # 1D views such as x[::3] have stride(-1) != 1; the kernel indexes columns densely.
-        return x.is_contiguous()
-    if x.stride(-1) != 1:
-        return False
-    if ndim == 2:
-        return True
-    if ndim == 3:
-        return x.stride(0) == x.stride(-2) * x.shape[-2]
-    if ndim == 4:
-        if x.stride(1) != x.stride(-2) * x.shape[-2]:
-            return False
-        return x.stride(0) == x.stride(1) * x.shape[1]
-    expected = x.stride(-2) * x.shape[-2]
-    for d in range(ndim - 3, -1, -1):
-        if x.stride(d) != expected:
-            return False
-        expected *= x.shape[d]
-    return True
-
-
-def _ensure_inner_contiguous(x: torch.Tensor) -> torch.Tensor:
-    if _is_inner_contiguous(x=x):
-        return x
-    # contiguous() can leave arbitrary strides on size-one dimensions unchanged
-    return x.clone(memory_format=torch.contiguous_format)
 
 
 def _alloc_output(x: torch.Tensor, contiguous: bool = False) -> torch.Tensor:
@@ -377,19 +343,21 @@ def swiglu_fwdbwd_kernel(
 @register(sigmoid_fwd, backend=TritonAscendBackend)
 @torch.compiler.disable
 def sigmoid_fwd_npu(x: torch.Tensor, output_contiguous: bool = False) -> torch.Tensor:
-    x = _ensure_inner_contiguous(x=x)
+    shape = x.shape
+    x = flatten_input(x=x)
     T, D = x.numel(), x.shape[-1]
     y = _alloc_output(x=x, contiguous=output_contiguous)
     grid, B = _activation_launch_config(T=T)
-    sigmoid_fwd_kernel[grid](x=x, y=y, T=T, D=D, stride_x_row=_get_stride(x=x), stride_y_row=_get_stride(x=y), B=B)
-    return y
+    sigmoid_fwd_kernel[grid](x=x, y=y, T=T, D=D, stride_x_row=get_row_stride(x=x), stride_y_row=get_row_stride(x=y), B=B)
+    return y.view(shape)
 
 
 @register(sigmoid_bwd, backend=TritonAscendBackend)
 @torch.compiler.disable
 def sigmoid_bwd_npu(x: torch.Tensor, dy: torch.Tensor, output_contiguous: bool = False) -> torch.Tensor:
-    x = _ensure_inner_contiguous(x=x)
-    dy = _ensure_inner_contiguous(x=dy)
+    shape = x.shape
+    x = flatten_input(x=x)
+    dy = flatten_input(x=dy)
     T, D = x.numel(), x.shape[-1]
     dx = _alloc_output(x=x, contiguous=output_contiguous)
     grid, B = _activation_launch_config(T=T, is_backward=True)
@@ -399,18 +367,19 @@ def sigmoid_bwd_npu(x: torch.Tensor, dy: torch.Tensor, output_contiguous: bool =
         dx=dx,
         T=T,
         D=D,
-        stride_x_row=_get_stride(x=x),
-        stride_dy_row=_get_stride(x=dy),
-        stride_dx_row=_get_stride(x=dx),
+        stride_x_row=get_row_stride(x=x),
+        stride_dy_row=get_row_stride(x=dy),
+        stride_dx_row=get_row_stride(x=dx),
         B=B,
     )
-    return dx
+    return dx.view(shape)
 
 
 @register(logsigmoid_fwd, backend=TritonAscendBackend)
 @torch.compiler.disable
 def logsigmoid_fwd_npu(x: torch.Tensor, temperature: float = 1., output_contiguous: bool = False) -> torch.Tensor:
-    x = _ensure_inner_contiguous(x=x)
+    shape = x.shape
+    x = flatten_input(x=x)
     T, D = x.numel(), x.shape[-1]
     y = _alloc_output(x=x, contiguous=output_contiguous)
     grid, B = _activation_launch_config(T=T)
@@ -420,11 +389,11 @@ def logsigmoid_fwd_npu(x: torch.Tensor, temperature: float = 1., output_contiguo
         temperature=temperature,
         T=T,
         D=D,
-        stride_x_row=_get_stride(x=x),
-        stride_y_row=_get_stride(x=y),
+        stride_x_row=get_row_stride(x=x),
+        stride_y_row=get_row_stride(x=y),
         B=B,
     )
-    return y
+    return y.view(shape)
 
 
 @register(logsigmoid_bwd, backend=TritonAscendBackend)
@@ -435,8 +404,9 @@ def logsigmoid_bwd_npu(
     temperature: float = 1.,
     output_contiguous: bool = False,
 ) -> torch.Tensor:
-    x = _ensure_inner_contiguous(x=x)
-    dy = _ensure_inner_contiguous(x=dy)
+    shape = x.shape
+    x = flatten_input(x=x)
+    dy = flatten_input(x=dy)
     T, D = x.numel(), x.shape[-1]
     dx = _alloc_output(x=x, contiguous=output_contiguous)
     grid, B = _activation_launch_config(T=T, is_backward=True)
@@ -447,30 +417,32 @@ def logsigmoid_bwd_npu(
         temperature=temperature,
         T=T,
         D=D,
-        stride_x_row=_get_stride(x=x),
-        stride_dx_row=_get_stride(x=dx),
-        stride_dy_row=_get_stride(x=dy),
+        stride_x_row=get_row_stride(x=x),
+        stride_dx_row=get_row_stride(x=dx),
+        stride_dy_row=get_row_stride(x=dy),
         B=B,
     )
-    return dx
+    return dx.view(shape)
 
 
 @register(swish_fwd, backend=TritonAscendBackend)
 @torch.compiler.disable
 def swish_fwd_npu(x: torch.Tensor, output_contiguous: bool = False) -> torch.Tensor:
-    x = _ensure_inner_contiguous(x=x)
+    shape = x.shape
+    x = flatten_input(x=x)
     T, D = x.numel(), x.shape[-1]
     y = _alloc_output(x=x, contiguous=output_contiguous)
     grid, B = _activation_launch_config(T=T)
-    swish_fwd_kernel[grid](x=x, y=y, T=T, D=D, stride_x_row=_get_stride(x=x), stride_y_row=_get_stride(x=y), B=B)
-    return y
+    swish_fwd_kernel[grid](x=x, y=y, T=T, D=D, stride_x_row=get_row_stride(x=x), stride_y_row=get_row_stride(x=y), B=B)
+    return y.view(shape)
 
 
 @register(swish_bwd, backend=TritonAscendBackend)
 @torch.compiler.disable
 def swish_bwd_npu(x: torch.Tensor, dy: torch.Tensor, output_contiguous: bool = False) -> torch.Tensor:
-    x = _ensure_inner_contiguous(x=x)
-    dy = _ensure_inner_contiguous(x=dy)
+    shape = x.shape
+    x = flatten_input(x=x)
+    dy = flatten_input(x=dy)
     T, D = x.numel(), x.shape[-1]
     dx = _alloc_output(x=x, contiguous=output_contiguous)
     grid, B = _activation_launch_config(T=T, is_backward=True)
@@ -480,20 +452,21 @@ def swish_bwd_npu(x: torch.Tensor, dy: torch.Tensor, output_contiguous: bool = F
         dx=dx,
         T=T,
         D=D,
-        stride_x_row=_get_stride(x=x),
-        stride_dy_row=_get_stride(x=dy),
-        stride_dx_row=_get_stride(x=dx),
+        stride_x_row=get_row_stride(x=x),
+        stride_dy_row=get_row_stride(x=dy),
+        stride_dx_row=get_row_stride(x=dx),
         B=B,
     )
-    return dx
+    return dx.view(shape)
 
 
 @register(swiglu_fwd, backend=TritonAscendBackend)
 @torch.compiler.disable
 def swiglu_fwd_npu(x: torch.Tensor, y: torch.Tensor, output_contiguous: bool = False) -> torch.Tensor:
     assert x.shape == y.shape, f"swiglu_fwd: shape mismatch x={x.shape} y={y.shape}"
-    x = _ensure_inner_contiguous(x=x)
-    y = _ensure_inner_contiguous(x=y)
+    shape = x.shape
+    x = flatten_input(x=x)
+    y = flatten_input(x=y)
     T, D = x.numel(), x.shape[-1]
     z = _alloc_output(x=x, contiguous=output_contiguous)
     grid, B = _activation_launch_config(T=T)
@@ -503,12 +476,12 @@ def swiglu_fwd_npu(x: torch.Tensor, y: torch.Tensor, output_contiguous: bool = F
         z=z,
         T=T,
         D=D,
-        stride_x_row=_get_stride(x=x),
-        stride_y_row=_get_stride(x=y),
-        stride_z_row=_get_stride(x=z),
+        stride_x_row=get_row_stride(x=x),
+        stride_y_row=get_row_stride(x=y),
+        stride_z_row=get_row_stride(x=z),
         B=B,
     )
-    return z
+    return z.view(shape)
 
 
 @register(swiglu_fwdbwd, backend=TritonAscendBackend)
@@ -521,9 +494,10 @@ def swiglu_fwdbwd_npu(
     output_contiguous: bool = False,
 ):
     assert x.shape == y.shape == g.shape, f"swiglu_fwdbwd: shape mismatch x={x.shape} y={y.shape} g={g.shape}"
-    x = _ensure_inner_contiguous(x=x)
-    y = _ensure_inner_contiguous(x=y)
-    g = _ensure_inner_contiguous(x=g)
+    shape = x.shape
+    x = flatten_input(x=x)
+    y = flatten_input(x=y)
+    g = flatten_input(x=g)
     T, D = x.numel(), x.shape[-1]
     dx = _alloc_output(x=x, contiguous=output_contiguous)
     dy = _alloc_output(x=y, contiguous=output_contiguous)
@@ -541,17 +515,17 @@ def swiglu_fwdbwd_npu(
         z=z,
         T=T,
         D=D,
-        stride_x_row=_get_stride(x=x),
-        stride_y_row=_get_stride(x=y),
-        stride_g_row=_get_stride(x=g),
-        stride_dx_row=_get_stride(x=dx),
-        stride_dy_row=_get_stride(x=dy),
-        stride_z_row=_get_stride(x=z) if z is not None else 0,
+        stride_x_row=get_row_stride(x=x),
+        stride_y_row=get_row_stride(x=y),
+        stride_g_row=get_row_stride(x=g),
+        stride_dx_row=get_row_stride(x=dx),
+        stride_dy_row=get_row_stride(x=dy),
+        stride_z_row=get_row_stride(x=z) if z is not None else 0,
         B=B,
     )
     if use_weight:
-        return dx, dy, z
-    return dx, dy
+        return dx.view(shape), dy.view(shape), z.view(shape)
+    return dx.view(shape), dy.view(shape)
 
 
 class SwiGLULinearFunctionNPU(torch.autograd.Function):
@@ -699,8 +673,9 @@ _POWGLU_BWD_MEM_MULT = 10.0
 @torch.compiler.disable
 def powglu_fwd_npu(x: torch.Tensor, y: torch.Tensor, power: float = 3.0, output_contiguous: bool = False) -> torch.Tensor:
     assert x.shape == y.shape, f"powglu_fwd: shape mismatch x={x.shape} y={y.shape}"
-    x = _ensure_inner_contiguous(x=x)
-    y = _ensure_inner_contiguous(x=y)
+    shape = x.shape
+    x = flatten_input(x=x)
+    y = flatten_input(x=y)
     T, D = x.numel(), x.shape[-1]
     z = _alloc_output(x=x, contiguous=output_contiguous)
     grid, B = _activation_launch_config(T=T, memory_multiplier=_POWGLU_FWD_MEM_MULT)
@@ -708,15 +683,15 @@ def powglu_fwd_npu(x: torch.Tensor, y: torch.Tensor, power: float = 3.0, output_
         x=x,
         y=y,
         z=z,
-        stride_x_row=_get_stride(x=x),
-        stride_y_row=_get_stride(x=y),
-        stride_z_row=_get_stride(x=z),
+        stride_x_row=get_row_stride(x=x),
+        stride_y_row=get_row_stride(x=y),
+        stride_z_row=get_row_stride(x=z),
         m=power,
         T=T,
         D=D,
         B=B,
     )
-    return z
+    return z.view(shape)
 
 
 @register(powglu_fwdbwd, backend=TritonAscendBackend)
@@ -730,9 +705,10 @@ def powglu_fwdbwd_npu(
     output_contiguous: bool = False,
 ):
     assert x.shape == y.shape == g.shape, f"powglu_fwdbwd: shape mismatch x={x.shape} y={y.shape} g={g.shape}"
-    x = _ensure_inner_contiguous(x=x)
-    y = _ensure_inner_contiguous(x=y)
-    g = _ensure_inner_contiguous(x=g)
+    shape = x.shape
+    x = flatten_input(x=x)
+    y = flatten_input(x=y)
+    g = flatten_input(x=g)
     T, D = x.numel(), x.shape[-1]
     dx = _alloc_output(x=x, contiguous=output_contiguous)
     dy = _alloc_output(x=y, contiguous=output_contiguous)
@@ -748,20 +724,20 @@ def powglu_fwdbwd_npu(
         dx=dx,
         dy=dy,
         z=z,
-        stride_x_row=_get_stride(x=x),
-        stride_y_row=_get_stride(x=y),
-        stride_g_row=_get_stride(x=g),
-        stride_dx_row=_get_stride(x=dx),
-        stride_dy_row=_get_stride(x=dy),
-        stride_z_row=_get_stride(x=z) if z is not None else 0,
+        stride_x_row=get_row_stride(x=x),
+        stride_y_row=get_row_stride(x=y),
+        stride_g_row=get_row_stride(x=g),
+        stride_dx_row=get_row_stride(x=dx),
+        stride_dy_row=get_row_stride(x=dy),
+        stride_z_row=get_row_stride(x=z) if z is not None else 0,
         m=power,
         T=T,
         D=D,
         B=B,
     )
     if use_weight:
-        return dx, dy, z
-    return dx, dy
+        return dx.view(shape), dy.view(shape), z.view(shape)
+    return dx.view(shape), dy.view(shape)
 
 
 class PowGLULinearFunctionNPU(torch.autograd.Function):

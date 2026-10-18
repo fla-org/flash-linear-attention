@@ -39,57 +39,18 @@ def _activation_autotune_configs():
     return [triton.Config({'B': bs}, num_warps=nw) for bs in bs_list for nw in nw_list]
 
 
-def _get_stride(x: torch.Tensor) -> int:
-    """Get the row stride for viewing a tensor as 2D (num_rows, D) where D = shape[-1].
+def flatten_input(x: torch.Tensor) -> torch.Tensor:
+    """Prepare a two-dimensional input with contiguous columns, preserving the last feature dimension."""
+    # compiled kernels use dense rows to avoid symbolic stride arguments
+    if torch.compiler.is_compiling() or (x.ndim > 0 and x.shape[-1] > 1 and x.stride(-1) != 1):
+        x = x.contiguous()
+    return x.flatten(end_dim=-2) if x.ndim > 1 else x.reshape(1, -1)
 
-    Returns stride(-2) if the tensor is at least 2D, or 0 for 1D tensors.
-    The caller must ensure stride(-1) == 1, with higher dimensions contiguous relative to dimension -2.
-    """
-    if x.ndim < 2:
-        return 0
+
+def get_row_stride(x: torch.Tensor) -> int:
     if torch.compiler.is_compiling():
         return x.shape[-1]
-    return x.stride(-2)
-
-
-def _is_inner_contiguous(x: torch.Tensor) -> bool:
-    """Check if a tensor can be safely viewed as 2D (num_rows, D) with row stride = stride(-2).
-
-    This holds when stride(-1) == 1 and all dimensions above -2 are contiguous with respect to the dimension below them.
-    """
-    ndim = x.ndim
-    if ndim < 2:
-        return x.is_contiguous()
-    if x.stride(-1) != 1:
-        return False
-    if ndim == 2:
-        # 2D: any layout with stride(-1)==1 is valid (can view as (T, D))
-        return True
-    if ndim == 3:
-        # 3D (B, T, D): stride should be (T*D, D, 1)
-        return x.stride(0) == x.stride(-2) * x.shape[-2]
-    if ndim == 4:
-        # 4D (B, H, T, D): stride should be (H*T*D, T*D, D, 1)
-        if x.stride(1) != x.stride(-2) * x.shape[-2]:
-            return False
-        return x.stride(0) == x.stride(1) * x.shape[1]
-    # 5D+ fallback to loop
-    expected = x.stride(-2) * x.shape[-2]
-    for d in range(ndim - 3, -1, -1):
-        if x.stride(d) != expected:
-            return False
-        expected *= x.shape[d]
-    return True
-
-
-def _ensure_inner_contiguous(x: torch.Tensor) -> torch.Tensor:
-    """Make the tensor inner-contiguous if it isn't already."""
-    if torch.compiler.is_compiling():
-        return x.contiguous()
-    if _is_inner_contiguous(x=x):
-        return x
-    # contiguous() can leave arbitrary strides on size-one dimensions unchanged
-    return x.clone(memory_format=torch.contiguous_format)
+    return x.stride(0)
 
 
 def _alloc_output(x: torch.Tensor, contiguous: bool = False) -> torch.Tensor:
@@ -133,37 +94,39 @@ def sigmoid_bwd_kernel(x, dy, dx, stride_x_row, stride_dy_row, stride_dx_row, T,
 
 @dispatch
 def sigmoid_fwd(x: torch.Tensor, output_contiguous: bool = False) -> torch.Tensor:
-    x = _ensure_inner_contiguous(x=x)
+    shape = x.shape
+    x = flatten_input(x=x)
     T, D = x.numel(), x.shape[-1]
     y = _alloc_output(x=x, contiguous=output_contiguous)
     sigmoid_fwd_kernel[lambda meta: (triton.cdiv(T, meta['B']),)](
         x=x,
         y=y,
-        stride_x_row=_get_stride(x=x),
-        stride_y_row=_get_stride(x=y),
+        stride_x_row=get_row_stride(x=x),
+        stride_y_row=get_row_stride(x=y),
         T=T,
         D=D,
     )
-    return y
+    return y.view(shape)
 
 
 @dispatch
 def sigmoid_bwd(x: torch.Tensor, dy: torch.Tensor, output_contiguous: bool = False) -> torch.Tensor:
-    x = _ensure_inner_contiguous(x=x)
-    dy = _ensure_inner_contiguous(x=dy)
+    shape = x.shape
+    x = flatten_input(x=x)
+    dy = flatten_input(x=dy)
     T, D = x.numel(), x.shape[-1]
     dx = _alloc_output(x=x, contiguous=output_contiguous)
     sigmoid_bwd_kernel[lambda meta: (triton.cdiv(T, meta['B']),)](
         x=x,
         dy=dy,
         dx=dx,
-        stride_x_row=_get_stride(x=x),
-        stride_dy_row=_get_stride(x=dy),
-        stride_dx_row=_get_stride(x=dx),
+        stride_x_row=get_row_stride(x=x),
+        stride_dy_row=get_row_stride(x=dy),
+        stride_dx_row=get_row_stride(x=dx),
         T=T,
         D=D,
     )
-    return dx
+    return dx.view(shape)
 
 
 class SigmoidFunction(torch.autograd.Function):
@@ -214,39 +177,41 @@ def elu_p1_bwd_kernel(x, dy, dx, stride_x_row, stride_dy_row, stride_dx_row, T, 
 
 @dispatch
 def elu_p1_fwd(x: torch.Tensor) -> torch.Tensor:
-    x = x.contiguous() if x.ndim < 2 else _ensure_inner_contiguous(x=x)
-    T, D = x.numel(), x.shape[-1] if x.ndim else 1
+    shape = x.shape
+    x = flatten_input(x=x)
+    T, D = x.numel(), x.shape[-1]
     y = _alloc_output(x=x)
     if T > 0:
         elu_p1_fwd_kernel[lambda meta: (triton.cdiv(T, meta['B']),)](
             x=x,
             y=y,
-            stride_x_row=_get_stride(x=x),
-            stride_y_row=_get_stride(x=y),
+            stride_x_row=get_row_stride(x=x),
+            stride_y_row=get_row_stride(x=y),
             T=T,
             D=D,
         )
-    return y
+    return y.view(shape)
 
 
 @dispatch
 def elu_p1_bwd(x: torch.Tensor, dy: torch.Tensor) -> torch.Tensor:
-    x = x.contiguous() if x.ndim < 2 else _ensure_inner_contiguous(x=x)
-    dy = dy.contiguous() if dy.ndim < 2 else _ensure_inner_contiguous(x=dy)
-    T, D = x.numel(), x.shape[-1] if x.ndim else 1
+    shape = x.shape
+    x = flatten_input(x=x)
+    dy = flatten_input(x=dy)
+    T, D = x.numel(), x.shape[-1]
     dx = _alloc_output(x=x)
     if T > 0:
         elu_p1_bwd_kernel[lambda meta: (triton.cdiv(T, meta['B']),)](
             x=x,
             dy=dy,
             dx=dx,
-            stride_x_row=_get_stride(x=x),
-            stride_dy_row=_get_stride(x=dy),
-            stride_dx_row=_get_stride(x=dx),
+            stride_x_row=get_row_stride(x=x),
+            stride_dy_row=get_row_stride(x=dy),
+            stride_dx_row=get_row_stride(x=dx),
             T=T,
             D=D,
         )
-    return dx
+    return dx.view(shape)
 
 
 class ELUPlusOneFunction(torch.autograd.Function):
@@ -316,19 +281,20 @@ def logsigmoid_bwd_kernel(
 
 @dispatch
 def logsigmoid_fwd(x: torch.Tensor, temperature: float = 1., output_contiguous: bool = False) -> torch.Tensor:
-    x = _ensure_inner_contiguous(x=x)
+    shape = x.shape
+    x = flatten_input(x=x)
     T, D = x.numel(), x.shape[-1]
     y = _alloc_output(x=x, contiguous=output_contiguous)
     logsigmoid_fwd_kernel[lambda meta: (triton.cdiv(T, meta['B']),)](
         x=x,
         y=y,
-        stride_x_row=_get_stride(x=x),
-        stride_y_row=_get_stride(x=y),
+        stride_x_row=get_row_stride(x=x),
+        stride_y_row=get_row_stride(x=y),
         temperature=temperature,
         T=T,
         D=D,
     )
-    return y
+    return y.view(shape)
 
 
 @dispatch
@@ -338,22 +304,23 @@ def logsigmoid_bwd(
     temperature: float = 1.,
     output_contiguous: bool = False,
 ) -> torch.Tensor:
-    x = _ensure_inner_contiguous(x=x)
-    dy = _ensure_inner_contiguous(x=dy)
+    shape = x.shape
+    x = flatten_input(x=x)
+    dy = flatten_input(x=dy)
     T, D = x.numel(), x.shape[-1]
     dx = _alloc_output(x=x, contiguous=output_contiguous)
     logsigmoid_bwd_kernel[lambda meta: (triton.cdiv(T, meta['B']),)](
         x=x,
         dy=dy,
         dx=dx,
-        stride_x_row=_get_stride(x=x),
-        stride_dy_row=_get_stride(x=dy),
-        stride_dx_row=_get_stride(x=dx),
+        stride_x_row=get_row_stride(x=x),
+        stride_dy_row=get_row_stride(x=dy),
+        stride_dx_row=get_row_stride(x=dx),
         temperature=temperature,
         T=T,
         D=D,
     )
-    return dx
+    return dx.view(shape)
 
 
 class LogSigmoidFunction(torch.autograd.Function):
@@ -406,37 +373,39 @@ def swish_bwd_kernel(x, dy, dx, stride_x_row, stride_dy_row, stride_dx_row, T, D
 
 @dispatch
 def swish_fwd(x: torch.Tensor, output_contiguous: bool = False) -> torch.Tensor:
-    x = _ensure_inner_contiguous(x=x)
+    shape = x.shape
+    x = flatten_input(x=x)
     T, D = x.numel(), x.shape[-1]
     y = _alloc_output(x=x, contiguous=output_contiguous)
     swish_fwd_kernel[lambda meta: (triton.cdiv(T, meta['B']),)](
         x=x,
         y=y,
-        stride_x_row=_get_stride(x=x),
-        stride_y_row=_get_stride(x=y),
+        stride_x_row=get_row_stride(x=x),
+        stride_y_row=get_row_stride(x=y),
         T=T,
         D=D,
     )
-    return y
+    return y.view(shape)
 
 
 @dispatch
 def swish_bwd(x: torch.Tensor, dy: torch.Tensor, output_contiguous: bool = False) -> torch.Tensor:
-    x = _ensure_inner_contiguous(x=x)
-    dy = _ensure_inner_contiguous(x=dy)
+    shape = x.shape
+    x = flatten_input(x=x)
+    dy = flatten_input(x=dy)
     T, D = x.numel(), x.shape[-1]
     dx = _alloc_output(x=x, contiguous=output_contiguous)
     swish_bwd_kernel[lambda meta: (triton.cdiv(T, meta['B']),)](
         x=x,
         dy=dy,
         dx=dx,
-        stride_x_row=_get_stride(x=x),
-        stride_dy_row=_get_stride(x=dy),
-        stride_dx_row=_get_stride(x=dx),
+        stride_x_row=get_row_stride(x=x),
+        stride_dy_row=get_row_stride(x=dy),
+        stride_dx_row=get_row_stride(x=dx),
         T=T,
         D=D,
     )
-    return dx
+    return dx.view(shape)
 
 
 class SwishFunction(torch.autograd.Function):
@@ -616,21 +585,22 @@ def swiglu_fwdbwd_kernel(
 @dispatch
 def swiglu_fwd(x: torch.Tensor, y: torch.Tensor, output_contiguous: bool = False) -> torch.Tensor:
     assert x.shape == y.shape, f"swiglu_fwd: shape mismatch x={x.shape} y={y.shape}"
-    x = _ensure_inner_contiguous(x=x)
-    y = _ensure_inner_contiguous(x=y)
+    shape = x.shape
+    x = flatten_input(x=x)
+    y = flatten_input(x=y)
     T, D = x.numel(), x.shape[-1]
     z = _alloc_output(x=x, contiguous=output_contiguous)
     swiglu_fwd_kernel[lambda meta: (triton.cdiv(T, meta['B']),)](
         x=x,
         y=y,
         z=z,
-        stride_x_row=_get_stride(x=x),
-        stride_y_row=_get_stride(x=y),
-        stride_z_row=_get_stride(x=z),
+        stride_x_row=get_row_stride(x=x),
+        stride_y_row=get_row_stride(x=y),
+        stride_z_row=get_row_stride(x=z),
         T=T,
         D=D,
     )
-    return z
+    return z.view(shape)
 
 
 @dispatch
@@ -642,9 +612,10 @@ def swiglu_fwdbwd(
     output_contiguous: bool = False,
 ):
     assert x.shape == y.shape == g.shape, f"swiglu_fwdbwd: shape mismatch x={x.shape} y={y.shape} g={g.shape}"
-    x = _ensure_inner_contiguous(x=x)
-    y = _ensure_inner_contiguous(x=y)
-    g = _ensure_inner_contiguous(x=g)
+    shape = x.shape
+    x = flatten_input(x=x)
+    y = flatten_input(x=y)
+    g = flatten_input(x=g)
     T, D = x.numel(), x.shape[-1]
     dx = _alloc_output(x=x, contiguous=output_contiguous)
     dy = _alloc_output(x=y, contiguous=output_contiguous)
@@ -659,18 +630,18 @@ def swiglu_fwdbwd(
         dx=dx,
         dy=dy,
         z=z,
-        stride_x_row=_get_stride(x=x),
-        stride_y_row=_get_stride(x=y),
-        stride_g_row=_get_stride(x=g),
-        stride_dx_row=_get_stride(x=dx),
-        stride_dy_row=_get_stride(x=dy),
-        stride_z_row=_get_stride(x=z) if z is not None else 0,
+        stride_x_row=get_row_stride(x=x),
+        stride_y_row=get_row_stride(x=y),
+        stride_g_row=get_row_stride(x=g),
+        stride_dx_row=get_row_stride(x=dx),
+        stride_dy_row=get_row_stride(x=dy),
+        stride_z_row=get_row_stride(x=z) if z is not None else 0,
         T=T,
         D=D,
     )
     if use_weight:
-        return dx, dy, z
-    return dx, dy
+        return dx.view(shape), dy.view(shape), z.view(shape)
+    return dx.view(shape), dy.view(shape)
 
 
 class SwiGLUFunction(torch.autograd.Function):
@@ -800,21 +771,22 @@ def sigmoidglu_fwdbwd_kernel(
 @torch.compiler.disable
 def sigmoidglu_fwd(x: torch.Tensor, y: torch.Tensor, output_contiguous: bool = False) -> torch.Tensor:
     assert x.shape == y.shape, f"sigmoidglu_fwd: shape mismatch x={x.shape} y={y.shape}"
-    x = _ensure_inner_contiguous(x=x)
-    y = _ensure_inner_contiguous(x=y)
+    shape = x.shape
+    x = flatten_input(x=x)
+    y = flatten_input(x=y)
     T, D = x.numel(), x.shape[-1]
     z = _alloc_output(x=x, contiguous=output_contiguous)
     sigmoidglu_fwd_kernel[lambda meta: (triton.cdiv(T, meta['B']),)](
         x=x,
         y=y,
         z=z,
-        stride_x_row=_get_stride(x=x),
-        stride_y_row=_get_stride(x=y),
-        stride_z_row=_get_stride(x=z),
+        stride_x_row=get_row_stride(x=x),
+        stride_y_row=get_row_stride(x=y),
+        stride_z_row=get_row_stride(x=z),
         T=T,
         D=D,
     )
-    return z
+    return z.view(shape)
 
 
 @torch.compiler.disable
@@ -826,9 +798,10 @@ def sigmoidglu_fwdbwd(
     output_contiguous: bool = False,
 ):
     assert x.shape == y.shape == g.shape, f"sigmoidglu_fwdbwd: shape mismatch x={x.shape} y={y.shape} g={g.shape}"
-    x = _ensure_inner_contiguous(x=x)
-    y = _ensure_inner_contiguous(x=y)
-    g = _ensure_inner_contiguous(x=g)
+    shape = x.shape
+    x = flatten_input(x=x)
+    y = flatten_input(x=y)
+    g = flatten_input(x=g)
     T, D = x.numel(), x.shape[-1]
     dx = _alloc_output(x=x, contiguous=output_contiguous)
     dy = _alloc_output(x=y, contiguous=output_contiguous)
@@ -843,18 +816,18 @@ def sigmoidglu_fwdbwd(
         dx=dx,
         dy=dy,
         z=z,
-        stride_x_row=_get_stride(x=x),
-        stride_y_row=_get_stride(x=y),
-        stride_g_row=_get_stride(x=g),
-        stride_dx_row=_get_stride(x=dx),
-        stride_dy_row=_get_stride(x=dy),
-        stride_z_row=_get_stride(x=z) if z is not None else 0,
+        stride_x_row=get_row_stride(x=x),
+        stride_y_row=get_row_stride(x=y),
+        stride_g_row=get_row_stride(x=g),
+        stride_dx_row=get_row_stride(x=dx),
+        stride_dy_row=get_row_stride(x=dy),
+        stride_z_row=get_row_stride(x=z) if z is not None else 0,
         T=T,
         D=D,
     )
     if use_weight:
-        return dx, dy, z
-    return dx, dy
+        return dx.view(shape), dy.view(shape), z.view(shape)
+    return dx.view(shape), dy.view(shape)
 
 
 class SigmoidGLUFunction(torch.autograd.Function):
@@ -1001,22 +974,23 @@ def powglu_fwdbwd_kernel(
 @dispatch
 def powglu_fwd(x: torch.Tensor, y: torch.Tensor, power: float = 3.0, output_contiguous: bool = False) -> torch.Tensor:
     assert x.shape == y.shape, f"powglu_fwd: shape mismatch x={x.shape} y={y.shape}"
-    x = _ensure_inner_contiguous(x=x)
-    y = _ensure_inner_contiguous(x=y)
+    shape = x.shape
+    x = flatten_input(x=x)
+    y = flatten_input(x=y)
     T, D = x.numel(), x.shape[-1]
     z = _alloc_output(x=x, contiguous=output_contiguous)
     powglu_fwd_kernel[lambda meta: (triton.cdiv(T, meta['B']),)](
         x=x,
         y=y,
         z=z,
-        stride_x_row=_get_stride(x=x),
-        stride_y_row=_get_stride(x=y),
-        stride_z_row=_get_stride(x=z),
+        stride_x_row=get_row_stride(x=x),
+        stride_y_row=get_row_stride(x=y),
+        stride_z_row=get_row_stride(x=z),
         m=power,
         T=T,
         D=D,
     )
-    return z
+    return z.view(shape)
 
 
 @dispatch
@@ -1029,9 +1003,10 @@ def powglu_fwdbwd(
     output_contiguous: bool = False,
 ):
     assert x.shape == y.shape == g.shape, f"powglu_fwdbwd: shape mismatch x={x.shape} y={y.shape} g={g.shape}"
-    x = _ensure_inner_contiguous(x=x)
-    y = _ensure_inner_contiguous(x=y)
-    g = _ensure_inner_contiguous(x=g)
+    shape = x.shape
+    x = flatten_input(x=x)
+    y = flatten_input(x=y)
+    g = flatten_input(x=g)
     T, D = x.numel(), x.shape[-1]
     dx = _alloc_output(x=x, contiguous=output_contiguous)
     dy = _alloc_output(x=y, contiguous=output_contiguous)
@@ -1046,19 +1021,19 @@ def powglu_fwdbwd(
         dx=dx,
         dy=dy,
         z=z,
-        stride_x_row=_get_stride(x=x),
-        stride_y_row=_get_stride(x=y),
-        stride_g_row=_get_stride(x=g),
-        stride_dx_row=_get_stride(x=dx),
-        stride_dy_row=_get_stride(x=dy),
-        stride_z_row=_get_stride(x=z) if z is not None else 0,
+        stride_x_row=get_row_stride(x=x),
+        stride_y_row=get_row_stride(x=y),
+        stride_g_row=get_row_stride(x=g),
+        stride_dx_row=get_row_stride(x=dx),
+        stride_dy_row=get_row_stride(x=dy),
+        stride_z_row=get_row_stride(x=z) if z is not None else 0,
         m=power,
         T=T,
         D=D,
     )
     if use_weight:
-        return dx, dy, z
-    return dx, dy
+        return dx.view(shape), dy.view(shape), z.view(shape)
+    return dx.view(shape), dy.view(shape)
 
 
 class PowGLUFunction(torch.autograd.Function):
