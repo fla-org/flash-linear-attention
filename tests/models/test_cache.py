@@ -172,46 +172,46 @@ def test_cache_window_size_does_not_undercount():
 
 
 @pytest.mark.parametrize("cache_class", [FLACache, LegacyFLACache])
-@pytest.mark.parametrize('with_recurrent_state', [False, True])
+@pytest.mark.parametrize('init_recurrent_state', [False, True])
 @pytest.mark.parametrize(
-    ("first_len", "second_len", "initial_window_size", "window_size"),
+    ("prefill_length", "update_length", "initial_window_size", "window_size"),
     [
-        pytest.param(4, 6, 4, 4, id="full-window-oversized-update"),
-        pytest.param(2, 4, 4, 4, id="partial-window-overflow"),
+        pytest.param(4, 6, 4, 4, id="replace-window"),
+        pytest.param(2, 4, 4, 4, id="overflow"),
         pytest.param(7, 2, 4, 4, id="oversized-prefill"),
-        pytest.param(4, 1, 4, 4, id="single-token-update"),
-        pytest.param(4, 0, 4, 4, id="empty-window-update"),
+        pytest.param(4, 1, 4, 4, id="decode"),
+        pytest.param(4, 0, 4, 4, id="empty-update"),
         pytest.param(0, 2, 4, 4, id="empty-prefill"),
         pytest.param(1, 1, 4, 4, id="partial-window"),
-        pytest.param(2, 3, 1, 1, id="single-token-window"),
+        pytest.param(2, 3, 1, 1, id="window-one"),
         pytest.param(2, 3, None, None, id="unbounded"),
         pytest.param(6, 1, None, 4, id="enable-window"),
         pytest.param(6, 1, 8, 4, id="shrink-window"),
     ],
 )
-def test_cache_attention_update(cache_class, with_recurrent_state, first_len, second_len, initial_window_size, window_size):
+def test_cache_attn_update(cache_class, init_recurrent_state, prefill_length, update_length, initial_window_size, window_size):
     cache = cache_class()
-    recurrent_state = torch.ones(1, 2, 3, device=device_name) if with_recurrent_state else None
-    if with_recurrent_state:
+    recurrent_state = torch.ones(1, 2, 3, device=device_name) if init_recurrent_state else None
+    if init_recurrent_state:
         cache.update(recurrent_state=recurrent_state, offset=0)
 
-    first_state = tuple(state.requires_grad_() for state in _make_attn_state(0, first_len))
-    second_state = tuple(state.requires_grad_() for state in _make_attn_state(first_len, second_len))
+    prefill_state = tuple(state.requires_grad_() for state in _make_attn_state(0, prefill_length))
+    update_state = tuple(state.requires_grad_() for state in _make_attn_state(prefill_length, update_length))
 
     cache.update(
-        attn_state=first_state,
+        attn_state=prefill_state,
         layer_idx=0,
-        offset=first_len,
+        offset=prefill_length,
         cache_kwargs={"window_size": initial_window_size},
     )
     cache.update(
-        attn_state=second_state,
+        attn_state=update_state,
         layer_idx=0,
-        offset=second_len,
+        offset=update_length,
         cache_kwargs={"window_size": window_size},
     )
 
-    total_length = first_len + second_len
+    total_length = prefill_length + update_length
     start = 0 if window_size is None else max(0, total_length - window_size)
     state = cache[0]
     assert state["attn_state"][0].shape[1] == total_length - start
@@ -220,11 +220,11 @@ def test_cache_attention_update(cache_class, with_recurrent_state, first_len, se
     assert state["recurrent_state"] is recurrent_state
 
     sum(tensor.sum() for tensor in state["attn_state"]).backward()
-    for tensors, offset, length in ((first_state, 0, first_len), (second_state, first_len, second_len)):
-        expected = (torch.arange(offset, offset + length, device=device_name) >= start).float().view(1, length, 1, 1)
+    for tensors, offset, length in ((prefill_state, 0, prefill_length), (update_state, prefill_length, update_length)):
+        expected_grad = (torch.arange(offset, offset + length, device=device_name) >= start).float().view(1, length, 1, 1)
         for tensor in tensors:
-            actual = torch.zeros_like(tensor) if tensor.grad is None else tensor.grad
-            torch.testing.assert_close(actual, expected.expand_as(tensor), rtol=0, atol=0)
+            grad = torch.zeros_like(tensor) if tensor.grad is None else tensor.grad
+            torch.testing.assert_close(grad, expected_grad.expand_as(tensor), rtol=0, atol=0)
 
 
 def test_legacy_cache_window_overflow_without_hf_init():
