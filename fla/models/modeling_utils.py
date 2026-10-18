@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import math
 from copy import copy
 from typing import TYPE_CHECKING
 
@@ -33,6 +34,41 @@ class FLAPreTrainedModel(PreTrainedModel):
     def set_output_embeddings(self, new_embeddings):
         # allow reattaching a head after set_output_embeddings(None)
         self.lm_head = new_embeddings
+
+    def _init_weights(
+        self,
+        module: nn.Module,
+        prenorm_residual_strategy: str | None = None,
+        num_residuals_per_layer: int = 2,
+    ):
+        if isinstance(module, (nn.Linear, nn.Conv1d)):
+            if getattr(module, '_is_attnres_proj', False):
+                nn.init.zeros_(module.weight)
+            else:
+                nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
+        elif hasattr(module, 'reset_parameters'):
+            module.reset_parameters()
+
+        if prenorm_residual_strategy is not None:
+            weight = None
+            if hasattr(module, 'o_proj'):
+                weight = module.o_proj.weight
+            elif hasattr(module, 'down_proj'):
+                weight = module.down_proj.weight
+            if weight is not None:
+                if prenorm_residual_strategy == 'rescale':
+                    # reinitialize before GPT-2 residual scaling to avoid compounding repeated calls
+                    nn.init.kaiming_uniform_(weight, a=math.sqrt(5))
+                    with torch.no_grad():
+                        weight /= math.sqrt(num_residuals_per_layer * self.config.num_hidden_layers)
+                elif prenorm_residual_strategy == 'zero':
+                    nn.init.zeros_(weight)
+                else:
+                    raise ValueError(f"Invalid prenorm_residual_strategy: {prenorm_residual_strategy}")
 
     def _compute_logits_and_loss(
         self,
