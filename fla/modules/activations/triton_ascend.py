@@ -91,12 +91,6 @@ _LINEAR_HEURISTICS_FWDBWD = {
 }
 
 
-def _alloc_output(x: torch.Tensor, contiguous: bool = False) -> torch.Tensor:
-    if contiguous:
-        return x.new_empty(x.shape)
-    return torch.empty_like(x)
-
-
 @triton.heuristics(_LINEAR_HEURISTICS_XY)
 @triton.jit(do_not_specialize=['T'])
 def sigmoid_fwd_kernel(
@@ -346,10 +340,10 @@ def sigmoid_fwd_npu(x: torch.Tensor, output_contiguous: bool = False) -> torch.T
     shape = x.shape
     x = flatten_input(x=x)
     T, D = x.numel(), x.shape[-1]
-    y = _alloc_output(x=x, contiguous=output_contiguous)
+    y = x.new_empty(shape)
     grid, B = _activation_launch_config(T=T)
-    sigmoid_fwd_kernel[grid](x=x, y=y, T=T, D=D, stride_x_row=get_row_stride(x=x), stride_y_row=get_row_stride(x=y), B=B)
-    return y.view(shape)
+    sigmoid_fwd_kernel[grid](x=x, y=y, T=T, D=D, stride_x_row=get_row_stride(x=x), stride_y_row=D, B=B)
+    return y
 
 
 @register(sigmoid_bwd, backend=TritonAscendBackend)
@@ -359,7 +353,7 @@ def sigmoid_bwd_npu(x: torch.Tensor, dy: torch.Tensor, output_contiguous: bool =
     x = flatten_input(x=x)
     dy = flatten_input(x=dy)
     T, D = x.numel(), x.shape[-1]
-    dx = _alloc_output(x=x, contiguous=output_contiguous)
+    dx = x.new_empty(shape)
     grid, B = _activation_launch_config(T=T, is_backward=True)
     sigmoid_bwd_kernel[grid](
         x=x,
@@ -369,10 +363,10 @@ def sigmoid_bwd_npu(x: torch.Tensor, dy: torch.Tensor, output_contiguous: bool =
         D=D,
         stride_x_row=get_row_stride(x=x),
         stride_dy_row=get_row_stride(x=dy),
-        stride_dx_row=get_row_stride(x=dx),
+        stride_dx_row=D,
         B=B,
     )
-    return dx.view(shape)
+    return dx
 
 
 @register(logsigmoid_fwd, backend=TritonAscendBackend)
@@ -381,7 +375,7 @@ def logsigmoid_fwd_npu(x: torch.Tensor, temperature: float = 1., output_contiguo
     shape = x.shape
     x = flatten_input(x=x)
     T, D = x.numel(), x.shape[-1]
-    y = _alloc_output(x=x, contiguous=output_contiguous)
+    y = x.new_empty(shape)
     grid, B = _activation_launch_config(T=T)
     logsigmoid_fwd_kernel[grid](
         x=x,
@@ -390,10 +384,10 @@ def logsigmoid_fwd_npu(x: torch.Tensor, temperature: float = 1., output_contiguo
         T=T,
         D=D,
         stride_x_row=get_row_stride(x=x),
-        stride_y_row=get_row_stride(x=y),
+        stride_y_row=D,
         B=B,
     )
-    return y.view(shape)
+    return y
 
 
 @register(logsigmoid_bwd, backend=TritonAscendBackend)
@@ -408,7 +402,7 @@ def logsigmoid_bwd_npu(
     x = flatten_input(x=x)
     dy = flatten_input(x=dy)
     T, D = x.numel(), x.shape[-1]
-    dx = _alloc_output(x=x, contiguous=output_contiguous)
+    dx = x.new_empty(shape)
     grid, B = _activation_launch_config(T=T, is_backward=True)
     logsigmoid_bwd_kernel[grid](
         x=x,
@@ -418,11 +412,11 @@ def logsigmoid_bwd_npu(
         T=T,
         D=D,
         stride_x_row=get_row_stride(x=x),
-        stride_dx_row=get_row_stride(x=dx),
+        stride_dx_row=D,
         stride_dy_row=get_row_stride(x=dy),
         B=B,
     )
-    return dx.view(shape)
+    return dx
 
 
 @register(swish_fwd, backend=TritonAscendBackend)
@@ -431,10 +425,10 @@ def swish_fwd_npu(x: torch.Tensor, output_contiguous: bool = False) -> torch.Ten
     shape = x.shape
     x = flatten_input(x=x)
     T, D = x.numel(), x.shape[-1]
-    y = _alloc_output(x=x, contiguous=output_contiguous)
+    y = x.new_empty(shape)
     grid, B = _activation_launch_config(T=T)
-    swish_fwd_kernel[grid](x=x, y=y, T=T, D=D, stride_x_row=get_row_stride(x=x), stride_y_row=get_row_stride(x=y), B=B)
-    return y.view(shape)
+    swish_fwd_kernel[grid](x=x, y=y, T=T, D=D, stride_x_row=get_row_stride(x=x), stride_y_row=D, B=B)
+    return y
 
 
 @register(swish_bwd, backend=TritonAscendBackend)
@@ -444,7 +438,7 @@ def swish_bwd_npu(x: torch.Tensor, dy: torch.Tensor, output_contiguous: bool = F
     x = flatten_input(x=x)
     dy = flatten_input(x=dy)
     T, D = x.numel(), x.shape[-1]
-    dx = _alloc_output(x=x, contiguous=output_contiguous)
+    dx = x.new_empty(shape)
     grid, B = _activation_launch_config(T=T, is_backward=True)
     swish_bwd_kernel[grid](
         x=x,
@@ -454,10 +448,10 @@ def swish_bwd_npu(x: torch.Tensor, dy: torch.Tensor, output_contiguous: bool = F
         D=D,
         stride_x_row=get_row_stride(x=x),
         stride_dy_row=get_row_stride(x=dy),
-        stride_dx_row=get_row_stride(x=dx),
+        stride_dx_row=D,
         B=B,
     )
-    return dx.view(shape)
+    return dx
 
 
 @register(swiglu_fwd, backend=TritonAscendBackend)
@@ -468,7 +462,7 @@ def swiglu_fwd_npu(x: torch.Tensor, y: torch.Tensor, output_contiguous: bool = F
     x = flatten_input(x=x)
     y = flatten_input(x=y)
     T, D = x.numel(), x.shape[-1]
-    z = _alloc_output(x=x, contiguous=output_contiguous)
+    z = x.new_empty(shape)
     grid, B = _activation_launch_config(T=T)
     swiglu_fwd_kernel[grid](
         x=x,
@@ -478,10 +472,10 @@ def swiglu_fwd_npu(x: torch.Tensor, y: torch.Tensor, output_contiguous: bool = F
         D=D,
         stride_x_row=get_row_stride(x=x),
         stride_y_row=get_row_stride(x=y),
-        stride_z_row=get_row_stride(x=z),
+        stride_z_row=D,
         B=B,
     )
-    return z.view(shape)
+    return z
 
 
 @register(swiglu_fwdbwd, backend=TritonAscendBackend)
@@ -499,10 +493,10 @@ def swiglu_fwdbwd_npu(
     y = flatten_input(x=y)
     g = flatten_input(x=g)
     T, D = x.numel(), x.shape[-1]
-    dx = _alloc_output(x=x, contiguous=output_contiguous)
-    dy = _alloc_output(x=y, contiguous=output_contiguous)
+    dx = x.new_empty(shape)
+    dy = y.new_empty(shape)
     if use_weight:
-        z = _alloc_output(x=x, contiguous=output_contiguous)
+        z = x.new_empty(shape)
     else:
         z = None
     grid, B = _activation_launch_config(T=T, is_backward=True)
@@ -518,14 +512,14 @@ def swiglu_fwdbwd_npu(
         stride_x_row=get_row_stride(x=x),
         stride_y_row=get_row_stride(x=y),
         stride_g_row=get_row_stride(x=g),
-        stride_dx_row=get_row_stride(x=dx),
-        stride_dy_row=get_row_stride(x=dy),
-        stride_z_row=get_row_stride(x=z) if z is not None else 0,
+        stride_dx_row=D,
+        stride_dy_row=D,
+        stride_z_row=D if z is not None else 0,
         B=B,
     )
     if use_weight:
-        return dx.view(shape), dy.view(shape), z.view(shape)
-    return dx.view(shape), dy.view(shape)
+        return dx, dy, z
+    return dx, dy
 
 
 class SwiGLULinearFunctionNPU(torch.autograd.Function):
@@ -677,7 +671,7 @@ def powglu_fwd_npu(x: torch.Tensor, y: torch.Tensor, power: float = 3.0, output_
     x = flatten_input(x=x)
     y = flatten_input(x=y)
     T, D = x.numel(), x.shape[-1]
-    z = _alloc_output(x=x, contiguous=output_contiguous)
+    z = x.new_empty(shape)
     grid, B = _activation_launch_config(T=T, memory_multiplier=_POWGLU_FWD_MEM_MULT)
     powglu_fwd_kernel[grid](
         x=x,
@@ -685,13 +679,13 @@ def powglu_fwd_npu(x: torch.Tensor, y: torch.Tensor, power: float = 3.0, output_
         z=z,
         stride_x_row=get_row_stride(x=x),
         stride_y_row=get_row_stride(x=y),
-        stride_z_row=get_row_stride(x=z),
+        stride_z_row=D,
         m=power,
         T=T,
         D=D,
         B=B,
     )
-    return z.view(shape)
+    return z
 
 
 @register(powglu_fwdbwd, backend=TritonAscendBackend)
@@ -710,10 +704,10 @@ def powglu_fwdbwd_npu(
     y = flatten_input(x=y)
     g = flatten_input(x=g)
     T, D = x.numel(), x.shape[-1]
-    dx = _alloc_output(x=x, contiguous=output_contiguous)
-    dy = _alloc_output(x=y, contiguous=output_contiguous)
+    dx = x.new_empty(shape)
+    dy = y.new_empty(shape)
     if use_weight:
-        z = _alloc_output(x=x, contiguous=output_contiguous)
+        z = x.new_empty(shape)
     else:
         z = None
     grid, B = _activation_launch_config(T=T, is_backward=True, memory_multiplier=_POWGLU_BWD_MEM_MULT)
@@ -727,17 +721,17 @@ def powglu_fwdbwd_npu(
         stride_x_row=get_row_stride(x=x),
         stride_y_row=get_row_stride(x=y),
         stride_g_row=get_row_stride(x=g),
-        stride_dx_row=get_row_stride(x=dx),
-        stride_dy_row=get_row_stride(x=dy),
-        stride_z_row=get_row_stride(x=z) if z is not None else 0,
+        stride_dx_row=D,
+        stride_dy_row=D,
+        stride_z_row=D if z is not None else 0,
         m=power,
         T=T,
         D=D,
         B=B,
     )
     if use_weight:
-        return dx.view(shape), dy.view(shape), z.view(shape)
-    return dx.view(shape), dy.view(shape)
+        return dx, dy, z
+    return dx, dy
 
 
 class PowGLULinearFunctionNPU(torch.autograd.Function):
