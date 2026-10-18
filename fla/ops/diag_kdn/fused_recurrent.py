@@ -7,7 +7,7 @@
 
 import torch
 
-from fla.modules.l2norm import l2norm
+from fla.modules.norm.l2norm import l2norm
 from fla.ops.diag_kdn.chunk import MIN_LOG_DECAY
 from fla.ops.diag_kdn.gain import diag_kdn_gain
 from fla.ops.generalized_delta_rule.dplr import fused_recurrent_dplr_delta_rule

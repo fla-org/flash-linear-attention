@@ -9,7 +9,7 @@ import math
 
 import torch
 
-from fla.modules.l2norm import l2norm
+from fla.modules.norm.l2norm import l2norm
 from fla.ops.diag_kdn.chunk_h import chunk_diag_kdn_bwd_dhu, chunk_diag_kdn_fwd_h
 from fla.ops.diag_kdn.chunk_intra import chunk_diag_kdn_bwd_intra, chunk_diag_kdn_fwd_intra
 from fla.ops.diag_kdn.chunk_o import chunk_diag_kdn_bwd_dAv, chunk_diag_kdn_fwd_o
