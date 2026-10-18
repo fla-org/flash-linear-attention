@@ -14,6 +14,36 @@ from transformers.cache_utils import Cache as HFCacheBase
 from transformers.cache_utils import CacheLayerMixin
 
 
+def _update_attn_state(
+    cached_state: tuple[torch.Tensor, ...] | list[torch.Tensor] | None,
+    new_state: tuple[torch.Tensor, ...] | list[torch.Tensor],
+    window_size: int | None,
+) -> tuple[torch.Tensor, ...] | list[torch.Tensor]:
+    input_length = new_state[0].shape[1]
+    if cached_state is None:
+        if window_size is None or input_length <= window_size:
+            return new_state
+        return [state[:, -window_size:].contiguous() for state in new_state]
+    updated_state = []
+    for cached, new in zip(cached_state, new_state, strict=False):
+        if window_size is not None and cached_state[0].shape[1] >= window_size:
+            # a full-window chunk replaces the cache; shorter chunks retain the preceding tokens
+            tail = new[:, -window_size:]
+            if tail.shape[1] >= window_size:
+                updated = tail.contiguous()
+            else:
+                if cached.shape[1] > window_size:
+                    cached = cached[:, -window_size:].contiguous()
+                updated = cached.roll(-input_length, dims=1)
+                updated[:, -tail.shape[1]:] = tail
+        else:
+            updated = torch.cat([cached, new], dim=1)
+            if window_size is not None and updated.shape[1] > window_size:
+                updated = updated[:, -window_size:].contiguous()
+        updated_state.append(updated)
+    return updated_state
+
+
 class FLALayer(CacheLayerMixin):
     """Store recurrent, attention, convolution, and auxiliary state for one layer."""
 
@@ -65,36 +95,13 @@ class FLALayer(CacheLayerMixin):
         input_length = attn_state[0].shape[1] if has_attn_state else 0
 
         if has_attn_state:
-            if self.state["attn_state"] is None:
-                if window_size is not None and input_length > window_size:
-                    attn_state = tuple(x[:, -window_size:].contiguous() for x in attn_state)
-                self.state["attn_state"] = tuple(attn_state)
-            else:
-                cached_attn_state = self.state["attn_state"]
-                if window_size is not None and input_length == 0:
-                    pass
-                # a full-window chunk replaces the cache; shorter chunks retain the preceding tokens
-                elif window_size is not None and cached_attn_state[0].shape[1] >= window_size:
-                    updated_attn_state = []
-                    for cached_state, new_state in zip(cached_attn_state, attn_state, strict=False):
-                        tail = new_state[:, -window_size:]
-                        if tail.shape[1] >= window_size:
-                            updated_attn_state.append(tail.contiguous())
-                        else:
-                            if cached_state.shape[1] > window_size:
-                                cached_state = cached_state[:, -window_size:].contiguous()
-                            rolled = cached_state.roll(-input_length, dims=1)
-                            rolled[:, -tail.shape[1]:] = tail
-                            updated_attn_state.append(rolled)
-                    self.state["attn_state"] = tuple(updated_attn_state)
-                else:
-                    updated_attn_state = []
-                    for cached_state, new_state in zip(cached_attn_state, attn_state, strict=False):
-                        updated = torch.cat([cached_state, new_state], dim=1)
-                        if window_size is not None and updated.shape[1] > window_size:
-                            updated = updated[:, -window_size:].contiguous()
-                        updated_attn_state.append(updated)
-                    self.state["attn_state"] = tuple(updated_attn_state)
+            cached_attn_state = self.state["attn_state"]
+            if cached_attn_state is None or window_size is None or input_length > 0:
+                self.state["attn_state"] = tuple(_update_attn_state(
+                    cached_state=cached_attn_state,
+                    new_state=attn_state,
+                    window_size=window_size,
+                ))
 
         if conv_state is not None:
             self.state["conv_state"] = conv_state
@@ -270,7 +277,7 @@ class LegacyFLACache(HFCacheBase):
                 self._seen_tokens += offset
             if attn_state is not None:
                 if window_size is not None and input_length > window_size:
-                    attn_state = [state[:, -window_size:].contiguous() for state in attn_state]
+                    attn_state = _update_attn_state(cached_state=None, new_state=attn_state, window_size=window_size)
             state = dict(
                 recurrent_state=recurrent_state,
                 attn_state=attn_state,
@@ -285,38 +292,13 @@ class LegacyFLACache(HFCacheBase):
             if recurrent_state is not None:
                 state['recurrent_state'] = recurrent_state
             if attn_state is not None:
-                if state['attn_state'] is None:
-                    state['attn_state'] = [
-                        new_state[:, -window_size:].contiguous()
-                        if window_size is not None and new_state.shape[1] > window_size
-                        else new_state
-                        for new_state in attn_state
-                    ]
-                elif window_size is not None and input_length == 0:
-                    pass
-                # mirror FLALayer's window semantics so legacy caches handle oversized decoding chunks
-                elif window_size is not None and state['attn_state'][0].shape[1] >= window_size:
-                    updated_attn_state = []
-                    for old_state, new_state in zip(state['attn_state'], attn_state, strict=False):
-                        tail = new_state[:, -window_size:]
-                        if tail.shape[1] >= window_size:
-                            updated_attn_state.append(tail.contiguous())
-                        else:
-                            old_state = (
-                                old_state[:, -window_size:].contiguous() if old_state.shape[1] > window_size else old_state
-                            )
-                            old_state = old_state.roll(-input_length, 1)
-                            old_state[:, -tail.shape[1]:] = tail
-                            updated_attn_state.append(old_state)
-                    state['attn_state'] = updated_attn_state
-                else:
-                    updated_attn_state = []
-                    for old_state, new_state in zip(state['attn_state'], attn_state, strict=False):
-                        updated = torch.cat([old_state, new_state], 1)
-                        if window_size is not None and updated.shape[1] > window_size:
-                            updated = updated[:, -window_size:].contiguous()
-                        updated_attn_state.append(updated)
-                    state['attn_state'] = updated_attn_state
+                cached_attn_state = state['attn_state']
+                if cached_attn_state is None or window_size is None or input_length > 0:
+                    state['attn_state'] = list(_update_attn_state(
+                        cached_state=cached_attn_state,
+                        new_state=attn_state,
+                        window_size=window_size,
+                    ))
             if conv_state is not None:
                 state['conv_state'] = conv_state
             if ffn_state is not None:

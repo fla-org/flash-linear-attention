@@ -172,24 +172,37 @@ def test_cache_window_size_does_not_undercount():
 
 
 @pytest.mark.parametrize("cache_class", [FLACache, LegacyFLACache])
+@pytest.mark.parametrize('with_recurrent_state', [False, True])
 @pytest.mark.parametrize(
-    ["first_len", "second_len", "window_size"],
+    ("first_len", "second_len", "initial_window_size", "window_size"),
     [
-        pytest.param(4, 6, 4, id="full-window-oversized-update"),
-        pytest.param(2, 4, 4, id="partial-window-overflow"),
+        pytest.param(4, 6, 4, 4, id="full-window-oversized-update"),
+        pytest.param(2, 4, 4, 4, id="partial-window-overflow"),
+        pytest.param(7, 2, 4, 4, id="oversized-prefill"),
+        pytest.param(4, 1, 4, 4, id="single-token-update"),
+        pytest.param(4, 0, 4, 4, id="empty-window-update"),
+        pytest.param(0, 2, 4, 4, id="empty-prefill"),
+        pytest.param(1, 1, 4, 4, id="partial-window"),
+        pytest.param(2, 3, 1, 1, id="single-token-window"),
+        pytest.param(2, 3, None, None, id="unbounded"),
+        pytest.param(6, 1, None, 4, id="enable-window"),
+        pytest.param(6, 1, 8, 4, id="shrink-window"),
     ],
 )
-def test_cache_window_overflow_keeps_tail(cache_class, first_len: int, second_len: int, window_size: int):
+def test_cache_attention_update(cache_class, with_recurrent_state, first_len, second_len, initial_window_size, window_size):
     cache = cache_class()
+    recurrent_state = torch.ones(1, 2, 3, device=device_name) if with_recurrent_state else None
+    if with_recurrent_state:
+        cache.update(recurrent_state=recurrent_state, offset=0)
 
-    first_state = _make_attn_state(0, first_len)
-    second_state = _make_attn_state(first_len, second_len)
+    first_state = tuple(state.requires_grad_() for state in _make_attn_state(0, first_len))
+    second_state = tuple(state.requires_grad_() for state in _make_attn_state(first_len, second_len))
 
     cache.update(
         attn_state=first_state,
         layer_idx=0,
         offset=first_len,
-        cache_kwargs={"window_size": window_size},
+        cache_kwargs={"window_size": initial_window_size},
     )
     cache.update(
         attn_state=second_state,
@@ -198,11 +211,20 @@ def test_cache_window_overflow_keeps_tail(cache_class, first_len: int, second_le
         cache_kwargs={"window_size": window_size},
     )
 
-    expected_tokens = torch.arange(first_len + second_len - window_size, first_len + second_len)
+    total_length = first_len + second_len
+    start = 0 if window_size is None else max(0, total_length - window_size)
     state = cache[0]
-    assert state["attn_state"][0].shape[1] == window_size
-    _assert_attn_state_tokens(state["attn_state"], expected_tokens)
-    assert cache.get_seq_length(0) == first_len + second_len
+    assert state["attn_state"][0].shape[1] == total_length - start
+    _assert_attn_state_tokens(state["attn_state"], torch.arange(start, total_length))
+    assert cache.get_seq_length(0) == total_length
+    assert state["recurrent_state"] is recurrent_state
+
+    sum(tensor.sum() for tensor in state["attn_state"]).backward()
+    for tensors, offset, length in ((first_state, 0, first_len), (second_state, first_len, second_len)):
+        expected = (torch.arange(offset, offset + length, device=device_name) >= start).float().view(1, length, 1, 1)
+        for tensor in tensors:
+            actual = torch.zeros_like(tensor) if tensor.grad is None else tensor.grad
+            torch.testing.assert_close(actual, expected.expand_as(tensor), rtol=0, atol=0)
 
 
 def test_legacy_cache_window_overflow_without_hf_init():
