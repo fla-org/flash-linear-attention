@@ -13,16 +13,36 @@ from typing import TYPE_CHECKING
 
 import torch
 from torch import nn
+from transformers.configuration_utils import PretrainedConfig
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils.deprecation import deprecate_kwarg
 from typing_extensions import Unpack
 
+from fla.layers.attn import Attention
+from fla.models.configuration_utils import get_attention_spec
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
 from fla.modules.l2warp import l2_warp
 
 if TYPE_CHECKING:
     from fla.models.cache_utils import Cache
+
+
+def get_attention(config: PretrainedConfig, layer_idx: int) -> Attention | None:
+    """Create standard attention for a selected layer, or return None for a native mixer."""
+    attn_spec = get_attention_spec(config.attn, layer_idx=layer_idx)
+    if attn_spec is None:
+        return None
+    return Attention(
+        hidden_size=config.hidden_size,
+        num_heads=attn_spec['num_heads'],
+        num_kv_heads=attn_spec['num_kv_heads'],
+        qkv_bias=attn_spec['qkv_bias'],
+        window_size=attn_spec['window_size'],
+        rope_theta=attn_spec['rope_theta'],
+        max_position_embeddings=config.max_position_embeddings,
+        layer_idx=layer_idx,
+    )
 
 
 class FLAPreTrainedModel(PreTrainedModel):

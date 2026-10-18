@@ -20,8 +20,7 @@ from fla.layers.delta_net import DeltaNet
 from fla.models.cache_utils import Cache
 from fla.models.delta_net.configuration_delta_net import DeltaNetConfig
 from fla.models.generation_utils import FLAUnsupportedCacheGenerationMixin
-from fla.models.modeling_layers import get_attention
-from fla.models.modeling_utils import FLAForCausalLM, FLAPreTrainedModel
+from fla.models.modeling_utils import FLAForCausalLM, FLAPreTrainedModel, get_attention
 from fla.modules import GatedMLP as DeltaNetMLP
 from fla.modules import RMSNorm
 from fla.ops.attnres import fused_attnres

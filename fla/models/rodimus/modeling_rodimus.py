@@ -22,8 +22,7 @@ from fla.layers.rodimus import RodimusAttention, SlidingWindowSharedKeyAttention
 from fla.models.cache_utils import Cache
 from fla.models.configuration_utils import get_attention_spec
 from fla.models.generation_utils import FLAUnsupportedCacheGenerationMixin
-from fla.models.modeling_layers import get_attention
-from fla.models.modeling_utils import FLAForCausalLM, FLAPreTrainedModel
+from fla.models.modeling_utils import FLAForCausalLM, FLAPreTrainedModel, get_attention
 from fla.models.rodimus.configuration_rodimus import RodimusConfig
 from fla.modules import GatedMLP as RodimusMLP
 from fla.modules import RMSNorm
