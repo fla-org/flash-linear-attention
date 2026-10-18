@@ -35,9 +35,9 @@ jobs:
             tests/models/test_configuration.py \
             tests/models/test_hybrid_attention.py \
             tests/models/test_transformers.py \
-            tests/models/test_causal_lm_loss.py \
+            tests/models/test_modeling_utils.py \
             tests/models/test_cache.py \
-            tests/models/test_generation_utils.py \
+            tests/models/test_generation.py \
             tests/models/test_modeling_kda.py::test_initialization \
             tests/models/test_modeling_gated_deltanet.py::test_initialization \
             tests/test_split_package_release.py

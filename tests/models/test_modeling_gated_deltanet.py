@@ -15,16 +15,14 @@ from fla.layers.gated_deltanet import GatedDeltaNet
 from fla.models import GatedDeltaNetConfig, GatedDeltaNetForCausalLM
 from fla.utils import assert_close, device
 
-from .test_modeling_base import (
-    run_test_generate_matches_forward,
-    run_test_generation,
-    run_test_model_forward_backward,
+from .utils import (
+    check_forward,
+    check_generate,
+    check_generation,
 )
 
 
-# ===================================================================================
-# Test for Modeling (Forward/Backward Pass)
-# ===================================================================================
+@pytest.mark.parametrize('varlen', [False, True], ids=['dense', 'varlen'])
 @pytest.mark.parametrize(
     ['L', 'B', 'T', 'H', 'D', 'use_l2warp', 'attnres_block_size', 'dtype'],
     [
@@ -46,8 +44,9 @@ def test_modeling(
     use_l2warp: bool,
     attnres_block_size: int | None,
     dtype: torch.dtype,
+    varlen: bool,
 ):
-    run_test_model_forward_backward(
+    check_forward(
         L,
         B,
         T,
@@ -57,12 +56,10 @@ def test_modeling(
         use_l2warp=use_l2warp,
         attnres_block_size=attnres_block_size,
         dtype=dtype,
+        varlen=varlen,
     )
 
 
-# ===================================================================================
-# Test for Generation
-# ===================================================================================
 @pytest.mark.parametrize(
     ['L', 'B', 'T', 'H', 'D', 'dtype'],
     [
@@ -80,7 +77,7 @@ def test_generation(
     D: int,
     dtype: torch.dtype,
 ):
-    run_test_generation(L, B, T, H, D, GatedDeltaNetConfig, dtype)
+    check_generation(L, B, T, H, D, GatedDeltaNetConfig, dtype)
 
 
 @pytest.mark.parametrize(
@@ -100,7 +97,7 @@ def test_generate_prefill(
     D: int,
     dtype: torch.dtype,
 ):
-    run_test_generate_matches_forward(L, B, T, H, D, GatedDeltaNetConfig, dtype)
+    check_generate(L, B, T, H, D, GatedDeltaNetConfig, dtype)
 
 
 @torch.no_grad()
