@@ -189,7 +189,7 @@ def test_cache_window_size_does_not_undercount():
         pytest.param(6, 1, 8, 4, id="shrink-window"),
     ],
 )
-def test_cache_attn_update(cache_class, init_recurrent_state, prefill_length, update_length, initial_window_size, window_size):
+def test_update_attention_cache(cache_class, init_recurrent_state, prefill_length, update_length, initial_window_size, window_size):
     cache = cache_class()
     recurrent_state = torch.ones(1, 2, 3, device=device_name) if init_recurrent_state else None
     if init_recurrent_state:

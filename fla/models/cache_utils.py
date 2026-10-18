@@ -14,7 +14,7 @@ from transformers.cache_utils import Cache as HFCacheBase
 from transformers.cache_utils import CacheLayerMixin
 
 
-def _update_attn_state(
+def update_attention_cache(
     cached_state: tuple[torch.Tensor, ...] | list[torch.Tensor],
     new_state: tuple[torch.Tensor, ...] | list[torch.Tensor],
     window_size: int | None,
@@ -94,7 +94,7 @@ class FLALayer(CacheLayerMixin):
                     attn_state = tuple(state[:, -window_size:].contiguous() for state in attn_state)
                 self.state["attn_state"] = tuple(attn_state)
             elif window_size is None or input_length > 0:
-                updated_attn_state = _update_attn_state(
+                updated_attn_state = update_attention_cache(
                     cached_state=cached_attn_state,
                     new_state=attn_state,
                     window_size=window_size,
@@ -299,7 +299,7 @@ class LegacyFLACache(HFCacheBase):
                         for new_state in attn_state
                     ]
                 elif window_size is None or input_length > 0:
-                    state['attn_state'] = _update_attn_state(
+                    state['attn_state'] = update_attention_cache(
                         cached_state=cached_attn_state,
                         new_state=attn_state,
                         window_size=window_size,
