@@ -5,7 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""CUDA-based mixed-mode implementation for causal convolution."""
+"""CUDA and mixed Triton/CUDA implementations of causal convolution."""
 
 import torch
 from einops import rearrange
@@ -55,7 +55,7 @@ class FastCausalConv1dFn(torch.autograd.Function):
 
         bias = bias.contiguous() if bias is not None else None
         if cu_seqlens is not None and seq_idx is None:
-            seq_idx = prepare_sequence_ids(cu_seqlens, cu_seqlens_cpu=cu_seqlens_cpu).to(torch.int32).unsqueeze(0)
+            seq_idx = prepare_sequence_ids(cu_seqlens=cu_seqlens, cu_seqlens_cpu=cu_seqlens_cpu).to(torch.int32).unsqueeze(0)
         seq_idx = seq_idx.contiguous() if seq_idx is not None else None
 
         # import here to avoid circular dependency.
@@ -77,7 +77,7 @@ class FastCausalConv1dFn(torch.autograd.Function):
 
         ctx.save_for_backward(x, weight, bias, seq_idx, initial_states)
         ctx.return_final_states = output_final_state
-        ctx.return_dinitial_states = (initial_states is not None and initial_states.requires_grad)
+        ctx.return_dinitial_states = initial_states is not None and initial_states.requires_grad
         return out, None
 
     @staticmethod
@@ -93,16 +93,16 @@ class FastCausalConv1dFn(torch.autograd.Function):
         if dout.stride(2) != 1 and dout.stride(1) != 1:
             dout = dout.contiguous()
         dx, dweight, dbias, dinitial_states = causal_conv1d_bwd_function(
-            x,
-            weight,
-            bias,
-            dout,
-            seq_idx,
-            initial_states,
-            dfinal_states,
-            dx,
-            ctx.return_dinitial_states,
-            ctx.activation,
+            x=x,
+            weight=weight,
+            bias=bias,
+            dout=dout,
+            seq_idx=seq_idx,
+            initial_states=initial_states,
+            dfinal_states=dfinal_states,
+            dx=dx,
+            return_dinitial_states=ctx.return_dinitial_states,
+            silu_activation=ctx.activation,
         )
         dx = rearrange(dx, 'b d t -> b t d')
         return (dx, dweight, dbias if bias is not None else None, None, None, None, None, None, None, None, None)
@@ -188,16 +188,16 @@ def causal_conv1d_cuda(
         x = x.contiguous()
     x_conv1d = rearrange(x, 'b t d -> b d t')
     if cu_seqlens is not None and seq_idx is None:
-        seq_idx = prepare_sequence_ids(cu_seqlens, cu_seqlens_cpu=cu_seqlens_cpu).to(torch.int32).unsqueeze(0)
+        seq_idx = prepare_sequence_ids(cu_seqlens=cu_seqlens, cu_seqlens_cpu=cu_seqlens_cpu).to(torch.int32).unsqueeze(0)
 
     y = causal_conv1d_fn_cuda(
         x=x_conv1d,
         weight=weight,
         bias=bias,
-        activation=activation,
         seq_idx=seq_idx,
         initial_states=None,
         return_final_states=False,
+        activation=activation,
     )
 
     y = rearrange(y, 'b d t -> b t d')
