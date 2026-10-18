@@ -14,7 +14,7 @@ from fla.ops.cp import build_cp_context
 from fla.ops.gated_delta_product import chunk_gated_delta_product
 from fla.ops.gated_delta_product.naive import naive_recurrent_gated_delta_product
 from fla.utils import assert_close, device
-from tests.cp.utils import gather_global, run_distributed
+from tests.cp.utils import gather_global, run_distributed, shard_tensor
 
 pytestmark = pytest.mark.skipif(device != "cuda", reason="requires CUDA or ROCm GPUs")
 
@@ -100,18 +100,12 @@ def _test_chunk(
 
     dist.barrier()
     cp_context = build_cp_context(cu_seqlens_global, group=dist.group.WORLD)
-    local_T = T // world_size
-    start = rank * local_T
-    end = start + local_T
-    start_dp, end_dp = start * num_householder, end * num_householder
-
-    # Get local slices
-    q_local = q_global[:, start:end].detach().clone().requires_grad_(True)
-    k_local = k_global[:, start_dp:end_dp].detach().clone().requires_grad_(True)
-    v_local = v_global[:, start_dp:end_dp].detach().clone().requires_grad_(True)
-    beta_local = beta_global[:, start_dp:end_dp].detach().clone().requires_grad_(True)
-    g_local = g_global[:, start:end].detach().clone().requires_grad_(True)
-    do_local = do_global[:, start:end].clone()
+    q_local = shard_tensor(q_global, rank=rank, world_size=world_size).detach().clone().requires_grad_(True)
+    k_local = shard_tensor(k_global, rank=rank, world_size=world_size).detach().clone().requires_grad_(True)
+    v_local = shard_tensor(v_global, rank=rank, world_size=world_size).detach().clone().requires_grad_(True)
+    beta_local = shard_tensor(beta_global, rank=rank, world_size=world_size).detach().clone().requires_grad_(True)
+    g_local = shard_tensor(g_global, rank=rank, world_size=world_size).detach().clone().requires_grad_(True)
+    do_local = shard_tensor(do_global, rank=rank, world_size=world_size).clone()
 
     dist.barrier()
 

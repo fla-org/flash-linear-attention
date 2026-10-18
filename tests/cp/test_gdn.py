@@ -16,7 +16,7 @@ import torch.nn.functional as F
 from fla.ops.cp import build_cp_context
 from fla.ops.gated_delta_rule import chunk_gated_delta_rule
 from fla.utils import assert_close, device
-from tests.cp.utils import gather_global, run_distributed
+from tests.cp.utils import gather_global, run_distributed, shard_tensor
 
 pytestmark = pytest.mark.skipif(device != "cuda", reason="requires CUDA or ROCm GPUs")
 
@@ -24,7 +24,6 @@ pytestmark = pytest.mark.skipif(device != "cuda", reason="requires CUDA or ROCm 
 def _test_chunk(
     rank: int,
     world_size: int,
-    T: int,
     H: int,
     D: int,
     lengths: list[int],
@@ -32,8 +31,8 @@ def _test_chunk(
     state_v_first: bool = False,
     Hq: int | None = None,
 ):
+    T = sum(lengths)
     assert T % world_size == 0, f"T={T} must be divisible by world_size={world_size}"
-    assert sum(lengths) == T, f"Sum of lengths {sum(lengths)} must equal T={T}"
 
     B = 1
     Hq_actual = Hq if Hq is not None else H
@@ -98,17 +97,12 @@ def _test_chunk(
 
     context = build_cp_context(cu_seqlens_global, group=dist.group.WORLD)
 
-    chunk_size = T // world_size
-    start_idx = rank * chunk_size
-    end_idx = (rank + 1) * chunk_size
-
-    # Get local slices - note: g is [B, T, H], beta is [B, T, H]
-    q_local = q_global[:, start_idx:end_idx, :].clone().detach().requires_grad_(True)
-    k_local = k_global[:, start_idx:end_idx, :].clone().detach().requires_grad_(True)
-    v_local = v_global[:, start_idx:end_idx, :].clone().detach().requires_grad_(True)
-    g_local = g_global[:, start_idx:end_idx].clone().detach().requires_grad_(True)
-    beta_local = beta_global[:, start_idx:end_idx].clone().detach().requires_grad_(True)
-    do_local = do_global[:, start_idx:end_idx, :].clone()
+    q_local = shard_tensor(q_global, rank=rank, world_size=world_size).clone().detach().requires_grad_(True)
+    k_local = shard_tensor(k_global, rank=rank, world_size=world_size).clone().detach().requires_grad_(True)
+    v_local = shard_tensor(v_global, rank=rank, world_size=world_size).clone().detach().requires_grad_(True)
+    g_local = shard_tensor(g_global, rank=rank, world_size=world_size).clone().detach().requires_grad_(True)
+    beta_local = shard_tensor(beta_global, rank=rank, world_size=world_size).clone().detach().requires_grad_(True)
+    do_local = shard_tensor(do_global, rank=rank, world_size=world_size).clone()
 
     dist.barrier()
 
@@ -141,28 +135,28 @@ def _test_chunk(
 
 
 @pytest.mark.parametrize(
-    ('world_size', 'T', 'H', 'D', 'lengths', 'options'),
+    ('world_size', 'lengths', 'H', 'D', 'Hq', 'state_v_first'),
     [
-        pytest.param(2, 10240, 4, 64, [3000, 4000, 3240], {}, id='CP2_SequenceCut'),
-        pytest.param(2, 10240, 4, 128, [5120, 5120], {}, id='CP2_BoundaryAligned'),
-        pytest.param(4, 10240, 4, 128, [7000, 3240], {}, id='CP4_Complex'),
-        pytest.param(4, 10240, 4, 128, [10240], {}, id='CP4_SingleSequence'),
-        pytest.param(8, 65536, 4, 128, [65536], {}, id='CP8_SingleSequence'),
-        pytest.param(2, 10240, 4, 128, [1000, 1500, 2000, 2500, 1240, 1000, 1000], {}, id='CP2_ManyShortSequences'),
-        pytest.param(2, 10240, 4, 64, [3000, 4000, 3240], dict(Hq=2), id='CP2_GQA_SequenceCut'),
-        pytest.param(2, 10240, 8, 64, [10240], dict(Hq=2), id='CP2_GQA_SingleSequence'),
-        pytest.param(2, 10240, 4, 128, [3000, 4000, 3240], dict(state_v_first=True), id='CP2_TransposeState'),
-        pytest.param(4, 10240, 4, 128, [10240], dict(state_v_first=True), id='CP4_TransposeState'),
+        pytest.param(2, [3000, 4000, 3240], 4, 64, 4, False, id='CP2_SequenceCut'),
+        pytest.param(2, [5120, 5120], 4, 128, 4, False, id='CP2_BoundaryAligned'),
+        pytest.param(4, [7000, 3240], 4, 128, 4, False, id='CP4_Complex'),
+        pytest.param(4, [10240], 4, 128, 4, False, id='CP4_SingleSequence'),
+        pytest.param(8, [65536], 4, 128, 4, False, id='CP8_SingleSequence'),
+        pytest.param(2, [1000, 1500, 2000, 2500, 1240, 1000, 1000], 4, 128, 4, False, id='CP2_ManyShortSequences'),
+        pytest.param(2, [3000, 4000, 3240], 4, 64, 2, False, id='CP2_GQA_SequenceCut'),
+        pytest.param(2, [10240], 8, 64, 2, False, id='CP2_GQA_SingleSequence'),
+        pytest.param(2, [3000, 4000, 3240], 4, 128, 4, True, id='CP2_TransposeState'),
+        pytest.param(4, [10240], 4, 128, 4, True, id='CP4_TransposeState'),
     ],
 )
-def test_chunk(world_size, T, H, D, lengths, options):
+def test_chunk(world_size, lengths, H, D, Hq, state_v_first):
     run_distributed(
         worker=_test_chunk,
         world_size=world_size,
-        T=T,
+        lengths=lengths,
         H=H,
         D=D,
-        lengths=lengths,
+        Hq=Hq,
+        state_v_first=state_v_first,
         dtype=torch.bfloat16,
-        **options,
     )

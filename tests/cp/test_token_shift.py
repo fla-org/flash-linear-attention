@@ -16,7 +16,7 @@ from fla.modules.token_shift import token_shift_ref
 from fla.modules.token_shift_cp import token_shift_cp
 from fla.ops.cp import build_cp_context
 from fla.utils import assert_close, device
-from tests.cp.utils import gather_global, run_distributed
+from tests.cp.utils import gather_global, run_distributed, shard_tensor
 
 pytestmark = pytest.mark.skipif(device != "cuda", reason="requires CUDA or ROCm GPUs")
 
@@ -24,13 +24,12 @@ pytestmark = pytest.mark.skipif(device != "cuda", reason="requires CUDA or ROCm 
 def _test_token_shift(
     rank: int,
     world_size: int,
-    T: int,
     D: int,
     lengths: list[int],
     dtype,
 ):
+    T = sum(lengths)
     assert T % world_size == 0, f"T={T} must be divisible by world_size={world_size}"
-    assert sum(lengths) == T, f"Sum of lengths {sum(lengths)} must equal T={T}"
 
     torch.manual_seed(42)
     B = 1
@@ -54,12 +53,8 @@ def _test_token_shift(
 
     context = build_cp_context(cu_seqlens_global, group=dist.group.WORLD)
 
-    chunk_size = T // world_size
-    start_idx = rank * chunk_size
-    end_idx = (rank + 1) * chunk_size
-
-    x_local = x_global[:, start_idx:end_idx, :].clone().detach().requires_grad_(True)
-    dy_local = dy_global[:, start_idx:end_idx, :].clone()
+    x_local = shard_tensor(x_global, rank=rank, world_size=world_size).clone().detach().requires_grad_(True)
+    dy_local = shard_tensor(dy_global, rank=rank, world_size=world_size).clone()
 
     dist.barrier()
 
@@ -95,7 +90,6 @@ def test_token_shift(world_size, lengths):
     run_distributed(
         worker=_test_token_shift,
         world_size=world_size,
-        T=1024,
         D=128,
         lengths=lengths,
         dtype=torch.float32,

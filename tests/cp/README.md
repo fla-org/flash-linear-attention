@@ -7,7 +7,7 @@ FLA_CI_ENV=0 pytest tests/cp -q
 FLA_CI_ENV=0 pytest tests/cp/test_kda.py -k CP2 -q
 ```
 
-Each component keeps its inputs, reference, CP call, and assertions in one test file. DPLR and its RWKV7 wrapper share a parameter matrix. Only distributed setup and result gathering are shared across operators.
+Each component keeps its inputs, reference, CP call, and assertions in one test file. DPLR and its RWKV7 wrapper share a parameter matrix. Distributed setup, token sharding, and result gathering are shared across operators.
 
 Multi-rank tests compare sharded outputs and gradients against full-sequence references. Context metadata, backward state-kernel, intra-card cache, and single-rank graph tests cover separate CP infrastructure; they do not establish cross-rank numerical correctness. Ordinary operator tests retain backend-verifier cases that only check whether a CP argument is supported.
 

@@ -17,7 +17,7 @@ from fla.modules.causal_conv1d import causal_conv1d
 from fla.modules.causal_conv1d.backends.cuda import ops
 from fla.ops.cp import FLACPContext, build_cp_context
 from fla.utils import IS_NVIDIA, assert_close, device, device_torch_lib
-from tests.cp.utils import run_distributed
+from tests.cp.utils import gather_global, run_distributed, shard_tensor
 
 
 def _test_causal_conv1d(
@@ -76,17 +76,9 @@ def _test_causal_conv1d(
         cu_seqlens_cpu=cu_seqlens_cpu,
         layout=layout,
     )
-    part_len = T // (2 * world_size) if layout == 'zigzag' else T // world_size
-
-    def slice_local(tensor: torch.Tensor) -> torch.Tensor:
-        front = tensor[:, rank * part_len:(rank + 1) * part_len]
-        if layout == 'contiguous':
-            return front
-        back_start = (2 * world_size - 1 - rank) * part_len
-        return torch.cat((front, tensor[:, back_start:back_start + part_len]), dim=1)
 
     def local_input(tensor: torch.Tensor) -> torch.Tensor:
-        local = slice_local(tensor).clone()
+        local = shard_tensor(tensor, rank=rank, world_size=world_size, layout=layout).clone()
         if non_contiguous:
             local = torch.stack((local, torch.zeros_like(local)), dim=-1)[..., 0]
         return local.requires_grad_()
@@ -95,7 +87,7 @@ def _test_causal_conv1d(
     weight_local = weight.clone().requires_grad_()
     bias_local = bias.clone().requires_grad_() if bias is not None else None
     residual_local = local_input(residual) if residual is not None else None
-    dy_local = slice_local(dy).clone()
+    dy_local = shard_tensor(dy, rank=rank, world_size=world_size, layout=layout).clone()
     if non_contiguous:
         dy_local = torch.stack((dy_local, torch.zeros_like(dy_local)), dim=-1)[..., 0]
     y, final_state = causal_conv1d(
@@ -120,13 +112,7 @@ def _test_causal_conv1d(
             value = value.float().contiguous()
             dist.all_reduce(value, op=dist.ReduceOp.SUM)
         else:
-            gathered = [torch.empty_like(value, memory_format=torch.contiguous_format) for _ in range(world_size)]
-            dist.all_gather(gathered, value.contiguous())
-            if layout == 'zigzag':
-                gathered = [part[:, :part_len] for part in gathered] + [
-                    part[:, part_len:] for part in reversed(gathered)
-                ]
-            value = torch.cat(gathered, dim=1)
+            value = gather_global(value, world_size=world_size, layout=layout)
         results[name] = value
 
     if rank == 0:

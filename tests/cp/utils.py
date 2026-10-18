@@ -19,7 +19,20 @@ import torch.multiprocessing as mp
 from fla.utils import device_platform, device_torch_lib
 
 
+def shard_tensor(tensor, rank, world_size, layout='contiguous'):
+    """Select one rank's tokens without changing their dtype or gradient ownership."""
+    parts = world_size * (2 if layout == 'zigzag' else 1)
+    assert tensor.shape[1] % parts == 0
+    part_len = tensor.shape[1] // parts
+    front = tensor[:, rank * part_len:(rank + 1) * part_len]
+    if layout == 'contiguous':
+        return front
+    back_start = (parts - 1 - rank) * part_len
+    return torch.cat((front, tensor[:, back_start:back_start + part_len]), dim=1)
+
+
 def gather_global(tensor, world_size, layout='contiguous'):
+    tensor = tensor.contiguous()
     gathered = [torch.empty_like(tensor) for _ in range(world_size)]
     dist.all_gather(gathered, tensor)
     if layout == 'zigzag':
