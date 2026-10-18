@@ -95,7 +95,6 @@ def run_cp_gdp_test_worker(
                 num_householder=num_householder,
             )
             outputs.append(o_ref_i)
-        # The recurrent reference accepts scale but does not apply it.
         o_ref = torch.cat(outputs, dim=1) * scale
         o_ref.backward(do_global)
         ref = {
