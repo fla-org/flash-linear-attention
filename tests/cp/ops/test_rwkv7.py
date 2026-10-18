@@ -9,17 +9,16 @@
 Context Parallel test for the chunk_rwkv7 wrapper.
 
 chunk_rwkv7 is a thin alias over chunk_dplr_delta_rule (r=q, w=gk). Reusing the
-test_cp_dplr harness, this swaps in the wrapper as the kernel under test so that
+DPLR worker, this swaps in the wrapper as the kernel under test so that
 cp_context is exercised end-to-end through the wrapper's kwarg passthrough.
 """
 
 import pytest
 import torch
 
-# tests/context_parallel is on sys.path under pytest (see pyproject pythonpath)
-from test_cp_dplr import run_cp_test_with_spawn
-
 from fla.ops.rwkv7 import chunk_rwkv7
+from tests.cp.ops.dplr import run_cp_dplr_test_worker
+from tests.cp.utils import run_distributed
 
 
 def _chunk_rwkv7(q, k, v, a, b, gk, scale=None, **kwargs):
@@ -32,7 +31,9 @@ def test_cp2_wrapper_sequence_cut():
     """CP2 via chunk_rwkv7: sequences cut across the rank boundary."""
     if torch.cuda.device_count() < 2:
         pytest.skip("At least 2 GPUs required")
-    run_cp_test_with_spawn(
+    run_distributed(
+        worker=run_cp_dplr_test_worker,
+        dtype=torch.bfloat16,
         world_size=2,
         test_name="CP2_Wrapper_SequenceCut",
         T=1024, H=4, D=64,
@@ -45,7 +46,9 @@ def test_cp4_wrapper_single_sequence():
     """CP4 via chunk_rwkv7: single long sequence spanning all ranks."""
     if torch.cuda.device_count() < 4:
         pytest.skip("At least 4 GPUs required")
-    run_cp_test_with_spawn(
+    run_distributed(
+        worker=run_cp_dplr_test_worker,
+        dtype=torch.bfloat16,
         world_size=4,
         test_name="CP4_Wrapper_SingleSequence",
         T=1024, H=4, D=64,

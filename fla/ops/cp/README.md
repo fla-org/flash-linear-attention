@@ -385,10 +385,10 @@ In CP mode, only the first sequence in the local batch can be a continuation fro
 
 ## Test References
 
-- [`tests/context_parallel/test_cp_conv.py`](../../../tests/context_parallel/test_cp_conv.py)
-- [`tests/context_parallel/test_cp_gdp.py`](../../../tests/context_parallel/test_cp_gdp.py)
-- [`tests/context_parallel/test_cp_kda.py`](../../../tests/context_parallel/test_cp_kda.py)
-- [`tests/context_parallel/test_cp_gdn2.py`](../../../tests/context_parallel/test_cp_gdn2.py)
+- [`tests/cp/modules/test_conv.py`](../../../tests/cp/modules/test_conv.py)
+- [`tests/cp/ops/test_gdp.py`](../../../tests/cp/ops/test_gdp.py)
+- [`tests/cp/ops/test_kda.py`](../../../tests/cp/ops/test_kda.py)
+- [`tests/cp/ops/test_gdn2.py`](../../../tests/cp/ops/test_gdn2.py)
 
 ## Discussion
 

@@ -156,7 +156,8 @@ def _guarded_new_empty(self, *args, **kwargs):
 def poison_torch_memory(request):
     # Only apply the guard to ops and modules tests
     path = str(request.node.fspath)
-    if 'tests/ops/' not in path and 'tests/modules/' not in path:
+    cp_poisoned = any(path.endswith(f'tests/cp/ops/{name}') for name in ('test_intracard_cache.py', 'test_kda_graph.py'))
+    if 'tests/ops/' not in path and 'tests/modules/' not in path and not cp_poisoned:
         yield
         return
 
