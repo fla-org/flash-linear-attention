@@ -23,8 +23,8 @@ from fla.modules.activations import (
     swiglu_linear,
     swish,
 )
-from fla.modules.activations.ops import _ensure_inner_contiguous, _is_inner_contiguous
-from fla.utils import IS_NPU, assert_close, device
+from fla.modules.activations.ops import flatten_input, get_row_stride
+from fla.utils import assert_close, device
 
 
 def powglu_ref(x: torch.Tensor, y: torch.Tensor, power: float = 3.0) -> torch.Tensor:
@@ -49,18 +49,13 @@ def make_inputs(shape: tuple[int, ...], n: int, noncontiguous: bool) -> tuple[to
 def make_singleton_input(shape: tuple[int, ...], strides: tuple[int, ...], dtype: torch.dtype) -> torch.Tensor:
     x = torch.randn(size=shape, device=device, dtype=dtype).as_strided(size=shape, stride=strides)
     assert x.is_contiguous() and x.contiguous() is x
-    # fail before kernel dispatch if normalization would leave an unsafe row stride
-    assert _is_inner_contiguous(x=_ensure_inner_contiguous(x=x))
-    if IS_NPU:
-        from fla.modules.activations import triton_ascend
-
-        assert _is_inner_contiguous(x=triton_ascend._ensure_inner_contiguous(x=x))
     return x
 
 
-def test_elu_p1():
+@pytest.mark.parametrize('shape', [(), (1,), (0,), (2, 0)])
+def test_elu_p1(shape: tuple[int, ...]):
     # bf16 rounds ELU(-8) to -1, so adding 1 loses the positive feature
-    x = torch.tensor([-8.], device=device, dtype=torch.bfloat16, requires_grad=True)
+    x = torch.full(size=shape, fill_value=-8., device=device, dtype=torch.bfloat16, requires_grad=True)
     y = elu_p1(x)
     dx, = torch.autograd.grad(y.sum(), x)
     expected = x.detach().float().exp().to(x.dtype)
@@ -457,6 +452,73 @@ def test_powglu_linear(B: int, T: int, D: int, O: int, power: float, noncontiguo
     assert_close('powglu_linear db ', db_ref, db_tri, 1e-3)
 
 
+@pytest.mark.parametrize('compile', [False, True], ids=['eager', 'compile'])
+@pytest.mark.parametrize('linear', [False, True], ids=['activation', 'linear'])
+def test_powglu_singleton_strides(compile: bool, linear: bool):
+    torch.manual_seed(42)
+    shape, strides = (3, 1, 128), (128, 1536, 1)
+    inputs = tuple(make_singleton_input(shape=shape, strides=strides, dtype=torch.float32).requires_grad_() for _ in range(2))
+    if linear:
+        inputs += (torch.randn(64, 128, device=device, requires_grad=True), torch.randn(64, device=device, requires_grad=True))
+    ref_inputs = tuple(x.detach().requires_grad_() for x in inputs)
+    ref = powglu_ref(*ref_inputs[:2])
+    if linear:
+        ref = F.linear(input=ref, weight=ref_inputs[2], bias=ref_inputs[3])
+    fn = powglu_linear if linear else powglu
+    if compile:
+        torch.compiler.reset()
+    tri = torch.compile(fn)(*inputs) if compile else fn(*inputs)
+    g = make_singleton_input(shape=ref.shape, strides=(ref.shape[-1], 1536, 1), dtype=torch.float32)
+    ref_grads = torch.autograd.grad(outputs=ref, inputs=ref_inputs, grad_outputs=g)
+    tri_grads = torch.autograd.grad(outputs=tri, inputs=inputs, grad_outputs=g)
+
+    assert tri.shape == ref.shape
+    assert torch.isfinite(tri).all()
+    assert_close('singleton-stride output', ref, tri, 1e-3)
+    for i, (ref_grad, tri_grad) in enumerate(zip(ref_grads, tri_grads)):
+        assert tri_grad.shape == inputs[i].shape
+        assert torch.isfinite(tri_grad).all()
+        assert_close(f'singleton-stride gradient {i}', ref_grad, tri_grad, 1e-3)
+
+
+@pytest.mark.parametrize(
+    ('shape', 'strides', 'needs_copy'),
+    [
+        pytest.param((), (), False, id='scalar'),
+        pytest.param((10,), (1,), False, id='vector'),
+        pytest.param((10, 20), (20, 1), False, id='dense-2d'),
+        pytest.param((5, 10, 20), (200, 20, 1), False, id='dense-3d'),
+        pytest.param((3, 5, 10, 20), (1000, 200, 20, 1), False, id='dense-4d'),
+        pytest.param((2, 3, 5, 10, 20), (3000, 1000, 200, 20, 1), False, id='dense-5d'),
+        pytest.param((3, 1, 128), (128, 1536, 1), False, id='singleton-3d'),
+        pytest.param((2, 1, 1, 63), (63, 999, 756, 1), False, id='singleton-4d'),
+        pytest.param((2, 1, 3, 1, 63), (189, 777, 63, 756, 1), False, id='singleton-5d'),
+        pytest.param((3, 1, 1), (1, 12, 7), False, id='singleton-feature'),
+        pytest.param((1, 1, 128), (999, 756, 1), False, id='single-row'),
+        pytest.param((3, 1), (1, 7), False, id='singleton-2d'),
+        pytest.param((1,), (7,), False, id='singleton-vector'),
+        pytest.param((5, 10, 20), (400, 40, 1), False, id='chunked-3d'),
+        pytest.param((3, 5, 10, 20), (2000, 400, 40, 1), False, id='chunked-4d'),
+        pytest.param((3, 1, 128), (256, 1536, 1), False, id='chunked-singleton'),
+        pytest.param((3, 4, 5), (20, 1, 4), True, id='transposed'),
+        pytest.param((3, 10, 20), (400, 20, 1), True, id='outer-strided'),
+        pytest.param((10, 10), (20, 2), True, id='strided-columns'),
+        pytest.param((10,), (3,), True, id='strided-vector'),
+        pytest.param((0, 3), (3, 1), False, id='empty-rows'),
+        pytest.param((2, 0), (1, 1), False, id='empty-columns'),
+    ],
+)
+def test_flatten_input(shape: tuple[int, ...], strides: tuple[int, ...], needs_copy: bool):
+    torch.manual_seed(42)
+    x = torch.empty_strided(size=shape, stride=strides).copy_(torch.randn(size=shape))
+    flat = flatten_input(x=x)
+    assert flat.ndim == 2
+    assert flat.shape[-1] == (shape[-1] if shape else 1)
+    assert (flat.data_ptr() != x.data_ptr()) == needs_copy
+    addressed = flat.as_strided(size=flat.shape, stride=(get_row_stride(x=flat), 1))
+    torch.testing.assert_close(addressed.view(shape), x, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize(
     ('fn', 'reference', 'n'),
     [
@@ -500,66 +562,10 @@ def test_activation_singleton_strides(
     ref_grads = torch.autograd.grad(outputs=ref, inputs=ref_inputs, grad_outputs=g.float())
     tri_grads = torch.autograd.grad(outputs=tri, inputs=inputs, grad_outputs=g)
 
+    assert tri.shape == shape
     assert torch.isfinite(tri).all()
     assert_close('singleton-stride output', ref.to(dtype), tri, 1e-3)
     for i, (ref_grad, tri_grad) in enumerate(zip(ref_grads, tri_grads)):
+        assert tri_grad.shape == shape
         assert torch.isfinite(tri_grad).all()
         assert_close(f'singleton-stride gradient {i}', ref_grad.to(dtype), tri_grad, 1e-3)
-
-
-def test_ensure_inner_contiguous():
-    x = torch.arange(384).as_strided(size=(3, 1, 128), stride=(128, 1536, 1))
-    assert x.is_contiguous() and x.contiguous() is x
-    assert not _is_inner_contiguous(x=x)
-    dense = _ensure_inner_contiguous(x=x)
-    assert dense.stride() == (128, 128, 1)
-    torch.testing.assert_close(dense, x)
-
-    chunk = torch.arange(2000).reshape(5, 10, 40).chunk(2, dim=-1)[0]
-    assert _ensure_inner_contiguous(x=chunk) is chunk
-
-
-def test_is_inner_contiguous():
-    """Test _is_inner_contiguous correctly classifies tensor layouts."""
-    assert _is_inner_contiguous(torch.randn(())) is True
-    assert _is_inner_contiguous(torch.randn(10)) is True
-    assert _is_inner_contiguous(torch.randn(30)[::3]) is False
-
-    x2d = torch.randn(10, 20)
-    assert _is_inner_contiguous(x2d) is True
-
-    x2d_transposed = x2d.t()
-    assert _is_inner_contiguous(x2d_transposed) is False
-
-    x2d_strided = x2d[:, ::2]  # shape (10, 10), stride (20, 2)
-    assert _is_inner_contiguous(x2d_strided) is False
-
-    x3d = torch.randn(5, 10, 20)
-    assert _is_inner_contiguous(x3d) is True
-
-    data3d = torch.randn(5, 10, 40)
-    x3d_chunk, _ = data3d.chunk(2, dim=-1)  # shape (5, 10, 20), stride (400, 40, 1)
-    assert _is_inner_contiguous(x3d_chunk) is True
-
-    x3d_transposed = x3d.transpose(-1, -2)
-    assert _is_inner_contiguous(x3d_transposed) is False
-
-    x4d = torch.randn(3, 5, 10, 20)
-    assert _is_inner_contiguous(x4d) is True
-
-    data4d = torch.randn(3, 5, 10, 40)
-    x4d_chunk, _ = data4d.chunk(2, dim=-1)  # shape (3, 5, 10, 20)
-    assert _is_inner_contiguous(x4d_chunk) is True
-
-    x5d = torch.randn(2, 3, 5, 10, 20)
-    assert _is_inner_contiguous(x5d) is True
-
-    # outer dim strided - NOT inner-contiguous because 2D view offset is wrong
-    x3d_outer_nc = x3d[::2]  # shape (3, 10, 20), stride (400, 20, 1)
-    assert _is_inner_contiguous(x3d_outer_nc) is False
-
-    x_btd = torch.randn(2, 500, 128)
-    assert _is_inner_contiguous(x_btd) is True
-
-    x_bhtd = torch.randn(2, 8, 500, 128)
-    assert _is_inner_contiguous(x_bhtd) is True
