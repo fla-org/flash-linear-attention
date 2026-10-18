@@ -12,7 +12,21 @@ For streams `x[..., N, D]`, routing weights `pre[..., N]` and `post[..., N]`, br
 
 Leading dimensions must match exactly; there is no broadcasting. Tokens are independent, so both dense batches and flattened packed sequences use the same entry points without sequence metadata. Empty leading dimensions are supported. Optimized paths initially target NVIDIA CUDA, 1–8 streams, and FP32/FP16/BF16 inputs; streams and routing weights may have different dtypes. Hidden dimensions need not be powers of two. Noncontiguous inputs are normalized by the entry point. The output of pre/post has the streams' dtype; Sinkhorn returns FP32. All tensor inputs support first-order gradients; optimized double backward is outside this contract.
 
-The naive PyTorch implementation additionally supports CPU and FP64 for gradient checks. Products, reductions, and Sinkhorn normalization use FP32, or FP64 in the double-precision reference. The optimized implementation does not use TF32. Triton is the default backend; Gluon and TileLang are optional, explicitly enabled alternatives. Backward retains the backend selected by forward.
+The naive PyTorch implementation additionally supports CPU and FP64 for gradient checks. Products, reductions, and Sinkhorn normalization use FP32, or FP64 in the double-precision reference. The optimized implementation does not use TF32. Triton is the default backend; Gluon and TileLang are optional, explicitly enabled alternatives. Enable optional backends with `FLA_HYPER_CONNECTIONS_GLUON=1` or `FLA_HYPER_CONNECTIONS_TILELANG=1` (or the corresponding global `FLA_GLUON` / `FLA_TILELANG` switch). Gluon takes precedence when both are enabled. Missing optional dependencies fall back to Triton. Backward retains the backend selected by forward.
+
+## Usage
+
+```python
+from fla.ops.hyper_connections import hyper_connection_pre, hyper_connection_post, sinkhorn
+
+hidden = hyper_connection_pre(streams, pre)
+branch = layer(hidden)
+streams = hyper_connection_post(streams, branch, post)
+```
+
+For mHC, pass `mixing=sinkhorn(mixing_logits)` to the write operation. `pre` and `post` are the activated routing weights, not their logits. The caller may repeat these operations across layers; gradients propagate through the streams and routing weights.
+
+The `naive_hyper_connection_pre`, `naive_hyper_connection_post`, and `naive_sinkhorn` exports provide eager PyTorch references and can be wrapped with `torch.compile(..., fullgraph=True)`.
 
 ## Validation and performance
 

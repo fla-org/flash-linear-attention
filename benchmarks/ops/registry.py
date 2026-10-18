@@ -625,6 +625,52 @@ register_op(OpConfig(
     category='naive_attnres',
 ))
 
+_hyper_connection_shapes = {
+    'T1_N4_D128': {'B': 1, 'T': 1, 'H': 4, 'D': 128},
+    'T63_N4_D1024': {'B': 1, 'T': 63, 'H': 4, 'D': 1024},
+    'T2048_N4_D4096': {'B': 1, 'T': 2048, 'H': 4, 'D': 4096},
+    'B2_T1024_N4_D4096': {'B': 2, 'T': 1024, 'H': 4, 'D': 4096},
+    'T8192_N4_D4096': {'B': 1, 'T': 8192, 'H': 4, 'D': 4096},
+    'T2048_N8_D1025': {'B': 1, 'T': 2048, 'H': 8, 'D': 1025},
+}
+
+
+def _shape_hyper_connection_mixing(B, T, H, D, **kw):
+    return (B, T, H, H)
+
+
+for _kind in ('pre', 'ihc', 'mhc', 'sinkhorn'):
+    _inputs = {'x': TensorSpec(shape_BTHD)}
+    _weight = TensorSpec(shape_BTH, dtype='float32')
+    _mixing = TensorSpec(_shape_hyper_connection_mixing, dtype='float32')
+    if _kind == 'pre':
+        _inputs['pre'] = _weight
+        _function = 'hyper_connection_pre'
+    elif _kind == 'sinkhorn':
+        _inputs = {'logits': _mixing}
+        _function = 'sinkhorn'
+    else:
+        _inputs.update(branch=TensorSpec(lambda B, T, H, D, **kw: (B, T, D)), post=_weight)
+        if _kind == 'mhc':
+            _inputs['mixing'] = _mixing
+        _function = 'hyper_connection_post'
+    for _prefix in ('', 'naive_'):
+        register_op(OpConfig(
+            name=f'{_prefix}hyper_connection_{_kind}',
+            import_path='fla.ops.hyper_connections',
+            func_name=f'{_prefix}{_function}',
+            inputs=_inputs.copy(),
+            output_is_tuple=False,
+            default_shapes=_hyper_connection_shapes,
+            category='hyper_connections',
+            test_file='tests/ops/test_hyper_connections.py',
+            backend_env={} if _prefix else {
+                'gluon': 'FLA_HYPER_CONNECTIONS_GLUON',
+                'tilelang': 'FLA_HYPER_CONNECTIONS_TILELANG',
+            },
+        ))
+
+
 # --- NSA (native sparse attention) — GQA + structured block selection ---
 # q carries HQ query heads while k/v carry H kv heads (GQA; HQ/H a power of two
 # and >= 16). block_indices is a causal random selection that must be built
