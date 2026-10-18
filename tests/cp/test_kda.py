@@ -6,6 +6,7 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 
+import contextlib
 import math
 
 import pytest
@@ -13,6 +14,9 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 import triton
+
+with contextlib.suppress(ImportError):
+    import torch_npu  # noqa: F401
 
 from cp.utils import assert_chunk_matches_cp, gather_global, slice_local
 from fla.ops.cp import build_cp_context
@@ -138,19 +142,7 @@ def _run_chunk(
                     )
                 g_for_grad = g_seq_input
             else:
-                if safe_gate and lower_bound is not None:
-                    g_processed = naive_kda_lowerbound_gate(
-                        g_seq.to(torch.float),
-                        A_log_global[:H].contiguous(),
-                        dt_bias_global,
-                        lower_bound=lower_bound,
-                    ).requires_grad_(True)
-                else:
-                    g_processed = naive_kda_gate(
-                        g_seq.to(torch.float),
-                        A_log_global[:H].contiguous(),
-                        dt_bias_global,
-                    ).requires_grad_(True)
+                g_processed = g_seq.to(torch.float).requires_grad_(True)
                 g_for_grad = g_processed
 
             o_seq, _ = naive_recurrent_kda(
@@ -271,25 +263,34 @@ def _run_chunk(
 
 
 @pytest.mark.parametrize(
-    ('world_size', 'T', 'lengths', 'disable_recompute', 'state_v_first', 'layout'),
+    ('world_size', 'T', 'lengths', 'disable_recompute', 'state_v_first', 'layout',
+     'use_gate_in_kernel', 'safe_gate', 'lower_bound'),
     [
-        pytest.param(2, 10240, [3000, 4000, 3240], False, False, 'contiguous', id='cp2-sequence-cut'),
-        pytest.param(2, 10240, [5120, 5120], False, False, 'contiguous', id='cp2-boundary-aligned'),
-        pytest.param(4, 10240, [7000, 3240], False, False, 'contiguous', id='cp4-complex'),
-        pytest.param(4, 10240, [10240], False, False, 'contiguous', id='cp4-single-sequence'),
-        pytest.param(8, 65536, [65536], False, False, 'contiguous', id='cp8-single-sequence'),
+        pytest.param(2, 10240, [3000, 4000, 3240], False, False, 'contiguous', True, True, -5.0, id='cp2-sequence-cut'),
+        pytest.param(2, 10240, [5120, 5120], False, False, 'contiguous', True, True, -5.0, id='cp2-boundary-aligned'),
+        pytest.param(4, 10240, [7000, 3240], False, False, 'contiguous', True, True, -5.0, id='cp4-complex'),
+        pytest.param(4, 10240, [10240], False, False, 'contiguous', True, True, -5.0, id='cp4-single-sequence'),
+        pytest.param(8, 65536, [65536], False, False, 'contiguous', True, True, -5.0, id='cp8-single-sequence'),
         pytest.param(2, 10240, [1000, 1500, 2000, 2500, 1240, 1000, 1000],
-                     False, False, 'contiguous', id='cp2-many-short-sequences'),
-        pytest.param(2, 10240, [3000, 4000, 3240], True, False, 'contiguous', id='cp2-disable-recompute'),
-        pytest.param(2, 10240, [3000, 4000, 3240], False, True, 'contiguous', id='cp2-state-v-first'),
-        pytest.param(4, 10240, [10240], False, True, 'contiguous', id='cp4-state-v-first'),
-        pytest.param(2, 10240, [10240], False, False, 'zigzag', id='cp2-zigzag-single-sequence'),
-        pytest.param(2, 10240, [3000, 4000, 3240], False, False, 'zigzag', id='cp2-zigzag-sequence-cut'),
-        pytest.param(4, 10240, [1500, 2600, 3000, 3140], False, False, 'zigzag', id='cp4-zigzag-complex'),
-        pytest.param(4, 10240, [2560, 2560, 2560, 2560], False, False, 'zigzag', id='cp4-zigzag-boundary-aligned'),
+                     False, False, 'contiguous', True, True, -5.0, id='cp2-many-short-sequences'),
+        pytest.param(2, 10240, [3000, 4000, 3240], True, False, 'contiguous', True, True, -5.0, id='cp2-disable-recompute'),
+        pytest.param(2, 10240, [3000, 4000, 3240], False, True, 'contiguous', True, True, -5.0, id='cp2-state-v-first'),
+        pytest.param(4, 10240, [10240], False, True, 'contiguous', True, True, -5.0, id='cp4-state-v-first'),
+        pytest.param(2, 10240, [10240], False, False, 'zigzag', True, True, -5.0, id='cp2-zigzag-single-sequence'),
+        pytest.param(2, 10240, [3000, 4000, 3240], False, False, 'zigzag', True, True, -5.0, id='cp2-zigzag-sequence-cut'),
+        pytest.param(4, 10240, [1500, 2600, 3000, 3140], False, False, 'zigzag', True, True, -5.0, id='cp4-zigzag-complex'),
+        pytest.param(4, 10240, [2560, 2560, 2560, 2560], False, False, 'zigzag',
+                     True, True, -5.0, id='cp4-zigzag-boundary-aligned'),
+        pytest.param(2, 10240, [3000, 4000, 3240], False, False, 'contiguous',
+                     False, False, None, id='cp2-pregated-nonsafe'),
+        pytest.param(2, 10240, [3000, 4000, 3240], False, False, 'contiguous',
+                     False, True, -5.0, id='cp2-pregated-safe'),
     ],
 )
-def test_chunk(run_distributed, world_size, T, lengths, disable_recompute, state_v_first, layout):
+def test_chunk(
+    run_distributed, world_size, T, lengths, disable_recompute, state_v_first, layout,
+    use_gate_in_kernel, safe_gate, lower_bound,
+):
     run_distributed(
         _run_chunk,
         world_size=world_size,
@@ -299,9 +300,9 @@ def test_chunk(run_distributed, world_size, T, lengths, disable_recompute, state
         lengths=lengths,
         dtype=torch.bfloat16,
         disable_recompute=disable_recompute,
-        use_gate_in_kernel=True,
-        safe_gate=True,
-        lower_bound=-5.0,
+        use_gate_in_kernel=use_gate_in_kernel,
+        safe_gate=safe_gate,
+        lower_bound=lower_bound,
         state_v_first=state_v_first,
         layout=layout,
     )

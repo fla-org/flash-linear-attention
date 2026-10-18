@@ -18,7 +18,7 @@ from fla.modules import RMSNorm
 from fla.ops.stickbreaking_attn import parallel_stickbreaking_attn
 
 if TYPE_CHECKING:
-    from fla.models.utils import Cache
+    from fla.models.cache_utils import Cache
 
 
 class StickBreakingAttention(nn.Module):

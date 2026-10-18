@@ -109,7 +109,6 @@ def chunk_cp_bwd_kernel_dh(
         for i_t in range(NT - 1, -1, -1):
             last_idx = min((i_t + 1) * BT, T) - 1
             o_t = i_t * BT + tl.arange(0, BT)
-            m_t = o_t < T
 
             b_dh1, b_dh2, b_dh3, b_dh4 = chunk_delta_rule_bwd_dh_state(
                 q=q,

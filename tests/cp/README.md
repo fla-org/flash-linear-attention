@@ -1,17 +1,17 @@
 # Context parallel tests
 
-Run the suite with `FLA_CI_ENV=0 pytest tests/cp -q`. Distributed cases use 2, 4, or 8 GPUs as indicated by their parameter IDs; cases that need more GPUs than are available are skipped. Each test starts fresh processes and uses its own file rendezvous, so tests do not share fixed TCP ports.
+Run the suite with `FLA_CI_ENV=0 pytest tests/cp -q`. Distributed cases use 2, 4, or 8 devices as indicated by their parameter IDs; cases that need more devices than are available are skipped. KDA also supports Ascend NPU with HCCL. Each test starts fresh processes and uses its own file rendezvous, so tests do not share fixed TCP ports.
 
 | File                          | Purpose                                                                                                                   |
 | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
 | `test_context.py`             | Sequence partition validation, rank metadata, and backward snapshots.                                                     |
 | `test_comm.py`                | Neighbor selection and boundary behavior for forward/backward communication.                                              |
 | `test_state.py`               | State compression, hardware precision selection, intra-card affine summaries/merge, and per-head vector-gate addressing.  |
-| `test_conv.py`                | Distributed convolution outputs and input/weight/bias gradients; contiguous/zigzag partitions and short local sequences.  |
+| `test_conv.py`                | Triton/CUDA/mixed convolution outputs and gradients, residuals, layouts, short sequences, and CUDA argument validation.  |
 | `test_token_shift.py`         | Distributed token-shift outputs and input gradients, including one- and two-token tails.                                  |
 | `test_gdn.py`                 | GDN outputs and all input gradients against non-CP execution; GVA and both state layouts.                                 |
 | `test_gdp.py`                 | GDP outputs and all input gradients against recurrence, with two or three Householder updates and unequal K/V dimensions. |
-| `test_gdn2.py`, `test_kda.py` | Recurrent-reference comparisons, fused safe gates, recomputation, both state layouts, and KDA zigzag partitions.          |
+| `test_gdn2.py`, `test_kda.py` | Recurrent-reference comparisons, fused and pre-activated KDA gates, recomputation, both state layouts, and KDA zigzag partitions.          |
 | `test_dplr.py`                | DPLR recurrent-reference comparisons, safe gates, TileLang routing, and the RWKV7 wrapper.                                |
 | `test_graph.py`               | KDA forward/backward graph replay against eager CP while changing sequence boundaries and zero-length padding.            |
 

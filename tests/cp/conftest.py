@@ -16,7 +16,7 @@ from fla.utils import device_torch_lib
 def run_distributed(tmp_path):
     def run(worker, world_size, teardown=True, **kwargs):
         if device_torch_lib.device_count() < world_size:
-            pytest.skip(f'requires {world_size} GPUs')
+            pytest.skip(f'requires {world_size} devices')
         rendezvous = (tmp_path / 'rendezvous').as_uri()
         mp.spawn(
             distributed_worker,

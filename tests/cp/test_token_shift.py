@@ -40,8 +40,6 @@ def _run_chunk(
     cu_seqlens_list = [0] + torch.cumsum(torch.tensor(lengths), 0).tolist()
     cu_seqlens_global = torch.tensor(cu_seqlens_list, device=device, dtype=torch.int32)
 
-    ref_out, ref_dx = None, None
-
     if rank == 0:
         x_ref = x_global.clone().detach().requires_grad_(True)
         y_ref = token_shift_ref(x_ref, cu_seqlens=cu_seqlens_global)

@@ -47,7 +47,7 @@ with warnings.catch_warnings():
 is_fast_path_available = mamba3_siso_combined is not None
 
 if TYPE_CHECKING:
-    from fla.models.utils import Cache
+    from fla.models.cache_utils import Cache
 
 logger = logging.get_logger(__name__)
 
