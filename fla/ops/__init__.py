@@ -5,7 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from fla.ops.hyper_connections import hyper_connection_post, hyper_connection_pre, sinkhorn
+from fla.ops.hc import hc_post, hc_pre, sinkhorn
 
 from .abc import chunk_abc
 from .attn import parallel_attn
@@ -96,8 +96,8 @@ __all__ = [
     'fused_recurrent_rwkv6',
     'fused_recurrent_rwkv7',
     'fused_recurrent_simple_gla',
-    'hyper_connection_post',
-    'hyper_connection_pre',
+    'hc_post',
+    'hc_pre',
     'parallel_attn',
     'parallel_based',
     'parallel_forgetting_attn',

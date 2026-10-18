@@ -8,13 +8,13 @@
 import torch
 
 
-def naive_hyper_connection_pre(x: torch.Tensor, pre: torch.Tensor) -> torch.Tensor:
+def naive_hc_pre(x: torch.Tensor, pre: torch.Tensor) -> torch.Tensor:
     """Read out residual streams, accumulating in FP32 (FP64 for double inputs)."""
     dtype = torch.float64 if x.dtype == torch.float64 else torch.float32
     return (x.to(dtype) * pre.to(dtype).unsqueeze(-1)).sum(-2).to(x.dtype)
 
 
-def naive_hyper_connection_post(
+def naive_hc_post(
     x: torch.Tensor,
     branch: torch.Tensor,
     post: torch.Tensor,
@@ -29,7 +29,7 @@ def naive_hyper_connection_post(
 
 
 def naive_sinkhorn(logits: torch.Tensor, num_iters: int = 20) -> torch.Tensor:
-    """Alternate column and row log normalizations and return the positive mixing matrix."""
+    """Alternate column and row log normalizations and return the nonnegative mixing matrix."""
     value = logits.to(torch.float64 if logits.dtype == torch.float64 else torch.float32)
     for _ in range(num_iters):
         value = value - value.logsumexp(dim=-2, keepdim=True)

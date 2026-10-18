@@ -625,7 +625,7 @@ register_op(OpConfig(
     category='naive_attnres',
 ))
 
-_hyper_connection_shapes = {
+_hc_shapes = {
     'T1_N4_D128': {'B': 1, 'T': 1, 'H': 4, 'D': 128},
     'T63_N4_D1024': {'B': 1, 'T': 63, 'H': 4, 'D': 1024},
     'T2048_N4_D4096': {'B': 1, 'T': 2048, 'H': 4, 'D': 4096},
@@ -635,17 +635,17 @@ _hyper_connection_shapes = {
 }
 
 
-def _shape_hyper_connection_mixing(B, T, H, D, **kw):
+def _shape_hc_mixing(B, T, H, D, **kw):
     return (B, T, H, H)
 
 
 for _kind in ('pre', 'ihc', 'mhc', 'sinkhorn'):
     _inputs = {'x': TensorSpec(shape_BTHD)}
     _weight = TensorSpec(shape_BTH, dtype='float32')
-    _mixing = TensorSpec(_shape_hyper_connection_mixing, dtype='float32')
+    _mixing = TensorSpec(_shape_hc_mixing, dtype='float32')
     if _kind == 'pre':
         _inputs['pre'] = _weight
-        _function = 'hyper_connection_pre'
+        _function = 'hc_pre'
     elif _kind == 'sinkhorn':
         _inputs = {'logits': _mixing}
         _function = 'sinkhorn'
@@ -653,20 +653,20 @@ for _kind in ('pre', 'ihc', 'mhc', 'sinkhorn'):
         _inputs.update(branch=TensorSpec(lambda B, T, H, D, **kw: (B, T, D)), post=_weight)
         if _kind == 'mhc':
             _inputs['mixing'] = _mixing
-        _function = 'hyper_connection_post'
+        _function = 'hc_post'
     for _prefix in ('', 'naive_'):
         register_op(OpConfig(
-            name=f'{_prefix}hyper_connection_{_kind}',
-            import_path='fla.ops.hyper_connections',
+            name=f'{_prefix}hc_{_kind}',
+            import_path='fla.ops.hc',
             func_name=f'{_prefix}{_function}',
             inputs=_inputs.copy(),
             output_is_tuple=False,
-            default_shapes=_hyper_connection_shapes,
-            category='hyper_connections',
-            test_file='tests/ops/test_hyper_connections.py',
+            default_shapes=_hc_shapes,
+            category='hc',
+            test_file='tests/ops/test_hc.py',
             backend_env={} if _prefix else {
-                'gluon': 'FLA_HYPER_CONNECTIONS_GLUON',
-                'tilelang': 'FLA_HYPER_CONNECTIONS_TILELANG',
+                'gluon': 'FLA_HC_GLUON',
+                'tilelang': 'FLA_HC_TILELANG',
             },
         ))
 
