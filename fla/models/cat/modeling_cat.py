@@ -25,7 +25,7 @@ from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.models.cat.configuration_cat import CATConfig
 from fla.models.generation_utils import FLAGenerationMixin
-from fla.models.modeling_utils import FLAPreTrainedModel
+from fla.models.modeling_utils import FLAForCausalLM, FLAPreTrainedModel
 from fla.modules import GatedMLP as CATMLP
 from fla.modules import RMSNorm, RotaryEmbedding
 from fla.modules.rotary import rotary_embedding
@@ -418,12 +418,6 @@ class CATModel(CATPreTrainedModel):
 
         self.post_init()
 
-    def get_input_embeddings(self):
-        return self.embeddings
-
-    def set_input_embeddings(self, value):
-        self.embeddings = value
-
     def _build_train_chunk_sizes(self) -> tuple[int, ...]:
         if self.config.train_chunk_size_schedule != "power_of_2":
             return (self.config.max_chunk_size,)
@@ -643,7 +637,7 @@ class CATModel(CATPreTrainedModel):
         )
 
 
-class CATForCausalLM(CATPreTrainedModel, FLAGenerationMixin):
+class CATForCausalLM(CATPreTrainedModel, FLAForCausalLM, FLAGenerationMixin):
     """CAT model with a language modeling head."""
 
     _tied_weights_keys = {"lm_head.weight": "model.embeddings.weight"}
@@ -657,24 +651,6 @@ class CATForCausalLM(CATPreTrainedModel, FLAGenerationMixin):
         self.criterion = None
 
         self.post_init()
-
-    def get_input_embeddings(self):
-        return self.model.embeddings
-
-    def set_input_embeddings(self, value):
-        self.model.embeddings = value
-
-    def get_output_embeddings(self):
-        return self.lm_head
-
-    def set_output_embeddings(self, new_embeddings):
-        self.lm_head = new_embeddings
-
-    def set_decoder(self, decoder):
-        self.model = decoder
-
-    def get_decoder(self):
-        return self.model
 
     @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
     def prepare_inputs_for_generation(
