@@ -5,6 +5,8 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+from math import prod
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -23,7 +25,7 @@ from fla.modules.activations import (
     swiglu_linear,
     swish,
 )
-from fla.modules.activations.ops import flatten_input, get_row_stride
+from fla.modules.activations.ops import prepare_input
 from fla.utils import assert_close, device
 
 
@@ -503,6 +505,8 @@ def test_powglu_singleton_strides(compile: bool, linear: bool):
         pytest.param((5, 10, 20), (400, 40, 1), False, id='chunked-3d'),
         pytest.param((3, 5, 10, 20), (2000, 400, 40, 1), False, id='chunked-4d'),
         pytest.param((3, 1, 128), (256, 1536, 1), False, id='chunked-singleton'),
+        pytest.param((3, 4), (0, 1), False, id='broadcast-rows'),
+        pytest.param((3, 1, 4), (0, 999, 1), False, id='broadcast-singleton'),
         pytest.param((3, 4, 5), (20, 1, 4), True, id='transposed'),
         pytest.param((3, 10, 20), (400, 20, 1), True, id='outer-strided'),
         pytest.param((10, 10), (20, 2), True, id='strided-columns'),
@@ -511,14 +515,15 @@ def test_powglu_singleton_strides(compile: bool, linear: bool):
         pytest.param((2, 0), (1, 1), False, id='empty-columns'),
     ],
 )
-def test_flatten_input(shape: tuple[int, ...], strides: tuple[int, ...], needs_copy: bool):
+def test_prepare_input(shape: tuple[int, ...], strides: tuple[int, ...], needs_copy: bool):
     torch.manual_seed(42)
-    x = torch.empty_strided(size=shape, stride=strides).copy_(torch.randn(size=shape))
-    flat = flatten_input(x=x)
-    assert flat.ndim == 2
-    assert flat.shape[-1] == (shape[-1] if shape else 1)
-    assert (flat.data_ptr() != x.data_ptr()) == needs_copy
-    addressed = flat.as_strided(size=flat.shape, stride=(get_row_stride(x=flat), 1))
+    storage_size = max(1 + sum((size - 1) * stride for size, stride in zip(shape, strides)), 0)
+    x = torch.randn(storage_size).as_strided(size=shape, stride=strides)
+    prepared, stride_row = prepare_input(x=x)
+    assert prepared.shape == shape
+    assert (prepared.data_ptr() != x.data_ptr()) == needs_copy
+    rows, D = prod(shape[:-1]), shape[-1] if shape else 1
+    addressed = prepared.as_strided(size=(rows, D), stride=(stride_row, 1))
     torch.testing.assert_close(addressed.view(shape), x, rtol=0, atol=0)
 
 
