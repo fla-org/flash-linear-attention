@@ -24,31 +24,18 @@ from fla.ops.cp import FLACPContext, build_cp_context
 from fla.ops.kda import chunk_kda
 from fla.utils import IS_AMD, IS_NVIDIA, assert_close, device
 from tests.cp.utils import run_distributed
-from tests.ops.kda_graph import _VARLEN_CONFIGS, _rand_inputs
+from tests.ops.kda_graph import _VARLEN_CONFIGS, MAX_NUM_SEQS, D, H, T, _rand_inputs
 
 pytestmark = pytest.mark.skipif(
     not (IS_NVIDIA or IS_AMD), reason="direct graph capture requires CUDA or HIP",
 )
-
-T = 1024
-H = 4
-D = 64
-MAX_NUM_SEQS = 4
-
-# (tag, cu_seqlens) -- all cover [0, T]; trailing repeats are zero-length padding sequences
-CONFIGS = [
-    ("4seq", [0, 300, 600, 900, 1024]),
-    ("2seq_zerotail", [0, 512, 1024, 1024, 1024]),
-    ("4seq_alt", [0, 100, 400, 700, 1024]),
-    ("1seq_zerotail", [0, 1024, 1024, 1024, 1024]),
-]
 
 TOK_NAMES = ["q", "k", "v", "g", "beta"]
 NAMES = TOK_NAMES + ["A_log", "dt_bias"]
 OUT_NAMES = ["o", "dq", "dk", "dv", "dg", "db", "dA", "dbias"]
 
 
-def rand_global(seed, device):
+def _rand_global(seed, device):
     """Same seed on every rank reproduces one logical global batch; ranks slice their shard."""
     g = torch.Generator(device).manual_seed(seed)
     dt = torch.bfloat16
@@ -64,7 +51,7 @@ def rand_global(seed, device):
     return dict(q=q, k=k, v=v, g=gg, beta=beta, A_log=A_log, dt_bias=dt_bias, do=do)
 
 
-def run_cp_graph_worker(rank, world_size):
+def _test_chunk_graph(rank, world_size):
     device = torch.device('cuda', rank)
     part = T // world_size
     lo, hi = rank * part, (rank + 1) * part
@@ -82,7 +69,7 @@ def run_cp_graph_worker(rank, world_size):
         post_dev.fill_(base.post_num_ranks)
 
     # one persistent context around the static buffers; host fields are only read eagerly
-    base0 = build_cp_context(torch.tensor(CONFIGS[0][1], dtype=torch.long, device=device), group=group)
+    base0 = build_cp_context(torch.tensor(_VARLEN_CONFIGS[0][1], dtype=torch.long, device=device), group=group)
     refresh(base0)
     ctx = FLACPContext(
         group=group,
@@ -102,7 +89,7 @@ def run_cp_graph_worker(rank, world_size):
             leaves[n] = inp[n].detach().clone().requires_grad_()
         return leaves
 
-    inp0 = rand_global(0, device)
+    inp0 = _rand_global(0, device)
     leaves = shard_leaves(inp0)
     do = inp0["do"][:, lo:hi].detach().clone()
 
@@ -131,8 +118,8 @@ def run_cp_graph_worker(rank, world_size):
     with torch.cuda.graph(graph):
         cap_o = step()
 
-    for seed, (tag, cucfg) in enumerate(CONFIGS, start=1):
-        inp = rand_global(seed * 17, device)
+    for seed, (tag, cucfg) in enumerate(_VARLEN_CONFIGS, start=1):
+        inp = _rand_global(seed * 17, device)
         for n in TOK_NAMES:
             leaves[n].data.copy_(inp[n][:, lo:hi])
         for n in ("A_log", "dt_bias"):
@@ -166,11 +153,9 @@ def run_cp_graph_worker(rank, world_size):
     dist.barrier()
 
 
-def test_cp2_graph_replay_matches_eager():
-    if torch.cuda.device_count() < 2:
-        pytest.skip("At least 2 GPUs required")
+def test_chunk_graph():
     # a communicator recorded by a CUDA graph must outlive the graph; worker exit reaps it
-    run_distributed(worker=run_cp_graph_worker, world_size=2, destroy_process_group=False)
+    run_distributed(worker=_test_chunk_graph, world_size=2, destroy_process_group=False)
 
 
 def _eager_cp(inp, cucfg, gate):
@@ -198,7 +183,9 @@ def _eager_cp(inp, cucfg, gate):
     return out
 
 
-def run_cp_graph_world1_worker(rank, world_size):
+def test_chunk_graph_world1(single_rank_group, monkeypatch):
+    # keep the eager reference on the same backend as graph capture
+    monkeypatch.setenv("FLA_TILELANG", "0")
     gate = True
     cu = torch.tensor(_VARLEN_CONFIGS[0][1], dtype=torch.long, device=device)
     pre_dev = torch.zeros(1, dtype=torch.int32, device=device)
@@ -267,9 +254,3 @@ def run_cp_graph_world1_worker(rank, world_size):
         ref = _eager_cp(inp, cucfg, gate)
         for name, r, g in zip(names_out, ref, got):
             assert_close(f"cp_world1::{tag}::{name}", r, g, 2e-3)
-
-
-def test_chunk_kda_graph_cp_world1(single_rank_group, monkeypatch):
-    # keep the eager reference on the same backend as graph capture
-    monkeypatch.setenv("FLA_TILELANG", "0")
-    run_cp_graph_world1_worker(rank=0, world_size=1)

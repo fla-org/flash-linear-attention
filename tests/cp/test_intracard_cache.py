@@ -15,7 +15,7 @@ import torch
 from fla.ops.common import intracard_cp
 from fla.ops.common.intracard_cp import _intracard_cache
 from fla.ops.kda import chunk_kda
-from fla.utils import device
+from fla.utils import device, device_torch_lib
 
 
 @pytest.fixture(autouse=True)
@@ -26,7 +26,7 @@ def clear_intracard_cache():
 
 
 @pytest.mark.skipif(os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") == "1", reason="backend dispatch disabled")
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.skipif(device != "cuda" or not device_torch_lib.is_available(), reason="requires CUDA")
 def test_chunk_kda_intracard_cache_hit_same_cu_seqlens_object(monkeypatch):
     """Reuse the intracard precompute cache for repeated calls with the same cu_seqlens object."""
     # intracard CP is disabled by default.
@@ -118,7 +118,7 @@ def test_intracard_backend_enabled_when_env_var_is_one(monkeypatch):
 
 
 @pytest.mark.skipif(os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") == "1", reason="backend dispatch disabled")
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.skipif(device != "cuda" or not device_torch_lib.is_available(), reason="requires CUDA")
 def test_chunk_gdn_intracard_gqa(monkeypatch):
     """E2E: chunk_gated_delta_rule intracard path produces correct results with GQA (Hq < H).
 

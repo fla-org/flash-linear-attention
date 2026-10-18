@@ -20,7 +20,7 @@ from fla.utils import IS_NVIDIA, assert_close, device, device_torch_lib
 from tests.cp.utils import run_distributed
 
 
-def run_cp_conv_worker(
+def _test_causal_conv1d(
     rank: int,
     world_size: int,
     lengths: list[int],
@@ -196,7 +196,7 @@ def run_cp_conv_worker(
         for dtype, dtype_name in [(torch.float32, 'fp32'), (torch.float16, 'fp16'), (torch.bfloat16, 'bf16')]
     ],
 )
-def test_causal_conv1d_cp(
+def test_causal_conv1d(
     world_size: int,
     lengths: list[int],
     D: int,
@@ -216,7 +216,7 @@ def test_causal_conv1d_cp(
             pytest.skip('CUDA backend requires an NVIDIA GPU')
         pytest.importorskip('causal_conv1d')
     run_distributed(
-        worker=run_cp_conv_worker,
+        worker=_test_causal_conv1d,
         world_size=world_size,
         lengths=lengths,
         D=D,
@@ -243,7 +243,7 @@ def test_causal_conv1d_cp(
         pytest.param('package', ImportError, 'causal-conv1d', id='missing-package'),
     ],
 )
-def test_causal_conv1d_cp_cuda_invalid(monkeypatch: pytest.MonkeyPatch, case: str, error: type[Exception], match: str) -> None:
+def test_causal_conv1d_cuda_invalid(monkeypatch: pytest.MonkeyPatch, case: str, error: type[Exception], match: str) -> None:
     def unexpected_cuda_call(**kwargs) -> None:
         pytest.fail('Invalid arguments must be rejected before CUDA execution')
 

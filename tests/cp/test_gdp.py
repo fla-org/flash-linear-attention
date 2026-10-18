@@ -5,8 +5,6 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-import logging
-
 import pytest
 import torch
 import torch.distributed as dist
@@ -15,26 +13,17 @@ import torch.nn.functional as F
 from fla.ops.cp import build_cp_context
 from fla.ops.gated_delta_product import chunk_gated_delta_product
 from fla.ops.gated_delta_product.naive import naive_recurrent_gated_delta_product
-from fla.utils import assert_close, device, device_torch_lib
+from fla.utils import assert_close, device
 from tests.cp.utils import gather_global, run_distributed
-
-# Configure logging to see assert_close messages
-logging.basicConfig(level=logging.INFO, format="%(message)s")
-
 
 pytestmark = pytest.mark.skipif(device != "cuda", reason="requires CUDA or ROCm GPUs")
 
 
-def run_cp_gdp_test_worker(
+def _test_chunk(
     rank: int,
     world_size: int,
-    test_name: str,
     num_householder: int,
 ) -> None:
-    """
-    Worker function for CP GDP test.
-    Runs in a spawned process with the given rank.
-    """
     current_device = torch.device(f"{device}:{rank}")
     dtype = torch.bfloat16
     B, T, H, K, V = 1, 256, 2, 64, 80
@@ -126,7 +115,6 @@ def run_cp_gdp_test_worker(
 
     dist.barrier()
 
-    # CP Forward
     o_local, final_state = chunk_gated_delta_product(
         q=q_local,
         k=k_local,
@@ -139,7 +127,6 @@ def run_cp_gdp_test_worker(
     )
     assert final_state is None
 
-    # CP Backward
     o_local.backward(do_local)
 
     actual = {
@@ -151,30 +138,12 @@ def run_cp_gdp_test_worker(
         "dg": gather_global(g_local.grad, world_size),
     }
 
-    test_passed = True
     if rank == 0:
         ratios = {"o": 5e-3, "dq": 8e-3, "dk": 8e-3, "dv": 8e-3, "dbeta": 2e-2, "dg": 2e-2}
-        try:
-            for name, expected in ref.items():
-                assert_close(name, expected, actual[name], ratio=ratios[name], warning=False)
-        except AssertionError:
-            test_passed = False
-    result = torch.tensor(test_passed, dtype=torch.int32, device=current_device)
-    dist.broadcast(result, src=0)
-    if not result.item():
-        raise AssertionError("GDP context parallel result did not match the single-device reference")
+        for name, expected in ref.items():
+            assert_close(name, expected, actual[name], ratio=ratios[name], warning=False)
 
 
 @pytest.mark.parametrize("num_householder", [2, 3], ids=["n2", "n3"])
-def test_cp_gdp_sequence_cut(num_householder: int) -> None:
-    """CP2: sequences cut across rank boundary."""
-    world_size = 2
-    if device_torch_lib.device_count() < world_size:
-        pytest.skip("At least 2 GPUs are required")
-    test_name = f"CP2_SequenceCut_N{num_householder}"
-    run_distributed(
-        worker=run_cp_gdp_test_worker,
-        world_size=world_size,
-        test_name=test_name,
-        num_householder=num_householder,
-    )
+def test_chunk(num_householder: int) -> None:
+    run_distributed(worker=_test_chunk, world_size=2, num_householder=num_householder)

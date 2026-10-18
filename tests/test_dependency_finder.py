@@ -165,7 +165,7 @@ def test_backend_changes_follow_repository_ownership(changed, expected, unrelate
         pytest.param('fla/modules/causal_conv1d/backends/cuda/ops.py', {'tests/modules/test_conv.py'}, id='cuda-ops'),
         pytest.param(
             'fla/modules/causal_conv1d/backends/cuda/cp.py',
-            {'tests/cp/modules/test_conv.py'},
+            {'tests/cp/test_conv.py'},
             id='cuda-cp',
         ),
         ('fla/modules/fused_cross_entropy/ops.py', {'tests/modules/test_cross_entropy.py', 'tests/modules/test_l2warp.py'}),

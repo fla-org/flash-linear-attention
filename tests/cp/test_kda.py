@@ -8,11 +8,13 @@
 """Compare CP KDA outputs and gradients with per-sequence recurrent references."""
 
 import contextlib
+import math
 
 import pytest
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
+import triton
 
 with contextlib.suppress(ImportError):
     import torch_npu  # noqa: F401
@@ -21,15 +23,13 @@ from fla.ops.cp import build_cp_context
 from fla.ops.kda import chunk_kda
 from fla.ops.kda.gate import naive_kda_lowerbound_gate
 from fla.ops.kda.naive import naive_recurrent_kda
-from fla.utils import assert_close
-from fla.utils import device as fla_device
+from fla.utils import assert_close, device
 from tests.cp.utils import gather_global, run_distributed
 
 
-def run_cp_kda_test_worker(
+def _test_chunk(
     rank: int,
     world_size: int,
-    test_name: str,
     T: int,
     H: int,
     D: int,
@@ -43,12 +43,6 @@ def run_cp_kda_test_worker(
     use_tf32x3_affine_chain: bool = False,
     layout: str = 'contiguous',
 ):
-    """
-    Worker function for CP KDA test.
-    Runs in a spawned process with the given rank.
-    """
-    device = torch.device(f'{fla_device}:{rank}')
-
     assert T % world_size == 0, f"T={T} must be divisible by world_size={world_size}"
     if layout == 'zigzag':
         assert T % (2 * world_size) == 0, f"T={T} must be divisible by 2*world_size={2 * world_size} for zigzag"
@@ -66,7 +60,7 @@ def run_cp_kda_test_worker(
 
     if rank == 0:
         torch.manual_seed(42)
-        # Generate inputs
+
         # q gets a +1.0 offset to keep L2 normalization observable; extreme k
         # magnitudes inflate chunk-vs-naive bf16 error past 8e-3 even without CP.
         q_global.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype) + 1.0)
@@ -80,7 +74,6 @@ def run_cp_kda_test_worker(
         beta_global.copy_(torch.randn(B, T, H, device=device, dtype=dtype).sigmoid())
         do_global.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype))
 
-    # Broadcast to ensure all ranks have same data
     dist.broadcast(q_global, src=0)
     dist.broadcast(k_global, src=0)
     dist.broadcast(v_global, src=0)
@@ -90,17 +83,13 @@ def run_cp_kda_test_worker(
 
     # Prepare and broadcast A_log and dt_bias for gate computation
     # Always generate these for reference, even when use_gate_in_kernel=False
-    import triton
     num_even_heads = triton.next_power_of_2(H)
     projection_size = H * D
 
-    # All ranks create tensors with same shape first
     A_log_global = torch.empty(num_even_heads, dtype=torch.float32, device=device)
     dt_bias_global = torch.empty(projection_size, dtype=torch.float32, device=device)
 
-    # Rank 0 fills in the actual data
     if rank == 0:
-        import math
         # Per-head variation in A_log is CRITICAL for catching backward kernel
         # bugs like missing `i_h * K` in gk pointer offsets.  When A_log=0 for
         # all heads, -exp(A_log)=-1 uniformly → same gate scaling → reading the
@@ -114,11 +103,9 @@ def run_cp_kda_test_worker(
                        (math.log(0.1) - math.log(0.001)) + math.log(0.001)).clamp_(min=1e-4)
         dt_bias_global.copy_(dt + torch.log(-torch.expm1(-dt)))
 
-    # Broadcast from rank 0 to all ranks
     dist.broadcast(A_log_global, src=0)
     dist.broadcast(dt_bias_global, src=0)
 
-    # Prepare cu_seqlens
     cu_seqlens_list = [0] + torch.cumsum(torch.tensor(lengths), 0).tolist()
     cu_seqlens_global = torch.tensor(cu_seqlens_list, device=device, dtype=torch.long)
 
@@ -211,7 +198,6 @@ def run_cp_kda_test_worker(
 
     dist.barrier()
 
-    # Build CP context
     context = build_cp_context(
         cu_seqlens_global, group=dist.group.WORLD, use_tf32x3_affine_chain=use_tf32x3_affine_chain,
         layout=layout,
@@ -234,7 +220,6 @@ def run_cp_kda_test_worker(
         def slice_local(t):
             return t[:, start_idx:end_idx]
 
-    # Get local slices
     q_local = slice_local(q_global).clone().detach().requires_grad_(True)
     k_local = slice_local(k_global).clone().detach().requires_grad_(True)
     v_local = slice_local(v_global).clone().detach().requires_grad_(True)
@@ -244,7 +229,6 @@ def run_cp_kda_test_worker(
 
     dist.barrier()
 
-    # CP Forward
     o_local, _ = chunk_kda(
         q=q_local,
         k=k_local,
@@ -262,7 +246,6 @@ def run_cp_kda_test_worker(
         state_v_first=state_v_first,
     )
 
-    # CP Backward
     o_local.backward(do_local)
 
     o_cp_global = gather_global(o_local, world_size=world_size, layout=layout)
@@ -272,32 +255,16 @@ def run_cp_kda_test_worker(
     dg_cp_global = gather_global(g_local.grad, world_size=world_size, layout=layout)
     db_cp_global = gather_global(beta_local.grad, world_size=world_size, layout=layout)
 
-    test_passed = True
     if rank == 0:
-
         # Tolerance: ratio=8e-3 for all tensors; dg/db warning-only: dg's
         # single-GPU chunk-vs-naive error is already ~0.0085; db sees cross-rank
         # reduction (~1.5-2.4%).
-        tensors_to_verify = [
-            ("Output", ref_out, o_cp_global),
-            ("dq", ref_dq, dq_cp_global),
-            ("dk", ref_dk, dk_cp_global),
-            ("dv", ref_dv, dv_cp_global),
-            ("dg", ref_dg, dg_cp_global),
-            ("db", ref_db, db_cp_global),
-        ]
-
-        try:
-            for name, ref, cp in tensors_to_verify:
-                warn = name in ("dg", "db")
-                assert_close(name, ref, cp, ratio=8e-3, warning=warn)
-        except AssertionError:
-            test_passed = False
-
-    dist.barrier()
-
-    if not test_passed:
-        raise AssertionError(f"Test {test_name} failed on rank {rank}")
+        assert_close("Output", ref_out, o_cp_global, ratio=8e-3, warning=False)
+        assert_close("dq", ref_dq, dq_cp_global, ratio=8e-3, warning=False)
+        assert_close("dk", ref_dk, dk_cp_global, ratio=8e-3, warning=False)
+        assert_close("dv", ref_dv, dv_cp_global, ratio=8e-3, warning=False)
+        assert_close("dg", ref_dg, dg_cp_global, ratio=8e-3, warning=True)
+        assert_close("db", ref_db, db_cp_global, ratio=8e-3, warning=True)
 
 
 GATE_KWARGS = dict(use_gate_in_kernel=True, safe_gate=True, lower_bound=-5.0)
@@ -329,15 +296,14 @@ GATE_KWARGS = dict(use_gate_in_kernel=True, safe_gate=True, lower_bound=-5.0)
             **GATE_KWARGS, layout='zigzag'), id='CP4_Zigzag_BoundaryAligned'),
     ],
 )
-def test_chunk(request, world_size, T, lengths, options):
+def test_chunk(world_size, T, lengths, options):
     run_distributed(
-        worker=run_cp_kda_test_worker,
+        worker=_test_chunk,
         world_size=world_size,
         T=T,
         H=12,
         D=128,
         lengths=lengths,
         dtype=torch.bfloat16,
-        test_name=request.node.callspec.id,
         **options,
     )

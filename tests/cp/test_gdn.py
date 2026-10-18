@@ -21,10 +21,9 @@ from tests.cp.utils import gather_global, run_distributed
 pytestmark = pytest.mark.skipif(device != "cuda", reason="requires CUDA or ROCm GPUs")
 
 
-def run_cp_gdn_test_worker(
+def _test_chunk(
     rank: int,
     world_size: int,
-    test_name: str,
     T: int,
     H: int,
     D: int,
@@ -33,12 +32,6 @@ def run_cp_gdn_test_worker(
     state_v_first: bool = False,
     Hq: int | None = None,
 ):
-    """
-    Worker function for CP GDN test.
-    Runs in a spawned process with the given rank.
-    """
-    device = torch.device(f'cuda:{rank}')
-
     assert T % world_size == 0, f"T={T} must be divisible by world_size={world_size}"
     assert sum(lengths) == T, f"Sum of lengths {sum(lengths)} must equal T={T}"
 
@@ -62,7 +55,6 @@ def run_cp_gdn_test_worker(
         beta_global.copy_(torch.randn(B, T, H, device=device, dtype=torch.float32).sigmoid())
         do_global.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype))
 
-    # Broadcast to ensure all ranks have same data
     dist.broadcast(q_global, src=0)
     dist.broadcast(k_global, src=0)
     dist.broadcast(v_global, src=0)
@@ -70,7 +62,6 @@ def run_cp_gdn_test_worker(
     dist.broadcast(beta_global, src=0)
     dist.broadcast(do_global, src=0)
 
-    # Prepare cu_seqlens
     cu_seqlens_list = [0] + torch.cumsum(torch.tensor(lengths), 0).tolist()
     cu_seqlens_global = torch.tensor(cu_seqlens_list, device=device, dtype=torch.long)
 
@@ -121,7 +112,6 @@ def run_cp_gdn_test_worker(
 
     dist.barrier()
 
-    # CP Forward
     o_local, _ = chunk_gated_delta_rule(
         q=q_local,
         k=k_local,
@@ -132,43 +122,22 @@ def run_cp_gdn_test_worker(
         state_v_first=state_v_first,
     )
 
-    # CP Backward
     o_local.backward(do_local)
 
     o_cp_global = gather_global(o_local, world_size=world_size)
-
     dq_cp_global = gather_global(q_local.grad, world_size=world_size)
-
     dk_cp_global = gather_global(k_local.grad, world_size=world_size)
-
     dv_cp_global = gather_global(v_local.grad, world_size=world_size)
-
     dg_cp_global = gather_global(g_local.grad, world_size=world_size)
-
     db_cp_global = gather_global(beta_local.grad, world_size=world_size)
 
-    test_passed = True
     if rank == 0:
-
-        tensors_to_verify = [
-            ("Output", ref_out, o_cp_global),
-            ("dq", ref_dq, dq_cp_global),
-            ("dk", ref_dk, dk_cp_global),
-            ("dv", ref_dv, dv_cp_global),
-            ("dg", ref_dg, dg_cp_global),
-            ("db", ref_db, db_cp_global),
-        ]
-
-        try:
-            for name, ref, cp in tensors_to_verify:
-                assert_close(name, ref, cp, ratio=3e-3, warning=False)
-        except AssertionError:
-            test_passed = False
-
-    dist.barrier()
-
-    if not test_passed:
-        raise AssertionError(f"Test {test_name} failed on rank {rank}")
+        assert_close("Output", ref_out, o_cp_global, ratio=3e-3, warning=False)
+        assert_close("dq", ref_dq, dq_cp_global, ratio=3e-3, warning=False)
+        assert_close("dk", ref_dk, dk_cp_global, ratio=3e-3, warning=False)
+        assert_close("dv", ref_dv, dv_cp_global, ratio=3e-3, warning=False)
+        assert_close("dg", ref_dg, dg_cp_global, ratio=3e-3, warning=False)
+        assert_close("db", ref_db, db_cp_global, ratio=3e-3, warning=False)
 
 
 @pytest.mark.parametrize(
@@ -186,15 +155,14 @@ def run_cp_gdn_test_worker(
         pytest.param(4, 10240, 4, 128, [10240], dict(state_v_first=True), id='CP4_TransposeState'),
     ],
 )
-def test_chunk(request, world_size, T, H, D, lengths, options):
+def test_chunk(world_size, T, H, D, lengths, options):
     run_distributed(
-        worker=run_cp_gdn_test_worker,
+        worker=_test_chunk,
         world_size=world_size,
         T=T,
         H=H,
         D=D,
         lengths=lengths,
         dtype=torch.bfloat16,
-        test_name=request.node.callspec.id,
         **options,
     )

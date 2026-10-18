@@ -8,46 +8,42 @@
 """Shared DPLR and RWKV7 output and gradient comparisons against the recurrent reference."""
 
 
+import pytest
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
 from fla.ops.cp import build_cp_context
 from fla.ops.generalized_delta_rule.dplr import chunk_dplr_delta_rule
+from fla.ops.generalized_delta_rule.dplr.backends import DPLRTileLangBackend
 from fla.ops.generalized_delta_rule.dplr.naive import dplr_recurrence
-from fla.utils import assert_close
-from tests.cp.utils import gather_global
+from fla.ops.rwkv7 import chunk_rwkv7
+from fla.utils import assert_close, device
+from tests.cp.utils import gather_global, run_distributed
+
+pytestmark = pytest.mark.skipif(device != "cuda", reason="requires CUDA or ROCm GPUs")
 
 
-def run_cp_dplr_test_worker(
+def _chunk_rwkv7(q, k, v, a, b, gk, scale=None, **kwargs):
+    # chunk_rwkv7 defaults scale=1.0; align with chunk_dplr_delta_rule (scale=None
+    # -> 1/sqrt(K)) so the wrapper matches the dplr_recurrence reference.
+    return chunk_rwkv7(r=q, w=gk, k=k, v=v, a=a, b=b, scale=scale, **kwargs)
+
+
+def _test_chunk(
     rank: int,
     world_size: int,
-    test_name: str,
     T: int,
     H: int,
     D: int,
     lengths: list[int],
     dtype,
-    safe_gate: bool = False,
     op=chunk_dplr_delta_rule,
     op_chunk_size: int = 64,
     assert_tilelang: bool = False,
 ):
-    """
-    Worker function for CP DPLR test.
-    Runs in a spawned process with the given rank.
-    """
-    device = torch.device(f'cuda:{rank}')
-
     assert T % world_size == 0, f"T={T} must be divisible by world_size={world_size}"
     assert sum(lengths) == T, f"Sum of lengths {sum(lengths)} must equal T={T}"
-
-    if rank == 0:
-        print(f"\n{'='*60}")
-        print(f"Test: {test_name}")
-        print(f"Config: T={T}, H={H}, D={D}, world_size={world_size}, safe_gate={safe_gate}")
-        print(f"Sequence lengths: {lengths}")
-        print(f"{'='*60}")
 
     B = 1
     q_global = torch.empty(B, T, H, D, device=device, dtype=dtype)
@@ -75,7 +71,6 @@ def run_cp_dplr_test_worker(
         gk_global.copy_(-0.6065306597126334 * torch.randn(B, T, H, D, device=device, dtype=torch.float).sigmoid())
         do_global.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype))
 
-    # Broadcast to ensure all ranks have same data
     dist.broadcast(q_global, src=0)
     dist.broadcast(k_global, src=0)
     dist.broadcast(v_global, src=0)
@@ -84,7 +79,6 @@ def run_cp_dplr_test_worker(
     dist.broadcast(gk_global, src=0)
     dist.broadcast(do_global, src=0)
 
-    # Prepare cu_seqlens
     cu_seqlens_list = [0] + torch.cumsum(torch.tensor(lengths), 0).tolist()
     cu_seqlens_global = torch.tensor(cu_seqlens_list, device=device, dtype=torch.long)
 
@@ -166,14 +160,12 @@ def run_cp_dplr_test_worker(
 
     dist.barrier()
 
-    # Build CP context
     context = build_cp_context(cu_seqlens_global, group=dist.group.WORLD)
 
     chunk_size = T // world_size
     start_idx = rank * chunk_size
     end_idx = (rank + 1) * chunk_size
 
-    # Get local slices
     q_local = q_global[:, start_idx:end_idx, :].clone().detach().requires_grad_(True)
     k_local = k_global[:, start_idx:end_idx, :].clone().detach().requires_grad_(True)
     v_local = v_global[:, start_idx:end_idx, :].clone().detach().requires_grad_(True)
@@ -182,9 +174,6 @@ def run_cp_dplr_test_worker(
     gk_local = gk_global[:, start_idx:end_idx, :].clone().detach().requires_grad_(True)
     do_local = do_global[:, start_idx:end_idx, :].clone()
 
-    print(f"[Rank {rank}] chunk: [{start_idx}, {end_idx}), "
-          f"cu_seqlens: {context.cu_seqlens.tolist()}, "
-          f"pre_num_ranks: {context.pre_num_ranks}")
     dist.barrier()
 
     route_spy = None
@@ -200,7 +189,6 @@ def run_cp_dplr_test_worker(
         DPLRTileLangBackend.chunk_dplr_delta_rule = _spy
 
     try:
-        # CP Forward
         o_local, _ = op(
             q=q_local,
             k=k_local,
@@ -213,7 +201,6 @@ def run_cp_dplr_test_worker(
             chunk_size=op_chunk_size,
         )
 
-        # CP Backward
         o_local.backward(do_local)
 
         if assert_tilelang:
@@ -223,50 +210,62 @@ def run_cp_dplr_test_worker(
             DPLRTileLangBackend.chunk_dplr_delta_rule = _orig
 
     o_cp_global = gather_global(o_local, world_size=world_size)
-
     dq_cp_global = gather_global(q_local.grad, world_size=world_size)
-
     dk_cp_global = gather_global(k_local.grad, world_size=world_size)
-
     dv_cp_global = gather_global(v_local.grad, world_size=world_size)
-
     da_cp_global = gather_global(a_local.grad, world_size=world_size)
-
     db_cp_global = gather_global(b_local.grad, world_size=world_size)
-
     dgk_cp_global = gather_global(gk_local.grad, world_size=world_size)
 
-    test_passed = True
     if rank == 0:
-        print(f"\n[{test_name}] Verifying results...")
+        assert_close("Output", ref_out, o_cp_global, ratio=8e-3, warning=False)
+        assert_close("dq", ref_dq, dq_cp_global, ratio=8e-3, warning=False)
+        assert_close("dk", ref_dk, dk_cp_global, ratio=8e-3, warning=False)
+        assert_close("dv", ref_dv, dv_cp_global, ratio=8e-3, warning=False)
+        assert_close("da", ref_da, da_cp_global, ratio=8e-3, warning=False)
+        assert_close("db", ref_db, db_cp_global, ratio=8e-3, warning=False)
+        assert_close("dgk", ref_dgk, dgk_cp_global, ratio=8e-3, warning=False)
 
-        tensors_to_verify = [
-            ("Output", ref_out, o_cp_global),
-            ("dq", ref_dq, dq_cp_global),
-            ("dk", ref_dk, dk_cp_global),
-            ("dv", ref_dv, dv_cp_global),
-            ("da", ref_da, da_cp_global),
-            ("db", ref_db, db_cp_global),
-            ("dgk", ref_dgk, dgk_cp_global),
-        ]
 
-        ratio_threshold = 8e-3
-        failures = []
-        for name, ref, cp in tensors_to_verify:
-            try:
-                assert_close(name, ref, cp, ratio=ratio_threshold, warning=False)
-            except AssertionError as e:
-                failures.append((name, str(e).strip()))
-        if failures:
-            print(f"❌ [{test_name}] Test Failed on: {[f[0] for f in failures]}")
-            for name, msg in failures:
-                print(f"   - {msg}")
-            print()
-            test_passed = False
-        else:
-            print(f"✅ [{test_name}] Test Passed!\n")
+@pytest.mark.parametrize(
+    ('world_size', 'lengths', 'op'),
+    [
+        pytest.param(2, [400, 624], chunk_dplr_delta_rule, id='CP2_SequenceCut'),
+        pytest.param(2, [512, 512], chunk_dplr_delta_rule, id='CP2_BoundaryAligned'),
+        pytest.param(4, [700, 324], chunk_dplr_delta_rule, id='CP4_Complex'),
+        pytest.param(4, [1024], chunk_dplr_delta_rule, id='CP4_SingleSequence'),
+        pytest.param(2, [100, 200, 300, 424], chunk_dplr_delta_rule, id='CP2_ManyShortSequences'),
+        pytest.param(2, [400, 624], _chunk_rwkv7, id='CP2_RWKV7_SequenceCut'),
+        pytest.param(4, [1024], _chunk_rwkv7, id='CP4_RWKV7_SingleSequence'),
+    ],
+)
+def test_chunk(world_size, lengths, op):
+    run_distributed(
+        worker=_test_chunk,
+        world_size=world_size,
+        T=1024,
+        H=4,
+        D=64,
+        lengths=lengths,
+        dtype=torch.bfloat16,
+        op=op,
+    )
 
-    dist.barrier()
 
-    if not test_passed:
-        raise AssertionError(f"Test {test_name} failed on rank {rank}")
+def test_chunk_tilelang(monkeypatch):
+    """CP2 through the TileLang DPLR backend (FLA_TILELANG=1), with route assertion."""
+    if not DPLRTileLangBackend.is_available():
+        pytest.skip("TileLang backend not available")
+
+    monkeypatch.setenv("FLA_TILELANG", "1")
+    run_distributed(
+        worker=_test_chunk,
+        world_size=2,
+        T=1024,
+        H=128,
+        D=64,
+        lengths=[400, 624],
+        dtype=torch.bfloat16,
+        op_chunk_size=32,
+        assert_tilelang=True,
+    )

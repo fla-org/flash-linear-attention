@@ -8,10 +8,13 @@
 """Compare CP GDN-2 outputs and gradients with per-sequence recurrent references."""
 
 
+import math
+
 import pytest
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
+import triton
 
 from fla.ops.cp import build_cp_context
 from fla.ops.gdn2 import chunk_gdn2
@@ -23,10 +26,9 @@ from tests.cp.utils import gather_global, run_distributed
 pytestmark = pytest.mark.skipif(device != "cuda", reason="requires CUDA or ROCm GPUs")
 
 
-def run_cp_gdn2_test_worker(
+def _test_chunk(
     rank: int,
     world_size: int,
-    test_name: str,
     T: int,
     H: int,
     D: int,
@@ -38,12 +40,6 @@ def run_cp_gdn2_test_worker(
     lower_bound: float | None = None,
     state_v_first: bool = False,
 ):
-    """
-    Worker function for CP GDN-2 test.
-    Runs in a spawned process with the given rank.
-    """
-    device = torch.device(f'cuda:{rank}')
-
     assert T % world_size == 0, f"T={T} must be divisible by world_size={world_size}"
     assert sum(lengths) == T, f"Sum of lengths {sum(lengths)} must equal T={T}"
 
@@ -60,7 +56,7 @@ def run_cp_gdn2_test_worker(
 
     if rank == 0:
         torch.manual_seed(42)
-        # Generate inputs
+
         # Asymmetric initialization for q and k to test L2 norm
         # q: small positive values around 1.0
         # k: large negative values around -50.0
@@ -76,7 +72,6 @@ def run_cp_gdn2_test_worker(
         w_global.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype).sigmoid())
         do_global.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype))
 
-    # Broadcast to ensure all ranks have same data
     dist.broadcast(q_global, src=0)
     dist.broadcast(k_global, src=0)
     dist.broadcast(v_global, src=0)
@@ -87,17 +82,13 @@ def run_cp_gdn2_test_worker(
 
     # Prepare and broadcast A_log and dt_bias for gate computation
     # Always generate these for reference, even when use_gate_in_kernel=False
-    import triton
     num_even_heads = triton.next_power_of_2(H)
     projection_size = H * D
 
-    # All ranks create tensors with same shape first
     A_log_global = torch.empty(num_even_heads, dtype=torch.float32, device=device)
     dt_bias_global = torch.empty(projection_size, dtype=torch.float32, device=device)
 
-    # Rank 0 fills in the actual data
     if rank == 0:
-        import math
         # Per-head variation in A_log is CRITICAL for catching backward kernel
         # bugs like missing `i_h * K` in gk pointer offsets.  When A_log=0 for
         # all heads, -exp(A_log)=-1 uniformly → same gate scaling → reading the
@@ -111,11 +102,9 @@ def run_cp_gdn2_test_worker(
                        (math.log(0.1) - math.log(0.001)) + math.log(0.001)).clamp_(min=1e-4)
         dt_bias_global.copy_(dt + torch.log(-torch.expm1(-dt)))
 
-    # Broadcast from rank 0 to all ranks
     dist.broadcast(A_log_global, src=0)
     dist.broadcast(dt_bias_global, src=0)
 
-    # Prepare cu_seqlens
     cu_seqlens_list = [0] + torch.cumsum(torch.tensor(lengths), 0).tolist()
     cu_seqlens_global = torch.tensor(cu_seqlens_list, device=device, dtype=torch.long)
 
@@ -212,14 +201,12 @@ def run_cp_gdn2_test_worker(
 
     dist.barrier()
 
-    # Build CP context
     context = build_cp_context(cu_seqlens_global, group=dist.group.WORLD)
 
     chunk_size = T // world_size
     start_idx = rank * chunk_size
     end_idx = (rank + 1) * chunk_size
 
-    # Get local slices
     q_local = q_global[:, start_idx:end_idx, :].clone().detach().requires_grad_(True)
     k_local = k_global[:, start_idx:end_idx, :].clone().detach().requires_grad_(True)
     v_local = v_global[:, start_idx:end_idx, :].clone().detach().requires_grad_(True)
@@ -230,7 +217,6 @@ def run_cp_gdn2_test_worker(
 
     dist.barrier()
 
-    # CP Forward
     o_local, _ = chunk_gdn2(
         q=q_local,
         k=k_local,
@@ -249,53 +235,30 @@ def run_cp_gdn2_test_worker(
         state_v_first=state_v_first,
     )
 
-    # CP Backward
     o_local.backward(do_local)
 
     o_cp_global = gather_global(o_local, world_size=world_size)
-
     dq_cp_global = gather_global(q_local.grad, world_size=world_size)
-
     dk_cp_global = gather_global(k_local.grad, world_size=world_size)
-
     dv_cp_global = gather_global(v_local.grad, world_size=world_size)
-
     dg_cp_global = gather_global(g_local.grad, world_size=world_size)
-
     db_cp_global = gather_global(b_local.grad, world_size=world_size)
-
     dw_cp_global = gather_global(w_local.grad, world_size=world_size)
 
-    test_passed = True
     if rank == 0:
-
         # Tolerance: ratio=8e-3 for all tensors, matching test_kda.py.
         # Measured ratios are actually ~0.9-1.6% (db ~2.3%): per-dim gating
         # plus the L2 norm over k ~ N(-50, 10) amplify the bf16 state
         # communication precision loss.
         # db (b grad) additionally involves a cross-rank reduction, so it is
         # marked warning-only unconditionally.
-        tensors_to_verify = [
-            ("Output", ref_out, o_cp_global),
-            ("dq", ref_dq, dq_cp_global),
-            ("dk", ref_dk, dk_cp_global),
-            ("dv", ref_dv, dv_cp_global),
-            ("dg", ref_dg, dg_cp_global),
-            ("db", ref_db, db_cp_global),
-            ("dw", ref_dw, dw_cp_global),
-        ]
-
-        try:
-            for name, ref, cp in tensors_to_verify:
-                warn = (name == "db")
-                assert_close(name, ref, cp, ratio=8e-3, warning=warn)
-        except AssertionError:
-            test_passed = False
-
-    dist.barrier()
-
-    if not test_passed:
-        raise AssertionError(f"Test {test_name} failed on rank {rank}")
+        assert_close("Output", ref_out, o_cp_global, ratio=8e-3, warning=False)
+        assert_close("dq", ref_dq, dq_cp_global, ratio=8e-3, warning=False)
+        assert_close("dk", ref_dk, dk_cp_global, ratio=8e-3, warning=False)
+        assert_close("dv", ref_dv, dv_cp_global, ratio=8e-3, warning=False)
+        assert_close("dg", ref_dg, dg_cp_global, ratio=8e-3, warning=False)
+        assert_close("db", ref_db, db_cp_global, ratio=8e-3, warning=True)
+        assert_close("dw", ref_dw, dw_cp_global, ratio=8e-3, warning=False)
 
 
 @pytest.mark.parametrize(
@@ -312,9 +275,9 @@ def run_cp_gdn2_test_worker(
         pytest.param(4, 10240, [10240], dict(state_v_first=True), id='CP4_TransposeState'),
     ],
 )
-def test_chunk(request, world_size, T, lengths, options):
+def test_chunk(world_size, T, lengths, options):
     run_distributed(
-        worker=run_cp_gdn2_test_worker,
+        worker=_test_chunk,
         world_size=world_size,
         T=T,
         H=12,
@@ -324,6 +287,5 @@ def test_chunk(request, world_size, T, lengths, options):
         use_gate_in_kernel=True,
         safe_gate=True,
         lower_bound=-5.0,
-        test_name=request.node.callspec.id,
         **options,
     )

@@ -21,27 +21,16 @@ from tests.cp.utils import gather_global, run_distributed
 pytestmark = pytest.mark.skipif(device != "cuda", reason="requires CUDA or ROCm GPUs")
 
 
-def run_cp_token_shift_test_worker(
+def _test_token_shift(
     rank: int,
     world_size: int,
-    test_name: str,
     T: int,
     D: int,
     lengths: list[int],
     dtype,
 ):
-    """Worker function for CP token shift test."""
-    device = torch.device(f'cuda:{rank}')
-
     assert T % world_size == 0, f"T={T} must be divisible by world_size={world_size}"
     assert sum(lengths) == T, f"Sum of lengths {sum(lengths)} must equal T={T}"
-
-    if rank == 0:
-        print(f"\n{'='*60}")
-        print(f"Test: {test_name}")
-        print(f"Config: T={T}, D={D}, world_size={world_size}")
-        print(f"Sequence lengths: {lengths}")
-        print(f"{'='*60}")
 
     torch.manual_seed(42)
     B = 1
@@ -72,40 +61,22 @@ def run_cp_token_shift_test_worker(
     x_local = x_global[:, start_idx:end_idx, :].clone().detach().requires_grad_(True)
     dy_local = dy_global[:, start_idx:end_idx, :].clone()
 
-    print(f"[Rank {rank}] chunk: [{start_idx}, {end_idx}), "
-          f"cu_seqlens: {context.cu_seqlens.tolist()}, "
-          f"pre_num_ranks: {context.pre_num_ranks}")
     dist.barrier()
 
-    # CP Forward
     y_local = token_shift_cp(
         x=x_local,
         cp_context=context,
         cu_seqlens=context.cu_seqlens,
     )
 
-    # CP Backward
     y_local.backward(dy_local)
 
     y_cp_global = gather_global(y_local, world_size=world_size)
-
     dx_cp_global = gather_global(x_local.grad, world_size=world_size)
 
-    test_passed = True
     if rank == 0:
-        print(f"\n[{test_name}] Verification Results:")
-        try:
-            assert_close("Output", ref_out, y_cp_global, ratio=0.001)
-            assert_close("dx", ref_dx, dx_cp_global, ratio=0.001)
-            print(f"✅ [{test_name}] Test Passed!\n")
-        except AssertionError as e:
-            print(f"❌ [{test_name}] Test Failed: {e}\n")
-            test_passed = False
-
-    dist.barrier()
-
-    if not test_passed:
-        raise AssertionError(f"Test {test_name} failed on rank {rank}")
+        assert_close("Output", ref_out, y_cp_global, ratio=0.001)
+        assert_close("dx", ref_dx, dx_cp_global, ratio=0.001)
 
 
 @pytest.mark.parametrize(
@@ -120,13 +91,12 @@ def run_cp_token_shift_test_worker(
         pytest.param(2, [514, 510], id='CP2_ShortTail_Len2'),
     ],
 )
-def test_token_shift(request, world_size, lengths):
+def test_token_shift(world_size, lengths):
     run_distributed(
-        worker=run_cp_token_shift_test_worker,
+        worker=_test_token_shift,
         world_size=world_size,
         T=1024,
         D=128,
         lengths=lengths,
         dtype=torch.float32,
-        test_name=request.node.callspec.id,
     )
