@@ -14,6 +14,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.backends import dispatch
 from fla.ops.utils import prepare_chunk_indices
 
 
@@ -59,8 +60,8 @@ def _atk_backward_chunk_out(
     """
     Per-chunk backward kernel for ATK. K-tiled variant.
     """
-    i_t = tl.program_id(0)
-    h = tl.program_id(1)
+    i_t = tl.program_id(0).to(tl.int64)
+    h = tl.program_id(1).to(tl.int64)
     chunk_id = tl.program_id(2).to(tl.int64)
 
     if IS_VARLEN:
@@ -331,8 +332,8 @@ def _atk_backward_chunk_summary(
     BK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t = tl.program_id(0)
-    h = tl.program_id(1)
+    i_t = tl.program_id(0).to(tl.int64)
+    h = tl.program_id(1).to(tl.int64)
     chunk_id = tl.program_id(2).to(tl.int64)
 
     if IS_VARLEN:
@@ -425,6 +426,7 @@ def _atk_backward_chunk_summary(
     tl.atomic_add(gbeta_ptr, gbeta_val, mask=mask_T)
 
 
+@dispatch('atk')
 def chunk_atk_bwd(
     k: torch.Tensor,
     g_raw: torch.Tensor,

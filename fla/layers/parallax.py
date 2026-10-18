@@ -24,7 +24,7 @@ from fla.ops.parallax.decode import parallax_decode, parallax_decode_one_step
 from fla.ops.utils.index import prepare_lens_from_mask
 
 if TYPE_CHECKING:
-    from fla.models.utils import Cache
+    from fla.models.cache_utils import Cache
 
 logger = logging.get_logger(__name__)
 

@@ -21,7 +21,7 @@ from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gat
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
-    from fla.models.utils import Cache
+    from fla.models.cache_utils import Cache
 
 from fla.layers.utils import (
     get_layer_cache,
@@ -693,7 +693,7 @@ class MomAttention(nn.Module):
 
         if torch.is_grad_enabled():
             mode = 'chunk'
-        elif hidden_states.shape[1] <= 64:
+        elif hidden_states.shape[1] <= 64 and not self.training:
             mode = 'fused_recurrent'
         else:
             mode = self.mode

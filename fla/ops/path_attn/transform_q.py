@@ -15,7 +15,7 @@ from fla.ops.utils import get_max_num_splits, prepare_chunk_indices
 @triton.heuristics({
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
-@triton.jit(do_not_specialize=['T'])
+@triton.jit(do_not_specialize=['T', 'NUM_BLOCKS'])
 def transform_q_fwd_kernel(
     q,
     q_new,
@@ -32,10 +32,10 @@ def transform_q_fwd_kernel(
     BT: tl.constexpr,
     BS: tl.constexpr,
     BK: tl.constexpr,
-    NUM_BLOCKS: tl.constexpr,
+    NUM_BLOCKS,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1)
+    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
     i_h = i_hq // G
 

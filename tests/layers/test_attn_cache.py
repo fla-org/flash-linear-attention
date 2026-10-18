@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from fla.layers.attn import Attention
-from fla.models.utils import Cache
+from fla.models.cache_utils import Cache
 from fla.utils import assert_close, device, find_spec_cached
 
 pytestmark = pytest.mark.skipif(find_spec_cached('flash_attn') is None, reason='Attention requires flash-attn')

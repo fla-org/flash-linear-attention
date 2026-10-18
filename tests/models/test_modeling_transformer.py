@@ -11,7 +11,7 @@ import torch
 from fla.models import TransformerConfig, TransformerForCausalLM
 from fla.utils import assert_close, device, find_spec_cached
 
-from .test_modeling_base import run_test_generation, run_test_model_forward_backward
+from .utils import check_forward, check_generation
 
 # Mark (not importorskip): a fully skipped module reports "no tests collected" and exits
 # with code 5, which CI per-file loops treat as a failure.
@@ -19,9 +19,7 @@ pytestmark = pytest.mark.skipif(find_spec_cached("flash_attn") is None,
                                 reason="Attention requires flash-attn (`pip install flash-attn --no-build-isolation`).")
 
 
-# ===================================================================================
-# Test for Modeling (Forward/Backward Pass)
-# ===================================================================================
+@pytest.mark.parametrize('varlen', [False, True], ids=['dense', 'varlen'])
 @pytest.mark.parametrize(
     ['L', 'B', 'T', 'H', 'D', 'use_l2warp', 'attnres_block_size', 'dtype'],
     [
@@ -45,8 +43,9 @@ def test_modeling(
     use_l2warp: bool,
     attnres_block_size: int | None,
     dtype: torch.dtype,
+    varlen: bool,
 ):
-    run_test_model_forward_backward(
+    check_forward(
         L,
         B,
         T,
@@ -56,12 +55,10 @@ def test_modeling(
         use_l2warp=use_l2warp,
         attnres_block_size=attnres_block_size,
         dtype=dtype,
+        varlen=varlen,
     )
 
 
-# ===================================================================================
-# Test for Generation
-# ===================================================================================
 @pytest.mark.parametrize(
     ['L', 'B', 'T', 'H', 'D', 'dtype'],
     [
@@ -79,7 +76,7 @@ def test_generation(
     D: int,
     dtype: torch.dtype,
 ):
-    run_test_generation(L, B, T, H, D, TransformerConfig, dtype)
+    check_generation(L, B, T, H, D, TransformerConfig, dtype)
 
 
 @pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16])

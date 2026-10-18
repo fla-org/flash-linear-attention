@@ -271,6 +271,37 @@ def generate_inputs(
 # Op registrations
 # ===========================================================================
 
+
+def shape_cyfa_readout(B, T, H, D, M=128, **kw):
+    return (H, M - 1, M - 1)
+
+
+def init_cyfa_inputs(inputs, **kwargs):
+    with torch.no_grad():
+        inputs['q_norm_weight'].fill_(1)
+        inputs['k_norm_weight'].fill_(1)
+        readout = inputs['readout']
+        readout.copy_(torch.eye(readout.shape[-1], dtype=readout.dtype, device=readout.device))
+
+
+register_op(OpConfig(
+    name='chunk_cyfa',
+    import_path='fla.ops.cyfa',
+    inputs={
+        'q': TensorSpec(shape_BTHD),
+        'k': TensorSpec(shape_BTHD),
+        'v': TensorSpec(shape_BTHD),
+        'g': TensorSpec(shape_BTH, dtype='float32', transform=logsigmoid),
+        'delta': TensorSpec(shape_BTH, dtype='float32', transform=sigmoid_transform),
+        'beta': TensorSpec(shape_BTH, dtype='float32', transform=sigmoid_transform),
+        'readout': TensorSpec(shape_cyfa_readout, dtype='float32'),
+        'q_norm_weight': TensorSpec(shape_D, dtype='float32'),
+        'k_norm_weight': TensorSpec(shape_D, dtype='float32'),
+    },
+    extra_kwargs={'q_norm_eps': 1e-6, 'k_norm_eps': 1e-6, 'output_final_state': True},
+    post_init=init_cyfa_inputs,
+))
+
 # --- Simple qkv (no extra inputs) ---
 
 _simple_qkv = {
@@ -364,6 +395,20 @@ register_op(OpConfig(
     },
     extra_kwargs={'use_qk_l2norm_in_kernel': True, 'safe_gate': True, 'lower_bound': -5},
     category='gate_beta',
+))
+
+register_op(OpConfig(
+    name='fused_recurrent_gdn2',
+    import_path='fla.ops.gdn2',
+    inputs={
+        **_simple_qkv,
+        'g': TensorSpec(shape_BTHD, transform=logsigmoid),
+        'b': TensorSpec(shape_BTHD, transform=sigmoid_transform),
+        'w': TensorSpec(shape_BTHD, transform=sigmoid_transform),
+    },
+    extra_kwargs={'use_qk_l2norm_in_kernel': True, 'output_final_state': True},
+    skip_backward=True,
+    category='gdn2',
 ))
 
 register_op(OpConfig(
@@ -509,6 +554,13 @@ register_op(OpConfig(
     import_path='fla.ops.attn',
     inputs={**_simple_qkv},
     output_is_tuple=False,
+    category='attn',
+))
+
+register_op(OpConfig(
+    name='parallel_stickbreaking_attn',
+    import_path='fla.ops.stickbreaking_attn',
+    inputs={**_simple_qkv},
     category='attn',
 ))
 

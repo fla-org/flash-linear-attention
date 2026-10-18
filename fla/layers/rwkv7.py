@@ -26,7 +26,7 @@ from fla.ops.rwkv7.fused_k_update import fused_k_rwkv7
 from fla.ops.rwkv7.gate_output_correction import gate_output_correction
 
 if TYPE_CHECKING:
-    from fla.models.utils import Cache
+    from fla.models.cache_utils import Cache
 
 
 class RWKV7Attention(nn.Module):
@@ -217,10 +217,9 @@ class RWKV7Attention(nn.Module):
 
     @staticmethod
     def _orthogonal_init(weight, gain=1.0):
-        oringinal_dtype = weight.dtype
-        weight = weight.float()
-        nn.init.orthogonal_(weight, gain=gain)
-        weight = weight.to(oringinal_dtype)
+        float_weight = weight.float()
+        nn.init.orthogonal_(float_weight, gain=gain)
+        weight.copy_(float_weight)
 
     def forward(
         self,

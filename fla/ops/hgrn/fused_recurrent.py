@@ -42,7 +42,7 @@ def fused_recurrent_hgrn_fwd_kernel(
     STORE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     ND = tl.cdiv(D, BD)
     i_d, i_n = pid % ND, (pid // ND).to(tl.int64)
     if IS_VARLEN:
@@ -109,7 +109,7 @@ def fused_recurrent_hgrn_bwd_kernel(
     USE_FINAL_STATE_GRADIENT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     ND = tl.cdiv(D, BD)
     i_d, i_n = pid % ND, (pid // ND).to(tl.int64)
     if IS_VARLEN:

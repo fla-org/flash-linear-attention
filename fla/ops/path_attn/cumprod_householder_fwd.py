@@ -16,7 +16,7 @@ from fla.utils import check_shared_mem
 @triton.heuristics({
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
-@triton.jit
+@triton.jit(do_not_specialize=['T'])
 def chunk_cumprod_householder_fwd_kernel(
     k,
     k_new,
@@ -32,11 +32,11 @@ def chunk_cumprod_householder_fwd_kernel(
     K: tl.constexpr,
     H: tl.constexpr,
     BK: tl.constexpr,
-    T: tl.constexpr,
+    T,
     S: tl.constexpr,  # split size, aka large chunk size
     IS_VARLEN: tl.constexpr,
 ):
-    i_ss, i_h = tl.program_id(0), tl.program_id(1)
+    i_ss, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
 
     if IS_VARLEN:
         i_n, i_s = tl.load(split_indices + i_ss * 2).to(tl.int32), tl.load(split_indices + i_ss * 2 + 1).to(tl.int32)
