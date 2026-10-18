@@ -25,7 +25,7 @@ from fla.modules.activations import (
     swiglu_linear,
     swish,
 )
-from fla.modules.activations.ops import prepare_input
+from fla.modules.activations.ops import alloc_output, prepare_input
 from fla.utils import assert_close, device
 
 
@@ -507,6 +507,7 @@ def test_powglu_singleton_strides(compile: bool, linear: bool):
         pytest.param((3, 1, 128), (256, 1536, 1), False, id='chunked-singleton'),
         pytest.param((3, 4), (0, 1), False, id='broadcast-rows'),
         pytest.param((3, 1, 4), (0, 999, 1), False, id='broadcast-singleton'),
+        pytest.param((2, 4, 3, 5), (12, 3, 1, 1), False, id='overlapping-rows'),
         pytest.param((3, 4, 5), (20, 1, 4), True, id='transposed'),
         pytest.param((3, 10, 20), (400, 20, 1), True, id='outer-strided'),
         pytest.param((10, 10), (20, 2), True, id='strided-columns'),
@@ -515,7 +516,7 @@ def test_powglu_singleton_strides(compile: bool, linear: bool):
         pytest.param((2, 0), (1, 1), False, id='empty-columns'),
     ],
 )
-def test_prepare_input(shape: tuple[int, ...], strides: tuple[int, ...], needs_copy: bool):
+def test_activation_layout(shape: tuple[int, ...], strides: tuple[int, ...], needs_copy: bool):
     torch.manual_seed(42)
     storage_size = max(1 + sum((size - 1) * stride for size, stride in zip(shape, strides)), 0)
     x = torch.randn(storage_size).as_strided(size=shape, stride=strides)
@@ -525,6 +526,10 @@ def test_prepare_input(shape: tuple[int, ...], strides: tuple[int, ...], needs_c
     rows, D = prod(shape[:-1]), shape[-1] if shape else 1
     addressed = prepared.as_strided(size=(rows, D), stride=(stride_row, 1))
     torch.testing.assert_close(addressed.view(shape), x, rtol=0, atol=0)
+    for contiguous in (False, True):
+        output = alloc_output(x=prepared, contiguous=contiguous)
+        assert output.shape == shape
+        assert output.is_contiguous()
 
 
 @pytest.mark.parametrize(
