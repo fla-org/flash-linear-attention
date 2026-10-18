@@ -625,50 +625,121 @@ register_op(OpConfig(
     category='naive_attnres',
 ))
 
-_hc_shapes = {
-    'T1_N4_D128': {'B': 1, 'T': 1, 'H': 4, 'D': 128},
-    'T63_N4_D1024': {'B': 1, 'T': 63, 'H': 4, 'D': 1024},
-    'T2048_N4_D4096': {'B': 1, 'T': 2048, 'H': 4, 'D': 4096},
-    'B2_T1024_N4_D4096': {'B': 2, 'T': 1024, 'H': 4, 'D': 4096},
-    'T8192_N4_D4096': {'B': 1, 'T': 8192, 'H': 4, 'D': 4096},
-    'T2048_N8_D1025': {'B': 1, 'T': 2048, 'H': 8, 'D': 1025},
+_hc_default_shapes = {
+    'B1_T1_H4_D128': {'B': 1, 'T': 1, 'H': 4, 'D': 128},
+    'B1_T63_H4_D1024': {'B': 1, 'T': 63, 'H': 4, 'D': 1024},
+    'B1_T2048_H4_D4096': {'B': 1, 'T': 2048, 'H': 4, 'D': 4096},
+    'B2_T1024_H4_D4096': {'B': 2, 'T': 1024, 'H': 4, 'D': 4096},
+    'B1_T8192_H4_D4096': {'B': 1, 'T': 8192, 'H': 4, 'D': 4096},
+    'B1_T2048_H8_D1025': {'B': 1, 'T': 2048, 'H': 8, 'D': 1025},
 }
+
+
+def _shape_hc_branch(B, T, H, D, **kw):
+    return (B, T, D)
 
 
 def _shape_hc_mixing(B, T, H, D, **kw):
     return (B, T, H, H)
 
 
-for _kind in ('pre', 'ihc', 'mhc', 'sinkhorn'):
-    _inputs = {'x': TensorSpec(shape_BTHD)}
-    _weight = TensorSpec(shape_BTH, dtype='float32')
-    _mixing = TensorSpec(_shape_hc_mixing, dtype='float32')
-    if _kind == 'pre':
-        _inputs['pre'] = _weight
-        _function = 'hc_pre'
-    elif _kind == 'sinkhorn':
-        _inputs = {'logits': _mixing}
-        _function = 'sinkhorn'
-    else:
-        _inputs.update(branch=TensorSpec(lambda B, T, H, D, **kw: (B, T, D)), post=_weight)
-        if _kind == 'mhc':
-            _inputs['mixing'] = _mixing
-        _function = 'hc_post'
-    for _prefix in ('', 'naive_'):
-        register_op(OpConfig(
-            name=f'{_prefix}hc_{_kind}',
-            import_path='fla.ops.hc',
-            func_name=f'{_prefix}{_function}',
-            inputs=_inputs.copy(),
-            output_is_tuple=False,
-            default_shapes=_hc_shapes,
-            category='hc',
-            test_file='tests/ops/test_hc.py',
-            backend_env={} if _prefix else {
-                'gluon': 'FLA_HC_GLUON',
-                'tilelang': 'FLA_HC_TILELANG',
-            },
-        ))
+_hc_pre_inputs = {
+    'x': TensorSpec(shape_BTHD),
+    'pre': TensorSpec(shape_BTH, dtype='float32'),
+}
+
+_hc_post_inputs = {
+    'x': TensorSpec(shape_BTHD),
+    'branch': TensorSpec(_shape_hc_branch),
+    'post': TensorSpec(shape_BTH, dtype='float32'),
+}
+
+_hc_post_mhc_inputs = {
+    **_hc_post_inputs,
+    'mixing': TensorSpec(_shape_hc_mixing, dtype='float32'),
+}
+
+_sinkhorn_inputs = {
+    'logits': TensorSpec(_shape_hc_mixing, dtype='float32'),
+}
+
+register_op(OpConfig(
+    name='hc_pre',
+    import_path='fla.ops.hc',
+    inputs=_hc_pre_inputs,
+    output_is_tuple=False,
+    default_shapes=_hc_default_shapes,
+    category='hc',
+    backend_env={'gluon': 'FLA_HC_GLUON', 'tilelang': 'FLA_HC_TILELANG'},
+))
+
+register_op(OpConfig(
+    name='naive_hc_pre',
+    import_path='fla.ops.hc',
+    inputs=_hc_pre_inputs,
+    output_is_tuple=False,
+    default_shapes=_hc_default_shapes,
+    category='hc',
+))
+
+register_op(OpConfig(
+    name='hc_post',
+    import_path='fla.ops.hc',
+    inputs=_hc_post_inputs,
+    output_is_tuple=False,
+    default_shapes=_hc_default_shapes,
+    category='hc',
+    backend_env={'gluon': 'FLA_HC_GLUON', 'tilelang': 'FLA_HC_TILELANG'},
+))
+
+register_op(OpConfig(
+    name='naive_hc_post',
+    import_path='fla.ops.hc',
+    inputs=_hc_post_inputs,
+    output_is_tuple=False,
+    default_shapes=_hc_default_shapes,
+    category='hc',
+))
+
+register_op(OpConfig(
+    name='hc_post_mhc',
+    import_path='fla.ops.hc',
+    inputs=_hc_post_mhc_inputs,
+    func_name='hc_post',
+    output_is_tuple=False,
+    default_shapes=_hc_default_shapes,
+    category='hc',
+    backend_env={'gluon': 'FLA_HC_GLUON', 'tilelang': 'FLA_HC_TILELANG'},
+))
+
+register_op(OpConfig(
+    name='naive_hc_post_mhc',
+    import_path='fla.ops.hc',
+    inputs=_hc_post_mhc_inputs,
+    func_name='naive_hc_post',
+    output_is_tuple=False,
+    default_shapes=_hc_default_shapes,
+    category='hc',
+))
+
+register_op(OpConfig(
+    name='sinkhorn',
+    import_path='fla.ops.hc',
+    inputs=_sinkhorn_inputs,
+    output_is_tuple=False,
+    default_shapes=_hc_default_shapes,
+    category='hc',
+    backend_env={'gluon': 'FLA_HC_GLUON', 'tilelang': 'FLA_HC_TILELANG'},
+))
+
+register_op(OpConfig(
+    name='naive_sinkhorn',
+    import_path='fla.ops.hc',
+    inputs=_sinkhorn_inputs,
+    output_is_tuple=False,
+    default_shapes=_hc_default_shapes,
+    category='hc',
+))
 
 
 # --- NSA (native sparse attention) — GQA + structured block selection ---
