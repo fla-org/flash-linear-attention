@@ -42,4 +42,8 @@ jobs:
           python3 -c "import triton; print('triton', triton.__version__)"
 
       - name: Run ops tests
-        run: python3 -m pytest tests/ops/ -x -v --tb=short
+        run: |
+          python3 -m pytest -x -v --tb=short \
+            tests/ops/ \
+            tests/cp/test_intracard_cache.py \
+            tests/cp/test_kda_graph.py::test_chunk_graph_world1
