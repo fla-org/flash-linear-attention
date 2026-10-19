@@ -248,7 +248,7 @@ def kda_gate_bwd_kernel(
         tl.store(p_db, b_db.to(p_db.dtype.element_ty), mask=m_t)
 
 
-@dispatch('kda')
+@dispatch
 def kda_gate_fwd(
     g: torch.Tensor,
     A_log: torch.Tensor | None = None,
@@ -280,7 +280,7 @@ def kda_gate_fwd(
     return yg
 
 
-@dispatch('kda')
+@dispatch
 def kda_gate_bwd(
     g: torch.Tensor,
     A_log: torch.Tensor | None = None,
@@ -361,7 +361,7 @@ class KDAGateFunction(torch.autograd.Function):
 
 
 @torch.compiler.disable
-@dispatch('kda')
+@dispatch
 def fused_kda_gate(
     g: torch.Tensor,
     A_log: torch.Tensor | None = None,
@@ -475,7 +475,7 @@ def kda_gate_chunk_cumsum_vector_kernel(
 
 
 @input_guard
-@dispatch('kda')
+@dispatch
 def kda_gate_chunk_cumsum(
     g: torch.Tensor,
     A_log: torch.Tensor | None,

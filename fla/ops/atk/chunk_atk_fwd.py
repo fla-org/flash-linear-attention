@@ -420,7 +420,7 @@ def _atk_fwd_stages(
     return k_precond.to(k.dtype), ac, a, sa, at
 
 
-@dispatch('atk')
+@dispatch
 def chunk_atk_fwd(
     k: torch.Tensor,
     beta: torch.Tensor,
@@ -444,7 +444,7 @@ def chunk_atk_fwd(
     return k_precond, at
 
 
-@dispatch('atk')
+@dispatch
 def recompute_atk_fwd(
     k: torch.Tensor,
     beta: torch.Tensor,

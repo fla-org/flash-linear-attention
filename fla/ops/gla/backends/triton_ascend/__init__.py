@@ -10,6 +10,14 @@
 from __future__ import annotations
 
 from fla.backends import BaseBackend, register
+from fla.ops.gla.chunk import (
+    chunk_gla_bwd_dA,
+    chunk_gla_bwd_dqk_intra,
+    chunk_gla_bwd_dqkg,
+    chunk_gla_bwd_dv,
+    chunk_gla_fwd_intra_gk,
+    chunk_gla_fwd_o_gk,
+)
 
 _MAX_KV = 512
 
@@ -22,7 +30,12 @@ def _verify_kv(K: int, V: int | None = None) -> tuple[bool, str | None]:
     return True, None
 
 
-@register('gla')
+@register(chunk_gla_bwd_dA)
+@register(chunk_gla_bwd_dqk_intra)
+@register(chunk_gla_bwd_dqkg)
+@register(chunk_gla_bwd_dv)
+@register(chunk_gla_fwd_intra_gk)
+@register(chunk_gla_fwd_o_gk)
 class TritonAscendGLABackend(BaseBackend):
     backend_type = 'triton_ascend'
     package_name = None

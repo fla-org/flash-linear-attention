@@ -15,3 +15,6 @@ __all__ = [
     "naive_chunk_gated_delta_rule",
     "naive_recurrent_gated_delta_rule",
 ]
+
+
+from fla.ops.gated_delta_rule import backends  # noqa: F401

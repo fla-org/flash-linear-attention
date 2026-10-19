@@ -12,9 +12,17 @@ from __future__ import annotations
 import torch
 
 from fla.backends import BaseBackend, register
+from fla.ops.gated_delta_rule.chunk_fwd import chunk_gated_delta_rule_fwd_intra
+from fla.ops.gated_delta_rule.gate import gdn_gate_bwd, gdn_gate_chunk_cumsum, gdn_gate_fwd
+from fla.ops.gated_delta_rule.wy_fast import prepare_wy_repr_bwd, recompute_w_u_fwd
 
 
-@register('gated_delta_rule')
+@register(chunk_gated_delta_rule_fwd_intra)
+@register(gdn_gate_bwd)
+@register(gdn_gate_chunk_cumsum)
+@register(gdn_gate_fwd)
+@register(prepare_wy_repr_bwd)
+@register(recompute_w_u_fwd)
 class TritonAscendGDNBackend(BaseBackend):
     """Ascend NPU backend for GDN gate and WY-representation kernels."""
 

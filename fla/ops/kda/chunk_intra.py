@@ -796,7 +796,7 @@ def chunk_kda_fwd_kernel_intra_sub_chunk(
     tl.store(p_Akk, b_Ai.to(Akk.dtype.element_ty), mask=m_Akk_st)
 
 
-@dispatch('kda')
+@dispatch
 def chunk_kda_fwd_intra(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -940,7 +940,7 @@ def chunk_kda_fwd_intra(
     return w, u, qg, kg, Aqk, Akk
 
 
-@dispatch('kda')
+@dispatch
 def chunk_kda_bwd_intra(
     q: torch.Tensor,
     k: torch.Tensor,

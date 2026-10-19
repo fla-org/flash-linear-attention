@@ -7,14 +7,12 @@
 
 """AttnRes backends."""
 
+from fla.backends import GluonBackend
 from fla.ops.attnres.backends.triton_ascend import TritonAscendAttnResBackend
 
 __all__ = ['TritonAscendAttnResBackend']
 
-# gluon.py imports triton.experimental at module load; keep the Ascend backend usable when Gluon is unavailable.
-try:
+if GluonBackend.is_available():
     from fla.ops.attnres.backends.gluon import AttnResGluonBackend
 
     __all__.append('AttnResGluonBackend')
-except ImportError:
-    pass

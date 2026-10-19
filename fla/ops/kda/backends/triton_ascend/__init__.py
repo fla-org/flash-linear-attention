@@ -12,6 +12,12 @@ from __future__ import annotations
 import triton
 
 from fla.backends import BaseBackend, register
+from fla.ops.kda.chunk_bwd import chunk_kda_bwd_dAv, chunk_kda_bwd_wy_dqkg_fused
+from fla.ops.kda.chunk_intra import chunk_kda_bwd_intra, chunk_kda_fwd_intra
+from fla.ops.kda.chunk_intra_token_parallel import chunk_kda_fwd_intra_token_parallel
+from fla.ops.kda.fused_recurrent import fused_recurrent_kda_fwd
+from fla.ops.kda.gate import fused_kda_gate, kda_gate_bwd, kda_gate_chunk_cumsum, kda_gate_fwd
+from fla.ops.kda.wy_fast import recompute_w_u_fwd
 
 _SUPPORTED_INTRA_CHUNK_SIZES = (32, 64)
 _SUB_CHUNK = 16
@@ -48,7 +54,17 @@ def _verify_bwd_intra_k(args, kwargs):
     return True, None
 
 
-@register('kda')
+@register(chunk_kda_bwd_dAv)
+@register(chunk_kda_bwd_intra)
+@register(chunk_kda_bwd_wy_dqkg_fused)
+@register(chunk_kda_fwd_intra)
+@register(chunk_kda_fwd_intra_token_parallel)
+@register(fused_kda_gate)
+@register(fused_recurrent_kda_fwd)
+@register(kda_gate_bwd)
+@register(kda_gate_chunk_cumsum)
+@register(kda_gate_fwd)
+@register(recompute_w_u_fwd)
 class TritonAscendKDABackend(BaseBackend):
     """Ascend NPU backend for KDA gate, intra, WY, and backward kernels."""
 
