@@ -27,8 +27,8 @@ Run from the repository root. Resolve the baseline to a commit SHA before compar
 FLA_BENCH_BASE=$(git rev-parse origin/main)
 FLA_CI_ENV=0 python -m benchmarks.verify --op chunk_kda --base "$FLA_BENCH_BASE"
 
-python -m benchmarks.run models.training --name kda --batch_size 2 --seq_len 8192
-python -m benchmarks.run models.training --name kda --batch_size 2 --seq_len 8192 --varlen
+python -m benchmarks.run models.causal_lm --scenario training --name kda --batch_size 2 --seq_len 8192
+python -m benchmarks.run models.causal_lm --scenario training --name kda --batch_size 2 --seq_len 8192 --varlen
 ```
 
 The verification command runs the current tests; retain the validated baseline and tests yourself. A selected subset is useful during iteration but does not replace the full relevant gate before reporting a gain.
@@ -43,11 +43,11 @@ The runner measures the current checkout. Replace the kernel filter with the cha
 mkdir -p profile/kda
 ncu --target-processes all --set full \
   -k 'regex:chunk_kda' -c 1 -o profile/kda/full \
-  python -m benchmarks.run ops.latency --op chunk_kda --modes fwd
+  python -m benchmarks.run ops.kda --modes fwd
 
 ncu --target-processes all --set source --section SourceCounters \
   -k 'regex:chunk_kda' -c 1 -o profile/kda/source \
-  python -m benchmarks.run ops.latency --op chunk_kda --modes fwd
+  python -m benchmarks.run ops.kda --modes fwd
 ```
 
 Use duration, memory throughput, occupancy, stalls, and hot instructions to explain the bottleneck. Profiling overhead makes these runs unsuitable as the latency comparison; use the synchronized benchmark for that measurement.

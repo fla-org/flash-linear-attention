@@ -183,22 +183,22 @@ jobs:
 
           (
             status=0
-            run_benchmark chunk_gdn 0 python -m benchmarks.run ops.latency \
+            run_benchmark chunk_gdn 0 python -m benchmarks.run ops.gated_delta_rule \
               --op chunk_gdn --json benchmark_chunk_gdn.json || status=1
-            run_benchmark fused_recurrent_gdn2 0 python -m benchmarks.run ops.latency \
+            run_benchmark fused_recurrent_gdn2 0 python -m benchmarks.run ops.gdn2 \
               --op fused_recurrent_gdn2 --json benchmark_fused_recurrent_gdn2.json || status=1
             exit "$status"
           ) &
           pid_gdn=$!
-          run_benchmark chunk_kda 1 python -m benchmarks.run ops.latency \
+          run_benchmark chunk_kda 1 python -m benchmarks.run ops.kda \
             --op chunk_kda --json benchmark_chunk_kda.json &
           pid_kda=$!
           # fused_attnres finishes first in the four-card baseline; reuse its card for GDN2.
           (
             set -e
-            run_benchmark fused_attnres 2 python -m benchmarks.run ops.latency \
+            run_benchmark fused_attnres 2 python -m benchmarks.run ops.attnres \
               --op fused_attnres --json benchmark_fused_attnres.json
-            run_benchmark chunk_gdn2 2 python -m benchmarks.run ops.latency \
+            run_benchmark chunk_gdn2 2 python -m benchmarks.run ops.gdn2 \
               --op chunk_gdn2 \
               --json benchmark_chunk_gdn2.json
           python - <<'PY'
@@ -229,7 +229,7 @@ jobs:
           pid_conv1d=$!
           status=0
           wait "$pid_conv1d" || status=1
-          ASCEND_RT_VISIBLE_DEVICES=3 python -m benchmarks.run ops.latency \
+          ASCEND_RT_VISIBLE_DEVICES=3 python -m benchmarks.run ops.precond_gated_delta_rule \
             --op chunk_precond_gdn --json benchmark_chunk_precond_gdn.json \
             > chunk_precond_gdn.log 2>&1 &
           pid_precond_gdn=$!
@@ -242,8 +242,8 @@ jobs:
           # The runner exposes devices 0-3. Reuse device 0 only after the
           # parallel benchmarks finish so graph latency is not affected by
           # another workload sharing the same NPU.
-          ASCEND_RT_VISIBLE_DEVICES=0 python -m benchmarks.run ops.graph \
-            --op chunk_kda --modes fwdbwd \
+          ASCEND_RT_VISIBLE_DEVICES=0 python -m benchmarks.run ops.kda --scenario graph \
+            --modes fwdbwd \
             --custom-shapes '{"smoke": {"B": 1, "T": 128, "H": 2, "D": 64, "N": 2}}' \
             --warmup 3 --iterations 10 --json benchmark_kda_graph.json \
             > chunk_kda_graph.log 2>&1 || status=1

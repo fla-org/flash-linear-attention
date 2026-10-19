@@ -32,7 +32,7 @@ def run_module_benchmark(mark, save_dir: str | None = None, plot: bool = False) 
     results = []
     for config, frame in zip(configurations, frames, strict=True):
         for values, row in zip(config.x_vals, frame.to_dict(orient='records'), strict=True):
-            if not isinstance(values, (list, tuple)):
+            if not isinstance(values, list | tuple):
                 values = [values for _ in config.x_names]
             parameters = {**dict(zip(config.x_names, values, strict=True)), **config.args}
             parameters = {key: str(value) if isinstance(value, torch.dtype) else value for key, value in parameters.items()}

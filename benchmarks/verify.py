@@ -17,7 +17,7 @@ import sys
 from benchmarks.utils.environment import synchronize_device
 from benchmarks.utils.ops.registry import SHAPE_CONFIGS, get_op, list_ops
 from benchmarks.utils.ops.runner import run_benchmarks
-from benchmarks.utils.reporting import compare_results, format_machine_info, print_results
+from benchmarks.utils.reporting import compare_results, format_comparison, format_machine_info, print_results
 from benchmarks.utils.revisions import find_project_root
 
 
@@ -124,13 +124,8 @@ def main():
     )
     parser.add_argument('--op', help='Registered op name (see --list)')
     parser.add_argument(
-        '--kind', choices=['op', 'layer'], default='op',
-        help='Target kind. Only "op" is implemented; "layer" is a reserved '
-             'extension point. Default: op.',
-    )
-    parser.add_argument(
         '--base', default=None,
-        help='Git ref for the baseline column (e.g. "main"); reuses run.py worktree compare.',
+        help='Git ref for the baseline column (e.g. "main"); uses an isolated revision worker.',
     )
     parser.add_argument(
         '--modes', nargs='+', default=['fwd', 'fwdbwd'], choices=['fwd', 'fwdbwd'],
@@ -161,13 +156,6 @@ def main():
             print(f"  {name:30s}  [{cfg.category}]  {cfg.import_path}")
         return 0
 
-    if args.kind == 'layer':
-        raise NotImplementedError(
-            "verify.py currently covers ops only; the registry has no layer targets yet. "
-            "Layer support is a reserved extension point — register layer configs in "
-            "registry.py and add a layer input/reference path before using --kind layer."
-        )
-
     if not args.op:
         parser.error('--op is required (use --list to see available ops)')
 
@@ -182,7 +170,7 @@ def main():
                 f"\n  Gate test not found: {e}\n"
                 f"  The op directory name may differ from its test name. Pass "
                 f"--test-file tests/ops/test_<name>.py, or set test_file=... in "
-                f"registry.py for '{args.op}'.",
+                f"the owning benchmark definition for '{args.op}'.",
                 file=sys.stderr,
             )
             return 2
@@ -203,7 +191,7 @@ def main():
     if args.base:
         baseline, _ = run_benchmarks(op_names=[args.op], shapes=SHAPE_CONFIGS, modes=args.modes, ref=args.base)
     if baseline is not None:
-        compare_results(base=baseline, head=results, threshold=5.0)
+        print(format_comparison(changes=compare_results(base=baseline, head=results, threshold=5.0)))
     else:
         print_results(results=results)
 

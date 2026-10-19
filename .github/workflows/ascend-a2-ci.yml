@@ -60,11 +60,11 @@ jobs:
               'tests/benchmarks/test_run.py',
               'tests/benchmarks/test_reporting.py',
               'benchmarks/run.py',
-              'benchmarks/ops/graph.py',
+              'benchmarks/ops/kda.py',
               'benchmarks/utils/revisions.py',
               'benchmarks/utils/environment.py',
               'benchmarks/utils/reporting.py',
-              'benchmarks/utils/ops/graph_registry.py',
+              'benchmarks/utils/graph.py',
             ]);
             const related = files.filter(f => npuPattern.test(f.filename) || graphPaths.has(f.filename)).map(f => f.filename);
             if (related.length > 0) {

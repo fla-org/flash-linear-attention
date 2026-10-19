@@ -14,11 +14,10 @@ import sys
 import time
 from pathlib import Path
 
-from benchmarks.run import list_benchmarks
 from benchmarks.utils.ops.discovery import find_affected_op_names, get_changed_files
 from benchmarks.utils.ops.registry import SHAPE_CONFIGS
 from benchmarks.utils.ops.runner import run_benchmarks
-from benchmarks.utils.reporting import compare_results, get_result_path
+from benchmarks.utils.reporting import compare_results, format_comparison, get_result_path
 from benchmarks.utils.revisions import get_commit_sha, run_benchmark
 
 
@@ -27,7 +26,7 @@ def main():
     parser.add_argument("--base", default="main", help="Base commit/branch/tag (default: main)")
     parser.add_argument("--head", default="HEAD", help="Head commit/branch/tag (default: HEAD)")
     parser.add_argument("--benchmark-ops", nargs="*", help="Op names to benchmark. If omitted, auto-detect from diff.")
-    parser.add_argument('--benchmark', choices=list_benchmarks(), help='Workload to compare instead of CI operator discovery')
+    parser.add_argument('--benchmark', help='Object name or quoted pattern to compare instead of CI operator discovery')
     parser.add_argument("--threshold", type=float, default=5.0, help="Regression threshold in percent (default: 5.0)")
     parser.add_argument("--output", help="Save comparison results to JSON file")
     parser.add_argument(
@@ -43,9 +42,9 @@ def main():
         parser.error('--benchmark and --benchmark-ops are mutually exclusive')
     if args.arguments and not args.benchmark:
         parser.error('workload arguments require --benchmark')
-    benchmark = args.benchmark or 'ops.latency'
-    if args.plot and benchmark != 'ops.latency':
-        parser.error('--plot currently supports ops.latency comparisons')
+    benchmark = args.benchmark or 'ops.*'
+    if args.plot and args.benchmark:
+        parser.error('--plot supports the default CI operator comparison')
 
     if args.plot and not args.output:
         print(
@@ -97,12 +96,14 @@ def main():
         return 1
 
     changes = compare_results(base=base_results, head=head_results, threshold=args.threshold)
+    print(format_comparison(changes=changes))
     regressions = [change for change in changes if change['regression']]
     speedups = [change for change in changes if change['speedup']]
     exit_code = int(bool(regressions))
 
     if args.output:
         comparison = {
+            'threshold': args.threshold,
             'base_sha': base_sha,
             'head_sha': head_sha,
             'machine_info': machine_info,
@@ -113,7 +114,7 @@ def main():
             'has_regression': len(regressions) > 0,
             'has_speedup': len(speedups) > 0,
         }
-        if benchmark == 'ops.latency':
+        if not args.benchmark:
             # the PR-comment workflow reads the established operator artifact on the default branch.
             for key in ('base_results', 'head_results'):
                 comparison[key] = [
@@ -127,8 +128,9 @@ def main():
                     for change in comparison[key]
                 ]
         else:
-            comparison['benchmark'] = benchmark
+            comparison.update(benchmark=benchmark, changes=changes, threshold=args.threshold)
         output = get_result_path(path=Path(args.output), rank=int(os.environ.get('RANK', '0')))
+        output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(comparison, indent=2, allow_nan=False) + '\n')
         print(f"\nFull results saved to {output}")
 

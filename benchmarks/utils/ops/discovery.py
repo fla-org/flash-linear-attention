@@ -8,6 +8,7 @@
 """Select operator benchmarks affected by a source diff."""
 
 import ast
+import importlib
 import re
 import subprocess
 from pathlib import Path
@@ -25,7 +26,6 @@ _SHARED_BENCHMARK_FILES = {
     'benchmarks/utils/environment.py',
     'benchmarks/utils/ops/inputs.py',
     'benchmarks/utils/ops/registry.py',
-    'benchmarks/ops/latency.py',
     'benchmarks/utils/ops/runner.py',
 }
 
@@ -76,6 +76,7 @@ def find_affected_op_names(changed_files: list[str]) -> list[str]:
             import_map.setdefault(parts[2], []).append(name)
 
     affected_dirs: set[str] = set()
+    op_names: set[str] = set()
     common_changed = False
     for fpath in changed_files:
         if not fpath.endswith('.py'):
@@ -83,6 +84,10 @@ def find_affected_op_names(changed_files: list[str]) -> list[str]:
         if fpath in _SHARED_BENCHMARK_FILES or fpath.startswith(('fla/ops/common/', 'fla/ops/utils/')):
             common_changed = True
             continue
+        if (fpath.startswith('benchmarks/ops/') and Path(fpath).stem != '__init__'
+                and (Path(find_project_root()) / fpath).is_file()):
+            module = importlib.import_module(f'benchmarks.ops.{Path(fpath).stem}')
+            op_names.update(config.name for config in module.OPERATORS)
         match = _OP_DIR_RE.match(fpath)
         if match:
             affected_dirs.add(match.group(1))
@@ -93,7 +98,6 @@ def find_affected_op_names(changed_files: list[str]) -> list[str]:
     if common_changed:
         return list_ops()
 
-    op_names: set[str] = set()
     for directory in affected_dirs:
         if directory in import_map:
             op_names.update(import_map[directory])

@@ -23,19 +23,50 @@ class BenchmarkResult:
     higher_is_better: bool = False
 
 
-def _result_key(result: dict) -> tuple[str, str]:
-    return result['name'], json.dumps(result['parameters'], sort_keys=True)
+def _result_key(result: dict) -> tuple[str, str, str, str]:
+    return result.get('benchmark', ''), result.get('scenario', ''), result['name'], json.dumps(result['parameters'], sort_keys=True)
+
+
+def format_table(headers: list[str], rows: list[list]) -> str:
+    def cell(value):
+        return str(value).replace('|', '&#124;').replace('\n', ' ')
+
+    lines = ['| ' + ' | '.join(headers) + ' |', '| ' + ' | '.join('---' for _ in headers) + ' |']
+    lines.extend('| ' + ' | '.join(cell(value) for value in row) + ' |' for row in rows)
+    return '\n'.join(lines)
+
+
+def format_parameters(parameters: dict) -> str:
+    return ', '.join(f'{key}={value}' for key, value in parameters.items())
+
+
+def format_results(results: list[dict]) -> str:
+    rows = [[
+        result.get('benchmark', ''), result.get('scenario', ''), result['name'],
+        format_parameters(result['parameters']),
+        ', '.join(f'{key}={value:.4g}' for key, value in result['metrics'].items()),
+    ] for result in results]
+    return format_table(headers=['Object', 'Scenario', 'Case', 'Parameters', 'Measurements'], rows=rows)
 
 
 def print_results(results: list[dict]) -> None:
-    for result in results:
-        parameters = ', '.join(f'{key}={value}' for key, value in result['parameters'].items())
-        metrics = ', '.join(f'{key}={value:.4g}' for key, value in result['metrics'].items())
-        print(f"{result['name']} ({parameters}): {metrics}")
+    print(format_results(results=results))
+
+
+def format_comparison(changes: list[dict]) -> str:
+    rows = [[
+        change.get('benchmark', ''), change.get('scenario', ''), change['name'],
+        format_parameters(change['parameters']), change['metric'],
+        f"{change['base']:.4g}", f"{change['head']:.4g}", f"{change['change_pct']:+.1f}%",
+        'regression' if change['regression'] else 'speedup' if change['speedup'] else 'within threshold',
+    ] for change in changes]
+    return format_table(headers=['Object', 'Scenario', 'Case', 'Parameters', 'Metric', 'Base', 'Head', 'Change', 'Status'], rows=rows)
 
 
 def compare_results(base: list[dict], head: list[dict], threshold: float) -> list[dict]:
     """Compare matching cases; positive change denotes a regression for either metric direction."""
+    if not math.isfinite(threshold) or threshold < 0:
+        raise ValueError('threshold must be finite and non-negative')
     base_by_key = {_result_key(result): result for result in base}
     head_by_key = {_result_key(result): result for result in head}
     if len(base_by_key) != len(base) or len(head_by_key) != len(head):
@@ -54,8 +85,9 @@ def compare_results(base: list[dict], head: list[dict], threshold: float) -> lis
         if not math.isfinite(old) or not math.isfinite(new) or old <= 0 or new <= 0:
             raise ValueError(f'Comparison metric must be positive for {current["name"]}')
         change = (new - old) / old * (-100 if higher_is_better else 100)
-        print(f"{current['name']} {current['parameters']}: {metric} {old:.4g} -> {new:.4g} ({change:+.1f}%)")
         changes.append({
+            'benchmark': current.get('benchmark', ''),
+            'scenario': current.get('scenario', ''),
             'name': current['name'],
             'parameters': current['parameters'],
             'metric': metric,

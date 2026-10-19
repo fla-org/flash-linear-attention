@@ -11,20 +11,14 @@ from dataclasses import asdict
 import pytest
 import torch
 
-from benchmarks.ops.graph import benchmark_case
-from benchmarks.utils.ops.graph_registry import (
-    GraphBenchmarkCase,
-    get_graph_op,
-    list_graph_ops,
-    make_cu_seqlens,
-    normalize_kda_shape,
-)
+from benchmarks.ops.kda import GRAPH, SCENARIOS, make_cu_seqlens, normalize_kda_shape
+from benchmarks.utils.graph import GraphBenchmarkCase, benchmark_case
 from benchmarks.utils.reporting import print_results
 
 
 def test_kda_graph_registration_and_common_shape_defaults():
-    assert "chunk_kda" in list_graph_ops()
-    config = get_graph_op("chunk_kda")
+    assert "graph" in SCENARIOS
+    config = GRAPH
     assert config.supported_modes == ("fwd", "fwdbwd")
     assert all({"B", "T", "H", "D"} <= shape.keys() for shape in config.default_shapes.values())
 
@@ -161,7 +155,7 @@ def test_benchmark_case_rejects_reusing_capture_tensor_as_live_input():
 
 @pytest.mark.parametrize('extra_dimensions', [False, True])
 def test_graph_workload_preserves_metrics_and_configuration(monkeypatch, capsys, extra_dimensions):
-    from benchmarks.ops import graph
+    from benchmarks.utils import graph
 
     row = {
         'op': 'chunk_kda', 'shape': 'custom', 'mode': 'fwdbwd',
@@ -174,8 +168,8 @@ def test_graph_workload_preserves_metrics_and_configuration(monkeypatch, capsys,
     }
     monkeypatch.setattr(graph, 'benchmark_graph_op', lambda **kwargs: [row])
     parser = argparse.ArgumentParser()
-    graph.add_arguments(parser)
-    results = graph.run(parser.parse_args(['--op', 'chunk_kda']))
+    graph.add_graph_arguments(parser)
+    results = graph.run_graph(args=parser.parse_args([]), config=GRAPH)
     assert len(results) == 2
     assert results[0].metrics == row['eager']
     assert results[1].metrics == {**row['graph'], 'capture_ms': 3.0}

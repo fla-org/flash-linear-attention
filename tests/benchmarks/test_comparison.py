@@ -64,7 +64,8 @@ def benchmark_repository(tmp_path, monkeypatch):
         'from pathlib import Path\n'
         'import fla\n'
         'from benchmarks.utils.reporting import BenchmarkResult\n'
-        'def add_arguments(parser):\n'
+        'SCENARIOS = ("latency",)\n'
+        'def add_arguments(parser, scenario):\n'
         '    parser.add_argument("--fail", action="store_true")\n'
         'def run(args):\n'
         '    cache = Path(os.environ["TRITON_CACHE_DIR"])\n'
@@ -96,7 +97,10 @@ def test_revision_isolation(benchmark_repository, monkeypatch, ref, fail, rank):
     else:
         results, info = revisions.run_benchmark(module='benchmarks.run', arguments=arguments, ref=ref)
         expected = {'baseline': 'baseline', 'feature/current': 'head', None: 'dirty'}[ref]
-        assert results == [asdict(BenchmarkResult(name='source', parameters={'source': expected}, metrics={'median_ms': 1.0}))]
+        assert results == [{
+            **asdict(BenchmarkResult(name='source', parameters={'source': expected}, metrics={'median_ms': 1.0})),
+            'benchmark': 'ops.worker', 'scenario': 'latency',
+        }]
         if ref is not None:
             assert info['git_label'] == f'{ref}[{git("rev-parse", ref)[:7]}]'
     assert git('status', '--porcelain') == before
@@ -128,7 +132,7 @@ def test_compare_artifact(tmp_path, monkeypatch, allow_regression):
     assert compare.main() == (0 if allow_regression else 1)
     data = json.loads(output.read_text())
     assert data.keys() == {
-        'base_sha', 'head_sha', 'machine_info', 'base_results', 'head_results',
+        'threshold', 'base_sha', 'head_sha', 'machine_info', 'base_results', 'head_results',
         'regressions', 'speedups', 'has_regression', 'has_speedup',
     }
     assert data['base_sha'] == 'base'
@@ -187,8 +191,8 @@ def test_affected_ops(tmp_path, monkeypatch, path, expected):
 def test_compare_workload_uses_common_runner(tmp_path, monkeypatch):
     output = tmp_path / 'training.json'
     monkeypatch.setattr(sys, 'argv', [
-        'compare', '--benchmark', 'models.training', '--base', 'base', '--head', 'head',
-        '--output', str(output), '--', '--name', 'kda',
+        'compare', '--benchmark', 'models.causal_lm', '--base', 'base', '--head', 'head',
+        '--output', str(output), '--', '--scenario', 'training', '--name', 'kda',
     ])
     monkeypatch.setattr(compare, 'get_commit_sha', lambda ref: ref)
     monkeypatch.setenv('FLA_BENCH_COOLDOWN_SEC', '0')
@@ -208,9 +212,17 @@ def test_compare_workload_uses_common_runner(tmp_path, monkeypatch):
     monkeypatch.setattr(compare, 'run_benchmark', run_benchmark)
     assert compare.main() == 1
     assert calls == [
-        ('benchmarks.run', ['models.training', '--name', 'kda'], 'head'),
-        ('benchmarks.run', ['models.training', '--name', 'kda'], 'base'),
+        ('benchmarks.run', ['models.causal_lm', '--scenario', 'training', '--name', 'kda'], 'head'),
+        ('benchmarks.run', ['models.causal_lm', '--scenario', 'training', '--name', 'kda'], 'base'),
     ]
     data = json.loads(output.read_text())
-    assert data['benchmark'] == 'models.training'
+    assert data['benchmark'] == 'models.causal_lm'
     assert data['regressions'][0]['change_pct'] == pytest.approx(10.0)
+
+
+def test_affected_operator_definition():
+    assert discovery.find_affected_op_names(changed_files=['benchmarks/ops/gated_delta_rule.py']) == ['chunk_gdn']
+    assert discovery.find_affected_op_names(changed_files=['benchmarks/ops/nsa.py']) == [
+        'parallel_nsa', 'parallel_nsa_compression', 'parallel_nsa_windowed',
+    ]
+    assert discovery.find_affected_op_names(changed_files=['benchmarks/ops/removed.py']) == []

@@ -5,7 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""Eager execution and graph replay latency on Ascend."""
+"""Graph capture, replay timing, and benchmark case contracts."""
 
 from __future__ import annotations
 
@@ -14,10 +14,39 @@ import json
 import math
 import statistics
 import time
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import Any
 
-from benchmarks.utils.ops.graph_registry import GraphBenchmarkCase, get_graph_op, list_graph_ops
 from benchmarks.utils.reporting import BenchmarkResult
+
+
+@dataclass
+class GraphBenchmarkCase:
+    """One fully materialized eager/graph benchmark case.
+
+    The runner owns the graph lifecycle and timing. Operator adapters own the
+    arguments, calls, and numerical comparison because those details vary
+    across operators.
+    """
+
+    eager_step: Callable
+    graph_step: Callable
+    capture_args: tuple[Any, ...]
+    eager_args: tuple[Any, ...]
+    graph_args: tuple[Any, ...]
+    run_once: Callable[[Callable, tuple[Any, ...], bool], dict[str, Any]]
+    assert_close: Callable[[dict[str, Any], dict[str, Any]], None]
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class GraphOpConfig:
+    name: str
+    build_case: Callable[[dict[str, Any], str, str, int], GraphBenchmarkCase]
+    default_shapes: dict[str, dict[str, Any]]
+    supported_modes: tuple[str, ...] = ("fwdbwd",)
+    category: str = ""
 
 
 def _percentile(values: list[float], fraction: float) -> float:
@@ -120,7 +149,7 @@ def benchmark_case(
 
 
 def benchmark_graph_op(
-    op_name: str,
+    config: GraphOpConfig,
     shapes: dict[str, dict[str, Any]],
     modes: tuple[str, ...],
     engines: tuple[str, ...],
@@ -139,7 +168,7 @@ def benchmark_graph_op(
         raise RuntimeError("torch.npu.make_graphed_callables is required for graph benchmarks")
     torch.npu.set_device(device)
 
-    config = get_graph_op(op_name)
+    op_name = config.name
     unsupported = set(modes) - set(config.supported_modes)
     if unsupported:
         raise ValueError(f"{op_name} does not support graph benchmark modes: {sorted(unsupported)}")
@@ -177,8 +206,7 @@ def benchmark_graph_op(
     return results
 
 
-def add_arguments(parser):
-    parser.add_argument('--op', nargs='+', required=True, choices=[*list_graph_ops(), 'all'])
+def add_graph_arguments(parser):
     parser.add_argument('--custom-shapes', help='JSON object keyed by shape name; B/T/H/D are required')
     parser.add_argument('--modes', nargs='+', choices=['fwd', 'fwdbwd'], default=['fwdbwd'])
     parser.add_argument('--engines', nargs='+', choices=['eager', 'graph'], default=['eager', 'graph'])
@@ -189,43 +217,36 @@ def add_arguments(parser):
     parser.add_argument('--seed', type=int, default=2026)
 
 
-def run(args):
-    names = list_graph_ops() if args.op == ['all'] else args.op
-    if args.custom_shapes:
-        shapes = json.loads(args.custom_shapes)
-    elif len(names) == 1:
-        shapes = get_graph_op(names[0]).default_shapes
-    else:
-        raise ValueError('--custom-shapes is required when benchmarking multiple graph operators')
+def run_graph(args, config: GraphOpConfig):
+    shapes = json.loads(args.custom_shapes) if args.custom_shapes else config.default_shapes
     if not isinstance(shapes, dict) or not shapes:
         raise ValueError('--custom-shapes must be a non-empty JSON object')
 
     results = []
-    for name in names:
-        rows = benchmark_graph_op(
-            op_name=name,
-            shapes=shapes,
-            modes=tuple(args.modes),
-            engines=tuple(dict.fromkeys(args.engines)),
-            default_dtype=args.dtype,
-            device=args.device,
-            warmup=args.warmup,
-            iterations=args.iterations,
-            seed=args.seed,
-        )
-        for row in rows:
-            parameters = {key: value for key, value in row.items()
-                          if key not in ('op', 'eager', 'graph', 'capture_ms')}
-            for engine in ('eager', 'graph'):
-                if engine not in row:
-                    continue
-                metrics = dict(row[engine])
-                if engine == 'graph':
-                    metrics['capture_ms'] = row['capture_ms']
-                results.append(BenchmarkResult(
-                    name=row['op'],
-                    parameters={**parameters, 'engine': engine},
-                    metrics=metrics,
-                    primary_metric='p50_ms',
-                ))
+    rows = benchmark_graph_op(
+        config=config,
+        shapes=shapes,
+        modes=tuple(args.modes),
+        engines=tuple(dict.fromkeys(args.engines)),
+        default_dtype=args.dtype,
+        device=args.device,
+        warmup=args.warmup,
+        iterations=args.iterations,
+        seed=args.seed,
+    )
+    for row in rows:
+        parameters = {key: value for key, value in row.items()
+                      if key not in ('op', 'eager', 'graph', 'capture_ms')}
+        for engine in ('eager', 'graph'):
+            if engine not in row:
+                continue
+            metrics = dict(row[engine])
+            if engine == 'graph':
+                metrics['capture_ms'] = row['capture_ms']
+            results.append(BenchmarkResult(
+                name=row['op'],
+                parameters={**parameters, 'engine': engine},
+                metrics=metrics,
+                primary_metric='p50_ms',
+            ))
     return results

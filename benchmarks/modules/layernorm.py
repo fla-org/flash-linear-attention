@@ -128,7 +128,10 @@ def benchmark(T, provider):
     return results
 
 
-def add_arguments(parser):
+SCENARIOS = ('latency',)
+
+
+def add_arguments(parser, scenario):
     add_module_arguments(parser)
 
 

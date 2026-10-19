@@ -223,3 +223,10 @@ def init_nsa_inputs(inputs, B, T, H, D, HQ=None, S=16, block_size=64, **kw):
     inputs['block_indices'] = block_indices.contiguous()
     inputs['block_counts'] = S
     inputs['block_size'] = block_size
+
+
+SIMPLE_QKV = {
+    'q': TensorSpec(shape_fn=shape_bthd),
+    'k': TensorSpec(shape_fn=shape_bthd),
+    'v': TensorSpec(shape_fn=shape_bthd),
+}

@@ -115,7 +115,10 @@ def benchmark(B, T, D, provider):
     return ms, min_ms, max_ms
 
 
-def add_arguments(parser):
+SCENARIOS = ('latency',)
+
+
+def add_arguments(parser, scenario):
     add_module_arguments(parser)
 
 

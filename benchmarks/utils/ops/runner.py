@@ -18,7 +18,7 @@ import torch
 
 from benchmarks.utils.environment import synchronize_device
 from benchmarks.utils.ops.inputs import generate_inputs
-from benchmarks.utils.ops.registry import OpConfig, get_op
+from benchmarks.utils.ops.registry import SHAPE_CONFIGS, OpConfig, get_op, list_ops
 from benchmarks.utils.reporting import BenchmarkResult
 from benchmarks.utils.revisions import run_benchmark
 
@@ -32,7 +32,7 @@ def run_benchmarks(
     backend: str | None = None,
     ref: str | None = None,
 ) -> tuple[list[dict], dict]:
-    arguments = ['ops.latency', '--op', *op_names, '--custom-shapes', json.dumps(shapes), '--modes', *modes]
+    arguments = ['ops.*', '--scenario', 'latency', '--op', *op_names, '--custom-shapes', json.dumps(shapes), '--modes', *modes]
     if backend is not None:
         arguments.extend(['--backend', backend])
     return run_benchmark(module='benchmarks.run', arguments=arguments, ref=ref)
@@ -199,4 +199,23 @@ def benchmark_op(
                 metrics={'median_ms': ms[0], 'p20_ms': ms[1], 'p80_ms': ms[2]},
             ))
 
+    return results
+
+
+def add_operator_arguments(parser, configs):
+    parser.add_argument(
+        '--op', nargs='+', choices=list_ops(), metavar='OP',
+        help=f'Select operator variants; this object provides: {", ".join(config.name for config in configs)}',
+    )
+    parser.add_argument('--backend', help='Registered backend override, such as triton or gluon')
+    parser.add_argument('--custom-shapes', help='JSON object keyed by shape name, with B/T/H/D and optional operator axes')
+    parser.add_argument('--modes', nargs='+', choices=['fwd', 'fwdbwd'], default=['fwd', 'fwdbwd'])
+
+
+def run_operator(args, configs):
+    shapes = json.loads(args.custom_shapes) if args.custom_shapes else SHAPE_CONFIGS
+    results = []
+    for config in configs:
+        if args.op is None or config.name in args.op:
+            results.extend(benchmark_op(op_name=config.name, shapes=shapes, modes=args.modes, backend=args.backend))
     return results

@@ -5,9 +5,10 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""Run a benchmark workload and record its measurements and environment."""
+"""Measure selected benchmark objects in a supported execution scenario."""
 
 import argparse
+import fnmatch
 import importlib
 import json
 import os
@@ -21,30 +22,53 @@ def list_benchmarks() -> list[str]:
     root = Path(__file__).parent
     return sorted(
         f'{category}.{path.stem}'
-        for category in ('ops', 'modules', 'models', 'cp')
+        for category in ('ops', 'modules', 'layers', 'models')
         for path in (root / category).glob('*.py')
         if path.stem != '__init__'
     )
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__, add_help=False)
-    parser.add_argument('benchmark', nargs='?', choices=list_benchmarks())
-    parser.add_argument('--list', action='store_true', help='List available workloads')
-    parser.add_argument('--json', type=Path, help='Write measurements and machine metadata to JSON')
-    selected, _ = parser.parse_known_args(args=argv)
-    parser.add_argument('-h', '--help', action='help')
+    common = argparse.ArgumentParser(description=__doc__, add_help=False)
+    common.add_argument('benchmark', nargs='?', help='Object name or quoted pattern, such as ops.kda or ops.*')
+    common.add_argument('--scenario', help="Execution scenario; defaults to the object's first scenario")
+    common.add_argument('--list', action='store_true', help='List benchmark objects without importing their dependencies')
+    common.add_argument('--json', type=Path, help='Write measurements and machine metadata to JSON')
+    selected, _ = common.parse_known_args(args=argv)
     if selected.list:
         print('\n'.join(list_benchmarks()))
         return 0
     if selected.benchmark is None:
-        parser.parse_args(args=argv)
-        parser.error('benchmark is required unless --list is used')
+        argparse.ArgumentParser(parents=[common], description=__doc__).parse_args(args=argv)
+        common.error('benchmark is required unless --list is used')
+    names = [name for name in list_benchmarks() if fnmatch.fnmatchcase(name, selected.benchmark)]
+    if not names:
+        common.error(f'No benchmark matches {selected.benchmark!r}; use --list to see available objects')
 
-    workload = importlib.import_module(f'benchmarks.{selected.benchmark}')
-    workload.add_arguments(parser)
-    args = parser.parse_args(args=argv)
-    results = [asdict(result) for result in workload.run(args)]
+    plans = []
+    for name in names:
+        workload = importlib.import_module(f'benchmarks.{name}')
+        scenario = selected.scenario or workload.SCENARIOS[0]
+        if scenario not in workload.SCENARIOS:
+            if name == selected.benchmark:
+                common.error(f'{name} supports scenarios: {", ".join(workload.SCENARIOS)}')
+            continue
+        parser = argparse.ArgumentParser(
+            parents=[common], description=f'{name}; supported scenarios: {", ".join(workload.SCENARIOS)}',
+        )
+        workload.add_arguments(parser, scenario)
+        args = parser.parse_args(args=argv)
+        args.scenario = scenario
+        plans.append((name, workload, args))
+    if not plans:
+        common.error(f'No matching object supports scenario {selected.scenario!r}')
+
+    results = []
+    for name, workload, args in plans:
+        for result in workload.run(args):
+            results.append({**asdict(result), 'benchmark': name, 'scenario': args.scenario})
+    if not results:
+        raise RuntimeError('No benchmark measurements were produced')
 
     from benchmarks.utils.environment import get_machine_info
 
@@ -54,9 +78,10 @@ def main(argv: list[str] | None = None) -> int:
     if rank == 0:
         print(format_machine_info(machine_info))
         print_results(results=results)
-    if args.json:
-        output = get_result_path(path=args.json, rank=rank)
-        payload = {'benchmark': args.benchmark, 'machine_info': machine_info, 'results': results}
+    if selected.json:
+        output = get_result_path(path=selected.json, rank=rank)
+        payload = {'benchmark': selected.benchmark, 'machine_info': machine_info, 'results': results}
+        output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(payload, indent=2, allow_nan=False) + '\n')
         print(f'Results saved to {output}')
     return 0
