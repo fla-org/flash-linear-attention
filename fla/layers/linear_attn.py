@@ -21,7 +21,7 @@ from fla.modules.feature_map import DPFPFeatureMap, HadamardFeatureMap, Hedgehog
 from fla.ops.linear_attn import chunk_linear_attn, fused_chunk_linear_attn, fused_recurrent_linear_attn
 
 if TYPE_CHECKING:
-    from fla.models.utils import Cache
+    from fla.models.cache_utils import Cache
 
 
 class LinearAttention(nn.Module):

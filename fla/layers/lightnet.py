@@ -24,7 +24,7 @@ from fla.ops.lightnet import chunk_lightnet, fused_recurrent_lightnet
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
-    from fla.models.utils import Cache
+    from fla.models.cache_utils import Cache
 
 
 class LightNetAttention(nn.Module):

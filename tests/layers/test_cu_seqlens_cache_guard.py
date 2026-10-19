@@ -13,7 +13,7 @@ from fla.layers.bitattn import BitAttention
 from fla.layers.mla import MultiheadLatentAttention
 from fla.layers.moba import MoBA
 from fla.layers.nsa import NativeSparseAttention
-from fla.models.utils import Cache
+from fla.models.cache_utils import Cache
 from fla.utils import device
 
 try:

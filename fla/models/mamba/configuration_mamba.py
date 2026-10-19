@@ -20,20 +20,21 @@
 # limitations under the License.
 
 import math
-import warnings
 
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
+
+from fla.models.configuration_utils import validate_loss_config
 
 
-class MambaConfig(PretrainedConfig):
+class MambaConfig(PreTrainedConfig):
     """
     This is the configuration class to store the configuration of a [`MambaModel`]. It is used to instantiate a MAMBA
     model according to the specified arguments, defining the model architecture. Instantiating a configuration with the
     defaults will yield a similar configuration to that of the MAMBA
     [state-spaces/mamba-2.8b](https://huggingface.co/state-spaces/mamba-2.8b) architecture.
 
-    Configuration objects inherit from [`PretrainedConfig`] and can be used to control the model outputs. Read the
-    documentation from [`PretrainedConfig`] for more information.
+    Configuration objects inherit from [`PreTrainedConfig`] and can be used to control the model outputs. Read the
+    documentation from [`PreTrainedConfig`] for more information.
 
 
     Args:
@@ -167,16 +168,7 @@ class MambaConfig(PretrainedConfig):
         self.fuse_linear_cross_entropy = fuse_linear_cross_entropy
         self.use_l2warp = use_l2warp
 
-        if fuse_cross_entropy and fuse_linear_cross_entropy:
-            raise ValueError(
-                "`fuse_cross_entropy` and `fuse_linear_cross_entropy` cannot be True at the same time.",
-            )
-        if fuse_linear_cross_entropy:
-            warnings.warn(
-                "`fuse_linear_cross_entropy` is enabled, which can improves memory efficiency "
-                "at the potential cost of reduced precision. "
-                "If you observe issues like loss divergence, consider disabling this setting.",
-            )
+        validate_loss_config(fuse_cross_entropy=fuse_cross_entropy, fuse_linear_cross_entropy=fuse_linear_cross_entropy)
 
         super().__init__(
             bos_token_id=bos_token_id,

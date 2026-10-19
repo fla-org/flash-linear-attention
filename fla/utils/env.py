@@ -84,6 +84,24 @@ def check_pytorch_version(version_s: str = '2.4') -> bool:
     return package_version.parse(torch.__version__) >= package_version.parse(version_s)
 
 
+@cache
+def check_transformers_version(version_s: str) -> bool:
+    try:
+        installed_version = importlib.metadata.version('transformers')
+    except importlib.metadata.PackageNotFoundError:
+        return False
+    return package_version.parse(installed_version) >= package_version.parse(version_s)
+
+
+@cache
+def supports_transformers_next_sequence_length() -> bool:
+    if find_spec_cached('transformers') is None:
+        return False
+    from transformers.generation import GenerationMixin
+
+    return 'next_sequence_length' in inspect.signature(GenerationMixin.prepare_inputs_for_generation).parameters
+
+
 TRITON_ABOVE_3_4_0 = package_version.parse(triton.__version__) >= package_version.parse("3.4.0")
 TRITON_ABOVE_3_5_1 = package_version.parse(triton.__version__) >= package_version.parse("3.5.1")
 TRITON_ABOVE_3_6_0 = package_version.parse(triton.__version__) >= package_version.parse("3.6.0")

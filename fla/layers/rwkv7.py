@@ -26,7 +26,7 @@ from fla.ops.rwkv7.fused_k_update import fused_k_rwkv7
 from fla.ops.rwkv7.gate_output_correction import gate_output_correction
 
 if TYPE_CHECKING:
-    from fla.models.utils import Cache
+    from fla.models.cache_utils import Cache
 
 
 class RWKV7Attention(nn.Module):

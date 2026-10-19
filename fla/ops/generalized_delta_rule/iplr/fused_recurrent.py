@@ -303,7 +303,7 @@ class FusedRecurrentIPLRDeltaRuleFunction(torch.autograd.Function):
 
         BK = triton.next_power_of_2(K)
         if output_final_state:
-            final_state = q.new_empty(B, H, K, V, dtype=torch.float32)
+            final_state = q.new_empty(N, H, K, V, dtype=torch.float32)
         else:
             final_state = None
 
@@ -422,9 +422,10 @@ def fused_recurrent_iplr_delta_rule(
             Scale factor for the RetNet attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         initial_state (Optional[torch.Tensor]):
-            Initial state of shape `[B, H, K, V]`. Default: `None`.
+            Initial state of shape `[N, H, K, V]`, where `N` is the number of sequences
+            (`B` for fixed-length inputs). Default: `None`.
         output_final_state (Optional[bool]):
-            Whether to output the final state of shape `[B, H, K, V]`. Default: `False`.
+            Whether to output the final state of shape `[N, H, K, V]`. Default: `False`.
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.

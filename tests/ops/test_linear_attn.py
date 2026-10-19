@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from fla.layers.linear_attn import LinearAttention
-from fla.models.utils import Cache
+from fla.models.cache_utils import Cache
 from fla.ops.linear_attn import chunk_linear_attn, fused_chunk_linear_attn, fused_recurrent_linear_attn
 from fla.ops.linear_attn.naive import naive_chunk_linear_attn, naive_recurrent_linear_attn
 from fla.utils import assert_close, device
