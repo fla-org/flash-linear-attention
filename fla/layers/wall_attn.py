@@ -25,7 +25,7 @@ from fla.ops.utils.cumsum import chunk_global_cumsum
 from fla.ops.wall_attn import build_wall_kv_cache, parallel_wall_attn, parallel_wall_attn_decode
 
 if TYPE_CHECKING:
-    from fla.models.utils import Cache
+    from fla.models.cache_utils import Cache
 
 logger = logging.get_logger(__name__)
 

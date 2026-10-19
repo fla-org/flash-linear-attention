@@ -5,12 +5,12 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-import warnings
+from transformers.configuration_utils import PreTrainedConfig
 
-from transformers.configuration_utils import PretrainedConfig
+from fla.models.configuration_utils import validate_loss_config
 
 
-class PrecondGatedDeltaNetConfig(PretrainedConfig):
+class PrecondGatedDeltaNetConfig(PreTrainedConfig):
     model_type = 'precond_gated_deltanet'
     keys_to_ignore_at_inference = ['past_key_values']
 
@@ -88,16 +88,7 @@ class PrecondGatedDeltaNetConfig(PretrainedConfig):
         self.log_atk_scale_init = log_atk_scale_init
         self.a_log_init_lower = a_log_init_lower
 
-        if fuse_cross_entropy and fuse_linear_cross_entropy:
-            raise ValueError(
-                "`fuse_cross_entropy` and `fuse_linear_cross_entropy` cannot be True at the same time.",
-            )
-        if fuse_linear_cross_entropy:
-            warnings.warn(
-                "`fuse_linear_cross_entropy` is enabled, which can improves memory efficiency "
-                "at the potential cost of reduced precision. "
-                "If you observe issues like loss divergence, consider disabling this setting.",
-            )
+        validate_loss_config(fuse_cross_entropy=fuse_cross_entropy, fuse_linear_cross_entropy=fuse_linear_cross_entropy)
 
         if attn is not None:
             if not isinstance(attn, dict):

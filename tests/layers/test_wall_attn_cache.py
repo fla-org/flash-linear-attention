@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from fla.layers.wall_attn import WallAttention
-from fla.models.utils import Cache
+from fla.models.cache_utils import Cache
 from fla.utils import assert_close, device
 
 
