@@ -531,6 +531,19 @@ register_op(OpConfig(
     test_file='tests/ops/test_precond_gated_delta.py',
 ))
 
+# Global SHAPE_CONFIGS minus the two shapes whose fwd+bwd peak exceeds a 32GB
+# 910B under the harness warmup (which keeps a second autograd graph alive):
+# B4_T4096_H64_D128 (~13 GiB) and B8_T2048_H32_D256 (~23 GiB). Each is kept as
+# a scaled-down variant of the same kind.
+_precond_kda_default_shapes = {
+    'B1_T8192_H96_D128':  {'B': 1, 'T': 8192,  'H': 96, 'D': 128},
+    'B2_T16384_H16_D128': {'B': 2, 'T': 16384, 'H': 16, 'D': 128},
+    'B4_T2048_H16_D128':  {'B': 4, 'T': 2048,  'H': 16, 'D': 128},
+    'B8_T1024_H8_D64':    {'B': 8, 'T': 1024,  'H': 8,  'D': 64},
+    'B2_T4096_H32_D128':  {'B': 2, 'T': 4096,  'H': 32, 'D': 128},
+    'B2_T2048_H16_D256':  {'B': 2, 'T': 2048,  'H': 16, 'D': 256},
+}
+
 register_op(OpConfig(
     name='chunk_precond_kda',
     import_path='fla.ops.precond_kda',
@@ -542,8 +555,10 @@ register_op(OpConfig(
         'beta_atk': TensorSpec(shape_BTH, transform=sigmoid_transform),
         'log_atk_scale': TensorSpec(shape_H, dtype='float32'),
     },
+    func_name='chunk_precond_kda',
     extra_kwargs={'x': 1.5},
     category='gate_beta',
+    default_shapes=_precond_kda_default_shapes,
     test_file='tests/ops/test_precond_kda.py',
 ))
 

@@ -153,7 +153,7 @@ jobs:
           print("matplotlib savefig smoke test: ok")
           PY
 
-      - name: Benchmark chunk_gdn, fused_recurrent_gdn2, chunk_gdn2, chunk_kda, KDA graph, fused_attnres, conv1d, chunk_precond_gdn, parallel_wall_attn, and fused_recurrent_oja
+      - name: Benchmark chunk_gdn, fused_recurrent_gdn2, chunk_gdn2, chunk_kda, KDA graph, fused_attnres, conv1d, chunk_precond_gdn, parallel_wall_attn, fused_recurrent_oja, and chunk_precond_kda
         shell: bash
         env:
           FLA_BENCH_WARMUP_MS: "25"
@@ -229,9 +229,15 @@ jobs:
           pid_conv1d=$!
           status=0
           wait "$pid_conv1d" || status=1
-          ASCEND_RT_VISIBLE_DEVICES=3 python -m benchmarks.ops.run \
-            --op chunk_precond_gdn --base '' --json benchmark_chunk_precond_gdn.json \
-            > chunk_precond_gdn.log 2>&1 &
+          (
+            set -e
+            ASCEND_RT_VISIBLE_DEVICES=3 python -m benchmarks.ops.run \
+              --op chunk_precond_gdn --base '' --json benchmark_chunk_precond_gdn.json \
+              > chunk_precond_gdn.log 2>&1
+            ASCEND_RT_VISIBLE_DEVICES=3 python -m benchmarks.ops.run \
+              --op chunk_precond_kda --base '' --json benchmark_chunk_precond_kda.json \
+              > chunk_precond_kda.log 2>&1
+          ) &
           pid_precond_gdn=$!
 
           wait "$pid_gdn" || status=1
@@ -266,8 +272,6 @@ jobs:
           cat conv1d.log
           echo "========== chunk_precond_gdn =========="
           cat chunk_precond_gdn.log
-          echo "========== parallel_wall_attn =========="
-          cat parallel_wall_attn.log
           exit "$status"
 
       - name: Check fused-recurrent GDN2 benchmark results
@@ -305,6 +309,7 @@ jobs:
             benchmark_chunk_kda.json
             benchmark_fused_attnres.json
             benchmark_chunk_precond_gdn.json
+            benchmark_chunk_precond_kda.json
             benchmark_kda_graph.json
             benchmark_parallel_wall_attn.json
             conv_benchmark/
