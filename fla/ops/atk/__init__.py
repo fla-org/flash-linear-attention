@@ -12,3 +12,6 @@ from fla.ops.atk.chunk_atk_bwd import chunk_atk_bwd
 from fla.ops.atk.chunk_atk_fwd import chunk_atk_fwd, recompute_atk_fwd
 
 __all__ = ['chunk_atk_bwd', 'chunk_atk_fwd', 'recompute_atk_fwd']
+
+
+from fla.ops.atk import backends  # noqa: F401

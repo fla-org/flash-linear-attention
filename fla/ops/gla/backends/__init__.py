@@ -7,6 +7,8 @@
 
 """GLA backends."""
 
-from fla.ops.gla.backends.triton_ascend import TritonAscendGLABackend
 
-__all__ = ['TritonAscendGLABackend']
+from fla.backends import TritonAscendBackend
+
+if TritonAscendBackend.is_available():
+    from fla.ops.gla.backends.triton_ascend import chunk  # noqa: F401

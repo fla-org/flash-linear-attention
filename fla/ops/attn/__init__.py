@@ -12,3 +12,6 @@ __all__ = [
     'naive_parallel_attn',
     'parallel_attn',
 ]
+
+
+from fla.ops.attn import backends  # noqa: F401

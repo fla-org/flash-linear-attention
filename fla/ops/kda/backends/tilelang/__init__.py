@@ -12,9 +12,10 @@ from __future__ import annotations
 import torch
 
 from fla.backends import TileLangBackend, register
+from fla.ops.kda.chunk_bwd import chunk_kda_bwd_wy_dqkg_fused
 
 
-@register('kda')
+@register(chunk_kda_bwd_wy_dqkg_fused)
 class KDATileLangBackend(TileLangBackend):
 
     def chunk_kda_bwd_wy_dqkg_fused_verifier(

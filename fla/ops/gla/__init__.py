@@ -14,3 +14,6 @@ __all__ = [
     'fused_chunk_gla',
     'fused_recurrent_gla',
 ]
+
+
+from fla.ops.gla import backends  # noqa: F401

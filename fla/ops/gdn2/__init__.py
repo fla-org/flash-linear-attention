@@ -15,3 +15,6 @@ __all__ = [
     "naive_chunk_gdn2",
     "naive_recurrent_gdn2",
 ]
+
+
+from fla.ops.gdn2 import backends  # noqa: F401

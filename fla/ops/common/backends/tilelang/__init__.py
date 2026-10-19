@@ -10,10 +10,11 @@ from __future__ import annotations
 import torch
 
 from fla.backends import TileLangBackend, register
+from fla.ops.common.chunk_o import chunk_bwd_dqkwg
 from fla.utils import IS_NVIDIA_HOPPER, TRITON_ABOVE_3_4_0
 
 
-@register('common')
+@register(chunk_bwd_dqkwg)
 class CommonTileLangBackend(TileLangBackend):
     # work around Hopper regressions with Triton 3.4+ (see #640).
     default_enable = IS_NVIDIA_HOPPER and TRITON_ABOVE_3_4_0

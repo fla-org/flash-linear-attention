@@ -13,6 +13,8 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.backends import TritonAscendBackend, register
+from fla.ops.kda.gate import fused_kda_gate, kda_gate_bwd, kda_gate_chunk_cumsum, kda_gate_fwd
 from fla.ops.utils.index import prepare_chunk_indices
 from fla.ops.utils.op import exp
 from fla.ops.utils.softplus import softplus
@@ -398,6 +400,7 @@ def _launch_gate_chunk_cumsum(
             kda_gate_chunk_cumsum_vector_kernel_npu[(ns, nt_len, bh_len)](**kernel_kwargs)
 
 
+@register(kda_gate_fwd, backend=TritonAscendBackend)
 @input_guard
 def kda_gate_fwd_npu(
     g: torch.Tensor,
@@ -424,6 +427,7 @@ def kda_gate_fwd_npu(
     return yg
 
 
+@register(kda_gate_bwd, backend=TritonAscendBackend)
 @input_guard
 def kda_gate_bwd_npu(
     g: torch.Tensor,
@@ -462,6 +466,7 @@ def kda_gate_bwd_npu(
     return dg, dA, dbias
 
 
+@register(kda_gate_chunk_cumsum, backend=TritonAscendBackend)
 @input_guard
 def kda_gate_chunk_cumsum_npu(
     g: torch.Tensor,
@@ -547,6 +552,7 @@ class KDAGateFunctionNPU(torch.autograd.Function):
         return dg, dA, dbias, None, None
 
 
+@register(fused_kda_gate, backend=TritonAscendBackend)
 def fused_kda_gate_npu(
     g: torch.Tensor,
     A_log: torch.Tensor | None = None,
