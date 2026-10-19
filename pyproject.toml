@@ -30,6 +30,24 @@ cuda = ["torch>=2.7.0", "triton>=3.3"]
 rocm = ["torch>=2.7.0"]
 xpu  = ["torch>=2.7.0"]
 npu  = ["torch==2.9.0", "torch_npu==2.9.0.post6", "torchvision==0.24.0", "triton-ascend==3.2.2"]
+# Install exactly one AscendC extra: all three wheels provide the fla_npu namespace.
+# From this checkout: python -m pip install -e ".[npu-ascendc-a2]"  # A2 / 910B
+#                     python -m pip install -e ".[npu-ascendc-a3]"  # A3 / 910_93
+#                     python -m pip install -e ".[npu-ascendc-a5]"  # A5 / 950
+# These extras add only the native wheel; prepare CANN and the NPU Python stack first.
+# pip selects the CPU architecture; the KDA adapter currently supports A5 only.
+npu-ascendc-a2 = [
+    "flash-linear-attention-npu-a2 @ https://github.com/flashserve/flash-linear-attention-npu/releases/download/main-20261019-030140/flash_linear_attention_npu_a2-26.10.0%2Bmain.dev54ae09b-py3-none-manylinux_2_34_aarch64.whl#sha256=4df60e6ae1567958ed688bd44c6f53fd176258bd3702c0a08df16df1b4ccd8de ; sys_platform == 'linux' and platform_machine == 'aarch64'",
+    "flash-linear-attention-npu-a2 @ https://github.com/flashserve/flash-linear-attention-npu/releases/download/main-20261019-030140/flash_linear_attention_npu_a2-26.10.0%2Bmain.dev54ae09b-py3-none-manylinux_2_34_x86_64.whl#sha256=280421d759b54574730ed409b5ce7efb83b8d4bbc62723cefa33f8294df84f04 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+npu-ascendc-a3 = [
+    "flash-linear-attention-npu-a3 @ https://github.com/flashserve/flash-linear-attention-npu/releases/download/main-20261019-030140/flash_linear_attention_npu_a3-26.10.0%2Bmain.dev54ae09b-py3-none-manylinux_2_34_aarch64.whl#sha256=8081e8f4eb1f46d77843d6de427db6a7510aa233a5625ed7dc36f8012e620525 ; sys_platform == 'linux' and platform_machine == 'aarch64'",
+    "flash-linear-attention-npu-a3 @ https://github.com/flashserve/flash-linear-attention-npu/releases/download/main-20261019-030140/flash_linear_attention_npu_a3-26.10.0%2Bmain.dev54ae09b-py3-none-manylinux_2_34_x86_64.whl#sha256=6e4db7a0539a194402dbabf7b5d08444f801ccaefb3ee56928e3a923c7e92cad ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+npu-ascendc-a5 = [
+    "flash-linear-attention-npu-a5 @ https://github.com/flashserve/flash-linear-attention-npu/releases/download/main-20261019-030140/flash_linear_attention_npu_a5-26.10.0%2Bmain.dev54ae09b-py3-none-manylinux_2_34_aarch64.whl#sha256=5a61d0bdd54a0abbdfaad9681231c6e0b08063e54d3e0171082b75de7c7eae0e ; sys_platform == 'linux' and platform_machine == 'aarch64'",
+    "flash-linear-attention-npu-a5 @ https://github.com/flashserve/flash-linear-attention-npu/releases/download/main-20261019-030140/flash_linear_attention_npu_a5-26.10.0%2Bmain.dev54ae09b-py3-none-manylinux_2_34_x86_64.whl#sha256=53eebf55c4beac66669e206601b9317eda9bd86f44f7b9da5e20ebcaee266449 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
 cpu  = ["torch>=2.7.0", "triton>=3.3"]
 tilelang = ["tilelang>=0.1.9"]
 conv1d = ["causal-conv1d>=1.4.0"]
