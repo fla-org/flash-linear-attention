@@ -432,7 +432,7 @@ def test_dispatch_disabled(run_python, disabled):
 
         for operation in [
             'attn', 'attnres', 'common', 'gated_delta_rule', 'gdn2', 'generalized_delta_rule.dplr',
-            'gla', 'kda', 'rwkv6', 'utils',
+            'gla', 'kda', 'rwkv6',
         ]:
             with warnings.catch_warnings():
                 warnings.simplefilter('error', DeprecationWarning)
@@ -461,7 +461,10 @@ def test_dispatch_disabled(run_python, disabled):
         assert 'tilelang' not in sys.modules
         assert 'flash_kda' not in sys.modules
         assert 'fla.ops.kda.backends.triton_ascend.chunk_intra' not in sys.modules
+        assert 'utils' not in backends._operation_registries
         ascend_available = TritonAscendBackend.is_available()
+        assert ('fla.ops.utils.triton_ascend.cumsum' in sys.modules) == ascend_available
+        assert ('fla.ops.utils.triton_ascend.solve_tril' in sys.modules) == ascend_available
         assert ('fla.ops.common.backends.triton_ascend.chunk_o' in sys.modules) == ascend_available
         assert any(name.startswith('fla.ops.simple_gla.backends.triton_ascend.') for name in sys.modules) == ascend_available
         assert any(
@@ -508,6 +511,8 @@ def test_register_import_order(run_python):
             'norm.layernorm': ['layer_norm_fwd', 'layer_norm_bwd'],
             'norm.l2norm': ['l2norm_fwd', 'l2norm_bwd'],
             'norm.fused_norm_gate': ['layer_norm_gated_fwd', 'layer_norm_gated_bwd'],
+            'utils.cumsum': ['chunk_global_cumsum', 'chunk_local_cumsum'],
+            'utils.solve_tril': ['solve_tril'],
         }.items():
             module = f'fla.modules.{owner}' if owner.startswith('norm.') else f'fla.modules.{owner}.ops'
             if owner == 'causal_conv1d':
@@ -516,7 +521,12 @@ def test_register_import_order(run_python):
                 backend_module = f'fla.modules.norm.triton_ascend.{owner.split(".")[1]}'
             else:
                 backend_module = f'fla.modules.{owner}.triton_ascend'
-            importlib.reload(importlib.import_module(f'fla.modules.{owner.split(".")[0]}'))
+            if owner.startswith('utils.'):
+                module = f'fla.ops.{owner}'
+                backend_module = f'fla.ops.utils.triton_ascend.{owner.split(".")[1]}'
+                importlib.reload(importlib.import_module('fla.ops.utils'))
+            else:
+                importlib.reload(importlib.import_module(f'fla.modules.{owner.split(".")[0]}'))
             entries = importlib.import_module(module)
             implementation = sys.modules[backend_module]
             for name in names:
@@ -559,18 +569,23 @@ def test_register_import_order(run_python):
         ('norm.l2norm', 'l2norm_bwd', ('rstd', 'dy'), {'eps': 1e-4}),
         ('norm.fused_norm_gate', 'layer_norm_gated_fwd', ('g', 'weight', 'bias'), {'activation': 'sigmoid'}),
         ('norm.fused_norm_gate', 'layer_norm_gated_bwd', ('x', 'g', 'weight', 'bias'), {'activation': 'sigmoid'}),
+        ('utils.cumsum', 'chunk_global_cumsum', ('cu_seqlens',), {'reverse': True, 'scale': 0.5}),
+        ('utils.cumsum', 'chunk_local_cumsum', ('cu_seqlens', 'chunk_indices'), {'chunk_size': 64, 'use_graph': True}),
+        ('utils.solve_tril', 'solve_tril', ('cu_seqlens', 'chunk_indices'), {'output_dtype': torch.float32}),
     ],
     ids=[
         'activations-forward', 'activations-backward', 'rotary-forward', 'rotary-backward',
         'conv-forward', 'conv-backward', 'conv-update', 'conv-update-states', 'grpo', 'cross-entropy',
         'linear-cross-entropy-forward', 'linear-cross-entropy-backward', 'kl-div-forward', 'kl-div-backward',
         'layernorm-forward', 'layernorm-backward', 'l2norm-forward', 'l2norm-backward',
-        'norm-gate-forward', 'norm-gate-backward',
+        'norm-gate-forward', 'norm-gate-backward', 'global-cumsum', 'local-cumsum', 'solve-tril',
     ],
 )
 @pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='dispatch was disabled before the entry points were imported')
-def test_dispatch_modules(monkeypatch, owner, name, tensor_args, options):
+def test_dispatch_entry_points(monkeypatch, owner, name, tensor_args, options):
     module = f'fla.modules.{owner}' if owner.startswith('norm.') else f'fla.modules.{owner}.ops'
+    if owner.startswith('utils.'):
+        module = f'fla.ops.{owner}'
     entry = getattr(importlib.import_module(module), name)
     calls = []
     expected = object()
