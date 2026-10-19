@@ -56,6 +56,8 @@ class TritonAscendMomentumDeltaRuleBackend(BaseBackend):
             return False, "chunk_momentum_delta_rule NPU override requires NPU tensors"
         if cu_seqlens is not None:
             return False, "variable-length `cu_seqlens` not supported by the NPU override"
+        if k.shape[-1] > 256:
+            return False, "K > 256 not supported by the NPU chunk kernels"
         return True, None
 
     def chunk_momentum_delta_rule(self, *args, **kwargs):

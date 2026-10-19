@@ -87,7 +87,7 @@ jobs:
 
     runs-on: ${{ matrix.os }}
 
-    timeout-minutes: 150
+    timeout-minutes: 180
 
     concurrency:
       group: ${{ github.workflow }}-${{ github.ref }}-${{ matrix.os }}-${{ matrix.python }}

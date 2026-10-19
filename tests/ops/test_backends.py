@@ -365,6 +365,22 @@ def test_simple_gla_ascend_verifier(monkeypatch, is_npu, device, accepted, reaso
     assert simple_gla_verifier(q=q, k=q, v=q) == (accepted, reason)
 
 
+def test_momentum_delta_chunk_ascend_verifier_k_boundary():
+    """K=256 exactly fills the four 64-wide kernel slabs; K=257 must fall back to the torch reference."""
+    from fla.ops.momentum_delta_rule.backends.triton_ascend import TritonAscendMomentumDeltaRuleBackend
+
+    backend = TritonAscendMomentumDeltaRuleBackend()
+
+    def verdict(K):
+        q = SimpleNamespace(device=SimpleNamespace(type='npu'), shape=(1, 64, 2, K))
+        return backend.chunk_momentum_delta_rule_verifier(q=q, k=q, v=q, log_alpha=q, log_mu=q)
+
+    assert verdict(256) == (True, None)
+    accepted, reason = verdict(257)
+    assert accepted is False
+    assert reason == "K > 256 not supported by the NPU chunk kernels"
+
+
 def test_retention_ascend_registration_import_order(run_python):
     run_python(
         """

@@ -111,8 +111,8 @@ def chunk_momentum_delta_kkt_fwd_kernel_npu(
     core_id = tl.program_id(0)
     NT = tl.cdiv(T, BT)
     for task in tl.range(core_id, task_num, num_core):
-        i_t = task % NT
-        i_nh = task // NT
+        i_t = (task % NT).to(tl.int64)
+        i_nh = (task // NT).to(tl.int64)
         i_n = i_nh // H
         i_h = i_nh % H
 
@@ -207,8 +207,8 @@ def chunk_momentum_delta_wy_fwd_kernel_npu(
     core_id = tl.program_id(0)
     NT = tl.cdiv(T, BT)
     for task in tl.range(core_id, task_num, num_core):
-        i_t = task % NT
-        i_nh = task // NT
+        i_t = (task % NT).to(tl.int64)
+        i_nh = (task // NT).to(tl.int64)
         i_n = i_nh // H
         i_h = i_nh % H
 
@@ -242,6 +242,7 @@ def chunk_momentum_delta_wy_fwd_kernel_npu(
             b_p = _ld(p_eff + (i_n * T * H + i_h) * K + offs_t + offs_k, m_k, T_K_ALIGNED).to(tl.float32)
             b_A = tl.load(p_A, mask=m_t[:, None], other=0.0).to(tl.float32)
             b_y = tl.dot(b_A, b_p * b_bar_a[:, None], allow_tf32=False)
+            b_A = tl.load(p_A, mask=m_t[:, None], other=0.0).to(tl.float32)
             b_z = tl.dot(b_A, b_p * b_btm1[:, None], allow_tf32=False)
             p_yz = (i_n * NT * BT * H + i_h) * K + offs_t + offs_k
             _st(y_c + p_yz, b_y, m_k, T_K_ALIGNED)
@@ -336,23 +337,24 @@ def chunk_momentum_delta_fwd_h_kernel_npu(
     NT = tl.cdiv(T, BT)
     NV = tl.cdiv(V, BV)
     for task in tl.range(core_id, task_num, num_core):
-        i_v = task % NV
-        i_nh = task // NV
+        i_v = (task % NV).to(tl.int64)
+        i_nh = (task // NV).to(tl.int64)
         i_n = i_nh // H
         i_h = i_nh % H
         v_start = i_v * BV
 
         o_t = tl.arange(0, BT)
         o_v = tl.arange(0, BV)
+        o_vs = v_start + o_v
         o_k1 = tl.arange(0, BK)
         o_k2 = BK + o_k1
         o_k3 = BK * 2 + o_k1
         o_k4 = BK * 3 + o_k1
         # state rows k >= K (BK > K) are out of bounds; mask every store/load on them
-        m_st1 = (o_k1[:, None] < K) & (o_v[None, :] < V)
-        m_st2 = (o_k2[:, None] < K) & (o_v[None, :] < V)
-        m_st3 = (o_k3[:, None] < K) & (o_v[None, :] < V)
-        m_st4 = (o_k4[:, None] < K) & (o_v[None, :] < V)
+        m_st1 = (o_k1[:, None] < K) & (o_vs[None, :] < V)
+        m_st2 = (o_k2[:, None] < K) & (o_vs[None, :] < V)
+        m_st3 = (o_k3[:, None] < K) & (o_vs[None, :] < V)
+        m_st4 = (o_k4[:, None] < K) & (o_vs[None, :] < V)
 
         # K-segmented state tiles: both S and M live across the chunk loop
         b_h_s1 = tl.zeros([BK, BV], dtype=tl.float32)
@@ -368,31 +370,31 @@ def chunk_momentum_delta_fwd_h_kernel_npu(
             b_h_m4 = tl.zeros([BK, BV], dtype=tl.float32)
 
         if USE_INITIAL_STATE:
-            p_h0_s = h_s0 + i_nh * K * V + o_k1[:, None] * V + o_v[None, :]
-            m_h0 = (o_k1[:, None] < K) & (o_v[None, :] < V)
+            p_h0_s = h_s0 + i_nh * K * V + o_k1[:, None] * V + o_vs[None, :]
+            m_h0 = (o_k1[:, None] < K) & (o_vs[None, :] < V)
             b_h_s1 = tl.load(p_h0_s, mask=m_h0, other=0.0).to(tl.float32)
-            p_h0_m = h_m0 + i_nh * K * V + o_k1[:, None] * V + o_v[None, :]
+            p_h0_m = h_m0 + i_nh * K * V + o_k1[:, None] * V + o_vs[None, :]
             b_h_m1 = tl.load(p_h0_m, mask=m_h0, other=0.0).to(tl.float32)
             if K > BK:
                 o_k2 = BK + o_k1
-                p_h0_s2 = h_s0 + i_nh * K * V + o_k2[:, None] * V + o_v[None, :]
-                m_h02 = (o_k2[:, None] < K) & (o_v[None, :] < V)
+                p_h0_s2 = h_s0 + i_nh * K * V + o_k2[:, None] * V + o_vs[None, :]
+                m_h02 = (o_k2[:, None] < K) & (o_vs[None, :] < V)
                 b_h_s2 = tl.load(p_h0_s2, mask=m_h02, other=0.0).to(tl.float32)
-                p_h0_m2 = h_m0 + i_nh * K * V + o_k2[:, None] * V + o_v[None, :]
+                p_h0_m2 = h_m0 + i_nh * K * V + o_k2[:, None] * V + o_vs[None, :]
                 b_h_m2 = tl.load(p_h0_m2, mask=m_h02, other=0.0).to(tl.float32)
             if K > BK * 2:
                 o_k3 = BK * 2 + o_k1
-                p_h0_s3 = h_s0 + i_nh * K * V + o_k3[:, None] * V + o_v[None, :]
-                m_h03 = (o_k3[:, None] < K) & (o_v[None, :] < V)
+                p_h0_s3 = h_s0 + i_nh * K * V + o_k3[:, None] * V + o_vs[None, :]
+                m_h03 = (o_k3[:, None] < K) & (o_vs[None, :] < V)
                 b_h_s3 = tl.load(p_h0_s3, mask=m_h03, other=0.0).to(tl.float32)
-                p_h0_m3 = h_m0 + i_nh * K * V + o_k3[:, None] * V + o_v[None, :]
+                p_h0_m3 = h_m0 + i_nh * K * V + o_k3[:, None] * V + o_vs[None, :]
                 b_h_m3 = tl.load(p_h0_m3, mask=m_h03, other=0.0).to(tl.float32)
             if K > BK * 3:
                 o_k4 = BK * 3 + o_k1
-                p_h0_s4 = h_s0 + i_nh * K * V + o_k4[:, None] * V + o_v[None, :]
-                m_h04 = (o_k4[:, None] < K) & (o_v[None, :] < V)
+                p_h0_s4 = h_s0 + i_nh * K * V + o_k4[:, None] * V + o_vs[None, :]
+                m_h04 = (o_k4[:, None] < K) & (o_vs[None, :] < V)
                 b_h_s4 = tl.load(p_h0_s4, mask=m_h04, other=0.0).to(tl.float32)
-                p_h0_m4 = h_m0 + i_nh * K * V + o_k4[:, None] * V + o_v[None, :]
+                p_h0_m4 = h_m0 + i_nh * K * V + o_k4[:, None] * V + o_vs[None, :]
                 b_h_m4 = tl.load(p_h0_m4, mask=m_h04, other=0.0).to(tl.float32)
 
         # rebind GM bases per chunk; do not ptr += across i_t (Ascend MTE OOB).
@@ -404,26 +406,27 @@ def chunk_momentum_delta_fwd_h_kernel_npu(
         z_base = z_c + (i_n * NT * BT * H + i_h) * K
         k_base = k_eta + (i_n * T * H + i_h) * K
 
-        for i_t in range(NT):
+        for i_chunk in range(NT):
+            i_t = i_chunk.to(tl.int64)
             # store the state entering chunk i_t (K-segmented)
-            p_hs = h_s_nh + i_t * H * K * V + o_k1[:, None] * V + o_v[None, :]
+            p_hs = h_s_nh + i_t * H * K * V + o_k1[:, None] * V + o_vs[None, :]
             tl.store(p_hs, b_h_s1, mask=m_st1)
-            p_hm = h_m_nh + i_t * H * K * V + o_k1[:, None] * V + o_v[None, :]
+            p_hm = h_m_nh + i_t * H * K * V + o_k1[:, None] * V + o_vs[None, :]
             tl.store(p_hm, b_h_m1, mask=m_st1)
             if K > BK:
-                p_hs2 = h_s_nh + i_t * H * K * V + o_k2[:, None] * V + o_v[None, :]
+                p_hs2 = h_s_nh + i_t * H * K * V + o_k2[:, None] * V + o_vs[None, :]
                 tl.store(p_hs2, b_h_s2, mask=m_st2)
-                p_hm2 = h_m_nh + i_t * H * K * V + o_k2[:, None] * V + o_v[None, :]
+                p_hm2 = h_m_nh + i_t * H * K * V + o_k2[:, None] * V + o_vs[None, :]
                 tl.store(p_hm2, b_h_m2, mask=m_st2)
             if K > BK * 2:
-                p_hs3 = h_s_nh + i_t * H * K * V + o_k3[:, None] * V + o_v[None, :]
+                p_hs3 = h_s_nh + i_t * H * K * V + o_k3[:, None] * V + o_vs[None, :]
                 tl.store(p_hs3, b_h_s3, mask=m_st3)
-                p_hm3 = h_m_nh + i_t * H * K * V + o_k3[:, None] * V + o_v[None, :]
+                p_hm3 = h_m_nh + i_t * H * K * V + o_k3[:, None] * V + o_vs[None, :]
                 tl.store(p_hm3, b_h_m3, mask=m_st3)
             if K > BK * 3:
-                p_hs4 = h_s_nh + i_t * H * K * V + o_k4[:, None] * V + o_v[None, :]
+                p_hs4 = h_s_nh + i_t * H * K * V + o_k4[:, None] * V + o_vs[None, :]
                 tl.store(p_hs4, b_h_s4, mask=m_st4)
-                p_hm4 = h_m_nh + i_t * H * K * V + o_k4[:, None] * V + o_v[None, :]
+                p_hm4 = h_m_nh + i_t * H * K * V + o_k4[:, None] * V + o_vs[None, :]
                 tl.store(p_hm4, b_h_m4, mask=m_st4)
 
             o_t2 = i_t * BT + o_t
@@ -493,24 +496,24 @@ def chunk_momentum_delta_fwd_h_kernel_npu(
                 b_h_m4 = tl.dot(tl.trans(-(b_k * b_dm[:, None])), b_v, b_h_m4 * tl.exp2(b_m_last), allow_tf32=False)
 
         if STORE_FINAL_STATE:
-            p_hsT = h_sT + i_nh * K * V + o_k1[:, None] * V + o_v[None, :]
+            p_hsT = h_sT + i_nh * K * V + o_k1[:, None] * V + o_vs[None, :]
             tl.store(p_hsT, b_h_s1, mask=m_st1)
-            p_hmT = h_mT + i_nh * K * V + o_k1[:, None] * V + o_v[None, :]
+            p_hmT = h_mT + i_nh * K * V + o_k1[:, None] * V + o_vs[None, :]
             tl.store(p_hmT, b_h_m1, mask=m_st1)
             if K > BK:
-                p_hsT2 = h_sT + i_nh * K * V + o_k2[:, None] * V + o_v[None, :]
+                p_hsT2 = h_sT + i_nh * K * V + o_k2[:, None] * V + o_vs[None, :]
                 tl.store(p_hsT2, b_h_s2, mask=m_st2)
-                p_hmT2 = h_mT + i_nh * K * V + o_k2[:, None] * V + o_v[None, :]
+                p_hmT2 = h_mT + i_nh * K * V + o_k2[:, None] * V + o_vs[None, :]
                 tl.store(p_hmT2, b_h_m2, mask=m_st2)
             if K > BK * 2:
-                p_hsT3 = h_sT + i_nh * K * V + o_k3[:, None] * V + o_v[None, :]
+                p_hsT3 = h_sT + i_nh * K * V + o_k3[:, None] * V + o_vs[None, :]
                 tl.store(p_hsT3, b_h_s3, mask=m_st3)
-                p_hmT3 = h_mT + i_nh * K * V + o_k3[:, None] * V + o_v[None, :]
+                p_hmT3 = h_mT + i_nh * K * V + o_k3[:, None] * V + o_vs[None, :]
                 tl.store(p_hmT3, b_h_m3, mask=m_st3)
             if K > BK * 3:
-                p_hsT4 = h_sT + i_nh * K * V + o_k4[:, None] * V + o_v[None, :]
+                p_hsT4 = h_sT + i_nh * K * V + o_k4[:, None] * V + o_vs[None, :]
                 tl.store(p_hsT4, b_h_s4, mask=m_st4)
-                p_hmT4 = h_mT + i_nh * K * V + o_k4[:, None] * V + o_v[None, :]
+                p_hmT4 = h_mT + i_nh * K * V + o_k4[:, None] * V + o_vs[None, :]
                 tl.store(p_hmT4, b_h_m4, mask=m_st4)
 
 
@@ -611,14 +614,15 @@ def chunk_momentum_delta_fwd_o_kernel_npu(
     NT = tl.cdiv(T, BT)
     NV = tl.cdiv(V, BV)
     for task in tl.range(core_id, task_num, num_core):
-        i_v = task % NV
-        i_nh = task // NV
+        i_v = (task % NV).to(tl.int64)
+        i_nh = (task // NV).to(tl.int64)
         i_n = i_nh // H
         i_h = i_nh % H
         v_start = i_v * BV
 
         o_t = tl.arange(0, BT)
         o_v = tl.arange(0, BV)
+        o_vs = v_start + o_v
         o_k1 = tl.arange(0, BK)
         b_r = tl.arange(0, BT)
 
@@ -629,7 +633,8 @@ def chunk_momentum_delta_fwd_o_kernel_npu(
         vi_base = v_i + (i_n * NT * BT * H + i_h) * V
         g_off = (i_n * H + i_h) * NT
 
-        for i_t in range(NT):
+        for i_chunk in range(NT):
+            i_t = i_chunk.to(tl.int64)
             o_t2 = i_t * BT + o_t
             m_t = o_t2 < T
             offs_t = o_t2[:, None] * (H * K)
@@ -646,10 +651,10 @@ def chunk_momentum_delta_fwd_o_kernel_npu(
             b_lct = tl.load(lct + g_off * BT + o_t2, mask=m_t, other=0.0)
             b_lct1 = tl.load(lct1 + g_off * BT + o_t2, mask=m_t, other=0.0)
 
-            p_hs1 = h_s_nh + i_t * H * K * V + o_k1[:, None] * V + o_v[None, :]
-            b_hs = tl.load(p_hs1, mask=(o_k1[:, None] < K) & (o_v[None, :] < V), other=0.0)
-            p_hm1 = h_m_nh + i_t * H * K * V + o_k1[:, None] * V + o_v[None, :]
-            b_hm = tl.load(p_hm1, mask=(o_k1[:, None] < K) & (o_v[None, :] < V), other=0.0)
+            p_hs1 = h_s_nh + i_t * H * K * V + o_k1[:, None] * V + o_vs[None, :]
+            b_hs = tl.load(p_hs1, mask=(o_k1[:, None] < K) & (o_vs[None, :] < V), other=0.0)
+            p_hm1 = h_m_nh + i_t * H * K * V + o_k1[:, None] * V + o_vs[None, :]
+            b_hm = tl.load(p_hm1, mask=(o_k1[:, None] < K) & (o_vs[None, :] < V), other=0.0)
             p_vi = vi_base + offs_tv + offs_v
             b_v = _ld(p_vi, m_v, T_V_ALIGNED).to(tl.float32)
 
@@ -666,10 +671,10 @@ def chunk_momentum_delta_fwd_o_kernel_npu(
                 m_k2 = m_t[:, None] & (o_k2[None, :] < K)
                 b_q = _ld(q_base + offs_t + o_k2[None, :], m_k2, T_K_ALIGNED).to(tl.float32) * scale
                 b_k = _ld(k_base + offs_t + o_k2[None, :], m_k2, T_K_ALIGNED).to(tl.float32)
-                p_hs2 = h_s_nh + i_t * H * K * V + o_k2[:, None] * V + o_v[None, :]
-                b_hs = tl.load(p_hs2, mask=(o_k2[:, None] < K) & (o_v[None, :] < V), other=0.0)
-                p_hm2 = h_m_nh + i_t * H * K * V + o_k2[:, None] * V + o_v[None, :]
-                b_hm = tl.load(p_hm2, mask=(o_k2[:, None] < K) & (o_v[None, :] < V), other=0.0)
+                p_hs2 = h_s_nh + i_t * H * K * V + o_k2[:, None] * V + o_vs[None, :]
+                b_hs = tl.load(p_hs2, mask=(o_k2[:, None] < K) & (o_vs[None, :] < V), other=0.0)
+                p_hm2 = h_m_nh + i_t * H * K * V + o_k2[:, None] * V + o_vs[None, :]
+                b_hm = tl.load(p_hm2, mask=(o_k2[:, None] < K) & (o_vs[None, :] < V), other=0.0)
                 b_o = b_o + tl.dot(b_q * b_a_cum[:, None], b_hs, allow_tf32=False)
                 b_o = b_o - tl.dot(b_q * b_bt[:, None], b_hm, allow_tf32=False)
                 b_qk = tl.dot(b_q + 0.0, tl.trans(b_k + 0.0), allow_tf32=False)
@@ -679,10 +684,10 @@ def chunk_momentum_delta_fwd_o_kernel_npu(
                 m_k3 = m_t[:, None] & (o_k3[None, :] < K)
                 b_q = _ld(q_base + offs_t + o_k3[None, :], m_k3, T_K_ALIGNED).to(tl.float32) * scale
                 b_k = _ld(k_base + offs_t + o_k3[None, :], m_k3, T_K_ALIGNED).to(tl.float32)
-                p_hs3 = h_s_nh + i_t * H * K * V + o_k3[:, None] * V + o_v[None, :]
-                b_hs = tl.load(p_hs3, mask=(o_k3[:, None] < K) & (o_v[None, :] < V), other=0.0)
-                p_hm3 = h_m_nh + i_t * H * K * V + o_k3[:, None] * V + o_v[None, :]
-                b_hm = tl.load(p_hm3, mask=(o_k3[:, None] < K) & (o_v[None, :] < V), other=0.0)
+                p_hs3 = h_s_nh + i_t * H * K * V + o_k3[:, None] * V + o_vs[None, :]
+                b_hs = tl.load(p_hs3, mask=(o_k3[:, None] < K) & (o_vs[None, :] < V), other=0.0)
+                p_hm3 = h_m_nh + i_t * H * K * V + o_k3[:, None] * V + o_vs[None, :]
+                b_hm = tl.load(p_hm3, mask=(o_k3[:, None] < K) & (o_vs[None, :] < V), other=0.0)
                 b_o = b_o + tl.dot(b_q * b_a_cum[:, None], b_hs, allow_tf32=False)
                 b_o = b_o - tl.dot(b_q * b_bt[:, None], b_hm, allow_tf32=False)
                 b_qk = tl.dot(b_q + 0.0, tl.trans(b_k + 0.0), allow_tf32=False)
@@ -692,10 +697,10 @@ def chunk_momentum_delta_fwd_o_kernel_npu(
                 m_k4 = m_t[:, None] & (o_k4[None, :] < K)
                 b_q = _ld(q_base + offs_t + o_k4[None, :], m_k4, T_K_ALIGNED).to(tl.float32) * scale
                 b_k = _ld(k_base + offs_t + o_k4[None, :], m_k4, T_K_ALIGNED).to(tl.float32)
-                p_hs4 = h_s_nh + i_t * H * K * V + o_k4[:, None] * V + o_v[None, :]
-                b_hs = tl.load(p_hs4, mask=(o_k4[:, None] < K) & (o_v[None, :] < V), other=0.0)
-                p_hm4 = h_m_nh + i_t * H * K * V + o_k4[:, None] * V + o_v[None, :]
-                b_hm = tl.load(p_hm4, mask=(o_k4[:, None] < K) & (o_v[None, :] < V), other=0.0)
+                p_hs4 = h_s_nh + i_t * H * K * V + o_k4[:, None] * V + o_vs[None, :]
+                b_hs = tl.load(p_hs4, mask=(o_k4[:, None] < K) & (o_vs[None, :] < V), other=0.0)
+                p_hm4 = h_m_nh + i_t * H * K * V + o_k4[:, None] * V + o_vs[None, :]
+                b_hm = tl.load(p_hm4, mask=(o_k4[:, None] < K) & (o_vs[None, :] < V), other=0.0)
                 b_o = b_o + tl.dot(b_q * b_a_cum[:, None], b_hs, allow_tf32=False)
                 b_o = b_o - tl.dot(b_q * b_bt[:, None], b_hm, allow_tf32=False)
                 b_qk = tl.dot(b_q + 0.0, tl.trans(b_k + 0.0), allow_tf32=False)
