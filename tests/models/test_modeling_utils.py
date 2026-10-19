@@ -6,6 +6,7 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 from copy import deepcopy
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -23,6 +24,7 @@ from fla.models import (
     PaTHAttentionConfig,
     TransformerConfig,
 )
+from fla.models.cache_utils import Cache
 from fla.utils import assert_close, device, device_name, find_spec_cached
 
 from .utils import create_model_and_config
@@ -30,10 +32,16 @@ from .utils import create_model_and_config
 FORWARD_CONFIGS = [
     models.ABCConfig, models.BitNetConfig, models.CombaConfig, models.DeltaNetConfig,
     models.ForgettingTransformerConfig, models.GatedDeltaNetConfig, models.GatedDeltaProductConfig,
-    models.GLAConfig, models.GSAConfig, models.HGRNConfig, models.HGRN2Config, models.LightNetConfig,
+    models.GLAConfig, models.GSAConfig, models.HGRNConfig, models.HGRN2Config, models.KDAConfig, models.LightNetConfig,
     models.MesaNetConfig, models.MLAConfig, models.MoBAConfig, models.NSAConfig, models.ParallaxConfig,
     models.PaTHAttentionConfig, models.PrecondGatedDeltaNetConfig, models.RavenConfig, models.RetNetConfig,
     models.RodimusConfig, models.RWKV6Config, models.TransformerConfig, models.WallTransformerConfig,
+]
+
+DECODER_CONFIGS = [
+    models.ABCConfig, models.CombaConfig, models.DeltaNetConfig, models.GatedDeltaNetConfig,
+    models.GatedDeltaProductConfig, models.GLAConfig, models.GSAConfig, models.KDAConfig,
+    models.MesaNetConfig, models.MLAConfig, models.MoBAConfig, models.NSAConfig, models.RavenConfig,
 ]
 
 
@@ -179,6 +187,70 @@ def test_forward_args(config_class, return_dict, make_model):
         torch.testing.assert_close(actual.logits if return_dict else actual[1], expected.logits)
         selected = model(input_ids=input_ids, num_logits_to_keep=2, use_cache=False, return_dict=return_dict)
     torch.testing.assert_close(selected.logits if return_dict else selected[0], expected.logits[:, -2:])
+
+
+@pytest.mark.parametrize('config_class', DECODER_CONFIGS, ids=lambda cls: cls.model_type)
+@pytest.mark.parametrize(('training', 'use_cache', 'return_dict'), [
+    pytest.param(True, None, False, id='train-default-tuple'),
+    pytest.param(False, None, True, id='eval-default-dict'),
+    pytest.param(True, True, True, id='train-cache-dict'),
+    pytest.param(False, False, False, id='eval-no-cache-tuple'),
+])
+def test_decoder_forward(config_class, training, use_cache, return_dict, make_model):
+    torch.manual_seed(42)
+    model = make_model(config_class).model.train(training)
+    model.layers = nn.ModuleList([nn.Module(), nn.Module()])
+    for layer in model.layers:
+        layer.forward = Mock(side_effect=lambda hidden_states, **kwargs: (
+            hidden_states + hidden_states.tanh(), None, kwargs['past_key_values'], kwargs['attnres_states'],
+        ))
+    input_ids = torch.randint(0, 64, (2, 7))
+    attention_mask = torch.ones_like(input_ids)
+    cu_seqlens = torch.tensor([0, 7, 14], dtype=torch.int32)
+    expected_cache = not training if use_cache is None else use_cache
+    outputs = model(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        use_cache=use_cache,
+        output_hidden_states=True,
+        return_dict=return_dict,
+        cu_seqlens=cu_seqlens,
+    )
+    cache = outputs.past_key_values if return_dict else outputs[1] if expected_cache else None
+    assert isinstance(cache, Cache) if expected_cache else cache is None
+    hidden_states = outputs.hidden_states if return_dict else outputs[-1]
+    reference = model.embeddings(input_ids)
+    for index, layer in enumerate(model.layers):
+        torch.testing.assert_close(hidden_states[index], reference)
+        layer.forward.assert_called_once()
+        args, kwargs = layer.forward.call_args
+        torch.testing.assert_close(args[0], reference)
+        assert kwargs['attention_mask'] is attention_mask
+        assert kwargs['past_key_values'] is cache
+        assert kwargs['use_cache'] is expected_cache
+        assert kwargs['output_attentions'] is False
+        assert kwargs['attnres_states'] is None
+        assert kwargs['cu_seqlens'] is cu_seqlens
+        reference = reference + reference.tanh()
+    reference = model.norm(reference)
+    torch.testing.assert_close(outputs[0], reference)
+    torch.testing.assert_close(hidden_states[-1], reference)
+    gradient = torch.randn_like(reference)
+    parameters = (model.embeddings.weight, model.norm.weight)
+    actual_gradients = torch.autograd.grad(outputs[0], parameters, grad_outputs=gradient)
+    reference_gradients = torch.autograd.grad(reference, parameters, grad_outputs=gradient)
+    torch.testing.assert_close(actual_gradients, reference_gradients)
+
+    embeddings = model.embeddings(input_ids)
+    embedded_outputs = model(None, attention_mask, embeddings, cache, use_cache, False, True, return_dict)
+    torch.testing.assert_close(embedded_outputs[0], reference)
+    with pytest.raises(ValueError, match='both input_ids and inputs_embeds'):
+        model(input_ids=input_ids, inputs_embeds=embeddings)
+    with pytest.raises(ValueError, match='either input_ids or inputs_embeds'):
+        model()
+    with pytest.warns(UserWarning, match=f'`{type(model).__name__}` does not `output_attentions`'):
+        warned_outputs = model(input_ids=input_ids, output_attentions=True, return_dict=True)
+    assert warned_outputs.attentions is None
 
 
 @pytest.mark.skipif(device_name == 'cpu', reason='Fused loss and model kernels require an accelerator.')
