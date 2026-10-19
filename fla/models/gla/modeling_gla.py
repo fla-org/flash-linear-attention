@@ -121,7 +121,9 @@ class GLAPreTrainedModel(FLAPreTrainedModel):
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
         # transformers loads meta parameters without invoking module load hooks.
-        kwargs['key_mapping'] = {**_RESIDUAL_KEY_MAPPING, **(kwargs.pop('key_mapping', None) or {})}
+        kwargs['key_mapping'] = dict(kwargs.get('key_mapping') or {})
+        for source, target in _RESIDUAL_KEY_MAPPING.items():
+            kwargs['key_mapping'].setdefault(source, target)
         return super().from_pretrained(pretrained_model_name_or_path, *args, **kwargs)
 
     def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
