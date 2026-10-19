@@ -161,6 +161,50 @@ jobs:
           print("matplotlib savefig smoke test: ok")
           PY
 
+      - name: Check strict GDN2 regressions before measuring the candidate
+        shell: bash
+        env:
+          FLA_CI_ENV: "0"
+          FLA_NPU_XDIST: "1"
+        run: |
+          source /usr/local/Ascend/ascend-toolkit/set_env.sh
+          pytest -s -v -x -n 4 --dist load tests/ops/test_gdn2.py -k large_decay_recurrence --junitxml=gdn2-regressions.xml
+
+      - name: Compare GDN2 backward on one NPU
+        shell: bash
+        env:
+          FLA_CI_ENV: "0"
+          FLA_CACHE_RESULTS: "0"
+          ASCEND_RT_VISIBLE_DEVICES: "0"
+          FLA_NPU_XDIST: "0"
+        run: |
+          source /usr/local/Ascend/ascend-toolkit/set_env.sh
+          set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          baseline=9e97506c338769e8031966fb22fe31780addd8fa
+          git fetch origin "$baseline"
+          mkdir -p /tmp/gdn2-baseline
+          git archive "$baseline" | tar -x -C /tmp/gdn2-baseline
+          candidate=$(git rev-parse HEAD)
+          for trial in baseline-1 candidate-1 candidate-2 baseline-2; do
+            source="$GITHUB_WORKSPACE"
+            commit="$candidate"
+            if [[ "$trial" == baseline-* ]]; then
+              source=/tmp/gdn2-baseline
+              commit="$baseline"
+            fi
+            python benchmarks/ops/profile_gdn2_review.py --source "$source" --commit "$commit" --label "$trial" --output gdn2-paired
+          done
+
+      - name: Upload GDN2 iteration evidence
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: gdn2-iteration
+          path: |
+            gdn2-regressions.xml
+            gdn2-paired/
+
       - name: Benchmark chunk_gdn, fused_recurrent_gdn2, chunk_gdn2, chunk_kda, KDA graph, fused_attnres, conv1d, and chunk_precond_gdn
         shell: bash
         env:
