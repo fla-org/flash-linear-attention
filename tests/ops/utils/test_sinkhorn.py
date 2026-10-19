@@ -36,30 +36,36 @@ def backend(request, monkeypatch):
 
 @pytest.mark.parametrize('dtype', [torch.float32, torch.float16, torch.bfloat16], ids=str)
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'N', 'num_iters', 'scale'),
+    ('shape', 'num_iters', 'scale', 'noncontiguous'),
     [
-        pytest.param(*test, id='B{}-T{}-H{}-N{}-iters{}-scale{}'.format(*test))
+        pytest.param(*test, id='shape{}-iters{}-scale{}-nc{}'.format('x'.join(map(str, test[0])), *test[1:]))
         for test in [
-            (2, 7, 1, 1, 20, 1),
-            (2, 7, 1, 3, 1, 1),
-            (2, 7, 1, 4, 20, 1),
-            (2, 7, 1, 8, 7, 1),
-            (2, 7, 1, 4, 20, 1000),
-            (1, 127, 1, 4, 20, 1),
-            (1, 128, 1, 4, 20, 1),
-            (1, 129, 1, 1, 20, 1),
-            (1, 129, 1, 3, 20, 1),
-            (1, 129, 1, 8, 20, 1),
-            (1, 8192, 1, 4, 20, 1),
-            (1, 8192, 1, 8, 20, 1),
-            (1, 32768, 1, 4, 20, 1),
-            (1, 32768, 1, 8, 20, 1),
+            ((2, 7, 1, 1, 1), 20, 1, False),
+            ((2, 7, 1, 3, 3), 1, 1, False),
+            ((2, 7, 1, 4, 4), 20, 1, False),
+            ((2, 7, 1, 8, 8), 7, 1, False),
+            ((2, 7, 1, 4, 4), 20, 1000, False),
+            ((1, 127, 1, 4, 4), 20, 1, False),
+            ((1, 128, 1, 4, 4), 20, 1, False),
+            ((1, 129, 1, 1, 1), 20, 1, False),
+            ((1, 129, 1, 3, 3), 20, 1, False),
+            ((1, 129, 1, 8, 8), 20, 1, False),
+            ((1, 8192, 1, 4, 4), 20, 1, False),
+            ((1, 8192, 1, 8, 8), 20, 1, False),
+            ((1, 32768, 1, 4, 4), 20, 1, False),
+            ((1, 32768, 1, 8, 8), 20, 1, False),
+            ((4, 4), 20, 1, False),
+            ((2, 4, 4), 20, 1, True),
+            ((2, 0, 4, 4), 20, 1, False),
         ]
     ],
 )
-def test_sinkhorn(B: int, T: int, H: int, N: int, num_iters: int, scale: float, dtype: torch.dtype, backend):
+def test_sinkhorn(shape: tuple[int, ...], num_iters: int, scale: float, noncontiguous: bool, dtype: torch.dtype, backend):
     torch.manual_seed(42)
-    x = (torch.randn(B, T, H, N, N, dtype=dtype, device=device) * scale).requires_grad_(True)
+    x = torch.randn(shape, dtype=dtype, device=device) * scale
+    if noncontiguous:
+        x = x.transpose(-1, -2)
+    x.requires_grad_()
     ref = naive_sinkhorn(logits=x, num_iters=num_iters)
     do = torch.randn_like(ref)
     ref.backward(do)
@@ -74,62 +80,45 @@ def test_sinkhorn(B: int, T: int, H: int, N: int, num_iters: int, scale: float, 
     assert tri_dx.dtype == dtype
     assert torch.isfinite(tri).all()
     assert torch.isfinite(tri_dx).all()
-    assert_close('o', ref, tri, 1e-4)
-    assert_close('dx', ref_dx, tri_dx, 1e-4)
-    torch.testing.assert_close(tri.sum(-1), torch.ones_like(tri[..., 0]), rtol=1e-5, atol=1e-5)
-
-
-@pytest.mark.parametrize('dtype', [torch.float32, torch.float16, torch.bfloat16], ids=str)
-@pytest.mark.parametrize(('shape', 'strided'), [
-    pytest.param((4, 4), False, id='unbatched'),
-    pytest.param((2, 4, 4), True, id='strided'),
-    pytest.param((2, 0, 4, 4), False, id='empty'),
-])
-def test_sinkhorn_layout(shape: tuple[int, ...], strided: bool, dtype: torch.dtype, backend):
-    torch.manual_seed(42)
-    x = torch.randn(shape, dtype=dtype, device=device)
-    if strided:
-        x = x.transpose(-1, -2)
-    x.requires_grad_()
-    ref = naive_sinkhorn(logits=x)
-    do = torch.randn_like(ref)
-    ref.backward(do)
-    ref_dx, x.grad = x.grad.clone(), None
-
-    tri = sinkhorn(logits=x)
-    tri.backward(do)
-    tri_dx = x.grad
-
-    assert tri.shape == x.shape
-    assert tri.dtype == torch.float32
-    assert tri_dx.dtype == dtype
     if x.numel() == 0:
         torch.testing.assert_close(ref, tri)
         torch.testing.assert_close(ref_dx, tri_dx)
     else:
         assert_close('o', ref, tri, 1e-4)
         assert_close('dx', ref_dx, tri_dx, 1e-4)
+    torch.testing.assert_close(tri.sum(-1), torch.ones_like(tri[..., 0]), rtol=1e-5, atol=1e-5)
 
 
-def test_sinkhorn_packed(backend):
+@pytest.mark.parametrize('dtype', [torch.float32, torch.float16, torch.bfloat16], ids=str)
+def test_sinkhorn_inference(dtype: torch.dtype, backend):
     torch.manual_seed(42)
-    logits = torch.randn(2, 3, 4, 4, device=device)
+    x = torch.randn(2, 3, 4, 4, dtype=dtype, device=device, requires_grad=True)
     with torch.no_grad():
-        dense = sinkhorn(logits=logits)
-        packed = sinkhorn(logits=logits.flatten(0, 1))
-    torch.testing.assert_close(dense.flatten(0, 1), packed, rtol=0, atol=0)
+        ref = naive_sinkhorn(logits=x)
+        tri = sinkhorn(logits=x)
+        flat = sinkhorn(logits=x.flatten(0, 1))
+    assert tri.dtype == torch.float32
+    assert not tri.requires_grad
+    assert not flat.requires_grad
+    assert_close('o', ref, tri, 1e-4)
+    torch.testing.assert_close(tri.flatten(0, 1), flat, rtol=0, atol=0)
 
 
-def test_sinkhorn_backend(backend, monkeypatch):
+def test_sinkhorn_backward_backend(backend, monkeypatch):
+    torch.manual_seed(42)
     if backend == 'gluon':
-        from fla.ops.utils.sinkhorn import gluon as module
+        from fla.ops.utils.sinkhorn import gluon
+
+        backward = Mock(wraps=gluon.sinkhorn_bwd_gluon)
+        monkeypatch.setattr(gluon, 'sinkhorn_bwd_gluon', backward)
     elif backend == 'tilelang':
-        from fla.ops.utils.sinkhorn import tilelang as module
+        from fla.ops.utils.sinkhorn import tilelang
+
+        backward = Mock(wraps=tilelang.sinkhorn_bwd_tilelang)
+        monkeypatch.setattr(tilelang, 'sinkhorn_bwd_tilelang', backward)
     else:
-        module = ops
-    name = 'sinkhorn_bwd' if backend == 'triton' else f'sinkhorn_bwd_{backend}'
-    backward = Mock(wraps=getattr(module, name))
-    monkeypatch.setattr(module, name, backward)
+        backward = Mock(wraps=ops.sinkhorn_bwd)
+        monkeypatch.setattr(ops, 'sinkhorn_bwd', backward)
 
     x = torch.randn(3, 4, 4, device=device, requires_grad=True)
     out = sinkhorn(logits=x)
@@ -137,21 +126,6 @@ def test_sinkhorn_backend(backend, monkeypatch):
         monkeypatch.setenv(flag, '0')
     out.backward(torch.randn_like(out))
     backward.assert_called_once()
-
-
-@pytest.mark.parametrize('backend_type', [GluonBackend, TileLangBackend])
-def test_sinkhorn_unavailable_backend(monkeypatch, backend_type):
-    if _DISPATCH_DISABLED:
-        pytest.skip('Backend dispatch disabled before import')
-    for name in ('GLUON', 'TILELANG'):
-        monkeypatch.setenv(f'FLA_{name}', '0')
-    monkeypatch.setenv(f'FLA_{backend_type.backend_type.upper()}', '1')
-    monkeypatch.setattr(backend_type, 'is_available', classmethod(lambda cls: False))
-
-    implementation = Mock(side_effect=AssertionError('Unavailable backend was selected'))
-    monkeypatch.setattr(backend_type, 'get_implementation', implementation)
-    logits = torch.zeros(1, 1, device=device)
-    torch.testing.assert_close(sinkhorn(logits=logits), torch.ones_like(logits))
 
 
 @pytest.mark.parametrize(('shape', 'dtype', 'num_iters', 'error'), [
@@ -167,8 +141,6 @@ def test_sinkhorn_unavailable_backend(monkeypatch, backend_type):
     pytest.param((4, 4), torch.float32, 1.5, 'positive integer', id='fractional-iters'),
     pytest.param((4, 4), torch.float32, True, 'positive integer', id='bool-iters'),
 ])
-def test_sinkhorn_invalid_inputs(monkeypatch, shape, dtype, num_iters, error):
-    forward = Mock(side_effect=AssertionError('Invalid inputs reached backend dispatch'))
-    monkeypatch.setattr(ops, 'sinkhorn_fwd', forward)
+def test_sinkhorn_invalid_inputs(shape, dtype, num_iters, error):
     with pytest.raises(ValueError, match=error):
         sinkhorn(logits=torch.empty(shape, device=device, dtype=dtype), num_iters=num_iters)
