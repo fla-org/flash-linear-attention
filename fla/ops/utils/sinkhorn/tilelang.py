@@ -19,12 +19,11 @@ class SinkhornTileLangBackend(TileLangBackend):
 
 
 @tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_DEVICE_COMPILE_FLAGS: ['--fmad=false']})
-def sinkhorn_fwd_kernel(NT, N, BN, BT, NUM_ITERS, SAVE_HISTORY, dtype):
+def sinkhorn_fwd_kernel(NT, N, BN, BT, NUM_ITERS, dtype):
     @T.prim_func
     def kernel(
         x: T.Tensor((NT * N * N,), dtype),
         o: T.Tensor((NT * N * N,), 'float32'),
-        history: T.Tensor((2 * NUM_ITERS * NT * N * N if SAVE_HISTORY else 1,), 'float32'),
     ):
         with T.Kernel(T.ceildiv(NT, BT), threads=128) as token:
             i_t = T.cast(token, 'int64') * BT
@@ -59,8 +58,6 @@ def sinkhorn_fwd_kernel(NT, N, BN, BT, NUM_ITERS, SAVE_HISTORY, dtype):
                         b_x[t, i, j] - T.log(b_col_sum[t, j]),
                         -T.infinity('float32'),
                     )
-                    if SAVE_HISTORY and i_t + t < NT and i < N and j < N:
-                        history[((T.cast(step, 'int64') * 2 * NT + i_t + t) * N + i) * N + j] = T.exp(b_x[t, i, j])
                 T.reduce_max(b_x, b_row_max, dim=2)
                 for t, i, j in T.Parallel(BT, BN, BN):
                     b_x[t, i, j] = b_x[t, i, j] - b_row_max[t, i]
@@ -72,8 +69,6 @@ def sinkhorn_fwd_kernel(NT, N, BN, BT, NUM_ITERS, SAVE_HISTORY, dtype):
                         b_x[t, i, j] - T.log(b_row_sum[t, i]),
                         -T.infinity('float32'),
                     )
-                    if SAVE_HISTORY and i_t + t < NT and i < N and j < N:
-                        history[(((T.cast(step, 'int64') * 2 + 1) * NT + i_t + t) * N + i) * N + j] = T.exp(b_x[t, i, j])
             for t, i, j in T.Parallel(BT, BN, BN):
                 if i_t + t < NT and i < N and j < N:
                     o[((i_t + t) * N + i) * N + j] = T.exp(b_x[t, i, j])
@@ -82,16 +77,23 @@ def sinkhorn_fwd_kernel(NT, N, BN, BT, NUM_ITERS, SAVE_HISTORY, dtype):
 
 @tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_DEVICE_COMPILE_FLAGS: ['--fmad=false']})
 def sinkhorn_bwd_kernel(NT, N, BN, BT, NUM_ITERS, dtype):
+    # Recompute earlier blocks to keep the shared probability cache within 40 KiB.
+    BI = min(NUM_ITERS, 20)
+
     @T.prim_func
     def kernel(
-        o: T.Tensor((NT * N * N,), 'float32'),
-        history: T.Tensor((2 * NUM_ITERS * NT * N * N,), 'float32'),
+        x: T.Tensor((NT * N * N,), dtype),
         do: T.Tensor((NT * N * N,), 'float32'),
         dx: T.Tensor((NT * N * N,), dtype),
     ):
         with T.Kernel(T.ceildiv(NT, BT), threads=128) as token:
             i_t = T.cast(token, 'int64') * BT
             b_dx = T.alloc_fragment((BT, BN, BN), 'float32')
+            b_ps = T.alloc_shared((2 * BI, BT, BN, BN), 'float32')
+            b_x = T.alloc_fragment((BT, BN, BN), 'float32')
+            b_p = T.alloc_fragment((BT, BN, BN), 'float32')
+            b_col_max = T.alloc_fragment((BT, BN), 'float32')
+            b_row_max = T.alloc_fragment((BT, BN), 'float32')
             b_col_sum = T.alloc_fragment((BT, BN), 'float32')
             b_row_sum = T.alloc_fragment((BT, BN), 'float32')
             if BT > 1:
@@ -100,23 +102,59 @@ def sinkhorn_bwd_kernel(NT, N, BN, BT, NUM_ITERS, dtype):
                     forward_thread_fn=lambda t, i, j: t * min(32, BN * BN) + (i * BN + j) % 32,
                     forward_index_fn=lambda t, i, j: (i * BN + j) // 32,
                 )
-                T.annotate_layout({b_dx: layout})
+                T.annotate_layout({b_x: layout, b_dx: layout})
             for t, i, j in T.Parallel(BT, BN, BN):
                 b_dx[t, i, j] = T.if_then_else(
                     i_t + t < NT and i < N and j < N,
-                    do[((i_t + t) * N + i) * N + j] * o[((i_t + t) * N + i) * N + j],
+                    do[((i_t + t) * N + i) * N + j],
                     0.0,
                 )
-            for reverse in T.serial(NUM_ITERS):
-                step = T.cast(NUM_ITERS - 1 - reverse, 'int64')
-                T.reduce_sum(b_dx, b_row_sum, dim=2)
+            for block in T.serial(T.ceildiv(NUM_ITERS, BI)):
+                i_b = T.ceildiv(NUM_ITERS, BI) - 1 - block
                 for t, i, j in T.Parallel(BT, BN, BN):
-                    if i_t + t < NT and i < N and j < N:
-                        b_dx[t, i, j] -= history[(((step * 2 + 1) * NT + i_t + t) * N + i) * N + j] * b_row_sum[t, i]
-                T.reduce_sum(b_dx, b_col_sum, dim=1)
-                for t, i, j in T.Parallel(BT, BN, BN):
-                    if i_t + t < NT and i < N and j < N:
-                        b_dx[t, i, j] -= history[((step * 2 * NT + i_t + t) * N + i) * N + j] * b_col_sum[t, j]
+                    b_x[t, i, j] = T.if_then_else(
+                        i_t + t < NT and i < N and j < N,
+                        x[((i_t + t) * N + i) * N + j],
+                        -T.infinity('float32'),
+                    )
+                for step in T.serial(T.min((i_b + 1) * BI, NUM_ITERS)):
+                    T.reduce_max(b_x, b_col_max, dim=1)
+                    for t, i, j in T.Parallel(BT, BN, BN):
+                        b_x[t, i, j] = b_x[t, i, j] - b_col_max[t, j]
+                        b_p[t, i, j] = T.exp(b_x[t, i, j])
+                    T.reduce_sum(b_p, b_col_sum, dim=1)
+                    for t, i, j in T.Parallel(BT, BN, BN):
+                        b_x[t, i, j] = T.if_then_else(
+                            i_t + t < NT and i < N and j < N,
+                            b_x[t, i, j] - T.log(b_col_sum[t, j]),
+                            -T.infinity('float32'),
+                        )
+                        if step >= i_b * BI:
+                            b_ps[2 * (step - i_b * BI), t, i, j] = T.exp(b_x[t, i, j])
+                    T.reduce_max(b_x, b_row_max, dim=2)
+                    for t, i, j in T.Parallel(BT, BN, BN):
+                        b_x[t, i, j] = b_x[t, i, j] - b_row_max[t, i]
+                        b_p[t, i, j] = T.exp(b_x[t, i, j])
+                    T.reduce_sum(b_p, b_row_sum, dim=2)
+                    for t, i, j in T.Parallel(BT, BN, BN):
+                        b_x[t, i, j] = T.if_then_else(
+                            i_t + t < NT and i < N and j < N,
+                            b_x[t, i, j] - T.log(b_row_sum[t, i]),
+                            -T.infinity('float32'),
+                        )
+                        if step >= i_b * BI:
+                            b_ps[2 * (step - i_b * BI) + 1, t, i, j] = T.exp(b_x[t, i, j])
+                if i_b == T.ceildiv(NUM_ITERS, BI) - 1:
+                    for t, i, j in T.Parallel(BT, BN, BN):
+                        b_dx[t, i, j] *= T.exp(b_x[t, i, j])
+                for reverse in T.serial(T.min(BI, NUM_ITERS - i_b * BI)):
+                    step = T.min(BI, NUM_ITERS - i_b * BI) - 1 - reverse
+                    T.reduce_sum(b_dx, b_row_sum, dim=2)
+                    for t, i, j in T.Parallel(BT, BN, BN):
+                        b_dx[t, i, j] -= b_ps[2 * step + 1, t, i, j] * b_row_sum[t, i]
+                    T.reduce_sum(b_dx, b_col_sum, dim=1)
+                    for t, i, j in T.Parallel(BT, BN, BN):
+                        b_dx[t, i, j] -= b_ps[2 * step, t, i, j] * b_col_sum[t, j]
             for t, i, j in T.Parallel(BT, BN, BN):
                 if i_t + t < NT and i < N and j < N:
                     dx[((i_t + t) * N + i) * N + j] = b_dx[t, i, j]
@@ -124,11 +162,10 @@ def sinkhorn_bwd_kernel(NT, N, BN, BT, NUM_ITERS, dtype):
 
 
 @register(sinkhorn_fwd, backend=SinkhornTileLangBackend)
-def sinkhorn_fwd_tilelang(logits: torch.Tensor, num_iters: int, save_history: bool):
+def sinkhorn_fwd_tilelang(logits: torch.Tensor, num_iters: int):
     N = logits.shape[-1]
     NT = logits.numel() // (N * N)
     out = torch.empty_like(logits, dtype=torch.float32)
-    history = torch.empty((2 * num_iters, NT, N, N), device=logits.device, dtype=torch.float32) if save_history else None
     if NT:
         kernel = sinkhorn_fwd_kernel(
             NT=NT,
@@ -136,23 +173,16 @@ def sinkhorn_fwd_tilelang(logits: torch.Tensor, num_iters: int, save_history: bo
             BN=triton.next_power_of_2(N),
             BT=1 if NT < 128 else max(4, 128 // min(32, triton.next_power_of_2(N) ** 2)),
             NUM_ITERS=num_iters,
-            SAVE_HISTORY=save_history,
             dtype=str(logits.dtype).removeprefix('torch.'),
         )
-        kernel(logits.flatten(), out.flatten(), history.flatten() if history is not None else out.flatten()[:1])
-    return out, history, sinkhorn_bwd_tilelang
+        kernel(logits.flatten(), out.flatten())
+    return out, sinkhorn_bwd_tilelang
 
 
-def sinkhorn_bwd_tilelang(
-    out: torch.Tensor,
-    history: torch.Tensor,
-    dout: torch.Tensor,
-    num_iters: int,
-    dtype: torch.dtype,
-) -> torch.Tensor:
-    N = out.shape[-1]
-    NT = out.numel() // (N * N)
-    dx = torch.empty_like(out, dtype=dtype)
+def sinkhorn_bwd_tilelang(logits: torch.Tensor, dout: torch.Tensor, num_iters: int) -> torch.Tensor:
+    N = logits.shape[-1]
+    NT = logits.numel() // (N * N)
+    dx = torch.empty_like(logits)
     if NT:
         kernel = sinkhorn_bwd_kernel(
             NT=NT,
@@ -160,7 +190,7 @@ def sinkhorn_bwd_tilelang(
             BN=triton.next_power_of_2(N),
             BT=1 if NT < 128 else max(4, 128 // min(32, triton.next_power_of_2(N) ** 2)),
             NUM_ITERS=num_iters,
-            dtype=str(dtype).removeprefix('torch.'),
+            dtype=str(logits.dtype).removeprefix('torch.'),
         )
-        kernel(out.flatten(), history.flatten(), dout.flatten(), dx.flatten())
+        kernel(logits.flatten(), dout.flatten(), dx.flatten())
     return dx
