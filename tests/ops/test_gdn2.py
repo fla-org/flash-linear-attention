@@ -425,6 +425,7 @@ def test_chunk_large_decay(spike, write, disable_recompute):
 
 @pytest.mark.skipif(not (IS_NVIDIA or IS_AMD or IS_NPU), reason="CUDA/ROCm or Ascend NPU required")
 @pytest.mark.parametrize(('dtype', 'K', 'V', 'gate_dtype', 'spike'), [
+    pytest.param(torch.bfloat16, 60, 32, torch.float32, 1e8, id='bf16-k60-v32'),
     pytest.param(torch.float32, 48, 32, torch.float32, 1e8, id='fp32-k48-v32'),
     pytest.param(torch.float16, 48, 32, torch.float32, 1e8, id='fp16-k48-v32'),
     pytest.param(torch.bfloat16, 48, 32, torch.float32, 1e8, id='bf16-k48-v32'),

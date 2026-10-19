@@ -499,6 +499,7 @@ def chunk_gdn2_bwd_kernel_intra(
     SAFE_GATE: tl.constexpr,
     GATE_SHIFT: tl.constexpr,
     USE_GATHER: tl.constexpr,
+    PRELOAD_DIAGONAL: tl.constexpr,
 ):
     i_kc, i_t = unflatten_program_id(tl.cdiv(K, BK) * NC)
     i_bh = tl.program_id(1).to(tl.int64)
@@ -619,12 +620,24 @@ def chunk_gdn2_bwd_kernel_intra(
         b_dq2 += tl.dot(b_dAqk_diag_qk, b_k_exp_diag_qk) * exp_b_g_diag_qk
         b_dk2 += tl.dot(b_dAkk_diag_qk, b_k_exp_diag_qk) * exp_b_g_diag_qk
     else:
+        if PRELOAD_DIAGONAL:
+            # keep diagonal rows in UB instead of issuing small DMA transfers inside the loop
+            b_graw = tl.load(g_raw + o_c[:, None] * H * K + o_k[None, :], mask=m_kc, other=0).to(tl.float32)
+            p_diag = o_c[:, None] * H * BT + i_i * BC + o_i[None, :]
+            b_dAqk_diag = tl.load(dAqk + p_diag, mask=m_c[:, None], other=0)
+            b_dAkk_diag = tl.load(dAkk + p_diag, mask=m_c[:, None], other=0)
         b_interval = tl.zeros([BC, BK], tl.float32)
         for j in range(min(BC, T - i_ti) - 1, -1, -1):
-            b_dAqk = tl.load(dAqk + o_dA + j, mask=m_dA, other=0)
-            b_dAkk = tl.load(dAkk + o_dA + j, mask=m_dA, other=0)
-            b_kj = tl.load(k + (i_ti + j) * H * K + o_k, mask=m_k, other=0).to(tl.float32)
-            b_gj = tl.load(g_raw + (i_ti + j) * H * K + o_k, mask=m_k, other=0).to(tl.float32)
+            if PRELOAD_DIAGONAL:
+                b_dAqk = gather(b_dAqk_diag, tl.full([BC, 1], j, tl.int32), axis=1).reshape([BC])
+                b_dAkk = gather(b_dAkk_diag, tl.full([BC, 1], j, tl.int32), axis=1).reshape([BC])
+                b_kj = gather(b_k, tl.full([1, BK], j, tl.int32), axis=0).reshape([BK]).to(tl.float32)
+                b_gj = gather(b_graw, tl.full([1, BK], j, tl.int32), axis=0).reshape([BK])
+            else:
+                b_dAqk = tl.load(dAqk + o_dA + j, mask=m_dA, other=0)
+                b_dAkk = tl.load(dAkk + o_dA + j, mask=m_dA, other=0)
+                b_kj = tl.load(k + (i_ti + j) * H * K + o_k, mask=m_k, other=0).to(tl.float32)
+                b_gj = tl.load(g_raw + (i_ti + j) * H * K + o_k, mask=m_k, other=0).to(tl.float32)
             m_i = o_i[:, None] >= j
             b_gqk = exp2(b_interval * 1.4426950408889634)
             b_dq2 += tl.where(m_i, b_dAqk[:, None] * b_kj[None, :] * b_gqk, 0.)
@@ -725,12 +738,20 @@ def chunk_gdn2_bwd_kernel_intra(
     else:
         b_interval = tl.zeros([BC, BK], tl.float32)
         for j in range(0, min(BC, T - i_ti)):
-            b_dAqk = tl.load(dAqk + o_dA + j * H * BT)
-            b_dAkk = tl.load(dAkk + o_dA + j * H * BT)
-            b_qj = tl.load(p_qj, mask=m_k, other=0).to(tl.float32)
-            b_kj = tl.load(p_kj, mask=m_k, other=0).to(tl.float32)
-            b_bj = tl.load(p_bj_ptr, mask=m_k, other=0).to(tl.float32)
-            b_gj = tl.load(g_raw + (i_ti + j) * H * K + o_k, mask=m_k, other=0).to(tl.float32)
+            if PRELOAD_DIAGONAL:
+                b_dAqk = gather(b_dAqk_diag, tl.full([1, BC], j, tl.int32), axis=0).reshape([BC])
+                b_dAkk = gather(b_dAkk_diag, tl.full([1, BC], j, tl.int32), axis=0).reshape([BC])
+                b_qj = gather(b_q, tl.full([1, BK], j, tl.int32), axis=0).reshape([BK]).to(tl.float32)
+                b_kj = gather(b_k, tl.full([1, BK], j, tl.int32), axis=0).reshape([BK]).to(tl.float32)
+                b_bj = gather(b_b, tl.full([1, BK], j, tl.int32), axis=0).reshape([BK]).to(tl.float32)
+                b_gj = gather(b_graw, tl.full([1, BK], j, tl.int32), axis=0).reshape([BK])
+            else:
+                b_dAqk = tl.load(dAqk + o_dA + j * H * BT)
+                b_dAkk = tl.load(dAkk + o_dA + j * H * BT)
+                b_qj = tl.load(p_qj, mask=m_k, other=0).to(tl.float32)
+                b_kj = tl.load(p_kj, mask=m_k, other=0).to(tl.float32)
+                b_bj = tl.load(p_bj_ptr, mask=m_k, other=0).to(tl.float32)
+                b_gj = tl.load(g_raw + (i_ti + j) * H * K + o_k, mask=m_k, other=0).to(tl.float32)
             b_interval += tl.where(o_i[:, None] < j, b_gj[None, :], 0.)
             b_kbj = b_kj * b_bj
             m_i = o_i[:, None] <= j
@@ -932,6 +953,7 @@ def chunk_gdn2_bwd_intra(
         BK=BK,
         NC=NC,
         SAFE_GATE=safe_gate,
+        PRELOAD_DIAGONAL=IS_NPU and IS_GATHER_SUPPORTED and not safe_gate,
         USE_GATHER=IS_GATHER_SUPPORTED,
         GATE_SHIFT=(-lower_bound if lower_bound is not None else 2.) * RCP_LN2,
     )
