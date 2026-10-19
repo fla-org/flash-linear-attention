@@ -17,31 +17,31 @@ from fla.utils import IS_NVIDIA, autocast_custom_bwd, autocast_custom_fwd, input
 @triton.jit(do_not_specialize=['T'])
 def hc_fwd_kernel(
     x,
-    weight,
-    branch,
-    mixing,
+    w,
+    y,
+    m,
     o,
     T,
     N: tl.constexpr,
     D: tl.constexpr,
     BN: tl.constexpr,
     BD: tl.constexpr,
-    HAS_BRANCH: tl.constexpr,
-    HAS_MIXING: tl.constexpr,
+    HAS_Y: tl.constexpr,
+    HAS_M: tl.constexpr,
 ):
     i_t = tl.program_id(0).to(tl.int64)
     i_c = tl.program_id(1).to(tl.int64)
     o_n = tl.arange(0, BN).to(tl.int64)
     o_d = i_c * BD + tl.arange(0, BD).to(tl.int64)
     m_nd = (o_n[:, None] < N) & (o_d[None, :] < D)
-    b_w = tl.load(weight + i_t * N + o_n, mask=o_n < N, other=0).to(tl.float32)
-    if HAS_BRANCH:
-        b_y = tl.load(branch + i_t * D + o_d, mask=o_d < D, other=0).to(tl.float32)
-        if HAS_MIXING:
+    b_w = tl.load(w + i_t * N + o_n, mask=o_n < N, other=0).to(tl.float32)
+    if HAS_Y:
+        b_y = tl.load(y + i_t * D + o_d, mask=o_d < D, other=0).to(tl.float32)
+        if HAS_M:
             b_o = tl.full((BN, BD), 0, dtype=tl.float32)
             for i_n in tl.static_range(N):
                 b_x = tl.load(x + (i_t * N + i_n) * D + o_d, mask=o_d < D, other=0).to(tl.float32)
-                b_m = tl.load(mixing + (i_t * N + o_n) * N + i_n, mask=o_n < N, other=0).to(tl.float32)
+                b_m = tl.load(m + (i_t * N + o_n) * N + i_n, mask=o_n < N, other=0).to(tl.float32)
                 b_o += b_m[:, None] * b_x[None, :]
         else:
             b_o = tl.load(x + (i_t * N + o_n[:, None]) * D + o_d[None, :], mask=m_nd, other=0).to(tl.float32)
@@ -52,7 +52,7 @@ def hc_fwd_kernel(
         b_o = tl.full((BD,), 0, dtype=tl.float32)
         for i_n in tl.static_range(N):
             b_x = tl.load(x + (i_t * N + i_n) * D + o_d, mask=o_d < D, other=0).to(tl.float32)
-            b_wj = tl.load(weight + i_t * N + i_n).to(tl.float32)
+            b_wj = tl.load(w + i_t * N + i_n).to(tl.float32)
             b_o += b_wj * b_x
         tl.store(o + i_t * D + o_d, b_o, mask=o_d < D)
 
@@ -60,44 +60,44 @@ def hc_fwd_kernel(
 @triton.jit(do_not_specialize=['T'])
 def hc_bwd_kernel(
     x,
-    weight,
-    branch,
-    mixing,
+    w,
+    y,
+    m,
     do,
     dx,
-    dbranch,
-    dweight_partial,
-    dmixing_partial,
+    dy,
+    dw_partial,
+    dm_partial,
     T,
     N: tl.constexpr,
     D: tl.constexpr,
     BN: tl.constexpr,
     BD: tl.constexpr,
-    CD: tl.constexpr,
-    HAS_BRANCH: tl.constexpr,
-    HAS_MIXING: tl.constexpr,
+    ND: tl.constexpr,
+    HAS_Y: tl.constexpr,
+    HAS_M: tl.constexpr,
 ):
     i_t = tl.program_id(0).to(tl.int64)
     i_c = tl.program_id(1).to(tl.int64)
     o_n = tl.arange(0, BN).to(tl.int64)
     o_d = i_c * BD + tl.arange(0, BD).to(tl.int64)
     m_nd = (o_n[:, None] < N) & (o_d[None, :] < D)
-    b_w = tl.load(weight + i_t * N + o_n, mask=o_n < N, other=0).to(tl.float32)
-    if HAS_BRANCH:
+    b_w = tl.load(w + i_t * N + o_n, mask=o_n < N, other=0).to(tl.float32)
+    if HAS_Y:
         b_do = tl.load(do + (i_t * N + o_n[:, None]) * D + o_d[None, :], mask=m_nd, other=0).to(tl.float32)
-        b_y = tl.load(branch + i_t * D + o_d, mask=o_d < D, other=0).to(tl.float32)
+        b_y = tl.load(y + i_t * D + o_d, mask=o_d < D, other=0).to(tl.float32)
         b_dw = tl.sum(b_do * b_y[None, :], axis=1)
         b_dy = tl.sum(b_do * b_w[:, None], axis=0)
-        tl.store(dbranch + i_t * D + o_d, b_dy, mask=o_d < D)
-        if HAS_MIXING:
+        tl.store(dy + i_t * D + o_d, b_dy, mask=o_d < D)
+        if HAS_M:
             b_dx = tl.full((BN, BD), 0, dtype=tl.float32)
             for i_n in tl.static_range(N):
                 b_doj = tl.load(do + (i_t * N + i_n) * D + o_d, mask=o_d < D, other=0).to(tl.float32)
-                b_m = tl.load(mixing + (i_t * N + i_n) * N + o_n, mask=o_n < N, other=0).to(tl.float32)
+                b_m = tl.load(m + (i_t * N + i_n) * N + o_n, mask=o_n < N, other=0).to(tl.float32)
                 b_dx += b_m[:, None] * b_doj[None, :]
                 b_xj = tl.load(x + (i_t * N + i_n) * D + o_d, mask=o_d < D, other=0).to(tl.float32)
                 b_dm = tl.sum(b_do * b_xj[None, :], axis=1)
-                tl.store(dmixing_partial + ((i_t * CD + i_c) * N + o_n) * N + i_n, b_dm, mask=o_n < N)
+                tl.store(dm_partial + ((i_t * ND + i_c) * N + o_n) * N + i_n, b_dm, mask=o_n < N)
         else:
             b_dx = b_do
     else:
@@ -106,7 +106,7 @@ def hc_bwd_kernel(
         b_dx = b_w[:, None] * b_do[None, :]
         b_dw = tl.sum(b_x * b_do[None, :], axis=1)
     tl.store(dx + (i_t * N + o_n[:, None]) * D + o_d[None, :], b_dx, mask=m_nd)
-    tl.store(dweight_partial + (i_t * CD + i_c) * N + o_n, b_dw, mask=o_n < N)
+    tl.store(dw_partial + (i_t * ND + i_c) * N + o_n, b_dw, mask=o_n < N)
 
 
 @triton.jit(do_not_specialize=['T'])
@@ -135,84 +135,84 @@ def _validate_inputs(x: torch.Tensor, *others: torch.Tensor | None) -> None:
 
 
 @dispatch
-def hc_fwd(x: torch.Tensor, weight: torch.Tensor, branch: torch.Tensor | None = None, mixing: torch.Tensor | None = None):
+def hc_fwd(x: torch.Tensor, w: torch.Tensor, y: torch.Tensor | None = None, m: torch.Tensor | None = None):
     N, D = x.shape[-2:]
     T = x.numel() // (N * D)
     BD = min(256, triton.next_power_of_2(D))
-    CD = triton.cdiv(D, BD)
-    out = torch.empty_like(x) if branch is not None else x.new_empty((*x.shape[:-2], D))
+    ND = triton.cdiv(D, BD)
+    o = torch.empty_like(x) if y is not None else x.new_empty((*x.shape[:-2], D))
     if T:
-        hc_fwd_kernel[(T, CD)](
+        hc_fwd_kernel[(T, ND)](
             x=x,
-            weight=weight,
-            branch=branch,
-            mixing=mixing,
-            o=out,
+            w=w,
+            y=y,
+            m=m,
+            o=o,
             T=T,
             N=N,
             D=D,
             BN=triton.next_power_of_2(N),
             BD=BD,
-            HAS_BRANCH=branch is not None,
-            HAS_MIXING=mixing is not None,
+            HAS_Y=y is not None,
+            HAS_M=m is not None,
             num_warps=4,
             enable_fp_fusion=False,
         )
-    return out, hc_bwd
+    return o, hc_bwd
 
 
 def hc_bwd(
     x: torch.Tensor,
-    weight: torch.Tensor,
-    branch: torch.Tensor | None,
-    mixing: torch.Tensor | None,
-    dout: torch.Tensor,
+    w: torch.Tensor,
+    y: torch.Tensor | None,
+    m: torch.Tensor | None,
+    do: torch.Tensor,
 ):
     N, D = x.shape[-2:]
     T = x.numel() // (N * D)
     BD = min(256, triton.next_power_of_2(D))
-    CD = triton.cdiv(D, BD)
-    dx, dweight = torch.empty_like(x), torch.empty_like(weight)
-    dbranch = torch.empty_like(branch) if branch is not None else None
-    dmixing = torch.empty_like(mixing) if mixing is not None else None
-    dweight_partial = torch.empty((T, CD, N), device=x.device, dtype=torch.float32)
-    dmixing_partial = torch.empty((T, CD, N * N), device=x.device, dtype=torch.float32) if mixing is not None else None
+    ND = triton.cdiv(D, BD)
+    dx, dw = torch.empty_like(x), torch.empty_like(w)
+    dy = torch.empty_like(y) if y is not None else None
+    dm = torch.empty_like(m) if m is not None else None
+    dw_partial = torch.empty((T, ND, N), device=x.device, dtype=torch.float32)
+    dm_partial = torch.empty((T, ND, N * N), device=x.device, dtype=torch.float32) if m is not None else None
     if T:
-        hc_bwd_kernel[(T, CD)](
+        hc_bwd_kernel[(T, ND)](
             x=x,
-            weight=weight,
-            branch=branch,
-            mixing=mixing,
-            do=dout,
+            w=w,
+            y=y,
+            m=m,
+            do=do,
             dx=dx,
-            dbranch=dbranch,
-            dweight_partial=dweight_partial,
-            dmixing_partial=dmixing_partial,
+            dy=dy,
+            dw_partial=dw_partial,
+            dm_partial=dm_partial,
             T=T,
             N=N,
             D=D,
             BN=triton.next_power_of_2(N),
             BD=BD,
-            CD=CD,
-            HAS_BRANCH=branch is not None,
-            HAS_MIXING=mixing is not None,
+            ND=ND,
+            HAS_Y=y is not None,
+            HAS_M=m is not None,
             num_warps=4,
             enable_fp_fusion=False,
         )
-        for partial, grad, size in ((dweight_partial, dweight, N), (dmixing_partial, dmixing, N * N)):
+        for partial, grad, size in ((dw_partial, dw, N), (dm_partial, dm, N * N)):
             if grad is not None:
                 hc_bwd_kernel_reduce[(T,)](
                     partial=partial,
                     grad=grad,
                     T=T,
-                    C=CD,
+                    C=ND,
                     S=size,
-                    BC=triton.next_power_of_2(CD),
+                    BC=triton.next_power_of_2(ND),
                     BS=triton.next_power_of_2(size),
                     num_warps=4,
                     enable_fp_fusion=False,
                 )
-    return dx, dweight, dbranch, dmixing
+    return dx, dw, dy, dm
 
 
 class FusedHCFunction(torch.autograd.Function):
@@ -220,18 +220,18 @@ class FusedHCFunction(torch.autograd.Function):
     @staticmethod
     @input_guard
     @autocast_custom_fwd
-    def forward(ctx, x, weight, branch, mixing):
-        out, ctx.bwd = hc_fwd(x=x, weight=weight, branch=branch, mixing=mixing)
-        ctx.save_for_backward(x, weight, branch, mixing)
-        return out
+    def forward(ctx, x, w, y, m):
+        o, ctx.bwd = hc_fwd(x=x, w=w, y=y, m=m)
+        ctx.save_for_backward(x, w, y, m)
+        return o
 
     @staticmethod
     @input_guard
     @autocast_custom_bwd
     @once_differentiable
-    def backward(ctx, dout):
-        x, weight, branch, mixing = ctx.saved_tensors
-        return ctx.bwd(x=x, weight=weight, branch=branch, mixing=mixing, dout=dout)
+    def backward(ctx, do):
+        x, w, y, m = ctx.saved_tensors
+        return ctx.bwd(x=x, w=w, y=y, m=m, do=do)
 
 
 def fused_hc_pre(x: torch.Tensor, pre: torch.Tensor) -> torch.Tensor:

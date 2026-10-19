@@ -17,35 +17,35 @@ from fla.ops.hc.fused import hc_fwd
 @gluon.jit(do_not_specialize=['T'])
 def hc_fwd_kernel(
     x,
-    weight,
-    branch,
-    mixing,
+    w,
+    y,
+    m,
     o,
     T,
     N: gl.constexpr,
     D: gl.constexpr,
     BN: gl.constexpr,
     BD: gl.constexpr,
-    HAS_BRANCH: gl.constexpr,
-    HAS_MIXING: gl.constexpr,
+    HAS_Y: gl.constexpr,
+    HAS_M: gl.constexpr,
 ):
     i_t = gl.program_id(0).to(gl.int64)
     i_c = gl.program_id(1).to(gl.int64)
-    if HAS_BRANCH:
+    if HAS_Y:
         layout: gl.constexpr = gl.BlockedLayout([1, 4], [1, 32], [4, 1], [1, 0])
     else:
         layout: gl.constexpr = gl.BlockedLayout([1, 2], [1, 32], [1, 4], [1, 0])
     o_n = gl.arange(0, BN, layout=gl.SliceLayout(1, layout)).to(gl.int64)
     o_d = i_c * BD + gl.arange(0, BD, layout=gl.SliceLayout(0, layout)).to(gl.int64)
     m_nd = (o_n[:, None] < N) & (o_d[None, :] < D)
-    b_w = gl.load(weight + i_t * N + o_n, mask=o_n < N, other=0).to(gl.float32)
-    if HAS_BRANCH:
-        b_y = gl.load(branch + i_t * D + o_d, mask=o_d < D, other=0).to(gl.float32)
-        if HAS_MIXING:
+    b_w = gl.load(w + i_t * N + o_n, mask=o_n < N, other=0).to(gl.float32)
+    if HAS_Y:
+        b_y = gl.load(y + i_t * D + o_d, mask=o_d < D, other=0).to(gl.float32)
+        if HAS_M:
             b_o = gl.full((BN, BD), 0, dtype=gl.float32, layout=layout)
             for i_n in gl.static_range(N):
                 b_x = gl.load(x + (i_t * N + i_n) * D + o_d, mask=o_d < D, other=0).to(gl.float32)
-                b_m = gl.load(mixing + (i_t * N + o_n) * N + i_n, mask=o_n < N, other=0).to(gl.float32)
+                b_m = gl.load(m + (i_t * N + o_n) * N + i_n, mask=o_n < N, other=0).to(gl.float32)
                 b_o += b_m[:, None] * b_x[None, :]
         else:
             b_o = gl.load(x + (i_t * N + o_n[:, None]) * D + o_d[None, :], mask=m_nd, other=0).to(gl.float32)
@@ -56,7 +56,7 @@ def hc_fwd_kernel(
         b_o = gl.full((BD,), 0, dtype=gl.float32, layout=gl.SliceLayout(0, layout))
         for i_n in gl.static_range(N):
             b_x = gl.load(x + (i_t * N + i_n) * D + o_d, mask=o_d < D, other=0).to(gl.float32)
-            b_wj = gl.load(weight + i_t * N + i_n).to(gl.float32)
+            b_wj = gl.load(w + i_t * N + i_n).to(gl.float32)
             b_o += b_wj * b_x
         gl.store(o + i_t * D + o_d, b_o, mask=o_d < D)
 
@@ -64,48 +64,48 @@ def hc_fwd_kernel(
 @gluon.jit(do_not_specialize=['T'])
 def hc_bwd_kernel(
     x,
-    weight,
-    branch,
-    mixing,
+    w,
+    y,
+    m,
     do,
     dx,
-    dbranch,
-    dweight_partial,
-    dmixing_partial,
+    dy,
+    dw_partial,
+    dm_partial,
     T,
     N: gl.constexpr,
     D: gl.constexpr,
     BN: gl.constexpr,
     BD: gl.constexpr,
-    CD: gl.constexpr,
-    HAS_BRANCH: gl.constexpr,
-    HAS_MIXING: gl.constexpr,
+    ND: gl.constexpr,
+    HAS_Y: gl.constexpr,
+    HAS_M: gl.constexpr,
 ):
     i_t = gl.program_id(0).to(gl.int64)
     i_c = gl.program_id(1).to(gl.int64)
-    if (not HAS_BRANCH and N <= 4) or (HAS_MIXING and N > 4):
+    if (not HAS_Y and N <= 4) or (HAS_M and N > 4):
         layout: gl.constexpr = gl.BlockedLayout([1, 4], [1, 32], [4, 1], [1, 0])
     else:
         layout: gl.constexpr = gl.BlockedLayout([1, 2], [1, 32], [1, 4], [1, 0])
     o_n = gl.arange(0, BN, layout=gl.SliceLayout(1, layout)).to(gl.int64)
     o_d = i_c * BD + gl.arange(0, BD, layout=gl.SliceLayout(0, layout)).to(gl.int64)
     m_nd = (o_n[:, None] < N) & (o_d[None, :] < D)
-    b_w = gl.load(weight + i_t * N + o_n, mask=o_n < N, other=0).to(gl.float32)
-    if HAS_BRANCH:
+    b_w = gl.load(w + i_t * N + o_n, mask=o_n < N, other=0).to(gl.float32)
+    if HAS_Y:
         b_do = gl.load(do + (i_t * N + o_n[:, None]) * D + o_d[None, :], mask=m_nd, other=0).to(gl.float32)
-        b_y = gl.load(branch + i_t * D + o_d, mask=o_d < D, other=0).to(gl.float32)
+        b_y = gl.load(y + i_t * D + o_d, mask=o_d < D, other=0).to(gl.float32)
         b_dw = gl.sum(b_do * b_y[None, :], axis=1)
         b_dy = gl.sum(b_do * b_w[:, None], axis=0)
-        gl.store(dbranch + i_t * D + o_d, b_dy, mask=o_d < D)
-        if HAS_MIXING:
+        gl.store(dy + i_t * D + o_d, b_dy, mask=o_d < D)
+        if HAS_M:
             b_dx = gl.full((BN, BD), 0, dtype=gl.float32, layout=layout)
             for i_n in gl.static_range(N):
                 b_doj = gl.load(do + (i_t * N + i_n) * D + o_d, mask=o_d < D, other=0).to(gl.float32)
-                b_m = gl.load(mixing + (i_t * N + i_n) * N + o_n, mask=o_n < N, other=0).to(gl.float32)
+                b_m = gl.load(m + (i_t * N + i_n) * N + o_n, mask=o_n < N, other=0).to(gl.float32)
                 b_dx += b_m[:, None] * b_doj[None, :]
                 b_xj = gl.load(x + (i_t * N + i_n) * D + o_d, mask=o_d < D, other=0).to(gl.float32)
                 b_dm = gl.sum(b_do * b_xj[None, :], axis=1)
-                gl.store(dmixing_partial + ((i_t * CD + i_c) * N + o_n) * N + i_n, b_dm, mask=o_n < N)
+                gl.store(dm_partial + ((i_t * ND + i_c) * N + o_n) * N + i_n, b_dm, mask=o_n < N)
         else:
             b_dx = b_do
     else:
@@ -114,7 +114,7 @@ def hc_bwd_kernel(
         b_dx = b_w[:, None] * b_do[None, :]
         b_dw = gl.sum(b_x * b_do[None, :], axis=1)
     gl.store(dx + (i_t * N + o_n[:, None]) * D + o_d[None, :], b_dx, mask=m_nd)
-    gl.store(dweight_partial + (i_t * CD + i_c) * N + o_n, b_dw, mask=o_n < N)
+    gl.store(dw_partial + (i_t * ND + i_c) * N + o_n, b_dw, mask=o_n < N)
 
 
 @gluon.jit(do_not_specialize=['T'])
@@ -134,85 +134,85 @@ def hc_bwd_kernel_reduce(partial, grad, T, C: gl.constexpr, S: gl.constexpr, BC:
 @register(hc_fwd, backend=GluonBackend)
 def hc_fwd_gluon(
     x: torch.Tensor,
-    weight: torch.Tensor,
-    branch: torch.Tensor | None = None,
-    mixing: torch.Tensor | None = None,
+    w: torch.Tensor,
+    y: torch.Tensor | None = None,
+    m: torch.Tensor | None = None,
 ):
     N, D = x.shape[-2:]
     T = x.numel() // (N * D)
-    BD = min(256 if branch is not None else 1024, triton.next_power_of_2(D))
-    CD = triton.cdiv(D, BD)
-    out = torch.empty_like(x) if branch is not None else x.new_empty((*x.shape[:-2], D))
+    BD = min(256 if y is not None else 1024, triton.next_power_of_2(D))
+    ND = triton.cdiv(D, BD)
+    o = torch.empty_like(x) if y is not None else x.new_empty((*x.shape[:-2], D))
     if T:
-        hc_fwd_kernel[(T, CD)](
+        hc_fwd_kernel[(T, ND)](
             x=x,
-            weight=weight,
-            branch=branch,
-            mixing=mixing,
-            o=out,
+            w=w,
+            y=y,
+            m=m,
+            o=o,
             T=T,
             N=N,
             D=D,
             BN=triton.next_power_of_2(N),
             BD=BD,
-            HAS_BRANCH=branch is not None,
-            HAS_MIXING=mixing is not None,
+            HAS_Y=y is not None,
+            HAS_M=m is not None,
             num_warps=4,
             enable_fp_fusion=False,
         )
-    return out, hc_bwd_gluon
+    return o, hc_bwd_gluon
 
 
 def hc_bwd_gluon(
     x: torch.Tensor,
-    weight: torch.Tensor,
-    branch: torch.Tensor | None,
-    mixing: torch.Tensor | None,
-    dout: torch.Tensor,
+    w: torch.Tensor,
+    y: torch.Tensor | None,
+    m: torch.Tensor | None,
+    do: torch.Tensor,
 ):
     N, D = x.shape[-2:]
     T = x.numel() // (N * D)
-    BD = 256 if (branch is None and N <= 4) or (mixing is not None and N > 4) else 1024
+    BD = 256 if (y is None and N <= 4) or (m is not None and N > 4) else 1024
     BD = min(BD, triton.next_power_of_2(D))
-    CD = triton.cdiv(D, BD)
-    dx, dweight = torch.empty_like(x), torch.empty_like(weight)
-    dbranch = torch.empty_like(branch) if branch is not None else None
-    dmixing = torch.empty_like(mixing) if mixing is not None else None
-    dweight_partial = torch.empty((T, CD, N), device=x.device, dtype=torch.float32)
-    dmixing_partial = torch.empty((T, CD, N * N), device=x.device, dtype=torch.float32) if mixing is not None else None
+    ND = triton.cdiv(D, BD)
+    dx, dw = torch.empty_like(x), torch.empty_like(w)
+    dy = torch.empty_like(y) if y is not None else None
+    dm = torch.empty_like(m) if m is not None else None
+    dw_partial = torch.empty((T, ND, N), device=x.device, dtype=torch.float32)
+    dm_partial = torch.empty((T, ND, N * N), device=x.device, dtype=torch.float32) if m is not None else None
     if T:
-        hc_bwd_kernel[(T, CD)](
+        hc_bwd_kernel[(T, ND)](
             x=x,
-            weight=weight,
-            branch=branch,
-            mixing=mixing,
-            do=dout,
+            w=w,
+            y=y,
+            m=m,
+            do=do,
             dx=dx,
-            dbranch=dbranch,
-            dweight_partial=dweight_partial,
-            dmixing_partial=dmixing_partial,
+            dy=dy,
+            dw_partial=dw_partial,
+            dm_partial=dm_partial,
             T=T,
             N=N,
             D=D,
             BN=triton.next_power_of_2(N),
             BD=BD,
-            CD=CD,
-            HAS_BRANCH=branch is not None,
-            HAS_MIXING=mixing is not None,
+            ND=ND,
+            HAS_Y=y is not None,
+            HAS_M=m is not None,
             num_warps=4,
             enable_fp_fusion=False,
         )
-        for partial, grad, size in ((dweight_partial, dweight, N), (dmixing_partial, dmixing, N * N)):
+        for partial, grad, size in ((dw_partial, dw, N), (dm_partial, dm, N * N)):
             if grad is not None:
                 hc_bwd_kernel_reduce[(T,)](
                     partial=partial,
                     grad=grad,
                     T=T,
-                    C=CD,
+                    C=ND,
                     S=size,
-                    BC=triton.next_power_of_2(CD),
+                    BC=triton.next_power_of_2(ND),
                     BS=triton.next_power_of_2(size),
                     num_warps=4,
                     enable_fp_fusion=False,
                 )
-    return dx, dweight, dbranch, dmixing
+    return dx, dw, dy, dm
