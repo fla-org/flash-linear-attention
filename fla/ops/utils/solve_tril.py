@@ -362,7 +362,7 @@ def solve_tril(
     A: torch.Tensor,
     cu_seqlens: torch.Tensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
-    output_dtype: torch.dtype = torch.float,
+    output_dtype: torch.dtype | None = torch.float,
 ) -> torch.Tensor:
     """
     Compute the inverse of the matrix I + A

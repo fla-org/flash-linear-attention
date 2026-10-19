@@ -6,7 +6,6 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import os
-from importlib import import_module
 
 import pytest
 import torch
@@ -20,8 +19,9 @@ from fla.utils import IS_NPU, assert_close, device
 @pytest.mark.parametrize("reverse", [False, True])
 def test_local_cumsum_graph_sentinels(monkeypatch, vector, reverse):
     """Sentinels between valid tasks must not read state or terminate the task loop."""
-    module = import_module("fla.ops.utils.triton_ascend.cumsum")
-    monkeypatch.setattr(module, "get_multiprocessor_count", lambda: 1)
+    from fla.ops.utils.triton_ascend import cumsum
+
+    monkeypatch.setattr(cumsum, 'get_multiprocessor_count', lambda: 1)
     torch.manual_seed(42)
     shape = (1, 128, 2, 32) if vector else (1, 128, 2)
     s = torch.randn(shape, device=device)
