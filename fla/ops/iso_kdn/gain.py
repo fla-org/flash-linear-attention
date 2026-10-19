@@ -75,16 +75,14 @@ def iso_kdn_gain_fwd_kernel_map(
     BT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_bh, i_t = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
-    i_b, i_h = i_bh // H, i_bh % H
+    i_tg, i_h = tl.program_id(0).to(tl.int64) // H, tl.program_id(0).to(tl.int64) % H
     if IS_VARLEN:
-        i_tg = i_t
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int64), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        i_n, i_t = tl.load(chunk_indices + i_tg * 2).to(tl.int64), tl.load(chunk_indices + i_tg * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
         NT = tl.cdiv(T, BT)
-        i_tg = i_b * NT + i_t
+        i_b, i_t = i_tg // NT, i_tg % NT
         bos, eos = i_b * T, i_b * T + T
 
     # compose the per-token Möbius maps p_t = (r a p_{t-1} + r w) / (s a p_{t-1} + r + s w),
@@ -178,16 +176,14 @@ def iso_kdn_gain_fwd_kernel_emit(
     STORE_COVARIANCE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_bh, i_t = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
-    i_b, i_h = i_bh // H, i_bh % H
+    i_tg, i_h = tl.program_id(0).to(tl.int64) // H, tl.program_id(0).to(tl.int64) % H
     if IS_VARLEN:
-        i_tg = i_t
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int64), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        i_n, i_t = tl.load(chunk_indices + i_tg * 2).to(tl.int64), tl.load(chunk_indices + i_tg * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
         NT = tl.cdiv(T, BT)
-        i_tg = i_b * NT + i_t
+        i_b, i_t = i_tg // NT, i_tg % NT
         bos, eos = i_b * T, i_b * T + T
 
     b_p = tl.load(p0 + i_tg * H + i_h)
@@ -222,16 +218,14 @@ def iso_kdn_gain_bwd_kernel_map(
     BT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_bh, i_t = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
-    i_b, i_h = i_bh // H, i_bh % H
+    i_tg, i_h = tl.program_id(0).to(tl.int64) // H, tl.program_id(0).to(tl.int64) % H
     if IS_VARLEN:
-        i_tg = i_t
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int64), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        i_n, i_t = tl.load(chunk_indices + i_tg * 2).to(tl.int64), tl.load(chunk_indices + i_tg * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
         NT = tl.cdiv(T, BT)
-        i_tg = i_b * NT + i_t
+        i_b, i_t = i_tg // NT, i_tg % NT
         bos, eos = i_b * T, i_b * T + T
 
     # the covariance adjoint obeys the affine recurrence lam_{t-1} = A_t lam_t + B_t
@@ -322,16 +316,14 @@ def iso_kdn_gain_bwd_kernel_emit(
     BT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_bh, i_t = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
-    i_b, i_h = i_bh // H, i_bh % H
+    i_tg, i_h = tl.program_id(0).to(tl.int64) // H, tl.program_id(0).to(tl.int64) % H
     if IS_VARLEN:
-        i_tg = i_t
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int64), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        i_n, i_t = tl.load(chunk_indices + i_tg * 2).to(tl.int64), tl.load(chunk_indices + i_tg * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
         NT = tl.cdiv(T, BT)
-        i_tg = i_b * NT + i_t
+        i_b, i_t = i_tg // NT, i_tg % NT
         bos, eos = i_b * T, i_b * T + T
 
     b_lam = tl.load(lam + i_tg * H + i_h)
@@ -417,7 +409,7 @@ def iso_kdn_gain_fwd(
     m = a.new_empty(B * NT, H, 4, dtype=torch.float32)
     p0 = a.new_empty(B * NT, H, dtype=torch.float32)
 
-    grid = (B * H, NT)
+    grid = (B * NT * H,)
     iso_kdn_gain_fwd_kernel_map[grid](
         a=a,
         omega=omega,
@@ -489,7 +481,7 @@ def iso_kdn_gain_bwd(
     m = a.new_empty(B * NT, H, 2, dtype=torch.float32)
     lam = a.new_empty(B * NT, H, dtype=torch.float32)
 
-    grid = (B * H, NT)
+    grid = (B * NT * H,)
     iso_kdn_gain_bwd_kernel_map[grid](
         a=a,
         omega=omega,
