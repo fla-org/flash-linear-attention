@@ -660,6 +660,15 @@ _mhc_post_inputs = {
     'mixing': TensorSpec(shape_fn=shape_BTNN, dtype='float32'),
 }
 
+_sinkhorn_default_shapes = {
+    'N4_B1_T1_D128': {'N': 4, 'B': 1, 'T': 1, 'H': 1, 'D': 128},
+    'N4_B1_T63_D1024': {'N': 4, 'B': 1, 'T': 63, 'H': 1, 'D': 1024},
+    'N4_B1_T2048_D4096': {'N': 4, 'B': 1, 'T': 2048, 'H': 1, 'D': 4096},
+    'N4_B2_T1024_D4096': {'N': 4, 'B': 2, 'T': 1024, 'H': 1, 'D': 4096},
+    'N4_B1_T8192_D4096': {'N': 4, 'B': 1, 'T': 8192, 'H': 1, 'D': 4096},
+    'N8_B1_T2048_D1025': {'N': 8, 'B': 1, 'T': 2048, 'H': 1, 'D': 1025},
+}
+
 _sinkhorn_inputs = {
     'logits': TensorSpec(shape_fn=shape_BTNN, dtype='float32'),
 }
@@ -738,7 +747,7 @@ register_op(OpConfig(
     output_is_tuple=False,
     category='sinkhorn',
     dim_constraints={'H': [1]},
-    default_shapes=_hc_default_shapes,
+    default_shapes=_sinkhorn_default_shapes,
     backend_env={'gluon': 'FLA_SINKHORN_GLUON', 'tilelang': 'FLA_SINKHORN_TILELANG'},
 ))
 
@@ -749,7 +758,7 @@ register_op(OpConfig(
     output_is_tuple=False,
     category='sinkhorn',
     dim_constraints={'H': [1]},
-    default_shapes=_hc_default_shapes,
+    default_shapes=_sinkhorn_default_shapes,
 ))
 
 

@@ -70,17 +70,7 @@ def sinkhorn_bwd_kernel(o, history, do, dx, T, N: tl.constexpr, BN: tl.constexpr
     tl.store(dx + o_ij, b_dx, mask=m_ij)
 
 
-def _validate_sinkhorn(logits: torch.Tensor, num_iters: int = 20) -> None:
-    if not IS_NVIDIA or not logits.is_cuda:
-        raise ValueError('Sinkhorn kernels require NVIDIA CUDA tensors')
-    if logits.dtype not in (torch.float16, torch.bfloat16, torch.float32):
-        raise ValueError('logits must use FP16, BF16, or FP32')
-    if logits.ndim < 2 or not 1 <= logits.shape[-1] <= 8 or logits.shape[-1] != logits.shape[-2]:
-        raise ValueError('logits must have shape [..., N, N] with 1 <= N <= 8')
-    if isinstance(num_iters, bool) or not isinstance(num_iters, int) or num_iters < 1:
-        raise ValueError('num_iters must be a positive integer')
-
-
+@dispatch
 def sinkhorn_fwd(logits, num_iters, save_history):
     N = logits.shape[-1]
     T = logits.numel() // (N * N)
@@ -99,7 +89,7 @@ def sinkhorn_fwd(logits, num_iters, save_history):
             num_warps=4,
             enable_fp_fusion=False,
         )
-    return out, history
+    return out, history, sinkhorn_bwd
 
 
 def sinkhorn_bwd(out, history, dout, num_iters, dtype):
@@ -127,7 +117,7 @@ class SinkhornFunction(torch.autograd.Function):
     @input_guard
     @autocast_custom_fwd
     def forward(ctx, logits, num_iters, save_history):
-        out, history = sinkhorn_fwd(logits=logits, num_iters=num_iters, save_history=save_history)
+        out, history, ctx.bwd = sinkhorn_fwd(logits=logits, num_iters=num_iters, save_history=save_history)
         ctx.save_for_backward(out, history)
         ctx.num_iters, ctx.dtype = num_iters, logits.dtype
         return out
@@ -138,11 +128,10 @@ class SinkhornFunction(torch.autograd.Function):
     @once_differentiable
     def backward(ctx, dout):
         out, history = ctx.saved_tensors
-        dx = sinkhorn_bwd(out=out, history=history, dout=dout, num_iters=ctx.num_iters, dtype=ctx.dtype)
+        dx = ctx.bwd(out=out, history=history, dout=dout, num_iters=ctx.num_iters, dtype=ctx.dtype)
         return dx, None, None
 
 
-@dispatch
 def sinkhorn(logits: torch.Tensor, num_iters: int = 20) -> torch.Tensor:
     """Normalize square matrices with alternating column and row log-sum-exp steps.
 
@@ -157,5 +146,12 @@ def sinkhorn(logits: torch.Tensor, num_iters: int = 20) -> torch.Tensor:
             Nonnegative FP32 matrices of shape `[..., N, N]`.
             A finite iteration count does not guarantee exact double stochasticity.
     """
-    _validate_sinkhorn(logits=logits, num_iters=num_iters)
+    if not IS_NVIDIA or not logits.is_cuda:
+        raise ValueError('Sinkhorn kernels require NVIDIA CUDA tensors')
+    if logits.dtype not in (torch.float16, torch.bfloat16, torch.float32):
+        raise ValueError('logits must use FP16, BF16, or FP32')
+    if logits.ndim < 2 or not 1 <= logits.shape[-1] <= 8 or logits.shape[-1] != logits.shape[-2]:
+        raise ValueError('logits must have shape [..., N, N] with 1 <= N <= 8')
+    if isinstance(num_iters, bool) or not isinstance(num_iters, int) or num_iters < 1:
+        raise ValueError('num_iters must be a positive integer')
     return SinkhornFunction.apply(logits, num_iters, torch.is_grad_enabled() and logits.requires_grad)

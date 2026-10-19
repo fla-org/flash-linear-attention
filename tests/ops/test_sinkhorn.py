@@ -105,6 +105,8 @@ def test_sinkhorn_backend(backend, monkeypatch):
 
 @pytest.mark.parametrize('backend_type', [GluonBackend, TileLangBackend])
 def test_sinkhorn_unavailable_backend(monkeypatch, backend_type):
+    if not IS_NVIDIA:
+        pytest.skip('NVIDIA CUDA required')
     if _DISPATCH_DISABLED:
         pytest.skip('Backend dispatch disabled before import')
     for name in ('GLUON', 'TILELANG'):
@@ -112,14 +114,25 @@ def test_sinkhorn_unavailable_backend(monkeypatch, backend_type):
         monkeypatch.setenv(f'FLA_SINKHORN_{name}', '0')
     monkeypatch.setenv(f'FLA_SINKHORN_{backend_type.backend_type.upper()}', '1')
     monkeypatch.setattr(backend_type, 'is_available', classmethod(lambda cls: False))
+    if backend_type.package_name == 'tilelang' and not importlib.util.find_spec('tilelang'):
+        pytest.skip('TileLang is unavailable')
+    module = importlib.import_module(f'fla.ops.utils.backends.{backend_type.backend_type}')
+
+    def forward(*args, **kwargs):
+        pytest.fail('Unavailable backend was selected')
+
+    monkeypatch.setattr(module, 'sinkhorn_fwd', forward)
+    logits = torch.zeros(1, 1, device=device)
+    torch.testing.assert_close(sinkhorn(logits=logits), torch.ones_like(logits))
+
+
+def test_sinkhorn_invalid_inputs(backend, monkeypatch):
     module = importlib.import_module('fla.ops.utils.sinkhorn')
-    sentinel = object()
-    monkeypatch.setattr(module, '_validate_sinkhorn', lambda **kwargs: None)
-    monkeypatch.setattr(module.SinkhornFunction, 'apply', lambda *args: sentinel)
-    assert sinkhorn(logits=torch.zeros(1, 1)) is sentinel
 
+    def forward(*args, **kwargs):
+        pytest.fail('Invalid inputs reached backend dispatch')
 
-def test_sinkhorn_invalid_inputs(backend):
+    monkeypatch.setattr(module, 'sinkhorn_fwd', forward)
     with pytest.raises(ValueError, match='positive integer'):
         sinkhorn(logits=torch.randn(4, 4, device=device), num_iters=0)
     with pytest.raises(ValueError, match='shape'):

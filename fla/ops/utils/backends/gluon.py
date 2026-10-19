@@ -7,13 +7,11 @@
 
 import torch
 import triton
-from torch.autograd.function import once_differentiable
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
 
 from fla.backends import GluonBackend, register
-from fla.ops.utils.sinkhorn import _validate_sinkhorn, sinkhorn
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
+from fla.ops.utils.sinkhorn import sinkhorn_fwd as sinkhorn_fwd_dispatch
 
 
 @gluon.jit(do_not_specialize=['T'])
@@ -102,7 +100,7 @@ def sinkhorn_fwd(logits, num_iters, save_history):
             num_warps=4,
             enable_fp_fusion=False,
         )
-    return out, history
+    return out, history, sinkhorn_bwd
 
 
 def sinkhorn_bwd(out, history, dout, num_iters, dtype):
@@ -126,31 +124,9 @@ def sinkhorn_bwd(out, history, dout, num_iters, dtype):
     return dx
 
 
-class SinkhornGluonFunction(torch.autograd.Function):
-
-    @staticmethod
-    @input_guard
-    @autocast_custom_fwd
-    def forward(ctx, logits, num_iters, save_history):
-        out, history = sinkhorn_fwd(logits=logits, num_iters=num_iters, save_history=save_history)
-        ctx.save_for_backward(out, history)
-        ctx.num_iters, ctx.dtype = num_iters, logits.dtype
-        return out
-
-    @staticmethod
-    @input_guard
-    @autocast_custom_bwd
-    @once_differentiable
-    def backward(ctx, dout):
-        out, history = ctx.saved_tensors
-        dx = sinkhorn_bwd(out=out, history=history, dout=dout, num_iters=ctx.num_iters, dtype=ctx.dtype)
-        return dx, None, None
-
-
-@register(sinkhorn, env_var='FLA_SINKHORN_GLUON')
+@register(sinkhorn_fwd_dispatch, env_var='FLA_SINKHORN_GLUON')
 class SinkhornGluonBackend(GluonBackend):
     default_enable = False
 
-    def sinkhorn(self, logits: torch.Tensor, num_iters: int = 20) -> torch.Tensor:
-        _validate_sinkhorn(logits=logits, num_iters=num_iters)
-        return SinkhornGluonFunction.apply(logits, num_iters, torch.is_grad_enabled() and logits.requires_grad)
+    def sinkhorn_fwd(self, logits, num_iters, save_history):
+        return sinkhorn_fwd(logits=logits, num_iters=num_iters, save_history=save_history)

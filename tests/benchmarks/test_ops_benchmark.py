@@ -22,7 +22,7 @@ from fla import utils
 def test_benchmark(monkeypatch, custom_shapes, compile):
     shape = {'B': 1, 'T': 3, 'H': 1, 'D': 7, 'N': 2}
     defaults = {'default': {**shape, 'T': 5, 'N': 4}}
-    monkeypatch.setattr(run.get_op('naive_hc_pre'), 'default_shapes', defaults)
+    monkeypatch.setattr(run.get_op('naive_sinkhorn'), 'default_shapes', defaults)
     monkeypatch.setattr(utils, 'device_name', 'cpu')
     monkeypatch.setattr(run, '_device_synchronize', lambda device: None)
     graphs = []
@@ -42,7 +42,7 @@ def test_benchmark(monkeypatch, custom_shapes, compile):
     monkeypatch.setattr(torch, 'compile', compile_fn)
     monkeypatch.setattr(triton.testing, 'do_bench', do_bench)
     results = run.benchmark_op(
-        op_name='naive_hc_pre',
+        op_name='naive_sinkhorn',
         shapes={'custom': shape} if custom_shapes else None,
         compile=compile,
     )
@@ -50,7 +50,7 @@ def test_benchmark(monkeypatch, custom_shapes, compile):
     assert len(results) == 2
     assert [row['mode'] for row in results] == ['fwd', 'fwdbwd']
     assert all({key: row[key] for key in expected} == expected for row in results)
-    assert all(row['op'] == ('naive_hc_pre[compile]' if compile else 'naive_hc_pre') for row in results)
+    assert all(row['op'] == ('naive_sinkhorn[compile]' if compile else 'naive_sinkhorn') for row in results)
     assert bool(graphs) == compile
     assert all(row['median_ms'] == 1.0 for row in results)
 
@@ -73,7 +73,7 @@ def test_backend(monkeypatch, backend, op_name, prefix):
     ('mhc_post', (2, 3, 4, 65), torch.bfloat16),
     ('sinkhorn', (2, 3, 4, 4), torch.float32),
 ])
-def test_hc_inputs(name, shape, dtype):
+def test_inputs(name, shape, dtype):
     config = get_op('naive_' + name)
     inputs = generate_inputs(config=config, B=2, T=3, H=1, D=65, N=4, dtype=torch.bfloat16, device='cpu')
     op = getattr(importlib.import_module(config.import_path), config.func_name or config.name)

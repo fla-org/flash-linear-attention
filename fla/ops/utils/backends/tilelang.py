@@ -9,11 +9,9 @@ import tilelang
 import tilelang.language as T
 import torch
 import triton
-from torch.autograd.function import once_differentiable
 
 from fla.backends import TileLangBackend, register
-from fla.ops.utils.sinkhorn import _validate_sinkhorn, sinkhorn
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
+from fla.ops.utils.sinkhorn import sinkhorn_fwd as sinkhorn_fwd_dispatch
 
 
 @tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_DEVICE_COMPILE_FLAGS: ['--fmad=false']})
@@ -137,7 +135,7 @@ def sinkhorn_fwd(logits, num_iters, save_history):
             dtype=str(logits.dtype).removeprefix('torch.'),
         )
         kernel(logits.flatten(), out.flatten(), history.flatten() if history is not None else out.flatten()[:1])
-    return out, history
+    return out, history, sinkhorn_bwd
 
 
 def sinkhorn_bwd(out, history, dout, num_iters, dtype):
@@ -156,31 +154,9 @@ def sinkhorn_bwd(out, history, dout, num_iters, dtype):
     return dx
 
 
-class SinkhornTileLangFunction(torch.autograd.Function):
-
-    @staticmethod
-    @input_guard
-    @autocast_custom_fwd
-    def forward(ctx, logits, num_iters, save_history):
-        out, history = sinkhorn_fwd(logits=logits, num_iters=num_iters, save_history=save_history)
-        ctx.save_for_backward(out, history)
-        ctx.num_iters, ctx.dtype = num_iters, logits.dtype
-        return out
-
-    @staticmethod
-    @input_guard
-    @autocast_custom_bwd
-    @once_differentiable
-    def backward(ctx, dout):
-        out, history = ctx.saved_tensors
-        dx = sinkhorn_bwd(out=out, history=history, dout=dout, num_iters=ctx.num_iters, dtype=ctx.dtype)
-        return dx, None, None
-
-
-@register(sinkhorn, env_var='FLA_SINKHORN_TILELANG')
+@register(sinkhorn_fwd_dispatch, env_var='FLA_SINKHORN_TILELANG')
 class SinkhornTileLangBackend(TileLangBackend):
     default_enable = False
 
-    def sinkhorn(self, logits: torch.Tensor, num_iters: int = 20) -> torch.Tensor:
-        _validate_sinkhorn(logits=logits, num_iters=num_iters)
-        return SinkhornTileLangFunction.apply(logits, num_iters, torch.is_grad_enabled() and logits.requires_grad)
+    def sinkhorn_fwd(self, logits, num_iters, save_history):
+        return sinkhorn_fwd(logits=logits, num_iters=num_iters, save_history=save_history)
