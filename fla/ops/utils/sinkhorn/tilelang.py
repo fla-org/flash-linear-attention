@@ -29,7 +29,7 @@ def sinkhorn_fwd_kernel(NT, N, BN, BT, NUM_ITERS, SAVE_HISTORY, dtype):
         with T.Kernel(T.ceildiv(NT, BT), threads=128) as token:
             i_t = T.cast(token, 'int64') * BT
             b_x = T.alloc_fragment((BT, BN, BN), 'float32')
-            b_probability = T.alloc_fragment((BT, BN, BN), 'float32')
+            b_p = T.alloc_fragment((BT, BN, BN), 'float32')
             b_col_max = T.alloc_fragment((BT, BN), 'float32')
             b_row_max = T.alloc_fragment((BT, BN), 'float32')
             b_col_sum = T.alloc_fragment((BT, BN), 'float32')
@@ -51,8 +51,8 @@ def sinkhorn_fwd_kernel(NT, N, BN, BT, NUM_ITERS, SAVE_HISTORY, dtype):
                 T.reduce_max(b_x, b_col_max, dim=1)
                 for t, i, j in T.Parallel(BT, BN, BN):
                     b_x[t, i, j] = b_x[t, i, j] - b_col_max[t, j]
-                    b_probability[t, i, j] = T.exp(b_x[t, i, j])
-                T.reduce_sum(b_probability, b_col_sum, dim=1)
+                    b_p[t, i, j] = T.exp(b_x[t, i, j])
+                T.reduce_sum(b_p, b_col_sum, dim=1)
                 for t, i, j in T.Parallel(BT, BN, BN):
                     b_x[t, i, j] = T.if_then_else(
                         i_t + t < NT and i < N and j < N,
@@ -64,8 +64,8 @@ def sinkhorn_fwd_kernel(NT, N, BN, BT, NUM_ITERS, SAVE_HISTORY, dtype):
                 T.reduce_max(b_x, b_row_max, dim=2)
                 for t, i, j in T.Parallel(BT, BN, BN):
                     b_x[t, i, j] = b_x[t, i, j] - b_row_max[t, i]
-                    b_probability[t, i, j] = T.exp(b_x[t, i, j])
-                T.reduce_sum(b_probability, b_row_sum, dim=2)
+                    b_p[t, i, j] = T.exp(b_x[t, i, j])
+                T.reduce_sum(b_p, b_row_sum, dim=2)
                 for t, i, j in T.Parallel(BT, BN, BN):
                     b_x[t, i, j] = T.if_then_else(
                         i_t + t < NT and i < N and j < N,
