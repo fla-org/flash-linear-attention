@@ -1550,12 +1550,14 @@ _TRITON_ASCEND_KDA_OPS = (
 def _spy_on_triton_ascend_kda_backend():
     """Patch every op of the Triton-Ascend KDA backend to record dispatched calls."""
     from fla import backends
+    from fla.ops.kda.backends import triton_ascend
 
-    backend = backends._load_operation_registry('kda')._backends.get('triton_ascend')
-    assert backend is not None, 'Triton-Ascend KDA backend is not registered'
-
-    calls = []
+    candidates, calls = {}, []
     for name in _TRITON_ASCEND_KDA_OPS:
+        entry = getattr(triton_ascend, name)
+        backend = backends._function_registries[inspect.unwrap(entry)]._backends.get('triton_ascend')
+        assert backend is not None, f'Triton-Ascend KDA backend is not registered for {name}'
+        candidates[name] = backend
         original = getattr(backend, name)
 
         def make_spy(name, original):
@@ -1565,7 +1567,7 @@ def _spy_on_triton_ascend_kda_backend():
             return spy
 
         setattr(backend, name, make_spy(name, original))
-    return backend, calls
+    return candidates, calls
 
 
 def _run_chunk_kda(safe_gate: bool, chunk_size: int = 64, use_gate_in_kernel: bool = True):
@@ -1637,7 +1639,7 @@ def test_triton_ascend_backend_routing():
 
     Numerical parity can pass through the fallback, so record which implementations actually run.
     """
-    backend, calls = _spy_on_triton_ascend_kda_backend()
+    candidates, calls = _spy_on_triton_ascend_kda_backend()
     try:
         # safe_gate=True: forward and backward must hit the NPU kernels
         calls.clear()
@@ -1683,5 +1685,5 @@ def test_triton_ascend_backend_routing():
             f'(dispatched: {calls})'
         )
     finally:
-        for name in _TRITON_ASCEND_KDA_OPS:
+        for name, backend in candidates.items():
             delattr(backend, name)

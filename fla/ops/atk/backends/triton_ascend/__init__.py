@@ -10,9 +10,13 @@
 from __future__ import annotations
 
 from fla.backends import BaseBackend, register
+from fla.ops.atk.chunk_atk_bwd import chunk_atk_bwd
+from fla.ops.atk.chunk_atk_fwd import chunk_atk_fwd, recompute_atk_fwd
 
 
-@register('atk')
+@register(chunk_atk_bwd)
+@register(chunk_atk_fwd)
+@register(recompute_atk_fwd)
 class TritonAscendATKBackend(BaseBackend):
     """Ascend NPU backend for chunked ATK forward and backward."""
 

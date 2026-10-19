@@ -7,6 +7,7 @@
 
 """End-to-end cache tests for intracard CP via chunk_kda."""
 
+import inspect
 import os
 
 import pytest
@@ -158,8 +159,9 @@ def test_chunk_gdn_intracard_gqa(monkeypatch):
         )
 
     from fla import backends
+    from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_fwd_h
 
-    common_registry = backends._load_operation_registry('common')
+    common_registry = backends._function_registries[inspect.unwrap(chunk_gated_delta_rule_fwd_h)]
     saved_backends = common_registry._backends.copy()
     common_registry._backends.clear()
     try:

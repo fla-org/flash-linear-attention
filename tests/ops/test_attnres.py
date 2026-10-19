@@ -5,6 +5,8 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import inspect
+
 import pytest
 import torch
 
@@ -109,7 +111,7 @@ def _spy_on_triton_ascend_attnres_backend():
     """Patch every op of the Triton-Ascend AttnRes backend to record dispatched calls."""
     from fla import backends
 
-    backend = backends._load_operation_registry('attnres')._backends.get('triton_ascend')
+    backend = backends._function_registries[inspect.unwrap(fused_attnres)]._backends.get('triton_ascend')
     assert backend is not None, 'Triton-Ascend AttnRes backend is not registered'
 
     calls = []

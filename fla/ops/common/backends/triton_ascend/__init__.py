@@ -12,9 +12,23 @@ from __future__ import annotations
 import torch
 
 from fla.backends import BaseBackend, register
+from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_gated_delta_rule_fwd_h
+from fla.ops.common.chunk_h import chunk_bwd_dh, chunk_fwd_h
+from fla.ops.common.chunk_o import chunk_bwd_dqkwg, chunk_bwd_dv_local, chunk_fwd_o
+from fla.ops.common.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
+from fla.ops.common.gate import fused_beta_sigmoid_bwd, fused_beta_sigmoid_fwd
 
 
-@register('common')
+@register(chunk_bwd_dh)
+@register(chunk_bwd_dqkwg)
+@register(chunk_bwd_dv_local)
+@register(chunk_fwd_h)
+@register(chunk_fwd_o)
+@register(chunk_gated_delta_rule_bwd_dhu)
+@register(chunk_gated_delta_rule_fwd_h)
+@register(chunk_scaled_dot_kkt_fwd)
+@register(fused_beta_sigmoid_bwd)
+@register(fused_beta_sigmoid_fwd)
 class TritonAscendCommonBackend(BaseBackend):
     backend_type = 'triton_ascend'
     package_name = None

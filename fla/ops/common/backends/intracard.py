@@ -21,6 +21,7 @@ import warnings
 import torch
 
 from fla.backends import BaseBackend, register
+from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_fwd_h
 from fla.utils import IS_TF32_SUPPORTED
 
 # Maximum number of sub-sequences per original sequence
@@ -37,7 +38,7 @@ if USE_TF32X3_AFFINE_CHAIN and not IS_TF32_SUPPORTED:
     )
 
 
-@register('common')
+@register(chunk_gated_delta_rule_fwd_h)
 class IntraCardCPBackend(BaseBackend):
     """Intra-card context parallel backend for chunk_gated_delta_rule_fwd_h."""
 

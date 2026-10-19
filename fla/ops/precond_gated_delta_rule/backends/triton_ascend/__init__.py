@@ -12,6 +12,9 @@ from __future__ import annotations
 import torch
 
 from fla.backends import BaseBackend, register
+from fla.ops.precond_gated_delta_rule.chunk_precond_kkt_fwd import chunk_precond_kkt_fwd
+from fla.ops.precond_gated_delta_rule.chunk_precond_wy_bwd import prepare_precond_wy_repr_bwd
+from fla.ops.precond_gated_delta_rule.fused_recurrent import fused_recurrent_precond_gated_delta_rule_fwd
 
 
 def _require_npu_device(*tensors: torch.Tensor | None) -> tuple[bool, str | None]:
@@ -24,7 +27,9 @@ def _require_npu_device(*tensors: torch.Tensor | None) -> tuple[bool, str | None
     return True, None
 
 
-@register('precond_gated_delta_rule')
+@register(chunk_precond_kkt_fwd)
+@register(fused_recurrent_precond_gated_delta_rule_fwd)
+@register(prepare_precond_wy_repr_bwd)
 class TritonAscendPrecondGDNBackend(BaseBackend):
     """Ascend NPU backend for preconditioned GDN chunk, fused-recurrent, KKT and WY kernels."""
 

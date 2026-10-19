@@ -13,12 +13,17 @@ import torch
 import triton
 
 from fla.backends import BaseBackend, register
+from fla.ops.gdn2.chunk_bwd import chunk_gdn2_bwd_wy_dqkg_fused
+from fla.ops.gdn2.chunk_intra import chunk_gdn2_fwd_intra
+from fla.ops.gdn2.fused_recurrent import fused_recurrent_gdn2_fwd
 
 # The grouped diagonal kernel keeps the padded K dimension in one UB slab.
 _MAX_FWD_INTRA_BK = 256
 
 
-@register('gdn2')
+@register(chunk_gdn2_bwd_wy_dqkg_fused)
+@register(chunk_gdn2_fwd_intra)
+@register(fused_recurrent_gdn2_fwd)
 class TritonAscendGDN2Backend(BaseBackend):
     """Ascend NPU backend for GDN-2 kernels."""
 
