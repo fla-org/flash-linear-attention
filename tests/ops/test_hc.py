@@ -5,21 +5,14 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import importlib
+
 import pytest
 import torch
 
-from fla.backends import _DISPATCH_DISABLED
-from fla.ops.hc import (
-    fused,
-    hc_post,
-    hc_pre,
-    naive_hc_post,
-    naive_hc_pre,
-    naive_sinkhorn,
-    sinkhorn,
-)
-from fla.ops.hc.backends import GluonBackend, HCTileLangBackend
-from fla.utils import IS_NVIDIA, assert_close
+from fla.backends import _DISPATCH_DISABLED, GluonBackend, TileLangBackend
+from fla.ops.hc import fused, fused_hc_post, fused_hc_pre, naive_hc_post, naive_hc_pre, naive_sinkhorn, sinkhorn
+from fla.utils import IS_NVIDIA, assert_close, device
 
 
 @pytest.fixture(params=['triton', 'gluon', 'tilelang'])
@@ -30,247 +23,235 @@ def backend(request, monkeypatch):
         monkeypatch.setenv(f'FLA_{name}', '0')
         monkeypatch.setenv(f'FLA_HC_{name}', '0')
     name = request.param
-    if name != 'triton':
-        if _DISPATCH_DISABLED:
-            pytest.skip('Backend dispatch disabled before import')
-        cls = GluonBackend if name == 'gluon' else HCTileLangBackend
-        if not cls.is_available():
-            pytest.skip(f'{name} is unavailable')
-        monkeypatch.setenv(f'FLA_HC_{name.upper()}', '1')
-    original = fused._launch_kernel
-    calls = []
-
-    def launch(backend, **kwargs):
-        assert backend == name
-        calls.append(backend)
-        return original(backend=backend, **kwargs)
-
-    monkeypatch.setattr(fused, '_launch_kernel', launch)
-    return calls
-
-
-def _check(fn, reference, inputs, ratio):
-    expected = reference(*inputs)
-    actual = fn(*inputs)
-    assert actual.shape == expected.shape and actual.dtype == expected.dtype
-    assert_close(prefix='output', ref=expected, tri=actual, ratio=ratio)
-    dout = torch.randn_like(expected)
-    ref_grads = torch.autograd.grad(outputs=expected, inputs=inputs, grad_outputs=dout)
-    grads = torch.autograd.grad(outputs=actual, inputs=inputs, grad_outputs=dout)
-    for index, (ref, grad) in enumerate(zip(ref_grads, grads)):
-        assert ref.dtype == grad.dtype
-        assert_close(prefix=f'gradient {index}', ref=ref, tri=grad, ratio=ratio)
-
-
-@pytest.mark.parametrize('shape', [(1, 1), (3, 65), (4, 256), (4, 1025), (8, 4096), (4, 8193)])
-@pytest.mark.parametrize('dtype', [torch.float32, torch.float16, torch.bfloat16])
-@pytest.mark.parametrize('kind', ['pre', 'ihc', 'mhc'])
-def test_hc(backend, shape, dtype, kind):
-    torch.manual_seed(42)
-    N, D = shape
-    x = torch.randn(2, 3, N, D, device='cuda', dtype=dtype, requires_grad=True)
-    weight = torch.randn(2, 3, N, device='cuda', dtype=torch.float32, requires_grad=True)
-    ratio = {torch.float32: 5e-5, torch.float16: 2e-3, torch.bfloat16: 6e-3}[dtype]
-    if kind == 'pre':
-        _check(fn=hc_pre, reference=naive_hc_pre, inputs=(x, weight), ratio=ratio)
-    else:
-        branch = torch.randn(2, 3, D, device='cuda', dtype=dtype, requires_grad=True)
-        args = (x, branch, weight)
-        if kind == 'mhc':
-            mixing = torch.randn(2, 3, N, N, device='cuda', dtype=torch.float32, requires_grad=True)
-            args += (mixing,)
-        _check(fn=hc_post, reference=naive_hc_post, inputs=args, ratio=ratio)
-    assert backend
-
-
-@pytest.mark.parametrize('dtype', [torch.float32, torch.float16, torch.bfloat16])
-@pytest.mark.parametrize('N,num_iters,scale', [(1, 20, 1), (3, 1, 1), (4, 20, 1), (8, 7, 1), (4, 20, 1000)])
-def test_sinkhorn(backend, dtype, N, num_iters, scale):
-    torch.manual_seed(9)
-    x = (torch.randn(2, 7, N, N, device='cuda', dtype=dtype) * scale).requires_grad_()
-    _check(
-        fn=lambda x: sinkhorn(logits=x, num_iters=num_iters),
-        reference=lambda x: naive_sinkhorn(logits=x, num_iters=num_iters),
-        inputs=(x,),
-        ratio=1e-4,
-    )
-    out = sinkhorn(logits=x, num_iters=num_iters)
-    torch.testing.assert_close(out.sum(-1), torch.ones_like(out[..., 0]), rtol=1e-5, atol=1e-5)
-    assert backend
-
-
-@pytest.mark.parametrize('kind', ['pre', 'ihc', 'mhc', 'sinkhorn'])
-def test_noncontiguous(backend, kind):
-    torch.manual_seed(5)
-    x = torch.randn(2, 65, 4, device='cuda', requires_grad=True).transpose(-1, -2)
-    weight = torch.randn(4, 2, device='cuda', dtype=torch.bfloat16, requires_grad=True).T
-    branch = torch.randn(65, 2, device='cuda', dtype=torch.float16, requires_grad=True).T
-    mixing = torch.randn(2, 4, 4, device='cuda', requires_grad=True).transpose(-1, -2)
-    if kind == 'pre':
-        _check(fn=hc_pre, reference=naive_hc_pre, inputs=(x, weight), ratio=6e-3)
-    elif kind == 'sinkhorn':
-        _check(fn=sinkhorn, reference=naive_sinkhorn, inputs=(mixing,), ratio=1e-4)
-    else:
-        args = (x, branch, weight, mixing) if kind == 'mhc' else (x, branch, weight)
-        _check(fn=hc_post, reference=naive_hc_post, inputs=args, ratio=6e-3)
-    assert backend
-
-
-@pytest.mark.parametrize('kind', ['pre', 'ihc', 'mhc', 'sinkhorn'])
-def test_empty(backend, kind):
-    x = torch.empty(2, 0, 4, 65, device='cuda', requires_grad=True)
-    weight = torch.empty(2, 0, 4, device='cuda', requires_grad=True)
-    branch = torch.empty(2, 0, 65, device='cuda', requires_grad=True)
-    mixing = torch.empty(2, 0, 4, 4, device='cuda', requires_grad=True)
-    if kind == 'pre':
-        out, args = hc_pre(x=x, pre=weight), (x, weight)
-    elif kind == 'sinkhorn':
-        out, args = sinkhorn(logits=mixing), (mixing,)
-    else:
-        args = (x, branch, weight, mixing) if kind == 'mhc' else (x, branch, weight)
-        out = hc_post(*args)
-    assert out.numel() == 0
-    assert all(grad.numel() == 0 for grad in torch.autograd.grad(outputs=out.sum(), inputs=args))
-    assert not backend
-
-
-@pytest.mark.parametrize('identity', [False, True])
-def test_chained(backend, identity):
-    torch.manual_seed(7)
-    inputs = (
-        torch.randn(2, 4, 127, device='cuda', requires_grad=True),
-        torch.randn(3, 2, 4, device='cuda', requires_grad=True),
-        torch.randn(3, 2, 4, device='cuda', requires_grad=True),
-    )
-    if not identity:
-        inputs += (torch.randn(3, 2, 4, 4, device='cuda', requires_grad=True),)
-
-    def chain(x, pre, post, logits=None, naive=False):
-        read, write, normalize = (
-            (naive_hc_pre, naive_hc_post, naive_sinkhorn) if naive else
-            (hc_pre, hc_post, sinkhorn)
-        )
-        for step in range(3):
-            branch = torch.tanh(read(x, pre[step].sigmoid()))
-            mixing = None if logits is None else normalize(logits[step])
-            x = write(x, branch, post[step].sigmoid() * 2, mixing)
-        return x
-
-    with torch.autocast('cuda', dtype=torch.bfloat16):
-        _check(fn=chain, reference=lambda *args: chain(*args, naive=True), inputs=inputs, ratio=1e-4)
-    assert backend
-
-
-@pytest.mark.parametrize('dtype', [torch.float32, torch.float16, torch.bfloat16])
-@pytest.mark.parametrize('kind', ['pre', 'ihc', 'mhc', 'sinkhorn'])
-def test_naive(dtype, kind):
-    x = torch.tensor([[1, 2], [3, 4]], dtype=dtype, requires_grad=True)
-    weight = torch.tensor([0.25, 0.75], requires_grad=True)
-    branch = torch.tensor([5, 6], dtype=dtype, requires_grad=True)
-    mixing = torch.tensor([[0.25, 0.75], [0.5, 0.5]], requires_grad=True)
-    if kind == 'pre':
-        out = naive_hc_pre(x=x, pre=weight)
-        inputs = (x, weight)
-        expected = [2.5, 3.5]
-        expected_grads = ([[0.25, 0.25], [0.75, 0.75]], [3, 7])
-    elif kind == 'ihc':
-        out = naive_hc_post(x=x, branch=branch, post=weight)
-        inputs = (x, branch, weight)
-        expected = [[2.25, 3.5], [6.75, 8.5]]
-        expected_grads = ([[1, 1], [1, 1]], [1, 1], [11, 11])
-    elif kind == 'mhc':
-        out = naive_hc_post(x=x, branch=branch, post=weight, mixing=mixing)
-        inputs = (x, branch, weight, mixing)
-        expected = [[3.75, 5], [5.75, 7.5]]
-        expected_grads = ([[0.75, 0.75], [1.25, 1.25]], [1, 1], [11, 11], [[3, 7], [3, 7]])
-    else:
-        logits = torch.zeros(2, 2, dtype=dtype, requires_grad=True)
-        out = naive_sinkhorn(logits=logits)
-        inputs = (logits,)
-        expected = [[0.5, 0.5], [0.5, 0.5]]
-        expected_grads = ([[0.125, -0.125], [-0.125, 0.125]],)
-
-    torch.testing.assert_close(out, torch.tensor(expected, dtype=torch.float32 if kind == 'sinkhorn' else dtype))
-    dout = torch.tensor([[1, 2], [3, 5]], dtype=out.dtype) if kind == 'sinkhorn' else torch.ones_like(out)
-    grads = torch.autograd.grad(outputs=out, inputs=inputs, grad_outputs=dout)
-    for grad, expected_grad in zip(grads, expected_grads):
-        torch.testing.assert_close(grad, torch.tensor(expected_grad, dtype=grad.dtype))
-
-
-@pytest.mark.parametrize('backend_type', [GluonBackend, HCTileLangBackend])
-def test_unavailable_backend(monkeypatch, backend_type):
+    if name == 'triton':
+        return fused
     if _DISPATCH_DISABLED:
         pytest.skip('Backend dispatch disabled before import')
-    monkeypatch.setenv('FLA_GLUON', '0')
-    monkeypatch.setenv('FLA_TILELANG', '0')
-    monkeypatch.setenv('FLA_HC_GLUON', '0')
-    monkeypatch.setenv('FLA_HC_TILELANG', '0')
-    monkeypatch.setenv(f'FLA_HC_{backend_type.backend_type.upper()}', '1')
-    monkeypatch.setattr(backend_type, 'is_available', classmethod(lambda cls: False))
-    sentinel = object()
-    monkeypatch.setattr(fused, '_hc_pre', lambda **kwargs: sentinel)
-    assert hc_pre(x=None, pre=None) is sentinel
+    backend_type = GluonBackend if name == 'gluon' else TileLangBackend
+    if not backend_type.is_available():
+        pytest.skip(f'{name} is unavailable')
+    monkeypatch.setenv(f'FLA_HC_{name.upper()}', '1')
+    return importlib.import_module(f'fla.ops.hc.backends.{name}')
 
 
-def test_invalid_inputs(backend):
-    x = torch.randn(2, 4, 65, device='cuda')
-    with pytest.raises(ValueError, match='pre must'):
-        hc_pre(x=x, pre=torch.randn(4, device='cuda'))
-    with pytest.raises(ValueError, match='branch and post'):
-        hc_post(x=x, branch=torch.randn(65, device='cuda'), post=torch.randn(2, 4, device='cuda'))
-    with pytest.raises(ValueError, match='mixing must'):
-        hc_post(x=x, branch=x[:, 0], post=x[:, :, 0], mixing=torch.randn(4, 4, device='cuda'))
-    with pytest.raises(ValueError, match='positive integer'):
-        sinkhorn(logits=torch.randn(4, 4, device='cuda'), num_iters=0)
-    with pytest.raises(ValueError, match='shape'):
-        sinkhorn(logits=torch.randn(4, 3, device='cuda'))
-    with pytest.raises(ValueError, match='FP16, BF16, or FP32'):
-        sinkhorn(logits=torch.randn(4, 4, device='cuda', dtype=torch.float64))
-    assert not backend
+_HC_CASES = [
+    pytest.param((2, 3, N, D), dtype, False, ratio, id=f'N{N}-D{D}-{dtype}')
+    for N, D in [(1, 1), (3, 65), (5, 65), (4, 256), (4, 1025), (8, 4096), (4, 8193)]
+    for dtype, ratio in [(torch.float32, 5e-5), (torch.float16, 2e-3), (torch.bfloat16, 6e-3)]
+] + [
+    pytest.param((T, 4, 1025), torch.float32, False, 5e-5, id=f'T{T}') for T in (127, 128)
+] + [
+    pytest.param((4, 65), torch.float32, False, 5e-5, id='unbatched'),
+    pytest.param((2, 4, 65), torch.float32, True, 6e-3, id='strided-mixed-dtypes'),
+    pytest.param((2, 0, 4, 65), torch.float32, False, 5e-5, id='empty'),
+]
 
 
-@pytest.mark.parametrize('kind', ['pre', 'ihc', 'mhc', 'sinkhorn'])
-def test_no_grad_and_packed(backend, kind):
-    x = torch.randn(2, 3, 4, 65, device='cuda')
-    weight = torch.randn(2, 3, 4, device='cuda')
-    branch = torch.randn(2, 3, 65, device='cuda')
-    mixing = torch.randn(2, 3, 4, 4, device='cuda')
-    if kind == 'pre':
-        fn, args = hc_pre, (x, weight)
-    elif kind == 'sinkhorn':
-        fn, args = sinkhorn, (mixing,)
+@pytest.mark.parametrize('shape,dtype,strided,ratio', _HC_CASES)
+def test_hc_pre(backend, shape, dtype, strided, ratio):
+    torch.manual_seed(42)
+    x = torch.randn(shape, device=device, dtype=dtype)
+    weight_dtype = torch.bfloat16 if strided else torch.float32
+    pre = torch.randn(shape[:-1], device=device, dtype=weight_dtype)
+    if strided:
+        x = x.transpose(-1, -2).contiguous().transpose(-1, -2)
+        pre = pre.T.contiguous().T
+    x.requires_grad_()
+    pre.requires_grad_()
+    ref = naive_hc_pre(x=x, pre=pre)
+    tri = fused_hc_pre(x=x, pre=pre)
+    do = torch.randn_like(ref)
+    ref_dx, ref_dpre = torch.autograd.grad(outputs=ref, inputs=(x, pre), grad_outputs=do)
+    tri_dx, tri_dpre = torch.autograd.grad(outputs=tri, inputs=(x, pre), grad_outputs=do)
+    assert tri.shape == ref.shape and tri.dtype == dtype
+    assert tri_dx.dtype == dtype and tri_dpre.dtype == weight_dtype
+    if x.numel() == 0:
+        torch.testing.assert_close(ref, tri)
+        torch.testing.assert_close(ref_dx, tri_dx)
+        torch.testing.assert_close(ref_dpre, tri_dpre)
+        return
+    assert_close('o', ref, tri, ratio)
+    assert_close('dx', ref_dx, tri_dx, ratio)
+    assert_close('dpre', ref_dpre, tri_dpre, ratio)
+
+
+@pytest.mark.parametrize('shape,dtype,strided,ratio', _HC_CASES)
+@pytest.mark.parametrize('identity', [True, False], ids=['ihc', 'mhc'])
+def test_hc_post(backend, shape, dtype, strided, ratio, identity):
+    torch.manual_seed(42)
+    x = torch.randn(shape, device=device, dtype=dtype)
+    weight_dtype = torch.bfloat16 if strided else torch.float32
+    branch_dtype = torch.float16 if strided else dtype
+    post = torch.randn(shape[:-1], device=device, dtype=weight_dtype)
+    branch = torch.randn((*shape[:-2], shape[-1]), device=device, dtype=branch_dtype)
+    mixing = None if identity else torch.randn((*shape[:-1], shape[-2]), device=device, dtype=torch.float32)
+    if strided:
+        x = x.transpose(-1, -2).contiguous().transpose(-1, -2)
+        post = post.T.contiguous().T
+        branch = branch.T.contiguous().T
+        if mixing is not None:
+            mixing = mixing.transpose(-1, -2)
+    inputs = (x, branch, post) if identity else (x, branch, post, mixing)
+    for tensor in inputs:
+        tensor.requires_grad_()
+    ref = naive_hc_post(x=x, branch=branch, post=post, mixing=mixing)
+    tri = fused_hc_post(x=x, branch=branch, post=post, mixing=mixing)
+    do = torch.randn_like(ref)
+    ref_dx, ref_dbranch, ref_dpost, *ref_dmixing = torch.autograd.grad(outputs=ref, inputs=inputs, grad_outputs=do)
+    tri_dx, tri_dbranch, tri_dpost, *tri_dmixing = torch.autograd.grad(outputs=tri, inputs=inputs, grad_outputs=do)
+    assert tri.shape == ref.shape and tri.dtype == dtype
+    assert tri_dx.dtype == dtype and tri_dbranch.dtype == branch_dtype and tri_dpost.dtype == weight_dtype
+    if x.numel() == 0:
+        for expected, actual in zip((ref, ref_dx, ref_dbranch, ref_dpost, *ref_dmixing),
+                                    (tri, tri_dx, tri_dbranch, tri_dpost, *tri_dmixing)):
+            torch.testing.assert_close(expected, actual)
+        return
+    assert_close('o', ref, tri, ratio)
+    assert_close('dx', ref_dx, tri_dx, ratio)
+    assert_close('dbranch', ref_dbranch, tri_dbranch, ratio)
+    assert_close('dpost', ref_dpost, tri_dpost, ratio)
+    if not identity:
+        assert tri_dmixing[0].dtype == mixing.dtype
+        assert_close('dmixing', ref_dmixing[0], tri_dmixing[0], ratio)
+
+
+@pytest.mark.parametrize('dtype', [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize('shape,num_iters,scale,strided', [
+    ((2, 7, 1, 1), 20, 1, False),
+    ((2, 7, 3, 3), 1, 1, False),
+    ((2, 7, 4, 4), 20, 1, False),
+    ((2, 7, 8, 8), 7, 1, False),
+    ((2, 7, 4, 4), 20, 1000, False),
+    ((127, 4, 4), 20, 1, False),
+    ((128, 4, 4), 20, 1, False),
+    ((129, 1, 1), 20, 1, False),
+    ((129, 3, 3), 20, 1, False),
+    ((129, 8, 8), 20, 1, False),
+    ((4, 4), 20, 1, False),
+    ((2, 4, 4), 20, 1, True),
+    ((2, 0, 4, 4), 20, 1, False),
+])
+def test_sinkhorn(backend, dtype, shape, num_iters, scale, strided):
+    torch.manual_seed(42)
+    logits = torch.randn(shape, device=device, dtype=dtype) * scale
+    if strided:
+        logits = logits.transpose(-1, -2)
+    logits.requires_grad_()
+    ref = naive_sinkhorn(logits=logits, num_iters=num_iters)
+    tri = sinkhorn(logits=logits, num_iters=num_iters)
+    do = torch.randn_like(ref)
+    ref_dx, = torch.autograd.grad(outputs=ref, inputs=logits, grad_outputs=do)
+    tri_dx, = torch.autograd.grad(outputs=tri, inputs=logits, grad_outputs=do)
+    assert tri.shape == ref.shape and tri.dtype == torch.float32
+    assert tri_dx.dtype == dtype
+    if logits.numel() == 0:
+        torch.testing.assert_close(ref, tri)
+        torch.testing.assert_close(ref_dx, tri_dx)
+        return
+    assert_close('o', ref, tri, 1e-4)
+    assert_close('dx', ref_dx, tri_dx, 1e-4)
+    torch.testing.assert_close(tri.sum(-1), torch.ones_like(tri[..., 0]), rtol=1e-5, atol=1e-5)
+
+
+@pytest.mark.parametrize('identity', [True, False], ids=['ihc', 'mhc'])
+def test_hc_stack(backend, identity):
+    torch.manual_seed(42)
+    x = torch.randn(2, 4, 127, device=device, requires_grad=True)
+    pre = torch.randn(3, 2, 4, device=device, requires_grad=True)
+    post = torch.randn(3, 2, 4, device=device, requires_grad=True)
+    logits = None if identity else torch.randn(3, 2, 4, 4, device=device, requires_grad=True)
+    ref, tri = x, x
+    with torch.autocast('cuda', dtype=torch.bfloat16):
+        for step in range(3):
+            ref_branch = naive_hc_pre(x=ref, pre=pre[step].sigmoid()).tanh()
+            tri_branch = fused_hc_pre(x=tri, pre=pre[step].sigmoid()).tanh()
+            ref_mixing = None if identity else naive_sinkhorn(logits=logits[step])
+            tri_mixing = None if identity else sinkhorn(logits=logits[step])
+            ref = naive_hc_post(x=ref, branch=ref_branch, post=2 * post[step].sigmoid(), mixing=ref_mixing)
+            tri = fused_hc_post(x=tri, branch=tri_branch, post=2 * post[step].sigmoid(), mixing=tri_mixing)
+    inputs = (x, pre, post) if identity else (x, pre, post, logits)
+    do = torch.randn_like(ref)
+    ref_grads = torch.autograd.grad(outputs=ref, inputs=inputs, grad_outputs=do)
+    tri_grads = torch.autograd.grad(outputs=tri, inputs=inputs, grad_outputs=do)
+    assert_close('o', ref, tri, 1e-4)
+    for name, ref_grad, tri_grad in zip(('dx', 'dpre', 'dpost', 'dlogits'), ref_grads, tri_grads):
+        assert_close(name, ref_grad, tri_grad, 1e-4)
+
+
+@pytest.mark.parametrize('op,identity', [(fused_hc_pre, True), (fused_hc_post, True), (fused_hc_post, False), (sinkhorn, True)])
+def test_hc_packed(backend, op, identity):
+    torch.manual_seed(42)
+    x = torch.randn(2, 3, 4, 65, device=device)
+    if op is fused_hc_pre:
+        inputs = {'x': x, 'pre': torch.randn(2, 3, 4, device=device)}
+    elif op is fused_hc_post:
+        inputs = {'x': x, 'branch': torch.randn(2, 3, 65, device=device), 'post': torch.randn(2, 3, 4, device=device)}
+        if not identity:
+            inputs['mixing'] = torch.randn(2, 3, 4, 4, device=device)
     else:
-        fn = hc_post
-        args = (x, branch, weight, mixing) if kind == 'mhc' else (x, branch, weight)
+        inputs = {'logits': torch.randn(2, 3, 4, 4, device=device)}
     with torch.no_grad():
-        dense = fn(*args)
-        packed = fn(*(arg.flatten(0, 1) for arg in args))
+        dense = op(**inputs)
+        packed = op(**{name: tensor.flatten(0, 1) for name, tensor in inputs.items()})
     torch.testing.assert_close(dense.flatten(0, 1), packed, rtol=0, atol=0)
-    assert backend
 
 
-def test_backward_keeps_backend(backend, monkeypatch):
-    x = torch.randn(3, 4, 65, device='cuda', requires_grad=True)
-    pre = torch.randn(3, 4, device='cuda', requires_grad=True)
-    out = hc_pre(x=x, pre=pre)
+@pytest.mark.parametrize('op', [fused_hc_pre, fused_hc_post, sinkhorn])
+def test_hc_backend(backend, monkeypatch, op):
+    calls = []
+    prefix = 'sinkhorn' if op is sinkhorn else 'hc'
+    forward, backward = getattr(backend, f'{prefix}_fwd'), getattr(backend, f'{prefix}_bwd')
+
+    def fwd(*args, **kwargs):
+        calls.append('fwd')
+        return forward(*args, **kwargs)
+
+    def bwd(*args, **kwargs):
+        calls.append('bwd')
+        return backward(*args, **kwargs)
+
+    monkeypatch.setattr(backend, f'{prefix}_fwd', fwd)
+    monkeypatch.setattr(backend, f'{prefix}_bwd', bwd)
+    x = torch.randn(3, 4, 65, device=device, requires_grad=True)
+    weight = torch.randn(3, 4, device=device, requires_grad=True)
+    if op is fused_hc_pre:
+        out = op(x=x, pre=weight)
+    elif op is fused_hc_post:
+        out = op(x=x, branch=x[:, 0], post=weight)
+    else:
+        out = op(logits=torch.randn(3, 4, 4, device=device, requires_grad=True))
     for name in ('GLUON', 'TILELANG'):
         monkeypatch.setenv(f'FLA_HC_{name}', '0')
     out.sum().backward()
-    assert len(backend) == 3
+    assert calls == ['fwd', 'bwd']
 
 
-@pytest.mark.parametrize('kind', ['pre', 'ihc', 'mhc', 'sinkhorn'])
-def test_unbatched(backend, kind):
-    torch.manual_seed(17)
-    x = torch.randn(4, 65, device='cuda', requires_grad=True)
-    weight = torch.randn(4, device='cuda', requires_grad=True)
-    branch = torch.randn(65, device='cuda', requires_grad=True)
-    mixing = torch.randn(4, 4, device='cuda', requires_grad=True)
-    if kind == 'pre':
-        _check(fn=hc_pre, reference=naive_hc_pre, inputs=(x, weight), ratio=5e-5)
-    elif kind == 'sinkhorn':
-        _check(fn=sinkhorn, reference=naive_sinkhorn, inputs=(mixing,), ratio=1e-4)
-    else:
-        args = (x, branch, weight, mixing) if kind == 'mhc' else (x, branch, weight)
-        _check(fn=hc_post, reference=naive_hc_post, inputs=args, ratio=5e-5)
-    assert backend
+@pytest.mark.parametrize('backend_type', [GluonBackend, TileLangBackend])
+def test_hc_unavailable_backend(monkeypatch, backend_type):
+    if _DISPATCH_DISABLED:
+        pytest.skip('Backend dispatch disabled before import')
+    for name in ('GLUON', 'TILELANG'):
+        monkeypatch.setenv(f'FLA_{name}', '0')
+        monkeypatch.setenv(f'FLA_HC_{name}', '0')
+    monkeypatch.setenv(f'FLA_HC_{backend_type.backend_type.upper()}', '1')
+    monkeypatch.setattr(backend_type, 'is_available', classmethod(lambda cls: False))
+    sentinel = object()
+    monkeypatch.setattr(fused, '_validate_hc_pre', lambda **kwargs: None)
+    monkeypatch.setattr(fused.FusedHCFunction, 'apply', lambda *args: sentinel)
+    assert fused_hc_pre(x=None, pre=None) is sentinel
+
+
+def test_hc_invalid_inputs(backend):
+    x = torch.randn(2, 4, 65, device=device)
+    with pytest.raises(ValueError, match='pre must'):
+        fused_hc_pre(x=x, pre=torch.randn(4, device=device))
+    with pytest.raises(ValueError, match='branch and post'):
+        fused_hc_post(x=x, branch=torch.randn(65, device=device), post=torch.randn(2, 4, device=device))
+    with pytest.raises(ValueError, match='mixing must'):
+        fused_hc_post(x=x, branch=x[:, 0], post=x[:, :, 0], mixing=torch.randn(4, 4, device=device))
+    with pytest.raises(ValueError, match='positive integer'):
+        sinkhorn(logits=torch.randn(4, 4, device=device), num_iters=0)
+    with pytest.raises(ValueError, match='shape'):
+        sinkhorn(logits=torch.randn(4, 3, device=device))
+    with pytest.raises(ValueError, match='FP16, BF16, or FP32'):
+        sinkhorn(logits=torch.randn(4, 4, device=device, dtype=torch.float64))

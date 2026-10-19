@@ -22,7 +22,7 @@ Usage::
     # All registered ops
     python -m benchmarks.ops.run --op all
 
-    # Select an op backend (ops with a `backend` param, e.g. AttnRes triton vs gluon)
+    # Select an op backend through its dispatch flags
     python -m benchmarks.ops.run --op fused_attnres --backend gluon
 
     # Compile a PyTorch reference before warmup and timing

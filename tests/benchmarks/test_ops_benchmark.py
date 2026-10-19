@@ -5,34 +5,37 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import importlib
 import os
-import sys
 
 import pytest
 import torch
 import triton
 
 from benchmarks.ops import run
+from benchmarks.ops.registry import generate_inputs, get_op
 from fla import utils
 
 
 @pytest.mark.parametrize('custom_shapes', [False, True])
 @pytest.mark.parametrize('compile', [False, True])
-def test_benchmark_shapes_and_compile(monkeypatch, custom_shapes, compile):
+def test_benchmark(monkeypatch, custom_shapes, compile):
     shape = {'B': 1, 'T': 3, 'H': 1, 'D': 7, 'N': 2}
     defaults = {'default': {**shape, 'T': 5, 'N': 4}}
     monkeypatch.setattr(run.get_op('naive_hc_pre'), 'default_shapes', defaults)
     monkeypatch.setattr(utils, 'device_name', 'cpu')
     monkeypatch.setattr(run, '_device_synchronize', lambda device: None)
-    events = []
+    graphs = []
+    torch_compile = torch.compile
+
+    def compiler(graph, inputs):
+        graphs.append(graph)
+        return graph.forward
 
     def compile_fn(fn, fullgraph):
-        assert fullgraph
-        events.append('compile')
-        return fn
+        return torch_compile(fn, fullgraph=fullgraph, backend=compiler)
 
     def do_bench(fn, **kwargs):
-        events.append('time')
         fn()
         return [1.0, 0.8, 1.2]
 
@@ -48,41 +51,45 @@ def test_benchmark_shapes_and_compile(monkeypatch, custom_shapes, compile):
     assert [row['mode'] for row in results] == ['fwd', 'fwdbwd']
     assert all({key: row[key] for key in expected} == expected for row in results)
     assert all(row['op'] == ('naive_hc_pre[compile]' if compile else 'naive_hc_pre') for row in results)
-    assert events == (['compile'] if compile else []) + ['time', 'time']
+    assert bool(graphs) == compile
+    assert all(row['median_ms'] == 1.0 for row in results)
 
 
 @pytest.mark.parametrize('backend', ['triton', 'gluon', 'tilelang'])
-def test_benchmark_backend_overrides_inherited_flags(monkeypatch, backend):
+def test_backend(monkeypatch, backend):
     for name in ('FLA_GLUON', 'FLA_TILELANG', 'FLA_HC_GLUON', 'FLA_HC_TILELANG'):
         monkeypatch.setenv(name, '1')
-    run.benchmark_op(op_name='hc_pre', shapes={}, backend=backend)
+    run.benchmark_op(op_name='fused_hc_pre', shapes={}, backend=backend)
     assert os.environ['FLA_GLUON'] == '0'
     assert os.environ['FLA_TILELANG'] == '0'
     assert os.environ['FLA_HC_GLUON'] == str(int(backend == 'gluon'))
     assert os.environ['FLA_HC_TILELANG'] == str(int(backend == 'tilelang'))
 
 
-@pytest.mark.parametrize('custom_shapes', [False, True])
-def test_benchmark_worker_preserves_options(monkeypatch, custom_shapes):
-    shapes = {'custom': {'B': 1, 'T': 3, 'H': 1, 'D': 7, 'N': 2}} if custom_shapes else None
-    cmd = run._isolated_bench_cmd('run.py', ['naive_hc_pre'], shapes, ['fwd'], 'triton', 'unused.json', compile=True)
-    del cmd[cmd.index('--json'):cmd.index('--json') + 2]
-    monkeypatch.setattr(sys, 'argv', cmd[1:])
-    monkeypatch.setenv('FLA_BENCH_WORKER', '1')
-    monkeypatch.setattr(run, '_get_machine_info', lambda: {})
-    calls = []
-
-    def benchmark_op(op_name, shape_configs, **kwargs):
-        calls.append((op_name, shape_configs, kwargs))
-        return []
-
-    monkeypatch.setattr(run, 'benchmark_op', benchmark_op)
-    run.main()
-    assert calls == [('naive_hc_pre', shapes, {'modes': ['fwd'], 'backend': 'triton', 'compile': True})]
+@pytest.mark.parametrize('name,shape,dtype', [
+    ('hc_pre', (2, 3, 65), torch.bfloat16),
+    ('ihc_post', (2, 3, 4, 65), torch.bfloat16),
+    ('mhc_post', (2, 3, 4, 65), torch.bfloat16),
+    ('sinkhorn', (2, 3, 4, 4), torch.float32),
+])
+def test_hc_inputs(name, shape, dtype):
+    config = get_op('naive_' + name)
+    inputs = generate_inputs(config=config, B=2, T=3, H=1, D=65, N=4, dtype=torch.bfloat16, device='cpu')
+    op = getattr(importlib.import_module(config.import_path), config.func_name or config.name)
+    out = op(**inputs, **config.extra_kwargs)
+    assert out.shape == shape
+    assert out.dtype == dtype
+    grads = torch.autograd.grad(outputs=out.sum(), inputs=tuple(inputs.values()))
+    assert all(torch.isfinite(grad).all() for grad in grads)
+    if name in ('ihc_post', 'mhc_post'):
+        assert ('mixing' in inputs) == (name == 'mhc_post')
+    for key in ('pre', 'post', 'mixing', 'logits'):
+        if key in inputs:
+            assert inputs[key].dtype == torch.float32
 
 
 @pytest.mark.parametrize('axis', ['L', 'N'])
-def test_benchmark_table_distinguishes_residual_counts(capsys, axis):
+def test_results(capsys, axis):
     row = {'op': 'residual', 'mode': 'fwd', 'B': 1, 'T': 3, 'H': 1, 'D': 7, 'median_ms': 1.0}
     results = [{**row, axis: n} for n in (2, 4)]
     run.print_results_table(results=results, baseline=[{**r, 'median_ms': 2.0} for r in results])

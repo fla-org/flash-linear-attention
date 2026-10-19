@@ -18,6 +18,7 @@ These switches control registered implementations. Unavailable backends and unsu
 | ------------------------------ | ----------------- | --------- | --------------------------------------------------------------------------------------------------- |
 | `FLA_DISABLE_BACKEND_DISPATCH` | `0`               | `0` / `1` | Bypass all backend dispatch. Takes precedence over every backend switch below.                      |
 | `FLA_TILELANG`                 | Backend-dependent | `0` / `1` | Enable TileLang implementations when installed. Default enablement depends on the operator and GPU. |
+| `FLA_HC_TILELANG`              | `0`               | `0` / `1` | Enable TileLang HC kernels independently; `FLA_TILELANG=1` overrides this switch.                   |
 | `FLA_FLASH_KDA`                | `1`               | `0` / `1` | Enable [FlashKDA](https://github.com/MoonshotAI/FlashKDA) for KDA inference when installed.         |
 
 ### Gluon
@@ -28,6 +29,7 @@ These switches control registered implementations. Unavailable backends and unsu
 | `FLA_CE_GLUON`      | `0`     | `0` / `1` | Enable Gluon CE kernels, including fused-linear CE (NVIDIA).                    |
 | `FLA_CONV_GLUON`    | `0`     | `0` / `1` | Enable Gluon causal convolution independently.                                  |
 | `FLA_ATTNRES_GLUON` | `0`     | `0` / `1` | Enable Gluon AttnRes independently.                                             |
+| `FLA_HC_GLUON`      | `0`     | `0` / `1` | Enable Gluon HC kernels independently.                                          |
 
 When `FLA_GLUON` is unset or `0`, the individual switches apply. `FLA_DISABLE_BACKEND_DISPATCH=1` overrides all of them.
 

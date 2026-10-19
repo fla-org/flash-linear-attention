@@ -7,31 +7,53 @@
 
 import tilelang
 import tilelang.language as T
+import torch
+import triton
+from torch.autograd.function import once_differentiable
+
+from fla.backends import TileLangBackend, register
+from fla.ops.hc.fused import (
+    _validate_hc_post,
+    _validate_hc_pre,
+    _validate_sinkhorn,
+    fused_hc_post,
+    fused_hc_pre,
+    sinkhorn,
+)
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
 @tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_DEVICE_COMPILE_FLAGS: ['--fmad=false']})
-def _hc_fwd_kernel(tokens, N, D, BN, BD, HAS_BRANCH, HAS_MIXING, x_dtype, weight_dtype, branch_dtype, mixing_dtype):
+def hc_fwd_kernel(NT, N, D, BN, BD, HAS_BRANCH, HAS_MIXING, x_dtype, weight_dtype, branch_dtype, mixing_dtype):
     CD = tilelang.cdiv(D, BD)
 
     @T.prim_func
     def kernel(
-        x: T.Tensor((tokens * N * D,), x_dtype),
-        weight: T.Tensor((tokens * N,), weight_dtype),
-        branch: T.Tensor((tokens * D if HAS_BRANCH else 1,), branch_dtype),
-        mixing: T.Tensor((tokens * N * N if HAS_MIXING else 1,), mixing_dtype),
-        o: T.Tensor((tokens * N * D if HAS_BRANCH else tokens * D,), x_dtype),
+        x: T.Tensor((NT * N * D,), x_dtype),
+        weight: T.Tensor((NT * N,), weight_dtype),
+        branch: T.Tensor((NT * D if HAS_BRANCH else 1,), branch_dtype),
+        mixing: T.Tensor((NT * N * N if HAS_MIXING else 1,), mixing_dtype),
+        o: T.Tensor((NT * N * D if HAS_BRANCH else NT * D,), x_dtype),
     ):
-        with T.Kernel(tokens, CD, threads=128) as (token, block):
+        with T.Kernel(NT, CD, threads=128) as (token, block):
             i_t = T.cast(token, 'int64')
             i_c = T.cast(block, 'int64')
-            b_value = T.alloc_fragment((BN, BD), 'float32')
+            b_o = T.alloc_fragment((BN, BD), 'float32')
             b_reduced = T.alloc_fragment((BD,), 'float32')
+            if not HAS_BRANCH and N <= 4:
+                T.annotate_layout({
+                    b_o: T.Fragment(
+                        shape=(BN, BD),
+                        forward_thread_fn=lambda i, d: d % 128,
+                        forward_index_fn=lambda i, d: i * (BD // 128) + d // 128,
+                    ),
+                })
             if HAS_BRANCH:
                 if HAS_MIXING:
-                    T.clear(b_value)
+                    T.clear(b_o)
                     for k in T.serial(N):
                         for i, d in T.Parallel(BN, BD):
-                            b_value[i, d] += T.if_then_else(
+                            b_o[i, d] += T.if_then_else(
                                 i < N and i_c * BD + d < D,
                                 T.cast(mixing[(i_t * N + i) * N + k], 'float32') *
                                 T.cast(x[(i_t * N + k) * D + i_c * BD + d], 'float32'),
@@ -39,21 +61,21 @@ def _hc_fwd_kernel(tokens, N, D, BN, BD, HAS_BRANCH, HAS_MIXING, x_dtype, weight
                             )
                 else:
                     for i, d in T.Parallel(BN, BD):
-                        b_value[i, d] = T.if_then_else(i < N and i_c * BD + d < D, x[(i_t * N + i) * D + i_c * BD + d], 0)
+                        b_o[i, d] = T.if_then_else(i < N and i_c * BD + d < D, x[(i_t * N + i) * D + i_c * BD + d], 0)
                 for i, d in T.Parallel(BN, BD):
                     if i < N and i_c * BD + d < D:
                         o[(i_t * N + i) * D + i_c * BD + d] = (
-                            b_value[i, d] + T.cast(weight[i_t * N + i], 'float32') *
+                            b_o[i, d] + T.cast(weight[i_t * N + i], 'float32') *
                             T.cast(branch[i_t * D + i_c * BD + d], 'float32')
                         )
             else:
                 for i, d in T.Parallel(BN, BD):
-                    b_value[i, d] = T.if_then_else(
+                    b_o[i, d] = T.if_then_else(
                         i < N and i_c * BD + d < D,
                         T.cast(x[(i_t * N + i) * D + i_c * BD + d], 'float32') * T.cast(weight[i_t * N + i], 'float32'),
                         0.0,
                     )
-                T.reduce_sum(b_value, b_reduced, dim=0)
+                T.reduce_sum(b_o, b_reduced, dim=0)
                 for d in T.Parallel(BD):
                     if i_c * BD + d < D:
                         o[i_t * D + i_c * BD + d] = b_reduced[d]
@@ -61,25 +83,25 @@ def _hc_fwd_kernel(tokens, N, D, BN, BD, HAS_BRANCH, HAS_MIXING, x_dtype, weight
 
 
 @tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_DEVICE_COMPILE_FLAGS: ['--fmad=false']})
-def _hc_bwd_kernel(tokens, N, D, BN, BD, HAS_BRANCH, HAS_MIXING, x_dtype, weight_dtype, branch_dtype, mixing_dtype):
+def hc_bwd_kernel(NT, N, D, BN, BD, HAS_BRANCH, HAS_MIXING, x_dtype, weight_dtype, branch_dtype, mixing_dtype):
     CD = tilelang.cdiv(D, BD)
 
     @T.prim_func
     def kernel(
-        x: T.Tensor((tokens * N * D,), x_dtype),
-        weight: T.Tensor((tokens * N,), weight_dtype),
-        branch: T.Tensor((tokens * D if HAS_BRANCH else 1,), branch_dtype),
-        mixing: T.Tensor((tokens * N * N if HAS_MIXING else 1,), mixing_dtype),
-        do: T.Tensor((tokens * N * D if HAS_BRANCH else tokens * D,), x_dtype),
-        dx: T.Tensor((tokens * N * D,), x_dtype),
-        dbranch: T.Tensor((tokens * D if HAS_BRANCH else 1,), branch_dtype),
-        dweight_partial: T.Tensor((tokens * CD * N,), 'float32'),
-        dmixing_partial: T.Tensor((tokens * CD * N * N if HAS_MIXING else 1,), 'float32'),
+        x: T.Tensor((NT * N * D,), x_dtype),
+        weight: T.Tensor((NT * N,), weight_dtype),
+        branch: T.Tensor((NT * D if HAS_BRANCH else 1,), branch_dtype),
+        mixing: T.Tensor((NT * N * N if HAS_MIXING else 1,), mixing_dtype),
+        do: T.Tensor((NT * N * D if HAS_BRANCH else NT * D,), x_dtype),
+        dx: T.Tensor((NT * N * D,), x_dtype),
+        dbranch: T.Tensor((NT * D if HAS_BRANCH else 1,), branch_dtype),
+        dweight_partial: T.Tensor((NT * CD * N,), 'float32'),
+        dmixing_partial: T.Tensor((NT * CD * N * N if HAS_MIXING else 1,), 'float32'),
     ):
-        with T.Kernel(tokens, CD, threads=128) as (token, block):
+        with T.Kernel(NT, CD, threads=128) as (token, block):
             i_t = T.cast(token, 'int64')
             i_c = T.cast(block, 'int64')
-            b_value = T.alloc_fragment((BN, BD), 'float32')
+            b_do = T.alloc_fragment((BN, BD), 'float32')
             b_product = T.alloc_fragment((BN, BD), 'float32')
             b_dx = T.alloc_fragment((BN, BD), 'float32')
             b_dweight = T.alloc_fragment((BN,), 'float32')
@@ -87,15 +109,15 @@ def _hc_bwd_kernel(tokens, N, D, BN, BD, HAS_BRANCH, HAS_MIXING, x_dtype, weight
             b_dbranch = T.alloc_fragment((BD,), 'float32')
             if HAS_BRANCH:
                 for i, d in T.Parallel(BN, BD):
-                    b_value[i, d] = T.if_then_else(i < N and i_c * BD + d < D, do[(i_t * N + i) * D + i_c * BD + d], 0)
-                    b_product[i, d] = b_value[i, d] * T.if_then_else(
+                    b_do[i, d] = T.if_then_else(i < N and i_c * BD + d < D, do[(i_t * N + i) * D + i_c * BD + d], 0)
+                    b_product[i, d] = b_do[i, d] * T.if_then_else(
                         i_c * BD + d < D,
                         T.cast(branch[i_t * D + i_c * BD + d], 'float32'),
                         0.0,
                     )
                 T.reduce_sum(b_product, b_dweight, dim=1)
                 for i, d in T.Parallel(BN, BD):
-                    b_product[i, d] = b_value[i, d] * T.if_then_else(i < N, T.cast(weight[i_t * N + i], 'float32'), 0.0)
+                    b_product[i, d] = b_do[i, d] * T.if_then_else(i < N, T.cast(weight[i_t * N + i], 'float32'), 0.0)
                 T.reduce_sum(b_product, b_dbranch, dim=0)
                 for d in T.Parallel(BD):
                     if i_c * BD + d < D:
@@ -110,7 +132,7 @@ def _hc_bwd_kernel(tokens, N, D, BN, BD, HAS_BRANCH, HAS_MIXING, x_dtype, weight
                                 T.cast(do[(i_t * N + k) * D + i_c * BD + d], 'float32'),
                                 0.0,
                             )
-                            b_product[i, d] = b_value[i, d] * T.if_then_else(
+                            b_product[i, d] = b_do[i, d] * T.if_then_else(
                                 i_c * BD + d < D,
                                 T.cast(x[(i_t * N + k) * D + i_c * BD + d], 'float32'),
                                 0.0,
@@ -120,12 +142,12 @@ def _hc_bwd_kernel(tokens, N, D, BN, BD, HAS_BRANCH, HAS_MIXING, x_dtype, weight
                             if i < N:
                                 dmixing_partial[((i_t * CD + i_c) * N + i) * N + k] = b_dmixing[i]
                 else:
-                    T.copy(b_value, b_dx)
+                    T.copy(b_do, b_dx)
             else:
                 for i, d in T.Parallel(BN, BD):
-                    b_value[i, d] = T.if_then_else(i_c * BD + d < D, do[i_t * D + i_c * BD + d], 0)
-                    b_dx[i, d] = b_value[i, d] * T.if_then_else(i < N, T.cast(weight[i_t * N + i], 'float32'), 0.0)
-                    b_product[i, d] = b_value[i, d] * T.if_then_else(
+                    b_do[i, d] = T.if_then_else(i_c * BD + d < D, do[i_t * D + i_c * BD + d], 0)
+                    b_dx[i, d] = b_do[i, d] * T.if_then_else(i < N, T.cast(weight[i_t * N + i], 'float32'), 0.0)
+                    b_product[i, d] = b_do[i, d] * T.if_then_else(
                         i < N and i_c * BD + d < D,
                         T.cast(x[(i_t * N + i) * D + i_c * BD + d], 'float32'),
                         0.0,
@@ -141,10 +163,10 @@ def _hc_bwd_kernel(tokens, N, D, BN, BD, HAS_BRANCH, HAS_MIXING, x_dtype, weight
 
 
 @tilelang.jit
-def _hc_bwd_kernel_reduce(tokens, C, S, BC, BS, dtype):
+def hc_bwd_kernel_reduce(NT, C, S, BC, BS, dtype):
     @T.prim_func
-    def kernel(partial: T.Tensor((tokens * C * S,), 'float32'), grad: T.Tensor((tokens * S,), dtype)):
-        with T.Kernel(tokens, threads=128) as token:
+    def kernel(partial: T.Tensor((NT * C * S,), 'float32'), grad: T.Tensor((NT * S,), dtype)):
+        with T.Kernel(NT, threads=128) as token:
             i_t = T.cast(token, 'int64')
             b_value = T.alloc_fragment((BC, BS), 'float32')
             b_reduced = T.alloc_fragment((BS,), 'float32')
@@ -158,154 +180,287 @@ def _hc_bwd_kernel_reduce(tokens, C, S, BC, BS, dtype):
 
 
 @tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_DEVICE_COMPILE_FLAGS: ['--fmad=false']})
-def _sinkhorn_fwd_kernel(tokens, N, BN, NUM_ITERS, SAVE_HISTORY, dtype):
+def sinkhorn_fwd_kernel(NT, N, BN, BT, NUM_ITERS, SAVE_HISTORY, dtype):
     @T.prim_func
     def kernel(
-        x: T.Tensor((tokens * N * N,), dtype),
-        o: T.Tensor((tokens * N * N,), 'float32'),
-        history: T.Tensor((2 * NUM_ITERS * tokens * N * N if SAVE_HISTORY else 1,), 'float32'),
+        x: T.Tensor((NT * N * N,), dtype),
+        o: T.Tensor((NT * N * N,), 'float32'),
+        history: T.Tensor((2 * NUM_ITERS * NT * N * N if SAVE_HISTORY else 1,), 'float32'),
     ):
-        with T.Kernel(tokens, threads=128) as token:
-            i_t = T.cast(token, 'int64')
-            b_value = T.alloc_fragment((BN, BN), 'float32')
-            b_probability = T.alloc_fragment((BN, BN), 'float32')
-            b_col_max = T.alloc_fragment((BN,), 'float32')
-            b_row_max = T.alloc_fragment((BN,), 'float32')
-            b_col_sum = T.alloc_fragment((BN,), 'float32')
-            b_row_sum = T.alloc_fragment((BN,), 'float32')
-            for i, j in T.Parallel(BN, BN):
-                b_value[i, j] = T.if_then_else(i < N and j < N, x[(i_t * N + i) * N + j], -T.infinity('float32'))
+        with T.Kernel(T.ceildiv(NT, BT), threads=128) as token:
+            i_t = T.cast(token, 'int64') * BT
+            b_x = T.alloc_fragment((BT, BN, BN), 'float32')
+            b_probability = T.alloc_fragment((BT, BN, BN), 'float32')
+            b_col_max = T.alloc_fragment((BT, BN), 'float32')
+            b_row_max = T.alloc_fragment((BT, BN), 'float32')
+            b_col_sum = T.alloc_fragment((BT, BN), 'float32')
+            b_row_sum = T.alloc_fragment((BT, BN), 'float32')
+            if BT > 1:
+                layout = T.Fragment(
+                    shape=(BT, BN, BN),
+                    forward_thread_fn=lambda t, i, j: t * min(32, BN * BN) + (i * BN + j) % 32,
+                    forward_index_fn=lambda t, i, j: (i * BN + j) // 32,
+                )
+                T.annotate_layout({b_x: layout})
+            for t, i, j in T.Parallel(BT, BN, BN):
+                b_x[t, i, j] = T.if_then_else(
+                    i_t + t < NT and i < N and j < N,
+                    x[((i_t + t) * N + i) * N + j],
+                    -T.infinity('float32'),
+                )
             for step in T.serial(NUM_ITERS):
-                T.reduce_max(b_value, b_col_max, dim=0)
-                for i, j in T.Parallel(BN, BN):
-                    b_value[i, j] = b_value[i, j] - b_col_max[j]
-                    b_probability[i, j] = T.exp(b_value[i, j])
-                T.reduce_sum(b_probability, b_col_sum, dim=0)
-                for i, j in T.Parallel(BN, BN):
-                    b_value[i, j] = T.if_then_else(
-                        i < N and j < N,
-                        b_value[i, j] - T.log(b_col_sum[j]),
+                T.reduce_max(b_x, b_col_max, dim=1)
+                for t, i, j in T.Parallel(BT, BN, BN):
+                    b_x[t, i, j] = b_x[t, i, j] - b_col_max[t, j]
+                    b_probability[t, i, j] = T.exp(b_x[t, i, j])
+                T.reduce_sum(b_probability, b_col_sum, dim=1)
+                for t, i, j in T.Parallel(BT, BN, BN):
+                    b_x[t, i, j] = T.if_then_else(
+                        i_t + t < NT and i < N and j < N,
+                        b_x[t, i, j] - T.log(b_col_sum[t, j]),
                         -T.infinity('float32'),
                     )
-                    if SAVE_HISTORY and i < N and j < N:
-                        history[((T.cast(step, 'int64') * 2 * tokens + i_t) * N + i) * N + j] = T.exp(b_value[i, j])
-                T.reduce_max(b_value, b_row_max, dim=1)
-                for i, j in T.Parallel(BN, BN):
-                    b_value[i, j] = b_value[i, j] - b_row_max[i]
-                    b_probability[i, j] = T.exp(b_value[i, j])
-                T.reduce_sum(b_probability, b_row_sum, dim=1)
-                for i, j in T.Parallel(BN, BN):
-                    b_value[i, j] = T.if_then_else(
-                        i < N and j < N,
-                        b_value[i, j] - T.log(b_row_sum[i]),
+                    if SAVE_HISTORY and i_t + t < NT and i < N and j < N:
+                        history[((T.cast(step, 'int64') * 2 * NT + i_t + t) * N + i) * N + j] = T.exp(b_x[t, i, j])
+                T.reduce_max(b_x, b_row_max, dim=2)
+                for t, i, j in T.Parallel(BT, BN, BN):
+                    b_x[t, i, j] = b_x[t, i, j] - b_row_max[t, i]
+                    b_probability[t, i, j] = T.exp(b_x[t, i, j])
+                T.reduce_sum(b_probability, b_row_sum, dim=2)
+                for t, i, j in T.Parallel(BT, BN, BN):
+                    b_x[t, i, j] = T.if_then_else(
+                        i_t + t < NT and i < N and j < N,
+                        b_x[t, i, j] - T.log(b_row_sum[t, i]),
                         -T.infinity('float32'),
                     )
-                    if SAVE_HISTORY and i < N and j < N:
-                        history[(((T.cast(step, 'int64') * 2 + 1) * tokens + i_t) * N + i) * N + j] = T.exp(b_value[i, j])
-            for i, j in T.Parallel(BN, BN):
-                if i < N and j < N:
-                    o[(i_t * N + i) * N + j] = T.exp(b_value[i, j])
+                    if SAVE_HISTORY and i_t + t < NT and i < N and j < N:
+                        history[(((T.cast(step, 'int64') * 2 + 1) * NT + i_t + t) * N + i) * N + j] = T.exp(b_x[t, i, j])
+            for t, i, j in T.Parallel(BT, BN, BN):
+                if i_t + t < NT and i < N and j < N:
+                    o[((i_t + t) * N + i) * N + j] = T.exp(b_x[t, i, j])
     return kernel
 
 
 @tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_DEVICE_COMPILE_FLAGS: ['--fmad=false']})
-def _sinkhorn_bwd_kernel(tokens, N, BN, NUM_ITERS, dtype):
+def sinkhorn_bwd_kernel(NT, N, BN, BT, NUM_ITERS, dtype):
     @T.prim_func
     def kernel(
-        o: T.Tensor((tokens * N * N,), 'float32'),
-        history: T.Tensor((2 * NUM_ITERS * tokens * N * N,), 'float32'),
-        do: T.Tensor((tokens * N * N,), 'float32'),
-        dx: T.Tensor((tokens * N * N,), dtype),
+        o: T.Tensor((NT * N * N,), 'float32'),
+        history: T.Tensor((2 * NUM_ITERS * NT * N * N,), 'float32'),
+        do: T.Tensor((NT * N * N,), 'float32'),
+        dx: T.Tensor((NT * N * N,), dtype),
     ):
-        with T.Kernel(tokens, threads=128) as token:
-            i_t = T.cast(token, 'int64')
-            b_value = T.alloc_fragment((BN, BN), 'float32')
-            b_col_sum = T.alloc_fragment((BN,), 'float32')
-            b_row_sum = T.alloc_fragment((BN,), 'float32')
-            for i, j in T.Parallel(BN, BN):
-                b_value[i, j] = T.if_then_else(i < N and j < N, do[(i_t * N + i) * N + j] * o[(i_t * N + i) * N + j], 0.0)
+        with T.Kernel(T.ceildiv(NT, BT), threads=128) as token:
+            i_t = T.cast(token, 'int64') * BT
+            b_dx = T.alloc_fragment((BT, BN, BN), 'float32')
+            b_col_sum = T.alloc_fragment((BT, BN), 'float32')
+            b_row_sum = T.alloc_fragment((BT, BN), 'float32')
+            if BT > 1:
+                layout = T.Fragment(
+                    shape=(BT, BN, BN),
+                    forward_thread_fn=lambda t, i, j: t * min(32, BN * BN) + (i * BN + j) % 32,
+                    forward_index_fn=lambda t, i, j: (i * BN + j) // 32,
+                )
+                T.annotate_layout({b_dx: layout})
+            for t, i, j in T.Parallel(BT, BN, BN):
+                b_dx[t, i, j] = T.if_then_else(
+                    i_t + t < NT and i < N and j < N,
+                    do[((i_t + t) * N + i) * N + j] * o[((i_t + t) * N + i) * N + j],
+                    0.0,
+                )
             for reverse in T.serial(NUM_ITERS):
                 step = T.cast(NUM_ITERS - 1 - reverse, 'int64')
-                T.reduce_sum(b_value, b_row_sum, dim=1)
-                for i, j in T.Parallel(BN, BN):
-                    if i < N and j < N:
-                        b_value[i, j] -= history[(((step * 2 + 1) * tokens + i_t) * N + i) * N + j] * b_row_sum[i]
-                T.reduce_sum(b_value, b_col_sum, dim=0)
-                for i, j in T.Parallel(BN, BN):
-                    if i < N and j < N:
-                        b_value[i, j] -= history[((step * 2 * tokens + i_t) * N + i) * N + j] * b_col_sum[j]
-            for i, j in T.Parallel(BN, BN):
-                if i < N and j < N:
-                    dx[(i_t * N + i) * N + j] = b_value[i, j]
+                T.reduce_sum(b_dx, b_row_sum, dim=2)
+                for t, i, j in T.Parallel(BT, BN, BN):
+                    if i_t + t < NT and i < N and j < N:
+                        b_dx[t, i, j] -= history[(((step * 2 + 1) * NT + i_t + t) * N + i) * N + j] * b_row_sum[t, i]
+                T.reduce_sum(b_dx, b_col_sum, dim=1)
+                for t, i, j in T.Parallel(BT, BN, BN):
+                    if i_t + t < NT and i < N and j < N:
+                        b_dx[t, i, j] -= history[((step * 2 * NT + i_t + t) * N + i) * N + j] * b_col_sum[t, j]
+            for t, i, j in T.Parallel(BT, BN, BN):
+                if i_t + t < NT and i < N and j < N:
+                    dx[((i_t + t) * N + i) * N + j] = b_dx[t, i, j]
     return kernel
 
 
-def _launch_kernel(name: str, **kwargs):
-    tokens = kwargs['T']
-    if name in ('hc_fwd_kernel', 'hc_bwd_kernel'):
-        if name == 'hc_fwd_kernel':
-            tensors = ('x', 'weight', 'branch', 'mixing', 'o')
-            factory = _hc_fwd_kernel
-        else:
-            tensors = ('x', 'weight', 'branch', 'mixing', 'do', 'dx', 'dbranch', 'dweight_partial', 'dmixing_partial')
-            factory = _hc_bwd_kernel
+def hc_fwd(x, weight, branch=None, mixing=None):
+    N, D = x.shape[-2:]
+    NT = x.numel() // (N * D)
+    BD = max(128, min(256 if NT < 128 or branch is not None or N > 4 else 1024, triton.next_power_of_2(D)))
+    out = torch.empty_like(x) if branch is not None else x.new_empty((*x.shape[:-2], D))
+    if NT:
+        kernel = hc_fwd_kernel(
+            NT=NT,
+            N=N,
+            D=D,
+            BN=triton.next_power_of_2(N),
+            BD=BD,
+            HAS_BRANCH=branch is not None,
+            HAS_MIXING=mixing is not None,
+            x_dtype=str(x.dtype).removeprefix('torch.'),
+            weight_dtype=str(weight.dtype).removeprefix('torch.'),
+            branch_dtype=str(branch.dtype if branch is not None else x.dtype).removeprefix('torch.'),
+            mixing_dtype=str(mixing.dtype if mixing is not None else x.dtype).removeprefix('torch.'),
+        )
+        dummy = x.flatten()[:1]
+        kernel(
+            x.flatten(),
+            weight.flatten(),
+            branch.flatten() if branch is not None else dummy,
+            mixing.flatten() if mixing is not None else dummy,
+            out.flatten(),
+        )
+    return out
 
-        def dtype(key: str) -> str:
-            tensor = kwargs[key] if kwargs[key] is not None else kwargs['x']
-            return str(tensor.dtype).split('.')[-1]
 
-        kernel = factory(
-            tokens=tokens,
-            N=kwargs['N'],
-            D=kwargs['D'],
-            BN=kwargs['BN'],
-            BD=kwargs['BD'],
-            HAS_BRANCH=kwargs['HAS_BRANCH'],
-            HAS_MIXING=kwargs['HAS_MIXING'],
-            x_dtype=dtype('x'),
-            weight_dtype=dtype('weight'),
-            branch_dtype=dtype('branch'),
-            mixing_dtype=dtype('mixing'),
+def hc_bwd(x, weight, branch, mixing, dout):
+    N, D = x.shape[-2:]
+    NT = x.numel() // (N * D)
+    BD = 256 if NT < 128 or mixing is not None or (branch is None and N <= 4) else 512
+    BD = min(BD, triton.next_power_of_2(D))
+    CD = triton.cdiv(D, BD)
+    dx, dweight = torch.empty_like(x), torch.empty_like(weight)
+    dbranch = torch.empty_like(branch) if branch is not None else None
+    dmixing = torch.empty_like(mixing) if mixing is not None else None
+    dweight_partial = torch.empty((NT, CD, N), device=x.device, dtype=torch.float32)
+    dmixing_partial = torch.empty((NT, CD, N * N), device=x.device, dtype=torch.float32) if mixing is not None else None
+    if NT:
+        kernel = hc_bwd_kernel(
+            NT=NT,
+            N=N,
+            D=D,
+            BN=triton.next_power_of_2(N),
+            BD=BD,
+            HAS_BRANCH=branch is not None,
+            HAS_MIXING=mixing is not None,
+            x_dtype=str(x.dtype).removeprefix('torch.'),
+            weight_dtype=str(weight.dtype).removeprefix('torch.'),
+            branch_dtype=str(branch.dtype if branch is not None else x.dtype).removeprefix('torch.'),
+            mixing_dtype=str(mixing.dtype if mixing is not None else x.dtype).removeprefix('torch.'),
         )
-        dummy = kwargs['x'].flatten()[:1]
-        fp32_dummy = kwargs.get('dweight_partial', dummy).flatten()[:1]
-    elif name == 'hc_bwd_kernel_reduce':
-        tensors = ('partial', 'grad')
-        kernel = _hc_bwd_kernel_reduce(
-            tokens=tokens,
-            C=kwargs['C'],
-            S=kwargs['S'],
-            BC=kwargs['BC'],
-            BS=kwargs['BS'],
-            dtype=str(kwargs['grad'].dtype).split('.')[-1],
+        dummy = x.flatten()[:1]
+        fp32_dummy = dweight_partial.flatten()[:1]
+        kernel(
+            x.flatten(),
+            weight.flatten(),
+            branch.flatten() if branch is not None else dummy,
+            mixing.flatten() if mixing is not None else dummy,
+            dout.flatten(),
+            dx.flatten(),
+            dbranch.flatten() if dbranch is not None else dummy,
+            dweight_partial.flatten(),
+            dmixing_partial.flatten() if dmixing_partial is not None else fp32_dummy,
         )
-    elif name == 'sinkhorn_fwd_kernel':
-        tensors = ('x', 'o', 'history')
-        kernel = _sinkhorn_fwd_kernel(
-            tokens=tokens,
-            N=kwargs['N'],
-            BN=kwargs['BN'],
-            NUM_ITERS=kwargs['NUM_ITERS'],
-            SAVE_HISTORY=kwargs['SAVE_HISTORY'],
-            dtype=str(kwargs['x'].dtype).split('.')[-1],
-        )
-        dummy = fp32_dummy = kwargs['o'].flatten()[:1]
-    elif name == 'sinkhorn_bwd_kernel':
-        tensors = ('o', 'history', 'do', 'dx')
-        kernel = _sinkhorn_bwd_kernel(
-            tokens=tokens,
-            N=kwargs['N'],
-            BN=kwargs['BN'],
-            NUM_ITERS=kwargs['NUM_ITERS'],
-            dtype=str(kwargs['dx'].dtype).split('.')[-1],
-        )
-    else:
-        raise ValueError(f'Unknown HC kernel: {name}')
+        for partial, grad, size in ((dweight_partial, dweight, N), (dmixing_partial, dmixing, N * N)):
+            if grad is not None:
+                kernel = hc_bwd_kernel_reduce(
+                    NT=NT,
+                    C=CD,
+                    S=size,
+                    BC=triton.next_power_of_2(CD),
+                    BS=triton.next_power_of_2(size),
+                    dtype=str(grad.dtype).removeprefix('torch.'),
+                )
+                kernel(partial.flatten(), grad.flatten())
+    return dx, dweight, dbranch, dmixing
 
-    args = []
-    for key in tensors:
-        tensor = kwargs[key]
-        if tensor is None:
-            tensor = fp32_dummy if key in ('dmixing_partial', 'history') else dummy
-        args.append(tensor.flatten())
-    kernel(*args)
+
+def sinkhorn_fwd(logits, num_iters, save_history):
+    N = logits.shape[-1]
+    NT = logits.numel() // (N * N)
+    out = torch.empty_like(logits, dtype=torch.float32)
+    history = torch.empty((2 * num_iters, NT, N, N), device=logits.device, dtype=torch.float32) if save_history else None
+    if NT:
+        kernel = sinkhorn_fwd_kernel(
+            NT=NT,
+            N=N,
+            BN=triton.next_power_of_2(N),
+            BT=1 if NT < 128 else max(4, 128 // min(32, triton.next_power_of_2(N) ** 2)),
+            NUM_ITERS=num_iters,
+            SAVE_HISTORY=save_history,
+            dtype=str(logits.dtype).removeprefix('torch.'),
+        )
+        kernel(logits.flatten(), out.flatten(), history.flatten() if history is not None else out.flatten()[:1])
+    return out, history
+
+
+def sinkhorn_bwd(out, history, dout, num_iters, dtype):
+    N, NT = out.shape[-1], out.numel() // out.shape[-1] ** 2
+    dx = torch.empty_like(out, dtype=dtype)
+    if NT:
+        kernel = sinkhorn_bwd_kernel(
+            NT=NT,
+            N=N,
+            BN=triton.next_power_of_2(N),
+            BT=1 if NT < 128 else max(4, 128 // min(32, triton.next_power_of_2(N) ** 2)),
+            NUM_ITERS=num_iters,
+            dtype=str(dtype).removeprefix('torch.'),
+        )
+        kernel(out.flatten(), history.flatten(), dout.flatten(), dx.flatten())
+    return dx
+
+
+class FusedHCTileLangFunction(torch.autograd.Function):
+
+    @staticmethod
+    @input_guard
+    @autocast_custom_fwd
+    def forward(ctx, x, weight, branch, mixing):
+        out = hc_fwd(x=x, weight=weight, branch=branch, mixing=mixing)
+        ctx.save_for_backward(x, weight, branch, mixing)
+        return out
+
+    @staticmethod
+    @input_guard
+    @autocast_custom_bwd
+    @once_differentiable
+    def backward(ctx, dout):
+        x, weight, branch, mixing = ctx.saved_tensors
+        return hc_bwd(x=x, weight=weight, branch=branch, mixing=mixing, dout=dout)
+
+
+class SinkhornTileLangFunction(torch.autograd.Function):
+
+    @staticmethod
+    @input_guard
+    @autocast_custom_fwd
+    def forward(ctx, logits, num_iters, save_history):
+        out, history = sinkhorn_fwd(logits=logits, num_iters=num_iters, save_history=save_history)
+        ctx.save_for_backward(out, history)
+        ctx.num_iters, ctx.dtype = num_iters, logits.dtype
+        return out
+
+    @staticmethod
+    @input_guard
+    @autocast_custom_bwd
+    @once_differentiable
+    def backward(ctx, dout):
+        out, history = ctx.saved_tensors
+        dx = sinkhorn_bwd(out=out, history=history, dout=dout, num_iters=ctx.num_iters, dtype=ctx.dtype)
+        return dx, None, None
+
+
+@register(fused_hc_pre, env_var='FLA_HC_TILELANG')
+@register(fused_hc_post, env_var='FLA_HC_TILELANG')
+@register(sinkhorn, env_var='FLA_HC_TILELANG')
+class HCTileLangBackend(TileLangBackend):
+    default_enable = False
+
+    def fused_hc_pre(self, x: torch.Tensor, pre: torch.Tensor) -> torch.Tensor:
+        _validate_hc_pre(x=x, pre=pre)
+        return FusedHCTileLangFunction.apply(x, pre, None, None)
+
+    def fused_hc_post(
+        self,
+        x: torch.Tensor,
+        branch: torch.Tensor,
+        post: torch.Tensor,
+        mixing: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        _validate_hc_post(x=x, branch=branch, post=post, mixing=mixing)
+        return FusedHCTileLangFunction.apply(x, post, branch, mixing)
+
+    def sinkhorn(self, logits: torch.Tensor, num_iters: int = 20) -> torch.Tensor:
+        _validate_sinkhorn(logits=logits, num_iters=num_iters)
+        return SinkhornTileLangFunction.apply(logits, num_iters, torch.is_grad_enabled() and logits.requires_grad)

@@ -5,12 +5,12 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from fla.ops.hc.fused import hc_post, hc_pre, sinkhorn
+from fla.ops.hc.fused import fused_hc_post, fused_hc_pre, sinkhorn
 from fla.ops.hc.naive import naive_hc_post, naive_hc_pre, naive_sinkhorn
 
 __all__ = [
-    'hc_post',
-    'hc_pre',
+    'fused_hc_post',
+    'fused_hc_pre',
     'naive_hc_post',
     'naive_hc_pre',
     'naive_sinkhorn',
