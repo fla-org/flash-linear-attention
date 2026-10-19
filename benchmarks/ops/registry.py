@@ -63,6 +63,18 @@ def shape_BTHNN(B, T, H, D, N, **kw):
     return (B, T, H, N, N)
 
 
+def shape_BTND(B, T, H, D, N, **kw):
+    return (B, T, N, D)
+
+
+def shape_BTN(B, T, H, D, N, **kw):
+    return (B, T, N)
+
+
+def shape_BTNN(B, T, H, D, N, **kw):
+    return (B, T, N, N)
+
+
 def shape_q_hq(B, T, H, D, HQ=None, **kw):
     """q with HQ query heads (GQA); k/v keep H heads. Used by NSA."""
     if HQ is None:
@@ -579,9 +591,7 @@ register_op(OpConfig(
     category='flash_attn',
 ))
 
-# --- layer-axis residual aggregation (AttnRes, mHC, ...) ---
-# These ops attend / aggregate over an `L` axis of stacked residual sources.
-# Inputs and shape sweeps are shared so future ops (mHC etc.) can reuse them.
+# attnres aggregates over an L axis of stacked residual sources.
 
 _layer_default_shapes = {
     'L8_B1_T8K_D2K':   {'L': 8,  'B': 1, 'T': 8192,  'H': 1, 'D': 2048},
@@ -627,6 +637,102 @@ register_op(OpConfig(
     output_is_tuple=False,
     default_shapes=_layer_default_shapes,
     category='naive_attnres',
+))
+
+_hc_default_shapes = {
+    'B1_T8K_H1_N4_D2K':  {'B': 1, 'T': 8192,  'H': 1, 'N': 4, 'D': 2048},
+    'B1_T8K_H1_N8_D2K':  {'B': 1, 'T': 8192,  'H': 1, 'N': 8, 'D': 2048},
+    'B1_T32K_H1_N4_D2K': {'B': 1, 'T': 32768, 'H': 1, 'N': 4, 'D': 2048},
+    'B1_T32K_H1_N8_D2K': {'B': 1, 'T': 32768, 'H': 1, 'N': 8, 'D': 2048},
+    'B1_T8K_H1_N4_D4K':  {'B': 1, 'T': 8192,  'H': 1, 'N': 4, 'D': 4096},
+    'B1_T8K_H1_N8_D4K':  {'B': 1, 'T': 8192,  'H': 1, 'N': 8, 'D': 4096},
+    'B1_T32K_H1_N4_D4K': {'B': 1, 'T': 32768, 'H': 1, 'N': 4, 'D': 4096},
+    'B1_T32K_H1_N8_D4K': {'B': 1, 'T': 32768, 'H': 1, 'N': 8, 'D': 4096},
+    'B1_T8K_H1_N4_D8K':  {'B': 1, 'T': 8192,  'H': 1, 'N': 4, 'D': 8192},
+    'B1_T8K_H1_N8_D8K':  {'B': 1, 'T': 8192,  'H': 1, 'N': 8, 'D': 8192},
+}
+
+_hc_pre_inputs = {
+    'x': TensorSpec(shape_fn=shape_BTND),
+    'pre': TensorSpec(shape_fn=shape_BTN, dtype='float32'),
+}
+
+_hc_post_inputs = {
+    'x': TensorSpec(shape_fn=shape_BTND),
+    'branch': TensorSpec(shape_fn=shape_BTD),
+    'post': TensorSpec(shape_fn=shape_BTN, dtype='float32'),
+}
+
+_mhc_post_inputs = {
+    **_hc_post_inputs,
+    'mixing': TensorSpec(shape_fn=shape_BTNN, dtype='float32'),
+}
+
+register_op(OpConfig(
+    name='fused_hc_pre',
+    import_path='fla.ops.hc',
+    inputs=_hc_pre_inputs,
+    output_is_tuple=False,
+    category='hc',
+    dim_constraints={'H': [1]},
+    default_shapes=_hc_default_shapes,
+    backend_env={'gluon': 'FLA_GLUON', 'tilelang': 'FLA_TILELANG'},
+))
+
+register_op(OpConfig(
+    name='naive_hc_pre',
+    import_path='fla.ops.hc',
+    inputs=_hc_pre_inputs,
+    output_is_tuple=False,
+    category='hc',
+    dim_constraints={'H': [1]},
+    default_shapes=_hc_default_shapes,
+))
+
+register_op(OpConfig(
+    name='fused_ihc_post',
+    import_path='fla.ops.hc',
+    inputs=_hc_post_inputs,
+    func_name='fused_hc_post',
+    output_is_tuple=False,
+    category='hc',
+    dim_constraints={'H': [1]},
+    default_shapes=_hc_default_shapes,
+    backend_env={'gluon': 'FLA_GLUON', 'tilelang': 'FLA_TILELANG'},
+))
+
+register_op(OpConfig(
+    name='naive_ihc_post',
+    import_path='fla.ops.hc',
+    inputs=_hc_post_inputs,
+    func_name='naive_hc_post',
+    output_is_tuple=False,
+    category='hc',
+    dim_constraints={'H': [1]},
+    default_shapes=_hc_default_shapes,
+))
+
+register_op(OpConfig(
+    name='fused_mhc_post',
+    import_path='fla.ops.hc',
+    inputs=_mhc_post_inputs,
+    func_name='fused_hc_post',
+    output_is_tuple=False,
+    category='hc',
+    dim_constraints={'H': [1]},
+    default_shapes=_hc_default_shapes,
+    backend_env={'gluon': 'FLA_GLUON', 'tilelang': 'FLA_TILELANG'},
+))
+
+register_op(OpConfig(
+    name='naive_mhc_post',
+    import_path='fla.ops.hc',
+    inputs=_mhc_post_inputs,
+    func_name='naive_hc_post',
+    output_is_tuple=False,
+    category='hc',
+    dim_constraints={'H': [1]},
+    default_shapes=_hc_default_shapes,
 ))
 
 _sinkhorn_default_shapes = {
