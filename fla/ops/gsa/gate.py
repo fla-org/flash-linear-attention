@@ -9,6 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.backends import dispatch
 from fla.ops.utils.op import exp, logaddexp, unflatten_program_id
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, input_guard
 
@@ -28,7 +29,7 @@ from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_k
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
-def cumulative_normalize_fwd_kernel(
+def fused_additive_gate_fwd_kernel(
     x,
     z,
     k,
@@ -96,7 +97,7 @@ def _reverse_recurrence(a_left, b_left, a_right, b_right):
     'USE_FINAL_STATE_GRADIENT': lambda args: args['dfinal_state'] is not None,
 })
 @triton.jit(do_not_specialize=['T'])
-def cumulative_normalize_bwd_kernel(
+def fused_additive_gate_bwd_kernel(
     x,
     z,
     initial_state,
@@ -180,7 +181,7 @@ def cumulative_normalize_bwd_kernel(
         tl.store(dinitial_state + i_n * S + o_s, b_dz0, mask=m_s)
 
 
-def cumulative_normalize_fwd(
+def fused_additive_gate_fwd(
     x: torch.Tensor,
     initial_state: torch.Tensor | None,
     cu_seqlens: torch.Tensor | None,
@@ -195,7 +196,7 @@ def cumulative_normalize_fwd(
     g = torch.empty_like(x, dtype=gate_dtype or x.dtype)
     z = torch.empty_like(x, dtype=torch.float32) if save_z else None
     final_state = x.new_empty((N, 1, H, K), dtype=torch.float32)
-    cumulative_normalize_fwd_kernel[(N * triton.cdiv(S, BS),)](
+    fused_additive_gate_fwd_kernel[(N * triton.cdiv(S, BS),)](
         x=x,
         z=z,
         k=k,
@@ -210,7 +211,7 @@ def cumulative_normalize_fwd(
     return k, g, final_state, z
 
 
-def cumulative_normalize_bwd(
+def fused_additive_gate_bwd(
     x: torch.Tensor,
     z: torch.Tensor,
     initial_state: torch.Tensor | None,
@@ -224,7 +225,7 @@ def cumulative_normalize_bwd(
     S, BS = H * K, 32
     dx = torch.empty_like(x)
     dinitial_state = torch.empty_like(initial_state) if initial_state is not None else None
-    cumulative_normalize_bwd_kernel[(N * triton.cdiv(S, BS),)](
+    fused_additive_gate_bwd_kernel[(N * triton.cdiv(S, BS),)](
         x=x,
         z=z,
         initial_state=initial_state,
@@ -242,13 +243,13 @@ def cumulative_normalize_bwd(
     return dx, dinitial_state
 
 
-class CumulativeNormalizeFunction(torch.autograd.Function):
+class FusedAdditiveGateFunction(torch.autograd.Function):
 
     @staticmethod
     @input_guard
     @autocast_custom_fwd
     def forward(ctx, x, initial_state, cu_seqlens, output_dtype, gate_dtype):
-        k, g, final_state, z = cumulative_normalize_fwd(
+        k, g, final_state, z = fused_additive_gate_fwd(
             x=x,
             initial_state=initial_state,
             cu_seqlens=cu_seqlens,
@@ -265,7 +266,7 @@ class CumulativeNormalizeFunction(torch.autograd.Function):
     @autocast_custom_bwd
     def backward(ctx, dk, dg, dfinal_state):
         x, z, initial_state, cu_seqlens = ctx.saved_tensors
-        dx, dinitial_state = cumulative_normalize_bwd(
+        dx, dinitial_state = fused_additive_gate_bwd(
             x=x,
             z=z,
             initial_state=initial_state,
@@ -277,14 +278,15 @@ class CumulativeNormalizeFunction(torch.autograd.Function):
         return dx, dinitial_state, None, None, None
 
 
-def fused_cumulative_normalize(
+@dispatch
+def fused_additive_gate(
     x: torch.Tensor,
     initial_state: torch.Tensor | None = None,
     cu_seqlens: torch.Tensor | None = None,
     output_dtype: torch.dtype | None = None,
     gate_dtype: torch.dtype | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Normalize logits by their cumulative exponential sum and return log-decay gates.
+    """Compute additive input and log-forget gates from cumulative exponential scores.
 
     Args:
         x (torch.Tensor):
@@ -314,4 +316,4 @@ def fused_cumulative_normalize(
         expected_shape = (N, 1, *x.shape[2:])
         if initial_state.shape != expected_shape:
             raise ValueError(f"initial_state must have shape {expected_shape}, got {tuple(initial_state.shape)}.")
-    return CumulativeNormalizeFunction.apply(x, initial_state, cu_seqlens, output_dtype, gate_dtype)
+    return FusedAdditiveGateFunction.apply(x, initial_state, cu_seqlens, output_dtype, gate_dtype)

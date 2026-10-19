@@ -10,7 +10,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.common.fused_recurrent import fused_recurrent_bwd_kernel, fused_recurrent_fwd_kernel
-from fla.ops.utils.cumulative_normalize import fused_cumulative_normalize
+from fla.ops.gsa.gate import fused_additive_gate
 from fla.ops.utils.op import exp
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
@@ -525,7 +525,7 @@ def fused_recurrent_gsa(
                 f"i.e., {len(cu_seqlens) - 1} rather than {initial_state[0].shape[0]}.",
             )
     if g is None:
-        s, g, _ = fused_cumulative_normalize(
+        s, g, _ = fused_additive_gate(
             x=s,
             cu_seqlens=cu_seqlens,
             output_dtype=k.dtype,

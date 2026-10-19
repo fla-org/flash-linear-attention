@@ -12,10 +12,10 @@ from einops import reduce
 
 from fla.ops.common.chunk_h import chunk_bwd_dh, chunk_fwd_h
 from fla.ops.gla.chunk import chunk_gla_bwd, chunk_gla_fwd
+from fla.ops.gsa.gate import fused_additive_gate
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.cumsum import chunk_local_cumsum
-from fla.ops.utils.cumulative_normalize import fused_cumulative_normalize
 from fla.ops.utils.op import exp2, unflatten_program_id
 from fla.ops.utils.softmax import softmax_bwd, softmax_fwd
 from fla.utils import autotune_cache_kwargs, input_guard
@@ -1236,7 +1236,7 @@ def chunk_gsa(
             )
     assert checkpoint_level in [0, 1, 2]
     if g is None:
-        s, g, _ = fused_cumulative_normalize(
+        s, g, _ = fused_additive_gate(
             x=s,
             cu_seqlens=cu_seqlens,
             output_dtype=k.dtype,

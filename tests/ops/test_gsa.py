@@ -17,19 +17,26 @@ from fla.utils import assert_close, check_shared_mem, device, device_platform
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'D', 'M', 'gate_logit_normalizer', 'dtype'),
+    ('B', 'T', 'H', 'D', 'V', 'M', 'gate_logit_normalizer', 'dtype', 'requires_grad_q', 'reverse'),
     [
-        pytest.param(*test, id="B{}-T{}-H{}-D{}-M{}-gate_logit_normalizer{}-{}".format(*test))
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-V{}-M{}-gate_logit_normalizer{}-{}-requires_grad_q{}-reverse{}".format(*test))
         for test in [
-            (1, 63, 1, 64, 32, 1, torch.float),
-            (2, 1024, 4, 60, 64, 1, torch.float),
-            (2, 1024, 8, 128, 64, 0.1, torch.float),
-            (2, 1024, 8, 128, 32, 1, torch.float),
-            (2, 1024, 8, 128, 64, 1, torch.float),
-            (2, 1024, 8, 128, 64, 10, torch.float),
-            (4, 2048, 8, 64, 64, 1, torch.float),
-            (2, 1024, 8, 128, 64, 0.1, torch.float16),
-            (2, 1024, 8, 128, 64, 10, torch.float16),
+            (1, 63, 1, 64, 64, 32, 1, torch.float, True, False),
+            (2, 1024, 4, 60, 60, 64, 1, torch.float, True, False),
+            (2, 1024, 8, 128, 128, 64, 0.1, torch.float, True, False),
+            (2, 1024, 8, 128, 128, 32, 1, torch.float, True, False),
+            (2, 1024, 8, 128, 128, 64, 1, torch.float, True, False),
+            (2, 1024, 8, 128, 128, 64, 10, torch.float, True, False),
+            (4, 2048, 8, 64, 64, 64, 1, torch.float, True, False),
+            (2, 1024, 8, 128, 128, 64, 0.1, torch.float16, True, False),
+            (2, 1024, 8, 128, 128, 64, 10, torch.float16, True, False),
+            (2, 65, 2, 32, 48, 32, None, torch.float32, True, False),
+            (2, 65, 2, 32, 48, 32, None, torch.float16, True, False),
+            (2, 65, 2, 32, 48, 32, None, torch.bfloat16, True, False),
+            (1, 1, 2, 32, 48, 32, 1, torch.float32, False, False),
+            (1, 1, 2, 32, 48, 32, 1, torch.float32, False, True),
+            (1, 17, 2, 32, 48, 32, 1, torch.float32, False, False),
+            (1, 17, 2, 32, 48, 32, 1, torch.float32, False, True),
         ]
     ],
 )
@@ -42,30 +49,53 @@ def test_fused_recurrent(
     T: int,
     H: int,
     D: int,
+    V: int,
     M: int,
-    gate_logit_normalizer: float,
+    gate_logit_normalizer: float | None,
     dtype: torch.dtype,
+    requires_grad_q: bool,
+    reverse: bool,
 ):
     torch.manual_seed(42)
+    os.environ['TRITON_F32_DEFAULT'] = 'ieee'
 
-    q = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
+    q = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_(requires_grad_q)
     k = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
-    v = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
+    v = torch.randn((B, T, H, V), dtype=dtype, device=device).requires_grad_()
     s = torch.randn((B, T, H, M), dtype=dtype, device=device).requires_grad_()
-    g = (F.logsigmoid(torch.randn((B, T, H, M), dtype=dtype, device=device)) / gate_logit_normalizer).requires_grad_()
+    g = None
+    if gate_logit_normalizer is not None:
+        g = (F.logsigmoid(torch.randn((B, T, H, M), dtype=dtype, device=device)) / gate_logit_normalizer).requires_grad_()
     hk0 = torch.randn(B, H, D, M, device=device).requires_grad_()
-    hv0 = torch.randn(B, H, M, D, device=device).requires_grad_()
+    hv0 = torch.randn(B, H, M, V, device=device).requires_grad_()
     do = torch.randn_like(v)
     dhkt = torch.randn_like(hk0)
     dhvt = torch.randn_like(hv0)
 
-    ref, (ref_hkt, ref_hvt) = naive_recurrent_gsa(q, k, v, s, g, initial_state=(hk0, hv0), output_final_state=True)
+    ref_s, ref_g = s, g
+    if g is None:
+        z = s.float().logcumsumexp(1)
+        ref_s = (s.float() - z).exp().to(dtype)
+        ref_g = torch.cat((z[:, :1], z[:, :-1]), dim=1) - z
+    ref, (ref_hkt, ref_hvt) = naive_recurrent_gsa(
+        q=q.flip(1) if reverse else q,
+        k=k.flip(1) if reverse else k,
+        v=v.flip(1) if reverse else v,
+        s=ref_s.flip(1) if reverse else ref_s,
+        g=ref_g.flip(1) if reverse else ref_g,
+        initial_state=(hk0, hv0),
+        output_final_state=True,
+    )
+    if reverse:
+        ref = ref.flip(1)
     ((ref * do).sum() + (ref_hkt * dhkt).sum() + (ref_hvt * dhvt).sum()).backward()
-    ref_dq, q.grad = q.grad.clone(), None
+    if requires_grad_q:
+        ref_dq, q.grad = q.grad.clone(), None
     ref_dk, k.grad = k.grad.clone(), None
     ref_dv, v.grad = v.grad.clone(), None
     ref_ds, s.grad = s.grad.clone(), None
-    ref_dg, g.grad = g.grad.clone(), None
+    if g is not None:
+        ref_dg, g.grad = g.grad.clone(), None
     ref_dhk0, hk0.grad = hk0.grad.clone(), None
     ref_dhv0, hv0.grad = hv0.grad.clone(), None
 
@@ -77,38 +107,46 @@ def test_fused_recurrent(
         g=g,
         initial_state=(hk0, hv0),
         output_final_state=True,
+        reverse=reverse,
     )
     ((tri * do).sum() + (tri_hkt * dhkt).sum() + (tri_hvt * dhvt).sum()).backward()
-    tri_dq, q.grad = q.grad.clone(), None
+    if requires_grad_q:
+        tri_dq, q.grad = q.grad.clone(), None
     tri_dk, k.grad = k.grad.clone(), None
     tri_dv, v.grad = v.grad.clone(), None
     tri_ds, s.grad = s.grad.clone(), None
-    tri_dg, s.grad = g.grad.clone(), None
+    if g is not None:
+        tri_dg, g.grad = g.grad.clone(), None
     tri_dhk0, hk0.grad = hk0.grad.clone(), None
     tri_dhv0, hv0.grad = hv0.grad.clone(), None
 
     assert_close('o', ref, tri, 0.005)
     assert_close('hkt', ref_hkt, tri_hkt, 0.005)
     assert_close('hvt', ref_hvt, tri_hvt, 0.005)
-    assert_close('dq', ref_dq, tri_dq, 0.005)
+    if requires_grad_q:
+        assert_close('dq', ref_dq, tri_dq, 0.005)
     assert_close('dk', ref_dk, tri_dk, 0.005)
     assert_close('dv', ref_dv, tri_dv, 0.005)
     assert_close('ds', ref_ds, tri_ds, 0.005)
-    assert_close('dg', ref_dg, tri_dg, 0.005)
+    if g is not None:
+        assert_close('dg', ref_dg, tri_dg, 0.005)
     assert_close('dhk0', ref_dhk0, tri_dhk0, 0.005)
     assert_close('dhv0', ref_dhv0, tri_dhv0, 0.005)
 
 
 @pytest.mark.parametrize(
-    ('H', 'D', 'M', 'cu_seqlens', 'dtype'),
+    ('H', 'D', 'V', 'M', 'cu_seqlens', 'gate_logit_normalizer', 'dtype'),
     [
-        pytest.param(*test, id="H{}-D{}-M{}-cu_seqlens{}-{}".format(*test))
+        pytest.param(*test, id="H{}-D{}-V{}-M{}-cu_seqlens{}-gate_logit_normalizer{}-{}".format(*test))
         for test in [
-            (4, 64, 64, [0, 15], torch.float),
-            (4, 64, 64, [0, 256, 500, 1000], torch.float),
-            (4, 100, 64, [0, 15, 100, 300, 1200, 2000], torch.float),
-            (4, 64, 64, [0, 1, 100, 300, 1200, 2048], torch.float16),
-            (4, 128, 64, [0, 200, 512, 1200, 2048], torch.float16),
+            (4, 64, 64, 64, [0, 15], 1, torch.float),
+            (4, 64, 64, 64, [0, 256, 500, 1000], 1, torch.float),
+            (4, 100, 100, 64, [0, 15, 100, 300, 1200, 2000], 1, torch.float),
+            (4, 64, 64, 64, [0, 1, 100, 300, 1200, 2048], 1, torch.float16),
+            (4, 128, 128, 64, [0, 200, 512, 1200, 2048], 1, torch.float16),
+            (2, 32, 48, 32, [0, 1, 17, 65], None, torch.float32),
+            (2, 32, 48, 32, [0, 1, 17, 65], None, torch.float16),
+            (2, 32, 48, 32, [0, 1, 17, 65], None, torch.bfloat16),
         ]
     ],
 )
@@ -119,8 +157,10 @@ def test_fused_recurrent(
 def test_fused_recurrent_varlen(
     H: int,
     D: int,
+    V: int,
     M: int,
     cu_seqlens: list[int],
+    gate_logit_normalizer: float | None,
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
@@ -131,23 +171,31 @@ def test_fused_recurrent_varlen(
 
     q = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
     k = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
-    v = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
+    v = torch.randn((1, T, H, V), dtype=dtype, device=device).requires_grad_()
     s = torch.randn((1, T, H, M), dtype=dtype, device=device).requires_grad_()
-    g = F.logsigmoid(torch.randn((1, T, H, M), dtype=dtype, device=device)).requires_grad_()
+    g = None
+    if gate_logit_normalizer is not None:
+        g = (F.logsigmoid(torch.randn((1, T, H, M), dtype=dtype, device=device)) / gate_logit_normalizer).requires_grad_()
     hk0 = torch.randn(N, H, D, M, device=device).requires_grad_()
-    hv0 = torch.randn(N, H, M, D, device=device).requires_grad_()
+    hv0 = torch.randn(N, H, M, V, device=device).requires_grad_()
     dhkt = torch.randn(N, H, D, M, device=device).requires_grad_()
-    dhvt = torch.randn(N, H, M, D, device=device).requires_grad_()
+    dhvt = torch.randn(N, H, M, V, device=device).requires_grad_()
 
     do = torch.randn_like(v)
     refs, ref_hkts, ref_hfts = [], [], []
     for i in range(N):
+        ref_s = s[:, cu_seqlens[i]:cu_seqlens[i+1]]
+        ref_g = g[:, cu_seqlens[i]:cu_seqlens[i+1]] if g is not None else None
+        if ref_g is None:
+            z = ref_s.float().logcumsumexp(1)
+            ref_s = (ref_s.float() - z).exp().to(dtype)
+            ref_g = torch.cat((z[:, :1], z[:, :-1]), dim=1) - z
         ref, (ref_hkt, ref_hvt) = naive_recurrent_gsa(
             q[:, cu_seqlens[i]:cu_seqlens[i+1]],
             k[:, cu_seqlens[i]:cu_seqlens[i+1]],
             v[:, cu_seqlens[i]:cu_seqlens[i+1]],
-            s[:, cu_seqlens[i]:cu_seqlens[i+1]],
-            g[:, cu_seqlens[i]:cu_seqlens[i+1]],
+            ref_s,
+            ref_g,
             initial_state=(hk0[i:i+1], hv0[i:i+1]),
             output_final_state=True,
         )
@@ -162,7 +210,8 @@ def test_fused_recurrent_varlen(
     ref_dk, k.grad = k.grad.clone(), None
     ref_dv, v.grad = v.grad.clone(), None
     ref_ds, s.grad = s.grad.clone(), None
-    ref_dg, g.grad = g.grad.clone(), None
+    if g is not None:
+        ref_dg, g.grad = g.grad.clone(), None
     ref_dhk0, hk0.grad = hk0.grad.clone(), None
     ref_dhv0, hv0.grad = hv0.grad.clone(), None
 
@@ -181,7 +230,8 @@ def test_fused_recurrent_varlen(
     tri_dk, k.grad = k.grad.clone(), None
     tri_dv, v.grad = v.grad.clone(), None
     tri_ds, s.grad = s.grad.clone(), None
-    tri_dg, s.grad = g.grad.clone(), None
+    if g is not None:
+        tri_dg, g.grad = g.grad.clone(), None
     tri_dhk0, hk0.grad = hk0.grad.clone(), None
     tri_dhv0, hv0.grad = hv0.grad.clone(), None
 
@@ -192,22 +242,26 @@ def test_fused_recurrent_varlen(
     assert_close('dk', ref_dk, tri_dk, 0.005)
     assert_close('dv', ref_dv, tri_dv, 0.005)
     assert_close('ds', ref_ds, tri_ds, 0.005)
-    assert_close('dg', ref_dg, tri_dg, 0.005)
+    if g is not None:
+        assert_close('dg', ref_dg, tri_dg, 0.005)
     assert_close('dhk0', ref_dhk0, tri_dhk0, 0.005)
     assert_close('dhv0', ref_dhv0, tri_dhv0, 0.005)
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'D', 'M', 'gate_logit_normalizer', 'dtype'),
+    ('B', 'T', 'H', 'D', 'V', 'M', 'gate_logit_normalizer', 'dtype'),
     [
-        pytest.param(*test, id="B{}-T{}-H{}-D{}-M{}-gate_logit_normalizer{}-{}".format(*test))
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-V{}-M{}-gate_logit_normalizer{}-{}".format(*test))
         for test in [
-            (1, 63, 1, 64, 32, 1, torch.float16),
-            (2, 1024, 4, 60, 64, 1, torch.float16),
-            (2, 1024, 4, 256, 64, 1, torch.float16),
-            (2, 1024, 4, 128, 64, 0.1, torch.float),
-            (2, 1024, 4, 128, 128, 1, torch.float16),
-            (2, 1024, 4, 128, 64, 10, torch.float16),
+            (1, 63, 1, 64, 64, 32, 1, torch.float16),
+            (2, 1024, 4, 60, 60, 64, 1, torch.float16),
+            (2, 1024, 4, 256, 256, 64, 1, torch.float16),
+            (2, 1024, 4, 128, 128, 64, 0.1, torch.float),
+            (2, 1024, 4, 128, 128, 128, 1, torch.float16),
+            (2, 1024, 4, 128, 128, 64, 10, torch.float16),
+            (2, 65, 2, 32, 48, 32, None, torch.float32),
+            (2, 65, 2, 32, 48, 32, None, torch.float16),
+            (2, 65, 2, 32, 48, 32, None, torch.bfloat16),
         ]
     ],
 )
@@ -220,8 +274,9 @@ def test_chunk(
     T: int,
     H: int,
     D: int,
+    V: int,
     M: int,
-    gate_logit_normalizer: float,
+    gate_logit_normalizer: float | None,
     dtype: torch.dtype,
 ):
     if (D > 64 or M > 64) and check_shared_mem('hopper') is False:
@@ -231,13 +286,15 @@ def test_chunk(
 
     q = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
     k = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
-    v = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
+    v = torch.randn((B, T, H, V), dtype=dtype, device=device).requires_grad_()
     s = torch.randn((B, T, H, M), dtype=dtype, device=device).requires_grad_()
-    g = (F.logsigmoid(torch.randn((B, T, H, M), dtype=dtype, device=device)) / gate_logit_normalizer).requires_grad_()
+    g = None
+    if gate_logit_normalizer is not None:
+        g = (F.logsigmoid(torch.randn((B, T, H, M), dtype=dtype, device=device)) / gate_logit_normalizer).requires_grad_()
     hk0 = torch.randn(B, H, D, M, device=device).requires_grad_()
-    hv0 = torch.randn(B, H, M, D, device=device).requires_grad_()
+    hv0 = torch.randn(B, H, M, V, device=device).requires_grad_()
     dhkt = torch.randn(B, H, D, M, device=device).requires_grad_()
-    dhvt = torch.randn(B, H, M, D, device=device).requires_grad_()
+    dhvt = torch.randn(B, H, M, V, device=device).requires_grad_()
 
     do = torch.randn_like(v)
     ref, (ref_hkt, ref_hvt) = fused_recurrent_gsa(
@@ -254,7 +311,8 @@ def test_chunk(
     ref_dk, k.grad = k.grad.clone(), None
     ref_dv, v.grad = v.grad.clone(), None
     ref_ds, s.grad = s.grad.clone(), None
-    ref_dg, g.grad = g.grad.clone(), None
+    if g is not None:
+        ref_dg, g.grad = g.grad.clone(), None
     ref_dhk0, hk0.grad = hk0.grad.clone(), None
     ref_dhv0, hv0.grad = hv0.grad.clone(), None
 
@@ -273,7 +331,8 @@ def test_chunk(
     tri_dk, k.grad = k.grad.clone(), None
     tri_dv, v.grad = v.grad.clone(), None
     tri_ds, s.grad = s.grad.clone(), None
-    tri_dg, s.grad = g.grad.clone(), None
+    if g is not None:
+        tri_dg, g.grad = g.grad.clone(), None
     tri_dhk0, hk0.grad = hk0.grad.clone(), None
     tri_dhv0, hv0.grad = hv0.grad.clone(), None
 
@@ -283,8 +342,9 @@ def test_chunk(
     assert_close('dq', ref_dq, tri_dq, 0.005)
     assert_close('dk', ref_dk, tri_dk, 0.005)
     assert_close('dv', ref_dv, tri_dv, 0.005)
-    assert_close('ds', ref_ds, tri_ds, 0.008)
-    assert_close('dg', ref_dg, tri_dg, 0.008)
+    assert_close('ds', ref_ds, tri_ds, 0.005 if g is None else 0.008)
+    if g is not None:
+        assert_close('dg', ref_dg, tri_dg, 0.008)
     assert_close('dhk0', ref_dhk0, tri_dhk0, 0.005)
     assert_close('dhv0', ref_dhv0, tri_dhv0, 0.005)
 
@@ -377,13 +437,16 @@ def test_chunk_with_chunk_size(
 
 
 @pytest.mark.parametrize(
-    ('H', 'D', 'M', 'cu_seqlens', 'dtype'),
+    ('H', 'D', 'V', 'M', 'cu_seqlens', 'gate_logit_normalizer', 'dtype'),
     [
-        pytest.param(*test, id="H{}-D{}-M{}-cu_seqlens{}-{}".format(*test))
+        pytest.param(*test, id="H{}-D{}-V{}-M{}-cu_seqlens{}-gate_logit_normalizer{}-{}".format(*test))
         for test in [
-            (4, 64, 64, [0, 15], torch.float16),
-            (4, 64, 64, [0, 256, 500, 1000], torch.float16),
-            (4, 100, 64, [0, 15, 100, 300, 1200, 2000], torch.float16),
+            (4, 64, 64, 64, [0, 15], 1, torch.float16),
+            (4, 64, 64, 64, [0, 256, 500, 1000], 1, torch.float16),
+            (4, 100, 100, 64, [0, 15, 100, 300, 1200, 2000], 1, torch.float16),
+            (2, 32, 48, 32, [0, 1, 17, 65], None, torch.float32),
+            (2, 32, 48, 32, [0, 1, 17, 65], None, torch.float16),
+            (2, 32, 48, 32, [0, 1, 17, 65], None, torch.bfloat16),
         ]
     ],
 )
@@ -399,8 +462,10 @@ def test_chunk_with_chunk_size(
 def test_chunk_varlen(
     H: int,
     D: int,
+    V: int,
     M: int,
     cu_seqlens: list[int],
+    gate_logit_normalizer: float | None,
     dtype: torch.dtype,
 ):
     if (D > 64 or M > 64) and check_shared_mem('hopper') is False:
@@ -413,13 +478,15 @@ def test_chunk_varlen(
 
     q = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
     k = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
-    v = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
+    v = torch.randn((1, T, H, V), dtype=dtype, device=device).requires_grad_()
     s = torch.randn((1, T, H, M), dtype=dtype, device=device).requires_grad_()
-    g = F.logsigmoid(torch.randn((1, T, H, M), dtype=dtype, device=device)).requires_grad_()
+    g = None
+    if gate_logit_normalizer is not None:
+        g = (F.logsigmoid(torch.randn((1, T, H, M), dtype=dtype, device=device)) / gate_logit_normalizer).requires_grad_()
     hk0 = torch.randn(N, H, D, M, device=device).requires_grad_()
-    hv0 = torch.randn(N, H, M, D, device=device).requires_grad_()
+    hv0 = torch.randn(N, H, M, V, device=device).requires_grad_()
     dhkt = torch.randn(N, H, D, M, device=device).requires_grad_()
-    dhvt = torch.randn(N, H, M, D, device=device).requires_grad_()
+    dhvt = torch.randn(N, H, M, V, device=device).requires_grad_()
 
     do = torch.randn_like(v)
 
@@ -439,7 +506,8 @@ def test_chunk_varlen(
     ref_dk, k.grad = k.grad.clone(), None
     ref_dv, v.grad = v.grad.clone(), None
     ref_ds, s.grad = s.grad.clone(), None
-    ref_dg, g.grad = g.grad.clone(), None
+    if g is not None:
+        ref_dg, g.grad = g.grad.clone(), None
     ref_dhk0, hk0.grad = hk0.grad.clone(), None
     ref_dhv0, hv0.grad = hv0.grad.clone(), None
 
@@ -459,18 +527,20 @@ def test_chunk_varlen(
     tri_dk, k.grad = k.grad.clone(), None
     tri_dv, v.grad = v.grad.clone(), None
     tri_ds, s.grad = s.grad.clone(), None
-    tri_dg, g.grad = g.grad.clone(), None
+    if g is not None:
+        tri_dg, g.grad = g.grad.clone(), None
     tri_dhk0, hk0.grad = hk0.grad.clone(), None
     tri_dhv0, hv0.grad = hv0.grad.clone(), None
 
-    assert_close('o', ref, tri, 0.004)
+    assert_close('o', ref, tri, 0.005 if g is None else 0.004)
     assert_close('hkt', ref_hkt, tri_hkt, 0.005)
     assert_close('hvt', ref_hvt, tri_hvt, 0.005)
     assert_close('dq', ref_dq, tri_dq, 0.005)
     assert_close('dk', ref_dk, tri_dk, 0.005)
     assert_close('dv', ref_dv, tri_dv, 0.005)
     assert_close('ds', ref_ds, tri_ds, 0.005)
-    assert_close('dg', ref_dg, tri_dg, 0.005)
+    if g is not None:
+        assert_close('dg', ref_dg, tri_dg, 0.005)
     assert_close('dhk0', ref_dhk0, tri_dhk0, 0.005)
     assert_close('dhv0', ref_dhv0, tri_dhv0, 0.005)
 
@@ -589,84 +659,3 @@ def test_inference_state_contract(has_initial_state: bool, output_final_state: b
         if output_final_state:
             assert tri_state[0].data_ptr() != initial_state[0].data_ptr()
             assert tri_state[1].data_ptr() != initial_state[1].data_ptr()
-
-
-@pytest.mark.parametrize("impl", [chunk_gsa, fused_recurrent_gsa], ids=["chunk", "fused-recurrent"])
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16], ids=["fp32", "fp16", "bf16"])
-@pytest.mark.parametrize("varlen", [False, True], ids=["dense", "varlen"])
-def test_normalization(impl, dtype: torch.dtype, varlen: bool, monkeypatch):
-    torch.manual_seed(42)
-    monkeypatch.setenv('TRITON_F32_DEFAULT', 'ieee')
-    lengths = [1, 16, 48] if varlen else [65, 65]
-    B, T, H, K, V, M = 1 if varlen else 2, 65, 2, 32, 48, 32
-    q = torch.randn(B, T, H, K, device=device, dtype=dtype).requires_grad_()
-    k = torch.randn_like(q).requires_grad_()
-    v = torch.randn(B, T, H, V, device=device, dtype=dtype).requires_grad_()
-    s = torch.randn(B, T, H, M, device=device, dtype=dtype).requires_grad_()
-    hk0 = torch.randn(len(lengths), H, K, M, device=device).requires_grad_()
-    hv0 = torch.randn(len(lengths), H, M, V, device=device).requires_grad_()
-    inputs = (q, k, v, s, hk0, hv0)
-    do, dhkt, dhvt = torch.randn_like(v), torch.randn_like(hk0), torch.randn_like(hv0)
-    cu_seqlens = torch.tensor([0, 1, 17, 65], device=device, dtype=torch.int32) if varlen else None
-
-    outputs, key_states, value_states = [], [], []
-    start = 0
-    for i, length in enumerate(lengths):
-        index = (slice(None), slice(start, start + length)) if varlen else (slice(i, i + 1), slice(None))
-        slots = s[index].float()
-        z = slots.logcumsumexp(1)
-        gates = torch.cat((z[:, :1], z[:, :-1]), dim=1) - z
-        out, (hkt, hvt) = naive_recurrent_gsa(
-            q=q[index],
-            k=k[index],
-            v=v[index],
-            s=(slots - z).exp().to(dtype),
-            g=gates,
-            initial_state=(hk0[i:i + 1], hv0[i:i + 1]),
-            output_final_state=True,
-        )
-        outputs.append(out)
-        key_states.append(hkt)
-        value_states.append(hvt)
-        start += length
-    ref = torch.cat(outputs, dim=1 if varlen else 0)
-    ref_hkt, ref_hvt = torch.cat(key_states), torch.cat(value_states)
-    ref_grads = torch.autograd.grad((ref * do).sum() + (ref_hkt * dhkt).sum() + (ref_hvt * dhvt).sum(), inputs)
-
-    tri, (tri_hkt, tri_hvt) = impl(
-        q=q,
-        k=k,
-        v=v,
-        s=s,
-        initial_state=(hk0, hv0),
-        output_final_state=True,
-        cu_seqlens=cu_seqlens,
-    )
-    tri_grads = torch.autograd.grad((tri * do).sum() + (tri_hkt * dhkt).sum() + (tri_hvt * dhvt).sum(), inputs)
-    assert_close('o', ref, tri, 0.005)
-    assert_close('hkt', ref_hkt, tri_hkt, 0.005)
-    assert_close('hvt', ref_hvt, tri_hvt, 0.005)
-    for name, ref_grad, tri_grad in zip(('dq', 'dk', 'dv', 'ds', 'dhk0', 'dhv0'), ref_grads, tri_grads):
-        assert_close(name, ref_grad, tri_grad, 0.005)
-
-
-@pytest.mark.parametrize("reverse", [False, True], ids=["forward", "reverse"])
-@pytest.mark.parametrize("T", [1, 17], ids=["single-token", "multi-token"])
-def test_fused_recurrent_partial_grad(T: int, reverse: bool):
-    torch.manual_seed(42)
-    q = torch.randn(1, T, 2, 32, device=device)
-    k = torch.randn_like(q).requires_grad_()
-    v = torch.randn(1, T, 2, 48, device=device).requires_grad_()
-    s = torch.randn(1, T, 2, 32, device=device).requires_grad_()
-    g = F.logsigmoid(torch.randn_like(s)).requires_grad_()
-    do = torch.randn_like(v)
-    ref_inputs = [x.flip(1) for x in (q, k, v, s, g)] if reverse else [q, k, v, s, g]
-    ref, _ = naive_recurrent_gsa(*ref_inputs)
-    if reverse:
-        ref = ref.flip(1)
-    ref_grads = torch.autograd.grad((ref * do).sum(), (k, v, s, g))
-    tri, _ = fused_recurrent_gsa(q=q, k=k, v=v, s=s, g=g, reverse=reverse)
-    tri_grads = torch.autograd.grad((tri * do).sum(), (k, v, s, g))
-    assert_close('o', ref, tri, 0.005)
-    for name, ref_grad, tri_grad in zip(('dk', 'dv', 'ds', 'dg'), ref_grads, tri_grads):
-        assert_close(name, ref_grad, tri_grad, 0.005)
