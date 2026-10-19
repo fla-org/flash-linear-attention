@@ -9,11 +9,12 @@
 
 The community entry is kept pristine; on NPU the ``momentum_delta_rule`` dispatch
 routes here (``backends/triton_ascend/__init__.py``). The forward composes the
-dispatched ``common`` momentum primitives (triton-ascend kernels on NPU, registered
-under ``fla/ops/common/backends/triton_ascend``) with the k*eta / p*alpha products
-kept in fp32: on NPU bf16 * bf16 rounds the product to bf16, and the rounding
-amplifies through the state recurrence past the parity tolerance. The backward runs
-the same fp32 torch reference autograd as the community path (fp32-promoted products).
+triton-ascend kernels in ``chunk_kernels`` of this package (kkt/wy/fwd_h/fwd_o);
+the gate prep and the k*eta / p*alpha products stay host-side torch like the
+community reference, kept in fp32: on NPU bf16 * bf16 rounds the product to bf16,
+and the rounding amplifies through the state recurrence past the parity tolerance.
+The backward runs the same fp32 torch reference autograd as the community path
+(fp32-promoted products).
 """
 
 from __future__ import annotations
@@ -25,13 +26,14 @@ import torch.nn.functional as F
 import triton
 
 from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
-from fla.ops.common.chunk_momentum_delta import (
-    chunk_momentum_delta_fwd_h,
-    chunk_momentum_delta_fwd_o,
-    chunk_momentum_delta_kkt_fwd,
-    chunk_momentum_delta_wy_fwd,
+from fla.ops.momentum_delta_rule.backends.triton_ascend.chunk_kernels import (
+    chunk_momentum_delta_fwd_h_npu,
+    chunk_momentum_delta_fwd_o_npu,
+    chunk_momentum_delta_kkt_fwd_npu,
+    chunk_momentum_delta_wy_fwd_npu,
 )
 from fla.ops.momentum_delta_rule.naive import chunk_momentum_delta_rule_ref
+from fla.ops.utils.cumsum import chunk_local_cumsum
 from fla.ops.utils.solve_tril import solve_tril
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
@@ -39,7 +41,7 @@ from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 def _build_k_eta(k: torch.Tensor, eta: torch.Tensor | None) -> torch.Tensor:
     if eta is None:
         return k
-    # see module docstring: keep the product in fp32 on npu
+    # keep the product in fp32 (torch promotion), like the community reference
     return k * eta.unsqueeze(-1).to(torch.float32)
 
 
@@ -53,9 +55,8 @@ def _build_p_eff(p: torch.Tensor, log_alpha: torch.Tensor, use_p_times_alpha: bo
 class MomentumChunkPrecompute:
     """All `[B, H, NT, BT]` fp32 vectors and `[B, H, NT]` scalars the chunk kernels need."""
 
-    log_a_cum: torch.Tensor
     log_m_cum: torch.Tensor
-    a_cum: torch.Tensor       # exp(log_a_cum)
+    a_cum: torch.Tensor
     log_ct: torch.Tensor      # per-chunk logcumsumexp(log_beta + log_m_cum - log_a_cum)
     lct1: torch.Tensor        # log_ct shifted by one slot, -inf at slot 0
     b_t: torch.Tensor         # exp(log_a_cum + log_ct)
@@ -75,11 +76,12 @@ def momentum_chunk_precompute(
     beta: torch.Tensor,
     chunk_size: int,
 ) -> MomentumChunkPrecompute:
-    """Host-side fp32 log-space precompute, in `[B, H, NT, BT]` contiguous layout.
+    """fp32 log-space precompute, in `[B, H, NT, BT]` contiguous layout.
 
-    Pads `T` to a multiple of `chunk_size` with zeros so cumsums freeze past the last
-    real row; per-chunk scalars are gathered at the clamped last real row, which makes
-    the pad path exact (no recurrent-ref shortcut needed downstream).
+    Chunk-local cumsums run the shared ``chunk_local_cumsum`` kernels; the remaining
+    log-space products stay torch ops like the community reference. The cumsums are
+    replicate-padded to `NT*BT` so they freeze at the last real row, keeping the pad
+    path exact.
     """
     B, T, H = log_alpha.shape
     BT = chunk_size
@@ -88,17 +90,14 @@ def momentum_chunk_precompute(
     pad = pT - T
     pad3 = (0, 0, 0, pad)
 
-    def pad_t(x: torch.Tensor) -> torch.Tensor:
-        return F.pad(x, pad3) if pad else x
+    def pad_t(x: torch.Tensor, replicate: bool = False) -> torch.Tensor:
+        if not pad:
+            return x
+        return F.pad(x, pad3, mode='replicate') if replicate else F.pad(x, pad3)
 
-    log_alpha_p = pad_t(log_alpha)
-    log_mu_p = pad_t(log_mu)
+    log_a_cum = pad_t(chunk_local_cumsum(log_alpha, chunk_size), replicate=True).reshape(B, NT, BT, H).permute(0, 3, 1, 2)
+    log_m_cum = pad_t(chunk_local_cumsum(log_mu, chunk_size), replicate=True).reshape(B, NT, BT, H).permute(0, 3, 1, 2)
     beta_p = pad_t(beta)
-
-    # naive.py cumsums are *chunk-local*: the ref rearranges to [B, H, NT, BT] first and
-    # cumsums along the chunk dim, so each chunk's decay factors restart at its first row.
-    log_a_cum = log_alpha_p.reshape(B, NT, BT, H).cumsum(dim=2).permute(0, 3, 1, 2)
-    log_m_cum = log_mu_p.reshape(B, NT, BT, H).cumsum(dim=2).permute(0, 3, 1, 2)
     log_beta = (beta_p + 1e-6).log().reshape(B, NT, BT, H).permute(0, 3, 1, 2)
     log_c_before = log_beta + log_m_cum - log_a_cum
     log_ct = torch.logcumsumexp(log_c_before, dim=-1)
@@ -110,7 +109,6 @@ def momentum_chunk_precompute(
     bar_a_tm1 = torch.cat([torch.ones_like(a_cum[..., :1]), a_cum[..., :-1]], dim=-1)
     b_tm1 = torch.cat([torch.zeros_like(b_t[..., :1]), b_t[..., :-1]], dim=-1)
     cfac = (-log_m_cum).exp()
-    lm_cum = log_m_cum
 
     # per-chunk scalars gathered at the last *real* row of each chunk (pad-safe)
     last_idx = torch.full((NT,), BT - 1, dtype=torch.long, device=log_alpha.device)
@@ -122,11 +120,10 @@ def momentum_chunk_precompute(
     a_last = gather_last(a_cum)
     b_last = gather_last(b_t)
     ct_last = gather_last(log_ct)
-    lm_last = gather_last(lm_cum)
+    lm_last = gather_last(log_m_cum)
 
     return MomentumChunkPrecompute(
-        log_a_cum=log_a_cum,
-        log_m_cum=lm_cum,
+        log_m_cum=log_m_cum,
         a_cum=a_cum,
         log_ct=log_ct,
         lct1=lct1,
@@ -155,7 +152,7 @@ def prepare_wy_repr_fwd(
 
     The inverse is computed on the host via ``solve_tril``.
     """
-    A = chunk_momentum_delta_kkt_fwd(
+    A = chunk_momentum_delta_kkt_fwd_npu(
         p_eff=p_eff,
         k_eta=k_eta,
         cfac=pre.cfac,
@@ -164,7 +161,7 @@ def prepare_wy_repr_fwd(
         chunk_size=chunk_size,
     )
     A = solve_tril(A=A, output_dtype=torch.float32)
-    u_c, y_c, z_c = chunk_momentum_delta_wy_fwd(
+    u_c, y_c, z_c = chunk_momentum_delta_wy_fwd_npu(
         A=A,
         v=v,
         p_eff=p_eff,
@@ -178,8 +175,8 @@ def prepare_wy_repr_fwd(
 class ChunkMomentumDeltaRuleFunctionNPU(torch.autograd.Function):
     """NPU override of the community ``ChunkMomentumDeltaRuleFunction``.
 
-    Forward composes the dispatched ``common`` momentum primitives (triton-ascend
-    kernels on NPU); backward keeps the community fp32 torch reference autograd (same
+    Forward composes the triton-ascend chunk kernels (``chunk_kernels`` of this
+    package); backward keeps the community fp32 torch reference autograd (same
     saved-tensors / ctx contract), with the k*eta and p*alpha products promoted to
     fp32 so the grads match the fp32 forward recurrence.
     """
@@ -200,14 +197,14 @@ class ChunkMomentumDeltaRuleFunctionNPU(torch.autograd.Function):
         p_eff = _build_p_eff(p, log_alpha, use_p_times_alpha)
         pre = momentum_chunk_precompute(log_alpha, log_mu, beta, chunk_size)
         u_c, y_c, z_c = prepare_wy_repr_fwd(p_eff, k_eta, v, pre, chunk_size)
-        h_s, h_m, v_i, final_S, final_M = chunk_momentum_delta_fwd_h(
+        h_s, h_m, v_i, final_S, final_M = chunk_momentum_delta_fwd_h_npu(
             k_eta=k_eta, u_c=u_c, y_c=y_c, z_c=z_c,
             cfac=pre.cfac, lct1=pre.lct1, lm_cum=pre.log_m_cum,
             a_last=pre.a_last, b_last=pre.b_last, ct_last=pre.ct_last, lm_last=pre.lm_last,
             initial_S=initial_S, initial_M=initial_M,
             output_final_state=output_final_state, chunk_size=chunk_size,
         )
-        o = chunk_momentum_delta_fwd_o(
+        o = chunk_momentum_delta_fwd_o_npu(
             q=q, k_eta=k_eta, v_i=v_i, h_s=h_s, h_m=h_m,
             a_cum=pre.a_cum, b_t=pre.b_t, cfac=pre.cfac, lct=pre.log_ct, lct1=pre.lct1,
             scale=scale, chunk_size=chunk_size,

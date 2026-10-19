@@ -7,14 +7,23 @@
 
 """Triton-Ascend kernels for the momentum delta rule chunk forward.
 
-Decomposition mirrors the torch base in ``fla/ops/common/chunk_momentum_delta.py``:
-kkt (masked p@k^T) -> inverse (host-side solve_tril) + three RHS -> two-state inter
+Decomposition mirrors the community chunk reference (``fla/ops/momentum_delta_rule/naive.py``):
+gate prep and fp32 input scaling stay host-side in the composition (chunk_local_cumsum
++ torch, like the community reference) -> kkt (masked p@k^T)
+-> inverse (host-side solve_tril) + three RHS -> two-state inter
 recurrence -> output. All math is fp32 with ``allow_tf32=False`` (the state recurrence
 amplifies bf16 noise past the parity tolerance); every ``exp`` becomes ``exp2`` on
 pre-scaled log values (the wrapper multiplies by log2(e), the repo-wide gate convention).
 
+The kernels are called directly by the op-level NPU composition (``chunk_momentum_delta.py``
+in this package); the backend verifier rejects K > 256 before the composition runs, so
+the four BK-wide key slabs (BK = min(64, next_power_of_2(max(K, 16))) ≤ 64) always
+cover K ≤ 4·BK.
+
 Layouts:
   - gate vectors `[B, H, NT, BT]` fp32 contiguous, one `[BT]` vector per (b, h, n).
+    Every slot is valid: the precompute replicate-pads the cumsums past the last
+    real row, so the pad rows hold real values and gate loads need no mask.
   - the kkt ``A`` tensor is `[B, T, H, BT]` (chunk row ``t`` stores its ``BT`` columns).
 """
 
@@ -24,46 +33,9 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.backends import TritonAscendBackend, register
-from fla.ops.common.chunk_momentum_delta import (
-    chunk_momentum_delta_fwd_h,
-    chunk_momentum_delta_fwd_o,
-    chunk_momentum_delta_kkt_fwd,
-    chunk_momentum_delta_wy_fwd,
-)
+from fla.ops.common.backends.triton_ascend.chunk_delta_h import _launch_core_grid
 from fla.utils import ascend_compile_kwargs, input_guard
 from fla.utils.ascend_ub_manager import compute_row_tile_block_size
-
-from .chunk_delta_h import _launch_core_grid
-
-
-def chunk_momentum_delta_kkt_fwd_verifier(p_eff, k_eta, cfac, lct1, b_tm1, chunk_size):
-    from fla.utils import IS_NPU
-    if not IS_NPU or p_eff.device.type != "npu":
-        return False, "momentum kkt not running on NPU"
-    return True, None
-
-
-def chunk_momentum_delta_wy_fwd_verifier(A, v, p_eff, bar_a_tm1, b_tm1, chunk_size):
-    from fla.utils import IS_NPU
-    if not IS_NPU or A.device.type != "npu":
-        return False, "momentum wy not running on NPU"
-    return True, None
-
-
-def chunk_momentum_delta_fwd_h_verifier(k_eta, u_c, y_c, z_c, cfac, lct1, lm_cum, a_last, b_last, ct_last, lm_last, initial_S, initial_M, output_final_state, chunk_size):
-    from fla.utils import IS_NPU
-    if not IS_NPU or k_eta.device.type != "npu":
-        return False, "momentum fwd_h not running on NPU"
-    return True, None
-
-
-def chunk_momentum_delta_fwd_o_verifier(q, k_eta, v_i, h_s, h_m, a_cum, b_t, cfac, lct, lct1, scale, chunk_size):
-    from fla.utils import IS_NPU
-    if not IS_NPU or q.device.type != "npu":
-        return False, "momentum fwd_o not running on NPU"
-    return True, None
-
 
 LOG2E: float = 1.4426950408889634
 _SAFETY_MARGIN = 1.2
@@ -73,6 +45,9 @@ _MAX_BK = 64
 
 
 def _get_kkt_bk(BT: int, K: int) -> int:
+    # for K < 16 the max_block clamp below can return next_power_of_2(K) (e.g. 8),
+    # overriding the declared min_block; that is intended: the masked loads only
+    # need a power-of-two tile, and the K=8 parity case covers the small dot.
     return compute_row_tile_block_size(
         BT,
         K,
@@ -89,6 +64,10 @@ def _get_kkt_bk(BT: int, K: int) -> int:
 def _select_state_tiles(K: int, V: int) -> tuple[int, int]:
     """(BK, BV) for the two-state fwd kernels; both states stay live in fp32."""
     BK = min(_MAX_BK, triton.next_power_of_2(max(K, 16)))
+    # the op-level verifier rejects K > 256, but the wrappers below are plain
+    # functions now: keep the four-slab invariant here so a direct call with a
+    # larger K fails loudly instead of silently dropping key rows.
+    assert K <= 4 * BK, f"NPU momentum kernels cover at most {4 * BK} key rows, got K={K}"
     BV = compute_row_tile_block_size(
         min(K, BK),
         V,
@@ -126,7 +105,7 @@ def _st(ptr, val, mask, ALIGNED: tl.constexpr):
 # ---------------------------------------------------------------- K1: kkt
 
 
-@triton.jit(do_not_specialize=['T', 'B', 'task_num', 'num_core'])
+@triton.jit(do_not_specialize=['T', 'task_num', 'num_core'])
 def chunk_momentum_delta_kkt_fwd_kernel_npu(
     p_eff,
     k_eta,
@@ -147,8 +126,8 @@ def chunk_momentum_delta_kkt_fwd_kernel_npu(
     core_id = tl.program_id(0)
     NT = tl.cdiv(T, BT)
     for task in tl.range(core_id, task_num, num_core):
-        i_t = task % NT
-        i_nh = task // NT
+        i_t = (task % NT).to(tl.int64)
+        i_nh = (task // NT).to(tl.int64)
         i_n = i_nh // H
         i_h = i_nh % H
 
@@ -165,6 +144,7 @@ def chunk_momentum_delta_kkt_fwd_kernel_npu(
             m_ld = m_t[:, None] & (offs_k < K)
             b_p = _ld(p_eff + (i_n * T * H + i_h) * K + offs_t + offs_k, m_ld, T_K_ALIGNED).to(tl.float32)
             b_k = _ld(k_eta + (i_n * T * H + i_h) * K + offs_t + offs_k, m_ld, T_K_ALIGNED).to(tl.float32)
+            # acc is a fresh product; the carried tile is added outside the dot
             b_A = tl.dot(b_p + 0.0, tl.trans(b_k + 0.0), b_A * 0.0, allow_tf32=False) + b_A
 
         b_tm1_v = tl.load(b_tm1 + (i_n * H + i_h) * NT * BT + i_t * BT + o_i)
@@ -178,7 +158,6 @@ def chunk_momentum_delta_kkt_fwd_kernel_npu(
         tl.store(p_A, b_A, mask=m_t[:, None])
 
 
-@register(chunk_momentum_delta_kkt_fwd, backend=TritonAscendBackend, verifier=chunk_momentum_delta_kkt_fwd_verifier)
 @input_guard
 def chunk_momentum_delta_kkt_fwd_npu(
     p_eff: torch.Tensor,
@@ -192,7 +171,7 @@ def chunk_momentum_delta_kkt_fwd_npu(
     BT = chunk_size
     NT = triton.cdiv(T, BT)
     BK = _get_kkt_bk(BT, K)
-    # same contract as the torch base: padded rows so the wy stage can reshape [B, pT, H, BT]
+    # rows past T stay zero so the wy stage can reshape [B, pT, H, BT]
     A = torch.zeros(B, NT * BT, H, BT, device=p_eff.device, dtype=torch.float32)
     _launch_core_grid(
         chunk_momentum_delta_kkt_fwd_kernel_npu,
@@ -215,7 +194,7 @@ def chunk_momentum_delta_kkt_fwd_npu(
 # ------------------------------------------------------- K2: inverse + 3 RHS
 
 
-@triton.jit(do_not_specialize=['T', 'B', 'task_num', 'num_core'])
+@triton.jit(do_not_specialize=['T', 'task_num', 'num_core'])
 def chunk_momentum_delta_wy_fwd_kernel_npu(
     A,
     v,
@@ -244,8 +223,8 @@ def chunk_momentum_delta_wy_fwd_kernel_npu(
     core_id = tl.program_id(0)
     NT = tl.cdiv(T, BT)
     for task in tl.range(core_id, task_num, num_core):
-        i_t = task % NT
-        i_nh = task // NT
+        i_t = (task % NT).to(tl.int64)
+        i_nh = (task // NT).to(tl.int64)
         i_n = i_nh // H
         i_h = i_nh % H
 
@@ -279,13 +258,13 @@ def chunk_momentum_delta_wy_fwd_kernel_npu(
             b_p = _ld(p_eff + (i_n * T * H + i_h) * K + offs_t + offs_k, m_k, T_K_ALIGNED).to(tl.float32)
             b_A = tl.load(p_A, mask=m_t[:, None], other=0.0).to(tl.float32)
             b_y = tl.dot(b_A, b_p * b_bar_a[:, None], allow_tf32=False)
+            b_A = tl.load(p_A, mask=m_t[:, None], other=0.0).to(tl.float32)
             b_z = tl.dot(b_A, b_p * b_btm1[:, None], allow_tf32=False)
             p_yz = (i_n * NT * BT * H + i_h) * K + offs_t + offs_k
             _st(y_c + p_yz, b_y, m_k, T_K_ALIGNED)
             _st(z_c + p_yz, b_z, m_k, T_K_ALIGNED)
 
 
-@register(chunk_momentum_delta_wy_fwd, backend=TritonAscendBackend, verifier=chunk_momentum_delta_wy_fwd_verifier)
 @input_guard
 def chunk_momentum_delta_wy_fwd_npu(
     A: torch.Tensor,
@@ -302,7 +281,7 @@ def chunk_momentum_delta_wy_fwd_npu(
     BK = _get_kkt_bk(BT, K)
     BV = min(_get_kkt_bk(BT, V), triton.next_power_of_2(V))
     # ``A`` is the packed inverse (pre-computed by the op wrapper via solve_tril);
-    # padded rows like the torch base (the fwd_h stage consumes [B, pT, H, ·])
+    # rows past T stay zero (the fwd_h stage consumes [B, pT, H, ·])
     u_c = torch.zeros(B, NT * BT, H, V, device=p_eff.device, dtype=torch.float32)
     y_c = torch.zeros(B, NT * BT, H, K, device=p_eff.device, dtype=torch.float32)
     z_c = torch.zeros(B, NT * BT, H, K, device=p_eff.device, dtype=torch.float32)
@@ -335,7 +314,7 @@ def chunk_momentum_delta_wy_fwd_npu(
     'USE_INITIAL_STATE': lambda args: args['h_s0'] is not None,
     'STORE_FINAL_STATE': lambda args: args['h_sT'] is not None,
 })
-@triton.jit(do_not_specialize=['T', 'B', 'task_num', 'num_core'])
+@triton.jit(do_not_specialize=['T', 'task_num', 'num_core'])
 def chunk_momentum_delta_fwd_h_kernel_npu(
     k_eta,
     u_c,
@@ -374,23 +353,24 @@ def chunk_momentum_delta_fwd_h_kernel_npu(
     NT = tl.cdiv(T, BT)
     NV = tl.cdiv(V, BV)
     for task in tl.range(core_id, task_num, num_core):
-        i_v = task % NV
-        i_nh = task // NV
+        i_v = (task % NV).to(tl.int64)
+        i_nh = (task // NV).to(tl.int64)
         i_n = i_nh // H
         i_h = i_nh % H
         v_start = i_v * BV
 
         o_t = tl.arange(0, BT)
         o_v = tl.arange(0, BV)
+        o_vs = v_start + o_v
         o_k1 = tl.arange(0, BK)
         o_k2 = BK + o_k1
         o_k3 = BK * 2 + o_k1
         o_k4 = BK * 3 + o_k1
         # state rows k >= K (BK > K) are out of bounds; mask every store/load on them
-        m_st1 = (o_k1[:, None] < K) & (o_v[None, :] < V)
-        m_st2 = (o_k2[:, None] < K) & (o_v[None, :] < V)
-        m_st3 = (o_k3[:, None] < K) & (o_v[None, :] < V)
-        m_st4 = (o_k4[:, None] < K) & (o_v[None, :] < V)
+        m_st1 = (o_k1[:, None] < K) & (o_vs[None, :] < V)
+        m_st2 = (o_k2[:, None] < K) & (o_vs[None, :] < V)
+        m_st3 = (o_k3[:, None] < K) & (o_vs[None, :] < V)
+        m_st4 = (o_k4[:, None] < K) & (o_vs[None, :] < V)
 
         # K-segmented state tiles: both S and M live across the chunk loop
         b_h_s1 = tl.zeros([BK, BV], dtype=tl.float32)
@@ -406,31 +386,31 @@ def chunk_momentum_delta_fwd_h_kernel_npu(
             b_h_m4 = tl.zeros([BK, BV], dtype=tl.float32)
 
         if USE_INITIAL_STATE:
-            p_h0_s = h_s0 + i_nh * K * V + o_k1[:, None] * V + o_v[None, :]
-            m_h0 = (o_k1[:, None] < K) & (o_v[None, :] < V)
+            p_h0_s = h_s0 + i_nh * K * V + o_k1[:, None] * V + o_vs[None, :]
+            m_h0 = (o_k1[:, None] < K) & (o_vs[None, :] < V)
             b_h_s1 = tl.load(p_h0_s, mask=m_h0, other=0.0).to(tl.float32)
-            p_h0_m = h_m0 + i_nh * K * V + o_k1[:, None] * V + o_v[None, :]
+            p_h0_m = h_m0 + i_nh * K * V + o_k1[:, None] * V + o_vs[None, :]
             b_h_m1 = tl.load(p_h0_m, mask=m_h0, other=0.0).to(tl.float32)
             if K > BK:
                 o_k2 = BK + o_k1
-                p_h0_s2 = h_s0 + i_nh * K * V + o_k2[:, None] * V + o_v[None, :]
-                m_h02 = (o_k2[:, None] < K) & (o_v[None, :] < V)
+                p_h0_s2 = h_s0 + i_nh * K * V + o_k2[:, None] * V + o_vs[None, :]
+                m_h02 = (o_k2[:, None] < K) & (o_vs[None, :] < V)
                 b_h_s2 = tl.load(p_h0_s2, mask=m_h02, other=0.0).to(tl.float32)
-                p_h0_m2 = h_m0 + i_nh * K * V + o_k2[:, None] * V + o_v[None, :]
+                p_h0_m2 = h_m0 + i_nh * K * V + o_k2[:, None] * V + o_vs[None, :]
                 b_h_m2 = tl.load(p_h0_m2, mask=m_h02, other=0.0).to(tl.float32)
             if K > BK * 2:
                 o_k3 = BK * 2 + o_k1
-                p_h0_s3 = h_s0 + i_nh * K * V + o_k3[:, None] * V + o_v[None, :]
-                m_h03 = (o_k3[:, None] < K) & (o_v[None, :] < V)
+                p_h0_s3 = h_s0 + i_nh * K * V + o_k3[:, None] * V + o_vs[None, :]
+                m_h03 = (o_k3[:, None] < K) & (o_vs[None, :] < V)
                 b_h_s3 = tl.load(p_h0_s3, mask=m_h03, other=0.0).to(tl.float32)
-                p_h0_m3 = h_m0 + i_nh * K * V + o_k3[:, None] * V + o_v[None, :]
+                p_h0_m3 = h_m0 + i_nh * K * V + o_k3[:, None] * V + o_vs[None, :]
                 b_h_m3 = tl.load(p_h0_m3, mask=m_h03, other=0.0).to(tl.float32)
             if K > BK * 3:
                 o_k4 = BK * 3 + o_k1
-                p_h0_s4 = h_s0 + i_nh * K * V + o_k4[:, None] * V + o_v[None, :]
-                m_h04 = (o_k4[:, None] < K) & (o_v[None, :] < V)
+                p_h0_s4 = h_s0 + i_nh * K * V + o_k4[:, None] * V + o_vs[None, :]
+                m_h04 = (o_k4[:, None] < K) & (o_vs[None, :] < V)
                 b_h_s4 = tl.load(p_h0_s4, mask=m_h04, other=0.0).to(tl.float32)
-                p_h0_m4 = h_m0 + i_nh * K * V + o_k4[:, None] * V + o_v[None, :]
+                p_h0_m4 = h_m0 + i_nh * K * V + o_k4[:, None] * V + o_vs[None, :]
                 b_h_m4 = tl.load(p_h0_m4, mask=m_h04, other=0.0).to(tl.float32)
 
         # rebind GM bases per chunk; do not ptr += across i_t (Ascend MTE OOB).
@@ -442,26 +422,27 @@ def chunk_momentum_delta_fwd_h_kernel_npu(
         z_base = z_c + (i_n * NT * BT * H + i_h) * K
         k_base = k_eta + (i_n * T * H + i_h) * K
 
-        for i_t in range(NT):
+        for i_chunk in range(NT):
+            i_t = i_chunk.to(tl.int64)
             # store the state entering chunk i_t (K-segmented)
-            p_hs = h_s_nh + i_t * H * K * V + o_k1[:, None] * V + o_v[None, :]
+            p_hs = h_s_nh + i_t * H * K * V + o_k1[:, None] * V + o_vs[None, :]
             tl.store(p_hs, b_h_s1, mask=m_st1)
-            p_hm = h_m_nh + i_t * H * K * V + o_k1[:, None] * V + o_v[None, :]
+            p_hm = h_m_nh + i_t * H * K * V + o_k1[:, None] * V + o_vs[None, :]
             tl.store(p_hm, b_h_m1, mask=m_st1)
             if K > BK:
-                p_hs2 = h_s_nh + i_t * H * K * V + o_k2[:, None] * V + o_v[None, :]
+                p_hs2 = h_s_nh + i_t * H * K * V + o_k2[:, None] * V + o_vs[None, :]
                 tl.store(p_hs2, b_h_s2, mask=m_st2)
-                p_hm2 = h_m_nh + i_t * H * K * V + o_k2[:, None] * V + o_v[None, :]
+                p_hm2 = h_m_nh + i_t * H * K * V + o_k2[:, None] * V + o_vs[None, :]
                 tl.store(p_hm2, b_h_m2, mask=m_st2)
             if K > BK * 2:
-                p_hs3 = h_s_nh + i_t * H * K * V + o_k3[:, None] * V + o_v[None, :]
+                p_hs3 = h_s_nh + i_t * H * K * V + o_k3[:, None] * V + o_vs[None, :]
                 tl.store(p_hs3, b_h_s3, mask=m_st3)
-                p_hm3 = h_m_nh + i_t * H * K * V + o_k3[:, None] * V + o_v[None, :]
+                p_hm3 = h_m_nh + i_t * H * K * V + o_k3[:, None] * V + o_vs[None, :]
                 tl.store(p_hm3, b_h_m3, mask=m_st3)
             if K > BK * 3:
-                p_hs4 = h_s_nh + i_t * H * K * V + o_k4[:, None] * V + o_v[None, :]
+                p_hs4 = h_s_nh + i_t * H * K * V + o_k4[:, None] * V + o_vs[None, :]
                 tl.store(p_hs4, b_h_s4, mask=m_st4)
-                p_hm4 = h_m_nh + i_t * H * K * V + o_k4[:, None] * V + o_v[None, :]
+                p_hm4 = h_m_nh + i_t * H * K * V + o_k4[:, None] * V + o_vs[None, :]
                 tl.store(p_hm4, b_h_m4, mask=m_st4)
 
             o_t2 = i_t * BT + o_t
@@ -508,7 +489,7 @@ def chunk_momentum_delta_fwd_h_kernel_npu(
             # decay_m[r] = exp2(lm_last - lm_cum[r])
             b_dm = tl.exp2(b_m_last - b_lm_cum)
 
-            # state updates per K-slab (bisheng-safe: acc is a product, never the carried tile)
+            # state updates per K-slab (acc is a product, never the carried tile)
             b_k = _ld(k_base + offs_t + o_k1[None, :], m_k1, T_K_ALIGNED).to(tl.float32)
             b_h_s1 = tl.dot(tl.trans(b_k * b_ds[:, None]), b_v, b_h_s1 * b_a_last, allow_tf32=False)
             b_h_s1 = b_h_s1 - b_h_m1 * b_b_last
@@ -531,28 +512,27 @@ def chunk_momentum_delta_fwd_h_kernel_npu(
                 b_h_m4 = tl.dot(tl.trans(-(b_k * b_dm[:, None])), b_v, b_h_m4 * tl.exp2(b_m_last), allow_tf32=False)
 
         if STORE_FINAL_STATE:
-            p_hsT = h_sT + i_nh * K * V + o_k1[:, None] * V + o_v[None, :]
+            p_hsT = h_sT + i_nh * K * V + o_k1[:, None] * V + o_vs[None, :]
             tl.store(p_hsT, b_h_s1, mask=m_st1)
-            p_hmT = h_mT + i_nh * K * V + o_k1[:, None] * V + o_v[None, :]
+            p_hmT = h_mT + i_nh * K * V + o_k1[:, None] * V + o_vs[None, :]
             tl.store(p_hmT, b_h_m1, mask=m_st1)
             if K > BK:
-                p_hsT2 = h_sT + i_nh * K * V + o_k2[:, None] * V + o_v[None, :]
+                p_hsT2 = h_sT + i_nh * K * V + o_k2[:, None] * V + o_vs[None, :]
                 tl.store(p_hsT2, b_h_s2, mask=m_st2)
-                p_hmT2 = h_mT + i_nh * K * V + o_k2[:, None] * V + o_v[None, :]
+                p_hmT2 = h_mT + i_nh * K * V + o_k2[:, None] * V + o_vs[None, :]
                 tl.store(p_hmT2, b_h_m2, mask=m_st2)
             if K > BK * 2:
-                p_hsT3 = h_sT + i_nh * K * V + o_k3[:, None] * V + o_v[None, :]
+                p_hsT3 = h_sT + i_nh * K * V + o_k3[:, None] * V + o_vs[None, :]
                 tl.store(p_hsT3, b_h_s3, mask=m_st3)
-                p_hmT3 = h_mT + i_nh * K * V + o_k3[:, None] * V + o_v[None, :]
+                p_hmT3 = h_mT + i_nh * K * V + o_k3[:, None] * V + o_vs[None, :]
                 tl.store(p_hmT3, b_h_m3, mask=m_st3)
             if K > BK * 3:
-                p_hsT4 = h_sT + i_nh * K * V + o_k4[:, None] * V + o_v[None, :]
+                p_hsT4 = h_sT + i_nh * K * V + o_k4[:, None] * V + o_vs[None, :]
                 tl.store(p_hsT4, b_h_s4, mask=m_st4)
-                p_hmT4 = h_mT + i_nh * K * V + o_k4[:, None] * V + o_v[None, :]
+                p_hmT4 = h_mT + i_nh * K * V + o_k4[:, None] * V + o_vs[None, :]
                 tl.store(p_hmT4, b_h_m4, mask=m_st4)
 
 
-@register(chunk_momentum_delta_fwd_h, backend=TritonAscendBackend, verifier=chunk_momentum_delta_fwd_h_verifier)
 @input_guard
 def chunk_momentum_delta_fwd_h_npu(
     k_eta: torch.Tensor,
@@ -579,6 +559,7 @@ def chunk_momentum_delta_fwd_h_npu(
     BK, BV = _select_state_tiles(K, V)
     h_s = torch.empty(B, NT, H, K, V, device=k_eta.device, dtype=torch.float32)
     h_m = torch.empty(B, NT, H, K, V, device=k_eta.device, dtype=torch.float32)
+    # v_i pad rows (t >= T) are never stored; fwd_o reads them only under m_t (other=0.0)
     v_i = torch.empty(B, pT, H, V, device=k_eta.device, dtype=torch.float32)
     h_sT = torch.empty(B, H, K, V, device=k_eta.device, dtype=torch.float32) if output_final_state else None
     h_mT = torch.empty(B, H, K, V, device=k_eta.device, dtype=torch.float32) if output_final_state else None
@@ -619,7 +600,7 @@ def chunk_momentum_delta_fwd_h_npu(
 # -------------------------------------------------------- K4: two-state fwd_o
 
 
-@triton.jit(do_not_specialize=['T', 'B', 'task_num', 'num_core'])
+@triton.jit(do_not_specialize=['T', 'task_num', 'num_core'])
 def chunk_momentum_delta_fwd_o_kernel_npu(
     q,
     k_eta,
@@ -650,14 +631,15 @@ def chunk_momentum_delta_fwd_o_kernel_npu(
     NT = tl.cdiv(T, BT)
     NV = tl.cdiv(V, BV)
     for task in tl.range(core_id, task_num, num_core):
-        i_v = task % NV
-        i_nh = task // NV
+        i_v = (task % NV).to(tl.int64)
+        i_nh = (task // NV).to(tl.int64)
         i_n = i_nh // H
         i_h = i_nh % H
         v_start = i_v * BV
 
         o_t = tl.arange(0, BT)
         o_v = tl.arange(0, BV)
+        o_vs = v_start + o_v
         o_k1 = tl.arange(0, BK)
         b_r = tl.arange(0, BT)
 
@@ -668,7 +650,8 @@ def chunk_momentum_delta_fwd_o_kernel_npu(
         vi_base = v_i + (i_n * NT * BT * H + i_h) * V
         g_off = (i_n * H + i_h) * NT
 
-        for i_t in range(NT):
+        for i_chunk in range(NT):
+            i_t = i_chunk.to(tl.int64)
             o_t2 = i_t * BT + o_t
             m_t = o_t2 < T
             offs_t = o_t2[:, None] * (H * K)
@@ -685,10 +668,10 @@ def chunk_momentum_delta_fwd_o_kernel_npu(
             b_lct = tl.load(lct + g_off * BT + o_t2, mask=m_t, other=0.0)
             b_lct1 = tl.load(lct1 + g_off * BT + o_t2, mask=m_t, other=0.0)
 
-            p_hs1 = h_s_nh + i_t * H * K * V + o_k1[:, None] * V + o_v[None, :]
-            b_hs = tl.load(p_hs1, mask=(o_k1[:, None] < K) & (o_v[None, :] < V), other=0.0)
-            p_hm1 = h_m_nh + i_t * H * K * V + o_k1[:, None] * V + o_v[None, :]
-            b_hm = tl.load(p_hm1, mask=(o_k1[:, None] < K) & (o_v[None, :] < V), other=0.0)
+            p_hs1 = h_s_nh + i_t * H * K * V + o_k1[:, None] * V + o_vs[None, :]
+            b_hs = tl.load(p_hs1, mask=(o_k1[:, None] < K) & (o_vs[None, :] < V), other=0.0)
+            p_hm1 = h_m_nh + i_t * H * K * V + o_k1[:, None] * V + o_vs[None, :]
+            b_hm = tl.load(p_hm1, mask=(o_k1[:, None] < K) & (o_vs[None, :] < V), other=0.0)
             p_vi = vi_base + offs_tv + offs_v
             b_v = _ld(p_vi, m_v, T_V_ALIGNED).to(tl.float32)
 
@@ -705,10 +688,10 @@ def chunk_momentum_delta_fwd_o_kernel_npu(
                 m_k2 = m_t[:, None] & (o_k2[None, :] < K)
                 b_q = _ld(q_base + offs_t + o_k2[None, :], m_k2, T_K_ALIGNED).to(tl.float32) * scale
                 b_k = _ld(k_base + offs_t + o_k2[None, :], m_k2, T_K_ALIGNED).to(tl.float32)
-                p_hs2 = h_s_nh + i_t * H * K * V + o_k2[:, None] * V + o_v[None, :]
-                b_hs = tl.load(p_hs2, mask=(o_k2[:, None] < K) & (o_v[None, :] < V), other=0.0)
-                p_hm2 = h_m_nh + i_t * H * K * V + o_k2[:, None] * V + o_v[None, :]
-                b_hm = tl.load(p_hm2, mask=(o_k2[:, None] < K) & (o_v[None, :] < V), other=0.0)
+                p_hs2 = h_s_nh + i_t * H * K * V + o_k2[:, None] * V + o_vs[None, :]
+                b_hs = tl.load(p_hs2, mask=(o_k2[:, None] < K) & (o_vs[None, :] < V), other=0.0)
+                p_hm2 = h_m_nh + i_t * H * K * V + o_k2[:, None] * V + o_vs[None, :]
+                b_hm = tl.load(p_hm2, mask=(o_k2[:, None] < K) & (o_vs[None, :] < V), other=0.0)
                 b_o = b_o + tl.dot(b_q * b_a_cum[:, None], b_hs, allow_tf32=False)
                 b_o = b_o - tl.dot(b_q * b_bt[:, None], b_hm, allow_tf32=False)
                 b_qk = tl.dot(b_q + 0.0, tl.trans(b_k + 0.0), allow_tf32=False)
@@ -718,10 +701,10 @@ def chunk_momentum_delta_fwd_o_kernel_npu(
                 m_k3 = m_t[:, None] & (o_k3[None, :] < K)
                 b_q = _ld(q_base + offs_t + o_k3[None, :], m_k3, T_K_ALIGNED).to(tl.float32) * scale
                 b_k = _ld(k_base + offs_t + o_k3[None, :], m_k3, T_K_ALIGNED).to(tl.float32)
-                p_hs3 = h_s_nh + i_t * H * K * V + o_k3[:, None] * V + o_v[None, :]
-                b_hs = tl.load(p_hs3, mask=(o_k3[:, None] < K) & (o_v[None, :] < V), other=0.0)
-                p_hm3 = h_m_nh + i_t * H * K * V + o_k3[:, None] * V + o_v[None, :]
-                b_hm = tl.load(p_hm3, mask=(o_k3[:, None] < K) & (o_v[None, :] < V), other=0.0)
+                p_hs3 = h_s_nh + i_t * H * K * V + o_k3[:, None] * V + o_vs[None, :]
+                b_hs = tl.load(p_hs3, mask=(o_k3[:, None] < K) & (o_vs[None, :] < V), other=0.0)
+                p_hm3 = h_m_nh + i_t * H * K * V + o_k3[:, None] * V + o_vs[None, :]
+                b_hm = tl.load(p_hm3, mask=(o_k3[:, None] < K) & (o_vs[None, :] < V), other=0.0)
                 b_o = b_o + tl.dot(b_q * b_a_cum[:, None], b_hs, allow_tf32=False)
                 b_o = b_o - tl.dot(b_q * b_bt[:, None], b_hm, allow_tf32=False)
                 b_qk = tl.dot(b_q + 0.0, tl.trans(b_k + 0.0), allow_tf32=False)
@@ -731,10 +714,10 @@ def chunk_momentum_delta_fwd_o_kernel_npu(
                 m_k4 = m_t[:, None] & (o_k4[None, :] < K)
                 b_q = _ld(q_base + offs_t + o_k4[None, :], m_k4, T_K_ALIGNED).to(tl.float32) * scale
                 b_k = _ld(k_base + offs_t + o_k4[None, :], m_k4, T_K_ALIGNED).to(tl.float32)
-                p_hs4 = h_s_nh + i_t * H * K * V + o_k4[:, None] * V + o_v[None, :]
-                b_hs = tl.load(p_hs4, mask=(o_k4[:, None] < K) & (o_v[None, :] < V), other=0.0)
-                p_hm4 = h_m_nh + i_t * H * K * V + o_k4[:, None] * V + o_v[None, :]
-                b_hm = tl.load(p_hm4, mask=(o_k4[:, None] < K) & (o_v[None, :] < V), other=0.0)
+                p_hs4 = h_s_nh + i_t * H * K * V + o_k4[:, None] * V + o_vs[None, :]
+                b_hs = tl.load(p_hs4, mask=(o_k4[:, None] < K) & (o_vs[None, :] < V), other=0.0)
+                p_hm4 = h_m_nh + i_t * H * K * V + o_k4[:, None] * V + o_vs[None, :]
+                b_hm = tl.load(p_hm4, mask=(o_k4[:, None] < K) & (o_vs[None, :] < V), other=0.0)
                 b_o = b_o + tl.dot(b_q * b_a_cum[:, None], b_hs, allow_tf32=False)
                 b_o = b_o - tl.dot(b_q * b_bt[:, None], b_hm, allow_tf32=False)
                 b_qk = tl.dot(b_q + 0.0, tl.trans(b_k + 0.0), allow_tf32=False)
@@ -744,7 +727,6 @@ def chunk_momentum_delta_fwd_o_kernel_npu(
             _st(p_o, b_o.to(o.dtype.element_ty), m_v, T_V_ALIGNED)
 
 
-@register(chunk_momentum_delta_fwd_o, backend=TritonAscendBackend, verifier=chunk_momentum_delta_fwd_o_verifier)
 @input_guard
 def chunk_momentum_delta_fwd_o_npu(
     q: torch.Tensor,
