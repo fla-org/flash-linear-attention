@@ -681,7 +681,7 @@ register_op(OpConfig(
     category='hc',
     dim_constraints={'H': [1]},
     default_shapes=_hc_default_shapes,
-    backend_env={'gluon': 'FLA_HC_GLUON', 'tilelang': 'FLA_HC_TILELANG'},
+    backend_env={'gluon': 'FLA_GLUON', 'tilelang': 'FLA_TILELANG'},
 ))
 
 register_op(OpConfig(
@@ -703,7 +703,7 @@ register_op(OpConfig(
     category='hc',
     dim_constraints={'H': [1]},
     default_shapes=_hc_default_shapes,
-    backend_env={'gluon': 'FLA_HC_GLUON', 'tilelang': 'FLA_HC_TILELANG'},
+    backend_env={'gluon': 'FLA_GLUON', 'tilelang': 'FLA_TILELANG'},
 ))
 
 register_op(OpConfig(
@@ -726,7 +726,7 @@ register_op(OpConfig(
     category='hc',
     dim_constraints={'H': [1]},
     default_shapes=_hc_default_shapes,
-    backend_env={'gluon': 'FLA_HC_GLUON', 'tilelang': 'FLA_HC_TILELANG'},
+    backend_env={'gluon': 'FLA_GLUON', 'tilelang': 'FLA_TILELANG'},
 ))
 
 register_op(OpConfig(
@@ -746,9 +746,10 @@ register_op(OpConfig(
     inputs=_sinkhorn_inputs,
     output_is_tuple=False,
     category='sinkhorn',
+    test_file='tests/ops/utils/test_sinkhorn.py',
     dim_constraints={'H': [1]},
     default_shapes=_sinkhorn_default_shapes,
-    backend_env={'gluon': 'FLA_SINKHORN_GLUON', 'tilelang': 'FLA_SINKHORN_TILELANG'},
+    backend_env={'gluon': 'FLA_GLUON', 'tilelang': 'FLA_TILELANG'},
 ))
 
 register_op(OpConfig(
@@ -757,6 +758,7 @@ register_op(OpConfig(
     inputs=_sinkhorn_inputs,
     output_is_tuple=False,
     category='sinkhorn',
+    test_file='tests/ops/utils/test_sinkhorn.py',
     dim_constraints={'H': [1]},
     default_shapes=_sinkhorn_default_shapes,
 ))

@@ -5,6 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+from fla.backends import GluonBackend, TileLangBackend, TritonAscendBackend
 from fla.ops.utils.csr import prepare_block_csr
 from fla.ops.utils.cumsum import (
     chunk_global_cumsum,
@@ -68,4 +69,12 @@ __all__ = [
     "unpack_sequence",
 ]
 
-from fla.ops.utils import backends  # noqa: E402, F401
+
+if TritonAscendBackend.is_available():
+    from fla.ops.utils import triton_ascend  # noqa: F401
+
+if GluonBackend.is_available():
+    from fla.ops.utils import gluon  # noqa: F401
+
+if TileLangBackend.is_available():
+    from fla.ops.utils import tilelang  # noqa: F401

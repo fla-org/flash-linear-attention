@@ -232,8 +232,8 @@ class FusedHCGluonFunction(torch.autograd.Function):
         return hc_bwd(x=x, weight=weight, branch=branch, mixing=mixing, dout=dout)
 
 
-@register(fused_hc_pre, env_var='FLA_HC_GLUON')
-@register(fused_hc_post, env_var='FLA_HC_GLUON')
+@register(fused_hc_pre)
+@register(fused_hc_post)
 class HCGluonBackend(GluonBackend):
     default_enable = False
 

@@ -278,8 +278,8 @@ class FusedHCTileLangFunction(torch.autograd.Function):
         return hc_bwd(x=x, weight=weight, branch=branch, mixing=mixing, dout=dout)
 
 
-@register(fused_hc_pre, env_var='FLA_HC_TILELANG')
-@register(fused_hc_post, env_var='FLA_HC_TILELANG')
+@register(fused_hc_pre)
+@register(fused_hc_post)
 class HCTileLangBackend(TileLangBackend):
     default_enable = False
 

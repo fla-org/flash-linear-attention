@@ -11,6 +11,8 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.backends import TritonAscendBackend, register
+from fla.ops.utils.cumsum import chunk_global_cumsum, chunk_local_cumsum
 from fla.ops.utils.index import prepare_chunk_indices
 from fla.utils import get_multiprocessor_count, input_guard
 from fla.utils.ascend_ub_manager import (
@@ -524,6 +526,7 @@ def chunk_global_cumsum_vector_npu(
     return z
 
 
+@register(chunk_global_cumsum, backend=TritonAscendBackend)
 @input_guard
 def chunk_global_cumsum_npu(
     s: torch.Tensor,
@@ -561,6 +564,7 @@ def chunk_global_cumsum_npu(
     )
 
 
+@register(chunk_local_cumsum, backend=TritonAscendBackend)
 @input_guard
 def chunk_local_cumsum_npu(
     g: torch.Tensor,

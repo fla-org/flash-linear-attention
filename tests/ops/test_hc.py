@@ -22,8 +22,6 @@ def backend(request, monkeypatch):
         pytest.skip('NVIDIA CUDA required')
     for name in ('GLUON', 'TILELANG'):
         monkeypatch.setenv(f'FLA_{name}', '0')
-        monkeypatch.setenv(f'FLA_HC_{name}', '0')
-        monkeypatch.setenv(f'FLA_SINKHORN_{name}', '0')
     name = request.param
     if name == 'triton':
         return fused
@@ -32,8 +30,7 @@ def backend(request, monkeypatch):
     backend_type = GluonBackend if name == 'gluon' else TileLangBackend
     if not backend_type.is_available():
         pytest.skip(f'{name} is unavailable')
-    monkeypatch.setenv(f'FLA_HC_{name.upper()}', '1')
-    monkeypatch.setenv(f'FLA_SINKHORN_{name.upper()}', '1')
+    monkeypatch.setenv(f'FLA_{name.upper()}', '1')
     return importlib.import_module(f'fla.ops.hc.backends.{name}')
 
 
@@ -181,7 +178,7 @@ def test_hc_backend(backend, monkeypatch, op):
     else:
         out = op(x=x, branch=x[:, 0], post=weight)
     for name in ('GLUON', 'TILELANG'):
-        monkeypatch.setenv(f'FLA_HC_{name}', '0')
+        monkeypatch.setenv(f'FLA_{name}', '0')
     out.sum().backward()
     assert calls == ['fwd', 'bwd']
 
@@ -192,8 +189,7 @@ def test_hc_unavailable_backend(monkeypatch, backend_type):
         pytest.skip('Backend dispatch disabled before import')
     for name in ('GLUON', 'TILELANG'):
         monkeypatch.setenv(f'FLA_{name}', '0')
-        monkeypatch.setenv(f'FLA_HC_{name}', '0')
-    monkeypatch.setenv(f'FLA_HC_{backend_type.backend_type.upper()}', '1')
+    monkeypatch.setenv(f'FLA_{backend_type.backend_type.upper()}', '1')
     monkeypatch.setattr(backend_type, 'is_available', classmethod(lambda cls: False))
     sentinel = object()
     monkeypatch.setattr(fused, '_validate_hc_pre', lambda **kwargs: None)

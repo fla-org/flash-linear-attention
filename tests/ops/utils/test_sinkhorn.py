@@ -21,7 +21,6 @@ def backend(request, monkeypatch):
         pytest.skip('NVIDIA CUDA required')
     for name in ('GLUON', 'TILELANG'):
         monkeypatch.setenv(f'FLA_{name}', '0')
-        monkeypatch.setenv(f'FLA_SINKHORN_{name}', '0')
     name = request.param
     if name == 'triton':
         return importlib.import_module('fla.ops.utils.sinkhorn')
@@ -30,8 +29,8 @@ def backend(request, monkeypatch):
     backend_type = GluonBackend if name == 'gluon' else TileLangBackend
     if not backend_type.is_available():
         pytest.skip(f'{name} is unavailable')
-    monkeypatch.setenv(f'FLA_SINKHORN_{name.upper()}', '1')
-    return importlib.import_module(f'fla.ops.utils.backends.{name}')
+    monkeypatch.setenv(f'FLA_{name.upper()}', '1')
+    return importlib.import_module(f'fla.ops.utils.{name}.sinkhorn')
 
 
 @pytest.mark.parametrize('dtype', [torch.float32, torch.float16, torch.bfloat16])
@@ -98,7 +97,7 @@ def test_sinkhorn_backend(backend, monkeypatch):
     logits = torch.randn(3, 4, 4, device=device, requires_grad=True)
     out = sinkhorn(logits=logits)
     for name in ('GLUON', 'TILELANG'):
-        monkeypatch.setenv(f'FLA_SINKHORN_{name}', '0')
+        monkeypatch.setenv(f'FLA_{name}', '0')
     out.sum().backward()
     assert calls == ['fwd', 'bwd']
 
@@ -111,8 +110,7 @@ def test_sinkhorn_unavailable_backend(monkeypatch, backend_type):
         pytest.skip('Backend dispatch disabled before import')
     for name in ('GLUON', 'TILELANG'):
         monkeypatch.setenv(f'FLA_{name}', '0')
-        monkeypatch.setenv(f'FLA_SINKHORN_{name}', '0')
-    monkeypatch.setenv(f'FLA_SINKHORN_{backend_type.backend_type.upper()}', '1')
+    monkeypatch.setenv(f'FLA_{backend_type.backend_type.upper()}', '1')
     monkeypatch.setattr(backend_type, 'is_available', classmethod(lambda cls: False))
 
     def implementation(*args, **kwargs):

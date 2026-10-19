@@ -356,7 +356,7 @@ def merge_16x16_to_64x64_inverse_kernel(
         desc_o.store([i_t * BT + 48, 32], b_Ai_43.to(desc_o.dtype, fp_downcast_rounding="rtne"))
 
 
-@dispatch('utils')
+@dispatch
 @input_guard
 def solve_tril(
     A: torch.Tensor,
