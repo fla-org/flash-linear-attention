@@ -10,12 +10,10 @@ import torch
 
 from fla.models import RWKV6Config
 
-from .test_modeling_base import run_test_generation, run_test_model_forward_backward
+from .utils import check_forward, check_generation
 
 
-# ===================================================================================
-# Test for Modeling (Forward/Backward Pass)
-# ===================================================================================
+@pytest.mark.parametrize('varlen', [False, True], ids=['dense', 'varlen'])
 @pytest.mark.parametrize(
     ['L', 'B', 'T', 'H', 'D', 'use_l2warp', 'dtype'],
     [
@@ -35,13 +33,11 @@ def test_modeling(
     D: int,
     use_l2warp: bool,
     dtype: torch.dtype,
+    varlen: bool,
 ):
-    run_test_model_forward_backward(L, B, T, H, D, RWKV6Config, use_l2warp=use_l2warp, dtype=dtype)
+    check_forward(L, B, T, H, D, RWKV6Config, use_l2warp=use_l2warp, dtype=dtype, varlen=varlen)
 
 
-# ===================================================================================
-# Test for Generation
-# ===================================================================================
 @pytest.mark.parametrize(
     ['L', 'B', 'T', 'H', 'D', 'dtype'],
     [
@@ -59,4 +55,4 @@ def test_generation(
     D: int,
     dtype: torch.dtype,
 ):
-    run_test_generation(L, B, T, H, D, RWKV6Config, dtype)
+    check_generation(L, B, T, H, D, RWKV6Config, dtype)

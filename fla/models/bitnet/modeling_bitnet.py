@@ -13,28 +13,24 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn as nn
+from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
-from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
 from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.bitattn import BitAttention
 from fla.models.bitnet.configuration_bitnet import BitNetConfig
-from fla.models.utils import Cache, FLAGenerationMixin
-from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
+from fla.models.cache_utils import Cache
+from fla.models.generation_utils import FLAGenerationMixin
+from fla.models.modeling_utils import FLAForCausalLM, FLAPreTrainedModel
+from fla.modules import RMSNorm
 from fla.modules.activations import swiglu
 from fla.modules.fused_bitlinear import FusedBitLinear
-from fla.modules.l2warp import l2_warp
 from fla.ops.attnres import fused_attnres
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
-
-try:
-    from transformers.modeling_layers import GradientCheckpointingLayer
-except ImportError:
-    from fla.models.modeling_layers import GradientCheckpointingLayer
 
 logger = logging.get_logger(__name__)
 
@@ -209,7 +205,7 @@ class BitNetBlock(GradientCheckpointingLayer):
         return outputs
 
 
-class BitNetPreTrainedModel(PreTrainedModel):
+class BitNetPreTrainedModel(FLAPreTrainedModel):
 
     config_class = BitNetConfig
     base_model_prefix = 'model'
@@ -289,12 +285,6 @@ class BitNetModel(BitNetPreTrainedModel):
 
         self.post_init()
 
-    def get_input_embeddings(self):
-        return self.embeddings
-
-    def set_input_embeddings(self, value):
-        self.embeddings = value
-
     def forward(
         self,
         input_ids: torch.LongTensor | None = None,
@@ -315,7 +305,7 @@ class BitNetModel(BitNetPreTrainedModel):
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         use_cache = use_cache if use_cache is not None else (self.config.use_cache if not self.training else False)
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = return_dict if return_dict is not None else self.config.return_dict
 
         # retrieve input_ids and inputs_embeds
         if input_ids is not None and inputs_embeds is not None:
@@ -387,9 +377,9 @@ class BitNetModel(BitNetPreTrainedModel):
         )
 
 
-class BitNetForCausalLM(BitNetPreTrainedModel, FLAGenerationMixin):
+class BitNetForCausalLM(BitNetPreTrainedModel, FLAForCausalLM, FLAGenerationMixin):
 
-    _tied_weights_keys = ["lm_head.weight"]
+    _tied_weights_keys = {"lm_head.weight": "model.embeddings.weight"}
 
     def __init__(self, config):
         super().__init__(config)
@@ -400,24 +390,6 @@ class BitNetForCausalLM(BitNetPreTrainedModel, FLAGenerationMixin):
 
         # Initialize weights and apply final processing
         self.post_init()
-
-    def get_input_embeddings(self):
-        return self.model.embeddings
-
-    def set_input_embeddings(self, value):
-        self.model.embeddings = value
-
-    def get_output_embeddings(self):
-        return self.lm_head
-
-    def set_output_embeddings(self, new_embeddings):
-        self.lm_head = new_embeddings
-
-    def set_decoder(self, decoder):
-        self.model = decoder
-
-    def get_decoder(self):
-        return self.model
 
     @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
     def forward(
@@ -431,63 +403,21 @@ class BitNetForCausalLM(BitNetPreTrainedModel, FLAGenerationMixin):
         output_attentions: bool | None = None,
         output_hidden_states: bool | None = None,
         return_dict: bool | None = None,
-        logits_to_keep: int | None = 0,
+        logits_to_keep: int | torch.Tensor | None = 0,
+        num_items_in_batch: int | torch.Tensor | None = None,
         **kwargs: Unpack[Any],
     ) -> tuple | CausalLMOutputWithPast:
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
-        outputs = self.model(
+        return super().forward(
             input_ids=input_ids,
             attention_mask=attention_mask,
-            past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
+            past_key_values=past_key_values,
+            labels=labels,
             use_cache=use_cache,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
+            logits_to_keep=logits_to_keep,
+            num_items_in_batch=num_items_in_batch,
             **kwargs,
-        )
-
-        hidden_states = outputs[0]
-
-        logits = None if self.config.fuse_linear_cross_entropy and labels is not None else self.lm_head(
-            hidden_states
-            if labels is not None or logits_to_keep is None
-            else hidden_states[:, -logits_to_keep:]
-        )
-
-        loss = None
-        if labels is not None:
-            if getattr(self, 'criterion', None) is None:
-                if self.config.fuse_linear_cross_entropy:
-                    criterion = FusedLinearCrossEntropyLoss(use_l2warp=self.config.use_l2warp)
-                elif self.config.fuse_cross_entropy:
-                    criterion = FusedCrossEntropyLoss(inplace_backward=True)
-                else:
-                    criterion = nn.CrossEntropyLoss()
-            else:
-                criterion = self.criterion
-
-            labels = labels.to(hidden_states.device)
-            labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], criterion.ignore_index)), 1)
-            if self.config.fuse_linear_cross_entropy:
-                loss = criterion(hidden_states, labels, self.lm_head.weight, self.lm_head.bias)
-            else:
-                loss = criterion(logits.view(labels.numel(), -1), labels.view(-1))
-                loss = l2_warp(loss, logits) if self.config.use_l2warp else loss
-
-        if not return_dict:
-            output = (logits,) + outputs[1:]
-            return (loss,) + output if loss is not None else output
-
-        return CausalLMOutputWithPast(
-            loss=loss,
-            logits=logits,
-            past_key_values=outputs.past_key_values,
-            hidden_states=outputs.hidden_states,
-            attentions=outputs.attentions,
         )

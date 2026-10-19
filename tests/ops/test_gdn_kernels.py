@@ -24,7 +24,7 @@ from fla.ops.gated_delta_rule.gate import gdn_gate_bwd, gdn_gate_chunk_cumsum, g
 from fla.ops.gated_delta_rule.naive import naive_recurrent_gated_delta_rule
 from fla.ops.gated_delta_rule.wy_fast import prepare_wy_repr_bwd, recompute_w_u_fwd
 from fla.ops.utils.constant import RCP_LN2
-from fla.utils import assert_close, device
+from fla.utils import IS_NVIDIA_BLACKWELL, assert_close, device
 
 
 def _make_wy_inverse(B: int, T: int, HV: int, BT: int, dtype: torch.dtype) -> torch.Tensor:
@@ -700,6 +700,37 @@ def test_chunk_bwd_dv_local(B: int, T: int, H: int, HV: int, D: int, use_g: bool
     tri = chunk_bwd_dv_local(q=q, k=k, do=do, g=g, scale=scale, chunk_size=BT)
 
     assert_close('dv', ref, tri, 0.005)
+
+
+@pytest.mark.skipif(not IS_NVIDIA_BLACKWELL, reason='Blackwell determinism regression')
+@pytest.mark.parametrize('kernel', ['fwd_o', 'bwd_dv_local'])
+def test_chunk_o_deterministic(kernel: str, monkeypatch):
+    from fla.ops.common import chunk_o
+    from fla.ops.utils import cache, chunk_local_cumsum, prepare_chunk_indices
+
+    monkeypatch.setattr(cache, 'FLA_CACHE_MODE', cache.FlaCacheMode.DISABLED)
+    torch.manual_seed(42)
+    T, H, D = 8192, 8, 128
+    q, k, v = (torch.randn(1, T, H, D, device=device, dtype=torch.bfloat16) for _ in range(3))
+    cu_seqlens = torch.tensor([0, 5000, T], dtype=torch.int32, device=device)
+    g = chunk_local_cumsum(-torch.rand(1, T, H, device=device), chunk_size=64, cu_seqlens=cu_seqlens)
+    if kernel == 'fwd_o':
+        h = torch.randn(1, len(prepare_chunk_indices(cu_seqlens, 64)), H, D, D, device=device, dtype=torch.bfloat16) * 0.01
+        tuner = chunk_o.chunk_fwd_kernel_o
+        def run(): return chunk_fwd_o(q=q, k=k, v=v, h=h, g=g, scale=D ** -0.5, cu_seqlens=cu_seqlens)
+    else:
+        tuner = chunk_o.chunk_bwd_kernel_dv_local
+        def run(): return chunk_bwd_dv_local(q=q, k=k, do=v, g=g, scale=D ** -0.5, cu_seqlens=cu_seqlens)
+    while not hasattr(tuner, 'configs'):
+        tuner = tuner.fn
+    try:
+        for config in list(tuner.configs):
+            monkeypatch.setattr(tuner, 'configs', [config])
+            tuner.cache.clear()
+            first = run()
+            assert all(torch.equal(first, run()) for _ in range(19)), config
+    finally:
+        tuner.cache.clear()
 
 
 def chunk_bwd_dqkwg_ref(

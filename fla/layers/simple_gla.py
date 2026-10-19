@@ -21,7 +21,7 @@ from fla.modules.activations import ACT2FN
 from fla.ops.simple_gla import chunk_simple_gla, fused_recurrent_simple_gla
 
 if TYPE_CHECKING:
-    from fla.models.utils import Cache
+    from fla.models.cache_utils import Cache
 
 
 class SimpleGatedLinearAttention(nn.Module):

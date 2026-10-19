@@ -28,8 +28,10 @@ from fla.utils.env import (
     autotune_cache_kwargs,
     check_environments,
     check_pytorch_version,
+    check_transformers_version,
     find_spec_cached,
     has_usable_nvcc,
+    supports_transformers_next_sequence_length,
 )
 from fla.utils.hardware import (
     IS_AMD,

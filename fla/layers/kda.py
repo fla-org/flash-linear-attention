@@ -22,7 +22,7 @@ from fla.ops.kda import chunk_kda, fused_recurrent_kda
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
-    from fla.models.utils import Cache
+    from fla.models.cache_utils import Cache
 
 
 class KimiDeltaAttention(nn.Module):
