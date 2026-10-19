@@ -5,15 +5,24 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""Context-parallel layer comparison shared by GDN and KDA."""
+"""All-to-all forward adapters and FP32 gradient accumulation for layer benchmarks."""
+
+from __future__ import annotations
 
 from functools import partial
+from typing import TYPE_CHECKING
 
 import torch
-import torch.distributed as dist
+import torch.nn.functional as F
+from einops import rearrange, repeat
 
-from benchmarks.utils.distributed import all_gather, generate_cu_seqlens, measure_latency, print_tensor_error, profile_function
-from benchmarks.utils.reporting import BenchmarkResult
+from benchmarks.utils.distributed import maybe_wait, qkvo_all_to_all
+from fla.modules.convolution import causal_conv1d
+from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
+from fla.ops.kda import chunk_kda, fused_recurrent_kda
+
+if TYPE_CHECKING:
+    from fla.models.cache_utils import Cache
 
 try:
     import fused_weight_gradient_mlp_cuda
@@ -28,9 +37,6 @@ try:
         HAVE_APEX = True
 except Exception:
     HAVE_APEX = False
-
-DTYPE = torch.bfloat16
-B = 1
 
 
 class _LinearFunction(torch.autograd.Function):
@@ -93,124 +99,374 @@ def patch_fp32_grad_linear_forward(model: torch.nn.Module):
                 m.weight.main_grad = torch.zeros_like(m.weight, dtype=torch.float32)
 
 
-def benchmark_layer(args):
-    from benchmarks.layers.gated_deltanet import gdn_forward
-    from benchmarks.layers.kda import kda_forward
-    from benchmarks.modules.conv import short_conv_forward
-    from fla.layers.gated_deltanet import GatedDeltaNet
-    from fla.layers.kda import KimiDeltaAttention
+def gdn_forward(
+    hidden_states: torch.Tensor,
+    attention_mask: torch.Tensor | None = None,
+    past_key_values: Cache | None = None,
+    use_cache: bool | None = False,
+    output_attentions: bool | None = False,
+    cp_group=None,
+    cp_size=None,
+    cp_rank=None,
+    self=None,
+    **kwargs
+) -> tuple[torch.Tensor, torch.Tensor | None, Cache | None]:
+    if attention_mask is not None:
+        assert len(attention_mask.shape) == 2, (
+            "Expected attention_mask as a 0-1 matrix with shape [batch_size, seq_len] "
+            "for padding purposes (0 indicating padding). "
+            "Arbitrary attention masks of shape [batch_size, seq_len, seq_len] are not allowed."
+        )
 
-    results = []
+    batch_size, q_len, _ = hidden_states.shape
+    # change to inference mode.
+    mode = 'fused_recurrent' if q_len <= 64 else self.mode
+    if self.training:
+        assert mode == 'chunk', "Only chunk mode is supported in training."
 
-    device = torch.cuda.current_device()
-    group = args.group
-    world_size = dist.get_world_size(group)
-    rank = dist.get_rank(group)
-    cu_seqlens = generate_cu_seqlens(args.seqlen, args.mean, args.std)
-    T = args.seqlen // world_size
-    hidden_size = 2304
-    n_head = 32
-    head_dim = 128
-    use_conv = True
+    last_state = None
+    if past_key_values is not None and len(past_key_values) > self.layer_idx:
+        last_state = past_key_values[self.layer_idx]
 
-    x = torch.randn(B, T, hidden_size, dtype=DTYPE, device=device).requires_grad_(True)
-    do = torch.randn(B, T, hidden_size, dtype=DTYPE, device=device)
-    total_x = all_gather(x.squeeze(0), group=group).unsqueeze(0).detach().requires_grad_(True)
-    total_do = all_gather(do.squeeze(0), group=group).unsqueeze(0)
-    if not args.kda:
-        layer = GatedDeltaNet(hidden_size, expand_v=1, head_dim=head_dim, num_heads=n_head, use_short_conv=use_conv)
-        cp_layer = GatedDeltaNet(hidden_size, expand_v=1, head_dim=head_dim,
-                                 num_heads=n_head, use_short_conv=use_conv)
-        if args.use_cp2hp:
-            cp_layer.forward = partial(gdn_forward, self=cp_layer, cp_size=world_size, cp_rank=rank, cp_group=group)
+    cu_seqlens = kwargs.get('cu_seqlens')
+
+    async_op = False
+    q = self.q_proj(hidden_states)
+    k = self.k_proj(hidden_states)
+    v = self.v_proj(hidden_states)
+    a = self.a_proj(hidden_states)
+    b = self.b_proj(hidden_states)
+    if self.use_gate:
+        gate = self.g_proj(hidden_states)
+    # set async_op=True and one proj one comm can overlap
+    q, handle_q = qkvo_all_to_all(q.view(-1, self.num_heads, self.head_k_dim), is_qkv=True, group=cp_group, async_op=async_op)
+    k, handle_k = qkvo_all_to_all(k.view(-1, self.num_heads, self.head_k_dim), is_qkv=True, group=cp_group, async_op=async_op)
+    v, handle_v = qkvo_all_to_all(v.view(-1, self.num_v_heads, self.head_v_dim),
+                                  is_qkv=True, group=cp_group, async_op=async_op)
+    a, handle_a = qkvo_all_to_all(a.view(-1, self.num_v_heads, 1), is_qkv=True, group=cp_group, async_op=async_op)
+    b, handle_b = qkvo_all_to_all(b.view(-1, self.num_v_heads, 1), is_qkv=True, group=cp_group, async_op=async_op)
+    if self.use_gate:
+        gate, handle_gate = qkvo_all_to_all(gate.view(-1, self.num_v_heads, self.head_v_dim),
+                                            is_qkv=True, group=cp_group, async_op=async_op)
+    q, k, v, a, b = [t.flatten(-2, -1).unsqueeze(0) for t in [q, k, v, a, b]]
+
+    if self.use_short_conv:
+        conv_state_q, conv_state_k, conv_state_v = None, None, None
+        if last_state is not None:
+            conv_state_q, conv_state_k, conv_state_v = last_state['conv_state']
+        maybe_wait(handle_q)
+        q, conv_state_q = self.q_conv1d(
+            x=q,
+            cache=conv_state_q,
+            output_final_state=use_cache,
+            cu_seqlens=cu_seqlens
+        )
+        maybe_wait(handle_k)
+        k, conv_state_k = self.k_conv1d(
+            x=k,
+            cache=conv_state_k,
+            output_final_state=use_cache,
+            cu_seqlens=cu_seqlens
+        )
+        maybe_wait(handle_v)
+        v, conv_state_v = self.v_conv1d(
+            x=v,
+            cache=conv_state_v,
+            output_final_state=use_cache,
+            cu_seqlens=cu_seqlens
+        )
     else:
-        layer = KimiDeltaAttention(hidden_size, expand_v=1, head_dim=head_dim, num_heads=n_head, use_short_conv=use_conv)
-        cp_layer = KimiDeltaAttention(hidden_size, expand_v=1, head_dim=head_dim,
-                                      num_heads=n_head, use_short_conv=use_conv)
-        if args.use_cp2hp:
-            cp_layer.forward = partial(kda_forward, self=cp_layer, cp_size=world_size, cp_rank=rank, cp_group=group)
-    if args.use_cp2hp and use_conv:
-        cp_layer.q_conv1d.forward = partial(short_conv_forward, self=cp_layer.q_conv1d, cp_size=world_size, cp_rank=rank)
-        cp_layer.k_conv1d.forward = partial(short_conv_forward, self=cp_layer.k_conv1d, cp_size=world_size, cp_rank=rank)
-        cp_layer.v_conv1d.forward = partial(short_conv_forward, self=cp_layer.v_conv1d, cp_size=world_size, cp_rank=rank)
+        maybe_wait(handle_q)
+        q = F.silu(q)
+        maybe_wait(handle_k)
+        k = F.silu(k)
+        maybe_wait(handle_v)
+        v = F.silu(v)
 
-    layer = layer.to(x)
-    cp_layer = cp_layer.to(x)
-    for p in layer.parameters():
-        dist.broadcast(p, src=0, group=group)
-    cp_layer.load_state_dict(layer.state_dict())
+    q, k = map(lambda x: rearrange(x, '... (h d) -> ... h d', d=self.head_k_dim), (q, k))
+    v = rearrange(v, '... (h d) -> ... h d', d=self.head_v_dim)
 
-    patch_fp32_grad_linear_forward(layer)
-    patch_fp32_grad_linear_forward(cp_layer)
-    layer.dt_bias.to(torch.float)
-    layer.A_log.to(torch.float)
-    cp_layer.dt_bias.to(torch.float)
-    cp_layer.A_log.to(torch.float)
+    if self.num_v_heads > self.num_heads:
+        q, k = map(lambda x: repeat(x, '... h d -> ... (h g) d', g=self.num_v_heads // self.num_heads), (q, k))
 
-    backward = args.backward
+    maybe_wait(handle_b)
+    beta = b.sigmoid()
+    if self.allow_neg_eigval:
+        beta = beta * 2.
 
-    def single_device():
-        total_o = layer(total_x, cu_seqlens=cu_seqlens)[0]
-        dist.barrier()
-        if backward:
-            total_o.backward(total_do)
-        dist.barrier()
-        return total_o.chunk(world_size, 1)[rank]
+    maybe_wait(handle_a)
+    A_log = self.A_log.chunk(cp_size)[cp_rank]
+    dt_bias = self.dt_bias.chunk(cp_size)[cp_rank]
+    g = -A_log.float().exp() * F.softplus(a.float() + dt_bias)
 
-    def context_parallel():
-        o = cp_layer(x, cu_seqlens=cu_seqlens)[0]
-        dist.barrier()
-        if backward:
-            o.backward(do)
-        dist.barrier()
-        return o
-
-    ref_o = single_device()
-    if backward:
-        ref_dx = total_x.grad.chunk(world_size, 1)[rank]
+    recurrent_state = last_state['recurrent_state'] if last_state is not None else None
+    if mode == 'chunk':
+        o, recurrent_state = chunk_gated_delta_rule(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            initial_state=recurrent_state,
+            output_final_state=use_cache,
+            cu_seqlens=cu_seqlens,
+            use_qk_l2norm_in_kernel=True,
+        )
+    elif mode == 'fused_recurrent':
+        o, recurrent_state = fused_recurrent_gated_delta_rule(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            initial_state=recurrent_state,
+            output_final_state=use_cache,
+            cu_seqlens=cu_seqlens,
+            use_qk_l2norm_in_kernel=True,
+        )
     else:
-        ref_dx = None
-    o = context_parallel()
-    dx = x.grad
+        raise NotImplementedError(f"Not supported mode `{mode}`.")
 
-    if rank == 0:
-        print(cu_seqlens)
-    dist.barrier()
-    print_tensor_error(o, ref_o, f"rank:{rank}, out:")
-    if backward:
-        print_tensor_error(ref_dx, dx, f"rank:{rank}, input grad:")
-        dist.barrier()
-        for (name1, p1), (name2, p2) in zip(layer.named_parameters(), cp_layer.named_parameters()):
-            assert name1 == name2
-            if HAVE_APEX and hasattr(p1, "main_grad"):
-                grad1 = p1.main_grad
-                grad2 = p2.main_grad
-            else:
-                grad1 = p1.grad.float()
-                grad2 = p2.grad.float()
-            torch.distributed.all_reduce(grad2, group=group)
-            print_tensor_error(grad1, grad2, f"rank:{rank}, {name1} grad:")
-            dist.barrier()
+    if past_key_values is not None:
+        past_key_values.update(
+            recurrent_state=recurrent_state,
+            conv_state=(conv_state_q, conv_state_k, conv_state_v) if self.use_short_conv else None,
+            layer_idx=self.layer_idx,
+            offset=q_len
+        )
 
-    dist.barrier()
-    t1 = measure_latency(single_device)
-    dist.barrier()
-    t2 = measure_latency(context_parallel)
-    dist.barrier()
-    for provider, elapsed in (('non_cp', t1), ('custom_cp', t2)):
-        results.append(BenchmarkResult(
-            name='kda' if args.kda else 'gdn',
-            parameters={'scope': 'layer', 'provider': provider, 'B': B, 'T': args.seqlen,
-                        'hidden_size': hidden_size, 'world_size': world_size, 'backward': backward},
-            metrics={'mean_ms': elapsed},
-            primary_metric='mean_ms',
-        ))
+    if self.use_gate:
+        maybe_wait(handle_gate)
+        g = rearrange(gate.flatten(-2, -1).unsqueeze(0), '... (h d) -> ... h d', d=self.head_v_dim)
+        o = self.o_norm(o, g)
+    else:
+        o = self.o_norm(o)
+    # THD
+    o = o.flatten(0, 1)
+    o, _ = qkvo_all_to_all(o, is_qkv=False, group=cp_group)
 
-    if args.profile:
-        def fn():
-            single_device()
-            dist.barrier()
-            context_parallel()
-            dist.barrier()
-        profile_function(fn, args.profile_path)
-    return results
+    o = rearrange(o.unsqueeze(0), 'b t h d -> b t (h d)')
+    o = self.o_proj(o)
+
+    return o, None, past_key_values
+
+
+def kda_forward(
+    hidden_states: torch.Tensor,
+    attention_mask: torch.Tensor | None = None,
+    past_key_values: Cache | None = None,
+    use_cache: bool | None = False,
+    output_attentions: bool | None = False,
+    cp_group=None,
+    cp_size=None,
+    cp_rank=None,
+    self=None,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor | None, Cache | None]:
+    if attention_mask is not None:
+        assert len(attention_mask.shape) == 2, (
+            "Expected attention_mask as a 0-1 matrix with shape [batch_size, seq_len] "
+            "for padding purposes (0 indicating padding). "
+            "Arbitrary attention masks of shape [batch_size, seq_len, seq_len] are not allowed."
+        )
+
+    batch_size, q_len, _ = hidden_states.shape
+    # change to inference mode.
+    mode = 'fused_recurrent' if q_len <= 64 else self.mode
+    if self.training:
+        assert mode == 'chunk', "Only chunk mode is supported in training."
+
+    last_state = None
+    if past_key_values is not None and len(past_key_values) > self.layer_idx:
+        last_state = past_key_values[self.layer_idx]
+
+    cu_seqlens = kwargs.get('cu_seqlens')
+
+    async_op = False
+    q = self.q_proj(hidden_states)
+    k = self.k_proj(hidden_states)
+    v = self.v_proj(hidden_states)
+    g = self.f_proj(hidden_states)
+    b = self.b_proj(hidden_states)
+    gate = self.g_proj(hidden_states)
+    q, handle_q = qkvo_all_to_all(q.view(-1, self.num_heads, self.head_k_dim), is_qkv=True, group=cp_group, async_op=async_op)
+    k, handle_k = qkvo_all_to_all(k.view(-1, self.num_heads, self.head_k_dim), is_qkv=True, group=cp_group, async_op=async_op)
+    v, handle_v = qkvo_all_to_all(v.view(-1, self.num_v_heads, self.head_v_dim),
+                                  is_qkv=True, group=cp_group, async_op=async_op)
+    g, handle_g = qkvo_all_to_all(g.view(-1, self.num_heads, self.head_k_dim), is_qkv=True, group=cp_group, async_op=async_op)
+    b, handle_b = qkvo_all_to_all(b.view(-1, self.num_heads, 1), is_qkv=True, group=cp_group, async_op=async_op)
+    gate, handle_gate = qkvo_all_to_all(gate.view(-1, self.num_v_heads, self.head_v_dim),
+                                        is_qkv=True, group=cp_group, async_op=async_op)
+    q, k, v, g, b, gate = [t.flatten(-2, -1).unsqueeze(0) for t in [q, k, v, g, b, gate]]
+
+    if self.use_short_conv:
+        conv_state_q, conv_state_k, conv_state_v = None, None, None
+        if last_state is not None:
+            conv_state_q, conv_state_k, conv_state_v = last_state['conv_state']
+        maybe_wait(handle_q)
+        q, conv_state_q = self.q_conv1d(
+            x=q,
+            cache=conv_state_q,
+            output_final_state=use_cache,
+            cu_seqlens=cu_seqlens
+        )
+        maybe_wait(handle_k)
+        k, conv_state_k = self.k_conv1d(
+            x=k,
+            cache=conv_state_k,
+            output_final_state=use_cache,
+            cu_seqlens=cu_seqlens
+        )
+        maybe_wait(handle_v)
+        v, conv_state_v = self.v_conv1d(
+            x=v,
+            cache=conv_state_v,
+            output_final_state=use_cache,
+            cu_seqlens=cu_seqlens
+        )
+    else:
+        maybe_wait(handle_q)
+        q = F.silu(q)
+        maybe_wait(handle_k)
+        k = F.silu(k)
+        maybe_wait(handle_v)
+        v = F.silu(v)
+
+    A_log = self.A_log.chunk(cp_size, 0)[cp_rank]
+    dt_bias = self.dt_bias.chunk(cp_size, 0)[cp_rank]
+    maybe_wait(handle_g)
+    maybe_wait(handle_b)
+    beta = b.sigmoid()
+
+    q, k, g = (rearrange(x, "... (h d) -> ... h d", d=self.head_k_dim) for x in (q, k, g))
+    v = rearrange(v, '... (h d) -> ... h d', d=self.head_v_dim)
+
+    if self.num_v_heads > self.num_heads:
+        q, k, g = (repeat(x, '... h d -> ... (h g) d', g=self.num_v_heads // self.num_heads) for x in (q, k, g))
+        beta = repeat(beta, '... h -> ... (h g)', g=self.num_v_heads // self.num_heads)
+
+    if self.allow_neg_eigval:
+        beta = beta * 2.
+    recurrent_state = last_state['recurrent_state'] if last_state is not None else None
+    if mode == 'chunk':
+        o, recurrent_state = chunk_kda(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            initial_state=recurrent_state,
+            output_final_state=use_cache,
+            use_qk_l2norm_in_kernel=True,
+            cu_seqlens=cu_seqlens,
+            A_log=A_log,
+            dt_bias=dt_bias,
+            use_gate_in_kernel=True,
+        )
+    elif mode == 'fused_recurrent':
+        o, recurrent_state = fused_recurrent_kda(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            initial_state=recurrent_state,
+            output_final_state=use_cache,
+            use_qk_l2norm_in_kernel=True,
+            cu_seqlens=cu_seqlens,
+        )
+    else:
+        raise NotImplementedError(f"Not supported mode `{mode}`.")
+
+    if past_key_values is not None:
+        past_key_values.update(
+            recurrent_state=recurrent_state,
+            conv_state=(conv_state_q, conv_state_k, conv_state_v) if self.use_short_conv else None,
+            layer_idx=self.layer_idx,
+            offset=q_len,
+        )
+    maybe_wait(handle_gate)
+    o = self.o_norm(o, rearrange(gate, '... (h d) -> ... h d', d=self.head_v_dim))
+
+    # THD
+    o, _ = qkvo_all_to_all(o.flatten(0, 1), is_qkv=False, group=cp_group)
+    o = rearrange(o.unsqueeze(0), 'b t h d -> b t (h d)')
+    o = self.o_proj(o)
+
+    return o, None, past_key_values
+
+
+def short_conv_forward(
+    x: torch.Tensor,
+    residual: torch.Tensor | None = None,
+    mask: torch.Tensor | None = None,
+    cache: torch.Tensor | None = None,
+    output_final_state: bool = False,
+    cu_seqlens: torch.LongTensor | None = None,
+    cp_size=None,
+    cp_rank=None,
+    self=None,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Args:
+        x (`torch.Tensor`):
+            Tensor of shape `[B, T, D]`. `B` must be 1 if `seq_idx` is provided.
+        residual (`Optional[torch.Tensor]`):
+            Residual tensor of shape `[B, T, D]`. Default: `None`.
+        mask (`Optional[torch.Tensor]`):
+            Attention mask dealing with padded positions.
+        cache (`Optional[torch.Tensor]`):
+            Previous cache tensor of shape `[N, D, W]`, where `W` is the kernel size.
+            If provided, the cache is updated **inplace**.
+        output_final_state (Optional[bool]):
+            Whether to output the final state of shape `[N, D, W]`. Default: `False`.
+        cu_seqlens (Optional[torch.LongTensor]):
+            Cumulative sequence lengths for each batch. Used for varlen. Default: `None`.
+            Shape: [B+1]
+
+    Returns:
+        Tensor of shape `[B, T, D]`.
+    """
+
+    B, T, *_ = x.shape
+    N = B if cu_seqlens is None else len(cu_seqlens) - 1
+    if mask is not None:
+        if cu_seqlens is not None:
+            raise ValueError("`mask` and `cu_seqlens` cannot be provided at the same time")
+        x = x.mul_(mask.unsqueeze(-1))
+
+    # in decoding phase, the cache (if provided) is updated inplace
+    if B * T == N:
+        y, cache = self.step(
+            x=x,
+            residual=residual,
+            cache=cache,
+            output_final_state=output_final_state,
+            cu_seqlens=cu_seqlens
+        )
+        return y, cache
+
+    # cuda backend do not support:
+    # 1. both `cu_seqlens` and `cache` being provided
+    # 2. both `cu_seqlens` and `output_final_state` being provided
+    if self.backend == 'cuda' and (
+        (cu_seqlens is not None and cache is not None) or
+        (cu_seqlens is not None and output_final_state)
+    ):
+        self.backend = 'triton'
+    # hidden_size, 1, kernel_size
+    weight = self.weight.chunk(cp_size, 0)[cp_rank].squeeze(1)
+
+    return causal_conv1d(
+        x=x,
+        weight=weight,
+        bias=self.bias,
+        residual=residual,
+        initial_state=cache,
+        output_final_state=output_final_state,
+        activation=self.activation,
+        backend=self.backend,
+        cu_seqlens=cu_seqlens,
+        **kwargs
+    )

@@ -23,8 +23,8 @@ class BenchmarkResult:
     higher_is_better: bool = False
 
 
-def _result_key(result: dict) -> tuple[str, str, str, str]:
-    return result.get('benchmark', ''), result.get('scenario', ''), result['name'], json.dumps(result['parameters'], sort_keys=True)
+def _result_key(result: dict) -> tuple[str, str, str]:
+    return result.get('benchmark', ''), result['name'], json.dumps(result['parameters'], sort_keys=True)
 
 
 def format_table(headers: list[str], rows: list[list]) -> str:
@@ -42,11 +42,11 @@ def format_parameters(parameters: dict) -> str:
 
 def format_results(results: list[dict]) -> str:
     rows = [[
-        result.get('benchmark', ''), result.get('scenario', ''), result['name'],
+        result.get('benchmark', ''), result['name'],
         format_parameters(result['parameters']),
         ', '.join(f'{key}={value:.4g}' for key, value in result['metrics'].items()),
     ] for result in results]
-    return format_table(headers=['Object', 'Scenario', 'Case', 'Parameters', 'Measurements'], rows=rows)
+    return format_table(headers=['Benchmark', 'Case', 'Parameters', 'Measurements'], rows=rows)
 
 
 def print_results(results: list[dict]) -> None:
@@ -55,12 +55,12 @@ def print_results(results: list[dict]) -> None:
 
 def format_comparison(changes: list[dict]) -> str:
     rows = [[
-        change.get('benchmark', ''), change.get('scenario', ''), change['name'],
+        change.get('benchmark', ''), change['name'],
         format_parameters(change['parameters']), change['metric'],
         f"{change['base']:.4g}", f"{change['head']:.4g}", f"{change['change_pct']:+.1f}%",
         'regression' if change['regression'] else 'speedup' if change['speedup'] else 'within threshold',
     ] for change in changes]
-    return format_table(headers=['Object', 'Scenario', 'Case', 'Parameters', 'Metric', 'Base', 'Head', 'Change', 'Status'], rows=rows)
+    return format_table(headers=['Benchmark', 'Case', 'Parameters', 'Metric', 'Base', 'Head', 'Change', 'Status'], rows=rows)
 
 
 def compare_results(base: list[dict], head: list[dict], threshold: float) -> list[dict]:
@@ -87,7 +87,6 @@ def compare_results(base: list[dict], head: list[dict], threshold: float) -> lis
         change = (new - old) / old * (-100 if higher_is_better else 100)
         changes.append({
             'benchmark': current.get('benchmark', ''),
-            'scenario': current.get('scenario', ''),
             'name': current['name'],
             'parameters': current['parameters'],
             'metric': metric,
@@ -115,3 +114,11 @@ def format_machine_info(info: dict) -> str:
 
 def get_result_path(path: Path, rank: int) -> Path:
     return path if rank == 0 else path.with_stem(f'{path.stem}.rank{rank}')
+
+
+def format_size(num, suffix='B'):
+    for unit in ('', 'Ki', 'Mi', 'Gi', 'Ti', 'Pi', 'Ei', 'Zi'):
+        if abs(num) < 1024.0:
+            return f'{num:.2f}{unit}{suffix}'
+        num /= 1024.0
+    return f'{num:.2f}Yi{suffix}'

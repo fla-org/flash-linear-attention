@@ -5,7 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""Measure selected benchmark objects in a supported execution scenario."""
+"""Run a named measurement task and save results for comparison or summary."""
 
 import argparse
 import fnmatch
@@ -15,60 +15,51 @@ import os
 from dataclasses import asdict
 from pathlib import Path
 
-from benchmarks.utils.reporting import format_machine_info, get_result_path, print_results
+from benchmarks.utils.reporting import format_machine_info, format_table, get_result_path, print_results
+from benchmarks.workloads import WORKLOADS
 
 
-def list_benchmarks() -> list[str]:
-    root = Path(__file__).parent
-    return sorted(
-        f'{category}.{path.stem}'
-        for category in ('ops', 'modules', 'layers', 'models')
-        for path in (root / category).glob('*.py')
-        if path.stem != '__init__'
-    )
+def list_benchmarks(pattern: str = '*') -> list[str]:
+    return sorted(name for name in WORKLOADS if fnmatch.fnmatchcase(name, pattern))
 
 
 def main(argv: list[str] | None = None) -> int:
     common = argparse.ArgumentParser(description=__doc__, add_help=False)
-    common.add_argument('benchmark', nargs='?', help='Object name or quoted pattern, such as ops.kda or ops.*')
-    common.add_argument('--scenario', help="Execution scenario; defaults to the object's first scenario")
-    common.add_argument('--list', action='store_true', help='List benchmark objects without importing their dependencies')
+    common.add_argument('benchmark', nargs='?', help='Measurement task or quoted pattern; use --list to see available tasks')
+    common.add_argument(
+        '--list',
+        action='store_true',
+        help='Show tasks, measurements, and required devices without loading them',
+    )
     common.add_argument('--json', type=Path, help='Write measurements and machine metadata to JSON')
     selected, _ = common.parse_known_args(args=argv)
+    names = list_benchmarks(pattern=selected.benchmark or '*')
     if selected.list:
-        print('\n'.join(list_benchmarks()))
+        common.parse_args(args=argv)
+        print(format_table(
+            headers=['Benchmark', 'Measurement', 'Execution'],
+            rows=[[name, *WORKLOADS[name]] for name in names],
+        ))
         return 0
     if selected.benchmark is None:
         argparse.ArgumentParser(parents=[common], description=__doc__).parse_args(args=argv)
         common.error('benchmark is required unless --list is used')
-    names = [name for name in list_benchmarks() if fnmatch.fnmatchcase(name, selected.benchmark)]
     if not names:
-        common.error(f'No benchmark matches {selected.benchmark!r}; use --list to see available objects')
+        common.error(f'No benchmark matches {selected.benchmark!r}; use --list to see available tasks')
 
     plans = []
     for name in names:
-        workload = importlib.import_module(f'benchmarks.{name}')
-        scenario = selected.scenario or workload.SCENARIOS[0]
-        if scenario not in workload.SCENARIOS:
-            if name == selected.benchmark:
-                common.error(f'{name} supports scenarios: {", ".join(workload.SCENARIOS)}')
-            continue
-        parser = argparse.ArgumentParser(
-            parents=[common], description=f'{name}; supported scenarios: {", ".join(workload.SCENARIOS)}',
-        )
-        workload.add_arguments(parser, scenario)
-        args = parser.parse_args(args=argv)
-        args.scenario = scenario
-        plans.append((name, workload, args))
-    if not plans:
-        common.error(f'No matching object supports scenario {selected.scenario!r}')
+        workload = importlib.import_module(f'benchmarks.workloads.{name}')
+        parser = argparse.ArgumentParser(parents=[common], description=f'{name}: {WORKLOADS[name][0]} ({WORKLOADS[name][1]})')
+        workload.add_arguments(parser)
+        plans.append((name, workload, parser.parse_args(args=argv)))
 
     results = []
     for name, workload, args in plans:
-        for result in workload.run(args):
-            results.append({**asdict(result), 'benchmark': name, 'scenario': args.scenario})
-    if not results:
-        raise RuntimeError('No benchmark measurements were produced')
+        measured = workload.run(args)
+        if not measured:
+            raise RuntimeError(f'No benchmark measurements were produced by {name}')
+        results.extend({**asdict(result), 'benchmark': name} for result in measured)
 
     from benchmarks.utils.environment import get_machine_info
 

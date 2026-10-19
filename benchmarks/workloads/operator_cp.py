@@ -12,12 +12,14 @@ import torch.distributed as dist
 import torch.nn.functional as F
 
 from benchmarks.utils.distributed import (
+    add_cp_arguments,
     all_gather,
     generate_cu_seqlens,
     measure_latency,
     print_tensor_error,
     profile_function,
     qkvo_all_to_all,
+    run_distributed,
 )
 from benchmarks.utils.reporting import BenchmarkResult
 
@@ -159,3 +161,13 @@ def benchmark_ops(args):
         profile_function(fn, args.profile_path)
 
     return results
+
+
+def add_arguments(parser):
+    add_cp_arguments(parser)
+    parser.add_argument('--op', choices=['chunk_gdn', 'chunk_kda'], default='chunk_gdn')
+
+
+def run(args):
+    args.kda = args.op == 'chunk_kda'
+    return run_distributed(args=args, measure=benchmark_ops)

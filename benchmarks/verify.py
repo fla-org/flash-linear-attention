@@ -14,11 +14,10 @@ import os
 import subprocess
 import sys
 
+from benchmarks.configs.operators import SHAPE_CONFIGS, get_op, list_ops
 from benchmarks.utils.environment import synchronize_device
-from benchmarks.utils.ops.registry import SHAPE_CONFIGS, get_op, list_ops
-from benchmarks.utils.ops.runner import run_benchmarks
 from benchmarks.utils.reporting import compare_results, format_comparison, format_machine_info, print_results
-from benchmarks.utils.revisions import find_project_root
+from benchmarks.utils.revisions import find_project_root, run_operator_benchmarks
 
 
 def derive_test_file(op_name: str) -> str:
@@ -70,7 +69,7 @@ def profile_op(op_name: str, modes: list[str]) -> None:
     import torch
     from torch.profiler import ProfilerActivity, profile
 
-    from benchmarks.utils.ops.inputs import generate_inputs
+    from benchmarks.utils.inputs import generate_inputs
     from fla.utils import device_name
 
     config = get_op(op_name)
@@ -170,7 +169,7 @@ def main():
                 f"\n  Gate test not found: {e}\n"
                 f"  The op directory name may differ from its test name. Pass "
                 f"--test-file tests/ops/test_<name>.py, or set test_file=... in "
-                f"the owning benchmark definition for '{args.op}'.",
+                f"configs/operators.py for '{args.op}'.",
                 file=sys.stderr,
             )
             return 2
@@ -180,7 +179,7 @@ def main():
             return 1
         print("\n  GATE PASSED.")
 
-    results, machine_info = run_benchmarks(op_names=[args.op], shapes=SHAPE_CONFIGS, modes=args.modes)
+    results, machine_info = run_operator_benchmarks(op_names=[args.op], shapes=SHAPE_CONFIGS, modes=args.modes)
     results = results or []
     machine_info = machine_info or {}
     print(f"\n  {format_machine_info(machine_info)} | "
@@ -189,7 +188,7 @@ def main():
 
     baseline = None
     if args.base:
-        baseline, _ = run_benchmarks(op_names=[args.op], shapes=SHAPE_CONFIGS, modes=args.modes, ref=args.base)
+        baseline, _ = run_operator_benchmarks(op_names=[args.op], shapes=SHAPE_CONFIGS, modes=args.modes, ref=args.base)
     if baseline is not None:
         print(format_comparison(changes=compare_results(base=baseline, head=results, threshold=5.0)))
     else:

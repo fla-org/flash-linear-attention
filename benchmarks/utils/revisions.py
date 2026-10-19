@@ -83,3 +83,16 @@ def run_benchmark(module: str, arguments: list[str], ref: str | None = None) -> 
                     capture_output=True,
                     check=True,
                 )
+
+
+def run_operator_benchmarks(
+    op_names: list[str],
+    shapes: dict[str, dict[str, int]],
+    modes: list[str],
+    backend: str | None = None,
+    ref: str | None = None,
+) -> tuple[list[dict], dict]:
+    arguments = ['operator_latency', '--op', *op_names, '--custom-shapes', json.dumps(shapes), '--modes', *modes]
+    if backend is not None:
+        arguments.extend(['--backend', backend])
+    return run_benchmark(module='benchmarks.run', arguments=arguments, ref=ref)

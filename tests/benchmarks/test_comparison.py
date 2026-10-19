@@ -14,9 +14,8 @@ from pathlib import Path
 import pytest
 
 from benchmarks import compare, run
-from benchmarks.utils import revisions
-from benchmarks.utils.ops import discovery
-from benchmarks.utils.ops.registry import list_ops
+from benchmarks.configs.operators import list_ops
+from benchmarks.utils import discovery, revisions
 from benchmarks.utils.reporting import BenchmarkResult
 
 
@@ -57,15 +56,14 @@ def benchmark_repository(tmp_path, monkeypatch):
     (harness / 'utils/__init__.py').write_text('')
     (harness / 'utils/reporting.py').write_text((Path(run.__file__).parent / 'utils/reporting.py').read_text())
     (harness / 'utils/environment.py').write_text('def get_machine_info(): return {}\n')
-    (harness / 'ops').mkdir()
-    (harness / 'ops/__init__.py').write_text('')
-    (harness / 'ops/worker.py').write_text(
+    (harness / 'workloads').mkdir()
+    (harness / 'workloads/__init__.py').write_text('WORKLOADS = {"worker": ("worker", "CPU")}\n')
+    (harness / 'workloads/worker.py').write_text(
         'import os\n'
         'from pathlib import Path\n'
         'import fla\n'
         'from benchmarks.utils.reporting import BenchmarkResult\n'
-        'SCENARIOS = ("latency",)\n'
-        'def add_arguments(parser, scenario):\n'
+        'def add_arguments(parser):\n'
         '    parser.add_argument("--fail", action="store_true")\n'
         'def run(args):\n'
         '    cache = Path(os.environ["TRITON_CACHE_DIR"])\n'
@@ -90,7 +88,7 @@ def test_revision_isolation(benchmark_repository, monkeypatch, ref, fail, rank):
     git = benchmark_repository
     before = git('status', '--porcelain')
     worktrees = git('worktree', 'list', '--porcelain')
-    arguments = ['ops.worker', '--fail'] if fail else ['ops.worker']
+    arguments = ['worker', '--fail'] if fail else ['worker']
     if fail:
         with pytest.raises(subprocess.CalledProcessError):
             revisions.run_benchmark(module='benchmarks.run', arguments=arguments, ref=ref)
@@ -99,7 +97,7 @@ def test_revision_isolation(benchmark_repository, monkeypatch, ref, fail, rank):
         expected = {'baseline': 'baseline', 'feature/current': 'head', None: 'dirty'}[ref]
         assert results == [{
             **asdict(BenchmarkResult(name='source', parameters={'source': expected}, metrics={'median_ms': 1.0})),
-            'benchmark': 'ops.worker', 'scenario': 'latency',
+            'benchmark': 'worker',
         }]
         if ref is not None:
             assert info['git_label'] == f'{ref}[{git("rev-parse", ref)[:7]}]'
@@ -119,7 +117,7 @@ def test_compare_artifact(tmp_path, monkeypatch, allow_regression):
     monkeypatch.setenv('FLA_BENCH_COOLDOWN_SEC', '0')
     calls = []
 
-    def run_benchmarks(op_names, shapes, modes, backend=None, ref=None):
+    def run_operator_benchmarks(op_names, shapes, modes, backend=None, ref=None):
         calls.append((op_names, shapes, modes, ref))
         results = [asdict(BenchmarkResult(
             name='chunk_gla',
@@ -128,7 +126,7 @@ def test_compare_artifact(tmp_path, monkeypatch, allow_regression):
         ))]
         return results, {'gpu_name': 'test', 'git_label': ref}
 
-    monkeypatch.setattr(compare, 'run_benchmarks', run_benchmarks)
+    monkeypatch.setattr(compare, 'run_operator_benchmarks', run_operator_benchmarks)
     assert compare.main() == (0 if allow_regression else 1)
     data = json.loads(output.read_text())
     assert data.keys() == {
@@ -153,12 +151,12 @@ def test_compare_failure_has_no_success_artifact(tmp_path, monkeypatch, failure)
     monkeypatch.setattr(compare, 'get_commit_sha', lambda ref: ref)
     monkeypatch.setenv('FLA_BENCH_COOLDOWN_SEC', '0')
 
-    def run_benchmarks(**kwargs):
+    def run_operator_benchmarks(**kwargs):
         if failure == 'exception':
             raise subprocess.CalledProcessError(1, ['worker'])
         return [], {}
 
-    monkeypatch.setattr(compare, 'run_benchmarks', run_benchmarks)
+    monkeypatch.setattr(compare, 'run_operator_benchmarks', run_operator_benchmarks)
     if failure == 'exception':
         with pytest.raises(subprocess.CalledProcessError):
             compare.main()
@@ -174,7 +172,7 @@ def test_compare_failure_has_no_success_artifact(tmp_path, monkeypatch, failure)
         ('fla/layers/example.py', ['chunk_kda']),
         ('fla/ops/common/chunk_h.py', list_ops()),
         ('fla/ops/utils/solve_tril.py', list_ops()),
-        ('benchmarks/utils/ops/inputs.py', list_ops()),
+        ('benchmarks/utils/inputs.py', list_ops()),
         ('benchmarks/utils/revisions.py', list_ops()),
         ('README.md', []),
     ],
@@ -191,8 +189,8 @@ def test_affected_ops(tmp_path, monkeypatch, path, expected):
 def test_compare_workload_uses_common_runner(tmp_path, monkeypatch):
     output = tmp_path / 'training.json'
     monkeypatch.setattr(sys, 'argv', [
-        'compare', '--benchmark', 'models.causal_lm', '--base', 'base', '--head', 'head',
-        '--output', str(output), '--', '--scenario', 'training', '--name', 'kda',
+        'compare', '--benchmark', 'training', '--base', 'base', '--head', 'head',
+        '--output', str(output), '--', '--name', 'kda',
     ])
     monkeypatch.setattr(compare, 'get_commit_sha', lambda ref: ref)
     monkeypatch.setenv('FLA_BENCH_COOLDOWN_SEC', '0')
@@ -212,17 +210,15 @@ def test_compare_workload_uses_common_runner(tmp_path, monkeypatch):
     monkeypatch.setattr(compare, 'run_benchmark', run_benchmark)
     assert compare.main() == 1
     assert calls == [
-        ('benchmarks.run', ['models.causal_lm', '--scenario', 'training', '--name', 'kda'], 'head'),
-        ('benchmarks.run', ['models.causal_lm', '--scenario', 'training', '--name', 'kda'], 'base'),
+        ('benchmarks.run', ['training', '--name', 'kda'], 'head'),
+        ('benchmarks.run', ['training', '--name', 'kda'], 'base'),
     ]
     data = json.loads(output.read_text())
-    assert data['benchmark'] == 'models.causal_lm'
+    assert data['benchmark'] == 'training'
     assert data['regressions'][0]['change_pct'] == pytest.approx(10.0)
 
 
-def test_affected_operator_definition():
-    assert discovery.find_affected_op_names(changed_files=['benchmarks/ops/gated_delta_rule.py']) == ['chunk_gdn']
-    assert discovery.find_affected_op_names(changed_files=['benchmarks/ops/nsa.py']) == [
-        'parallel_nsa', 'parallel_nsa_compression', 'parallel_nsa_windowed',
-    ]
-    assert discovery.find_affected_op_names(changed_files=['benchmarks/ops/removed.py']) == []
+def test_affected_benchmark_definitions():
+    assert discovery.find_affected_op_names(changed_files=['benchmarks/configs/operators.py']) == list_ops()
+    assert discovery.find_affected_op_names(changed_files=['benchmarks/workloads/operator_latency.py']) == list_ops()
+    assert discovery.find_affected_op_names(changed_files=['benchmarks/workloads/training.py']) == []

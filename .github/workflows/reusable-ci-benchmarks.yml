@@ -111,6 +111,15 @@ jobs:
             --no-fail-on-regression \
             --output benchmark_results.json
 
+      - name: Summarize benchmark results
+        if: always() && steps.check_skip.outputs.skip_bench == 'false'
+        shell: bash
+        run: |
+          if [[ -f benchmark_results.json ]]; then
+            $CONDA_BIN_PATH/python -m benchmarks.summarize benchmark_results.json --output benchmark_summary.md
+            cat benchmark_summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Write benchmark metadata
         if: always() && steps.check_skip.outputs.skip_bench == 'false'
         shell: bash
@@ -143,5 +152,6 @@ jobs:
           path: |
             benchmark_results.json
             benchmark_meta.json
+            benchmark_summary.md
           if-no-files-found: ignore
           retention-days: 30

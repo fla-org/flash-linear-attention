@@ -128,10 +128,7 @@ def benchmark_logits(
     return triton.testing.do_bench(lambda: criterion(input=logits, target=target), quantiles=quantiles)
 
 
-SCENARIOS = ('latency',)
-
-
-def add_arguments(parser, scenario):
+def add_arguments(parser):
     add_module_arguments(parser)
     parser.add_argument('--logits-only', action='store_true', help='Compare cross entropy without the linear projection')
 

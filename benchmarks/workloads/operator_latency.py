@@ -16,26 +16,12 @@ import os
 
 import torch
 
+from benchmarks.configs.operators import SHAPE_CONFIGS, OpConfig, get_op, list_ops
 from benchmarks.utils.environment import synchronize_device
-from benchmarks.utils.ops.inputs import generate_inputs
-from benchmarks.utils.ops.registry import SHAPE_CONFIGS, OpConfig, get_op, list_ops
+from benchmarks.utils.inputs import generate_inputs
 from benchmarks.utils.reporting import BenchmarkResult
-from benchmarks.utils.revisions import run_benchmark
 
 logger = logging.getLogger(__name__)
-
-
-def run_benchmarks(
-    op_names: list[str],
-    shapes: dict[str, dict[str, int]],
-    modes: list[str],
-    backend: str | None = None,
-    ref: str | None = None,
-) -> tuple[list[dict], dict]:
-    arguments = ['ops.*', '--scenario', 'latency', '--op', *op_names, '--custom-shapes', json.dumps(shapes), '--modes', *modes]
-    if backend is not None:
-        arguments.extend(['--backend', backend])
-    return run_benchmark(module='benchmarks.run', arguments=arguments, ref=ref)
 
 
 def _import_op(config: OpConfig):
@@ -202,20 +188,24 @@ def benchmark_op(
     return results
 
 
-def add_operator_arguments(parser, configs):
+def add_arguments(parser):
     parser.add_argument(
-        '--op', nargs='+', choices=list_ops(), metavar='OP',
-        help=f'Select operator variants; this object provides: {", ".join(config.name for config in configs)}',
+        '--op',
+        nargs='+',
+        choices=list_ops(),
+        metavar='OP',
+        help='Operator names; defaults to all registered ops',
     )
     parser.add_argument('--backend', help='Registered backend override, such as triton or gluon')
     parser.add_argument('--custom-shapes', help='JSON object keyed by shape name, with B/T/H/D and optional operator axes')
     parser.add_argument('--modes', nargs='+', choices=['fwd', 'fwdbwd'], default=['fwd', 'fwdbwd'])
 
 
-def run_operator(args, configs):
+def run(args):
     shapes = json.loads(args.custom_shapes) if args.custom_shapes else SHAPE_CONFIGS
+    if not isinstance(shapes, dict) or not shapes:
+        raise ValueError('--custom-shapes must be a non-empty JSON object')
     results = []
-    for config in configs:
-        if args.op is None or config.name in args.op:
-            results.extend(benchmark_op(op_name=config.name, shapes=shapes, modes=args.modes, backend=args.backend))
+    for name in dict.fromkeys(args.op or list_ops()):
+        results.extend(benchmark_op(op_name=name, shapes=shapes, modes=args.modes, backend=args.backend))
     return results

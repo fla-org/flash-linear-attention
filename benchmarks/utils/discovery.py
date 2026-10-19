@@ -8,25 +8,25 @@
 """Select operator benchmarks affected by a source diff."""
 
 import ast
-import importlib
 import re
 import subprocess
 from pathlib import Path
 
-from benchmarks.utils.ops.registry import get_op, list_ops
+from benchmarks.configs.operators import get_op, list_ops
 from benchmarks.utils.revisions import find_project_root
 
 _OP_DIR_RE = re.compile(r'^fla/ops/([^/]+)/')
 _SHARED_BENCHMARK_FILES = {
     'benchmarks/compare.py',
     'benchmarks/run.py',
+    'benchmarks/workloads/__init__.py',
     'benchmarks/utils/reporting.py',
     'benchmarks/utils/revisions.py',
-    'benchmarks/utils/ops/discovery.py',
+    'benchmarks/utils/discovery.py',
     'benchmarks/utils/environment.py',
-    'benchmarks/utils/ops/inputs.py',
-    'benchmarks/utils/ops/registry.py',
-    'benchmarks/utils/ops/runner.py',
+    'benchmarks/utils/inputs.py',
+    'benchmarks/configs/operators.py',
+    'benchmarks/workloads/operator_latency.py',
 }
 
 
@@ -84,10 +84,6 @@ def find_affected_op_names(changed_files: list[str]) -> list[str]:
         if fpath in _SHARED_BENCHMARK_FILES or fpath.startswith(('fla/ops/common/', 'fla/ops/utils/')):
             common_changed = True
             continue
-        if (fpath.startswith('benchmarks/ops/') and Path(fpath).stem != '__init__'
-                and (Path(find_project_root()) / fpath).is_file()):
-            module = importlib.import_module(f'benchmarks.ops.{Path(fpath).stem}')
-            op_names.update(config.name for config in module.OPERATORS)
         match = _OP_DIR_RE.match(fpath)
         if match:
             affected_dirs.add(match.group(1))

@@ -286,11 +286,11 @@ In the following, we give a generation example:
 >>> tokenizer.batch_decode(outputs, skip_special_tokens=True)[0]
 ```
 
-We also provide a simple script [here](benchmarks/models/causal_lm.py) for benchmarking the generation speed.
+We also provide a simple script [here](benchmarks/workloads/generation.py) for benchmarking the generation speed.
 Simply run it by:
 
 ```sh
-$ python -m benchmarks.run models.causal_lm --scenario generation \
+$ python -m benchmarks.run generation \
   --path 'fla-hub/gla-1.3B-100B' \
   --data 'fla-hub/pg19' \
   --repetition_penalty 2. \
@@ -476,7 +476,7 @@ These tests were conducted on a single NVIDIA GB200 GPU (CUDA 12.9, PyTorch 2.9.
 
 ```sh
 # you might have to first install `fla` via `pip install -e .` to enable its import
-$ python -m benchmarks.run 'ops.*' --op chunk_retention chunk_gla chunk_gdn flash_attn
+$ python -m benchmarks.run operator_latency --op chunk_retention chunk_gla chunk_gdn flash_attn
 ```
 
 Recorded measurements from `main[0a484709]`:

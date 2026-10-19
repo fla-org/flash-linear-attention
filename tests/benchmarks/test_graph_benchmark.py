@@ -11,13 +11,12 @@ from dataclasses import asdict
 import pytest
 import torch
 
-from benchmarks.ops.kda import GRAPH, SCENARIOS, make_cu_seqlens, normalize_kda_shape
 from benchmarks.utils.graph import GraphBenchmarkCase, benchmark_case
 from benchmarks.utils.reporting import print_results
+from benchmarks.workloads.kda_graph import GRAPH, make_cu_seqlens, normalize_kda_shape
 
 
 def test_kda_graph_registration_and_common_shape_defaults():
-    assert "graph" in SCENARIOS
     config = GRAPH
     assert config.supported_modes == ("fwd", "fwdbwd")
     assert all({"B", "T", "H", "D"} <= shape.keys() for shape in config.default_shapes.values())

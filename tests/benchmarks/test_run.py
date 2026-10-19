@@ -19,7 +19,7 @@ from benchmarks.utils.perf_report import run_module_benchmark
 from benchmarks.utils.reporting import BenchmarkResult
 
 
-@pytest.mark.parametrize('benchmark', ['ops.kda', 'modules.conv', 'models.causal_lm', 'layers.kda'])
+@pytest.mark.parametrize('benchmark', ['operator_latency', 'conv_latency', 'training', 'layer_cp'])
 @pytest.mark.parametrize('rank', [0, 1])
 def test_workload_runner_records_results_and_rank(tmp_path, monkeypatch, benchmark, rank):
     output = tmp_path / 'results.json'
@@ -27,15 +27,15 @@ def test_workload_runner_records_results_and_rank(tmp_path, monkeypatch, benchma
     monkeypatch.setenv('WORLD_SIZE', '2')
     monkeypatch.setattr(environment, 'get_machine_info', lambda: {'git_label': 'test'})
 
-    def add_arguments(parser, scenario):
+    def add_arguments(parser):
         parser.add_argument('--tokens', type=int, required=True)
 
     def measure(args):
         return [BenchmarkResult(name='case', parameters={'T': args.tokens}, metrics={'median_ms': 1.25})]
 
     def import_module(name):
-        assert name == f'benchmarks.{benchmark}'
-        return SimpleNamespace(SCENARIOS=('test',), add_arguments=add_arguments, run=measure)
+        assert name == f'benchmarks.workloads.{benchmark}'
+        return SimpleNamespace(add_arguments=add_arguments, run=measure)
 
     monkeypatch.setattr(run.importlib, 'import_module', import_module)
     assert run.main([benchmark, '--tokens', '128', '--json', str(output)]) == 0
@@ -46,7 +46,7 @@ def test_workload_runner_records_results_and_rank(tmp_path, monkeypatch, benchma
     assert payload['results'] == [{
         'name': 'case', 'parameters': {'T': 128}, 'metrics': {'median_ms': 1.25},
         'primary_metric': 'median_ms', 'higher_is_better': False,
-        'benchmark': benchmark, 'scenario': 'test',
+        'benchmark': benchmark,
     }]
     if rank:
         assert not output.exists()
@@ -58,12 +58,17 @@ def test_list_does_not_import_workloads(monkeypatch, capsys):
 
     monkeypatch.setattr(run.importlib, 'import_module', import_module)
     assert run.main(['--list']) == 0
-    assert set(capsys.readouterr().out.splitlines()) == set(run.list_benchmarks())
+    output = capsys.readouterr().out
+    assert all(f'| {name} |' in output for name in run.list_benchmarks())
+    assert 'torchrun' in output and 'Ascend NPU' in output
+    assert run.main(['*_cp', '--list']) == 0
+    filtered = capsys.readouterr().out
+    assert '| operator_cp |' in filtered and '| training |' not in filtered
 
 
 def test_workload_help_includes_its_arguments(capsys):
     with pytest.raises(SystemExit) as error:
-        run.main(['ops.kda', '--scenario', 'graph', '--help'])
+        run.main(['kda_graph', '--help'])
     assert error.value.code == 0
     help_text = capsys.readouterr().out
     assert '--iterations' in help_text and '--json' in help_text
@@ -75,10 +80,10 @@ def test_failed_workload_does_not_publish_results(tmp_path, monkeypatch):
     def measure(args):
         raise RuntimeError('measurement failed')
 
-    workload = SimpleNamespace(SCENARIOS=('training',), add_arguments=lambda parser, scenario: None, run=measure)
+    workload = SimpleNamespace(add_arguments=lambda parser: None, run=measure)
     monkeypatch.setattr(run.importlib, 'import_module', lambda name: workload)
     with pytest.raises(RuntimeError, match='measurement failed'):
-        run.main(['models.causal_lm', '--json', str(output)])
+        run.main(['training', '--json', str(output)])
     assert not output.exists()
 
 
@@ -129,43 +134,49 @@ def test_distributed_context_cleans_up(monkeypatch, fail):
     assert events == [('device', 2), ('init', 'nccl'), ('measure',), ('destroy',)]
 
 
-def test_pattern_selects_supported_scenarios_before_measuring(tmp_path, monkeypatch):
+@pytest.mark.parametrize('invalid', [False, True])
+def test_pattern_validates_all_arguments_before_measuring(tmp_path, monkeypatch, invalid):
     output = tmp_path / 'nested/results.json'
-    monkeypatch.setattr(run, 'list_benchmarks', lambda: ['ops.first', 'ops.second', 'ops.third'])
+    monkeypatch.setattr(run, 'WORKLOADS', {'first': ('first', 'CPU'), 'second': ('second', 'CPU')})
     monkeypatch.setattr(environment, 'get_machine_info', lambda: {})
     planned = []
-
-    def add_arguments(parser, scenario):
-        planned.append(scenario)
+    measured = []
 
     def measure(args):
-        assert planned == ['graph', 'graph']
+        assert planned == ['benchmarks.workloads.first', 'benchmarks.workloads.second']
+        measured.append(args)
         return [BenchmarkResult(name='case', parameters={}, metrics={'median_ms': 1.0})]
 
     def import_module(name):
-        scenarios = ('latency',) if name.endswith('third') else ('latency', 'graph')
-        return SimpleNamespace(SCENARIOS=scenarios, add_arguments=add_arguments, run=measure)
+        def add_arguments(parser):
+            planned.append(name)
+            if invalid and name.endswith('second'):
+                parser.add_argument('--required', required=True)
+        return SimpleNamespace(add_arguments=add_arguments, run=measure)
 
     monkeypatch.setattr(run.importlib, 'import_module', import_module)
-    assert run.main(['ops.*', '--scenario', 'graph', '--json', str(output)]) == 0
-    results = json.loads(output.read_text())['results']
-    assert [(r['benchmark'], r['scenario']) for r in results] == [('ops.first', 'graph'), ('ops.second', 'graph')]
-    with pytest.raises(SystemExit) as error:
-        run.main(['ops.third', '--scenario', 'graph'])
-    assert error.value.code == 2
+    if invalid:
+        with pytest.raises(SystemExit) as error:
+            run.main(['*', '--json', str(output)])
+        assert error.value.code == 2
+        assert not measured and not output.exists()
+    else:
+        assert run.main(['*', '--json', str(output)]) == 0
+        results = json.loads(output.read_text())['results']
+        assert [r['benchmark'] for r in results] == ['first', 'second']
 
 
 def test_empty_selection_does_not_publish_results(tmp_path, monkeypatch):
     output = tmp_path / 'results.json'
-    workload = SimpleNamespace(SCENARIOS=('latency',), add_arguments=lambda parser, scenario: None, run=lambda args: [])
+    workload = SimpleNamespace(add_arguments=lambda parser: None, run=lambda args: [])
     monkeypatch.setattr(run.importlib, 'import_module', lambda name: workload)
     with pytest.raises(RuntimeError, match='No benchmark measurements'):
-        run.main(['ops.kda', '--json', str(output)])
+        run.main(['operator_latency', '--json', str(output)])
     assert not output.exists()
 
 
-def test_operator_pattern_runs_selected_variants(tmp_path, monkeypatch):
-    from benchmarks.utils.ops import runner
+def test_operator_task_runs_selected_variants(tmp_path, monkeypatch):
+    from benchmarks.workloads import operator_latency
 
     monkeypatch.setattr(environment, 'get_machine_info', lambda: {})
     calls = []
@@ -174,12 +185,12 @@ def test_operator_pattern_runs_selected_variants(tmp_path, monkeypatch):
         calls.append((op_name, modes, backend))
         return [BenchmarkResult(name=op_name, parameters=shapes['small'], metrics={'median_ms': 1.0})]
 
-    monkeypatch.setattr(runner, 'benchmark_op', benchmark_op)
+    monkeypatch.setattr(operator_latency, 'benchmark_op', benchmark_op)
     output = tmp_path / 'results.json'
     assert run.main([
-        'ops.*', '--op', 'chunk_gdn', 'chunk_gdn2', '--modes', 'fwd', '--backend', 'triton',
+        'operator_latency', '--op', 'chunk_gdn', 'chunk_gdn2', '--modes', 'fwd', '--backend', 'triton',
         '--custom-shapes', '{"small": {"B": 1, "T": 64, "H": 2, "D": 16}}', '--json', str(output),
     ]) == 0
     assert calls == [('chunk_gdn', ['fwd'], 'triton'), ('chunk_gdn2', ['fwd'], 'triton')]
     results = json.loads(output.read_text())['results']
-    assert [result['benchmark'] for result in results] == ['ops.gated_delta_rule', 'ops.gdn2']
+    assert [result['benchmark'] for result in results] == ['operator_latency', 'operator_latency']

@@ -398,7 +398,7 @@ Benchmark only against a **green test gate**. A kernel that runs faster but fail
 
 ```bash
 FLA_BENCH_BASE=$(git rev-parse origin/main)
-python -m benchmarks.compare --benchmark ops.gla --base "$FLA_BENCH_BASE"
+python -m benchmarks.compare --benchmark operator_latency --base "$FLA_BENCH_BASE" -- --op chunk_gla
 python -m benchmarks.run --list
 ```
 
@@ -417,9 +417,9 @@ These scripts require additional dependencies: `accelerate` for training through
 ```bash
 pip install -e '.[cuda,benchmark]' accelerate
 
-python -m benchmarks.run models.causal_lm --scenario training --name kda --batch_size 2 --seq_len 8192
-python -m benchmarks.run models.causal_lm --scenario training --name kda --batch_size 2 --seq_len 8192 --varlen
-python -m benchmarks.run models.causal_lm --scenario generation --path fla-hub/gla-1.3B-100B
+python -m benchmarks.run training --name kda --batch_size 2 --seq_len 8192
+python -m benchmarks.run training --name kda --batch_size 2 --seq_len 8192 --varlen
+python -m benchmarks.run generation --path fla-hub/gla-1.3B-100B
 ```
 
 The generation benchmark loads a pretrained model or checkpoint via `--path`; it does not accept a model config name via `--name`.

@@ -14,11 +14,10 @@ import sys
 import time
 from pathlib import Path
 
-from benchmarks.utils.ops.discovery import find_affected_op_names, get_changed_files
-from benchmarks.utils.ops.registry import SHAPE_CONFIGS
-from benchmarks.utils.ops.runner import run_benchmarks
+from benchmarks.configs.operators import SHAPE_CONFIGS
+from benchmarks.utils.discovery import find_affected_op_names, get_changed_files
 from benchmarks.utils.reporting import compare_results, format_comparison, get_result_path
-from benchmarks.utils.revisions import get_commit_sha, run_benchmark
+from benchmarks.utils.revisions import get_commit_sha, run_benchmark, run_operator_benchmarks
 
 
 def main():
@@ -26,7 +25,7 @@ def main():
     parser.add_argument("--base", default="main", help="Base commit/branch/tag (default: main)")
     parser.add_argument("--head", default="HEAD", help="Head commit/branch/tag (default: HEAD)")
     parser.add_argument("--benchmark-ops", nargs="*", help="Op names to benchmark. If omitted, auto-detect from diff.")
-    parser.add_argument('--benchmark', help='Object name or quoted pattern to compare instead of CI operator discovery')
+    parser.add_argument('--benchmark', help='Measurement task or quoted pattern to compare instead of CI operator discovery')
     parser.add_argument("--threshold", type=float, default=5.0, help="Regression threshold in percent (default: 5.0)")
     parser.add_argument("--output", help="Save comparison results to JSON file")
     parser.add_argument(
@@ -42,7 +41,7 @@ def main():
         parser.error('--benchmark and --benchmark-ops are mutually exclusive')
     if args.arguments and not args.benchmark:
         parser.error('workload arguments require --benchmark')
-    benchmark = args.benchmark or 'ops.*'
+    benchmark = args.benchmark or 'operator_latency'
     if args.plot and args.benchmark:
         parser.error('--plot supports the default CI operator comparison')
 
@@ -83,7 +82,7 @@ def main():
     def measure(ref):
         if args.benchmark:
             return run_benchmark(module='benchmarks.run', arguments=[benchmark, *arguments], ref=ref)
-        return run_benchmarks(op_names=op_names, shapes=SHAPE_CONFIGS, modes=['fwd', 'fwdbwd'], ref=ref)
+        return run_operator_benchmarks(op_names=op_names, shapes=SHAPE_CONFIGS, modes=['fwd', 'fwdbwd'], ref=ref)
 
     head_results, machine_info = measure(ref=head_sha)
     cooldown = int(os.environ.get('FLA_BENCH_COOLDOWN_SEC', '0'))
