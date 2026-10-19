@@ -5,17 +5,22 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import warnings
+
 import torch
 import triton
 import triton.language as tl
 from einops import reduce
 
+# NPU backend dispatcher — selects TritonAscendGSABackend on Ascend,
+# falls back to the GPU implementation otherwise.
+from fla.ops.backends import dispatch
 from fla.ops.common.chunk_h import chunk_bwd_dh, chunk_fwd_h
 from fla.ops.gla.chunk import chunk_gla_bwd, chunk_gla_fwd
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.cumsum import chunk_local_cumsum
-from fla.ops.utils.op import exp2, unflatten_program_id
+from fla.ops.utils.op import exp2
 from fla.ops.utils.softmax import softmax_bwd, softmax_fwd
 from fla.utils import autotune_cache_kwargs, input_guard
 
@@ -56,8 +61,7 @@ def chunk_gsa_fwd_k_kernel_inter(
     NG: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_t = unflatten_program_id(tl.cdiv(V, BV))
-    i_bh = tl.program_id(1).to(tl.int64)
+    i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
     i_h = i_hq // NG
     if IS_VARLEN:
@@ -140,7 +144,7 @@ def chunk_gsa_fwd_k_kernel_intra(
     IS_VARLEN: tl.constexpr,
 ):
     NV = tl.cdiv(V, BV)
-    i_v, i_c, i_bh = tl.program_id(0).to(tl.int64) % NV, tl.program_id(0).to(tl.int64) // NV, tl.program_id(1).to(tl.int64)
+    i_v, i_c, i_bh = tl.program_id(0) % NV, (tl.program_id(0) // NV).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
     i_h = i_hq // NG
     i_t, i_i = (i_c // NC).to(tl.int64), i_c % NC
@@ -238,7 +242,7 @@ def chunk_gsa_bwd_k_kernel_dA(
     IS_VARLEN: tl.constexpr,
 ):
     NV = tl.cdiv(V, BV)
-    i_v, i_c, i_bh = tl.program_id(0).to(tl.int64) % NV, tl.program_id(0).to(tl.int64) // NV, tl.program_id(1).to(tl.int64)
+    i_v, i_c, i_bh = tl.program_id(0) % NV, (tl.program_id(0) // NV).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
     i_h = i_hq // NG
     i_t, i_i, i_j = (i_c // (NC * NC)).to(tl.int64), (i_c % (NC * NC)) // NC, (i_c % (NC * NC)) % NC
@@ -356,8 +360,7 @@ def chunk_gsa_bwd_k_kernel_dqkvg(
     NG: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_t = unflatten_program_id(tl.cdiv(K, BK))
-    i_bh = tl.program_id(1).to(tl.int64)
+    i_k, i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
     i_h = i_hq // NG
     if IS_VARLEN:
@@ -484,7 +487,7 @@ def chunk_gsa_bwd_k_kernel_intra_dvg(
     IS_VARLEN: tl.constexpr,
 ):
     NV = tl.cdiv(V, BV)
-    i_v, i_c, i_bh = tl.program_id(0).to(tl.int64) % NV, tl.program_id(0).to(tl.int64) // NV, tl.program_id(1).to(tl.int64)
+    i_v, i_c, i_bh = tl.program_id(0) % NV, (tl.program_id(0) // NV).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
     i_h = i_hq // NG
     i_t, i_i = (i_c // NC).to(tl.int64), i_c % NC
@@ -561,6 +564,7 @@ def chunk_gsa_bwd_k_kernel_intra_dvg(
     tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), mask=m_cv)
 
 
+@dispatch('gsa')
 def chunk_gsa_fwd_v(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -573,6 +577,8 @@ def chunk_gsa_fwd_v(
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """V-half forward. Dispatchable: NPU backend can replace this with
+    `chunk_gsa_fwd_v_npu` when registered."""
     _, A, h, ht, o = chunk_gla_fwd(
         q=q,
         k=k,
@@ -589,6 +595,7 @@ def chunk_gsa_fwd_v(
     return A, h, ht, o
 
 
+@dispatch('gsa')
 def chunk_gsa_fwd_k(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -630,7 +637,7 @@ def chunk_gsa_fwd_k(
     )
     o = v.new_empty(B, T, HQ, V)
     A = q.new_empty(B, T, HQ, BT)
-    def grid(meta): return (triton.cdiv(V, meta['BV']) * NT, B * HQ)
+    def grid(meta): return (triton.cdiv(V, meta['BV']), NT, B * HQ)
     chunk_gsa_fwd_k_kernel_inter[grid](
         q,
         k,
@@ -673,6 +680,7 @@ def chunk_gsa_fwd_k(
     return A, h, ht, o
 
 
+@dispatch('gsa')
 def chunk_gsa_bwd_v(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -708,6 +716,7 @@ def chunk_gsa_bwd_v(
     return dq, dk, dv, dg, dh0
 
 
+@dispatch('gsa')
 def chunk_gsa_bwd_k(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -798,7 +807,7 @@ def chunk_gsa_bwd_k(
     dk = k.new_empty(B, T, HQ, K)
     dv = v.new_empty(NK, B, T, HQ, V)
     dgv = g.new_empty(NK, B, T, HQ, V, dtype=torch.float)
-    grid = (NK * NT, B * HQ)
+    grid = (NK, NT, B * HQ)
     chunk_gsa_bwd_k_kernel_dqkvg[grid](
         q,
         k,
@@ -1245,6 +1254,43 @@ def chunk_gsa(
     hk0, hv0 = None, None
     if initial_state is not None:
         hk0, hv0 = initial_state
+
+    # Ascend NPU adaptation: the chunk custom kernels are not usable under
+    # Triton-Ascend 3.2.2 / bishengir 1.2.0. Two independent toolchain
+    # failures, both reproduced on-device (A2 / Ascend910B2):
+    #   - chunk_size >= 32 crashes bishengir in `ConvertLinalgRToBinary`
+    #     (SIGSEGV) for kernels with >= 2 linalg.transpose ops;
+    #   - chunk_size == 16 compiles but the forward is non-deterministic
+    #     (same input, same process: `o` differs by ~4 run-to-run), so it
+    #     cannot match the reference regardless of indexing.
+    # See `docs/bishengir-bug/README.md` and the tracking issues in
+    # `docs/gsa-ascend/TRACKING_ISSUES.md`. On NPU we therefore compute the
+    # chunk path via `fused_recurrent_gsa` (the recurrent form is the chunk
+    # limit, so results are equivalent). `chunk_size` and `checkpoint_level`
+    # have no effect on this path; warn so callers are not misled.
+    from fla.utils import IS_NPU
+    if IS_NPU:
+        if chunk_size is not None:
+            warnings.warn(
+                "GSA on Ascend NPU routes `chunk_gsa` through `fused_recurrent_gsa`; "
+                f"the requested `chunk_size={chunk_size}` is ignored.",
+                stacklevel=2,
+            )
+        if checkpoint_level != 2:
+            warnings.warn(
+                "GSA on Ascend NPU routes `chunk_gsa` through `fused_recurrent_gsa`; "
+                f"the requested `checkpoint_level={checkpoint_level}` is ignored.",
+                stacklevel=2,
+            )
+        from fla.ops.gsa.fused_recurrent import fused_recurrent_gsa
+        return fused_recurrent_gsa(
+            q=q, k=k, v=v, s=s, g=g,
+            scale=scale,
+            initial_state=(hk0, hv0) if (hk0 is not None or hv0 is not None) else None,
+            output_final_state=output_final_state,
+            cu_seqlens=cu_seqlens,
+        )
+
     o, *final_state = ChunkGSAFunction.apply(
         q,
         k,
