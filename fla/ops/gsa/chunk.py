@@ -1051,8 +1051,6 @@ class ChunkGSAFunction(torch.autograd.Function):
             del hk
             del hv
             hk, hv = None, None
-        else:
-            hk0, hv0 = None, None
 
         ctx.save_for_backward(
             q,
@@ -1134,9 +1132,9 @@ def chunk_gsa(
     s: torch.Tensor,
     g: torch.Tensor | None = None,
     scale: float | None = None,
-    initial_state: tuple[torch.Tensor] | None = None,
-    output_final_state: bool | None = False,
-    checkpoint_level: int | None = 2,
+    initial_state: tuple[torch.Tensor, torch.Tensor] | None = None,
+    output_final_state: bool = False,
+    checkpoint_level: int = 2,
     cu_seqlens: torch.LongTensor | None = None,
     cu_seqlens_cpu: torch.LongTensor | None = None,
     **kwargs,
@@ -1153,7 +1151,7 @@ def chunk_gsa(
         s (torch.Tensor):
             slot representations of shape `[B, T, H, M]`.
         g (Optional[torch.Tensor]):
-            Forget gates of shape `[B, T, H, M]` applied to keys.
+            Forget gates of shape `[B, T, H, M]` applied along the slot dimension.
             If not provided, this function is equivalent to vanilla ABC. Default: `None`.
         scale (Optional[float]):
             Scale factor for attention scores.
@@ -1170,7 +1168,7 @@ def chunk_gsa(
             Default: `2`.
             - Level `0`: no memory saved, no recomputation.
             - Level `1`: recompute the fp32 cumulative values during backward.
-            - Level `2`: recompute the fp32 cumulative values and forward hidden states during backward.
+            - Level `2`: recompute cumulative gates and chunk states during backward.
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
@@ -1179,16 +1177,16 @@ def chunk_gsa(
 
     Returns:
         o (torch.Tensor):
-            Outputs of shape `[B, T, H, V]`.
+            Outputs of shape `[B, T, HQ, V]`.
         final_state (Tuple[torch.Tensor]):
             Final state tuple having tensors of shape `[N, H, K, M]` and `[N, H, M, V]` if `output_final_state=True`.
-            `None` otherwise.
+            Both entries are `None` otherwise.
 
     Examples::
         >>> import torch
         >>> import torch.nn.functional as F
         >>> from einops import rearrange
-        >>> from fla.ops.gsa import fused_recurrent_gsa
+        >>> from fla.ops.gsa import chunk_gsa
         # inputs with equal lengths
         >>> B, T, H, K, V, M = 4, 2048, 4, 512, 512, 64
         >>> q = torch.randn(B, T, H, K, device='cuda')
@@ -1221,7 +1219,7 @@ def chunk_gsa(
             "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
         )
     chunk_size = kwargs.pop('chunk_size', None)
-    if chunk_size is not None and chunk_size != 2 ** (chunk_size.bit_length() - 1):
+    if chunk_size is not None and (chunk_size <= 0 or chunk_size & (chunk_size - 1)):
         raise ValueError(f"`chunk_size` must be a power of 2, got {chunk_size}.")
     if cu_seqlens is not None:
         if q.shape[0] != 1:
@@ -1248,6 +1246,13 @@ def chunk_gsa(
     hk0, hv0 = None, None
     if initial_state is not None:
         hk0, hv0 = initial_state
+    H, HQ = k.shape[2], q.shape[2]
+    if HQ < H or HQ % H:
+        raise ValueError(f"The number of query heads ({HQ}) must be a multiple of the number of key heads ({H}).")
+    NG = HQ // H
+    if NG > 1:
+        k, v, s, g = (x.repeat_interleave(NG, dim=2) for x in (k, v, s, g))
+        hk0, hv0 = (x.repeat_interleave(NG, dim=1) if x is not None else None for x in (hk0, hv0))
     o, *final_state = ChunkGSAFunction.apply(
         q,
         k,
@@ -1263,4 +1268,6 @@ def chunk_gsa(
         cu_seqlens_cpu,
         chunk_size,
     )
+    if NG > 1 and output_final_state:
+        final_state = [x[:, ::NG].contiguous() for x in final_state]
     return o, final_state
