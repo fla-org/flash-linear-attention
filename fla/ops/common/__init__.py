@@ -9,7 +9,14 @@ from fla.backends import TileLangBackend, TritonAscendBackend
 from fla.ops.common.backends import intracard  # noqa: F401
 
 if TritonAscendBackend.is_available():
-    from fla.ops.common.backends.triton_ascend import chunk_delta_h, chunk_h, chunk_momentum_delta, chunk_o, chunk_scaled_dot_kkt, gate  # noqa: F401
+    from fla.ops.common.backends.triton_ascend import (  # noqa: F401
+        chunk_delta_h,
+        chunk_h,
+        chunk_momentum_delta,
+        chunk_o,
+        chunk_scaled_dot_kkt,
+        gate,
+    )
 
 if TileLangBackend.is_available():
     from fla.ops.common.backends import tilelang  # noqa: F401

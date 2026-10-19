@@ -109,3 +109,36 @@ def test_tilelang_enabled(monkeypatch, setting, expected):
     else:
         monkeypatch.setenv('FLA_TILELANG', setting)
     assert backends.TileLangBackend().is_enabled() is expected
+
+
+def test_momentum_delta_chunk_ascend_verifier_k_boundary():
+    """K=256 exactly fills the four 64-wide kernel slabs; K=257 must fall back to the torch reference."""
+    from fla.ops.common.backends.triton_ascend.chunk_momentum_delta import (
+        chunk_momentum_delta_fwd_h_verifier,
+        chunk_momentum_delta_fwd_o_verifier,
+    )
+    from fla.ops.momentum_delta_rule.backends.triton_ascend import TritonAscendMomentumDeltaRuleBackend
+
+    backend = TritonAscendMomentumDeltaRuleBackend()
+
+    def verdict(K):
+        q = SimpleNamespace(device=SimpleNamespace(type='npu'), shape=(1, 64, 2, K))
+        return backend.chunk_momentum_delta_rule_verifier(q=q, k=q, v=q, log_alpha=q, log_mu=q)
+
+    assert verdict(256) == (True, None)
+    accepted, reason = verdict(257)
+    assert accepted is False
+    assert reason == "K > 256 not supported by the NPU chunk kernels"
+
+    def common_verdicts(K):
+        q = SimpleNamespace(device=SimpleNamespace(type='npu'), shape=(1, 64, 2, K))
+        return (
+            chunk_momentum_delta_fwd_h_verifier(*(q,) * 13, False, 16),
+            chunk_momentum_delta_fwd_o_verifier(*(q,) * 10, 1.0, 16),
+        )
+
+    assert common_verdicts(256) == ((True, None), (True, None))
+    assert common_verdicts(257) == (
+        (False, "K > 256 not supported by the NPU chunk kernels"),
+        (False, "K > 256 not supported by the NPU chunk kernels"),
+    )
