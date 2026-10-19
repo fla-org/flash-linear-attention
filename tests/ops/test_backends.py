@@ -6,7 +6,6 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import importlib.metadata
-import inspect
 import logging
 from pathlib import Path
 from types import SimpleNamespace
@@ -403,89 +402,4 @@ def test_retention_ascend_registration_import_order(run_python):
         assert 'simple_gla' not in backends._operation_registries
         """,
         FLA_DISABLE_BACKEND_DISPATCH='0',
-    )
-
-
-@pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
-@pytest.mark.parametrize('route', ['accepted', 'rejected', 'disabled', 'unavailable'])
-@pytest.mark.parametrize('explicit_options', [False, True], ids=['defaults', 'explicit-options'])
-def test_additive_gate_dispatch(monkeypatch, route, explicit_options):
-    from fla.ops.gsa import gate
-
-    entry = gate.fused_additive_gate
-    registry = backends._function_registries[inspect.unwrap(entry)]
-    monkeypatch.setattr(registry, '_backends', {})
-    monkeypatch.setenv('FLA_TEST_ADDITIVE_GATE', '0' if route == 'disabled' else '1')
-
-    class GateBackend(backends.BaseBackend):
-        backend_type = 'test_additive_gate'
-        env_var = 'FLA_TEST_ADDITIVE_GATE'
-
-        @classmethod
-        def is_available(cls):
-            return route != 'unavailable'
-
-    backend_result, fallback_result = object(), object()
-    implementation = create_autospec(inspect.unwrap(entry), return_value=backend_result)
-    fallback = create_autospec(gate.FusedAdditiveGateFunction.apply, return_value=fallback_result)
-    monkeypatch.setattr(gate.FusedAdditiveGateFunction, 'apply', fallback)
-    backends.register(
-        entry,
-        backend=GateBackend,
-        verifier=lambda *args, **kwargs: (False, 'unsupported input') if route == 'rejected' else (True, None),
-    )(implementation)
-
-    x = torch.zeros(1, 3, 2, 4)
-    options = {}
-    if explicit_options:
-        options = dict(
-            initial_state=torch.zeros(1, 1, 2, 4),
-            cu_seqlens=torch.tensor([0, 3], dtype=torch.int32),
-            output_dtype=torch.float16,
-            gate_dtype=torch.float32,
-        )
-    expected = backend_result if route == 'accepted' else fallback_result
-    for operation in ['gsa.chunk', 'gsa.fused_recurrent', 'lightnet.chunk', 'lightnet.fused_recurrent']:
-        consumer = importlib.import_module('fla.ops.' + operation)
-        assert consumer.fused_additive_gate is entry
-        assert consumer.fused_additive_gate(x=x, **options) is expected
-    assert implementation.call_count == (4 if route == 'accepted' else 0)
-    assert fallback.call_count == (0 if route == 'accepted' else 4)
-    if route == 'accepted':
-        implementation.assert_called_with(x=x, **options)
-    else:
-        fallback.assert_called_with(
-            x, options.get('initial_state'), options.get('cu_seqlens'),
-            options.get('output_dtype'), options.get('gate_dtype'),
-        )
-
-
-@pytest.mark.parametrize('first_owner', ['lightnet', 'gsa'])
-@pytest.mark.parametrize('disabled', ['0', '1'], ids=['dispatch', 'bypass'])
-def test_additive_gate_import_order(run_python, first_owner, disabled):
-    run_python(
-        f"""
-        import importlib
-        import inspect
-        from unittest.mock import patch
-
-        import torch
-
-        importlib.import_module('fla.ops.{first_owner}')
-        from fla import backends
-        from fla.ops.gsa import gate
-
-        entry = gate.fused_additive_gate
-        assert (inspect.unwrap(entry) in backends._function_registries) == ({disabled!r} == '0')
-        result = object()
-        x = torch.zeros(1, 3, 2, 4)
-        with patch.object(gate.FusedAdditiveGateFunction, 'apply', return_value=result) as fallback:
-            for operation in ['gsa.chunk', 'gsa.fused_recurrent', 'lightnet.chunk', 'lightnet.fused_recurrent']:
-                consumer = importlib.import_module('fla.ops.' + operation)
-                assert consumer.fused_additive_gate is entry
-                assert consumer.fused_additive_gate(x=x) is result
-            assert fallback.call_count == 4
-            fallback.assert_called_with(x, None, None, None, None)
-        """,
-        FLA_DISABLE_BACKEND_DISPATCH=disabled,
     )

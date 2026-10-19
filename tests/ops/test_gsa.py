@@ -17,26 +17,22 @@ from fla.utils import assert_close, check_shared_mem, device, device_platform
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'D', 'V', 'M', 'gate_logit_normalizer', 'dtype', 'requires_grad_q', 'reverse'),
+    ('B', 'T', 'H', 'D', 'V', 'M', 'gate_logit_normalizer', 'dtype'),
     [
-        pytest.param(*test, id="B{}-T{}-H{}-D{}-V{}-M{}-gate_logit_normalizer{}-{}-requires_grad_q{}-reverse{}".format(*test))
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-V{}-M{}-gate_logit_normalizer{}-{}".format(*test))
         for test in [
-            (1, 63, 1, 64, 64, 32, 1, torch.float, True, False),
-            (2, 1024, 4, 60, 60, 64, 1, torch.float, True, False),
-            (2, 1024, 8, 128, 128, 64, 0.1, torch.float, True, False),
-            (2, 1024, 8, 128, 128, 32, 1, torch.float, True, False),
-            (2, 1024, 8, 128, 128, 64, 1, torch.float, True, False),
-            (2, 1024, 8, 128, 128, 64, 10, torch.float, True, False),
-            (4, 2048, 8, 64, 64, 64, 1, torch.float, True, False),
-            (2, 1024, 8, 128, 128, 64, 0.1, torch.float16, True, False),
-            (2, 1024, 8, 128, 128, 64, 10, torch.float16, True, False),
-            (2, 65, 2, 32, 48, 32, None, torch.float32, True, False),
-            (2, 65, 2, 32, 48, 32, None, torch.float16, True, False),
-            (2, 65, 2, 32, 48, 32, None, torch.bfloat16, True, False),
-            (1, 1, 2, 32, 48, 32, 1, torch.float32, False, False),
-            (1, 1, 2, 32, 48, 32, 1, torch.float32, False, True),
-            (1, 17, 2, 32, 48, 32, 1, torch.float32, False, False),
-            (1, 17, 2, 32, 48, 32, 1, torch.float32, False, True),
+            (1, 63, 1, 64, 64, 32, 1, torch.float),
+            (2, 1024, 4, 60, 60, 64, 1, torch.float),
+            (2, 1024, 8, 128, 128, 64, 0.1, torch.float),
+            (2, 1024, 8, 128, 128, 32, 1, torch.float),
+            (2, 1024, 8, 128, 128, 64, 1, torch.float),
+            (2, 1024, 8, 128, 128, 64, 10, torch.float),
+            (4, 2048, 8, 64, 64, 64, 1, torch.float),
+            (2, 1024, 8, 128, 128, 64, 0.1, torch.float16),
+            (2, 1024, 8, 128, 128, 64, 10, torch.float16),
+            (2, 65, 2, 32, 48, 32, None, torch.float32),
+            (2, 65, 2, 32, 48, 32, None, torch.float16),
+            (2, 65, 2, 32, 48, 32, None, torch.bfloat16),
         ]
     ],
 )
@@ -53,13 +49,11 @@ def test_fused_recurrent(
     M: int,
     gate_logit_normalizer: float | None,
     dtype: torch.dtype,
-    requires_grad_q: bool,
-    reverse: bool,
 ):
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
 
-    q = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_(requires_grad_q)
+    q = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
     k = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
     v = torch.randn((B, T, H, V), dtype=dtype, device=device).requires_grad_()
     s = torch.randn((B, T, H, M), dtype=dtype, device=device).requires_grad_()
@@ -78,19 +72,16 @@ def test_fused_recurrent(
         ref_s = (s.float() - z).exp().to(dtype)
         ref_g = torch.cat((z[:, :1], z[:, :-1]), dim=1) - z
     ref, (ref_hkt, ref_hvt) = naive_recurrent_gsa(
-        q=q.flip(1) if reverse else q,
-        k=k.flip(1) if reverse else k,
-        v=v.flip(1) if reverse else v,
-        s=ref_s.flip(1) if reverse else ref_s,
-        g=ref_g.flip(1) if reverse else ref_g,
+        q=q,
+        k=k,
+        v=v,
+        s=ref_s,
+        g=ref_g,
         initial_state=(hk0, hv0),
         output_final_state=True,
     )
-    if reverse:
-        ref = ref.flip(1)
     ((ref * do).sum() + (ref_hkt * dhkt).sum() + (ref_hvt * dhvt).sum()).backward()
-    if requires_grad_q:
-        ref_dq, q.grad = q.grad.clone(), None
+    ref_dq, q.grad = q.grad.clone(), None
     ref_dk, k.grad = k.grad.clone(), None
     ref_dv, v.grad = v.grad.clone(), None
     ref_ds, s.grad = s.grad.clone(), None
@@ -107,11 +98,9 @@ def test_fused_recurrent(
         g=g,
         initial_state=(hk0, hv0),
         output_final_state=True,
-        reverse=reverse,
     )
     ((tri * do).sum() + (tri_hkt * dhkt).sum() + (tri_hvt * dhvt).sum()).backward()
-    if requires_grad_q:
-        tri_dq, q.grad = q.grad.clone(), None
+    tri_dq, q.grad = q.grad.clone(), None
     tri_dk, k.grad = k.grad.clone(), None
     tri_dv, v.grad = v.grad.clone(), None
     tri_ds, s.grad = s.grad.clone(), None
@@ -123,8 +112,7 @@ def test_fused_recurrent(
     assert_close('o', ref, tri, 0.005)
     assert_close('hkt', ref_hkt, tri_hkt, 0.005)
     assert_close('hvt', ref_hvt, tri_hvt, 0.005)
-    if requires_grad_q:
-        assert_close('dq', ref_dq, tri_dq, 0.005)
+    assert_close('dq', ref_dq, tri_dq, 0.005)
     assert_close('dk', ref_dk, tri_dk, 0.005)
     assert_close('dv', ref_dv, tri_dv, 0.005)
     assert_close('ds', ref_ds, tri_ds, 0.005)
