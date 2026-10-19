@@ -32,7 +32,7 @@ from fla.ops.simple_gla import chunk_simple_gla, fused_recurrent_simple_gla
 from fla.ops.utils.index import prepare_lens_from_mask
 
 if TYPE_CHECKING:
-    from fla.models.utils import Cache
+    from fla.models.cache_utils import Cache
 
 logger = logging.get_logger(__name__)
 

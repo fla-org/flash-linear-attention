@@ -10,7 +10,7 @@ import torch
 
 from fla.models import YOCOConfig, YOCOForCausalLM
 
-from .test_modeling_base import run_test_generation, run_test_model_forward_backward
+from .utils import check_forward, check_generation
 
 try:
     import flash_attn  # noqa: F401
@@ -83,9 +83,7 @@ def _create_yoco_config(
     )
 
 
-# ===================================================================================
-# Test for Modeling (Forward/Backward Pass)
-# ===================================================================================
+@pytest.mark.parametrize('varlen', [False, True], ids=['dense', 'varlen'])
 @pytest.mark.parametrize(
     ['L', 'B', 'T', 'H', 'D', 'self_decoder_attn_type', 'use_l2warp', 'attnres_block_size', 'dtype'],
     [
@@ -111,11 +109,12 @@ def test_modeling(
     use_l2warp: bool,
     attnres_block_size: int | None,
     dtype: torch.dtype,
+    varlen: bool,
 ):
     if self_decoder_attn_type == 'swa' and not HAS_FLASH_ATTN:
         pytest.skip(reason="YOCO swa attention requires flash-attn (`pip install flash-attn --no-build-isolation`).")
     torch.manual_seed(42)
-    run_test_model_forward_backward(
+    check_forward(
         L,
         B,
         T,
@@ -131,12 +130,10 @@ def test_modeling(
             self_decoder_attn_type=self_decoder_attn_type,
             attnres_block_size=attnres_block_size,
         ),
+        varlen=varlen,
     )
 
 
-# ===================================================================================
-# Test for Generation
-# ===================================================================================
 @pytest.mark.parametrize(
     ['L', 'B', 'T', 'H', 'D', 'self_decoder_attn_type', 'dtype', 'tol'],
     [
@@ -168,4 +165,4 @@ def test_generation(
         self_decoder_attn_type=self_decoder_attn_type,
     )
     model = YOCOForCausalLM(config)
-    run_test_generation(L, B, T, H, D, YOCOConfig, dtype, model=model, config=config, tol=tol)
+    check_generation(L, B, T, H, D, YOCOConfig, dtype, model=model, config=config, tol=tol)

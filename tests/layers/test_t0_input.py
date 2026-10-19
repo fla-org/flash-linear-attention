@@ -11,7 +11,7 @@ import torch
 from fla.layers.mamba import Mamba
 from fla.layers.mamba2 import Mamba2
 from fla.layers.rwkv6 import RWKV6Attention
-from fla.models.utils import Cache
+from fla.models.cache_utils import Cache
 from fla.utils import assert_close, device
 
 

@@ -22,7 +22,7 @@ from fla.ops.attn.decoding import attn_decoding_one_step
 from fla.ops.forgetting_attn.parallel import parallel_forgetting_attn
 
 if TYPE_CHECKING:
-    from fla.models.utils import Cache
+    from fla.models.cache_utils import Cache
 
 logger = logging.get_logger(__name__)
 

@@ -36,7 +36,7 @@ def get_definitions_from_tree(tree) -> set:
     return definitions
 
 
-def get_imports_from_tree(tree) -> set:
+def get_imports_from_tree(tree, package: str | None = None) -> set:
     """
     Return set of (module_path, symbol_name) tuples.
     module_path is the import source module (e.g., 'fla.ops.kda.wy_fast').
@@ -48,6 +48,8 @@ def get_imports_from_tree(tree) -> set:
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
             module = node.module or ""
+            if node.level and package:
+                module = resolve_name('.' * node.level + module, package)
             for alias in node.names:
                 imports.add((module, alias.name))
         elif isinstance(node, ast.Import):
@@ -266,7 +268,7 @@ class DependencyFinder:
         else:
             test_files = [p for p in self.test_dir.rglob("*.py") if p.name != '__init__.py']
         self.all_project_files = source_files + test_files
-        self.all_test_files = set(test_files)
+        self.all_test_files = {path for path in test_files if path.name.startswith('test_')}
 
         self.file_to_module = {}
         for file_path in self.all_project_files:
@@ -280,7 +282,8 @@ class DependencyFinder:
         for file_path in self.all_project_files:
             tree = parse_file(file_path)
             definitions = get_definitions_from_tree(tree)
-            imports = expand_aliased_imports(get_imports_from_tree(tree), reexports, module_aliases)
+            package = self.file_to_module.get(file_path, '').rpartition('.')[0]
+            imports = expand_aliased_imports(get_imports_from_tree(tree, package), reexports, module_aliases)
             self.file_to_definitions[file_path] = definitions
             self.file_to_imports[file_path] = imports
             for defn in definitions:
@@ -421,6 +424,15 @@ class DependencyFinder:
                         file=sys.stderr,
                     )
                 dependent_tests.add(str(test_file))
+
+        fixture_dirs = {
+            path.parent for path in self.all_project_files
+            if path.name == 'conftest.py' and self.file_to_module.get(path) in affected_modules
+        }
+        dependent_tests.update(
+            str(path) for path in self.all_test_files
+            if any(directory in path.parents for directory in fixture_dirs)
+        )
 
         for changed_file in changed_files:
             if changed_file in self.all_test_files:
