@@ -26,7 +26,7 @@ Usage::
     python -m benchmarks.ops.run --op fused_attnres --backend gluon
 
     # Compile a PyTorch reference before warmup and timing
-    python -m benchmarks.ops.run --op naive_hc_pre --compile --no-base
+    python -m benchmarks.ops.run --op naive_sinkhorn --compile --no-base
 
     # Forward only
     python -m benchmarks.ops.run --op chunk_gla --modes fwd
