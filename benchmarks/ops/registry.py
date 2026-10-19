@@ -59,15 +59,15 @@ def shape_LBTD(B, T, H, D, L=None, **kw):
     return (L, B, T, D)
 
 
-def _shape_btnd(B, T, H, D, N, **kw):
+def shape_BTND(B, T, H, D, N, **kw):
     return (B, T, N, D)
 
 
-def _shape_btn(B, T, H, D, N, **kw):
+def shape_BTN(B, T, H, D, N, **kw):
     return (B, T, N)
 
 
-def _shape_btnn(B, T, H, D, N, **kw):
+def shape_BTNN(B, T, H, D, N, **kw):
     return (B, T, N, N)
 
 
@@ -635,7 +635,7 @@ register_op(OpConfig(
     category='naive_attnres',
 ))
 
-_HC_SHAPES = {
+_hc_default_shapes = {
     'N4_B1_T1_D128': {'N': 4, 'B': 1, 'T': 1, 'H': 1, 'D': 128},
     'N4_B1_T63_D1024': {'N': 4, 'B': 1, 'T': 63, 'H': 1, 'D': 1024},
     'N4_B1_T2048_D4096': {'N': 4, 'B': 1, 'T': 2048, 'H': 1, 'D': 4096},
@@ -644,112 +644,112 @@ _HC_SHAPES = {
     'N8_B1_T2048_D1025': {'N': 8, 'B': 1, 'T': 2048, 'H': 1, 'D': 1025},
 }
 
-_HC_PRE_INPUTS = {
-    'x': TensorSpec(shape_fn=_shape_btnd),
-    'pre': TensorSpec(shape_fn=_shape_btn, dtype='float32'),
+_hc_pre_inputs = {
+    'x': TensorSpec(shape_fn=shape_BTND),
+    'pre': TensorSpec(shape_fn=shape_BTN, dtype='float32'),
 }
 
-_HC_POST_INPUTS = {
-    'x': TensorSpec(shape_fn=_shape_btnd),
+_hc_post_inputs = {
+    'x': TensorSpec(shape_fn=shape_BTND),
     'branch': TensorSpec(shape_fn=shape_BTD),
-    'post': TensorSpec(shape_fn=_shape_btn, dtype='float32'),
+    'post': TensorSpec(shape_fn=shape_BTN, dtype='float32'),
 }
 
-_MHC_POST_INPUTS = {
-    **_HC_POST_INPUTS,
-    'mixing': TensorSpec(shape_fn=_shape_btnn, dtype='float32'),
+_mhc_post_inputs = {
+    **_hc_post_inputs,
+    'mixing': TensorSpec(shape_fn=shape_BTNN, dtype='float32'),
 }
 
-_SINKHORN_INPUTS = {
-    'logits': TensorSpec(shape_fn=_shape_btnn, dtype='float32'),
+_sinkhorn_inputs = {
+    'logits': TensorSpec(shape_fn=shape_BTNN, dtype='float32'),
 }
 
 register_op(OpConfig(
     name='fused_hc_pre',
     import_path='fla.ops.hc',
-    inputs=_HC_PRE_INPUTS,
+    inputs=_hc_pre_inputs,
     output_is_tuple=False,
     category='hc',
     dim_constraints={'H': [1]},
-    default_shapes=_HC_SHAPES,
+    default_shapes=_hc_default_shapes,
     backend_env={'gluon': 'FLA_HC_GLUON', 'tilelang': 'FLA_HC_TILELANG'},
 ))
 
 register_op(OpConfig(
     name='naive_hc_pre',
     import_path='fla.ops.hc',
-    inputs=_HC_PRE_INPUTS,
+    inputs=_hc_pre_inputs,
     output_is_tuple=False,
     category='hc',
     dim_constraints={'H': [1]},
-    default_shapes=_HC_SHAPES,
+    default_shapes=_hc_default_shapes,
 ))
 
 register_op(OpConfig(
     name='fused_ihc_post',
     import_path='fla.ops.hc',
-    inputs=_HC_POST_INPUTS,
+    inputs=_hc_post_inputs,
     func_name='fused_hc_post',
     output_is_tuple=False,
     category='hc',
     dim_constraints={'H': [1]},
-    default_shapes=_HC_SHAPES,
+    default_shapes=_hc_default_shapes,
     backend_env={'gluon': 'FLA_HC_GLUON', 'tilelang': 'FLA_HC_TILELANG'},
 ))
 
 register_op(OpConfig(
     name='naive_ihc_post',
     import_path='fla.ops.hc',
-    inputs=_HC_POST_INPUTS,
+    inputs=_hc_post_inputs,
     func_name='naive_hc_post',
     output_is_tuple=False,
     category='hc',
     dim_constraints={'H': [1]},
-    default_shapes=_HC_SHAPES,
+    default_shapes=_hc_default_shapes,
 ))
 
 register_op(OpConfig(
     name='fused_mhc_post',
     import_path='fla.ops.hc',
-    inputs=_MHC_POST_INPUTS,
+    inputs=_mhc_post_inputs,
     func_name='fused_hc_post',
     output_is_tuple=False,
     category='hc',
     dim_constraints={'H': [1]},
-    default_shapes=_HC_SHAPES,
+    default_shapes=_hc_default_shapes,
     backend_env={'gluon': 'FLA_HC_GLUON', 'tilelang': 'FLA_HC_TILELANG'},
 ))
 
 register_op(OpConfig(
     name='naive_mhc_post',
     import_path='fla.ops.hc',
-    inputs=_MHC_POST_INPUTS,
+    inputs=_mhc_post_inputs,
     func_name='naive_hc_post',
     output_is_tuple=False,
     category='hc',
     dim_constraints={'H': [1]},
-    default_shapes=_HC_SHAPES,
+    default_shapes=_hc_default_shapes,
 ))
 
 register_op(OpConfig(
     name='sinkhorn',
-    import_path='fla.ops.hc',
-    inputs=_SINKHORN_INPUTS,
+    import_path='fla.ops.utils.sinkhorn',
+    inputs=_sinkhorn_inputs,
     output_is_tuple=False,
-    category='hc',
+    category='sinkhorn',
     dim_constraints={'H': [1]},
-    default_shapes=_HC_SHAPES,
-    backend_env={'gluon': 'FLA_HC_GLUON', 'tilelang': 'FLA_HC_TILELANG'},
+    default_shapes=_hc_default_shapes,
+    backend_env={'gluon': 'FLA_SINKHORN_GLUON', 'tilelang': 'FLA_SINKHORN_TILELANG'},
 ))
 
 register_op(OpConfig(
     name='naive_sinkhorn',
-    import_path='fla.ops.hc',
-    inputs=_SINKHORN_INPUTS,
+    import_path='fla.ops.utils.sinkhorn',
+    inputs=_sinkhorn_inputs,
     output_is_tuple=False,
-    category='hc',
+    category='sinkhorn',
     dim_constraints={'H': [1]},
-    default_shapes=_HC_SHAPES,
+    default_shapes=_hc_default_shapes,
 ))
 
 

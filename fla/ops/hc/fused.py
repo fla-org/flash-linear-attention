@@ -122,53 +122,6 @@ def hc_bwd_kernel_reduce(partial, grad, T, C: tl.constexpr, S: tl.constexpr, BC:
     tl.store(grad + i_t * S + o_s, tl.sum(b_partial, axis=0), mask=o_s < S)
 
 
-@triton.jit(do_not_specialize=['T'])
-def sinkhorn_fwd_kernel(
-    x,
-    o,
-    history,
-    T,
-    N: tl.constexpr,
-    BN: tl.constexpr,
-    NUM_ITERS: tl.constexpr,
-    SAVE_HISTORY: tl.constexpr,
-):
-    i_t = tl.program_id(0).to(tl.int64)
-    o_i = tl.arange(0, BN).to(tl.int64)
-    o_j = tl.arange(0, BN).to(tl.int64)
-    o_ij = (i_t * N + o_i[:, None]) * N + o_j[None, :]
-    m_ij = (o_i[:, None] < N) & (o_j[None, :] < N)
-    b_x = tl.load(x + o_ij, mask=m_ij, other=float('-inf')).to(tl.float32)
-    for step in range(NUM_ITERS):
-        b_max = tl.max(b_x, axis=0)
-        b_x = b_x - b_max[None, :]
-        b_x = tl.where(m_ij, b_x - tl.log(tl.sum(tl.exp(b_x), axis=0))[None, :], float('-inf'))
-        if SAVE_HISTORY:
-            tl.store(history + (step.to(tl.int64) * 2 * T * N * N) + o_ij, tl.exp(b_x), mask=m_ij)
-        b_max = tl.max(b_x, axis=1)
-        b_x = b_x - b_max[:, None]
-        b_x = tl.where(m_ij, b_x - tl.log(tl.sum(tl.exp(b_x), axis=1))[:, None], float('-inf'))
-        if SAVE_HISTORY:
-            tl.store(history + ((step.to(tl.int64) * 2 + 1) * T * N * N) + o_ij, tl.exp(b_x), mask=m_ij)
-    tl.store(o + o_ij, tl.exp(b_x), mask=m_ij)
-
-
-@triton.jit(do_not_specialize=['T'])
-def sinkhorn_bwd_kernel(o, history, do, dx, T, N: tl.constexpr, BN: tl.constexpr, NUM_ITERS: tl.constexpr):
-    i_t = tl.program_id(0).to(tl.int64)
-    o_i = tl.arange(0, BN).to(tl.int64)
-    o_j = tl.arange(0, BN).to(tl.int64)
-    o_ij = (i_t * N + o_i[:, None]) * N + o_j[None, :]
-    m_ij = (o_i[:, None] < N) & (o_j[None, :] < N)
-    b_dx = tl.load(do + o_ij, mask=m_ij, other=0).to(tl.float32) * tl.load(o + o_ij, mask=m_ij, other=0)
-    for step in range(NUM_ITERS - 1, -1, -1):
-        b_probability = tl.load(history + ((step.to(tl.int64) * 2 + 1) * T * N * N) + o_ij, mask=m_ij, other=0)
-        b_dx = b_dx - b_probability * tl.sum(b_dx, axis=1)[:, None]
-        b_probability = tl.load(history + (step.to(tl.int64) * 2 * T * N * N) + o_ij, mask=m_ij, other=0)
-        b_dx = b_dx - b_probability * tl.sum(b_dx, axis=0)[None, :]
-    tl.store(dx + o_ij, b_dx, mask=m_ij)
-
-
 def _validate_inputs(x: torch.Tensor, *others: torch.Tensor | None):
     if not IS_NVIDIA or not x.is_cuda:
         raise ValueError('HC kernels require NVIDIA CUDA tensors')
@@ -198,14 +151,6 @@ def _validate_hc_post(
         raise ValueError('branch and post must have shapes [..., D] and [..., N] matching x')
     if mixing is not None and mixing.shape != (*x.shape[:-1], x.shape[-2]):
         raise ValueError('mixing must have shape [..., N, N] matching x')
-
-
-def _validate_sinkhorn(logits: torch.Tensor, num_iters: int = 20) -> None:
-    _validate_inputs(logits)
-    if logits.shape[-1] != logits.shape[-2]:
-        raise ValueError('logits must have shape [..., N, N]')
-    if isinstance(num_iters, bool) or not isinstance(num_iters, int) or num_iters < 1:
-        raise ValueError('num_iters must be a positive integer')
 
 
 def hc_fwd(x, weight, branch=None, mixing=None):
@@ -282,46 +227,6 @@ def hc_bwd(x, weight, branch, mixing, dout):
     return dx, dweight, dbranch, dmixing
 
 
-def sinkhorn_fwd(logits, num_iters, save_history):
-    N = logits.shape[-1]
-    T = logits.numel() // (N * N)
-    out = torch.empty_like(logits, dtype=torch.float32)
-    history = torch.empty((2 * num_iters, T, N, N), device=logits.device, dtype=torch.float32) if save_history else None
-    if T:
-        sinkhorn_fwd_kernel[(T,)](
-            x=logits,
-            o=out,
-            history=history,
-            T=T,
-            N=N,
-            BN=triton.next_power_of_2(N),
-            NUM_ITERS=num_iters,
-            SAVE_HISTORY=save_history,
-            num_warps=4,
-            enable_fp_fusion=False,
-        )
-    return out, history
-
-
-def sinkhorn_bwd(out, history, dout, num_iters, dtype):
-    N, T = out.shape[-1], out.numel() // out.shape[-1] ** 2
-    dx = torch.empty_like(out, dtype=dtype)
-    if T:
-        sinkhorn_bwd_kernel[(T,)](
-            o=out,
-            history=history,
-            do=dout,
-            dx=dx,
-            T=T,
-            N=N,
-            BN=triton.next_power_of_2(N),
-            NUM_ITERS=num_iters,
-            num_warps=4,
-            enable_fp_fusion=False,
-        )
-    return dx
-
-
 class FusedHCFunction(torch.autograd.Function):
 
     @staticmethod
@@ -339,27 +244,6 @@ class FusedHCFunction(torch.autograd.Function):
     def backward(ctx, dout):
         x, weight, branch, mixing = ctx.saved_tensors
         return hc_bwd(x=x, weight=weight, branch=branch, mixing=mixing, dout=dout)
-
-
-class SinkhornFunction(torch.autograd.Function):
-
-    @staticmethod
-    @input_guard
-    @autocast_custom_fwd
-    def forward(ctx, logits, num_iters, save_history):
-        out, history = sinkhorn_fwd(logits=logits, num_iters=num_iters, save_history=save_history)
-        ctx.save_for_backward(out, history)
-        ctx.num_iters, ctx.dtype = num_iters, logits.dtype
-        return out
-
-    @staticmethod
-    @input_guard
-    @autocast_custom_bwd
-    @once_differentiable
-    def backward(ctx, dout):
-        out, history = ctx.saved_tensors
-        dx = sinkhorn_bwd(out=out, history=history, dout=dout, num_iters=ctx.num_iters, dtype=ctx.dtype)
-        return dx, None, None
 
 
 @dispatch
@@ -400,22 +284,3 @@ def fused_hc_post(x: torch.Tensor, branch: torch.Tensor, post: torch.Tensor, mix
     """
     _validate_hc_post(x=x, branch=branch, post=post, mixing=mixing)
     return FusedHCFunction.apply(x, post, branch, mixing)
-
-
-@dispatch
-def sinkhorn(logits: torch.Tensor, num_iters: int = 20) -> torch.Tensor:
-    """Normalize routing logits with alternating column and row log-sum-exp steps.
-
-    Args:
-        logits (torch.Tensor):
-            Routing logits of shape `[..., N, N]`.
-        num_iters (int, Optional):
-            Positive number of normalization iterations. Default: 20.
-
-    Returns:
-        torch.Tensor:
-            Nonnegative FP32 mixing matrices of shape `[..., N, N]`.
-            A finite iteration count does not guarantee exact double stochasticity.
-    """
-    _validate_sinkhorn(logits=logits, num_iters=num_iters)
-    return SinkhornFunction.apply(logits, num_iters, torch.is_grad_enabled() and logits.requires_grad)

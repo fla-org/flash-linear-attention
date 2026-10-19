@@ -15,10 +15,8 @@ from fla.backends import GluonBackend, register
 from fla.ops.hc.fused import (
     _validate_hc_post,
     _validate_hc_pre,
-    _validate_sinkhorn,
     fused_hc_post,
     fused_hc_pre,
-    sinkhorn,
 )
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
@@ -140,72 +138,6 @@ def hc_bwd_kernel_reduce(partial, grad, T, C: gl.constexpr, S: gl.constexpr, BC:
     gl.store(grad + i_t * S + o_s, gl.sum(b_partial, axis=0), mask=o_s < S)
 
 
-@gluon.jit(do_not_specialize=['T'])
-def sinkhorn_fwd_kernel(
-    x,
-    o,
-    history,
-    T,
-    N: gl.constexpr,
-    BN: gl.constexpr,
-    BT: gl.constexpr,
-    NUM_ITERS: gl.constexpr,
-    SAVE_HISTORY: gl.constexpr,
-):
-    # independent matrices share a warp; row and column reductions never cross warps
-    RI: gl.constexpr = 4 if BN >= 4 else BN
-    RJ: gl.constexpr = 8 if BN >= 8 else BN
-    layout: gl.constexpr = gl.BlockedLayout([1, 1, 1], [32 // (RI * RJ), RI, RJ], [4, 1, 1], [2, 1, 0])
-    o_t = gl.program_id(0).to(gl.int64) * BT + gl.arange(0, BT, layout=gl.SliceLayout(1, gl.SliceLayout(2, layout)))
-    o_i = gl.arange(0, BN, layout=gl.SliceLayout(0, gl.SliceLayout(2, layout))).to(gl.int64)
-    o_j = gl.arange(0, BN, layout=gl.SliceLayout(0, gl.SliceLayout(1, layout))).to(gl.int64)
-    o_ij = (o_t[:, None, None] * N + o_i[None, :, None]) * N + o_j[None, None, :]
-    m_ij = (o_t[:, None, None] < T) & (o_i[None, :, None] < N) & (o_j[None, None, :] < N)
-    b_x = gl.load(x + o_ij, mask=m_ij, other=float('-inf')).to(gl.float32)
-    for step in range(NUM_ITERS):
-        b_max = gl.max(b_x, axis=1)
-        b_x = b_x - b_max[:, None, :]
-        b_x = gl.where(m_ij, b_x - gl.log(gl.sum(gl.exp(b_x), axis=1))[:, None, :], float('-inf'))
-        if SAVE_HISTORY:
-            gl.store(history + (step.to(gl.int64) * 2 * T * N * N) + o_ij, gl.exp(b_x), mask=m_ij)
-        b_max = gl.max(b_x, axis=2)
-        b_x = b_x - b_max[:, :, None]
-        b_x = gl.where(m_ij, b_x - gl.log(gl.sum(gl.exp(b_x), axis=2))[:, :, None], float('-inf'))
-        if SAVE_HISTORY:
-            gl.store(history + ((step.to(gl.int64) * 2 + 1) * T * N * N) + o_ij, gl.exp(b_x), mask=m_ij)
-    gl.store(o + o_ij, gl.exp(b_x), mask=m_ij)
-
-
-@gluon.jit(do_not_specialize=['T'])
-def sinkhorn_bwd_kernel(
-    o,
-    history,
-    do,
-    dx,
-    T,
-    N: gl.constexpr,
-    BN: gl.constexpr,
-    BT: gl.constexpr,
-    NUM_ITERS: gl.constexpr,
-):
-    # independent matrices share a warp; row and column reductions never cross warps
-    RI: gl.constexpr = 4 if BN >= 4 else BN
-    RJ: gl.constexpr = 8 if BN >= 8 else BN
-    layout: gl.constexpr = gl.BlockedLayout([1, 1, 1], [32 // (RI * RJ), RI, RJ], [4, 1, 1], [2, 1, 0])
-    o_t = gl.program_id(0).to(gl.int64) * BT + gl.arange(0, BT, layout=gl.SliceLayout(1, gl.SliceLayout(2, layout)))
-    o_i = gl.arange(0, BN, layout=gl.SliceLayout(0, gl.SliceLayout(2, layout))).to(gl.int64)
-    o_j = gl.arange(0, BN, layout=gl.SliceLayout(0, gl.SliceLayout(1, layout))).to(gl.int64)
-    o_ij = (o_t[:, None, None] * N + o_i[None, :, None]) * N + o_j[None, None, :]
-    m_ij = (o_t[:, None, None] < T) & (o_i[None, :, None] < N) & (o_j[None, None, :] < N)
-    b_dx = gl.load(do + o_ij, mask=m_ij, other=0).to(gl.float32) * gl.load(o + o_ij, mask=m_ij, other=0)
-    for step in range(NUM_ITERS - 1, -1, -1):
-        b_probability = gl.load(history + ((step.to(gl.int64) * 2 + 1) * T * N * N) + o_ij, mask=m_ij, other=0)
-        b_dx = b_dx - b_probability * gl.sum(b_dx, axis=2)[:, :, None]
-        b_probability = gl.load(history + (step.to(gl.int64) * 2 * T * N * N) + o_ij, mask=m_ij, other=0)
-        b_dx = b_dx - b_probability * gl.sum(b_dx, axis=1)[:, None, :]
-    gl.store(dx + o_ij, b_dx, mask=m_ij)
-
-
 def hc_fwd(x, weight, branch=None, mixing=None):
     N, D = x.shape[-2:]
     T = x.numel() // (N * D)
@@ -281,50 +213,6 @@ def hc_bwd(x, weight, branch, mixing, dout):
     return dx, dweight, dbranch, dmixing
 
 
-def sinkhorn_fwd(logits, num_iters, save_history):
-    N = logits.shape[-1]
-    T = logits.numel() // (N * N)
-    out = torch.empty_like(logits, dtype=torch.float32)
-    history = torch.empty((2 * num_iters, T, N, N), device=logits.device, dtype=torch.float32) if save_history else None
-    BT = 1 if T < 128 else max(4, 128 // min(32, triton.next_power_of_2(N) ** 2))
-    if T:
-        sinkhorn_fwd_kernel[(triton.cdiv(T, BT),)](
-            x=logits,
-            o=out,
-            history=history,
-            T=T,
-            N=N,
-            BN=triton.next_power_of_2(N),
-            BT=BT,
-            NUM_ITERS=num_iters,
-            SAVE_HISTORY=save_history,
-            num_warps=4,
-            enable_fp_fusion=False,
-        )
-    return out, history
-
-
-def sinkhorn_bwd(out, history, dout, num_iters, dtype):
-    N, T = out.shape[-1], out.numel() // out.shape[-1] ** 2
-    dx = torch.empty_like(out, dtype=dtype)
-    BT = 1 if T < 128 else max(4, 128 // min(32, triton.next_power_of_2(N) ** 2))
-    if T:
-        sinkhorn_bwd_kernel[(triton.cdiv(T, BT),)](
-            o=out,
-            history=history,
-            do=dout,
-            dx=dx,
-            T=T,
-            N=N,
-            BN=triton.next_power_of_2(N),
-            BT=BT,
-            NUM_ITERS=num_iters,
-            num_warps=4,
-            enable_fp_fusion=False,
-        )
-    return dx
-
-
 class FusedHCGluonFunction(torch.autograd.Function):
 
     @staticmethod
@@ -344,30 +232,8 @@ class FusedHCGluonFunction(torch.autograd.Function):
         return hc_bwd(x=x, weight=weight, branch=branch, mixing=mixing, dout=dout)
 
 
-class SinkhornGluonFunction(torch.autograd.Function):
-
-    @staticmethod
-    @input_guard
-    @autocast_custom_fwd
-    def forward(ctx, logits, num_iters, save_history):
-        out, history = sinkhorn_fwd(logits=logits, num_iters=num_iters, save_history=save_history)
-        ctx.save_for_backward(out, history)
-        ctx.num_iters, ctx.dtype = num_iters, logits.dtype
-        return out
-
-    @staticmethod
-    @input_guard
-    @autocast_custom_bwd
-    @once_differentiable
-    def backward(ctx, dout):
-        out, history = ctx.saved_tensors
-        dx = sinkhorn_bwd(out=out, history=history, dout=dout, num_iters=ctx.num_iters, dtype=ctx.dtype)
-        return dx, None, None
-
-
 @register(fused_hc_pre, env_var='FLA_HC_GLUON')
 @register(fused_hc_post, env_var='FLA_HC_GLUON')
-@register(sinkhorn, env_var='FLA_HC_GLUON')
 class HCGluonBackend(GluonBackend):
     default_enable = False
 
@@ -384,7 +250,3 @@ class HCGluonBackend(GluonBackend):
     ) -> torch.Tensor:
         _validate_hc_post(x=x, branch=branch, post=post, mixing=mixing)
         return FusedHCGluonFunction.apply(x, post, branch, mixing)
-
-    def sinkhorn(self, logits: torch.Tensor, num_iters: int = 20) -> torch.Tensor:
-        _validate_sinkhorn(logits=logits, num_iters=num_iters)
-        return SinkhornGluonFunction.apply(logits, num_iters, torch.is_grad_enabled() and logits.requires_grad)

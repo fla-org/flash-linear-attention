@@ -56,14 +56,15 @@ def test_benchmark(monkeypatch, custom_shapes, compile):
 
 
 @pytest.mark.parametrize('backend', ['triton', 'gluon', 'tilelang'])
-def test_backend(monkeypatch, backend):
-    for name in ('FLA_GLUON', 'FLA_TILELANG', 'FLA_HC_GLUON', 'FLA_HC_TILELANG'):
+@pytest.mark.parametrize('op_name,prefix', [('fused_hc_pre', 'HC'), ('sinkhorn', 'SINKHORN')])
+def test_backend(monkeypatch, backend, op_name, prefix):
+    for name in ('FLA_GLUON', 'FLA_TILELANG', f'FLA_{prefix}_GLUON', f'FLA_{prefix}_TILELANG'):
         monkeypatch.setenv(name, '1')
-    run.benchmark_op(op_name='fused_hc_pre', shapes={}, backend=backend)
+    run.benchmark_op(op_name=op_name, shapes={}, backend=backend)
     assert os.environ['FLA_GLUON'] == '0'
     assert os.environ['FLA_TILELANG'] == '0'
-    assert os.environ['FLA_HC_GLUON'] == str(int(backend == 'gluon'))
-    assert os.environ['FLA_HC_TILELANG'] == str(int(backend == 'tilelang'))
+    assert os.environ[f'FLA_{prefix}_GLUON'] == str(int(backend == 'gluon'))
+    assert os.environ[f'FLA_{prefix}_TILELANG'] == str(int(backend == 'tilelang'))
 
 
 @pytest.mark.parametrize('name,shape,dtype', [

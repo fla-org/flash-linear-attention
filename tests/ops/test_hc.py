@@ -11,7 +11,8 @@ import pytest
 import torch
 
 from fla.backends import _DISPATCH_DISABLED, GluonBackend, TileLangBackend
-from fla.ops.hc import fused, fused_hc_post, fused_hc_pre, naive_hc_post, naive_hc_pre, naive_sinkhorn, sinkhorn
+from fla.ops.hc import fused, fused_hc_post, fused_hc_pre, naive_hc_post, naive_hc_pre
+from fla.ops.utils.sinkhorn import naive_sinkhorn, sinkhorn
 from fla.utils import IS_NVIDIA, assert_close, device
 
 
@@ -22,6 +23,7 @@ def backend(request, monkeypatch):
     for name in ('GLUON', 'TILELANG'):
         monkeypatch.setenv(f'FLA_{name}', '0')
         monkeypatch.setenv(f'FLA_HC_{name}', '0')
+        monkeypatch.setenv(f'FLA_SINKHORN_{name}', '0')
     name = request.param
     if name == 'triton':
         return fused
@@ -31,6 +33,7 @@ def backend(request, monkeypatch):
     if not backend_type.is_available():
         pytest.skip(f'{name} is unavailable')
     monkeypatch.setenv(f'FLA_HC_{name.upper()}', '1')
+    monkeypatch.setenv(f'FLA_SINKHORN_{name.upper()}', '1')
     return importlib.import_module(f'fla.ops.hc.backends.{name}')
 
 
@@ -115,44 +118,6 @@ def test_hc_post(backend, shape, dtype, strided, ratio, identity):
         assert_close('dmixing', ref_dmixing[0], tri_dmixing[0], ratio)
 
 
-@pytest.mark.parametrize('dtype', [torch.float32, torch.float16, torch.bfloat16])
-@pytest.mark.parametrize('shape,num_iters,scale,strided', [
-    ((2, 7, 1, 1), 20, 1, False),
-    ((2, 7, 3, 3), 1, 1, False),
-    ((2, 7, 4, 4), 20, 1, False),
-    ((2, 7, 8, 8), 7, 1, False),
-    ((2, 7, 4, 4), 20, 1000, False),
-    ((127, 4, 4), 20, 1, False),
-    ((128, 4, 4), 20, 1, False),
-    ((129, 1, 1), 20, 1, False),
-    ((129, 3, 3), 20, 1, False),
-    ((129, 8, 8), 20, 1, False),
-    ((4, 4), 20, 1, False),
-    ((2, 4, 4), 20, 1, True),
-    ((2, 0, 4, 4), 20, 1, False),
-])
-def test_sinkhorn(backend, dtype, shape, num_iters, scale, strided):
-    torch.manual_seed(42)
-    logits = torch.randn(shape, device=device, dtype=dtype) * scale
-    if strided:
-        logits = logits.transpose(-1, -2)
-    logits.requires_grad_()
-    ref = naive_sinkhorn(logits=logits, num_iters=num_iters)
-    tri = sinkhorn(logits=logits, num_iters=num_iters)
-    do = torch.randn_like(ref)
-    ref_dx, = torch.autograd.grad(outputs=ref, inputs=logits, grad_outputs=do)
-    tri_dx, = torch.autograd.grad(outputs=tri, inputs=logits, grad_outputs=do)
-    assert tri.shape == ref.shape and tri.dtype == torch.float32
-    assert tri_dx.dtype == dtype
-    if logits.numel() == 0:
-        torch.testing.assert_close(ref, tri)
-        torch.testing.assert_close(ref_dx, tri_dx)
-        return
-    assert_close('o', ref, tri, 1e-4)
-    assert_close('dx', ref_dx, tri_dx, 1e-4)
-    torch.testing.assert_close(tri.sum(-1), torch.ones_like(tri[..., 0]), rtol=1e-5, atol=1e-5)
-
-
 @pytest.mark.parametrize('identity', [True, False], ids=['ihc', 'mhc'])
 def test_hc_stack(backend, identity):
     torch.manual_seed(42)
@@ -178,29 +143,26 @@ def test_hc_stack(backend, identity):
         assert_close(name, ref_grad, tri_grad, 1e-4)
 
 
-@pytest.mark.parametrize('op,identity', [(fused_hc_pre, True), (fused_hc_post, True), (fused_hc_post, False), (sinkhorn, True)])
+@pytest.mark.parametrize('op,identity', [(fused_hc_pre, True), (fused_hc_post, True), (fused_hc_post, False)])
 def test_hc_packed(backend, op, identity):
     torch.manual_seed(42)
     x = torch.randn(2, 3, 4, 65, device=device)
     if op is fused_hc_pre:
         inputs = {'x': x, 'pre': torch.randn(2, 3, 4, device=device)}
-    elif op is fused_hc_post:
+    else:
         inputs = {'x': x, 'branch': torch.randn(2, 3, 65, device=device), 'post': torch.randn(2, 3, 4, device=device)}
         if not identity:
             inputs['mixing'] = torch.randn(2, 3, 4, 4, device=device)
-    else:
-        inputs = {'logits': torch.randn(2, 3, 4, 4, device=device)}
     with torch.no_grad():
         dense = op(**inputs)
         packed = op(**{name: tensor.flatten(0, 1) for name, tensor in inputs.items()})
     torch.testing.assert_close(dense.flatten(0, 1), packed, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize('op', [fused_hc_pre, fused_hc_post, sinkhorn])
+@pytest.mark.parametrize('op', [fused_hc_pre, fused_hc_post])
 def test_hc_backend(backend, monkeypatch, op):
     calls = []
-    prefix = 'sinkhorn' if op is sinkhorn else 'hc'
-    forward, backward = getattr(backend, f'{prefix}_fwd'), getattr(backend, f'{prefix}_bwd')
+    forward, backward = backend.hc_fwd, backend.hc_bwd
 
     def fwd(*args, **kwargs):
         calls.append('fwd')
@@ -210,16 +172,14 @@ def test_hc_backend(backend, monkeypatch, op):
         calls.append('bwd')
         return backward(*args, **kwargs)
 
-    monkeypatch.setattr(backend, f'{prefix}_fwd', fwd)
-    monkeypatch.setattr(backend, f'{prefix}_bwd', bwd)
+    monkeypatch.setattr(backend, 'hc_fwd', fwd)
+    monkeypatch.setattr(backend, 'hc_bwd', bwd)
     x = torch.randn(3, 4, 65, device=device, requires_grad=True)
     weight = torch.randn(3, 4, device=device, requires_grad=True)
     if op is fused_hc_pre:
         out = op(x=x, pre=weight)
-    elif op is fused_hc_post:
-        out = op(x=x, branch=x[:, 0], post=weight)
     else:
-        out = op(logits=torch.randn(3, 4, 4, device=device, requires_grad=True))
+        out = op(x=x, branch=x[:, 0], post=weight)
     for name in ('GLUON', 'TILELANG'):
         monkeypatch.setenv(f'FLA_HC_{name}', '0')
     out.sum().backward()
@@ -249,9 +209,3 @@ def test_hc_invalid_inputs(backend):
         fused_hc_post(x=x, branch=torch.randn(65, device=device), post=torch.randn(2, 4, device=device))
     with pytest.raises(ValueError, match='mixing must'):
         fused_hc_post(x=x, branch=x[:, 0], post=x[:, :, 0], mixing=torch.randn(4, 4, device=device))
-    with pytest.raises(ValueError, match='positive integer'):
-        sinkhorn(logits=torch.randn(4, 4, device=device), num_iters=0)
-    with pytest.raises(ValueError, match='shape'):
-        sinkhorn(logits=torch.randn(4, 3, device=device))
-    with pytest.raises(ValueError, match='FP16, BF16, or FP32'):
-        sinkhorn(logits=torch.randn(4, 4, device=device, dtype=torch.float64))

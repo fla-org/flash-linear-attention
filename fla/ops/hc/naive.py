@@ -36,12 +36,3 @@ def naive_hc_post(
 
     update = post.unsqueeze(-1) * branch.unsqueeze(-2)
     return (residual + update).to(dtype)
-
-
-def naive_sinkhorn(logits: torch.Tensor, num_iters: int = 20) -> torch.Tensor:
-    """Apply column and row log normalizations in FP32."""
-    x = logits.float()
-    for _ in range(num_iters):
-        x = x - x.logsumexp(dim=-2, keepdim=True)
-        x = x - x.logsumexp(dim=-1, keepdim=True)
-    return x.exp()

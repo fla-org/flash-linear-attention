@@ -22,7 +22,7 @@ from fla.ops.generalized_delta_rule import (
 )
 from fla.ops.gla import chunk_gla, fused_chunk_gla, fused_recurrent_gla
 from fla.ops.gsa import chunk_gsa, fused_recurrent_gsa
-from fla.ops.hc import fused_hc_post, fused_hc_pre, sinkhorn
+from fla.ops.hc import fused_hc_post, fused_hc_pre
 from fla.ops.hgrn import fused_recurrent_hgrn
 from fla.ops.kda import chunk_kda, fused_recurrent_kda
 from fla.ops.lightning_attn import chunk_lightning_attn, fused_recurrent_lightning_attn
@@ -43,6 +43,7 @@ from fla.ops.rwkv6 import chunk_rwkv6, fused_recurrent_rwkv6
 from fla.ops.rwkv7 import chunk_rwkv7, fused_recurrent_rwkv7
 from fla.ops.simple_gla import chunk_simple_gla, fused_chunk_simple_gla, fused_recurrent_simple_gla, parallel_simple_gla
 from fla.ops.stickbreaking_attn import parallel_stickbreaking_attn
+from fla.ops.utils import sinkhorn
 from fla.ops.wall_attn import parallel_wall_attn, parallel_wall_attn_decode
 
 __all__ = [
