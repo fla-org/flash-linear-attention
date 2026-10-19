@@ -213,3 +213,20 @@ def test_gla_custom_residual(missing, make_model, monkeypatch, tmp_path):
     monkeypatch.delitem(residuals._RESIDUAL_CLASSES, 'test.projected')
     with pytest.raises(ValueError, match='register_residual'):
         GLAForCausalLM.from_pretrained(tmp_path)
+
+
+def test_gla_key_mapping(make_model, tmp_path):
+    torch.manual_seed(42)
+    model = make_model(models.GLAConfig, num_hidden_layers=1)
+    state = model.state_dict()
+    state['model.layers.0.attn_norm.weight'] = state.pop('model.layers.0.attn.q_proj.weight')
+    model.config.save_pretrained(tmp_path)
+    save_file(state, tmp_path / 'model.safetensors', metadata={'format': 'pt'})
+    restored, info = GLAForCausalLM.from_pretrained(
+        tmp_path,
+        key_mapping={r'layers\.0\.attn_norm\.weight': 'layers.0.attn.q_proj.weight'},
+        output_loading_info=True,
+    )
+    assert not info['missing_keys'] and not info['unexpected_keys'] and not info['mismatched_keys']
+    for name, value in restored.state_dict().items():
+        torch.testing.assert_close(value, model.state_dict()[name], rtol=0, atol=0)
