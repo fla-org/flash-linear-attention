@@ -34,7 +34,7 @@ def main():
 
     from benchmarks.ops.registry import generate_inputs, get_op
     from fla.ops.gdn2 import chunk_bwd, chunk_fwd, chunk_gdn2
-    from fla.utils import IS_NPU
+    from fla.utils import IS_GATHER_SUPPORTED, IS_NPU
 
     assert IS_NPU and torch.npu.is_available()
     assert Path(sys.modules['fla'].__file__).resolve().is_relative_to(source)
@@ -99,12 +99,48 @@ def main():
 
     shapes = ((4, 2048, 16, 128, False), (8, 2048, 32, 256, False), (1, 2048, 4, 128, True))
     records = []
+
+    def checkpoint(phase, shape, pending_samples=None):
+        modules = {}
+        for name, module in tuple(sys.modules.items()):
+            if name == 'fla' or name.startswith('fla.'):
+                filename = getattr(module, '__file__', None)
+                if filename:
+                    path = Path(filename).resolve()
+                    assert path.is_relative_to(source), (name, path, source)
+                    modules[str(path.relative_to(source))] = hashlib.sha256(path.read_bytes()).hexdigest()
+        result = dict(
+            label=args.label,
+            commit=args.commit,
+            source=str(source),
+            torch=torch.__version__,
+            torch_npu=torch_npu.__version__,
+            triton=triton.__version__,
+            device=torch.npu.get_device_name(0),
+            gather_supported=IS_GATHER_SUPPORTED,
+            timing='Five synchronized wall-clock samples after three warmups; gradients accumulate as in CI benchmark',
+            stage_timing='Three separate calls with synchronization around each pipeline stage; excludes no work from samples_ms',
+            records=records,
+            imported_sources=modules,
+            complete=len(records) == len(shapes),
+            phase=phase,
+            current_shape=shape,
+            current_input_hashes=hashes if shape is not None else None,
+            pending_samples_ms=pending_samples,
+        )
+        (args.output / f'{args.label}.json').write_text(json.dumps(result, indent=2) + '\n')
+        print(json.dumps({'label': args.label, 'phase': phase, 'shape': shape, 'time': time.time()}), flush=True)
+
     for B, T, H, D, packed in shapes:
         inputs, do, workload = make_workload(B, T, H, D, packed)
         hashes = {
             name: hashlib.sha256(tensor.detach().cpu().view(torch.uint8).numpy().tobytes()).hexdigest()
             for name, tensor in {**inputs, 'do': do}.items()
         }
+        shape = (B, T, H, D, packed)
+        if hasattr(torch.npu, 'reset_peak_memory_stats'):
+            torch.npu.reset_peak_memory_stats()
+        checkpoint('warmup', shape)
         for _ in range(3):
             out = workload()
         torch.npu.synchronize()
@@ -112,6 +148,7 @@ def main():
         for tensor in inputs.values():
             if tensor.requires_grad:
                 assert tensor.grad is not None and torch.isfinite(tensor.grad).all().item()
+        checkpoint('samples', shape)
         samples = []
         for _ in range(5):
             torch.npu.synchronize()
@@ -124,6 +161,7 @@ def main():
             if tensor.requires_grad:
                 assert torch.isfinite(tensor.grad).all().item()
 
+        checkpoint('stage measurements', shape, samples)
         stages, stage_totals = time_stages(workload)
         for tensor in inputs.values():
             if tensor.requires_grad:
@@ -138,34 +176,15 @@ def main():
             stage_samples_ms=stages,
             instrumented_total_ms=stage_totals,
             input_hashes=hashes,
+            peak_allocated_bytes=torch.npu.max_memory_allocated() if hasattr(torch.npu, 'max_memory_allocated') else None,
         )
         print(json.dumps({'label': args.label, **record}), flush=True)
         records.append(record)
+        checkpoint('shape complete', shape)
         del workload, inputs, out, do
         torch.npu.empty_cache()
 
-    modules = {}
-    for name, module in tuple(sys.modules.items()):
-        if name == 'fla' or name.startswith('fla.'):
-            filename = getattr(module, '__file__', None)
-            if filename:
-                path = Path(filename).resolve()
-                assert path.is_relative_to(source), (name, path, source)
-                modules[str(path.relative_to(source))] = hashlib.sha256(path.read_bytes()).hexdigest()
-    result = dict(
-        label=args.label,
-        commit=args.commit,
-        source=str(source),
-        torch=torch.__version__,
-        torch_npu=torch_npu.__version__,
-        triton=triton.__version__,
-        device=torch.npu.get_device_name(0),
-        timing='Five synchronized wall-clock samples after three warmups; gradients accumulate as in CI benchmark',
-        stage_timing='Three separate calls with synchronization around each pipeline stage; excludes no work from samples_ms',
-        records=records,
-        imported_sources=modules,
-    )
-    (args.output / f'{args.label}.json').write_text(json.dumps(result, indent=2) + '\n')
+    checkpoint('complete', None)
 
     if args.profile:
         collector = Path(__file__).resolve().parents[2] / '.agents/skills/fla-ascend-performance/scripts'

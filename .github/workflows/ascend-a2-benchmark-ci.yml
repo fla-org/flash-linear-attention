@@ -161,14 +161,19 @@ jobs:
           print("matplotlib savefig smoke test: ok")
           PY
 
-      - name: Check strict GDN2 regressions before measuring the candidate
+      - name: Check representative strict GDN2 regressions before timing
         shell: bash
         env:
           FLA_CI_ENV: "0"
           FLA_NPU_XDIST: "1"
         run: |
           source /usr/local/Ascend/ascend-toolkit/set_env.sh
-          pytest -s -v -x -n 4 --dist load tests/ops/test_gdn2.py -k large_decay_recurrence --junitxml=gdn2-regressions.xml
+          # Early signal only; ascend-a2-ci.yml keeps the full strict GDN2 gate.
+          pytest -s -v -x -n 4 --dist load --junitxml=gdn2-regressions.xml \
+            'tests/ops/test_gdn2.py::test_chunk_large_decay_recurrence[dense-log-gates-bf16-k60-v32]' \
+            'tests/ops/test_gdn2.py::test_chunk_large_decay_recurrence[varlen-fused-gates-bf16-k60-v32]' \
+            'tests/ops/test_gdn2.py::test_chunk_large_decay_recurrence[dense-fused-gates-bf16-k256-v128]' \
+            'tests/ops/test_gdn2.py::test_chunk_large_decay_recurrence[varlen-log-gates-fp32-k48-v32]'
 
       - name: Compare GDN2 backward on one NPU
         shell: bash
@@ -182,10 +187,11 @@ jobs:
           set -euo pipefail
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           baseline=9e97506c338769e8031966fb22fe31780addd8fa
-          git fetch origin "$baseline"
+          git fetch --depth 1 origin "$baseline"
           mkdir -p /tmp/gdn2-baseline
           git archive "$baseline" | tar -x -C /tmp/gdn2-baseline
           candidate=$(git rev-parse HEAD)
+          mkdir -p gdn2-paired
           for trial in baseline-1 candidate-1 candidate-2 baseline-2; do
             source="$GITHUB_WORKSPACE"
             commit="$candidate"
@@ -193,7 +199,9 @@ jobs:
               source=/tmp/gdn2-baseline
               commit="$baseline"
             fi
-            python benchmarks/ops/profile_gdn2_review.py --source "$source" --commit "$commit" --label "$trial" --output gdn2-paired
+            timeout --signal=INT --kill-after=30s 40m \
+              python benchmarks/ops/profile_gdn2_review.py --source "$source" --commit "$commit" --label "$trial" --output gdn2-paired \
+              2>&1 | tee "gdn2-paired/$trial.log"
           done
 
       - name: Upload GDN2 iteration evidence
