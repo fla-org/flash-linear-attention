@@ -1,45 +1,33 @@
 # HC, mHC, and iHC
 
-A standard residual layer updates a single stream as $x_{l+1}=x_l+F_l(x_l)$. HC expands that state into $N$ streams, $X_l\in\mathbb{R}^{N\times D}$, while the layer $F_l$ still operates on a $D$-dimensional input. HC, mHC, and iHC differ in how the residual streams are connected across layers.
+We follow the notation of [Attention Residuals, §2 and §6.2](https://arxiv.org/pdf/2603.15031#page=15): $l$ indexes layers, $h_l\in\mathbb{R}^d$ is the input to layer $l$, and $f_l$ is its transformation. Each attention or MLP sublayer counts as one layer. Batch and token indices are omitted.
 
-## HC
+## General form
 
-[HC](https://arxiv.org/abs/2409.19606) introduces three mappings: pre weights $p_l\in\mathbb{R}^N$ read from the streams, post weights $q_l\in\mathbb{R}^N$ distribute the layer output, and a residual matrix $M_l\in\mathbb{R}^{N\times N}$ mixes the existing streams:
-
-```math
-h_l=p_l^\top X_l,\qquad
-b_l=F_l(h_l),\qquad
-X_{l+1}=M_lX_l+q_lb_l.
-```
-
-The mappings can combine learned static coefficients with input-dependent coefficients. Expanding the residual state increases the information carried between layers without widening $F_l$. The direct residual path across several layers contains the product $M_{L-1}\cdots M_l$; unconstrained matrices can amplify or attenuate that path as depth increases.
-
-## mHC
-
-[mHC](https://arxiv.org/abs/2512.24880) constrains $M_l$ to the Birkhoff polytope of doubly stochastic matrices:
+Let $H_l\in\mathbb{R}^{d\times m}$ contain $m$ residual streams as columns. The vectors $\alpha_l,\beta_l\in\mathbb{R}^m$ give the pre (read) and post (write) weights; $A_{l+1}\in\mathbb{R}^{m\times m}$ mixes the existing streams on the transition from $H_l$ to $H_{l+1}$:
 
 ```math
-M_l\geq 0,\qquad
-M_l\mathbf{1}=\mathbf{1},\qquad
-\mathbf{1}^\top M_l=\mathbf{1}^\top.
+h_l=H_l\alpha_l,\qquad
+v_l=f_l(h_l),\qquad
+H_{l+1}=H_lA_{l+1}+v_l\beta_l^\top.
 ```
 
-Each output stream is a convex combination of the input streams, and the stream mean is preserved by the residual mixing. Products of doubly stochastic matrices remain doubly stochastic, with spectral norm at most one. These properties apply to the direct residual path; they do not bound the Jacobian of the full layer, which also contains $F_l$ and input-dependent routing.
+The layer reads a weighted combination of the streams and writes its output back to them, while the residual transition carries the previous state forward. The weights may depend on the current state. FLA stores streams as rows: `x` corresponds to $H_l^\top$, and `mixing` to $A_{l+1}^\top$.
 
-mHC obtains the mixing matrix by alternating row and column normalization of a positive matrix with Sinkhorn iterations. A finite number of iterations only approximates the constraint. Its pre/post mappings are nonnegative, with sigmoid gates for the readout and scaled sigmoid gates for the writeback.
+## HC, mHC, and iHC as special cases
 
-## iHC
+Their residual transitions differ in one condition: **HC learns $A_l$ without stochastic constraints, mHC constrains it to be doubly stochastic, and iHC fixes it to $I_m$.**
 
-[iHC](https://x.com/unakar666/status/2027566637319393412) fixes the residual matrix to the identity, $M_l=I_N$:
+| Variant    | Condition on $A_l$                                                            | Effect of the residual transition                  |
+| ---------- | ----------------------------------------------------------------------------- | -------------------------------------------------- |
+| [HC][hc]   | Learned $A_l\in\mathbb{R}^{m\times m}$                                        | Freely mixes, amplifies, or attenuates streams     |
+| [mHC][mhc] | $A_l\geq0$, $A_l\mathbf{1}=\mathbf{1}$, $\mathbf{1}^\top A_l=\mathbf{1}^\top$ | Convex mixing that preserves the stream mean       |
+| [iHC][ihc] | $A_l=I_m$                                                                     | Carries each stream unchanged before the new write |
 
-```math
-X_{l+1}=X_l+q_lF_l(p_l^\top X_l).
-```
+mHC uses Sinkhorn normalization to obtain $A_l$; finite iterations approximate the doubly stochastic constraint. It also constrains the pre/post weights, using $\alpha_l=\sigma(\tilde\alpha_l)$ and $\beta_l=2\sigma(\tilde\beta_l)$, where the tildes denote learned logits. iHC retains learned pre/post weights, so streams still interact through $f_l(H_l\alpha_l)$ even though the residual transition is the identity.
 
-The direct residual path is then exactly an identity mapping at every depth. Learned pre/post routing still lets the streams interact through the layer output. This removes the learned residual-mixing matrix and its normalization; the residual update needs no $N\times N$ matrix multiplication. With one stream and $p_l=q_l=1$, the update reduces to the standard residual connection.
+Setting $m=1$ and $A_l=\alpha_l=\beta_l=1$ recovers the standard residual update $h_{l+1}=h_l+f_l(h_l)$.
 
-| Variant | Residual matrix $M_l$    | Direct residual path across layers        |
-| ------- | ----------------------- | ----------------------------------------- |
-| HC      | Learned, unconstrained  | Product of learned mixing matrices        |
-| mHC     | Doubly stochastic       | Doubly stochastic under exact constraints |
-| iHC     | Identity                | Identity                                  |
+[hc]: https://arxiv.org/abs/2409.19606
+[mhc]: https://arxiv.org/abs/2512.24880
+[ihc]: https://x.com/unakar666/status/2027566637319393412
