@@ -14,15 +14,6 @@ from fla.backends import dispatch
 from fla.utils import IS_NVIDIA, autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
-def naive_sinkhorn(logits: torch.Tensor, num_iters: int = 20) -> torch.Tensor:
-    """Apply column and row log normalizations in FP32."""
-    x = logits.float()
-    for _ in range(num_iters):
-        x = x - x.logsumexp(dim=-2, keepdim=True)
-        x = x - x.logsumexp(dim=-1, keepdim=True)
-    return x.exp()
-
-
 @triton.jit(do_not_specialize=['T'])
 def sinkhorn_fwd_kernel(
     x,

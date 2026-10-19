@@ -59,6 +59,10 @@ def shape_LBTD(B, T, H, D, L=None, **kw):
     return (L, B, T, D)
 
 
+def shape_BTHNN(B, T, H, D, N, **kw):
+    return (B, T, H, N, N)
+
+
 def shape_BTND(B, T, H, D, N, **kw):
     return (B, T, N, D)
 
@@ -661,16 +665,14 @@ _mhc_post_inputs = {
 }
 
 _sinkhorn_default_shapes = {
-    'N4_B1_T1': {'N': 4, 'B': 1, 'T': 1, 'H': 1, 'D': 1},
-    'N4_B1_T63': {'N': 4, 'B': 1, 'T': 63, 'H': 1, 'D': 1},
-    'N4_B1_T2048': {'N': 4, 'B': 1, 'T': 2048, 'H': 1, 'D': 1},
-    'N4_B2_T1024': {'N': 4, 'B': 2, 'T': 1024, 'H': 1, 'D': 1},
-    'N4_B1_T8192': {'N': 4, 'B': 1, 'T': 8192, 'H': 1, 'D': 1},
-    'N8_B1_T2048': {'N': 8, 'B': 1, 'T': 2048, 'H': 1, 'D': 1},
+    'B1_T8K_H1_N4':  {'B': 1, 'T': 8192,  'H': 1, 'N': 4, 'D': 1},
+    'B1_T8K_H1_N8':  {'B': 1, 'T': 8192,  'H': 1, 'N': 8, 'D': 1},
+    'B1_T32K_H1_N4': {'B': 1, 'T': 32768, 'H': 1, 'N': 4, 'D': 1},
+    'B1_T32K_H1_N8': {'B': 1, 'T': 32768, 'H': 1, 'N': 8, 'D': 1},
 }
 
 _sinkhorn_inputs = {
-    'logits': TensorSpec(shape_fn=shape_BTNN, dtype='float32'),
+    'logits': TensorSpec(shape_fn=shape_BTHNN, dtype='float32'),
 }
 
 register_op(OpConfig(
