@@ -9,16 +9,13 @@ import tilelang
 import tilelang.language as T
 import torch
 import triton
-from torch.autograd.function import once_differentiable
 
 from fla.backends import TileLangBackend, register
-from fla.ops.hc.fused import (
-    _validate_hc_post,
-    _validate_hc_pre,
-    fused_hc_post,
-    fused_hc_pre,
-)
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
+from fla.ops.hc.fused import hc_fwd
+
+
+class HCTileLangBackend(TileLangBackend):
+    default_enable = False
 
 
 @tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_DEVICE_COMPILE_FLAGS: ['--fmad=false']})
@@ -102,9 +99,9 @@ def hc_bwd_kernel(NT, N, D, BN, BD, HAS_BRANCH, HAS_MIXING, x_dtype, weight_dtyp
             b_do = T.alloc_fragment((BN, BD), 'float32')
             b_product = T.alloc_fragment((BN, BD), 'float32')
             b_dx = T.alloc_fragment((BN, BD), 'float32')
-            b_dweight = T.alloc_fragment((BN,), 'float32')
-            b_dmixing = T.alloc_fragment((BN,), 'float32')
-            b_dbranch = T.alloc_fragment((BD,), 'float32')
+            b_dw = T.alloc_fragment((BN,), 'float32')
+            b_dm = T.alloc_fragment((BN,), 'float32')
+            b_dy = T.alloc_fragment((BD,), 'float32')
             if HAS_BRANCH:
                 for i, d in T.Parallel(BN, BD):
                     b_do[i, d] = T.if_then_else(i < N and i_c * BD + d < D, do[(i_t * N + i) * D + i_c * BD + d], 0)
@@ -113,13 +110,13 @@ def hc_bwd_kernel(NT, N, D, BN, BD, HAS_BRANCH, HAS_MIXING, x_dtype, weight_dtyp
                         T.cast(branch[i_t * D + i_c * BD + d], 'float32'),
                         0.0,
                     )
-                T.reduce_sum(b_product, b_dweight, dim=1)
+                T.reduce_sum(b_product, b_dw, dim=1)
                 for i, d in T.Parallel(BN, BD):
                     b_product[i, d] = b_do[i, d] * T.if_then_else(i < N, T.cast(weight[i_t * N + i], 'float32'), 0.0)
-                T.reduce_sum(b_product, b_dbranch, dim=0)
+                T.reduce_sum(b_product, b_dy, dim=0)
                 for d in T.Parallel(BD):
                     if i_c * BD + d < D:
-                        dbranch[i_t * D + i_c * BD + d] = b_dbranch[d]
+                        dbranch[i_t * D + i_c * BD + d] = b_dy[d]
                 if HAS_MIXING:
                     T.clear(b_dx)
                     for k in T.serial(N):
@@ -135,10 +132,10 @@ def hc_bwd_kernel(NT, N, D, BN, BD, HAS_BRANCH, HAS_MIXING, x_dtype, weight_dtyp
                                 T.cast(x[(i_t * N + k) * D + i_c * BD + d], 'float32'),
                                 0.0,
                             )
-                        T.reduce_sum(b_product, b_dmixing, dim=1)
+                        T.reduce_sum(b_product, b_dm, dim=1)
                         for i in T.Parallel(BN):
                             if i < N:
-                                dmixing_partial[((i_t * CD + i_c) * N + i) * N + k] = b_dmixing[i]
+                                dmixing_partial[((i_t * CD + i_c) * N + i) * N + k] = b_dm[i]
                 else:
                     T.copy(b_do, b_dx)
             else:
@@ -150,13 +147,13 @@ def hc_bwd_kernel(NT, N, D, BN, BD, HAS_BRANCH, HAS_MIXING, x_dtype, weight_dtyp
                         T.cast(x[(i_t * N + i) * D + i_c * BD + d], 'float32'),
                         0.0,
                     )
-                T.reduce_sum(b_product, b_dweight, dim=1)
+                T.reduce_sum(b_product, b_dw, dim=1)
             for i, d in T.Parallel(BN, BD):
                 if i < N and i_c * BD + d < D:
                     dx[(i_t * N + i) * D + i_c * BD + d] = b_dx[i, d]
             for i in T.Parallel(BN):
                 if i < N:
-                    dweight_partial[(i_t * CD + i_c) * N + i] = b_dweight[i]
+                    dweight_partial[(i_t * CD + i_c) * N + i] = b_dw[i]
     return kernel
 
 
@@ -177,7 +174,13 @@ def hc_bwd_kernel_reduce(NT, C, S, BC, BS, dtype):
     return kernel
 
 
-def hc_fwd(x, weight, branch=None, mixing=None):
+@register(hc_fwd, backend=HCTileLangBackend)
+def hc_fwd_tilelang(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    branch: torch.Tensor | None = None,
+    mixing: torch.Tensor | None = None,
+):
     N, D = x.shape[-2:]
     NT = x.numel() // (N * D)
     BD = max(128, min(256 if NT < 128 or branch is not None or N > 4 else 1024, triton.next_power_of_2(D)))
@@ -204,10 +207,16 @@ def hc_fwd(x, weight, branch=None, mixing=None):
             mixing.flatten() if mixing is not None else dummy,
             out.flatten(),
         )
-    return out
+    return out, hc_bwd_tilelang
 
 
-def hc_bwd(x, weight, branch, mixing, dout):
+def hc_bwd_tilelang(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    branch: torch.Tensor | None,
+    mixing: torch.Tensor | None,
+    dout: torch.Tensor,
+):
     N, D = x.shape[-2:]
     NT = x.numel() // (N * D)
     BD = 256 if NT < 128 or mixing is not None or (branch is None and N <= 4) else 512
@@ -257,42 +266,3 @@ def hc_bwd(x, weight, branch, mixing, dout):
                 )
                 kernel(partial.flatten(), grad.flatten())
     return dx, dweight, dbranch, dmixing
-
-
-class FusedHCTileLangFunction(torch.autograd.Function):
-
-    @staticmethod
-    @input_guard
-    @autocast_custom_fwd
-    def forward(ctx, x, weight, branch, mixing):
-        out = hc_fwd(x=x, weight=weight, branch=branch, mixing=mixing)
-        ctx.save_for_backward(x, weight, branch, mixing)
-        return out
-
-    @staticmethod
-    @input_guard
-    @autocast_custom_bwd
-    @once_differentiable
-    def backward(ctx, dout):
-        x, weight, branch, mixing = ctx.saved_tensors
-        return hc_bwd(x=x, weight=weight, branch=branch, mixing=mixing, dout=dout)
-
-
-@register(fused_hc_pre)
-@register(fused_hc_post)
-class HCTileLangBackend(TileLangBackend):
-    default_enable = False
-
-    def fused_hc_pre(self, x: torch.Tensor, pre: torch.Tensor) -> torch.Tensor:
-        _validate_hc_pre(x=x, pre=pre)
-        return FusedHCTileLangFunction.apply(x, pre, None, None)
-
-    def fused_hc_post(
-        self,
-        x: torch.Tensor,
-        branch: torch.Tensor,
-        post: torch.Tensor,
-        mixing: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        _validate_hc_post(x=x, branch=branch, post=post, mixing=mixing)
-        return FusedHCTileLangFunction.apply(x, post, branch, mixing)

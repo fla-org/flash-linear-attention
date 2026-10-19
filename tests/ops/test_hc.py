@@ -5,7 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-import importlib
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -15,23 +15,23 @@ from fla.ops.hc import fused, fused_hc_post, fused_hc_pre, naive_hc_post, naive_
 from fla.ops.utils.sinkhorn import naive_sinkhorn, sinkhorn
 from fla.utils import IS_NVIDIA, assert_close, device
 
+pytestmark = pytest.mark.skipif(not IS_NVIDIA, reason='NVIDIA CUDA required')
+
 
 @pytest.fixture(params=['triton', 'gluon', 'tilelang'])
 def backend(request, monkeypatch):
-    if not IS_NVIDIA:
-        pytest.skip('NVIDIA CUDA required')
     for name in ('GLUON', 'TILELANG'):
         monkeypatch.setenv(f'FLA_{name}', '0')
     name = request.param
     if name == 'triton':
-        return fused
+        return name
     if _DISPATCH_DISABLED:
         pytest.skip('Backend dispatch disabled before import')
     backend_type = GluonBackend if name == 'gluon' else TileLangBackend
     if not backend_type.is_available():
         pytest.skip(f'{name} is unavailable')
     monkeypatch.setenv(f'FLA_{name.upper()}', '1')
-    return importlib.import_module(f'fla.ops.hc.backends.{name}')
+    return name
 
 
 _HC_CASES = [
@@ -42,18 +42,18 @@ _HC_CASES = [
     pytest.param((T, 4, 1025), torch.float32, False, 5e-5, id=f'T{T}') for T in (127, 128)
 ] + [
     pytest.param((4, 65), torch.float32, False, 5e-5, id='unbatched'),
-    pytest.param((2, 4, 65), torch.float32, True, 6e-3, id='strided-mixed-dtypes'),
+    pytest.param((2, 4, 65), torch.float32, True, 6e-3, id='noncontiguous-mixed-dtypes'),
     pytest.param((2, 0, 4, 65), torch.float32, False, 5e-5, id='empty'),
 ]
 
 
-@pytest.mark.parametrize('shape,dtype,strided,ratio', _HC_CASES)
-def test_hc_pre(backend, shape, dtype, strided, ratio):
+@pytest.mark.parametrize(('shape', 'dtype', 'noncontiguous', 'ratio'), _HC_CASES)
+def test_fused_hc_pre(shape: tuple[int, ...], dtype: torch.dtype, noncontiguous: bool, ratio: float, backend):
     torch.manual_seed(42)
     x = torch.randn(shape, device=device, dtype=dtype)
-    weight_dtype = torch.bfloat16 if strided else torch.float32
+    weight_dtype = torch.bfloat16 if noncontiguous else torch.float32
     pre = torch.randn(shape[:-1], device=device, dtype=weight_dtype)
-    if strided:
+    if noncontiguous:
         x = x.transpose(-1, -2).contiguous().transpose(-1, -2)
         pre = pre.T.contiguous().T
     x.requires_grad_()
@@ -75,17 +75,17 @@ def test_hc_pre(backend, shape, dtype, strided, ratio):
     assert_close('dpre', ref_dpre, tri_dpre, ratio)
 
 
-@pytest.mark.parametrize('shape,dtype,strided,ratio', _HC_CASES)
+@pytest.mark.parametrize(('shape', 'dtype', 'noncontiguous', 'ratio'), _HC_CASES)
 @pytest.mark.parametrize('identity', [True, False], ids=['ihc', 'mhc'])
-def test_hc_post(backend, shape, dtype, strided, ratio, identity):
+def test_fused_hc_post(shape: tuple[int, ...], dtype: torch.dtype, noncontiguous: bool, ratio: float, identity: bool, backend):
     torch.manual_seed(42)
     x = torch.randn(shape, device=device, dtype=dtype)
-    weight_dtype = torch.bfloat16 if strided else torch.float32
-    branch_dtype = torch.float16 if strided else dtype
+    weight_dtype = torch.bfloat16 if noncontiguous else torch.float32
+    branch_dtype = torch.float16 if noncontiguous else dtype
     post = torch.randn(shape[:-1], device=device, dtype=weight_dtype)
     branch = torch.randn((*shape[:-2], shape[-1]), device=device, dtype=branch_dtype)
     mixing = None if identity else torch.randn((*shape[:-1], shape[-2]), device=device, dtype=torch.float32)
-    if strided:
+    if noncontiguous:
         x = x.transpose(-1, -2).contiguous().transpose(-1, -2)
         post = post.T.contiguous().T
         branch = branch.T.contiguous().T
@@ -116,7 +116,7 @@ def test_hc_post(backend, shape, dtype, strided, ratio, identity):
 
 
 @pytest.mark.parametrize('identity', [True, False], ids=['ihc', 'mhc'])
-def test_hc_stack(backend, identity):
+def test_fused_hc_stack(backend, identity):
     torch.manual_seed(42)
     x = torch.randn(2, 4, 127, device=device, requires_grad=True)
     pre = torch.randn(3, 2, 4, device=device, requires_grad=True)
@@ -140,8 +140,8 @@ def test_hc_stack(backend, identity):
         assert_close(name, ref_grad, tri_grad, 1e-4)
 
 
-@pytest.mark.parametrize('op,identity', [(fused_hc_pre, True), (fused_hc_post, True), (fused_hc_post, False)])
-def test_hc_packed(backend, op, identity):
+@pytest.mark.parametrize(('op', 'identity'), [(fused_hc_pre, True), (fused_hc_post, True), (fused_hc_post, False)])
+def test_fused_hc_packed(backend, op, identity):
     torch.manual_seed(42)
     x = torch.randn(2, 3, 4, 65, device=device)
     if op is fused_hc_pre:
@@ -156,48 +156,78 @@ def test_hc_packed(backend, op, identity):
     torch.testing.assert_close(dense.flatten(0, 1), packed, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize('op', [fused_hc_pre, fused_hc_post])
-def test_hc_backend(backend, monkeypatch, op):
-    calls = []
-    forward, backward = backend.hc_fwd, backend.hc_bwd
+@pytest.mark.parametrize(('op', 'identity'), [
+    pytest.param(fused_hc_pre, True, id='pre'),
+    pytest.param(fused_hc_post, True, id='ihc'),
+    pytest.param(fused_hc_post, False, id='mhc'),
+])
+def test_fused_hc_backward_backend(backend, monkeypatch, op, identity):
+    torch.manual_seed(42)
+    if backend == 'gluon':
+        from fla.ops.hc import gluon
 
-    def fwd(*args, **kwargs):
-        calls.append('fwd')
-        return forward(*args, **kwargs)
+        backward = Mock(wraps=gluon.hc_bwd_gluon)
+        monkeypatch.setattr(gluon, 'hc_bwd_gluon', backward)
+    elif backend == 'tilelang':
+        from fla.ops.hc import tilelang
 
-    def bwd(*args, **kwargs):
-        calls.append('bwd')
-        return backward(*args, **kwargs)
+        backward = Mock(wraps=tilelang.hc_bwd_tilelang)
+        monkeypatch.setattr(tilelang, 'hc_bwd_tilelang', backward)
+    else:
+        backward = Mock(wraps=fused.hc_bwd)
+        monkeypatch.setattr(fused, 'hc_bwd', backward)
 
-    monkeypatch.setattr(backend, 'hc_fwd', fwd)
-    monkeypatch.setattr(backend, 'hc_bwd', bwd)
     x = torch.randn(3, 4, 65, device=device, requires_grad=True)
     weight = torch.randn(3, 4, device=device, requires_grad=True)
     if op is fused_hc_pre:
         out = op(x=x, pre=weight)
     else:
-        out = op(x=x, branch=x[:, 0], post=weight)
+        mixing = None if identity else torch.randn(3, 4, 4, device=device, requires_grad=True)
+        out = op(x=x, branch=x[:, 0], post=weight, mixing=mixing)
     for name in ('GLUON', 'TILELANG'):
         monkeypatch.setenv(f'FLA_{name}', '0')
-    out.sum().backward()
-    assert calls == ['fwd', 'bwd']
+    out.backward(torch.randn_like(out))
+    backward.assert_called_once()
 
 
 @pytest.mark.parametrize('backend_type', [GluonBackend, TileLangBackend])
-def test_hc_unavailable_backend(monkeypatch, backend_type):
+@pytest.mark.parametrize(('op', 'identity'), [
+    pytest.param(fused_hc_pre, True, id='pre'),
+    pytest.param(fused_hc_post, True, id='ihc'),
+    pytest.param(fused_hc_post, False, id='mhc'),
+])
+def test_fused_hc_unavailable_backend(monkeypatch, backend_type, op, identity):
+    torch.manual_seed(42)
     if _DISPATCH_DISABLED:
         pytest.skip('Backend dispatch disabled before import')
     for name in ('GLUON', 'TILELANG'):
         monkeypatch.setenv(f'FLA_{name}', '0')
+    x = torch.randn(3, 4, 65, device=device, requires_grad=True)
+    weight = torch.randn(3, 4, device=device, requires_grad=True)
+    if op is fused_hc_pre:
+        inputs = {'x': x, 'pre': weight}
+    else:
+        inputs = {'x': x, 'branch': x[:, 0], 'post': weight}
+        if not identity:
+            inputs['mixing'] = torch.randn(3, 4, 4, device=device, requires_grad=True)
+    ref = op(**inputs)
+    do = torch.randn_like(ref)
+    ref_grads = torch.autograd.grad(outputs=ref, inputs=tuple(inputs.values()), grad_outputs=do)
+
     monkeypatch.setenv(f'FLA_{backend_type.backend_type.upper()}', '1')
     monkeypatch.setattr(backend_type, 'is_available', classmethod(lambda cls: False))
-    sentinel = object()
-    monkeypatch.setattr(fused, '_validate_hc_pre', lambda **kwargs: None)
-    monkeypatch.setattr(fused.FusedHCFunction, 'apply', lambda *args: sentinel)
-    assert fused_hc_pre(x=None, pre=None) is sentinel
+    backward = Mock(wraps=fused.hc_bwd)
+    monkeypatch.setattr(fused, 'hc_bwd', backward)
+    tri = op(**inputs)
+    tri_grads = torch.autograd.grad(outputs=tri, inputs=tuple(inputs.values()), grad_outputs=do)
+    backward.assert_called_once()
+    torch.testing.assert_close(ref, tri, rtol=0, atol=0)
+    for ref_grad, tri_grad in zip(ref_grads, tri_grads):
+        torch.testing.assert_close(ref_grad, tri_grad, rtol=0, atol=0)
 
 
-def test_hc_invalid_inputs(backend):
+def test_fused_hc_invalid_inputs(backend):
+    torch.manual_seed(42)
     x = torch.randn(2, 4, 65, device=device)
     with pytest.raises(ValueError, match='pre must'):
         fused_hc_pre(x=x, pre=torch.randn(4, device=device))

@@ -34,26 +34,26 @@ def hc_fwd_kernel(
     o_n = tl.arange(0, BN).to(tl.int64)
     o_d = i_c * BD + tl.arange(0, BD).to(tl.int64)
     m_nd = (o_n[:, None] < N) & (o_d[None, :] < D)
-    b_weight = tl.load(weight + i_t * N + o_n, mask=o_n < N, other=0).to(tl.float32)
+    b_w = tl.load(weight + i_t * N + o_n, mask=o_n < N, other=0).to(tl.float32)
     if HAS_BRANCH:
-        b_branch = tl.load(branch + i_t * D + o_d, mask=o_d < D, other=0).to(tl.float32)
+        b_y = tl.load(branch + i_t * D + o_d, mask=o_d < D, other=0).to(tl.float32)
         if HAS_MIXING:
             b_o = tl.full((BN, BD), 0, dtype=tl.float32)
             for i_n in tl.static_range(N):
                 b_x = tl.load(x + (i_t * N + i_n) * D + o_d, mask=o_d < D, other=0).to(tl.float32)
-                b_mixing = tl.load(mixing + (i_t * N + o_n) * N + i_n, mask=o_n < N, other=0).to(tl.float32)
-                b_o += b_mixing[:, None] * b_x[None, :]
+                b_m = tl.load(mixing + (i_t * N + o_n) * N + i_n, mask=o_n < N, other=0).to(tl.float32)
+                b_o += b_m[:, None] * b_x[None, :]
         else:
             b_o = tl.load(x + (i_t * N + o_n[:, None]) * D + o_d[None, :], mask=m_nd, other=0).to(tl.float32)
-        b_o += b_weight[:, None] * b_branch[None, :]
+        b_o += b_w[:, None] * b_y[None, :]
         tl.store(o + (i_t * N + o_n[:, None]) * D + o_d[None, :], b_o, mask=m_nd)
     else:
         # keep the stream reduction in registers to avoid a shared-memory layout conversion
         b_o = tl.full((BD,), 0, dtype=tl.float32)
         for i_n in tl.static_range(N):
             b_x = tl.load(x + (i_t * N + i_n) * D + o_d, mask=o_d < D, other=0).to(tl.float32)
-            b_weight_j = tl.load(weight + i_t * N + i_n).to(tl.float32)
-            b_o += b_weight_j * b_x
+            b_wj = tl.load(weight + i_t * N + i_n).to(tl.float32)
+            b_o += b_wj * b_x
         tl.store(o + i_t * D + o_d, b_o, mask=o_d < D)
 
 
@@ -82,31 +82,31 @@ def hc_bwd_kernel(
     o_n = tl.arange(0, BN).to(tl.int64)
     o_d = i_c * BD + tl.arange(0, BD).to(tl.int64)
     m_nd = (o_n[:, None] < N) & (o_d[None, :] < D)
-    b_weight = tl.load(weight + i_t * N + o_n, mask=o_n < N, other=0).to(tl.float32)
+    b_w = tl.load(weight + i_t * N + o_n, mask=o_n < N, other=0).to(tl.float32)
     if HAS_BRANCH:
         b_do = tl.load(do + (i_t * N + o_n[:, None]) * D + o_d[None, :], mask=m_nd, other=0).to(tl.float32)
-        b_branch = tl.load(branch + i_t * D + o_d, mask=o_d < D, other=0).to(tl.float32)
-        b_dweight = tl.sum(b_do * b_branch[None, :], axis=1)
-        b_dbranch = tl.sum(b_do * b_weight[:, None], axis=0)
-        tl.store(dbranch + i_t * D + o_d, b_dbranch, mask=o_d < D)
+        b_y = tl.load(branch + i_t * D + o_d, mask=o_d < D, other=0).to(tl.float32)
+        b_dw = tl.sum(b_do * b_y[None, :], axis=1)
+        b_dy = tl.sum(b_do * b_w[:, None], axis=0)
+        tl.store(dbranch + i_t * D + o_d, b_dy, mask=o_d < D)
         if HAS_MIXING:
             b_dx = tl.full((BN, BD), 0, dtype=tl.float32)
             for i_n in tl.static_range(N):
-                b_do_j = tl.load(do + (i_t * N + i_n) * D + o_d, mask=o_d < D, other=0).to(tl.float32)
-                b_mixing = tl.load(mixing + (i_t * N + i_n) * N + o_n, mask=o_n < N, other=0).to(tl.float32)
-                b_dx += b_mixing[:, None] * b_do_j[None, :]
-                b_x_j = tl.load(x + (i_t * N + i_n) * D + o_d, mask=o_d < D, other=0).to(tl.float32)
-                b_dmixing = tl.sum(b_do * b_x_j[None, :], axis=1)
-                tl.store(dmixing_partial + ((i_t * CD + i_c) * N + o_n) * N + i_n, b_dmixing, mask=o_n < N)
+                b_doj = tl.load(do + (i_t * N + i_n) * D + o_d, mask=o_d < D, other=0).to(tl.float32)
+                b_m = tl.load(mixing + (i_t * N + i_n) * N + o_n, mask=o_n < N, other=0).to(tl.float32)
+                b_dx += b_m[:, None] * b_doj[None, :]
+                b_xj = tl.load(x + (i_t * N + i_n) * D + o_d, mask=o_d < D, other=0).to(tl.float32)
+                b_dm = tl.sum(b_do * b_xj[None, :], axis=1)
+                tl.store(dmixing_partial + ((i_t * CD + i_c) * N + o_n) * N + i_n, b_dm, mask=o_n < N)
         else:
             b_dx = b_do
     else:
         b_do = tl.load(do + i_t * D + o_d, mask=o_d < D, other=0).to(tl.float32)
         b_x = tl.load(x + (i_t * N + o_n[:, None]) * D + o_d[None, :], mask=m_nd, other=0).to(tl.float32)
-        b_dx = b_weight[:, None] * b_do[None, :]
-        b_dweight = tl.sum(b_x * b_do[None, :], axis=1)
+        b_dx = b_w[:, None] * b_do[None, :]
+        b_dw = tl.sum(b_x * b_do[None, :], axis=1)
     tl.store(dx + (i_t * N + o_n[:, None]) * D + o_d[None, :], b_dx, mask=m_nd)
-    tl.store(dweight_partial + (i_t * CD + i_c) * N + o_n, b_dweight, mask=o_n < N)
+    tl.store(dweight_partial + (i_t * CD + i_c) * N + o_n, b_dw, mask=o_n < N)
 
 
 @triton.jit(do_not_specialize=['T'])
@@ -122,7 +122,7 @@ def hc_bwd_kernel_reduce(partial, grad, T, C: tl.constexpr, S: tl.constexpr, BC:
     tl.store(grad + i_t * S + o_s, tl.sum(b_partial, axis=0), mask=o_s < S)
 
 
-def _validate_inputs(x: torch.Tensor, *others: torch.Tensor | None):
+def _validate_inputs(x: torch.Tensor, *others: torch.Tensor | None) -> None:
     if not IS_NVIDIA or not x.is_cuda:
         raise ValueError('HC kernels require NVIDIA CUDA tensors')
     for value in (x, *others):
@@ -134,26 +134,8 @@ def _validate_inputs(x: torch.Tensor, *others: torch.Tensor | None):
         raise ValueError('Expected [..., N, D] with 1 <= N <= 8 and D >= 1')
 
 
-def _validate_hc_pre(x: torch.Tensor, pre: torch.Tensor) -> None:
-    _validate_inputs(x, pre)
-    if pre.shape != x.shape[:-1]:
-        raise ValueError('pre must have shape [..., N] matching x')
-
-
-def _validate_hc_post(
-    x: torch.Tensor,
-    branch: torch.Tensor,
-    post: torch.Tensor,
-    mixing: torch.Tensor | None = None,
-) -> None:
-    _validate_inputs(x, branch, post, mixing)
-    if branch.shape != (*x.shape[:-2], x.shape[-1]) or post.shape != x.shape[:-1]:
-        raise ValueError('branch and post must have shapes [..., D] and [..., N] matching x')
-    if mixing is not None and mixing.shape != (*x.shape[:-1], x.shape[-2]):
-        raise ValueError('mixing must have shape [..., N, N] matching x')
-
-
-def hc_fwd(x, weight, branch=None, mixing=None):
+@dispatch
+def hc_fwd(x: torch.Tensor, weight: torch.Tensor, branch: torch.Tensor | None = None, mixing: torch.Tensor | None = None):
     N, D = x.shape[-2:]
     T = x.numel() // (N * D)
     BD = min(256, triton.next_power_of_2(D))
@@ -176,10 +158,16 @@ def hc_fwd(x, weight, branch=None, mixing=None):
             num_warps=4,
             enable_fp_fusion=False,
         )
-    return out
+    return out, hc_bwd
 
 
-def hc_bwd(x, weight, branch, mixing, dout):
+def hc_bwd(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    branch: torch.Tensor | None,
+    mixing: torch.Tensor | None,
+    dout: torch.Tensor,
+):
     N, D = x.shape[-2:]
     T = x.numel() // (N * D)
     BD = min(256, triton.next_power_of_2(D))
@@ -233,7 +221,7 @@ class FusedHCFunction(torch.autograd.Function):
     @input_guard
     @autocast_custom_fwd
     def forward(ctx, x, weight, branch, mixing):
-        out = hc_fwd(x=x, weight=weight, branch=branch, mixing=mixing)
+        out, ctx.bwd = hc_fwd(x=x, weight=weight, branch=branch, mixing=mixing)
         ctx.save_for_backward(x, weight, branch, mixing)
         return out
 
@@ -243,10 +231,9 @@ class FusedHCFunction(torch.autograd.Function):
     @once_differentiable
     def backward(ctx, dout):
         x, weight, branch, mixing = ctx.saved_tensors
-        return hc_bwd(x=x, weight=weight, branch=branch, mixing=mixing, dout=dout)
+        return ctx.bwd(x=x, weight=weight, branch=branch, mixing=mixing, dout=dout)
 
 
-@dispatch
 def fused_hc_pre(x: torch.Tensor, pre: torch.Tensor) -> torch.Tensor:
     """Read out residual streams with activated routing weights.
 
@@ -260,11 +247,12 @@ def fused_hc_pre(x: torch.Tensor, pre: torch.Tensor) -> torch.Tensor:
         torch.Tensor:
             Weighted sum of shape `[..., D]`, accumulated in FP32 and returned in `x.dtype`.
     """
-    _validate_hc_pre(x=x, pre=pre)
+    _validate_inputs(x, pre)
+    if pre.shape != x.shape[:-1]:
+        raise ValueError('pre must have shape [..., N] matching x')
     return FusedHCFunction.apply(x, pre, None, None)
 
 
-@dispatch
 def fused_hc_post(x: torch.Tensor, branch: torch.Tensor, post: torch.Tensor, mixing: torch.Tensor | None = None) -> torch.Tensor:
     """Write a branch into residual streams using iHC or mHC routing.
 
@@ -282,5 +270,9 @@ def fused_hc_post(x: torch.Tensor, branch: torch.Tensor, post: torch.Tensor, mix
         torch.Tensor:
             Updated streams of shape `[..., N, D]`, accumulated in FP32 and returned in `x.dtype`.
     """
-    _validate_hc_post(x=x, branch=branch, post=post, mixing=mixing)
+    _validate_inputs(x, branch, post, mixing)
+    if branch.shape != (*x.shape[:-2], x.shape[-1]) or post.shape != x.shape[:-1]:
+        raise ValueError('branch and post must have shapes [..., D] and [..., N] matching x')
+    if mixing is not None and mixing.shape != (*x.shape[:-1], x.shape[-2]):
+        raise ValueError('mixing must have shape [..., N, N] matching x')
     return FusedHCFunction.apply(x, post, branch, mixing)

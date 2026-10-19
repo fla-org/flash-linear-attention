@@ -640,12 +640,14 @@ register_op(OpConfig(
 ))
 
 _hc_default_shapes = {
-    'N4_B1_T1_D128': {'N': 4, 'B': 1, 'T': 1, 'H': 1, 'D': 128},
-    'N4_B1_T63_D1024': {'N': 4, 'B': 1, 'T': 63, 'H': 1, 'D': 1024},
-    'N4_B1_T2048_D4096': {'N': 4, 'B': 1, 'T': 2048, 'H': 1, 'D': 4096},
-    'N4_B2_T1024_D4096': {'N': 4, 'B': 2, 'T': 1024, 'H': 1, 'D': 4096},
-    'N4_B1_T8192_D4096': {'N': 4, 'B': 1, 'T': 8192, 'H': 1, 'D': 4096},
-    'N8_B1_T2048_D1025': {'N': 8, 'B': 1, 'T': 2048, 'H': 1, 'D': 1025},
+    'B1_T8K_H1_N4_D2K':  {'B': 1, 'T': 8192,  'H': 1, 'N': 4, 'D': 2048},
+    'B1_T8K_H1_N8_D2K':  {'B': 1, 'T': 8192,  'H': 1, 'N': 8, 'D': 2048},
+    'B1_T32K_H1_N4_D2K': {'B': 1, 'T': 32768, 'H': 1, 'N': 4, 'D': 2048},
+    'B1_T32K_H1_N8_D2K': {'B': 1, 'T': 32768, 'H': 1, 'N': 8, 'D': 2048},
+    'B1_T8K_H1_N4_D4K':  {'B': 1, 'T': 8192,  'H': 1, 'N': 4, 'D': 4096},
+    'B1_T8K_H1_N8_D4K':  {'B': 1, 'T': 8192,  'H': 1, 'N': 8, 'D': 4096},
+    'B1_T32K_H1_N4_D4K': {'B': 1, 'T': 32768, 'H': 1, 'N': 4, 'D': 4096},
+    'B1_T32K_H1_N8_D4K': {'B': 1, 'T': 32768, 'H': 1, 'N': 8, 'D': 4096},
 }
 
 _hc_pre_inputs = {
@@ -662,17 +664,6 @@ _hc_post_inputs = {
 _mhc_post_inputs = {
     **_hc_post_inputs,
     'mixing': TensorSpec(shape_fn=shape_BTNN, dtype='float32'),
-}
-
-_sinkhorn_default_shapes = {
-    'B1_T8K_H1_N4':  {'B': 1, 'T': 8192,  'H': 1, 'N': 4, 'D': 1},
-    'B1_T8K_H1_N8':  {'B': 1, 'T': 8192,  'H': 1, 'N': 8, 'D': 1},
-    'B1_T32K_H1_N4': {'B': 1, 'T': 32768, 'H': 1, 'N': 4, 'D': 1},
-    'B1_T32K_H1_N8': {'B': 1, 'T': 32768, 'H': 1, 'N': 8, 'D': 1},
-}
-
-_sinkhorn_inputs = {
-    'logits': TensorSpec(shape_fn=shape_BTHNN, dtype='float32'),
 }
 
 register_op(OpConfig(
@@ -741,6 +732,17 @@ register_op(OpConfig(
     dim_constraints={'H': [1]},
     default_shapes=_hc_default_shapes,
 ))
+
+_sinkhorn_default_shapes = {
+    'B1_T8K_H1_N4':  {'B': 1, 'T': 8192,  'H': 1, 'N': 4, 'D': 1},
+    'B1_T8K_H1_N8':  {'B': 1, 'T': 8192,  'H': 1, 'N': 8, 'D': 1},
+    'B1_T32K_H1_N4': {'B': 1, 'T': 32768, 'H': 1, 'N': 4, 'D': 1},
+    'B1_T32K_H1_N8': {'B': 1, 'T': 32768, 'H': 1, 'N': 8, 'D': 1},
+}
+
+_sinkhorn_inputs = {
+    'logits': TensorSpec(shape_fn=shape_BTHNN, dtype='float32'),
+}
 
 register_op(OpConfig(
     name='sinkhorn',

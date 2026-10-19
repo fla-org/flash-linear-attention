@@ -38,7 +38,7 @@ X_{l+1}=X_l+q_lF_l(p_l^\top X_l).
 
 The direct residual path is then exactly an identity mapping at every depth. Learned pre/post routing still lets the streams interact through the layer output. This removes the learned residual-mixing matrix and its normalization; the residual update needs no $N\times N$ matrix multiplication. With one stream and $p_l=q_l=1$, the update reduces to the standard residual connection.
 
-| Variant | Residual matrix $M_l$   | Direct residual path across layers        |
+| Variant | Residual matrix $M_l$    | Direct residual path across layers        |
 | ------- | ----------------------- | ----------------------------------------- |
 | HC      | Learned, unconstrained  | Product of learned mixing matrices        |
 | mHC     | Doubly stochastic       | Doubly stochastic under exact constraints |
