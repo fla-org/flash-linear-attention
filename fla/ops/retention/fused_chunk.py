@@ -59,8 +59,7 @@ def fused_chunk_retention(
                 f"The number of initial states is expected to be equal to the number of input sequences, "
                 f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}.",
             )
-    exponent = -5. - torch.arange(q.shape[2], dtype=torch.float, device=q.device)
-    g_gamma = (1 - q.new_full((), 2., dtype=torch.float).pow(exponent)).log()
+    g_gamma = (1 - 2.0 ** (-5.0 - torch.arange(q.shape[2], dtype=torch.float, device=q.device))).log()
     o, final_state = fused_chunk_simple_gla(
         q=q,
         k=k,

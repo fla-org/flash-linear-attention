@@ -66,8 +66,8 @@ def fused_recurrent_lightning_attn(
                 f"The number of initial states is expected to be equal to the number of input sequences, "
                 f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}.",
             )
-    H = q.shape[2]
-    g_gamma = -(8 / H * (1 - layer_idx / num_layers)) * torch.arange(H, dtype=torch.float, device=q.device)
+    H, L = q.shape[2], num_layers
+    g_gamma = -(8 / H * (1 - layer_idx / L)) * torch.arange(H, dtype=torch.float, device=q.device)
     return fused_recurrent_simple_gla(
         q=q,
         k=k,
