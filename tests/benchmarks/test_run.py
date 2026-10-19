@@ -66,12 +66,13 @@ def test_list_does_not_import_workloads(monkeypatch, capsys):
     assert '| operator_cp |' in filtered and '| training |' not in filtered
 
 
-def test_workload_help_includes_its_arguments(capsys):
+@pytest.mark.parametrize(('benchmark', 'option'), [('kda_graph', '--iterations'), ('operator_latency', 'chunk_kda')])
+def test_workload_help_includes_its_arguments(capsys, benchmark, option):
     with pytest.raises(SystemExit) as error:
-        run.main(['kda_graph', '--help'])
+        run.main([benchmark, '--help'])
     assert error.value.code == 0
     help_text = capsys.readouterr().out
-    assert '--iterations' in help_text and '--json' in help_text
+    assert option in help_text and '--json' in help_text
 
 
 def test_failed_workload_does_not_publish_results(tmp_path, monkeypatch):

@@ -193,7 +193,6 @@ def add_arguments(parser):
         '--op',
         nargs='+',
         choices=list_ops(),
-        metavar='OP',
         help='Operator names; defaults to all registered ops',
     )
     parser.add_argument('--backend', help='Registered backend override, such as triton or gluon')
