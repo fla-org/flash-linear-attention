@@ -11,6 +11,7 @@ import torch
 import triton
 
 from fla.backends import TileLangBackend, register
+from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.sinkhorn.ops import sinkhorn_fwd
 
 
@@ -19,7 +20,7 @@ class SinkhornTileLangBackend(TileLangBackend):
 
 
 @tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_DEVICE_COMPILE_FLAGS: ['--fmad=false']})
-def sinkhorn_fwd_kernel(NT, N, BN, BT, NUM_ITERS, dtype):
+def sinkhorn_fwd_kernel(NT, scale, N, BN, BT, NUM_ITERS, dtype):
     @T.prim_func
     def kernel(
         x: T.Tensor((NT * N * N,), dtype),
@@ -46,38 +47,41 @@ def sinkhorn_fwd_kernel(NT, N, BN, BT, NUM_ITERS, dtype):
                     x[((i_t + t) * N + i) * N + j],
                     -T.infinity('float32'),
                 )
+            T.reduce_max(b_x, b_col_max, dim=1)
+            for t, i, j in T.Parallel(BT, BN, BN):
+                b_x[t, i, j] = (b_x[t, i, j] - b_col_max[t, j]) * scale
             for step in T.serial(NUM_ITERS):
                 T.reduce_max(b_x, b_col_max, dim=1)
                 for t, i, j in T.Parallel(BT, BN, BN):
                     b_x[t, i, j] = b_x[t, i, j] - b_col_max[t, j]
-                    b_p[t, i, j] = T.exp(b_x[t, i, j])
+                    b_p[t, i, j] = T.exp2(b_x[t, i, j])
                 T.reduce_sum(b_p, b_col_sum, dim=1)
                 for t, i, j in T.Parallel(BT, BN, BN):
                     b_x[t, i, j] = T.if_then_else(
                         i_t + t < NT and i < N and j < N,
-                        b_x[t, i, j] - T.log(b_col_sum[t, j]),
+                        b_x[t, i, j] - T.log2(b_col_sum[t, j]),
                         -T.infinity('float32'),
                     )
                 T.reduce_max(b_x, b_row_max, dim=2)
                 for t, i, j in T.Parallel(BT, BN, BN):
                     b_x[t, i, j] = b_x[t, i, j] - b_row_max[t, i]
-                    b_p[t, i, j] = T.exp(b_x[t, i, j])
+                    b_p[t, i, j] = T.exp2(b_x[t, i, j])
                 T.reduce_sum(b_p, b_row_sum, dim=2)
                 for t, i, j in T.Parallel(BT, BN, BN):
                     b_x[t, i, j] = T.if_then_else(
                         i_t + t < NT and i < N and j < N,
-                        b_x[t, i, j] - T.log(b_row_sum[t, i]),
+                        b_x[t, i, j] - T.log2(b_row_sum[t, i]),
                         -T.infinity('float32'),
                     )
             for t, i, j in T.Parallel(BT, BN, BN):
                 if i_t + t < NT and i < N and j < N:
-                    o[((i_t + t) * N + i) * N + j] = T.exp(b_x[t, i, j])
+                    o[((i_t + t) * N + i) * N + j] = T.exp2(b_x[t, i, j])
     return kernel
 
 
 @tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_DEVICE_COMPILE_FLAGS: ['--fmad=false']})
-def sinkhorn_bwd_kernel(NT, N, BN, BT, NUM_ITERS, dtype):
-    # Recompute earlier blocks to keep the shared probability cache within 40 KiB.
+def sinkhorn_bwd_kernel(NT, scale, N, BN, BT, NUM_ITERS, dtype):
+    # recompute earlier blocks to keep the shared probability cache within 40 KiB.
     BI = min(NUM_ITERS, 20)
 
     @T.prim_func
@@ -117,36 +121,39 @@ def sinkhorn_bwd_kernel(NT, N, BN, BT, NUM_ITERS, dtype):
                         x[((i_t + t) * N + i) * N + j],
                         -T.infinity('float32'),
                     )
+                T.reduce_max(b_x, b_col_max, dim=1)
+                for t, i, j in T.Parallel(BT, BN, BN):
+                    b_x[t, i, j] = (b_x[t, i, j] - b_col_max[t, j]) * scale
                 for step in T.serial(T.min((i_b + 1) * BI, NUM_ITERS)):
                     T.reduce_max(b_x, b_col_max, dim=1)
                     for t, i, j in T.Parallel(BT, BN, BN):
                         b_x[t, i, j] = b_x[t, i, j] - b_col_max[t, j]
-                        b_p[t, i, j] = T.exp(b_x[t, i, j])
+                        b_p[t, i, j] = T.exp2(b_x[t, i, j])
                     T.reduce_sum(b_p, b_col_sum, dim=1)
                     for t, i, j in T.Parallel(BT, BN, BN):
                         b_x[t, i, j] = T.if_then_else(
                             i_t + t < NT and i < N and j < N,
-                            b_x[t, i, j] - T.log(b_col_sum[t, j]),
+                            b_x[t, i, j] - T.log2(b_col_sum[t, j]),
                             -T.infinity('float32'),
                         )
                         if step >= i_b * BI:
-                            b_ps[2 * (step - i_b * BI), t, i, j] = T.exp(b_x[t, i, j])
+                            b_ps[2 * (step - i_b * BI), t, i, j] = T.exp2(b_x[t, i, j])
                     T.reduce_max(b_x, b_row_max, dim=2)
                     for t, i, j in T.Parallel(BT, BN, BN):
                         b_x[t, i, j] = b_x[t, i, j] - b_row_max[t, i]
-                        b_p[t, i, j] = T.exp(b_x[t, i, j])
+                        b_p[t, i, j] = T.exp2(b_x[t, i, j])
                     T.reduce_sum(b_p, b_row_sum, dim=2)
                     for t, i, j in T.Parallel(BT, BN, BN):
                         b_x[t, i, j] = T.if_then_else(
                             i_t + t < NT and i < N and j < N,
-                            b_x[t, i, j] - T.log(b_row_sum[t, i]),
+                            b_x[t, i, j] - T.log2(b_row_sum[t, i]),
                             -T.infinity('float32'),
                         )
                         if step >= i_b * BI:
-                            b_ps[2 * (step - i_b * BI) + 1, t, i, j] = T.exp(b_x[t, i, j])
+                            b_ps[2 * (step - i_b * BI) + 1, t, i, j] = T.exp2(b_x[t, i, j])
                 if i_b == T.ceildiv(NUM_ITERS, BI) - 1:
                     for t, i, j in T.Parallel(BT, BN, BN):
-                        b_dx[t, i, j] *= T.exp(b_x[t, i, j])
+                        b_dx[t, i, j] *= T.exp2(b_x[t, i, j])
                 for reverse in T.serial(T.min(BI, NUM_ITERS - i_b * BI)):
                     step = T.min(BI, NUM_ITERS - i_b * BI) - 1 - reverse
                     T.reduce_sum(b_dx, b_row_sum, dim=2)
@@ -169,6 +176,7 @@ def sinkhorn_fwd_tilelang(logits: torch.Tensor, num_iters: int):
     if NT:
         kernel = sinkhorn_fwd_kernel(
             NT=NT,
+            scale=RCP_LN2,
             N=N,
             BN=triton.next_power_of_2(N),
             BT=1 if NT < 128 else max(4, 128 // min(32, triton.next_power_of_2(N) ** 2)),
@@ -186,6 +194,7 @@ def sinkhorn_bwd_tilelang(logits: torch.Tensor, dout: torch.Tensor, num_iters: i
     if NT:
         kernel = sinkhorn_bwd_kernel(
             NT=NT,
+            scale=RCP_LN2,
             N=N,
             BN=triton.next_power_of_2(N),
             BT=1 if NT < 128 else max(4, 128 // min(32, triton.next_power_of_2(N) ** 2)),
