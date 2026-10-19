@@ -30,7 +30,7 @@ from fla.ops.utils.index import prepare_lens_from_mask
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
-    from fla.models.utils import Cache
+    from fla.models.cache_utils import Cache
 
 
 def _max_offset(seqlen_offset: int | torch.Tensor) -> int:

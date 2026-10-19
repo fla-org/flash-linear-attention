@@ -807,21 +807,24 @@ def chunk_kda_bwd_kernel_intra_npu(
                     b_dq2 *= b_gqn
                     b_dk2 *= b_gqn
 
-                # ---- diagonal (SAFE_GATE midpoint path) ----
+                # query-side diagonal. anchor is the midpoint gate of this BC tile.
                 if SAFE_GATE:
                     i_gm = i_ti + min(BC // 2, T - i_ti - 1)
                     b_gm = tl.load(p_g + i_gm * HV * K + o_k, mask=m_k, other=0.0).to(tl.float32)[None, :]
-                    m_ij_d = m_row[:, None] & ((i_i * BC + o_i)[None, :] < BT)
-                    b_dAqk_d = tl.load(p_dAqk + i_ti * (HV * BT) + o_i[:, None] * (HV * BT) +
-                                       (i_i * BC + o_i)[None, :], mask=m_ij_d, other=0.0).to(tl.float32)
-                    b_dAkk_d = tl.load(p_dAkk + i_ti * (HV * BT) + o_i[:, None] * (HV * BT) +
-                                       (i_i * BC + o_i)[None, :], mask=m_ij_d, other=0.0).to(tl.float32)
-                    m_i_d = (o_i[:, None] >= o_i[None, :]) & m_row[:, None] & m_row[None, :]
+                    o_c = i_ti + o_i
+                    m_c = o_c < T
+                    m_dAf = m_c[:, None] & ((i_i * BC + o_i)[None, :] < BT)
+                    b_dAqk_d = tl.load(p_dAqk + o_c[:, None] * (HV * BT) +
+                                       (i_i * BC + o_i)[None, :], mask=m_dAf, other=0.0).to(tl.float32)
+                    b_dAkk_d = tl.load(p_dAkk + o_c[:, None] * (HV * BT) +
+                                       (i_i * BC + o_i)[None, :], mask=m_dAf, other=0.0).to(tl.float32)
+                    m_i_d = (o_i[:, None] >= o_i[None, :]) & m_c[:, None] & m_c[None, :]
+                    m_j_d = m_c[:, None]
                     b_dAqk_d = tl.where(m_i_d, b_dAqk_d, 0.)
                     b_dAkk_d = tl.where(m_i_d, b_dAkk_d, 0.)
-                    b_g_d = tl.where(m_row[:, None], b_g - b_gm, 0.)
-                    b_gq = tl.where(m_row[:, None], exp2(b_g_d), 0.)
-                    b_gk = tl.where(m_row[:, None], exp2(-b_g_d), 0.)
+                    b_g_d = tl.where(m_j_d, b_g - b_gm, 0.)
+                    b_gq = tl.where(m_j_d, exp2(b_g_d), 0.)
+                    b_gk = tl.where(m_j_d, exp2(-b_g_d), 0.)
                     b_k_exp = b_k.to(tl.float32) * b_gk
                     b_dq2 += tl.dot(b_dAqk_d, b_k_exp, allow_tf32=False) * b_gq
                     b_dk2 += tl.dot(b_dAkk_d, b_k_exp, allow_tf32=False) * b_gq
@@ -875,21 +878,24 @@ def chunk_kda_bwd_kernel_intra_npu(
                         b_dkt = tl.dot(b_dAkk_f.to(tl.float32), b_kbg.to(tl.float32), b_dkt, allow_tf32=False)
                     b_dkt *= exp2(b_gn_f - b_g)
 
+                # future-side diagonal. same midpoint anchor; dA rows are key offsets.
                 if SAFE_GATE:
                     i_gm = i_ti + min(BC // 2, T - i_ti - 1)
                     b_gm = tl.load(p_g + i_gm * HV * K + o_k, mask=m_k, other=0.0).to(tl.float32)[None, :]
-                    o_col = i_ti + o_i
-                    m_t = (o_col[None, :] < T)
-                    b_dAqk_t = tl.load(p_dAqk + i_ti * (HV * BT) + o_row[:, None] +
-                                       o_i[None, :] * (HV * BT), mask=m_t, other=0.0).to(tl.float32)
-                    b_dAkk_t = tl.load(p_dAkk + i_ti * (HV * BT) + o_row[:, None] +
-                                       o_i[None, :] * (HV * BT), mask=m_t, other=0.0).to(tl.float32)
-                    m_i_t = (o_i[:, None] <= o_i[None, :]) & m_row[:, None] & m_row[None, :]
+                    o_c = i_ti + o_i
+                    m_c = o_c < T
+                    m_dAt = (o_i[:, None] < BT) & m_c[None, :]
+                    b_dAqk_t = tl.load(p_dAqk + o_row[:, None] + o_c[None, :] * (HV * BT),
+                                       mask=m_dAt, other=0.0).to(tl.float32)
+                    b_dAkk_t = tl.load(p_dAkk + o_row[:, None] + o_c[None, :] * (HV * BT),
+                                       mask=m_dAt, other=0.0).to(tl.float32)
+                    m_i_t = (o_i[:, None] <= o_i[None, :]) & m_c[:, None] & m_c[None, :]
+                    m_j_t = m_c[:, None]
                     b_dAqk_t = tl.where(m_i_t, b_dAqk_t, 0.)
                     b_dAkk_t = tl.where(m_i_t, b_dAkk_t, 0.)
-                    b_g_d = tl.where(m_row[:, None], b_g - b_gm, 0.)
-                    b_gq = tl.where(m_row[:, None], exp2(b_g_d), 0.)
-                    b_gk = tl.where(m_row[:, None], exp2(-b_g_d), 0.)
+                    b_g_d = tl.where(m_j_t, b_g - b_gm, 0.)
+                    b_gq = tl.where(m_j_t, exp2(b_g_d), 0.)
+                    b_gk = tl.where(m_j_t, exp2(-b_g_d), 0.)
                     b_q_exp = b_q.to(tl.float32) * b_gq
                     b_kb_exp = b_k.to(tl.float32) * b_b.to(tl.float32)[:, None] * b_gq
                     b_dkt += tl.dot(b_dAqk_t, b_q_exp, allow_tf32=False) * b_gk
@@ -967,8 +973,7 @@ def chunk_kda_bwd_intra_npu(
         )
     # The 192KB UB budget caps how many BCxBK fp32 tiles stay live, so BC must
     # follow the padded BK (non-pow2 K like 192 lands in the BK=256 tier).
-    # SAFE_GATE dot path uses 32x32 cube tiles; the pairwise per-column diag
-    # compiles only at BC<=16, and only at BC=8 once BK reaches 256.
+    # safe-gate diagonal uses 32x32 cube tiles.
     if safe_gate:
         BC = min(32, BT) if BK <= 256 else min(16, BT)
     else:

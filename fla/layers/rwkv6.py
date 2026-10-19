@@ -24,7 +24,7 @@ from fla.modules.token_shift import token_shift
 from fla.ops.rwkv6 import chunk_rwkv6, fused_recurrent_rwkv6
 
 if TYPE_CHECKING:
-    from fla.models.utils import Cache
+    from fla.models.cache_utils import Cache
 
 
 class RWKV6Attention(nn.Module):
