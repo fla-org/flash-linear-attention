@@ -8,23 +8,21 @@
 import torch
 import triton
 import triton.language as tl
-from einops import reduce
 
 from fla.ops.common.chunk_h import chunk_bwd_dh, chunk_fwd_h
 from fla.ops.gla.chunk import chunk_gla_bwd, chunk_gla_fwd
 from fla.ops.gsa.gate import fused_additive_gate
-from fla.ops.utils import prepare_chunk_indices
+from fla.ops.utils import chunk_local_cumsum, prepare_chunk_indices, softmax_bwd, softmax_fwd
+from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.constant import RCP_LN2
-from fla.ops.utils.cumsum import chunk_local_cumsum
 from fla.ops.utils.op import exp2, unflatten_program_id
-from fla.ops.utils.softmax import softmax_bwd, softmax_fwd
 from fla.utils import autotune_cache_kwargs, input_guard
 
 
 @triton.heuristics({
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
-@triton.autotune(
+@fla_cache_autotune(
     configs=[
         triton.Config({'BK': BK, 'BV': BV}, num_warps=num_warps, num_stages=num_stages)
         for BK in [32, 64]
@@ -32,11 +30,11 @@ from fla.utils import autotune_cache_kwargs, input_guard
         for num_warps in [2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
-    key=['BT'],
+    key=['H', 'K', 'V', 'BT', 'IS_VARLEN'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
-def chunk_gsa_fwd_k_kernel_inter(
+def chunk_gsa_fwd_kernel_inter(
     q,
     k,
     h,
@@ -47,23 +45,20 @@ def chunk_gsa_fwd_k_kernel_inter(
     chunk_indices,
     scale,
     T,
-    HQ: tl.constexpr,
     H: tl.constexpr,
     K: tl.constexpr,
     V: tl.constexpr,
     BT: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    NG: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
     i_v, i_t = unflatten_program_id(tl.cdiv(V, BV))
     i_bh = tl.program_id(1).to(tl.int64)
-    i_b, i_hq = i_bh // HQ, i_bh % HQ
-    i_h = i_hq // NG
+    i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_tg = i_t
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int64), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
         NT = tl.cdiv(T, BT)
@@ -78,17 +73,17 @@ def chunk_gsa_fwd_k_kernel_inter(
     b_o = tl.zeros([BT, BV], dtype=tl.float32)
     b_A = tl.zeros([BT, BT], dtype=tl.float32)
     o_t = i_t * BT + tl.arange(0, BT)
-    o_v = i_v * BV + tl.arange(0, BV)
+    o_v = i_v * BV + tl.arange(0, BV).to(tl.int64)
     m_t = o_t < T
     m_v = o_v < V
     m_tv = m_t[:, None] & m_v[None, :]
     for i_k in range(tl.cdiv(K, BK)):
-        o_k = i_k * BK + tl.arange(0, BK)
+        o_k = i_k * BK + tl.arange(0, BK).to(tl.int64)
         m_k = o_k < K
         m_qk = m_t[:, None] & m_k[None, :]
         m_kt = m_k[:, None] & m_t[None, :]
         m_kv = m_k[:, None] & m_v[None, :]
-        p_q = q + (bos * HQ + i_hq) * K + o_t[:, None] * (HQ*K) + o_k[None, :]
+        p_q = q + (bos * H + i_h) * K + o_t[:, None] * (H*K) + o_k[None, :]
         p_k = k + (bos * H + i_h) * K + o_k[:, None] + o_t[None, :] * (H*K)
         p_h = h + (i_tg * H + i_h) * K*V + o_k[:, None] * V + o_v[None, :]
 
@@ -105,8 +100,8 @@ def chunk_gsa_fwd_k_kernel_inter(
         b_A = tl.dot(b_q, b_k, b_A)
     m_A = m_t[:, None] & (o_i[None, :] < BT)
     p_g = g + (bos * H + i_h) * V + o_t[:, None] * (H*V) + o_v[None, :]
-    p_o = o + (bos * HQ + i_hq) * V + o_t[:, None] * (HQ*V) + o_v[None, :]
-    p_A = A + (bos * HQ + i_hq) * BT + o_t[:, None] * (HQ*BT) + o_i[None, :]
+    p_o = o + (bos * H + i_h) * V + o_t[:, None] * (H*V) + o_v[None, :]
+    p_A = A + (bos * H + i_h) * BT + o_t[:, None] * (H*BT) + o_i[None, :]
     # [BT, BV]
     b_g = tl.load(p_g, mask=m_tv, other=0.0)
     b_o = b_o * exp2(b_g)
@@ -122,7 +117,7 @@ def chunk_gsa_fwd_k_kernel_inter(
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.jit(do_not_specialize=['T'])
-def chunk_gsa_fwd_k_kernel_intra(
+def chunk_gsa_fwd_kernel_intra(
     v,
     g,
     o,
@@ -130,30 +125,27 @@ def chunk_gsa_fwd_k_kernel_intra(
     cu_seqlens,
     chunk_indices,
     T,
-    HQ: tl.constexpr,
     H: tl.constexpr,
     V: tl.constexpr,
     BT: tl.constexpr,
     BC: tl.constexpr,
     BV: tl.constexpr,
     NC: tl.constexpr,
-    NG: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
     NV = tl.cdiv(V, BV)
     i_v, i_c, i_bh = tl.program_id(0).to(tl.int64) % NV, tl.program_id(0).to(tl.int64) // NV, tl.program_id(1).to(tl.int64)
-    i_b, i_hq = i_bh // HQ, i_bh % HQ
-    i_h = i_hq // NG
+    i_b, i_h = i_bh // H, i_bh % H
     i_t, i_i = (i_c // NC).to(tl.int64), i_c % NC
     if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int64), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
 
     o_i = tl.arange(0, BC)
-    o_v = i_v * BV + tl.arange(0, BV)
+    o_v = i_v * BV + tl.arange(0, BV).to(tl.int64)
     m_v = o_v < V
 
     if i_t * BT + i_i * BC >= T:
@@ -173,7 +165,7 @@ def chunk_gsa_fwd_k_kernel_intra(
         o_jA = i_j * BC + tl.arange(0, BC)
         m_jv = (o_j[:, None] < T) & m_v[None, :]
         m_A = m_c[:, None] & (o_jA[None, :] < BT)
-        p_A = A + (bos*HQ+i_hq) * BT + o_c[:, None] * (HQ*BT) + o_jA[None, :]
+        p_A = A + (bos*H+i_h) * BT + o_c[:, None] * (H*BT) + o_jA[None, :]
         p_v = v + (bos*H+i_h) * V + o_j[:, None] * (H*V) + o_v[None, :]
         p_gv = g + (bos*H+i_h) * V + o_j[:, None] * (H*V) + o_v[None, :]
         # [BC, BV]
@@ -187,7 +179,7 @@ def chunk_gsa_fwd_k_kernel_intra(
     b_g = tl.load(p_g, mask=m_cv, other=0.0)
     b_o *= exp2(b_g - b_gn[None, :])
 
-    o_A = (bos + i_t * BT + i_i * BC + tl.arange(0, BC)) * HQ*BT + i_hq * BT + i_i * BC
+    o_A = (bos + i_t * BT + i_i * BC + tl.arange(0, BC)) * H*BT + i_h * BT + i_i * BC
     m_A = (i_t * BT + i_i * BC + tl.arange(0, BC)) < T
     for j in range(0, min(BC, T - i_t * BT - i_i * BC)):
         p_v = v + (bos + i_t * BT + i_i * BC + j) * H*V + i_h * V + o_v
@@ -199,9 +191,9 @@ def chunk_gsa_fwd_k_kernel_intra(
         b_gv = tl.load(p_gv, mask=m_v, other=0).to(tl.float32)
         # [BC, BV]
         b_vg = b_v[None, :] * exp2(b_g - b_gv[None, :])
-        # avoid 0 * inf = inf
+        # mask noncausal products before accumulating to avoid 0 * inf = NaN
         b_o += tl.where(o_i[:, None] >= j, b_A[:, None] * b_vg, 0.)
-    p_o = o + (bos*HQ + i_hq) * V + o_c[:, None] * (HQ*V) + o_v[None, :]
+    p_o = o + (bos*H + i_h) * V + o_c[:, None] * (H*V) + o_v[None, :]
     b_o += tl.load(p_o, mask=m_cv, other=0.0)
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=m_cv)
 
@@ -209,16 +201,16 @@ def chunk_gsa_fwd_k_kernel_intra(
 @triton.heuristics({
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
-@triton.autotune(
+@fla_cache_autotune(
     configs=[
         triton.Config({}, num_warps=num_warps)
         for num_warps in [2, 4, 8]
     ],
-    key=['BT'],
+    key=['H', 'V', 'BT', 'IS_VARLEN'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
-def chunk_gsa_bwd_k_kernel_dA(
+def chunk_gsa_bwd_kernel_dA(
     v,
     g,
     do,
@@ -228,23 +220,20 @@ def chunk_gsa_bwd_k_kernel_dA(
     scale,
     T,
     B: tl.constexpr,
-    HQ: tl.constexpr,
     H: tl.constexpr,
     V: tl.constexpr,
     BT: tl.constexpr,
     BC: tl.constexpr,
     BV: tl.constexpr,
     NC: tl.constexpr,
-    NG: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
     NV = tl.cdiv(V, BV)
     i_v, i_c, i_bh = tl.program_id(0).to(tl.int64) % NV, tl.program_id(0).to(tl.int64) // NV, tl.program_id(1).to(tl.int64)
-    i_b, i_hq = i_bh // HQ, i_bh % HQ
-    i_h = i_hq // NG
+    i_b, i_h = i_bh // H, i_bh % H
     i_t, i_i, i_j = (i_c // (NC * NC)).to(tl.int64), (i_c % (NC * NC)) // NC, (i_c % (NC * NC)) % NC
     if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int64), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         all = T
         T = eos - bos
@@ -252,7 +241,7 @@ def chunk_gsa_bwd_k_kernel_dA(
         bos, eos = i_b * T, i_b * T + T
         all = B * T
 
-    o_v = i_v * BV + tl.arange(0, BV)
+    o_v = i_v * BV + tl.arange(0, BV).to(tl.int64)
     m_v = o_v < V
 
     if i_t * BT + i_i * BC >= T:
@@ -263,7 +252,7 @@ def chunk_gsa_bwd_k_kernel_dA(
     m_c = o_c < T
     m_A = m_c[:, None] & (o_jA[None, :] < BT)
     m_cv = m_c[:, None] & m_v[None, :]
-    p_dA = dA+((i_v*all+bos)*HQ+i_hq)*BT + o_c[:, None] * (HQ*BT) + o_jA[None, :]
+    p_dA = dA+((i_v*all+bos)*H+i_h)*BT + o_c[:, None] * (H*BT) + o_jA[None, :]
 
     # [BC, BC]
     b_dA = tl.zeros([BC, BC], dtype=tl.float32)
@@ -274,7 +263,7 @@ def chunk_gsa_bwd_k_kernel_dA(
         p_gv = g + (bos*H+i_h) * V + o_v[:, None] + o_j[None, :] * (H*V)
         p_gn = g + (bos + i_t*BT + i_i*BC) * H*V + i_h * V + o_v
         p_g = g + (bos*H+i_h) * V + o_c[:, None] * (H*V) + o_v[None, :]
-        p_do = do + (bos*HQ+i_hq) * V + o_c[:, None] * (HQ*V) + o_v[None, :]
+        p_do = do + (bos*H+i_h) * V + o_c[:, None] * (H*V) + o_v[None, :]
         # [BV,]
         b_gn = tl.load(p_gn, mask=m_v, other=0.)
         # [BC, BV]
@@ -289,7 +278,7 @@ def chunk_gsa_bwd_k_kernel_dA(
         b_dA = tl.dot(b_do, b_vg) * scale
     elif i_i == i_j:
         p_g = g + (bos*H + i_h) * V + o_c[:, None] * (H*V) + o_v[None, :]
-        p_do = do + (bos*HQ + i_hq) * V + o_c[:, None] * (HQ*V) + o_v[None, :]
+        p_do = do + (bos*H + i_h) * V + o_c[:, None] * (H*V) + o_v[None, :]
         p_v = v + (bos + i_t*BT + i_j*BC) * H*V + i_h * V + o_v
         p_gv = g + (bos + i_t*BT + i_j*BC) * H*V + i_h * V + o_v
         # [BC, BV]
@@ -317,17 +306,17 @@ def chunk_gsa_bwd_k_kernel_dA(
 @triton.heuristics({
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
-@triton.autotune(
+@fla_cache_autotune(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [2, 4]
         for num_stages in [2, 3, 4]
     ],
-    key=['BT'],
+    key=['H', 'K', 'V', 'BT', 'IS_VARLEN'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
-def chunk_gsa_bwd_k_kernel_dqkvg(
+def chunk_gsa_bwd_kernel_dqkvg(
     q,
     k,
     v,
@@ -347,23 +336,20 @@ def chunk_gsa_bwd_k_kernel_dqkvg(
     scale,
     T,
     B: tl.constexpr,
-    HQ: tl.constexpr,
     H: tl.constexpr,
     K: tl.constexpr,
     V: tl.constexpr,
     BT: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    NG: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
     i_k, i_t = unflatten_program_id(tl.cdiv(K, BK))
     i_bh = tl.program_id(1).to(tl.int64)
-    i_b, i_hq = i_bh // HQ, i_bh % HQ
-    i_h = i_hq // NG
+    i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_tg = i_t
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int64), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         all = T
         T = eos - bos
@@ -379,14 +365,14 @@ def chunk_gsa_bwd_k_kernel_dqkvg(
     m_s = o_i[:, None] >= o_i[None, :]
 
     o_q = i_t * BT + tl.arange(0, BT)
-    o_k = i_k * BK + tl.arange(0, BK)
+    o_k = i_k * BK + tl.arange(0, BK).to(tl.int64)
     m_q = o_q < T
     m_k = o_k < K
     m_qk = m_q[:, None] & m_k[None, :]
     m_A = m_q[:, None] & (o_i[None, :] < BT)
-    p_q = q + (bos*HQ+i_hq) * K + o_q[:, None] * (HQ*K) + o_k[None, :]
+    p_q = q + (bos*H+i_h) * K + o_q[:, None] * (H*K) + o_k[None, :]
     p_k = k + (bos*H+i_h) * K + o_q[:, None] * (H*K) + o_k[None, :]
-    p_A = A + ((i_k*all+bos)*HQ+i_hq)*BT + o_q[:, None] * (HQ*BT) + o_i[None, :]
+    p_A = A + ((i_k*all+bos)*H+i_h)*BT + o_q[:, None] * (H*BT) + o_i[None, :]
 
     # [BT, BK]
     b_q = tl.load(p_q, mask=m_qk, other=0.0)
@@ -399,7 +385,7 @@ def chunk_gsa_bwd_k_kernel_dqkvg(
     b_dq = tl.zeros([BT, BK], dtype=tl.float32)
     b_dk = tl.zeros([BT, BK], dtype=tl.float32)
     for i_v in range(tl.cdiv(V, BV)):
-        o_v = i_v * BV + tl.arange(0, BV)
+        o_v = i_v * BV + tl.arange(0, BV).to(tl.int64)
         m_v = o_v < V
         m_qv = m_q[:, None] & m_v[None, :]
         m_vk = m_v[:, None] & m_k[None, :]
@@ -407,12 +393,12 @@ def chunk_gsa_bwd_k_kernel_dqkvg(
         p_v = v + (bos*H+i_h)*V + o_q[:, None] * (H*V) + o_v[None, :]
         p_g = g + (bos*H+i_h)*V + o_q[:, None] * (H*V) + o_v[None, :]
         p_gn = g + (bos + o_t - 1) * H*V + i_h * V + o_v
-        p_do = do + (bos*HQ+i_hq)*V + o_q[:, None] * (HQ*V) + o_v[None, :]
-        p_dv = dv + ((i_k*all+bos)*HQ+i_hq)*V + o_q[:, None] * (HQ*V) + o_v[None, :]
-        p_dg = dg + (bos*HQ+i_hq)*V + o_q[:, None] * (HQ*V) + o_v[None, :]
-        p_dgv = dgv+((i_k*all+bos)*HQ+i_hq)*V + o_q[:, None] * (HQ*V) + o_v[None, :]
+        p_do = do + (bos*H+i_h)*V + o_q[:, None] * (H*V) + o_v[None, :]
+        p_dv = dv + ((i_k*all+bos)*H+i_h)*V + o_q[:, None] * (H*V) + o_v[None, :]
+        p_dg = dg + (bos*H+i_h)*V + o_q[:, None] * (H*V) + o_v[None, :]
+        p_dgv = dgv+((i_k*all+bos)*H+i_h)*V + o_q[:, None] * (H*V) + o_v[None, :]
         p_h = h + (i_tg * H + i_h) * K*V + o_v[:, None] + o_k[None, :] * V
-        p_dh = dh + (i_tg * HQ + i_hq) * K*V + o_k[:, None] * V + o_v[None, :]
+        p_dh = dh + (i_tg * H + i_h) * K*V + o_k[:, None] * V + o_v[None, :]
 
         # [BV,]
         b_gn = tl.load(p_gn, mask=m_v, other=0)
@@ -446,9 +432,9 @@ def chunk_gsa_bwd_k_kernel_dqkvg(
 
         tl.store(p_dgv, b_dgv.to(p_dgv.dtype.element_ty), mask=m_qv)
         tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), mask=m_qv)
-    p_dA = dA + (bos*HQ + i_hq) * BT + o_q[:, None] * (HQ*BT) + o_i[None, :]
-    p_dq = dq + (bos*HQ + i_hq) * K + o_q[:, None] * (HQ*K) + o_k[None, :]
-    p_dk = dk + (bos*HQ + i_hq) * K + o_q[:, None] * (HQ*K) + o_k[None, :]
+    p_dA = dA + (bos*H + i_h) * BT + o_q[:, None] * (H*BT) + o_i[None, :]
+    p_dq = dq + (bos*H + i_h) * K + o_q[:, None] * (H*K) + o_k[None, :]
+    p_dk = dk + (bos*H + i_h) * K + o_q[:, None] * (H*K) + o_k[None, :]
     # [BT, BT]
     b_dA = tl.load(p_dA, mask=m_A, other=0.0)
     # [BT, BK]
@@ -463,7 +449,7 @@ def chunk_gsa_bwd_k_kernel_dqkvg(
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.jit(do_not_specialize=['T'])
-def chunk_gsa_bwd_k_kernel_intra_dvg(
+def chunk_gsa_bwd_kernel_intra_dvg(
     v,
     g,
     o,
@@ -474,30 +460,27 @@ def chunk_gsa_bwd_k_kernel_intra_dvg(
     cu_seqlens,
     chunk_indices,
     T,
-    HQ: tl.constexpr,
     H: tl.constexpr,
     V: tl.constexpr,
     BT: tl.constexpr,
     BC: tl.constexpr,
     BV: tl.constexpr,
     NC: tl.constexpr,
-    NG: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
     NV = tl.cdiv(V, BV)
     i_v, i_c, i_bh = tl.program_id(0).to(tl.int64) % NV, tl.program_id(0).to(tl.int64) // NV, tl.program_id(1).to(tl.int64)
-    i_b, i_hq = i_bh // HQ, i_bh % HQ
-    i_h = i_hq // NG
+    i_b, i_h = i_bh // H, i_bh % H
     i_t, i_i = (i_c // NC).to(tl.int64), i_c % NC
     if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int64), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
 
     o_i = tl.arange(0, BC)
-    o_v = i_v * BV + tl.arange(0, BV)
+    o_v = i_v * BV + tl.arange(0, BV).to(tl.int64)
     m_v = o_v < V
 
     if i_t * BT + i_i * BC >= T:
@@ -520,8 +503,8 @@ def chunk_gsa_bwd_k_kernel_intra_dvg(
         m_jv = m_j[:, None] & m_v[None, :]
         m_A = (o_iA[:, None] < BT) & m_j[None, :]
         p_g = g + (bos*H+i_h) * V + o_j[:, None] * (H*V) + o_v[None, :]
-        p_A = A + (bos*HQ+i_hq) * BT + o_iA[:, None] + o_j[None, :] * (HQ*BT)
-        p_do = do + (bos*HQ+i_hq) * V + o_j[:, None] * (HQ*V) + o_v[None, :]
+        p_A = A + (bos*H+i_h) * BT + o_iA[:, None] + o_j[None, :] * (H*BT)
+        p_do = do + (bos*H+i_h) * V + o_j[:, None] * (H*V) + o_v[None, :]
         # [BC, BV]
         b_g = tl.load(p_g, mask=m_jv, other=0.0)
         b_do = tl.load(p_do, mask=m_jv, other=0.0) * tl.where(m_j[:, None], exp2(b_g - b_gn[None, :]), 0)
@@ -532,8 +515,8 @@ def chunk_gsa_bwd_k_kernel_intra_dvg(
     b_dv *= exp2(b_gn[None, :] - b_gv)
 
     p_g = g + (bos + i_t * BT + i_i * BC) * H*V + i_h * V + o_v
-    p_A = A + (bos + i_t*BT + i_i*BC) * HQ*BT + i_hq * BT + i_i * BC + o_i
-    p_do = do + (bos + i_t*BT + i_i*BC) * HQ*V + i_hq * V + o_v
+    p_A = A + (bos + i_t*BT + i_i*BC) * H*BT + i_h * BT + i_i * BC + o_i
+    p_do = do + (bos + i_t*BT + i_i*BC) * H*V + i_h * V + o_v
     for j in range(0, min(BC, T - i_t * BT - i_i * BC)):
         # [BC,]
         b_A = tl.load(p_A)
@@ -545,13 +528,13 @@ def chunk_gsa_bwd_k_kernel_intra_dvg(
         b_dv += tl.where(m_i, exp2(b_g[None, :] - b_gv) * b_A[:, None] * b_do[None, :], 0.)
 
         p_g += H * V
-        p_A += HQ * BT
-        p_do += HQ * V
-    p_o = o + (bos*HQ+i_hq)*V + o_c[:, None] * (HQ*V) + o_v[None, :]
+        p_A += H * BT
+        p_do += H * V
+    p_o = o + (bos*H+i_h)*V + o_c[:, None] * (H*V) + o_v[None, :]
     p_v = v + (bos*H+i_h)*V + o_c[:, None] * (H*V) + o_v[None, :]
-    p_do = do + (bos*HQ+i_hq)*V + o_c[:, None] * (HQ*V) + o_v[None, :]
-    p_dv = dv + (bos*HQ+i_hq)*V + o_c[:, None] * (HQ*V) + o_v[None, :]
-    p_dg = dg + (bos*HQ+i_hq)*V + o_c[:, None] * (HQ*V) + o_v[None, :]
+    p_do = do + (bos*H+i_h)*V + o_c[:, None] * (H*V) + o_v[None, :]
+    p_dv = dv + (bos*H+i_h)*V + o_c[:, None] * (H*V) + o_v[None, :]
+    p_dg = dg + (bos*H+i_h)*V + o_c[:, None] * (H*V) + o_v[None, :]
 
     b_o = tl.load(p_o, mask=m_cv, other=0.0).to(tl.float32)
     b_v = tl.load(p_v, mask=m_cv, other=0.0).to(tl.float32)
@@ -560,34 +543,6 @@ def chunk_gsa_bwd_k_kernel_intra_dvg(
     b_dg = b_o * b_do - b_v * b_dv
     tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), mask=m_cv)
     tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), mask=m_cv)
-
-
-def chunk_gsa_fwd_v(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    g: torch.Tensor,
-    scale: float = 1.,
-    initial_state: torch.Tensor | None = None,
-    output_final_state: bool = False,
-    cu_seqlens: torch.LongTensor | None = None,
-    chunk_size: int = 64,
-    chunk_indices: torch.LongTensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    _, A, h, ht, o = chunk_gla_fwd(
-        q=q,
-        k=k,
-        v=v,
-        g=None,
-        g_cumsum=g,
-        scale=scale,
-        initial_state=initial_state,
-        output_final_state=output_final_state,
-        cu_seqlens=cu_seqlens,
-        chunk_size=chunk_size,
-        chunk_indices=chunk_indices,
-    )
-    return A, h, ht, o
 
 
 def chunk_gsa_fwd_k(
@@ -601,21 +556,16 @@ def chunk_gsa_fwd_k(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = chunk_size
     BC = min(16, BT)
     BV = min(64, triton.next_power_of_2(V))
-    HQ = q.shape[2]
 
-    if chunk_indices is None:
-        if cu_seqlens is not None:
-            chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
-        else:
-            chunk_indices = None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     NC = triton.cdiv(BT, BC)
-    NG = HQ // H
 
     h, ht = chunk_fwd_h(
         k=k,
@@ -629,84 +579,45 @@ def chunk_gsa_fwd_k(
         chunk_size=BT,
         states_in_fp32=False,
     )
-    o = v.new_empty(B, T, HQ, V)
-    A = q.new_empty(B, T, HQ, BT)
-    def grid(meta): return (triton.cdiv(V, meta['BV']) * NT, B * HQ)
-    chunk_gsa_fwd_k_kernel_inter[grid](
-        q,
-        k,
-        h,
-        g,
-        o,
-        A,
+    o = v.new_empty(B, T, H, V)
+    A = q.new_empty(B, T, H, BT)
+    def grid(meta): return (triton.cdiv(V, meta['BV']) * NT, B * H)
+    chunk_gsa_fwd_kernel_inter[grid](
+        q=q,
+        k=k,
+        h=h,
+        g=g,
+        o=o,
+        A=A,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         scale=scale,
         T=T,
-        HQ=HQ,
         H=H,
         K=K,
         V=V,
         BT=BT,
-        NG=NG,
     )
 
-    def grid(meta): return (triton.cdiv(V, meta['BV']) * NT * NC, B * HQ)
-    chunk_gsa_fwd_k_kernel_intra[grid](
-        v,
-        g,
-        o,
-        A,
+    def grid(meta): return (triton.cdiv(V, meta['BV']) * NT * NC, B * H)
+    chunk_gsa_fwd_kernel_intra[grid](
+        v=v,
+        g=g,
+        o=o,
+        A=A,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         T=T,
-        HQ=HQ,
         H=H,
         V=V,
         BT=BT,
         BC=BC,
         BV=BV,
         NC=NC,
-        NG=NG,
         num_warps=4,
         num_stages=2,
     )
-    return A, h, ht, o
-
-
-def chunk_gsa_bwd_v(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    g: torch.Tensor,
-    h0: torch.Tensor,
-    h: torch.Tensor,
-    A: torch.Tensor,
-    do: torch.Tensor,
-    dht: torch.Tensor,
-    dg: torch.Tensor,
-    scale: float = 1.,
-    cu_seqlens: torch.LongTensor | None = None,
-    chunk_size: int = 64,
-    chunk_indices: torch.LongTensor | None = None,
-):
-    dq, dk, dv, dg, dh0 = chunk_gla_bwd(
-        q=q,
-        k=k,
-        v=v,
-        g=None,
-        g_cumsum=g,
-        scale=scale,
-        initial_state=h0,
-        h=h,
-        A=A,
-        do=do,
-        dht=dht,
-        cu_seqlens=cu_seqlens,
-        chunk_size=chunk_size,
-        chunk_indices=chunk_indices,
-    )
-    return dq, dk, dv, dg, dh0
+    return h, ht, o
 
 
 def chunk_gsa_bwd_k(
@@ -730,18 +641,13 @@ def chunk_gsa_bwd_k(
     BC = min(16, BT)
     BK = min(64, triton.next_power_of_2(K))
     BV = min(64, triton.next_power_of_2(V))
-    HQ = q.shape[2]
 
-    if chunk_indices is None:
-        if cu_seqlens is not None:
-            chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
-        else:
-            chunk_indices = None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     NC = triton.cdiv(BT, BC)
     NK = triton.cdiv(K, BK)
     NV = triton.cdiv(V, BV)
-    NG = HQ // H
 
     if h is None:
         h, _ = chunk_fwd_h(
@@ -771,88 +677,82 @@ def chunk_gsa_bwd_k(
         chunk_size=BT,
         states_in_fp32=True,
     )
-    dA = q.new_empty(NV, B, T, HQ, BT)
-    grid = (NV * NT * NC * NC, B * HQ)
-    chunk_gsa_bwd_k_kernel_dA[grid](
-        v,
-        g,
-        do,
-        dA,
+    dA = q.new_empty(NV, B, T, H, BT)
+    grid = (NV * NT * NC * NC, B * H)
+    chunk_gsa_bwd_kernel_dA[grid](
+        v=v,
+        g=g,
+        do=do,
+        dA=dA,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         scale=scale,
         T=T,
         B=B,
-        HQ=HQ,
         H=H,
         V=V,
         BT=BT,
         BC=BC,
         BV=BV,
         NC=NC,
-        NG=NG,
     )
-    dA = dA.sum(0, dtype=dA.dtype)
+    dA = dA.sum(0, dtype=dA.dtype) if NV > 1 else dA.squeeze(0)
 
-    A = do.new_empty(NK, B, T, HQ, BT)
+    A = do.new_empty(NK, B, T, H, BT)
     dq = torch.empty_like(q)
-    dk = k.new_empty(B, T, HQ, K)
-    dv = v.new_empty(NK, B, T, HQ, V)
-    dgv = g.new_empty(NK, B, T, HQ, V, dtype=torch.float)
-    grid = (NK * NT, B * HQ)
-    chunk_gsa_bwd_k_kernel_dqkvg[grid](
-        q,
-        k,
-        v,
-        h,
-        g,
-        A,
-        do,
-        dh,
-        dq,
-        dk,
-        dv,
-        dg,
-        dgv,
-        dA,
+    dk = k.new_empty(B, T, H, K)
+    dv = v.new_empty(NK, B, T, H, V)
+    dgv = g.new_empty(NK, B, T, H, V, dtype=torch.float)
+    grid = (NK * NT, B * H)
+    chunk_gsa_bwd_kernel_dqkvg[grid](
+        q=q,
+        k=k,
+        v=v,
+        h=h,
+        g=g,
+        A=A,
+        do=do,
+        dh=dh,
+        dq=dq,
+        dk=dk,
+        dv=dv,
+        dg=dg,
+        dgv=dgv,
+        dA=dA,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         scale=scale,
         T=T,
         B=B,
-        HQ=HQ,
         H=H,
         K=K,
         V=V,
         BT=BT,
         BK=BK,
         BV=BV,
-        NG=NG,
     )
-    A = A.sum(0, dtype=A.dtype)
-    dv = dv.sum(0, dtype=dv.dtype)
-    dgv = dgv.sum(0, dtype=dgv.dtype)
+    A = A.sum(0, dtype=A.dtype) if NK > 1 else A.squeeze(0)
+    dv = dv.sum(0, dtype=dv.dtype) if NK > 1 else dv.squeeze(0)
+    dgv = dgv.sum(0, dtype=dgv.dtype) if NK > 1 else dgv.squeeze(0)
 
-    def grid(meta): return (triton.cdiv(V, meta['BV']) * NT * NC, B * HQ)
-    chunk_gsa_bwd_k_kernel_intra_dvg[grid](
-        v,
-        g,
-        o,
-        A,
-        do,
-        dv,
-        dg,
+    def grid(meta): return (triton.cdiv(V, meta['BV']) * NT * NC, B * H)
+    chunk_gsa_bwd_kernel_intra_dvg[grid](
+        v=v,
+        g=g,
+        o=o,
+        A=A,
+        do=do,
+        dv=dv,
+        dg=dg,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         T=T,
-        HQ=HQ,
         H=H,
         V=V,
         BT=BT,
         BC=BC,
         BV=BV,
         NC=NC,
-        NG=NG,
         num_warps=4,
         num_stages=2,
     )
@@ -881,11 +781,11 @@ def chunk_gsa_fwd(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+):
     hk0, hv0 = None, None
     if initial_state is not None:
         hk0, hv0 = initial_state
-    Ak, hk, hkt, ok = chunk_gsa_fwd_k(
+    hk, hkt, ok = chunk_gsa_fwd_k(
         q=q,
         k=k,
         v=s,
@@ -902,11 +802,12 @@ def chunk_gsa_fwd(
     p = softmax_fwd(ok, dtype=torch.float)
 
     qv = p.to(q.dtype)
-    Av, hv, hvt, ov = chunk_gsa_fwd_v(
+    _, Av, hv, hvt, ov = chunk_gla_fwd(
         q=qv,
         k=s,
         v=v,
-        g=g,
+        g=None,
+        g_cumsum=g,
         scale=1.,
         initial_state=hv0,
         output_final_state=output_final_state,
@@ -914,7 +815,7 @@ def chunk_gsa_fwd(
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
     )
-    return Ak, hk, hkt, ok, p, Av, hv, hvt, ov
+    return hk, hkt, ok, p, Av, hv, hvt, ov
 
 
 def chunk_gsa_bwd(
@@ -925,7 +826,7 @@ def chunk_gsa_bwd(
     g: torch.Tensor,
     ok: torch.Tensor,
     p: torch.Tensor,
-    A: tuple[torch.Tensor, torch.Tensor],
+    A: torch.Tensor,
     h: tuple[torch.Tensor, torch.Tensor],
     initial_state: tuple[torch.Tensor, torch.Tensor] | None,
     scale: float,
@@ -939,30 +840,27 @@ def chunk_gsa_bwd(
     if initial_state is not None:
         hk0, hv0 = initial_state
 
-    _, Av = A
     hk, hv = h
     dhkt, dhvt = dht
 
     qv = p.to(q.dtype)
-    dqv, dsv, dv, dg, dhv0 = chunk_gsa_bwd_v(
+    dqv, dsv, dv, dg, dhv0 = chunk_gla_bwd(
         q=qv,
         k=s,
         v=v,
-        g=g,
-        h0=hv0,
+        g=None,
+        g_cumsum=g,
+        scale=1.,
+        initial_state=hv0,
         h=hv,
-        A=Av,
+        A=A,
         do=do,
         dht=dhvt,
-        dg=None,
-        scale=1.,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
     )
 
-    # softmax gradient, equivalent to:
-    # dok = qv * (dqv - (qv * dqv).sum(-1, True))
     dok = softmax_bwd(p, dqv, dtype=ok.dtype)
 
     dq, dk, dsk, dg, dhk0 = chunk_gsa_bwd_k(
@@ -983,8 +881,6 @@ def chunk_gsa_bwd(
     )
 
     ds = dsv.add_(dsk)
-    if q.shape[1] != k.shape[1]:
-        dk, dv, ds, dg = map(lambda x: reduce(x, 'b (h g) ... -> b h ...', 'sum', h=k.shape[1]), (dk, dv, ds, dg))
     dg = dg.to(s.dtype)
     return dq, dk, dv, ds, dg, dhk0, dhv0
 
@@ -1014,23 +910,23 @@ class ChunkGSAFunction(torch.autograd.Function):
 
         if cu_seqlens is not None:
             chunk_indices = prepare_chunk_indices(
-                cu_seqlens,
-                chunk_size,
+                cu_seqlens=cu_seqlens,
+                chunk_size=chunk_size,
                 cu_seqlens_cpu=cu_seqlens_cpu,
             )
         else:
             chunk_indices = None
 
-        # Pre-scale by RCP_LN2 so downstream kernels can use exp2 directly.
+        # pre-scale gates so both stages use exp2 with the same cumulative values.
         g_org = g
         g = chunk_local_cumsum(
-            g,
-            chunk_size,
+            g=g,
+            chunk_size=chunk_size,
             scale=RCP_LN2,
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
         )
-        Ak, hk, hkt, ok, p, Av, hv, hvt, ov = chunk_gsa_fwd(
+        hk, hkt, ok, p, Av, hv, hvt, ov = chunk_gsa_fwd(
             q=q,
             k=k,
             v=v,
@@ -1045,11 +941,8 @@ class ChunkGSAFunction(torch.autograd.Function):
         )
 
         if checkpoint_level >= 1:
-            del g
             g = g_org
         if checkpoint_level > 1:
-            del hk
-            del hv
             hk, hv = None, None
 
         ctx.save_for_backward(
@@ -1097,8 +990,8 @@ class ChunkGSAFunction(torch.autograd.Function):
 
         if ctx.checkpoint_level >= 1:
             g = chunk_local_cumsum(
-                g,
-                chunk_size,
+                g=g,
+                chunk_size=chunk_size,
                 scale=RCP_LN2,
                 cu_seqlens=cu_seqlens,
                 chunk_indices=chunk_indices,
@@ -1111,7 +1004,7 @@ class ChunkGSAFunction(torch.autograd.Function):
             g=g,
             ok=ok,
             p=p,
-            A=(None, Av),
+            A=Av,
             h=(hk, hv),
             initial_state=(hk0, hv0),
             scale=scale,
