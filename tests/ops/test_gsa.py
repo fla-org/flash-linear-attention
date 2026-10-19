@@ -241,19 +241,22 @@ def test_fused_recurrent_varlen(
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'D', 'V', 'M', 'gate_logit_normalizer', 'dtype'),
+    ('B', 'T', 'H', 'HQ', 'D', 'V', 'M', 'gate_logit_normalizer', 'dtype', 'checkpoint_level'),
     [
-        pytest.param(*test, id="B{}-T{}-H{}-D{}-V{}-M{}-gate_logit_normalizer{}-{}".format(*test))
+        pytest.param(*test, id="B{}-T{}-H{}-HQ{}-D{}-V{}-M{}-gate_logit_normalizer{}-{}-checkpoint_level{}".format(*test))
         for test in [
-            (1, 63, 1, 64, 64, 32, 1, torch.float16),
-            (2, 1024, 4, 60, 60, 64, 1, torch.float16),
-            (2, 1024, 4, 256, 256, 64, 1, torch.float16),
-            (2, 1024, 4, 128, 128, 64, 0.1, torch.float),
-            (2, 1024, 4, 128, 128, 128, 1, torch.float16),
-            (2, 1024, 4, 128, 128, 64, 10, torch.float16),
-            (2, 65, 2, 32, 48, 32, None, torch.float32),
-            (2, 65, 2, 32, 48, 32, None, torch.float16),
-            (2, 65, 2, 32, 48, 32, None, torch.bfloat16),
+            (1, 63, 1, 1, 64, 64, 32, 1, torch.float16, 2),
+            (2, 1024, 4, 4, 60, 60, 64, 1, torch.float16, 2),
+            (2, 1024, 4, 4, 256, 256, 64, 1, torch.float16, 2),
+            (2, 1024, 4, 4, 128, 128, 64, 0.1, torch.float, 2),
+            (2, 1024, 4, 4, 128, 128, 128, 1, torch.float16, 2),
+            (2, 1024, 4, 4, 128, 128, 64, 10, torch.float16, 2),
+            (2, 65, 2, 2, 32, 48, 32, None, torch.float32, 2),
+            (2, 65, 2, 2, 32, 48, 32, None, torch.float16, 2),
+            (2, 65, 2, 2, 32, 48, 32, None, torch.bfloat16, 2),
+            (1, 65, 2, 4, 32, 48, 32, 1, torch.float16, 0),
+            (1, 65, 2, 4, 32, 48, 32, 1, torch.float16, 1),
+            (1, 65, 2, 4, 32, 48, 32, 1, torch.float16, 2),
         ]
     ],
 )
@@ -265,18 +268,20 @@ def test_chunk(
     B: int,
     T: int,
     H: int,
+    HQ: int,
     D: int,
     V: int,
     M: int,
     gate_logit_normalizer: float | None,
     dtype: torch.dtype,
+    checkpoint_level: int,
 ):
     if (D > 64 or M > 64) and check_shared_mem('hopper') is False:
         pytest.skip(reason='Current CI do not support this config')
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
 
-    q = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
+    q = torch.randn((B, T, HQ, D), dtype=dtype, device=device).requires_grad_()
     k = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
     v = torch.randn((B, T, H, V), dtype=dtype, device=device).requires_grad_()
     s = torch.randn((B, T, H, M), dtype=dtype, device=device).requires_grad_()
@@ -288,8 +293,9 @@ def test_chunk(
     dhkt = torch.randn(B, H, D, M, device=device).requires_grad_()
     dhvt = torch.randn(B, H, M, V, device=device).requires_grad_()
 
-    do = torch.randn_like(v)
-    ref, (ref_hkt, ref_hvt) = fused_recurrent_gsa(
+    do = torch.randn(*q.shape[:3], V, dtype=dtype, device=device)
+    reference = naive_recurrent_gsa if HQ != H else fused_recurrent_gsa
+    ref, (ref_hkt, ref_hvt) = reference(
         q=q,
         k=k,
         v=v,
@@ -317,6 +323,7 @@ def test_chunk(
         scale=D**-0.5,
         initial_state=(hk0, hv0),
         output_final_state=True,
+        checkpoint_level=checkpoint_level,
     )
     ((tri * do).sum() + (tri_hkt * dhkt).sum() + (tri_hvt * dhvt).sum()).backward()
     tri_dq, q.grad = q.grad.clone(), None
@@ -342,12 +349,13 @@ def test_chunk(
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'D', 'M', 'dtype', 'chunk_size'),
+    ('B', 'T', 'H', 'D', 'M', 'dtype', 'chunk_size', 'checkpoint_level'),
     [
-        pytest.param(*test, id="B{}-T{}-H{}-D{}-M{}-{}-chunk{}".format(*test))
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-M{}-{}-chunk{}-checkpoint{}".format(*test))
         for chunk_size in [16, 32, 64]
+        for checkpoint_level in [0, 1, 2]
         for test in [
-            (1, 64, 2, 32, 32, torch.float32, chunk_size),
+            (1, 64, 2, 32, 32, torch.float32, chunk_size, checkpoint_level),
         ]
     ],
 )
@@ -363,6 +371,7 @@ def test_chunk_with_chunk_size(
     M: int,
     dtype: torch.dtype,
     chunk_size: int,
+    checkpoint_level: int,
 ):
     torch.manual_seed(42)
     q = torch.randn(B, T, H, D, dtype=dtype, device=device)
@@ -409,6 +418,7 @@ def test_chunk_with_chunk_size(
             initial_state=(hk0_, hv0_),
             output_final_state=True,
             chunk_size=chunk_size,
+            checkpoint_level=checkpoint_level,
         )
         ((o * do).sum() + (hkt * dhkt).sum() + (hvt * dhvt).sum()).backward()
         return o, hkt, hvt, q_.grad, k_.grad, v_.grad, s_.grad, g_.grad, hk0_.grad, hv0_.grad
@@ -429,16 +439,19 @@ def test_chunk_with_chunk_size(
 
 
 @pytest.mark.parametrize(
-    ('H', 'D', 'V', 'M', 'cu_seqlens', 'gate_logit_normalizer', 'dtype'),
+    ('H', 'HQ', 'D', 'V', 'M', 'cu_seqlens', 'gate_logit_normalizer', 'dtype', 'checkpoint_level'),
     [
-        pytest.param(*test, id="H{}-D{}-V{}-M{}-cu_seqlens{}-gate_logit_normalizer{}-{}".format(*test))
+        pytest.param(*test, id="H{}-HQ{}-D{}-V{}-M{}-cu_seqlens{}-gate_logit_normalizer{}-{}-checkpoint_level{}".format(*test))
         for test in [
-            (4, 64, 64, 64, [0, 15], 1, torch.float16),
-            (4, 64, 64, 64, [0, 256, 500, 1000], 1, torch.float16),
-            (4, 100, 100, 64, [0, 15, 100, 300, 1200, 2000], 1, torch.float16),
-            (2, 32, 48, 32, [0, 1, 17, 65], None, torch.float32),
-            (2, 32, 48, 32, [0, 1, 17, 65], None, torch.float16),
-            (2, 32, 48, 32, [0, 1, 17, 65], None, torch.bfloat16),
+            (4, 4, 64, 64, 64, [0, 15], 1, torch.float16, 2),
+            (4, 4, 64, 64, 64, [0, 256, 500, 1000], 1, torch.float16, 2),
+            (4, 4, 100, 100, 64, [0, 15, 100, 300, 1200, 2000], 1, torch.float16, 2),
+            (2, 2, 32, 48, 32, [0, 1, 17, 65], None, torch.float32, 2),
+            (2, 2, 32, 48, 32, [0, 1, 17, 65], None, torch.float16, 2),
+            (2, 2, 32, 48, 32, [0, 1, 17, 65], None, torch.bfloat16, 2),
+            (2, 4, 32, 48, 32, [0, 1, 17, 65], 1, torch.float16, 0),
+            (2, 4, 32, 48, 32, [0, 1, 17, 65], 1, torch.float16, 1),
+            (2, 4, 32, 48, 32, [0, 1, 17, 65], 1, torch.float16, 2),
         ]
     ],
 )
@@ -453,12 +466,14 @@ def test_chunk_with_chunk_size(
 @pytest.mark.smoke
 def test_chunk_varlen(
     H: int,
+    HQ: int,
     D: int,
     V: int,
     M: int,
     cu_seqlens: list[int],
     gate_logit_normalizer: float | None,
     dtype: torch.dtype,
+    checkpoint_level: int,
 ):
     if (D > 64 or M > 64) and check_shared_mem('hopper') is False:
         pytest.skip(reason='Current CI do not support this config')
@@ -468,7 +483,7 @@ def test_chunk_varlen(
     T = cu_seqlens[-1]
     cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
 
-    q = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
+    q = torch.randn((1, T, HQ, D), dtype=dtype, device=device).requires_grad_()
     k = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
     v = torch.randn((1, T, H, V), dtype=dtype, device=device).requires_grad_()
     s = torch.randn((1, T, H, M), dtype=dtype, device=device).requires_grad_()
@@ -480,19 +495,37 @@ def test_chunk_varlen(
     dhkt = torch.randn(N, H, D, M, device=device).requires_grad_()
     dhvt = torch.randn(N, H, M, V, device=device).requires_grad_()
 
-    do = torch.randn_like(v)
+    do = torch.randn(*q.shape[:3], V, dtype=dtype, device=device)
 
-    ref, (ref_hkt, ref_hvt) = fused_recurrent_gsa(
-        q=q,
-        k=k,
-        v=v,
-        s=s,
-        g=g,
-        scale=D**-0.5,
-        initial_state=(hk0, hv0),
-        output_final_state=True,
-        cu_seqlens=cu_seqlens,
-    )
+    if HQ != H:
+        refs, ref_hkts, ref_hvts = [], [], []
+        for i in range(N):
+            ref, (ref_hkt, ref_hvt) = naive_recurrent_gsa(
+                q=q[:, cu_seqlens[i]:cu_seqlens[i+1]],
+                k=k[:, cu_seqlens[i]:cu_seqlens[i+1]],
+                v=v[:, cu_seqlens[i]:cu_seqlens[i+1]],
+                s=s[:, cu_seqlens[i]:cu_seqlens[i+1]],
+                g=g[:, cu_seqlens[i]:cu_seqlens[i+1]],
+                initial_state=(hk0[i:i+1], hv0[i:i+1]),
+                output_final_state=True,
+            )
+            refs.append(ref)
+            ref_hkts.append(ref_hkt)
+            ref_hvts.append(ref_hvt)
+        ref = torch.cat(refs, 1)
+        ref_hkt, ref_hvt = torch.cat(ref_hkts, 0), torch.cat(ref_hvts, 0)
+    else:
+        ref, (ref_hkt, ref_hvt) = fused_recurrent_gsa(
+            q=q,
+            k=k,
+            v=v,
+            s=s,
+            g=g,
+            scale=D**-0.5,
+            initial_state=(hk0, hv0),
+            output_final_state=True,
+            cu_seqlens=cu_seqlens,
+        )
     ((ref * do).sum() + (ref_hkt * dhkt).sum() + (ref_hvt * dhvt).sum()).backward()
     ref_dq, q.grad = q.grad.clone(), None
     ref_dk, k.grad = k.grad.clone(), None
@@ -512,6 +545,7 @@ def test_chunk_varlen(
         scale=D**-0.5,
         initial_state=(hk0, hv0),
         output_final_state=True,
+        checkpoint_level=checkpoint_level,
         cu_seqlens=cu_seqlens,
     )
     ((tri * do).sum() + (tri_hkt * dhkt).sum() + (tri_hvt * dhvt).sum()).backward()
@@ -530,9 +564,9 @@ def test_chunk_varlen(
     assert_close('dq', ref_dq, tri_dq, 0.005)
     assert_close('dk', ref_dk, tri_dk, 0.005)
     assert_close('dv', ref_dv, tri_dv, 0.005)
-    assert_close('ds', ref_ds, tri_ds, 0.005)
+    assert_close('ds', ref_ds, tri_ds, 0.008 if HQ != H else 0.005)
     if g is not None:
-        assert_close('dg', ref_dg, tri_dg, 0.005)
+        assert_close('dg', ref_dg, tri_dg, 0.008 if HQ != H else 0.005)
     assert_close('dhk0', ref_dhk0, tri_dhk0, 0.005)
     assert_close('dhv0', ref_dhv0, tri_dhv0, 0.005)
 
