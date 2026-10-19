@@ -7,12 +7,10 @@
 
 """AttnRes backends."""
 
-from fla.backends import GluonBackend
-from fla.ops.attnres.backends.triton_ascend import TritonAscendAttnResBackend
-
-__all__ = ['TritonAscendAttnResBackend']
+from fla.backends import GluonBackend, TritonAscendBackend
 
 if GluonBackend.is_available():
-    from fla.ops.attnres.backends.gluon import AttnResGluonBackend
+    from fla.ops.attnres.backends.gluon import AttnResGluonBackend  # noqa: F401
 
-    __all__.append('AttnResGluonBackend')
+if TritonAscendBackend.is_available():
+    from fla.ops.attnres.backends.triton_ascend import fused  # noqa: F401

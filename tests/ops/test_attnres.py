@@ -6,6 +6,7 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import inspect
+from functools import wraps
 
 import pytest
 import torch
@@ -116,15 +117,16 @@ def _spy_on_triton_ascend_attnres_backend():
 
     calls = []
     for name in _TRITON_ASCEND_ATTNRES_OPS:
-        original = getattr(backend, name)
+        original = backend.implementation
 
         def make_spy(name, original):
+            @wraps(original)
             def spy(*args, **kwargs):
                 calls.append(name)
                 return original(*args, **kwargs)
             return spy
 
-        setattr(backend, name, make_spy(name, original))
+        backend.implementation = make_spy(name, original)
     return backend, calls
 
 
@@ -148,4 +150,4 @@ def test_triton_ascend_backend_routing():
         assert calls == ['fused_attnres'], (f'fused_attnres not routed to the Triton-Ascend backend (dispatched: {calls})')
     finally:
         for name in _TRITON_ASCEND_ATTNRES_OPS:
-            delattr(backend, name)
+            backend.implementation = backend.implementation.__wrapped__

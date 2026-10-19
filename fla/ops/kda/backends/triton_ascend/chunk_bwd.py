@@ -14,6 +14,9 @@ import triton
 import triton.language as tl
 from triton.runtime import driver
 
+from fla.backends import TritonAscendBackend, register
+from fla.ops.kda.backends.triton_ascend.utils import _SUB_CHUNK, _chunk_size_from
+from fla.ops.kda.chunk_bwd import chunk_kda_bwd_dAv, chunk_kda_bwd_wy_dqkg_fused
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 from fla.ops.utils.graph import get_static_buffer
 from fla.ops.utils.op import exp2
@@ -117,6 +120,7 @@ def chunk_kda_bwd_kernel_dAv_npu(
     tl.store(p_dA, b_dA.to(p_dA.dtype.element_ty), boundary_check=(0, 1))
 
 
+@register(chunk_kda_bwd_dAv, backend=TritonAscendBackend)
 @input_guard
 def chunk_kda_bwd_dAv_npu(
     q: torch.Tensor,
@@ -767,6 +771,18 @@ def chunk_kda_bwd_kernel_wy_dA_finalize_npu(
                 tl.store(p_db, tl.load(p_db_acc, boundary_check=(0,)).to(p_db.dtype.element_ty), boundary_check=(0,))
 
 
+def _verify_subchunk_aligned(args, kwargs):
+    chunk_size = _chunk_size_from(args, kwargs)
+    if chunk_size % _SUB_CHUNK != 0:
+        return False, f'KDA Ascend bwd requires chunk_size % {_SUB_CHUNK} == 0, got {chunk_size}'
+    return True, None
+
+
+def chunk_kda_bwd_wy_dqkg_fused_verifier(*args, **kwargs):
+    return _verify_subchunk_aligned(args, kwargs)
+
+
+@register(chunk_kda_bwd_wy_dqkg_fused, backend=TritonAscendBackend, verifier=chunk_kda_bwd_wy_dqkg_fused_verifier)
 @input_guard
 def chunk_kda_bwd_wy_dqkg_fused_npu(
     q: torch.Tensor,
