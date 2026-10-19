@@ -184,6 +184,35 @@ class FLAModel(FLAPreTrainedModel):
         if use_cache and not isinstance(past_key_values, Cache):
             past_key_values = Cache.from_legacy_cache(past_key_values)
 
+        hidden_states, past_key_values, all_hidden_states, all_attns = self._forward_layers(
+            hidden_states=hidden_states,
+            attention_mask=attention_mask,
+            past_key_values=past_key_values,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            **kwargs,
+        )
+
+        if not return_dict:
+            return tuple(i for i in [hidden_states, past_key_values, all_hidden_states, all_attns] if i is not None)
+        return BaseModelOutputWithPast(
+            last_hidden_state=hidden_states,
+            past_key_values=past_key_values,
+            hidden_states=all_hidden_states,
+            attentions=all_attns,
+        )
+
+    def _forward_layers(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+        past_key_values: Cache | None = None,
+        use_cache: bool = False,
+        output_attentions: bool = False,
+        output_hidden_states: bool = False,
+        **kwargs: Unpack[dict],
+    ) -> tuple:
         attnres_states: list[torch.Tensor] | None = None
 
         all_hidden_states = () if output_hidden_states else None
@@ -222,14 +251,7 @@ class FLAModel(FLAPreTrainedModel):
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
 
-        if not return_dict:
-            return tuple(i for i in [hidden_states, past_key_values, all_hidden_states, all_attns] if i is not None)
-        return BaseModelOutputWithPast(
-            last_hidden_state=hidden_states,
-            past_key_values=past_key_values,
-            hidden_states=all_hidden_states,
-            attentions=all_attns,
-        )
+        return hidden_states, past_key_values, all_hidden_states, all_attns
 
 
 class FLAForCausalLM(FLAPreTrainedModel):
