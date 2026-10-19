@@ -22,8 +22,11 @@ Usage::
     # All registered ops
     python -m benchmarks.ops.run --op all
 
-    # Select an op backend (ops with a `backend` param, e.g. AttnRes triton vs gluon)
+    # Select an op backend through its dispatch flags
     python -m benchmarks.ops.run --op fused_attnres --backend gluon
+
+    # Compile a PyTorch reference before warmup and timing
+    python -m benchmarks.ops.run --op naive_hc_pre --compile --no-base
 
     # Forward only
     python -m benchmarks.ops.run --op chunk_gla --modes fwd
@@ -279,9 +282,10 @@ def _warmup_autotune(fn, n: int | None = None, device: str | None = None):
 
 def benchmark_op(
     op_name: str,
-    shapes: dict[str, dict[str, int]],
+    shapes: dict[str, dict[str, int]] | None = None,
     modes: list[str] | None = None,
     backend: str | None = None,
+    compile: bool = False,
 ) -> list[dict]:
     """Benchmark a single op across all *shapes* and *modes*.
 
@@ -297,14 +301,16 @@ def benchmark_op(
     config = get_op(op_name)
     op_fn = _import_op(config)
 
-    # `--backend` selects an op backend by toggling its dispatch env var (see OpConfig.backend_env),
-    # matching how FLA backends are enabled at runtime. 'triton' (or unset) leaves the default path.
+    # `--backend` selects dispatch flags; without it, the caller's environment applies.
     call_kwargs = dict(config.extra_kwargs)
     op_label = op_name
     backend_env = config.backend_env or {}
     if backend is not None:
-        # explicit benchmark selection must not inherit a global Gluon opt-in.
+        # explicit selection must not inherit competing backend opt-ins.
         os.environ['FLA_GLUON'] = '0'
+        for name, env in backend_env.items():
+            os.environ[f'FLA_{name.upper()}'] = '0'
+            os.environ[env] = '0'
     if backend and backend != 'triton':
         env = backend_env.get(backend)
         if env is not None:
@@ -312,16 +318,16 @@ def benchmark_op(
             op_label = f"{op_name}[{backend}]"
         else:
             logger.info(f"Op '{op_name}' has no '{backend}' backend; running the default path")
-    elif backend == 'triton':
-        for env in backend_env.values():
-            os.environ[env] = '0'
 
     if config.skip_backward and 'fwdbwd' in modes:
         modes = [m for m in modes if m != 'fwdbwd']
 
-    # Per-op shape override (e.g., AttnRes uses an `L` axis not in B/T/H/D)
-    if config.default_shapes is not None:
-        shapes = config.default_shapes
+    if compile:
+        op_fn = torch.compile(op_fn, fullgraph=True)
+        op_label += '[compile]'
+
+    if shapes is None:
+        shapes = config.default_shapes if config.default_shapes is not None else SHAPE_CONFIGS
 
     # Filter shapes by dim_constraints
     valid_shapes = {}
@@ -480,26 +486,24 @@ def print_results_table(results: list[dict], machine_info: dict | None = None,
     # mode_w = 2 (indent) + 7 (mode field) + 1 (space) = 10 chars before first dim column
     mode_pad = ' ' * 10
 
-    # Show L column only when every row has an L axis (e.g., a pure
-    # AttnRes / mHC / layer-attn run). Mixed runs hide L for clarity.
-    has_l = bool(results) and all('L' in r for r in results)
-    l_col = f"{'L':>4s} " if has_l else ''
-    l_extra_w = 5 if has_l else 0
+    extra_dims = sorted({key for row in results for key in row.keys() - _RESULT_RESERVED_KEYS})
+    extra_cols = ''.join(f'{dim:>4s} ' for dim in extra_dims)
+    extra_width = 5 * len(extra_dims)
 
     if has_baseline:
         old_git = baseline_info.get('git_label', 'main') if baseline_info else 'main'
         old_hdr, new_hdr = _make_col_headers(old_git, new_git)
         col_w = max(len(old_hdr), len(new_hdr), 10)
-        inner_w = l_extra_w + 4 + 1 + 6 + 1 + 4 + 1 + 4 + 2 + 28 + 2 + col_w + 1 + col_w + 1 + 8
-        inner_hdr = (f"{l_col}{'B':>4s} {'T':>6s} {'H':>4s} {'D':>4s}  {'op':<28s}"
+        inner_w = extra_width + 4 + 1 + 6 + 1 + 4 + 1 + 4 + 2 + 28 + 2 + col_w + 1 + col_w + 1 + 8
+        inner_hdr = (f"{extra_cols}{'B':>4s} {'T':>6s} {'H':>4s} {'D':>4s}  {'op':<28s}"
                      f"  {old_hdr:>{col_w}s} {new_hdr:>{col_w}s} {'speedup':>8s}")
     else:
         new_hdr = _truncate_branch(new_git.split('[')[0]) if '[' in new_git else new_git
         suffix = '[' + new_git.split('[', 1)[1] + '(ms)' if '[' in new_git else '(ms)'
         new_hdr = new_hdr + suffix
         col_w = max(len(new_hdr), 10)
-        inner_w = l_extra_w + 4 + 1 + 6 + 1 + 4 + 1 + 4 + 2 + 28 + 2 + col_w
-        inner_hdr = (f"{l_col}{'B':>4s} {'T':>6s} {'H':>4s} {'D':>4s}  {'op':<28s}"
+        inner_w = extra_width + 4 + 1 + 6 + 1 + 4 + 1 + 4 + 2 + 28 + 2 + col_w
+        inner_hdr = (f"{extra_cols}{'B':>4s} {'T':>6s} {'H':>4s} {'D':>4s}  {'op':<28s}"
                      f"  {new_hdr:>{col_w}s}")
 
     width = 10 + inner_w
@@ -510,18 +514,10 @@ def print_results_table(results: list[dict], machine_info: dict | None = None,
     if machine_info:
         print(f"  {_format_machine_line(machine_info)}")
 
-    def _l_cell(r, blank=False):
-        if not has_l:
-            return ''
-        if blank:
-            return f"{'':>4s} "
-        v = r.get('L')
-        return f"{v:>4d} " if v is not None else f"{'-':>4s} "
-
     prev_shape = None
     prev_mode = None
     for r in results:
-        cur_shape = (r.get('L'), r['B'], r['T'], r['H'], r['D'])
+        cur_shape = tuple(r.get(dim) for dim in extra_dims) + (r['B'], r['T'], r['H'], r['D'])
         cur_mode = r['mode']
 
         # Show mode label + column header when mode changes; just a dash line between shapes
@@ -534,9 +530,10 @@ def print_results_table(results: list[dict], machine_info: dict | None = None,
 
         # Show shape columns on first row of each shape group
         if cur_mode != prev_mode or cur_shape != prev_shape:
-            shape_str = f"{_l_cell(r)}{r['B']:>4d} {r['T']:>6d} {r['H']:>4d} {r['D']:>4d}"
+            extra_cells = ''.join(f'{str(r.get(dim, "-")):>4s} ' for dim in extra_dims)
+            shape_str = f"{extra_cells}{r['B']:>4d} {r['T']:>6d} {r['H']:>4d} {r['D']:>4d}"
         else:
-            shape_str = f"{_l_cell(r, blank=True)}{'':>4s} {'':>6s} {'':>4s} {'':>4s}"
+            shape_str = f"{'':>{extra_width}s}{'':>4s} {'':>6s} {'':>4s} {'':>4s}"
 
         prev_shape = cur_shape
         prev_mode = cur_mode
@@ -570,13 +567,16 @@ def _find_project_root() -> str:
 _WORKER_ENV = 'FLA_BENCH_WORKER'
 
 
-def _isolated_bench_cmd(runner, op_names, shape_configs, modes, backend, out_json):
+def _isolated_bench_cmd(runner, op_names, shape_configs, modes, backend, out_json, compile=False):
     """Worker argv. ``--no-base`` plus ``FLA_BENCH_WORKER`` block nested compares."""
     cmd = [sys.executable, runner, '--op', *op_names,
-           '--custom-shapes', json.dumps(shape_configs),
            '--modes', *modes, '--json', out_json, '--no-base']
+    if shape_configs is not None:
+        cmd += ['--custom-shapes', json.dumps(shape_configs)]
     if backend is not None:
         cmd += ['--backend', backend]
+    if compile:
+        cmd += ['--compile']
     return cmd
 
 
@@ -594,7 +594,7 @@ def _read_bench_json(out_json):
     return None, None
 
 
-def _bench_current(op_names, shape_configs, modes, backend=None):
+def _bench_current(op_names, shape_configs, modes, backend=None, compile=False):
     """Run the current working tree in a subprocess, then exit to free HBM.
 
     Returns (results_list, machine_info_dict) or (None, None) on failure.
@@ -607,7 +607,7 @@ def _bench_current(op_names, shape_configs, modes, backend=None):
         out_json = os.path.join(tmpdir, 'results.json')
         _run_isolated_bench(
             project_root,
-            _isolated_bench_cmd(runner, op_names, shape_configs, modes, backend, out_json),
+            _isolated_bench_cmd(runner, op_names, shape_configs, modes, backend, out_json, compile=compile),
         )
         return _read_bench_json(out_json)
     except Exception as e:
@@ -617,7 +617,7 @@ def _bench_current(op_names, shape_configs, modes, backend=None):
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-def _bench_at_ref(ref, op_names, shape_configs, modes, backend=None):
+def _bench_at_ref(ref, op_names, shape_configs, modes, backend=None, compile=False):
     """Run benchmarks at a git ref using a temporary worktree.
 
     Returns (results_list, machine_info_dict) or (None, None) on failure.
@@ -650,7 +650,7 @@ def _bench_at_ref(ref, op_names, shape_configs, modes, backend=None):
         out_json = os.path.join(tmpdir, 'results.json')
         _run_isolated_bench(
             worktree_dir,
-            _isolated_bench_cmd(runner, op_names, shape_configs, modes, backend, out_json),
+            _isolated_bench_cmd(runner, op_names, shape_configs, modes, backend, out_json, compile=compile),
         )
         return _read_bench_json(out_json)
     except Exception as e:
@@ -692,6 +692,10 @@ def main():
         '--backend', default=None,
         help="Op backend to select, e.g. 'triton' or 'gluon'. Toggles the backend's dispatch env "
              "var for ops that declare one (see OpConfig.backend_env); ignored otherwise.",
+    )
+    parser.add_argument(
+        '--compile', action='store_true',
+        help='Apply torch.compile(fullgraph=True) to the selected ops before warmup and timing',
     )
     parser.add_argument(
         '--custom-shapes', default=None,
@@ -762,11 +766,11 @@ def main():
 
     if not args.from_diff:
         op_names = list_ops() if args.op == ['all'] else args.op
-    shape_configs = json.loads(args.custom_shapes) if args.custom_shapes else SHAPE_CONFIGS
+    shape_configs = json.loads(args.custom_shapes) if args.custom_shapes else None
 
     is_worker = os.environ.get(_WORKER_ENV) == '1'
     print(f"Git: {_get_git_label()}")
-    print(f"Shapes: {len(shape_configs)} configs")
+    print(f"Shapes: {len(shape_configs) if shape_configs is not None else 'per-op defaults'}")
     print(f"Ops: {op_names}")
 
     if is_worker:
@@ -776,14 +780,14 @@ def main():
         for op_name in op_names:
             try:
                 all_results.extend(
-                    benchmark_op(op_name, shape_configs, modes=args.modes, backend=args.backend),
+                    benchmark_op(op_name, shape_configs, modes=args.modes, backend=args.backend, compile=args.compile),
                 )
             except Exception as e:
                 logger.error(f"Failed to benchmark {op_name}: {e}")
         baseline, baseline_info = None, None
     else:
         all_results, machine_info = _bench_current(
-            op_names, shape_configs, args.modes, backend=args.backend,
+            op_names, shape_configs, args.modes, backend=args.backend, compile=args.compile,
         )
         all_results = all_results or []
         machine_info = machine_info or {'git_label': _get_git_label()}
@@ -799,14 +803,13 @@ def main():
         baseline, baseline_info = None, None
         if base_ref:
             baseline, baseline_info = _bench_at_ref(
-                base_ref, op_names, shape_configs, args.modes, backend=args.backend)
+                base_ref, op_names, shape_configs, args.modes, backend=args.backend, compile=args.compile)
 
-    # Sort by (mode, L, B, T, H, D, op) so the table groups by mode first
-    # and (when present) by L so different residual-source counts cluster.
+    # group by mode, extra shape dimensions, B/T/H/D, and op.
     mode_order = {'fwd': 0, 'fwdbwd': 1}
     all_results.sort(key=lambda r: (
         mode_order.get(r['mode'], 9),
-        r.get('L', 0),
+        _make_result_key(r)[-1],
         r['B'], r['T'], r['H'], r['D'], r['op'],
     ))
 

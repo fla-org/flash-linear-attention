@@ -7,6 +7,13 @@
 
 """Utils op backends."""
 
+from fla.backends import GluonBackend, TileLangBackend
 from fla.ops.utils.backends.triton_ascend import TritonAscendUtilsBackend
 
 __all__ = ['TritonAscendUtilsBackend']
+
+if GluonBackend.is_available():
+    from fla.ops.utils.backends import gluon  # noqa: F401
+
+if TileLangBackend.is_available():
+    from fla.ops.utils.backends import tilelang  # noqa: F401

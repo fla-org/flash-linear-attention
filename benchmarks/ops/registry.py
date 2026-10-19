@@ -59,6 +59,10 @@ def shape_LBTD(B, T, H, D, L=None, **kw):
     return (L, B, T, D)
 
 
+def shape_BTNN(B, T, H, D, N, **kw):
+    return (B, T, N, N)
+
+
 def shape_q_hq(B, T, H, D, HQ=None, **kw):
     """q with HQ query heads (GQA); k/v keep H heads. Used by NSA."""
     if HQ is None:
@@ -624,6 +628,41 @@ register_op(OpConfig(
     default_shapes=_layer_default_shapes,
     category='naive_attnres',
 ))
+
+_sinkhorn_default_shapes = {
+    'N4_B1_T1_D128': {'N': 4, 'B': 1, 'T': 1, 'H': 1, 'D': 128},
+    'N4_B1_T63_D1024': {'N': 4, 'B': 1, 'T': 63, 'H': 1, 'D': 1024},
+    'N4_B1_T2048_D4096': {'N': 4, 'B': 1, 'T': 2048, 'H': 1, 'D': 4096},
+    'N4_B2_T1024_D4096': {'N': 4, 'B': 2, 'T': 1024, 'H': 1, 'D': 4096},
+    'N4_B1_T8192_D4096': {'N': 4, 'B': 1, 'T': 8192, 'H': 1, 'D': 4096},
+    'N8_B1_T2048_D1025': {'N': 8, 'B': 1, 'T': 2048, 'H': 1, 'D': 1025},
+}
+
+_sinkhorn_inputs = {
+    'logits': TensorSpec(shape_fn=shape_BTNN, dtype='float32'),
+}
+
+register_op(OpConfig(
+    name='sinkhorn',
+    import_path='fla.ops.utils.sinkhorn',
+    inputs=_sinkhorn_inputs,
+    output_is_tuple=False,
+    category='sinkhorn',
+    dim_constraints={'H': [1]},
+    default_shapes=_sinkhorn_default_shapes,
+    backend_env={'gluon': 'FLA_SINKHORN_GLUON', 'tilelang': 'FLA_SINKHORN_TILELANG'},
+))
+
+register_op(OpConfig(
+    name='naive_sinkhorn',
+    import_path='fla.ops.utils.sinkhorn',
+    inputs=_sinkhorn_inputs,
+    output_is_tuple=False,
+    category='sinkhorn',
+    dim_constraints={'H': [1]},
+    default_shapes=_sinkhorn_default_shapes,
+))
+
 
 # --- NSA (native sparse attention) — GQA + structured block selection ---
 # q carries HQ query heads while k/v carry H kv heads (GQA; HQ/H a power of two
