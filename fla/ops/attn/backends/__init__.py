@@ -8,3 +8,7 @@
 from fla.ops.attn.backends.tilelang import AttnTileLangBackend
 
 __all__ = ['AttnTileLangBackend']
+
+
+if AttnTileLangBackend.is_available():
+    from fla.ops.attn.backends.tilelang import parallel  # noqa: F401

@@ -14,7 +14,3 @@ from fla.utils import IS_NVIDIA_HOPPER, TRITON_ABOVE_3_4_0
 class AttnTileLangBackend(TileLangBackend):
     # work around Hopper regressions with Triton 3.4+ (see #640).
     default_enable = IS_NVIDIA_HOPPER and TRITON_ABOVE_3_4_0
-
-
-if AttnTileLangBackend.is_available():
-    from fla.ops.attn.backends.tilelang import parallel  # noqa: F401

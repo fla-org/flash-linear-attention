@@ -8,6 +8,7 @@
 """KDA backends."""
 
 from fla.backends import TritonAscendBackend
+from fla.ops.kda.backends.flash_kda import FlashKDABackend  # noqa: F401
 from fla.ops.kda.backends.tilelang import KDATileLangBackend  # noqa: F401
 
 if TritonAscendBackend.is_available():
