@@ -6,56 +6,52 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 from abc import ABC, abstractmethod
-from typing import Generic, TypeVar
+from typing import Any
 
 import torch
 from torch import nn
 
-StateT = TypeVar('StateT')
+from fla.modules.norm import RMSNorm
 
 
-class BaseResidual(nn.Module, ABC, Generic[StateT]):
-    """Prepare branch inputs and carry implementation-specific residual state between sublayers.
+class BaseResidual(nn.Module, ABC):
+    """Own one sublayer's normalization and residual parameters.
 
-    Implementations own their parameters and state layout. Initialization and updates return a branch input
-    and history; `get_hidden_state` exposes a representation for intermediate model hidden states.
-    Histories and their reported representations retain autograd connections without in-place updates.
-
-    Parameter initialization belongs to `reset_parameters`, independently of history initialization.
-    Model integrations call it instead of initializing residual children with their generic weight policy.
-    Custom initial values must be reproducible by this method, including after construction on the meta device.
+    `pre` reads the incoming state and returns a normalized branch input plus per-call context.
+    `post` writes the branch output into a new state. State and context remain explicit inputs,
+    retain autograd connections, and are never cached on the module or updated in place.
+    An output module performs only the final readout and normalization.
     """
 
+    def __init__(
+        self,
+        hidden_size: int,
+        norm_eps: float = 1e-6,
+        fuse_norm: bool = True,
+        sub_layer_idx: int = 0,
+        is_output: bool = False,
+    ):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.sub_layer_idx = sub_layer_idx
+        self.is_output = is_output
+        self.norm = (RMSNorm if fuse_norm else nn.RMSNorm)(hidden_size, eps=norm_eps)
+
     def reset_parameters(self) -> None:
-        """Initialize child modules using their own reset methods.
+        """Initialize owned parameters; custom implementations may override this method."""
+        self.norm.reset_parameters()
 
-        Override to initialize parameters or buffers owned directly by the residual, or to customize child defaults.
-        Call `super().reset_parameters()` first when retaining the other child defaults, and call this method after
-        constructing all fields for standalone use. Use `torch.nn.init` functions on the original tensors so
-        checkpoint loading can protect already loaded weights; avoid `.data`, tensor views and in-place arithmetic.
-        """
-        def reset(module):
-            if hasattr(module, 'reset_parameters'):
-                module.reset_parameters()
-            else:
-                for child in module.children():
-                    reset(child)
-
-        for child in self.children():
-            reset(child)
+    def initialize(self, x: torch.Tensor) -> Any:
+        return x
 
     @abstractmethod
-    def initialize(self, x: torch.Tensor) -> tuple[torch.Tensor, StateT]:
-        """Create the first sublayer's history and prepare its branch input from model embeddings."""
+    def pre(self, state: Any) -> tuple[torch.Tensor, Any]:
         raise NotImplementedError
 
     @abstractmethod
-    def forward(self, branch_output: torch.Tensor, history: StateT) -> tuple[torch.Tensor, StateT]:
-        """Return the next branch input (or final model output) and a new history without mutating the input history."""
+    def post(self, state: Any, branch_output: torch.Tensor, context: Any) -> Any:
         raise NotImplementedError
 
     @staticmethod
-    @abstractmethod
-    def get_hidden_state(history: StateT) -> torch.Tensor:
-        """Expose a `[..., hidden_size]` representation without copying, detaching, or mutating history."""
-        raise NotImplementedError
+    def get_hidden_state(state: Any) -> torch.Tensor:
+        return state

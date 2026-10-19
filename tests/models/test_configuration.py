@@ -57,6 +57,19 @@ def test_attnres(config_class, block_size):
 
 
 @pytest.mark.parametrize(('config_class', 'kwargs', 'match'), [
+    pytest.param(models.GLAConfig, {'attnres_block_size': 2, 'residual_mode': 'mhc'}, 'conflicts', id='gla-residual-mode'),
+    pytest.param(
+        models.GLAConfig,
+        {'attnres_block_size': 2, 'residual_kwargs': {'block_size': 4}},
+        'conflicts',
+        id='gla-residual-block',
+    ),
+    pytest.param(
+        models.GLAConfig,
+        {'residual_kwargs': {'hidden_size': 16}},
+        'supplied by the model',
+        id='gla-residual-layout',
+    ),
     pytest.param(models.KDAConfig, {'safe_gate': True, 'attnres_block_size': 3}, 'lower_bound', id='kda-gate'),
     pytest.param(models.GatedDeltaNetConfig, {'output_gate_activation': 'relu'}, 'output_gate_activation', id='gdn-gate'),
     pytest.param(models.Mamba2Config, {'A_init_range': (0, 16)}, 'A_init_range', id='mamba2-state'),
@@ -70,3 +83,22 @@ def test_attnres(config_class, block_size):
 def test_model_validation(config_class, kwargs, match):
     with pytest.raises(ValueError, match=match):
         config_class(**kwargs, fuse_cross_entropy=True, fuse_linear_cross_entropy=True)
+
+
+@pytest.mark.parametrize(('mode', 'options'), [
+    ('standard', {}), ('attnres', {'block_size': 3}), ('mhc', {'num_streams': 2, 'num_iters': 3}),
+])
+def test_gla_residual(mode, options, tmp_path):
+    options = dict(options, norm_eps=1e-4, fuse_norm=False)
+    config = models.GLAConfig(residual_mode=mode, residual_kwargs=options)
+    options['norm_eps'] = 0.1
+    assert config.get_residual_kwargs(sub_layer_idx=2)['norm_eps'] == 1e-4
+    config.save_pretrained(tmp_path)
+    restored = models.GLAConfig.from_pretrained(tmp_path)
+    assert restored.residual_mode == mode
+    assert restored.residual_kwargs == config.residual_kwargs
+    assert 'attnres_block_size' not in restored.to_dict()
+    restored.attnres_block_size = 4
+    assert restored.residual_mode == 'attnres' and restored.residual_kwargs['block_size'] == 4
+    restored.attnres_block_size = None
+    assert restored.residual_mode == 'standard' and 'block_size' not in restored.residual_kwargs

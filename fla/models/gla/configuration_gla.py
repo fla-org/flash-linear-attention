@@ -94,7 +94,7 @@ class GLAConfig(AttentionConfigBase, PreTrainedConfig):
         if residual_kwargs is not None and not isinstance(residual_kwargs, dict):
             raise TypeError('residual_kwargs must be a dict or None')
         self.residual_kwargs = dict(residual_kwargs or {})
-        reserved = {'hidden_size', 'sub_layer_idx', 'num_sublayers'} & self.residual_kwargs.keys()
+        reserved = {'hidden_size', 'sub_layer_idx', 'is_output'} & self.residual_kwargs.keys()
         if reserved:
             raise ValueError(f'{sorted(reserved)} are supplied by the model, not residual_kwargs')
 
@@ -134,7 +134,7 @@ class GLAConfig(AttentionConfigBase, PreTrainedConfig):
         else:
             self.residual_kwargs['block_size'] = value
 
-    def get_residual_kwargs(self, sub_layer_idx: int) -> dict:
+    def get_residual_kwargs(self, sub_layer_idx: int, is_output: bool = False) -> dict:
         """Build constructor arguments for the selected residual and sublayer."""
         return dict(
             norm_eps=self.norm_eps,
@@ -142,5 +142,5 @@ class GLAConfig(AttentionConfigBase, PreTrainedConfig):
         ) | self.residual_kwargs | dict(
             hidden_size=self.hidden_size,
             sub_layer_idx=sub_layer_idx,
-            num_sublayers=2 * self.num_hidden_layers,
+            is_output=is_output,
         )

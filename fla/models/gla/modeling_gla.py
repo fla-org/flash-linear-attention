@@ -8,49 +8,35 @@
 from __future__ import annotations
 
 import re
-import warnings
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn as nn
 from transformers.modeling_layers import GradientCheckpointingLayer
-from transformers.modeling_outputs import BaseModelOutputWithPast
-from transformers.utils import logging
 
 from fla.layers.gla import GatedLinearAttention
-from fla.models.cache_utils import Cache
 from fla.models.generation_utils import FLAUnsupportedCacheGenerationMixin
 from fla.models.gla.configuration_gla import GLAConfig
-from fla.models.modeling_utils import FLAForCausalLM, FLAPreTrainedModel, get_attention
+from fla.models.modeling_utils import FLAForCausalLM, FLAModel, FLAPreTrainedModel, get_attention
 from fla.modules import GatedMLP as GLAMLP
 from fla.modules import RMSNorm
-from fla.modules.residuals import BaseResidual, get_residual_class
+from fla.modules.residuals import AttentionResidual, BaseResidual, StandardResidual, get_residual_class
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
+    from fla.models.cache_utils import Cache
 
-logger = logging.get_logger(__name__)
 
-
-def _legacy_residual_keys(num_layers: int) -> dict[str, str]:
-    """Map official and external-attn-norm checkpoints to residual-owned parameters."""
-    keys = {}
-    if num_layers == 0:
-        return keys
-    for i in range(num_layers):
-        previous = f'layers.{i - 1}.residual_mlp' if i else 'layers.0.residual_attn'
-        input_norm = f'{previous}.norm.weight' if i else f'{previous}.input_norm.weight'
-        keys[f'layers.{i}.attn_norm.weight'] = input_norm
-        keys[f'attn_norms.{i}.weight'] = input_norm
-        keys[f'layers.{i}.mlp_norm.weight'] = f'layers.{i}.residual_attn.norm.weight'
-        for old, new in [('res_proj', 'query'), ('res_norm', 'key_norm')]:
-            keys[f'layers.{i}.attn_{old}.weight'] = f'{previous}.{new if i else "input_" + new}.weight'
-            keys[f'layers.{i}.mlp_{old}.weight'] = f'layers.{i}.residual_attn.{new}.weight'
-    keys['norm.weight'] = f'layers.{num_layers - 1}.residual_mlp.norm.weight'
-    keys['res_proj.weight'] = f'layers.{num_layers - 1}.residual_mlp.query.weight'
-    keys['res_norm.weight'] = f'layers.{num_layers - 1}.residual_mlp.key_norm.weight'
-    return keys
+_RESIDUAL_KEY_MAPPING = {
+    rf'layers\.(\d+)\.{sublayer}_{old}\.': rf'layers.\1.residual_{sublayer}.{new}.'
+    for sublayer in ('attn', 'mlp')
+    for old, new in (('norm', 'norm'), ('res_proj', 'query'), ('res_norm', 'key_norm'))
+} | {
+    r'^(model\.|)norm\.': r'\1residual_output.norm.',
+    r'^(model\.|)res_proj\.': r'\1residual_output.query.',
+    r'^(model\.|)res_norm\.': r'\1residual_output.key_norm.',
+}
 
 
 class GLABlock(GradientCheckpointingLayer):
@@ -93,24 +79,18 @@ class GLABlock(GradientCheckpointingLayer):
         residual_cls = get_residual_class(config.residual_mode)
         self.residual_attn = residual_cls(**config.get_residual_kwargs(sub_layer_idx=layer_idx * 2))
         self.residual_mlp = residual_cls(**config.get_residual_kwargs(sub_layer_idx=layer_idx * 2 + 1))
-        for residual in (self.residual_attn, self.residual_mlp):
-            for module in residual.modules():
-                if module is not residual:
-                    module._is_residual_child = True
+        self.fuse_residual = residual_cls is StandardResidual and isinstance(self.residual_mlp.norm, RMSNorm)
 
     def forward(
         self,
-        hidden_states: torch.Tensor,
-        history: Any = None,
+        state: Any,
         attention_mask: torch.Tensor | None = None,
         past_key_values: Cache | list[torch.FloatTensor] | None = None,
         use_cache: bool | None = False,
         output_attentions: bool | None = False,
         **kwargs: Unpack[dict],
-    ) -> tuple[torch.Tensor, torch.Tensor | None, Cache | None, Any]:
-        if history is None:
-            hidden_states, history = self.residual_attn.initialize(hidden_states)
-
+    ) -> tuple[Any, torch.Tensor | None, Cache | None]:
+        hidden_states, context = self.residual_attn.pre(state)
         hidden_states, attentions, past_key_values = self.attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
@@ -119,12 +99,15 @@ class GLABlock(GradientCheckpointingLayer):
             output_attentions=output_attentions,
             **kwargs,
         )
-        hidden_states, history = self.residual_attn(hidden_states, history)
-
+        if self.fuse_residual:
+            # preserve fused add/norm rounding for existing Standard checkpoints.
+            hidden_states, state = self.residual_mlp.norm(hidden_states, state, prenorm=True)
+        else:
+            state = self.residual_attn.post(state, hidden_states, context)
+            hidden_states, context = self.residual_mlp.pre(state)
         hidden_states = self.mlp(hidden_states, **kwargs)
-        hidden_states, history = self.residual_mlp(hidden_states, history)
-        outputs = (hidden_states, attentions, past_key_values, history)
-        return outputs
+        state = self.residual_mlp.post(state, hidden_states, context)
+        return state, attentions, past_key_values
 
 
 class GLAPreTrainedModel(FLAPreTrainedModel):
@@ -137,27 +120,15 @@ class GLAPreTrainedModel(FLAPreTrainedModel):
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
-        # HF loaders bypass module load hooks, including when loading onto the meta device.
-        config = kwargs.get('config')
-        if not isinstance(config, GLAConfig):
-            config = cls.config_class.from_pretrained(config or pretrained_model_name_or_path, **{
-                key: kwargs[key] for key in (
-                    'cache_dir', 'revision', 'token', 'local_files_only', 'subfolder',
-                    'num_hidden_layers', 'residual_mode', 'residual_kwargs', 'attnres_block_size',
-                )
-                if key in kwargs
-            })
-        key_mapping = dict(kwargs.pop('key_mapping', None) or {})
-        if config.residual_mode != 'mhc':
-            for old_key, new_key in _legacy_residual_keys(config.num_hidden_layers).items():
-                key_mapping.setdefault(r'^(model\.|)' + re.escape(old_key) + '$', r'\1' + new_key)
-        kwargs['key_mapping'] = key_mapping
+        # transformers loads meta parameters without invoking module load hooks.
+        kwargs['key_mapping'] = {**_RESIDUAL_KEY_MAPPING, **(kwargs.pop('key_mapping', None) or {})}
         return super().from_pretrained(pretrained_model_name_or_path, *args, **kwargs)
 
     def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
         checkpoint_kwargs = {'use_reentrant': False, **(gradient_checkpointing_kwargs or {})}
-        if checkpoint_kwargs['use_reentrant'] and self.config.residual_mode != 'standard':
-            raise ValueError('Structured residual history requires gradient checkpointing with use_reentrant=False')
+        residual_cls = get_residual_class(self.config.residual_mode)
+        if checkpoint_kwargs['use_reentrant'] and issubclass(residual_cls, AttentionResidual):
+            raise ValueError('AttentionResidual requires gradient checkpointing with use_reentrant=False')
         return super().gradient_checkpointing_enable(gradient_checkpointing_kwargs=checkpoint_kwargs)
 
     def _initialize_weights(self, module: nn.Module, *args, **kwargs):
@@ -172,23 +143,8 @@ class GLAPreTrainedModel(FLAPreTrainedModel):
             return
         super()._initialize_weights(module, *args, **kwargs)
 
-    def _init_weights(
-        self,
-        module: nn.Module,
-        prenorm_residual_strategy: str | None = None,
-        num_residuals_per_layer: int = 2,
-    ):
-        if isinstance(module, BaseResidual):
-            module.reset_parameters()
-            return
-        super()._init_weights(
-            module=module,
-            prenorm_residual_strategy=prenorm_residual_strategy,
-            num_residuals_per_layer=num_residuals_per_layer,
-        )
 
-
-class GLAModel(GLAPreTrainedModel):
+class GLAModel(GLAPreTrainedModel, FLAModel):
 
     def __init__(self, config: GLAConfig):
         super().__init__(config)
@@ -197,62 +153,53 @@ class GLAModel(GLAPreTrainedModel):
 
         self.embeddings = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
         self.layers = nn.ModuleList([GLABlock(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
+        residual_cls = get_residual_class(config.residual_mode)
+        output_kwargs = config.get_residual_kwargs(sub_layer_idx=2 * config.num_hidden_layers, is_output=True)
         if not self.layers:
-            self.norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
+            residual_cls = StandardResidual
+            output_kwargs = dict(hidden_size=config.hidden_size, norm_eps=config.norm_eps, fuse_norm=config.fuse_norm)
+        self.residual_output = residual_cls(**output_kwargs)
+        for residual in self.modules():
+            if isinstance(residual, BaseResidual):
+                for child in residual.modules():
+                    if child is not residual:
+                        child._is_residual_child = True
 
         self.gradient_checkpointing = False
 
         self.post_init()
 
     def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
-        if self.config.residual_mode != 'mhc':
-            for old_key, new_key in _legacy_residual_keys(len(self.layers)).items():
-                old_key, new_key = prefix + old_key, prefix + new_key
-                if old_key in state_dict and new_key not in state_dict:
-                    state_dict[new_key] = state_dict.pop(old_key)
+        for key in list(state_dict):
+            if not key.startswith(prefix):
+                continue
+            converted = key[len(prefix):]
+            for pattern, replacement in _RESIDUAL_KEY_MAPPING.items():
+                converted = re.sub(pattern, replacement, converted)
+            converted = prefix + converted
+            if converted != key and converted not in state_dict:
+                state_dict[converted] = state_dict.pop(key)
         super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
-    def forward(
+    def _forward_layers(
         self,
-        input_ids: torch.LongTensor | None = None,
-        attention_mask: Optional[torch.Tensor] = None,  # noqa
-        inputs_embeds: torch.FloatTensor | None = None,
-        past_key_values: Cache | list[torch.FloatTensor] | None = None,
-        use_cache: bool | None = None,
-        output_attentions: bool | None = None,
-        output_hidden_states: bool | None = None,
-        return_dict: bool | None = None,
+        hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+        past_key_values: Cache | None = None,
+        use_cache: bool = False,
+        output_attentions: bool = False,
+        output_hidden_states: bool = False,
         **kwargs: Unpack[dict],
-    ) -> tuple | BaseModelOutputWithPast:
-        if output_attentions:
-            warnings.warn("`GLAModel` does not `output_attentions` now, setting it to `False`.")
-            output_attentions = False
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        use_cache = use_cache if use_cache is not None else (self.config.use_cache if not self.training else False)
-        return_dict = return_dict if return_dict is not None else self.config.return_dict
+    ) -> tuple:
+        state = self.residual_output.initialize(hidden_states)
 
-        # retrieve input_ids and inputs_embeds
-        if input_ids is not None and inputs_embeds is not None:
-            raise ValueError("You cannot specify both input_ids and inputs_embeds at the same time")
-        if input_ids is None and inputs_embeds is None:
-            raise ValueError("You have to specify either input_ids or inputs_embeds")
-
-        if inputs_embeds is None:
-            inputs_embeds = self.embeddings(input_ids)
-        hidden_states = inputs_embeds
-
-        if use_cache and not isinstance(past_key_values, Cache):
-            past_key_values = Cache.from_legacy_cache(past_key_values)
-
-        history = None
-
-        all_hidden_states = (hidden_states,) if output_hidden_states else None
+        all_hidden_states = () if output_hidden_states else None
         all_attns = () if output_attentions else None
-        for layer_idx, layer in enumerate(self.layers):
-            hidden_states, attentions, past_key_values, history = layer(
-                hidden_states,
-                history,
+        for layer in self.layers:
+            if output_hidden_states:
+                all_hidden_states += (self.residual_output.get_hidden_state(state),)
+            state, attentions, past_key_values = layer(
+                state,
                 attention_mask=attention_mask,
                 past_key_values=past_key_values,
                 use_cache=use_cache,
@@ -263,25 +210,11 @@ class GLAModel(GLAPreTrainedModel):
             if output_attentions:
                 all_attns += (attentions,)
 
-            if output_hidden_states:
-                # intermediate entries report residual states; the final entry is the normalized model output.
-                all_hidden_states += (
-                    hidden_states if layer_idx == len(self.layers) - 1 else layer.residual_mlp.get_hidden_state(history),
-                )
+        hidden_states, _ = self.residual_output.pre(state)
+        if output_hidden_states:
+            all_hidden_states += (hidden_states,)
 
-        if not self.layers:
-            hidden_states = self.norm(hidden_states)
-            if output_hidden_states:
-                all_hidden_states = (hidden_states,)
-
-        if not return_dict:
-            return tuple(i for i in [hidden_states, past_key_values, all_hidden_states, all_attns] if i is not None)
-        return BaseModelOutputWithPast(
-            last_hidden_state=hidden_states,
-            past_key_values=past_key_values,
-            hidden_states=all_hidden_states,
-            attentions=all_attns,
-        )
+        return hidden_states, past_key_values, all_hidden_states, all_attns
 
 
 class GLAForCausalLM(GLAPreTrainedModel, FLAForCausalLM, FLAUnsupportedCacheGenerationMixin):
