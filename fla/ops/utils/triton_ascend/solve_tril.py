@@ -13,7 +13,9 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.backends import TritonAscendBackend, register
 from fla.ops.utils.index import prepare_chunk_indices
+from fla.ops.utils.solve_tril import solve_tril
 from fla.utils import input_guard
 from fla.utils.ascend_ub_manager import ASCEND_MAX_GRID_DIM, max_grid_axis_chunks
 
@@ -301,12 +303,13 @@ def merge_16x16_to_64x64_inverse_kernel_npu(
     tl.store(p_Ai_43, b_Ai_43.to(p_Ai_43.dtype.element_ty, fp_downcast_rounding='rtne'), boundary_check=(0, 1))
 
 
+@register(solve_tril, backend=TritonAscendBackend)
 @input_guard
 def solve_tril_npu(
     A: torch.Tensor,
     cu_seqlens: torch.Tensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
-    output_dtype: torch.dtype = torch.float,
+    output_dtype: torch.dtype | None = torch.float,
 ) -> torch.Tensor:
     assert A.shape[-1] in [16, 32, 64]
     output_dtype = A.dtype if output_dtype is None else output_dtype
