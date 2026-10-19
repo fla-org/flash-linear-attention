@@ -469,9 +469,9 @@ def test_dispatch_disabled(run_python, disabled):
             assert f'modules.{owner}' not in backends._operation_registries
         assert ('fla.ops.utils.sinkhorn.tilelang' in sys.modules) == TileLangBackend.is_available()
         assert 'flash_kda' not in sys.modules
-        assert 'fla.ops.kda.backends.triton_ascend.chunk_intra' not in sys.modules
         assert 'utils' not in backends._operation_registries
         ascend_available = TritonAscendBackend.is_available()
+        assert ('fla.ops.kda.backends.triton_ascend.chunk_intra' in sys.modules) == ascend_available
         assert ('fla.ops.utils.triton_ascend.cumsum' in sys.modules) == ascend_available
         assert ('fla.ops.utils.triton_ascend.solve_tril' in sys.modules) == ascend_available
         assert ('fla.ops.common.backends.triton_ascend.chunk_o' in sys.modules) == ascend_available
