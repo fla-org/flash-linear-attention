@@ -10,6 +10,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.common.fused_recurrent import fused_recurrent_bwd_kernel, fused_recurrent_fwd_kernel
+from fla.ops.utils.cumulative_normalize import fused_cumulative_normalize
 from fla.ops.utils.op import exp
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
@@ -374,9 +375,8 @@ class FusedRecurrentGSAFunction(torch.autograd.Function):
         cu_seqlens: torch.LongTensor | None = None,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor]]:
         T = q.shape[1]
-        # The inference shortcut treats the input as a single dense batch; it is only
-        # valid without cu_seqlens (a packed batch would read seq0's state and misshape the output).
-        if T == 1 and not q.requires_grad and cu_seqlens is None:
+        # the decode kernel assumes one token per dense sequence and does not save tensors for backward.
+        if T == 1 and not any(ctx.needs_input_grad) and cu_seqlens is None:
             o, (hkt, hvt) = fused_recurrent_gsa_inference(
                 q=q,
                 k=k,
@@ -524,6 +524,13 @@ def fused_recurrent_gsa(
                 f"The number of initial states is expected to be equal to the number of input sequences, "
                 f"i.e., {len(cu_seqlens) - 1} rather than {initial_state[0].shape[0]}.",
             )
+    if g is None:
+        s, g, _ = fused_cumulative_normalize(
+            x=s,
+            cu_seqlens=cu_seqlens,
+            output_dtype=k.dtype,
+            gate_dtype=torch.float32,
+        )
     if scale is None:
         scale = k.shape[-1] ** -0.5
     if initial_state is None:

@@ -589,3 +589,84 @@ def test_inference_state_contract(has_initial_state: bool, output_final_state: b
         if output_final_state:
             assert tri_state[0].data_ptr() != initial_state[0].data_ptr()
             assert tri_state[1].data_ptr() != initial_state[1].data_ptr()
+
+
+@pytest.mark.parametrize("impl", [chunk_gsa, fused_recurrent_gsa], ids=["chunk", "fused-recurrent"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16], ids=["fp32", "fp16", "bf16"])
+@pytest.mark.parametrize("varlen", [False, True], ids=["dense", "varlen"])
+def test_normalization(impl, dtype: torch.dtype, varlen: bool, monkeypatch):
+    torch.manual_seed(42)
+    monkeypatch.setenv('TRITON_F32_DEFAULT', 'ieee')
+    lengths = [1, 16, 48] if varlen else [65, 65]
+    B, T, H, K, V, M = 1 if varlen else 2, 65, 2, 32, 48, 32
+    q = torch.randn(B, T, H, K, device=device, dtype=dtype).requires_grad_()
+    k = torch.randn_like(q).requires_grad_()
+    v = torch.randn(B, T, H, V, device=device, dtype=dtype).requires_grad_()
+    s = torch.randn(B, T, H, M, device=device, dtype=dtype).requires_grad_()
+    hk0 = torch.randn(len(lengths), H, K, M, device=device).requires_grad_()
+    hv0 = torch.randn(len(lengths), H, M, V, device=device).requires_grad_()
+    inputs = (q, k, v, s, hk0, hv0)
+    do, dhkt, dhvt = torch.randn_like(v), torch.randn_like(hk0), torch.randn_like(hv0)
+    cu_seqlens = torch.tensor([0, 1, 17, 65], device=device, dtype=torch.int32) if varlen else None
+
+    outputs, key_states, value_states = [], [], []
+    start = 0
+    for i, length in enumerate(lengths):
+        index = (slice(None), slice(start, start + length)) if varlen else (slice(i, i + 1), slice(None))
+        slots = s[index].float()
+        z = slots.logcumsumexp(1)
+        gates = torch.cat((z[:, :1], z[:, :-1]), dim=1) - z
+        out, (hkt, hvt) = naive_recurrent_gsa(
+            q=q[index],
+            k=k[index],
+            v=v[index],
+            s=(slots - z).exp().to(dtype),
+            g=gates,
+            initial_state=(hk0[i:i + 1], hv0[i:i + 1]),
+            output_final_state=True,
+        )
+        outputs.append(out)
+        key_states.append(hkt)
+        value_states.append(hvt)
+        start += length
+    ref = torch.cat(outputs, dim=1 if varlen else 0)
+    ref_hkt, ref_hvt = torch.cat(key_states), torch.cat(value_states)
+    ref_grads = torch.autograd.grad((ref * do).sum() + (ref_hkt * dhkt).sum() + (ref_hvt * dhvt).sum(), inputs)
+
+    tri, (tri_hkt, tri_hvt) = impl(
+        q=q,
+        k=k,
+        v=v,
+        s=s,
+        initial_state=(hk0, hv0),
+        output_final_state=True,
+        cu_seqlens=cu_seqlens,
+    )
+    tri_grads = torch.autograd.grad((tri * do).sum() + (tri_hkt * dhkt).sum() + (tri_hvt * dhvt).sum(), inputs)
+    assert_close('o', ref, tri, 0.005)
+    assert_close('hkt', ref_hkt, tri_hkt, 0.005)
+    assert_close('hvt', ref_hvt, tri_hvt, 0.005)
+    for name, ref_grad, tri_grad in zip(('dq', 'dk', 'dv', 'ds', 'dhk0', 'dhv0'), ref_grads, tri_grads):
+        assert_close(name, ref_grad, tri_grad, 0.005)
+
+
+@pytest.mark.parametrize("reverse", [False, True], ids=["forward", "reverse"])
+@pytest.mark.parametrize("T", [1, 17], ids=["single-token", "multi-token"])
+def test_fused_recurrent_partial_grad(T: int, reverse: bool):
+    torch.manual_seed(42)
+    q = torch.randn(1, T, 2, 32, device=device)
+    k = torch.randn_like(q).requires_grad_()
+    v = torch.randn(1, T, 2, 48, device=device).requires_grad_()
+    s = torch.randn(1, T, 2, 32, device=device).requires_grad_()
+    g = F.logsigmoid(torch.randn_like(s)).requires_grad_()
+    do = torch.randn_like(v)
+    ref_inputs = [x.flip(1) for x in (q, k, v, s, g)] if reverse else [q, k, v, s, g]
+    ref, _ = naive_recurrent_gsa(*ref_inputs)
+    if reverse:
+        ref = ref.flip(1)
+    ref_grads = torch.autograd.grad((ref * do).sum(), (k, v, s, g))
+    tri, _ = fused_recurrent_gsa(q=q, k=k, v=v, s=s, g=g, reverse=reverse)
+    tri_grads = torch.autograd.grad((tri * do).sum(), (k, v, s, g))
+    assert_close('o', ref, tri, 0.005)
+    for name, ref_grad, tri_grad in zip(('dk', 'dv', 'ds', 'dg'), ref_grads, tri_grads):
+        assert_close(name, ref_grad, tri_grad, 0.005)

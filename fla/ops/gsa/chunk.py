@@ -15,6 +15,7 @@ from fla.ops.gla.chunk import chunk_gla_bwd, chunk_gla_fwd
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.cumsum import chunk_local_cumsum
+from fla.ops.utils.cumulative_normalize import fused_cumulative_normalize
 from fla.ops.utils.op import exp2, unflatten_program_id
 from fla.ops.utils.softmax import softmax_bwd, softmax_fwd
 from fla.utils import autotune_cache_kwargs, input_guard
@@ -1235,10 +1236,12 @@ def chunk_gsa(
             )
     assert checkpoint_level in [0, 1, 2]
     if g is None:
-        # TODO: this 3 steps took huge amount of time, ought to be optimized
-        z = s.float().logcumsumexp(2)
-        g = torch.cat((z[:, :, :1], z[:, :, :-1]), 1) - z
-        s = torch.exp(s - z).to(k.dtype)
+        s, g, _ = fused_cumulative_normalize(
+            x=s,
+            cu_seqlens=cu_seqlens,
+            output_dtype=k.dtype,
+            gate_dtype=torch.float32,
+        )
     if scale is None:
         scale = q.shape[-1] ** -0.5
 
