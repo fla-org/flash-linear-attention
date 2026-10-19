@@ -23,6 +23,77 @@ def gdn2_local_log_cumsum(g, start, end, o_k, H: tl.constexpr, K: tl.constexpr, 
 
 
 @triton.jit(do_not_specialize=['T'])
+def gdn2_local_log_scans_kernel(
+    g,
+    prefix,
+    suffix,
+    cu_seqlens,
+    chunk_indices,
+    T,
+    H: tl.constexpr,
+    K: tl.constexpr,
+    BT: tl.constexpr,
+    BC: tl.constexpr,
+    BK: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+):
+    i_tk = tl.program_id(0).to(tl.int64)
+    i_t, i_k = i_tk // tl.cdiv(K, BK), i_tk % tl.cdiv(K, BK)
+    i_bh = tl.program_id(1).to(tl.int64)
+    i_b, i_h = i_bh // H, i_bh % H
+    if IS_VARLEN:
+        i_n = tl.load(chunk_indices + i_t * 2).to(tl.int64)
+        i_t = tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        bos = tl.load(cu_seqlens + i_n).to(tl.int64)
+        T = tl.load(cu_seqlens + i_n + 1).to(tl.int64) - bos
+    else:
+        bos = i_b * T
+    o_k = i_k * BK + tl.arange(0, BK)
+    g += (bos * H + i_h) * K
+    for i_i in range(tl.cdiv(BT, BC)):
+        start = i_t * BT + i_i * BC
+        if start < T:
+            end = min(start + BC, T)
+            o_t = start + tl.arange(0, BC)
+            offsets = ((bos + o_t[:, None]) * H + i_h) * K + o_k[None, :]
+            mask = (o_t[:, None] < T) & (o_k[None, :] < K)
+            b_prefix = gdn2_local_log_cumsum(g, start, end, o_k, H, K, BC)
+            b_suffix = gdn2_local_log_cumsum(g, start, end, o_k, H, K, BC, True)
+            tl.store(prefix + offsets, b_prefix, mask)
+            tl.store(suffix + offsets, b_suffix, mask)
+
+
+def gdn2_local_log_scans(
+    g: torch.Tensor,
+    cu_seqlens: torch.Tensor | None,
+    chunk_indices: torch.Tensor | None,
+    chunk_size: int,
+    subchunk_size: int,
+    key_tile_size: int,
+):
+    """Compute local FP32 gate scans before the Ascend mixed backward kernel."""
+    B, T, H, K = g.shape
+    NT = triton.cdiv(T, chunk_size) if chunk_indices is None else len(chunk_indices)
+    prefix = torch.empty_like(g, dtype=torch.float32)
+    suffix = torch.empty_like(g, dtype=torch.float32)
+    gdn2_local_log_scans_kernel[(NT * triton.cdiv(K, key_tile_size), B * H)](
+        g=g,
+        prefix=prefix,
+        suffix=suffix,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        T=T,
+        H=H,
+        K=K,
+        BT=chunk_size,
+        BC=subchunk_size,
+        BK=key_tile_size,
+        IS_VARLEN=cu_seqlens is not None,
+    )
+    return prefix, suffix
+
+
+@triton.jit(do_not_specialize=['T'])
 def gdn2_chunk_gate_kernel(
     g,
     out,
