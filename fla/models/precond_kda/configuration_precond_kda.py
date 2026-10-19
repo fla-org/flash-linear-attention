@@ -5,10 +5,10 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
 
-class PrecondKDAConfig(PretrainedConfig):
+class PrecondKDAConfig(PreTrainedConfig):
     model_type = 'precond_kda'
     keys_to_ignore_at_inference = ['past_key_values']
 

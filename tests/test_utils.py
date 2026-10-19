@@ -103,10 +103,12 @@ def test_public_utils_are_reexported():
         'assert_close',
         'autotune_cache_kwargs',
         'check_shared_mem',
+        'check_transformers_version',
         'device',
         'device_platform',
         'input_guard',
         'is_nvidia_hopper',
+        'supports_transformers_next_sequence_length',
         'tensor_cache',
     ):
         assert hasattr(utils, name), name
