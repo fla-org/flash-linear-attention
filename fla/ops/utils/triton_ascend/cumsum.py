@@ -25,7 +25,7 @@ from fla.utils.ascend_ub_manager import (
 )
 
 _NUM_WARPS = 4
-# Peak live fp32 tiles: b_s, b_o (and b_z / partial sums for vector/global).
+# peak live fp32 tiles: b_s, b_o (and b_z / partial sums for vector/global).
 _CUMSUM_SCALAR_MEM_MULT = 3.0
 # b_s, b_c, b_z, plus tl.cumsum multi-buffer on [BT, BS] tiles.
 _CUMSUM_VECTOR_MEM_MULT = 8.0
@@ -351,7 +351,7 @@ def chunk_local_cumsum_scalar_npu(
     g: torch.Tensor,
     chunk_size: int,
     reverse: bool = False,
-    scale: float = None,
+    scale: float | None = None,
     cu_seqlens: torch.Tensor | None = None,
     output_dtype: torch.dtype | None = torch.float,
     chunk_indices: torch.LongTensor | None = None,
@@ -367,7 +367,7 @@ def chunk_local_cumsum_scalar_npu(
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
     num_blocks = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, chunk_size)
-    # graph 模式下未覆盖行须为 0：kda_gate_bwd 对输出做全量归约，脏行会污染 dA/dbias
+    # graph padding must stay zero because kda_gate_bwd reduces over all rows.
     g_org, g = g, (torch.zeros_like if use_graph else torch.empty_like)(g, dtype=output_dtype or g.dtype)
 
     num_core = get_multiprocessor_count()
@@ -395,7 +395,7 @@ def chunk_local_cumsum_vector_npu(
     g: torch.Tensor,
     chunk_size: int,
     reverse: bool = False,
-    scale: float = None,
+    scale: float | None = None,
     cu_seqlens: torch.Tensor | None = None,
     output_dtype: torch.dtype | None = torch.float,
     chunk_indices: torch.LongTensor | None = None,
@@ -420,7 +420,7 @@ def chunk_local_cumsum_vector_npu(
         BS,
         max_grid=ASCEND_MAX_GRID_DIM,
     )
-    # graph 模式下未覆盖行须为 0：kda_gate_bwd 对输出做全量归约，脏行会污染 dA/dbias
+    # graph padding must stay zero because kda_gate_bwd reduces over all rows.
     g_org, g = g, (torch.zeros_like if use_graph else torch.empty_like)(g, dtype=output_dtype or g.dtype)
     _launch_local_cumsum_vector(
         g_org=g_org,
@@ -446,7 +446,7 @@ def chunk_global_cumsum_scalar_npu(
     s: torch.Tensor,
     reverse: bool = False,
     cu_seqlens: torch.Tensor | None = None,
-    scale: float = None,
+    scale: float | None = None,
     output_dtype: torch.dtype | None = torch.float,
     **kwargs,
 ) -> torch.Tensor:
@@ -483,7 +483,7 @@ def chunk_global_cumsum_vector_npu(
     s: torch.Tensor,
     reverse: bool = False,
     cu_seqlens: torch.Tensor | None = None,
-    scale: float = None,
+    scale: float | None = None,
     output_dtype: torch.dtype | None = torch.float,
     **kwargs,
 ) -> torch.Tensor:
@@ -532,7 +532,7 @@ def chunk_global_cumsum_npu(
     s: torch.Tensor,
     reverse: bool = False,
     cu_seqlens: torch.Tensor | None = None,
-    scale: float = None,
+    scale: float | None = None,
     output_dtype: torch.dtype | None = torch.float,
     **kwargs,
 ) -> torch.Tensor:
@@ -570,7 +570,7 @@ def chunk_local_cumsum_npu(
     g: torch.Tensor,
     chunk_size: int,
     reverse: bool = False,
-    scale: float = None,
+    scale: float | None = None,
     cu_seqlens: torch.Tensor | None = None,
     output_dtype: torch.dtype | None = torch.float,
     chunk_indices: torch.LongTensor | None = None,

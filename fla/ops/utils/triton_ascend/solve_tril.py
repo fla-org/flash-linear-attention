@@ -309,7 +309,7 @@ def solve_tril_npu(
     A: torch.Tensor,
     cu_seqlens: torch.Tensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
-    output_dtype: torch.dtype = torch.float,
+    output_dtype: torch.dtype | None = torch.float,
 ) -> torch.Tensor:
     assert A.shape[-1] in [16, 32, 64]
     output_dtype = A.dtype if output_dtype is None else output_dtype
