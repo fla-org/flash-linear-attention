@@ -114,14 +114,11 @@ def test_sinkhorn_unavailable_backend(monkeypatch, backend_type):
         monkeypatch.setenv(f'FLA_SINKHORN_{name}', '0')
     monkeypatch.setenv(f'FLA_SINKHORN_{backend_type.backend_type.upper()}', '1')
     monkeypatch.setattr(backend_type, 'is_available', classmethod(lambda cls: False))
-    if backend_type.package_name == 'tilelang' and not importlib.util.find_spec('tilelang'):
-        pytest.skip('TileLang is unavailable')
-    module = importlib.import_module(f'fla.ops.utils.backends.{backend_type.backend_type}')
 
-    def forward(*args, **kwargs):
+    def implementation(*args, **kwargs):
         pytest.fail('Unavailable backend was selected')
 
-    monkeypatch.setattr(module, 'sinkhorn_fwd', forward)
+    monkeypatch.setattr(backend_type, 'get_implementation', implementation)
     logits = torch.zeros(1, 1, device=device)
     torch.testing.assert_close(sinkhorn(logits=logits), torch.ones_like(logits))
 
