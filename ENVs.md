@@ -18,18 +18,16 @@ These switches control registered implementations. Unavailable backends and unsu
 | ------------------------------ | ----------------- | --------- | --------------------------------------------------------------------------------------------------- |
 | `FLA_DISABLE_BACKEND_DISPATCH` | `0`               | `0` / `1` | Bypass all backend dispatch. Takes precedence over every backend switch below.                      |
 | `FLA_TILELANG`                 | Backend-dependent | `0` / `1` | Enable TileLang implementations when installed. Default enablement depends on the operator and GPU. |
-| `FLA_SINKHORN_TILELANG`        | `0`               | `0` / `1` | Enable TileLang Sinkhorn kernels independently.                                                     |
 | `FLA_FLASH_KDA`                | `1`               | `0` / `1` | Enable [FlashKDA](https://github.com/MoonshotAI/FlashKDA) for KDA inference when installed.         |
 
 ### Gluon
 
-| Variable             | Default | Options   | Description                                                                     |
-| -------------------- | ------- | --------- | ------------------------------------------------------------------------------- |
-| `FLA_GLUON`          | `0`     | `0` / `1` | Enable all available Gluon backends, overriding individual switches set to `0`. |
-| `FLA_CE_GLUON`       | `0`     | `0` / `1` | Enable Gluon CE kernels, including fused-linear CE (NVIDIA).                    |
-| `FLA_CONV_GLUON`     | `0`     | `0` / `1` | Enable Gluon causal convolution independently.                                  |
-| `FLA_ATTNRES_GLUON`  | `0`     | `0` / `1` | Enable Gluon AttnRes independently.                                             |
-| `FLA_SINKHORN_GLUON` | `0`     | `0` / `1` | Enable Gluon Sinkhorn kernels independently.                                    |
+| Variable            | Default | Options   | Description                                                                     |
+| ------------------- | ------- | --------- | ------------------------------------------------------------------------------- |
+| `FLA_GLUON`         | `0`     | `0` / `1` | Enable all available Gluon backends, overriding individual switches set to `0`. |
+| `FLA_CE_GLUON`      | `0`     | `0` / `1` | Enable Gluon CE kernels, including fused-linear CE (NVIDIA).                    |
+| `FLA_CONV_GLUON`    | `0`     | `0` / `1` | Enable Gluon causal convolution independently.                                  |
+| `FLA_ATTNRES_GLUON` | `0`     | `0` / `1` | Enable Gluon AttnRes independently.                                             |
 
 When `FLA_GLUON` is unset or `0`, the individual switches apply. `FLA_DISABLE_BACKEND_DISPATCH=1` overrides all of them.
 

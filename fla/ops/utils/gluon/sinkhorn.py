@@ -124,7 +124,7 @@ def sinkhorn_bwd(out, history, dout, num_iters, dtype):
     return dx
 
 
-@register(sinkhorn_fwd_dispatch, env_var='FLA_SINKHORN_GLUON')
+@register(sinkhorn_fwd_dispatch)
 class SinkhornGluonBackend(GluonBackend):
     default_enable = False
 

@@ -154,7 +154,7 @@ def sinkhorn_bwd(out, history, dout, num_iters, dtype):
     return dx
 
 
-@register(sinkhorn_fwd_dispatch, env_var='FLA_SINKHORN_TILELANG')
+@register(sinkhorn_fwd_dispatch)
 class SinkhornTileLangBackend(TileLangBackend):
     default_enable = False
 

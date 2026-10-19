@@ -410,7 +410,7 @@ def chunk_global_cumsum_vector(
 
 
 @input_guard
-@dispatch('utils')
+@dispatch
 def chunk_global_cumsum(
     s: torch.Tensor,
     reverse: bool = False,
@@ -449,7 +449,7 @@ def chunk_global_cumsum(
 
 
 @input_guard
-@dispatch('utils')
+@dispatch
 def chunk_local_cumsum(
     g: torch.Tensor,
     chunk_size: int,
