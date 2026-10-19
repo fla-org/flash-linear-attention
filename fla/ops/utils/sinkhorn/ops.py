@@ -54,10 +54,10 @@ def sinkhorn_bwd_kernel(o, history, do, dx, T, N: tl.constexpr, BN: tl.constexpr
     m_ij = (o_i[:, None] < N) & (o_j[None, :] < N)
     b_dx = tl.load(do + o_ij, mask=m_ij, other=0).to(tl.float32) * tl.load(o + o_ij, mask=m_ij, other=0)
     for step in range(NUM_ITERS - 1, -1, -1):
-        b_probability = tl.load(history + ((step.to(tl.int64) * 2 + 1) * T * N * N) + o_ij, mask=m_ij, other=0)
-        b_dx = b_dx - b_probability * tl.sum(b_dx, axis=1)[:, None]
-        b_probability = tl.load(history + (step.to(tl.int64) * 2 * T * N * N) + o_ij, mask=m_ij, other=0)
-        b_dx = b_dx - b_probability * tl.sum(b_dx, axis=0)[None, :]
+        b_p = tl.load(history + ((step.to(tl.int64) * 2 + 1) * T * N * N) + o_ij, mask=m_ij, other=0)
+        b_dx = b_dx - b_p * tl.sum(b_dx, axis=1)[:, None]
+        b_p = tl.load(history + (step.to(tl.int64) * 2 * T * N * N) + o_ij, mask=m_ij, other=0)
+        b_dx = b_dx - b_p * tl.sum(b_dx, axis=0)[None, :]
     tl.store(dx + o_ij, b_dx, mask=m_ij)
 
 

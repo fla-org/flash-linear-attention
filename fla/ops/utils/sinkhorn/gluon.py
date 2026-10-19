@@ -73,10 +73,10 @@ def sinkhorn_bwd_kernel(
     m_ij = (o_t[:, None, None] < T) & (o_i[None, :, None] < N) & (o_j[None, None, :] < N)
     b_dx = gl.load(do + o_ij, mask=m_ij, other=0).to(gl.float32) * gl.load(o + o_ij, mask=m_ij, other=0)
     for step in range(NUM_ITERS - 1, -1, -1):
-        b_probability = gl.load(history + ((step.to(gl.int64) * 2 + 1) * T * N * N) + o_ij, mask=m_ij, other=0)
-        b_dx = b_dx - b_probability * gl.sum(b_dx, axis=2)[:, :, None]
-        b_probability = gl.load(history + (step.to(gl.int64) * 2 * T * N * N) + o_ij, mask=m_ij, other=0)
-        b_dx = b_dx - b_probability * gl.sum(b_dx, axis=1)[:, None, :]
+        b_p = gl.load(history + ((step.to(gl.int64) * 2 + 1) * T * N * N) + o_ij, mask=m_ij, other=0)
+        b_dx = b_dx - b_p * gl.sum(b_dx, axis=2)[:, :, None]
+        b_p = gl.load(history + (step.to(gl.int64) * 2 * T * N * N) + o_ij, mask=m_ij, other=0)
+        b_dx = b_dx - b_p * gl.sum(b_dx, axis=1)[:, None, :]
     gl.store(dx + o_ij, b_dx, mask=m_ij)
 
 
