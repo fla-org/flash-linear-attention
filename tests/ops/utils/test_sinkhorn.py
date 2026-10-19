@@ -5,70 +5,110 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-import importlib
+from unittest.mock import Mock
 
 import pytest
 import torch
 
 from fla.backends import _DISPATCH_DISABLED, GluonBackend, TileLangBackend
-from fla.ops.utils.sinkhorn import naive_sinkhorn, sinkhorn
+from fla.ops.utils.sinkhorn import ops, sinkhorn
+from fla.ops.utils.sinkhorn.naive import naive_sinkhorn
 from fla.utils import IS_NVIDIA, assert_close, device
+
+pytestmark = pytest.mark.skipif(not IS_NVIDIA, reason='NVIDIA CUDA required')
 
 
 @pytest.fixture(params=['triton', 'gluon', 'tilelang'])
 def backend(request, monkeypatch):
-    if not IS_NVIDIA:
-        pytest.skip('NVIDIA CUDA required')
     for name in ('GLUON', 'TILELANG'):
         monkeypatch.setenv(f'FLA_{name}', '0')
     name = request.param
     if name == 'triton':
-        return importlib.import_module('fla.ops.utils.sinkhorn')
+        return name
     if _DISPATCH_DISABLED:
         pytest.skip('Backend dispatch disabled before import')
     backend_type = GluonBackend if name == 'gluon' else TileLangBackend
     if not backend_type.is_available():
         pytest.skip(f'{name} is unavailable')
     monkeypatch.setenv(f'FLA_{name.upper()}', '1')
-    return importlib.import_module(f'fla.ops.utils.{name}.sinkhorn')
+    return name
 
 
-@pytest.mark.parametrize('dtype', [torch.float32, torch.float16, torch.bfloat16])
-@pytest.mark.parametrize(('shape', 'num_iters', 'scale', 'strided'), [
-    pytest.param((2, 7, 1, 1), 20, 1, False, id='N1'),
-    pytest.param((2, 7, 3, 3), 1, 1, False, id='N3-iter1'),
-    pytest.param((2, 7, 4, 4), 20, 1, False, id='N4'),
-    pytest.param((2, 7, 8, 8), 7, 1, False, id='N8-iter7'),
-    pytest.param((2, 7, 4, 4), 20, 1000, False, id='large-logits'),
-    pytest.param((127, 4, 4), 20, 1, False, id='T127-N4'),
-    pytest.param((128, 4, 4), 20, 1, False, id='T128-N4'),
-    pytest.param((129, 1, 1), 20, 1, False, id='T129-N1'),
-    pytest.param((129, 3, 3), 20, 1, False, id='T129-N3'),
-    pytest.param((129, 8, 8), 20, 1, False, id='T129-N8'),
-    pytest.param((4, 4), 20, 1, False, id='unbatched'),
-    pytest.param((2, 4, 4), 20, 1, True, id='strided'),
-    pytest.param((2, 0, 4, 4), 20, 1, False, id='empty'),
-])
-def test_sinkhorn(backend, dtype, shape, num_iters, scale, strided):
+@pytest.mark.parametrize('dtype', [torch.float32, torch.float16, torch.bfloat16], ids=str)
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'N', 'num_iters', 'scale'),
+    [
+        pytest.param(*test, id='B{}-T{}-H{}-N{}-iters{}-scale{}'.format(*test))
+        for test in [
+            (2, 7, 1, 1, 20, 1),
+            (2, 7, 1, 3, 1, 1),
+            (2, 7, 1, 4, 20, 1),
+            (2, 7, 1, 8, 7, 1),
+            (2, 7, 1, 4, 20, 1000),
+            (1, 127, 1, 4, 20, 1),
+            (1, 128, 1, 4, 20, 1),
+            (1, 129, 1, 1, 20, 1),
+            (1, 129, 1, 3, 20, 1),
+            (1, 129, 1, 8, 20, 1),
+            (1, 8192, 1, 4, 20, 1),
+            (1, 8192, 1, 8, 20, 1),
+            (1, 32768, 1, 4, 20, 1),
+            (1, 32768, 1, 8, 20, 1),
+        ]
+    ],
+)
+def test_sinkhorn(B: int, T: int, H: int, N: int, num_iters: int, scale: float, dtype: torch.dtype, backend):
     torch.manual_seed(42)
-    logits = torch.randn(shape, device=device, dtype=dtype) * scale
-    if strided:
-        logits = logits.transpose(-1, -2)
-    logits.requires_grad_()
-    ref = naive_sinkhorn(logits=logits, num_iters=num_iters)
-    tri = sinkhorn(logits=logits, num_iters=num_iters)
+    x = (torch.randn(B, T, H, N, N, dtype=dtype, device=device) * scale).requires_grad_(True)
+    ref = naive_sinkhorn(logits=x, num_iters=num_iters)
     do = torch.randn_like(ref)
-    ref_dx, = torch.autograd.grad(outputs=ref, inputs=logits, grad_outputs=do)
-    tri_dx, = torch.autograd.grad(outputs=tri, inputs=logits, grad_outputs=do)
-    assert tri.shape == ref.shape and tri.dtype == torch.float32
+    ref.backward(do)
+    ref_dx, x.grad = x.grad.clone(), None
+
+    tri = sinkhorn(logits=x, num_iters=num_iters)
+    tri.backward(do)
+    tri_dx = x.grad
+
+    assert tri.shape == x.shape
+    assert tri.dtype == torch.float32
     assert tri_dx.dtype == dtype
-    if logits.numel() == 0:
-        torch.testing.assert_close(ref, tri)
-        torch.testing.assert_close(ref_dx, tri_dx)
-        return
+    assert torch.isfinite(tri).all()
+    assert torch.isfinite(tri_dx).all()
     assert_close('o', ref, tri, 1e-4)
     assert_close('dx', ref_dx, tri_dx, 1e-4)
     torch.testing.assert_close(tri.sum(-1), torch.ones_like(tri[..., 0]), rtol=1e-5, atol=1e-5)
+
+
+@pytest.mark.parametrize('dtype', [torch.float32, torch.float16, torch.bfloat16], ids=str)
+@pytest.mark.parametrize(('shape', 'strided'), [
+    pytest.param((4, 4), False, id='unbatched'),
+    pytest.param((2, 4, 4), True, id='strided'),
+    pytest.param((2, 0, 4, 4), False, id='empty'),
+])
+def test_sinkhorn_layout(shape: tuple[int, ...], strided: bool, dtype: torch.dtype, backend):
+    torch.manual_seed(42)
+    x = torch.randn(shape, dtype=dtype, device=device)
+    if strided:
+        x = x.transpose(-1, -2)
+    x.requires_grad_()
+    ref = naive_sinkhorn(logits=x)
+    do = torch.randn_like(ref)
+    ref.backward(do)
+    ref_dx, x.grad = x.grad.clone(), None
+
+    tri = sinkhorn(logits=x)
+    tri.backward(do)
+    tri_dx = x.grad
+
+    assert tri.shape == x.shape
+    assert tri.dtype == torch.float32
+    assert tri_dx.dtype == dtype
+    if x.numel() == 0:
+        torch.testing.assert_close(ref, tri)
+        torch.testing.assert_close(ref_dx, tri_dx)
+    else:
+        assert_close('o', ref, tri, 1e-4)
+        assert_close('dx', ref_dx, tri_dx, 1e-4)
 
 
 def test_sinkhorn_packed(backend):
@@ -81,34 +121,26 @@ def test_sinkhorn_packed(backend):
 
 
 def test_sinkhorn_backend(backend, monkeypatch):
-    module = importlib.import_module('fla.ops.utils.sinkhorn')
-    calls = []
-    forward = module.sinkhorn_fwd
+    if backend == 'gluon':
+        from fla.ops.utils.sinkhorn import gluon as module
+    elif backend == 'tilelang':
+        from fla.ops.utils.sinkhorn import tilelang as module
+    else:
+        module = ops
+    name = 'sinkhorn_bwd' if backend == 'triton' else f'sinkhorn_bwd_{backend}'
+    backward = Mock(wraps=getattr(module, name))
+    monkeypatch.setattr(module, name, backward)
 
-    def fwd(*args, **kwargs):
-        calls.append('fwd')
-        out, history, backward = forward(*args, **kwargs)
-        assert backward.__module__ == backend.__name__
-
-        def bwd(*args, **kwargs):
-            calls.append('bwd')
-            return backward(*args, **kwargs)
-
-        return out, history, bwd
-
-    monkeypatch.setattr(module, 'sinkhorn_fwd', fwd)
-    logits = torch.randn(3, 4, 4, device=device, requires_grad=True)
-    out = sinkhorn(logits=logits)
-    for name in ('GLUON', 'TILELANG'):
-        monkeypatch.setenv(f'FLA_{name}', '0')
-    out.sum().backward()
-    assert calls == ['fwd', 'bwd']
+    x = torch.randn(3, 4, 4, device=device, requires_grad=True)
+    out = sinkhorn(logits=x)
+    for flag in ('FLA_GLUON', 'FLA_TILELANG'):
+        monkeypatch.setenv(flag, '0')
+    out.backward(torch.randn_like(out))
+    backward.assert_called_once()
 
 
 @pytest.mark.parametrize('backend_type', [GluonBackend, TileLangBackend])
 def test_sinkhorn_unavailable_backend(monkeypatch, backend_type):
-    if not IS_NVIDIA:
-        pytest.skip('NVIDIA CUDA required')
     if _DISPATCH_DISABLED:
         pytest.skip('Backend dispatch disabled before import')
     for name in ('GLUON', 'TILELANG'):
@@ -116,15 +148,12 @@ def test_sinkhorn_unavailable_backend(monkeypatch, backend_type):
     monkeypatch.setenv(f'FLA_{backend_type.backend_type.upper()}', '1')
     monkeypatch.setattr(backend_type, 'is_available', classmethod(lambda cls: False))
 
-    def implementation(*args, **kwargs):
-        pytest.fail('Unavailable backend was selected')
-
+    implementation = Mock(side_effect=AssertionError('Unavailable backend was selected'))
     monkeypatch.setattr(backend_type, 'get_implementation', implementation)
     logits = torch.zeros(1, 1, device=device)
     torch.testing.assert_close(sinkhorn(logits=logits), torch.ones_like(logits))
 
 
-@pytest.mark.skipif(not IS_NVIDIA, reason='NVIDIA CUDA required')
 @pytest.mark.parametrize(('shape', 'dtype', 'num_iters', 'error'), [
     pytest.param((), torch.float32, 20, 'shape', id='scalar'),
     pytest.param((4,), torch.float32, 20, 'shape', id='vector'),
@@ -139,11 +168,7 @@ def test_sinkhorn_unavailable_backend(monkeypatch, backend_type):
     pytest.param((4, 4), torch.float32, True, 'positive integer', id='bool-iters'),
 ])
 def test_sinkhorn_invalid_inputs(monkeypatch, shape, dtype, num_iters, error):
-    module = importlib.import_module('fla.ops.utils.sinkhorn')
-
-    def forward(*args, **kwargs):
-        pytest.fail('Invalid inputs reached backend dispatch')
-
-    monkeypatch.setattr(module, 'sinkhorn_fwd', forward)
+    forward = Mock(side_effect=AssertionError('Invalid inputs reached backend dispatch'))
+    monkeypatch.setattr(ops, 'sinkhorn_fwd', forward)
     with pytest.raises(ValueError, match=error):
         sinkhorn(logits=torch.empty(shape, device=device, dtype=dtype), num_iters=num_iters)

@@ -11,7 +11,7 @@ from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
 
 from fla.backends import GluonBackend, register
-from fla.ops.utils.sinkhorn import sinkhorn_fwd
+from fla.ops.utils.sinkhorn.ops import sinkhorn_fwd
 
 
 @gluon.jit(do_not_specialize=['T'])

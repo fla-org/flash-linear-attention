@@ -11,7 +11,7 @@ import torch
 import triton
 
 from fla.backends import TileLangBackend, register
-from fla.ops.utils.sinkhorn import sinkhorn_fwd
+from fla.ops.utils.sinkhorn.ops import sinkhorn_fwd
 
 
 class SinkhornTileLangBackend(TileLangBackend):
