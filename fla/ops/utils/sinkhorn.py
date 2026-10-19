@@ -71,7 +71,7 @@ def sinkhorn_bwd_kernel(o, history, do, dx, T, N: tl.constexpr, BN: tl.constexpr
 
 
 @dispatch
-def sinkhorn_fwd(logits, num_iters, save_history):
+def sinkhorn_fwd(logits: torch.Tensor, num_iters: int, save_history: bool):
     N = logits.shape[-1]
     T = logits.numel() // (N * N)
     out = torch.empty_like(logits, dtype=torch.float32)
@@ -92,8 +92,15 @@ def sinkhorn_fwd(logits, num_iters, save_history):
     return out, history, sinkhorn_bwd
 
 
-def sinkhorn_bwd(out, history, dout, num_iters, dtype):
-    N, T = out.shape[-1], out.numel() // out.shape[-1] ** 2
+def sinkhorn_bwd(
+    out: torch.Tensor,
+    history: torch.Tensor,
+    dout: torch.Tensor,
+    num_iters: int,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    N = out.shape[-1]
+    T = out.numel() // (N * N)
     dx = torch.empty_like(out, dtype=dtype)
     if T:
         sinkhorn_bwd_kernel[(T,)](

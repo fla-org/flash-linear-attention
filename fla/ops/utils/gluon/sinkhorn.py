@@ -11,7 +11,7 @@ from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
 
 from fla.backends import GluonBackend, register
-from fla.ops.utils.sinkhorn import sinkhorn_fwd as sinkhorn_fwd_dispatch
+from fla.ops.utils.sinkhorn import sinkhorn_fwd
 
 
 @gluon.jit(do_not_specialize=['T'])
@@ -80,7 +80,8 @@ def sinkhorn_bwd_kernel(
     gl.store(dx + o_ij, b_dx, mask=m_ij)
 
 
-def sinkhorn_fwd(logits, num_iters, save_history):
+@register(sinkhorn_fwd, backend=GluonBackend)
+def sinkhorn_fwd_gluon(logits: torch.Tensor, num_iters: int, save_history: bool):
     N = logits.shape[-1]
     T = logits.numel() // (N * N)
     out = torch.empty_like(logits, dtype=torch.float32)
@@ -100,11 +101,18 @@ def sinkhorn_fwd(logits, num_iters, save_history):
             num_warps=4,
             enable_fp_fusion=False,
         )
-    return out, history, sinkhorn_bwd
+    return out, history, sinkhorn_bwd_gluon
 
 
-def sinkhorn_bwd(out, history, dout, num_iters, dtype):
-    N, T = out.shape[-1], out.numel() // out.shape[-1] ** 2
+def sinkhorn_bwd_gluon(
+    out: torch.Tensor,
+    history: torch.Tensor,
+    dout: torch.Tensor,
+    num_iters: int,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    N = out.shape[-1]
+    T = out.numel() // (N * N)
     dx = torch.empty_like(out, dtype=dtype)
     BT = 1 if T < 128 else max(4, 128 // min(32, triton.next_power_of_2(N) ** 2))
     if T:
@@ -122,11 +130,3 @@ def sinkhorn_bwd(out, history, dout, num_iters, dtype):
             enable_fp_fusion=False,
         )
     return dx
-
-
-@register(sinkhorn_fwd_dispatch)
-class SinkhornGluonBackend(GluonBackend):
-    default_enable = False
-
-    def sinkhorn_fwd(self, logits, num_iters, save_history):
-        return sinkhorn_fwd(logits=logits, num_iters=num_iters, save_history=save_history)
