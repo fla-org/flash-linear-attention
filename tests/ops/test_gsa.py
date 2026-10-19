@@ -22,6 +22,9 @@ from fla.utils import assert_close, check_shared_mem, device, device_platform
         pytest.param(*test, id="B{}-T{}-H{}-D{}-V{}-M{}-gate_logit_normalizer{}-{}".format(*test))
         for test in [
             (1, 63, 1, 64, 64, 32, 1, torch.float),
+            (1, 1, 2, 32, 32, 32, 8, torch.float16),
+            (1, 65, 2, 60, 60, 96, 8, torch.float),
+            (1, 65, 2, 60, 60, 32, 8, torch.bfloat16),
             (2, 1024, 4, 60, 60, 64, 1, torch.float),
             (2, 1024, 8, 128, 128, 64, 0.1, torch.float),
             (2, 1024, 8, 128, 128, 32, 1, torch.float),
@@ -128,6 +131,7 @@ def test_fused_recurrent(
         pytest.param(*test, id="H{}-D{}-V{}-M{}-cu_seqlens{}-gate_logit_normalizer{}-{}".format(*test))
         for test in [
             (4, 64, 64, 64, [0, 15], 1, torch.float),
+            (2, 60, 60, 32, [0, 1, 17, 65], 1, torch.bfloat16),
             (4, 64, 64, 64, [0, 256, 500, 1000], 1, torch.float),
             (4, 100, 100, 64, [0, 15, 100, 300, 1200, 2000], 1, torch.float),
             (4, 64, 64, 64, [0, 1, 100, 300, 1200, 2048], 1, torch.float16),
@@ -539,6 +543,7 @@ def test_chunk_varlen(
         pytest.param(*test, id="B{}-T{}-HQ{}-H{}-D{}-M{}-{}".format(*test))
         for test in [
             (2, 63, 2, 1, 64, 32, torch.float),
+            (2, 17, 4, 2, 60, 48, torch.float),
             (2, 200, 8, 2, 64, 64, torch.float),
             (2, 256, 16, 4, 128, 64, torch.float),
         ]

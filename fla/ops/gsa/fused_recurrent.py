@@ -9,8 +9,9 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.common.fused_recurrent import fused_recurrent_bwd_kernel, fused_recurrent_fwd_kernel
+from fla.ops.common.fused_recurrent import fused_recurrent_bwd, fused_recurrent_fwd
 from fla.ops.gsa.gate import fused_additive_gate
+from fla.ops.utils import softmax_bwd
 from fla.ops.utils.op import exp
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
@@ -36,26 +37,29 @@ def fused_recurrent_gsa_inference_kernel(
     M: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
+    BM: tl.constexpr,
     NG: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
 ):
     i_bh = tl.program_id(0).to(tl.int64)
     i_bg = i_bh // NG
 
-    b_s = tl.load(s + i_bg * M + tl.arange(0, M)).to(tl.float32)
-    b_g = tl.load(g + i_bg * M + tl.arange(0, M)).to(tl.float32)
+    o_m = tl.arange(0, BM).to(tl.int64)
+    m_m = o_m < M
+    b_s = tl.load(s + i_bg * M + o_m, mask=m_m, other=0).to(tl.float32)
+    b_g = tl.load(g + i_bg * M + o_m, mask=m_m, other=0).to(tl.float32)
     b_g = exp(b_g)
 
-    b_ok = tl.zeros([M], dtype=tl.float32)
+    b_ok = tl.zeros([BM], dtype=tl.float32)
     for i_k in range(tl.cdiv(K, BK)):
-        o_k = i_k * BK + tl.arange(0, BK)
+        o_k = i_k * BK + tl.arange(0, BK).to(tl.int64)
 
-        p_hk0 = hk0 + i_bg * K * M + (o_k[None, :]) * M + tl.arange(0, M)[:, None]
+        p_hk0 = hk0 + i_bg * K * M + (o_k[None, :]) * M + o_m[:, None]
         # [BK,]
         mask_k = o_k < K
-        # [M, BK]
-        mask_hk = (tl.arange(0, M) < M)[:, None] & mask_k[None, :]
-        # [M, BK]
+        # [BM, BK]
+        mask_hk = m_m[:, None] & mask_k[None, :]
+        # [BM, BK]
         b_hk = tl.load(p_hk0, mask=mask_hk, other=0.).to(tl.float32)
         # [BK,]
         b_q = tl.load(q + i_bh * K + o_k, mask=mask_k, other=0.).to(tl.float32) * scale
@@ -65,19 +69,19 @@ def fused_recurrent_gsa_inference_kernel(
 
         if STORE_FINAL_STATE:
             if i_bh % NG == 0:
-                p_hkt = hkt + i_bg * K * M + o_k[None, :] * M + tl.arange(0, M)[:, None]
+                p_hkt = hkt + i_bg * K * M + o_k[None, :] * M + o_m[:, None]
                 tl.store(p_hkt, b_hk.to(p_hkt.dtype.element_ty), mask=mask_hk)
 
-    b_qv = tl.softmax(b_ok)
+    b_qv = tl.softmax(tl.where(m_m, b_ok, float('-inf')))
     for i_v in range(tl.cdiv(V, BV)):
-        o_v = i_v * BV + tl.arange(0, BV)
+        o_v = i_v * BV + tl.arange(0, BV).to(tl.int64)
 
-        p_hv0 = hv0 + i_bg * M * V + tl.arange(0, M)[None, :] * V + o_v[:, None]
+        p_hv0 = hv0 + i_bg * M * V + o_m[None, :] * V + o_v[:, None]
         # [BV,]
         mask_v = o_v < V
-        # [BV, M]
-        mask_hv = mask_v[:, None] & (tl.arange(0, M) < M)[None, :]
-        # [BV, M]
+        # [BV, BM]
+        mask_hv = mask_v[:, None] & m_m[None, :]
+        # [BV, BM]
         b_hv = tl.load(p_hv0, mask=mask_hv, other=0).to(tl.float32)
         # [BV,]
         b_v = tl.load(v + i_bg * V + o_v, mask=mask_v, other=0).to(tl.float32)
@@ -88,7 +92,7 @@ def fused_recurrent_gsa_inference_kernel(
 
         if STORE_FINAL_STATE:
             if i_bh % NG == 0:
-                p_hvt = hvt + i_bg * M * V + tl.arange(0, M)[None, :] * V + o_v[:, None]
+                p_hvt = hvt + i_bg * M * V + o_m[None, :] * V + o_v[:, None]
                 tl.store(p_hvt, b_hv.to(p_hvt.dtype.element_ty), mask=mask_hv)
 
 
@@ -107,7 +111,7 @@ def fused_recurrent_gsa_inference(
     BK, BV = min(triton.next_power_of_2(K), 64), min(triton.next_power_of_2(V), 64)
     NG = HQ // H
 
-    if initial_state != (None, None) and initial_state is not None:
+    if initial_state is not None and initial_state[0] is not None:
         hk0, hv0 = initial_state
     else:
         hk0, hv0 = q.new_zeros(B, H, K, M, dtype=torch.float), q.new_zeros(B, H, M, V, dtype=torch.float)
@@ -119,22 +123,23 @@ def fused_recurrent_gsa_inference(
     o = v.new_empty(B, T, HQ, V)
     grid = (B * HQ,)
     fused_recurrent_gsa_inference_kernel[grid](
-        q,
-        k,
-        v,
-        s,
-        g,
-        o,
-        hk0,
-        hv0,
-        hkt,
-        hvt,
+        q=q,
+        k=k,
+        v=v,
+        s=s,
+        g=g,
+        o=o,
+        hk0=hk0,
+        hv0=hv0,
+        hkt=hkt,
+        hvt=hvt,
         scale=scale,
         K=K,
         V=V,
         M=M,
         BK=BK,
         BV=BV,
+        BM=triton.next_power_of_2(M),
         NG=NG,
     )
     return o, (hkt, hvt)
@@ -152,84 +157,32 @@ def fused_recurrent_gsa_fwd(
     reverse: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, tuple[torch.Tensor]]:
-    B, T, H, K, V, M = *k.shape, v.shape[-1], s.shape[-1]
-    N = B if cu_seqlens is None else len(cu_seqlens) - 1
-    HQ = q.shape[2]
-    if HQ != H:
-        raise ValueError("GQA not supported yet.")
-
-    BK, BV, BM = min(triton.next_power_of_2(K), 64), min(triton.next_power_of_2(V), 64), min(triton.next_power_of_2(M), 64)
-    NK, NV, NM = triton.cdiv(K, BK), triton.cdiv(V, BV), triton.cdiv(M, BM)
-
-    hk0, hv0 = None, None
-    if initial_state != (None, None) and initial_state is not None:
-        hk0, hv0 = initial_state
-    hkt, hvt = None, None
-    if output_final_state:
-        hkt, hvt = q.new_empty(N, H, K, M, dtype=torch.float), q.new_empty(N, H, M, V, dtype=torch.float)
-
-    ok = q.new_empty(NK, *s.shape, dtype=torch.float)
-    gk, gv = None, g
-    grid = (NM * NK * N * H,)
-    fused_recurrent_fwd_kernel[grid](
+    if q.shape[2] != k.shape[2]:
+        raise ValueError("GQA is only supported for single-token inference.")
+    hk0, hv0 = (None, None) if initial_state is None else initial_state
+    ok, hkt = fused_recurrent_fwd(
         q=q,
         k=k,
         v=s,
-        g=None,
-        g_gamma=None,
-        gk=gk,
-        gv=gv,
-        o=ok,
-        h0=hk0,
-        ht=hkt,
-        cu_seqlens=cu_seqlens,
+        gv=g,
         scale=scale,
-        B=B,
-        T=T,
-        H=H,
-        K=K,
-        V=M,
-        BK=BK,
-        BV=BM,
-        USE_G=False,
-        USE_G_GAMMA=False,
-        USE_GK=False,
-        USE_GV=True,
-        REVERSE=reverse,
+        initial_state=hk0,
+        output_final_state=output_final_state,
+        reverse=reverse,
+        cu_seqlens=cu_seqlens,
     )
-    ok = ok.sum(0)
-
-    qv = ok.softmax(-1, dtype=torch.float)
-    ov = q.new_empty(NM, *v.shape, dtype=torch.float)
-    gk, gv = g, None
-    grid = (NV * NM * N * H,)
-    fused_recurrent_fwd_kernel[grid](
+    qv = ok.softmax(-1, dtype=torch.float32)
+    ov, hvt = fused_recurrent_fwd(
         q=qv,
         k=s,
         v=v,
-        g=None,
-        g_gamma=None,
-        gk=gk,
-        gv=gv,
-        o=ov,
-        h0=hv0,
-        ht=hvt,
-        cu_seqlens=cu_seqlens,
+        gk=g,
         scale=1.,
-        B=B,
-        T=T,
-        H=H,
-        K=M,
-        V=V,
-        BK=BM,
-        BV=BV,
-        USE_G=False,
-        USE_G_GAMMA=False,
-        USE_GK=True,
-        USE_GV=False,
-        REVERSE=reverse,
+        initial_state=hv0,
+        output_final_state=output_final_state,
+        reverse=reverse,
+        cu_seqlens=cu_seqlens,
     )
-    ov = ov.sum(0)
     return ok, hkt, qv, ov, hvt
 
 
@@ -250,109 +203,35 @@ def fused_recurrent_gsa_bwd(
     reverse: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor]:
-    B, T, H, K, V, M = *q.shape, v.shape[-1], s.shape[-1]
-    N = B if cu_seqlens is None else len(cu_seqlens) - 1
-
-    BK, BV, BM = min(triton.next_power_of_2(K), 64), min(triton.next_power_of_2(V), 64), min(triton.next_power_of_2(M), 64)
-    NK, NV, NM = triton.cdiv(K, BK), triton.cdiv(V, BV), triton.cdiv(M, BM)
-
-    dqv = q.new_empty(NV, B, T, H, M, dtype=torch.float)
-    dsv = q.new_empty(NV, B, T, H, M, dtype=torch.float)
-    dv = q.new_empty(NM, B, T, H, V, dtype=torch.float)
-    dgv = q.new_empty(NV, B, T, H, M, dtype=torch.float)
-    dhv0 = torch.empty_like(hv0)if hv0 is not None else None
-
-    grid = (NV * NM * N * H,)
-    fused_recurrent_bwd_kernel[grid](
+    dqv, dsv, dv, _, dgv, _, dhv0 = fused_recurrent_bwd(
         q=qv,
         k=s,
         v=v,
-        g=None,
-        g_gamma=None,
         gk=g,
-        gv=None,
-        o=None,
-        h0=hv0,
         do=do,
-        dq=dqv,
-        dk=dsv,
-        dv=dv,
-        dg=None,
-        dgk=dgv,
-        dgv=None,
         dht=dhvt,
-        dh0=dhv0,
-        cu_seqlens=cu_seqlens,
         scale=1.,
-        B=B,
-        T=T,
-        H=H,
-        K=M,
-        V=V,
-        BK=BM,
-        BV=BV,
-        USE_G=False,
-        USE_G_GAMMA=False,
-        USE_GK=True,
-        USE_GV=False,
-        REVERSE=reverse,
+        initial_state=hv0,
+        reverse=reverse,
+        cu_seqlens=cu_seqlens,
+        gate_grad_dtype=torch.float32,
     )
-    dqv = dqv.sum(0)
-    dsv = dsv.sum(0)
-    dv = dv.sum(0)
-    dgv = dgv.sum(0)
-
-    dok = qv * (dqv - (qv * dqv).sum(-1, True))
-    dq = q.new_empty(NM, B, T, H, K, dtype=torch.float)
-    dk = q.new_empty(NM, B, T, H, K, dtype=torch.float)
-    dsk = q.new_empty(NK, B, T, H, M, dtype=torch.float)
-    dgk = q.new_empty(NK, B, T, H, M, dtype=torch.float)
-    dhk0 = torch.empty_like(hk0)if hk0 is not None else None
-
-    grid = (NM * NK * N * H,)
-    fused_recurrent_bwd_kernel[grid](
+    dok = softmax_bwd(qv, dqv, dtype=torch.float32)
+    dq, dk, dsk, _, _, dgk, dhk0 = fused_recurrent_bwd(
         q=q,
         k=k,
         v=s,
-        g=None,
-        g_gamma=None,
-        gk=None,
         gv=g,
         o=ok,
-        h0=hk0,
         do=dok,
-        dq=dq,
-        dk=dk,
-        dv=dsk,
-        dg=None,
-        dgk=None,
-        dgv=dgk,
         dht=dhkt,
-        dh0=dhk0,
-        cu_seqlens=cu_seqlens,
         scale=scale,
-        B=B,
-        T=T,
-        H=H,
-        K=K,
-        V=M,
-        BK=BK,
-        BV=BM,
-        USE_G=False,
-        USE_G_GAMMA=False,
-        USE_GK=False,
-        USE_GV=True,
-        REVERSE=reverse,
+        initial_state=hk0,
+        reverse=reverse,
+        cu_seqlens=cu_seqlens,
+        gate_grad_dtype=torch.float32,
     )
-    dq = dq.sum(0)
-    dk = dk.sum(0)
-    dsk = dsk.sum(0)
-    dgk = dgk.sum(0)
-
-    ds = dsk.add_(dsv)
-    dg = dgk.add_(dgv)
-
-    return dq, dk, dv, ds, dg, dhk0, dhv0
+    return dq, dk, dv, dsk.add_(dsv), dgk.add_(dgv), dhk0, dhv0
 
 
 class FusedRecurrentGSAFunction(torch.autograd.Function):
@@ -441,10 +320,10 @@ def fused_recurrent_gsa(
     v: torch.Tensor,
     s: torch.Tensor,
     g: torch.Tensor | None = None,
-    scale: int | None = None,
-    initial_state: tuple[torch.Tensor] | None = None,
-    output_final_state: bool | None = False,
-    reverse: bool | None = False,
+    scale: float | None = None,
+    initial_state: tuple[torch.Tensor, torch.Tensor] | None = None,
+    output_final_state: bool = False,
+    reverse: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
@@ -458,7 +337,8 @@ def fused_recurrent_gsa(
         s (torch.Tensor):
             slot representations of shape `[B, T, H, M]`.
         g (torch.Tensor):
-            Forget gates of shape `[B, H, T, M]` applied to keys.
+            Forget gates of shape `[B, T, H, M]` applied along the slot dimension.
+            If omitted, slots are cumulatively normalized as in ABC.
         scale (Optional[float]):
             Scale factor for the attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
@@ -467,7 +347,7 @@ def fused_recurrent_gsa(
             For equal-length input sequences, `N` equals the batch size `B`.
             Default: `None`.
         output_final_state (Optional[bool]):
-            Whether to output the final state of shape `[N, H, K, V]` and `[N, H, M, V]`.
+            Whether to output the final states of shape `[N, H, K, M]` and `[N, H, M, V]`.
             Default: `False`.
         reverse (Optional[bool]):
             If `True`, process the state passing in reverse order. Default: `False`.
