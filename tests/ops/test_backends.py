@@ -102,12 +102,17 @@ def _configure_no_nvcc(monkeypatch):
 def test_ops_registered_dispatch(monkeypatch, module_name, names, backend_types):
     module = importlib.import_module(f'fla.ops.{module_name}')
     expected = set(backend_types)
+    required = expected.copy()
     if not backends.GluonBackend.is_available():
-        expected.discard('gluon')
+        required.discard('gluon')
+    if not backends.TritonAscendBackend.is_available():
+        required.discard('triton_ascend')
+    if module_name == 'attn.parallel' and not attn_tilelang_backend.AttnTileLangBackend.is_available():
+        required.discard('tilelang')
     for name in names:
         entry = getattr(module, name)
         registry = backends._function_registries[inspect.unwrap(entry)]
-        assert registry._backends.keys() == expected
+        assert required <= registry._backends.keys() <= expected
         for backend_type, candidate in registry._backends.items():
             assert candidate.get_implementation(name) is not None
             with monkeypatch.context() as patch:
@@ -171,14 +176,17 @@ def test_attention_and_common_backends_have_separate_implementations():
     from fla.ops.common.chunk_o import chunk_bwd_dqkwg
 
     common = backends._function_registries[inspect.unwrap(chunk_bwd_dqkwg)]._backends['tilelang']
-    attention = backends._function_registries[inspect.unwrap(parallel_attn_fwd)]._backends['tilelang']
     assert type(common) is common_tilelang_backend.CommonTileLangBackend
-    assert type(attention) is attn_tilelang_backend.AttnTileLangBackend
-    assert hasattr(common, 'chunk_bwd_dqkwg')
-    assert not hasattr(attention, 'chunk_bwd_dqkwg')
     for name in ('parallel_attn_fwd', 'parallel_attn_bwd'):
-        assert hasattr(attention, name)
         assert not hasattr(common, name)
+    registry = backends._function_registries[inspect.unwrap(parallel_attn_fwd)]
+    if attn_tilelang_backend.AttnTileLangBackend.is_available():
+        attention = registry._backends['tilelang']
+        assert type(attention) is attn_tilelang_backend.AttnTileLangBackend
+        assert attention.implementation.__name__ == 'parallel_attn_fwd_tilelang'
+        assert attention.implementation.__module__ == 'fla.ops.attn.backends.tilelang.parallel'
+    else:
+        assert 'tilelang' not in registry._backends
 
 
 def test_nvcc_from_cuda_home_env(monkeypatch, tmp_path):
@@ -322,10 +330,9 @@ def kda_bwd_inputs():
 
 @pytest.mark.skipif(backends._DISPATCH_DISABLED, reason='Backend dispatch was disabled before import')
 def test_kda_tilelang_backend_dispatch(monkeypatch, kda_bwd_inputs):
-    from fla.ops.kda.backends.triton_ascend import TritonAscendKDABackend
     from fla.ops.kda.chunk_bwd import chunk_kda_bwd_wy_dqkg_fused
 
-    monkeypatch.setattr(TritonAscendKDABackend, 'is_available', classmethod(lambda cls: False))
+    monkeypatch.setattr(backends.TritonAscendBackend, 'is_available', classmethod(lambda cls: False))
     backend = kda_tilelang_backend.KDATileLangBackend
     monkeypatch.setattr(backend, 'is_available', classmethod(lambda cls: True))
     monkeypatch.setenv('FLA_TILELANG', '1')
@@ -359,10 +366,9 @@ def test_kda_tilelang_backend_verifier(kda_bwd_inputs, use_graph, accepted, reas
 def test_intracard_backend_dispatch(monkeypatch, extra):
     """KDA's eager forward passes chunk_offsets=None; the opt-in intra-card backend must still be selected."""
     from fla.ops.common.backends.intracard import IntraCardCPBackend
-    from fla.ops.common.backends.triton_ascend import TritonAscendCommonBackend
     from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_fwd_h
 
-    monkeypatch.setattr(TritonAscendCommonBackend, 'is_available', classmethod(lambda cls: False))
+    monkeypatch.setattr(backends.TritonAscendBackend, 'is_available', classmethod(lambda cls: False))
     monkeypatch.setenv('FLA_INTRACARD_CP', '1')
     result = object()
     implementation = create_autospec(IntraCardCPBackend.chunk_gated_delta_rule_fwd_h, return_value=result)
@@ -402,7 +408,7 @@ def test_simple_gla_ascend_verifier(monkeypatch, is_npu, device, accepted, reaso
     assert simple_gla_verifier(q=q, k=q, v=q) == (accepted, reason)
 
 
-def test_retention_ascend_registration_import_order(run_python):
+def test_ops_ascend_registration_import_order(run_python):
     run_python(
         """
         import importlib
@@ -413,11 +419,21 @@ def test_retention_ascend_registration_import_order(run_python):
         from fla.ops.simple_gla.backends.triton_ascend.utils import simple_gla_verifier
 
         backends.TritonAscendBackend.is_available = classmethod(lambda cls: True)
+        for owner in ('atk', 'attnres', 'common', 'gated_delta_rule', 'gdn2', 'gla', 'kda', 'precond_gated_delta_rule'):
+            importlib.reload(importlib.import_module(f'fla.ops.{owner}.backends'))
         for operation, name in [
             ('common.chunk_o', 'chunk_bwd_dv'),
             ('simple_gla.fused_chunk', 'fused_chunk_simple_gla'),
             ('simple_gla.parallel', 'parallel_simple_gla'),
             ('simple_gla.fused_recurrent', 'fused_recurrent_simple_gla'),
+            ('atk.chunk_atk_fwd', 'chunk_atk_fwd'),
+            ('attnres.fused', 'fused_attnres'),
+            ('gated_delta_rule.gate', 'gdn_gate_fwd'),
+            ('gdn2.chunk_intra', 'chunk_gdn2_fwd_intra'),
+            ('gla.chunk', 'chunk_gla_fwd_intra_gk'),
+            ('kda.chunk_intra', 'chunk_kda_fwd_intra'),
+            ('kda.chunk_bwd', 'chunk_kda_bwd_dAv'),
+            ('precond_gated_delta_rule.chunk_precond_kkt_fwd', 'chunk_precond_kkt_fwd'),
         ]:
             module = 'fla.ops.' + operation
             owner, file = operation.split('.')
@@ -426,10 +442,12 @@ def test_retention_ascend_registration_import_order(run_python):
             entry = getattr(importlib.import_module(module), name)
             implementation = sys.modules[backend_module]
             registry = backends._function_registries[inspect.unwrap(entry)]
-            assert len(registry._backends) == 1
             candidate = registry._backends['triton_ascend']
             assert candidate.implementation is getattr(implementation, name + '_npu')
-            assert candidate.verifier is (simple_gla_verifier if owner == 'simple_gla' else None)
+            if owner == 'simple_gla':
+                assert candidate.verifier is simple_gla_verifier
+            if owner not in ('common', 'simple_gla'):
+                continue
             expected = inspect.signature(entry).parameters
             actual = inspect.signature(candidate.implementation).parameters
             assert expected.keys() == actual.keys()

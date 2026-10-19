@@ -13,6 +13,9 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.backends import TritonAscendBackend, register
+from fla.ops.precond_gated_delta_rule.backends.triton_ascend.utils import _require_npu_device
+from fla.ops.precond_gated_delta_rule.chunk_precond_kkt_fwd import chunk_precond_kkt_fwd
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp2
 from fla.utils import input_guard
@@ -115,6 +118,19 @@ def chunk_precond_kkt_fwd_kernel_npu(
             tl.store(p_A, b_A.to(p_A.dtype.element_ty), mask=m_t[:, None])
 
 
+def chunk_precond_kkt_fwd_verifier(
+    k,
+    k_precond,
+    g,
+    beta,
+    chunk_size=64,
+    output_dtype=torch.float32,
+    cu_seqlens=None,
+) -> tuple[bool, str | None]:
+    return _require_npu_device(k, k_precond, g, beta, cu_seqlens)
+
+
+@register(chunk_precond_kkt_fwd, backend=TritonAscendBackend, verifier=chunk_precond_kkt_fwd_verifier)
 @input_guard
 def chunk_precond_kkt_fwd_npu(
     k: torch.Tensor,

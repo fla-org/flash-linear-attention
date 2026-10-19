@@ -7,6 +7,8 @@
 
 """ATK backends."""
 
-from fla.ops.atk.backends.triton_ascend import TritonAscendATKBackend
 
-__all__ = ['TritonAscendATKBackend']
+from fla.backends import TritonAscendBackend
+
+if TritonAscendBackend.is_available():
+    from fla.ops.atk.backends.triton_ascend import chunk_atk_bwd, chunk_atk_fwd  # noqa: F401

@@ -7,8 +7,9 @@
 
 """Common backends for shared operations like chunk_gated_delta_rule_fwd_h."""
 
-from fla.ops.common.backends.intracard import IntraCardCPBackend
-from fla.ops.common.backends.tilelang import CommonTileLangBackend
-from fla.ops.common.backends.triton_ascend import TritonAscendCommonBackend
+from fla.backends import TritonAscendBackend
+from fla.ops.common.backends.intracard import IntraCardCPBackend  # noqa: F401
+from fla.ops.common.backends.tilelang import CommonTileLangBackend  # noqa: F401
 
-__all__ = ['CommonTileLangBackend', 'IntraCardCPBackend', 'TritonAscendCommonBackend']
+if TritonAscendBackend.is_available():
+    from fla.ops.common.backends.triton_ascend import chunk_delta_h, chunk_h, chunk_o, chunk_scaled_dot_kkt, gate  # noqa: F401

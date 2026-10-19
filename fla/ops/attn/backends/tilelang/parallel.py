@@ -14,6 +14,9 @@ import tilelang
 import tilelang.language as T
 import torch
 
+from fla.backends import register
+from fla.ops.attn.backends.tilelang import AttnTileLangBackend
+from fla.ops.attn.parallel import parallel_attn_bwd, parallel_attn_fwd
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.constant import RCP_LN2
 
@@ -222,6 +225,23 @@ def _build_parallel_attn_fwd_kernel(
     return kernel
 
 
+def parallel_attn_fwd_verifier(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g_cumsum: torch.Tensor | None,
+    sink_bias: torch.Tensor | None,
+    scale: float,
+    window_size: int | None = None,
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
+) -> tuple[bool, str | None]:
+    if q.dtype not in (torch.float16, torch.bfloat16, torch.float32):
+        return False, f"TileLang backend does not support dtype {q.dtype}; fall back to Triton"
+    return True, None
+
+
+@register(parallel_attn_fwd, backend=AttnTileLangBackend, verifier=parallel_attn_fwd_verifier)
 def parallel_attn_fwd_tilelang(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -500,6 +520,27 @@ def _build_parallel_attn_bwd_kernel(
     return kernel
 
 
+def parallel_attn_bwd_verifier(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    o: torch.Tensor,
+    g_cumsum: torch.Tensor | None,
+    lse: torch.Tensor,
+    do: torch.Tensor,
+    sink_bias: torch.Tensor | None = None,
+    scale: float | None = None,
+    window_size: int | None = None,
+    chunk_size: int = 128,
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
+) -> tuple[bool, str | None]:
+    if q.dtype not in (torch.float16, torch.bfloat16, torch.float32):
+        return False, f"TileLang backend does not support dtype {q.dtype}; fall back to Triton"
+    return True, None
+
+
+@register(parallel_attn_bwd, backend=AttnTileLangBackend, verifier=parallel_attn_bwd_verifier)
 def parallel_attn_bwd_tilelang(
     q: torch.Tensor,
     k: torch.Tensor,
