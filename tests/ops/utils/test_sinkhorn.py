@@ -34,20 +34,20 @@ def backend(request, monkeypatch):
 
 
 @pytest.mark.parametrize('dtype', [torch.float32, torch.float16, torch.bfloat16])
-@pytest.mark.parametrize('shape,num_iters,scale,strided', [
-    ((2, 7, 1, 1), 20, 1, False),
-    ((2, 7, 3, 3), 1, 1, False),
-    ((2, 7, 4, 4), 20, 1, False),
-    ((2, 7, 8, 8), 7, 1, False),
-    ((2, 7, 4, 4), 20, 1000, False),
-    ((127, 4, 4), 20, 1, False),
-    ((128, 4, 4), 20, 1, False),
-    ((129, 1, 1), 20, 1, False),
-    ((129, 3, 3), 20, 1, False),
-    ((129, 8, 8), 20, 1, False),
-    ((4, 4), 20, 1, False),
-    ((2, 4, 4), 20, 1, True),
-    ((2, 0, 4, 4), 20, 1, False),
+@pytest.mark.parametrize(('shape', 'num_iters', 'scale', 'strided'), [
+    pytest.param((2, 7, 1, 1), 20, 1, False, id='N1'),
+    pytest.param((2, 7, 3, 3), 1, 1, False, id='N3-iter1'),
+    pytest.param((2, 7, 4, 4), 20, 1, False, id='N4'),
+    pytest.param((2, 7, 8, 8), 7, 1, False, id='N8-iter7'),
+    pytest.param((2, 7, 4, 4), 20, 1000, False, id='large-logits'),
+    pytest.param((127, 4, 4), 20, 1, False, id='T127-N4'),
+    pytest.param((128, 4, 4), 20, 1, False, id='T128-N4'),
+    pytest.param((129, 1, 1), 20, 1, False, id='T129-N1'),
+    pytest.param((129, 3, 3), 20, 1, False, id='T129-N3'),
+    pytest.param((129, 8, 8), 20, 1, False, id='T129-N8'),
+    pytest.param((4, 4), 20, 1, False, id='unbatched'),
+    pytest.param((2, 4, 4), 20, 1, True, id='strided'),
+    pytest.param((2, 0, 4, 4), 20, 1, False, id='empty'),
 ])
 def test_sinkhorn(backend, dtype, shape, num_iters, scale, strided):
     torch.manual_seed(42)
@@ -81,19 +81,22 @@ def test_sinkhorn_packed(backend):
 
 
 def test_sinkhorn_backend(backend, monkeypatch):
+    module = importlib.import_module('fla.ops.utils.sinkhorn')
     calls = []
-    forward, backward = backend.sinkhorn_fwd, backend.sinkhorn_bwd
+    forward = module.sinkhorn_fwd
 
     def fwd(*args, **kwargs):
         calls.append('fwd')
-        return forward(*args, **kwargs)
+        out, history, backward = forward(*args, **kwargs)
+        assert backward.__module__ == backend.__name__
 
-    def bwd(*args, **kwargs):
-        calls.append('bwd')
-        return backward(*args, **kwargs)
+        def bwd(*args, **kwargs):
+            calls.append('bwd')
+            return backward(*args, **kwargs)
 
-    monkeypatch.setattr(backend, 'sinkhorn_fwd', fwd)
-    monkeypatch.setattr(backend, 'sinkhorn_bwd', bwd)
+        return out, history, bwd
+
+    monkeypatch.setattr(module, 'sinkhorn_fwd', fwd)
     logits = torch.randn(3, 4, 4, device=device, requires_grad=True)
     out = sinkhorn(logits=logits)
     for name in ('GLUON', 'TILELANG'):
@@ -121,16 +124,26 @@ def test_sinkhorn_unavailable_backend(monkeypatch, backend_type):
     torch.testing.assert_close(sinkhorn(logits=logits), torch.ones_like(logits))
 
 
-def test_sinkhorn_invalid_inputs(backend, monkeypatch):
+@pytest.mark.skipif(not IS_NVIDIA, reason='NVIDIA CUDA required')
+@pytest.mark.parametrize(('shape', 'dtype', 'num_iters', 'error'), [
+    pytest.param((), torch.float32, 20, 'shape', id='scalar'),
+    pytest.param((4,), torch.float32, 20, 'shape', id='vector'),
+    pytest.param((4, 3), torch.float32, 20, 'shape', id='rectangular'),
+    pytest.param((0, 0), torch.float32, 20, 'shape', id='N0'),
+    pytest.param((9, 9), torch.float32, 20, 'shape', id='N9'),
+    pytest.param((4, 4), torch.float64, 20, 'FP16, BF16, or FP32', id='fp64'),
+    pytest.param((4, 4), torch.int32, 20, 'FP16, BF16, or FP32', id='int32'),
+    pytest.param((4, 4), torch.float32, 0, 'positive integer', id='iter0'),
+    pytest.param((4, 4), torch.float32, -1, 'positive integer', id='negative-iters'),
+    pytest.param((4, 4), torch.float32, 1.5, 'positive integer', id='fractional-iters'),
+    pytest.param((4, 4), torch.float32, True, 'positive integer', id='bool-iters'),
+])
+def test_sinkhorn_invalid_inputs(monkeypatch, shape, dtype, num_iters, error):
     module = importlib.import_module('fla.ops.utils.sinkhorn')
 
     def forward(*args, **kwargs):
         pytest.fail('Invalid inputs reached backend dispatch')
 
     monkeypatch.setattr(module, 'sinkhorn_fwd', forward)
-    with pytest.raises(ValueError, match='positive integer'):
-        sinkhorn(logits=torch.randn(4, 4, device=device), num_iters=0)
-    with pytest.raises(ValueError, match='shape'):
-        sinkhorn(logits=torch.randn(4, 3, device=device))
-    with pytest.raises(ValueError, match='FP16, BF16, or FP32'):
-        sinkhorn(logits=torch.randn(4, 4, device=device, dtype=torch.float64))
+    with pytest.raises(ValueError, match=error):
+        sinkhorn(logits=torch.empty(shape, device=device, dtype=dtype), num_iters=num_iters)

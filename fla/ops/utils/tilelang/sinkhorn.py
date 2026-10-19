@@ -11,7 +11,11 @@ import torch
 import triton
 
 from fla.backends import TileLangBackend, register
-from fla.ops.utils.sinkhorn import sinkhorn_fwd as sinkhorn_fwd_dispatch
+from fla.ops.utils.sinkhorn import sinkhorn_fwd
+
+
+class SinkhornTileLangBackend(TileLangBackend):
+    default_enable = False
 
 
 @tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_DEVICE_COMPILE_FLAGS: ['--fmad=false']})
@@ -119,7 +123,8 @@ def sinkhorn_bwd_kernel(NT, N, BN, BT, NUM_ITERS, dtype):
     return kernel
 
 
-def sinkhorn_fwd(logits, num_iters, save_history):
+@register(sinkhorn_fwd, backend=SinkhornTileLangBackend)
+def sinkhorn_fwd_tilelang(logits: torch.Tensor, num_iters: int, save_history: bool):
     N = logits.shape[-1]
     NT = logits.numel() // (N * N)
     out = torch.empty_like(logits, dtype=torch.float32)
@@ -135,11 +140,18 @@ def sinkhorn_fwd(logits, num_iters, save_history):
             dtype=str(logits.dtype).removeprefix('torch.'),
         )
         kernel(logits.flatten(), out.flatten(), history.flatten() if history is not None else out.flatten()[:1])
-    return out, history, sinkhorn_bwd
+    return out, history, sinkhorn_bwd_tilelang
 
 
-def sinkhorn_bwd(out, history, dout, num_iters, dtype):
-    N, NT = out.shape[-1], out.numel() // out.shape[-1] ** 2
+def sinkhorn_bwd_tilelang(
+    out: torch.Tensor,
+    history: torch.Tensor,
+    dout: torch.Tensor,
+    num_iters: int,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    N = out.shape[-1]
+    NT = out.numel() // (N * N)
     dx = torch.empty_like(out, dtype=dtype)
     if NT:
         kernel = sinkhorn_bwd_kernel(
@@ -152,11 +164,3 @@ def sinkhorn_bwd(out, history, dout, num_iters, dtype):
         )
         kernel(out.flatten(), history.flatten(), dout.flatten(), dx.flatten())
     return dx
-
-
-@register(sinkhorn_fwd_dispatch)
-class SinkhornTileLangBackend(TileLangBackend):
-    default_enable = False
-
-    def sinkhorn_fwd(self, logits, num_iters, save_history):
-        return sinkhorn_fwd(logits=logits, num_iters=num_iters, save_history=save_history)
