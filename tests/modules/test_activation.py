@@ -245,34 +245,68 @@ def test_swiglu(shape: tuple[int, ...], noncontiguous: bool, grad_stride: int, c
 @pytest.mark.parametrize(
     ('B', 'T', 'D', 'O', 'noncontiguous', 'compile'),
     [
-        (2, 512, 128, 256, False, True),
-        (1, 1, 64, 32, False, False),
-        (2, 500, 128, 64, False, True),
-        (3, 2048, 1200, 600, False, False),
-        (2, 500, 128, 64, True, False),
-        (2, 512, 128, 256, True, True),
-        (3, 2048, 1200, 600, True, False),
+        pytest.param(*test, id="B{}-T{}-D{}-O{}-noncontiguous{}-compile{}".format(*test))
+        for test in [
+            (2, 512, 128, 256, False, True),
+            (1, 1, 64, 32, False, False),
+            (2, 500, 128, 64, False, True),
+            (3, 2048, 1200, 600, False, False),
+            (2, 500, 128, 64, True, False),
+            (2, 512, 128, 256, True, True),
+            (3, 2048, 1200, 600, True, False),
+        ]
     ],
 )
-def test_swiglu_linear(B: int, T: int, D: int, O: int, noncontiguous: bool, compile: bool):  # noqa: E741
+@pytest.mark.parametrize(
+    ('requires_grad', 'use_bias'),
+    [
+        pytest.param((True, True, True, True), True, id='all'),
+        pytest.param((True, True, False, False), True, id='inputs'),
+        pytest.param((True, False, False, False), True, id='x'),
+        pytest.param((False, True, False, False), True, id='y'),
+        pytest.param((False, False, True, False), True, id='weight'),
+        pytest.param((False, False, False, True), True, id='bias'),
+        pytest.param((False, False, True, True), True, id='weight-bias'),
+        pytest.param((True, True, True, False), False, id='all-no-bias'),
+        pytest.param((True, True, False, False), False, id='inputs-no-bias'),
+        pytest.param((False, False, True, False), False, id='weight-no-bias'),
+    ],
+)
+def test_swiglu_linear(
+    B: int,
+    T: int,
+    D: int,
+    O: int,
+    noncontiguous: bool,
+    compile: bool,
+    requires_grad: tuple[bool, bool, bool, bool],
+    use_bias: bool,
+):
     torch.manual_seed(42)
     x, y = make_inputs(shape=(B, T, D), n=2, noncontiguous=noncontiguous)
-    w = torch.randn(O, D, device=device, requires_grad=True)
-    b = torch.randn(O, device=device, requires_grad=True)
+    x.requires_grad_(requires_grad[0])
+    y.requires_grad_(requires_grad[1])
+    w = torch.randn(O, D, device=device, requires_grad=requires_grad[2])
+    b = torch.randn(O, device=device, requires_grad=requires_grad[3]) if use_bias else None
+    inputs = (x, y, w, b)
+    grad_inputs = [tensor for tensor in inputs if tensor is not None and tensor.requires_grad]
+    grad_names = [
+        name for name, tensor in zip(('dx', 'dy', 'dw', 'db'), inputs)
+        if tensor is not None and tensor.requires_grad
+    ]
 
-    z_ref = F.silu(x) * y
-    out_ref = F.linear(z_ref, w, b)
-    out_tri = swiglu_linear(x, y, w, b) if not compile else torch.compile(swiglu_linear)(x, y, w, b)
+    ref_z = F.silu(x) * y
+    ref = F.linear(input=ref_z, weight=w, bias=b)
+    fn = torch.compile(swiglu_linear) if compile else swiglu_linear
+    tri = fn(x=x, y=y, weight=w, bias=b)
 
-    g = torch.randn_like(out_ref)
-    dx_ref, dy_ref, dw_ref, db_ref = torch.autograd.grad(out_ref, (x, y, w, b), g)
-    dx_tri, dy_tri, dw_tri, db_tri = torch.autograd.grad(out_tri, (x, y, w, b), g)
+    do = torch.randn_like(ref)
+    ref_grads = torch.autograd.grad(outputs=ref, inputs=grad_inputs, grad_outputs=do)
+    tri_grads = torch.autograd.grad(outputs=tri, inputs=grad_inputs, grad_outputs=do)
 
-    assert_close('swiglu_linear out', out_ref, out_tri, 1e-3)
-    assert_close('swiglu_linear dx ', dx_ref, dx_tri, 1e-3)
-    assert_close('swiglu_linear dy ', dy_ref, dy_tri, 1e-3)
-    assert_close('swiglu_linear dw ', dw_ref, dw_tri, 1e-3)
-    assert_close('swiglu_linear db ', db_ref, db_tri, 1e-3)
+    assert_close('swiglu_linear out', ref, tri, 1e-3)
+    for name, ref_grad, tri_grad in zip(grad_names, ref_grads, tri_grads):
+        assert_close(f'swiglu_linear {name}', ref_grad, tri_grad, 1e-3)
 
 
 @pytest.mark.parametrize(

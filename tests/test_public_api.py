@@ -77,14 +77,35 @@ def test_public_call_defaults(owner, name, defaults):
 @pytest.mark.parametrize(
     ('legacy', 'current', 'names'),
     [
-        ('convolution', 'causal_conv1d', ('ShortConvolution', 'causal_conv1d')),
-        ('convolution', 'long_conv', ('LongConvolution', 'ImplicitLongConvolution', 'PositionalEmbedding', 'fft_conv')),
+        ('fla.modules.convolution', 'fla.modules.causal_conv1d', ('ShortConvolution', 'causal_conv1d')),
+        (
+            'fla.modules.convolution',
+            'fla.modules.long_conv',
+            ('LongConvolution', 'ImplicitLongConvolution', 'PositionalEmbedding', 'fft_conv'),
+        ),
+        (
+            'fla.modules.convolution',
+            'fla.modules.causal_conv1d.backends.cuda',
+            ('FastCausalConv1dFn', 'causal_conv1d_cuda', 'fast_causal_conv1d_fn'),
+        ),
+        (
+            'fla.modules.conv.cuda',
+            'fla.modules.causal_conv1d.backends.cuda.ops',
+            ('FastCausalConv1dFn', 'causal_conv1d_cuda', 'fast_causal_conv1d_fn'),
+        ),
+        (
+            'fla.modules.conv.cuda.ops',
+            'fla.modules.causal_conv1d.backends.cuda.ops',
+            ('FastCausalConv1dFn', 'causal_conv1d_cuda', 'fast_causal_conv1d_fn'),
+        ),
+        ('fla.models.utils', 'fla.models.cache_utils', ('Cache', 'FLACache', 'FLALayer', 'LegacyFLACache')),
+        ('fla.models.utils', 'fla.models.generation_utils', ('FLAGenerationMixin', 'FLAUnsupportedCacheGenerationMixin')),
     ],
-    ids=['causal-conv', 'long-conv'],
+    ids=['causal-conv', 'long-conv', 'conv-cuda-exports', 'conv-cuda-package', 'conv-cuda-ops', 'model-cache', 'model-generation'],
 )
 def test_legacy_imports_preserve_symbol_identity(legacy, current, names):
-    old_package = importlib.import_module(f'fla.modules.{legacy}')
-    new_package = importlib.import_module(f'fla.modules.{current}')
+    old_package = importlib.import_module(legacy)
+    new_package = importlib.import_module(current)
     for name in names:
         assert getattr(old_package, name) is getattr(new_package, name)
 

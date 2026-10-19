@@ -245,7 +245,7 @@ def chunk_local_cumsum_scalar(
     g: torch.Tensor,
     chunk_size: int,
     reverse: bool = False,
-    scale: float = None,
+    scale: float | None = None,
     cu_seqlens: torch.Tensor | None = None,
     output_dtype: torch.dtype | None = torch.float,
     chunk_indices: torch.LongTensor | None = None,
@@ -288,7 +288,7 @@ def chunk_local_cumsum_vector(
     g: torch.Tensor,
     chunk_size: int,
     reverse: bool = False,
-    scale: float = None,
+    scale: float | None = None,
     cu_seqlens: torch.Tensor | None = None,
     output_dtype: torch.dtype | None = torch.float,
     chunk_indices: torch.LongTensor | None = None,
@@ -344,7 +344,7 @@ def chunk_global_cumsum_scalar(
     s: torch.Tensor,
     reverse: bool = False,
     cu_seqlens: torch.Tensor | None = None,
-    scale: float = None,
+    scale: float | None = None,
     output_dtype: torch.dtype | None = torch.float,
     **kwargs,
 ) -> torch.Tensor:
@@ -375,7 +375,7 @@ def chunk_global_cumsum_vector(
     s: torch.Tensor,
     reverse: bool = False,
     cu_seqlens: torch.Tensor | None = None,
-    scale: float = None,
+    scale: float | None = None,
     output_dtype: torch.dtype | None = torch.float,
     **kwargs,
 ) -> torch.Tensor:
@@ -405,12 +405,12 @@ def chunk_global_cumsum_vector(
 
 
 @input_guard
-@dispatch('utils')
+@dispatch
 def chunk_global_cumsum(
     s: torch.Tensor,
     reverse: bool = False,
     cu_seqlens: torch.Tensor | None = None,
-    scale: float = None,
+    scale: float | None = None,
     output_dtype: torch.dtype | None = torch.float,
     **kwargs,
 ) -> torch.Tensor:
@@ -444,12 +444,12 @@ def chunk_global_cumsum(
 
 
 @input_guard
-@dispatch('utils')
+@dispatch
 def chunk_local_cumsum(
     g: torch.Tensor,
     chunk_size: int,
     reverse: bool = False,
-    scale: float = None,
+    scale: float | None = None,
     cu_seqlens: torch.Tensor | None = None,
     output_dtype: torch.dtype | None = torch.float,
     chunk_indices: torch.LongTensor | None = None,

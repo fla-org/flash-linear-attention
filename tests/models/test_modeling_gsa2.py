@@ -15,12 +15,7 @@ from triton.runtime.autotuner import Autotuner
 from fla.models import GSA2Config, GSA2ForCausalLM
 from fla.utils import IS_AMD, IS_NPU, IS_NVIDIA, assert_close, device
 
-from .test_modeling_base import (
-    run_test_generate_matches_forward,
-    run_test_generation,
-    run_test_model_forward_backward,
-)
-from .test_modeling_utils import create_model_and_config
+from .utils import check_forward, check_generate, check_generation, create_model_and_config
 
 # GSA2 runs the GDN-2 kernels, which tests/ops/test_gdn2.py guards the same way
 pytestmark = pytest.mark.skipif(not (IS_NVIDIA or IS_AMD or IS_NPU), reason="CUDA/ROCm or Ascend NPU required")
@@ -120,7 +115,7 @@ def test_modeling(
     dtype: torch.dtype,
 ):
     # the dense and the varlen pass autotune independently, as in production
-    run_test_model_forward_backward(
+    check_forward(
         L,
         B,
         T,
@@ -153,7 +148,7 @@ def test_modeling_shared_autotune(
     # diagnostic: with one autotune result shared by the dense and the varlen pass, any remaining difference comes from
     # the varlen code paths themselves rather than from the reduction order of a different config
     with _shared_dense_varlen_autotune():
-        run_test_model_forward_backward(
+        check_forward(
             L,
             B,
             T,
@@ -189,7 +184,7 @@ def test_generation(
     # chunked prefill and token-by-token decode round differently, and GSA2 stacks two recurrences per layer where GDN and
     # KDA have one. On H20 the single-recurrence models measure 1.6e-3 to 1.7e-3 against the default 2e-3 and GSA2 measures
     # 3.3e-3 in fp16, so the budget is twice the default
-    run_test_generation(L, B, T, H, D, GSA2Config, dtype, tol=4e-3)
+    check_generation(L, B, T, H, D, GSA2Config, dtype, tol=4e-3)
 
 
 def test_generation_with_slot_projections():
@@ -201,7 +196,7 @@ def test_generation_with_slot_projections():
         GSA2Config, L, H, D, dtype, head_dim=D, num_slots=128, level2_axis='head',
     )
     assert model.model.layers[0].attn.gdn_q_proj is not None
-    run_test_generation(L, B, T, H, D, GSA2Config, dtype, model=model, config=config, tol=4e-3)
+    check_generation(L, B, T, H, D, GSA2Config, dtype, model=model, config=config, tol=4e-3)
 
 
 @pytest.mark.parametrize(
@@ -221,7 +216,7 @@ def test_generate_prefill(
     D: int,
     dtype: torch.dtype,
 ):
-    run_test_generate_matches_forward(L, B, T, H, D, GSA2Config, dtype)
+    check_generate(L, B, T, H, D, GSA2Config, dtype)
 
 
 @pytest.mark.parametrize(
@@ -229,7 +224,8 @@ def test_generate_prefill(
     [(False, False), (True, False), (False, True)],
     ids=['ce', 'fused-ce', 'fused-linear-ce'],
 )
-def test_packed_loss(fuse_cross_entropy: bool, fuse_linear_cross_entropy: bool):
+@pytest.mark.parametrize('num_items', [None, 10])
+def test_packed_loss(fuse_cross_entropy: bool, fuse_linear_cross_entropy: bool, num_items: int | None):
     """Packing two sequences with cu_seqlens gives the loss and gradients of running them as a batch: no target crosses
     the boundary. GSA2 takes cu_seqlens only with a batch size of 1, so the packed layout is the flattened one. fp32
     keeps the comparison about the labels rather than the reduction order of dense and varlen kernels."""
@@ -250,7 +246,7 @@ def test_packed_loss(fuse_cross_entropy: bool, fuse_linear_cross_entropy: bool):
     labels = input_ids.clone()
     labels[:, 2] = -100
 
-    expected = model(input_ids=input_ids, labels=labels).loss
+    expected = model(input_ids=input_ids, labels=labels, num_items_in_batch=num_items).loss
     expected.backward()
     expected_grads = {name: param.grad.clone() for name, param in model.named_parameters()}
     model.zero_grad(set_to_none=True)
@@ -258,6 +254,7 @@ def test_packed_loss(fuse_cross_entropy: bool, fuse_linear_cross_entropy: bool):
     output = model(
         input_ids=input_ids.view(1, -1),
         labels=labels.view(1, -1),
+        num_items_in_batch=num_items,
         output_hidden_states=True,
         cu_seqlens=torch.tensor([0, 7, 14], dtype=torch.int32, device=device),
     )

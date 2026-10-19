@@ -23,7 +23,7 @@ from fla.ops.gdn2 import chunk_gdn2, fused_recurrent_gdn2
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
-    from fla.models.utils import Cache
+    from fla.models.cache_utils import Cache
 
 
 class GatedSlotAttention2(nn.Module):

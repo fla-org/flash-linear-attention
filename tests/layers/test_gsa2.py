@@ -11,7 +11,7 @@ import pytest
 import torch
 
 from fla.layers.gsa2 import GatedSlotAttention2
-from fla.models.utils import Cache
+from fla.models.cache_utils import Cache
 from fla.utils import IS_AMD, IS_NPU, IS_NVIDIA, device
 
 # the layer runs the GDN-2 kernels, which tests/ops/test_gdn2.py guards the same way

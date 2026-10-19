@@ -24,7 +24,7 @@ from fla.modules.norm.layernorm_quant import LayerNormLinearQuantFunction, weigh
 def activation_quant(x: torch.Tensor) -> torch.Tensor:
     """Quantize activations to 8 bits per token and return dequantized values."""
     scale = 127.0 / x.abs().max(dim=-1, keepdim=True).values.clamp_(min=1e-5)
-    y = (x * scale).round().clamp_(-128, 127) / scale
+    y = (x * scale).round().clamp_(min=-128, max=127) / scale
     return y
 
 
@@ -94,6 +94,7 @@ def bit_linear(
         norm_bias=norm_bias,
         linear_weight=weight,
         linear_bias=bias,
+        eps=eps,
         is_rms_norm=True,
     )
 
@@ -126,11 +127,11 @@ class BitLinear(nn.Linear):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         w = self.weight
-        x_norm = self.norm(x)
+        x_norm = self.norm(x=x)
 
         # straight-through gradients bypass quantization
-        x_quant = x_norm + (activation_quant(x_norm) - x_norm).detach()
-        w_quant = w + (weight_quant(w) - w).detach()
+        x_quant = x_norm + (activation_quant(x=x_norm) - x_norm).detach()
+        w_quant = w + (weight_quant(w=w) - w).detach()
         y = F.linear(input=x_quant, weight=w_quant)
 
         return y
@@ -149,5 +150,6 @@ class FusedBitLinear(BitLinear):
             norm_bias=self.norm.bias,
             linear_weight=self.weight,
             linear_bias=self.bias,
+            eps=self.norm.eps,
             is_rms_norm=True,
         )

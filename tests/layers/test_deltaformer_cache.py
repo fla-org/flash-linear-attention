@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from fla.layers.deltaformer import DeltaFormerAttention
-from fla.models.utils import Cache
+from fla.models.cache_utils import Cache
 from fla.utils import device, find_spec_cached
 
 # Mark (not importorskip): a fully skipped module reports "no tests collected" and exits

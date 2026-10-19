@@ -22,7 +22,7 @@ from fla.ops.mesa_net import chunk_mesa_net, mesa_net_decoding_one_step
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
-    from fla.models.utils import Cache
+    from fla.models.cache_utils import Cache
 
 
 class MesaNet(nn.Module):
