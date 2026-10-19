@@ -52,7 +52,7 @@ The common rule is in [TRAPS.md](TRAPS.md#reused-tldot-operands). This index ide
 | `fla/ops/gated_delta_rule/backends/triton_ascend/wy_fast.py` | Inverse tiles reused between stages; gradient tiles used first on the left, then on the right. |
 | `fla/ops/kda/backends/triton_ascend/wy_fast.py`              | Inverse tiles reused across the value and key loops.                                           |
 | `fla/ops/kda/backends/triton_ascend/chunk_intra.py`          | Triangular block merges that reuse operands for several products and final stores.             |
-| `fla/ops/utils/backends/triton_ascend/solve_tril.py`         | Block inverse operands used in multiple products or stored after a dot.                        |
+| `fla/ops/utils/triton_ascend/solve_tril.py`                  | Block inverse operands used in multiple products or stored after a dot.                        |
 | `fla/ops/kda/backends/triton_ascend/chunk_bwd.py`            | Output gradients used as both left and right operands.                                         |
 
 Audit the changed kernel's first left-operand use and every subsequent read. Copies must precede that first use; reloads must come from pristine storage. Validate with the operator's kernel tests, including `tests/ops/test_gdn_kernels.py` and `tests/ops/test_solve_tril.py` where relevant.
