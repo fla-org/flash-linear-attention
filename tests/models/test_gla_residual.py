@@ -12,6 +12,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from fla.models.cache_utils import Cache
 from fla.models.gla.modeling_gla import GLAModel
 from fla.modules.residuals import AttentionResidual, ManifoldHyperConnection, StandardResidual
 from fla.ops.attnres import naive_attnres
@@ -200,15 +201,40 @@ def test_history_initialization_only_at_first_sublayer(residual_cls):
 
 
 @pytest.mark.parametrize('mode', ['standard', 'attnres', 'mhc'])
-def test_gla_hybrid_and_repeated_forward(mode):
+@pytest.mark.parametrize(('training', 'use_cache'), [
+    pytest.param(True, None, id='train-default'),
+    pytest.param(False, None, id='eval-default'),
+    pytest.param(True, True, id='train-cache'),
+    pytest.param(False, False, id='eval-no-cache'),
+])
+def test_gla_hybrid_and_repeated_forward(mode, training, use_cache):
     torch.manual_seed(42)
     config = make_config(4 if mode == 'attnres' else None, mode=mode, attn={'layers': [1], 'num_heads': 2})
-    model = GLAModel(config)
+    config.use_cache = True
+    model = GLAModel(config).train(training)
     ids = torch.arange(10).reshape(2, 5)
-    first = model(ids, return_dict=False)[0]
-    second = model(ids).last_hidden_state
-    torch.testing.assert_close(first, second, atol=0, rtol=0)
-    assert first.shape == (2, 5, 32)
+    attention_mask = torch.ones_like(ids)
+    cu_seqlens = torch.tensor([0, 5, 10], dtype=torch.int32)
+    calls = []
+    handles = [layer.attn.register_forward_pre_hook(
+        lambda module, args, kwargs: calls.append(kwargs), with_kwargs=True,
+    ) for layer in model.layers]
+    first = model(ids, attention_mask=attention_mask, use_cache=use_cache, return_dict=False, cu_seqlens=cu_seqlens)
+    for handle in handles:
+        handle.remove()
+    second = model(ids, use_cache=use_cache)
+    torch.testing.assert_close(first[0], second.last_hidden_state, atol=0, rtol=0)
+    assert first[0].shape == (2, 5, 32)
+    expected_cache = not training if use_cache is None else use_cache
+    cache = first[1] if expected_cache else None
+    assert isinstance(second.past_key_values, Cache) if expected_cache else second.past_key_values is None
+    assert len(calls) == config.num_hidden_layers
+    for kwargs in calls:
+        assert kwargs['attention_mask'] is attention_mask
+        assert kwargs['past_key_values'] is cache
+        assert kwargs['use_cache'] is expected_cache
+        assert kwargs['output_attentions'] is False
+        assert kwargs['cu_seqlens'] is cu_seqlens
     assert not hasattr(model, 'attn_norms') and not hasattr(model, 'norm')
 
 
