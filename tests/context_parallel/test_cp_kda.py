@@ -124,7 +124,7 @@ def run_cp_kda_test_worker(
     safe_gate: bool = False,
     lower_bound: float | None = None,
     state_v_first: bool = False,
-    use_tf32x3_affine_chain: bool = False,
+    use_tf32x3_affine_chain: bool | None = None,
     layout: str = 'contiguous',
 ):
     """
@@ -310,7 +310,8 @@ def run_cp_kda_test_worker(
 
         # Build CP context
         context = build_cp_context(
-            cu_seqlens_global, group=dist.group.WORLD, use_tf32x3_affine_chain=use_tf32x3_affine_chain,
+            cu_seqlens_global, group=dist.group.WORLD,
+            **({'use_tf32x3_affine_chain': use_tf32x3_affine_chain} if use_tf32x3_affine_chain is not None else {}),
             layout=layout,
         )
 
@@ -430,7 +431,7 @@ def run_cp_test_with_spawn(
     safe_gate: bool = False,
     lower_bound: float | None = None,
     state_v_first: bool = False,
-    use_tf32x3_affine_chain: bool = False,
+    use_tf32x3_affine_chain: bool | None = None,
     layout: str = 'contiguous',
 ):
     """

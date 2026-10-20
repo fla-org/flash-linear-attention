@@ -25,8 +25,9 @@ import triton
 
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_fwd_kernel_h_blockdim64
 from fla.ops.cp.chunk_delta_h import pre_process_fwd_kernel_merged
+from fla.ops.cp.context import _check_cp_device, _validate_cp_kwargs
 from fla.ops.utils.index import prepare_chunk_indices, prepare_chunk_offsets
-from fla.utils import IS_TF32_SUPPORTED, get_multiprocessor_count
+from fla.utils import get_multiprocessor_count
 
 logger = logging.getLogger(__name__)
 
@@ -259,8 +260,10 @@ def intracard_pre_scan(
     cu_seqlens_subseq_split: torch.Tensor,
     S_split: int,
     chunk_size: int = 64,
-    use_tf32x3_affine_chain: bool = False,
+    **kwargs,
 ):
+    _validate_cp_kwargs(**kwargs)
+    _check_cp_device(kg.device)
     H, K, V, HV = kg.shape[2], kg.shape[3], u.shape[3], u.shape[2]
     BK = triton.next_power_of_2(K)
     BLOCK_SIZE = 32 if K <= 64 else 64
@@ -287,10 +290,6 @@ def intracard_pre_scan(
         BLOCK_SIZE=BLOCK_SIZE,
         BK1=BK,
         MULTI_SEQS=True,
-        AFFINE_CHAIN_PRECISION=(
-            "tf32x3" if use_tf32x3_affine_chain and IS_TF32_SUPPORTED
-            else ("ieee" if not IS_TF32_SUPPORTED else None)
-        ),
     )
 
     return hm
@@ -305,7 +304,7 @@ def intracard_merge(
     device: torch.device,
     initial_state: torch.Tensor | None = None,
     state_v_first: bool = False,
-    use_tf32x3_affine_chain: bool = False,
+    **kwargs,
 ) -> tuple[torch.Tensor | None, int]:
     """Merge sub-sequence states using pre-computed parameters.
 
@@ -315,6 +314,8 @@ def intracard_merge(
     """
     from fla.ops.cp.chunk_delta_h import merge_fwd_bwd_kernel
 
+    _validate_cp_kwargs(**kwargs)
+    _check_cp_device(hm.device)
     if num_non_first == 0:
         return None, 0
 
@@ -361,10 +362,6 @@ def intracard_merge(
         INTRACARD_MODE=True,
         NUM_SEQ_ENTRIES=num_split_seqs,
         STATE_V_FIRST=state_v_first,
-        AFFINE_CHAIN_PRECISION=(
-            "tf32x3" if use_tf32x3_affine_chain and IS_TF32_SUPPORTED
-            else ("ieee" if not IS_TF32_SUPPORTED else None)
-        ),
     )
 
     return initial_states_merge, num_non_first
@@ -458,8 +455,10 @@ def intracard_fwd_h(
     cu_seqlens_cpu: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
     max_splits: int = 32,
-    use_tf32x3_affine_chain: bool = False,
+    **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    _validate_cp_kwargs(**kwargs)
+    _check_cp_device(k.device)
     assert cu_seqlens is not None, "intracard_fwd_h requires cu_seqlens"
 
     _, _, _Hq, K = k.shape
@@ -587,7 +586,6 @@ def intracard_fwd_h(
         cu_seqlens_subseq_split=cu_seqlens_split_flat,
         S_split=S_split_total,
         chunk_size=chunk_size,
-        use_tf32x3_affine_chain=use_tf32x3_affine_chain,
     )
 
     initial_states_merge, num_non_first = intracard_merge(
@@ -599,7 +597,6 @@ def intracard_fwd_h(
         device=device,
         initial_state=initial_state,
         state_v_first=state_v_first,
-        use_tf32x3_affine_chain=use_tf32x3_affine_chain,
     )
 
     if state_v_first:

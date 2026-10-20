@@ -14,6 +14,7 @@ import torch
 
 from fla.ops.common import intracard_cp
 from fla.ops.common.intracard_cp import _intracard_cache
+from fla.ops.cp import context
 from fla.ops.kda import chunk_kda
 from fla.utils import device
 
@@ -23,6 +24,28 @@ def clear_intracard_cache():
     _intracard_cache.clear()
     yield
     _intracard_cache.clear()
+
+
+@pytest.mark.parametrize('entry', ['fwd', 'pre_scan', 'merge'])
+@pytest.mark.parametrize('legacy_false', [False, True], ids=['unsupported-device', 'legacy-false'])
+def test_intracard_precision_requirement(entry, legacy_false, monkeypatch):
+    monkeypatch.setattr(context, 'IS_NVIDIA', False)
+    x = torch.empty(1, 64, 1, 32)
+    kwargs = {'use_tf32x3_affine_chain': False} if legacy_false else {}
+    error = ValueError if legacy_false else RuntimeError
+    message = 'use_tf32x3_affine_chain=False' if legacy_false else 'compute capability >= 8.0'
+    with pytest.raises(error, match=message):
+        if entry == 'fwd':
+            intracard_cp.intracard_fwd_h(k=x, w=x, u=x, **kwargs)
+        elif entry == 'pre_scan':
+            intracard_cp.intracard_pre_scan(
+                kg=x, w=x, u=x, g=None, gk=None, cu_seqlens_subseq_split=None, S_split=0, **kwargs,
+            )
+        else:
+            intracard_cp.intracard_merge(
+                hm=x, split_info=None, num_non_first=0, merge_seq_offsets=[], merge_init_offsets=[],
+                device=x.device, **kwargs,
+            )
 
 
 @pytest.mark.skipif(os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") == "1", reason="backend dispatch disabled")
@@ -129,6 +152,7 @@ def test_chunk_gdn_intracard_gqa(monkeypatch):
 
     from fla.ops.gated_delta_rule import chunk_gated_delta_rule
 
+    monkeypatch.setenv("FLA_INTRACARD_CP", "1")
     torch.manual_seed(0)
     dtype = torch.bfloat16
 

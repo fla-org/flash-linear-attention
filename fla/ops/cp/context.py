@@ -13,13 +13,28 @@ from typing import TYPE_CHECKING
 import torch
 import torch.distributed as dist
 
-from fla.utils import tensor_cache
+from fla.utils import IS_NVIDIA, get_device_capability, tensor_cache
 
 if TYPE_CHECKING:
     from torch.distributed import ProcessGroup
 
 
-@dataclass
+def _validate_cp_kwargs(**kwargs) -> None:
+    if kwargs.pop('use_tf32x3_affine_chain', True) is False:
+        raise ValueError("use_tf32x3_affine_chain=False is no longer supported; CP requires TF32x3.")
+    if kwargs:
+        raise TypeError(f"Unexpected CP keyword arguments: {', '.join(kwargs)}")
+
+
+def _check_cp_device(device: torch.device) -> None:
+    if not IS_NVIDIA or device.type != 'cuda':
+        raise RuntimeError("CP affine chains require an NVIDIA Ampere or newer GPU (compute capability >= 8.0).")
+    device_index = device.index if device.index is not None else torch.cuda.current_device()
+    if get_device_capability(device_index)[0] < 8:
+        raise RuntimeError("CP affine chains require an NVIDIA Ampere or newer GPU (compute capability >= 8.0).")
+
+
+@dataclass(init=False)
 class FLACPContext:
     """FLA Context Parallel Context - Operator-level context management."""
     group: ProcessGroup | None = None
@@ -31,7 +46,6 @@ class FLACPContext:
     post_num_ranks: int | None = None
     conv1d_kernel_size: int | None = None
     pre_num_conv_tokens: int | None = None
-    use_tf32x3_affine_chain: bool = False
     # Device-resident copies of pre/post_num_ranks for graph replay: kernel scalar
     # arguments are frozen at capture, so graph mode reads them via tl.load instead.
     # Persistent int32 tensors the caller refreshes in place before each replay.
@@ -48,6 +62,51 @@ class FLACPContext:
     is_last_by_part: tuple[bool, bool] | None = None
     pre_num_conv_tokens_by_part: tuple[int, int] | None = None
 
+    def __init__(
+        self,
+        group: ProcessGroup | None = None,
+        cu_seqlens: torch.Tensor | None = None,
+        cu_seqlens_cpu: torch.Tensor | None = None,
+        is_last_rank: bool | None = None,
+        pre_num_ranks: int | None = None,
+        is_first_rank: bool | None = None,
+        post_num_ranks: int | None = None,
+        conv1d_kernel_size: int | None = None,
+        pre_num_conv_tokens: int | None = None,
+        *,
+        pre_num_ranks_dev: torch.Tensor | None = None,
+        post_num_ranks_dev: torch.Tensor | None = None,
+        layout: str = 'contiguous',
+        part_len: int | None = None,
+        front_num_seqs: int | None = None,
+        pre_num_ranks_by_part: tuple[int, int] | None = None,
+        post_num_ranks_by_part: tuple[int, int] | None = None,
+        is_first_by_part: tuple[bool, bool] | None = None,
+        is_last_by_part: tuple[bool, bool] | None = None,
+        pre_num_conv_tokens_by_part: tuple[int, int] | None = None,
+        **kwargs,
+    ):
+        _validate_cp_kwargs(**kwargs)
+        self.group = group
+        self.cu_seqlens = cu_seqlens
+        self.cu_seqlens_cpu = cu_seqlens_cpu
+        self.is_last_rank = is_last_rank
+        self.pre_num_ranks = pre_num_ranks
+        self.is_first_rank = is_first_rank
+        self.post_num_ranks = post_num_ranks
+        self.conv1d_kernel_size = conv1d_kernel_size
+        self.pre_num_conv_tokens = pre_num_conv_tokens
+        self.pre_num_ranks_dev = pre_num_ranks_dev
+        self.post_num_ranks_dev = post_num_ranks_dev
+        self.layout = layout
+        self.part_len = part_len
+        self.front_num_seqs = front_num_seqs
+        self.pre_num_ranks_by_part = pre_num_ranks_by_part
+        self.post_num_ranks_by_part = post_num_ranks_by_part
+        self.is_first_by_part = is_first_by_part
+        self.is_last_by_part = is_last_by_part
+        self.pre_num_conv_tokens_by_part = pre_num_conv_tokens_by_part
+
     def copy_for_backward(self) -> FLACPContext:
         """Create a copy for backward pass (useful when PP_SIZE > 1)."""
         return FLACPContext(
@@ -60,7 +119,6 @@ class FLACPContext:
             post_num_ranks=self.post_num_ranks,
             conv1d_kernel_size=self.conv1d_kernel_size,
             pre_num_conv_tokens=self.pre_num_conv_tokens,
-            use_tf32x3_affine_chain=self.use_tf32x3_affine_chain,
             pre_num_ranks_dev=self.pre_num_ranks_dev,
             post_num_ranks_dev=self.post_num_ranks_dev,
             layout=self.layout,
@@ -133,9 +191,11 @@ def get_cp_cu_seqlens(
     rank: int | None = None,
     group: dist.ProcessGroup | None = None,
     conv1d_kernel_size: int | None = None,
-    use_tf32x3_affine_chain: bool = False,
+    *,
     layout: str = 'contiguous',
+    **kwargs,
 ) -> FLACPContext:
+    _validate_cp_kwargs(**kwargs)
     # 1. Initialize environment info
     if world_size is None:
         assert group is not None
@@ -178,7 +238,6 @@ def get_cp_cu_seqlens(
             post_num_ranks=post_ranks,
             conv1d_kernel_size=conv1d_kernel_size,
             pre_num_conv_tokens=pre_conv,
-            use_tf32x3_affine_chain=use_tf32x3_affine_chain,
         )
 
     # zigzag: local buffer = [front part; back part], each part_len tokens
@@ -195,7 +254,6 @@ def get_cp_cu_seqlens(
         cu_seqlens=local.to(device=cu_seqlens.device, non_blocking=True),
         cu_seqlens_cpu=local,
         conv1d_kernel_size=conv1d_kernel_size,
-        use_tf32x3_affine_chain=use_tf32x3_affine_chain,
         layout='zigzag',
         part_len=part_len,
         front_num_seqs=len(front_cu) - 1,
@@ -212,8 +270,9 @@ def build_cp_context(
     group: ProcessGroup,
     conv1d_kernel_size: int | None = None,
     cu_seqlens_cpu: torch.Tensor | None = None,
-    use_tf32x3_affine_chain: bool = False,
+    *,
     layout: str = 'contiguous',
+    **kwargs,
 ) -> FLACPContext:
     """Build a CP context for the given cu_seqlens and process group.
 
@@ -222,19 +281,20 @@ def build_cp_context(
         group: Process group for CP communication.
         conv1d_kernel_size: Kernel size for convolution (optional).
         cu_seqlens_cpu: CPU version of cu_seqlens to avoid d2h transfer (optional).
-        use_tf32x3_affine_chain: Use tf32x3 for the affine-chain dots in the CP pre-process and merge kernels (NVIDIA only).
         layout: 'contiguous' (default) assigns rank r the token interval
             [r * T/W, (r + 1) * T/W); 'zigzag' assigns rank r two intervals of
             T/(2W) tokens, [r * T/2W, (r + 1) * T/2W) and
             [(2W - 1 - r) * T/2W, (2W - r) * T/2W), and the caller feeds the
             concatenation [front; back] as the local input. Zigzag balances
             causal-attention CP layouts without a re-shard at layer boundaries.
+        **kwargs: Accepts legacy use_tf32x3_affine_chain=True. Passing False raises ValueError.
 
     Returns:
         FLACPContext with computed cu_seqlens and rank information.
     """
     return get_cp_cu_seqlens(
         cu_seqlens, cu_seqlens_cpu=cu_seqlens_cpu, group=group,
-        conv1d_kernel_size=conv1d_kernel_size, use_tf32x3_affine_chain=use_tf32x3_affine_chain,
+        conv1d_kernel_size=conv1d_kernel_size,
         layout=layout,
+        **kwargs,
     )
