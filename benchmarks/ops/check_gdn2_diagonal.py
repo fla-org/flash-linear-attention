@@ -56,16 +56,22 @@ def scan_probe(X, Y):
         tl.store(Y + offsets, result)
 
 
-@triton.jit
-def diagonal_probe(Q, K, B, G, AQ, AK, OQ, OK, OT):
+@triton.jit(do_not_specialize=['T', 'S'])
+def diagonal_probe(Q, K, B, G, AQ, AK, OQ, OK, OT, X, Y, OD, T, S, MIXED: tl.constexpr):
     i = tl.arange(0, 16)
     channels = 16 + tl.arange(0, 16).to(tl.int64)
-    dq, dk, dt = gdn2_bwd_diagonal(Q + 48, K + 48, B + 48, G + 48, AQ + 64, AK + 64,
-                                   16, 33, channels, 2, 48, 64, 16)
     offsets = i[:, None].to(tl.int64) * 16 + tl.arange(0, 16)[None, :]
+    if MIXED:
+        x = tl.load(X + offsets)
+        y = tl.load(Y + offsets)
+        dot = tl.dot(x, y, allow_tf32=False)
+    dq, dk, dt = gdn2_bwd_diagonal(Q + 48, K + 48, B + 48, G + 48, AQ + 64, AK + 64,
+                                   tl.cast(S, tl.int64), T, channels, 2, 48, 64, 16)
     tl.store(OQ + offsets, dq)
     tl.store(OK + offsets, dk)
     tl.store(OT + offsets, dt)
+    if MIXED:
+        tl.store(OD + offsets, dot)
 
 
 def main():
@@ -104,8 +110,6 @@ def main():
     g = -torch.rand_like(q)
     g[16, :, 0] = -1e30
     aq, ak = [torch.randn(33, 2, 64) for _ in range(2)]
-    outputs = [torch.full((16, 16), float('nan'), device=device) for _ in range(3)]
-    diagonal_probe[(1,)](*[v.to(device) for v in (q, k, b, g, aq, ak)], *outputs)
     expected = [torch.zeros(16, 16, dtype=torch.float64) for _ in range(3)]
     for i in range(16, 32):
         for j in range(16, i + 1):
@@ -115,8 +119,15 @@ def main():
             expected[1][i - 16] += c * k[j, 1, 16:32].double() * decay
             expected[2][j - 16] += (a * q[i, 1, 16:32].double() +
                                     c * k[i, 1, 16:32].double() * b[i, 1, 16:32].double()) * decay
-    for name, got, want in zip(('dq', 'dk', 'dkt'), outputs, expected):
-        compare(name, got, want)
+    for mixed in (False, True):
+        outputs = [torch.full((16, 16), float('nan'), device=device) for _ in range(4)]
+        dot_inputs = [torch.randn(16, 16, device=device) for _ in range(2)]
+        diagonal_probe[(1,)](*[v.to(device) for v in (q, k, b, g, aq, ak)],
+                             *outputs[:3], *dot_inputs, outputs[3], 33, 16, mixed)
+        for name, got, want in zip(('dq', 'dk', 'dkt'), outputs, expected):
+            compare(f'{name}_mixed{mixed}', got, want)
+        if mixed:
+            assert torch.isfinite(outputs[3]).all()
     path.write_text(json.dumps(report, indent=2) + '\n')
     assert all(row['passed'] for row in report.values()), 'Native lowering probe failed; see diagonal-lowering.json'
 

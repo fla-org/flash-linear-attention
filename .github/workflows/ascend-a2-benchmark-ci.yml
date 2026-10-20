@@ -170,6 +170,13 @@ jobs:
           source /usr/local/Ascend/ascend-toolkit/set_env.sh
           python benchmarks/ops/check_gdn2_diagonal.py
 
+      - name: Upload diagonal lowering results
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: gdn2-diagonal-lowering
+          path: gdn2-paired/diagonal-lowering.json
+
       - name: Check representative strict GDN2 regressions before timing
         shell: bash
         env:
