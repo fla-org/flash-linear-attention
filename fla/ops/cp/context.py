@@ -36,10 +36,10 @@ def _check_cp_device(device: torch.device) -> None:
 
 @dataclass(init=False)
 class FLACPContext:
-    """Rank-local sequence metadata shared by CP operators.
+    """Sequence partition and communication metadata for context parallelism.
 
-    Contiguous layouts use the scalar rank fields; zigzag layouts use the per-part fields for the front and back intervals.
-    Graph replay keeps device buffers at fixed addresses and requires the caller to refresh their contents in place.
+    Contiguous layouts use scalar rank-boundary metadata. Zigzag layouts use front/back tuples in local-buffer order.
+    The optional device rank counts are persistent int32 tensors refreshed in place for CUDA Graph replay.
     """
     group: ProcessGroup | None = None
     cu_seqlens: torch.Tensor | None = None
@@ -134,8 +134,9 @@ def _interval_cp_meta(
 ) -> tuple[torch.Tensor, int, int, bool, int, bool]:
     """Compute local sequence boundaries and chain metadata for [start, end).
 
-    `chain_pos` is the interval's position in the global processing chain and `part_len` is its token length.
-    They reduce to (rank, rank length) for the contiguous layout and to (slot, total/(2W)) for zigzag.
+    `chain_pos` identifies a rank in contiguous layouts or a slot in zigzag layouts.
+    `part_len` is the token length of one such interval.
+    The first and last overlapping sequences determine how many neighboring intervals share their recurrent state.
     """
     start_seq_idx = torch.searchsorted(cu_seqlens_cpu[1:], start, side='right')
     end_seq_idx = torch.searchsorted(cu_seqlens_cpu[:-1], end, side='left')

@@ -25,6 +25,11 @@ def chunk_cp_merge_state(
     BV: tl.constexpr,
     STATE_V_FIRST: tl.constexpr,
 ):
+    """Apply one [h_local | M] summary to a boundary state.
+
+    K-first states use M @ h + h_local; V-first states use h @ M.T + h_local.T.
+    The summary itself always keeps the [K, V+K] layout.
+    """
     m_k, m_v = o_k < K, o_v < V
     p_he = hm + o_k[:, None] * (V + K) + o_v[None, :]
     b_he = tl.load(p_he, mask=m_k[:, None] & m_v[None, :], other=0.).to(tl.float32)
@@ -36,9 +41,10 @@ def chunk_cp_merge_state(
         else:
             b_h = tl.dot(b_m, b_h.to(tl.float32), input_precision="tf32x3")
     else:
-        # a full 256-by-256 TF32x3 operand exceeds shared memory on supported GPUs
+        # tile wide reductions to keep TF32x3 operands within shared memory
         b_acc = tl.full(b_h.shape, 0, tl.float32)
         for i in tl.static_range(BK // 128):
+            # pair M's reduction columns with the same key rows of the incoming state
             o_r = i * 128 + tl.arange(0, 128)
             p_m = hm + V + o_k[:, None] * (V + K) + o_r[None, :]
             b_m = tl.load(p_m, mask=m_k[:, None] & (o_r < K)[None, :], other=0.).to(tl.float32)
@@ -99,10 +105,11 @@ def chunk_cp_fwd_bwd_kernel_merge(
     STATE_V_FIRST: tl.constexpr = False,
     NUM_RANKS_ON_DEVICE: tl.constexpr = False,
 ):
-    """Compose affine summaries across ranks or local subsequences.
+    """Merge affine summaries across ranks or intra-card subsequences.
 
-    Summaries store [K, V+K] regardless of the state layout.
-    Intracard mode writes each non-first subsequence's initial state; CP mode writes one boundary state.
+    Summaries use [K, V+K]; STATE_V_FIRST selects [V, K] input and output states.
+    Cross-rank mode writes one boundary state per head after composing the contributing ranks.
+    Intra-card mode starts from each original sequence's h0 and writes the state entering each later subsequence.
     """
     i_v = tl.program_id(0).to(tl.int64)
     o_k = tl.arange(0, BK)
@@ -116,6 +123,7 @@ def chunk_cp_fwd_bwd_kernel_merge(
         if i_seq >= NUM_SEQ_ENTRIES:
             return
 
+        # seq_offsets indexes summaries; init_offsets indexes outputs with the first subsequence omitted
         ss_start = tl.load(seq_offsets + i_seq).to(tl.int32)
         ss_end = tl.load(seq_offsets + i_seq + 1).to(tl.int32)
         init_base = tl.load(init_offsets + i_seq).to(tl.int32)
@@ -154,6 +162,7 @@ def chunk_cp_fwd_bwd_kernel_merge(
                 STATE_V_FIRST=STATE_V_FIRST,
             )
 
+            # this prefix's final state initializes the next subsequence; the last prefix has no successor
             if idx < num_subseqs - 1:
                 init_idx = init_base + idx
                 stride_init = HV * K * V
@@ -169,6 +178,7 @@ def chunk_cp_fwd_bwd_kernel_merge(
         if HAS_H_SEQ_IDX:
             h += tl.load(h_seq_idx).to(tl.int64) * HV * K * V
         if NUM_RANKS_ON_DEVICE:
+            # graph replay must read refreshed rank counts instead of capture-time Python scalars
             num_ranks = tl.load(pre_or_post_num_ranks).to(tl.int32)
         else:
             num_ranks = pre_or_post_num_ranks.to(tl.int32)
@@ -179,6 +189,7 @@ def chunk_cp_fwd_bwd_kernel_merge(
             b_h = tl.zeros([BV, BK], dtype=tl.float32)
         else:
             b_h = tl.zeros([BK, BV], dtype=tl.float32)
+        # forward composes preceding ranks left to right; backward composes following ranks right to left
         for idx in range(num_ranks):
             if FORWARD:
                 cur_rank = rank - num_ranks + idx

@@ -56,6 +56,11 @@ def chunk_cp_fwd_kernel_h(
     IS_VARLEN: tl.constexpr,
     MULTI_SEQS: tl.constexpr,
 ):
+    """Summarize a local sequence as h_out = M @ h_in + h_local.
+
+    Each value head writes [h_local | M] with shape [K, V+K].
+    The two column groups compute the zero-initial-state response and the incoming-state transform independently.
+    """
     i_col, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     if MULTI_SEQS:
         i_n = tl.program_id(2).to(tl.int64)
@@ -71,6 +76,7 @@ def chunk_cp_fwd_kernel_h(
         bos, eos = (i_n * T).to(tl.int64), (i_n * T + T).to(tl.int64)
         NT = tl.cdiv(T, BT)
 
+    # h_local and M have separately padded column grids, including when V is not a block multiple
     is_h_part = i_col * BLOCK_SIZE < V
     # for DPLR, use H heads for w/bg; GDN and KDA use HV heads for w
     k += ((bos * H + i_h // (HV // H)) * K).to(tl.int64)
@@ -94,6 +100,7 @@ def chunk_cp_fwd_kernel_h(
         stride_v = HV * V
         i_v = i_col
 
+        # starting from zero isolates the local contribution from the unknown incoming rank state
         b_h1 = tl.zeros([64, BLOCK_SIZE], dtype=tl.float32)
         if K > 64:
             b_h2 = tl.zeros([64, BLOCK_SIZE], dtype=tl.float32)
@@ -158,6 +165,7 @@ def chunk_cp_fwd_kernel_h(
                 if K > 192:
                     b_h4 *= b_g_last
 
+            # vector gates decay each key row independently; scalar gates share one decay across rows
             if USE_GK:
                 o_k1 = tl.arange(0, 64)
                 p_gk_last = gk + last_idx * HV * K
@@ -231,11 +239,13 @@ def chunk_cp_fwd_kernel_h(
             p_h4 = hm + o_k4[:, None] * stride_hm_kv + o_vb[None, :]
             tl.store(p_h4, b_h4.to(p_h4.dtype.element_ty), mask=m_k4[:, None] & m_vb[None, :])
     else:
+        # M starts after the padded h_local grid, not after an unpadded V / BLOCK_SIZE
         i_k_col = i_col - tl.cdiv(V, BLOCK_SIZE)
 
         row = tl.arange(0, BK1)
         col = tl.arange(0, BLOCK_SIZE) + i_k_col * BLOCK_SIZE
 
+        # identity represents an unchanged incoming state before any local chunk is applied
         b_m = tl.where(row[:, None] == col[None, :], 1.0, 0.0)
 
         for i_t in range(NT):
@@ -276,6 +286,7 @@ def chunk_cp_fwd_kernel_h(
                 # GDN/KDA: M = (diag - k^T @ w) @ M
                 b_kw = tl.dot(tl.trans(b_k.to(b_w.dtype)), b_w)
                 b_m_i = b_diag - b_kw
+            # keep the composed transform in fp32; repeated bf16 casts accumulate error along the chain
             b_m = tl.dot(b_m_i.to(tl.float32), b_m.to(tl.float32), input_precision="tf32x3")
 
         stride_hm_kv = K + V

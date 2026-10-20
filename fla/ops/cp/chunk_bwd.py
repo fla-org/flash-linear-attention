@@ -56,6 +56,11 @@ def chunk_cp_bwd_kernel_dh(
     USE_BG: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
+    """Summarize local backward propagation as dh_in = dM @ dh_out + dh_local.
+
+    Each value head writes [dh_local | dM] with shape [K, V+K].
+    Both the zero-terminal-gradient response and its boundary-gradient transform scan chunks in reverse order.
+    """
     i_col, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_n = 0
     if IS_VARLEN:
@@ -89,6 +94,7 @@ def chunk_cp_bwd_kernel_dh(
         i_v = i_col
 
         b_dh2, b_dh3, b_dh4 = tl.full((), 0, tl.float32), tl.full((), 0, tl.float32), tl.full((), 0, tl.float32)
+        # zero terminal gradient isolates contributions from this rank's do and dv
         b_dh1 = tl.zeros([64, BLOCK_SIZE], dtype=tl.float32)
         if K > 64:
             b_dh2 = tl.zeros([64, BLOCK_SIZE], dtype=tl.float32)
@@ -112,6 +118,7 @@ def chunk_cp_bwd_kernel_dh(
             last_idx = min((i_t + 1) * BT, T) - 1
             o_t = i_t * BT + tl.arange(0, BT)
 
+            # reuse the common recurrence with zero terminal gradient to form the local affine offset
             b_dh1, b_dh2, b_dh3, b_dh4 = chunk_delta_rule_bwd_dh_state(
                 q=q,
                 k=k,
@@ -183,6 +190,7 @@ def chunk_cp_bwd_kernel_dh(
             else:
                 b_diag = tl.where(row[:, None] == row[None, :], 1.0, 0.0)
 
+            # backward transposes each chunk's state transform; DPLR passes its gated bg through k
             b_kw = tl.dot(tl.trans(b_w), b_k.to(b_w.dtype))
             if USE_BG:
                 # DPLR: dM = (diag + w^T @ bg) @ dM

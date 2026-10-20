@@ -5,7 +5,12 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""Intra-card context parallelism for variable-length delta-rule inference."""
+"""Intra-card context parallelism for variable-length delta-rule inference.
+
+Long sequences are split at chunk boundaries. A pre-scan summarizes each subsequence as an affine state transform;
+merging those summaries supplies the initial states needed to run the subsequences independently.
+Partition indices and device tensors are cached together to avoid repeating host work and device transfers.
+"""
 
 from __future__ import annotations
 
@@ -130,7 +135,11 @@ def compute_subseq_len(
     num_heads: int,
     chunk_size: int = 64,
 ) -> int:
-    """Choose chunk-aligned subsequences that balance SM occupancy and merge overhead."""
+    """Choose chunk-aligned subsequences that balance SM occupancy and merge overhead.
+
+    The longest sequence determines the split target.
+    A minimum subsequence size avoids excessive splitting and merge overhead for shorter sequences in mixed-length batches.
+    """
     seq_chunks = (seq_len + chunk_size - 1) // chunk_size
 
     if seq_chunks < 8:
@@ -170,6 +179,7 @@ def prepare_subseq_cu_seqlens(
         return cu_seqlens_cpu.tolist(), False, 0
 
     subseq_chunks = (subseq_len + chunk_size - 1) // chunk_size
+    # splitting needs enough work to amortize the extra pre-scan and merge
     threshold_subseq_len = 3 * subseq_len
 
     split_seq_ids: list[int] = []
@@ -190,6 +200,7 @@ def prepare_subseq_cu_seqlens(
             chunks_per = (seq_chunks_i + num_ss - 1) // num_ss
             actual_ssl = chunks_per * chunk_size
 
+            # preserve chunk alignment inside the sequence; only its final subsequence may end in a partial chunk
             split_seq_ids.append(i)
             start_subseq_idxs.append(cumsum_offset)
             num_subseqs_list.append(num_ss)
@@ -267,11 +278,10 @@ def intracard_merge(
     state_v_first: bool = False,
     **kwargs,
 ) -> tuple[torch.Tensor | None, int]:
-    """Merge sub-sequence states using pre-computed parameters.
+    """Compute initial states for non-first subsequences from their affine summaries.
 
-    All CPU-side preparation (cumsum, offset lists) is done in the caller
-    using pure Python loops. This function only creates GPU tensors and
-    launches the merge kernel.
+    Each original sequence starts from its supplied initial_state, or zero.
+    Returned states are ordered by split sequence, with the first subsequence of each sequence omitted.
     """
     _validate_cp_kwargs(**kwargs)
     _check_cp_device(hm.device)
@@ -422,6 +432,11 @@ def intracard_fwd_h(
     max_splits: int = 32,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    """Run independent subsequences after reconstructing their incoming recurrent states.
+
+    The original initial state belongs to each sequence's first subsequence; later ones use affine-merge results.
+    Reusing a cu_seqlens object assumes its boundaries are unchanged while its cache entry is retained.
+    """
     _validate_cp_kwargs(**kwargs)
     _check_cp_device(k.device)
     assert cu_seqlens is not None, "intracard_fwd_h requires cu_seqlens"
@@ -445,6 +460,7 @@ def intracard_fwd_h(
     cache_key = None
 
     if not early_return:
+        # identity avoids copying device boundaries to form a content key; the weakref guards against id reuse
         cache_key = (
             id(cu_seqlens),
             subseq_len,
@@ -536,6 +552,7 @@ def intracard_fwd_h(
         while len(_intracard_cache) > _INTRACARD_CACHE_MAXSIZE:
             _intracard_cache.popitem(last=False)
 
+    # summarize only split sequences; unsplit sequences keep their original initial states
     hm = intracard_pre_scan(
         kg=k,
         w=w,
@@ -563,6 +580,7 @@ def intracard_fwd_h(
     else:
         initial_state_expanded = k.new_zeros(total_subseqs, HV, K, V, dtype=torch.float32)
 
+    # first subsequences inherit h0; later subsequences inherit the preceding affine prefix
     if initial_state is not None:
         initial_state_expanded[first_subseq_indices] = initial_state
 
@@ -586,6 +604,7 @@ def intracard_fwd_h(
         state_v_first=state_v_first,
     )
 
+    # expose one final state per original sequence, taken from its last subsequence
     if output_final_state and final_state_subseq is not None:
         final_state = final_state_subseq[last_subseq_indices]
     else:
