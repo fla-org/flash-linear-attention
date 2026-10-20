@@ -15,6 +15,7 @@ import torch.distributed as dist
 import triton
 import triton.language as tl
 
+from fla.backends import dispatch
 from fla.ops.cp.comm import all_gather_into_tensor
 from fla.ops.utils.op import exp2
 from fla.utils import IS_TF32_SUPPORTED, autotune_cache_kwargs, check_shared_mem
@@ -760,6 +761,7 @@ def pre_process_bwd_kernel_merged(
         tl.store(p_m, b_m.to(p_m.dtype.element_ty), mask=(row < K)[:, None] & (col < K)[None, :])
 
 
+@dispatch('cp')
 def chunk_gated_delta_rule_fwd_h_pre_process(
     k: torch.Tensor,
     w: torch.Tensor,
@@ -944,6 +946,7 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
     return initial_state
 
 
+@dispatch('cp')
 def chunk_gated_delta_rule_bwd_dhu_pre_process(
     q: torch.Tensor,
     k: torch.Tensor,

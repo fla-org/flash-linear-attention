@@ -21,8 +21,10 @@ When use_gate_in_kernel=True, the reference path must manually:
    which is exactly what naive_recurrent_kda expects
 
 When use_gate_in_kernel=False:
-- For chunk_kda: input g must be pre-processed (gate applied + cumsum'd)
-- For naive_recurrent_kda reference: g should be gate-applied but NOT cumsum'd
+- g is already log-space decay (logsigmoid, then clamp). chunk_kda only runs
+  chunk_local_cumsum on it.
+- The naive reference takes that same per-token decay. Do not apply
+  naive_kda_gate or naive_kda_lowerbound_gate again.
 
 Variable-Length Sequence Handling:
 ==================================
@@ -84,13 +86,86 @@ from fla.utils import device as fla_device
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 
 
+# one fp32 state [HV, K, V] is saved per token. A single graph for T=65536, D=128
+# is about 48 GiB and does not fit a 64 GiB device. Only NPU uses the segmented
+# reference; CUDA and shorter cases stay on the original one-shot path.
+_NAIVE_SEGMENT_TOKENS = 4096
+_NAIVE_FULL_GRAPH_MAX = 16384
+
+
+def _naive_recurrent_kda_segmented(q, k, v, g, beta, do, segment_len=_NAIVE_SEGMENT_TOKENS):
+    """Same recurrence as naive_recurrent_kda, with one segment's graph live at a time."""
+    T = q.shape[1]
+    states = [None]
+    pieces = []
+    h = None
+    with torch.no_grad():
+        for start in range(0, T, segment_len):
+            end = min(start + segment_len, T)
+            o, h = naive_recurrent_kda(
+                q=q[:, start:end],
+                k=k[:, start:end],
+                v=v[:, start:end],
+                g=g[:, start:end],
+                beta=beta[:, start:end],
+                initial_state=h,
+                output_final_state=True,
+            )
+            pieces.append(o)
+            states.append(h.detach())
+
+    dq = torch.empty_like(q)
+    dk = torch.empty_like(k)
+    dv = torch.empty_like(v)
+    dg = torch.empty_like(g)
+    db = torch.empty_like(beta)
+    dht = None
+    starts = list(range(0, T, segment_len))
+    for seg in range(len(starts) - 1, -1, -1):
+        start = starts[seg]
+        end = min(start + segment_len, T)
+        h0 = states[seg]
+        h0_in = None if h0 is None else h0.detach().requires_grad_(True)
+        q_s = q[:, start:end].detach().requires_grad_(True)
+        k_s = k[:, start:end].detach().requires_grad_(True)
+        v_s = v[:, start:end].detach().requires_grad_(True)
+        g_s = g[:, start:end].detach().requires_grad_(True)
+        b_s = beta[:, start:end].detach().requires_grad_(True)
+        o, h = naive_recurrent_kda(
+            q=q_s,
+            k=k_s,
+            v=v_s,
+            g=g_s,
+            beta=b_s,
+            initial_state=h0_in,
+            output_final_state=True,
+        )
+        loss = (o * do[:, start:end]).sum()
+        if dht is not None:
+            loss = loss + (h * dht).sum()
+        loss.backward()
+        dq[:, start:end] = q_s.grad
+        dk[:, start:end] = k_s.grad
+        dv[:, start:end] = v_s.grad
+        dg[:, start:end] = g_s.grad
+        db[:, start:end] = b_s.grad
+        dht = None if h0_in is None else h0_in.grad.detach()
+        if device_platform == 'npu':
+            torch.npu.empty_cache()
+    return torch.cat(pieces, dim=1), dq, dk, dv, dg, db
+
+
 def init_distributed(rank, world_size):
     """Initialize distributed environment for a single process."""
     # Configure logging in worker process
     logging.basicConfig(level=logging.INFO, format='%(message)s')
 
     # NPU has no nccl. The CUDA port stays clear of the conv CP test.
+    # The long reference runs on rank 0 before the next barrier. The default
+    # HCCL wait is shorter than that reference on T=65536.
     if device_platform == 'npu':
+        os.environ.setdefault('HCCL_CONNECT_TIMEOUT', '1800')
+        os.environ.setdefault('HCCL_EXEC_TIMEOUT', '1800')
         backend, port = 'hccl', '29617'
     else:
         backend, port = 'nccl', '29501'
@@ -258,21 +333,40 @@ def run_cp_kda_test_worker(
                         )
                     g_for_grad = g_seq_input
                 else:
-                    # Pre-gated: g_global is already log-space decay (logsigmoid[, clamp]).
+                    # pre-gated: g_global is already log-space decay (logsigmoid[, clamp]).
                     # Match tests/ops/test_kda.py — naive takes per-token decay; chunk_kda
                     # only runs chunk_local_cumsum. Do not apply naive_kda_gate here.
                     g_processed = g_seq.to(torch.float).requires_grad_(True)
                     g_for_grad = g_processed
 
-                o_seq, _ = naive_recurrent_kda(
-                    q=q_seq_norm,
-                    k=k_seq_norm,
-                    v=v_seq,
-                    g=g_processed,
-                    beta=beta_seq,
-                    initial_state=None,
-                    output_final_state=False,
-                )
+                if device_platform == 'npu' and q_seq_norm.shape[1] > _NAIVE_FULL_GRAPH_MAX:
+                    o_seq, dq_n, dk_n, dv_n, dg_n, db_n = _naive_recurrent_kda_segmented(
+                        q=q_seq_norm,
+                        k=k_seq_norm,
+                        v=v_seq,
+                        g=g_processed,
+                        beta=beta_seq,
+                        do=do_seq,
+                    )
+                    q_seq_norm.backward(dq_n)
+                    k_seq_norm.backward(dk_n)
+                    if g_for_grad is g_processed:
+                        g_for_grad.grad = dg_n
+                    else:
+                        g_processed.backward(dg_n)
+                    v_seq.grad = dv_n
+                    beta_seq.grad = db_n
+                    o_seq = o_seq.detach()
+                else:
+                    o_seq, _ = naive_recurrent_kda(
+                        q=q_seq_norm,
+                        k=k_seq_norm,
+                        v=v_seq,
+                        g=g_processed,
+                        beta=beta_seq,
+                        initial_state=None,
+                        output_final_state=False,
+                    )
 
                 ref_outputs.append({
                     'o': o_seq,
@@ -291,7 +385,8 @@ def run_cp_kda_test_worker(
             all_db = []
 
             for item in ref_outputs:
-                (item['o'] * item['do']).sum().backward()
+                if item['q'].grad is None:
+                    (item['o'] * item['do']).sum().backward()
                 all_dq.append(item['q'].grad.detach())
                 all_dk.append(item['k'].grad.detach())
                 all_dv.append(item['v'].grad.detach())
