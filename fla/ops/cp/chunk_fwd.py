@@ -25,7 +25,7 @@ from fla.utils import IS_TF32_SUPPORTED, autotune_cache_kwargs
         for num_warps in [2, 4]
         for num_stages in [2, 3, 4]
     ],
-    key=['H', 'HV', 'K', 'V', 'BT'],
+    key=['H', 'HV', 'K', 'V', 'BT', 'USE_G', 'USE_GK', 'USE_BG', 'IS_VARLEN', 'MULTI_SEQS'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])

@@ -122,13 +122,25 @@ def test_intracard_pre_scan_merge(H: int, vector_gate: bool, state_v_first: bool
         g, gk = decay.view(1, T, 1).expand(1, T, HV).contiguous(), None
     state_shape = (1, HV, V, K) if state_v_first else (1, HV, K, V)
     h0 = torch.randn(state_shape, device=device, dtype=torch.float32) * 0.1
+    cu_seqlens_split = torch.tensor([0, 128, 256, T], device=device, dtype=torch.int32)
+    if vector_gate:
+        # scalar and vector gates must not share an autotuned pipeline configuration
+        intracard_pre_scan(
+            kg=k,
+            w=w,
+            u=u,
+            g=decay.view(1, T, 1).expand(1, T, HV).contiguous(),
+            gk=None,
+            cu_seqlens_subseq_split=cu_seqlens_split,
+            S_split=3,
+        )
     hm = intracard_pre_scan(
         kg=k,
         w=w,
         u=u,
         g=g,
         gk=gk,
-        cu_seqlens_subseq_split=torch.tensor([0, 128, 256, T], device=device, dtype=torch.int32),
+        cu_seqlens_subseq_split=cu_seqlens_split,
         S_split=3,
     )
     states, count = intracard_merge(
