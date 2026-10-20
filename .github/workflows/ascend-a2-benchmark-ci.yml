@@ -190,14 +190,21 @@ jobs:
           git fetch --depth 1 origin "$baseline"
           mkdir -p /tmp/gdn2-baseline
           git archive "$baseline" | tar -x -C /tmp/gdn2-baseline
+          corrected=7b2abb6122af469472209d7751c01cd94febba5a
+          git fetch --depth 1 origin "$corrected"
+          mkdir -p /tmp/gdn2-corrected
+          git archive "$corrected" | tar -x -C /tmp/gdn2-corrected
           candidate=$(git rev-parse HEAD)
           mkdir -p gdn2-paired
-          for trial in baseline-1 candidate-1 candidate-2 baseline-2; do
+          for trial in baseline-1 corrected-1 candidate-1 candidate-2 corrected-2 baseline-2; do
             source="$GITHUB_WORKSPACE"
             commit="$candidate"
             if [[ "$trial" == baseline-* ]]; then
               source=/tmp/gdn2-baseline
               commit="$baseline"
+            elif [[ "$trial" == corrected-* ]]; then
+              source=/tmp/gdn2-corrected
+              commit="$corrected"
             fi
             timeout --signal=INT --kill-after=30s 40m \
               python benchmarks/ops/profile_gdn2_review.py --source "$source" --commit "$commit" --label "$trial" --output gdn2-paired \
