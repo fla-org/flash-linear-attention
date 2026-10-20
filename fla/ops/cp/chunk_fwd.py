@@ -9,6 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.cp.chunk_merge import _prune_cp_configs
 from fla.ops.cp.context import _check_cp_device
 from fla.ops.utils.op import exp2
 from fla.utils import autotune_cache_kwargs
@@ -24,9 +25,10 @@ from fla.utils import autotune_cache_kwargs
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [2, 4]
-        for num_stages in [2, 3, 4]
+        for num_stages in [1, 2, 3, 4]
     ],
     key=['H', 'HV', 'K', 'V', 'BT', 'USE_G', 'USE_GK', 'USE_BG', 'IS_VARLEN', 'MULTI_SEQS'],
+    prune_configs_by={'early_config_prune': _prune_cp_configs},
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])

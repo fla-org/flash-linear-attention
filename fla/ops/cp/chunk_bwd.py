@@ -10,6 +10,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.common.chunk_delta_h_state import chunk_delta_rule_bwd_dh_state
+from fla.ops.cp.chunk_merge import _prune_cp_configs
 from fla.ops.cp.context import _check_cp_device
 from fla.ops.utils.op import exp2
 from fla.utils import autotune_cache_kwargs, check_shared_mem
@@ -24,9 +25,10 @@ from fla.utils import autotune_cache_kwargs, check_shared_mem
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [2, 4]
-        for num_stages in ([4, 3, 2] if check_shared_mem('ampere') else [1])
+        for num_stages in ([4, 3, 2, 1] if check_shared_mem('ampere') else [1])
     ],
-    key=['H', 'HV', 'K', 'V', 'BT'],
+    key=['H', 'HV', 'K', 'V', 'BT', 'USE_G', 'USE_GK', 'USE_BG', 'IS_VARLEN'],
+    prune_configs_by={'early_config_prune': _prune_cp_configs},
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
