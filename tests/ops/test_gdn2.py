@@ -19,6 +19,53 @@ from fla.ops.kda.gate import naive_kda_gate, naive_kda_lowerbound_gate
 from fla.utils import IS_AMD, IS_NPU, IS_NVIDIA, assert_close, device, device_platform
 
 
+@pytest.mark.skipif(not IS_NVIDIA, reason="CUDA required")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("K,V,packed,with_q", [(32, 64, False, True), (60, 32, True, False),
+                                               (128, 60, True, True), (256, 128, False, False)])
+def test_wy_parallel_tiles(dtype, K, V, packed, with_q):
+    from fla.ops.gdn2.wy_fast import recompute_w_u_fwd_gdn2
+
+    torch.manual_seed(42)
+    B, T, H, BT = 1 if packed else 2, 130, 2, 64
+    q, k = [torch.randn(B, T, H, K, device=device, dtype=dtype) for _ in range(2)]
+    b = torch.rand_like(k)
+    v = torch.randn(B, T, H, V, device=device, dtype=dtype)
+    wg = torch.rand_like(v)
+    raw = -torch.rand(B, T, H, K, device=device) * 0.1
+    raw[:, [0, 63, 64, 65, 129], :, 0] = -1e8
+    prefix = torch.empty_like(raw)
+    A = torch.zeros(B, T, H, BT, device=device, dtype=dtype)
+    refs = [torch.empty_like(k), torch.empty_like(v), torch.empty_like(q), torch.empty_like(k)]
+    offsets = [0, 65, 130] if packed else [0, T]
+    for start, end in zip(offsets, offsets[1:]):
+        for chunk in range(start, end, BT):
+            stop = min(chunk + BT, end)
+            n = stop - chunk
+            a = torch.tril(torch.randn(B, H, n, n, device=device) * 0.03, diagonal=-1)
+            a = (a + torch.eye(n, device=device)).to(dtype)
+            A[:, chunk:stop, :, :n] = a.transpose(1, 2)
+            prefix[:, chunk:stop] = raw[:, chunk:stop].cumsum(1) * math.log2(math.e)
+            decay = torch.exp2(prefix[:, chunk:stop])
+            kb = (k[:, chunk:stop].float() * b[:, chunk:stop].float() * decay).to(dtype)
+            vb = (v[:, chunk:stop].float() * wg[:, chunk:stop].float()).to(dtype)
+            refs[0][:, chunk:stop] = (a @ kb.transpose(1, 2)).transpose(1, 2)
+            refs[1][:, chunk:stop] = (a @ vb.transpose(1, 2)).transpose(1, 2)
+            refs[2][:, chunk:stop] = q[:, chunk:stop].float() * decay
+            shifted = torch.cat((raw[:, chunk+1:stop].double(), torch.zeros_like(raw[:, chunk:chunk+1]).double()), dim=1)
+            suffix = shifted.flip(1).cumsum(1).flip(1)
+            refs[3][:, chunk:stop] = k[:, chunk:stop].double() * suffix.exp()
+    cu = torch.tensor(offsets, device=device, dtype=torch.int64) if packed else None
+    values = recompute_w_u_fwd_gdn2(k, v, b, wg, A, q=q if with_q else None,
+                                    gk=prefix, g_raw=raw, cu_seqlens=cu)
+    for name, expected, actual in zip(('w', 'u', 'qg', 'kg'), refs, values):
+        if name == 'qg' and not with_q:
+            assert actual is None
+        else:
+            assert torch.isfinite(actual).all()
+            assert_close(name, expected.float(), actual.float(), 0.005)
+
+
 def _unwrap_autotuner(fn):
     while not hasattr(fn, 'configs'):
         fn = fn.fn
