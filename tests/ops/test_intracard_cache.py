@@ -16,7 +16,7 @@ from fla.ops.common import intracard_cp
 from fla.ops.common.intracard_cp import _intracard_cache
 from fla.ops.cp import context
 from fla.ops.kda import chunk_kda
-from fla.utils import assert_close, device, device_torch_lib
+from fla.utils import IS_TF32_SUPPORTED, assert_close, device
 
 
 @pytest.fixture(autouse=True)
@@ -49,7 +49,7 @@ def test_intracard_precision_requirement(entry, legacy_false, monkeypatch):
 
 
 @pytest.mark.skipif(os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") == "1", reason="backend dispatch disabled")
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.skipif(not IS_TF32_SUPPORTED, reason="requires NVIDIA Ampere or newer")
 def test_chunk_kda_intracard_cache_hit_same_cu_seqlens_object(monkeypatch):
     """Reuse the intracard precompute cache for repeated calls with the same cu_seqlens object."""
     # intracard CP is disabled by default.
@@ -141,7 +141,7 @@ def test_intracard_backend_enabled_when_env_var_is_one(monkeypatch):
 
 
 @pytest.mark.skipif(os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") == "1", reason="backend dispatch disabled")
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.skipif(not IS_TF32_SUPPORTED, reason="requires NVIDIA Ampere or newer")
 def test_chunk_gdn_intracard_gqa(monkeypatch):
     """E2E: chunk_gated_delta_rule intracard path produces correct results with GQA (Hq < H).
 
@@ -207,7 +207,7 @@ def test_chunk_gdn_intracard_gqa(monkeypatch):
         f"Final state mismatch: max diff={(ht_intra - ht_ref).abs().max().item()}"
 
 
-@pytest.mark.skipif(not device_torch_lib.is_available(), reason='requires an accelerator')
+@pytest.mark.skipif(not IS_TF32_SUPPORTED, reason='requires NVIDIA Ampere or newer')
 @pytest.mark.parametrize('vector_gate', [False, True], ids=['scalar-gate', 'vector-gate'])
 @pytest.mark.parametrize('state_v_first', [False, True])
 @pytest.mark.parametrize(('K', 'V'), [(192, 64), (256, 80)])
