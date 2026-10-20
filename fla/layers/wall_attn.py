@@ -18,7 +18,7 @@ import torch.utils.checkpoint
 from einops import rearrange
 from transformers.utils import logging
 
-from fla.layers.utils import pad_input, unpad_input
+from fla.layers.utils import get_layer_cache, pad_input, unpad_input
 from fla.modules import GroupNorm
 from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.cumsum import chunk_global_cumsum
@@ -174,7 +174,10 @@ class WallAttention(nn.Module):
                 o = self._decode_incremental(q, k, v, g, gs, past_key_values, q_len)
             else:
                 # chunk anchors track the rolling window, so rebuild from the raw cache
-                prior = self._get_cached_state(past_key_values)
+                last_state = get_layer_cache(module=self, past_key_values=past_key_values)
+                attn_state = last_state['attn_state'] if last_state is not None else None
+                if attn_state is not None and attn_state[0] is None:
+                    attn_state = None
                 cached = (k, v, g, gs) if self.use_scalar_gate else (k, v, g)
                 state = past_key_values.update(
                     attn_state=cached,
@@ -182,10 +185,10 @@ class WallAttention(nn.Module):
                     offset=q_len,
                     cache_kwargs=dict(window_size=self.window_size),
                 )['attn_state']
-                if prior is not None:
+                if attn_state is not None:
                     if q_len > 1:
                         # earlier queries need keys that the updated cache has already evicted
-                        state = tuple(torch.cat((x, y), dim=1) for x, y in zip(prior, cached))
+                        state = tuple(torch.cat((x, y), dim=1) for x, y in zip(attn_state, cached))
                     k, v, g, *rest = state
                     gs = rest[0] if self.use_scalar_gate else None
                     o = self._decode_rebuild(q=q, k=k, v=v, g=g, gs=gs)
@@ -211,16 +214,6 @@ class WallAttention(nn.Module):
         o = self.o_proj(o)
         return o, None, past_key_values
 
-    def _get_cached_state(self, past_key_values):
-        """Return this layer's cached ``attn_state`` tuple, or ``None`` if empty (prefill)."""
-        try:
-            attn_state = past_key_values[self.layer_idx]['attn_state']
-        except (KeyError, IndexError, TypeError):
-            return None
-        if attn_state is None or attn_state[0] is None:
-            return None
-        return attn_state
-
     def _decode_incremental(self, q, k, v, g, gs, past_key_values, q_len):
         r"""Non-windowed decode against a *pre-rescaled* KV cache.
 
@@ -233,21 +226,24 @@ class WallAttention(nn.Module):
         scale = self.head_dim ** -0.5
         C = WALL_DECODE_CHUNK
         G = self.num_kv_groups
-        prior = self._get_cached_state(past_key_values)
+        last_state = get_layer_cache(module=self, past_key_values=past_key_values)
+        attn_state = last_state['attn_state'] if last_state is not None else None
+        if attn_state is not None and attn_state[0] is None:
+            attn_state = None
 
         # Running prefix P (base-2) for the new tokens, offset by the cached tail.
-        p_offset = prior[2][:, -1:].float() if prior is not None else 0.0
+        p_offset = attn_state[2][:, -1:].float() if attn_state is not None else 0.0
         p_new = p_offset + torch.cumsum(g.float(), dim=1) * RCP_LN2  # [B, q_len, HQ, K]
 
-        if prior is None:
+        if attn_state is None:
             # Prefill: lean on the tested builder for the full pass.
             k_tilde_new, _ = build_wall_kv_cache(k, p_new, C, out_dtype=torch.bfloat16)
         else:
-            prior_len = prior[2].shape[1]
-            k_tilde_new = self._rescale_new_keys(k, p_new, prior[2], prior_len, C, G)
+            prior_len = attn_state[2].shape[1]
+            k_tilde_new = self._rescale_new_keys(k, p_new, attn_state[2], prior_len, C, G)
 
         if self.use_scalar_gate:
-            gs_offset = prior[3][:, -1:].float() if prior is not None else 0.0
+            gs_offset = attn_state[3][:, -1:].float() if attn_state is not None else 0.0
             gs_new = gs_offset + torch.cumsum(gs.float(), dim=1) * RCP_LN2  # [B, q_len, HQ]
             cached = (k_tilde_new, v, p_new, gs_new)
         else:
@@ -265,7 +261,7 @@ class WallAttention(nn.Module):
             k_tilde, v_all, p_all = state
             gs_all = None
 
-        if prior is None:
+        if attn_state is None:
             # Prefill output via the optimized full-attention kernel on raw inputs.
             return parallel_wall_attn(q, k, v, g, g_scalar=gs, scale=scale)
 

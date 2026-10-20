@@ -15,6 +15,7 @@ from fla.utils import assert_close, device
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("window_size", [None, 16], ids=["full", "windowed"])
+@pytest.mark.parametrize("cache_initialized", [False, True])
 @pytest.mark.parametrize(
     ("T", "q_len", "use_scalar_gate"),
     [
@@ -29,7 +30,14 @@ from fla.utils import assert_close, device
         ]
     ],
 )
-def test_cache_continuation(T: int, q_len: int, use_scalar_gate: bool, window_size: int | None, dtype: torch.dtype):
+def test_cache_continuation(
+    T: int,
+    q_len: int,
+    use_scalar_gate: bool,
+    cache_initialized: bool,
+    window_size: int | None,
+    dtype: torch.dtype,
+):
     torch.manual_seed(42)
     B, H, D = 2, 2, 64
     layer = WallAttention(
@@ -47,6 +55,8 @@ def test_cache_continuation(T: int, q_len: int, use_scalar_gate: bool, window_si
         expected, _, _ = layer(hidden_states=hidden_states)
         expected_next, _, _ = layer(hidden_states=torch.cat([hidden_states, next_hidden_states], dim=1))
         cache = Cache()
+        if cache_initialized:
+            cache.update(layer_idx=0, offset=0)
         actual, _, returned_cache = layer(hidden_states=hidden_states, past_key_values=cache, use_cache=True)
         actual_next, _, _ = layer(hidden_states=next_hidden_states, past_key_values=cache, use_cache=True)
 
