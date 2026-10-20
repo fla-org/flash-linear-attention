@@ -121,7 +121,7 @@ def chunk_oja_fwd_kernel_h_blockdim64(
             p_h0_4 = h0 + o_k[:, None] * V + (192 + o_v1)[None, :]
             b_h4 += tl.load(p_h0_4, mask=(o_k[:, None] < K) & ((192 + o_v1)[None, :] < V), other=0.0).to(tl.float32)
 
-    # disable pipelining for Blackwell's chained fp32 tensor-memory dots
+    # disable pipelining for Blackwell's chained tensor-memory dots
     for i_t in tl.range(NT, num_stages=1 if DISABLE_PIPELINING else None):
         o_t = i_t.to(tl.int64) * BT + tl.arange(0, BT)
         m_t = o_t < T
@@ -256,7 +256,7 @@ def chunk_oja_fwd_h(
         K=K,
         V=V,
         BT=BT,
-        DISABLE_PIPELINING=IS_NVIDIA_BLACKWELL and v.dtype == torch.float32,
+        DISABLE_PIPELINING=IS_NVIDIA_BLACKWELL and (v.dtype == torch.float32 or V > 64),
     )
     return h, k_new, final_state
 
