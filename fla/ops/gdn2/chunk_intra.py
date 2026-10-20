@@ -25,7 +25,7 @@ import triton
 import triton.language as tl
 
 from fla.backends import dispatch
-from fla.ops.gdn2.chunk_intra_diagonal import gdn2_bwd_diagonal
+from fla.ops.gdn2.chunk_intra_diagonal import gdn2_bwd_diagonal_precompute
 from fla.ops.gdn2.chunk_intra_token_parallel import chunk_gdn2_fwd_intra_token_parallel
 from fla.ops.gdn2.gate import gdn2_local_log_cumsum, gdn2_local_log_scans
 from fla.ops.gdn2.wy_fast import recompute_w_u_fwd_gdn2
@@ -479,6 +479,9 @@ def chunk_gdn2_bwd_kernel_intra(
     g_raw,
     g_local_prefix,
     g_local_suffix,
+    dq_diagonal,
+    dk_diagonal,
+    dkt_diagonal,
     b,
     dAqk,
     dAkk,
@@ -533,6 +536,9 @@ def chunk_gdn2_bwd_kernel_intra(
         if PRECOMPUTED_SCANS:
             g_local_prefix += (bos * H + i_h) * K
             g_local_suffix += (bos * H + i_h) * K
+            dq_diagonal += (bos * H + i_h) * K
+            dk_diagonal += (bos * H + i_h) * K
+            dkt_diagonal += (bos * H + i_h) * K
     b += (bos * H + i_h) * K
 
     dAqk += (bos * H + i_h) * BT
@@ -633,11 +639,9 @@ def chunk_gdn2_bwd_kernel_intra(
         b_dq2 += tl.dot(b_dAqk_diag_qk, b_k_exp_diag_qk) * exp_b_g_diag_qk
         b_dk2 += tl.dot(b_dAkk_diag_qk, b_k_exp_diag_qk) * exp_b_g_diag_qk
     elif PRECOMPUTED_SCANS:
-        b_dq_diag, b_dk_diag, b_dkt_diag = gdn2_bwd_diagonal(
-            q, k, b, g_raw, dAqk, dAkk, i_ti, T, o_k, H, K, BT, BC,
-        )
-        b_dq2 += b_dq_diag
-        b_dk2 += b_dk_diag
+        o_diag = o_c[:, None] * H * K + o_k[None, :]
+        b_dq2 += tl.load(dq_diagonal + o_diag, mask=m_kc, other=0)
+        b_dk2 += tl.load(dk_diagonal + o_diag, mask=m_kc, other=0)
     else:
         b_interval = tl.zeros([BC, BK], tl.float32)
         for j in range(min(BC, T - i_ti) - 1, -1, -1):
@@ -749,7 +753,8 @@ def chunk_gdn2_bwd_kernel_intra(
         b_dkt += tl.dot(b_dAqk_diag_kk, b_q_exp) * exp_neg_b_g_diag_kk
         b_dkt += tl.dot(b_dAkk_diag_kk, b_kb_exp) * exp_neg_b_g_diag_kk
     elif PRECOMPUTED_SCANS:
-        b_dkt += b_dkt_diag
+        o_diag = o_c[:, None] * H * K + o_k[None, :]
+        b_dkt += tl.load(dkt_diagonal + o_diag, mask=m_kc, other=0)
     else:
         b_interval = tl.zeros([BC, BK], tl.float32)
         for j in range(0, min(BC, T - i_ti)):
@@ -929,8 +934,22 @@ def chunk_gdn2_bwd_intra(
     NK = triton.cdiv(K, BK)
 
     g_local_prefix, g_local_suffix = None, None
+    dq_diagonal, dk_diagonal, dkt_diagonal = None, None, None
     if IS_NPU and not safe_gate:
         g_local_prefix, g_local_suffix = gdn2_local_log_scans(g_raw, cu_seqlens, chunk_indices, BT, BC, BK)
+        dq_diagonal, dk_diagonal, dkt_diagonal = gdn2_bwd_diagonal_precompute(
+            q=q,
+            k=k,
+            b=b,
+            g_raw=g_raw,
+            dAqk=dAqk,
+            dAkk=dAkk,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+            chunk_size=BT,
+            subchunk_size=BC,
+            key_tile_size=BK,
+        )
 
     dq2 = torch.empty_like(q)
     dk2 = torch.empty_like(k)
@@ -945,6 +964,9 @@ def chunk_gdn2_bwd_intra(
         g_raw=g_raw,
         g_local_prefix=g_local_prefix,
         g_local_suffix=g_local_suffix,
+        dq_diagonal=dq_diagonal,
+        dk_diagonal=dk_diagonal,
+        dkt_diagonal=dkt_diagonal,
         b=b,
         dAqk=dAqk,
         dAkk=dAkk,
