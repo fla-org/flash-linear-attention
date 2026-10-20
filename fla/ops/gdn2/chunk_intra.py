@@ -25,6 +25,7 @@ import triton
 import triton.language as tl
 
 from fla.backends import dispatch
+from fla.ops.gdn2.chunk_intra_diagonal import gdn2_bwd_diagonal
 from fla.ops.gdn2.chunk_intra_token_parallel import chunk_gdn2_fwd_intra_token_parallel
 from fla.ops.gdn2.gate import gdn2_local_log_cumsum, gdn2_local_log_scans
 from fla.ops.gdn2.wy_fast import recompute_w_u_fwd_gdn2
@@ -631,6 +632,12 @@ def chunk_gdn2_bwd_kernel_intra(
         b_k_exp_diag_qk = b_k * exp_neg_b_g_diag_qk
         b_dq2 += tl.dot(b_dAqk_diag_qk, b_k_exp_diag_qk) * exp_b_g_diag_qk
         b_dk2 += tl.dot(b_dAkk_diag_qk, b_k_exp_diag_qk) * exp_b_g_diag_qk
+    elif PRECOMPUTED_SCANS:
+        b_dq_diag, b_dk_diag, b_dkt_diag = gdn2_bwd_diagonal(
+            q, k, b, g_raw, dAqk, dAkk, i_ti, T, o_k, H, K, BT, BC,
+        )
+        b_dq2 += b_dq_diag
+        b_dk2 += b_dk_diag
     else:
         b_interval = tl.zeros([BC, BK], tl.float32)
         for j in range(min(BC, T - i_ti) - 1, -1, -1):
@@ -741,6 +748,8 @@ def chunk_gdn2_bwd_kernel_intra(
 
         b_dkt += tl.dot(b_dAqk_diag_kk, b_q_exp) * exp_neg_b_g_diag_kk
         b_dkt += tl.dot(b_dAkk_diag_kk, b_kb_exp) * exp_neg_b_g_diag_kk
+    elif PRECOMPUTED_SCANS:
+        b_dkt += b_dkt_diag
     else:
         b_interval = tl.zeros([BC, BK], tl.float32)
         for j in range(0, min(BC, T - i_ti)):
