@@ -72,6 +72,11 @@ def pre_process_fwd_kernel_merged(
     IS_VARLEN: tl.constexpr,
     MULTI_SEQS: tl.constexpr,
 ):
+    """Summarize a local sequence as h_out = M @ h_in + h_local.
+
+    Each value head writes [h_local | M] with shape [K, V+K].
+    The two column groups compute the zero-initial-state response and the incoming-state transform independently.
+    """
     i_col, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     if MULTI_SEQS:
         i_n = tl.program_id(2).to(tl.int64)
@@ -87,6 +92,7 @@ def pre_process_fwd_kernel_merged(
         bos, eos = (i_n * T).to(tl.int64), (i_n * T + T).to(tl.int64)
         NT = tl.cdiv(T, BT)
 
+    # h_local and M have separately padded column grids, including when V is not a block multiple
     is_h_part = i_col * BLOCK_SIZE < V
     # for DPLR, w/bg use H heads; GDN/KDA w uses HV heads
     k += ((bos * H + i_h // (HV // H)) * K).to(tl.int64)
@@ -110,6 +116,7 @@ def pre_process_fwd_kernel_merged(
         stride_v = HV * V
         i_v = i_col
 
+        # starting from zero isolates the local contribution from the unknown incoming rank state
         b_h1 = tl.zeros([64, BLOCK_SIZE], dtype=tl.float32)
         if K > 64:
             b_h2 = tl.zeros([64, BLOCK_SIZE], dtype=tl.float32)
@@ -150,10 +157,12 @@ def pre_process_fwd_kernel_merged(
 
             p_v = v + o_t[:, None] * stride_v + o_vb[None, :]
             if USE_BG:
+                # for DPLR, v2 = w @ h + u; the update also needs the original v
                 b_v_orig = tl.load(p_v, mask=m_t[:, None] & m_vb[None, :], other=0.0)
                 p_u = u + o_t[:, None] * stride_v + o_vb[None, :]
                 b_v = b_v_decay + tl.load(p_u, mask=m_t[:, None] & m_vb[None, :], other=0.0)
             else:
+                # the delta-rule residual subtracts the prediction from the current state
                 b_v = tl.load(p_v, mask=m_t[:, None] & m_vb[None, :], other=0.0) - b_v_decay
 
             last_idx = min((i_t + 1) * BT, T) - 1
@@ -172,6 +181,7 @@ def pre_process_fwd_kernel_merged(
                 if K > 192:
                     b_h4 *= b_g_last
 
+            # vector gates decay each key row independently; scalar gates share one decay across rows
             if USE_GK:
                 o_k1 = tl.arange(0, 64)
                 p_gk_last = gk + last_idx * HV * K
@@ -194,6 +204,7 @@ def pre_process_fwd_kernel_merged(
             p_k = k + o_k1[:, None] + o_t[None, :] * stride_k
             b_k = tl.load(p_k, mask=m_k1[:, None] & m_t[None, :], other=0.0)
             if USE_BG:
+                # for DPLR, h += k.T @ v + bg.T @ v2; GDN/KDA below use h += k.T @ v_new
                 p_bg = bg + o_k1[:, None] + o_t[None, :] * stride_k
                 b_bg = tl.load(p_bg, mask=m_k1[:, None] & m_t[None, :], other=0.0)
                 b_h1 += tl.dot(b_k, b_v_orig.to(b_k.dtype)) + tl.dot(b_bg, b_v)
@@ -243,11 +254,13 @@ def pre_process_fwd_kernel_merged(
             p_h4 = hm + o_k4[:, None] * stride_hm_kv + o_vb[None, :]
             tl.store(p_h4, b_h4.to(p_h4.dtype.element_ty), mask=m_k4[:, None] & m_vb[None, :])
     else:
+        # M starts after the padded h_local grid, not after an unpadded V / BLOCK_SIZE
         i_k_col = i_col - tl.cdiv(V, BLOCK_SIZE)
 
         row = tl.arange(0, BK1)
         col = tl.arange(0, BLOCK_SIZE) + i_k_col * BLOCK_SIZE
 
+        # identity represents an unchanged incoming state before any local chunk is applied
         b_m = tl.where(row[:, None] == col[None, :], 1.0, 0.0)
 
         for i_t in range(NT):
@@ -278,12 +291,14 @@ def pre_process_fwd_kernel_merged(
             else:
                 b_diag = tl.where(row[:, None] == row[None, :], 1.0, 0.0)
 
+            # each chunk left-composes its transform: diag + bg.T @ w for DPLR, diag - k.T @ w for GDN/KDA
             if USE_BG:
                 b_kw = tl.dot(tl.trans(b_k.to(b_w.dtype)), b_w)
                 b_m_i = b_diag + b_kw
             else:
                 b_kw = tl.dot(tl.trans(b_k.to(b_w.dtype)), b_w)
                 b_m_i = b_diag - b_kw
+            # keep the composed transform in fp32; repeated bf16 casts accumulate error along the chain
             b_m = tl.dot(b_m_i.to(tl.float32), b_m.to(tl.float32), input_precision="tf32x3")
 
         stride_hm_kv = K + V
@@ -303,6 +318,11 @@ def chunk_cp_merge_state(
     BV: tl.constexpr,
     STATE_V_FIRST: tl.constexpr,
 ):
+    """Apply one [h_local | M] summary to a boundary state.
+
+    K-first states use M @ h + h_local; V-first states use h @ M.T + h_local.T.
+    The summary itself always keeps the [K, V+K] layout.
+    """
     m_k, m_v = o_k < K, o_v < V
     p_he = hm + o_k[:, None] * (V + K) + o_v[None, :]
     b_he = tl.load(p_he, mask=m_k[:, None] & m_v[None, :], other=0.).to(tl.float32)
@@ -317,6 +337,7 @@ def chunk_cp_merge_state(
         # tile wide reductions to keep TF32x3 operands within shared memory
         b_acc = tl.full(b_h.shape, 0, tl.float32)
         for i in tl.static_range(BK // 128):
+            # pair M's reduction columns with the same key rows of the incoming state
             o_r = i * 128 + tl.arange(0, 128)
             p_m = hm + V + o_k[:, None] * (V + K) + o_r[None, :]
             b_m = tl.load(p_m, mask=m_k[:, None] & (o_r < K)[None, :], other=0.).to(tl.float32)
@@ -372,6 +393,8 @@ def merge_fwd_bwd_kernel(
     """Merge affine summaries across ranks or intra-card subsequences.
 
     Summaries use [K, V+K]; STATE_V_FIRST selects [V, K] input and output states.
+    Cross-rank mode writes one boundary state per head after composing the contributing ranks.
+    Intra-card mode starts from each original sequence's h0 and writes the state entering each later subsequence.
     """
     i_v = tl.program_id(0).to(tl.int64)
     o_k = tl.arange(0, BK)
@@ -385,6 +408,7 @@ def merge_fwd_bwd_kernel(
         if i_seq >= NUM_SEQ_ENTRIES:
             return
 
+        # seq_offsets indexes summaries; init_offsets indexes outputs with the first subsequence omitted
         ss_start = tl.load(seq_offsets + i_seq).to(tl.int32)
         ss_end = tl.load(seq_offsets + i_seq + 1).to(tl.int32)
         init_base = tl.load(init_offsets + i_seq).to(tl.int32)
@@ -423,6 +447,7 @@ def merge_fwd_bwd_kernel(
                 STATE_V_FIRST=STATE_V_FIRST,
             )
 
+            # this prefix's final state initializes the next subsequence; the last prefix has no successor
             if idx < num_subseqs - 1:
                 init_idx = init_base + idx
                 stride_init = HV * K * V
@@ -438,6 +463,7 @@ def merge_fwd_bwd_kernel(
         if HAS_H_SEQ_IDX:
             h += tl.load(h_seq_idx).to(tl.int64) * HV * K * V
         if NUM_RANKS_ON_DEVICE:
+            # graph replay must read refreshed rank counts instead of capture-time Python scalars
             num_ranks = tl.load(pre_or_post_num_ranks).to(tl.int32)
         else:
             num_ranks = pre_or_post_num_ranks.to(tl.int32)
@@ -448,6 +474,7 @@ def merge_fwd_bwd_kernel(
             b_h = tl.zeros([BV, BK], dtype=tl.float32)
         else:
             b_h = tl.zeros([BK, BV], dtype=tl.float32)
+        # forward composes preceding ranks left to right; backward composes following ranks right to left
         for idx in range(num_ranks):
             if FORWARD:
                 cur_rank = rank - num_ranks + idx
@@ -513,7 +540,11 @@ def pre_process_bwd_kernel_merged(
     USE_BG: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    """Compute backward affine summaries for context-parallel state propagation."""
+    """Summarize local backward propagation as dh_in = dM @ dh_out + dh_local.
+
+    Each value head writes [dh_local | dM] with shape [K, V+K].
+    Both the zero-terminal-gradient response and its boundary-gradient transform scan chunks in reverse order.
+    """
     i_col, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_n = 0
     if IS_VARLEN:
@@ -547,6 +578,7 @@ def pre_process_bwd_kernel_merged(
         stride_v = HV * V
         i_v = i_col
 
+        # zero terminal gradient isolates contributions from this rank's do and dv
         b_dh1 = tl.zeros([64, BLOCK_SIZE], dtype=tl.float32)
         if K > 64:
             b_dh2 = tl.zeros([64, BLOCK_SIZE], dtype=tl.float32)
@@ -582,6 +614,7 @@ def pre_process_bwd_kernel_merged(
             p_do = do + o_t[:, None] * stride_v + o_vb[None, :]
             b_do = tl.load(p_do, mask=m_t[:, None] & m_vb[None, :], other=0.0)
 
+            # the boundary-state gradient contributes k @ dh to this chunk's value gradient
             p_k = k + o_t[:, None] * stride_qk + o_k1[None, :]
             b_k = tl.load(p_k, mask=m_t[:, None] & m_k1[None, :], other=0.0)
             if USE_GK:
@@ -624,7 +657,7 @@ def pre_process_bwd_kernel_merged(
             if USE_GK:
                 b_dh1 *= exp2(b_gk_last1[:, None])
             if USE_BG:
-                # scale is already applied upstream for DPLR
+                # the DPLR recurrence adds w.T @ dv; the delta-rule recurrence below subtracts it
                 b_dh1 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) + tl.dot(b_w, b_dv.to(b_w.dtype))
             else:
                 b_dh1 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) * scale - tl.dot(b_w, b_dv.to(b_w.dtype))
@@ -719,6 +752,7 @@ def pre_process_bwd_kernel_merged(
             else:
                 b_diag = tl.where(row[:, None] == row[None, :], 1.0, 0.0)
 
+            # backward transposes each chunk's state transform; DPLR passes its gated bg through k
             b_kw = tl.dot(tl.trans(b_w), b_k.to(b_w.dtype))
             if USE_BG:
                 b_m_i = b_diag + b_kw

@@ -7,8 +7,10 @@
 
 """Compare distributed KDA outputs and gradients with the recurrent reference.
 
-Both paths consume per-token log gates; chunk_kda computes its own chunk-local cumulative sums.
+In fused-gate mode, the reference applies the same gate transform and Q/K normalization before its recurrent scan.
+In pre-gated mode, both paths consume per-token log gates; chunk_kda computes its own chunk-local cumulative sums.
 Each reference sequence starts with zero state, including sequences spanning rank boundaries.
+Rank-local outputs and input gradients are gathered back into global token order before comparison.
 """
 
 import contextlib

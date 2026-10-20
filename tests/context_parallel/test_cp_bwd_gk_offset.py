@@ -5,7 +5,11 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""Verify that CP backward summaries use each head's own vector gate."""
+"""Verify that CP backward summaries use each head's own vector gate.
+
+Both runs leave head 0's gate at zero; the second run strongly decays every other head.
+Head 0 must remain unchanged while the other heads change, exposing a missing per-head gate offset.
+"""
 
 import logging
 import os
