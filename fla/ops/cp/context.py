@@ -132,7 +132,7 @@ def _interval_cp_meta(
     chain_pos: int,
     part_len: int,
 ) -> tuple[torch.Tensor, int, int, bool, int, bool]:
-    """Local cu_seqlens and chain metadata for one token interval [start, end).
+    """Compute local sequence boundaries and chain metadata for [start, end).
 
     `chain_pos` is the interval's position in the global processing chain and `part_len` is its token length.
     They reduce to (rank, rank length) for the contiguous layout and to (slot, total/(2W)) for zigzag.
@@ -191,12 +191,10 @@ def get_cp_cu_seqlens(
     num_parts = world_size if layout == 'contiguous' else 2 * world_size
     divisor = "`world_size`" if layout == 'contiguous' else "`2 * world_size`"
     if total_tokens < num_parts:
-        raise ValueError(
-            f"`total_tokens` ({total_tokens}) must be at least {divisor} ({num_parts}) for context parallelism."
-        )
+        raise ValueError(f"`total_tokens` ({total_tokens}) must be at least {divisor} ({num_parts}) for context parallelism.")
     if total_tokens % num_parts != 0:
         raise ValueError(
-            f"`total_tokens` ({total_tokens}) must be divisible by {divisor} ({num_parts}) for context parallelism."
+            f"`total_tokens` ({total_tokens}) must be divisible by {divisor} ({num_parts}) for context parallelism.",
         )
     part_len = total_tokens // num_parts
 
@@ -262,7 +260,7 @@ def build_cp_context(
     layout: str = 'contiguous',
     **kwargs,
 ) -> FLACPContext:
-    """Build a CP context for the given cu_seqlens and process group.
+    """Build sequence partitions and rank metadata for a CP process group.
 
     Args:
         cu_seqlens (torch.Tensor):

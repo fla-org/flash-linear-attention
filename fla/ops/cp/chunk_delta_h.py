@@ -75,7 +75,7 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
                     chunk_size=chunk_size,
                 )
         ag_hm, _ = all_gather_into_tensor(hm, group=context.group)
-        # chain order: front parts of ranks 0..W-1, then back parts of ranks W-1..0
+        # chain order: rank fronts in ascending order, then rank backs in descending order
         slots = torch.cat([ag_hm[:, 0], ag_hm[:, 1].flip(0)])
         world_size = dist.get_world_size(group=context.group)
 
@@ -119,7 +119,7 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
             chunk_size=chunk_size,
         )
     ag_hm, _ = all_gather_into_tensor(hm, group=context.group)
-    # a zero num_ranks merge just re-stores the zeros initial_state[0] already holds
+    # a zero-rank merge would only re-store the existing zeros
     if use_graph or not context.is_first_rank:
         chunk_cp_merge(
             h=initial_state[0],
@@ -192,7 +192,7 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
                     chunk_size=chunk_size,
                 )
         ag_dhm, _ = all_gather_into_tensor(dhm, group=context.group)
-        # chain order: front parts of ranks 0..W-1, then back parts of ranks W-1..0
+        # chain order: rank fronts in ascending order, then rank backs in descending order
         slots = torch.cat([ag_dhm[:, 0], ag_dhm[:, 1].flip(0)])
         world_size = dist.get_world_size(group=context.group)
 
@@ -235,7 +235,7 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
 
     ag_dhm, _ = all_gather_into_tensor(dhm, group=context.group)
 
-    # a zero num_ranks merge just re-stores the zeros dht already holds
+    # a zero-rank merge would only re-store the existing zeros
     if use_graph or not context.is_last_rank:
         h_seq_idx = None
         h = dht[-1]
@@ -264,9 +264,9 @@ def compress_h0(h0: torch.Tensor | None, context: FLACPContext) -> torch.Tensor 
         return h0
     if context.layout == 'zigzag':
         if len(context.cu_seqlens) == 3:
-            # one segment per part; both rows may carry a cross-rank state
+            # both parts can carry a cross-rank state
             return h0
-        # only each part's first segment can carry a cross-rank state
+        # only the first segment of each part can carry a cross-rank state
         return h0[[0, context.front_num_seqs]]
     # clone so autograd does not retain storage for all local sequences
     return h0[:1].clone()

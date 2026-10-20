@@ -38,13 +38,16 @@ def test_intracard_precision_requirement(entry, legacy_false, monkeypatch):
         if entry == 'fwd':
             intracard_cp.intracard_fwd_h(k=x, w=x, u=x, **kwargs)
         elif entry == 'pre_scan':
-            intracard_cp.intracard_pre_scan(
-                kg=x, w=x, u=x, g=None, gk=None, cu_seqlens_subseq_split=None, S_split=0, **kwargs,
-            )
+            intracard_cp.intracard_pre_scan(kg=x, w=x, u=x, g=None, gk=None, cu_seqlens_subseq_split=None, S_split=0, **kwargs)
         else:
             intracard_cp.intracard_merge(
-                hm=x, split_info=None, num_non_first=0, merge_seq_offsets=[], merge_init_offsets=[],
-                device=x.device, **kwargs,
+                hm=x,
+                split_info=None,
+                num_non_first=0,
+                merge_seq_offsets=[],
+                merge_init_offsets=[],
+                device=x.device,
+                **kwargs,
             )
 
 
@@ -58,7 +61,7 @@ def test_chunk_kda_intracard_cache_hit_same_cu_seqlens_object(monkeypatch):
     dtype = torch.bfloat16
 
     # with chunk_size=64 and MIN_SUBSEQ_CHUNKS=128, subseq_len is at least 8192.
-    # T=32768 bypasses early_return (2 * subseq_len) and exercises splitting (3 * subseq_len).
+    # this T=32768 case bypasses early_return (2 * subseq_len) and exercises splitting (3 * subseq_len).
     B, T, H, D = 1, 32768, 1, 32
 
     q = torch.randn(B, T, H, D, device=device, dtype=dtype)

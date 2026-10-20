@@ -49,11 +49,7 @@ def test_get_cp_cu_seqlens_empty_partition(layout: str):
 
 
 def test_get_cp_cu_seqlens_preserves_divisible_varlen_partition():
-    context = get_cp_cu_seqlens(
-        torch.tensor([0, 5, 12], dtype=torch.long),
-        world_size=3,
-        rank=1,
-    )
+    context = get_cp_cu_seqlens(torch.tensor([0, 5, 12], dtype=torch.long), world_size=3, rank=1)
 
     assert context.cu_seqlens_cpu.tolist() == [0, 1, 4]
     assert context.pre_num_conv_tokens == 4
