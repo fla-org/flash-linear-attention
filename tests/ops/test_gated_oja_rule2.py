@@ -152,7 +152,6 @@ def test_fused_recurrent_backward_unsupported():
             (1, 1024, 2, 128, 256, 0.1, torch.bfloat16, True, True, True, True),
             (4, 1024, 4, 128, 64, 1, torch.float16, True, True, True, True),
             (1, 65, 2, 256, 64, 0.1, torch.bfloat16, True, True, True, True),
-            (1, 17, 1, 512, 64, 0.1, torch.float16, True, True, True, True),
             (1, 65, 2, 60, 96, 0.1, torch.float16, False, False, False, False),
             (1, 17, 2, 64, 64, None, torch.float32, True, False, False, True),
             (1, 17, 2, 64, 64, None, torch.float32, False, True, True, False),
@@ -362,11 +361,15 @@ def test_chunk_varlen(
         assert_close(name, ref_grad, tri_grad, ratio)
 
 
-def test_chunk_matches_fused_recurrent():
-    q, k, v, gv, b, c, h0 = _rand_inputs(2, 100, 2, 64, 64, torch.float16)
+@pytest.mark.parametrize('K', [64, 512], ids=['K64', 'K512'])
+def test_chunk_matches_fused_recurrent(K: int):
+    q, k, v, gv, b, c, h0 = _rand_inputs(2, 100, 2, K, 64, torch.float16)
     kwargs = dict(initial_state=h0, output_final_state=True, use_q_l2norm=True, use_k_l2norm=True)
     o0, ht0 = chunk_gated_oja_rule2(q=q, k=k, v=v, gv=gv, b=b, c=c, **kwargs)
     o1, ht1 = fused_recurrent_gated_oja_rule2(q=q, k=k, v=v, gv=gv, b=b, c=c, **kwargs)
+    ref, ref_ht = _ref(q, k, v, gv, b, c, h0)
+    assert_close('o', ref, o0, 0.005)
+    assert_close('ht', ref_ht, ht0, 0.005)
     assert_close('o', o0, o1, 0.005)
     assert_close('ht', ht0, ht1, 0.005)
 

@@ -13,7 +13,7 @@ Here \(v_t\) is the slot code. The decay acts before the erase and write updates
 
 ## Interfaces
 
-`chunk_gated_oja_rule2` supports training with gradients for queries, keys, slot codes, decay, both gates, and the initial state. Queries and keys have shape `[B, T, H, K]`; slot codes, decay and erase gates have shape `[B, T, H, M]`; write gates have shape `[B, T, H, K]`. The slot dimension is at most 256. The chunk size can be 16, 32 or 64.
+`chunk_gated_oja_rule2` supports training with gradients for queries, keys, slot codes, decay, both gates, and the initial state. Queries and keys have shape `[B, T, H, K]`; slot codes, decay and erase gates have shape `[B, T, H, M]`; write gates have shape `[B, T, H, K]`. The slot dimension is at most 256. Backward supports key dimensions up to 256; larger keys can be used for forward-only inference. The chunk size can be 16, 32 or 64.
 
 `fused_recurrent_gated_oja_rule2` supports forward-only inference with at most 128 slots. Use the chunk entry point when gradients are needed or the slot dimension exceeds this limit.
 
