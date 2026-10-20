@@ -34,19 +34,12 @@ def test_get_cp_cu_seqlens_rejects_empty_rank_partition():
     world_size = 3
     cu_seqlens = torch.tensor([0, total_tokens], dtype=torch.long)
 
-    with pytest.raises(
-        ValueError,
-        match=rf"`total_tokens` \({total_tokens}\) must be at least `world_size` \({world_size}\)",
-    ):
+    with pytest.raises(ValueError, match=rf"`total_tokens` \({total_tokens}\) must be at least `world_size` \({world_size}\)"):
         get_cp_cu_seqlens(cu_seqlens, world_size=world_size, rank=0)
 
 
 def test_get_cp_cu_seqlens_preserves_divisible_varlen_partition():
-    context = get_cp_cu_seqlens(
-        torch.tensor([0, 5, 12], dtype=torch.long),
-        world_size=3,
-        rank=1,
-    )
+    context = get_cp_cu_seqlens(torch.tensor([0, 5, 12], dtype=torch.long), world_size=3, rank=1)
 
     assert context.cu_seqlens_cpu.tolist() == [0, 1, 4]
     assert context.pre_num_conv_tokens == 4

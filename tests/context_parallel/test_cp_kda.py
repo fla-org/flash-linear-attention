@@ -5,59 +5,10 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""
-Test for Context Parallel (CP) KDA (Kimi Delta Attention)
+"""Compare distributed KDA outputs and gradients with the recurrent reference.
 
-Test Architecture Notes:
-========================
-This test uses naive_recurrent_kda as the reference baseline because:
-- It represents the exact mathematical definition without chunking approximations
-- It expects per-token g (non-cumsum'd) and pre-normalized q/k
-
-When use_gate_in_kernel=True, the reference path must manually:
-1. Apply L2 normalization to q/k before passing to naive_recurrent_kda
-2. Apply the gate formula (naive_kda_lowerbound_gate or naive_kda_gate)
-3. The output g from these naive gate functions is per-token (non-cumsum'd),
-   which is exactly what naive_recurrent_kda expects
-
-When use_gate_in_kernel=False:
-- For chunk_kda: input g must be pre-processed (gate applied + cumsum'd)
-- For naive_recurrent_kda reference: g should be gate-applied but NOT cumsum'd
-
-Variable-Length Sequence Handling:
-==================================
-- All sequences are flattened to batch size 1 with cu_seqlens markers
-- Each sequence is processed independently with h0=0 (no cross-sequence state)
-- The reference computation loops over sequences and concatenates results
-- CP path uses the same cu_seqlens for correct chunk boundary handling
-
-Context Parallel Principle for KDA:
-===================================
-
-KDA has a recurrent state dependency across tokens. The hidden state h evolves
-as tokens are processed, creating dependencies that span the sequence.
-
-With Context Parallel:
-1. Sequence Partitioning: The input sequence is split across ranks along the sequence dimension.
-   - Rank 0: tokens [0, T/N)
-   - Rank 1: tokens [T/N, 2T/N)
-   - ...
-
-2. Forward Pass:
-   - Each rank computes its local chunk
-   - Non-first ranks need the final state from previous rank as initial_state
-   - Communication: All-reduce style state passing between ranks
-
-3. Backward Pass:
-   - Gradients flow back through the recurrent state
-   - Communication: Gradient synchronization across ranks
-
-Test Scenarios:
-===============
-1. CP2 with sequence cut in the middle
-2. CP2 with sequence boundary aligned
-3. CP4 with complex sequence distribution
-4. CP4 with single long sequence
+Both paths consume per-token log gates; chunk_kda computes its own chunk-local cumulative sums.
+Each reference sequence starts with zero state, including sequences spanning rank boundaries.
 """
 
 import contextlib
@@ -80,16 +31,15 @@ from fla.ops.kda.naive import naive_recurrent_kda
 from fla.utils import assert_close, device_platform, device_torch_lib
 from fla.utils import device as fla_device
 
-# Configure logging to see assert_close messages
+# configure logging to see assert_close messages
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 
 
 def init_distributed(rank, world_size):
     """Initialize distributed environment for a single process."""
-    # Configure logging in worker process
     logging.basicConfig(level=logging.INFO, format='%(message)s')
 
-    # NPU has no nccl. The CUDA port stays clear of the conv CP test.
+    # the NPU backend requires HCCL; a separate CUDA port avoids collisions with convolution CP tests
     if device_platform == 'npu':
         backend, port = 'hccl', '29617'
     else:
@@ -127,10 +77,7 @@ def run_cp_kda_test_worker(
     use_tf32x3_affine_chain: bool | None = None,
     layout: str = 'contiguous',
 ):
-    """
-    Worker function for CP KDA test.
-    Runs in a spawned process with the given rank.
-    """
+    """Run one rank of the distributed KDA reference comparison."""
     try:
         init_distributed(rank, world_size)
         device = torch.device(f'{fla_device}:{rank}')
@@ -148,7 +95,6 @@ def run_cp_kda_test_worker(
             print(f"Sequence lengths: {lengths}")
             print(f"{'='*60}")
 
-        # Step 1: Prepare Global Data (all generated on rank 0, broadcast to other ranks)
         B = 1
         q_global = torch.empty(B, T, H, D, device=device, dtype=dtype)
         k_global = torch.empty(B, T, H, D, device=device, dtype=dtype)
@@ -161,9 +107,7 @@ def run_cp_kda_test_worker(
 
         if rank == 0:
             torch.manual_seed(42)
-            # Generate inputs
-            # q gets a +1.0 offset to keep L2 normalization observable; extreme k
-            # magnitudes inflate chunk-vs-naive bf16 error past 8e-3 even without CP.
+            # q's offset keeps L2 normalization observable; large k values exceed the bf16 reference error budget
             q_global.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype) + 1.0)
             k_global.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype))
             v_global.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype))
@@ -175,7 +119,6 @@ def run_cp_kda_test_worker(
             beta_global.copy_(torch.randn(B, T, H, device=device, dtype=dtype).sigmoid())
             do_global.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype))
 
-        # Broadcast to ensure all ranks have same data
         dist.broadcast(q_global, src=0)
         dist.broadcast(k_global, src=0)
         dist.broadcast(v_global, src=0)
@@ -183,23 +126,17 @@ def run_cp_kda_test_worker(
         dist.broadcast(beta_global, src=0)
         dist.broadcast(do_global, src=0)
 
-        # Prepare and broadcast A_log and dt_bias for gate computation
-        # Always generate these for reference, even when use_gate_in_kernel=False
+        # always generate these for reference, even when use_gate_in_kernel=False
         import triton
         num_even_heads = triton.next_power_of_2(H)
         projection_size = H * D
 
-        # All ranks create tensors with same shape first
         A_log_global = torch.empty(num_even_heads, dtype=torch.float32, device=device)
         dt_bias_global = torch.empty(projection_size, dtype=torch.float32, device=device)
 
-        # Rank 0 fills in the actual data
         if rank == 0:
             import math
-            # Per-head variation in A_log is CRITICAL for catching backward kernel
-            # bugs like missing `i_h * K` in gk pointer offsets.  When A_log=0 for
-            # all heads, -exp(A_log)=-1 uniformly → same gate scaling → reading the
-            # wrong head's gk gives nearly identical values → bug is invisible.
+            # distinct per-head gates expose missing head offsets in backward loads
             if safe_gate and lower_bound is not None:
                 A_log_global[:H] = torch.log(torch.linspace(1, 8, H, dtype=torch.float32, device=device))
             else:
@@ -209,16 +146,12 @@ def run_cp_kda_test_worker(
                            (math.log(0.1) - math.log(0.001)) + math.log(0.001)).clamp_(min=1e-4)
             dt_bias_global.copy_(dt + torch.log(-torch.expm1(-dt)))
 
-        # Broadcast from rank 0 to all ranks
         dist.broadcast(A_log_global, src=0)
         dist.broadcast(dt_bias_global, src=0)
 
-        # Prepare cu_seqlens
         cu_seqlens_list = [0] + torch.cumsum(torch.tensor(lengths), 0).tolist()
         cu_seqlens_global = torch.tensor(cu_seqlens_list, device=device, dtype=torch.long)
 
-        # Step 2: Reference Run using naive_recurrent_kda (ground truth)
-        # Each sequence is computed independently with h0=0 for simplicity
         ref_out = None
         ref_dq, ref_dk, ref_dv, ref_dg, ref_db = None, None, None, None, None
 
@@ -258,9 +191,7 @@ def run_cp_kda_test_worker(
                         )
                     g_for_grad = g_seq_input
                 else:
-                    # Pre-gated: g_global is already log-space decay (logsigmoid[, clamp]).
-                    # Match tests/ops/test_kda.py — naive takes per-token decay; chunk_kda
-                    # only runs chunk_local_cumsum. Do not apply naive_kda_gate here.
+                    # both paths consume per-token log decay; only chunk_kda applies a chunk-local cumulative sum
                     g_processed = g_seq.to(torch.float).requires_grad_(True)
                     g_for_grad = g_processed
 
@@ -305,12 +236,11 @@ def run_cp_kda_test_worker(
             ref_dg = torch.cat(all_dg, dim=1)
             ref_db = torch.cat(all_db, dim=1)
 
-        # Step 3: Context Parallel Run
         dist.barrier()
 
-        # Build CP context
         context = build_cp_context(
-            cu_seqlens_global, group=dist.group.WORLD,
+            cu_seqlens_global,
+            group=dist.group.WORLD,
             **({'use_tf32x3_affine_chain': use_tf32x3_affine_chain} if use_tf32x3_affine_chain is not None else {}),
             layout=layout,
         )
@@ -332,7 +262,6 @@ def run_cp_kda_test_worker(
             def slice_local(t):
                 return t[:, start_idx:end_idx]
 
-        # Get local slices
         q_local = slice_local(q_global).clone().detach().requires_grad_(True)
         k_local = slice_local(k_global).clone().detach().requires_grad_(True)
         v_local = slice_local(v_global).clone().detach().requires_grad_(True)
@@ -344,7 +273,6 @@ def run_cp_kda_test_worker(
               f"pre_num_ranks: {context.pre_num_ranks}")
         dist.barrier()
 
-        # CP Forward
         o_local, _ = chunk_kda(
             q=q_local,
             k=k_local,
@@ -362,10 +290,8 @@ def run_cp_kda_test_worker(
             state_v_first=state_v_first,
         )
 
-        # CP Backward
         o_local.backward(do_local)
 
-        # Step 4: Result Aggregation and Verification
         def gather_global(local):
             gathered = [torch.zeros_like(local) for _ in range(world_size)]
             dist.all_gather(gathered, local)
@@ -386,9 +312,7 @@ def run_cp_kda_test_worker(
         if rank == 0:
             print(f"\n[{test_name}] Verifying results...")
 
-            # Tolerance: ratio=8e-3 for all tensors; dg/db warning-only: dg's
-            # single-GPU chunk-vs-naive error is already ~0.0085; db sees cross-rank
-            # reduction (~1.5-2.4%).
+            # dg/db remain warning-only: reference errors reach ~0.0085 for dg and 1.5–2.4% for db
             tensors_to_verify = [
                 ("Output", ref_out, o_cp_global),
                 ("dq", ref_dq, dq_cp_global),
@@ -448,11 +372,6 @@ def run_cp_test_with_spawn(
     )
 
 
-# ============================================================
-# Test Scenario Definitions
-# All tests use: use_gate_in_kernel=True, safe_gate=True, lower_bound=-5.0
-# ============================================================
-
 GATE_KWARGS = dict(use_gate_in_kernel=True, safe_gate=True, lower_bound=-5.0)
 
 
@@ -464,7 +383,9 @@ def test_cp2_sequence_cut():
     run_cp_test_with_spawn(
         world_size=2,
         test_name="CP2_SequenceCut",
-        T=10240, H=12, D=128,
+        T=10240,
+        H=12,
+        D=128,
         lengths=[3000, 4000, 3240],
         dtype=torch.bfloat16,
         **GATE_KWARGS,
@@ -479,7 +400,9 @@ def test_cp2_boundary_aligned():
     run_cp_test_with_spawn(
         world_size=2,
         test_name="CP2_BoundaryAligned",
-        T=10240, H=12, D=128,
+        T=10240,
+        H=12,
+        D=128,
         lengths=[5120, 5120],
         dtype=torch.bfloat16,
         **GATE_KWARGS,
@@ -494,7 +417,9 @@ def test_cp4_complex():
     run_cp_test_with_spawn(
         world_size=4,
         test_name="CP4_Complex",
-        T=10240, H=12, D=128,
+        T=10240,
+        H=12,
+        D=128,
         lengths=[7000, 3240],
         dtype=torch.bfloat16,
         **GATE_KWARGS,
@@ -509,7 +434,9 @@ def test_cp4_single_sequence():
     run_cp_test_with_spawn(
         world_size=4,
         test_name="CP4_SingleSequence",
-        T=10240, H=12, D=128,
+        T=10240,
+        H=12,
+        D=128,
         lengths=[10240],
         dtype=torch.bfloat16,
         **GATE_KWARGS,
@@ -524,7 +451,9 @@ def test_cp8_single_sequence():
     run_cp_test_with_spawn(
         world_size=8,
         test_name="CP8_SingleSequence",
-        T=65536, H=12, D=128,
+        T=65536,
+        H=12,
+        D=128,
         lengths=[65536],
         dtype=torch.bfloat16,
         **GATE_KWARGS,
@@ -539,7 +468,9 @@ def test_cp2_many_short_sequences():
     run_cp_test_with_spawn(
         world_size=2,
         test_name="CP2_ManyShortSequences",
-        T=10240, H=12, D=128,
+        T=10240,
+        H=12,
+        D=128,
         lengths=[1000, 1500, 2000, 2500, 1240, 1000, 1000],
         dtype=torch.bfloat16,
         **GATE_KWARGS,
@@ -554,7 +485,9 @@ def test_cp2_disable_recompute():
     run_cp_test_with_spawn(
         world_size=2,
         test_name="CP2_DisableRecompute",
-        T=10240, H=12, D=128,
+        T=10240,
+        H=12,
+        D=128,
         lengths=[3000, 4000, 3240],
         dtype=torch.bfloat16,
         disable_recompute=True,
@@ -570,7 +503,9 @@ def test_cp2_pregated_nonsafe():
     run_cp_test_with_spawn(
         world_size=2,
         test_name="CP2_PreGated_NonSafe",
-        T=10240, H=12, D=128,
+        T=10240,
+        H=12,
+        D=128,
         lengths=[3000, 4000, 3240],
         dtype=torch.bfloat16,
         use_gate_in_kernel=False,
@@ -586,7 +521,9 @@ def test_cp2_pregated_safe():
     run_cp_test_with_spawn(
         world_size=2,
         test_name="CP2_PreGated_Safe",
-        T=10240, H=12, D=128,
+        T=10240,
+        H=12,
+        D=128,
         lengths=[3000, 4000, 3240],
         dtype=torch.bfloat16,
         use_gate_in_kernel=False,
@@ -594,10 +531,6 @@ def test_cp2_pregated_safe():
         lower_bound=-5.0,
     )
 
-
-# ============================================================
-# Transpose State Layout Tests
-# ============================================================
 
 def test_cp2_state_v_first():
     """CP2: state_v_first=True with sequence cut."""
@@ -607,7 +540,9 @@ def test_cp2_state_v_first():
     run_cp_test_with_spawn(
         world_size=2,
         test_name="CP2_TransposeState",
-        T=10240, H=12, D=128,
+        T=10240,
+        H=12,
+        D=128,
         lengths=[3000, 4000, 3240],
         dtype=torch.bfloat16,
         state_v_first=True,
@@ -623,17 +558,15 @@ def test_cp4_state_v_first():
     run_cp_test_with_spawn(
         world_size=4,
         test_name="CP4_TransposeState",
-        T=10240, H=12, D=128,
+        T=10240,
+        H=12,
+        D=128,
         lengths=[10240],
         dtype=torch.bfloat16,
         state_v_first=True,
         **GATE_KWARGS,
     )
 
-
-# ============================================================
-# tf32x3 Affine Chain Tests
-# ============================================================
 
 def test_cp2_sequence_cut_tf32x3():
     """CP2: sequences cut across rank boundary, tf32x3 affine chain in CP."""
@@ -643,7 +576,9 @@ def test_cp2_sequence_cut_tf32x3():
     run_cp_test_with_spawn(
         world_size=2,
         test_name="CP2_SequenceCut_TF32X3",
-        T=10240, H=12, D=128,
+        T=10240,
+        H=12,
+        D=128,
         lengths=[3000, 4000, 3240],
         dtype=torch.bfloat16,
         use_tf32x3_affine_chain=True,
@@ -659,7 +594,9 @@ def test_cp4_single_sequence_tf32x3():
     run_cp_test_with_spawn(
         world_size=4,
         test_name="CP4_SingleSequence_TF32X3",
-        T=10240, H=12, D=128,
+        T=10240,
+        H=12,
+        D=128,
         lengths=[10240],
         dtype=torch.bfloat16,
         use_tf32x3_affine_chain=True,
@@ -675,7 +612,9 @@ def test_cp2_state_v_first_tf32x3():
     run_cp_test_with_spawn(
         world_size=2,
         test_name="CP2_TransposeState_TF32X3",
-        T=10240, H=12, D=128,
+        T=10240,
+        H=12,
+        D=128,
         lengths=[3000, 4000, 3240],
         dtype=torch.bfloat16,
         state_v_first=True,
@@ -683,10 +622,6 @@ def test_cp2_state_v_first_tf32x3():
         **GATE_KWARGS,
     )
 
-
-# ============================================================
-# Zigzag Layout Tests
-# ============================================================
 
 def test_cp2_zigzag_single_sequence():
     """CP2 zigzag: single long sequence, state chain snakes through all 4 parts."""
@@ -696,7 +631,9 @@ def test_cp2_zigzag_single_sequence():
     run_cp_test_with_spawn(
         world_size=2,
         test_name="CP2_Zigzag_SingleSequence",
-        T=10240, H=12, D=128,
+        T=10240,
+        H=12,
+        D=128,
         lengths=[10240],
         dtype=torch.bfloat16,
         layout='zigzag',
@@ -712,7 +649,9 @@ def test_cp2_zigzag_sequence_cut():
     run_cp_test_with_spawn(
         world_size=2,
         test_name="CP2_Zigzag_SequenceCut",
-        T=10240, H=12, D=128,
+        T=10240,
+        H=12,
+        D=128,
         lengths=[3000, 4000, 3240],
         dtype=torch.bfloat16,
         layout='zigzag',
@@ -728,7 +667,9 @@ def test_cp4_zigzag_complex():
     run_cp_test_with_spawn(
         world_size=4,
         test_name="CP4_Zigzag_Complex",
-        T=10240, H=12, D=128,
+        T=10240,
+        H=12,
+        D=128,
         lengths=[1500, 2600, 3000, 3140],
         dtype=torch.bfloat16,
         layout='zigzag',
@@ -744,17 +685,15 @@ def test_cp4_zigzag_boundary_aligned():
     run_cp_test_with_spawn(
         world_size=4,
         test_name="CP4_Zigzag_BoundaryAligned",
-        T=10240, H=12, D=128,
+        T=10240,
+        H=12,
+        D=128,
         lengths=[2560, 2560, 2560, 2560],
         dtype=torch.bfloat16,
         layout='zigzag',
         **GATE_KWARGS,
     )
 
-
-# ============================================================
-# Main Entry Point (for torchrun)
-# ============================================================
 
 def setup_distributed_torchrun():
     """Initialize distributed environment for torchrun."""
