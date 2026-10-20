@@ -11,7 +11,7 @@ import pytest
 import torch
 
 from fla.layers.lightnet import LightNetAttention
-from fla.models.utils import Cache
+from fla.models.cache_utils import Cache
 from fla.utils import assert_close, device
 
 

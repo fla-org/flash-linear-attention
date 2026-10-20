@@ -27,7 +27,7 @@ from fla.modules import RMSNorm, RotaryEmbedding
 from fla.ops.utils.index import prepare_lens_from_mask
 
 if TYPE_CHECKING:
-    from fla.models.utils import Cache
+    from fla.models.cache_utils import Cache
 
 try:
     from flash_attn import flash_attn_func, flash_attn_varlen_func

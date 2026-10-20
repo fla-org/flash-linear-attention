@@ -45,9 +45,9 @@ class TritonAscendGDN2Backend(BaseBackend):
         chunk_size: int = 64,
         chunk_indices: torch.LongTensor | None = None,
         safe_gate: bool = False,
+        lower_bound: float | None = None,
         disable_recompute: bool = False,
     ) -> tuple[bool, str | None]:
-        del scale, safe_gate, disable_recompute
         if chunk_size != 64:
             return False, f"GDN-2 Ascend intra requires chunk_size=64, got {chunk_size}"
         K = int(k.shape[-1])
