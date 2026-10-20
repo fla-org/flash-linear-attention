@@ -116,7 +116,7 @@ def test_gsa2_read_only_call_keeps_cache(T: int):
 
     state = cache[0]
     assert cache.get_seq_length() == seen
-    for expected, actual in zip(states, (*state['recurrent_state'], *state['conv_state'])):
-        assert torch.equal(expected, actual)
+    for saved, current in zip(states, (*state['recurrent_state'], *state['conv_state'])):
+        assert torch.equal(saved, current)
     expected = layer(x, past_key_values=cache, use_cache=True)[0]
     assert_close('o', expected, actual, 1e-6)
