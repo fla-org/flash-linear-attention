@@ -16,6 +16,7 @@ from fla.ops.cp.chunk_bwd import chunk_cp_bwd_dh
 from fla.ops.cp.chunk_fwd import chunk_cp_fwd_h
 from fla.ops.cp.chunk_merge import chunk_cp_merge
 from fla.ops.cp.comm import all_gather_into_tensor
+from fla.ops.cp.context import _check_cp_device
 
 if TYPE_CHECKING:
     from fla.ops.cp.context import FLACPContext
@@ -39,6 +40,7 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
     if context is None or context.group is None:
         return initial_state
     assert initial_state is None, "When enable CP, the provided initial_state must be None."
+    _check_cp_device(k.device)
     rank = dist.get_rank(group=context.group)
 
     B, _, _, K = k.shape
@@ -153,6 +155,7 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
     if context is None or context.group is None:
         return dht, initial_state
     assert dht is None, "When enable CP, the provided dht must be None."
+    _check_cp_device(k.device)
     rank = dist.get_rank(group=context.group)
 
     B, _, _, K = q.shape

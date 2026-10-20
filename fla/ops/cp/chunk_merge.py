@@ -9,7 +9,8 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.utils import IS_TF32_SUPPORTED, autotune_cache_kwargs
+from fla.ops.cp.context import _check_cp_device
+from fla.utils import autotune_cache_kwargs
 
 
 @triton.jit
@@ -23,7 +24,6 @@ def chunk_cp_merge_state(
     BK: tl.constexpr,
     BV: tl.constexpr,
     STATE_V_FIRST: tl.constexpr,
-    AFFINE_CHAIN_PRECISION: tl.constexpr,
 ):
     m_k, m_v = o_k < K, o_v < V
     p_he = hm + o_k[:, None] * (V + K) + o_v[None, :]
@@ -32,9 +32,9 @@ def chunk_cp_merge_state(
         p_m = hm + V + o_k[:, None] * (V + K) + o_k[None, :]
         b_m = tl.load(p_m, mask=m_k[:, None] & m_k[None, :], other=0.).to(tl.float32)
         if STATE_V_FIRST:
-            b_h = tl.dot(b_h.to(tl.float32), tl.trans(b_m), input_precision=AFFINE_CHAIN_PRECISION)
+            b_h = tl.dot(b_h.to(tl.float32), tl.trans(b_m), input_precision="tf32x3")
         else:
-            b_h = tl.dot(b_m, b_h.to(tl.float32), input_precision=AFFINE_CHAIN_PRECISION)
+            b_h = tl.dot(b_m, b_h.to(tl.float32), input_precision="tf32x3")
     else:
         # a full 256-by-256 TF32x3 operand exceeds shared memory on supported GPUs
         b_acc = tl.full(b_h.shape, 0, tl.float32)
@@ -44,10 +44,10 @@ def chunk_cp_merge_state(
             b_m = tl.load(p_m, mask=m_k[:, None] & (o_r < K)[None, :], other=0.).to(tl.float32)
             if STATE_V_FIRST:
                 b_hi = tl.gather(b_h, tl.broadcast_to(o_r[None, :], (BV, 128)), axis=1)
-                b_acc = tl.dot(b_hi.to(tl.float32), tl.trans(b_m), b_acc, input_precision=AFFINE_CHAIN_PRECISION)
+                b_acc = tl.dot(b_hi.to(tl.float32), tl.trans(b_m), b_acc, input_precision="tf32x3")
             else:
                 b_hi = tl.gather(b_h, tl.broadcast_to(o_r[:, None], (128, BV)), axis=0)
-                b_acc = tl.dot(b_m, b_hi.to(tl.float32), b_acc, input_precision=AFFINE_CHAIN_PRECISION)
+                b_acc = tl.dot(b_m, b_hi.to(tl.float32), b_acc, input_precision="tf32x3")
         b_h = b_acc
     return b_h + (tl.trans(b_he) if STATE_V_FIRST else b_he)
 
@@ -94,7 +94,6 @@ def chunk_cp_fwd_bwd_kernel_merge(
     NUM_SEQ_ENTRIES,
     HAS_H0: tl.constexpr,
     HAS_H_SEQ_IDX: tl.constexpr,
-    AFFINE_CHAIN_PRECISION: tl.constexpr,
     STATE_V_FIRST: tl.constexpr = False,
     NUM_RANKS_ON_DEVICE: tl.constexpr = False,
 ):
@@ -151,7 +150,6 @@ def chunk_cp_fwd_bwd_kernel_merge(
                 BK=BK,
                 BV=BV,
                 STATE_V_FIRST=STATE_V_FIRST,
-                AFFINE_CHAIN_PRECISION=AFFINE_CHAIN_PRECISION,
             )
 
             if idx < num_subseqs - 1:
@@ -194,7 +192,6 @@ def chunk_cp_fwd_bwd_kernel_merge(
                 BK=BK,
                 BV=BV,
                 STATE_V_FIRST=STATE_V_FIRST,
-                AFFINE_CHAIN_PRECISION=AFFINE_CHAIN_PRECISION,
             )
 
         if STATE_V_FIRST:
@@ -217,6 +214,7 @@ def chunk_cp_merge(
     use_graph: bool = False,
 ) -> None:
     """Merge gathered affine summaries into a rank's boundary state."""
+    _check_cp_device(h.device)
     _, HV, K, VK = ag_hm.shape
     V = VK - K
     BK = triton.next_power_of_2(K)
@@ -242,6 +240,5 @@ def chunk_cp_merge(
         INTRACARD_MODE=False,
         NUM_SEQ_ENTRIES=0,
         STATE_V_FIRST=state_v_first,
-        AFFINE_CHAIN_PRECISION='tf32x3' if IS_TF32_SUPPORTED else 'ieee',
         NUM_RANKS_ON_DEVICE=use_graph,
     )

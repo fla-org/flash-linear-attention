@@ -10,8 +10,9 @@ import triton
 import triton.language as tl
 
 from fla.ops.common.chunk_delta_h_state import chunk_delta_rule_bwd_dh_state
+from fla.ops.cp.context import _check_cp_device
 from fla.ops.utils.op import exp2
-from fla.utils import IS_TF32_SUPPORTED, autotune_cache_kwargs, check_shared_mem
+from fla.utils import autotune_cache_kwargs, check_shared_mem
 
 
 @triton.heuristics({
@@ -52,7 +53,6 @@ def chunk_cp_bwd_kernel_dh(
     USE_GK: tl.constexpr,
     USE_BG: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    AFFINE_CHAIN_PRECISION: tl.constexpr,
 ):
     i_col, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_n = 0
@@ -189,7 +189,7 @@ def chunk_cp_bwd_kernel_dh(
                 # GDN/KDA: dM = (diag - w^T @ k) @ dM
                 b_m_i = b_diag - b_kw
             # keep the matrix chain in fp32 to avoid repeated bf16 rounding
-            b_m = tl.dot(b_m_i.to(tl.float32), b_m.to(tl.float32), input_precision=AFFINE_CHAIN_PRECISION)
+            b_m = tl.dot(b_m_i.to(tl.float32), b_m.to(tl.float32), input_precision="tf32x3")
 
         p_m = dhm + V + row[:, None] * (V + K) + col[None, :]
         tl.store(p_m, b_m.to(p_m.dtype.element_ty), mask=(row < K)[:, None] & (col < K)[None, :])
@@ -210,6 +210,7 @@ def chunk_cp_bwd_dh(
     chunk_size: int = 64,
 ) -> None:
     """Write the backward affine summary of one local sequence into dhm."""
+    _check_cp_device(k.device)
     _, T, H, K = q.shape
     HV, V = do.shape[2:]
     BK = triton.next_power_of_2(K)
@@ -235,5 +236,4 @@ def chunk_cp_bwd_dh(
         BLOCK_SIZE=BLOCK_SIZE,
         BK1=BK,
         USE_BG=bg is not None,
-        AFFINE_CHAIN_PRECISION='tf32x3' if IS_TF32_SUPPORTED else 'ieee',
     )

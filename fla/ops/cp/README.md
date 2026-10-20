@@ -2,6 +2,8 @@
 
 Context Parallel of Linear Attention (alias KCP in Moonshot) is context parallelism designed for delta-rule recurrent models such as GDN (Gated Delta Rule), GDP (Gated DeltaProduct), and KDA (Kimi Delta Attention). It enables efficient distributed training by partitioning the sequence dimension across ranks, with each rank processing a local token chunk and CP automatically synchronizing cross-rank states.
 
+Delta-rule CP affine chains, including intra-card CP, require NVIDIA Ampere or newer (compute capability >= 8.0). Their FP32 matrix products always use TF32x3; unsupported devices raise an error before CP kernel execution. Input tensor dtypes are unchanged.
+
 ## Quick Start
 
 ### Build CP Context

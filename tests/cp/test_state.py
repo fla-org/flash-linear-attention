@@ -48,8 +48,7 @@ def test_compress_expand_h0(layout, cu_seqlens, front_num_seqs, state_indices, s
 
 @pytest.mark.parametrize('constructor', ['context', 'get', 'build'])
 @pytest.mark.parametrize('layout', ['contiguous', 'zigzag'])
-@pytest.mark.parametrize('supported', [False, True], ids=['ieee-hardware', 'tf32-hardware'])
-def test_affine_chain_precision(monkeypatch, constructor, layout, supported):
+def test_affine_chain_precision(monkeypatch, constructor, layout):
     """All context constructors route forward, backward, and merge through the same precision policy."""
     group = object()
     monkeypatch.setattr(context.dist, 'get_rank', Mock(return_value=1))
@@ -62,13 +61,14 @@ def test_affine_chain_precision(monkeypatch, constructor, layout, supported):
         if constructor == 'context':
             cp_context = context.FLACPContext(**vars(cp_context))
 
+    monkeypatch.setattr(chunk_delta_h, '_check_cp_device', Mock())
     launches = []
     for module, name in (
         (chunk_fwd, 'chunk_cp_fwd_kernel_h'),
         (chunk_bwd, 'chunk_cp_bwd_kernel_dh'),
         (chunk_merge, 'chunk_cp_fwd_bwd_kernel_merge'),
     ):
-        monkeypatch.setattr(module, 'IS_TF32_SUPPORTED', supported)
+        monkeypatch.setattr(module, '_check_cp_device', Mock())
         kernel = MagicMock()
         monkeypatch.setattr(module, name, kernel)
         launches.append(kernel.__getitem__.return_value)
@@ -96,12 +96,11 @@ def test_affine_chain_precision(monkeypatch, constructor, layout, supported):
         cu_seqlens=cp_context.cu_seqlens,
         context=cp_context,
     )
-    expected = 'tf32x3' if supported else 'ieee'
     num_parts = 2 if layout == 'zigzag' else 1
     assert fwd.call_count == bwd.call_count == num_parts
     assert merge.call_count == 2 * num_parts
     for call in fwd.call_args_list + bwd.call_args_list + merge.call_args_list:
-        assert call.kwargs['AFFINE_CHAIN_PRECISION'] == expected
+        assert 'AFFINE_CHAIN_PRECISION' not in call.kwargs
 
 
 @pytest.mark.skipif(not device_torch_lib.is_available(), reason='requires an accelerator')
@@ -168,9 +167,8 @@ def test_intracard_pre_scan_merge(H: int, vector_gate: bool, state_v_first: bool
     assert_close('h', ref_h[0, [2, 4]], states, 0.006)
 
 
-@pytest.mark.parametrize('supported', [False, True], ids=['ieee-hardware', 'tf32-hardware'])
-def test_intracard_affine_chain_precision(monkeypatch, supported):
-    monkeypatch.setattr(intracard_cp, 'IS_TF32_SUPPORTED', supported)
+def test_intracard_affine_chain_precision(monkeypatch):
+    monkeypatch.setattr(intracard_cp, '_check_cp_device', Mock())
     fwd, merge = MagicMock(), MagicMock()
     monkeypatch.setattr(intracard_cp, 'chunk_cp_fwd_kernel_h', fwd)
     monkeypatch.setattr(intracard_cp, 'chunk_cp_fwd_bwd_kernel_merge', merge)
@@ -196,7 +194,7 @@ def test_intracard_affine_chain_precision(monkeypatch, supported):
     for kernel in (fwd, merge):
         launch = kernel.__getitem__.return_value
         launch.assert_called_once()
-        assert launch.call_args.kwargs['AFFINE_CHAIN_PRECISION'] == ('tf32x3' if supported else 'ieee')
+        assert 'AFFINE_CHAIN_PRECISION' not in launch.call_args.kwargs
 
 
 @pytest.mark.skipif(not device_torch_lib.is_available(), reason='requires an accelerator')

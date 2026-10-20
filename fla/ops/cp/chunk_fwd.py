@@ -9,8 +9,9 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.cp.context import _check_cp_device
 from fla.ops.utils.op import exp2
-from fla.utils import IS_TF32_SUPPORTED, autotune_cache_kwargs
+from fla.utils import autotune_cache_kwargs
 
 
 @triton.heuristics({
@@ -52,7 +53,6 @@ def chunk_cp_fwd_kernel_h(
     USE_BG: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     MULTI_SEQS: tl.constexpr,
-    AFFINE_CHAIN_PRECISION: tl.constexpr,
 ):
     i_col, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     if MULTI_SEQS:
@@ -274,7 +274,7 @@ def chunk_cp_fwd_kernel_h(
                 # GDN/KDA: M = (diag - k^T @ w) @ M
                 b_kw = tl.dot(tl.trans(b_k.to(b_w.dtype)), b_w)
                 b_m_i = b_diag - b_kw
-            b_m = tl.dot(b_m_i.to(tl.float32), b_m.to(tl.float32), input_precision=AFFINE_CHAIN_PRECISION)
+            b_m = tl.dot(b_m_i.to(tl.float32), b_m.to(tl.float32), input_precision="tf32x3")
 
         stride_hm_kv = K + V
         p_m = hm + V + row[:, None] * stride_hm_kv + col[None, :]
@@ -294,6 +294,7 @@ def chunk_cp_fwd_h(
     chunk_size: int = 64,
 ) -> None:
     """Write the forward affine summary of one local sequence into hm."""
+    _check_cp_device(k.device)
     _, T, H, K = k.shape
     HV, V = u.shape[2:]
     BK = triton.next_power_of_2(K)
@@ -318,5 +319,4 @@ def chunk_cp_fwd_h(
         BLOCK_SIZE=BLOCK_SIZE,
         BK1=BK,
         MULTI_SEQS=False,
-        AFFINE_CHAIN_PRECISION='tf32x3' if IS_TF32_SUPPORTED else 'ieee',
     )
