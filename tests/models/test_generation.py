@@ -12,10 +12,19 @@ import torch
 from transformers.generation import GenerationMixin
 
 from fla import models
-from fla.models import GLAConfig, GLAForCausalLM
+from fla.models import (
+    BitNetConfig,
+    DeltaFormerConfig,
+    ForgettingTransformerConfig,
+    GLAConfig,
+    GLAForCausalLM,
+    PaTHAttentionConfig,
+)
 from fla.models.cache_utils import Cache
 from fla.models.generation_utils import FLAGenerationMixin, FLAUnsupportedCacheGenerationMixin
-from fla.utils import device_name
+from fla.utils import assert_close, device, device_name, find_spec_cached
+
+from .utils import create_model_and_config
 
 
 @pytest.fixture
@@ -202,3 +211,41 @@ def test_generate_inputs_embeds(config_class, use_cache, make_model):
         tokens = model.generate(input_ids=input_ids, **kwargs)
         embeddings = model.generate(inputs_embeds=model.get_input_embeddings()(input_ids), **kwargs)
     assert torch.equal(tokens[:, input_ids.shape[1]:], embeddings)
+
+
+@pytest.mark.skipif(device_name == 'cpu', reason='Fused loss and model kernels require an accelerator.')
+@pytest.mark.skipif(find_spec_cached('flash_attn') is None, reason='Fused-loss integration requires flash-attn.')
+@pytest.mark.parametrize(
+    "config_class",
+    [
+        pytest.param(config_class, id=config_class.__name__)
+        for config_class in [
+            BitNetConfig,
+            DeltaFormerConfig,
+            ForgettingTransformerConfig,
+            PaTHAttentionConfig,
+        ]
+    ],
+)
+def test_generate_fused_loss(config_class):
+    torch.manual_seed(42)
+    L, B, T, H, D = 2, 2, 64, 4, 64
+    model, config = create_model_and_config(config_class, L, H, D, dtype=torch.bfloat16)
+    model.eval()
+
+    input_ids = torch.randint(low=0, high=config.vocab_size, size=(B, T), device=device)
+    labels = input_ids.clone()
+
+    with torch.no_grad():
+        expected = model(input_ids, labels=labels, use_cache=False).loss
+
+        model.config.fuse_linear_cross_entropy = True
+        outputs = model(input_ids, labels=labels, use_cache=False)
+        assert outputs.logits is None
+        assert_close("loss", expected, outputs.loss, 0.02)
+
+        # the generate path passes no labels; logits must still be materialized
+        outputs = model(input_ids, use_cache=False)
+        assert outputs.logits is not None
+        output_ids = model.generate(input_ids[:, :T // 2], max_new_tokens=2, use_cache=config_class is not DeltaFormerConfig)
+    assert output_ids.shape[1] == T // 2 + 2
