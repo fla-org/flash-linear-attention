@@ -23,6 +23,14 @@ if TYPE_CHECKING:
     from fla.ops.cp.context import FLACPContext
 
 
+def _prune_cp_configs(configs, nargs, **kwargs):
+    args = {**nargs, **kwargs}
+    # wide TF32x3 states need single-stage candidates to fit shared memory
+    if args['K'] <= 128 and any(config.num_stages > 1 for config in configs):
+        return [config for config in configs if config.num_stages > 1]
+    return configs
+
+
 @triton.heuristics({
     'USE_G': lambda args: args['g'] is not None,
     'USE_GK': lambda args: args['gk'] is not None,
@@ -33,9 +41,10 @@ if TYPE_CHECKING:
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [2, 4]
-        for num_stages in [2, 3, 4]
+        for num_stages in [1, 2, 3, 4]
     ],
-    key=['H', 'HV', 'K', 'V', 'BT'],
+    key=['H', 'HV', 'K', 'V', 'BT', 'USE_G', 'USE_GK', 'USE_BG', 'IS_VARLEN', 'MULTI_SEQS'],
+    prune_configs_by={'early_config_prune': _prune_cp_configs},
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -316,6 +325,45 @@ def pre_process_fwd_kernel_merged(
         tl.store(p_m, b_m.to(p_m.dtype.element_ty), mask=(row < K)[:, None] & (col < K)[None, :])
 
 
+@triton.jit
+def chunk_cp_merge_state(
+    hm,
+    b_h,
+    o_k,
+    o_v,
+    K: tl.constexpr,
+    V: tl.constexpr,
+    BK: tl.constexpr,
+    BV: tl.constexpr,
+    STATE_V_FIRST: tl.constexpr,
+):
+    m_k, m_v = o_k < K, o_v < V
+    p_he = hm + o_k[:, None] * (V + K) + o_v[None, :]
+    b_he = tl.load(p_he, mask=m_k[:, None] & m_v[None, :], other=0.).to(tl.float32)
+    if BK <= 128:
+        p_m = hm + V + o_k[:, None] * (V + K) + o_k[None, :]
+        b_m = tl.load(p_m, mask=m_k[:, None] & m_k[None, :], other=0.).to(tl.float32)
+        if STATE_V_FIRST:
+            b_h = tl.dot(b_h.to(tl.float32), tl.trans(b_m), input_precision="tf32x3")
+        else:
+            b_h = tl.dot(b_m, b_h.to(tl.float32), input_precision="tf32x3")
+    else:
+        # a full 256-by-256 TF32x3 operand exceeds shared memory on supported GPUs
+        b_acc = tl.full(b_h.shape, 0, tl.float32)
+        for i in tl.static_range(BK // 128):
+            o_r = i * 128 + tl.arange(0, 128)
+            p_m = hm + V + o_k[:, None] * (V + K) + o_r[None, :]
+            b_m = tl.load(p_m, mask=m_k[:, None] & (o_r < K)[None, :], other=0.).to(tl.float32)
+            if STATE_V_FIRST:
+                b_hi = tl.gather(b_h, tl.broadcast_to(o_r[None, :], (BV, 128)), axis=1)
+                b_acc = tl.dot(b_hi.to(tl.float32), tl.trans(b_m), b_acc, input_precision="tf32x3")
+            else:
+                b_hi = tl.gather(b_h, tl.broadcast_to(o_r[:, None], (128, BV)), axis=0)
+                b_acc = tl.dot(b_m, b_hi.to(tl.float32), b_acc, input_precision="tf32x3")
+        b_h = b_acc
+    return b_h + (tl.trans(b_he) if STATE_V_FIRST else b_he)
+
+
 @triton.heuristics({
     'HAS_H0': lambda args: args['h0'] is not None,
     'HAS_H_SEQ_IDX': lambda args: args['h_seq_idx'] is not None,
@@ -324,10 +372,11 @@ def pre_process_fwd_kernel_merged(
     configs=[
         triton.Config({'BV': BV}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [2, 4]
-        for num_stages in [2, 3, 4]
+        for num_stages in [1, 2, 3, 4]
         for BV in [32, 64]
     ],
-    key=['HV', 'K', 'V'],
+    key=['HV', 'K', 'V', 'STATE_V_FIRST', 'INTRACARD_MODE'],
+    prune_configs_by={'early_config_prune': _prune_cp_configs},
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['pre_or_post_num_ranks', 'rank', 'NUM_SEQ_ENTRIES'])
@@ -410,17 +459,17 @@ def merge_fwd_bwd_kernel(
             i_ss = ss_start + idx
             base = i_ss * stride_hm_s + i_h * stride_hm_h
 
-            # he and m are always in [K, V+K] layout from pre_scan
-            p_he = ag_hm + base + o_k[:, None] * (V + K) + o_v[None, :]
-            b_he = tl.load(p_he, mask=m_k[:, None] & m_v[None, :], other=0.0).to(tl.float32)
-            p_m = ag_hm + base + V + o_k[:, None] * (V + K) + o_k[None, :]
-            b_m = tl.load(p_m, mask=m_k[:, None] & m_k[None, :], other=0.0).to(tl.float32)
-            if STATE_V_FIRST:
-                # h_T' = h_T @ M^T + he^T
-                b_h = tl.dot(b_h.to(tl.float32), tl.trans(b_m), input_precision="tf32x3") + tl.trans(b_he)
-            else:
-                b_h = tl.dot(b_m.to(tl.float32), b_h.to(tl.float32),
-                             input_precision="tf32x3") + b_he.to(tl.float32)
+            b_h = chunk_cp_merge_state(
+                hm=ag_hm + base,
+                b_h=b_h,
+                o_k=o_k,
+                o_v=o_v,
+                K=K,
+                V=V,
+                BK=BK,
+                BV=BV,
+                STATE_V_FIRST=STATE_V_FIRST,
+            )
 
             # Store for non-first subseqs
             if idx < num_subseqs - 1:
@@ -454,16 +503,17 @@ def merge_fwd_bwd_kernel(
                 cur_rank = rank - num_ranks + idx
             else:
                 cur_rank = rank + num_ranks - idx
-            p_ag_h = ag_hm + cur_rank * stride + o_k[:, None] * (K + V) + o_v[None, :]
-            b_ag_h = tl.load(p_ag_h, mask=m_k[:, None] & m_v[None, :], other=0.0)
-            p_ag_m = ag_hm + cur_rank * stride + V + o_k[:, None] * (K + V) + o_k[None, :]
-            b_ag_m = tl.load(p_ag_m, mask=m_k[:, None] & m_k[None, :], other=0.0)
-            if STATE_V_FIRST:
-                b_h = tl.dot(b_h.to(tl.float32), tl.trans(b_ag_m).to(tl.float32),
-                             input_precision="tf32x3") + tl.trans(b_ag_h).to(tl.float32)
-            else:
-                b_h = tl.dot(b_ag_m.to(tl.float32), b_h.to(tl.float32),
-                             input_precision="tf32x3") + b_ag_h.to(tl.float32)
+            b_h = chunk_cp_merge_state(
+                hm=ag_hm + cur_rank * stride,
+                b_h=b_h,
+                o_k=o_k,
+                o_v=o_v,
+                K=K,
+                V=V,
+                BK=BK,
+                BV=BV,
+                STATE_V_FIRST=STATE_V_FIRST,
+            )
         if STATE_V_FIRST:
             p_h = h + o_v[:, None] * K + o_k[None, :]
             m_h = m_v[:, None] & m_k[None, :]
@@ -482,9 +532,10 @@ def merge_fwd_bwd_kernel(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [2, 4]
-        for num_stages in ([4, 3, 2] if check_shared_mem('ampere') else [1])
+        for num_stages in ([4, 3, 2, 1] if check_shared_mem('ampere') else [1])
     ],
-    key=['H', 'HV', 'K', 'V', 'BT'],
+    key=['H', 'HV', 'K', 'V', 'BT', 'USE_G', 'USE_GK', 'USE_BG', 'IS_VARLEN'],
+    prune_configs_by={'early_config_prune': _prune_cp_configs},
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
