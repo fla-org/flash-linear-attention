@@ -340,6 +340,36 @@ register_op(OpConfig(
     category='elem_gate',
 ))
 
+
+def _gsa_slot_shape(B, T, H, D, M=None, **kw):
+    return (B, T, H, D if M is None else M)
+
+
+def _gsa_post_init(inputs, B, T, H, D, varlen=False, **kw):
+    g = (inputs['g'].detach() / 8).requires_grad_()
+    inputs['g'] = g
+    inputs['s'] = (1 - g.detach().exp()).requires_grad_()
+    if varlen:
+        inputs.update({name: x.detach().flatten(0, 1).unsqueeze(0).requires_grad_() for name, x in inputs.items()})
+        inputs['cu_seqlens'] = torch.arange(B + 1, device=g.device, dtype=torch.int32) * T
+
+
+for _gsa_mode, _gsa_lengths in [('chunk', [65, 1024, 8192]), ('fused_recurrent', [1, 16, 64])]:
+    register_op(OpConfig(
+        name=f'{_gsa_mode}_gsa',
+        import_path='fla.ops.gsa',
+        inputs={
+            'q': TensorSpec(shape_BTHD, transform=F.silu),
+            'k': TensorSpec(shape_BTHD, transform=F.silu),
+            'v': TensorSpec(shape_BTHD, transform=F.silu),
+            'g': TensorSpec(_gsa_slot_shape, transform=logsigmoid),
+        },
+        post_init=_gsa_post_init,
+        extra_kwargs={'scale': 1.},
+        category='slot_gate',
+        default_shapes={f'B2_T{T}_H8_D64_M64': {'B': 2, 'T': T, 'H': 8, 'D': 64, 'M': 64} for T in _gsa_lengths},
+    ))
+
 # --- +beta (beta=[B,T,H] with sigmoid) ---
 
 register_op(OpConfig(
