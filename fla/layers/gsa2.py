@@ -30,19 +30,8 @@ class GatedSlotAttention2(nn.Module):
     r"""
     Gated Slot Attention 2 (GSA2) layer.
 
-    GSA2 stacks two gated delta-rule memories. The first one is an Oja2 memory `S1` of shape `[K, M]` that reads the
-    context through `M` slots addressed by a learned slot code `w_t`, the second one is a GDN-2 memory `S2` of shape
-    `[D, V]` that is queried with the activated slot readout:
-
-        S1_t = S1_{t-1} Diag(exp(g1_t)) (I - (b1_t * w_t) w_t^T) + (c1_t * k_t) w_t^T
-        z_t  = act(S1_t^T q_t)
-        S2_t = (I - d_t (b2_t * d_t)^T) Diag(exp(g2_t)) S2_{t-1} + d_t (c2_t * v_t)^T
-        o_t  = S2_t^T z_t
-
-    where `*` is the elementwise product, `d_t` is the slot code seen from the second level, and `act` is `silu` or
-    `softmax` over the slot axis. `level2_axis` selects the key axis of `S2`: `head` projects the slot readout back to
-    `head_dim`, so `D = head_dim`, while `slot` keeps it as is, so `D = num_slots`. The two coincide when
-    `num_slots == head_dim`.
+    An Oja2 slot memory feeds a GDN-2 value memory. ``level2_axis`` selects whether the
+    slot readout is projected to ``head_dim`` or used directly as the second memory's query.
 
     Args:
         hidden_size (int, Optional):
@@ -181,6 +170,10 @@ class GatedSlotAttention2(nn.Module):
         self.use_gdn_qk_l2norm_in_kernel = use_gdn_qk_l2norm_in_kernel
         self.oja_lower_bound = oja_lower_bound
 
+        if min(hidden_size, head_dim, num_heads, self.num_v_heads, self.w_rank) <= 0:
+            raise ValueError("hidden_size, head_dim, head counts and w_rank must be positive.")
+        if self.level2_dim > 256 or self.head_v_dim <= 0:
+            raise ValueError("The second-level key dimension must be at most 256 and the value dimension must be positive.")
         if self.level2_axis not in ("head", "slot"):
             raise ValueError(f"level2_axis must be 'head' or 'slot', got {self.level2_axis!r}.")
         if self.oja_out_act not in ("silu", "swish", "softmax", "none", "identity"):
@@ -306,10 +299,10 @@ class GatedSlotAttention2(nn.Module):
             )
 
         batch_size, q_len, _ = hidden_states.shape
-        # the fused recurrent Oja2 kernel keeps the whole [K, M] state in registers, which only fits M <= 128
-        if torch.is_grad_enabled():
+        # recurrent Oja2 keeps the slot axis in registers and supports at most 128 slots
+        if torch.is_grad_enabled() or self.num_slots > 128:
             mode = "chunk"
-        elif q_len <= 64 and not self.training and self.num_slots <= 128:
+        elif q_len <= 64 and not self.training:
             mode = "fused_recurrent"
         else:
             mode = self.mode
@@ -387,37 +380,22 @@ class GatedSlotAttention2(nn.Module):
         if last_state is not None and last_state["recurrent_state"] is not None:
             state_oja, state_gdn = last_state["recurrent_state"]
 
-        if mode == "chunk":
-            o, state_oja = chunk_gated_oja_rule2(
-                q=q,
-                k=k,
-                v=w,
-                gv=gv,
-                b=b1.sigmoid(),
-                c=c1.sigmoid(),
-                scale=self.oja_scale,
-                initial_state=state_oja,
-                output_final_state=use_cache,
-                use_q_l2norm=self.use_oja_q_l2norm,
-                use_k_l2norm=self.use_oja_k_l2norm,
-                cu_seqlens=cu_seqlens,
-                cu_seqlens_cpu=kwargs.get("cu_seqlens_cpu"),
-            )
-        else:
-            o, state_oja = fused_recurrent_gated_oja_rule2(
-                q=q,
-                k=k,
-                v=w,
-                gv=gv,
-                b=b1.sigmoid(),
-                c=c1.sigmoid(),
-                scale=self.oja_scale,
-                initial_state=state_oja,
-                output_final_state=use_cache,
-                use_q_l2norm=self.use_oja_q_l2norm,
-                use_k_l2norm=self.use_oja_k_l2norm,
-                cu_seqlens=cu_seqlens,
-            )
+        oja_rule = chunk_gated_oja_rule2 if mode == "chunk" else fused_recurrent_gated_oja_rule2
+        o, state_oja = oja_rule(
+            q=q,
+            k=k,
+            v=w,
+            gv=gv,
+            b=b1.sigmoid(),
+            c=c1.sigmoid(),
+            scale=self.oja_scale,
+            initial_state=state_oja,
+            output_final_state=use_cache,
+            use_q_l2norm=self.use_oja_q_l2norm,
+            use_k_l2norm=self.use_oja_k_l2norm,
+            cu_seqlens=cu_seqlens,
+            cu_seqlens_cpu=kwargs.get("cu_seqlens_cpu"),
+        )
 
         # the slot readout becomes the query of the second level, the slot code its key
         q2 = self._apply_oja_out_act(o)
@@ -433,41 +411,24 @@ class GatedSlotAttention2(nn.Module):
                 for x in (q2, k2)
             )
 
-        if mode == "chunk":
-            o, state_gdn = chunk_gdn2(
-                q=q2,
-                k=k2,
-                v=v,
-                g=g2,
-                b=b2.sigmoid(),
-                w=w2.sigmoid(),
-                scale=self.gdn_scale,
-                initial_state=state_gdn,
-                output_final_state=use_cache,
-                use_qk_l2norm_in_kernel=self.use_gdn_qk_l2norm_in_kernel,
-                use_gate_in_kernel=True,
-                cu_seqlens=cu_seqlens,
-                cu_seqlens_cpu=kwargs.get("cu_seqlens_cpu"),
-                A_log=self.A2_log,
-                dt_bias=self.dt2_bias,
-            )
-        else:
-            o, state_gdn = fused_recurrent_gdn2(
-                q=q2,
-                k=k2,
-                v=v,
-                g=g2,
-                b=b2.sigmoid(),
-                w=w2.sigmoid(),
-                scale=self.gdn_scale,
-                initial_state=state_gdn,
-                output_final_state=use_cache,
-                use_qk_l2norm_in_kernel=self.use_gdn_qk_l2norm_in_kernel,
-                use_gate_in_kernel=True,
-                cu_seqlens=cu_seqlens,
-                A_log=self.A2_log,
-                dt_bias=self.dt2_bias,
-            )
+        delta_rule = chunk_gdn2 if mode == "chunk" else fused_recurrent_gdn2
+        o, state_gdn = delta_rule(
+            q=q2,
+            k=k2,
+            v=v,
+            g=g2,
+            b=b2.sigmoid(),
+            w=w2.sigmoid(),
+            scale=self.gdn_scale,
+            initial_state=state_gdn,
+            output_final_state=use_cache,
+            use_qk_l2norm_in_kernel=self.use_gdn_qk_l2norm_in_kernel,
+            use_gate_in_kernel=True,
+            cu_seqlens=cu_seqlens,
+            cu_seqlens_cpu=kwargs.get("cu_seqlens_cpu"),
+            A_log=self.A2_log,
+            dt_bias=self.dt2_bias,
+        )
 
         if use_cache:
             update_layer_cache(

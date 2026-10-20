@@ -5,87 +5,19 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-import gc
-from contextlib import contextmanager
-
 import pytest
 import torch
-from triton.runtime.autotuner import Autotuner
+from torch import nn
+from torch.distributed.tensor import DTensor, distribute_tensor
+from torch.nn import functional as F
 
+from fla.layers.gsa2 import GatedSlotAttention2
 from fla.models import GSA2Config, GSA2ForCausalLM
 from fla.utils import IS_AMD, IS_NPU, IS_NVIDIA, assert_close, device
-
-from .utils import check_forward, check_generate, check_generation, create_model_and_config
+from tests.models.utils import check_forward, check_generate, check_generation, create_model_and_config
 
 # GSA2 runs the GDN-2 kernels, which tests/ops/test_gdn2.py guards the same way
-pytestmark = pytest.mark.skipif(not (IS_NVIDIA or IS_AMD or IS_NPU), reason="CUDA/ROCm or Ascend NPU required")
-
-_INT_DTYPES = ('torch.int32', 'torch.int64')
-# key entries that tell a dense call from the matching varlen call: the varlen flag itself, and the batch size,
-# which is B for the dense batch and 1 once the same tokens are packed with cu_seqlens
-_LAYOUT_KEYS = ('IS_VARLEN', 'B')
-
-
-class _DenseVarlenSharedCache(dict):
-    """Autotune cache that maps a dense call and the matching varlen call to the same entry."""
-
-    def __init__(self, key_names):
-        super().__init__()
-        self.layout_at = sorted((i for i, name in enumerate(key_names) if name in _LAYOUT_KEYS), reverse=True)
-        self.n_keys = len(key_names)
-
-    def _canonical(self, key):
-        if not isinstance(key, tuple):
-            return key
-        if len(key) >= self.n_keys:
-            key = list(key)
-            for i in self.layout_at:
-                del key[i]
-        return tuple(k for k in key if k not in _INT_DTYPES)
-
-    def __contains__(self, key):
-        return super().__contains__(self._canonical(key))
-
-    def __getitem__(self, key):
-        return super().__getitem__(self._canonical(key))
-
-    def __setitem__(self, key, value):
-        super().__setitem__(self._canonical(key), value)
-
-    def get(self, key, default=None):
-        return super().get(self._canonical(key), default)
-
-    def pop(self, key, *default):
-        return super().pop(self._canonical(key), *default)
-
-
-def _all_autotuners():
-    # not every Autotuner is reachable as a module attribute, so collect them from the heap. `type()` rather than
-    # `isinstance()`: the latter reads `__class__`, which deprecated proxies such as `torch.distributed.reduce_op` warn on
-    return [obj for obj in gc.get_objects() if issubclass(type(obj), Autotuner)]
-
-
-@contextmanager
-def _shared_dense_varlen_autotune():
-    """Let dense and varlen calls of every fla kernel run with the same autotuned config, and restore the caches after."""
-    tuners = _all_autotuners()
-    saved = {id(t): t.cache for t in tuners}
-    original_init = Autotuner.__init__
-
-    def init(self, *args, **kwargs):
-        original_init(self, *args, **kwargs)
-        self.cache = _DenseVarlenSharedCache(self.keys)
-
-    Autotuner.__init__ = init
-    for tuner in tuners:
-        tuner.cache = _DenseVarlenSharedCache(tuner.keys)
-    try:
-        yield
-    finally:
-        Autotuner.__init__ = original_init
-        for tuner in tuners:
-            tuner.cache = saved[id(tuner)]
-
+requires_accelerator = pytest.mark.skipif(not (IS_NVIDIA or IS_AMD or IS_NPU), reason="CUDA/ROCm or Ascend NPU required")
 
 _MODELING_CASES = [
     pytest.param(*test, id="L{}-B{}-T{}-H{}-D{}-l2{}-M{}-{}-{}-bs{}-{}".format(*test))
@@ -100,7 +32,9 @@ _MODELING_ARGS = ['L', 'B', 'T', 'H', 'D', 'use_l2warp', 'num_slots',
                   'level2_axis', 'oja_out_act', 'attnres_block_size', 'dtype']
 
 
+@pytest.mark.parametrize('varlen', [False, True], ids=['dense', 'varlen'])
 @pytest.mark.parametrize(_MODELING_ARGS, _MODELING_CASES)
+@requires_accelerator
 def test_modeling(
     L: int,
     B: int,
@@ -113,55 +47,23 @@ def test_modeling(
     oja_out_act: str,
     attnres_block_size: int | None,
     dtype: torch.dtype,
+    varlen: bool,
 ):
-    # the dense and the varlen pass autotune independently, as in production
     check_forward(
-        L,
-        B,
-        T,
-        H,
-        D,
-        GSA2Config,
+        L=L,
+        B=B,
+        T=T,
+        H=H,
+        D=D,
+        config_class=GSA2Config,
         use_l2warp=use_l2warp,
         num_slots=num_slots,
         level2_axis=level2_axis,
         oja_out_act=oja_out_act,
         attnres_block_size=attnres_block_size,
         dtype=dtype,
+        varlen=varlen,
     )
-
-
-@pytest.mark.parametrize(_MODELING_ARGS, _MODELING_CASES)
-def test_modeling_shared_autotune(
-    L: int,
-    B: int,
-    T: int,
-    H: int,
-    D: int,
-    use_l2warp: bool,
-    num_slots: int,
-    level2_axis: str,
-    oja_out_act: str,
-    attnres_block_size: int | None,
-    dtype: torch.dtype,
-):
-    # diagnostic: with one autotune result shared by the dense and the varlen pass, any remaining difference comes from
-    # the varlen code paths themselves rather than from the reduction order of a different config
-    with _shared_dense_varlen_autotune():
-        check_forward(
-            L,
-            B,
-            T,
-            H,
-            D,
-            GSA2Config,
-            use_l2warp=use_l2warp,
-            num_slots=num_slots,
-            level2_axis=level2_axis,
-            oja_out_act=oja_out_act,
-            attnres_block_size=attnres_block_size,
-            dtype=dtype,
-        )
 
 
 @pytest.mark.parametrize(
@@ -173,6 +75,7 @@ def test_modeling_shared_autotune(
         ]
     ],
 )
+@requires_accelerator
 def test_generation(
     L: int,
     B: int,
@@ -181,16 +84,12 @@ def test_generation(
     D: int,
     dtype: torch.dtype,
 ):
-    # chunked prefill and token-by-token decode round differently, and GSA2 stacks two recurrences per layer where GDN and
-    # KDA have one. On H20 the single-recurrence models measure 1.6e-3 to 1.7e-3 against the default 2e-3 and GSA2 measures
-    # 3.3e-3 in fp16, so the budget is twice the default
+    # two recurrences per layer use the existing GSA2 generation error budget
     check_generation(L, B, T, H, D, GSA2Config, dtype, tol=4e-3)
 
 
+@requires_accelerator
 def test_generation_with_slot_projections():
-    # num_slots != head_dim on the head axis puts gdn_q_proj between the two levels, so token-by-token decode feeds the
-    # fused recurrent Oja2 output straight into a low-precision linear layer. Same shape, dtype and budget as
-    # test_generation (3.1e-3 on H20); the bf16 output dtype is checked by test_fused_recurrent
     L, B, T, H, D, dtype = 2, 4, 2000, 8, 64, torch.float16
     model, config = create_model_and_config(
         GSA2Config, L, H, D, dtype, head_dim=D, num_slots=128, level2_axis='head',
@@ -208,6 +107,7 @@ def test_generation_with_slot_projections():
         ]
     ],
 )
+@requires_accelerator
 def test_generate_prefill(
     L: int,
     B: int,
@@ -225,10 +125,9 @@ def test_generate_prefill(
     ids=['ce', 'fused-ce', 'fused-linear-ce'],
 )
 @pytest.mark.parametrize('num_items', [None, 10])
+@requires_accelerator
 def test_packed_loss(fuse_cross_entropy: bool, fuse_linear_cross_entropy: bool, num_items: int | None):
-    """Packing two sequences with cu_seqlens gives the loss and gradients of running them as a batch: no target crosses
-    the boundary. GSA2 takes cu_seqlens only with a batch size of 1, so the packed layout is the flattened one. fp32
-    keeps the comparison about the labels rather than the reduction order of dense and varlen kernels."""
+    """Packed loss and gradients match a batch without predicting across sequence boundaries."""
     torch.manual_seed(42)
     config = GSA2Config(
         hidden_size=64,
@@ -270,6 +169,7 @@ def test_packed_loss(fuse_cross_entropy: bool, fuse_linear_cross_entropy: bool, 
 
 
 @torch.no_grad()
+@requires_accelerator
 def test_logits_to_keep_with_labels():
     B, T, H, D, V = 2, 8, 2, 8, 32
     config = GSA2Config(
@@ -294,3 +194,47 @@ def test_logits_to_keep_with_labels():
     assert inference.logits.shape == (B, 1, V)
     assert torch.isfinite(actual.loss)
     assert_close('loss', expected.loss, actual.loss, 1e-6)
+
+
+def test_initialization(init_layout, make_model):
+    torch.manual_seed(42)
+    model = make_model(GSA2Config)
+    with torch.device('meta'):
+        layer = GatedSlotAttention2(hidden_size=64, head_dim=16, num_heads=4, num_slots=64, use_short_conv=False)
+    model._init_weights(layer)
+    assert all(parameter.is_meta for parameter in layer.parameters())
+    layer.to_empty(device='cpu')
+    names = ('A1_log', 'A2_log', 'dt1_bias', 'dt2_bias')
+    for name in names:
+        value = torch.full_like(getattr(layer, name), float('nan'))
+        if init_layout is not None:
+            mesh, placements = init_layout
+            value = distribute_tensor(value, mesh, placements)
+        setattr(layer, name, nn.Parameter(value))
+    parameters = [getattr(layer, name) for name in names]
+    model._init_weights(layer)
+    values = []
+    for name, parameter in zip(names, parameters, strict=True):
+        actual = getattr(layer, name)
+        assert actual is parameter
+        assert actual._no_weight_decay
+        if init_layout is not None:
+            assert isinstance(actual, DTensor)
+            assert actual.device_mesh == mesh
+            assert actual.placements == placements
+            actual = actual.to_local()
+        assert torch.isfinite(actual).all()
+        values.append(actual)
+    for value in values[:2]:
+        assert ((value.exp() >= 1) & (value.exp() <= 16)).all()
+    assert values[2].count_nonzero() == 0
+    dt = F.softplus(values[3])
+    assert ((dt >= 0.001) & (dt <= 0.1)).all()
+    for parameter in parameters:
+        parameter._is_hf_initialized = True
+    expected = [parameter.detach().clone() for parameter in parameters]
+    model._init_weights(layer)
+    for actual, reference in zip(parameters, expected, strict=True):
+        if init_layout is not None:
+            actual, reference = actual.to_local(), reference.to_local()
+        torch.testing.assert_close(actual, reference, rtol=0, atol=0)

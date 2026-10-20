@@ -10,7 +10,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.op import exp
-from fla.utils import autotune_cache_kwargs, input_guard
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, input_guard
 
 
 @triton.heuristics({
@@ -53,21 +53,20 @@ def fused_recurrent_oja2_fwd_kernel(
     STORE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    # each program owns BK rows of the [K, V] state with every slot: the erase read reduces over the slots of a row,
-    # so rows are independent, and only the output, a reduction over K, is left as one partial sum per row block
+    # erase reduces across all slots; only the output needs a reduction across row blocks
     pid = tl.program_id(0).to(tl.int64)
     NK = tl.cdiv(K, BK)
     i_k, i_nh = pid % NK, pid // NK
     i_n, i_h = i_nh // H, i_nh % H
-    all = B * T
+    all = B.to(tl.int64) * T
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
         bos, eos = i_n * T, i_n * T + T
-    o_k = i_k * BK + tl.arange(0, BK)
-    o_kf = tl.arange(0, BKF)
-    o_v = tl.arange(0, BV)
+    o_k = i_k * BK + tl.arange(0, BK).to(tl.int64)
+    o_kf = tl.arange(0, BKF).to(tl.int64)
+    o_v = tl.arange(0, BV).to(tl.int64)
 
     p_q = q + (bos * H + i_h) * K + o_k
     p_k = k + (bos * H + i_h) * K + o_k
@@ -151,7 +150,6 @@ def fused_recurrent_oja2_fwd(
     if V > 128:
         raise ValueError(f"The number of slots must be at most 128 for the fused recurrent kernel, got {V}.")
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
-    # every program keeps all slots of its rows, so the state tile is [BK, BV] with BV covering the whole slot axis
     BKF, BV = triton.next_power_of_2(K), triton.next_power_of_2(V)
     BK = min(BKF, 32)
     NK = triton.cdiv(K, BK)
@@ -191,6 +189,7 @@ class FusedRecurrentOja2Function(torch.autograd.Function):
 
     @staticmethod
     @input_guard
+    @autocast_custom_fwd
     def forward(
         ctx,
         q: torch.Tensor,
@@ -225,6 +224,7 @@ class FusedRecurrentOja2Function(torch.autograd.Function):
 
     @staticmethod
     @input_guard
+    @autocast_custom_bwd
     def backward(ctx, do, dht):
         raise NotImplementedError(
             "Backward pass is not implemented for the fused recurrent Oja2 kernel. "
@@ -283,7 +283,7 @@ def fused_recurrent_gated_oja_rule2(
         final_state (torch.Tensor):
             Final state of shape `[N, H, K, M]` if `output_final_state=True` else `None`.
     """
-    if 'use_qk_l2norm_in_kernel' in kwargs and (not use_q_l2norm and not use_k_l2norm):
+    if kwargs.get('use_qk_l2norm_in_kernel', False) and not (use_q_l2norm or use_k_l2norm):
         use_q_l2norm = True
         use_k_l2norm = True
 
@@ -298,6 +298,7 @@ def fused_recurrent_gated_oja_rule2(
                 f"The number of initial states is expected to be equal to the number of input sequences, "
                 f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}."
             )
+    assert q.shape[:3] == v.shape[:3], "q, k and v must have matching batch, sequence and head dimensions."
     assert q.shape == k.shape, "q and k must have the same shape."
     assert v.shape == gv.shape == b.shape, "v, gv and b must have the same shape."
     assert c.shape == k.shape, "c and k must have the same shape."

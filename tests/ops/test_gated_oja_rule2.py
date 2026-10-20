@@ -5,11 +5,6 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-# Correctness tests for Oja2, the Oja rule with decoupled erase and write gates.
-#
-# The ground truth is the pure-PyTorch ``naive_recurrent_gated_oja_rule2``. The slot code ``v`` and the log-decay ``gv``
-# stay in fp32 while q, k and the two gates use the low-precision dtype, which is how the operator is fed in GSA2.
-
 import pytest
 import torch
 import torch.nn.functional as F
@@ -42,6 +37,14 @@ def _ref(q, k, v, gv, b, c, h0, scale=None):
         initial_state=h0,
         output_final_state=True,
     )
+
+
+@pytest.mark.parametrize(('K', 'M'), [(0, 64), (64, 0), (64, 257)], ids=['empty-key', 'empty-slot', 'large-slot'])
+def test_chunk_invalid_dimensions(K: int, M: int):
+    q = torch.zeros(1, 1, 1, K, device=device)
+    v = torch.zeros(1, 1, 1, M, device=device)
+    with pytest.raises(ValueError, match='key dimension must be positive and the slot dimension'):
+        chunk_gated_oja_rule2(q=q, k=q, v=v, gv=v, b=v, c=q)
 
 
 @pytest.mark.parametrize(
@@ -139,15 +142,20 @@ def test_fused_recurrent_backward_unsupported():
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'K', 'M', 'scale', 'dtype'),
+    ('B', 'T', 'H', 'K', 'M', 'scale', 'dtype', 'q_norm', 'k_norm', 'use_initial_state', 'output_final_state'),
     [
-        pytest.param(*test, id="B{}-T{}-H{}-K{}-M{}-scale{}-{}".format(*test))
+        pytest.param(*test, id="B{}-T{}-H{}-K{}-M{}-scale{}-{}-qn{}-kn{}-h0{}-ht{}".format(*test))
         for test in [
-            (1, 63, 1, 64, 64, 1, torch.float16),
-            (2, 500, 3, 60, 64, 1, torch.float16),
-            (2, 1000, 3, 128, 128, 0.1, torch.bfloat16),
-            (1, 1024, 2, 128, 256, 0.1, torch.bfloat16),
-            (4, 1024, 4, 128, 64, 1, torch.float16),
+            (1, 63, 1, 64, 64, 1, torch.float16, True, True, True, True),
+            (2, 500, 3, 60, 64, 1, torch.float16, True, True, True, True),
+            (2, 1000, 3, 128, 128, 0.1, torch.bfloat16, True, True, True, True),
+            (1, 1024, 2, 128, 256, 0.1, torch.bfloat16, True, True, True, True),
+            (4, 1024, 4, 128, 64, 1, torch.float16, True, True, True, True),
+            (1, 65, 2, 256, 64, 0.1, torch.bfloat16, True, True, True, True),
+            (1, 17, 1, 512, 64, 0.1, torch.float16, True, True, True, True),
+            (1, 65, 2, 60, 96, 0.1, torch.float16, False, False, False, False),
+            (1, 17, 2, 64, 64, None, torch.float32, True, False, False, True),
+            (1, 17, 2, 64, 64, None, torch.float32, False, True, True, False),
         ]
     ]
 )
@@ -159,6 +167,10 @@ def test_chunk(
     M: int,
     scale: float,
     dtype: torch.dtype,
+    q_norm: bool,
+    k_norm: bool,
+    use_initial_state: bool,
+    output_final_state: bool,
 ):
     if IS_INTEL_ALCHEMIST and max(K, M) > 128:
         pytest.skip(reason='chunk_gated_oja_rule2 is not supported on alchemist for dimensions above 128')
@@ -166,30 +178,57 @@ def test_chunk(
     do = torch.randn(B, T, H, M, dtype=torch.float32, device=device)
     dht = torch.randn(B, H, K, M, dtype=torch.float32, device=device)
 
-    def run(fn, **kwargs):
-        q, k, v, gv, b, c, h0 = (x.detach().clone().requires_grad_(True) for x in inputs)
-        o, ht = fn(q, k, v, gv, b, c, h0, **kwargs)
-        ((o.float() * do).sum() + (ht * dht).sum()).backward()
-        return o, ht, [x.grad for x in (q, k, v, gv, b, c, h0)]
-
-    ref, ref_ht, ref_grads = run(lambda q, k, v, gv, b, c, h0: _ref(q, k, v, gv, b, c, h0, scale))
-    tri, tri_ht, tri_grads = run(
-        lambda q, k, v, gv, b, c, h0: chunk_gated_oja_rule2(
-            q=q,
-            k=k,
-            v=v,
-            gv=gv,
-            b=b,
-            c=c,
-            scale=scale,
-            initial_state=h0,
-            output_final_state=True,
-            use_q_l2norm=True,
-            use_k_l2norm=True,
-        )
+    q, k, v, gv, b, c, h0 = (x.detach().clone().requires_grad_(True) for x in inputs)
+    if not use_initial_state:
+        h0 = None
+    tri, tri_ht = chunk_gated_oja_rule2(
+        q=q,
+        k=k,
+        v=v,
+        gv=gv,
+        b=b,
+        c=c,
+        scale=scale,
+        initial_state=h0,
+        output_final_state=output_final_state,
+        use_q_l2norm=q_norm,
+        use_k_l2norm=k_norm,
     )
+    loss = (tri.float() * do).sum()
+    if output_final_state:
+        loss = loss + (tri_ht * dht).sum()
+    loss.backward()
+    tri_grads = [x.grad for x in (q, k, v, gv, b, c)]
+    if use_initial_state:
+        tri_grads.append(h0.grad)
+
+    q, k, v, gv, b, c, h0 = (x.detach().clone().requires_grad_(True) for x in inputs)
+    if not use_initial_state:
+        h0 = None
+    ref, ref_ht = naive_recurrent_gated_oja_rule2(
+        q=F.normalize(q.float(), p=2, dim=-1) if q_norm else q.float(),
+        k=F.normalize(k.float(), p=2, dim=-1) if k_norm else k.float(),
+        v=v,
+        gv=gv,
+        b=b.float(),
+        c=c.float(),
+        scale=scale,
+        initial_state=h0,
+        output_final_state=output_final_state,
+    )
+    loss = (ref * do).sum()
+    if output_final_state:
+        loss = loss + (ref_ht * dht).sum()
+    loss.backward()
+    ref_grads = [x.grad for x in (q, k, v, gv, b, c)]
+    if use_initial_state:
+        ref_grads.append(h0.grad)
+
     assert_close('o', ref, tri, 0.005)
-    assert_close('ht', ref_ht, tri_ht, 0.005)
+    if output_final_state:
+        assert_close('ht', ref_ht, tri_ht, 0.005)
+    else:
+        assert tri_ht is None
     for name, ratio, ref_grad, tri_grad in zip(
         ('dq', 'dk', 'dv', 'dgv', 'db', 'dc', 'dh0'),
         (0.01, 0.01, 0.01, 0.02, 0.02, 0.02, 0.01),
@@ -330,3 +369,23 @@ def test_chunk_matches_fused_recurrent():
     o1, ht1 = fused_recurrent_gated_oja_rule2(q=q, k=k, v=v, gv=gv, b=b, c=c, **kwargs)
     assert_close('o', o0, o1, 0.005)
     assert_close('ht', ht0, ht1, 0.005)
+
+
+@pytest.mark.parametrize('op', [chunk_gated_oja_rule2, fused_recurrent_gated_oja_rule2], ids=['chunk', 'recurrent'])
+@pytest.mark.parametrize('normalize', [False, True], ids=['unnormalized', 'normalized'])
+def test_normalization_alias(op, normalize):
+    q, k, v, gv, b, c, _ = _rand_inputs(1, 17, 1, 64, 64, torch.float32)
+    expected, expected_ht = op(
+        q=q,
+        k=k,
+        v=v,
+        gv=gv,
+        b=b,
+        c=c,
+        output_final_state=True,
+        use_q_l2norm=normalize,
+        use_k_l2norm=normalize,
+    )
+    actual, actual_ht = op(q=q, k=k, v=v, gv=gv, b=b, c=c, output_final_state=True, use_qk_l2norm_in_kernel=normalize)
+    assert_close('o', expected, actual, 1e-6)
+    assert_close('ht', expected_ht, actual_ht, 1e-6)

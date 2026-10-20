@@ -5,11 +5,6 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-# Intra-chunk score matrix A = tril((b * v) exp(gv) v^T, -1) for Oja2.
-#
-# Oja2 runs the delta rule on the slot code, so the "key" of this kernel is the slot code of shape [B, T, H, M].
-# The per-slot erase gate ``b`` [B, T, H, M] is folded into the row side only, which makes A asymmetric.
-
 import torch
 import triton
 import triton.language as tl
@@ -34,7 +29,7 @@ from fla.utils import autotune_cache_kwargs
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
-def chunk_oja2_kkt_fwd_kernel_intra_sub_inter(
+def chunk_oja2_fwd_kernel_kkt_inter(
     k,
     g,
     b,
@@ -54,7 +49,7 @@ def chunk_oja2_kkt_fwd_kernel_intra_sub_inter(
     i_b, i_h = i_bh // H, i_bh % H
     i_i, i_j = i_c // NC, i_c % NC
     if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int64), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
@@ -70,13 +65,13 @@ def chunk_oja2_kkt_fwd_kernel_intra_sub_inter(
     b += (bos * H + i_h) * K
     A += (bos * H + i_h) * BT
 
-    o_r = i_t * BT + i_i * BC + tl.arange(0, BC)
+    o_r = i_t * BT + i_i * BC + tl.arange(0, BC).to(tl.int64)
     m_r = o_r < T
 
     b_A = tl.zeros([BC, BC], dtype=tl.float32)
     for i_k in range(tl.cdiv(K, BK)):
-        o_kj = i_t * BT + i_j * BC + tl.arange(0, BC)
-        o_k = i_k * BK + tl.arange(0, BK)
+        o_kj = i_t * BT + i_j * BC + tl.arange(0, BC).to(tl.int64)
+        o_k = i_k * BK + tl.arange(0, BK).to(tl.int64)
         m_k = o_k < K
         m_rk = m_r[:, None] & m_k[None, :]
         m_kj = m_k[:, None] & (o_kj[None, :] < T)
@@ -99,7 +94,7 @@ def chunk_oja2_kkt_fwd_kernel_intra_sub_inter(
         # [BC, BC]
         b_A = tl.dot(b_k, b_kt, b_A)
 
-    o_Aj = i_j * BC + tl.arange(0, BC)
+    o_Aj = i_j * BC + tl.arange(0, BC).to(tl.int64)
     p_A = A + o_r[:, None] * (H*BT) + o_Aj[None, :]
     tl.store(p_A, b_A.to(A.dtype.element_ty), mask=m_r[:, None] & (o_Aj[None, :] < BT))
 
@@ -118,7 +113,7 @@ def chunk_oja2_kkt_fwd_kernel_intra_sub_inter(
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
-def chunk_oja2_kkt_fwd_kernel_intra_sub_intra(
+def chunk_oja2_fwd_kernel_kkt_intra(
     k,
     g,
     b,
@@ -136,7 +131,7 @@ def chunk_oja2_kkt_fwd_kernel_intra_sub_intra(
     i_t, i_i, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int64), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
@@ -145,8 +140,8 @@ def chunk_oja2_kkt_fwd_kernel_intra_sub_intra(
     if i_t * BT + i_i * BC >= T:
         return
 
-    o_i = tl.arange(0, BC)
-    o_k = tl.arange(0, BK)
+    o_i = tl.arange(0, BC).to(tl.int64)
+    o_k = tl.arange(0, BK).to(tl.int64)
     m_k = o_k < K
     m_A = (i_t * BT + i_i * BC + o_i) < T
     o_A = (bos + i_t * BT + i_i * BC + o_i) * H*BT + i_h * BT + i_i * BC
@@ -187,7 +182,7 @@ def chunk_oja2_kkt_fwd_kernel_intra_sub_intra(
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['B', 'T'])
-def chunk_oja2_kkt_bwd_kernel_gk(
+def chunk_oja2_bwd_kernel_kkt(
     k,
     g,
     b,
@@ -214,7 +209,7 @@ def chunk_oja2_kkt_bwd_kernel_gk(
 
     all = B.to(tl.int64) * T
     if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int64), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
     else:
         bos, eos = i_b * T, i_b * T + T
@@ -222,7 +217,7 @@ def chunk_oja2_kkt_bwd_kernel_gk(
     if i_t * BT + i_i * BC >= T:
         return
 
-    o_k = i_k * BK + tl.arange(0, BK)
+    o_k = i_k * BK + tl.arange(0, BK).to(tl.int64)
     m_k = o_k < K
 
     k += (bos * H + i_h) * K
@@ -235,7 +230,7 @@ def chunk_oja2_kkt_bwd_kernel_gk(
     # db is laid out as [NK, B, T, H, BK]: one BK-wide slice per K block
     db += ((i_k * all + bos) * H + i_h) * BK
 
-    o_r = i_t * BT + i_i * BC + tl.arange(0, BC)
+    o_r = i_t * BT + i_i * BC + tl.arange(0, BC).to(tl.int64)
     m_r = o_r < T
     m_rk = m_r[:, None] & m_k[None, :]
     p_g = g + o_r[:, None] * (H*K) + o_k[None, :]
@@ -249,9 +244,9 @@ def chunk_oja2_kkt_bwd_kernel_gk(
         # [BK,]
         b_gn = tl.load(p_gn, mask=m_k, other=0)
         for i_j in range(0, i_i):
-            o_j = i_t * BT + i_j * BC + tl.arange(0, BC)
+            o_j = i_t * BT + i_j * BC + tl.arange(0, BC).to(tl.int64)
             m_jk = (o_j[:, None] < T) & m_k[None, :]
-            o_dAj = i_j * BC + tl.arange(0, BC)
+            o_dAj = i_j * BC + tl.arange(0, BC).to(tl.int64)
             p_k = k + o_j[:, None] * (H*K) + o_k[None, :]
             p_gk = g + o_j[:, None] * (H*K) + o_k[None, :]
             p_dA = dA + o_r[:, None] * (H*BT) + o_dAj[None, :]
@@ -265,7 +260,7 @@ def chunk_oja2_kkt_bwd_kernel_gk(
             b_dkb = tl.dot(b_dA, b_kg.to(b_dA.dtype)) * exp(b_g - b_gn[None, :])
             b_dk += b_dkb
 
-    o_i = tl.arange(0, BC)
+    o_i = tl.arange(0, BC).to(tl.int64)
     m_dA = (i_t * BT + i_i * BC + o_i) < T
     o_dA = (i_t * BT + i_i * BC + o_i) * H*BT + i_i * BC
     p_kj = k + (i_t * BT + i_i * BC) * H*K + o_k
@@ -290,7 +285,7 @@ def chunk_oja2_kkt_bwd_kernel_gk(
     # the erase gate only touches the row side, so its gradient is the pre-gate dk times k
     b_db = b_dk * b_k
     b_dk *= b_b
-    p_db = db + o_r[:, None] * (H*BK) + tl.arange(0, BK)[None, :]
+    p_db = db + o_r[:, None] * (H*BK) + tl.arange(0, BK).to(tl.int64)[None, :]
     tl.store(p_db, b_db.to(p_db.dtype.element_ty), mask=m_r[:, None])
 
     tl.debug_barrier()
@@ -303,10 +298,10 @@ def chunk_oja2_kkt_bwd_kernel_gk(
         # [BK,]
         b_gn = tl.load(p_gn, mask=m_k, other=0)
         for i_j in range(i_i + 1, NC):
-            o_j = i_t * BT + i_j * BC + tl.arange(0, BC)
+            o_j = i_t * BT + i_j * BC + tl.arange(0, BC).to(tl.int64)
             m_j = o_j < T
             m_jk = m_j[:, None] & m_k[None, :]
-            o_dAi = i_i * BC + tl.arange(0, BC)
+            o_dAi = i_i * BC + tl.arange(0, BC).to(tl.int64)
             p_k = k + o_j[:, None] * (H*K) + o_k[None, :]
             p_gk = g + o_j[:, None] * (H*K) + o_k[None, :]
             p_bj = b + o_j[:, None] * (H*K) + o_k[None, :]
@@ -394,7 +389,7 @@ def chunk_oja2_kkt_fwd(
     BK = max(triton.next_power_of_2(K), 16)
     A = torch.zeros(B, T, H, BT, device=k.device, dtype=output_dtype)
     grid = (NT, NC * NC, B * H)
-    chunk_oja2_kkt_fwd_kernel_intra_sub_inter[grid](
+    chunk_oja2_fwd_kernel_kkt_inter[grid](
         k=k,
         g=gk,
         b=b,
@@ -410,7 +405,7 @@ def chunk_oja2_kkt_fwd(
     )
 
     grid = (NT, NC, B * H)
-    chunk_oja2_kkt_fwd_kernel_intra_sub_intra[grid](
+    chunk_oja2_fwd_kernel_kkt_intra[grid](
         k=k,
         g=gk,
         b=b,
@@ -457,7 +452,7 @@ def chunk_oja2_kkt_bwd_gk(
     dg = torch.empty_like(g, dtype=torch.float)
     db = k.new_empty(NK, B, T, H, BK, dtype=torch.float)
     grid = (NK * NT * NC, B * H)
-    chunk_oja2_kkt_bwd_kernel_gk[grid](
+    chunk_oja2_bwd_kernel_kkt[grid](
         k=k,
         g=g,
         b=b,

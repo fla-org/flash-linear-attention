@@ -5,9 +5,9 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from .chunk import chunk_gated_oja_rule2
-from .fused_recurrent import fused_recurrent_gated_oja_rule2
-from .naive import naive_recurrent_gated_oja_rule2
+from fla.ops.gated_oja_rule2.chunk import chunk_gated_oja_rule2
+from fla.ops.gated_oja_rule2.fused_recurrent import fused_recurrent_gated_oja_rule2
+from fla.ops.gated_oja_rule2.naive import naive_recurrent_gated_oja_rule2
 
 __all__ = [
     "chunk_gated_oja_rule2",

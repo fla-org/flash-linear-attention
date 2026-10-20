@@ -485,6 +485,7 @@ register_op(OpConfig(
     skip_backward=True,
     category='oja2',
     dim_constraints={'D': [64, 128]},
+    default_shapes={f'B4_T{T}_H8_D128': {'B': 4, 'T': T, 'H': 8, 'D': 128} for T in (1, 16, 64)},
     test_file='tests/ops/test_gated_oja_rule2.py',
 ))
 

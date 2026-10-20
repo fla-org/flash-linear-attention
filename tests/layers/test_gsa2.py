@@ -12,7 +12,7 @@ import torch
 
 from fla.layers.gsa2 import GatedSlotAttention2
 from fla.models.cache_utils import Cache
-from fla.utils import IS_AMD, IS_NPU, IS_NVIDIA, device
+from fla.utils import IS_AMD, IS_NPU, IS_NVIDIA, assert_close, device
 
 # the layer runs the GDN-2 kernels, which tests/ops/test_gdn2.py guards the same way
 pytestmark = pytest.mark.skipif(not (IS_NVIDIA or IS_AMD or IS_NPU), reason="CUDA/ROCm or Ascend NPU required")
@@ -30,8 +30,7 @@ pytestmark = pytest.mark.skipif(not (IS_NVIDIA or IS_AMD or IS_NPU), reason="CUD
     ],
 )
 def test_gsa2_layer(num_heads: int, num_v_heads: int, use_short_conv: bool, num_slots: int, level2_axis: str):
-    """The layer runs forward and backward with finite gradients for every parameter, covering GVA, the slot-to-head
-    projections of the head axis, and the short-conv path that the model tests do not reach."""
+    """Both memories and their projections receive finite training gradients."""
     torch.manual_seed(42)
     hidden_size, head_dim, B, T = 128, 32, 2, 128
     layer = GatedSlotAttention2(
@@ -60,32 +59,40 @@ def test_gsa2_layer(num_heads: int, num_v_heads: int, use_short_conv: bool, num_
 
 
 @pytest.mark.parametrize('mode', ['chunk', 'fused_recurrent'])
-def test_gsa2_eval_with_grad_uses_chunk(mode: str):
+@pytest.mark.parametrize(('num_slots', 'requires_grad'), [(64, True), (256, True), (256, False)])
+def test_chunk_fallback(mode: str, num_slots: int, requires_grad: bool):
     torch.manual_seed(42)
     layer = GatedSlotAttention2(
         hidden_size=128,
         head_dim=32,
         num_heads=2,
-        num_slots=64,
+        num_slots=num_slots,
         mode=mode,
         layer_idx=0,
     ).to(device=device, dtype=torch.bfloat16).eval()
     x = torch.randn(1, 32, 128, device=device, dtype=torch.bfloat16, requires_grad=True)
 
-    message = "eval with autograd must not use a forward-only fused recurrent kernel"
-    with mock.patch('fla.layers.gsa2.fused_recurrent_gated_oja_rule2', side_effect=AssertionError(message)) as oja2, \
-            mock.patch('fla.layers.gsa2.fused_recurrent_gdn2', side_effect=AssertionError(message)) as gdn2:
+    message = "this input requires the chunk kernel"
+    with (
+        torch.set_grad_enabled(requires_grad),
+        mock.patch('fla.layers.gsa2.fused_recurrent_gated_oja_rule2', side_effect=AssertionError(message)) as oja2,
+        mock.patch('fla.layers.gsa2.fused_recurrent_gdn2', side_effect=AssertionError(message)) as gdn2,
+    ):
         y = layer(x)[0]
-        y.sum().backward()
+        if requires_grad:
+            y.sum().backward()
 
     oja2.assert_not_called()
     gdn2.assert_not_called()
-    assert x.grad is not None
-    assert torch.isfinite(x.grad).all()
+    assert torch.isfinite(y).all()
+    if requires_grad:
+        assert x.grad is not None
+        assert torch.isfinite(x.grad).all()
 
 
 @torch.no_grad()
-def test_gsa2_read_only_call_keeps_cache():
+@pytest.mark.parametrize('T', [1, 3, 65])
+def test_gsa2_read_only_call_keeps_cache(T: int):
     """A call with an existing cache and `use_cache=False` leaves every cached state and the token count unchanged."""
     torch.manual_seed(42)
     layer = GatedSlotAttention2(
@@ -104,10 +111,12 @@ def test_gsa2_read_only_call_keeps_cache():
     states = [s.clone() for s in (*state['recurrent_state'], *state['conv_state'])]
     seen = cache.get_seq_length()
 
-    # a single token takes the in-place convolution step and the fused recurrent kernels
-    layer(torch.randn(1, 1, 128, device=device), past_key_values=cache, use_cache=False)
+    x = torch.randn(1, T, 128, device=device)
+    actual = layer(x, past_key_values=cache, use_cache=False)[0]
 
     state = cache[0]
     assert cache.get_seq_length() == seen
     for expected, actual in zip(states, (*state['recurrent_state'], *state['conv_state'])):
         assert torch.equal(expected, actual)
+    expected = layer(x, past_key_values=cache, use_cache=True)[0]
+    assert_close('o', expected, actual, 1e-6)

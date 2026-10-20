@@ -14,7 +14,6 @@ import torch
 import torch.nn as nn
 from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import CausalLMOutputWithPast
-from transformers.utils import logging
 from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.gsa2 import GatedSlotAttention2
@@ -29,9 +28,6 @@ if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
     from fla.models.cache_utils import Cache
-
-
-logger = logging.get_logger(__name__)
 
 
 class GSA2Block(GradientCheckpointingLayer):
@@ -108,10 +104,7 @@ class GSA2Block(GradientCheckpointingLayer):
         if self.use_attnres:
             prefix_sum = hidden_states
             if attnres_states is None:
-                # L=1 single-source: attnres is trivially identity (p=1, mix=v[0]);
-                # apply the prenorm directly, matching the L>1 kernel path which
-                # folds it via `output_rms_weight`. Mirrors Megatron-LM's bypass
-                # at the first layer (where `block_residual` is empty).
+                # with one residual, attention mixing reduces to the prenorm
                 hidden_states = self.attn_norm(prefix_sum)
                 attnres_states = [prefix_sum]
                 prefix_sum = None
@@ -178,9 +171,6 @@ class GSA2PreTrainedModel(FLAPreTrainedModel):
     _no_split_modules = ['GSA2Block']
     _supports_cache_class = True
 
-    def __init__(self, *inputs, **kwargs):
-        super().__init__(*inputs, **kwargs)
-
     def _init_weights(
         self,
         module: nn.Module,
@@ -246,7 +236,6 @@ class GSA2ForCausalLM(GSA2PreTrainedModel, FLAForCausalLM, FLAUnsupportedCacheGe
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.criterion = None
 
-        # Initialize weights and apply final processing
         self.post_init()
 
     @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
@@ -265,53 +254,25 @@ class GSA2ForCausalLM(GSA2PreTrainedModel, FLAForCausalLM, FLAUnsupportedCacheGe
         num_items_in_batch: int | torch.Tensor | None = None,
         **kwargs: Unpack[dict],
     ) -> tuple | CausalLMOutputWithPast:
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        return_dict = return_dict if return_dict is not None else self.config.return_dict
+        cu_seqlens = kwargs.get("cu_seqlens")
+        if labels is not None and cu_seqlens is not None:
+            ignore_index = self.criterion.ignore_index if self.criterion is not None else -100
+            labels = labels.clone()
+            starts = cu_seqlens[1:-1].to(device=labels.device, dtype=torch.long)
+            # the shared loss shifts labels left, so exclude the first target of each packed sequence
+            labels.reshape(-1).index_fill_(0, starts[starts < labels.numel()], ignore_index)
 
-        outputs = self.model(
+        return super().forward(
             input_ids=input_ids,
             attention_mask=attention_mask,
             inputs_embeds=inputs_embeds,
             past_key_values=past_key_values,
+            labels=labels,
             use_cache=use_cache,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
-            **kwargs,
-        )
-
-        hidden_states = outputs[0]
-
-        shift_labels = None
-        cu_seqlens = kwargs.get("cu_seqlens")
-        if labels is not None and cu_seqlens is not None:
-            ignore_index = self.criterion.ignore_index if self.criterion is not None else -100
-            flat_labels = labels.to(hidden_states.device).reshape(-1)
-            shift_labels = torch.cat((flat_labels[1:], torch.full_like(flat_labels[:1], ignore_index)))
-            starts, ends = cu_seqlens[:-1], cu_seqlens[1:]
-            last_token_indices = ends[ends > starts].to(device=hidden_states.device, dtype=torch.long) - 1
-            shift_labels.index_fill_(0, last_token_indices, ignore_index)
-            shift_labels = shift_labels.view_as(labels)
-
-        loss, logits = self._compute_logits_and_loss(
-            hidden_states=hidden_states,
-            labels=labels,
             logits_to_keep=logits_to_keep,
-            shift_labels=shift_labels,
             num_items_in_batch=num_items_in_batch,
-        )
-
-        if not return_dict:
-            output = (logits,) + outputs[1:]
-            return (loss,) + output if loss is not None else output
-
-        return CausalLMOutputWithPast(
-            loss=loss,
-            logits=logits,
-            past_key_values=outputs.past_key_values,
-            hidden_states=outputs.hidden_states,
-            attentions=outputs.attentions,
+            **kwargs,
         )

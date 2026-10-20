@@ -5,17 +5,6 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-# WY-representation recompute for Oja2.
-#
-# Given the solved chunk inverse ``A = (I + tril(T, -1))^{-1}``, this kernel produces the two within-chunk auxiliaries
-# consumed by the inter-chunk state recurrence:
-#
-#   w = A @ ((b * v) * exp(gv))     # erase-side, M-axis
-#   u = A @ (c * k)                 # write-side, K-axis
-#
-# Difference vs ``gated_oja_rule``: the scalar ``beta`` is split into a per-slot erase gate ``b`` on the M axis and a
-# per-channel write gate ``c`` on the K axis. The two live on different axes, so the kernel loads them per BV / BK block.
-
 import torch
 import triton
 import triton.language as tl
@@ -40,7 +29,7 @@ from fla.utils import autotune_cache_kwargs, check_shared_mem
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
-def recompute_w_u_fwd_oja2_kernel(
+def oja2_fwd_kernel_wy(
     k,
     v,
     vg,
@@ -65,21 +54,21 @@ def recompute_w_u_fwd_oja2_kernel(
     i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int64), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
-    o_t = i_t * BT + tl.arange(0, BT)
+    o_t = i_t * BT + tl.arange(0, BT).to(tl.int64)
     m_t = o_t < T
 
-    o_A = tl.arange(0, BT)
+    o_A = tl.arange(0, BT).to(tl.int64)
     m_AT = m_t[:, None] & (o_A[None, :] < BT)
     p_A = A + (bos*H + i_h) * BT + o_t[:, None] * (H*BT) + o_A[None, :]
     b_A = tl.load(p_A, mask=m_AT, other=0.0)
 
     for i_v in range(tl.cdiv(V, BV)):
-        o_v = i_v * BV + tl.arange(0, BV)
+        o_v = i_v * BV + tl.arange(0, BV).to(tl.int64)
         m_tv = m_t[:, None] & (o_v[None, :] < V)
         p_v = v + (bos*H + i_h) * V + o_t[:, None] * (H*V) + o_v[None, :]
         p_w = w + (bos*H + i_h) * V + o_t[:, None] * (H*V) + o_v[None, :]
@@ -105,7 +94,7 @@ def recompute_w_u_fwd_oja2_kernel(
         tl.store(p_w, b_w.to(p_w.dtype.element_ty), mask=m_tv)
 
     for i_k in range(tl.cdiv(K, BK)):
-        o_k = i_k * BK + tl.arange(0, BK)
+        o_k = i_k * BK + tl.arange(0, BK).to(tl.int64)
         m_tk = m_t[:, None] & (o_k[None, :] < K)
         p_k = k + (bos*H + i_h) * K + o_t[:, None] * (H*K) + o_k[None, :]
         p_u = u + (bos*H + i_h) * K + o_t[:, None] * (H*K) + o_k[None, :]
@@ -130,7 +119,7 @@ def recompute_w_u_fwd_oja2_kernel(
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
-def prepare_wy_repr_bwd_oja2_kernel(
+def oja2_bwd_kernel_wy(
     k,
     v,
     b_gate,
@@ -159,15 +148,15 @@ def prepare_wy_repr_bwd_oja2_kernel(
     i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int64), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
 
-    o_t = i_t * BT + tl.arange(0, BT)
+    o_t = i_t * BT + tl.arange(0, BT).to(tl.int64)
     m_t = o_t < T
-    o_A = tl.arange(0, BT)
+    o_A = tl.arange(0, BT).to(tl.int64)
     m_AT = (o_A[:, None] < BT) & m_t[None, :]
     p_A = A + (bos*H + i_h) * BT + o_A[:, None] + o_t[None, :] * (H*BT)
 
@@ -176,7 +165,7 @@ def prepare_wy_repr_bwd_oja2_kernel(
 
     # w path: w = A @ ((b * v) * exp(gv))
     for i_v in range(tl.cdiv(V, BV)):
-        o_v = i_v * BV + tl.arange(0, BV)
+        o_v = i_v * BV + tl.arange(0, BV).to(tl.int64)
         m_tv = m_t[:, None] & (o_v[None, :] < V)
         p_v = v + (bos*H + i_h) * V + o_t[:, None] * (H*V) + o_v[None, :]
         p_bg = b_gate + (bos*H + i_h) * V + o_t[:, None] * (H*V) + o_v[None, :]
@@ -203,7 +192,7 @@ def prepare_wy_repr_bwd_oja2_kernel(
 
     # u path: u = A @ (c * k)
     for i_k in range(tl.cdiv(K, BK)):
-        o_k = i_k * BK + tl.arange(0, BK)
+        o_k = i_k * BK + tl.arange(0, BK).to(tl.int64)
         m_tk = m_t[:, None] & (o_k[None, :] < K)
         p_k = k + (bos*H + i_h) * K + o_t[:, None] * (H*K) + o_k[None, :]
         p_cg = c_gate + (bos*H + i_h) * K + o_t[:, None] * (H*K) + o_k[None, :]
@@ -277,7 +266,7 @@ def recompute_w_u_fwd_oja2(
     w = torch.empty_like(v)
     u = torch.empty_like(k)
     vg = torch.empty_like(v) if gv is not None else None
-    recompute_w_u_fwd_oja2_kernel[(NT, B*H)](
+    oja2_fwd_kernel_wy[(NT, B*H)](
         k=k,
         v=v,
         vg=vg,
@@ -334,7 +323,7 @@ def prepare_wy_repr_bwd_oja2(
     dgv = torch.empty_like(gv, dtype=torch.float)
     dA = torch.empty_like(A, dtype=torch.float)
 
-    prepare_wy_repr_bwd_oja2_kernel[(NT, B * H)](
+    oja2_bwd_kernel_wy[(NT, B * H)](
         k=k,
         v=v,
         b_gate=b_gate,
