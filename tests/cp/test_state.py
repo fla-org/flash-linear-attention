@@ -12,9 +12,9 @@ import torch
 import triton
 
 from fla.ops.cp.chunk_bwd import chunk_cp_bwd_kernel_dh
-from fla.utils import IS_TF32_SUPPORTED, device
+from fla.utils import IS_NPU, IS_TF32_SUPPORTED, device
 
-pytestmark = pytest.mark.skipif(not IS_TF32_SUPPORTED, reason="requires NVIDIA Ampere or newer")
+pytestmark = pytest.mark.skipif(not (IS_TF32_SUPPORTED or IS_NPU), reason="requires NVIDIA Ampere or newer, or Ascend")
 
 
 @pytest.mark.parametrize(

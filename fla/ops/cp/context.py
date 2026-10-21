@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 import torch
 import torch.distributed as dist
 
-from fla.utils import IS_NVIDIA, get_device_capability, tensor_cache
+from fla.utils import IS_NPU, IS_NVIDIA, get_device_capability, tensor_cache
 
 if TYPE_CHECKING:
     from torch.distributed import ProcessGroup
@@ -21,14 +21,19 @@ if TYPE_CHECKING:
 
 def _validate_cp_kwargs(**kwargs) -> None:
     if kwargs.pop('use_tf32x3_affine_chain', True) is False:
-        raise ValueError("use_tf32x3_affine_chain=False is no longer supported; CP requires TF32x3.")
+        raise ValueError(
+            "use_tf32x3_affine_chain=False is no longer supported; "
+            "CP requires TF32x3 on NVIDIA and IEEE FP32 on Ascend."
+        )
     if kwargs:
         raise TypeError(f"Unexpected CP keyword arguments: {', '.join(kwargs)}")
 
 
 def _check_cp_device(device: torch.device) -> None:
+    if IS_NPU and device.type == 'npu':
+        return
     if not IS_NVIDIA or device.type != 'cuda':
-        raise RuntimeError("CP affine chains require an NVIDIA Ampere or newer GPU (compute capability >= 8.0).")
+        raise RuntimeError("CP affine chains require NVIDIA Ampere or newer (compute capability >= 8.0), or Ascend.")
     device_index = device.index if device.index is not None else torch.cuda.current_device()
     if get_device_capability(device_index)[0] < 8:
         raise RuntimeError("CP affine chains require an NVIDIA Ampere or newer GPU (compute capability >= 8.0).")

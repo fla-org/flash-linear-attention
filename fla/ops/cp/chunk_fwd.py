@@ -9,7 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.cp.chunk_merge import _prune_cp_configs
+from fla.ops.cp.chunk_merge import CP_DOT_PRECISION, _prune_cp_configs
 from fla.ops.cp.context import _check_cp_device
 from fla.ops.utils.op import exp2
 from fla.utils import autotune_cache_kwargs
@@ -283,7 +283,7 @@ def chunk_cp_fwd_kernel_h(
                 b_kw = tl.dot(tl.trans(b_k.to(b_w.dtype)), b_w)
                 b_m_i = b_diag - b_kw
             # keep the composed transform in fp32; repeated bf16 casts accumulate error along the chain
-            b_m = tl.dot(b_m_i.to(tl.float32), b_m.to(tl.float32), input_precision="tf32x3")
+            b_m = tl.dot(b_m_i.to(tl.float32), b_m.to(tl.float32), input_precision=CP_DOT_PRECISION)
 
         stride_hm_kv = K + V
         p_m = hm + V + row[:, None] * stride_hm_kv + col[None, :]

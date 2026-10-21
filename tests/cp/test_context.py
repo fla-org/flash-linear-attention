@@ -5,6 +5,8 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -70,16 +72,19 @@ def test_precision_keyword(use_tf32x3: bool, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ('is_nvidia', 'device_name', 'capability', 'supported'),
+    ('is_nvidia', 'is_npu', 'device_name', 'capability', 'supported'),
     [
-        pytest.param(True, 'cuda:1', (7, 5), False, id='turing'),
-        pytest.param(True, 'cuda:1', (8, 0), True, id='ampere'),
-        pytest.param(False, 'cuda:1', (9, 0), False, id='amd'),
-        pytest.param(False, 'cpu', (0, 0), False, id='cpu'),
+        pytest.param(True, False, 'cuda:1', (7, 5), False, id='turing'),
+        pytest.param(True, False, 'cuda:1', (8, 0), True, id='ampere'),
+        pytest.param(False, False, 'cuda:1', (9, 0), False, id='amd'),
+        pytest.param(False, False, 'cpu', (0, 0), False, id='cpu'),
+        pytest.param(False, True, 'npu:1', None, True, id='ascend'),
     ],
 )
-def test_device_requirement(is_nvidia, device_name, capability, supported, monkeypatch):
+def test_device_requirement(is_nvidia, is_npu, device_name, capability, supported, monkeypatch):
     monkeypatch.setattr(context, 'IS_NVIDIA', is_nvidia)
+    monkeypatch.setattr(context, 'IS_NPU', is_npu)
+    device = SimpleNamespace(type='npu', index=1) if is_npu else torch.device(device_name)
     checked_devices = []
 
     def get_capability(device_index):
@@ -88,8 +93,8 @@ def test_device_requirement(is_nvidia, device_name, capability, supported, monke
 
     monkeypatch.setattr(context, 'get_device_capability', get_capability)
     if supported:
-        context._check_cp_device(torch.device(device_name))
+        context._check_cp_device(device)
     else:
         with pytest.raises(RuntimeError, match='compute capability >= 8.0'):
-            context._check_cp_device(torch.device(device_name))
+            context._check_cp_device(device)
     assert checked_devices == ([1] if is_nvidia else [])

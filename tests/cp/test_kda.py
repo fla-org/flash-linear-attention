@@ -23,10 +23,10 @@ from fla.ops.cp import build_cp_context
 from fla.ops.kda import chunk_kda
 from fla.ops.kda.gate import naive_kda_lowerbound_gate
 from fla.ops.kda.naive import naive_recurrent_kda
-from fla.utils import IS_TF32_SUPPORTED, assert_close, device
+from fla.utils import IS_NPU, IS_TF32_SUPPORTED, assert_close, device
 from tests.cp.utils import gather_global, shard_tensor
 
-pytestmark = pytest.mark.skipif(not IS_TF32_SUPPORTED, reason="requires NVIDIA Ampere or newer")
+pytestmark = pytest.mark.skipif(not (IS_TF32_SUPPORTED or IS_NPU), reason="requires NVIDIA Ampere or newer, or Ascend")
 
 
 def _make_inputs(rank, T, H, D, dtype, use_gate_in_kernel, safe_gate, lower_bound):

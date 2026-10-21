@@ -10,7 +10,9 @@ import triton
 import triton.language as tl
 
 from fla.ops.cp.context import _check_cp_device
-from fla.utils import autotune_cache_kwargs
+from fla.utils import IS_NPU, autotune_cache_kwargs
+
+CP_DOT_PRECISION = tl.constexpr('ieee' if IS_NPU else 'tf32x3')
 
 
 @triton.jit
@@ -37,9 +39,9 @@ def chunk_cp_merge_state(
         p_m = hm + V + o_k[:, None] * (V + K) + o_k[None, :]
         b_m = tl.load(p_m, mask=m_k[:, None] & m_k[None, :], other=0.).to(tl.float32)
         if STATE_V_FIRST:
-            b_h = tl.dot(b_h.to(tl.float32), tl.trans(b_m), input_precision="tf32x3")
+            b_h = tl.dot(b_h.to(tl.float32), tl.trans(b_m), input_precision=CP_DOT_PRECISION)
         else:
-            b_h = tl.dot(b_m, b_h.to(tl.float32), input_precision="tf32x3")
+            b_h = tl.dot(b_m, b_h.to(tl.float32), input_precision=CP_DOT_PRECISION)
     else:
         # tile wide reductions to keep TF32x3 operands within shared memory
         b_acc = tl.full(b_h.shape, 0, tl.float32)
@@ -50,10 +52,10 @@ def chunk_cp_merge_state(
             b_m = tl.load(p_m, mask=m_k[:, None] & (o_r < K)[None, :], other=0.).to(tl.float32)
             if STATE_V_FIRST:
                 b_hi = tl.gather(b_h, tl.broadcast_to(o_r[None, :], (BV, 128)), axis=1)
-                b_acc = tl.dot(b_hi.to(tl.float32), tl.trans(b_m), b_acc, input_precision="tf32x3")
+                b_acc = tl.dot(b_hi.to(tl.float32), tl.trans(b_m), b_acc, input_precision=CP_DOT_PRECISION)
             else:
                 b_hi = tl.gather(b_h, tl.broadcast_to(o_r[:, None], (128, BV)), axis=0)
-                b_acc = tl.dot(b_m, b_hi.to(tl.float32), b_acc, input_precision="tf32x3")
+                b_acc = tl.dot(b_m, b_hi.to(tl.float32), b_acc, input_precision=CP_DOT_PRECISION)
         b_h = b_acc
     return b_h + (tl.trans(b_he) if STATE_V_FIRST else b_he)
 

@@ -19,7 +19,7 @@ from fla.ops.common.backends.intracard import IntraCardCPBackend
 from fla.ops.common.intracard_cp import _intracard_cache
 from fla.ops.gated_delta_rule import chunk_gated_delta_rule
 from fla.ops.kda import chunk_kda
-from fla.utils import IS_TF32_SUPPORTED, device
+from fla.utils import IS_NPU, IS_TF32_SUPPORTED, device
 
 
 @pytest.fixture(autouse=True)
@@ -30,7 +30,7 @@ def _clear_intracard_cache():
 
 
 @pytest.mark.skipif(os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") == "1", reason="backend dispatch disabled")
-@pytest.mark.skipif(not IS_TF32_SUPPORTED, reason="requires NVIDIA Ampere or newer")
+@pytest.mark.skipif(not (IS_TF32_SUPPORTED or IS_NPU), reason="requires NVIDIA Ampere or newer, or Ascend")
 def test_chunk_kda_cache(monkeypatch):
     """Reuse the intracard precompute cache for repeated calls with the same cu_seqlens object."""
     # intracard CP is disabled by default.
@@ -111,7 +111,7 @@ def test_backend_enabled(monkeypatch, enabled: bool):
 
 
 @pytest.mark.skipif(os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") == "1", reason="backend dispatch disabled")
-@pytest.mark.skipif(not IS_TF32_SUPPORTED, reason="requires NVIDIA Ampere or newer")
+@pytest.mark.skipif(not (IS_TF32_SUPPORTED or IS_NPU), reason="requires NVIDIA Ampere or newer, or Ascend")
 def test_chunk_gdn_grouped_heads(monkeypatch):
     """Compare intra-card splitting with the ordinary chunk path when query heads are shared by value heads."""
     monkeypatch.setenv("FLA_INTRACARD_CP", "1")

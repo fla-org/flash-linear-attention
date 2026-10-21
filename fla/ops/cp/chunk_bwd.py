@@ -9,7 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.cp.chunk_merge import _prune_cp_configs
+from fla.ops.cp.chunk_merge import CP_DOT_PRECISION, _prune_cp_configs
 from fla.ops.cp.context import _check_cp_device
 from fla.ops.utils.op import exp2
 from fla.utils import autotune_cache_kwargs, check_shared_mem
@@ -274,7 +274,7 @@ def chunk_cp_bwd_kernel_dh(
             else:
                 b_m_i = b_diag - b_kw
             # keep the affine chain in fp32 to avoid repeated bf16 rounding
-            b_m = tl.dot(b_m_i.to(tl.float32), b_m.to(tl.float32), input_precision="tf32x3")
+            b_m = tl.dot(b_m_i.to(tl.float32), b_m.to(tl.float32), input_precision=CP_DOT_PRECISION)
 
         p_m = dhm + V + row[:, None] * (V + K) + col[None, :]
         tl.store(p_m, b_m.to(p_m.dtype.element_ty), mask=(row < K)[:, None] & (col < K)[None, :])
