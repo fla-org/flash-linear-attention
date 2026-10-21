@@ -52,7 +52,7 @@ from fla.utils import IS_NVIDIA, IS_NVIDIA_HOPPER, IS_TF32_SUPPORTED, autotune_c
 if TYPE_CHECKING:
     from fla.ops.cp import FLACPContext
 
-DOT_PRECISION = tl.constexpr("tf32x3" if IS_TF32_SUPPORTED else "ieee")
+DOT_PRECISION = tl.constexpr("tf32x3" if IS_TF32_SUPPORTED else None)
 
 NUM_WARPS_WY = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8]
 
