@@ -33,6 +33,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
 import os
 import random
@@ -42,24 +43,22 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
-try:
-    import torch_npu  # noqa: F401
-except ImportError as exc:
-    raise SystemExit("torch_npu is required to benchmark KDA CP on NPU.") from exc
-
-from torch_npu.profiler import (
-    AiCMetrics,
-    ExportType,
-    ProfilerActivity,
-    ProfilerLevel,
-    _ExperimentalConfig,
-    profile,
-    schedule,
-    tensorboard_trace_handler,
-)
-
 from fla.ops.cp import build_cp_context
 from fla.ops.kda import chunk_kda
+
+with contextlib.suppress(ImportError):
+    import torch_npu  # noqa: F401
+    from torch_npu.profiler import (
+        AiCMetrics,
+        ExportType,
+        ProfilerActivity,
+        ProfilerLevel,
+        _ExperimentalConfig,
+        profile,
+        schedule,
+        tensorboard_trace_handler,
+    )
+
 
 DTYPE = torch.bfloat16
 B = 1
