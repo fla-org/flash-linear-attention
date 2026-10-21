@@ -18,12 +18,15 @@ from fla.ops.utils.cumsum import chunk_local_cumsum
 from fla.ops.utils.op import exp2, unflatten_program_id
 from fla.utils import (
     IS_NVIDIA_HOPPER,
+    IS_TF32_SUPPORTED,
     TRITON_ABOVE_3_6_0,
     TRITON_ABOVE_3_8_0,
     autotune_cache_kwargs,
     check_shared_mem,
     input_guard,
 )
+
+MIXED_DOT_PRECISION = tl.constexpr("tf32x3" if IS_TF32_SUPPORTED else "ieee")
 
 BK_LIST = [32, 64] if check_shared_mem() else [16, 32]
 BV_LIST = [64, 128] if check_shared_mem('ampere') else [16, 32]
@@ -451,7 +454,10 @@ def chunk_gla_fwd_kernel_o(
     # [BT, BT]
     b_A = tl.load(p_A, mask=m_A, other=0.0)
     b_A = tl.where(m_s, b_A, 0.).to(b_v.dtype)
-    b_o = tl.dot(b_A, b_v, b_o)
+    if v.dtype.element_ty != q.dtype.element_ty:
+        b_o = tl.dot(b_A, b_v, b_o, input_precision=MIXED_DOT_PRECISION)
+    else:
+        b_o = tl.dot(b_A, b_v, b_o)
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=m_tv)
 
 

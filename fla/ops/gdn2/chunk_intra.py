@@ -31,12 +31,14 @@ from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.op import exp2, gather, unflatten_program_id
-from fla.utils import IS_GATHER_SUPPORTED, IS_TF32_SUPPORTED, autotune_cache_kwargs
+from fla.utils import IS_GATHER_SUPPORTED, IS_NVIDIA, IS_TF32_SUPPORTED, autotune_cache_kwargs
 
 if IS_TF32_SUPPORTED:
-    SOLVE_TRIL_DOT_PRECISION = tl.constexpr('tf32')
+    SOLVE_TRIL_DOT_PRECISION = tl.constexpr('tf32x3')
 else:
     SOLVE_TRIL_DOT_PRECISION = tl.constexpr('ieee')
+
+BWD_DOT_PRECISION = tl.constexpr("tf32x3" if IS_TF32_SUPPORTED else None)
 
 
 @triton.heuristics({
@@ -529,8 +531,8 @@ def chunk_gdn2_bwd_kernel_intra(
             b_kg = b_kj * exp2(b_gn - b_gk)
             b_dAqk = tl.load(p_dAqk, mask=m_dj, other=0.0)
             b_dAkk = tl.load(p_dAkk, mask=m_dj, other=0.0)
-            b_dq2 = tl.dot(b_dAqk, b_kg, b_dq2)
-            b_dk2 = tl.dot(b_dAkk, b_kg, b_dk2)
+            b_dq2 = tl.dot(b_dAqk, b_kg, b_dq2, input_precision=BWD_DOT_PRECISION)
+            b_dk2 = tl.dot(b_dAkk, b_kg, b_dk2, input_precision=BWD_DOT_PRECISION)
         b_gqn = exp2(b_g - b_gn)
         b_dq2 *= b_gqn
         b_dk2 *= b_gqn
@@ -569,8 +571,8 @@ def chunk_gdn2_bwd_kernel_intra(
         exp_neg_b_g_diag_qk = tl.where(m_j_diag_qk, exp2(-b_g_diag_qk), 0.)
 
         b_k_exp_diag_qk = b_k * exp_neg_b_g_diag_qk
-        b_dq2 += tl.dot(b_dAqk_diag_qk, b_k_exp_diag_qk) * exp_b_g_diag_qk
-        b_dk2 += tl.dot(b_dAkk_diag_qk, b_k_exp_diag_qk) * exp_b_g_diag_qk
+        b_dq2 += tl.dot(b_dAqk_diag_qk, b_k_exp_diag_qk, input_precision=BWD_DOT_PRECISION) * exp_b_g_diag_qk
+        b_dk2 += tl.dot(b_dAkk_diag_qk, b_k_exp_diag_qk, input_precision=BWD_DOT_PRECISION) * exp_b_g_diag_qk
     else:
         for j in range(0, min(BC, T - i_t * BT - i_i * BC)):
             b_dAqk = tl.load(dAqk + o_dA + j, mask=m_dA, other=0)
@@ -628,8 +630,8 @@ def chunk_gdn2_bwd_kernel_intra(
             b_gkn = exp2(b_gk - b_gn)
             b_qg = b_qj * tl.where(m_j[:, None], b_gkn, 0)
             b_kbg = b_kbj * tl.where(m_j[:, None], b_gkn, 0)
-            b_dkt = tl.dot(b_dAqk, b_qg, b_dkt)
-            b_dkt = tl.dot(b_dAkk, b_kbg, b_dkt)
+            b_dkt = tl.dot(b_dAqk, b_qg, b_dkt, input_precision=BWD_DOT_PRECISION)
+            b_dkt = tl.dot(b_dAkk, b_kbg, b_dkt, input_precision=BWD_DOT_PRECISION)
         b_dkt *= exp2(b_gn - b_g)
 
     o_dA = i_ti * H * BT + i_i * BC + o_i
@@ -665,8 +667,8 @@ def chunk_gdn2_bwd_kernel_intra(
         b_q_exp = b_q * exp_b_g_diag_kk
         b_kb_exp = b_k * b_b * exp_b_g_diag_kk
 
-        b_dkt += tl.dot(b_dAqk_diag_kk, b_q_exp) * exp_neg_b_g_diag_kk
-        b_dkt += tl.dot(b_dAkk_diag_kk, b_kb_exp) * exp_neg_b_g_diag_kk
+        b_dkt += tl.dot(b_dAqk_diag_kk, b_q_exp, input_precision=BWD_DOT_PRECISION) * exp_neg_b_g_diag_kk
+        b_dkt += tl.dot(b_dAkk_diag_kk, b_kb_exp, input_precision=BWD_DOT_PRECISION) * exp_neg_b_g_diag_kk
     else:
         for j in range(0, min(BC, T - i_t * BT - i_i * BC)):
             b_dAqk = tl.load(dAqk + o_dA + j * H * BT)
@@ -729,9 +731,9 @@ def chunk_gdn2_fwd_intra(
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
-    Aqk = torch.empty(B, T, H, BT, device=k.device, dtype=k.dtype)
+    Aqk = torch.empty(B, T, H, BT, device=k.device, dtype=torch.float32 if IS_NVIDIA else k.dtype)
     # Akk must be zero-initialized - kernel only writes lower triangular.
-    Akk = torch.zeros(B, T, H, BT, device=k.device, dtype=k.dtype)
+    Akk = torch.zeros(B, T, H, BT, device=k.device, dtype=torch.float32 if IS_NVIDIA else k.dtype)
     Akkd = torch.empty(B, T, H, BC, device=k.device, dtype=torch.float32)
 
     if safe_gate:

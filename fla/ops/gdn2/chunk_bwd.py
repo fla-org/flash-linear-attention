@@ -47,12 +47,22 @@ from fla.ops.utils import chunk_local_cumsum, prepare_chunk_indices
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.op import exp2
-from fla.utils import IS_NVIDIA_HOPPER, autotune_cache_kwargs
+from fla.utils import IS_NVIDIA, IS_NVIDIA_HOPPER, IS_TF32_SUPPORTED, autotune_cache_kwargs
 
 if TYPE_CHECKING:
     from fla.ops.cp import FLACPContext
 
+DOT_PRECISION = tl.constexpr("tf32x3" if IS_TF32_SUPPORTED else None)
+
 NUM_WARPS_WY = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8]
+
+
+def _prune_wy_configs(configs, nargs, **kwargs):
+    args = {**(nargs or {}), **kwargs}
+    if IS_NVIDIA and args['A'].dtype == torch.float32:
+        # avoid two-warp register allocation failures with FP32 inverse products.
+        return [config for config in configs if config.num_warps >= 4]
+    return configs
 
 
 @triton.heuristics({
@@ -70,6 +80,7 @@ NUM_WARPS_WY = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8]
     # NOTE: H is excluded on purpose -- it only scales the grid (NT, B * H) and
     # strides addressing, so it does not shape the work the BK/BV sweep tunes.
     key=['BT', 'K', 'V', 'STATE_V_FIRST'],
+    prune_configs_by={'early_config_prune': _prune_wy_configs},
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -193,8 +204,8 @@ def chunk_gdn2_bwd_kernel_wy_dqkg_fused(
 
             b_dgk += tl.sum(b_h * b_dh, axis=0)
             b_dq = tl.dot(b_do, b_h.to(b_do.dtype), b_dq)
-            b_dk = tl.dot(b_v_new, b_dh.to(b_v_new.dtype), b_dk)
-            b_dw_flow = tl.dot(b_dv.to(b_v_new.dtype), b_h.to(b_v_new.dtype), b_dw_flow)
+            b_dk = tl.dot(b_v_new, b_dh.to(b_v_new.dtype), b_dk, input_precision=DOT_PRECISION)
+            b_dw_flow = tl.dot(b_dv.to(b_v_new.dtype), b_h.to(b_v_new.dtype), b_dw_flow, input_precision=DOT_PRECISION)
             tl.debug_barrier()
 
             if i_k == 0:
@@ -206,9 +217,13 @@ def chunk_gdn2_bwd_kernel_wy_dqkg_fused(
                 b_v = tl.load(p_v, mask=m_vv, other=0.0)
                 b_wg = tl.load(p_wg, mask=m_vv, other=0.0)
                 # dA gets (w_gate * v) on the value side - the GDN-2 channel-wise twist.
-                b_dA = tl.dot(b_dv, tl.trans(b_v * b_wg), b_dA)
+                if A.dtype.element_ty == tl.float32:
+                    b_dA = tl.dot(b_dv, tl.trans(b_v.to(b_dv.dtype) * b_wg.to(b_dv.dtype)),
+                                  b_dA, input_precision=DOT_PRECISION)
+                else:
+                    b_dA = tl.dot(b_dv, tl.trans(b_v * b_wg), b_dA, input_precision=DOT_PRECISION)
 
-                b_dvb = tl.dot(b_A, b_dv)
+                b_dvb = tl.dot(b_A.to(b_dv.dtype), b_dv, input_precision=DOT_PRECISION)
                 b_dv2 = b_dvb * b_wg
                 b_dw_gate = b_dvb * b_v
 
@@ -225,9 +240,9 @@ def chunk_gdn2_bwd_kernel_wy_dqkg_fused(
 
         b_dw_flow = -b_dw_flow.to(b_A.dtype)
         # dA gets (b * exp(gk) * k) on the key side - the GDN-2 channel-wise twist.
-        b_dA = tl.dot(b_dw_flow, tl.trans((b_kg * b_b).to(b_A.dtype)), b_dA)
+        b_dA = tl.dot(b_dw_flow, tl.trans((b_kg * b_b).to(b_A.dtype)), b_dA, input_precision=DOT_PRECISION)
 
-        b_dkgb = tl.dot(b_A, b_dw_flow)
+        b_dkgb = tl.dot(b_A, b_dw_flow, input_precision=DOT_PRECISION)
         p_db = db + o_t[:, None] * (H * K) + o_k[None, :]
         b_db_partial = b_dkgb * b_kg
         tl.store(p_db, b_db_partial.to(p_db.dtype.element_ty), mask=m_kk)
@@ -248,8 +263,8 @@ def chunk_gdn2_bwd_kernel_wy_dqkg_fused(
 
     m_A = (o_t[:, None] > o_t[None, :]) & (m_t[:, None] & m_t)
     b_dA = tl.where(m_A, b_dA, 0)
-    b_dA = tl.dot(b_dA.to(b_A.dtype), b_A)
-    b_dA = tl.dot(b_A, b_dA.to(b_A.dtype))
+    b_dA = tl.dot(b_dA.to(b_A.dtype), b_A, input_precision=DOT_PRECISION)
+    b_dA = tl.dot(b_A, b_dA.to(b_A.dtype), input_precision=DOT_PRECISION)
     b_dA = tl.where(m_A, -b_dA, 0)
     p_dA = dA + o_t[:, None] * (H * BT) + o_A[None, :]
     tl.store(p_dA, b_dA.to(p_dA.dtype.element_ty), mask=m_dA)
