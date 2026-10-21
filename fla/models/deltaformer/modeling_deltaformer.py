@@ -21,7 +21,7 @@ from fla.layers.deltaformer import DeltaFormerAttention
 from fla.models.cache_utils import Cache
 from fla.models.deltaformer.configuration_deltaformer import DeltaFormerConfig
 from fla.models.generation_utils import FLAUnsupportedCacheGenerationMixin
-from fla.models.modeling_utils import FLAPreTrainedModel
+from fla.models.modeling_utils import FLAForCausalLM, FLAPreTrainedModel
 from fla.modules import GatedMLP as DeltaFormerMLP
 from fla.modules import RMSNorm
 from fla.ops.attnres import fused_attnres
@@ -197,12 +197,6 @@ class DeltaFormerModel(DeltaFormerPreTrainedModel):
 
         self.post_init()
 
-    def get_input_embeddings(self):
-        return self.embeddings
-
-    def set_input_embeddings(self, value):
-        self.embeddings = value
-
     def forward(
         self,
         input_ids: torch.LongTensor | None = None,
@@ -286,7 +280,7 @@ class DeltaFormerModel(DeltaFormerPreTrainedModel):
         )
 
 
-class DeltaFormerForCausalLM(DeltaFormerPreTrainedModel, FLAUnsupportedCacheGenerationMixin):
+class DeltaFormerForCausalLM(DeltaFormerPreTrainedModel, FLAForCausalLM, FLAUnsupportedCacheGenerationMixin):
 
     _tied_weights_keys = {"lm_head.weight": "model.embeddings.weight"}
 
@@ -298,12 +292,6 @@ class DeltaFormerForCausalLM(DeltaFormerPreTrainedModel, FLAUnsupportedCacheGene
 
         self.post_init()
 
-    def get_input_embeddings(self):
-        return self.model.get_input_embeddings()
-
-    def set_input_embeddings(self, value):
-        self.model.set_input_embeddings(value)
-
     def tie_weights(self, *args, **kwargs):
         """Tie weights for the model. Accepts any arguments for transformers version compatibility."""
         # Use _tie_or_clone_weights if available (older transformers), otherwise rely on parent class
@@ -312,18 +300,6 @@ class DeltaFormerForCausalLM(DeltaFormerPreTrainedModel, FLAUnsupportedCacheGene
         else:
             # For newer transformers, rely on _tied_weights_keys
             super().tie_weights(*args, **kwargs)
-
-    def get_output_embeddings(self):
-        return self.lm_head
-
-    def set_output_embeddings(self, new_embeddings):
-        self.lm_head = new_embeddings
-
-    def set_decoder(self, decoder):
-        self.model = decoder
-
-    def get_decoder(self):
-        return self.model
 
     @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
     def forward(

@@ -5,11 +5,13 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-import warnings
-
 from transformers.configuration_utils import PreTrainedConfig
 
-from fla.models.modeling_layers import AttentionConfig, AttentionConfigBase
+from fla.models.configuration_utils import (
+    AttentionConfig,
+    AttentionConfigBase,
+    validate_loss_config,
+)
 
 
 class RWKV6Config(AttentionConfigBase, PreTrainedConfig):
@@ -72,16 +74,7 @@ class RWKV6Config(AttentionConfigBase, PreTrainedConfig):
         self.use_l2warp = use_l2warp
         self.vocab_size = vocab_size
 
-        if fuse_cross_entropy and fuse_linear_cross_entropy:
-            raise ValueError(
-                "`fuse_cross_entropy` and `fuse_linear_cross_entropy` cannot be True at the same time.",
-            )
-        if fuse_linear_cross_entropy:
-            warnings.warn(
-                "`fuse_linear_cross_entropy` is enabled, which can improves memory efficiency "
-                "at the potential cost of reduced precision. "
-                "If you observe issues like loss divergence, consider disabling this setting.",
-            )
+        validate_loss_config(fuse_cross_entropy=fuse_cross_entropy, fuse_linear_cross_entropy=fuse_linear_cross_entropy)
 
         super().__init__(
             pad_token_id=pad_token_id,

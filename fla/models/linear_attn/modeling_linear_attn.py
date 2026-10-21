@@ -7,7 +7,6 @@
 
 from __future__ import annotations
 
-import math
 import warnings
 from typing import TYPE_CHECKING, Optional
 
@@ -22,8 +21,7 @@ from fla.layers.linear_attn import LinearAttention
 from fla.models.cache_utils import Cache
 from fla.models.generation_utils import FLAUnsupportedCacheGenerationMixin
 from fla.models.linear_attn.configuration_linear_attn import LinearAttentionConfig
-from fla.models.modeling_layers import get_attention
-from fla.models.modeling_utils import FLAPreTrainedModel
+from fla.models.modeling_utils import FLAForCausalLM, FLAPreTrainedModel, get_attention
 from fla.modules import GatedMLP as LinearAttentionMLP
 from fla.modules import RMSNorm
 from fla.ops.attnres import fused_attnres
@@ -166,55 +164,6 @@ class LinearAttentionPreTrainedModel(FLAPreTrainedModel):
     _no_split_modules = ['LinearAttentionBlock']
     _supports_cache_class = True
 
-    def __init__(self, *inputs, **kwargs):
-        super().__init__(*inputs, **kwargs)
-
-    def _init_weights(
-        self,
-        module: nn.Module,
-        prenorm_residual_strategy: str | None = None,
-        num_residuals_per_layer: int = 2,
-    ):
-        if isinstance(module, (nn.Linear, nn.Conv1d)):
-            if getattr(module, '_is_attnres_proj', False):
-                nn.init.zeros_(module.weight)
-            else:
-                # Slightly different from the TF version which uses truncated_normal for initialization
-                # cf https://github.com/pytorch/pytorch/pull/5617
-                nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
-            if module.bias is not None:
-                nn.init.zeros_(module.bias)
-        elif isinstance(module, nn.Embedding):
-            nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
-        elif hasattr(module, 'reset_parameters'):
-            module.reset_parameters()
-
-        if prenorm_residual_strategy is not None:
-            # Reinitialize selected weights subject to the OpenAI GPT-2 Paper Scheme:
-            #   > A modified initialization which accounts for the accumulation on the residual path with model depth. Scale
-            #   > the weights of residual layers at initialization by a factor of 1/√N where N is the # of residual layers.
-            #   >   -- GPT-2 :: https://openai.com/blog/better-language-models/
-            #
-            # Reference (Megatron-LM): https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/models/gpt/gpt_model.py
-            p = None
-            if hasattr(module, 'o_proj'):
-                p = module.o_proj.weight
-            elif hasattr(module, 'down_proj'):
-                p = module.down_proj.weight
-            if p is not None:
-                # Special Scaled Initialization --> There are 2 Layer Norms per Transformer Block
-                # Following Pytorch init, except scale by 1/sqrt(2 * n_layer)
-                # We need to reinit p since this code could be called multiple times
-                # Having just p *= scale would repeatedly scale it down
-                if prenorm_residual_strategy == 'rescale':
-                    nn.init.kaiming_uniform_(p, a=math.sqrt(5))
-                    with torch.no_grad():
-                        p /= math.sqrt(num_residuals_per_layer * self.config.num_hidden_layers)
-                elif prenorm_residual_strategy == 'zero':
-                    nn.init.zeros_(p)
-                else:
-                    raise ValueError(f"Invalid prenorm_residual_strategy: {prenorm_residual_strategy}")
-
 
 class LinearAttentionModel(LinearAttentionPreTrainedModel):
 
@@ -236,12 +185,6 @@ class LinearAttentionModel(LinearAttentionPreTrainedModel):
         self.gradient_checkpointing = False
 
         self.post_init()
-
-    def get_input_embeddings(self):
-        return self.embeddings
-
-    def set_input_embeddings(self, value):
-        self.embeddings = value
 
     def forward(
         self,
@@ -327,7 +270,7 @@ class LinearAttentionModel(LinearAttentionPreTrainedModel):
         )
 
 
-class LinearAttentionForCausalLM(LinearAttentionPreTrainedModel, FLAUnsupportedCacheGenerationMixin):
+class LinearAttentionForCausalLM(LinearAttentionPreTrainedModel, FLAForCausalLM, FLAUnsupportedCacheGenerationMixin):
 
     _tied_weights_keys = {"lm_head.weight": "model.embeddings.weight"}
 
@@ -340,24 +283,6 @@ class LinearAttentionForCausalLM(LinearAttentionPreTrainedModel, FLAUnsupportedC
 
         # Initialize weights and apply final processing
         self.post_init()
-
-    def get_input_embeddings(self):
-        return self.model.embeddings
-
-    def set_input_embeddings(self, value):
-        self.model.embeddings = value
-
-    def get_output_embeddings(self):
-        return self.lm_head
-
-    def set_output_embeddings(self, new_embeddings):
-        self.lm_head = new_embeddings
-
-    def set_decoder(self, decoder):
-        self.model = decoder
-
-    def get_decoder(self):
-        return self.model
 
     @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
     def forward(
