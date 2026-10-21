@@ -8,7 +8,7 @@
 import torch
 
 from fla.ops.gla import chunk_gla
-from fla.ops.lightnet.gate import fused_lightnet_gate
+from fla.ops.gsa.gate import fused_additive_gate
 
 
 @torch.compiler.disable
@@ -51,7 +51,7 @@ def chunk_lightnet(
             The recurrent state is `None` when `output_final_state=False`; the final log-normalizer is always returned.
     """
     h0, z0 = (None, None) if initial_state is None else initial_state
-    k, g, zt = fused_lightnet_gate(x=k, initial_state=z0, cu_seqlens=cu_seqlens)
+    k, g, zt = fused_additive_gate(x=k, initial_state=z0, cu_seqlens=cu_seqlens)
     o, ht = chunk_gla(
         q=q,
         k=k,

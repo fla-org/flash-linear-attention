@@ -5,30 +5,35 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""End-to-end cache tests for intracard CP via chunk_kda."""
+"""Check intra-card CP routing, cache reuse, and grouped-head outputs and final states."""
 
 import inspect
 import os
 
 import pytest
 import torch
+import torch.nn.functional as F
 
+from fla import backends
 from fla.ops.common import intracard_cp
+from fla.ops.common.backends.intracard import IntraCardCPBackend
+from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_fwd_h
 from fla.ops.common.intracard_cp import _intracard_cache
+from fla.ops.gated_delta_rule import chunk_gated_delta_rule
 from fla.ops.kda import chunk_kda
-from fla.utils import device
+from fla.utils import device, device_torch_lib
 
 
 @pytest.fixture(autouse=True)
-def clear_intracard_cache():
+def _clear_intracard_cache():
     _intracard_cache.clear()
     yield
     _intracard_cache.clear()
 
 
 @pytest.mark.skipif(os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") == "1", reason="backend dispatch disabled")
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_chunk_kda_intracard_cache_hit_same_cu_seqlens_object(monkeypatch):
+@pytest.mark.skipif(device != "cuda" or not device_torch_lib.is_available(), reason="requires CUDA")
+def test_chunk_kda_cache(monkeypatch):
     """Reuse the intracard precompute cache for repeated calls with the same cu_seqlens object."""
     # intracard CP is disabled by default.
     monkeypatch.setenv("FLA_INTRACARD_CP", "1")
@@ -36,7 +41,7 @@ def test_chunk_kda_intracard_cache_hit_same_cu_seqlens_object(monkeypatch):
     dtype = torch.bfloat16
 
     # with chunk_size=64 and MIN_SUBSEQ_CHUNKS=128, subseq_len is at least 8192.
-    # T=32768 bypasses early_return (2 * subseq_len) and exercises splitting (3 * subseq_len).
+    # the 32768-token sequence bypasses early_return and reaches the split threshold of 3 * subseq_len.
     B, T, H, D = 1, 32768, 1, 32
 
     q = torch.randn(B, T, H, D, device=device, dtype=dtype)
@@ -67,9 +72,9 @@ def test_chunk_kda_intracard_cache_hit_same_cu_seqlens_object(monkeypatch):
             v=v,
             g=g,
             beta=beta,
+            use_gate_in_kernel=True,
             cu_seqlens=cu_seqlens,
             cu_seqlens_cpu=cu_seqlens_cpu,
-            use_gate_in_kernel=True,
             A_log=A_log,
             dt_bias=dt_bias,
         )
@@ -79,9 +84,9 @@ def test_chunk_kda_intracard_cache_hit_same_cu_seqlens_object(monkeypatch):
             v=v,
             g=g,
             beta=beta,
+            use_gate_in_kernel=True,
             cu_seqlens=cu_seqlens,
             cu_seqlens_cpu=cu_seqlens_cpu,
-            use_gate_in_kernel=True,
             A_log=A_log,
             dt_bias=dt_bias,
         )
@@ -95,41 +100,25 @@ def test_chunk_kda_intracard_cache_hit_same_cu_seqlens_object(monkeypatch):
     assert torch.allclose(o1, o2, atol=1e-4, rtol=1e-4)
 
 
-def test_intracard_backend_disabled_by_default():
+def test_backend_default():
     """Verify that IntraCardCPBackend is disabled by default."""
-    from fla.ops.common.backends.intracard import IntraCardCPBackend
-
     assert IntraCardCPBackend.default_enable is False
 
 
-def test_intracard_backend_disabled_when_env_var_is_zero(monkeypatch):
-    """Verify that IntraCardCPBackend is disabled when FLA_INTRACARD_CP=0."""
-    from fla.ops.common.backends.intracard import IntraCardCPBackend
-
-    monkeypatch.setenv("FLA_INTRACARD_CP", "0")
-    assert IntraCardCPBackend().is_enabled() is False
-
-
-def test_intracard_backend_enabled_when_env_var_is_one(monkeypatch):
-    """Verify that IntraCardCPBackend is enabled when FLA_INTRACARD_CP=1."""
-    from fla.ops.common.backends.intracard import IntraCardCPBackend
-
-    monkeypatch.setenv("FLA_INTRACARD_CP", "1")
-    assert IntraCardCPBackend().is_enabled() is True
+@pytest.mark.parametrize('enabled', [False, True], ids=['disabled', 'enabled'])
+def test_backend_enabled(monkeypatch, enabled: bool):
+    """The environment switch overrides the backend's disabled default."""
+    monkeypatch.setenv("FLA_INTRACARD_CP", "1" if enabled else "0")
+    assert IntraCardCPBackend().is_enabled() is enabled
 
 
 @pytest.mark.skipif(os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") == "1", reason="backend dispatch disabled")
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_chunk_gdn_intracard_gqa(monkeypatch):
-    """E2E: chunk_gated_delta_rule intracard path produces correct results with GQA (Hq < H).
-
-    Uses a long varlen sequence to exercise the intracard split path,
-    with Hq=2 key/query heads and H=4 value/output heads.
-    """
-    import torch.nn.functional as F
-
-    from fla.ops.gated_delta_rule import chunk_gated_delta_rule
-
+@pytest.mark.skipif(device != "cuda" or not device_torch_lib.is_available(), reason="requires CUDA")
+def test_chunk_gdn_grouped_heads(monkeypatch):
+    """Compare intra-card splitting with the ordinary chunk path when query heads are shared by value heads."""
+    monkeypatch.setenv("FLA_INTRACARD_CP", "1")
+    monkeypatch.setenv("FLA_FLASH_QLA", "0")
+    monkeypatch.setenv("FLA_TILELANG", "0")
     torch.manual_seed(0)
     dtype = torch.bfloat16
 
@@ -145,7 +134,16 @@ def test_chunk_gdn_intracard_gqa(monkeypatch):
     cu_seqlens = torch.tensor([0, T], device=device, dtype=torch.int32)
     cu_seqlens_cpu = cu_seqlens.cpu()
 
-    # inference mode enables the intracard path.
+    split_calls = 0
+    original_precompute = intracard_cp._precompute_intracard_indices
+
+    def counted_precompute(*args, **kwargs):
+        nonlocal split_calls
+        split_calls += 1
+        return original_precompute(*args, **kwargs)
+
+    # index construction occurs only after the backend actually splits the sequence
+    monkeypatch.setattr(intracard_cp, "_precompute_intracard_indices", counted_precompute)
     with torch.inference_mode():
         o_intra, ht_intra = chunk_gated_delta_rule(
             q=q,
@@ -153,18 +151,16 @@ def test_chunk_gdn_intracard_gqa(monkeypatch):
             v=v,
             g=g,
             beta=beta,
+            output_final_state=True,
             cu_seqlens=cu_seqlens,
             cu_seqlens_cpu=cu_seqlens_cpu,
-            output_final_state=True,
         )
 
-    from fla import backends
-    from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_fwd_h
+    assert split_calls == 1, "the grouped-head case must execute intra-card splitting"
 
     common_registry = backends._function_registries[inspect.unwrap(chunk_gated_delta_rule_fwd_h)]
-    saved_backends = common_registry._backends.copy()
-    common_registry._backends.clear()
-    try:
+    with monkeypatch.context() as patch:
+        patch.setattr(common_registry, '_backends', {})
         with torch.inference_mode():
             o_ref, ht_ref = chunk_gated_delta_rule(
                 q=q,
@@ -172,14 +168,15 @@ def test_chunk_gdn_intracard_gqa(monkeypatch):
                 v=v,
                 g=g,
                 beta=beta,
+                output_final_state=True,
                 cu_seqlens=cu_seqlens,
                 cu_seqlens_cpu=cu_seqlens_cpu,
-                output_final_state=True,
             )
-    finally:
-        common_registry._backends = saved_backends
 
-    assert torch.allclose(o_intra, o_ref, atol=1e-2, rtol=1e-2), \
+    assert split_calls == 1, "the reference must bypass intra-card splitting"
+    assert torch.allclose(o_intra, o_ref, atol=1e-2, rtol=1e-2), (
         f"Output mismatch: max diff={(o_intra - o_ref).abs().max().item()}"
-    assert torch.allclose(ht_intra, ht_ref, atol=1e-2, rtol=1e-2), \
+    )
+    assert torch.allclose(ht_intra, ht_ref, atol=1e-2, rtol=1e-2), (
         f"Final state mismatch: max diff={(ht_intra - ht_ref).abs().max().item()}"
+    )

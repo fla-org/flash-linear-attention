@@ -245,6 +245,7 @@ def _launch_wy_dA_finalize(
     """Host-split aligned bulk vs tail so TAIL_MODE is constexpr per launch."""
     kwargs = dict(kernel_kwargs)
     kwargs['num_core'] = num_core
+    kwargs.update(ascend_compile_kwargs())
     if is_varlen:
         kwargs['TAIL_MODE'] = 1
         kwargs['NT_OFFSET'] = 0
@@ -910,7 +911,7 @@ def chunk_kda_bwd_wy_dqkg_fused_npu(
     )
     for k_off in range(NK):
         k_part_kwargs['K_OFFSET'] = k_off
-        chunk_kda_bwd_kernel_wy_k_part_npu[(num_core,)](**k_part_kwargs)
+        chunk_kda_bwd_kernel_wy_k_part_npu[(num_core,)](**k_part_kwargs, **ascend_compile_kwargs())
 
     k_arg, k_t_contig = _t_contig_arg(k, H)
     g_arg, g_t_contig = _t_contig_arg(g, HV)
@@ -947,7 +948,7 @@ def chunk_kda_bwd_wy_dqkg_fused_npu(
     )
     for k_off in range(NK):
         dw_kwargs['K_OFFSET'] = k_off
-        chunk_kda_bwd_kernel_wy_dw_part_npu[(num_core,)](**dw_kwargs)
+        chunk_kda_bwd_kernel_wy_dw_part_npu[(num_core,)](**dw_kwargs, **ascend_compile_kwargs())
 
     _launch_wy_dA_finalize(
         chunk_kda_bwd_kernel_wy_dA_finalize_npu,
