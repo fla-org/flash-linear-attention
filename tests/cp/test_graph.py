@@ -23,19 +23,18 @@ import torch.nn.functional as F
 from fla.ops.cp import FLACPContext, build_cp_context
 from fla.ops.kda import chunk_kda
 from fla.utils import IS_AMD, IS_NVIDIA, assert_close, device
-from tests.cp.utils import run_distributed
-from tests.ops.kda_graph import _VARLEN_CONFIGS, MAX_NUM_SEQS, D, H, T, _rand_inputs
+from tests.ops.kda_graph import MAX_NUM_SEQS, VARLEN_CASES, D, H, T, make_inputs
 
 pytestmark = pytest.mark.skipif(
     not (IS_NVIDIA or IS_AMD), reason="direct graph capture requires CUDA or HIP",
 )
 
-TOK_NAMES = ["q", "k", "v", "g", "beta"]
-NAMES = TOK_NAMES + ["A_log", "dt_bias"]
-OUT_NAMES = ["o", "dq", "dk", "dv", "dg", "db", "dA", "dbias"]
+TOKEN_NAMES = ["q", "k", "v", "g", "beta"]
+INPUT_NAMES = TOKEN_NAMES + ["A_log", "dt_bias"]
+OUTPUT_NAMES = ["o", "dq", "dk", "dv", "dg", "db", "dA", "dbias"]
 
 
-def _rand_global(seed, device):
+def _make_inputs(seed, device):
     """Same seed on every rank reproduces one logical global batch; ranks slice their shard."""
     g = torch.Generator(device).manual_seed(seed)
     dt = torch.bfloat16
@@ -51,7 +50,7 @@ def _rand_global(seed, device):
     return dict(q=q, k=k, v=v, g=gg, beta=beta, A_log=A_log, dt_bias=dt_bias, do=do)
 
 
-def _test_chunk_graph(rank, world_size):
+def _run_graph(rank, world_size):
     device = torch.device('cuda', rank)
     part = T // world_size
     lo, hi = rank * part, (rank + 1) * part
@@ -69,7 +68,7 @@ def _test_chunk_graph(rank, world_size):
         post_dev.fill_(base.post_num_ranks)
 
     # one persistent context around the static buffers; host fields are only read eagerly
-    base0 = build_cp_context(torch.tensor(_VARLEN_CONFIGS[0][1], dtype=torch.long, device=device), group=group)
+    base0 = build_cp_context(torch.tensor(VARLEN_CASES[0][1], dtype=torch.long, device=device), group=group)
     refresh(base0)
     ctx = FLACPContext(
         group=group,
@@ -84,12 +83,12 @@ def _test_chunk_graph(rank, world_size):
     )
 
     def shard_leaves(inp):
-        leaves = {n: inp[n][:, lo:hi].detach().clone().requires_grad_() for n in TOK_NAMES}
+        leaves = {n: inp[n][:, lo:hi].detach().clone().requires_grad_() for n in TOKEN_NAMES}
         for n in ("A_log", "dt_bias"):
             leaves[n] = inp[n].detach().clone().requires_grad_()
         return leaves
 
-    inp0 = _rand_global(0, device)
+    inp0 = _make_inputs(0, device)
     leaves = shard_leaves(inp0)
     do = inp0["do"][:, lo:hi].detach().clone()
 
@@ -98,10 +97,17 @@ def _test_chunk_graph(rank, world_size):
             if t.grad is not None:
                 t.grad.zero_()
         o, _ = chunk_kda(
-            q=leaves["q"], k=leaves["k"], v=leaves["v"], g=leaves["g"], beta=leaves["beta"],
-            cp_context=ctx, use_gate_in_kernel=True,
-            A_log=leaves["A_log"], dt_bias=leaves["dt_bias"],
-            use_graph=True, max_num_seqs=MAX_NUM_SEQS,
+            q=leaves["q"],
+            k=leaves["k"],
+            v=leaves["v"],
+            g=leaves["g"],
+            beta=leaves["beta"],
+            cp_context=ctx,
+            use_gate_in_kernel=True,
+            A_log=leaves["A_log"],
+            dt_bias=leaves["dt_bias"],
+            use_graph=True,
+            max_num_seqs=MAX_NUM_SEQS,
         )
         (o * do).sum().backward()
         return o
@@ -118,9 +124,9 @@ def _test_chunk_graph(rank, world_size):
     with torch.cuda.graph(graph):
         cap_o = step()
 
-    for seed, (tag, cucfg) in enumerate(_VARLEN_CONFIGS, start=1):
-        inp = _rand_global(seed * 17, device)
-        for n in TOK_NAMES:
+    for seed, (tag, cucfg) in enumerate(VARLEN_CASES, start=1):
+        inp = _make_inputs(seed * 17, device)
+        for n in TOKEN_NAMES:
             leaves[n].data.copy_(inp[n][:, lo:hi])
         for n in ("A_log", "dt_bias"):
             leaves[n].data.copy_(inp[n])
@@ -131,21 +137,27 @@ def _test_chunk_graph(rank, world_size):
         dist.barrier()
         graph.replay()
         torch.cuda.synchronize()
-        got = [cap_o.clone()] + [leaves[n].grad.clone() for n in NAMES]
+        got = [cap_o.clone()] + [leaves[n].grad.clone() for n in INPUT_NAMES]
         dist.barrier()
 
         # eager CP reference on the same shard
         ref_leaves = shard_leaves(inp)
         o, _ = chunk_kda(
-            q=ref_leaves["q"], k=ref_leaves["k"], v=ref_leaves["v"], g=ref_leaves["g"], beta=ref_leaves["beta"],
-            cp_context=build_cp_context(cu, group=group), use_gate_in_kernel=True,
-            A_log=ref_leaves["A_log"], dt_bias=ref_leaves["dt_bias"],
+            q=ref_leaves["q"],
+            k=ref_leaves["k"],
+            v=ref_leaves["v"],
+            g=ref_leaves["g"],
+            beta=ref_leaves["beta"],
+            cp_context=build_cp_context(cu, group=group),
+            use_gate_in_kernel=True,
+            A_log=ref_leaves["A_log"],
+            dt_bias=ref_leaves["dt_bias"],
         )
         (o * inp["do"][:, lo:hi]).sum().backward()
-        ref = [o.detach()] + [ref_leaves[n].grad for n in NAMES]
+        ref = [o.detach()] + [ref_leaves[n].grad for n in INPUT_NAMES]
         dist.barrier()
 
-        for name, r, g in zip(OUT_NAMES, ref, got):
+        for name, r, g in zip(OUTPUT_NAMES, ref, got):
             assert_close(f"{tag}::{name}", r, g, ratio=8e-3)
 
     # no destroy_process_group: tearing down a communicator recorded in a CUDA graph
@@ -153,9 +165,9 @@ def _test_chunk_graph(rank, world_size):
     dist.barrier()
 
 
-def test_chunk_graph():
+def test_chunk_kda(run_distributed):
     # a communicator recorded by a CUDA graph must outlive the graph; worker exit reaps it
-    run_distributed(worker=_test_chunk_graph, world_size=2, destroy_process_group=False)
+    run_distributed(worker=_run_graph, world_size=2, destroy_process_group=False)
 
 
 def _eager_cp(inp, cucfg, gate):
@@ -183,11 +195,11 @@ def _eager_cp(inp, cucfg, gate):
     return out
 
 
-def test_chunk_graph_world1(single_rank_group, monkeypatch):
+def test_chunk_kda_single_rank(single_rank_group, monkeypatch):
     # keep the eager reference on the same backend as graph capture
     monkeypatch.setenv("FLA_TILELANG", "0")
     gate = True
-    cu = torch.tensor(_VARLEN_CONFIGS[0][1], dtype=torch.long, device=device)
+    cu = torch.tensor(VARLEN_CASES[0][1], dtype=torch.long, device=device)
     pre_dev = torch.zeros(1, dtype=torch.int32, device=device)
     post_dev = torch.zeros(1, dtype=torch.int32, device=device)
     base = build_cp_context(cu, group=dist.group.WORLD)
@@ -203,7 +215,7 @@ def test_chunk_graph_world1(single_rank_group, monkeypatch):
         post_num_ranks_dev=post_dev,
     )
 
-    inp0 = _rand_inputs(seed=0, gate=gate, safe_gate=False)
+    inp0 = make_inputs(seed=0, gate=gate, safe_gate=False)
     names = ["q", "k", "v", "g", "beta", "A_log", "dt_bias"]
     leaves = {n: inp0[n].detach().clone().requires_grad_() for n in names}
     do = inp0["do"].detach().clone()
@@ -240,8 +252,8 @@ def test_chunk_graph_world1(single_rank_group, monkeypatch):
         cap_o = step()
 
     names_out = ["o", "dq", "dk", "dv", "dg", "db", "dA", "dbias"]
-    for seed, (tag, cucfg) in enumerate(_VARLEN_CONFIGS, start=1):
-        inp = _rand_inputs(seed=seed * 17, gate=gate, safe_gate=False)
+    for seed, (tag, cucfg) in enumerate(VARLEN_CASES, start=1):
+        inp = make_inputs(seed=seed * 17, gate=gate, safe_gate=False)
         for n in names:
             leaves[n].data.copy_(inp[n])
         do.copy_(inp["do"])

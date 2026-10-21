@@ -17,10 +17,10 @@ from fla.modules.causal_conv1d import causal_conv1d
 from fla.modules.causal_conv1d.backends.cuda import ops
 from fla.ops.cp import FLACPContext, build_cp_context
 from fla.utils import IS_NVIDIA, assert_close, device, device_torch_lib
-from tests.cp.utils import gather_global, run_distributed, shard_tensor
+from tests.cp.utils import gather_global, shard_tensor
 
 
-def _test_causal_conv1d(
+def _run_causal_conv1d(
     rank: int,
     world_size: int,
     lengths: list[int],
@@ -183,6 +183,7 @@ def _test_causal_conv1d(
     ],
 )
 def test_causal_conv1d(
+    run_distributed,
     world_size: int,
     lengths: list[int],
     D: int,
@@ -202,7 +203,7 @@ def test_causal_conv1d(
             pytest.skip('CUDA backend requires an NVIDIA GPU')
         pytest.importorskip('causal_conv1d')
     run_distributed(
-        worker=_test_causal_conv1d,
+        worker=_run_causal_conv1d,
         world_size=world_size,
         lengths=lengths,
         D=D,

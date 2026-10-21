@@ -5,6 +5,8 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+"""Changing one head's vector gate must affect only that head's backward state summary."""
+
 import pytest
 import torch
 import triton
@@ -24,7 +26,7 @@ from fla.utils import device
         ]
     ],
 )
-def test_pre_process_bwd_gk(monkeypatch, tmp_path,  T: int, H: int, K: int, V: int):
+def test_chunk_bwd_gate_head(monkeypatch, tmp_path, T: int, H: int, K: int, V: int):
     monkeypatch.setenv("TRITON_CACHE_DIR", str(tmp_path))
     torch.manual_seed(42)
     B = 1

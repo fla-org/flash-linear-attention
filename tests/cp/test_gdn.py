@@ -16,12 +16,12 @@ import torch.nn.functional as F
 from fla.ops.cp import build_cp_context
 from fla.ops.gated_delta_rule import chunk_gated_delta_rule
 from fla.utils import assert_close, device
-from tests.cp.utils import gather_global, run_distributed, shard_tensor
+from tests.cp.utils import gather_global, shard_tensor
 
 pytestmark = pytest.mark.skipif(device != "cuda", reason="requires CUDA or ROCm GPUs")
 
 
-def _test_chunk(
+def _run_chunk(
     rank: int,
     world_size: int,
     H: int,
@@ -137,26 +137,26 @@ def _test_chunk(
 @pytest.mark.parametrize(
     ('world_size', 'lengths', 'H', 'D', 'Hq', 'state_v_first'),
     [
-        pytest.param(2, [3000, 4000, 3240], 4, 64, 4, False, id='CP2_SequenceCut'),
-        pytest.param(2, [5120, 5120], 4, 128, 4, False, id='CP2_BoundaryAligned'),
-        pytest.param(4, [7000, 3240], 4, 128, 4, False, id='CP4_Complex'),
-        pytest.param(4, [10240], 4, 128, 4, False, id='CP4_SingleSequence'),
-        pytest.param(8, [65536], 4, 128, 4, False, id='CP8_SingleSequence'),
-        pytest.param(2, [1000, 1500, 2000, 2500, 1240, 1000, 1000], 4, 128, 4, False, id='CP2_ManyShortSequences'),
-        pytest.param(2, [3000, 4000, 3240], 4, 64, 2, False, id='CP2_GQA_SequenceCut'),
-        pytest.param(2, [10240], 8, 64, 2, False, id='CP2_GQA_SingleSequence'),
-        pytest.param(2, [3000, 4000, 3240], 4, 128, 4, True, id='CP2_TransposeState'),
-        pytest.param(4, [10240], 4, 128, 4, True, id='CP4_TransposeState'),
+        pytest.param(2, [3000, 4000, 3240], 4, 64, 4, False, id='cp2-sequence-cut'),
+        pytest.param(2, [5120, 5120], 4, 128, 4, False, id='cp2-boundary-aligned'),
+        pytest.param(4, [7000, 3240], 4, 128, 4, False, id='cp4-sequence-cut'),
+        pytest.param(4, [10240], 4, 128, 4, False, id='cp4-single-sequence'),
+        pytest.param(8, [65536], 4, 128, 4, False, id='cp8-single-sequence'),
+        pytest.param(2, [1000, 1500, 2000, 2500, 1240, 1000, 1000], 4, 128, 4, False, id='cp2-short-sequences'),
+        pytest.param(2, [3000, 4000, 3240], 4, 64, 2, False, id='cp2-gva-sequence-cut'),
+        pytest.param(2, [10240], 8, 64, 2, False, id='cp2-gva-single-sequence'),
+        pytest.param(2, [3000, 4000, 3240], 4, 128, 4, True, id='cp2-v-first'),
+        pytest.param(4, [10240], 4, 128, 4, True, id='cp4-v-first'),
     ],
 )
-def test_chunk(world_size, lengths, H, D, Hq, state_v_first):
+def test_chunk(run_distributed, world_size, lengths, H, D, Hq, state_v_first):
     run_distributed(
-        worker=_test_chunk,
+        worker=_run_chunk,
         world_size=world_size,
-        lengths=lengths,
         H=H,
         D=D,
-        Hq=Hq,
-        state_v_first=state_v_first,
+        lengths=lengths,
         dtype=torch.bfloat16,
+        state_v_first=state_v_first,
+        Hq=Hq,
     )

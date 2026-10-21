@@ -5,6 +5,8 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+"""Share graph capacities, sequence layouts, and inputs between ordinary and CP KDA tests."""
+
 import torch
 import torch.nn.functional as F
 
@@ -17,7 +19,7 @@ D = 64
 MAX_NUM_SEQS = 4
 
 # (tag, cu_seqlens) -- all cover [0, T]; trailing repeats are zero-length padding sequences
-_VARLEN_CONFIGS = [
+VARLEN_CASES = [
     ("4seq", [0, 300, 600, 900, 1024]),
     ("2seq_zerotail", [0, 512, 1024, 1024, 1024]),
     ("4seq_alt", [0, 100, 400, 700, 1024]),
@@ -25,7 +27,7 @@ _VARLEN_CONFIGS = [
 ]
 
 
-def _rand_inputs(seed, gate, safe_gate, hv=H):
+def make_inputs(seed, gate, safe_gate, hv=H):
     # q/k carry H heads; v/g/beta/state carry HV heads (HV>H exercises GVA).
     g = torch.Generator(device).manual_seed(seed)
     dt = torch.bfloat16

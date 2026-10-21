@@ -16,12 +16,12 @@ from fla.modules.token_shift import token_shift_ref
 from fla.modules.token_shift_cp import token_shift_cp
 from fla.ops.cp import build_cp_context
 from fla.utils import assert_close, device
-from tests.cp.utils import gather_global, run_distributed, shard_tensor
+from tests.cp.utils import gather_global, shard_tensor
 
 pytestmark = pytest.mark.skipif(device != "cuda", reason="requires CUDA or ROCm GPUs")
 
 
-def _test_token_shift(
+def _run_token_shift(
     rank: int,
     world_size: int,
     D: int,
@@ -77,20 +77,14 @@ def _test_token_shift(
 @pytest.mark.parametrize(
     ('world_size', 'lengths'),
     [
-        pytest.param(2, [300, 400, 324], id='CP2_SequenceCut'),
-        pytest.param(2, [512, 512], id='CP2_BoundaryAligned'),
-        pytest.param(4, [700, 324], id='CP4_Complex'),
-        pytest.param(4, [1024], id='CP4_SingleSequence'),
-        pytest.param(2, [100, 150, 200, 250, 124, 100, 100], id='CP2_ManyShortSequences'),
-        pytest.param(2, [513, 511], id='CP2_ShortTail_Len1'),
-        pytest.param(2, [514, 510], id='CP2_ShortTail_Len2'),
+        pytest.param(2, [300, 400, 324], id='cp2-sequence-cut'),
+        pytest.param(2, [512, 512], id='cp2-boundary-aligned'),
+        pytest.param(4, [700, 324], id='cp4-sequence-cut'),
+        pytest.param(4, [1024], id='cp4-single-sequence'),
+        pytest.param(2, [100, 150, 200, 250, 124, 100, 100], id='cp2-short-sequences'),
+        pytest.param(2, [513, 511], id='cp2-tail-1'),
+        pytest.param(2, [514, 510], id='cp2-tail-2'),
     ],
 )
-def test_token_shift(world_size, lengths):
-    run_distributed(
-        worker=_test_token_shift,
-        world_size=world_size,
-        D=128,
-        lengths=lengths,
-        dtype=torch.float32,
-    )
+def test_token_shift(run_distributed, world_size, lengths):
+    run_distributed(worker=_run_token_shift, world_size=world_size, D=128, lengths=lengths, dtype=torch.float32)

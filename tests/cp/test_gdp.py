@@ -14,12 +14,12 @@ from fla.ops.cp import build_cp_context
 from fla.ops.gated_delta_product import chunk_gated_delta_product
 from fla.ops.gated_delta_product.naive import naive_recurrent_gated_delta_product
 from fla.utils import assert_close, device
-from tests.cp.utils import gather_global, run_distributed, shard_tensor
+from tests.cp.utils import gather_global, shard_tensor
 
 pytestmark = pytest.mark.skipif(device != "cuda", reason="requires CUDA or ROCm GPUs")
 
 
-def _test_chunk(
+def _run_chunk(
     rank: int,
     world_size: int,
     num_householder: int,
@@ -139,5 +139,5 @@ def _test_chunk(
 
 
 @pytest.mark.parametrize("num_householder", [2, 3], ids=["n2", "n3"])
-def test_chunk(num_householder: int) -> None:
-    run_distributed(worker=_test_chunk, world_size=2, num_householder=num_householder)
+def test_chunk(run_distributed, num_householder: int) -> None:
+    run_distributed(worker=_run_chunk, world_size=2, num_householder=num_householder)

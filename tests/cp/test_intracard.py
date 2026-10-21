@@ -19,7 +19,7 @@ from fla.utils import device, device_torch_lib
 
 
 @pytest.fixture(autouse=True)
-def clear_intracard_cache():
+def _clear_intracard_cache():
     _intracard_cache.clear()
     yield
     _intracard_cache.clear()
@@ -27,7 +27,7 @@ def clear_intracard_cache():
 
 @pytest.mark.skipif(os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") == "1", reason="backend dispatch disabled")
 @pytest.mark.skipif(device != "cuda" or not device_torch_lib.is_available(), reason="requires CUDA")
-def test_chunk_kda_intracard_cache_hit_same_cu_seqlens_object(monkeypatch):
+def test_chunk_kda_cache(monkeypatch):
     """Reuse the intracard precompute cache for repeated calls with the same cu_seqlens object."""
     # intracard CP is disabled by default.
     monkeypatch.setenv("FLA_INTRACARD_CP", "1")
@@ -94,32 +94,25 @@ def test_chunk_kda_intracard_cache_hit_same_cu_seqlens_object(monkeypatch):
     assert torch.allclose(o1, o2, atol=1e-4, rtol=1e-4)
 
 
-def test_intracard_backend_disabled_by_default():
+def test_backend_default():
     """Verify that IntraCardCPBackend is disabled by default."""
     from fla.ops.common.backends.intracard import IntraCardCPBackend
 
     assert IntraCardCPBackend.default_enable is False
 
 
-def test_intracard_backend_disabled_when_env_var_is_zero(monkeypatch):
-    """Verify that IntraCardCPBackend is disabled when FLA_INTRACARD_CP=0."""
+@pytest.mark.parametrize('enabled', [False, True], ids=['disabled', 'enabled'])
+def test_backend_enabled(monkeypatch, enabled: bool):
+    """The environment switch overrides the backend's disabled default."""
     from fla.ops.common.backends.intracard import IntraCardCPBackend
 
-    monkeypatch.setenv("FLA_INTRACARD_CP", "0")
-    assert IntraCardCPBackend().is_enabled() is False
-
-
-def test_intracard_backend_enabled_when_env_var_is_one(monkeypatch):
-    """Verify that IntraCardCPBackend is enabled when FLA_INTRACARD_CP=1."""
-    from fla.ops.common.backends.intracard import IntraCardCPBackend
-
-    monkeypatch.setenv("FLA_INTRACARD_CP", "1")
-    assert IntraCardCPBackend().is_enabled() is True
+    monkeypatch.setenv("FLA_INTRACARD_CP", "1" if enabled else "0")
+    assert IntraCardCPBackend().is_enabled() is enabled
 
 
 @pytest.mark.skipif(os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") == "1", reason="backend dispatch disabled")
 @pytest.mark.skipif(device != "cuda" or not device_torch_lib.is_available(), reason="requires CUDA")
-def test_chunk_gdn_intracard_gqa(monkeypatch):
+def test_chunk_gdn_grouped_heads(monkeypatch):
     """E2E: chunk_gated_delta_rule intracard path produces correct results with GQA (Hq < H).
 
     Uses a long varlen sequence to exercise the intracard split path,

@@ -23,7 +23,7 @@ import torch.nn.functional as F
 from fla.ops.cp import FLACPContext
 from fla.ops.kda import chunk_kda
 from fla.utils import IS_AMD, IS_NPU, IS_NVIDIA, assert_close, device
-from tests.ops.kda_graph import _VARLEN_CONFIGS, MAX_NUM_SEQS, H, _rand_inputs
+from tests.ops.kda_graph import MAX_NUM_SEQS, VARLEN_CASES, H, make_inputs
 
 pytestmark = pytest.mark.skipif(
     not (IS_NVIDIA or IS_AMD or IS_NPU),
@@ -161,8 +161,8 @@ _CFG = [
 @pytest.mark.skipif(IS_NPU, reason="direct CUDA capture and NCCL require a CUDA/HIP device")
 def test_chunk_kda_graph_replay_matches_eager(gate, safe_gate, hv):
     """Capture fwd+bwd, replay with the captured inputs, and compare to the eager path."""
-    cu = torch.tensor(_VARLEN_CONFIGS[0][1], dtype=torch.long, device=device)
-    inp = _rand_inputs(seed=0, gate=gate, safe_gate=safe_gate, hv=hv)
+    cu = torch.tensor(VARLEN_CASES[0][1], dtype=torch.long, device=device)
+    inp = make_inputs(seed=0, gate=gate, safe_gate=safe_gate, hv=hv)
 
     graph, leaves, _do, _dht, cap_o, cap_ht = _make_graphed(inp, cu, gate, safe_gate)
     graph.replay()
@@ -185,13 +185,13 @@ def test_chunk_kda_graph_multi_replay_varlen(gate, safe_gate, hv):
     must match an independent eager run on that same data -- proving the in-graph device-side
     chunk-index rebuild recomputes correctly from the live cu_seqlens on every replay.
     """
-    cu = torch.tensor(_VARLEN_CONFIGS[0][1], dtype=torch.long, device=device)
-    inp0 = _rand_inputs(seed=0, gate=gate, safe_gate=safe_gate, hv=hv)
+    cu = torch.tensor(VARLEN_CASES[0][1], dtype=torch.long, device=device)
+    inp0 = make_inputs(seed=0, gate=gate, safe_gate=safe_gate, hv=hv)
     graph, leaves, _do, _dht, cap_o, cap_ht = _make_graphed(inp0, cu, gate, safe_gate)
 
     update_names = ["q", "k", "v", "g", "beta", "h0"] + (["A_log", "dt_bias"] if gate else [])
-    for seed, (tag, cucfg) in enumerate(_VARLEN_CONFIGS, start=1):
-        inp = _rand_inputs(seed=seed * 17, gate=gate, safe_gate=safe_gate, hv=hv)
+    for seed, (tag, cucfg) in enumerate(VARLEN_CASES, start=1):
+        inp = make_inputs(seed=seed * 17, gate=gate, safe_gate=safe_gate, hv=hv)
         for n in update_names:
             leaves[n].data.copy_(inp[n])
         _do.copy_(inp["do"])
@@ -223,14 +223,14 @@ def test_chunk_kda_graph_partial_tokens(safe_gate, hv):
     kda_gate_bwd (dA/dbias) must still match the eager path run on real tokens only.
     """
     gate = True
-    cu = torch.tensor(_VARLEN_CONFIGS[0][1], dtype=torch.long, device=device)
-    inp0 = _rand_inputs(seed=0, gate=gate, safe_gate=safe_gate, hv=hv)
+    cu = torch.tensor(VARLEN_CASES[0][1], dtype=torch.long, device=device)
+    inp0 = make_inputs(seed=0, gate=gate, safe_gate=safe_gate, hv=hv)
     graph, leaves, _do, _dht, cap_o, cap_ht = _make_graphed(inp0, cu, gate, safe_gate)
 
     update_names = ["q", "k", "v", "g", "beta", "h0", "A_log", "dt_bias"]
     for seed, (tag, cucfg) in enumerate(_PARTIAL_CONFIGS, start=1):
         n = cucfg[-1]
-        inp = _rand_inputs(seed=seed * 17, gate=gate, safe_gate=safe_gate, hv=hv)
+        inp = make_inputs(seed=seed * 17, gate=gate, safe_gate=safe_gate, hv=hv)
         for name in update_names:
             leaves[name].data.copy_(inp[name])
         _do.copy_(inp["do"])

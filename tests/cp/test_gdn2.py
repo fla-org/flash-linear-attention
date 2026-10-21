@@ -21,7 +21,7 @@ from fla.ops.gdn2 import chunk_gdn2
 from fla.ops.gdn2.naive import naive_recurrent_gdn2
 from fla.ops.kda.gate import naive_kda_lowerbound_gate
 from fla.utils import assert_close, device
-from tests.cp.utils import gather_global, run_distributed, shard_tensor
+from tests.cp.utils import gather_global, shard_tensor
 
 pytestmark = pytest.mark.skipif(device != "cuda", reason="requires CUDA or ROCm GPUs")
 
@@ -116,7 +116,7 @@ def _reference(q, k, v, g, b, w, do, offsets, A_log, dt_bias):
     return tuple(torch.cat(parts, dim=1) for parts in zip(*results))
 
 
-def _test_chunk(
+def _run_chunk(
     rank: int,
     world_size: int,
     H: int,
@@ -215,25 +215,25 @@ def _test_chunk(
 @pytest.mark.parametrize(
     ('world_size', 'lengths', 'disable_recompute', 'state_v_first'),
     [
-        pytest.param(2, [3000, 4000, 3240], False, False, id='CP2_SequenceCut'),
-        pytest.param(2, [5120, 5120], False, False, id='CP2_BoundaryAligned'),
-        pytest.param(4, [7000, 3240], False, False, id='CP4_Complex'),
-        pytest.param(4, [10240], False, False, id='CP4_SingleSequence'),
-        pytest.param(8, [65536], False, False, id='CP8_SingleSequence'),
-        pytest.param(2, [1000, 1500, 2000, 2500, 1240, 1000, 1000], False, False, id='CP2_ManyShortSequences'),
-        pytest.param(2, [3000, 4000, 3240], True, False, id='CP2_DisableRecompute'),
-        pytest.param(2, [3000, 4000, 3240], False, True, id='CP2_TransposeState'),
-        pytest.param(4, [10240], False, True, id='CP4_TransposeState'),
+        pytest.param(2, [3000, 4000, 3240], False, False, id='cp2-sequence-cut'),
+        pytest.param(2, [5120, 5120], False, False, id='cp2-boundary-aligned'),
+        pytest.param(4, [7000, 3240], False, False, id='cp4-sequence-cut'),
+        pytest.param(4, [10240], False, False, id='cp4-single-sequence'),
+        pytest.param(8, [65536], False, False, id='cp8-single-sequence'),
+        pytest.param(2, [1000, 1500, 2000, 2500, 1240, 1000, 1000], False, False, id='cp2-short-sequences'),
+        pytest.param(2, [3000, 4000, 3240], True, False, id='cp2-no-recompute'),
+        pytest.param(2, [3000, 4000, 3240], False, True, id='cp2-v-first'),
+        pytest.param(4, [10240], False, True, id='cp4-v-first'),
     ],
 )
-def test_chunk(world_size, lengths, disable_recompute, state_v_first):
+def test_chunk(run_distributed, world_size, lengths, disable_recompute, state_v_first):
     run_distributed(
-        worker=_test_chunk,
+        worker=_run_chunk,
         world_size=world_size,
-        lengths=lengths,
-        disable_recompute=disable_recompute,
-        state_v_first=state_v_first,
         H=12,
         D=128,
+        lengths=lengths,
         dtype=torch.bfloat16,
+        disable_recompute=disable_recompute,
+        state_v_first=state_v_first,
     )

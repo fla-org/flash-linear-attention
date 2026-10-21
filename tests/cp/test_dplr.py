@@ -19,7 +19,7 @@ from fla.ops.generalized_delta_rule.dplr.backends import DPLRTileLangBackend
 from fla.ops.generalized_delta_rule.dplr.naive import dplr_recurrence
 from fla.ops.rwkv7 import chunk_rwkv7
 from fla.utils import assert_close, device
-from tests.cp.utils import gather_global, run_distributed, shard_tensor
+from tests.cp.utils import gather_global, shard_tensor
 
 pytestmark = pytest.mark.skipif(device != "cuda", reason="requires CUDA or ROCm GPUs")
 
@@ -106,7 +106,7 @@ def _reference(q, k, v, a, b, gk, do, offsets):
     return tuple(torch.cat(parts, dim=1) for parts in zip(*results))
 
 
-def _test_chunk(
+def _run_chunk(
     rank: int,
     world_size: int,
     H: int,
@@ -211,35 +211,27 @@ def _test_chunk(
 @pytest.mark.parametrize(
     ('world_size', 'lengths', 'op'),
     [
-        pytest.param(2, [400, 624], chunk_dplr_delta_rule, id='CP2_SequenceCut'),
-        pytest.param(2, [512, 512], chunk_dplr_delta_rule, id='CP2_BoundaryAligned'),
-        pytest.param(4, [700, 324], chunk_dplr_delta_rule, id='CP4_Complex'),
-        pytest.param(4, [1024], chunk_dplr_delta_rule, id='CP4_SingleSequence'),
-        pytest.param(2, [100, 200, 300, 424], chunk_dplr_delta_rule, id='CP2_ManyShortSequences'),
-        pytest.param(2, [400, 624], _chunk_rwkv7, id='CP2_RWKV7_SequenceCut'),
-        pytest.param(4, [1024], _chunk_rwkv7, id='CP4_RWKV7_SingleSequence'),
+        pytest.param(2, [400, 624], chunk_dplr_delta_rule, id='cp2-sequence-cut'),
+        pytest.param(2, [512, 512], chunk_dplr_delta_rule, id='cp2-boundary-aligned'),
+        pytest.param(4, [700, 324], chunk_dplr_delta_rule, id='cp4-sequence-cut'),
+        pytest.param(4, [1024], chunk_dplr_delta_rule, id='cp4-single-sequence'),
+        pytest.param(2, [100, 200, 300, 424], chunk_dplr_delta_rule, id='cp2-short-sequences'),
+        pytest.param(2, [400, 624], _chunk_rwkv7, id='cp2-rwkv7-sequence-cut'),
+        pytest.param(4, [1024], _chunk_rwkv7, id='cp4-rwkv7-single-sequence'),
     ],
 )
-def test_chunk(world_size, lengths, op):
-    run_distributed(
-        worker=_test_chunk,
-        world_size=world_size,
-        H=4,
-        D=64,
-        lengths=lengths,
-        dtype=torch.bfloat16,
-        op=op,
-    )
+def test_chunk(run_distributed, world_size, lengths, op):
+    run_distributed(worker=_run_chunk, world_size=world_size, H=4, D=64, lengths=lengths, dtype=torch.bfloat16, op=op)
 
 
-def test_chunk_tilelang(monkeypatch):
+def test_chunk_tilelang(run_distributed, monkeypatch):
     """CP2 through the TileLang DPLR backend (FLA_TILELANG=1), with route assertion."""
     if not DPLRTileLangBackend.is_available():
         pytest.skip("TileLang backend not available")
 
     monkeypatch.setenv("FLA_TILELANG", "1")
     run_distributed(
-        worker=_test_chunk,
+        worker=_run_chunk,
         world_size=2,
         H=128,
         D=64,

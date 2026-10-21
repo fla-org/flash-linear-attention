@@ -24,7 +24,7 @@ from fla.ops.kda import chunk_kda
 from fla.ops.kda.gate import naive_kda_lowerbound_gate
 from fla.ops.kda.naive import naive_recurrent_kda
 from fla.utils import assert_close, device
-from tests.cp.utils import gather_global, run_distributed, shard_tensor
+from tests.cp.utils import gather_global, shard_tensor
 
 
 def _make_inputs(rank, T, H, D, dtype, use_gate_in_kernel, safe_gate, lower_bound):
@@ -126,7 +126,7 @@ def _reference(q, k, v, g, beta, do, offsets, A_log, dt_bias, use_gate_in_kernel
     return tuple(torch.cat(parts, dim=1) for parts in zip(*results))
 
 
-def _test_chunk(
+def _run_chunk(
     rank: int,
     world_size: int,
     H: int,
@@ -236,40 +236,50 @@ def _test_chunk(
     ('world_size', 'lengths', 'use_gate_in_kernel', 'safe_gate',
      'disable_recompute', 'state_v_first', 'use_tf32x3_affine_chain', 'layout'),
     [
-        pytest.param(2, [3000, 4000, 3240], True, True, False, False, False, 'contiguous', id='CP2_SequenceCut'),
-        pytest.param(2, [5120, 5120], True, True, False, False, False, 'contiguous', id='CP2_BoundaryAligned'),
-        pytest.param(4, [7000, 3240], True, True, False, False, False, 'contiguous', id='CP4_Complex'),
-        pytest.param(4, [10240], True, True, False, False, False, 'contiguous', id='CP4_SingleSequence'),
-        pytest.param(8, [65536], True, True, False, False, False, 'contiguous', id='CP8_SingleSequence'),
+        pytest.param(2, [3000, 4000, 3240], True, True, False, False, False, 'contiguous', id='cp2-sequence-cut'),
+        pytest.param(2, [5120, 5120], True, True, False, False, False, 'contiguous', id='cp2-boundary-aligned'),
+        pytest.param(4, [7000, 3240], True, True, False, False, False, 'contiguous', id='cp4-sequence-cut'),
+        pytest.param(4, [10240], True, True, False, False, False, 'contiguous', id='cp4-single-sequence'),
+        pytest.param(8, [65536], True, True, False, False, False, 'contiguous', id='cp8-single-sequence'),
         pytest.param(2, [1000, 1500, 2000, 2500, 1240, 1000, 1000], True, True,
-                     False, False, False, 'contiguous', id='CP2_ManyShortSequences'),
-        pytest.param(2, [3000, 4000, 3240], True, True, True, False, False, 'contiguous', id='CP2_DisableRecompute'),
-        pytest.param(2, [3000, 4000, 3240], False, False, False, False, False, 'contiguous', id='CP2_PreGated_NonSafe'),
-        pytest.param(2, [3000, 4000, 3240], False, True, False, False, False, 'contiguous', id='CP2_PreGated_Safe'),
-        pytest.param(2, [3000, 4000, 3240], True, True, False, True, False, 'contiguous', id='CP2_TransposeState'),
-        pytest.param(4, [10240], True, True, False, True, False, 'contiguous', id='CP4_TransposeState'),
-        pytest.param(2, [3000, 4000, 3240], True, True, False, False, True, 'contiguous', id='CP2_SequenceCut_TF32X3'),
-        pytest.param(4, [10240], True, True, False, False, True, 'contiguous', id='CP4_SingleSequence_TF32X3'),
-        pytest.param(2, [3000, 4000, 3240], True, True, False, True, True, 'contiguous', id='CP2_TransposeState_TF32X3'),
-        pytest.param(2, [10240], True, True, False, False, False, 'zigzag', id='CP2_Zigzag_SingleSequence'),
-        pytest.param(2, [3000, 4000, 3240], True, True, False, False, False, 'zigzag', id='CP2_Zigzag_SequenceCut'),
-        pytest.param(4, [1500, 2600, 3000, 3140], True, True, False, False, False, 'zigzag', id='CP4_Zigzag_Complex'),
-        pytest.param(4, [2560, 2560, 2560, 2560], True, True, False, False, False, 'zigzag', id='CP4_Zigzag_BoundaryAligned'),
+                     False, False, False, 'contiguous', id='cp2-short-sequences'),
+        pytest.param(2, [3000, 4000, 3240], True, True, True, False, False, 'contiguous', id='cp2-no-recompute'),
+        pytest.param(2, [3000, 4000, 3240], False, False, False, False, False, 'contiguous', id='cp2-pregated'),
+        pytest.param(2, [3000, 4000, 3240], False, True, False, False, False, 'contiguous', id='cp2-pregated-safe'),
+        pytest.param(2, [3000, 4000, 3240], True, True, False, True, False, 'contiguous', id='cp2-v-first'),
+        pytest.param(4, [10240], True, True, False, True, False, 'contiguous', id='cp4-v-first'),
+        pytest.param(2, [3000, 4000, 3240], True, True, False, False, True, 'contiguous', id='cp2-sequence-cut-tf32x3'),
+        pytest.param(4, [10240], True, True, False, False, True, 'contiguous', id='cp4-single-sequence-tf32x3'),
+        pytest.param(2, [3000, 4000, 3240], True, True, False, True, True, 'contiguous', id='cp2-v-first-tf32x3'),
+        pytest.param(2, [10240], True, True, False, False, False, 'zigzag', id='cp2-zigzag-single-sequence'),
+        pytest.param(2, [3000, 4000, 3240], True, True, False, False, False, 'zigzag', id='cp2-zigzag-sequence-cut'),
+        pytest.param(4, [1500, 2600, 3000, 3140], True, True, False, False, False, 'zigzag', id='cp4-zigzag-sequence-cut'),
+        pytest.param(4, [2560, 2560, 2560, 2560], True, True, False, False, False, 'zigzag', id='cp4-zigzag-boundary-aligned'),
     ],
 )
-def test_chunk(world_size, lengths, use_gate_in_kernel, safe_gate, disable_recompute, state_v_first, use_tf32x3_affine_chain, layout):
+def test_chunk(
+    run_distributed,
+    world_size,
+    lengths,
+    use_gate_in_kernel,
+    safe_gate,
+    disable_recompute,
+    state_v_first,
+    use_tf32x3_affine_chain,
+    layout,
+):
     run_distributed(
-        worker=_test_chunk,
+        worker=_run_chunk,
         world_size=world_size,
+        H=12,
+        D=128,
         lengths=lengths,
+        dtype=torch.bfloat16,
+        disable_recompute=disable_recompute,
         use_gate_in_kernel=use_gate_in_kernel,
         safe_gate=safe_gate,
-        disable_recompute=disable_recompute,
+        lower_bound=-5.0 if safe_gate else None,
         state_v_first=state_v_first,
         use_tf32x3_affine_chain=use_tf32x3_affine_chain,
         layout=layout,
-        H=12,
-        D=128,
-        dtype=torch.bfloat16,
-        lower_bound=-5.0 if safe_gate else None,
     )

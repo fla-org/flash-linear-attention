@@ -8,15 +8,11 @@
 import logging
 import os
 from datetime import timedelta
-from pathlib import Path
-from tempfile import TemporaryDirectory
 
-import pytest
 import torch
 import torch.distributed as dist
-import torch.multiprocessing as mp
 
-from fla.utils import device_platform, device_torch_lib
+from fla.utils import device_torch_lib
 
 
 def shard_tensor(tensor, rank, world_size, layout='contiguous'):
@@ -56,23 +52,6 @@ def _run_worker(rank, world_size, init_method, backend, worker, kwargs, destroy_
         )
         worker(rank=rank, world_size=world_size, **kwargs)
     finally:
+        # graph workers keep captured communicators alive until process exit
         if destroy_process_group and dist.is_initialized():
             dist.destroy_process_group()
-
-
-def run_distributed(worker, world_size, *, backend=None, destroy_process_group=True, **kwargs):
-    """Run one single-host CP case with an isolated rendezvous and propagate worker failures."""
-    if not dist.is_available():
-        pytest.skip('requires torch.distributed')
-    if device_torch_lib.device_count() < world_size:
-        pytest.skip(f'requires {world_size} devices')
-    if backend is None:
-        backend = 'hccl' if device_platform == 'npu' else 'nccl'
-    with TemporaryDirectory(prefix='fla-cp-') as directory:
-        init_method = (Path(directory) / 'rendezvous').as_uri()
-        mp.spawn(
-            fn=_run_worker,
-            args=(world_size, init_method, backend, worker, kwargs, destroy_process_group),
-            nprocs=world_size,
-            join=True,
-        )
