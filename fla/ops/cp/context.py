@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 import torch
@@ -110,26 +110,10 @@ class FLACPContext:
 
     def copy_for_backward(self) -> FLACPContext:
         """Create a copy for backward pass (useful when PP_SIZE > 1)."""
-        return FLACPContext(
-            group=self.group,
+        return replace(
+            self,
             cu_seqlens=self.cu_seqlens.clone() if self.cu_seqlens is not None else None,
             cu_seqlens_cpu=self.cu_seqlens_cpu.clone() if self.cu_seqlens_cpu is not None else None,
-            is_last_rank=self.is_last_rank,
-            pre_num_ranks=self.pre_num_ranks,
-            is_first_rank=self.is_first_rank,
-            post_num_ranks=self.post_num_ranks,
-            conv1d_kernel_size=self.conv1d_kernel_size,
-            pre_num_conv_tokens=self.pre_num_conv_tokens,
-            pre_num_ranks_dev=self.pre_num_ranks_dev,
-            post_num_ranks_dev=self.post_num_ranks_dev,
-            layout=self.layout,
-            part_len=self.part_len,
-            front_num_seqs=self.front_num_seqs,
-            pre_num_ranks_by_part=self.pre_num_ranks_by_part,
-            post_num_ranks_by_part=self.post_num_ranks_by_part,
-            is_first_by_part=self.is_first_by_part,
-            is_last_by_part=self.is_last_by_part,
-            pre_num_conv_tokens_by_part=self.pre_num_conv_tokens_by_part,
         )
 
     @property
@@ -220,11 +204,11 @@ def get_cp_cu_seqlens(
 
     if layout == 'contiguous':
         local, pre_conv, pre_ranks, is_first, post_ranks, is_last = _interval_cp_meta(
-            cu_seqlens_cpu,
-            part_len * rank,
-            part_len * (rank + 1),
-            rank,
-            part_len,
+            cu_seqlens_cpu=cu_seqlens_cpu,
+            start=part_len * rank,
+            end=part_len * (rank + 1),
+            chain_pos=rank,
+            part_len=part_len,
         )
         return FLACPContext(
             group=group,
@@ -240,19 +224,19 @@ def get_cp_cu_seqlens(
 
     # zigzag: local buffer = [front part; back part], each part_len tokens
     front_cu, front_conv, front_pre, front_first, front_post, front_last = _interval_cp_meta(
-        cu_seqlens_cpu,
-        part_len * rank,
-        part_len * (rank + 1),
-        rank,
-        part_len,
+        cu_seqlens_cpu=cu_seqlens_cpu,
+        start=part_len * rank,
+        end=part_len * (rank + 1),
+        chain_pos=rank,
+        part_len=part_len,
     )
     back_pos = 2 * world_size - 1 - rank
     back_cu, back_conv, back_pre, back_first, back_post, back_last = _interval_cp_meta(
-        cu_seqlens_cpu,
-        part_len * back_pos,
-        part_len * (back_pos + 1),
-        back_pos,
-        part_len,
+        cu_seqlens_cpu=cu_seqlens_cpu,
+        start=part_len * back_pos,
+        end=part_len * (back_pos + 1),
+        chain_pos=back_pos,
+        part_len=part_len,
     )
     local = torch.cat([front_cu, back_cu[1:] + part_len])
     return FLACPContext(
@@ -303,7 +287,7 @@ def build_cp_context(
             Local sequence boundaries and communication metadata.
     """
     return get_cp_cu_seqlens(
-        cu_seqlens,
+        cu_seqlens=cu_seqlens,
         cu_seqlens_cpu=cu_seqlens_cpu,
         group=group,
         conv1d_kernel_size=conv1d_kernel_size,

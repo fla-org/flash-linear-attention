@@ -19,7 +19,7 @@ import pytest
 import torch
 import triton
 
-from fla.ops.cp.chunk_delta_h import pre_process_bwd_kernel_merged
+from fla.ops.cp.chunk_bwd import chunk_cp_bwd_kernel_dh
 from fla.utils import device
 
 logging.basicConfig(level=logging.INFO, format='%(message)s')
@@ -76,7 +76,7 @@ class TestBwdGkOffset:
         grid = (triton.cdiv(V, BLOCK_SIZE) + triton.cdiv(K, BLOCK_SIZE), H)
 
         dhm_a = torch.zeros(H, K, V + K, dtype=torch.float32, device=device)
-        pre_process_bwd_kernel_merged[grid](
+        chunk_cp_bwd_kernel_dh[grid](
             q=q,
             k=k,
             w=w,
@@ -93,13 +93,13 @@ class TestBwdGkOffset:
             K=K,
             V=V,
             BT=BT,
-            BK1=BK,
             BLOCK_SIZE=BLOCK_SIZE,
+            BK1=BK,
             USE_BG=False,
         )
 
         dhm_b = torch.zeros(H, K, V + K, dtype=torch.float32, device=device)
-        pre_process_bwd_kernel_merged[grid](
+        chunk_cp_bwd_kernel_dh[grid](
             q=q,
             k=k,
             w=w,
@@ -116,8 +116,8 @@ class TestBwdGkOffset:
             K=K,
             V=V,
             BT=BT,
-            BK1=BK,
             BLOCK_SIZE=BLOCK_SIZE,
+            BK1=BK,
             USE_BG=False,
         )
 

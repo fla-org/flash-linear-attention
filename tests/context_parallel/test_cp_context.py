@@ -5,6 +5,8 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+from dataclasses import fields
+
 import pytest
 import torch
 
@@ -71,6 +73,33 @@ def test_cp_precision_keyword(entry, mode, monkeypatch):
         copied = cp_context.copy_for_backward()
         assert copied.group is cp_context.group
         torch.testing.assert_close(copied.cu_seqlens, cp_context.cu_seqlens)
+
+
+@pytest.mark.parametrize('layout', ['contiguous', 'zigzag'])
+def test_cp_context_copy_for_backward(layout):
+    cp_context = get_cp_cu_seqlens(
+        cu_seqlens=torch.tensor([0, 5, 12]),
+        world_size=2,
+        rank=1,
+        conv1d_kernel_size=4,
+        layout=layout,
+    )
+    cp_context.group = object()
+    cp_context.pre_num_ranks_dev = torch.tensor(1, dtype=torch.int32)
+    cp_context.post_num_ranks_dev = torch.tensor(0, dtype=torch.int32)
+    copied = cp_context.copy_for_backward()
+
+    # Backward owns its sequence boundaries; graph replay must keep the same persistent rank-count tensors.
+    for field in fields(cp_context):
+        original = getattr(cp_context, field.name)
+        saved = getattr(copied, field.name)
+        if field.name in ('cu_seqlens', 'cu_seqlens_cpu'):
+            torch.testing.assert_close(saved, original)
+            assert saved.data_ptr() != original.data_ptr()
+            saved.add_(1)
+            torch.testing.assert_close(saved, original + 1)
+        else:
+            assert saved is original
 
 
 @pytest.mark.parametrize(

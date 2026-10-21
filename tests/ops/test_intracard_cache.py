@@ -38,7 +38,16 @@ def test_intracard_precision_requirement(entry, legacy_false, monkeypatch):
         if entry == 'fwd':
             intracard_cp.intracard_fwd_h(k=x, w=x, u=x, **kwargs)
         elif entry == 'pre_scan':
-            intracard_cp.intracard_pre_scan(kg=x, w=x, u=x, g=None, gk=None, cu_seqlens_subseq_split=None, S_split=0, **kwargs)
+            intracard_cp.intracard_pre_scan(
+                k=x,
+                w=x,
+                u=x,
+                g=None,
+                gk=None,
+                cu_seqlens=None,
+                num_subseqs=0,
+                **kwargs,
+            )
         else:
             intracard_cp.intracard_merge(
                 hm=x,
@@ -231,15 +240,23 @@ def test_intracard_pre_scan_merge(vector_gate: bool, state_v_first: bool, K: int
     if vector_gate:
         # scalar and vector gates must not share an autotuned pipeline configuration
         intracard_cp.intracard_pre_scan(
-            kg=k,
+            k=k,
             w=w,
             u=u,
             g=decay.view(1, T, 1).expand(1, T, HV).contiguous(),
             gk=None,
-            cu_seqlens_subseq_split=cu_seqlens_split,
-            S_split=3,
+            cu_seqlens=cu_seqlens_split,
+            num_subseqs=3,
         )
-    hm = intracard_cp.intracard_pre_scan(kg=k, w=w, u=u, g=g, gk=gk, cu_seqlens_subseq_split=cu_seqlens_split, S_split=3)
+    hm = intracard_cp.intracard_pre_scan(
+        k=k,
+        w=w,
+        u=u,
+        g=g,
+        gk=gk,
+        cu_seqlens=cu_seqlens_split,
+        num_subseqs=3,
+    )
     states, count = intracard_cp.intracard_merge(
         hm=hm,
         split_info=intracard_cp.SplitSeqInfo(split_seq_ids=[0], start_subseq_idx=[0], num_subseqs=[3]),
