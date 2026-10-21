@@ -34,9 +34,9 @@ from fla.ops.utils.op import exp2, gather, unflatten_program_id
 from fla.utils import IS_GATHER_SUPPORTED, IS_NVIDIA, IS_TF32_SUPPORTED, autotune_cache_kwargs
 
 if IS_TF32_SUPPORTED:
-    SOLVE_TRIL_DOT_PRECISION = tl.constexpr('tf32x3')
+    DOT_PRECISION = tl.constexpr('tf32x3')
 else:
-    SOLVE_TRIL_DOT_PRECISION = tl.constexpr('ieee')
+    DOT_PRECISION = tl.constexpr('ieee')
 
 
 @triton.heuristics({
@@ -364,39 +364,39 @@ def chunk_gdn2_fwd_kernel_inter_solve_fused(
         b_Ai33 += m_I
 
     b_Ai10 = -tl.dot(
-        tl.dot(b_Ai11, b_Akk10, input_precision=SOLVE_TRIL_DOT_PRECISION),
+        tl.dot(b_Ai11, b_Akk10, input_precision=DOT_PRECISION),
         b_Ai00,
-        input_precision=SOLVE_TRIL_DOT_PRECISION,
+        input_precision=DOT_PRECISION,
     )
     b_Ai21 = -tl.dot(
-        tl.dot(b_Ai22, b_Akk21, input_precision=SOLVE_TRIL_DOT_PRECISION),
+        tl.dot(b_Ai22, b_Akk21, input_precision=DOT_PRECISION),
         b_Ai11,
-        input_precision=SOLVE_TRIL_DOT_PRECISION,
+        input_precision=DOT_PRECISION,
     )
     b_Ai32 = -tl.dot(
-        tl.dot(b_Ai33, b_Akk32, input_precision=SOLVE_TRIL_DOT_PRECISION),
+        tl.dot(b_Ai33, b_Akk32, input_precision=DOT_PRECISION),
         b_Ai22,
-        input_precision=SOLVE_TRIL_DOT_PRECISION,
+        input_precision=DOT_PRECISION,
     )
 
     b_Ai20 = -tl.dot(
         b_Ai22,
-        tl.dot(b_Akk20, b_Ai00, input_precision=SOLVE_TRIL_DOT_PRECISION)
-        + tl.dot(b_Akk21, b_Ai10, input_precision=SOLVE_TRIL_DOT_PRECISION),
-        input_precision=SOLVE_TRIL_DOT_PRECISION,
+        tl.dot(b_Akk20, b_Ai00, input_precision=DOT_PRECISION)
+        + tl.dot(b_Akk21, b_Ai10, input_precision=DOT_PRECISION),
+        input_precision=DOT_PRECISION,
     )
     b_Ai31 = -tl.dot(
         b_Ai33,
-        tl.dot(b_Akk31, b_Ai11, input_precision=SOLVE_TRIL_DOT_PRECISION)
-        + tl.dot(b_Akk32, b_Ai21, input_precision=SOLVE_TRIL_DOT_PRECISION),
-        input_precision=SOLVE_TRIL_DOT_PRECISION,
+        tl.dot(b_Akk31, b_Ai11, input_precision=DOT_PRECISION)
+        + tl.dot(b_Akk32, b_Ai21, input_precision=DOT_PRECISION),
+        input_precision=DOT_PRECISION,
     )
     b_Ai30 = -tl.dot(
         b_Ai33,
-        tl.dot(b_Akk30, b_Ai00, input_precision=SOLVE_TRIL_DOT_PRECISION)
-        + tl.dot(b_Akk31, b_Ai10, input_precision=SOLVE_TRIL_DOT_PRECISION)
-        + tl.dot(b_Akk32, b_Ai20, input_precision=SOLVE_TRIL_DOT_PRECISION),
-        input_precision=SOLVE_TRIL_DOT_PRECISION,
+        tl.dot(b_Akk30, b_Ai00, input_precision=DOT_PRECISION)
+        + tl.dot(b_Akk31, b_Ai10, input_precision=DOT_PRECISION)
+        + tl.dot(b_Akk32, b_Ai20, input_precision=DOT_PRECISION),
+        input_precision=DOT_PRECISION,
     )
 
     p_Akk00 = Akk + (i_tc0 + o_i)[:, None] * (H * BT) + o_i[None, :]
@@ -529,8 +529,8 @@ def chunk_gdn2_bwd_kernel_intra(
             b_kg = b_kj * exp2(b_gn - b_gk)
             b_dAqk = tl.load(p_dAqk, mask=m_dj, other=0.0)
             b_dAkk = tl.load(p_dAkk, mask=m_dj, other=0.0)
-            b_dq2 = tl.dot(b_dAqk, b_kg, b_dq2)
-            b_dk2 = tl.dot(b_dAkk, b_kg, b_dk2)
+            b_dq2 = tl.dot(b_dAqk, b_kg, b_dq2, input_precision=DOT_PRECISION)
+            b_dk2 = tl.dot(b_dAkk, b_kg, b_dk2, input_precision=DOT_PRECISION)
         b_gqn = exp2(b_g - b_gn)
         b_dq2 *= b_gqn
         b_dk2 *= b_gqn
@@ -569,8 +569,8 @@ def chunk_gdn2_bwd_kernel_intra(
         exp_neg_b_g_diag_qk = tl.where(m_j_diag_qk, exp2(-b_g_diag_qk), 0.)
 
         b_k_exp_diag_qk = b_k * exp_neg_b_g_diag_qk
-        b_dq2 += tl.dot(b_dAqk_diag_qk, b_k_exp_diag_qk) * exp_b_g_diag_qk
-        b_dk2 += tl.dot(b_dAkk_diag_qk, b_k_exp_diag_qk) * exp_b_g_diag_qk
+        b_dq2 += tl.dot(b_dAqk_diag_qk, b_k_exp_diag_qk, input_precision=DOT_PRECISION) * exp_b_g_diag_qk
+        b_dk2 += tl.dot(b_dAkk_diag_qk, b_k_exp_diag_qk, input_precision=DOT_PRECISION) * exp_b_g_diag_qk
     else:
         for j in range(0, min(BC, T - i_t * BT - i_i * BC)):
             b_dAqk = tl.load(dAqk + o_dA + j, mask=m_dA, other=0)
@@ -628,8 +628,8 @@ def chunk_gdn2_bwd_kernel_intra(
             b_gkn = exp2(b_gk - b_gn)
             b_qg = b_qj * tl.where(m_j[:, None], b_gkn, 0)
             b_kbg = b_kbj * tl.where(m_j[:, None], b_gkn, 0)
-            b_dkt = tl.dot(b_dAqk, b_qg, b_dkt)
-            b_dkt = tl.dot(b_dAkk, b_kbg, b_dkt)
+            b_dkt = tl.dot(b_dAqk, b_qg, b_dkt, input_precision=DOT_PRECISION)
+            b_dkt = tl.dot(b_dAkk, b_kbg, b_dkt, input_precision=DOT_PRECISION)
         b_dkt *= exp2(b_gn - b_g)
 
     o_dA = i_ti * H * BT + i_i * BC + o_i
@@ -665,8 +665,8 @@ def chunk_gdn2_bwd_kernel_intra(
         b_q_exp = b_q * exp_b_g_diag_kk
         b_kb_exp = b_k * b_b * exp_b_g_diag_kk
 
-        b_dkt += tl.dot(b_dAqk_diag_kk, b_q_exp) * exp_neg_b_g_diag_kk
-        b_dkt += tl.dot(b_dAkk_diag_kk, b_kb_exp) * exp_neg_b_g_diag_kk
+        b_dkt += tl.dot(b_dAqk_diag_kk, b_q_exp, input_precision=DOT_PRECISION) * exp_neg_b_g_diag_kk
+        b_dkt += tl.dot(b_dAkk_diag_kk, b_kb_exp, input_precision=DOT_PRECISION) * exp_neg_b_g_diag_kk
     else:
         for j in range(0, min(BC, T - i_t * BT - i_i * BC)):
             b_dAqk = tl.load(dAqk + o_dA + j * H * BT)
