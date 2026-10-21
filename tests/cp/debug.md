@@ -1,7 +1,7 @@
 # Debugging Kimi Context Parallel (KCP) precision failures
 
 A skill-level guide to root-causing KCP precision bugs in `fla`. Read this
-before you start chasing a failing `tests/cp/test_*.py`; the patterns here apply
+before you start chasing a failing `tests/cp/`; the patterns here apply
 to every op that plugs into KCP (gated-delta-rule, generalized delta rule,
 RWKV-style recurrences, future ops).
 
@@ -94,15 +94,15 @@ garbage the torch allocator left behind (often zeros, which masks the
 bug for single-sequence ranks but explodes as soon as a rank owns
 more than one local sub-sequence).
 
-### 3. autotune `BV` in `chunk_cp_fwd_bwd_kernel_merge`
+### 3. autotune `BV` in `merge_fwd_bwd_kernel`
 
-`chunk_cp_fwd_bwd_kernel_merge` autotunes `BV ∈ {32, 64}`. Never hardcode `BV`
+`merge_fwd_bwd_kernel` autotunes `BV ∈ {32, 64}`. Never hardcode `BV`
 in a manual grid function — compute it at launch time:
 
 ```python
 BK = triton.next_power_of_2(K)
 def grid(meta): return (triton.cdiv(V, meta['BV']), HV)
-chunk_cp_fwd_bwd_kernel_merge[grid](..., BK=BK, ...)
+merge_fwd_bwd_kernel[grid](..., BK=BK, ...)
 ```
 
 Hardcoding `BV=64` produces `(cdiv(V, 64), HV)` grid; if the autotuner
