@@ -217,7 +217,11 @@ def chunk_gdn2_bwd_kernel_wy_dqkg_fused(
                 b_v = tl.load(p_v, mask=m_vv, other=0.0)
                 b_wg = tl.load(p_wg, mask=m_vv, other=0.0)
                 # dA gets (w_gate * v) on the value side - the GDN-2 channel-wise twist.
-                b_dA = tl.dot(b_dv, tl.trans(b_v.to(b_dv.dtype) * b_wg.to(b_dv.dtype)), b_dA, input_precision=DOT_PRECISION)
+                if A.dtype.element_ty == tl.float32:
+                    b_dA = tl.dot(b_dv, tl.trans(b_v.to(b_dv.dtype) * b_wg.to(b_dv.dtype)),
+                                  b_dA, input_precision=DOT_PRECISION)
+                else:
+                    b_dA = tl.dot(b_dv, tl.trans(b_v * b_wg), b_dA, input_precision=DOT_PRECISION)
 
                 b_dvb = tl.dot(b_A.to(b_dv.dtype), b_dv, input_precision=DOT_PRECISION)
                 b_dv2 = b_dvb * b_wg
