@@ -1,7 +1,7 @@
 name: ascend-a2-ci
 
 # Pinned stack: CANN 9.1.0 image + pyproject [npu] extra
-# (torch 2.9.0 / torch_npu 2.9.0.post6 / torchvision 0.24.0 / triton-ascend 3.2.2)
+# (torch 2.10.0 / torch_npu 2.10.0.post7 / torchvision 0.25.0 / triton-ascend 3.6.0)
 
 on:
   workflow_dispatch:
@@ -55,6 +55,7 @@ jobs:
             // trigger this CI.
             const npuPattern = /^fla\/(.+\/)?backends\/triton_ascend\/|^\.github\/workflows\/ascend-|^pyproject\.toml$|^fla\/backends\.py$|^fla\/utils\/|^fla\/modules\/|^tests\/conftest\.py$/;
             const graphPaths = new Set([
+              'tests/ops/kda_graph.py',
               'tests/ops/test_kda_graph.py',
               'tests/benchmarks/test_graph_benchmark.py',
               'benchmarks/ops/run.py',
@@ -67,8 +68,8 @@ jobs:
             }
             core.setOutput('npu_related', related.length > 0 ? 'true' : 'false');
 
-  test-a2-npu-pytorch-2-9:
-    name: Test A2 NPU (PyTorch 2.9.0)
+  test-a2-npu-pytorch-2-10:
+    name: Test A2 NPU (PyTorch 2.10.0)
     needs: changes
     if: |
       github.event_name == 'workflow_dispatch' ||
@@ -150,7 +151,7 @@ jobs:
           assert IS_NPU, "Expected NPU backend (IS_NPU=True)"
           PY
 
-      - name: Run benchmark unit tests, modules, ops/utils, gdn, gdn2, kda, gla, attnres, solve_tril, delta
+      - name: Run benchmark unit tests, modules, ops/utils, gdn, gdn2, kda, gla, attnres, solve_tril, delta, pgdn
         shell: bash
         env:
           FLA_NPU_XDIST: "1"
@@ -171,7 +172,8 @@ jobs:
             tests/ops/test_gla.py \
             tests/ops/test_attnres.py \
             tests/ops/test_solve_tril.py \
-            tests/ops/test_delta.py
+            tests/ops/test_delta.py \
+            tests/ops/test_precond_gated_delta.py
 
       - name: Run NPU graph tests serially
         shell: bash

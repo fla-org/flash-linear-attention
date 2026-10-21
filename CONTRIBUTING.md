@@ -136,7 +136,7 @@ fla/
 └── utils/           # Global utilities and decorators
 
 tests/
-├── context_parallel/   # Context-parallel tests
+├── cp/                 # Context-parallel tests
 ├── layers/             # Layer tests
 ├── models/             # Model tests
 ├── modules/            # Module tests
@@ -386,7 +386,7 @@ Follow the existing file names in the relevant test directory. Operator tests no
 
 ### NaN Memory Poisoning
 
-The fixture in `tests/conftest.py` poisons eligible floating-point and complex allocations made by FLA through `torch.empty`, `torch.empty_like`, and `Tensor.new_empty` during operator and module tests. It excludes allocations made directly by tests, gradient-requiring tensors, and compilation paths. This catches uninitialized reads; kernels must initialize every output element they expose. No manual opt-in is needed for covered tests.
+The fixture in `tests/conftest.py` poisons eligible floating-point and complex allocations made by FLA through `torch.empty`, `torch.empty_like`, and `Tensor.new_empty` during operator and module tests, including the single-rank CP graph and intra-card cache tests moved into `tests/cp/`. It excludes allocations made directly by tests, gradient-requiring tensors, and compilation paths. This catches uninitialized reads; kernels must initialize every output element they expose. No manual opt-in is needed for covered tests.
 
 ## Benchmarking
 
@@ -439,7 +439,7 @@ Open pull requests against `main`. Search existing issues and PRs before startin
 
 One PR should solve one concrete problem or deliver one concrete capability. State that outcome in a sentence: what input or use case is affected, and what changes for the user. "Fix cached KDA state updates when caching is disabled" is a scope; "various attention improvements" is not. Changes sharing a directory or a broad label such as "cleanup" or "performance" are not necessarily one task.
 
-Keep implementation, regression tests, and documentation for the same outcome together. Split unrelated fixes, speculative helpers, and independent optimizations into separate PRs. For a larger feature, prefer independently reviewable steps that each work and pass their relevant tests; link their dependencies.
+Keep implementation, regression tests, and documentation for the same outcome together. Split unrelated fixes, speculative helpers, and independent optimizations into separate PRs. For a larger feature with dependent steps, use a GitHub native PR stack: each PR presents only its increment over the layer below and must work and pass relevant tests together with its prerequisites, without needing a later layer to fix it. Changes without dependencies should target the trunk separately. See the [PR stacks skill](.agents/skills/fla-pr-stacks/SKILL.md) for choosing boundaries, reusing existing PRs, and creating and verifying the stack.
 
 The default limit is **500 changed lines**, counted as additions plus deletions in the complete PR diff against its base. A replaced line counts twice. Tests, documentation, renames with edits, and generated files count as GitHub reports them; the limit is not per commit. Do not remove tests, compress code, or hide generated changes to fit the limit.
 

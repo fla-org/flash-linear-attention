@@ -243,7 +243,7 @@ def main():
 
     # 2. Performance measurement (reuses run.py). Each ref runs in a subprocess
     # so the parent never holds NPU/CUDA tensors across HEAD vs --base.
-    results, machine_info = _bench_current([args.op], SHAPE_CONFIGS, args.modes)
+    results, machine_info = _bench_current([args.op], None, args.modes)
     results = results or []
     machine_info = machine_info or {}
     print(f"\n  {_format_machine_line(machine_info)} | "
@@ -252,7 +252,7 @@ def main():
 
     baseline, baseline_info = (None, None)
     if args.base:
-        baseline, baseline_info = _bench_at_ref(args.base, [args.op], SHAPE_CONFIGS, args.modes)
+        baseline, baseline_info = _bench_at_ref(args.base, [args.op], None, args.modes)
     print_results_table(results, machine_info, baseline=baseline, baseline_info=baseline_info)
 
     # 3. Optional profiling.

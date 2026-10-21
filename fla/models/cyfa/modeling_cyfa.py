@@ -18,26 +18,21 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn as nn
 from torch.distributed.tensor import DTensor, distribute_tensor
+from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
-from transformers.modeling_utils import PreTrainedModel
 from transformers.utils.deprecation import deprecate_kwarg
 
-from fla.models.utils import Cache, FLAGenerationMixin
-from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
+from fla.models.cache_utils import Cache
+from fla.models.generation_utils import FLAGenerationMixin
+from fla.models.modeling_utils import FLAForCausalLM, FLAPreTrainedModel
 from fla.modules import GatedMLP as CyFAMLP
-from fla.modules.l2warp import l2_warp
+from fla.modules import RMSNorm
 
 from ...layers import CyclicFlowAttention
 from .configuration_cyfa import CyclicFlowAttentionConfig
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
-
-
-try:
-    from transformers.modeling_layers import GradientCheckpointingLayer
-except ImportError:
-    from fla.models.modeling_layers import GradientCheckpointingLayer
 
 
 class CyFABlock(GradientCheckpointingLayer):
@@ -104,7 +99,7 @@ class CyFABlock(GradientCheckpointingLayer):
         return outputs
 
 
-class CyclicFlowAttentionPreTrainedModel(PreTrainedModel):
+class CyclicFlowAttentionPreTrainedModel(FLAPreTrainedModel):
     config_class = CyclicFlowAttentionConfig
     base_model_prefix = "model"
     supports_gradient_checkpointing = True
@@ -166,12 +161,6 @@ class CyclicFlowAttentionModel(CyclicFlowAttentionPreTrainedModel):
         self.gradient_checkpointing = False
         self.post_init()
 
-    def get_input_embeddings(self):
-        return self.embeddings
-
-    def set_input_embeddings(self, value):
-        self.embeddings = value
-
     def forward(
         self,
         input_ids: torch.LongTensor | None = None,
@@ -190,7 +179,7 @@ class CyclicFlowAttentionModel(CyclicFlowAttentionPreTrainedModel):
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         use_cache = use_cache if use_cache is not None else (self.config.use_cache if not self.training else False)
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = return_dict if return_dict is not None else self.config.return_dict
 
         if input_ids is not None and inputs_embeds is not None:
             raise ValueError("You cannot specify both input_ids and inputs_embeds at the same time")
@@ -236,7 +225,7 @@ class CyclicFlowAttentionModel(CyclicFlowAttentionPreTrainedModel):
         )
 
 
-class CyclicFlowAttentionForCausalLM(CyclicFlowAttentionPreTrainedModel, FLAGenerationMixin):
+class CyclicFlowAttentionForCausalLM(CyclicFlowAttentionPreTrainedModel, FLAForCausalLM, FLAGenerationMixin):
     _tied_weights_keys = {"lm_head.weight": "model.embeddings.weight"}
 
     def __init__(self, config: CyclicFlowAttentionConfig):
@@ -247,24 +236,6 @@ class CyclicFlowAttentionForCausalLM(CyclicFlowAttentionPreTrainedModel, FLAGene
         self.criterion = None
 
         self.post_init()
-
-    def get_input_embeddings(self):
-        return self.model.embeddings
-
-    def set_input_embeddings(self, value):
-        self.model.embeddings = value
-
-    def get_output_embeddings(self):
-        return self.lm_head
-
-    def set_output_embeddings(self, new_embeddings):
-        self.lm_head = new_embeddings
-
-    def set_decoder(self, decoder):
-        self.model = decoder
-
-    def get_decoder(self):
-        return self.model
 
     @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
     def forward(
@@ -278,12 +249,13 @@ class CyclicFlowAttentionForCausalLM(CyclicFlowAttentionPreTrainedModel, FLAGene
         output_attentions: bool | None = None,
         output_hidden_states: bool | None = None,
         return_dict: bool | None = None,
-        logits_to_keep: int | None = 0,
+        logits_to_keep: int | torch.Tensor | None = 0,
+        num_items_in_batch: int | torch.Tensor | None = None,
         **kwargs: Unpack[dict],
     ) -> tuple | CausalLMOutputWithPast:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = return_dict if return_dict is not None else self.config.return_dict
 
         outputs = self.model(
             input_ids=input_ids,
@@ -298,31 +270,14 @@ class CyclicFlowAttentionForCausalLM(CyclicFlowAttentionPreTrainedModel, FLAGene
         )
 
         hidden_states = outputs[0]
-        fuse_linear_and_cross_entropy = self.config.fuse_linear_cross_entropy and self.training and labels is not None
 
-        loss, logits = None, None
-        if not fuse_linear_and_cross_entropy:
-            logits = self.lm_head(
-                hidden_states if labels is not None or logits_to_keep is None else hidden_states[:, -logits_to_keep:],
-            )
-
-        if labels is not None:
-            if getattr(self, "criterion", None) is None:
-                if fuse_linear_and_cross_entropy:
-                    criterion = FusedLinearCrossEntropyLoss(use_l2warp=self.config.use_l2warp)
-                elif self.config.fuse_cross_entropy:
-                    criterion = FusedCrossEntropyLoss(inplace_backward=True)
-                else:
-                    criterion = nn.CrossEntropyLoss()
-            else:
-                criterion = self.criterion
-            labels = labels.to(hidden_states.device)
-            labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], criterion.ignore_index)), 1)
-            if fuse_linear_and_cross_entropy:
-                loss = criterion(hidden_states, labels, self.lm_head.weight, self.lm_head.bias)
-            else:
-                loss = criterion(logits.view(labels.numel(), -1), labels.view(-1))
-                loss = l2_warp(loss, logits) if self.config.use_l2warp else loss
+        loss, logits = self._compute_logits_and_loss(
+            hidden_states=hidden_states,
+            labels=labels,
+            logits_to_keep=logits_to_keep,
+            num_items_in_batch=num_items_in_batch,
+            fuse_linear_cross_entropy=self.config.fuse_linear_cross_entropy and self.training,
+        )
 
         if not return_dict:
             output = (logits,) + outputs[1:]
