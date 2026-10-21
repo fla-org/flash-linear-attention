@@ -7,7 +7,6 @@
 
 """Compare CP GDN-2 outputs and gradients with per-sequence recurrent references."""
 
-
 import math
 
 import pytest
@@ -86,9 +85,9 @@ def _reference(q, k, v, g, b, w, do, offsets, A_log, dt_bias):
         q_seq_norm = F.normalize(q_seq, p=2, dim=-1)
         k_seq_norm = F.normalize(k_seq, p=2, dim=-1)
         g_processed = naive_kda_lowerbound_gate(
-            g_seq.to(torch.float),
-            A_log[:H].contiguous(),
-            dt_bias,
+            g=g_seq.to(torch.float),
+            A_log=A_log[:H].contiguous(),
+            dt_bias=dt_bias,
             lower_bound=-5.0,
         )
 

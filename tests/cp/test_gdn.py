@@ -7,7 +7,6 @@
 
 """Compare CP GDN outputs and gradients with a full-sequence chunk reference."""
 
-
 import pytest
 import torch
 import torch.distributed as dist

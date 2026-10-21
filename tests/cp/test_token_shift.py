@@ -7,7 +7,6 @@
 
 """Compare CP token shift outputs and gradients across packed sequence boundaries."""
 
-
 import pytest
 import torch
 import torch.distributed as dist

@@ -27,24 +27,24 @@ VARLEN_CASES = [
 ]
 
 
-def make_inputs(seed, gate, safe_gate, hv=H):
+def make_inputs(seed: int, gate: bool, safe_gate: bool, hv: int = H) -> dict[str, torch.Tensor | None]:
     # q/k carry H heads; v/g/beta/state carry HV heads (HV>H exercises GVA).
-    g = torch.Generator(device).manual_seed(seed)
-    dt = torch.bfloat16
-    q = torch.randn(1, T, H, D, dtype=dt, device=device, generator=g)
-    k = F.normalize(torch.randn(1, T, H, D, dtype=torch.float32, device=device, generator=g), p=2, dim=-1).to(dt)
-    v = torch.randn(1, T, hv, D, dtype=dt, device=device, generator=g)
+    generator = torch.Generator(device).manual_seed(seed)
+    dtype = torch.bfloat16
+    q = torch.randn(1, T, H, D, dtype=dtype, device=device, generator=generator)
+    k = F.normalize(torch.randn(1, T, H, D, dtype=torch.float32, device=device, generator=generator), p=2, dim=-1).to(dtype)
+    v = torch.randn(1, T, hv, D, dtype=dtype, device=device, generator=generator)
     if gate:
-        gg = torch.randn(1, T, hv, D, dtype=dt, device=device, generator=g)
-        A_log = torch.log(torch.empty(1, 1, hv, 1, device=device).uniform_(1, 16, generator=g))
-        dt_bias = torch.randn(hv * D, dtype=torch.float32, device=device, generator=g)
+        g = torch.randn(1, T, hv, D, dtype=dtype, device=device, generator=generator)
+        A_log = torch.log(torch.empty(1, 1, hv, 1, device=device).uniform_(1, 16, generator=generator))
+        dt_bias = torch.randn(hv * D, dtype=torch.float32, device=device, generator=generator)
     else:
-        gg = F.logsigmoid(torch.randn(1, T, hv, D, dtype=torch.float32, device=device, generator=g))
+        g = F.logsigmoid(torch.randn(1, T, hv, D, dtype=torch.float32, device=device, generator=generator))
         if safe_gate:
-            gg = gg.clamp(-5, 0)
+            g = g.clamp(-5, 0)
         A_log = dt_bias = None
-    beta = torch.rand(1, T, hv, dtype=dt, device=device, generator=g).sigmoid()
-    h0 = torch.randn(MAX_NUM_SEQS, hv, D, D, dtype=torch.float32, device=device, generator=g)
-    do = torch.randn(1, T, hv, D, dtype=dt, device=device, generator=g)
-    dht = torch.randn(MAX_NUM_SEQS, hv, D, D, dtype=torch.float32, device=device, generator=g)
-    return dict(q=q, k=k, v=v, g=gg, beta=beta, h0=h0, A_log=A_log, dt_bias=dt_bias, do=do, dht=dht)
+    beta = torch.rand(1, T, hv, dtype=dtype, device=device, generator=generator).sigmoid()
+    h0 = torch.randn(MAX_NUM_SEQS, hv, D, D, dtype=torch.float32, device=device, generator=generator)
+    do = torch.randn(1, T, hv, D, dtype=dtype, device=device, generator=generator)
+    dht = torch.randn(MAX_NUM_SEQS, hv, D, D, dtype=torch.float32, device=device, generator=generator)
+    return dict(q=q, k=k, v=v, g=g, beta=beta, h0=h0, A_log=A_log, dt_bias=dt_bias, do=do, dht=dht)

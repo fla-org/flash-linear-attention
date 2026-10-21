@@ -95,9 +95,9 @@ def _reference(q, k, v, g, beta, do, offsets, A_log, dt_bias, use_gate_in_kernel
         if use_gate_in_kernel:
             g_seq_input = g_seq.requires_grad_(True)
             g_processed = naive_kda_lowerbound_gate(
-                g_seq_input.to(torch.float),
-                A_log[:H].contiguous(),
-                dt_bias,
+                g=g_seq_input.to(torch.float),
+                A_log=A_log[:H].contiguous(),
+                dt_bias=dt_bias,
                 lower_bound=lower_bound,
             )
             g_for_grad = g_seq_input

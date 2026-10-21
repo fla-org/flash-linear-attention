@@ -47,12 +47,12 @@ def triton_eager_reference(monkeypatch):
     monkeypatch.setenv("FLA_TILELANG", "0")
 
 
-def _eager(inp, cu, gate, safe_gate):
-    leaves = {n: inp[n].detach().clone().requires_grad_() for n in ("q", "k", "v", "g", "beta", "h0")}
+def _eager(inputs, cu, gate, safe_gate):
+    leaves = {n: inputs[n].detach().clone().requires_grad_() for n in ("q", "k", "v", "g", "beta", "h0")}
     extra = {}
     if gate:
-        leaves["A_log"] = inp["A_log"].detach().clone().requires_grad_()
-        leaves["dt_bias"] = inp["dt_bias"].detach().clone().requires_grad_()
+        leaves["A_log"] = inputs["A_log"].detach().clone().requires_grad_()
+        leaves["dt_bias"] = inputs["dt_bias"].detach().clone().requires_grad_()
         extra = dict(A_log=leaves["A_log"], dt_bias=leaves["dt_bias"])
     o, ht = chunk_kda(
         q=leaves["q"],
@@ -62,13 +62,13 @@ def _eager(inp, cu, gate, safe_gate):
         beta=leaves["beta"],
         initial_state=leaves["h0"],
         output_final_state=True,
-        cu_seqlens=cu,
         use_gate_in_kernel=gate,
         safe_gate=safe_gate,
         lower_bound=(-5 if safe_gate else None),
+        cu_seqlens=cu,
         **extra,
     )
-    ((o * inp["do"]).sum() + (ht * inp["dht"]).sum()).backward()
+    ((o * inputs["do"]).sum() + (ht * inputs["dht"]).sum()).backward()
     out = [
         o.detach(),
         ht.detach(),
@@ -83,16 +83,16 @@ def _eager(inp, cu, gate, safe_gate):
     return out
 
 
-def _make_graphed(inp, cu, gate, safe_gate):
-    """Build static leaf buffers and capture a fwd+bwd step. Returns (graph, leaves, do, dht, cap_o, cap_ht)."""
-    leaves = {n: inp[n].detach().clone().requires_grad_() for n in ("q", "k", "v", "g", "beta", "h0")}
+def _make_graphed(inputs, cu, gate, safe_gate):
+    """Build static leaf buffers and capture a fwd+bwd step. Returns (graph, leaves, do, dht, o_captured, ht_captured)."""
+    leaves = {n: inputs[n].detach().clone().requires_grad_() for n in ("q", "k", "v", "g", "beta", "h0")}
     extra = {}
     if gate:
-        leaves["A_log"] = inp["A_log"].detach().clone().requires_grad_()
-        leaves["dt_bias"] = inp["dt_bias"].detach().clone().requires_grad_()
+        leaves["A_log"] = inputs["A_log"].detach().clone().requires_grad_()
+        leaves["dt_bias"] = inputs["dt_bias"].detach().clone().requires_grad_()
         extra = dict(A_log=leaves["A_log"], dt_bias=leaves["dt_bias"])
-    do = inp["do"].detach().clone()
-    dht = inp["dht"].detach().clone()
+    do = inputs["do"].detach().clone()
+    dht = inputs["dht"].detach().clone()
     grad_leaves = [leaves[n] for n in leaves]
 
     def step():
@@ -107,10 +107,10 @@ def _make_graphed(inp, cu, gate, safe_gate):
             beta=leaves["beta"],
             initial_state=leaves["h0"],
             output_final_state=True,
-            cu_seqlens=cu,
             use_gate_in_kernel=gate,
             safe_gate=safe_gate,
             lower_bound=(-5 if safe_gate else None),
+            cu_seqlens=cu,
             use_graph=True,
             max_num_seqs=MAX_NUM_SEQS,
             **extra,
@@ -118,23 +118,23 @@ def _make_graphed(inp, cu, gate, safe_gate):
         ((o * do).sum() + (ht * dht).sum()).backward()
         return o.detach().clone(), ht.detach().clone()
 
-    s = torch.cuda.Stream()
-    s.wait_stream(torch.cuda.current_stream())
-    with torch.cuda.stream(s):
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
         for _ in range(3):
             step()
-    torch.cuda.current_stream().wait_stream(s)
+    torch.cuda.current_stream().wait_stream(stream)
 
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
-        cap_o, cap_ht = step()
-    return graph, leaves, do, dht, cap_o, cap_ht
+        o_captured, ht_captured = step()
+    return graph, leaves, do, dht, o_captured, ht_captured
 
 
-def _graphed_outputs(leaves, gate, cap_o, cap_ht):
+def _graphed_outputs(leaves, gate, o_captured, ht_captured):
     out = [
-        cap_o,
-        cap_ht,
+        o_captured,
+        ht_captured,
         leaves["q"].grad,
         leaves["k"].grad,
         leaves["v"].grad,
@@ -162,14 +162,14 @@ _CFG = [
 def test_chunk_kda_graph_replay_matches_eager(gate, safe_gate, hv):
     """Capture fwd+bwd, replay with the captured inputs, and compare to the eager path."""
     cu = torch.tensor(VARLEN_CASES[0][1], dtype=torch.long, device=device)
-    inp = make_inputs(seed=0, gate=gate, safe_gate=safe_gate, hv=hv)
+    inputs = make_inputs(seed=0, gate=gate, safe_gate=safe_gate, hv=hv)
 
-    graph, leaves, _do, _dht, cap_o, cap_ht = _make_graphed(inp, cu, gate, safe_gate)
+    graph, leaves, _do, _dht, o_captured, ht_captured = _make_graphed(inputs, cu, gate, safe_gate)
     graph.replay()
     torch.cuda.synchronize()
 
-    got = _graphed_outputs(leaves, gate, cap_o, cap_ht)
-    ref = _eager(inp, cu, gate, safe_gate)
+    got = _graphed_outputs(leaves, gate, o_captured, ht_captured)
+    ref = _eager(inputs, cu, gate, safe_gate)
     for name, r, g in zip(_OUT_NAMES, ref, got):
         if r is None:
             continue
@@ -186,23 +186,23 @@ def test_chunk_kda_graph_multi_replay_varlen(gate, safe_gate, hv):
     chunk-index rebuild recomputes correctly from the live cu_seqlens on every replay.
     """
     cu = torch.tensor(VARLEN_CASES[0][1], dtype=torch.long, device=device)
-    inp0 = make_inputs(seed=0, gate=gate, safe_gate=safe_gate, hv=hv)
-    graph, leaves, _do, _dht, cap_o, cap_ht = _make_graphed(inp0, cu, gate, safe_gate)
+    initial_inputs = make_inputs(seed=0, gate=gate, safe_gate=safe_gate, hv=hv)
+    graph, leaves, _do, _dht, o_captured, ht_captured = _make_graphed(initial_inputs, cu, gate, safe_gate)
 
     update_names = ["q", "k", "v", "g", "beta", "h0"] + (["A_log", "dt_bias"] if gate else [])
-    for seed, (tag, cucfg) in enumerate(VARLEN_CASES, start=1):
-        inp = make_inputs(seed=seed * 17, gate=gate, safe_gate=safe_gate, hv=hv)
+    for seed, (tag, sequence_offsets) in enumerate(VARLEN_CASES, start=1):
+        inputs = make_inputs(seed=seed * 17, gate=gate, safe_gate=safe_gate, hv=hv)
         for n in update_names:
-            leaves[n].data.copy_(inp[n])
-        _do.copy_(inp["do"])
-        _dht.copy_(inp["dht"])
-        cu.copy_(torch.tensor(cucfg, dtype=torch.long, device=device))
+            leaves[n].data.copy_(inputs[n])
+        _do.copy_(inputs["do"])
+        _dht.copy_(inputs["dht"])
+        cu.copy_(torch.tensor(sequence_offsets, dtype=torch.long, device=device))
 
         graph.replay()
         torch.cuda.synchronize()
 
-        got = _graphed_outputs(leaves, gate, cap_o, cap_ht)
-        ref = _eager(inp, torch.tensor(cucfg, dtype=torch.long, device=device), gate, safe_gate)
+        got = _graphed_outputs(leaves, gate, o_captured, ht_captured)
+        ref = _eager(inputs, torch.tensor(sequence_offsets, dtype=torch.long, device=device), gate, safe_gate)
         for name, r, g in zip(_OUT_NAMES, ref, got):
             if r is None:
                 continue
@@ -224,25 +224,25 @@ def test_chunk_kda_graph_partial_tokens(safe_gate, hv):
     """
     gate = True
     cu = torch.tensor(VARLEN_CASES[0][1], dtype=torch.long, device=device)
-    inp0 = make_inputs(seed=0, gate=gate, safe_gate=safe_gate, hv=hv)
-    graph, leaves, _do, _dht, cap_o, cap_ht = _make_graphed(inp0, cu, gate, safe_gate)
+    initial_inputs = make_inputs(seed=0, gate=gate, safe_gate=safe_gate, hv=hv)
+    graph, leaves, _do, _dht, o_captured, ht_captured = _make_graphed(initial_inputs, cu, gate, safe_gate)
 
     update_names = ["q", "k", "v", "g", "beta", "h0", "A_log", "dt_bias"]
-    for seed, (tag, cucfg) in enumerate(_PARTIAL_CONFIGS, start=1):
-        n = cucfg[-1]
-        inp = make_inputs(seed=seed * 17, gate=gate, safe_gate=safe_gate, hv=hv)
+    for seed, (tag, sequence_offsets) in enumerate(_PARTIAL_CONFIGS, start=1):
+        n = sequence_offsets[-1]
+        inputs = make_inputs(seed=seed * 17, gate=gate, safe_gate=safe_gate, hv=hv)
         for name in update_names:
-            leaves[name].data.copy_(inp[name])
-        _do.copy_(inp["do"])
-        _dht.copy_(inp["dht"])
-        cu.copy_(torch.tensor(cucfg, dtype=torch.long, device=device))
+            leaves[name].data.copy_(inputs[name])
+        _do.copy_(inputs["do"])
+        _dht.copy_(inputs["dht"])
+        cu.copy_(torch.tensor(sequence_offsets, dtype=torch.long, device=device))
 
         graph.replay()
         torch.cuda.synchronize()
 
-        got = _graphed_outputs(leaves, gate, cap_o, cap_ht)
-        sliced = {k: v[:, :n] if k in ("q", "k", "v", "g", "beta", "do") else v for k, v in inp.items()}
-        ref = _eager(sliced, torch.tensor(cucfg, dtype=torch.long, device=device), gate, safe_gate)
+        got = _graphed_outputs(leaves, gate, o_captured, ht_captured)
+        sliced = {k: v[:, :n] if k in ("q", "k", "v", "g", "beta", "do") else v for k, v in inputs.items()}
+        ref = _eager(sliced, torch.tensor(sequence_offsets, dtype=torch.long, device=device), gate, safe_gate)
         for name, r, g in zip(_OUT_NAMES, ref, got):
             if r is None:
                 continue

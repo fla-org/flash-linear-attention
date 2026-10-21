@@ -15,7 +15,7 @@ import torch.distributed as dist
 from fla.utils import device_torch_lib
 
 
-def shard_tensor(tensor, rank, world_size, layout='contiguous'):
+def shard_tensor(tensor: torch.Tensor, rank: int, world_size: int, layout: str = 'contiguous') -> torch.Tensor:
     """Select one rank's tokens without changing their dtype or gradient ownership."""
     parts = world_size * (2 if layout == 'zigzag' else 1)
     assert tensor.shape[1] % parts == 0
@@ -27,7 +27,7 @@ def shard_tensor(tensor, rank, world_size, layout='contiguous'):
     return torch.cat((front, tensor[:, back_start:back_start + part_len]), dim=1)
 
 
-def gather_global(tensor, world_size, layout='contiguous'):
+def gather_global(tensor: torch.Tensor, world_size: int, layout: str = 'contiguous') -> torch.Tensor:
     tensor = tensor.contiguous()
     gathered = [torch.empty_like(tensor) for _ in range(world_size)]
     dist.all_gather(gathered, tensor)

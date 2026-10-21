@@ -51,7 +51,7 @@ def _run_chunk(
         )
         k_global.copy_(
             F.normalize(
-                torch.randn(B, T * num_householder, H, K, dtype=torch.float32, device=current_device),
+                input=torch.randn(B, T * num_householder, H, K, dtype=torch.float32, device=current_device),
                 p=2,
                 dim=-1,
             ).to(dtype)

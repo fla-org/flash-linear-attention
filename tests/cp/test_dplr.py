@@ -7,7 +7,6 @@
 
 """Shared DPLR and RWKV7 output and gradient comparisons against the recurrent reference."""
 
-
 import os
 
 import pytest
@@ -49,10 +48,10 @@ def _make_inputs(rank, T, H, D, dtype):
         #   a = -kk where kk = l2norm(...),
         #   b = kk * sigmoid(...),
         #   gk (w in rwkv7) = -0.6065306597126334 * sigmoid(...)  → range [-0.6065, 0]
-        q.copy_(F.normalize(torch.randn(B, T, H, D, device=device, dtype=dtype), dim=-1, p=2.0))
-        k.copy_(F.normalize(torch.randn(B, T, H, D, device=device, dtype=dtype), dim=-1, p=2.0))
+        q.copy_(F.normalize(torch.randn(B, T, H, D, device=device, dtype=dtype), p=2.0, dim=-1))
+        k.copy_(F.normalize(torch.randn(B, T, H, D, device=device, dtype=dtype), p=2.0, dim=-1))
         v.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype))
-        kk = F.normalize(torch.randn(B, T, H, D, device=device, dtype=dtype), dim=-1, p=2.0)
+        kk = F.normalize(torch.randn(B, T, H, D, device=device, dtype=dtype), p=2.0, dim=-1)
         a_sigmoid = torch.randn(B, T, H, D, device=device, dtype=dtype).sigmoid()
         a.copy_(-kk)
         b.copy_(kk * a_sigmoid)
@@ -159,17 +158,16 @@ def _run_chunk(
 
     dist.barrier()
 
-    route_spy = None
+    route_calls = None
     if assert_tilelang:
-        from fla.ops.generalized_delta_rule.dplr.backends.tilelang import DPLRTileLangBackend
-        route_spy = []
-        _orig = DPLRTileLangBackend.chunk_dplr_delta_rule
+        route_calls = []
+        original_chunk = DPLRTileLangBackend.chunk_dplr_delta_rule
 
-        def _spy(self, *args, **kwargs):
-            route_spy.append(1)
-            return _orig(self, *args, **kwargs)
+        def recorded_chunk(self, *args, **kwargs):
+            route_calls.append(1)
+            return original_chunk(self, *args, **kwargs)
 
-        DPLRTileLangBackend.chunk_dplr_delta_rule = _spy
+        DPLRTileLangBackend.chunk_dplr_delta_rule = recorded_chunk
 
     try:
         o_local, _ = op(
@@ -179,18 +177,18 @@ def _run_chunk(
             a=a_local,
             b=b_local,
             gk=gk_local,
-            cp_context=context,
             safe_gate=True,
             chunk_size=op_chunk_size,
+            cp_context=context,
         )
 
         o_local.backward(do_local)
 
         if assert_tilelang:
-            assert route_spy, "TileLang backend route was not taken"
+            assert route_calls, "TileLang backend route was not taken"
     finally:
         if assert_tilelang:
-            DPLRTileLangBackend.chunk_dplr_delta_rule = _orig
+            DPLRTileLangBackend.chunk_dplr_delta_rule = original_chunk
 
     o_cp_global = gather_global(o_local, world_size=world_size)
     dq_cp_global = gather_global(q_local.grad, world_size=world_size)

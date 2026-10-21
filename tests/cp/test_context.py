@@ -42,7 +42,7 @@ def test_get_cp_cu_seqlens_empty_partition():
 
 def test_get_cp_cu_seqlens_varlen():
     context = get_cp_cu_seqlens(
-        torch.tensor([0, 5, 12], dtype=torch.long),
+        cu_seqlens=torch.tensor([0, 5, 12], dtype=torch.long),
         world_size=3,
         rank=1,
     )
