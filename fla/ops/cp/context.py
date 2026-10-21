@@ -50,8 +50,10 @@ class FLACPContext:
     post_num_ranks: int | None = None
     conv1d_kernel_size: int | None = None
     pre_num_conv_tokens: int | None = None
+    # graph capture freezes scalar arguments; callers refresh these device tensors before replay
     pre_num_ranks_dev: torch.Tensor | None = None
     post_num_ranks_dev: torch.Tensor | None = None
+    # zigzag rank r holds chain slots r and 2 * world_size - 1 - r; metadata is per part
     layout: str = 'contiguous'
     part_len: int | None = None
     front_num_seqs: int | None = None
@@ -107,7 +109,7 @@ class FLACPContext:
         self.pre_num_conv_tokens_by_part = pre_num_conv_tokens_by_part
 
     def copy_for_backward(self) -> FLACPContext:
-        """Snapshot sequence lengths for backward while sharing device rank counters."""
+        """Create a copy for backward pass (useful when PP_SIZE > 1)."""
         return replace(
             self,
             cu_seqlens=self.cu_seqlens.clone() if self.cu_seqlens is not None else None,
@@ -141,13 +143,14 @@ def _interval_cp_meta(
     start_seq_idx = torch.searchsorted(cu_seqlens_cpu[1:], start, side='right')
     end_seq_idx = torch.searchsorted(cu_seqlens_cpu[:-1], end, side='left')
 
-    # clamping introduces duplicate boundaries outside the local interval
+    # clamping can collapse multiple sequence boundaries
     subset = cu_seqlens_cpu[start_seq_idx: end_seq_idx + 1]
     local = (subset.clamp(min=start, max=end) - start).unique_consecutive().to(torch.int32)
 
     first_seq_global_start = cu_seqlens_cpu[start_seq_idx].item()
     last_seq_global_end = cu_seqlens_cpu[end_seq_idx].item()
 
+    # convolution needs the preceding tokens from the same sequence
     pre_num_conv_tokens = max(0, start - first_seq_global_start)
 
     first_pos = first_seq_global_start // part_len
@@ -187,7 +190,7 @@ def get_cp_cu_seqlens(
         cu_seqlens_cpu = cu_seqlens.cpu()
     cu_seqlens_cpu = cu_seqlens_cpu.to(dtype=torch.long)
 
-    # zigzag assigns chain intervals r and 2W-1-r to rank r
+    # zigzag doubles the number of chain intervals: rank r holds intervals r and 2W-1-r
     total_tokens = cu_seqlens_cpu[-1].item()
     num_parts = world_size if layout == 'contiguous' else 2 * world_size
     divisor = "`world_size`" if layout == 'contiguous' else "`2 * world_size`"
@@ -271,20 +274,17 @@ def build_cp_context(
         conv1d_kernel_size (int, Optional):
             Convolution kernel size. Default: `None`.
         cu_seqlens_cpu (torch.Tensor, Optional):
-            CPU copy of global sequence lengths to avoid a device-to-host transfer. Default: `None`.
+            CPU sequence boundaries to avoid a device-to-host transfer. Default: `None`.
         layout (str, Optional):
-            Token partition layout. Default: `'contiguous'`. Contiguous assigns rank r the interval
-            [r * T/W, (r + 1) * T/W); 'zigzag' assigns rank r two intervals of
-            T/(2W) tokens, [r * T/2W, (r + 1) * T/2W) and
-            [(2W - 1 - r) * T/2W, (2W - r) * T/2W), and the caller feeds the
-            concatenation [front; back] as the local input. Zigzag balances
-            causal-attention CP layouts without a re-shard at layer boundaries.
+            Partition layout. Default: 'contiguous'. Each rank receives one interval in contiguous mode.
+            In 'zigzag' mode, rank r receives intervals r and 2 * world_size - 1 - r,
+            concatenated as [front; back]. Each interval contains T / (2 * world_size) tokens.
         **kwargs:
-            Accepts legacy use_tf32x3_affine_chain=True. Passing False raises ValueError.
+            Accepts legacy `use_tf32x3_affine_chain=True`; `False` raises `ValueError`.
 
     Returns:
         FLACPContext:
-            Rank-local sequence lengths and communication metadata.
+            Local sequence boundaries and communication metadata.
     """
     return get_cp_cu_seqlens(
         cu_seqlens=cu_seqlens,

@@ -23,38 +23,13 @@ import torch
 import triton
 
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_fwd_kernel_h_blockdim64
-from fla.ops.cp.chunk_fwd import chunk_cp_fwd_kernel_h
+from fla.ops.cp.chunk_fwd import chunk_cp_fwd_h
 from fla.ops.cp.chunk_merge import chunk_cp_fwd_bwd_kernel_merge
 from fla.ops.cp.context import _check_cp_device, _validate_cp_kwargs
 from fla.ops.utils.index import prepare_chunk_indices, prepare_chunk_offsets
 from fla.utils import get_multiprocessor_count
 
 logger = logging.getLogger(__name__)
-
-
-# cache indices and device tensors by cu_seqlens identity
-_intracard_cache: OrderedDict[tuple, _CacheEntry] = OrderedDict()
-_INTRACARD_CACHE_MAXSIZE = 32
-
-
-class _CacheEntry(NamedTuple):
-    """Cached partition metadata and device tensors for one sequence-boundary object."""
-    # a weak reference prevents stale cache hits when Python reuses an object id
-    cu_seqlens_ref: weakref.ReferenceType[torch.Tensor]
-    cu_seqlens_subseq_values: list[int]
-    split_info: SplitSeqInfo
-    total_subseqs: int
-    cu_seqlens_split_values: list[int]
-    S_split_total: int
-    non_first_indices: list[int]
-    first_subseq_indices: list[int]
-    last_subseq_indices: list[int]
-    num_non_first: int
-    merge_seq_offsets: list[int]
-    merge_init_offsets: list[int]
-    # cached device tensors avoid repeated host-to-device transfers
-    cu_seqlens_subseq_gpu: torch.Tensor
-    cu_seqlens_split_flat: torch.Tensor
 
 
 class SplitSeqInfo(NamedTuple):
@@ -69,6 +44,31 @@ class SplitSeqInfo(NamedTuple):
 
     def __bool__(self) -> bool:
         return self.num_split_seqs > 0
+
+
+class _CacheEntry(NamedTuple):
+    """Cached partition metadata and device tensors for one sequence-boundary object."""
+    # a weak reference prevents stale cache hits when Python reuses an object id
+    cu_seqlens_ref: weakref.ReferenceType[torch.Tensor]
+    cu_seqlens_subseq_values: list[int]
+    split_info: SplitSeqInfo
+    total_subseqs: int
+    cu_seqlens_split_values: list[int]
+    num_split_subseqs: int
+    non_first_indices: list[int]
+    first_subseq_indices: list[int]
+    last_subseq_indices: list[int]
+    num_non_first: int
+    merge_seq_offsets: list[int]
+    merge_init_offsets: list[int]
+    # cached device tensors avoid repeated host-to-device transfers
+    cu_seqlens_subseq_gpu: torch.Tensor
+    cu_seqlens_split_flat: torch.Tensor
+
+
+# cache indices and device tensors by cu_seqlens identity
+_intracard_cache: OrderedDict[tuple, _CacheEntry] = OrderedDict()
+_INTRACARD_CACHE_MAXSIZE = 32
 
 
 def _raw_chunk_gated_delta_rule_fwd_h(
@@ -119,8 +119,8 @@ def _raw_chunk_gated_delta_rule_fwd_h(
         cu_seqlens=cu_seqlens,
         chunk_offsets=chunk_offsets,
         T=T,
-        HV=HV,
         H=H,
+        HV=HV,
         K=K,
         V=V,
         BT=BT,
@@ -224,46 +224,32 @@ def prepare_subseq_cu_seqlens(
 
 
 def intracard_pre_scan(
-    kg: torch.Tensor,
+    k: torch.Tensor,
     w: torch.Tensor,
     u: torch.Tensor,
     g: torch.Tensor | None,
     gk: torch.Tensor | None,
-    cu_seqlens_subseq_split: torch.Tensor,
-    S_split: int,
+    cu_seqlens: torch.Tensor,
+    num_subseqs: int,
     chunk_size: int = 64,
     **kwargs,
-):
+) -> torch.Tensor:
     _validate_cp_kwargs(**kwargs)
-    _check_cp_device(kg.device)
-    H, K, V, HV = kg.shape[2], kg.shape[3], u.shape[3], u.shape[2]
-    BK = triton.next_power_of_2(K)
-    BLOCK_SIZE = 32 if K <= 64 else 64
-
-    hm = kg.new_empty(S_split, HV, K, V + K, dtype=torch.float32)
-
-    grid = (triton.cdiv(V, BLOCK_SIZE) + triton.cdiv(K, BLOCK_SIZE), HV, S_split)
-    chunk_cp_fwd_kernel_h[grid](
-        k=kg,
-        v=u,
+    _check_cp_device(k.device)
+    K = k.shape[-1]
+    HV, V = u.shape[2:]
+    hm = k.new_empty(num_subseqs, HV, K, V + K, dtype=torch.float32)
+    chunk_cp_fwd_h(
+        k=k,
         w=w,
-        g=g,
-        gk=gk,
-        bg=None,
         u=u,
         hm=hm,
-        cu_seqlens=cu_seqlens_subseq_split,
-        T=0,
-        H=H,
-        HV=HV,
-        K=K,
-        V=V,
-        BT=chunk_size,
-        BLOCK_SIZE=BLOCK_SIZE,
-        BK1=BK,
-        MULTI_SEQS=True,
+        g=g,
+        gk=gk,
+        cu_seqlens=cu_seqlens,
+        chunk_size=chunk_size,
+        multi_seqs=True,
     )
-
     return hm
 
 
@@ -288,9 +274,8 @@ def intracard_merge(
     if num_non_first == 0:
         return None, 0
 
-    HV = hm.shape[1]
-    K = hm.shape[2]
-    V = hm.shape[3] - K
+    _, HV, K, VK = hm.shape
+    V = VK - K
     BK = triton.next_power_of_2(K)
 
     num_split_seqs = split_info.num_split_seqs
@@ -338,14 +323,14 @@ def intracard_merge(
 def _precompute_intracard_indices(
     split_info: SplitSeqInfo,
     cu_seqlens_subseq_values: list[int],
-    N_orig: int,
+    num_seqs: int,
 ) -> tuple[list[int], int, list[int], list[int], list[int], int, list[int], list[int]]:
     """Prepare sequence indices for pre-scan, state merging, and final-state gathering.
 
     Returns:
         cu_seqlens_split_values (list[int]):
             Flattened boundaries of split sequences for pre-scan.
-        S_split_total (int):
+        num_split_subseqs (int):
             Total subsequences belonging to split sequences.
         non_first_indices (list[int]):
             Destinations for merged initial states.
@@ -366,13 +351,13 @@ def _precompute_intracard_indices(
 
     # cu_seqlens_split_values: for each split seq, extract [start:start+n+1] boundaries
     cu_seqlens_split_values: list[int] = []
-    S_split_total = 0
+    num_split_subseqs = 0
     for s, n in zip(starts, num_ss):
         cu_seqlens_split_values.extend(cu_seqlens_subseq_values[s:s+n+1])
-        S_split_total += n
+        num_split_subseqs += n
 
-    # num_subseqs_per_seq: [N_orig], default 1 for unsplit sequences
-    num_subseqs_per_seq = [1] * N_orig
+    # num_subseqs_per_seq: [num_seqs], default 1 for unsplit sequences
+    num_subseqs_per_seq = [1] * num_seqs
     for sid, nss in zip(split_ids, num_ss):
         num_subseqs_per_seq[sid] = nss
 
@@ -385,7 +370,7 @@ def _precompute_intracard_indices(
     # first_subseq_indices: for scattering original initial states
     first_subseq_indices: list[int] = [0]
     running = 0
-    for i in range(N_orig - 1):
+    for i in range(num_seqs - 1):
         running += num_subseqs_per_seq[i]
         first_subseq_indices.append(running)
 
@@ -405,7 +390,7 @@ def _precompute_intracard_indices(
 
     return (
         cu_seqlens_split_values,
-        S_split_total,
+        num_split_subseqs,
         non_first_indices,
         first_subseq_indices,
         last_subseq_indices,
@@ -441,9 +426,8 @@ def intracard_fwd_h(
     _check_cp_device(k.device)
     assert cu_seqlens is not None, "intracard_fwd_h requires cu_seqlens"
 
-    _, _, _Hq, K = k.shape
-    V = u.shape[-1]
-    HV = u.shape[2]
+    K = k.shape[-1]
+    HV, V = u.shape[2:]
     device = k.device
 
     if cu_seqlens_cpu is None:
@@ -452,7 +436,12 @@ def intracard_fwd_h(
     seq_lens = torch.diff(cu_seqlens_cpu)
     max_seq_len = int(seq_lens.max().item())
     num_sms = get_multiprocessor_count()
-    subseq_len = compute_subseq_len(max_seq_len, num_sms, HV, chunk_size)
+    subseq_len = compute_subseq_len(
+        seq_len=max_seq_len,
+        num_sms=num_sms,
+        num_heads=HV,
+        chunk_size=chunk_size,
+    )
 
     early_return = (seq_lens < 2 * subseq_len).all()
 
@@ -482,7 +471,7 @@ def intracard_fwd_h(
             split_info = cached.split_info
             total_subseqs = cached.total_subseqs
             cu_seqlens_split_values = cached.cu_seqlens_split_values
-            S_split_total = cached.S_split_total
+            num_split_subseqs = cached.num_split_subseqs
             non_first_indices = cached.non_first_indices
             first_subseq_indices = cached.first_subseq_indices
             last_subseq_indices = cached.last_subseq_indices
@@ -493,9 +482,9 @@ def intracard_fwd_h(
             cu_seqlens_split_flat = cached.cu_seqlens_split_flat
         else:
             cu_seqlens_subseq_values, split_info, total_subseqs = prepare_subseq_cu_seqlens(
-                cu_seqlens_cpu,
-                subseq_len,
-                chunk_size,
+                cu_seqlens_cpu=cu_seqlens_cpu,
+                subseq_len=subseq_len,
+                chunk_size=chunk_size,
                 max_splits=max_splits,
             )
 
@@ -510,24 +499,28 @@ def intracard_fwd_h(
             output_final_state=output_final_state,
             chunk_size=chunk_size,
             save_new_value=save_new_value,
+            state_v_first=state_v_first,
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
-            state_v_first=state_v_first,
         )
 
-    N_orig = len(cu_seqlens_cpu) - 1
+    num_seqs = len(cu_seqlens_cpu) - 1
 
     if cached is None:
         (
             cu_seqlens_split_values,
-            S_split_total,
+            num_split_subseqs,
             non_first_indices,
             first_subseq_indices,
             last_subseq_indices,
             num_non_first,
             merge_seq_offsets,
             merge_init_offsets,
-        ) = _precompute_intracard_indices(split_info, cu_seqlens_subseq_values, N_orig)
+        ) = _precompute_intracard_indices(
+            split_info=split_info,
+            cu_seqlens_subseq_values=cu_seqlens_subseq_values,
+            num_seqs=num_seqs,
+        )
 
         dtype = cu_seqlens_cpu.dtype
         cu_seqlens_subseq_gpu = torch.tensor(cu_seqlens_subseq_values, dtype=dtype, device=device)
@@ -539,7 +532,7 @@ def intracard_fwd_h(
             split_info=split_info,
             total_subseqs=total_subseqs,
             cu_seqlens_split_values=cu_seqlens_split_values,
-            S_split_total=S_split_total,
+            num_split_subseqs=num_split_subseqs,
             non_first_indices=non_first_indices,
             first_subseq_indices=first_subseq_indices,
             last_subseq_indices=last_subseq_indices,
@@ -554,13 +547,13 @@ def intracard_fwd_h(
 
     # summarize only split sequences; unsplit sequences keep their original initial states
     hm = intracard_pre_scan(
-        kg=k,
+        k=k,
         w=w,
         u=u,
         g=g,
         gk=gk,
-        cu_seqlens_subseq_split=cu_seqlens_split_flat,
-        S_split=S_split_total,
+        cu_seqlens=cu_seqlens_split_flat,
+        num_subseqs=num_split_subseqs,
         chunk_size=chunk_size,
     )
 
@@ -599,9 +592,9 @@ def intracard_fwd_h(
         output_final_state=output_final_state,
         chunk_size=chunk_size,
         save_new_value=save_new_value,
+        state_v_first=state_v_first,
         cu_seqlens=cu_seqlens_subseq_gpu,
         chunk_indices=chunk_indices_subseq,
-        state_v_first=state_v_first,
     )
 
     # expose one final state per original sequence, taken from its last subsequence

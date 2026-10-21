@@ -60,7 +60,9 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
             initial_state = k.new_zeros(N, HV, K, V, dtype=torch.float32)
         # each part exports the affine chain of its last segment, skipped when chain-last
         for part, (cu_part, is_last) in enumerate(zip(
-                (cu_seqlens[front_num_seqs - 1: front_num_seqs + 1], cu_seqlens[-2:]), context.is_last_by_part)):
+            (cu_seqlens[front_num_seqs - 1: front_num_seqs + 1], cu_seqlens[-2:]),
+            context.is_last_by_part,
+        )):
             if not is_last:
                 chunk_cp_fwd_h(
                     k=k,
@@ -175,7 +177,9 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
             dht = q.new_zeros(N, HV, K, V, dtype=torch.float32)
         # each part exports the backward affine chain of its first segment, skipped when chain-first
         for part, (cu_part, is_first) in enumerate(zip(
-                (cu_seqlens[:2], cu_seqlens[front_num_seqs: front_num_seqs + 2]), context.is_first_by_part)):
+            (cu_seqlens[:2], cu_seqlens[front_num_seqs: front_num_seqs + 2]),
+            context.is_first_by_part,
+        )):
             if not is_first:
                 chunk_cp_bwd_dh(
                     q=q,

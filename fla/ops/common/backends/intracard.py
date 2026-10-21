@@ -99,9 +99,9 @@ class IntraCardCPBackend(BaseBackend):
             output_final_state=output_final_state,
             chunk_size=chunk_size,
             save_new_value=save_new_value,
+            state_v_first=state_v_first,
             cu_seqlens=cu_seqlens,
             cu_seqlens_cpu=cu_seqlens_cpu,
             chunk_indices=chunk_indices,
             max_splits=MAX_SUBSEQS,
-            state_v_first=state_v_first,
         )

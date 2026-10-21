@@ -125,22 +125,22 @@ def test_intracard_pre_scan_merge(H: int, vector_gate: bool, state_v_first: bool
     if vector_gate:
         # scalar and vector gates must not share an autotuned pipeline configuration
         intracard_pre_scan(
-            kg=k,
+            k=k,
             w=w,
             u=u,
             g=decay.view(1, T, 1).expand(1, T, HV).contiguous(),
             gk=None,
-            cu_seqlens_subseq_split=cu_seqlens_split,
-            S_split=3,
+            cu_seqlens=cu_seqlens_split,
+            num_subseqs=3,
         )
     hm = intracard_pre_scan(
-        kg=k,
+        k=k,
         w=w,
         u=u,
         g=g,
         gk=gk,
-        cu_seqlens_subseq_split=cu_seqlens_split,
-        S_split=3,
+        cu_seqlens=cu_seqlens_split,
+        num_subseqs=3,
     )
     states, count = intracard_merge(
         hm=hm,
@@ -170,18 +170,19 @@ def test_intracard_pre_scan_merge(H: int, vector_gate: bool, state_v_first: bool
 def test_intracard_affine_chain_precision(monkeypatch):
     monkeypatch.setattr(intracard_cp, '_check_cp_device', Mock())
     fwd, merge = MagicMock(), MagicMock()
-    monkeypatch.setattr(intracard_cp, 'chunk_cp_fwd_kernel_h', fwd)
+    monkeypatch.setattr(chunk_fwd, '_check_cp_device', Mock())
+    monkeypatch.setattr(chunk_fwd, 'chunk_cp_fwd_kernel_h', fwd)
     monkeypatch.setattr(intracard_cp, 'chunk_cp_fwd_bwd_kernel_merge', merge)
     k = torch.zeros(1, 4, 1, 2)
     v = torch.zeros(1, 4, 1, 3)
     hm = intracard_pre_scan(
-        kg=k,
+        k=k,
         w=k,
         u=v,
         g=None,
         gk=None,
-        cu_seqlens_subseq_split=torch.tensor([0, 2, 4]),
-        S_split=2,
+        cu_seqlens=torch.tensor([0, 2, 4]),
+        num_subseqs=2,
     )
     intracard_merge(
         hm=hm,

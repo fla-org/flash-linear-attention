@@ -68,6 +68,7 @@ def test_copy_for_backward(layout: str):
         conv1d_kernel_size=4,
         layout=layout,
     )
+    context.group = object()
     context.pre_num_ranks_dev = torch.tensor([1], dtype=torch.int32)
     context.post_num_ranks_dev = torch.tensor([2], dtype=torch.int32)
     saved = context.copy_for_backward()

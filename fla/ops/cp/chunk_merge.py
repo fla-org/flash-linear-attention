@@ -83,14 +83,14 @@ def _prune_cp_configs(configs, nargs, **kwargs):
 )
 @triton.jit(do_not_specialize=['pre_or_post_num_ranks', 'rank', 'NUM_SEQ_ENTRIES'])
 def chunk_cp_fwd_bwd_kernel_merge(
-    h,
-    ag_hm,
+    h,                   # [HV, K, V] or [num_non_first, HV, K, V]; K/V swapped for STATE_V_FIRST
+    ag_hm,               # [num_ranks, HV, K, V+K] or [S_split, HV, K, V+K]
     pre_or_post_num_ranks,
     rank,
-    seq_offsets,
-    init_offsets,
-    h0_seq_ids,
-    h0,
+    seq_offsets,         # [num_split_seqs + 1] or None
+    init_offsets,        # [num_split_seqs + 1] or None
+    h0_seq_ids,          # [num_split_seqs] or None
+    h0,                  # [N_orig, HV, K, V] or None; K/V swapped for STATE_V_FIRST
     h_seq_idx,
     HV: tl.constexpr,
     K: tl.constexpr,
@@ -206,7 +206,6 @@ def chunk_cp_fwd_bwd_kernel_merge(
                 BV=BV,
                 STATE_V_FIRST=STATE_V_FIRST,
             )
-
         if STATE_V_FIRST:
             p_h = h + o_v[:, None] * K + o_k[None, :]
             m_h = m_v[:, None] & m_k[None, :]

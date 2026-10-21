@@ -38,7 +38,16 @@ def test_intracard_precision_requirement(entry, legacy_false, monkeypatch):
         if entry == 'fwd':
             intracard_cp.intracard_fwd_h(k=x, w=x, u=x, **kwargs)
         elif entry == 'pre_scan':
-            intracard_cp.intracard_pre_scan(kg=x, w=x, u=x, g=None, gk=None, cu_seqlens_subseq_split=None, S_split=0, **kwargs)
+            intracard_cp.intracard_pre_scan(
+                k=x,
+                w=x,
+                u=x,
+                g=None,
+                gk=None,
+                cu_seqlens=None,
+                num_subseqs=0,
+                **kwargs,
+            )
         else:
             intracard_cp.intracard_merge(
                 hm=x,

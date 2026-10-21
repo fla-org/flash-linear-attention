@@ -305,14 +305,18 @@ def chunk_cp_fwd_h(
     v: torch.Tensor | None = None,
     cu_seqlens: torch.Tensor | None = None,
     chunk_size: int = 64,
+    multi_seqs: bool = False,
 ) -> None:
-    """Write the forward affine summary of one local sequence into hm."""
+    """Write forward affine summaries into hm for one boundary sequence or multiple subsequences."""
     _check_cp_device(k.device)
     _, T, H, K = k.shape
     HV, V = u.shape[2:]
     BK = triton.next_power_of_2(K)
     BLOCK_SIZE = 32 if K <= 64 else 64
     grid = (triton.cdiv(V, BLOCK_SIZE) + triton.cdiv(K, BLOCK_SIZE), HV)
+    if multi_seqs:
+        grid += (hm.shape[0],)
+    # DPLR uses original v and WY-processed u; delta-rule paths use u for both.
     chunk_cp_fwd_kernel_h[grid](
         k=k,
         v=u if v is None else v,
@@ -323,7 +327,7 @@ def chunk_cp_fwd_h(
         u=u,
         hm=hm,
         cu_seqlens=cu_seqlens,
-        T=T,
+        T=0 if multi_seqs else T,
         H=H,
         HV=HV,
         K=K,
@@ -331,5 +335,5 @@ def chunk_cp_fwd_h(
         BT=chunk_size,
         BLOCK_SIZE=BLOCK_SIZE,
         BK1=BK,
-        MULTI_SEQS=False,
+        MULTI_SEQS=multi_seqs,
     )
