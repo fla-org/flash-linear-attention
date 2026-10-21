@@ -8,6 +8,8 @@
 """Shared DPLR and RWKV7 output and gradient comparisons against the recurrent reference."""
 
 
+import os
+
 import pytest
 import torch
 import torch.distributed as dist
@@ -224,6 +226,7 @@ def test_chunk(run_distributed, world_size, lengths, op):
     run_distributed(worker=_run_chunk, world_size=world_size, H=4, D=64, lengths=lengths, dtype=torch.bfloat16, op=op)
 
 
+@pytest.mark.skipif(os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") == "1", reason="backend dispatch disabled")
 def test_chunk_tilelang(run_distributed, monkeypatch):
     """CP2 through the TileLang DPLR backend (FLA_TILELANG=1), with route assertion."""
     if not DPLRTileLangBackend.is_available():
