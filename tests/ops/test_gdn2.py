@@ -15,6 +15,7 @@ import torch
 import torch.nn.functional as F
 
 from fla.ops.gdn2 import chunk_gdn2, fused_recurrent_gdn2, naive_recurrent_gdn2
+from fla.ops.gdn2.wy_fast import recompute_w_u_fwd_gdn2
 from fla.ops.gla.chunk import chunk_gla_fwd_o_gk
 from fla.ops.kda.chunk_bwd import chunk_kda_bwd_dAv
 from fla.ops.kda.gate import naive_kda_gate, naive_kda_lowerbound_gate
@@ -965,6 +966,30 @@ def _precision_blocks(x, chunk_size):
 
 def _precision_tokens(x, length):
     return x.flatten(-3, -2).transpose(1, 2)[:, :length]
+
+
+@pytest.mark.skipif(IS_NPU, reason="generic Triton WY kernel")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16], ids=["fp16", "bf16"])
+def test_chunk_wy_gate_precision(dtype):
+    torch.manual_seed(42)
+    B, T, H, K, V, BT = 1, 64, 2, 32, 48, 64
+    k = torch.randn(B, T, H, K, device=device, dtype=dtype)
+    v = torch.randn(B, T, H, V, device=device, dtype=dtype)
+    b = torch.randn(B, T, H, K, device=device).sigmoid()
+    w_gate = torch.randn(B, T, H, V, device=device).sigmoid()
+    gk = torch.zeros(B, T, H, K, device=device)
+    A = torch.randn(B, T, H, BT, device=device, dtype=dtype) * 0.1
+    A = _precision_tokens(_precision_blocks(A, BT).tril(), T).contiguous()
+    inverse = _precision_blocks(A.double(), BT)
+    expected_w = inverse @ _precision_blocks((k.float() * b).to(dtype).double(), BT)
+    expected_u = inverse @ _precision_blocks((v.float() * w_gate).to(dtype).double(), BT)
+
+    w, u, _, _ = recompute_w_u_fwd_gdn2(k=k, v=v, b=b, w_gate=w_gate, A=A, gk=gk)
+
+    assert w.dtype == dtype
+    assert u.dtype == (torch.float32 if IS_NVIDIA else dtype)
+    assert_close("w", _precision_tokens(expected_w, T).to(w.dtype).float(), w.float(), 1e-5)
+    assert_close("u", _precision_tokens(expected_u, T).to(u.dtype).float(), u.float(), 1e-5)
 
 
 @pytest.mark.skipif(not IS_NVIDIA, reason="NVIDIA precision path")

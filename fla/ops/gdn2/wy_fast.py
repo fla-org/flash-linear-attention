@@ -99,7 +99,10 @@ def recompute_w_u_fwd_gdn2_kernel(
         p_wg = w_gate + (bos * H + i_h) * V + o_t[:, None] * (H * V) + o_v[None, :]
         b_v = tl.load(p_v, mask=m_v, other=0.0)
         b_wg = tl.load(p_wg, mask=m_v, other=0.0)
-        b_vb = b_v.to(b_A.dtype) * b_wg.to(b_A.dtype)
+        if A.dtype.element_ty == tl.float32:
+            b_vb = b_v.to(b_A.dtype) * b_wg.to(b_A.dtype)
+        else:
+            b_vb = (b_v * b_wg).to(b_v.dtype)
         b_u = tl.dot(b_A, b_vb, input_precision=DOT_PRECISION)
         tl.store(p_u, b_u.to(p_u.dtype.element_ty), mask=m_v)
 
@@ -111,7 +114,10 @@ def recompute_w_u_fwd_gdn2_kernel(
         p_b = b + (bos * H + i_h) * K + o_t[:, None] * (H * K) + o_k[None, :]
         b_k = tl.load(p_k, mask=m_kk, other=0.0)
         b_b = tl.load(p_b, mask=m_kk, other=0.0)
-        b_kb = b_k.to(b_A.dtype) * b_b.to(b_A.dtype)
+        if A.dtype.element_ty == tl.float32:
+            b_kb = b_k.to(b_A.dtype) * b_b.to(b_A.dtype)
+        else:
+            b_kb = b_k * b_b
 
         p_gk = gk + (bos * H + i_h) * K + o_t[:, None] * (H * K) + o_k[None, :]
         b_gk = tl.load(p_gk, mask=m_kk, other=0.0).to(tl.float32)
