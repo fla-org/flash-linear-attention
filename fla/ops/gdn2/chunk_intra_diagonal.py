@@ -63,7 +63,7 @@ def gdn2_bwd_kernel_diagonal(
     NK: tl.constexpr = tl.cdiv(K, BK)
     NC: tl.constexpr = tl.cdiv(BT, BC)
     count = tl.cast(B, tl.int64) * H * NT * NC * NK
-    for task in range(tl.program_id(0).to(tl.int64), count, tl.num_programs(0).to(tl.int64)):
+    for task in range(tl.cast(tl.program_id(0), tl.int64), count, tl.cast(tl.num_programs(0), tl.int64)):
         i_k = task % NK
         i_c = task // NK % NC
         i_t = task // (NK * NC) % NT
