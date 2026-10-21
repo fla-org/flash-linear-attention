@@ -202,18 +202,21 @@ jobs:
           source /usr/local/Ascend/ascend-toolkit/set_env.sh
           set -euo pipefail
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          baseline=9e97506c338769e8031966fb22fe31780addd8fa
+          baseline=9d478facb282410dc150051d5f57205cd3812f31
           git fetch --depth 1 origin "$baseline"
           mkdir -p /tmp/gdn2-baseline
           git archive "$baseline" | tar -x -C /tmp/gdn2-baseline
-          corrected=7b2abb6122af469472209d7751c01cd94febba5a
+          corrected=50ad9b59e931869888d53f82a91cd9c6ec2025e4
           git fetch --depth 1 origin "$corrected"
           mkdir -p /tmp/gdn2-corrected
           git archive "$corrected" | tar -x -C /tmp/gdn2-corrected
-          candidate=$(git rev-parse HEAD)
+          candidate=${{ github.event.pull_request.head.sha }}
+          git fetch --depth 1 origin "$candidate"
+          mkdir -p /tmp/gdn2-candidate
+          git archive "$candidate" | tar -x -C /tmp/gdn2-candidate
           mkdir -p gdn2-paired
           for trial in baseline-1 corrected-1 candidate-1 candidate-2 corrected-2 baseline-2; do
-            source="$GITHUB_WORKSPACE"
+            source=/tmp/gdn2-candidate
             commit="$candidate"
             if [[ "$trial" == baseline-* ]]; then
               source=/tmp/gdn2-baseline
