@@ -45,10 +45,16 @@ def _run_chunk(
 
     if rank == 0:
         torch.manual_seed(42)
-        q_global.copy_(F.normalize(torch.randn(B, T, Hq_actual, D, device=device,
-                       dtype=torch.float32), p=2, dim=-1).to(dtype))
-        k_global.copy_(F.normalize(torch.randn(B, T, Hq_actual, D, device=device,
-                       dtype=torch.float32), p=2, dim=-1).to(dtype))
+        q_global.copy_(F.normalize(
+            input=torch.randn(B, T, Hq_actual, D, device=device, dtype=torch.float32),
+            p=2,
+            dim=-1,
+        ).to(dtype))
+        k_global.copy_(F.normalize(
+            input=torch.randn(B, T, Hq_actual, D, device=device, dtype=torch.float32),
+            p=2,
+            dim=-1,
+        ).to(dtype))
         v_global.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype))
         g_global.copy_(F.logsigmoid(torch.randn(B, T, H, device=device, dtype=dtype)))
         beta_global.copy_(torch.randn(B, T, H, device=device, dtype=torch.float32).sigmoid())
@@ -80,8 +86,8 @@ def _run_chunk(
             v=v_ref,
             g=g_ref,
             beta=beta_ref,
-            cu_seqlens=cu_seqlens_global,
             state_v_first=state_v_first,
+            cu_seqlens=cu_seqlens_global,
         )
 
         o_ref.backward(do_global)
@@ -112,8 +118,8 @@ def _run_chunk(
         v=v_local,
         g=g_local,
         beta=beta_local,
-        cp_context=context,
         state_v_first=state_v_first,
+        cp_context=context,
     )
 
     o_local.backward(do_local)

@@ -39,9 +39,7 @@ def _make_inputs(rank, T, H, D, dtype):
     if rank == 0:
         torch.manual_seed(42)
 
-        # Asymmetric initialization for q and k to test L2 norm
-        # q: small positive values around 1.0
-        # k: large negative values around -50.0
+        # asymmetric q ~ N(1, 1) and k ~ N(-50, 10) stress the L2 normalization path
         q.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype) + 1.0)
         k.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype) * 10.0 - 50.0)
         v.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype))
@@ -63,8 +61,9 @@ def _make_inputs(rank, T, H, D, dtype):
         # vary A_log across heads so wrong-head gk offsets change the result
         A_log[:H] = torch.log(torch.linspace(1, 8, H, dtype=torch.float32, device=device))
         # dt initialization from real training
-        dt = torch.exp(torch.rand(projection_size, device=device) *
-                       (math.log(0.1) - math.log(0.001)) + math.log(0.001)).clamp_(min=1e-4)
+        dt = torch.exp(
+            torch.rand(projection_size, device=device) * (math.log(0.1) - math.log(0.001)) + math.log(0.001),
+        ).clamp_(min=1e-4)
         dt_bias.copy_(dt + torch.log(-torch.expm1(-dt)))
 
     for tensor in (A_log, dt_bias):
@@ -175,15 +174,15 @@ def _run_chunk(
         g=g_local,
         b=b_local,
         w=w_local,
-        cp_context=context,
-        disable_recompute=disable_recompute,
         use_qk_l2norm_in_kernel=True,
         use_gate_in_kernel=True,
         safe_gate=True,
         lower_bound=-5.0,
+        disable_recompute=disable_recompute,
+        state_v_first=state_v_first,
+        cp_context=context,
         A_log=A_log_global[:H].contiguous(),
         dt_bias=dt_bias_global,
-        state_v_first=state_v_first,
     )
 
     o_local.backward(do_local)
@@ -197,12 +196,9 @@ def _run_chunk(
     dw_cp_global = gather_global(w_local.grad, world_size=world_size)
 
     if rank == 0:
-        # Tolerance: ratio=8e-3 for all tensors, matching test_kda.py.
-        # Measured ratios are actually ~0.9-1.6% (db ~2.3%): per-dim gating
-        # plus the L2 norm over k ~ N(-50, 10) amplify the bf16 state
-        # communication precision loss.
-        # db (b grad) additionally involves a cross-rank reduction, so it is
-        # marked warning-only unconditionally.
+        # per-dim gating and L2 normalization of k ~ N(-50, 10) amplify bf16 state-communication error;
+        # baseline ratios reach ~0.9-1.6%, above the strict 8e-3 threshold.
+        # db also includes a cross-rank reduction (~2.3% error) and remains a warning-only diagnostic.
         assert_close("Output", ref_out, o_cp_global, ratio=8e-3, warning=False)
         assert_close("dq", ref_dq, dq_cp_global, ratio=8e-3, warning=False)
         assert_close("dk", ref_dk, dk_cp_global, ratio=8e-3, warning=False)

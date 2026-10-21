@@ -8,10 +8,10 @@
 """
 Test for Context Parallel (CP) KDA with platform graph capture/replay.
 
-Each rank captures a fwd+bwd step (cp_context + use_graph) once, replays it with
-several cu_seqlens layouts (different splits and zero-length tail padding), and
-compares against the eager CP path on the same shard. The recorded region includes
-the cross-rank state all-gathers, so all ranks must capture and replay in lockstep.
+Each rank captures a fwd+bwd step (cp_context + use_graph) once,
+replays it with several cu_seqlens layouts (different splits and zero-length tail padding),
+and compares against the eager CP path on the same shard.
+The recorded region includes cross-rank state all-gathers, so ranks must capture and replay in lockstep.
 """
 
 
@@ -102,12 +102,12 @@ def _run_graph(rank, world_size):
             v=leaves["v"],
             g=leaves["g"],
             beta=leaves["beta"],
-            cp_context=ctx,
             use_gate_in_kernel=True,
-            A_log=leaves["A_log"],
-            dt_bias=leaves["dt_bias"],
+            cp_context=ctx,
             use_graph=True,
             max_num_seqs=MAX_NUM_SEQS,
+            A_log=leaves["A_log"],
+            dt_bias=leaves["dt_bias"],
         )
         (o * do).sum().backward()
         return o
@@ -148,8 +148,8 @@ def _run_graph(rank, world_size):
             v=ref_leaves["v"],
             g=ref_leaves["g"],
             beta=ref_leaves["beta"],
-            cp_context=build_cp_context(cu, group=group),
             use_gate_in_kernel=True,
+            cp_context=build_cp_context(cu, group=group),
             A_log=ref_leaves["A_log"],
             dt_bias=ref_leaves["dt_bias"],
         )
@@ -160,8 +160,7 @@ def _run_graph(rank, world_size):
         for name, r, g in zip(OUTPUT_NAMES, ref, got):
             assert_close(f"{tag}::{name}", r, g, ratio=8e-3)
 
-    # no destroy_process_group: tearing down a communicator recorded in a CUDA graph
-    # can hang; process exit reaps it
+    # destroying a communicator recorded in a CUDA graph can hang; process exit reaps it
     dist.barrier()
 
 
@@ -185,8 +184,8 @@ def _eager_cp(inp, cucfg, gate):
         v=leaves["v"],
         g=leaves["g"],
         beta=leaves["beta"],
-        cp_context=build_cp_context(cu, group=dist.group.WORLD),
         use_gate_in_kernel=gate,
+        cp_context=build_cp_context(cu, group=dist.group.WORLD),
         **extra,
     )
     (o * inp["do"]).sum().backward()
@@ -230,12 +229,12 @@ def test_chunk_kda_single_rank(single_rank_group, monkeypatch):
             v=leaves["v"],
             g=leaves["g"],
             beta=leaves["beta"],
-            cp_context=ctx,
             use_gate_in_kernel=gate,
-            A_log=leaves["A_log"],
-            dt_bias=leaves["dt_bias"],
+            cp_context=ctx,
             use_graph=True,
             max_num_seqs=MAX_NUM_SEQS,
+            A_log=leaves["A_log"],
+            dt_bias=leaves["dt_bias"],
         )
         (o * do).sum().backward()
         return o.detach().clone()

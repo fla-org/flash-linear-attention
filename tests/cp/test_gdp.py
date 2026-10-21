@@ -44,7 +44,9 @@ def _run_chunk(
         torch.manual_seed(42)
         q_global.copy_(
             F.normalize(
-                torch.randn(B, T, H, K, dtype=torch.float32, device=current_device), p=2, dim=-1
+                input=torch.randn(B, T, H, K, dtype=torch.float32, device=current_device),
+                p=2,
+                dim=-1,
             ).to(dtype)
         )
         k_global.copy_(
@@ -62,7 +64,7 @@ def _run_chunk(
     for tensor in (q_global, k_global, v_global, beta_global, g_global, do_global):
         dist.broadcast(tensor, src=0)
 
-    # Prepare cu_seqlens
+    # offsets count output tokens; k/v/beta carry num_householder updates per token
     sequence_offsets = [0, *torch.tensor(lengths).cumsum(0).tolist()]
     cu_seqlens_global = torch.tensor(sequence_offsets, dtype=torch.long, device=current_device)
 
@@ -87,7 +89,8 @@ def _run_chunk(
                 num_householder=num_householder,
             )
             outputs.append(o_ref_i)
-        o_ref = torch.cat(outputs, dim=1) * scale
+        # the recurrent reference applies scale to q before reading the state
+        o_ref = torch.cat(outputs, dim=1)
         o_ref.backward(do_global)
         ref = {
             "o": o_ref.detach(),

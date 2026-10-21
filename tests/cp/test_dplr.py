@@ -25,8 +25,8 @@ pytestmark = pytest.mark.skipif(device != "cuda", reason="requires CUDA or ROCm 
 
 
 def _chunk_rwkv7(q, k, v, a, b, gk, scale=None, **kwargs):
-    # chunk_rwkv7 defaults scale=1.0; align with chunk_dplr_delta_rule (scale=None
-    # -> 1/sqrt(K)) so the wrapper matches the dplr_recurrence reference.
+    # chunk_rwkv7 defaults scale=1.0;
+    # use scale=None for 1/sqrt(K), matching chunk_dplr_delta_rule and the recurrent reference.
     return chunk_rwkv7(r=q, w=gk, k=k, v=v, a=a, b=b, scale=scale, **kwargs)
 
 
@@ -42,7 +42,7 @@ def _make_inputs(rank, T, H, D, dtype):
 
     if rank == 0:
         torch.manual_seed(42)
-        # Mirror fla/layers/rwkv7.py:
+        # match the input constraints in fla/layers/rwkv7.py:
         #   q/k are l2-normalized over head_dim,
         #   a = -kk where kk = l2norm(...),
         #   b = kk * sigmoid(...),

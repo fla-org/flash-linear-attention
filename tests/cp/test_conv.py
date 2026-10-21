@@ -122,7 +122,8 @@ def _run_causal_conv1d(
 
 
 @pytest.mark.parametrize(
-    ('world_size', 'lengths', 'D', 'W', 'activation', 'has_bias', 'has_residual', 'non_contiguous', 'dtype', 'layout', 'backend'),
+    ('world_size', 'lengths', 'D', 'W', 'activation', 'has_bias', 'has_residual',
+     'non_contiguous', 'dtype', 'layout', 'backend'),
     [
         pytest.param(
             world_size,

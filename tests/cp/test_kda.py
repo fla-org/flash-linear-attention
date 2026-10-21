@@ -39,8 +39,8 @@ def _make_inputs(rank, T, H, D, dtype, use_gate_in_kernel, safe_gate, lower_boun
     if rank == 0:
         torch.manual_seed(42)
 
-        # q gets a +1.0 offset to keep L2 normalization observable; extreme k
-        # magnitudes inflate chunk-vs-naive bf16 error past 8e-3 even without CP.
+        # q gets a +1.0 offset to keep L2 normalization observable;
+        # extreme k magnitudes inflate chunk-vs-naive bf16 error past 8e-3 even without CP.
         q.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype) + 1.0)
         k.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype))
         v.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype))
@@ -68,8 +68,9 @@ def _make_inputs(rank, T, H, D, dtype, use_gate_in_kernel, safe_gate, lower_boun
         else:
             A_log.copy_(torch.log(torch.empty(num_even_heads, dtype=torch.float32, device=device).uniform_(1, 16)))
         # dt initialization from real training
-        dt = torch.exp(torch.rand(projection_size, device=device) *
-                       (math.log(0.1) - math.log(0.001)) + math.log(0.001)).clamp_(min=1e-4)
+        dt = torch.exp(
+            torch.rand(projection_size, device=device) * (math.log(0.1) - math.log(0.001)) + math.log(0.001),
+        ).clamp_(min=1e-4)
         dt_bias.copy_(dt + torch.log(-torch.expm1(-dt)))
 
     for tensor in (A_log, dt_bias):
@@ -188,8 +189,12 @@ def _run_chunk(
     k_local = shard_tensor(k_global, rank=rank, world_size=world_size, layout=layout).clone().detach().requires_grad_(True)
     v_local = shard_tensor(v_global, rank=rank, world_size=world_size, layout=layout).clone().detach().requires_grad_(True)
     g_local = shard_tensor(g_global, rank=rank, world_size=world_size, layout=layout).clone().detach().requires_grad_(True)
-    beta_local = shard_tensor(beta_global, rank=rank, world_size=world_size,
-                              layout=layout).clone().detach().requires_grad_(True)
+    beta_local = shard_tensor(
+        tensor=beta_global,
+        rank=rank,
+        world_size=world_size,
+        layout=layout,
+    ).clone().detach().requires_grad_(True)
     do_local = shard_tensor(do_global, rank=rank, world_size=world_size, layout=layout).clone()
 
     dist.barrier()
@@ -200,15 +205,15 @@ def _run_chunk(
         v=v_local,
         g=g_local,
         beta=beta_local,
-        cp_context=context,
-        disable_recompute=disable_recompute,
         use_qk_l2norm_in_kernel=True,
         use_gate_in_kernel=use_gate_in_kernel,
         safe_gate=safe_gate,
         lower_bound=lower_bound,
+        disable_recompute=disable_recompute,
+        state_v_first=state_v_first,
+        cp_context=context,
         A_log=A_log_global[:H].contiguous() if use_gate_in_kernel else None,
         dt_bias=dt_bias_global if use_gate_in_kernel else None,
-        state_v_first=state_v_first,
     )
 
     o_local.backward(do_local)
@@ -221,9 +226,8 @@ def _run_chunk(
     db_cp_global = gather_global(beta_local.grad, world_size=world_size, layout=layout)
 
     if rank == 0:
-        # Tolerance: ratio=8e-3 for all tensors; dg/db warning-only: dg's
-        # single-GPU chunk-vs-naive error is already ~0.0085; db sees cross-rank
-        # reduction (~1.5-2.4%).
+        # dg remains diagnostic: single-GPU chunk-vs-naive error is already ~0.0085;
+        # db's cross-rank reduction adds ~1.5-2.4% error, so it also remains warning-only.
         assert_close("Output", ref_out, o_cp_global, ratio=8e-3, warning=False)
         assert_close("dq", ref_dq, dq_cp_global, ratio=8e-3, warning=False)
         assert_close("dk", ref_dk, dk_cp_global, ratio=8e-3, warning=False)

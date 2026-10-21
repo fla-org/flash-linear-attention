@@ -9,16 +9,16 @@ FLA_CI_ENV=0 pytest tests/cp/test_kda.py -k cp2-sequence-cut -q
 
 Each component keeps its inputs, reference, CP call, and assertions in one test file. DPLR and its RWKV7 wrapper share a parameter matrix. The `run_distributed` fixture owns process startup, device-count checks, and rendezvous cleanup. Workers receive explicit keyword arguments; token sharding and gathering live in `utils.py`.
 
-| File                                      | Coverage                                                                   |
-| ----------------------------------------- | -------------------------------------------------------------------------- |
-| `test_context.py`                         | Sequence partitions and invalid context metadata.                          |
-| `test_state.py`                           | Per-head vector-gate addressing in backward state summaries.               |
-| `test_intracard.py`                       | Intra-card backend selection, index caching, and grouped heads.            |
-| `test_graph.py`                           | KDA graph replay with one or multiple ranks and changing sequence cuts.    |
-| `test_conv.py`, `test_token_shift.py`     | Boundary exchange, outputs, and gradients for convolution and token shift. |
-| `test_kda.py`, `test_gdn2.py`             | Gate modes, recomputation, state layouts, and recurrent references.        |
-| `test_gdn.py`, `test_gdp.py`              | Grouped heads and multiple Householder updates against their references.   |
-| `test_dplr.py`                            | DPLR, its RWKV7 wrapper, and explicit TileLang routing.                    |
+| File                                  | Coverage                                                                   |
+| ------------------------------------- | -------------------------------------------------------------------------- |
+| `test_context.py`                     | Sequence partitions and invalid context metadata.                          |
+| `test_state.py`                       | Per-head vector-gate addressing in backward state summaries.               |
+| `test_intracard.py`                   | Intra-card backend selection, index caching, and grouped heads.            |
+| `test_graph.py`                       | KDA graph replay with one or multiple ranks and changing sequence cuts.    |
+| `test_conv.py`, `test_token_shift.py` | Boundary exchange, outputs, and gradients for convolution and token shift. |
+| `test_kda.py`, `test_gdn2.py`         | Gate modes, recomputation, state layouts, and recurrent references.        |
+| `test_gdn.py`, `test_gdp.py`          | Grouped heads and multiple Householder updates against their references.   |
+| `test_dplr.py`                        | DPLR, its RWKV7 wrapper, and explicit TileLang routing.                    |
 
 Multi-rank tests compare sharded outputs and gradients against full-sequence references. Context metadata, backward state-kernel, intra-card cache, and single-rank graph tests cover separate CP infrastructure; they do not establish cross-rank numerical correctness. Ordinary operator tests retain backend-verifier cases that only check whether a CP argument is supported.
 
