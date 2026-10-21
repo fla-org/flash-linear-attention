@@ -14,13 +14,13 @@ import torch.distributed as dist
 import torch.nn.functional as F
 import triton
 
-from cp.utils import assert_chunk_matches_cp, gather_global
 from fla.ops.cp import build_cp_context
 from fla.ops.gdn2 import chunk_gdn2
 from fla.ops.gdn2.naive import naive_recurrent_gdn2
 from fla.ops.kda.gate import naive_kda_gate, naive_kda_lowerbound_gate
 from fla.utils import assert_close
 from fla.utils import device as device_type
+from tests.cp.utils import assert_chunk_matches_cp, gather_global
 
 
 def _run_chunk(

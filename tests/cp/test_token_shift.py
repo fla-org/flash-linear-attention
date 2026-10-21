@@ -10,12 +10,12 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from cp.utils import gather_global
 from fla.modules.token_shift import token_shift_ref
 from fla.modules.token_shift_cp import token_shift_cp
 from fla.ops.cp import build_cp_context
 from fla.utils import assert_close
 from fla.utils import device as device_type
+from tests.cp.utils import gather_global
 
 
 def _run_chunk(

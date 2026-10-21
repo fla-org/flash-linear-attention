@@ -13,48 +13,54 @@ import torch
 import torch.distributed as dist
 
 from fla.ops.cp import build_cp_context
-from fla.utils import assert_close, device, device_torch_lib
+from fla.utils import assert_close, device_torch_lib
 
 
-def distributed_worker(rank, world_size, rendezvous, worker, kwargs, teardown):
-    logging.basicConfig(level=logging.INFO, format='%(message)s')
-    os.environ.update(RANK=str(rank), WORLD_SIZE=str(world_size), LOCAL_RANK=str(rank))
-    device_torch_lib.set_device(rank)
-    dist.init_process_group(
-        backend=dist.get_default_backend_for_device(device),
-        init_method=rendezvous,
-        rank=rank,
-        world_size=world_size,
-        timeout=timedelta(minutes=10),
-    )
-    try:
-        worker(rank=rank, world_size=world_size, **kwargs)
-    finally:
-        # graph tests keep captured communicators alive until process exit
-        if teardown and dist.is_initialized():
-            dist.destroy_process_group()
+def shard_tensor(tensor: torch.Tensor, rank: int, world_size: int, layout: str = 'contiguous') -> torch.Tensor:
+    """Select one rank's tokens without changing their dtype or gradient ownership."""
+    parts = world_size * (2 if layout == 'zigzag' else 1)
+    assert tensor.shape[1] % parts == 0
+    part_len = tensor.shape[1] // parts
+    front = tensor[:, rank * part_len:(rank + 1) * part_len]
+    if layout == 'contiguous':
+        return front
+    back_start = (parts - 1 - rank) * part_len
+    return torch.cat((front, tensor[:, back_start:back_start + part_len]), dim=1)
 
 
-def slice_local(tensor, rank, world_size, layout='contiguous'):
-    parts = tensor.chunk(world_size * (2 if layout == 'zigzag' else 1), dim=1)
-    if layout == 'zigzag':
-        return torch.cat([parts[rank], parts[2 * world_size - 1 - rank]], dim=1)
-    return parts[rank]
-
-
-def gather_global(tensor, world_size, layout='contiguous'):
-    gathered = [torch.zeros_like(tensor) for _ in range(world_size)]
+def gather_global(tensor: torch.Tensor, world_size: int, layout: str = 'contiguous') -> torch.Tensor:
+    tensor = tensor.contiguous()
+    gathered = [torch.empty_like(tensor) for _ in range(world_size)]
     dist.all_gather(gathered, tensor)
     if layout == 'zigzag':
         part_len = tensor.shape[1] // 2
-        # fronts follow rank order; backs follow the reverse order
+        # undo the zigzag permutation: fronts in rank order, then backs reversed
         gathered = [part[:, :part_len] for part in gathered] + [part[:, part_len:] for part in reversed(gathered)]
     return torch.cat(gathered, dim=1)
 
 
+def _run_worker(rank, world_size, init_method, backend, worker, kwargs, destroy_process_group):
+    logging.basicConfig(level=logging.INFO, format='%(message)s')
+    os.environ.update(RANK=str(rank), LOCAL_RANK=str(rank), WORLD_SIZE=str(world_size))
+    device_torch_lib.set_device(rank)
+    try:
+        dist.init_process_group(
+            backend=backend,
+            init_method=init_method,
+            rank=rank,
+            world_size=world_size,
+            timeout=timedelta(minutes=10),
+        )
+        worker(rank=rank, world_size=world_size, **kwargs)
+    finally:
+        # graph workers keep captured communicators alive until process exit
+        if destroy_process_group and dist.is_initialized():
+            dist.destroy_process_group()
+
+
 def assert_chunk_matches_cp(op, inputs, do, cu_seqlens, rank, world_size, layout='contiguous', ratio=0.006, **kwargs):
     def shard(tensor):
-        return slice_local(tensor, rank=rank, world_size=world_size, layout=layout).contiguous()
+        return shard_tensor(tensor, rank=rank, world_size=world_size, layout=layout).contiguous()
 
     expected, actual = [], []
     for cp in [False, True]:

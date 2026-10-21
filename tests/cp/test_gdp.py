@@ -11,11 +11,11 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
-from cp.utils import assert_chunk_matches_cp, gather_global
 from fla.ops.cp import build_cp_context
 from fla.ops.gated_delta_product import chunk_gated_delta_product
 from fla.ops.gated_delta_product.naive import naive_recurrent_gated_delta_product
 from fla.utils import assert_close, device
+from tests.cp.utils import assert_chunk_matches_cp, gather_global
 
 
 def _run_chunk(

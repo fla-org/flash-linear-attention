@@ -18,13 +18,13 @@ import triton
 with contextlib.suppress(ImportError):
     import torch_npu  # noqa: F401
 
-from cp.utils import assert_chunk_matches_cp, gather_global, slice_local
 from fla.ops.cp import build_cp_context
 from fla.ops.kda import chunk_kda
 from fla.ops.kda.gate import naive_kda_gate, naive_kda_lowerbound_gate
 from fla.ops.kda.naive import naive_recurrent_kda
 from fla.utils import assert_close
 from fla.utils import device as device_type
+from tests.cp.utils import assert_chunk_matches_cp, gather_global, shard_tensor
 
 
 def _run_chunk(
@@ -194,17 +194,17 @@ def _run_chunk(
         layout=layout,
     )
 
-    q_local = slice_local(q_global, rank=rank, world_size=world_size, layout=layout).clone().detach().requires_grad_(True)
-    k_local = slice_local(k_global, rank=rank, world_size=world_size, layout=layout).clone().detach().requires_grad_(True)
-    v_local = slice_local(v_global, rank=rank, world_size=world_size, layout=layout).clone().detach().requires_grad_(True)
-    g_local = slice_local(g_global, rank=rank, world_size=world_size, layout=layout).clone().detach().requires_grad_(True)
-    beta_local = slice_local(
+    q_local = shard_tensor(q_global, rank=rank, world_size=world_size, layout=layout).clone().detach().requires_grad_(True)
+    k_local = shard_tensor(k_global, rank=rank, world_size=world_size, layout=layout).clone().detach().requires_grad_(True)
+    v_local = shard_tensor(v_global, rank=rank, world_size=world_size, layout=layout).clone().detach().requires_grad_(True)
+    g_local = shard_tensor(g_global, rank=rank, world_size=world_size, layout=layout).clone().detach().requires_grad_(True)
+    beta_local = shard_tensor(
         beta_global,
         rank=rank,
         world_size=world_size,
         layout=layout,
     ).clone().detach().requires_grad_(True)
-    do_local = slice_local(do_global, rank=rank, world_size=world_size, layout=layout).clone()
+    do_local = shard_tensor(do_global, rank=rank, world_size=world_size, layout=layout).clone()
 
     dist.barrier()
 
