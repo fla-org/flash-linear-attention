@@ -30,7 +30,9 @@ import triton.language as tl
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.op import exp2
-from fla.utils import autotune_cache_kwargs
+from fla.utils import IS_NVIDIA, IS_TF32_SUPPORTED, autotune_cache_kwargs
+
+DOT_PRECISION = tl.constexpr("tf32x3" if IS_TF32_SUPPORTED else "ieee")
 
 
 @triton.heuristics({
@@ -97,8 +99,8 @@ def recompute_w_u_fwd_gdn2_kernel(
         p_wg = w_gate + (bos * H + i_h) * V + o_t[:, None] * (H * V) + o_v[None, :]
         b_v = tl.load(p_v, mask=m_v, other=0.0)
         b_wg = tl.load(p_wg, mask=m_v, other=0.0)
-        b_vb = (b_v * b_wg).to(b_v.dtype)
-        b_u = tl.dot(b_A, b_vb)
+        b_vb = b_v.to(b_A.dtype) * b_wg.to(b_A.dtype)
+        b_u = tl.dot(b_A, b_vb, input_precision=DOT_PRECISION)
         tl.store(p_u, b_u.to(p_u.dtype.element_ty), mask=m_v)
 
     for i_k in range(tl.cdiv(K, BK)):
@@ -109,7 +111,7 @@ def recompute_w_u_fwd_gdn2_kernel(
         p_b = b + (bos * H + i_h) * K + o_t[:, None] * (H * K) + o_k[None, :]
         b_k = tl.load(p_k, mask=m_kk, other=0.0)
         b_b = tl.load(p_b, mask=m_kk, other=0.0)
-        b_kb = b_k * b_b
+        b_kb = b_k.to(b_A.dtype) * b_b.to(b_A.dtype)
 
         p_gk = gk + (bos * H + i_h) * K + o_t[:, None] * (H * K) + o_k[None, :]
         b_gk = tl.load(p_gk, mask=m_kk, other=0.0).to(tl.float32)
@@ -138,7 +140,7 @@ def recompute_w_u_fwd_gdn2_kernel(
             p_kg = kg + (bos * H + i_h) * K + o_t[:, None] * (H * K) + o_k[None, :]
             tl.store(p_kg, b_kg.to(p_kg.dtype.element_ty), mask=m_kk)
 
-        b_w = tl.dot(b_A, b_kb.to(b_k.dtype))
+        b_w = tl.dot(b_A, b_kb.to(b_A.dtype), input_precision=DOT_PRECISION)
         tl.store(p_w, b_w.to(p_w.dtype.element_ty), mask=m_kk)
 
 
@@ -168,7 +170,7 @@ def recompute_w_u_fwd_gdn2(
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     w = torch.empty_like(k)
-    u = torch.empty_like(v)
+    u = torch.empty_like(v, dtype=torch.float32 if IS_NVIDIA else v.dtype)
     qg = torch.empty_like(q) if q is not None else None
     kg = torch.empty_like(k) if gk is not None else None
     recompute_w_u_fwd_gdn2_kernel[(NT, B * H)](

@@ -15,6 +15,8 @@ import torch
 import torch.nn.functional as F
 
 from fla.ops.gdn2 import chunk_gdn2, fused_recurrent_gdn2, naive_recurrent_gdn2
+from fla.ops.gla.chunk import chunk_gla_fwd_o_gk
+from fla.ops.kda.chunk_bwd import chunk_kda_bwd_dAv
 from fla.ops.kda.gate import naive_kda_gate, naive_kda_lowerbound_gate
 from fla.utils import IS_AMD, IS_NPU, IS_NVIDIA, assert_close, device, device_platform
 
@@ -953,3 +955,65 @@ def test_chunk_intra_default_shift(use_gate_in_kernel, monkeypatch):
     for ref, tri in zip((default,) + default_grads, (explicit,) + explicit_grads):
         assert torch.isfinite(ref).all() and torch.isfinite(tri).all()
         assert torch.equal(ref, tri)
+
+
+def _precision_blocks(x, chunk_size):
+    x = x.transpose(1, 2)
+    x = F.pad(x, (0, 0, 0, -x.shape[-2] % chunk_size))
+    return x.unflatten(-2, (-1, chunk_size))
+
+
+def _precision_tokens(x, length):
+    return x.flatten(-3, -2).transpose(1, 2)[:, :length]
+
+
+@pytest.mark.skipif(not IS_NVIDIA, reason="NVIDIA precision path")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16], ids=["fp16", "bf16"])
+@pytest.mark.parametrize("fp32_values", [False, True], ids=["input-values", "fp32-values"])
+@pytest.mark.parametrize("state_v_first", [False, True], ids=["k-first", "v-first"])
+def test_chunk_output_precision(dtype, fp32_values, state_v_first):
+    torch.manual_seed(42)
+    B, T, H, K, V, BT = 1, 129, 2, 32, 48, 64
+    value_dtype = torch.float32 if fp32_values else dtype
+    q = torch.randn(B, T, H, K, device=device, dtype=dtype)
+    v = torch.randn(B, T, H, V, device=device, dtype=value_dtype)
+    g = torch.zeros(B, T, H, K, device=device)
+    A = torch.randn(B, T, H, BT, device=device, dtype=value_dtype)
+    h = torch.randn(B, (T + BT - 1) // BT, H, K, V, device=device, dtype=dtype)
+    scale = 0.5
+    scores = _precision_blocks(A.double(), BT).tril()
+    expected = _precision_blocks(q.double(), BT) @ h.double().transpose(1, 2) * scale
+    expected += scores @ _precision_blocks(v.double(), BT)
+    expected = _precision_tokens(expected, T).to(value_dtype)
+    state = h.transpose(-1, -2).contiguous() if state_v_first else h
+
+    actual = chunk_gla_fwd_o_gk(q=q, v=v, g=g, A=A, h=state, scale=scale, state_v_first=state_v_first)
+
+    assert actual.dtype == value_dtype
+    assert torch.isfinite(actual).all()
+    assert_close("o", expected.float(), actual.float(), 1e-5 if fp32_values else 5e-3)
+
+
+@pytest.mark.skipif(not IS_NVIDIA, reason="NVIDIA precision path")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16], ids=["fp16", "bf16"])
+@pytest.mark.parametrize("fp32_values", [False, True], ids=["input-values", "fp32-values"])
+def test_chunk_output_gradient_precision(dtype, fp32_values):
+    torch.manual_seed(42)
+    B, T, H, K, V, BT = 1, 129, 2, 32, 48, 64
+    value_dtype = torch.float32 if fp32_values else dtype
+    q, k = [torch.randn(B, T, H, K, device=device, dtype=dtype) for _ in range(2)]
+    v = torch.randn(B, T, H, V, device=device, dtype=value_dtype)
+    do = torch.randn(B, T, H, V, device=device, dtype=dtype)
+    A = torch.randn(B, T, H, BT, device=device, dtype=value_dtype)
+    scale = 0.5
+    do_blocks = _precision_blocks(do.double(), BT)
+    expected_dA = (do_blocks @ _precision_blocks(v.double(), BT).transpose(-1, -2) * scale).tril()
+    expected_dv = _precision_blocks(A.double(), BT).tril().transpose(-1, -2) @ do_blocks
+
+    dA, dv = chunk_kda_bwd_dAv(q=q, k=k, v=v, do=do, A=A, scale=scale)
+
+    assert dA.dtype == torch.float32
+    assert dv.dtype == value_dtype
+    assert torch.isfinite(dA).all() and torch.isfinite(dv).all()
+    assert_close("dA", _precision_tokens(expected_dA, T).float(), dA, 1e-5)
+    assert_close("dv", _precision_tokens(expected_dv, T).float(), dv.float(), 1e-5 if fp32_values else 5e-3)

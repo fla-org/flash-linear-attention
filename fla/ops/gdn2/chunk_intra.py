@@ -31,10 +31,10 @@ from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.op import exp2, gather, unflatten_program_id
-from fla.utils import IS_GATHER_SUPPORTED, IS_TF32_SUPPORTED, autotune_cache_kwargs
+from fla.utils import IS_GATHER_SUPPORTED, IS_NVIDIA, IS_TF32_SUPPORTED, autotune_cache_kwargs
 
 if IS_TF32_SUPPORTED:
-    SOLVE_TRIL_DOT_PRECISION = tl.constexpr('tf32')
+    SOLVE_TRIL_DOT_PRECISION = tl.constexpr('tf32x3')
 else:
     SOLVE_TRIL_DOT_PRECISION = tl.constexpr('ieee')
 
@@ -729,9 +729,9 @@ def chunk_gdn2_fwd_intra(
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
-    Aqk = torch.empty(B, T, H, BT, device=k.device, dtype=k.dtype)
+    Aqk = torch.empty(B, T, H, BT, device=k.device, dtype=torch.float32 if IS_NVIDIA else k.dtype)
     # Akk must be zero-initialized - kernel only writes lower triangular.
-    Akk = torch.zeros(B, T, H, BT, device=k.device, dtype=k.dtype)
+    Akk = torch.zeros(B, T, H, BT, device=k.device, dtype=torch.float32 if IS_NVIDIA else k.dtype)
     Akkd = torch.empty(B, T, H, BC, device=k.device, dtype=torch.float32)
 
     if safe_gate:
