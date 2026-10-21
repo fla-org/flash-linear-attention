@@ -5,488 +5,232 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""
-Test for Context Parallel (CP) GDN-2 (Gated DeltaNet 2)
+"""Compare CP GDN-2 outputs and gradients with per-sequence recurrent references."""
 
-Test Architecture Notes:
-========================
-This test uses naive_recurrent_gdn2 as the reference baseline because:
-- It represents the exact mathematical definition without chunking approximations
-- It expects per-token g (non-cumsum'd) and pre-normalized q/k
-
-When use_gate_in_kernel=True, the reference path must manually:
-1. Apply L2 normalization to q/k before passing to naive_recurrent_gdn2
-2. Apply the gate formula (naive_kda_lowerbound_gate or naive_kda_gate)
-3. The output g from these naive gate functions is per-token (non-cumsum'd),
-   which is exactly what naive_recurrent_gdn2 expects
-
-When use_gate_in_kernel=False:
-- chunk_gdn2 treats the input g as the log-decay directly (it only cumsums it
-  within each chunk), so the test feeds it the raw g_global
-- naive_recurrent_gdn2 must therefore see that same g, un-gated and NOT cumsum'd
-
-Variable-Length Sequence Handling:
-==================================
-- All sequences are flattened to batch size 1 with cu_seqlens markers
-- Each sequence is processed independently with h0=0 (no cross-sequence state)
-- The reference computation loops over sequences and concatenates results
-- CP path uses the same cu_seqlens for correct chunk boundary handling
-
-Context Parallel Principle for GDN-2:
-=====================================
-
-GDN-2 has a recurrent state dependency across tokens. The hidden state h evolves
-as tokens are processed, creating dependencies that span the sequence.
-
-With Context Parallel:
-1. Sequence Partitioning: The input sequence is split across ranks along the sequence dimension.
-   - Rank 0: tokens [0, T/N)
-   - Rank 1: tokens [T/N, 2T/N)
-   - ...
-
-2. Forward Pass:
-   - Each rank computes its local chunk
-   - Non-first ranks need the final state from previous rank as initial_state
-   - Communication: All-reduce style state passing between ranks
-
-3. Backward Pass:
-   - Gradients flow back through the recurrent state
-   - Communication: Gradient synchronization across ranks
-
-Test Scenarios:
-===============
-1. CP2 with sequence cut in the middle
-2. CP2 with sequence boundary aligned
-3. CP2 with many short sequences
-4. CP2 with disable_recompute=True
-5. CP4 with complex sequence distribution (first sequence spans 3 ranks)
-6. CP4 / CP8 with a single long sequence
-7. CP2 / CP4 with state_v_first=True
-"""
-
-import logging
-import os
+import math
 
 import pytest
 import torch
 import torch.distributed as dist
-import torch.multiprocessing as mp
 import torch.nn.functional as F
+import triton
 
 from fla.ops.cp import build_cp_context
 from fla.ops.gdn2 import chunk_gdn2
 from fla.ops.gdn2.naive import naive_recurrent_gdn2
 from fla.ops.kda.gate import naive_kda_lowerbound_gate
-from fla.utils import assert_close
+from fla.utils import IS_TF32_SUPPORTED, assert_close, device
+from tests.cp.utils import gather_global, shard_tensor
 
-# Configure logging to see assert_close messages
-logging.basicConfig(level=logging.INFO, format='%(message)s')
+pytestmark = pytest.mark.skipif(not IS_TF32_SUPPORTED, reason="requires NVIDIA Ampere or newer")
 
-
-def _init_distributed(rank, world_size):
-    """Initialize distributed environment for a single process."""
-    # Configure logging in worker process
-    logging.basicConfig(level=logging.INFO, format='%(message)s')
-
-    os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '29503'  # Different port from the KDA/GDN CP tests
-    os.environ['RANK'] = str(rank)
-    os.environ['WORLD_SIZE'] = str(world_size)
-    os.environ['LOCAL_RANK'] = str(rank)
-
-    dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
-    torch.cuda.set_device(rank)
+pytestmark = pytest.mark.skipif(device != "cuda", reason="requires CUDA or ROCm GPUs")
 
 
-def _cleanup_distributed():
-    """Clean up distributed environment."""
-    if dist.is_initialized():
-        dist.destroy_process_group()
+def _make_inputs(rank, T, H, D, dtype):
+    B = 1
+    q = torch.empty(B, T, H, D, device=device, dtype=dtype)
+    k = torch.empty(B, T, H, D, device=device, dtype=dtype)
+    v = torch.empty(B, T, H, D, device=device, dtype=dtype)
+    g = torch.empty(B, T, H, D, device=device, dtype=dtype)
+    b = torch.empty(B, T, H, D, device=device, dtype=dtype)
+    w = torch.empty(B, T, H, D, device=device, dtype=dtype)
+    do = torch.empty(B, T, H, D, device=device, dtype=dtype)
+
+    if rank == 0:
+        torch.manual_seed(42)
+
+        # asymmetric q ~ N(1, 1) and k ~ N(-50, 10) stress the L2 normalization path
+        q.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype) + 1.0)
+        k.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype) * 10.0 - 50.0)
+        v.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype))
+        g.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype))
+        b.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype).sigmoid())
+        w.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype).sigmoid())
+        do.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype))
+
+    for tensor in (q, k, v, g, b, w, do):
+        dist.broadcast(tensor, src=0)
+
+    num_even_heads = triton.next_power_of_2(H)
+    projection_size = H * D
+
+    A_log = torch.empty(num_even_heads, dtype=torch.float32, device=device)
+    dt_bias = torch.empty(projection_size, dtype=torch.float32, device=device)
+
+    if rank == 0:
+        # vary A_log across heads so wrong-head gk offsets change the result
+        A_log[:H] = torch.log(torch.linspace(1, 8, H, dtype=torch.float32, device=device))
+        # dt initialization from real training
+        dt = torch.exp(
+            torch.rand(projection_size, device=device) * (math.log(0.1) - math.log(0.001)) + math.log(0.001),
+        ).clamp_(min=1e-4)
+        dt_bias.copy_(dt + torch.log(-torch.expm1(-dt)))
+
+    for tensor in (A_log, dt_bias):
+        dist.broadcast(tensor, src=0)
+    return q, k, v, g, b, w, do, A_log, dt_bias
+
+
+def _reference(q, k, v, g, b, w, do, offsets, A_log, dt_bias):
+    H = q.shape[2]
+    results = []
+    for start, end in zip(offsets[:-1], offsets[1:]):
+        q_seq = q[:, start:end].clone().detach().requires_grad_(True)
+        k_seq = k[:, start:end].clone().detach().requires_grad_(True)
+        v_seq = v[:, start:end].clone().detach().requires_grad_(True)
+        g_seq = g[:, start:end].clone().detach().requires_grad_(True)
+        b_seq = b[:, start:end].clone().detach().requires_grad_(True)
+        w_seq = w[:, start:end].clone().detach().requires_grad_(True)
+        do_seq = do[:, start:end].clone()
+
+        q_seq_norm = F.normalize(q_seq, p=2, dim=-1)
+        k_seq_norm = F.normalize(k_seq, p=2, dim=-1)
+        g_processed = naive_kda_lowerbound_gate(
+            g=g_seq.to(torch.float),
+            A_log=A_log[:H].contiguous(),
+            dt_bias=dt_bias,
+            lower_bound=-5.0,
+        )
+
+        o_seq, _ = naive_recurrent_gdn2(
+            q=q_seq_norm,
+            k=k_seq_norm,
+            v=v_seq,
+            g=g_processed,
+            b=b_seq,
+            w=w_seq,
+            initial_state=None,
+            output_final_state=False,
+        )
+        (o_seq * do_seq).sum().backward()
+        results.append((
+            o_seq.detach(),
+            q_seq.grad.detach(),
+            k_seq.grad.detach(),
+            v_seq.grad.detach(),
+            g_seq.grad.detach(),
+            b_seq.grad.detach(),
+            w_seq.grad.detach(),
+        ))
+    return tuple(torch.cat(parts, dim=1) for parts in zip(*results))
 
 
 def _run_chunk(
     rank: int,
     world_size: int,
-    test_name: str,
-    T: int,
     H: int,
     D: int,
     lengths: list[int],
     dtype,
     disable_recompute: bool = False,
-    use_gate_in_kernel: bool = False,
-    safe_gate: bool = False,
-    lower_bound: float | None = None,
     state_v_first: bool = False,
 ):
-    """
-    Worker function for CP GDN-2 test.
-    Runs in a spawned process with the given rank.
-    """
-    try:
-        _init_distributed(rank, world_size)
-        device = torch.device(f'cuda:{rank}')
+    T = sum(lengths)
+    assert T % world_size == 0, f"T={T} must be divisible by world_size={world_size}"
 
-        assert T % world_size == 0, f"T={T} must be divisible by world_size={world_size}"
-        assert sum(lengths) == T, f"Sum of lengths {sum(lengths)} must equal T={T}"
+    q_global, k_global, v_global, g_global, b_global, w_global, do_global, A_log_global, dt_bias_global = _make_inputs(
+        rank=rank,
+        T=T,
+        H=H,
+        D=D,
+        dtype=dtype,
+    )
 
-        if rank == 0:
-            print(f"\n{'='*60}")
-            print(f"Test: {test_name}")
-            print(f"Config: T={T}, H={H}, D={D}, world_size={world_size}, disable_recompute={disable_recompute}")
-            print(f"use_gate_in_kernel={use_gate_in_kernel}, safe_gate={safe_gate}, lower_bound={lower_bound}")
-            print(f"Sequence lengths: {lengths}")
-            print(f"{'='*60}")
+    cu_seqlens_list = [0] + torch.cumsum(torch.tensor(lengths), 0).tolist()
+    cu_seqlens_global = torch.tensor(cu_seqlens_list, device=device, dtype=torch.long)
 
-        # Step 1: Prepare Global Data (all generated on rank 0, broadcast to other ranks)
-        B = 1
-        q_global = torch.empty(B, T, H, D, device=device, dtype=dtype)
-        k_global = torch.empty(B, T, H, D, device=device, dtype=dtype)
-        v_global = torch.empty(B, T, H, D, device=device, dtype=dtype)
-        g_global = torch.empty(B, T, H, D, device=device, dtype=dtype if use_gate_in_kernel else torch.float)
-        b_global = torch.empty(B, T, H, D, device=device, dtype=dtype)
-        w_global = torch.empty(B, T, H, D, device=device, dtype=dtype)
-        do_global = torch.empty(B, T, H, D, device=device, dtype=dtype)
-        A_log_global = None
-        dt_bias_global = None
-
-        if rank == 0:
-            torch.manual_seed(42)
-            # Generate inputs
-            # Asymmetric initialization for q and k to test L2 norm
-            # q: small positive values around 1.0
-            # k: large negative values around -50.0
-            q_global.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype) + 1.0)
-            k_global.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype) * 10.0 - 50.0)
-            v_global.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype))
-            if use_gate_in_kernel:
-                g_global.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype))
-            else:
-                g_global.copy_(F.logsigmoid(torch.randn(B, T, H, D, device=device, dtype=torch.float)))
-                g_global.clamp_(min=-5.0)
-            b_global.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype).sigmoid())
-            w_global.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype).sigmoid())
-            do_global.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype))
-
-        # Broadcast to ensure all ranks have same data
-        dist.broadcast(q_global, src=0)
-        dist.broadcast(k_global, src=0)
-        dist.broadcast(v_global, src=0)
-        dist.broadcast(g_global, src=0)
-        dist.broadcast(b_global, src=0)
-        dist.broadcast(w_global, src=0)
-        dist.broadcast(do_global, src=0)
-
-        # Prepare and broadcast A_log and dt_bias for gate computation
-        # Always generate these for reference, even when use_gate_in_kernel=False
-        import triton
-        num_even_heads = triton.next_power_of_2(H)
-        projection_size = H * D
-
-        # All ranks create tensors with same shape first
-        A_log_global = torch.empty(num_even_heads, dtype=torch.float32, device=device)
-        dt_bias_global = torch.empty(projection_size, dtype=torch.float32, device=device)
-
-        # Rank 0 fills in the actual data
-        if rank == 0:
-            import math
-            # Per-head variation in A_log is CRITICAL for catching backward kernel
-            # bugs like missing `i_h * K` in gk pointer offsets.  When A_log=0 for
-            # all heads, -exp(A_log)=-1 uniformly → same gate scaling → reading the
-            # wrong head's gk gives nearly identical values → bug is invisible.
-            if safe_gate and lower_bound is not None:
-                A_log_global[:H] = torch.log(torch.linspace(1, 8, H, dtype=torch.float32, device=device))
-            else:
-                A_log_global.copy_(torch.log(torch.empty(num_even_heads, dtype=torch.float32, device=device).uniform_(1, 16)))
-            # dt initialization from real training
-            dt = torch.exp(torch.rand(projection_size, device=device) *
-                           (math.log(0.1) - math.log(0.001)) + math.log(0.001)).clamp_(min=1e-4)
-            dt_bias_global.copy_(dt + torch.log(-torch.expm1(-dt)))
-
-        # Broadcast from rank 0 to all ranks
-        dist.broadcast(A_log_global, src=0)
-        dist.broadcast(dt_bias_global, src=0)
-
-        # Prepare cu_seqlens
-        cu_seqlens_list = [0] + torch.cumsum(torch.tensor(lengths), 0).tolist()
-        cu_seqlens_global = torch.tensor(cu_seqlens_list, device=device, dtype=torch.long)
-
-        # Step 2: Reference Run using naive_recurrent_gdn2 (ground truth)
-        # Each sequence is computed independently with h0=0 for simplicity
-        ref_out = None
-        ref_dq, ref_dk, ref_dv, ref_dg, ref_db, ref_dw = None, None, None, None, None, None
-
-        if rank == 0:
-            N = len(lengths)
-            ref_outputs = []
-
-            for i in range(N):
-                seq_start = cu_seqlens_list[i]
-                seq_end = cu_seqlens_list[i + 1]
-
-                q_seq = q_global[:, seq_start:seq_end].clone().detach().requires_grad_(True)
-                k_seq = k_global[:, seq_start:seq_end].clone().detach().requires_grad_(True)
-                v_seq = v_global[:, seq_start:seq_end].clone().detach().requires_grad_(True)
-                g_seq = g_global[:, seq_start:seq_end].clone().detach().requires_grad_(True)
-                b_seq = b_global[:, seq_start:seq_end].clone().detach().requires_grad_(True)
-                w_seq = w_global[:, seq_start:seq_end].clone().detach().requires_grad_(True)
-                do_seq = do_global[:, seq_start:seq_end].clone()
-
-                q_seq_norm = F.normalize(q_seq, p=2, dim=-1)
-                k_seq_norm = F.normalize(k_seq, p=2, dim=-1)
-                if use_gate_in_kernel:
-                    g_seq_input = g_seq.requires_grad_(True)
-                    if safe_gate and lower_bound is not None:
-                        g_processed = naive_kda_lowerbound_gate(
-                            g_seq_input.to(torch.float),
-                            A_log_global[:H].contiguous(),
-                            dt_bias_global,
-                            lower_bound=lower_bound,
-                        )
-                    else:
-                        from fla.ops.kda.gate import naive_kda_gate
-                        g_processed = naive_kda_gate(
-                            g_seq_input.to(torch.float),
-                            A_log_global[:H].contiguous(),
-                            dt_bias_global,
-                        )
-                    g_for_grad = g_seq_input
-                else:
-                    # chunk_gdn2 gets the raw g_local here and only cumsums it,
-                    # so the reference must use the very same log-decay.
-                    g_processed = g_seq
-                    g_for_grad = g_seq
-
-                o_seq, _ = naive_recurrent_gdn2(
-                    q=q_seq_norm,
-                    k=k_seq_norm,
-                    v=v_seq,
-                    g=g_processed,
-                    b=b_seq,
-                    w=w_seq,
-                    initial_state=None,
-                    output_final_state=False,
-                )
-
-                ref_outputs.append({
-                    'o': o_seq,
-                    'q': q_seq,
-                    'k': k_seq,
-                    'v': v_seq,
-                    'g': g_for_grad,
-                    'b': b_seq,
-                    'w': w_seq,
-                    'do': do_seq,
-                })
-
-            all_dq = []
-            all_dk = []
-            all_dv = []
-            all_dg = []
-            all_db = []
-            all_dw = []
-
-            for item in ref_outputs:
-                (item['o'] * item['do']).sum().backward()
-                all_dq.append(item['q'].grad.detach())
-                all_dk.append(item['k'].grad.detach())
-                all_dv.append(item['v'].grad.detach())
-                all_dg.append(item['g'].grad.detach())
-                all_db.append(item['b'].grad.detach())
-                all_dw.append(item['w'].grad.detach())
-
-            ref_out = torch.cat([item['o'].detach() for item in ref_outputs], dim=1)
-            ref_dq = torch.cat(all_dq, dim=1)
-            ref_dk = torch.cat(all_dk, dim=1)
-            ref_dv = torch.cat(all_dv, dim=1)
-            ref_dg = torch.cat(all_dg, dim=1)
-            ref_db = torch.cat(all_db, dim=1)
-            ref_dw = torch.cat(all_dw, dim=1)
-
-        # Step 3: Context Parallel Run
-        dist.barrier()
-
-        # Build CP context
-        context = build_cp_context(cu_seqlens_global, group=dist.group.WORLD)
-
-        chunk_size = T // world_size
-        start_idx = rank * chunk_size
-        end_idx = (rank + 1) * chunk_size
-
-        # Get local slices
-        q_local = q_global[:, start_idx:end_idx, :].clone().detach().requires_grad_(True)
-        k_local = k_global[:, start_idx:end_idx, :].clone().detach().requires_grad_(True)
-        v_local = v_global[:, start_idx:end_idx, :].clone().detach().requires_grad_(True)
-        g_local = g_global[:, start_idx:end_idx, :].clone().detach().requires_grad_(True)
-        b_local = b_global[:, start_idx:end_idx, :].clone().detach().requires_grad_(True)
-        w_local = w_global[:, start_idx:end_idx, :].clone().detach().requires_grad_(True)
-        do_local = do_global[:, start_idx:end_idx, :].clone()
-
-        print(f"[Rank {rank}] chunk: [{start_idx}, {end_idx}), "
-              f"cu_seqlens: {context.cu_seqlens.tolist()}, "
-              f"pre_num_ranks: {context.pre_num_ranks}")
-        dist.barrier()
-
-        # CP Forward
-        o_local, _ = chunk_gdn2(
-            q=q_local,
-            k=k_local,
-            v=v_local,
-            g=g_local,
-            b=b_local,
-            w=w_local,
-            cp_context=context,
-            disable_recompute=disable_recompute,
-            use_qk_l2norm_in_kernel=True,
-            use_gate_in_kernel=use_gate_in_kernel,
-            safe_gate=safe_gate,
-            lower_bound=lower_bound,
-            A_log=A_log_global[:H].contiguous() if use_gate_in_kernel else None,
-            dt_bias=dt_bias_global if use_gate_in_kernel else None,
-            state_v_first=state_v_first,
+    if rank == 0:
+        ref_out, ref_dq, ref_dk, ref_dv, ref_dg, ref_db, ref_dw = _reference(
+            q=q_global,
+            k=k_global,
+            v=v_global,
+            g=g_global,
+            b=b_global,
+            w=w_global,
+            do=do_global,
+            offsets=cu_seqlens_list,
+            A_log=A_log_global,
+            dt_bias=dt_bias_global,
         )
 
-        # CP Backward
-        o_local.backward(do_local)
+    dist.barrier()
 
-        # Step 4: Result Aggregation and Verification
-        o_gathered = [torch.zeros_like(o_local) for _ in range(world_size)]
-        dist.all_gather(o_gathered, o_local)
-        o_cp_global = torch.cat(o_gathered, dim=1)
+    context = build_cp_context(cu_seqlens_global, group=dist.group.WORLD)
 
-        dq_gathered = [torch.zeros_like(q_local.grad) for _ in range(world_size)]
-        dist.all_gather(dq_gathered, q_local.grad)
-        dq_cp_global = torch.cat(dq_gathered, dim=1)
+    q_local = shard_tensor(q_global, rank=rank, world_size=world_size).clone().detach().requires_grad_(True)
+    k_local = shard_tensor(k_global, rank=rank, world_size=world_size).clone().detach().requires_grad_(True)
+    v_local = shard_tensor(v_global, rank=rank, world_size=world_size).clone().detach().requires_grad_(True)
+    g_local = shard_tensor(g_global, rank=rank, world_size=world_size).clone().detach().requires_grad_(True)
+    b_local = shard_tensor(b_global, rank=rank, world_size=world_size).clone().detach().requires_grad_(True)
+    w_local = shard_tensor(w_global, rank=rank, world_size=world_size).clone().detach().requires_grad_(True)
+    do_local = shard_tensor(do_global, rank=rank, world_size=world_size).clone()
 
-        dk_gathered = [torch.zeros_like(k_local.grad) for _ in range(world_size)]
-        dist.all_gather(dk_gathered, k_local.grad)
-        dk_cp_global = torch.cat(dk_gathered, dim=1)
+    dist.barrier()
 
-        dv_gathered = [torch.zeros_like(v_local.grad) for _ in range(world_size)]
-        dist.all_gather(dv_gathered, v_local.grad)
-        dv_cp_global = torch.cat(dv_gathered, dim=1)
-
-        dg_gathered = [torch.zeros_like(g_local.grad) for _ in range(world_size)]
-        dist.all_gather(dg_gathered, g_local.grad)
-        dg_cp_global = torch.cat(dg_gathered, dim=1)
-
-        db_gathered = [torch.zeros_like(b_local.grad) for _ in range(world_size)]
-        dist.all_gather(db_gathered, b_local.grad)
-        db_cp_global = torch.cat(db_gathered, dim=1)
-
-        dw_gathered = [torch.zeros_like(w_local.grad) for _ in range(world_size)]
-        dist.all_gather(dw_gathered, w_local.grad)
-        dw_cp_global = torch.cat(dw_gathered, dim=1)
-
-        test_passed = True
-        if rank == 0:
-            print(f"\n[{test_name}] Verifying results...")
-
-            # Tolerance: ratio=8e-3 for all tensors, matching test_kda.py.
-            # Measured ratios are actually ~0.9-1.6% (db ~2.3%): per-dim gating
-            # plus the L2 norm over k ~ N(-50, 10) amplify the bf16 state
-            # communication precision loss.
-            # db (b grad) additionally involves a cross-rank reduction, so it is
-            # marked warning-only unconditionally.
-            tensors_to_verify = [
-                ("Output", ref_out, o_cp_global),
-                ("dq", ref_dq, dq_cp_global),
-                ("dk", ref_dk, dk_cp_global),
-                ("dv", ref_dv, dv_cp_global),
-                ("dg", ref_dg, dg_cp_global),
-                ("db", ref_db, db_cp_global),
-                ("dw", ref_dw, dw_cp_global),
-            ]
-
-            try:
-                for name, ref, cp in tensors_to_verify:
-                    warn = (name == "db")
-                    assert_close(name, ref, cp, ratio=8e-3, warning=warn)
-                print(f"✅ [{test_name}] Test Passed!\n")
-            except AssertionError as e:
-                print(f"❌ [{test_name}] Test Failed: {e}\n")
-                test_passed = False
-
-        dist.barrier()
-        _cleanup_distributed()
-
-        if not test_passed:
-            raise AssertionError(f"Test {test_name} failed on rank {rank}")
-
-    except Exception as e:
-        _cleanup_distributed()
-        raise e
-
-
-def _run_distributed(
-    world_size: int,
-    test_name: str,
-    T: int,
-    H: int,
-    D: int,
-    lengths: list[int],
-    dtype=torch.bfloat16,
-    disable_recompute: bool = False,
-    use_gate_in_kernel: bool = False,
-    safe_gate: bool = False,
-    lower_bound: float | None = None,
-    state_v_first: bool = False,
-):
-    """
-    Run CP test using torch.multiprocessing.spawn.
-    This allows running the test directly with pytest.
-    """
-    mp.start_processes(
-        _run_chunk,
-        args=(world_size, test_name, T, H, D, lengths, dtype, disable_recompute,
-              use_gate_in_kernel, safe_gate, lower_bound, state_v_first),
-        nprocs=world_size,
-        join=True,
-        start_method='spawn',
+    o_local, _ = chunk_gdn2(
+        q=q_local,
+        k=k_local,
+        v=v_local,
+        g=g_local,
+        b=b_local,
+        w=w_local,
+        use_qk_l2norm_in_kernel=True,
+        use_gate_in_kernel=True,
+        safe_gate=True,
+        lower_bound=-5.0,
+        disable_recompute=disable_recompute,
+        state_v_first=state_v_first,
+        cp_context=context,
+        A_log=A_log_global[:H].contiguous(),
+        dt_bias=dt_bias_global,
     )
+
+    o_local.backward(do_local)
+
+    o_cp_global = gather_global(o_local, world_size=world_size)
+    dq_cp_global = gather_global(q_local.grad, world_size=world_size)
+    dk_cp_global = gather_global(k_local.grad, world_size=world_size)
+    dv_cp_global = gather_global(v_local.grad, world_size=world_size)
+    dg_cp_global = gather_global(g_local.grad, world_size=world_size)
+    db_cp_global = gather_global(b_local.grad, world_size=world_size)
+    dw_cp_global = gather_global(w_local.grad, world_size=world_size)
+
+    if rank == 0:
+        # per-dim gating and L2 normalization of k ~ N(-50, 10) amplify bf16 state-communication error;
+        # baseline ratios reach ~0.9-1.6%, above the strict 8e-3 threshold.
+        # db also includes a cross-rank reduction (~2.3% error) and remains a warning-only diagnostic.
+        assert_close("Output", ref_out, o_cp_global, ratio=8e-3, warning=False)
+        assert_close("dq", ref_dq, dq_cp_global, ratio=8e-3, warning=False)
+        assert_close("dk", ref_dk, dk_cp_global, ratio=8e-3, warning=False)
+        assert_close("dv", ref_dv, dv_cp_global, ratio=8e-3, warning=False)
+        assert_close("dg", ref_dg, dg_cp_global, ratio=8e-3, warning=False)
+        assert_close("db", ref_db, db_cp_global, ratio=8e-3, warning=True)
+        assert_close("dw", ref_dw, dw_cp_global, ratio=8e-3, warning=False)
 
 
 @pytest.mark.parametrize(
-    ('world_size', 'T', 'lengths', 'disable_recompute', 'state_v_first'),
+    ('world_size', 'lengths', 'disable_recompute', 'state_v_first'),
     [
-        pytest.param(2, 10240, [3000, 4000, 3240], False, False, id='cp2-sequence-cut'),
-        pytest.param(2, 10240, [5120, 5120], False, False, id='cp2-boundary-aligned'),
-        # the first sequence crosses three rank partitions
-        pytest.param(4, 10240, [7000, 3240], False, False, id='cp4-sequence-cut'),
-        pytest.param(4, 10240, [10240], False, False, id='cp4-single-sequence'),
-        pytest.param(8, 65536, [65536], False, False, id='cp8-single-sequence'),
-        pytest.param(2, 10240, [1000, 1500, 2000, 2500, 1240, 1000, 1000], False, False, id='cp2-short-sequences'),
-        pytest.param(2, 10240, [3000, 4000, 3240], True, False, id='cp2-no-recompute'),
-        pytest.param(2, 10240, [3000, 4000, 3240], False, True, id='cp2-v-first'),
-        pytest.param(4, 10240, [10240], False, True, id='cp4-v-first'),
+        pytest.param(2, [3000, 4000, 3240], False, False, id='cp2-sequence-cut'),
+        pytest.param(2, [5120, 5120], False, False, id='cp2-boundary-aligned'),
+        pytest.param(4, [7000, 3240], False, False, id='cp4-sequence-cut'),
+        pytest.param(4, [10240], False, False, id='cp4-single-sequence'),
+        pytest.param(8, [65536], False, False, id='cp8-single-sequence'),
+        pytest.param(2, [1000, 1500, 2000, 2500, 1240, 1000, 1000], False, False, id='cp2-short-sequences'),
+        pytest.param(2, [3000, 4000, 3240], True, False, id='cp2-no-recompute'),
+        pytest.param(2, [3000, 4000, 3240], False, True, id='cp2-v-first'),
+        pytest.param(4, [10240], False, True, id='cp4-v-first'),
     ],
 )
-def test_chunk(request, world_size, T, lengths, disable_recompute, state_v_first):
-    if torch.cuda.device_count() < world_size:
-        pytest.skip(f"At least {world_size} devices required")
-
-    _run_distributed(
+def test_chunk(run_distributed, world_size, lengths, disable_recompute, state_v_first):
+    run_distributed(
+        worker=_run_chunk,
         world_size=world_size,
-        test_name=request.node.callspec.id,
-        T=T,
         H=12,
         D=128,
         lengths=lengths,
         dtype=torch.bfloat16,
         disable_recompute=disable_recompute,
-        use_gate_in_kernel=True,
-        safe_gate=True,
-        lower_bound=-5.0,
         state_v_first=state_v_first,
     )
-
-
-def _init_torchrun():
-    """Initialize distributed environment for torchrun."""
-    if 'RANK' not in os.environ:
-        return False
-
-    dist.init_process_group(backend="nccl")
-    local_rank = int(os.environ["LOCAL_RANK"])
-    torch.cuda.set_device(local_rank)
-    return True

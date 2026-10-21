@@ -5,187 +5,72 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""
-Test for Context Parallel (CP) Token Shift
-
-Context Parallel Principle for Token Shift:
-===========================================
-
-Token shift has a 1-token dependency on previous tokens:
-    y[t] = x[t-1] - x[t]  (for t > 0)
-    y[0] = cache - x[0]   (cache is the last token from previous rank)
-
-With Context Parallel:
-1. Sequence Partitioning: input sequence split across ranks
-2. Forward: non-first ranks need the last token from previous rank as cache
-3. Backward: non-last ranks send the last token's gradient to previous rank
-
-Test Scenarios:
-===============
-1. CP2 with sequence cut in the middle
-2. CP2 with sequence boundary aligned
-3. CP4 with complex sequence distribution
-4. Single long sequence spanning all ranks
-5. Many short sequences
-6. Edge case: short local segments (T_local < 2 for token shift)
-"""
-
-import logging
-import os
+"""Compare CP token shift outputs and gradients across packed sequence boundaries."""
 
 import pytest
 import torch
 import torch.distributed as dist
-import torch.multiprocessing as mp
 
 from fla.modules.token_shift import token_shift_ref
 from fla.modules.token_shift_cp import token_shift_cp
 from fla.ops.cp import build_cp_context
-from fla.utils import assert_close
+from fla.utils import assert_close, device
+from tests.cp.utils import gather_global, shard_tensor
 
-logging.basicConfig(level=logging.INFO, format='%(message)s')
-
-
-def _init_distributed(rank, world_size, port):
-    """Initialize distributed environment for a single process."""
-    logging.basicConfig(level=logging.INFO, format='%(message)s')
-
-    os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = str(port)
-    os.environ['RANK'] = str(rank)
-    os.environ['WORLD_SIZE'] = str(world_size)
-    os.environ['LOCAL_RANK'] = str(rank)
-
-    dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
-    torch.cuda.set_device(rank)
-
-
-def _cleanup_distributed():
-    """Clean up distributed environment."""
-    if dist.is_initialized():
-        dist.destroy_process_group()
+pytestmark = pytest.mark.skipif(device != "cuda", reason="requires CUDA or ROCm GPUs")
 
 
 def _run_token_shift(
     rank: int,
     world_size: int,
-    test_name: str,
-    T: int,
     D: int,
     lengths: list[int],
     dtype,
-    port: int,
 ):
-    """Worker function for CP token shift test."""
-    try:
-        _init_distributed(rank, world_size, port)
-        device = torch.device(f'cuda:{rank}')
+    T = sum(lengths)
+    assert T % world_size == 0, f"T={T} must be divisible by world_size={world_size}"
 
-        assert T % world_size == 0, f"T={T} must be divisible by world_size={world_size}"
-        assert sum(lengths) == T, f"Sum of lengths {sum(lengths)} must equal T={T}"
+    torch.manual_seed(42)
+    B = 1
 
-        if rank == 0:
-            print(f"\n{'='*60}")
-            print(f"Test: {test_name}")
-            print(f"Config: T={T}, D={D}, world_size={world_size}")
-            print(f"Sequence lengths: {lengths}")
-            print(f"{'='*60}")
+    x_global = torch.randn(B, T, D, device=device, dtype=dtype) * 10
+    dy_global = torch.randn(B, T, D, device=device, dtype=dtype)
 
-        # Step 1: Prepare Global Data
-        torch.manual_seed(42)
-        B = 1
+    cu_seqlens_list = [0] + torch.cumsum(torch.tensor(lengths), 0).tolist()
+    cu_seqlens_global = torch.tensor(cu_seqlens_list, device=device, dtype=torch.int32)
 
-        x_global = torch.randn(B, T, D, device=device, dtype=dtype) * 10
-        dy_global = torch.randn(B, T, D, device=device, dtype=dtype)
+    ref_out, ref_dx = None, None
 
-        cu_seqlens_list = [0] + torch.cumsum(torch.tensor(lengths), 0).tolist()
-        cu_seqlens_global = torch.tensor(cu_seqlens_list, device=device, dtype=torch.int32)
+    if rank == 0:
+        x_ref = x_global.clone().detach().requires_grad_(True)
+        y_ref = token_shift_ref(x_ref, cu_seqlens=cu_seqlens_global)
+        y_ref.backward(dy_global)
+        ref_out = y_ref.detach()
+        ref_dx = x_ref.grad.detach()
 
-        # Step 2: Reference Run
-        ref_out, ref_dx = None, None
+    dist.barrier()
 
-        if rank == 0:
-            x_ref = x_global.clone().detach().requires_grad_(True)
-            y_ref = token_shift_ref(x_ref, cu_seqlens=cu_seqlens_global)
-            y_ref.backward(dy_global)
-            ref_out = y_ref.detach()
-            ref_dx = x_ref.grad.detach()
+    context = build_cp_context(cu_seqlens_global, group=dist.group.WORLD)
 
-        # Step 3: Context Parallel Run
-        dist.barrier()
+    x_local = shard_tensor(x_global, rank=rank, world_size=world_size).clone().detach().requires_grad_(True)
+    dy_local = shard_tensor(dy_global, rank=rank, world_size=world_size).clone()
 
-        context = build_cp_context(cu_seqlens_global, group=dist.group.WORLD)
+    dist.barrier()
 
-        chunk_size = T // world_size
-        start_idx = rank * chunk_size
-        end_idx = (rank + 1) * chunk_size
-
-        x_local = x_global[:, start_idx:end_idx, :].clone().detach().requires_grad_(True)
-        dy_local = dy_global[:, start_idx:end_idx, :].clone()
-
-        print(f"[Rank {rank}] chunk: [{start_idx}, {end_idx}), "
-              f"cu_seqlens: {context.cu_seqlens.tolist()}, "
-              f"pre_num_ranks: {context.pre_num_ranks}")
-        dist.barrier()
-
-        # CP Forward
-        y_local = token_shift_cp(
-            x=x_local,
-            cp_context=context,
-            cu_seqlens=context.cu_seqlens,
-        )
-
-        # CP Backward
-        y_local.backward(dy_local)
-
-        # Step 4: Result Aggregation and Verification
-        y_gathered = [torch.zeros_like(y_local) for _ in range(world_size)]
-        dist.all_gather(y_gathered, y_local)
-        y_cp_global = torch.cat(y_gathered, dim=1)
-
-        dx_gathered = [torch.zeros_like(x_local.grad) for _ in range(world_size)]
-        dist.all_gather(dx_gathered, x_local.grad)
-        dx_cp_global = torch.cat(dx_gathered, dim=1)
-
-        test_passed = True
-        if rank == 0:
-            print(f"\n[{test_name}] Verification Results:")
-            try:
-                assert_close("Output", ref_out, y_cp_global, ratio=0.001)
-                assert_close("dx", ref_dx, dx_cp_global, ratio=0.001)
-                print(f"✅ [{test_name}] Test Passed!\n")
-            except AssertionError as e:
-                print(f"❌ [{test_name}] Test Failed: {e}\n")
-                test_passed = False
-
-        dist.barrier()
-        _cleanup_distributed()
-
-        if not test_passed:
-            raise AssertionError(f"Test {test_name} failed on rank {rank}")
-
-    except Exception as e:
-        _cleanup_distributed()
-        raise e
-
-
-def _run_distributed(
-    world_size: int,
-    test_name: str,
-    T: int,
-    D: int,
-    lengths: list[int],
-    dtype=torch.float32,
-):
-    """Run CP test using torch.multiprocessing.spawn."""
-    port = 29510  # Different port from other CP tests
-    mp.start_processes(
-        _run_token_shift,
-        args=(world_size, test_name, T, D, lengths, dtype, port),
-        nprocs=world_size,
-        join=True,
-        start_method='spawn',
+    y_local = token_shift_cp(
+        x=x_local,
+        cp_context=context,
+        cu_seqlens=context.cu_seqlens,
     )
+
+    y_local.backward(dy_local)
+
+    y_cp_global = gather_global(y_local, world_size=world_size)
+    dx_cp_global = gather_global(x_local.grad, world_size=world_size)
+
+    if rank == 0:
+        assert_close("Output", ref_out, y_cp_global, ratio=0.001)
+        assert_close("dx", ref_dx, dx_cp_global, ratio=0.001)
 
 
 @pytest.mark.parametrize(
@@ -193,25 +78,12 @@ def _run_distributed(
     [
         pytest.param(2, [300, 400, 324], id='cp2-sequence-cut'),
         pytest.param(2, [512, 512], id='cp2-boundary-aligned'),
-        # the first sequence crosses three rank partitions
         pytest.param(4, [700, 324], id='cp4-sequence-cut'),
         pytest.param(4, [1024], id='cp4-single-sequence'),
         pytest.param(2, [100, 150, 200, 250, 124, 100, 100], id='cp2-short-sequences'),
-        # rank 1 starts with a one-token sequence tail
         pytest.param(2, [513, 511], id='cp2-tail-1'),
-        # rank 1 starts with a two-token sequence tail
         pytest.param(2, [514, 510], id='cp2-tail-2'),
     ],
 )
-def test_token_shift(request, world_size, lengths):
-    if torch.cuda.device_count() < world_size:
-        pytest.skip(f"At least {world_size} devices required")
-
-    _run_distributed(
-        world_size=world_size,
-        test_name=request.node.callspec.id,
-        T=1024,
-        D=128,
-        lengths=lengths,
-        dtype=torch.float32,
-    )
+def test_token_shift(run_distributed, world_size, lengths):
+    run_distributed(worker=_run_token_shift, world_size=world_size, D=128, lengths=lengths, dtype=torch.float32)

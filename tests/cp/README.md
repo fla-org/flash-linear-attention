@@ -1,24 +1,31 @@
-# CP(Context Parallel)
+# Context-parallel tests
 
-1. CP2TP refers to Context Parallelism with Tensor Parallelism on attention heads. When CP is mentioned in FLA kernels, it specifically denotes TP (head parallelism), which requires two all-to-all collective operations—one before and one after the attention computation.
+Run CP coverage from the repository root:
 
-2. Ring CP introduces sequential dependencies between ranks. For example, in a CP2 configuration, Rank1 must wait for Rank0 to complete before it can compute; during backpropagation, Rank0 must conversely wait for Rank1.
+```bash
+FLA_CI_ENV=0 pytest tests/cp -q
+FLA_CI_ENV=0 pytest tests/cp/test_kda.py -k cp2-sequence-cut -q
+```
 
-3. True CP resembles the CP implementation in FLA(KDA and GDN first), enabling genuinely parallel computation across all ranks with minimal communication overhead. However, this approach is more complex and requires sophisticated mathematical optimizations.
+Each component keeps its inputs, reference, CP call, and assertions in one test file. DPLR and its RWKV7 wrapper share a parameter matrix. The `run_distributed` fixture owns process startup, device-count checks, and rendezvous cleanup. Workers receive explicit keyword arguments; token sharding and gathering live in `utils.py`.
 
-## Running tests
+| File                                  | Coverage                                                                   |
+| ------------------------------------- | -------------------------------------------------------------------------- |
+| `test_context.py`                     | Sequence partitions and invalid context metadata.                          |
+| `test_state.py`                       | Per-head vector-gate addressing in backward state summaries.               |
+| `test_intracard.py`                   | Intra-card backend selection, index caching, and grouped heads.            |
+| `test_graph.py`                       | KDA graph replay with one or multiple ranks and changing sequence cuts.    |
+| `test_conv.py`, `test_token_shift.py` | Boundary exchange, outputs, and gradients for convolution and token shift. |
+| `test_kda.py`, `test_gdn2.py`         | Gate modes, recomputation, state layouts, and recurrent references.        |
+| `test_gdn.py`, `test_gdp.py`          | Grouped heads and multiple Householder updates against their references.   |
+| `test_dplr.py`                        | DPLR, its RWKV7 wrapper, and explicit TileLang routing.                    |
 
-Run the suite with `FLA_CI_ENV=0 pytest tests/cp -q`. Distributed cases require the device count shown in their parameter IDs. For example, `pytest tests/cp/test_kda.py -k cp2-sequence-cut` selects KDA sequence-cut cases.
+Multi-rank tests compare sharded outputs and gradients against full-sequence references. Context metadata, backward state-kernel, intra-card cache, and single-rank graph tests cover separate CP infrastructure; they do not establish cross-rank numerical correctness. Ordinary operator tests retain backend-verifier cases that only check whether a CP argument is supported.
 
-Files identify the operator or shared component; test functions identify the operation, and parameter IDs identify the partition, layout, or compatibility case.
+Distributed cases spawn their own local ranks. Run pytest once per host, without `torchrun` or `pytest-xdist`: every case uses the first required devices. Each run has its own rendezvous file, and failures in a worker fail the parent test. Cases requiring 2, 4, or 8 devices skip when fewer devices are available. The KDA suite also supports Ascend HCCL; direct CUDA graph and CUDA convolution coverage retain their platform restrictions.
 
-| Files                                                       | Coverage                                                                              |
-| ----------------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| `test_context.py`                                           | Sequence partitions, backward snapshots, precision keywords, and device requirements. |
-| `test_state.py`                                             | Backward affine-state summaries and per-head vector gates.                            |
-| `test_graph.py`                                             | KDA graph capture and replay against eager execution.                                 |
-| `test_conv.py`, `test_token_shift.py`                       | Convolution and token-shift outputs and gradients.                                    |
-| `test_kda.py`, `test_gdn.py`, `test_gdn2.py`, `test_gdp.py` | Chunked operators against their existing references.                                  |
-| `test_dplr.py`, `test_rwkv7.py`                             | DPLR and its RWKV7 wrapper against the recurrent reference.                           |
+Test functions name the operation, and parameter IDs identify the scenario: `test_chunk[cp2-sequence-cut]`, for example. Cases cover sequence cuts, aligned boundaries, short sequences, state orientation, grouped heads, gate modes, recomputation, and zigzag layouts. The `tf32x3` suffix selects the explicit affine-chain precision option; other cases retain the operator's default precision. References and tolerances remain specific to each operator. KDA and GDN-2 retain their existing warning-only gradient diagnostics; those warnings are not strict numerical passes, even with `FLA_CI_ENV=0`.
 
-The `legacy-precision-true` cases exercise the accepted legacy keyword; all affine-chain tests use TF32x3. Numerical investigation guidance is in [debug.md](debug.md).
+Single-rank graph and intra-card cache tests retain the NaN allocation guard used by their original operator tests. Distributed graph workers keep captured communicators alive until process exit.
+
+See [the CP implementation](../../fla/ops/cp/README.md) for the algorithm and [debugging notes](debug.md) for numerical investigations.

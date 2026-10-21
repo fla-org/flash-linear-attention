@@ -23,7 +23,7 @@ Compare outputs and final states against the existing reference. Training APIs a
 
 For addressing changes, inspect casts before multiplication and test shapes that expose large offsets, partial tiles, and varlen boundaries. Follow the `tl.int64` and platform requirements in [Triton Kernels](../../../CONTRIBUTING.md#triton-kernels). Exercise changed grid/address paths on affected supported platforms. Distinguish unsupported cases from tests skipped for unavailable hardware or dependencies; record the latter as validation gaps.
 
-The NaN allocation guard covers eligible FLA allocations in operator/module tests, not layer/model/CP tests or every allocation. Add explicit finite-output and finite-gradient checks to adversarial cases, and investigate a poisoned-run failure even when an ad hoc run passes.
+The NaN allocation guard covers eligible FLA allocations in operator/module tests, including the single-rank CP graph and intra-card cache cases moved from operator tests, but not layer/model tests, spawned CP workers, or every allocation. Add explicit finite-output and finite-gradient checks to adversarial cases, and investigate a poisoned-run failure even when an ad hoc run passes.
 
 ## Run the affected paths
 

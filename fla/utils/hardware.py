@@ -210,7 +210,7 @@ else:
             return contextlib.nullcontext()
 
 
-def ascend_compile_kwargs(*, blacklist_auto_blockify: bool = False) -> dict:
+def ascend_compile_kwargs(*, blacklist_auto_blockify: bool = False, workspace_multibuffer: int = 1) -> dict:
     """Return NPU Triton launch kwargs that disable auto-multi-buffer.
 
     Empty on non-NPU devices. When ``blacklist_auto_blockify`` is set, also
@@ -219,13 +219,16 @@ def ascend_compile_kwargs(*, blacklist_auto_blockify: bool = False) -> dict:
     if not IS_NPU:
         return {}
     kwargs = {'multibuffer': False}
-    if blacklist_auto_blockify:
-        try:
-            from triton.backends.ascend.compiler import NPUOptions
-        except ImportError:
-            return kwargs
-        if 'has_auto_blockify_blacklist_op' in getattr(NPUOptions, '__dataclass_fields__', {}):
-            kwargs['has_auto_blockify_blacklist_op'] = True
+    try:
+        from triton.backends.ascend.compiler import NPUOptions
+        fields = getattr(NPUOptions, '__dataclass_fields__', {})
+    except ImportError:
+        return kwargs
+    # BiShengIR 2.0 pipelines CV workspaces 4 slots deep by default, overflowing the 192KB UB.
+    if 'set_workspace_multibuffer' in fields:
+        kwargs['set_workspace_multibuffer'] = workspace_multibuffer
+    if blacklist_auto_blockify and 'has_auto_blockify_blacklist_op' in fields:
+        kwargs['has_auto_blockify_blacklist_op'] = True
     return kwargs
 
 

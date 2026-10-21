@@ -36,12 +36,19 @@ def test_get_cp_cu_seqlens_empty_partition():
     world_size = 3
     cu_seqlens = torch.tensor([0, total_tokens], dtype=torch.long)
 
-    with pytest.raises(ValueError, match=rf"`total_tokens` \({total_tokens}\) must be at least `world_size` \({world_size}\)"):
+    with pytest.raises(
+        ValueError,
+        match=rf"`total_tokens` \({total_tokens}\) must be at least `world_size` \({world_size}\)",
+    ):
         get_cp_cu_seqlens(cu_seqlens, world_size=world_size, rank=0)
 
 
 def test_get_cp_cu_seqlens_varlen():
-    context = get_cp_cu_seqlens(torch.tensor([0, 5, 12], dtype=torch.long), world_size=3, rank=1)
+    context = get_cp_cu_seqlens(
+        cu_seqlens=torch.tensor([0, 5, 12], dtype=torch.long),
+        world_size=3,
+        rank=1,
+    )
 
     assert context.cu_seqlens_cpu.tolist() == [0, 1, 4]
     assert context.pre_num_conv_tokens == 4
@@ -89,7 +96,7 @@ def test_copy_for_backward(layout):
     cp_context.post_num_ranks_dev = torch.tensor(0, dtype=torch.int32)
     copied = cp_context.copy_for_backward()
 
-    # Backward owns its sequence boundaries; graph replay must keep the same persistent rank-count tensors.
+    # backward owns its sequence boundaries; graph replay must keep the same persistent rank-count tensors.
     for field in fields(cp_context):
         original = getattr(cp_context, field.name)
         saved = getattr(copied, field.name)
