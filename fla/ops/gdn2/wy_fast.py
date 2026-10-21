@@ -27,15 +27,17 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.gdn2.gate import gdn2_local_log_cumsum
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.op import exp2
-from fla.utils import autotune_cache_kwargs
+from fla.utils import IS_NVIDIA, autotune_cache_kwargs
 
 
 @triton.heuristics({
     'STORE_QG': lambda args: args['qg'] is not None,
     'STORE_KG': lambda args: args['kg'] is not None,
+    'USE_RAW_G': lambda args: args['g_raw'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @fla_cache_autotune(
@@ -60,6 +62,7 @@ def recompute_w_u_fwd_gdn2_kernel(
     u,           # output: A @ (w_gate * v), [B, T, H, V]
     A,
     gk,
+    g_raw,
     cu_seqlens,
     chunk_indices,
     T,
@@ -69,6 +72,7 @@ def recompute_w_u_fwd_gdn2_kernel(
     BT: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
+    USE_RAW_G: tl.constexpr,
     STORE_QG: tl.constexpr,
     STORE_KG: tl.constexpr,
     IS_VARLEN: tl.constexpr,
@@ -122,6 +126,9 @@ def recompute_w_u_fwd_gdn2_kernel(
             b_qg = b_q * exp2(b_gk)
             tl.store(p_qg, b_qg.to(p_qg.dtype.element_ty), mask=m_kk)
 
+        b_w = tl.dot(b_A, b_kb.to(b_k.dtype))
+        tl.store(p_w, b_w.to(p_w.dtype.element_ty), mask=m_kk)
+
         if STORE_KG:
             last_idx = min(i_t * BT + BT, T) - 1
             o_k = i_k * BK + tl.arange(0, BK)
@@ -130,16 +137,106 @@ def recompute_w_u_fwd_gdn2_kernel(
                 gk + ((bos + last_idx) * H + i_h) * K + o_k,
                 mask=m_k, other=0.,
             ).to(tl.float32)
-            b_kg = b_k * tl.where(
-                (i_t * BT + tl.arange(0, BT) < T)[:, None],
-                exp2(b_gn[None, :] - b_gk),
-                0,
-            )
+            b_gs = b_gn[None, :] - b_gk
+            if USE_RAW_G:
+                b_gs = gdn2_local_log_cumsum(
+                    g_raw + (bos * H + i_h) * K, i_t * BT, min(i_t * BT + BT, T), o_k, H, K, BT, True,
+                )
+            b_kg = b_k * tl.where(m_t[:, None], exp2(b_gs), 0)
             p_kg = kg + (bos * H + i_h) * K + o_t[:, None] * (H * K) + o_k[None, :]
             tl.store(p_kg, b_kg.to(p_kg.dtype.element_ty), mask=m_kk)
 
-        b_w = tl.dot(b_A, b_kb.to(b_k.dtype))
-        tl.store(p_w, b_w.to(p_w.dtype.element_ty), mask=m_kk)
+
+@triton.heuristics({
+    'STORE_QG': lambda args: args['qg'] is not None,
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
+})
+@fla_cache_autotune(
+    configs=[
+        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in [2, 4, 8]
+        for num_stages in [2, 3, 4]
+    ],
+    key=['T', 'H', 'K', 'V', 'BT', 'IS_VARLEN', 'STORE_QG'],
+    **autotune_cache_kwargs,
+)
+@triton.jit(do_not_specialize=['T'])
+def recompute_w_u_fwd_gdn2_parallel_kernel(
+    q,
+    k,
+    qg,
+    kg,
+    v,
+    b,
+    w_gate,
+    w,
+    u,
+    A,
+    gk,
+    g_raw,
+    cu_seqlens,
+    chunk_indices,
+    T,
+    H: tl.constexpr,
+    K: tl.constexpr,
+    V: tl.constexpr,
+    BT: tl.constexpr,
+    BK: tl.constexpr,
+    BV: tl.constexpr,
+    STORE_QG: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+):
+    BS: tl.constexpr = 32
+    NV: tl.constexpr = triton.cdiv(V, BV)
+    NK: tl.constexpr = triton.cdiv(K, BK)
+    NS: tl.constexpr = triton.cdiv(K, BS)
+    i_tc = tl.program_id(0).to(tl.int64)
+    i_t, i_c = i_tc // (NV + NK + NS), i_tc % (NV + NK + NS)
+    i_bh = tl.program_id(1).to(tl.int64)
+    i_b, i_h = i_bh // H, i_bh % H
+    if IS_VARLEN:
+        i_n = tl.load(chunk_indices + i_t * 2).to(tl.int64)
+        i_t = tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64)
+        bos = tl.load(cu_seqlens + i_n).to(tl.int64)
+        T = tl.load(cu_seqlens + i_n + 1).to(tl.int64) - bos
+    else:
+        bos = i_b * T
+
+    o_t = i_t * BT + tl.arange(0, BT)
+    m_t = o_t < T
+    if i_c < NV + NK:
+        o_A = tl.arange(0, BT)
+        p_A = A + (bos * H + i_h) * BT + o_t[:, None] * H * BT + o_A[None, :]
+        b_A = tl.load(p_A, mask=m_t[:, None], other=0)
+        if i_c < NV:
+            o_v = i_c * BV + tl.arange(0, BV)
+            offsets = ((bos + o_t[:, None]) * H + i_h) * V + o_v[None, :]
+            mask = m_t[:, None] & (o_v[None, :] < V)
+            b_v = tl.load(v + offsets, mask=mask, other=0)
+            b_wg = tl.load(w_gate + offsets, mask=mask, other=0)
+            b_u = tl.dot(b_A, (b_v * b_wg).to(b_v.dtype))
+            tl.store(u + offsets, b_u.to(u.dtype.element_ty), mask=mask)
+        else:
+            o_k = (i_c - NV) * BK + tl.arange(0, BK)
+            offsets = ((bos + o_t[:, None]) * H + i_h) * K + o_k[None, :]
+            mask = m_t[:, None] & (o_k[None, :] < K)
+            b_k = tl.load(k + offsets, mask=mask, other=0)
+            b_b = tl.load(b + offsets, mask=mask, other=0)
+            b_g = tl.load(gk + offsets, mask=mask, other=0).to(tl.float32)
+            b_kb = b_k * b_b * exp2(b_g)
+            b_w = tl.dot(b_A, b_kb.to(b_k.dtype))
+            tl.store(w + offsets, b_w.to(w.dtype.element_ty), mask=mask)
+            if STORE_QG:
+                b_q = tl.load(q + offsets, mask=mask, other=0)
+                tl.store(qg + offsets, (b_q * exp2(b_g)).to(qg.dtype.element_ty), mask=mask)
+    else:
+        o_s = (i_c - NV - NK) * BS + tl.arange(0, BS)
+        offsets_s = ((bos + o_t[:, None]) * H + i_h) * K + o_s[None, :]
+        mask_s = m_t[:, None] & (o_s[None, :] < K)
+        b_ks = tl.load(k + offsets_s, mask=mask_s, other=0)
+        b_gs = gdn2_local_log_cumsum(g_raw + (bos * H + i_h) * K, i_t * BT, min(i_t * BT + BT, T), o_s, H, K, BT, True)
+        b_kg = b_ks * tl.where(m_t[:, None], exp2(b_gs), 0)
+        tl.store(kg + offsets_s, b_kg.to(kg.dtype.element_ty), mask=mask_s)
 
 
 def recompute_w_u_fwd_gdn2(
@@ -152,6 +249,7 @@ def recompute_w_u_fwd_gdn2(
     gk: torch.Tensor | None = None,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
+    g_raw: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
     """Produce GDN-2 WY auxiliaries from the solved chunk inverse ``A``.
 
@@ -171,7 +269,10 @@ def recompute_w_u_fwd_gdn2(
     u = torch.empty_like(v)
     qg = torch.empty_like(q) if q is not None else None
     kg = torch.empty_like(k) if gk is not None else None
-    recompute_w_u_fwd_gdn2_kernel[(NT, B * H)](
+    parallel = IS_NVIDIA and g_raw is not None and gk is not None and cu_seqlens is None
+    kernel = recompute_w_u_fwd_gdn2_parallel_kernel if parallel else recompute_w_u_fwd_gdn2_kernel
+    tasks = triton.cdiv(V, BV) + triton.cdiv(K, BK) + triton.cdiv(K, 32) if parallel else 1
+    kernel[(NT * tasks, B * H)](
         q=q,
         k=k,
         qg=qg,
@@ -183,6 +284,7 @@ def recompute_w_u_fwd_gdn2(
         u=u,
         A=A,
         gk=gk,
+        g_raw=g_raw,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         T=T,

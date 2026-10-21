@@ -26,12 +26,13 @@ import triton.language as tl
 
 from fla.backends import dispatch
 from fla.ops.gdn2.chunk_intra_token_parallel import chunk_gdn2_fwd_intra_token_parallel
+from fla.ops.gdn2.gate import gdn2_local_log_cumsum, gdn2_local_log_scans
 from fla.ops.gdn2.wy_fast import recompute_w_u_fwd_gdn2
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.op import exp2, gather, unflatten_program_id
-from fla.utils import IS_GATHER_SUPPORTED, IS_TF32_SUPPORTED, autotune_cache_kwargs
+from fla.utils import IS_GATHER_SUPPORTED, IS_NPU, IS_TF32_SUPPORTED, autotune_cache_kwargs
 
 if IS_TF32_SUPPORTED:
     SOLVE_TRIL_DOT_PRECISION = tl.constexpr('tf32')
@@ -172,6 +173,7 @@ def chunk_gdn2_fwd_kernel_inter_solve_fused(
     q,
     k,
     g,
+    g_raw,
     b,
     Aqk,
     Akkd,
@@ -209,6 +211,8 @@ def chunk_gdn2_fwd_kernel_inter_solve_fused(
     q += (bos * H + i_h) * K
     k += (bos * H + i_h) * K
     g += (bos * H + i_h) * K
+    if not USE_SAFE_GATE:
+        g_raw += (bos * H + i_h) * K
     b += (bos * H + i_h) * K
     Aqk += (bos * H + i_h) * BT
     Akk += (bos * H + i_h) * BT
@@ -244,6 +248,9 @@ def chunk_gdn2_fwd_kernel_inter_solve_fused(
         b_k0 = tl.load(p_k0, mask=m_tc0[:, None] & m_k[None, :], other=0.0).to(tl.float32)
         b_g0 = tl.load(p_g0, mask=m_tc0[:, None] & m_k[None, :], other=0.0).to(tl.float32)
 
+        if not USE_SAFE_GATE:
+            b_gs0 = gdn2_local_log_cumsum(g_raw, i_tc0, min(i_tc1, T), o_k, H, K, BC, True)
+
         if i_tc1 < T:
             p_q1 = q + (i_tc1 + o_i)[:, None] * (H * K) + o_k[None, :]
             p_k1 = k + (i_tc1 + o_i)[:, None] * (H * K) + o_k[None, :]
@@ -253,9 +260,16 @@ def chunk_gdn2_fwd_kernel_inter_solve_fused(
             b_k1 = tl.load(p_k1, mask=m_tc1[:, None] & m_k[None, :], other=0.0).to(tl.float32)
             b_g1 = tl.load(p_g1, mask=m_tc1[:, None] & m_k[None, :], other=0.0).to(tl.float32)
             b_b1 = tl.load(p_b1, mask=m_tc1[:, None] & m_k[None, :], other=0.0).to(tl.float32)
+            if not USE_SAFE_GATE:
+                b_gp1 = gdn2_local_log_cumsum(g_raw, i_tc1, min(i_tc1 + BC, T), o_k, H, K, BC)
+                b_gt1 = tl.sum(tl.where(o_i[:, None] == BC - 1, b_gp1, 0.), axis=0)
             b_gn1 = tl.load(g + i_tc1 * H * K + o_k, mask=m_k, other=0).to(tl.float32)
             b_gqn = tl.where(m_tc1[:, None], exp2(b_g1 - b_gn1[None, :]), 0)
+            if not USE_SAFE_GATE:
+                b_gqn = tl.where(m_tc1[:, None], exp2(b_gp1), 0)
             b_kgt = tl.trans(b_k0 * exp2(b_gn1[None, :] - b_g0))
+            if not USE_SAFE_GATE:
+                b_kgt = tl.trans(b_k0 * exp2(b_gs0))
             b_bk1 = b_b1 * b_k1
             b_Aqk10 = tl.dot(b_q1 * b_gqn, b_kgt, b_Aqk10)
             b_Akk10 = tl.dot(b_bk1 * b_gqn, b_kgt, b_Akk10)
@@ -269,14 +283,24 @@ def chunk_gdn2_fwd_kernel_inter_solve_fused(
                 b_k2 = tl.load(p_k2, mask=m_tc2[:, None] & m_k[None, :], other=0.0).to(tl.float32)
                 b_g2 = tl.load(p_g2, mask=m_tc2[:, None] & m_k[None, :], other=0.0).to(tl.float32)
                 b_b2 = tl.load(p_b2, mask=m_tc2[:, None] & m_k[None, :], other=0.0).to(tl.float32)
+                if not USE_SAFE_GATE:
+                    b_gp2 = gdn2_local_log_cumsum(g_raw, i_tc2, min(i_tc2 + BC, T), o_k, H, K, BC)
+                    b_gt2 = tl.sum(tl.where(o_i[:, None] == BC - 1, b_gp2, 0.), axis=0)
                 b_gn2 = tl.load(g + i_tc2 * H * K + o_k, mask=m_k, other=0).to(tl.float32)
                 b_gqn2 = tl.where(m_tc2[:, None], exp2(b_g2 - b_gn2[None, :]), 0)
+                if not USE_SAFE_GATE:
+                    b_gqn2 = tl.where(m_tc2[:, None], exp2(b_gp2), 0)
                 b_qg2 = b_q2 * b_gqn2
                 b_bkg2 = (b_b2 * b_k2) * b_gqn2
                 b_kgt = tl.trans(b_k0 * exp2(b_gn2[None, :] - b_g0))
+                if not USE_SAFE_GATE:
+                    b_kgt = tl.trans(b_k0 * exp2(b_gs0 + b_gt1[None, :]))
                 b_Aqk20 = tl.dot(b_qg2, b_kgt, b_Aqk20)
                 b_Akk20 = tl.dot(b_bkg2, b_kgt, b_Akk20)
                 b_kgt = tl.trans(b_k1 * exp2(b_gn2[None, :] - b_g1))
+                if not USE_SAFE_GATE:
+                    b_gs1 = gdn2_local_log_cumsum(g_raw, i_tc1, min(i_tc1 + BC, T), o_k, H, K, BC, True)
+                    b_kgt = tl.trans(b_k1 * exp2(b_gs1))
                 b_Aqk21 = tl.dot(b_qg2, b_kgt, b_Aqk21)
                 b_Akk21 = tl.dot(b_bkg2, b_kgt, b_Akk21)
 
@@ -289,17 +313,28 @@ def chunk_gdn2_fwd_kernel_inter_solve_fused(
                     b_k3 = tl.load(p_k3, mask=m_tc3[:, None] & m_k[None, :], other=0.0).to(tl.float32)
                     b_g3 = tl.load(p_g3, mask=m_tc3[:, None] & m_k[None, :], other=0.0).to(tl.float32)
                     b_b3 = tl.load(p_b3, mask=m_tc3[:, None] & m_k[None, :], other=0.0).to(tl.float32)
+                    if not USE_SAFE_GATE:
+                        b_gp3 = gdn2_local_log_cumsum(g_raw, i_tc3, min(i_tc3 + BC, T), o_k, H, K, BC)
                     b_gn3 = tl.load(g + i_tc3 * H * K + o_k, mask=m_k, other=0).to(tl.float32)
                     b_gqn3 = tl.where(m_tc3[:, None], exp2(b_g3 - b_gn3[None, :]), 0)
+                    if not USE_SAFE_GATE:
+                        b_gqn3 = tl.where(m_tc3[:, None], exp2(b_gp3), 0)
                     b_qg3 = b_q3 * b_gqn3
                     b_bkg3 = (b_b3 * b_k3) * b_gqn3
                     b_kgt = tl.trans(b_k0 * exp2(b_gn3[None, :] - b_g0))
+                    if not USE_SAFE_GATE:
+                        b_kgt = tl.trans(b_k0 * exp2(b_gs0 + b_gt1[None, :] + b_gt2[None, :]))
                     b_Aqk30 = tl.dot(b_qg3, b_kgt, b_Aqk30)
                     b_Akk30 = tl.dot(b_bkg3, b_kgt, b_Akk30)
                     b_kgt = tl.trans(b_k1 * exp2(b_gn3[None, :] - b_g1))
+                    if not USE_SAFE_GATE:
+                        b_kgt = tl.trans(b_k1 * exp2(b_gs1 + b_gt2[None, :]))
                     b_Aqk31 = tl.dot(b_qg3, b_kgt, b_Aqk31)
                     b_Akk31 = tl.dot(b_bkg3, b_kgt, b_Akk31)
                     b_kgt = tl.trans(b_k2 * exp2(b_gn3[None, :] - b_g2))
+                    if not USE_SAFE_GATE:
+                        b_gs2 = gdn2_local_log_cumsum(g_raw, i_tc2, min(i_tc2 + BC, T), o_k, H, K, BC, True)
+                        b_kgt = tl.trans(b_k2 * exp2(b_gs2))
                     b_Aqk32 = tl.dot(b_qg3, b_kgt, b_Aqk32)
                     b_Akk32 = tl.dot(b_bkg3, b_kgt, b_Akk32)
 
@@ -424,6 +459,7 @@ def chunk_gdn2_fwd_kernel_inter_solve_fused(
 
 @triton.heuristics({
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
+    'PRECOMPUTED_SCANS': lambda args: args['g_local_prefix'] is not None,
 })
 @fla_cache_autotune(
     configs=[
@@ -439,6 +475,9 @@ def chunk_gdn2_bwd_kernel_intra(
     q,
     k,
     g,
+    g_raw,
+    g_local_prefix,
+    g_local_suffix,
     b,
     dAqk,
     dAkk,
@@ -463,6 +502,7 @@ def chunk_gdn2_bwd_kernel_intra(
     SAFE_GATE: tl.constexpr,
     GATE_SHIFT: tl.constexpr,
     USE_GATHER: tl.constexpr,
+    PRECOMPUTED_SCANS: tl.constexpr,
 ):
     i_kc, i_t = unflatten_program_id(tl.cdiv(K, BK) * NC)
     i_bh = tl.program_id(1).to(tl.int64)
@@ -487,6 +527,11 @@ def chunk_gdn2_bwd_kernel_intra(
     q += (bos * H + i_h) * K
     k += (bos * H + i_h) * K
     g += (bos * H + i_h) * K
+    if not SAFE_GATE:
+        g_raw += (bos * H + i_h) * K
+        if PRECOMPUTED_SCANS:
+            g_local_prefix += (bos * H + i_h) * K
+            g_local_suffix += (bos * H + i_h) * K
     b += (bos * H + i_h) * K
 
     dAqk += (bos * H + i_h) * BT
@@ -515,7 +560,9 @@ def chunk_gdn2_bwd_kernel_intra(
     if i_i > 0:
         p_gn = g + i_ti * H * K + o_k
         b_gn = tl.load(p_gn, mask=m_k, other=0).to(tl.float32)[None, :]
-        for i_j in range(0, i_i):
+        b_gap = tl.zeros([BK], tl.float32)
+        for j in range(i_i):
+            i_j = j if SAFE_GATE else i_i - 1 - j
             o_j = i_t * BT + i_j * BC + o_i
             m_j = o_j < T
             m_jk = m_j[:, None] & m_k[None, :]
@@ -527,18 +574,31 @@ def chunk_gdn2_bwd_kernel_intra(
             b_kj = tl.load(p_k, mask=m_jk, other=0.0)
             b_gk = tl.load(p_gk, mask=m_jk, other=0.0)
             b_kg = b_kj * exp2(b_gn - b_gk)
+            if not SAFE_GATE:
+                if PRECOMPUTED_SCANS:
+                    b_gkj = tl.load(g_local_suffix + o_j[:, None] * H * K + o_k[None, :], mask=m_jk, other=0)
+                else:
+                    b_gkj = gdn2_local_log_cumsum(g_raw, i_t * BT + i_j * BC, i_t * BT + (i_j + 1) * BC, o_k, H, K, BC, True)
+                b_kg = b_kj * exp2(b_gkj + b_gap[None, :])
+                b_raw = tl.load(g_raw + o_j[:, None] * H * K + o_k[None, :], mask=m_jk, other=0).to(tl.float32)
+                b_gap += tl.sum(b_raw, axis=0) * 1.4426950408889634
             b_dAqk = tl.load(p_dAqk, mask=m_dj, other=0.0)
             b_dAkk = tl.load(p_dAkk, mask=m_dj, other=0.0)
             b_dq2 = tl.dot(b_dAqk, b_kg, b_dq2)
             b_dk2 = tl.dot(b_dAkk, b_kg, b_dk2)
         b_gqn = exp2(b_g - b_gn)
+        if not SAFE_GATE:
+            if PRECOMPUTED_SCANS:
+                b_gp = tl.load(g_local_prefix + o_c[:, None] * H * K + o_k[None, :], mask=m_kc, other=0)
+            else:
+                b_gp = gdn2_local_log_cumsum(g_raw, i_ti, min(i_ti + BC, T), o_k, H, K, BC)
+            b_gqn = exp2(b_gp)
         b_dq2 *= b_gqn
         b_dk2 *= b_gqn
 
     m_dA = (i_ti + o_i) < T
     o_dA = (i_ti + o_i) * H * BT + i_i * BC
     p_kj = k + i_ti * H * K + o_k
-    p_gkj = g + i_ti * H * K + o_k
 
     p_q = q + o_c[:, None] * (H * K) + o_k[None, :]
     p_k = k + o_c[:, None] * (H * K) + o_k[None, :]
@@ -572,18 +632,17 @@ def chunk_gdn2_bwd_kernel_intra(
         b_dq2 += tl.dot(b_dAqk_diag_qk, b_k_exp_diag_qk) * exp_b_g_diag_qk
         b_dk2 += tl.dot(b_dAkk_diag_qk, b_k_exp_diag_qk) * exp_b_g_diag_qk
     else:
-        for j in range(0, min(BC, T - i_t * BT - i_i * BC)):
+        b_interval = tl.zeros([BC, BK], tl.float32)
+        for j in range(min(BC, T - i_ti) - 1, -1, -1):
             b_dAqk = tl.load(dAqk + o_dA + j, mask=m_dA, other=0)
             b_dAkk = tl.load(dAkk + o_dA + j, mask=m_dA, other=0)
-            b_kj = tl.load(p_kj, mask=m_k, other=0).to(tl.float32)
-            b_gkj = tl.load(p_gkj, mask=m_k, other=0).to(tl.float32)
+            b_kj = tl.load(k + (i_ti + j) * H * K + o_k, mask=m_k, other=0).to(tl.float32)
+            b_gj = tl.load(g_raw + (i_ti + j) * H * K + o_k, mask=m_k, other=0).to(tl.float32)
             m_i = o_i[:, None] >= j
-            b_gqk = exp2(b_g - b_gkj[None, :])
+            b_gqk = exp2(b_interval * 1.4426950408889634)
             b_dq2 += tl.where(m_i, b_dAqk[:, None] * b_kj[None, :] * b_gqk, 0.)
             b_dk2 += tl.where(m_i, b_dAkk[:, None] * b_kj[None, :] * b_gqk, 0.)
-
-            p_kj += H * K
-            p_gkj += H * K
+            b_interval += tl.where(m_i, b_gj[None, :], 0.)
 
     # db gets the elementwise b * k contribution from dk2 (before b is folded
     # back into dk2 itself); then dk2 is rescaled by the channel-wise gate.
@@ -608,6 +667,7 @@ def chunk_gdn2_bwd_kernel_intra(
     if i_i < NC - 1:
         p_gn = g + (min(i_ti + BC, T) - 1) * H * K + o_k
         b_gn = tl.load(p_gn, mask=m_k, other=0).to(tl.float32)[None, :]
+        b_gap = tl.zeros([BK], tl.float32)
         for i_j in range(i_i + 1, NC):
             o_j = i_t * BT + i_j * BC + o_i
             m_j = o_j < T
@@ -626,16 +686,30 @@ def chunk_gdn2_bwd_kernel_intra(
             b_dAqk = tl.load(p_dAqk, mask=m_dj, other=0.0)
             b_dAkk = tl.load(p_dAkk, mask=m_dj, other=0.0)
             b_gkn = exp2(b_gk - b_gn)
+            if not SAFE_GATE:
+                if PRECOMPUTED_SCANS:
+                    b_gqj = tl.load(g_local_prefix + o_j[:, None] * H * K + o_k[None, :], mask=m_jk, other=0)
+                else:
+                    b_gqj = gdn2_local_log_cumsum(g_raw, i_t * BT + i_j * BC, min(i_t * BT + (i_j + 1) * BC, T), o_k, H, K, BC)
+                b_gkn = exp2(b_gqj + b_gap[None, :])
+                b_raw = tl.load(g_raw + o_j[:, None] * H * K + o_k[None, :], mask=m_jk, other=0).to(tl.float32)
+                b_gap += tl.sum(b_raw, axis=0) * 1.4426950408889634
             b_qg = b_qj * tl.where(m_j[:, None], b_gkn, 0)
             b_kbg = b_kbj * tl.where(m_j[:, None], b_gkn, 0)
             b_dkt = tl.dot(b_dAqk, b_qg, b_dkt)
             b_dkt = tl.dot(b_dAkk, b_kbg, b_dkt)
-        b_dkt *= exp2(b_gn - b_g)
+        if SAFE_GATE:
+            b_dkt *= exp2(b_gn - b_g)
+        else:
+            if PRECOMPUTED_SCANS:
+                b_gs = tl.load(g_local_suffix + o_c[:, None] * H * K + o_k[None, :], mask=m_kc, other=0)
+            else:
+                b_gs = gdn2_local_log_cumsum(g_raw, i_ti, min(i_ti + BC, T), o_k, H, K, BC, True)
+            b_dkt *= exp2(b_gs)
 
     o_dA = i_ti * H * BT + i_i * BC + o_i
     p_qj = q + i_ti * H * K + o_k
     p_kj = k + i_ti * H * K + o_k
-    p_gkj = g + i_ti * H * K + o_k
     p_bj_ptr = b + i_ti * H * K + o_k
 
     if SAFE_GATE:
@@ -668,22 +742,23 @@ def chunk_gdn2_bwd_kernel_intra(
         b_dkt += tl.dot(b_dAqk_diag_kk, b_q_exp) * exp_neg_b_g_diag_kk
         b_dkt += tl.dot(b_dAkk_diag_kk, b_kb_exp) * exp_neg_b_g_diag_kk
     else:
-        for j in range(0, min(BC, T - i_t * BT - i_i * BC)):
+        b_interval = tl.zeros([BC, BK], tl.float32)
+        for j in range(0, min(BC, T - i_ti)):
             b_dAqk = tl.load(dAqk + o_dA + j * H * BT)
             b_dAkk = tl.load(dAkk + o_dA + j * H * BT)
             b_qj = tl.load(p_qj, mask=m_k, other=0).to(tl.float32)
             b_kj = tl.load(p_kj, mask=m_k, other=0).to(tl.float32)
             b_bj = tl.load(p_bj_ptr, mask=m_k, other=0).to(tl.float32)
+            b_gj = tl.load(g_raw + (i_ti + j) * H * K + o_k, mask=m_k, other=0).to(tl.float32)
+            b_interval += tl.where(o_i[:, None] < j, b_gj[None, :], 0.)
             b_kbj = b_kj * b_bj
-            b_gkj = tl.load(p_gkj, mask=m_k, other=0).to(tl.float32)
             m_i = o_i[:, None] <= j
-            b_gkq = exp2(b_gkj[None, :] - b_g)
+            b_gkq = exp2(b_interval * 1.4426950408889634)
             b_dkt += tl.where(m_i, b_dAqk[:, None] * b_qj[None, :] * b_gkq, 0.)
             b_dkt += tl.where(m_i, b_dAkk[:, None] * b_kbj[None, :] * b_gkq, 0.)
 
             p_qj += H * K
             p_kj += H * K
-            p_gkj += H * K
             p_bj_ptr += H * K
 
     p_dk = dk + o_c[:, None] * (H * K) + o_k[None, :]
@@ -714,6 +789,7 @@ def chunk_gdn2_fwd_intra(
     safe_gate: bool = False,
     lower_bound: float | None = None,
     disable_recompute: bool = False,
+    g_raw: torch.Tensor | None = None,
 ):
     """Build Aqk, Akk_inv, and WY auxiliaries with causal safe-gate anchors.
 
@@ -760,7 +836,7 @@ def chunk_gdn2_fwd_intra(
         chunk_gdn2_fwd_intra_token_parallel(
             q=q,
             k=k,
-            gk=gk,
+            g=g_raw,
             b=b,
             Aqk=Aqk,
             Akk=Akkd,
@@ -789,6 +865,7 @@ def chunk_gdn2_fwd_intra(
         BT=BT,
         BC=BC,
         USE_SAFE_GATE=safe_gate,
+        g_raw=g_raw,
     )
 
     w, u, qg, kg = recompute_w_u_fwd_gdn2(
@@ -799,6 +876,7 @@ def chunk_gdn2_fwd_intra(
         A=Akk,
         q=q if disable_recompute else None,
         gk=gk,
+        g_raw=g_raw,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
     )
@@ -821,6 +899,7 @@ def chunk_gdn2_bwd_intra(
     chunk_size: int = 64,
     safe_gate: bool = False,
     lower_bound: float | None = None,
+    g_raw: torch.Tensor | None = None,
 ):
     """Intra-chunk backward: q, k, g, b contributions from dAqk, dAkk.
 
@@ -830,13 +909,19 @@ def chunk_gdn2_bwd_intra(
     B, T, H, K = k.shape
     BT = chunk_size
     BC = min(16, BT)
-    BK = min(32, triton.next_power_of_2(K))
+    # Keep the raw-log backward key tile consistent with its local scans.
+    max_bk = 16 if IS_NPU and not safe_gate else 32
+    BK = min(max_bk, triton.next_power_of_2(K))
 
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     NC = triton.cdiv(BT, BC)
     NK = triton.cdiv(K, BK)
+
+    g_local_prefix, g_local_suffix = None, None
+    if IS_NPU and not safe_gate:
+        g_local_prefix, g_local_suffix = gdn2_local_log_scans(g_raw, cu_seqlens, chunk_indices, BT, BC, BK)
 
     dq2 = torch.empty_like(q)
     dk2 = torch.empty_like(k)
@@ -848,6 +933,9 @@ def chunk_gdn2_bwd_intra(
         q=q,
         k=k,
         g=g,
+        g_raw=g_raw,
+        g_local_prefix=g_local_prefix,
+        g_local_suffix=g_local_suffix,
         b=b,
         dAqk=dAqk,
         dAkk=dAkk,

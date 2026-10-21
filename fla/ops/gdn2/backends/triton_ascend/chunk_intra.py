@@ -13,6 +13,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.gdn2.gate import gdn2_local_log_cumsum
 from fla.ops.gdn2.wy_fast import recompute_w_u_fwd_gdn2
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp2
@@ -109,6 +110,7 @@ def chunk_gdn2_fwd_kernel_intra_grouped_npu(
     BR: tl.constexpr,
     ROW_GROUP: tl.constexpr,
     IS_HEAD_MAJOR: tl.constexpr,
+    USE_RAW_G: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     NT_OFFSET,
     NC_OFFSET,
@@ -165,14 +167,19 @@ def chunk_gdn2_fwd_kernel_intra_grouped_npu(
     b_b = tl.load(p_b, mask=m_rk, other=0.0).to(tl.float32)
     b_k *= b_b
 
-    for j in range(0, (ROW_GROUP + 1) * BR):
+    b_interval = tl.zeros([BR, BK], tl.float32)
+    for j in range((ROW_GROUP + 1) * BR - 1, -1, -1):
         i_j = i_ts + j
         m_j = i_j < T
         p_kj = k + i_j * input_stride + o_k
         p_gj = g + i_j * input_stride + o_k
         b_kj = tl.load(p_kj, mask=m_j & m_k, other=0.0).to(tl.float32)
         b_gj = tl.load(p_gj, mask=m_j & m_k, other=0.0).to(tl.float32)
-        b_kgj = tl.where(m_k[None, :], b_kj[None, :] * exp2(b_g - b_gj[None, :]), 0.0)
+        b_decay = exp2(b_g - b_gj[None, :])
+        if USE_RAW_G:
+            b_decay = exp2(b_interval * 1.4426950408889634)
+            b_interval += tl.where((ROW_GROUP * BR + o_r)[:, None] >= j, b_gj[None, :], 0.)
+        b_kgj = tl.where(m_k[None, :], b_kj[None, :] * b_decay, 0.0)
         b_Aqk = tl.sum(b_q * b_kgj, axis=1) * scale
         b_Akk = tl.sum(b_k * b_kgj, axis=1)
         row_in_subchunk = ROW_GROUP * BR + o_r
@@ -239,6 +246,7 @@ def chunk_gdn2_fwd_kernel_inter_products_npu(
     q,
     k,
     g,
+    g_raw,
     b,
     Aqk,
     Akkx,
@@ -254,6 +262,7 @@ def chunk_gdn2_fwd_kernel_inter_products_npu(
     DST_BLOCK: tl.constexpr,
     SRC_BLOCK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    USE_RAW_G: tl.constexpr,
     NT_OFFSET,
     BH_OFFSET,
 ):
@@ -270,10 +279,15 @@ def chunk_gdn2_fwd_kernel_inter_products_npu(
     else:
         bos = tl.cast(i_b, tl.int64) * T
 
-    i_tc_dst = i_t * BT + DST_BLOCK * BC
-    i_tc_src = i_t * BT + SRC_BLOCK * BC
+    i_tc = tl.cast(i_t, tl.int64) * BT
+    i_tc_dst = i_tc + DST_BLOCK * BC
+    i_tc_src = i_tc + SRC_BLOCK * BC
+    T_chunk = T - i_tc
+    if i_tc_dst >= T:
+        return
 
-    base = bos * H + i_h
+    # Block-pointer offsets must be int32; keep the chunk base in int64.
+    base = (bos + i_tc) * H + i_h
     q += base * K
     k += base * K
     g += base * K
@@ -290,42 +304,54 @@ def chunk_gdn2_fwd_kernel_inter_products_npu(
         o_k = i_k * BK + tl.arange(0, BK)
         m_k = o_k < K
 
-        p_k_src = tl.make_block_ptr(k, (T, K), (H * K, 1), (i_tc_src, i_k * BK), (BC, BK), (1, 0))
-        p_g_src = tl.make_block_ptr(g, (T, K), (H * K, 1), (i_tc_src, i_k * BK), (BC, BK), (1, 0))
+        p_k_src = tl.make_block_ptr(k, (T_chunk, K), (H * K, 1), (SRC_BLOCK * BC, i_k * BK), (BC, BK), (1, 0))
+        p_g_src = tl.make_block_ptr(g, (T_chunk, K), (H * K, 1), (SRC_BLOCK * BC, i_k * BK), (BC, BK), (1, 0))
         b_k_src = tl.load(p_k_src, boundary_check=(0, 1)).to(tl.float32)
         b_g_src = tl.load(p_g_src, boundary_check=(0, 1)).to(tl.float32)
 
-        p_q_dst = tl.make_block_ptr(q, (T, K), (H * K, 1), (i_tc_dst, i_k * BK), (BC, BK), (1, 0))
-        p_k_dst = tl.make_block_ptr(k, (T, K), (H * K, 1), (i_tc_dst, i_k * BK), (BC, BK), (1, 0))
-        p_g_dst = tl.make_block_ptr(g, (T, K), (H * K, 1), (i_tc_dst, i_k * BK), (BC, BK), (1, 0))
-        p_b_dst = tl.make_block_ptr(b, (T, K), (H * K, 1), (i_tc_dst, i_k * BK), (BC, BK), (1, 0))
+        p_q_dst = tl.make_block_ptr(q, (T_chunk, K), (H * K, 1), (DST_BLOCK * BC, i_k * BK), (BC, BK), (1, 0))
+        p_k_dst = tl.make_block_ptr(k, (T_chunk, K), (H * K, 1), (DST_BLOCK * BC, i_k * BK), (BC, BK), (1, 0))
+        p_g_dst = tl.make_block_ptr(g, (T_chunk, K), (H * K, 1), (DST_BLOCK * BC, i_k * BK), (BC, BK), (1, 0))
+        p_b_dst = tl.make_block_ptr(b, (T_chunk, K), (H * K, 1), (DST_BLOCK * BC, i_k * BK), (BC, BK), (1, 0))
         b_q_dst = tl.load(p_q_dst, boundary_check=(0, 1)).to(tl.float32)
         b_k_dst = tl.load(p_k_dst, boundary_check=(0, 1)).to(tl.float32)
         b_g_dst = tl.load(p_g_dst, boundary_check=(0, 1)).to(tl.float32)
         b_b_dst = tl.load(p_b_dst, boundary_check=(0, 1)).to(tl.float32)
         b_gn_dst = tl.load(
-            g + tl.cast(i_tc_dst, tl.int64) * H * K + o_k,
+            g + tl.cast(DST_BLOCK * BC, tl.int64) * H * K + o_k,
             mask=m_k & (i_tc_dst < T),
             other=0.0,
         ).to(tl.float32)
         b_gq = tl.where(m_dst[:, None], exp2(b_g_dst - b_gn_dst[None, :]), 0.0)
-        b_kgt = tl.trans(b_k_src * exp2(b_gn_dst[None, :] - b_g_src))
+        b_ks = b_gn_dst[None, :] - b_g_src
+        if USE_RAW_G:
+            g_raw_ptr = g_raw + (bos * H + i_h) * K
+            b_gp = gdn2_local_log_cumsum(g_raw_ptr, i_tc_dst.to(tl.int64), min(i_tc_dst + BC, T), o_k, H, K, BC)
+            b_ks = gdn2_local_log_cumsum(g_raw_ptr, i_tc_src.to(tl.int64), i_tc_src + BC, o_k, H, K, BC, True)
+            o_gap = i_t.to(tl.int64) * BT + tl.arange(0, BT)
+            b_gap = tl.load(
+                g_raw_ptr + o_gap[:, None] * H * K + o_k[None, :],
+                (o_gap[:, None] >= i_tc_src + BC) & (o_gap[:, None] < i_tc_dst) & m_k[None, :], other=0,
+            ).to(tl.float32)
+            b_ks += tl.sum(b_gap, axis=0)[None, :] * 1.4426950408889634
+            b_gq = tl.where(m_dst[:, None], exp2(b_gp), 0.)
+        b_kgt = tl.trans(b_k_src * exp2(b_ks))
         b_Aqk += tl.dot(b_q_dst * b_gq, b_kgt, allow_tf32=False)
         b_Akk += tl.dot((b_b_dst * b_k_dst) * b_gq, b_kgt, allow_tf32=False)
 
     p_Aqk = tl.make_block_ptr(
         Aqk,
-        (T, BT),
+        (T_chunk, BT),
         (H * BT, 1),
-        (i_tc_dst, SRC_BLOCK * BC),
+        (DST_BLOCK * BC, SRC_BLOCK * BC),
         (BC, BC),
         (1, 0),
     )
     p_Akkx = tl.make_block_ptr(
         Akkx,
-        (T, BT),
+        (T_chunk, BT),
         (H * BT, 1),
-        (i_tc_dst, SRC_BLOCK * BC),
+        (DST_BLOCK * BC, SRC_BLOCK * BC),
         (BC, BC),
         (1, 0),
     )
@@ -479,9 +505,8 @@ def chunk_gdn2_fwd_intra_npu(
     safe_gate: bool = False,
     lower_bound: float | None = None,
     disable_recompute: bool = False,
+    g_raw: torch.Tensor | None = None,
 ):
-    # gk is already activated and accumulated; pairwise gate differences serve both gate modes.
-
     B, T, H, K = k.shape
     BT = chunk_size
     BC = _BC
@@ -500,13 +525,14 @@ def chunk_gdn2_fwd_intra_npu(
     use_head_major_intra = not is_varlen
     # serialize split packed launches as well as dense launches to avoid CANN queue stalls.
     sync_each_launch = use_head_major_intra or NT * NC * B * H > _LAUNCH_BLOCK_BUDGET
+    g_diag = g_raw if g_raw is not None else gk
     if use_head_major_intra:
         q_intra = q.transpose(1, 2).contiguous()
         k_intra = k.transpose(1, 2).contiguous()
-        g_intra = gk.transpose(1, 2).contiguous()
+        g_intra = g_diag.transpose(1, 2).contiguous()
         b_intra = b.transpose(1, 2).contiguous()
     else:
-        q_intra, k_intra, g_intra, b_intra = q, k, gk, b
+        q_intra, k_intra, g_intra, b_intra = q, k, g_diag, b
     for row_group in range(BC // _TOKEN_GROUP):
         _launch_diag_kernel(
             chunk_gdn2_fwd_kernel_intra_grouped_npu,
@@ -533,6 +559,7 @@ def chunk_gdn2_fwd_intra_npu(
                 BR=_TOKEN_GROUP,
                 ROW_GROUP=row_group,
                 IS_HEAD_MAJOR=use_head_major_intra,
+                USE_RAW_G=g_raw is not None,
                 IS_VARLEN=is_varlen,
                 NT_OFFSET=0,
                 NC_OFFSET=0,
@@ -566,6 +593,8 @@ def chunk_gdn2_fwd_intra_npu(
         q=q,
         k=k,
         g=gk,
+        g_raw=g_raw,
+        USE_RAW_G=g_raw is not None,
         b=b,
         Aqk=Aqk,
         Akkx=Akkx,
@@ -618,6 +647,7 @@ def chunk_gdn2_fwd_intra_npu(
         A=Akk,
         q=q if disable_recompute else None,
         gk=gk,
+        g_raw=g_raw,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
     )
