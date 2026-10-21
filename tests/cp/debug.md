@@ -94,15 +94,15 @@ garbage the torch allocator left behind (often zeros, which masks the
 bug for single-sequence ranks but explodes as soon as a rank owns
 more than one local sub-sequence).
 
-### 3. autotune `BV` in `merge_fwd_bwd_kernel`
+### 3. autotune `BV` in `chunk_cp_merge_kernel`
 
-`merge_fwd_bwd_kernel` autotunes `BV ∈ {32, 64}`. Never hardcode `BV`
+`chunk_cp_merge_kernel` autotunes `BV ∈ {32, 64}`. Never hardcode `BV`
 in a manual grid function — compute it at launch time:
 
 ```python
 BK = triton.next_power_of_2(K)
 def grid(meta): return (triton.cdiv(V, meta['BV']), HV)
-merge_fwd_bwd_kernel[grid](..., BK=BK, ...)
+chunk_cp_merge_kernel[grid](..., BK=BK, ...)
 ```
 
 Hardcoding `BV=64` produces `(cdiv(V, 64), HV)` grid; if the autotuner
