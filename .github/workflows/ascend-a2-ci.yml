@@ -1,7 +1,7 @@
 name: ascend-a2-ci
 
 # Pinned stack: CANN 9.1.0 image + pyproject [npu] extra
-# (torch 2.9.0 / torch_npu 2.9.0.post6 / torchvision 0.24.0 / triton-ascend 3.2.2)
+# (torch 2.10.0 / torch_npu 2.10.0.post7 / torchvision 0.25.0 / triton-ascend 3.6.0)
 
 on:
   workflow_dispatch:
@@ -68,8 +68,8 @@ jobs:
             }
             core.setOutput('npu_related', related.length > 0 ? 'true' : 'false');
 
-  test-a2-npu-pytorch-2-9:
-    name: Test A2 NPU (PyTorch 2.9.0)
+  test-a2-npu-pytorch-2-10:
+    name: Test A2 NPU (PyTorch 2.10.0)
     needs: changes
     if: |
       github.event_name == 'workflow_dispatch' ||
