@@ -21,7 +21,7 @@ from fla.ops.cp.context import FLACPContext, build_cp_context, get_cp_cu_seqlens
         pytest.param(14, 4, id='remainder-varlen'),
     ],
 )
-def test_get_cp_cu_seqlens_rejects_non_divisible_total_tokens(total_tokens: int, world_size: int):
+def test_get_cp_cu_seqlens_invalid_total(total_tokens: int, world_size: int):
     cu_seqlens = torch.tensor([0, total_tokens], dtype=torch.long)
 
     with pytest.raises(
@@ -31,7 +31,7 @@ def test_get_cp_cu_seqlens_rejects_non_divisible_total_tokens(total_tokens: int,
         get_cp_cu_seqlens(cu_seqlens, world_size=world_size, rank=0)
 
 
-def test_get_cp_cu_seqlens_rejects_empty_rank_partition():
+def test_get_cp_cu_seqlens_empty_partition():
     total_tokens = 2
     world_size = 3
     cu_seqlens = torch.tensor([0, total_tokens], dtype=torch.long)
@@ -40,7 +40,7 @@ def test_get_cp_cu_seqlens_rejects_empty_rank_partition():
         get_cp_cu_seqlens(cu_seqlens, world_size=world_size, rank=0)
 
 
-def test_get_cp_cu_seqlens_preserves_divisible_varlen_partition():
+def test_get_cp_cu_seqlens_varlen():
     context = get_cp_cu_seqlens(torch.tensor([0, 5, 12], dtype=torch.long), world_size=3, rank=1)
 
     assert context.cu_seqlens_cpu.tolist() == [0, 1, 4]
@@ -53,7 +53,7 @@ def test_get_cp_cu_seqlens_preserves_divisible_varlen_partition():
 
 @pytest.mark.parametrize('entry', [FLACPContext, get_cp_cu_seqlens, build_cp_context], ids=['context', 'partition', 'build'])
 @pytest.mark.parametrize('mode', ['omitted', 'true', 'false', 'unknown'])
-def test_cp_precision_keyword(entry, mode, monkeypatch):
+def test_precision_keyword(entry, mode, monkeypatch):
     monkeypatch.setattr(context.dist, 'get_world_size', lambda group: 2)
     monkeypatch.setattr(context.dist, 'get_rank', lambda group: 0)
     kwargs = dict(cu_seqlens=torch.tensor([0, 256]), group=object())
@@ -76,7 +76,7 @@ def test_cp_precision_keyword(entry, mode, monkeypatch):
 
 
 @pytest.mark.parametrize('layout', ['contiguous', 'zigzag'])
-def test_cp_context_copy_for_backward(layout):
+def test_copy_for_backward(layout):
     cp_context = get_cp_cu_seqlens(
         cu_seqlens=torch.tensor([0, 5, 12]),
         world_size=2,
@@ -114,7 +114,7 @@ def test_cp_context_copy_for_backward(layout):
         pytest.param(False, 'cpu', (0, 0), False, id='cpu'),
     ],
 )
-def test_cp_device_requirement(is_nvidia, device_name, capability, supported, monkeypatch):
+def test_device_requirement(is_nvidia, device_name, capability, supported, monkeypatch):
     monkeypatch.setattr(context, 'IS_NVIDIA', is_nvidia)
     checked_devices = []
 
@@ -132,7 +132,7 @@ def test_cp_device_requirement(is_nvidia, device_name, capability, supported, mo
 
 
 @pytest.mark.parametrize('direction', ['fwd', 'bwd'])
-def test_cp_pre_process_rejects_unsupported_device(direction, monkeypatch):
+def test_pre_process_unsupported_device(direction, monkeypatch):
     from fla.ops.cp.chunk_delta_h import (
         chunk_gated_delta_rule_bwd_dhu_pre_process,
         chunk_gated_delta_rule_fwd_h_pre_process,

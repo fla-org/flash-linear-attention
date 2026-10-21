@@ -23,7 +23,7 @@ from fla.utils import assert_close, device, device_torch_lib
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 
-def init_distributed(rank, world_size):
+def _init_distributed(rank, world_size):
     """Initialize distributed environment for a single process."""
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -37,19 +37,19 @@ def init_distributed(rank, world_size):
     device_torch_lib.set_device(rank)
 
 
-def cleanup_distributed():
+def _cleanup_distributed():
     """Clean up distributed environment."""
     if dist.is_initialized():
         dist.destroy_process_group()
 
 
-def all_gather_cat(x: torch.Tensor, world_size: int) -> torch.Tensor:
+def _gather_tokens(x: torch.Tensor, world_size: int) -> torch.Tensor:
     gathered = [torch.empty_like(x) for _ in range(world_size)]
     dist.all_gather(gathered, x)
     return torch.cat(gathered, dim=1)
 
 
-def run_cp_gdp_test_worker(
+def _run_chunk(
     rank: int,
     world_size: int,
     test_name: str,
@@ -60,7 +60,7 @@ def run_cp_gdp_test_worker(
     Runs in a spawned process with the given rank.
     """
     try:
-        init_distributed(rank, world_size)
+        _init_distributed(rank, world_size)
         current_device = torch.device(f"{device}:{rank}")
         dtype = torch.bfloat16
         B, T, H, K, V = 1, 256, 2, 64, 80
@@ -186,12 +186,12 @@ def run_cp_gdp_test_worker(
 
         # Step 4: Result Aggregation and Verification
         actual = {
-            "o": all_gather_cat(o_local, world_size),
-            "dq": all_gather_cat(q_local.grad, world_size),
-            "dk": all_gather_cat(k_local.grad, world_size),
-            "dv": all_gather_cat(v_local.grad, world_size),
-            "dbeta": all_gather_cat(beta_local.grad, world_size),
-            "dg": all_gather_cat(g_local.grad, world_size),
+            "o": _gather_tokens(o_local, world_size),
+            "dq": _gather_tokens(q_local.grad, world_size),
+            "dk": _gather_tokens(k_local.grad, world_size),
+            "dv": _gather_tokens(v_local.grad, world_size),
+            "dbeta": _gather_tokens(beta_local.grad, world_size),
+            "dg": _gather_tokens(g_local.grad, world_size),
         }
 
         test_passed = True
@@ -210,18 +210,18 @@ def run_cp_gdp_test_worker(
         if not result.item():
             raise AssertionError("GDP context parallel result did not match the single-device reference")
     finally:
-        cleanup_distributed()
+        _cleanup_distributed()
 
 
 @pytest.mark.parametrize("num_householder", [2, 3], ids=["n2", "n3"])
-def test_cp_gdp_sequence_cut(num_householder: int) -> None:
+def test_chunk(num_householder: int) -> None:
     """CP2: sequences cut across rank boundary."""
     world_size = 2
     if device_torch_lib.device_count() < world_size:
         pytest.skip("At least 2 GPUs are required")
     test_name = f"CP2_SequenceCut_N{num_householder}"
     mp.start_processes(
-        run_cp_gdp_test_worker,
+        _run_chunk,
         args=(world_size, test_name, num_householder),
         nprocs=world_size,
         join=True,

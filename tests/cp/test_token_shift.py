@@ -46,7 +46,7 @@ from fla.utils import assert_close
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 
 
-def init_distributed(rank, world_size, port):
+def _init_distributed(rank, world_size, port):
     """Initialize distributed environment for a single process."""
     logging.basicConfig(level=logging.INFO, format='%(message)s')
 
@@ -60,13 +60,13 @@ def init_distributed(rank, world_size, port):
     torch.cuda.set_device(rank)
 
 
-def cleanup_distributed():
+def _cleanup_distributed():
     """Clean up distributed environment."""
     if dist.is_initialized():
         dist.destroy_process_group()
 
 
-def run_cp_token_shift_test_worker(
+def _run_token_shift(
     rank: int,
     world_size: int,
     test_name: str,
@@ -78,7 +78,7 @@ def run_cp_token_shift_test_worker(
 ):
     """Worker function for CP token shift test."""
     try:
-        init_distributed(rank, world_size, port)
+        _init_distributed(rank, world_size, port)
         device = torch.device(f'cuda:{rank}')
 
         assert T % world_size == 0, f"T={T} must be divisible by world_size={world_size}"
@@ -159,17 +159,17 @@ def run_cp_token_shift_test_worker(
                 test_passed = False
 
         dist.barrier()
-        cleanup_distributed()
+        _cleanup_distributed()
 
         if not test_passed:
             raise AssertionError(f"Test {test_name} failed on rank {rank}")
 
     except Exception as e:
-        cleanup_distributed()
+        _cleanup_distributed()
         raise e
 
 
-def run_cp_test_with_spawn(
+def _run_distributed(
     world_size: int,
     test_name: str,
     T: int,
@@ -180,7 +180,7 @@ def run_cp_test_with_spawn(
     """Run CP test using torch.multiprocessing.spawn."""
     port = 29510  # Different port from other CP tests
     mp.start_processes(
-        run_cp_token_shift_test_worker,
+        _run_token_shift,
         args=(world_size, test_name, T, D, lengths, dtype, port),
         nprocs=world_size,
         join=True,
@@ -188,104 +188,30 @@ def run_cp_test_with_spawn(
     )
 
 
-# ============================================================
-# Test Scenario Definitions
-# ============================================================
+@pytest.mark.parametrize(
+    ('world_size', 'lengths'),
+    [
+        pytest.param(2, [300, 400, 324], id='cp2-sequence-cut'),
+        pytest.param(2, [512, 512], id='cp2-boundary-aligned'),
+        # the first sequence crosses three rank partitions
+        pytest.param(4, [700, 324], id='cp4-sequence-cut'),
+        pytest.param(4, [1024], id='cp4-single-sequence'),
+        pytest.param(2, [100, 150, 200, 250, 124, 100, 100], id='cp2-short-sequences'),
+        # rank 1 starts with a one-token sequence tail
+        pytest.param(2, [513, 511], id='cp2-tail-1'),
+        # rank 1 starts with a two-token sequence tail
+        pytest.param(2, [514, 510], id='cp2-tail-2'),
+    ],
+)
+def test_token_shift(request, world_size, lengths):
+    if torch.cuda.device_count() < world_size:
+        pytest.skip(f"At least {world_size} devices required")
 
-def test_cp2_sequence_cut():
-    """CP2: sequences cut across rank boundary."""
-    if torch.cuda.device_count() < 2:
-        pytest.skip("At least 2 GPUs required")
-
-    run_cp_test_with_spawn(
-        world_size=2,
-        test_name="CP2_SequenceCut",
-        T=1024, D=128,
-        lengths=[300, 400, 324],
-        dtype=torch.float32,
-    )
-
-
-def test_cp2_boundary_aligned():
-    """CP2: sequence boundaries aligned with rank boundaries."""
-    if torch.cuda.device_count() < 2:
-        pytest.skip("At least 2 GPUs required")
-
-    run_cp_test_with_spawn(
-        world_size=2,
-        test_name="CP2_BoundaryAligned",
-        T=1024, D=128,
-        lengths=[512, 512],
-        dtype=torch.float32,
-    )
-
-
-def test_cp4_complex():
-    """CP4: complex sequence distribution."""
-    if torch.cuda.device_count() < 4:
-        pytest.skip("At least 4 GPUs required")
-
-    run_cp_test_with_spawn(
-        world_size=4,
-        test_name="CP4_Complex",
-        T=1024, D=128,
-        lengths=[700, 324],
-        dtype=torch.float32,
-    )
-
-
-def test_cp4_single_sequence():
-    """CP4: single long sequence spanning all ranks."""
-    if torch.cuda.device_count() < 4:
-        pytest.skip("At least 4 GPUs required")
-
-    run_cp_test_with_spawn(
-        world_size=4,
-        test_name="CP4_SingleSequence",
-        T=1024, D=128,
-        lengths=[1024],
-        dtype=torch.float32,
-    )
-
-
-def test_cp2_many_short_sequences():
-    """CP2: many short sequences."""
-    if torch.cuda.device_count() < 2:
-        pytest.skip("At least 2 GPUs required")
-
-    run_cp_test_with_spawn(
-        world_size=2,
-        test_name="CP2_ManyShortSequences",
-        T=1024, D=128,
-        lengths=[100, 150, 200, 250, 124, 100, 100],
-        dtype=torch.float32,
-    )
-
-
-# Edge case: short local segments (T_local = 1 for token shift)
-def test_cp2_short_tail_len1():
-    """CP2: rank 1 gets a length-1 tail."""
-    if torch.cuda.device_count() < 2:
-        pytest.skip("At least 2 GPUs required")
-
-    run_cp_test_with_spawn(
-        world_size=2,
-        test_name="CP2_ShortTail_Len1",
-        T=1024, D=128,
-        lengths=[513, 511],
-        dtype=torch.float32,
-    )
-
-
-def test_cp2_short_tail_len2():
-    """CP2: rank 1 gets a length-2 tail."""
-    if torch.cuda.device_count() < 2:
-        pytest.skip("At least 2 GPUs required")
-
-    run_cp_test_with_spawn(
-        world_size=2,
-        test_name="CP2_ShortTail_Len2",
-        T=1024, D=128,
-        lengths=[514, 510],
+    _run_distributed(
+        world_size=world_size,
+        test_name=request.node.callspec.id,
+        T=1024,
+        D=128,
+        lengths=lengths,
         dtype=torch.float32,
     )

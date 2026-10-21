@@ -37,7 +37,7 @@ from fla.utils import device as fla_device
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 
 
-def init_distributed(rank, world_size):
+def _init_distributed(rank, world_size):
     """Initialize distributed environment for a single process."""
     logging.basicConfig(level=logging.INFO, format='%(message)s')
 
@@ -56,13 +56,13 @@ def init_distributed(rank, world_size):
     device_torch_lib.set_device(rank)
 
 
-def cleanup_distributed():
+def _cleanup_distributed():
     """Clean up distributed environment."""
     if dist.is_initialized():
         dist.destroy_process_group()
 
 
-def run_cp_kda_test_worker(
+def _run_chunk(
     rank: int,
     world_size: int,
     test_name: str,
@@ -81,7 +81,7 @@ def run_cp_kda_test_worker(
 ):
     """Run one rank of the distributed KDA reference comparison."""
     try:
-        init_distributed(rank, world_size)
+        _init_distributed(rank, world_size)
         device = torch.device(f'{fla_device}:{rank}')
 
         assert T % world_size == 0, f"T={T} must be divisible by world_size={world_size}"
@@ -334,17 +334,17 @@ def run_cp_kda_test_worker(
                 test_passed = False
 
         dist.barrier()
-        cleanup_distributed()
+        _cleanup_distributed()
 
         if not test_passed:
             raise AssertionError(f"Test {test_name} failed on rank {rank}")
 
     except Exception as e:
-        cleanup_distributed()
+        _cleanup_distributed()
         raise e
 
 
-def run_cp_test_with_spawn(
+def _run_distributed(
     world_size: int,
     test_name: str,
     T: int,
@@ -365,7 +365,7 @@ def run_cp_test_with_spawn(
     This allows running the test directly with pytest.
     """
     mp.start_processes(
-        run_cp_kda_test_worker,
+        _run_chunk,
         args=(world_size, test_name, T, H, D, lengths, dtype, disable_recompute,
               use_gate_in_kernel, safe_gate, lower_bound, state_v_first, use_tf32x3_affine_chain, layout),
         nprocs=world_size,
@@ -374,330 +374,174 @@ def run_cp_test_with_spawn(
     )
 
 
-GATE_KWARGS = dict(use_gate_in_kernel=True, safe_gate=True, lower_bound=-5.0)
+@pytest.mark.parametrize(
+    (
+        'world_size',
+        'T',
+        'lengths',
+        'disable_recompute',
+        'use_gate_in_kernel',
+        'safe_gate',
+        'lower_bound',
+        'state_v_first',
+        'use_tf32x3_affine_chain',
+        'layout',
+    ),
+    [
+        pytest.param(2, 10240, [3000, 4000, 3240], False, True, True, -5.0, False, None, 'contiguous', id='cp2-sequence-cut'),
+        pytest.param(2, 10240, [5120, 5120], False, True, True, -5.0, False, None, 'contiguous', id='cp2-boundary-aligned'),
+        # the first sequence crosses three rank partitions
+        pytest.param(4, 10240, [7000, 3240], False, True, True, -5.0, False, None, 'contiguous', id='cp4-sequence-cut'),
+        pytest.param(4, 10240, [10240], False, True, True, -5.0, False, None, 'contiguous', id='cp4-single-sequence'),
+        pytest.param(8, 65536, [65536], False, True, True, -5.0, False, None, 'contiguous', id='cp8-single-sequence'),
+        pytest.param(
+            2,
+            10240,
+            [1000, 1500, 2000, 2500, 1240, 1000, 1000],
+            False,
+            True,
+            True,
+            -5.0,
+            False,
+            None,
+            'contiguous',
+            id='cp2-short-sequences',
+        ),
+        pytest.param(2, 10240, [3000, 4000, 3240], True, True, True, -5.0, False, None, 'contiguous', id='cp2-no-recompute'),
+        pytest.param(2, 10240, [3000, 4000, 3240], False, False, False, None, False, None, 'contiguous', id='cp2-pregated'),
+        pytest.param(
+            2,
+            10240,
+            [3000, 4000, 3240],
+            False,
+            False,
+            True,
+            -5.0,
+            False,
+            None,
+            'contiguous',
+            id='cp2-pregated-safe',
+        ),
+        pytest.param(2, 10240, [3000, 4000, 3240], False, True, True, -5.0, True, None, 'contiguous', id='cp2-v-first'),
+        pytest.param(4, 10240, [10240], False, True, True, -5.0, True, None, 'contiguous', id='cp4-v-first'),
+        pytest.param(
+            2,
+            10240,
+            [3000, 4000, 3240],
+            False,
+            True,
+            True,
+            -5.0,
+            False,
+            True,
+            'contiguous',
+            id='cp2-sequence-cut-legacy-precision-true',
+        ),
+        pytest.param(
+            4,
+            10240,
+            [10240],
+            False,
+            True,
+            True,
+            -5.0,
+            False,
+            True,
+            'contiguous',
+            id='cp4-single-sequence-legacy-precision-true',
+        ),
+        pytest.param(
+            2,
+            10240,
+            [3000, 4000, 3240],
+            False,
+            True,
+            True,
+            -5.0,
+            True,
+            True,
+            'contiguous',
+            id='cp2-v-first-legacy-precision-true',
+        ),
+        # the state chain crosses all four zigzag parts
+        pytest.param(2, 10240, [10240], False, True, True, -5.0, False, None, 'zigzag', id='cp2-zigzag-single-sequence'),
+        pytest.param(
+            2,
+            10240,
+            [3000, 4000, 3240],
+            False,
+            True,
+            True,
+            -5.0,
+            False,
+            None,
+            'zigzag',
+            id='cp2-zigzag-sequence-cut',
+        ),
+        pytest.param(
+            4,
+            10240,
+            [1500, 2600, 3000, 3140],
+            False,
+            True,
+            True,
+            -5.0,
+            False,
+            None,
+            'zigzag',
+            id='cp4-zigzag-sequence-cut',
+        ),
+        # every sequence ends at a part boundary, so no state crosses ranks
+        pytest.param(
+            4,
+            10240,
+            [2560, 2560, 2560, 2560],
+            False,
+            True,
+            True,
+            -5.0,
+            False,
+            None,
+            'zigzag',
+            id='cp4-zigzag-boundary-aligned',
+        ),
+    ],
+)
+def test_chunk(
+    request,
+    world_size,
+    T,
+    lengths,
+    disable_recompute,
+    use_gate_in_kernel,
+    safe_gate,
+    lower_bound,
+    state_v_first,
+    use_tf32x3_affine_chain,
+    layout,
+):
+    if device_torch_lib.device_count() < world_size:
+        pytest.skip(f"At least {world_size} devices required")
 
-
-def test_cp2_sequence_cut():
-    """CP2: sequences cut across rank boundary."""
-    if device_torch_lib.device_count() < 2:
-        pytest.skip("At least 2 devices required")
-
-    run_cp_test_with_spawn(
-        world_size=2,
-        test_name="CP2_SequenceCut",
-        T=10240,
+    _run_distributed(
+        world_size=world_size,
+        test_name=request.node.callspec.id,
+        T=T,
         H=12,
         D=128,
-        lengths=[3000, 4000, 3240],
+        lengths=lengths,
         dtype=torch.bfloat16,
-        **GATE_KWARGS,
+        disable_recompute=disable_recompute,
+        use_gate_in_kernel=use_gate_in_kernel,
+        safe_gate=safe_gate,
+        lower_bound=lower_bound,
+        state_v_first=state_v_first,
+        use_tf32x3_affine_chain=use_tf32x3_affine_chain,
+        layout=layout,
     )
 
 
-def test_cp2_boundary_aligned():
-    """CP2: sequence boundaries aligned with rank boundaries."""
-    if device_torch_lib.device_count() < 2:
-        pytest.skip("At least 2 devices required")
-
-    run_cp_test_with_spawn(
-        world_size=2,
-        test_name="CP2_BoundaryAligned",
-        T=10240,
-        H=12,
-        D=128,
-        lengths=[5120, 5120],
-        dtype=torch.bfloat16,
-        **GATE_KWARGS,
-    )
-
-
-def test_cp4_complex():
-    """CP4: complex sequence distribution, first sequence spans 3 ranks."""
-    if device_torch_lib.device_count() < 4:
-        pytest.skip("At least 4 devices required")
-
-    run_cp_test_with_spawn(
-        world_size=4,
-        test_name="CP4_Complex",
-        T=10240,
-        H=12,
-        D=128,
-        lengths=[7000, 3240],
-        dtype=torch.bfloat16,
-        **GATE_KWARGS,
-    )
-
-
-def test_cp4_single_sequence():
-    """CP4: single long sequence spanning all ranks."""
-    if device_torch_lib.device_count() < 4:
-        pytest.skip("At least 4 devices required")
-
-    run_cp_test_with_spawn(
-        world_size=4,
-        test_name="CP4_SingleSequence",
-        T=10240,
-        H=12,
-        D=128,
-        lengths=[10240],
-        dtype=torch.bfloat16,
-        **GATE_KWARGS,
-    )
-
-
-def test_cp8_single_sequence():
-    """CP8: single long sequence spanning all ranks."""
-    if device_torch_lib.device_count() < 8:
-        pytest.skip("At least 8 devices required")
-
-    run_cp_test_with_spawn(
-        world_size=8,
-        test_name="CP8_SingleSequence",
-        T=65536,
-        H=12,
-        D=128,
-        lengths=[65536],
-        dtype=torch.bfloat16,
-        **GATE_KWARGS,
-    )
-
-
-def test_cp2_many_short_sequences():
-    """CP2: many short sequences."""
-    if device_torch_lib.device_count() < 2:
-        pytest.skip("At least 2 devices required")
-
-    run_cp_test_with_spawn(
-        world_size=2,
-        test_name="CP2_ManyShortSequences",
-        T=10240,
-        H=12,
-        D=128,
-        lengths=[1000, 1500, 2000, 2500, 1240, 1000, 1000],
-        dtype=torch.bfloat16,
-        **GATE_KWARGS,
-    )
-
-
-def test_cp2_disable_recompute():
-    """CP2: disable_recompute=True."""
-    if device_torch_lib.device_count() < 2:
-        pytest.skip("At least 2 devices required")
-
-    run_cp_test_with_spawn(
-        world_size=2,
-        test_name="CP2_DisableRecompute",
-        T=10240,
-        H=12,
-        D=128,
-        lengths=[3000, 4000, 3240],
-        dtype=torch.bfloat16,
-        disable_recompute=True,
-        **GATE_KWARGS,
-    )
-
-
-def test_cp2_pregated_nonsafe():
-    """CP2: pre-gated mode (use_gate_in_kernel=False), non-safe gate."""
-    if device_torch_lib.device_count() < 2:
-        pytest.skip("At least 2 devices required")
-
-    run_cp_test_with_spawn(
-        world_size=2,
-        test_name="CP2_PreGated_NonSafe",
-        T=10240,
-        H=12,
-        D=128,
-        lengths=[3000, 4000, 3240],
-        dtype=torch.bfloat16,
-        use_gate_in_kernel=False,
-        safe_gate=False,
-    )
-
-
-def test_cp2_pregated_safe():
-    """CP2: pre-gated mode with bounded log-space gates (safe_gate=True)."""
-    if device_torch_lib.device_count() < 2:
-        pytest.skip("At least 2 devices required")
-
-    run_cp_test_with_spawn(
-        world_size=2,
-        test_name="CP2_PreGated_Safe",
-        T=10240,
-        H=12,
-        D=128,
-        lengths=[3000, 4000, 3240],
-        dtype=torch.bfloat16,
-        use_gate_in_kernel=False,
-        safe_gate=True,
-        lower_bound=-5.0,
-    )
-
-
-def test_cp2_state_v_first():
-    """CP2: state_v_first=True with sequence cut."""
-    if device_torch_lib.device_count() < 2:
-        pytest.skip("At least 2 devices required")
-
-    run_cp_test_with_spawn(
-        world_size=2,
-        test_name="CP2_TransposeState",
-        T=10240,
-        H=12,
-        D=128,
-        lengths=[3000, 4000, 3240],
-        dtype=torch.bfloat16,
-        state_v_first=True,
-        **GATE_KWARGS,
-    )
-
-
-def test_cp4_state_v_first():
-    """CP4: state_v_first=True with single long sequence."""
-    if device_torch_lib.device_count() < 4:
-        pytest.skip("At least 4 devices required")
-
-    run_cp_test_with_spawn(
-        world_size=4,
-        test_name="CP4_TransposeState",
-        T=10240,
-        H=12,
-        D=128,
-        lengths=[10240],
-        dtype=torch.bfloat16,
-        state_v_first=True,
-        **GATE_KWARGS,
-    )
-
-
-def test_cp2_sequence_cut_tf32x3():
-    """CP2: sequences cut across rank boundary, tf32x3 affine chain in CP."""
-    if device_torch_lib.device_count() < 2:
-        pytest.skip("At least 2 devices required")
-
-    run_cp_test_with_spawn(
-        world_size=2,
-        test_name="CP2_SequenceCut_TF32X3",
-        T=10240,
-        H=12,
-        D=128,
-        lengths=[3000, 4000, 3240],
-        dtype=torch.bfloat16,
-        use_tf32x3_affine_chain=True,
-        **GATE_KWARGS,
-    )
-
-
-def test_cp4_single_sequence_tf32x3():
-    """CP4: single long sequence spanning all ranks, tf32x3 affine chain in CP."""
-    if device_torch_lib.device_count() < 4:
-        pytest.skip("At least 4 devices required")
-
-    run_cp_test_with_spawn(
-        world_size=4,
-        test_name="CP4_SingleSequence_TF32X3",
-        T=10240,
-        H=12,
-        D=128,
-        lengths=[10240],
-        dtype=torch.bfloat16,
-        use_tf32x3_affine_chain=True,
-        **GATE_KWARGS,
-    )
-
-
-def test_cp2_state_v_first_tf32x3():
-    """CP2: state_v_first=True with sequence cut, tf32x3 affine chain in CP."""
-    if device_torch_lib.device_count() < 2:
-        pytest.skip("At least 2 devices required")
-
-    run_cp_test_with_spawn(
-        world_size=2,
-        test_name="CP2_TransposeState_TF32X3",
-        T=10240,
-        H=12,
-        D=128,
-        lengths=[3000, 4000, 3240],
-        dtype=torch.bfloat16,
-        state_v_first=True,
-        use_tf32x3_affine_chain=True,
-        **GATE_KWARGS,
-    )
-
-
-def test_cp2_zigzag_single_sequence():
-    """CP2 zigzag: single long sequence, state chain snakes through all 4 parts."""
-    if device_torch_lib.device_count() < 2:
-        pytest.skip("At least 2 devices required")
-
-    run_cp_test_with_spawn(
-        world_size=2,
-        test_name="CP2_Zigzag_SingleSequence",
-        T=10240,
-        H=12,
-        D=128,
-        lengths=[10240],
-        dtype=torch.bfloat16,
-        layout='zigzag',
-        **GATE_KWARGS,
-    )
-
-
-def test_cp2_zigzag_sequence_cut():
-    """CP2 zigzag: sequences cut at every part boundary (2560/5120/7680)."""
-    if device_torch_lib.device_count() < 2:
-        pytest.skip("At least 2 devices required")
-
-    run_cp_test_with_spawn(
-        world_size=2,
-        test_name="CP2_Zigzag_SequenceCut",
-        T=10240,
-        H=12,
-        D=128,
-        lengths=[3000, 4000, 3240],
-        dtype=torch.bfloat16,
-        layout='zigzag',
-        **GATE_KWARGS,
-    )
-
-
-def test_cp4_zigzag_complex():
-    """CP4 zigzag: 8 parts of 1280, sequences cut everywhere including the middle boundary."""
-    if device_torch_lib.device_count() < 4:
-        pytest.skip("At least 4 devices required")
-
-    run_cp_test_with_spawn(
-        world_size=4,
-        test_name="CP4_Zigzag_Complex",
-        T=10240,
-        H=12,
-        D=128,
-        lengths=[1500, 2600, 3000, 3140],
-        dtype=torch.bfloat16,
-        layout='zigzag',
-        **GATE_KWARGS,
-    )
-
-
-def test_cp4_zigzag_boundary_aligned():
-    """CP4 zigzag: all sequence boundaries on part boundaries, no cross-rank state."""
-    if device_torch_lib.device_count() < 4:
-        pytest.skip("At least 4 devices required")
-
-    run_cp_test_with_spawn(
-        world_size=4,
-        test_name="CP4_Zigzag_BoundaryAligned",
-        T=10240,
-        H=12,
-        D=128,
-        lengths=[2560, 2560, 2560, 2560],
-        dtype=torch.bfloat16,
-        layout='zigzag',
-        **GATE_KWARGS,
-    )
-
-
-def setup_distributed_torchrun():
+def _init_torchrun():
     """Initialize distributed environment for torchrun."""
     if 'RANK' not in os.environ:
         return False

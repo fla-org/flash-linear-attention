@@ -25,11 +25,11 @@ from fla.utils import device
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 
 
-class TestBwdGkOffset:
+class TestBackwardState:
     """Test that backward pre-processing kernel correctly addresses per-head gk values."""
 
     @pytest.fixture(autouse=True)
-    def setup(self):
+    def _isolated_triton_cache(self):
         """Use a fresh triton cache for each test to avoid stale compilations."""
         self._original_cache = os.environ.get('TRITON_CACHE_DIR')
         os.environ['TRITON_CACHE_DIR'] = tempfile.mkdtemp()
@@ -52,7 +52,7 @@ class TestBwdGkOffset:
             ]
         ],
     )
-    def test_stage1_gk_per_head_sensitivity(self, T: int, H: int, K: int, V: int):
+    def test_chunk_bwd_gate_head(self, T: int, H: int, K: int, V: int):
         """Changing one head's gate must affect only that head's backward state."""
         torch.manual_seed(42)
         B = 1

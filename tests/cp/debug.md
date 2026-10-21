@@ -1,7 +1,7 @@
 # Debugging Kimi Context Parallel (KCP) precision failures
 
 A skill-level guide to root-causing KCP precision bugs in `fla`. Read this
-before you start chasing a failing `test_cp_*.py`; the patterns here apply
+before you start chasing a failing `tests/cp/test_*.py`; the patterns here apply
 to every op that plugs into KCP (gated-delta-rule, generalized delta rule,
 RWKV-style recurrences, future ops).
 

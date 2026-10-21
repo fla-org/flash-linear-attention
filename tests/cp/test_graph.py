@@ -47,7 +47,7 @@ NAMES = TOK_NAMES + ["A_log", "dt_bias"]
 OUT_NAMES = ["o", "dq", "dk", "dv", "dg", "db", "dA", "dbias"]
 
 
-def rand_global(seed, device):
+def _make_inputs(seed, device):
     """Same seed on every rank reproduces one logical global batch; ranks slice their shard."""
     g = torch.Generator(device).manual_seed(seed)
     dt = torch.bfloat16
@@ -63,15 +63,15 @@ def rand_global(seed, device):
     return dict(q=q, k=k, v=v, g=gg, beta=beta, A_log=A_log, dt_bias=dt_bias, do=do)
 
 
-def init_distributed(rank, world_size):
+def _init_distributed(rank, world_size):
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '29631'
     dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
     torch.cuda.set_device(rank)
 
 
-def run_cp_graph_worker(rank, world_size):
-    init_distributed(rank, world_size)
+def _run_graph(rank, world_size):
+    _init_distributed(rank, world_size)
     device = torch.device('cuda', rank)
     part = T // world_size
     lo, hi = rank * part, (rank + 1) * part
@@ -109,7 +109,7 @@ def run_cp_graph_worker(rank, world_size):
             leaves[n] = inp[n].detach().clone().requires_grad_()
         return leaves
 
-    inp0 = rand_global(0, device)
+    inp0 = _make_inputs(0, device)
     leaves = shard_leaves(inp0)
     do = inp0["do"][:, lo:hi].detach().clone()
 
@@ -139,7 +139,7 @@ def run_cp_graph_worker(rank, world_size):
         cap_o = step()
 
     for seed, (tag, cucfg) in enumerate(CONFIGS, start=1):
-        inp = rand_global(seed * 17, device)
+        inp = _make_inputs(seed * 17, device)
         for n in TOK_NAMES:
             leaves[n].data.copy_(inp[n][:, lo:hi])
         for n in ("A_log", "dt_bias"):
@@ -173,7 +173,7 @@ def run_cp_graph_worker(rank, world_size):
     dist.barrier()
 
 
-def test_cp2_graph_replay_matches_eager():
+def test_chunk_kda():
     if torch.cuda.device_count() < 2:
         pytest.skip("At least 2 GPUs required")
-    mp.start_processes(run_cp_graph_worker, args=(2,), nprocs=2, join=True, start_method='spawn')
+    mp.start_processes(_run_graph, args=(2,), nprocs=2, join=True, start_method='spawn')

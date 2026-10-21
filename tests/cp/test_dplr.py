@@ -52,7 +52,7 @@ from fla.utils import assert_close
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 
 
-def init_distributed(rank, world_size):
+def _init_distributed(rank, world_size):
     """Initialize distributed environment for a single process."""
     logging.basicConfig(level=logging.INFO, format='%(message)s')
 
@@ -66,13 +66,13 @@ def init_distributed(rank, world_size):
     torch.cuda.set_device(rank)
 
 
-def cleanup_distributed():
+def _cleanup_distributed():
     """Clean up distributed environment."""
     if dist.is_initialized():
         dist.destroy_process_group()
 
 
-def run_cp_dplr_test_worker(
+def _run_chunk(
     rank: int,
     world_size: int,
     test_name: str,
@@ -91,7 +91,7 @@ def run_cp_dplr_test_worker(
     Runs in a spawned process with the given rank.
     """
     try:
-        init_distributed(rank, world_size)
+        _init_distributed(rank, world_size)
         device = torch.device(f'cuda:{rank}')
 
         assert T % world_size == 0, f"T={T} must be divisible by world_size={world_size}"
@@ -340,17 +340,17 @@ def run_cp_dplr_test_worker(
                 print(f"✅ [{test_name}] Test Passed!\n")
 
         dist.barrier()
-        cleanup_distributed()
+        _cleanup_distributed()
 
         if not test_passed:
             raise AssertionError(f"Test {test_name} failed on rank {rank}")
 
     except Exception as e:
-        cleanup_distributed()
+        _cleanup_distributed()
         raise e
 
 
-def run_cp_test_with_spawn(
+def _run_distributed(
     world_size: int,
     test_name: str,
     T: int,
@@ -368,7 +368,7 @@ def run_cp_test_with_spawn(
     This allows running the test directly with pytest.
     """
     mp.start_processes(
-        run_cp_dplr_test_worker,
+        _run_chunk,
         args=(world_size, test_name, T, H, D, lengths, dtype, safe_gate, op, op_chunk_size, assert_tilelang),
         nprocs=world_size,
         join=True,
@@ -376,96 +376,38 @@ def run_cp_test_with_spawn(
     )
 
 
-# ============================================================
-# Test Scenario Definitions
-# ============================================================
+@pytest.mark.parametrize(
+    ('world_size', 'lengths', 'safe_gate'),
+    [
+        pytest.param(2, [400, 624], False, id='cp2-sequence-cut'),
+        pytest.param(2, [512, 512], False, id='cp2-boundary-aligned'),
+        # the first sequence crosses three rank partitions
+        pytest.param(4, [700, 324], False, id='cp4-sequence-cut'),
+        pytest.param(4, [1024], False, id='cp4-single-sequence'),
+        pytest.param(2, [100, 200, 300, 424], False, id='cp2-short-sequences'),
+        pytest.param(2, [400, 624], True, id='cp2-safe-gate'),
+    ],
+)
+def test_chunk(request, world_size, lengths, safe_gate):
+    if torch.cuda.device_count() < world_size:
+        pytest.skip(f"At least {world_size} devices required")
 
-def test_cp2_sequence_cut():
-    """CP2: sequences cut across rank boundary."""
-    if torch.cuda.device_count() < 2:
-        pytest.skip("At least 2 GPUs required")
-
-    run_cp_test_with_spawn(
-        world_size=2,
-        test_name="CP2_SequenceCut",
-        T=1024, H=4, D=64,
-        lengths=[400, 624],
+    _run_distributed(
+        world_size=world_size,
+        test_name=request.node.callspec.id,
+        T=1024,
+        H=4,
+        D=64,
+        lengths=lengths,
         dtype=torch.bfloat16,
+        safe_gate=safe_gate,
+        op=chunk_dplr_delta_rule,
+        op_chunk_size=64,
+        assert_tilelang=False,
     )
 
 
-def test_cp2_boundary_aligned():
-    """CP2: sequence boundaries aligned with rank boundaries."""
-    if torch.cuda.device_count() < 2:
-        pytest.skip("At least 2 GPUs required")
-
-    run_cp_test_with_spawn(
-        world_size=2,
-        test_name="CP2_BoundaryAligned",
-        T=1024, H=4, D=64,
-        lengths=[512, 512],
-        dtype=torch.bfloat16,
-    )
-
-
-def test_cp4_complex():
-    """CP4: complex sequence distribution, first sequence spans 3 ranks."""
-    if torch.cuda.device_count() < 4:
-        pytest.skip("At least 4 GPUs required")
-
-    run_cp_test_with_spawn(
-        world_size=4,
-        test_name="CP4_Complex",
-        T=1024, H=4, D=64,
-        lengths=[700, 324],
-        dtype=torch.bfloat16,
-    )
-
-
-def test_cp4_single_sequence():
-    """CP4: single long sequence spanning all ranks."""
-    if torch.cuda.device_count() < 4:
-        pytest.skip("At least 4 GPUs required")
-
-    run_cp_test_with_spawn(
-        world_size=4,
-        test_name="CP4_SingleSequence",
-        T=1024, H=4, D=64,
-        lengths=[1024],
-        dtype=torch.bfloat16,
-    )
-
-
-def test_cp2_many_short_sequences():
-    """CP2: many short sequences."""
-    if torch.cuda.device_count() < 2:
-        pytest.skip("At least 2 GPUs required")
-
-    run_cp_test_with_spawn(
-        world_size=2,
-        test_name="CP2_ManyShortSequences",
-        T=1024, H=4, D=64,
-        lengths=[100, 200, 300, 424],
-        dtype=torch.bfloat16,
-    )
-
-
-def test_cp2_safe_gate():
-    """CP2: safe_gate=True with sequence cut."""
-    if torch.cuda.device_count() < 2:
-        pytest.skip("At least 2 GPUs required")
-
-    run_cp_test_with_spawn(
-        world_size=2,
-        test_name="CP2_SafeGate",
-        T=1024, H=4, D=64,
-        lengths=[400, 624],
-        dtype=torch.bfloat16,
-        safe_gate=True,
-    )
-
-
-def test_cp2_tilelang_route():
+def test_chunk_tilelang():
     """CP2 through the TileLang DPLR backend (FLA_TILELANG=1), with route assertion."""
     if torch.cuda.device_count() < 2:
         pytest.skip("At least 2 GPUs required")
@@ -475,7 +417,7 @@ def test_cp2_tilelang_route():
     prev = os.environ.get('FLA_TILELANG')
     os.environ['FLA_TILELANG'] = '1'
     try:
-        run_cp_test_with_spawn(
+        _run_distributed(
             world_size=2,
             test_name="CP2_TileLang",
             T=1024, H=128, D=64,
@@ -491,11 +433,7 @@ def test_cp2_tilelang_route():
             os.environ['FLA_TILELANG'] = prev
 
 
-# ============================================================
-# Main Entry Point (for torchrun)
-# ============================================================
-
-def setup_distributed_torchrun():
+def _init_torchrun():
     """Initialize distributed environment for torchrun."""
     if 'RANK' not in os.environ:
         return False
