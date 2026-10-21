@@ -189,7 +189,7 @@ def chunk_local_cumsum_scalar_kernel_npu(
                 bos = tl.cast(i_b, tl.int64) * T
                 eos = bos + T
 
-            o_t = i_t * BT + tl.arange(0, BT)
+            o_t = tl.cast(i_t, tl.int64) * BT + tl.arange(0, BT)
             m_t = o_t < T
             p_s = s + bos * H + i_h + o_t * H
             p_o = o + bos * H + i_h + o_t * H
@@ -240,16 +240,21 @@ def chunk_local_cumsum_vector_kernel_npu(
         bos = tl.cast(i_b, tl.int64) * T
         eos = bos + T
 
-    p_s = tl.make_block_ptr(s + (bos * H + i_h) * S, (T, S), (H*S, 1), (i_t * BT, i_s * BS), (BT, BS), (1, 0))
-    p_o = tl.make_block_ptr(o + (bos * H + i_h) * S, (T, S), (H*S, 1), (i_t * BT, i_s * BS), (BT, BS), (1, 0))
-    b_s = tl.load(p_s, boundary_check=(0, 1)).to(tl.float32)
+    o_t = tl.cast(i_t, tl.int64) * BT + tl.arange(0, BT)
+    m_t = (o_t >= 0) & (o_t < T)
+    o_s = i_s * BS + tl.arange(0, BS)
+    m_s = (o_s >= 0) & (o_s < S)
+    m_p_s = m_t[:, None] & m_s[None, :]
+    p_s = s + (bos * H + i_h) * S + o_t[:, None] * (H*S) + o_s[None, :]
+    p_o = o + (bos * H + i_h) * S + o_t[:, None] * (H*S) + o_s[None, :]
+    b_s = tl.load(p_s, mask=m_p_s, other=0).to(tl.float32)
     if REVERSE:
         b_o = tl.cumsum(b_s, axis=0, reverse=True)
     else:
         b_o = tl.cumsum(b_s, axis=0)
     if HAS_SCALE:
         b_o *= scale
-    tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=m_p_s)
 
 
 @triton.heuristics({
@@ -284,9 +289,11 @@ def chunk_global_cumsum_scalar_kernel_npu(
     NT = tl.cdiv(T, BT)
     for i_c in range(NT):
         i_t = NT - 1 - i_c if REVERSE else i_c
-        p_s = tl.make_block_ptr(s + bos*H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
-        p_o = tl.make_block_ptr(o + bos*H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
-        b_s = tl.load(p_s, boundary_check=(0,)).to(tl.float32)
+        o_t = tl.cast(i_t, tl.int64) * BT + tl.arange(0, BT)
+        m_t = (o_t >= 0) & (o_t < T)
+        p_s = s + bos*H + i_h + o_t * H
+        p_o = o + bos*H + i_h + o_t * H
+        b_s = tl.load(p_s, mask=m_t, other=0).to(tl.float32)
         if REVERSE:
             b_o = tl.cumsum(b_s, axis=0, reverse=True)
         else:
@@ -297,7 +304,7 @@ def chunk_global_cumsum_scalar_kernel_npu(
             b_z += b_ss
         if HAS_SCALE:
             b_o *= scale
-        tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0,))
+        tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=m_t)
 
 
 @triton.heuristics({
@@ -334,16 +341,21 @@ def chunk_global_cumsum_vector_kernel_npu(
     NT = tl.cdiv(T, BT)
     for i_c in range(NT):
         i_t = NT - 1 - i_c if REVERSE else i_c
-        p_s = tl.make_block_ptr(s + (bos * H + i_h) * S, (T, S), (H*S, 1), (i_t * BT, i_s * BS), (BT, BS), (1, 0))
-        p_o = tl.make_block_ptr(o + (bos * H + i_h) * S, (T, S), (H*S, 1), (i_t * BT, i_s * BS), (BT, BS), (1, 0))
-        b_s = tl.load(p_s, boundary_check=(0, 1)).to(tl.float32)
+        o_t = tl.cast(i_t, tl.int64) * BT + tl.arange(0, BT)
+        m_t = (o_t >= 0) & (o_t < T)
+        o_s = i_s * BS + tl.arange(0, BS)
+        m_s = (o_s >= 0) & (o_s < S)
+        m_p_s = m_t[:, None] & m_s[None, :]
+        p_s = s + (bos * H + i_h) * S + o_t[:, None] * (H*S) + o_s[None, :]
+        p_o = o + (bos * H + i_h) * S + o_t[:, None] * (H*S) + o_s[None, :]
+        b_s = tl.load(p_s, mask=m_p_s, other=0).to(tl.float32)
         if REVERSE:
             b_c = b_z[None, :] + tl.cumsum(b_s, axis=0, reverse=True)
         else:
             b_c = b_z[None, :] + tl.cumsum(b_s, axis=0)
         if HAS_SCALE:
             b_c *= scale
-        tl.store(p_o, b_c.to(p_o.dtype.element_ty), boundary_check=(0, 1))
+        tl.store(p_o, b_c.to(p_o.dtype.element_ty), mask=m_p_s)
         b_z += tl.sum(b_s, 0)
 
 

@@ -106,6 +106,37 @@ class TritonAscendGDN2Backend(BaseBackend):
         from fla.ops.gdn2.backends.triton_ascend.chunk_bwd import chunk_gdn2_bwd_wy_dqkg_fused_npu
         return chunk_gdn2_bwd_wy_dqkg_fused_npu(*args, **kwargs)
 
+    def recompute_w_u_fwd_gdn2_verifier(
+        self,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        b: torch.Tensor,
+        w_gate: torch.Tensor,
+        A: torch.Tensor,
+        q: torch.Tensor | None = None,
+        gk: torch.Tensor | None = None,
+        cu_seqlens: torch.LongTensor | None = None,
+        chunk_indices: torch.LongTensor | None = None,
+    ) -> tuple[bool, str | None]:
+        # The shared kernel dots ``A`` with ``k`` / ``v`` tiles. It is used when
+        # those dtypes already agree; Ascend keeps ``A`` in fp32 and needs the
+        # promoted kernel for the mixed-dtype case.
+        q_matches = q is None or q.dtype == A.dtype
+        if A.dtype == k.dtype and A.dtype == v.dtype and q_matches:
+            return False, "shared WY recompute accepts matching dtypes"
+        float_tensors = (k, v, b, w_gate, A, *(t for t in (q, gk) if t is not None))
+        tensors = (*float_tensors, *(t for t in (cu_seqlens, chunk_indices) if t is not None))
+        if any(t.device.type != "npu" for t in tensors):
+            return False, "GDN-2 Ascend WY recompute requires NPU tensors"
+        supported = (torch.float16, torch.bfloat16, torch.float32)
+        if any(t.dtype not in supported for t in float_tensors):
+            return False, "GDN-2 Ascend WY recompute received an unsupported dtype"
+        return True, None
+
+    def recompute_w_u_fwd_gdn2(self, *args, **kwargs):
+        from fla.ops.gdn2.backends.triton_ascend.wy_fast import recompute_w_u_fwd_gdn2_npu
+        return recompute_w_u_fwd_gdn2_npu(*args, **kwargs)
+
     def fused_recurrent_gdn2_fwd_verifier(
         self,
         q: torch.Tensor,
