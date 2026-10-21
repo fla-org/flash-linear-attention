@@ -16,7 +16,7 @@ cp_context is exercised end-to-end through the wrapper's kwarg passthrough.
 import pytest
 import torch
 
-# tests/context_parallel is on sys.path under pytest (see pyproject pythonpath)
+# pytest adds this test directory to sys.path for the shared DPLR harness
 from test_cp_dplr import run_cp_test_with_spawn
 
 from fla.ops.rwkv7 import chunk_rwkv7

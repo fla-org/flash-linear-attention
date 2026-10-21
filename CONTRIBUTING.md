@@ -136,7 +136,7 @@ fla/
 └── utils/           # Global utilities and decorators
 
 tests/
-├── context_parallel/   # Context-parallel tests
+├── cp/                 # Context-parallel tests
 ├── layers/             # Layer tests
 ├── models/             # Model tests
 ├── modules/            # Module tests
