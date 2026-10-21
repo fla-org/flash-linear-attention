@@ -18,7 +18,7 @@ from fla.ops.cp.context import get_cp_cu_seqlens
         pytest.param(14, 4, id='remainder-varlen'),
     ],
 )
-def test_get_cp_cu_seqlens_rejects_non_divisible_total_tokens(total_tokens: int, world_size: int):
+def test_get_cp_cu_seqlens_invalid_total(total_tokens: int, world_size: int):
     cu_seqlens = torch.tensor([0, total_tokens], dtype=torch.long)
 
     with pytest.raises(
@@ -28,7 +28,7 @@ def test_get_cp_cu_seqlens_rejects_non_divisible_total_tokens(total_tokens: int,
         get_cp_cu_seqlens(cu_seqlens, world_size=world_size, rank=0)
 
 
-def test_get_cp_cu_seqlens_rejects_empty_rank_partition():
+def test_get_cp_cu_seqlens_empty_partition():
     total_tokens = 2
     world_size = 3
     cu_seqlens = torch.tensor([0, total_tokens], dtype=torch.long)
@@ -40,9 +40,9 @@ def test_get_cp_cu_seqlens_rejects_empty_rank_partition():
         get_cp_cu_seqlens(cu_seqlens, world_size=world_size, rank=0)
 
 
-def test_get_cp_cu_seqlens_preserves_divisible_varlen_partition():
+def test_get_cp_cu_seqlens_varlen():
     context = get_cp_cu_seqlens(
-        torch.tensor([0, 5, 12], dtype=torch.long),
+        cu_seqlens=torch.tensor([0, 5, 12], dtype=torch.long),
         world_size=3,
         rank=1,
     )
