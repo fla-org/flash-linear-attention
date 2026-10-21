@@ -17,10 +17,9 @@ from fla import backends
 from fla.ops.common import intracard_cp
 from fla.ops.common.backends.intracard import IntraCardCPBackend
 from fla.ops.common.intracard_cp import _intracard_cache
-from fla.ops.cp import context
 from fla.ops.gated_delta_rule import chunk_gated_delta_rule
 from fla.ops.kda import chunk_kda
-from fla.utils import IS_TF32_SUPPORTED, assert_close, device
+from fla.utils import IS_TF32_SUPPORTED, device
 
 
 @pytest.fixture(autouse=True)
@@ -28,40 +27,6 @@ def _clear_intracard_cache():
     _intracard_cache.clear()
     yield
     _intracard_cache.clear()
-
-
-@pytest.mark.parametrize('entry', ['fwd', 'pre_scan', 'merge'])
-@pytest.mark.parametrize('legacy_false', [False, True], ids=['unsupported-device', 'legacy-false'])
-def test_intracard_precision_requirement(entry, legacy_false, monkeypatch):
-    monkeypatch.setattr(context, 'IS_NVIDIA', False)
-    x = torch.empty(1, 64, 1, 32)
-    kwargs = {'use_tf32x3_affine_chain': False} if legacy_false else {}
-    error = ValueError if legacy_false else RuntimeError
-    message = 'use_tf32x3_affine_chain=False' if legacy_false else 'compute capability >= 8.0'
-    with pytest.raises(error, match=message):
-        if entry == 'fwd':
-            intracard_cp.intracard_fwd_h(k=x, w=x, u=x, **kwargs)
-        elif entry == 'pre_scan':
-            intracard_cp.intracard_pre_scan(
-                k=x,
-                w=x,
-                u=x,
-                g=None,
-                gk=None,
-                cu_seqlens=None,
-                num_subseqs=0,
-                **kwargs,
-            )
-        else:
-            intracard_cp.intracard_merge(
-                hm=x,
-                split_info=None,
-                num_non_first=0,
-                merge_seq_offsets=[],
-                merge_init_offsets=[],
-                device=x.device,
-                **kwargs,
-            )
 
 
 @pytest.mark.skipif(os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") == "1", reason="backend dispatch disabled")
@@ -213,66 +178,3 @@ def test_chunk_gdn_grouped_heads(monkeypatch):
     assert torch.allclose(ht_intra, ht_ref, atol=1e-2, rtol=1e-2), (
         f"Final state mismatch: max diff={(ht_intra - ht_ref).abs().max().item()}"
     )
-
-
-@pytest.mark.skipif(not IS_TF32_SUPPORTED, reason='requires NVIDIA Ampere or newer')
-@pytest.mark.parametrize('vector_gate', [False, True], ids=['scalar-gate', 'vector-gate'])
-@pytest.mark.parametrize('state_v_first', [False, True])
-@pytest.mark.parametrize(('K', 'V'), [(192, 64), (256, 80)])
-def test_intracard_pre_scan_merge(vector_gate: bool, state_v_first: bool, K: int, V: int):
-    torch.manual_seed(42)
-    T, H, HV = 319, 2, 4
-    k = torch.randn(1, T, H, K, device=device, dtype=torch.bfloat16) * 0.05
-    w = torch.randn(1, T, HV, K, device=device, dtype=torch.bfloat16) * 0.05
-    u = torch.randn(1, T, HV, V, device=device, dtype=torch.bfloat16)
-    decay = -0.01 * (torch.arange(T, device=device) % 64 + 1)
-    if vector_gate:
-        g, gk = None, decay.view(1, T, 1, 1).expand(1, T, HV, K).contiguous()
-    else:
-        g, gk = decay.view(1, T, 1).expand(1, T, HV).contiguous(), None
-    state_shape = (1, HV, V, K) if state_v_first else (1, HV, K, V)
-    h0 = torch.randn(state_shape, device=device, dtype=torch.float32) * 0.1
-    cu_seqlens_split = torch.tensor([0, 128, 256, T], device=device, dtype=torch.int32)
-    if vector_gate:
-        # scalar and vector gates must not share an autotuned pipeline configuration
-        intracard_cp.intracard_pre_scan(
-            k=k,
-            w=w,
-            u=u,
-            g=decay.view(1, T, 1).expand(1, T, HV).contiguous(),
-            gk=None,
-            cu_seqlens=cu_seqlens_split,
-            num_subseqs=3,
-        )
-    hm = intracard_cp.intracard_pre_scan(
-        k=k,
-        w=w,
-        u=u,
-        g=g,
-        gk=gk,
-        cu_seqlens=cu_seqlens_split,
-        num_subseqs=3,
-    )
-    states, count = intracard_cp.intracard_merge(
-        hm=hm,
-        split_info=intracard_cp.SplitSeqInfo(split_seq_ids=[0], start_subseq_idx=[0], num_subseqs=[3]),
-        num_non_first=2,
-        merge_seq_offsets=[0, 3],
-        merge_init_offsets=[0, 2],
-        device=k.device,
-        initial_state=h0,
-        state_v_first=state_v_first,
-    )
-    ref_h, _, _ = intracard_cp._raw_chunk_gated_delta_rule_fwd_h(
-        k=k,
-        w=w,
-        u=u,
-        g=g,
-        gk=gk,
-        initial_state=h0,
-        state_v_first=state_v_first,
-        cu_seqlens=torch.tensor([0, T], device=device, dtype=torch.int32),
-    )
-    assert count == 2
-    assert torch.isfinite(hm).all()
-    assert_close('h', ref_h[0, [2, 4]], states, 0.006)

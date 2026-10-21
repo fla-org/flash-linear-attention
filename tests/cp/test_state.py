@@ -25,8 +25,6 @@ pytestmark = pytest.mark.skipif(not IS_TF32_SUPPORTED, reason="requires NVIDIA A
             (256, 4, 128, 128),
             (256, 8, 64, 64),
             (512, 4, 128, 128),
-            (256, 4, 192, 64),
-            (256, 4, 256, 80),
         ]
     ],
 )

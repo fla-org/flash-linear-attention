@@ -11,9 +11,9 @@ Each component keeps its inputs, reference, CP call, and assertions in one test 
 
 | File                                  | Coverage                                                                                |
 | ------------------------------------- | --------------------------------------------------------------------------------------- |
-| `test_context.py`                     | Sequence partitions, backward snapshots, precision keywords, and hardware requirements. |
-| `test_state.py`                       | Per-head vector-gate addressing in backward summaries, including K=192/256.             |
-| `test_intracard.py`                   | Backend selection, index caching, grouped heads, and wide-state pre-scan/merge.         |
+| `test_context.py`                     | Sequence partitions, precision keywords, and hardware requirements.                     |
+| `test_state.py`                       | Per-head vector-gate addressing in backward summaries.                                  |
+| `test_intracard.py`                   | Backend selection, index caching, and grouped heads.                                    |
 | `test_graph.py`                       | KDA graph replay with one or multiple ranks and changing sequence cuts.                 |
 | `test_conv.py`, `test_token_shift.py` | Boundary exchange, outputs, and gradients for convolution and token shift.              |
 | `test_kda.py`, `test_gdn2.py`         | Gate modes, recomputation, state layouts, and recurrent references.                     |
