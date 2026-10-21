@@ -136,7 +136,7 @@ fla/
 └── utils/           # Global utilities and decorators
 
 tests/
-├── context_parallel/   # Context-parallel tests
+├── cp/                 # Context-parallel tests
 ├── layers/             # Layer tests
 ├── models/             # Model tests
 ├── modules/            # Module tests
@@ -386,7 +386,7 @@ Follow the existing file names in the relevant test directory. Operator tests no
 
 ### NaN Memory Poisoning
 
-The fixture in `tests/conftest.py` poisons eligible floating-point and complex allocations made by FLA through `torch.empty`, `torch.empty_like`, and `Tensor.new_empty` during operator and module tests. It excludes allocations made directly by tests, gradient-requiring tensors, and compilation paths. This catches uninitialized reads; kernels must initialize every output element they expose. No manual opt-in is needed for covered tests.
+The fixture in `tests/conftest.py` poisons eligible floating-point and complex allocations made by FLA through `torch.empty`, `torch.empty_like`, and `Tensor.new_empty` during operator and module tests, including the single-rank CP graph and intra-card cache tests moved into `tests/cp/`. It excludes allocations made directly by tests, gradient-requiring tensors, and compilation paths. This catches uninitialized reads; kernels must initialize every output element they expose. No manual opt-in is needed for covered tests.
 
 ## Benchmarking
 

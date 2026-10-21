@@ -179,7 +179,7 @@ def main():
             return 1
         print("\n  GATE PASSED.")
 
-    results, machine_info = run_operator_benchmarks(op_names=[args.op], shapes=SHAPE_CONFIGS, modes=args.modes)
+    results, machine_info = run_operator_benchmarks(op_names=[args.op], shapes=None, modes=args.modes)
     results = results or []
     machine_info = machine_info or {}
     print(f"\n  {format_machine_info(machine_info)} | "
@@ -188,7 +188,7 @@ def main():
 
     baseline = None
     if args.base:
-        baseline, _ = run_operator_benchmarks(op_names=[args.op], shapes=SHAPE_CONFIGS, modes=args.modes, ref=args.base)
+        baseline, _ = run_operator_benchmarks(op_names=[args.op], shapes=None, modes=args.modes, ref=args.base)
     if baseline is not None:
         print(format_comparison(changes=compare_results(base=baseline, head=results, threshold=5.0)))
     else:

@@ -60,9 +60,10 @@ def _warmup_autotune(fn, iterations: int | None = None, device: str | None = Non
 
 def benchmark_op(
     op_name: str,
-    shapes: dict[str, dict[str, int]],
+    shapes: dict[str, dict[str, int]] | None = None,
     modes: list[str] | None = None,
     backend: str | None = None,
+    compile: bool = False,
 ) -> list[BenchmarkResult]:
     """Return one latency record per supported shape and execution mode."""
     import triton
@@ -79,8 +80,11 @@ def benchmark_op(
     op_label = op_name
     backend_env = config.backend_env or {}
     if backend is not None:
-        # explicit benchmark selection must not inherit a global Gluon opt-in.
+        # explicit selection must not inherit competing backend opt-ins.
         os.environ['FLA_GLUON'] = '0'
+        for name, env in backend_env.items():
+            os.environ[f'FLA_{name.upper()}'] = '0'
+            os.environ[env] = '0'
     if backend and backend != 'triton':
         env = backend_env.get(backend)
         if env is not None:
@@ -88,15 +92,16 @@ def benchmark_op(
             op_label = f"{op_name}[{backend}]"
         else:
             logger.info(f"Op '{op_name}' has no '{backend}' backend; running the default path")
-    elif backend == 'triton':
-        for env in backend_env.values():
-            os.environ[env] = '0'
 
     if config.skip_backward and 'fwdbwd' in modes:
         modes = [m for m in modes if m != 'fwdbwd']
 
-    if config.default_shapes is not None:
-        shapes = config.default_shapes
+    if compile:
+        op_fn = torch.compile(op_fn, fullgraph=True)
+        op_label += '[compile]'
+
+    if shapes is None:
+        shapes = config.default_shapes if config.default_shapes is not None else SHAPE_CONFIGS
 
     valid_shapes = {}
     for shape_name, shape_dict in shapes.items():
@@ -196,15 +201,16 @@ def add_arguments(parser):
         help='Operator names; defaults to all registered ops',
     )
     parser.add_argument('--backend', help='Registered backend override, such as triton or gluon')
+    parser.add_argument('--compile', action='store_true', help='Compile the operator before warmup and timing')
     parser.add_argument('--custom-shapes', help='JSON object keyed by shape name, with B/T/H/D and optional operator axes')
     parser.add_argument('--modes', nargs='+', choices=['fwd', 'fwdbwd'], default=['fwd', 'fwdbwd'])
 
 
 def run(args):
-    shapes = json.loads(args.custom_shapes) if args.custom_shapes else SHAPE_CONFIGS
-    if not isinstance(shapes, dict) or not shapes:
+    shapes = json.loads(args.custom_shapes) if args.custom_shapes else None
+    if shapes is not None and (not isinstance(shapes, dict) or not shapes):
         raise ValueError('--custom-shapes must be a non-empty JSON object')
     results = []
     for name in dict.fromkeys(args.op or list_ops()):
-        results.extend(benchmark_op(op_name=name, shapes=shapes, modes=args.modes, backend=args.backend))
+        results.extend(benchmark_op(op_name=name, shapes=shapes, modes=args.modes, backend=args.backend, compile=args.compile))
     return results

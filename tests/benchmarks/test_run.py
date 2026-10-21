@@ -176,14 +176,15 @@ def test_empty_selection_does_not_publish_results(tmp_path, monkeypatch):
     assert not output.exists()
 
 
-def test_operator_task_runs_selected_variants(tmp_path, monkeypatch):
+@pytest.mark.parametrize('compile', [False, True])
+def test_operator_task_runs_selected_variants(tmp_path, monkeypatch, compile):
     from benchmarks.workloads import operator_latency
 
     monkeypatch.setattr(environment, 'get_machine_info', lambda: {})
     calls = []
 
-    def benchmark_op(op_name, shapes, modes, backend):
-        calls.append((op_name, modes, backend))
+    def benchmark_op(op_name, shapes, modes, backend, compile):
+        calls.append((op_name, modes, backend, compile))
         return [BenchmarkResult(name=op_name, parameters=shapes['small'], metrics={'median_ms': 1.0})]
 
     monkeypatch.setattr(operator_latency, 'benchmark_op', benchmark_op)
@@ -191,7 +192,8 @@ def test_operator_task_runs_selected_variants(tmp_path, monkeypatch):
     assert run.main([
         'operator_latency', '--op', 'chunk_gdn', 'chunk_gdn2', '--modes', 'fwd', '--backend', 'triton',
         '--custom-shapes', '{"small": {"B": 1, "T": 64, "H": 2, "D": 16}}', '--json', str(output),
+        *(['--compile'] if compile else []),
     ]) == 0
-    assert calls == [('chunk_gdn', ['fwd'], 'triton'), ('chunk_gdn2', ['fwd'], 'triton')]
+    assert calls == [('chunk_gdn', ['fwd'], 'triton', compile), ('chunk_gdn2', ['fwd'], 'triton', compile)]
     results = json.loads(output.read_text())['results']
     assert [result['benchmark'] for result in results] == ['operator_latency', 'operator_latency']

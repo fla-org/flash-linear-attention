@@ -14,7 +14,6 @@ import sys
 import time
 from pathlib import Path
 
-from benchmarks.configs.operators import SHAPE_CONFIGS
 from benchmarks.utils.discovery import find_affected_op_names, get_changed_files
 from benchmarks.utils.reporting import compare_results, format_comparison, get_result_path
 from benchmarks.utils.revisions import get_commit_sha, run_benchmark, run_operator_benchmarks
@@ -82,7 +81,7 @@ def main():
     def measure(ref):
         if args.benchmark:
             return run_benchmark(module='benchmarks.run', arguments=[benchmark, *arguments], ref=ref)
-        return run_operator_benchmarks(op_names=op_names, shapes=SHAPE_CONFIGS, modes=['fwd', 'fwdbwd'], ref=ref)
+        return run_operator_benchmarks(op_names=op_names, shapes=None, modes=['fwd', 'fwdbwd'], ref=ref)
 
     head_results, machine_info = measure(ref=head_sha)
     cooldown = int(os.environ.get('FLA_BENCH_COOLDOWN_SEC', '0'))

@@ -230,3 +230,20 @@ SIMPLE_QKV = {
     'k': TensorSpec(shape_fn=shape_bthd),
     'v': TensorSpec(shape_fn=shape_bthd),
 }
+
+
+def shape_bthnn(B, T, H, D, N, **kw):
+    return (B, T, H, N, N)
+
+
+def shape_gsa_slots(B, T, H, D, M=None, **kw):
+    return (B, T, H, D if M is None else M)
+
+
+def init_gsa_inputs(inputs, B, T, H, D, varlen=False, **kw):
+    g = (inputs['g'].detach() / 8).requires_grad_()
+    inputs['g'] = g
+    inputs['s'] = (1 - g.detach().exp()).requires_grad_()
+    if varlen:
+        inputs.update({name: x.detach().flatten(0, 1).unsqueeze(0).requires_grad_() for name, x in inputs.items()})
+        inputs['cu_seqlens'] = torch.arange(B + 1, device=g.device, dtype=torch.int32) * T

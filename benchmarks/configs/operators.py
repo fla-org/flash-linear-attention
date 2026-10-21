@@ -13,13 +13,14 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from torch.nn.functional import logsigmoid
+from torch.nn.functional import logsigmoid, silu
 
 from benchmarks.utils.inputs import (
     SIMPLE_QKV,
     TensorSpec,
     init_attnres_inputs,
     init_cyfa_inputs,
+    init_gsa_inputs,
     init_nsa_compression_inputs,
     init_nsa_inputs,
     init_nsa_windowed_inputs,
@@ -29,8 +30,10 @@ from benchmarks.utils.inputs import (
     shape_btd,
     shape_bth,
     shape_bthd,
+    shape_bthnn,
     shape_cyfa_readout,
     shape_d,
+    shape_gsa_slots,
     shape_h,
     shape_hd,
     shape_lbtd,
@@ -151,7 +154,67 @@ NSA_SHAPES = {
     'B1_T128K_H1_HQ128_D256_S16': {'B': 1, 'T': 131072, 'H': 1, 'HQ': 128, 'D': 256, 'S': 16, 'block_size': 64},
 }
 
+SINKHORN_SHAPES = {
+    'B1_T8K_H1_N4':  {'B': 1, 'T': 8192,  'H': 1, 'N': 4, 'D': 1},
+    'B1_T8K_H1_N8':  {'B': 1, 'T': 8192,  'H': 1, 'N': 8, 'D': 1},
+    'B1_T32K_H1_N4': {'B': 1, 'T': 32768, 'H': 1, 'N': 4, 'D': 1},
+    'B1_T32K_H1_N8': {'B': 1, 'T': 32768, 'H': 1, 'N': 8, 'D': 1},
+}
+
+SINKHORN_INPUTS = {
+    'logits': TensorSpec(shape_fn=shape_bthnn, dtype='float32'),
+}
+
 OPERATORS = (
+    OpConfig(
+        name='chunk_gsa',
+        import_path='fla.ops.gsa',
+        inputs={
+            'q': TensorSpec(shape_fn=shape_bthd, transform=silu),
+            'k': TensorSpec(shape_fn=shape_bthd, transform=silu),
+            'v': TensorSpec(shape_fn=shape_bthd, transform=silu),
+            'g': TensorSpec(shape_fn=shape_gsa_slots, transform=logsigmoid),
+        },
+        post_init=init_gsa_inputs,
+        extra_kwargs={'scale': 1.},
+        category='slot_gate',
+        default_shapes={f'B2_T{T}_H8_D64_M64': {'B': 2, 'T': T, 'H': 8, 'D': 64, 'M': 64} for T in [65, 1024, 8192]},
+    ),
+    OpConfig(
+        name='fused_recurrent_gsa',
+        import_path='fla.ops.gsa',
+        inputs={
+            'q': TensorSpec(shape_fn=shape_bthd, transform=silu),
+            'k': TensorSpec(shape_fn=shape_bthd, transform=silu),
+            'v': TensorSpec(shape_fn=shape_bthd, transform=silu),
+            'g': TensorSpec(shape_fn=shape_gsa_slots, transform=logsigmoid),
+        },
+        post_init=init_gsa_inputs,
+        extra_kwargs={'scale': 1.},
+        category='slot_gate',
+        default_shapes={f'B2_T{T}_H8_D64_M64': {'B': 2, 'T': T, 'H': 8, 'D': 64, 'M': 64} for T in [1, 16, 64]},
+    ),
+    OpConfig(
+        name='sinkhorn',
+        import_path='fla.ops.utils.sinkhorn',
+        inputs=SINKHORN_INPUTS,
+        output_is_tuple=False,
+        category='sinkhorn',
+        test_file='tests/ops/utils/test_sinkhorn.py',
+        dim_constraints={'H': [1]},
+        default_shapes=SINKHORN_SHAPES,
+        backend_env={'gluon': 'FLA_GLUON', 'tilelang': 'FLA_TILELANG'},
+    ),
+    OpConfig(
+        name='naive_sinkhorn',
+        import_path='fla.ops.utils.sinkhorn',
+        inputs=SINKHORN_INPUTS,
+        output_is_tuple=False,
+        category='sinkhorn',
+        test_file='tests/ops/utils/test_sinkhorn.py',
+        dim_constraints={'H': [1]},
+        default_shapes=SINKHORN_SHAPES,
+    ),
     OpConfig(
         name='parallel_attn',
         import_path='fla.ops.attn',
