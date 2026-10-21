@@ -18,8 +18,6 @@ from tests.cp.utils import gather_global, shard_tensor
 
 pytestmark = pytest.mark.skipif(not IS_TF32_SUPPORTED, reason="requires NVIDIA Ampere or newer")
 
-pytestmark = pytest.mark.skipif(device != "cuda", reason="requires CUDA or ROCm GPUs")
-
 
 def _run_chunk(
     rank: int,
