@@ -318,18 +318,16 @@ def chunk_titans_linear_ref(
     chunk_size: int = 16,  # chunk size
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
-    head_first: bool = False,
     use_chunk: bool = True,
 ):
     assert q.dtype == k.dtype == v.dtype
     assert k.shape[-1] == v.shape[-1], "DK must equal to DV."
-    if not head_first:
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
-        eta = eta.transpose(1, 2)
-        alpha = alpha.transpose(1, 2)
-        theta = theta.transpose(1, 2)
+    q = q.transpose(1, 2)
+    k = k.transpose(1, 2)
+    v = v.transpose(1, 2)
+    eta = eta.transpose(1, 2)
+    alpha = alpha.transpose(1, 2)
+    theta = theta.transpose(1, 2)
     seq_len = q.shape[-2]
     pad_len = (chunk_size - (seq_len % chunk_size)) % chunk_size
     if pad_len > 0:
@@ -375,6 +373,5 @@ def chunk_titans_linear_ref(
             output_final_state,
         )
     o = o[:, :, :seq_len, :]
-    if not head_first:
-        o = o.transpose(1, 2)
+    o = o.transpose(1, 2)
     return o, final_state

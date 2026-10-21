@@ -7,13 +7,7 @@
 
 """KDA backends."""
 
-from fla.ops.backends import BackendRegistry, dispatch
-from fla.ops.kda.backends.flash_kda import FlashKDABackend
 from fla.ops.kda.backends.tilelang import KDATileLangBackend
+from fla.ops.kda.backends.triton_ascend import TritonAscendKDABackend
 
-kda_registry = BackendRegistry("kda")
-kda_registry.register(FlashKDABackend())
-kda_registry.register(KDATileLangBackend())
-
-
-__all__ = ['dispatch', 'kda_registry']
+__all__ = ['KDATileLangBackend', 'TritonAscendKDABackend']

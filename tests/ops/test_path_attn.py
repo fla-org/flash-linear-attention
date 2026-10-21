@@ -10,9 +10,15 @@ import os
 import pytest
 import torch
 import torch.nn.functional as F
+from triton.runtime.jit import JITFunction
 
 from fla.ops.path_attn import naive_path_attn
+from fla.ops.path_attn.cumprod_householder_bwd import chunk_cumprod_householder_bwd_kernel
+from fla.ops.path_attn.cumprod_householder_fwd import chunk_cumprod_householder_fwd_kernel
 from fla.ops.path_attn.parallel import parallel_path_attention
+from fla.ops.path_attn.parallel_path_bwd_inter_dkv import parallel_path_bwd_dkv_kernel
+from fla.ops.path_attn.parallel_path_bwd_inter_dqh import parallel_path_bwd_dq_kernel
+from fla.ops.path_attn.transform_q import transform_q_fwd_kernel
 from fla.utils import IS_INTEL_ALCHEMIST, assert_close, device
 
 
@@ -109,6 +115,7 @@ def test_parallel(
     IS_INTEL_ALCHEMIST,
     reason="Intel Triton Failure",
 )
+@pytest.mark.smoke
 def test_parallel_varlen(
     H: int,
     HQ: int,
@@ -165,3 +172,18 @@ def test_parallel_varlen(
         assert_close("dg", ref_dg, tri_dg, 0.005)
     assert_close("dw", ref_dw, tri_dw, 0.005)
     assert_close("db", ref_db, tri_db, 0.005)
+
+
+@pytest.mark.parametrize(('kernel', 'name'), [
+    (chunk_cumprod_householder_fwd_kernel, 'T'),
+    (chunk_cumprod_householder_bwd_kernel, 'T'),
+    (transform_q_fwd_kernel, 'NUM_BLOCKS'),
+    (parallel_path_bwd_dkv_kernel, 'NUM_BLOCKS'),
+    (parallel_path_bwd_dq_kernel, 'NUM_BLOCKS'),
+])
+def test_parallel_backward_kernels_take_runtime_lengths(kernel, name):
+    """T and NUM_BLOCKS follow the (longest) sequence length; as constexprs, every new length compiles the kernel again."""
+    jit = kernel if isinstance(kernel, JITFunction) else kernel.fn
+    param = next(param for param in jit.params if param.name == name)
+    assert not param.is_constexpr
+    assert param.do_not_specialize

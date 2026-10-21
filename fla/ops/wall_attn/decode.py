@@ -7,14 +7,14 @@
 #
 # Wall attention, contributed by Tilde Research (Timor Averbuch, Dhruv Pai).
 # Heavily modified from fla/ops/gated_oja_rule/chunk.py.
-"""Wall single-step decode kernel and pre-rescaled KV-cache builder."""
+"""Wall cached decode kernel and pre-rescaled KV-cache builder."""
 
 import torch
 import triton
 import triton.language as tl
 
 from fla.ops.utils.op import exp2, log2
-from fla.utils import check_shared_mem
+from fla.utils import autotune_cache_kwargs, check_shared_mem
 
 WALL_DECODE_AUTOTUNE_CONFIGS = [
     triton.Config({'BT': BT}, num_warps=nw, num_stages=ns)
@@ -26,13 +26,15 @@ WALL_DECODE_AUTOTUNE_CONFIGS = [
 
 @triton.autotune(
     configs=WALL_DECODE_AUTOTUNE_CONFIGS,
-    key=['T_kv', 'K', 'V', 'HQ', 'H', 'C'],
+    key=['KV_CHUNKS_BUCKET', 'K', 'V', 'HQ', 'H', 'C'],
+    **autotune_cache_kwargs,
 )
 @triton.heuristics({
     'USE_SINK_BIAS': lambda args: args['sink_bias'] is not None,
     'USE_SCALAR_G': lambda args: args['g_scalar_cumsum'] is not None,
+    'USE_WINDOW': lambda args: args['W'] is not None,
 })
-@triton.jit
+@triton.jit(do_not_specialize=['T_kv', 'NC', 'KV_CHUNKS_BUCKET'])
 def parallel_wall_attn_decode_kernel(
     q,                # [B, T_q, HQ, K]
     k_tilde,          # [B, T_kv, HQ, K]  pre-rescaled keys (per-Q-head)
@@ -47,6 +49,8 @@ def parallel_wall_attn_decode_kernel(
     T_q,
     T_kv,
     NC,
+    KV_CHUNKS_BUCKET,
+    W: tl.constexpr,
     B: tl.constexpr,
     H: tl.constexpr,
     HQ: tl.constexpr,
@@ -60,8 +64,11 @@ def parallel_wall_attn_decode_kernel(
     C: tl.constexpr,
     USE_SINK_BIAS: tl.constexpr,
     USE_SCALAR_G: tl.constexpr,
+    USE_WINDOW: tl.constexpr,
 ):
-    i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    pid = tl.program_id(0).to(tl.int64)
+    NV, NT = tl.cdiv(V, BV), tl.cdiv(T_q, BT)
+    i_v, i_t, i_bh = pid % NV, ((pid // NV) % NT).to(tl.int64), (pid // (NV * NT)).to(tl.int64)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
     i_h = i_hq // G
     RCP_LN2: tl.constexpr = 1.4426950216
@@ -70,32 +77,22 @@ def parallel_wall_attn_decode_kernel(
     bos_kv = (i_b * T_kv).to(tl.int64)
     bos_nc = (i_b * NC).to(tl.int64)
 
-    p_q = tl.make_block_ptr(
-        q + (bos_q * HQ + i_hq) * K, (T_q, K), (HQ * K, 1),
-        (i_t * BT, 0), (BT, BK), (1, 0),
-    )
-    p_pq = tl.make_block_ptr(
-        p_curr + (bos_q * HQ + i_hq) * K, (T_q, K), (HQ * K, 1),
-        (i_t * BT, 0), (BT, BK), (1, 0),
-    )
-    p_o = tl.make_block_ptr(
-        o + (bos_q * HQ + i_hq) * V, (T_q, V), (HQ * V, 1),
-        (i_t * BT, i_v * BV), (BT, BV), (1, 0),
-    )
-    p_lse = tl.make_block_ptr(
-        lse + bos_q * HQ + i_hq, (T_q,), (HQ,), (i_t * BT,), (BT,), (0,),
-    )
+    o_q = i_t * BT + tl.arange(0, BT)
+    # queries occupy the last T_q positions of the cache
+    o_q_global = T_kv - T_q + o_q
+    o_d = tl.arange(0, BK)
+    o_v = i_v * BV + tl.arange(0, BV)
+    m_q = o_q < T_q
+    p_q = q + (bos_q * HQ + i_hq) * K + o_q[:, None] * (HQ * K) + o_d[None, :]
+    p_pq = p_curr + (bos_q * HQ + i_hq) * K + o_q[:, None] * (HQ * K) + o_d[None, :]
+    p_o = o + (bos_q * HQ + i_hq) * V + o_q[:, None] * (HQ * V) + o_v[None, :]
+    p_lse = lse + bos_q * HQ + i_hq + o_q * HQ
 
-    b_q = tl.load(p_q, boundary_check=(0, 1))
-    b_pq = tl.load(p_pq, boundary_check=(0, 1)).to(tl.float32)
+    b_q = tl.load(p_q, mask=m_q[:, None] & (o_d[None, :] < K), other=0.0)
+    b_pq = tl.load(p_pq, mask=m_q[:, None] & (o_d[None, :] < K), other=0.0).to(tl.float32)
 
     if USE_SCALAR_G:
-        o_q_global = (T_kv - T_q) + i_t * BT + tl.arange(0, BT)
-        m_q = o_q_global < T_kv
-        b_cq = tl.load(
-            g_scalar_cumsum + (bos_kv + o_q_global) * HQ + i_hq,
-            mask=m_q, other=0,
-        ).to(tl.float32)
+        b_cq = tl.load(g_scalar_cumsum + (bos_kv + o_q_global) * HQ + i_hq, mask=m_q, other=0).to(tl.float32)
 
     if USE_SINK_BIAS:
         b_sink_bias = tl.load(sink_bias + i_hq).to(tl.float32) * RCP_LN2
@@ -104,40 +101,35 @@ def parallel_wall_attn_decode_kernel(
     b_m = tl.full([BT], float('-inf'), dtype=tl.float32)
     b_acc = tl.zeros([BT], dtype=tl.float32)
 
-    # Iterate over the KV cache one chunk at a time: BS == C
-    for i_s in range(0, T_kv, BS):
-        i_c = i_s // C
-        # Load anchor
-        p_r = tl.make_block_ptr(
-            r_cache + (bos_nc * HQ + i_hq) * K, (NC, K), (HQ * K, 1),
-            (i_c, 0), (1, BK), (1, 0),
-        )
-        b_R = tl.load(p_r, boundary_check=(0, 1)).to(tl.float32)
-        b_q_til = (b_q.to(tl.float32) * exp2(b_pq - b_R)).to(b_q.dtype)
+    i_end = tl.minimum(T_kv, T_kv - T_q + (i_t + 1) * BT)
+    i_start = tl.maximum((T_kv - T_q + i_t * BT - W + 1) // BS * BS, 0) if USE_WINDOW else 0
 
-        p_kt = tl.make_block_ptr(
-            k_tilde + (bos_kv * HQ + i_hq) * K, (K, T_kv), (1, HQ * K),
-            (0, i_s), (BK, BS), (0, 1),
-        )
-        p_v = tl.make_block_ptr(
-            v + (bos_kv * H + i_h) * V, (T_kv, V), (H * V, 1),
-            (i_s, i_v * BV), (BS, BV), (1, 0),
-        )
-        b_kt = tl.load(p_kt, boundary_check=(0, 1))
-        b_v = tl.load(p_v, boundary_check=(0, 1))
+    for i_s in range(i_start, i_end, BS):
+        i_c = i_s // C
+        o_k = (i_s + tl.arange(0, BS)).to(tl.int64)
+        m_k = o_k < T_kv
+        o_c = (i_c + tl.arange(0, 1)).to(tl.int64)
+        p_r = r_cache + (bos_nc * HQ + i_hq) * K + o_c[:, None] * (HQ * K) + o_d[None, :]
+        b_R = tl.load(p_r, mask=(o_c[:, None] < NC) & (o_d[None, :] < K), other=0.0).to(tl.float32)
+        # dot in the cache's dtype: the rescale runs in fp32, so casting down to the
+        # (range-safe) storage dtype here loses only mantissa, matching training.
+        b_q_til = (b_q.to(tl.float32) * exp2(b_pq - b_R)).to(k_tilde.dtype.element_ty)
+
+        p_kt = k_tilde + (bos_kv * HQ + i_hq) * K + o_d[:, None] + o_k[None, :] * (HQ * K)
+        p_v = v + (bos_kv * H + i_h) * V + o_k[:, None] * (H * V) + o_v[None, :]
+        b_kt = tl.load(p_kt, mask=(o_d[:, None] < K) & m_k[None, :], other=0.0)
+        b_v = tl.load(p_v, mask=m_k[:, None] & (o_v[None, :] < V), other=0.0)
 
         b_s = tl.dot(b_q_til, b_kt) * scale * RCP_LN2
 
-        o_k = i_s + tl.arange(0, BS)
-        m_k = o_k < T_kv
         if USE_SCALAR_G:
-            b_ck = tl.load(
-                g_scalar_cumsum + (bos_kv + o_k) * HQ + i_hq,
-                mask=m_k, other=0,
-            ).to(tl.float32)
+            b_ck = tl.load(g_scalar_cumsum + (bos_kv + o_k) * HQ + i_hq, mask=m_k, other=0).to(tl.float32)
             b_s += b_cq[:, None] - b_ck[None, :]
 
-        b_s = tl.where(m_k[None, :], b_s, float('-inf'))
+        m_s = m_k[None, :] & (o_k[None, :] <= o_q_global[:, None])
+        if USE_WINDOW:
+            m_s = m_s & (o_q_global[:, None] - o_k[None, :] < W)
+        b_s = tl.where(m_s, b_s, float('-inf'))
 
         b_m, b_mp = tl.maximum(b_m, tl.max(b_s, 1)), b_m
         b_mw = tl.where(b_m == float('-inf'), 0., b_m)
@@ -152,8 +144,9 @@ def parallel_wall_attn_decode_kernel(
 
     b_o = b_o / b_acc[:, None]
     b_m += log2(b_acc)
-    tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_lse, b_m.to(p_lse.dtype.element_ty), boundary_check=(0,))
+    tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=m_q[:, None] & (o_v[None, :] < V))
+    if i_v == 0:
+        tl.store(p_lse, b_m.to(p_lse.dtype.element_ty), mask=m_q)
 
 
 def parallel_wall_attn_decode(
@@ -166,6 +159,7 @@ def parallel_wall_attn_decode(
     scale: float,
     cache_chunk_size: int,
     g_scalar_cumsum: torch.Tensor | None = None,
+    window_size: int | None = None,
 ):
     r"""Wall decode with a pre-rescaled KV cache.
 
@@ -181,6 +175,10 @@ def parallel_wall_attn_decode(
         r_cache  : ``[B, NC,   HQ, K]``  per-chunk anchors, ``NC = ceil(T_kv / C)``
         g_scalar_cumsum : ``[B, T_kv, HQ]`` or ``None``  optional FoX-style scalar gate
 
+    The queries are the last ``T_q`` tokens of the cache:
+    query ``i`` attends to positions up to ``T_kv - T_q + i``,
+    limited to the last ``window_size`` positions when provided.
+
     Returns ``(o, lse)`` with ``o.shape == [B, T_q, HQ, V]``.
     """
     C = cache_chunk_size
@@ -188,6 +186,8 @@ def parallel_wall_attn_decode(
     _, T_kv, H, V = v.shape
     NC = r_cache.shape[1]
     G = HQ // H
+    # the bucket selects an autotune config; exact T_kv determines the causal bounds
+    KV_CHUNKS_BUCKET = triton.next_power_of_2(max(1, triton.cdiv(T_kv, C)))
 
     if k_tilde.shape != (B, T_kv, HQ, K):
         raise ValueError(f"k_tilde shape {k_tilde.shape} != expected {(B, T_kv, HQ, K)}")
@@ -222,7 +222,7 @@ def parallel_wall_attn_decode(
     lse = torch.empty(B, T_q, HQ, dtype=torch.float, device=q.device)
 
     def grid(meta):
-        return (NV, triton.cdiv(T_q, meta['BT']), B * HQ)
+        return (NV * triton.cdiv(T_q, meta['BT']) * B * HQ,)
     parallel_wall_attn_decode_kernel[grid](
         q=q,
         k_tilde=k_tilde,
@@ -237,6 +237,8 @@ def parallel_wall_attn_decode(
         T_q=T_q,
         T_kv=T_kv,
         NC=NC,
+        KV_CHUNKS_BUCKET=KV_CHUNKS_BUCKET,
+        W=window_size,
         B=B,
         H=H,
         HQ=HQ,

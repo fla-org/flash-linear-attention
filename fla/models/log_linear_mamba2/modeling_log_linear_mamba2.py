@@ -10,14 +10,15 @@ import math
 import torch
 from torch import nn
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
-from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
 from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.log_linear_mamba2 import LogLinearMamba2
+from fla.models.cache_utils import Cache
+from fla.models.generation_utils import FLAGenerationMixin
 from fla.models.log_linear_mamba2.configuration_log_linear_mamba2 import LogLinearMamba2Config
-from fla.models.utils import Cache, FLAGenerationMixin
-from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, GatedMLP, RMSNorm
+from fla.models.modeling_utils import FLAPreTrainedModel
+from fla.modules import GatedMLP, RMSNorm
 from fla.ops.attnres import fused_attnres
 
 logger = logging.get_logger(__name__)
@@ -147,7 +148,7 @@ class LogLinearMamba2Block(nn.Module):
         return hidden_states, attentions, past_key_values, attnres_states
 
 
-class LogLinearMamba2PreTrainedModel(PreTrainedModel, FLAGenerationMixin):
+class LogLinearMamba2PreTrainedModel(FLAPreTrainedModel, FLAGenerationMixin):
     """
     An abstract class to handle weights initialization and a simple interface for downloading and loading pretrained
     models.
@@ -238,7 +239,7 @@ class LogLinearMamba2PreTrainedModel(PreTrainedModel, FLAGenerationMixin):
             #   > the weights of residual layers at initialization by a factor of 1/√N where N is the # of residual layers.
             #   >   -- GPT-2 :: https://openai.com/blog/better-language-models/
             #
-            # Reference (Megatron-LM): https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/model/gpt_model.py
+            # Reference (Megatron-LM): https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/models/gpt/gpt_model.py
             p = None
             if hasattr(module, "o_proj"):
                 # p = module.o_proj.weight
@@ -291,9 +292,6 @@ class LogLinearMamba2Model(LogLinearMamba2PreTrainedModel):
                 state_dict[k.replace("embedding.", "embeddings.")] = state_dict.pop(k)
                 break
 
-    def get_input_embeddings(self):
-        return self.embeddings
-
     def set_input_embeddings(self, new_embeddings):
         self.embeddings = new_embeddings
 
@@ -329,7 +327,7 @@ class LogLinearMamba2Model(LogLinearMamba2PreTrainedModel):
             use_cache = False
             past_key_values = None
         return_dict = (
-            return_dict if return_dict is not None else self.config.use_return_dict
+            return_dict if return_dict is not None else self.config.return_dict
         )
 
         if (input_ids is None) ^ (inputs_embeds is not None):
@@ -406,8 +404,8 @@ class LogLinearMamba2Model(LogLinearMamba2PreTrainedModel):
         )
 
 
-class LogLinearMamba2ForCausalLM(LogLinearMamba2PreTrainedModel):
-    _tied_weights_keys = []
+class LogLinearMamba2ForCausalLM(LogLinearMamba2PreTrainedModel, FLAGenerationMixin):
+    _tied_weights_keys = {"lm_head.weight": "backbone.embeddings.weight"}
 
     def __init__(self, config):
         super().__init__(config)
@@ -417,15 +415,6 @@ class LogLinearMamba2ForCausalLM(LogLinearMamba2PreTrainedModel):
 
         # Initialize weights and apply final processing
         self.post_init()
-
-    def get_output_embeddings(self):
-        return self.lm_head
-
-    def set_output_embeddings(self, new_embeddings):
-        self.lm_head = new_embeddings
-
-    def get_input_embeddings(self):
-        return self.backbone.get_input_embeddings()
 
     def set_input_embeddings(self, new_embeddings):
         return self.backbone.set_input_embeddings(new_embeddings)
@@ -442,11 +431,12 @@ class LogLinearMamba2ForCausalLM(LogLinearMamba2PreTrainedModel):
         output_attentions: bool | None = None,
         output_hidden_states: bool | None = None,
         return_dict: bool | None = None,
-        logits_to_keep: int | None = 0,
+        logits_to_keep: int | torch.Tensor | None = 0,
+        num_items_in_batch: int | torch.Tensor | None = None,
         **kwargs,
     ) -> tuple | CausalLMOutputWithPast:
         return_dict = (
-            return_dict if return_dict is not None else self.config.use_return_dict
+            return_dict if return_dict is not None else self.config.return_dict
         )
 
         outputs = self.backbone(
@@ -461,39 +451,15 @@ class LogLinearMamba2ForCausalLM(LogLinearMamba2PreTrainedModel):
             **kwargs,
         )
         hidden_states = outputs[0]
-        fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training
 
-        loss, logits = None, None
-        if not fuse_linear_and_cross_entropy or labels is None:
-            logits = self.lm_head(
-                hidden_states
-                if logits_to_keep is None
-                else hidden_states[:, -logits_to_keep:],
-            )
-        if labels is not None:
-            if getattr(self, "criterion", None) is None:
-                if fuse_linear_and_cross_entropy:
-                    criterion = FusedLinearCrossEntropyLoss()
-                elif self.config.fuse_cross_entropy:
-                    criterion = FusedCrossEntropyLoss(inplace_backward=True)
-                else:
-                    criterion = nn.CrossEntropyLoss()
-            else:
-                criterion = self.criterion
-            labels = labels.to(hidden_states.device)
-            labels = torch.cat(
-                (
-                    labels[..., 1:],
-                    torch.full_like(labels[:, :1], criterion.ignore_index),
-                ),
-                1,
-            )
-            if fuse_linear_and_cross_entropy:
-                loss = criterion(
-                    hidden_states, labels, self.lm_head.weight, self.lm_head.bias,
-                )
-            else:
-                loss = criterion(logits.view(labels.numel(), -1), labels.view(-1))
+        loss, logits = self._compute_logits_and_loss(
+            hidden_states=hidden_states,
+            labels=labels,
+            logits_to_keep=logits_to_keep,
+            num_items_in_batch=num_items_in_batch,
+            fuse_linear_cross_entropy=self.config.fuse_cross_entropy and self.training,
+            use_l2warp=False,
+        )
 
         if not return_dict:
             output = (logits,) + outputs[1:]

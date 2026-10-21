@@ -16,15 +16,15 @@ import torch.nn as nn
 from einops import rearrange
 from torch.nn import functional as F
 
-from fla.layers.utils import get_layer_cache, get_unpad_data, index_first_axis, pad_input, update_layer_cache
+from fla.layers.utils import get_layer_cache, repad_hidden_states, unpad_hidden_states, update_layer_cache
 from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
-from fla.modules.convolution import can_fuse_qkv_short_conv, fused_qkv_short_conv
+from fla.modules.causal_conv1d import can_fuse_qkv_short_conv, fused_qkv_short_conv
 from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
-    from fla.models.utils import Cache
+    from fla.models.cache_utils import Cache
 
 
 class GatedDeltaNet(nn.Module):
@@ -80,9 +80,12 @@ class GatedDeltaNet(nn.Module):
         conv_bias (bool, Optional):
             Whether to use bias in the short convolution, only used when `use_short_conv` is `True`. Default: `False`.
         layer_idx (int, Optional):
-            The index of the layer. Default: None.
+            The index of the layer. Default: `None`.
         norm_eps (float, Optional):
             The epsilon value for the normalization layer. Default: 1e-5.
+        output_gate_activation (str, Optional):
+            Activation applied by the output gate when `use_gate=True`. Supported values: `swish`, `silu`, or `sigmoid`.
+            `swish` and `silu` are equivalent aliases. Default: `swish`.
     """
 
     def __init__(
@@ -100,6 +103,7 @@ class GatedDeltaNet(nn.Module):
         conv_bias: bool = False,
         layer_idx: int = None,
         norm_eps: float = 1e-5,
+        output_gate_activation: str = 'swish',
         **kwargs,
     ) -> GatedDeltaNet:
         super().__init__()
@@ -124,16 +128,13 @@ class GatedDeltaNet(nn.Module):
         self.value_dim = int(self.num_v_heads * self.head_v_dim)
         self.layer_idx = layer_idx
 
-        # Consistency check: Ensure expand_v produces integer values
         if not math.isclose(self.num_v_heads * self.head_dim * expand_v, self.value_dim, rel_tol=1e-5):
             raise ValueError(
                 f"expand_v={expand_v} does not produce an integer value when multiplied by key_dim={self.key_dim}. "
                 f"Resulting value_dim would be {self.num_v_heads * self.head_dim * expand_v}, which is invalid for nn.Linear.",
             )
         if self.num_v_heads > self.num_heads and self.num_v_heads % self.num_heads != 0:
-            raise ValueError(
-                f"num_v_heads={self.num_v_heads} must be divisible by num_heads={self.num_heads}.",
-            )
+            raise ValueError(f"num_v_heads={self.num_v_heads} must be divisible by num_heads={self.num_heads}.")
 
         if not math.isclose(head_dim * expand_v, self.head_v_dim, rel_tol=1e-5):
             raise ValueError(
@@ -141,30 +142,27 @@ class GatedDeltaNet(nn.Module):
                 f"Resulting head_v_dim would be {head_dim * expand_v}, which is invalid for FusedRMSNormGated.",
             )
         assert mode in ['chunk', 'fused_recurrent'], f"Not supported mode `{mode}`."
+        if output_gate_activation not in ('swish', 'silu', 'sigmoid'):
+            raise ValueError(f"output_gate_activation must be 'swish', 'silu', or 'sigmoid', got {output_gate_activation!r}.")
 
-        self.q_proj = nn.Linear(hidden_size, self.key_dim, bias=False)
-        self.k_proj = nn.Linear(hidden_size, self.key_dim, bias=False)
-        self.v_proj = nn.Linear(hidden_size, self.value_dim, bias=False)
-        self.a_proj = nn.Linear(hidden_size, self.num_v_heads, bias=False)
-        self.b_proj = nn.Linear(hidden_size, self.num_v_heads, bias=False)
+        self.q_proj = nn.Linear(in_features=hidden_size, out_features=self.key_dim, bias=False)
+        self.k_proj = nn.Linear(in_features=hidden_size, out_features=self.key_dim, bias=False)
+        self.v_proj = nn.Linear(in_features=hidden_size, out_features=self.value_dim, bias=False)
+        self.a_proj = nn.Linear(in_features=hidden_size, out_features=self.num_v_heads, bias=False)
+        self.b_proj = nn.Linear(in_features=hidden_size, out_features=self.num_v_heads, bias=False)
 
         A = torch.empty(self.num_v_heads, dtype=torch.float32).uniform_(0, 16)
         self.A_log = nn.Parameter(torch.log(A))
         self.A_log._no_weight_decay = True
-        # hard coded for now
         dt_min = 0.001
         dt_max = 0.1
         dt_init_floor = 1e-4
-        dt = torch.exp(
-            torch.rand(self.num_v_heads) * (math.log(dt_max) - math.log(dt_min))
-            + math.log(dt_min),
-        )
+        dt = torch.exp(torch.rand(self.num_v_heads) * (math.log(dt_max) - math.log(dt_min)) + math.log(dt_min))
         dt = torch.clamp(dt, min=dt_init_floor)
-        # Inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
+        # inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
         inv_dt = dt + torch.log(-torch.expm1(-dt))
         self.dt_bias = nn.Parameter(inv_dt)
-        # Just to be explicit. Without this we already don't put wd on dt_bias because of the check
-        # name.endswith("bias") in param_grouping.py
+        # without this flag, name.endswith("bias") in param_grouping.py already excludes dt_bias from weight decay.
         self.dt_bias._no_weight_decay = True
 
         if use_short_conv:
@@ -193,11 +191,11 @@ class GatedDeltaNet(nn.Module):
                 "Do not turn it off, i.e., setting `use_short_conv=False` unless you know what you are doing.",
             )
         if use_gate:
-            self.g_proj = nn.Linear(hidden_size, self.value_dim, bias=False)
-            self.o_norm = FusedRMSNormGated(self.head_v_dim, eps=norm_eps)
+            self.g_proj = nn.Linear(in_features=hidden_size, out_features=self.value_dim, bias=False)
+            self.o_norm = FusedRMSNormGated(hidden_size=self.head_v_dim, eps=norm_eps, activation=output_gate_activation)
         else:
-            self.o_norm = RMSNorm(self.head_v_dim, eps=norm_eps, dtype=torch.float32)
-        self.o_proj = nn.Linear(self.value_dim, hidden_size, bias=False)
+            self.o_norm = RMSNorm(hidden_size=self.head_v_dim, eps=norm_eps, dtype=torch.float32)
+        self.o_proj = nn.Linear(in_features=self.value_dim, out_features=hidden_size, bias=False)
 
     def forward(
         self,
@@ -216,17 +214,24 @@ class GatedDeltaNet(nn.Module):
             )
 
         batch_size, q_len, _ = hidden_states.shape
-        # change to inference mode.
-        mode = 'fused_recurrent' if (q_len <= 64 and not self.training) else self.mode
+        if torch.is_grad_enabled():
+            mode = 'chunk'
+        elif q_len <= 64 and not self.training:
+            mode = 'fused_recurrent'
+        else:
+            mode = self.mode
         if self.training:
             assert mode == 'chunk', "Only chunk mode is supported in training."
 
-        last_state = get_layer_cache(self, past_key_values)
+        last_state = get_layer_cache(module=self, past_key_values=past_key_values)
 
         cu_seqlens = kwargs.get('cu_seqlens')
-        if cu_seqlens is None and attention_mask is not None:
-            indices, cu_seqlens, _ = get_unpad_data(attention_mask[:, -q_len:])
-            hidden_states = index_first_axis(rearrange(hidden_states, "b s ... -> (b s) ..."), indices).unsqueeze(0)
+        hidden_states, indices, cu_seqlens = unpad_hidden_states(
+            hidden_states=hidden_states,
+            cu_seqlens=cu_seqlens,
+            attention_mask=attention_mask,
+            q_len=q_len,
+        )
 
         conv_state_q, conv_state_k, conv_state_v = None, None, None
         if (
@@ -283,16 +288,16 @@ class GatedDeltaNet(nn.Module):
                 v=v,
                 g=self.a_proj(hidden_states),
                 beta=beta,
-                A_log=self.A_log,
-                dt_bias=self.dt_bias,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
                 use_qk_l2norm_in_kernel=True,
-                use_gate_in_kernel=True,
                 use_beta_sigmoid_in_kernel=True,
                 allow_neg_eigval=self.allow_neg_eigval,
                 state_v_first=True,
                 cu_seqlens=cu_seqlens,
+                use_gate_in_kernel=True,
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
             )
         elif mode == 'fused_recurrent':
             o, recurrent_state = fused_recurrent_gated_delta_rule(
@@ -301,12 +306,12 @@ class GatedDeltaNet(nn.Module):
                 v=v,
                 g=self.a_proj(hidden_states),
                 beta=beta,
-                A_log=self.A_log,
-                dt_bias=self.dt_bias,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
                 use_qk_l2norm_in_kernel=True,
                 use_gate_in_kernel=True,
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
                 use_beta_sigmoid_in_kernel=True,
                 allow_neg_eigval=self.allow_neg_eigval,
                 state_v_first=True,
@@ -316,8 +321,8 @@ class GatedDeltaNet(nn.Module):
             raise NotImplementedError(f"Not supported mode `{mode}`.")
 
         update_layer_cache(
-            self,
-            past_key_values,
+            module=self,
+            past_key_values=past_key_values,
             recurrent_state=recurrent_state,
             conv_state=(conv_state_q, conv_state_k, conv_state_v) if self.use_short_conv else None,
             offset=q_len,
@@ -330,7 +335,6 @@ class GatedDeltaNet(nn.Module):
             o = self.o_norm(o)
         o = rearrange(o, 'b t h d -> b t (h d)')
         o = self.o_proj(o)
-        if attention_mask is not None:
-            o = pad_input(o.squeeze(0), indices, batch_size, q_len)
+        o = repad_hidden_states(hidden_states=o, indices=indices, batch_size=batch_size, q_len=q_len)
 
         return o, None, past_key_values

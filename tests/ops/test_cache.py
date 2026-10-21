@@ -10,7 +10,10 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.utils.cache import fla_cache_autotune
+from fla.modules.causal_conv1d.ops import causal_conv1d_bwd_kernel, causal_conv1d_fwd_kernel
+from fla.modules.token_shift import token_shift_bwd_kernel_long, token_shift_fwd_kernel_long
+from fla.ops.gla.chunk import chunk_gla_bwd_kernel_inter
+from fla.ops.utils.cache import AutotuneKey, fla_cache_autotune
 from fla.utils import device
 
 
@@ -58,3 +61,52 @@ def test_fla_cache_autotune_handles_none_restore_value():
     y2 = torch.full((M,), 7, dtype=torch.int32, device=device)
     _optional_restore_kernel[(triton.cdiv(M, 128),)](None, y2, M)
     assert torch.equal(y2, torch.zeros(M, dtype=torch.int32, device=device))
+
+
+@pytest.mark.parametrize("kernel", [
+    causal_conv1d_fwd_kernel,
+    causal_conv1d_bwd_kernel,
+    token_shift_fwd_kernel_long,
+    token_shift_bwd_kernel_long,
+], ids=["causal_conv1d_fwd", "causal_conv1d_bwd", "token_shift_fwd_long", "token_shift_bwd_long"])
+def test_kernels_do_not_take_unused_nb(kernel):
+    """NB (a 1024-token bucket of the input size) is never read inside these kernel bodies, so none of them may take it:
+    in the autotune key it forces a re-tune on every new bucket, and as a constexpr it still compiles a new kernel for each one.
+    """
+    autotuner = kernel.fn
+    assert 'NB' not in autotuner.keys
+    assert 'NB' not in autotuner.arg_names
+
+
+@pytest.mark.parametrize(
+    ('BK', 'num_warps', 'accepted'),
+    [
+        pytest.param(32, 4, False, id='unsafe-wgmma'),
+        pytest.param(64, 2, False, id='oversized-key-tile'),
+        pytest.param(32, 2, True, id='builtin-config'),
+        pytest.param(16, 4, True, id='external-config'),
+    ],
+)
+def test_gla_cached_config_respects_pruning(monkeypatch, BK, num_warps, accepted):
+    autotuner = chunk_gla_bwd_kernel_inter.fn
+    configs = [triton.Config({'BK': bk, 'BV': 64}, num_warps=2, num_stages=2) for bk in (32, 64)]
+    cfg = triton.Config({'BK': BK, 'BV': 64}, num_warps=num_warps, num_stages=2)
+    key = AutotuneKey(autotune_key=(64, True, 32, 64))
+    monkeypatch.setattr('fla.ops.gla.chunk.IS_NVIDIA_HOPPER', True)
+    monkeypatch.setattr('fla.ops.gla.chunk.TRITON_ABOVE_3_6_0', True)
+    monkeypatch.setattr('fla.ops.gla.chunk.TRITON_ABOVE_3_8_0', False)
+    monkeypatch.setattr(autotuner, 'configs', configs)
+    monkeypatch.setattr(autotuner, 'cache', {key.autotune_key: cfg})
+    monkeypatch.setattr('fla.ops.utils.cache.load_cached_config', lambda kernel_name, key: {
+        'kwargs': cfg.kwargs,
+        'num_warps': cfg.num_warps,
+        'num_stages': cfg.num_stages,
+        'num_ctas': 1,
+    })
+
+    autotuner.maybe_load_cached_config(key=key, nargs={}, runtime_kwargs={'K': 32, 'V': 64, 'STATE_V_FIRST': True})
+
+    if accepted:
+        assert autotuner.cache[key.autotune_key].all_kwargs() == cfg.all_kwargs()
+    else:
+        assert key.autotune_key not in autotuner.cache

@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
 import torch
@@ -17,16 +18,16 @@ from einops import rearrange, repeat
 from fla.layers.utils import get_layer_cache, update_layer_cache
 from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
 from fla.modules.activations import ACT2FN
-from fla.modules.convolution import can_fuse_qkv_short_conv, fused_qkv_short_conv
+from fla.modules.causal_conv1d import can_fuse_qkv_short_conv, fused_qkv_short_conv
 from fla.ops.simple_gla import chunk_simple_gla, fused_recurrent_simple_gla
 
 if TYPE_CHECKING:
-    from fla.models.utils import Cache
+    from fla.models.cache_utils import Cache
 
 
 class SimpleGatedLinearAttention(nn.Module):
     r"""
-    The layer implementaion for [Gated Linear Attention Transformers with Hardware-Efficient Training](https://arxiv.org/abs/2312.06635).  # noqa
+    The layer implementation for [Gated Linear Attention Transformers with Hardware-Efficient Training](https://arxiv.org/abs/2312.06635).  # noqa
     This layer calls the simplified GLA kernel in which the gating is head-wise instead of elementwise.
 
     Args:
@@ -93,6 +94,7 @@ class SimpleGatedLinearAttention(nn.Module):
         self.expand_v = expand_v
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads if num_kv_heads is not None else num_heads
+        assert self.num_heads % self.num_kv_heads == 0, "num_heads must be divisible by num_kv_heads"
         self.num_kv_groups = self.num_heads // self.num_kv_heads
         self.feature_map_fn = ACT2FN[feature_map] if feature_map is not None else None
 
@@ -100,8 +102,10 @@ class SimpleGatedLinearAttention(nn.Module):
         self.conv_size = conv_size
         self.conv_bias = conv_bias
 
-        self.key_dim = int(hidden_size * expand_k)
-        self.value_dim = int(hidden_size * expand_v)
+        key_dim, value_dim = hidden_size * expand_k, hidden_size * expand_v
+        self.key_dim, self.value_dim = round(key_dim), round(value_dim)
+        assert math.isclose(key_dim, self.key_dim), f"`hidden_size * expand_k` must be an integer, got {key_dim}."
+        assert math.isclose(value_dim, self.value_dim), f"`hidden_size * expand_v` must be an integer, got {value_dim}."
         self.key_dim_per_group = self.key_dim // self.num_kv_groups
         self.value_dim_per_group = self.value_dim // self.num_kv_groups
         self.layer_idx = layer_idx
@@ -178,7 +182,12 @@ class SimpleGatedLinearAttention(nn.Module):
             )
 
         # launching the triton kernel for just one token will actually be slower
-        mode = 'fused_recurrent' if hidden_states.shape[1] <= 64 else self.mode
+        if torch.is_grad_enabled():
+            mode = 'chunk'
+        elif hidden_states.shape[1] <= 64:
+            mode = 'fused_recurrent'
+        else:
+            mode = self.mode
 
         last_state = get_layer_cache(self, past_key_values)
 
@@ -242,6 +251,10 @@ class SimpleGatedLinearAttention(nn.Module):
         else:
             k, v = (rearrange(x, '... (h d) -> ... h d', h=self.num_kv_heads) for x in (k, v))
         gk = F.logsigmoid(gk) / self.gate_logit_normalizer
+        if attention_mask is not None:
+            # zero the decay logit so a padded step neutrally passes the state through
+            # (exp(0) == 1) instead of applying a real, content-derived decay to it
+            gk = gk.mul_(attention_mask[:, -gk.shape[-2]:, None])
 
         recurrent_state = last_state['recurrent_state'] if last_state is not None else None
         if mode == 'chunk':

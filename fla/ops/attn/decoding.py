@@ -11,7 +11,7 @@ import triton.language as tl
 
 from fla.ops.utils.cumsum import chunk_global_cumsum
 from fla.ops.utils.op import exp
-from fla.utils import autotune_cache_kwargs, check_shared_mem
+from fla.utils import autotune_cache_kwargs, check_shared_mem, input_guard
 
 
 @triton.heuristics({
@@ -24,7 +24,7 @@ from fla.utils import autotune_cache_kwargs, check_shared_mem
         for num_warps in [1, 2, 4] + ([] if check_shared_mem('hopper') else [8])
         for num_stages in [2, 3, 4, 5]
     ],
-    key=['H', 'G', 'K', 'V', 'BK', 'BV', 'USE_G', 'USE_SINK_BIAS'],
+    key=['H', 'G', 'K', 'V', 'W', 'BK', 'BV', 'USE_G', 'USE_SINK_BIAS'],
     **autotune_cache_kwargs,
 )
 @triton.jit
@@ -44,23 +44,30 @@ def naive_attn_decoding_kernel(
     G: tl.constexpr,
     K: tl.constexpr,
     V: tl.constexpr,
+    W: tl.constexpr,
     BS: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
     USE_G: tl.constexpr,
     USE_SINK_BIAS: tl.constexpr,
 ):
-    i_v, i_bh = tl.program_id(0), tl.program_id(1)
+    pid = tl.program_id(0).to(tl.int64)
+    NV = tl.cdiv(V, BV)
+    i_v, i_bh = pid % NV, (pid // NV).to(tl.int64)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
     i_h = i_hq // G
 
-    bos, eos = tl.load(cu_seqlens + i_b).to(tl.int32), tl.load(cu_seqlens + i_b + 1).to(tl.int32)
+    bos, eos = tl.load(cu_seqlens + i_b).to(tl.int64), tl.load(cu_seqlens + i_b + 1).to(tl.int64)
+    if W is not None:
+        bos = tl.maximum(bos, eos - W)
     T = eos - bos
 
-    p_q = tl.make_block_ptr(q + i_bh * K, (K,), (1, ), (0, ), (BK,), (0,))
-    p_o = tl.make_block_ptr(o + i_bh * V, (V,), (1, ), (0, ), (BV,), (0,))
+    o_d = tl.arange(0, BK)
+    o_v = i_v * BV + tl.arange(0, BV)
+    p_q = q + i_bh * K + o_d
+    p_o = o + i_bh * V + o_v
 
-    b_q = tl.load(p_q, boundary_check=(0,))
+    b_q = tl.load(p_q, mask=o_d < K, other=0.0)
     b_q = (b_q * scale).to(b_q.dtype)
 
     b_o = tl.zeros([BV], dtype=tl.float32)
@@ -69,8 +76,8 @@ def naive_attn_decoding_kernel(
     b_acc = tl.zeros([1], dtype=tl.float32)
 
     if USE_G:
-        p_g = tl.make_block_ptr(g_cumsum + bos * HQ + i_hq, (T,), (HQ,), (T-1,), (1,), (0,))
-        b_gq = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
+        p_g = g_cumsum + bos * HQ + i_hq + (T - 1) * HQ
+        b_gq = tl.load(p_g, mask=T > 0, other=0.0).to(tl.float32)
     else:
         b_gq = None
 
@@ -80,21 +87,22 @@ def naive_attn_decoding_kernel(
         b_sink_bias = None
 
     for i_s in range(0, T, BS):
-        p_k = tl.make_block_ptr(k + (bos * H + i_h) * K, (T, K), (H*K, 1), (i_s, 0), (BS, BK), (1, 0))
-        p_v = tl.make_block_ptr(v + (bos * H + i_h) * V, (T, V), (H*V, 1), (i_s, i_v * BV), (BS, BV), (1, 0))
+        o_k = (i_s + tl.arange(0, BS)).to(tl.int64)
+        m_k = o_k < T
+        p_k = k + (bos * H + i_h) * K + o_k[:, None] * (H*K) + o_d[None, :]
+        p_v = v + (bos * H + i_h) * V + o_k[:, None] * (H*V) + o_v[None, :]
         # [BK, BS]
-        b_k = tl.load(p_k, boundary_check=(0, 1))
+        b_k = tl.load(p_k, mask=m_k[:, None] & (o_d[None, :] < K), other=0.0)
         # [BS, BV]
-        b_v = tl.load(p_v, boundary_check=(0, 1))
+        b_v = tl.load(p_v, mask=m_k[:, None] & (o_v[None, :] < V), other=0.0)
         # [BT, BS]
         b_s = tl.sum(b_q[None, :] * b_k, 1)
 
-        mask = i_s + tl.arange(0, BS) < T
-        b_s = tl.where(mask, b_s, float('-inf'))
+        b_s = tl.where(m_k, b_s, float('-inf'))
 
         if USE_G:
-            p_gk = tl.make_block_ptr(g_cumsum + bos * HQ + i_hq, (T,), (HQ,), (i_s,), (BS,), (0,))
-            b_gk = tl.load(p_gk, boundary_check=(0,)).to(tl.float32)
+            p_gk = g_cumsum + bos * HQ + i_hq + o_k * HQ
+            b_gk = tl.load(p_gk, mask=m_k, other=0.0).to(tl.float32)
             b_s += b_gq - b_gk
         # [BT, BS]
         b_m, b_mp = tl.maximum(b_m, tl.max(b_s)), b_m
@@ -112,10 +120,11 @@ def naive_attn_decoding_kernel(
         # keep the sink-bias merge finite when masking leaves a row with no valid key.
         b_m = tl.where(b_m == float('-inf'), 0., b_m)
         b_acc += exp(b_sink_bias - b_m)
-    b_o = b_o / b_acc
-    tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, ))
+    b_o = b_o / tl.where(T > 0, b_acc, 1.)
+    tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=o_v < V)
 
 
+@input_guard
 def attn_decoding_one_step(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -125,6 +134,7 @@ def attn_decoding_one_step(
     cu_seqlens: torch.LongTensor = None,
     do_gate_scale: bool = False,
     *,
+    window_size: int | None = None,
     sink_bias: torch.Tensor | None = None,
 ):
     r"""
@@ -142,11 +152,13 @@ def attn_decoding_one_step(
             Scale factor for attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         cu_seqlens (torch.LongTensor):
-            Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
-            consistent with the FlashAttention API.
+            Cumulative KV sequence lengths of shape `[B+1]`, with one query at the end of each sequence.
         do_gate_scale (bool):
             Whether to apply gate scale. Default: `False`. If `True`, the attention scale will also be applied
             to the gating bias term in Forgetting Transformer or PaTH-FoX.
+        window_size (int, Optional):
+            Number of most recent keys attended to in each sequence, including the current token.
+            Must be nonnegative; zero returns zeros. Default: `None` (all keys).
         sink_bias (Optional[torch.Tensor]):
             Per-query-head attention-sink bias logits of shape `[HQ]` — one
             learnable scalar per query head, as introduced by GPT-OSS.
@@ -157,9 +169,13 @@ def attn_decoding_one_step(
             Outputs of shape `[1, B, HQ, V]`.
     """
     assert cu_seqlens is not None, "The cu_seqlens must be provided for varlen decoding"
+    if window_size is not None and window_size < 0:
+        raise ValueError("window_size must be nonnegative")
     B, T, H, K, V = *k.shape, v.shape[-1]
     N = len(cu_seqlens) - 1
     HQ = q.shape[2]
+    if H == 0 or HQ % H != 0:
+        raise ValueError(f"The number of query heads ({HQ}) must be divisible by the number of key/value heads ({H}).")
     G = HQ // H
     if scale is None:
         scale = K ** -0.5
@@ -185,7 +201,7 @@ def attn_decoding_one_step(
     NV = triton.cdiv(V, BV)
     o = torch.empty(*q.shape[:-1], V, dtype=v.dtype, device=q.device)
 
-    grid = (NV, N * HQ)
+    grid = (NV * N * HQ,)
     naive_attn_decoding_kernel[grid](
         q=q,
         k=k,
@@ -202,6 +218,7 @@ def attn_decoding_one_step(
         G=G,
         K=K,
         V=V,
+        W=window_size,
         BS=BS,
         BK=BK,
         BV=BV,

@@ -46,12 +46,18 @@ def log_decay(*shape, scale=0.05, dtype=torch.float32):
         for test in [
             (1, 48, 2, 4, 32, 16),
             (2, 31, 1, 1, 24, 8),
+            (1, 31, 1, 2, 32, 128),
         ]
     ],
 )
 @pytest.mark.parametrize('window_size', [None, 8])
-def test_parallel_matches_reference(B: int, T: int, H: int, HQ: int, K: int, V: int, window_size):
+def test_parallel_matches_reference(B: int, T: int, H: int, HQ: int, K: int, V: int, window_size, monkeypatch):
     assert HQ % H == 0
+    if V == 128:
+        # force BV=64 so the forward launches with NV=2: exercises the value-split
+        # path (incl. single-writer LSE stores) without the BV=256 giant tiles whose
+        # IEEE fp32-dot compilation stalls ptxas for minutes per autotune config.
+        monkeypatch.setattr("fla.ops.wall_attn.parallel.check_shared_mem", lambda *args, **kwargs: False)
     torch.manual_seed(0)
     dtype = torch.float32
     q = torch.randn(B, T, HQ, K, device=device, dtype=dtype)
@@ -81,6 +87,7 @@ def test_parallel_gqa_matches_reference():
     assert_close(" o", ref, tri, RTOL_FWD)
 
 
+@pytest.mark.smoke
 def test_parallel_varlen_matches_reference():
     dtype = torch.float32
     T1, T2 = 17, 23
@@ -141,7 +148,10 @@ def test_parallel_aggressive_gates_long_seq():
         ]
     ],
 )
-def test_backward_matches_eager_reference(B: int, T: int, H: int, HQ: int, K: int, V: int):
+def test_backward_matches_eager_reference(B: int, T: int, H: int, HQ: int, K: int, V: int, monkeypatch):
+    if V == 128:
+        # force BV=64 in the forward so backward consumes LSE from a split-value launch
+        monkeypatch.setattr("fla.ops.wall_attn.parallel.check_shared_mem", lambda *args, **kwargs: False)
     dtype = torch.float32
     torch.manual_seed(11)
     q0 = torch.randn(B, T, HQ, K, device=device, dtype=dtype)
@@ -171,6 +181,61 @@ def test_backward_matches_eager_reference(B: int, T: int, H: int, HQ: int, K: in
     assert_close("dv", v2.grad, v.grad, RTOL_GRAD)
     # The reference does not backprop through `g` (chunk_global_cumsum); the wall
     # `dg` is validated separately in `test_g_gradient_matches_finite_differences`.
+
+
+def test_backward_value_split_matches_single_tile(monkeypatch):
+    torch.manual_seed(42)
+    dtype = torch.float32
+    B, T, H, HQ, K, V = 1, 17, 1, 2, 16, 96
+    scale = K**-0.5
+    window_size = 8
+    cu_seqlens = torch.tensor([0, 7, T], dtype=torch.long, device=device)
+
+    q0 = torch.randn(B, T, HQ, K, device=device, dtype=dtype)
+    k0 = torch.randn(B, T, H, K, device=device, dtype=dtype)
+    v0 = torch.randn(B, T, H, V, device=device, dtype=dtype)
+    g0 = log_decay(B, T, HQ, K, dtype=dtype)
+    g_scalar0 = log_decay(B, T, HQ, dtype=dtype)
+    sink_bias0 = torch.randn(HQ, device=device, dtype=dtype) * 0.1
+    do = torch.randn(B, T, HQ, V, device=device, dtype=dtype)
+
+    def run(single_tile_backward: bool):
+        force_single_tile = True
+        monkeypatch.setattr(
+            "fla.ops.wall_attn.parallel.check_shared_mem",
+            lambda arch, *args, **kwargs: force_single_tile and arch == 'hopper',
+        )
+        inputs = [x.clone().requires_grad_(True) for x in (q0, k0, v0, g0, g_scalar0, sink_bias0)]
+        q, k, v, g, g_scalar, sink_bias = inputs
+        o = parallel_wall_attn(
+            q,
+            k,
+            v,
+            g,
+            g_scalar=g_scalar,
+            sink_bias=sink_bias,
+            scale=scale,
+            window_size=window_size,
+            cu_seqlens=cu_seqlens,
+        )
+        force_single_tile = single_tile_backward
+        grads = torch.autograd.grad((o * do).sum(), inputs)
+        return o, grads
+
+    # keep forward single-tile so this backward regression does not depend on split-LSE ownership.
+    # the split backward uses BV=64, so V=96 launches NV=2 with a 32-wide tail.
+    # if either slice subtracts the full-V delta, summing its score gradients
+    # subtracts delta twice and disagrees with the single-tile result below.
+    o_split, grads_split = run(single_tile_backward=False)
+    o_single, grads_single = run(single_tile_backward=True)
+
+    assert_close("       o", o_single, o_split, RTOL_FWD)
+    for name, single, split in zip(
+        ("dq", "dk", "dv", "dg", "dg_scalar", "dsink_bias"),
+        grads_single,
+        grads_split,
+    ):
+        assert_close(name, single, split, RTOL_GRAD)
 
 
 def test_dg_nonzero_after_backward():
@@ -289,59 +354,73 @@ def test_scalar_gate_gradient_finite_differences():
     assert_close("dg_scalar", dgs_fd, dgs_ana, RTOL_FD)
 
 
-def _decode_at(t, q, k, v, P, scale, C, *, g_scalar_cumsum=None):
-    """Decode at position `t` with the cache truncated to [0, t].
-
-    Decode has no intra-cache causal mask (the query is assumed to come after
-    everything in the cache), so we truncate the cache to the current position.
-    """
+def _decode_at(t, q, k, v, P, scale, C, *, T_q=1, g_scalar_cumsum=None, window_size=None):
+    """Decode the last `T_q` queries of the cache ending at position `t`."""
     k_c = k[:, : t + 1].contiguous()
     v_c = v[:, : t + 1].contiguous()
     P_c = P[:, : t + 1].contiguous()
     gsc = g_scalar_cumsum[:, : t + 1].contiguous() if g_scalar_cumsum is not None else None
 
-    k_tilde, r_cache = build_wall_kv_cache(k_c, P_c, chunk_size=C)
+    k_tilde, r_cache = build_wall_kv_cache(k=k_c, g_cumsum=P_c, chunk_size=C)
     o_dec, _ = parallel_wall_attn_decode(
-        q=q[:, t: t + 1].contiguous(),
+        q=q[:, t + 1 - T_q: t + 1].contiguous(),
         v=v_c,
-        p_curr=P[:, t: t + 1].contiguous(),
+        p_curr=P[:, t + 1 - T_q: t + 1].contiguous(),
         k_tilde=k_tilde,
         r_cache=r_cache,
         sink_bias=None,
         scale=scale,
         cache_chunk_size=C,
         g_scalar_cumsum=gsc,
+        window_size=window_size,
     )
     return o_dec
 
 
 @pytest.mark.parametrize('dtype', [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'HQ', 'K', 'V', 'C'),
+    ('B', 'T', 'T_q', 'H', 'HQ', 'K', 'V', 'C', 'window_size'),
     [
-        pytest.param(*test, id="B{}-T{}-H{}-HQ{}-K{}-V{}-C{}".format(*test))
+        pytest.param(*test, id="B{}-T{}-Tq{}-H{}-HQ{}-K{}-V{}-C{}-W{}".format(*test))
         for test in [
-            (1, 256, 4, 4, 64, 64, 64),   # MHA
-            (1, 256, 2, 8, 64, 64, 64),   # GQA, G=4
-            (2, 128, 1, 2, 32, 32, 32),   # small
+            (1, 256, 1, 4, 4, 64, 64, 64, None),
+            (1, 256, 1, 2, 8, 64, 64, 64, None),
+            (2, 128, 1, 1, 2, 32, 32, 32, None),
+            (1, 128, 1, 1, 2, 32, 320, 32, None),
+            (2, 160, 5, 2, 4, 64, 64, 32, None),
+            (2, 160, 48, 2, 4, 64, 64, 32, None),
+            (2, 160, 5, 2, 4, 64, 64, 32, 32),
+            (2, 160, 48, 2, 4, 64, 64, 32, 32),
+            (2, 161, 33, 2, 4, 64, 64, 32, 17),
         ]
     ],
 )
-def test_decode_matches_training_forward(dtype, B: int, T: int, H: int, HQ: int, K: int, V: int, C: int):
-    """Decode at position t reproduces the training forward output at that row."""
-    torch.manual_seed(0)
+def test_decode_matches_training_forward(
+    B: int,
+    T: int,
+    T_q: int,
+    H: int,
+    HQ: int,
+    K: int,
+    V: int,
+    C: int,
+    window_size: int | None,
+    dtype: torch.dtype,
+):
+    """Cached continuation matches the corresponding training forward outputs."""
+    torch.manual_seed(42)
     scale = K**-0.5
     q = torch.randn(B, T, HQ, K, device=device, dtype=dtype)
     k = torch.randn(B, T, H, K, device=device, dtype=dtype)
     v = torch.randn(B, T, H, V, device=device, dtype=dtype)
     g = log_decay(B, T, HQ, K, dtype=dtype)
 
-    o_ref = parallel_wall_attn(q, k, v, g, scale=scale)
+    o_ref = parallel_wall_attn(q=q, k=k, v=v, g=g, scale=scale, window_size=window_size)
     P = chunk_global_cumsum(g, scale=RCP_LN2)
 
     for t in (T - 1, (T // 2 // C) * C + C - 1):
-        o_dec = _decode_at(t, q, k, v, P, scale, C)
-        assert_close("o_dec", o_ref[:, t: t + 1], o_dec, RTOL_DECODE)
+        o_dec = _decode_at(t=t, q=q, k=k, v=v, P=P, scale=scale, C=C, T_q=T_q, window_size=window_size)
+        assert_close("o_dec", o_ref[:, t + 1 - T_q: t + 1], o_dec, RTOL_DECODE)
 
 
 def test_decode_matches_training_forward_long():
@@ -364,9 +443,11 @@ def test_decode_matches_training_forward_long():
     assert_close("o_dec_long", o_ref[:, t: t + 1], o_dec, RTOL_DECODE)
 
 
-def test_decode_with_scalar_gate():
+@pytest.mark.parametrize('T_q', [1, 5, 48], ids=["Tq1", "Tq5", "Tq48"])
+@pytest.mark.parametrize('window_size', [None, 32], ids=["full", "windowed"])
+def test_decode_with_scalar_gate(window_size: int | None, T_q: int):
     """Wall + FoX-style scalar gate: decode matches training forward."""
-    torch.manual_seed(2)
+    torch.manual_seed(42)
     dtype = torch.float32
     B, T, H, HQ, K, V, C = 1, 256, 2, 4, 64, 64, 64
     scale = K**-0.5
@@ -376,13 +457,13 @@ def test_decode_with_scalar_gate():
     g = log_decay(B, T, HQ, K, dtype=dtype)
     g_scalar = log_decay(B, T, HQ, dtype=dtype)
 
-    o_ref = parallel_wall_attn(q, k, v, g, scale=scale, g_scalar=g_scalar)
+    o_ref = parallel_wall_attn(q=q, k=k, v=v, g=g, scale=scale, g_scalar=g_scalar, window_size=window_size)
     P = chunk_global_cumsum(g, scale=RCP_LN2)
     c = chunk_global_cumsum(g_scalar, scale=RCP_LN2)
 
     t = T - 1
-    o_dec = _decode_at(t, q, k, v, P, scale, C, g_scalar_cumsum=c)
-    assert_close("o_dec_scalar", o_ref[:, t: t + 1], o_dec, RTOL_DECODE)
+    o_dec = _decode_at(t=t, q=q, k=k, v=v, P=P, scale=scale, C=C, T_q=T_q, g_scalar_cumsum=c, window_size=window_size)
+    assert_close("o_dec_scalar", o_ref[:, t + 1 - T_q: t + 1], o_dec, RTOL_DECODE)
 
 
 @pytest.mark.parametrize('dtype', [torch.float32, torch.bfloat16])

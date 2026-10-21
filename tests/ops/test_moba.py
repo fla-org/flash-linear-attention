@@ -91,6 +91,7 @@ def test_parallel_moba_topk1_short_circuits():
         ]
     ],
 )
+@pytest.mark.smoke
 def test_parallel_moba_varlen_matches_full_attn(cu_seqlens, H, D, chunk_size, topk):
     torch.manual_seed(42)
     T = cu_seqlens[-1]

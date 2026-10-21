@@ -130,6 +130,7 @@ def test_chunk_with_chunk_size(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
     reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set',
 )
+@pytest.mark.smoke
 def test_chunk_varlen(
     H: int,
     K: int,
@@ -422,3 +423,20 @@ def test_fused_recurrent_state_v_first(
         fused_recurrent_retention(q, k, v, transpose_state_layout=True)
     with pytest.raises(ValueError):
         fused_recurrent_retention(q, k, v, state_v_first=True, transpose_state_layout=True)
+
+
+@pytest.mark.skipif(device != 'cuda', reason="Host-sync detection relies on torch.cuda.set_sync_debug_mode")
+@pytest.mark.parametrize(
+    'fn',
+    [chunk_retention, fused_chunk_retention, parallel_retention, fused_recurrent_retention],
+    ids=['chunk', 'fused_chunk', 'parallel', 'fused_recurrent'],
+)
+def test_no_host_sync(fn):
+    """The per-head decay is built on the device; building it from host data blocked every call on a copy."""
+    q, k, v = (torch.randn(1, 64, 2, 32, device=device, dtype=torch.bfloat16) for _ in range(3))
+    fn(q, k, v)
+    torch.cuda.set_sync_debug_mode('error')
+    try:
+        fn(q, k, v)
+    finally:
+        torch.cuda.set_sync_debug_mode('default')

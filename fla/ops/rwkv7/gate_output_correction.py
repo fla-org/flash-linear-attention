@@ -84,8 +84,8 @@ def gate_output_correction_fwd_kernel(
     BLOCK_SIZE_D: tl.constexpr,
     BT: tl.constexpr,
 ):
-    pid_b, pid_t_block = tl.program_id(0), tl.program_id(1)
-    pid_h = tl.program_id(2)
+    pid_b, pid_t_block = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
+    pid_h = tl.program_id(2).to(tl.int64)
     t_local = pid_t_block * BT + tl.arange(0, BT)[:, None]
     t_idx = T_OFFSET + t_local
     mask_t = t_local < T
@@ -134,8 +134,8 @@ def gate_output_correction_bwd_kernel(
     BLOCK_SIZE_D: tl.constexpr,
     BT: tl.constexpr,
 ):
-    pid_b, pid_t_block = tl.program_id(0), tl.program_id(1)
-    pid_h = tl.program_id(2)
+    pid_b, pid_t_block = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
+    pid_h = tl.program_id(2).to(tl.int64)
 
     t_local = pid_t_block * BT + tl.arange(0, BT)[:, None]
     t_idx = T_OFFSET + t_local

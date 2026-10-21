@@ -39,6 +39,8 @@ def chunk_kda_fwd(
     disable_recompute: bool = False,
     return_intermediate_states: bool = False,
     cp_context: FLACPContext | None = None,
+    use_graph: bool = False,
+    chunk_offsets: torch.LongTensor | None = None,
 ):
     # Apply gate activation
     g_org = None
@@ -53,6 +55,7 @@ def chunk_kda_fwd(
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
             lower_bound=lower_bound,
+            use_graph=use_graph,
         )
     else:
         g = chunk_local_cumsum(
@@ -60,7 +63,8 @@ def chunk_kda_fwd(
             scale=RCP_LN2,
             chunk_size=chunk_size,
             cu_seqlens=cu_seqlens,
-            chunk_indices=chunk_indices
+            chunk_indices=chunk_indices,
+            use_graph=use_graph,
         )
 
     # qg = None if disable_recompute is False
@@ -75,7 +79,8 @@ def chunk_kda_fwd(
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
         safe_gate=safe_gate,
-        disable_recompute=disable_recompute
+        disable_recompute=disable_recompute,
+        use_graph=use_graph,
     )
 
     if cp_context is not None:
@@ -89,6 +94,7 @@ def chunk_kda_fwd(
             context=cp_context,
             chunk_size=chunk_size,
             state_v_first=state_v_first,
+            use_graph=use_graph,
         )
 
     h, v_new, final_state = chunk_gated_delta_rule_fwd_h(
@@ -101,6 +107,7 @@ def chunk_kda_fwd(
         cu_seqlens=cu_seqlens,
         cu_seqlens_cpu=cu_seqlens_cpu,
         chunk_indices=chunk_indices,
+        chunk_offsets=chunk_offsets,
         chunk_size=chunk_size,
         state_v_first=state_v_first,
     )
@@ -123,6 +130,7 @@ def chunk_kda_fwd(
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
         state_v_first=state_v_first,
+        use_graph=use_graph,
     )
     if disable_recompute is False:
         # Delete to save memory

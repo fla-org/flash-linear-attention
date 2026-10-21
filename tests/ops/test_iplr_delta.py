@@ -186,6 +186,94 @@ def test_fused_recurrent(
 
 
 @pytest.mark.parametrize(
+    ('H', 'K', 'V', 'cu_seqlens', 'dtype'),
+    [
+        pytest.param(*test, id="H{}-K{}-V{}-cu_seqlens{}-{}".format(*test))
+        for test in [
+            (2, 16, 16, [0, 5, 12], torch.float),
+            (2, 100, 100, [0, 33, 98], torch.float),
+            (2, 16, 16, [0, 12], torch.float),
+            (2, 32, 48, [0, 5, 12], torch.float),
+            (2, 16, 16, [0, 5, 5, 12], torch.float),
+        ]
+    ],
+)
+@pytest.mark.parametrize('use_initial_state', [False, True])
+def test_fused_recurrent_varlen(
+    H: int,
+    K: int,
+    V: int,
+    cu_seqlens: list[int],
+    dtype: torch.dtype,
+    use_initial_state: bool,
+):
+    torch.manual_seed(42)
+    N, T = len(cu_seqlens) - 1, cu_seqlens[-1]
+    q = torch.randn(1, T, H, K, dtype=dtype, device=device, requires_grad=True)
+    k = torch.randn(1, T, H, K, dtype=dtype, device=device, requires_grad=True)
+    v = torch.randn(1, T, H, V, dtype=dtype, device=device, requires_grad=True)
+    a = F.normalize(torch.rand_like(q), p=2, dim=-1).requires_grad_()
+    b = (-a.detach()).requires_grad_()
+    h0 = torch.randn(N, H, K, V, dtype=torch.float32, device=device, requires_grad=True) if use_initial_state else None
+    outputs, states = [], []
+    for i in range(N):
+        start, end = cu_seqlens[i:i+2]
+        out, state = recurrence_iplr_delta_rule_ref(
+            q=q[:, start:end],
+            k=k[:, start:end],
+            v=v[:, start:end],
+            a=a[:, start:end],
+            b=b[:, start:end],
+            initial_state=h0[i:i+1] if h0 is not None else None,
+            output_final_state=True,
+        )
+        outputs.append(out)
+        states.append(state)
+    ref, ref_ht = torch.cat(outputs, dim=1), torch.cat(states)
+    do, dht = torch.rand_like(ref), torch.rand_like(ref_ht)
+    ((ref * do).sum() + (ref_ht * dht).sum()).backward()
+    ref_dq, q.grad = q.grad.clone(), None
+    ref_dk, k.grad = k.grad.clone(), None
+    ref_dv, v.grad = v.grad.clone(), None
+    ref_da, a.grad = a.grad.clone(), None
+    ref_db, b.grad = b.grad.clone(), None
+    if h0 is not None:
+        ref_dh0, h0.grad = h0.grad.clone(), None
+    tri, tri_ht = fused_recurrent_iplr_delta_rule(
+        q=q,
+        k=k,
+        v=v,
+        a=a,
+        b=b,
+        initial_state=h0,
+        output_final_state=True,
+        cu_seqlens=torch.tensor(cu_seqlens, dtype=torch.int32, device=device),
+    )
+    assert tri_ht.shape == (N, H, K, V)
+    for i in range(N):
+        if cu_seqlens[i] == cu_seqlens[i+1]:
+            expected = h0[i] if h0 is not None else torch.zeros_like(tri_ht[i])
+            torch.testing.assert_close(tri_ht[i], expected, rtol=0, atol=0)
+    ((tri * do).sum() + (tri_ht * dht).sum()).backward()
+    assert torch.isfinite(tri).all() and torch.isfinite(tri_ht).all()
+    assert torch.isfinite(q.grad).all()
+    assert torch.isfinite(k.grad).all()
+    assert torch.isfinite(v.grad).all()
+    assert torch.isfinite(a.grad).all()
+    assert torch.isfinite(b.grad).all()
+    assert_close('o', ref, tri, 0.003)
+    assert_close('ht', ref_ht, tri_ht, 0.003)
+    assert_close('dq', ref_dq, q.grad, 0.003)
+    assert_close('dk', ref_dk, k.grad, 0.003)
+    assert_close('dv', ref_dv, v.grad, 0.003)
+    assert_close('da', ref_da, a.grad, 0.003)
+    assert_close('db', ref_db, b.grad, 0.003)
+    if h0 is not None:
+        assert torch.isfinite(h0.grad).all()
+        assert_close('dh0', ref_dh0, h0.grad, 0.003)
+
+
+@pytest.mark.parametrize(
     ('B', 'T', 'H', 'D', 'scale', 'dtype'),
     [
         pytest.param(*test, id="B{}-T{}-H{}-D{}-scale{}-{}".format(*test))
@@ -199,6 +287,7 @@ def test_fused_recurrent(
         ]
     ],
 )
+@pytest.mark.smoke
 def test_chunk(
     B: int,
     T: int,

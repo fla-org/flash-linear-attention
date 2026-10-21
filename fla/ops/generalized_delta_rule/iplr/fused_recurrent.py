@@ -50,7 +50,9 @@ def fused_recurrent_fwd_kernel(
     STORE_FINAL_STATE: tl.constexpr,  # whether to store final state
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_nh = tl.program_id(0), tl.program_id(1)
+    pid = tl.program_id(0).to(tl.int64)
+    NV = tl.cdiv(V, BV)
+    i_v, i_nh = pid % NV, (pid // NV).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
 
     if IS_VARLEN:
@@ -152,7 +154,9 @@ def fused_recurrent_bwd_kernel(
     USE_DHT: tl.constexpr,  # whether to use dht
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_nh = tl.program_id(0), tl.program_id(1)
+    pid = tl.program_id(0).to(tl.int64)
+    NV = tl.cdiv(V, BV)
+    i_v, i_nh = (pid % NV).to(tl.int64), (pid // NV).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
     dk += i_v * B * H * K * T
     db += i_v * B * H * K * T
@@ -299,15 +303,14 @@ class FusedRecurrentIPLRDeltaRuleFunction(torch.autograd.Function):
 
         BK = triton.next_power_of_2(K)
         if output_final_state:
-            final_state = q.new_empty(B, H, K, V, dtype=torch.float32)
+            final_state = q.new_empty(N, H, K, V, dtype=torch.float32)
         else:
             final_state = None
 
         ha = torch.empty_like(v, dtype=torch.float32)
 
         def grid(meta): return (
-            triton.cdiv(V, meta['BV']),
-            N * H,
+            triton.cdiv(V, meta['BV']) * N * H,
         )
         o = torch.empty_like(v)
         fused_recurrent_fwd_kernel[grid](
@@ -349,7 +352,7 @@ class FusedRecurrentIPLRDeltaRuleFunction(torch.autograd.Function):
         db = b.new_empty(NV, *b.shape)
         dv = torch.empty_like(v)
         dha = torch.empty_like(ha)
-        grid = (NV, N * H)
+        grid = (NV * N * H,)
 
         if initial_state is not None and initial_state.requires_grad:
             dh0 = torch.empty_like(initial_state, dtype=torch.float32)
@@ -419,9 +422,10 @@ def fused_recurrent_iplr_delta_rule(
             Scale factor for the RetNet attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         initial_state (Optional[torch.Tensor]):
-            Initial state of shape `[B, H, K, V]`. Default: `None`.
+            Initial state of shape `[N, H, K, V]`, where `N` is the number of sequences
+            (`B` for fixed-length inputs). Default: `None`.
         output_final_state (Optional[bool]):
-            Whether to output the final state of shape `[B, H, K, V]`. Default: `False`.
+            Whether to output the final state of shape `[N, H, K, V]`. Default: `False`.
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.

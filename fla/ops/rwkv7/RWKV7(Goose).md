@@ -483,25 +483,24 @@ def recurrent_rwkv7(
     initial_state: torch.Tensor = None,
     output_final_state: bool = True,
     cu_seqlens: Optional[torch.LongTensor] = None,
-    head_first: bool = True
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Args:
         r (torch.Tensor):
-            r of shape `[B, H, T, K]` if `head_first=True` else `[B, T, H, K]`.
+            r of shape `[B, H, T, K]`.
         k (torch.Tensor):
-            k of shape `[B, H, T, K]` if `head_first=True` else `[B, T, H, K]`.
+            k of shape `[B, H, T, K]`.
         v (torch.Tensor):
-            v of shape `[B, H, T, V]` if `head_first=True` else `[B, T, H, V]`.
+            v of shape `[B, H, T, V]`.
         a (torch.Tensor):
-            a of shape `[B, H, T, K]` if `head_first=True` else `[B, T, H, K]`.
+            a of shape `[B, H, T, K]`.
         b (torch.Tensor):
-            b of shape `[B, H, T, K]` if `head_first=True` else `[B, T, H, K]`.
+            b of shape `[B, H, T, K]`.
         w (torch.Tensor):
-            decay of shape `[B, H, T, K]` if `head_first=True` else `[B, T, H, K]`, kernel
+            decay of shape `[B, H, T, K]`, kernel
             will apply log_w = -torch.exp(w)
         log_w (torch.Tensor):
-            log decay of shape `[B, H, T, K]` if `head_first=True` else `[B, T, H, K]`.
+            log decay of shape `[B, H, T, K]`.
         scale (float):
             scale of the attention.
         initial_state (Optional[torch.Tensor]):
@@ -513,11 +512,8 @@ def recurrent_rwkv7(
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
-        head_first (bool):
-            whether to use head first. Recommended to be False to avoid extra transposes.
     """
     assert cu_seqlens is None
-    assert head_first is True
     assert w is not None
     if scale == -1.0:
         scale = q.shape[-1] ** -0.5

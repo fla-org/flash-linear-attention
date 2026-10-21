@@ -16,8 +16,6 @@ from fla.utils import assert_close, device
 
 
 def _as_input(x: torch.Tensor) -> torch.Tensor:
-    # `ShortConvolution.forward` applies the mask in-place (`x.mul_`), so the
-    # tensors we pass in must be non-leaf to avoid PyTorch's leaf-inplace error.
     x = x * 1.0
     x.requires_grad_(True)
     return x

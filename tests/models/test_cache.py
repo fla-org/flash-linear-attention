@@ -5,612 +5,292 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import pickle
+
 import pytest
 import torch
 
-from fla.models.utils import FLACache, FLALayer, LegacyFLACache
-from fla.utils import device
+from fla.models.cache_utils import Cache, FLACache, FLALayer, LegacyFLACache
+from fla.utils import device_name
 
 
-# encode token positions into tensor values so window tail assertions are exact
-def _make_attn_state(start: int, length: int, *, batch_size: int = 1, num_heads: int = 2, head_dim: int = 3):
-    token_ids = torch.arange(start, start + length, dtype=torch.float32, device=device).view(1, length, 1, 1)
-    key_states = token_ids.expand(batch_size, length, num_heads, head_dim).contiguous()
-    value_states = (token_ids + 1000).expand(batch_size, length, num_heads, head_dim).contiguous()
-    return key_states, value_states
+@pytest.fixture(params=[FLACache, LegacyFLACache], ids=['layered', 'legacy'])
+def cache(request):
+    return request.param()
 
 
-def _assert_attn_state_tokens(attn_state, expected_tokens: torch.Tensor):
-    expected = expected_tokens.to(device=device, dtype=torch.float32).view(1, -1, 1, 1)
-    expected_key = expected.expand_as(attn_state[0])
-    expected_value = (expected + 1000).expand_as(attn_state[1])
-
-    torch.testing.assert_close(attn_state[0], expected_key)
-    torch.testing.assert_close(attn_state[1], expected_value)
+def make_attention_state(length: int, offset: int = 0):
+    # token positions make window eviction visible in the cached values
+    positions = torch.arange(offset, offset + length, dtype=torch.float32, device=device_name).view(1, length, 1, 1)
+    keys = positions.expand(2, length, 2, 3).contiguous()
+    return keys, keys + 1000
 
 
-def _new_cache(cache_cls):
-    try:
-        return cache_cls()
-    except (TypeError, ValueError) as exc:
-        pytest.skip(f"{cache_cls.__name__} is not compatible with this transformers version: {exc}")
-
-
-def _raw_legacy_cache():
-    cache = object.__new__(LegacyFLACache)
-    cache.states = []
-    cache._seen_tokens = 0
-    return cache
-
-
-# ===================================================================================
-# Test for FLACache per-layer get_seq_length behavior
-# ===================================================================================
-@pytest.mark.parametrize(
-    ['num_layers', 'batch_size', 'seq_len', 'hidden_size', 'num_heads'],
-    [
-        pytest.param(*test, id=f"L{test[0]}-B{test[1]}-T{test[2]}-D{test[3]}-H{test[4]}")
-        for test in [
-            (4, 2, 10, 64, 4),
-            (8, 1, 20, 128, 8),
-        ]
-    ],
-)
-def test_cache_per_layer_seq_length(
-    num_layers: int,
-    batch_size: int,
-    seq_len: int,
-    hidden_size: int,
-    num_heads: int,
-):
-    """
-    Test that FLACache.get_seq_length returns per-layer sequence length,
-    not a global counter. This is important for multi-layer models where
-    each layer should maintain its own sequence length.
-
-    See: https://github.com/fla-org/flash-linear-attention/issues/747
-    """
+@pytest.mark.parametrize('layer_idx', [0, 5, None], ids=['first', 'missing', 'default'])
+def test_get_seq_length(layer_idx):
     cache = FLACache()
-    head_dim = hidden_size // num_heads
+    assert cache.get_seq_length(layer_idx=layer_idx) == 0
 
-    # Simulate updating cache for each layer sequentially
-    for layer_idx in range(num_layers):
-        # Initially, the layer doesn't exist, so seq_length should be 0
-        assert cache.get_seq_length(layer_idx) == 0
+    cache.update(attn_state=make_attention_state(length=10))
+    assert cache.get_seq_length(layer_idx=layer_idx) == (0 if layer_idx == 5 else 10)
 
-        # Create dummy attention states (key, value)
-        key_states = torch.randn(batch_size, seq_len, num_heads, head_dim, device=device)
-        value_states = torch.randn(batch_size, seq_len, num_heads, head_dim, device=device)
-        attn_state = (key_states, value_states)
 
-        # Update the cache for this layer
-        cache.update(
-            attn_state=attn_state,
-            layer_idx=layer_idx,
-        )
+@pytest.mark.parametrize('num_layers', [4, 8], ids=['4-layers', '8-layers'])
+def test_update_layers(num_layers):
+    """Layer counters are independent: https://github.com/fla-org/flash-linear-attention/issues/747."""
+    cache = FLACache()
+    lengths = [layer_idx * 10 for layer_idx in range(num_layers)]
+    for layer_idx, length in enumerate(lengths):
+        assert cache.get_seq_length(layer_idx=layer_idx) == 0
+        cache.update(attn_state=make_attention_state(length=length), layer_idx=layer_idx)
+        assert cache.get_seq_length(layer_idx=layer_idx) == length
+        assert cache.get_seq_length(layer_idx=layer_idx + 1) == 0
 
-        # Verify that this layer's seq_length is updated
-        assert cache.get_seq_length(layer_idx) == seq_len, \
-            f"Layer {layer_idx} should have seq_length={seq_len}, got {cache.get_seq_length(layer_idx)}"
-
-        # Verify that the next layer still has seq_length=0 (not updated yet)
-        if layer_idx + 1 < num_layers:
-            assert cache.get_seq_length(layer_idx + 1) == 0, \
-                f"Layer {layer_idx + 1} should have seq_length=0 before being updated"
-
-    # Now verify all layers have the correct seq_length
-    for layer_idx in range(num_layers):
-        assert cache.get_seq_length(layer_idx) == seq_len, \
-            f"Layer {layer_idx} should have seq_length={seq_len}"
+    cache.update(attn_state=make_attention_state(length=5), layer_idx=0)
+    assert [cache.get_seq_length(layer_idx=i) for i in range(num_layers)] == [5, *lengths[1:]]
 
 
 @pytest.mark.parametrize(
-    ['num_layers', 'batch_size', 'chunk_size', 'num_chunks', 'hidden_size', 'num_heads'],
+    ('num_layers', 'prefill_length', 'update_length', 'num_steps'),
     [
-        pytest.param(*test, id=f"L{test[0]}-B{test[1]}-chunk{test[2]}-n{test[3]}-D{test[4]}-H{test[5]}")
-        for test in [
-            (4, 1, 5, 4, 64, 4),
-            (2, 2, 10, 3, 128, 8),
-        ]
+        pytest.param(4, 0, 1, 5, id='decode-from-empty'),
+        pytest.param(8, 0, 1, 10, id='decode-many-layers'),
+        pytest.param(4, 5, 1, 3, id='decode-after-prefill'),
+        pytest.param(8, 10, 1, 3, id='decode-long-prefill'),
+        pytest.param(4, 5, 3, 3, id='chunk-after-prefill'),
+        pytest.param(4, 0, 5, 4, id='chunk-from-empty'),
+        pytest.param(2, 0, 10, 3, id='chunk-two-layers'),
     ],
 )
-def test_cache_incremental_update(
-    num_layers: int,
-    batch_size: int,
-    chunk_size: int,
-    num_chunks: int,
-    hidden_size: int,
-    num_heads: int,
-):
-    """
-    Test that FLACache correctly tracks incremental updates to each layer,
-    simulating autoregressive generation where tokens are added one at a time.
-    """
-    cache = FLACache()
-    head_dim = hidden_size // num_heads
-
-    # Simulate incremental token generation
-    for chunk_idx in range(num_chunks):
+def test_update_decode(cache, num_layers, prefill_length, update_length, num_steps):
+    """Layers see the same pre-update RoPE offset: https://github.com/fla-org/flash-linear-attention/issues/766."""
+    if prefill_length:
         for layer_idx in range(num_layers):
-            # Create dummy attention states for this chunk
-            key_states = torch.randn(batch_size, chunk_size, num_heads, head_dim, device=device)
-            value_states = torch.randn(batch_size, chunk_size, num_heads, head_dim, device=device)
-            attn_state = (key_states, value_states)
+            cache.update(attn_state=make_attention_state(length=prefill_length), layer_idx=layer_idx, offset=prefill_length)
 
-            # Update the cache for this layer
+    for step in range(num_steps):
+        past_length = prefill_length + step * update_length
+        for layer_idx in range(num_layers):
+            assert cache.get_seq_length(layer_idx=layer_idx) == past_length
             cache.update(
-                attn_state=attn_state,
+                attn_state=make_attention_state(length=update_length, offset=past_length),
                 layer_idx=layer_idx,
+                offset=update_length,
             )
-
-            # Verify seq_length accumulates correctly
-            expected_seq_len = (chunk_idx + 1) * chunk_size
-            actual_seq_len = cache.get_seq_length(layer_idx)
-            assert actual_seq_len == expected_seq_len, \
-                f"Layer {layer_idx} after chunk {chunk_idx} should have seq_length={expected_seq_len}, got {actual_seq_len}"
+        assert [cache.get_seq_length(layer_idx=i) for i in range(num_layers)] == [past_length + update_length] * num_layers
 
 
-def test_cache_get_seq_length_nonexistent_layer():
-    """
-    Test that get_seq_length returns 0 for non-existent layers
-    and handles None layer_idx correctly for populated caches.
-    """
-    cache = FLACache()
-
-    # Should return 0 for layers that don't exist yet
-    assert cache.get_seq_length(0) == 0
-    assert cache.get_seq_length(5) == 0
-    assert cache.get_seq_length(None) == 0
-
-    # Populate the cache with one layer
-    key_states = torch.randn(1, 10, 4, 16, device=device)
-    value_states = torch.randn(1, 10, 4, 16, device=device)
-    cache.update(attn_state=(key_states, value_states), layer_idx=0)
-
-    # After populating, get_seq_length(None) should default to layer 0
-    assert cache.get_seq_length(None) == 10
-    assert cache.get_seq_length(0) == 10
+@pytest.mark.parametrize('offset', [None, 0, 3], ids=['default', 'zero', 'explicit'])
+def test_update_offset(cache, offset):
+    state = torch.ones(2, 2, 3, device=device_name)
+    cache.update(recurrent_state=state, offset=offset)
+    assert cache.get_seq_length() == (1 if offset is None else offset)
+    assert cache[0]['recurrent_state'] is state
 
 
-def test_cache_window_size_does_not_undercount():
-    """
-    Test that window_size truncation doesn't undercount sequence length.
-    When window_size is applied and input exceeds it, the full input size
-    should still be counted in _seen_tokens.
-    """
-    cache = FLACache()
-    batch_size, seq_len, num_heads, head_dim = 1, 100, 4, 16
-    window_size = 10
-
-    key_states = torch.randn(batch_size, seq_len, num_heads, head_dim, device=device)
-    value_states = torch.randn(batch_size, seq_len, num_heads, head_dim, device=device)
-
-    # Update with window_size smaller than seq_len
-    cache.update(
-        attn_state=(key_states, value_states),
-        layer_idx=0,
-        cache_kwargs={"window_size": window_size}
-    )
-
-    # Sequence length should be the full seq_len, not window_size
-    assert cache.get_seq_length(0) == seq_len, \
-        f"Expected seq_length={seq_len}, got {cache.get_seq_length(0)} (window_size={window_size})"
-
-
-@pytest.mark.parametrize("cache_cls", [FLACache, LegacyFLACache])
+@pytest.mark.parametrize('with_recurrent_state', [False, True], ids=['empty', 'recurrent'])
 @pytest.mark.parametrize(
-    ["first_len", "second_len", "window_size"],
+    ('prefill_length', 'update_length', 'initial_window_size', 'window_size'),
     [
-        pytest.param(4, 6, 4, id="full-window-oversized-update"),
-        pytest.param(2, 4, 4, id="partial-window-overflow"),
+        pytest.param(4, 6, 4, 4, id='replace-window'),
+        pytest.param(2, 4, 4, 4, id='overflow'),
+        pytest.param(7, 2, 4, 4, id='oversized-prefill'),
+        pytest.param(4, 1, 4, 4, id='decode'),
+        pytest.param(4, 0, 4, 4, id='empty-update'),
+        pytest.param(0, 2, 4, 4, id='empty-prefill'),
+        pytest.param(1, 1, 4, 4, id='partial-window'),
+        pytest.param(2, 3, 1, 1, id='window-one'),
+        pytest.param(2, 3, None, None, id='unbounded'),
+        pytest.param(6, 1, None, 4, id='enable-window'),
+        pytest.param(6, 1, 8, 4, id='shrink-window'),
     ],
 )
-def test_cache_window_overflow_keeps_tail(cache_cls, first_len: int, second_len: int, window_size: int):
-    cache = _new_cache(cache_cls)
+def test_update_attention(cache, with_recurrent_state, prefill_length, update_length, initial_window_size, window_size):
+    recurrent_state = torch.ones(2, 2, 3, device=device_name) if with_recurrent_state else None
+    if with_recurrent_state:
+        cache.update(recurrent_state=recurrent_state, offset=0)
 
-    first_state = _make_attn_state(0, first_len)
-    second_state = _make_attn_state(first_len, second_len)
+    prefill = tuple(state.requires_grad_() for state in make_attention_state(length=prefill_length))
+    update = tuple(state.requires_grad_() for state in make_attention_state(length=update_length, offset=prefill_length))
+    cache.update(attn_state=prefill, offset=prefill_length, cache_kwargs={'window_size': initial_window_size})
+    assert cache.get_seq_length() == prefill_length
+    prefill_start = 0 if initial_window_size is None else max(0, prefill_length - initial_window_size)
+    torch.testing.assert_close(cache[0]['attn_state'], tuple(state[:, prefill_start:] for state in prefill))
 
-    cache.update(
-        attn_state=first_state,
-        layer_idx=0,
-        offset=first_len,
-        cache_kwargs={"window_size": window_size},
-    )
-    cache.update(
-        attn_state=second_state,
-        layer_idx=0,
-        offset=second_len,
-        cache_kwargs={"window_size": window_size},
-    )
+    cache.update(attn_state=update, offset=update_length, cache_kwargs={'window_size': window_size})
+    total_length = prefill_length + update_length
+    start = 0 if window_size is None else max(0, total_length - window_size)
+    torch.testing.assert_close(cache[0]['attn_state'], make_attention_state(length=total_length - start, offset=start))
+    assert cache.get_seq_length() == total_length
+    assert cache[0]['recurrent_state'] is recurrent_state
 
-    expected_tokens = torch.arange(first_len + second_len - window_size, first_len + second_len)
-    state = cache[0]
-    assert state["attn_state"][0].shape[1] == window_size
-    _assert_attn_state_tokens(state["attn_state"], expected_tokens)
-    assert cache.get_seq_length(0) == first_len + second_len
-
-
-def test_legacy_cache_window_overflow_without_hf_init():
-    cache = _raw_legacy_cache()
-    window_size = 4
-    first_len = 2
-    second_len = 4
-
-    cache.update(
-        attn_state=_make_attn_state(0, first_len),
-        layer_idx=0,
-        offset=first_len,
-        cache_kwargs={"window_size": window_size},
-    )
-    cache.update(
-        attn_state=_make_attn_state(first_len, second_len),
-        layer_idx=0,
-        offset=second_len,
-        cache_kwargs={"window_size": window_size},
-    )
-
-    _assert_attn_state_tokens(
-        cache[0]["attn_state"], torch.arange(first_len + second_len - window_size, first_len + second_len)
-    )
-    assert cache.get_seq_length(0) == first_len + second_len
+    sum(state.sum() for state in cache[0]['attn_state']).backward()
+    for states, offset, length in ((prefill, 0, prefill_length), (update, prefill_length, update_length)):
+        expected = (torch.arange(offset, offset + length, device=device_name) >= start).float().view(1, length, 1, 1)
+        for state in states:
+            grad = torch.zeros_like(state) if state.grad is None else state.grad
+            torch.testing.assert_close(grad, expected.expand_as(state), rtol=0, atol=0)
 
 
-def test_fla_layer_reset():
+@pytest.mark.parametrize('operation', ['reorder_cache', 'batch_repeat_interleave', 'batch_select_indices'])
+def test_batch_operations(operation):
+    cache = FLACache()
+    state = torch.arange(12, dtype=torch.float32).reshape(3, 2, 2)
+    cache.update(recurrent_state=state, conv_state=(state + 20, [state + 40]), offset=5)
+    cache.update(attn_state=(state[:, :, None], state[:, :, None] + 60), layer_idx=1, offset=2)
+
+    indices = torch.tensor([2, 0, 2])
+    if operation == 'batch_repeat_interleave':
+        cache.batch_repeat_interleave(repeats=2)
+        indices = torch.arange(3).repeat_interleave(2)
+    else:
+        getattr(cache, operation)(indices)
+
+    torch.testing.assert_close(cache[0]['recurrent_state'], state[indices])
+    torch.testing.assert_close(cache[0]['conv_state'], (state[indices] + 20, [state[indices] + 40]))
+    torch.testing.assert_close(cache[1]['attn_state'], (state[indices, :, None], state[indices, :, None] + 60))
+    assert cache.get_seq_length(layer_idx=0) == 5
+    assert cache.get_seq_length(layer_idx=1) == 2
+
+
+@pytest.mark.parametrize('max_length', [5, -2], ids=['absolute', 'relative'])
+def test_crop(max_length):
+    cache = FLACache()
+    state = make_attention_state(length=7)
+    cache.update(attn_state=state)
+    cache.crop(max_length=max_length)
+
+    torch.testing.assert_close(cache[0]['attn_state'], tuple(tensor[:, :5] for tensor in state))
+    assert cache.get_seq_length() == 5
+    assert cache.get_mask_sizes(query_length=3, layer_idx=0) == (8, 0)
+
+
+def test_crop_recurrent():
+    cache = FLACache()
+    attention_state = make_attention_state(length=4)
+    recurrent_state = torch.ones(2, 1, 3, 3, device=device_name)
+    cache.update(attn_state=attention_state)
+    cache.update(recurrent_state=recurrent_state, layer_idx=1, offset=4)
+
+    with pytest.raises(NotImplementedError, match='rollback'):
+        cache.crop(max_length=2)
+    assert cache[0]['attn_state'][0] is attention_state[0]
+    assert cache[1]['recurrent_state'] is recurrent_state
+    assert cache.get_seq_length(layer_idx=0) == cache.get_seq_length(layer_idx=1) == 4
+
+
+def test_crop_sliding_window():
+    cache = FLACache()
+    cache.update(attn_state=make_attention_state(length=7), cache_kwargs={'window_size': 4})
+    assert cache.get_mask_sizes(query_length=3, layer_idx=0) == (6, 4)
+
+    with pytest.raises(NotImplementedError, match='sliding-window'):
+        cache.crop(max_length=5)
+    assert cache.get_seq_length() == 7
+
+
+@pytest.mark.parametrize(('cache_class', 'expected_states'), [(FLACache, [None, None]), (LegacyFLACache, [])])
+def test_reset(cache_class, expected_states):
+    cache = cache_class()
+    for layer_idx in range(2):
+        cache.update(attn_state=make_attention_state(length=3, offset=layer_idx * 10), layer_idx=layer_idx, offset=3)
+    assert cache.get_seq_length() == 3
+
+    cache.reset()
+    assert cache.get_seq_length() == 0
+    assert list(cache) == expected_states
+
+
+@pytest.mark.parametrize('state', [None, {}, {'recurrent_state': None}], ids=['uninitialized', 'empty', 'none-value'])
+def test_layer_offload_empty(state):
     layer = FLALayer()
-    layer.update(attn_state=_make_attn_state(0, 5))
+    layer.state = state
+    layer.offload()
+    layer.prefetch()
+    assert layer.state == state
 
+
+@pytest.mark.parametrize(
+    ('state_name', 'as_tuple'),
+    [('recurrent_state', False), ('recurrent_state', True), ('attn_state', True), ('conv_state', True), ('ffn_state', False)],
+    ids=['recurrent', 'composite-recurrent', 'attention', 'convolution', 'feed-forward'],
+)
+def test_layer_offload(state_name, as_tuple):
+    layer = FLALayer()
+    tensor = torch.arange(12, dtype=torch.float32, device=device_name).reshape(1, 4, 1, 3)
+    state = (tensor, tensor + 1) if as_tuple else tensor
+    layer.update(**{state_name: state})
+
+    for action, expected_device in ((layer.offload, torch.device('cpu')), (layer.prefetch, tensor.device)):
+        action()
+        restored = layer.state[state_name]
+        tensors = restored if as_tuple else (restored,)
+        expected = state if as_tuple else (state,)
+        for actual, original in zip(tensors, expected, strict=True):
+            assert actual.device == expected_device
+            torch.testing.assert_close(actual.cpu(), original.cpu())
+
+
+def test_layer_reset():
+    layer = FLALayer()
+    layer.update(attn_state=make_attention_state(length=5))
     assert layer.state is not None
     assert layer.get_seq_length() == 5
 
     layer.reset()
-
     assert layer.state is None
     assert layer.get_seq_length() == 0
 
-    layer.update(attn_state=_make_attn_state(20, 2))
-
+    state = make_attention_state(length=2, offset=20)
+    layer.update(attn_state=state)
+    torch.testing.assert_close(layer.state['attn_state'], state)
     assert layer.get_seq_length() == 2
-    _assert_attn_state_tokens(layer.state["attn_state"], torch.arange(20, 22))
 
 
-@pytest.mark.parametrize("cache_cls", [FLACache, LegacyFLACache])
-def test_cache_reset(cache_cls):
-    cache = _new_cache(cache_cls)
-    for layer_idx in range(2):
-        cache.update(
-            attn_state=_make_attn_state(layer_idx * 10, 3),
-            layer_idx=layer_idx,
-            offset=3,
-        )
+@pytest.mark.parametrize('container', [list, tuple], ids=['list', 'tuple'])
+@pytest.mark.parametrize('seen_tokens', [0, 17], ids=['zero-tokens', 'seen-tokens'])
+def test_legacy_conversion(cache, container, seen_tokens):
+    cache.update(attn_state=make_attention_state(length=4, offset=10), offset=4)
+    legacy_state = container(cache.to_legacy_cache())
+    restored = type(cache).from_legacy_cache(past_key_values=legacy_state, seen_tokens=seen_tokens)
 
-    assert cache.get_seq_length(0) == 3
-
-    cache.reset()
-
-    assert cache.get_seq_length(0) == 0
-    if isinstance(cache, FLACache):
-        assert len(cache) == 2
-        assert cache[0] is None
-        assert cache[1] is None
-    else:
-        assert len(cache) == 0
+    torch.testing.assert_close(restored.to_legacy_cache(), tuple(legacy_state))
+    assert restored.get_seq_length() == seen_tokens
 
 
-def test_cache_from_legacy_preserves_seen_tokens():
-    seen_tokens = 17
-    legacy_state = {
-        "recurrent_state": None,
-        "attn_state": _make_attn_state(10, 4),
-        "conv_state": None,
-        "ffn_state": None,
-    }
-
-    cache = FLACache.from_legacy_cache([legacy_state], seen_tokens=seen_tokens)
-
-    assert cache.get_seq_length(0) == seen_tokens
-    _assert_attn_state_tokens(cache[0]["attn_state"], torch.arange(10, 14))
-
-
-# ===================================================================================
-# Tests for GitHub Issue #766: Cache seen-token count committed too early during decode
-# ===================================================================================
-
-@pytest.mark.parametrize(
-    ['num_layers', 'batch_size', 'seq_len', 'hidden_size', 'num_heads'],
-    [
-        pytest.param(*test, id=f"L{test[0]}-B{test[1]}-T{test[2]}-D{test[3]}-H{test[4]}")
-        for test in [
-            (4, 1, 1, 64, 4),   # Single token decode
-            (8, 2, 1, 128, 8),  # Batch decode
-            (4, 1, 3, 64, 4),   # Multi-token prefill/decode
-        ]
-    ],
-)
-def test_cache_decode_all_layers_see_same_past_length(
-    num_layers: int,
-    batch_size: int,
-    seq_len: int,
-    hidden_size: int,
-    num_heads: int,
-):
-    """
-    Test that during decode, all layers see the same past length for RoPE offset.
-
-    GitHub Issue #766: The cache implementation updates each layer's seen-token count
-    when that layer's update() is called. This means during a single forward pass,
-    Layer 0 will have _seen_tokens incremented immediately after its update(), while
-    Layer 1+ still see their old (lower) values until they are updated.
-
-    This inconsistency causes different layers to compute different RoPE offsets
-    during the same forward pass, breaking exact cache equivalence.
-
-    Expected behavior: During a single forward pass, ALL layers should see the same
-    past_len, regardless of their position in the stack. The seen-token count should
-    only increment AFTER all layers have computed their RoPE for the current step.
-
-    Current buggy behavior: Layer 0 sees N, Layer 1 sees N+1, Layer 2 sees N+2, etc.
-    """
+@pytest.mark.parametrize('seen_tokens', [0, 5], ids=['zero-tokens', 'seen-tokens'])
+def test_legacy_conversion_offload(seen_tokens):
     cache = FLACache()
-    head_dim = hidden_size // num_heads
+    state = torch.arange(24, dtype=torch.float32, device=device_name).reshape(2, 3, 4)
+    cache.update(recurrent_state=state, offset=seen_tokens)
+    restored = FLACache.from_legacy_cache(past_key_values=cache.to_legacy_cache(), seen_tokens=seen_tokens)
+    restored.layers[0].offload()
+    restored.layers[0].prefetch()
 
-    # First, pre-populate the cache to simulate we've already processed some tokens
-    # This creates all layers with initial _seen_tokens = some_value
-    initial_seq_len = 5
-    for layer_idx in range(num_layers):
-        key_states = torch.randn(batch_size, initial_seq_len, num_heads, head_dim, device=device)
-        value_states = torch.randn(batch_size, initial_seq_len, num_heads, head_dim, device=device)
-        cache.update(
-            attn_state=(key_states, value_states),
-            layer_idx=layer_idx,
-            offset=initial_seq_len,
-        )
-
-    # Now all layers should have _seen_tokens = initial_seq_len
-    for layer_idx in range(num_layers):
-        assert cache.get_seq_length(layer_idx) == initial_seq_len, \
-            f"Layer {layer_idx} should have seq_length={initial_seq_len} after prefill"
-
-    # Simulate a decode step (single token) through all layers
-    observed_lengths_before_update = []
-    for layer_idx in range(num_layers):
-        # This is what attention layers do: get seq_length BEFORE computing attention
-        # to determine RoPE offset (seqlen_offset)
-        seq_length_before_update = cache.get_seq_length(layer_idx)
-        observed_lengths_before_update.append(seq_length_before_update)
-
-        # Create dummy attention states (key, value) for the new token
-        key_states = torch.randn(batch_size, seq_len, num_heads, head_dim, device=device)
-        value_states = torch.randn(batch_size, seq_len, num_heads, head_dim, device=device)
-        attn_state = (key_states, value_states)
-
-        # Update the cache (this is what happens AFTER attention computation)
-        cache.update(
-            attn_state=attn_state,
-            layer_idx=layer_idx,
-            offset=seq_len,
-        )
-
-    # CRITICAL CHECK: All layers should have seen the SAME past length
-    # during this forward pass. They should ALL see initial_seq_len,
-    # not incrementally larger values as layers are updated.
-    #
-    # This is a regression test for GitHub Issue #766.
-    # Before the fix (per-layer _seen_tokens):
-    #   - Layer 0 sees initial_seq_len
-    #   - Layer 1 sees initial_seq_len + 1 (because Layer 0 already updated)
-    #   - Layer 2 sees initial_seq_len + 2 (because Layer 0 and 1 updated)
-    #   etc.
-    #
-    # After the fix (PR #748):
-    #   - ALL layers see initial_seq_len
-    expected_length = initial_seq_len
-    for layer_idx, observed_len in enumerate(observed_lengths_before_update):
-        assert observed_len == expected_length, (
-            f"GitHub Issue #766 regression detected! Layer {layer_idx} saw wrong past length for RoPE: "
-            f"expected {expected_length}, got {observed_len}. "
-            f"Different layers are computing different RoPE offsets during the same forward pass."
-        )
+    assert restored[0]['recurrent_state'].device == state.device
+    torch.testing.assert_close(restored[0]['recurrent_state'], state)
+    assert restored.get_seq_length() == seen_tokens
 
 
-@pytest.mark.parametrize(
-    ['num_layers', 'batch_size', 'seq_len', 'hidden_size', 'num_heads'],
-    [
-        pytest.param(*test, id=f"legacy-L{test[0]}-B{test[1]}-T{test[2]}")
-        for test in [
-            (4, 1, 1, 64, 4),
-            (8, 2, 1, 128, 8),
-        ]
-    ],
-)
-def test_legacy_cache_decode_all_layers_see_same_past_length(
-    num_layers: int,
-    batch_size: int,
-    seq_len: int,
-    hidden_size: int,
-    num_heads: int,
-):
-    """
-    Test that LegacyFLACache also has consistent past length across all layers during decode.
+@pytest.mark.parametrize('module_name', ['fla.models.utils', 'fla.models.cache_utils'], ids=['legacy', 'canonical'])
+@pytest.mark.parametrize('cache_class', [Cache, FLACache, LegacyFLACache])
+def test_pickle(monkeypatch, module_name, cache_class):
+    cache = cache_class()
+    recurrent_state = (torch.arange(24).reshape(1, 2, 3, 4), torch.arange(6).reshape(1, 2, 3))
+    cache.update(recurrent_state=recurrent_state, attn_state=make_attention_state(length=4, offset=10), offset=4)
 
-    Same issue as test_cache_decode_all_layers_see_same_past_length but for LegacyFLACache.
+    with monkeypatch.context() as patch:
+        for cls in (Cache, FLACache, FLALayer, LegacyFLACache):
+            patch.setattr(cls, '__module__', module_name)
+        checkpoint = pickle.dumps(cache)
+    restored = pickle.loads(checkpoint)
 
-    See: https://github.com/fla-org/flash-linear-attention/issues/766
-    """
-    # Skip if LegacyFLACache is not compatible with current transformers version
-    try:
-        cache = LegacyFLACache()
-    except (ValueError, TypeError) as e:
-        pytest.skip(f"LegacyFLACache not compatible with current transformers version: {e}")
+    assert type(restored) is cache_class
+    torch.testing.assert_close(restored[0]['recurrent_state'], recurrent_state)
+    torch.testing.assert_close(restored[0]['attn_state'], make_attention_state(length=4, offset=10))
+    assert restored.get_seq_length() == 4
 
-    head_dim = hidden_size // num_heads
-
-    # First, pre-populate the cache to simulate we've already processed some tokens
-    initial_seq_len = 5
-    for layer_idx in range(num_layers):
-        key_states = torch.randn(batch_size, initial_seq_len, num_heads, head_dim, device=device)
-        value_states = torch.randn(batch_size, initial_seq_len, num_heads, head_dim, device=device)
-        cache.update(
-            attn_state=(key_states, value_states),
-            layer_idx=layer_idx,
-            offset=initial_seq_len,
-        )
-
-    # Now simulate a decode step
-    observed_lengths = []
-    for layer_idx in range(num_layers):
-        # Get seq_length BEFORE update (for RoPE offset)
-        seq_length_before_update = cache.get_seq_length(layer_idx)
-        observed_lengths.append(seq_length_before_update)
-
-        # Create and update with dummy attention states
-        key_states = torch.randn(batch_size, seq_len, num_heads, head_dim, device=device)
-        value_states = torch.randn(batch_size, seq_len, num_heads, head_dim, device=device)
-
-        cache.update(
-            attn_state=(key_states, value_states),
-            layer_idx=layer_idx,
-            offset=seq_len,
-        )
-
-    # All layers should see the same past length during the forward pass
-    # Regression test for GitHub Issue #766
-    expected_length = initial_seq_len
-    for layer_idx, observed_len in enumerate(observed_lengths):
-        assert observed_len == expected_length, (
-            f"GitHub Issue #766 regression detected! LegacyFLACache Layer {layer_idx} saw wrong past length: "
-            f"expected {expected_length}, got {observed_len}."
-        )
-
-
-@pytest.mark.parametrize(
-    ['num_decode_steps', 'num_layers'],
-    [
-        pytest.param(5, 4, id="5steps-4layers"),
-        pytest.param(10, 8, id="10steps-8layers"),
-    ],
-)
-def test_cache_incremental_decode_consistency(num_decode_steps: int, num_layers: int):
-    """
-    Test that cache remains consistent across multiple decode steps.
-
-    Simulates autoregressive generation where we do multiple decode steps,
-    each with a single token. During each decode step, all layers should see
-    the same past_len before computing RoPE.
-
-    This catches the GitHub #766 issue where upper layers see inflated past_len
-    because Layer 0's update() increments the seen-token count too early.
-
-    See: https://github.com/fla-org/flash-linear-attention/issues/766
-    """
-    cache = FLACache()
-    batch_size, seq_len, num_heads, head_dim = 1, 1, 4, 16
-
-    # Track what length each layer observes at each decode step
-    observed_lengths_per_step = []
-
-    for decode_step in range(num_decode_steps):
-        expected_past_len = decode_step  # Before this step, we've seen 'decode_step' tokens
-        observed_this_step = []
-
-        # Simulate forward pass through all layers
-        for layer_idx in range(num_layers):
-            # Each layer should see the same past_len at this decode step
-            actual_past_len = cache.get_seq_length(layer_idx)
-            observed_this_step.append((layer_idx, actual_past_len))
-
-            # Update cache for this layer
-            key_states = torch.randn(batch_size, seq_len, num_heads, head_dim, device=device)
-            value_states = torch.randn(batch_size, seq_len, num_heads, head_dim, device=device)
-            cache.update(
-                attn_state=(key_states, value_states),
-                layer_idx=layer_idx,
-                offset=seq_len,
-            )
-
-        observed_lengths_per_step.append(observed_this_step)
-
-    # Check consistency: within each step, all layers should see the same past_len
-    # Regression test for GitHub Issue #766
-    for decode_step, observations in enumerate(observed_lengths_per_step):
-        expected_past_len = decode_step
-        for layer_idx, actual_past_len in observations:
-            assert actual_past_len == expected_past_len, (
-                f"GitHub Issue #766 regression detected! Cache shows inconsistent past lengths "
-                f"during decode step {decode_step}. Expected all layers to see {expected_past_len}, "
-                f"but Layer {layer_idx} saw {actual_past_len}. "
-                f"This causes incorrect RoPE offset calculation in upper layers."
-            )
-
-
-# ===================================================================================
-# Additional regression tests for GitHub Issue #766
-# ===================================================================================
-
-def test_per_layer_independent_counter_regression():
-    """
-    Verify that each FLALayer maintains its own independent _seen_tokens counter.
-
-    This is the mechanism that prevents the GitHub #766 bug.
-    """
-    layers = [FLALayer() for _ in range(4)]
-
-    # Initialize with different values
-    for i, layer in enumerate(layers):
-        layer._seen_tokens = i * 10  # 0, 10, 20, 30
-
-    # Update only layer 0
-    key_states = torch.randn(1, 5, 4, 16, device=device)
-    value_states = torch.randn(1, 5, 4, 16, device=device)
-    layers[0].update(attn_state=(key_states, value_states))
-
-    # Verify only layer 0 changed
-    assert layers[0].get_seq_length() == 5  # 0 + 5
-    assert layers[1].get_seq_length() == 10  # unchanged
-    assert layers[2].get_seq_length() == 20  # unchanged
-    assert layers[3].get_seq_length() == 30  # unchanged
-
-
-def test_rope_offset_consistency_simulation_regression():
-    """
-    Simulate how RoPE offsets would be calculated during decode.
-
-    This test demonstrates that with the fix, all layers compute
-    the same position encoding for the same token.
-    """
-    cache = FLACache()
-    batch_size, num_heads, head_dim = 1, 4, 16
-    num_layers = 8
-    prompt_len = 10
-
-    # Prefill
-    for layer_idx in range(num_layers):
-        key_states = torch.randn(batch_size, prompt_len, num_heads, head_dim, device=device)
-        value_states = torch.randn(batch_size, prompt_len, num_heads, head_dim, device=device)
-        cache.update(
-            attn_state=(key_states, value_states),
-            layer_idx=layer_idx,
-            offset=prompt_len,
-        )
-
-    # Decode and collect what RoPE offset each layer would use
-    rope_offsets = []
-    for layer_idx in range(num_layers):
-        seqlen_offset = cache.get_seq_length(layer_idx)
-        rope_offsets.append(seqlen_offset)
-
-        # Update
-        key_states = torch.randn(batch_size, 1, num_heads, head_dim, device=device)
-        value_states = torch.randn(batch_size, 1, num_heads, head_dim, device=device)
-        cache.update(
-            attn_state=(key_states, value_states),
-            layer_idx=layer_idx,
-            offset=1,
-        )
-
-    # All layers should use the same offset
-    assert len(set(rope_offsets)) == 1, (
-        f"GitHub Issue #766 regression: Different layers used different RoPE offsets: {rope_offsets}. "
-        f"This means the same token gets different position encodings at different layers!"
-    )
-    assert rope_offsets[0] == prompt_len
+    restored.update(attn_state=make_attention_state(length=2, offset=14), offset=2)
+    torch.testing.assert_close(restored[0]['recurrent_state'], recurrent_state)
+    torch.testing.assert_close(restored[0]['attn_state'], make_attention_state(length=6, offset=10))
+    assert restored.get_seq_length() == 6

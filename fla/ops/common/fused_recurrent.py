@@ -5,12 +5,14 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+from functools import lru_cache
+
 import torch
 import triton
 import triton.language as tl
 
 from fla.ops.utils.op import exp
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, input_guard
+from fla.utils import ascend_compile_kwargs, autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, input_guard
 
 
 @triton.heuristics({
@@ -57,7 +59,9 @@ def fused_recurrent_fwd_kernel(
     IS_VARLEN: tl.constexpr,
     STATE_V_FIRST: tl.constexpr = False,
 ):
-    i_v, i_k, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    pid = tl.program_id(0).to(tl.int64)
+    NV, NK = tl.cdiv(V, BV), tl.cdiv(K, BK)
+    i_v, i_k, i_nh = (pid % NV).to(tl.int64), ((pid // NV) % NK).to(tl.int64), (pid // (NV * NK)).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
 
     all = B * T
@@ -199,7 +203,9 @@ def fused_recurrent_bwd_kernel(
     IS_VARLEN: tl.constexpr,
     STATE_V_FIRST: tl.constexpr = False,
 ):
-    i_v, i_k, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
+    pid = tl.program_id(0).to(tl.int64)
+    NV, NK = tl.cdiv(V, BV), tl.cdiv(K, BK)
+    i_v, i_k, i_nh = (pid % NV).to(tl.int64), ((pid // NV) % NK).to(tl.int64), (pid // (NV * NK)).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
 
     all = B * T
@@ -402,6 +408,12 @@ def fused_recurrent_bwd_kernel(
         tl.store(p_dh0, b_dh.to(p_dh0.dtype.element_ty), mask=m_h)
 
 
+@lru_cache(maxsize=128)
+def _fused_recurrent_tiling(K: int, V: int) -> tuple[int, int, int, int]:
+    BK, BV = min(triton.next_power_of_2(K), 64), min(triton.next_power_of_2(V), 64)
+    return BK, BV, triton.cdiv(K, BK), triton.cdiv(V, BV)
+
+
 def fused_recurrent_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -419,8 +431,7 @@ def fused_recurrent_fwd(
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
-    BK, BV = min(triton.next_power_of_2(K), 64), min(triton.next_power_of_2(V), 64)
-    NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
+    BK, BV, NK, NV = _fused_recurrent_tiling(K, V)
 
     h0 = initial_state
     if output_final_state:
@@ -430,9 +441,9 @@ def fused_recurrent_fwd(
             ht = q.new_empty(N, H, K, V, dtype=torch.float32)
     else:
         ht = None
-    o = q.new_empty(NK, *v.shape, dtype=torch.float32)
+    o = q.new_empty((NK, *v.shape) if NK > 1 else v.shape, dtype=torch.float32)
 
-    grid = (NV, NK, N * H)
+    grid = (NV * NK * N * H,)
     fused_recurrent_fwd_kernel[grid](
         q=q,
         k=k,
@@ -460,7 +471,8 @@ def fused_recurrent_fwd(
         REVERSE=reverse,
         STATE_V_FIRST=state_v_first,
     )
-    o = o.sum(0)
+    if NK > 1:
+        o = o.sum(0)
     return o, ht
 
 
@@ -484,24 +496,24 @@ def fused_recurrent_bwd(
     B, T, H, K, V = *k.shape, v.shape[-1]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
 
-    BK, BV = min(triton.next_power_of_2(K), 64), min(triton.next_power_of_2(V), 64)
-    NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
+    BK, BV, NK, NV = _fused_recurrent_tiling(K, V)
 
     h0 = initial_state
-    dq = q.new_empty(NV, *q.shape, dtype=torch.float32)
-    dk = q.new_empty(NV, *k.shape, dtype=torch.float32)
-    dv = q.new_empty(NK, *v.shape, dtype=torch.float32)
+    dq = q.new_empty((NV, *q.shape) if NV > 1 else q.shape, dtype=torch.float32)
+    dk = q.new_empty((NV, *k.shape) if NV > 1 else k.shape, dtype=torch.float32)
+    dv = q.new_empty((NK, *v.shape) if NK > 1 else v.shape, dtype=torch.float32)
     dh0 = torch.empty_like(h0) if h0 is not None else None
 
     dg, dgk, dgv = None, None, None
     if g is not None:
-        dg = g.new_empty(NK*NV, *g.shape, dtype=torch.float32)
+        dg = g.new_empty((NK*NV, *g.shape) if NK*NV > 1 else g.shape, dtype=torch.float32)
     if gk is not None:
-        dgk = gk.new_empty(NV, *gk.shape, dtype=torch.float32)
+        dgk = gk.new_empty((NV, *gk.shape) if NV > 1 else gk.shape, dtype=torch.float32)
     if gv is not None:
-        dgv = gv.new_empty(NK, *gv.shape, dtype=torch.float32)
+        dgv = gv.new_empty((NK, *gv.shape) if NK > 1 else gv.shape, dtype=torch.float32)
 
-    grid = (NV, NK, N * H)
+    grid = (NV * NK * N * H,)
+    # disable auto-multi-buffer on the gate-gradient accumulate
     fused_recurrent_bwd_kernel[grid](
         q=q,
         k=k,
@@ -536,16 +548,25 @@ def fused_recurrent_bwd(
         USE_GV=gv is not None,
         REVERSE=reverse,
         STATE_V_FIRST=state_v_first,
+        **ascend_compile_kwargs(),
     )
-    dq = dq.sum(0)
-    dk = dk.sum(0)
-    dv = dv.sum(0)
+    if NV > 1:
+        dq = dq.sum(0)
+        dk = dk.sum(0)
+    if NK > 1:
+        dv = dv.sum(0)
     if g is not None:
-        dg = dg.sum(0).to(g)
+        if NK*NV > 1:
+            dg = dg.sum(0)
+        dg = dg.to(g)
     if gk is not None:
-        dgk = dgk.sum(0).to(gk)
+        if NV > 1:
+            dgk = dgk.sum(0)
+        dgk = dgk.to(gk)
     if gv is not None:
-        dgv = dgv.sum(0).to(gv)
+        if NK > 1:
+            dgv = dgv.sum(0)
+        dgv = dgv.to(gv)
 
     return dq, dk, dv, dg, dgk, dgv, dh0
 

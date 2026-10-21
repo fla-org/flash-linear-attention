@@ -57,15 +57,15 @@ old "install fla, then `pip uninstall triton`, then install `triton-ascend`"
 dance is no longer needed.
 
 ```sh
-# 1. install CANN 9.0.0 + source set_env.sh
+# 1. install CANN 9.1.0 + source set_env.sh
 # 2. install torch / torch_npu / triton-ascend, then fla with the npu extra
-pip install torch==2.7.1 torch_npu==2.7.1 torchvision==0.22.1
-pip install triton-ascend==3.2.1 --extra-index-url=https://triton-ascend.osinfra.cn/pypi/simple
+pip install torch==2.10.0 torch_npu==2.10.0.post7 torchvision==0.25.0
+pip install triton-ascend==3.6.0 --extra-index-url=https://triton-ascend.osinfra.cn/pypi/simple
 pip install flash-linear-attention[npu]
 ```
 
-The `[npu]` extra pins `torch==2.7.1`, `torch_npu==2.7.1`, `torchvision==0.22.1`,
-and `triton-ascend==3.2.1` (CANN 9.0.0 stack tested in CI). Install
+The `[npu]` extra pins `torch==2.10.0`, `torch_npu==2.10.0.post7`, `torchvision==0.25.0`,
+and `triton-ascend==3.6.0` (CANN 9.1.0 stack tested on A2). Install
 `triton-ascend` with `--extra-index-url` as shown above.
 
 ## From source
