@@ -48,7 +48,7 @@ def test_get_cp_cu_seqlens_empty_partition(layout: str):
         get_cp_cu_seqlens(cu_seqlens, world_size=world_size, rank=0, layout=layout)
 
 
-def test_get_cp_cu_seqlens_preserves_divisible_varlen_partition():
+def test_get_cp_cu_seqlens_varlen():
     context = get_cp_cu_seqlens(torch.tensor([0, 5, 12], dtype=torch.long), world_size=3, rank=1)
 
     assert context.cu_seqlens_cpu.tolist() == [0, 1, 4]
@@ -93,7 +93,7 @@ def test_copy_for_backward(layout: str):
 
 @pytest.mark.parametrize('entry', [FLACPContext, get_cp_cu_seqlens, build_cp_context], ids=['context', 'partition', 'build'])
 @pytest.mark.parametrize('mode', ['omitted', 'true', 'false', 'unknown'])
-def test_cp_precision_keyword(entry, mode, monkeypatch):
+def test_precision_keyword(entry, mode, monkeypatch):
     monkeypatch.setattr(context.dist, 'get_world_size', lambda group: 2)
     monkeypatch.setattr(context.dist, 'get_rank', lambda group: 0)
     kwargs = dict(cu_seqlens=torch.tensor([0, 256]), group=object())
@@ -127,7 +127,7 @@ def test_cp_precision_keyword(entry, mode, monkeypatch):
         pytest.param(False, 'cpu', (0, 0), False, id='cpu'),
     ],
 )
-def test_cp_device_requirement(is_nvidia, device_name, capability, supported, monkeypatch):
+def test_device_requirement(is_nvidia, device_name, capability, supported, monkeypatch):
     monkeypatch.setattr(context, 'IS_NVIDIA', is_nvidia)
     checked_devices = []
 
@@ -145,7 +145,7 @@ def test_cp_device_requirement(is_nvidia, device_name, capability, supported, mo
 
 
 @pytest.mark.parametrize('direction', ['fwd', 'bwd'])
-def test_cp_pre_process_rejects_unsupported_device(direction, monkeypatch):
+def test_pre_process_unsupported_device(direction, monkeypatch):
     from fla.ops.cp.chunk_delta_h import (
         chunk_gated_delta_rule_bwd_dhu_pre_process,
         chunk_gated_delta_rule_fwd_h_pre_process,

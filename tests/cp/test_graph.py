@@ -40,7 +40,7 @@ NAMES = TOK_NAMES + ["A_log", "dt_bias"]
 OUT_NAMES = ["o", "dq", "dk", "dv", "dg", "db", "dA", "dbias"]
 
 
-def rand_global(seed, device):
+def _make_inputs(seed, device):
     """Same seed on every rank reproduces one logical global batch; ranks slice their shard."""
     g = torch.Generator(device).manual_seed(seed)
     dt = torch.bfloat16
@@ -94,7 +94,7 @@ def _run_graph(rank, world_size):
             leaves[n] = inp[n].detach().clone().requires_grad_()
         return leaves
 
-    inp0 = rand_global(0, device)
+    inp0 = _make_inputs(0, device)
     leaves = shard_leaves(inp0)
     do = inp0["do"][:, lo:hi].detach().clone()
 
@@ -124,7 +124,7 @@ def _run_graph(rank, world_size):
         cap_o = step()
 
     for seed, (tag, cucfg) in enumerate(CONFIGS, start=1):
-        inp = rand_global(seed * 17, device)
+        inp = _make_inputs(seed * 17, device)
         for n in TOK_NAMES:
             leaves[n].data.copy_(inp[n][:, lo:hi])
         for n in ("A_log", "dt_bias"):
