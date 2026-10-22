@@ -163,6 +163,73 @@ def test_gain_varlen(cu_seqlens: list[int], H: int, D: int):
     assert_close("dc0", ref_dc0, tri_dc0, 1e-4)
 
 
+@pytest.mark.parametrize("varlen", [False, True], ids=["dense", "varlen"])
+def test_gain_many_chunks(varlen: bool):
+    """More than 65535 chunks of 64 tokens must launch and match the same inputs run in two pieces.
+
+    The dense case splits the sequence and chains the precision through the initial state, the varlen
+    case runs each sequence alone, so every piece stays below the limit and only the grid differs.
+    """
+    torch.manual_seed(42)
+    H, D = 2, 16
+    T = 65537 * 64 + 100
+    cut = 32768 * 64 + 37
+    N = 2 if varlen else 1
+
+    g = F.logsigmoid(torch.randn(1, T, H, D, dtype=torch.float, device=device))
+    omega = make_noise(1, T, H).to(device)
+    r = make_noise(1, T, H).to(device)
+    c0 = make_noise(N, H, lower=0.1).to(device)
+    dbeta = torch.randn(1, T, H, dtype=torch.float, device=device)
+    dct = torch.randn(N, H, dtype=torch.float, device=device)
+
+    def leaves():
+        return [x.clone().requires_grad_(True) for x in (g, omega, r, c0)]
+
+    tri = leaves()
+    cu_seqlens = torch.tensor([0, cut, T], dtype=torch.long, device=device) if varlen else None
+    tri_beta, tri_ct = iso_kdn_gain(*tri[:3], initial_state=tri[3], output_final_state=True, cu_seqlens=cu_seqlens)
+    ((tri_beta * dbeta).sum() + (tri_ct * dct).sum()).backward()
+
+    ref = leaves()
+    ref_beta, ref_ct, ct = [], [], None
+    for i, (bos, eos) in enumerate(((0, cut), (cut, T))):
+        h0 = ref[3][i:i+1] if varlen or i == 0 else ct
+        beta, ct = iso_kdn_gain(*(x[:, bos:eos] for x in ref[:3]), initial_state=h0, output_final_state=True)
+        ref_beta.append(beta)
+        ref_ct.append(ct)
+    ref_beta = torch.cat(ref_beta, 1)
+    ref_ct = torch.cat(ref_ct, 0) if varlen else ref_ct[-1]
+    ((ref_beta * dbeta).sum() + (ref_ct * dct).sum()).backward()
+
+    assert_close("beta", ref_beta, tri_beta, 1e-5)
+    assert_close("ct", ref_ct, tri_ct, 1e-5)
+    for name, x, y in zip(("dg", "domega", "dr", "dc0"), ref, tri):
+        assert_close(name, x.grad, y.grad, 1e-5)
+
+
+def test_gain_many_heads():
+    """More than 65535 (batch, head) pairs in one decoding step must launch."""
+    torch.manual_seed(42)
+    B, H, D = 70000, 1, 16
+    k = F.normalize(torch.randn(B, 1, H, D, dtype=torch.float), p=2, dim=-1).to(device)
+    g = F.logsigmoid(torch.randn(B, 1, H, D, dtype=torch.float)).to(device)
+    omega, r = make_noise(B, 1, H).to(device), make_noise(B, 1, H).to(device)
+    c0 = make_noise(B, H, lower=0.1).to(device)
+    dbeta = torch.randn(B, 1, H, dtype=torch.float, device=device)
+    dct = torch.randn(B, H, dtype=torch.float, device=device)
+
+    outs = []
+    for fn in (iso_kdn_gain, naive_iso_kdn_gain):
+        xs = [x.clone().requires_grad_(True) for x in (g, omega, r, c0)]
+        args = xs[:3] if fn is iso_kdn_gain else [k, *xs[:3]]
+        beta, ct = fn(*args, initial_state=xs[3], output_final_state=True)
+        ((beta * dbeta).sum() + (ct * dct).sum()).backward()
+        outs.append([beta, ct, *(x.grad for x in xs)])
+    for name, tri, ref in zip(("beta", "ct", "dg", "domega", "dr", "dc0"), *outs):
+        assert_close(name, ref, tri, 1e-4)
+
+
 @pytest.mark.parametrize(
     ("B", "T", "H", "HV", "D", "scale", "use_qk_l2norm_in_kernel", "use_gate_in_kernel", "state_v_first", "dtype"),
     [
