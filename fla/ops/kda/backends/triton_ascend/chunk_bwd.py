@@ -392,6 +392,7 @@ def chunk_kda_bwd_kernel_wy_k_part_npu(
     IS_VARLEN: tl.constexpr,
     K_OFFSET: tl.constexpr,
     USE_GRAPH: tl.constexpr = False,
+    g_suffix=None,
 ):
     i_k = K_OFFSET
     core_id = tl.program_id(0)
@@ -473,7 +474,14 @@ def chunk_kda_bwd_kernel_wy_k_part_npu(
                     b_dh = tl.load(p_dh, boundary_check=(0, 1))
                     b_dk = tl.dot(b_v_new, b_dh.to(b_v_new.dtype), b_dk, allow_tf32=False)
 
-                b_dk = b_dk * tl.where(m_s[:, None], exp2(b_gn[None, :] - b_g), 0)
+                b_gs = b_gn[None, :] - b_g
+                if g_suffix is not None:
+                    o_s = i_t.to(tl.int64) * BT + s * BC + o_i
+                    b_gs = tl.load(
+                        g_suffix + ((bos + o_s[:, None]) * HV + i_hv) * K + o_k[None, :],
+                        m_s[:, None] & m_k[None, :], other=0,
+                    ).to(tl.float32)
+                b_dk = b_dk * tl.where(m_s[:, None], exp2(b_gs), 0)
                 b_kdk_sum += tl.sum(b_k * b_dk, axis=0)
                 p_dk = tl.make_block_ptr(dk_ptr, (T, K), (HV * K, 1), (i_tc_s, i_k * BK), (BC, BK), (1, 0))
                 tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))

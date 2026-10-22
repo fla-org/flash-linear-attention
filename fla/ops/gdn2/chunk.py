@@ -155,7 +155,7 @@ class ChunkGDN2Function(torch.autograd.Function):
             do=do,
             dht=dht,
             g=g_cumsum,
-            g_org=g_input if ctx.use_gate_in_kernel else None,
+            g_org=g_input,
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
             chunk_size=ctx.chunk_size,
