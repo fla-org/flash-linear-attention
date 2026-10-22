@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -31,6 +32,7 @@ class GraphBenchmarkCase:
     run_once: Callable[[Callable, tuple[Any, ...], bool], dict[str, Any]]
     assert_close: Callable[[dict[str, Any], dict[str, Any]], None]
     metadata: dict[str, Any] = field(default_factory=dict)
+    measure_graph_safe: bool = False
 
 
 @dataclass(frozen=True)
@@ -296,6 +298,146 @@ register_graph_op(GraphOpConfig(
     name="chunk_kda",
     build_case=_build_kda_case,
     default_shapes=KDA_GRAPH_SHAPES,
+    supported_modes=("fwd", "fwdbwd"),
+    category="gate_beta",
+))
+
+
+def normalize_gdn_shape(shape: dict[str, Any], default_dtype: str = "float16") -> dict[str, Any]:
+    """Restrict GDN benchmarks to the NPU forward/backward graph contract."""
+    normalized = normalize_kda_shape(shape, default_dtype)
+    if normalized["D"] not in (64, 128) or normalized["DV"] != normalized["D"]:
+        raise ValueError("GDN graph requires D=DV in {64, 128}")
+    if normalized["HV"] != normalized["H"] or normalized["chunk_size"] != 64:
+        raise ValueError("GDN graph requires H=HV and chunk_size=64")
+    for name in ("fused_options", "safe_gate", "allow_neg_eigval", "disable_recompute"):
+        if normalized[name]:
+            raise ValueError(f"GDN graph does not support {name}")
+    return normalized
+
+
+def _check_gdn_error(name: str, abs_error: float, rms_error: float, tolerance: float) -> None:
+    # keep the existing RMS/absolute budgets, independently of FLA_CI_ENV.
+    if not math.isfinite(abs_error) or not math.isfinite(rms_error):
+        raise AssertionError(f"Non-finite GDN {name} error")
+    if abs_error > 1e-6 and rms_error >= tolerance:
+        raise AssertionError(f"GDN {name}: abs={abs_error}, RMS={rms_error}, tolerance={tolerance}")
+
+
+def _build_gdn_case(shape: dict[str, Any], mode: str, device: str, seed: int) -> GraphBenchmarkCase:
+    if mode not in ("fwd", "fwdbwd"):
+        raise ValueError(f"Unsupported GDN graph benchmark mode: {mode}")
+
+    import torch
+    import torch.nn.functional as F
+
+    from fla.ops.gated_delta_rule import chunk_gated_delta_rule
+    from fla.utils.testing import get_abs_err, get_err_ratio
+
+    shape = normalize_gdn_shape(shape)
+    if torch.device(device).type != "npu":
+        raise ValueError("GDN graph benchmark requires NPU")
+    T, H, D, N, actual_t = (shape[name] for name in ("T", "H", "D", "N", "actual_T"))
+    dtype = getattr(torch, shape["dtype"])
+    requires_grad = mode == "fwdbwd"
+
+    def make_inputs(input_seed):
+        gen = torch.Generator(device).manual_seed(input_seed)
+        size = (1, T, H, D)
+        q, k = [F.normalize(torch.randn(size, device=device, generator=gen), dim=-1).to(dtype) for _ in range(2)]
+        v = torch.randn(size, dtype=dtype, device=device, generator=gen)
+        g = F.logsigmoid(torch.randn(size[:3], device=device, generator=gen)) / 8
+        beta = torch.rand(size[:3], dtype=dtype, device=device, generator=gen)
+        h0 = torch.randn(N, H, D, D, device=device, generator=gen)
+        return tuple(x.requires_grad_(requires_grad) for x in (q, k, v, g, beta, h0))
+
+    capture_cu = torch.tensor(make_cu_seqlens(T, N, "balanced"), device=device)
+    live_cu = torch.tensor(make_cu_seqlens(actual_t, N, shape["sequence_profile"]), device=device)
+    capture_args = make_inputs(seed) + (capture_cu,)
+    graph_args = make_inputs(seed + 1) + (live_cu,)
+    eager_inputs = tuple(
+        (x[:, :actual_t] if i < 5 else x).detach().clone().requires_grad_(requires_grad)
+        for i, x in enumerate(graph_args[:-1])
+    )
+    eager_args = eager_inputs + (live_cu.clone(),)
+    generator = torch.Generator(device).manual_seed(seed + 2)
+    do = torch.randn((1, T, H, D), dtype=dtype, device=device, generator=generator)
+    dht = torch.randn((N, H, D, D), device=device, generator=generator)
+    input_names = ("q", "k", "v", "g", "beta", "h0")
+
+    def call(q, k, v, g, beta, h0, cu, use_graph):
+        return chunk_gated_delta_rule(
+            q,
+            k,
+            v,
+            g,
+            beta,
+            initial_state=h0,
+            output_final_state=True,
+            cu_seqlens=cu,
+            use_graph=use_graph,
+        )
+
+    def eager_step(*args):
+        return call(*args, use_graph=False)
+
+    def graph_step(*args):
+        return call(*args, use_graph=True)
+
+    def run_once(step, args, collect):
+        o, ht = step(*args)
+        grads = None
+        if requires_grad:
+            grads = torch.autograd.grad((o, ht), args[:-1], (do[:, :o.shape[1]].contiguous(), dht))
+        if not collect:
+            return {}
+        result = {"o": o[:, :actual_t].detach().clone(), "ht": ht.detach().clone()}
+        if grads is not None:
+            for index, (name, grad) in enumerate(zip(input_names, grads)):
+                if index < 5:
+                    if torch.count_nonzero(grad[:, actual_t:]):
+                        raise AssertionError(f"Nonzero GDN inactive d{name}")
+                    grad = grad[:, :actual_t]
+                result[f"d{name}"] = grad.detach().clone()
+        return result
+
+    def compare(actual, reference):
+        if actual.keys() != reference.keys():
+            raise AssertionError(f"GDN result keys differ: {actual.keys()} != {reference.keys()}")
+        tolerances = {"o": 0.005, "ht": 0.005, "dq": 0.007, "dk": 0.008,
+                      "dv": 0.007, "dg": 0.015, "dbeta": 0.015, "dh0": 0.007}
+        for name in reference:
+            if not torch.isfinite(actual[name]).all() or not torch.isfinite(reference[name]).all():
+                raise AssertionError(f"Non-finite GDN {name}")
+            _check_gdn_error(
+                name,
+                get_abs_err(reference[name], actual[name]),
+                get_err_ratio(reference[name], actual[name]),
+                tolerances[name] if requires_grad else 3e-3,
+            )
+
+    return GraphBenchmarkCase(
+        eager_step=eager_step,
+        graph_step=graph_step,
+        capture_args=capture_args,
+        eager_args=eager_args,
+        graph_args=graph_args,
+        run_once=run_once,
+        assert_close=compare,
+        metadata=shape,
+        measure_graph_safe=True,
+    )
+
+
+register_graph_op(GraphOpConfig(
+    name="chunk_gdn",
+    build_case=_build_gdn_case,
+    default_shapes={
+        "ragged_fp16": {"B": 1, "T": 193, "H": 2, "D": 64, "N": 4, "sequence_profile": "ragged"},
+        "partial_bf16": {"B": 1, "T": 256, "actual_T": 129, "H": 2, "D": 128, "N": 4, "dtype": "bfloat16"},
+        "long_bf16": {"B": 1, "T": 4096, "H": 8, "D": 128, "N": 4, "dtype": "bfloat16"},
+        "long_partial_bf16": {"B": 1, "T": 4096, "actual_T": 1024, "H": 8, "D": 128, "N": 4, "dtype": "bfloat16"},
+    },
     supported_modes=("fwd", "fwdbwd"),
     category="gate_beta",
 ))

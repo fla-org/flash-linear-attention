@@ -6,6 +6,7 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import warnings
+from functools import partial
 
 import torch
 
@@ -26,7 +27,7 @@ from fla.ops.gated_delta_rule.gate import gdn_gate_bwd, gdn_gate_chunk_cumsum
 from fla.ops.gated_delta_rule.wy_fast import prepare_wy_repr_bwd, recompute_w_u_fwd
 from fla.ops.utils import chunk_local_cumsum
 from fla.ops.utils.constant import RCP_LN2
-from fla.ops.utils.index import prepare_chunk_indices
+from fla.ops.utils.index import prepare_chunk_indices, prepare_chunk_indices_static
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
@@ -143,8 +144,45 @@ def chunk_gated_delta_rule_bwd(
     A_log: torch.Tensor | None = None,
     dt_bias: torch.Tensor | None = None,
     chunk_size: int = 64,
+    use_graph: bool = False,
+    chunk_offsets: torch.LongTensor | None = None,
 ):
-    w, u = recompute_w_u_fwd(
+    recompute_w_u = recompute_w_u_fwd
+    recompute_h = chunk_gated_delta_rule_fwd_h
+    bwd_dv = chunk_bwd_dv_local
+    bwd_dhu = chunk_gated_delta_rule_bwd_dhu
+    bwd_dqkwg = chunk_bwd_dqkwg
+    bwd_wy = prepare_wy_repr_bwd
+    reverse_cumsum = chunk_local_cumsum
+    if use_graph:
+        from fla.ops.common.backends.triton_ascend.chunk_delta_h import (
+            _chunk_gated_delta_rule_bwd_dhu_npu,
+            chunk_gated_delta_rule_fwd_h_npu,
+        )
+        from fla.ops.common.backends.triton_ascend.chunk_o import _chunk_bwd_dqkwg_npu, _chunk_bwd_dv_local_npu
+        from fla.ops.gated_delta_rule.backends.triton_ascend.wy_fast import (
+            _prepare_wy_repr_bwd_npu,
+            recompute_w_u_fwd_npu,
+        )
+        from fla.ops.utils.triton_ascend.cumsum import chunk_local_cumsum_npu
+
+        if cu_seqlens is None or chunk_indices is None or chunk_offsets is None:
+            raise ValueError("graph backward requires saved fixed-capacity indices and offsets")
+        recompute_w_u = partial(recompute_w_u_fwd_npu, use_graph=True)
+        recompute_h = partial(chunk_gated_delta_rule_fwd_h_npu, chunk_offsets=chunk_offsets, use_graph=True)
+        bwd_dv = partial(_chunk_bwd_dv_local_npu, use_graph=True)
+        bwd_dhu = partial(_chunk_gated_delta_rule_bwd_dhu_npu, chunk_offsets=chunk_offsets, use_graph=True)
+        bwd_dqkwg = partial(_chunk_bwd_dqkwg_npu, use_graph=True)
+        bwd_wy = partial(_prepare_wy_repr_bwd_npu, use_graph=True)
+        reverse_cumsum = partial(chunk_local_cumsum_npu, use_graph=True)
+        # upstream gradients outside active capacity must not enter state reductions.
+        if do is None:
+            do = torch.zeros_like(v)
+        else:
+            active = torch.arange(q.shape[1], device=q.device) < cu_seqlens[-1]
+            do = torch.where(active[None, :, None, None], do, 0)
+
+    w, u = recompute_w_u(
         k=k,
         v=v,
         beta=beta,
@@ -157,7 +195,7 @@ def chunk_gated_delta_rule_bwd(
     if cp_context is not None:
         initial_state = expand_h0(initial_state, context=cp_context)
 
-    h, v_new, _ = chunk_gated_delta_rule_fwd_h(
+    h, v_new, _ = recompute_h(
         k=k,
         w=w,
         u=u,
@@ -169,7 +207,7 @@ def chunk_gated_delta_rule_bwd(
         state_v_first=state_v_first,
         chunk_size=chunk_size,
     )
-    dv = chunk_bwd_dv_local(
+    dv = bwd_dv(
         q=q,
         k=k,
         g=g,
@@ -199,7 +237,7 @@ def chunk_gated_delta_rule_bwd(
             chunk_size=chunk_size,
         )
 
-    dh, dh0, dv = chunk_gated_delta_rule_bwd_dhu(
+    dh, dh0, dv = bwd_dhu(
         q=q,
         k=k,
         w=w,
@@ -214,7 +252,7 @@ def chunk_gated_delta_rule_bwd(
         state_v_first=state_v_first,
         chunk_size=chunk_size,
     )
-    dq, dk, dw, dg = chunk_bwd_dqkwg(
+    dq, dk, dw, dg = bwd_dqkwg(
         q=q,
         k=k,
         v=v_new,
@@ -230,7 +268,7 @@ def chunk_gated_delta_rule_bwd(
         state_v_first=state_v_first,
         chunk_size=chunk_size,
     )
-    dk2, dv, db, dg2 = prepare_wy_repr_bwd(
+    dk2, dv, db, dg2 = bwd_wy(
         k=k,
         v=v,
         beta=beta,
@@ -243,7 +281,7 @@ def chunk_gated_delta_rule_bwd(
     )
     dk.add_(dk2)
     dg.add_(dg2)
-    dg = chunk_local_cumsum(dg, chunk_size=chunk_size, reverse=True, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
+    dg = reverse_cumsum(dg, chunk_size=chunk_size, reverse=True, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
     dA_log, ddt_bias = None, None
     if use_gate_in_kernel:
         dg, dA_log, ddt_bias = gdn_gate_bwd(g=g_input, A_log=A_log, dt_bias=dt_bias, dyg=dg)
@@ -277,6 +315,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         allow_neg_eigval: bool = False,
         cp_context: FLACPContext | None = None,
         chunk_size: int = 64,
+        use_graph: bool = False,
     ):
         q_rstd, k_rstd = None, None
         if use_qk_l2norm_in_kernel:
@@ -287,26 +326,37 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         if use_beta_sigmoid_in_kernel:
             beta = fused_beta_sigmoid(beta_raw, scale=2.0 if allow_neg_eigval else 1.0)
 
-        if chunk_indices is None and cu_seqlens is not None:
-            chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size, cu_seqlens_cpu=cu_seqlens_cpu)
-        g, o, A, final_state, initial_state, g_input = chunk_gated_delta_rule_fwd(
-            q=q,
-            k=k,
-            v=v,
-            g=g,
-            beta=beta,
-            scale=scale,
-            initial_state=initial_state,
-            output_final_state=output_final_state,
-            cu_seqlens=cu_seqlens,
-            cp_context=cp_context,
-            chunk_indices=chunk_indices,
-            state_v_first=state_v_first,
-            use_gate_in_kernel=use_gate_in_kernel,
-            A_log=A_log,
-            dt_bias=dt_bias,
-            chunk_size=chunk_size,
-        )
+        chunk_offsets = None
+        if use_graph:
+            from fla.ops.gated_delta_rule.graph import chunk_gated_delta_rule_graph_fwd
+
+            nt_max = (q.shape[1] + chunk_size - 1) // chunk_size + cu_seqlens.numel() - 2
+            chunk_indices, chunk_offsets = prepare_chunk_indices_static(cu_seqlens, chunk_size, nt_max)
+            g, o, A, final_state = chunk_gated_delta_rule_graph_fwd(
+                q, k, v, g, beta, scale, initial_state, output_final_state, cu_seqlens, chunk_indices, chunk_offsets,
+            )
+            g_input = None
+        else:
+            if chunk_indices is None and cu_seqlens is not None:
+                chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size, cu_seqlens_cpu=cu_seqlens_cpu)
+            g, o, A, final_state, initial_state, g_input = chunk_gated_delta_rule_fwd(
+                q=q,
+                k=k,
+                v=v,
+                g=g,
+                beta=beta,
+                scale=scale,
+                initial_state=initial_state,
+                output_final_state=output_final_state,
+                cu_seqlens=cu_seqlens,
+                cp_context=cp_context,
+                chunk_indices=chunk_indices,
+                state_v_first=state_v_first,
+                use_gate_in_kernel=use_gate_in_kernel,
+                A_log=A_log,
+                dt_bias=dt_bias,
+                chunk_size=chunk_size,
+            )
         ctx.save_for_backward(
             q,
             q_rstd,
@@ -323,7 +373,9 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             g_input,
             A_log,
             dt_bias,
+            chunk_offsets,
         )
+        ctx.use_graph = use_graph
         ctx.scale = scale
         ctx.chunk_size = chunk_size
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
@@ -342,6 +394,8 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         do: torch.Tensor,
         dht: torch.Tensor,
     ):
+        if ctx.use_graph and torch.is_grad_enabled():
+            raise RuntimeError("GDN graph execution supports first-order gradients only")
         (
             q,
             q_rstd,
@@ -358,6 +412,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             g_input,
             A_log,
             dt_bias,
+            chunk_offsets,
         ) = ctx.saved_tensors
         dq, dk, dv, db, dg, dh0, dA_log, ddt_bias = chunk_gated_delta_rule_bwd(
             q=q,
@@ -379,6 +434,8 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             A_log=A_log,
             dt_bias=dt_bias,
             chunk_size=ctx.chunk_size,
+            use_graph=ctx.use_graph,
+            chunk_offsets=chunk_offsets,
         )
         if ctx.use_qk_l2norm_in_kernel:
             dq = l2norm_bwd(q, q_rstd, dq)
@@ -388,7 +445,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         return (
             dq.to(q), dk.to(k), dv.to(v), dg.to(g), db.to(beta_raw),
             None, dh0, None, None, None, None, None, None, None, dA_log, ddt_bias,
-            None, None, None, None,
+            None, None, None, None, None,
         )
 
 
@@ -411,6 +468,7 @@ def chunk_gated_delta_rule(
     cu_seqlens_cpu: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
     cp_context: FLACPContext | None = None,
+    use_graph: bool = False,
     **kwargs,
 ):
     r"""
@@ -472,6 +530,19 @@ def chunk_gated_delta_rule(
             When provided, `initial_state` and `output_final_state` are not supported,
             and `cu_seqlens` will be overridden by the context. Default: `None`.
 
+        use_graph (bool):
+            Opt into NPU fixed-capacity packed forward and first-order backward execution.
+            Requires contiguous fp16/bf16 q/k/v, fp32 log-space g, post-sigmoid beta,
+            equal head counts, K=V in {64, 128}, chunk_size=64, and device cu_seqlens.
+            Shapes and addresses must stay fixed during replay; offsets and tensor values may change.
+            Offsets must start at zero, be nondecreasing, and end at most at T.
+            Empty sequences preserve initial state; inactive output tokens are zero.
+            Inactive token gradients are zero; empty sequences propagate final-state gradients to h0.
+            Fused gates, normalization, GVA, CP, and higher-order gradients are unsupported.
+            Complete each forward/backward pair before replaying the same graph again.
+            Captured outputs are reused by subsequent replays; clone them to retain a snapshot.
+            Default: `False`.
+
     Returns:
         o (torch.Tensor):
             Outputs of shape `[B, T, HV, V]`.
@@ -516,6 +587,25 @@ def chunk_gated_delta_rule(
             stacklevel=2,
         )
         state_v_first = kwargs.pop('transpose_state_layout')
+
+    if use_graph:
+        from fla.ops.gated_delta_rule.graph import _validate_graph_inputs
+
+        _validate_graph_inputs(
+            q, k, v, g, beta, scale, initial_state, cu_seqlens,
+            dict(
+                use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+                use_beta_sigmoid_in_kernel=use_beta_sigmoid_in_kernel,
+                allow_neg_eigval=allow_neg_eigval,
+                state_v_first=state_v_first,
+                cu_seqlens_cpu=cu_seqlens_cpu,
+                chunk_indices=chunk_indices,
+                cp_context=cp_context,
+                **kwargs,
+            ),
+        )
+        if not isinstance(output_final_state, bool):
+            raise ValueError("graph output_final_state must be a Python bool")
 
     # Validate head dimensions
     if q.shape[2] != k.shape[2]:
@@ -589,6 +679,7 @@ def chunk_gated_delta_rule(
         allow_neg_eigval,
         cp_context,
         chunk_size,
+        use_graph,
     )
     return o, final_state
 
