@@ -8,28 +8,27 @@
 from __future__ import annotations
 
 import math
-import warnings
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
 from transformers.modeling_layers import GradientCheckpointingLayer
-from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
+from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.utils import logging
 from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.diag_kdn import DiagonalKalmanDeltaNetwork
-from fla.models.cache_utils import Cache
 from fla.models.diag_kdn.configuration_diag_kdn import DiagKDNConfig
 from fla.models.generation_utils import FLAUnsupportedCacheGenerationMixin
-from fla.models.modeling_layers import get_attention
-from fla.models.modeling_utils import FLAPreTrainedModel
+from fla.models.modeling_utils import FLAForCausalLM, FLAModel, FLAPreTrainedModel, get_attention
 from fla.modules import GatedMLP as DiagKDNMLP
 from fla.modules import RMSNorm
 from fla.ops.attnres import fused_attnres
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
+
+    from fla.models.cache_utils import Cache
 
 
 logger = logging.get_logger(__name__)
@@ -244,7 +243,7 @@ class DiagKDNPreTrainedModel(FLAPreTrainedModel):
                     raise ValueError(f"Invalid prenorm_residual_strategy: {prenorm_residual_strategy}")
 
 
-class DiagKDNModel(DiagKDNPreTrainedModel):
+class DiagKDNModel(DiagKDNPreTrainedModel, FLAModel):
     def __init__(self, config: DiagKDNConfig):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
@@ -265,99 +264,8 @@ class DiagKDNModel(DiagKDNPreTrainedModel):
 
         self.post_init()
 
-    def get_input_embeddings(self):
-        return self.embeddings
 
-    def set_input_embeddings(self, value):
-        self.embeddings = value
-
-    def forward(
-        self,
-        input_ids: torch.LongTensor | None = None,
-        attention_mask: Optional[torch.Tensor] = None,  # noqa
-        inputs_embeds: torch.FloatTensor | None = None,
-        past_key_values: Cache | list[torch.FloatTensor] | None = None,
-        use_cache: bool | None = None,
-        output_attentions: bool | None = None,
-        output_hidden_states: bool | None = None,
-        return_dict: bool | None = None,
-        **kwargs: Unpack[dict],
-    ) -> tuple | BaseModelOutputWithPast:
-        if output_attentions:
-            warnings.warn("`DiagKDNModel` does not `output_attentions` now, setting it to `False`.")
-            output_attentions = False
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        use_cache = use_cache if use_cache is not None else (self.config.use_cache if not self.training else False)
-        return_dict = return_dict if return_dict is not None else self.config.return_dict
-
-        # retrieve input_ids and inputs_embeds
-        if input_ids is not None and inputs_embeds is not None:
-            raise ValueError("You cannot specify both input_ids and inputs_embeds at the same time")
-        if input_ids is None and inputs_embeds is None:
-            raise ValueError("You have to specify either input_ids or inputs_embeds")
-
-        if inputs_embeds is None:
-            inputs_embeds = self.embeddings(input_ids)
-        hidden_states = inputs_embeds
-
-        if use_cache and not isinstance(past_key_values, Cache):
-            past_key_values = Cache.from_legacy_cache(past_key_values)
-
-        # list of completed block summaries (kept as separate tensors so
-        # `fused_attnres` can ingest them via its pointer-table API
-        # without an upstream `torch.cat`); the running `prefix_sum`
-        # rides on `hidden_states` itself.
-        attnres_states: list[torch.Tensor] | None = None
-
-        all_hidden_states = () if output_hidden_states else None
-        all_attns = () if output_attentions else None
-        for layer in self.layers:
-            if output_hidden_states:
-                all_hidden_states += (hidden_states,)
-
-            hidden_states, attentions, past_key_values, attnres_states = layer(
-                hidden_states,
-                attention_mask=attention_mask,
-                past_key_values=past_key_values,
-                use_cache=use_cache,
-                output_attentions=output_attentions,
-                attnres_states=attnres_states,
-                **kwargs,
-            )
-
-            if output_attentions:
-                all_attns += (attentions,)
-
-        if self.use_attnres:
-            # top-level attnres aggregation; `self.norm` is folded into the
-            # kernel via `output_rms_weight` so we don't double-norm.
-            residuals = [*attnres_states, hidden_states]
-            hidden_states = fused_attnres(
-                query=self.res_proj.weight,
-                residuals=residuals,
-                rms_weight=self.res_norm.weight,
-                output_rms_weight=self.norm.weight,
-                rms_eps=self.res_norm.eps,
-            )
-        else:
-            hidden_states = self.norm(hidden_states)
-
-        # add hidden states from the last decoder layer
-        if output_hidden_states:
-            all_hidden_states += (hidden_states,)
-
-        if not return_dict:
-            return tuple(i for i in [hidden_states, past_key_values, all_hidden_states, all_attns] if i is not None)
-        return BaseModelOutputWithPast(
-            last_hidden_state=hidden_states,
-            past_key_values=past_key_values,
-            hidden_states=all_hidden_states,
-            attentions=all_attns,
-        )
-
-
-class DiagKDNForCausalLM(DiagKDNPreTrainedModel, FLAUnsupportedCacheGenerationMixin):
+class DiagKDNForCausalLM(DiagKDNPreTrainedModel, FLAForCausalLM, FLAUnsupportedCacheGenerationMixin):
     _tied_weights_keys = {"lm_head.weight": "model.embeddings.weight"}
 
     def __init__(self, config):
@@ -369,24 +277,6 @@ class DiagKDNForCausalLM(DiagKDNPreTrainedModel, FLAUnsupportedCacheGenerationMi
 
         # Initialize weights and apply final processing
         self.post_init()
-
-    def get_input_embeddings(self):
-        return self.model.embeddings
-
-    def set_input_embeddings(self, value):
-        self.model.embeddings = value
-
-    def get_output_embeddings(self):
-        return self.lm_head
-
-    def set_output_embeddings(self, new_embeddings):
-        self.lm_head = new_embeddings
-
-    def set_decoder(self, decoder):
-        self.model = decoder
-
-    def get_decoder(self):
-        return self.model
 
     @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
     def forward(
