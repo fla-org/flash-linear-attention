@@ -187,12 +187,15 @@ def merge_16x16_to_64x64_inverse_kernel_npu(
     IS_VARLEN: tl.constexpr,
     NT_OFFSET,
     BH_OFFSET,
+    USE_GRAPH: tl.constexpr = False,
 ):
     i_t = tl.program_id(0) + NT_OFFSET
     i_bh = tl.program_id(1) + BH_OFFSET
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        if USE_GRAPH and i_n < 0:
+            return
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
     else:
@@ -349,14 +352,16 @@ def merge_16x16_to_64x64_inverse_kernel_npu(
     tl.store(p_Ai_43, b_Ai_43.to(p_Ai_43.dtype.element_ty, fp_downcast_rounding='rtne'), mask=m_p_A_43)
 
 
-@register(solve_tril, backend=TritonAscendBackend)
 @input_guard
-def solve_tril_npu(
+def _solve_tril_npu(
     A: torch.Tensor,
     cu_seqlens: torch.Tensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
     output_dtype: torch.dtype | None = torch.float,
+    use_graph: bool = False,
 ) -> torch.Tensor:
+    if use_graph and A.shape[-1] != 64:
+        raise ValueError("NPU graph solve_tril supports only 64x64 chunks")
     assert A.shape[-1] in [16, 32, 64]
     output_dtype = A.dtype if output_dtype is None else output_dtype
 
@@ -385,9 +390,26 @@ def solve_tril_npu(
             'T': T,
             'H': H,
             'BT': BT,
+            **({'USE_GRAPH': True} if use_graph else {}),
             'IS_VARLEN': cu_seqlens is not None,
             'NT_OFFSET': 0,
             'BH_OFFSET': 0,
         },
     )
     return Ai
+
+
+@register(solve_tril, backend=TritonAscendBackend)
+def solve_tril_npu(
+    A: torch.Tensor,
+    cu_seqlens: torch.Tensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
+    output_dtype: torch.dtype | None = torch.float,
+) -> torch.Tensor:
+    return _solve_tril_npu(
+        A=A,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        output_dtype=output_dtype,
+        use_graph=False,
+    )
