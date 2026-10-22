@@ -162,6 +162,7 @@ def test_gain_varlen(cu_seqlens: list[int], H: int, D: int):
     for name, ref_grad, tri_grad in zip(("dk", "dg", "domega", "dr", "dc0"), ref_grads, tri_grads):
         assert_close(name, ref_grad, tri_grad, 1e-4)
 
+
 @pytest.mark.parametrize("varlen", [False, True], ids=["dense", "varlen"])
 def test_gain_many_chunks(varlen: bool):
     """More than 65535 chunks of 64 tokens must launch and match the same inputs run in two pieces."""
@@ -204,7 +205,6 @@ def test_gain_many_chunks(varlen: bool):
     assert_close("ct", ref_ct, tri_ct, 1e-5)
     for name, x, y in zip(("dg", "domega", "dr", "dc0"), ref, tri):
         assert_close(name, x.grad, y.grad, 1e-5)
-
 
 
 @pytest.mark.parametrize(
@@ -385,6 +385,7 @@ def test_chunk_varlen(D: int, cu_seqlens: list[int], dtype: torch.dtype):
     ):
         assert_close(name, ref_grad, tri_grad, ratio)
 
+
 @pytest.mark.parametrize("varlen", [False, True], ids=["dense", "varlen"])
 def test_chunk_many_chunks(varlen: bool):
     """More than 65535 memory chunks of 32 tokens must launch and match the same inputs run in two pieces.
@@ -447,7 +448,6 @@ def test_chunk_many_chunks(varlen: bool):
     assert_close("ct", ref_ct, tri_ct, 1e-4)
     for name, x, y in zip(("dq", "dk", "dv", "dg", "domega", "dr", "dh0", "dc0"), ref, tri):
         assert_close(name, x.grad, y.grad, 1e-4)
-
 
 
 def test_chunk_strong_decay():
@@ -561,6 +561,7 @@ def test_fused_recurrent(
     assert_close("ht", ref_ht, tri_ht, 0.005)
     assert_close("ct", ref_ct, tri_ct, 0.005)
 
+
 @torch.inference_mode()
 def test_fused_recurrent_many_heads():
     """More than 65535 (batch, head) pairs in one decoding step must launch."""
@@ -599,7 +600,6 @@ def test_fused_recurrent_many_heads():
     assert_close("o", ref, tri, 0.005)
     assert_close("ht", ref_ht, tri_ht, 0.005)
     assert_close("ct", ref_ct, tri_ct, 0.005)
-
 
 
 @torch.inference_mode()
