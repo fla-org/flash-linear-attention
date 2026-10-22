@@ -22,7 +22,7 @@ from fla.layers.attn import Attention
 from fla.layers.precond_kda import PrecondKDA
 from fla.models.cache_utils import Cache
 from fla.models.generation_utils import FLAGenerationMixin
-from fla.models.modeling_utils import FLAPreTrainedModel
+from fla.models.modeling_utils import FLAForCausalLM, FLAPreTrainedModel
 from fla.models.precond_kda.configuration_precond_kda import PrecondKDAConfig
 from fla.modules import GatedMLP as PrecondKDAMLP
 from fla.modules import RMSNorm
@@ -212,12 +212,6 @@ class PrecondKDAModel(PrecondKDAPreTrainedModel):
 
         self.post_init()
 
-    def get_input_embeddings(self):
-        return self.embeddings
-
-    def set_input_embeddings(self, value):
-        self.embeddings = value
-
     def forward(
         self,
         input_ids: torch.LongTensor | None = None,
@@ -285,7 +279,7 @@ class PrecondKDAModel(PrecondKDAPreTrainedModel):
         )
 
 
-class PrecondKDAForCausalLM(PrecondKDAPreTrainedModel, FLAGenerationMixin):
+class PrecondKDAForCausalLM(PrecondKDAPreTrainedModel, FLAForCausalLM, FLAGenerationMixin):
     _tied_weights_keys = {"lm_head.weight": "model.embeddings.weight"}
 
     def __init__(self, config):
@@ -297,24 +291,6 @@ class PrecondKDAForCausalLM(PrecondKDAPreTrainedModel, FLAGenerationMixin):
 
         # Initialize weights and apply final processing
         self.post_init()
-
-    def get_input_embeddings(self):
-        return self.model.embeddings
-
-    def set_input_embeddings(self, value):
-        self.model.embeddings = value
-
-    def get_output_embeddings(self):
-        return self.lm_head
-
-    def set_output_embeddings(self, new_embeddings):
-        self.lm_head = new_embeddings
-
-    def set_decoder(self, decoder):
-        self.model = decoder
-
-    def get_decoder(self):
-        return self.model
 
     def generate(self, *args, **kwargs):
         try:

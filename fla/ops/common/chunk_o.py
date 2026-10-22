@@ -607,9 +607,12 @@ def chunk_bwd_dv(
     BT = chunk_size
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
-    # H100 can have larger block size
+    # H100 can have larger block size, and so can the A100 when every tensor this kernel loads is 16-bit
     if check_shared_mem('hopper', k.device.index):
         CONST_TILING = 128
+    elif check_shared_mem('ampere', k.device.index):
+        is_16bit = all(x.element_size() == 2 for x in (q, k, do, dh) if x is not None)
+        CONST_TILING = 128 if is_16bit else 64
     elif check_shared_mem('ada', k.device.index):
         CONST_TILING = 64
     else:
@@ -664,9 +667,12 @@ def chunk_bwd_dv_local(
     BT = chunk_size
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
-    # H100 can have larger block size
+    # H100 can have larger block size, and so can the A100 when every tensor this kernel loads is 16-bit
     if check_shared_mem('hopper', k.device.index):
         CONST_TILING = 128
+    elif check_shared_mem('ampere', k.device.index):
+        is_16bit = all(x.element_size() == 2 for x in (q, k, do, A) if x is not None)
+        CONST_TILING = 128 if is_16bit else 64
     elif check_shared_mem('ada', k.device.index):
         CONST_TILING = 64
     else:
@@ -731,8 +737,12 @@ def chunk_bwd_dqkwg(
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
+    # H100 can have larger block size, and so can the A100 when every tensor this kernel loads is 16-bit
     if check_shared_mem('hopper', k.device.index):
         CONST_TILING = 128
+    elif check_shared_mem('ampere', k.device.index):
+        is_16bit = all(x.element_size() == 2 for x in (q, k, v, do, h, dh, w, dv) if x is not None)
+        CONST_TILING = 128 if is_16bit else 64
     elif check_shared_mem('ada', k.device.index):
         CONST_TILING = 64
     else:
